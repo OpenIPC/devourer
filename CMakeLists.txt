@@ -5,9 +5,10 @@ project(Rtl8812auNet)
 # the `pkg_check_modules` function is created with this call
 find_package(PkgConfig REQUIRED)
 
-# these calls create special `PkgConfig::LIBUSB` variables
+# this calls create special `PkgConfig::LIBUSB` variables
 pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
-pkg_check_modules(SPDLOG REQUIRED IMPORTED_TARGET spdlog)
+
+find_package(spdlog CONFIG REQUIRED)
 
 add_executable(WiFiDriver
     src/logger.h
@@ -47,9 +48,10 @@ add_executable(WiFiDriver
     src/registry_priv.h
     )
 
-target_link_libraries(WiFiDriver PUBLIC
+target_link_libraries(WiFiDriver PRIVATE
     PkgConfig::LIBUSB
-    PkgConfig::SPDLOG
+    # use the header-only version
+    spdlog::spdlog_header_only
     )
 
 set_property(TARGET WiFiDriver PROPERTY CXX_STANDARD 20)

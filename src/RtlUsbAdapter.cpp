@@ -5,6 +5,7 @@
 
 #include "FrameParser.h"
 #include "Hal8812PhyReg.h"
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -48,26 +49,19 @@ $ lsusb -v -d 0bda:8812
         bInterval               0
 */
 
-void RtlUsbAdapter::infinite_read() {
+std::vector<Packet> RtlUsbAdapter::infinite_read() {
   uint8_t buffer[65000] = {0};
   int actual_length = 0;
   int rc;
 
   rc = libusb_bulk_transfer(_dev_handle, 0x81, buffer, sizeof(buffer),
                             &actual_length, USB_TIMEOUT * 10);
-
+  std::vector<Packet> packets;
   if (actual_length > 1000) {
-
     FrameParser fp{_logger};
-    std::vector<Packet> packets =
-        fp.recvbuf2recvframe(std::span<uint8_t>{buffer, (size_t)actual_length});
-    for (auto &p : packets) {
-      //_logger->warn("frame control 0x{:02x} 0x{:02x}", (uint8_t)p.Data[0],
-      //(uint8_t)p.Data[1]); _logger->warn("duration id 0x{:02x} 0x{:02x}",
-      //(uint8_t)p.Data[2], (uint8_t)p.Data[3]);
-    }
-    printf("received %d bytes\n", actual_length);
+    packets = fp.recvbuf2recvframe(std::span<uint8_t>{buffer, (size_t)actual_length});
   }
+  return packets;
 }
 
 bool RtlUsbAdapter::WriteBytes(uint16_t reg_num, uint8_t *ptr, size_t size) {

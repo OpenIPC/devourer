@@ -6,6 +6,7 @@
 
 #include "basic_types.h"
 #include "rtl8812a_recv.h"
+#include <vector>
 
 FrameParser::FrameParser(Logger_t logger) : _logger{logger} {}
 
@@ -144,7 +145,7 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
   if (pkt_cnt != 0) {
     _logger->info("Unprocessed packets: {}", pkt_cnt);
   }
-  _logger->info("{} received in frame", ret.size());
+  //_logger->info("{} received in frame", ret.size());
 
   return ret;
 }

@@ -5,12 +5,11 @@
 
 #include "logger.h"
 #include "HalModule.h"
-#include "ParsedRadioPacket.h"
 #include "SelectedChannel.h"
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
 
-using Action_ParsedRadioPacket = std::function<void(const ParsedRadioPacket&)>;
+using Action_RadioPacket = std::function<void(const Packet&)>;
 
 class Rtl8812aDevice {
   std::shared_ptr<EepromManager> _eepromManager;
@@ -18,12 +17,13 @@ class Rtl8812aDevice {
   RtlUsbAdapter _device;
   HalModule _halModule;
   Logger_t _logger;
-  Action_ParsedRadioPacket _packetProcessor = nullptr;
+  Action_RadioPacket _packetProcessor = nullptr;
 
 public:
   Rtl8812aDevice(RtlUsbAdapter device, Logger_t logger);
-  void Init(Action_ParsedRadioPacket packetProcessor, SelectedChannel channel);
+  void Init(Action_RadioPacket packetProcessor, SelectedChannel channel);
   void SetMonitorChannel(SelectedChannel channel);
+  bool should_stop = false;
 
 private:
   void StartWithMonitorMode(SelectedChannel selectedChannel);

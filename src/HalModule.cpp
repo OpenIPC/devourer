@@ -1395,7 +1395,7 @@ void HalModule::odm_read_and_config_mp_8812a_phy_reg() {
       }
     } else {
       if (is_matched) {
-        _logger->debug("SEND_TO {:04X}", v1);
+        //_logger->debug("SEND_TO {:04X}", v1);
         odm_config_bb_phy_8812a(v1, MASKDWORD, v2);
       }
     }

@@ -1,6 +1,7 @@
 #include "Rtl8812aDevice.h"
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
+#include <vector>
 
 Rtl8812aDevice::Rtl8812aDevice(RtlUsbAdapter device, Logger_t logger)
     : _device{device},
@@ -10,7 +11,7 @@ Rtl8812aDevice::Rtl8812aDevice(RtlUsbAdapter device, Logger_t logger)
       _halModule{device, _eepromManager, _radioManagement, logger},
       _logger{logger} {}
 
-void Rtl8812aDevice::Init(Action_ParsedRadioPacket packetProcessor,
+void Rtl8812aDevice::Init(Action_RadioPacket packetProcessor,
                           SelectedChannel channel) {
   _packetProcessor = packetProcessor;
 
@@ -18,8 +19,12 @@ void Rtl8812aDevice::Init(Action_ParsedRadioPacket packetProcessor,
   SetMonitorChannel(channel);
 
   _logger->info("Listening air...");
-  for (;;)
-    _device.infinite_read();
+  while(!should_stop) {
+      auto packets = _device.infinite_read();
+      for (auto& p : packets) {
+        _packetProcessor(p);
+      }
+  }
 
 #if 0
   _device.UsbDevice.SetBulkDataHandler(BulkDataHandler);

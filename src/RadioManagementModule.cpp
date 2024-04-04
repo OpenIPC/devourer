@@ -4,6 +4,7 @@
 
 #include <map>
 #include <thread>
+#include <vector>
 
 RadioManagementModule::RadioManagementModule(
     RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
@@ -106,8 +107,8 @@ void RadioManagementModule::set_channel_bwmode(uint8_t channel,
                                                ChannelWidth_t bwmode) {
   uint8_t center_ch, chnl_offset80 = HAL_PRIME_CHNL_OFFSET_DONT_CARE;
 
-  _logger->info("[{}] ch = {}, offset = {}, bwmode = {}", __func__, channel,
-                channel_offset, (int)bwmode);
+  _logger->info("[{}] ch = {}, offset = {}, bwmode = {}", __func__, unsigned(channel),
+                unsigned(channel_offset), (int)bwmode);
 
   center_ch = rtw_get_center_ch(channel, bwmode, channel_offset);
   if (bwmode == ChannelWidth_t::CHANNEL_WIDTH_80) {
@@ -216,8 +217,8 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
 void RadioManagementModule::phy_set_rf_reg(RfPath eRFPath, uint16_t RegAddr,
                                            uint32_t BitMask, uint32_t Data) {
   uint data = Data;
-  _logger->debug("RFREG;{};{:X};{:X};{:X}", (uint8_t)eRFPath, (uint)RegAddr,
-                 BitMask, data);
+  //_logger->debug("RFREG;{};{:X};{:X};{:X}", (uint8_t)eRFPath, (uint)RegAddr,
+  //               BitMask, data);
   if (BitMask == 0) {
     return;
   }
@@ -356,7 +357,7 @@ void RadioManagementModule::PHY_SwitchWirelessBand8812(BandType Band) {
   ChannelWidth_t current_bw = _currentChannelBw;
   bool eLNA_2g = _eepromManager->ExternalLNA_2G;
 
-  _logger->info("==>PHY_SwitchWirelessBand8812() %s",
+  _logger->info("==>PHY_SwitchWirelessBand8812() {}",
                 ((Band == BandType::BAND_ON_2_4G) ? "2.4G" : "5G"));
 
   current_band_type = Band;

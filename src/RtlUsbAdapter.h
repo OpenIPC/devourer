@@ -5,6 +5,7 @@
 
 #include <libusb.h>
 
+#include "FrameParser.h"
 #include "drv_types.h"
 #include "hal_com_reg.h"
 #include "logger.h"
@@ -45,7 +46,7 @@ public:
   uint8_t rxagg_usb_size;
   uint8_t rxagg_usb_timeout;
 
-  void infinite_read();
+  std::vector<Packet> infinite_read();
   uint8_t efuse_OneByteRead(uint16_t addr, uint8_t *data);
   void phy_set_bb_reg(uint16_t regAddr, uint32_t bitMask, uint32_t data);
 

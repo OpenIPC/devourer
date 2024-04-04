@@ -8,14 +8,14 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
-#include "ParsedRadioPacket.h"
+#include "FrameParser.h"
 #include "RtlUsbAdapter.h"
 #include "WiFiDriver.h"
 
 #define USB_VENDOR_ID 0x0bda
 #define USB_PRODUCT_ID 0x8812
 
-static void packetProcessor(const ParsedRadioPacket &packet) {}
+static void packetProcessor(const Packet &packet) {}
 
 int main() {
   libusb_context *ctx;

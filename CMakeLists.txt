@@ -35,7 +35,6 @@ add_executable(WiFiDriver
     src/HalModule.cpp
     src/HalModule.h
     src/ParsedRadioPacket.cpp
-    src/ParsedRadioPacket.h
     src/RadioManagementModule.cpp
     src/RadioManagementModule.h
     src/Rtl8812aDevice.cpp

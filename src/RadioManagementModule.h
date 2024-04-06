@@ -198,6 +198,8 @@ private:
                                       const std::vector<MGN_RATE> &rates);
   void PHY_SetTxPowerIndex_8812A(uint32_t powerIndex, RfPath rfPath,
                                  MGN_RATE rate);
+  uint32_t phy_query_bb_reg(uint16_t regAddr, uint32_t bitMask);
+  uint32_t PHY_QueryBBReg8812(uint16_t regAddr, uint32_t bitMask);
 };
 
 #endif /* RADIOMANAGEMENTMODULE_H */

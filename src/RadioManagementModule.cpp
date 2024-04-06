@@ -263,20 +263,38 @@ std::map<RfPath, BbRegisterDefinition> PhyRegDef = {
          .RfLSSIReadBackPi = rB_PIRead_Jaguar,
      }}};
 
+uint32_t RadioManagementModule::phy_query_bb_reg(uint16_t regAddr,
+                                                 uint32_t bitMask) {
+  return PHY_QueryBBReg8812(regAddr, bitMask);
+}
+
+uint32_t RadioManagementModule::PHY_QueryBBReg8812(uint16_t regAddr,
+                                                   uint32_t bitMask) {
+  uint32_t ReturnValue, OriginalValue, BitShift;
+
+  /* RTW_INFO("--.PHY_QueryBBReg8812(): RegAddr(%#x), BitMask(%#x)\n", RegAddr,
+   * BitMask); */
+
+  OriginalValue = _device.rtw_read32(regAddr);
+  BitShift = PHY_CalculateBitShift(bitMask);
+  ReturnValue = (OriginalValue & bitMask) >> (int)BitShift;
+
+  /* RTW_INFO("BBR MASK=0x%x Addr[0x%x]=0x%x\n", BitMask, RegAddr,
+   * OriginalValue); */
+  return ReturnValue;
+}
+
 uint32_t RadioManagementModule::phy_RFSerialRead(RfPath eRFPath,
                                                  uint32_t Offset) {
   uint32_t retValue;
 
-  _logger->error("TODO: phy_RFSerialRead");
-
-#if 0
   BbRegisterDefinition pPhyReg = PhyRegDef[eRFPath];
   bool bIsPIMode = false;
 
   /* <20120809, Kordan> CCA OFF(when entering), asked by James to avoid reading
    * the wrong value. */
   /* <20120828, Kordan> Toggling CCA would affect RF 0x0, skip it! */
-  if (Offset != 0x0 && !(_eepromManager.Version.IS_C_CUT())) {
+  if (Offset != 0x0 && !(IS_C_CUT(_eepromManager->version_id))) {
     _device.phy_set_bb_reg(rCCAonSec_Jaguar, 0x8, 1);
   }
 
@@ -291,8 +309,8 @@ uint32_t RadioManagementModule::phy_RFSerialRead(RfPath eRFPath,
   _device.phy_set_bb_reg((ushort)pPhyReg.RfHSSIPara2, bHSSIRead_addr_Jaguar,
                          Offset);
 
-  if (_eepromManager.Version.IS_C_CUT()) {
-    Thread.Sleep(20);
+  if (IS_C_CUT(_eepromManager->version_id)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
 
   if (bIsPIMode) {
@@ -308,10 +326,10 @@ uint32_t RadioManagementModule::phy_RFSerialRead(RfPath eRFPath,
   /* <20120809, Kordan> CCA ON(when exiting), asked by James to avoid reading
    * the wrong value. */
   /* <20120828, Kordan> Toggling CCA would affect RF 0x0, skip it! */
-  if (Offset != 0x0 && !(_eepromManager.Version.IS_C_CUT())) {
+  if (Offset != 0x0 && !(IS_C_CUT(_eepromManager->version_id))) {
     _device.phy_set_bb_reg(rCCAonSec_Jaguar, 0x8, 0);
   }
-#endif
+
   return retValue;
 }
 

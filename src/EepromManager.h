@@ -12,8 +12,6 @@ class EepromManager {
   RtlUsbAdapter _device;
   Logger_t _logger;
 
-  HAL_RF_TYPE_E rf_type;
-
   uint8_t efuse_eeprom_data[EFUSE_MAP_LEN_JAGUAR]; /*92C:256bytes, 88E:512bytes,
                                      we use union set (512bytes)*/
   uint8_t EEPROMVersion;
@@ -42,6 +40,7 @@ public:
   uint8_t numTotalRfPath;
   bool ExternalLNA_2G;
   bool ExternalPA_2G;
+  HAL_RF_TYPE_E rf_type;
   uint16_t rfe_type;
 
 private:

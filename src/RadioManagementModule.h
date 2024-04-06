@@ -22,6 +22,117 @@ enum class BandType {
   BAND_MAX = 3,
 };
 
+enum RATE_SECTION {
+  CCK = 0,
+  OFDM = 1,
+  HT_MCS0_MCS7 = 2,
+  HT_MCS8_MCS15 = 3,
+  HT_MCS16_MCS23 = 4,
+  HT_MCS24_MCS31 = 5,
+  HT_1SS = HT_MCS0_MCS7,
+  HT_2SS = HT_MCS8_MCS15,
+  HT_3SS = HT_MCS16_MCS23,
+  HT_4SS = HT_MCS24_MCS31,
+  VHT_1SSMCS0_1SSMCS9 = 6,
+  VHT_2SSMCS0_2SSMCS9 = 7,
+  VHT_3SSMCS0_3SSMCS9 = 8,
+  VHT_4SSMCS0_4SSMCS9 = 9,
+  VHT_1SS = VHT_1SSMCS0_1SSMCS9,
+  VHT_2SS = VHT_2SSMCS0_2SSMCS9,
+  VHT_3SS = VHT_3SSMCS0_3SSMCS9,
+  VHT_4SS = VHT_4SSMCS0_4SSMCS9,
+  RATE_SECTION_NUM,
+};
+
+enum MGN_RATE {
+  MGN_1M = 0x02,
+  MGN_2M = 0x04,
+  MGN_5_5M = 0x0B,
+  MGN_6M = 0x0C,
+  MGN_9M = 0x12,
+  MGN_11M = 0x16,
+  MGN_12M = 0x18,
+  MGN_18M = 0x24,
+  MGN_24M = 0x30,
+  MGN_36M = 0x48,
+  MGN_48M = 0x60,
+  MGN_54M = 0x6C,
+  MGN_MCS32 = 0x7F,
+  MGN_MCS0,
+  MGN_MCS1,
+  MGN_MCS2,
+  MGN_MCS3,
+  MGN_MCS4,
+  MGN_MCS5,
+  MGN_MCS6,
+  MGN_MCS7,
+  MGN_MCS8,
+  MGN_MCS9,
+  MGN_MCS10,
+  MGN_MCS11,
+  MGN_MCS12,
+  MGN_MCS13,
+  MGN_MCS14,
+  MGN_MCS15,
+  MGN_MCS16,
+  MGN_MCS17,
+  MGN_MCS18,
+  MGN_MCS19,
+  MGN_MCS20,
+  MGN_MCS21,
+  MGN_MCS22,
+  MGN_MCS23,
+  MGN_MCS24,
+  MGN_MCS25,
+  MGN_MCS26,
+  MGN_MCS27,
+  MGN_MCS28,
+  MGN_MCS29,
+  MGN_MCS30,
+  MGN_MCS31,
+  MGN_VHT1SS_MCS0,
+  MGN_VHT1SS_MCS1,
+  MGN_VHT1SS_MCS2,
+  MGN_VHT1SS_MCS3,
+  MGN_VHT1SS_MCS4,
+  MGN_VHT1SS_MCS5,
+  MGN_VHT1SS_MCS6,
+  MGN_VHT1SS_MCS7,
+  MGN_VHT1SS_MCS8,
+  MGN_VHT1SS_MCS9,
+  MGN_VHT2SS_MCS0,
+  MGN_VHT2SS_MCS1,
+  MGN_VHT2SS_MCS2,
+  MGN_VHT2SS_MCS3,
+  MGN_VHT2SS_MCS4,
+  MGN_VHT2SS_MCS5,
+  MGN_VHT2SS_MCS6,
+  MGN_VHT2SS_MCS7,
+  MGN_VHT2SS_MCS8,
+  MGN_VHT2SS_MCS9,
+  MGN_VHT3SS_MCS0,
+  MGN_VHT3SS_MCS1,
+  MGN_VHT3SS_MCS2,
+  MGN_VHT3SS_MCS3,
+  MGN_VHT3SS_MCS4,
+  MGN_VHT3SS_MCS5,
+  MGN_VHT3SS_MCS6,
+  MGN_VHT3SS_MCS7,
+  MGN_VHT3SS_MCS8,
+  MGN_VHT3SS_MCS9,
+  MGN_VHT4SS_MCS0,
+  MGN_VHT4SS_MCS1,
+  MGN_VHT4SS_MCS2,
+  MGN_VHT4SS_MCS3,
+  MGN_VHT4SS_MCS4,
+  MGN_VHT4SS_MCS5,
+  MGN_VHT4SS_MCS6,
+  MGN_VHT4SS_MCS7,
+  MGN_VHT4SS_MCS8,
+  MGN_VHT4SS_MCS9,
+  MGN_UNKNOWN
+};
+
 class RadioManagementModule {
   RtlUsbAdapter _device;
   std::shared_ptr<EepromManager> _eepromManager;
@@ -71,6 +182,22 @@ private:
   void phy_SetBBSwingByBand_8812A(BandType Band);
   uint32_t phy_get_tx_bb_swing_8812a(BandType Band, RfPath RFPath);
   void Set_HW_VAR_ENABLE_RX_BAR(bool val);
+  void phy_SwChnl8812();
+  bool phy_SwBand8812(uint8_t channelToSW);
+  void phy_FixSpur_8812A(ChannelWidth_t Bandwidth, uint8_t Channel);
+  void phy_PostSetBwMode8812();
+  void phy_SetRegBW_8812(ChannelWidth_t CurrentBW);
+  void PHY_RF6052SetBandwidth8812(ChannelWidth_t Bandwidth);
+  uint8_t phy_GetSecondaryChnl_8812();
+  void PHY_SetTxPowerLevel8812(uint8_t Channel);
+  void phy_set_tx_power_level_by_path(uint8_t channel, RfPath path);
+  void phy_set_tx_power_index_by_rate_section(RfPath rfPath, uint8_t channel,
+                                              RATE_SECTION rateSection);
+  void PHY_TxPowerTrainingByPath_8812(RfPath rfPath);
+  void PHY_SetTxPowerIndexByRateArray(RfPath rfPath,
+                                      const std::vector<MGN_RATE> &rates);
+  void PHY_SetTxPowerIndex_8812A(uint32_t powerIndex, RfPath rfPath,
+                                 MGN_RATE rate);
 };
 
 #endif /* RADIOMANAGEMENTMODULE_H */

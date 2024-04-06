@@ -3,7 +3,6 @@
 #include "registry_priv.h"
 
 #include <map>
-#include <stdexcept>
 #include <thread>
 
 RadioManagementModule::RadioManagementModule(
@@ -199,7 +198,6 @@ void RadioManagementModule::PHY_HandleSwChnlAndSetBW8812(
 }
 
 void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
-#if 0
   if (_swChannel) {
     phy_SwChnl8812();
     _swChannel = false;
@@ -213,7 +211,6 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
   PHY_SetTxPowerLevel8812(_currentChannel);
 
   _needIQK = false;
-#endif
 }
 
 void RadioManagementModule::phy_set_rf_reg(RfPath eRFPath, uint16_t RegAddr,
@@ -686,4 +683,519 @@ void RadioManagementModule::Set_HW_VAR_ENABLE_RX_BAR(bool val) {
 
   _logger->info("[HW_VAR_ENABLE_RX_BAR] 0x{:4X}=0x{:4X}", REG_RXFLTMAP1,
                 _device.rtw_read16(REG_RXFLTMAP1));
+}
+
+void RadioManagementModule::phy_SwChnl8812() {
+  u8 channelToSW = _currentChannel;
+
+  if (phy_SwBand8812(channelToSW) == false) {
+    _logger->error("error Chnl {} !", channelToSW);
+  }
+
+  /* RTW_INFO("[BW:CHNL], phy_SwChnl8812(), switch to channel %d !!\n",
+   * channelToSW); */
+
+  /* fc_area		 */
+  if (36 <= channelToSW && channelToSW <= 48) {
+    _device.phy_set_bb_reg(rFc_area_Jaguar, 0x1ffe0000, 0x494);
+  } else if (15 <= channelToSW && channelToSW <= 35) {
+    _device.phy_set_bb_reg(rFc_area_Jaguar, 0x1ffe0000, 0x494);
+  } else if (50 <= channelToSW && channelToSW <= 80) {
+    _device.phy_set_bb_reg(rFc_area_Jaguar, 0x1ffe0000, 0x453);
+  } else if (82 <= channelToSW && channelToSW <= 116) {
+    _device.phy_set_bb_reg(rFc_area_Jaguar, 0x1ffe0000, 0x452);
+  } else if (118 <= channelToSW) {
+    _device.phy_set_bb_reg(rFc_area_Jaguar, 0x1ffe0000, 0x412);
+  } else {
+    _device.phy_set_bb_reg(rFc_area_Jaguar, 0x1ffe0000, 0x96a);
+  }
+
+  for (uint8_t eRFPath = 0; (uint8_t)eRFPath < _eepromManager->numTotalRfPath;
+       eRFPath++) {
+    /* RF_MOD_AG */
+    if (36 <= channelToSW && channelToSW <= 80) {
+      phy_set_rf_reg((RfPath)eRFPath, RF_CHNLBW_Jaguar,
+                     BIT18 | BIT17 | BIT16 | BIT9 | BIT8,
+                     0x101); /* 5'b00101); */
+    } else if (15 <= channelToSW && channelToSW <= 35) {
+      phy_set_rf_reg((RfPath)eRFPath, RF_CHNLBW_Jaguar,
+                     BIT18 | BIT17 | BIT16 | BIT9 | BIT8,
+                     0x101); /* 5'b00101); */
+    } else if (82 <= channelToSW && channelToSW <= 140) {
+      phy_set_rf_reg((RfPath)eRFPath, RF_CHNLBW_Jaguar,
+                     BIT18 | BIT17 | BIT16 | BIT9 | BIT8,
+                     0x301); /* 5'b01101); */
+    } else if (140 < channelToSW) {
+      phy_set_rf_reg((RfPath)eRFPath, RF_CHNLBW_Jaguar,
+                     BIT18 | BIT17 | BIT16 | BIT9 | BIT8,
+                     0x501); /* 5'b10101); */
+    } else {
+      phy_set_rf_reg((RfPath)eRFPath, RF_CHNLBW_Jaguar,
+                     BIT18 | BIT17 | BIT16 | BIT9 | BIT8,
+                     0x000); /* 5'b00000); */
+    }
+
+    /* <20121109, Kordan> A workaround for 8812A only. */
+    phy_FixSpur_8812A(_currentChannelBw, channelToSW);
+    phy_set_rf_reg((RfPath)eRFPath, RF_CHNLBW_Jaguar, bMaskByte0, channelToSW);
+  }
+}
+
+bool RadioManagementModule::phy_SwBand8812(uint8_t channelToSW) {
+  uint8_t u1Btmp;
+  bool ret_value = true;
+  BandType Band;
+  BandType BandToSW;
+
+  u1Btmp = _device.rtw_read8(REG_CCK_CHECK_8812);
+  if ((u1Btmp & BIT7) != 0) {
+    Band = BandType::BAND_ON_5G;
+  } else {
+    Band = BandType::BAND_ON_2_4G;
+  }
+
+  /* Use current channel to judge Band Type and switch Band if need. */
+  if (channelToSW > 14) {
+    BandToSW = BandType::BAND_ON_5G;
+  } else {
+    BandToSW = BandType::BAND_ON_2_4G;
+  }
+
+  if (BandToSW != Band) {
+    PHY_SwitchWirelessBand8812(BandToSW);
+  }
+
+  return ret_value;
+}
+
+void RadioManagementModule::phy_FixSpur_8812A(ChannelWidth_t Bandwidth,
+                                              uint8_t Channel) {
+  /* C cut Item12 ADC FIFO CLOCK */
+  if (IS_C_CUT(_eepromManager->version_id)) {
+    if (Bandwidth == CHANNEL_WIDTH_40 && Channel == 11) {
+      _device.phy_set_bb_reg(rRFMOD_Jaguar, 0xC00,
+                             0x3); /* 0x8AC[11:10] = 2'b11 */
+    } else {
+      _device.phy_set_bb_reg(rRFMOD_Jaguar, 0xC00,
+                             0x2); /* 0x8AC[11:10] = 2'b10 */
+    }
+
+    /* <20120914, Kordan> A workarould to resolve 2480Mhz spur by setting ADC
+     * clock as 160M. (Asked by Binson) */
+    if (Bandwidth == CHANNEL_WIDTH_20 && (Channel == 13 || Channel == 14)) {
+
+      _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x300,
+                             0x3); /* 0x8AC[9:8] = 2'b11 */
+      _device.phy_set_bb_reg(rADC_Buf_Clk_Jaguar, BIT30, 1); /* 0x8C4[30] = 1 */
+
+    } else if (Bandwidth == CHANNEL_WIDTH_40 && Channel == 11) {
+      _device.phy_set_bb_reg(rADC_Buf_Clk_Jaguar, BIT30, 1); /* 0x8C4[30] = 1 */
+    } else if (Bandwidth != CHANNEL_WIDTH_80) {
+      _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x300,
+                             0x2); /* 0x8AC[9:8] = 2'b10	 */
+      _device.phy_set_bb_reg(rADC_Buf_Clk_Jaguar, BIT30, 0); /* 0x8C4[30] = 0 */
+    }
+  } else {
+    /* <20120914, Kordan> A workarould to resolve 2480Mhz spur by setting ADC
+     * clock as 160M. (Asked by Binson) */
+    if (Bandwidth == CHANNEL_WIDTH_20 && (Channel == 13 || Channel == 14)) {
+      _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x300, 0x3); /* 0x8AC[9:8] = 11 */
+    } else if (Channel <= 14)                            /* 2.4G only */
+    {
+      _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x300, 0x2); /* 0x8AC[9:8] = 10 */
+    }
+  }
+}
+
+enum VHT_DATA_SC : uint8_t {
+  UNDEFINED = 0,
+  VHT_DATA_SC_20_UPPER_OF_80MHZ = 1,
+  VHT_DATA_SC_20_LOWER_OF_80MHZ = 2,
+  VHT_DATA_SC_20_UPPERST_OF_80MHZ = 3,
+  VHT_DATA_SC_20_LOWEST_OF_80MHZ = 4,
+  VHT_DATA_SC_40_UPPER_OF_80MHZ = 9,
+  VHT_DATA_SC_40_LOWER_OF_80MHZ = 10,
+};
+
+void RadioManagementModule::phy_PostSetBwMode8812() {
+  uint8_t L1pkVal = 0, reg_837 = 0;
+
+  /* 3 Set Reg668 BW */
+  phy_SetRegBW_8812(_currentChannelBw);
+
+  /* 3 Set Reg483 */
+  auto SubChnlNum = phy_GetSecondaryChnl_8812();
+  _device.rtw_write8(REG_DATA_SC_8812, SubChnlNum);
+
+  reg_837 = _device.rtw_read8(rBWIndication_Jaguar + 3);
+  /* 3 Set Reg848 Reg864 Reg8AC Reg8C4 RegA00 */
+  switch (_currentChannelBw) {
+  case CHANNEL_WIDTH_20:
+    _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x003003C3,
+                           0x00300200); /* 0x8ac[21,20,9:6,1,0]=8'b11100000 */
+    _device.phy_set_bb_reg(rADC_Buf_Clk_Jaguar, BIT30,
+                           0); /* 0x8c4[30] = 1'b0 */
+
+    if (_eepromManager->rf_type == RF_TYPE_2T2R) {
+      _device.phy_set_bb_reg(rL1PeakTH_Jaguar, 0x03C00000,
+                             7); /* 2R 0x848[25:22] = 0x7 */
+    } else {
+      _device.phy_set_bb_reg(rL1PeakTH_Jaguar, 0x03C00000,
+                             8); /* 1R 0x848[25:22] = 0x8 */
+    }
+
+    break;
+
+  case CHANNEL_WIDTH_40:
+    _device.phy_set_bb_reg(
+        rRFMOD_Jaguar, 0x003003C3,
+        0x00300201); /* 0x8ac[21,20,9:6,1,0]=8'b11100000		 */
+    _device.phy_set_bb_reg(rADC_Buf_Clk_Jaguar, BIT30,
+                           0); /* 0x8c4[30] = 1'b0 */
+    _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x3C, SubChnlNum);
+    _device.phy_set_bb_reg(rCCAonSec_Jaguar, 0xf0000000, SubChnlNum);
+
+    if ((reg_837 & BIT2) != 0)
+      L1pkVal = 6;
+    else {
+      if (_eepromManager->rf_type == RF_TYPE_2T2R) {
+        L1pkVal = 7;
+      } else {
+        L1pkVal = 8;
+      }
+    }
+
+    _device.phy_set_bb_reg(rL1PeakTH_Jaguar, 0x03C00000,
+                           L1pkVal); /* 0x848[25:22] = 0x6 */
+
+    if (SubChnlNum == VHT_DATA_SC::VHT_DATA_SC_20_UPPER_OF_80MHZ) {
+      _device.phy_set_bb_reg(rCCK_System_Jaguar, bCCK_System_Jaguar, 1);
+    } else {
+      _device.phy_set_bb_reg(rCCK_System_Jaguar, bCCK_System_Jaguar, 0);
+    }
+
+    break;
+
+  case CHANNEL_WIDTH_80:
+    _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x003003C3,
+                           0x00300202); /* 0x8ac[21,20,9:6,1,0]=8'b11100010 */
+    _device.phy_set_bb_reg(rADC_Buf_Clk_Jaguar, BIT30, 1); /* 0x8c4[30] = 1 */
+    _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x3C, SubChnlNum);
+    _device.phy_set_bb_reg(rCCAonSec_Jaguar, 0xf0000000, SubChnlNum);
+
+    if ((reg_837 & BIT2) != 0)
+      L1pkVal = 5;
+    else {
+      if (_eepromManager->rf_type == RF_TYPE_2T2R) {
+        L1pkVal = 6;
+      } else {
+        L1pkVal = 7;
+      }
+    }
+
+    _device.phy_set_bb_reg(rL1PeakTH_Jaguar, 0x03C00000,
+                           L1pkVal); /* 0x848[25:22] = 0x5 */
+
+    break;
+
+  default:
+    _logger->error("phy_PostSetBWMode8812():	unknown Bandwidth: {}",
+                   (int)_currentChannelBw);
+    break;
+  }
+
+  /* <20121109, Kordan> A workaround for 8812A only. */
+  phy_FixSpur_8812A(_currentChannelBw, _currentChannel);
+
+  /* RTW_INFO("phy_PostSetBwMode8812(): Reg483: %x\n", rtw_read8(adapterState,
+   * 0x483)); */
+  /* RTW_INFO("phy_PostSetBwMode8812(): Reg668: %x\n", rtw_read32(adapterState,
+   * 0x668)); */
+  /* RTW_INFO("phy_PostSetBwMode8812(): Reg8AC: %x\n",
+   * phy_query_bb_reg(adapterState, rRFMOD_Jaguar, 0xffffffff)); */
+
+  /* 3 Set RF related register */
+  PHY_RF6052SetBandwidth8812(_currentChannelBw);
+}
+
+void RadioManagementModule::phy_SetRegBW_8812(ChannelWidth_t CurrentBW) {
+  uint16_t RegRfMod_BW, u2tmp;
+  RegRfMod_BW = _device.rtw_read16(REG_WMAC_TRXPTCL_CTL);
+
+  switch (CurrentBW) {
+  case CHANNEL_WIDTH_20:
+    _device.rtw_write16(
+        REG_WMAC_TRXPTCL_CTL,
+        (ushort)(RegRfMod_BW & 0xFE7F)); /* BIT 7 = 0, BIT 8 = 0 */
+    break;
+
+  case CHANNEL_WIDTH_40:
+    u2tmp = (ushort)(RegRfMod_BW | BIT7);
+    _device.rtw_write16(REG_WMAC_TRXPTCL_CTL,
+                        (ushort)(u2tmp & 0xFEFF)); /* BIT 7 = 1, BIT 8 = 0 */
+    break;
+
+  case CHANNEL_WIDTH_80:
+    u2tmp = (ushort)(RegRfMod_BW | BIT8);
+    _device.rtw_write16(REG_WMAC_TRXPTCL_CTL,
+                        (ushort)(u2tmp & 0xFF7F)); /* BIT 7 = 0, BIT 8 = 1 */
+    break;
+
+  default:
+    _logger->error("phy_PostSetBWMode8812():	unknown Bandwidth: {}",
+                   (int)CurrentBW);
+    break;
+  }
+}
+
+void RadioManagementModule::PHY_RF6052SetBandwidth8812(
+    ChannelWidth_t Bandwidth) /* 20M or 40M */
+{
+  switch (Bandwidth) {
+  case CHANNEL_WIDTH_20:
+    /* RTW_INFO("PHY_RF6052SetBandwidth8812(), set 20MHz\n"); */
+    phy_set_rf_reg(RfPath::RF_PATH_A, RF_CHNLBW_Jaguar, BIT11 | BIT10, 3);
+    phy_set_rf_reg(RfPath::RF_PATH_B, RF_CHNLBW_Jaguar, BIT11 | BIT10, 3);
+    break;
+
+  case CHANNEL_WIDTH_40:
+    /* RTW_INFO("PHY_RF6052SetBandwidth8812(), set 40MHz\n"); */
+    phy_set_rf_reg(RfPath::RF_PATH_A, RF_CHNLBW_Jaguar, BIT11 | BIT10, 1);
+    phy_set_rf_reg(RfPath::RF_PATH_B, RF_CHNLBW_Jaguar, BIT11 | BIT10, 1);
+    break;
+
+  case CHANNEL_WIDTH_80:
+    /* RTW_INFO("PHY_RF6052SetBandwidth8812(), set 80MHz\n"); */
+    phy_set_rf_reg(RfPath::RF_PATH_A, RF_CHNLBW_Jaguar, BIT11 | BIT10, 0);
+    phy_set_rf_reg(RfPath::RF_PATH_B, RF_CHNLBW_Jaguar, BIT11 | BIT10, 0);
+    break;
+
+  default:
+    _logger->error("PHY_RF6052SetBandwidth8812(): unknown Bandwidth: {}",
+                   (int)Bandwidth);
+    break;
+  }
+}
+
+uint8_t RadioManagementModule::phy_GetSecondaryChnl_8812() {
+  VHT_DATA_SC SCSettingOf40 = UNDEFINED, SCSettingOf20 = UNDEFINED;
+
+  /* RTW_INFO("SCMapping: Case: pHalData._currentChannelBw %d,
+   * pHalData._cur80MhzPrimeSc %d, pHalData._cur40MhzPrimeSc
+   * %d\n",pHalData._currentChannelBw,pHalData._cur80MhzPrimeSc,pHalData._cur40MhzPrimeSc);
+   */
+  if (_currentChannelBw == CHANNEL_WIDTH_80) {
+    if (_cur80MhzPrimeSc == HAL_PRIME_CHNL_OFFSET_LOWER) {
+      SCSettingOf40 = VHT_DATA_SC::VHT_DATA_SC_40_LOWER_OF_80MHZ;
+    } else if (_cur80MhzPrimeSc == HAL_PRIME_CHNL_OFFSET_UPPER) {
+      SCSettingOf40 = VHT_DATA_SC::VHT_DATA_SC_40_UPPER_OF_80MHZ;
+    } else {
+      _logger->error("SCMapping: DONOT CARE Mode Setting");
+    }
+
+    if ((_cur40MhzPrimeSc == HAL_PRIME_CHNL_OFFSET_LOWER) &&
+        (_cur80MhzPrimeSc == HAL_PRIME_CHNL_OFFSET_LOWER)) {
+      SCSettingOf20 = VHT_DATA_SC::VHT_DATA_SC_20_LOWEST_OF_80MHZ;
+    } else if ((_cur40MhzPrimeSc == HAL_PRIME_CHNL_OFFSET_UPPER) &&
+               (_cur80MhzPrimeSc == HAL_PRIME_CHNL_OFFSET_LOWER)) {
+      SCSettingOf20 = VHT_DATA_SC::VHT_DATA_SC_20_LOWER_OF_80MHZ;
+    } else if ((_cur40MhzPrimeSc == HAL_PRIME_CHNL_OFFSET_LOWER) &&
+               (_cur80MhzPrimeSc == HAL_PRIME_CHNL_OFFSET_UPPER)) {
+      SCSettingOf20 = VHT_DATA_SC::VHT_DATA_SC_20_UPPER_OF_80MHZ;
+    } else if ((_cur40MhzPrimeSc == HAL_PRIME_CHNL_OFFSET_UPPER) &&
+               (_cur80MhzPrimeSc == HAL_PRIME_CHNL_OFFSET_UPPER)) {
+      SCSettingOf20 = VHT_DATA_SC::VHT_DATA_SC_20_UPPERST_OF_80MHZ;
+    } else {
+      _logger->error("SCMapping: DONOT CARE Mode Setting");
+    }
+  } else if (_currentChannelBw == CHANNEL_WIDTH_40) {
+    /* RTW_INFO("SCMapping: Case: pHalData._currentChannelBw %d,
+     * pHalData._cur40MhzPrimeSc
+     * %d\n",pHalData._currentChannelBw,pHalData._cur40MhzPrimeSc); */
+
+    if (_cur40MhzPrimeSc == HAL_PRIME_CHNL_OFFSET_UPPER) {
+      SCSettingOf20 = VHT_DATA_SC::VHT_DATA_SC_20_UPPER_OF_80MHZ;
+    } else if (_cur40MhzPrimeSc == HAL_PRIME_CHNL_OFFSET_LOWER) {
+      SCSettingOf20 = VHT_DATA_SC::VHT_DATA_SC_20_LOWER_OF_80MHZ;
+    } else {
+      _logger->error("SCMapping: DONOT CARE Mode Setting");
+    }
+  }
+
+  /*RTW_INFO("SCMapping: SC Value %x\n", ((SCSettingOf40 << 4) |
+   * SCSettingOf20));*/
+  return (uint8_t)(((uint8_t)SCSettingOf40 << 4) | (uint8_t)SCSettingOf20);
+}
+
+void RadioManagementModule::PHY_SetTxPowerLevel8812(uint8_t Channel) {
+  for (uint8_t path = 0; (uint8_t)path < _eepromManager->numTotalRfPath;
+       path++) {
+    phy_set_tx_power_level_by_path(Channel, (RfPath)path);
+    PHY_TxPowerTrainingByPath_8812((RfPath)path);
+  }
+}
+
+void RadioManagementModule::phy_set_tx_power_level_by_path(uint8_t channel,
+                                                           RfPath path) {
+  bool bIsIn24G = (current_band_type == BandType::BAND_ON_2_4G);
+
+  if (bIsIn24G) {
+    phy_set_tx_power_index_by_rate_section(path, channel, RATE_SECTION::CCK);
+  }
+
+  phy_set_tx_power_index_by_rate_section(path, channel, RATE_SECTION::OFDM);
+
+  phy_set_tx_power_index_by_rate_section(path, channel,
+                                         RATE_SECTION::HT_MCS0_MCS7);
+  phy_set_tx_power_index_by_rate_section(path, channel,
+                                         RATE_SECTION::VHT_1SSMCS0_1SSMCS9);
+
+  if (_eepromManager->numTotalRfPath >= 2) {
+    phy_set_tx_power_index_by_rate_section(path, channel,
+                                           RATE_SECTION::HT_MCS8_MCS15);
+    phy_set_tx_power_index_by_rate_section(path, channel,
+                                           RATE_SECTION::VHT_2SSMCS0_2SSMCS9);
+  }
+}
+
+const static std::vector<MGN_RATE> mgn_rates_cck = {
+    MGN_RATE::MGN_1M, MGN_RATE::MGN_2M, MGN_RATE::MGN_5_5M, MGN_RATE::MGN_11M};
+
+const static std::vector<MGN_RATE> mgn_rates_ofdm = {
+    MGN_RATE::MGN_6M,  MGN_RATE::MGN_9M,  MGN_RATE::MGN_12M, MGN_RATE::MGN_18M,
+    MGN_RATE::MGN_24M, MGN_RATE::MGN_36M, MGN_RATE::MGN_48M, MGN_RATE::MGN_54M};
+
+const static std::vector<MGN_RATE> mgn_rates_mcs0_7 = {
+    MGN_RATE::MGN_MCS0, MGN_RATE::MGN_MCS1, MGN_RATE::MGN_MCS2,
+    MGN_RATE::MGN_MCS3, MGN_RATE::MGN_MCS4, MGN_RATE::MGN_MCS5,
+    MGN_RATE::MGN_MCS6, MGN_RATE::MGN_MCS7};
+
+const static std::vector<MGN_RATE> mgn_rates_mcs8_15 = {
+    MGN_RATE::MGN_MCS8,  MGN_RATE::MGN_MCS9,  MGN_RATE::MGN_MCS10,
+    MGN_RATE::MGN_MCS11, MGN_RATE::MGN_MCS12, MGN_RATE::MGN_MCS13,
+    MGN_RATE::MGN_MCS14, MGN_RATE::MGN_MCS15};
+
+const static std::vector<MGN_RATE> mgn_rates_mcs16_23 = {
+    MGN_RATE::MGN_MCS16, MGN_RATE::MGN_MCS17, MGN_RATE::MGN_MCS18,
+    MGN_RATE::MGN_MCS19, MGN_RATE::MGN_MCS20, MGN_RATE::MGN_MCS21,
+    MGN_RATE::MGN_MCS22, MGN_RATE::MGN_MCS23};
+
+const static std::vector<MGN_RATE> mgn_rates_mcs24_31 = {
+    MGN_RATE::MGN_MCS24, MGN_RATE::MGN_MCS25, MGN_RATE::MGN_MCS26,
+    MGN_RATE::MGN_MCS27, MGN_RATE::MGN_MCS28, MGN_RATE::MGN_MCS29,
+    MGN_RATE::MGN_MCS30, MGN_RATE::MGN_MCS31};
+
+const static std::vector<MGN_RATE> mgn_rates_vht1ss = {
+    MGN_RATE::MGN_VHT1SS_MCS0, MGN_RATE::MGN_VHT1SS_MCS1,
+    MGN_RATE::MGN_VHT1SS_MCS2, MGN_RATE::MGN_VHT1SS_MCS3,
+    MGN_RATE::MGN_VHT1SS_MCS4, MGN_RATE::MGN_VHT1SS_MCS5,
+    MGN_RATE::MGN_VHT1SS_MCS6, MGN_RATE::MGN_VHT1SS_MCS7,
+    MGN_RATE::MGN_VHT1SS_MCS8, MGN_RATE::MGN_VHT1SS_MCS9};
+
+const static std::vector<MGN_RATE> mgn_rates_vht2ss = {
+    MGN_RATE::MGN_VHT2SS_MCS0, MGN_RATE::MGN_VHT2SS_MCS1,
+    MGN_RATE::MGN_VHT2SS_MCS2, MGN_RATE::MGN_VHT2SS_MCS3,
+    MGN_RATE::MGN_VHT2SS_MCS4, MGN_RATE::MGN_VHT2SS_MCS5,
+    MGN_RATE::MGN_VHT2SS_MCS6, MGN_RATE::MGN_VHT2SS_MCS7,
+    MGN_RATE::MGN_VHT2SS_MCS8, MGN_RATE::MGN_VHT2SS_MCS9};
+
+const static std::vector<MGN_RATE> mgn_rates_vht3ss = {
+    MGN_RATE::MGN_VHT3SS_MCS0, MGN_RATE::MGN_VHT3SS_MCS1,
+    MGN_RATE::MGN_VHT3SS_MCS2, MGN_RATE::MGN_VHT3SS_MCS3,
+    MGN_RATE::MGN_VHT3SS_MCS4, MGN_RATE::MGN_VHT3SS_MCS5,
+    MGN_RATE::MGN_VHT3SS_MCS6, MGN_RATE::MGN_VHT3SS_MCS7,
+    MGN_RATE::MGN_VHT3SS_MCS8, MGN_RATE::MGN_VHT3SS_MCS9};
+
+const static std::vector<MGN_RATE> mgn_rates_vht4ss = {
+    MGN_RATE::MGN_VHT4SS_MCS0, MGN_RATE::MGN_VHT4SS_MCS1,
+    MGN_RATE::MGN_VHT4SS_MCS2, MGN_RATE::MGN_VHT4SS_MCS3,
+    MGN_RATE::MGN_VHT4SS_MCS4, MGN_RATE::MGN_VHT4SS_MCS5,
+    MGN_RATE::MGN_VHT4SS_MCS6, MGN_RATE::MGN_VHT4SS_MCS7,
+    MGN_RATE::MGN_VHT4SS_MCS8, MGN_RATE::MGN_VHT4SS_MCS9};
+
+const static std::vector<MGN_RATE> rates_by_sections[] = {
+    mgn_rates_cck,      mgn_rates_ofdm,     mgn_rates_mcs0_7, mgn_rates_mcs8_15,
+    mgn_rates_mcs16_23, mgn_rates_mcs24_31, mgn_rates_vht1ss, mgn_rates_vht2ss,
+    mgn_rates_vht3ss,   mgn_rates_vht4ss,
+};
+
+static uint8_t phy_get_tx_power_index() { return 16; }
+
+void RadioManagementModule::PHY_SetTxPowerIndexByRateArray(
+    RfPath rfPath, const std::vector<MGN_RATE> &rates) {
+  for (int i = 0; i < rates.size(); ++i) {
+    auto powerIndex = phy_get_tx_power_index();
+    MGN_RATE rate = rates[i];
+    PHY_SetTxPowerIndex_8812A(powerIndex, rfPath, rate);
+  }
+}
+
+void RadioManagementModule::PHY_SetTxPowerIndex_8812A(uint32_t powerIndex,
+                                                      RfPath rfPath,
+                                                      MGN_RATE rate) {
+#if 0
+        if (PowerIndexDescription.SetTable.TryGetValue(rfPath, out var rfTable))
+        {
+            if (rfTable.TryGetValue(rate, out var values))
+            {
+                _device.phy_set_bb_reg(values.RegAddress, values.BitMask, powerIndex);
+            }
+            else
+            {
+                _logger.LogError("Invalid rate! RfPath: {RfPath} Rate:{Rate}", rfPath, rate);
+            }
+        }
+        else
+        {
+            _logger.LogError("Invalid RfPath! RfPath: {RfPath} Rate:{Rate}", rfPath, rate);
+        }
+#endif
+}
+
+void RadioManagementModule::phy_set_tx_power_index_by_rate_section(
+    RfPath rfPath, uint8_t channel, RATE_SECTION rateSection) {
+  _logger->debug("SET_TX_POWER {}; {}; {}", (int)rfPath, channel,
+                 (int)rateSection);
+
+  if (rateSection >= RATE_SECTION::RATE_SECTION_NUM) {
+    throw std::logic_error("RateSection >= RATE_SECTION.RATE_SECTION_NUM");
+  }
+
+  // TODO: WTF is going on?
+  if (rateSection == RATE_SECTION::CCK &&
+      current_band_type != BandType::BAND_ON_2_4G) {
+    return;
+  }
+
+  PHY_SetTxPowerIndexByRateArray(rfPath, rates_by_sections[(int)rateSection]);
+}
+
+void RadioManagementModule::PHY_TxPowerTrainingByPath_8812(RfPath rfPath) {
+  if ((uint8_t)rfPath >= _eepromManager->numTotalRfPath) {
+    return;
+  }
+
+  uint16_t writeOffset;
+  uint32_t powerLevel;
+  if (rfPath == RfPath::RF_PATH_A) {
+    powerLevel = phy_get_tx_power_index();
+    writeOffset = rA_TxPwrTraing_Jaguar;
+  } else {
+    powerLevel = phy_get_tx_power_index();
+    writeOffset = rB_TxPwrTraing_Jaguar;
+  }
+
+  uint32_t writeData = 0;
+  for (uint8_t i = 0; i < 3; i++) {
+    if (i == 0) {
+      powerLevel = powerLevel - 10;
+    } else if (i == 1) {
+      powerLevel = powerLevel - 8;
+    } else {
+      powerLevel = powerLevel - 6;
+    }
+    writeData |= (((powerLevel > 2) ? (powerLevel) : 2) << (i * 8));
+  }
+
+  _device.phy_set_bb_reg(writeOffset, 0xffffff, writeData);
 }

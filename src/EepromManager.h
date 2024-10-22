@@ -8,6 +8,8 @@
 #include "phydm_pre_define.h"
 #include "rtl8812a_hal.h"
 
+typedef unsigned short ushort;
+
 class EepromManager {
   RtlUsbAdapter _device;
   Logger_t _logger;

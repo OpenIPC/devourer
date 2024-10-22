@@ -1,11 +1,17 @@
 #include "RtlUsbAdapter.h"
 
 #include <chrono>
-#include <thread>
-
+#ifdef __ANDROID__
+#include <libusb.h>
+#else
+#include <libusb-1.0/libusb.h>
+#endif
 #include "FrameParser.h"
 #include "Hal8812PhyReg.h"
-#include <vector>
+#include "logger.h"
+#include <iomanip>
+#include <iostream>
+#include <thread>
 
 using namespace std::chrono_literals;
 
@@ -62,10 +68,9 @@ std::vector<Packet> RtlUsbAdapter::infinite_read() {
     }
 
   std::vector<Packet> packets;
-  if (actual_length > 1000) {
-    FrameParser fp{_logger};
-    packets = fp.recvbuf2recvframe(std::span<uint8_t>{buffer, (size_t)actual_length});
-  }
+  FrameParser fp{_logger};
+  packets =
+      fp.recvbuf2recvframe(std::span<uint8_t>{buffer, (size_t)actual_length});
   return packets;
 }
 
@@ -311,8 +316,47 @@ void RtlUsbAdapter::GetChipOutEP8812() {
     break;
   }
 
-  _logger->info("OutEpQueueSel({}), OutEpNumber({})", (int)OutEpQueueSel,
-                (int)OutEpNumber);
+  _logger->info("OutEpQueueSel({}), OutEpNumber({})", OutEpQueueSel,
+                OutEpNumber);
+}
+
+void transfer_callback(struct libusb_transfer *transfer) {
+  Logger *_logger = (Logger *)(transfer->user_data);
+  if (transfer->status == LIBUSB_TRANSFER_COMPLETED &&
+      transfer->actual_length == transfer->length) {
+    _logger->info("Packet {} sent successfully, length: {}", _logger,
+                  transfer->length);
+  } else {
+    _logger->error("Failed to send packet {}, status: {}, actual length: {}",
+                   _logger, transfer->status, transfer->actual_length);
+  }
+  libusb_free_transfer(transfer);
+}
+
+bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
+
+  libusb_transfer *transfer = libusb_alloc_transfer(0);
+  if (!transfer) {
+    _logger->error("Failed to allocate transfer");
+    return false;
+  }
+
+  libusb_fill_bulk_transfer(transfer, _dev_handle, 0x02, packet, length,
+                            transfer_callback, (void *)(_logger.get()),
+                            USB_TIMEOUT);
+  auto start = std::chrono::high_resolution_clock::now();
+  int rc = rc = libusb_submit_transfer(transfer);
+  auto end = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double, std::milli> elapsed = end - start;
+  if (rc == LIBUSB_SUCCESS) {
+    _logger->info("Packet sent successfully, length: {},used time {}ms", length,
+                  elapsed.count());
+    return true;
+  } else {
+    _logger->error("Failed to send packet, error code: {}", rc);
+    libusb_free_transfer(transfer);
+    return false;
+  }
 }
 
 void RtlUsbAdapter::phy_set_bb_reg(uint16_t regAddr, uint32_t bitMask,

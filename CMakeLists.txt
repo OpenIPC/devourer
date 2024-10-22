@@ -27,6 +27,7 @@ add_library(WiFiDriver
         hal/rtl8812a_recv.h
         hal/rtl8812a_spec.h
 
+        src/ieee80211_radiotap.h
         src/EepromManager.cpp
         src/EepromManager.h
         src/Firmware.h
@@ -39,6 +40,7 @@ add_library(WiFiDriver
         src/ParsedRadioPacket.cpp
         src/RadioManagementModule.cpp
         src/RadioManagementModule.h
+        src/Radiotap.c
         src/Rtl8812aDevice.cpp
         src/Rtl8812aDevice.h
         src/RtlUsbAdapter.cpp
@@ -62,3 +64,7 @@ add_executable(WiFiDriverDemo
         demo/main.cpp)
 
 target_link_libraries(WiFiDriverDemo PUBLIC WiFiDriver)
+
+add_executable(WiFiDriverTxDemo
+        txdemo/main.cpp)
+target_link_libraries(WiFiDriverTxDemo PUBLIC WiFiDriver)

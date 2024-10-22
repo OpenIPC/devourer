@@ -18,8 +18,11 @@
 #define _FALSE FALSE
 #endif
 
-#define le16_to_cpu(x) ((uint16_t)(x))
-#define le32_to_cpu(x) ((uint32_t)(x))
+#define cpu_to_le32(x) ((__u32)(x))
+#define le32_to_cpu(x) ((__u32)(x))
+#define cpu_to_le16(x) ((__u16)(x))
+#define le16_to_cpu(x) ((__u16)(x))
+
 
 #define LE_BITS_TO_4BYTE(__pStart, __BitOffset, __BitLen)                      \
   ((LE_P4BYTE_TO_HOST_4BYTE(__pStart) >> (__BitOffset)) &                      \

@@ -306,8 +306,8 @@ void RtlUsbAdapter::GetChipOutEP8812() {
     break;
   }
 
-  _logger->info("OutEpQueueSel({}), OutEpNumber({})", OutEpQueueSel,
-                OutEpNumber);
+  _logger->info("OutEpQueueSel({}), OutEpNumber({})", (int)OutEpQueueSel,
+                (int)OutEpNumber);
 }
 
 void RtlUsbAdapter::phy_set_bb_reg(uint16_t regAddr, uint32_t bitMask,

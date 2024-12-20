@@ -85,7 +85,7 @@ void EepromManager::rtw_hal_config_rftype() {
   }
 
   _logger->info("RF_Type is {} TotalTxPath is {}", (int)rf_type,
-                numTotalRfPath);
+                (int)numTotalRfPath);
 }
 
 void EepromManager::dump_chip_info(HAL_VERSION ChipVersion) {
@@ -366,11 +366,11 @@ void EepromManager::Hal_EfuseReadEFuse8812A(uint16_t _offset,
   uint8_t rtemp8;
   _device.ReadEFuseByte(eFuse_Addr, &rtemp8);
   if (rtemp8 != 0xFF) {
-    _logger->info("efuse_Addr-{:x} efuse_data={:x}", eFuse_Addr, rtemp8);
+    _logger->info("efuse_Addr-{:x} efuse_data={:x}", eFuse_Addr, (int)rtemp8);
     eFuse_Addr++;
   } else {
     _logger->info("EFUSE is empty efuse_Addr-{:x} efuse_data={:x}", eFuse_Addr,
-                  rtemp8);
+                  (int)rtemp8);
     return;
   }
 
@@ -569,7 +569,7 @@ uint8_t EepromManager::Hal_ReadTxPowerInfo8812A(RtlUsbAdapter device,
     EEPROMRegulatory = 0;
   }
 
-  _logger->info("EEPROMRegulatory = 0x{:X}", EEPROMRegulatory);
+  _logger->info("EEPROMRegulatory = 0x{:X}", (int)EEPROMRegulatory);
 
   return EEPROMRegulatory;
 }
@@ -602,7 +602,7 @@ void EepromManager::Hal_EfuseParseXtal_8812A() {
     crystal_cap = EEPROM_DEFAULT_CRYSTAL_CAP_8812;
   }
 
-  _logger->info("crystal_cap: 0x{:X}", crystal_cap);
+  _logger->info("crystal_cap: 0x{:X}", (int)crystal_cap);
 }
 
 #define EEPROM_THERMAL_METER_8812 0xBA
@@ -762,7 +762,7 @@ void EepromManager::hal_ReadPAType_8812A() {
                 LNAType_2G, ExternalLNA_2G);
   _logger->info("pHalData.LNAType_5G is 0x{:X}, "
                 "pHalData.external_lna_5g = {}",
-                LNAType_5G, external_lna_5g);
+                (int)LNAType_5G, (int)external_lna_5g);
 }
 
 #define EEPROM_RFE_OPTION_8812 0xCA
@@ -857,7 +857,7 @@ void EepromManager::hal_ReadUsbType_8812AU() {
       }
     }
 
-    _logger->info("antenna={}, wmode={}", antenna, wmode);
+    _logger->info("antenna={}, wmode={}", (int)antenna, (int)wmode);
     /* Antenna == 1 WMODE = 3 RTL8812AU-VL 11AC + USB2.0 Mode */
     if (antenna == 1) {
       /* Config 8812AU as 1*1 mode AC mode. */

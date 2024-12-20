@@ -39,7 +39,7 @@ bool HalModule::rtl8812au_hal_init() {
   auto value8 = _device.rtw_read8(REG_SYS_CLKR + 1);
   auto regCr = _device.rtw_read8(REG_CR);
   _logger->info("power-on :REG_SYS_CLKR 0x09=0x{:X}. REG_CR 0x100=0x{:X}",
-                value8, regCr);
+                (int)value8, (int)regCr);
   if ((value8 & BIT3) != 0 && (regCr != 0 && regCr != 0xEA)) {
     /* pHalData.bMACFuncEnable = TRUE; */
     _logger->info("MAC has already power on");

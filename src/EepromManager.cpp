@@ -169,7 +169,7 @@ void EepromManager::dump_chip_info(HAL_VERSION ChipVersion) {
 
 uint8_t EepromManager::GetBoardType() {
   /* 1 ======= BoardType: ODM_CMNINFO_BOARD_TYPE ======= */
-  uint odm_board_type = ODM_BOARD_DEFAULT;
+  uint32_t odm_board_type = ODM_BOARD_DEFAULT;
 
   if (ExternalLNA_2G) {
     odm_board_type |= ODM_BOARD_EXT_LNA;
@@ -624,7 +624,7 @@ void EepromManager::Hal_ReadThermalMeter_8812A() {
   }
 
   /* pHalData.ThermalMeter[0] = pHalData.eeprom_thermal_meter;	 */
-  _logger->info("ThermalMeter = 0x{:X}", eeprom_thermal_meter);
+  _logger->info("ThermalMeter = 0x{:X}", (int)eeprom_thermal_meter);
 }
 
 void EepromManager::Hal_ReadAmplifierType_8812A() {
@@ -753,10 +753,10 @@ void EepromManager::hal_ReadPAType_8812A() {
 
   _logger->info("pHalData.PAType_2G is 0x{:X}, "
                 "pHalData.ExternalPA_2G = {}",
-                PAType_2G, ExternalPA_2G);
+                (int)PAType_2G, (int)ExternalPA_2G);
   _logger->info("pHalData.PAType_5G is 0x{:X}, "
                 "pHalData.external_pa_5g = {}",
-                PAType_5G, external_pa_5g);
+                (int)PAType_5G, (int)external_pa_5g);
   _logger->info("pHalData.LNAType_2G is 0x{:X}, "
                 "pHalData.ExternalLNA_2G = {}",
                 LNAType_2G, ExternalLNA_2G);

@@ -211,7 +211,7 @@ void FirmwareManager::InitializeFirmwareVars8812() {
   _device.rtw_write8(REG_HMETFR, 0x0f);
 }
 
-bool FirmwareManager::polling_fwdl_chksum(uint min_cnt, uint timeout_ms) {
+bool FirmwareManager::polling_fwdl_chksum(uint32_t min_cnt, uint32_t timeout_ms) {
   bool ret = false;
   u32 value32;
   auto start = std::chrono::steady_clock::now();

@@ -209,7 +209,7 @@ bool HalModule::InitPowerOn() {
 
 bool HalModule::InitLLTTable8812A(uint8_t txpktbuf_bndy) {
   bool status;
-  for (uint i = 0; i < (txpktbuf_bndy - 1); i++) {
+  for (uint32_t i = 0; i < (txpktbuf_bndy - 1); i++) {
     status = _LLTWrite_8812A(i, i + 1);
     if (true != status) {
       return false;
@@ -217,7 +217,7 @@ bool HalModule::InitLLTTable8812A(uint8_t txpktbuf_bndy) {
   }
 
   /* end of list */
-  status = _LLTWrite_8812A((uint)(txpktbuf_bndy - 1), 0xFF);
+  status = _LLTWrite_8812A((uint32_t)(txpktbuf_bndy - 1), 0xFF);
   if (status == false) {
     return false;
   }
@@ -227,7 +227,7 @@ bool HalModule::InitLLTTable8812A(uint8_t txpktbuf_bndy) {
    * transfer. */
   /* Otherwise used as local loopback buffer. */
   uint32_t Last_Entry_Of_TxPktBuf = LAST_ENTRY_OF_TX_PKT_BUFFER_8812;
-  for (uint i = txpktbuf_bndy; i < Last_Entry_Of_TxPktBuf; i++) {
+  for (uint32_t i = txpktbuf_bndy; i < Last_Entry_Of_TxPktBuf; i++) {
     status = _LLTWrite_8812A(i, (i + 1));
     if (status == false) {
       return false;
@@ -506,25 +506,25 @@ bool HalModule::check_positive(int32_t condition1, int32_t condition2,
   uint32_t cond2 = condition2;
   uint32_t cond4 = condition4;
 
-  uint cut_version_for_para = (_eepromManager->cut_version == ODM_CUT_A)
-                                  ? (uint)15
-                                  : (uint)_eepromManager->version_id.CUTVersion;
-  uint pkg_type_for_para = (uint8_t)15;
+  uint32_t cut_version_for_para = (_eepromManager->cut_version == ODM_CUT_A)
+                                  ? (uint32_t)15
+                                  : (uint32_t)_eepromManager->version_id.CUTVersion;
+  uint32_t pkg_type_for_para = 15;
 
   uint32_t driver1 = cut_version_for_para << 24 |
-                     ((uint)RTL871X_HCI_TYPE_RTW_USB & 0xF0) << 16 |
+                     ((uint32_t)RTL871X_HCI_TYPE_RTW_USB & 0xF0) << 16 |
                      pkg_type_for_para << 12 |
-                     ((uint)RTL871X_HCI_TYPE_RTW_USB & 0x0F) << 8 | boardType;
+                     ((uint32_t)RTL871X_HCI_TYPE_RTW_USB & 0x0F) << 8 | boardType;
 
-  uint32_t driver2 = ((uint)_eepromManager->TypeGLNA & 0xFF) << 0 |
-                     ((uint)_eepromManager->TypeGPA & 0xFF) << 8 |
-                     ((uint)_eepromManager->TypeALNA & 0xFF) << 16 |
-                     ((uint)_eepromManager->TypeAPA & 0xFF) << 24;
+  uint32_t driver2 = ((uint32_t)_eepromManager->TypeGLNA & 0xFF) << 0 |
+                     ((uint32_t)_eepromManager->TypeGPA & 0xFF) << 8 |
+                     ((uint32_t)_eepromManager->TypeALNA & 0xFF) << 16 |
+                     ((uint32_t)_eepromManager->TypeAPA & 0xFF) << 24;
 
-  uint32_t driver4 = ((uint)_eepromManager->TypeGLNA & 0xFF00) >> 8 |
-                     ((uint)_eepromManager->TypeGPA & 0xFF00) |
-                     ((uint)_eepromManager->TypeALNA & 0xFF00) << 8 |
-                     ((uint)_eepromManager->TypeAPA & 0xFF00) << 16;
+  uint32_t driver4 = ((uint32_t)_eepromManager->TypeGLNA & 0xFF00) >> 8 |
+                     ((uint32_t)_eepromManager->TypeGPA & 0xFF00) |
+                     ((uint32_t)_eepromManager->TypeALNA & 0xFF00) << 8 |
+                     ((uint32_t)_eepromManager->TypeAPA & 0xFF00) << 16;
 
   /*============== value Defined Check ===============*/
   /*QFN type [15:12] and cut version [27:24] need to do value check*/
@@ -812,7 +812,7 @@ void HalModule::_InitWMACSetting_8812A() {
   _device.rtw_write32(REG_MAR, 0xFFFFFFFF);
   _device.rtw_write32(REG_MAR + 4, 0xFFFFFFFF);
 
-  uint value16 = BIT10 | BIT5;
+  uint32_t value16 = BIT10 | BIT5;
   _device.rtw_write16(REG_RXFLTMAP1, (uint16_t)value16);
 }
 
@@ -860,7 +860,7 @@ void HalModule::_InitEDCA_8812AUsb() {
 }
 
 void HalModule::_InitRetryFunction_8812A() {
-  uint value8;
+  uint32_t value8;
 
   value8 = _device.rtw_read8(REG_FWHW_TXQ_CTRL);
   value8 |= EN_AMPDU_RTY_NEW;
@@ -894,7 +894,7 @@ void HalModule::usb_AggSettingTxUpdate_8812A() {
 }
 
 void HalModule::usb_AggSettingRxUpdate_8812A() {
-  uint valueDMA = _device.rtw_read8(REG_TRXDMA_CTRL);
+  uint32_t valueDMA = _device.rtw_read8(REG_TRXDMA_CTRL);
   switch (_rxAggMode) {
   case RX_AGG_DMA:
     valueDMA |= RXDMA_AGG_EN;
@@ -1056,7 +1056,7 @@ bool HalModule::PHY_BBConfig8812() {
   /* tangw check start 20120412 */
   /* . APLL_EN,,APLL_320_GATEB,APLL_320BIAS,  auto config by hw fsm after
    * pfsm_go (0x4 bit 8) set */
-  uint TmpU1B = _device.rtw_read8(REG_SYS_FUNC_EN);
+  uint32_t TmpU1B = _device.rtw_read8(REG_SYS_FUNC_EN);
 
   TmpU1B |= FEN_USBA;
 

@@ -1173,7 +1173,7 @@ void RadioManagementModule::PHY_SetTxPowerIndex_8812A(uint32_t powerIndex,
 
 void RadioManagementModule::phy_set_tx_power_index_by_rate_section(
     RfPath rfPath, uint8_t channel, RATE_SECTION rateSection) {
-  _logger->debug("SET_TX_POWER {}; {}; {}", (int)rfPath, channel,
+  _logger->debug("SET_TX_POWER {}; {}; {}", (int)rfPath, (int)channel,
                  (int)rateSection);
 
   if (rateSection >= RATE_SECTION::RATE_SECTION_NUM) {

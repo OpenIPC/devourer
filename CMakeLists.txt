@@ -13,8 +13,6 @@ find_package(PkgConfig REQUIRED)
 # this calls create special `PkgConfig::LIBUSB` variables
 pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
 
-find_package(spdlog CONFIG REQUIRED)
-
 add_library(WiFiDriver
         src/logger.h
 
@@ -55,8 +53,6 @@ target_compile_features(WiFiDriver PUBLIC cxx_std_20)
 
 target_link_libraries(WiFiDriver PUBLIC
         PkgConfig::LIBUSB
-        # Use the header-only version
-        spdlog::spdlog_header_only
 )
 
 target_include_directories(WiFiDriver PUBLIC hal)

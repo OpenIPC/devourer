@@ -5,6 +5,8 @@
 #include "rtl8812a_hal.h"
 #include "rtw_efuse.h"
 
+#include <cstring>
+
 EepromManager::EepromManager(RtlUsbAdapter device, Logger_t logger)
     : _device{device}, _logger{logger} {
   read_chip_version_8812a(device);

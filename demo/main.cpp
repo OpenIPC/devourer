@@ -3,10 +3,6 @@
 
 #include <libusb.h>
 
-#include <spdlog/sinks/android_sink.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
-#include <spdlog/spdlog.h>
-
 #include "FrameParser.h"
 #include "RtlUsbAdapter.h"
 #include "WiFiDriver.h"

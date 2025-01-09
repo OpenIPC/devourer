@@ -54,10 +54,35 @@ jobs:
       run: |
         echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
 
-    - name: Install dependency libraries
-      run: git clone https://github.com/Microsoft/vcpkg.git; cd vcpkg; .\bootstrap-vcpkg.bat; .\vcpkg integrate install; .\vcpkg install libusb spdlog
+    - name: Install dependency libraries (Windows)
+      id: vars
+      if: runner.os == 'Windows'
+      run: |
+        git clone https://github.com/Microsoft/vcpkg.git
+        cd vcpkg
+        .\bootstrap-vcpkg.bat
+        .\vcpkg integrate install
+        .\vcpkg install libusb
+        echo ("VCPKG_ROOT=" + "$PWD") >> $env:GITHUB_ENV
 
-    - name: Configure CMake
+    - name: Install dependency libraries (Linux)
+      if: runner.os == 'Linux'
+      run:
+        sudo apt-get install libusb-1.0-0-dev
+
+    - name: Configure CMake (Windows)
+      if: runner.os == 'Windows'
+      # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
+      # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
+      run: >
+        cmake -B ${{ steps.strings.outputs.build-output-dir }}
+        -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
+        -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -S ${{ github.workspace }}
+
+    - name: Configure CMake (Linux)
+      if: runner.os == 'Linux'
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
       # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
       run: >

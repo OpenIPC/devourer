@@ -3,6 +3,7 @@
 
 #include "logger.h"
 #include <span>
+#include <vector>
 
 enum class RX_PACKET_TYPE {
   NORMAL_RX,  /* Normal rx packet */

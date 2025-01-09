@@ -216,7 +216,7 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
 
 void RadioManagementModule::phy_set_rf_reg(RfPath eRFPath, uint16_t RegAddr,
                                            uint32_t BitMask, uint32_t Data) {
-  uint data = Data;
+  uint32_t data = Data;
   //_logger->debug("RFREG;{};{:X};{:X};{:X}", (uint8_t)eRFPath, (uint)RegAddr,
   //               BitMask, data);
   if (BitMask == 0) {
@@ -464,7 +464,7 @@ void RadioManagementModule::PHY_SwitchWirelessBand8812(BandType Band) {
 }
 
 void RadioManagementModule::phy_SetRFEReg8812(BandType Band) {
-  uint u1tmp = 0;
+  uint32_t u1tmp = 0;
 
   if (Band == BandType::BAND_ON_2_4G) {
     switch (_eepromManager->rfe_type) {
@@ -1173,7 +1173,7 @@ void RadioManagementModule::PHY_SetTxPowerIndex_8812A(uint32_t powerIndex,
 
 void RadioManagementModule::phy_set_tx_power_index_by_rate_section(
     RfPath rfPath, uint8_t channel, RATE_SECTION rateSection) {
-  _logger->debug("SET_TX_POWER {}; {}; {}", (int)rfPath, channel,
+  _logger->debug("SET_TX_POWER {}; {}; {}", (int)rfPath, (int)channel,
                  (int)rateSection);
 
   if (rateSection >= RATE_SECTION::RATE_SECTION_NUM) {

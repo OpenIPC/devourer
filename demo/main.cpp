@@ -23,8 +23,9 @@ int main() {
   auto logger = std::make_shared<Logger>();
 
   rc = libusb_init(&ctx);
-  if (rc < 0)
+  if (rc < 0) {
     return rc;
+  }
 
   libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_DEBUG);
 
@@ -37,11 +38,11 @@ int main() {
     return 1;
   }
 
-  /*Check if kernel driver attached*/
+  // Check if the kernel driver attached
   if (libusb_kernel_driver_active(dev_handle, 0)) {
     rc = libusb_detach_kernel_driver(dev_handle, 0); // detach driver
-    assert(rc == 0);
   }
+
   rc = libusb_claim_interface(dev_handle, 0);
   assert(rc == 0);
 

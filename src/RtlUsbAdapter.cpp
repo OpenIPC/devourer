@@ -56,6 +56,11 @@ std::vector<Packet> RtlUsbAdapter::infinite_read() {
 
   rc = libusb_bulk_transfer(_dev_handle, 0x81, buffer, sizeof(buffer),
                             &actual_length, USB_TIMEOUT * 10);
+
+    if (rc < 0) {
+        _logger->error("libusb_bulk_transfer failed with error: {}", rc);
+    }
+
   std::vector<Packet> packets;
   if (actual_length > 1000) {
     FrameParser fp{_logger};

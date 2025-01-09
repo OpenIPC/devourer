@@ -18,7 +18,7 @@ private:
   int _PageWrite_8812(uint32_t page, uint8_t *buffer, uint32_t size);
   bool BlockWrite(uint8_t *buffer, int buffSize);
   void InitializeFirmwareVars8812();
-  bool polling_fwdl_chksum(uint min_cnt, uint timeout_ms);
+  bool polling_fwdl_chksum(uint32_t min_cnt, uint32_t timeout_ms);
      bool _FWFreeToGo8812(uint32_t min_cnt, uint32_t timeout_ms);
 
 };

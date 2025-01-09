@@ -2,7 +2,9 @@
 #define HALMODULE_H
 
 #include "EepromManager.h"
+extern "C"{
 #include "Hal8812PwrSeq.h"
+}
 #include "RadioManagementModule.h"
 #include "RtlUsbAdapter.h"
 #include "SelectedChannel.h"

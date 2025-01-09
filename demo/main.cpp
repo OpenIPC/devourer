@@ -1,5 +1,4 @@
 #include <cassert>
-#include <iostream>
 #include <memory>
 
 #include <libusb.h>
@@ -19,24 +18,16 @@ static void packetProcessor(const Packet &packet) {}
 
 int main() {
   libusb_context *ctx;
-  libusb_device **devs;
   int rc;
-  ssize_t cnt;
 
-#ifdef __ANDROID__
-  auto logger = spdlog::android_logger_mt("android", tag);
-#else
-  auto logger = spdlog::stderr_color_mt("stderr");
-#endif
+  auto logger = std::make_shared<Logger>();
 
   rc = libusb_init(&ctx);
-  if (rc < 0)
+  if (rc < 0) {
     return rc;
+  }
 
-// #ifndef NDEBUG
-#if 0
   libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_DEBUG);
-#endif
 
   libusb_device_handle *dev_handle =
       libusb_open_device_with_vid_pid(ctx, USB_VENDOR_ID, USB_PRODUCT_ID);
@@ -47,15 +38,15 @@ int main() {
     return 1;
   }
 
-  /*Check if kenel driver attached*/
+  // Check if the kernel driver attached
   if (libusb_kernel_driver_active(dev_handle, 0)) {
     rc = libusb_detach_kernel_driver(dev_handle, 0); // detach driver
-    assert(rc == 0);
   }
+
   rc = libusb_claim_interface(dev_handle, 0);
   assert(rc == 0);
 
-  WiFiDriver wifi_driver{logger};
+  WiFiDriver wifi_driver(logger);
   auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle);
   rtlDevice->Init(packetProcessor, SelectedChannel{
                                        .Channel = 36,
@@ -69,5 +60,6 @@ int main() {
   libusb_close(dev_handle);
 
   libusb_exit(ctx);
+
   return 0;
 }

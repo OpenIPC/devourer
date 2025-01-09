@@ -1,5 +1,5 @@
-#ifndef WIFIDRIVER_H
-#define WIFIDRIVER_H
+#ifndef WIFI_DRIVER_H
+#define WIFI_DRIVER_H
 
 #include <memory>
 
@@ -10,10 +10,10 @@ class WiFiDriver {
   Logger_t _logger;
 
 public:
-  WiFiDriver(Logger_t logger);
+  explicit WiFiDriver(Logger_t logger);
 
   std::unique_ptr<Rtl8812aDevice>
   CreateRtlDevice(libusb_device_handle *dev_handle);
 };
 
-#endif /* WIFIDRIVER_H */
+#endif /* WIFI_DRIVER_H */

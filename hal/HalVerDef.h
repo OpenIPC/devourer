@@ -15,6 +15,9 @@
 #ifndef __HAL_VERSION_DEF_H__
 #define __HAL_VERSION_DEF_H__
 
+#undef TRUE
+#undef FALSE
+
 #include "basic_types.h"
 #include "drv_types.h"
 

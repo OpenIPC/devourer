@@ -42,8 +42,11 @@ typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef void *PADAPTER;
+#ifndef WIN32
 typedef bool BOOLEAN;
 typedef void VOID;
+#endif
+
 
 static uint32_t PHY_CalculateBitShift(uint32_t BitMask) {
   int i;

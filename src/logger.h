@@ -24,11 +24,6 @@
 #else
     #include <cstdio>
 
-    #define RESET "\033[0m"
-    #define RED "\033[31m"
-    #define GREEN "\033[32m"
-    #define YELLOW "\033[33m"
-
     #define DEVOURER_LOGV(...)            \
     printf("<%s>", DEVOURER_LOG_TAG); \
     printf(__VA_ARGS__);                \
@@ -42,13 +37,13 @@
     printf(__VA_ARGS__);                \
     printf("\n")
     #define DEVOURER_LOGW(...)                   \
-    printf(YELLOW "<%s>", DEVOURER_LOG_TAG); \
+    printf("<%s>", DEVOURER_LOG_TAG); \
     printf(__VA_ARGS__);                       \
-    printf("\n" RESET)
+    printf("\n")
     #define DEVOURER_LOGE(...)                \
-    printf(RED "<%s>", DEVOURER_LOG_TAG); \
+    printf("<%s>", DEVOURER_LOG_TAG); \
     printf(__VA_ARGS__);                    \
-    printf("\n" RESET)
+    printf("\n")
 #endif
 
 template<typename T>

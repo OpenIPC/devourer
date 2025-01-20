@@ -145,13 +145,12 @@ void RadioManagementModule::PHY_HandleSwChnlAndSetBW8812(
     ChannelWidth_t ChnlWidth, uint8_t ChnlOffsetOf40MHz,
     uint8_t ChnlOffsetOf80MHz, uint8_t CenterFrequencyIndex1) {
   _logger->info(
-      "=> PHY_HandleSwChnlAndSetBW8812: bSwitchChannel {}, bSetBandWidth * {}",
+      "[{}] bSwitchChannel {}, bSetBandWidth {}", __func__,
       bSwitchChannel, bSetBandWidth);
 
   /* check is swchnl or setbw */
   if (!bSwitchChannel && !bSetBandWidth) {
-    _logger->error("PHY_HandleSwChnlAndSetBW8812:  not switch channel and "
-                   "not set bandwidth");
+    _logger->error("[{}]: not switch channel and not set bandwidth", __func__);
     return;
   }
 
@@ -175,8 +174,7 @@ void RadioManagementModule::PHY_HandleSwChnlAndSetBW8812(
   }
 
   if (!_setChannelBw && !_swChannel && _needIQK != true) {
-    _logger->error("<= PHY_HandleSwChnlAndSetBW8812: SwChnl {}, "
-                   "_setChannelBw {}",
+    _logger->error("[{}]: _swChannel {}, _setChannelBw {}", __func__,
                    _swChannel, _setChannelBw);
     return;
   }
@@ -357,8 +355,7 @@ void RadioManagementModule::PHY_SwitchWirelessBand8812(BandType Band) {
   ChannelWidth_t current_bw = _currentChannelBw;
   bool eLNA_2g = _eepromManager->ExternalLNA_2G;
 
-  _logger->info("==>PHY_SwitchWirelessBand8812() {}",
-                ((Band == BandType::BAND_ON_2_4G) ? "2.4G" : "5G"));
+  _logger->info("[{}] {}", __func__, Band == BandType::BAND_ON_2_4G ? "2.4G" : "5G");
 
   current_band_type = Band;
 
@@ -1173,7 +1170,7 @@ void RadioManagementModule::PHY_SetTxPowerIndex_8812A(uint32_t powerIndex,
 
 void RadioManagementModule::phy_set_tx_power_index_by_rate_section(
     RfPath rfPath, uint8_t channel, RATE_SECTION rateSection) {
-  _logger->debug("SET_TX_POWER {}; {}; {}", (int)rfPath, (int)channel,
+  _logger->debug("SET_TX_POWER {} - {} - {}", (int)rfPath, (int)channel,
                  (int)rateSection);
 
   if (rateSection >= RATE_SECTION::RATE_SECTION_NUM) {

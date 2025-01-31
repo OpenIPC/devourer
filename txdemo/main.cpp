@@ -3,12 +3,18 @@
 #include <memory>
 #include <string>
 
-#ifdef __ANDROID__
+#if defined(_MSC_VER)
+  #include <windows.h>
+  #include <process.h>
+  typedef int pid_t;
+  #define fork() (0)
+  #define sleep(seconds) Sleep((seconds)*1000)
+#elif defined(__ANDROID__)
+  // On Android, include the libusb header as required.
   #include <libusb.h>
 #else
   #include <libusb-1.0/libusb.h>
 #endif
-
 
 #include "FrameParser.h"
 #include "RtlUsbAdapter.h"
@@ -16,6 +22,7 @@
 #include "logger.h"
 
 #include <iomanip>
+
 
 // #define USB_VENDOR_ID 0x0bda
 // #define USB_PRODUCT_ID 0x8812

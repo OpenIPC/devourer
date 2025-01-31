@@ -374,7 +374,7 @@ struct pkt_attrib
     u8 rtsen;
     u8 cts2self;
     union Keytype dot11tkiptxmickey;
-    /* union Keytype	dot11tkiprxmickey; */
+    /* union Keytype  dot11tkiprxmickey; */
     union Keytype dot118021x_UncstKey;
 
     // #ifdef CONFIG_TDLS
@@ -400,6 +400,9 @@ struct pkt_attrib
     u8 inject; /* == a5 if injected */
 };
 
+#if defined(_MSC_VER)
+#pragma pack(push, 1)
+#endif
 struct rtw_ieee80211_hdr
 {
     u16 frame_ctl;
@@ -408,9 +411,18 @@ struct rtw_ieee80211_hdr
     u8 addr2[ETH_ALEN];
     u8 addr3[ETH_ALEN];
     u16 seq_ctl;
-    u8 addr4[ETH_ALEN];
-} __attribute__((packed));
+}
+#if !defined(_MSC_VER)
+ __attribute__((packed))
+#endif
+;
+#if defined(_MSC_VER)
+#pragma pack(pop)
+#endif
 
+#if defined(_MSC_VER)
+#pragma pack(push, 1)
+#endif
 struct rtw_ieee80211_hdr_3addr
 {
     u16 frame_ctl;
@@ -419,8 +431,18 @@ struct rtw_ieee80211_hdr_3addr
     u8 addr2[ETH_ALEN];
     u8 addr3[ETH_ALEN];
     u16 seq_ctl;
-} __attribute__((packed));
+}
+#if !defined(_MSC_VER)
+ __attribute__((packed))
+#endif
+;
+#if defined(_MSC_VER)
+#pragma pack(pop)
+#endif
 
+#if defined(_MSC_VER)
+#pragma pack(push, 1)
+#endif
 struct rtw_ieee80211_hdr_qos
 {
     u16 frame_ctl;
@@ -431,8 +453,18 @@ struct rtw_ieee80211_hdr_qos
     u16 seq_ctl;
     u8 addr4[ETH_ALEN];
     u16 qc;
-} __attribute__((packed));
+}
+#if !defined(_MSC_VER)
+ __attribute__((packed))
+#endif
+;
+#if defined(_MSC_VER)
+#pragma pack(pop)
+#endif
 
+#if defined(_MSC_VER)
+#pragma pack(push, 1)
+#endif
 struct rtw_ieee80211_hdr_3addr_qos
 {
     u16 frame_ctl;
@@ -442,8 +474,18 @@ struct rtw_ieee80211_hdr_3addr_qos
     u8 addr3[ETH_ALEN];
     u16 seq_ctl;
     u16 qc;
-} __attribute__((packed));
+}
+#if !defined(_MSC_VER)
+ __attribute__((packed))
+#endif
+;
+#if defined(_MSC_VER)
+#pragma pack(pop)
+#endif
 
+#if defined(_MSC_VER)
+#pragma pack(push, 1)
+#endif
 struct eapol
 {
     u8 snap[6];
@@ -451,7 +493,14 @@ struct eapol
     u8 version;
     u8 type;
     u16 length;
-} __attribute__((packed));
+}
+#if !defined(_MSC_VER)
+ __attribute__((packed))
+#endif
+;
+#if defined(_MSC_VER)
+#pragma pack(pop)
+#endif
 
 struct tx_desc
 {

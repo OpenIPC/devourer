@@ -1,8 +1,8 @@
 /*
  * Radiotap parser
  *
- * Copyright 2007		Andy Green <andy@warmcat.com>
- * Copyright 2009		Johannes Berg <johannes@sipsolutions.net>
+ * Copyright 2007        Andy Green <andy@warmcat.com>
+ * Copyright 2009        Johannes Berg <johannes@sipsolutions.net>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -16,6 +16,19 @@
 
 #include "ieee80211_radiotap.h"
 #include <stdio.h>
+#include <stddef.h>  /* for size_t */
+#include <stdint.h>  /* for uint8_t, uint16_t, etc. */
+
+/* if not defined already */
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#endif
+
+/* Make sure your type definitions for u8, u16 etc are available.
+   For example:
+   typedef uint8_t u8;
+   typedef uint16_t u16;
+*/
 
 enum MGN_RATE {
   MGN_1M = 0x02,
@@ -105,127 +118,46 @@ enum MGN_RATE {
   MGN_VHT4SS_MCS9,
   MGN_UNKNOWN
 };
-/* function prototypes and related defs are in include/net/cfg80211.h */
 
-static const struct radiotap_align_size rtap_namespace_sizes[] = {
-    [IEEE80211_RADIOTAP_TSFT] =
-        {
-            .align = 8,
-            .size = 8,
-        },
-    [IEEE80211_RADIOTAP_FLAGS] =
-        {
-            .align = 1,
-            .size = 1,
-        },
-    [IEEE80211_RADIOTAP_RATE] =
-        {
-            .align = 1,
-            .size = 1,
-        },
-    [IEEE80211_RADIOTAP_CHANNEL] =
-        {
-            .align = 2,
-            .size = 4,
-        },
-    [IEEE80211_RADIOTAP_FHSS] =
-        {
-            .align = 2,
-            .size = 2,
-        },
-    [IEEE80211_RADIOTAP_DBM_ANTSIGNAL] =
-        {
-            .align = 1,
-            .size = 1,
-        },
-    [IEEE80211_RADIOTAP_DBM_ANTNOISE] =
-        {
-            .align = 1,
-            .size = 1,
-        },
-    [IEEE80211_RADIOTAP_LOCK_QUALITY] =
-        {
-            .align = 2,
-            .size = 2,
-        },
-    [IEEE80211_RADIOTAP_TX_ATTENUATION] =
-        {
-            .align = 2,
-            .size = 2,
-        },
-    [IEEE80211_RADIOTAP_DB_TX_ATTENUATION] =
-        {
-            .align = 2,
-            .size = 2,
-        },
-    [IEEE80211_RADIOTAP_DBM_TX_POWER] =
-        {
-            .align = 1,
-            .size = 1,
-        },
-    [IEEE80211_RADIOTAP_ANTENNA] =
-        {
-            .align = 1,
-            .size = 1,
-        },
-    [IEEE80211_RADIOTAP_DB_ANTSIGNAL] =
-        {
-            .align = 1,
-            .size = 1,
-        },
-    [IEEE80211_RADIOTAP_DB_ANTNOISE] =
-        {
-            .align = 1,
-            .size = 1,
-        },
-    [IEEE80211_RADIOTAP_RX_FLAGS] =
-        {
-            .align = 2,
-            .size = 2,
-        },
-    [IEEE80211_RADIOTAP_TX_FLAGS] =
-        {
-            .align = 2,
-            .size = 2,
-        },
-    [IEEE80211_RADIOTAP_RTS_RETRIES] =
-        {
-            .align = 1,
-            .size = 1,
-        },
-    [IEEE80211_RADIOTAP_DATA_RETRIES] =
-        {
-            .align = 1,
-            .size = 1,
-        },
-    [IEEE80211_RADIOTAP_MCS] =
-        {
-            .align = 1,
-            .size = 3,
-        },
-    [IEEE80211_RADIOTAP_AMPDU_STATUS] =
-        {
-            .align = 4,
-            .size = 8,
-        },
-    [IEEE80211_RADIOTAP_VHT] =
-        {
-            .align = 2,
-            .size = 12,
-        },
-    [IEEE80211_RADIOTAP_TIMESTAMP] =
-        {
-            .align = 8,
-            .size = 12,
-        },
-    /*
-     * add more here as they are defined in radiotap.h
-     */
+/*
+ * In order to support MSVC (which doesn’t support C99 designated
+ * initializers), we replace the “[index] = { .align = …, .size = … }”
+ * syntax with positional initializers. Note that the array is defined
+ * to have 23 entries (0..22) corresponding to indices used in the enum.
+ * Entries for undefined indices (e.g. 18) are set to {0,0}.
+ */
+
+static const struct radiotap_align_size rtap_namespace_sizes[23] = {
+    /*  0: IEEE80211_RADIOTAP_TSFT */       { 8, 8 },
+    /*  1: IEEE80211_RADIOTAP_FLAGS */      { 1, 1 },
+    /*  2: IEEE80211_RADIOTAP_RATE */       { 1, 1 },
+    /*  3: IEEE80211_RADIOTAP_CHANNEL */    { 2, 4 },
+    /*  4: IEEE80211_RADIOTAP_FHSS */       { 2, 2 },
+    /*  5: IEEE80211_RADIOTAP_DBM_ANTSIGNAL */ { 1, 1 },
+    /*  6: IEEE80211_RADIOTAP_DBM_ANTNOISE */ { 1, 1 },
+    /*  7: IEEE80211_RADIOTAP_LOCK_QUALITY */ { 2, 2 },
+    /*  8: IEEE80211_RADIOTAP_TX_ATTENUATION */ { 2, 2 },
+    /*  9: IEEE80211_RADIOTAP_DB_TX_ATTENUATION */ { 2, 2 },
+    /* 10: IEEE80211_RADIOTAP_DBM_TX_POWER */ { 1, 1 },
+    /* 11: IEEE80211_RADIOTAP_ANTENNA */      { 1, 1 },
+    /* 12: IEEE80211_RADIOTAP_DB_ANTSIGNAL */ { 1, 1 },
+    /* 13: IEEE80211_RADIOTAP_DB_ANTNOISE */  { 1, 1 },
+    /* 14: IEEE80211_RADIOTAP_RX_FLAGS */     { 2, 2 },
+    /* 15: IEEE80211_RADIOTAP_TX_FLAGS */     { 2, 2 },
+    /* 16: IEEE80211_RADIOTAP_RTS_RETRIES */  { 1, 1 },
+    /* 17: IEEE80211_RADIOTAP_DATA_RETRIES */ { 1, 1 },
+    /* 18: (unused) */                        { 0, 0 },
+    /* 19: IEEE80211_RADIOTAP_MCS */          { 1, 3 },
+    /* 20: IEEE80211_RADIOTAP_AMPDU_STATUS */ { 4, 8 },
+    /* 21: IEEE80211_RADIOTAP_VHT */          { 2, 12 },
+    /* 22: IEEE80211_RADIOTAP_TIMESTAMP */    { 8, 12 },
 };
 
 static const struct ieee80211_radiotap_namespace radiotap_ns = {
-    .n_bits = ARRAY_SIZE(rtap_namespace_sizes),
-    .align_size = rtap_namespace_sizes,
+    rtap_namespace_sizes,
+    (int)sizeof(rtap_namespace_sizes) / sizeof(rtap_namespace_sizes[0]),
+    0,   /* oui */
+    0    /* subns */
 };
 
 /**
@@ -289,9 +221,7 @@ int ieee80211_radiotap_iterator_init(
   iterator->_bitmap_shifter = get_unaligned_le32(&radiotap_header->it_present);
   iterator->_arg = (uint8_t *)radiotap_header + sizeof(*radiotap_header);
   iterator->_reset_on_ext = 0;
-  iterator->_next_bitmap =
-      &radiotap_header
-           ->it_present; // NOLINT(clang-diagnostic-address-of-packed-member)
+  iterator->_next_bitmap = &radiotap_header->it_present; // NOLINT(clang-diagnostic-address-of-packed-member)
   iterator->_next_bitmap++;
   iterator->_vns = vns;
   iterator->current_namespace = &radiotap_ns;
@@ -300,23 +230,14 @@ int ieee80211_radiotap_iterator_init(
   /* find payload start allowing for extended bitmap(s) */
 
   if (iterator->_bitmap_shifter & (1u << IEEE80211_RADIOTAP_EXT)) {
-    if ((unsigned long)iterator->_arg - (unsigned long)iterator->_rtheader +
-            sizeof(uint32_t) >
-        (unsigned long)iterator->_max_length)
+    if (((size_t)iterator->_arg - (size_t)iterator->_rtheader) + sizeof(uint32_t) >
+        (size_t)iterator->_max_length)
       return -EINVAL;
     while (get_unaligned_le32(iterator->_arg) &
            (1u << IEEE80211_RADIOTAP_EXT)) {
       iterator->_arg += sizeof(uint32_t);
-
-      /*
-       * check for insanity where the present bitmaps
-       * keep claiming to extend up to or even beyond the
-       * stated radiotap header length
-       */
-
-      if ((unsigned long)iterator->_arg - (unsigned long)iterator->_rtheader +
-              sizeof(uint32_t) >
-          (unsigned long)iterator->_max_length)
+      if (((size_t)iterator->_arg - (size_t)iterator->_rtheader) + sizeof(uint32_t) >
+          (size_t)iterator->_max_length)
         return -EINVAL;
     }
 
@@ -383,18 +304,16 @@ int ieee80211_radiotap_iterator_next(
     struct ieee80211_radiotap_iterator *iterator) {
   while (1) {
     int hit = 0;
-    int pad, align, size, subns;
+    int pad, align = 0, size = 0, subns;
     uint32_t oui;
 
-    /* if no more EXT bits, that's it */
     if ((iterator->_arg_index % 32) == IEEE80211_RADIOTAP_EXT &&
         !(iterator->_bitmap_shifter & 1))
       return -ENOENT;
 
     if (!(iterator->_bitmap_shifter & 1))
-      goto next_entry; /* arg not present */
+      goto next_entry;
 
-    /* get alignment/size of data */
     switch (iterator->_arg_index % 32) {
     case IEEE80211_RADIOTAP_RADIOTAP_NAMESPACE:
     case IEEE80211_RADIOTAP_EXT:
@@ -418,47 +337,28 @@ int ieee80211_radiotap_iterator_next(
             iterator->current_namespace->align_size[iterator->_arg_index].size;
       }
       if (!align) {
-        /* skip all subsequent data */
         iterator->_arg = iterator->_next_ns_data;
-        /* give up on this namespace */
         iterator->current_namespace = NULL;
         goto next_entry;
       }
       break;
     }
 
-    /*
-     * arg is present, account for alignment padding
-     *
-     * Note that these alignments are relative to the start
-     * of the radiotap header.  There is no guarantee
-     * that the radiotap header itself is aligned on any
-     * kind of boundary.
-     *
-     * The above is why get_unaligned() is used to dereference
-     * multibyte elements from the radiotap area.
-     */
-
-    pad = ((unsigned long)iterator->_arg - (unsigned long)iterator->_rtheader) &
-          (align - 1);
-
+    pad = (((size_t)iterator->_arg - (size_t)iterator->_rtheader) & (align - 1));
     if (pad)
       iterator->_arg += align - pad;
 
     if (iterator->_arg_index % 32 == IEEE80211_RADIOTAP_VENDOR_NAMESPACE) {
       int vnslen;
-
-      if ((unsigned long)iterator->_arg + size -
-              (unsigned long)iterator->_rtheader >
-          (unsigned long)iterator->_max_length)
+      if (((size_t)iterator->_arg + size - (size_t)iterator->_rtheader) >
+          (size_t)iterator->_max_length)
         return -EINVAL;
 
-      oui = (*iterator->_arg << 16) | (*(iterator->_arg + 1) << 8) |
-            *(iterator->_arg + 2);
-      subns = *(iterator->_arg + 3);
+      oui = (iterator->_arg[0] << 16) | (iterator->_arg[1] << 8) |
+            iterator->_arg[2];
+      subns = iterator->_arg[3];
 
       find_ns(iterator, oui, subns);
-
       vnslen = get_unaligned_le16(iterator->_arg + 4);
       iterator->_next_ns_data = iterator->_arg + size + vnslen;
       if (!iterator->current_namespace)
@@ -483,11 +383,10 @@ int ieee80211_radiotap_iterator_next(
      * max_length on the last arg, never exceeding it.
      */
 
-    if ((unsigned long)iterator->_arg - (unsigned long)iterator->_rtheader >
-        (unsigned long)iterator->_max_length)
+    if (((size_t)iterator->_arg - (size_t)iterator->_rtheader) >
+        (size_t)iterator->_max_length)
       return -EINVAL;
 
-    /* these special ones are valid in each bitmap word */
     switch (iterator->_arg_index % 32) {
     case IEEE80211_RADIOTAP_VENDOR_NAMESPACE:
       iterator->_reset_on_ext = 1;
@@ -536,274 +435,100 @@ int ieee80211_radiotap_iterator_next(
 }
 
 u16 GetSequence(const u8 *packet) {
-  // 假设Sequence Control位于从第22个字节开始的位置，占两个字节
   u16 seqCtrl = (u16)(packet[22]) | (u16)(packet[23] << 8);
-  // 序列号为seqCtrl的高12位（从0号位开始计数）
   u16 seqNum = (seqCtrl >> 4) & 0x0FFF;
   return seqNum;
 }
+
 u8 MRateToHwRate(u8 rate) {
   u8 ret = DESC_RATE1M;
-
   switch (rate) {
-  case MGN_1M:
-    ret = DESC_RATE1M;
-    break;
-  case MGN_2M:
-    ret = DESC_RATE2M;
-    break;
-  case MGN_5_5M:
-    ret = DESC_RATE5_5M;
-    break;
-  case MGN_11M:
-    ret = DESC_RATE11M;
-    break;
-  case MGN_6M:
-    ret = DESC_RATE6M;
-    break;
-  case MGN_9M:
-    ret = DESC_RATE9M;
-    break;
-  case MGN_12M:
-    ret = DESC_RATE12M;
-    break;
-  case MGN_18M:
-    ret = DESC_RATE18M;
-    break;
-  case MGN_24M:
-    ret = DESC_RATE24M;
-    break;
-  case MGN_36M:
-    ret = DESC_RATE36M;
-    break;
-  case MGN_48M:
-    ret = DESC_RATE48M;
-    break;
-  case MGN_54M:
-    ret = DESC_RATE54M;
-    break;
-
-  case MGN_MCS0:
-    ret = DESC_RATEMCS0;
-    break;
-  case MGN_MCS1:
-    ret = DESC_RATEMCS1;
-    break;
-  case MGN_MCS2:
-    ret = DESC_RATEMCS2;
-    break;
-  case MGN_MCS3:
-    ret = DESC_RATEMCS3;
-    break;
-  case MGN_MCS4:
-    ret = DESC_RATEMCS4;
-    break;
-  case MGN_MCS5:
-    ret = DESC_RATEMCS5;
-    break;
-  case MGN_MCS6:
-    ret = DESC_RATEMCS6;
-    break;
-  case MGN_MCS7:
-    ret = DESC_RATEMCS7;
-    break;
-  case MGN_MCS8:
-    ret = DESC_RATEMCS8;
-    break;
-  case MGN_MCS9:
-    ret = DESC_RATEMCS9;
-    break;
-  case MGN_MCS10:
-    ret = DESC_RATEMCS10;
-    break;
-  case MGN_MCS11:
-    ret = DESC_RATEMCS11;
-    break;
-  case MGN_MCS12:
-    ret = DESC_RATEMCS12;
-    break;
-  case MGN_MCS13:
-    ret = DESC_RATEMCS13;
-    break;
-  case MGN_MCS14:
-    ret = DESC_RATEMCS14;
-    break;
-  case MGN_MCS15:
-    ret = DESC_RATEMCS15;
-    break;
-  case MGN_MCS16:
-    ret = DESC_RATEMCS16;
-    break;
-  case MGN_MCS17:
-    ret = DESC_RATEMCS17;
-    break;
-  case MGN_MCS18:
-    ret = DESC_RATEMCS18;
-    break;
-  case MGN_MCS19:
-    ret = DESC_RATEMCS19;
-    break;
-  case MGN_MCS20:
-    ret = DESC_RATEMCS20;
-    break;
-  case MGN_MCS21:
-    ret = DESC_RATEMCS21;
-    break;
-  case MGN_MCS22:
-    ret = DESC_RATEMCS22;
-    break;
-  case MGN_MCS23:
-    ret = DESC_RATEMCS23;
-    break;
-  case MGN_MCS24:
-    ret = DESC_RATEMCS24;
-    break;
-  case MGN_MCS25:
-    ret = DESC_RATEMCS25;
-    break;
-  case MGN_MCS26:
-    ret = DESC_RATEMCS26;
-    break;
-  case MGN_MCS27:
-    ret = DESC_RATEMCS27;
-    break;
-  case MGN_MCS28:
-    ret = DESC_RATEMCS28;
-    break;
-  case MGN_MCS29:
-    ret = DESC_RATEMCS29;
-    break;
-  case MGN_MCS30:
-    ret = DESC_RATEMCS30;
-    break;
-  case MGN_MCS31:
-    ret = DESC_RATEMCS31;
-    break;
-
-  case MGN_VHT1SS_MCS0:
-    ret = DESC_RATEVHTSS1MCS0;
-    break;
-  case MGN_VHT1SS_MCS1:
-    ret = DESC_RATEVHTSS1MCS1;
-    break;
-  case MGN_VHT1SS_MCS2:
-    ret = DESC_RATEVHTSS1MCS2;
-    break;
-  case MGN_VHT1SS_MCS3:
-    ret = DESC_RATEVHTSS1MCS3;
-    break;
-  case MGN_VHT1SS_MCS4:
-    ret = DESC_RATEVHTSS1MCS4;
-    break;
-  case MGN_VHT1SS_MCS5:
-    ret = DESC_RATEVHTSS1MCS5;
-    break;
-  case MGN_VHT1SS_MCS6:
-    ret = DESC_RATEVHTSS1MCS6;
-    break;
-  case MGN_VHT1SS_MCS7:
-    ret = DESC_RATEVHTSS1MCS7;
-    break;
-  case MGN_VHT1SS_MCS8:
-    ret = DESC_RATEVHTSS1MCS8;
-    break;
-  case MGN_VHT1SS_MCS9:
-    ret = DESC_RATEVHTSS1MCS9;
-    break;
-  case MGN_VHT2SS_MCS0:
-    ret = DESC_RATEVHTSS2MCS0;
-    break;
-  case MGN_VHT2SS_MCS1:
-    ret = DESC_RATEVHTSS2MCS1;
-    break;
-  case MGN_VHT2SS_MCS2:
-    ret = DESC_RATEVHTSS2MCS2;
-    break;
-  case MGN_VHT2SS_MCS3:
-    ret = DESC_RATEVHTSS2MCS3;
-    break;
-  case MGN_VHT2SS_MCS4:
-    ret = DESC_RATEVHTSS2MCS4;
-    break;
-  case MGN_VHT2SS_MCS5:
-    ret = DESC_RATEVHTSS2MCS5;
-    break;
-  case MGN_VHT2SS_MCS6:
-    ret = DESC_RATEVHTSS2MCS6;
-    break;
-  case MGN_VHT2SS_MCS7:
-    ret = DESC_RATEVHTSS2MCS7;
-    break;
-  case MGN_VHT2SS_MCS8:
-    ret = DESC_RATEVHTSS2MCS8;
-    break;
-  case MGN_VHT2SS_MCS9:
-    ret = DESC_RATEVHTSS2MCS9;
-    break;
-  case MGN_VHT3SS_MCS0:
-    ret = DESC_RATEVHTSS3MCS0;
-    break;
-  case MGN_VHT3SS_MCS1:
-    ret = DESC_RATEVHTSS3MCS1;
-    break;
-  case MGN_VHT3SS_MCS2:
-    ret = DESC_RATEVHTSS3MCS2;
-    break;
-  case MGN_VHT3SS_MCS3:
-    ret = DESC_RATEVHTSS3MCS3;
-    break;
-  case MGN_VHT3SS_MCS4:
-    ret = DESC_RATEVHTSS3MCS4;
-    break;
-  case MGN_VHT3SS_MCS5:
-    ret = DESC_RATEVHTSS3MCS5;
-    break;
-  case MGN_VHT3SS_MCS6:
-    ret = DESC_RATEVHTSS3MCS6;
-    break;
-  case MGN_VHT3SS_MCS7:
-    ret = DESC_RATEVHTSS3MCS7;
-    break;
-  case MGN_VHT3SS_MCS8:
-    ret = DESC_RATEVHTSS3MCS8;
-    break;
-  case MGN_VHT3SS_MCS9:
-    ret = DESC_RATEVHTSS3MCS9;
-    break;
-  case MGN_VHT4SS_MCS0:
-    ret = DESC_RATEVHTSS4MCS0;
-    break;
-  case MGN_VHT4SS_MCS1:
-    ret = DESC_RATEVHTSS4MCS1;
-    break;
-  case MGN_VHT4SS_MCS2:
-    ret = DESC_RATEVHTSS4MCS2;
-    break;
-  case MGN_VHT4SS_MCS3:
-    ret = DESC_RATEVHTSS4MCS3;
-    break;
-  case MGN_VHT4SS_MCS4:
-    ret = DESC_RATEVHTSS4MCS4;
-    break;
-  case MGN_VHT4SS_MCS5:
-    ret = DESC_RATEVHTSS4MCS5;
-    break;
-  case MGN_VHT4SS_MCS6:
-    ret = DESC_RATEVHTSS4MCS6;
-    break;
-  case MGN_VHT4SS_MCS7:
-    ret = DESC_RATEVHTSS4MCS7;
-    break;
-  case MGN_VHT4SS_MCS8:
-    ret = DESC_RATEVHTSS4MCS8;
-    break;
-  case MGN_VHT4SS_MCS9:
-    ret = DESC_RATEVHTSS4MCS9;
-    break;
-  default:
-    break;
+  case MGN_1M: ret = DESC_RATE1M; break;
+  case MGN_2M: ret = DESC_RATE2M; break;
+  case MGN_5_5M: ret = DESC_RATE5_5M; break;
+  case MGN_11M: ret = DESC_RATE11M; break;
+  case MGN_6M: ret = DESC_RATE6M; break;
+  case MGN_9M: ret = DESC_RATE9M; break;
+  case MGN_12M: ret = DESC_RATE12M; break;
+  case MGN_18M: ret = DESC_RATE18M; break;
+  case MGN_24M: ret = DESC_RATE24M; break;
+  case MGN_36M: ret = DESC_RATE36M; break;
+  case MGN_48M: ret = DESC_RATE48M; break;
+  case MGN_54M: ret = DESC_RATE54M; break;
+  case MGN_MCS0: ret = DESC_RATEMCS0; break;
+  case MGN_MCS1: ret = DESC_RATEMCS1; break;
+  case MGN_MCS2: ret = DESC_RATEMCS2; break;
+  case MGN_MCS3: ret = DESC_RATEMCS3; break;
+  case MGN_MCS4: ret = DESC_RATEMCS4; break;
+  case MGN_MCS5: ret = DESC_RATEMCS5; break;
+  case MGN_MCS6: ret = DESC_RATEMCS6; break;
+  case MGN_MCS7: ret = DESC_RATEMCS7; break;
+  case MGN_MCS8: ret = DESC_RATEMCS8; break;
+  case MGN_MCS9: ret = DESC_RATEMCS9; break;
+  case MGN_MCS10: ret = DESC_RATEMCS10; break;
+  case MGN_MCS11: ret = DESC_RATEMCS11; break;
+  case MGN_MCS12: ret = DESC_RATEMCS12; break;
+  case MGN_MCS13: ret = DESC_RATEMCS13; break;
+  case MGN_MCS14: ret = DESC_RATEMCS14; break;
+  case MGN_MCS15: ret = DESC_RATEMCS15; break;
+  case MGN_MCS16: ret = DESC_RATEMCS16; break;
+  case MGN_MCS17: ret = DESC_RATEMCS17; break;
+  case MGN_MCS18: ret = DESC_RATEMCS18; break;
+  case MGN_MCS19: ret = DESC_RATEMCS19; break;
+  case MGN_MCS20: ret = DESC_RATEMCS20; break;
+  case MGN_MCS21: ret = DESC_RATEMCS21; break;
+  case MGN_MCS22: ret = DESC_RATEMCS22; break;
+  case MGN_MCS23: ret = DESC_RATEMCS23; break;
+  case MGN_MCS24: ret = DESC_RATEMCS24; break;
+  case MGN_MCS25: ret = DESC_RATEMCS25; break;
+  case MGN_MCS26: ret = DESC_RATEMCS26; break;
+  case MGN_MCS27: ret = DESC_RATEMCS27; break;
+  case MGN_MCS28: ret = DESC_RATEMCS28; break;
+  case MGN_MCS29: ret = DESC_RATEMCS29; break;
+  case MGN_MCS30: ret = DESC_RATEMCS30; break;
+  case MGN_MCS31: ret = DESC_RATEMCS31; break;
+  case MGN_VHT1SS_MCS0: ret = DESC_RATEVHTSS1MCS0; break;
+  case MGN_VHT1SS_MCS1: ret = DESC_RATEVHTSS1MCS1; break;
+  case MGN_VHT1SS_MCS2: ret = DESC_RATEVHTSS1MCS2; break;
+  case MGN_VHT1SS_MCS3: ret = DESC_RATEVHTSS1MCS3; break;
+  case MGN_VHT1SS_MCS4: ret = DESC_RATEVHTSS1MCS4; break;
+  case MGN_VHT1SS_MCS5: ret = DESC_RATEVHTSS1MCS5; break;
+  case MGN_VHT1SS_MCS6: ret = DESC_RATEVHTSS1MCS6; break;
+  case MGN_VHT1SS_MCS7: ret = DESC_RATEVHTSS1MCS7; break;
+  case MGN_VHT1SS_MCS8: ret = DESC_RATEVHTSS1MCS8; break;
+  case MGN_VHT1SS_MCS9: ret = DESC_RATEVHTSS1MCS9; break;
+  case MGN_VHT2SS_MCS0: ret = DESC_RATEVHTSS2MCS0; break;
+  case MGN_VHT2SS_MCS1: ret = DESC_RATEVHTSS2MCS1; break;
+  case MGN_VHT2SS_MCS2: ret = DESC_RATEVHTSS2MCS2; break;
+  case MGN_VHT2SS_MCS3: ret = DESC_RATEVHTSS2MCS3; break;
+  case MGN_VHT2SS_MCS4: ret = DESC_RATEVHTSS2MCS4; break;
+  case MGN_VHT2SS_MCS5: ret = DESC_RATEVHTSS2MCS5; break;
+  case MGN_VHT2SS_MCS6: ret = DESC_RATEVHTSS2MCS6; break;
+  case MGN_VHT2SS_MCS7: ret = DESC_RATEVHTSS2MCS7; break;
+  case MGN_VHT2SS_MCS8: ret = DESC_RATEVHTSS2MCS8; break;
+  case MGN_VHT2SS_MCS9: ret = DESC_RATEVHTSS2MCS9; break;
+  case MGN_VHT3SS_MCS0: ret = DESC_RATEVHTSS3MCS0; break;
+  case MGN_VHT3SS_MCS1: ret = DESC_RATEVHTSS3MCS1; break;
+  case MGN_VHT3SS_MCS2: ret = DESC_RATEVHTSS3MCS2; break;
+  case MGN_VHT3SS_MCS3: ret = DESC_RATEVHTSS3MCS3; break;
+  case MGN_VHT3SS_MCS4: ret = DESC_RATEVHTSS3MCS4; break;
+  case MGN_VHT3SS_MCS5: ret = DESC_RATEVHTSS3MCS5; break;
+  case MGN_VHT3SS_MCS6: ret = DESC_RATEVHTSS3MCS6; break;
+  case MGN_VHT3SS_MCS7: ret = DESC_RATEVHTSS3MCS7; break;
+  case MGN_VHT3SS_MCS8: ret = DESC_RATEVHTSS3MCS8; break;
+  case MGN_VHT3SS_MCS9: ret = DESC_RATEVHTSS3MCS9; break;
+  case MGN_VHT4SS_MCS0: ret = DESC_RATEVHTSS4MCS0; break;
+  case MGN_VHT4SS_MCS1: ret = DESC_RATEVHTSS4MCS1; break;
+  case MGN_VHT4SS_MCS2: ret = DESC_RATEVHTSS4MCS2; break;
+  case MGN_VHT4SS_MCS3: ret = DESC_RATEVHTSS4MCS3; break;
+  case MGN_VHT4SS_MCS4: ret = DESC_RATEVHTSS4MCS4; break;
+  case MGN_VHT4SS_MCS5: ret = DESC_RATEVHTSS4MCS5; break;
+  case MGN_VHT4SS_MCS6: ret = DESC_RATEVHTSS4MCS6; break;
+  case MGN_VHT4SS_MCS7: ret = DESC_RATEVHTSS4MCS7; break;
+  case MGN_VHT4SS_MCS8: ret = DESC_RATEVHTSS4MCS8; break;
+  case MGN_VHT4SS_MCS9: ret = DESC_RATEVHTSS4MCS9; break;
+  default: break;
   }
-
   return ret;
 }
 
@@ -820,14 +545,16 @@ int parse_radiotap() {
   u8 fixed_rate = MGN_1M, sgi = 0, bwidth = 0, ldpc = 0, stbc = 0;
   u16 txflags = 0;
 
+  /* This packet is only 13 bytes long.
+     We add an explicit cast to silence the warning. */
   uint8_t pkt[] = {
       0x00, 0x00, 0x0d, 0x00, 0x00, 0x80, 0x08,
       0x00, 0x08, 0x00, 0x37, 0x00, 0x01,
   };
   struct ieee80211_radiotap_header *rtap_hdr;
-  rtap_hdr = (struct ieee80211_radiotap_header *)pkt;
+  rtap_hdr = (struct ieee80211_radiotap_header *)(void *)pkt;
   struct ieee80211_radiotap_iterator iterator;
-  ret = ieee80211_radiotap_iterator_init(&iterator, pkt, 0x0d, NULL);
+  ret = ieee80211_radiotap_iterator_init(&iterator, rtap_hdr, 0x0d, NULL);
   while (!ret) {
     ret = ieee80211_radiotap_iterator_next(&iterator);
 
@@ -906,6 +633,6 @@ int parse_radiotap() {
   }
 
   printf("fixed rate:%d\n", fixed_rate);
-  printf("sgi =%d,bandwdith=%d,ldpc=%d,stbc=%d\n", sgi, bwidth, ldpc, stbc);
+  printf("sgi =%d, bandwdith=%d, ldpc=%d, stbc=%d\n", sgi, bwidth, ldpc, stbc);
   return 1;
 }

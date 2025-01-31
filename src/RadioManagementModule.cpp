@@ -2,6 +2,7 @@
 #include "Hal8812PhyReg.h"
 #include "registry_priv.h"
 
+#include <chrono>
 #include <map>
 #include <thread>
 #include <vector>

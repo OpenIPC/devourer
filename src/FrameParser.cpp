@@ -118,8 +118,9 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
       ret.push_back({pattrib, pbuf.subspan(pattrib.shift_sz +
                                                pattrib.drvinfo_sz + RXDESC_SIZE,
                                            pattrib.pkt_len)});
-      // pre_recv_entry(precvframe, pattrib.physt ? pbuf.Slice(RXDESC_OFFSET) :
-      // null);
+
+      ret.back().RxAtrib.rssi[0] = pbuf[RXDESC_SIZE];
+      ret.back().RxAtrib.rssi[1] = pbuf[RXDESC_SIZE + 1];
     } else {
       /* pkt_rpt_type == TX_REPORT1-CCX, TX_REPORT2-TX RTP,HIS_REPORT-USB HISR
        * RTP */
@@ -148,4 +149,57 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
   //_logger->info("{} received in frame", ret.size());
 
   return ret;
+}
+
+void rtl8812a_cal_txdesc_chksum(uint8_t *ptxdesc) {
+  u16 *usPtr;
+  u32 count;
+  u32 index;
+  u16 checksum = 0;
+
+  usPtr = (u16 *)ptxdesc;
+
+  /* checksum is always calculated by first 32 bytes, */
+  /* and it doesn't depend on TX DESC length. */
+  /* Thomas,Lucas@SD4,20130515 */
+  count = 16;
+
+  /* Clear first */
+  SET_TX_DESC_TX_DESC_CHECKSUM_8812(ptxdesc, 0);
+
+  for (index = 0; index < count; index++)
+    checksum = checksum ^ le16_to_cpu(*(usPtr + index));
+
+  SET_TX_DESC_TX_DESC_CHECKSUM_8812(ptxdesc, checksum);
+}
+
+int rtw_action_frame_parse(const u8 *frame, u32 frame_len, u8 *category,
+                           u8 *action) {
+  /*const u8 *frame_body = frame + sizeof(struct rtw_ieee80211_hdr_3addr);
+  u16 fc;
+  u8 c;
+  u8 a = ACT_PUBLIC_MAX;
+
+  fc = le16_to_cpu(((struct rtw_ieee80211_hdr_3addr *)frame)->frame_ctl);
+
+  if ((fc & (RTW_IEEE80211_FCTL_FTYPE | RTW_IEEE80211_FCTL_STYPE))
+      != (RTW_IEEE80211_FTYPE_MGMT | RTW_IEEE80211_STYPE_ACTION)
+     )
+          return _FALSE;
+
+  c = frame_body[0];
+
+  switch (c) {
+  case RTW_WLAN_CATEGORY_P2P: // vendor-specific
+          break;
+  default:
+          a = frame_body[1];
+  }
+
+  if (category)
+          *category = c;
+  if (action)
+          *action = a;
+*/
+  return _TRUE;
 }

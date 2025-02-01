@@ -2,6 +2,7 @@
 #define RADIOMANAGEMENTMODULE_H
 
 #include <cstdint>
+#include <vector>
 
 #include "EepromManager.h"
 #include "RfPath.h"
@@ -148,6 +149,7 @@ class RadioManagementModule {
   uint8_t _cur40MhzPrimeSc;
   uint8_t _cur80MhzPrimeSc;
   uint8_t _currentCenterFrequencyIndex;
+  uint8_t power = 16;
 
 public:
   RadioManagementModule(RtlUsbAdapter device,
@@ -163,6 +165,7 @@ public:
   void rtw_hal_set_chnl_bw(uint8_t channel, ChannelWidth_t Bandwidth,
                            uint8_t Offset40, uint8_t Offset80);
   void PHY_SwitchWirelessBand8812(BandType Band);
+  void SetTxPower(uint8_t p);
 
 private:
   void rtw_hal_set_msr(uint8_t net_type);

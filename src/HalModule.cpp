@@ -7,6 +7,7 @@
 #include "rtl8812a_hal.h"
 #include "rtl8812a_spec.h"
 
+#include <chrono>
 #include <memory>
 #include <thread>
 

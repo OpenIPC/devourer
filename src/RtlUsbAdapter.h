@@ -4,6 +4,7 @@
 #include <iostream>
 
 #include <libusb.h>
+#include <thread>
 
 #include "FrameParser.h"
 #include "drv_types.h"
@@ -45,28 +46,22 @@ public:
   uint8_t OutEpNumber;
   uint8_t rxagg_usb_size;
   uint8_t rxagg_usb_timeout;
-
+  bool send_packet(uint8_t* packet, size_t length);
   std::vector<Packet> infinite_read();
   uint8_t efuse_OneByteRead(uint16_t addr, uint8_t *data);
   void phy_set_bb_reg(uint16_t regAddr, uint32_t bitMask, uint32_t data);
 
   template <typename T> T rtw_read(uint16_t reg_num) {
     T data = 0;
-
-    int res = libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5, reg_num,
+    if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5, reg_num,
                                 0, (uint8_t *)&data, sizeof(T),
-                                USB_TIMEOUT);
-    if (res == sizeof(T)) {
+                                USB_TIMEOUT) == sizeof(T)) {
       return data;
     }
 
-    _logger->error("rtw_read({:x}), sizeof(T) = {}", reg_num, sizeof(T));
-
-    if (res < 0) {
-      _logger->error("libusb error code: {}", res);
-    }
-
+    _logger->error("rtw_read({:04x}), sizeof(T) = {}", reg_num, sizeof(T));
     throw std::ios_base::failure("rtw_read");
+    return 0;
   }
 
   template <typename T> bool rtw_write(uint16_t reg_num, T value) {

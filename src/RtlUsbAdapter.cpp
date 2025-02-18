@@ -324,7 +324,7 @@ void transfer_callback(struct libusb_transfer *transfer) {
   Logger *_logger = (Logger *)(transfer->user_data);
   if (transfer->status == LIBUSB_TRANSFER_COMPLETED &&
       transfer->actual_length == transfer->length) {
-    _logger->info("Packet {} sent successfully, length: {}", _logger,
+    _logger->debug("Packet {} sent successfully, length: {}", _logger,
                   transfer->length);
   } else {
     _logger->error("Failed to send packet {}, status: {}, actual length: {}",
@@ -349,7 +349,7 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double, std::milli> elapsed = end - start;
   if (rc == LIBUSB_SUCCESS) {
-    _logger->info("Packet sent successfully, length: {},used time {}ms", length,
+    _logger->debug("Packet sent successfully, length: {},used time {}ms", length,
                   elapsed.count());
     return true;
   } else {

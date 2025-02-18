@@ -74,8 +74,10 @@ class Logger {
 public:
     template<typename... Args>
     void debug(format_string_t<Args...> fmt, Args &&...args) {
+#if !defined(NDEBUG)
         std::string txt = format(fmt, args...);
         DEVOURER_LOGD(txt.c_str());
+#endif
     }
 
     template<typename... Args>

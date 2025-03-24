@@ -6,7 +6,64 @@
 
 #include "basic_types.h"
 #include "rtl8812a_recv.h"
+
+#include <string.h>
 #include <vector>
+
+struct _phy_status_rpt_8812 {
+  /*	DWORD 0*/
+  u8 gain_trsw[2];    /*path-A and path-B {TRSW, gain[6:0] }*/
+  u8 chl_num_LSB;     /*channel number[7:0]*/
+  u8 chl_num_MSB : 2; /*channel number[9:8]*/
+  u8 sub_chnl : 4;    /*sub-channel location[3:0]*/
+  u8 r_RFMOD : 2;     /*RF mode[1:0]*/
+
+  /*	DWORD 1*/
+  u8 pwdb_all;  /*CCK signal quality / OFDM pwdb all*/
+  s8 cfosho[2]; /*DW1 byte 1 DW1 byte2	CCK AGC report and CCK_BB_Power /
+                   OFDM path-A and path-B short CFO*/
+  /*this should be checked again because the definition of 8812 and 8814
+   * is different*/
+  /*	u8			r_cck_rx_enable_pathc:2;					cck rx enable pathc[1:0]*/
+  /*	u8			cck_rx_path:4;							cck rx path[3:0]*/
+  u8 resvd_0 : 6;
+  u8 bt_RF_ch_MSB : 2; /*8812A:2'b0			8814A: bt rf channel keep[7:6]*/
+  u8 ant_div_sw_a : 1; /*8812A: ant_div_sw_a    8814A: 1'b0*/
+  u8 ant_div_sw_b : 1; /*8812A: ant_div_sw_b    8814A: 1'b0*/
+  u8 bt_RF_ch_LSB : 6; /*8812A: 6'b0                   8814A: bt rf
+                          channel keep[5:0]*/
+  s8 cfotail[2];       /*DW2 byte 1 DW2 byte 2	path-A and path-B CFO tail*/
+  u8 PCTS_MSK_RPT_0;   /*PCTS mask report[7:0]*/
+  u8 PCTS_MSK_RPT_1;   /*PCTS mask report[15:8]*/
+
+  /*	DWORD 3*/
+  s8 rxevm[2]; /*DW3 byte 1 DW3 byte 2	stream 1 and stream 2 RX EVM*/
+  s8 rxsnr[2]; /*DW3 byte 3 DW4 byte 0	path-A and path-B RX SNR*/
+
+  /*	DWORD 4*/
+  u8 PCTS_MSK_RPT_2;     /*PCTS mask report[23:16]*/
+  u8 PCTS_MSK_RPT_3 : 6; /*PCTS mask report[29:24]*/
+  u8 pcts_rpt_valid : 1; /*pcts_rpt_valid*/
+  u8 resvd_1 : 1;        /*1'b0*/
+  s8 rxevm_cd[2];        /*DW 4 byte 3 DW5 byte 0  8812A: 16'b0	8814A: stream 3
+                            and stream 4 RX EVM*/
+
+  /*	DWORD 5*/
+  u8 csi_current[2];  /*DW5 byte 1 DW5 byte 2	8812A: stream 1 and 2 CSI
+                         8814A:  path-C and path-D RX SNR*/
+  u8 gain_trsw_cd[2]; /*DW5 byte 3 DW6 byte 0	path-C and path-D {TRSW,
+                         gain[6:0] }*/
+
+  /*	DWORD 6*/
+  s8 sigevm;             /*signal field EVM*/
+  u8 antidx_antc : 3;    /*8812A: 3'b0		8814A: antidx_antc[2:0]*/
+  u8 antidx_antd : 3;    /*8812A: 3'b0		8814A: antidx_antd[2:0]*/
+  u8 dpdt_ctrl_keep : 1; /*8812A: 1'b0		8814A: dpdt_ctrl_keep*/
+  u8 GNT_BT_keep : 1;    /*8812A: 1'b0		8814A: GNT_BT_keep*/
+  u8 antidx_anta : 3;    /*antidx_anta[2:0]*/
+  u8 antidx_antb : 3;    /*antidx_antb[2:0]*/
+  u8 hw_antsw_occur : 2; /*1'b0*/
+};
 
 FrameParser::FrameParser(Logger_t logger) : _logger{logger} {}
 
@@ -119,8 +176,12 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
                                                pattrib.drvinfo_sz + RXDESC_SIZE,
                                            pattrib.pkt_len)});
 
-      ret.back().RxAtrib.rssi[0] = pbuf[RXDESC_SIZE];
-      ret.back().RxAtrib.rssi[1] = pbuf[RXDESC_SIZE + 1];
+      struct _phy_status_rpt_8812 driver_data;
+      memcpy(static_cast<void*>(&driver_data), pbuf.data() + RXDESC_SIZE, sizeof(driver_data));
+      ret.back().RxAtrib.rssi[0] = driver_data.gain_trsw[0];
+      ret.back().RxAtrib.rssi[1] = driver_data.gain_trsw[1];
+      ret.back().RxAtrib.snr[0] = driver_data.rxsnr[0];
+      ret.back().RxAtrib.snr[1] = driver_data.rxsnr[1];
     } else {
       /* pkt_rpt_type == TX_REPORT1-CCX, TX_REPORT2-TX RTP,HIS_REPORT-USB HISR
        * RTP */

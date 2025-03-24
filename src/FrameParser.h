@@ -291,6 +291,7 @@ struct rx_pkt_attrib
     uint8_t ldpc;
     uint8_t sgi;
     uint8_t rssi[2];
+    int8_t snr[2];
     RX_PACKET_TYPE pkt_rpt_type;
 };
 

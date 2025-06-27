@@ -36,7 +36,7 @@ bool Rtl8812aDevice::send_packet(const uint8_t *packet, size_t length) {
 
   usb_frame_length = real_packet_length + TXDESC_SIZE;
 
-  _logger->info("radiotap length is {}, 80211 length is {}, usb_frame length "
+  _logger->debug("radiotap length is {}, 80211 length is {}, usb_frame length "
                 "should be {}",
                 radiotap_length, real_packet_length, usb_frame_length);
 
@@ -121,7 +121,7 @@ bool Rtl8812aDevice::send_packet(const uint8_t *packet, size_t length) {
 
   ptxdesc = (struct tx_desc *)usb_frame;
 
-  _logger->info("fixed rate:{}, sgi:{}, radiotap_bwidth:{}, ldpc:{}, stbc:{}",
+  _logger->debug("fixed rate:{}, sgi:{}, radiotap_bwidth:{}, ldpc:{}, stbc:{}",
                 (int)fixed_rate, (int)sgi, (int)bwidth, (int)ldpc, (int)stbc);
 
   uint8_t BWSettingOfDesc;
@@ -132,7 +132,7 @@ bool Rtl8812aDevice::send_packet(const uint8_t *packet, size_t length) {
   } else {
     BWSettingOfDesc = 0;
   }
-  _logger->info("TX DESC BW decision: _channel.ChannelWidth(RX)={}, radiotap_bwidth(TX)={}, BWSettingOfDesc(TX_DESC)={}",
+  _logger->debug("TX DESC BW decision: _channel.ChannelWidth(RX)={}, radiotap_bwidth(TX)={}, BWSettingOfDesc(TX_DESC)={}",
                 (int)_channel.ChannelWidth, (int)bwidth, (int)BWSettingOfDesc);
 
   SET_TX_DESC_DATA_BW_8812(usb_frame, BWSettingOfDesc);
@@ -187,7 +187,7 @@ bool Rtl8812aDevice::send_packet(const uint8_t *packet, size_t length) {
   SET_TX_DESC_DATA_STBC_8812(usb_frame, stbc & 3);
 
   rtl8812a_cal_txdesc_chksum(usb_frame);
-  _logger->info("tx desc formed");
+  _logger->debug("tx desc formed");
 #ifdef DEBUG
   for (size_t i = 0; i < usb_frame_length; ++i) {
     std::cout << "0x" << std::hex << std::setw(2) << std::setfill('0')
@@ -201,7 +201,7 @@ bool Rtl8812aDevice::send_packet(const uint8_t *packet, size_t length) {
 #endif
   uint8_t *addr = usb_frame + TXDESC_SIZE;
   memcpy(addr, packet + radiotap_length, real_packet_length);
-  _logger->info("packet formed");
+  _logger->debug("packet formed");
 #ifdef DEBUG
   for (size_t i = 0; i < usb_frame_length; ++i) {
     std::cout << "0x" << std::hex << std::setw(2) << std::setfill('0')

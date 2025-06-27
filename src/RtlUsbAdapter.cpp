@@ -316,8 +316,8 @@ void RtlUsbAdapter::GetChipOutEP8812() {
     break;
   }
 
-  _logger->info("OutEpQueueSel({}), OutEpNumber({})", OutEpQueueSel,
-                OutEpNumber);
+  _logger->info("OutEpQueueSel({}), OutEpNumber({})", (int)OutEpQueueSel,
+                (int)OutEpNumber);
 }
 
 void transfer_callback(struct libusb_transfer *transfer) {

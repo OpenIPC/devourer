@@ -495,19 +495,20 @@ void EepromManager::Hal_EfuseReadEFuse8812A(uint16_t _offset,
                 eFuse_Addr);
 }
 
-#define EEPROM_TX_PWR_INX_8812 0x10
+#define EEPROM_TX_PWR_INX_8812 0x20
 
 bool EepromManager::IsEfuseTxPowerInfoValid(uint8_t *efuseEepromData) {
-  // Just because single chip support
   uint16_t tx_index_offset = EEPROM_TX_PWR_INX_8812;
+  bool found= false;
   for (int index = 0; index < 11; index++) {
-    if (efuseEepromData[tx_index_offset + index] == 0xFF) {
-      return false;
+    if (efuseEepromData[tx_index_offset + index] != 0xFF) {
+      found = true;
     }
   }
 
-  return true;
+  return found;
 }
+
 
 void EepromManager::rtw_dump_cur_efuse() {
 #if 0

@@ -1,7 +1,7 @@
 #include "RtlUsbAdapter.h"
 
 #include <chrono>
-#if defined(__ANDROID__) || defined(_MSC_VER)
+#if defined(__ANDROID__) || defined(_MSC_VER) || defined(__APPLE__)
 #include <libusb.h>
 #else
 #include <libusb-1.0/libusb.h>

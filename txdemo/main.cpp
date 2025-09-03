@@ -10,7 +10,9 @@
   #define fork() (0)
   #define sleep(seconds) Sleep((seconds)*1000)
 #elif defined(__ANDROID__)
-  // On Android, include the libusb header as required.
+  #include <libusb.h>
+#elif defined(__APPLE__)
+  #include <unistd.h>
   #include <libusb.h>
 #else
   #include <libusb-1.0/libusb.h>

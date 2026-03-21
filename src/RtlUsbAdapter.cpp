@@ -56,7 +56,8 @@ $ lsusb -v -d 0bda:8812
 */
 
 std::vector<Packet> RtlUsbAdapter::infinite_read() {
-  uint8_t buffer[65000] = {0};
+  static constexpr int BUF_SIZE = 16 * 1024;
+  uint8_t buffer[BUF_SIZE] = {};
   int actual_length = 0;
   int rc;
 

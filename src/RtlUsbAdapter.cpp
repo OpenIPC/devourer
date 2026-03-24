@@ -21,13 +21,13 @@ RtlUsbAdapter::RtlUsbAdapter(libusb_device_handle *dev_handle, Logger_t logger)
 
   if (usbSpeed > LIBUSB_SPEED_HIGH) // USB 3.0
   {
-    rxagg_usb_size = 0x7;
-    rxagg_usb_timeout = 0x1a;
+      rxagg_usb_size = 0x3; // 16KB
+      rxagg_usb_timeout = 0x01;
   } else {
-    /* the setting to reduce RX FIFO overflow on USB2.0 and increase rx
+      /* the setting to reduce RX FIFO overflow on USB2.0 and increase rx
      * throughput */
-    rxagg_usb_size = 0x5;
-    rxagg_usb_timeout = 0x20;
+      rxagg_usb_size = 0x1; // 8KB
+      rxagg_usb_timeout = 0x01;
   }
 
   GetChipOutEP8812();
@@ -56,7 +56,8 @@ $ lsusb -v -d 0bda:8812
 */
 
 std::vector<Packet> RtlUsbAdapter::infinite_read() {
-  uint8_t buffer[65000] = {0};
+  static constexpr int BUF_SIZE = 16 * 1024;
+  uint8_t buffer[BUF_SIZE] = {};
   int actual_length = 0;
   int rc;
 

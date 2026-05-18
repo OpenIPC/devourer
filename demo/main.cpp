@@ -8,7 +8,15 @@
 #include "WiFiDriver.h"
 
 #define USB_VENDOR_ID 0x0bda
-#define USB_PRODUCT_ID 0x8812
+
+/* Known USB product IDs for RTL8812AU (2T2R) and RTL8811AU (1T1R, 1x1 cut of
+ * the same Jaguar silicon). Both are driven by this library. */
+static constexpr uint16_t kRealtekProductIds[] = {
+    0x8812, /* RTL8812AU (also seen on some 8811AU boards) */
+    0x0811, /* RTL8811AU */
+    0xa811, /* RTL8811AU */
+    0xb811, /* RTL8811AU/8821AU variants */
+};
 
 static void packetProcessor(const Packet &packet) {}
 
@@ -25,11 +33,17 @@ int main() {
 
   libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_DEBUG);
 
-  libusb_device_handle *dev_handle =
-      libusb_open_device_with_vid_pid(ctx, USB_VENDOR_ID, USB_PRODUCT_ID);
+  libusb_device_handle *dev_handle = nullptr;
+  for (uint16_t pid : kRealtekProductIds) {
+    dev_handle = libusb_open_device_with_vid_pid(ctx, USB_VENDOR_ID, pid);
+    if (dev_handle != NULL) {
+      logger->info("Opened Realtek device {:04x}:{:04x}", USB_VENDOR_ID, pid);
+      break;
+    }
+  }
   if (dev_handle == NULL) {
-    logger->error("Cannot find device {:04x}:{:04x}", USB_VENDOR_ID,
-                  USB_PRODUCT_ID);
+    logger->error("Cannot find any supported Realtek device under VID {:04x}",
+                  USB_VENDOR_ID);
     libusb_exit(ctx);
     return 1;
   }

@@ -47,11 +47,15 @@ void EepromManager::read_chip_version_8812a(RtlUsbAdapter device) {
       .ICType = CHIP_8812,
       .ChipType = (value32 & RTL_ID) ? TEST_CHIP : NORMAL_CHIP,
       .VendorType = (value32 & VENDOR_ID) ? CHIP_VENDOR_UMC : CHIP_VENDOR_TSMC,
-      .RFType = RF_TYPE_2T2R, /* RF_2T2R; */
+      /* SYS_CFG bit 27 (RF_TYPE_ID): set on 1T1R cuts (RTL8811AU),
+       * clear on 2T2R cuts (RTL8812AU). */
+      .RFType = (value32 & RF_TYPE_ID) ? RF_TYPE_1T1R : RF_TYPE_2T2R,
   };
 
+  /* Manual override: force 1T1R even when SYS_CFG reports 2T2R
+   * (useful if EFUSE/strap is mis-burnt on a 1T1R board). */
   if (registry_priv::special_rf_path == 1) {
-    version_id.RFType = RF_TYPE_1T1R; /* RF_1T1R; */
+    version_id.RFType = RF_TYPE_1T1R;
   }
 
   version_id.CUTVersion = (HAL_CUT_VERSION_E)(((value32 & CHIP_VER_RTL_MASK) >>

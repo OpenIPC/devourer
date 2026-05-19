@@ -224,12 +224,20 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   return resp;
 }
 
+//===================================================================================
+//===================================================================================
+// Starts monitor mode and dispatches parsed packets until should_stop is set.
 void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
-                          SelectedChannel channel) {
+                           SelectedChannel channel,
+                           std::function<void()> started) {
   _packetProcessor = packetProcessor;
 
   StartWithMonitorMode(channel);
   SetMonitorChannel(channel);
+  if (started)
+  {
+    started();
+  }
 
   _logger->info("Listening air...");
   while (!should_stop) {

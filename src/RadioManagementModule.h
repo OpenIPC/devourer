@@ -161,6 +161,8 @@ public:
                           ChannelWidth_t bwmode);
   void phy_set_rf_reg(RfPath eRFPath, uint16_t RegAddr, uint32_t BitMask,
                       uint32_t Data);
+  uint32_t phy_query_rf_reg(RfPath eRFPath, uint32_t RegAddr,
+                            uint32_t BitMask);
   void init_hw_mlme_ext(SelectedChannel pmlmeext);
   void rtw_hal_set_chnl_bw(uint8_t channel, ChannelWidth_t Bandwidth,
                            uint8_t Offset40, uint8_t Offset80);

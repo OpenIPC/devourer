@@ -1,8 +1,8 @@
-#include "Rtl8812aDevice.h"
+#include "RtlJaguarDevice.h"
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
 
-Rtl8812aDevice::Rtl8812aDevice(RtlUsbAdapter device, Logger_t logger)
+RtlJaguarDevice::RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger)
     : _device{device},
       _eepromManager{std::make_shared<EepromManager>(device, logger)},
       _radioManagement{std::make_shared<RadioManagementModule>(
@@ -10,13 +10,13 @@ Rtl8812aDevice::Rtl8812aDevice(RtlUsbAdapter device, Logger_t logger)
       _halModule{device, _eepromManager, _radioManagement, logger},
       _logger{logger} {}
 
-void Rtl8812aDevice::InitWrite(SelectedChannel channel) {
+void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
   StartWithMonitorMode(channel);
   SetMonitorChannel(channel);
   _logger->info("In Monitor Mode");
 }
 
-bool Rtl8812aDevice::send_packet(const uint8_t *packet, size_t length) {
+bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   struct tx_desc *ptxdesc;
   bool resp;
   uint8_t *usb_frame;
@@ -219,7 +219,7 @@ bool Rtl8812aDevice::send_packet(const uint8_t *packet, size_t length) {
   return resp;
 }
 
-void Rtl8812aDevice::Init(Action_ParsedRadioPacket packetProcessor,
+void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
                           SelectedChannel channel) {
   _packetProcessor = packetProcessor;
 
@@ -240,12 +240,12 @@ void Rtl8812aDevice::Init(Action_ParsedRadioPacket packetProcessor,
 #endif
 }
 
-void Rtl8812aDevice::SetMonitorChannel(SelectedChannel channel) {
+void RtlJaguarDevice::SetMonitorChannel(SelectedChannel channel) {
   _radioManagement->set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                        channel.ChannelWidth);
 }
 
-void Rtl8812aDevice::StartWithMonitorMode(SelectedChannel selectedChannel) {
+void RtlJaguarDevice::StartWithMonitorMode(SelectedChannel selectedChannel) {
   if (NetDevOpen(selectedChannel) == false) {
     throw std::ios_base::failure("StartWithMonitorMode failed NetDevOpen");
   }
@@ -253,11 +253,11 @@ void Rtl8812aDevice::StartWithMonitorMode(SelectedChannel selectedChannel) {
   _radioManagement->SetMonitorMode();
 }
 
-void Rtl8812aDevice::SetTxPower(uint8_t power) {
+void RtlJaguarDevice::SetTxPower(uint8_t power) {
   _radioManagement->SetTxPower(power);
 }
 
-bool Rtl8812aDevice::NetDevOpen(SelectedChannel selectedChannel) {
+bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {
   auto status = _halModule.rtw_hal_init(selectedChannel);
   if (status == false) {
     return false;

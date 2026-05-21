@@ -17,6 +17,14 @@ using namespace std::chrono_literals;
 
 RtlUsbAdapter::RtlUsbAdapter(libusb_device_handle *dev_handle, Logger_t logger)
     : _dev_handle{dev_handle}, _logger{logger} {
+  libusb_device_descriptor desc{};
+  if (libusb_get_device_descriptor(libusb_get_device(_dev_handle), &desc) ==
+      LIBUSB_SUCCESS) {
+    _idVendor = desc.idVendor;
+    _idProduct = desc.idProduct;
+    _logger->info("USB device {:04x}:{:04x}", _idVendor, _idProduct);
+  }
+
   InitDvObj();
 
   if (usbSpeed > LIBUSB_SPEED_HIGH) // USB 3.0
@@ -358,6 +366,29 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
     libusb_free_transfer(transfer);
     return false;
   }
+}
+
+int RtlUsbAdapter::bulk_send_sync(uint8_t *packet, size_t length,
+                                  int timeout_ms) {
+  return bulk_send_sync_ep(0x02, packet, length, timeout_ms);
+}
+
+int RtlUsbAdapter::bulk_send_sync_ep(uint8_t ep, uint8_t *packet, size_t length,
+                                     int timeout_ms) {
+  /* No libusb_clear_halt here. rtw88_8814au's usbmon shows the first bulk
+   * OUT is preceded by 0 CLEAR_FEATUREs; later CLEAR_FEATUREs happen during
+   * normal TX-queue operation, not the per-send hot path. Resetting the
+   * data toggle bit corrupts the chip's state machine. */
+  int actual = 0;
+  int rc = libusb_bulk_transfer(_dev_handle, ep, packet,
+                                static_cast<int>(length), &actual, timeout_ms);
+  if (rc != LIBUSB_SUCCESS) {
+    _logger->error("bulk_send EP {} FAIL rc={} got {}/{}", (int)ep, rc,
+                   actual, (int)length);
+    return rc;
+  }
+  _logger->info("bulk_send EP {} OK {} bytes", (int)ep, actual);
+  return actual;
 }
 
 void RtlUsbAdapter::phy_set_bb_reg(uint16_t regAddr, uint32_t bitMask,

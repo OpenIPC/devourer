@@ -237,7 +237,20 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     phy_PostSetBwMode8812();
     _setChannelBw = false;
   }
-  PHY_SetTxPowerLevel8812(_currentChannel);
+  /* For 8814AU specifically, TX power setup iterates 4 RF paths ×
+   * ~8 rate sections, totaling ~370 PHY_SetTxPowerIndex calls and
+   * roughly 20–30 seconds of control transfers. The values are only
+   * consumed by the TX path, so monitor-mode RX gains nothing from
+   * doing the work. Set DEVOURER_FORCE_TXPWR=1 to enable the full
+   * loop (required if you actually want to TX from an 8814 build —
+   * TX path is not yet end-to-end validated). */
+  if (_eepromManager->version_id.ICType != CHIP_8814A ||
+      std::getenv("DEVOURER_FORCE_TXPWR")) {
+    PHY_SetTxPowerLevel8812(_currentChannel);
+  } else {
+    _logger->info("8814A: skipping TX power setup (monitor-mode RX-only; "
+                  "set DEVOURER_FORCE_TXPWR=1 to enable)");
+  }
 
   _needIQK = false;
 }
@@ -276,6 +289,16 @@ struct BbRegisterDefinition {
   uint16_t RfLSSIReadBackPi;
 };
 
+/* RTL8814AU path C / D BB register offsets — from hal/Hal8814PhyReg.h.
+ * Inlined here to avoid pulling the full 8814 PHY register header (which has
+ * extensive #define overlap with Hal8812PhyReg.h on shared Jaguar symbols). */
+constexpr uint32_t rC_LSSIWrite_8814A = 0x1890;
+constexpr uint32_t rD_LSSIWrite_8814A = 0x1A90;
+constexpr uint16_t rC_SIRead_8814A = 0xd88;
+constexpr uint16_t rD_SIRead_8814A = 0xdC8;
+constexpr uint16_t rC_PIRead_8814A = 0xd84;
+constexpr uint16_t rD_PIRead_8814A = 0xdC4;
+
 std::map<RfPath, BbRegisterDefinition> PhyRegDef = {
     {RfPath::RF_PATH_A,
      {
@@ -290,6 +313,20 @@ std::map<RfPath, BbRegisterDefinition> PhyRegDef = {
          .RfHSSIPara2 = rHSSIRead_Jaguar,
          .RfLSSIReadBack = rB_SIRead_Jaguar,
          .RfLSSIReadBackPi = rB_PIRead_Jaguar,
+     }},
+    {RfPath::RF_PATH_C,
+     {
+         .Rf3WireOffset = rC_LSSIWrite_8814A,
+         .RfHSSIPara2 = rHSSIRead_Jaguar,
+         .RfLSSIReadBack = rC_SIRead_8814A,
+         .RfLSSIReadBackPi = rC_PIRead_8814A,
+     }},
+    {RfPath::RF_PATH_D,
+     {
+         .Rf3WireOffset = rD_LSSIWrite_8814A,
+         .RfHSSIPara2 = rHSSIRead_Jaguar,
+         .RfLSSIReadBack = rD_SIRead_8814A,
+         .RfLSSIReadBackPi = rD_PIRead_8814A,
      }}};
 
 uint32_t RadioManagementModule::phy_query_bb_reg(uint16_t regAddr,
@@ -311,6 +348,16 @@ uint32_t RadioManagementModule::PHY_QueryBBReg8812(uint16_t regAddr,
   /* RTW_INFO("BBR MASK=0x%x Addr[0x%x]=0x%x\n", BitMask, RegAddr,
    * OriginalValue); */
   return ReturnValue;
+}
+
+uint32_t RadioManagementModule::phy_query_rf_reg(RfPath eRFPath,
+                                                 uint32_t RegAddr,
+                                                 uint32_t BitMask) {
+  uint32_t val = phy_RFSerialRead(eRFPath, RegAddr);
+  if (BitMask != 0 && BitMask != 0xFFFFFFFFu) {
+    val = (val & BitMask) >> PHY_CalculateBitShift(BitMask);
+  }
+  return val;
 }
 
 uint32_t RadioManagementModule::phy_RFSerialRead(RfPath eRFPath,
@@ -439,17 +486,13 @@ void RadioManagementModule::PHY_SwitchWirelessBand8812(BandType Band) {
 
     uint16_t count = 0;
     uint16_t reg41A = _device.rtw_read16(REG_TXPKT_EMPTY);
-    /* RTW_INFO("Reg41A value %d", reg41A); */
     reg41A &= 0x30;
     while ((reg41A != 0x30) && (count < 50)) {
       using namespace std::chrono_literals;
       std::this_thread::sleep_for(50ms);
-      /* RTW_INFO("Delay 50us\n"); */
-
       reg41A = _device.rtw_read16(REG_TXPKT_EMPTY);
       reg41A &= 0x30;
       count++;
-      /* RTW_INFO("Reg41A value %d", reg41A); */
     }
 
     if (count != 0) {
@@ -882,9 +925,9 @@ void RadioManagementModule::phy_PostSetBwMode8812() {
     _device.phy_set_bb_reg(rADC_Buf_Clk_Jaguar, BIT30,
                            0); /* 0x8c4[30] = 1'b0 */
 
-    if (_eepromManager->rf_type == RF_TYPE_2T2R) {
+    if (_eepromManager->numTotalRfPath >= 2) {
       _device.phy_set_bb_reg(rL1PeakTH_Jaguar, 0x03C00000,
-                             7); /* 2R 0x848[25:22] = 0x7 */
+                             7); /* multi-path 0x848[25:22] = 0x7 */
     } else {
       _device.phy_set_bb_reg(rL1PeakTH_Jaguar, 0x03C00000,
                              8); /* 1R 0x848[25:22] = 0x8 */
@@ -904,7 +947,7 @@ void RadioManagementModule::phy_PostSetBwMode8812() {
     if ((reg_837 & BIT2) != 0)
       L1pkVal = 6;
     else {
-      if (_eepromManager->rf_type == RF_TYPE_2T2R) {
+      if (_eepromManager->numTotalRfPath >= 2) {
         L1pkVal = 7;
       } else {
         L1pkVal = 8;
@@ -932,7 +975,7 @@ void RadioManagementModule::phy_PostSetBwMode8812() {
     if ((reg_837 & BIT2) != 0)
       L1pkVal = 5;
     else {
-      if (_eepromManager->rf_type == RF_TYPE_2T2R) {
+      if (_eepromManager->numTotalRfPath >= 2) {
         L1pkVal = 6;
       } else {
         L1pkVal = 7;
@@ -997,29 +1040,29 @@ void RadioManagementModule::phy_SetRegBW_8812(ChannelWidth_t CurrentBW) {
 void RadioManagementModule::PHY_RF6052SetBandwidth8812(
     ChannelWidth_t Bandwidth) /* 20M or 40M */
 {
+  /* RF_CHNLBW_Jaguar[11:10] encodes the per-path channel bandwidth:
+   *   0b11 = 20 MHz, 0b01 = 40 MHz, 0b00 = 80 MHz.
+   * Apply to every populated RF path (4 paths on 8814AU, 2 on 8812AU). */
+  uint32_t bw_bits;
   switch (Bandwidth) {
   case CHANNEL_WIDTH_20:
-    /* RTW_INFO("PHY_RF6052SetBandwidth8812(), set 20MHz\n"); */
-    phy_set_rf_reg(RfPath::RF_PATH_A, RF_CHNLBW_Jaguar, BIT11 | BIT10, 3);
-    phy_set_rf_reg(RfPath::RF_PATH_B, RF_CHNLBW_Jaguar, BIT11 | BIT10, 3);
+    bw_bits = 3;
     break;
-
   case CHANNEL_WIDTH_40:
-    /* RTW_INFO("PHY_RF6052SetBandwidth8812(), set 40MHz\n"); */
-    phy_set_rf_reg(RfPath::RF_PATH_A, RF_CHNLBW_Jaguar, BIT11 | BIT10, 1);
-    phy_set_rf_reg(RfPath::RF_PATH_B, RF_CHNLBW_Jaguar, BIT11 | BIT10, 1);
+    bw_bits = 1;
     break;
-
   case CHANNEL_WIDTH_80:
-    /* RTW_INFO("PHY_RF6052SetBandwidth8812(), set 80MHz\n"); */
-    phy_set_rf_reg(RfPath::RF_PATH_A, RF_CHNLBW_Jaguar, BIT11 | BIT10, 0);
-    phy_set_rf_reg(RfPath::RF_PATH_B, RF_CHNLBW_Jaguar, BIT11 | BIT10, 0);
+    bw_bits = 0;
     break;
-
   default:
     _logger->error("PHY_RF6052SetBandwidth8812(): unknown Bandwidth: {}",
                    (int)Bandwidth);
-    break;
+    return;
+  }
+
+  for (uint8_t p = 0; p < _eepromManager->numTotalRfPath; ++p) {
+    phy_set_rf_reg(static_cast<RfPath>(p), RF_CHNLBW_Jaguar, BIT11 | BIT10,
+                   bw_bits);
   }
 }
 
@@ -1186,6 +1229,14 @@ void RadioManagementModule::PHY_SetTxPowerIndex_8812A(uint32_t powerIndex,
                                                       MGN_RATE rate) {
 
   _logger->debug("PHY_SetTxPowerIndex {} {} {}", powerIndex, (int)rfPath, rate);
+  /* The per-rate register table below only encodes paths A/B (8812-family).
+   * 8814AU paths C/D use a different per-path register layout (the rTxAGC_C_
+   * and rTxAGC_D_ symbol family in Hal8814PhyReg.h) not yet wired here. For
+   * now, silently skip C/D so the bring-up trace isn't flooded with errors;
+   * follow-up Phase-4 work will extend the table. */
+  if (static_cast<uint8_t>(rfPath) >= RF_PATH_C) {
+    return;
+  }
   if (powerIndex % 2 == 1)
     powerIndex -= 1;
   if (rfPath == RF_PATH_A) {

@@ -4,6 +4,7 @@
 #include "EepromManager.h"
 extern "C"{
 #include "Hal8812PwrSeq.h"
+#include "Hal8814PwrSeq.h"
 }
 #include "RadioManagementModule.h"
 #include "RtlUsbAdapter.h"
@@ -60,11 +61,16 @@ private:
   bool rtl8812au_hal_init();
   bool InitPowerOn();
   bool InitLLTTable8812A(uint8_t txpktbuf_bndy);
+  bool InitLLTTable8814A();
   bool _LLTWrite_8812A(uint32_t address, uint32_t data);
   void _InitHardwareDropIncorrectBulkOut_8812A();
   bool HalPwrSeqCmdParsing(WLAN_PWR_CFG *PwrSeqCmd);
   void PHY_MACConfig8812();
   void odm_read_and_config_mp_8812a_mac_reg();
+  void odm_read_and_config_mp_8814a_mac_reg();
+  void odm_read_and_config_mp_8814a_phy_reg();
+  void odm_read_and_config_mp_8814a_agc_tab();
+  bool phy_BB8814_Config_ParaFile();
   void odm_write_1byte(uint16_t reg_addr, uint8_t data);
   bool check_positive(int32_t condition1, int32_t condition2,
                       int32_t condition4);
@@ -77,6 +83,11 @@ private:
                                            uint16_t mgtQ, uint16_t hiQ);
   void _InitNormalChipThreeOutEpPriority_8812AUsb();
   void _InitNormalChipFourOutEpPriority_8812AUsb();
+  void _InitNormalChipTwoOutEpPriority_8814AUsb();
+  void _InitNormalChipThreeOutEpPriority_8814AUsb();
+  void _InitNormalChipRegPriority_8814AUsb(uint16_t beQ, uint16_t bkQ,
+                                           uint16_t viQ, uint16_t voQ,
+                                           uint16_t mgtQ, uint16_t hiQ);
   void init_hi_queue_config_8812a_usb();
   void _InitPageBoundary_8812AUsb();
   void _InitTransferPageSize_8812AUsb();
@@ -109,6 +120,11 @@ private:
 
   void PHY_RF6052_Config_8812();
   void phy_RF6052_Config_ParaFile_8812();
+  void phy_RF6052_Config_ParaFile_8814();
+  void odm_read_and_config_mp_8814a_radioa();
+  void odm_read_and_config_mp_8814a_radiob();
+  void odm_read_and_config_mp_8814a_radioc();
+  void odm_read_and_config_mp_8814a_radiod();
   void odm_config_rf_with_header_file(odm_rf_config_type config_type,
                                       RfPath e_rf_path);
   void odm_read_and_config_mp_8812a_radioa();

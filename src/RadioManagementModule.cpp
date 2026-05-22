@@ -2,6 +2,10 @@
 #include "Hal8812PhyReg.h"
 #include "registry_priv.h"
 
+extern "C" {
+#include "ieee80211_radiotap.h"
+}
+
 #include <chrono>
 #include <map>
 #include <thread>
@@ -237,19 +241,18 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     phy_PostSetBwMode8812();
     _setChannelBw = false;
   }
-  /* For 8814AU specifically, TX power setup iterates 4 RF paths ×
-   * ~8 rate sections, totaling ~370 PHY_SetTxPowerIndex calls and
-   * roughly 20–30 seconds of control transfers. The values are only
-   * consumed by the TX path, so monitor-mode RX gains nothing from
-   * doing the work. Set DEVOURER_FORCE_TXPWR=1 to enable the full
-   * loop (required if you actually want to TX from an 8814 build —
-   * TX path is not yet end-to-end validated). */
-  if (_eepromManager->version_id.ICType != CHIP_8814A ||
-      std::getenv("DEVOURER_FORCE_TXPWR")) {
-    PHY_SetTxPowerLevel8812(_currentChannel);
+  /* 8814A uses a packed single-DWord write to BB 0x1998 per (path,rate)
+   * instead of the 8812's per-rate per-byte register fanout (see the
+   * CHIP_8814A branch at the top of PHY_SetTxPowerIndex_8812A). The
+   * earlier "skip TX power on 8814" workaround was a symptom of the
+   * 8812 register layout being wrong for 8814 — every write hit the
+   * wrong bits and the chip's BB stalled on each one. Setting
+   * DEVOURER_SKIP_TXPWR=1 keeps the old skip behaviour as an escape
+   * hatch (e.g. for RX-only experiments). */
+  if (std::getenv("DEVOURER_SKIP_TXPWR")) {
+    _logger->info("DEVOURER_SKIP_TXPWR=1 — skipping TX power setup");
   } else {
-    _logger->info("8814A: skipping TX power setup (monitor-mode RX-only; "
-                  "set DEVOURER_FORCE_TXPWR=1 to enable)");
+    PHY_SetTxPowerLevel8812(_currentChannel);
   }
 
   _needIQK = false;
@@ -1145,6 +1148,15 @@ void RadioManagementModule::phy_set_tx_power_level_by_path(uint8_t channel,
     phy_set_tx_power_index_by_rate_section(path, channel,
                                            RATE_SECTION::VHT_2SSMCS0_2SSMCS9);
   }
+  /* 8814A 3-stream rate sections — must be programmed so the chip's TXAGC
+   * table is fully populated even though the USB-2 link can't sustain 3-SS
+   * data rates. Upstream PHY_SetTxPowerLevel8814 iterates all sections. */
+  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+    phy_set_tx_power_index_by_rate_section(path, channel,
+                                           RATE_SECTION::HT_MCS16_MCS23);
+    phy_set_tx_power_index_by_rate_section(path, channel,
+                                           RATE_SECTION::VHT_3SSMCS0_3SSMCS9);
+  }
 }
 
 const static std::vector<MGN_RATE> mgn_rates_cck = {
@@ -1229,11 +1241,38 @@ void RadioManagementModule::PHY_SetTxPowerIndex_8812A(uint32_t powerIndex,
                                                       MGN_RATE rate) {
 
   _logger->debug("PHY_SetTxPowerIndex {} {} {}", powerIndex, (int)rfPath, rate);
+
+  /* 8814A: per-rate per-path power index is programmed via a single packed
+   * BB-register write at 0x1998. Port of PHY_SetTxPowerIndex_8814A from
+   * upstream hal/rtl8814a/rtl8814a_phycfg.c:743.
+   *
+   *   txagc_table_wd[31:24] = PowerIndex
+   *   txagc_table_wd[15:8]  = RFPath
+   *   txagc_table_wd[7:0]   = MRateToHwRate(Rate)
+   *   txagc_table_wd        |= 0x00801000  (TXAGC table-write enable + addr)
+   *
+   * The 8812 per-rate fanout below uses register addresses (rTxAGC_A_CCK_*
+   * etc.) that don't exist on 8814 — using it on 8814 scribbles random bits
+   * and stalls the BB; that's what the earlier "skip TX power for monitor
+   * mode" workaround was masking. */
+  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+    uint32_t txagc_table_wd =
+        0x00801000u |
+        (static_cast<uint32_t>(rfPath) << 8) |
+        static_cast<uint32_t>(MRateToHwRate(static_cast<uint8_t>(rate))) |
+        (powerIndex << 24);
+    _device.phy_set_bb_reg(0x1998, bMaskDWord, txagc_table_wd);
+    if (rate == MGN_1M) {
+      /* Upstream comment: "first time to turn on the txagc table". */
+      _device.phy_set_bb_reg(0x1998, bMaskDWord, txagc_table_wd);
+    }
+    return;
+  }
+
   /* The per-rate register table below only encodes paths A/B (8812-family).
    * 8814AU paths C/D use a different per-path register layout (the rTxAGC_C_
-   * and rTxAGC_D_ symbol family in Hal8814PhyReg.h) not yet wired here. For
-   * now, silently skip C/D so the bring-up trace isn't flooded with errors;
-   * follow-up Phase-4 work will extend the table. */
+   * and rTxAGC_D_ symbol family in Hal8814PhyReg.h) — that's handled by the
+   * CHIP_8814A branch above. */
   if (static_cast<uint8_t>(rfPath) >= RF_PATH_C) {
     return;
   }

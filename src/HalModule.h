@@ -88,6 +88,8 @@ private:
   void _InitNormalChipRegPriority_8814AUsb(uint16_t beQ, uint16_t bkQ,
                                            uint16_t viQ, uint16_t voQ,
                                            uint16_t mgtQ, uint16_t hiQ);
+  void _InitQueueReservedPage_8814AUsb();
+  void _InitPageBoundary_8814AUsb();
   void init_hi_queue_config_8812a_usb();
   void _InitPageBoundary_8812AUsb();
   void _InitTransferPageSize_8812AUsb();

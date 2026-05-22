@@ -9,6 +9,40 @@
 #include "rtl8812a_hal.h"
 #include "rtl8812a_spec.h"
 
+/* 8814AU register + page constants extracted from upstream
+ * hal/rtl8814a_spec.h and hal/rtl8814a_hal.h. Inlined here because the
+ * upstream headers pull in kernel-only deps (drv_conf.h, hal_data.h). */
+namespace rtl8814a {
+constexpr uint16_t REG_FIFOPAGE_INFO_1_8814A   = 0x0230;
+constexpr uint16_t REG_FIFOPAGE_INFO_2_8814A   = 0x0234;
+constexpr uint16_t REG_FIFOPAGE_INFO_3_8814A   = 0x0238;
+constexpr uint16_t REG_FIFOPAGE_INFO_4_8814A   = 0x023C;
+constexpr uint16_t REG_FIFOPAGE_INFO_5_8814A   = 0x0240;
+constexpr uint16_t REG_RQPN_CTRL_2_8814A       = 0x022C;
+constexpr uint16_t REG_FIFOPAGE_CTRL_2_8814A   = 0x0204;
+constexpr uint16_t REG_TXPKTBUF_BCNQ_BDNY_8814A  = 0x0424;
+constexpr uint16_t REG_TXPKTBUF_BCNQ1_BDNY_8814A = 0x0426; /* spec calls it +2 */
+constexpr uint16_t REG_MGQ_PGBNDY_8814A        = 0x047A;
+constexpr uint16_t REG_RXFF_PTR_8814A          = 0x011C;
+
+constexpr uint32_t HPQ_PGNUM_8814A = 0x20; /* 32 pages per queue (USB) */
+constexpr uint32_t LPQ_PGNUM_8814A = 0x20;
+constexpr uint32_t NPQ_PGNUM_8814A = 0x20;
+constexpr uint32_t EPQ_PGNUM_8814A = 0x20;
+constexpr uint32_t BCNQ_PAGE_NUM_8814 = 0x08;
+constexpr uint32_t WOWLAN_PAGE_NUM_8814 = 0x00;
+constexpr uint32_t TXPKT_PGNUM_8814A =
+    2048 - BCNQ_PAGE_NUM_8814 - WOWLAN_PAGE_NUM_8814;
+constexpr uint32_t PUB_PGNUM_8814A = TXPKT_PGNUM_8814A - HPQ_PGNUM_8814A -
+                                     NPQ_PGNUM_8814A - LPQ_PGNUM_8814A -
+                                     EPQ_PGNUM_8814A;
+constexpr uint16_t TX_PAGE_BOUNDARY_8814A = TXPKT_PGNUM_8814A;
+constexpr uint16_t WMM_NORMAL_TX_PAGE_BOUNDARY_8814A = TXPKT_PGNUM_8814A + 1;
+
+constexpr uint32_t MAX_RX_DMA_BUFFER_SIZE_8814A = 0x5C00;
+constexpr uint16_t RX_DMA_BOUNDARY_8814A = MAX_RX_DMA_BUFFER_SIZE_8814A - 1;
+} // namespace rtl8814a
+
 #include <chrono>
 #include <memory>
 #include <thread>
@@ -108,11 +142,60 @@ bool HalModule::rtl8812au_hal_init() {
 
   PHY_MACConfig8812();
 
-  _InitQueueReservedPage_8812AUsb();
-  _InitTxBufferBoundary_8812AUsb();
-  _InitQueuePriority_8812AUsb();
-  _InitPageBoundary_8812AUsb();
-  _InitTransferPageSize_8812AUsb();
+  if (is_8814a) {
+    /* 8814AU has its own TX FIFO page allocation: 2048 total pages vs 8812's
+     * 256, set via 32-bit FIFOPAGE_INFO_{1..5} regs + 16-bit BCNQ/MGQ page
+     * boundaries. The 8812 path uses 8-bit REG_RQPN / REG_BCNQ_BDNY etc.
+     * which silently no-op on 8814 — that leaves HPQ with 0 pages, so MGT
+     * frames submitted via bulk OUT have nowhere to land and the chip never
+     * drains the EP (USB bulk OUT times out). */
+    _InitQueueReservedPage_8814AUsb();
+    /* TX buffer boundary is set inside _InitQueueReservedPage_8814AUsb. Skip
+     * _InitTxBufferBoundary_8812AUsb. */
+    _InitQueuePriority_8812AUsb(); /* dispatches on CHIP_8814A internally */
+    _InitPageBoundary_8814AUsb();
+    /* _InitTransferPageSize_8814AUsb is a no-op upstream. */
+
+    /* 8814AU auto-LLT trigger via 32-bit BIT16 of REG_AUTO_LLT_8814A (0x0208,
+     * aliased as REG_TDECTRL). The generic Realtek bit definition is
+     * BIT_AUTO_INIT_LLT = BIT(16) (see hal_com_reg.h). The upstream OOT
+     * code at rtl8814a_hal_init.c::InitLLTTable8814A writes BIT0 of an 8-bit
+     * read at 0x208 — that's a different bit entirely; empirically the
+     * trigger never fires (auto-LLT "completes in 0 polls" because BIT0
+     * was never set). Use the correct BIT(16) trigger as a 32-bit RMW.
+     * Without auto-LLT, the chip's TX FIFO page-count regs we just set are
+     * advertised but no free-page list is linked, so the chip's TX queues
+     * have nowhere to store inbound bulk-OUT frames and vendor-control
+     * transfers to OUT EPs time out forever. */
+    constexpr uint16_t REG_AUTO_LLT_8814A = 0x0208;
+    constexpr uint32_t AUTO_INIT_LLT_BIT   = 1u << 16; /* renamed: hal_com_reg.h's BIT_AUTO_INIT_LLT macro collides */
+    uint32_t llt = _device.rtw_read32(REG_AUTO_LLT_8814A);
+    _logger->info("8814A auto-LLT pre  REG_AUTO_LLT=0x{:08x}", llt);
+    _device.rtw_write32(REG_AUTO_LLT_8814A, llt | AUTO_INIT_LLT_BIT);
+    int polls = 0;
+    do {
+      llt = _device.rtw_read32(REG_AUTO_LLT_8814A);
+      if (!(llt & AUTO_INIT_LLT_BIT))
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      ++polls;
+    } while (polls < 200);
+    if (llt & AUTO_INIT_LLT_BIT) {
+      _logger->error("8814A auto-LLT did not complete (REG_AUTO_LLT=0x{:08x} "
+                     "after {} polls)",
+                     llt, polls);
+    } else {
+      _logger->info(
+          "8814A auto-LLT completed in {} polls (REG_AUTO_LLT=0x{:08x})", polls,
+          llt);
+    }
+  } else {
+    _InitQueueReservedPage_8812AUsb();
+    _InitTxBufferBoundary_8812AUsb();
+    _InitQueuePriority_8812AUsb();
+    _InitPageBoundary_8812AUsb();
+    _InitTransferPageSize_8812AUsb();
+  }
 
   // Get Rx PHY status in order to report RSSI and others.
   _InitDriverInfoSize_8812A(DRVINFO_SZ);
@@ -199,7 +282,19 @@ bool HalModule::rtl8812au_hal_init() {
 
   // HW SEQ CTRL
   // set 0x0 to 0xFF by tynli. Default enable HW SEQ NUM.
-  _device.rtw_write8(REG_HWSEQ_CTRL, 0xFF);
+  // On 8814 the chip rejects 8-bit access at offset 0x423 (byte 3 of
+  // FWHW_TXQ_CTRL@0x420) — the rtw_write8 at this address silently no-ops
+  // and rtw_read8 returns 0 regardless of the actual byte. Verified by the
+  // diag dump: rtw_read32(0x420) shows byte3=0x03 but rtw_read8(0x423)=0x00.
+  // Use a 32-bit aligned RMW so the chip's USB controller handles it as a
+  // word-sized access.
+  if (is_8814a) {
+    uint32_t txqctl = _device.rtw_read32(REG_FWHW_TXQ_CTRL);
+    txqctl = (txqctl & 0x00FFFFFFu) | (0xFFu << 24);
+    _device.rtw_write32(REG_FWHW_TXQ_CTRL, txqctl);
+  } else {
+    _device.rtw_write8(REG_HWSEQ_CTRL, 0xFF);
+  }
 
   // Disable BAR, suggested by Scott
   // 2010.04.09 add by hpfan
@@ -243,14 +338,62 @@ bool HalModule::rtl8812au_hal_init() {
    * (clearing DMA + protocol + scheduler) — verified via post-init pyusb
    * probe showing REG_CR=0xc0. And REG_RXFLTMAP2 read back as 0 instead
    * of the 0xFFFF we want for monitor-mode data-frame acceptance. Force
-   * the final state here so RX bulk IN actually moves frames. */
-  uint16_t cr_final = (uint16_t)(HCI_TXDMA_EN | HCI_RXDMA_EN | TXDMA_EN |
-                                 RXDMA_EN | PROTOCOL_EN | SCHEDULE_EN |
-                                 MACTXEN | MACRXEN);
+   * the final state here so RX bulk IN actually moves frames.
+   *
+   * 8814 hypothesis: firmware programs REG_CR after it boots and may set
+   * bits beyond our 0x00FF mask (ENSEC=BIT9, CALTMR_EN=BIT10 — both in
+   * the upstream _InitPowerOn_8814AU OR-mask, neither in our cr_final).
+   * Forcing 0x00FF on 8814 could clobber fw-set high bits that gate TX.
+   * Read current REG_CR first, then OR in our minimum-required bits
+   * instead of clobbering the whole word. */
+  uint16_t cr_observed = _device.rtw_read16(REG_CR);
+  uint16_t cr_min = (uint16_t)(HCI_TXDMA_EN | HCI_RXDMA_EN | TXDMA_EN |
+                               RXDMA_EN | PROTOCOL_EN | SCHEDULE_EN |
+                               MACTXEN | MACRXEN);
+  uint16_t cr_final = static_cast<uint16_t>(cr_observed | cr_min);
   _device.rtw_write16(REG_CR, cr_final);
   _device.rtw_write16(REG_RXFLTMAP2, 0xFFFF);
-  _logger->info("post-init final: REG_CR=0x{:04x} REG_RXFLTMAP2=0xFFFF",
-                cr_final);
+  _logger->info(
+      "post-init final: REG_CR observed=0x{:04x} written=0x{:04x} "
+      "REG_RXFLTMAP2=0xFFFF",
+      cr_observed, cr_final);
+
+  if (is_8814a) {
+    /* TX-validation diagnostic. Read back the registers that gate USB→TX
+     * dataflow to confirm what state the chip is actually in at the end of
+     * init. One log per register to dodge the Logger format helper's
+     * placeholder-overflow truncation. */
+    using namespace rtl8814a;
+    _logger->info("8814A TX-state CR = 0x{:04x}", _device.rtw_read16(REG_CR));
+    _logger->info("8814A TX-state TXPAUSE(0x522) = 0x{:02x}",
+                  _device.rtw_read8(0x0522));
+    _logger->info("8814A TX-state FWHW_TXQ_CTRL(0x420) = 0x{:08x}",
+                  _device.rtw_read32(0x0420));
+    _logger->info("8814A TX-state FIFOPAGE_CTRL_2 = 0x{:08x}",
+                  _device.rtw_read32(REG_FIFOPAGE_CTRL_2_8814A));
+    _logger->info("8814A TX-state MGQ_PGBNDY = 0x{:04x}",
+                  _device.rtw_read16(REG_MGQ_PGBNDY_8814A));
+    _logger->info("8814A TX-state FIFOPAGE_INFO_1(HPQ) = 0x{:08x}",
+                  _device.rtw_read32(REG_FIFOPAGE_INFO_1_8814A));
+    _logger->info("8814A TX-state FIFOPAGE_INFO_5(PUB) = 0x{:08x}",
+                  _device.rtw_read32(REG_FIFOPAGE_INFO_5_8814A));
+    _logger->info("8814A TX-state MCUFWDL = 0x{:08x}",
+                  _device.rtw_read32(0x0080));
+    _logger->info("8814A TX-state TXDMA_STATUS(0x210) = 0x{:08x}",
+                  _device.rtw_read32(0x0210));
+    _logger->info("8814A TX-state TXDMA_OFFSET_CHK(0x20C) = 0x{:08x}",
+                  _device.rtw_read32(0x020C));
+    /* 8-bit read of 0x423 is unreliable on 8814; surface both 8-bit and the
+     * byte-3 of the 32-bit FWHW_TXQ_CTRL word for comparison. */
+    _logger->info("8814A TX-state HWSEQ_CTRL(0x423,8bit) = 0x{:02x}",
+                  _device.rtw_read8(0x0423));
+    _logger->info("8814A TX-state HWSEQ_CTRL(byte3 of 0x420 32bit) = 0x{:02x}",
+                  (_device.rtw_read32(REG_FWHW_TXQ_CTRL) >> 24) & 0xFF);
+    _logger->info("8814A TX-state TCR(0x604) = 0x{:08x}",
+                  _device.rtw_read32(0x0604));
+    _logger->info("8814A TX-state RCR(0x608) = 0x{:08x}",
+                  _device.rtw_read32(0x0608));
+  }
 
   return true;
 }
@@ -1033,6 +1176,45 @@ void HalModule::init_hi_queue_config_8812a_usb() {
 
 void HalModule::_InitPageBoundary_8812AUsb() {
   _device.rtw_write16((REG_TRXFF_BNDY + 2), RX_DMA_BOUNDARY_8812);
+}
+
+void HalModule::_InitQueueReservedPage_8814AUsb() {
+  using namespace rtl8814a;
+  /* Port of upstream _InitQueueReservedPage_8814AUsb (hal/rtl8814a/usb/
+   * usb_halinit.c). 8814 uses 32-bit FIFOPAGE_INFO regs to set per-queue
+   * page counts and 16-bit boundary registers. The 8812 8-bit REG_RQPN /
+   * REG_BCNQ_BDNY equivalents don't exist on 8814, so reusing the 8812
+   * path leaves HPQ/NPQ/LPQ with zero pages and TX bulk OUT stalls. */
+  _device.rtw_write32(REG_FIFOPAGE_INFO_1_8814A, HPQ_PGNUM_8814A);
+  _device.rtw_write32(REG_FIFOPAGE_INFO_2_8814A, LPQ_PGNUM_8814A);
+  _device.rtw_write32(REG_FIFOPAGE_INFO_3_8814A, NPQ_PGNUM_8814A);
+  _device.rtw_write32(REG_FIFOPAGE_INFO_4_8814A, EPQ_PGNUM_8814A);
+  _device.rtw_write32(REG_FIFOPAGE_INFO_5_8814A, PUB_PGNUM_8814A);
+
+  _device.rtw_write32(REG_RQPN_CTRL_2_8814A, 0x80000000);
+
+  uint16_t txpktbuf_bndy = registry_priv::wifi_spec
+                               ? WMM_NORMAL_TX_PAGE_BOUNDARY_8814A
+                               : TX_PAGE_BOUNDARY_8814A;
+
+  _device.rtw_write16(REG_TXPKTBUF_BCNQ_BDNY_8814A, txpktbuf_bndy);
+  _device.rtw_write16(REG_TXPKTBUF_BCNQ1_BDNY_8814A, txpktbuf_bndy);
+  _device.rtw_write16(REG_MGQ_PGBNDY_8814A, txpktbuf_bndy);
+
+  /* Head page of BCNQ + BCNQ1 packets. */
+  _device.rtw_write16(REG_FIFOPAGE_CTRL_2_8814A, txpktbuf_bndy);
+  _device.rtw_write16(REG_FIFOPAGE_CTRL_2_8814A + 2, txpktbuf_bndy);
+
+  _logger->info(
+      "8814A queue reserved pages: HPQ/LPQ/NPQ/EPQ={:#x} PUB={:#x} bndy={:#x}",
+      HPQ_PGNUM_8814A, PUB_PGNUM_8814A, txpktbuf_bndy);
+}
+
+void HalModule::_InitPageBoundary_8814AUsb() {
+  using namespace rtl8814a;
+  /* Port of upstream _InitPageBoundary_8814AUsb. Single 16-bit write to
+   * REG_RXFF_PTR_8814A. The 8812 path writes REG_TRXFF_BNDY+2 instead. */
+  _device.rtw_write16(REG_RXFF_PTR_8814A, RX_DMA_BOUNDARY_8814A);
 }
 
 void HalModule::_InitTransferPageSize_8812AUsb() {

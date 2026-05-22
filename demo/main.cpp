@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 
 #include <libusb.h>
@@ -27,6 +28,22 @@ static void packetProcessor(const Packet &packet) {
   if (g_rx_count <= 10 || g_rx_count % 100 == 0) {
     printf("<devourer>RX pkt #%d (len=%zu)\n", g_rx_count, packet.Data.size());
     fflush(stdout);
+  }
+  /* TX-validation hook: detect frames whose SA matches the txdemo's hardcoded
+   * injected beacon (57:42:75:05:d6:00). When running this RX demo against
+   * one adapter while WiFiDriverTxDemo runs against another on the same
+   * channel, each hit confirms an injected frame made it over the air. */
+  if (packet.Data.size() >= 16) {
+    static const uint8_t kTxSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+    if (std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
+      static int hits = 0;
+      ++hits;
+      if (hits <= 10 || hits % 100 == 0) {
+        printf("<devourer-tx-hit>txdemo SA match: hits=%d total_rx=%d len=%zu\n",
+               hits, g_rx_count, packet.Data.size());
+        fflush(stdout);
+      }
+    }
   }
 }
 

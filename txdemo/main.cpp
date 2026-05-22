@@ -1,4 +1,5 @@
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -193,7 +194,7 @@ int main(int argc, char **argv) {
       printf("<devourer-tx>TX #%ld rc=%d\n", tx_count, rc);
       fflush(stdout);
     }
-    usleep(2000); /* 2 ms — ~500 fps, gentle on USB bulk EP */
+    std::this_thread::sleep_for(std::chrono::milliseconds(2)); /* ~500 fps, gentle on USB bulk EP */
   }
   rc = libusb_release_interface(handle, 0);
   assert(rc == 0);

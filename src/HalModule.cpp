@@ -29,7 +29,11 @@ constexpr uint32_t HPQ_PGNUM_8814A = 0x20; /* 32 pages per queue (USB) */
 constexpr uint32_t LPQ_PGNUM_8814A = 0x20;
 constexpr uint32_t NPQ_PGNUM_8814A = 0x20;
 constexpr uint32_t EPQ_PGNUM_8814A = 0x20;
-constexpr uint32_t BCNQ_PAGE_NUM_8814 = 0x08;
+/* BCNQ_PAGE_NUM_8814 is documented as 0x08 in upstream's rtl8814a_hal.h, but
+ * the aircrack-ng OOT driver running in our oracle VM shows boundary regs at
+ * 0x07F6 (= 2038), implying BCNQ reserves 10 pages, not 8. Use 0x0A to match
+ * the OOT post-init state. */
+constexpr uint32_t BCNQ_PAGE_NUM_8814 = 0x0A;
 constexpr uint32_t WOWLAN_PAGE_NUM_8814 = 0x00;
 constexpr uint32_t TXPKT_PGNUM_8814A =
     2048 - BCNQ_PAGE_NUM_8814 - WOWLAN_PAGE_NUM_8814;
@@ -315,12 +319,32 @@ bool HalModule::rtl8812au_hal_init() {
   /* enable Tx report. */
   _device.rtw_write8(REG_FWHW_TXQ_CTRL + 1, 0x0F);
 
-  /* Suggested by SD1 pisa. Added by tynli. 2011.10.21. */
-  _device.rtw_write8(REG_EARLY_MODE_CONTROL_8812 + 3,
-                     0x01); /* Pretx_en, for WEP/TKIP SEC */
+  if (is_8814a) {
+    /* Port of upstream _InitRetryFunction_8814A: set EN_AMPDU_RTY_NEW (bit 7
+     * of REG_FWHW_TXQ_CTRL byte 0) and REG_ACKTO = 0x80. Also clear BIT6 of
+     * byte 2 (EN_BCN_FUNCTION-within-TXQ_CTRL, not the BIT3 of REG_BCN_CTRL
+     * which is a separate per-port flag). OOT post-init shows
+     * REG_FWHW_TXQ_CTRL = 0x03310F80; we were at 0x03711F00 without these. */
+    uint8_t txqctl_b0 = _device.rtw_read8(REG_FWHW_TXQ_CTRL);
+    _device.rtw_write8(REG_FWHW_TXQ_CTRL, (uint8_t)(txqctl_b0 | 0x80 /* EN_AMPDU_RTY_NEW */));
+    uint8_t txqctl_b2 = _device.rtw_read8(REG_FWHW_TXQ_CTRL + 2);
+    _device.rtw_write8(REG_FWHW_TXQ_CTRL + 2, (uint8_t)(txqctl_b2 & ~0x40));
+    _device.rtw_write8(REG_ACKTO, 0x80);
+  }
 
-  /* tynli_test_tx_report. */
-  _device.rtw_write16(REG_TX_RPT_TIME, 0x3DF0);
+  /* Suggested by SD1 pisa. Added by tynli. 2011.10.21.
+   * Upstream rtl8814au's usb_halinit.c explicitly comments BOTH of these
+   * out for 8814 — the REG_EARLY_MODE_CONTROL_8812+3 = 0x01 write
+   * (Pretx_en for WEP/TKIP SEC) plus unconfigured security state may
+   * be holding TX frames in a "wait for encryption key" state on 8814.
+   * Gate to 8812-only. */
+  if (!is_8814a) {
+    _device.rtw_write8(REG_EARLY_MODE_CONTROL_8812 + 3,
+                       0x01); /* Pretx_en, for WEP/TKIP SEC */
+
+    /* tynli_test_tx_report. */
+    _device.rtw_write16(REG_TX_RPT_TIME, 0x3DF0);
+  }
 
   /* Reset USB mode switch setting */
   _device.rtw_write8(REG_SDIO_CTRL_8812, 0x0);
@@ -330,8 +354,12 @@ bool HalModule::rtl8812au_hal_init() {
 
   // TODO:
   ///* ack for xmit mgmt frames. */
-  _device.rtw_write32(REG_FWHW_TXQ_CTRL,
-                      _device.rtw_read32(REG_FWHW_TXQ_CTRL) | BIT12);
+  if (!is_8814a) {
+    /* OOT-driver register readback shows the 8814 doesn't set BIT12 (ack
+     * for xmit mgmt frames). Skip for 8814. */
+    _device.rtw_write32(REG_FWHW_TXQ_CTRL,
+                        _device.rtw_read32(REG_FWHW_TXQ_CTRL) | BIT12);
+  }
 
   /* Final safety re-write of MAC/RX enable bits. Some of the post-fwdl
    * init helpers can overwrite REG_CR back to only MACTXEN|MACRXEN
@@ -350,6 +378,20 @@ bool HalModule::rtl8812au_hal_init() {
   uint16_t cr_min = (uint16_t)(HCI_TXDMA_EN | HCI_RXDMA_EN | TXDMA_EN |
                                RXDMA_EN | PROTOCOL_EN | SCHEDULE_EN |
                                MACTXEN | MACRXEN);
+  if (is_8814a) {
+    /* OOT driver register dump shows REG_CR=0x06FF on a working 8814 init —
+     * ENSEC (BIT9) + CALTMR_EN (BIT10) are set in addition to the low byte.
+     * The upstream _InitPowerOn_8814AU OR-mask also includes both. Our
+     * earlier init skips InitPowerOn for 8814 (since fwdl does it via the
+     * RSVD-page path), so these high bits never get set. Add them here. */
+    cr_min |= ENSEC | CALTMR_EN;
+    /* OOT-driver readback shows REG_TXDMA_OFFSET_CHK = 0x0FFD0200 — bit 9
+     * (DROP_DATA_EN) is set. Our existing _InitHardwareDropIncorrectBulkOut
+     * runs pre-fwdl and gets cleared by the chip reset during fwdl. Re-apply
+     * here post-fwdl. */
+    uint32_t dma_chk = _device.rtw_read32(REG_TXDMA_OFFSET_CHK);
+    _device.rtw_write32(REG_TXDMA_OFFSET_CHK, dma_chk | DROP_DATA_EN);
+  }
   uint16_t cr_final = static_cast<uint16_t>(cr_observed | cr_min);
   _device.rtw_write16(REG_CR, cr_final);
   _device.rtw_write16(REG_RXFLTMAP2, 0xFFFF);
@@ -1185,11 +1227,22 @@ void HalModule::_InitQueueReservedPage_8814AUsb() {
    * page counts and 16-bit boundary registers. The 8812 8-bit REG_RQPN /
    * REG_BCNQ_BDNY equivalents don't exist on 8814, so reusing the 8812
    * path leaves HPQ/NPQ/LPQ with zero pages and TX bulk OUT stalls. */
-  _device.rtw_write32(REG_FIFOPAGE_INFO_1_8814A, HPQ_PGNUM_8814A);
-  _device.rtw_write32(REG_FIFOPAGE_INFO_2_8814A, LPQ_PGNUM_8814A);
-  _device.rtw_write32(REG_FIFOPAGE_INFO_3_8814A, NPQ_PGNUM_8814A);
-  _device.rtw_write32(REG_FIFOPAGE_INFO_4_8814A, EPQ_PGNUM_8814A);
-  _device.rtw_write32(REG_FIFOPAGE_INFO_5_8814A, PUB_PGNUM_8814A);
+  /* 8814 has dual MAC ports — these 32-bit FIFOPAGE_INFO regs carry the
+   * per-queue page count for port 0 in the low 16 bits and port 1 in the
+   * high 16 bits. Upstream rtl8814a_hal_init.c writes the raw page count
+   * (low half only), and the OOT-driver readback shows the chip mirrors it
+   * into the high half automatically — but on our path the high half stays
+   * at 0, so MAC port 1 has zero pages allocated. Write BOTH halves
+   * explicitly to match the OOT-driver post-init state (FIFOPAGE_INFO_1 =
+   * 0x00200020, FIFOPAGE_INFO_5 = 0x07760776). */
+  auto dup16 = [](uint32_t v) -> uint32_t {
+    return (v & 0xFFFF) | ((v & 0xFFFF) << 16);
+  };
+  _device.rtw_write32(REG_FIFOPAGE_INFO_1_8814A, dup16(HPQ_PGNUM_8814A));
+  _device.rtw_write32(REG_FIFOPAGE_INFO_2_8814A, dup16(LPQ_PGNUM_8814A));
+  _device.rtw_write32(REG_FIFOPAGE_INFO_3_8814A, dup16(NPQ_PGNUM_8814A));
+  _device.rtw_write32(REG_FIFOPAGE_INFO_4_8814A, dup16(EPQ_PGNUM_8814A));
+  _device.rtw_write32(REG_FIFOPAGE_INFO_5_8814A, dup16(PUB_PGNUM_8814A));
 
   _device.rtw_write32(REG_RQPN_CTRL_2_8814A, 0x80000000);
 

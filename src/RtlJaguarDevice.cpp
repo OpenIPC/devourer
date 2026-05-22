@@ -137,12 +137,8 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
 
   SET_TX_DESC_DATA_BW_8812(usb_frame, BWSettingOfDesc);
 
-  /* Upstream rtl8814a_xmit.c sets ONLY LAST_SEG=1 (not FIRST_SEG) for a
-   * single-fragment frame, and MACID = bmc_camid which is 0 for the
-   * broadcast/default CAM entry. Our previous values (FIRST_SEG=1, MACID=1)
-   * caused the chip to silently reject every bulk-OUT — verified by
-   * usbmon trace comparing the OOT-driver's working TX descriptor to
-   * ours at byte offsets 3 (flags) and 4 (MACID). */
+  /* Single-fragment frame: LAST_SEG=1 (no FIRST_SEG); OWN=1 so chip
+   * processes the descriptor. */
   SET_TX_DESC_LAST_SEG_8812(usb_frame, 1);
   SET_TX_DESC_OWN_8812(usb_frame, 1);
 
@@ -152,40 +148,45 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   SET_TX_DESC_OFFSET_8812(usb_frame,
                           static_cast<uint8_t>(TXDESC_SIZE + OFFSET_SZ));
 
-  SET_TX_DESC_MACID_8812(usb_frame, static_cast<uint8_t>(0x00));
+  /* Match the kernel-driver TX descriptor field-for-field. usbmon
+   * capture of kernel-driver TX in monitor mode (8814AU, channel 6)
+   * shows these exact values; previous comments in this file proposed
+   * different values based on speculative reasoning that didn't hold
+   * up under empirical comparison:
+   *
+   *   MACID = 1                 (broadcast/default CAM, not 0)
+   *   RATE_ID = 8 (non-VHT)     (kernel uses 8, not 7)
+   *   GID = 63 (= 0x3F)         (no-group default; previously left 0)
+   *   SW_DEFINE = 1             (DriverFixedRate flag; previously 0)
+   *   RETRY_LIMIT_ENABLE = 1, DATA_RETRY_LIMIT = 12
+   *                             (mgmt-frame defaults from upstream
+   *                              rtl8814au_xmit.c:267; previously
+   *                              both 0)
+   *   SPE_RPT = 0               (kernel does NOT set this; previously 1)
+   *   DISABLE_FB = 0            (kernel does NOT set this; previously 1)
+   *   HWSEQ_EN = 1              (chip auto-fills 802.11 SEQ; unchanged)
+   */
+  SET_TX_DESC_MACID_8812(usb_frame, static_cast<uint8_t>(0x01));
 
   if (!vht) {
-    rate_id = 7;
+    rate_id = 8;
   } else {
     rate_id = 9;
   }
 
   SET_TX_DESC_BMC_8812(usb_frame, 1);
-  SET_TX_DESC_RATE_ID_8812(
-      usb_frame,
-      static_cast<uint8_t>(rate_id));
+  SET_TX_DESC_RATE_ID_8812(usb_frame, static_cast<uint8_t>(rate_id));
 
   SET_TX_DESC_QUEUE_SEL_8812(usb_frame, 0x12);
-  /* Upstream 8814 uses HWSEQ_EN=1 (chip auto-fills the 802.11 SEQ number)
-   * with the descriptor SEQ field zero. Verified by usbmon trace: OOT
-   * driver sets bit 15 of word 8 (byte 33 = 0x80). Our previous path set
-   * HWSEQ_EN=0 + SEQ field manually — the chip's HWSEQ-disabled path may
-   * require additional driver-side sequence handling we don't have. */
   SET_TX_DESC_HWSEQ_EN_8812(usb_frame, static_cast<uint8_t>(1));
-  /* OOT-driver descriptor has SPE_RPT=1 (bit 19 of word 2 = byte 10 bit 3).
-   * Special TX report — chip may use this to signal TX-complete back to the
-   * driver. Without it, the TX queue may stall waiting for a status ack we
-   * never enable. */
-  SET_TX_DESC_SPE_RPT_8812(usb_frame, static_cast<uint8_t>(1));
-  /* OOT-driver descriptor has RETRY_LIMIT_ENABLE=0 (let chip use its
-   * default retry policy). Setting RETRY_LIMIT_ENABLE=1 with
-   * DATA_RETRY_LIMIT=0 means "give up after 0 retries" — the chip drops
-   * the frame and never even attempts to TX. */
+  SET_TX_DESC_GID_8812(usb_frame, static_cast<uint8_t>(0x3F));
+  SET_TX_DESC_SW_DEFINE_8812(usb_frame, static_cast<uint16_t>(0x001));
+  SET_TX_DESC_RETRY_LIMIT_ENABLE_8812(usb_frame, 1);
+  SET_TX_DESC_DATA_RETRY_LIMIT_8812(usb_frame, 12);
   if (sgi) {
     _logger->info("short gi enabled,set sgi");
     SET_TX_DESC_DATA_SHORT_8812(usb_frame, 1);
   }
-  SET_TX_DESC_DISABLE_FB_8812(usb_frame, 1);
   SET_TX_DESC_USE_RATE_8812(usb_frame, 1);
   SET_TX_DESC_TX_RATE_8812(usb_frame,
                            static_cast<uint8_t>(MRateToHwRate(

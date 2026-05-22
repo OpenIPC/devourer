@@ -351,6 +351,26 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
     return false;
   }
 
+  /* On the FIRST send only, dump the bulk-OUT bytes to compare against
+   * the OOT-driver wire trace. */
+  static bool first_pkt_dump = true;
+  if (first_pkt_dump) {
+    first_pkt_dump = false;
+    /* Clear any HALT state on the TX EP. The fwdl process can leave EP
+     * 0x02 in a stalled state from the chip side; without clear_halt the
+     * USB controller would NAK every subsequent bulk OUT URB. */
+    int chr = libusb_clear_halt(_dev_handle, 0x02);
+    _logger->info("libusb_clear_halt(EP 0x02) rc={}", chr);
+    size_t dump_len = std::min<size_t>(length, 64);
+    char hex[64 * 2 + 1] = {0};
+    for (size_t k = 0; k < dump_len; ++k) {
+      static const char hd[] = "0123456789abcdef";
+      hex[2*k]   = hd[packet[k] >> 4];
+      hex[2*k+1] = hd[packet[k] & 0xF];
+    }
+    _logger->info("first TX bulk-OUT len={} bytes: {}", length, hex);
+  }
+
   /* On the FIRST send only, dump chip state via vendor reads. Surfaces any
    * register clobber between init-end and first TX (e.g. SetMonitorChannel
    * could be resetting REG_CR or related). */
@@ -382,6 +402,13 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
   libusb_fill_bulk_transfer(transfer, _dev_handle, tx_ep, packet, length,
                             transfer_callback, (void *)(_logger.get()),
                             USB_TIMEOUT);
+  /* Upstream OOT (rtl8814a/usb/rtl8814au_xmit.c) sets URB_ZERO_PACKET on
+   * every TX URB. libusb equivalent: LIBUSB_TRANSFER_ADD_ZERO_PACKET.
+   * Without it the chip's SuperSpeed bulk OUT controller can wait
+   * indefinitely for transfer-end signaling and NAK every URB until libusb
+   * cancels — matches the usbmon trace we captured: 6977 submitted URBs,
+   * every completion with status=-2 (ENOENT/cancelled), data_len=0. */
+  transfer->flags |= LIBUSB_TRANSFER_ADD_ZERO_PACKET;
   auto start = std::chrono::high_resolution_clock::now();
   int rc = rc = libusb_submit_transfer(transfer);
   auto end = std::chrono::high_resolution_clock::now();

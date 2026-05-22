@@ -1,6 +1,7 @@
 #include "RtlUsbAdapter.h"
 
 #include <chrono>
+#include <cstdlib>
 #if defined(__ANDROID__) || defined(_MSC_VER) || defined(__APPLE__)
 #include <libusb.h>
 #else
@@ -350,7 +351,35 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
     return false;
   }
 
-  libusb_fill_bulk_transfer(transfer, _dev_handle, 0x02, packet, length,
+  /* On the FIRST send only, dump chip state via vendor reads. Surfaces any
+   * register clobber between init-end and first TX (e.g. SetMonitorChannel
+   * could be resetting REG_CR or related). */
+  static bool first_dump = true;
+  if (first_dump) {
+    first_dump = false;
+    uint16_t cr = rtw_read16(0x0100);
+    uint8_t txpause = rtw_read8(0x0522);
+    uint32_t txdma_off_chk = rtw_read32(0x020C);
+    uint32_t fwhw_txq = rtw_read32(0x0420);
+    uint32_t mcufwdl = rtw_read32(0x0080);
+    uint32_t hci_susp = rtw_read32(0xFE10);  /* USB_HCPWM / USB suspend ctrl */
+    _logger->info("pre-1st-TX: CR=0x{:04x} TXPAUSE=0x{:02x} TXDMA_OFFC=0x{:08x}",
+                  cr, txpause, txdma_off_chk);
+    _logger->info("pre-1st-TX: FWHW_TXQ=0x{:08x} MCUFWDL=0x{:08x} HCIPWR=0x{:08x}",
+                  fwhw_txq, mcufwdl, hci_susp);
+  }
+
+  /* DEVOURER_TX_EP=0xNN overrides the default bulk OUT endpoint (0x02 = HQ).
+   * Diagnostic hook for 8814 TX validation — lets us bisect EP routing
+   * without rebuilding (0x03=NQ, 0x04=LQ on the 8814's 3-OUT-EP layout). */
+  static uint8_t tx_ep = []() {
+    if (const char *ep_env = std::getenv("DEVOURER_TX_EP")) {
+      return static_cast<uint8_t>(std::strtoul(ep_env, nullptr, 0));
+    }
+    return static_cast<uint8_t>(0x02);
+  }();
+
+  libusb_fill_bulk_transfer(transfer, _dev_handle, tx_ep, packet, length,
                             transfer_callback, (void *)(_logger.get()),
                             USB_TIMEOUT);
   auto start = std::chrono::high_resolution_clock::now();

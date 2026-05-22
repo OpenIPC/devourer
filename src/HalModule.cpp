@@ -358,6 +358,43 @@ bool HalModule::rtl8812au_hal_init() {
       "REG_RXFLTMAP2=0xFFFF",
       cr_observed, cr_final);
 
+  if (is_8814a) {
+    /* TX-validation diagnostic. Read back the registers that gate USB→TX
+     * dataflow to confirm what state the chip is actually in at the end of
+     * init. One log per register to dodge the Logger format helper's
+     * placeholder-overflow truncation. */
+    using namespace rtl8814a;
+    _logger->info("8814A TX-state CR = 0x{:04x}", _device.rtw_read16(REG_CR));
+    _logger->info("8814A TX-state TXPAUSE(0x522) = 0x{:02x}",
+                  _device.rtw_read8(0x0522));
+    _logger->info("8814A TX-state FWHW_TXQ_CTRL(0x420) = 0x{:08x}",
+                  _device.rtw_read32(0x0420));
+    _logger->info("8814A TX-state FIFOPAGE_CTRL_2 = 0x{:08x}",
+                  _device.rtw_read32(REG_FIFOPAGE_CTRL_2_8814A));
+    _logger->info("8814A TX-state MGQ_PGBNDY = 0x{:04x}",
+                  _device.rtw_read16(REG_MGQ_PGBNDY_8814A));
+    _logger->info("8814A TX-state FIFOPAGE_INFO_1(HPQ) = 0x{:08x}",
+                  _device.rtw_read32(REG_FIFOPAGE_INFO_1_8814A));
+    _logger->info("8814A TX-state FIFOPAGE_INFO_5(PUB) = 0x{:08x}",
+                  _device.rtw_read32(REG_FIFOPAGE_INFO_5_8814A));
+    _logger->info("8814A TX-state MCUFWDL = 0x{:08x}",
+                  _device.rtw_read32(0x0080));
+    _logger->info("8814A TX-state TXDMA_STATUS(0x210) = 0x{:08x}",
+                  _device.rtw_read32(0x0210));
+    _logger->info("8814A TX-state TXDMA_OFFSET_CHK(0x20C) = 0x{:08x}",
+                  _device.rtw_read32(0x020C));
+    /* 8-bit read of 0x423 is unreliable on 8814; surface both 8-bit and the
+     * byte-3 of the 32-bit FWHW_TXQ_CTRL word for comparison. */
+    _logger->info("8814A TX-state HWSEQ_CTRL(0x423,8bit) = 0x{:02x}",
+                  _device.rtw_read8(0x0423));
+    _logger->info("8814A TX-state HWSEQ_CTRL(byte3 of 0x420 32bit) = 0x{:02x}",
+                  (_device.rtw_read32(REG_FWHW_TXQ_CTRL) >> 24) & 0xFF);
+    _logger->info("8814A TX-state TCR(0x604) = 0x{:08x}",
+                  _device.rtw_read32(0x0604));
+    _logger->info("8814A TX-state RCR(0x608) = 0x{:08x}",
+                  _device.rtw_read32(0x0608));
+  }
+
   return true;
 }
 

@@ -3,11 +3,14 @@
 #include "FirmwareManager.h"
 #include "Hal8812PhyReg.h"
 #include "Hal8814_PhyTables.h"
+#include "Hal8814_PostFwdlReplay.h"
 #include "PhyTableLoader.h"
 #include "phydm_pre_define.h"
 #include "registry_priv.h"
 #include "rtl8812a_hal.h"
 #include "rtl8812a_spec.h"
+
+#include <cstdlib>
 
 /* 8814AU register + page constants extracted from upstream
  * hal/rtl8814a_spec.h and hal/rtl8814a_hal.h. Inlined here because the
@@ -476,6 +479,47 @@ bool HalModule::rtl8812au_hal_init() {
                   _device.rtw_read32(0x0604));
     _logger->info("8814A TX-state RCR(0x608) = 0x{:08x}",
                   _device.rtw_read32(0x0608));
+  }
+
+  if (is_8814a && std::getenv("DEVOURER_OOT_REPLAY")) {
+    /* DEVOURER_OOT_REPLAY=1 enables verbatim replay of the kernel
+     * driver's post-fwdl vendor-write sequence on 8814AU. This is the
+     * minimum that unwedges TX today.
+     *
+     * Without this, devourer's post-fwdl chip state diverges from the
+     * working kernel-driver's in many small ways that combine to leave
+     * the chip's USB controller wedged — bulk OUT EP 0x02 NAKs every
+     * TX URB. With the replay, devourer's chip state matches the
+     * kernel driver byte-for-byte (verified via live pyusb register
+     * dump) and TX URBs drain (status=0 across 781 of 781 URBs in
+     * verification runs).
+     *
+     * Trade-off: the replay sequence also includes BB writes that
+     * degrade RX throughput on the same chip (e.g. RX-packet rate
+     * drops ~10x in a 60-second window). Because of this, the replay
+     * is opt-in via env var; default behaviour preserves RX. Users
+     * who need 8814 TX set DEVOURER_OOT_REPLAY=1.
+     *
+     * Source of the replay table (hal/Hal8814_PostFwdlReplay.h):
+     * usbmon capture of a cold-init kernel-driver session
+     *   modprobe 8814au; ip link up; iw set monitor; iw set channel 6
+     * with all vendor control writes between the last fwdl bulk chunk
+     * and the first TX bulk OUT captured (4464 entries).
+     *
+     * Long-term: port the equivalent upstream functions individually
+     * (rtl8814a_hal_init.c + usb_halinit.c) so TX works without the
+     * RX trade-off and without 130 KB of opaque trace data in the
+     * binary. The verbatim replay is the minimum that actually
+     * unblocks TX today and serves as a regression checkpoint. */
+    _logger->info("8814A: replaying {} kernel-driver post-fwdl writes",
+                  kKernelPostFwdlWritesCount);
+    for (size_t i = 0; i < kKernelPostFwdlWritesCount; ++i) {
+      const auto &w = kKernelPostFwdlWrites[i];
+      if (w.len == 1)      _device.rtw_write8(w.addr, (uint8_t)w.value);
+      else if (w.len == 2) _device.rtw_write16(w.addr, (uint16_t)w.value);
+      else if (w.len == 4) _device.rtw_write32(w.addr, w.value);
+    }
+    _logger->info("8814A: replay complete");
   }
 
   return true;

@@ -21,7 +21,7 @@ constexpr uint16_t REG_FIFOPAGE_INFO_5_8814A   = 0x0240;
 constexpr uint16_t REG_RQPN_CTRL_2_8814A       = 0x022C;
 constexpr uint16_t REG_FIFOPAGE_CTRL_2_8814A   = 0x0204;
 constexpr uint16_t REG_TXPKTBUF_BCNQ_BDNY_8814A  = 0x0424;
-constexpr uint16_t REG_TXPKTBUF_BCNQ1_BDNY_8814A = 0x0426; /* spec calls it +2 */
+constexpr uint16_t REG_TXPKTBUF_BCNQ1_BDNY_8814A = 0x0456; /* per rtl8814a_spec.h:262 */
 constexpr uint16_t REG_MGQ_PGBNDY_8814A        = 0x047A;
 constexpr uint16_t REG_RXFF_PTR_8814A          = 0x011C;
 
@@ -399,6 +399,47 @@ bool HalModule::rtl8812au_hal_init() {
       "post-init final: REG_CR observed=0x{:04x} written=0x{:04x} "
       "REG_RXFLTMAP2=0xFFFF",
       cr_observed, cr_final);
+
+  if (is_8814a) {
+    /* Program MAC address to REG_MACID (0x0610). usbmon-trace diff vs
+     * kernel-driver shows kernel writes 6 individual bytes at 0x610..0x615
+     * during init; devourer never writes REG_MACID at all. Many Realtek
+     * MAC TX paths refuse to schedule a frame if the chip's MAC address
+     * isn't programmed. Using a hardcoded locally-administered address
+     * for now — proper EFUSE-read of the per-chip MAC is a follow-up. */
+    static const uint8_t kHardcodedMac[6] = {0x02, 0x0d, 0xb0, 0xc7, 0xe4, 0xb3};
+    for (uint16_t i = 0; i < 6; ++i) {
+      _device.rtw_write8(0x0610 + i, kHardcodedMac[i]);
+    }
+
+    /* Trace-derived 8814 post-fwdl init writes. usbmon diff vs
+     * kernel-driver (cold-init → monitor → inject) revealed these are
+     * present in the kernel path and absent from devourer. Applied as a
+     * batch to bring devourer's chip state into MAC-TX-ready shape.
+     *
+     *   REG_RRSR (0x0440)        = 0xff0f0000  Response Rate Set
+     *   0x04bc                   = 0x00        TX queue gate
+     *   REG_QUEUE_CTRL (0x04c6)  = 0x04        Queue control
+     *   REG_TX_PTCL_CTRL (0x520) = 0x0f2f0000  TX protocol control
+     *   REG_RD_CTRL (0x0524)     = 0x0f4fff00  RD control
+     *   0x0670                   = 0x000000c0  NAV-related
+     *   RA-table init at 0x0990-0x09a4
+     */
+    _device.rtw_write32(0x0440, 0xff0f0000u);   /* REG_RRSR */
+    _device.rtw_write8(0x04bc, 0x00);
+    _device.rtw_write8(0x04c6, 0x04);           /* REG_QUEUE_CTRL */
+    _device.rtw_write32(0x0520, 0x0f2f0000u);   /* REG_TX_PTCL_CTRL */
+    _device.rtw_write32(0x0524, 0x0f4fff00u);   /* REG_RD_CTRL */
+    _device.rtw_write32(0x0670, 0x000000c0u);
+    /* Rate-adaptation table init (final values from trace). */
+    _device.rtw_write32(0x0990, 0xffff1027u);
+    _device.rtw_write32(0x0994, 0x0001484cu);
+    _device.rtw_write32(0x0998, 0x24282c30u);
+    _device.rtw_write32(0x099c, 0x34383c40u);
+    _device.rtw_write32(0x09a0, 0x44000000u);
+    _device.rtw_write32(0x09a4, 0x80000800u);
+    _logger->info("8814A: REG_MACID + trace-derived post-fwdl writes applied");
+  }
 
   if (is_8814a) {
     /* TX-validation diagnostic. Read back the registers that gate USB→TX

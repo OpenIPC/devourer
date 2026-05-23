@@ -58,28 +58,51 @@ int main() {
     return rc;
   }
 
-  libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_DEBUG);
+  /* libusb log level: DEBUG by default (matches historic behaviour); a single
+   * DEVOURER_USB_QUIET=1 knob downgrades to WARNING to keep capture logs
+   * manageable. DEBUG output runs ~7 MB per 15s run, which has filled /tmp
+   * and wedged the harness on previous sessions. */
+  libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL,
+                    std::getenv("DEVOURER_USB_QUIET")
+                        ? LIBUSB_LOG_LEVEL_WARNING
+                        : LIBUSB_LOG_LEVEL_DEBUG);
 
   /* DEVOURER_PID env var (hex, e.g. "0x8813") restricts the open loop to a
-   * single PID. Useful when multiple Realtek adapters are plugged. */
+   * single PID. Useful when multiple Realtek adapters are plugged.
+   * DEVOURER_VID overrides the VID (default 0x0bda Realtek) — needed to reach
+   * OEM-rebadged Jaguar dongles like the TP-Link Archer T2U Plus (2357:0120). */
   const char *pid_env = std::getenv("DEVOURER_PID");
   uint16_t target_pid = 0;
   if (pid_env != nullptr) {
     target_pid = static_cast<uint16_t>(std::strtoul(pid_env, nullptr, 0));
     logger->info("DEVOURER_PID={:04x} (limiting to this PID)", target_pid);
   }
+  uint16_t target_vid = USB_VENDOR_ID;
+  if (const char *vid_env = std::getenv("DEVOURER_VID")) {
+    target_vid = static_cast<uint16_t>(std::strtoul(vid_env, nullptr, 0));
+    logger->info("DEVOURER_VID={:04x} (overriding default VID)", target_vid);
+  }
   libusb_device_handle *dev_handle = nullptr;
   for (uint16_t pid : kRealtekProductIds) {
     if (target_pid != 0 && pid != target_pid) continue;
-    dev_handle = libusb_open_device_with_vid_pid(ctx, USB_VENDOR_ID, pid);
+    dev_handle = libusb_open_device_with_vid_pid(ctx, target_vid, pid);
     if (dev_handle != NULL) {
-      logger->info("Opened Realtek device {:04x}:{:04x}", USB_VENDOR_ID, pid);
+      logger->info("Opened device {:04x}:{:04x}", target_vid, pid);
       break;
     }
   }
+  /* DEVOURER_PID can name a PID not in kRealtekProductIds (e.g. 0x0120 for the
+   * T2U Plus). Try that direct combination once before giving up. */
+  if (dev_handle == NULL && target_pid != 0) {
+    dev_handle = libusb_open_device_with_vid_pid(ctx, target_vid, target_pid);
+    if (dev_handle != NULL) {
+      logger->info("Opened device {:04x}:{:04x} (via DEVOURER_PID)",
+                   target_vid, target_pid);
+    }
+  }
   if (dev_handle == NULL) {
-    logger->error("Cannot find any supported Realtek device under VID {:04x}",
-                  USB_VENDOR_ID);
+    logger->error("Cannot find any supported device under VID {:04x}",
+                  target_vid);
     libusb_exit(ctx);
     return 1;
   }

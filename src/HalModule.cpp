@@ -4,6 +4,7 @@
 #include "Hal8812PhyReg.h"
 #include "Hal8814_PhyTables.h"
 #include "Hal8814_PostFwdlReplay.h"
+#include "Hal8821PhyReg.h"
 #include "PhyTableLoader.h"
 #include "phydm_pre_define.h"
 #include "registry_priv.h"
@@ -353,7 +354,16 @@ bool HalModule::rtl8812au_hal_init() {
   _device.rtw_write8(REG_SDIO_CTRL_8812, 0x0);
   _device.rtw_write8(REG_ACLK_MON, 0x0);
 
-  _device.rtw_write8(REG_USB_HRPWM, 0);
+  /* USB Host Read PWM. 8812/8814 path writes 0 (default). 8821AU appears
+   * to drift into a low-power state post-fwdl on some boards; the canonical
+   * "leave LPS" sequence in Hal8821APwrSeq.h writes 0x84 to REG_USB_HRPWM
+   * (PWR_INTF_USB_MSK / RTL8821A_TRANS_LPS_TO_ACT). Write 0x84 for 8821 to
+   * kick the chip out of LPS so RX bulk IN actually moves frames. */
+  if (_eepromManager->version_id.ICType == CHIP_8821) {
+    _device.rtw_write8(REG_USB_HRPWM, 0x84);
+  } else {
+    _device.rtw_write8(REG_USB_HRPWM, 0);
+  }
 
   // TODO:
   ///* ack for xmit mgmt frames. */
@@ -530,10 +540,22 @@ bool HalModule::InitPowerOn() {
     return true;
   }
 
-  WLAN_PWR_CFG *enable_flow =
-      (_eepromManager->version_id.ICType == CHIP_8814A)
-          ? rtl8814A_card_enable_flow
-          : Rtl8812_NIC_ENABLE_FLOW;
+  /* Three-way dispatch on chip family. The CARDEMU→ACT power sequence is
+   * silicon-specific — applying the wrong one leaves the chip stuck in
+   * CARDEMU (REG_SYS_CLKR=0x30, REG_CR=0xEA) and HalPwrSeqCmdParsing returns
+   * false. */
+  WLAN_PWR_CFG *enable_flow;
+  switch (_eepromManager->version_id.ICType) {
+  case CHIP_8814A:
+    enable_flow = rtl8814A_card_enable_flow;
+    break;
+  case CHIP_8821:
+    enable_flow = Rtl8821A_NIC_ENABLE_FLOW;
+    break;
+  default:
+    enable_flow = Rtl8812_NIC_ENABLE_FLOW;
+    break;
+  }
   if (!HalPwrSeqCmdParsing(enable_flow)) {
     _logger->error("InitPowerOn: run power on flow fail");
     return false;
@@ -767,10 +789,16 @@ bool HalModule::HalPwrSeqCmdParsing(WLAN_PWR_CFG *PwrSeqCmd) {
 }
 
 void HalModule::PHY_MACConfig8812() {
-  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+  switch (_eepromManager->version_id.ICType) {
+  case CHIP_8814A:
     odm_read_and_config_mp_8814a_mac_reg();
-  } else {
+    break;
+  case CHIP_8821:
+    odm_read_and_config_mp_8821a_mac_reg();
+    break;
+  default:
     odm_read_and_config_mp_8812a_mac_reg();
+    break;
   }
 }
 
@@ -807,6 +835,60 @@ bool HalModule::phy_BB8814_Config_ParaFile() {
   odm_read_and_config_mp_8814a_phy_reg();
   odm_read_and_config_mp_8814a_agc_tab();
   return true;
+}
+
+/* RTL8821AU MAC/BB/RF init via PhyTableLoader (shared phydm conditional
+ * encoding with 8814; arrays defined in hal/Hal8821PhyReg.h, ported from
+ * svpcom/rtl8812au v5.2.20). The tables are flat static uint32_t arrays so we
+ * compute length with std::size at the call site. */
+void HalModule::odm_read_and_config_mp_8821a_mac_reg() {
+  auto ctx = _eepromManager->GetPhyContext();
+  PhyTableLoader::Load(array_mp_8821a_mac_reg,
+                       sizeof(array_mp_8821a_mac_reg) / sizeof(uint32_t), ctx,
+                       [this](uint32_t addr, uint32_t value) {
+                         _device.rtw_write8(static_cast<uint16_t>(addr),
+                                            static_cast<uint8_t>(value));
+                       });
+}
+
+void HalModule::odm_read_and_config_mp_8821a_phy_reg() {
+  auto ctx = _eepromManager->GetPhyContext();
+  PhyTableLoader::Load(array_mp_8821a_phy_reg,
+                       sizeof(array_mp_8821a_phy_reg) / sizeof(uint32_t), ctx,
+                       [this](uint32_t addr, uint32_t value) {
+                         odm_config_bb_phy_8812a(addr, 0xFFFFFFFFu, value);
+                       });
+}
+
+void HalModule::odm_read_and_config_mp_8821a_agc_tab() {
+  auto ctx = _eepromManager->GetPhyContext();
+  PhyTableLoader::Load(array_mp_8821a_agc_tab,
+                       sizeof(array_mp_8821a_agc_tab) / sizeof(uint32_t), ctx,
+                       [this](uint32_t addr, uint32_t value) {
+                         odm_config_bb_agc_8812a(addr, 0xFFFFFFFFu, value);
+                       });
+}
+
+void HalModule::odm_read_and_config_mp_8821a_radioa() {
+  auto ctx = _eepromManager->GetPhyContext();
+  PhyTableLoader::Load(
+      array_mp_8821a_radioa,
+      sizeof(array_mp_8821a_radioa) / sizeof(uint32_t), ctx,
+      [this](uint32_t addr, uint32_t value) {
+        odm_config_rf_reg_8812a(addr, value, RfPath::RF_PATH_A,
+                                static_cast<uint16_t>(addr));
+      });
+}
+
+bool HalModule::phy_BB8821_Config_ParaFile() {
+  odm_read_and_config_mp_8821a_phy_reg();
+  odm_read_and_config_mp_8821a_agc_tab();
+  return true;
+}
+
+void HalModule::phy_RF6052_Config_ParaFile_8821() {
+  /* RTL8821AU is single-chain (1T1R AC+BT combo); only path A is initialised. */
+  odm_read_and_config_mp_8821a_radioa();
 }
 
 /******************************************************************************
@@ -1655,9 +1737,18 @@ bool HalModule::PHY_BBConfig8812() {
   /*  */
   /* Config BB and AGC */
   /*  */
-  auto rtStatus = (_eepromManager->version_id.ICType == CHIP_8814A)
-                      ? phy_BB8814_Config_ParaFile()
-                      : phy_BB8812_Config_ParaFile();
+  bool rtStatus;
+  switch (_eepromManager->version_id.ICType) {
+  case CHIP_8814A:
+    rtStatus = phy_BB8814_Config_ParaFile();
+    break;
+  case CHIP_8821:
+    rtStatus = phy_BB8821_Config_ParaFile();
+    break;
+  default:
+    rtStatus = phy_BB8812_Config_ParaFile();
+    break;
+  }
 
   hal_set_crystal_cap(_eepromManager->crystal_cap);
 
@@ -2168,10 +2259,16 @@ void HalModule::PHY_RF6052_Config_8812() {
   /*  */
   /* Config BB and RF */
   /*  */
-  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+  switch (_eepromManager->version_id.ICType) {
+  case CHIP_8814A:
     phy_RF6052_Config_ParaFile_8814();
-  } else {
+    break;
+  case CHIP_8821:
+    phy_RF6052_Config_ParaFile_8821();
+    break;
+  default:
     phy_RF6052_Config_ParaFile_8812();
+    break;
   }
 }
 

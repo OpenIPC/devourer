@@ -16,6 +16,13 @@ typedef uint32_t u32;
 extern "C" {
 #include "hal8812a_fw.h"
 #include "hal8814a_fw.h"
+/* CONFIG_RTL8821A is scoped tightly: hal/rtl8812a_spec.h has a vendor-pattern
+ * `#ifdef CONFIG_RTL8821A #include "rtl8821a_spec.h"` block, and we don't
+ * carry that spec header (8821AU register layout is covered by the shared
+ * 8812 spec). Define just for the firmware-header include, then undef. */
+#define CONFIG_RTL8821A
+#include "hal8821a_fw.h"
+#undef CONFIG_RTL8821A
 }
 
 struct FirmwareBlob {
@@ -23,12 +30,17 @@ struct FirmwareBlob {
   std::size_t len;
 };
 
-/* Pick the right firmware NIC blob for the given chip. CHIP_8814A has its own
- * compiled-in array; everything else in the Jaguar family rides on the 8812
- * blob. */
+/* Pick the right firmware NIC blob for the given chip. CHIP_8814A and
+ * CHIP_8821 ship their own compiled-in arrays; CHIP_8812 (and the 1T1R 8811AU
+ * cut that shares its HAL) rides on the 8812 blob. The 8821 blob carries the
+ * IS_FW_HEADER_EXIST_8821 signature (0x2100) — the FW header dispatch in
+ * jaguar_fw_header_present picks the right header parse based on ic_type. */
 inline FirmwareBlob PickFirmwareForChip(HAL_IC_TYPE_E ic_type) {
   if (ic_type == CHIP_8814A) {
     return {array_mp_8814a_fw_nic, sizeof(array_mp_8814a_fw_nic)};
+  }
+  if (ic_type == CHIP_8821) {
+    return {array_mp_8821a_fw_nic, sizeof(array_mp_8821a_fw_nic)};
   }
   return {array_mp_8812a_fw_nic, sizeof(array_mp_8812a_fw_nic)};
 }

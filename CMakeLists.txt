@@ -20,11 +20,16 @@ add_library(WiFiDriver
     hal/Hal8814_PostFwdlReplay.h
     hal/Hal8814PwrSeq.c
     hal/Hal8814PwrSeq.h
+    hal/Hal8821APwrSeq.c
+    hal/Hal8821APwrSeq.h
+    hal/Hal8821PhyReg.h
     hal/basic_types.h
     hal/hal8812a_fw.c
     hal/hal8812a_fw.h
     hal/hal8814a_fw.c
     hal/hal8814a_fw.h
+    hal/hal8821a_fw.c
+    hal/hal8821a_fw.h
     hal/hal_com_reg.h
     hal/rtl8812a_hal.h
     hal/rtl8812a_recv.h

@@ -5,6 +5,7 @@
 extern "C"{
 #include "Hal8812PwrSeq.h"
 #include "Hal8814PwrSeq.h"
+#include "Hal8821APwrSeq.h"
 }
 #include "RadioManagementModule.h"
 #include "RtlUsbAdapter.h"
@@ -70,7 +71,13 @@ private:
   void odm_read_and_config_mp_8814a_mac_reg();
   void odm_read_and_config_mp_8814a_phy_reg();
   void odm_read_and_config_mp_8814a_agc_tab();
+  void odm_read_and_config_mp_8821a_mac_reg();
+  void odm_read_and_config_mp_8821a_phy_reg();
+  void odm_read_and_config_mp_8821a_agc_tab();
+  void odm_read_and_config_mp_8821a_radioa();
   bool phy_BB8814_Config_ParaFile();
+  bool phy_BB8821_Config_ParaFile();
+  void phy_RF6052_Config_ParaFile_8821();
   void odm_write_1byte(uint16_t reg_addr, uint8_t data);
   bool check_positive(int32_t condition1, int32_t condition2,
                       int32_t condition4);

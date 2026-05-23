@@ -36,7 +36,7 @@ Designed to be run manually after building devourer:
     sudo python3 tests/regress.py --channel 100
     # VM mode (after tests/setup_vm.sh):
     sudo python3 tests/regress.py --channel 100 \\
-        --vm-name devourer-testrig --vm-ssh dima@10.216.129.126
+        --vm-name devourer-testrig --vm-ssh <user>@<VM-IP>
 
 Portability: tool paths resolved via `which`, wlan interfaces discovered via
 `iw dev` (works for systemd `wlp*` and classic `wlan*`), kernel driver
@@ -115,7 +115,7 @@ def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
 class KernelHost:
     """One of two flavours. Use KernelHost.local() or KernelHost.via_ssh()."""
 
-    # ssh target like "dima@10.216.129.126". Empty string for local execution.
+    # ssh target like "<user>@<vm-ip>". Empty string for local execution.
     ssh_target: str = ""
     # libvirt domain name for USB passthrough. Empty for local mode (no DUT
     # movement needed — DUTs already on the same machine).
@@ -843,6 +843,110 @@ def run_matrix(
     return results
 
 
+# ---------------------------------------------------------------------------
+# N-adapter full matrix — runs every ordered (TX, RX) pair across all 4
+# driver-side combinations and emits one NxN table per mode.
+# ---------------------------------------------------------------------------
+
+
+# The four mode-matrices. Each is a (tx_side, rx_side) tuple labelled with
+# the question it answers.
+FULL_MATRIX_MODES = [
+    ("kernel", "kernel",
+     "Kernel-only (rig sanity / cross-chipset kernel interop)"),
+    ("devourer", "kernel",
+     "devourer TX → kernel RX (does devourer emit valid frames?)"),
+    ("kernel", "devourer",
+     "kernel TX → devourer RX (does devourer RX a known-good frame?)"),
+    ("devourer", "devourer",
+     "devourer ↔ devourer (end-to-end devourer)"),
+]
+
+
+def run_full_matrix(
+    devourer_root: Path,
+    duts: list[Dut],
+    channel: int,
+    duration: float,
+    threshold: int,
+    tmpdir: Path,
+    kh: KernelHost,
+) -> dict[tuple[str, str, str, str], CellResult]:
+    """Run every ordered (TX, RX) pair of distinct DUTs across all four
+    driver-side combinations. Returns a dict keyed by
+    (tx_side, rx_side, tx_vidpid, rx_vidpid)."""
+    results: dict[tuple[str, str, str, str], CellResult] = {}
+    pairs = [(tx, rx) for tx in duts for rx in duts if tx.sysfs_id != rx.sysfs_id]
+    total = len(pairs) * len(FULL_MATRIX_MODES)
+    idx = 0
+    for tx_dut, rx_dut in pairs:
+        for tx_side, rx_side, _label in FULL_MATRIX_MODES:
+            idx += 1
+            cell_id = (
+                f"[{time.strftime('%H:%M:%S')}] [{idx}/{total}] "
+                f"TX={tx_dut.chipset} ({tx_side}) → "
+                f"RX={rx_dut.chipset} ({rx_side})"
+            )
+            print(cell_id + " ...", flush=True)
+            try:
+                r = run_cell(
+                    devourer_root, tx_dut, rx_dut, tx_side, rx_side,
+                    channel, duration, tmpdir, kh,
+                )
+            except Exception as e:
+                print(f"  ✗ cell crashed: {e}", flush=True)
+                r = CellResult(hits=0, tx_attempts=0, tx_failures=0,
+                               duration_s=0.0, notes=str(e))
+            results[(tx_side, rx_side, tx_dut.vidpid, rx_dut.vidpid)] = r
+            print(f"  → {r.fmt(threshold)}", flush=True)
+    return results
+
+
+def emit_full_markdown(
+    duts: list[Dut],
+    channel: int,
+    duration: float,
+    threshold: int,
+    kh: KernelHost,
+    results: dict[tuple[str, str, str, str], CellResult],
+) -> str:
+    """Render four NxN tables, one per (tx_side, rx_side) mode. Diagonal is
+    blanked (can't TX and RX with the same physical adapter)."""
+    out = []
+    out.append(f"# Full regression matrix — channel {channel}, "
+               f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    out.append(f"- Kernel host: "
+               f"{'VM ' + kh.vm_name + ' via ' + kh.ssh_target if kh.is_remote else 'local'}")
+    out.append(f"- Cell duration: {duration:.0f}s   Pass threshold: ≥ {threshold} hits")
+    out.append("- Adapters:")
+    for d in duts:
+        out.append(f"  - `{d.vidpid}` ({d.chipset})")
+    out.append("")
+
+    short = {d.vidpid: d.chipset.split(" ")[0] for d in duts}
+
+    for tx_side, rx_side, label in FULL_MATRIX_MODES:
+        out.append(f"## {label}\n")
+        # Header
+        header = "| TX \\ RX |" + "".join(
+            f" {short[d.vidpid]} |" for d in duts
+        )
+        sep = "|---|" + "---|" * len(duts)
+        out.append(header)
+        out.append(sep)
+        for tx_dut in duts:
+            row_cells = []
+            for rx_dut in duts:
+                if tx_dut.sysfs_id == rx_dut.sysfs_id:
+                    row_cells.append("—")
+                    continue
+                r = results.get((tx_side, rx_side, tx_dut.vidpid, rx_dut.vidpid))
+                row_cells.append(r.fmt(threshold) if r else "?")
+            out.append(f"| {short[tx_dut.vidpid]} | " + " | ".join(row_cells) + " |")
+        out.append("")
+    return "\n".join(out)
+
+
 def emit_markdown(
     tx_dut: Dut, rx_dut: Dut, channel: int, duration: float,
     threshold: int, kh: KernelHost,
@@ -913,6 +1017,12 @@ def main():
         help="run all 4 cells even if kernel-kernel baseline fails",
     )
     ap.add_argument(
+        "--full-matrix", action="store_true",
+        help="iterate every ordered (TX, RX) pair of plugged DUTs across "
+             "all 4 driver-side combinations. Emits four NxN tables instead "
+             "of one 4-cell table. Ignores --tx-pid / --rx-pid.",
+    )
+    ap.add_argument(
         "--vm-name",
         default=os.environ.get("DEVOURER_VM_NAME", ""),
         help="libvirt domain to run kernel cells in (env: DEVOURER_VM_NAME). "
@@ -958,6 +1068,45 @@ def main():
                 return d
         sys.stderr.write(f"No plugged DUT has PID {pid_arg}\n")
         sys.exit(2)
+
+    if args.full_matrix:
+        print(f"Full matrix mode over {len(duts)} adapters:")
+        for d in duts:
+            print(f"  - {d.vidpid} ({d.chipset}) at {d.sysfs_id}")
+        print(f"Kernel host: "
+              f"{'VM ' + kh.vm_name + ' (' + kh.ssh_target + ')' if kh.is_remote else 'local'}")
+        n_pairs = len(duts) * (len(duts) - 1)
+        n_cells = n_pairs * len(FULL_MATRIX_MODES)
+        print(f"Channel: {args.channel}   Duration/cell: {args.duration}s   "
+              f"Pass threshold: ≥{args.pass_threshold} hits")
+        print(f"Total cells: {n_cells} "
+              f"({n_pairs} ordered pairs × {len(FULL_MATRIX_MODES)} mode-combos)\n")
+
+        kh.release_all_known_duts(duts)
+
+        with tempfile.TemporaryDirectory(prefix="devourer-regress-") as td:
+            tmpdir = Path(td)
+            results = run_full_matrix(
+                devourer_root=args.devourer_root,
+                duts=duts,
+                channel=args.channel, duration=args.duration,
+                threshold=args.pass_threshold,
+                tmpdir=tmpdir, kh=kh,
+            )
+            print()
+            md = emit_full_markdown(
+                duts, args.channel, args.duration,
+                args.pass_threshold, kh, results,
+            )
+            print(md)
+            if args.keep_logs:
+                kept = Path(tempfile.gettempdir()) / "devourer-regress-last"
+                if kept.is_symlink() or kept.exists():
+                    kept.unlink()
+                kept.symlink_to(tmpdir)
+                print(f"(logs kept at {kept} — symlink, valid until next run)")
+                os._exit(0)
+        return
 
     tx_dut = pick(args.tx_pid, 0)
     rx_dut = pick(args.rx_pid, 1)

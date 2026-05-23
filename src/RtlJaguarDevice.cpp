@@ -28,8 +28,11 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   u8 fixed_rate = MGN_1M, sgi = 0, bwidth = 0, ldpc = 0, stbc = 0;
   u16 txflags = 0;
   int rate_id = 0;
-  radiotap_length = int(packet[2]);
-  if (radiotap_length <= 0 || (size_t)radiotap_length >= length) {
+  if (length < sizeof(struct ieee80211_radiotap_header)) {
+    return false;
+  }
+  radiotap_length = get_unaligned_le16(packet + 2);
+  if (radiotap_length == 0 || (size_t)radiotap_length >= length) {
     return false;
   }
   real_packet_length = length - radiotap_length;

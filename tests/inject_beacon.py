@@ -26,11 +26,17 @@ from scapy.all import RadioTap, Dot11, sendp
 CANONICAL_SA = "57:42:75:05:d6:00"
 
 
-def build_beacon():
+def build_beacon(rate_mbps_x2: int = 0):
     """Mgmt / probe-request frame matching txdemo's beacon_frame[]. The body
-    payload doesn't matter for hit-count testing — only SA is matched."""
+    payload doesn't matter for hit-count testing — only SA is matched.
+
+    `rate_mbps_x2` is in 500kbps units (the radiotap convention): 12 → 6Mbps
+    OFDM, 2 → 1Mbps CCK, etc. 0 leaves the rate unspecified, which lets the
+    chip pick its own default (varies by chipset and is the source of the
+    8812-vs-8814 asymmetry we're investigating)."""
+    rt = RadioTap(Rate=rate_mbps_x2) if rate_mbps_x2 else RadioTap()
     return (
-        RadioTap()
+        rt
         / Dot11(
             type=0,  # mgmt
             subtype=4,  # probe request
@@ -57,9 +63,16 @@ def main():
         default=0.002,
         help="inter-frame gap seconds (default 0.002 = 500 fps, matches txdemo)",
     )
+    ap.add_argument(
+        "--rate",
+        type=int,
+        default=0,
+        help="TX rate in 500kbps units (e.g. 12 = 6Mbps OFDM, 2 = 1Mbps CCK). "
+             "0 (default) leaves it unspecified — chip picks its own default.",
+    )
     args = ap.parse_args()
 
-    pkt = build_beacon()
+    pkt = build_beacon(args.rate)
     end = time.monotonic() + args.duration
     sent = 0
     while time.monotonic() < end:

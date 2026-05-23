@@ -29,6 +29,9 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   u16 txflags = 0;
   int rate_id = 0;
   radiotap_length = int(packet[2]);
+  if (radiotap_length <= 0 || (size_t)radiotap_length >= length) {
+    return false;
+  }
   real_packet_length = length - radiotap_length;
 
   if (radiotap_length != 0x0d)

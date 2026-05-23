@@ -50,7 +50,7 @@ Then run the matrix in VM mode:
 ```bash
 sudo python3 tests/regress.py --channel 100 \
     --vm-name devourer-testrig \
-    --vm-ssh dima@<VM-IP-from-status>
+    --vm-ssh <user>@<VM-IP-from-status>
 ```
 
 VM mode is what unblocks chipsets where the host kernel driver doesn't
@@ -83,7 +83,8 @@ probe on kernels 6.15+ (`failed to download firmware`, `error -22`), but
   (download from <https://cloud-images.ubuntu.com/jammy/current/>)
 - Working USB hot-plug on libvirt (`xhci` controller; `setup_vm.sh` adds it)
 - The host user's SSH key in `~/.ssh/id_rsa.pub` (or set `SSH_PUBKEY=...`
-  before `setup_vm.sh`) — gets baked into the VM's `dima` user
+  before `setup_vm.sh`) — gets baked into the VM's user account
+  (defaults to your invoking user; override with `VM_USER=foo`)
 
 The script does a preflight check and prints distro-agnostic install
 hints for anything missing.
@@ -97,7 +98,7 @@ Markdown table to stdout, ready to paste into PR comments:
 
 - TX adapter: `0bda:8812` (RTL8812AU)
 - RX adapter: `0bda:8813` (RTL8814AU)
-- Kernel host: VM devourer-testrig via dima@10.216.129.126
+- Kernel host: VM devourer-testrig via <user>@<VM-IP>
 - Cell duration: 10s
 - Pass threshold: ≥ 3 hits
 

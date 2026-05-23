@@ -30,8 +30,11 @@ VM_VCPUS="${VM_VCPUS:-2}"
 VM_DISK_GB="${VM_DISK_GB:-20}"
 BASE_IMAGE="${BASE_IMAGE:-/var/lib/libvirt/images/jammy-base.qcow2}"
 LIBVIRT_IMAGES="${LIBVIRT_IMAGES:-/var/lib/libvirt/images}"
-SSH_PUBKEY="${SSH_PUBKEY:-$HOME/.ssh/id_rsa.pub}"
-WORK_DIR="${WORK_DIR:-$HOME/devourer-testrig-setup}"
+# Username to create inside the VM. Defaults to the invoking user
+# (SUDO_USER when called via sudo, else USER). Override with VM_USER=foo.
+VM_USER="${VM_USER:-${SUDO_USER:-$USER}}"
+SSH_PUBKEY="${SSH_PUBKEY:-$(eval echo "~$VM_USER/.ssh/id_rsa.pub")}"
+WORK_DIR="${WORK_DIR:-$(eval echo "~$VM_USER/devourer-testrig-setup")}"
 
 cmd="${1:-provision}"
 
@@ -53,7 +56,7 @@ case "$cmd" in
     ip=$(vm_ip)
     echo "IP:      ${ip:-(none — DHCP not assigned)}"
     if [ -n "${ip:-}" ]; then
-      echo "SSH:     ssh dima@$ip"
+      echo "SSH:     ssh $VM_USER@$ip"
     fi
     echo "USB passthrough (current):"
     sudo virsh dumpxml "$VM_NAME" 2>/dev/null \
@@ -91,7 +94,7 @@ hostname: $VM_NAME
 manage_etc_hosts: true
 
 users:
-  - name: dima
+  - name: $VM_USER
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     ssh_authorized_keys:
@@ -166,14 +169,14 @@ fi
 echo "waiting for cloud-init to finish (installs aircrack-ng driver, ~5-10 min)..."
 ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 \
     -o UserKnownHostsFile=/dev/null \
-    dima@"$ip" "cloud-init status --wait" 2>&1 | tail -3
+    $VM_USER@"$ip" "cloud-init status --wait" 2>&1 | tail -3
 
 echo
 echo "=== VM ready ==="
-echo "ssh dima@$ip"
+echo "ssh $VM_USER@$ip"
 echo
 echo "Verify aircrack-ng driver:"
-echo "  ssh dima@$ip 'sudo modprobe 88XXau && lsmod | grep 88XXau'"
+echo "  ssh $VM_USER@$ip 'sudo modprobe 88XXau && lsmod | grep 88XXau'"
 echo
 echo "Hot-plug a DUT into the VM (example for 8814AU):"
 echo "  cat > /tmp/usb-8814.xml << 'XML'"

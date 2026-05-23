@@ -434,6 +434,8 @@ void RadioManagementModule::phy_RFSerialWrite(RfPath eRFPath, uint32_t Offset,
 void RadioManagementModule::PHY_SwitchWirelessBand8812(BandType Band) {
   ChannelWidth_t current_bw = _currentChannelBw;
   bool eLNA_2g = _eepromManager->ExternalLNA_2G;
+  const bool is_8821 =
+      _eepromManager->version_id.ICType == CHIP_8821;
 
   _logger->info("[{}] {}", __func__, Band == BandType::BAND_ON_2_4G ? "2.4G" : "5G");
 
@@ -445,30 +447,41 @@ void RadioManagementModule::PHY_SwitchWirelessBand8812(BandType Band) {
     _device.phy_set_bb_reg(rOFDMCCKEN_Jaguar, bOFDMEN_Jaguar | bCCKEN_Jaguar,
                            0x03);
 
-    /* <20131128, VincentL> Remove 0x830[3:1] setting when switching 2G/5G,
-     * requested by Yn. */
-    _device.phy_set_bb_reg(rBWIndication_Jaguar, 0x3,
-                           0x1); /* 0x834[1:0] = 0x1 */
-    /* set PD_TH_20M for BB Yn user guide R27 */
-    _device.phy_set_bb_reg(rPwed_TH_Jaguar,
-                           BIT13 | BIT14 | BIT15 | BIT16 | BIT17,
-                           0x17); /* 0x830[17:13]=5'b10111 */
-
-    /* set PWED_TH for BB Yn user guide R29 */
-
-    if (current_bw == ChannelWidth_t::CHANNEL_WIDTH_20 &&
-        _eepromManager->version_id.RFType == RF_TYPE_1T1R && eLNA_2g == false) {
-      /* 0x830[3:1]=3'b010 */
-      _device.phy_set_bb_reg(rPwed_TH_Jaguar, BIT1 | BIT2 | BIT3, 0x02);
+    if (is_8821) {
+      phy_SetRFEReg8821(Band);
     } else {
-      /* 0x830[3:1]=3'b100 */
-      _device.phy_set_bb_reg(rPwed_TH_Jaguar, BIT1 | BIT2 | BIT3, 0x04);
+      /* <20131128, VincentL> Remove 0x830[3:1] setting when switching 2G/5G,
+       * requested by Yn. */
+      _device.phy_set_bb_reg(rBWIndication_Jaguar, 0x3,
+                             0x1); /* 0x834[1:0] = 0x1 */
+      /* set PD_TH_20M for BB Yn user guide R27 */
+      _device.phy_set_bb_reg(rPwed_TH_Jaguar,
+                             BIT13 | BIT14 | BIT15 | BIT16 | BIT17,
+                             0x17); /* 0x830[17:13]=5'b10111 */
+
+      /* set PWED_TH for BB Yn user guide R29 */
+      if (current_bw == ChannelWidth_t::CHANNEL_WIDTH_20 &&
+          _eepromManager->version_id.RFType == RF_TYPE_1T1R &&
+          eLNA_2g == false) {
+        /* 0x830[3:1]=3'b010 */
+        _device.phy_set_bb_reg(rPwed_TH_Jaguar, BIT1 | BIT2 | BIT3, 0x02);
+      } else {
+        /* 0x830[3:1]=3'b100 */
+        _device.phy_set_bb_reg(rPwed_TH_Jaguar, BIT1 | BIT2 | BIT3, 0x04);
+      }
     }
 
-    /* AGC table select */
-    _device.phy_set_bb_reg(rAGC_table_Jaguar, 0x3, 0); /* 0x82C[1:0] = 2b'00 */
+    /* AGC table select. 8821AU uses the path-A TX scale knob at 0xC1C[11:8];
+     * 8812/8814 use the AGC table select bit at 0x82C[1:0]. */
+    if (is_8821 && IS_NORMAL_CHIP(_eepromManager->version_id)) {
+      _device.phy_set_bb_reg(rA_TxScale_Jaguar, 0xF00, 0);
+    } else {
+      _device.phy_set_bb_reg(rAGC_table_Jaguar, 0x3, 0);
+    }
 
-    phy_SetRFEReg8812(Band);
+    if (!is_8821) {
+      phy_SetRFEReg8812(Band);
+    }
 
     /* <20131106, Kordan> Workaround to fix CCK FA for scan issue. */
     /* if( pHalData.bMPMode == FALSE) */
@@ -509,23 +522,33 @@ void RadioManagementModule::PHY_SwitchWirelessBand8812(BandType Band) {
     _device.phy_set_bb_reg(rOFDMCCKEN_Jaguar, bOFDMEN_Jaguar | bCCKEN_Jaguar,
                            0x03);
 
-    /* <20131128, VincentL> Remove 0x830[3:1] setting when switching 2G/5G,
-     * requested by Yn. */
-    _device.phy_set_bb_reg(rBWIndication_Jaguar, 0x3,
-                           0x2); /* 0x834[1:0] = 0x2 */
-    /* set PD_TH_20M for BB Yn user guide R27 */
-    _device.phy_set_bb_reg(rPwed_TH_Jaguar,
-                           BIT13 | BIT14 | BIT15 | BIT16 | BIT17,
-                           0x15); /* 0x830[17:13]=5'b10101 */
+    if (is_8821) {
+      phy_SetRFEReg8821(Band);
+    } else {
+      /* <20131128, VincentL> Remove 0x830[3:1] setting when switching 2G/5G,
+       * requested by Yn. */
+      _device.phy_set_bb_reg(rBWIndication_Jaguar, 0x3,
+                             0x2); /* 0x834[1:0] = 0x2 */
+      /* set PD_TH_20M for BB Yn user guide R27 */
+      _device.phy_set_bb_reg(rPwed_TH_Jaguar,
+                             BIT13 | BIT14 | BIT15 | BIT16 | BIT17,
+                             0x15); /* 0x830[17:13]=5'b10101 */
 
-    /* set PWED_TH for BB Yn user guide R29 */
-    /* 0x830[3:1]=3'b100 */
-    _device.phy_set_bb_reg(rPwed_TH_Jaguar, BIT1 | BIT2 | BIT3, 0x04);
+      /* set PWED_TH for BB Yn user guide R29 */
+      /* 0x830[3:1]=3'b100 */
+      _device.phy_set_bb_reg(rPwed_TH_Jaguar, BIT1 | BIT2 | BIT3, 0x04);
+    }
 
-    /* AGC table select */
-    _device.phy_set_bb_reg(rAGC_table_Jaguar, 0x3, 1); /* 0x82C[1:0] = 2'b00 */
+    /* AGC table select (same family-split as 2.4G branch). */
+    if (is_8821 && IS_NORMAL_CHIP(_eepromManager->version_id)) {
+      _device.phy_set_bb_reg(rA_TxScale_Jaguar, 0xF00, 1);
+    } else {
+      _device.phy_set_bb_reg(rAGC_table_Jaguar, 0x3, 1);
+    }
 
-    phy_SetRFEReg8812(Band);
+    if (!is_8821) {
+      phy_SetRFEReg8812(Band);
+    }
 
     /* <20131106, Kordan> Workaround to fix CCK FA for scan issue. */
     /* if( pHalData.bMPMode == FALSE) */
@@ -534,6 +557,37 @@ void RadioManagementModule::PHY_SwitchWirelessBand8812(BandType Band) {
   }
 
   phy_SetBBSwingByBand_8812A(Band);
+}
+
+/* 8821AU has a single RFE pinmux register set (path A only). The 2.4G/5G
+ * paths split on EFUSE ExternalLNA_2G — when an external LNA is present the
+ * pinmux is configured for the EXT_LNA cell of the RFE control plane (mux
+ * values 0x2 with INV[20]=1). Ported from svpcom/rtl8812au v5.2.20 via
+ * PR#22. */
+void RadioManagementModule::phy_SetRFEReg8821(BandType Band) {
+  if (Band == BandType::BAND_ON_2_4G) {
+    _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, 0xF000, 0x7);
+    _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, 0xF0, 0x7);
+
+    if (_eepromManager->ExternalLNA_2G) {
+      _device.phy_set_bb_reg(rA_RFE_Inv_Jaguar, BIT20, 1);
+      _device.phy_set_bb_reg(rA_RFE_Inv_Jaguar, BIT22, 0);
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, BIT2 | BIT1 | BIT0, 0x2);
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, BIT10 | BIT9 | BIT8, 0x2);
+    } else {
+      _device.phy_set_bb_reg(rA_RFE_Inv_Jaguar, BIT20, 0);
+      _device.phy_set_bb_reg(rA_RFE_Inv_Jaguar, BIT22, 0);
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, BIT2 | BIT1 | BIT0, 0x7);
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, BIT10 | BIT9 | BIT8, 0x7);
+    }
+  } else {
+    _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, 0xF000, 0x5);
+    _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, 0xF0, 0x4);
+    _device.phy_set_bb_reg(rA_RFE_Inv_Jaguar, BIT20, 0);
+    _device.phy_set_bb_reg(rA_RFE_Inv_Jaguar, BIT22, 0);
+    _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, BIT2 | BIT1 | BIT0, 0x7);
+    _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, BIT10 | BIT9 | BIT8, 0x7);
+  }
 }
 
 void RadioManagementModule::phy_SetRFEReg8812(BandType Band) {

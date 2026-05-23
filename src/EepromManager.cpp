@@ -80,31 +80,105 @@ void EepromManager::LateInitFor8814A() {
                 LNAType_2G, LNAType_5G);
 }
 
+/* RTL8821AU is Jaguar-family silicon (CHIP_8821 = 7 in Realtek's HalVerDef),
+ * 1T1R AC + BT combo. It responds to REG_SYS_CFG with an 8812-shaped value
+ * (low byte 0x35), so plain SYS_CFG-bit inspection misidentifies it as 8812.
+ * Distinguish by VID:PID at probe time. Genuine 8821AU SKUs we know about:
+ *  - TP-Link Archer T2U Plus / T4U / etc:  2357:0120 / 011E / 0122
+ *  - Realtek reference PIDs:               0bda:0820 / 0821 / 0823 / 8822
+ *  - OEM rebadges (Senao, ASUS, Edimax, D-Link, Hawking, …):
+ *    0411:0242 / 029B   (Senao)
+ *    0846:9052          (ASUS)
+ *    0e66:0023          (Hawking)
+ *    2001:3314 / 3318   (D-Link)
+ *    20f4:804b          (TRENDnet)
+ *    7392:a811/a812/a813/b611 (Edimax)
+ *    3823:6249          (HP/MaxNet)
+ *    2019:ab32          (Planex)
+ *    04bb:0953          (I-O Data)
+ *    056e:4007 / 400e / 400f (ELECOM)
+ *
+ * NOT included on purpose:
+ *  - 0bda:0811 / a811 / b811  — those are 8811AU (1T1R cut of 8812 silicon);
+ *    they ride on CHIP_8812 + RFType=1T1R, NOT through the 8821 HAL.
+ *  - 0bda:c811  — RTL8811CU, unrelated silicon, not supported here. */
+static bool is_rtl8821a_pid(uint16_t vid, uint16_t pid) {
+  const uint32_t key = (static_cast<uint32_t>(vid) << 16) | pid;
+  switch (key) {
+  case 0x0BDA0820:
+  case 0x0BDA0821:
+  case 0x0BDA0823:
+  case 0x0BDA8822:
+  case 0x0411'0242:
+  case 0x0411'029B:
+  case 0x04BB'0953:
+  case 0x056E'4007:
+  case 0x056E'400E:
+  case 0x056E'400F:
+  case 0x0846'9052:
+  case 0x0E66'0023:
+  case 0x2001'3314:
+  case 0x2001'3318:
+  case 0x2019'AB32:
+  case 0x20F4'804B:
+  case 0x2357'011E:
+  case 0x2357'0120:
+  case 0x2357'0122:
+  case 0x3823'6249:
+  case 0x7392'A811:
+  case 0x7392'A812:
+  case 0x7392'A813:
+  case 0x7392'B611:
+    return true;
+  default:
+    return false;
+  }
+}
+
 void EepromManager::read_chip_version_8812a(RtlUsbAdapter device) {
   uint32_t value32 = device.rtw_read32(REG_SYS_CFG);
   _logger->info("read_chip_version_8812a SYS_CFG(0x{:X})=0x{:08X}", REG_SYS_CFG,
                 value32);
 
   const uint16_t pid = device.idProduct();
+  const uint16_t vid = device.idVendor();
   const bool is_8814a = (pid == 0x8813);
+  const bool is_8821 = !is_8814a && is_rtl8821a_pid(vid, pid);
+
+  HAL_IC_TYPE_E ic_type;
+  if (is_8814a) {
+    ic_type = CHIP_8814A;
+  } else if (is_8821) {
+    ic_type = CHIP_8821;
+  } else {
+    ic_type = CHIP_8812;
+  }
+
+  /* RFType:
+   *   8814AU      → 4T4R RF (baseband caps at 3 spatial streams)
+   *   8821AU      → always 1T1R (Jaguar-family AC+BT combo, single chain)
+   *   8812/8811AU → SYS_CFG bit 27 (RF_TYPE_ID): set on 1T1R, clear on 2T2R */
+  HAL_RF_TYPE_E rf_type;
+  if (is_8814a) {
+    rf_type = RF_TYPE_4T4R;
+  } else if (is_8821) {
+    rf_type = RF_TYPE_1T1R;
+  } else {
+    rf_type =
+        (value32 & RF_TYPE_ID) ? RF_TYPE_1T1R : RF_TYPE_2T2R;
+  }
 
   version_id = {
-      .ICType = is_8814a ? CHIP_8814A : CHIP_8812,
+      .ICType = ic_type,
       .ChipType = (value32 & RTL_ID) ? TEST_CHIP : NORMAL_CHIP,
       .VendorType = (value32 & VENDOR_ID) ? CHIP_VENDOR_UMC : CHIP_VENDOR_TSMC,
-      /* For the Jaguar 8812-family (8812AU / 8811AU), SYS_CFG bit 27
-       * (RF_TYPE_ID) is set on 1T1R cuts and clear on 2T2R cuts. RTL8814AU
-       * is identified by USB PID 0x8813 instead — the chip is 4T4R RF /
-       * 3-SS baseband cap. */
-      .RFType = is_8814a ? RF_TYPE_4T4R
-                         : ((value32 & RF_TYPE_ID) ? RF_TYPE_1T1R
-                                                   : RF_TYPE_2T2R),
+      .RFType = rf_type,
   };
 
   /* Manual override: force 1T1R even when SYS_CFG reports 2T2R
    * (useful if EFUSE/strap is mis-burnt on a 1T1R board). Only meaningful
-   * for the 8812-family; 8814AU keeps its 4T4R RFType. */
-  if (!is_8814a && registry_priv::special_rf_path == 1) {
+   * for the 8812-family; 8814AU keeps its 4T4R RFType, 8821AU is already 1T1R. */
+  if (!is_8814a && !is_8821 && registry_priv::special_rf_path == 1) {
     version_id.RFType = RF_TYPE_1T1R;
   }
 

@@ -53,12 +53,14 @@ FirmwareManager::FirmwareManager(RtlUsbAdapter device, Logger_t logger)
     : _device{device}, _logger{logger} {}
 
 /* The Jaguar firmware-header signature lives in the low 16 bits of the first
- * word: 0x95xx for 8812/8811, 0x88xx for 8814. */
+ * word: 0x95xx for 8812/8811, 0x88xx for 8814, 0x21xx for 8821A. */
 static bool jaguar_fw_header_present(const uint8_t *buf, HAL_IC_TYPE_E ic_type) {
   const uint16_t signature =
       static_cast<uint16_t>(GET_FIRMWARE_HDR_SIGNATURE_8812(buf));
   if (ic_type == CHIP_8814A)
     return (signature & 0xFFF0u) == 0x8810u;
+  if (ic_type == CHIP_8821)
+    return (signature & 0xFFF0u) == 0x2100u;
   return (signature & 0xFFF0u) == 0x9500u;
 }
 

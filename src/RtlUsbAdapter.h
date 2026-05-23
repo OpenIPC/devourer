@@ -5,6 +5,7 @@
 
 #include <libusb.h>
 #include <thread>
+#include <vector>
 
 #include "FrameParser.h"
 #include "drv_types.h"
@@ -36,6 +37,17 @@ class RtlUsbAdapter {
 
   enum libusb_speed usbSpeed;
   uint8_t numOutPipes = 0;
+  /* Bulk-IN endpoint address used by infinite_read(). 8812AU / 8814AU expose
+   * IN endpoint at 0x81; 8821AU has a different descriptor (no 0x81), so we
+   * pick this up from the interface descriptor at InitDvObj time instead of
+   * hardcoding. Default 0x81 keeps existing behaviour for 88[12,14]AU when
+   * the descriptor walk doesn't override. */
+  uint8_t _bulk_in_ep = 0x81;
+  /* Bulk-OUT endpoint addresses, in descriptor order. 8812AU exposes 4 OUT
+   * EPs at 0x02/0x03/0x04/0x05 (HQ/NQ/LQ/EQ); 8821AU exposes 0x05/0x06/0x08/
+   * 0x09. send_packet picks index 0 (HQ-equivalent) by default; DEVOURER_TX_EP
+   * env override still wins for diagnostic bisection. */
+  std::vector<uint8_t> _bulk_out_eps;
 
   uint16_t _idVendor = 0;
   uint16_t _idProduct = 0;

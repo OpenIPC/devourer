@@ -97,17 +97,32 @@ int main(int argc, char **argv) {
       target_pid = static_cast<uint16_t>(std::strtoul(pid_env, nullptr, 0));
       logger->info("DEVOURER_PID={:04x} (limiting to this PID)", target_pid);
     }
+    /* DEVOURER_VID overrides the VID (default 0x0bda) — needed for OEM-rebadged
+     * Jaguar dongles like the TP-Link Archer T2U Plus (2357:0120). */
+    uint16_t target_vid = USB_VENDOR_ID;
+    if (const char *vid_env = std::getenv("DEVOURER_VID")) {
+      target_vid = static_cast<uint16_t>(std::strtoul(vid_env, nullptr, 0));
+      logger->info("DEVOURER_VID={:04x} (overriding default VID)", target_vid);
+    }
     for (uint16_t pid : kRealtekProductIds) {
       if (target_pid != 0 && pid != target_pid) continue;
-      handle = libusb_open_device_with_vid_pid(context, USB_VENDOR_ID, pid);
+      handle = libusb_open_device_with_vid_pid(context, target_vid, pid);
       if (handle != NULL) {
-        logger->info("Opened Realtek device {:04x}:{:04x}", USB_VENDOR_ID, pid);
+        logger->info("Opened device {:04x}:{:04x}", target_vid, pid);
         break;
       }
     }
+    /* DEVOURER_PID can name a PID not in kRealtekProductIds (e.g. 0x0120 for
+     * the T2U Plus). Try that direct combination once before giving up. */
+    if (handle == NULL && target_pid != 0) {
+      handle = libusb_open_device_with_vid_pid(context, target_vid, target_pid);
+      if (handle != NULL) {
+        logger->info("Opened device {:04x}:{:04x} (via DEVOURER_PID)",
+                     target_vid, target_pid);
+      }
+    }
     if (handle == NULL) {
-      logger->error("No supported Realtek device found under VID {:04x}",
-                    USB_VENDOR_ID);
+      logger->error("No supported device found under VID {:04x}", target_vid);
       libusb_exit(context);
       return 1;
     }

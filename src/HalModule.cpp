@@ -109,11 +109,14 @@ bool HalModule::rtl8812au_hal_init() {
    * both chips — these write to chip-version-agnostic registers and the
    * functions that do diverge dispatch internally on ICType. */
   const bool is_8814a = _eepromManager->version_id.ICType == CHIP_8814A;
+  const bool is_8821 = _eepromManager->version_id.ICType == CHIP_8821;
   if (!is_8814a) {
-    _device.rtw_write8(REG_RF_CTRL, 5);
-    _device.rtw_write8(REG_RF_CTRL, 7);
-    _device.rtw_write8(REG_RF_B_CTRL_8812, 5);
-    _device.rtw_write8(REG_RF_B_CTRL_8812, 7);
+    if (!is_8821) {
+      _device.rtw_write8(REG_RF_CTRL, 5);
+      _device.rtw_write8(REG_RF_CTRL, 7);
+      _device.rtw_write8(REG_RF_B_CTRL_8812, 5);
+      _device.rtw_write8(REG_RF_B_CTRL_8812, 7);
+    }
 
     // If HW didn't go through a complete de-initial procedure,
     // it probably occurs some problem for double initial procedure.
@@ -130,7 +133,9 @@ bool HalModule::rtl8812au_hal_init() {
    * runs LLT init AFTER fw boot, and doing it pre-fw on 8814 breaks the
    * beacon-queue fwdl path (the chip silently rejects bulk OUT writes). */
   if (_eepromManager->version_id.ICType != CHIP_8814A) {
-    if (!InitLLTTable8812A(TX_PAGE_BOUNDARY_8812)) {
+    const uint8_t txpktbuf_bndy =
+        is_8821 ? TX_PAGE_BOUNDARY_8821 : TX_PAGE_BOUNDARY_8812;
+    if (!InitLLTTable8812A(txpktbuf_bndy)) {
       _logger->error("InitLLTTable8812A failed");
       return false;
     }
@@ -198,11 +203,18 @@ bool HalModule::rtl8812au_hal_init() {
           llt);
     }
   } else {
-    _InitQueueReservedPage_8812AUsb();
-    _InitTxBufferBoundary_8812AUsb();
+    if (is_8821) {
+      _InitQueueReservedPage_8821AUsb();
+      _InitTxBufferBoundary_8821AUsb();
+    } else {
+      _InitQueueReservedPage_8812AUsb();
+      _InitTxBufferBoundary_8812AUsb();
+    }
     _InitQueuePriority_8812AUsb();
     _InitPageBoundary_8812AUsb();
-    _InitTransferPageSize_8812AUsb();
+    if (!is_8821) {
+      _InitTransferPageSize_8812AUsb();
+    }
   }
 
   // Get Rx PHY status in order to report RSSI and others.
@@ -227,6 +239,13 @@ bool HalModule::rtl8812au_hal_init() {
   // than the real Rx buffer size in 88E. 2011.08.05. by tynli.
   value8 = _device.rtw_read8(REG_CR);
   _device.rtw_write8(REG_CR, (uint8_t)(value8 | MACTXEN | MACRXEN));
+
+  if (is_8821) {
+    uint8_t sysCfg3 = _device.rtw_read8(REG_SYS_CFG + 3);
+    if ((sysCfg3 & BIT0) != 0) {
+      _device.rtw_write8(0x7c, (uint8_t)(_device.rtw_read8(0x7c) | BIT6));
+    }
+  }
 
   _device.rtw_write16(REG_PKT_VO_VI_LIFE_TIME, 0x0400); /* unit: 256us. 256ms */
   _device.rtw_write16(REG_PKT_BE_BK_LIFE_TIME, 0x0400); /* unit: 256us. 256ms */
@@ -779,6 +798,20 @@ bool HalModule::HalPwrSeqCmdParsing(WLAN_PWR_CFG *PwrSeqCmd) {
       AryIdx++;
       continue;
     }
+    uint8_t cutMask = PWR_CUT_ALL_MSK;
+    if (_eepromManager->version_id.ICType == CHIP_8821) {
+      cutMask = _eepromManager->version_id.ChipType == NORMAL_CHIP
+                    ? PWR_CUT_A_MSK
+                    : PWR_CUT_TESTCHIP_MSK;
+    }
+    if (!(GET_PWR_CFG_CUT_MASK(PwrCfgCmd) & cutMask)) {
+      AryIdx++;
+      continue;
+    }
+    if (!(GET_PWR_CFG_FAB_MASK(PwrCfgCmd) & PWR_FAB_ALL_MSK)) {
+      AryIdx++;
+      continue;
+    }
     switch (PwrCfgCmd.cmd) {
     case PWR_CMD_READ:
       break;
@@ -1232,6 +1265,51 @@ void HalModule::_InitTxBufferBoundary_8812AUsb() {
   _device.rtw_write8(REG_WMAC_LBK_BF_HD, txPageBoundary8812);
   _device.rtw_write8(REG_TRXFF_BNDY, txPageBoundary8812);
   _device.rtw_write8(REG_TDECTRL + 1, txPageBoundary8812);
+}
+
+void HalModule::_InitQueueReservedPage_8821AUsb() {
+  uint32_t numHQ = 0;
+  uint32_t numLQ = 0;
+  uint32_t numNQ = 0;
+
+  if (registry_priv::wifi_spec) {
+    if (_device.OutEpQueueSel & TxSele::TX_SELE_HQ) {
+      numHQ = WMM_NORMAL_PAGE_NUM_HPQ_8821;
+    }
+    if (_device.OutEpQueueSel & TxSele::TX_SELE_LQ) {
+      numLQ = WMM_NORMAL_PAGE_NUM_LPQ_8821;
+    }
+    if (_device.OutEpQueueSel & TxSele::TX_SELE_NQ) {
+      numNQ = WMM_NORMAL_PAGE_NUM_NPQ_8821;
+    }
+  } else {
+    if (_device.OutEpQueueSel & TxSele::TX_SELE_HQ) {
+      numHQ = NORMAL_PAGE_NUM_HPQ_8821;
+    }
+    if (_device.OutEpQueueSel & TxSele::TX_SELE_LQ) {
+      numLQ = NORMAL_PAGE_NUM_LPQ_8821;
+    }
+    if (_device.OutEpQueueSel & TxSele::TX_SELE_NQ) {
+      numNQ = NORMAL_PAGE_NUM_NPQ_8821;
+    }
+  }
+
+  const uint32_t numPubQ = TX_TOTAL_PAGE_NUMBER_8821 - numHQ - numLQ - numNQ;
+  _device.rtw_write8(REG_RQPN_NPQ, (uint8_t)_NPQ(numNQ));
+  _device.rtw_write32(REG_RQPN,
+                      _HPQ(numHQ) | _LPQ(numLQ) | _PUBQ(numPubQ) | LD_RQPN);
+}
+
+void HalModule::_InitTxBufferBoundary_8821AUsb() {
+  const uint8_t txpktbuf_bndy = registry_priv::wifi_spec
+                                    ? WMM_NORMAL_TX_PAGE_BOUNDARY_8821
+                                    : TX_PAGE_BOUNDARY_8821;
+
+  _device.rtw_write8(REG_BCNQ_BDNY, txpktbuf_bndy);
+  _device.rtw_write8(REG_MGQ_BDNY, txpktbuf_bndy);
+  _device.rtw_write8(REG_WMAC_LBK_BF_HD, txpktbuf_bndy);
+  _device.rtw_write8(REG_TRXFF_BNDY, txpktbuf_bndy);
+  _device.rtw_write8(REG_TDECTRL + 1, txpktbuf_bndy);
 }
 
 void HalModule::_InitQueuePriority_8812AUsb() {
@@ -1711,6 +1789,7 @@ void HalModule::_InitBeaconMaxError_8812A() {
 
 void HalModule::_InitBurstPktLen() {
   uint8_t speedvalue, provalue, temp;
+  const bool is_8821 = _eepromManager->version_id.ICType == CHIP_8821;
 
   _device.rtw_write8(0xf050, 0x01); /* usb3 rx interval */
   _device.rtw_write16(
@@ -1719,7 +1798,7 @@ void HalModule::_InitBurstPktLen() {
   _device.rtw_write8(0x289, 0xf5); /* for rxdma control */
 
   /* 0x456 = 0x70, sugguested by Zhilin */
-  _device.rtw_write8(REG_AMPDU_MAX_TIME_8812, 0x70);
+  _device.rtw_write8(REG_AMPDU_MAX_TIME_8812, is_8821 ? 0x5e : 0x70);
 
   _device.rtw_write32(REG_AMPDU_MAX_LENGTH_8812, 0xffffffff);
   _device.rtw_write8(REG_USTIME_TSF, 0x50);
@@ -1727,6 +1806,9 @@ void HalModule::_InitBurstPktLen() {
 
   speedvalue =
       _device.rtw_read8(0xff); /* check device operation speed: SS 0xff bit7 */
+  if (is_8821) {
+    speedvalue = BIT7;
+  }
 
   if ((speedvalue & BIT7) != 0) {
     /* USB2/1.1 Mode */
@@ -1768,6 +1850,10 @@ void HalModule::_InitBurstPktLen() {
   _device.rtw_write16(REG_MAX_AGGR_NUM, 0x1f1f);
   _device.rtw_write8(REG_FWHW_TXQ_CTRL,
                      (uint8_t)(_device.rtw_read8(REG_FWHW_TXQ_CTRL) & (~BIT7)));
+  if (is_8821 && !registry_priv::wifi_spec) {
+    _device.rtw_write8(REG_FWHW_TXQ_CTRL, 0x80);
+    _device.rtw_write32(REG_FAST_EDCA_CTRL, 0x03087777);
+  }
 
   // AMPDUBurstMode is always false
   // if (pHalData.AMPDUBurstMode)

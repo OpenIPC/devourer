@@ -82,7 +82,9 @@ private:
   bool check_positive(int32_t condition1, int32_t condition2,
                       int32_t condition4);
   void _InitQueueReservedPage_8812AUsb();
+  void _InitQueueReservedPage_8821AUsb();
   void _InitTxBufferBoundary_8812AUsb();
+  void _InitTxBufferBoundary_8821AUsb();
   void _InitQueuePriority_8812AUsb();
   void _InitNormalChipTwoOutEpPriority_8812AUsb();
   void _InitNormalChipRegPriority_8812AUsb(uint16_t beQ, uint16_t bkQ,

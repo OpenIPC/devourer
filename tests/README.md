@@ -130,6 +130,68 @@ per-cell stdout/stderr logs end up at `/tmp/devourer-regress-last/`.
 
 Environment variable equivalents: `DEVOURER_VM_NAME`, `DEVOURER_VM_SSH`.
 
+## Specialized modes
+
+The default invocation runs the 4-cell matrix on one ordered (TX, RX)
+pair. Two additional modes extend coverage along different axes.
+
+### `--full-matrix`: cross-chipset interop
+
+Iterates every ordered (TX, RX) pair of plugged DUTs across all four
+driver-side combinations and emits four NxN tables. For N adapters,
+N×(N-1)×4 cells; ~16 min for N=3 in VM mode. Useful for catching
+cross-chipset regressions in PRs that touch shared HAL code.
+
+```bash
+sudo python3 tests/regress.py --full-matrix --channel 100 \
+    --vm-name devourer-testrig --vm-ssh <user>@<VM-IP>
+```
+
+### `--encoding-matrix`: chip-specific radiotap encoding asymmetries
+
+For one ordered TX→RX pair, iterates (driver mode × radiotap encoding
+flags). 16 cells per run (~10 min in VM mode). Designed to surface
+chip-specific RX asymmetries that the default and full matrices miss
+because they only exercise the chip's default encoding.
+
+```bash
+sudo python3 tests/regress.py --encoding-matrix \
+    --tx-pid 0x8813 --rx-pid 0x0120 --channel 100 \
+    --vm-name devourer-testrig --vm-ssh <user>@<VM-IP>
+```
+
+Encoding combos iterated (with MCS 1, 20 MHz): `BCC`, `LDPC`, `STBC=1`,
+`LDPC+STBC=1`. Add more in `ENCODING_COMBOS` at the top of `regress.py`
+if you need other mixes (e.g. MCS 7, 40 MHz, or VHT).
+
+The underlying knobs are also usable standalone for one-off targeted
+TX:
+
+- Devourer TX: `DEVOURER_TX_LDPC=1`, `DEVOURER_TX_STBC=1`,
+  `DEVOURER_TX_MCS=N`, `DEVOURER_TX_BW=20|40` env vars read by
+  `WiFiDriverTxDemo` to patch the radiotap MCS field at startup.
+- Kernel-side scapy TX: `--ldpc`, `--stbc N`, `--mcs N`, `--bandwidth
+  20|40` flags on `tests/inject_beacon.py`.
+
+#### Known caveat: kernel-TX encoding flags may not reach the air
+
+mac80211 + the `aircrack-ng/88XXau` driver don't necessarily honour the
+radiotap MCS flags on TX — the chip's own rate-selection logic may
+override them. So the `k/k` and `k/d` rows of the table reflect what
+the *kernel* driver chose to transmit, which may collapse all four
+encoding columns onto the chip's default. Validated 2026-05-25 with
+`--encoding-matrix --tx-pid 0x8813 --rx-pid 0x0120`: the `k/d` row was
+flat across all four columns (`~400 hits`), consistent with the kernel
+stripping the LDPC/STBC bits before they reached the air rather than
+the 8821AU RX accepting LDPC frames.
+
+The `d/k` and `d/d` rows are not affected — `WiFiDriverTxDemo` writes
+the radiotap header directly into the chip's bulk-OUT buffer, so the
+`DEVOURER_TX_*` env vars are the ground truth for what flies. To
+validate kernel-TX encoding made it on-air, run a third adapter as
+sniffer (e.g. AR9271 via tcpdump on the same channel) and inspect the
+MCS flags in the captured radiotap.
+
 ## Supported DUTs
 
 Listed in `SUPPORTED_DUTS` at the top of `regress.py`. Extend the dict

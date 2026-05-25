@@ -501,12 +501,25 @@ class CellResult:
 # ---------------------------------------------------------------------------
 
 
-def _devourer_env(dut: Dut, channel: int) -> dict[str, str]:
+def _devourer_env(dut: Dut, channel: int,
+                  tx_encoding: Optional[dict] = None) -> dict[str, str]:
     env = os.environ.copy()
     env["DEVOURER_VID"] = f"0x{dut.vid}"
     env["DEVOURER_PID"] = f"0x{dut.pid}"
     env["DEVOURER_CHANNEL"] = str(channel)
     env["DEVOURER_USB_QUIET"] = "1"
+    if tx_encoding:
+        # DEVOURER_TX_* knobs are read by txdemo/main.cpp to patch the
+        # radiotap MCS info bytes before the TX loop. Only meaningful when
+        # spawning WiFiDriverTxDemo; harmless on the RX side.
+        if tx_encoding.get("mcs") is not None:
+            env["DEVOURER_TX_MCS"] = str(tx_encoding["mcs"])
+        if tx_encoding.get("ldpc"):
+            env["DEVOURER_TX_LDPC"] = "1"
+        if tx_encoding.get("stbc"):
+            env["DEVOURER_TX_STBC"] = str(tx_encoding["stbc"])
+        if tx_encoding.get("bandwidth") is not None:
+            env["DEVOURER_TX_BW"] = str(tx_encoding["bandwidth"])
     return env
 
 
@@ -522,12 +535,13 @@ def _spawn_devourer_rx(
 
 
 def _spawn_devourer_tx(
-    devourer_root: Path, dut: Dut, channel: int, log_path: Path
+    devourer_root: Path, dut: Dut, channel: int, log_path: Path,
+    encoding: Optional[dict] = None,
 ) -> subprocess.Popen:
     fh = open(log_path, "w")
     return subprocess.Popen(
         [str(devourer_root / "build" / "WiFiDriverTxDemo")],
-        env=_devourer_env(dut, channel),
+        env=_devourer_env(dut, channel, tx_encoding=encoding),
         stdout=fh, stderr=subprocess.STDOUT, start_new_session=True,
     )
 
@@ -553,7 +567,7 @@ def _spawn_kernel_rx(
 
 def _spawn_kernel_tx(
     kh: KernelHost, devourer_root: Path, iface: str, channel: int,
-    duration: float, log_path: Path,
+    duration: float, log_path: Path, encoding: Optional[dict] = None,
 ) -> subprocess.Popen:
     """TX side: scapy injector that emits the canonical beacon.
     Local mode runs tests/inject_beacon.py directly. VM mode scps it over
@@ -561,15 +575,25 @@ def _spawn_kernel_tx(
     kh.iface_to_monitor(iface, channel)
     fh = open(log_path, "w")
     injector = devourer_root / "tests" / "inject_beacon.py"
+    extra: list[str] = []
+    if encoding:
+        if encoding.get("mcs") is not None:
+            extra += ["--mcs", str(encoding["mcs"])]
+        if encoding.get("ldpc"):
+            extra.append("--ldpc")
+        if encoding.get("stbc"):
+            extra += ["--stbc", str(encoding["stbc"])]
+        if encoding.get("bandwidth") is not None:
+            extra += ["--bandwidth", str(encoding["bandwidth"])]
     if kh.is_remote:
         # Ship the injector to the VM (overwrites each run — fine for the
         # tiny script).
         kh.push_file(injector, "/tmp/inject_beacon.py")
         cmd = ["python3", "/tmp/inject_beacon.py",
-               "--iface", iface, "--duration", str(duration)]
+               "--iface", iface, "--duration", str(duration)] + extra
     else:
         cmd = [sys.executable, str(injector),
-               "--iface", iface, "--duration", str(duration)]
+               "--iface", iface, "--duration", str(duration)] + extra
     return kh.popen(cmd, stdout=fh, stderr=subprocess.STDOUT)
 
 
@@ -696,9 +720,14 @@ def run_cell(
     duration: float,
     tmpdir: Path,
     kh: KernelHost,
+    encoding: Optional[dict] = None,
 ) -> CellResult:
     """Run one matrix cell. State contract: always restore DUTs to a clean
-    baseline (host kernel-bound) on exit via try/finally."""
+    baseline (host kernel-bound) on exit via try/finally.
+
+    `encoding` (optional dict, used by --encoding-matrix) passes radiotap
+    TX encoding flags through to the TX-side spawn: kernel TX → injector
+    CLI args, devourer TX → DEVOURER_TX_* env vars."""
     cell_id = f"tx-{tx_side}_rx-{rx_side}"
     tx_log = tmpdir / f"{cell_id}.tx.log"
     rx_log = tmpdir / f"{cell_id}.rx.log"
@@ -722,12 +751,15 @@ def run_cell(
 
         # Stage 3: TX side.
         if tx_side == "devourer":
-            tx_proc = _spawn_devourer_tx(devourer_root, tx_dut, channel, tx_log)
+            tx_proc = _spawn_devourer_tx(
+                devourer_root, tx_dut, channel, tx_log, encoding=encoding
+            )
             tx_warmup = 6.0
         else:
             tx_iface = kh.wait_for_wlan_iface(tx_dut)
             tx_proc = _spawn_kernel_tx(
-                kh, devourer_root, tx_iface, channel, duration, tx_log
+                kh, devourer_root, tx_iface, channel, duration, tx_log,
+                encoding=encoding,
             )
             tx_warmup = 0.5
 
@@ -947,6 +979,94 @@ def emit_full_markdown(
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------------------
+# Encoding matrix — one TX/RX pair, iterate (driver-mode × encoding flags).
+# Surfaces chip-specific radiotap-encoding asymmetries that --full-matrix
+# can't see because every cell there uses the default encoding (MCS 1, BCC,
+# no STBC). Motivating example: RTL8821AU TXes LDPC fine but can't RX LDPC
+# frames (the chip's decoder lacks the LDPC block), so an `LDPC` k/d cell
+# to an 8821AU goes to 0 hits while `BCC` works.
+# ---------------------------------------------------------------------------
+
+ENCODING_COMBOS = [
+    ("BCC",         {"mcs": 1}),
+    ("LDPC",        {"mcs": 1, "ldpc": True}),
+    ("STBC=1",      {"mcs": 1, "stbc": 1}),
+    ("LDPC+STBC=1", {"mcs": 1, "ldpc": True, "stbc": 1}),
+]
+
+
+def run_encoding_matrix(
+    devourer_root: Path,
+    tx_dut: Dut,
+    rx_dut: Dut,
+    channel: int,
+    duration: float,
+    threshold: int,
+    tmpdir: Path,
+    kh: KernelHost,
+) -> dict[tuple[str, str, str], CellResult]:
+    """For one ordered (TX, RX) pair, iterate every driver-mode × encoding
+    combination. Returns dict keyed by (tx_side, rx_side, encoding_label)."""
+    results: dict[tuple[str, str, str], CellResult] = {}
+    total = len(FULL_MATRIX_MODES) * len(ENCODING_COMBOS)
+    idx = 0
+    for tx_side, rx_side, _label in FULL_MATRIX_MODES:
+        for enc_label, enc in ENCODING_COMBOS:
+            idx += 1
+            cell_hdr = (
+                f"[{time.strftime('%H:%M:%S')}] [{idx}/{total}] "
+                f"TX={tx_dut.chipset} ({tx_side}) → "
+                f"RX={rx_dut.chipset} ({rx_side})  enc=[{enc_label}]"
+            )
+            print(cell_hdr + " ...", flush=True)
+            try:
+                r = run_cell(
+                    devourer_root, tx_dut, rx_dut, tx_side, rx_side,
+                    channel, duration, tmpdir, kh, encoding=enc,
+                )
+            except Exception as e:
+                print(f"  ✗ cell crashed: {e}", flush=True)
+                r = CellResult(hits=0, tx_attempts=0, tx_failures=0,
+                               duration_s=0.0, notes=str(e))
+            results[(tx_side, rx_side, enc_label)] = r
+            print(f"  → {r.fmt(threshold)}", flush=True)
+    return results
+
+
+def emit_encoding_markdown(
+    tx_dut: Dut, rx_dut: Dut, channel: int, duration: float,
+    threshold: int, kh: KernelHost,
+    results: dict[tuple[str, str, str], CellResult],
+) -> str:
+    """Render one table: rows = driver mode (k/k, d/k, k/d, d/d),
+    columns = encoding combo. A chip with an encoding-specific RX
+    limitation will show a single column going to 0 in the k/d row."""
+    out = []
+    out.append(f"# Encoding matrix — channel {channel}, "
+               f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    out.append(f"- TX adapter: `{tx_dut.vidpid}` ({tx_dut.chipset})")
+    out.append(f"- RX adapter: `{rx_dut.vidpid}` ({rx_dut.chipset})")
+    out.append(f"- Kernel host: "
+               f"{'VM ' + kh.vm_name + ' via ' + kh.ssh_target if kh.is_remote else 'local'}")
+    out.append(f"- Cell duration: {duration:.0f}s   "
+               f"Pass threshold: ≥ {threshold} hits\n")
+    header = "| Mode (TX/RX driver) |" + "".join(
+        f" {lbl} |" for lbl, _ in ENCODING_COMBOS
+    )
+    sep = "|---|" + "---|" * len(ENCODING_COMBOS)
+    out.append(header)
+    out.append(sep)
+    for tx_side, rx_side, _ in FULL_MATRIX_MODES:
+        row = f"| {tx_side[0]}/{rx_side[0]} |"
+        for enc_label, _ in ENCODING_COMBOS:
+            r = results.get((tx_side, rx_side, enc_label))
+            row += f" {r.fmt(threshold) if r else '?'} |"
+        out.append(row)
+    out.append("")
+    return "\n".join(out)
+
+
 def emit_markdown(
     tx_dut: Dut, rx_dut: Dut, channel: int, duration: float,
     threshold: int, kh: KernelHost,
@@ -1023,6 +1143,13 @@ def main():
              "of one 4-cell table. Ignores --tx-pid / --rx-pid.",
     )
     ap.add_argument(
+        "--encoding-matrix", action="store_true",
+        help="for one ordered TX→RX pair (use --tx-pid / --rx-pid to select, "
+             "first two auto-detected DUTs otherwise), iterate "
+             "(driver-mode × radiotap encoding combo). Surfaces chip-specific "
+             "asymmetries like the RTL8821AU LDPC-RX-no limitation.",
+    )
+    ap.add_argument(
         "--vm-name",
         default=os.environ.get("DEVOURER_VM_NAME", ""),
         help="libvirt domain to run kernel cells in (env: DEVOURER_VM_NAME). "
@@ -1068,6 +1195,52 @@ def main():
                 return d
         sys.stderr.write(f"No plugged DUT has PID {pid_arg}\n")
         sys.exit(2)
+
+    if args.encoding_matrix:
+        tx_dut = pick(args.tx_pid, 0)
+        rx_dut = pick(args.rx_pid, 1)
+        if tx_dut.sysfs_id == rx_dut.sysfs_id:
+            sys.stderr.write("TX and RX must be different physical devices.\n")
+            sys.exit(2)
+        print(f"Encoding matrix mode:")
+        print(f"  TX adapter: {tx_dut.vidpid} ({tx_dut.chipset}) at {tx_dut.sysfs_id}")
+        print(f"  RX adapter: {rx_dut.vidpid} ({rx_dut.chipset}) at {rx_dut.sysfs_id}")
+        print(f"Kernel host: "
+              f"{'VM ' + kh.vm_name + ' (' + kh.ssh_target + ')' if kh.is_remote else 'local'}")
+        n_cells = len(FULL_MATRIX_MODES) * len(ENCODING_COMBOS)
+        print(f"Channel: {args.channel}   Duration/cell: {args.duration}s   "
+              f"Pass threshold: ≥{args.pass_threshold} hits")
+        print(f"Total cells: {n_cells} "
+              f"({len(FULL_MATRIX_MODES)} driver modes × "
+              f"{len(ENCODING_COMBOS)} encoding combos)\n")
+
+        kh.release_all_known_duts([tx_dut, rx_dut])
+        with tempfile.TemporaryDirectory(prefix="devourer-regress-") as td:
+            tmpdir = Path(td)
+            results = run_encoding_matrix(
+                devourer_root=args.devourer_root,
+                tx_dut=tx_dut, rx_dut=rx_dut,
+                channel=args.channel, duration=args.duration,
+                threshold=args.pass_threshold,
+                tmpdir=tmpdir, kh=kh,
+            )
+            print()
+            md = emit_encoding_markdown(
+                tx_dut, rx_dut, args.channel, args.duration,
+                args.pass_threshold, kh, results,
+            )
+            print(md, flush=True)
+            sys.stdout.flush()
+            if args.keep_logs:
+                kept = Path(tempfile.gettempdir()) / "devourer-regress-last"
+                if kept.is_symlink() or kept.exists():
+                    kept.unlink()
+                kept.symlink_to(tmpdir)
+                print(f"(logs kept at {kept} — symlink, valid until next run)",
+                      flush=True)
+                sys.stdout.flush()
+                os._exit(0)
+        return
 
     if args.full_matrix:
         print(f"Full matrix mode over {len(duts)} adapters:")

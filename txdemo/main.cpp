@@ -204,6 +204,33 @@ int main(int argc, char **argv) {
       0xcd, 0xce, 0x4e, 0x35, 0xd9, 0x85, 0x9a, 0xcf, 0x4d, 0x48, 0x4c,
       0x8f, 0x28, 0x6f, 0x10, 0xb0, 0xa9, 0x5d, 0xbf, 0xcb, 0x6f};
 
+  /* Radiotap MCS info lives at beacon_frame[10..12]: known mask, flags, idx.
+   * Defaults encode MCS 1 / 20 MHz / long GI / BCC / no STBC. Env knobs let
+   * tests/regress.py --encoding-matrix exercise LDPC and STBC paths — needed
+   * to surface chip-specific asymmetries like the RTL8821AU LDPC-RX-no
+   * limitation (the chip can TX LDPC but its decoder can't RX LDPC frames). */
+  if (const char *m = std::getenv("DEVOURER_TX_MCS")) {
+    beacon_frame[12] = static_cast<uint8_t>(std::strtoul(m, nullptr, 0) & 0x7F);
+    logger->info("DEVOURER_TX_MCS — MCS index set to {}", beacon_frame[12]);
+  }
+  uint8_t mcs_flags = beacon_frame[11];
+  if (std::getenv("DEVOURER_TX_LDPC")) {
+    mcs_flags |= 0x10; /* MCS flags bit 4 = FEC type LDPC */
+    logger->info("DEVOURER_TX_LDPC — FEC=LDPC");
+  }
+  if (const char *s = std::getenv("DEVOURER_TX_STBC")) {
+    int n = std::atoi(s) & 0x3;
+    mcs_flags = static_cast<uint8_t>((mcs_flags & ~0x60) | (n << 5));
+    logger->info("DEVOURER_TX_STBC — {} STBC stream(s)", n);
+  }
+  if (const char *bw = std::getenv("DEVOURER_TX_BW")) {
+    int b = std::atoi(bw);
+    uint8_t code = (b == 40) ? 0x01 : 0x00;
+    mcs_flags = static_cast<uint8_t>((mcs_flags & ~0x03) | code);
+    logger->info("DEVOURER_TX_BW — {} MHz", b);
+  }
+  beacon_frame[11] = mcs_flags;
+
   long tx_count = 0;
   while (true) {
     rc = rtlDevice->send_packet(beacon_frame, sizeof(beacon_frame));

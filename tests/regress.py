@@ -520,6 +520,12 @@ def _devourer_env(dut: Dut, channel: int,
             env["DEVOURER_TX_STBC"] = str(tx_encoding["stbc"])
         if tx_encoding.get("bandwidth") is not None:
             env["DEVOURER_TX_BW"] = str(tx_encoding["bandwidth"])
+        if tx_encoding.get("vht"):
+            env["DEVOURER_TX_VHT"] = "1"
+            if tx_encoding.get("vht_mcs") is not None:
+                env["DEVOURER_TX_VHT_MCS"] = str(tx_encoding["vht_mcs"])
+            if tx_encoding.get("nss") is not None:
+                env["DEVOURER_TX_VHT_NSS"] = str(tx_encoding["nss"])
     return env
 
 
@@ -585,6 +591,12 @@ def _spawn_kernel_tx(
             extra += ["--stbc", str(encoding["stbc"])]
         if encoding.get("bandwidth") is not None:
             extra += ["--bandwidth", str(encoding["bandwidth"])]
+        if encoding.get("vht"):
+            extra.append("--vht")
+            if encoding.get("vht_mcs") is not None:
+                extra += ["--vht-mcs", str(encoding["vht_mcs"])]
+            if encoding.get("nss") is not None:
+                extra += ["--vht-nss", str(encoding["nss"])]
     if kh.is_remote:
         # Ship the injector to the VM (overwrites each run — fine for the
         # tiny script).
@@ -989,10 +1001,17 @@ def emit_full_markdown(
 # ---------------------------------------------------------------------------
 
 ENCODING_COMBOS = [
-    ("BCC",         {"mcs": 1}),
-    ("LDPC",        {"mcs": 1, "ldpc": True}),
-    ("STBC=1",      {"mcs": 1, "stbc": 1}),
-    ("LDPC+STBC=1", {"mcs": 1, "ldpc": True, "stbc": 1}),
+    # HT (radiotap bit 19): MCS 1, 20 MHz.
+    ("HT-BCC",        {"mcs": 1}),
+    ("HT-LDPC",       {"mcs": 1, "ldpc": True}),
+    ("HT-STBC=1",     {"mcs": 1, "stbc": 1}),
+    ("HT-LDPC+STBC",  {"mcs": 1, "ldpc": True, "stbc": 1}),
+    # VHT (radiotap bit 21): VHT MCS 0, NSS 1, 20 MHz. 8821AU's LDPC-RX-no
+    # limitation (per Eachine Sphere Link reports) is on the VHT path —
+    # HT-LDPC didn't surface it because the chip's HT and VHT decoders are
+    # separate code paths in silicon.
+    ("VHT-BCC",       {"vht": True, "vht_mcs": 0, "nss": 1}),
+    ("VHT-LDPC",      {"vht": True, "vht_mcs": 0, "nss": 1, "ldpc": True}),
 ]
 
 

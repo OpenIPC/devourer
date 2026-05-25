@@ -160,37 +160,61 @@ sudo python3 tests/regress.py --encoding-matrix \
     --vm-name devourer-testrig --vm-ssh <user>@<VM-IP>
 ```
 
-Encoding combos iterated (with MCS 1, 20 MHz): `BCC`, `LDPC`, `STBC=1`,
-`LDPC+STBC=1`. Add more in `ENCODING_COMBOS` at the top of `regress.py`
-if you need other mixes (e.g. MCS 7, 40 MHz, or VHT).
+Encoding combos iterated by default — 6 cells per driver mode × 4 driver
+modes = 24 cells total per run:
 
-The underlying knobs are also usable standalone for one-off targeted
-TX:
+| Combo | Radiotap bit | Notes |
+|---|---|---|
+| `HT-BCC` | 19 (MCS info) | MCS 1, BCC FEC, 20 MHz |
+| `HT-LDPC` | 19 | MCS 1, FEC=LDPC |
+| `HT-STBC=1` | 19 | MCS 1, 1 STBC stream |
+| `HT-LDPC+STBC` | 19 | MCS 1, FEC=LDPC + 1 STBC stream |
+| `VHT-BCC` | 21 (VHT info) | VHT MCS 0, NSS 1, BCC, 20 MHz |
+| `VHT-LDPC` | 21 | VHT MCS 0, NSS 1, FEC=LDPC |
 
-- Devourer TX: `DEVOURER_TX_LDPC=1`, `DEVOURER_TX_STBC=1`,
-  `DEVOURER_TX_MCS=N`, `DEVOURER_TX_BW=20|40` env vars read by
-  `WiFiDriverTxDemo` to patch the radiotap MCS field at startup.
-- Kernel-side scapy TX: `--ldpc`, `--stbc N`, `--mcs N`, `--bandwidth
-  20|40` flags on `tests/inject_beacon.py`.
+VHT (802.11ac) coverage exists because some chips' LDPC decoder limitation
+is on the VHT path only — the silicon's HT-LDPC and VHT-LDPC are separate
+blocks. RTL8821AU is the motivating case (HT-LDPC tests pass, VHT-LDPC
+reportedly fails at RX). Add more in `ENCODING_COMBOS` at the top of
+`regress.py` if you need MCS 7, 40/80 MHz, or higher NSS.
 
-#### Known caveat: kernel-TX encoding flags may not reach the air
+The underlying knobs are also usable standalone for one-off targeted TX:
+
+- **Devourer TX:** `DEVOURER_TX_MCS=N`, `DEVOURER_TX_LDPC=1`,
+  `DEVOURER_TX_STBC=N`, `DEVOURER_TX_BW=20|40|80|160` env vars read by
+  `WiFiDriverTxDemo`. Default mode is HT; `DEVOURER_TX_VHT=1` switches to
+  a VHT radiotap header (22 bytes) and exposes `DEVOURER_TX_VHT_MCS=N` +
+  `DEVOURER_TX_VHT_NSS=N`. `_LDPC` / `_STBC` / `_BW` apply to whichever
+  mode is active.
+- **Kernel-side scapy TX:** `--mcs N` / `--ldpc` / `--stbc N` / `--bandwidth
+  20|40|80|160` on `tests/inject_beacon.py`, plus `--vht` / `--vht-mcs N`
+  / `--vht-nss N` for VHT mode.
+
+#### Caveat: kernel-TX encoding flags may not always reach the air
 
 mac80211 + the `aircrack-ng/88XXau` driver don't necessarily honour the
 radiotap MCS flags on TX — the chip's own rate-selection logic may
 override them. So the `k/k` and `k/d` rows of the table reflect what
-the *kernel* driver chose to transmit, which may collapse all four
-encoding columns onto the chip's default. Validated 2026-05-25 with
-`--encoding-matrix --tx-pid 0x8813 --rx-pid 0x0120`: the `k/d` row was
-flat across all four columns (`~400 hits`), consistent with the kernel
-stripping the LDPC/STBC bits before they reached the air rather than
-the 8821AU RX accepting LDPC frames.
+the *kernel* driver chose to transmit, which may collapse encoding
+columns onto the chip's default.
 
-The `d/k` and `d/d` rows are not affected — `WiFiDriverTxDemo` writes
-the radiotap header directly into the chip's bulk-OUT buffer, so the
-`DEVOURER_TX_*` env vars are the ground truth for what flies. To
-validate kernel-TX encoding made it on-air, run a third adapter as
-sniffer (e.g. AR9271 via tcpdump on the same channel) and inspect the
-MCS flags in the captured radiotap.
+To prove what actually flew, run `tests/sniff_air.py` on a third
+adapter (AR9271 is the canonical sniffer — it speaks vanilla radiotap
+without driver-side filtering) on the same channel, in parallel with
+the matrix. Output reports each captured frame's decoded radiotap
+MCS / VHT info, including LDPC bit + STBC streams. If a `--ldpc`
+injection comes back tagged as BCC, the kernel stripped it before the
+air.
+
+```bash
+sudo python3 tests/sniff_air.py --iface wlan0mon --channel 100 \
+    --duration 60
+```
+
+The `d/k` and `d/d` rows are not affected by the kernel-TX caveat —
+`WiFiDriverTxDemo` writes the radiotap header directly into the
+chip's bulk-OUT buffer, so the `DEVOURER_TX_*` env vars are ground
+truth for what flies on devourer TX.
 
 ## Supported DUTs
 

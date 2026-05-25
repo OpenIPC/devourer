@@ -128,7 +128,33 @@ per-cell stdout/stderr logs end up at `/tmp/devourer-regress-last/`.
 - `--vm-name NAME` / `--vm-ssh USER@HOST` — enter VM mode
 - `--keep-logs` — symlink the temp log dir at `/tmp/devourer-regress-last`
 
-Environment variable equivalents: `DEVOURER_VM_NAME`, `DEVOURER_VM_SSH`.
+Environment variable equivalents: `DEVOURER_VM_NAME`, `DEVOURER_VM_SSH`,
+`DEVOURER_SNIFFER_IFACE`.
+
+### `--sniffer-iface` — on-air encoding verification
+
+When set, each matrix cell additionally captures on a third (host-local)
+monitor iface and reports the decoded radiotap encoding distribution
+alongside the hit count. Composes with `--full-matrix` and
+`--encoding-matrix`. Intended for an AR9271 (vanilla radiotap, no
+driver-side flag filtering).
+
+```bash
+sudo python3 tests/regress.py --encoding-matrix \
+    --tx-pid 0x8813 --rx-pid 0x0120 --channel 100 \
+    --vm-name devourer-testrig --vm-ssh <user>@<VM-IP> \
+    --sniffer-iface wlan0mon
+```
+
+Per-cell output gains a `↪ sniffer: N frames — <encoding>=N, ...` line
+showing what actually flew. If the `--ldpc` injection comes back tagged
+as BCC, mac80211 / the OOT driver stripped the flag before the air —
+the chip-side RX never had to refuse an LDPC frame, so any
+`k/d`-row-flat result for LDPC means the test setup, not the chip.
+
+The sniffer is host-only and never moved through the VM USB
+passthrough. The same helper, run standalone outside the matrix, is
+`tests/sniff_air.py` (see below).
 
 ## Specialized modes
 

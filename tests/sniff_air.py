@@ -84,7 +84,12 @@ def _aligned(offset: int, align: int) -> int:
 def _parse_radiotap(frame: bytes):
     """Decode radiotap MCS (bit 19) / VHT (bit 21) info from one captured
     frame. Returns dict with keys: kind ('HT' | 'VHT' | 'legacy'), mcs,
-    ldpc, stbc, bw, nss (where applicable)."""
+    ldpc, stbc, bw, nss (where applicable), or None on malformed header.
+
+    Handles multi-word it_present chains and the radiotap control bits
+    (29 RADIOTAP_NS, 30 VENDOR_NS, 31 EXT). Real mac80211 captures from
+    ath9k_htc routinely use multiple presence words + bit 29, so a parser
+    that only walks word0 fails on every frame."""
     if len(frame) < 8:
         return None
     version, _pad, it_len = struct.unpack_from("<BBH", frame, 0)
@@ -101,41 +106,74 @@ def _parse_radiotap(frame: bytes):
         if not (word & (1 << 31)):
             break
 
-    # Fields start after the last it_present word; offset relative to frame.
-    # Iterate bits 0..21 in the first word — the only one we know fixed
-    # field sizes for. Anything in extension words we skip.
     cur = off
-    word0 = presence[0] if presence else 0
-    parsed = {}
-    for bit in range(32):
-        if not (word0 & (1 << bit)):
-            continue
-        if bit not in _RT_FIELDS:
-            # Unknown field — can't safely skip past it. Bail.
-            return None
-        size, align = _RT_FIELDS[bit]
-        cur = _aligned(cur, align)
-        if cur + size > it_len:
-            return None
-        if bit == 19:  # MCS info
-            mcs_known, mcs_flags, mcs_idx = struct.unpack_from(
-                "<BBB", frame, cur,
-            )
-            parsed["mcs_known"] = mcs_known
-            parsed["mcs_flags"] = mcs_flags
-            parsed["mcs_idx"] = mcs_idx
-        elif bit == 21:  # VHT info
-            vht_known, vht_flags, vht_bw = struct.unpack_from(
-                "<HBB", frame, cur,
-            )
-            vht_mcs_nss = frame[cur + 4:cur + 8]
-            vht_coding = frame[cur + 8]
-            parsed["vht_known"] = vht_known
-            parsed["vht_flags"] = vht_flags
-            parsed["vht_bw"] = vht_bw
-            parsed["vht_mcs_nss"] = vht_mcs_nss
-            parsed["vht_coding"] = vht_coding
-        cur += size
+    parsed: dict = {}
+
+    # Iterate bits across ALL presence words in transmission order.
+    # Bits 29-31 are control bits, not data:
+    #   29 RADIOTAP_NS  — namespace restart marker, no data consumed
+    #   30 VENDOR_NS    — 6-byte vendor namespace header (OUI 3 + sub-NS 1
+    #                     + skip-len 2). Subsequent bits in the same
+    #                     namespace use a vendor-defined mapping we don't
+    #                     know — give up after consuming the header.
+    #   31 EXT          — another presence word follows; no data
+    in_vendor_ns = False
+    for word in presence:
+        for bit in range(32):
+            if not (word & (1 << bit)):
+                continue
+            if bit == 31:  # EXT — handled by outer loop
+                continue
+            if bit == 29:  # RADIOTAP_NS — restart to default namespace
+                in_vendor_ns = False
+                continue
+            if bit == 30:  # VENDOR_NS — skip 6-byte header, then stop
+                cur = _aligned(cur, 2)
+                if cur + 6 > it_len:
+                    return None
+                cur += 6
+                in_vendor_ns = True
+                # Continue iterating bits, but any further field bits in
+                # this word are in vendor namespace — we can't size them.
+                continue
+            if in_vendor_ns:
+                # Vendor field, unknown size — bail out of further parsing
+                # but keep what we already extracted.
+                return parsed_to_result(parsed, it_len)
+            if bit not in _RT_FIELDS:
+                # Unknown radiotap field — can't safely advance cur. Return
+                # what we parsed so far rather than discarding.
+                return parsed_to_result(parsed, it_len)
+            size, align = _RT_FIELDS[bit]
+            cur = _aligned(cur, align)
+            if cur + size > it_len:
+                return parsed_to_result(parsed, it_len)
+            if bit == 19:  # MCS info
+                mcs_known, mcs_flags, mcs_idx = struct.unpack_from(
+                    "<BBB", frame, cur,
+                )
+                parsed["mcs_known"] = mcs_known
+                parsed["mcs_flags"] = mcs_flags
+                parsed["mcs_idx"] = mcs_idx
+            elif bit == 21:  # VHT info
+                vht_known, vht_flags, vht_bw = struct.unpack_from(
+                    "<HBB", frame, cur,
+                )
+                vht_mcs_nss = frame[cur + 4:cur + 8]
+                vht_coding = frame[cur + 8]
+                parsed["vht_known"] = vht_known
+                parsed["vht_flags"] = vht_flags
+                parsed["vht_bw"] = vht_bw
+                parsed["vht_mcs_nss"] = vht_mcs_nss
+                parsed["vht_coding"] = vht_coding
+            cur += size
+    return parsed_to_result(parsed, it_len)
+
+
+def parsed_to_result(parsed: dict, it_len: int):
+    """Convert the raw parsed-field dict into the public result shape.
+    Returned by _parse_radiotap once iteration completes OR bails early
+    on an unknown / out-of-bounds field."""
 
     # Decide kind.
     if "vht_mcs_nss" in parsed:

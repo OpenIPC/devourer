@@ -806,6 +806,7 @@ def run_cell(
     kh: KernelHost,
     encoding: Optional[dict] = None,
     sniffer_iface: Optional[str] = None,
+    cell_tag: str = "",
 ) -> CellResult:
     """Run one matrix cell. State contract: always restore DUTs to a clean
     baseline (host kernel-bound) on exit via try/finally.
@@ -819,7 +820,14 @@ def run_cell(
     via sniff_air's radiotap decoder and a one-line summary appended to
     the CellResult.notes. Lets the matrix prove what encoding actually
     flew, vs what inject_beacon.py / txdemo *requested*."""
+    # Per-cell filename stem. `cell_tag` is appended by callers that run
+    # multiple cells with the same (tx_side, rx_side) but different
+    # encodings (--encoding-matrix) — without it the pcap from cell N
+    # gets overwritten by cell N+1, so --keep-logs only preserves the
+    # last encoding combo per driver-mode.
     cell_id = f"tx-{tx_side}_rx-{rx_side}"
+    if cell_tag:
+        cell_id = f"{cell_id}_{cell_tag}"
     tx_log = tmpdir / f"{cell_id}.tx.log"
     rx_log = tmpdir / f"{cell_id}.rx.log"
     sniffer_pcap = tmpdir / f"{cell_id}.sniffer.pcap" if sniffer_iface else None
@@ -1152,11 +1160,13 @@ def run_encoding_matrix(
                 f"RX={rx_dut.chipset} ({rx_side})  enc=[{enc_label}]"
             )
             print(cell_hdr + " ...", flush=True)
+            # Sanitize encoding label for use in a filename.
+            tag = enc_label.lower().replace("+", "-").replace("=", "")
             try:
                 r = run_cell(
                     devourer_root, tx_dut, rx_dut, tx_side, rx_side,
                     channel, duration, tmpdir, kh, encoding=enc,
-                    sniffer_iface=sniffer_iface,
+                    sniffer_iface=sniffer_iface, cell_tag=tag,
                 )
             except Exception as e:
                 print(f"  ✗ cell crashed: {e}", flush=True)

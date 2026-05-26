@@ -106,9 +106,11 @@ s32 FillH2CCmd_8814(PADAPTER padapter, u8 ElementID, u32 CmdLen, u8 *pCmdBuffer)
 		if (CmdLen <= 3) {
 			_rtw_memcpy((u8 *)(&h2c_cmd) + 1, pCmdBuffer, CmdLen);
 			h2c_cmd_ex = 0;
-		} else {
+		} else if ((CmdLen - 3) <= sizeof(h2c_cmd_ex)) {
 			_rtw_memcpy((u8 *)(&h2c_cmd) + 1, pCmdBuffer, 3);
 			_rtw_memcpy((u8 *)(&h2c_cmd_ex), pCmdBuffer + 3, CmdLen - 3);
+		} else {
+			goto exit;
 		}
 
 		/* Write Ext command */

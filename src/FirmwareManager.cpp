@@ -531,7 +531,16 @@ void FirmwareManager::FirmwareDownload_8814A() {
    * byte-for-byte after the last fwdl IDDMA program. */
   _device.rtw_write8(REG_MCUFWDL, 0x79);    /* declare init ready */
   _device.rtw_write8(0x010d, 0x00);         /* REG_RD_CTRL+1 */
-  _device.rtw_write8(0x0100, 0x00);         /* REG_CR byte 0 = 0 */
+  /* DO NOT write 0x0100 (REG_CR) = 0 here. Bisect 2026-05-26 of #36 wedge:
+   * zeroing REG_CR disables byte 0's DMA-enable bits (HCI_TXDMA_EN/
+   * HCI_RXDMA_EN/TXDMA_EN/RXDMA_EN/PROTOCOL_EN/SCHEDULE_EN). The later
+   * `REG_CR |= MACTXEN | MACRXEN` at HalModule.cpp:241 sets bits 6,7 but
+   * leaves bits 0..5 zero, so the chip's TX/RX DMA engines never come up
+   * — bulk-OUT URBs queue at EP 0x02 but the FIFO never drains. URBs sit
+   * until libusb's 500 ms async timeout cancels them (-ENOENT), giving
+   * the 95%+ submit-failure pattern reported in #36. Kernel rtw88_8814au
+   * never writes this address with this value. With this single write
+   * removed, devourer-TX on 8814AU goes from 0.4% completion to 100%. */
   _device.rtw_write32(0x1330, 0x80000000);  /* REG_3081_DCDC_CTRL */
   _device.rtw_write16(0x0230, 0x0000);      /* REG_PCIE_CTRL_REG word */
   _device.rtw_write32(0x022c, 0x80000000);  /* REG_BIST_CTRL */

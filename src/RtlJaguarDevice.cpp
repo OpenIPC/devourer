@@ -2,6 +2,8 @@
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
 
+#include <cstdlib>
+
 RtlJaguarDevice::RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger)
     : _device{device},
       _eepromManager{std::make_shared<EepromManager>(device, logger)},
@@ -143,10 +145,41 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
 
   SET_TX_DESC_DATA_BW_8812(usb_frame, BWSettingOfDesc);
 
-  /* Single-fragment frame: LAST_SEG=1 (no FIRST_SEG); OWN=1 so chip
-   * processes the descriptor. */
+  /* The SET_TX_DESC_*_8812 macros have bit-identical positions to the
+   * SET_TX_DESC_*_8814A macros (verified against hal/rtl8814a_xmit.h). But
+   * a few of the field NAMES differ on 8814A, and a usbmon byte-diff
+   * against a working VM-passthrough 88XXau monitor-injection session shows
+   * three field-value mismatches on 8814A:
+   *
+   *   Dword 0 bit 31 — 8812 calls it OWN, 8814A calls it DISQSELSEQ.
+   *     88XXau leaves bit 31 = 0 for monitor-injected frames; devourer's
+   *     SET_TX_DESC_OWN_8812(usb_frame, 1) sets it to 1, which on 8814A
+   *     means DISQSELSEQ=1 (disable queue-select-based sequence numbering).
+   *   Dword 2 bits 24-29 (GID) — 88XXau leaves at 0 for injection;
+   *     devourer writes 0x3F.
+   *   Dword 4 bits 18-23 (DATA_RETRY_LIMIT) — 88XXau leaves at 0 for
+   *     injection; devourer writes 12.
+   *
+   * Skip those writes on 8814A to byte-match aircrack-ng's reference
+   * monitor-injection descriptor. Does NOT resolve #50 (on-air silence
+   * has a different root cause that vendor-control-write replay can't
+   * reach), but aligns devourer's TX descriptor with the working
+   * kernel-driver format. Override with DEVOURER_TX_LEGACY_8812_DESC=1
+   * to restore the old behaviour without rebuilding.
+   *
+   * 8812AU and 8821AU paths are bit-for-bit identical to current master --
+   * is_8814a is false there and all writes fire as before. */
+  const bool is_8814a =
+      _eepromManager->version_id.ICType == CHIP_8814A &&
+      !std::getenv("DEVOURER_TX_LEGACY_8812_DESC");
+
+  /* Single-fragment frame: LAST_SEG=1 (no FIRST_SEG). */
   SET_TX_DESC_LAST_SEG_8812(usb_frame, 1);
-  SET_TX_DESC_OWN_8812(usb_frame, 1);
+  if (!is_8814a) {
+    /* OWN=1 needed on 8812/8821 so chip processes the descriptor. On
+     * 8814A the same bit is DISQSELSEQ -- leave at 0 to match 88XXau. */
+    SET_TX_DESC_OWN_8812(usb_frame, 1);
+  }
 
   SET_TX_DESC_PKT_SIZE_8812(usb_frame,
                             static_cast<uint32_t>(real_packet_length));
@@ -172,10 +205,17 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
 
   SET_TX_DESC_QUEUE_SEL_8812(usb_frame, 0x12);
   SET_TX_DESC_HWSEQ_EN_8812(usb_frame, static_cast<uint8_t>(1));
-  SET_TX_DESC_GID_8812(usb_frame, static_cast<uint8_t>(0x3F));
+  if (!is_8814a) {
+    /* 88XXau leaves GID=0 for monitor injection on 8814A. */
+    SET_TX_DESC_GID_8812(usb_frame, static_cast<uint8_t>(0x3F));
+  }
   SET_TX_DESC_SW_DEFINE_8812(usb_frame, static_cast<uint16_t>(0x001));
   SET_TX_DESC_RETRY_LIMIT_ENABLE_8812(usb_frame, 1);
-  SET_TX_DESC_DATA_RETRY_LIMIT_8812(usb_frame, 12);
+  if (!is_8814a) {
+    /* 88XXau leaves DATA_RETRY_LIMIT=0 for monitor injection on 8814A
+     * (RETRY_LIMIT_ENABLE stays set to 1 in both). */
+    SET_TX_DESC_DATA_RETRY_LIMIT_8812(usb_frame, 12);
+  }
   if (sgi) {
     _logger->info("short gi enabled,set sgi");
     SET_TX_DESC_DATA_SHORT_8812(usb_frame, 1);

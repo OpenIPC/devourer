@@ -230,7 +230,9 @@ int main(int argc, char **argv) {
           ++reads;
           if (reads <= 20 || (reads % 100) == 0) {
             char hex[64 * 2 + 1] = {0};
-            int hex_len = std::min(actual, 32);
+            /* Explicit template arg so MSVC's `windows.h` `min` macro doesn't
+             * mangle this — same pattern as RtlUsbAdapter.cpp:435. */
+            int hex_len = std::min<int>(actual, 32);
             for (int k = 0; k < hex_len; ++k) {
               static const char hd[] = "0123456789abcdef";
               hex[2*k]   = hd[buf[k] >> 4];

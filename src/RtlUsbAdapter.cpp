@@ -212,6 +212,19 @@ void RtlUsbAdapter::ReadEFuseByte(uint16_t _offset, uint8_t *pbuf) {
   uint8_t readbyte;
   uint16_t retry;
 
+  /* Match the kernel `88XXau` driver's per-iteration EFUSE_TEST clear.
+   * Cold-init usbmon diff (2026-05-28, devourer-testrig VM kernel-side
+   * vs host devourer-side) shows the kernel does an RD-then-WR sequence
+   * at REG_EFUSE_TEST (0x0034) = 0x0000 (16-bit) BEFORE every EFUSE byte
+   * read, 312 times per init; devourer never touched 0x0034. We mirror
+   * the sequence so the EFUSE state machine sees identical wire shape
+   * across all 312 byte reads. Empirically harmless on its own (does
+   * NOT fix the RTL8814AU TX-on-air gate per a sniffer run with this
+   * patch + bulk-IN drainer enabled) but removes a known concrete
+   * wire-level divergence flagged by tools/usbmon_pcap_diff.py. */
+  (void)rtw_read16(REG_EFUSE_TEST);
+  rtw_write16(REG_EFUSE_TEST, 0x0000);
+
   /* Write Address */
   rtw_write8(EFUSE_CTRL + 1, (uint8_t)(_offset & 0xff));
   readbyte = rtw_read8(EFUSE_CTRL + 2);

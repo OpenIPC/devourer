@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
@@ -147,6 +148,109 @@ int main(int argc, char **argv) {
   rc = libusb_claim_interface(handle, 0);
   assert(rc == 0);
 
+  /* USB-wire sentinel writes — gated behind DEVOURER_USB_SENTINEL=1. Used by
+   * tools/usbmon_pcap_diff.py --phase-split to delimit the init phase in a
+   * devourer-side capture. We write to REG_DUMMY (0x04FC, documented as a
+   * no-side-effect scratch register in hal_com_reg.h:322) so the sentinel
+   * cannot perturb chip state. The 2-byte payload encodes the marker:
+   * 0xDEAD before init, 0xBEEF at init-done. Diff tool matches by
+   * wValue (== REG_DUMMY) AND payload (\\xad\\xde or \\xef\\xbe LE). */
+  const bool sentinel_enabled = std::getenv("DEVOURER_USB_SENTINEL") != nullptr;
+  auto write_sentinel = [&](uint16_t marker, const char *label) {
+    if (!sentinel_enabled) return;
+    uint16_t payload = marker;
+    int srt = libusb_control_transfer(
+        handle, /*bmRequestType*/ 0x40, /*bRequest*/ 5,
+        /*wValue=REG_DUMMY*/ 0x04FC, /*wIndex*/ 0,
+        reinterpret_cast<unsigned char *>(&payload), sizeof(payload),
+        /*timeout_ms*/ 500);
+    logger->info("USB sentinel {}: REG_DUMMY <= 0x{:04x} rc={}", label, marker, srt);
+  };
+
+  write_sentinel(0xDEAD, "pre-init");
+
+  /* Optional interrupt-IN poller on EP 0x85 — gated by
+   * DEVOURER_POLL_INTR_IN=1. The 8814AU descriptor exposes an Interrupt IN
+   * endpoint at 0x85 (64-byte, bInterval=1) which carries C2H (chip-to-host)
+   * messages; the upstream aircrack-ng 8814au driver submits a perpetual URB
+   * on it under CONFIG_USB_INTERRUPT_IN_PIPE. Devourer currently never reads
+   * it, so the chip's C2H buffer fills and firmware may stall waiting for
+   * drainage — a candidate explanation for "bulk-OUT URBs complete OK but
+   * nothing reaches the air" (issue #36). This thread polls EP 0x85 until
+   * the process is killed; failures other than -ETIMEDOUT are logged once
+   * per N. */
+  /* Optional bulk-IN drainer on EP 0x81 — gated by DEVOURER_DRAIN_BULK_IN=1.
+   * The kernel `88XXau` driver pre-arms 8 bulk-IN URBs of 32 KB each on
+   * EP 0x81 at the end of init, *before* the first TX. The RTL8814AU
+   * delivers TX-status reports back on the bulk-IN endpoint mixed with
+   * RX data; if the host never has IN URBs pending, the chip cannot
+   * deliver TX status and queues TX indefinitely — which fits the
+   * observed pathology exactly (bulk-OUT URBs complete OK at the libusb
+   * level but nothing reaches the air). Spawn a thread that pre-submits
+   * a small pool of bulk-IN URBs on EP 0x81 before TX begins and keeps
+   * a stream of them in flight. */
+  std::atomic<bool> bulk_in_running{false};
+  std::thread bulk_in_thread;
+  if (std::getenv("DEVOURER_DRAIN_BULK_IN")) {
+    bulk_in_running = true;
+    bulk_in_thread = std::thread([handle, &bulk_in_running, logger]() {
+      static constexpr int BUF_SIZE = 16 * 1024;
+      uint8_t buf[BUF_SIZE];
+      uint64_t reads = 0;
+      while (bulk_in_running) {
+        int actual = 0;
+        int rc = libusb_bulk_transfer(handle, 0x81, buf, sizeof(buf),
+                                       &actual, 200 /* ms */);
+        if (rc == 0 && actual > 0) {
+          ++reads;
+          if (reads <= 5 || (reads % 200) == 0) {
+            logger->info("EP 0x81 IN #{}: {} bytes (head=0x{:02x}{:02x})",
+                         reads, actual, buf[0], buf[1]);
+          }
+        } else if (rc != 0 && rc != LIBUSB_ERROR_TIMEOUT) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+      }
+    });
+    logger->info("DEVOURER_DRAIN_BULK_IN — EP 0x81 bulk-IN drainer running");
+  }
+
+  std::atomic<bool> intr_running{false};
+  std::thread intr_in_thread;
+  if (std::getenv("DEVOURER_POLL_INTR_IN")) {
+    intr_running = true;
+    intr_in_thread = std::thread([handle, &intr_running, logger]() {
+      uint8_t buf[64];
+      uint64_t reads = 0, errs = 0;
+      while (intr_running) {
+        int actual = 0;
+        int rc = libusb_interrupt_transfer(handle, 0x85, buf, sizeof(buf),
+                                            &actual, 100 /* ms */);
+        if (rc == 0 && actual > 0) {
+          ++reads;
+          if (reads <= 20 || (reads % 100) == 0) {
+            char hex[64 * 2 + 1] = {0};
+            int hex_len = std::min(actual, 32);
+            for (int k = 0; k < hex_len; ++k) {
+              static const char hd[] = "0123456789abcdef";
+              hex[2*k]   = hd[buf[k] >> 4];
+              hex[2*k+1] = hd[buf[k] & 0xF];
+            }
+            logger->info("EP 0x85 IN #{}: {} bytes, head={}",
+                         reads, actual, hex);
+          }
+        } else if (rc != 0 && rc != LIBUSB_ERROR_TIMEOUT) {
+          ++errs;
+          if ((errs % 50) == 1) {
+            logger->error("EP 0x85 IN rc={} (#{})", rc, errs);
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+      }
+    });
+    logger->info("DEVOURER_POLL_INTR_IN — EP 0x85 interrupt-IN poller running");
+  }
+
   WiFiDriver wifi_driver{logger};
   auto rtlDevice = wifi_driver.CreateRtlDevice(handle);
 
@@ -184,6 +288,8 @@ int main(int argc, char **argv) {
       .Channel = static_cast<uint8_t>(channel),
       .ChannelOffset = 0,
       .ChannelWidth = CHANNEL_WIDTH_20});
+
+  write_sentinel(0xBEEF, "post-init/pre-TX");
 
   sleep(5);
 

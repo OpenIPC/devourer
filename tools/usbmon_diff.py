@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Diff two usbmon captures by URB-level properties.
+"""Diff two usbmon captures by URB-level properties — TEXT FORMAT, BULK ONLY.
 
-Use to compare a libusb-routed TX path vs. a kernel-routed (qemu USB passthrough)
-TX path on the same chip — both go through host xhci so host usbmon sees both.
-The decisive question is what URB-level property the kernel preserves and the
-libusb userspace path drops.
+For control-transfer-aware diffs (EP0 vendor reads/writes, full payload bytes,
+URB flags, IN URBs, chip-side C2H interrupts), use `tools/usbmon_pcap_diff.py`
+instead. That tool consumes pcapng captured by tshark on usbmonN at full
+fidelity and surfaces axes this text-format tool structurally cannot.
+
+Original purpose: compare a libusb-routed TX path vs. a kernel-routed (qemu USB
+passthrough) TX path on the same chip — both go through host xhci so host
+usbmon sees both. The decisive question is what URB-level property the kernel
+preserves and the libusb userspace path drops.
 
 Format: usbmon text format (the `Nu` debugfs file on kernel 6.18 emits this).
 See Documentation/usb/usbmon.rst. Line layout:

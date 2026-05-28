@@ -1202,14 +1202,24 @@ void RadioManagementModule::phy_set_tx_power_level_by_path(uint8_t channel,
     phy_set_tx_power_index_by_rate_section(path, channel,
                                            RATE_SECTION::VHT_2SSMCS0_2SSMCS9);
   }
-  /* 8814A 3-stream rate sections — must be programmed so the chip's TXAGC
-   * table is fully populated even though the USB-2 link can't sustain 3-SS
-   * data rates. Upstream PHY_SetTxPowerLevel8814 iterates all sections. */
+  /* 8814A 3-stream + 4-stream rate sections — must be programmed so the
+   * chip's TXAGC table at BB 0x1998 is fully populated even though the
+   * USB-2 link can't sustain 3-SS or 4-SS data rates. Upstream
+   * PHY_SetTxPowerLevel8814 iterates ALL sections including 4SS. The
+   * earlier 3SS-only stop was a port-incomplete bug: a kernel-vs-devourer
+   * cold-init usbmon diff (2026-05-28, devourer-testrig VM) showed BB
+   * 0x1998 had ~248 fewer writes in devourer than kernel — a count
+   * proportional to the missing (8 HT_MCS24_MCS31 + 10 VHT_4SS) × 4 paths
+   * = 72 writes per `PHY_SetTxPowerLevel8812` apply. */
   if (_eepromManager->version_id.ICType == CHIP_8814A) {
     phy_set_tx_power_index_by_rate_section(path, channel,
                                            RATE_SECTION::HT_MCS16_MCS23);
     phy_set_tx_power_index_by_rate_section(path, channel,
                                            RATE_SECTION::VHT_3SSMCS0_3SSMCS9);
+    phy_set_tx_power_index_by_rate_section(path, channel,
+                                           RATE_SECTION::HT_MCS24_MCS31);
+    phy_set_tx_power_index_by_rate_section(path, channel,
+                                           RATE_SECTION::VHT_4SSMCS0_4SSMCS9);
   }
 }
 

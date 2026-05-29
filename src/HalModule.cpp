@@ -525,34 +525,59 @@ bool HalModule::rtl8812au_hal_init() {
     _device.rtw_write32(0x0cb4, 0x20000077u);
     _device.rtw_write32(0x0e90, 0x01800c00u);
     _logger->info("8821 trace-derived BB/AGC value overrides applied");
+  }
 
-    /* Trace-derived 8814 post-fwdl init writes. usbmon diff vs
-     * kernel-driver (cold-init → monitor → inject) revealed these are
-     * present in the kernel path and absent from devourer. Applied as a
-     * batch to bring devourer's chip state into MAC-TX-ready shape.
+  if (is_8814a) {
+    /* Trace-derived 8814 post-fwdl init writes. Captured from
+     * aircrack-ng/88XXau cold-init → monitor → inject; usbmon diff vs
+     * devourer surfaced these as kernel-only writes. Previously these
+     * lived inside the `if (CHIP_8821)` block above (BUG: they were
+     * gated on the 8821 path and never ran on 8814AU, fixed here 2026-05-29
+     * after the per-register diff cross-check confirmed they were absent
+     * from the wire on every 8814AU run).
      *
-     *   REG_RRSR (0x0440)        = 0xff0f0000  Response Rate Set
-     *   0x04bc                   = 0x00        TX queue gate
-     *   REG_QUEUE_CTRL (0x04c6)  = 0x04        Queue control
-     *   REG_TX_PTCL_CTRL (0x520) = 0x0f2f0000  TX protocol control
-     *   REG_RD_CTRL (0x0524)     = 0x0f4fff00  RD control
-     *   0x0670                   = 0x000000c0  NAV-related
-     *   RA-table init at 0x0990-0x09a4
+     * Values are LITTLE-ENDIAN u32. usbmon shows wire bytes in
+     * transmission order, so to write a value via rtw_write32 on a LE
+     * host the bytes need to be reversed from the usbmon text. The
+     * previous values stored the wire bytes directly as u32 (e.g.
+     * `0xff0f0000u` for REG_RRSR), which produced wire bytes `00 00 0f ff`
+     * on the chip — opposite of what kernel writes (`ff 0f 00 00` ⇒
+     * u32 = 0x00000fff). The reversed values below match the kernel
+     * wire byte-for-byte.
+     *
+     *   addr   kernel wire bytes  →  u32 to write
+     *   0x0440 ff 0f 00 00           0x00000fff  REG_RRSR
+     *   0x04bc 00                    0x00        TX queue gate (1 byte)
+     *   0x04c6 04                    0x04        REG_QUEUE_CTRL (1 byte)
+     *   0x0520 0f 2f 00 00           0x00002f0f  REG_TX_PTCL_CTRL
+     *   0x0524 00 ff 4f 0f           0x0f4fff00  REG_RD_CTRL
+     *                                            (kept value; no usbmon
+     *                                             trace for 0x0524 in
+     *                                             current capture set)
+     *   0x0670 00 00 00 c0           0xc0000000  NAV-related
+     *   0x0990 00 00 10 27           0x27100000  RA-table base
+     *   0x0994 00 01 48 4c           0x4c480100
+     *   0x0998 24 28 2c 30           0x302c2824
+     *   0x099c 34 38 3c 40           0x403c3834
+     *   0x09a0 44 00 00 00           0x00000044
+     *   0x09a4 80 00 08 00           0x00080080
      */
-    _device.rtw_write32(0x0440, 0xff0f0000u);   /* REG_RRSR */
+    _device.rtw_write32(0x0440, 0x00000fffu);   /* REG_RRSR */
     _device.rtw_write8(0x04bc, 0x00);
     _device.rtw_write8(0x04c6, 0x04);           /* REG_QUEUE_CTRL */
-    _device.rtw_write32(0x0520, 0x0f2f0000u);   /* REG_TX_PTCL_CTRL */
-    _device.rtw_write32(0x0524, 0x0f4fff00u);   /* REG_RD_CTRL */
-    _device.rtw_write32(0x0670, 0x000000c0u);
-    /* Rate-adaptation table init (final values from trace). */
-    _device.rtw_write32(0x0990, 0xffff1027u);
-    _device.rtw_write32(0x0994, 0x0001484cu);
-    _device.rtw_write32(0x0998, 0x24282c30u);
-    _device.rtw_write32(0x099c, 0x34383c40u);
-    _device.rtw_write32(0x09a0, 0x44000000u);
-    _device.rtw_write32(0x09a4, 0x80000800u);
-    _logger->info("8814A: REG_MACID + trace-derived post-fwdl writes applied");
+    _device.rtw_write32(0x0520, 0x00002f0fu);   /* REG_TX_PTCL_CTRL */
+    _device.rtw_write32(0x0524, 0x0f4fff00u);   /* REG_RD_CTRL — kept */
+    _device.rtw_write32(0x0670, 0xc0000000u);
+    /* Rate-adaptation table init (first-write values from cold-init
+     * trace; kernel emits 3+ runtime updates from IQK that devourer
+     * cannot reproduce — settle for the first/initial value). */
+    _device.rtw_write32(0x0990, 0x27100000u);
+    _device.rtw_write32(0x0994, 0x4c480100u);
+    _device.rtw_write32(0x0998, 0x302c2824u);
+    _device.rtw_write32(0x099c, 0x403c3834u);
+    _device.rtw_write32(0x09a0, 0x00000044u);
+    _device.rtw_write32(0x09a4, 0x00080080u);
+    _logger->info("8814A: trace-derived post-fwdl writes applied");
   }
 
   if (is_8814a) {

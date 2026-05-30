@@ -27,7 +27,8 @@ a moving target as kernels evolve, especially for the out-of-tree
 `aircrack-ng/rtl8812au` driver.
 
 ```bash
-sudo python3 tests/regress.py --channel 100
+sudo python3 tests/regress.py
+# default --channel 6; pass --channel 36 / --channel 100 to exercise 5GHz
 ```
 
 ### VM mode (recommended)
@@ -48,9 +49,11 @@ sudo tests/setup_vm.sh --status           # show VM IP, ssh hint
 Then run the matrix in VM mode:
 
 ```bash
-sudo python3 tests/regress.py --channel 100 \
+sudo python3 tests/regress.py \
     --vm-name devourer-testrig \
     --vm-ssh <user>@<VM-IP-from-status>
+# Defaults to --channel 6 (2.4GHz). Re-run with --channel 36 / 100 to
+# also exercise 5GHz; devourer has known broken cells there for some chips.
 ```
 
 VM mode is what unblocks chipsets where the host kernel driver doesn't
@@ -117,8 +120,11 @@ per-cell stdout/stderr logs end up at `/tmp/devourer-regress-last/`.
 
 ## CLI knobs
 
-- `--channel N` — Wi-Fi channel for both adapters (default 36; pick the
-  channel your nearest AP is on for guaranteed traffic)
+- `--channel N` — Wi-Fi channel for both adapters (default `6`). **Devourer's
+  5GHz path has known broken cells** (8814 RX, 8821 TX/RX) that are masked
+  if you only test 2.4GHz. Override with `--channel 36` / `--channel 100`
+  to surface them. The 8814 TX gate (kaeru ref `RTL8814AU libusb-userspace
+  bulk-OUT does not produce on-air TX`) shows on both bands.
 - `--duration SECONDS` — per-cell injection/measurement window (default 15)
 - `--pass-threshold N` — min hits to pass (default 1)
 - `--tx-pid 0xNNNN` / `--rx-pid 0xNNNN` — pick specific DUTs (defaults to
@@ -277,3 +283,14 @@ to add new chipsets — the rest of the script is chipset-agnostic.
   host and devourer-claimable simultaneously. Works fine, but means both
   chipsets need working devourer RX — if one is RX-broken (e.g. current
   RTL8814AU TODO), that cell will always show 0 hits regardless of TX.
+- **Channel / band asymmetry on devourer.** A single-channel matrix run
+  doesn't tell the full story — devourer's 5GHz code path has long-
+  standing broken cells (8814 RX, 8821 TX, 8821 RX) that pass on 2.4GHz.
+  The default of `--channel 6` was chosen because it produces the
+  "everything except 8814 TX works" picture that matches CLAUDE.md and
+  the project's primary use case. Run with `--channel 36` or
+  `--channel 100` to surface the 5GHz issues. Older PR matrix tables
+  in the repo history were captured at `--channel 100`, which is why
+  multiple PR bodies (e.g. #34, #42, #49) record "8814 RX devourer still
+  broken" — those cells work at 2.4GHz; the documented "broken" status
+  is band-specific.

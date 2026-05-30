@@ -44,15 +44,22 @@ two USB Wi-Fi adapters plugged into the host. Run **after** building devourer.
 
 ```sh
 # Local mode — kernel cells use whatever driver is bound on the host
-sudo python3 tests/regress.py --channel 100
+sudo python3 tests/regress.py
 
 # VM mode (recommended for RTL8814AU and other chips whose kernel driver
 # doesn't build on bleeding-edge kernels) — kernel cells run inside a
 # pinned-kernel (Ubuntu 22.04 / 5.15) libvirt VM with aircrack-ng/rtl8812au
 # preloaded. Provision once with tests/setup_vm.sh, then:
-sudo python3 tests/regress.py --channel 100 \
+sudo python3 tests/regress.py \
     --vm-name devourer-testrig --vm-ssh <user>@<VM-IP>
 ```
+
+Default channel is `6` (2.4GHz). Devourer's 5GHz path has known broken
+cells for 8814 RX, 8821 TX, and 8821 RX — at 2.4GHz every chip combo
+except 8814 TX works. Pass `--channel 36` / `--channel 100` to exercise
+5GHz; do not assume a single-band matrix is comprehensive. (The repo
+history's matrix tables in PR bodies #34/#42/#49 were all captured at
+`--channel 100` and document the 5GHz state.)
 
 Three specialised modes layered on top of the default 4-cell matrix:
 

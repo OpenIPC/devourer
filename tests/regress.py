@@ -1252,9 +1252,13 @@ def main():
         help="repo root with build/WiFiDriverDemo + build/WiFiDriverTxDemo",
     )
     ap.add_argument(
-        "--channel", type=int, default=36,
-        help="Wi-Fi channel (default 36; pick a busy channel like 100 if your "
-             "AP is on it — higher hit counts mean less variance)",
+        "--channel", type=int, default=6,
+        help="Wi-Fi channel (default 6 — 2.4GHz). Devourer's 5GHz code path "
+             "has known broken cells for 8814 RX, 8821 TX, and 8821 RX (8814 "
+             "TX is broken on both bands). At 2.4GHz every chip combo except "
+             "8814 TX works. Override with `--channel 36` or `--channel 100` "
+             "to surface the 5GHz cells; do not assume a single-band matrix "
+             "is comprehensive.",
     )
     ap.add_argument(
         "--duration", type=float, default=15.0,

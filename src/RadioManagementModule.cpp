@@ -1848,8 +1848,19 @@ void RadioManagementModule::PHY_TxPowerTrainingByPath_8812(RfPath rfPath) {
   }
 
   uint16_t writeOffset;
-  uint32_t powerLevel;
-  powerLevel = power;
+  /* Upstream `PHY_TxPowerTrainingByPath_8812` uses
+   * `phy_get_tx_power_index(adapter, path, MGN_MCS7, bw, channel)` as the
+   * starting PowerLevel — i.e. the per-channel per-Ntx TX-power index for
+   * HT MCS7 (1-stream). devourer used to read the uniform `power` class
+   * member instead, which produced 0xc54 = 0x10161E vs kernel's 0x171D25
+   * at ch6 (the T1 canary diff's last outstanding divergence in the
+   * TX-power cluster). MGN_MCS7 = 0x87, ntx_idx = 0 (1-stream rate). */
+  uint32_t powerLevel = _eepromManager->TxPowerInfoLoaded
+      ? _eepromManager->GetTxPowerIndexBase(
+            static_cast<uint8_t>(rfPath), /*rate MGN_MCS7=*/0x87,
+            /*ntx_idx=*/0,
+            static_cast<uint8_t>(_currentChannelBw), _currentChannel)
+      : power;
 
   if (rfPath == RfPath::RF_PATH_A) {
     writeOffset = rA_TxPwrTraing_Jaguar;

@@ -112,6 +112,44 @@ public:
   int8_t BW80_5G_Diff[kMaxRfPath][kMaxTxCount]{};
   bool TxPowerInfoLoaded = false;
 
+  /* TxPwrByRateOffset: per-rate fine-tune offset applied on top of the
+   * per-channel base. Loaded from `kHal8812aPhyRegPg` (verbatim copy of
+   * upstream `array_mp_8812a_phy_reg_pg`). After `NormalizeTxPowerByRate`
+   * runs, each entry holds (raw_value - section_base) — a small signed
+   * offset (~-12..+20). Indexed by RateToIndex(MGN_*). */
+  static constexpr int kNumRateIdx = 84;
+  static constexpr int kNumRateSection = 10;
+  int8_t TxPwrByRateOffset[2][kMaxRfPath][kNumRateIdx]{};
+  uint8_t TxPwrByRateBase[2][kMaxRfPath][kNumRateSection]{};
+  bool TxPwrByRateLoaded = false;
+
+  /* TX power regulatory limit table from `kHal8812aTxpwrLmt`. After load,
+   * each entry holds the regulation-imposed max power-index for a given
+   * (regulation, band, bw, rate_section, ntx, channel). devourer's
+   * `GetTxPowerIndexBase` caps `by_rate_offset` against this when
+   * computing the final per-rate per-channel power. */
+  static constexpr int kNumRegulations = 4; /* FCC, ETSI, MKK, WW */
+  static constexpr int kNum2gBw = 2; /* 20M, 40M */
+  static constexpr int kNum5gBw = 4; /* 20M, 40M, 80M, 160M */
+  static constexpr int kNumRateSectionLmt = 4; /* CCK, OFDM, HT, VHT */
+  static constexpr int kCenterCh2gNumLmt = 14;
+  static constexpr int kCenterCh5gAllNumLmt = 65;
+  int8_t TxPwrLimit2g[kNumRegulations][kNum2gBw][kNumRateSectionLmt]
+                     [kMaxTxCount][kCenterCh2gNumLmt]{};
+  int8_t TxPwrLimit5g[kNumRegulations][kNum5gBw][kNumRateSectionLmt]
+                     [kMaxTxCount][kCenterCh5gAllNumLmt]{};
+  bool TxPwrLimitLoaded = false;
+  /* Active regulation domain — defaults to FCC (least restrictive on the
+   * canonical 8812AU). Can be overridden via DEVOURER_REGULATION env. */
+  uint8_t CurrentRegulation = 0; /* 0=FCC, 1=ETSI, 2=MKK, 3=WW */
+
+  /* Load + normalize per-rate offsets from the upstream phy_reg_pg table.
+   * Called after LoadTxPowerInfo. */
+  void LoadTxPowerByRate();
+
+  /* Parse upstream txpwr_lmt array into the 5D limit lookup. */
+  void LoadTxPowerLimit();
+
 private:
   void read_chip_version_8812a(RtlUsbAdapter device);
   void dump_chip_info(HAL_VERSION ChipVersion);

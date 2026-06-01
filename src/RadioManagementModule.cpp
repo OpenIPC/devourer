@@ -1323,7 +1323,18 @@ void RadioManagementModule::PHY_SetTxPowerIndexByRateArray(
    * Fallback when EFUSE tables not loaded (autoload failed for this
    * chip, e.g. 8814 pre-LateInit): the legacy `power` shortcut. Once
    * EFUSE is loaded all rates compute against base + per-Ntx diff. */
-  const uint8_t ntx_idx = static_cast<uint8_t>(_eepromManager->numTotalRfPath);
+  /* ntx_idx is the rate's stream count - 1, NOT the chip's RfPath count.
+   * Mirrors upstream `phy_get_current_tx_num`: OFDM/MCS0-7/VHT1SS → 0,
+   * MCS8-15/VHT2SS → 1, MCS16-23/VHT3SS → 2, MCS24-31/VHT4SS → 3. */
+  auto rate_ntx = [](uint8_t r) -> uint8_t {
+    if (r >= 0x88 && r <= 0x8F) return 1; /* MCS8-15 */
+    if (r >= 0x90 && r <= 0x97) return 2; /* MCS16-23 */
+    if (r >= 0x98 && r <= 0x9F) return 3; /* MCS24-31 */
+    if (r >= 0xAA && r <= 0xB3) return 1; /* VHT2SS */
+    if (r >= 0xB4 && r <= 0xBD) return 2; /* VHT3SS */
+    if (r >= 0xBE && r <= 0xC7) return 3; /* VHT4SS */
+    return 0;
+  };
   const uint8_t bw = static_cast<uint8_t>(_currentChannelBw);
   for (int i = 0; i < rates.size(); ++i) {
     MGN_RATE rate = rates[i];
@@ -1331,8 +1342,7 @@ void RadioManagementModule::PHY_SetTxPowerIndexByRateArray(
     if (_eepromManager->TxPowerInfoLoaded) {
       powerIndex = _eepromManager->GetTxPowerIndexBase(
           static_cast<uint8_t>(rfPath), static_cast<uint8_t>(rate),
-          ntx_idx > 0 ? static_cast<uint8_t>(ntx_idx - 1) : 0, bw,
-          _currentChannel);
+          rate_ntx(static_cast<uint8_t>(rate)), bw, _currentChannel);
     } else {
       powerIndex = power;
     }
@@ -1380,8 +1390,15 @@ void RadioManagementModule::PHY_SetTxPowerIndex_8812A(uint32_t powerIndex,
   if (static_cast<uint8_t>(rfPath) >= RF_PATH_C) {
     return;
   }
-  if (powerIndex % 2 == 1)
+  /* Upstream `rtl8812a_phycfg.c:629` — workaround for the 8812A/8821A
+   * TEST CHIPS only, which had a bug accepting odd Tx-power indexes.
+   * Normal-production silicon doesn't need it. Devourer was applying
+   * the decrement unconditionally and introducing a systematic -1
+   * offset in the per-rate TX-power canary diff vs kernel. */
+  if (!IS_NORMAL_CHIP(_eepromManager->version_id) &&
+      powerIndex % 2 == 1) {
     powerIndex -= 1;
+  }
   if (rfPath == RF_PATH_A) {
     switch (rate) {
     case MGN_1M:

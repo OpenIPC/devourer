@@ -6,6 +6,8 @@
 #include "rtw_efuse.h"
 
 #include <cstring>
+#include <cstdlib>
+#include <strings.h>  /* strcasecmp */
 
 EepromManager::EepromManager(RtlUsbAdapter device, Logger_t logger)
     : _device{device}, _logger{logger} {
@@ -34,6 +36,8 @@ EepromManager::EepromManager(RtlUsbAdapter device, Logger_t logger)
    * RadioManagementModule can compute per-rate TX power instead of using
    * the uniform `SetTxPower(N)` shortcut. */
   LoadTxPowerInfo();
+  LoadTxPowerByRate();
+  LoadTxPowerLimit();
 
   /*  */
   /* Read Bluetooth co-exist and initialize */
@@ -208,6 +212,129 @@ void EepromManager::read_chip_version_8812a(RtlUsbAdapter device) {
 
   dump_chip_info(version_id);
 }
+
+/* Includes for the embedded upstream tables. */
+#include "../hal/Hal8812a_PhyRegPg.h"
+#include "../hal/Hal8812a_TxpwrLmt.h"
+
+namespace {
+
+/* Rate → flat-index map for TxPwrByRateOffset. Mirrors upstream
+ * `PHY_GetRateIndexOfTxPowerByRate`. -1 = rate not in table. */
+int8_t rate_to_idx(uint8_t rate) {
+  switch (rate) {
+  /* CCK */
+  case 0x02: return 0;  /* MGN_1M */
+  case 0x04: return 1;  /* MGN_2M */
+  case 0x0B: return 2;  /* MGN_5_5M */
+  case 0x16: return 3;  /* MGN_11M */
+  /* OFDM */
+  case 0x0C: return 4;  /* MGN_6M */
+  case 0x12: return 5;  /* MGN_9M */
+  case 0x18: return 6;  /* MGN_12M */
+  case 0x24: return 7;  /* MGN_18M */
+  case 0x30: return 8;  /* MGN_24M */
+  case 0x48: return 9;  /* MGN_36M */
+  case 0x60: return 10; /* MGN_48M */
+  case 0x6C: return 11; /* MGN_54M */
+  default:
+    /* MGN_MCS0..31 = 0x80..0x9F → idx 12..43. */
+    if (rate >= 0x80 && rate <= 0x9F)
+      return static_cast<int8_t>(12 + (rate - 0x80));
+    /* MGN_VHT1SS_MCS0..VHT4SS_MCS9 = 0xA0..0xC7 → idx 44..83. */
+    if (rate >= 0xA0 && rate <= 0xC7)
+      return static_cast<int8_t>(44 + (rate - 0xA0));
+    return -1;
+  }
+}
+
+/* RATE_SECTION enum from upstream `phydm_pre_define.h`. */
+enum { RS_CCK = 0, RS_OFDM, RS_HT_1SS, RS_HT_2SS, RS_HT_3SS, RS_HT_4SS,
+       RS_VHT_1SS, RS_VHT_2SS, RS_VHT_3SS, RS_VHT_4SS };
+
+/* (RegAddr → 4 rates) port of upstream `PHY_GetRateValuesOfTxPowerByRate`.
+ * Only the regs that appear in `kHal8812aPhyRegPg` for 8812 are mapped. */
+struct RateRow {
+  uint16_t reg;
+  uint8_t rates[4];
+  uint8_t count;
+};
+static const RateRow kRateMap[] = {
+    /* path-A */
+    {0xc20, {0x02, 0x04, 0x0B, 0x16}, 4}, /* CCK 1/2/5.5/11 */
+    {0xc24, {0x0C, 0x12, 0x18, 0x24}, 4}, /* OFDM 6/9/12/18 */
+    {0xc28, {0x30, 0x48, 0x60, 0x6C}, 4}, /* OFDM 24/36/48/54 */
+    {0xc2c, {0x80, 0x81, 0x82, 0x83}, 4}, /* MCS0..3 */
+    {0xc30, {0x84, 0x85, 0x86, 0x87}, 4}, /* MCS4..7 */
+    {0xc34, {0x88, 0x89, 0x8A, 0x8B}, 4}, /* MCS8..11 */
+    {0xc38, {0x8C, 0x8D, 0x8E, 0x8F}, 4}, /* MCS12..15 */
+    {0xc3c, {0xA0, 0xA1, 0xA2, 0xA3}, 4}, /* VHT1SS_MCS0..3 */
+    {0xc40, {0xA4, 0xA5, 0xA6, 0xA7}, 4}, /* VHT1SS_MCS4..7 */
+    {0xc44, {0xA8, 0xA9, 0xAA, 0xAB}, 4}, /* VHT1SS_MCS8,9, VHT2SS_MCS0,1 */
+    {0xc48, {0xAC, 0xAD, 0xAE, 0xAF}, 4}, /* VHT2SS_MCS2..5 */
+    {0xc4c, {0xB0, 0xB1, 0xB2, 0xB3}, 4}, /* VHT2SS_MCS6..9 */
+    /* path-B */
+    {0xe20, {0x02, 0x04, 0x0B, 0x16}, 4},
+    {0xe24, {0x0C, 0x12, 0x18, 0x24}, 4},
+    {0xe28, {0x30, 0x48, 0x60, 0x6C}, 4},
+    {0xe2c, {0x80, 0x81, 0x82, 0x83}, 4},
+    {0xe30, {0x84, 0x85, 0x86, 0x87}, 4},
+    {0xe34, {0x88, 0x89, 0x8A, 0x8B}, 4},
+    {0xe38, {0x8C, 0x8D, 0x8E, 0x8F}, 4},
+    {0xe3c, {0xA0, 0xA1, 0xA2, 0xA3}, 4},
+    {0xe40, {0xA4, 0xA5, 0xA6, 0xA7}, 4},
+    {0xe44, {0xA8, 0xA9, 0xAA, 0xAB}, 4},
+    {0xe48, {0xAC, 0xAD, 0xAE, 0xAF}, 4},
+    {0xe4c, {0xB0, 0xB1, 0xB2, 0xB3}, 4},
+};
+
+/* Section base rate index — port of upstream `rate_sec_base[RATE_SECTION_NUM]`
+ * (the rate whose value becomes the section's base for offset normalization). */
+static const uint8_t kSectionBaseRate[10] = {
+    0x16, /* RS_CCK   → MGN_11M */
+    0x6C, /* RS_OFDM  → MGN_54M */
+    0x87, /* RS_HT_1SS → MGN_MCS7 */
+    0x8F, /* RS_HT_2SS → MGN_MCS15 */
+    0x97, /* RS_HT_3SS → MGN_MCS23 */
+    0x9F, /* RS_HT_4SS → MGN_MCS31 */
+    0xA7, /* RS_VHT_1SS → MGN_VHT1SS_MCS7 */
+    0xB1, /* RS_VHT_2SS → MGN_VHT2SS_MCS7 */
+    0xBB, /* RS_VHT_3SS → MGN_VHT3SS_MCS7 */
+    0xC5, /* RS_VHT_4SS → MGN_VHT4SS_MCS7 */
+};
+
+int8_t rate_to_section(uint8_t rate) {
+  if (rate == 0x02 || rate == 0x04 || rate == 0x0B || rate == 0x16) return RS_CCK;
+  if (rate >= 0x0C && rate <= 0x6C) return RS_OFDM;
+  if (rate >= 0x80 && rate <= 0x87) return RS_HT_1SS;
+  if (rate >= 0x88 && rate <= 0x8F) return RS_HT_2SS;
+  if (rate >= 0x90 && rate <= 0x97) return RS_HT_3SS;
+  if (rate >= 0x98 && rate <= 0x9F) return RS_HT_4SS;
+  if (rate >= 0xA0 && rate <= 0xA9) return RS_VHT_1SS;
+  if (rate >= 0xAA && rate <= 0xB3) return RS_VHT_2SS;
+  if (rate >= 0xB4 && rate <= 0xBD) return RS_VHT_3SS;
+  if (rate >= 0xBE && rate <= 0xC7) return RS_VHT_4SS;
+  return -1;
+}
+
+/* Channel → index in the per-band TX-power-limit table (port of upstream
+ * `phy_GetChannelIndexOfTxPowerLimit`). For 2.4G it's channel-1 (1..14).
+ * For 5G it's the index in the 65-entry center_ch_5g_all table. */
+int8_t lmt_ch_idx_2g(uint8_t ch) {
+  if (ch >= 1 && ch <= 14) return static_cast<int8_t>(ch - 1);
+  return -1;
+}
+/* The 5G channel index table is defined as a file-scope static below
+ * (`kCenterCh5gAll`). lmt_ch_idx_5g uses the same definition via a small
+ * inline lookup in `LoadTxPowerLimit` rather than re-declaring it here. */
+
+uint8_t parse_decimal(const char *s) {
+  unsigned r = 0;
+  while (*s >= '0' && *s <= '9') { r = r * 10 + (*s - '0'); s++; }
+  return static_cast<uint8_t>(r);
+}
+
+}  /* namespace */
 
 /* Helper: 4-bit signed nibble (Realtek's PG diff encoding) to int8_t. */
 static inline int8_t pg_msb_diff(uint8_t v) {
@@ -394,6 +521,172 @@ void EepromManager::LoadTxPowerInfo() {
                 unsigned(Index24G_BW40_Base[0][5]));
 }
 
+void EepromManager::LoadTxPowerByRate() {
+  /* Reset to zero — invalid rates / unmapped registers stay 0 and the
+   * lookup returns 0 (no offset). */
+  std::memset(TxPwrByRateOffset, 0, sizeof(TxPwrByRateOffset));
+  std::memset(TxPwrByRateBase, 0, sizeof(TxPwrByRateBase));
+
+  /* Stage 1: parse kHal8812aPhyRegPg into per-(band,path,rate) raw values. */
+  constexpr size_t row_words = 6;
+  const size_t num_rows = sizeof(kHal8812aPhyRegPg) / sizeof(uint32_t) / row_words;
+  for (size_t r = 0; r < num_rows; r++) {
+    uint32_t band   = kHal8812aPhyRegPg[r * row_words + 0];
+    uint32_t rfpath = kHal8812aPhyRegPg[r * row_words + 1];
+    /* row[2] = tx_num — not used for our flat per-rate index; the rate
+     * IDs already differentiate by Ntx. */
+    uint32_t addr   = kHal8812aPhyRegPg[r * row_words + 3];
+    /* row[4] = bitmask, always 0xffffffff for 8812. */
+    uint32_t data   = kHal8812aPhyRegPg[r * row_words + 5];
+    if (band >= 2 || rfpath >= kMaxRfPath) continue;
+    const uint16_t reg = static_cast<uint16_t>(addr);
+    const RateRow *rr = nullptr;
+    for (const auto &m : kRateMap) {
+      if (m.reg == reg) { rr = &m; break; }
+    }
+    if (!rr) continue;
+    for (int i = 0; i < rr->count; i++) {
+      int8_t idx = rate_to_idx(rr->rates[i]);
+      if (idx < 0) continue;
+      uint8_t val = static_cast<uint8_t>((data >> (i * 8)) & 0xff);
+      TxPwrByRateOffset[band][rfpath][idx] = static_cast<int8_t>(val);
+    }
+  }
+
+  /* Stage 2: compute per-section base (value at rate_sec_base[rs]). */
+  for (int band = 0; band < 2; band++) {
+    for (int path = 0; path < numTotalRfPath && path < kMaxRfPath; path++) {
+      for (int rs = 0; rs < kNumRateSection; rs++) {
+        int8_t base_idx = rate_to_idx(kSectionBaseRate[rs]);
+        if (base_idx < 0) continue;
+        TxPwrByRateBase[band][path][rs] =
+            static_cast<uint8_t>(TxPwrByRateOffset[band][path][base_idx]);
+      }
+    }
+  }
+
+  /* Stage 3: normalize — replace each rate's raw value with
+   * (raw - section_base), yielding a small signed offset. Mirrors
+   * upstream `phy_ConvertTxPowerByRateInDbmToRelativeValues`. */
+  for (int band = 0; band < 2; band++) {
+    for (int path = 0; path < numTotalRfPath && path < kMaxRfPath; path++) {
+      for (int idx = 0; idx < kNumRateIdx; idx++) {
+        /* Skip rates whose section base is zero (rate not loaded). */
+        /* Reconstruct the MGN_RATE from idx to find its section. */
+        uint8_t rate;
+        if (idx <= 3) {
+          static const uint8_t cck[] = {0x02, 0x04, 0x0B, 0x16};
+          rate = cck[idx];
+        } else if (idx <= 11) {
+          static const uint8_t ofdm[] = {0x0C, 0x12, 0x18, 0x24,
+                                         0x30, 0x48, 0x60, 0x6C};
+          rate = ofdm[idx - 4];
+        } else if (idx <= 43) {
+          rate = static_cast<uint8_t>(0x80 + (idx - 12));
+        } else {
+          rate = static_cast<uint8_t>(0xA0 + (idx - 44));
+        }
+        int8_t section = rate_to_section(rate);
+        if (section < 0) continue;
+        int raw = TxPwrByRateOffset[band][path][idx];
+        int base = TxPwrByRateBase[band][path][section];
+        TxPwrByRateOffset[band][path][idx] =
+            static_cast<int8_t>(raw - base);
+      }
+    }
+  }
+
+  TxPwrByRateLoaded = true;
+  _logger->info("LoadTxPowerByRate: 2.4G path-A OFDM-6M offset={} HT-MCS7 base={}",
+                int(TxPwrByRateOffset[0][0][rate_to_idx(0x0C)]),
+                unsigned(TxPwrByRateBase[0][0][RS_HT_1SS]));
+}
+
+void EepromManager::LoadTxPowerLimit() {
+  /* Init to a sentinel "63" = txgi_max meaning "no limit" — entries not
+   * touched by the parser end up unconstrained. */
+  std::memset(TxPwrLimit2g, 63, sizeof(TxPwrLimit2g));
+  std::memset(TxPwrLimit5g, 63, sizeof(TxPwrLimit5g));
+
+  /* Honour DEVOURER_REGULATION env override (FCC|ETSI|MKK|WW). */
+  if (const char *e = std::getenv("DEVOURER_REGULATION")) {
+    if (!strcasecmp(e, "ETSI")) CurrentRegulation = 1;
+    else if (!strcasecmp(e, "MKK")) CurrentRegulation = 2;
+    else if (!strcasecmp(e, "WW")) CurrentRegulation = 3;
+    else CurrentRegulation = 0;
+  }
+
+  const size_t num_strings =
+      sizeof(kHal8812aTxpwrLmt) / sizeof(kHal8812aTxpwrLmt[0]);
+  for (size_t i = 0; i + 6 < num_strings; i += 7) {
+    const char *reg_s   = kHal8812aTxpwrLmt[i + 0];
+    const char *band_s  = kHal8812aTxpwrLmt[i + 1];
+    const char *bw_s    = kHal8812aTxpwrLmt[i + 2];
+    const char *rate_s  = kHal8812aTxpwrLmt[i + 3];
+    const char *ntx_s   = kHal8812aTxpwrLmt[i + 4];
+    const char *ch_s    = kHal8812aTxpwrLmt[i + 5];
+    const char *val_s   = kHal8812aTxpwrLmt[i + 6];
+
+    uint8_t reg;
+    if      (!strcmp(reg_s, "FCC"))  reg = 0;
+    else if (!strcmp(reg_s, "ETSI")) reg = 1;
+    else if (!strcmp(reg_s, "MKK"))  reg = 2;
+    else if (!strcmp(reg_s, "WW"))   reg = 3;
+    else continue;
+
+    uint8_t band;
+    if      (!strcmp(band_s, "2.4G")) band = 0;
+    else if (!strcmp(band_s, "5G"))   band = 1;
+    else continue;
+
+    uint8_t bw;
+    if      (!strcmp(bw_s, "20M"))  bw = 0;
+    else if (!strcmp(bw_s, "40M"))  bw = 1;
+    else if (!strcmp(bw_s, "80M"))  bw = 2;
+    else if (!strcmp(bw_s, "160M")) bw = 3;
+    else continue;
+
+    uint8_t rs;
+    if      (!strcmp(rate_s, "CCK"))  rs = 0;
+    else if (!strcmp(rate_s, "OFDM")) rs = 1;
+    else if (!strcmp(rate_s, "HT"))   rs = 2;
+    else if (!strcmp(rate_s, "VHT"))  rs = 3;
+    else continue;
+
+    uint8_t ntx;
+    if      (!strcmp(ntx_s, "1T")) ntx = 0;
+    else if (!strcmp(ntx_s, "2T")) ntx = 1;
+    else if (!strcmp(ntx_s, "3T")) ntx = 2;
+    else if (!strcmp(ntx_s, "4T")) ntx = 3;
+    else continue;
+
+    uint8_t ch = parse_decimal(ch_s);
+    /* val_s may be signed (kept as-is via decimal parse, but no negatives
+     * appear in this table). */
+    uint8_t val = parse_decimal(val_s);
+
+    if (band == 0) {
+      if (bw >= kNum2gBw) continue;
+      int8_t ch_idx = lmt_ch_idx_2g(ch);
+      if (ch_idx < 0) continue;
+      TxPwrLimit2g[reg][bw][rs][ntx][ch_idx] = static_cast<int8_t>(val);
+    } else {
+      if (bw >= kNum5gBw) continue;
+      int8_t ch_idx = -1;
+      for (int j = 0; j < kCenterCh5gAllNumLmt; j++)
+        if (kCenterCh5gAll[j] == ch) { ch_idx = static_cast<int8_t>(j); break; }
+      if (ch_idx < 0) continue;
+      TxPwrLimit5g[reg][bw][rs][ntx][ch_idx] = static_cast<int8_t>(val);
+    }
+  }
+
+  TxPwrLimitLoaded = true;
+  static const char *kRegName[] = {"FCC", "ETSI", "MKK", "WW"};
+  _logger->info("LoadTxPowerLimit: active regulation={} (FCC OFDM 1T ch6 = {})",
+                kRegName[CurrentRegulation],
+                int(TxPwrLimit2g[0][0][1][0][5]));
+}
+
 uint8_t EepromManager::GetTxPowerIndexBase(uint8_t path, uint8_t rate,
                                            uint8_t ntx_idx, uint8_t bandwidth,
                                            uint8_t channel) const {
@@ -525,6 +818,64 @@ uint8_t EepromManager::GetTxPowerIndexBase(uint8_t path, uint8_t rate,
   }
 
 clamp_and_return:
+  /* Layer 2: per-rate offset (port of upstream PHY_GetTxPowerByRate).
+   * VHT rates at 2.4G are not capped by the txpwr_lmt table (no entries —
+   * VHT is 5G-only per Wi-Fi spec). Kernel writes base+boost for those,
+   * so force by_rate=0 there to match. */
+  int by_rate_diff = 0;
+  const int8_t section_classifier = rate_to_section(rate);
+  const bool is_vht_24g =
+      (band == 0) && section_classifier >= RS_VHT_1SS;
+  if (TxPwrByRateLoaded && !is_vht_24g) {
+    int8_t rate_idx = rate_to_idx(rate);
+    if (rate_idx >= 0)
+      by_rate_diff = TxPwrByRateOffset[band][path][rate_idx];
+  }
+
+  /* Layer 3: regulatory limit (port of upstream PHY_GetTxPowerLimit). */
+  int limit = 63;
+  if (TxPwrLimitLoaded) {
+    int8_t section = rate_to_section(rate);
+    int rs_lmt;
+    if      (section == RS_CCK)  rs_lmt = 0;
+    else if (section == RS_OFDM) rs_lmt = 1;
+    else if (section >= RS_HT_1SS && section <= RS_HT_4SS) rs_lmt = 2;
+    else if (section >= RS_VHT_1SS) rs_lmt = 3;
+    else rs_lmt = -1;
+    if (rs_lmt >= 0) {
+      if (band == 0) {
+        if (bandwidth < kNum2gBw && ntx_idx < kMaxTxCount) {
+          int8_t v = TxPwrLimit2g[CurrentRegulation][bandwidth][rs_lmt]
+                                 [ntx_idx][ch_idx];
+          if (v < 63 && v > -63) limit = v;
+        }
+      } else {
+        if (bandwidth < kNum5gBw && ntx_idx < kMaxTxCount) {
+          int8_t v = TxPwrLimit5g[CurrentRegulation][bandwidth][rs_lmt]
+                                 [ntx_idx][ch_idx];
+          if (v < 63 && v > -63) limit = v;
+        }
+      }
+    }
+  }
+
+  /* Cap `by_rate_diff` such that the final power doesn't exceed the
+   * regulatory `limit`. Upstream writes:
+   *   by_rate_diff = (by_rate_diff > limit) ? limit : by_rate_diff;
+   *   power = base + by_rate_diff + boost;
+   * But empirically that lets `base + by_rate_diff + boost` exceed `limit`
+   * when by_rate is small enough vs limit but base is high (the kernel
+   * 0xc24 OFDM-6M canary = 0x31 = 49 contradicts the literal formula —
+   * by_rate=20 limit=36 base=47 would predict 47+20+2=69 clamped to 63,
+   * but kernel writes 49 = base+boost as if by_rate was forced to 0).
+   * The effective rule is: by_rate caps at (limit - base - boost), with a
+   * floor of 0. */
+  constexpr int boost = 2;  /* upstream `transmit_power_boost` default */
+  int headroom = limit - txPower - boost;
+  if (headroom < 0) headroom = 0;
+  if (by_rate_diff > headroom) by_rate_diff = headroom;
+  txPower += by_rate_diff + boost;
+
   if (txPower < 0) txPower = 0;
   if (txPower > 63) txPower = 63; /* txgi_max for 8812/8821/8814 */
   return static_cast<uint8_t>(txPower);

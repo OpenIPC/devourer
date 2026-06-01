@@ -259,7 +259,18 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
    * is set, dump the canary BB/MAC/RF registers after channel-set is
    * complete. Output format matches `iwpriv <iface> read 4,<addr>` /
    * `iwpriv <iface> rfr <path> <addr>` so kernel and devourer dumps
-   * can be diffed line-by-line. */
+   * can be diffed line-by-line.
+   *
+   * Known expected divergence on a clean diff (NOT a devourer bug):
+   *   BB 0x0c1c bits 31:21 — phydm TX BB-swing thermal compensation.
+   *     Kernel's phydm watchdog reads RF reg 0x42 thermal meter every
+   *     2s and walks 0xc1c[31:21] up/down through `tx_scaling_table_jaguar`
+   *     (typical drift to 0x21E (+0.5dB) or 0x23E (+1.0dB) on a
+   *     warmed-up dongle). Devourer keeps the BB-init value 0x200
+   *     (0 dB, table index 24). Porting the full thermal-tracking
+   *     watchdog (~2800 LOC across halrf_powertracking_ce.c +
+   *     halrf_8812a_ce.c) is out of scope. Other bits of 0xc1c
+   *     (AGC-table-select [11:8] etc.) are byte-for-byte. */
   if (std::getenv("DEVOURER_DUMP_CANARY")) {
     static const uint16_t bb_canary[] = {
         0x808, 0x80c, 0x82c, 0x830, 0x834, 0x838, 0x84c, 0x860, 0x8ac,

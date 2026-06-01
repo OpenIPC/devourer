@@ -148,6 +148,18 @@ private:
   void odm_config_rf_radio_b_8812a(uint32_t addr, uint32_t data);
        void PHY_BB8812_Config_1T();
 
+  /* Pre-converge the path-A/B Initial Gain Index to phydm's documented
+   * DIG floor (0x1c) for all Jaguar chips. Upstream phydm runs DIG
+   * (Dynamic Initial Gain) from its watchdog and converges 0xc50/0xe50
+   * to 0x1c when no false-alarm pressure is present (phydm_dig.c:
+   * `dig_t->dm_dig_min = 0x1c` for ODM_RTL8812 | RTL8814A | RTL8821).
+   * Devourer has no phydm watchdog, so devourer's static 0x20 (from the
+   * BB-init table) never moves and the chip runs slightly less sensitive
+   * than the kernel driver. Writing 0x1c once at init matches kernel
+   * post-DIG-converged state — last remaining T1 canary divergence on
+   * 0xc50/0xe50 that wasn't a real init bug. Safe for monitor RX:
+   * higher sensitivity, lower CCA threshold, no TX-side impact. */
+  void phydm_SetIgiFloor_Jaguar();
 };
 
 #endif /* HALMODULE_H */

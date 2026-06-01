@@ -255,6 +255,37 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     PHY_SetTxPowerLevel8812(_currentChannel);
   }
 
+  /* T1 cross-validation oracle (TODO.md): when DEVOURER_DUMP_CANARY=1
+   * is set, dump the canary BB/MAC/RF registers after channel-set is
+   * complete. Output format matches `iwpriv <iface> read 4,<addr>` /
+   * `iwpriv <iface> rfr <path> <addr>` so kernel and devourer dumps
+   * can be diffed line-by-line. */
+  if (std::getenv("DEVOURER_DUMP_CANARY")) {
+    static const uint16_t bb_canary[] = {
+        0x808, 0x80c, 0x82c, 0x830, 0x834, 0x838, 0x84c, 0x860, 0x8ac,
+        0x8b0, 0x8c4, 0xc00, 0xc1c, 0xc20, 0xc24, 0xc28, 0xc2c, 0xc30,
+        0xc34, 0xc38, 0xc3c, 0xc40, 0xc50, 0xc54, 0xc60, 0xc64, 0xc68,
+        0xc6c, 0xc70, 0xc90, 0xe1c, 0xe50, 0xe54};
+    static const uint16_t mac_canary[] = {0x40,  0xcf,  0xf0,  0x100,
+                                          0x102, 0x420, 0x4c8, 0x508,
+                                          0x522, 0x550, 0x560, 0x610,
+                                          0x614};
+    static const uint32_t rf_canary[] = {0x00, 0x05, 0x18, 0x42, 0x65, 0x8f};
+    _logger->info("=== DEVOURER_DUMP_CANARY (post channel-set ch={}) ===",
+                  unsigned(_currentChannel));
+    for (uint16_t a : bb_canary)
+      _logger->info("BB 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+    for (uint16_t a : mac_canary)
+      _logger->info("MAC 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+    for (uint32_t a : rf_canary)
+      _logger->info("RF[A] 0x{:02x} = 0x{:05X}", a,
+                    phy_query_rf_reg(RfPath::RF_PATH_A, a, 0xfffffu));
+    for (uint32_t a : rf_canary)
+      _logger->info("RF[B] 0x{:02x} = 0x{:05X}", a,
+                    phy_query_rf_reg(RfPath::RF_PATH_B, a, 0xfffffu));
+    _logger->info("=== END DEVOURER_DUMP_CANARY ===");
+  }
+
   _needIQK = false;
 }
 

@@ -48,6 +48,8 @@ managed no` on the test interfaces.
 from __future__ import annotations
 
 import argparse
+import atexit
+import ctypes
 import dataclasses
 import glob
 import os
@@ -60,6 +62,96 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Optional
+
+
+# ---------------------------------------------------------------------------
+# Process leak prevention.
+#
+# Long-running Popens (WiFiDriverDemo, WiFiDriverTxDemo, kernel-side tcpdump)
+# can outlive this script if:
+#   1. an outer `timeout` / SIGKILL hits Python before the run_cell finally
+#      block executes (the leaked child reparents to init with PPID=1);
+#   2. an unhandled exception propagates out of run_cell before _terminate
+#      runs on the in-flight Popen.
+#
+# A leaked WiFiDriverDemo keeps the USB device claimed, which manifests
+# in the kernel as `usbfs: process N (WiFiDriverDemo) did not claim
+# interface 0 before use` spam and prevents `aircrack-ng/88XXau` from
+# binding in the VM — exactly what bit us during the 2026-05-30 / -31
+# 8821AU 5GHz UNII-2 investigation.
+#
+# Mitigation layers (defense in depth):
+#   A) Track every local Popen in `_ACTIVE_LOCAL_PROCS`; SIGTERM/SIGINT/
+#      atexit walks the set and SIGKILLs survivors.
+#   B) Child preexec uses prctl(PR_SET_PDEATHSIG, SIGKILL) so the kernel
+#      kills the child the moment its parent (this process) dies, even
+#      if Python had no chance to run cleanup (the SIGKILL-from-outer-
+#      timeout case).
+# ---------------------------------------------------------------------------
+
+
+_ACTIVE_LOCAL_PROCS: set[subprocess.Popen] = set()
+
+
+PR_SET_PDEATHSIG = 1
+
+
+def _child_preexec() -> None:
+    """Runs in the child after fork, before exec. Asks the kernel to send
+    SIGKILL to this child the moment its parent (the regress.py process)
+    dies. Belt-and-braces against orphaned WiFiDriverDemo processes when
+    Python is killed by an outer `timeout` / SIGKILL that can't be caught."""
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
+    except Exception:
+        # Best-effort — if prctl unavailable, fall back to layer (A).
+        pass
+    # Also put the child in its own session so killpg targets work cleanly.
+    try:
+        os.setsid()
+    except OSError:
+        pass
+
+
+def _register_local_proc(proc: subprocess.Popen) -> subprocess.Popen:
+    _ACTIVE_LOCAL_PROCS.add(proc)
+    return proc
+
+
+def _unregister_local_proc(proc: subprocess.Popen) -> None:
+    _ACTIVE_LOCAL_PROCS.discard(proc)
+
+
+def _kill_all_local_procs() -> None:
+    """Last-resort sweep of every tracked Popen. Best effort — don't raise."""
+    for proc in list(_ACTIVE_LOCAL_PROCS):
+        if proc.poll() is not None:
+            _ACTIVE_LOCAL_PROCS.discard(proc)
+            continue
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        _ACTIVE_LOCAL_PROCS.discard(proc)
+
+
+def _install_cleanup_handlers() -> None:
+    atexit.register(_kill_all_local_procs)
+
+    def _handler(signum, _frame):
+        _kill_all_local_procs()
+        # Re-raise the signal at default disposition so the exit code
+        # reflects how we died.
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    signal.signal(signal.SIGTERM, _handler)
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGHUP, _handler)
 
 # Source MAC of the canonical beacon — must match txdemo/main.cpp and the
 # `<devourer-tx-hit>` matcher in demo/main.cpp. tcpdump filter and scapy
@@ -533,11 +625,11 @@ def _spawn_devourer_rx(
     devourer_root: Path, dut: Dut, channel: int, log_path: Path
 ) -> subprocess.Popen:
     fh = open(log_path, "w")
-    return subprocess.Popen(
+    return _register_local_proc(subprocess.Popen(
         [str(devourer_root / "build" / "WiFiDriverDemo")],
         env=_devourer_env(dut, channel),
-        stdout=fh, stderr=subprocess.STDOUT, start_new_session=True,
-    )
+        stdout=fh, stderr=subprocess.STDOUT, preexec_fn=_child_preexec,
+    ))
 
 
 def _spawn_devourer_tx(
@@ -545,11 +637,11 @@ def _spawn_devourer_tx(
     encoding: Optional[dict] = None,
 ) -> subprocess.Popen:
     fh = open(log_path, "w")
-    return subprocess.Popen(
+    return _register_local_proc(subprocess.Popen(
         [str(devourer_root / "build" / "WiFiDriverTxDemo")],
         env=_devourer_env(dut, channel, tx_encoding=encoding),
-        stdout=fh, stderr=subprocess.STDOUT, start_new_session=True,
-    )
+        stdout=fh, stderr=subprocess.STDOUT, preexec_fn=_child_preexec,
+    ))
 
 
 def _spawn_kernel_rx(
@@ -632,11 +724,11 @@ def _spawn_sniffer(
     sa_str = ":".join(
         f"{b:02x}" for b in bytes.fromhex(CANONICAL_SA.replace(":", ""))
     )
-    return subprocess.Popen(
+    return _register_local_proc(subprocess.Popen(
         ["tcpdump", "-i", iface, "-w", str(pcap_path), "-U", "-nn",
          f"ether src {sa_str}"],
-        stdout=fh, stderr=subprocess.STDOUT, start_new_session=True,
-    )
+        stdout=fh, stderr=subprocess.STDOUT, preexec_fn=_child_preexec,
+    ))
 
 
 def _summarise_sniffer_pcap(pcap_path: Path) -> str:
@@ -683,6 +775,7 @@ def _summarise_sniffer_pcap(pcap_path: Path) -> str:
 
 def _terminate(proc: subprocess.Popen, grace: float = 2.0) -> None:
     if proc.poll() is not None:
+        _unregister_local_proc(proc)
         return
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGINT)
@@ -693,6 +786,7 @@ def _terminate(proc: subprocess.Popen, grace: float = 2.0) -> None:
         except ProcessLookupError:
             pass
         proc.wait()
+    _unregister_local_proc(proc)
 
 
 # ---------------------------------------------------------------------------
@@ -1243,6 +1337,7 @@ def emit_markdown(
 
 
 def main():
+    _install_cleanup_handlers()
     ap = argparse.ArgumentParser(
         description="Cross-driver regression matrix for devourer.",
     )

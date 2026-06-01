@@ -1,0 +1,118 @@
+# Patch for aircrack-ng/8812au v5.6.4.2_35491.20191025 to route SIOCDEVPRIVATE
+# via .ndo_siocdevprivate on kernel 5.15+.
+#
+# Background
+# ----------
+# Linux 5.6 added struct net_device_ops::ndo_siocdevprivate, and 5.13 switched
+# SIOCDEVPRIVATE (0x89F0..0x89FF) dispatch over to it. Drivers that still only
+# register .ndo_do_ioctl no longer receive SIOCDEVPRIVATE ioctls on modern
+# kernels.
+#
+# aircrack-ng/88XXau (vintage 2019) wires the entire MP / EFUSE / debug
+# command surface through SIOCDEVPRIVATE → .ndo_do_ioctl → rtw_ioctl_wext_private
+# (the name-dispatch table at os_dep/linux/ioctl_linux.c:_rtw_ioctl_wext_private).
+# On kernel 5.15 these all return -EOPNOTSUPP from rtwpriv v5.9.1 (the
+# canonical Realtek MP-mode tool), even though MP/EFUSE handlers are compiled
+# in (CONFIG_MP_INCLUDED=y).
+#
+# iwpriv keeps working because it uses SIOCIWFIRSTPRIV+N (different ioctl
+# numbers, still routed via .ndo_do_ioctl).
+#
+# This patch adds a thin .ndo_siocdevprivate shim that rebuilds the iwreq
+# userspace-pointer field (now passed separately by the new ABI) and dispatches
+# into the existing rtw_ioctl() path. Unlocks rtwpriv v5.9.1 for:
+#   - efuse_get realmap / realraw / rmap,XX,N  (T3 EFUSE state-machine work)
+#   - mp_start, mp_channel, mp_bandwidth, mp_rate, mp_txpower, mp_ctx, mp_query
+#     (T4 MP-mode subcommand work)
+#   - rfr / rfw via SIOCDEVPRIVATE (alternative to the iwpriv path the canary
+#     diff oracle already uses)
+#
+# Apply
+# -----
+#   cd /usr/src/8812au-5.6.4.2_35491.20191025
+#   patch -p1 < /path/to/this/patch
+#   dkms remove -m realtek-rtl88xxau -v 5.6.4.2~20230501 --all
+#   dkms add /usr/src/8812au-5.6.4.2_35491.20191025
+#   dkms build  -m realtek-rtl88xxau -v 5.6.4.2~20230501
+#   dkms install -m realtek-rtl88xxau -v 5.6.4.2~20230501 --force
+#   rmmod 88XXau && modprobe 88XXau
+#
+# Verify
+# ------
+#   iw dev wlxXXXX set type monitor && ip link set wlxXXXX up
+#   iw dev wlxXXXX set channel 6
+#   rtwpriv wlxXXXX mp_start                    # → "mp_start ok"
+#   rtwpriv wlxXXXX efuse_get realmap           # → 16-byte rows of EFUSE
+#
+# Tested against: Ubuntu 22.04 / 5.15.0-179-generic / aircrack-ng/8812au
+# v5.6.4.2_35491.20191025 + rtwpriv_x86_64 from rtwpriv_release_v5.9.1.20241014.
+
+--- a/include/osdep_intf.h
++++ b/include/osdep_intf.h
+@@ -52,6 +52,11 @@ struct intf_priv {
+ #ifdef PLATFORM_LINUX
+ int rtw_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
+
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++int rtw_siocdevprivate(struct net_device *dev, struct ifreq *rq,
++		       void __user *data, int cmd);
++#endif
++
+ int rtw_init_netdev_name(struct net_device *pnetdev, const char *ifname);
+ struct net_device *rtw_init_netdev(_adapter *padapter);
+ u16 rtw_recv_select_queue(struct sk_buff *skb);
+--- a/os_dep/linux/ioctl_linux.c
++++ b/os_dep/linux/ioctl_linux.c
+@@ -12821,3 +12821,30 @@ int rtw_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+
+ 	return ret;
+ }
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++/* Kernel 5.15+ deprecated SIOCDEVPRIVATE routing through .ndo_do_ioctl —
++ * those ioctls now flow through .ndo_siocdevprivate with a separate
++ * userspace pointer arg. Wrap rtw_ioctl so the existing dispatch logic
++ * still receives SIOCDEVPRIVATE / SIOCDEVPRIVATE+1 etc.
++ *
++ * Without this shim, rtwpriv v5.9.1 (which talks via SIOCDEVPRIVATE) fails
++ * with "Operation not supported" on every command, even though MP/EFUSE
++ * handlers are compiled in. iwpriv keeps working because it uses
++ * SIOCIWFIRSTPRIV+N which still routes via .ndo_do_ioctl.
++ */
++int rtw_siocdevprivate(struct net_device *dev, struct ifreq *rq,
++		       void __user *data, int cmd)
++{
++	struct iwreq *wrq = (struct iwreq *)rq;
++
++	/* The legacy rtw_ioctl reads the userspace buffer via copy_from_user
++	 * on `wrq->u.data.pointer`. The new ABI gives us that pointer
++	 * separately in `data`; rebuild the iwreq so the legacy path sees
++	 * what it expects. */
++	if (cmd == SIOCDEVPRIVATE || cmd == SIOCDEVPRIVATE + 1)
++		wrq->u.data.pointer = data;
++
++	return rtw_ioctl(dev, rq, cmd);
++}
++#endif
+--- a/os_dep/linux/os_intfs.c
++++ b/os_dep/linux/os_intfs.c
+@@ -1535,6 +1535,9 @@ static const struct net_device_ops rtw_netdev_ops = {
+ 	.ndo_get_stats = rtw_net_get_stats,
+ #ifdef CONFIG_WIRELESS_EXT
+ 	.ndo_do_ioctl = rtw_ioctl,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++	.ndo_siocdevprivate = rtw_siocdevprivate,
++#endif
+ #endif
+ };
+ #endif
+@@ -2823,6 +2826,9 @@ static const struct net_device_ops rtw_netdev_ops = {
+ 	.ndo_get_stats = rtw_net_get_stats,
+ #ifdef CONFIG_WIRELESS_EXT
+ 	.ndo_do_ioctl = rtw_ioctl,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
++	.ndo_siocdevprivate = rtw_siocdevprivate,
++#endif
+ #endif
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 35))
+ 	.ndo_select_queue	= rtw_select_queue,

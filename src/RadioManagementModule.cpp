@@ -255,6 +255,37 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     PHY_SetTxPowerLevel8812(_currentChannel);
   }
 
+  /* T1 cross-validation oracle (TODO.md): when DEVOURER_DUMP_CANARY=1
+   * is set, dump the canary BB/MAC/RF registers after channel-set is
+   * complete. Output format matches `iwpriv <iface> read 4,<addr>` /
+   * `iwpriv <iface> rfr <path> <addr>` so kernel and devourer dumps
+   * can be diffed line-by-line. */
+  if (std::getenv("DEVOURER_DUMP_CANARY")) {
+    static const uint16_t bb_canary[] = {
+        0x808, 0x80c, 0x82c, 0x830, 0x834, 0x838, 0x84c, 0x860, 0x8ac,
+        0x8b0, 0x8c4, 0xc00, 0xc1c, 0xc20, 0xc24, 0xc28, 0xc2c, 0xc30,
+        0xc34, 0xc38, 0xc3c, 0xc40, 0xc50, 0xc54, 0xc60, 0xc64, 0xc68,
+        0xc6c, 0xc70, 0xc90, 0xe1c, 0xe50, 0xe54};
+    static const uint16_t mac_canary[] = {0x40,  0xcf,  0xf0,  0x100,
+                                          0x102, 0x420, 0x4c8, 0x508,
+                                          0x522, 0x550, 0x560, 0x610,
+                                          0x614};
+    static const uint32_t rf_canary[] = {0x00, 0x05, 0x18, 0x42, 0x65, 0x8f};
+    _logger->info("=== DEVOURER_DUMP_CANARY (post channel-set ch={}) ===",
+                  unsigned(_currentChannel));
+    for (uint16_t a : bb_canary)
+      _logger->info("BB 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+    for (uint16_t a : mac_canary)
+      _logger->info("MAC 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+    for (uint32_t a : rf_canary)
+      _logger->info("RF[A] 0x{:02x} = 0x{:05X}", a,
+                    phy_query_rf_reg(RfPath::RF_PATH_A, a, 0xfffffu));
+    for (uint32_t a : rf_canary)
+      _logger->info("RF[B] 0x{:02x} = 0x{:05X}", a,
+                    phy_query_rf_reg(RfPath::RF_PATH_B, a, 0xfffffu));
+    _logger->info("=== END DEVOURER_DUMP_CANARY ===");
+  }
+
   _needIQK = false;
 }
 
@@ -1283,9 +1314,38 @@ static uint8_t phy_get_tx_power_index() { return 16; }
 
 void RadioManagementModule::PHY_SetTxPowerIndexByRateArray(
     RfPath rfPath, const std::vector<MGN_RATE> &rates) {
+  /* T1 fix: per-rate TX power from EFUSE-derived tables (port of
+   * upstream `PHY_GetTxPowerIndexBase`). Before this, every rate got
+   * the same `power` (set once via SetTxPower) which produced the
+   * uniform 0x28 across the 0xc20..0xc40 TX-AGC cluster and diverged
+   * from kernel's per-rate per-channel values (0x2D..0x31 at ch6).
+   *
+   * Fallback when EFUSE tables not loaded (autoload failed for this
+   * chip, e.g. 8814 pre-LateInit): the legacy `power` shortcut. Once
+   * EFUSE is loaded all rates compute against base + per-Ntx diff. */
+  /* ntx_idx is the rate's stream count - 1, NOT the chip's RfPath count.
+   * Mirrors upstream `phy_get_current_tx_num`: OFDM/MCS0-7/VHT1SS → 0,
+   * MCS8-15/VHT2SS → 1, MCS16-23/VHT3SS → 2, MCS24-31/VHT4SS → 3. */
+  auto rate_ntx = [](uint8_t r) -> uint8_t {
+    if (r >= 0x88 && r <= 0x8F) return 1; /* MCS8-15 */
+    if (r >= 0x90 && r <= 0x97) return 2; /* MCS16-23 */
+    if (r >= 0x98 && r <= 0x9F) return 3; /* MCS24-31 */
+    if (r >= 0xAA && r <= 0xB3) return 1; /* VHT2SS */
+    if (r >= 0xB4 && r <= 0xBD) return 2; /* VHT3SS */
+    if (r >= 0xBE && r <= 0xC7) return 3; /* VHT4SS */
+    return 0;
+  };
+  const uint8_t bw = static_cast<uint8_t>(_currentChannelBw);
   for (int i = 0; i < rates.size(); ++i) {
-    auto powerIndex = power;
     MGN_RATE rate = rates[i];
+    uint32_t powerIndex;
+    if (_eepromManager->TxPowerInfoLoaded) {
+      powerIndex = _eepromManager->GetTxPowerIndexBase(
+          static_cast<uint8_t>(rfPath), static_cast<uint8_t>(rate),
+          rate_ntx(static_cast<uint8_t>(rate)), bw, _currentChannel);
+    } else {
+      powerIndex = power;
+    }
     PHY_SetTxPowerIndex_8812A(powerIndex, rfPath, rate);
   }
 }
@@ -1330,8 +1390,15 @@ void RadioManagementModule::PHY_SetTxPowerIndex_8812A(uint32_t powerIndex,
   if (static_cast<uint8_t>(rfPath) >= RF_PATH_C) {
     return;
   }
-  if (powerIndex % 2 == 1)
+  /* Upstream `rtl8812a_phycfg.c:629` — workaround for the 8812A/8821A
+   * TEST CHIPS only, which had a bug accepting odd Tx-power indexes.
+   * Normal-production silicon doesn't need it. Devourer was applying
+   * the decrement unconditionally and introducing a systematic -1
+   * offset in the per-rate TX-power canary diff vs kernel. */
+  if (!IS_NORMAL_CHIP(_eepromManager->version_id) &&
+      powerIndex % 2 == 1) {
     powerIndex -= 1;
+  }
   if (rfPath == RF_PATH_A) {
     switch (rate) {
     case MGN_1M:
@@ -1781,8 +1848,19 @@ void RadioManagementModule::PHY_TxPowerTrainingByPath_8812(RfPath rfPath) {
   }
 
   uint16_t writeOffset;
-  uint32_t powerLevel;
-  powerLevel = power;
+  /* Upstream `PHY_TxPowerTrainingByPath_8812` uses
+   * `phy_get_tx_power_index(adapter, path, MGN_MCS7, bw, channel)` as the
+   * starting PowerLevel — i.e. the per-channel per-Ntx TX-power index for
+   * HT MCS7 (1-stream). devourer used to read the uniform `power` class
+   * member instead, which produced 0xc54 = 0x10161E vs kernel's 0x171D25
+   * at ch6 (the T1 canary diff's last outstanding divergence in the
+   * TX-power cluster). MGN_MCS7 = 0x87, ntx_idx = 0 (1-stream rate). */
+  uint32_t powerLevel = _eepromManager->TxPowerInfoLoaded
+      ? _eepromManager->GetTxPowerIndexBase(
+            static_cast<uint8_t>(rfPath), /*rate MGN_MCS7=*/0x87,
+            /*ntx_idx=*/0,
+            static_cast<uint8_t>(_currentChannelBw), _currentChannel)
+      : power;
 
   if (rfPath == RfPath::RF_PATH_A) {
     writeOffset = rA_TxPwrTraing_Jaguar;

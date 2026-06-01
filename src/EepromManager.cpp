@@ -5,9 +5,24 @@
 #include "rtl8812a_hal.h"
 #include "rtw_efuse.h"
 
-#include <cstring>
+#include <cctype>
 #include <cstdlib>
-#include <strings.h>  /* strcasecmp */
+#include <cstring>
+#include <string>
+
+/* Cross-platform case-insensitive compare. POSIX has `strcasecmp` in
+ * <strings.h>; MSVC has `_stricmp`; doing it by hand keeps the include
+ * surface portable. */
+static int devourer_strcaseeq(const char *a, const char *b) {
+  while (*a && *b) {
+    if (std::tolower(static_cast<unsigned char>(*a)) !=
+        std::tolower(static_cast<unsigned char>(*b)))
+      return 0;
+    a++;
+    b++;
+  }
+  return *a == *b;
+}
 
 EepromManager::EepromManager(RtlUsbAdapter device, Logger_t logger)
     : _device{device}, _logger{logger} {
@@ -610,9 +625,9 @@ void EepromManager::LoadTxPowerLimit() {
 
   /* Honour DEVOURER_REGULATION env override (FCC|ETSI|MKK|WW). */
   if (const char *e = std::getenv("DEVOURER_REGULATION")) {
-    if (!strcasecmp(e, "ETSI")) CurrentRegulation = 1;
-    else if (!strcasecmp(e, "MKK")) CurrentRegulation = 2;
-    else if (!strcasecmp(e, "WW")) CurrentRegulation = 3;
+    if (devourer_strcaseeq(e, "ETSI")) CurrentRegulation = 1;
+    else if (devourer_strcaseeq(e, "MKK")) CurrentRegulation = 2;
+    else if (devourer_strcaseeq(e, "WW")) CurrentRegulation = 3;
     else CurrentRegulation = 0;
   }
 

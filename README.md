@@ -3,13 +3,13 @@
 The Realtek 11ac driver that simply devours its competitors.
 
 Devourer is a userspace re-implementation of Realtek's RTL88xxAU Wi-Fi
-driver (Jaguar family: RTL8812AU shipping on both bands, RTL8821AU
-shipping at 2.4 GHz, RTL8811AU supported via the 8812 code path,
-RTL8814AU RX-only), speaking to the chip directly through libusb. No
-kernel module, no `rtl8812au` DKMS tree — just a C++20 static library
-(`WiFiDriver`) plus two demo executables for RX and TX. It is the
-OpenIPC project's driver of choice for long-range video links built on
-top of cheap Realtek 11ac USB radios.
+driver (Jaguar family: RTL8812AU shipping on every band/channel,
+RTL8821AU shipping at 2.4 GHz and 5 GHz UNII-1 RX, RTL8811AU supported
+via the 8812 code path, RTL8814AU RX-only), speaking to the chip
+directly through libusb. No kernel module, no `rtl8812au` DKMS tree —
+just a C++20 static library (`WiFiDriver`) plus two demo executables
+for RX and TX. It is the OpenIPC project's driver of choice for
+long-range video links built on top of cheap Realtek 11ac USB radios.
 
 ## Hardware landscape
 
@@ -21,12 +21,12 @@ register-table layout, firmware-download plumbing, and
 family; chip-specific EEPROM handling, firmware blobs, and RF tables are
 layered on top.
 
-| Part           | RF / streams    | 2.4 GHz       | 5 GHz         | Notes                                       |
-| -------------- | --------------- | ------------- | ------------- | ------------------------------------------- |
-| **RTL8812AU**  | 2T2R            | TX + RX       | TX + RX       | VID/PID `0bda:8812`; reference part         |
-| **RTL8811AU**  | 1T1R            | TX + RX       | TX + RX       | 1T1R cut of 8812 silicon; rides 8812 code path with `RFType=RF_TYPE_1T1R` selected from `REG_SYS_CFG` bit 27 |
-| **RTL8814AU**  | 4T4R, 3-SS max  | RX only       | RX only       | VID/PID `0bda:8813`; 2-SS effective on USB-2. TX submits succeed on the bulk pipe but nothing reaches the air at any band — see issue #36 |
-| **RTL8821AU**  | 1T1R AC + BT    | TX + RX       | RX only       | OEM-rebadged as TP-Link Archer T2U Plus (`2357:0120`) etc; Android hotplug works end-to-end. 5 GHz TX needs the per-channel IQK calibration ported from upstream `halrf_iqk_8821a_ce.c` — see issue #59 |
+| Part           | RF / streams    | 2.4 GHz       | 5 GHz UNII-1 (ch36-48) | 5 GHz UNII-2/3 (ch52+) | Notes                                       |
+| -------------- | --------------- | ------------- | ---------------------- | ---------------------- | ------------------------------------------- |
+| **RTL8812AU**  | 2T2R            | TX + RX       | TX + RX                | TX + RX                | VID/PID `0bda:8812`; reference part — works on every channel/band combo |
+| **RTL8811AU**  | 1T1R            | TX + RX       | TX + RX                | TX + RX                | 1T1R cut of 8812 silicon; rides 8812 code path with `RFType=RF_TYPE_1T1R` selected from `REG_SYS_CFG` bit 27. Status mirrored from 8812 — no 8811AU DUT in the test rig |
+| **RTL8814AU**  | 4T4R, 3-SS max  | RX only       | RX only                | RX only                | VID/PID `0bda:8813`; 2-SS effective on USB-2. TX submits succeed on the bulk pipe but nothing reaches the air at any band — see issue #36 |
+| **RTL8821AU**  | 1T1R AC + BT    | TX + RX       | RX only                | none                   | OEM-rebadged as TP-Link Archer T2U Plus (`2357:0120`) etc; Android hotplug works end-to-end. 5 GHz UNII-1 RX works on this chip but TX is silently gated — sweep `--channel 36/40/44/48` to verify on your hardware. UNII-2 / UNII-3 (ch100, 149, 161, …) are completely broken — both TX and RX. Five hypotheses tested + refuted to date (IQK port, BB-divergence overrides, missing init writes, post-channel-set delay, TX power cap) — see issue #59 |
 
 Successor families (`Jaguar2` / `Jaguar+` — 8812BU, 8822BU/BE, etc., and
 the later `Kestrel` 11ax generation) are **out of scope**: they share

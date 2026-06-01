@@ -30,6 +30,10 @@ EepromManager::EepromManager(RtlUsbAdapter device, Logger_t logger)
   Hal_EfuseParseIDCode8812A();
   EEPROMVersion = Hal_ReadPROMVersion8812A(_device, efuse_eeprom_data);
   EEPROMRegulatory = Hal_ReadTxPowerInfo8812A(_device, efuse_eeprom_data);
+  /* T1: populate the per-channel per-path TX-power tables from EFUSE so
+   * RadioManagementModule can compute per-rate TX power instead of using
+   * the uniform `SetTxPower(N)` shortcut. */
+  LoadTxPowerInfo();
 
   /*  */
   /* Read Bluetooth co-exist and initialize */
@@ -69,6 +73,10 @@ void EepromManager::LateInitFor8814A() {
   Hal_EfuseParseIDCode8812A();
   EEPROMVersion = Hal_ReadPROMVersion8812A(_device, efuse_eeprom_data);
   EEPROMRegulatory = Hal_ReadTxPowerInfo8812A(_device, efuse_eeprom_data);
+  /* T1: populate the per-channel per-path TX-power tables from EFUSE so
+   * RadioManagementModule can compute per-rate TX power instead of using
+   * the uniform `SetTxPower(N)` shortcut. */
+  LoadTxPowerInfo();
   Hal_EfuseParseBTCoexistInfo8812A();
   Hal_EfuseParseXtal_8812A();
   Hal_ReadThermalMeter_8812A();
@@ -199,6 +207,327 @@ void EepromManager::read_chip_version_8812a(RtlUsbAdapter device) {
   rtw_hal_config_rftype();
 
   dump_chip_info(version_id);
+}
+
+/* Helper: 4-bit signed nibble (Realtek's PG diff encoding) to int8_t. */
+static inline int8_t pg_msb_diff(uint8_t v) {
+  uint8_t n = (v >> 4) & 0x0f;
+  return static_cast<int8_t>((n & 0x08) ? (n | 0xf0) : n);
+}
+static inline int8_t pg_lsb_diff(uint8_t v) {
+  uint8_t n = v & 0x0f;
+  return static_cast<int8_t>((n & 0x08) ? (n | 0xf0) : n);
+}
+
+/* Per-channel group classifier — port of upstream `rtw_get_ch_group` in
+ * `core/rtw_rf.c`. Returns 0 = 2.4G, 1 = 5G, 0xFF on invalid channel.
+ * `group` is the index into the per-band EFUSE PG table; `cck_group` is
+ * the 2.4G CCK sub-group (mostly == group, except ch14 → 5). */
+static uint8_t classify_channel(uint8_t ch, uint8_t *group, uint8_t *cck_group) {
+  if (ch <= 14) {
+    int gp = -1, cck_gp = -1;
+    if (1 <= ch && ch <= 2)        gp = 0;
+    else if (3  <= ch && ch <= 5)  gp = 1;
+    else if (6  <= ch && ch <= 8)  gp = 2;
+    else if (9  <= ch && ch <= 11) gp = 3;
+    else if (12 <= ch && ch <= 14) gp = 4;
+    cck_gp = (ch == 14) ? 5 : gp;
+    if (gp < 0) return 0xFF;
+    if (group) *group = static_cast<uint8_t>(gp);
+    if (cck_group) *cck_group = static_cast<uint8_t>(cck_gp);
+    return 0; /* 2.4G */
+  }
+  int gp = -1;
+  if      (15  <= ch && ch <=  42) gp = 0;
+  else if (44  <= ch && ch <=  48) gp = 1;
+  else if (50  <= ch && ch <=  58) gp = 2;
+  else if (60  <= ch && ch <=  80) gp = 3;
+  else if (82  <= ch && ch <= 106) gp = 4;
+  else if (108 <= ch && ch <= 114) gp = 5;
+  else if (116 <= ch && ch <= 122) gp = 6;
+  else if (124 <= ch && ch <= 130) gp = 7;
+  else if (132 <= ch && ch <= 138) gp = 8;
+  else if (140 <= ch && ch <= 144) gp = 9;
+  else if (149 <= ch && ch <= 155) gp = 10;
+  else if (157 <= ch && ch <= 161) gp = 11;
+  else if (165 <= ch && ch <= 171) gp = 12;
+  else if (173 <= ch && ch <= 177) gp = 13;
+  if (gp < 0) return 0xFF;
+  if (group) *group = static_cast<uint8_t>(gp);
+  return 1; /* 5G */
+}
+
+/* Upstream `core/rtw_rf.c:center_ch_5g_all[CENTER_CH_5G_ALL_NUM]` — the
+ * canonical 5G channel index used to populate `Index5G_BW40_Base`. Mirrors
+ * the upstream table verbatim. */
+static const uint8_t kCenterCh5gAll[65] = {
+    15, 16, 17, 18, 20, 24, 28, 32, 36, 38, 40, 42, 44, 46, 48,
+    52, 54, 56, 58, 60, 62, 64, 68, 72, 76, 80, 84, 88, 92, 96,
+    100, 102, 104, 106, 108, 110, 112, 116, 118, 120, 122, 124, 126, 128,
+    132, 134, 136, 138, 140, 142, 144, 149, 151, 153, 155, 157, 159, 161,
+    165, 167, 169, 171, 173, 175, 177,
+};
+
+void EepromManager::LoadTxPowerInfo() {
+  /* EFUSE PG TX-power block layout — port of
+   * `hal_load_pg_txpwr_info_path_{2,5}g` from upstream
+   * `hal/hal_com_phycfg.c`. Per-path, 2.4G uses 18 bytes, 5G uses 24
+   * bytes, both paths laid out contiguously starting at PG offset 0x10
+   * (8812/8814 share this layout per `pg_txpwr_saddr=0x10`).
+   *
+   * Sequence per path:
+   *   2.4G:
+   *     6 bytes CCK base   (one per channel group, MAX_CHNL_GROUP_24G=6)
+   *     5 bytes BW40 base  (MAX_CHNL_GROUP_24G-1; last group folds in)
+   *     1 byte  Ntx=1 BW20+OFDM diffs (MSB nibble=BW20, LSB=OFDM)
+   *     2 bytes Ntx=2 (BW40+BW20, then OFDM+CCK)
+   *     2 bytes Ntx=3
+   *     2 bytes Ntx=4
+   *   5G:
+   *     14 bytes BW40 base (MAX_CHNL_GROUP_5G)
+   *     1 byte  Ntx=1 BW20+OFDM
+   *     2 bytes Ntx=2 (BW40+BW20, then OFDM)
+   *     2 bytes Ntx=3
+   *     2 bytes Ntx=4
+   *     plus 3 bytes BW80 diffs (Ntx=1..3 in nibble pairs)
+   *
+   * Diff nibbles are signed 4-bit. Helpers `pg_msb_diff` / `pg_lsb_diff`
+   * sign-extend to int8_t. */
+  constexpr uint16_t kPgSaddr = 0x10;
+  uint16_t off = kPgSaddr;
+
+  /* Stage 1: per-path EFUSE byte stream → per-group base + per-Ntx diff.
+   * Iterates rfpath=0..numTotalRfPath-1 because that's what's compiled
+   * into the EFUSE for this chip variant. The kernel iterates MAX_RF_PATH
+   * unconditionally and skips per `HAL_SPEC_CHK_RF_PATH_*` — devourer
+   * already has `numTotalRfPath` set by `rtw_hal_config_rftype` post-EFUSE
+   * read. */
+  /* Per-path-per-group base arrays (intermediate, before per-channel
+   * scattering). Layout: [path][group]. */
+  uint8_t cck_base_2g[kMaxRfPath][6] = {};
+  uint8_t bw40_base_2g[kMaxRfPath][6] = {};
+  uint8_t bw40_base_5g[kMaxRfPath][14] = {};
+
+  for (int path = 0; path < numTotalRfPath && path < kMaxRfPath; path++) {
+    /* 2.4G section — 18 bytes per path. */
+    for (int g = 0; g < 6; g++)
+      cck_base_2g[path][g] = efuse_eeprom_data[off++];
+    for (int g = 0; g < 5; g++)
+      bw40_base_2g[path][g] = efuse_eeprom_data[off++];
+    /* Ntx=1: 1 byte (MSB=BW20, LSB=OFDM) */
+    {
+      uint8_t v = efuse_eeprom_data[off++];
+      BW20_24G_Diff[path][0] = pg_msb_diff(v);
+      OFDM_24G_Diff[path][0] = pg_lsb_diff(v);
+    }
+    /* Ntx=2..4: 2 bytes each (BW40|BW20 then OFDM|CCK) */
+    for (int t = 1; t < 4; t++) {
+      uint8_t v = efuse_eeprom_data[off++];
+      BW40_24G_Diff[path][t] = pg_msb_diff(v);
+      BW20_24G_Diff[path][t] = pg_lsb_diff(v);
+      v = efuse_eeprom_data[off++];
+      OFDM_24G_Diff[path][t] = pg_msb_diff(v);
+      CCK_24G_Diff[path][t]  = pg_lsb_diff(v);
+    }
+
+    /* 5G section — 24 bytes per path. */
+    for (int g = 0; g < 14; g++)
+      bw40_base_5g[path][g] = efuse_eeprom_data[off++];
+    /* Ntx=1: 1 byte (MSB=BW20, LSB=OFDM) */
+    {
+      uint8_t v = efuse_eeprom_data[off++];
+      BW20_5G_Diff[path][0] = pg_msb_diff(v);
+      OFDM_5G_Diff[path][0] = pg_lsb_diff(v);
+    }
+    /* Ntx=2..4: 2 bytes each (BW40|BW20, OFDM|-) */
+    for (int t = 1; t < 4; t++) {
+      uint8_t v = efuse_eeprom_data[off++];
+      BW40_5G_Diff[path][t] = pg_msb_diff(v);
+      BW20_5G_Diff[path][t] = pg_lsb_diff(v);
+      v = efuse_eeprom_data[off++];
+      OFDM_5G_Diff[path][t] = pg_msb_diff(v);
+      /* LSB nibble of this byte is unused for 5G (no CCK on 5G). */
+    }
+    /* 3 bytes BW80 diffs, Ntx=1..3 stored as nibble pairs:
+     *   byte 0: MSB=Ntx2-BW80, LSB=Ntx1-BW80
+     *   byte 1: MSB=Ntx4-BW80, LSB=Ntx3-BW80
+     *   byte 2: reserved
+     * Upstream uses a different layout per IC; the 8812 path packs as
+     * above per `hal_load_pg_txpwr_info_path_5g`. */
+    {
+      uint8_t v = efuse_eeprom_data[off++];
+      BW80_5G_Diff[path][1] = pg_msb_diff(v);
+      BW80_5G_Diff[path][0] = pg_lsb_diff(v);
+      v = efuse_eeprom_data[off++];
+      BW80_5G_Diff[path][3] = pg_msb_diff(v);
+      BW80_5G_Diff[path][2] = pg_lsb_diff(v);
+      /* third byte ignored */
+      off++;
+    }
+  }
+
+  /* Stage 2: per-group → per-channel. Mirrors upstream `hal_load_txpwr_info`. */
+  for (int path = 0; path < numTotalRfPath && path < kMaxRfPath; path++) {
+    /* 2.4G: 14 channels mapped via classify_channel. */
+    for (int ch_idx = 0; ch_idx < kCenterCh2gNum; ch_idx++) {
+      uint8_t group = 0, cck_group = 0;
+      if (classify_channel(static_cast<uint8_t>(ch_idx + 1), &group,
+                           &cck_group) != 0)
+        continue;
+      Index24G_CCK_Base[path][ch_idx] = cck_base_2g[path][cck_group];
+      Index24G_BW40_Base[path][ch_idx] = bw40_base_2g[path][group];
+    }
+    /* 5G: 65 channels from kCenterCh5gAll. */
+    for (int ch_idx = 0; ch_idx < kCenterCh5gAllNum; ch_idx++) {
+      uint8_t group = 0;
+      if (classify_channel(kCenterCh5gAll[ch_idx], &group, nullptr) != 1)
+        continue;
+      Index5G_BW40_Base[path][ch_idx] = bw40_base_5g[path][group];
+    }
+  }
+
+  TxPowerInfoLoaded = true;
+  _logger->info("LoadTxPowerInfo: parsed {} paths, 2.4G ch6 CCK_Base[0]=0x{:02x} "
+                "BW40_Base[0]=0x{:02x}",
+                unsigned(numTotalRfPath),
+                unsigned(Index24G_CCK_Base[0][5]),
+                unsigned(Index24G_BW40_Base[0][5]));
+}
+
+uint8_t EepromManager::GetTxPowerIndexBase(uint8_t path, uint8_t rate,
+                                           uint8_t ntx_idx, uint8_t bandwidth,
+                                           uint8_t channel) const {
+  if (!TxPowerInfoLoaded || path >= kMaxRfPath)
+    return 0;
+
+  /* Port of `PHY_GetTxPowerIndexBase` from `hal_com_phycfg.c`. Rates are
+   * the MGN_* values from upstream `phydm_types.h`; we mirror the macro
+   * conditions inline. Bandwidth enum matches devourer's ChannelWidth_t
+   * (20=0, 40=1, 80=2, 160=3). */
+  /* MGN_* rate group classifiers — keep in sync with upstream. */
+  auto is_cck = [](uint8_t r) {
+    /* MGN_1M=0x02, MGN_2M=0x04, MGN_5_5M=0x0B, MGN_11M=0x16 */
+    return r == 0x02 || r == 0x04 || r == 0x0B || r == 0x16;
+  };
+  auto is_ofdm = [](uint8_t r) {
+    /* MGN_6M..MGN_54M: 0x0C, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6C */
+    return r == 0x0C || r == 0x12 || r == 0x18 || r == 0x24 ||
+           r == 0x30 || r == 0x48 || r == 0x60 || r == 0x6C;
+  };
+  /* MGN_MCS0=0x80, MCS31=0x9F (HT); MGN_VHT1SS_MCS0=0xA0..VHT4SS_MCS9=0xC9 */
+  auto is_mcs0_7   = [](uint8_t r) { return r >= 0x80 && r <= 0x87; };
+  auto is_mcs8_15  = [](uint8_t r) { return r >= 0x88 && r <= 0x8F; };
+  auto is_mcs16_23 = [](uint8_t r) { return r >= 0x90 && r <= 0x97; };
+  auto is_mcs24_31 = [](uint8_t r) { return r >= 0x98 && r <= 0x9F; };
+  auto is_vht1ss   = [](uint8_t r) { return r >= 0xA0 && r <= 0xA9; };
+  auto is_vht2ss   = [](uint8_t r) { return r >= 0xAA && r <= 0xB3; };
+  auto is_vht3ss   = [](uint8_t r) { return r >= 0xB4 && r <= 0xBD; };
+  auto is_vht4ss   = [](uint8_t r) { return r >= 0xBE && r <= 0xC7; };
+
+  uint8_t group = 0, cck_group = 0;
+  uint8_t band = classify_channel(channel, &group, &cck_group);
+  if (band == 0xFF)
+    return 0;
+  /* Channel index into the per-band base array. For 2.4G it's
+   * `channel - 1` (channels 1-14). For 5G it's the index in
+   * kCenterCh5gAll. */
+  uint8_t ch_idx = 0;
+  if (band == 0) {
+    if (channel == 0 || channel > kCenterCh2gNum)
+      return 0;
+    ch_idx = static_cast<uint8_t>(channel - 1);
+  } else {
+    bool found = false;
+    for (uint8_t i = 0; i < kCenterCh5gAllNum; i++) {
+      if (kCenterCh5gAll[i] == channel) {
+        ch_idx = i;
+        found = true;
+        break;
+      }
+    }
+    if (!found)
+      return 0;
+  }
+
+  int txPower = 0;
+
+  if (band == 0) {
+    /* 2.4G */
+    if (is_cck(rate)) {
+      txPower = Index24G_CCK_Base[path][ch_idx];
+      txPower += CCK_24G_Diff[path][0];
+      if (ntx_idx >= 1) txPower += CCK_24G_Diff[path][1];
+      if (ntx_idx >= 2) txPower += CCK_24G_Diff[path][2];
+      if (ntx_idx >= 3) txPower += CCK_24G_Diff[path][3];
+      goto clamp_and_return;
+    }
+    txPower = Index24G_BW40_Base[path][ch_idx];
+    if (is_ofdm(rate)) {
+      txPower += OFDM_24G_Diff[path][0];
+      if (ntx_idx >= 1) txPower += OFDM_24G_Diff[path][1];
+      if (ntx_idx >= 2) txPower += OFDM_24G_Diff[path][2];
+      if (ntx_idx >= 3) txPower += OFDM_24G_Diff[path][3];
+      goto clamp_and_return;
+    }
+    /* MCS / VHT — pick BW20 / BW40 (BW80 falls through to BW40 per upstream
+     * comment "Willis suggest adopt BW 40M power index while in BW 80 mode"). */
+    if (bandwidth == 0) { /* BW20 */
+      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
+          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW20_24G_Diff[path][0];
+      if (is_mcs8_15 (rate) || (ntx_idx >= 1 && (is_vht2ss(rate) || is_vht3ss(rate) || is_vht4ss(rate))))
+        txPower += BW20_24G_Diff[path][1];
+      if (is_mcs16_23(rate) || (ntx_idx >= 2 && (is_vht3ss(rate) || is_vht4ss(rate))))
+        txPower += BW20_24G_Diff[path][2];
+      if (is_mcs24_31(rate) || (ntx_idx >= 3 && is_vht4ss(rate)))
+        txPower += BW20_24G_Diff[path][3];
+    } else { /* BW40 or BW80 */
+      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
+          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW40_24G_Diff[path][0];
+      if (is_mcs8_15 (rate) || (ntx_idx >= 1 && (is_vht2ss(rate) || is_vht3ss(rate) || is_vht4ss(rate))))
+        txPower += BW40_24G_Diff[path][1];
+      if (is_mcs16_23(rate) || (ntx_idx >= 2 && (is_vht3ss(rate) || is_vht4ss(rate))))
+        txPower += BW40_24G_Diff[path][2];
+      if (is_mcs24_31(rate) || (ntx_idx >= 3 && is_vht4ss(rate)))
+        txPower += BW40_24G_Diff[path][3];
+    }
+  } else {
+    /* 5G — no CCK */
+    if (rate < 0x0C)
+      return 0;
+    txPower = Index5G_BW40_Base[path][ch_idx];
+    if (is_ofdm(rate)) {
+      txPower += OFDM_5G_Diff[path][0];
+      if (ntx_idx >= 1) txPower += OFDM_5G_Diff[path][1];
+      if (ntx_idx >= 2) txPower += OFDM_5G_Diff[path][2];
+      if (ntx_idx >= 3) txPower += OFDM_5G_Diff[path][3];
+      goto clamp_and_return;
+    }
+    /* MCS / VHT BW20 / BW40 / BW80. */
+    if (bandwidth == 0) {
+      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
+          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW20_5G_Diff[path][0];
+      if (is_mcs8_15 (rate)) txPower += BW20_5G_Diff[path][1];
+      if (is_mcs16_23(rate)) txPower += BW20_5G_Diff[path][2];
+      if (is_mcs24_31(rate)) txPower += BW20_5G_Diff[path][3];
+    } else if (bandwidth == 1) {
+      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
+          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW40_5G_Diff[path][0];
+      if (is_mcs8_15 (rate)) txPower += BW40_5G_Diff[path][1];
+      if (is_mcs16_23(rate)) txPower += BW40_5G_Diff[path][2];
+      if (is_mcs24_31(rate)) txPower += BW40_5G_Diff[path][3];
+    } else { /* BW80 */
+      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
+          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW80_5G_Diff[path][0];
+      if (is_mcs8_15 (rate)) txPower += BW80_5G_Diff[path][1];
+      if (is_mcs16_23(rate)) txPower += BW80_5G_Diff[path][2];
+      if (is_mcs24_31(rate)) txPower += BW80_5G_Diff[path][3];
+    }
+  }
+
+clamp_and_return:
+  if (txPower < 0) txPower = 0;
+  if (txPower > 63) txPower = 63; /* txgi_max for 8812/8821/8814 */
+  return static_cast<uint8_t>(txPower);
 }
 
 bool EepromManager::GetMacAddress(uint8_t out[6]) const {

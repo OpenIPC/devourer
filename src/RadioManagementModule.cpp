@@ -1314,9 +1314,28 @@ static uint8_t phy_get_tx_power_index() { return 16; }
 
 void RadioManagementModule::PHY_SetTxPowerIndexByRateArray(
     RfPath rfPath, const std::vector<MGN_RATE> &rates) {
+  /* T1 fix: per-rate TX power from EFUSE-derived tables (port of
+   * upstream `PHY_GetTxPowerIndexBase`). Before this, every rate got
+   * the same `power` (set once via SetTxPower) which produced the
+   * uniform 0x28 across the 0xc20..0xc40 TX-AGC cluster and diverged
+   * from kernel's per-rate per-channel values (0x2D..0x31 at ch6).
+   *
+   * Fallback when EFUSE tables not loaded (autoload failed for this
+   * chip, e.g. 8814 pre-LateInit): the legacy `power` shortcut. Once
+   * EFUSE is loaded all rates compute against base + per-Ntx diff. */
+  const uint8_t ntx_idx = static_cast<uint8_t>(_eepromManager->numTotalRfPath);
+  const uint8_t bw = static_cast<uint8_t>(_currentChannelBw);
   for (int i = 0; i < rates.size(); ++i) {
-    auto powerIndex = power;
     MGN_RATE rate = rates[i];
+    uint32_t powerIndex;
+    if (_eepromManager->TxPowerInfoLoaded) {
+      powerIndex = _eepromManager->GetTxPowerIndexBase(
+          static_cast<uint8_t>(rfPath), static_cast<uint8_t>(rate),
+          ntx_idx > 0 ? static_cast<uint8_t>(ntx_idx - 1) : 0, bw,
+          _currentChannel);
+    } else {
+      powerIndex = power;
+    }
     PHY_SetTxPowerIndex_8812A(powerIndex, rfPath, rate);
   }
 }

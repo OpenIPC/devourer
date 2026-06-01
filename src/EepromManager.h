@@ -54,6 +54,23 @@ public:
    * MAC ID is zero). */
   bool GetMacAddress(uint8_t out[6]) const;
 
+  /* Parse the EFUSE TX-power PG block at offset 0x10 into the per-channel
+   * per-path Index{24G,5G}_*_Base and *_Diff tables. Port of upstream
+   * `hal_load_pg_txpwr_info` + `hal_load_pg_txpwr_info_path_{2,5}g` from
+   * `hal_com_phycfg.c`. Called once during init after the EFUSE shadow is
+   * populated. Once loaded, `RadioManagementModule::PHY_GetTxPowerIndexBase`
+   * computes the per-rate per-channel power index instead of using the
+   * uniform `SetTxPower(N)` shortcut (T1 root cause for the 0xc20..0xc40
+   * TX-AGC divergence + the 0xc54 TxPwrTraing divergence at ch6). */
+  void LoadTxPowerInfo();
+
+  /* Returns the chip's TX-power index for (path, rate, ntx, bw, channel),
+   * mirroring upstream `PHY_GetTxPowerIndexBase` (sans the by-rate /
+   * regulatory-limit / tracking-offset overlay — those layers come later).
+   * Returns 0 if `LoadTxPowerInfo()` hasn't run yet. */
+  uint8_t GetTxPowerIndexBase(uint8_t path, uint8_t rate, uint8_t ntx_idx,
+                              uint8_t bandwidth, uint8_t channel) const;
+
   HAL_VERSION version_id;
   odm_cut_version_e cut_version;
   uint8_t crystal_cap;
@@ -67,6 +84,33 @@ public:
   bool ExternalPA_2G;
   HAL_RF_TYPE_E rf_type;
   uint16_t rfe_type;
+
+  /* Per-channel per-path TX-power tables parsed from the EFUSE PG block.
+   * Mirrors `HAL_DATA_TYPE::Index{24G,5G}_*_Base` and `*_Diff` arrays from
+   * upstream `aircrack-ng/rtl8812au/include/hal_data.h`. Populated by
+   * `LoadTxPowerInfo()` post-EFUSE-read; consumed by
+   * `RadioManagementModule::PHY_GetTxPowerIndexBase8812` to compute the
+   * per-rate per-channel TX power index instead of using the historical
+   * uniform `SetTxPower(N)` shortcut.
+   *
+   * Dimensions match upstream: MAX_RF_PATH = 4, MAX_TX_COUNT = 4,
+   * CENTER_CH_2G_NUM = 14, CENTER_CH_5G_ALL_NUM = 65. */
+  static constexpr int kMaxRfPath = 4;
+  static constexpr int kMaxTxCount = 4;
+  static constexpr int kCenterCh2gNum = 14;
+  static constexpr int kCenterCh5gAllNum = 65;
+  uint8_t Index24G_CCK_Base[kMaxRfPath][kCenterCh2gNum]{};
+  uint8_t Index24G_BW40_Base[kMaxRfPath][kCenterCh2gNum]{};
+  uint8_t Index5G_BW40_Base[kMaxRfPath][kCenterCh5gAllNum]{};
+  int8_t CCK_24G_Diff[kMaxRfPath][kMaxTxCount]{};
+  int8_t OFDM_24G_Diff[kMaxRfPath][kMaxTxCount]{};
+  int8_t BW20_24G_Diff[kMaxRfPath][kMaxTxCount]{};
+  int8_t BW40_24G_Diff[kMaxRfPath][kMaxTxCount]{};
+  int8_t OFDM_5G_Diff[kMaxRfPath][kMaxTxCount]{};
+  int8_t BW20_5G_Diff[kMaxRfPath][kMaxTxCount]{};
+  int8_t BW40_5G_Diff[kMaxRfPath][kMaxTxCount]{};
+  int8_t BW80_5G_Diff[kMaxRfPath][kMaxTxCount]{};
+  bool TxPowerInfoLoaded = false;
 
 private:
   void read_chip_version_8812a(RtlUsbAdapter device);

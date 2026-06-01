@@ -44,6 +44,16 @@ public:
    * populated from EFUSE values already read into this manager. */
   JaguarPhyContext GetPhyContext() const;
 
+  /* Read the chip's MAC address from the EFUSE shadow. Returns true if a
+   * non-empty (not all-0xFF / not all-0x00) MAC was found. EFUSE offsets per
+   * upstream `hal_pg.h`: 0xD7 for 8812AU, 0xD8 for 8814AU, 0x107 for 8821AU.
+   * Caller is expected to fall back to a hardcoded MAC if this returns
+   * false (the T1 canary diff against `aircrack-ng/88XXau` showed
+   * `REG_MACID @ 0x610` was unprogrammed on 8812AU because devourer never
+   * wrote it — many Realtek MAC-TX paths refuse to schedule frames if the
+   * MAC ID is zero). */
+  bool GetMacAddress(uint8_t out[6]) const;
+
   HAL_VERSION version_id;
   odm_cut_version_e cut_version;
   uint8_t crystal_cap;

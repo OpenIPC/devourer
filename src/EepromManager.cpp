@@ -201,6 +201,29 @@ void EepromManager::read_chip_version_8812a(RtlUsbAdapter device) {
   dump_chip_info(version_id);
 }
 
+bool EepromManager::GetMacAddress(uint8_t out[6]) const {
+  /* EFUSE MAC-address offsets per upstream `include/hal_pg.h`:
+   *   EEPROM_MAC_ADDR_8812AU = 0xD7
+   *   EEPROM_MAC_ADDR_8814AU = 0xD8
+   *   EEPROM_MAC_ADDR_8821AU = 0x107  */
+  uint16_t off;
+  switch (version_id.ICType) {
+    case CHIP_8814A: off = 0xD8; break;
+    case CHIP_8821:  off = 0x107; break;
+    default:         off = 0xD7; break; /* 8812AU / 8811AU (8812 silicon) */
+  }
+  for (int i = 0; i < 6; ++i)
+    out[i] = efuse_eeprom_data[off + i];
+  /* All-0xFF means EFUSE empty / unburnt; all-0x00 means we haven't read
+   * EFUSE yet. Both are invalid. */
+  bool all_ff = true, all_zero = true;
+  for (int i = 0; i < 6; ++i) {
+    if (out[i] != 0xFF) all_ff = false;
+    if (out[i] != 0x00) all_zero = false;
+  }
+  return !all_ff && !all_zero;
+}
+
 JaguarPhyContext EepromManager::GetPhyContext() const {
   /* ODM_ITRF_USB and ODM_CE are phydm enum values (we don't pull the phydm
    * subsystem in, so hardcode the canonical numbers from upstream

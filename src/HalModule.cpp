@@ -428,17 +428,35 @@ bool HalModule::rtl8812au_hal_init() {
       "REG_RXFLTMAP2=0xFFFF",
       cr_observed, cr_final);
 
-  if (is_8814a) {
-    /* Program MAC address to REG_MACID (0x0610). usbmon-trace diff vs
-     * kernel-driver shows kernel writes 6 individual bytes at 0x610..0x615
-     * during init; devourer never writes REG_MACID at all. Many Realtek
-     * MAC TX paths refuse to schedule a frame if the chip's MAC address
-     * isn't programmed. Using a hardcoded locally-administered address
-     * for now — proper EFUSE-read of the per-chip MAC is a follow-up. */
-    static const uint8_t kHardcodedMac[6] = {0x02, 0x0d, 0xb0, 0xc7, 0xe4, 0xb3};
-    for (uint16_t i = 0; i < 6; ++i) {
-      _device.rtw_write8(0x0610 + i, kHardcodedMac[i]);
-    }
+  /* Program MAC address to REG_MACID (0x0610). usbmon-trace diff vs
+   * kernel-driver shows kernel writes 6 individual bytes at 0x610..0x615
+   * during init; devourer never wrote REG_MACID for 8812AU at all and used
+   * a hardcoded locally-administered address for 8814AU. Many Realtek MAC
+   * TX paths refuse to schedule a frame if the MAC ID is zero — caught by
+   * the T1 canary diff (TODO.md) on 8812AU at ch6: kernel side
+   * `MAC 0x610 = 0x02FFC954`, devourer side `MAC 0x610 = 0x00000000`.
+   *
+   * Read the MAC from EFUSE per chip type (EepromManager handles the
+   * 8812/8814/8821 offset split). Fall back to the historical hardcoded
+   * locally-administered 8814AU address for cards whose EFUSE is empty,
+   * matching prior behaviour. */
+  uint8_t mac[6];
+  if (_eepromManager->GetMacAddress(mac)) {
+    for (uint16_t i = 0; i < 6; ++i)
+      _device.rtw_write8(0x0610 + i, mac[i]);
+    _logger->info("REG_MACID programmed from EFUSE: "
+                  "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                  unsigned(mac[0]), unsigned(mac[1]), unsigned(mac[2]),
+                  unsigned(mac[3]), unsigned(mac[4]), unsigned(mac[5]));
+  } else if (is_8814a) {
+    static const uint8_t kHardcoded8814Mac[6] = {0x02, 0x0d, 0xb0,
+                                                 0xc7, 0xe4, 0xb3};
+    for (uint16_t i = 0; i < 6; ++i)
+      _device.rtw_write8(0x0610 + i, kHardcoded8814Mac[i]);
+    _logger->info("REG_MACID: EFUSE empty, using 8814AU hardcoded fallback");
+  } else {
+    _logger->info("REG_MACID: EFUSE empty and no fallback for this chip — "
+                  "leaving zero (MAC-TX may drop frames)");
   }
 
   if (is_8814a) {
@@ -1552,10 +1570,14 @@ void HalModule::_InitInterrupt_8812AU() {
 }
 
 void HalModule::_InitNetworkType_8812A() {
+  /* devourer is monitor-only; the kernel rtw driver sets MSR (REG_CR
+   * bits [17:16] for port 0) to NT_NO_LINK in this case. The earlier
+   * NT_LINK_AP value here was a leftover that the T1 canary diff
+   * caught — `MAC 0x102 = 0x02` on devourer vs `0x00` on kernel
+   * (TODO.md, kernel side via `iwpriv read 4,0x100`). Setting
+   * NT_NO_LINK matches kernel's monitor-mode state. */
   auto value32 = _device.rtw_read32(REG_CR);
-  /* TODO: use the other function to set network type */
-  value32 = (value32 & ~MASK_NETTYPE) | _NETTYPE(NT_LINK_AP);
-
+  value32 = (value32 & ~MASK_NETTYPE) | _NETTYPE(NT_NO_LINK);
   _device.rtw_write32(REG_CR, value32);
 }
 

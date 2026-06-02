@@ -36,11 +36,14 @@ Listing them as divergences would drown out real bugs. The mask:
     chip temperature so each capture shows a slightly different
     value. The thermal value is also the input to phydm's TX
     BB-swing tracking (see BB 0xc1c[31:21] below).
-  - BB 0xc1c bits 31:21 / 0xe1c bits 31:21: TX BB-swing
+  - BB 0xc1c / 0xe1c / 0x181c / 0x1a1c bits 31:21: TX BB-swing
     `tx_scaling_table_jaguar` index, written by `PowerTracking8812a`
     (and the kernel's phydm watchdog) based on the thermal-meter
-    sample. Same drift class as RF[A] 0x42. Other bits of 0xc1c
-    (AGC table select [11:8], static base bits) ARE checked.
+    sample. Same drift class as RF[A] 0x42. Devourer's pwrtrk is
+    gated to CHIP_8812 only, so on 8814 only the kernel walks
+    path C/D — masking is still correct for the diff. Other bits
+    of these registers (AGC table select [11:8], static base
+    bits) ARE checked.
   - BB 0xc50, 0xe50, 0x1850, 0x1a50 bits 7:0: DIG IGI (path
     A/B/C/D Initial Gain). The kernel's phydm DIG watchdog walks
     the IGI value up and down each interrupt cycle based on
@@ -56,10 +59,11 @@ Listing them as divergences would drown out real bugs. The mask:
 There's also a known capture-state asymmetry: the kernel iface is
 long-lived (CCK regs at 5G retain values written during prior 2.4G
 activity), while devourer captures from a fresh process per run
-(BB-init defaults). At 5G channels we therefore skip `BB 0xc20`
-(rTxAGC_A_CCK11_CCK1_JAguar) because it's CCK-only — never written
-at 5G by either side, but reflects different histories. Add more
-to `CAPTURE_STATE_5G_ARTIFACTS` if new ones surface.
+(BB-init defaults). At 5G channels we therefore skip the per-path
+CCK TX-AGC registers — `rTxAGC_*_CCK11_CCK1_*` for paths A/B (8812 /
+8821) and paths C/D (8814) — they're CCK-only, never written at
+5G by either side, but reflect different histories. Add more to
+`CAPTURE_STATE_5G_ARTIFACTS` if new ones surface.
 """
 
 from __future__ import annotations
@@ -82,9 +86,14 @@ RUNTIME_EPHEMERAL: dict[tuple[str, int], int] = {
     ("RF[A]", 0x42): 0xFFFFFFFF,
     ("RF[B]", 0x42): 0xFFFFFFFF,
     # BB TX-swing thermal pwrtrk — only bits 31:21 (the
-    # tx_scaling_table_jaguar index) are thermal-tracked.
-    ("BB", 0xc1c): 0xFFE00000,
-    ("BB", 0xe1c): 0xFFE00000,
+    # tx_scaling_table_jaguar index) are thermal-tracked. Devourer's
+    # PowerTracking8812a is gated to CHIP_8812 only, so on 8814 the
+    # kernel walks the path-C/D swing while devourer leaves it static
+    # — same divergence class, same masking applies.
+    ("BB", 0xc1c): 0xFFE00000,    # path A
+    ("BB", 0xe1c): 0xFFE00000,    # path B
+    ("BB", 0x181c): 0xFFE00000,   # path C (8814 only)
+    ("BB", 0x1a1c): 0xFFE00000,   # path D (8814 only)
     # DIG IGI (bits 7:0) — kernel's phydm DIG watchdog continuously
     # walks the path-IGI based on RX noise floor; devourer writes
     # the 0x1c floor once and doesn't update.
@@ -112,8 +121,10 @@ RUNTIME_EPHEMERAL: dict[tuple[str, int], int] = {
 # iface, while devourer captures from a fresh process. Skip
 # entirely when --channel > 14.
 CAPTURE_STATE_5G_ARTIFACTS: set[tuple[str, int]] = {
-    ("BB", 0xc20),  # rTxAGC_A_CCK11_CCK1_JAguar
-    ("BB", 0xe20),  # path-B mirror
+    ("BB", 0xc20),    # rTxAGC_A_CCK11_CCK1_JAguar      (path A)
+    ("BB", 0xe20),    # rTxAGC_B_CCK11_CCK1_JAguar      (path B)
+    ("BB", 0x1820),   # rTxAGC_C_CCK11_CCK1_Jaguar2     (path C, 8814)
+    ("BB", 0x1a20),   # rTxAGC_D_CCK11_CCK1_Jaguar2     (path D, 8814)
 }
 
 LINE_RE = re.compile(

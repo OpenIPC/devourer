@@ -157,6 +157,35 @@ def test_5g_capture_state_artifact_masked(tmp_path: Path) -> None:
     assert "0xc20" in res.stdout
 
 
+def test_5g_capture_state_artifact_8814_path_c_d_masked(tmp_path: Path) -> None:
+    """8814 path-C/D CCK TX-AGC mirrors (0x1820 / 0x1a20) — same
+    asymmetry as path-A/B, should also be masked at 5G."""
+    body_k = "BB 0x1820 = 0x2A2A2A2A\nBB 0x1a20 = 0x3B3B3B3B"
+    body_d = "BB 0x1820 = 0x00000000\nBB 0x1a20 = 0x00000000"
+    res = run_diff(wrap(body_k), wrap(body_d),
+                   "--channel", "100", tmp_path=tmp_path)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "0x1820" in res.stdout
+    assert "0x1a20" in res.stdout
+
+
+def test_8814_pathcd_bb_swing_thermal_masked(tmp_path: Path) -> None:
+    """8814 path-C/D TX scaling (0x181c / 0x1a1c) bits 31:21 are
+    the same pwrtrk-tracked field as path-A/B 0xc1c / 0xe1c."""
+    kernel = wrap("BB 0x181c = 0x47C00003\nBB 0x1a1c = 0x47C00003")
+    devourer = wrap("BB 0x181c = 0x40000003\nBB 0x1a1c = 0x40000003")
+    res = run_diff(kernel, devourer, tmp_path=tmp_path)
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_8814_pathcd_bb_swing_lower_bits_still_diffed(tmp_path: Path) -> None:
+    """Lower bits of 0x181c / 0x1a1c are checked."""
+    kernel = wrap("BB 0x181c = 0x47C00003")
+    devourer = wrap("BB 0x181c = 0x47C00103")  # bit 8 differs
+    res = run_diff(kernel, devourer, tmp_path=tmp_path)
+    assert res.returncode == 1, res.stdout + res.stderr
+
+
 def test_5g_capture_state_artifact_NOT_masked_at_2g(tmp_path: Path) -> None:
     """Same divergence at ch6 is treated as a real difference (CCK is
     active at 2.4G; if it diverges there it's a real init drift)."""

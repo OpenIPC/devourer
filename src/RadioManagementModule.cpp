@@ -302,65 +302,75 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
    * temperatures. Capture both dumps within a few seconds for clean
    * parity. */
   if (std::getenv("DEVOURER_DUMP_CANARY")) {
-    static const uint16_t bb_canary[] = {
-        /* PHY/AGC anchors */
+    /* Per-chip canary set. Each Jaguar variant has a different active
+     * RF/path footprint:
+     *   - 8821AU is 1T1R AC: only path-A exists physically. Path-B BB-AGC
+     *     mirror (0xe20-0xe40) and RF[B] reads return BB-init defaults
+     *     or sentinel zero — including them just clutters the diff.
+     *   - 8812AU is 2T2R: paths A + B are both active.
+     *   - 8814AU is 4T4R: paths A + B + C + D BB-table state is active.
+     *     RF[C]/RF[D] are write-only by HW design (kaeru cite "RTL8814AU
+     *     RF read mechanism — paths C/D write-only by HW design") so we
+     *     skip RF reads for paths C and D.
+     * The MAC anchor set is chip-independent (same regs across the
+     * family). */
+
+    /* Shared anchors — PHY anchors + MAC: same for every Jaguar chip. */
+    static const uint16_t bb_anchors[] = {
         0x808, 0x80c, 0x82c, 0x830, 0x834, 0x838, 0x84c, 0x860, 0x8ac,
-        0x8b0, 0x8c4,
-        /* Page-C path A: TX-AGC + AGC core */
+        0x8b0, 0x8c4};
+    static const uint16_t bb_pathA[] = {
+        /* Page-C path A: TX-AGC + AGC core + IQK/DPK output regs */
         0xc00, 0xc1c, 0xc20, 0xc24, 0xc28, 0xc2c, 0xc30, 0xc34, 0xc38,
         0xc3c, 0xc40, 0xc50, 0xc54, 0xc60, 0xc64, 0xc68, 0xc6c, 0xc70,
-        /* IQK / DPK output regs (path A): rOFDM0_X*TxIQImbalance,
-         * IQC matrix coefficients, IQK readback registers. */
-        0xc10, 0xc14, 0xc90, 0xc94,
-        /* Page-C path B: TX-AGC mirror of 0xc20-0xc40 (path-A AGC table
-         * is mirrored to path-B at 0xe20-0xe40 by PHY_SetTxPowerIndex_8812A
-         * for 2T2R chips; divergence here would surface a path-B-specific
-         * port bug we'd otherwise miss). */
+        0xc10, 0xc14, 0xc90, 0xc94};
+    static const uint16_t bb_pathB[] = {
+        /* Page-C path B: TX-AGC mirror of path-A + IQK/DPK output regs */
         0xe1c, 0xe20, 0xe24, 0xe28, 0xe2c, 0xe30, 0xe34, 0xe38, 0xe3c,
-        0xe40, 0xe50, 0xe54,
-        /* IQK / DPK output regs (path B). */
-        0xe10, 0xe14, 0xe90, 0xe94};
+        0xe40, 0xe50, 0xe54, 0xe10, 0xe14, 0xe90, 0xe94};
+    static const uint16_t bb_pathC[] = {
+        /* 8814A path-C BB-table (0x18xx range, see hal/Hal8814PhyReg.h) */
+        0x1820, 0x1824, 0x1828, 0x182c, 0x1830, 0x1834, 0x1838, 0x183c,
+        0x1840, 0x181c, 0x1850};
+    static const uint16_t bb_pathD[] = {
+        /* 8814A path-D BB-table (0x1Axx range, see hal/Hal8814PhyReg.h) */
+        0x1a20, 0x1a24, 0x1a28, 0x1a2c, 0x1a30, 0x1a34, 0x1a38, 0x1a3c,
+        0x1a40, 0x1a1c, 0x1a50};
     static const uint16_t mac_canary[] = {0x40,  0xcf,  0xf0,  0x100,
                                           0x102, 0x420, 0x4c8, 0x508,
                                           0x522, 0x550, 0x560, 0x610,
                                           0x614};
     static const uint32_t rf_canary[] = {0x00, 0x05, 0x18, 0x42, 0x65, 0x8f};
+
+    /* Chip-dependent path mask. */
+    const auto ictype = _eepromManager->version_id.ICType;
+    const bool has_pathB = (ictype != CHIP_8821);
+    const bool has_pathCD = (ictype == CHIP_8814A);
+
     _logger->info("=== DEVOURER_DUMP_CANARY (post channel-set ch={}) ===",
                   unsigned(_currentChannel));
-    for (uint16_t a : bb_canary)
+    for (uint16_t a : bb_anchors)
       _logger->info("BB 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+    for (uint16_t a : bb_pathA)
+      _logger->info("BB 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+    if (has_pathB)
+      for (uint16_t a : bb_pathB)
+        _logger->info("BB 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+    if (has_pathCD) {
+      for (uint16_t a : bb_pathC)
+        _logger->info("BB 0x{:04x} = 0x{:08X}", a, _device.rtw_read32(a));
+      for (uint16_t a : bb_pathD)
+        _logger->info("BB 0x{:04x} = 0x{:08X}", a, _device.rtw_read32(a));
+    }
     for (uint16_t a : mac_canary)
       _logger->info("MAC 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
     for (uint32_t a : rf_canary)
       _logger->info("RF[A] 0x{:02x} = 0x{:05X}", a,
                     phy_query_rf_reg(RfPath::RF_PATH_A, a, 0xfffffu));
-    for (uint32_t a : rf_canary)
-      _logger->info("RF[B] 0x{:02x} = 0x{:05X}", a,
-                    phy_query_rf_reg(RfPath::RF_PATH_B, a, 0xfffffu));
-
-    /* 8814AU extension: dump path-C/D BB-AGC + IGI + BB-swing. Paths C/D
-     * exist at BB-register-table level (0x18xx for path C, 0x1Axx for
-     * path D, see hal/Hal8814PhyReg.h). NB: the corresponding RF
-     * registers for paths C/D are write-only by HW design on 8814AU
-     * (see kaeru cite "RTL8814AU RF read mechanism — paths C/D
-     * write-only by HW design") — read attempts return undefined
-     * data, so we skip RF[C]/RF[D]. The BB-table state IS readable
-     * and is the canary surface for path-C/D init drift. */
-    if (_eepromManager->version_id.ICType == CHIP_8814A) {
-      static const uint16_t bb_canary_8814_pathCD[] = {
-          /* Path-C TX-AGC table */
-          0x1820, 0x1824, 0x1828, 0x182c, 0x1830, 0x1834, 0x1838, 0x183c,
-          0x1840,
-          /* Path-C BB-swing + IGI */
-          0x181c, 0x1850,
-          /* Path-D TX-AGC table */
-          0x1a20, 0x1a24, 0x1a28, 0x1a2c, 0x1a30, 0x1a34, 0x1a38, 0x1a3c,
-          0x1a40,
-          /* Path-D BB-swing + IGI */
-          0x1a1c, 0x1a50};
-      for (uint16_t a : bb_canary_8814_pathCD)
-        _logger->info("BB 0x{:04x} = 0x{:08X}", a, _device.rtw_read32(a));
-    }
+    if (has_pathB)
+      for (uint32_t a : rf_canary)
+        _logger->info("RF[B] 0x{:02x} = 0x{:05X}", a,
+                      phy_query_rf_reg(RfPath::RF_PATH_B, a, 0xfffffu));
     _logger->info("=== END DEVOURER_DUMP_CANARY ===");
   }
 

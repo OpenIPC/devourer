@@ -32,6 +32,12 @@ public:
   EepromManager(RtlUsbAdapter device, Logger_t logger);
   uint8_t GetBoardType();
   void efuse_ShadowRead1Byte(uint16_t Offset, uint8_t *Value);
+  /* phydm thermal-meter pwrtrk baseline from EFUSE (set by
+   * `Hal_ReadThermalMeter_8812A`). Returns 0xFF when EFUSE autoload
+   * failed — in that case pwrtrk should be disabled because there's
+   * no factory-calibrated reference temperature to compute delta
+   * against. */
+  uint8_t GetEepromThermalMeter() const { return eeprom_thermal_meter; }
 
   /* 8814AU only: read EFUSE and populate rfe_type, PA/LNA types, crystal cap,
    * etc. Must be called AFTER firmware download (pre-fwdl EFUSE access

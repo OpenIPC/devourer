@@ -17,6 +17,8 @@ add_library(WiFiDriver
     hal/Hal8812PhyReg.h
     hal/Hal8812PwrSeq.c
     hal/Hal8812PwrSeq.h
+    hal/Hal8812a_TxPwrTrack.cpp
+    hal/Hal8812a_TxPwrTrack.h
     hal/Hal8814_PostFwdlReplay.h
     hal/Hal8814PwrSeq.c
     hal/Hal8814PwrSeq.h
@@ -55,6 +57,8 @@ add_library(WiFiDriver
     src/ParsedRadioPacket.cpp
     src/PhyTableLoader.cpp
     src/PhyTableLoader.h
+    src/PowerTracking8812a.cpp
+    src/PowerTracking8812a.h
     src/RadioManagementModule.cpp
     src/RadioManagementModule.h
     src/Radiotap.c

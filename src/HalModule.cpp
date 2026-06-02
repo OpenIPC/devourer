@@ -291,6 +291,12 @@ bool HalModule::rtl8812au_hal_init() {
 
   phydm_SetIgiFloor_Jaguar();
 
+  /* Initialise phydm thermal-meter pwrtrk state now that BB+RF tables
+   * have been applied. Mirrors phydm's `phydm_rf_init` ->
+   * `odm_txpowertracking_init`. The watchdog ticks themselves run from
+   * the channel-set path + RtlJaguarDevice background thread. */
+  _radioManagementModule->InitPwrTrack();
+
   if (_eepromManager->version_id.RFType == RF_TYPE_1T1R) {
     PHY_BB8812_Config_1T();
   }

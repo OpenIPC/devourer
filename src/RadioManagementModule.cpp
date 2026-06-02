@@ -276,8 +276,19 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
    * upstream watchdog tick — reads RF[A][0x42], folds into the
    * thermal-value rolling average, walks the delta-swing table for
    * the (band, channel) bucket, and writes the resulting BB-swing
-   * index to 0xc1c[31:21] / 0xe1c[31:21]. */
-  _pwrTrk.TickThermalMeter(current_band_type, _currentChannel);
+   * index to 0xc1c[31:21] / 0xe1c[31:21].
+   *
+   * 8812A-only. The delta-swing tables + `PowerTracking8812a` logic
+   * came from `aircrack-ng/rtl8812au/hal/phydm/halrf/rtl8812a/
+   * halrf_8812a_ce.c`. The 8821AU has its own `halrf_8821a_ce.c`
+   * variant with different per-band tables and 1T1R-specific math —
+   * running 8812A code on 8821A produced wrong values at ch6 BB
+   * 0xc1c[31:21] (T1 8821 canary diff caught it as kern 0x200/0dB vs
+   * dev 0x1C8/-1dB). Until the 8821 pwrtrk is ported, skip the tick
+   * on non-8812 chips. */
+  if (_eepromManager->version_id.ICType == CHIP_8812) {
+    _pwrTrk.TickThermalMeter(current_band_type, _currentChannel);
+  }
 
   /* T1 cross-validation oracle (TODO.md): when DEVOURER_DUMP_CANARY=1
    * is set, dump the canary BB/MAC/RF registers after channel-set is

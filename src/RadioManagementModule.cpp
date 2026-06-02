@@ -316,27 +316,13 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     _logger->info("=== END DEVOURER_DUMP_CANARY ===");
   }
 
-  /* Trigger I/Q calibration if requested AND opt-in via env. The IQK
-   * port (Iqk8812a) closes the BB 0x8b0 canary divergence vs kernel
-   * but currently introduces a 5GHz TX regression on 8812AU — dev TX
-   * at ch36 stops reaching kernel receivers (full matrix at ch36 goes
-   * from 6500/6500 to 0/6500 on the affected cells). Root cause not
-   * yet isolated; suspected register that's not restored to the
-   * post-channel-set state after IQK completes. Default-off until
-   * the regression is resolved; the code path is kept available
-   * behind DEVOURER_ENABLE_IQK=1 for canary-parity and root-cause
-   * debugging.
-   *
-   * Set by `phy_SwBand8812` on band transitions and (post-init) on
-   * the very first channel-set. Optional override:
-   *   - DEVOURER_ENABLE_IQK=1: enable the IQK trigger surface
-   *   - DEVOURER_FORCE_IQK=1:  run IQK on every channel-set
-   *                            (implies _ENABLE_IQK; for canary work)
-   */
-  bool iqk_enabled = std::getenv("DEVOURER_ENABLE_IQK") ||
-                     std::getenv("DEVOURER_FORCE_IQK");
-  if (iqk_enabled &&
-      (_needIQK || std::getenv("DEVOURER_FORCE_IQK"))) {
+  /* Trigger I/Q calibration. Set by `phy_SwBand8812` on band
+   * transitions and (post-init) on the very first channel-set via
+   * `HalModule::rtl8812au_hal_init` → `ArmIQKOnNextChannelSet`.
+   * Optional override: `DEVOURER_FORCE_IQK=1` runs IQK on every
+   * channel-set (used for canary-diff workflow against kernel). */
+  if ((_needIQK || std::getenv("DEVOURER_FORCE_IQK")) &&
+      !std::getenv("DEVOURER_DISABLE_IQK")) {
     if (_eepromManager->version_id.ICType == CHIP_8812) {
       _iqk.Calibrate(_currentChannel, current_band_type,
                      /*is_recovery=*/false);

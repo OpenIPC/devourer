@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "EepromManager.h"
+#include "Iqk8812a.h"
 #include "PowerTracking8812a.h"
 #include "RfPath.h"
 #include "RtlUsbAdapter.h"
@@ -152,6 +153,7 @@ class RadioManagementModule {
   uint8_t _currentCenterFrequencyIndex;
   uint8_t power = 16;
   PowerTracking8812a _pwrTrk;
+  Iqk8812a _iqk;
 
 public:
   RadioManagementModule(RtlUsbAdapter device,
@@ -166,6 +168,15 @@ public:
    * callback `odm_txpowertracking_callback_thermal_meter` and writes
    * the resulting BB-swing index to 0xc1c[31:21] / 0xe1c[31:21]. */
   void TickPwrTrack();
+  /* Run a full I/Q calibration. Mirrors upstream
+   * `phy_iq_calibrate_8812a` triggered from the channel-set callback
+   * when `_needIQK` is asserted. Takes ~50-100 ms per invocation. */
+  void RunIQK();
+  /* Arm the IQK trigger so the next channel-set runs a full I/Q
+   * calibration. HalModule calls this once at init so the initial
+   * channel-set converges 0xc1c IQK output + 0xc90 IQ-imbalance
+   * registers to kernel-equivalent state. */
+  void ArmIQKOnNextChannelSet() { _needIQK = true; }
   void hw_var_rcr_config(uint32_t rcr);
   void SetMonitorMode();
   void set_channel_bwmode(uint8_t channel, uint8_t channel_offset,

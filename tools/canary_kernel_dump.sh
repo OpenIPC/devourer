@@ -38,12 +38,14 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-  echo "Usage: $0 <iface> <channel>" >&2
+  echo "Usage: $0 <iface> <channel> [chip]" >&2
+  echo "  chip: 8812 (default) | 8814" >&2
   exit 1
 fi
 
 IFACE="$1"
 CHANNEL="$2"
+CHIP="${3:-8812}"
 
 if ! ip -o link show "$IFACE" >/dev/null 2>&1; then
   echo "iface '$IFACE' not found — did you modprobe 88XXau?" >&2
@@ -92,5 +94,17 @@ for PATH_IDX in 0 1; do
     printf "RF[%s] %s = %s\n" "$PATH_LBL" "$RF" "$(rfread $PATH_IDX $RF)"
   done
 done
+
+# 8814AU extension: path-C/D BB-AGC + IGI + BB-swing. RF[C]/RF[D]
+# are write-only by HW design on 8814AU (read attempts return undefined
+# data), so we only dump BB-table state for paths C/D.
+if [[ "$CHIP" = "8814" ]]; then
+  for ADDR in 0x1820 0x1824 0x1828 0x182c 0x1830 0x1834 0x1838 0x183c \
+              0x1840 0x181c 0x1850 \
+              0x1a20 0x1a24 0x1a28 0x1a2c 0x1a30 0x1a34 0x1a38 0x1a3c \
+              0x1a40 0x1a1c 0x1a50; do
+    printf "BB %s = %s\n" "$ADDR" "$(readreg $ADDR)"
+  done
+fi
 
 echo "=== END DEVOURER_DUMP_CANARY ==="

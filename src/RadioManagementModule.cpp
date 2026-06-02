@@ -337,6 +337,30 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     for (uint32_t a : rf_canary)
       _logger->info("RF[B] 0x{:02x} = 0x{:05X}", a,
                     phy_query_rf_reg(RfPath::RF_PATH_B, a, 0xfffffu));
+
+    /* 8814AU extension: dump path-C/D BB-AGC + IGI + BB-swing. Paths C/D
+     * exist at BB-register-table level (0x18xx for path C, 0x1Axx for
+     * path D, see hal/Hal8814PhyReg.h). NB: the corresponding RF
+     * registers for paths C/D are write-only by HW design on 8814AU
+     * (see kaeru cite "RTL8814AU RF read mechanism — paths C/D
+     * write-only by HW design") — read attempts return undefined
+     * data, so we skip RF[C]/RF[D]. The BB-table state IS readable
+     * and is the canary surface for path-C/D init drift. */
+    if (_eepromManager->version_id.ICType == CHIP_8814A) {
+      static const uint16_t bb_canary_8814_pathCD[] = {
+          /* Path-C TX-AGC table */
+          0x1820, 0x1824, 0x1828, 0x182c, 0x1830, 0x1834, 0x1838, 0x183c,
+          0x1840,
+          /* Path-C BB-swing + IGI */
+          0x181c, 0x1850,
+          /* Path-D TX-AGC table */
+          0x1a20, 0x1a24, 0x1a28, 0x1a2c, 0x1a30, 0x1a34, 0x1a38, 0x1a3c,
+          0x1a40,
+          /* Path-D BB-swing + IGI */
+          0x1a1c, 0x1a50};
+      for (uint16_t a : bb_canary_8814_pathCD)
+        _logger->info("BB 0x{:04x} = 0x{:08X}", a, _device.rtw_read32(a));
+    }
     _logger->info("=== END DEVOURER_DUMP_CANARY ===");
   }
 

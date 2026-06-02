@@ -294,8 +294,12 @@ bool HalModule::rtl8812au_hal_init() {
   /* Initialise phydm thermal-meter pwrtrk state now that BB+RF tables
    * have been applied. Mirrors phydm's `phydm_rf_init` ->
    * `odm_txpowertracking_init`. The watchdog ticks themselves run from
-   * the channel-set path + RtlJaguarDevice background thread. */
-  _radioManagementModule->InitPwrTrack();
+   * the channel-set path + RtlJaguarDevice background thread.
+   * 8812A-only — see RadioManagementModule::phy_SwChnlAndSetBwMode8812
+   * for the gate rationale. */
+  if (_eepromManager->version_id.ICType == CHIP_8812) {
+    _radioManagementModule->InitPwrTrack();
+  }
 
   /* Arm I/Q calibration so the initial channel-set runs a full IQK
    * (TX-tone + RX-tone, ~50-100 ms). Mirrors upstream where

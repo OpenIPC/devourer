@@ -289,6 +289,14 @@ bool HalModule::rtl8812au_hal_init() {
 
   PHY_RF6052_Config_8812();
 
+  phydm_SetIgiFloor_Jaguar();
+
+  /* Initialise phydm thermal-meter pwrtrk state now that BB+RF tables
+   * have been applied. Mirrors phydm's `phydm_rf_init` ->
+   * `odm_txpowertracking_init`. The watchdog ticks themselves run from
+   * the channel-set path + RtlJaguarDevice background thread. */
+  _radioManagementModule->InitPwrTrack();
+
   if (_eepromManager->version_id.RFType == RF_TYPE_1T1R) {
     PHY_BB8812_Config_1T();
   }
@@ -2953,6 +2961,18 @@ void HalModule::odm_config_rf_radio_b_8812a(uint32_t addr, uint32_t data) {
 
   odm_config_rf_reg_8812a(addr, data, RfPath::RF_PATH_B,
                           (uint16_t)(addr | maskfor_phy_set));
+}
+
+void HalModule::phydm_SetIgiFloor_Jaguar() {
+  /* Port of phydm DIG floor convergence for the Jaguar family. Upstream
+   * phydm_dig.c sets `dig_t->dm_dig_min = 0x1c` for
+   * `(ODM_RTL8812 | ODM_RTL8814A | ODM_RTL8821 | ODM_RTL8822B)` and the
+   * DIG watchdog walks 0xc50/0xe50 down to this floor under clean RX
+   * conditions. Without phydm's watchdog devourer's IGI never moves
+   * from the 0x20 BB-table seed and runs ~4 dB less sensitive than the
+   * kernel driver. Match kernel by writing the floor once here. */
+  _device.phy_set_bb_reg(rA_IGI_Jaguar, bMaskByte0, 0x1c);
+  _device.phy_set_bb_reg(rB_IGI_Jaguar, bMaskByte0, 0x1c);
 }
 
 void HalModule::PHY_BB8812_Config_1T() {

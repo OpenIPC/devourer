@@ -25,6 +25,15 @@
 #
 # Iface is the wlx... or wlan? name the kernel driver enumerated. Run
 # `iw dev` to find it after `modprobe 88XXau`.
+#
+# Expected divergence on a clean diff (do NOT chase as devourer bug):
+#   BB 0x0c1c bits 31:21 — phydm TX BB-swing thermal compensation. The
+#     kernel's phydm watchdog reads RF reg 0x42 thermal meter every 2s
+#     and walks 0xc1c[31:21] up/down through `tx_scaling_table_jaguar`
+#     (typical 0x21E/+0.5dB or 0x23E/+1.0dB on a warmed-up dongle).
+#     Devourer keeps the BB-init value 0x200 (0 dB, table index 24).
+#     Porting the full thermal-tracking watchdog (~2800 LOC) is out of
+#     scope; the other bits of 0xc1c are byte-for-byte.
 
 set -euo pipefail
 

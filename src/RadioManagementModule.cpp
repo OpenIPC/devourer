@@ -48,7 +48,19 @@ int get_40mhz_center_channel(int channel) {
 RadioManagementModule::RadioManagementModule(
     RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
     Logger_t logger)
-    : _device{device}, _eepromManager{eepromManager}, _logger{logger} {}
+    : _device{device}, _eepromManager{eepromManager}, _logger{logger},
+      _pwrTrk{device, eepromManager, this, logger} {}
+
+uint32_t RadioManagementModule::phy_query_bb_reg_public(uint16_t regAddr,
+                                                       uint32_t bitMask) {
+  return phy_query_bb_reg(regAddr, bitMask);
+}
+
+void RadioManagementModule::InitPwrTrack() { _pwrTrk.Init(); }
+
+void RadioManagementModule::TickPwrTrack() {
+  _pwrTrk.TickThermalMeter(current_band_type, _currentChannel);
+}
 
 void RadioManagementModule::hw_var_rcr_config(uint32_t rcr) {
   _device.rtw_write32(REG_RCR, rcr);
@@ -255,11 +267,24 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     PHY_SetTxPowerLevel8812(_currentChannel);
   }
 
+  /* Run phydm thermal-meter pwrtrk once per channel-set. Mirrors the
+   * upstream watchdog tick — reads RF[A][0x42], folds into the
+   * thermal-value rolling average, walks the delta-swing table for
+   * the (band, channel) bucket, and writes the resulting BB-swing
+   * index to 0xc1c[31:21] / 0xe1c[31:21]. */
+  _pwrTrk.TickThermalMeter(current_band_type, _currentChannel);
+
   /* T1 cross-validation oracle (TODO.md): when DEVOURER_DUMP_CANARY=1
    * is set, dump the canary BB/MAC/RF registers after channel-set is
    * complete. Output format matches `iwpriv <iface> read 4,<addr>` /
    * `iwpriv <iface> rfr <path> <addr>` so kernel and devourer dumps
-   * can be diffed line-by-line. */
+   * can be diffed line-by-line.
+   *
+   * BB 0xc1c[31:21] / 0xe1c[31:21] are now phydm-managed; the value
+   * is thermal-meter-driven so small (~1-step) divergence is expected
+   * if devourer and kernel sampled the chip at non-identical
+   * temperatures. Capture both dumps within a few seconds for clean
+   * parity. */
   if (std::getenv("DEVOURER_DUMP_CANARY")) {
     static const uint16_t bb_canary[] = {
         0x808, 0x80c, 0x82c, 0x830, 0x834, 0x838, 0x84c, 0x860, 0x8ac,
@@ -724,6 +749,15 @@ void RadioManagementModule::phy_SetBBSwingByBand_8812A(BandType Band) {
   _device.phy_set_bb_reg(
       rB_TxScale_Jaguar, 0xFFE00000,
       phy_get_tx_bb_swing_8812a(Band, RfPath::RF_PATH_B)); /* 0xE1C[31:21] */
+
+  /* Mirror upstream `phy_SetBBSwingByBand_8812A` which calls
+   * `odm_clear_txpowertracking_state(pDM_Odm)` after rewriting the
+   * BB-swing base. Without this the next pwrtrk tick sees
+   * delta_abs==0 (thermal_value unchanged since the previous tick)
+   * and short-circuits the re-apply — leaving 0xc1c[31:21] stuck at
+   * the BB-init base (0x200) even when the previous channel-set's
+   * tick had walked it up to the thermal-warmed value. */
+  _pwrTrk.ClearState();
 }
 
 #define EEPROM_TX_BBSWING_2G_8812 0xC6

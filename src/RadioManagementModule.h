@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "EepromManager.h"
+#include "PowerTracking8812a.h"
 #include "RfPath.h"
 #include "RtlUsbAdapter.h"
 #include "SelectedChannel.h"
@@ -150,11 +151,21 @@ class RadioManagementModule {
   uint8_t _cur80MhzPrimeSc;
   uint8_t _currentCenterFrequencyIndex;
   uint8_t power = 16;
+  PowerTracking8812a _pwrTrk;
 
 public:
   RadioManagementModule(RtlUsbAdapter device,
                         std::shared_ptr<EepromManager> eepromManager,
                         Logger_t logger);
+  /* Initialise phydm thermal-meter pwrtrk state. Call once after the
+   * BB + RF table application is complete (mirrors phydm's
+   * `phydm_rf_init -> odm_txpowertracking_init`). Reads EFUSE +
+   * current 0xc1c[31:21]. Safe to call multiple times. */
+  void InitPwrTrack();
+  /* Run one phydm thermal-meter pwrtrk tick. Mirrors the watchdog
+   * callback `odm_txpowertracking_callback_thermal_meter` and writes
+   * the resulting BB-swing index to 0xc1c[31:21] / 0xe1c[31:21]. */
+  void TickPwrTrack();
   void hw_var_rcr_config(uint32_t rcr);
   void SetMonitorMode();
   void set_channel_bwmode(uint8_t channel, uint8_t channel_offset,
@@ -163,6 +174,7 @@ public:
                       uint32_t Data);
   uint32_t phy_query_rf_reg(RfPath eRFPath, uint32_t RegAddr,
                             uint32_t BitMask);
+  uint32_t phy_query_bb_reg_public(uint16_t regAddr, uint32_t bitMask);
   void init_hw_mlme_ext(SelectedChannel pmlmeext);
   void rtw_hal_set_chnl_bw(uint8_t channel, ChannelWidth_t Bandwidth,
                            uint8_t Offset40, uint8_t Offset80);

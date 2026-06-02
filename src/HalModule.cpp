@@ -1597,6 +1597,25 @@ void HalModule::_InitNetworkType_8812A() {
   auto value32 = _device.rtw_read32(REG_CR);
   value32 = (value32 & ~MASK_NETTYPE) | _NETTYPE(NT_NO_LINK);
   _device.rtw_write32(REG_CR, value32);
+
+  /* Port of upstream `StopTxBeacon(Adapter)` (hal_com.c:14158). The
+   * kernel's `rtw_hal_set_hwreg(HW_VAR_NET_TYPE, ...)` path calls
+   * StopTxBeacon when MSR transitions to NO_LINK or STATION mode and
+   * no AP/mesh port is up. devourer skips this, which leaves
+   * `0x420[22]` (BIT6 of byte 2 = "HW treats packet as real beacon"
+   * enable) at the chip's reset-state 1. The T1 canary diff caught
+   * this as MAC 0x420 byte 2 = `0x71` (devourer) vs `0x31` (kernel).
+   * Also program TBTT hold-time-when-stopping-beacon to match. */
+  uint8_t txqctl_b2 = _device.rtw_read8(REG_FWHW_TXQ_CTRL + 2);
+  _device.rtw_write8(REG_FWHW_TXQ_CTRL + 2,
+                     static_cast<uint8_t>(txqctl_b2 & ~BIT6));
+  constexpr uint16_t TBTT_HOLD_STOP_BCN = 0x64; /* 3.2ms, unit 32us */
+  _device.rtw_write8(REG_TBTT_PROHIBIT + 1,
+                     static_cast<uint8_t>(TBTT_HOLD_STOP_BCN & 0xFF));
+  uint8_t tbtt_b2 = _device.rtw_read8(REG_TBTT_PROHIBIT + 2);
+  _device.rtw_write8(REG_TBTT_PROHIBIT + 2,
+                     static_cast<uint8_t>((tbtt_b2 & 0xF0) |
+                                          (TBTT_HOLD_STOP_BCN >> 8)));
 }
 
 void HalModule::_InitWMACSetting_8812A() {

@@ -3,10 +3,9 @@
 The Realtek 11ac driver that simply devours its competitors.
 
 Devourer is a userspace re-implementation of Realtek's RTL88xxAU Wi-Fi
-driver (Jaguar family: RTL8812AU shipping on every band/channel,
-RTL8821AU shipping on every band with partial-receiver-dependent 5 GHz
-UNII-2/3 TX, RTL8811AU supported via the 8812 code path, RTL8814AU
-RX-only), speaking to the chip directly through libusb. No kernel
+driver (Jaguar family: RTL8812AU and RTL8821AU shipping on every band,
+RTL8811AU supported via the 8812 code path, RTL8814AU RX-only),
+speaking to the chip directly through libusb. No kernel
 module, no `rtl8812au` DKMS tree — just a C++20 static library
 (`WiFiDriver`) plus two demo executables for RX and TX. It is the
 OpenIPC project's driver of choice for long-range video links built on
@@ -25,9 +24,9 @@ layered on top.
 | Part           | RF / streams    | 2.4 GHz       | 5 GHz UNII-1 (ch36-48) | 5 GHz UNII-2/3 (ch52+) | Notes                                       |
 | -------------- | --------------- | ------------- | ---------------------- | ---------------------- | ------------------------------------------- |
 | **RTL8812AU**  | 2T2R            | TX + RX       | TX + RX                | TX + RX                | VID/PID `0bda:8812`; reference part — works on every channel/band combo |
-| **RTL8811AU**  | 1T1R            | TX + RX       | TX + RX                | TX + RX                | 1T1R cut of 8812 silicon; rides 8812 code path with `RFType=RF_TYPE_1T1R` selected from `REG_SYS_CFG` bit 27. Status mirrored from 8812 — no 8811AU DUT in the test rig |
-| **RTL8814AU**  | 4T4R, 3-SS max  | RX only       | RX only                | RX only                | VID/PID `0bda:8813`; 2-SS effective on USB-2. TX submits succeed on the bulk pipe but nothing reaches the air at any band — see issue #36 |
-| **RTL8821AU**  | 1T1R AC + BT    | TX + RX       | TX + RX                | TX (receiver-dependent) + RX (receiver-dependent) | OEM-rebadged as TP-Link Archer T2U Plus (`2357:0120`) etc; Android hotplug works end-to-end. 5 GHz UNII-1 TX validated against both 8812AU and 8814AU receivers post-T1 EFUSE per-rate TX-power port. UNII-2/3 (ch100+): TX reaches the air at full rate when received by an 8814AU peer (matrix at ch100 shows 4160/4500 hits) but is dropped by an 8812AU peer; RX path on 8821AU itself is broken at UNII-2/3 (kernel-TX → 8821-devourer-RX = 0 hits at ch100+). Six hypotheses tested + refuted for the residual UNII-2/3 RX gate and 8812-RX-side asymmetry — see issue #59 |
+| **RTL8811AU**  | 1T1R            | TX + RX       | TX + RX                | TX + RX                | 1T1R cut of 8812 silicon; rides 8812 code path with `RFType=RF_TYPE_1T1R` selected from `REG_SYS_CFG` bit 27. Status mirrored from 8812 — not separately exercised |
+| **RTL8814AU**  | 4T4R, 3-SS max  | RX only       | RX only                | RX only                | VID/PID `0bda:8813`; 2-SS effective on USB-2. TX submits succeed on the bulk pipe but nothing reaches the air at any band |
+| **RTL8821AU**  | 1T1R AC + BT    | TX + RX       | TX + RX                | TX + RX | OEM-rebadged as TP-Link Archer T2U Plus (`2357:0120`) etc. UNII-2/3 TX has cross-receiver asymmetry against 8812AU peers |
 
 Successor families (`Jaguar2` / `Jaguar+` — 8812BU, 8822BU/BE, etc., and
 the later `Kestrel` 11ax generation) are **out of scope**: they share
@@ -83,9 +82,10 @@ root.
 - `WiFiDriverDemo` — RX example built from `demo/main.cpp`. Walks every
   Realtek device under VID `0bda` and tries to open it; sets monitor mode
   on channel 36 / 20 MHz, runs the read loop.
-- `WiFiDriverTxDemo` — TX example built from `txdemo/main.cpp`. Takes a USB
-  fd as `argv[1]` (the Termux-on-Android pattern using
-  `libusb_wrap_sys_device`), forks RX into a child, and TX-loops a hardcoded
+- `WiFiDriverTxDemo` — TX example built from `txdemo/main.cpp`. Opens the
+  device via `libusb_open_device_with_vid_pid` by default, or wraps a USB
+  fd passed as `argv[1]` (the Termux-on-Android pattern using
+  `libusb_wrap_sys_device`). Forks RX into a child, TX-loops a hardcoded
   beacon in the parent.
 
 ### Demo env vars
@@ -167,7 +167,10 @@ ARE).
 hal/      Vendor headers and tables ported from Realtek's tree
           Hal8812PhyReg.h, hal8812a_fw.[ch], rtl8812a_spec.h
           Hal8814PhyReg.h, hal8814a_fw.[ch], Hal8814PwrSeq.[ch]
-          rtl8814a/Hal8814_PhyTables.[ch]  (8814 BB/AGC/RF tables)
+          rtl8814a/Hal8814_PhyTables.[ch]    (8814 BB/AGC/RF tables)
+          Hal8812a_PhyRegPg.h                (per-rate TX-power PG table)
+          Hal8812a_TxpwrLmt.h                (per-region TX-power limit table)
+          Hal8812a_TxPwrTrack.[h,cpp]        (phydm thermal-meter delta-swing tables)
 src/      Driver implementation
           WiFiDriver             thin factory
           RtlJaguarDevice        orchestrator (RX + TX entry points)
@@ -176,6 +179,8 @@ src/      Driver implementation
           EepromManager          EFUSE / EEPROM read + autoload state
           FirmwareManager        chip-specific firmware download
           PhyTableLoader         applies chip-cut-conditional BB/AGC tables
+          PowerTracking8812a     phydm thermal-meter TX BB-swing compensation
+          Iqk8812a               phydm I/Q calibration
           RtlUsbAdapter          libusb wrapper (vendor + bulk transfers)
           FrameParser            RX parsing, TX descriptor layout
           Radiotap.c             radiotap header iterator

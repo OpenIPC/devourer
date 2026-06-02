@@ -26,8 +26,9 @@ Why this isn't just `diff`:
 
 Several registers shift on every capture for reasons that aren't
 init drift — they're runtime state the kernel or devourer keep
-updating after init completes. Listing them as divergences would
-drown out real bugs. The mask:
+updating after init completes, or calibration outputs that vary
+between runs because the calibration samples a noisy signal.
+Listing them as divergences would drown out real bugs. The mask:
 
   - MAC 0x040, 0x550, 0x560: per-queue / beacon-window / TBTT
     counters that increment continuously.
@@ -40,6 +41,17 @@ drown out real bugs. The mask:
     (and the kernel's phydm watchdog) based on the thermal-meter
     sample. Same drift class as RF[A] 0x42. Other bits of 0xc1c
     (AGC table select [11:8], static base bits) ARE checked.
+  - BB 0xc50, 0xe50, 0x1850, 0x1a50 bits 7:0: DIG IGI (path
+    A/B/C/D Initial Gain). The kernel's phydm DIG watchdog walks
+    the IGI value up and down each interrupt cycle based on
+    received noise floor; devourer writes the 0x1c floor once at
+    init and leaves it. Upper bits of the AGC core word are
+    static config and ARE checked.
+  - BB 0x8b0, 0xc10, 0xc14, 0xc90, 0xc94 (and 0xe10/0xe14/0xe90/0xe94
+    path-B mirrors): IQK output coefficients. Both sides run IQK,
+    but the tone sweep samples noise so the per-bit output varies
+    between runs even on the same chip. Functional IQK correctness
+    is validated by the on-air RX/TX matrix, not by canary diff.
 
 There's also a known capture-state asymmetry: the kernel iface is
 long-lived (CCK regs at 5G retain values written during prior 2.4G
@@ -73,6 +85,26 @@ RUNTIME_EPHEMERAL: dict[tuple[str, int], int] = {
     # tx_scaling_table_jaguar index) are thermal-tracked.
     ("BB", 0xc1c): 0xFFE00000,
     ("BB", 0xe1c): 0xFFE00000,
+    # DIG IGI (bits 7:0) — kernel's phydm DIG watchdog continuously
+    # walks the path-IGI based on RX noise floor; devourer writes
+    # the 0x1c floor once and doesn't update.
+    ("BB", 0xc50): 0x000000FF,    # path A
+    ("BB", 0xe50): 0x000000FF,    # path B
+    ("BB", 0x1850): 0x000000FF,   # path C (8814 only)
+    ("BB", 0x1a50): 0x000000FF,   # path D (8814 only)
+    # IQK output regs — calibration results vary run-to-run because
+    # the tone sweep samples a noisy signal. Bit-exact match between
+    # captures (or between devourer and kernel) isn't expected;
+    # functional correctness is checked by the on-air RX/TX matrix.
+    ("BB", 0x8b0): 0xFFFFFFFF,
+    ("BB", 0xc10): 0xFFFFFFFF,    # path-A RX IQK fill
+    ("BB", 0xc14): 0xFFFFFFFF,
+    ("BB", 0xc90): 0xFFFFFFFF,    # path-A TX IQK matrix
+    ("BB", 0xc94): 0xFFFFFFFF,
+    ("BB", 0xe10): 0xFFFFFFFF,    # path-B RX IQK fill
+    ("BB", 0xe14): 0xFFFFFFFF,
+    ("BB", 0xe90): 0xFFFFFFFF,    # path-B TX IQK matrix
+    ("BB", 0xe94): 0xFFFFFFFF,
 }
 
 # Capture-state artifacts at 5GHz only — registers that aren't

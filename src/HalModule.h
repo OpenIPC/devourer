@@ -59,7 +59,7 @@ public:
   bool rtw_hal_init(SelectedChannel selectedChannel);
 
 private:
-  bool rtl8812au_hal_init();
+  bool rtl8812au_hal_init(uint8_t init_channel);
   bool InitPowerOn();
   bool InitLLTTable8812A(uint8_t txpktbuf_bndy);
   bool InitLLTTable8814A();

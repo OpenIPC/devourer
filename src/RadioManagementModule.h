@@ -217,9 +217,11 @@ private:
   uint32_t phy_get_tx_bb_swing_8812a(BandType Band, RfPath RFPath);
   void Set_HW_VAR_ENABLE_RX_BAR(bool val);
   void phy_SwChnl8812();
+  void phy_SwChnl8814A();
   bool phy_SwBand8812(uint8_t channelToSW);
   void phy_FixSpur_8812A(ChannelWidth_t Bandwidth, uint8_t Channel);
   void phy_PostSetBwMode8812();
+  void phy_PostSetBwMode8814A();
   void phy_SetRegBW_8812(ChannelWidth_t CurrentBW);
   void PHY_RF6052SetBandwidth8812(ChannelWidth_t Bandwidth);
   uint8_t phy_GetSecondaryChnl_8812();

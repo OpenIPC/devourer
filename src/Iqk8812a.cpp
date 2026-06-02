@@ -289,10 +289,10 @@ void Iqk8812a::DoTxRxCalibration(uint8_t chnl_idx, BandType band) {
       if (!(TX0_fail || TX0_finish)) {
         _device.rtw_write32(0xcb8, 0x02000000);
         TX_IQC_temp[tx0_average][0] = static_cast<int>(
-            (_device.rtw_read32(0xd00) & kMask07ff0000) << 21);
+            ((_device.rtw_read32(0xd00) & kMask07ff0000) >> 16) << 21);
         _device.rtw_write32(0xcb8, 0x04000000);
         TX_IQC_temp[tx0_average][1] = static_cast<int>(
-            (_device.rtw_read32(0xd00) & kMask07ff0000) << 21);
+            ((_device.rtw_read32(0xd00) & kMask07ff0000) >> 16) << 21);
         tx0_average++;
       } else {
         cal0_retry++;
@@ -303,10 +303,10 @@ void Iqk8812a::DoTxRxCalibration(uint8_t chnl_idx, BandType band) {
       if (!(TX1_fail || TX1_finish)) {
         _device.rtw_write32(0xeb8, 0x02000000);
         TX_IQC_temp[tx1_average][2] = static_cast<int>(
-            (_device.rtw_read32(0xd40) & kMask07ff0000) << 21);
+            ((_device.rtw_read32(0xd40) & kMask07ff0000) >> 16) << 21);
         _device.rtw_write32(0xeb8, 0x04000000);
         TX_IQC_temp[tx1_average][3] = static_cast<int>(
-            (_device.rtw_read32(0xd40) & kMask07ff0000) << 21);
+            ((_device.rtw_read32(0xd40) & kMask07ff0000) >> 16) << 21);
         tx1_average++;
       } else {
         cal1_retry++;
@@ -491,10 +491,10 @@ void Iqk8812a::DoTxRxCalibration(uint8_t chnl_idx, BandType band) {
       if (!(RX0_fail || RX0_finish) && TX0_finish) {
         _device.rtw_write32(0xcb8, 0x06000000);
         RX_IQC_temp[rx0_average][0] = static_cast<int>(
-            (_device.rtw_read32(0xd00) & kMask07ff0000) << 21);
+            ((_device.rtw_read32(0xd00) & kMask07ff0000) >> 16) << 21);
         _device.rtw_write32(0xcb8, 0x08000000);
         RX_IQC_temp[rx0_average][1] = static_cast<int>(
-            (_device.rtw_read32(0xd00) & kMask07ff0000) << 21);
+            ((_device.rtw_read32(0xd00) & kMask07ff0000) >> 16) << 21);
         rx0_average++;
       } else {
         cal0_retry++;
@@ -505,10 +505,10 @@ void Iqk8812a::DoTxRxCalibration(uint8_t chnl_idx, BandType band) {
       if (!(RX1_fail || RX1_finish) && TX1_finish) {
         _device.rtw_write32(0xeb8, 0x06000000);
         RX_IQC_temp[rx1_average][2] = static_cast<int>(
-            (_device.rtw_read32(0xd40) & kMask07ff0000) << 21);
+            ((_device.rtw_read32(0xd40) & kMask07ff0000) >> 16) << 21);
         _device.rtw_write32(0xeb8, 0x08000000);
         RX_IQC_temp[rx1_average][3] = static_cast<int>(
-            (_device.rtw_read32(0xd40) & kMask07ff0000) << 21);
+            ((_device.rtw_read32(0xd40) & kMask07ff0000) >> 16) << 21);
         rx1_average++;
       } else {
         cal1_retry++;

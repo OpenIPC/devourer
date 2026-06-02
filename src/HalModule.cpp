@@ -297,6 +297,16 @@ bool HalModule::rtl8812au_hal_init() {
    * the channel-set path + RtlJaguarDevice background thread. */
   _radioManagementModule->InitPwrTrack();
 
+  /* Arm I/Q calibration so the initial channel-set runs a full IQK
+   * (TX-tone + RX-tone, ~50-100 ms). Mirrors upstream where
+   * `phy_iq_calibrate_8812a` is triggered from the post-init
+   * channel-set callback. Without this, BB 0xc90 + IQK output
+   * registers stay at the BB-init seed instead of the calibrated
+   * IQ-imbalance correction. */
+  if (_eepromManager->version_id.ICType == CHIP_8812) {
+    _radioManagementModule->ArmIQKOnNextChannelSet();
+  }
+
   if (_eepromManager->version_id.RFType == RF_TYPE_1T1R) {
     PHY_BB8812_Config_1T();
   }

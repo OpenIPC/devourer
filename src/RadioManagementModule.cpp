@@ -49,7 +49,12 @@ RadioManagementModule::RadioManagementModule(
     RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
     Logger_t logger)
     : _device{device}, _eepromManager{eepromManager}, _logger{logger},
-      _pwrTrk{device, eepromManager, this, logger} {}
+      _pwrTrk{device, eepromManager, this, logger},
+      _iqk{device, eepromManager, this, logger} {}
+
+void RadioManagementModule::RunIQK() {
+  _iqk.Calibrate(_currentChannel, current_band_type, /*is_recovery=*/false);
+}
 
 uint32_t RadioManagementModule::phy_query_bb_reg_public(uint16_t regAddr,
                                                        uint32_t bitMask) {
@@ -311,6 +316,32 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     _logger->info("=== END DEVOURER_DUMP_CANARY ===");
   }
 
+  /* Trigger I/Q calibration if requested AND opt-in via env. The IQK
+   * port (Iqk8812a) closes the BB 0x8b0 canary divergence vs kernel
+   * but currently introduces a 5GHz TX regression on 8812AU — dev TX
+   * at ch36 stops reaching kernel receivers (full matrix at ch36 goes
+   * from 6500/6500 to 0/6500 on the affected cells). Root cause not
+   * yet isolated; suspected register that's not restored to the
+   * post-channel-set state after IQK completes. Default-off until
+   * the regression is resolved; the code path is kept available
+   * behind DEVOURER_ENABLE_IQK=1 for canary-parity and root-cause
+   * debugging.
+   *
+   * Set by `phy_SwBand8812` on band transitions and (post-init) on
+   * the very first channel-set. Optional override:
+   *   - DEVOURER_ENABLE_IQK=1: enable the IQK trigger surface
+   *   - DEVOURER_FORCE_IQK=1:  run IQK on every channel-set
+   *                            (implies _ENABLE_IQK; for canary work)
+   */
+  bool iqk_enabled = std::getenv("DEVOURER_ENABLE_IQK") ||
+                     std::getenv("DEVOURER_FORCE_IQK");
+  if (iqk_enabled &&
+      (_needIQK || std::getenv("DEVOURER_FORCE_IQK"))) {
+    if (_eepromManager->version_id.ICType == CHIP_8812) {
+      _iqk.Calibrate(_currentChannel, current_band_type,
+                     /*is_recovery=*/false);
+    }
+  }
   _needIQK = false;
 }
 
@@ -974,6 +1005,11 @@ bool RadioManagementModule::phy_SwBand8812(uint8_t channelToSW) {
 
   if (BandToSW != Band) {
     PHY_SwitchWirelessBand8812(BandToSW);
+    /* Band transition invalidates IQK results — RX LNA, RFE pinmux,
+     * BB-swing base all change. Mirror upstream where
+     * `PHY_SwitchWirelessBand8812` is followed by `phy_iq_calibrate_*`
+     * on the next watchdog tick. */
+    _needIQK = true;
   }
 
   return ret_value;

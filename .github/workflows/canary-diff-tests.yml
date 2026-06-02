@@ -1,0 +1,33 @@
+name: Canary diff unit tests
+
+on:
+  push:
+    branches: [ "master" ]
+    paths:
+      - 'tests/canary_diff.py'
+      - 'tests/test_canary_diff.py'
+      - '.github/workflows/canary-diff-tests.yml'
+  pull_request:
+    branches: [ "master" ]
+    paths:
+      - 'tests/canary_diff.py'
+      - 'tests/test_canary_diff.py'
+      - '.github/workflows/canary-diff-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Run canary_diff tests
+        run: python -m pytest tests/test_canary_diff.py -v

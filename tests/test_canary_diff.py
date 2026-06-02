@@ -101,6 +101,50 @@ def test_strict_disables_masking(tmp_path: Path) -> None:
     assert res.returncode == 1, res.stdout + res.stderr
 
 
+def test_dig_igi_byte0_masked(tmp_path: Path) -> None:
+    """BB 0xc50 bits 7:0 are the DIG IGI — kernel's phydm walks
+    them; devourer writes the floor once. Diffs in byte 0 must
+    be masked, but upper bytes still diff."""
+    kernel = wrap("BB 0xc50 = 0x69b80022")
+    devourer = wrap("BB 0xc50 = 0x69b8001c")  # only byte 0 differs
+    res = run_diff(kernel, devourer, tmp_path=tmp_path)
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_dig_igi_upper_bits_still_diffed(tmp_path: Path) -> None:
+    """BB 0xc50 bits 31:8 are static AGC config — a real divergence
+    there should still fail the diff."""
+    kernel = wrap("BB 0xc50 = 0x69b8001c")
+    devourer = wrap("BB 0xc50 = 0x69b8011c")  # bit 8 differs
+    res = run_diff(kernel, devourer, tmp_path=tmp_path)
+    assert res.returncode == 1, res.stdout + res.stderr
+
+
+def test_iqk_output_regs_masked(tmp_path: Path) -> None:
+    """IQK output coefficients vary run-to-run; the canonical
+    set (0x8b0, 0xc10/0xc14/0xc90/0xc94, path-B mirrors) is
+    masked entirely."""
+    body = "\n".join(
+        f"BB 0x{addr:x} = 0xAAAAAAAA" for addr in
+        (0x8b0, 0xc10, 0xc14, 0xc90, 0xc94, 0xe10, 0xe14, 0xe90, 0xe94)
+    )
+    body_alt = "\n".join(
+        f"BB 0x{addr:x} = 0x55555555" for addr in
+        (0x8b0, 0xc10, 0xc14, 0xc90, 0xc94, 0xe10, 0xe14, 0xe90, 0xe94)
+    )
+    res = run_diff(wrap(body), wrap(body_alt), tmp_path=tmp_path)
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_iqk_output_unmasked_under_strict(tmp_path: Path) -> None:
+    """--strict bypasses the IQK output mask; functional checks
+    that want bit-exact match (e.g. replay testing) can opt in."""
+    kernel = wrap("BB 0xc90 = 0xAAAAAAAA")
+    devourer = wrap("BB 0xc90 = 0x55555555")
+    res = run_diff(kernel, devourer, "--strict", tmp_path=tmp_path)
+    assert res.returncode == 1, res.stdout + res.stderr
+
+
 def test_5g_capture_state_artifact_masked(tmp_path: Path) -> None:
     """BB 0xc20 is CCK-only — never written at 5G by either side, but
     kernel iface (long-lived) retains a 2.4G value while devourer

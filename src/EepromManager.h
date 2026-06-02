@@ -38,6 +38,12 @@ public:
    * no factory-calibrated reference temperature to compute delta
    * against. */
   uint8_t GetEepromThermalMeter() const { return eeprom_thermal_meter; }
+  /* External PA presence flags from EFUSE — read by IQK to pick the
+   * right AFE setup table. `ExternalPA_2G` is exposed as a public
+   * field on the class; the 5G equivalent lives in the private
+   * section to maintain backwards compatibility with existing
+   * callers. */
+  uint8_t GetExternalPa5G() const { return external_pa_5g; }
 
   /* 8814AU only: read EFUSE and populate rfe_type, PA/LNA types, crystal cap,
    * etc. Must be called AFTER firmware download (pre-fwdl EFUSE access

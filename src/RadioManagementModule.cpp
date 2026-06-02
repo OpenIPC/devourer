@@ -49,7 +49,12 @@ RadioManagementModule::RadioManagementModule(
     RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
     Logger_t logger)
     : _device{device}, _eepromManager{eepromManager}, _logger{logger},
-      _pwrTrk{device, eepromManager, this, logger} {}
+      _pwrTrk{device, eepromManager, this, logger},
+      _iqk{device, eepromManager, this, logger} {}
+
+void RadioManagementModule::RunIQK() {
+  _iqk.Calibrate(_currentChannel, current_band_type, /*is_recovery=*/false);
+}
 
 uint32_t RadioManagementModule::phy_query_bb_reg_public(uint16_t regAddr,
                                                        uint32_t bitMask) {
@@ -311,6 +316,18 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     _logger->info("=== END DEVOURER_DUMP_CANARY ===");
   }
 
+  /* Trigger I/Q calibration. Set by `phy_SwBand8812` on band
+   * transitions and (post-init) on the very first channel-set via
+   * `HalModule::rtl8812au_hal_init` → `ArmIQKOnNextChannelSet`.
+   * Optional override: `DEVOURER_FORCE_IQK=1` runs IQK on every
+   * channel-set (used for canary-diff workflow against kernel). */
+  if ((_needIQK || std::getenv("DEVOURER_FORCE_IQK")) &&
+      !std::getenv("DEVOURER_DISABLE_IQK")) {
+    if (_eepromManager->version_id.ICType == CHIP_8812) {
+      _iqk.Calibrate(_currentChannel, current_band_type,
+                     /*is_recovery=*/false);
+    }
+  }
   _needIQK = false;
 }
 
@@ -974,6 +991,11 @@ bool RadioManagementModule::phy_SwBand8812(uint8_t channelToSW) {
 
   if (BandToSW != Band) {
     PHY_SwitchWirelessBand8812(BandToSW);
+    /* Band transition invalidates IQK results — RX LNA, RFE pinmux,
+     * BB-swing base all change. Mirror upstream where
+     * `PHY_SwitchWirelessBand8812` is followed by `phy_iq_calibrate_*`
+     * on the next watchdog tick. */
+    _needIQK = true;
   }
 
   return ret_value;

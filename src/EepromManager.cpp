@@ -834,17 +834,30 @@ uint8_t EepromManager::GetTxPowerIndexBase(uint8_t path, uint8_t rate,
 
 clamp_and_return:
   /* Layer 2: per-rate offset (port of upstream PHY_GetTxPowerByRate).
-   * VHT rates at 2.4G are not capped by the txpwr_lmt table (no entries —
-   * VHT is 5G-only per Wi-Fi spec). Kernel writes base+boost for those,
-   * so force by_rate=0 there to match. */
+   *
+   * Upstream's aircrack-ng/88XXau USB Makefile sets
+   * `CONFIG_TXPWR_BY_RATE_EN = n` (line 48) → `RegEnableTxPowerByRate =
+   * 0` → `phy_is_tx_power_by_rate_needed()` returns FALSE →
+   * `PHY_GetTxPowerByRate()` returns 0. So kernel never applies the
+   * per-rate offset on USB builds; all TX power = base + boost. The
+   * 5G TX-AGC canary at ch36/ch100 confirmed this: devourer's headroom-
+   * cap incidentally zeroed by_rate at 2.4G (base+boost > limit) but
+   * exposed the divergence at 5G where headroom is positive.
+   *
+   * Default-off to match upstream's USB-build behaviour byte-for-byte.
+   * `DEVOURER_ENABLE_TXPWR_BY_RATE=1` re-enables the layer for
+   * deployments that want the PG-table offsets (mirrors upstream
+   * CONFIG_TXPWR_BY_RATE_EN=y). */
   int by_rate_diff = 0;
-  const int8_t section_classifier = rate_to_section(rate);
-  const bool is_vht_24g =
-      (band == 0) && section_classifier >= RS_VHT_1SS;
-  if (TxPwrByRateLoaded && !is_vht_24g) {
-    int8_t rate_idx = rate_to_idx(rate);
-    if (rate_idx >= 0)
-      by_rate_diff = TxPwrByRateOffset[band][path][rate_idx];
+  if (std::getenv("DEVOURER_ENABLE_TXPWR_BY_RATE")) {
+    const int8_t section_classifier = rate_to_section(rate);
+    const bool is_vht_24g =
+        (band == 0) && section_classifier >= RS_VHT_1SS;
+    if (TxPwrByRateLoaded && !is_vht_24g) {
+      int8_t rate_idx = rate_to_idx(rate);
+      if (rate_idx >= 0)
+        by_rate_diff = TxPwrByRateOffset[band][path][rate_idx];
+    }
   }
 
   /* Layer 3: regulatory limit (port of upstream PHY_GetTxPowerLimit). */
@@ -889,7 +902,16 @@ clamp_and_return:
   int headroom = limit - txPower - boost;
   if (headroom < 0) headroom = 0;
   if (by_rate_diff > headroom) by_rate_diff = headroom;
+  int base_before_apply = txPower;
   txPower += by_rate_diff + boost;
+  if (std::getenv("DEVOURER_LOG_TXPWR")) {
+    _logger->info(
+        "txpwr: ch={} path={} rate=0x{:02x} ntx={} bw={} -> "
+        "base={} by_rate(capped)={} limit={} boost={} headroom={} final={}",
+        unsigned(channel), unsigned(path), unsigned(rate), unsigned(ntx_idx),
+        unsigned(bandwidth), base_before_apply, by_rate_diff, limit, boost,
+        headroom, txPower);
+  }
 
   if (txPower < 0) txPower = 0;
   if (txPower > 63) txPower = 63; /* txgi_max for 8812/8821/8814 */

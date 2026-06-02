@@ -67,7 +67,7 @@ HalModule::HalModule(
       _eepromManager{eepromManager}, _logger{logger} {}
 
 bool HalModule::rtw_hal_init(SelectedChannel selectedChannel) {
-  auto status = rtl8812au_hal_init();
+  auto status = rtl8812au_hal_init(selectedChannel.Channel);
 
   if (status) {
     _radioManagementModule->init_hw_mlme_ext(selectedChannel);
@@ -79,7 +79,7 @@ bool HalModule::rtw_hal_init(SelectedChannel selectedChannel) {
   return status;
 }
 
-bool HalModule::rtl8812au_hal_init() {
+bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   // Check if MAC has already power on. by tynli. 2011.05.27.
   auto value8 = _device.rtw_read8(REG_SYS_CLKR + 1);
   auto regCr = _device.rtw_read8(REG_CR);
@@ -319,14 +319,23 @@ bool HalModule::rtl8812au_hal_init() {
     _device.phy_set_bb_reg(rTxPath_Jaguar, bMaskLWord, 0x1111);
   }
 
-  if (registry_priv::channel <= 14) {
+  /* Init directly at the user's selected channel so we only run the
+   * per-rate TX-power write loop once. The redundant prior pattern
+   * (init at registry_priv::channel = 36, then re-channel-set to the
+   * user's channel from `init_hw_mlme_ext`) wedged 8821AU at ch100
+   * mid-second-channel-set TX-power loop — the chip stopped ACK'ing
+   * USB control transfers after 2 BB writes, leaving the demo
+   * deadlocked on libusb_control_transfer until SIGKILL. See kaeru
+   * cite "8821AU ch100 wedge — confirmed second-channel-set is the
+   * trigger, not band-switch 2026-06-02". */
+  if (init_channel <= 14) {
     _radioManagementModule->PHY_SwitchWirelessBand8812(BandType::BAND_ON_2_4G);
   } else {
     _radioManagementModule->PHY_SwitchWirelessBand8812(BandType::BAND_ON_5G);
   }
 
   _radioManagementModule->rtw_hal_set_chnl_bw(
-      registry_priv::channel, ChannelWidth_t::CHANNEL_WIDTH_20,
+      init_channel, ChannelWidth_t::CHANNEL_WIDTH_20,
       HAL_PRIME_CHNL_OFFSET_DONT_CARE, HAL_PRIME_CHNL_OFFSET_DONT_CARE);
 
   // HW SEQ CTRL

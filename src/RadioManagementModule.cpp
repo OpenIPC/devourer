@@ -906,6 +906,29 @@ uint32_t RadioManagementModule::phy_get_tx_bb_swing_8812a(BandType Band,
 }
 
 void RadioManagementModule::init_hw_mlme_ext(SelectedChannel pmlmeext) {
+  /* If `HalModule::rtl8812au_hal_init` already programmed the same
+   * (channel, bw, offset) AND the chip is an 8821AU, skip the
+   * reset-and-redo. The second channel-set wedges 8821AU at ch100
+   * mid-TX-power loop (chip stops ACK'ing USB control transfers
+   * after 2 BB writes — see kaeru cite "8821AU ch100 wedge —
+   * confirmed second-channel-set is the trigger, not band-switch
+   * 2026-06-02"). Other chips (8812AU, 8814AU) tolerate the second
+   * pass; some 8814AU init steps appear to depend on it (gating the
+   * skip caused 8814 ch6 to lose its RX loop entry).
+   *
+   * Falls through to the historical reset+redo path for everything
+   * else. */
+  bool same_target =
+      (_currentChannel == pmlmeext.Channel) &&
+      (_currentChannelBw == pmlmeext.ChannelWidth) &&
+      (_cur40MhzPrimeSc == pmlmeext.ChannelOffset) &&
+      (current_band_type != BandType::BAND_MAX);
+  bool is_8821 = _eepromManager->version_id.ICType == CHIP_8821;
+  if (same_target && is_8821) {
+    Set_HW_VAR_ENABLE_RX_BAR(true);
+    return;
+  }
+
   /* Modify to make sure first time change channel(band) would be done properly
    */
   _currentChannel = 0;

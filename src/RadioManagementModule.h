@@ -208,7 +208,12 @@ private:
   void phy_RFSerialWrite(RfPath eRFPath, uint32_t Offset, uint32_t Data);
   void phy_SetRFEReg8812(BandType Band);
   void phy_SetRFEReg8821(BandType Band);
+  void phy_SetRFEReg8814A(BandType Band);
+  void PHY_SwitchWirelessBand8814A(BandType Band);
+  void phy_SetBwRegAdc_8814A(BandType Band, ChannelWidth_t bw);
+  void phy_SetBwRegAgc_8814A(BandType Band, ChannelWidth_t bw);
   void phy_SetBBSwingByBand_8812A(BandType Band);
+  void phy_SetBBSwingByBand_8814A(BandType Band);
   uint32_t phy_get_tx_bb_swing_8812a(BandType Band, RfPath RFPath);
   void Set_HW_VAR_ENABLE_RX_BAR(bool val);
   void phy_SwChnl8812();

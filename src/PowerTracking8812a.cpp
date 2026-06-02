@@ -81,6 +81,18 @@ void PowerTracking8812a::ClearState() {
     _deltaPowerIndexLast[p] = 0;
   }
   _thermalValue = _eepromManager->GetEepromThermalMeter();
+
+  /* Re-seed default_ofdm_index from the current 0xc1c[31:21] value.
+   * `phy_SetBBSwingByBand_8812A` calls us right after writing the
+   * band-specific BB-swing base (0x200 at 2.4G, 0x16A at 5G for
+   * dongles with EFUSE swing-down). Without this refresh, the
+   * Init()-time snapshot (taken before the band switch fires) is
+   * stale and pwrtrk computes the wrong final swing index relative
+   * to the actual base — surfaced as ~6 step over-compute on 5G
+   * TX-AGC. */
+  uint8_t swing_idx = LookupSwingIndexFromBb();
+  _defaultOfdmIndex =
+      (swing_idx < kTxScaleTableSize) ? swing_idx : uint8_t{24};
 }
 
 void PowerTracking8812a::GetTrackingTable(BandType band, uint8_t channel,

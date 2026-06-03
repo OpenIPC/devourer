@@ -157,6 +157,31 @@ def test_5g_capture_state_artifact_masked(tmp_path: Path) -> None:
     assert "0xc20" in res.stdout
 
 
+def test_mac_opmode_artifacts_masked(tmp_path: Path) -> None:
+    """MAC 0x100 / 0x420 / 0x4c8 / 0x522 / 0x610 / 0x614 are kernel-vs-
+    devourer monitor-mode structural differences. Kernel programs the
+    iface MAC, TX queue control, etc; devourer monitor-mode doesn't.
+    These should be masked entirely so the diff doesn't fail on them."""
+    body_kernel = "\n".join([
+        "MAC 0x100 = 0x000006ff",
+        "MAC 0x420 = 0x03311f80",
+        "MAC 0x4c8 = 0x363608ff",
+        "MAC 0x522 = 0x4f000000",
+        "MAC 0x610 = 0xc7b00d20",
+        "MAC 0x614 = 0x0000b3e4",
+    ])
+    body_devourer = "\n".join([
+        "MAC 0x100 = 0x000000c5",
+        "MAC 0x420 = 0x00310f00",
+        "MAC 0x4c8 = 0x1f1f08ff",
+        "MAC 0x522 = 0x470f0000",
+        "MAC 0x610 = 0x00000000",
+        "MAC 0x614 = 0x00000000",
+    ])
+    res = run_diff(wrap(body_kernel), wrap(body_devourer), tmp_path=tmp_path)
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
 def test_5g_capture_state_artifact_8814_path_c_d_masked(tmp_path: Path) -> None:
     """8814 path-C/D CCK TX-AGC mirrors (0x1820 / 0x1a20) — same
     asymmetry as path-A/B, should also be masked at 5G."""

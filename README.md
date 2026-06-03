@@ -4,12 +4,12 @@ The Realtek 11ac driver that simply devours its competitors.
 
 Devourer is a userspace re-implementation of Realtek's RTL88xxAU Wi-Fi
 driver (Jaguar family: RTL8812AU and RTL8821AU shipping on every band,
-RTL8811AU supported via the 8812 code path, RTL8814AU RX-only),
-speaking to the chip directly through libusb. No kernel
-module, no `rtl8812au` DKMS tree — just a C++20 static library
-(`WiFiDriver`) plus two demo executables for RX and TX. It is the
-OpenIPC project's driver of choice for long-range video links built on
-top of cheap Realtek 11ac USB radios.
+RTL8811AU supported via the 8812 code path, RTL8814AU with band-
+specific gaps — see table below), speaking to the chip directly
+through libusb. No kernel module, no `rtl8812au` DKMS tree — just a
+C++20 static library (`WiFiDriver`) plus two demo executables for RX
+and TX. It is the OpenIPC project's driver of choice for long-range
+video links built on top of cheap Realtek 11ac USB radios.
 
 ## Hardware landscape
 
@@ -25,7 +25,7 @@ layered on top.
 | -------------- | --------------- | ------------- | ---------------------- | ---------------------- | ------------------------------------------- |
 | **RTL8812AU**  | 2T2R            | TX + RX       | TX + RX                | TX + RX                | VID/PID `0bda:8812`; reference part — works on every channel/band combo |
 | **RTL8811AU**  | 1T1R            | TX + RX       | TX + RX                | TX + RX                | 1T1R cut of 8812 silicon; rides 8812 code path with `RFType=RF_TYPE_1T1R` selected from `REG_SYS_CFG` bit 27. Status mirrored from 8812 — not separately exercised |
-| **RTL8814AU**  | 4T4R, 3-SS max  | RX only       | RX only                | RX only                | VID/PID `0bda:8813`; 2-SS effective on USB-2. TX submits succeed on the bulk pipe but nothing reaches the air at any band |
+| **RTL8814AU**  | 4T4R, 3-SS max  | RX only       | RX only                | TX + RX                | VID/PID `0bda:8813`; 2-SS effective on USB-2. 5 GHz UNII-2/3 TX produces on-air frames after the 8814A-specific band-switch + channel-set chain. 2.4 GHz TX still doesn't reach receivers |
 | **RTL8821AU**  | 1T1R AC + BT    | TX + RX       | TX + RX                | TX + RX | OEM-rebadged as TP-Link Archer T2U Plus (`2357:0120`) etc. UNII-2/3 TX has cross-receiver asymmetry against 8812AU peers |
 
 Successor families (`Jaguar2` / `Jaguar+` — 8812BU, 8822BU/BE, etc., and
@@ -105,6 +105,24 @@ Common to both demos:
   channel switch. Skipped by default in 8814 monitor mode: the loop issues
   ~300 vendor control transfers and the resulting per-rate indices are
   unused for RX-only operation.
+- `DEVOURER_SKIP_TXPWR=1` — skip the per-rate TX-power loop entirely on
+  every chip. Useful for fast iteration during BB/RF debugging when the
+  per-rate indices aren't relevant to what you're measuring.
+- `DEVOURER_FORCE_IQK=1` — run phydm I/Q calibration on every channel-set,
+  not just band transitions. For 8814, IQK is otherwise off by default —
+  the kernel doesn't run it on `iw set channel` either, and devourer
+  matches that behaviour.
+- `DEVOURER_DISABLE_IQK=1` — never run IQK, even when armed by a band
+  transition. Diagnostic — IQK-output BB regs stay at their BB-init seeds.
+- `DEVOURER_PHYDM_WATCHDOG=1` — start the periodic phydm DM watchdog
+  thread (FA-counter statistics + DIG IGI walk every ~2 s). Off by
+  default because the watchdog's BB reads/writes share libusb's
+  transfer queue with the TX bulk path and measurably drop sustained
+  TX throughput on Jaguar chips. Use for canary-diff workflows and
+  RX-only DIG tuning.
+- `DEVOURER_DUMP_CANARY=1` — emit a canonical post-channel-set dump of
+  BB/MAC/RF anchor registers. Feeds the `tests/canary_diff.py`
+  cross-validation tool against `tools/canary_kernel_dump.sh` output.
 - `DEVOURER_USB_QUIET=1` — downgrade libusb log level from DEBUG to
   WARNING (DEBUG produces ~7 MB per 15 s and can fill `/tmp` mid-capture).
 
@@ -180,7 +198,9 @@ src/      Driver implementation
           FirmwareManager        chip-specific firmware download
           PhyTableLoader         applies chip-cut-conditional BB/AGC tables
           PowerTracking8812a     phydm thermal-meter TX BB-swing compensation
-          Iqk8812a               phydm I/Q calibration
+          Iqk8812a               phydm I/Q calibration for 8812 / 8821
+          Iqk8814a               phydm I/Q calibration for 8814 (4-path)
+          PhydmWatchdog          opt-in periodic DM thread (FA stats + DIG)
           RtlUsbAdapter          libusb wrapper (vendor + bulk transfers)
           FrameParser            RX parsing, TX descriptor layout
           Radiotap.c             radiotap header iterator

@@ -6,6 +6,7 @@
 
 #include "EepromManager.h"
 #include "Iqk8812a.h"
+#include "Iqk8814a.h"
 #include "PowerTracking8812a.h"
 #include "RfPath.h"
 #include "RtlUsbAdapter.h"
@@ -154,6 +155,7 @@ class RadioManagementModule {
   uint8_t power = 16;
   PowerTracking8812a _pwrTrk;
   Iqk8812a _iqk;
+  Iqk8814a _iqk8814;
 
 public:
   RadioManagementModule(RtlUsbAdapter device,
@@ -208,13 +210,20 @@ private:
   void phy_RFSerialWrite(RfPath eRFPath, uint32_t Offset, uint32_t Data);
   void phy_SetRFEReg8812(BandType Band);
   void phy_SetRFEReg8821(BandType Band);
+  void phy_SetRFEReg8814A(BandType Band);
+  void PHY_SwitchWirelessBand8814A(BandType Band);
+  void phy_SetBwRegAdc_8814A(BandType Band, ChannelWidth_t bw);
+  void phy_SetBwRegAgc_8814A(BandType Band, ChannelWidth_t bw);
   void phy_SetBBSwingByBand_8812A(BandType Band);
+  void phy_SetBBSwingByBand_8814A(BandType Band);
   uint32_t phy_get_tx_bb_swing_8812a(BandType Band, RfPath RFPath);
   void Set_HW_VAR_ENABLE_RX_BAR(bool val);
   void phy_SwChnl8812();
+  void phy_SwChnl8814A();
   bool phy_SwBand8812(uint8_t channelToSW);
   void phy_FixSpur_8812A(ChannelWidth_t Bandwidth, uint8_t Channel);
   void phy_PostSetBwMode8812();
+  void phy_PostSetBwMode8814A();
   void phy_SetRegBW_8812(ChannelWidth_t CurrentBW);
   void PHY_RF6052SetBandwidth8812(ChannelWidth_t Bandwidth);
   uint8_t phy_GetSecondaryChnl_8812();

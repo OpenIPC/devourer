@@ -50,7 +50,8 @@ RadioManagementModule::RadioManagementModule(
     Logger_t logger)
     : _device{device}, _eepromManager{eepromManager}, _logger{logger},
       _pwrTrk{device, eepromManager, this, logger},
-      _iqk{device, eepromManager, this, logger} {}
+      _iqk{device, eepromManager, this, logger},
+      _iqk8814{device, eepromManager, this, logger} {}
 
 void RadioManagementModule::RunIQK() {
   _iqk.Calibrate(_currentChannel, current_band_type, /*is_recovery=*/false);
@@ -300,8 +301,14 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
    * is thermal-meter-driven so small (~1-step) divergence is expected
    * if devourer and kernel sampled the chip at non-identical
    * temperatures. Capture both dumps within a few seconds for clean
-   * parity. */
-  if (std::getenv("DEVOURER_DUMP_CANARY")) {
+   * parity.
+   *
+   * The IQK trigger BELOW runs phydm I/Q calibration which touches
+   * RF[*][0x0] / RF[*][0x8f] + BB IQK-output regs (0xc90 / 0xe90 /
+   * 0xcc4 / etc). We capture the canary AFTER IQK so it reflects the
+   * post-calibration state — matching kernel semantics where IQK is
+   * part of the channel-set callback. */
+  const auto dump_canary = [this]() {
     /* Per-chip canary set. Each Jaguar variant has a different active
      * RF/path footprint:
      *   - 8821AU is 1T1R AC: only path-A exists physically. Path-B BB-AGC
@@ -372,7 +379,7 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
         _logger->info("RF[B] 0x{:02x} = 0x{:05X}", a,
                       phy_query_rf_reg(RfPath::RF_PATH_B, a, 0xfffffu));
     _logger->info("=== END DEVOURER_DUMP_CANARY ===");
-  }
+  };
 
   /* Trigger I/Q calibration. Set by `phy_SwBand8812` on band
    * transitions and (post-init) on the very first channel-set via
@@ -384,9 +391,19 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     if (_eepromManager->version_id.ICType == CHIP_8812) {
       _iqk.Calibrate(_currentChannel, current_band_type,
                      /*is_recovery=*/false);
+    } else if (_eepromManager->version_id.ICType == CHIP_8814A) {
+      _iqk8814.Calibrate(_currentChannel, current_band_type,
+                         /*is_recovery=*/false);
     }
   }
   _needIQK = false;
+
+  /* Canary dump runs LAST so it captures the post-IQK / post-pwrtrk
+   * state — same observation order as kernel iface reads via
+   * `iwpriv read 4,<addr>`. */
+  if (std::getenv("DEVOURER_DUMP_CANARY")) {
+    dump_canary();
+  }
 }
 
 void RadioManagementModule::phy_set_rf_reg(RfPath eRFPath, uint16_t RegAddr,
@@ -817,6 +834,197 @@ void RadioManagementModule::phy_SetRFEReg8812(BandType Band) {
   }
 }
 
+/* Port of upstream `PHY_SetRFEReg8814A` band-switch path (bInit=false)
+ * from `aircrack-ng/rtl8812au/hal/rtl8814a/rtl8814a_phycfg.c:1567`.
+ * 8814AU has its own RFE pinmux for all four paths (A/B/C/D) at
+ * 0xCB0 / 0xEB0 / 0x18B4 / 0x1AB4 plus the 0x1ABC[27:20] tail;
+ * the 8812 RFE function never touches the path-C/D regs so running
+ * it on 8814 leaves the LNA in SW-managed mode (visible as RF[A] 0x00
+ * bit 15 = 1 in canary diff) and the path-C/D antenna mux unprogrammed.
+ *
+ * rfe_type comes from EFUSE. Cases 0/1/2 are the only ones upstream
+ * 8814A handles; other rfe_type values fall through to case 0/default. */
+void RadioManagementModule::phy_SetRFEReg8814A(BandType Band) {
+  const auto rfe_type = _eepromManager->rfe_type;
+  if (Band == BandType::BAND_ON_2_4G) {
+    switch (rfe_type) {
+    case 2:
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, bMaskDWord, 0x72707270);
+      _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar, bMaskDWord, 0x72707270);
+      _device.phy_set_bb_reg(0x18B4, bMaskDWord, 0x72707270); /* rC_RFE_Pinmux */
+      _device.phy_set_bb_reg(0x1AB4, bMaskDWord, 0x77707770); /* rD_RFE_Pinmux */
+      _device.phy_set_bb_reg(0x1ABC, 0x0FF00000, 0x72);        /* [27:20] */
+      break;
+    case 1:
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, bMaskDWord, 0x77777777);
+      _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar, bMaskDWord, 0x77777777);
+      _device.phy_set_bb_reg(0x18B4, bMaskDWord, 0x77777777);
+      _device.phy_set_bb_reg(0x1AB4, bMaskDWord, 0x77777777);
+      _device.phy_set_bb_reg(0x1ABC, 0x0FF00000, 0x77);
+      break;
+    case 0:
+    default:
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, bMaskDWord, 0x77777777);
+      _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar, bMaskDWord, 0x77777777);
+      _device.phy_set_bb_reg(0x18B4, bMaskDWord, 0x77777777);
+      /* Upstream case-0/default skips rD_RFE_Pinmux entirely. */
+      _device.phy_set_bb_reg(0x1ABC, 0x0FF00000, 0x77);
+      break;
+    }
+  } else {
+    switch (rfe_type) {
+    case 2:
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, bMaskDWord, 0x33173717);
+      _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar, bMaskDWord, 0x33173717);
+      _device.phy_set_bb_reg(0x18B4, bMaskDWord, 0x33173717);
+      _device.phy_set_bb_reg(0x1AB4, bMaskDWord, 0x77177717);
+      _device.phy_set_bb_reg(0x1ABC, 0x0FF00000, 0x37);
+      break;
+    case 1:
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, bMaskDWord, 0x33173317);
+      _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar, bMaskDWord, 0x33173317);
+      _device.phy_set_bb_reg(0x18B4, bMaskDWord, 0x33173317);
+      _device.phy_set_bb_reg(0x1AB4, bMaskDWord, 0x77177717);
+      _device.phy_set_bb_reg(0x1ABC, 0x0FF00000, 0x33);
+      break;
+    case 0:
+    default:
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, bMaskDWord, 0x54775477);
+      _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar, bMaskDWord, 0x54775477);
+      _device.phy_set_bb_reg(0x18B4, bMaskDWord, 0x54775477);
+      _device.phy_set_bb_reg(0x1AB4, bMaskDWord, 0x54775477);
+      _device.phy_set_bb_reg(0x1ABC, 0x0FF00000, 0x54);
+      break;
+    }
+  }
+}
+
+/* Port of upstream `phy_SetBwRegAdc_8814A`
+ * (rtl8814a_phycfg.c:1454). Programs rRFMOD_Jaguar (0x8AC) bits [1:0]
+ * per bandwidth; both bands write the same value here. */
+void RadioManagementModule::phy_SetBwRegAdc_8814A(BandType Band,
+                                                  ChannelWidth_t bw) {
+  (void)Band;
+  uint32_t val;
+  switch (bw) {
+  case ChannelWidth_t::CHANNEL_WIDTH_20:
+    val = 0x0;
+    break;
+  case ChannelWidth_t::CHANNEL_WIDTH_40:
+    val = 0x1;
+    break;
+  case ChannelWidth_t::CHANNEL_WIDTH_80:
+    val = 0x2;
+    break;
+  default:
+    _logger->error("phy_SetBwRegAdc_8814A: unknown bw {}",
+                   static_cast<int>(bw));
+    return;
+  }
+  _device.phy_set_bb_reg(rRFMOD_Jaguar, BIT1 | BIT0, val);
+}
+
+/* Port of upstream `phy_SetBwRegAgc_8814A`
+ * (rtl8814a_phycfg.c:1496). 0x82C[15:12] AGC value: 20MHz=6, 80MHz=3,
+ * 40MHz=7 (2.4G) or 8 (5G). */
+void RadioManagementModule::phy_SetBwRegAgc_8814A(BandType Band,
+                                                  ChannelWidth_t bw) {
+  uint32_t agc;
+  switch (bw) {
+  case ChannelWidth_t::CHANNEL_WIDTH_20:
+    agc = 6;
+    break;
+  case ChannelWidth_t::CHANNEL_WIDTH_40:
+    agc = (Band == BandType::BAND_ON_5G) ? 8 : 7;
+    break;
+  case ChannelWidth_t::CHANNEL_WIDTH_80:
+    agc = 3;
+    break;
+  default:
+    _logger->error("phy_SetBwRegAgc_8814A: unknown bw {}",
+                   static_cast<int>(bw));
+    return;
+  }
+  _device.phy_set_bb_reg(rAGC_table_Jaguar, 0xf000, agc);
+}
+
+/* Port of upstream `phy_SetBBSwingByBand_8814A` (rtl8814a_phycfg.c:1652).
+ * Writes TX scale bits 31:21 for all four paths. Reuses the existing
+ * `phy_get_tx_bb_swing_8812a` (extended to handle path C/D bit
+ * extraction from the EFUSE swing byte). 0x181C / 0x1A1C are the
+ * path-C/D TX scale registers per `hal/Hal8814PhyReg.h`. */
+void RadioManagementModule::phy_SetBBSwingByBand_8814A(BandType Band) {
+  _device.phy_set_bb_reg(
+      rA_TxScale_Jaguar, 0xFFE00000,
+      phy_get_tx_bb_swing_8812a(Band, RfPath::RF_PATH_A));
+  _device.phy_set_bb_reg(
+      rB_TxScale_Jaguar, 0xFFE00000,
+      phy_get_tx_bb_swing_8812a(Band, RfPath::RF_PATH_B));
+  _device.phy_set_bb_reg(
+      0x181c, 0xFFE00000,
+      phy_get_tx_bb_swing_8812a(Band, RfPath::RF_PATH_C));
+  _device.phy_set_bb_reg(
+      0x1a1c, 0xFFE00000,
+      phy_get_tx_bb_swing_8812a(Band, RfPath::RF_PATH_D));
+}
+
+/* Port of upstream `PHY_SwitchWirelessBand8814A`
+ * (rtl8814a_phycfg.c:1688). 8814 has its own band-switch sequence,
+ * not a superset of the 8812 path. Running the 8812 band-switch on
+ * 8814 leaves path C/D RFE unprogrammed and the LNA in SW-managed
+ * mode (RF[A] 0x00 bit 15 = 1 at 5G in canary diff); the AGC table
+ * register and per-band rTxPath / rCCK_RX values also differ. The
+ * CCK+OFDM clock-gate cycle around the switch (`REG_SYS_CFG3_8814A`
+ * bit 16) is unique to 8814; upstream gates the chip's BB clocks
+ * off for the switch then re-enables. */
+void RadioManagementModule::PHY_SwitchWirelessBand8814A(BandType Band) {
+  /* `REG_SYS_CFG3_8814A = 0x1000` per `hal/rtl8814a_spec.h`; bit 16 of
+   * the dword lives in the +2 byte. */
+  constexpr uint16_t kRegSysCfg38814AHi = 0x1002;
+  constexpr uint16_t kRegCckCheck8814A  = 0x0454;
+
+  _logger->info("[{}] {}", __func__,
+                Band == BandType::BAND_ON_2_4G ? "2.4G" : "5G");
+
+  current_band_type = Band;
+
+  /* Disable BB CCK+OFDM clocks for the switch. */
+  uint8_t sys_cfg3 = _device.rtw_read8(kRegSysCfg38814AHi);
+  _device.rtw_write8(kRegSysCfg38814AHi, (uint8_t)(sys_cfg3 & ~BIT0));
+
+  if (Band == BandType::BAND_ON_2_4G) {
+    /* 8814 AGC table select lives at 0x958[4:0]
+     * (`rAGC_table_Jaguar2` in `hal/Hal8814PhyReg.h`), NOT 0x82C[1:0]
+     * (`rAGC_table_Jaguar`) — different register and different mask
+     * from the 8812 path. */
+    _device.phy_set_bb_reg(0x958, 0x1F, 0);
+    phy_SetRFEReg8814A(Band);
+    _device.phy_set_bb_reg(rTxPath_Jaguar, 0xf0, 0x2);    /* 0x80C[7:4] */
+    _device.phy_set_bb_reg(rCCK_RX_Jaguar, 0x0f000000, 0x5);
+    _device.phy_set_bb_reg(rOFDMCCKEN_Jaguar,
+                           bOFDMEN_Jaguar | bCCKEN_Jaguar, 0x3);
+    _device.rtw_write8(kRegCckCheck8814A, 0x0);
+    _device.phy_set_bb_reg(0xa80, BIT18, 0x0);            /* CCK Tx disable */
+  } else {
+    _device.rtw_write8(kRegCckCheck8814A, 0x80);
+    _device.phy_set_bb_reg(0xa80, BIT18, 0x1);            /* CCK Tx enable */
+    /* AGC table select postponed to channel switch per upstream comment. */
+    phy_SetRFEReg8814A(Band);
+    _device.phy_set_bb_reg(rTxPath_Jaguar, 0xf0, 0x0);
+    _device.phy_set_bb_reg(rCCK_RX_Jaguar, 0x0f000000, 0xF);
+    _device.phy_set_bb_reg(rOFDMCCKEN_Jaguar,
+                           bOFDMEN_Jaguar | bCCKEN_Jaguar, 0x02);
+  }
+
+  phy_SetBBSwingByBand_8814A(Band);
+  phy_SetBwRegAdc_8814A(Band, _currentChannelBw);
+  phy_SetBwRegAgc_8814A(Band, _currentChannelBw);
+
+  /* Re-enable BB CCK+OFDM clocks. */
+  sys_cfg3 = _device.rtw_read8(kRegSysCfg38814AHi);
+  _device.rtw_write8(kRegSysCfg38814AHi, (uint8_t)(sys_cfg3 | BIT0));
+}
+
 void RadioManagementModule::phy_SetBBSwingByBand_8812A(BandType Band) {
   _device.phy_set_bb_reg(
       rA_TxScale_Jaguar, 0xFFE00000,
@@ -921,6 +1129,10 @@ uint32_t RadioManagementModule::phy_get_tx_bb_swing_8812a(BandType Band,
       onePathSwing = (uint8_t)((swing & 0x3) >> 0); /* 0xC6/C7[1:0] */
     } else if (RFPath == RfPath::RF_PATH_B) {
       onePathSwing = (uint8_t)((swing & 0xC) >> 2); /* 0xC6/C7[3:2] */
+    } else if (RFPath == RfPath::RF_PATH_C) {
+      onePathSwing = (uint8_t)((swing & 0x30) >> 4); /* 0xC6/C7[5:4] — 8814 */
+    } else if (RFPath == RfPath::RF_PATH_D) {
+      onePathSwing = (uint8_t)((swing & 0xC0) >> 6); /* 0xC6/C7[7:6] — 8814 */
     }
 
     if (onePathSwing == 0x0) {
@@ -995,6 +1207,16 @@ void RadioManagementModule::Set_HW_VAR_ENABLE_RX_BAR(bool val) {
 }
 
 void RadioManagementModule::phy_SwChnl8812() {
+  /* 8814 has its own channel-set: different fc_area boundaries, RF_MOD_AG
+   * channel ranges, a 5G AGC-table sub-select at 0x958[4:0], 2.4G CCK
+   * TX DFIR writes, and the combined channel+mod RF write pattern. The
+   * 8812 path's `phy_FixSpur_8812A` workaround is also 8812-specific
+   * (cut-C ADC FIFO clock at ch11) and shouldn't run on 8814. */
+  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+    phy_SwChnl8814A();
+    return;
+  }
+
   u8 channelToSW = _currentChannel;
 
   if (phy_SwBand8812(channelToSW) == false) {
@@ -1056,7 +1278,16 @@ bool RadioManagementModule::phy_SwBand8812(uint8_t channelToSW) {
   BandType Band;
   BandType BandToSW;
 
-  u1Btmp = _device.rtw_read8(REG_CCK_CHECK_8812);
+  /* 8814AU uses REG_CCK_CHECK_8814A (0x0454); 8812/8821 use
+   * REG_CCK_CHECK_8812 (typically 0x4CA). Reading the wrong register
+   * yields a bogus "current band" and triggers band-switch when it
+   * shouldn't (or skips it when it should). */
+  constexpr uint16_t kRegCckCheck8814A = 0x0454;
+  const bool is_8814 =
+      _eepromManager->version_id.ICType == CHIP_8814A;
+  const uint16_t cck_check_reg =
+      is_8814 ? kRegCckCheck8814A : REG_CCK_CHECK_8812;
+  u1Btmp = _device.rtw_read8(cck_check_reg);
   if ((u1Btmp & BIT7) != 0) {
     Band = BandType::BAND_ON_5G;
   } else {
@@ -1071,7 +1302,17 @@ bool RadioManagementModule::phy_SwBand8812(uint8_t channelToSW) {
   }
 
   if (BandToSW != Band) {
-    PHY_SwitchWirelessBand8812(BandToSW);
+    /* Per-chip band-switch. 8814 has a completely separate sequence
+     * (path-C/D RFE pinmux, 8814 AGC table register, CCK clock-gate
+     * cycle, different rTxPath/rCCK_RX values) — see
+     * `PHY_SwitchWirelessBand8814A`. 8812 and 8821 share the
+     * `PHY_SwitchWirelessBand8812` path (with `is_8821` branches
+     * inside for the 8821-specific RFE / AGC writes). */
+    if (_eepromManager->version_id.ICType == CHIP_8814A) {
+      PHY_SwitchWirelessBand8814A(BandToSW);
+    } else {
+      PHY_SwitchWirelessBand8812(BandToSW);
+    }
     /* Band transition invalidates IQK results — RX LNA, RFE pinmux,
      * BB-swing base all change. Mirror upstream where
      * `PHY_SwitchWirelessBand8812` is followed by `phy_iq_calibrate_*`
@@ -1082,8 +1323,104 @@ bool RadioManagementModule::phy_SwBand8812(uint8_t channelToSW) {
   return ret_value;
 }
 
+/* Port of upstream `phy_SwChnl8814A` (rtl8814a_phycfg.c:2448). The 8814
+ * channel-set differs from the 8812 path on several fronts:
+ *   - fc_area boundaries: 8814 splits 50-64 / 100-116 / 118+; 8812 uses
+ *     50-80 / 82-116 + an extra 15-35 case.
+ *   - RF_MOD_AG channel ranges: 8814 uses 36-64 / 100-140 / 140+ for
+ *     0x101/0x301/0x501; 8812 uses 36-80 / 82-140 / 140<.
+ *   - 5G AGC table sub-select: 8814 writes 0x958[4:0] = 1/2/3 per 5G
+ *     channel band (36-64 / 100-144 / >=149); 8812 has no equivalent.
+ *   - 2.4G CCK TX DFIR coefficients (channels 1-14): 8814 reprograms
+ *     rCCK0_TxFilter1/2 and rCCK0_DebugPort per channel range; 8812
+ *     doesn't.
+ *   - 8812-specific `phy_FixSpur_8812A` (cut-C ADC FIFO clock workaround
+ *     for ch11) is skipped entirely on 8814.
+ *
+ * Skips MP-mode-only paths (phy_ADC_CLK_8814A, phy_SpurCalibration_8814A,
+ * phy_ModifyInitialGain_8814A) — devourer only runs monitor mode.
+ * Skips the FW-offload `H2C_CHNL_SWITCH_OFFLOAD` path — devourer doesn't
+ * have the H2C mailbox plumbing. */
+void RadioManagementModule::phy_SwChnl8814A() {
+  const uint8_t channelToSW = _currentChannel;
+
+  if (phy_SwBand8812(channelToSW) == false) {
+    _logger->error("error Chnl {} !", channelToSW);
+  }
+
+  /* fc_area — 8814A boundaries. */
+  uint32_t fc_area;
+  if (36 <= channelToSW && channelToSW <= 48) {
+    fc_area = 0x494;
+  } else if (50 <= channelToSW && channelToSW <= 64) {
+    fc_area = 0x453;
+  } else if (100 <= channelToSW && channelToSW <= 116) {
+    fc_area = 0x452;
+  } else if (118 <= channelToSW) {
+    fc_area = 0x412;
+  } else {
+    fc_area = 0x96a;
+  }
+  _device.phy_set_bb_reg(rFc_area_Jaguar, 0x1ffe0000, fc_area);
+
+  for (uint8_t eRFPath = 0; eRFPath < _eepromManager->numTotalRfPath;
+       ++eRFPath) {
+    /* RF_MOD_AG — 8814A boundaries. */
+    uint32_t rf_val;
+    if (36 <= channelToSW && channelToSW <= 64) {
+      rf_val = 0x101;
+    } else if (100 <= channelToSW && channelToSW <= 140) {
+      rf_val = 0x301;
+    } else if (140 < channelToSW) {
+      rf_val = 0x501;
+    } else {
+      rf_val = 0x000;
+    }
+    /* Combined RF write: RF_MOD_AG bits + channel byte, single RMW.
+     * Mask BIT18|BIT17|BIT16|BIT9|BIT8 has lowest bit = BIT8, so
+     * phy_set_rf_reg's BitShift = 0 for the combined mask
+     * (BIT18|BIT17|BIT16|BIT9|BIT8|bMaskByte0 → lowest bit is BIT0).
+     * Pre-shift rf_val into bits 16:8, OR with channel byte. */
+    const uint32_t combined = (rf_val << 8) | channelToSW;
+    phy_set_rf_reg(static_cast<RfPath>(eRFPath), RF_CHNLBW_Jaguar,
+                   BIT18 | BIT17 | BIT16 | BIT9 | BIT8 | bMaskByte0,
+                   combined);
+  }
+
+  /* 5G AGC table sub-select (rAGC_table_Jaguar2 = 0x958, 8814-only). */
+  if (36 <= channelToSW && channelToSW <= 64) {
+    _device.phy_set_bb_reg(0x958, 0x1F, 1);
+  } else if (100 <= channelToSW && channelToSW <= 144) {
+    _device.phy_set_bb_reg(0x958, 0x1F, 2);
+  } else if (channelToSW >= 149) {
+    _device.phy_set_bb_reg(0x958, 0x1F, 3);
+  }
+
+  /* 2.4G CCK TX DFIR coefficient reprogramming per channel range. */
+  if (channelToSW >= 1 && channelToSW <= 11) {
+    _device.phy_set_bb_reg(rCCK0_TxFilter1, bMaskDWord, 0x1a1b0030);
+    _device.phy_set_bb_reg(rCCK0_TxFilter2, bMaskDWord, 0x090e1317);
+    _device.phy_set_bb_reg(rCCK0_DebugPort, bMaskDWord, 0x00000204);
+  } else if (channelToSW >= 12 && channelToSW <= 13) {
+    _device.phy_set_bb_reg(rCCK0_TxFilter1, bMaskDWord, 0x1a1b0030);
+    _device.phy_set_bb_reg(rCCK0_TxFilter2, bMaskDWord, 0x090e1217);
+    _device.phy_set_bb_reg(rCCK0_DebugPort, bMaskDWord, 0x00000305);
+  } else if (channelToSW == 14) {
+    _device.phy_set_bb_reg(rCCK0_TxFilter1, bMaskDWord, 0x1a1b0030);
+    _device.phy_set_bb_reg(rCCK0_TxFilter2, bMaskDWord, 0x00000E17);
+    _device.phy_set_bb_reg(rCCK0_DebugPort, bMaskDWord, 0x00000000);
+  }
+}
+
 void RadioManagementModule::phy_FixSpur_8812A(ChannelWidth_t Bandwidth,
                                               uint8_t Channel) {
+  /* 8812-only — upstream's `PHY_FixSpur_8814A` is empty / nonexistent.
+   * Returns early on 8814 even though the inner IS_C_CUT guard would
+   * also skip on B-cut chips; defends against future cut-C 8814 silicon
+   * incorrectly hitting the 8812-specific spur workaround. */
+  if (_eepromManager->version_id.ICType != CHIP_8812) {
+    return;
+  }
   /* C cut Item12 ADC FIFO CLOCK */
   if (IS_C_CUT(_eepromManager->version_id)) {
     if (Bandwidth == CHANNEL_WIDTH_40 && Channel == 11) {
@@ -1131,7 +1468,66 @@ enum VHT_DATA_SC : uint8_t {
   VHT_DATA_SC_40_LOWER_OF_80MHZ = 10,
 };
 
+/* Port of upstream `phy_SetBwMode8814A` (rtl8814a_phycfg.c:2182). 8814
+ * BW post-config writes a much smaller set of BB regs than the 8812
+ * path: it skips `rADC_Buf_Clk_Jaguar` (0x8C4 BIT30), `rL1PeakTH_Jaguar`
+ * (0x848[25:22]), `rCCAonSec_Jaguar` (0xf0000000), and uses a narrower
+ * `rRFMOD_Jaguar` mask. 8814 instead programs rRFMOD_Jaguar[1:0] and
+ * 0x82C[15:12] via the already-ported `phy_SetBwRegAdc_8814A` /
+ * `phy_SetBwRegAgc_8814A` helpers. Skipped here because they're
+ * either A-cut-only no-ops (phy_ADC_CLK_8814A) or specific-40MHz-
+ * channel workarounds (phy_SpurCalibration_8814A) that don't apply
+ * to devourer's 20 MHz monitor use case. */
+void RadioManagementModule::phy_PostSetBwMode8814A() {
+  /* 0x668 BW write (REG_TRXPTCL_CTL_8814A == REG_WMAC_TRXPTCL_CTL,
+   * same address). The existing 8812 helper does identical writes. */
+  phy_SetRegBW_8812(_currentChannelBw);
+
+  const auto SubChnlNum = phy_GetSecondaryChnl_8812();
+  /* REG_DATA_SC_8814A and REG_DATA_SC_8812 are both 0x0483. */
+  _device.rtw_write8(REG_DATA_SC_8812, SubChnlNum);
+
+  phy_SetBwRegAdc_8814A(current_band_type, _currentChannelBw);
+  phy_SetBwRegAgc_8814A(current_band_type, _currentChannelBw);
+
+  switch (_currentChannelBw) {
+  case ChannelWidth_t::CHANNEL_WIDTH_20:
+    /* No extra writes for 20 MHz on 8814. */
+    break;
+  case ChannelWidth_t::CHANNEL_WIDTH_40:
+    _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x3C, SubChnlNum);
+    if (SubChnlNum ==
+        static_cast<uint8_t>(VHT_DATA_SC::VHT_DATA_SC_20_UPPER_OF_80MHZ)) {
+      _device.phy_set_bb_reg(rCCK_System_Jaguar, bCCK_System_Jaguar, 1);
+    } else {
+      _device.phy_set_bb_reg(rCCK_System_Jaguar, bCCK_System_Jaguar, 0);
+    }
+    break;
+  case ChannelWidth_t::CHANNEL_WIDTH_80:
+    _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x3C, SubChnlNum);
+    break;
+  default:
+    _logger->error("phy_PostSetBwMode8814A: unknown Bandwidth {}",
+                   static_cast<int>(_currentChannelBw));
+    break;
+  }
+
+  /* RF[A/B/C/D] 0x18[11:10] BW bits — devourer's existing function
+   * loops over `numTotalRfPath` (4 on 8814) with the same per-BW
+   * values upstream `PHY_RF6052SetBandwidth8814A` uses, so it
+   * already covers paths C/D. */
+  PHY_RF6052SetBandwidth8812(_currentChannelBw);
+}
+
 void RadioManagementModule::phy_PostSetBwMode8812() {
+  /* Per-chip BW post-config. 8814 has a separate sequence (no
+   * rADC_Buf_Clk / rL1PeakTH / rCCAonSec writes, narrower
+   * rRFMOD_Jaguar mask) — see `phy_PostSetBwMode8814A`. */
+  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+    phy_PostSetBwMode8814A();
+    return;
+  }
+
   uint8_t L1pkVal = 0, reg_837 = 0;
 
   /* 3 Set Reg668 BW */

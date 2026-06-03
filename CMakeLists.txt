@@ -56,6 +56,10 @@ add_library(WiFiDriver
     src/HalModule.h
     src/Iqk8812a.cpp
     src/Iqk8812a.h
+    src/Iqk8814a.cpp
+    src/Iqk8814a.h
+    src/PhydmWatchdog.cpp
+    src/PhydmWatchdog.h
     src/ParsedRadioPacket.cpp
     src/PhyTableLoader.cpp
     src/PhyTableLoader.h

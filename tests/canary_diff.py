@@ -36,6 +36,12 @@ Listing them as divergences would drown out real bugs. The mask:
     chip temperature so each capture shows a slightly different
     value. The thermal value is also the input to phydm's TX
     BB-swing tracking (see BB 0xc1c[31:21] below).
+  - RF[A] 0x00 / RF[B] 0x00 lower 16 bits: RF_AC LNA + analog
+    config. Bits 4-9 are LNA gain index (phydm_rssi_monitor
+    walks), bit 15 is LNA HW/SW control mode (phydm_lna_sat
+    toggles). Upper bits 16-19 (RF mode: Standby/Normal/TX/RX)
+    ARE checked. Devourer doesn't run the phydm RSSI / LNA-sat
+    modules so it holds whatever the channel-set left.
   - BB 0xc1c / 0xe1c / 0x181c / 0x1a1c bits 31:21: TX BB-swing
     `tx_scaling_table_jaguar` index, written by `PowerTracking8812a`
     (and the kernel's phydm watchdog) based on the thermal-meter
@@ -55,6 +61,12 @@ Listing them as divergences would drown out real bugs. The mask:
     but the tone sweep samples noise so the per-bit output varies
     between runs even on the same chip. Functional IQK correctness
     is validated by the on-air RX/TX matrix, not by canary diff.
+  - MAC 0x100, 0x420, 0x4c8, 0x522, 0x610, 0x614: MAC operational-mode
+    artifacts. Kernel iface runs as a fully-configured normal-mode
+    driver (programs the iface MAC address, TX queue control, TBTT-
+    prohibit timing, MAC port enable bits); devourer's monitor mode
+    intentionally skips most of these. Not bugs — structural mode
+    differences that would otherwise dominate the diff.
 
 There's also a known capture-state asymmetry: the kernel iface is
 long-lived (CCK regs at 5G retain values written during prior 2.4G
@@ -85,6 +97,15 @@ RUNTIME_EPHEMERAL: dict[tuple[str, int], int] = {
     # RF thermal-meter sample — varies with chip temperature.
     ("RF[A]", 0x42): 0xFFFFFFFF,
     ("RF[B]", 0x42): 0xFFFFFFFF,
+    # RF_AC (mode + LNA + analog) — lower 16 bits are runtime-tracked
+    # by phydm (LNA gain index in bits 4-9, LNA HW/SW mode in bit 15,
+    # plus various biasing). Upper bits 16-19 are the RF mode field
+    # (Standby/Normal/TX/RX) and ARE checked. Devourer lacks the
+    # phydm_rssi_monitor + phydm_lna_sat modules that walk these
+    # bits on kernel, so devourer holds whatever the channel-set
+    # sequence left.
+    ("RF[A]", 0x00): 0x0000FFFF,
+    ("RF[B]", 0x00): 0x0000FFFF,
     # BB TX-swing thermal pwrtrk — only bits 31:21 (the
     # tx_scaling_table_jaguar index) are thermal-tracked. Devourer's
     # PowerTracking8812a is gated to CHIP_8812 only, so on 8814 the
@@ -114,6 +135,30 @@ RUNTIME_EPHEMERAL: dict[tuple[str, int], int] = {
     ("BB", 0xe14): 0xFFFFFFFF,
     ("BB", 0xe90): 0xFFFFFFFF,    # path-B TX IQK matrix
     ("BB", 0xe94): 0xFFFFFFFF,
+    # MAC operational-mode artifacts — kernel runs the iface as a
+    # fully-configured normal-mode driver (programs MAC address, TX
+    # queue control, TBTT-prohibit timing, MAC port enable bits);
+    # devourer runs monitor-mode-only and intentionally skips these
+    # writes. Not bugs — structural mode differences.
+    ("MAC", 0x100): 0xFFFFFFFF,   # REG_CR — TX/RXMACEN, port enable
+    ("MAC", 0x420): 0xFFFFFFFF,   # REG_FWHW_TXQ_CTRL — TX queue cfg
+    ("MAC", 0x4c8): 0xFFFFFFFF,   # REG_TBTT_PROHIBIT — beacon timing
+    ("MAC", 0x522): 0xFFFFFFFF,   # REG_TXPAUSE — TX pause domains
+    ("MAC", 0x610): 0xFFFFFFFF,   # REG_MACID  (MAC[3:0]) — kernel-only
+    ("MAC", 0x614): 0xFFFFFFFF,   # REG_MACID+4 (MAC[5:4]) — kernel-only
+    # 8814 init-time 8812 band-switch artifacts — HalModule's cold-init
+    # calls `PHY_SwitchWirelessBand8812` directly for all chip families
+    # (NOT through the chip-aware `phy_SwBand8812` dispatcher), so on
+    # 8814 the 8812-specific writes still fire. Routing this call
+    # through `PHY_SwitchWirelessBand8814A` instead corrupts the RF
+    # SI/PI read interface (CCK+OFDM clock-gate cycle pre-IQK leaves
+    # phy_RFSerialRead returning wrong-register values on path B),
+    # so we accept the small-bit BB divergence over broken RF reads.
+    # Specific bits the 8812 path forces vs BB-init / 8814 expected:
+    ("BB", 0x808): 0x10000000,    # bit 28 — CCK enable (8812 path forces 1)
+    ("BB", 0x82c): 0x00000001,    # bit 0  — AGC table tail
+    ("BB", 0x830): 0x00024000,    # bits 14, 17 — rPwed_TH_Jaguar 5G bits
+    ("BB", 0x834): 0x0000000c,    # bits 2, 3  — rBWIndication tail
 }
 
 # Capture-state artifacts at 5GHz only — registers that aren't

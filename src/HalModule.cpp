@@ -72,6 +72,29 @@ bool HalModule::rtw_hal_init(SelectedChannel selectedChannel) {
   if (status) {
     _radioManagementModule->init_hw_mlme_ext(selectedChannel);
     _radioManagementModule->SetMonitorMode();
+
+    /* Construct + start the phydm DM watchdog after chip init is
+     * complete. Tick once synchronously so the first canary capture
+     * sees post-watchdog state (mirrors kernel where phydm runs
+     * before any read-back). Then spawn the periodic thread for
+     * subsequent 2s ticks. */
+    /* Phydm DM watchdog is opt-in (`DEVOURER_PHYDM_WATCHDOG=1`). The
+     * watchdog thread's periodic BB reads/writes share libusb's
+     * transfer queue with the TX bulk path — measured 4500→1000 TX
+     * submits in 10s on 8821 ch100, and 2300→0 RX hits on the 8814
+     * ch100 dev-dev cell — when the watchdog runs concurrently with
+     * sustained TX. The scaffold + DIG port are kept available for
+     * targeted experiments (canary diff vs kernel reference, future
+     * RX-only DIG tuning), but normal monitor-mode RX/TX runs the
+     * faster, watchdog-less path that matches kernel cold-init
+     * behaviour anyway (kernel doesn't run phydm before the first
+     * `iw set channel` either). */
+    if (std::getenv("DEVOURER_PHYDM_WATCHDOG")) {
+      _phydmWatchdog = std::make_unique<PhydmWatchdog>(
+          _device, _eepromManager, _radioManagementModule.get(), _logger);
+      _phydmWatchdog->TickOnce();
+      _phydmWatchdog->Start();
+    }
   } else {
     _logger->error("rtw_hal_init: fail");
   }
@@ -310,6 +333,15 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   if (_eepromManager->version_id.ICType == CHIP_8812) {
     _radioManagementModule->ArmIQKOnNextChannelSet();
   }
+  /* Note: 8814 IQK is NOT auto-armed on cold init. The kernel does
+   * not arm it either — the standard `iw set channel` path goes
+   * through `set_channel_bwmode` → `rtw_hal_set_chnl_bw` without
+   * firing `HW_VAR_DO_IQK`. Only AP-mode / DFS / silent-reset paths
+   * fire IQK kernel-side. Auto-arming on devourer caused BB 0xc60
+   * to land at the AFE-normal value (0x07808003) at end of IQK
+   * restore, instead of the BB-init final value (0x0e808003) that
+   * the kernel canary observes. The `Iqk8814a` port is still wired
+   * up via `DEVOURER_FORCE_IQK=1` for explicit testing. */
 
   if (_eepromManager->version_id.RFType == RF_TYPE_1T1R) {
     PHY_BB8812_Config_1T();

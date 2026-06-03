@@ -25,7 +25,7 @@ layered on top.
 | -------------- | --------------- | ------------- | ---------------------- | ---------------------- | ------------------------------------------- |
 | **RTL8812AU**  | 2T2R            | TX + RX       | TX + RX                | TX + RX                | VID/PID `0bda:8812`; reference part — works on every channel/band combo |
 | **RTL8811AU**  | 1T1R            | TX + RX       | TX + RX                | TX + RX                | 1T1R cut of 8812 silicon; rides 8812 code path with `RFType=RF_TYPE_1T1R` selected from `REG_SYS_CFG` bit 27. Status mirrored from 8812 — not separately exercised |
-| **RTL8814AU**  | 4T4R, 3-SS max  | RX only       | RX only                | TX only                | VID/PID `0bda:8813`; 2-SS effective on USB-2. 5 GHz UNII-2/3 TX produces on-air frames after the 8814A-specific band-switch + channel-set chain; 2.4 GHz TX still doesn't reach receivers and 5 GHz RX from devourer-side TX still doesn't work |
+| **RTL8814AU**  | 4T4R, 3-SS max  | RX only       | RX only                | TX + RX                | VID/PID `0bda:8813`; 2-SS effective on USB-2. 5 GHz UNII-2/3 TX produces on-air frames after the 8814A-specific band-switch + channel-set chain. 2.4 GHz TX still doesn't reach receivers |
 | **RTL8821AU**  | 1T1R AC + BT    | TX + RX       | TX + RX                | TX + RX | OEM-rebadged as TP-Link Archer T2U Plus (`2357:0120`) etc. UNII-2/3 TX has cross-receiver asymmetry against 8812AU peers |
 
 Successor families (`Jaguar2` / `Jaguar+` — 8812BU, 8822BU/BE, etc., and

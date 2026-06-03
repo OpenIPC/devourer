@@ -78,10 +78,23 @@ bool HalModule::rtw_hal_init(SelectedChannel selectedChannel) {
      * sees post-watchdog state (mirrors kernel where phydm runs
      * before any read-back). Then spawn the periodic thread for
      * subsequent 2s ticks. */
-    _phydmWatchdog = std::make_unique<PhydmWatchdog>(
-        _device, _eepromManager, _radioManagementModule.get(), _logger);
-    _phydmWatchdog->TickOnce();
-    _phydmWatchdog->Start();
+    /* Phydm DM watchdog is opt-in (`DEVOURER_PHYDM_WATCHDOG=1`). The
+     * watchdog thread's periodic BB reads/writes share libusb's
+     * transfer queue with the TX bulk path — measured 4500→1000 TX
+     * submits in 10s on 8821 ch100, and 2300→0 RX hits on the 8814
+     * ch100 dev-dev cell — when the watchdog runs concurrently with
+     * sustained TX. The scaffold + DIG port are kept available for
+     * targeted experiments (canary diff vs kernel reference, future
+     * RX-only DIG tuning), but normal monitor-mode RX/TX runs the
+     * faster, watchdog-less path that matches kernel cold-init
+     * behaviour anyway (kernel doesn't run phydm before the first
+     * `iw set channel` either). */
+    if (std::getenv("DEVOURER_PHYDM_WATCHDOG")) {
+      _phydmWatchdog = std::make_unique<PhydmWatchdog>(
+          _device, _eepromManager, _radioManagementModule.get(), _logger);
+      _phydmWatchdog->TickOnce();
+      _phydmWatchdog->Start();
+    }
   } else {
     _logger->error("rtw_hal_init: fail");
   }

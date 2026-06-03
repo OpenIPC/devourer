@@ -307,10 +307,18 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
    * channel-set callback. Without this, BB 0xc90 + IQK output
    * registers stay at the BB-init seed instead of the calibrated
    * IQ-imbalance correction. */
-  if (_eepromManager->version_id.ICType == CHIP_8812 ||
-      _eepromManager->version_id.ICType == CHIP_8814A) {
+  if (_eepromManager->version_id.ICType == CHIP_8812) {
     _radioManagementModule->ArmIQKOnNextChannelSet();
   }
+  /* Note: 8814 IQK is NOT auto-armed on cold init. The kernel does
+   * not arm it either — the standard `iw set channel` path goes
+   * through `set_channel_bwmode` → `rtw_hal_set_chnl_bw` without
+   * firing `HW_VAR_DO_IQK`. Only AP-mode / DFS / silent-reset paths
+   * fire IQK kernel-side. Auto-arming on devourer caused BB 0xc60
+   * to land at the AFE-normal value (0x07808003) at end of IQK
+   * restore, instead of the BB-init final value (0x0e808003) that
+   * the kernel canary observes. The `Iqk8814a` port is still wired
+   * up via `DEVOURER_FORCE_IQK=1` for explicit testing. */
 
   if (_eepromManager->version_id.RFType == RF_TYPE_1T1R) {
     PHY_BB8812_Config_1T();

@@ -2,6 +2,7 @@
 
 #include "RadioManagementModule.h"
 
+#include <algorithm>
 #include <chrono>
 
 namespace {
@@ -86,6 +87,17 @@ void PhydmWatchdog::TickOnce() {
   ReadFaCountersAc(fa);
   _lastFaCnt = fa;
   ResetFaCountersAc();
+
+  /* DIG (Dynamic Initial Gain) — walk per-path IGI based on FA
+   * count. Reads BB 0xc50 byte 0 on the first tick to seed
+   * `cur_ig_value`, then on subsequent ticks adjusts and writes
+   * to all 4 paths (paths C/D writes are 8814-only; harmless
+   * write-only on 8812/8821). */
+  if (!_digInitialised) {
+    DigInit();
+    _digInitialised = true;
+  }
+  DigTick(fa.cnt_all);
 }
 
 void PhydmWatchdog::ReadFaCountersAc(FaCnt &out) {
@@ -166,3 +178,97 @@ void PhydmWatchdog::ResetFaCountersAc() {
 }
 
 PhydmWatchdog::FaCnt PhydmWatchdog::LastFaCnt() const { return _lastFaCnt; }
+
+void PhydmWatchdog::DigInit() {
+  /* Port of `phydm_dig_init` (phydm_dig.c:726). Reads current
+   * BB 0xc50 byte 0 as the initial IGI value. Bounds match the
+   * Jaguar AC family monitor-mode (!is_linked) configuration:
+   * coverage 0x1c..0x26, with dig_max_of_min = 0x2a as the upper
+   * bound when nothing's linked. */
+  _cur_ig_value =
+      static_cast<uint8_t>(_radio->phy_query_bb_reg_public(0xc50, 0xff));
+  _rx_gain_range_max = _dig_max_of_min;
+  _rx_gain_range_min = _dm_dig_min;
+  _logger->info("PhydmWatchdog::DigInit cur_ig=0x{:02x} bounds=[0x{:02x},0x{:02x}]",
+                unsigned(_cur_ig_value),
+                unsigned(_rx_gain_range_min),
+                unsigned(_rx_gain_range_max));
+}
+
+void PhydmWatchdog::DigTick(uint32_t fa_cnt) {
+  /* Port of `phydm_dig` (phydm_dig.c:1066), monitor-mode subset.
+   * Always !is_linked since devourer doesn't track link state.
+   * `phydm_dig_abs_boundary_decision`: dm_dig_max = COVERAGR (0x26),
+   * dm_dig_min = COVERAGE (0x1c). `phydm_dig_dym_boundary_decision`:
+   * rx_gain_range_{max,min} stay at {dig_max_of_min, dm_dig_min}.
+   * `phydm_new_igi_by_fa`: step={2,1,2}, FA thresholds={250,500,750}.
+   *
+   * Per `phydm_get_new_igi` (phydm_dig.c:952), monitor-mode walk:
+   *   fa > 750 → igi += 2 (saturate)
+   *   fa > 500 → igi += 1
+   *   fa < 250 → igi -= 2
+   * Then clamp to [rx_gain_range_min, rx_gain_range_max]. */
+  constexpr uint16_t kFaTh0 = 250;
+  constexpr uint16_t kFaTh1 = 500;
+  constexpr uint16_t kFaTh2 = 750;
+  constexpr uint8_t kStepUp1 = 2; /* fa > kFaTh2 */
+  constexpr uint8_t kStepUp2 = 1; /* fa > kFaTh1 */
+  constexpr uint8_t kStepDown = 2; /* fa < kFaTh0 */
+
+  /* Refresh bounds from abs_boundary_decision + dym_boundary_decision
+   * each tick (cheap, makes the !is_linked behaviour explicit). */
+  _dm_dig_max = 0x26;
+  _dm_dig_min = 0x1c;
+  _rx_gain_range_max = _dig_max_of_min;
+  _rx_gain_range_min = _dm_dig_min;
+
+  uint8_t new_igi = _cur_ig_value;
+  if (fa_cnt > kFaTh2) {
+    new_igi += kStepUp1;
+  } else if (fa_cnt > kFaTh1) {
+    new_igi += kStepUp2;
+  } else if (fa_cnt < kFaTh0) {
+    if (new_igi >= kStepDown) {
+      new_igi -= kStepDown;
+    } else {
+      new_igi = 0;
+    }
+  }
+
+  if (new_igi < _rx_gain_range_min) {
+    new_igi = _rx_gain_range_min;
+  }
+  if (new_igi > _rx_gain_range_max) {
+    new_igi = _rx_gain_range_max;
+  }
+
+  if (new_igi != _cur_ig_value) {
+    _logger->debug("PhydmWatchdog::DigTick fa={} igi 0x{:02x}->0x{:02x}",
+                   fa_cnt, unsigned(_cur_ig_value), unsigned(new_igi));
+    DigWriteIgi(new_igi);
+    _cur_ig_value = new_igi;
+  } else {
+    /* Re-write the same value to ensure the BB reg is in sync
+     * with our cached cur_ig_value (matters on first tick when
+     * BB-init left a different value than `phydm_SetIgiFloor_Jaguar`
+     * later overwrote). */
+    DigWriteIgi(new_igi);
+  }
+}
+
+void PhydmWatchdog::DigWriteIgi(uint8_t igi) {
+  /* Port of `phydm_write_dig_reg_c50` (phydm_dig.c:501). Writes
+   * the IGI byte to all populated path-IGI registers. Path C/D
+   * writes are 8814-only but writing them on 8812/8821 is
+   * harmless: those chips' BB regs at 0x1850/0x1a50 are reserved
+   * and ignore writes.
+   *
+   * NOTE: this duplicates the chip-family path-count check that
+   * RadioManagementModule does, but we don't have the EEPROM
+   * version_id easily accessible from here. Writing the unused
+   * paths is a no-op on non-8814. */
+  _device.phy_set_bb_reg(0xc50, 0xff, igi); /* path A — rA_IGI_Jaguar */
+  _device.phy_set_bb_reg(0xe50, 0xff, igi); /* path B — rB_IGI_Jaguar */
+  _device.phy_set_bb_reg(0x1850, 0xff, igi); /* path C — 8814 only */
+  _device.phy_set_bb_reg(0x1a50, 0xff, igi); /* path D — 8814 only */
+}

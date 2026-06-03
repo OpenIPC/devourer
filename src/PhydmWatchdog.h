@@ -29,9 +29,7 @@ class RadioManagementModule;
  *     reads BB OFDM/CCK FA+CCA counters at 0xfcc..0xfd0, resets at
  *     tick boundary so successive ticks see only the delta.
  *
- * Out of scope for the first cut (added as separate ports):
- *   - DIG (Dynamic Initial Gain) — walks BB 0xc50[7:0] based on FA
- *     count + RSSI. Substantial port (~400 LOC of helpers).
+ * Out of scope (added as separate ports):
  *   - RSSI monitor / CFO tracking / adaptivity — depend on TX/RX
  *     activity which devourer drives via its own paths.
  *   - Beamforming, antenna diversity — out of scope for monitor mode.
@@ -85,6 +83,14 @@ private:
    * counter latches so the next tick captures fresh-since-now
    * counts. */
   void ResetFaCountersAc();
+  /* Port of `phydm_dig` (phydm_dig.c:1066) walking BB 0xc50/0xe50/
+   * 0x1850/0x1a50 byte 0 (per-path IGI) based on the most recent
+   * FA count. Always hits the !is_linked monitor-mode path: bounds
+   * [DIG_MIN_COVERAGE=0x1c, DIG_MAX_OF_MIN_BALANCE_MODE=0x2a],
+   * step={2,1,2}, FA thresholds={250,500,750}. */
+  void DigInit();
+  void DigTick(uint32_t fa_cnt);
+  void DigWriteIgi(uint8_t igi);
 
   RtlUsbAdapter _device;
   std::shared_ptr<EepromManager> _eepromManager;
@@ -98,6 +104,21 @@ private:
   /* Latest snapshot. mutable so const accessor is feasible without
    * dragging in a mutex; reader sees a torn-but-bounded copy. */
   mutable FaCnt _lastFaCnt{};
+
+  /* DIG state, mirroring `struct phydm_dig_struct` minus the fields
+   * we don't use (TDMA, damping check, antdiv override). All in
+   * "monitor mode, never linked" semantics — we never look at
+   * rssi_min / is_linked because devourer doesn't track them.
+   * `_digInitialised` distinguishes the first tick (which reads
+   * BB 0xc50 to seed cur_ig_value) from subsequent ticks (which
+   * just walk based on FA count). */
+  bool _digInitialised = false;
+  uint8_t _cur_ig_value = 0x20;
+  uint8_t _dm_dig_max = 0x26;       /* DIG_MAX_COVERAGR */
+  uint8_t _dm_dig_min = 0x1c;       /* DIG_MIN_COVERAGE */
+  uint8_t _dig_max_of_min = 0x2a;   /* DIG_MAX_OF_MIN_BALANCE_MODE */
+  uint8_t _rx_gain_range_max = 0x2a;
+  uint8_t _rx_gain_range_min = 0x1c;
 };
 
 #endif /* PHYDM_WATCHDOG_H */

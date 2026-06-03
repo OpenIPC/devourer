@@ -55,6 +55,12 @@ Listing them as divergences would drown out real bugs. The mask:
     but the tone sweep samples noise so the per-bit output varies
     between runs even on the same chip. Functional IQK correctness
     is validated by the on-air RX/TX matrix, not by canary diff.
+  - MAC 0x100, 0x420, 0x4c8, 0x522, 0x610, 0x614: MAC operational-mode
+    artifacts. Kernel iface runs as a fully-configured normal-mode
+    driver (programs the iface MAC address, TX queue control, TBTT-
+    prohibit timing, MAC port enable bits); devourer's monitor mode
+    intentionally skips most of these. Not bugs — structural mode
+    differences that would otherwise dominate the diff.
 
 There's also a known capture-state asymmetry: the kernel iface is
 long-lived (CCK regs at 5G retain values written during prior 2.4G
@@ -114,6 +120,17 @@ RUNTIME_EPHEMERAL: dict[tuple[str, int], int] = {
     ("BB", 0xe14): 0xFFFFFFFF,
     ("BB", 0xe90): 0xFFFFFFFF,    # path-B TX IQK matrix
     ("BB", 0xe94): 0xFFFFFFFF,
+    # MAC operational-mode artifacts — kernel runs the iface as a
+    # fully-configured normal-mode driver (programs MAC address, TX
+    # queue control, TBTT-prohibit timing, MAC port enable bits);
+    # devourer runs monitor-mode-only and intentionally skips these
+    # writes. Not bugs — structural mode differences.
+    ("MAC", 0x100): 0xFFFFFFFF,   # REG_CR — TX/RXMACEN, port enable
+    ("MAC", 0x420): 0xFFFFFFFF,   # REG_FWHW_TXQ_CTRL — TX queue cfg
+    ("MAC", 0x4c8): 0xFFFFFFFF,   # REG_TBTT_PROHIBIT — beacon timing
+    ("MAC", 0x522): 0xFFFFFFFF,   # REG_TXPAUSE — TX pause domains
+    ("MAC", 0x610): 0xFFFFFFFF,   # REG_MACID  (MAC[3:0]) — kernel-only
+    ("MAC", 0x614): 0xFFFFFFFF,   # REG_MACID+4 (MAC[5:4]) — kernel-only
 }
 
 # Capture-state artifacts at 5GHz only — registers that aren't

@@ -6,6 +6,7 @@
 
 #include "EepromManager.h"
 #include "Iqk8812a.h"
+#include "Iqk8814a.h"
 #include "PowerTracking8812a.h"
 #include "RfPath.h"
 #include "RtlUsbAdapter.h"
@@ -154,6 +155,7 @@ class RadioManagementModule {
   uint8_t power = 16;
   PowerTracking8812a _pwrTrk;
   Iqk8812a _iqk;
+  Iqk8814a _iqk8814;
 
 public:
   RadioManagementModule(RtlUsbAdapter device,

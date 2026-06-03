@@ -307,7 +307,8 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
    * channel-set callback. Without this, BB 0xc90 + IQK output
    * registers stay at the BB-init seed instead of the calibrated
    * IQ-imbalance correction. */
-  if (_eepromManager->version_id.ICType == CHIP_8812) {
+  if (_eepromManager->version_id.ICType == CHIP_8812 ||
+      _eepromManager->version_id.ICType == CHIP_8814A) {
     _radioManagementModule->ArmIQKOnNextChannelSet();
   }
 

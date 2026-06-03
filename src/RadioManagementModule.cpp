@@ -50,7 +50,8 @@ RadioManagementModule::RadioManagementModule(
     Logger_t logger)
     : _device{device}, _eepromManager{eepromManager}, _logger{logger},
       _pwrTrk{device, eepromManager, this, logger},
-      _iqk{device, eepromManager, this, logger} {}
+      _iqk{device, eepromManager, this, logger},
+      _iqk8814{device, eepromManager, this, logger} {}
 
 void RadioManagementModule::RunIQK() {
   _iqk.Calibrate(_currentChannel, current_band_type, /*is_recovery=*/false);
@@ -300,8 +301,14 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
    * is thermal-meter-driven so small (~1-step) divergence is expected
    * if devourer and kernel sampled the chip at non-identical
    * temperatures. Capture both dumps within a few seconds for clean
-   * parity. */
-  if (std::getenv("DEVOURER_DUMP_CANARY")) {
+   * parity.
+   *
+   * The IQK trigger BELOW runs phydm I/Q calibration which touches
+   * RF[*][0x0] / RF[*][0x8f] + BB IQK-output regs (0xc90 / 0xe90 /
+   * 0xcc4 / etc). We capture the canary AFTER IQK so it reflects the
+   * post-calibration state — matching kernel semantics where IQK is
+   * part of the channel-set callback. */
+  const auto dump_canary = [this]() {
     /* Per-chip canary set. Each Jaguar variant has a different active
      * RF/path footprint:
      *   - 8821AU is 1T1R AC: only path-A exists physically. Path-B BB-AGC
@@ -372,7 +379,7 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
         _logger->info("RF[B] 0x{:02x} = 0x{:05X}", a,
                       phy_query_rf_reg(RfPath::RF_PATH_B, a, 0xfffffu));
     _logger->info("=== END DEVOURER_DUMP_CANARY ===");
-  }
+  };
 
   /* Trigger I/Q calibration. Set by `phy_SwBand8812` on band
    * transitions and (post-init) on the very first channel-set via
@@ -384,9 +391,19 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     if (_eepromManager->version_id.ICType == CHIP_8812) {
       _iqk.Calibrate(_currentChannel, current_band_type,
                      /*is_recovery=*/false);
+    } else if (_eepromManager->version_id.ICType == CHIP_8814A) {
+      _iqk8814.Calibrate(_currentChannel, current_band_type,
+                         /*is_recovery=*/false);
     }
   }
   _needIQK = false;
+
+  /* Canary dump runs LAST so it captures the post-IQK / post-pwrtrk
+   * state — same observation order as kernel iface reads via
+   * `iwpriv read 4,<addr>`. */
+  if (std::getenv("DEVOURER_DUMP_CANARY")) {
+    dump_canary();
+  }
 }
 
 void RadioManagementModule::phy_set_rf_reg(RfPath eRFPath, uint16_t RegAddr,

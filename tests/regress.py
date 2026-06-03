@@ -564,6 +564,43 @@ def attach_to_host_kernel(dut: Dut) -> None:
         sys.stderr.write(f"attach_to_host_kernel({dut.iface_id}): {e}\n")
 
 
+# Module-level toggle for usb_port_power_cycle. main() flips this off when
+# --no-rf-reset is passed.
+_RF_RESET_ENABLED: bool = True
+
+
+def usb_port_power_cycle(dut: Dut, settle_s: float = 2.0) -> None:
+    """Toggle the USB port-level `authorized` flag to force a chip-power
+    cycle on `dut`.
+
+    Why this exists: `libusb_reset_device` and sysfs unbind/rebind do
+    NOT reset Realtek RF analog state — values written to RF registers
+    persist across both. Authorize-cycling the port produces a true
+    power-off, which drops RF state to chip-reset defaults. Verified
+    empirically on RTL8814AU: without the cycle, canary captures of
+    RF[A]/[B] 0x18 retain band-select bits from the previous session,
+    making per-cell comparisons unreliable.
+
+    Skipped silently (with stderr note) if the sysfs node is missing
+    or unwritable — the cell still runs, just from whatever state the
+    chip happened to be in. Skipped entirely when `_RF_RESET_ENABLED`
+    is False (CLI: `--no-rf-reset`).
+    """
+    if not _RF_RESET_ENABLED:
+        return
+    auth_path = f"/sys/bus/usb/devices/{dut.sysfs_id}/authorized"
+    try:
+        with open(auth_path, "w") as f:
+            f.write("0")
+        time.sleep(0.5)
+        with open(auth_path, "w") as f:
+            f.write("1")
+    except OSError as e:
+        sys.stderr.write(f"usb_port_power_cycle({dut.sysfs_id}): {e}\n")
+        return
+    time.sleep(settle_s)  # let the chip re-enumerate before any claim
+
+
 # ---------------------------------------------------------------------------
 # Cell results + scoring.
 # ---------------------------------------------------------------------------
@@ -866,7 +903,18 @@ def _ensure_dut_location(
     VM mode: when `want_at_kernel_host` is True, virsh attach-device to the
     VM. When False, virsh detach-device back to the host, then unbind from
     whatever host kernel driver claims it (so devourer can libusb-claim).
+
+    Always starts with a USB port-level authorize-cycle (see
+    `usb_port_power_cycle`) so each cell sees clean RF state.
+    Per-cell `run_cell.finally` brings DUTs back to the host before
+    this runs, so the sysfs cycle is local in both modes.
     """
+    # Clean RF state for THIS cell (libusb_reset_device on its own doesn't
+    # reset RF). Must happen on the host *before* the DUT moves to the VM
+    # / gets claimed by devourer, so the chip wakes up fresh on whichever
+    # side runs it.
+    usb_port_power_cycle(dut)
+
     if not kh.is_remote:
         # Local mode: ALWAYS detach from kernel before devourer use.
         if not want_at_kernel_host:
@@ -1415,7 +1463,21 @@ def main():
              "--encoding-matrix runs. Always host-local; never moved to the "
              "VM. Env: DEVOURER_SNIFFER_IFACE.",
     )
+    ap.add_argument(
+        "--no-rf-reset",
+        action="store_true",
+        help="skip the per-cell USB port-level authorize-cycle that "
+             "resets chip RF state. Default behaviour is to cycle every "
+             "DUT before each cell, since libusb_reset_device alone "
+             "doesn't clear the Realtek RF analog state (verified on "
+             "RTL8814AU — see usb_port_power_cycle). Disabling is rarely "
+             "useful; mainly a perf knob for trivial smoke runs.",
+    )
     args = ap.parse_args()
+
+    # Apply RF-reset toggle before any cell runs.
+    global _RF_RESET_ENABLED
+    _RF_RESET_ENABLED = not args.no_rf_reset
 
     if args.vm_name and not args.vm_ssh:
         sys.stderr.write("--vm-name requires --vm-ssh\n")

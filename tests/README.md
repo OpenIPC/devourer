@@ -131,6 +131,14 @@ per-cell stdout/stderr logs end up at `/tmp/devourer-regress-last/`.
   the first two auto-detected)
 - `--no-baseline-abort` — run all 4 cells even if kernel-kernel fails
   (useful when one chipset has no working kernel driver on this rig)
+- `--no-rf-reset` — skip the per-cell USB port-level authorize-cycle.
+  Default behaviour is to deauthorize / reauthorize each DUT's USB port
+  before every cell, forcing a true chip-power cycle. Required because
+  `libusb_reset_device` and sysfs unbind/rebind do NOT reset Realtek RF
+  analog state — RF reg writes survive both. Without the cycle, canary
+  captures and matrix cells inherit RF state (band-select bits, IQK
+  coefficients, AGC indices) from the previous run on the same DUT.
+  Adds ~3 s per DUT per cell; disable only for trivial smoke runs.
 - `--vm-name NAME` / `--vm-ssh USER@HOST` — enter VM mode
 - `--keep-logs` — symlink the temp log dir at `/tmp/devourer-regress-last`
 

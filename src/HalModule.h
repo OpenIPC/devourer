@@ -7,6 +7,7 @@ extern "C"{
 #include "Hal8814PwrSeq.h"
 #include "Hal8821APwrSeq.h"
 }
+#include "PhydmWatchdog.h"
 #include "RadioManagementModule.h"
 #include "RtlUsbAdapter.h"
 #include "SelectedChannel.h"
@@ -51,6 +52,9 @@ class HalModule {
   uint8_t _rxAggDmaSize =
       16; /* uint: 128b, 0x0A = 10 =
              MAX_RX_DMA_BUFFER_SIZE/2/pHalData.UsbBulkOutSize */
+  /* Phydm DM watchdog. Lazily constructed in `rtw_hal_init` after
+   * `RadioManagementModule` is fully wired up. */
+  std::unique_ptr<PhydmWatchdog> _phydmWatchdog;
 
 public:
   HalModule(RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,

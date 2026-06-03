@@ -72,6 +72,16 @@ bool HalModule::rtw_hal_init(SelectedChannel selectedChannel) {
   if (status) {
     _radioManagementModule->init_hw_mlme_ext(selectedChannel);
     _radioManagementModule->SetMonitorMode();
+
+    /* Construct + start the phydm DM watchdog after chip init is
+     * complete. Tick once synchronously so the first canary capture
+     * sees post-watchdog state (mirrors kernel where phydm runs
+     * before any read-back). Then spawn the periodic thread for
+     * subsequent 2s ticks. */
+    _phydmWatchdog = std::make_unique<PhydmWatchdog>(
+        _device, _eepromManager, _radioManagementModule.get(), _logger);
+    _phydmWatchdog->TickOnce();
+    _phydmWatchdog->Start();
   } else {
     _logger->error("rtw_hal_init: fail");
   }

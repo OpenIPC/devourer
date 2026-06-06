@@ -2,7 +2,9 @@
 
 Cross-driver matrix test that compares this project's userspace stack
 against the kernel-driver baseline for both TX and RX on plugged-in USB
-Wi-Fi adapters.
+Wi-Fi adapters. An optional on-air sniffer (`--sniffer-iface`) can
+attend each cell and report what actually flew on the air — adding
+unambiguous TX-vs-RX failure attribution on top of the bare hit count.
 
 ```
                   TX = devourer       TX = kernel
@@ -16,7 +18,33 @@ matching `txdemo/main.cpp`) for `--duration` seconds and counts hits.
 The baseline cell runs first — if it fails the rig itself is broken and
 the remaining cells are skipped (override with `--no-baseline-abort`).
 
+## Failure attribution via the sniffer
+
+With `--sniffer-iface` set (see [On-air sniffer](#--sniffer-iface--on-air-encoding-verification--attribution)
+below), every cell gains a third independent witness:
+
+| sniffer caught N? | RX counted N? | diagnosis                          |
+|-------------------|---------------|------------------------------------|
+| no                | no            | TX side broken (frame never flew)  |
+| yes               | no            | RX side broken (frame flew, missed) |
+| yes               | yes           | cell passes                         |
+| no                | yes           | rig fault (impossible)              |
+
+This is the primary reason to attach a sniffer: it turns the 2×2 matrix
+from "did the pair work end-to-end?" into "which side broke?". The same
+attribution holds whether the other side is `devourer` or `kernel` — so
+**a sniffer-equipped run does not need a working kernel driver for the
+DUT** to diagnose a devourer-side regression. The VM mode (below) is
+only needed when you specifically want the kernel-vs-kernel and
+kernel-vs-devourer **interop** rows for a chip whose host kernel driver
+doesn't build.
+
 ## Two run modes
+
+These describe where the *kernel-side* cells run. With a sniffer
+attached, the kernel side is needed for interop rows but not for
+attributing devourer-side failures — see
+[Failure attribution via the sniffer](#failure-attribution-via-the-sniffer).
 
 ### Local mode
 
@@ -145,20 +173,40 @@ per-cell stdout/stderr logs end up at `/tmp/devourer-regress-last/`.
 Environment variable equivalents: `DEVOURER_VM_NAME`, `DEVOURER_VM_SSH`,
 `DEVOURER_SNIFFER_IFACE`.
 
-### `--sniffer-iface` — on-air encoding verification
+### `--sniffer-iface` — on-air encoding verification + attribution
 
-When set, each matrix cell additionally captures on a third (host-local)
-monitor iface and reports the decoded radiotap encoding distribution
-alongside the hit count. Composes with `--full-matrix` and
-`--encoding-matrix`. Intended for an AR9271 (vanilla radiotap, no
-driver-side flag filtering).
+When set, each matrix cell captures on a third (host-local) monitor
+iface and reports the decoded radiotap encoding distribution alongside
+the hit count. The sniffer also gives unambiguous TX-vs-RX failure
+attribution (see [Failure attribution via the sniffer](#failure-attribution-via-the-sniffer)
+above). Composes with `--full-matrix` and `--encoding-matrix`.
+
+#### Per-band sniffer assignment
+
+A single sniffer chip can't cover the whole spectrum. Pick by band:
+
+| Band                 | Sniffer chip            | Why                                  |
+|----------------------|-------------------------|--------------------------------------|
+| 2.4 GHz (ch 1–13)    | **AR9271** (`ath9k_htc`)| Vanilla radiotap, no driver-side flag filtering. Canonical kernel-MAC reference for HT/legacy capture. 2.4 G only. |
+| 5 GHz (UNII-1/2/3)   | **RTL8832AU** (`8852au`, lwfinger OOT) | Covers UNII-1 (ch36–48), UNII-2 DFS (ch52–144), UNII-3 (ch149+). Out-of-tree DKMS; kernel-6.18 patch set documented in kaeru (`lwfinger/rtl8852au — kernel 6.18 build patches`). **Caveat — host stall observed once** (2026-06-04) when used as `--sniffer-iface` for `--full-matrix --channel 36` on kernel 6.18 with three concurrent Realtek DUTs on the same xhci bus; hard CPU stall, no oops/NMI trace. Cause not isolated (xhci bus contention vs. lwfinger 5 GHz monitor path); if you see a stall, drop `--sniffer-iface` for 5 G runs and use compositional attribution across cells. |
+
+Set the iface per run — there is no auto-band switching:
 
 ```bash
-sudo python3 tests/regress.py --encoding-matrix \
-    --tx-pid 0x8813 --rx-pid 0x0120 --channel 100 \
-    --vm-name devourer-testrig --vm-ssh <user>@<VM-IP> \
-    --sniffer-iface wlan0mon
+# 2.4 GHz channel — use AR9271
+sudo python3 tests/regress.py --full-matrix --channel 6 \
+    --sniffer-iface wlp0s20f0u14
+
+# 5 GHz channel — use RTL8832AU
+sudo python3 tests/regress.py --full-matrix --channel 36 \
+    --sniffer-iface wlp0s20f0u13
+sudo python3 tests/regress.py --full-matrix --channel 100 \
+    --sniffer-iface wlp0s20f0u13
 ```
+
+(Replace iface names with `iw dev` output on your rig.) `regress.py`
+puts the sniffer iface into monitor mode and tunes it to `--channel`
+itself — pre-configuration is not required.
 
 Per-cell output gains a `↪ sniffer: N frames — <encoding>=N, ...` line
 showing what actually flew. If the `--ldpc` injection comes back tagged
@@ -169,6 +217,17 @@ the chip-side RX never had to refuse an LDPC frame, so any
 The sniffer is host-only and never moved through the VM USB
 passthrough. The same helper, run standalone outside the matrix, is
 `tests/sniff_air.py` (see below).
+
+#### Why this displaces VM mode for most devourer work
+
+The sniffer attributes failure to TX or RX without needing the *other*
+side to be a working kernel driver. So if you're investigating a
+devourer-side regression (TX or RX), pair-with-anything + sniffer is
+sufficient — even pair-with-devourer cells stay diagnosable because the
+sniffer is the third-party witness. VM mode is now only required when
+you specifically need the cross-driver **interop** rows on a chip whose
+host kernel driver doesn't build (notably RTL8814AU on kernels 6.15+
+where mainline `rtw88_8814au` fails to download firmware).
 
 ## Specialized modes
 
@@ -183,9 +242,16 @@ N×(N-1)×4 cells; ~16 min for N=3 in VM mode. Useful for catching
 cross-chipset regressions in PRs that touch shared HAL code.
 
 ```bash
+# 5 GHz UNII-2 — sniffer attribution + VM-side kernel interop
 sudo python3 tests/regress.py --full-matrix --channel 100 \
+    --sniffer-iface wlp0s20f0u13 \
     --vm-name devourer-testrig --vm-ssh <user>@<VM-IP>
 ```
+
+For devourer-only regressions (skip the cross-driver interop rows,
+keep attribution), `--no-baseline-abort` lets the matrix proceed
+without a working kernel side; the sniffer column still attributes
+every cell.
 
 ### `--encoding-matrix`: chip-specific radiotap encoding asymmetries
 

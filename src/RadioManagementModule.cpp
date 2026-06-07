@@ -7,6 +7,7 @@ extern "C" {
 }
 
 #include <chrono>
+#include <cstdlib>
 #include <map>
 #include <thread>
 #include <unordered_map>
@@ -109,6 +110,20 @@ void RadioManagementModule::hw_var_set_monitor() {
 
   /* Append FCS */
   rcr_bits |= RCR_APPFCS;
+
+  /* DEVOURER_RX_KEEP_CORRUPTED: also pass frames whose 802.11 FCS (CRC32) or
+   * decryption-ICV check failed. By default the chip drops them at the WMAC
+   * filter — fine for clean-or-missing IP traffic, but it also hides any
+   * partial-bit-error information that a FEC layer could otherwise use. With
+   * the bits below set the frames reach the host with `crc_err` / `icv_err`
+   * set on the RX descriptor; FrameParser surfaces them so a consumer like
+   * tools/precoder/corruption_analysis.py can characterise the corruption.
+   * Guarded by the same env var as the demo's filter — keep them in lockstep
+   * so a noisy RX never surprises an IP-stack consumer that didn't ask for
+   * it. */
+  if (std::getenv("DEVOURER_RX_KEEP_CORRUPTED") != nullptr) {
+    rcr_bits |= RCR_ACRC32 | RCR_AICV;
+  }
 
   // rtw_hal_get_hwreg(adapterState, HW_VAR_RCR, pHalData.rcr_backup);
   hw_var_rcr_config(rcr_bits);

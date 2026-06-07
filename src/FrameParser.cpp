@@ -125,8 +125,12 @@ static rx_pkt_attrib rtl8812_query_rx_desc_status(uint8_t *pdesc) {
    * tools/precoder/seed_probe.py is the reliable path. */
   pattrib.scrambler = (uint8_t)LE_BITS_TO_4BYTE(pdesc + 16, 9, 7);
 
-  /* Offset 20 */
-  /* pattrib.tsfl=(byte)GET_RX_STATUS_DESC_TSFL_8812(pdesc); */
+  /* Offset 20 — chip-side TSF low (32 bits). Surfaced via RxAtrib.tsfl
+   * for downstream latency measurement and dup-detection (see
+   * demo/main.cpp's <devourer-stream> line). The macro reads bits 0..31
+   * of pdesc+20 (full 4-byte u32), not a byte — the original commented
+   * `(byte)` cast in master was a copy-paste from another field. */
+  pattrib.tsfl = GET_RX_STATUS_DESC_TSFL_8812(pdesc);
 
   return pattrib;
 }

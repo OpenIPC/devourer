@@ -285,6 +285,12 @@ struct rx_pkt_attrib
                         encrypt algorith */
     bool crc_err;
     bool icv_err;
+    /* TSF low (4 bytes at RX-descriptor offset 20) — chip-side timestamp
+     * for the frame. With the seq_num just above it, a downstream layer
+     * can drop duplicates by seq and measure one-way latency by diffing
+     * the chip's TSF against its own wall clock. Populated by
+     * FrameParser; surfaced through demo/main.cpp's <devourer-stream>. */
+    uint32_t tsfl;
     uint8_t data_rate;
     uint8_t bw;
     uint8_t stbc;

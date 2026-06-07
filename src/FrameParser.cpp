@@ -228,11 +228,22 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
       ret.back().RxAtrib.evm[3] = driver_data.rxevm_cd[1];
     } else {
       /* pkt_rpt_type == TX_REPORT1-CCX, TX_REPORT2-TX RTP,HIS_REPORT-USB HISR
-       * RTP */
+       * RTP, C2H_PACKET */
       if (pattrib.pkt_rpt_type == RX_PACKET_TYPE::C2H_PACKET) {
-        _logger->info("RX USB C2H_PACKET");
-        // rtw_hal_c2h_pkt_pre_hdl(padapter, precvframe.u.hdr.rx_data,
-        // pattrib.pkt_len);
+        /* Surface C2H payload bytes as a Packet so the application
+         * callback can decode them. The C2H frame body lives at the same
+         * offset as a normal-RX 802.11 frame (shift + drvinfo + RXDESC).
+         * Layout per upstream Realtek convention: byte 0 = C2H cmd_id
+         * (sub-type), byte 1 = seq, bytes 2..N = payload. Sub-type IDs
+         * vary per chip and aren't enumerated in the vendored headers —
+         * demo/main.cpp does a best-effort decode of the 8814A TX_RPT
+         * payload via the GET_8814A_C2H_TX_RPT_* macros gated by
+         * DEVOURER_TX_STATUS=1, plus a raw hex dump so observers can
+         * validate the sub-type ID against on-air capture. */
+        ret.push_back({pattrib, pbuf.subspan(pattrib.shift_sz +
+                                                 pattrib.drvinfo_sz +
+                                                 RXDESC_SIZE,
+                                             pattrib.pkt_len)});
       } else if (pattrib.pkt_rpt_type == RX_PACKET_TYPE::HIS_REPORT) {
         _logger->info("RX USB HIS_REPORT");
       }

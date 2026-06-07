@@ -71,6 +71,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
       break;
 
     case IEEE80211_RADIOTAP_MCS: {
+      u8 mcs_known = iterator.this_arg[0];
       u8 mcs_flags = iterator.this_arg[1];
 
       uint8_t mcs_bw_field = mcs_flags & IEEE80211_RADIOTAP_MCS_BW_MASK;
@@ -86,6 +87,23 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
         sgi = 1;
       } else {
         sgi = 0;
+      }
+
+      /* DEVOURER_TX_HT_MCS=1: honour the HT MCS index from radiotap byte 2
+       * and set fixed_rate accordingly. Without this knob the historic
+       * behaviour kicks in — fixed_rate stays at the MGN_1M default and the
+       * chip transmits 1 Mbps CCK regardless of the HT-MCS field (see PR
+       * #80's README: "send_packet only wires fixed_rate from the radiotap
+       * RATE/VHT fields — never the HT MCS index"). Gated because flipping
+       * this unconditionally would silently change the regression matrix's
+       * rate sweeps and the precoder PoC's locked-in 6 Mbps OFDM carrier. */
+      static const bool ht_mcs_enabled =
+          std::getenv("DEVOURER_TX_HT_MCS") != nullptr;
+      if (ht_mcs_enabled && (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_MCS)) {
+        uint8_t mcs_index = iterator.this_arg[2];
+        if (mcs_index <= 31) {
+          fixed_rate = MGN_MCS0 + mcs_index;
+        }
       }
     } break;
 

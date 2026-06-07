@@ -22,7 +22,6 @@
 // canonical SA. Other stdout output is suppressed; stderr carries logger and
 // counters.
 
-#include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -66,13 +65,14 @@ static constexpr uint16_t kRealtekProductIds[] = {
 };
 
 // Same probe-request header as StreamTxDemo / PrecoderDemo; radiotap is now
-// built once at startup from DEVOURER_STREAM_RATE (default 6M legacy OFDM).
-// Length stays 13 bytes so send_packet's vht-detection heuristic keeps this
-// on the legacy path. The canonical SA matcher in the packet processor
-// below is identical to demo/main.cpp's, so any tooling that already grep'd
-// <devourer-stream> lines keeps working unchanged.
-static const std::array<uint8_t, 13> kRadiotapLegacy =
-    devourer::build_legacy_radiotap(devourer::parse_stream_rate_env());
+// built once at startup from DEVOURER_STREAM_RATE — accepts legacy
+// (6M..54M), HT (MCS0..MCS31), or VHT (VHT1SS_MCS0..VHT4SS_MCS9) carrier
+// modes. Default is 6M legacy OFDM, bit-identical to the historic
+// kRadiotapLegacy6M constant. The canonical SA matcher in the packet
+// processor below is identical to demo/main.cpp's, so any tooling that
+// already grep'd <devourer-stream> lines keeps working unchanged.
+static const std::vector<uint8_t> kStreamRadiotap =
+    devourer::build_stream_radiotap(devourer::parse_stream_rate_env());
 static const uint8_t kCanonicalSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
 
 static std::vector<uint8_t> build_dot11_probe_req() {
@@ -139,7 +139,7 @@ struct TxArgs {
 static void tx_thread(TxArgs args) {
   auto dot11 = build_dot11_probe_req();
   std::vector<uint8_t> tx_buf;
-  tx_buf.reserve(kRadiotapLegacy.size() + dot11.size() + args.max_psdu);
+  tx_buf.reserve(kStreamRadiotap.size() + dot11.size() + args.max_psdu);
   long tx_count = 0;
 
   while (!args.should_stop->load()) {
@@ -165,8 +165,8 @@ static void tx_thread(TxArgs args) {
       break;
     }
     tx_buf.clear();
-    tx_buf.insert(tx_buf.end(), kRadiotapLegacy.begin(),
-                  kRadiotapLegacy.end());
+    tx_buf.insert(tx_buf.end(), kStreamRadiotap.begin(),
+                  kStreamRadiotap.end());
     tx_buf.insert(tx_buf.end(), dot11.begin(), dot11.end());
     tx_buf.insert(tx_buf.end(), psdu.begin(), psdu.end());
     bool ok = args.rtl->send_packet(tx_buf.data(), tx_buf.size());

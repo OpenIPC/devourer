@@ -1,48 +1,75 @@
 /* Stream-carrier radiotap helper shared between the stream TX binaries.
  *
- * The two stream demos (StreamDuplexDemo, StreamTxDemo) historically each
- * shipped a private `kRadiotapLegacy6M[13]` constant. With the precoder
- * stream link's FEC layers now in master, the carrier MCS/BW is a useful
- * robustness-vs-throughput knob — but the underlying chip's send_packet
- * uses `radiotap_length != 0x0d` (= 13) as the legacy-vs-VHT path
- * selector, so anything that swaps the header has to keep the 13-byte
- * length to stay on the legacy path.
+ * The stream demos historically each shipped a private kRadiotapLegacy6M[13]
+ * constant. This helper switches between three carrier modes — Legacy OFDM,
+ * HT-MCS, and VHT — under one env var (DEVOURER_STREAM_RATE), so the
+ * carrier rate becomes a robustness-vs-throughput knob for the precoder
+ * stream link's FEC layers (PR #86 / #87).
  *
- * This v1 helper switches between the eight legacy OFDM rates (6 / 9 /
- * 12 / 18 / 24 / 36 / 48 / 54 Mbps) by mutating byte 8 (the RATE field)
- * of an otherwise byte-identical 13-byte header. Higher-rate HT-MCS / VHT
- * paths are deliberately out of scope of this first PR — they need PR #88
- * (DEVOURER_TX_HT_MCS) to land first and they ship a non-13-byte radiotap
- * which switches send_packet into its VHT branch. Follow-up PR.
+ * Three wire-format facts the chip-side send_packet relies on:
+ *
+ *   - Length 13 (0x0d) → legacy path. radiotap_length != 0x0d sets vht=true
+ *     in RtlJaguarDevice::send_packet, switching rate_id to 9.
+ *   - The radiotap iterator parses *all* fields regardless of vht — so a
+ *     13-byte HT-MCS radiotap (it_present=MCS|TX_FLAGS, no RATE) is
+ *     correctly parsed via the IEEE80211_RADIOTAP_MCS case and stays on
+ *     rate_id=8. That's what we want for HT-MCS carriers.
+ *   - VHT needs a 22-byte radiotap (it_present=VHT|TX_FLAGS). Length>13
+ *     puts us on rate_id=9 — that's what the VHT branch requires.
+ *
+ * For HT-MCS to actually set fixed_rate (vs falling back to MGN_1M CCK at
+ * 1 Mbps), the F1 gate DEVOURER_TX_HT_MCS=1 must also be set on the same
+ * process. parse_stream_rate_env() logs a warning to stderr if an HT
+ * rate is parsed without that gate; VHT has no such gate (send_packet's
+ * VHT branch always sets fixed_rate from the VHT info field).
  */
 
 #ifndef RADIOTAP_BUILDER_H
 #define RADIOTAP_BUILDER_H
 
-#include <array>
 #include <cstdint>
+#include <vector>
 
 namespace devourer {
 
-/* RATE field convention: u8 in 500 kbps units. 12 = 6 Mbps, 18 = 9 Mbps,
- * 24 = 12 Mbps, 36 = 18 Mbps, 48 = 24 Mbps, 72 = 36 Mbps, 96 = 48 Mbps,
- * 108 = 54 Mbps. Validated against IEEE 802.11 §17.3.4 and the
- * MGN_*M enum positions in src/RadioManagementModule.h. */
-constexpr uint8_t kStreamRateDefault500kbps = 12;  // 6 Mbps
+struct StreamRateCfg {
+  enum class Mode { Legacy, HT, VHT };
+  Mode mode = Mode::Legacy;
 
-/* Build a 13-byte legacy-OFDM radiotap header with the given RATE field
- * (in 500 kbps units). All other bytes are bit-identical to the historic
- * kRadiotapLegacy6M constant: presence = RATE | TX_FLAGS, TX_FLAGS = 8
- * (no-ack). Length stays at 0x0d so send_packet's vht-detection
- * heuristic keeps this on the legacy path. */
-std::array<uint8_t, 13> build_legacy_radiotap(uint8_t rate_500kbps);
+  /* Legacy: in 500 kbps units. 12=6M, 18=9M, 24=12M, 36=18M, 48=24M,
+   * 72=36M, 96=48M, 108=54M. Default 6M. */
+  uint8_t legacy_rate_500kbps = 12;
 
-/* Look up DEVOURER_STREAM_RATE and return the corresponding 500 kbps
- * units value, or kStreamRateDefault500kbps if the env var is unset or
- * unrecognised. Accepted forms: "6M", "9M", "12M", "18M", "24M", "36M",
- * "48M", "54M" (case-insensitive). A bare integer (e.g. "12") is
- * interpreted as already in 500 kbps units. */
-uint8_t parse_stream_rate_env();
+  /* HT: 0..31 (NSS is implicit — MCS0-7 = 1ss, 8-15 = 2ss, ...). */
+  uint8_t ht_mcs = 0;
+
+  /* VHT: per IEEE 802.11ac. mcs 0..9, nss 1..4. */
+  uint8_t vht_mcs = 0;
+  uint8_t vht_nss = 1;
+
+  /* Bandwidth in MHz. Legacy mode ignores this (always 20 MHz). HT
+   * recognises 20 or 40; VHT recognises 20/40/80/160. */
+  uint8_t bw_mhz = 20;
+
+  bool sgi = false;
+  bool ldpc = false;
+  bool stbc = false;
+};
+
+/* Build a radiotap header according to cfg.mode. Output is always a
+ * complete, well-formed radiotap header — no 802.11 frame body. */
+std::vector<uint8_t> build_stream_radiotap(const StreamRateCfg& cfg);
+
+/* Parse DEVOURER_STREAM_RATE / DEVOURER_STREAM_BW / DEVOURER_STREAM_SGI /
+ * DEVOURER_STREAM_LDPC / DEVOURER_STREAM_STBC. Unrecognised values fall
+ * back to default 6M legacy.
+ *
+ * DEVOURER_STREAM_RATE grammar (case-insensitive):
+ *   - Legacy: 6M / 9M / 12M / 18M / 24M / 36M / 48M / 54M
+ *   - HT:     MCS0 .. MCS31
+ *   - VHT:    VHT1SS_MCS0 .. VHT4SS_MCS9
+ */
+StreamRateCfg parse_stream_rate_env();
 
 }  // namespace devourer
 

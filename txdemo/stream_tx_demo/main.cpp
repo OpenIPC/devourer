@@ -27,7 +27,6 @@
 // Env: same conventions as the other demos (DEVOURER_VID / DEVOURER_PID /
 // DEVOURER_CHANNEL / DEVOURER_SKIP_RESET).
 
-#include <array>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -71,12 +70,13 @@ static constexpr uint16_t kRealtekProductIds[] = {
 };
 
 // Identical 802.11 probe-request header to PrecoderDemo; radiotap is now
-// built once at startup from DEVOURER_STREAM_RATE (default 6M legacy OFDM).
-// Length stays 13 bytes so send_packet's vht-detection heuristic keeps this
-// on the legacy path. Same canonical SA, same matcher in demo/main.cpp's
-// RX path — keep these three in lockstep, see CLAUDE.md.
-static const std::array<uint8_t, 13> kRadiotapLegacy =
-    devourer::build_legacy_radiotap(devourer::parse_stream_rate_env());
+// built once at startup from DEVOURER_STREAM_RATE — accepts legacy
+// (6M..54M), HT (MCS0..MCS31), or VHT (VHT1SS_MCS0..VHT4SS_MCS9) carrier
+// modes. Default is 6M legacy OFDM, bit-identical to the historic
+// kRadiotapLegacy6M constant. Same canonical SA, same matcher in
+// demo/main.cpp's RX path — keep these three in lockstep, see CLAUDE.md.
+static const std::vector<uint8_t> kStreamRadiotap =
+    devourer::build_stream_radiotap(devourer::parse_stream_rate_env());
 static const uint8_t kCanonicalSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
 
 static std::vector<uint8_t> build_dot11_probe_req() {
@@ -218,7 +218,7 @@ int main(int argc, char **argv) {
 
   auto dot11 = build_dot11_probe_req();
   std::vector<uint8_t> tx_buf;
-  tx_buf.reserve(kRadiotapLegacy.size() + dot11.size() + max_psdu);
+  tx_buf.reserve(kStreamRadiotap.size() + dot11.size() + max_psdu);
 
   logger->info(
       "stream TX ready (legacy 6M OFDM, ch {}); reading length-prefixed PSDUs "
@@ -246,8 +246,8 @@ int main(int argc, char **argv) {
     }
 
     tx_buf.clear();
-    tx_buf.insert(tx_buf.end(), kRadiotapLegacy.begin(),
-                  kRadiotapLegacy.end());
+    tx_buf.insert(tx_buf.end(), kStreamRadiotap.begin(),
+                  kStreamRadiotap.end());
     tx_buf.insert(tx_buf.end(), dot11.begin(), dot11.end());
     tx_buf.insert(tx_buf.end(), psdu.begin(), psdu.end());
     bool ok = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());

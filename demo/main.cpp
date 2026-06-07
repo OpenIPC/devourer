@@ -29,6 +29,26 @@ static void packetProcessor(const Packet &packet) {
     printf("<devourer>RX pkt #%d (len=%zu)\n", g_rx_count, packet.Data.size());
     fflush(stdout);
   }
+  /* DEVOURER_RX_DUMP_ALL=1: emit a `<devourer-corrupt-any>` line for EVERY
+   * frame regardless of SA, with chip-flag bits and phy-soft metrics.
+   * Consumed by tools/precoder/corruption_survey.py for the FEC-design
+   * corruption-pattern survey. Pairs with DEVOURER_RX_KEEP_CORRUPTED to
+   * also pass through chip-FCS-error frames. The body is omitted from this
+   * line by design (a hot survey would inflate the log past usable size);
+   * pkt_len + the chip flags + phy metrics is what aggregates carry. */
+  static const bool dump_all = std::getenv("DEVOURER_RX_DUMP_ALL") != nullptr;
+  if (dump_all) {
+    printf("<devourer-corrupt-any>len=%zu crc_err=%u icv_err=%u "
+           "rate=%u rssi=%d,%d evm=%d,%d snr=%d,%d\n",
+           packet.Data.size(),
+           packet.RxAtrib.crc_err ? 1u : 0u,
+           packet.RxAtrib.icv_err ? 1u : 0u,
+           packet.RxAtrib.data_rate,
+           packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1],
+           packet.RxAtrib.evm[0], packet.RxAtrib.evm[1],
+           packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]);
+    fflush(stdout);
+  }
   /* TX-validation hook: detect frames whose SA matches the txdemo's hardcoded
    * injected beacon (57:42:75:05:d6:00). When running this RX demo against
    * one adapter while WiFiDriverTxDemo runs against another on the same
@@ -80,10 +100,21 @@ static void packetProcessor(const Packet &packet) {
           std::getenv("DEVOURER_RX_KEEP_CORRUPTED") != nullptr;
       const bool corrupted = packet.RxAtrib.crc_err || packet.RxAtrib.icv_err;
       if (stream_out && (!corrupted || keep_corrupted)) {
-        printf("<devourer-stream>rate=%u len=%zu crc_err=%u icv_err=%u body=",
+        /* Per-stream phy soft metrics (RSSI / EVM / SNR for paths A,B; on
+         * 8814AU paths C,D would also be non-zero but we surface only A,B
+         * here to stay aligned with <devourer-body>'s format). These are
+         * link-quality measurements at the PHY before decoding — same
+         * source as the Tier-2 diagnostics — so a consumer like
+         * corruption_analysis.py can correlate BER with link quality on a
+         * per-frame basis instead of relying on aggregated statistics. */
+        printf("<devourer-stream>rate=%u len=%zu crc_err=%u icv_err=%u "
+               "rssi=%d,%d evm=%d,%d snr=%d,%d body=",
                packet.RxAtrib.data_rate, packet.Data.size(),
                packet.RxAtrib.crc_err ? 1u : 0u,
-               packet.RxAtrib.icv_err ? 1u : 0u);
+               packet.RxAtrib.icv_err ? 1u : 0u,
+               packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1],
+               packet.RxAtrib.evm[0], packet.RxAtrib.evm[1],
+               packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]);
         for (size_t i = 24; i < packet.Data.size(); ++i)
           printf("%02x", packet.Data[i]);
         printf("\n");

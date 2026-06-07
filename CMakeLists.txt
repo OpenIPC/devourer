@@ -68,6 +68,8 @@ add_library(WiFiDriver
     src/RadioManagementModule.cpp
     src/RadioManagementModule.h
     src/Radiotap.c
+    src/RadiotapBuilder.cpp
+    src/RadiotapBuilder.h
     src/RtlJaguarDevice.cpp
     src/RtlJaguarDevice.h
     src/RtlUsbAdapter.cpp

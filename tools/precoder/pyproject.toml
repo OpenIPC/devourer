@@ -24,4 +24,4 @@ dev = [
 [tool.pytest.ini_options]
 # test_pipeline.py lives alongside the module; default (prepend) import mode
 # puts this dir on sys.path so `import encode_subcarriers` resolves.
-testpaths = ["test_pipeline.py"]
+testpaths = ["test_pipeline.py", "test_stream.py"]

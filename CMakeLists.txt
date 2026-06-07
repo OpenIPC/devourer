@@ -104,3 +104,11 @@ add_executable(PrecoderDemo
     txdemo/precoder_demo/main.cpp
 )
 target_link_libraries(PrecoderDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
+
+# Stream-link TX: reads length-prefixed PSDU bodies from stdin and transmits
+# one probe-request per body. Driven by tools/precoder/stream_tx.py — the
+# C++/Python split keeps libusb out of the framing math.
+add_executable(StreamTxDemo
+    txdemo/stream_tx_demo/main.cpp
+)
+target_link_libraries(StreamTxDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)

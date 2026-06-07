@@ -300,8 +300,10 @@ def test_decoder_drops_symbol_with_wrong_config():
     cfg = FecConfig(k=8, symbol_size=200)
     dec = FecDecoder(cfg)
     # Hand-craft an envelope with a different k.
-    bad_header = stream_fec._pack_header(
-        FecConfig(k=16, symbol_size=200), kreal=16, block_id=0)
+    # _pack_header now lives in stream_fec_raptorq (scheme-specific header).
+    import stream_fec_raptorq
+    bad_header = stream_fec_raptorq._pack_header(
+        16, kreal=16, symbol_size=200, block_id=0)
     out = dec.add_symbol(bad_header + b"\x00" * 200)
     assert out == []
     assert dec.symbols_dropped_bad_cfg == 1

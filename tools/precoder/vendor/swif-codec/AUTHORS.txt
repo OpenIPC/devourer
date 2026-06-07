@@ -1,0 +1,17 @@
+This file lists the authors of the swif-codec.
+This software has been developed in the context of the SWiF Codec IETF Hackathon project.
+Contact: Vincent Roca (vincent.roca@inria.fr)
+
+---
+Main contributors/developers (alphabetical order)
+
+Cedric Adjih (Inria, France)
+Oumaima Attia (Inria, France)
+Francois Michel (UCLouvain, Belgium)
+Vincent Roca (Inria, France)
+
+---
+Additional contributors (alphabetical order)
+
+Marie-Jose Montpetit (Research Affiliate, MIT Media Laboratory, USA)
+

@@ -397,11 +397,17 @@ def rx_thread(stop: StopBit, rx_stdout, tun_fd: int,
                 ip_pkts = fec_dec.add_symbol(frame.payload)
                 counters["fec_symbols_rx"] += 1
                 for pkt in ip_pkts:
+                    # FEC-recovered packets occasionally come back malformed
+                    # (RLC recovers all source symbols including zero-padded
+                    # ones at the window's tail; their length-prefixed packet
+                    # parse can yield bytes that aren't a valid IP header).
+                    # Drop those at the TUN boundary instead of taking the
+                    # whole bridge down — count for visibility.
                     try:
                         os.write(tun_fd, pkt)
                     except OSError as e:
-                        sys.stderr.write(f"tun write: {e}\n")
-                        return
+                        counters["malformed"] += 1
+                        continue
                     counters["rx_pkts"] += 1
                     counters["rx_bytes"] += len(pkt)
                 # Periodic expiry — cheap; once a second is plenty.
@@ -524,6 +530,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--fec-block-expire-ms", type=int, default=500,
                     help="ms before the RX side gives up on a block whose "
                          "first symbol arrived this long ago (default 500).")
+    ap.add_argument("--fec-scheme", default="rlc",
+                    choices=("rlc", "raptorq"),
+                    help="FEC scheme: 'rlc' (default, RFC 8681 sliding "
+                         "window, low-latency; wraps Inria swif-codec) or "
+                         "'raptorq' (RFC 6330 block code, throughput-"
+                         "optimised).")
+    ap.add_argument("--fec-window", type=int, default=32,
+                    help="RLC encoding window in source symbols (default "
+                         "32). RaptorQ ignores; uses --fec-k instead.")
+    ap.add_argument("--fec-density-threshold", type=int, default=4,
+                    help="RLC repair density (RFC 8681 DT, 0..15; default "
+                         "4). Higher = denser coefficient vectors → better "
+                         "recovery, more CPU.")
     args = ap.parse_args(argv)
 
     do_tx = args.mode in ("duplex", "duplex-split", "tx-only")
@@ -570,18 +589,30 @@ def main(argv: Optional[list[str]] = None) -> int:
     # tun MTU at the symbol size minus the per-packet length prefix so a
     # max-size packet still fits in one source symbol.
     fec_cfg = None
-    if args.fec_k > 0:
+    # RaptorQ default config still keys on --fec-k > 0 for backward compat;
+    # RLC is always-on whenever --fec-scheme is explicitly rlc (the default).
+    fec_on = (args.fec_k > 0) or (args.fec_scheme == "rlc")
+    if fec_on:
         _import_stream_fec()
+        # Per-scheme defaults: --fec-k is RaptorQ-only; in RLC mode we use
+        # --fec-window. We populate both fields of FecConfig regardless so
+        # the dataclass's invariants don't complain about k=0.
+        fec_k_effective = args.fec_k if args.fec_k > 0 else 16
         fec_cfg = stream_fec.FecConfig(
-            k=args.fec_k,
+            scheme=args.fec_scheme,
+            k=fec_k_effective,
+            window=args.fec_window,
             symbol_size=args.fec_symbol_size,
             overhead=args.fec_overhead,
+            density_threshold=args.fec_density_threshold,
         )
-        # body must hold the stream envelope (10 B) + inner FEC header
-        # (9 B) + the raptorq packet (≤ symbol_size B; cberner's lib caps
-        # packet bytes at the configured `mtu`).
-        min_body = (fec_cfg.symbol_size
-                    + stream_fec.FEC_HEADER_LEN
+        # body must hold the stream envelope (10 B) + scheme-specific inner
+        # header + the codec's packet (≤ symbol_size B).
+        scheme_header_len = (
+            stream_fec.FEC_HEADER_LEN if args.fec_scheme == "raptorq"
+            else 14  # stream_fec_rlc.RLC_HEADER_LEN
+        )
+        min_body = (fec_cfg.symbol_size + scheme_header_len
                     + stream.ENVELOPE_LEN)
         if args.body_bytes < min_body:
             sys.stderr.write(
@@ -616,8 +647,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "fec_blocks_decoded": 0, "fec_blocks_unrecoverable": 0,
     }
     dedup = SeqWindow(args.dedup_window) if args.dedup else None
-    fec_enc = stream_fec.FecEncoder(fec_cfg) if fec_cfg else None
-    fec_dec = stream_fec.FecDecoder(fec_cfg) if fec_cfg else None
+    fec_enc = stream_fec.make_encoder(fec_cfg) if fec_cfg else None
+    fec_dec = stream_fec.make_decoder(fec_cfg) if fec_cfg else None
     fec_lock = threading.Lock() if fec_enc else None
 
     if single_binary:

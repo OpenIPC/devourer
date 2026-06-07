@@ -107,14 +107,20 @@ static void packetProcessor(const Packet &packet) {
          * source as the Tier-2 diagnostics — so a consumer like
          * corruption_analysis.py can correlate BER with link quality on a
          * per-frame basis instead of relying on aggregated statistics. */
+        /* seq + tsfl: chip-side sequence number (12-bit u16) and TSF low
+         * (full 32-bit u32). Consumers can dedup by seq and measure
+         * one-way latency by diffing TSF against the host clock. Optional
+         * fields — pre-#84 regex consumers tolerate them via the same
+         * pass-through pattern. */
         printf("<devourer-stream>rate=%u len=%zu crc_err=%u icv_err=%u "
-               "rssi=%d,%d evm=%d,%d snr=%d,%d body=",
+               "rssi=%d,%d evm=%d,%d snr=%d,%d seq=%u tsfl=%u body=",
                packet.RxAtrib.data_rate, packet.Data.size(),
                packet.RxAtrib.crc_err ? 1u : 0u,
                packet.RxAtrib.icv_err ? 1u : 0u,
                packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1],
                packet.RxAtrib.evm[0], packet.RxAtrib.evm[1],
-               packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]);
+               packet.RxAtrib.snr[0], packet.RxAtrib.snr[1],
+               packet.RxAtrib.seq_num, packet.RxAtrib.tsfl);
         for (size_t i = 24; i < packet.Data.size(); ++i)
           printf("%02x", packet.Data[i]);
         printf("\n");

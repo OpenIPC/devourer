@@ -149,22 +149,34 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
   do {
     auto pattrib = rtl8812_query_rx_desc_status(pbuf.data());
 
-    if ((pattrib.crc_err) || (pattrib.icv_err)) {
-      _logger->info("RX Warning! crc_err={} "
-                    "icv_err={}, skip!",
-                    pattrib.crc_err, pattrib.icv_err);
-      break;
-    }
-
     auto pkt_offset = RXDESC_SIZE + pattrib.drvinfo_sz + pattrib.shift_sz +
                       pattrib.pkt_len; // this is offset for next package
 
+    /* The packet-length sanity check has to run BEFORE deciding what to do
+     * about CRC/ICV errors. If pkt_len is unreadable we can't find the next
+     * aggregate boundary either way, so we still have to give up. But a
+     * surviving descriptor with a bad-CRC body is recoverable: we can
+     * surface the (corrupted) packet to the consumer and advance to the
+     * next one in the same USB aggregate. */
     if ((pattrib.pkt_len <= 0) || (pkt_offset > pbuf.size())) {
       _logger->warn(
           "RX Warning!,pkt_len <= 0 or pkt_offset > transfer_len; pkt_len: "
           "{}, pkt_offset: {}, transfer_len: {}",
           pattrib.pkt_len, pkt_offset, pbuf.size());
       break;
+    }
+
+    /* Corrupted-frame surfacing: previously this was `break`, which threw
+     * away the bad frame AND every subsequent frame in the same USB
+     * aggregate (typically 4-8 frames). Now we log + continue: the packet
+     * still ends up in `ret` with crc_err / icv_err set on its RxAtrib so a
+     * consumer can either filter (existing behaviour) or analyse the
+     * corruption (corruption_analysis.py, FEC layers). The pkt_len check
+     * above already guards the slice math against a corrupted descriptor. */
+    if ((pattrib.crc_err) || (pattrib.icv_err)) {
+      _logger->debug("RX corrupted frame surfaced: crc_err={} icv_err={} "
+                     "pkt_len={}",
+                     pattrib.crc_err, pattrib.icv_err, pattrib.pkt_len);
     }
 
     if (pattrib.mfrag) {

@@ -200,7 +200,14 @@ int main(int argc, char **argv) {
     logger->info("DEVOURER_CHANNEL set — tuning TX to channel {}", channel);
   }
 
-  rtlDevice->SetTxPower(40);
+  /* DEVOURER_TX_POWER overrides the per-rate "txpower" register value
+   * (default 40, low single-digits for an attenuated/noisy bench). Useful
+   * for stress-testing the RX path's corruption handling — lowering this
+   * forces marginal SNR, which raises the chip's CRC-failure rate so the
+   * corrupted-frame surfacing path actually gets exercised. */
+  int tx_power = 40;
+  if (const char *p = std::getenv("DEVOURER_TX_POWER")) tx_power = std::atoi(p);
+  rtlDevice->SetTxPower(static_cast<uint8_t>(tx_power));
   rtlDevice->InitWrite(SelectedChannel{.Channel = static_cast<uint8_t>(channel),
                                        .ChannelOffset = 0,
                                        .ChannelWidth = CHANNEL_WIDTH_20});

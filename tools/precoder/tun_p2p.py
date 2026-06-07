@@ -88,6 +88,9 @@ _STREAM_RE = re.compile(
     r"<devourer-stream>rate=(?P<rate>\d+)\s+len=(?P<len>\d+)"
     r"(?:\s+crc_err=(?P<crc_err>\d+))?"
     r"(?:\s+icv_err=(?P<icv_err>\d+))?"
+    r"(?:\s+rssi=(?P<rssi>-?\d+,-?\d+))?"
+    r"(?:\s+evm=(?P<evm>-?\d+,-?\d+))?"
+    r"(?:\s+snr=(?P<snr>-?\d+,-?\d+))?"
     r"\s+body=(?P<hex>[0-9a-fA-F]*)"
 )
 

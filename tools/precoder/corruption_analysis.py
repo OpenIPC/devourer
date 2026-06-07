@@ -62,8 +62,43 @@ _STREAM_RE = re.compile(
     r"<devourer-stream>rate=(?P<rate>\d+)\s+len=(?P<len>\d+)"
     r"(?:\s+crc_err=(?P<crc_err>\d+))?"
     r"(?:\s+icv_err=(?P<icv_err>\d+))?"
+    r"(?:\s+rssi=(?P<rssi>-?\d+,-?\d+))?"
+    r"(?:\s+evm=(?P<evm>-?\d+,-?\d+))?"
+    r"(?:\s+snr=(?P<snr>-?\d+,-?\d+))?"
     r"\s+body=(?P<hex>[0-9a-fA-F]*)"
 )
+
+
+def _parse_pair(s: Optional[str]) -> Optional[tuple[int, int]]:
+    if not s:
+        return None
+    a, b = s.split(",")
+    return int(a), int(b)
+
+
+def _effective_snr(snr: Optional[tuple[int, int]]) -> Optional[int]:
+    """Pick the SNR value that actually drove decode quality.
+
+    The two-path field carries SNR for paths A and B; on single-antenna
+    USB sticks path B reads 0 (no signal, not "0 dB SNR"), so a naive
+    min(A,B) would always report 0 and the BER-vs-SNR view collapses.
+    `max(A,B)` works for both 1T1R (B is 0, A drives) and 2T2R single-
+    stream operation (the chip picks the stronger path for the only
+    stream). For an honest 2T2R two-stream analysis a finer model
+    would be needed; this is a single-stream PoC.
+    """
+    if snr is None:
+        return None
+    return max(snr)
+
+
+def _snr_bucket(snr: Optional[tuple[int, int]]) -> str:
+    """Group SNR into 5-dB buckets. Returns 'no-snr' when absent."""
+    eff = _effective_snr(snr)
+    if eff is None:
+        return "no-snr"
+    base = (eff // 5) * 5
+    return f"{base:>3d}-{base + 5} dB"
 
 
 def _expected_bodies(source: bytes, mtu: int, body_bytes: int,
@@ -116,6 +151,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     byte_pos_examined = collections.Counter()
     per_frame_byte_errs: list[int] = []
     per_frame_bit_errs: list[int] = []
+    # Per-frame phy metrics (parsed but only used when present).
+    snr_clean: list[int] = []
+    snr_corrupt: list[int] = []
+    # (snr_bucket, corrupted_or_not) -> count; for the BER-vs-SNR table.
+    bucket_frames: collections.Counter = collections.Counter()
+    bucket_bit_errors: collections.Counter = collections.Counter()
+    bucket_bits_compared: collections.Counter = collections.Counter()
 
     for line in sys.stdin:
         m = _STREAM_RE.search(line)
@@ -124,6 +166,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         total_captured += 1
         crc_err = int(m.group("crc_err") or 0)
         icv_err = int(m.group("icv_err") or 0)
+        snr = _parse_pair(m.group("snr"))
+        eff = _effective_snr(snr)
+        if eff is not None:
+            (snr_corrupt if crc_err or icv_err else snr_clean).append(eff)
         if crc_err or icv_err:
             total_corrupted += 1
         else:
@@ -156,6 +202,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         bit_errors += frame_bit_errs
         per_frame_byte_errs.append(frame_byte_errs)
         per_frame_bit_errs.append(frame_bit_errs)
+        bucket = _snr_bucket(snr)
+        bucket_frames[bucket] += 1
+        bucket_bit_errors[bucket] += frame_bit_errs
+        bucket_bits_compared[bucket] += compare_len * 8
 
     if not matched_seq:
         sys.stderr.write(
@@ -196,6 +246,31 @@ def main(argv: Optional[list[str]] = None) -> int:
             exam = byte_pos_examined[pos]
             pct = 100.0 * count / max(1, exam)
             print(f"  {pos:3d}   {count:5d}/{exam:5d}   {pct:5.1f}%")
+
+    # Phy-metrics correlation. Two views: distribution of weakest-path SNR
+    # for chip-clean vs chip-corrupt frames, and per-SNR-bucket BER.
+    if snr_clean or snr_corrupt:
+        def _stat(xs: list[int]) -> str:
+            if not xs:
+                return "n=0"
+            xs = sorted(xs)
+            n = len(xs)
+            return (f"n={n} min={xs[0]} p25={xs[n // 4]} "
+                    f"med={xs[n // 2]} p75={xs[(3 * n) // 4]} max={xs[-1]}")
+        print(f"\nphy SNR (stronger path, dB):")
+        print(f"  chip-clean    : {_stat(snr_clean)}")
+        print(f"  chip-corrupt  : {_stat(snr_corrupt)}")
+
+    if bucket_frames and any(b != "no-snr" for b in bucket_frames):
+        print(f"\nBER by SNR bucket (stronger path, 5-dB buckets):")
+        print(f"  bucket       frames   bits-cmp   bit-err    BER")
+        for bucket in sorted(bucket_frames):
+            n = bucket_frames[bucket]
+            bits = bucket_bits_compared[bucket]
+            errs = bucket_bit_errors[bucket]
+            ber = errs / max(1, bits)
+            print(f"  {bucket:>11s}   {n:6d}   {bits:8d}   {errs:6d}   "
+                  f"{ber:.3e}")
 
     return 0
 

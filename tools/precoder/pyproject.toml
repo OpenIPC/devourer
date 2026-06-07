@@ -1,0 +1,27 @@
+[project]
+name = "devourer-precoder"
+version = "0.1.0"
+description = "Pre-modulator subcarrier encoder for devourer — inverts the 802.11 BPSK/BCC TX pipeline so chosen OFDM data subcarriers carry chosen bits."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.23",
+]
+
+# Phase-B RF verification (tools/precoder/fft_capture.py) needs an SDR stack.
+# Kept optional so the encoder + smoke tests install with numpy alone:
+#   uv sync --extra sdr
+[project.optional-dependencies]
+sdr = [
+    "pyrtlsdr>=0.2.93",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7",
+]
+
+[tool.pytest.ini_options]
+# test_pipeline.py lives alongside the module; default (prepend) import mode
+# puts this dir on sys.path so `import encode_subcarriers` resolves.
+testpaths = ["test_pipeline.py"]

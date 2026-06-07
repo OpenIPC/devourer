@@ -43,6 +43,45 @@ static void packetProcessor(const Packet &packet) {
                hits, g_rx_count, packet.Data.size());
         fflush(stdout);
       }
+      /* DEVOURER_DUMP_SCRAMBLER=1: print the descrambler seed the chip
+       * recovered from this frame's SERVICE field. Consumed by
+       * tools/precoder/seed_probe.py --mode rx to learn the seed a precoder TX
+       * chip uses. CAVEAT: the seed is only trustworthy when *this* RX adapter
+       * is an RTL8814AU — the 8812/8821 RX descriptor doesn't expose it there
+       * (see FrameParser.cpp). On 8812/8821 prefer seed_probe.py --mode
+       * bruteforce. Gated + SA-filtered so it doesn't flood. */
+      static const bool dump_scrambler =
+          std::getenv("DEVOURER_DUMP_SCRAMBLER") != nullptr;
+      if (dump_scrambler && (hits <= 20 || hits % 100 == 0)) {
+        printf("<devourer-scrambler>seed=0x%02x rate=%u hits=%d len=%zu\n",
+               packet.RxAtrib.scrambler, packet.RxAtrib.data_rate, hits,
+               packet.Data.size());
+        fflush(stdout);
+      }
+      /* DEVOURER_DUMP_BODY=1: print the RX rate index (DESC_RATE*: 0x04=6M
+       * OFDM, 0x00=1M CCK, 0x0c+=HT/VHT MCS) and the 802.11 frame body
+       * (everything after the 24-byte mgmt header) as hex. Consumed by
+       * tests/precoder_roundtrip.py to confirm a PrecoderDemo frame flew as
+       * 6M OFDM and that its shaped PSDU bytes round-tripped intact — the
+       * two-adapter, no-SDR verification. First few hits only. */
+      static const bool dump_body = std::getenv("DEVOURER_DUMP_BODY") != nullptr;
+      if (dump_body && hits <= 5) {
+        /* Tier-2 health diagnostics alongside the byte mirror: rate (0x04 =
+         * 6M OFDM), per-stream RSSI/EVM/SNR (link quality — content-blind),
+         * crc (always 0: CRC-failed frames are dropped upstream, so reaching
+         * here is itself the decode-sanity signal). Then the body hex. */
+        printf("<devourer-body>rate=%u rssi=%d,%d evm=%d,%d snr=%d,%d crc=%d "
+               "len=%zu body=",
+               packet.RxAtrib.data_rate, packet.RxAtrib.rssi[0],
+               packet.RxAtrib.rssi[1], packet.RxAtrib.evm[0],
+               packet.RxAtrib.evm[1], packet.RxAtrib.snr[0],
+               packet.RxAtrib.snr[1], packet.RxAtrib.crc_err ? 1 : 0,
+               packet.Data.size());
+        for (size_t i = 24; i < packet.Data.size(); ++i)
+          printf("%02x", packet.Data[i]);
+        printf("\n");
+        fflush(stdout);
+      }
     }
   }
 }

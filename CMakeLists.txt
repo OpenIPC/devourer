@@ -112,3 +112,12 @@ add_executable(StreamTxDemo
     txdemo/stream_tx_demo/main.cpp
 )
 target_link_libraries(StreamTxDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
+
+# Stream-link DUPLEX: one binary, one chip, both directions. Combines the RX
+# loop from WiFiDriverDemo and the stdin-driven TX from StreamTxDemo —
+# stdin = length-prefixed PSDU bodies, stdout = <devourer-stream> lines.
+# tools/precoder/tun_p2p.py spawns this for --mode=duplex.
+add_executable(StreamDuplexDemo
+    txdemo/stream_duplex_demo/main.cpp
+)
+target_link_libraries(StreamDuplexDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)

@@ -60,6 +60,7 @@ proving per-subcarrier IQ at the antenna.
 from __future__ import annotations
 
 import argparse
+import collections
 import fcntl
 import os
 import re
@@ -218,9 +219,33 @@ def tx_thread(stop: StopBit, tun_fd: int, tx_stdin, body_bytes: int,
         stop.stop = True
 
 
+class SeqWindow:
+    """Sliding-window seq dedup. `size` keeps the last K seqs seen; the K+1'th
+    pushes out the oldest. Wrap-aware in the sense that re-using a u16 seq
+    after `size` other seqs have been seen is treated as a fresh packet (the
+    old entry has aged out), so the window must be sized large enough to
+    cover the worst-case TX-side --repeat fan-out at the expected packet
+    rate but small enough that legitimate seq reuse after wrap is allowed.
+    """
+
+    def __init__(self, size: int) -> None:
+        self.size = max(1, size)
+        self._set: set[int] = set()
+        self._order: collections.deque[int] = collections.deque()
+
+    def seen_or_add(self, seq: int) -> bool:
+        if seq in self._set:
+            return True
+        self._set.add(seq)
+        self._order.append(seq)
+        if len(self._order) > self.size:
+            self._set.discard(self._order.popleft())
+        return False
+
+
 def rx_thread(stop: StopBit, rx_stdout, tun_fd: int,
               shape: Optional[dict], seed: int, offset: int, entry_state: int,
-              counters: dict) -> None:
+              dedup: Optional[SeqWindow], counters: dict) -> None:
     try:
         for line in rx_stdout:
             if stop.stop:
@@ -237,6 +262,11 @@ def rx_thread(stop: StopBit, rx_stdout, tun_fd: int,
             )
             if frame is None:
                 counters["malformed"] += 1
+                continue
+            if dedup is not None and dedup.seen_or_add(frame.seq):
+                # Duplicate from --repeat fan-out (or a real radio repeat).
+                # Drop before it ever touches the IP stack.
+                counters["dedup_dropped"] += 1
                 continue
             try:
                 os.write(tun_fd, frame.payload)
@@ -284,9 +314,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                     default=str(repo / "build" / "StreamDuplexDemo"))
     ap.add_argument("--interval-ms", type=int, default=2)
     ap.add_argument("--repeat", type=int, default=1,
-                    help="blind per-frame replication (RX has no dedup in this "
-                         "v1, so >1 will send duplicate IP packets up the "
-                         "stack; default 1)")
+                    help="blind per-frame replication (combine with the "
+                         "default --dedup to collapse the fan-out at RX so "
+                         "the IP stack sees one packet per source packet)")
+    ap.add_argument("--no-dedup", dest="dedup", action="store_false",
+                    default=True,
+                    help="disable RX-side seq dedup (default: on). With "
+                         "--repeat>1 OR a real radio retransmission, leaving "
+                         "this on prevents duplicate IP packets reaching the "
+                         "kernel.")
+    ap.add_argument("--dedup-window", type=int, default=4096,
+                    help="dedup window size in distinct seqs (default 4096). "
+                         "Bigger = tolerates higher --repeat at higher packet "
+                         "rates; smaller = allows seq reuse sooner")
     ap.add_argument("--tun-name", default="dvr0")
     ap.add_argument("--tun-addr", default=None,
                     help="address/CIDR to assign to the TUN, e.g. "
@@ -356,7 +396,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     counters = {
         "tx_pkts": 0, "tx_bytes": 0, "tun_oversize": 0,
         "rx_pkts": 0, "rx_bytes": 0, "malformed": 0, "rate_mismatch": 0,
+        "dedup_dropped": 0,
     }
+    dedup = SeqWindow(args.dedup_window) if args.dedup else None
 
     if single_binary:
         duplex_proc = launch_duplex(args)
@@ -388,7 +430,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         t = threading.Thread(
             target=rx_thread, daemon=True,
             args=(stop, rx_stdout, tun_fd, shape,
-                  args.seed, args.offset, args.entry_state, counters),
+                  args.seed, args.offset, args.entry_state, dedup, counters),
         )
         t.start()
         threads.append(t)
@@ -409,6 +451,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     f"tun_p2p: tx={counters['tx_pkts']}pkt/"
                     f"{counters['tx_bytes']}B "
                     f"rx={counters['rx_pkts']}pkt/{counters['rx_bytes']}B "
+                    f"dedup-drop={counters['dedup_dropped']} "
                     f"mal={counters['malformed']} "
                     f"rate-mismatch={counters['rate_mismatch']} "
                     f"tun-oversize={counters['tun_oversize']}\n"

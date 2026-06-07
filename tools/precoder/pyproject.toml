@@ -6,6 +6,11 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.23",
+    # RaptorQ (RFC 6330) fountain-code FEC for the stream link's
+    # packet-erasure channel. cberner's Rust+PyO3 implementation has
+    # manylinux abi3 wheels on PyPI so `uv sync` doesn't need a Rust
+    # toolchain. Used by stream_fec.py / tun_p2p.py.
+    "raptorq>=2",
 ]
 
 # Phase-B RF verification (tools/precoder/fft_capture.py) needs an SDR stack.
@@ -24,4 +29,4 @@ dev = [
 [tool.pytest.ini_options]
 # test_pipeline.py lives alongside the module; default (prepend) import mode
 # puts this dir on sys.path so `import encode_subcarriers` resolves.
-testpaths = ["test_pipeline.py", "test_stream.py"]
+testpaths = ["test_pipeline.py", "test_stream.py", "test_stream_fec.py"]

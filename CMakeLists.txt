@@ -45,6 +45,8 @@ add_library(WiFiDriver
     hal/phydm/rtl8814a/Hal8814_PhyTables.h
 
     src/ieee80211_radiotap.h
+    src/BbDbgportReader.cpp
+    src/BbDbgportReader.h
     src/EepromManager.cpp
     src/EepromManager.h
     src/Firmware.h

@@ -385,3 +385,14 @@ std::array<uint32_t, 5> RtlJaguarDevice::get_queue_depth() const {
   }
   return out;
 }
+
+uint32_t RtlJaguarDevice::read_bb_dbgport(uint32_t selector) {
+  if (!_bb_dbgport) {
+    _bb_dbgport = std::make_unique<devourer::BbDbgportReader>(_device, _logger);
+  }
+  return _bb_dbgport->read_dbgport(selector);
+}
+
+bool RtlJaguarDevice::bb_dbgport_wedged() const {
+  return _bb_dbgport && _bb_dbgport->is_wedged();
+}

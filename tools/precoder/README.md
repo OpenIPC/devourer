@@ -122,6 +122,84 @@ tree: `0x8FC` dbgport is already poked at `HalModule.cpp:2167`, and `0x95C`
 (`rDMA_trigger_Jaguar2`, "ADC sample mode") is in `Hal8814PhyReg.h:190`.
 **Research spike** — undocumented register dance, BB-state brick risk.
 
+### Tier 4 — current status (dead-end as shipped, framework in tree)
+
+The PR that wired this up shipped the *framework* and verified the
+transport works, but not per-subcarrier IQ. Specifically:
+
+* **Transport confirmed.** `src/BbDbgportReader.{h,cpp}` wraps the
+  canonical "write u32 selector to `0x8FC` → read u32 result from
+  `0xFA0`" pattern with save/restore on `0x8FC`. The only in-tree user
+  of the same pair is `hal/rtl8814a/rtl8814a_phycfg.c:460-545`
+  (`phy_ADC_CLK_8814A`, A-cut 8814A only), which reads a "MAC active"
+  busy bit via this path — proving the transport is real.
+* **Per-subcarrier selector missing from the tree.** Realtek's phydm
+  source — which contains the `phydm_set_bb_dbg_port` / `phydm_get_bb_dbg_port_value`
+  helpers and, crucially, the **selector catalogue** that maps a u32
+  selector to a specific BB internal bus (CSI, AGC state, RF status, ...)
+  — is **not vendored** in this repo. `hal/phydm/` carries init tables
+  only. Without that catalogue, we can sweep selectors and read
+  whatever lands at `0xFA0`, but we can't claim "this selector value
+  routes the post-FFT IQ".
+* **`0x95C` ADC-DMA path stays on the to-do list.** That register is
+  the per-symbol ADC capture trigger; reading the resulting buffer is
+  via DMA, not BB-register poll. Needs a FW-mailbox dance that's also
+  not in-tree.
+
+#### Using the framework to look for a selector
+
+`DEVOURER_RX_DUMP_CSI=0x1a,0x20,0x40 ./build/WiFiDriverDemo` performs
+the save→write→read→restore dance for each selector on the first 8
+canonical-SA frames and emits
+
+```
+<devourer-csi>hit=1 selector=0x0000001a value=0x????????
+<devourer-csi>hit=1 selector=0x00000020 value=0x????????
+<devourer-csi>hit=1 selector=0x00000040 value=0x????????
+...
+```
+
+A "promising" selector is one where (a) `value` changes between
+canonical-SA hits (i.e. tracks RX content, not chip clock), and
+(b) the high half doesn't look like a status flag (no busy bit, no
+sticky 0xF...). Per-subcarrier IQ would be a packed `int16 i, int16 q`
+in a single u32, with selector encoding the subcarrier index in
+its low bits — that's the upstream phydm convention, but unverified
+here.
+
+`tools/precoder/csi_dump.py` parses `<devourer-csi>` lines and reports
+which selectors changed across frames, which stayed constant, and
+the per-bit toggle ratio (high = bus, low = status flag).
+
+#### Brick recovery if the chip stalls after a sweep
+
+Symptoms: RX stops producing `<devourer>RX pkt` lines, control transfers
+still succeed. The `BbDbgportReader` auto-detects this via a SYS_CFG
+sanity read after every selector and self-wedges — `<devourer-csi-wedged>`
+on stdout means subsequent selectors were skipped.
+
+Recovery ladder (each step is a fresh process invocation):
+1. Re-run without `DEVOURER_SKIP_RESET` — `libusb_reset_device` clears
+   most stalls.
+2. USB port-level reset (`tests/regress.py` reuses `usbreset` for the
+   8814 USB-IO mitigation; same mechanism here).
+3. Unplug-replug. No permanent damage has been observed in-tree from
+   `0x8FC` writes alone, but treat first runs as destructive until proven
+   otherwise.
+
+#### What would unblock real IQ capture
+
+1. Vendoring (or independently rediscovering) Realtek's phydm dbgport
+   selector catalogue. The variable name in the upstream FW is typically
+   `phydm_dbgport_sel` or similar; rtwpriv MP-tool dumps from a Realtek
+   reference platform would expose it.
+2. Or: implementing the `0x95C` ADC-DMA path. That gives raw ADC samples
+   (pre-FFT) at full bandwidth; an off-chip 64-point FFT would recover
+   per-subcarrier IQ. Larger scope, separate PR.
+
+Until one of those lands, this Tier stays "framework in tree, capture
+out of reach." `src/BbDbgportReader.h` carries the same warning.
+
 **Tier 5 — IQK TX→RX loopback** (`*`if it carries a full PPDU). The path-enable
 dance already lives in `Iqk8812a.cpp`/`Iqk8814a.cpp` (the `0x77…` writes). The
 risk isn't the regs — it's that IQK loopback carries the calibration *tone* via

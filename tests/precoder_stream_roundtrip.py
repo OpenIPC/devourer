@@ -51,7 +51,10 @@ import encode_subcarriers as enc  # noqa: E402
 
 DESC_RATE6M = 0x04
 _STREAM_RE = re.compile(
-    r"<devourer-stream>rate=(?P<rate>\d+) len=(?P<len>\d+) body=(?P<hex>[0-9a-fA-F]*)"
+    r"<devourer-stream>rate=(?P<rate>\d+)\s+len=(?P<len>\d+)"
+    r"(?:\s+crc_err=(?P<crc_err>\d+))?"
+    r"(?:\s+icv_err=(?P<icv_err>\d+))?"
+    r"\s+body=(?P<hex>[0-9a-fA-F]*)"
 )
 
 

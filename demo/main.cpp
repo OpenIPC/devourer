@@ -70,9 +70,20 @@ static void packetProcessor(const Packet &packet) {
        * (tools/precoder/stream_rx.py) to decode. Tag is distinct so the
        * regular dump_body capture stays uncluttered. */
       static const bool stream_out = std::getenv("DEVOURER_STREAM_OUT") != nullptr;
-      if (stream_out) {
-        printf("<devourer-stream>rate=%u len=%zu body=",
-               packet.RxAtrib.data_rate, packet.Data.size());
+      /* DEVOURER_RX_KEEP_CORRUPTED=1: surface the body even when the chip
+       * flagged CRC/ICV error. Default is to filter them out for the byte-
+       * stream consumer (stream_rx.py), since a body with a wrong tail is
+       * the byte-mode parser's worst-case input. The flag is the entry
+       * point for the corruption_analysis.py tool — by-design opt-in so
+       * accidental enablement doesn't cause IP-stack misery. */
+      static const bool keep_corrupted =
+          std::getenv("DEVOURER_RX_KEEP_CORRUPTED") != nullptr;
+      const bool corrupted = packet.RxAtrib.crc_err || packet.RxAtrib.icv_err;
+      if (stream_out && (!corrupted || keep_corrupted)) {
+        printf("<devourer-stream>rate=%u len=%zu crc_err=%u icv_err=%u body=",
+               packet.RxAtrib.data_rate, packet.Data.size(),
+               packet.RxAtrib.crc_err ? 1u : 0u,
+               packet.RxAtrib.icv_err ? 1u : 0u);
         for (size_t i = 24; i < packet.Data.size(); ++i)
           printf("%02x", packet.Data[i]);
         printf("\n");

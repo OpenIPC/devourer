@@ -6,9 +6,11 @@
 #include <functional>
 #include <iostream>
 #include <iomanip>
+#include <memory>
 #include <thread>
 
 #include "logger.h"
+#include "BbDbgportReader.h"
 #include "HalModule.h"
 #include "SelectedChannel.h"
 #include "EepromManager.h"
@@ -62,6 +64,13 @@ public:
   void start_queue_depth_poller(uint32_t interval_ms);
   std::array<uint32_t, 5> get_queue_depth() const;
 
+  /* F2 research helper: read a u32 from the BB debug port at `selector`,
+   * with save/restore around register 0x8FC. Lazy-constructs the reader
+   * on first call. Returns 0 if the chip wedged on a prior call. See
+   * BbDbgportReader.h for the brick-risk caveats. */
+  uint32_t read_bb_dbgport(uint32_t selector);
+  bool bb_dbgport_wedged() const;
+
 private:
   void StartWithMonitorMode(SelectedChannel selectedChannel);
   bool NetDevOpen(SelectedChannel selectedChannel);
@@ -69,6 +78,8 @@ private:
   std::array<std::atomic<uint32_t>, 5> _qd_snap{};
   std::thread _qd_thread;
   std::atomic<bool> _qd_stop{false};
+
+  std::unique_ptr<devourer::BbDbgportReader> _bb_dbgport;
 };
 
 /* Backwards-compatibility alias. External callers using the old name still

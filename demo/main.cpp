@@ -4,7 +4,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <libusb.h>
 
@@ -45,6 +47,43 @@ static const uint32_t g_qd_poll_ms = []() -> uint32_t {
   const char *e = std::getenv("DEVOURER_QUEUE_POLL_MS");
   return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
 }();
+
+/* DEVOURER_RX_DUMP_CSI=hex,hex,... (or "0x1a,0x20,0x40"): F2 research
+ * spike. On each canonical-SA RX frame (first N frames), read BB
+ * dbgport 0x8FC at each selector and emit
+ *   <devourer-csi>selector=0xNN value=0xNNNNNNNN
+ *
+ * This is a SELECTOR-SWEEP framework — the actual per-subcarrier IQ
+ * selector is missing from in-tree sources (see BbDbgportReader.h for
+ * details), so this knob exists so a researcher can try selectors at
+ * runtime, capture the resulting words, and look for plausible
+ * IQ-like patterns without recompiling. Throttled to the first 8
+ * canonical-SA frames to bound brick-risk.
+ *
+ * BRICK RISK: enabling this writes to 0x8FC while RX is live. If the
+ * chip stops responding after a sweep, the reader self-wedges (see
+ * <devourer-csi-wedged>) and refuses further writes; recover with
+ * libusb_reset_device / usbreset / power-cycle. */
+static const std::vector<uint32_t> g_csi_selectors = []() -> std::vector<uint32_t> {
+  const char *e = std::getenv("DEVOURER_RX_DUMP_CSI");
+  if (!e || !*e) return {};
+  std::vector<uint32_t> out;
+  std::string s = e;
+  size_t pos = 0;
+  while (pos < s.size()) {
+    size_t comma = s.find(',', pos);
+    std::string tok = s.substr(pos, comma == std::string::npos
+                                        ? std::string::npos
+                                        : comma - pos);
+    if (!tok.empty()) {
+      out.push_back(static_cast<uint32_t>(std::strtoul(tok.c_str(), nullptr, 0)));
+    }
+    if (comma == std::string::npos) break;
+    pos = comma + 1;
+  }
+  return out;
+}();
+static constexpr int kCsiMaxFrames = 8;
 
 static void packetProcessor(const Packet &packet) {
   /* C2H packets carry chip-side status updates, not 802.11 frames. Handle
@@ -119,6 +158,23 @@ static void packetProcessor(const Packet &packet) {
       if (hits <= 10 || hits % 100 == 0) {
         printf("<devourer-tx-hit>txdemo SA match: hits=%d total_rx=%d len=%zu\n",
                hits, g_rx_count, packet.Data.size());
+        fflush(stdout);
+      }
+      /* F2: BB-dbgport sweep on the first kCsiMaxFrames canonical-SA frames. */
+      if (!g_csi_selectors.empty() && g_rtl_device != nullptr &&
+          hits <= kCsiMaxFrames && !g_rtl_device->bb_dbgport_wedged()) {
+        for (uint32_t sel : g_csi_selectors) {
+          uint32_t v = g_rtl_device->read_bb_dbgport(sel);
+          if (g_rtl_device->bb_dbgport_wedged()) {
+            printf("<devourer-csi-wedged>after selector=0x%08x — reader "
+                   "refusing further writes. Recover with "
+                   "libusb_reset_device / usbreset.\n", sel);
+            fflush(stdout);
+            break;
+          }
+          printf("<devourer-csi>hit=%d selector=0x%08x value=0x%08x\n",
+                 hits, sel, v);
+        }
         fflush(stdout);
       }
       /* DEVOURER_DUMP_SCRAMBLER=1: print the descrambler seed the chip

@@ -110,7 +110,38 @@ static bool read_exact(FILE *f, void *buf, size_t n) {
 static std::mutex g_print_mu;
 static std::atomic<long> g_rx_hits{0};
 
+/* DEVOURER_TX_STATUS=1: surface chip-side C2H frames (TX-status reports
+ * from the same 8812/8821 chip we're TXing on). Best-effort 8814A TX_RPT
+ * decode mirrors demo/main.cpp; the C2H sub-type ID isn't enumerated in
+ * the vendored headers so the raw hex stays in the line. */
+static const bool g_tx_status_enabled =
+    std::getenv("DEVOURER_TX_STATUS") != nullptr;
+
 static void packet_processor(const Packet &packet) {
+  if (packet.RxAtrib.pkt_rpt_type == RX_PACKET_TYPE::C2H_PACKET) {
+    if (!g_tx_status_enabled) return;
+    std::lock_guard<std::mutex> lk(g_print_mu);
+    std::printf("<devourer-c2h>len=%zu bytes=", packet.Data.size());
+    for (size_t i = 0; i < packet.Data.size(); ++i)
+      std::printf("%02x", packet.Data[i]);
+    std::printf("\n");
+    if (packet.Data.size() >= 8) {
+      for (size_t hoff : {size_t(1), size_t(2)}) {
+        if (packet.Data.size() < hoff + 6) continue;
+        const uint8_t *h = packet.Data.data() + hoff;
+        uint8_t  queue   = h[0] & 0x1f;
+        uint8_t  retry   = h[2] & 0x3f;
+        uint16_t qt_raw  = static_cast<uint16_t>(h[3] | (h[4] << 8));
+        uint32_t qt_us   = static_cast<uint32_t>(qt_raw) * 256u;
+        uint8_t  rate    = h[5];
+        std::printf("<devourer-tx-status>hoff=%zu queue=%u retry=%u "
+                    "airtime_us=%u rate=%u\n",
+                    hoff, queue, retry, qt_us, rate);
+      }
+    }
+    std::fflush(stdout);
+    return;
+  }
   if (packet.Data.size() < 16) return;
   if (std::memcmp(packet.Data.data() + 10, kCanonicalSa, 6) != 0) return;
   long hits = ++g_rx_hits;

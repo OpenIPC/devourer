@@ -2,7 +2,15 @@
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
 
+#include <chrono>
 #include <cstdlib>
+
+/* Per-queue free-page registers (8814A only — 0x0230..0x0240 don't decode
+ * the same way on 8812/8821). Cross-checked against hal/rtl8814a_spec.h
+ * and src/HalModule.cpp's REG_FIFOPAGE_INFO_*_8814A constants. */
+static constexpr uint16_t kFifoPageInfoRegs_8814A[5] = {
+    0x0230, 0x0234, 0x0238, 0x023C, 0x0240,
+};
 
 RtlJaguarDevice::RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger)
     : _device{device},
@@ -327,4 +335,53 @@ bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {
   }
 
   return true;
+}
+
+RtlJaguarDevice::~RtlJaguarDevice() {
+  _qd_stop.store(true);
+  if (_qd_thread.joinable()) {
+    _qd_thread.join();
+  }
+}
+
+void RtlJaguarDevice::start_queue_depth_poller(uint32_t interval_ms) {
+  if (interval_ms == 0) return;
+  if (_qd_thread.joinable()) {
+    _logger->warn("queue-depth poller already running");
+    return;
+  }
+  if (_eepromManager->version_id.ICType != CHIP_8814A) {
+    _logger->warn(
+        "DEVOURER_QUEUE_POLL_MS set but chip is not 8814A — REG_FIFOPAGE_INFO_*"
+        " registers don't decode as per-queue free pages on this chip; poller"
+        " disabled");
+    return;
+  }
+  _qd_thread = std::thread([this, interval_ms]() {
+    /* libusb-1.0 allows concurrent transfers on different endpoints from
+     * different threads — vendor control (ep 0) doesn't conflict with the
+     * RX-loop's bulk-IN. The reads here are synchronous control transfers
+     * via _device.rtw_read32, so no completion-callback plumbing needed. */
+    while (!_qd_stop.load()) {
+      for (size_t i = 0; i < 5; ++i) {
+        if (_qd_stop.load()) break;
+        uint32_t v = _device.rtw_read32(kFifoPageInfoRegs_8814A[i]);
+        _qd_snap[i].store(v, std::memory_order_relaxed);
+      }
+      /* Sleep in short slices so destruction doesn't block for a full
+       * interval after _qd_stop is set. */
+      for (uint32_t slept = 0; slept < interval_ms && !_qd_stop.load();
+           slept += 50) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    }
+  });
+}
+
+std::array<uint32_t, 5> RtlJaguarDevice::get_queue_depth() const {
+  std::array<uint32_t, 5> out{};
+  for (size_t i = 0; i < 5; ++i) {
+    out[i] = _qd_snap[i].load(std::memory_order_relaxed);
+  }
+  return out;
 }

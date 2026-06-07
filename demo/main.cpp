@@ -1,11 +1,15 @@
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <thread>
 
 #include <libusb.h>
 
 #include "FrameParser.h"
+#include "RtlJaguarDevice.h"
 #include "RtlUsbAdapter.h"
 #include "WiFiDriver.h"
 
@@ -23,8 +27,62 @@ static constexpr uint16_t kRealtekProductIds[] = {
 };
 
 static int g_rx_count = 0;
+static RtlJaguarDevice *g_rtl_device = nullptr;
+
+/* DEVOURER_TX_STATUS=1: surface chip-side C2H frames (TX status reports,
+ * various diagnostic pings) on `<devourer-c2h>` with a raw hex dump, plus
+ * a best-effort decode of the 8814A TX_RPT payload layout. The C2H
+ * sub-type ID isn't enumerated in the vendored headers, so the decode is
+ * speculative — the raw hex stays in the line so an observer can
+ * validate the sub-type against on-air capture.
+ *
+ * DEVOURER_QUEUE_POLL_MS=N: periodic snapshot of the 8814A REG_FIFOPAGE_INFO
+ * registers, throttled to one `<devourer-queue>` line per second on RX hook.
+ * 8814-only (8812/8821 don't expose these registers as per-queue free pages). */
+static const bool g_tx_status_enabled =
+    std::getenv("DEVOURER_TX_STATUS") != nullptr;
+static const uint32_t g_qd_poll_ms = []() -> uint32_t {
+  const char *e = std::getenv("DEVOURER_QUEUE_POLL_MS");
+  return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
+}();
+
 static void packetProcessor(const Packet &packet) {
+  /* C2H packets carry chip-side status updates, not 802.11 frames. Handle
+   * them up front so the rest of this function (which assumes a normal
+   * 802.11 MPDU layout) doesn't try to read SA bytes from a C2H payload. */
+  if (packet.RxAtrib.pkt_rpt_type == RX_PACKET_TYPE::C2H_PACKET) {
+    if (g_tx_status_enabled) {
+      printf("<devourer-c2h>len=%zu bytes=", packet.Data.size());
+      for (size_t i = 0; i < packet.Data.size(); ++i)
+        printf("%02x", packet.Data[i]);
+      printf("\n");
+      /* Best-effort 8814A TX_RPT decode. The GET_8814A_C2H_TX_RPT_*
+       * macros (hal/rtl8814a_cmd.h:118-125) read from a "_Header" pointer
+       * — which, in upstream Realtek code, points one or two bytes past
+       * the C2H frame start (after cmd_id [+ seq]). We try the two most
+       * common offsets (1 and 2) and emit each; an observer can pick the
+       * one whose queue_id / rate / retry values look plausible. */
+      if (packet.Data.size() >= 8) {
+        for (size_t hoff : {size_t(1), size_t(2)}) {
+          if (packet.Data.size() < hoff + 6) continue;
+          const uint8_t *h = packet.Data.data() + hoff;
+          uint8_t  queue   = h[0] & 0x1f;
+          uint8_t  retry   = h[2] & 0x3f;
+          uint16_t qt_raw  = static_cast<uint16_t>(h[3] | (h[4] << 8));
+          uint32_t qt_us   = static_cast<uint32_t>(qt_raw) * 256u;
+          uint8_t  rate    = h[5];
+          printf("<devourer-tx-status>hoff=%zu queue=%u retry=%u "
+                 "airtime_us=%u rate=%u\n",
+                 hoff, queue, retry, qt_us, rate);
+        }
+      }
+      fflush(stdout);
+    }
+    return;
+  }
+
   ++g_rx_count;
+
   if (g_rx_count <= 10 || g_rx_count % 100 == 0) {
     printf("<devourer>RX pkt #%d (len=%zu)\n", g_rx_count, packet.Data.size());
     fflush(stdout);
@@ -238,6 +296,31 @@ int main() {
 
   WiFiDriver wifi_driver(logger);
   auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle);
+  g_rtl_device = rtlDevice.get();
+  std::atomic<bool> qd_emitter_stop{false};
+  std::thread qd_emitter;
+  if (g_qd_poll_ms > 0) {
+    logger->info("DEVOURER_QUEUE_POLL_MS={} — starting queue-depth poller",
+                 g_qd_poll_ms);
+    rtlDevice->start_queue_depth_poller(g_qd_poll_ms);
+    /* Self-driven emitter — ticks at the poll cadence so the queue snapshot
+     * surfaces even when the RX hook is sparse (e.g. broken-RX 8814 cells).
+     * Idempotent w.r.t. the poller; just reads the atomic snapshot. */
+    qd_emitter = std::thread([&qd_emitter_stop]() {
+      while (!qd_emitter_stop.load()) {
+        if (g_rtl_device != nullptr) {
+          auto q = g_rtl_device->get_queue_depth();
+          printf("<devourer-queue>q1=0x%08x q2=0x%08x q3=0x%08x q4=0x%08x "
+                 "q5=0x%08x\n", q[0], q[1], q[2], q[3], q[4]);
+          fflush(stdout);
+        }
+        for (uint32_t slept = 0; slept < g_qd_poll_ms && !qd_emitter_stop.load();
+             slept += 50) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+      }
+    });
+  }
   /* Default channel 36 (5 GHz) for the 8812 reference. Override with
    * DEVOURER_CHANNEL=N env var (e.g. DEVOURER_CHANNEL=6 for busy 2.4 GHz). */
   int channel = 36;

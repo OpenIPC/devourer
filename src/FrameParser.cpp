@@ -113,6 +113,18 @@ static rx_pkt_attrib rtl8812_query_rx_desc_status(uint8_t *pdesc) {
   pattrib.stbc = GET_RX_STATUS_DESC_STBC_8812(pdesc);
   pattrib.bw = GET_RX_STATUS_DESC_BW_8812(pdesc);
 
+  /* Descrambler seed recovered by the chip from the RX SERVICE field. This is
+   * read at the RTL8814AU descriptor offset (DWORD4 bits 9-15, i.e.
+   * GET_RX_STATUS_DESC_RX_SCRAMBLER_8814A in hal/rtl8814a_recv.h). NOTE: the
+   * 8812/8821 RX status descriptor does NOT lay the scrambler out here — that
+   * region holds the rate-info bits read just above (SPLCP/LDPC/STBC/BW occupy
+   * bits 0-5). The field is therefore only meaningful when the RX chip is an
+   * RTL8814AU; on 8812/8821 it reflects reserved/other bits and must not be
+   * trusted. Used solely by the DEVOURER_DUMP_SCRAMBLER diagnostic — for the
+   * precoder PoC (which targets 8812/8821 TX) the brute-force seed search in
+   * tools/precoder/seed_probe.py is the reliable path. */
+  pattrib.scrambler = (uint8_t)LE_BITS_TO_4BYTE(pdesc + 16, 9, 7);
+
   /* Offset 20 */
   /* pattrib.tsfl=(byte)GET_RX_STATUS_DESC_TSFL_8812(pdesc); */
 
@@ -192,6 +204,12 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
        * 8814AU. */
       ret.back().RxAtrib.snr[2] = static_cast<int8_t>(driver_data.csi_current[0]);
       ret.back().RxAtrib.snr[3] = static_cast<int8_t>(driver_data.csi_current[1]);
+      /* Per-stream RX EVM: streams 1/2 in rxevm, 3/4 in rxevm_cd (8814 only;
+       * 0 on 8812/8811). Link-quality only — see rx_pkt_attrib::evm. */
+      ret.back().RxAtrib.evm[0] = driver_data.rxevm[0];
+      ret.back().RxAtrib.evm[1] = driver_data.rxevm[1];
+      ret.back().RxAtrib.evm[2] = driver_data.rxevm_cd[0];
+      ret.back().RxAtrib.evm[3] = driver_data.rxevm_cd[1];
     } else {
       /* pkt_rpt_type == TX_REPORT1-CCX, TX_REPORT2-TX RTP,HIS_REPORT-USB HISR
        * RTP */

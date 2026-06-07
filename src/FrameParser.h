@@ -290,11 +290,19 @@ struct rx_pkt_attrib
     uint8_t stbc;
     uint8_t ldpc;
     uint8_t sgi;
+    /* Descrambler seed the chip recovered from this frame's SERVICE field.
+     * Trustworthy only on RTL8814AU (see FrameParser.cpp); surfaced for the
+     * DEVOURER_DUMP_SCRAMBLER hook in demo/main.cpp. */
+    uint8_t scrambler;
     /* RSSI / SNR per RF path: A, B (Jaguar 8812/8811) plus C, D (8814AU). On
      * non-8814 chips the [2..3] slots are zero — the upstream RX phy-status
      * report reserves those bytes when only 2 paths are active. */
     uint8_t rssi[4];
     int8_t snr[4];
+    /* Per-stream RX EVM (A,B on 8812/8811; plus C,D on 8814). Raw RX-status
+     * bytes — a link-quality metric, NOT a per-subcarrier or content signal.
+     * Surfaced for the DEVOURER_DUMP_BODY Tier-2 health diagnostic. */
+    int8_t evm[4];
     RX_PACKET_TYPE pkt_rpt_type;
 };
 

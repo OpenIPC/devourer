@@ -96,3 +96,11 @@ add_executable(WiFiDriverTxDemo
     txdemo/main.cpp
 )
 target_link_libraries(WiFiDriverTxDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
+
+# Pre-modulator subcarrier PoC: transmits PSDU bytes shaped by
+# tools/precoder/encode_subcarriers.py so chosen OFDM data subcarriers carry
+# chosen bits. Single-stream BPSK / HT MCS0 / BCC on 8812/8821/8811.
+add_executable(PrecoderDemo
+    txdemo/precoder_demo/main.cpp
+)
+target_link_libraries(PrecoderDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)

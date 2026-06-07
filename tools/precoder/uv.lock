@@ -24,6 +24,7 @@ dependencies = [
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.10.*'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "raptorq" },
 ]
 
 [package.optional-dependencies]
@@ -41,6 +42,7 @@ dev = [
 requires-dist = [
     { name = "numpy", specifier = ">=1.23" },
     { name = "pyrtlsdr", marker = "extra == 'sdr'", specifier = ">=0.2.93" },
+    { name = "raptorq", specifier = ">=2" },
 ]
 provides-extras = ["sdr"]
 
@@ -363,6 +365,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7d/0d/549bd94f1a0a402dc8cf64563a117c0f3765662e2e668477624baeec44d5/pytest-9.0.3.tar.gz", hash = "sha256:b86ada508af81d19edeb213c681b1d48246c1a91d304c6c81a427674c17eb91c", size = 1572165, upload-time = "2026-04-07T17:16:18.027Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d4/24/a372aaf5c9b7208e7112038812994107bc65a84cd00e0354a88c2c77a617/pytest-9.0.3-py3-none-any.whl", hash = "sha256:2c5efc453d45394fdd706ade797c0a81091eccd1d6e4bccfcd476e2b8e0ab5d9", size = 375249, upload-time = "2026-04-07T17:16:16.13Z" },
+]
+
+[[package]]
+name = "raptorq"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f4/5e/09c4d73b65c34868d24f02ddabcf4f13618982b00bcb12bc8da42e90ffeb/raptorq-2.0.0.tar.gz", hash = "sha256:89cc189525973bc4ff6495b4c3d28f0c1fd629b5c11dec4d3f21883ac8e011d3", size = 87500, upload-time = "2024-03-16T00:58:28.787Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/06/f4/85d0e976816b9e2aac6f35552690801e848a232453adb64d517c35169adb/raptorq-2.0.0-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:a7cc9ffb024969b3cb33ae4f3789431fae0e225b19ae8bad85bb67703e564532", size = 374706, upload-time = "2024-03-16T00:58:26.626Z" },
 ]
 
 [[package]]

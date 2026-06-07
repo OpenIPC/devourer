@@ -1,0 +1,6 @@
+# cffi build artifacts for the vendored swif-codec RLC extension.
+# Built locally by `uv run python _swif_build.py` (also auto-built on
+# first `import stream_fec_rlc`). See _swif_build.py and stream_fec_rlc.py.
+_swif_ext.c
+_swif_ext.*.so
+_swif_build_tmp/

@@ -65,6 +65,19 @@ static void packetProcessor(const Packet &packet) {
        * 6M OFDM and that its shaped PSDU bytes round-tripped intact — the
        * two-adapter, no-SDR verification. First few hits only. */
       static const bool dump_body = std::getenv("DEVOURER_DUMP_BODY") != nullptr;
+      /* DEVOURER_STREAM_OUT=1: like DEVOURER_DUMP_BODY but uncapped — print
+       * every canonical-SA frame's body for the stream RX driver
+       * (tools/precoder/stream_rx.py) to decode. Tag is distinct so the
+       * regular dump_body capture stays uncluttered. */
+      static const bool stream_out = std::getenv("DEVOURER_STREAM_OUT") != nullptr;
+      if (stream_out) {
+        printf("<devourer-stream>rate=%u len=%zu body=",
+               packet.RxAtrib.data_rate, packet.Data.size());
+        for (size_t i = 24; i < packet.Data.size(); ++i)
+          printf("%02x", packet.Data[i]);
+        printf("\n");
+        fflush(stdout);
+      }
       if (dump_body && hits <= 5) {
         /* Tier-2 health diagnostics alongside the byte mirror: rate (0x04 =
          * 6M OFDM), per-stream RSSI/EVM/SNR (link quality — content-blind),

@@ -32,7 +32,10 @@ using Action_ParsedRadioPacket = std::function<void(const Packet&)>;
 class RtlJaguarDevice {
   std::shared_ptr<EepromManager> _eepromManager;
   std::shared_ptr<RadioManagementModule> _radioManagement;
-  SelectedChannel _channel;
+  /* Last channel handed to SetMonitorChannel. Value-initialised so the
+   * 5GHz CCK clamp in send_packet reads Channel=0 (clamp off) rather than
+   * indeterminate garbage before the first channel set. */
+  SelectedChannel _channel{};
   RtlUsbAdapter _device;
   HalModule _halModule;
   Logger_t _logger;

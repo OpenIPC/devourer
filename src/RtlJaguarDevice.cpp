@@ -325,6 +325,11 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
 }
 
 void RtlJaguarDevice::SetMonitorChannel(SelectedChannel channel) {
+  /* Keep the device-level channel state current: send_packet's 5GHz
+   * CCK->OFDM clamp keys off _channel.Channel. Before this assignment
+   * existed, _channel was never written anywhere — the clamp read an
+   * uninitialised member and fired nondeterministically. */
+  _channel = channel;
   _radioManagement->set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                        channel.ChannelWidth);
 }

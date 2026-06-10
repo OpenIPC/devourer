@@ -638,7 +638,10 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
      *                                            (kept value; no usbmon
      *                                             trace for 0x0524 in
      *                                             current capture set)
-     *   0x0670 00 00 00 c0           0xc0000000  NAV-related
+     *   0x0670 00 00 00 c0           0xc0000000  REG_CAMCMD: BIT31|BIT30 =
+     *                                            security-CAM clear-all
+     *                                            (= kernel invalidate_cam_all
+     *                                            at usb_halinit.c:1236)
      *   0x0990 00 00 10 27           0x27100000  RA-table base
      *   0x0994 00 01 48 4c           0x4c480100
      *   0x0998 24 28 2c 30           0x302c2824
@@ -651,7 +654,7 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
     _device.rtw_write8(0x04c6, 0x04);           /* REG_QUEUE_CTRL */
     _device.rtw_write32(0x0520, 0x00002f0fu);   /* REG_TX_PTCL_CTRL */
     _device.rtw_write32(0x0524, 0x0f4fff00u);   /* REG_RD_CTRL — kept */
-    _device.rtw_write32(0x0670, 0xc0000000u);
+    _device.rtw_write32(0x0670, 0xc0000000u); /* REG_CAMCMD clear-all */
     /* Rate-adaptation table init (first-write values from cold-init
      * trace; kernel emits 3+ runtime updates from IQK that devourer
      * cannot reproduce — settle for the first/initial value). */
@@ -795,25 +798,15 @@ bool HalModule::InitPowerOn() {
   return true;
 }
 
-/* 8814AU's LLT (linked-list table) for TX FIFO pages is initialized by chip
- * hardware: set BIT0 of REG_AUTO_LLT (0x0208), then poll for the bit to
- * clear, meaning init is done. Mirrors upstream InitLLTTable8814A in
- * hal/rtl8814a/rtl8814a_hal_init.c. */
-bool HalModule::InitLLTTable8814A() {
-  constexpr uint16_t REG_AUTO_LLT_8814A = 0x0208;
-  uint8_t v = _device.rtw_read8(REG_AUTO_LLT_8814A);
-  _device.rtw_write8(REG_AUTO_LLT_8814A, (uint8_t)(v | BIT0));
-  for (int i = 0; i < 100; ++i) {
-    v = _device.rtw_read8(REG_AUTO_LLT_8814A);
-    if (!(v & BIT0)) {
-      _logger->info("InitLLTTable8814A: auto-init OK after {} iters", i);
-      return true;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  _logger->error("InitLLTTable8814A: timeout waiting for BIT0 to clear");
-  return false;
-}
+/* NOTE: there is deliberately no BIT0-style InitLLTTable8814A here. The
+ * vendor function (rtl8814a_hal_init.c:71-92) writes BIT0 of an 8-bit
+ * access at 0x208 and its poll loop tests a stale pre-write variable, so
+ * it never verifies anything. The only structured in-tree definition of
+ * 0x208's fields on this generation says BIT_AUTO_INIT_LLT = BIT(16)
+ * (hal_com_reg.h "2 AUTO_LLT" block), and the BIT16 trigger was verified
+ * on hardware to self-clear within 2 ms. The live trigger is the 32-bit
+ * BIT16 RMW in rtl8812au_hal_init above; keep FIFOPAGE_INFO/RQPN
+ * programming immediately before it. */
 
 bool HalModule::InitLLTTable8812A(uint8_t txpktbuf_bndy) {
   bool status;

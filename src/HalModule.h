@@ -66,7 +66,6 @@ private:
   bool rtl8812au_hal_init(uint8_t init_channel);
   bool InitPowerOn();
   bool InitLLTTable8812A(uint8_t txpktbuf_bndy);
-  bool InitLLTTable8814A();
   bool _LLTWrite_8812A(uint32_t address, uint32_t data);
   void _InitHardwareDropIncorrectBulkOut_8812A();
   bool HalPwrSeqCmdParsing(WLAN_PWR_CFG *PwrSeqCmd);

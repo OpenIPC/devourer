@@ -453,6 +453,14 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   // Nav limit , suggest by scott
   _device.rtw_write8(0x652, 0x0);
 
+  if (is_8814a) {
+    /* Kernel restores NAV_UPPER at the end of hal init via
+     * HW_VAR_NAV_UPPER (usb_halinit.c:1286 -> rtl8814a_hal_init.c:3794):
+     * ceil(WiFiNavUpperUs=30000 / 128us-unit) = 0xEB. Without it the
+     * zero-write above leaves the MAC honouring arbitrarily long NAV. */
+    _device.rtw_write8(REG_NAV_UPPER, 0xEB);
+  }
+
   /* 0x4c6[3] 1: RTS BW = Data BW */
   /* 0: RTS BW depends on CCA / secondary CCA result. */
   _device.rtw_write8(REG_QUEUE_CTRL,

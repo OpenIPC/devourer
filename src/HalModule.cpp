@@ -960,7 +960,10 @@ bool HalModule::HalPwrSeqCmdParsing(WLAN_PWR_CFG *PwrSeqCmd) {
           bPollingBit = true;
         } else {
           using namespace std::chrono_literals;
-          std::this_thread::sleep_for(10ms);
+          /* Kernel retries with rtw_udelay_os(10) — 10us, not 10ms
+           * (HalPwrSeqCmd.c:134). With maxPollingCnt=5000 the worst-case
+           * failing-poll budget is ~50ms upstream; 10ms here made it ~50s. */
+          std::this_thread::sleep_for(10us);
         }
 
         if (pollingCount++ > maxPollingCnt) {

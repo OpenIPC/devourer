@@ -1774,10 +1774,20 @@ uint8_t RadioManagementModule::phy_GetSecondaryChnl_8812() {
 }
 
 void RadioManagementModule::PHY_SetTxPowerLevel8812(uint8_t Channel) {
+  const bool is_8814a = _eepromManager->version_id.ICType == CHIP_8814A;
   for (uint8_t path = 0; (uint8_t)path < _eepromManager->numTotalRfPath;
        path++) {
     phy_set_tx_power_level_by_path(Channel, (RfPath)path);
-    PHY_TxPowerTrainingByPath_8812((RfPath)path);
+    /* TX power training is an 8812 mechanism: kernel
+     * PHY_SetTxPowerLevel8814 (rtl8814a_phycfg.c:636) only loops
+     * phy_set_tx_power_level_by_path — no training write exists anywhere
+     * in the 8814 tree, and its BB table inits 0xC54/0xE54 to 0. Running
+     * the 8812 trainee on 8814 wrote a non-zero word into 0xC54 and
+     * collapsed paths B/C/D onto 0xE54 (last-writer-wins) on every
+     * channel set. */
+    if (!is_8814a) {
+      PHY_TxPowerTrainingByPath_8812((RfPath)path);
+    }
   }
 }
 

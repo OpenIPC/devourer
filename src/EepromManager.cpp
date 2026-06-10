@@ -484,30 +484,32 @@ void EepromManager::LoadTxPowerInfo() {
       BW20_5G_Diff[path][0] = pg_msb_diff(v);
       OFDM_5G_Diff[path][0] = pg_lsb_diff(v);
     }
-    /* Ntx=2..4: 2 bytes each (BW40|BW20, OFDM|-) */
+    /* Ntx=2..4: ONE byte each (MSB=BW40, LSB=BW20). Unlike the 2.4G
+     * block, 5G packs the OFDM diffs separately below — the previous
+     * two-bytes-per-Ntx parse reused the 2.4G shape and shifted every
+     * field from byte 16 onward (kernel hal_load_pg_txpwr_info_path_5g,
+     * hal_com_phycfg.c:848-953). */
     for (int t = 1; t < 4; t++) {
       uint8_t v = efuse_eeprom_data[off++];
       BW40_5G_Diff[path][t] = pg_msb_diff(v);
       BW20_5G_Diff[path][t] = pg_lsb_diff(v);
-      v = efuse_eeprom_data[off++];
-      OFDM_5G_Diff[path][t] = pg_msb_diff(v);
-      /* LSB nibble of this byte is unused for 5G (no CCK on 5G). */
     }
-    /* 3 bytes BW80 diffs, Ntx=1..3 stored as nibble pairs:
-     *   byte 0: MSB=Ntx2-BW80, LSB=Ntx1-BW80
-     *   byte 1: MSB=Ntx4-BW80, LSB=Ntx3-BW80
-     *   byte 2: reserved
-     * Upstream uses a different layout per IC; the 8812 path packs as
-     * above per `hal_load_pg_txpwr_info_path_5g`. */
+    /* OFDM diff 2T~3T: one byte (MSB=2T, LSB=3T). */
     {
       uint8_t v = efuse_eeprom_data[off++];
-      BW80_5G_Diff[path][1] = pg_msb_diff(v);
-      BW80_5G_Diff[path][0] = pg_lsb_diff(v);
-      v = efuse_eeprom_data[off++];
-      BW80_5G_Diff[path][3] = pg_msb_diff(v);
-      BW80_5G_Diff[path][2] = pg_lsb_diff(v);
-      /* third byte ignored */
-      off++;
+      OFDM_5G_Diff[path][1] = pg_msb_diff(v);
+      OFDM_5G_Diff[path][2] = pg_lsb_diff(v);
+    }
+    /* OFDM diff 4T: one byte, LSB nibble only. */
+    {
+      uint8_t v = efuse_eeprom_data[off++];
+      OFDM_5G_Diff[path][3] = pg_lsb_diff(v);
+    }
+    /* BW80|BW160 diffs: four bytes, tx 0..3 (MSB=BW80, LSB=BW160 — no
+     * 160MHz support here, the LSB nibble is consumed for layout only). */
+    for (int t = 0; t < 4; t++) {
+      uint8_t v = efuse_eeprom_data[off++];
+      BW80_5G_Diff[path][t] = pg_msb_diff(v);
     }
   }
 

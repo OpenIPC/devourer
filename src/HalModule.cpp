@@ -28,6 +28,11 @@ constexpr uint16_t REG_TXPKTBUF_BCNQ_BDNY_8814A  = 0x0424;
 constexpr uint16_t REG_TXPKTBUF_BCNQ1_BDNY_8814A = 0x0456; /* per rtl8814a_spec.h:262 */
 constexpr uint16_t REG_MGQ_PGBNDY_8814A        = 0x047A;
 constexpr uint16_t REG_RXFF_PTR_8814A          = 0x011C;
+constexpr uint16_t REG_FAST_EDCA_VOVI_SETTING_8814A = 0x1448; /* per rtl8814a_spec.h:526 */
+constexpr uint16_t REG_FAST_EDCA_BEBK_SETTING_8814A = 0x144C; /* per rtl8814a_spec.h:527 */
+constexpr uint16_t REG_RXDMA_AGG_PG_TH_8814A   = 0x0280; /* per rtl8814a_spec.h:156 */
+constexpr uint16_t REG_RXDMA_MODE_8814A        = 0x0290; /* per rtl8814a_spec.h:160 */
+constexpr uint16_t REG_SW_AMPDU_BURST_MODE_CTRL_8814A = 0x04BC; /* per rtl8814a_spec.h:295 */
 
 constexpr uint32_t HPQ_PGNUM_8814A = 0x20; /* 32 pages per queue (USB) */
 constexpr uint32_t LPQ_PGNUM_8814A = 0x20;
@@ -276,7 +281,11 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   _InitBeaconParameters_8812A();
   _InitBeaconMaxError_8812A();
 
-  _InitBurstPktLen(); // added by page. 20110919
+  if (is_8814a) {
+    _InitBurstPktLen_8814A();
+  } else {
+    _InitBurstPktLen(); // added by page. 20110919
+  }
 
   // Init CR MACTXEN, MACRXEN after setting RxFF boundary REG_TRXFF_BNDY to
   // patch Hw bug which Hw initials RxFF boundry size to a value which is larger
@@ -1959,6 +1968,57 @@ void HalModule::_InitBurstPktLen() {
   /* ARFB table 12 for 11ac 24G 2SS */
   _device.rtw_write32(REG_ARFR3_8812, 0x00000015);
   _device.rtw_write32(REG_ARFR3_8812 + 4, 0xffcff000);
+}
+
+/* Port of upstream 8814 _InitBurstPktLen (usb_halinit.c). The 8812 body
+ * above must NOT run on 8814A: its 0x456 write (REG_AMPDU_MAX_TIME_8812,
+ * "suggested by Zhilin") lands on REG_TXPKTBUF_BCNQ1_BDNY_8814A and
+ * corrupts the beacon-queue TX-buffer boundary programmed by
+ * _InitQueueReservedPage_8814AUsb; the USTIME_TSF/EDCA = 0x50 writes are
+ * 8812's 80MHz-clock value where the 8814 MAC table keeps 0x64; and the
+ * PIFS/MAX_AGGR/ARFR/RSV_CTRL pokes have no counterpart in the kernel's
+ * 8814 init. */
+void HalModule::_InitBurstPktLen_8814A() {
+  using namespace rtl8814a;
+
+  /* yx_qi 131128 move to 0x1448, 144c */
+  _device.rtw_write32(REG_FAST_EDCA_VOVI_SETTING_8814A, 0x08070807);
+  _device.rtw_write32(REG_FAST_EDCA_BEBK_SETTING_8814A, 0x08070807);
+
+  /* check device operation speed: SS 0xff bit7 */
+  const bool supportUsb3 = (_device.rtw_read8(0xff) & BIT7) == 0;
+  if (!supportUsb3) { /* USB2/1.1 Mode */
+    /* Kernel keys this off UsbBulkOutSize (512 on high-speed, 64 on
+     * full-speed). */
+    if (_device.speed() == LIBUSB_SPEED_HIGH) {
+      /* set burst pkt len=512B */
+      _device.rtw_write8(REG_RXDMA_MODE_8814A, 0x1e);
+    } else {
+      /* set burst pkt len=64B */
+      _device.rtw_write8(REG_RXDMA_MODE_8814A, 0x2e);
+    }
+    _device.rtw_write16(REG_RXDMA_AGG_PG_TH_8814A, 0x2005); /* dmc agg th 20K */
+  } else { /* USB3 Mode */
+    /* set burst pkt len=1k */
+    _device.rtw_write8(REG_RXDMA_MODE_8814A, 0x0e);
+    _device.rtw_write16(REG_RXDMA_AGG_PG_TH_8814A, 0x0a05); /* dmc agg th 20K */
+
+    /* set Reg 0xf008[3:4] to 2'00 to disable U1/U2 Mode to avoid 2.5G spur
+     * in USB3.0. added by page, 20120712 */
+    _device.rtw_write8(0xf008, (uint8_t)(_device.rtw_read8(0xf008) & 0xE7));
+    /* to avoid usb 3.0 H2C fail */
+    _device.rtw_write16(0xf002, 0);
+
+    /* turn off the LDPC pre-TX */
+    _device.rtw_write8(
+        REG_SW_AMPDU_BURST_MODE_CTRL_8814A,
+        (uint8_t)(_device.rtw_read8(REG_SW_AMPDU_BURST_MODE_CTRL_8814A) &
+                  ~BIT6));
+  }
+
+  /* Upstream tail: `if (pHalData->AMPDUBurstMode) write8(0x4BC, 0x5F)` —
+   * AMPDUBurstMode is never assigned anywhere in the kernel tree
+   * (zero-initialised false), so that write never runs there either. */
 }
 
 bool HalModule::PHY_BBConfig8812() {

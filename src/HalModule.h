@@ -120,6 +120,7 @@ private:
   void _InitBeaconParameters_8812A();
   void _InitBeaconMaxError_8812A();
   void _InitBurstPktLen();
+  void _InitBurstPktLen_8814A();
 
   bool PHY_BBConfig8812();
   bool phy_BB8812_Config_ParaFile();

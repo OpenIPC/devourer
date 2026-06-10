@@ -57,6 +57,7 @@ public:
 
   uint16_t idVendor() const { return _idVendor; }
   uint16_t idProduct() const { return _idProduct; }
+  enum libusb_speed speed() const { return usbSpeed; }
 
   bool AutoloadFailFlag = false;
   bool EepromOrEfuse = false;

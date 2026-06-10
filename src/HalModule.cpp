@@ -115,7 +115,8 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   auto regCr = _device.rtw_read8(REG_CR);
   _logger->info("power-on :REG_SYS_CLKR 0x09=0x{:X}. REG_CR 0x100=0x{:X}",
                 (int)value8, (int)regCr);
-  if ((value8 & BIT3) != 0 && (regCr != 0 && regCr != 0xEA)) {
+  const bool macAlreadyOn = (value8 & BIT3) != 0 && (regCr != 0 && regCr != 0xEA);
+  if (macAlreadyOn) {
     /* pHalData.bMACFuncEnable = TRUE; */
     _logger->info("MAC has already power on");
   } else {
@@ -155,9 +156,21 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
    * (set the env, run devourer twice with no power-cycle, confirm the 2nd run
    * does not wedge AND cold init is unaffected) before it can become default. */
   if (is_8814a && std::getenv("DEVOURER_8814_DEINIT_BEFORE_INIT") != nullptr) {
-    _logger->info("8814 deinit-before-init: running card_disable_flow");
-    if (!HalPwrSeqCmdParsing(rtl8814A_card_disable_flow)) {
-      _logger->warn("8814 deinit-before-init: card_disable_flow failed");
+    if (macAlreadyOn) {
+      /* Kernel card-disable prologue (hal_carddisable_8814,
+       * usb_halinit.c:1394-1398): quiesce MAC DMA first ("stop rx"), then
+       * run the disable flow. The kernel also only card-disables a chip
+       * whose HW init completed (usb_halinit.c:1453) — mirror that with
+       * the warm-boot detect above rather than feeding ACT_TO_CARDEMU to
+       * a cold chip, a path the kernel never exercises. */
+      _logger->info("8814 deinit-before-init: running card_disable_flow");
+      _device.rtw_write8(REG_CR, 0x0); /* stop rx */
+      if (!HalPwrSeqCmdParsing(rtl8814A_card_disable_flow)) {
+        _logger->warn("8814 deinit-before-init: card_disable_flow failed");
+      }
+    } else {
+      _logger->info(
+          "8814 deinit-before-init: chip is cold, skipping card_disable_flow");
     }
   }
 
@@ -892,6 +905,16 @@ bool HalModule::HalPwrSeqCmdParsing(WLAN_PWR_CFG *PwrSeqCmd) {
       cutMask = _eepromManager->version_id.ChipType == NORMAL_CHIP
                     ? PWR_CUT_A_MSK
                     : PWR_CUT_TESTCHIP_MSK;
+    } else if (_eepromManager->version_id.ICType == CHIP_8814A) {
+      /* The kernel passes the chip-independent CONSTANT
+       * (u8)~PWR_CUT_TESTCHIP_MSK for both the 8814 enable and disable
+       * flows (usb_halinit.c:217, :1398) — it never derives this mask
+       * from the chip's real cut, so the "cut extraction from SYS_CFG is
+       * untrustworthy" concern above doesn't apply here. Effect: the
+       * test-chip-only entries (e.g. card-disable's 0x0002[0]=0 + 2us
+       * delay, and five analog writes in the enable flow) are skipped,
+       * exactly as on the kernel. */
+      cutMask = (uint8_t)~PWR_CUT_TESTCHIP_MSK;
     }
     if (!(GET_PWR_CFG_CUT_MASK(PwrCfgCmd) & cutMask)) {
       AryIdx++;

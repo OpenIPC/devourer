@@ -187,6 +187,8 @@ private:
   void Hal_ReadAmplifierType_8812A();
   void hal_ReadPAType_8812A();
   void Hal_ReadRFEType_8812A();
+  void Hal_ReadRFEType_8814A();
+  void hal_ReadAmplifierType_8814A();
   void hal_ReadUsbType_8812AU();
 };
 

@@ -500,12 +500,17 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   _device.rtw_write8(REG_SDIO_CTRL_8812, 0x0);
   _device.rtw_write8(REG_ACLK_MON, 0x0);
 
-  /* USB Host Read PWM. All chip families: write 0. Earlier hypothesis
+  /* USB Host Read PWM. 8812/8821: write 0. Earlier hypothesis
    * (8821 needing 0x84 "leave LPS" wake) was wrong — usbmon trace of
    * aircrack-ng/88XXau on the same T2U Plus shows kernel writes 0x00
    * here, not 0x84. The LPS-leave flow in Hal8821APwrSeq.h is only
-   * traversed when actually leaving LPS, not during init. */
-  _device.rtw_write8(REG_USB_HRPWM, 0);
+   * traversed when actually leaving LPS, not during init.
+   * 8814: the kernel has this init write commented out
+   * (usb_halinit.c:1354); its only live REG_USB_HRPWM writes are on the
+   * LPS path, which monitor mode never enters. Skip to match. */
+  if (!is_8814a) {
+    _device.rtw_write8(REG_USB_HRPWM, 0);
+  }
 
   // TODO:
   ///* ack for xmit mgmt frames. */

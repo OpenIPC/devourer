@@ -187,7 +187,7 @@ void FirmwareManager::FirmwareDownload_8814A() {
   uint32_t fw_len = static_cast<uint32_t>(blob.len);
 
   const uint16_t firmwareVersion =
-      static_cast<uint16_t>(GET_FIRMWARE_HDR_VERSION_8812(fw + 4));
+      static_cast<uint16_t>(GET_FIRMWARE_HDR_VERSION_8812(fw));
   const uint16_t firmwareSignature =
       static_cast<uint16_t>(GET_FIRMWARE_HDR_SIGNATURE_8812(fw));
   _logger->info("FirmwareDownload_8814A: fw_ver={} sig=0x{:X} blob={} bytes",

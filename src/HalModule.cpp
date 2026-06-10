@@ -1795,6 +1795,20 @@ void HalModule::init_UsbAggregationSetting_8812A() {
 }
 
 void HalModule::usb_AggSettingTxUpdate_8812A() {
+  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+    /* Kernel usb_AggSettingTxUpdate_8814A runs with UsbTxAggMode=1 and
+     * UsbTxAggDescNum=3 (wifi_spec=0 default): program the block-descriptor
+     * count into REG_TDECTRL[7:4] and REG_TDECTRL+3 (0x20B) = DescNum<<1.
+     * Devourer still submits one frame per bulk URB, but this is part of
+     * the reference TXDMA state the kernel chip runs with. */
+    constexpr uint8_t kUsbTxAggDescNum = 3;
+    uint32_t value32 = _device.rtw_read32(REG_TDECTRL);
+    value32 &= ~(BLK_DESC_NUM_MASK << BLK_DESC_NUM_SHIFT);
+    value32 |= (kUsbTxAggDescNum & BLK_DESC_NUM_MASK) << BLK_DESC_NUM_SHIFT;
+    _device.rtw_write32(REG_TDECTRL, value32);
+    _device.rtw_write8(REG_TDECTRL + 3, kUsbTxAggDescNum << 1);
+    return;
+  }
   if (_usbTxAggMode) {
     uint32_t value32 = _device.rtw_read32(REG_TDECTRL);
     value32 = value32 & ~(BLK_DESC_NUM_MASK << BLK_DESC_NUM_SHIFT);

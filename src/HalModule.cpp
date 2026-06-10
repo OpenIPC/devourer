@@ -3259,6 +3259,16 @@ void HalModule::phydm_SetIgiFloor_Jaguar() {
    * kernel driver. Match kernel by writing the floor once here. */
   _device.phy_set_bb_reg(rA_IGI_Jaguar, bMaskByte0, 0x1c);
   _device.phy_set_bb_reg(rB_IGI_Jaguar, bMaskByte0, 0x1c);
+  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+    /* 4-path chip: kernel DIG always writes the same IGI to all four
+     * paths (phydm_write_dig_reg covers 0xC50/0xE50/0x1850/0x1A50 for
+     * ODM_IC_AC_4SS). Flooring only A/B left C/D at the 0x20 BB-table
+     * seed — a 4 dB per-path gain imbalance the kernel never has, which
+     * skews MRC combining and per-path RSSI. (0x1850/0x1A50 =
+     * rC_IGI_Jaguar2 / rD_IGI_Jaguar2.) */
+    _device.phy_set_bb_reg(0x1850, bMaskByte0, 0x1c);
+    _device.phy_set_bb_reg(0x1A50, bMaskByte0, 0x1c);
+  }
 }
 
 void HalModule::PHY_BB8812_Config_1T() {

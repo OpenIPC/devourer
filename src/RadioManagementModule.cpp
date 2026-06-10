@@ -905,9 +905,13 @@ void RadioManagementModule::phy_SetRFEReg8814A(BandType Band) {
   } else {
     switch (rfe_type) {
     case 2:
-      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, bMaskDWord, 0x33173717);
-      _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar, bMaskDWord, 0x33173717);
-      _device.phy_set_bb_reg(0x18B4, bMaskDWord, 0x33173717);
+      /* Kernel PHY_SetRFEReg8814A 5G case 2: 0x37173717 on A/B/C — the
+       * previous 0x33173717 carried rfe-1's [27:24] nibble (copy slip
+       * between adjacent cases; flagged independently by two audit
+       * passes against the rtl8814au reference). */
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, bMaskDWord, 0x37173717);
+      _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar, bMaskDWord, 0x37173717);
+      _device.phy_set_bb_reg(0x18B4, bMaskDWord, 0x37173717);
       _device.phy_set_bb_reg(0x1AB4, bMaskDWord, 0x77177717);
       _device.phy_set_bb_reg(0x1ABC, 0x0FF00000, 0x37);
       break;

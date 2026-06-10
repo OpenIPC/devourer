@@ -133,6 +133,27 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
    * functions that do diverge dispatch internally on ICType. */
   const bool is_8814a = _eepromManager->version_id.ICType == CHIP_8814A;
   const bool is_8821 = _eepromManager->version_id.ICType == CHIP_8821;
+
+  /* Experimental, env-gated (default OFF): deinit-before-init for the 8814.
+   * The 8814 path below skips BOTH rtl8812au_hw_reset() (the
+   * "DEINIT_BEFORE_INIT" double-init guard) and InitPowerOn() — it relies on
+   * the 242-op rtw88-mimic inside FirmwareDownload_8814A instead. So a
+   * WARM/dirty chip (a re-run without a cold USB Vbus power-cycle, or after
+   * rtw88_8814au auto-bound it) is never reset: RX bulk-IN wedges (~10 frames
+   * then LIBUSB_ERROR_TIMEOUT) and TX goes 0 on-air, until a Vbus drop. The
+   * kernel avoids this by card_disable-on-unbind (CardDisableRTL8814AU runs
+   * Rtl8814A_NIC_DISABLE_FLOW); devourer never powers the chip off. Mirror it
+   * as a deinit-before-init here. GATED: the 8814 PWR_SEQ has a known
+   * cut-mask-filter interaction with fwdl, so this needs clean-rig validation
+   * (set the env, run devourer twice with no power-cycle, confirm the 2nd run
+   * does not wedge AND cold init is unaffected) before it can become default. */
+  if (is_8814a && std::getenv("DEVOURER_8814_DEINIT_BEFORE_INIT") != nullptr) {
+    _logger->info("8814 deinit-before-init: running card_disable_flow");
+    if (!HalPwrSeqCmdParsing(rtl8814A_card_disable_flow)) {
+      _logger->warn("8814 deinit-before-init: card_disable_flow failed");
+    }
+  }
+
   if (!is_8814a) {
     if (!is_8821) {
       _device.rtw_write8(REG_RF_CTRL, 5);

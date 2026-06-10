@@ -2201,10 +2201,28 @@ bool HalModule::odm_config_bb_with_header_file(odm_bb_config_type config_type) {
 
 void HalModule::hal_set_crystal_cap(uint8_t crystal_cap) {
   crystal_cap = (uint8_t)(crystal_cap & 0x3F);
+  const uint32_t reg_val = (uint32_t)(crystal_cap | (crystal_cap << 6));
 
-  /* write 0x2C[30:25] = 0x2C[24:19] = CrystalCap */
-  _device.phy_set_bb_reg(REG_MAC_PHY_CTRL, 0x7FF80000u,
-                         (uint8_t)(crystal_cap | (crystal_cap << 6)));
+  /* The XTAL-trim field of 0x2C sits at different bit positions per chip
+   * (upstream phydm_cfotracking.c::odm_set_crystal_cap):
+   *   8812A: 0x2C[30:25] = 0x2C[24:19]  -> mask 0x7FF80000
+   *   8821A: 0x2C[23:18] = 0x2C[17:12]  -> mask 0x00FFF000
+   *   8814A: 0x2C[26:21] = 0x2C[20:15]  -> mask 0x07FF8000
+   * The 8812 mask was applied to every chip — on 8814 the cap landed 4
+   * bits high (real trim field untouched, bits [30:27] clobbered), i.e.
+   * a carrier-frequency offset on TX and RX. */
+  switch (_eepromManager->version_id.ICType) {
+  case CHIP_8814A:
+    _device.phy_set_bb_reg(REG_MAC_PHY_CTRL, 0x07FF8000u, reg_val);
+    break;
+  case CHIP_8821:
+    _device.phy_set_bb_reg(REG_MAC_PHY_CTRL, 0x00FFF000u, reg_val);
+    break;
+  default:
+    /* write 0x2C[30:25] = 0x2C[24:19] = CrystalCap */
+    _device.phy_set_bb_reg(REG_MAC_PHY_CTRL, 0x7FF80000u, reg_val);
+    break;
+  }
 }
 
 static uint32_t array_mp_8812a_phy_reg_mp[] = {
@@ -2668,6 +2686,25 @@ void HalModule::phy_RF6052_Config_ParaFile_8814() {
       break;
     }
   }
+
+  /* Kernel PHY_RFConfig8814A tail (rtl8814a_rf6052.c:143-146): copy path
+   * A's RC-calibration word (RF_RCK1_Jaguar = RF 0x1C) to paths B/C/D so
+   * all chains run the same RC filter trim. Path A is readable; B/C/D
+   * writes take effect even though they can't be read back (see note
+   * below). */
+  {
+    /* RF_RCK1_Jaguar (0x1c) comes from Hal8812PhyReg.h. */
+    const uint32_t rck1 = _radioManagementModule->phy_query_rf_reg(
+        RfPath::RF_PATH_A, RF_RCK1_Jaguar, 0xfffff);
+    _radioManagementModule->phy_set_rf_reg(RfPath::RF_PATH_B, RF_RCK1_Jaguar,
+                                           0xfffff, rck1);
+    _radioManagementModule->phy_set_rf_reg(RfPath::RF_PATH_C, RF_RCK1_Jaguar,
+                                           0xfffff, rck1);
+    _radioManagementModule->phy_set_rf_reg(RfPath::RF_PATH_D, RF_RCK1_Jaguar,
+                                           0xfffff, rck1);
+    _logger->info("8814A RCK1 sync: RF-A[0x1c]=0x{:05x} copied to B/C/D", rck1);
+  }
+
   /* Verify path A/B RF reads return sensible values. NOTE: paths C/D do
    * not support RF read-back via the standard 3-wire SI/PI mechanism on
    * 8814 — rtw88's rtw88xxa_phy_read_rf only indexes paths A/B (rf_phy_num

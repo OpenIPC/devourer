@@ -914,6 +914,27 @@ void RadioManagementModule::phy_SetRFEReg8814A(BandType Band) {
   }
 }
 
+void RadioManagementModule::InitRFEGpio8814A() {
+  /* Mirror of the kernel PHY_SetRFEReg8814A(bInit=TRUE) branch
+   * (rtl8814a_phycfg.c:1026-1039, called once from usb_halinit.c:1279).
+   * Enables the GPIO pins that physically drive the external RFE (PA + T/R
+   * antenna switch). devourer's per-band phy_SetRFEReg8814A programs only the
+   * RFE pinmux *functions* (0xCB0/0xEB0/0x18B4/0x1AB4); without this one-time
+   * pin-select the pins are never enabled as RFE outputs, so the external
+   * PA/T-R switch never engages on TX — TX submits succeed (err:0) but nothing
+   * reaches the air, while RX still works (issue surfaced after the chip
+   * stopped inheriting a prior kernel-set GPIO state). */
+  const auto rfe_type = _eepromManager->rfe_type;
+  constexpr uint16_t REG_GPIO_IO_SEL_8814A = 0x0042; /* byte 2 of the 0x40 dword */
+  _device.phy_set_bb_reg(0x1994, 0xf, 0xf); /* 0x1994[3:0] = 0xf */
+  const uint8_t sel = _device.rtw_read8(REG_GPIO_IO_SEL_8814A);
+  /* rfe_type 1/2 -> 0x40[23:20]=0xf (0x42 |= 0xf0); type 0 -> [23:22]=11b (0xc0) */
+  const uint8_t orv = (rfe_type == 0) ? 0xc0 : 0xf0;
+  _device.rtw_write8(REG_GPIO_IO_SEL_8814A, (uint8_t)(sel | orv));
+  _logger->info("8814A RFE GPIO pin-select (rfe_type={}, 0x42 |= 0x{:02x})",
+                (int)rfe_type, orv);
+}
+
 /* Port of upstream `phy_SetBwRegAdc_8814A`
  * (rtl8814a_phycfg.c:1454). Programs rRFMOD_Jaguar (0x8AC) bits [1:0]
  * per bandwidth; both bands write the same value here. */

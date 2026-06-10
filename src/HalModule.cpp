@@ -393,6 +393,12 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
      * band-set runs the correct per-chip sequence (issue #51, confirmed via
      * kernel-vs-devourer usbmon register diff). */
     _radioManagementModule->PHY_SwitchWirelessBand8814A(init_band);
+    /* Kernel PHY_SetRFEReg8814A(bInit=TRUE) (usb_halinit.c:1279): select the
+     * GPIO pins that physically drive the external RFE (PA + T/R switch). The
+     * per-band band-switch above only sets the RFE pin *functions*; without
+     * this one-time pin-select the pins never output, so TX never reaches the
+     * antenna (submits OK, 0 on-air) while RX still works. */
+    _radioManagementModule->InitRFEGpio8814A();
   } else {
     _radioManagementModule->PHY_SwitchWirelessBand8812(init_band);
   }

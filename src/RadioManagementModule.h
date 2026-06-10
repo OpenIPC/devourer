@@ -193,6 +193,11 @@ public:
                            uint8_t Offset40, uint8_t Offset80);
   void PHY_SwitchWirelessBand8812(BandType Band);
   void PHY_SwitchWirelessBand8814A(BandType Band);
+  /* One-time RFE GPIO pin-select for the 8814 (mirror of the kernel's
+   * PHY_SetRFEReg8814A bInit=TRUE branch). Must run once at init, after the
+   * first band-set. Without it the external PA/T-R switch never engages on
+   * TX (submits OK, 0 on-air) even though RX works. */
+  void InitRFEGpio8814A();
   void SetTxPower(uint8_t p);
 
 private:

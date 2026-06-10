@@ -151,6 +151,19 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
     }
   }
 
+  /* CCK rates (1/2/5.5/11M) do not exist at 5GHz. The RTL8814AU silently
+   * drops a CCK-rated frame on a 5GHz channel — the bulk-OUT completes but
+   * nothing goes on-air (verified on hardware: default MGN_1M beacon = 0
+   * frames at ch36/ch100, but ~14k on-air once the rate is OFDM). 2.4GHz
+   * CCK is fine. So on a 5GHz channel, clamp a CCK rate to the lowest OFDM
+   * rate. (The 8812 chip happens to auto-fall-back CCK->OFDM at 5G; the
+   * 8814 does not, so we must do it in software.) */
+  if (_channel.Channel > 14 &&
+      (fixed_rate == MGN_1M || fixed_rate == MGN_2M ||
+       fixed_rate == MGN_5_5M || fixed_rate == MGN_11M)) {
+    fixed_rate = MGN_6M;
+  }
+
   usb_frame = new uint8_t[usb_frame_length]();
 
   ptxdesc = (struct tx_desc *)usb_frame;

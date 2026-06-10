@@ -528,6 +528,22 @@ uint32_t RadioManagementModule::phy_query_rf_reg(RfPath eRFPath,
 
 uint32_t RadioManagementModule::phy_RFSerialRead(RfPath eRFPath,
                                                  uint32_t Offset) {
+  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+    /* Kernel phy_RFRead_8814A (rtl8814a_phycfg.c:86-122): 8814 RF
+     * registers are read back through per-path direct BB shadow blocks,
+     * NOT the 8812 HSSI/LSSI serial mechanism below. This is also the
+     * only read path that works for paths C/D — the SI readback returns
+     * garbage there, which corrupted every masked (read-modify-write) RF
+     * write on those paths: the channel and bandwidth RMWs of RF 0x18
+     * destroyed all bits outside their masks on C/D at every channel
+     * set. */
+    static constexpr uint16_t kDirectBase[4] = {0x2800, 0x2c00, 0x3800,
+                                                0x3c00};
+    const uint16_t direct_addr = (uint16_t)(
+        kDirectBase[static_cast<int>(eRFPath) & 3] + (Offset & 0xff) * 4);
+    return phy_query_bb_reg(direct_addr, 0xfffff /* bRFRegOffsetMask */);
+  }
+
   uint32_t retValue;
 
   BbRegisterDefinition pPhyReg = PhyRegDef[eRFPath];

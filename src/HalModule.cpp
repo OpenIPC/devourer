@@ -1898,6 +1898,17 @@ void HalModule::usb_AggSettingRxUpdate_8812A() {
           (uint16_t)(_device.rxagg_usb_size | (_device.rxagg_usb_timeout << 8));
       _device.rtw_write16(REG_RXDMA_AGG_PG_TH, temp);
     }
+    if (_eepromManager->version_id.ICType == CHIP_8814A) {
+      /* Kernel usb_AggSettingRxUpdate_8814A explicitly RMW-clears
+       * USB_AGG_EN_8814A (BIT7 of REG_RXDMA_AGG_PG_TH+3, 0x283) in its
+       * default RX_AGG_DMA mode (usb_halinit.c:705-727). Devourer's
+       * taken path never wrote that byte, leaving USB-mode aggregation
+       * at whatever the reset/firmware value is — mixed DMA+USB agg
+       * framing would break the RND8 parse walk. */
+      uint8_t valueUSB = _device.rtw_read8(REG_RXDMA_AGG_PG_TH + 3);
+      _device.rtw_write8(REG_RXDMA_AGG_PG_TH + 3,
+                         (uint8_t)(valueUSB & ~BIT7));
+    }
     break;
   case RX_AGG_MIX:
   case RX_AGG_DISABLE:

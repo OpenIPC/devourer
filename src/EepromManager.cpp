@@ -783,25 +783,29 @@ uint8_t EepromManager::GetTxPowerIndexBase(uint8_t path, uint8_t rate,
       goto clamp_and_return;
     }
     /* MCS / VHT — pick BW20 / BW40 (BW80 falls through to BW40 per upstream
-     * comment "Willis suggest adopt BW 40M power index while in BW 80 mode"). */
-    if (bandwidth == 0) { /* BW20 */
-      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
-          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW20_24G_Diff[path][0];
-      if (is_mcs8_15 (rate) || (ntx_idx >= 1 && (is_vht2ss(rate) || is_vht3ss(rate) || is_vht4ss(rate))))
-        txPower += BW20_24G_Diff[path][1];
-      if (is_mcs16_23(rate) || (ntx_idx >= 2 && (is_vht3ss(rate) || is_vht4ss(rate))))
-        txPower += BW20_24G_Diff[path][2];
-      if (is_mcs24_31(rate) || (ntx_idx >= 3 && is_vht4ss(rate)))
-        txPower += BW20_24G_Diff[path][3];
-    } else { /* BW40 or BW80 */
-      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
-          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW40_24G_Diff[path][0];
-      if (is_mcs8_15 (rate) || (ntx_idx >= 1 && (is_vht2ss(rate) || is_vht3ss(rate) || is_vht4ss(rate))))
-        txPower += BW40_24G_Diff[path][1];
-      if (is_mcs16_23(rate) || (ntx_idx >= 2 && (is_vht3ss(rate) || is_vht4ss(rate))))
-        txPower += BW40_24G_Diff[path][2];
-      if (is_mcs24_31(rate) || (ntx_idx >= 3 && is_vht4ss(rate)))
-        txPower += BW40_24G_Diff[path][3];
+     * comment "Willis suggest adopt BW 40M power index while in BW 80 mode").
+     *
+     * Kernel accumulation is CUMULATIVE over rate ranges
+     * (hal_com_phycfg.c:2490-2496): MCS8-31 adds [0]+[1], MCS16-31 adds
+     * [0]+[1]+[2], VHT2SS+ adds [1], VHT3SS+ adds [2], etc. The previous
+     * exclusive windows gave e.g. MCS16-23 only [2]. */
+    {
+      const bool ge_1s = is_mcs0_7(rate) || is_mcs8_15(rate) ||
+                         is_mcs16_23(rate) || is_mcs24_31(rate) ||
+                         is_vht1ss(rate) || is_vht2ss(rate) ||
+                         is_vht3ss(rate) || is_vht4ss(rate);
+      const bool ge_2s = is_mcs8_15(rate) || is_mcs16_23(rate) ||
+                         is_mcs24_31(rate) || is_vht2ss(rate) ||
+                         is_vht3ss(rate) || is_vht4ss(rate);
+      const bool ge_3s = is_mcs16_23(rate) || is_mcs24_31(rate) ||
+                         is_vht3ss(rate) || is_vht4ss(rate);
+      const bool ge_4s = is_mcs24_31(rate) || is_vht4ss(rate);
+      const int8_t *diff =
+          (bandwidth == 0) ? BW20_24G_Diff[path] : BW40_24G_Diff[path];
+      if (ge_1s) txPower += diff[0];
+      if (ge_2s) txPower += diff[1];
+      if (ge_3s) txPower += diff[2];
+      if (ge_4s) txPower += diff[3];
     }
   } else {
     /* 5G — no CCK */
@@ -815,25 +819,28 @@ uint8_t EepromManager::GetTxPowerIndexBase(uint8_t path, uint8_t rate,
       if (ntx_idx >= 3) txPower += OFDM_5G_Diff[path][3];
       goto clamp_and_return;
     }
-    /* MCS / VHT BW20 / BW40 / BW80. */
-    if (bandwidth == 0) {
-      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
-          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW20_5G_Diff[path][0];
-      if (is_mcs8_15 (rate)) txPower += BW20_5G_Diff[path][1];
-      if (is_mcs16_23(rate)) txPower += BW20_5G_Diff[path][2];
-      if (is_mcs24_31(rate)) txPower += BW20_5G_Diff[path][3];
-    } else if (bandwidth == 1) {
-      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
-          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW40_5G_Diff[path][0];
-      if (is_mcs8_15 (rate)) txPower += BW40_5G_Diff[path][1];
-      if (is_mcs16_23(rate)) txPower += BW40_5G_Diff[path][2];
-      if (is_mcs24_31(rate)) txPower += BW40_5G_Diff[path][3];
-    } else { /* BW80 */
-      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
-          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW80_5G_Diff[path][0];
-      if (is_mcs8_15 (rate)) txPower += BW80_5G_Diff[path][1];
-      if (is_mcs16_23(rate)) txPower += BW80_5G_Diff[path][2];
-      if (is_mcs24_31(rate)) txPower += BW80_5G_Diff[path][3];
+    /* MCS / VHT BW20 / BW40 / BW80 — cumulative over rate ranges, same
+     * scheme as 2.4G (kernel hal_com_phycfg.c:2550-2601). The previous
+     * code had no VHT clauses beyond [0] at all on 5G, so VHT2SS missed
+     * [1] and VHT3SS missed [1]+[2]. */
+    {
+      const bool ge_1s = is_mcs0_7(rate) || is_mcs8_15(rate) ||
+                         is_mcs16_23(rate) || is_mcs24_31(rate) ||
+                         is_vht1ss(rate) || is_vht2ss(rate) ||
+                         is_vht3ss(rate) || is_vht4ss(rate);
+      const bool ge_2s = is_mcs8_15(rate) || is_mcs16_23(rate) ||
+                         is_mcs24_31(rate) || is_vht2ss(rate) ||
+                         is_vht3ss(rate) || is_vht4ss(rate);
+      const bool ge_3s = is_mcs16_23(rate) || is_mcs24_31(rate) ||
+                         is_vht3ss(rate) || is_vht4ss(rate);
+      const bool ge_4s = is_mcs24_31(rate) || is_vht4ss(rate);
+      const int8_t *diff = (bandwidth == 0)   ? BW20_5G_Diff[path]
+                           : (bandwidth == 1) ? BW40_5G_Diff[path]
+                                              : BW80_5G_Diff[path];
+      if (ge_1s) txPower += diff[0];
+      if (ge_2s) txPower += diff[1];
+      if (ge_3s) txPower += diff[2];
+      if (ge_4s) txPower += diff[3];
     }
   }
 

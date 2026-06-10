@@ -360,10 +360,20 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
    * deadlocked on libusb_control_transfer until SIGKILL. See kaeru
    * cite "8821AU ch100 wedge — confirmed second-channel-set is the
    * trigger, not band-switch 2026-06-02". */
-  if (init_channel <= 14) {
-    _radioManagementModule->PHY_SwitchWirelessBand8812(BandType::BAND_ON_2_4G);
+  const BandType init_band = (init_channel <= 14) ? BandType::BAND_ON_2_4G
+                                                  : BandType::BAND_ON_5G;
+  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+    /* 8814 has a separate band-switch (path-C/D RFE pinmux via
+     * phy_SetRFEReg8814A, the 8814 AGC-table register, CCK clock-gate
+     * cycle). Running the 8812 version here marks the band already-set
+     * (CCK check 0x454) so phy_SwBand8812's later dispatch SKIPS the 8814A
+     * switch — leaving the 5G RFE pinmux (0xCB0/.../path-C-D) and RX config
+     * unprogrammed. Mirror the dispatch in phy_SwBand8812 so the initial
+     * band-set runs the correct per-chip sequence (issue #51, confirmed via
+     * kernel-vs-devourer usbmon register diff). */
+    _radioManagementModule->PHY_SwitchWirelessBand8814A(init_band);
   } else {
-    _radioManagementModule->PHY_SwitchWirelessBand8812(BandType::BAND_ON_5G);
+    _radioManagementModule->PHY_SwitchWirelessBand8812(init_band);
   }
 
   _radioManagementModule->rtw_hal_set_chnl_bw(

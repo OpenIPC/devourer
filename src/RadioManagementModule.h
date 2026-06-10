@@ -192,6 +192,7 @@ public:
   void rtw_hal_set_chnl_bw(uint8_t channel, ChannelWidth_t Bandwidth,
                            uint8_t Offset40, uint8_t Offset80);
   void PHY_SwitchWirelessBand8812(BandType Band);
+  void PHY_SwitchWirelessBand8814A(BandType Band);
   void SetTxPower(uint8_t p);
 
 private:
@@ -211,7 +212,6 @@ private:
   void phy_SetRFEReg8812(BandType Band);
   void phy_SetRFEReg8821(BandType Band);
   void phy_SetRFEReg8814A(BandType Band);
-  void PHY_SwitchWirelessBand8814A(BandType Band);
   void phy_SetBwRegAdc_8814A(BandType Band, ChannelWidth_t bw);
   void phy_SetBwRegAgc_8814A(BandType Band, ChannelWidth_t bw);
   void phy_SetBBSwingByBand_8812A(BandType Band);

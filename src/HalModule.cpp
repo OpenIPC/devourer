@@ -1764,9 +1764,13 @@ void HalModule::_InitEDCA_8812AUsb() {
   _device.rtw_write32(REG_EDCA_VI_PARAM, 0x005EA324);
   _device.rtw_write32(REG_EDCA_VO_PARAM, 0x002FA226);
 
-  /* 0x50 for 80MHz clock */
-  _device.rtw_write8(REG_USTIME_TSF, 0x50);
-  _device.rtw_write8(REG_USTIME_EDCA, 0x50);
+  if (_eepromManager->version_id.ICType != CHIP_8814A) {
+    /* 0x50 for 80MHz clock */
+    _device.rtw_write8(REG_USTIME_TSF, 0x50);
+    _device.rtw_write8(REG_USTIME_EDCA, 0x50);
+  }
+  /* 8814A keeps the MAC-table value 0x64 (100MHz tick): the kernel's
+   * _InitEDCA_8814AUsb has the 0x50 writes commented out. */
 }
 
 void HalModule::_InitRetryFunction_8812A() {

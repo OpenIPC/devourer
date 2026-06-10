@@ -459,6 +459,13 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   // 2010.04.09 add by hpfan
   _device.rtw_write32(REG_BAR_MODE_CTRL, 0x0201ffff);
 
+  if (is_8814a) {
+    /* Kernel usb_halinit.c:1250: REG_SECONDARY_CCA_CTRL_8814A. Gates TX
+     * deferral on the secondary channel; one of the few unported MAC
+     * writes in the TX-relevant 0x5xx block. */
+    _device.rtw_write8(0x577, 0x03);
+  }
+
   if (registry_priv::wifi_spec) {
     _device.rtw_write16(REG_FAST_EDCA_CTRL, 0);
   }

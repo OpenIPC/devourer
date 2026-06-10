@@ -530,7 +530,7 @@ void FirmwareManager::FirmwareDownload_8814A() {
   /* Post-fwdl CPU kick sequence — mirrors rtw88_8814au's usbmon trace
    * byte-for-byte after the last fwdl IDDMA program. */
   _device.rtw_write8(REG_MCUFWDL, 0x79);    /* declare init ready */
-  _device.rtw_write8(0x010d, 0x00);         /* REG_RD_CTRL+1 */
+  _device.rtw_write8(0x010d, 0x00);         /* REG_TRXDMA_CTRL+1 */
   /* DO NOT write 0x0100 (REG_CR) = 0 here. Bisect 2026-05-26 of #36 wedge:
    * zeroing REG_CR disables byte 0's DMA-enable bits (HCI_TXDMA_EN/
    * HCI_RXDMA_EN/TXDMA_EN/RXDMA_EN/PROTOCOL_EN/SCHEDULE_EN). The later
@@ -542,13 +542,16 @@ void FirmwareManager::FirmwareDownload_8814A() {
    * never writes this address with this value. With this single write
    * removed, devourer-TX on 8814AU goes from 0.4% completion to 100%. */
   _device.rtw_write32(0x1330, 0x80000000);  /* REG_3081_DCDC_CTRL */
-  _device.rtw_write16(0x0230, 0x0000);      /* REG_PCIE_CTRL_REG word */
-  _device.rtw_write32(0x022c, 0x80000000);  /* REG_BIST_CTRL */
+  _device.rtw_write16(0x0230, 0x0000);      /* REG_FIFOPAGE_INFO_1_8814A —
+                                             * zeroes the HPQ page count;
+                                             * restored later by
+                                             * _InitQueueReservedPage_8814AUsb */
+  _device.rtw_write32(0x022c, 0x80000000);  /* REG_RQPN_CTRL_2_8814A (LD_RQPN) */
   _device.rtw_write8(REG_BCN_CTRL, 0x14);   /* REG_BCN_CTRL */
-  _device.rtw_write32(0x0210, 0x00000004);  /* REG_RXFLTMAP */
+  _device.rtw_write32(0x0210, 0x00000004);  /* REG_TXDMA_STATUS_8814A (W1C) */
   _device.rtw_write16(REG_MCUFWDL, 0x6078); /* clear FWDL_EN; kick */
-  _device.rtw_write8(0x001d, 0x09);         /* REG_AFE_OSC_CTRL2+1 */
-  _device.rtw_write8(0x0003, 0xfe);         /* REG_RSV_CTRL+1, enable 8051 */
+  _device.rtw_write8(0x001d, 0x09);         /* REG_RSV_CTRL+1 */
+  _device.rtw_write8(0x0003, 0xfe);         /* REG_SYS_FUNC_EN+1, enable 8051 */
 
   /* Poll for CPU_DL_READY (BIT15 of REG_MCUFWDL). The chip sets this bit
    * once the 3081 is running and has finished its on-chip init. */

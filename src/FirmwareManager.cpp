@@ -550,9 +550,14 @@ void FirmwareManager::FirmwareDownload_8814A() {
   _device.rtw_write8(0x001d, 0x09);         /* REG_AFE_OSC_CTRL2+1 */
   _device.rtw_write8(0x0003, 0xfe);         /* REG_RSV_CTRL+1, enable 8051 */
 
-  /* Poll for CPU_DL_READY (BIT15 of REG_MCUFWDL). The 8051 sets this bit
-   * once it's running and has finished its on-chip init. */
+  /* Poll for CPU_DL_READY (BIT15 of REG_MCUFWDL). The chip sets this bit
+   * once the 3081 is running and has finished its on-chip init. */
   if (!_FWFreeToGo8812(10, 5000, CHIP_8814A)) {
+    _logger->error(
+        "8814A firmware boot NOT confirmed: CPU_DL_READY (REG_MCUFWDL bit15) "
+        "never asserted within 5s. Final REG_MCUFWDL=0x{:08X}. The 3081 MCU "
+        "is likely not running — expect dead TX (and no TX reports).",
+        _device.rtw_read32(REG_MCUFWDL));
     return;
   }
 
@@ -888,11 +893,15 @@ bool FirmwareManager::_FWFreeToGo8812(uint32_t min_cnt, uint32_t timeout_ms,
    * upstream renames it REG_8051FW_CTRL_8814A. The "FW is alive" indicator
    * differs by chip:
    *  - 8812 uses WINTINI_RDY (BIT6) as the single-bit ready flag
-   *  - 8814 has the chip set BIT15 (FW_INIT_RDY) briefly during fw init,
-   *    then settles to byte 0 = 0x78 (IMEM_DL_RDY|IMEM_CHKSUM_OK|
-   *    DMEM_DL_RDY|DMEM_CHKSUM_OK, FWDL_EN cleared). Polling BIT15 in
-   *    userspace misses the transient window; the stable post-boot state
-   *    is byte 0 == 0x78 with FW_DW_RDY (BIT14) also set. */
+   *  - 8814: the chip sets CPU_DL_READY (BIT15) once the 3081 has booted,
+   *    and the kernel polls exactly that as its TERMINAL success condition
+   *    (FirmwareDownload8814A -> rtl8814a_hal_init.c:649-656, 50ms x 100)
+   *    — which only works because the bit is stable once set. An earlier
+   *    devourer revision additionally accepted byte0==0x78 as a "stable
+   *    post-boot state", but byte0=0x78 is written BY US in the 0x6078
+   *    kick just before this poll, so that arm self-satisfied on the
+   *    first read and made the check vacuous: a never-booted 8051 was
+   *    indistinguishable from success. Kernel-parity: BIT15 only. */
   if (ic_type != CHIP_8814A) {
     value32 = _device.rtw_read32(REG_MCUFWDL);
     value32 |= MCUFWDL_RDY;
@@ -911,10 +920,10 @@ bool FirmwareManager::_FWFreeToGo8812(uint32_t min_cnt, uint32_t timeout_ms,
     cnt++;
     value32 = _device.rtw_read32(REG_MCUFWDL);
     if (ic_type == CHIP_8814A) {
-      /* Match either the transient FW_INIT_RDY (BIT15) OR the stable
-       * post-boot pattern (byte 0 == 0x78 = all DL_RDY + CHKSUM_OK,
-       * FWDL_EN cleared). */
-      if ((value32 & (1u << 15)) || ((value32 & 0xFF) == 0x78)) {
+      /* CPU_DL_READY (BIT15), chip-set on 3081 boot. We poll much faster
+       * than the kernel's 50ms cadence, so a short-lived assertion cannot
+       * be missed either. */
+      if ((value32 & (1u << 15)) != 0) {
         break;
       }
     } else if ((value32 & ready_bit) != 0) {
@@ -924,7 +933,7 @@ bool FirmwareManager::_FWFreeToGo8812(uint32_t min_cnt, uint32_t timeout_ms,
   } while (since(start).count() < timeout_ms || cnt < min_cnt);
 
   if (ic_type == CHIP_8814A) {
-    if (!((value32 & (1u << 15)) || ((value32 & 0xFF) == 0x78))) {
+    if ((value32 & (1u << 15)) == 0) {
       goto exit;
     }
   } else if (!((value32 & ready_bit) != 0)) {

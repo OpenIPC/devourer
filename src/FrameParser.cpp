@@ -107,7 +107,13 @@ static rx_pkt_attrib rtl8812_query_rx_desc_status(uint8_t *pdesc) {
 
   /* Offset 12 */
   pattrib.data_rate = GET_RX_STATUS_DESC_RX_RATE_8812(pdesc);
-  /* Offset 16 */
+  /* Offset 16 — 8812/8821 ONLY. On 8814A this DWORD holds
+   * PATTERN_IDX[7:0] / RX_EOF[8] / RX_SCRAMBLER[15:9]
+   * (rtl8814a_recv.h:148-150) and the kernel's 8814 rx-desc query never
+   * reads SGI/LDPC/STBC/BW from the descriptor at all (it sets
+   * bw = CHANNEL_WIDTH_MAX). These four attribs are therefore garbage
+   * when the RX chip is an 8814 — no current consumer reads them, but
+   * don't trust them there without chip-gating first. */
   pattrib.sgi = GET_RX_STATUS_DESC_SPLCP_8812(pdesc);
   pattrib.ldpc = GET_RX_STATUS_DESC_LDPC_8812(pdesc);
   pattrib.stbc = GET_RX_STATUS_DESC_STBC_8812(pdesc);
@@ -151,6 +157,12 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
   auto ret = std::vector<Packet>{};
 
   do {
+    /* Never parse a descriptor out of a tail fragment shorter than the
+     * descriptor itself (kernel rejects transfers < RXDESC_SIZE before
+     * parsing, os_dep usb_ops_linux.c). */
+    if (pbuf.size() < RXDESC_SIZE) {
+      break;
+    }
     auto pattrib = rtl8812_query_rx_desc_status(pbuf.data());
 
     auto pkt_offset = RXDESC_SIZE + pattrib.drvinfo_sz + pattrib.shift_sz +
@@ -204,8 +216,19 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
                                                pattrib.drvinfo_sz + RXDESC_SIZE,
                                            pattrib.pkt_len)});
 
-      struct _phy_status_rpt_8812 driver_data;
-      memcpy(static_cast<void*>(&driver_data), pbuf.data() + RXDESC_SIZE, sizeof(driver_data));
+      struct _phy_status_rpt_8812 driver_data = {};
+      /* Only read the PHY-status report when the descriptor says one is
+       * present and it fits the remaining buffer. The kernel gates this
+       * on pattrib->physt (usb_ops_linux.c:179); drvinfo_sz >= the report
+       * size is the equivalent condition with the fields we carry —
+       * without it, frames with drvinfo_sz==0 had payload bytes decoded
+       * as RSSI/EVM/SNR, and a frame ending near the buffer tail
+       * over-read the transfer buffer. */
+      if (pattrib.drvinfo_sz >= sizeof(driver_data) &&
+          pbuf.size() >= RXDESC_SIZE + sizeof(driver_data)) {
+        memcpy(static_cast<void *>(&driver_data), pbuf.data() + RXDESC_SIZE,
+               sizeof(driver_data));
+      }
       ret.back().RxAtrib.rssi[0] = driver_data.gain_trsw[0];
       ret.back().RxAtrib.rssi[1] = driver_data.gain_trsw[1];
       /* 8814AU path C/D RSSI lives in gain_trsw_cd; on 8812/8811 these bytes
@@ -259,8 +282,12 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
     pbuf = pbuf.subspan(pkt_offset, pbuf.size() - pkt_offset);
   } while (pbuf.size() > 0);
 
+  /* pkt_cnt (DMA_AGG_NUM from the first descriptor) is informational only:
+   * neither the kernel nor devourer uses it for loop control, and devourer
+   * never decremented it — so a non-zero value here is the norm for every
+   * aggregated transfer, not an error. */
   if (pkt_cnt != 0) {
-    _logger->info("Unprocessed packets: {}", pkt_cnt);
+    _logger->debug("RX aggregate carried {} packets (DMA_AGG_NUM)", pkt_cnt);
   }
   //_logger->info("{} received in frame", ret.size());
 

@@ -33,6 +33,8 @@ constexpr uint16_t REG_FAST_EDCA_BEBK_SETTING_8814A = 0x144C; /* per rtl8814a_sp
 constexpr uint16_t REG_RXDMA_AGG_PG_TH_8814A   = 0x0280; /* per rtl8814a_spec.h:156 */
 constexpr uint16_t REG_RXDMA_MODE_8814A        = 0x0290; /* per rtl8814a_spec.h:160 */
 constexpr uint16_t REG_SW_AMPDU_BURST_MODE_CTRL_8814A = 0x04BC; /* per rtl8814a_spec.h:295 */
+constexpr uint16_t REG_MAX_AGGR_NUM_8814A      = 0x04CA; /* per rtl8814a_spec.h:303 */
+constexpr uint16_t REG_RTS_MAX_AGGR_NUM_8814A  = 0x04CB; /* per rtl8814a_spec.h:304 */
 
 constexpr uint32_t HPQ_PGNUM_8814A = 0x20; /* 32 pages per queue (USB) */
 constexpr uint32_t LPQ_PGNUM_8814A = 0x20;
@@ -273,6 +275,14 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   _InitNetworkType_8812A(); /* set msr	 */
   _InitWMACSetting_8812A();
   _InitAdaptiveCtrl_8812AUsb();
+  if (is_8814a) {
+    /* Tail of kernel _InitMacConfigure_8814A (usb_halinit.c:551-552): 8814
+     * splits the aggregation limits into per-byte registers. The 8812-body
+     * 16-bit 0x4CA=0x1f1f write no longer runs on 8814 (see
+     * _InitBurstPktLen_8814A), so program the kernel values here. */
+    _device.rtw_write8(rtl8814a::REG_MAX_AGGR_NUM_8814A, 0x36);
+    _device.rtw_write8(rtl8814a::REG_RTS_MAX_AGGR_NUM_8814A, 0x36);
+  }
   _InitEDCA_8812AUsb();
 
   _InitRetryFunction_8812A();

@@ -125,12 +125,17 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
         stbc = 1;
       if (known & 0x40) {
         auto bw = iterator.this_arg[3] & 0x1f;
+        /* Map radiotap VHT bandwidth codes to CHANNEL_WIDTH enums — the
+         * descriptor BW switch below compares against the enums (as the
+         * HT path above does). The previous MHz literals (40/80) never
+         * matched CHANNEL_WIDTH_40(1)/CHANNEL_WIDTH_80(2), so VHT 40/80
+         * silently transmitted as 20MHz. */
         if (bw >= 1 && bw <= 3)
-          bwidth = 40;
+          bwidth = CHANNEL_WIDTH_40;
         else if (bw >= 4 && bw <= 10)
-          bwidth = 80;
+          bwidth = CHANNEL_WIDTH_80;
         else
-          bwidth = 20;
+          bwidth = CHANNEL_WIDTH_20;
       }
 
       if (iterator.this_arg[8] & 1)

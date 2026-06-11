@@ -5,6 +5,7 @@
 #include "rtl8812a_hal.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -40,6 +41,10 @@ constexpr uint32_t FW_HEADER_SIZE_8814A = 64;
 constexpr uint16_t TX_PAGE_BOUNDARY_8814A_USB = 0xF8;
 constexpr uint32_t TX_PAGE_SIZE = 128;
 constexpr uint32_t MAX_RSVD_PAGE_CHUNK_SZ = 4096u; /* rtw88 sends 4096-byte fw chunks */
+/* Kernel chunk size: MAX_XMIT_EXTBUF_SZ (1536) - TXDESC_OFFSET (40 + 8 byte
+ * packet offset = 48) as used by HalROMDownloadFWRSVDPage8814A's
+ * MaxRsvdPageBufSize. Override per-run via DEVOURER_8814_FWDL_CHUNK. */
+constexpr uint32_t MAX_RSVD_PAGE_BUF_SZ_8814A = 1536u - 48u;
 }  // namespace
 
 template <class result_t = std::chrono::milliseconds,
@@ -146,24 +151,34 @@ void FirmwareManager::FirmwareDownload(HAL_IC_TYPE_E ic_type) {
 // TODO: now does nothing
 static void yield() {}
 
-/* 8814AU firmware download via vendor-control-transfer page writes (same
- * transport as 8812), but with the 8814-specific 8051 control sequence:
+/* 8814AU firmware download via the RSVD-page (beacon-queue bulk-OUT) + IDDMA
+ * transport. Shared prologue: power-on / pre-fwdl chip conditioning mirrored
+ * from rtw88_8814au's usbmon trace (devourer's only 8814 power-on path —
+ * HalModule skips InitPowerOn() for 8814). Then one of two fwdl brackets,
+ * selected by DEVOURER_8814_FWDL:
  *
- *   _FWDownloadEnable_8814A(true)   -- put chip in FW-load mode
- *   _3081Disable8814A               -- gate the 8051 MCU
- *   _DDMAReset8814A                 -- clear stale DDMA state
- *   page-write firmware bytes       -- chip computes checksum on the fly
- *   (poll FWDL_ChkSum_rpt for OK)
- *   _3081Enable8814A                -- ungate the 8051
- *   _FWDownloadEnable_8814A(false)
- *   set BIT(6) of REG_MCUFWDL+1     -- "FW go" kick
- *   poll CPU_DL_READY               -- 8051 reports it's running
+ *   (default / "kernel") _Fwdl8814_KernelPath — verbatim port of the vendor
+ *   kernel's FirmwareDownload8814A + HalROMDownloadFWRSVDPage8814A
+ *   (hal/rtl8814a/rtl8814a_hal_init.c), which is the sequence proven to make
+ *   CPU_DL_READY assert on real hardware (issue #95):
  *
- * The RSVD-page + IDDMA path upstream uses is not available to us because the
- * bulk-OUT TX endpoint times out during fwdl mode on this driver; the
- * page-write path's bytes also reach the chip (verified by FWDL_ChkSum_rpt
- * being set after upload). The 8814 firmware header is 64 bytes (vs 8812's
- * 32). */
+ *     _FWDownloadEnable_8814A(true)   -- RMW 0x0080: bit13|bit0
+ *     _3081Disable8814A               -- RMW: hold the 3081 MCU in reset
+ *     _DDMAReset8814A                 -- 0x1080 BIT16 clear->set toggle
+ *     HalROM RSVD-page download       -- per-chunk bulk-OUT + IDDMA with
+ *                                        checksum-driven DL_RDY/CHKSUM_OK RMW
+ *     FW_DW_RDY (0x0081 |= BIT6)      -- only if both section checksums OK
+ *     _3081Enable8814A                -- release MCU -> fw boots
+ *     _FWDownloadEnable_8814A(false)  -- RMW: clear bit0
+ *     poll CPU_DL_READY (bit15)       -- 3081 reports it's running
+ *
+ *   ("rtw88") _Fwdl8814_Rtw88Path — the legacy open-loop rtw88-usbmon-mimic
+ *   staging + blanket REG_MCUFWDL=0x79/0x6078 kick. Kept bit-identical on the
+ *   wire as an A/B fallback; under it the FW bytes land (DDMA checksum OK)
+ *   but the 3081 never reaches CPU_DL_READY (REG_MCUFWDL stuck at
+ *   0x00606078).
+ *
+ * The 8814 firmware header is 64 bytes (vs 8812's 32). */
 void FirmwareManager::FirmwareDownload_8814A() {
   /* If fw is already running on the chip (e.g. another driver loaded it and
    * we're picking up the device mid-flight), skip fwdl entirely.
@@ -200,8 +215,17 @@ void FirmwareManager::FirmwareDownload_8814A() {
    * the chip see the header.) */
   (void)FW_HEADER_SIZE_8814A;
 
-  if ((_device.rtw_read8(REG_MCUFWDL) & BIT7) != 0) {
-    /* 8051 already running from previous session — reset it. */
+  /* Path select: kernel-faithful bracket by default; DEVOURER_8814_FWDL=rtw88
+   * restores the legacy rtw88-mimic sequence bit-for-bit (A/B fallback). */
+  const char *fwdl_mode = std::getenv("DEVOURER_8814_FWDL");
+  const bool use_rtw88_path =
+      (fwdl_mode != nullptr && std::strcmp(fwdl_mode, "rtw88") == 0);
+
+  if (use_rtw88_path && (_device.rtw_read8(REG_MCUFWDL) & BIT7) != 0) {
+    /* 8051 already running from previous session — reset it. (rtw88 path
+     * only: the kernel's FirmwareDownload8814A has no such prologue, and the
+     * absolute REG_MCUFWDL=0x00 write destroys the bit12-13 state that
+     * _FWDownloadEnable_8814A is specified to preserve.) */
     _device.rtw_write8(REG_MCUFWDL, 0x00);
     _device._8051Reset8812();
   }
@@ -364,6 +388,61 @@ void FirmwareManager::FirmwareDownload_8814A() {
       break;
     }
   }
+  _logger->info("8814A: rtw88-mimic power-on prefix applied");
+
+  if (use_rtw88_path) {
+    _Fwdl8814_Rtw88Path(fw, dmem_size, iram_size);
+    return;
+  }
+
+  /* Kernel path. First: pre-fwdl staging ops with no counterpart inside the
+   * kernel's fwdl bracket — rtw88 issues them between power-on and fwdl; the
+   * kernel does their equivalents in _InitPowerOn_8814AU /
+   * _InitQueueReservedPage_8814AUsb, which both run BEFORE fwdl in the
+   * kernel but which devourer runs post-fwdl. 0x0100=0x05 in particular
+   * gates bulk-OUT DMA drain (see the #36 bisect note in the rtw88 path).
+   * Kept in rtw88 trace order with their paired reads (read-side-effects).
+   * Deliberately dropped vs the rtw88 path — the kernel bracket performs
+   * these RMW-style at the kernel position instead: 0x1080=0xF7816D20,
+   * 0x0003=0xFA, 0x0550=0x14, 0x0080=0x2001, 0x1208=0x02000000,
+   * 0x0204=0x8000, 0x0101=0x01. */
+  (void)_device.rtw_read8(0x0003);
+  _device.rtw_write8(0x0003, 0xFE);
+  (void)_device.rtw_read8(0x1103);
+  _device.rtw_write8(0x1103, 0x0C);
+  (void)_device.rtw_read32(0x0080);
+  _device.rtw_write8(0x01A0, 0xFD);
+  (void)_device.rtw_read8(0x001D);
+  _device.rtw_write8(0x001D, 0x08);
+  (void)_device.rtw_read8(0x010D);
+  _device.rtw_write8(0x010D, 0xC0);
+  (void)_device.rtw_read8(0x0100);
+  _device.rtw_write8(0x0100, 0x05);
+  _device.rtw_write32(0x1330, 0x80000000);
+  (void)_device.rtw_read16(0x0230);
+  (void)_device.rtw_read32(0x022C);
+  _device.rtw_write16(0x0230, 0x0200);
+  _device.rtw_write32(0x022C, 0x80000000);
+  (void)_device.rtw_read8(0x1082);
+  _device.rtw_write8(0x1082, 0x80);
+  (void)_device.rtw_read8(0x0009);
+  _device.rtw_write8(0x0009, 0xBC);
+  (void)_device.rtw_read8(0x1082);
+  _device.rtw_write8(0x1082, 0x81);
+  (void)_device.rtw_read8(0x0009);
+  _device.rtw_write8(0x0009, 0xFC);
+
+  _Fwdl8814_KernelPath(fw, dmem_size, iram_size);
+}
+
+/* Legacy rtw88-mimic fwdl bracket — open-loop staging ops + chunk loop +
+ * blanket CPU kick, bit-identical on the wire to the pre-#95 single-path
+ * sequence. Known-bad outcome on real hardware: FW bytes land (DDMA checksum
+ * passes) but CPU_DL_READY never asserts (issue #95). Retained for A/B
+ * iteration via DEVOURER_8814_FWDL=rtw88. */
+void FirmwareManager::_Fwdl8814_Rtw88Path(const uint8_t *fw,
+                                          uint32_t dmem_size,
+                                          uint32_t iram_size) {
   (void)_device.rtw_read32(0x1080);
   _device.rtw_write32(0x1080, 0xF7816D20);
   (void)_device.rtw_read8(0x0003);
@@ -567,6 +646,193 @@ void FirmwareManager::FirmwareDownload_8814A() {
   InitializeFirmwareVars8812();
 }
 
+/* One-line register-state snapshot of every fwdl-bracket-relevant register,
+ * tagged per step, so each hardware iteration yields a decisive REG_MCUFWDL
+ * trajectory. All listed registers are status/config reads the kernel also
+ * performs during fwdl (no read side-effects; 0x0205 BIT7 is W1C-on-write
+ * only). */
+void FirmwareManager::_DumpFwdlState8814A(const char *tag) {
+  _logger->info(
+      "8814A fwdl[{}]: MCUFWDL=0x{:08X} SYS_FUNC_EN+1=0x{:02X} "
+      "CPU_DMEM_CON=0x{:08X} DDMA_CH0CTRL=0x{:08X} FIFOPAGE_CTRL2=0x{:08X} "
+      "BCN_CTRL=0x{:02X} CR+1=0x{:02X}",
+      tag, _device.rtw_read32(REG_MCUFWDL),
+      /* widen u8 reads: the minimal logger streams uint8_t as a raw char,
+       * which puts non-UTF-8 bytes in the log and breaks text consumers
+       * (e.g. tests/regress.py). */
+      (unsigned)_device.rtw_read8(REG_SYS_FUNC_EN + 1),
+      _device.rtw_read32(0x1080),
+      _device.rtw_read32(REG_DDMA_CH0CTRL_8814A),
+      _device.rtw_read32(REG_FIFOPAGE_CTRL_2_8814A),
+      (unsigned)_device.rtw_read8(REG_BCN_CTRL),
+      (unsigned)_device.rtw_read8(REG_CR_8814A + 1));
+}
+
+/* Verbatim port of the vendor kernel's fwdl bracket:
+ * FirmwareDownload8814A (hal/rtl8814a/rtl8814a_hal_init.c:669-797) with
+ * HalROMDownloadFWRSVDPage8814A (:469-638) inlined. This is the sequence
+ * that demonstrably boots the 3081 on this chip (the kernel driver TXes on
+ * the same adapter). Helpers (_FWDownloadEnable_8814A, _3081Disable/Enable,
+ * _DDMAReset8814A, _WaitDownLoadRSVDPageOK_3081) are the pre-existing
+ * kernel-faithful ports. */
+void FirmwareManager::_Fwdl8814_KernelPath(const uint8_t *fw,
+                                           uint32_t dmem_size,
+                                           uint32_t iram_size) {
+  _DumpFwdlState8814A("pre-bracket");
+
+  _FWDownloadEnable_8814A(true);
+  _3081Disable8814A();
+  _DDMAReset8814A(); /* "DDMA reset, suggest by MAC yodar" */
+  _DumpFwdlState8814A("fwdl-en+3081-off+ddma-rst");
+
+  /* === HalROMDownloadFWRSVDPage8814A === */
+  const uint8_t bcn_ctrl = _device.rtw_read8(REG_BCN_CTRL);
+
+  /* Set REG_CR bit 8: DMA beacon by SW — ONCE for the whole download (the
+   * rtw88 path toggles this per-chunk; the kernel does not). */
+  uint8_t u1bTmp = _device.rtw_read8(REG_CR_8814A + 1);
+  _device.rtw_write8(REG_CR_8814A + 1, (uint8_t)(u1bTmp | BIT(0)));
+
+  /* Disable HW beacon protection window during RSVD-page access:
+   * 0x550[4]=1, 0x550[3]=0. */
+  _device.rtw_write8(REG_BCN_CTRL,
+                     (uint8_t)((bcn_ctrl & ~EN_BCN_FUNCTION) | DIS_TSF_UDT));
+
+  /* 0x422[6]=0: tell HW the queued packet is not a real beacon frame. */
+  const uint8_t tmpReg422 =
+      _device.rtw_read8(REG_FWHW_TXQ_CTRL_8814A + 2);
+  _device.rtw_write8(REG_FWHW_TXQ_CTRL_8814A + 2,
+                     (uint8_t)(tmpReg422 & ~BIT(6)));
+  if (tmpReg422 & BIT(6)) {
+    _logger->info("_Fwdl8814_KernelPath: an adapter was sending beacons");
+  }
+
+  /* Head page of the beacon queue. The kernel uses its TX_PAGE_BOUNDARY here
+   * because _InitQueueReservedPage/LLT ran before fwdl; devourer runs both
+   * AFTER fwdl, so the boundary is 0 — which degenerates the kernel's source
+   * formula to the empirically confirmed 0x18780028 (usbmon: rtw88 programs
+   * REG_DDMA_CH0SA = OCPBASE_TXBUF_3081 + 40). */
+  const uint16_t txpktbuf_bndy = 0;
+  _device.rtw_write16(REG_FIFOPAGE_CTRL_2_8814A, txpktbuf_bndy);
+
+  /* Clear beacon-valid check bit (0x205[7], W1C) — RMW form, kernel-style. */
+  const uint8_t bcnValidReg =
+      _device.rtw_read8(REG_FIFOPAGE_CTRL_2_8814A + 1);
+  _device.rtw_write8(REG_FIFOPAGE_CTRL_2_8814A + 1,
+                     (uint8_t)(bcnValidReg | BIT(7)));
+
+  const uint32_t MEMOffsetInTxBuf =
+      OCPBASE_TXBUF_3081 + (uint32_t)txpktbuf_bndy * TX_PAGE_SIZE +
+      TXDESC_OFFSET_8814A;
+
+  uint32_t max_chunk = MAX_RSVD_PAGE_BUF_SZ_8814A;
+  if (const char *env_chunk = std::getenv("DEVOURER_8814_FWDL_CHUNK")) {
+    const unsigned long v = std::strtoul(env_chunk, nullptr, 0);
+    if (v >= 64 && v <= MAX_RSVD_PAGE_CHUNK_SZ) {
+      max_chunk = (uint32_t)v;
+      _logger->info("_Fwdl8814_KernelPath: chunk override {} bytes", max_chunk);
+    }
+  }
+
+  auto stream_section = [&](const uint8_t *section_start,
+                            uint32_t section_size,
+                            uint32_t ocp_dest) -> bool {
+    uint32_t remaining = section_size;
+    uint32_t pkt_offset = 0;
+    while (remaining > 0) {
+      uint32_t chunk;
+      bool ls;
+      if (remaining > max_chunk) {
+        chunk = max_chunk;
+        ls = false;
+        /* Kernel quirk: if the would-be final block lands on a multiple of
+         * 64 (incl. the 40-byte descriptor), shave 4 bytes off this chunk. */
+        const uint32_t last_block = remaining - max_chunk;
+        if (last_block < max_chunk && ((last_block + 40) & 0x3F) == 0) {
+          chunk -= 4;
+        }
+      } else {
+        chunk = remaining;
+        ls = true;
+      }
+      const bool fs = (pkt_offset == 0);
+      _SetDownLoadFwRsvdPagePkt_8814A(section_start + pkt_offset, chunk);
+      if (!_WaitDownLoadRSVDPageOK_3081()) {
+        _logger->error(
+            "_Fwdl8814_KernelPath: RSVD-page ack failed @ ocp=0x{:X} "
+            "pkt_offset={}",
+            ocp_dest, pkt_offset);
+        return false;
+      }
+      if (!_IDDMADownLoadFW_3081(MEMOffsetInTxBuf, ocp_dest + pkt_offset,
+                                 chunk, fs, ls, /*kernel_flags=*/true)) {
+        _logger->error("_Fwdl8814_KernelPath: IDDMA failed @ ocp=0x{:X} "
+                       "pkt_offset={}",
+                       ocp_dest, pkt_offset);
+        return false;
+      }
+      /* NO per-chunk 0x0204 / 0x0550 / 0x0101 gating — the kernel sets the
+       * beacon-queue state once before all chunks and restores it once after
+       * both sections. */
+      remaining -= chunk;
+      pkt_offset += chunk;
+    }
+    return true;
+  };
+
+  bool ok = stream_section(fw + FW_HEADER_SIZE_8814A, dmem_size,
+                           OCPBASE_DMEM_3081);
+  if (ok) {
+    ok = stream_section(fw + FW_HEADER_SIZE_8814A + dmem_size, iram_size,
+                        OCPBASE_IMEM_3081);
+  }
+  _DumpFwdlState8814A("sections-done");
+
+  if (ok) {
+    /* Restore beacon-queue state (kernel skips this on a failed download —
+     * mirror that, the boot poll below will fail loudly either way). */
+    _device.rtw_write8(REG_BCN_CTRL, bcn_ctrl);
+    if (tmpReg422 & BIT(6)) {
+      _device.rtw_write8(REG_FWHW_TXQ_CTRL_8814A + 2, tmpReg422);
+    }
+    u1bTmp = _device.rtw_read8(REG_CR_8814A + 1);
+    _device.rtw_write8(REG_CR_8814A + 1, (uint8_t)(u1bTmp & ~BIT(0)));
+
+    /* FW_DW_RDY (0x0081 BIT6 == REG_MCUFWDL bit14) — only if the chip
+     * reports both section checksums OK. */
+    const uint8_t fwctrl = _device.rtw_read8(REG_MCUFWDL);
+    if ((fwctrl & DMEM_CHKSUM_OK_8814A) && (fwctrl & IMEM_CHKSUM_OK_8814A)) {
+      const uint8_t b1 = _device.rtw_read8(REG_MCUFWDL + 1);
+      _device.rtw_write8(REG_MCUFWDL + 1, (uint8_t)(b1 | BIT(6)));
+    } else {
+      _logger->error(
+          "_Fwdl8814_KernelPath: section checksums not OK in REG_MCUFWDL "
+          "byte0=0x{:02X} — skipping FW_DW_RDY",
+          fwctrl);
+    }
+  }
+  _DumpFwdlState8814A("rsvd-done");
+  /* === end HalROMDownloadFWRSVDPage8814A === */
+
+  _3081Enable8814A();          /* release MCU -> fw boots */
+  _FWDownloadEnable_8814A(false);
+  _DumpFwdlState8814A("cpu-kick");
+
+  if (!_FWFreeToGo8812(10, 5000, CHIP_8814A)) {
+    _logger->error(
+        "8814A firmware boot NOT confirmed: CPU_DL_READY (REG_MCUFWDL bit15) "
+        "never asserted within 5s. Final REG_MCUFWDL=0x{:08X}. The 3081 MCU "
+        "is likely not running — expect dead TX (and no TX reports).",
+        _device.rtw_read32(REG_MCUFWDL));
+    return;
+  }
+  _logger->info("8814A firmware boot confirmed: CPU_DL_READY asserted "
+                "(REG_MCUFWDL=0x{:08X})",
+                _device.rtw_read32(REG_MCUFWDL));
+
+  InitializeFirmwareVars8812();
+}
+
 /* Polls REG_FIFOPAGE_CTRL_2_8814A+1 BIT7 for "RSVD page download complete"
  * after a TX-FIFO write. Upstream's `dump_mgntframe` is synchronous;
  * devourer's send_packet is async via libusb, so we need a longer window to
@@ -628,7 +894,8 @@ void FirmwareManager::_SetDownLoadFwRsvdPagePkt_8814A(
  * from TX-FIFO source `source` to internal `dest` (DMEM or IMEM). Mirrors
  * upstream IDDMADownLoadFW_3081. */
 bool FirmwareManager::_IDDMADownLoadFW_3081(uint32_t source, uint32_t dest,
-                                            uint32_t length, bool fs, bool ls) {
+                                            uint32_t length, bool fs, bool ls,
+                                            bool kernel_flags) {
   /* Wait for channel idle before programming a new transfer. */
   for (int cnt = 20; cnt > 0; --cnt) {
     if (!(_device.rtw_read32(REG_DDMA_CH0CTRL_8814A) & DDMA_CH_OWN_8814A))
@@ -661,17 +928,53 @@ bool FirmwareManager::_IDDMADownLoadFW_3081(uint32_t source, uint32_t dest,
   }
 
   if (ls) {
-    /* Only check the IDDMA checksum status — do NOT write IMEM_DL_RDY /
-     * DMEM_DL_RDY / *_CHKSUM_OK back into REG_MCUFWDL. The aircrack-ng
-     * rtl8814au port we originally followed does these writes, but rtw88's
-     * iddma_download_firmware does not — and the chip is supposed to set
-     * BIT4 (IMEM_CHKSUM_OK) and BIT6 (DMEM_CHKSUM_OK) itself after a
-     * successful IDDMA. download_firmware_end_flow then reads MCUFWDL,
-     * verifies BIT_CHECK_SUM_OK = BIT4|BIT6, and on success writes
-     * FW_DW_RDY (BIT14) and clears MCUFWDL_EN (BIT0). Force-writing the
-     * DL_RDY bits ourselves was leaving the chip in a state where the 3081
-     * CPU enable wouldn't trigger fw execution (chip stayed at 0x00606078
-     * instead of transitioning to 0x0060e078 = BIT15 / FW_INIT_RDY set). */
+    if (kernel_flags) {
+      /* Kernel-faithful last-section handling (IDDMADownLoadFW_3081,
+       * hal/rtl8814a/rtl8814a_hal_init.c:332-369): on checksum OK, RMW the
+       * section's DL_RDY + CHKSUM_OK flags into REG_MCUFWDL byte0; on fail,
+       * clear them. dest < OCPBASE_DMEM_3081 means IMEM. This handshake is
+       * part of what arms the 3081 boot (issue #95). */
+      const uint8_t tmp = _device.rtw_read8(REG_MCUFWDL);
+      if (!(_device.rtw_read32(REG_DDMA_CH0CTRL_8814A) &
+            DDMA_CHKSUM_FAIL_8814A)) {
+        if (dest < OCPBASE_DMEM_3081) {
+          _device.rtw_write8(REG_MCUFWDL,
+                             (uint8_t)(tmp | IMEM_DL_RDY_8814A |
+                                       IMEM_CHKSUM_OK_8814A));
+        } else {
+          _device.rtw_write8(REG_MCUFWDL,
+                             (uint8_t)(tmp | DMEM_DL_RDY_8814A |
+                                       DMEM_CHKSUM_OK_8814A));
+        }
+        _logger->info("_IDDMADownLoadFW_3081: {} checksum OK",
+                      dest < OCPBASE_DMEM_3081 ? "imem" : "dmem");
+      } else {
+        const uint32_t v = _device.rtw_read32(REG_DDMA_CH0CTRL_8814A);
+        _device.rtw_write32(REG_DDMA_CH0CTRL_8814A,
+                            v | DDMA_RST_CHKSUM_STS_8814A);
+        if (dest < OCPBASE_DMEM_3081) {
+          _device.rtw_write8(REG_MCUFWDL,
+                             (uint8_t)(tmp & ~(IMEM_DL_RDY_8814A |
+                                               IMEM_CHKSUM_OK_8814A)));
+        } else {
+          _device.rtw_write8(REG_MCUFWDL,
+                             (uint8_t)(tmp & ~(DMEM_DL_RDY_8814A |
+                                               DMEM_CHKSUM_OK_8814A)));
+        }
+        _logger->error("_IDDMADownLoadFW_3081: checksum fail (dest=0x{:X})",
+                       dest);
+        return false;
+      }
+      return true;
+    }
+    /* rtw88 path: only check the IDDMA checksum status — do NOT write
+     * IMEM_DL_RDY / DMEM_DL_RDY / *_CHKSUM_OK back into REG_MCUFWDL. rtw88's
+     * iddma_download_firmware does no such writes — its
+     * download_firmware_end_flow reads MCUFWDL, verifies BIT4|BIT6, then
+     * writes FW_DW_RDY (BIT14) and clears MCUFWDL_EN (BIT0). (Historical
+     * note kept from the mimic experiments: force-writing the DL_RDY bits
+     * inside the otherwise-rtw88-shaped sequence left the chip stuck at
+     * 0x00606078.) */
     if (_device.rtw_read32(REG_DDMA_CH0CTRL_8814A) & DDMA_CHKSUM_FAIL_8814A) {
       const uint32_t v = _device.rtw_read32(REG_DDMA_CH0CTRL_8814A);
       _device.rtw_write32(REG_DDMA_CH0CTRL_8814A,
@@ -919,6 +1222,7 @@ bool FirmwareManager::_FWFreeToGo8812(uint32_t min_cnt, uint32_t timeout_ms,
 
   auto start = std::chrono::steady_clock::now();
   /*  polling for FW ready */
+  int64_t next_progress_ms = 1000;
   do {
     cnt++;
     value32 = _device.rtw_read32(REG_MCUFWDL);
@@ -928,6 +1232,14 @@ bool FirmwareManager::_FWFreeToGo8812(uint32_t min_cnt, uint32_t timeout_ms,
        * be missed either. */
       if ((value32 & (1u << 15)) != 0) {
         break;
+      }
+      /* Per-second progress line so a hardware iteration shows whether the
+       * register is moving at all while we wait on the 3081. */
+      if (since(start).count() >= next_progress_ms) {
+        _logger->info("_FWFreeToGo: waiting on CPU_DL_READY, "
+                      "REG_MCUFWDL=0x{:08x} ({} ms)",
+                      value32, since(start).count());
+        next_progress_ms += 1000;
       }
     } else if ((value32 & ready_bit) != 0) {
       break;

@@ -150,3 +150,19 @@ symptom.
 4. `sudo python3 tests/regress.py --vm-name devourer-testrig --vm-ssh …`
    default matrix; `--channel 36` spot-check; full matrix + encoding-matrix if
    8814 TX goes green.
+
+## Resolution: FW-boot / TX-silence axis (2026-06-11)
+
+The smoking gun fired exactly as predicted by finding #3: on a virgin chip the
+`CPU_DL_READY` poll failed (`REG_MCUFWDL` stuck at `0x00606078`) and TX was
+0 on-air. Replacing the rtw88-mimic fwdl *bracket* with a verbatim port of the
+vendor kernel's `FirmwareDownload8814A` + `HalROMDownloadFWRSVDPage8814A`
+(keeping the mimic's power-on prefix, which remains devourer's only 8814
+power-on) makes the 3081 boot: trajectory `0x...2079` (per-section
+DL_RDY/CHKSUM_OK RMW) → `0x...6079` (FW_DW_RDY) → `0x...E078`
+(`CPU_DL_READY`, asserted instantly on `_3081Enable`). With the FW running,
+TX emits on-air: ch6 12.8k / ch36 10.7k / ch100 10.8k canonical-SA frames at
+the kernel-monitor witness; RX unaffected. The legacy sequence is preserved
+bit-for-bit behind `DEVOURER_8814_FWDL=rtw88` and still reproduces the
+failure — a clean causal A/B. Residual-risk items #1 (blanket `0x79/0x6078`
+kick) and the FW-boot arm of #5 are thereby resolved.

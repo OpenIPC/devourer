@@ -3,12 +3,11 @@
 The Realtek 11ac driver that simply devours its competitors.
 
 Devourer is a userspace re-implementation of Realtek's RTL88xxAU Wi-Fi
-driver (Jaguar family: RTL8812AU and RTL8821AU shipping on every band,
-RTL8811AU supported via the 8812 code path, RTL8814AU with band-
-specific gaps — see table below), speaking to the chip directly
-through libusb. No kernel module, no `rtl8812au` DKMS tree — just a
-C++20 static library (`WiFiDriver`) plus two demo executables for RX
-and TX. It is the OpenIPC project's driver of choice for long-range
+driver (Jaguar family: RTL8812AU, RTL8814AU, and RTL8821AU shipping on
+every band, RTL8811AU supported via the 8812 code path), speaking to
+the chip directly through libusb. No kernel module, no `rtl8812au`
+DKMS tree — just a C++20 static library (`WiFiDriver`) plus two demo
+executables for RX and TX. It is the OpenIPC project's driver of choice for long-range
 video links built on top of cheap Realtek 11ac USB radios.
 
 ## Hardware landscape
@@ -23,9 +22,9 @@ layered on top.
 
 | Part           | RF / streams    | 2.4 GHz       | 5 GHz UNII-1 (ch36-48) | 5 GHz UNII-2/3 (ch52+) | Notes                                       |
 | -------------- | --------------- | ------------- | ---------------------- | ---------------------- | ------------------------------------------- |
-| **RTL8812AU**  | 2T2R            | TX + RX       | TX + RX                | TX + RX                | VID/PID `0bda:8812`; reference part — works on every channel/band combo |
+| **RTL8812AU**  | 2T2R            | TX + RX       | TX + RX                | TX + RX                | VID/PID `0bda:8812`; reference part |
 | **RTL8811AU**  | 1T1R            | TX + RX       | TX + RX                | TX + RX                | 1T1R cut of 8812 silicon; rides 8812 code path with `RFType=RF_TYPE_1T1R` selected from `REG_SYS_CFG` bit 27. Status mirrored from 8812 — not separately exercised |
-| **RTL8814AU**  | 4T4R, 3-SS max  | RX only       | RX only                | TX + RX                | VID/PID `0bda:8813`; 2-SS effective on USB-2. 5 GHz UNII-2/3 TX produces on-air frames after the 8814A-specific band-switch + channel-set chain. 2.4 GHz TX still doesn't reach receivers |
+| **RTL8814AU**  | 4T4R, 3-SS max  | TX + RX       | TX + RX                | TX + RX                | VID/PID `0bda:8813`; 2-SS effective on USB-2 |
 | **RTL8821AU**  | 1T1R AC + BT    | TX + RX       | TX + RX                | TX + RX | OEM-rebadged as TP-Link Archer T2U Plus (`2357:0120`) etc. UNII-2/3 TX has cross-receiver asymmetry against 8812AU peers |
 
 Successor families (`Jaguar2` / `Jaguar+` — 8812BU, 8822BU/BE, etc., and

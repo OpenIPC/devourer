@@ -81,7 +81,7 @@ sudo python3 tests/regress.py \
     --vm-name devourer-testrig \
     --vm-ssh <user>@<VM-IP-from-status>
 # Defaults to --channel 6 (2.4GHz). Re-run with --channel 36 / 100 to
-# also exercise 5GHz; devourer has known broken cells there for some chips.
+# also exercise 5GHz.
 ```
 
 VM mode is what unblocks chipsets where the host kernel driver doesn't
@@ -148,11 +148,13 @@ per-cell stdout/stderr logs end up at `/tmp/devourer-regress-last/`.
 
 ## CLI knobs
 
-- `--channel N` — Wi-Fi channel for both adapters (default `6`). **Devourer's
-  5GHz path has known broken cells** (8814 RX, 8821 TX/RX) that are masked
-  if you only test 2.4GHz. Override with `--channel 36` / `--channel 100`
-  to surface them. The 8814 TX gate (kaeru ref `RTL8814AU libusb-userspace
-  bulk-OUT does not produce on-air TX`) shows on both bands.
+- `--channel N` — Wi-Fi channel for both adapters (default `6`). Band
+  behaviour can differ per chip — don't assume a single-channel matrix is
+  comprehensive; re-run with `--channel 36` / `--channel 100` to cover
+  5GHz. NB: with the RTL8814AU on the kernel-TX side, kernel-TX cells
+  read 0 at every channel — `88XXau` host-push beacon injection (what
+  `inject_beacon.py` does) doesn't emit on that driver; judge 8814 TX by
+  the devourer-TX cells.
 - `--duration SECONDS` — per-cell injection/measurement window (default 15)
 - `--pass-threshold N` — min hits to pass (default 1)
 - `--tx-pid 0xNNNN` / `--rx-pid 0xNNNN` — pick specific DUTs (defaults to
@@ -188,7 +190,7 @@ A single sniffer chip can't cover the whole spectrum. Pick by band:
 | Band                 | Sniffer chip            | Why                                  |
 |----------------------|-------------------------|--------------------------------------|
 | 2.4 GHz (ch 1–13)    | **AR9271** (`ath9k_htc`)| Vanilla radiotap, no driver-side flag filtering. Canonical kernel-MAC reference for HT/legacy capture. 2.4 G only. |
-| 5 GHz (UNII-1/2/3)   | **RTL8832AU** (`8852au`, lwfinger OOT) | Covers UNII-1 (ch36–48), UNII-2 DFS (ch52–144), UNII-3 (ch149+). Out-of-tree DKMS; kernel-6.18 patch set documented in kaeru (`lwfinger/rtl8852au — kernel 6.18 build patches`). **Caveat — host stall observed once** (2026-06-04) when used as `--sniffer-iface` for `--full-matrix --channel 36` on kernel 6.18 with three concurrent Realtek DUTs on the same xhci bus; hard CPU stall, no oops/NMI trace. Cause not isolated (xhci bus contention vs. lwfinger 5 GHz monitor path); if you see a stall, drop `--sniffer-iface` for 5 G runs and use compositional attribution across cells. |
+| 5 GHz (UNII-1/2/3)   | **RTL8832AU** (`8852au`, lwfinger OOT) | Covers UNII-1 (ch36–48), UNII-2 DFS (ch52–144), UNII-3 (ch149+). Out-of-tree DKMS; recent kernels may need build patches. **Caveat — host stall observed once** when used as `--sniffer-iface` for `--full-matrix --channel 36` on kernel 6.18 with three concurrent Realtek DUTs on the same xhci bus; hard CPU stall, no oops/NMI trace. Cause not isolated (xhci bus contention vs. lwfinger 5 GHz monitor path); if you see a stall, drop `--sniffer-iface` for 5 G runs and use compositional attribution across cells. |
 
 Set the iface per run — there is no auto-band switching:
 
@@ -354,17 +356,10 @@ to add new chipsets — the rest of the script is chipset-agnostic.
   still runs locally; if the VM is on a different host, run virsh there
   (via your own wrapper).
 - Cell 4 (`devourer-TX → devourer-RX`) requires both DUTs to be on the
-  host and devourer-claimable simultaneously. Works fine, but means both
-  chipsets need working devourer RX — if one is RX-broken (e.g. current
-  RTL8814AU TODO), that cell will always show 0 hits regardless of TX.
-- **Channel / band asymmetry on devourer.** A single-channel matrix run
-  doesn't tell the full story — devourer's 5GHz code path has long-
-  standing broken cells (8814 RX, 8821 TX, 8821 RX) that pass on 2.4GHz.
-  The default of `--channel 6` was chosen because it produces the
-  "everything except 8814 TX works" picture that matches CLAUDE.md and
-  the project's primary use case. Run with `--channel 36` or
-  `--channel 100` to surface the 5GHz issues. Older PR matrix tables
-  in the repo history were captured at `--channel 100`, which is why
-  multiple PR bodies (e.g. #34, #42, #49) record "8814 RX devourer still
-  broken" — those cells work at 2.4GHz; the documented "broken" status
-  is band-specific.
+  host and devourer-claimable simultaneously. Both chipsets need working
+  devourer RX — an RX-side failure shows as 0 hits in that cell
+  regardless of the TX side.
+- **Channel / band asymmetry.** A single-channel matrix run doesn't tell
+  the full story — chip behaviour can differ per band. Run 2.4GHz
+  (`--channel 6`) plus at least one 5GHz channel (`--channel 36` /
+  `--channel 100`) before calling a configuration good.

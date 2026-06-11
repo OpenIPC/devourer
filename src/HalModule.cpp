@@ -3,7 +3,6 @@
 #include "FirmwareManager.h"
 #include "Hal8812PhyReg.h"
 #include "Hal8814_PhyTables.h"
-#include "Hal8814_PostFwdlReplay.h"
 #include "Hal8821PhyReg.h"
 #include "PhyTableLoader.h"
 #include "phydm_pre_define.h"
@@ -141,38 +140,6 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
    * functions that do diverge dispatch internally on ICType. */
   const bool is_8814a = _eepromManager->version_id.ICType == CHIP_8814A;
   const bool is_8821 = _eepromManager->version_id.ICType == CHIP_8821;
-
-  /* Experimental, env-gated (default OFF): deinit-before-init for the 8814.
-   * The 8814 path below skips BOTH rtl8812au_hw_reset() (the
-   * "DEINIT_BEFORE_INIT" double-init guard) and InitPowerOn() — it relies on
-   * the 242-op rtw88-mimic inside FirmwareDownload_8814A instead. So a
-   * WARM/dirty chip (a re-run without a cold USB Vbus power-cycle, or after
-   * rtw88_8814au auto-bound it) is never reset: RX bulk-IN wedges (~10 frames
-   * then LIBUSB_ERROR_TIMEOUT) and TX goes 0 on-air, until a Vbus drop. The
-   * kernel avoids this by card_disable-on-unbind (CardDisableRTL8814AU runs
-   * Rtl8814A_NIC_DISABLE_FLOW); devourer never powers the chip off. Mirror it
-   * as a deinit-before-init here. GATED: the 8814 PWR_SEQ has a known
-   * cut-mask-filter interaction with fwdl, so this needs clean-rig validation
-   * (set the env, run devourer twice with no power-cycle, confirm the 2nd run
-   * does not wedge AND cold init is unaffected) before it can become default. */
-  if (is_8814a && std::getenv("DEVOURER_8814_DEINIT_BEFORE_INIT") != nullptr) {
-    if (macAlreadyOn) {
-      /* Kernel card-disable prologue (hal_carddisable_8814,
-       * usb_halinit.c:1394-1398): quiesce MAC DMA first ("stop rx"), then
-       * run the disable flow. The kernel also only card-disables a chip
-       * whose HW init completed (usb_halinit.c:1453) — mirror that with
-       * the warm-boot detect above rather than feeding ACT_TO_CARDEMU to
-       * a cold chip, a path the kernel never exercises. */
-      _logger->info("8814 deinit-before-init: running card_disable_flow");
-      _device.rtw_write8(REG_CR, 0x0); /* stop rx */
-      if (!HalPwrSeqCmdParsing(rtl8814A_card_disable_flow)) {
-        _logger->warn("8814 deinit-before-init: card_disable_flow failed");
-      }
-    } else {
-      _logger->info(
-          "8814 deinit-before-init: chip is cold, skipping card_disable_flow");
-    }
-  }
 
   if (!is_8814a) {
     if (!is_8821) {
@@ -410,9 +377,9 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
    * user's channel from `init_hw_mlme_ext`) wedged 8821AU at ch100
    * mid-second-channel-set TX-power loop — the chip stopped ACK'ing
    * USB control transfers after 2 BB writes, leaving the demo
-   * deadlocked on libusb_control_transfer until SIGKILL. See kaeru
-   * cite "8821AU ch100 wedge — confirmed second-channel-set is the
-   * trigger, not band-switch 2026-06-02". */
+   * deadlocked on libusb_control_transfer until SIGKILL. (Verified on
+   * hardware: the second channel-set is the trigger, not the
+   * band-switch.) */
   const BandType init_band = (init_channel <= 14) ? BandType::BAND_ON_2_4G
                                                   : BandType::BAND_ON_5G;
   if (_eepromManager->version_id.ICType == CHIP_8814A) {
@@ -585,7 +552,7 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
    * during init; devourer never wrote REG_MACID for 8812AU at all and used
    * a hardcoded locally-administered address for 8814AU. Many Realtek MAC
    * TX paths refuse to schedule a frame if the MAC ID is zero — caught by
-   * the T1 canary diff (TODO.md) on 8812AU at ch6: kernel side
+   * a kernel-vs-devourer register canary diff on 8812AU at ch6: kernel side
    * `MAC 0x610 = 0x02FFC954`, devourer side `MAC 0x610 = 0x00000000`.
    *
    * Read the MAC from EFUSE per chip type (EepromManager handles the
@@ -665,84 +632,6 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
     _device.rtw_write32(0x09a0, 0x00000044u);
     _device.rtw_write32(0x09a4, 0x00080080u);
     _logger->info("8814A: trace-derived post-fwdl writes applied");
-  }
-
-  if (is_8814a) {
-    /* TX-validation diagnostic. Read back the registers that gate USB→TX
-     * dataflow to confirm what state the chip is actually in at the end of
-     * init. One log per register to dodge the Logger format helper's
-     * placeholder-overflow truncation. */
-    using namespace rtl8814a;
-    _logger->info("8814A TX-state CR = 0x{:04x}", _device.rtw_read16(REG_CR));
-    _logger->info("8814A TX-state TXPAUSE(0x522) = 0x{:02x}",
-                  _device.rtw_read8(0x0522));
-    _logger->info("8814A TX-state FWHW_TXQ_CTRL(0x420) = 0x{:08x}",
-                  _device.rtw_read32(0x0420));
-    _logger->info("8814A TX-state FIFOPAGE_CTRL_2 = 0x{:08x}",
-                  _device.rtw_read32(REG_FIFOPAGE_CTRL_2_8814A));
-    _logger->info("8814A TX-state MGQ_PGBNDY = 0x{:04x}",
-                  _device.rtw_read16(REG_MGQ_PGBNDY_8814A));
-    _logger->info("8814A TX-state FIFOPAGE_INFO_1(HPQ) = 0x{:08x}",
-                  _device.rtw_read32(REG_FIFOPAGE_INFO_1_8814A));
-    _logger->info("8814A TX-state FIFOPAGE_INFO_5(PUB) = 0x{:08x}",
-                  _device.rtw_read32(REG_FIFOPAGE_INFO_5_8814A));
-    _logger->info("8814A TX-state MCUFWDL = 0x{:08x}",
-                  _device.rtw_read32(0x0080));
-    _logger->info("8814A TX-state TXDMA_STATUS(0x210) = 0x{:08x}",
-                  _device.rtw_read32(0x0210));
-    _logger->info("8814A TX-state TXDMA_OFFSET_CHK(0x20C) = 0x{:08x}",
-                  _device.rtw_read32(0x020C));
-    /* 8-bit read of 0x423 is unreliable on 8814; surface both 8-bit and the
-     * byte-3 of the 32-bit FWHW_TXQ_CTRL word for comparison. */
-    _logger->info("8814A TX-state HWSEQ_CTRL(0x423,8bit) = 0x{:02x}",
-                  _device.rtw_read8(0x0423));
-    _logger->info("8814A TX-state HWSEQ_CTRL(byte3 of 0x420 32bit) = 0x{:02x}",
-                  (_device.rtw_read32(REG_FWHW_TXQ_CTRL) >> 24) & 0xFF);
-    _logger->info("8814A TX-state TCR(0x604) = 0x{:08x}",
-                  _device.rtw_read32(0x0604));
-    _logger->info("8814A TX-state RCR(0x608) = 0x{:08x}",
-                  _device.rtw_read32(0x0608));
-  }
-
-  if (is_8814a && std::getenv("DEVOURER_OOT_REPLAY")) {
-    /* DEVOURER_OOT_REPLAY=1 enables verbatim replay of the kernel
-     * driver's post-fwdl vendor-write sequence on 8814AU. This is the
-     * minimum that unwedges TX today.
-     *
-     * Without this, devourer's post-fwdl chip state diverges from the
-     * working kernel-driver's in many small ways that combine to leave
-     * the chip's USB controller wedged — bulk OUT EP 0x02 NAKs every
-     * TX URB. With the replay, devourer's chip state matches the
-     * kernel driver byte-for-byte (verified via live pyusb register
-     * dump) and TX URBs drain (status=0 across 781 of 781 URBs in
-     * verification runs).
-     *
-     * Trade-off: the replay sequence also includes BB writes that
-     * degrade RX throughput on the same chip (e.g. RX-packet rate
-     * drops ~10x in a 60-second window). Because of this, the replay
-     * is opt-in via env var; default behaviour preserves RX. Users
-     * who need 8814 TX set DEVOURER_OOT_REPLAY=1.
-     *
-     * Source of the replay table (hal/Hal8814_PostFwdlReplay.h):
-     * usbmon capture of a cold-init kernel-driver session
-     *   modprobe 8814au; ip link up; iw set monitor; iw set channel 6
-     * with all vendor control writes between the last fwdl bulk chunk
-     * and the first TX bulk OUT captured (4464 entries).
-     *
-     * Long-term: port the equivalent upstream functions individually
-     * (rtl8814a_hal_init.c + usb_halinit.c) so TX works without the
-     * RX trade-off and without 130 KB of opaque trace data in the
-     * binary. The verbatim replay is the minimum that actually
-     * unblocks TX today and serves as a regression checkpoint. */
-    _logger->info("8814A: replaying {} kernel-driver post-fwdl writes",
-                  kKernelPostFwdlWritesCount);
-    for (size_t i = 0; i < kKernelPostFwdlWritesCount; ++i) {
-      const auto &w = kKernelPostFwdlWrites[i];
-      if (w.len == 1)      _device.rtw_write8(w.addr, (uint8_t)w.value);
-      else if (w.len == 2) _device.rtw_write16(w.addr, (uint16_t)w.value);
-      else if (w.len == 4) _device.rtw_write32(w.addr, w.value);
-    }
-    _logger->info("8814A: replay complete");
   }
 
   return true;
@@ -1730,9 +1619,9 @@ void HalModule::_InitInterrupt_8812AU() {
 void HalModule::_InitNetworkType_8812A() {
   /* devourer is monitor-only; the kernel rtw driver sets MSR (REG_CR
    * bits [17:16] for port 0) to NT_NO_LINK in this case. The earlier
-   * NT_LINK_AP value here was a leftover that the T1 canary diff
-   * caught — `MAC 0x102 = 0x02` on devourer vs `0x00` on kernel
-   * (TODO.md, kernel side via `iwpriv read 4,0x100`). Setting
+   * NT_LINK_AP value here was a leftover that a kernel-vs-devourer
+   * register canary diff caught — `MAC 0x102 = 0x02` on devourer vs
+   * `0x00` on kernel (kernel side via `iwpriv read 4,0x100`). Setting
    * NT_NO_LINK matches kernel's monitor-mode state. */
   auto value32 = _device.rtw_read32(REG_CR);
   value32 = (value32 & ~MASK_NETTYPE) | _NETTYPE(NT_NO_LINK);

@@ -252,8 +252,7 @@ void FirmwareManager::FirmwareDownload_8814A() {
    * rtw88_8814au's usbmon trace (163 reads + 79 writes). The reads matter:
    * several Realtek registers have read-side-effects (RC1 status clears,
    * latched values, state-machine triggers), and a writes-only replay was
-   * insufficient to unlock the chip's BCN_VALID ack after the bulk OUT.
-   * Generated from /tmp/rtw88_init.seq via tools/gen_rtw88_mimic.py. */
+   * insufficient to unlock the chip's BCN_VALID ack after the bulk OUT. */
   (void)_device.rtw_read32(0x00F0);
   _device.rtw_write8(0x001C, 0x00);
   (void)_device.rtw_read32(0x0064);

@@ -306,7 +306,7 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     _pwrTrk.TickThermalMeter(current_band_type, _currentChannel);
   }
 
-  /* T1 cross-validation oracle (TODO.md): when DEVOURER_DUMP_CANARY=1
+  /* Kernel cross-validation oracle: when DEVOURER_DUMP_CANARY=1
    * is set, dump the canary BB/MAC/RF registers after channel-set is
    * complete. Output format matches `iwpriv <iface> read 4,<addr>` /
    * `iwpriv <iface> rfr <path> <addr>` so kernel and devourer dumps
@@ -331,9 +331,8 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
      *     or sentinel zero — including them just clutters the diff.
      *   - 8812AU is 2T2R: paths A + B are both active.
      *   - 8814AU is 4T4R: paths A + B + C + D BB-table state is active.
-     *     RF[C]/RF[D] are write-only by HW design (kaeru cite "RTL8814AU
-     *     RF read mechanism — paths C/D write-only by HW design") so we
-     *     skip RF reads for paths C and D.
+     *     RF[C]/RF[D] are write-only by HW design (reads return
+     *     sentinel/zero) so we skip RF reads for paths C and D.
      * The MAC anchor set is chip-independent (same regs across the
      * family). */
 
@@ -1212,11 +1211,11 @@ void RadioManagementModule::init_hw_mlme_ext(SelectedChannel pmlmeext) {
    * (channel, bw, offset) AND the chip is an 8821AU, skip the
    * reset-and-redo. The second channel-set wedges 8821AU at ch100
    * mid-TX-power loop (chip stops ACK'ing USB control transfers
-   * after 2 BB writes — see kaeru cite "8821AU ch100 wedge —
-   * confirmed second-channel-set is the trigger, not band-switch
-   * 2026-06-02"). Other chips (8812AU, 8814AU) tolerate the second
-   * pass; some 8814AU init steps appear to depend on it (gating the
-   * skip caused 8814 ch6 to lose its RX loop entry).
+   * after 2 BB writes; verified on hardware that the second
+   * channel-set is the trigger, not the band-switch). Other chips
+   * (8812AU, 8814AU) tolerate the second pass; some 8814AU init
+   * steps appear to depend on it (gating the skip caused 8814 ch6
+   * to lose its RX loop entry).
    *
    * Falls through to the historical reset+redo path for everything
    * else. */

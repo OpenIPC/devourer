@@ -337,19 +337,6 @@ int main() {
   rc = libusb_claim_interface(dev_handle, 0);
   assert(rc == 0);
 
-  /* Probe MCUFWDL immediately after claim, before any other chip access.
-   * Useful for diagnosing post-rtw88-unbind takeover: shows whether chip
-   * state has transitioned away from rtw88's 0x0060e078 (fw running). */
-  if (std::getenv("DEVOURER_PROBE_MCUFWDL")) {
-    uint32_t mcufwdl = 0;
-    for (int i = 0; i < 5; ++i) {
-      int got = libusb_control_transfer(dev_handle, 0xC0, 5, 0x0080, 0,
-                                        reinterpret_cast<uint8_t *>(&mcufwdl),
-                                        4, 500);
-      logger->info("PROBE MCUFWDL[{}]: rc={} val=0x{:08x}", i, got, mcufwdl);
-    }
-  }
-
   WiFiDriver wifi_driver(logger);
   auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle);
   g_rtl_device = rtlDevice.get();

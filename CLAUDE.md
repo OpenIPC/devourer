@@ -12,10 +12,11 @@ OpenIPC project for long-range video links.
 Targets the Realtek "Jaguar" 1st-gen 802.11ac family: **RTL8812AU** (2T2R,
 reference), **RTL8811AU** (1T1R cut of 8812 silicon — rides the 8812 code
 path with `RFType=RF_TYPE_1T1R` selected via `REG_SYS_CFG` bit 27),
-**RTL8814AU** (4T4R RF / 3-SS baseband; RX solid, TX validated on
-fresh-chip single-cell runs but unstable after USB passthrough cycles —
-issue #36), and **RTL8821AU** (1T1R AC + BT combo; proper 8821-specific
-init flow landed in PR #42, Android hotplug confirmed end-to-end).
+**RTL8814AU** (4T4R RF / 3-SS baseband; TX + RX on all bands since the
+3081-MCU firmware-boot fix for issue #95 — host-pushed TX needs the
+running MCU, and the earlier rtw88-mimic fwdl never booted it), and
+**RTL8821AU** (1T1R AC + BT combo; proper 8821-specific init flow landed
+in PR #42, Android hotplug confirmed end-to-end).
 
 NOT 8821AU's family confusion: it IS Jaguar wave 1 (CHIP_8821 = 7 in
 Realtek's HalVerDef, shares the enum with CHIP_8812), not Jaguar2 as
@@ -54,12 +55,15 @@ sudo python3 tests/regress.py \
     --vm-name devourer-testrig --vm-ssh <user>@<VM-IP>
 ```
 
-Default channel is `6` (2.4GHz). Devourer's 5GHz path has known broken
-cells for 8814 RX, 8821 TX, and 8821 RX — at 2.4GHz every chip combo
-except 8814 TX works. Pass `--channel 36` / `--channel 100` to exercise
-5GHz; do not assume a single-band matrix is comprehensive. (The repo
-history's matrix tables in PR bodies #34/#42/#49 were all captured at
-`--channel 100` and document the 5GHz state.)
+Default channel is `6` (2.4GHz). Pass `--channel 36` / `--channel 100`
+to exercise 5GHz; do not assume a single-band matrix is comprehensive.
+(The repo history's matrix tables in PR bodies #34/#42/#49 were all
+captured at `--channel 100` and predate the 8814/8821 band fixes.)
+Matrix-interpretation caveat: with the 8814 as TX, the `kernel`-TX cells
+read 0 at every channel — `aircrack-ng/88XXau` host-push *beacon*
+injection (what `inject_beacon.py` does) doesn't emit on that driver
+even though its probe-request injection (`aireplay -9`) does. Judge 8814
+TX by the devourer-TX cells.
 
 Three specialised modes layered on top of the default 4-cell matrix:
 
@@ -163,13 +167,14 @@ phydm parser.
   Windows installer, then re-enumerate as the NIC after a mode switch. If
   `libusb_open_device_with_vid_pid` returns NULL, check `lsusb` — may need
   `usb_modeswitch` first.
-- **RTL8814AU TX is flaky after USB passthrough cycles** (issue #36):
-  fresh-chip single-cell runs send ~4000 frames with 0 submit failures,
-  but after one or more virsh attach/detach cycles `libusb_bulk_transfer`
-  starts returning `LIBUSB_ERROR_IO` on 90%+ of submits. Every full-
-  matrix run since #34 has reproduced this. `RX = devourer` 8814 cells
-  are also still 0 (RX path itself is separately broken — not in scope
-  for #36).
+- **RTL8814AU passthrough-cycle TX flakiness is resolved** (issue #36,
+  historical): virsh attach/detach cycles used to leave 90%+ of
+  `libusb_bulk_transfer` submits failing with `LIBUSB_ERROR_IO`. Root
+  cause was the old rtw88-mimic post-fwdl kick's `REG_CR=0` write killing
+  the DMA-enable bits; the kernel-faithful fwdl path (issue #95 fix)
+  doesn't have it, and the wedge no longer reproduces after repeated
+  cycles. If something like it resurfaces, suspect the fwdl path first
+  (`DEVOURER_8814_FWDL=rtw88` reinstates the old behaviour for A/B).
 - **rmmod/sysfs-unbind actively de-inits the chip** (RF off, MAC DMA off).
   After detaching a kernel driver, expect to re-init from cold, not warm.
   `DEVOURER_SKIP_RESET=1` only helps when firmware state is still intact.

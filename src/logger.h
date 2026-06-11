@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 
 #define ushort uint16_t
 #define DEVOURER_LOG_TAG "devourer"
@@ -46,6 +47,21 @@
     printf(__VA_ARGS__);                    \
     printf("\n")
 #endif
+
+/* Widen byte-sized integers before streaming: `oss << uint8_t` inserts a raw
+ * char, which puts non-UTF-8 bytes into the log (register values like 0xF0)
+ * and breaks text consumers such as tests/regress.py. Plain `char` is left
+ * alone — it is a distinct type and means "character" at our call sites. */
+template<typename T>
+decltype(auto) widen_for_stream(const T& value)
+{
+    if constexpr (std::is_same_v<T, unsigned char>)
+        return static_cast<unsigned>(value);
+    else if constexpr (std::is_same_v<T, signed char>)
+        return static_cast<int>(value);
+    else
+        return (value);
+}
 
 template<typename T>
 void format_helper(std::ostringstream& oss,
@@ -91,11 +107,11 @@ void format_helper(std::ostringstream& oss,
         if (hex_upper) oss << std::uppercase;
         if (zero_pad) oss << std::setfill('0');
         if (width > 0) oss << std::setw(width);
-        oss << value;
+        oss << widen_for_stream(value);
         oss.flags(saved);
         oss.fill(saved_fill);
     } else {
-        oss << value;
+        oss << widen_for_stream(value);
     }
 
     str = str.substr(closeBracket + 1);

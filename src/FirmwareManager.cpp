@@ -657,11 +657,15 @@ void FirmwareManager::_DumpFwdlState8814A(const char *tag) {
       "CPU_DMEM_CON=0x{:08X} DDMA_CH0CTRL=0x{:08X} FIFOPAGE_CTRL2=0x{:08X} "
       "BCN_CTRL=0x{:02X} CR+1=0x{:02X}",
       tag, _device.rtw_read32(REG_MCUFWDL),
-      _device.rtw_read8(REG_SYS_FUNC_EN + 1),
+      /* widen u8 reads: the minimal logger streams uint8_t as a raw char,
+       * which puts non-UTF-8 bytes in the log and breaks text consumers
+       * (e.g. tests/regress.py). */
+      (unsigned)_device.rtw_read8(REG_SYS_FUNC_EN + 1),
       _device.rtw_read32(0x1080),
       _device.rtw_read32(REG_DDMA_CH0CTRL_8814A),
       _device.rtw_read32(REG_FIFOPAGE_CTRL_2_8814A),
-      _device.rtw_read8(REG_BCN_CTRL), _device.rtw_read8(REG_CR_8814A + 1));
+      (unsigned)_device.rtw_read8(REG_BCN_CTRL),
+      (unsigned)_device.rtw_read8(REG_CR_8814A + 1));
 }
 
 /* Verbatim port of the vendor kernel's fwdl bracket:

@@ -834,7 +834,7 @@ def _terminate(proc: subprocess.Popen, grace: float = 2.0) -> None:
 def _count_devourer_rx_hits(log_path: Path) -> int:
     last = 0
     try:
-        for line in log_path.read_text().splitlines():
+        for line in log_path.read_text(errors="replace").splitlines():
             if "<devourer-tx-hit>" in line:
                 for tok in line.split():
                     if tok.startswith("hits="):
@@ -854,7 +854,7 @@ def _count_devourer_tx_attempts(log_path: Path) -> tuple[int, int]:
     last = 0
     failures = 0
     try:
-        for line in log_path.read_text().splitlines():
+        for line in log_path.read_text(errors="replace").splitlines():
             if line.startswith("<devourer-tx>TX #"):
                 tok = line.split("#", 1)[1].split()[0]
                 try:
@@ -870,7 +870,7 @@ def _count_devourer_tx_attempts(log_path: Path) -> tuple[int, int]:
 
 def _count_tcpdump_hits(log_path: Path) -> int:
     try:
-        return sum(1 for _ in log_path.read_text().splitlines())
+        return sum(1 for _ in log_path.read_text(errors="replace").splitlines())
     except FileNotFoundError:
         return 0
 
@@ -878,7 +878,7 @@ def _count_tcpdump_hits(log_path: Path) -> int:
 def _count_kernel_tx_sent(log_path: Path) -> int:
     """inject_beacon.py emits `inject_beacon: sent N frames on IFACE` at exit."""
     try:
-        for line in log_path.read_text().splitlines():
+        for line in log_path.read_text(errors="replace").splitlines():
             if line.startswith("inject_beacon: sent "):
                 return int(line.split()[2])
     except (FileNotFoundError, ValueError):

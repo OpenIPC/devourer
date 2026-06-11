@@ -65,7 +65,14 @@ $ lsusb -v -d 0bda:8812
 */
 
 std::vector<Packet> RtlUsbAdapter::infinite_read() {
-  static constexpr int BUF_SIZE = 16 * 1024;
+  /* Must cover one full chip-side RX aggregate: the 8814 init programs
+   * REG_RXDMA_AGG_PG_TH = 0x05 ("dmc agg th 20K"), and the kernel pairs
+   * that with MAX_RECVBUF_SZ = 32768 (rtl8814a_recv.h:25) — the threshold
+   * plus the in-flight frame must fit the host read. A 16 KB buffer (an
+   * exact multiple of wMaxPacketSize, so no short-packet terminates the
+   * transfer) split >16 KB aggregates and the tail bytes were then parsed
+   * as an RX descriptor at the head of the next transfer. */
+  static constexpr int BUF_SIZE = 32 * 1024;
   uint8_t buffer[BUF_SIZE] = {};
   int actual_length = 0;
   int rc;

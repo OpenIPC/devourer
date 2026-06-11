@@ -66,7 +66,6 @@ private:
   bool rtl8812au_hal_init(uint8_t init_channel);
   bool InitPowerOn();
   bool InitLLTTable8812A(uint8_t txpktbuf_bndy);
-  bool InitLLTTable8814A();
   bool _LLTWrite_8812A(uint32_t address, uint32_t data);
   void _InitHardwareDropIncorrectBulkOut_8812A();
   bool HalPwrSeqCmdParsing(WLAN_PWR_CFG *PwrSeqCmd);
@@ -120,6 +119,7 @@ private:
   void _InitBeaconParameters_8812A();
   void _InitBeaconMaxError_8812A();
   void _InitBurstPktLen();
+  void _InitBurstPktLen_8814A();
 
   bool PHY_BBConfig8812();
   bool phy_BB8812_Config_ParaFile();

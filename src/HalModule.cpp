@@ -28,6 +28,13 @@ constexpr uint16_t REG_TXPKTBUF_BCNQ_BDNY_8814A  = 0x0424;
 constexpr uint16_t REG_TXPKTBUF_BCNQ1_BDNY_8814A = 0x0456; /* per rtl8814a_spec.h:262 */
 constexpr uint16_t REG_MGQ_PGBNDY_8814A        = 0x047A;
 constexpr uint16_t REG_RXFF_PTR_8814A          = 0x011C;
+constexpr uint16_t REG_FAST_EDCA_VOVI_SETTING_8814A = 0x1448; /* per rtl8814a_spec.h:526 */
+constexpr uint16_t REG_FAST_EDCA_BEBK_SETTING_8814A = 0x144C; /* per rtl8814a_spec.h:527 */
+constexpr uint16_t REG_RXDMA_AGG_PG_TH_8814A   = 0x0280; /* per rtl8814a_spec.h:156 */
+constexpr uint16_t REG_RXDMA_MODE_8814A        = 0x0290; /* per rtl8814a_spec.h:160 */
+constexpr uint16_t REG_SW_AMPDU_BURST_MODE_CTRL_8814A = 0x04BC; /* per rtl8814a_spec.h:295 */
+constexpr uint16_t REG_MAX_AGGR_NUM_8814A      = 0x04CA; /* per rtl8814a_spec.h:303 */
+constexpr uint16_t REG_RTS_MAX_AGGR_NUM_8814A  = 0x04CB; /* per rtl8814a_spec.h:304 */
 
 constexpr uint32_t HPQ_PGNUM_8814A = 0x20; /* 32 pages per queue (USB) */
 constexpr uint32_t LPQ_PGNUM_8814A = 0x20;
@@ -108,7 +115,8 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   auto regCr = _device.rtw_read8(REG_CR);
   _logger->info("power-on :REG_SYS_CLKR 0x09=0x{:X}. REG_CR 0x100=0x{:X}",
                 (int)value8, (int)regCr);
-  if ((value8 & BIT3) != 0 && (regCr != 0 && regCr != 0xEA)) {
+  const bool macAlreadyOn = (value8 & BIT3) != 0 && (regCr != 0 && regCr != 0xEA);
+  if (macAlreadyOn) {
     /* pHalData.bMACFuncEnable = TRUE; */
     _logger->info("MAC has already power on");
   } else {
@@ -133,6 +141,39 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
    * functions that do diverge dispatch internally on ICType. */
   const bool is_8814a = _eepromManager->version_id.ICType == CHIP_8814A;
   const bool is_8821 = _eepromManager->version_id.ICType == CHIP_8821;
+
+  /* Experimental, env-gated (default OFF): deinit-before-init for the 8814.
+   * The 8814 path below skips BOTH rtl8812au_hw_reset() (the
+   * "DEINIT_BEFORE_INIT" double-init guard) and InitPowerOn() — it relies on
+   * the 242-op rtw88-mimic inside FirmwareDownload_8814A instead. So a
+   * WARM/dirty chip (a re-run without a cold USB Vbus power-cycle, or after
+   * rtw88_8814au auto-bound it) is never reset: RX bulk-IN wedges (~10 frames
+   * then LIBUSB_ERROR_TIMEOUT) and TX goes 0 on-air, until a Vbus drop. The
+   * kernel avoids this by card_disable-on-unbind (CardDisableRTL8814AU runs
+   * Rtl8814A_NIC_DISABLE_FLOW); devourer never powers the chip off. Mirror it
+   * as a deinit-before-init here. GATED: the 8814 PWR_SEQ has a known
+   * cut-mask-filter interaction with fwdl, so this needs clean-rig validation
+   * (set the env, run devourer twice with no power-cycle, confirm the 2nd run
+   * does not wedge AND cold init is unaffected) before it can become default. */
+  if (is_8814a && std::getenv("DEVOURER_8814_DEINIT_BEFORE_INIT") != nullptr) {
+    if (macAlreadyOn) {
+      /* Kernel card-disable prologue (hal_carddisable_8814,
+       * usb_halinit.c:1394-1398): quiesce MAC DMA first ("stop rx"), then
+       * run the disable flow. The kernel also only card-disables a chip
+       * whose HW init completed (usb_halinit.c:1453) — mirror that with
+       * the warm-boot detect above rather than feeding ACT_TO_CARDEMU to
+       * a cold chip, a path the kernel never exercises. */
+      _logger->info("8814 deinit-before-init: running card_disable_flow");
+      _device.rtw_write8(REG_CR, 0x0); /* stop rx */
+      if (!HalPwrSeqCmdParsing(rtl8814A_card_disable_flow)) {
+        _logger->warn("8814 deinit-before-init: card_disable_flow failed");
+      }
+    } else {
+      _logger->info(
+          "8814 deinit-before-init: chip is cold, skipping card_disable_flow");
+    }
+  }
+
   if (!is_8814a) {
     if (!is_8821) {
       _device.rtw_write8(REG_RF_CTRL, 5);
@@ -247,6 +288,14 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   _InitNetworkType_8812A(); /* set msr	 */
   _InitWMACSetting_8812A();
   _InitAdaptiveCtrl_8812AUsb();
+  if (is_8814a) {
+    /* Tail of kernel _InitMacConfigure_8814A (usb_halinit.c:551-552): 8814
+     * splits the aggregation limits into per-byte registers. The 8812-body
+     * 16-bit 0x4CA=0x1f1f write no longer runs on 8814 (see
+     * _InitBurstPktLen_8814A), so program the kernel values here. */
+    _device.rtw_write8(rtl8814a::REG_MAX_AGGR_NUM_8814A, 0x36);
+    _device.rtw_write8(rtl8814a::REG_RTS_MAX_AGGR_NUM_8814A, 0x36);
+  }
   _InitEDCA_8812AUsb();
 
   _InitRetryFunction_8812A();
@@ -255,7 +304,11 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   _InitBeaconParameters_8812A();
   _InitBeaconMaxError_8812A();
 
-  _InitBurstPktLen(); // added by page. 20110919
+  if (is_8814a) {
+    _InitBurstPktLen_8814A();
+  } else {
+    _InitBurstPktLen(); // added by page. 20110919
+  }
 
   // Init CR MACTXEN, MACRXEN after setting RxFF boundary REG_TRXFF_BNDY to
   // patch Hw bug which Hw initials RxFF boundry size to a value which is larger
@@ -372,6 +425,12 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
      * band-set runs the correct per-chip sequence (issue #51, confirmed via
      * kernel-vs-devourer usbmon register diff). */
     _radioManagementModule->PHY_SwitchWirelessBand8814A(init_band);
+    /* Kernel PHY_SetRFEReg8814A(bInit=TRUE) (usb_halinit.c:1279): select the
+     * GPIO pins that physically drive the external RFE (PA + T/R switch). The
+     * per-band band-switch above only sets the RFE pin *functions*; without
+     * this one-time pin-select the pins never output, so TX never reaches the
+     * antenna (submits OK, 0 on-air) while RX still works. */
+    _radioManagementModule->InitRFEGpio8814A();
   } else {
     _radioManagementModule->PHY_SwitchWirelessBand8812(init_band);
   }
@@ -400,12 +459,27 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   // 2010.04.09 add by hpfan
   _device.rtw_write32(REG_BAR_MODE_CTRL, 0x0201ffff);
 
+  if (is_8814a) {
+    /* Kernel usb_halinit.c:1250: REG_SECONDARY_CCA_CTRL_8814A. Gates TX
+     * deferral on the secondary channel; one of the few unported MAC
+     * writes in the TX-relevant 0x5xx block. */
+    _device.rtw_write8(0x577, 0x03);
+  }
+
   if (registry_priv::wifi_spec) {
     _device.rtw_write16(REG_FAST_EDCA_CTRL, 0);
   }
 
   // Nav limit , suggest by scott
   _device.rtw_write8(0x652, 0x0);
+
+  if (is_8814a) {
+    /* Kernel restores NAV_UPPER at the end of hal init via
+     * HW_VAR_NAV_UPPER (usb_halinit.c:1286 -> rtl8814a_hal_init.c:3794):
+     * ceil(WiFiNavUpperUs=30000 / 128us-unit) = 0xEB. Without it the
+     * zero-write above leaves the MAC honouring arbitrarily long NAV. */
+    _device.rtw_write8(REG_NAV_UPPER, 0xEB);
+  }
 
   /* 0x4c6[3] 1: RTS BW = Data BW */
   /* 0: RTS BW depends on CCA / secondary CCA result. */
@@ -446,12 +520,17 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   _device.rtw_write8(REG_SDIO_CTRL_8812, 0x0);
   _device.rtw_write8(REG_ACLK_MON, 0x0);
 
-  /* USB Host Read PWM. All chip families: write 0. Earlier hypothesis
+  /* USB Host Read PWM. 8812/8821: write 0. Earlier hypothesis
    * (8821 needing 0x84 "leave LPS" wake) was wrong — usbmon trace of
    * aircrack-ng/88XXau on the same T2U Plus shows kernel writes 0x00
    * here, not 0x84. The LPS-leave flow in Hal8821APwrSeq.h is only
-   * traversed when actually leaving LPS, not during init. */
-  _device.rtw_write8(REG_USB_HRPWM, 0);
+   * traversed when actually leaving LPS, not during init.
+   * 8814: the kernel has this init write commented out
+   * (usb_halinit.c:1354); its only live REG_USB_HRPWM writes are on the
+   * LPS path, which monitor mode never enters. Skip to match. */
+  if (!is_8814a) {
+    _device.rtw_write8(REG_USB_HRPWM, 0);
+  }
 
   // TODO:
   ///* ack for xmit mgmt frames. */
@@ -559,7 +638,10 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
      *                                            (kept value; no usbmon
      *                                             trace for 0x0524 in
      *                                             current capture set)
-     *   0x0670 00 00 00 c0           0xc0000000  NAV-related
+     *   0x0670 00 00 00 c0           0xc0000000  REG_CAMCMD: BIT31|BIT30 =
+     *                                            security-CAM clear-all
+     *                                            (= kernel invalidate_cam_all
+     *                                            at usb_halinit.c:1236)
      *   0x0990 00 00 10 27           0x27100000  RA-table base
      *   0x0994 00 01 48 4c           0x4c480100
      *   0x0998 24 28 2c 30           0x302c2824
@@ -572,7 +654,7 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
     _device.rtw_write8(0x04c6, 0x04);           /* REG_QUEUE_CTRL */
     _device.rtw_write32(0x0520, 0x00002f0fu);   /* REG_TX_PTCL_CTRL */
     _device.rtw_write32(0x0524, 0x0f4fff00u);   /* REG_RD_CTRL — kept */
-    _device.rtw_write32(0x0670, 0xc0000000u);
+    _device.rtw_write32(0x0670, 0xc0000000u); /* REG_CAMCMD clear-all */
     /* Rate-adaptation table init (first-write values from cold-init
      * trace; kernel emits 3+ runtime updates from IQK that devourer
      * cannot reproduce — settle for the first/initial value). */
@@ -716,25 +798,15 @@ bool HalModule::InitPowerOn() {
   return true;
 }
 
-/* 8814AU's LLT (linked-list table) for TX FIFO pages is initialized by chip
- * hardware: set BIT0 of REG_AUTO_LLT (0x0208), then poll for the bit to
- * clear, meaning init is done. Mirrors upstream InitLLTTable8814A in
- * hal/rtl8814a/rtl8814a_hal_init.c. */
-bool HalModule::InitLLTTable8814A() {
-  constexpr uint16_t REG_AUTO_LLT_8814A = 0x0208;
-  uint8_t v = _device.rtw_read8(REG_AUTO_LLT_8814A);
-  _device.rtw_write8(REG_AUTO_LLT_8814A, (uint8_t)(v | BIT0));
-  for (int i = 0; i < 100; ++i) {
-    v = _device.rtw_read8(REG_AUTO_LLT_8814A);
-    if (!(v & BIT0)) {
-      _logger->info("InitLLTTable8814A: auto-init OK after {} iters", i);
-      return true;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  _logger->error("InitLLTTable8814A: timeout waiting for BIT0 to clear");
-  return false;
-}
+/* NOTE: there is deliberately no BIT0-style InitLLTTable8814A here. The
+ * vendor function (rtl8814a_hal_init.c:71-92) writes BIT0 of an 8-bit
+ * access at 0x208 and its poll loop tests a stale pre-write variable, so
+ * it never verifies anything. The only structured in-tree definition of
+ * 0x208's fields on this generation says BIT_AUTO_INIT_LLT = BIT(16)
+ * (hal_com_reg.h "2 AUTO_LLT" block), and the BIT16 trigger was verified
+ * on hardware to self-clear within 2 ms. The live trigger is the 32-bit
+ * BIT16 RMW in rtl8812au_hal_init above; keep FIFOPAGE_INFO/RQPN
+ * programming immediately before it. */
 
 bool HalModule::InitLLTTable8812A(uint8_t txpktbuf_bndy) {
   bool status;
@@ -833,6 +905,16 @@ bool HalModule::HalPwrSeqCmdParsing(WLAN_PWR_CFG *PwrSeqCmd) {
       cutMask = _eepromManager->version_id.ChipType == NORMAL_CHIP
                     ? PWR_CUT_A_MSK
                     : PWR_CUT_TESTCHIP_MSK;
+    } else if (_eepromManager->version_id.ICType == CHIP_8814A) {
+      /* The kernel passes the chip-independent CONSTANT
+       * (u8)~PWR_CUT_TESTCHIP_MSK for both the 8814 enable and disable
+       * flows (usb_halinit.c:217, :1398) — it never derives this mask
+       * from the chip's real cut, so the "cut extraction from SYS_CFG is
+       * untrustworthy" concern above doesn't apply here. Effect: the
+       * test-chip-only entries (e.g. card-disable's 0x0002[0]=0 + 2us
+       * delay, and five analog writes in the enable flow) are skipped,
+       * exactly as on the kernel. */
+      cutMask = (uint8_t)~PWR_CUT_TESTCHIP_MSK;
     }
     if (!(GET_PWR_CFG_CUT_MASK(PwrCfgCmd) & cutMask)) {
       AryIdx++;
@@ -878,7 +960,10 @@ bool HalModule::HalPwrSeqCmdParsing(WLAN_PWR_CFG *PwrSeqCmd) {
           bPollingBit = true;
         } else {
           using namespace std::chrono_literals;
-          std::this_thread::sleep_for(10ms);
+          /* Kernel retries with rtw_udelay_os(10) — 10us, not 10ms
+           * (HalPwrSeqCmd.c:134). With maxPollingCnt=5000 the worst-case
+           * failing-poll budget is ~50ms upstream; 10ms here made it ~50s. */
+          std::this_thread::sleep_for(10us);
         }
 
         if (pollingCount++ > maxPollingCnt) {
@@ -1728,9 +1813,13 @@ void HalModule::_InitEDCA_8812AUsb() {
   _device.rtw_write32(REG_EDCA_VI_PARAM, 0x005EA324);
   _device.rtw_write32(REG_EDCA_VO_PARAM, 0x002FA226);
 
-  /* 0x50 for 80MHz clock */
-  _device.rtw_write8(REG_USTIME_TSF, 0x50);
-  _device.rtw_write8(REG_USTIME_EDCA, 0x50);
+  if (_eepromManager->version_id.ICType != CHIP_8814A) {
+    /* 0x50 for 80MHz clock */
+    _device.rtw_write8(REG_USTIME_TSF, 0x50);
+    _device.rtw_write8(REG_USTIME_EDCA, 0x50);
+  }
+  /* 8814A keeps the MAC-table value 0x64 (100MHz tick): the kernel's
+   * _InitEDCA_8814AUsb has the 0x50 writes commented out. */
 }
 
 void HalModule::_InitRetryFunction_8812A() {
@@ -1755,6 +1844,20 @@ void HalModule::init_UsbAggregationSetting_8812A() {
 }
 
 void HalModule::usb_AggSettingTxUpdate_8812A() {
+  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+    /* Kernel usb_AggSettingTxUpdate_8814A runs with UsbTxAggMode=1 and
+     * UsbTxAggDescNum=3 (wifi_spec=0 default): program the block-descriptor
+     * count into REG_TDECTRL[7:4] and REG_TDECTRL+3 (0x20B) = DescNum<<1.
+     * Devourer still submits one frame per bulk URB, but this is part of
+     * the reference TXDMA state the kernel chip runs with. */
+    constexpr uint8_t kUsbTxAggDescNum = 3;
+    uint32_t value32 = _device.rtw_read32(REG_TDECTRL);
+    value32 &= ~(BLK_DESC_NUM_MASK << BLK_DESC_NUM_SHIFT);
+    value32 |= (kUsbTxAggDescNum & BLK_DESC_NUM_MASK) << BLK_DESC_NUM_SHIFT;
+    _device.rtw_write32(REG_TDECTRL, value32);
+    _device.rtw_write8(REG_TDECTRL + 3, kUsbTxAggDescNum << 1);
+    return;
+  }
   if (_usbTxAggMode) {
     uint32_t value32 = _device.rtw_read32(REG_TDECTRL);
     value32 = value32 & ~(BLK_DESC_NUM_MASK << BLK_DESC_NUM_SHIFT);
@@ -1794,6 +1897,17 @@ void HalModule::usb_AggSettingRxUpdate_8812A() {
       temp =
           (uint16_t)(_device.rxagg_usb_size | (_device.rxagg_usb_timeout << 8));
       _device.rtw_write16(REG_RXDMA_AGG_PG_TH, temp);
+    }
+    if (_eepromManager->version_id.ICType == CHIP_8814A) {
+      /* Kernel usb_AggSettingRxUpdate_8814A explicitly RMW-clears
+       * USB_AGG_EN_8814A (BIT7 of REG_RXDMA_AGG_PG_TH+3, 0x283) in its
+       * default RX_AGG_DMA mode (usb_halinit.c:705-727). Devourer's
+       * taken path never wrote that byte, leaving USB-mode aggregation
+       * at whatever the reset/firmware value is — mixed DMA+USB agg
+       * framing would break the RND8 parse walk. */
+      uint8_t valueUSB = _device.rtw_read8(REG_RXDMA_AGG_PG_TH + 3);
+      _device.rtw_write8(REG_RXDMA_AGG_PG_TH + 3,
+                         (uint8_t)(valueUSB & ~BIT7));
     }
     break;
   case RX_AGG_MIX:
@@ -1934,6 +2048,57 @@ void HalModule::_InitBurstPktLen() {
   _device.rtw_write32(REG_ARFR3_8812 + 4, 0xffcff000);
 }
 
+/* Port of upstream 8814 _InitBurstPktLen (usb_halinit.c). The 8812 body
+ * above must NOT run on 8814A: its 0x456 write (REG_AMPDU_MAX_TIME_8812,
+ * "suggested by Zhilin") lands on REG_TXPKTBUF_BCNQ1_BDNY_8814A and
+ * corrupts the beacon-queue TX-buffer boundary programmed by
+ * _InitQueueReservedPage_8814AUsb; the USTIME_TSF/EDCA = 0x50 writes are
+ * 8812's 80MHz-clock value where the 8814 MAC table keeps 0x64; and the
+ * PIFS/MAX_AGGR/ARFR/RSV_CTRL pokes have no counterpart in the kernel's
+ * 8814 init. */
+void HalModule::_InitBurstPktLen_8814A() {
+  using namespace rtl8814a;
+
+  /* yx_qi 131128 move to 0x1448, 144c */
+  _device.rtw_write32(REG_FAST_EDCA_VOVI_SETTING_8814A, 0x08070807);
+  _device.rtw_write32(REG_FAST_EDCA_BEBK_SETTING_8814A, 0x08070807);
+
+  /* check device operation speed: SS 0xff bit7 */
+  const bool supportUsb3 = (_device.rtw_read8(0xff) & BIT7) == 0;
+  if (!supportUsb3) { /* USB2/1.1 Mode */
+    /* Kernel keys this off UsbBulkOutSize (512 on high-speed, 64 on
+     * full-speed). */
+    if (_device.speed() == LIBUSB_SPEED_HIGH) {
+      /* set burst pkt len=512B */
+      _device.rtw_write8(REG_RXDMA_MODE_8814A, 0x1e);
+    } else {
+      /* set burst pkt len=64B */
+      _device.rtw_write8(REG_RXDMA_MODE_8814A, 0x2e);
+    }
+    _device.rtw_write16(REG_RXDMA_AGG_PG_TH_8814A, 0x2005); /* dmc agg th 20K */
+  } else { /* USB3 Mode */
+    /* set burst pkt len=1k */
+    _device.rtw_write8(REG_RXDMA_MODE_8814A, 0x0e);
+    _device.rtw_write16(REG_RXDMA_AGG_PG_TH_8814A, 0x0a05); /* dmc agg th 20K */
+
+    /* set Reg 0xf008[3:4] to 2'00 to disable U1/U2 Mode to avoid 2.5G spur
+     * in USB3.0. added by page, 20120712 */
+    _device.rtw_write8(0xf008, (uint8_t)(_device.rtw_read8(0xf008) & 0xE7));
+    /* to avoid usb 3.0 H2C fail */
+    _device.rtw_write16(0xf002, 0);
+
+    /* turn off the LDPC pre-TX */
+    _device.rtw_write8(
+        REG_SW_AMPDU_BURST_MODE_CTRL_8814A,
+        (uint8_t)(_device.rtw_read8(REG_SW_AMPDU_BURST_MODE_CTRL_8814A) &
+                  ~BIT6));
+  }
+
+  /* Upstream tail: `if (pHalData->AMPDUBurstMode) write8(0x4BC, 0x5F)` —
+   * AMPDUBurstMode is never assigned anywhere in the kernel tree
+   * (zero-initialised false), so that write never runs there either. */
+}
+
 bool HalModule::PHY_BBConfig8812() {
   /* tangw check start 20120412 */
   /* . APLL_EN,,APLL_320_GATEB,APLL_320BIAS,  auto config by hw fsm after
@@ -2047,10 +2212,28 @@ bool HalModule::odm_config_bb_with_header_file(odm_bb_config_type config_type) {
 
 void HalModule::hal_set_crystal_cap(uint8_t crystal_cap) {
   crystal_cap = (uint8_t)(crystal_cap & 0x3F);
+  const uint32_t reg_val = (uint32_t)(crystal_cap | (crystal_cap << 6));
 
-  /* write 0x2C[30:25] = 0x2C[24:19] = CrystalCap */
-  _device.phy_set_bb_reg(REG_MAC_PHY_CTRL, 0x7FF80000u,
-                         (uint8_t)(crystal_cap | (crystal_cap << 6)));
+  /* The XTAL-trim field of 0x2C sits at different bit positions per chip
+   * (upstream phydm_cfotracking.c::odm_set_crystal_cap):
+   *   8812A: 0x2C[30:25] = 0x2C[24:19]  -> mask 0x7FF80000
+   *   8821A: 0x2C[23:18] = 0x2C[17:12]  -> mask 0x00FFF000
+   *   8814A: 0x2C[26:21] = 0x2C[20:15]  -> mask 0x07FF8000
+   * The 8812 mask was applied to every chip — on 8814 the cap landed 4
+   * bits high (real trim field untouched, bits [30:27] clobbered), i.e.
+   * a carrier-frequency offset on TX and RX. */
+  switch (_eepromManager->version_id.ICType) {
+  case CHIP_8814A:
+    _device.phy_set_bb_reg(REG_MAC_PHY_CTRL, 0x07FF8000u, reg_val);
+    break;
+  case CHIP_8821:
+    _device.phy_set_bb_reg(REG_MAC_PHY_CTRL, 0x00FFF000u, reg_val);
+    break;
+  default:
+    /* write 0x2C[30:25] = 0x2C[24:19] = CrystalCap */
+    _device.phy_set_bb_reg(REG_MAC_PHY_CTRL, 0x7FF80000u, reg_val);
+    break;
+  }
 }
 
 static uint32_t array_mp_8812a_phy_reg_mp[] = {
@@ -2514,6 +2697,25 @@ void HalModule::phy_RF6052_Config_ParaFile_8814() {
       break;
     }
   }
+
+  /* Kernel PHY_RFConfig8814A tail (rtl8814a_rf6052.c:143-146): copy path
+   * A's RC-calibration word (RF_RCK1_Jaguar = RF 0x1C) to paths B/C/D so
+   * all chains run the same RC filter trim. Path A is readable; B/C/D
+   * writes take effect even though they can't be read back (see note
+   * below). */
+  {
+    /* RF_RCK1_Jaguar (0x1c) comes from Hal8812PhyReg.h. */
+    const uint32_t rck1 = _radioManagementModule->phy_query_rf_reg(
+        RfPath::RF_PATH_A, RF_RCK1_Jaguar, 0xfffff);
+    _radioManagementModule->phy_set_rf_reg(RfPath::RF_PATH_B, RF_RCK1_Jaguar,
+                                           0xfffff, rck1);
+    _radioManagementModule->phy_set_rf_reg(RfPath::RF_PATH_C, RF_RCK1_Jaguar,
+                                           0xfffff, rck1);
+    _radioManagementModule->phy_set_rf_reg(RfPath::RF_PATH_D, RF_RCK1_Jaguar,
+                                           0xfffff, rck1);
+    _logger->info("8814A RCK1 sync: RF-A[0x1c]=0x{:05x} copied to B/C/D", rck1);
+  }
+
   /* Verify path A/B RF reads return sensible values. NOTE: paths C/D do
    * not support RF read-back via the standard 3-wire SI/PI mechanism on
    * 8814 — rtw88's rtw88xxa_phy_read_rf only indexes paths A/B (rf_phy_num
@@ -3057,6 +3259,16 @@ void HalModule::phydm_SetIgiFloor_Jaguar() {
    * kernel driver. Match kernel by writing the floor once here. */
   _device.phy_set_bb_reg(rA_IGI_Jaguar, bMaskByte0, 0x1c);
   _device.phy_set_bb_reg(rB_IGI_Jaguar, bMaskByte0, 0x1c);
+  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+    /* 4-path chip: kernel DIG always writes the same IGI to all four
+     * paths (phydm_write_dig_reg covers 0xC50/0xE50/0x1850/0x1A50 for
+     * ODM_IC_AC_4SS). Flooring only A/B left C/D at the 0x20 BB-table
+     * seed — a 4 dB per-path gain imbalance the kernel never has, which
+     * skews MRC combining and per-path RSSI. (0x1850/0x1A50 =
+     * rC_IGI_Jaguar2 / rD_IGI_Jaguar2.) */
+    _device.phy_set_bb_reg(0x1850, bMaskByte0, 0x1c);
+    _device.phy_set_bb_reg(0x1A50, bMaskByte0, 0x1c);
+  }
 }
 
 void HalModule::PHY_BB8812_Config_1T() {

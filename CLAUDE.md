@@ -94,9 +94,9 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
 - `DEVOURER_CHANNEL=N` — override monitor channel.
 - `DEVOURER_SKIP_RESET=1` — skip `libusb_reset_device` before claim; useful
   when picking up a chip whose firmware is already running.
-- `DEVOURER_FORCE_TXPWR=1` — force the per-rate TX-power loop during channel
-  switch. Skipped by default in 8814 monitor mode (~300 vendor ctrl
-  transfers, indices are unused for RX-only).
+- `DEVOURER_SKIP_TXPWR=1` — skip the per-rate TX-power loop during channel
+  switch (runs by default on every chip; escape hatch for RX-only
+  experiments).
 - `DEVOURER_USB_QUIET=1` — downgrade libusb log level from DEBUG to WARNING
   (DEBUG produces ~7 MB per 15 s and has filled `/tmp` mid-capture).
 

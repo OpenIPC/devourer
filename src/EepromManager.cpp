@@ -99,8 +99,11 @@ void EepromManager::LateInitFor8814A() {
   Hal_EfuseParseBTCoexistInfo8812A();
   Hal_EfuseParseXtal_8812A();
   Hal_ReadThermalMeter_8812A();
-  Hal_ReadAmplifierType_8812A();
-  Hal_ReadRFEType_8812A();
+  /* 8814 derives amplifier state from rfe_type (kernel
+   * hal_ReadRFEType_8814A -> hal_ReadAmplifierType_8814A) — the 8812
+   * pair (EFUSE-parsed amplifier + 8812 RFE heuristic) resolved the
+   * wrong fallback (0 instead of 1) on unburnt 0xCA boards. */
+  Hal_ReadRFEType_8814A();
   _logger->info("8814A LateInit: rfe_type={} crystal_cap=0x{:X} "
                 "PA_2G/5G=0x{:X}/0x{:X} LNA_2G/5G=0x{:X}/0x{:X}",
                 rfe_type, crystal_cap, PAType_2G, PAType_5G,
@@ -481,30 +484,32 @@ void EepromManager::LoadTxPowerInfo() {
       BW20_5G_Diff[path][0] = pg_msb_diff(v);
       OFDM_5G_Diff[path][0] = pg_lsb_diff(v);
     }
-    /* Ntx=2..4: 2 bytes each (BW40|BW20, OFDM|-) */
+    /* Ntx=2..4: ONE byte each (MSB=BW40, LSB=BW20). Unlike the 2.4G
+     * block, 5G packs the OFDM diffs separately below — the previous
+     * two-bytes-per-Ntx parse reused the 2.4G shape and shifted every
+     * field from byte 16 onward (kernel hal_load_pg_txpwr_info_path_5g,
+     * hal_com_phycfg.c:848-953). */
     for (int t = 1; t < 4; t++) {
       uint8_t v = efuse_eeprom_data[off++];
       BW40_5G_Diff[path][t] = pg_msb_diff(v);
       BW20_5G_Diff[path][t] = pg_lsb_diff(v);
-      v = efuse_eeprom_data[off++];
-      OFDM_5G_Diff[path][t] = pg_msb_diff(v);
-      /* LSB nibble of this byte is unused for 5G (no CCK on 5G). */
     }
-    /* 3 bytes BW80 diffs, Ntx=1..3 stored as nibble pairs:
-     *   byte 0: MSB=Ntx2-BW80, LSB=Ntx1-BW80
-     *   byte 1: MSB=Ntx4-BW80, LSB=Ntx3-BW80
-     *   byte 2: reserved
-     * Upstream uses a different layout per IC; the 8812 path packs as
-     * above per `hal_load_pg_txpwr_info_path_5g`. */
+    /* OFDM diff 2T~3T: one byte (MSB=2T, LSB=3T). */
     {
       uint8_t v = efuse_eeprom_data[off++];
-      BW80_5G_Diff[path][1] = pg_msb_diff(v);
-      BW80_5G_Diff[path][0] = pg_lsb_diff(v);
-      v = efuse_eeprom_data[off++];
-      BW80_5G_Diff[path][3] = pg_msb_diff(v);
-      BW80_5G_Diff[path][2] = pg_lsb_diff(v);
-      /* third byte ignored */
-      off++;
+      OFDM_5G_Diff[path][1] = pg_msb_diff(v);
+      OFDM_5G_Diff[path][2] = pg_lsb_diff(v);
+    }
+    /* OFDM diff 4T: one byte, LSB nibble only. */
+    {
+      uint8_t v = efuse_eeprom_data[off++];
+      OFDM_5G_Diff[path][3] = pg_lsb_diff(v);
+    }
+    /* BW80|BW160 diffs: four bytes, tx 0..3 (MSB=BW80, LSB=BW160 — no
+     * 160MHz support here, the LSB nibble is consumed for layout only). */
+    for (int t = 0; t < 4; t++) {
+      uint8_t v = efuse_eeprom_data[off++];
+      BW80_5G_Diff[path][t] = pg_msb_diff(v);
     }
   }
 
@@ -778,25 +783,29 @@ uint8_t EepromManager::GetTxPowerIndexBase(uint8_t path, uint8_t rate,
       goto clamp_and_return;
     }
     /* MCS / VHT — pick BW20 / BW40 (BW80 falls through to BW40 per upstream
-     * comment "Willis suggest adopt BW 40M power index while in BW 80 mode"). */
-    if (bandwidth == 0) { /* BW20 */
-      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
-          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW20_24G_Diff[path][0];
-      if (is_mcs8_15 (rate) || (ntx_idx >= 1 && (is_vht2ss(rate) || is_vht3ss(rate) || is_vht4ss(rate))))
-        txPower += BW20_24G_Diff[path][1];
-      if (is_mcs16_23(rate) || (ntx_idx >= 2 && (is_vht3ss(rate) || is_vht4ss(rate))))
-        txPower += BW20_24G_Diff[path][2];
-      if (is_mcs24_31(rate) || (ntx_idx >= 3 && is_vht4ss(rate)))
-        txPower += BW20_24G_Diff[path][3];
-    } else { /* BW40 or BW80 */
-      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
-          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW40_24G_Diff[path][0];
-      if (is_mcs8_15 (rate) || (ntx_idx >= 1 && (is_vht2ss(rate) || is_vht3ss(rate) || is_vht4ss(rate))))
-        txPower += BW40_24G_Diff[path][1];
-      if (is_mcs16_23(rate) || (ntx_idx >= 2 && (is_vht3ss(rate) || is_vht4ss(rate))))
-        txPower += BW40_24G_Diff[path][2];
-      if (is_mcs24_31(rate) || (ntx_idx >= 3 && is_vht4ss(rate)))
-        txPower += BW40_24G_Diff[path][3];
+     * comment "Willis suggest adopt BW 40M power index while in BW 80 mode").
+     *
+     * Kernel accumulation is CUMULATIVE over rate ranges
+     * (hal_com_phycfg.c:2490-2496): MCS8-31 adds [0]+[1], MCS16-31 adds
+     * [0]+[1]+[2], VHT2SS+ adds [1], VHT3SS+ adds [2], etc. The previous
+     * exclusive windows gave e.g. MCS16-23 only [2]. */
+    {
+      const bool ge_1s = is_mcs0_7(rate) || is_mcs8_15(rate) ||
+                         is_mcs16_23(rate) || is_mcs24_31(rate) ||
+                         is_vht1ss(rate) || is_vht2ss(rate) ||
+                         is_vht3ss(rate) || is_vht4ss(rate);
+      const bool ge_2s = is_mcs8_15(rate) || is_mcs16_23(rate) ||
+                         is_mcs24_31(rate) || is_vht2ss(rate) ||
+                         is_vht3ss(rate) || is_vht4ss(rate);
+      const bool ge_3s = is_mcs16_23(rate) || is_mcs24_31(rate) ||
+                         is_vht3ss(rate) || is_vht4ss(rate);
+      const bool ge_4s = is_mcs24_31(rate) || is_vht4ss(rate);
+      const int8_t *diff =
+          (bandwidth == 0) ? BW20_24G_Diff[path] : BW40_24G_Diff[path];
+      if (ge_1s) txPower += diff[0];
+      if (ge_2s) txPower += diff[1];
+      if (ge_3s) txPower += diff[2];
+      if (ge_4s) txPower += diff[3];
     }
   } else {
     /* 5G — no CCK */
@@ -810,25 +819,28 @@ uint8_t EepromManager::GetTxPowerIndexBase(uint8_t path, uint8_t rate,
       if (ntx_idx >= 3) txPower += OFDM_5G_Diff[path][3];
       goto clamp_and_return;
     }
-    /* MCS / VHT BW20 / BW40 / BW80. */
-    if (bandwidth == 0) {
-      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
-          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW20_5G_Diff[path][0];
-      if (is_mcs8_15 (rate)) txPower += BW20_5G_Diff[path][1];
-      if (is_mcs16_23(rate)) txPower += BW20_5G_Diff[path][2];
-      if (is_mcs24_31(rate)) txPower += BW20_5G_Diff[path][3];
-    } else if (bandwidth == 1) {
-      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
-          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW40_5G_Diff[path][0];
-      if (is_mcs8_15 (rate)) txPower += BW40_5G_Diff[path][1];
-      if (is_mcs16_23(rate)) txPower += BW40_5G_Diff[path][2];
-      if (is_mcs24_31(rate)) txPower += BW40_5G_Diff[path][3];
-    } else { /* BW80 */
-      if (is_mcs0_7  (rate) || is_vht1ss(rate) || is_vht2ss(rate) ||
-          is_vht3ss  (rate) || is_vht4ss(rate)) txPower += BW80_5G_Diff[path][0];
-      if (is_mcs8_15 (rate)) txPower += BW80_5G_Diff[path][1];
-      if (is_mcs16_23(rate)) txPower += BW80_5G_Diff[path][2];
-      if (is_mcs24_31(rate)) txPower += BW80_5G_Diff[path][3];
+    /* MCS / VHT BW20 / BW40 / BW80 — cumulative over rate ranges, same
+     * scheme as 2.4G (kernel hal_com_phycfg.c:2550-2601). The previous
+     * code had no VHT clauses beyond [0] at all on 5G, so VHT2SS missed
+     * [1] and VHT3SS missed [1]+[2]. */
+    {
+      const bool ge_1s = is_mcs0_7(rate) || is_mcs8_15(rate) ||
+                         is_mcs16_23(rate) || is_mcs24_31(rate) ||
+                         is_vht1ss(rate) || is_vht2ss(rate) ||
+                         is_vht3ss(rate) || is_vht4ss(rate);
+      const bool ge_2s = is_mcs8_15(rate) || is_mcs16_23(rate) ||
+                         is_mcs24_31(rate) || is_vht2ss(rate) ||
+                         is_vht3ss(rate) || is_vht4ss(rate);
+      const bool ge_3s = is_mcs16_23(rate) || is_mcs24_31(rate) ||
+                         is_vht3ss(rate) || is_vht4ss(rate);
+      const bool ge_4s = is_mcs24_31(rate) || is_vht4ss(rate);
+      const int8_t *diff = (bandwidth == 0)   ? BW20_5G_Diff[path]
+                           : (bandwidth == 1) ? BW40_5G_Diff[path]
+                                              : BW80_5G_Diff[path];
+      if (ge_1s) txPower += diff[0];
+      if (ge_2s) txPower += diff[1];
+      if (ge_3s) txPower += diff[2];
+      if (ge_4s) txPower += diff[3];
     }
   }
 
@@ -948,18 +960,12 @@ JaguarPhyContext EepromManager::GetPhyContext() const {
   constexpr uint8_t kOdmItrfUsb = 0x02;
   constexpr uint8_t kOdmCe = 0x04;
 
-  /* Every conditional block in array_mp_8814a_phy_reg + _agc_tab requires
-   * a non-zero rfe_type (122 + 52 blocks, low-byte values 1..11). If
-   * LateInitFor8814A hasn't run yet — or the chip's EFUSE doesn't carry
-   * a board RFE — fall back to rfe_type=1 so at least the BB/AGC tables
-   * apply. The board's RFE pinmux may then be slightly off, but the chip
-   * will still receive: verified on CF-938AC, even with the fallback
-   * value the chip lands on the same RFE_PIN_0824 = 0x00033E40 that
-   * rtw88's working trace shows. */
-  const uint8_t rfe_for_ctx =
-      (version_id.ICType == CHIP_8814A && rfe_type == 0)
-          ? 1
-          : static_cast<uint8_t>(rfe_type);
+  /* Pass the resolved rfe_type straight through. Hal_ReadRFEType_8814A now
+   * mirrors the kernel decision tree (unburnt/BIT7 0xCA -> 1 on 8814AU,
+   * incl. the autoload-fail branch), so the old 0->1 ctx patch-up is
+   * redundant — and would mis-map a board whose EFUSE legitimately burns
+   * rfe_type=0. */
+  const uint8_t rfe_for_ctx = static_cast<uint8_t>(rfe_type);
 
   return JaguarPhyContext{
       .cut_version = static_cast<uint8_t>(version_id.CUTVersion),
@@ -1729,6 +1735,92 @@ void EepromManager::Hal_ReadRFEType_8812A() {
   }
 
   _logger->info("RFE Type: 0x{:X}", rfe_type);
+}
+
+/* Kernel hal_ReadAmplifierType_8814A (rtl8814a_hal_init.c:1474-1525): on
+ * 8814 the PA/LNA state is DERIVED from rfe_type, not parsed from the
+ * 0xBC-0xC0 EFUSE bytes (the byte-parsing hal_ReadPAType_8814A is dead
+ * code upstream — no caller). Note: neither driver's 8814 table
+ * check_positive consumes the Type* words (cond2 ignored both sides), so
+ * these mostly matter for logging/diagnostics parity. */
+void EepromManager::hal_ReadAmplifierType_8814A() {
+  switch (rfe_type) {
+  case 1: /* 8814AU */
+    external_pa_5g = external_lna_5g = 1;
+    TypeAPA = TypeALNA = 0;
+    break;
+  case 2: /* socket board 8814AR and 8194AR */
+    ExternalPA_2G = true;
+    ExternalLNA_2G = true;
+    external_pa_5g = external_lna_5g = 1;
+    TypeAPA = TypeALNA = 0x55;
+    TypeGPA = TypeGLNA = 0x55;
+    break;
+  case 3: /* high power on-board 8814AR and 8194AR */
+    ExternalPA_2G = true;
+    ExternalLNA_2G = true;
+    external_pa_5g = external_lna_5g = 1;
+    TypeAPA = TypeALNA = 0xaa;
+    TypeGPA = TypeGLNA = 0xaa;
+    break;
+  case 4: /* on-board 8814AR and 8194AR */
+    ExternalPA_2G = true;
+    ExternalLNA_2G = true;
+    external_pa_5g = external_lna_5g = 1;
+    TypeAPA = 0x55;
+    TypeALNA = 0xff;
+    TypeGPA = TypeGLNA = 0x55;
+    break;
+  case 5:
+    ExternalPA_2G = true;
+    ExternalLNA_2G = true;
+    external_pa_5g = external_lna_5g = 1;
+    TypeAPA = 0xaa;
+    TypeALNA = 0x5500;
+    TypeGPA = TypeGLNA = 0xaa;
+    break;
+  case 6:
+    external_lna_5g = 1;
+    TypeALNA = 0;
+    break;
+  case 0:
+  default: /* 8814AE */
+    break;
+  }
+}
+
+/* Kernel hal_ReadRFEType_8814A (rtl8814a_hal_init.c:1527-1568). Differs
+ * from the 8812 tree in three load-bearing ways: the fallback for an
+ * unprogrammed/BIT7 EFUSE 0xCA is rfe_type=1 on 8814AU (8812: 0 or the
+ * PA/LNA heuristic), the programmed-value mask is 0x7F (8812: 0x3F + the
+ * rfe==4 customer workaround), and the amplifier state is derived from
+ * the resolved rfe_type afterwards. EEPROM_RFE_OPTION is 0xCA on both
+ * chips. (CF-938AC ground truth: 0xCA = 0x01 -> rfe_type 1 either way;
+ * the fallback difference bites on unburnt boards.) */
+void EepromManager::Hal_ReadRFEType_8814A() {
+  if (!_device.AutoloadFailFlag) {
+    if (registry_priv::RFE_Type != 64 ||
+        0xFF == efuse_eeprom_data[EEPROM_RFE_OPTION_8812] ||
+        (efuse_eeprom_data[EEPROM_RFE_OPTION_8812] & BIT7) != 0) {
+      if (registry_priv::RFE_Type != 64) {
+        rfe_type = registry_priv::RFE_Type;
+      } else {
+        /* IS_HARDWARE_TYPE_8814AU -> 1 (the AE/PCIe case is 0). */
+        rfe_type = 1;
+      }
+    } else {
+      /* bit7==0 means RFE type defined by 0xCA[6:0] */
+      rfe_type =
+          (uint16_t)(efuse_eeprom_data[EEPROM_RFE_OPTION_8812] & 0x7F);
+    }
+  } else {
+    rfe_type = (registry_priv::RFE_Type != 64)
+                   ? registry_priv::RFE_Type
+                   : 1; /* 8814AU autoload-fail default */
+  }
+  hal_ReadAmplifierType_8814A();
+  _logger->info("8814A RFE Type: 0x{:X} (ext PA_5G={} LNA_5G={})", rfe_type,
+                (int)external_pa_5g, (int)external_lna_5g);
 }
 
 #define EEPROM_USB_MODE_8812 0x08

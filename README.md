@@ -101,13 +101,10 @@ Common to both demos:
 - `DEVOURER_SKIP_RESET=1` — skip `libusb_reset_device` before claim. Useful
   when picking up a chip whose firmware is already running (e.g. after
   unbinding a kernel driver that left fw state intact).
-- `DEVOURER_FORCE_TXPWR=1` — force the per-rate TX-power loop to run during
-  channel switch. Skipped by default in 8814 monitor mode: the loop issues
-  ~300 vendor control transfers and the resulting per-rate indices are
-  unused for RX-only operation.
 - `DEVOURER_SKIP_TXPWR=1` — skip the per-rate TX-power loop entirely on
-  every chip. Useful for fast iteration during BB/RF debugging when the
-  per-rate indices aren't relevant to what you're measuring.
+  every chip (it runs by default, including 8814). Useful for fast
+  iteration during BB/RF debugging when the per-rate indices aren't
+  relevant to what you're measuring.
 - `DEVOURER_FORCE_IQK=1` — run phydm I/Q calibration on every channel-set,
   not just band transitions. For 8814, IQK is otherwise off by default —
   the kernel doesn't run it on `iw set channel` either, and devourer

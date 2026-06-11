@@ -125,12 +125,17 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
         stbc = 1;
       if (known & 0x40) {
         auto bw = iterator.this_arg[3] & 0x1f;
+        /* Map radiotap VHT bandwidth codes to CHANNEL_WIDTH enums — the
+         * descriptor BW switch below compares against the enums (as the
+         * HT path above does). The previous MHz literals (40/80) never
+         * matched CHANNEL_WIDTH_40(1)/CHANNEL_WIDTH_80(2), so VHT 40/80
+         * silently transmitted as 20MHz. */
         if (bw >= 1 && bw <= 3)
-          bwidth = 40;
+          bwidth = CHANNEL_WIDTH_40;
         else if (bw >= 4 && bw <= 10)
-          bwidth = 80;
+          bwidth = CHANNEL_WIDTH_80;
         else
-          bwidth = 20;
+          bwidth = CHANNEL_WIDTH_20;
       }
 
       if (iterator.this_arg[8] & 1)
@@ -149,6 +154,19 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
     default:
       break;
     }
+  }
+
+  /* CCK rates (1/2/5.5/11M) do not exist at 5GHz. The RTL8814AU silently
+   * drops a CCK-rated frame on a 5GHz channel — the bulk-OUT completes but
+   * nothing goes on-air (verified on hardware: default MGN_1M beacon = 0
+   * frames at ch36/ch100, but ~14k on-air once the rate is OFDM). 2.4GHz
+   * CCK is fine. So on a 5GHz channel, clamp a CCK rate to the lowest OFDM
+   * rate. (The 8812 chip happens to auto-fall-back CCK->OFDM at 5G; the
+   * 8814 does not, so we must do it in software.) */
+  if (_channel.Channel > 14 &&
+      (fixed_rate == MGN_1M || fixed_rate == MGN_2M ||
+       fixed_rate == MGN_5_5M || fixed_rate == MGN_11M)) {
+    fixed_rate = MGN_6M;
   }
 
   usb_frame = new uint8_t[usb_frame_length]();
@@ -312,6 +330,11 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
 }
 
 void RtlJaguarDevice::SetMonitorChannel(SelectedChannel channel) {
+  /* Keep the device-level channel state current: send_packet's 5GHz
+   * CCK->OFDM clamp keys off _channel.Channel. Before this assignment
+   * existed, _channel was never written anywhere — the clamp read an
+   * uninitialised member and fired nondeterministically. */
+  _channel = channel;
   _radioManagement->set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                        channel.ChannelWidth);
 }

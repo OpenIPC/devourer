@@ -528,6 +528,22 @@ uint32_t RadioManagementModule::phy_query_rf_reg(RfPath eRFPath,
 
 uint32_t RadioManagementModule::phy_RFSerialRead(RfPath eRFPath,
                                                  uint32_t Offset) {
+  if (_eepromManager->version_id.ICType == CHIP_8814A) {
+    /* Kernel phy_RFRead_8814A (rtl8814a_phycfg.c:86-122): 8814 RF
+     * registers are read back through per-path direct BB shadow blocks,
+     * NOT the 8812 HSSI/LSSI serial mechanism below. This is also the
+     * only read path that works for paths C/D — the SI readback returns
+     * garbage there, which corrupted every masked (read-modify-write) RF
+     * write on those paths: the channel and bandwidth RMWs of RF 0x18
+     * destroyed all bits outside their masks on C/D at every channel
+     * set. */
+    static constexpr uint16_t kDirectBase[4] = {0x2800, 0x2c00, 0x3800,
+                                                0x3c00};
+    const uint16_t direct_addr = (uint16_t)(
+        kDirectBase[static_cast<int>(eRFPath) & 3] + (Offset & 0xff) * 4);
+    return phy_query_bb_reg(direct_addr, 0xfffff /* bRFRegOffsetMask */);
+  }
+
   uint32_t retValue;
 
   BbRegisterDefinition pPhyReg = PhyRegDef[eRFPath];
@@ -889,9 +905,13 @@ void RadioManagementModule::phy_SetRFEReg8814A(BandType Band) {
   } else {
     switch (rfe_type) {
     case 2:
-      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, bMaskDWord, 0x33173717);
-      _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar, bMaskDWord, 0x33173717);
-      _device.phy_set_bb_reg(0x18B4, bMaskDWord, 0x33173717);
+      /* Kernel PHY_SetRFEReg8814A 5G case 2: 0x37173717 on A/B/C — the
+       * previous 0x33173717 carried rfe-1's [27:24] nibble (copy slip
+       * between adjacent cases; flagged independently by two audit
+       * passes against the rtl8814au reference). */
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, bMaskDWord, 0x37173717);
+      _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar, bMaskDWord, 0x37173717);
+      _device.phy_set_bb_reg(0x18B4, bMaskDWord, 0x37173717);
       _device.phy_set_bb_reg(0x1AB4, bMaskDWord, 0x77177717);
       _device.phy_set_bb_reg(0x1ABC, 0x0FF00000, 0x37);
       break;
@@ -912,6 +932,27 @@ void RadioManagementModule::phy_SetRFEReg8814A(BandType Band) {
       break;
     }
   }
+}
+
+void RadioManagementModule::InitRFEGpio8814A() {
+  /* Mirror of the kernel PHY_SetRFEReg8814A(bInit=TRUE) branch
+   * (rtl8814a_phycfg.c:1026-1039, called once from usb_halinit.c:1279).
+   * Enables the GPIO pins that physically drive the external RFE (PA + T/R
+   * antenna switch). devourer's per-band phy_SetRFEReg8814A programs only the
+   * RFE pinmux *functions* (0xCB0/0xEB0/0x18B4/0x1AB4); without this one-time
+   * pin-select the pins are never enabled as RFE outputs, so the external
+   * PA/T-R switch never engages on TX — TX submits succeed (err:0) but nothing
+   * reaches the air, while RX still works (issue surfaced after the chip
+   * stopped inheriting a prior kernel-set GPIO state). */
+  const auto rfe_type = _eepromManager->rfe_type;
+  constexpr uint16_t REG_GPIO_IO_SEL_8814A = 0x0042; /* byte 2 of the 0x40 dword */
+  _device.phy_set_bb_reg(0x1994, 0xf, 0xf); /* 0x1994[3:0] = 0xf */
+  const uint8_t sel = _device.rtw_read8(REG_GPIO_IO_SEL_8814A);
+  /* rfe_type 1/2 -> 0x40[23:20]=0xf (0x42 |= 0xf0); type 0 -> [23:22]=11b (0xc0) */
+  const uint8_t orv = (rfe_type == 0) ? 0xc0 : 0xf0;
+  _device.rtw_write8(REG_GPIO_IO_SEL_8814A, (uint8_t)(sel | orv));
+  _logger->info("8814A RFE GPIO pin-select (rfe_type={}, 0x42 |= 0x{:02x})",
+                (int)rfe_type, orv);
 }
 
 /* Port of upstream `phy_SetBwRegAdc_8814A`
@@ -1753,10 +1794,20 @@ uint8_t RadioManagementModule::phy_GetSecondaryChnl_8812() {
 }
 
 void RadioManagementModule::PHY_SetTxPowerLevel8812(uint8_t Channel) {
+  const bool is_8814a = _eepromManager->version_id.ICType == CHIP_8814A;
   for (uint8_t path = 0; (uint8_t)path < _eepromManager->numTotalRfPath;
        path++) {
     phy_set_tx_power_level_by_path(Channel, (RfPath)path);
-    PHY_TxPowerTrainingByPath_8812((RfPath)path);
+    /* TX power training is an 8812 mechanism: kernel
+     * PHY_SetTxPowerLevel8814 (rtl8814a_phycfg.c:636) only loops
+     * phy_set_tx_power_level_by_path — no training write exists anywhere
+     * in the 8814 tree, and its BB table inits 0xC54/0xE54 to 0. Running
+     * the 8812 trainee on 8814 wrote a non-zero word into 0xC54 and
+     * collapsed paths B/C/D onto 0xE54 (last-writer-wins) on every
+     * channel set. */
+    if (!is_8814a) {
+      PHY_TxPowerTrainingByPath_8812((RfPath)path);
+    }
   }
 }
 

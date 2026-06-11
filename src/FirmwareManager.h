@@ -23,10 +23,19 @@ private:
   void _3081Enable8814A();
   void _DDMAReset8814A();
   void FirmwareDownload_8814A();
+  /* Kernel-faithful fwdl bracket (verbatim port of aircrack-ng/rtl8814au
+   * FirmwareDownload8814A + HalROMDownloadFWRSVDPage8814A). Default path. */
+  void _Fwdl8814_KernelPath(const uint8_t *fw, uint32_t dmem_size,
+                            uint32_t iram_size);
+  /* Legacy rtw88-usbmon-mimic path, selectable via DEVOURER_8814_FWDL=rtw88.
+   * Bit-identical on the wire to the pre-#95 sequence. */
+  void _Fwdl8814_Rtw88Path(const uint8_t *fw, uint32_t dmem_size,
+                           uint32_t iram_size);
+  void _DumpFwdlState8814A(const char *tag);
   void _SetDownLoadFwRsvdPagePkt_8814A(const uint8_t *fw_chunk, uint32_t len);
   bool _WaitDownLoadRSVDPageOK_3081();
   bool _IDDMADownLoadFW_3081(uint32_t source, uint32_t dest, uint32_t length,
-                             bool fs, bool ls);
+                             bool fs, bool ls, bool kernel_flags = false);
   bool WriteFW8812(uint8_t *buffer, uint32_t size);
   int _PageWrite_8812(uint32_t page, uint8_t *buffer, uint32_t size);
   bool BlockWrite(uint8_t *buffer, int buffSize);

@@ -38,10 +38,9 @@ void Iqk8814a::BackupMacBb(const uint32_t *macRegs, uint32_t *macOut,
 }
 
 void Iqk8814a::BackupRf(const uint32_t *regs, uint32_t out[][4]) {
-  /* Path C/D RF reads return sentinel/zero by HW design (kaeru:
-   * "RTL8814AU RF read mechanism — paths C/D write-only by HW design")
-   * but mirror upstream's read-all-4-paths pattern exactly so the
-   * restore writes back identical values. */
+  /* 8814 RF paths C/D are write-only by HW design — reads return
+   * sentinel/zero. Mirror upstream's read-all-4-paths pattern anyway so
+   * the restore writes back identical values. */
   for (int i = 0; i < kRfRegNum; i++) {
     out[i][RfPath::RF_PATH_A] =
         _radio->phy_query_rf_reg(RfPath::RF_PATH_A, regs[i], kRFRegMask);

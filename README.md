@@ -176,6 +176,15 @@ on the kernel-TX path, so the `kernel`-TX rows of `--encoding-matrix`
 are not authoritative for LDPC/STBC asymmetries — devourer-TX rows
 ARE).
 
+### Startup time
+
+Devourer reaches ready-to-RX/TX faster than the `aircrack-ng/88XXau`
+kernel driver on every supported chip, in both directions (RTL8812AU
+~2s, RTL8814AU ~6s, RTL8821AU ~1s cold-init to first frame). Run your
+own numbers with `tests/bench_init.py` — it benchmarks cold init per
+adapter, devourer vs kernel driver, with a per-stage breakdown from the
+library's `init-timing:` log lines.
+
 ## Project layout
 
 ```

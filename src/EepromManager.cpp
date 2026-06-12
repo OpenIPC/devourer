@@ -1,5 +1,6 @@
 #include "EepromManager.h"
 
+#include "InitTimer.h"
 #include "phydm_pre_define.h"
 #include "registry_priv.h"
 #include "rtl8812a_hal.h"
@@ -26,7 +27,9 @@ static int devourer_strcaseeq(const char *a, const char *b) {
 
 EepromManager::EepromManager(RtlUsbAdapter device, Logger_t logger)
     : _device{device}, _logger{logger} {
+  InitTimer timer(logger, "eeprom");
   read_chip_version_8812a(device);
+  timer.stage("chip_version");
 
   /* On 8814AU, defer all EFUSE access until AFTER firmware download. rtw88's
    * usbmon shows zero touches to EFUSE_CTRL (0x0031-0x0033) and EFUSE_ACCESS
@@ -43,6 +46,7 @@ EepromManager::EepromManager(RtlUsbAdapter device, Logger_t logger)
   } else {
     hal_InitPGData_8812A();
   }
+  timer.stage("efuse_read");
 
   Hal_EfuseParseIDCode8812A();
   EEPROMVersion = Hal_ReadPROMVersion8812A(_device, efuse_eeprom_data);
@@ -76,6 +80,8 @@ EepromManager::EepromManager(RtlUsbAdapter device, Logger_t logger)
   if (version_id.ICType != CHIP_8814A) {
     hal_ReadUsbType_8812AU();
   }
+  timer.stage("parse");
+  timer.total();
 }
 
 void EepromManager::LateInitFor8814A() {
@@ -87,8 +93,10 @@ void EepromManager::LateInitFor8814A() {
   if (version_id.ICType != CHIP_8814A) {
     return;
   }
+  InitTimer timer(_logger, "eeprom_late");
   _device.AutoloadFailFlag = false;
   hal_InitPGData_8812A();
+  timer.stage("efuse_read");
   Hal_EfuseParseIDCode8812A();
   EEPROMVersion = Hal_ReadPROMVersion8812A(_device, efuse_eeprom_data);
   EEPROMRegulatory = Hal_ReadTxPowerInfo8812A(_device, efuse_eeprom_data);
@@ -108,6 +116,8 @@ void EepromManager::LateInitFor8814A() {
                 "PA_2G/5G=0x{:X}/0x{:X} LNA_2G/5G=0x{:X}/0x{:X}",
                 rfe_type, crystal_cap, PAType_2G, PAType_5G,
                 LNAType_2G, LNAType_5G);
+  timer.stage("parse");
+  timer.total();
 }
 
 /* RTL8821AU is Jaguar-family silicon (CHIP_8821 = 7 in Realtek's HalVerDef),

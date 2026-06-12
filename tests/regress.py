@@ -636,7 +636,6 @@ def _devourer_env(dut: Dut, channel: int,
     env["DEVOURER_VID"] = f"0x{dut.vid}"
     env["DEVOURER_PID"] = f"0x{dut.pid}"
     env["DEVOURER_CHANNEL"] = str(channel)
-    env["DEVOURER_USB_QUIET"] = "1"
     if tx_encoding:
         # DEVOURER_TX_* knobs are read by txdemo/main.cpp to patch the
         # radiotap MCS info bytes before the TX loop. Only meaningful when

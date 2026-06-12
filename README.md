@@ -119,8 +119,9 @@ Common to both demos:
 - `DEVOURER_DUMP_CANARY=1` — emit a canonical post-channel-set dump of
   BB/MAC/RF anchor registers. Feeds the `tests/canary_diff.py`
   cross-validation tool against `tools/canary_kernel_dump.sh` output.
-- `DEVOURER_USB_QUIET=1` — downgrade libusb log level from DEBUG to
-  WARNING (DEBUG produces ~7 MB per 15 s and can fill `/tmp` mid-capture).
+- `DEVOURER_USB_DEBUG=1` — raise libusb log level from the default WARNING
+  to DEBUG (produces ~7 MB per 15 s, can fill `/tmp` mid-capture, and slows
+  init measurably). `DEVOURER_USB_QUIET` is accepted as a no-op.
 
 `WiFiDriverTxDemo`-only knobs patch the canonical beacon's radiotap
 header before the TX loop:

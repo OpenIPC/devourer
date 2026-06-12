@@ -1,5 +1,6 @@
 #include "RadioManagementModule.h"
 #include "Hal8812PhyReg.h"
+#include "InitTimer.h"
 #include "registry_priv.h"
 
 extern "C" {
@@ -265,15 +266,18 @@ void RadioManagementModule::PHY_HandleSwChnlAndSetBW8812(
 }
 
 void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
+  InitTimer timer(_logger, "channel_set");
   if (_swChannel) {
     phy_SwChnl8812();
     _swChannel = false;
   }
+  timer.stage("sw_chnl");
 
   if (_setChannelBw) {
     phy_PostSetBwMode8812();
     _setChannelBw = false;
   }
+  timer.stage("set_bw");
   /* 8814A uses a packed single-DWord write to BB 0x1998 per (path,rate)
    * instead of the 8812's per-rate per-byte register fanout (see the
    * CHIP_8814A branch at the top of PHY_SetTxPowerIndex_8812A). The
@@ -287,6 +291,7 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
   } else {
     PHY_SetTxPowerLevel8812(_currentChannel);
   }
+  timer.stage("tx_power");
 
   /* Run phydm thermal-meter pwrtrk once per channel-set. Mirrors the
    * upstream watchdog tick — reads RF[A][0x42], folds into the
@@ -411,6 +416,8 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     }
   }
   _needIQK = false;
+  timer.stage("iqk");
+  timer.total();
 
   /* Canary dump runs LAST so it captures the post-IQK / post-pwrtrk
    * state — same observation order as kernel iface reads via

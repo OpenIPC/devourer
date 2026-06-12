@@ -79,6 +79,14 @@ Three specialised modes layered on top of the default 4-cell matrix:
   `--encoding-matrix` are NOT authoritative for LDPC/STBC asymmetries
   (MCS index + HT/VHT distinction do survive).
 
+Init/startup-time benchmarking lives in `tests/bench_init.py`: per-DUT
+cold-init timing of devourer RX (`exec → first RX frame`), devourer TX
+(`exec → first bulk-OUT`), and — with `--vm-name`/`--vm-ssh` — the kernel
+driver (`virsh attach → monitor up → first frame`). Per-stage numbers come
+from the `init-timing: <scope>.<stage> = N ms` lines the library emits
+(`src/InitTimer.h`); A/B variants isolate libusb log level, USB reset, and
+the TX-power loop.
+
 DUTs are routed between host and VM per cell via `virsh attach-device`.
 Re-run with `--keep-logs` to inspect per-cell logs (and per-cell pcaps
 when `--sniffer-iface` is active) at `/tmp/devourer-regress-last/`. See
@@ -98,8 +106,10 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
 - `DEVOURER_SKIP_TXPWR=1` — skip the per-rate TX-power loop during channel
   switch (runs by default on every chip; escape hatch for RX-only
   experiments).
-- `DEVOURER_USB_QUIET=1` — downgrade libusb log level from DEBUG to WARNING
-  (DEBUG produces ~7 MB per 15 s and has filled `/tmp` mid-capture).
+- `DEVOURER_USB_DEBUG=1` — raise libusb log level from the default WARNING to
+  DEBUG (produces ~7 MB per 15 s — has filled `/tmp` mid-capture and adds
+  0.5-0.8 s to init even with stderr discarded). `DEVOURER_USB_QUIET` is
+  accepted as a no-op for backwards compatibility.
 
 `WiFiDriverTxDemo` additionally honours radiotap-encoding knobs that
 patch the beacon's MCS info field (or, with `_VHT=1`, replace it with a

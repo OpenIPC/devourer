@@ -1,6 +1,7 @@
 #include "HalModule.h"
 
 #include "FirmwareManager.h"
+#include "InitTimer.h"
 #include "Hal8812PhyReg.h"
 #include "Hal8814_PhyTables.h"
 #include "Hal8821PhyReg.h"
@@ -73,11 +74,15 @@ HalModule::HalModule(
       _eepromManager{eepromManager}, _logger{logger} {}
 
 bool HalModule::rtw_hal_init(SelectedChannel selectedChannel) {
+  InitTimer timer(_logger, "hal");
   auto status = rtl8812au_hal_init(selectedChannel.Channel);
 
   if (status) {
+    timer.stage("chip_init");
     _radioManagementModule->init_hw_mlme_ext(selectedChannel);
     _radioManagementModule->SetMonitorMode();
+    timer.stage("mlme_monitor");
+    timer.total();
 
     /* Construct + start the phydm DM watchdog after chip init is
      * complete. Tick once synchronously so the first canary capture
@@ -109,6 +114,7 @@ bool HalModule::rtw_hal_init(SelectedChannel selectedChannel) {
 }
 
 bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
+  InitTimer timer(_logger, "hal_init");
   // Check if MAC has already power on. by tynli. 2011.05.27.
   auto value8 = _device.rtw_read8(REG_SYS_CLKR + 1);
   auto regCr = _device.rtw_read8(REG_CR);
@@ -159,6 +165,7 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
       return false;
     }
   }
+  timer.stage("power_on");
 
   /* LLT table init: 8812 needs it pre-fw download; 8814AU does NOT — rtw88
    * runs LLT init AFTER fw boot, and doing it pre-fw on 8814 breaks the
@@ -173,9 +180,11 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   }
 
   _InitHardwareDropIncorrectBulkOut_8812A();
+  timer.stage("llt");
 
   auto fwManager = std::make_unique<FirmwareManager>(_device, _logger);
   fwManager->FirmwareDownload(_eepromManager->version_id.ICType);
+  timer.stage("fwdl");
 
   /* 8814AU: now that fw is running, the chip will accept EFUSE reads
    * without breaking RSVD-page fwdl (which is past). Read the board's
@@ -183,8 +192,10 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
    * GetPhyContext() returns real values to PhyTableLoader instead of
    * the fallback rfe_type=1 used pre-EFUSE-read. */
   _eepromManager->LateInitFor8814A();
+  timer.stage("efuse_late");
 
   PHY_MACConfig8812();
+  timer.stage("mac_cfg");
 
   if (is_8814a) {
     /* 8814AU has its own TX FIFO page allocation: 2048 total pages vs 8812's
@@ -247,6 +258,7 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
       _InitTransferPageSize_8812AUsb();
     }
   }
+  timer.stage("queue_fifo");
 
   // Get Rx PHY status in order to report RSSI and others.
   _InitDriverInfoSize_8812A(DRVINFO_SZ);
@@ -292,6 +304,7 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
 
   _device.rtw_write16(REG_PKT_VO_VI_LIFE_TIME, 0x0400); /* unit: 256us. 256ms */
   _device.rtw_write16(REG_PKT_BE_BK_LIFE_TIME, 0x0400); /* unit: 256us. 256ms */
+  timer.stage("mac_misc");
 
   /* 8814AU BB/RF domain power-on. Without these writes, the chip's BB
    * register space (0x800-0xFFF) silently rejects writes via vendor
@@ -329,8 +342,10 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   if (bbConfig8812Status == false) {
     return false;
   }
+  timer.stage("bb_config");
 
   PHY_RF6052_Config_8812();
+  timer.stage("rf_config");
 
   phydm_SetIgiFloor_Jaguar();
 
@@ -401,10 +416,12 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   } else {
     _radioManagementModule->PHY_SwitchWirelessBand8812(init_band);
   }
+  timer.stage("band_switch");
 
   _radioManagementModule->rtw_hal_set_chnl_bw(
       init_channel, ChannelWidth_t::CHANNEL_WIDTH_20,
       HAL_PRIME_CHNL_OFFSET_DONT_CARE, HAL_PRIME_CHNL_OFFSET_DONT_CARE);
+  timer.stage("channel_set");
 
   // HW SEQ CTRL
   // set 0x0 to 0xFF by tynli. Default enable HW SEQ NUM.
@@ -634,6 +651,8 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
     _logger->info("8814A: trace-derived post-fwdl writes applied");
   }
 
+  timer.stage("post_init");
+  timer.total();
   return true;
 }
 

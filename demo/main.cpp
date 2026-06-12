@@ -31,6 +31,17 @@ static constexpr uint16_t kRealtekProductIds[] = {
 static int g_rx_count = 0;
 static RtlJaguarDevice *g_rtl_device = nullptr;
 
+/* Process-start reference for the init-timing lines (see src/InitTimer.h).
+ * `init-timing: demo.first_rx_frame` is the end-to-end "ready to RX" mark:
+ * exec → first 802.11 frame delivered to the packet processor. */
+static const std::chrono::steady_clock::time_point g_proc_start =
+    std::chrono::steady_clock::now();
+static long long ms_since_start() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now() - g_proc_start)
+      .count();
+}
+
 /* DEVOURER_TX_STATUS=1: surface chip-side C2H frames (TX status reports,
  * various diagnostic pings) on `<devourer-c2h>` with a raw hex dump, plus
  * a best-effort decode of the 8814A TX_RPT payload layout. The C2H
@@ -121,6 +132,12 @@ static void packetProcessor(const Packet &packet) {
   }
 
   ++g_rx_count;
+
+  if (g_rx_count == 1) {
+    printf("<devourer>init-timing: demo.first_rx_frame = %lld ms\n",
+           ms_since_start());
+    fflush(stdout);
+  }
 
   if (g_rx_count <= 10 || g_rx_count % 100 == 0) {
     printf("<devourer>RX pkt #%d (len=%zu)\n", g_rx_count, packet.Data.size());
@@ -272,14 +289,16 @@ int main() {
     return rc;
   }
 
-  /* libusb log level: DEBUG by default (matches historic behaviour); a single
-   * DEVOURER_USB_QUIET=1 knob downgrades to WARNING to keep capture logs
-   * manageable. DEBUG output runs ~7 MB per 15s run, which has filled /tmp
-   * and wedged the harness on previous sessions. */
+  /* libusb log level: WARNING by default. DEBUG is opt-in via
+   * DEVOURER_USB_DEBUG=1 — it emits ~7 MB per 15s run (has filled /tmp and
+   * wedged the harness), and bench_init.py measured it adding 0.5-0.8s to
+   * time-to-first-RX-frame even with stderr discarded; on a slow sink
+   * (SSH/serial/embedded flash) the cost is unbounded. DEVOURER_USB_QUIET
+   * is accepted as a no-op for backwards compatibility with older scripts. */
   libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL,
-                    std::getenv("DEVOURER_USB_QUIET")
-                        ? LIBUSB_LOG_LEVEL_WARNING
-                        : LIBUSB_LOG_LEVEL_DEBUG);
+                    std::getenv("DEVOURER_USB_DEBUG")
+                        ? LIBUSB_LOG_LEVEL_DEBUG
+                        : LIBUSB_LOG_LEVEL_WARNING);
 
   /* DEVOURER_PID env var (hex, e.g. "0x8813") restricts the open loop to a
    * single PID. Useful when multiple Realtek adapters are plugged.
@@ -329,16 +348,19 @@ int main() {
   /* Skip USB reset if DEVOURER_SKIP_RESET=1. Used when picking up a chip
    * with firmware already running (e.g. after a patched-rtw88 sysfs unbind):
    * USB reset would clobber fw state and force us to re-run fwdl. */
+  logger->info("init-timing: demo.open_device = {} ms", ms_since_start());
   if (!std::getenv("DEVOURER_SKIP_RESET")) {
     libusb_reset_device(dev_handle);
   } else {
     logger->info("DEVOURER_SKIP_RESET set — skipping libusb_reset_device");
   }
+  logger->info("init-timing: demo.usb_reset = {} ms", ms_since_start());
   rc = libusb_claim_interface(dev_handle, 0);
   assert(rc == 0);
 
   WiFiDriver wifi_driver(logger);
   auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle);
+  logger->info("init-timing: demo.create_device = {} ms", ms_since_start());
   g_rtl_device = rtlDevice.get();
   std::atomic<bool> qd_emitter_stop{false};
   std::thread qd_emitter;

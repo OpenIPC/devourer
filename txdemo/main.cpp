@@ -39,6 +39,17 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
 };
 
+/* Process-start reference for the init-timing lines (see src/InitTimer.h).
+ * `init-timing: txdemo.first_tx_submit` is the end-to-end "ready to TX" mark:
+ * exec → first bulk-OUT submitted. */
+static const std::chrono::steady_clock::time_point g_proc_start =
+    std::chrono::steady_clock::now();
+static long long ms_since_start() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now() - g_proc_start)
+      .count();
+}
+
 static int g_rx_count = 0;
 static void packetProcessor(const Packet &packet) {
   ++g_rx_count;
@@ -141,9 +152,11 @@ int main(int argc, char **argv) {
     if (rc != 0) logger->error("libusb_detach_kernel_driver: {}", rc);
   }
 
+  logger->info("init-timing: txdemo.open_device = {} ms", ms_since_start());
   if (!termux_mode && !std::getenv("DEVOURER_SKIP_RESET")) {
     libusb_reset_device(handle);
   }
+  logger->info("init-timing: txdemo.usb_reset = {} ms", ms_since_start());
 
   rc = libusb_claim_interface(handle, 0);
   assert(rc == 0);
@@ -255,6 +268,7 @@ int main(int argc, char **argv) {
 
   WiFiDriver wifi_driver{logger};
   auto rtlDevice = wifi_driver.CreateRtlDevice(handle);
+  logger->info("init-timing: txdemo.create_device = {} ms", ms_since_start());
 
   int channel = 161;
   if (const char *ch_env = std::getenv("DEVOURER_CHANNEL")) {
@@ -292,8 +306,7 @@ int main(int argc, char **argv) {
       .ChannelWidth = CHANNEL_WIDTH_20});
 
   write_sentinel(0xBEEF, "post-init/pre-TX");
-
-  sleep(5);
+  logger->info("init-timing: txdemo.init_write = {} ms", ms_since_start());
 
   std::thread usb_thread(usb_event_loop, logger, context);
   uint8_t beacon_frame[] = {
@@ -419,6 +432,10 @@ int main(int argc, char **argv) {
 
   long tx_count = 0;
   while (true) {
+    if (tx_count == 0) {
+      logger->info("init-timing: txdemo.first_tx_submit = {} ms",
+                   ms_since_start());
+    }
     rc = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
     ++tx_count;
     if (tx_count <= 10 || tx_count % 500 == 0) {

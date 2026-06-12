@@ -253,12 +253,12 @@ int main(int argc, char **argv) {
   } else {
     rc = libusb_init(&context);
     if (rc < 0) return rc;
-    /* Match WiFiDriverDemo's libusb log level convention — DEVOURER_USB_QUIET
-     * drops to WARNING so a long-running duplex doesn't flood the harness. */
+    /* Match WiFiDriverDemo's libusb log level convention — WARNING by
+     * default, DEVOURER_USB_DEBUG=1 opts into DEBUG. */
     libusb_set_option(context, LIBUSB_OPTION_LOG_LEVEL,
-                      std::getenv("DEVOURER_USB_QUIET")
-                          ? LIBUSB_LOG_LEVEL_WARNING
-                          : LIBUSB_LOG_LEVEL_INFO);
+                      std::getenv("DEVOURER_USB_DEBUG")
+                          ? LIBUSB_LOG_LEVEL_DEBUG
+                          : LIBUSB_LOG_LEVEL_WARNING);
     uint16_t target_pid = 0;
     if (const char *pid_env = std::getenv("DEVOURER_PID")) {
       target_pid = static_cast<uint16_t>(std::strtoul(pid_env, nullptr, 0));

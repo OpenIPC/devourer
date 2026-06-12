@@ -119,8 +119,9 @@ Common to both demos:
 - `DEVOURER_DUMP_CANARY=1` — emit a canonical post-channel-set dump of
   BB/MAC/RF anchor registers. Feeds the `tests/canary_diff.py`
   cross-validation tool against `tools/canary_kernel_dump.sh` output.
-- `DEVOURER_USB_QUIET=1` — downgrade libusb log level from DEBUG to
-  WARNING (DEBUG produces ~7 MB per 15 s and can fill `/tmp` mid-capture).
+- `DEVOURER_USB_DEBUG=1` — raise libusb log level from the default WARNING
+  to DEBUG (produces ~7 MB per 15 s, can fill `/tmp` mid-capture, and slows
+  init measurably). `DEVOURER_USB_QUIET` is accepted as a no-op.
 
 `WiFiDriverTxDemo`-only knobs patch the canonical beacon's radiotap
 header before the TX loop:
@@ -174,6 +175,15 @@ limitations (notably: `aircrack-ng/88XXau` strips radiotap LDPC + STBC
 on the kernel-TX path, so the `kernel`-TX rows of `--encoding-matrix`
 are not authoritative for LDPC/STBC asymmetries — devourer-TX rows
 ARE).
+
+### Startup time
+
+Devourer reaches ready-to-RX/TX faster than the `aircrack-ng/88XXau`
+kernel driver on every supported chip, in both directions (RTL8812AU
+~2s, RTL8814AU ~6s, RTL8821AU ~1s cold-init to first frame). Run your
+own numbers with `tests/bench_init.py` — it benchmarks cold init per
+adapter, devourer vs kernel driver, with a per-stage breakdown from the
+library's `init-timing:` log lines.
 
 ## Project layout
 

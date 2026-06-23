@@ -46,6 +46,12 @@
   #include <process.h>
   typedef int pid_t;
   #define sleep(seconds) Sleep((seconds)*1000)
+#elif defined(__MINGW32__) || defined(__MINGW64__)
+  // mingw builds: POSIX libusb/unistd PLUS io.h/fcntl.h for binary stdin.
+  #include <io.h>
+  #include <fcntl.h>
+  #include <unistd.h>
+  #include <libusb-1.0/libusb.h>
 #elif defined(__ANDROID__)
   #include <libusb.h>
   #include <unistd.h>
@@ -134,8 +140,9 @@ int main(int argc, char **argv) {
     }
   }
 
-#if defined(_MSC_VER)
+#if defined(_WIN32)
   // Make stdin binary so a 0x1A or CRLF doesn't corrupt PSDU bytes.
+  // (mingw/GCC defines _WIN32 but not _MSC_VER, yet still has _setmode.)
   _setmode(_fileno(stdin), _O_BINARY);
 #endif
 

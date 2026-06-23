@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.15)
 
-# Set the toolchain file for vcpkg on Windows.
-if(WIN32)
+# Set the toolchain file for vcpkg on Windows (only if VCPKG_ROOT is set;
+# on mingw we get libusb from pkg-config directly).
+if(WIN32 AND NOT "$ENV{VCPKG_ROOT}" STREQUAL "")
     set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
 endif()
 

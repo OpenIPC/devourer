@@ -101,3 +101,51 @@ jobs:
         # Execute tests defined by the CMake configuration. Note that --build-config is needed because the default Windows generator is a multi-config generator (Visual Studio generator).
         # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
         run: ctest --build-config ${{ matrix.build_type }}
+
+  # mingw-w64 (GCC on Windows). NOT covered by the matrix above (that Windows
+  # cell is MSVC + vcpkg). This is the toolchain the stream-link TX demos'
+  # binary-stdin fix targets: mingw defines _WIN32 but not _MSC_VER, and it
+  # gets libusb from pkg-config with VCPKG_ROOT unset. Build-only would miss a
+  # text-mode stdin regression, so this also runs ctest (the StreamStdinSelftest
+  # round-trip catches it).
+  build-mingw:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 / mingw-w64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-pkgconf
+
+      - name: Configure CMake (mingw, pkg-config libusb, no vcpkg)
+        # VCPKG_ROOT is unset, so CMakeLists takes the pkg-config path — the
+        # exact configuration the mingw binary-stdin fix exists for.
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=gcc
+          -DCMAKE_CXX_COMPILER=g++
+
+      - name: Build (library + stream demos + self-test)
+        # WiFiDriverDemo / WiFiDriverTxDemo / PrecoderDemo use POSIX-only APIs
+        # (e.g. fork() in txdemo/main.cpp for the DEVOURER_TX_WITH_RX path) and
+        # are not mingw targets. This job guards the stdin-driven stream demos
+        # and their headless self-test — what the binary-stdin fix touches.
+        run: >
+          cmake --build build --target
+          WiFiDriver StreamTxDemo StreamDuplexDemo StreamStdinSelftest
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure

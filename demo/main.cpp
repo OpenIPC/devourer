@@ -59,6 +59,19 @@ static const uint32_t g_qd_poll_ms = []() -> uint32_t {
   return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
 }();
 
+/* DEVOURER_THERMAL_POLL_MS=N: periodic snapshot of the chip thermal meter
+ * (RF[A][0x42][15:10]), one `<devourer-thermal>` line per interval. Works on
+ * every Jaguar member. 0 = disabled. DEVOURER_THERMAL_WARN_DELTA overrides the
+ * warn threshold (thermal units above the EFUSE baseline; default 15). */
+static const uint32_t g_thermal_poll_ms = []() -> uint32_t {
+  const char *e = std::getenv("DEVOURER_THERMAL_POLL_MS");
+  return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
+}();
+static const int g_thermal_warn_delta = []() -> int {
+  const char *e = std::getenv("DEVOURER_THERMAL_WARN_DELTA");
+  return e ? std::atoi(e) : 15;
+}();
+
 /* DEVOURER_RX_DUMP_CSI=hex,hex,... (or "0x1a,0x20,0x40"): F2 research
  * spike. On each canonical-SA RX frame (first N frames), read BB
  * dbgport 0x8FC at each selector and emit
@@ -380,6 +393,33 @@ int main() {
           fflush(stdout);
         }
         for (uint32_t slept = 0; slept < g_qd_poll_ms && !qd_emitter_stop.load();
+             slept += 50) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+      }
+    });
+  }
+  std::atomic<bool> therm_emitter_stop{false};
+  std::thread therm_emitter;
+  if (g_thermal_poll_ms > 0) {
+    logger->info("DEVOURER_THERMAL_POLL_MS={} warn_delta={} — starting thermal "
+                 "poller", g_thermal_poll_ms, g_thermal_warn_delta);
+    rtlDevice->start_thermal_poller(g_thermal_poll_ms, g_thermal_warn_delta);
+    therm_emitter = std::thread([&therm_emitter_stop]() {
+      while (!therm_emitter_stop.load()) {
+        if (g_rtl_device != nullptr) {
+          auto t = g_rtl_device->get_thermal_snapshot();
+          if (t.valid) {
+            printf("<devourer-thermal>raw=%u baseline=%u delta=%+d status=%s\n",
+                   t.raw, t.baseline, t.delta, ThermalBucket(t));
+          } else {
+            printf("<devourer-thermal>raw=%u baseline=none status=%s\n",
+                   t.raw, ThermalBucket(t));
+          }
+          fflush(stdout);
+        }
+        for (uint32_t slept = 0;
+             slept < g_thermal_poll_ms && !therm_emitter_stop.load();
              slept += 50) {
           std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }

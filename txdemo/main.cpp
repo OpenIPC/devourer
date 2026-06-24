@@ -430,6 +430,26 @@ int main(int argc, char **argv) {
     tx_buf.assign(beacon_frame, beacon_frame + sizeof(beacon_frame));
   }
 
+  /* Thermal monitoring — read inline on the TX (owning) thread, so no
+   * background thread shares the libusb handle (no USB contention). Cadence is
+   * derived from DEVOURER_THERMAL_POLL_MS over the ~2 ms/packet loop; 0 =
+   * disabled. DEVOURER_THERMAL_WARN_DELTA overrides the warn threshold (thermal
+   * units above the EFUSE baseline; default 15). */
+  long thermal_every = 0;
+  if (const char *e = std::getenv("DEVOURER_THERMAL_POLL_MS")) {
+    long ms = std::strtol(e, nullptr, 0);
+    if (ms > 0) thermal_every = ms / 2 < 1 ? 1 : ms / 2;
+  }
+  int thermal_warn_delta = 15;
+  if (const char *e = std::getenv("DEVOURER_THERMAL_WARN_DELTA")) {
+    thermal_warn_delta = std::atoi(e);
+  }
+  if (thermal_every > 0) {
+    logger->info("DEVOURER_THERMAL_POLL_MS — thermal monitor on, every {} TX "
+                 "frames, warn_delta={}", thermal_every, thermal_warn_delta);
+  }
+  bool thermal_warned = false;
+
   long tx_count = 0;
   while (true) {
     if (tx_count == 0) {
@@ -440,6 +460,26 @@ int main(int argc, char **argv) {
     ++tx_count;
     if (tx_count <= 10 || tx_count % 500 == 0) {
       printf("<devourer-tx>TX #%ld rc=%d\n", tx_count, rc);
+      fflush(stdout);
+    }
+    if (thermal_every > 0 && tx_count % thermal_every == 0) {
+      auto t = rtlDevice->GetThermalStatus();
+      if (t.valid) {
+        printf("<devourer-thermal>raw=%u baseline=%u delta=%+d status=%s\n",
+               t.raw, t.baseline, t.delta, ThermalBucket(t));
+        if (t.delta >= thermal_warn_delta && !thermal_warned) {
+          logger->warn("thermal: chip running hot — raw={} baseline={} "
+                       "delta=+{} (>= {}); TX power tracking backing off, "
+                       "sustained TX may degrade the PA",
+                       t.raw, t.baseline, t.delta, thermal_warn_delta);
+          thermal_warned = true;
+        } else if (t.delta < thermal_warn_delta) {
+          thermal_warned = false;
+        }
+      } else {
+        printf("<devourer-thermal>raw=%u baseline=none status=%s\n",
+               t.raw, ThermalBucket(t));
+      }
       fflush(stdout);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(2)); /* ~500 fps, gentle on USB bulk EP */

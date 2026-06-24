@@ -365,6 +365,10 @@ RtlJaguarDevice::~RtlJaguarDevice() {
   if (_qd_thread.joinable()) {
     _qd_thread.join();
   }
+  _therm_stop.store(true);
+  if (_therm_thread.joinable()) {
+    _therm_thread.join();
+  }
 }
 
 void RtlJaguarDevice::start_queue_depth_poller(uint32_t interval_ms) {
@@ -407,6 +411,75 @@ std::array<uint32_t, 5> RtlJaguarDevice::get_queue_depth() const {
     out[i] = _qd_snap[i].load(std::memory_order_relaxed);
   }
   return out;
+}
+
+static uint32_t pack_thermal(const ThermalStatus &s) {
+  int8_t d = static_cast<int8_t>(
+      s.delta > 127 ? 127 : (s.delta < -128 ? -128 : s.delta));
+  return (s.valid ? 1u : 0u) | (uint32_t(s.raw) << 8) |
+         (uint32_t(s.baseline) << 16) |
+         (uint32_t(static_cast<uint8_t>(d)) << 24);
+}
+
+static ThermalStatus unpack_thermal(uint32_t v) {
+  ThermalStatus s;
+  s.valid = (v & 1u) != 0;
+  s.raw = static_cast<uint8_t>((v >> 8) & 0xFF);
+  s.baseline = static_cast<uint8_t>((v >> 16) & 0xFF);
+  s.delta = static_cast<int8_t>((v >> 24) & 0xFF);
+  return s;
+}
+
+ThermalStatus RtlJaguarDevice::GetThermalStatus() {
+  return _radioManagement->ReadThermalStatus();
+}
+
+ThermalStatus RtlJaguarDevice::get_thermal_snapshot() const {
+  return unpack_thermal(_therm_snap.load(std::memory_order_relaxed));
+}
+
+void RtlJaguarDevice::start_thermal_poller(uint32_t interval_ms,
+                                           int warn_delta) {
+  if (interval_ms == 0) return;
+  if (_therm_thread.joinable()) {
+    _logger->warn("thermal poller already running");
+    return;
+  }
+  _therm_thread = std::thread([this, interval_ms, warn_delta]() {
+    bool warned = false;
+    bool baseline_note = false;
+    while (!_therm_stop.load()) {
+      ThermalStatus s = _radioManagement->ReadThermalStatus();
+      _therm_snap.store(pack_thermal(s), std::memory_order_relaxed);
+      if (!s.valid) {
+        if (!baseline_note) {
+          _logger->info(
+              "thermal: no EFUSE baseline (0xFF) — reporting raw only "
+              "(raw={})",
+              unsigned(s.raw));
+          baseline_note = true;
+        }
+      } else if (s.delta >= warn_delta) {
+        if (!warned) {
+          _logger->warn(
+              "thermal: chip running hot ({}) — raw={} baseline={} delta=+{} "
+              "(>= {}); TX power tracking backing off, sustained TX may "
+              "degrade the PA",
+              ThermalBucket(s), unsigned(s.raw), unsigned(s.baseline), s.delta,
+              warn_delta);
+          warned = true;
+        }
+      } else {
+        warned = false; /* re-arm once it cools back under the threshold */
+      }
+      /* Sleep in short slices so destruction doesn't block for a full
+       * interval after _therm_stop is set. */
+      for (uint32_t slept = 0; slept < interval_ms && !_therm_stop.load();
+           slept += 50) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    }
+  });
 }
 
 uint32_t RtlJaguarDevice::read_bb_dbgport(uint32_t selector) {

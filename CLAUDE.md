@@ -114,6 +114,22 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   DEBUG (produces ~7 MB per 15 s — has filled `/tmp` mid-capture and adds
   0.5-0.8 s to init even with stderr discarded). `DEVOURER_USB_QUIET` is
   accepted as a no-op for backwards compatibility.
+- `DEVOURER_THERMAL_POLL_MS=N` — emit periodic `<devourer-thermal>` lines from
+  the chip thermal meter (RF[A][0x42][15:10]) paired with the EFUSE baseline:
+  `raw` (0..63 thermal units, ~1.5-2 °C each, not absolute °C), `baseline`,
+  `delta = raw − baseline`, and a coarse `status` bucket (cool/warm/hot/critical,
+  keyed off delta — the meter has no calibrated °C, so this is deliberately
+  bucketed rather than a fake temperature). Works on every Jaguar chip; read-only (does not
+  alter TX-power tracking). 0/unset = disabled. In `WiFiDriverDemo` (RX) this
+  spawns a background poller at the given cadence; in `WiFiDriverTxDemo` it is
+  read inline on the TX thread (no extra USB contention) every `N/2` frames.
+  Jaguar-1 has no hard thermal TX shutdown — a rising `delta` is the early
+  warning that the PA is heating and TX power is being backed off. NB: on the
+  8814 the EFUSE baseline is read at the 8812 offset, so the absolute `delta`
+  may be off there; the raw trend is still valid.
+- `DEVOURER_THERMAL_WARN_DELTA=N` — thermal-units-above-baseline threshold at
+  which a one-shot `warn` fires (default `15`); re-arms once the chip cools
+  back below it.
 
 `WiFiDriverTxDemo` additionally honours radiotap-encoding knobs that
 patch the beacon's MCS info field (or, with `_VHT=1`, replace it with a

@@ -137,6 +137,36 @@ enum MGN_RATE {
   MGN_UNKNOWN
 };
 
+/* Read-only snapshot of the chip's thermal meter. `raw` is the live
+ * RF[A][0x42][15:10] reading (0..63, Realtek "thermal units" — roughly
+ * 1.5-2 C each, NOT absolute degrees). `baseline` is the EFUSE
+ * factory-calibrated reading (0xFF = autoload failed / no baseline).
+ * `delta = raw - baseline` (signed) is the heat signal — positive means
+ * the chip is running hotter than calibration. `valid` is false when no
+ * EFUSE baseline is available, in which case only `raw` is meaningful. */
+struct ThermalStatus {
+  uint8_t raw = 0;
+  uint8_t baseline = 0xFF;
+  int delta = 0;
+  bool valid = false;
+};
+
+/* Coarse, honest health label for a thermal reading. The meter is NOT a
+ * calibrated °C sensor (Realtek publishes no °C transfer function for the AU
+ * family; the value is an RF/PA-bias tracking index), so we deliberately bucket
+ * the delta-from-baseline rather than fake a precise temperature — the same
+ * stance the rtl88x2eu driver takes (cool/warm/hot/...). Thresholds are in
+ * thermal units above the EFUSE baseline; "hot" aligns with the default
+ * DEVOURER_THERMAL_WARN_DELTA of 15. Returns "unknown" when no EFUSE baseline
+ * is available (delta is meaningless without it). */
+inline const char *ThermalBucket(const ThermalStatus &s) {
+  if (!s.valid) return "unknown";
+  if (s.delta < 8) return "cool";
+  if (s.delta < 15) return "warm";
+  if (s.delta < 25) return "hot";
+  return "critical";
+}
+
 class RadioManagementModule {
   RtlUsbAdapter _device;
   std::shared_ptr<EepromManager> _eepromManager;
@@ -170,6 +200,12 @@ public:
    * callback `odm_txpowertracking_callback_thermal_meter` and writes
    * the resulting BB-swing index to 0xc1c[31:21] / 0xe1c[31:21]. */
   void TickPwrTrack();
+  /* Read the chip thermal meter (RF[A][0x42][15:10]) and pair it with the
+   * EFUSE baseline. Read-only — does NOT touch the TX-power-tracking
+   * BB-swing registers (that correction lives in TickPwrTrack). Works on
+   * every Jaguar member: path-A RF reads succeed on 8812/8811/8814/8821
+   * (on the 8814 only paths C/D are write-only). */
+  ThermalStatus ReadThermalStatus();
   /* Run a full I/Q calibration. Mirrors upstream
    * `phy_iq_calibrate_8812a` triggered from the channel-set callback
    * when `_needIQK` is asserted. Takes ~50-100 ms per invocation. */

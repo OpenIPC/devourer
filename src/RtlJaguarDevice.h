@@ -67,6 +67,26 @@ public:
   void start_queue_depth_poller(uint32_t interval_ms);
   std::array<uint32_t, 5> get_queue_depth() const;
 
+  /* Read the chip thermal meter (RF[A][0x42][15:10]) paired with the EFUSE
+   * baseline. Read-only — leaves the TX-power-tracking BB-swing registers
+   * untouched. Works on every Jaguar member. Safe to call from the thread
+   * that owns the device (e.g. inline in a TX loop) — no USB contention.
+   * See ThermalStatus in RadioManagementModule.h for field semantics. */
+  ThermalStatus GetThermalStatus();
+
+  /* Spawn a background thread that samples the thermal meter every
+   * interval_ms and stores a snapshot (queryable via get_thermal_snapshot).
+   * Emits a logger->warn when delta >= warn_delta. 0 interval = disabled.
+   * Intended for the RX demo, whose Init() blocks the main thread.
+   *
+   * CONCURRENCY: an RF read is a multi-step BB register sequence over the
+   * shared libusb handle. Background phydm-style polling has wedged the chip
+   * before (ch100 second-channel-set), so this poller is opt-in and should
+   * use a conservative cadence (>= 1 s). A TX loop on the owning thread
+   * should prefer the synchronous GetThermalStatus() instead. */
+  void start_thermal_poller(uint32_t interval_ms, int warn_delta);
+  ThermalStatus get_thermal_snapshot() const;
+
   /* F2 research helper: read a u32 from the BB debug port at `selector`,
    * with save/restore around register 0x8FC. Lazy-constructs the reader
    * on first call. Returns 0 if the chip wedged on a prior call. See
@@ -81,6 +101,13 @@ private:
   std::array<std::atomic<uint32_t>, 5> _qd_snap{};
   std::thread _qd_thread;
   std::atomic<bool> _qd_stop{false};
+
+  std::thread _therm_thread;
+  std::atomic<bool> _therm_stop{false};
+  /* Packed last thermal snapshot: bit0 = valid, [8:15] = raw,
+   * [16:23] = baseline, [24:31] = signed delta (clamped to int8). Stored as
+   * one atomic so a reader sees a consistent tuple without a mutex. */
+  std::atomic<uint32_t> _therm_snap{0};
 
   std::unique_ptr<devourer::BbDbgportReader> _bb_dbgport;
 };

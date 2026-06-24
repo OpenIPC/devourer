@@ -70,6 +70,25 @@ void RadioManagementModule::TickPwrTrack() {
   _pwrTrk.TickThermalMeter(current_band_type, _currentChannel);
 }
 
+ThermalStatus RadioManagementModule::ReadThermalStatus() {
+  /* Live thermal meter: RF path A, register 0x42, bits [15:10]. phy_query_rf_reg
+   * already masks + shifts the bits down, so the result is the raw 6-bit reading.
+   * Same register the 8812A power-track loop samples; here we read it standalone
+   * (no chip-type gate, no BB-swing write) so the probe works on every Jaguar. */
+  ThermalStatus s;
+  uint32_t rf = phy_query_rf_reg(RfPath::RF_PATH_A, 0x42, 0xfc00u);
+  s.raw = static_cast<uint8_t>(rf & 0x3F);
+  s.baseline = _eepromManager->GetEepromThermalMeter();
+  if (s.baseline == 0xFF) {
+    s.valid = false;
+    s.delta = 0;
+  } else {
+    s.valid = true;
+    s.delta = static_cast<int>(s.raw) - static_cast<int>(s.baseline);
+  }
+  return s;
+}
+
 void RadioManagementModule::hw_var_rcr_config(uint32_t rcr) {
   _device.rtw_write32(REG_RCR, rcr);
 }

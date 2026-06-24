@@ -34,6 +34,8 @@ add_library(WiFiDriver
     hal/hal8814a_fw.h
     hal/hal8821a_fw.c
     hal/hal8821a_fw.h
+    hal/hal8822c_fw.c
+    hal/hal8822c_fw.h
     hal/hal_com_reg.h
     hal/rtl8812a_hal.h
     hal/rtl8812a_recv.h
@@ -45,6 +47,13 @@ add_library(WiFiDriver
     # upstream phydm parser does, without pulling in phydm itself.
     hal/phydm/rtl8814a/Hal8814_PhyTables.c
     hal/phydm/rtl8814a/Hal8814_PhyTables.h
+
+    # RTL8822C (Jaguar3) phydm-format BB/AGC/RF tables. Generated from the
+    # rtl88x2cu tree by tools/extract_8822c_phy_tables.py. These use the newer
+    # "halbb" conditional encoding — walked by src/jaguar3/PhyTableLoader8822c,
+    # NOT src/PhyTableLoader (which handles the Jaguar1 check_positive format).
+    hal/phydm/rtl8822c/Hal8822c_PhyTables.c
+    hal/phydm/rtl8822c/Hal8822c_PhyTables.h
 
     src/ieee80211_radiotap.h
     src/BbDbgportReader.cpp
@@ -79,9 +88,26 @@ add_library(WiFiDriver
     src/RtlUsbAdapter.cpp
     src/RtlUsbAdapter.h
     src/SelectedChannel.h
+    src/IRtlDevice.h
     src/WiFiDriver.cpp
     src/WiFiDriver.h
     src/registry_priv.h
+
+    # Jaguar3 (RTL8822CU / RTL8812EU / RTL8822EU) port — WORK IN PROGRESS.
+    # Scaffold only; bring-up lands in milestones (docs/jaguar3-bringup.md).
+    src/jaguar3/Jaguar3Common.h
+    src/jaguar3/RtlJaguar3Device.cpp
+    src/jaguar3/RtlJaguar3Device.h
+    src/jaguar3/Hal8822c.cpp
+    src/jaguar3/Hal8822c.h
+    src/jaguar3/Halmac8822cFw.cpp
+    src/jaguar3/Halmac8822cFw.h
+    src/jaguar3/Halmac8822cRegs.h
+    src/jaguar3/RadioManagement8822c.cpp
+    src/jaguar3/RadioManagement8822c.h
+    src/jaguar3/FrameParser8822c.h
+    src/jaguar3/PhyTableLoader8822c.cpp
+    src/jaguar3/PhyTableLoader8822c.h
 )
 
 target_compile_features(WiFiDriver PUBLIC cxx_std_20)
@@ -91,6 +117,7 @@ target_link_libraries(WiFiDriver PUBLIC PkgConfig::libusb)
 
 target_include_directories(WiFiDriver PUBLIC hal)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8814a)
+target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822c)
 target_include_directories(WiFiDriver PUBLIC src)
 
 add_executable(WiFiDriverDemo

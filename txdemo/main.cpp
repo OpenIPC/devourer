@@ -37,6 +37,7 @@
  * demo (demo/main.cpp). */
 static constexpr uint16_t kRealtekProductIds[] = {
     0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
+    0xc82c, 0xc82e, 0xc812, /* RTL8822CU (Jaguar3) — WIP */
 };
 
 /* Process-start reference for the init-timing lines (see src/InitTimer.h).

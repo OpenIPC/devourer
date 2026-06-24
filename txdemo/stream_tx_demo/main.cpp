@@ -68,6 +68,7 @@
 #include "RtlUsbAdapter.h"
 #include "WiFiDriver.h"
 #include "logger.h"
+#include "stream_stdin.h"
 
 #define USB_VENDOR_ID 0x0bda
 
@@ -97,27 +98,6 @@ static std::vector<uint8_t> build_dot11_probe_req() {
   return h;
 }
 
-// Read exactly `n` bytes from FILE *f into buf. Returns:
-//   true  -> got all n bytes
-//   false -> clean EOF before any bytes (orderly stdin close)
-// Terminates on short read mid-record (a stream framing bug we'd rather see).
-static bool read_exact(FILE *f, void *buf, size_t n) {
-  size_t got = 0;
-  auto *p = static_cast<uint8_t *>(buf);
-  while (got < n) {
-    size_t r = std::fread(p + got, 1, n - got, f);
-    if (r == 0) {
-      if (got == 0 && std::feof(f)) return false;
-      std::fprintf(stderr,
-                   "stream_tx_demo: short read on stdin (%zu/%zu); record "
-                   "truncated mid-PSDU\n", got, n);
-      std::exit(2);
-    }
-    got += r;
-  }
-  return true;
-}
-
 int main(int argc, char **argv) {
   auto logger = std::make_shared<Logger>();
 
@@ -140,11 +120,9 @@ int main(int argc, char **argv) {
     }
   }
 
-#if defined(_WIN32)
-  // Make stdin binary so a 0x1A or CRLF doesn't corrupt PSDU bytes.
-  // (mingw/GCC defines _WIN32 but not _MSC_VER, yet still has _setmode.)
-  _setmode(_fileno(stdin), _O_BINARY);
-#endif
+  // Make stdin binary so a 0x1A or CRLF doesn't corrupt PSDU bytes. Gated on
+  // _WIN32 (not _MSC_VER) inside the shared helper — see txdemo/stream_stdin.h.
+  stream_stdin::set_stdin_binary();
 
   libusb_context *context = nullptr;
   libusb_device_handle *handle = nullptr;
@@ -234,7 +212,16 @@ int main(int argc, char **argv) {
   long tx_count = 0;
   while (true) {
     uint8_t len_bytes[4];
-    if (!read_exact(stdin, len_bytes, sizeof(len_bytes))) break;  // clean EOF
+    {
+      auto r = stream_stdin::read_exact(stdin, len_bytes, sizeof(len_bytes));
+      if (r == stream_stdin::ReadResult::Eof) break;  // clean stdin close
+      if (r == stream_stdin::ReadResult::Short) {
+        std::fprintf(stderr,
+                     "stream_tx_demo: short read on stdin len-prefix; record "
+                     "truncated\n");
+        std::exit(2);
+      }
+    }
     uint32_t len = static_cast<uint32_t>(len_bytes[0])
                  | (static_cast<uint32_t>(len_bytes[1]) << 8)
                  | (static_cast<uint32_t>(len_bytes[2]) << 16)
@@ -246,10 +233,19 @@ int main(int argc, char **argv) {
       break;
     }
     std::vector<uint8_t> psdu(len);
-    if (!read_exact(stdin, psdu.data(), len)) {
-      std::fprintf(stderr,
-                   "stream_tx_demo: EOF mid-PSDU (expected %u bytes)\n", len);
-      break;
+    {
+      auto r = stream_stdin::read_exact(stdin, psdu.data(), len);
+      if (r == stream_stdin::ReadResult::Eof) {
+        std::fprintf(stderr,
+                     "stream_tx_demo: EOF mid-PSDU (expected %u bytes)\n", len);
+        break;
+      }
+      if (r == stream_stdin::ReadResult::Short) {
+        std::fprintf(stderr,
+                     "stream_tx_demo: short read mid-PSDU (expected %u bytes); "
+                     "record truncated\n", len);
+        std::exit(2);
+      }
     }
 
     tx_buf.clear();

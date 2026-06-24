@@ -8,6 +8,8 @@ endif()
 
 project(Rtl8812auNet)
 
+enable_testing()
+
 # Find pkg-config and then use it to locate libusb.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(libusb REQUIRED IMPORTED_TARGET libusb-1.0)
@@ -116,6 +118,8 @@ add_executable(StreamTxDemo
     txdemo/stream_tx_demo/main.cpp
 )
 target_link_libraries(StreamTxDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
+# stream_stdin.h (shared binary-stdin framing) lives in txdemo/.
+target_include_directories(StreamTxDemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/txdemo)
 
 # Stream-link DUPLEX: one binary, one chip, both directions. Combines the RX
 # loop from WiFiDriverDemo and the stdin-driven TX from StreamTxDemo —
@@ -125,3 +129,22 @@ add_executable(StreamDuplexDemo
     txdemo/stream_duplex_demo/main.cpp
 )
 target_link_libraries(StreamDuplexDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
+target_include_directories(StreamDuplexDemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/txdemo)
+
+# Headless regression guard for the binary-stdin framing shared by the two
+# stream demos above (txdemo/stream_stdin.h). No libusb, no radio — just the
+# set_stdin_binary() + read_exact() path, so a text-mode regression (e.g. the
+# _setmode gate slipping back to _MSC_VER, which is invisible to a build-only
+# check) fails `ctest` on the Windows/mingw jobs. See tests/stream_stdin_test.cmake.
+add_executable(StreamStdinSelftest
+    txdemo/stream_stdin_selftest.cpp
+)
+target_compile_features(StreamStdinSelftest PRIVATE cxx_std_20)
+target_include_directories(StreamStdinSelftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/txdemo)
+
+add_test(
+    NAME stream_stdin_binary
+    COMMAND ${CMAKE_COMMAND}
+            -DSELFTEST_EXE=$<TARGET_FILE:StreamStdinSelftest>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/stream_stdin_test.cmake
+)

@@ -32,10 +32,14 @@ cmake --build build -j
 
 libusb-1.0 is required: `pkg-config` on Linux/macOS, vcpkg on Windows
 (`VCPKG_ROOT` must be set so the toolchain file resolves). CI matrix builds
-across GCC/Clang/MSVC on Ubuntu/macOS/Windows
-(`.github/workflows/cmake-multi-platform.yml`). `ctest` runs in CI but no CMake
-tests are registered — regression testing happens out-of-band via
-`tests/regress.py`.
+across GCC/Clang/MSVC on Ubuntu/macOS/Windows, plus a separate `build-mingw`
+job (mingw-w64 via MSYS2, libusb from pkg-config) covering the Windows-GCC
+toolchain the MSVC matrix cell doesn't
+(`.github/workflows/cmake-multi-platform.yml`). `ctest` runs in every CI job;
+the one registered test (`stream_stdin_binary`) round-trips the stream demos'
+binary-stdin framing (`txdemo/stream_stdin.h`) headlessly, so a Windows
+text-mode regression fails CI instead of only surfacing on a radio. Hardware
+regression testing happens out-of-band via `tests/regress.py`.
 
 ## Regression testing
 

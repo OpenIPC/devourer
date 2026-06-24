@@ -63,6 +63,7 @@
 #include "RtlUsbAdapter.h"
 #include "WiFiDriver.h"
 #include "logger.h"
+#include "stream_stdin.h"
 
 #define USB_VENDOR_ID 0x0bda
 
@@ -91,22 +92,6 @@ static std::vector<uint8_t> build_dot11_probe_req() {
   h.push_back(0x80);
   h.push_back(0x00);
   return h;
-}
-
-static bool read_exact(FILE *f, void *buf, size_t n) {
-  size_t got = 0;
-  auto *p = static_cast<uint8_t *>(buf);
-  while (got < n) {
-    size_t r = std::fread(p + got, 1, n - got, f);
-    if (r == 0) {
-      if (got == 0 && std::feof(f)) return false;
-      std::fprintf(stderr,
-                   "stream_duplex_demo: short stdin read (%zu/%zu)\n", got, n);
-      return false;
-    }
-    got += r;
-  }
-  return true;
 }
 
 // RX callback — emits `<devourer-stream>` on canonical-SA matches. Wrapped in
@@ -181,7 +166,8 @@ static void tx_thread(TxArgs args) {
 
   while (!args.should_stop->load()) {
     uint8_t len_bytes[4];
-    if (!read_exact(stdin, len_bytes, sizeof(len_bytes))) {
+    if (stream_stdin::read_exact(stdin, len_bytes, sizeof(len_bytes)) !=
+        stream_stdin::ReadResult::Ok) {
       // Clean EOF or short read — TX side done. RX keeps running.
       std::fprintf(stderr, "<stream-duplex>tx EOF after %ld PSDUs\n", tx_count);
       break;
@@ -197,7 +183,8 @@ static void tx_thread(TxArgs args) {
       break;
     }
     std::vector<uint8_t> psdu(len);
-    if (!read_exact(stdin, psdu.data(), len)) {
+    if (stream_stdin::read_exact(stdin, psdu.data(), len) !=
+        stream_stdin::ReadResult::Ok) {
       std::fprintf(stderr, "<stream-duplex>tx EOF mid-PSDU (%u bytes)\n", len);
       break;
     }
@@ -239,11 +226,10 @@ int main(int argc, char **argv) {
     }
   }
 
-#if defined(_WIN32)
-  // mingw/GCC defines _WIN32 but not _MSC_VER, yet still has _setmode — make
-  // stdin binary so a 0x1A/CRLF doesn't corrupt the length-prefixed PSDU stream.
-  _setmode(_fileno(stdin), _O_BINARY);
-#endif
+  // Make stdin binary so a 0x1A/CRLF doesn't corrupt the length-prefixed PSDU
+  // stream. Gated on _WIN32 (not _MSC_VER) in the shared helper — see
+  // txdemo/stream_stdin.h.
+  stream_stdin::set_stdin_binary();
 
   libusb_context *context = nullptr;
   libusb_device_handle *handle = nullptr;

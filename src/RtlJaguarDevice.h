@@ -12,6 +12,7 @@
 #include "logger.h"
 #include "BbDbgportReader.h"
 #include "HalModule.h"
+#include "IRtlDevice.h"
 #include "SelectedChannel.h"
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
@@ -22,14 +23,15 @@ extern "C"
 #include "ieee80211_radiotap.h"
 }
 
-using Action_ParsedRadioPacket = std::function<void(const Packet&)>;
+/* Action_ParsedRadioPacket is declared in IRtlDevice.h (shared with the
+ * Jaguar3 device and the factory). */
 
 /* RtlJaguarDevice is the orchestrator for the Realtek "Jaguar" 802.11ac family
  * — RTL8812AU (2T2R), RTL8811AU (1T1R cut), and RTL8814AU (4T4R RF / 3-SS
  * baseband). The chip is identified at construction time via SYS_CFG bits and
  * USB PID; this class drives bring-up, RX, and TX for whichever member of the
  * family is present. */
-class RtlJaguarDevice {
+class RtlJaguarDevice : public IRtlDevice {
   std::shared_ptr<EepromManager> _eepromManager;
   std::shared_ptr<RadioManagementModule> _radioManagement;
   /* Last channel handed to SetMonitorChannel. Value-initialised so the
@@ -44,13 +46,14 @@ class RtlJaguarDevice {
 
 public:
   RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger);
-  ~RtlJaguarDevice();
-  void Init(Action_ParsedRadioPacket packetProcessor, SelectedChannel channel);
-  void SetMonitorChannel(SelectedChannel channel);
-  void InitWrite(SelectedChannel channel);
-  void SetTxPower(uint8_t power);
-  bool send_packet(const uint8_t* packet, size_t length);
-  SelectedChannel GetSelectedChannel();
+  ~RtlJaguarDevice() override;
+  void Init(Action_ParsedRadioPacket packetProcessor,
+            SelectedChannel channel) override;
+  void SetMonitorChannel(SelectedChannel channel) override;
+  void InitWrite(SelectedChannel channel) override;
+  void SetTxPower(uint8_t power) override;
+  bool send_packet(const uint8_t* packet, size_t length) override;
+  SelectedChannel GetSelectedChannel() override;
   bool should_stop = false;
 
   /* Per-queue free-page snapshot read from REG_FIFOPAGE_INFO_1..5

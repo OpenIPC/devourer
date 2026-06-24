@@ -159,8 +159,8 @@ static void packet_processor(const Packet &packet) {
 }
 
 struct TxArgs {
-  class RtlJaguarDevice *rtl;  // unique_ptr lives in main(); raw ptr OK while
-                                // we join() before that unique_ptr goes away
+  class IRtlDevice *rtl;  // unique_ptr lives in main(); raw ptr OK while
+                          // we join() before that unique_ptr goes away
   int interval_ms;
   size_t max_psdu;
   std::atomic<bool> *should_stop;

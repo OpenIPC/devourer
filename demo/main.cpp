@@ -26,6 +26,9 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0xa811, /* RTL8811AU */
     0xb811, /* RTL8811AU/8821AU variants */
     0x8813, /* RTL8814AU (Realtek demoboard PID, used by CF-938AC/CF-960AC) */
+    0xc82c, /* RTL8822CU (Jaguar3) â WIP */
+    0xc82e, /* RTL8822CU (Jaguar3) â WIP */
+    0xc812, /* RTL8822CU WiFi-only (Jaguar3) â WIP */
 };
 
 static int g_rx_count = 0;
@@ -361,13 +364,16 @@ int main() {
   WiFiDriver wifi_driver(logger);
   auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle);
   logger->info("init-timing: demo.create_device = {} ms", ms_since_start());
-  g_rtl_device = rtlDevice.get();
+  /* The BB-debug-port / queue-depth research helpers are Jaguar1-only, so they
+   * live on RtlJaguarDevice rather than the IRtlDevice interface. dynamic_cast
+   * yields nullptr for a Jaguar3 device, which disables those helpers cleanly. */
+  g_rtl_device = dynamic_cast<RtlJaguarDevice *>(rtlDevice.get());
   std::atomic<bool> qd_emitter_stop{false};
   std::thread qd_emitter;
-  if (g_qd_poll_ms > 0) {
+  if (g_qd_poll_ms > 0 && g_rtl_device != nullptr) {
     logger->info("DEVOURER_QUEUE_POLL_MS={} — starting queue-depth poller",
                  g_qd_poll_ms);
-    rtlDevice->start_queue_depth_poller(g_qd_poll_ms);
+    g_rtl_device->start_queue_depth_poller(g_qd_poll_ms);
     /* Self-driven emitter — ticks at the poll cadence so the queue snapshot
      * surfaces even when the RX hook is sparse (e.g. broken-RX 8814 cells).
      * Idempotent w.r.t. the poller; just reads the atomic snapshot. */

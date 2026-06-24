@@ -26,6 +26,8 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
   _logger->info("In Monitor Mode");
 }
 
+SelectedChannel RtlJaguarDevice::GetSelectedChannel() { return _channel; }
+
 bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   struct tx_desc *ptxdesc;
   bool resp;

@@ -256,15 +256,26 @@ static void packetProcessor(const Packet &packet) {
          * one-way latency by diffing TSF against the host clock. Optional
          * fields — pre-#84 regex consumers tolerate them via the same
          * pass-through pattern. */
+        /* Decoded PHY descriptor fields (bw/stbc/ldpc/sgi) alongside the rate
+         * index: these let an SDR-as-TX completeness harness assert that the
+         * frame devourer received carries the bandwidth / STBC / FEC / guard
+         * interval the transmitter encoded. Valid on 8812/8821; on 8814AU the
+         * RX descriptor doesn't expose these at this offset (FrameParser.cpp),
+         * so they read as the chip's defaults there. Inserted before body= so
+         * the trailing hex-dump pattern downstream regex consumers key on is
+         * unchanged. */
         printf("<devourer-stream>rate=%u len=%zu crc_err=%u icv_err=%u "
-               "rssi=%d,%d evm=%d,%d snr=%d,%d seq=%u tsfl=%u body=",
+               "rssi=%d,%d evm=%d,%d snr=%d,%d seq=%u tsfl=%u "
+               "bw=%u stbc=%u ldpc=%u sgi=%u body=",
                packet.RxAtrib.data_rate, packet.Data.size(),
                packet.RxAtrib.crc_err ? 1u : 0u,
                packet.RxAtrib.icv_err ? 1u : 0u,
                packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1],
                packet.RxAtrib.evm[0], packet.RxAtrib.evm[1],
                packet.RxAtrib.snr[0], packet.RxAtrib.snr[1],
-               packet.RxAtrib.seq_num, packet.RxAtrib.tsfl);
+               packet.RxAtrib.seq_num, packet.RxAtrib.tsfl,
+               packet.RxAtrib.bw, packet.RxAtrib.stbc,
+               packet.RxAtrib.ldpc, packet.RxAtrib.sgi);
         for (size_t i = 24; i < packet.Data.size(); ++i)
           printf("%02x", packet.Data[i]);
         printf("\n");

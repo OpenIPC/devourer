@@ -166,11 +166,13 @@ static void packetProcessor(const Packet &packet) {
   static const bool dump_all = std::getenv("DEVOURER_RX_DUMP_ALL") != nullptr;
   if (dump_all) {
     printf("<devourer-corrupt-any>len=%zu crc_err=%u icv_err=%u "
-           "rate=%u rssi=%d,%d evm=%d,%d snr=%d,%d\n",
+           "rate=%u bw=%u stbc=%u ldpc=%u sgi=%u rssi=%d,%d evm=%d,%d snr=%d,%d\n",
            packet.Data.size(),
            packet.RxAtrib.crc_err ? 1u : 0u,
            packet.RxAtrib.icv_err ? 1u : 0u,
            packet.RxAtrib.data_rate,
+           packet.RxAtrib.bw, packet.RxAtrib.stbc,
+           packet.RxAtrib.ldpc, packet.RxAtrib.sgi,
            packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1],
            packet.RxAtrib.evm[0], packet.RxAtrib.evm[1],
            packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]);
@@ -444,10 +446,24 @@ int main() {
     channel = std::atoi(ch_env);
     logger->info("DEVOURER_CHANNEL set — tuning to channel {}", channel);
   }
+  /* RX bandwidth: 20 MHz by default. DEVOURER_BW=40 selects a 40 MHz monitor
+   * channel (for receiving HT40 frames); DEVOURER_CHOFFSET picks the secondary
+   * half (1 = secondary above the primary, 2 = secondary below). */
+  ChannelWidth_t width = CHANNEL_WIDTH_20;
+  uint8_t ch_offset = 0;
+  if (const char *bw_env = std::getenv("DEVOURER_BW")) {
+    if (std::atoi(bw_env) == 40) {
+      width = CHANNEL_WIDTH_40;
+      ch_offset = 1; // default: secondary channel above the primary
+      if (const char *off_env = std::getenv("DEVOURER_CHOFFSET"))
+        ch_offset = static_cast<uint8_t>(std::atoi(off_env));
+      logger->info("DEVOURER_BW=40 — 40 MHz RX, channel-offset {}", ch_offset);
+    }
+  }
   rtlDevice->Init(packetProcessor, SelectedChannel{
                                        .Channel = static_cast<uint8_t>(channel),
-                                       .ChannelOffset = 0,
-                                       .ChannelWidth = CHANNEL_WIDTH_20,
+                                       .ChannelOffset = ch_offset,
+                                       .ChannelWidth = width,
                                    });
 
   rc = libusb_release_interface(dev_handle, 0);

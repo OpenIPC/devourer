@@ -97,6 +97,19 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
         sgi = 0;
       }
 
+      /* STBC (radiotap MCS known bit5 / flags bits5-6) and FEC=LDPC (known bit4 /
+       * flags bit4). The HT branch previously read neither, so an HT frame tagged
+       * STBC/LDPC in radiotap silently transmitted as BCC SISO -- only the VHT
+       * branch honoured them. Reading them here lets WiFiDriverTxDemo emit a real
+       * HT STBC / HT LDPC frame (needed as a chip reference for the gr-ieee802-11
+       * fork's modern-format TX). */
+      if (mcs_known & 0x20) {
+        stbc = (mcs_flags >> 5) & 0x3;
+      }
+      if ((mcs_known & 0x10) && (mcs_flags & 0x10)) {
+        ldpc = 1;
+      }
+
       /* DEVOURER_TX_HT_MCS=1: honour the HT MCS index from radiotap byte 2
        * and set fixed_rate accordingly. Without this knob the historic
        * behaviour kicks in — fixed_rate stays at the MGN_1M default and the

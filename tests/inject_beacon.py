@@ -90,7 +90,7 @@ def _build_radiotap_vht(*, vht_mcs: int, nss: int, ldpc: bool, stbc: bool,
 
 def build_beacon(rate_mbps_x2: int = 0, *, mcs=None, ldpc: bool = False,
                  stbc: int = 0, bandwidth: int = 20, vht: bool = False,
-                 vht_mcs: int = 0, nss: int = 1):
+                 vht_mcs: int = 0, nss: int = 1, size: int = 0):
     """Mgmt / probe-request frame matching txdemo's beacon_frame[]. The body
     payload doesn't matter for hit-count testing — only SA is matched.
 
@@ -116,6 +116,10 @@ def build_beacon(rate_mbps_x2: int = 0, *, mcs=None, ldpc: bool = False,
         )
         / b"\x00\x00\x00\x00\x00\x00\x00\x00"  # ssid IE (empty)
     )
+    # Throughput benchmark: pad the 802.11 PSDU up to `size` bytes so the
+    # kernel TX matches devourer's DEVOURER_TX_PAYLOAD_BYTES frames. Pad-up only.
+    if size and size > len(dot11_bytes):
+        dot11_bytes = dot11_bytes + b"\x00" * (size - len(dot11_bytes))
     if vht:
         rt_bytes = _build_radiotap_vht(
             vht_mcs=vht_mcs, nss=nss, ldpc=ldpc, stbc=bool(stbc),
@@ -187,24 +191,52 @@ def main():
         help="VHT spatial streams (NSS), 1..4 (default 1). Only used with "
              "--vht.",
     )
+    ap.add_argument(
+        "--size", type=int, default=0,
+        help="pad the 802.11 PSDU up to N bytes (throughput benchmark; mirrors "
+             "txdemo's DEVOURER_TX_PAYLOAD_BYTES). 0 = the small probe request.",
+    )
+    ap.add_argument(
+        "--max-rate", action="store_true",
+        help="blast as fast as the driver TX ring allows via a blocking "
+             "AF_PACKET raw socket (no per-frame sleep). send() blocks on the "
+             "ring so the rate ~= the kernel TX-completion rate. For "
+             "throughput benchmarking, not the regress.py hit-count path.",
+    )
     args = ap.parse_args()
 
     pkt = build_beacon(
         args.rate, mcs=args.mcs, ldpc=args.ldpc, stbc=args.stbc,
         bandwidth=args.bandwidth, vht=args.vht, vht_mcs=args.vht_mcs,
-        nss=args.vht_nss,
+        nss=args.vht_nss, size=args.size,
     )
     end = time.monotonic() + args.duration
     sent = 0
-    while time.monotonic() < end:
-        try:
-            sendp(pkt, iface=args.iface, verbose=False)
-            sent += 1
-        except OSError as e:
-            # iface went down mid-test — bail rather than spin.
-            print(f"inject_beacon: sendp failed after {sent} frames: {e}")
-            break
-        time.sleep(args.interval)
+    if args.max_rate:
+        # Blocking raw socket: bytes(pkt) = radiotap + 802.11 PSDU, which the
+        # kernel monitor iface TXes verbatim. send() blocks on the TX ring.
+        import socket
+        raw = bytes(pkt)
+        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+        s.bind((args.iface, 0))
+        while time.monotonic() < end:
+            try:
+                s.send(raw)
+                sent += 1
+            except OSError as e:
+                print(f"inject_beacon: send failed after {sent} frames: {e}")
+                break
+        s.close()
+    else:
+        while time.monotonic() < end:
+            try:
+                sendp(pkt, iface=args.iface, verbose=False)
+                sent += 1
+            except OSError as e:
+                # iface went down mid-test — bail rather than spin.
+                print(f"inject_beacon: sendp failed after {sent} frames: {e}")
+                break
+            time.sleep(args.interval)
     print(f"inject_beacon: sent {sent} frames on {args.iface}")
 
 

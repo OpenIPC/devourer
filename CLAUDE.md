@@ -219,6 +219,21 @@ phydm parser.
 - **rmmod/sysfs-unbind actively de-inits the chip** (RF off, MAC DMA off).
   After detaching a kernel driver, expect to re-init from cold, not warm.
   `DEVOURER_SKIP_RESET=1` only helps when firmware state is still intact.
+- **USB Vbus sag on bus-powered hub chains**: 5 GHz TX draws far more PA current
+  than 2.4 GHz. Fed through a deep bus-powered hub chain the rail can brown out
+  the PA. Symptom: frames submit fine (`rc` ok, 0 send-fails) but on-air power
+  collapses — SDR duty near the noise floor, or fully dark — *intermittently*, and
+  often on every plugged adapter at once, while 2.4 GHz keeps working. Recovers on
+  a `uhubctl` power-cycle of the hub tree (the most deeply-nested / highest-PA
+  adapter may need its own dedicated port cycle). **Do not mis-diagnose it** as a
+  per-chip dead PA, a 5 GHz code gate, a BT-coex/antenna issue, or an EFUSE
+  TX-power bug — every one of those was chased and refuted; it was the rail.
+  Defences: (1) keep a known-good control adapter and re-check it *each session* —
+  a sagging control silently makes the bench look like per-chip hardware death;
+  (2) measure TX as on-air **Mbps via SDR duty × PHY rate**, never monitor-sniffer
+  frame counts — a sensitive receiver decodes weak frames and masks a power
+  collapse; (3) don't trust a "fix validated" off a single reading on an unstable
+  rail. Durable fix: powered USB hub / direct root ports.
 
 ## TX path
 

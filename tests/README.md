@@ -363,3 +363,35 @@ to add new chipsets — the rest of the script is chipset-agnostic.
   the full story — chip behaviour can differ per band. Run 2.4GHz
   (`--channel 6`) plus at least one 5GHz channel (`--channel 36` /
   `--channel 100`) before calling a configuration good.
+
+## Throughput benchmark (`bench_tput.py`)
+
+`tests/bench_tput.py` measures per-chip TX throughput + per-frame latency and
+RX, across bands (2.4 GHz ch6 / UNII-1 ch36 / UNII-2/3 ch149) and PSDU sizes
+(1500 / 3994 B), comparing devourer against the host kernel driver. Results feed
+the README "Hardware landscape" numbers.
+
+```sh
+sudo tests/bench_tput.py --quick          # ~1 cell smoke
+sudo tests/bench_tput.py --directions tx  # full TX matrix (resumable)
+```
+
+Method: **TX rate = usbmon bulk-OUT completions at the source chip** (the true
+frames-accepted rate). Counting at a sniffer instead measures the *sniffer's*
+RX ceiling — a trap that makes every transmitter look identical (~336 fps on an
+8814 sniffer here). Bytes are summed from the `Bo` completions, so mixed URB
+sizes are handled. devourer TX has no host-side backpressure (it pipelines
+URBs), so its saturated submit→completion latency is backlog drain time, not
+per-frame cost — latency is therefore taken from a separate non-saturating
+(`--gap 2000`) pass. Kernel TX uses `inject_beacon.py --max-rate` (blocking
+AF_PACKET, which paces on the driver TX ring); note AF_PACKET cannot inject
+frames larger than the iface MTU, so kernel 3994 B cells read `—`.
+
+**RX is hard to benchmark on a 2-USB-bus rig and is not tabulated.** RX requires
+a same-channel flooder peer; same-bus TX/RX pairs (e.g. 8812 + 8821 both on one
+host controller) contend, the only reliable cross-bus flooder (8812 → 8814)
+saturates the receiver at the full TX rate, and the 8814 RX path is itself
+intermittent. A clean cross-bus, moderate-rate flood (8812 → 8814) does receive
+~3100 frames in a 12 s window, confirming RX works; a representative *capacity*
+number needs a 3-bus rig (one bus per DUT + flooder) or a calibrated SDR
+transmitter.

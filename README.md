@@ -20,12 +20,17 @@ register-table layout, firmware-download plumbing, and
 family; chip-specific EEPROM handling, firmware blobs, and RF tables are
 layered on top.
 
-| Part           | RF / streams    | 2.4 GHz       | 5 GHz UNII-1 (ch36-48) | 5 GHz UNII-2/3 (ch52+) | Notes                                       |
-| -------------- | --------------- | ------------- | ---------------------- | ---------------------- | ------------------------------------------- |
-| **RTL8812AU**  | 2T2R            | TX + RX       | TX + RX                | TX + RX                | VID/PID `0bda:8812`; reference part |
-| **RTL8811AU**  | 1T1R            | TX + RX       | TX + RX                | TX + RX                | 1T1R cut of 8812 silicon; rides 8812 code path with `RFType=RF_TYPE_1T1R` selected from `REG_SYS_CFG` bit 27. Status mirrored from 8812 — not separately exercised |
-| **RTL8814AU**  | 4T4R, 3-SS max  | TX + RX       | TX + RX                | TX + RX                | VID/PID `0bda:8813`; 2-SS effective on USB-2 |
-| **RTL8821AU**  | 1T1R AC + BT    | TX + RX       | TX + RX                | TX + RX | OEM-rebadged as TP-Link Archer T2U Plus (`2357:0120`) etc. UNII-2/3 TX has cross-receiver asymmetry against 8812AU peers |
+Band cells below show **measured devourer TX throughput, Mbps @ 1500 / 3994 B
+PSDU** (monitor injection, HT MCS7, 20 MHz; median of runs via
+`tests/bench_tput.py`). See [Measured throughput](#measured-throughput) for the
+kernel-driver comparison and per-frame latency.
+
+| Part           | RF / streams    | 2.4 GHz (ch6) | 5 GHz UNII-1 (ch36) | 5 GHz UNII-2/3 (ch149) | Notes                                       |
+| -------------- | --------------- | ------------- | ------------------- | ---------------------- | ------------------------------------------- |
+| **RTL8812AU**  | 2T2R            | 46 / 58       | 49 / 61             | 49 / 62                | VID/PID `0bda:8812`; reference part — fastest + most consistent TX |
+| **RTL8811AU**  | 1T1R            | mirrors 8812  | mirrors 8812        | mirrors 8812           | 1T1R cut of 8812 silicon; rides 8812 code path with `RFType=RF_TYPE_1T1R` selected from `REG_SYS_CFG` bit 27. No working unit on the bench — status mirrored from 8812, not separately benchmarked |
+| **RTL8814AU**  | 4T4R, 3-SS max  | 0.3 / 22 ⚠    | 2.7 / 0.3 ⚠         | 19 / 23 ⚠              | VID/PID `0bda:8813`; 2-SS effective on USB-2. ⚠ TX throughput is **flaky** (high run-to-run variance, frequent near-zero) — the 8814 monitor-TX path is the least reliable of the family |
+| **RTL8821AU**  | 1T1R AC + BT    | 41 / 60       | 23 / 34             | 22 / 33                | OEM-rebadged as TP-Link Archer T2U Plus (`2357:0120`). 2.4 GHz on par with 8812; the ~½ throughput at 5 GHz UNII bands reflects the documented UNII-2/3 cross-receiver asymmetry |
 
 Successor families (`Jaguar2` / `Jaguar+` — 8812BU, 8822BU/BE, etc., and
 the later `Kestrel` 11ax generation) are **out of scope**: they share
@@ -40,6 +45,40 @@ CHIP_8812), not Jaguar2 — the naming is a known trap.
 > a mode switch. If `libusb_open_device_with_vid_pid(ctx, 0x0bda, 0x8812)`
 > returns NULL, check `lsusb` — you may need `usb_modeswitch` to flip it
 > first.
+
+### Measured throughput
+
+Numbers below are from `tests/bench_tput.py`, monitor-mode injection at HT MCS7,
+20 MHz, PSDU 1500 and 3994 B (the practical max single radio frame). **TX rate is
+measured from usbmon bulk-OUT completions at the source chip** — the true
+frames-accepted rate, which (unlike counting at a sniffer) is not capped by a
+receiver. `dev` = devourer, `ker` = host kernel driver (`rtw88`/`88XXau`,
+AF_PACKET injection). Per-frame TX **latency** is the submit→completion time
+measured at a non-saturating rate. `—` = unsupported or degenerate.
+
+| Band | Part | TX dev 1500 / 3994 (Mbps) | TX ker 1500 / 3994 | TX latency dev (µs) |
+| ---- | ---- | ------------------------- | ------------------ | ------------------- |
+| 2.4 GHz (ch6)     | RTL8812AU | 46 / 58 | 0.9 / — | 116 |
+| 2.4 GHz (ch6)     | RTL8814AU | 0.3 / 22 ⚠ | 1.0 / — | 29 |
+| 2.4 GHz (ch6)     | RTL8821AU | 41 / 60 | 0.8 / — | 128 |
+| UNII-1 (ch36)     | RTL8812AU | 49 / 61 | 5.8 / — | 116 |
+| UNII-1 (ch36)     | RTL8814AU | 2.7 / 0.3 ⚠ | 5.2 / — | 29 |
+| UNII-1 (ch36)     | RTL8821AU | 23 / 34 | 5.3 / — | 122 |
+| UNII-2/3 (ch149)  | RTL8812AU | 49 / 62 | 5.9 / — | 115 |
+| UNII-2/3 (ch149)  | RTL8814AU | 19 / 23 ⚠ | 5.6 / — | 17 |
+| UNII-2/3 (ch149)  | RTL8821AU | 22 / 33 | 5.9 / — | 127 |
+
+Takeaways: (1) devourer's direct-USB TX is **8–60× faster than kernel AF_PACKET
+monitor injection** — devourer pipelines bulk-OUT URBs (no per-frame syscall),
+the kernel path blocks on the TX ring per frame. (2) The **kernel monitor path
+cannot inject 3994 B frames at all** (AF_PACKET > iface-MTU); devourer sends them
+at up to 62 Mbps. (3) Throughput scales with frame size (the chip's per-frame
+overhead amortises), so 3994 B beats 1500 B everywhere it works. (4) The **8814
+TX path is the family's least reliable** (high variance). (5) **RX throughput is
+not tabulated**: on a 2-USB-bus bench it cannot be measured cleanly — same-bus
+TX/RX pairs contend, the only cross-bus flooder (8812→8814) saturates the
+receiver at full TX rate, and the 8814 RX path is itself flaky. RX is functional
+(the chips receive); see `tests/README.md` for the measurement caveats.
 
 ## Building
 
@@ -134,6 +173,10 @@ header before the TX loop:
   VHT info field (bit 21). Exposes `DEVOURER_TX_VHT_MCS=N` (VHT MCS
   index, 0..9 typical) and `DEVOURER_TX_VHT_NSS=N` (spatial streams).
   `_LDPC` / `_STBC` / `_BW` apply to whichever (HT/VHT) mode is active.
+- `DEVOURER_TX_PAYLOAD_BYTES=N` — pad the 802.11 PSDU up to `N` bytes (the
+  on-wire frame becomes `N + 40`-byte TX descriptor). Used by the throughput
+  benchmark to send 1500 / 3994 B frames. Pad-up only; default = the small
+  probe-request beacon.
 
 ## Using the library
 

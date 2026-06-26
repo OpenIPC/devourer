@@ -146,6 +146,28 @@ VHT info field) before the bulk-OUT loop:
 
 `_LDPC` / `_STBC` / `_BW` apply to whichever (HT/VHT) mode is active.
 
+`WiFiDriverTxDemo` also honours a TX-gain ramp + duty knob for thermal /
+TX-power characterisation (drives `RtlJaguarDevice::SetTxPowerOverride` +
+`ApplyTxPower`):
+
+- `DEVOURER_TX_PWR_START=N` — force an absolute per-rate TXAGC index (0..63),
+  bypassing the EFUSE per-rate table. Unset = normal EFUSE-driven power.
+- `DEVOURER_TX_PWR_STOP=N` / `DEVOURER_TX_PWR_STEP=N` / `DEVOURER_TX_PWR_STEP_MS=N`
+  — step the override from START up to STOP by STEP every STEP_MS, in one
+  uninterrupted TX session, emitting a `<devourer-txpwr>index=N` marker per step.
+  The override only moves on-air power for OFDM/HT/VHT rates — drive HT with
+  `DEVOURER_TX_HT_MCS=1` (CCK at the 1M default tracks the index in-register but
+  the SDR-measured swing is dominated by the CCK path).
+- `DEVOURER_TX_GAP_US=N` — inter-frame gap in microseconds (default 2000,
+  ~500 fps). `0` = back-to-back for maximum TX duty (heating experiments).
+- `DEVOURER_TX_PWR_READBACK=1` — after each override apply, print
+  `<devourer-txpwr-rb>` with the read-back TXAGC registers (0xc20 CCK 1M /
+  0xc24 OFDM 6M) to confirm the write landed.
+
+The reusable experiment harness lives in `tests/thermal_gain_sweep.py`
+(orchestrator), `tests/sdr_power_probe.py` (USRP receive-power ground truth),
+and `tests/run_thermal_gain_sweep.sh` (build + uv venv + sudo run).
+
 ## Architecture
 
 **The caller owns libusb.** `WiFiDriver::CreateRtlDevice` is intentionally

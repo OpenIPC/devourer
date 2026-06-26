@@ -364,6 +364,16 @@ void RtlJaguarDevice::SetTxPower(uint8_t power) {
   _radioManagement->SetTxPower(power);
 }
 
+void RtlJaguarDevice::SetTxPowerOverride(int idx) {
+  _radioManagement->SetTxPowerOverride(idx);
+}
+
+void RtlJaguarDevice::ApplyTxPower() { _radioManagement->ApplyTxPower(); }
+
+uint32_t RtlJaguarDevice::ReadBBReg(uint16_t addr, uint32_t mask) {
+  return _radioManagement->phy_query_bb_reg_public(addr, mask);
+}
+
 bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {
   auto status = _halModule.rtw_hal_init(selectedChannel);
   if (status == false) {

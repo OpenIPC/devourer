@@ -183,6 +183,12 @@ class RadioManagementModule {
   uint8_t _cur80MhzPrimeSc;
   uint8_t _currentCenterFrequencyIndex;
   uint8_t power = 16;
+  /* Experiment knob: when >= 0, every per-rate TXAGC index is forced to this
+   * value instead of the EFUSE-derived per-rate table (or the `power`
+   * fallback). -1 = disabled (normal behaviour). Set via SetTxPowerOverride
+   * and re-applied on the next channel-set; used by the thermal-vs-gain
+   * ramp in WiFiDriverTxDemo. */
+  int txpwr_override_ = -1;
   PowerTracking8812a _pwrTrk;
   Iqk8812a _iqk;
   Iqk8814a _iqk8814;
@@ -235,6 +241,16 @@ public:
    * TX (submits OK, 0 on-air) even though RX works. */
   void InitRFEGpio8814A();
   void SetTxPower(uint8_t p);
+  /* Force the per-rate TXAGC index (0..63) on the next and subsequent
+   * channel-sets, overriding the EFUSE per-rate table. -1 restores normal
+   * (EFUSE-driven) behaviour. Takes effect when set_channel_bwmode runs, or
+   * immediately via ApplyTxPower(). */
+  void SetTxPowerOverride(int idx) { txpwr_override_ = idx; }
+  /* Re-run the per-rate TXAGC writes for the current channel WITHOUT a channel
+   * switch. set_channel_bwmode early-returns when the channel/bw is unchanged,
+   * so this is the only way to push a freshly-set SetTxPowerOverride() value to
+   * the TXAGC registers mid-session (used by the thermal-vs-gain ramp). */
+  void ApplyTxPower() { PHY_SetTxPowerLevel8812(_currentChannel); }
 
 private:
   void rtw_hal_set_msr(uint8_t net_type);

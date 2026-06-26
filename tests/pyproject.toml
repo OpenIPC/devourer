@@ -1,0 +1,18 @@
+[project]
+name = "devourer-tests"
+version = "0.0.0"
+description = "Devourer hardware test/experiment harness (regress, bench, thermal sweep)"
+requires-python = ">=3.10"
+# NOTE: `uhd` (UHD's Python bindings) is a SYSTEM package, not on PyPI. Create
+# the venv so it can see system site-packages:
+#     uv venv --system-site-packages
+#     uv pip install -e .
+# `run_thermal_gain_sweep.sh` does this automatically.
+dependencies = [
+    "numpy>=1.23",
+    "scapy>=2.5",
+]
+
+[tool.uv]
+# Allow the experiment scripts to import the system-installed `uhd` module.
+# (uv still manages numpy/scapy in the venv.)

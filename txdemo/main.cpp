@@ -450,11 +450,72 @@ int main(int argc, char **argv) {
   }
   bool thermal_warned = false;
 
+  /* Inter-frame gap. Default 2 ms (~500 fps, gentle on the USB bulk EP). Lower
+   * it (e.g. DEVOURER_TX_GAP_US=0) to raise the TX duty cycle for thermal /
+   * heating experiments — at the default gap the PA barely warms. */
+  long tx_gap_us = 2000;
+  if (const char *e = std::getenv("DEVOURER_TX_GAP_US")) {
+    tx_gap_us = std::strtol(e, nullptr, 0);
+    if (tx_gap_us < 0) tx_gap_us = 0;
+  }
+
+  /* TX-gain ramp (thermal-vs-gain experiment). When DEVOURER_TX_PWR_START is
+   * set, force the per-rate TXAGC index to an absolute value and step it up by
+   * STEP every STEP_MS, in one continuous TX session (chip never stops, so we
+   * observe cumulative heating). Each (re-)apply re-runs the channel-set so the
+   * new index reaches the TXAGC registers. A <devourer-txpwr> marker is emitted
+   * on every change so the harness can correlate gain index with the thermal /
+   * SDR streams. Without START, behaviour is unchanged (EFUSE per-rate power). */
+  bool pwr_ramp = false;
+  int pwr_cur = 0, pwr_stop = 0, pwr_step = 4;
+  long pwr_step_ms = 30000;
+  long pwr_next_step_ms = 0;
+  bool txpwr_readback = std::getenv("DEVOURER_TX_PWR_READBACK") != nullptr;
+  auto apply_txpwr = [&](int idx) {
+    rtlDevice->SetTxPowerOverride(idx);
+    rtlDevice->ApplyTxPower();  /* SetMonitorChannel early-returns on same ch */
+    printf("<devourer-txpwr>index=%d t_ms=%lld\n", idx,
+           static_cast<long long>(ms_since_start()));
+    if (txpwr_readback) {
+      /* Confirm the per-rate TXAGC writes landed: path-A 1M-CCK is byte0 of
+       * 0xc20, 6M-OFDM is byte0 of 0xc24. If these read back == idx but on-air
+       * power doesn't follow (CCK), the chip floors CCK elsewhere; if they read
+       * back != idx, something clobbered the write. */
+      uint32_t cck1m = rtlDevice->ReadBBReg(0xc20, 0x000000ff);
+      uint32_t ofdm6m = rtlDevice->ReadBBReg(0xc24, 0x000000ff);
+      printf("<devourer-txpwr-rb>index=%d cck1m=%u ofdm6m=%u\n", idx, cck1m,
+             ofdm6m);
+    }
+    fflush(stdout);
+  };
+  if (const char *e = std::getenv("DEVOURER_TX_PWR_START")) {
+    pwr_ramp = true;
+    pwr_cur = std::atoi(e);
+    pwr_stop = pwr_cur;
+    if (const char *s = std::getenv("DEVOURER_TX_PWR_STOP")) pwr_stop = std::atoi(s);
+    if (const char *s = std::getenv("DEVOURER_TX_PWR_STEP")) pwr_step = std::atoi(s);
+    if (const char *s = std::getenv("DEVOURER_TX_PWR_STEP_MS"))
+      pwr_step_ms = std::strtol(s, nullptr, 0);
+    if (pwr_step < 1) pwr_step = 1;
+    logger->info("DEVOURER_TX_PWR ramp — index {}..{} step {} every {} ms",
+                 pwr_cur, pwr_stop, pwr_step, pwr_step_ms);
+  }
+
   long tx_count = 0;
   while (true) {
     if (tx_count == 0) {
       logger->info("init-timing: txdemo.first_tx_submit = {} ms",
                    ms_since_start());
+      if (pwr_ramp) {
+        apply_txpwr(pwr_cur);
+        pwr_next_step_ms = ms_since_start() + pwr_step_ms;
+      }
+    }
+    if (pwr_ramp && pwr_cur < pwr_stop && ms_since_start() >= pwr_next_step_ms) {
+      pwr_cur += pwr_step;
+      if (pwr_cur > pwr_stop) pwr_cur = pwr_stop;
+      apply_txpwr(pwr_cur);
+      pwr_next_step_ms = ms_since_start() + pwr_step_ms;
     }
     rc = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
     ++tx_count;
@@ -482,7 +543,8 @@ int main(int argc, char **argv) {
       }
       fflush(stdout);
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(2)); /* ~500 fps, gentle on USB bulk EP */
+    if (tx_gap_us > 0)
+      std::this_thread::sleep_for(std::chrono::microseconds(tx_gap_us));
   }
   rc = libusb_release_interface(handle, 0);
   assert(rc == 0);

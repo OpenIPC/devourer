@@ -49,6 +49,17 @@ public:
   void SetMonitorChannel(SelectedChannel channel);
   void InitWrite(SelectedChannel channel);
   void SetTxPower(uint8_t power);
+  /* Force the per-rate TXAGC index (0..63), bypassing the EFUSE per-rate
+   * table; -1 restores normal behaviour. Re-applied on the next
+   * SetMonitorChannel. Used by the thermal-vs-gain ramp in WiFiDriverTxDemo. */
+  void SetTxPowerOverride(int idx);
+  /* Re-apply the per-rate TX power for the current channel immediately (no
+   * channel switch). Needed because SetMonitorChannel early-returns when the
+   * channel is unchanged. Call after SetTxPowerOverride to make it take. */
+  void ApplyTxPower();
+  /* Read a baseband register (debug/diagnostic). Thin passthrough to the
+   * radio manager's BB read — handy for confirming a TXAGC write landed. */
+  uint32_t ReadBBReg(uint16_t addr, uint32_t mask);
   bool send_packet(const uint8_t* packet, size_t length);
   SelectedChannel GetSelectedChannel();
   bool should_stop = false;

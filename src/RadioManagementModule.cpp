@@ -1382,6 +1382,15 @@ bool RadioManagementModule::phy_SwBand8812(uint8_t channelToSW) {
     BandToSW = BandType::BAND_ON_2_4G;
   }
 
+  /* The shadow band-type must track the channel's band even when no HW
+   * band-switch is needed (the chip is already on that band). It used to be
+   * updated only inside PHY_SwitchWirelessBand8812, so after init_hw_mlme_ext
+   * reset it to BAND_MAX and the following same-band channel-set skipped the
+   * switch, current_band_type stayed BAND_MAX. That made bIsIn24G false and
+   * silently skipped CCK TX-power programming on every later TX-power apply
+   * (and fed BAND_MAX to the thermal tracker + IQK). */
+  current_band_type = BandToSW;
+
   if (BandToSW != Band) {
     /* Per-chip band-switch. 8814 has a completely separate sequence
      * (path-C/D RFE pinmux, 8814 AGC table register, CCK clock-gate
@@ -1963,7 +1972,12 @@ void RadioManagementModule::PHY_SetTxPowerIndexByRateArray(
   for (int i = 0; i < rates.size(); ++i) {
     MGN_RATE rate = rates[i];
     uint32_t powerIndex;
-    if (_eepromManager->TxPowerInfoLoaded) {
+    if (txpwr_override_ >= 0) {
+      /* Experiment override: force every rate to the same TXAGC index,
+       * bypassing the EFUSE per-rate table. Clamp to the 6-bit field. */
+      powerIndex = static_cast<uint32_t>(txpwr_override_ > 63 ? 63
+                                                              : txpwr_override_);
+    } else if (_eepromManager->TxPowerInfoLoaded) {
       powerIndex = _eepromManager->GetTxPowerIndexBase(
           static_cast<uint8_t>(rfPath), static_cast<uint8_t>(rate),
           rate_ntx(static_cast<uint8_t>(rate)), bw, _currentChannel);

@@ -4,6 +4,9 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 /* Per-queue free-page registers (8814A only — 0x0230..0x0240 don't decode
  * the same way on 8812/8821). Cross-checked against hal/rtl8814a_spec.h
@@ -329,12 +332,41 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
   SetMonitorChannel(channel);
 
   _logger->info("Listening air...");
-  while (!should_stop) {
-    auto packets = _device.infinite_read();
-    for (auto &p : packets) {
-      _packetProcessor(p);
-    }
+  /* Keep several bulk-IN transfers in flight at once (mirrors the kernel's ~4
+   * always-posted RX URBs — confirmed via usbmon: rtw88 re-submits each URB
+   * ~20us after completion and cycles 4 of them). With a single synchronous
+   * transfer there is a window between transfers where NO URB is posted; the
+   * 8814's RX-DMA ring pauses in that gap and, under sparse traffic,
+   * intermittently wedges after a short burst — the "RX stalls at ~10 frames"
+   * bug (8812/8821 tolerate it, the 8814 does not). infinite_read() is
+   * reentrant (local buffer + local FrameParser; libusb is thread-safe), so a
+   * small worker pool restores the always-posted behaviour. Frame order across
+   * workers is not preserved, which is fine for monitor-mode RX. Set
+   * DEVOURER_RX_URBS=1 to restore the old single-transfer behaviour. */
+  int rx_workers = 4;
+  if (const char *e = std::getenv("DEVOURER_RX_URBS")) {
+    rx_workers = std::atoi(e);
+    if (rx_workers < 1) rx_workers = 1;
   }
+  std::mutex proc_mu;
+  std::vector<std::thread> workers;
+  for (int i = 0; i < rx_workers; ++i) {
+    workers.emplace_back([this, &proc_mu]() {
+      while (!should_stop) {
+        auto packets = _device.infinite_read();
+        if (packets.empty())
+          continue;
+        std::lock_guard<std::mutex> lk(proc_mu);
+        for (auto &p : packets) {
+          if (should_stop)
+            break;
+          _packetProcessor(p);
+        }
+      }
+    });
+  }
+  for (auto &t : workers)
+    t.join();
 
 #if 0
   _device.UsbDevice.SetBulkDataHandler(BulkDataHandler);

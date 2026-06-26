@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+
+# Private lab notes — local hardware inventory, not for publication
+INVENTORY.md

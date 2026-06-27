@@ -110,6 +110,13 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
 - `DEVOURER_SKIP_TXPWR=1` — skip the per-rate TX-power loop during channel
   switch (runs by default on every chip; escape hatch for RX-only
   experiments).
+- `DEVOURER_RX_KEEP_CORRUPTED=1` — pass frames that fail the 802.11 FCS (CRC32)
+  or decryption-ICV check up to the host instead of dropping them at the WMAC
+  filter (sets RCR `ACRC32|AICV`). They arrive with `crc_err`/`icv_err` set on
+  the RX descriptor; `WiFiDriverDemo` surfaces them in its `<devourer-stream>`
+  output. This is the entry point for the fused-FEC sub-block-salvage layer
+  (see `docs/fused-fec.md`); opt-in, since a body with a corrupt tail is the
+  worst-case input for an IP-stack consumer that didn't ask for it.
 - `DEVOURER_USB_DEBUG=1` — raise libusb log level from the default WARNING to
   DEBUG (produces ~7 MB per 15 s — has filled `/tmp` mid-capture and adds
   0.5-0.8 s to init even with stderr discarded). `DEVOURER_USB_QUIET` is
@@ -156,6 +163,14 @@ fast MCS for enhancement), since the radiotap is honoured per-packet. The ladder
 is `DEVOURER_SVC_LADDER="CRIT=<spec>;T0=<spec>;T1=<spec>;..."` where each `<spec>`
 is a `DEVOURER_TX_RATE` string; unset uses the built-in default. On-air check:
 `tests/gen_svc_nals.py` (synthetic 1:4:8:16 layer mix) + `tests/svc_uep_onair.sh`.
+
+The SVC ladder is the PHY-MCS half of cross-layer unequal error protection. The
+application-FEC half — a sub-block-integrity layer that salvages FCS-failed
+frames (`DEVOURER_RX_KEEP_CORRUPTED`) plus a Reed-Solomon outer code with
+per-layer redundancy — lives in `tools/precoder/` and is documented in
+**`docs/fused-fec.md`**. `StreamTxDemo` adds `DEVOURER_TX_PWR_OVERRIDE=N`
+(absolute per-rate TXAGC index 0..63, held) for the marginal-SNR bench setups
+that exercise the salvage path.
 
 `WiFiDriverTxDemo` also honours a TX-gain ramp + duty knob for thermal /
 TX-power characterisation (drives `RtlJaguarDevice::SetTxPowerOverride` +

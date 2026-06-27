@@ -36,4 +36,6 @@ dev = [
 # test_pipeline.py lives alongside the module; default (prepend) import mode
 # puts this dir on sys.path so `import encode_subcarriers` resolves.
 testpaths = ["test_pipeline.py", "test_stream.py", "test_stream_fec.py",
-              "test_stream_fec_rlc.py"]
+              "test_stream_fec_rlc.py", "test_stream_fec_rs.py",
+              "test_fec_subblock.py", "test_fec_fusion_sim.py",
+              "test_svc_uep_fec.py", "test_fused_fec_link.py"]

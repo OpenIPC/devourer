@@ -199,6 +199,20 @@ int main(int argc, char **argv) {
   rtlDevice->InitWrite(SelectedChannel{.Channel = static_cast<uint8_t>(channel),
                                        .ChannelOffset = 0,
                                        .ChannelWidth = CHANNEL_WIDTH_20});
+
+  /* DEVOURER_TX_PWR_OVERRIDE: force an absolute per-rate TXAGC index (0..63),
+   * bypassing the EFUSE/SetTxPower table — the finest-grained, lowest TX-power
+   * knob for pushing the link into the marginal-SNR regime where the RX's
+   * corrupted-frame salvage path gets exercised (pairs with the B210 interferer
+   * in tests/fused_fec_onair.sh). Applied once and held, unlike
+   * WiFiDriverTxDemo's DEVOURER_TX_PWR_START ramp. Must follow InitWrite so the
+   * channel-set has run; ApplyTxPower re-pushes the index to the registers. */
+  if (const char *o = std::getenv("DEVOURER_TX_PWR_OVERRIDE")) {
+    int idx = std::atoi(o);
+    rtlDevice->SetTxPowerOverride(idx);
+    rtlDevice->ApplyTxPower();
+    logger->info("DEVOURER_TX_PWR_OVERRIDE — forced absolute TXAGC index {}", idx);
+  }
   sleep(2);
 
   auto dot11 = build_dot11_probe_req();

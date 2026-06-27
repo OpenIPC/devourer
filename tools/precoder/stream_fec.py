@@ -61,6 +61,7 @@ DEFAULT_DENSITY_THRESHOLD = 4  # RLC; range 0..15, see RFC 8681 §3.4
 # their per-scheme code can import from here without circular dependency.
 FEC_MAGIC_RAPTORQ = 0xF52E
 FEC_MAGIC_RLC = 0xF534
+FEC_MAGIC_RS = 0xF540
 
 # Legacy alias — pre-RLC code references `FEC_MAGIC` and the 9-byte
 # RaptorQ header length. Keep them aliased to RaptorQ for any importer
@@ -90,9 +91,9 @@ class FecConfig:
     density_threshold: int = DEFAULT_DENSITY_THRESHOLD
 
     def __post_init__(self) -> None:
-        if self.scheme not in ("raptorq", "rlc"):
+        if self.scheme not in ("raptorq", "rlc", "rs"):
             raise ValueError(
-                f"scheme must be 'raptorq' or 'rlc' (got {self.scheme!r})")
+                f"scheme must be 'raptorq', 'rlc' or 'rs' (got {self.scheme!r})")
         if self.k <= 0 or self.k > 255:
             raise ValueError(f"k must be in 1..255 (got {self.k})")
         if self.symbol_size <= PACKET_LEN_PREFIX:
@@ -132,6 +133,9 @@ def make_encoder(cfg: FecConfig):
     if cfg.scheme == "rlc":
         from stream_fec_rlc import RlcEncoder
         return RlcEncoder(cfg)
+    if cfg.scheme == "rs":
+        from stream_fec_rs import RsEncoder
+        return RsEncoder(cfg)
     raise ValueError(f"unknown FEC scheme {cfg.scheme!r}")
 
 
@@ -144,6 +148,9 @@ def make_decoder(cfg: FecConfig):
     if cfg.scheme == "rlc":
         from stream_fec_rlc import RlcDecoder
         return RlcDecoder(cfg)
+    if cfg.scheme == "rs":
+        from stream_fec_rs import RsDecoder
+        return RsDecoder(cfg)
     raise ValueError(f"unknown FEC scheme {cfg.scheme!r}")
 
 

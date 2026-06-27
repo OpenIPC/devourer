@@ -148,6 +148,15 @@ gate any more (an HT-MCS radiotap is honoured unconditionally):
 (Programmatic equivalent: `dev->SetTxMode(devourer::TxMode{...})`;
 `dev->ClearTxMode()` reverts to the built-in default.)
 
+`SvcTxDemo` is a per-packet-rate showcase: it reads length-prefixed HEVC NALs
+from stdin, classifies each by `temporal_id` / IRAP-or-parameter-set criticality
+(`txdemo/svc_tx_demo/svc_tx.h`), and injects each at the PHY rate its SVC-T layer
+deserves — a per-layer unequal-error-protection ladder (robust MCS for base/IDR,
+fast MCS for enhancement), since the radiotap is honoured per-packet. The ladder
+is `DEVOURER_SVC_LADDER="CRIT=<spec>;T0=<spec>;T1=<spec>;..."` where each `<spec>`
+is a `DEVOURER_TX_RATE` string; unset uses the built-in default. On-air check:
+`tests/gen_svc_nals.py` (synthetic 1:4:8:16 layer mix) + `tests/svc_uep_onair.sh`.
+
 `WiFiDriverTxDemo` also honours a TX-gain ramp + duty knob for thermal /
 TX-power characterisation (drives `RtlJaguarDevice::SetTxPowerOverride` +
 `ApplyTxPower`):

@@ -123,6 +123,14 @@ target_link_libraries(StreamTxDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
 # stream_stdin.h (shared binary-stdin framing) lives in txdemo/.
 target_include_directories(StreamTxDemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/txdemo)
 
+# SVC-T UEP injector: maps each HEVC NAL's temporal_id -> a robust/fast TxMode
+# (svc_tx.h), so base/IDR layers fly robust and enhancement layers ride fast.
+add_executable(SvcTxDemo
+    txdemo/svc_tx_demo/main.cpp
+)
+target_link_libraries(SvcTxDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
+target_include_directories(SvcTxDemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/txdemo)
+
 # Stream-link DUPLEX: one binary, one chip, both directions. Combines the RX
 # loop from WiFiDriverDemo and the stdin-driven TX from StreamTxDemo —
 # stdin = length-prefixed PSDU bodies, stdout = <devourer-stream> lines.

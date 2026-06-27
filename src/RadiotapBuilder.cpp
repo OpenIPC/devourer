@@ -197,14 +197,13 @@ std::vector<uint8_t> build_stream_radiotap(const TxMode& cfg) {
   }
 }
 
-TxMode parse_tx_mode_env() {
+TxMode parse_tx_mode_str(const std::string& spec) {
   TxMode cfg;  /* defaults: legacy 6M, 20 MHz, no SGI/LDPC/STBC */
 
-  const char* raw = std::getenv("DEVOURER_TX_RATE");
-  if (raw == nullptr || *raw == '\0') {
+  if (spec.empty()) {
     return cfg;
   }
-  const std::string s = to_upper_stripped(raw);
+  const std::string s = to_upper_stripped(spec.c_str());
 
   /* Split on '/': first token = rate, rest = bandwidth (numeric) or modifier
    * flags (SGI / LDPC / STBC). */
@@ -221,8 +220,8 @@ TxMode parse_tx_mode_env() {
   }
   if (tokens.empty() || tokens[0].empty() || !parse_rate_token(tokens[0], &cfg)) {
     std::fprintf(stderr,
-                 "<tx-mode>warning: unrecognised DEVOURER_TX_RATE=%s, "
-                 "falling back to 6M legacy\n", raw);
+                 "<tx-mode>warning: unrecognised TX rate '%s', "
+                 "falling back to 6M legacy\n", spec.c_str());
     return TxMode{};
   }
 
@@ -235,10 +234,15 @@ TxMode parse_tx_mode_env() {
       cfg.bw_mhz = static_cast<uint8_t>(std::atoi(t.c_str()));
     else if (!t.empty())
       std::fprintf(stderr,
-                   "<tx-mode>warning: ignoring unrecognised DEVOURER_TX_RATE "
-                   "token '%s'\n", t.c_str());
+                   "<tx-mode>warning: ignoring unrecognised TX-mode token "
+                   "'%s'\n", t.c_str());
   }
   return cfg;
+}
+
+TxMode parse_tx_mode_env() {
+  const char* raw = std::getenv("DEVOURER_TX_RATE");
+  return parse_tx_mode_str(raw ? raw : "");
 }
 
 }  // namespace devourer

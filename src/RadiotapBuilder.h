@@ -16,6 +16,7 @@
 #define RADIOTAP_BUILDER_H
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "TxMode.h"
@@ -26,11 +27,14 @@ namespace devourer {
  * well-formed radiotap header — no 802.11 frame body. */
 std::vector<uint8_t> build_stream_radiotap(const TxMode& mode);
 
-/* Parse DEVOURER_TX_RATE into a TxMode. Single slash-separated string:
+/* Parse a TX-mode spec string into a TxMode. Single slash-separated string:
  *   <rate>[/<bw>][/SGI][/LDPC][/STBC]   (case-insensitive)
  *     <rate> : 6M|9M|12M|18M|24M|36M|48M|54M | MCS0..MCS31 | VHT1SS_MCS0..VHT4SS_MCS9
  *     <bw>   : 20|40|80|160 (default 20)
- * Unset or unrecognised falls back to 6M legacy. */
+ * Empty or unrecognised falls back to 6M legacy. */
+TxMode parse_tx_mode_str(const std::string& spec);
+
+/* parse_tx_mode_str applied to the DEVOURER_TX_RATE environment variable. */
 TxMode parse_tx_mode_env();
 
 }  // namespace devourer

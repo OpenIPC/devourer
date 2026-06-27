@@ -430,6 +430,26 @@ int main(int argc, char **argv) {
     tx_buf.assign(beacon_frame, beacon_frame + sizeof(beacon_frame));
   }
 
+  /* Frame-size knob for throughput benchmarking. DEVOURER_TX_PAYLOAD_BYTES=N
+   * pads the 802.11 body so the on-air PSDU is exactly N bytes — send_packet
+   * writes real_packet_length (= PSDU) into the 16-bit TX-desc PKT_SIZE, so N
+   * up to 65535 is valid (the chip's RX side caps at 16383). Pad-up only: if N
+   * is below the existing body we leave it and warn. The on-wire bulk-OUT URB
+   * is N + TXDESC_SIZE bytes. Default unset = the small probe-request beacon. */
+  if (const char *e = std::getenv("DEVOURER_TX_PAYLOAD_BYTES")) {
+    long want = std::strtol(e, nullptr, 0);
+    size_t radiotap_len = tx_vht ? 22 : 13;
+    size_t body_len = tx_buf.size() - radiotap_len;
+    if (want > 0 && static_cast<size_t>(want) > body_len) {
+      tx_buf.insert(tx_buf.end(), static_cast<size_t>(want) - body_len, 0x00);
+      logger->info("DEVOURER_TX_PAYLOAD_BYTES — PSDU padded {} -> {} bytes",
+                   body_len, want);
+    } else if (want > 0) {
+      logger->warn("DEVOURER_TX_PAYLOAD_BYTES={} <= current body {} — ignored "
+                   "(pad-up only)", want, body_len);
+    }
+  }
+
   /* Thermal monitoring — read inline on the TX (owning) thread, so no
    * background thread shares the libusb handle (no USB contention). Cadence is
    * derived from DEVOURER_THERMAL_POLL_MS over the ~2 ms/packet loop; 0 =

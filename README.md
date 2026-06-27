@@ -20,12 +20,21 @@ register-table layout, firmware-download plumbing, and
 family; chip-specific EEPROM handling, firmware blobs, and RF tables are
 layered on top.
 
-| Part           | RF / streams    | 2.4 GHz       | 5 GHz UNII-1 (ch36-48) | 5 GHz UNII-2/3 (ch52+) | Notes                                       |
-| -------------- | --------------- | ------------- | ---------------------- | ---------------------- | ------------------------------------------- |
-| **RTL8812AU**  | 2T2R            | TX + RX       | TX + RX                | TX + RX                | VID/PID `0bda:8812`; reference part |
-| **RTL8811AU**  | 1T1R            | TX + RX       | TX + RX                | TX + RX                | 1T1R cut of 8812 silicon; rides 8812 code path with `RFType=RF_TYPE_1T1R` selected from `REG_SYS_CFG` bit 27. Status mirrored from 8812 — not separately exercised |
-| **RTL8814AU**  | 4T4R, 3-SS max  | TX + RX       | TX + RX                | TX + RX                | VID/PID `0bda:8813`; 2-SS effective on USB-2 |
-| **RTL8821AU**  | 1T1R AC + BT    | TX + RX       | TX + RX                | TX + RX | OEM-rebadged as TP-Link Archer T2U Plus (`2357:0120`) etc. UNII-2/3 TX has cross-receiver asymmetry against 8812AU peers |
+Band cells show **devourer on-air TX throughput** (Mbps, HT MCS7, 20 MHz),
+measured by USRP channel-occupancy (`tests/bench_onair.py`); devourer matches
+wfb-ng on the `svpcom/rtl8812au` driver at parity — see
+[`docs/wfb-ng-tuning.md`](docs/wfb-ng-tuning.md). The 8812AU is the fully-benchmarked
+reference. `†` = transmits on air, but the on-air rate is **USB-power-bound** on
+this bench and not reproducibly benchmarkable (5 GHz TX is current-hungry; needs a
+powered USB hub / direct root port — see _USB Vbus sag_ in Hardware gotchas); the
+bracketed figure is the best clean reading observed.
+
+| Part           | RF / streams    | 2.4 GHz (ch6) | UNII-1 (ch36) | UNII-2/3 (ch149) | Notes                                       |
+| -------------- | --------------- | ------------- | ------------- | ---------------- | ------------------------------------------- |
+| **RTL8812AU**  | 2T2R            | 56            | 52            | 52               | VID/PID `0bda:8812`; reference part — solid on every band |
+| **RTL8811AU**  | 1T1R            | mirrors 8812  | mirrors 8812  | mirrors 8812     | 1T1R cut of 8812 silicon; rides the 8812 code path with `RFType=RF_TYPE_1T1R` from `REG_SYS_CFG` bit 27. Not separately benchmarked (no working unit on the bench) |
+| **RTL8814AU**  | 4T4R, 3-SS max  | 65            | †(32)         | †(32)            | VID/PID `0bda:8813`; 2-SS effective on USB-2. 2.4 GHz saturates the channel; 5 GHz reached 32 Mbps in good moments but sags otherwise on this bench — power-bound, not a chip limit |
+| **RTL8821AU**  | 1T1R AC + BT    | 54            | 32            | 28               | OEM-rebadged as TP-Link Archer T2U Plus (`2357:0120`). 1T1R; 5 GHz SDR-measured and reproducible here |
 
 Successor families (`Jaguar2` / `Jaguar+` — 8812BU, 8822BU/BE, etc., and
 the later `Kestrel` 11ax generation) are **out of scope**: they share
@@ -134,6 +143,11 @@ header before the TX loop:
   VHT info field (bit 21). Exposes `DEVOURER_TX_VHT_MCS=N` (VHT MCS
   index, 0..9 typical) and `DEVOURER_TX_VHT_NSS=N` (spatial streams).
   `_LDPC` / `_STBC` / `_BW` apply to whichever (HT/VHT) mode is active.
+- `DEVOURER_TX_PAYLOAD_BYTES=N` — pad the 802.11 PSDU up to `N` bytes (on-wire
+  `N + 40`). For throughput testing — `N=3993` is wfb-ng's max frame payload.
+
+On-air TX throughput vs wfb-ng (SDR-verified parity; how to reproduce) is
+documented in [`docs/wfb-ng-tuning.md`](docs/wfb-ng-tuning.md).
 
 ## Using the library
 

@@ -36,8 +36,38 @@ Phase-B SDR extra (optional): `uv sync --extra sdr`.
 | `seed_probe.py` | discover / characterise the chip scrambler seed (rx + bruteforce) |
 | `fft_capture.py` | Phase-B per-subcarrier IQ verification (+ runnable `--self-test`) |
 | `test_pipeline.py` | pytest: scrambler/BCC/interleaver KATs + pipeline round-trips |
+| `stream_fec*.py` | outer erasure codes: RaptorQ (`_raptorq`), RLC (`_rlc`), **Reed-Solomon (`_rs`)**; `stream_fec.py` dispatches by `FecConfig.scheme` |
+| `fec_subblock.py` | **sub-block integrity (SBI)** — per-sub-block CRC so a kept-corrupt frame yields its surviving symbols as erasures, not a whole-frame loss |
+| `svc_uep_fec.py` | per-SVC-layer FEC-rate UEP (heavy FEC on base/IDR, light on enhancement) — the app-FEC half of cross-layer UEP |
+| `fec_fusion_sim.py` | offline sim quantifying the SBI gain + picking the sub-block size, no hardware |
+| `fused_fec_link.py` + `fused_fec_tx/rx.py` | chip↔chip RS+SBI sender/receiver + CLIs (RX reports baseline-vs-SBI gain) |
 
 The repo-level end-to-end smoke is `tests/precoder_smoke.py` (skips without numpy).
+
+## Fused FEC (sub-block integrity + RS + per-layer UEP)
+
+Three error-correction layers stacked into one concatenated code for the video
+downlink: the **PHY MCS** code (inner, picked per-packet via radiotap/`TxMode`),
+a **sub-block-integrity** layer (`fec_subblock.py`) that turns the chip's
+all-or-nothing 802.11 FCS into per-symbol erasures, and an **outer erasure
+code** (RaptorQ/RLC/**RS**). With `DEVOURER_RX_KEEP_CORRUPTED=1` a frame that
+fails the FCS is kept; only its genuinely-corrupt sub-blocks are dropped, so the
+outer code recovers from far fewer erasures than "whole frame lost".
+
+```sh
+# Size the sub-blocks for your link's residual BER (no radio):
+uv run python fec_fusion_sim.py --scheme rs --model slope --ber 3e-4 --sweep
+
+# On-air chip↔chip gain (8812 TX → 8821 RX), baseline vs SBI:
+sudo bash ../../tests/fused_fec_onair.sh        # reports FUSED-FEC GAIN
+
+# SDR-RX path (USRP B210, gr-ieee802-11 fork w/ GR_KEEP_CORRUPTED): see
+#   ~/git/sdr2wifi/fused_fec_rung1.py  — end-to-end over the real OFDM PHY.
+```
+
+The PHY-MCS half of SVC unequal error protection lives in C++
+(`txdemo/svc_tx_demo/svc_tx.h`, `DEVOURER_SVC_LADDER`); `svc_uep_fec.py` adds the
+matching FEC-rate ladder so base/IDR layers get robust MCS **and** heavy FEC.
 
 ## End-to-end recipe
 

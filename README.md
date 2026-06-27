@@ -132,17 +132,13 @@ Common to both demos:
   to DEBUG (produces ~7 MB per 15 s, can fill `/tmp` mid-capture, and slows
   init measurably). `DEVOURER_USB_QUIET` is accepted as a no-op.
 
-`WiFiDriverTxDemo`-only knobs patch the canonical beacon's radiotap
-header before the TX loop:
+`WiFiDriverTxDemo`-only knobs:
 
-- `DEVOURER_TX_MCS=N` — HT MCS index. Default 1.
-- `DEVOURER_TX_LDPC=1` — FEC type LDPC (vs default BCC).
-- `DEVOURER_TX_STBC=N` — STBC stream count (0..3). Default 0.
-- `DEVOURER_TX_BW=20|40|80|160` — bandwidth.
-- `DEVOURER_TX_VHT=1` — switch from HT MCS field (radiotap bit 19) to
-  VHT info field (bit 21). Exposes `DEVOURER_TX_VHT_MCS=N` (VHT MCS
-  index, 0..9 typical) and `DEVOURER_TX_VHT_NSS=N` (spatial streams).
-  `_LDPC` / `_STBC` / `_BW` apply to whichever (HT/VHT) mode is active.
+- `DEVOURER_TX_RATE=<rate>[/<bw>][/SGI][/LDPC][/STBC]` — the on-air TX mode,
+  parsed into a `devourer::TxMode` and applied via `RtlJaguarDevice::SetTxMode`.
+  `<rate>` = `6M`..`54M` (legacy OFDM) | `MCS0`..`MCS31` (HT) |
+  `VHT1SS_MCS0`..`VHT4SS_MCS9` (VHT); `<bw>` = `20|40|80|160`. Unset = `6M`.
+  Examples: `MCS7`, `MCS7/40/SGI`, `VHT2SS_MCS3/80/LDPC`.
 - `DEVOURER_TX_PAYLOAD_BYTES=N` — pad the 802.11 PSDU up to `N` bytes (on-wire
   `N + 40`). For throughput testing — `N=3993` is wfb-ng's max frame payload.
 

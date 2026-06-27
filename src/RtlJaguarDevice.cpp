@@ -41,6 +41,9 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   u8 fixed_rate = MGN_1M, sgi = 0, bwidth = 0, ldpc = 0, stbc = 0;
   u16 txflags = 0;
   int rate_id = 0;
+  /* True once the radiotap carries a rate (RATE / HT-MCS-index / VHT). When it
+   * stays false the device TX-mode default (SetTxMode) — else MGN_1M — applies. */
+  bool rate_from_radiotap = false;
   if (length < sizeof(struct ieee80211_radiotap_header)) {
     return false;
   }
@@ -75,6 +78,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
 
     case IEEE80211_RADIOTAP_RATE:
       fixed_rate = *iterator.this_arg;
+      rate_from_radiotap = true;
       break;
 
     case IEEE80211_RADIOTAP_TX_FLAGS:
@@ -113,20 +117,16 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
         ldpc = 1;
       }
 
-      /* DEVOURER_TX_HT_MCS=1: honour the HT MCS index from radiotap byte 2
-       * and set fixed_rate accordingly. Without this knob the historic
-       * behaviour kicks in — fixed_rate stays at the MGN_1M default and the
-       * chip transmits 1 Mbps CCK regardless of the HT-MCS field (see PR
-       * #80's README: "send_packet only wires fixed_rate from the radiotap
-       * RATE/VHT fields — never the HT MCS index"). Gated because flipping
-       * this unconditionally would silently change the regression matrix's
-       * rate sweeps and the precoder PoC's locked-in 6 Mbps OFDM carrier. */
-      static const bool ht_mcs_enabled =
-          std::getenv("DEVOURER_TX_HT_MCS") != nullptr;
-      if (ht_mcs_enabled && (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_MCS)) {
+      /* The radiotap is authoritative for per-packet rate: honour the HT MCS
+       * index from byte 2 unconditionally. (Previously gated behind the
+       * DEVOURER_TX_HT_MCS env var, so a valid HT radiotap silently fell back
+       * to 1M CCK — now replaced by the programmatic SetTxMode default, applied
+       * after this loop only when no rate is present in the radiotap.) */
+      if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_MCS) {
         uint8_t mcs_index = iterator.this_arg[2];
         if (mcs_index <= 31) {
           fixed_rate = MGN_MCS0 + mcs_index;
+          rate_from_radiotap = true;
         }
       }
     } break;
@@ -164,12 +164,27 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
         if (mcs > 9)
           mcs = 9;
         fixed_rate = MGN_VHT1SS_MCS0 + ((nss - 1) * 10 + mcs);
+        rate_from_radiotap = true;
       }
     } break;
 
     default:
       break;
     }
+  }
+
+  /* The radiotap carried no rate → apply the runtime TX-mode default set via
+   * SetTxMode (modulation / MCS / BW / GI / FEC / STBC). With no default set,
+   * the MGN_1M fallback from above stands. Per-packet radiotap always wins. */
+  if (!rate_from_radiotap && _tx_mode_default.has_value()) {
+    const devourer::TxParams tp =
+        devourer::tx_mode_to_params(*_tx_mode_default);
+    fixed_rate = tp.fixed_rate;
+    vht = tp.vht;
+    sgi = tp.sgi;
+    ldpc = tp.ldpc;
+    stbc = tp.stbc;
+    bwidth = static_cast<u8>(tp.bwidth);
   }
 
   /* CCK rates (1/2/5.5/11M) do not exist at 5GHz. The RTL8814AU silently
@@ -401,6 +416,12 @@ void RtlJaguarDevice::SetTxPowerOverride(int idx) {
 }
 
 void RtlJaguarDevice::ApplyTxPower() { _radioManagement->ApplyTxPower(); }
+
+void RtlJaguarDevice::SetTxMode(const devourer::TxMode& mode) {
+  _tx_mode_default = mode;
+}
+
+void RtlJaguarDevice::ClearTxMode() { _tx_mode_default.reset(); }
 
 uint32_t RtlJaguarDevice::ReadBBReg(uint16_t addr, uint32_t mask) {
   return _radioManagement->phy_query_bb_reg_public(addr, mask);

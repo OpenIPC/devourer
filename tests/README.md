@@ -288,12 +288,11 @@ reportedly fails at RX). Add more in `ENCODING_COMBOS` at the top of
 
 The underlying knobs are also usable standalone for one-off targeted TX:
 
-- **Devourer TX:** `DEVOURER_TX_MCS=N`, `DEVOURER_TX_LDPC=1`,
-  `DEVOURER_TX_STBC=N`, `DEVOURER_TX_BW=20|40|80|160` env vars read by
-  `WiFiDriverTxDemo`. Default mode is HT; `DEVOURER_TX_VHT=1` switches to
-  a VHT radiotap header (22 bytes) and exposes `DEVOURER_TX_VHT_MCS=N` +
-  `DEVOURER_TX_VHT_NSS=N`. `_LDPC` / `_STBC` / `_BW` apply to whichever
-  mode is active.
+- **Devourer TX:** `DEVOURER_TX_RATE=<rate>[/<bw>][/SGI][/LDPC][/STBC]` read by
+  `WiFiDriverTxDemo` (parsed into a `devourer::TxMode`, applied via
+  `RtlJaguarDevice::SetTxMode`). `<rate>` = `6M`..`54M` (legacy) | `MCS0`..`MCS31`
+  (HT) | `VHT1SS_MCS0`..`VHT4SS_MCS9` (VHT); `<bw>` = `20|40|80|160`. Examples:
+  `MCS7/40/SGI`, `VHT2SS_MCS3/80/LDPC`.
 - **Kernel-side scapy TX:** `--mcs N` / `--ldpc` / `--stbc N` / `--bandwidth
   20|40|80|160` on `tests/inject_beacon.py`, plus `--vht` / `--vht-mcs N`
   / `--vht-nss N` for VHT mode.

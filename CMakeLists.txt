@@ -79,6 +79,8 @@ add_library(WiFiDriver
     src/RtlUsbAdapter.cpp
     src/RtlUsbAdapter.h
     src/SelectedChannel.h
+    src/TxMode.cpp
+    src/TxMode.h
     src/WiFiDriver.cpp
     src/WiFiDriver.h
     src/registry_priv.h

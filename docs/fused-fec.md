@@ -54,20 +54,22 @@ length byte must never desync the other sub-blocks in the same body. The
 receiver partitions the body at offsets it computes from its own configured
 sub-block size, never trusting the (corruptible) header.
 
-### Where the gain comes from — and its limit
+### Where the gain comes from
 
-SBI salvage only helps when corruption is **localized within a frame**. This is
-the central empirical result of the project:
+SBI salvage only helps when corruption is **localized within a frame**, so the
+inner decoder's failure mode determines the gain:
 
-- The **Realtek chip RX** (8821) uses a soft-decision *hardware* decoder, which
-  on a marginal frame leaves a few localized residual byte errors. SBI salvages
-  the rest. **On-air gain measured: +129 RS blocks recovered in a 15 s run that
-  the drop-whole-frame baseline lost** (chip↔chip, see Results).
-- An **SDR receiver running a hard-decision Viterbi** (the gr-ieee802-11 fork),
-  on a marginal frame, *diverges* and produces frame-wide errors — most
-  sub-blocks bad. SBI then has little to salvage. The over-air pipeline works
-  end-to-end, but the gain is small until the SDR decoder is made
-  soft-decision (see "Future work: soft-decision SDR").
+- a **soft-decision** inner decoder, on a marginal frame, leaves a few
+  *localized* residual byte errors; SBI salvages the surviving sub-blocks;
+- a **hard-decision** inner decoder *diverges* on a marginal frame and smears
+  errors frame-wide, leaving SBI little to salvage.
+
+The **Realtek chip RX** (8821) decodes soft in *hardware*, landing in the first
+regime natively. The **SDR RX** (gr-ieee802-11 fork) supports both: its default
+hard-decision Viterbi lands in the second; a soft-decision path
+(`GR_SOFT_VITERBI`) restores the first. Soft information helps here, at the inner
+decoder — not at the outer code; see
+[Soft information](#soft-information-inner-decoder-vs-outer-code).
 
 ## Outer codes
 
@@ -106,18 +108,21 @@ ladder, base/IDR layers get the most robust MCS **and** the heaviest FEC.
 
 ## Two receive scenarios, one shared framing
 
-The SBI framing + outer code are identical for both receivers. Only the erasure
-decision differs:
+The SBI framing, outer code, and per-sub-block CRC erasure decision are identical
+for both receivers. Only the receiver — and thus the inner decode — differs:
 
 1. **chip↔chip** (`fused_fec_link.py`, `fused_fec_tx.py`, `fused_fec_rx.py`):
    devourer 8812 TX → devourer 8821 RX. The chip gives only hard corrupted
    bytes; localization is the per-sub-block CRC. `fused_fec_rx` runs a baseline
    and an SBI decoder in lockstep and reports the gain.
-2. **SDR-RX** (`~/git/sdr2wifi/fused_fec_rung3.py`): devourer 8812 TX →
-   USRP B210 RX via the `~/git/gr-ieee802-11` fork. Same SBI framing, same
+2. **SDR-RX** ([`sdr2wifi`](https://github.com/josephnef/sdr2wifi)'s
+   `fused_fec_rung3.py`): devourer 8812 TX → USRP B210 RX via the
+   [`gr-ieee802-11` fork](https://github.com/josephnef/gr-ieee802-11). Same SBI framing, same
    `FusedFecReceiver`. The fork surfaces FCS-failed frames via `GR_KEEP_CORRUPTED`
-   (mirror of devourer's env). The SDR can, in principle, also use per-bit soft
-   information — see Future work.
+   (mirror of devourer's env) and can decode soft (`GR_SOFT_VITERBI`). The bridge
+   keeps only encoding ≥ HT PDUs: an 802.11n frame's legacy L-SIG cover is also
+   decoded as a garbage legacy frame, which `KEEP_CORRUPTED` would otherwise
+   surface as a spurious corrupt frame.
 
 ## Module map (`tools/precoder/`)
 
@@ -130,7 +135,9 @@ decision differs:
 | `fused_fec_link.py` | chip-path `FusedFecSender` / `FusedFecReceiver` (baseline-vs-SBI) |
 | `fused_fec_tx.py` / `fused_fec_rx.py` | chip-path CLIs (bytes ↔ `StreamTxDemo` / `<devourer-stream>`) |
 | `fec_fusion_sim.py` | offline simulation: quantify SBI gain, size sub-blocks, no hardware |
-| `test_*.py` | unit tests for each module (130 in the suite) |
+| `soft_erasure_fec.py` | errors-and-erasures Reed-Solomon (BCH form) + soft-reliability GMD; the reference that quantifies the inner-vs-outer soft-information question |
+| `fec_ab_sim.py` | the SBI-vs-plain-block-FEC A/B over measured channels (does SBI beat just adding parity, at equal overhead?) |
+| `test_*.py` | unit tests for each module (145 in the suite) |
 
 ## Running it
 
@@ -159,7 +166,8 @@ with `KEEP_CORRUPTED`. Reports `received / corrupt / FUSED-FEC GAIN`. See
 
 ### SDR-RX over real air (rung-3)
 
-In `~/git/sdr2wifi` (needs the gr-ieee802-11 fork + GNU Radio 3.10):
+In [`sdr2wifi`](https://github.com/josephnef/sdr2wifi) (needs the
+[`gr-ieee802-11` fork](https://github.com/josephnef/gr-ieee802-11) + GNU Radio 3.10):
 
 ```sh
 sudo bash run_fused_rung3.sh    # 8812 TX HT MCS7 → B210 RX → SBI salvage
@@ -170,10 +178,28 @@ sudo bash run_fused_rung3.sh    # 8812 TX HT MCS7 → B210 RX → SBI salvage
 - **chip↔chip, real silicon, 15 s, MCS7, ch6:** 4086 frames, 1072 corrupt
   surfaced, 6013 sub-blocks salvaged, **FUSED-FEC GAIN = 129 RS blocks** the
   baseline lost (≈13 % lift in delivered blocks).
-- **SDR-RX, over real air, HT MCS7:** the pipeline runs end-to-end — 4044
-  devourer HT frames decoded over the air, corrupt frames surfaced, SBI bridge
-  runs. The gain is small because the fork's **hard-decision** Viterbi produces
-  frame-wide corruption (see below), not because of a code defect.
+- **SDR-RX, over real air, marginal HT MCS7** (8812 TX → B210, deterministic
+  capture-replay so no USRP-overflow confound):
+  - *hard-decision* Viterbi: 5 of 1795 HT frames pass the FCS clean; SBI salvages
+    3.6 sub-blocks per corrupt frame and lifts 4 baseline RS blocks to 21
+    (**FUSED-FEC GAIN = 17**).
+  - *soft-decision* Viterbi (`GR_SOFT_VITERBI`): 489 of 1809 HT frames pass clean
+    and ≈6.9 sub-blocks survive per corrupt frame (≈2× the hard path); the
+    baseline alone reaches the full 21 blocks, so SBI has nothing left to add.
+
+  The two paths reach the same delivered payload by complementary routes: hard
+  decode leans on SBI salvage, soft decode recovers the frames outright.
+- **chip RX vs SDR RX, matched operating point.** The fair cross-receiver metric
+  is *conditional sub-block survival* — of a corrupt frame's sub-blocks, the
+  fraction that still pass their CRC (what SBI salvages) — compared at equal
+  corrupt-frame rate. (Matched on corrupt rate, not SNR: the chip's pilot-based
+  SNR meter reads ~31–34 dB even at 80 %+ corrupt while the SDR's EVM-based one
+  reads ~21 dB, and without an RF splitter the two antennas are not on one
+  channel.) Measured: the Realtek 8821 (hardware soft decode) survives 81 % at
+  42 % corrupt, 69 % at 83 %, 55 % at 97 %; the B210 fork's **soft** Viterbi
+  survives 69 % at 73 % corrupt — on the chip's curve (parity); its **hard**
+  Viterbi survives 36 % at ~100 % corrupt — far below. Soft decode brings the
+  SDR's localization to chip parity; hard decode does not.
 
 ## Reproducible corruption
 
@@ -200,31 +226,92 @@ use the current rail as-is after a clean boot.
 
 ## SDR receiver changes (sister repos)
 
-The SDR-RX path required two changes to the `~/git/gr-ieee802-11` fork, both
-mirroring devourer's `KEEP_CORRUPTED`:
+The SDR-RX path carries three changes in the
+[`gr-ieee802-11` fork](https://github.com/josephnef/gr-ieee802-11):
 
 - **`lib/decode_mac.cc`** — `GR_KEEP_CORRUPTED` surfaces FCS-failed *legacy*
-  PSDUs tagged `crc_ok=#f` instead of dropping them.
-- **`lib/frame_equalizer_impl.cc`** — HT/VHT/MIMO frames are decoded here (not
-  in `decode_mac`) and previously only printed their CRC result. A new `pdu`
-  message port publishes them (with `crc_ok` + `GR_KEEP_CORRUPTED`); the hier
-  block forwards it to `mac_out`.
+  PSDUs tagged `crc_ok=#f` instead of dropping them (mirrors devourer's env).
+- **`lib/frame_equalizer_impl.cc`** — HT/VHT/MIMO frames are decoded here (not in
+  `decode_mac`); a `pdu` message port publishes them (with `crc_ok` under
+  `GR_KEEP_CORRUPTED`) and stamps per-frame `snr`/`encoding`, which the hier
+  block forwards to `mac_out`.
+- **`lib/frame_equalizer_impl.cc` + `lib/viterbi_decoder/`** — the soft-decision
+  path under `GR_SOFT_VITERBI` (default off, hard path bit-identical): a max-log
+  soft demapper (per-coded-bit LLRs for BPSK/QPSK/16/64-QAM) feeds a soft-input
+  Viterbi (scalar + SSE2).
 
-`~/git/sdr2wifi` holds the over-air receiver (`fused_fec_rung3.py`), the
+[`sdr2wifi`](https://github.com/josephnef/sdr2wifi) holds the over-air receiver (`fused_fec_rung3.py`), the
 software-loopback capstone (`fused_fec_rung1.py`), and validation tools
-(`keep_corrupted_check.py`, `ht_hier_check.py`).
+(`keep_corrupted_check.py`, `ht_hier_check.py`, `iq_diag.py`, `iq_fec_diag.py`).
 
-## Future work: soft-decision SDR
+## Soft information: inner decoder vs outer code
 
-The SDR over-air gain is gated by the fork's **hard-decision** Viterbi: on a
-marginal frame it diverges and corrupts the whole frame, leaving SBI nothing to
-salvage. The fix is a **soft-decision** receive path — a soft demapper
-(per-coded-bit LLRs for BPSK/QPSK/16/64-QAM) feeding a soft-input Viterbi —
-so marginal frames carry a few *localized* residual errors instead of
-frame-wide garbage, restoring the structure SBI exploits. The fork already has a
-soft min-sum LDPC decoder, but only for R=1/2 n=648 (the robust regime that does
-not corrupt over air); the fragile BCC rates (MCS1-7) are where the soft path is
-needed.
+An SDR computes a per-coded-bit LLR at the demapper that a Wi-Fi chip never
+exposes. That soft information has exactly one place it helps, and the
+distinction sets where an SDR earns its place on RX.
+
+**Inner decoder — soft helps.** Feeding real LLRs to a soft-input Viterbi
+(`GR_SOFT_VITERBI`) keeps a marginal frame's residual errors *localized* instead
+of letting the hard decoder diverge frame-wide — the structure SBI exploits. The
+[Results](#results) show this over real air. The Realtek chip already decodes
+soft in hardware, so the soft Viterbi brings the SDR to parity with the chip, it
+does not surpass it.
+
+**Outer code — soft does not help.** The shipped outer RS is erasure-only and
+takes its erasures from the per-sub-block CRC. `soft_erasure_fec.py` tests the
+alternative — a BCH-form errors-and-erasures RS whose erasures are chosen by soft
+per-symbol reliability (min |LLR| over a symbol's bits), swept GMD-style — and
+the result is negative for this link:
+
+- Against the per-sub-block CRC's *perfect* erasure flag, binary CRC-erasure
+  beats soft-reliability GMD: a CRC locates erasures exactly, soft only ranks
+  them and can be fooled by a confidently-wrong symbol. Soft beats only a
+  no-side-information errors-only decode.
+- Soft's one structural edge is dropping the CRC bytes for extra parity, but that
+  wins only at large per-symbol overhead: at the link's 32-byte symbols
+  (CRC ≈12 %) CRC-erasure wins decisively; soft pulls ahead only near 50 %
+  overhead (≈4-byte symbols), which the video link never uses.
+
+So at the outer code the chip and SDR are equivalent — the chip's
+`KEEP_CORRUPTED` supplies the same CRC erasure flag — and the SDR's soft
+advantage is confined to the inner decoder. `soft_erasure_fec.py --mode
+genie|overhead` is the reproducible reference for both regimes.
+
+## Is SBI worth it? Fused vs. plain block FEC
+
+The architectural question for the whole initiative: does SBI's per-sub-block
+machinery beat simply spending the same overhead on more Reed-Solomon parity (the
+wfb-ng model)? `fec_ab_sim.py` decides it by running both over the MEASURED
+channels (real survivor distributions) at equal on-air overhead — plain pays no
+CRC tax and so buys ~6 % more parity; SBI pays the tax but recovers surviving
+sub-blocks from corrupt frames.
+
+The split is structural. Plain treats a CRC-failed frame as a whole-frame
+erasure, so the overhead it needs scales with the corrupt-frame *rate*: it
+tolerates a corrupt rate up to `ov/(1+ov)` (33 % at 50 % overhead) and is useless
+beyond it. SBI loses only the bad sub-blocks, so its overhead scales with the
+per-frame corruption *fraction*: with localized corruption (measured survivor
+fraction f ≈ 0.69) it tolerates ≈ `1/(1−f)` ≈ 3× the corrupt rate at the same
+overhead. Measured source-delivery crossover (localized corruption, 25 %
+overhead):
+
+| corrupt-frame rate | plain | SBI |
+|--------------------|-------|-----|
+| 5 %  | 0.98 | 1.00 |
+| 10 % | 0.89 | 0.99 |
+| 20 % | 0.56 | 0.93 |
+| 30 % | 0.26 | 0.80 |
+| 50 % | 0.02 | 0.41 |
+
+Below ~10 % loss the two are close and SBI's CRC tax is not worth it; above ~15 %
+loss SBI wins decisively, and the deeper the link the larger the gap. That is the
+high-loss regime a long-range link runs in — where fused FEC earns its
+complexity.
+
+The win is contingent on corruption staying localized. With frame-wide corruption
+(the SDR hard-Viterbi channel, survivor fraction 0.36 at ~100 % corrupt) neither
+inter-frame scheme recovers — so the soft inner decoder (which keeps corruption
+localized) and SBI are complementary, not independent.
 
 ## References
 
@@ -234,3 +321,4 @@ needed.
 - Abdel-Khalek & Heath, "A Cross-Layer Design for Perceptual Optimization of H.264/SVC with UEP", JSAC 2012.
 - Shokrollahi, "Raptor Codes", IEEE Trans. IT 2006 (RaptorQ: RFC 6330). Roca et al., RLC: RFC 8681.
 - Rizzo, "Effective Erasure Codes for Reliable Computer Communication Protocols", 1997 (the GF(2⁸) Vandermonde RS).
+- Forney, "Generalized Minimum Distance Decoding", IEEE Trans. IT 1966 (the soft-reliability erasure ladder in `soft_erasure_fec.py`).

@@ -38,4 +38,5 @@ dev = [
 testpaths = ["test_pipeline.py", "test_stream.py", "test_stream_fec.py",
               "test_stream_fec_rlc.py", "test_stream_fec_rs.py",
               "test_fec_subblock.py", "test_fec_fusion_sim.py",
-              "test_svc_uep_fec.py", "test_fused_fec_link.py"]
+              "test_svc_uep_fec.py", "test_fused_fec_link.py",
+              "test_soft_erasure_fec.py", "test_fec_ab_sim.py"]

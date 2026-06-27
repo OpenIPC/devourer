@@ -637,23 +637,27 @@ def _devourer_env(dut: Dut, channel: int,
     env["DEVOURER_PID"] = f"0x{dut.pid}"
     env["DEVOURER_CHANNEL"] = str(channel)
     if tx_encoding:
-        # DEVOURER_TX_* knobs are read by txdemo/main.cpp to patch the
-        # radiotap MCS info bytes before the TX loop. Only meaningful when
-        # spawning WiFiDriverTxDemo; harmless on the RX side.
-        if tx_encoding.get("mcs") is not None:
-            env["DEVOURER_TX_MCS"] = str(tx_encoding["mcs"])
-        if tx_encoding.get("ldpc"):
-            env["DEVOURER_TX_LDPC"] = "1"
-        if tx_encoding.get("stbc"):
-            env["DEVOURER_TX_STBC"] = str(tx_encoding["stbc"])
-        if tx_encoding.get("bandwidth") is not None:
-            env["DEVOURER_TX_BW"] = str(tx_encoding["bandwidth"])
+        # The TX rate/mode is a single DEVOURER_TX_RATE string read by
+        # WiFiDriverTxDemo (-> RtlJaguarDevice::SetTxMode):
+        #   "<rate>[/<bw>][/SGI][/LDPC][/STBC]".
+        # Only meaningful when spawning WiFiDriverTxDemo; harmless on the RX side.
         if tx_encoding.get("vht"):
-            env["DEVOURER_TX_VHT"] = "1"
-            if tx_encoding.get("vht_mcs") is not None:
-                env["DEVOURER_TX_VHT_MCS"] = str(tx_encoding["vht_mcs"])
-            if tx_encoding.get("nss") is not None:
-                env["DEVOURER_TX_VHT_NSS"] = str(tx_encoding["nss"])
+            rate = (f"VHT{tx_encoding.get('nss', 1)}SS_MCS"
+                    f"{tx_encoding.get('vht_mcs', 0)}")
+        elif tx_encoding.get("mcs") is not None:
+            rate = f"MCS{tx_encoding['mcs']}"
+        else:
+            rate = "6M"
+        parts = [rate]
+        if tx_encoding.get("bandwidth") is not None:
+            parts.append(str(tx_encoding["bandwidth"]))
+        if tx_encoding.get("sgi"):
+            parts.append("SGI")
+        if tx_encoding.get("ldpc"):
+            parts.append("LDPC")
+        if tx_encoding.get("stbc"):
+            parts.append("STBC")
+        env["DEVOURER_TX_RATE"] = "/".join(parts)
     return env
 
 

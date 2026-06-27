@@ -24,13 +24,10 @@ PHY MODE — legacy vs HT  (IMPORTANT)
 ------------------------------------
 The originating plan's prose ("48 data + 4 pilot", "24 input bits") describes
 *legacy* 802.11a OFDM (6 Mbps BPSK). It also said to select the rate via the HT
-radiotap MCS field (`DEVOURER_TX_MCS=0`) — but HT MCS 0 is a DIFFERENT
-numerology (52 SD, 26 info bits, 13x4 interleaver) AND, decisively,
-`RtlJaguarDevice::send_packet` never wires the HT MCS *index* into the TX rate:
-an HT-MCS frame with no RATE field transmits at the MGN_1M default = 1 Mbps
-CCK, which is DSSS — no OFDM subcarriers at all. So the working OFDM-BPSK path
-is legacy 6 Mbps (honoured via the radiotap RATE field), which is what
-`PrecoderDemo` transmits. Both numerologies are implemented:
+radiotap MCS field — but HT MCS 0 is a DIFFERENT numerology (52 SD, 26 info
+bits, 13x4 interleaver), so the working OFDM-BPSK path is legacy 6 Mbps
+(honoured via the radiotap RATE field), which is what `PrecoderDemo`
+transmits. Both numerologies are implemented:
 
     --phy legacy   (default)  N_SD=48  N_CBPS=48  N_DBPS=24  interleaver 16x3
     --phy ht                  N_SD=52  N_CBPS=52  N_DBPS=26  interleaver 13x4

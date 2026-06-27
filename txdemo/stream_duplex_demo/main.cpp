@@ -79,7 +79,7 @@ static constexpr uint16_t kRealtekProductIds[] = {
 // processor below is identical to demo/main.cpp's, so any tooling that
 // already grep'd <devourer-stream> lines keeps working unchanged.
 static const std::vector<uint8_t> kStreamRadiotap =
-    devourer::build_stream_radiotap(devourer::parse_stream_rate_env());
+    devourer::build_stream_radiotap(devourer::parse_tx_mode_env());
 static const uint8_t kCanonicalSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
 
 static std::vector<uint8_t> build_dot11_probe_req() {

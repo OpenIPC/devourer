@@ -79,10 +79,9 @@ def _devourer_env(dut: regress.Dut, channel: int, ramp: dict) -> dict:
     env["DEVOURER_THERMAL_POLL_MS"] = str(ramp["thermal_ms"])
     env["DEVOURER_TX_GAP_US"] = str(ramp["gap_us"])
     if ramp["ht"]:
-        # Transmit HT/OFDM instead of the 1M-CCK default — CCK output power is
-        # decoupled from the per-rate TXAGC base, so the gain knob only shows
-        # up on-air for OFDM/HT/VHT rates.
-        env["DEVOURER_TX_HT_MCS"] = "1"
+        # Transmit HT (MCS1) instead of the 6M-legacy default — the gain knob
+        # only moves on-air power for OFDM/HT/VHT rates, not the CCK path.
+        env["DEVOURER_TX_RATE"] = "MCS1"
     # Keep a high warn threshold so the demo's own back-off message doesn't
     # spam; we judge from the data, and abort on `critical` ourselves.
     env["DEVOURER_THERMAL_WARN_DELTA"] = "100"

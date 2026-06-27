@@ -212,15 +212,13 @@ observer; the off-chip counterpart to Tier 4.
 
 ## Things the plan got slightly wrong (and how this resolves them)
 
-* **HT MCS 0 doesn't reach the air (decisive).** The plan selected the rate via
-  `DEVOURER_TX_MCS=0`, but `RtlJaguarDevice::send_packet` only sets the TX rate
-  from the radiotap RATE field (legacy) or the VHT field — it **never reads the
-  HT MCS index**. An HT-MCS frame with no RATE field therefore transmits at the
-  `MGN_1M` default = **1 Mbps CCK** (DSSS, no OFDM subcarriers). So this PoC uses
-  **legacy 6 Mbps OFDM** (BPSK r=½), which `send_packet` honours and which the
-  chip really modulates as OFDM. (Fixing the HT path is a one-liner in
-  `send_packet`, but it changes shared core TX behaviour the regression matrix
-  depends on — deliberately out of scope here.)
+* **HT MCS 0 is a different numerology.** The plan selected the rate via the HT
+  MCS field, but HT MCS 0 is a *different* numerology (52 SD, 26 info bits,
+  13×4 interleaver) than the plan's legacy-OFDM prose. So this PoC uses
+  **legacy 6 Mbps OFDM** (BPSK r=½) via the radiotap RATE field, which the chip
+  modulates as OFDM. (`send_packet` now honours the HT MCS index directly — the
+  former `DEVOURER_TX_HT_MCS` gate is gone — so an HT carrier is available via
+  `DEVOURER_TX_RATE=MCS<n>` if a future variant wants the HT numerology.)
 
 * **Numerology.** Consequently the on-air rate is legacy 802.11a/g 6 Mbps:
   **48 data subcarriers, 24 info bits, a 16×3 interleaver** — exactly the plan's

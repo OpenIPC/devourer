@@ -7,6 +7,7 @@
 #include <iostream>
 #include <iomanip>
 #include <memory>
+#include <optional>
 #include <thread>
 
 #include "logger.h"
@@ -16,6 +17,7 @@
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
 #include "FrameParser.h"
+#include "TxMode.h"
 
 extern "C"
 {
@@ -41,6 +43,9 @@ class RtlJaguarDevice {
   Logger_t _logger;
   uint8_t debug;
   Action_ParsedRadioPacket _packetProcessor = nullptr;
+  /* Runtime TX-mode default (SetTxMode/ClearTxMode); applied in send_packet
+   * only when the frame's radiotap carries no rate. */
+  std::optional<devourer::TxMode> _tx_mode_default;
 
 public:
   RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger);
@@ -60,6 +65,15 @@ public:
   /* Read a baseband register (debug/diagnostic). Thin passthrough to the
    * radio manager's BB read — handy for confirming a TXAGC write landed. */
   uint32_t ReadBBReg(uint16_t addr, uint32_t mask);
+
+  /* Runtime TX-mode default. send_packet honours a frame's own radiotap rate
+   * fields per-packet; when a frame's radiotap carries no rate, this mode
+   * supplies the modulation / MCS / BW / GI / FEC / STBC instead of the
+   * built-in 1M-CCK fallback. Pure state — applied on the next send_packet,
+   * no USB I/O. ClearTxMode() reverts to the built-in default. */
+  void SetTxMode(const devourer::TxMode& mode);
+  void ClearTxMode();
+
   bool send_packet(const uint8_t* packet, size_t length);
   SelectedChannel GetSelectedChannel();
   bool should_stop = false;

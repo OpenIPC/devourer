@@ -29,6 +29,7 @@
 #include "FrameParser.h"
 #include "RtlUsbAdapter.h"
 #include "WiFiDriver.h"
+#include "RadiotapBuilder.h"
 #include "logger.h"
 
 #define USB_VENDOR_ID 0x0bda
@@ -310,8 +311,8 @@ int main(int argc, char **argv) {
 
   std::thread usb_thread(usb_event_loop, logger, context);
   uint8_t beacon_frame[] = {
-      0x00, 0x00, 0x0d, 0x00, 0x00, 0x80, 0x08, 0x00, 0x08, 0x00, 0x37,
-      0x00, 0x01, // radiotap header
+      0x00, 0x00, 0x0a, 0x00, 0x00, 0x80, 0x00, 0x00, 0x08,
+      0x00, // radiotap: TX_FLAGS only (rate-less) — rate comes from SetTxMode
       /* Mgmt / probe-request frame (FC=0x40 0x00). Was DATA / ToDS=1
        * (FC=0x08 0x01) which requires an AP context the chip doesn't
        * have in monitor mode — the chip silently NAKed every bulk OUT. */
@@ -326,109 +327,16 @@ int main(int argc, char **argv) {
       0xcd, 0xce, 0x4e, 0x35, 0xd9, 0x85, 0x9a, 0xcf, 0x4d, 0x48, 0x4c,
       0x8f, 0x28, 0x6f, 0x10, 0xb0, 0xa9, 0x5d, 0xbf, 0xcb, 0x6f};
 
-  /* Radiotap MCS info lives at beacon_frame[10..12]: known mask, flags, idx.
-   * Defaults encode HT MCS 1 / 20 MHz / long GI / BCC / no STBC. Env knobs
-   * let tests/regress.py --encoding-matrix exercise LDPC and STBC paths —
-   * needed to surface chip-specific asymmetries like the RTL8821AU
-   * LDPC-RX-no limitation. DEVOURER_TX_VHT=1 switches to a VHT (802.11ac)
-   * radiotap header instead (radiotap bit 21, 22-byte length) — required
-   * for chips whose LDPC RX limitation only appears on the VHT path. */
-  bool tx_vht = std::getenv("DEVOURER_TX_VHT") != nullptr;
-  if (const char *m = std::getenv("DEVOURER_TX_MCS")) {
-    beacon_frame[12] = static_cast<uint8_t>(std::strtoul(m, nullptr, 0) & 0x7F);
-    logger->info("DEVOURER_TX_MCS — HT MCS index set to {}", beacon_frame[12]);
-  }
-  uint8_t mcs_flags = beacon_frame[11];
-  bool tx_ldpc = std::getenv("DEVOURER_TX_LDPC") != nullptr;
-  if (tx_ldpc && !tx_vht) {
-    mcs_flags |= 0x10; /* HT MCS flags bit 4 = FEC type LDPC */
-    logger->info("DEVOURER_TX_LDPC — FEC=LDPC (HT)");
-  }
-  int tx_stbc = 0;
-  if (const char *s = std::getenv("DEVOURER_TX_STBC")) {
-    tx_stbc = std::atoi(s) & 0x3;
-    if (!tx_vht) {
-      mcs_flags = static_cast<uint8_t>((mcs_flags & ~0x60) | (tx_stbc << 5));
-    }
-    logger->info("DEVOURER_TX_STBC — {} STBC stream(s)", tx_stbc);
-  }
-  int tx_bw = 20;
-  if (const char *bw = std::getenv("DEVOURER_TX_BW")) {
-    tx_bw = std::atoi(bw);
-    if (!tx_vht) {
-      uint8_t code = (tx_bw == 40) ? 0x01 : 0x00;
-      mcs_flags = static_cast<uint8_t>((mcs_flags & ~0x03) | code);
-    }
-    logger->info("DEVOURER_TX_BW — {} MHz", tx_bw);
-  }
-  beacon_frame[11] = mcs_flags;
+  /* On-air rate/modulation comes from the device TX-mode default.
+   * parse_tx_mode_env() reads DEVOURER_TX_RATE — a single string
+   * "<rate>[/<bw>][/SGI][/LDPC][/STBC]" (e.g. "MCS7/40/SGI", "VHT2SS_MCS3/80",
+   * "6M") — into a TxMode. The beacon's rate-less radiotap (above) lets that
+   * default apply; a frame embedding its own rate radiotap overrides it per
+   * packet. Default (no env) = 6 M legacy. Replaces the former per-knob
+   * DEVOURER_TX_MCS/_VHT/_LDPC/_STBC/_BW env vars + the DEVOURER_TX_HT_MCS gate. */
+  rtlDevice->SetTxMode(devourer::parse_tx_mode_env());
 
-  /* Build the final TX buffer. Default: send beacon_frame[] verbatim (the
-   * existing HT path, with the in-place patches above already applied). VHT
-   * mode: swap the first 13 bytes (HT radiotap) for a 22-byte VHT radiotap,
-   * keep the 802.11 frame body unchanged. */
-  std::vector<uint8_t> tx_buf;
-  if (tx_vht) {
-    int vht_mcs = 0;
-    int vht_nss = 1;
-    if (const char *vm = std::getenv("DEVOURER_TX_VHT_MCS")) {
-      vht_mcs = std::atoi(vm) & 0xF;
-    }
-    if (const char *vn = std::getenv("DEVOURER_TX_VHT_NSS")) {
-      vht_nss = std::atoi(vn) & 0xF;
-    }
-    uint8_t bw_code = 0;
-    switch (tx_bw) {
-      case 40:  bw_code = 1; break;
-      case 80:  bw_code = 4; break;
-      case 160: bw_code = 11; break;
-      default:  bw_code = 0; break;
-    }
-    /* VHT radiotap layout (22 bytes): header(8) + TX Flags(2) + VHT info(12).
-     * VHT info: u16 known, u8 flags, u8 bw, u8[4] mcs_nss, u8 coding,
-     * u8 group_id, u16 partial_aid. Mirrors tests/inject_beacon.py's
-     * _build_radiotap_vht. */
-    const uint16_t known = (1u << 0) | (1u << 2) | (1u << 6); /* STBC|GI|BW */
-    const uint8_t vht_info_flags = tx_stbc ? 0x01 : 0x00;
-    const uint8_t mcs_nss_user0 =
-        static_cast<uint8_t>(((vht_mcs & 0xF) << 4) | (vht_nss & 0xF));
-    const uint8_t coding = tx_ldpc ? 0x01 : 0x00; /* user-0 nibble */
-    /* it_present = (1<<15) TX Flags | (1<<21) VHT */
-    const uint32_t it_present = (1u << 15) | (1u << 21);
-    const uint16_t it_len = 22;
-    const uint16_t tx_flags = 0x0008;
-    tx_buf.reserve(22 + sizeof(beacon_frame) - 13);
-    /* radiotap header */
-    tx_buf.push_back(0); /* version */
-    tx_buf.push_back(0); /* pad */
-    tx_buf.push_back(static_cast<uint8_t>(it_len & 0xFF));
-    tx_buf.push_back(static_cast<uint8_t>((it_len >> 8) & 0xFF));
-    tx_buf.push_back(static_cast<uint8_t>(it_present & 0xFF));
-    tx_buf.push_back(static_cast<uint8_t>((it_present >> 8) & 0xFF));
-    tx_buf.push_back(static_cast<uint8_t>((it_present >> 16) & 0xFF));
-    tx_buf.push_back(static_cast<uint8_t>((it_present >> 24) & 0xFF));
-    /* TX Flags */
-    tx_buf.push_back(static_cast<uint8_t>(tx_flags & 0xFF));
-    tx_buf.push_back(static_cast<uint8_t>((tx_flags >> 8) & 0xFF));
-    /* VHT info */
-    tx_buf.push_back(static_cast<uint8_t>(known & 0xFF));
-    tx_buf.push_back(static_cast<uint8_t>((known >> 8) & 0xFF));
-    tx_buf.push_back(vht_info_flags);
-    tx_buf.push_back(bw_code);
-    tx_buf.push_back(mcs_nss_user0);
-    tx_buf.push_back(0); tx_buf.push_back(0); tx_buf.push_back(0); /* users 1-3 */
-    tx_buf.push_back(coding);
-    tx_buf.push_back(0); /* group_id */
-    tx_buf.push_back(0); tx_buf.push_back(0); /* partial_aid LE */
-    /* 802.11 frame body (skip the original 13-byte HT radiotap). */
-    tx_buf.insert(tx_buf.end(),
-                  beacon_frame + 13, beacon_frame + sizeof(beacon_frame));
-    logger->info(
-        "DEVOURER_TX_VHT — VHT radiotap: mcs={} nss={} ldpc={} stbc={} bw={}MHz",
-        vht_mcs, vht_nss, tx_ldpc ? 1 : 0, tx_stbc, tx_bw);
-  } else {
-    tx_buf.assign(beacon_frame, beacon_frame + sizeof(beacon_frame));
-  }
+  std::vector<uint8_t> tx_buf(beacon_frame, beacon_frame + sizeof(beacon_frame));
 
   /* Frame-size knob for throughput benchmarking. DEVOURER_TX_PAYLOAD_BYTES=N
    * pads the 802.11 body so the on-air PSDU is exactly N bytes — send_packet
@@ -438,7 +346,7 @@ int main(int argc, char **argv) {
    * is N + TXDESC_SIZE bytes. Default unset = the small probe-request beacon. */
   if (const char *e = std::getenv("DEVOURER_TX_PAYLOAD_BYTES")) {
     long want = std::strtol(e, nullptr, 0);
-    size_t radiotap_len = tx_vht ? 22 : 13;
+    size_t radiotap_len = 10;  /* rate-less TX_FLAGS-only radiotap */
     size_t body_len = tx_buf.size() - radiotap_len;
     if (want > 0 && static_cast<size_t>(want) > body_len) {
       tx_buf.insert(tx_buf.end(), static_cast<size_t>(want) - body_len, 0x00);

@@ -131,20 +131,22 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   which a one-shot `warn` fires (default `15`); re-arms once the chip cools
   back below it.
 
-`WiFiDriverTxDemo` additionally honours radiotap-encoding knobs that
-patch the beacon's MCS info field (or, with `_VHT=1`, replace it with a
-VHT info field) before the bulk-OUT loop:
+`WiFiDriverTxDemo` selects the on-air TX mode with a single env var that it
+parses into a `devourer::TxMode` and hands to `RtlJaguarDevice::SetTxMode`
+(the canonical runtime API; the demo sends a rate-less beacon so this mode
+applies). The library itself is radiotap-driven — a frame that carries its own
+rate radiotap overrides the mode per-packet — so there is **no** `DEVOURER_TX_HT_MCS`
+gate any more (an HT-MCS radiotap is honoured unconditionally):
 
-- `DEVOURER_TX_MCS=N` — HT MCS index (0..31). Default 1.
-- `DEVOURER_TX_LDPC=1` — set FEC type LDPC (vs default BCC).
-- `DEVOURER_TX_STBC=N` — STBC stream count (0..3). Default 0.
-- `DEVOURER_TX_BW=20|40|80|160` — HT honours 20/40; VHT honours 20-160.
-- `DEVOURER_TX_VHT=1` — switch from HT MCS field (13-byte radiotap) to
-  VHT info field (22-byte radiotap). Exposes:
-- `DEVOURER_TX_VHT_MCS=N` — VHT MCS index (0..9 typical).
-- `DEVOURER_TX_VHT_NSS=N` — VHT spatial streams.
+- `DEVOURER_TX_RATE=<rate>[/<bw>][/SGI][/LDPC][/STBC]` (case-insensitive). Unset
+  = `6M` legacy. Examples: `MCS7`, `MCS7/40/SGI`, `VHT2SS_MCS3/80/LDPC`, `54M`.
+  - `<rate>`: `6M`/`9M`/`12M`/`18M`/`24M`/`36M`/`48M`/`54M` (legacy OFDM),
+    `MCS0`..`MCS31` (HT), or `VHT1SS_MCS0`..`VHT4SS_MCS9` (VHT).
+  - `<bw>`: `20`|`40`|`80`|`160` (default 20; legacy is always 20).
+  - `SGI` / `LDPC` / `STBC`: optional modifiers.
 
-`_LDPC` / `_STBC` / `_BW` apply to whichever (HT/VHT) mode is active.
+(Programmatic equivalent: `dev->SetTxMode(devourer::TxMode{...})`;
+`dev->ClearTxMode()` reverts to the built-in default.)
 
 `WiFiDriverTxDemo` also honours a TX-gain ramp + duty knob for thermal /
 TX-power characterisation (drives `RtlJaguarDevice::SetTxPowerOverride` +
@@ -156,8 +158,8 @@ TX-power characterisation (drives `RtlJaguarDevice::SetTxPowerOverride` +
   — step the override from START up to STOP by STEP every STEP_MS, in one
   uninterrupted TX session, emitting a `<devourer-txpwr>index=N` marker per step.
   The override only moves on-air power for OFDM/HT/VHT rates — drive HT with
-  `DEVOURER_TX_HT_MCS=1` (CCK at the 1M default tracks the index in-register but
-  the SDR-measured swing is dominated by the CCK path).
+  `DEVOURER_TX_RATE=MCS1` (the CCK path tracks the index in-register but the
+  SDR-measured swing is dominated by the CCK path).
 - `DEVOURER_TX_GAP_US=N` — inter-frame gap in microseconds (default 2000,
   ~500 fps). `0` = back-to-back for maximum TX duty (heating experiments).
 - `DEVOURER_TX_PWR_READBACK=1` — after each override apply, print

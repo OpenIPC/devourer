@@ -61,9 +61,8 @@ def sdr_duty(freq: float, mcs: int, bw: int, noise_db: float | None,
 def devourer_flood(vid, pid, ch, mcs, bw, size):
     env = dict(__import__("os").environ,
                DEVOURER_VID=vid, DEVOURER_PID=pid, DEVOURER_CHANNEL=str(ch),
-               DEVOURER_TX_HT_MCS="1", DEVOURER_TX_MCS=str(mcs),
-               DEVOURER_TX_BW=str(bw), DEVOURER_TX_PAYLOAD_BYTES=str(size),
-               DEVOURER_TX_GAP_US="0")
+               DEVOURER_TX_RATE=f"MCS{mcs}/{bw}",
+               DEVOURER_TX_PAYLOAD_BYTES=str(size), DEVOURER_TX_GAP_US="0")
     return regress._register_local_proc(subprocess.Popen(
         [str(ROOT / "build" / "WiFiDriverTxDemo")], env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

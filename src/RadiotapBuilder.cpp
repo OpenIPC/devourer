@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 namespace devourer {
 
@@ -31,11 +32,9 @@ void emit_u32_le(std::vector<uint8_t>& v, uint32_t x) {
   v.push_back(static_cast<uint8_t>((x >> 24) & 0xFF));
 }
 
-std::vector<uint8_t> build_legacy(const StreamRateCfg& cfg) {
-  /* 13-byte legacy-OFDM radiotap. Bit-identical to the historic
-   * kRadiotapLegacy6M[13] constant except byte 8 (RATE), which the caller
-   * controls. Length stays 13 so send_packet's vht-detection heuristic
-   * keeps this on the legacy path. */
+std::vector<uint8_t> build_legacy(const TxMode& cfg) {
+  /* 13-byte legacy-OFDM radiotap. Byte 8 (RATE) carried from cfg; length stays
+   * 13 so send_packet's vht-detection heuristic keeps this on the legacy path. */
   std::vector<uint8_t> r;
   r.reserve(13);
   emit_u8(r, kRadiotapVersion);
@@ -49,17 +48,11 @@ std::vector<uint8_t> build_legacy(const StreamRateCfg& cfg) {
   return r;
 }
 
-std::vector<uint8_t> build_ht(const StreamRateCfg& cfg) {
-  /* 13-byte HT radiotap: presence = TX_FLAGS | MCS, no RATE field. Total
-   * header length must remain 13 so send_packet stays on rate_id=8 (HT,
-   * not VHT). Verified against txdemo/main.cpp's beacon_frame[] HT layout
-   * at line 300 — same it_present, same MCS field positions.
+std::vector<uint8_t> build_ht(const TxMode& cfg) {
+  /* 13-byte HT radiotap: presence = TX_FLAGS | MCS, no RATE field. Length stays
+   * 13 so send_packet keeps rate_id=8 (HT, not VHT).
    *
-   * MCS field layout (3 bytes after TX_FLAGS):
-   *   byte 0: known mask
-   *   byte 1: flags (BW / SGI / FEC / STBC)
-   *   byte 2: MCS index 0..31
-   */
+   * MCS field layout (3 bytes after TX_FLAGS): known mask, flags, MCS index. */
   constexpr uint8_t kKnownBw   = 1u << 0;
   constexpr uint8_t kKnownMcs  = 1u << 1;
   constexpr uint8_t kKnownGi   = 1u << 2;
@@ -68,7 +61,7 @@ std::vector<uint8_t> build_ht(const StreamRateCfg& cfg) {
 
   uint8_t known = kKnownMcs | kKnownGi | kKnownFec | kKnownBw | kKnownStbc;
   uint8_t flags = 0;
-  /* BW: 0=20, 1=40. (20L/20U upper/lower not exposed.) */
+  /* BW: 0=20, 1=40. */
   if (cfg.bw_mhz >= 40) flags |= 0x01;
   if (cfg.sgi)          flags |= 0x04;
   if (cfg.ldpc)         flags |= 0x10;
@@ -87,11 +80,9 @@ std::vector<uint8_t> build_ht(const StreamRateCfg& cfg) {
   return r;
 }
 
-std::vector<uint8_t> build_vht(const StreamRateCfg& cfg) {
-  /* 22-byte VHT radiotap. Identical layout to txdemo/main.cpp's
-   * DEVOURER_TX_VHT=1 path (lines 374-409) — header(8) + TX_FLAGS(2) +
-   * VHT info(12). Length > 13 triggers send_packet's vht=true branch
-   * (rate_id=9), which is required for the VHT info field to be honoured. */
+std::vector<uint8_t> build_vht(const TxMode& cfg) {
+  /* 22-byte VHT radiotap: header(8) + TX_FLAGS(2) + VHT info(12). Length > 13
+   * triggers send_packet's vht=true branch (rate_id=9). */
   uint8_t bw_code;
   switch (cfg.bw_mhz) {
     case 40:  bw_code = 1;  break;
@@ -99,8 +90,7 @@ std::vector<uint8_t> build_vht(const StreamRateCfg& cfg) {
     case 160: bw_code = 11; break;
     default:  bw_code = 0;  break;
   }
-  /* known mask: STBC(0) | GI(2) | BW(6) — matches send_packet's VHT
-   * decoder at RtlJaguarDevice.cpp:110-138. */
+  /* known mask: STBC(0) | GI(2) | BW(6) — matches send_packet's VHT decoder. */
   const uint16_t known = (1u << 0) | (1u << 2) | (1u << 6);
   uint8_t vht_flags = 0;
   if (cfg.stbc) vht_flags |= 0x01;
@@ -152,62 +142,25 @@ bool parse_uint(const std::string& s, size_t pos, unsigned* out) {
   return true;
 }
 
-}  // namespace
-
-std::vector<uint8_t> build_stream_radiotap(const StreamRateCfg& cfg) {
-  switch (cfg.mode) {
-    case StreamRateCfg::Mode::HT:  return build_ht(cfg);
-    case StreamRateCfg::Mode::VHT: return build_vht(cfg);
-    case StreamRateCfg::Mode::Legacy:
-    default:                       return build_legacy(cfg);
-  }
-}
-
-StreamRateCfg parse_stream_rate_env() {
-  StreamRateCfg cfg;
-
-  /* Bandwidth (cross-cuts modes). */
-  if (const char* bw = std::getenv("DEVOURER_STREAM_BW")) {
-    int v = std::atoi(bw);
-    if (v == 20 || v == 40 || v == 80 || v == 160) {
-      cfg.bw_mhz = static_cast<uint8_t>(v);
-    }
-  }
-  cfg.sgi  = std::getenv("DEVOURER_STREAM_SGI")  != nullptr;
-  cfg.ldpc = std::getenv("DEVOURER_STREAM_LDPC") != nullptr;
-  cfg.stbc = std::getenv("DEVOURER_STREAM_STBC") != nullptr;
-
-  const char* raw = std::getenv("DEVOURER_STREAM_RATE");
-  if (raw == nullptr || *raw == '\0') {
-    return cfg;  /* defaults: legacy 6M */
-  }
-  const std::string s = to_upper_stripped(raw);
-
-  /* Legacy mnemonics. */
-  if (s == "6M")  { cfg.legacy_rate_500kbps = 12;  return cfg; }
-  if (s == "9M")  { cfg.legacy_rate_500kbps = 18;  return cfg; }
-  if (s == "12M") { cfg.legacy_rate_500kbps = 24;  return cfg; }
-  if (s == "18M") { cfg.legacy_rate_500kbps = 36;  return cfg; }
-  if (s == "24M") { cfg.legacy_rate_500kbps = 48;  return cfg; }
-  if (s == "36M") { cfg.legacy_rate_500kbps = 72;  return cfg; }
-  if (s == "48M") { cfg.legacy_rate_500kbps = 96;  return cfg; }
-  if (s == "54M") { cfg.legacy_rate_500kbps = 108; return cfg; }
+/* Parse the rate mnemonic (first '/'-token) into cfg. Returns false if the
+ * token is not a recognised rate. */
+bool parse_rate_token(const std::string& s, TxMode* cfg) {
+  if (s == "6M")  { cfg->legacy_rate_500kbps = 12;  return true; }
+  if (s == "9M")  { cfg->legacy_rate_500kbps = 18;  return true; }
+  if (s == "12M") { cfg->legacy_rate_500kbps = 24;  return true; }
+  if (s == "18M") { cfg->legacy_rate_500kbps = 36;  return true; }
+  if (s == "24M") { cfg->legacy_rate_500kbps = 48;  return true; }
+  if (s == "36M") { cfg->legacy_rate_500kbps = 72;  return true; }
+  if (s == "48M") { cfg->legacy_rate_500kbps = 96;  return true; }
+  if (s == "54M") { cfg->legacy_rate_500kbps = 108; return true; }
 
   /* HT: MCS<N>, 0..31. */
   if (s.rfind("MCS", 0) == 0) {
     unsigned mcs;
     if (parse_uint(s, 3, &mcs) && mcs <= 31) {
-      cfg.mode = StreamRateCfg::Mode::HT;
-      cfg.ht_mcs = static_cast<uint8_t>(mcs);
-      if (std::getenv("DEVOURER_TX_HT_MCS") == nullptr) {
-        std::fprintf(
-            stderr,
-            "<stream-radiotap>warning: DEVOURER_STREAM_RATE=MCS%u requires "
-            "DEVOURER_TX_HT_MCS=1 to actually fly at the requested rate "
-            "(otherwise send_packet falls back to 1M CCK)\n",
-            mcs);
-      }
-      return cfg;
+      cfg->mode = TxMode::Mode::HT;
+      cfg->ht_mcs = static_cast<uint8_t>(mcs);
+      return true;
     }
   }
 
@@ -222,19 +175,69 @@ StreamRateCfg parse_stream_rate_env() {
       if (s.compare(after_nss, tail.size(), tail) == 0) {
         unsigned mcs;
         if (parse_uint(s, after_nss + tail.size(), &mcs) && mcs <= 9) {
-          cfg.mode = StreamRateCfg::Mode::VHT;
-          cfg.vht_nss = static_cast<uint8_t>(nss);
-          cfg.vht_mcs = static_cast<uint8_t>(mcs);
-          return cfg;
+          cfg->mode = TxMode::Mode::VHT;
+          cfg->vht_nss = static_cast<uint8_t>(nss);
+          cfg->vht_mcs = static_cast<uint8_t>(mcs);
+          return true;
         }
       }
     }
   }
+  return false;
+}
 
-  /* Unrecognised — fall back to default 6M legacy. */
-  std::fprintf(stderr,
-               "<stream-radiotap>warning: unrecognised DEVOURER_STREAM_RATE=%s,"
-               " falling back to 6M legacy\n", raw);
+}  // namespace
+
+std::vector<uint8_t> build_stream_radiotap(const TxMode& cfg) {
+  switch (cfg.mode) {
+    case TxMode::Mode::HT:  return build_ht(cfg);
+    case TxMode::Mode::VHT: return build_vht(cfg);
+    case TxMode::Mode::Legacy:
+    default:                return build_legacy(cfg);
+  }
+}
+
+TxMode parse_tx_mode_env() {
+  TxMode cfg;  /* defaults: legacy 6M, 20 MHz, no SGI/LDPC/STBC */
+
+  const char* raw = std::getenv("DEVOURER_TX_RATE");
+  if (raw == nullptr || *raw == '\0') {
+    return cfg;
+  }
+  const std::string s = to_upper_stripped(raw);
+
+  /* Split on '/': first token = rate, rest = bandwidth (numeric) or modifier
+   * flags (SGI / LDPC / STBC). */
+  std::vector<std::string> tokens;
+  size_t start = 0;
+  while (start <= s.size()) {
+    size_t slash = s.find('/', start);
+    if (slash == std::string::npos) {
+      tokens.push_back(s.substr(start));
+      break;
+    }
+    tokens.push_back(s.substr(start, slash - start));
+    start = slash + 1;
+  }
+  if (tokens.empty() || tokens[0].empty() || !parse_rate_token(tokens[0], &cfg)) {
+    std::fprintf(stderr,
+                 "<tx-mode>warning: unrecognised DEVOURER_TX_RATE=%s, "
+                 "falling back to 6M legacy\n", raw);
+    return TxMode{};
+  }
+
+  for (size_t i = 1; i < tokens.size(); ++i) {
+    const std::string& t = tokens[i];
+    if (t == "SGI")       cfg.sgi = true;
+    else if (t == "LDPC") cfg.ldpc = true;
+    else if (t == "STBC") cfg.stbc = true;
+    else if (t == "20" || t == "40" || t == "80" || t == "160")
+      cfg.bw_mhz = static_cast<uint8_t>(std::atoi(t.c_str()));
+    else if (!t.empty())
+      std::fprintf(stderr,
+                   "<tx-mode>warning: ignoring unrecognised DEVOURER_TX_RATE "
+                   "token '%s'\n", t.c_str());
+  }
   return cfg;
 }
 

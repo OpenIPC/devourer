@@ -273,7 +273,8 @@ def run_vrx(proc, link, calib, vtx_id, channel, feedback_period_ms=100):
             op = vrx.cur_op
             sys.stderr.write(
                 f"<adaptive-vrx>state={vrx.rz.state} snr={vrx.win.snr_estimate()} "
-                f"score={vrx.win.score()} -> MCS{op.mcs} ov{op.overhead} "
+                f"score={vrx.win.score()} deliv={1.0 - vrx.win.seq_gap_loss():.3f} "
+                f"-> MCS{op.mcs} ov{op.overhead} "
                 f"txagc{op.txagc} frames={vrx.win.n()}\n")
             sys.stderr.flush()
         time.sleep(0.01)

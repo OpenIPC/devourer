@@ -67,11 +67,25 @@ class ScoreWindow:
         return sum(1 for f in self._frames if f[3]) / len(self._frames)
 
     def seq_gap_loss(self) -> float:
-        """Fraction of expected frames missing (from sequence-number gaps)."""
-        seqs = sorted(f[4] for f in self._frames)
-        if len(seqs) < 2:
+        """Fraction of expected frames missing, from 802.11 sequence gaps.
+
+        Unwraps the 12-bit sequence in ARRIVAL order (summing forward, wrap-safe
+        deltas) so a 4096 wrap inside the window is not mistaken for a giant gap —
+        the previous sort + (max-min) made any wrap-straddling window read as
+        ~100% loss.
+
+        CAVEAT: 802.11 seq advances per *transmitted* frame (retries, other
+        traffic, fragments), not per delivered application frame, so this
+        OVER-reports loss whenever the received seq stream isn't a clean
+        per-video-frame counter. Treat it as an upper bound; the truer on-air
+        delivery is received/sent frame counts (an app-level sequence in the
+        payload would make this exact)."""
+        if len(self._frames) < 2:
             return 0.0
-        span = (seqs[-1] - seqs[0]) % 4096 + 1
+        seqs = [f[4] for f in self._frames]        # arrival order (NOT sorted)
+        span = 1
+        for a, b in zip(seqs, seqs[1:]):
+            span += (b - a) % 4096                 # forward, wrap-safe distance
         return max(0.0, 1.0 - len(seqs) / span) if span else 0.0
 
     def ack_seq(self) -> int:

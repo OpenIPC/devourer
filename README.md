@@ -188,12 +188,15 @@ ARE).
 
 ### Video link design
 
-The long-range video link's two design documents:
+The long-range video link's design documents:
 [`docs/adaptive-link.md`](docs/adaptive-link.md) — the energy-minimizing adaptive
 controller (VTX ↔ VRX), and how it compares to OpenIPC's `alink` and other
-adaptive systems — and [`docs/fused-fec.md`](docs/fused-fec.md) — the
-cross-layer (PHY-MCS ⊕ sub-block-integrity ⊕ outer erasure) FEC stack the
-link's per-layer quality SLA is stated against.
+adaptive systems; [`docs/adaptive-link-validation.md`](docs/adaptive-link-validation.md)
+— its simulation + on-air results, the measurement methodology, and the open
+questions, with the [linklab](https://github.com/josephnef/linklab) simulation
+sandbox; and [`docs/fused-fec.md`](docs/fused-fec.md) — the cross-layer
+(PHY-MCS ⊕ sub-block-integrity ⊕ outer erasure) FEC stack the link's per-layer
+quality SLA is stated against.
 
 ### Startup time
 

@@ -254,3 +254,6 @@ below the point where enhancement is gone.
   asymmetric-duty rendezvous pattern.
 - [Fused FEC](fused-fec.md) — the error-correction stack the quality floor is
   stated against · [wfb-ng tuning](wfb-ng-tuning.md) — the static baseline.
+- [Adaptive link validation](adaptive-link-validation.md) — simulation + on-air
+  results, the measurement methodology, and the open questions (and the
+  [linklab](https://github.com/josephnef/linklab) simulation sandbox).

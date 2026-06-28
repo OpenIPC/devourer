@@ -44,4 +44,5 @@ testpaths = ["test_pipeline.py", "test_stream.py", "test_stream_fec.py",
               "test_controller.py",
               "test_rc_proto.py", "test_score.py",
               "test_rendezvous.py", "test_adaptive_link.py",
-              "test_svc_pipeline.py"]
+              "test_svc_pipeline.py", "test_hop_diversity_sim.py",
+              "test_hop_rx_combine.py"]

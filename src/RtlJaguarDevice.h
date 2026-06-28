@@ -52,6 +52,15 @@ public:
   ~RtlJaguarDevice();
   void Init(Action_ParsedRadioPacket packetProcessor, SelectedChannel channel);
   void SetMonitorChannel(SelectedChannel channel);
+  /* Lean frequency-hop retune: switches the RF channel only, skipping the
+   * per-rate TX-power loop, bandwidth post-set, and thermal pwrtrk tick that
+   * SetMonitorChannel runs — none of which change across an intra-band, 20 MHz
+   * hop. Falls back to the full SetMonitorChannel automatically when the hop
+   * crosses the 2.4/5 GHz boundary or the current bandwidth isn't 20 MHz.
+   * cache_rf=true additionally avoids the per-write 20 ms C-cut RF-read sleep
+   * by writing RF_CHNLBW from a cached value. Intended for channel hopping;
+   * keeps the device channel state in sync for the 5 GHz CCK clamp. */
+  void FastRetune(uint8_t channel, bool cache_rf = true);
   void InitWrite(SelectedChannel channel);
   void SetTxPower(uint8_t power);
   /* Force the per-rate TXAGC index (0..63), bypassing the EFUSE per-rate

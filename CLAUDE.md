@@ -172,6 +172,25 @@ per-layer redundancy — lives in `tools/precoder/` and is documented in
 (absolute per-rate TXAGC index 0..63, held) for the marginal-SNR bench setups
 that exercise the salvage path.
 
+## Frequency hopping
+
+`RtlJaguarDevice::FastRetune(channel)` is a lean intra-band, same-bandwidth
+channel retune (~1.5 ms vs ~275 ms for a full `SetMonitorChannel`) — it does the
+RF channel switch only, skipping the per-rate TX-power loop, bandwidth post-set,
+and thermal tick a hop doesn't need, and writes `RF_CHNLBW` from a cached value
+so it never pays the C-cut RF-read sleep. It falls back to the full path on a
+band change. `send_packet` also honours a radiotap `CHANNEL` field, so hopping is
+per-packet and radiotap-driven like rate. Both demos hop via
+`DEVOURER_HOP_CHANNELS="1,6,11"` (+ `DEVOURER_HOP_DWELL_FRAMES`,
+`DEVOURER_HOP_ROUNDS`, `DEVOURER_HOP_FAST=0|1|2`, `DEVOURER_HOP_RADIOTAP`,
+`DEVOURER_HOP_BW`/`DEVOURER_HOP_OFFSET`). Per-packet hopping doubles as a
+frequency-diversity interleaver for the outer FEC. Validated by
+`tests/run_hop_validation.sh` (B210 wideband), `tests/hop_parity_check.sh`
+(register parity for the 40/80 path), and `tools/precoder/hop_diversity_sim.py`.
+The implementation and the in-code techniques are documented in
+**`docs/frequency-hopping.md`** (also a porting guideline for other chip
+generations).
+
 `WiFiDriverTxDemo` also honours a TX-gain ramp + duty knob for thermal /
 TX-power characterisation (drives `RtlJaguarDevice::SetTxPowerOverride` +
 `ApplyTxPower`):

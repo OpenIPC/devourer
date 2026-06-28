@@ -198,6 +198,13 @@ void RadioManagementModule::set_channel_bwmode(uint8_t channel,
   _logger->info("[{}] ch = {}, offset = {}, bwmode = {}", __func__, unsigned(channel),
                 unsigned(channel_offset), (int)bwmode);
 
+  /* The full path may rewrite RF_CHNLBW (0x18) bandwidth bits + fc_area +
+   * spur regs, so the fast_retune caches are stale after this. */
+  _rf_chnlbw_cached = false;
+  _last_fc_area = 0xffffffff;
+  _last_spur_class = -1;
+  _last_subchnl = -1;
+
   center_ch = rtw_get_center_ch(channel, bwmode, channel_offset);
   if (bwmode == ChannelWidth_t::CHANNEL_WIDTH_80) {
     if (center_ch > channel) {
@@ -218,6 +225,168 @@ void RadioManagementModule::rtw_hal_set_chnl_bw(uint8_t channel,
                                                 uint8_t Offset40,
                                                 uint8_t Offset80) {
   PHY_SetSwChnlBWMode8812(channel, Bandwidth, Offset40, Offset80);
+}
+
+bool RadioManagementModule::fast_retune(uint8_t channel, bool cache_rf) {
+  /* Decline (without touching the chip) a band change — the caller falls back
+   * to the full set_channel_bwmode, which does the RFE/AGC reconfig + IQK.
+   * (_currentChannel is the center channel; its band == the primary's band.) */
+  const bool cur_5g = _currentChannel > 14;
+  const bool new_5g = channel > 14;
+  if (cur_5g != new_5g)
+    return false;
+
+  if (_currentChannelBw != ChannelWidth_t::CHANNEL_WIDTH_20) {
+    /* Wider-bandwidth hop. Across a same-BW, same-offset hop the ONLY thing
+     * that changes is the RF center channel: the BW bits in RF 0x18, the
+     * BW-only BB registers, and the secondary-channel registers (which depend
+     * on the prime offset, not the channel number — see phy_GetSecondaryChnl)
+     * are all constant. So the lean cached path writes the center channel from
+     * the RF cache (no read-modify-write -> no 20 ms C-cut sleeps) and writes
+     * the SubChnl registers only when they change. The BW-only registers were
+     * set by the last full set at this BW (InitWrite) and are left untouched.
+     * Register parity against the full path is checked by
+     * tests/hop_parity_check.sh. */
+    if (cache_rf && _eepromManager->version_id.ICType != CHIP_8814A) {
+      InitTimer timer(_logger, "fast_retune");
+      const uint8_t center =
+          rtw_get_center_ch(channel, _currentChannelBw, _cur40MhzPrimeSc);
+      _currentChannel = center;
+      _currentCenterFrequencyIndex = center;
+      phy_SwChnl8812_fast(center); /* cached RF center + fc_area + spur */
+
+      const uint8_t sc = phy_GetSecondaryChnl_8812();
+      if (static_cast<int>(sc) != _last_subchnl) {
+        _device.rtw_write8(REG_DATA_SC_8812, sc);
+        _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x3C, sc);
+        if (_currentChannelBw == ChannelWidth_t::CHANNEL_WIDTH_40) {
+          _device.phy_set_bb_reg(rCCAonSec_Jaguar, 0xf0000000, sc);
+          /* 1 == VHT_DATA_SC_20_UPPER_OF_80MHZ (enum defined later in this
+           * file); matches the comparison in phy_PostSetBwMode8812. */
+          _device.phy_set_bb_reg(rCCK_System_Jaguar, bCCK_System_Jaguar,
+                                 sc == 1 ? 1 : 0);
+        }
+        _last_subchnl = sc;
+      }
+      timer.stage("sw_chnl_bw");
+      timer.total();
+      if (std::getenv("DEVOURER_DUMP_CANARY"))
+        DumpCanary();
+      return true;
+    }
+
+    /* Non-cached fallback: reuse the full set_channel_bwmode (guaranteed
+     * channel+BW parity) but skip the per-rate TX-power loop + pwrtrk tick via
+     * _fast_skip_heavy. */
+    InitTimer timer(_logger, "fast_retune");
+    const uint8_t offset = _cur40MhzPrimeSc;
+    const ChannelWidth_t bw = _currentChannelBw;
+    _fast_skip_heavy = true;
+    set_channel_bwmode(channel, offset, bw);
+    _fast_skip_heavy = false;
+    timer.stage("sw_chnl_bw");
+    timer.total();
+    return true;
+  }
+
+  if (channel == _currentChannel)
+    return true;   /* already tuned here */
+
+  InitTimer timer(_logger, "fast_retune");
+  _currentChannel = channel;
+  _currentCenterFrequencyIndex = channel;
+  /* 20 MHz fast path: RF channel switch ONLY (primary == center) — no TX-power
+   * loop, no bandwidth post-set, no thermal pwrtrk tick, no IQK. */
+  if (cache_rf && _eepromManager->version_id.ICType != CHIP_8814A)
+    phy_SwChnl8812_fast(channel);
+  else
+    phy_SwChnl8812();
+  timer.stage("sw_chnl");
+  timer.total();
+  if (std::getenv("DEVOURER_DUMP_CANARY"))
+    DumpCanary();
+  return true;
+}
+
+/* Cached-RF variant of phy_SwChnl8812. Same register effect, but the two
+ * RF_CHNLBW (0x18) fields (RF_MOD_AG + channel byte) are merged into a cached
+ * full-register value and written with the full LSSI-write mask — so no
+ * read-modify-write, and thus none of the 20 ms C-cut RF-read sleeps that
+ * dominate the masked-write path. 8812/8821 only; 8814 has its own channel-set. */
+void RadioManagementModule::phy_SwChnl8812_fast(uint8_t channelToSW) {
+  if (phy_SwBand8812(channelToSW) == false)
+    _logger->error("error Chnl {} !", channelToSW);
+
+  /* fc_area — identical boundaries to phy_SwChnl8812 (one BB write, no read). */
+  uint32_t fc;
+  if (36 <= channelToSW && channelToSW <= 48)
+    fc = 0x494;
+  else if (15 <= channelToSW && channelToSW <= 35)
+    fc = 0x494;
+  else if (50 <= channelToSW && channelToSW <= 80)
+    fc = 0x453;
+  else if (82 <= channelToSW && channelToSW <= 116)
+    fc = 0x452;
+  else if (118 <= channelToSW)
+    fc = 0x412;
+  else
+    fc = 0x96a;
+  /* fc_area is constant within a band — write only when it actually changes. */
+  if (fc != _last_fc_area) {
+    _device.phy_set_bb_reg(rFc_area_Jaguar, 0x1ffe0000, fc);
+    _last_fc_area = fc;
+  }
+
+  /* RF_MOD_AG value for this channel range (same table as phy_SwChnl8812). */
+  uint32_t mod_ag;
+  if (36 <= channelToSW && channelToSW <= 80)
+    mod_ag = 0x101;
+  else if (15 <= channelToSW && channelToSW <= 35)
+    mod_ag = 0x101;
+  else if (82 <= channelToSW && channelToSW <= 140)
+    mod_ag = 0x301;
+  else if (140 < channelToSW)
+    mod_ag = 0x501;
+  else
+    mod_ag = 0x000;
+  const uint32_t mod_ag_mask = BIT18 | BIT17 | BIT16 | BIT9 | BIT8;
+  const uint32_t mod_ag_shift = PHY_CalculateBitShift(mod_ag_mask);
+
+  /* Prime the cache once (pays the 20 ms reads a single time); subsequent hops
+   * write the full register straight from the cache. */
+  if (!_rf_chnlbw_cached) {
+    for (uint8_t p = 0; p < _eepromManager->numTotalRfPath && p < 4; p++)
+      _rf_chnlbw_cache[p] =
+          phy_query_rf_reg((RfPath)p, RF_CHNLBW_Jaguar, bLSSIWrite_data_Jaguar);
+    _rf_chnlbw_cached = true;
+  }
+
+  /* phy_FixSpur_8812A writes GLOBAL (not per-path) BB ADC-clock regs, and its
+   * output depends only on (bandwidth, whether the channel is 11/13/14). The
+   * original per-path loop called it redundantly N times; here it runs once,
+   * and only when its config class actually changes across the hop set. */
+  const int spur_class =
+      (_currentChannelBw == ChannelWidth_t::CHANNEL_WIDTH_40 && channelToSW == 11)
+          ? 1
+      : (_currentChannelBw == ChannelWidth_t::CHANNEL_WIDTH_20 &&
+         (channelToSW == 13 || channelToSW == 14))
+          ? 2
+          : 0;
+  if (spur_class != _last_spur_class) {
+    phy_FixSpur_8812A(_currentChannelBw, channelToSW);
+    _last_spur_class = spur_class;
+  }
+
+  for (uint8_t p = 0; p < _eepromManager->numTotalRfPath && p < 4; p++) {
+    uint32_t v = _rf_chnlbw_cache[p];
+    /* Merge exactly as phy_set_rf_reg would (no masking of the shifted field,
+     * matching its semantics). */
+    v = (v & ~mod_ag_mask) | (mod_ag << mod_ag_shift);
+    v = (v & ~(uint32_t)bMaskByte0) | channelToSW;
+    v &= bLSSIWrite_data_Jaguar;
+    phy_set_rf_reg((RfPath)p, RF_CHNLBW_Jaguar, bLSSIWrite_data_Jaguar, v);
+    _rf_chnlbw_cache[p] = v;
+  }
 }
 
 void RadioManagementModule::PHY_SetSwChnlBWMode8812(uint8_t channel,
@@ -305,8 +474,9 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
    * wrong bits and the chip's BB stalled on each one. Setting
    * DEVOURER_SKIP_TXPWR=1 keeps the old skip behaviour as an escape
    * hatch (e.g. for RX-only experiments). */
-  if (std::getenv("DEVOURER_SKIP_TXPWR")) {
-    _logger->info("DEVOURER_SKIP_TXPWR=1 — skipping TX power setup");
+  if (_fast_skip_heavy || std::getenv("DEVOURER_SKIP_TXPWR")) {
+    if (!_fast_skip_heavy)
+      _logger->info("DEVOURER_SKIP_TXPWR=1 — skipping TX power setup");
   } else {
     PHY_SetTxPowerLevel8812(_currentChannel);
   }
@@ -326,7 +496,8 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
    * 0xc1c[31:21] (T1 8821 canary diff caught it as kern 0x200/0dB vs
    * dev 0x1C8/-1dB). Until the 8821 pwrtrk is ported, skip the tick
    * on non-8812 chips. */
-  if (_eepromManager->version_id.ICType == CHIP_8812) {
+  if (!_fast_skip_heavy &&
+      _eepromManager->version_id.ICType == CHIP_8812) {
     _pwrTrk.TickThermalMeter(current_band_type, _currentChannel);
   }
 
@@ -347,77 +518,8 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
    * 0xcc4 / etc). We capture the canary AFTER IQK so it reflects the
    * post-calibration state — matching kernel semantics where IQK is
    * part of the channel-set callback. */
-  const auto dump_canary = [this]() {
-    /* Per-chip canary set. Each Jaguar variant has a different active
-     * RF/path footprint:
-     *   - 8821AU is 1T1R AC: only path-A exists physically. Path-B BB-AGC
-     *     mirror (0xe20-0xe40) and RF[B] reads return BB-init defaults
-     *     or sentinel zero — including them just clutters the diff.
-     *   - 8812AU is 2T2R: paths A + B are both active.
-     *   - 8814AU is 4T4R: paths A + B + C + D BB-table state is active.
-     *     RF[C]/RF[D] are write-only by HW design (reads return
-     *     sentinel/zero) so we skip RF reads for paths C and D.
-     * The MAC anchor set is chip-independent (same regs across the
-     * family). */
-
-    /* Shared anchors — PHY anchors + MAC: same for every Jaguar chip. */
-    static const uint16_t bb_anchors[] = {
-        0x808, 0x80c, 0x82c, 0x830, 0x834, 0x838, 0x84c, 0x860, 0x8ac,
-        0x8b0, 0x8c4};
-    static const uint16_t bb_pathA[] = {
-        /* Page-C path A: TX-AGC + AGC core + IQK/DPK output regs */
-        0xc00, 0xc1c, 0xc20, 0xc24, 0xc28, 0xc2c, 0xc30, 0xc34, 0xc38,
-        0xc3c, 0xc40, 0xc50, 0xc54, 0xc60, 0xc64, 0xc68, 0xc6c, 0xc70,
-        0xc10, 0xc14, 0xc90, 0xc94};
-    static const uint16_t bb_pathB[] = {
-        /* Page-C path B: TX-AGC mirror of path-A + IQK/DPK output regs */
-        0xe1c, 0xe20, 0xe24, 0xe28, 0xe2c, 0xe30, 0xe34, 0xe38, 0xe3c,
-        0xe40, 0xe50, 0xe54, 0xe10, 0xe14, 0xe90, 0xe94};
-    static const uint16_t bb_pathC[] = {
-        /* 8814A path-C BB-table (0x18xx range, see hal/Hal8814PhyReg.h) */
-        0x1820, 0x1824, 0x1828, 0x182c, 0x1830, 0x1834, 0x1838, 0x183c,
-        0x1840, 0x181c, 0x1850};
-    static const uint16_t bb_pathD[] = {
-        /* 8814A path-D BB-table (0x1Axx range, see hal/Hal8814PhyReg.h) */
-        0x1a20, 0x1a24, 0x1a28, 0x1a2c, 0x1a30, 0x1a34, 0x1a38, 0x1a3c,
-        0x1a40, 0x1a1c, 0x1a50};
-    static const uint16_t mac_canary[] = {0x40,  0xcf,  0xf0,  0x100,
-                                          0x102, 0x420, 0x4c8, 0x508,
-                                          0x522, 0x550, 0x560, 0x610,
-                                          0x614};
-    static const uint32_t rf_canary[] = {0x00, 0x05, 0x18, 0x42, 0x65, 0x8f};
-
-    /* Chip-dependent path mask. */
-    const auto ictype = _eepromManager->version_id.ICType;
-    const bool has_pathB = (ictype != CHIP_8821);
-    const bool has_pathCD = (ictype == CHIP_8814A);
-
-    _logger->info("=== DEVOURER_DUMP_CANARY (post channel-set ch={}) ===",
-                  unsigned(_currentChannel));
-    for (uint16_t a : bb_anchors)
-      _logger->info("BB 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
-    for (uint16_t a : bb_pathA)
-      _logger->info("BB 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
-    if (has_pathB)
-      for (uint16_t a : bb_pathB)
-        _logger->info("BB 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
-    if (has_pathCD) {
-      for (uint16_t a : bb_pathC)
-        _logger->info("BB 0x{:04x} = 0x{:08X}", a, _device.rtw_read32(a));
-      for (uint16_t a : bb_pathD)
-        _logger->info("BB 0x{:04x} = 0x{:08X}", a, _device.rtw_read32(a));
-    }
-    for (uint16_t a : mac_canary)
-      _logger->info("MAC 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
-    for (uint32_t a : rf_canary)
-      _logger->info("RF[A] 0x{:02x} = 0x{:05X}", a,
-                    phy_query_rf_reg(RfPath::RF_PATH_A, a, 0xfffffu));
-    if (has_pathB)
-      for (uint32_t a : rf_canary)
-        _logger->info("RF[B] 0x{:02x} = 0x{:05X}", a,
-                      phy_query_rf_reg(RfPath::RF_PATH_B, a, 0xfffffu));
-    _logger->info("=== END DEVOURER_DUMP_CANARY ===");
-  };
+  /* (Canary register dump is DumpCanary(), called below and from the fast
+   * 40/80 path so its channel/BW register state is parity-checkable.) */
 
   /* Trigger I/Q calibration. Set by `phy_SwBand8812` on band
    * transitions and (post-init) on the very first channel-set via
@@ -442,8 +544,68 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
    * state — same observation order as kernel iface reads via
    * `iwpriv read 4,<addr>`. */
   if (std::getenv("DEVOURER_DUMP_CANARY")) {
-    dump_canary();
+    DumpCanary();
   }
+}
+
+/* Canary register dump for kernel cross-validation / fast-vs-full parity. Reads
+ * a fixed per-chip set of BB/MAC/RF registers and logs them in a stable format
+ * (matches `iwpriv read`). See the call sites in phy_SwChnlAndSetBwMode8812 and
+ * fast_retune. */
+void RadioManagementModule::DumpCanary() {
+  /* Per-chip canary set. 8821AU = path A only; 8812AU = A+B; 8814AU = A+B+C+D
+   * (RF[C]/RF[D] are write-only, so no RF reads for them). MAC set is shared. */
+  static const uint16_t bb_anchors[] = {
+      0x808, 0x80c, 0x82c, 0x830, 0x834, 0x838, 0x84c, 0x860, 0x8ac,
+      0x8b0, 0x8c4};
+  static const uint16_t bb_pathA[] = {
+      0xc00, 0xc1c, 0xc20, 0xc24, 0xc28, 0xc2c, 0xc30, 0xc34, 0xc38,
+      0xc3c, 0xc40, 0xc50, 0xc54, 0xc60, 0xc64, 0xc68, 0xc6c, 0xc70,
+      0xc10, 0xc14, 0xc90, 0xc94};
+  static const uint16_t bb_pathB[] = {
+      0xe1c, 0xe20, 0xe24, 0xe28, 0xe2c, 0xe30, 0xe34, 0xe38, 0xe3c,
+      0xe40, 0xe50, 0xe54, 0xe10, 0xe14, 0xe90, 0xe94};
+  static const uint16_t bb_pathC[] = {
+      0x1820, 0x1824, 0x1828, 0x182c, 0x1830, 0x1834, 0x1838, 0x183c,
+      0x1840, 0x181c, 0x1850};
+  static const uint16_t bb_pathD[] = {
+      0x1a20, 0x1a24, 0x1a28, 0x1a2c, 0x1a30, 0x1a34, 0x1a38, 0x1a3c,
+      0x1a40, 0x1a1c, 0x1a50};
+  static const uint16_t mac_canary[] = {0x40,  0xcf,  0xf0,  0x100,
+                                        0x102, 0x420, 0x4c8, 0x508,
+                                        0x522, 0x550, 0x560, 0x610,
+                                        0x614};
+  static const uint32_t rf_canary[] = {0x00, 0x05, 0x18, 0x42, 0x65, 0x8f};
+
+  const auto ictype = _eepromManager->version_id.ICType;
+  const bool has_pathB = (ictype != CHIP_8821);
+  const bool has_pathCD = (ictype == CHIP_8814A);
+
+  _logger->info("=== DEVOURER_DUMP_CANARY (post channel-set ch={}) ===",
+                unsigned(_currentChannel));
+  for (uint16_t a : bb_anchors)
+    _logger->info("BB 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+  for (uint16_t a : bb_pathA)
+    _logger->info("BB 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+  if (has_pathB)
+    for (uint16_t a : bb_pathB)
+      _logger->info("BB 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+  if (has_pathCD) {
+    for (uint16_t a : bb_pathC)
+      _logger->info("BB 0x{:04x} = 0x{:08X}", a, _device.rtw_read32(a));
+    for (uint16_t a : bb_pathD)
+      _logger->info("BB 0x{:04x} = 0x{:08X}", a, _device.rtw_read32(a));
+  }
+  for (uint16_t a : mac_canary)
+    _logger->info("MAC 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+  for (uint32_t a : rf_canary)
+    _logger->info("RF[A] 0x{:02x} = 0x{:05X}", a,
+                  phy_query_rf_reg(RfPath::RF_PATH_A, a, 0xfffffu));
+  if (has_pathB)
+    for (uint32_t a : rf_canary)
+      _logger->info("RF[B] 0x{:02x} = 0x{:05X}", a,
+                    phy_query_rf_reg(RfPath::RF_PATH_B, a, 0xfffffu));
+  _logger->info("=== END DEVOURER_DUMP_CANARY ===");
 }
 
 void RadioManagementModule::phy_set_rf_reg(RfPath eRFPath, uint16_t RegAddr,

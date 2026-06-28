@@ -356,6 +356,9 @@ def main():
     ap.add_argument("--duplex", default=os.path.normpath(os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "..", "build", "StreamDuplexDemo")))
     ap.add_argument("--link-calib"); ap.add_argument("--energy-calib")
+    ap.add_argument("--feedback-ms", type=int, default=100,
+                    help="VRX RCF feedback period (ms). Higher = fewer half-duplex "
+                         "RX-blind windows on the ground (diagnostic knob)")
     a = ap.parse_args()
 
     if a.role == "selftest":
@@ -370,7 +373,8 @@ def main():
     link = lm.LinkModel(calib_path=a.link_calib)
     calib = em.load_calibration(a.energy_calib)
     if a.role == "vrx":
-        run_vrx(proc, link, calib, a.vtx_id, a.channel)
+        run_vrx(proc, link, calib, a.vtx_id, a.channel,
+                feedback_period_ms=a.feedback_ms)
     else:
         run_vtx(proc, a.vtx_id, a.video, a.channel)
 

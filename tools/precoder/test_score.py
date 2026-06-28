@@ -17,6 +17,20 @@ def test_score_rises_with_snr():
     assert 1000 <= lo.score() <= 2000 and 1000 <= hi.score() <= 2000
 
 
+def test_seq_gap_loss_wrap_and_gaps():
+    # contiguous arrival straddling a 12-bit wrap -> NO loss (the old sort+max-min
+    # mis-read any wrap-straddling window as ~100% loss)
+    w = ScoreWindow(ScoreConfig(window_s=100.0))
+    for i, s in enumerate([4094, 4095, 0, 1, 2]):
+        w.add_frame(-50, 20, False, s, i * 0.001)
+    assert w.seq_gap_loss() < 1e-9
+    # a real gap: seqs 0,1,3,4 -> span 5, 4 received -> 0.20 loss
+    g = ScoreWindow(ScoreConfig(window_s=100.0))
+    for i, s in enumerate([0, 1, 3, 4]):
+        g.add_frame(-50, 20, False, s, i * 0.001)
+    assert abs(g.seq_gap_loss() - 0.2) < 1e-9
+
+
 def test_snr_estimate_is_windowed_mean():
     w = ScoreWindow(ScoreConfig(window_s=10.0))
     _fill(w, 10, -60, 20)

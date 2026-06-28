@@ -74,7 +74,8 @@ def test_base_layer_never_sheds():
 
 
 def test_sim_energy_savings_headline():
-    sys.path.insert(0, os.path.expanduser("~/git/devourer/tests"))
+    sys.path.insert(0, os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests")))
     import sim_loop
     r = sim_loop.main()
     assert r["save_vs_robust"] >= 0.25                # vs over-provisioned set-and-forget

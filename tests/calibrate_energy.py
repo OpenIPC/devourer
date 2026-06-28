@@ -24,7 +24,8 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.expanduser("~/git/devourer/tools/precoder"))
+sys.path.insert(0, os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "tools", "precoder")))
 import energy_model  # noqa: E402
 
 

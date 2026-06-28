@@ -13,7 +13,8 @@ the close-range headroom as Watts saved while holding the delivery SLA.
 import os
 import sys
 
-sys.path.insert(0, os.path.expanduser("~/git/devourer/tools/precoder"))
+sys.path.insert(0, os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "tools", "precoder")))
 import energy_model as em
 import link_model as lm
 import op_table

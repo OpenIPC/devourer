@@ -352,7 +352,8 @@ def main():
     ap.add_argument("--channel", type=int, default=6)
     ap.add_argument("--vtx-id", type=lambda x: int(x, 0), default=0xABCD)
     ap.add_argument("--video", help="VTX video source file (length-agnostic bytes)")
-    ap.add_argument("--duplex", default=os.path.expanduser("~/git/devourer/build/StreamDuplexDemo"))
+    ap.add_argument("--duplex", default=os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "build", "StreamDuplexDemo")))
     ap.add_argument("--link-calib"); ap.add_argument("--energy-calib")
     a = ap.parse_args()
 

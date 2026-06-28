@@ -29,6 +29,18 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
   _logger->info("In Monitor Mode");
 }
 
+/* Map a radiotap CHANNEL frequency (MHz) to a Wi-Fi channel number. Returns 0
+ * for a frequency outside the bands devourer drives (caller ignores it). */
+static int freq_to_chan(uint16_t freq_mhz) {
+  if (freq_mhz == 2484)
+    return 14;
+  if (freq_mhz >= 2412 && freq_mhz <= 2472)
+    return (freq_mhz - 2407) / 5;        /* 2.4 GHz ch1..13 */
+  if (freq_mhz >= 5000 && freq_mhz <= 5895)
+    return (freq_mhz - 5000) / 5;        /* 5 GHz UNII ch */
+  return 0;
+}
+
 bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   struct tx_desc *ptxdesc;
   bool resp;
@@ -44,6 +56,8 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   /* True once the radiotap carries a rate (RATE / HT-MCS-index / VHT). When it
    * stays false the device TX-mode default (SetTxMode) — else MGN_1M — applies. */
   bool rate_from_radiotap = false;
+  /* Per-packet hop target from a radiotap CHANNEL field (0 = none present). */
+  int radiotap_channel = 0;
   if (length < sizeof(struct ieee80211_radiotap_header)) {
     return false;
   }
@@ -83,6 +97,13 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
 
     case IEEE80211_RADIOTAP_TX_FLAGS:
       txflags = get_unaligned_le16(iterator.this_arg);
+      break;
+
+    case IEEE80211_RADIOTAP_CHANNEL:
+      /* 2 x __le16: frequency (MHz), then flags. Frequency is authoritative
+       * for the per-packet hop target; flags are ignored (rate/BW come from
+       * the RATE/MCS/VHT fields). */
+      radiotap_channel = freq_to_chan(get_unaligned_le16(iterator.this_arg));
       break;
 
     case IEEE80211_RADIOTAP_MCS: {
@@ -171,6 +192,18 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
     default:
       break;
     }
+  }
+
+  /* Radiotap CHANNEL is authoritative for per-packet frequency, exactly as
+   * RATE/MCS are for rate: a frame asking for a different channel triggers a
+   * lean FastRetune before TX (intra-band 20 MHz ~1.6 ms; cross-band/non-20MHz
+   * falls back to the full path). A no-op when it equals the current channel,
+   * so an informational CHANNEL field costs nothing. This makes frequency
+   * hopping radiotap-driven — any caller can hop per-packet without an env knob
+   * — at the honest cost of stalling this send by the retune latency. Done
+   * before the 5 GHz CCK clamp below so the clamp keys off the new channel. */
+  if (radiotap_channel > 0 && radiotap_channel != _channel.Channel) {
+    FastRetune(static_cast<uint8_t>(radiotap_channel));
   }
 
   /* The radiotap carried no rate → apply the runtime TX-mode default set via
@@ -397,6 +430,18 @@ void RtlJaguarDevice::SetMonitorChannel(SelectedChannel channel) {
   _channel = channel;
   _radioManagement->set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                        channel.ChannelWidth);
+}
+
+void RtlJaguarDevice::FastRetune(uint8_t channel, bool cache_rf) {
+  if (_radioManagement->fast_retune(channel, cache_rf)) {
+    _channel.Channel = channel;
+    return;
+  }
+  /* Fast path declined (band change / non-20MHz) — do the full channel set,
+   * preserving the current bandwidth + offset. */
+  SetMonitorChannel(SelectedChannel{.Channel = channel,
+                                    .ChannelOffset = _channel.ChannelOffset,
+                                    .ChannelWidth = _channel.ChannelWidth});
 }
 
 void RtlJaguarDevice::StartWithMonitorMode(SelectedChannel selectedChannel) {

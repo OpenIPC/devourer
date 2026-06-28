@@ -51,6 +51,33 @@ static long long ms_since_start() {
       .count();
 }
 
+/* Wi-Fi channel number -> center frequency (MHz), for the radiotap CHANNEL
+ * field that drives the library's per-packet retune (DEVOURER_HOP_RADIOTAP). */
+static uint16_t chan_to_freq(int ch) {
+  if (ch == 14) return 2484;
+  if (ch <= 14) return static_cast<uint16_t>(2407 + 5 * ch);
+  return static_cast<uint16_t>(5000 + 5 * ch);
+}
+
+/* Build a radiotap header carrying CHANNEL (freq) + TX_FLAGS, then append the
+ * 802.11 body. The library reads the CHANNEL field and FastRetunes per packet. */
+static std::vector<uint8_t> build_frame_with_channel(uint16_t freq,
+                                                     const uint8_t *body,
+                                                     size_t body_len) {
+  std::vector<uint8_t> f;
+  /* version, pad, len(le16)=14, present(le32)= CHANNEL(bit3)|TX_FLAGS(bit15) */
+  const uint8_t hdr[] = {0x00, 0x00, 0x0e, 0x00, 0x08, 0x80, 0x00, 0x00};
+  f.insert(f.end(), hdr, hdr + sizeof(hdr));
+  f.push_back(freq & 0xff);          /* CHANNEL freq le16 */
+  f.push_back((freq >> 8) & 0xff);
+  f.push_back(0x00);                  /* CHANNEL flags le16 (unused) */
+  f.push_back(0x00);
+  f.push_back(0x08);                  /* TX_FLAGS le16 */
+  f.push_back(0x00);
+  f.insert(f.end(), body, body + body_len);
+  return f;
+}
+
 static int g_rx_count = 0;
 static void packetProcessor(const Packet &packet) {
   ++g_rx_count;
@@ -277,6 +304,22 @@ int main(int argc, char **argv) {
     logger->info("DEVOURER_CHANNEL set — tuning TX to channel {}", channel);
   }
 
+  /* Bandwidth for init + hopping. DEVOURER_HOP_BW = 20|40|80 (default 20),
+   * DEVOURER_HOP_OFFSET = primary-channel offset (0=DONT_CARE, 1=LOWER/HT40+,
+   * 2=UPPER/HT40-) for 40/80. FastRetune reuses the device's bandwidth. */
+  ChannelWidth_t init_width = CHANNEL_WIDTH_20;
+  uint8_t init_offset = 0;
+  if (const char *e = std::getenv("DEVOURER_HOP_BW")) {
+    int mhz = std::atoi(e);
+    init_width = mhz == 80 ? CHANNEL_WIDTH_80
+               : mhz == 40 ? CHANNEL_WIDTH_40
+                           : CHANNEL_WIDTH_20;
+    if (init_width != CHANNEL_WIDTH_20)
+      init_offset = 1; /* HT40+ by default */
+    if (const char *o = std::getenv("DEVOURER_HOP_OFFSET"))
+      init_offset = static_cast<uint8_t>(std::atoi(o));
+  }
+
   rtlDevice->SetTxPower(40);
 
   /* The original txdemo forked an RX child and a TX parent on the same
@@ -303,8 +346,8 @@ int main(int argc, char **argv) {
 
   rtlDevice->InitWrite(SelectedChannel{
       .Channel = static_cast<uint8_t>(channel),
-      .ChannelOffset = 0,
-      .ChannelWidth = CHANNEL_WIDTH_20});
+      .ChannelOffset = init_offset,
+      .ChannelWidth = init_width});
 
   write_sentinel(0xBEEF, "post-init/pre-TX");
   logger->info("init-timing: txdemo.init_write = {} ms", ms_since_start());
@@ -387,6 +430,63 @@ int main(int argc, char **argv) {
     if (tx_gap_us < 0) tx_gap_us = 0;
   }
 
+  /* Channel-hopping mode (frequency-diversity validation). When
+   * DEVOURER_HOP_CHANNELS="1,6,11" is set the TX loop dwells DWELL_FRAMES
+   * frames on each listed channel, then retunes to the next via
+   * SetMonitorChannel, cycling for HOP_ROUNDS full passes (0 = forever). Each
+   * retune is wall-clock timed and announced as a <devourer-hop> marker so a
+   * wideband SDR receiver can correlate which frames landed on which channel
+   * and confirm none are dropped across the retune. Intra-band (e.g. all of
+   * 1/6/11 in 2.4 GHz) is the cheap case — no band switch, no IQK — so the
+   * measured switch_us here is the real per-hop cost of the current
+   * (un-optimised) SetMonitorChannel path. */
+  std::vector<int> hop_channels;
+  long hop_dwell = 50;
+  long hop_rounds = 0;
+  /* 0 = full SetMonitorChannel; 1 = FastRetune (cached RF writes, fastest);
+   * 2 = FastRetune without the RF cache (sw_chnl only, for A/B measurement). */
+  const int hop_fast =
+      std::getenv("DEVOURER_HOP_FAST") ? std::atoi(std::getenv("DEVOURER_HOP_FAST")) : 0;
+  /* When set, drive hopping through the radiotap CHANNEL field (the library
+   * FastRetunes per packet) instead of calling FastRetune from the demo —
+   * exercises the radiotap-driven path. */
+  const char *hop_rt_env = std::getenv("DEVOURER_HOP_RADIOTAP");
+  const bool hop_radiotap = hop_rt_env != nullptr && hop_rt_env[0] != '\0';
+  if (const char *e = std::getenv("DEVOURER_HOP_CHANNELS")) {
+    std::string s(e);
+    size_t pos = 0;
+    while (pos < s.size()) {
+      size_t comma = s.find(',', pos);
+      std::string tok = s.substr(pos, comma == std::string::npos
+                                          ? std::string::npos
+                                          : comma - pos);
+      if (!tok.empty()) {
+        int ch = std::atoi(tok.c_str());
+        if (ch > 0) hop_channels.push_back(ch);
+      }
+      if (comma == std::string::npos) break;
+      pos = comma + 1;
+    }
+  }
+  if (!hop_channels.empty()) {
+    if (const char *e = std::getenv("DEVOURER_HOP_DWELL_FRAMES")) {
+      hop_dwell = std::strtol(e, nullptr, 0);
+      if (hop_dwell < 1) hop_dwell = 1;
+    }
+    if (const char *e = std::getenv("DEVOURER_HOP_ROUNDS")) {
+      hop_rounds = std::strtol(e, nullptr, 0);
+      if (hop_rounds < 0) hop_rounds = 0;
+    }
+    std::string list;
+    for (size_t i = 0; i < hop_channels.size(); ++i)
+      list += (i ? "," : "") + std::to_string(hop_channels[i]);
+    logger->info("DEVOURER_HOP_CHANNELS — hopping [{}] dwell={} frames "
+                 "rounds={} ({}){}",
+                 list, hop_dwell, hop_rounds,
+                 hop_rounds ? "bounded" : "forever",
+                 hop_fast ? " [FastRetune]" : "");
+  }
+
   /* TX-gain ramp (thermal-vs-gain experiment). When DEVOURER_TX_PWR_START is
    * set, force the per-rate TXAGC index to an absolute value and step it up by
    * STEP every STEP_MS, in one continuous TX session (chip never stops, so we
@@ -428,6 +528,19 @@ int main(int argc, char **argv) {
     logger->info("DEVOURER_TX_PWR ramp — index {}..{} step {} every {} ms",
                  pwr_cur, pwr_stop, pwr_step, pwr_step_ms);
   }
+  if (!hop_channels.empty() && pwr_ramp) {
+    logger->warn("hop mode active — disabling TX-power ramp (both drive "
+                 "SetMonitorChannel)");
+    pwr_ramp = false;
+  }
+
+  /* Hop bookkeeping: dwell_no counts dwells from 0; frames_in_dwell counts
+   * frames sent on the current dwell. When hop_rounds>0 we stop after exactly
+   * that many full passes over the channel list. */
+  long dwell_no = -1;
+  long frames_in_dwell = 0;
+  const long total_dwells =
+      hop_rounds > 0 ? hop_rounds * static_cast<long>(hop_channels.size()) : 0;
 
   long tx_count = 0;
   while (true) {
@@ -445,8 +558,44 @@ int main(int argc, char **argv) {
       apply_txpwr(pwr_cur);
       pwr_next_step_ms = ms_since_start() + pwr_step_ms;
     }
+    /* Retune at each dwell boundary. The first iteration (frames_in_dwell==0,
+     * dwell_no==-1) selects the first hop channel; SetMonitorChannel
+     * early-returns if it equals the InitWrite channel. */
+    if (!hop_channels.empty() && frames_in_dwell == 0) {
+      ++dwell_no;
+      if (total_dwells > 0 && dwell_no >= total_dwells) break;
+      int ch = hop_channels[dwell_no % hop_channels.size()];
+      auto sw0 = std::chrono::steady_clock::now();
+      const char *mode = "";
+      if (hop_radiotap) {
+        /* Library retunes from the CHANNEL field on the next send_packet; the
+         * 802.11 body is beacon_frame past its 10-byte radiotap. */
+        tx_buf = build_frame_with_channel(chan_to_freq(ch), beacon_frame + 10,
+                                          sizeof(beacon_frame) - 10);
+        mode = " radiotap";
+      } else if (hop_fast) {
+        rtlDevice->FastRetune(static_cast<uint8_t>(ch), /*cache_rf=*/hop_fast != 2);
+        mode = " fast";
+      } else {
+        rtlDevice->SetMonitorChannel(SelectedChannel{
+            .Channel = static_cast<uint8_t>(ch),
+            .ChannelOffset = init_offset,
+            .ChannelWidth = init_width});
+      }
+      long long switch_us =
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - sw0)
+              .count();
+      printf("<devourer-hop>dwell=%ld round=%ld channel=%d frame=%ld "
+             "switch_us=%lld t_ms=%lld%s\n",
+             dwell_no, dwell_no / static_cast<long>(hop_channels.size()), ch,
+             tx_count, switch_us, ms_since_start(), mode);
+      fflush(stdout);
+    }
     rc = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
     ++tx_count;
+    if (!hop_channels.empty() && ++frames_in_dwell >= hop_dwell)
+      frames_in_dwell = 0;
     if (tx_count <= 10 || tx_count % 500 == 0) {
       printf("<devourer-tx>TX #%ld rc=%d\n", tx_count, rc);
       fflush(stdout);
@@ -474,10 +623,10 @@ int main(int argc, char **argv) {
     if (tx_gap_us > 0)
       std::this_thread::sleep_for(std::chrono::microseconds(tx_gap_us));
   }
-  rc = libusb_release_interface(handle, 0);
-  assert(rc == 0);
-
-  libusb_close(handle);
-  libusb_exit(context);
-  return 0;
+  /* Only reached in bounded hop mode (DEVOURER_HOP_ROUNDS>0). The usb_thread
+   * is still spinning on libusb_handle_events over this handle, so don't race
+   * it through release/close — announce completion and exit hard. */
+  printf("<devourer-hop-done>frames=%ld dwells=%ld\n", tx_count, dwell_no + 1);
+  fflush(stdout);
+  std::exit(0);
 }

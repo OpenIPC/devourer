@@ -213,6 +213,46 @@ int main(int argc, char **argv) {
     rtlDevice->ApplyTxPower();
     logger->info("DEVOURER_TX_PWR_OVERRIDE — forced absolute TXAGC index {}", idx);
   }
+  /* Channel hopping for frequency diversity. DEVOURER_HOP_CHANNELS="1,6,11"
+   * cycles the TX channel every DEVOURER_HOP_DWELL_FRAMES PSDUs (default 1 =
+   * per-packet hop, which spreads an outer-FEC block's shards across channels
+   * so a single-channel fade/interferer only erases ~1/N of each block —
+   * recoverable by the RS layer; see tools/precoder/stream_fec_rs.py
+   * --hop-interleave). Uses FastRetune (lean intra-band retune, ~1-2 ms) unless
+   * DEVOURER_HOP_FAST=0 (full SetMonitorChannel) / =2 (FastRetune, no RF cache).
+   * Intra-band 20 MHz only; a cross-band entry falls back automatically. */
+  std::vector<int> hop_channels;
+  long hop_dwell = 1;
+  const int hop_fast = std::getenv("DEVOURER_HOP_FAST")
+                           ? std::atoi(std::getenv("DEVOURER_HOP_FAST"))
+                           : 1;
+  if (const char *e = std::getenv("DEVOURER_HOP_CHANNELS")) {
+    std::string s(e);
+    size_t pos = 0;
+    while (pos < s.size()) {
+      size_t c = s.find(',', pos);
+      std::string tok =
+          s.substr(pos, c == std::string::npos ? std::string::npos : c - pos);
+      if (!tok.empty()) {
+        int ch = std::atoi(tok.c_str());
+        if (ch > 0) hop_channels.push_back(ch);
+      }
+      if (c == std::string::npos) break;
+      pos = c + 1;
+    }
+    if (const char *d = std::getenv("DEVOURER_HOP_DWELL_FRAMES")) {
+      hop_dwell = std::strtol(d, nullptr, 0);
+      if (hop_dwell < 1) hop_dwell = 1;
+    }
+    if (!hop_channels.empty()) {
+      std::string list;
+      for (size_t i = 0; i < hop_channels.size(); ++i)
+        list += (i ? "," : "") + std::to_string(hop_channels[i]);
+      logger->info("DEVOURER_HOP_CHANNELS — stream hopping [{}] dwell={} "
+                   "fast={}", list, hop_dwell, hop_fast);
+    }
+  }
+
   sleep(2);
 
   auto dot11 = build_dot11_probe_req();
@@ -260,6 +300,20 @@ int main(int argc, char **argv) {
                      "record truncated\n", len);
         std::exit(2);
       }
+    }
+
+    /* Retune to this PSDU's hop channel before sending. FastRetune/fast_retune
+     * is a cheap no-op when the channel is unchanged within a dwell, so calling
+     * it per packet is fine. */
+    if (!hop_channels.empty()) {
+      int ch = hop_channels[(tx_count / hop_dwell) % hop_channels.size()];
+      if (hop_fast)
+        rtlDevice->FastRetune(static_cast<uint8_t>(ch), /*cache_rf=*/hop_fast != 2);
+      else
+        rtlDevice->SetMonitorChannel(SelectedChannel{
+            .Channel = static_cast<uint8_t>(ch),
+            .ChannelOffset = 0,
+            .ChannelWidth = CHANNEL_WIDTH_20});
     }
 
     tx_buf.clear();

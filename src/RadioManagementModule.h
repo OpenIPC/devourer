@@ -179,6 +179,27 @@ class RadioManagementModule {
   bool _swChannel = false;
   bool _channelBwInitialized = false;
   bool _setChannelBw = false;
+  /* Cached RF_CHNLBW (0x18) value per RF path for fast_retune(cache_rf=true):
+   * lets the hop write the full register without a read-modify-write (and thus
+   * without the 20 ms C-cut RF-read sleep). Invalidated by set_channel_bwmode,
+   * since the full path can change 0x18's bandwidth bits. */
+  uint32_t _rf_chnlbw_cache[4] = {0, 0, 0, 0};
+  bool _rf_chnlbw_cached = false;
+  /* fast_retune trim caches: fc_area (0x860) and the spur-fix config are
+   * constant across an intra-band same-BW hop set, so skip re-writing them
+   * when unchanged. Also invalidated by set_channel_bwmode. */
+  uint32_t _last_fc_area = 0xffffffff;
+  int _last_spur_class = -1;
+  /* Last secondary-channel value written by the lean 40/80 fast path. It
+   * depends only on the prime-channel offset (not the channel number), so for a
+   * same-BW same-offset hop set it's constant — write the SubChnl registers
+   * once, then skip. Invalidated by set_channel_bwmode. */
+  int _last_subchnl = -1;
+  /* Set by fast_retune around a reused set_channel_bwmode call so the shared
+   * channel-set skips the per-rate TX-power loop + thermal pwrtrk tick (the
+   * heavy stages a hop doesn't need), while still doing the channel + BW
+   * registers identically to the full path. */
+  bool _fast_skip_heavy = false;
   uint8_t _cur40MhzPrimeSc;
   uint8_t _cur80MhzPrimeSc;
   uint8_t _currentCenterFrequencyIndex;
@@ -225,6 +246,17 @@ public:
   void SetMonitorMode();
   void set_channel_bwmode(uint8_t channel, uint8_t channel_offset,
                           ChannelWidth_t bwmode);
+  /* Lean frequency-hop retune. Runs ONLY the RF channel switch (phy_SwChnl),
+   * skipping the per-rate TX-power loop, the bandwidth post-set, and the
+   * thermal pwrtrk tick that the full set_channel_bwmode does — those don't
+   * change across an intra-band, same-bandwidth hop. Returns false WITHOUT
+   * touching the chip if the request crosses the 2.4/5 GHz boundary or the
+   * current bandwidth isn't 20 MHz (the caller must then fall back to the full
+   * set_channel_bwmode, which handles band switch + IQK). With cache_rf=true
+   * the RF_CHNLBW (0x18) writes are done as full-register writes from a cached
+   * value instead of masked read-modify-writes, avoiding the per-read 20 ms
+   * C-cut sleep — the dominant cost of phy_SwChnl on C-cut silicon. */
+  bool fast_retune(uint8_t channel, bool cache_rf);
   void phy_set_rf_reg(RfPath eRFPath, uint16_t RegAddr, uint32_t BitMask,
                       uint32_t Data);
   uint32_t phy_query_rf_reg(RfPath eRFPath, uint32_t RegAddr,
@@ -276,6 +308,8 @@ private:
   uint32_t phy_get_tx_bb_swing_8812a(BandType Band, RfPath RFPath);
   void Set_HW_VAR_ENABLE_RX_BAR(bool val);
   void phy_SwChnl8812();
+  void phy_SwChnl8812_fast(uint8_t channelToSW);
+  void DumpCanary();
   void phy_SwChnl8814A();
   bool phy_SwBand8812(uint8_t channelToSW);
   void phy_FixSpur_8812A(ChannelWidth_t Bandwidth, uint8_t Channel);

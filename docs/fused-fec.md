@@ -106,6 +106,29 @@ Verified graceful-degradation staircase at 30 % loss: blocks decoded
 critical 17 / T0 16 / T1 12 / T2 7 (of 20). Together with `svc_tx.h`'s MCS
 ladder, base/IDR layers get the most robust MCS **and** the heaviest FEC.
 
+## Frequency diversity (a complementary erasure source)
+
+The outer erasure code recovers symbols that don't arrive, whatever the cause —
+including a whole channel lost to a narrowband fade or interferer. devourer's
+per-packet frequency hopping (see **`docs/frequency-hopping.md`**) turns that
+into a frequency-diversity code almost for free: with one hop per packet the
+outer code's symbols, emitted in order, land on the hop channels round-robin, so
+a block of *N* symbols is spread across *N_ch* channels. A single dead channel
+then erases only ⌈*N* / *N_ch*⌉ of each block's symbols, which the MDS
+Reed-Solomon outer code recovers as long as
+
+```
+repair_count  ≥  ⌈N / N_ch⌉
+```
+
+— converting a catastrophic single-channel outage (which otherwise loses whole
+blocks regardless of how much parity you add) into an ordinary erasure. The
+receive side is the existing decoder: it dedups by `(block_id, symbol index)`,
+so symbols recovered on different channels — from several adapters, a wideband
+SDR, or a lockstep-hopping radio — simply add up. `hop_diversity_sim.py` proves
+the recovery threshold against the real codec, and `hop_rx_combine.py` is the
+front-end-agnostic combiner.
+
 ## Two receive scenarios, one shared framing
 
 The SBI framing, outer code, and per-sub-block CRC erasure decision are identical
@@ -137,7 +160,9 @@ for both receivers. Only the receiver — and thus the inner decode — differs:
 | `fec_fusion_sim.py` | offline simulation: quantify SBI gain, size sub-blocks, no hardware |
 | `soft_erasure_fec.py` | errors-and-erasures Reed-Solomon (BCH form) + soft-reliability GMD; the reference that quantifies the inner-vs-outer soft-information question |
 | `fec_ab_sim.py` | the SBI-vs-plain-block-FEC A/B over measured channels (does SBI beat just adding parity, at equal overhead?) |
-| `test_*.py` | unit tests for each module (145 in the suite) |
+| `hop_diversity_sim.py` | frequency-diversity recovery vs the real RS codec — the single-channel-loss threshold (see `docs/frequency-hopping.md`) |
+| `hop_rx_combine.py` | diversity-RX combiner — merge per-channel symbol feeds into one erasure decode |
+| `test_*.py` | unit tests for each module (215 in the suite) |
 
 ## Running it
 

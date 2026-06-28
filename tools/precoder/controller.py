@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import energy_model as em
 import op_table
 from op_table import OpPoint, build_link_rows, resolve, MAX_RANGE
 
@@ -43,6 +44,17 @@ class ControllerConfig:
     improve_frac: float = 0.03        # only switch up if >=3% cheaper (vs churn)
     feedback_timeout_ms: int = 1000   # no feedback this long -> failsafe
     allow_shed: bool = True           # enhancement layers may be deallocated
+    # Variance-aware fade margin (OPT-IN, default OFF -> behaviour unchanged):
+    # under time-correlated fading the energy-min point can't cover deep dips. The
+    # margin adds `fade_margin_k` dB of TXAGC HEADROOM (power only) per dB of recent
+    # path-loss std (clamped) AFTER the operating point is chosen — so the
+    # MCS/FEC choice is unchanged (adding it to row selection instead would buy
+    # robustness with airtime/FEC and overload the channel during fades). Variance
+    # is measured on the path loss (TX power removed), so our own TXAGC moves don't
+    # feed back into it.
+    fade_margin_k: float = 0.0        # 0 = disabled
+    fade_margin_max_db: float = 12.0  # clamp on the extra TXAGC headroom (dB)
+    fade_var_alpha: float = 0.2       # EWMA weight for the path-loss variance
 
 
 class Controller:
@@ -53,6 +65,7 @@ class Controller:
         self.rows = build_link_rows(link, self.cfg.target, self.cfg.mcs_set,
                                     self.cfg.overhead_set, self.cfg.bw, sbi=self.cfg.sbi)
         self.snr_ema: float | None = None
+        self.pl_var_ema: float = 0.0        # EWMA of path-loss variance (fade depth)
         self.cur: OpPoint | None = None
         self.shed = False
         self._last_change_ms = -1 << 60
@@ -84,15 +97,25 @@ class Controller:
         self._last_feedback_ms = now_ms
         # EWMA the PATH LOSS (channel SNR with TX power removed), not the SNR —
         # SNR moves with our own TXAGC, path loss doesn't. Asymmetric: track a
-        # worsening channel fast (raise power in time), an improving one slow.
+        # worsening channel fast (raise power in time), an improving one slow. Also
+        # track the path-loss variance (fade depth) for the optional fade margin.
         pl_inst = self._path_loss(reported_snr, reported_txagc)
         if self.snr_ema is None:
             self.snr_ema = pl_inst
         else:
+            dev = pl_inst - self.snr_ema
             a = self.cfg.ema_alpha_down if pl_inst < self.snr_ema else self.cfg.ema_alpha
             self.snr_ema = (1 - a) * self.snr_ema + a * pl_inst
+            b = self.cfg.fade_var_alpha
+            self.pl_var_ema = (1 - b) * self.pl_var_ema + b * dev * dev
         path_loss = self.snr_ema
+        op = self._decide(path_loss, now_ms)
+        # Fade margin (opt-in) is applied as power-only TXAGC headroom here, so it
+        # never perturbs the energy-min MCS/FEC choice above.
+        return self._fade_headroom(op, path_loss)
 
+    def _decide(self, path_loss: float, now_ms: float) -> OpPoint | None:
+        """Energy-min operating-point decision (hysteresis, shed/failsafe)."""
         # Is the current pick still clearing (no margin = fast-down threshold)?
         cur_ok = False
         if self.cur is not None and not self.shed:
@@ -104,7 +127,7 @@ class Controller:
             if cur_ok:
                 self.cur = cur_now            # refresh txagc/e_bit at new path loss
 
-        cand = self._best(path_loss, self.cfg.margin_db)   # candidate with margin
+        cand = self._best(path_loss, self.cfg.margin_db)   # candidate with hysteresis
 
         if cand is None:
             # nothing clears even with margin: keep current if it still works,
@@ -156,6 +179,30 @@ class Controller:
         self._last_change_ms = now_ms
         return op
 
+    def _fade_headroom(self, op: OpPoint | None, path_loss: float) -> OpPoint | None:
+        """Add power-only TXAGC headroom for fade resilience (opt-in via
+        fade_margin_k). Keeps the energy-min MCS/FEC choice and leaves `self.cur`
+        (hysteresis state) untouched — only the op actually applied on-air gets the
+        extra power, so deep fades are covered without spending airtime."""
+        if op is None or self.cfg.fade_margin_k <= 0.0:
+            return op
+        headroom_db = min(self.cfg.fade_margin_max_db,
+                          self.cfg.fade_margin_k * self.pl_var_ema ** 0.5)
+        if headroom_db <= 0.0:
+            return op
+        new_txagc = self.calib.min_txagc_for_gain(
+            self.calib.gain_db(op.txagc) + headroom_db)
+        if new_txagc is None or new_txagc <= op.txagc:
+            return op
+        recv = path_loss + self.calib.gain_db(new_txagc)
+        pdel = self.link.p_deliver(recv, op.mcs, op.overhead)
+        eb = em.energy_per_delivered_bit(
+            em.TxPoint(op.mode, op.mcs, op.bw, op.sgi, new_txagc),
+            self.cfg.src_bitrate_bps, op.overhead, self.cfg.payload_bytes, pdel,
+            self.calib)
+        return OpPoint(op.mode, op.mcs, op.bw, op.sgi, new_txagc, op.overhead,
+                       op.snr_req, eb, pdel)
+
 
 # --------------------------------------------------------------------------- #
 # SVC per-layer UEP: a bank of controllers, one per temporal layer. Base/IDR
@@ -199,7 +246,9 @@ class SvcController:
 
     def update(self, reported_snr: float, reported_txagc: int, now_ms: float):
         """Returns (ops_by_sid, shared_txagc, active_sids). A None op = shed layer.
-        shared_txagc = the max TX power any active layer needs (one PA)."""
+        shared_txagc = the max TX power any active layer needs (one PA).
+        Each layer controller tracks its own path-loss variance for the fade
+        margin (when enabled), so no extra signal is threaded in."""
         ops = {sid: c.update(reported_snr, reported_txagc, now_ms)
                for sid, c in self.ctrls.items()}
         present = [op for op in ops.values() if op is not None]

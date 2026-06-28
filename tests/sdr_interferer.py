@@ -60,9 +60,9 @@ def main(argv=None) -> int:
                     help="if >0, modulate interference power with a time-correlated "
                          "(AR1) envelope of this coherence time (s) -> the victim "
                          "link sees correlated SNR fades (for fade-SLA validation)")
-    ap.add_argument("--fade-depth-db", type=float, default=12.0,
-                    help="peak-to-floor interference power swing (dB) of the fade "
-                         "envelope; deeper = harder fades")
+    ap.add_argument("--fade-depth-db", type=float, default=8.0,
+                    help="std of the interference power (dB) in the fade envelope; "
+                         "deeper = harder fades. Mean power is unchanged (matched A/B)")
     args = ap.parse_args(argv)
 
     if args.freq is None:
@@ -120,8 +120,10 @@ def main(argv=None) -> int:
         buf_dt = nsamps / args.rate
         fade_rho = float(np.exp(-buf_dt / args.fade_coherence))
         fade_g = 0.0
-        peak_mult = 10.0 ** (args.fade_depth_db / 20.0 * 3.0)
-        fade_base = min(args.amplitude, 0.7 / peak_mult)
+        # log-normal interference-power envelope with UNIT MEAN, so a fading run's
+        # mean power equals a static run's at the same --tx-gain (a matched A/B).
+        # fade_depth_db is the std of the interference power in dB.
+        fade_sigma = args.fade_depth_db * (np.log(10.0) / 10.0)
         marker_every = max(1, int(0.1 / max(1e-6, buf_dt)))   # ~10 Hz markers
 
     t0 = time.monotonic()
@@ -132,11 +134,12 @@ def main(argv=None) -> int:
             break
         if fade_on:
             fade_g = fade_rho * fade_g + (1.0 - fade_rho ** 2) ** 0.5 * rng.standard_normal()
-            env = abs(fade_g)                              # correlated, mean ~0.8
-            amp = fade_base * 10.0 ** (args.fade_depth_db / 20.0 * env)
+            # unit-mean log-normal power -> correlated deep fades, mean matched to static
+            power = float(np.exp(fade_sigma * fade_g - 0.5 * fade_sigma ** 2))
+            amp = min(0.95, args.amplitude * power ** 0.5)
             if nbuf % marker_every == 0:
                 sys.stderr.write(f"<interferer-fade>t={time.monotonic()-t0:.2f} "
-                                 f"env={env:.2f} amp={amp:.3f}\n")
+                                 f"powr={power:.2f} amp={amp:.3f}\n")
                 sys.stderr.flush()
         else:
             amp = args.amplitude

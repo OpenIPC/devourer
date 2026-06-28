@@ -21,8 +21,8 @@ PREC="$ROOT/tools/precoder"
 
 VTX_PID=${VTX_PID:-0x8812}; VTX_VID=${VTX_VID:-0x0bda}; VTX=${VTX_SYSFS:-9-2}
 VRX_PID=${VRX_PID:-0x0120}; VRX_VID=${VRX_VID:-0x2357}; VRX=${VRX_SYSFS:-9-1.4}
-CH=${CH:-6}; SECS=${SECS:-30}; VTX_ID=${VTX_ID:-0xABCD}
-IGAIN=${IGAIN:-78}; FADE_COH=${FADE_COH:-0.3}; FADE_DEPTH=${FADE_DEPTH:-12}
+CH=${CH:-6}; SECS=${SECS:-25}; VTX_ID=${VTX_ID:-0xABCD}
+FADE_COH=${FADE_COH:-0.3}; FADE_DEPTH=${FADE_DEPTH:-8}   # depth = power std (dB)
 SLA=${SLA:-0.99}
 
 VIDEO=/tmp/fade_sla_video.bin
@@ -35,35 +35,41 @@ KILL(){ sudo pkill -9 -f adaptive_link 2>/dev/null
         sudo pkill -9 -f sdr_interferer 2>/dev/null; }
 trap KILL EXIT
 
-# free both Wi-Fi adapters (B210 is UHD-accessed)
-for D in "$VTX" "$VRX"; do
-  for i in /sys/bus/usb/devices/$D/$D:*; do
-    ifc=$(basename "$i"); drv=$(readlink -f "$i/driver" 2>/dev/null)
-    [ -n "$drv" ] && echo "$ifc" | sudo tee "$drv/unbind" >/dev/null 2>&1
-  done
-done; sleep 1
+free_adapters(){           # detach kernel drivers so devourer can claim them
+  for D in "$VTX" "$VRX"; do
+    for i in /sys/bus/usb/devices/$D/$D:*; do
+      ifc=$(basename "$i"); drv=$(readlink -f "$i/driver" 2>/dev/null)
+      [ -n "$drv" ] && echo "$ifc" | sudo tee "$drv/unbind" >/dev/null 2>&1
+    done
+  done; sleep 2
+}
 
-head -c 4000000 /dev/urandom > "$VIDEO"   # synthetic video bytes
+head -c 4000000 /dev/urandom > "$VIDEO"   # synthetic video bytes (VTX loops it)
 
 run_phase(){               # $1=label  $2..=extra sdr_interferer args
   local label="$1"; shift
   echo "=== PHASE $label: interferer ch$CH gain=$IGAIN $* ==="
+  KILL; free_adapters                       # clean slate per phase (fix cold-start)
   sudo python3 "$ROOT/tests/sdr_interferer.py" --channel "$CH" --tx-gain "$IGAIN" \
-       --rate 20e6 --mode noise --secs $((SECS + 12)) "$@" >"$INTF_LOG" 2>&1 &
+       --rate 20e6 --mode noise --secs $((SECS + 30)) "$@" >"$INTF_LOG" 2>&1 &
   sleep 8
   sudo env DEVOURER_VID=$VRX_VID DEVOURER_PID=$VRX_PID PYTHONPATH="$PREC" \
        python3 "$PREC/adaptive_link.py" --role vrx --pid $VRX_PID --channel $CH \
        --vtx-id $VTX_ID --duplex "$ROOT/build/StreamDuplexDemo" >"${VRX_LOG[$label]}" 2>&1 &
-  sleep 5
+  sleep 4
   sudo env DEVOURER_VID=$VTX_VID DEVOURER_PID=$VTX_PID PYTHONPATH="$PREC" \
        python3 "$PREC/adaptive_link.py" --role vtx --pid $VTX_PID --channel $CH \
        --vtx-id $VTX_ID --video "$VIDEO" --duplex "$ROOT/build/StreamDuplexDemo" \
        >"${VTX_LOG[$label]}" 2>&1 &
+  # wait for the session to establish (rendezvous) before the measurement window
+  for _ in $(seq 1 20); do
+    grep -q 'state=SESSION' "${VRX_LOG[$label]}" && break; sleep 1
+  done
   sleep "$SECS"; KILL; sleep 2
 }
 
-# delivery stats from a VRX log's <adaptive-vrx> deliv= field
-stats(){ grep -oP '<adaptive-vrx>.*?deliv=\K[0-9.]+' "$1" | python3 -c '
+# delivery stats over SESSION samples only (ignore the BEACONING placeholder)
+stats(){ grep -E '<adaptive-vrx>state=SESSION' "$1" | grep -oP 'deliv=\K[0-9.]+' | python3 -c '
 import sys
 v=[float(x) for x in sys.stdin if x.strip()]
 if not v: print("n=0 (no samples)"); sys.exit()
@@ -71,17 +77,26 @@ v.sort(); n=len(v)
 mean=sum(v)/n; mn=v[0]; p10=v[max(0,int(0.10*n))]
 print(f"n={n} mean={mean:.3f} p10={p10:.3f} min={mn:.3f}")'; }
 
-run_phase static
-run_phase fading --fade-coherence "$FADE_COH" --fade-depth-db "$FADE_DEPTH"
+# Sweep interferer gain to find the regime where the STATIC baseline still holds
+# the SLA (so fading can be seen to break it). static vs fading are MEAN-POWER
+# MATCHED at each gain (the interferer's fade envelope has unit mean power).
+IGAINS=${IGAINS:-"46 52 58 64"}
 
 echo
-echo "=== RESULT (SLA target deliv >= $SLA) ==="
-echo "[static] $(stats "${VRX_LOG[static]}")"
-echo "[fading] $(stats "${VRX_LOG[fading]}")"
-echo "interferer fade envelope samples: $(grep -c '<interferer-fade>' "$INTF_LOG")"
-echo "trajectories:"
-echo "  static: $(grep -c '<adaptive-vrx>' "${VRX_LOG[static]}") samples -> ${VRX_LOG[static]}"
-echo "  fading: $(grep -c '<adaptive-vrx>' "${VRX_LOG[fading]}") samples -> ${VRX_LOG[fading]}"
+echo "=== fade-SLA gain sweep (SLA target deliv >= $SLA; static/fading mean-matched) ==="
+printf "%-5s | %-34s | %-34s\n" "gain" "STATIC" "FADING"
+for g in $IGAINS; do
+  IGAIN=$g
+  run_phase static >/dev/null 2>&1
+  s=$(stats "${VRX_LOG[static]}")
+  run_phase fading --fade-coherence "$FADE_COH" --fade-depth-db "$FADE_DEPTH" >/dev/null 2>&1
+  f=$(stats "${VRX_LOG[fading]}")
+  printf "%-5s | %-34s | %-34s\n" "$g" "$s" "$f"
+done
+echo
+echo "Read the row where STATIC mean is ~>= $SLA (baseline holds): if FADING there"
+echo "drops below it, the fixed-margin controller under-delivers under fading —"
+echo "confirming the gap and justifying the opt-in fade margin (#118)."
 echo
 echo "Interpretation: if [fading] min/p10 deliv drops below $SLA while [static]"
 echo "holds it (at the same interferer gain), the fixed-margin controller is"

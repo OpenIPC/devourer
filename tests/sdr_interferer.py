@@ -56,6 +56,13 @@ def main(argv=None) -> int:
                     help="RNG seed — fixes the noise so runs are reproducible")
     ap.add_argument("--secs", type=float, default=0.0,
                     help="run time; 0 = until SIGINT/SIGTERM")
+    ap.add_argument("--fade-coherence", type=float, default=0.0,
+                    help="if >0, modulate interference power with a time-correlated "
+                         "(AR1) envelope of this coherence time (s) -> the victim "
+                         "link sees correlated SNR fades (for fade-SLA validation)")
+    ap.add_argument("--fade-depth-db", type=float, default=12.0,
+                    help="peak-to-floor interference power swing (dB) of the fade "
+                         "envelope; deeper = harder fades")
     args = ap.parse_args(argv)
 
     if args.freq is None:
@@ -105,20 +112,44 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGINT, lambda *_: stop.update(flag=True))
     signal.signal(signal.SIGTERM, lambda *_: stop.update(flag=True))
 
+    # Time-correlated fading envelope: an AR(1) process modulates the interference
+    # power, so the victim link sees correlated SNR fades. Base amplitude is
+    # auto-scaled so the loudest (~3-sigma) fade peak stays under the DAC ceiling.
+    fade_on = args.fade_coherence > 0.0
+    if fade_on:
+        buf_dt = nsamps / args.rate
+        fade_rho = float(np.exp(-buf_dt / args.fade_coherence))
+        fade_g = 0.0
+        peak_mult = 10.0 ** (args.fade_depth_db / 20.0 * 3.0)
+        fade_base = min(args.amplitude, 0.7 / peak_mult)
+        marker_every = max(1, int(0.1 / max(1e-6, buf_dt)))   # ~10 Hz markers
+
     t0 = time.monotonic()
     sent = 0
+    nbuf = 0
     while not stop["flag"]:
         if args.secs and (time.monotonic() - t0) >= args.secs:
             break
-        if args.mode == "cw":
-            buf = tone
+        if fade_on:
+            fade_g = fade_rho * fade_g + (1.0 - fade_rho ** 2) ** 0.5 * rng.standard_normal()
+            env = abs(fade_g)                              # correlated, mean ~0.8
+            amp = fade_base * 10.0 ** (args.fade_depth_db / 20.0 * env)
+            if nbuf % marker_every == 0:
+                sys.stderr.write(f"<interferer-fade>t={time.monotonic()-t0:.2f} "
+                                 f"env={env:.2f} amp={amp:.3f}\n")
+                sys.stderr.flush()
         else:
-            buf = (args.amplitude *
+            amp = args.amplitude
+        if args.mode == "cw":
+            buf = (tone * (amp / max(1e-9, args.amplitude))).astype(np.complex64)
+        else:
+            buf = (amp *
                    (rng.standard_normal(nsamps) + 1j * rng.standard_normal(nsamps))
                    / np.sqrt(2)).astype(np.complex64)
         tx.send(buf.reshape(1, -1), md)
         md.start_of_burst = False
         sent += nsamps
+        nbuf += 1
 
     md.end_of_burst = True
     try:

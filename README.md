@@ -186,6 +186,15 @@ on the kernel-TX path, so the `kernel`-TX rows of `--encoding-matrix`
 are not authoritative for LDPC/STBC asymmetries — devourer-TX rows
 ARE).
 
+### Video link design
+
+The long-range video link's two design documents:
+[`docs/adaptive-link.md`](docs/adaptive-link.md) — the energy-minimizing adaptive
+controller (VTX ↔ VRX), and how it compares to OpenIPC's `alink` and other
+adaptive systems — and [`docs/fused-fec.md`](docs/fused-fec.md) — the
+cross-layer (PHY-MCS ⊕ sub-block-integrity ⊕ outer erasure) FEC stack the
+link's per-layer quality SLA is stated against.
+
 ### Startup time
 
 Devourer reaches ready-to-RX/TX faster than the `aircrack-ng/88XXau`

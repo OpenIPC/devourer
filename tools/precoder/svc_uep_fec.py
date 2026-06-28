@@ -23,6 +23,7 @@ meant to be configured together (robust MCS + heavy FEC on the same layers).
 from __future__ import annotations
 
 import os
+import struct
 import sys
 from dataclasses import dataclass, field
 
@@ -33,6 +34,16 @@ if _HERE not in sys.path:
 import fec_subblock  # noqa: E402
 import stream_fec  # noqa: E402
 from stream_fec import FecConfig  # noqa: E402
+
+# Fragmentation header for NALs that exceed one FEC symbol. A real HEVC NAL
+# (IDR ~1-2 kB, P-frames hundreds of B) does not fit one outer-code symbol, so
+# `fragment=True` splits it into symbol-sized FEC packets, each tagged so the
+# receiver reassembles only when every fragment of a NAL survives (a lost
+# fragment drops just that NAL — exactly the per-NAL delivery the UEP SLA is
+# stated in). Header: per-stream nal_seq (u16, wraps), frag_idx (u8), n_frags
+# (u8). Opt-in: the default single-symbol path (small NALs) is unchanged.
+_FRAG_HDR = struct.Struct("<HBB")
+FRAG_HDR_LEN = _FRAG_HDR.size  # 4
 
 
 # --------------------------------------------------------------------------- #
@@ -128,8 +139,9 @@ class SvcUepEncoder:
     """Routes each NAL to its temporal layer's FEC stream and SBI-packs it.
     `add_nal` returns a list of (stream_id, body) ready for the radio."""
 
-    def __init__(self, policy: UepPolicy) -> None:
+    def __init__(self, policy: UepPolicy, fragment: bool = False) -> None:
         self.policy = policy
+        self.fragment = fragment
         self._enc = {sid: stream_fec.make_encoder(policy.layer(sid).fec)
                      for sid in policy.stream_ids()}
         self._env = {sid: _env_size(policy.layer(sid).fec)
@@ -138,13 +150,29 @@ class SvcUepEncoder:
             sid: fec_subblock.SubBlockPacker(
                 self._env[sid], policy.layer(sid).blocks_per_body, stream_id=sid)
             for sid in policy.stream_ids()}
+        self._seq = {sid: 0 for sid in policy.stream_ids()}
+
+    def _frag_packets(self, sid: int, nal: bytes) -> list[bytes]:
+        """Split a NAL into (seq,idx,count)-tagged packets sized for this layer's
+        FEC symbol. A 1-fragment NAL still carries the header so the receiver's
+        reassembly path is uniform."""
+        usable = self.policy.layer(sid).fec.max_packet_size - FRAG_HDR_LEN
+        if usable <= 0:
+            raise ValueError("symbol too small to fragment NALs")
+        chunks = [nal[i:i + usable] for i in range(0, max(len(nal), 1), usable)]
+        seq = self._seq[sid]
+        self._seq[sid] = (seq + 1) & 0xFFFF
+        n = len(chunks)
+        return [_FRAG_HDR.pack(seq, i, n) + c for i, c in enumerate(chunks)]
 
     def add_nal(self, nal: bytes) -> list[tuple[int, bytes]]:
         sid = self.policy.stream_for(parse_hevc_nal(nal))
+        packets = self._frag_packets(sid, nal) if self.fragment else [nal]
         out: list[tuple[int, bytes]] = []
-        for env in self._enc[sid].add_packet(nal):
-            for body in self._packer[sid].add(env):
-                out.append((sid, body))
+        for pkt in packets:
+            for env in self._enc[sid].add_packet(pkt):
+                for body in self._packer[sid].add(env):
+                    out.append((sid, body))
         return out
 
     def flush(self) -> list[tuple[int, bytes]]:
@@ -162,14 +190,36 @@ class SvcUepDecoder:
     """Routes a received body by its SBI stream_id to that layer's FEC decoder,
     unpacking with the layer's *configured* envelope size."""
 
-    def __init__(self, policy: UepPolicy) -> None:
+    def __init__(self, policy: UepPolicy, fragment: bool = False) -> None:
         self.policy = policy
+        self.fragment = fragment
         self._dec = {sid: stream_fec.make_decoder(policy.layer(sid).fec)
                      for sid in policy.stream_ids()}
         self._env = {sid: _env_size(policy.layer(sid).fec)
                      for sid in policy.stream_ids()}
+        # reassembly buffer: (sid, seq) -> {frag_idx: chunk}, plus expected count
+        self._reasm: dict[tuple[int, int], dict[int, bytes]] = {}
+        self._reasm_n: dict[tuple[int, int], int] = {}
         self.bodies_routed = 0
         self.bodies_misrouted = 0
+
+    def _reassemble(self, sid: int, pkt: bytes) -> list[tuple[int, bytes]]:
+        """Buffer a recovered fragment; emit the full NAL once all of its
+        fragments have arrived. A NAL whose fragments never all decode is simply
+        never emitted (dropped) — the per-NAL UEP delivery semantics."""
+        if len(pkt) < FRAG_HDR_LEN:
+            return []
+        seq, idx, n = _FRAG_HDR.unpack_from(pkt)
+        key = (sid, seq)
+        slot = self._reasm.setdefault(key, {})
+        slot[idx] = pkt[FRAG_HDR_LEN:]
+        self._reasm_n[key] = n
+        if len(slot) < n:
+            return []
+        nal = b"".join(slot[i] for i in range(n))
+        del self._reasm[key]
+        del self._reasm_n[key]
+        return [(sid, nal)]
 
     def add_body(self, body: bytes) -> list[tuple[int, bytes]]:
         sid = fec_subblock.peek_stream_id(body)
@@ -181,7 +231,10 @@ class SvcUepDecoder:
         out: list[tuple[int, bytes]] = []
         for env in res.survivors:
             for pkt in self._dec[sid].add_symbol(env):
-                out.append((sid, pkt))
+                if self.fragment:
+                    out += self._reassemble(sid, pkt)
+                else:
+                    out.append((sid, pkt))
         return out
 
     def blocks_decoded(self, stream_id: int) -> int:

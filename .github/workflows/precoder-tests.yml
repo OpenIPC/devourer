@@ -1,0 +1,41 @@
+name: Precoder unit tests
+
+# Runs the tools/precoder pytest suite (DSP KATs, FEC round-trips, the adaptive
+# energy link, and the SVC-HEVC UEP pipeline) headlessly in CI. The SVC pipeline
+# drives synthetic HEVC (tests/gen_svc_nals.py) through encode -> per-layer
+# channel -> decode and asserts the graceful-degradation staircase.
+on:
+  push:
+    branches: [ "master" ]
+    paths:
+      - 'tools/precoder/**'
+      - 'tests/gen_svc_nals.py'
+      - '.github/workflows/precoder-tests.yml'
+  pull_request:
+    branches: [ "master" ]
+    paths:
+      - 'tools/precoder/**'
+      - 'tests/gen_svc_nals.py'
+      - '.github/workflows/precoder-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/precoder
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Build vendored swif RLC extension
+        run: uv run python _swif_build.py
+
+      - name: Run precoder test suite
+        run: uv run pytest -q

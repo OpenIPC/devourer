@@ -38,7 +38,8 @@ Phase-B SDR extra (optional): `uv sync --extra sdr`.
 | `test_pipeline.py` | pytest: scrambler/BCC/interleaver KATs + pipeline round-trips |
 | `stream_fec*.py` | outer erasure codes: RaptorQ (`_raptorq`), RLC (`_rlc`), **Reed-Solomon (`_rs`)**; `stream_fec.py` dispatches by `FecConfig.scheme` |
 | `fec_subblock.py` | **sub-block integrity (SBI)** — per-sub-block CRC so a kept-corrupt frame yields its surviving symbols as erasures, not a whole-frame loss |
-| `svc_uep_fec.py` | per-SVC-layer FEC-rate UEP (heavy FEC on base/IDR, light on enhancement) — the app-FEC half of cross-layer UEP |
+| `svc_uep_fec.py` | per-SVC-layer FEC-rate UEP (heavy FEC on base/IDR, light on enhancement) — the app-FEC half of cross-layer UEP; `fragment=True` splits real-sized NALs into FEC packets |
+| `svc_pipeline.py` | end-to-end SVC-HEVC UEP sim: synthetic HEVC (`tests/gen_svc_nals.py`) → per-layer FEC+SBI → per-layer (MCS,SNR) channel → decode; `run_svc_pipeline_adaptive` closes the loop with `SvcController` (per-layer MCS, shedding, shared power) |
 | `fec_fusion_sim.py` | offline sim quantifying the SBI gain + picking the sub-block size, no hardware |
 | `fused_fec_link.py` + `fused_fec_tx/rx.py` | chip↔chip RS+SBI sender/receiver + CLIs (RX reports baseline-vs-SBI gain) |
 
@@ -68,6 +69,26 @@ sudo bash ../../tests/fused_fec_onair.sh        # reports FUSED-FEC GAIN
 The PHY-MCS half of SVC unequal error protection lives in C++
 (`txdemo/svc_tx_demo/svc_tx.h`, `DEVOURER_SVC_LADDER`); `svc_uep_fec.py` adds the
 matching FEC-rate ladder so base/IDR layers get robust MCS **and** heavy FEC.
+`svc_pipeline.py` runs both halves end-to-end against a synthetic HEVC stream and
+shows the graceful-degradation staircase (T2 sheds first, base/IDR last):
+
+```sh
+uv run python svc_pipeline.py        # per-layer delivery across an SNR sweep
+```
+
+The whole `tools/precoder` suite — including the SVC pipeline staircase and the
+closed-loop adaptive variant — runs headlessly in CI
+(`.github/workflows/precoder-tests.yml`).
+
+## Adaptive video link
+
+The energy-minimizing adaptive link (drone VTX ↔ ground VRX) — controller,
+energy/link models, feedback + rendezvous protocol, and how it differs from
+OpenIPC's `alink` and other adaptive systems — is documented in
+[`docs/adaptive-link.md`](../../docs/adaptive-link.md). Its modules
+(`energy_model.py`, `link_model.py`, `op_table.py`, `controller.py`,
+`rc_proto.py`, `score.py`, `rendezvous.py`, `adaptive_link.py`) and the offline
+energy headline (`tests/sim_loop.py`) all live alongside this suite.
 
 ## End-to-end recipe
 

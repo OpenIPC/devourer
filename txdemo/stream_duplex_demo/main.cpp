@@ -78,7 +78,10 @@ static constexpr uint16_t kRealtekProductIds[] = {
 // kRadiotapLegacy6M constant. The canonical SA matcher in the packet
 // processor below is identical to demo/main.cpp's, so any tooling that
 // already grep'd <devourer-stream> lines keeps working unchanged.
-static const std::vector<uint8_t> kStreamRadiotap =
+// Radiotap is MUTABLE here (the adaptive link rewrites the on-air rate live via
+// the stdin SET_RATE control op). Guarded by g_rt_mu against the TX thread.
+static std::mutex g_rt_mu;
+static std::vector<uint8_t> g_radiotap =
     devourer::build_stream_radiotap(devourer::parse_tx_mode_env());
 static const uint8_t kCanonicalSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
 
@@ -137,8 +140,19 @@ static void packet_processor(const Packet &packet) {
   if (std::memcmp(packet.Data.data() + 10, kCanonicalSa, 6) != 0) return;
   long hits = ++g_rx_hits;
   std::lock_guard<std::mutex> lk(g_print_mu);
-  std::printf("<devourer-stream>rate=%u len=%zu body=",
-              packet.RxAtrib.data_rate, packet.Data.size());
+  // Full field set (mirrors demo/main.cpp) so the adaptive VRX can score RSSI/SNR
+  // and the VTX can read RCF/DISC bodies + ACK_SEQ.
+  std::printf("<devourer-stream>rate=%u len=%zu crc_err=%u icv_err=%u "
+              "rssi=%d,%d evm=%d,%d snr=%d,%d seq=%u tsfl=%u "
+              "bw=%u stbc=%u ldpc=%u sgi=%u body=",
+              packet.RxAtrib.data_rate, packet.Data.size(),
+              packet.RxAtrib.crc_err ? 1u : 0u, packet.RxAtrib.icv_err ? 1u : 0u,
+              packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1],
+              packet.RxAtrib.evm[0], packet.RxAtrib.evm[1],
+              packet.RxAtrib.snr[0], packet.RxAtrib.snr[1],
+              packet.RxAtrib.seq_num, packet.RxAtrib.tsfl,
+              packet.RxAtrib.bw, packet.RxAtrib.stbc,
+              packet.RxAtrib.ldpc, packet.RxAtrib.sgi);
   for (size_t i = 24; i < packet.Data.size(); ++i)
     std::printf("%02x", packet.Data[i]);
   std::printf("\n");
@@ -161,7 +175,7 @@ struct TxArgs {
 static void tx_thread(TxArgs args) {
   auto dot11 = build_dot11_probe_req();
   std::vector<uint8_t> tx_buf;
-  tx_buf.reserve(kStreamRadiotap.size() + dot11.size() + args.max_psdu);
+  tx_buf.reserve(g_radiotap.size() + dot11.size() + args.max_psdu);
   long tx_count = 0;
 
   while (!args.should_stop->load()) {
@@ -176,6 +190,34 @@ static void tx_thread(TxArgs args) {
                  | (static_cast<uint32_t>(len_bytes[1]) << 8)
                  | (static_cast<uint32_t>(len_bytes[2]) << 16)
                  | (static_cast<uint32_t>(len_bytes[3]) << 24);
+
+    // Control-opcode escape: top bit set -> the body is a control TLV (the
+    // adaptive link's live knobs), not a PSDU. <op:u8><payload...>.
+    if (len & 0x80000000u) {
+      uint32_t clen = len & 0x7fffffffu;
+      if (clen == 0 || clen > 256) break;
+      std::vector<uint8_t> ctl(clen);
+      if (stream_stdin::read_exact(stdin, ctl.data(), clen) !=
+          stream_stdin::ReadResult::Ok)
+        break;
+      uint8_t op = ctl[0];
+      if (op == 1 && clen >= 2) {                 // SET_PWR <idx>
+        args.rtl->SetTxPowerOverride(ctl[1]);
+        args.rtl->ApplyTxPower();
+      } else if (op == 2 && clen >= 2) {          // SET_RATE <spec ascii>
+        std::string spec(ctl.begin() + 1, ctl.end());
+        auto rt = devourer::build_stream_radiotap(devourer::parse_tx_mode_str(spec));
+        std::lock_guard<std::mutex> lk(g_rt_mu);
+        g_radiotap = std::move(rt);
+      } else if (op == 3 && clen >= 4) {          // SET_CHAN <ch><offset><width>
+        args.rtl->SetMonitorChannel(SelectedChannel{
+            .Channel = ctl[1], .ChannelOffset = ctl[2],
+            .ChannelWidth = static_cast<ChannelWidth_t>(ctl[3])});
+      }
+      std::fprintf(stderr, "<stream-duplex>ctl op=%u len=%u\n", op, clen);
+      continue;
+    }
+
     if (len == 0 || len > args.max_psdu) {
       std::fprintf(stderr,
                    "<stream-duplex>tx PSDU len %u out of range (max %zu)\n",
@@ -189,8 +231,10 @@ static void tx_thread(TxArgs args) {
       break;
     }
     tx_buf.clear();
-    tx_buf.insert(tx_buf.end(), kStreamRadiotap.begin(),
-                  kStreamRadiotap.end());
+    {
+      std::lock_guard<std::mutex> lk(g_rt_mu);   // live rate may be rewritten
+      tx_buf.insert(tx_buf.end(), g_radiotap.begin(), g_radiotap.end());
+    }
     tx_buf.insert(tx_buf.end(), dot11.begin(), dot11.end());
     tx_buf.insert(tx_buf.end(), psdu.begin(), psdu.end());
     bool ok = args.rtl->send_packet(tx_buf.data(), tx_buf.size());

@@ -84,6 +84,52 @@ def test_sim_energy_savings_headline():
     assert r["changes"] < 100                         # no flapping over 200 ticks
 
 
+def _drive_pl(ctrl, pl_seq, calib, txagc0=32):
+    """Drive a controller with a free-SNR (path-loss) sequence, feeding back the
+    reported SNR at the previously applied TXAGC (like the real loop), so the
+    controller's recovered path loss — and its variance — are uncontaminated by
+    its own power moves."""
+    txagc, op = txagc0, None
+    for t, pl in enumerate(pl_seq):
+        reported = pl + calib.gain_db(txagc)
+        op = ctrl.update(reported, txagc, now_ms=t * 100)
+        if op is not None:
+            txagc = op.txagc
+    return op
+
+
+def test_fade_margin_off_is_behaviourally_unchanged():
+    """Default config (fade_margin_k=0): the tracked variance has zero effect on
+    the chosen op — the opt-in fade margin never changes shipped behaviour."""
+    calib = em.load_calibration()
+    seq = [18.0 + (8.0 if i % 2 else -8.0) for i in range(40)]   # volatile
+    a = _drive_pl(_ctrl(target=0.99, allow_shed=False, fade_margin_k=0.0), seq, calib)
+    b = _drive_pl(_ctrl(target=0.99, allow_shed=False, fade_margin_k=0.0), seq, calib)
+    assert (a.mcs, a.overhead, a.txagc) == (b.mcs, b.overhead, b.txagc)
+
+
+def test_fade_margin_adds_power_headroom_not_airtime():
+    """With the fade margin enabled and a volatile path loss, the controller adds
+    TXAGC headroom (more power) while KEEPING the energy-min MCS/FEC — the margin
+    must not be spent on airtime (lower MCS / heavier FEC), which would overload
+    the channel during fades. This is the validated fix for fading under-delivery."""
+    calib = em.load_calibration()
+    seq = [18.0 + (8.0 if i % 2 else -8.0) for i in range(40)]
+    base = _drive_pl(_ctrl(target=0.99, allow_shed=False, fade_margin_k=0.0), seq, calib)
+    fade = _drive_pl(_ctrl(target=0.99, allow_shed=False, fade_margin_k=1.5), seq, calib)
+    assert fade.txagc > base.txagc                       # more power
+    assert fade.mcs == base.mcs and fade.overhead == base.overhead   # same airtime
+
+
+def test_fade_variance_tracked_only_when_volatile():
+    calib = em.load_calibration()
+    volatile = _ctrl(target=0.99, fade_margin_k=1.0)
+    _drive_pl(volatile, [18.0 + (6.0 if i % 2 else -6.0) for i in range(40)], calib)
+    steady = _ctrl(target=0.99, fade_margin_k=1.0)
+    _drive_pl(steady, [18.0] * 40, calib)
+    assert volatile.pl_var_ema > 1.0 and steady.pl_var_ema < 0.5
+
+
 def test_svc_uep_graceful_staircase():
     """As SNR drops, enhancement layers (T2 then T1) shed first; base (critical/T0)
     holds longest — the UEP graceful-degradation staircase."""

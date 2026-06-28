@@ -256,8 +256,12 @@ def run_vrx(proc, link, calib, vtx_id, channel, feedback_period_ms=100):
                 continue
             snr = max(int(m.group("snr")), int(m.group("snr2")))
             rssi = max(int(m.group("rssi")), int(m.group("rssi2")))
-            vrx.on_video(rssi, snr, int(m.group("crc")) != 0, int(m.group("seq")),
-                         _now_ms())
+            # App-level sequence: the VTX prefixes a 12-bit per-video-frame counter,
+            # so gap-based loss is EXACT. (The 802.11 seq=... advances per transmitted
+            # frame incl. retries, so it over-counts loss — see score.seq_gap_loss.)
+            seq = (int.from_bytes(body[:2], "little") & 0xFFF
+                   if len(body) >= 2 else int(m.group("seq")))
+            vrx.on_video(rssi, snr, int(m.group("crc")) != 0, seq, _now_ms())
     threading.Thread(target=reader, daemon=True).start()
     import sys
     import time
@@ -307,6 +311,7 @@ def run_vtx(proc, vtx_id, video_path, channel):
     import sys
     import time
     vid = open(video_path, "rb") if video_path else None
+    app_seq = 0                                  # 12-bit per-video-frame counter
     last_log = 0.0
     cur_chan = channel
     prev_state = vtx.rz.state
@@ -327,10 +332,12 @@ def run_vtx(proc, vtx_id, video_path, channel):
             proc.stdin.write(ctl_frame(SET_PWR, bytes([vtx.state.txagc])))
             proc.stdin.flush()
         if vid is not None and act in (rz.A_TX_VIDEO, rz.A_FAILSAFE):
-            chunk = vid.read(1024)
+            chunk = vid.read(1022)               # room for the 2-byte app-seq header
             if not chunk:
-                vid.seek(0); chunk = vid.read(1024)
-            proc.stdin.write(psdu_frame(chunk)); proc.stdin.flush()
+                vid.seek(0); chunk = vid.read(1022)
+            proc.stdin.write(psdu_frame(app_seq.to_bytes(2, "little") + chunk))
+            proc.stdin.flush()
+            app_seq = (app_seq + 1) & 0xFFF
         if now - last_log > 1000:
             last_log = now
             sys.stderr.write(f"<adaptive-vtx>state={vtx.rz.state} txagc={vtx.state.txagc} "

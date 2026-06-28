@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # On-air verification of SvcTxDemo's TID -> TxMode UEP mapping.
 #
-# Synthetic HEVC NALs (tests/gen_svc_nals.py, ratio 1:4:8:16 = IDR:T0:T1:T2) are
-# injected by the 8812; the 8814 kernel monitor witness decodes the per-frame
-# MCS. The decoded histogram should track the default_policy ladder
-# (critical=MCS0, T0=MCS1, T1=MCS4, T2=MCS7) in the same 1:4:8:16 proportion.
+# Synthetic HEVC NALs (tests/gen_svc_nals.py: 4:8:16 T0/T1/T2 per GOP plus an
+# IDR access unit — VPS/SPS/PPS/IDR — every other GOP) are injected by the 8812;
+# the 8814 kernel monitor witness decodes the per-frame MCS. The decoded
+# histogram should track the default_policy ladder (critical=MCS0, T0=MCS1,
+# T1=MCS4, T2=MCS7), enhancement layers dominating the count.
 #
 # ch6 (2.4 GHz, low current) avoids the USB Vbus-sag gotcha; a fresh power-cycle
 # is taken first. Run: sudo bash tests/svc_uep_onair.sh

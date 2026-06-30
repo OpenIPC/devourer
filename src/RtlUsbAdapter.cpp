@@ -16,8 +16,62 @@
 
 using namespace std::chrono_literals;
 
-RtlUsbAdapter::RtlUsbAdapter(libusb_device_handle *dev_handle, Logger_t logger)
-    : _dev_handle{dev_handle}, _logger{logger} {
+namespace {
+/* Shared state for the async RX URB queue. */
+struct AsyncRxShared {
+  const std::function<void(const uint8_t *, int)> *cb;
+  const volatile bool *stop;
+  int active;
+};
+extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
+  auto *s = static_cast<AsyncRxShared *>(t->user_data);
+  if (t->status == LIBUSB_TRANSFER_COMPLETED && t->actual_length > 0)
+    (*s->cb)(t->buffer, t->actual_length);
+  bool resubmit = !*s->stop && (t->status == LIBUSB_TRANSFER_COMPLETED ||
+                                t->status == LIBUSB_TRANSFER_TIMED_OUT);
+  if (resubmit && libusb_submit_transfer(t) == 0)
+    return;
+  s->active--; /* not resubmitted -> this URB is done */
+}
+} // namespace
+
+void RtlUsbAdapter::bulk_read_async_loop(
+    int buf_size, int n_urbs,
+    const std::function<void(const uint8_t *, int)> &on_data,
+    const volatile bool &stop) {
+  AsyncRxShared sh{&on_data, &stop, 0};
+  std::vector<libusb_transfer *> xfers;
+  std::vector<std::vector<uint8_t>> bufs(n_urbs,
+                                         std::vector<uint8_t>(buf_size));
+  for (int i = 0; i < n_urbs; i++) {
+    libusb_transfer *t = libusb_alloc_transfer(0);
+    libusb_fill_bulk_transfer(t, _dev_handle, _bulk_in_ep, bufs[i].data(),
+                              buf_size, devourer_rx_cb, &sh, 1000);
+    if (libusb_submit_transfer(t) == 0) {
+      xfers.push_back(t);
+      sh.active++;
+    } else {
+      libusb_free_transfer(t);
+    }
+  }
+  _logger->info("Jaguar3 RX: async queue of {} URBs submitted", sh.active);
+  while (!stop && sh.active > 0) {
+    struct timeval tv {0, 100000};
+    libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
+  }
+  for (auto *t : xfers)
+    libusb_cancel_transfer(t);
+  while (sh.active > 0) {
+    struct timeval tv {0, 100000};
+    libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
+  }
+  for (auto *t : xfers)
+    libusb_free_transfer(t);
+}
+
+RtlUsbAdapter::RtlUsbAdapter(libusb_device_handle *dev_handle, Logger_t logger,
+                             libusb_context *ctx)
+    : _dev_handle{dev_handle}, _ctx{ctx}, _logger{logger} {
   libusb_device_descriptor desc{};
   if (libusb_get_device_descriptor(libusb_get_device(_dev_handle), &desc) ==
       LIBUSB_SUCCESS) {

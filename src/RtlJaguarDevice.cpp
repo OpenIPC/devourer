@@ -1,6 +1,7 @@
 #include "RtlJaguarDevice.h"
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
+#include "SignalStop.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -40,6 +41,8 @@ static int freq_to_chan(uint16_t freq_mhz) {
     return (freq_mhz - 5000) / 5;        /* 5 GHz UNII ch */
   return 0;
 }
+
+SelectedChannel RtlJaguarDevice::GetSelectedChannel() { return _channel; }
 
 bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   struct tx_desc *ptxdesc;
@@ -400,13 +403,13 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
   std::vector<std::thread> workers;
   for (int i = 0; i < rx_workers; ++i) {
     workers.emplace_back([this, &proc_mu]() {
-      while (!should_stop) {
+      while (!should_stop && !g_devourer_should_stop) {
         auto packets = _device.infinite_read();
         if (packets.empty())
           continue;
         std::lock_guard<std::mutex> lk(proc_mu);
         for (auto &p : packets) {
-          if (should_stop)
+          if (should_stop || g_devourer_should_stop)
             break;
           _packetProcessor(p);
         }

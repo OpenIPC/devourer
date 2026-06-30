@@ -27,7 +27,9 @@
 #endif
 
 #include "FrameParser.h"
+#include "RtlJaguarDevice.h"
 #include "RtlUsbAdapter.h"
+#include "SignalStop.h"
 #include "WiFiDriver.h"
 #include "RadiotapBuilder.h"
 #include "logger.h"
@@ -38,6 +40,7 @@
  * demo (demo/main.cpp). */
 static constexpr uint16_t kRealtekProductIds[] = {
     0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
+    0xc82c, 0xc82e, 0xc812, /* RTL8822CU/8812CU (Jaguar3) */
 };
 
 /* Process-start reference for the init-timing lines (see src/InitTimer.h).
@@ -97,9 +100,14 @@ static void packetProcessor(const Packet &packet) {
 }
 
 void usb_event_loop(Logger_t _logger, libusb_context *ctx) {
-  while (true) {
-    int r = libusb_handle_events(ctx);
-    if (r < 0) {
+  /* Poll with a timeout (not the blocking libusb_handle_events) so the thread
+   * notices g_devourer_should_stop and returns — letting main() join it before
+   * libusb_exit. A still-running event thread inside libusb at exit time trips
+   * libusb's mutex-destroy assertion (SIGABRT/core dump). */
+  while (!g_devourer_should_stop) {
+    struct timeval tv {0, 100000};
+    int r = libusb_handle_events_timeout_completed(ctx, &tv, nullptr);
+    if (r < 0 && r != LIBUSB_ERROR_TIMEOUT) {
       _logger->error("Error handling events: {}", r);
       break;
     }
@@ -112,6 +120,10 @@ int main(int argc, char **argv) {
   int rc;
 
   auto logger = std::make_shared<Logger>();
+
+  /* SIGINT/SIGTERM -> break the TX loop and run a clean chip de-init, so the
+   * harness's `timeout` doesn't leave the adapter's USB core hung. */
+  install_devourer_signal_handlers();
 
   /* Two modes:
    *  1. Termux/Android: argv[1] = numeric USB fd (wrapped via
@@ -186,6 +198,13 @@ int main(int argc, char **argv) {
   }
   logger->info("init-timing: txdemo.usb_reset = {} ms", ms_since_start());
 
+  /* Self-set the USB configuration (don't rely on the kernel) so we run on a
+   * truly cold chip; no-op if config 1 is already active. */
+  {
+    int cfg = 0;
+    if (libusb_get_configuration(handle, &cfg) != 0 || cfg != 1)
+      libusb_set_configuration(handle, 1);
+  }
   rc = libusb_claim_interface(handle, 0);
   assert(rc == 0);
 
@@ -298,6 +317,12 @@ int main(int argc, char **argv) {
   auto rtlDevice = wifi_driver.CreateRtlDevice(handle);
   logger->info("init-timing: txdemo.create_device = {} ms", ms_since_start());
 
+  /* Jaguar1-only research features (TX-mode default, fast-retune hopping,
+   * thermal telemetry, TXAGC override, BB-reg probe) are not part of the
+   * IRtlDevice contract — reach them by downcasting. jag is null on Jaguar3,
+   * where those call sites are skipped. */
+  RtlJaguarDevice *jag = dynamic_cast<RtlJaguarDevice *>(rtlDevice.get());
+
   int channel = 161;
   if (const char *ch_env = std::getenv("DEVOURER_CHANNEL")) {
     channel = std::atoi(ch_env);
@@ -306,7 +331,8 @@ int main(int argc, char **argv) {
 
   /* Bandwidth for init + hopping. DEVOURER_HOP_BW = 20|40|80 (default 20),
    * DEVOURER_HOP_OFFSET = primary-channel offset (0=DONT_CARE, 1=LOWER/HT40+,
-   * 2=UPPER/HT40-) for 40/80. FastRetune reuses the device's bandwidth. */
+   * 2=UPPER/HT40-) for 40/80. FastRetune reuses the device's bandwidth.
+   * DEVOURER_NB_BW = 5|10 re-clocks the baseband to narrowband (Jaguar3 only). */
   ChannelWidth_t init_width = CHANNEL_WIDTH_20;
   uint8_t init_offset = 0;
   if (const char *e = std::getenv("DEVOURER_HOP_BW")) {
@@ -319,8 +345,20 @@ int main(int argc, char **argv) {
     if (const char *o = std::getenv("DEVOURER_HOP_OFFSET"))
       init_offset = static_cast<uint8_t>(std::atoi(o));
   }
+  if (const char *nb = std::getenv("DEVOURER_NB_BW")) {
+    int mhz = std::atoi(nb);
+    if (mhz == 5)
+      init_width = CHANNEL_WIDTH_5;
+    else if (mhz == 10)
+      init_width = CHANNEL_WIDTH_10;
+    logger->info("DEVOURER_NB_BW={} — TX bandwidth {} MHz", nb, mhz);
+  }
 
-  rtlDevice->SetTxPower(40);
+  /* TX power: default reference 40; DEVOURER_TX_PWR=0xNN overrides it. */
+  int tx_pwr = 40;
+  if (const char *p = std::getenv("DEVOURER_TX_PWR"))
+    tx_pwr = static_cast<int>(std::strtol(p, nullptr, 0));
+  rtlDevice->SetTxPower(static_cast<uint8_t>(tx_pwr));
 
   /* The original txdemo forked an RX child and a TX parent on the same
    * libusb handle. That pattern is Termux-specific (libusb_wrap_sys_device
@@ -377,7 +415,10 @@ int main(int argc, char **argv) {
    * default apply; a frame embedding its own rate radiotap overrides it per
    * packet. Default (no env) = 6 M legacy. Replaces the former per-knob
    * DEVOURER_TX_MCS/_VHT/_LDPC/_STBC/_BW env vars + the DEVOURER_TX_HT_MCS gate. */
-  rtlDevice->SetTxMode(devourer::parse_tx_mode_env());
+  /* TX-mode default is a Jaguar1 (RtlJaguarDevice) feature; on Jaguar3 the
+   * frame's own radiotap carries the rate. */
+  if (jag)
+    jag->SetTxMode(devourer::parse_tx_mode_env());
 
   std::vector<uint8_t> tx_buf(beacon_frame, beacon_frame + sizeof(beacon_frame));
 
@@ -500,8 +541,10 @@ int main(int argc, char **argv) {
   long pwr_next_step_ms = 0;
   bool txpwr_readback = std::getenv("DEVOURER_TX_PWR_READBACK") != nullptr;
   auto apply_txpwr = [&](int idx) {
-    rtlDevice->SetTxPowerOverride(idx);
-    rtlDevice->ApplyTxPower();  /* SetMonitorChannel early-returns on same ch */
+    if (!jag) /* TXAGC override is a Jaguar1 (RtlJaguarDevice) feature */
+      return;
+    jag->SetTxPowerOverride(idx);
+    jag->ApplyTxPower();  /* SetMonitorChannel early-returns on same ch */
     printf("<devourer-txpwr>index=%d t_ms=%lld\n", idx,
            static_cast<long long>(ms_since_start()));
     if (txpwr_readback) {
@@ -509,8 +552,8 @@ int main(int argc, char **argv) {
        * 0xc20, 6M-OFDM is byte0 of 0xc24. If these read back == idx but on-air
        * power doesn't follow (CCK), the chip floors CCK elsewhere; if they read
        * back != idx, something clobbered the write. */
-      uint32_t cck1m = rtlDevice->ReadBBReg(0xc20, 0x000000ff);
-      uint32_t ofdm6m = rtlDevice->ReadBBReg(0xc24, 0x000000ff);
+      uint32_t cck1m = jag->ReadBBReg(0xc20, 0x000000ff);
+      uint32_t ofdm6m = jag->ReadBBReg(0xc24, 0x000000ff);
       printf("<devourer-txpwr-rb>index=%d cck1m=%u ofdm6m=%u\n", idx, cck1m,
              ofdm6m);
     }
@@ -543,7 +586,19 @@ int main(int argc, char **argv) {
       hop_rounds > 0 ? hop_rounds * static_cast<long>(hop_channels.size()) : 0;
 
   long tx_count = 0;
-  while (true) {
+  long consec_fail = 0;
+  /* If the TX path isn't enabled the chip NAKs every bulk-OUT; hammering a
+   * non-draining endpoint for the whole run is what wedged its USB core. Bail
+   * out after a short burst of consecutive failures so we shut down cleanly
+   * (Stop()) instead of flooding the chip into a -71 hang. */
+  constexpr long kMaxConsecFail = 8;
+  /* Inter-frame delay (default 2 ms ~ 500 fps). DEVOURER_TX_INTERVAL_MS overrides
+   * it — used to test whether the Jaguar3 sustained-TX ceiling is wall-clock
+   * (timer) or frame-count (per-frame resource) bound. */
+  int tx_interval_ms = 2;
+  if (const char *iv = std::getenv("DEVOURER_TX_INTERVAL_MS"))
+    tx_interval_ms = std::atoi(iv);
+  while (!g_devourer_should_stop) {
     if (tx_count == 0) {
       logger->info("init-timing: txdemo.first_tx_submit = {} ms",
                    ms_since_start());
@@ -573,8 +628,8 @@ int main(int argc, char **argv) {
         tx_buf = build_frame_with_channel(chan_to_freq(ch), beacon_frame + 10,
                                           sizeof(beacon_frame) - 10);
         mode = " radiotap";
-      } else if (hop_fast) {
-        rtlDevice->FastRetune(static_cast<uint8_t>(ch), /*cache_rf=*/hop_fast != 2);
+      } else if (hop_fast && jag) {
+        jag->FastRetune(static_cast<uint8_t>(ch), /*cache_rf=*/hop_fast != 2);
         mode = " fast";
       } else {
         rtlDevice->SetMonitorChannel(SelectedChannel{
@@ -600,8 +655,10 @@ int main(int argc, char **argv) {
       printf("<devourer-tx>TX #%ld rc=%d\n", tx_count, rc);
       fflush(stdout);
     }
-    if (thermal_every > 0 && tx_count % thermal_every == 0) {
-      auto t = rtlDevice->GetThermalStatus();
+    /* Thermal telemetry is a Jaguar1 (RtlJaguarDevice) feature; skip on
+     * Jaguar3, where jag is null. */
+    if (jag && thermal_every > 0 && tx_count % thermal_every == 0) {
+      auto t = jag->GetThermalStatus();
       if (t.valid) {
         printf("<devourer-thermal>raw=%u baseline=%u delta=%+d status=%s\n",
                t.raw, t.baseline, t.delta, ThermalBucket(t));
@@ -620,13 +677,47 @@ int main(int argc, char **argv) {
       }
       fflush(stdout);
     }
+    if (rc) {
+      consec_fail = 0;
+    } else if (++consec_fail >= kMaxConsecFail) {
+      logger->error("TX aborting: {} consecutive bulk-OUT failures — TX path "
+                    "not enabled (chip NAKing). Stopping to avoid wedging the "
+                    "adapter; clean card-disable follows.",
+                    consec_fail);
+      break;
+    }
     if (tx_gap_us > 0)
       std::this_thread::sleep_for(std::chrono::microseconds(tx_gap_us));
+    else if (tx_interval_ms > 0)
+      std::this_thread::sleep_for(std::chrono::milliseconds(tx_interval_ms));
   }
-  /* Only reached in bounded hop mode (DEVOURER_HOP_ROUNDS>0). The usb_thread
-   * is still spinning on libusb_handle_events over this handle, so don't race
-   * it through release/close — announce completion and exit hard. */
-  printf("<devourer-hop-done>frames=%ld dwells=%ld\n", tx_count, dwell_no + 1);
-  fflush(stdout);
-  std::exit(0);
+
+  /* Bounded hop mode (DEVOURER_HOP_ROUNDS>0) reaches here when its rounds
+   * complete; the signal and back-off paths also fall through. */
+  if (!hop_channels.empty()) {
+    printf("<devourer-hop-done>frames=%ld dwells=%ld\n", tx_count, dwell_no + 1);
+    fflush(stdout);
+  }
+
+  /* Stop and join the libusb event thread BEFORE any teardown: a thread still
+   * inside libusb when libusb_exit runs trips an internal mutex-destroy assertion
+   * (core dump). Setting the flag also covers the back-off exit path, where no
+   * signal was delivered. */
+  g_devourer_should_stop = true;
+  if (usb_thread.joinable())
+    usb_thread.join();
+
+  /* Clean chip de-init before releasing the interface (card-disable PWR_SEQ), so
+   * the adapter re-enumerates instead of hanging its USB core. */
+  rtlDevice->Stop();
+
+  /* Tolerant teardown: if the chip already dropped off the bus (e.g. a TX-path
+   * wedge), release_interface returns an error — log it, don't assert/abort. */
+  rc = libusb_release_interface(handle, 0);
+  if (rc != 0)
+    logger->info("libusb_release_interface rc={} (device already gone?)", rc);
+
+  libusb_close(handle);
+  libusb_exit(context);
+  return 0;
 }

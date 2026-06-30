@@ -61,6 +61,7 @@
 #include "FrameParser.h"
 #include "RadiotapBuilder.h"
 #include "RtlUsbAdapter.h"
+#include "RtlJaguarDevice.h"
 #include "WiFiDriver.h"
 #include "logger.h"
 #include "stream_stdin.h"
@@ -164,8 +165,8 @@ static void packet_processor(const Packet &packet) {
 }
 
 struct TxArgs {
-  class RtlJaguarDevice *rtl;  // unique_ptr lives in main(); raw ptr OK while
-                                // we join() before that unique_ptr goes away
+  class IRtlDevice *rtl;  // unique_ptr lives in main(); raw ptr OK while
+                          // we join() before that unique_ptr goes away
   int interval_ms;
   size_t max_psdu;
   std::atomic<bool> *should_stop;
@@ -202,8 +203,11 @@ static void tx_thread(TxArgs args) {
         break;
       uint8_t op = ctl[0];
       if (op == 1 && clen >= 2) {                 // SET_PWR <idx>
-        args.rtl->SetTxPowerOverride(ctl[1]);
-        args.rtl->ApplyTxPower();
+        /* TXAGC override is a Jaguar1 (RtlJaguarDevice) feature. */
+        if (auto *jag = dynamic_cast<RtlJaguarDevice *>(args.rtl)) {
+          jag->SetTxPowerOverride(ctl[1]);
+          jag->ApplyTxPower();
+        }
       } else if (op == 2 && clen >= 2) {          // SET_RATE <spec ascii>
         std::string spec(ctl.begin() + 1, ctl.end());
         auto rt = devourer::build_stream_radiotap(devourer::parse_tx_mode_str(spec));

@@ -9,13 +9,55 @@ directly via libusb instead of a kernel module. Static library `WiFiDriver` + tw
 demo binaries (`WiFiDriverDemo` for RX, `WiFiDriverTxDemo` for TX). Used by the
 OpenIPC project for long-range video links.
 
-Targets the Realtek "Jaguar" 1st-gen 802.11ac family: **RTL8812AU** (2T2R,
+Two chip generations are supported, dispatched at construction (see
+**Architecture**):
+
+**Jaguar (1st-gen 802.11ac).** The original family: **RTL8812AU** (2T2R,
 reference), **RTL8811AU** (1T1R cut of 8812 silicon — rides the 8812 code
 path with `RFType=RF_TYPE_1T1R` selected via `REG_SYS_CFG` bit 27),
 **RTL8814AU** (4T4R RF / 3-SS baseband; host-pushed TX requires the
 on-chip 3081 MCU, which devourer boots during firmware download —
 a failed FW-boot poll means dead TX while RX still works), and
-**RTL8821AU** (1T1R AC + BT combo).
+**RTL8821AU** (1T1R AC + BT combo). These share one HAL (`src/HalModule`,
+`src/RtlJaguarDevice`) with chip-family branches.
+
+**Jaguar3 (`rtl8822c` PHY generation).** A second, self-contained HAL under
+`src/jaguar3/` for the **RTL8812CU / RTL8822CU** (`0bda:c812` etc.), built to
+reach **narrowband 5/10 MHz** (a baseband underclock the Jaguar-1 silicon
+physically lacks). It ports Realtek's vendor bring-up from source — power-on,
+HalMAC firmware download, MAC/BB/RF init, the halrf calibration steps needed
+for TX (3-wire RF + DACK + beamforming init), then RX and on-air TX at
+20 MHz plus the 5/10 MHz narrowband re-clock. Validated on RTL8812CU
+hardware. RTL8812EU/8822EU (the `rtl8822e` MAC/DLFW fork) are out of scope.
+
+RX and narrowband are SDR-confirmed. **Sustained continuous TX is confirmed on
+UNII-1 (ch36–48); on UNII-2/3 (ch100, ch149) TX stops after ~50–60 s** — a
+wall-clock FW event whose cause is, after exhaustive investigation, still
+unidentified: ruled out are RF tune (matches the kernel's `rf_dump`), TX power
+(overdrive dies the same), the coex runtime, C2H, channel-info H2C, duty cycle
+(50 fps and 500 fps stop together), and thermal (the chip warms only ~3 meter
+units, so it is not overheating). The full halrf thermal chain is ported —
+`pwr_track` (swing-table TX-power compensation) and `do_lck` (synth re-lock on
+drift) in `Halrf8822cIqk` — and is correct/UNII-1-safe, but it is *not* the
+upper-band fix (the chip barely heats; LCK never triggers). The remaining
+unported calibration is per-channel DPK (`rtw8822c_do_dpk`).
+Continuous TX on UNII-1 no longer dies: a **coex runtime thread**
+(`RtlJaguar3Device::coex_runtime_loop`,
+started in `InitWrite`) ports the rtw88 watchdog's coex path — it drains the
+firmware C2H reports off bulk-IN (so the on-chip C2H buffer never fills) and every
+~2 s re-applies the 5 GHz coex decision (`Hal8822c::coex_run_5g`, a port of
+`rtw_coex_action_wl_under5g`: GNT_BT→HW-PTA + GNT_WL→SW-high, antenna owner = WL,
+the WL-wins PTA table) plus the FW heartbeats (`fw_update_wl_phy_info`,
+`fw_set_pwr_mode_active`, `fw_coex_query_bt_info`). Without this the combo chip's
+coex firmware silenced the antenna after ~50 s; with it, TX runs indefinitely
+(validated to 100 s+).
+
+TX power: by default (no `DEVOURER_TX_PWR`) the chip transmits at its
+**efuse-calibrated power**, flat and sustained — the firmware reads efuse itself
+and holds that level (same firmware + efuse the kernel uses, so the sustained
+power matches the kernel's). `DEVOURER_TX_PWR=0xNN` writes a flat TXAGC reference
+that overdrives the PA for ~60 s until the FW's calibration reverts it to the
+efuse level; it's a debug/SDR-visibility knob, not for sustained use.
 
 NOT 8821AU's family confusion: it IS Jaguar wave 1 (CHIP_8821 = 7 in
 Realtek's HalVerDef, shares the enum with CHIP_8812), not Jaguar2 as
@@ -220,10 +262,13 @@ thin — `libusb_init`, device open, kernel driver detach, and
 `libusb_claim_interface(handle, 0)` must happen **before** handing the handle
 to the factory. `demo/main.cpp` is the canonical boilerplate.
 
-**Chip identity is resolved at construction** from SYS_CFG bits + USB PID;
-`RtlJaguarDevice` (the orchestrator) then drives bring-up, RX, and TX
-through chip-family branches. The class name was previously `Rtl8812aDevice`
-— a deprecated alias still exists for one release cycle.
+**Chip identity is resolved at construction** from SYS_CFG bits + USB PID.
+`CreateRtlDevice` returns an `IRtlDevice` (`Init` / `InitWrite` / `send_packet`)
+and dispatches on chip generation: Jaguar-1 PIDs construct `RtlJaguarDevice`,
+Jaguar3 PIDs (`0bda:c812`, …) construct `RtlJaguar3Device`. Each orchestrator
+then drives bring-up, RX, and TX through its own HAL. `RtlJaguarDevice` was
+previously named `Rtl8812aDevice` — a deprecated alias still exists for one
+release cycle.
 
 Module layout in `src/`:
 
@@ -247,12 +292,30 @@ Module layout in `src/`:
   `send_packet` **must** begin with a radiotap header; rate / MCS / VHT /
   STBC / LDPC / SGI / bandwidth are read from it.
 
+The Jaguar3 HAL is a parallel, self-contained set under `src/jaguar3/`:
+
+- `RtlJaguar3Device` — orchestrator (Init / InitWrite / send_packet / Stop).
+- `Hal8822c` — bring-up: power-on/off PWR_SEQ, MAC/USB config, BB/AGC/RF table
+  apply, `config_phydm_parameter_init` (3-wire RF), `bf_init` (beamforming),
+  and `enable_tx_path`. Calls into the calibration and FW modules.
+- `Halmac8822cFw` — verbatim-ported HalMAC firmware download/boot (the
+  `rtl8822c` analogue of the 8814 3081 path).
+- `Halrf8822cIqk` — ported halrf calibration: IQK plus the DAC DC cal (DACK,
+  `dac_calibrate`) the TX path requires.
+- `RadioManagement8822c` — channel / bandwidth / TX power, including the
+  `0x9b0`/`0x9b4` baseband-divider recipe for 5/10 MHz narrowband and the
+  RF18 channel-tune encoding.
+- `FrameParser8822c.h` / `PhyTableLoader8822c` — 8822C TX/RX descriptors and
+  the table walker for the `rtl8822c` phydm tables.
+
 `hal/` holds vendor headers and tables ported from Realtek's tree. The
 8814-specific BB/AGC/RF tables under `hal/phydm/rtl8814a/Hal8814_PhyTables.{c,h}`
 are **generated** from the upstream aircrack-ng/rtl8814au source by
 `tools/extract_8814a_phy_tables.py` — edit the generator, not the output.
 The runtime parser for these tables is `src/PhyTableLoader`, not the upstream
-phydm parser.
+phydm parser. The Jaguar3 tables under `hal/phydm/rtl8822c/` are likewise
+generated by `tools/extract_8822c_phy_tables.py` and walked by
+`src/jaguar3/PhyTableLoader8822c`.
 
 ## Hardware gotchas
 

@@ -13,6 +13,7 @@
 #include "FrameParser.h"
 #include "RtlJaguarDevice.h"
 #include "RtlUsbAdapter.h"
+#include "SignalStop.h"
 #include "WiFiDriver.h"
 
 #define USB_VENDOR_ID 0x0bda
@@ -26,6 +27,9 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0xa811, /* RTL8811AU */
     0xb811, /* RTL8811AU/8821AU variants */
     0x8813, /* RTL8814AU (Realtek demoboard PID, used by CF-938AC/CF-960AC) */
+    0xc82c, /* RTL8822CU (Jaguar3) */
+    0xc82e, /* RTL8822CU (Jaguar3) */
+    0xc812, /* RTL8812CU WiFi-only (Jaguar3) */
 };
 
 static int g_rx_count = 0;
@@ -310,6 +314,10 @@ int main() {
 
   auto logger = std::make_shared<Logger>();
 
+  /* SIGINT/SIGTERM -> clean shutdown (Stop() below). Without this the harness's
+   * `timeout` SIGTERM killed us mid-RX, leaving the chip's USB core hung. */
+  install_devourer_signal_handlers();
+
   rc = libusb_init(&ctx);
   if (rc < 0) {
     return rc;
@@ -381,19 +389,31 @@ int main() {
     logger->info("DEVOURER_SKIP_RESET set — skipping libusb_reset_device");
   }
   logger->info("init-timing: demo.usb_reset = {} ms", ms_since_start());
+  /* Set the USB configuration ourselves rather than relying on the kernel
+   * having done it — required when the device was never kernel-configured
+   * (e.g. drivers_autoprobe off / a truly cold chip), where bulk transfers
+   * otherwise fail with errno=3 (ESRCH). No-op if config 1 is already active. */
+  {
+    int cfg = 0;
+    if (libusb_get_configuration(dev_handle, &cfg) != 0 || cfg != 1)
+      libusb_set_configuration(dev_handle, 1);
+  }
   rc = libusb_claim_interface(dev_handle, 0);
   assert(rc == 0);
 
   WiFiDriver wifi_driver(logger);
-  auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle);
+  auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle, ctx);
   logger->info("init-timing: demo.create_device = {} ms", ms_since_start());
-  g_rtl_device = rtlDevice.get();
+  /* The BB-debug-port / queue-depth research helpers are Jaguar1-only, so they
+   * live on RtlJaguarDevice rather than the IRtlDevice interface. dynamic_cast
+   * yields nullptr for a Jaguar3 device, which disables those helpers cleanly. */
+  g_rtl_device = dynamic_cast<RtlJaguarDevice *>(rtlDevice.get());
   std::atomic<bool> qd_emitter_stop{false};
   std::thread qd_emitter;
-  if (g_qd_poll_ms > 0) {
+  if (g_qd_poll_ms > 0 && g_rtl_device != nullptr) {
     logger->info("DEVOURER_QUEUE_POLL_MS={} — starting queue-depth poller",
                  g_qd_poll_ms);
-    rtlDevice->start_queue_depth_poller(g_qd_poll_ms);
+    g_rtl_device->start_queue_depth_poller(g_qd_poll_ms);
     /* Self-driven emitter — ticks at the poll cadence so the queue snapshot
      * surfaces even when the RX hook is sparse (e.g. broken-RX 8814 cells).
      * Idempotent w.r.t. the poller; just reads the atomic snapshot. */
@@ -417,7 +437,10 @@ int main() {
   if (g_thermal_poll_ms > 0) {
     logger->info("DEVOURER_THERMAL_POLL_MS={} warn_delta={} — starting thermal "
                  "poller", g_thermal_poll_ms, g_thermal_warn_delta);
-    rtlDevice->start_thermal_poller(g_thermal_poll_ms, g_thermal_warn_delta);
+    /* Thermal poller is a Jaguar1 (RtlJaguarDevice) feature; g_rtl_device is
+     * null on Jaguar3. */
+    if (g_rtl_device != nullptr)
+      g_rtl_device->start_thermal_poller(g_thermal_poll_ms, g_thermal_warn_delta);
     therm_emitter = std::thread([&therm_emitter_stop]() {
       while (!therm_emitter_stop.load()) {
         if (g_rtl_device != nullptr) {
@@ -448,7 +471,8 @@ int main() {
   }
   /* RX bandwidth: 20 MHz by default. DEVOURER_BW=40 selects a 40 MHz monitor
    * channel (for receiving HT40 frames); DEVOURER_CHOFFSET picks the secondary
-   * half (1 = secondary above the primary, 2 = secondary below). */
+   * half (1 = secondary above the primary, 2 = secondary below).
+   * DEVOURER_NB_BW=5|10 re-clocks the baseband to narrowband (Jaguar3 only). */
   ChannelWidth_t width = CHANNEL_WIDTH_20;
   uint8_t ch_offset = 0;
   if (const char *bw_env = std::getenv("DEVOURER_BW")) {
@@ -460,11 +484,23 @@ int main() {
       logger->info("DEVOURER_BW=40 — 40 MHz RX, channel-offset {}", ch_offset);
     }
   }
+  if (const char *nb = std::getenv("DEVOURER_NB_BW")) {
+    int mhz = std::atoi(nb);
+    if (mhz == 5)
+      width = CHANNEL_WIDTH_5;
+    else if (mhz == 10)
+      width = CHANNEL_WIDTH_10;
+    logger->info("DEVOURER_NB_BW={} — RX bandwidth {} MHz", nb, mhz);
+  }
   rtlDevice->Init(packetProcessor, SelectedChannel{
                                        .Channel = static_cast<uint8_t>(channel),
                                        .ChannelOffset = ch_offset,
                                        .ChannelWidth = width,
                                    });
+
+  /* Clean chip de-init before dropping the interface (card-disable PWR_SEQ), so
+   * the adapter re-enumerates instead of hanging its USB core. */
+  rtlDevice->Stop();
 
   rc = libusb_release_interface(dev_handle, 0);
   assert(rc == 0);

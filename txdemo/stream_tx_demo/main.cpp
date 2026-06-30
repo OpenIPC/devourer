@@ -66,6 +66,7 @@
 #include "FrameParser.h"
 #include "RadiotapBuilder.h"
 #include "RtlUsbAdapter.h"
+#include "RtlJaguarDevice.h"
 #include "WiFiDriver.h"
 #include "logger.h"
 #include "stream_stdin.h"
@@ -181,6 +182,9 @@ int main(int argc, char **argv) {
 
   WiFiDriver wifi_driver{logger};
   auto rtlDevice = wifi_driver.CreateRtlDevice(handle);
+  /* Jaguar1-only research features (TXAGC override, fast-retune hopping) aren't
+   * on the IRtlDevice contract — downcast for them; jag is null on Jaguar3. */
+  RtlJaguarDevice *jag = dynamic_cast<RtlJaguarDevice *>(rtlDevice.get());
 
   int channel = 6;
   if (const char *ch_env = std::getenv("DEVOURER_CHANNEL")) {
@@ -207,10 +211,10 @@ int main(int argc, char **argv) {
    * in tests/fused_fec_onair.sh). Applied once and held, unlike
    * WiFiDriverTxDemo's DEVOURER_TX_PWR_START ramp. Must follow InitWrite so the
    * channel-set has run; ApplyTxPower re-pushes the index to the registers. */
-  if (const char *o = std::getenv("DEVOURER_TX_PWR_OVERRIDE")) {
+  if (const char *o = std::getenv("DEVOURER_TX_PWR_OVERRIDE"); o && jag) {
     int idx = std::atoi(o);
-    rtlDevice->SetTxPowerOverride(idx);
-    rtlDevice->ApplyTxPower();
+    jag->SetTxPowerOverride(idx);
+    jag->ApplyTxPower();
     logger->info("DEVOURER_TX_PWR_OVERRIDE — forced absolute TXAGC index {}", idx);
   }
   /* Channel hopping for frequency diversity. DEVOURER_HOP_CHANNELS="1,6,11"
@@ -307,8 +311,8 @@ int main(int argc, char **argv) {
      * it per packet is fine. */
     if (!hop_channels.empty()) {
       int ch = hop_channels[(tx_count / hop_dwell) % hop_channels.size()];
-      if (hop_fast)
-        rtlDevice->FastRetune(static_cast<uint8_t>(ch), /*cache_rf=*/hop_fast != 2);
+      if (hop_fast && jag)
+        jag->FastRetune(static_cast<uint8_t>(ch), /*cache_rf=*/hop_fast != 2);
       else
         rtlDevice->SetMonitorChannel(SelectedChannel{
             .Channel = static_cast<uint8_t>(ch),

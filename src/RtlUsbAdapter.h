@@ -3,6 +3,7 @@
 
 #include <iostream>
 
+#include <functional>
 #include <libusb.h>
 #include <thread>
 #include <vector>
@@ -33,6 +34,7 @@ enum TxSele {
 
 class RtlUsbAdapter {
   libusb_device_handle *_dev_handle;
+  libusb_context *_ctx = nullptr;
   Logger_t _logger;
 
   enum libusb_speed usbSpeed;
@@ -53,11 +55,27 @@ class RtlUsbAdapter {
   uint16_t _idProduct = 0;
 
 public:
-  RtlUsbAdapter(libusb_device_handle *dev_handle, Logger_t logger);
+  RtlUsbAdapter(libusb_device_handle *dev_handle, Logger_t logger,
+                libusb_context *ctx = nullptr);
+
+  /* Kernel-style async RX: keep n_urbs concurrent bulk-IN transfers in flight on
+   * the discovered bulk-IN endpoint, invoking on_data(buf,len) for each non-empty
+   * completion and resubmitting, until `stop` is set. Mirrors the rtw88 RX URB
+   * queue (the single-shot bulk_read_raw can miss the chip's RX delivery window).
+   * Requires the libusb context the handle belongs to (passed at construction). */
+  void bulk_read_async_loop(int buf_size, int n_urbs,
+                            const std::function<void(const uint8_t *, int)> &on_data,
+                            const volatile bool &stop);
 
   uint16_t idVendor() const { return _idVendor; }
   uint16_t idProduct() const { return _idProduct; }
   enum libusb_speed speed() const { return usbSpeed; }
+  /* First discovered bulk-OUT endpoint (HQ-equivalent), or 0x02 if none were
+   * discovered. Used by the Jaguar3 DLFW rsvd-page download, whose chip
+   * (e.g. RTL8812CU) has no 0x02 endpoint — it exposes 0x05/0x06/0x08. */
+  uint8_t first_bulk_out_ep() const {
+    return _bulk_out_eps.empty() ? 0x02 : _bulk_out_eps[0];
+  }
 
   bool AutoloadFailFlag = false;
   bool EepromOrEfuse = false;
@@ -73,6 +91,15 @@ public:
   int bulk_send_sync_ep(uint8_t ep, uint8_t *packet, size_t length,
                         int timeout_ms);
   std::vector<Packet> infinite_read();
+  /* Raw bulk-IN read on the discovered bulk-IN endpoint, returning bytes read
+   * (or a negative libusb error). For chip families whose RX descriptor is not
+   * the Jaguar1 layout (e.g. Jaguar3), the caller parses the buffer itself. */
+  int bulk_read_raw(uint8_t *buf, int len, int timeout_ms) {
+    int actual = 0;
+    int rc = libusb_bulk_transfer(_dev_handle, _bulk_in_ep, buf, len, &actual,
+                                  timeout_ms);
+    return rc < 0 ? rc : actual;
+  }
   uint8_t efuse_OneByteRead(uint16_t addr, uint8_t *data);
   void phy_set_bb_reg(uint16_t regAddr, uint32_t bitMask, uint32_t data);
 

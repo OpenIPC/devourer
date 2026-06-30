@@ -11,15 +11,15 @@ namespace jaguar3 {
 
 /* RadioManagement8822c — channel / bandwidth / TX-power for the Jaguar3 family.
  *
- * The Jaguar3 channel+bandwidth path is procedural (the vendor implements it in
- * config_phydm_switch_channel_8822c / config_phydm_switch_bandwidth_8822c in
- * hal/phydm/rtl8822c/phydm_hal_api8822c.c) rather than via the Jaguar1
- * phy_PostSetBwMode8812 register writes. This class will port that procedure.
+ * The Jaguar3 channel+bandwidth path is procedural — a port of the vendor's
+ * config_phydm_switch_channel_8822c / config_phydm_switch_bandwidth_8822c
+ * (hal/phydm/rtl8822c/phydm_hal_api8822c.c) — rather than the Jaguar1
+ * phy_PostSetBwMode8812 register writes.
  *
- * The narrowband payoff (the whole reason for the Jaguar3 port) is a drop-in
- * extension of switch_bandwidth: Jaguar3 — unlike Jaguar1 — exposes a true
- * baseband clock divider, so 5/10 MHz is achievable. The exact register recipe
- * is already known (see the NB_* constants below and switch_bandwidth's TODO). */
+ * Jaguar3 — unlike Jaguar1 — exposes a true baseband clock divider, so the
+ * 5/10 MHz narrowband re-clock (the whole reason for the port) is reachable:
+ * set_bandwidth_dividers applies it on top of an already-tuned channel via the
+ * NB_* registers below (SDR-validated). */
 class RadioManagement8822c {
 public:
   RadioManagement8822c(RtlUsbAdapter device, Logger_t logger);

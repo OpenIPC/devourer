@@ -1208,8 +1208,8 @@ void Halrf8822cIqk::pwr_track() {
   }
   /* need_lck: when path-A thermal drifts >= the LCK threshold (8) from the last
    * LCK reference, re-lock the synth. In practice the chip warms only ~3 thermal
-   * units during TX so this rarely triggers; it's here for faithfulness/long
-   * sessions, not as the upper-band sustain fix (the chip barely heats). */
+   * units during TX so this rarely triggers; it's here for faithfulness and
+   * long sessions. */
   if (_thermal_lck_ref < 0)
     _thermal_lck_ref = t[0];
   int dlck = t[0] > _thermal_lck_ref ? t[0] - _thermal_lck_ref

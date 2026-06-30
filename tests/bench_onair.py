@@ -18,15 +18,18 @@ ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 import regress  # noqa
 
-# chipset -> (sysfs_id, vid, pid)
+# chipset -> (sysfs_id, vid, pid). sysfs_id is bench-specific (the USB port the
+# adapter is plugged into) — adjust to your topology.
 CHIPS = {
     "RTL8812AU": ("9-2", "0x0bda", "0x8812"),
     "RTL8814AU": ("4-2.3.2", "0x0bda", "0x8813"),
     "RTL8821AU": ("9-1.4", "0x2357", "0x0120"),
+    "RTL8812CU": ("3-2.4", "0x0bda", "0xc812"),   # Jaguar3 (rtl8822c)
 }
 BANDS = [("2.4 GHz (ch6)", 6, 2437e6), ("UNII-1 (ch36)", 36, 5180e6),
          ("UNII-2/3 (ch149)", 149, 5745e6)]
-KDRIVERS = ["rtw88_8812au", "rtw88_8814au", "rtw88_8821au", "rtl88xxau_wfb"]
+KDRIVERS = ["rtw88_8812au", "rtw88_8814au", "rtw88_8821au", "rtw88_8822cu",
+            "rtl88xxau_wfb"]
 DUTY_RE = re.compile(r"duty=([\d.]+)%\s+noise=([-\d.]+)dB.*on_air~=([\d.]+)Mbps")
 
 

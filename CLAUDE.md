@@ -30,11 +30,11 @@ for TX (3-wire RF + DACK + beamforming init), then RX and on-air TX at
 20 MHz plus the 5/10 MHz narrowband re-clock. Validated on RTL8812CU
 hardware. RTL8812EU/8822EU (the `rtl8822e` MAC/DLFW fork) are out of scope.
 
-RX and narrowband are SDR-confirmed. **Sustained continuous TX is confirmed on
-UNII-1 (ch36–48) and UNII-3 (ch149)** — SDR-validated flat at ~93% channel duty
-/ ~60 Mbps (MCS7/20) for ~3 min with zero bulk-OUT failures, kept alive by the
-coex runtime thread (below). DFS UNII-2 channels (ch100/120/144) are not yet
-validated — radar/CAC firmware gating differs there. The halrf thermal chain is
+RX and narrowband are SDR-confirmed. **Sustained continuous TX is confirmed
+across the full 5 GHz band** — UNII-1 (ch36–48), UNII-2/DFS (ch100/120/144),
+and UNII-3 (ch149) — SDR-validated flat at ~93% channel duty / ~60 Mbps
+(MCS7/20) with zero bulk-OUT failures, kept alive by the coex runtime thread
+(below). The halrf thermal chain is
 ported — `pwr_track` (swing-table TX-power compensation) and `do_lck` (synth
 re-lock on drift) in `Halrf8822cIqk`. The remaining unported calibration is
 per-channel DPK (`rtw8822c_do_dpk`).

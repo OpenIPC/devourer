@@ -38,9 +38,7 @@ wfb-ng on the `svpcom/rtl8812au` driver at parity — see
 reference. `†` = transmits on air, but the on-air rate is **USB-power-bound** on
 this bench and not reproducibly benchmarkable (5 GHz TX is current-hungry; needs a
 powered USB hub / direct root port — see _USB Vbus sag_ in Hardware gotchas); the
-bracketed figure is the best clean reading observed. `‡` = the rate holds for the
-measurement window but **sustained** TX on that band stops after ~50–60 s (a
-firmware event still under investigation).
+bracketed figure is the best clean reading observed.
 
 | Part                          | RF / streams      | 2.4 GHz (ch6) | UNII-1 (ch36) | UNII-2/3 (ch149) | Notes                                       |
 | ----------------------------- | ----------------- | ------------- | ------------- | ---------------- | ------------------------------------------- |
@@ -48,7 +46,7 @@ firmware event still under investigation).
 | **RTL8811AU**                 | 1T1R              | mirrors 8812  | mirrors 8812  | mirrors 8812     | 1T1R cut of 8812 silicon; rides the 8812 code path with `RFType=RF_TYPE_1T1R` from `REG_SYS_CFG` bit 27. Not separately benchmarked (no working unit on the bench) |
 | **RTL8814AU**                 | 4T4R, 3-SS max    | 65            | †(32)         | †(32)            | VID/PID `0bda:8813`; 2-SS effective on USB-2. 2.4 GHz saturates the channel; 5 GHz reached 32 Mbps in good moments but sags otherwise on this bench — power-bound, not a chip limit |
 | **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | OEM-rebadged as TP-Link Archer T2U Plus (`2357:0120`). 1T1R; 5 GHz SDR-measured and reproducible here |
-| **RTL8812CU / RTL8822CU**     | 2T2R (`rtl8822c`) | 65            | 60            | 61‡              | **Jaguar3** (`0bda:c812` / `0bda:c82c`); 2nd-gen silicon — adds 5/10 MHz narrowband. RX + on-air TX confirmed on RTL8812CU. UNII-2/3 sustained TX stops after ~50–60 s (`‡`); UNII-1 runs indefinitely |
+| **RTL8812CU / RTL8822CU**     | 2T2R (`rtl8822c`) | 65            | 60            | 60               | **Jaguar3** (`0bda:c812` / `0bda:c82c`); 2nd-gen silicon — adds 5/10 MHz narrowband. RX + on-air TX confirmed on RTL8812CU; sustained TX validated ~3 min on UNII-1 (ch36) and UNII-3 (ch149). DFS channels (UNII-2, ch100/120/144) not yet validated |
 
 The **`Jaguar2`** / **`Jaguar+`** family (8812BU, 8822**B**U/BE, etc.) and
 the later **`Kestrel`** 11ax generation are **out of scope**: they share

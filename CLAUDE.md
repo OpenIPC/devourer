@@ -31,26 +31,23 @@ for TX (3-wire RF + DACK + beamforming init), then RX and on-air TX at
 hardware. RTL8812EU/8822EU (the `rtl8822e` MAC/DLFW fork) are out of scope.
 
 RX and narrowband are SDR-confirmed. **Sustained continuous TX is confirmed on
-UNII-1 (ch36–48); on UNII-2/3 (ch100, ch149) TX stops after ~50–60 s** — a
-wall-clock FW event whose cause is, after exhaustive investigation, still
-unidentified: ruled out are RF tune (matches the kernel's `rf_dump`), TX power
-(overdrive dies the same), the coex runtime, C2H, channel-info H2C, duty cycle
-(50 fps and 500 fps stop together), and thermal (the chip warms only ~3 meter
-units, so it is not overheating). The full halrf thermal chain is ported —
-`pwr_track` (swing-table TX-power compensation) and `do_lck` (synth re-lock on
-drift) in `Halrf8822cIqk` — and is correct/UNII-1-safe, but it is *not* the
-upper-band fix (the chip barely heats; LCK never triggers). The remaining
-unported calibration is per-channel DPK (`rtw8822c_do_dpk`).
-Continuous TX on UNII-1 no longer dies: a **coex runtime thread**
+UNII-1 (ch36–48) and UNII-3 (ch149)** — SDR-validated flat at ~93% channel duty
+/ ~60 Mbps (MCS7/20) for ~3 min with zero bulk-OUT failures, kept alive by the
+coex runtime thread (below). DFS UNII-2 channels (ch100/120/144) are not yet
+validated — radar/CAC firmware gating differs there. The halrf thermal chain is
+ported — `pwr_track` (swing-table TX-power compensation) and `do_lck` (synth
+re-lock on drift) in `Halrf8822cIqk`. The remaining unported calibration is
+per-channel DPK (`rtw8822c_do_dpk`).
+Sustained 5 GHz TX is kept alive by a **coex runtime thread**
 (`RtlJaguar3Device::coex_runtime_loop`,
 started in `InitWrite`) ports the rtw88 watchdog's coex path — it drains the
 firmware C2H reports off bulk-IN (so the on-chip C2H buffer never fills) and every
 ~2 s re-applies the 5 GHz coex decision (`Hal8822c::coex_run_5g`, a port of
 `rtw_coex_action_wl_under5g`: GNT_BT→HW-PTA + GNT_WL→SW-high, antenna owner = WL,
 the WL-wins PTA table) plus the FW heartbeats (`fw_update_wl_phy_info`,
-`fw_set_pwr_mode_active`, `fw_coex_query_bt_info`). Without this the combo chip's
-coex firmware silenced the antenna after ~50 s; with it, TX runs indefinitely
-(validated to 100 s+).
+`fw_set_pwr_mode_active`, `fw_coex_query_bt_info`). Without it the combo chip's
+coex firmware silences the antenna after ~50 s; with it, 5 GHz TX runs
+indefinitely (SDR-validated to ~3 min on both ch36 and ch149).
 
 TX power: by default (no `DEVOURER_TX_PWR`) the chip transmits at its
 **efuse-calibrated power**, flat and sustained — the firmware reads efuse itself

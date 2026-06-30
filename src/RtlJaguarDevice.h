@@ -13,6 +13,7 @@
 #include "logger.h"
 #include "BbDbgportReader.h"
 #include "HalModule.h"
+#include "IRtlDevice.h"
 #include "SelectedChannel.h"
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
@@ -24,14 +25,15 @@ extern "C"
 #include "ieee80211_radiotap.h"
 }
 
-using Action_ParsedRadioPacket = std::function<void(const Packet&)>;
+/* Action_ParsedRadioPacket is declared in IRtlDevice.h (shared with the
+ * Jaguar3 device and the factory). */
 
 /* RtlJaguarDevice is the orchestrator for the Realtek "Jaguar" 802.11ac family
  * — RTL8812AU (2T2R), RTL8811AU (1T1R cut), and RTL8814AU (4T4R RF / 3-SS
  * baseband). The chip is identified at construction time via SYS_CFG bits and
  * USB PID; this class drives bring-up, RX, and TX for whichever member of the
  * family is present. */
-class RtlJaguarDevice {
+class RtlJaguarDevice : public IRtlDevice {
   std::shared_ptr<EepromManager> _eepromManager;
   std::shared_ptr<RadioManagementModule> _radioManagement;
   /* Last channel handed to SetMonitorChannel. Value-initialised so the
@@ -49,9 +51,10 @@ class RtlJaguarDevice {
 
 public:
   RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger);
-  ~RtlJaguarDevice();
-  void Init(Action_ParsedRadioPacket packetProcessor, SelectedChannel channel);
-  void SetMonitorChannel(SelectedChannel channel);
+  ~RtlJaguarDevice() override;
+  void Init(Action_ParsedRadioPacket packetProcessor,
+            SelectedChannel channel) override;
+  void SetMonitorChannel(SelectedChannel channel) override;
   /* Lean frequency-hop retune: switches the RF channel only, skipping the
    * per-rate TX-power loop, bandwidth post-set, and thermal pwrtrk tick that
    * SetMonitorChannel runs — none of which change across an intra-band, 20 MHz
@@ -61,8 +64,8 @@ public:
    * by writing RF_CHNLBW from a cached value. Intended for channel hopping;
    * keeps the device channel state in sync for the 5 GHz CCK clamp. */
   void FastRetune(uint8_t channel, bool cache_rf = true);
-  void InitWrite(SelectedChannel channel);
-  void SetTxPower(uint8_t power);
+  void InitWrite(SelectedChannel channel) override;
+  void SetTxPower(uint8_t power) override;
   /* Force the per-rate TXAGC index (0..63), bypassing the EFUSE per-rate
    * table; -1 restores normal behaviour. Re-applied on the next
    * SetMonitorChannel. Used by the thermal-vs-gain ramp in WiFiDriverTxDemo. */
@@ -83,8 +86,9 @@ public:
   void SetTxMode(const devourer::TxMode& mode);
   void ClearTxMode();
 
-  bool send_packet(const uint8_t* packet, size_t length);
-  SelectedChannel GetSelectedChannel();
+  bool send_packet(const uint8_t* packet, size_t length) override;
+  SelectedChannel GetSelectedChannel() override;
+
   bool should_stop = false;
 
   /* Per-queue free-page snapshot read from REG_FIFOPAGE_INFO_1..5

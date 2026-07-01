@@ -1,6 +1,6 @@
 #include "TxMode.h"
 
-#include "RadioManagementModule.h"  // enum MGN_RATE
+#include "RateDefinitions.h"  // enum MGN_RATE
 
 namespace devourer {
 

@@ -4,12 +4,15 @@
 #include <memory>
 #include <thread>
 
+#if defined(DEVOURER_HAVE_JAGUAR3_8822C)
 extern "C" {
 #include "Hal8822c_IqkNctl.h"
 }
+#endif
 
 namespace jaguar3 {
 
+#if defined(DEVOURER_HAVE_JAGUAR3_8822C)
 namespace {
 /* IQK type indices (halrf_iqk_8822c.h: TXIQK/RXIQK; halrf_iqk.h: trigger steps) */
 constexpr int TXIQK = 0;
@@ -39,20 +42,33 @@ inline uint32_t mask_shift(uint32_t mask) {
 
 Halrf8822c::Halrf8822c(RtlUsbAdapter device, Logger_t logger)
     : _device{device}, _logger{logger} {}
+#endif /* DEVOURER_HAVE_JAGUAR3_8822C */
 
+#if defined(DEVOURER_HAVE_JAGUAR3_8822E)
 /* Defined in Halrf8822e.cpp. */
 std::unique_ptr<Jaguar3Calibration> make_halrf_8822e(RtlUsbAdapter device,
                                                      Logger_t logger);
+#endif
 
 /* Calibration strategy factory: pick the per-generation halrf impl. */
 std::unique_ptr<Jaguar3Calibration>
 make_jaguar3_calibration(ChipVariant variant, RtlUsbAdapter device,
                          Logger_t logger) {
+#if defined(DEVOURER_HAVE_JAGUAR3_8822E)
   if (variant == ChipVariant::C8822E)
     return make_halrf_8822e(device, logger);
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR3_8822C)
   return std::make_unique<Halrf8822c>(device, logger);
+#else
+  (void)variant;
+  (void)device;
+  (void)logger;
+  return nullptr;
+#endif
 }
 
+#if defined(DEVOURER_HAVE_JAGUAR3_8822C)
 uint32_t Halrf8822c::bb_get(uint16_t addr, uint32_t mask) {
   return (_device.rtw_read32(addr) & mask) >> mask_shift(mask);
 }
@@ -1330,5 +1346,6 @@ void Halrf8822c::coex_wlan_only_init() {
   force_wl_antenna();
   _logger->info("Jaguar3: coex WiFi-only init applied (antenna locked to WL)");
 }
+#endif /* DEVOURER_HAVE_JAGUAR3_8822C */
 
 } /* namespace jaguar3 */

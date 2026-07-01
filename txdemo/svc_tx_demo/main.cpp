@@ -56,7 +56,6 @@
   #include <libusb-1.0/libusb.h>
 #endif
 
-#include "FrameParser.h"
 #include "RadiotapBuilder.h"
 #include "RtlUsbAdapter.h"
 #include "WiFiDriver.h"

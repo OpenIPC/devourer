@@ -6,20 +6,8 @@
 #include <span>
 #include <vector>
 
-typedef unsigned int __u32;
-
-#ifndef __u16
-typedef unsigned short __u16;
-#endif
-
-typedef signed char s8;
-typedef unsigned char u8;
-
-typedef signed short s16;
-typedef unsigned short u16;
-
-typedef signed int s32;
-typedef unsigned int u32;
+#include "TxDescBits.h"
+#include "RxPacket.h"
 
 #define ETH_ALEN 6
 #define TXDESC_SIZE 40
@@ -30,31 +18,6 @@ typedef unsigned int u32;
 #define LSG BIT(26)
 #define QSEL_SHT 8
 
-#define WriteLE4Byte(_ptr, _val) ((*((u32*)(_ptr))) = cpu_to_le32(_val))
-#define WriteLE2Byte(_ptr, _val) ((*((u16*)(_ptr))) = cpu_to_le16(_val))
-#define WriteLE1Byte(_ptr, _val) ((*((u8*)(_ptr))) = ((u8)(_val)))
-
-#define BIT_LEN_MASK_32(__BitLen) ((u32)(0xFFFFFFFF >> (32 - (__BitLen))))
-
-#define LE_P4BYTE_TO_HOST_4BYTE(__pStart) (le32_to_cpu(*((u32*)(__pStart))))
-
-#define BIT_OFFSET_LEN_MASK_32(__BitOffset, __BitLen) ((u32)(BIT_LEN_MASK_32(__BitLen) << (__BitOffset)))
-
-#define LE_BITS_CLEARED_TO_4BYTE(__pStart, __BitOffset, __BitLen)                                                      \
-    (LE_P4BYTE_TO_HOST_4BYTE(__pStart) & (~BIT_OFFSET_LEN_MASK_32(__BitOffset, __BitLen)))
-
-#define SET_BITS_TO_LE_4BYTE(__pStart, __BitOffset, __BitLen, __Value)                                                 \
-    do                                                                                                                 \
-    {                                                                                                                  \
-        if (__BitOffset == 0 && __BitLen == 32)                                                                        \
-            WriteLE4Byte(__pStart, __Value);                                                                           \
-        else                                                                                                           \
-        {                                                                                                              \
-            WriteLE4Byte(__pStart,                                                                                     \
-                         LE_BITS_CLEARED_TO_4BYTE(__pStart, __BitOffset, __BitLen) |                                   \
-                             ((((u32)__Value) & BIT_LEN_MASK_32(__BitLen)) << (__BitOffset)));                         \
-        }                                                                                                              \
-    } while (0)
 
 #define SET_TX_DESC_TX_DESC_CHECKSUM_8812(__pTxDesc, __Value) SET_BITS_TO_LE_4BYTE(__pTxDesc + 28, 0, 16, __Value)
 
@@ -259,64 +222,6 @@ enum _PUBLIC_ACTION
     ACT_PUBLIC_MAX
 };
 
-enum class RX_PACKET_TYPE
-{
-    NORMAL_RX,  /* Normal rx packet */
-    TX_REPORT1, /* CCX */
-    TX_REPORT2, /* TX RPT */
-    HIS_REPORT, /* USB HISR RPT */
-    C2H_PACKET
-};
-
-struct rx_pkt_attrib
-{
-    uint16_t pkt_len;
-    bool physt;
-    uint8_t drvinfo_sz;
-    uint8_t shift_sz;
-    bool qos;
-    uint8_t priority;
-    bool mdata;
-    uint16_t seq_num;
-    uint8_t frag_num;
-    bool mfrag;
-    bool bdecrypted;
-    uint8_t encrypt; /* when 0 indicate no encrypt. when non-zero, indicate the
-                        encrypt algorith */
-    bool crc_err;
-    bool icv_err;
-    /* TSF low (4 bytes at RX-descriptor offset 20) — chip-side timestamp
-     * for the frame. With the seq_num just above it, a downstream layer
-     * can drop duplicates by seq and measure one-way latency by diffing
-     * the chip's TSF against its own wall clock. Populated by
-     * FrameParser; surfaced through demo/main.cpp's <devourer-stream>. */
-    uint32_t tsfl;
-    uint8_t data_rate;
-    uint8_t bw;
-    uint8_t stbc;
-    uint8_t ldpc;
-    uint8_t sgi;
-    /* Descrambler seed the chip recovered from this frame's SERVICE field.
-     * Trustworthy only on RTL8814AU (see FrameParser.cpp); surfaced for the
-     * DEVOURER_DUMP_SCRAMBLER hook in demo/main.cpp. */
-    uint8_t scrambler;
-    /* RSSI / SNR per RF path: A, B (Jaguar 8812/8811) plus C, D (8814AU). On
-     * non-8814 chips the [2..3] slots are zero — the upstream RX phy-status
-     * report reserves those bytes when only 2 paths are active. */
-    uint8_t rssi[4];
-    int8_t snr[4];
-    /* Per-stream RX EVM (A,B on 8812/8811; plus C,D on 8814). Raw RX-status
-     * bytes — a link-quality metric, NOT a per-subcarrier or content signal.
-     * Surfaced for the DEVOURER_DUMP_BODY Tier-2 health diagnostic. */
-    int8_t evm[4];
-    RX_PACKET_TYPE pkt_rpt_type;
-};
-
-struct Packet
-{
-    rx_pkt_attrib RxAtrib;
-    std::span<uint8_t> Data;
-};
 
 class FrameParser
 {

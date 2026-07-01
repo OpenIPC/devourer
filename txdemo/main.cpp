@@ -26,8 +26,10 @@
   #include <libusb-1.0/libusb.h>
 #endif
 
-#include "FrameParser.h"
-#include "RtlJaguarDevice.h"
+#include "RxPacket.h"
+#if defined(DEVOURER_HAVE_JAGUAR1)
+#include "jaguar1/RtlJaguarDevice.h"
+#endif
 #include "RtlUsbAdapter.h"
 #include "SignalStop.h"
 #include "WiFiDriver.h"
@@ -317,13 +319,22 @@ int main(int argc, char **argv) {
 
   WiFiDriver wifi_driver{logger};
   auto rtlDevice = wifi_driver.CreateRtlDevice(handle);
+  if (!rtlDevice) {
+    /* Factory returns null when this chip's generation wasn't compiled in
+     * (per-chip CMake options); it already logged which. */
+    logger->error("No driver for this chip in this build — exiting");
+    return 1;
+  }
   logger->info("init-timing: txdemo.create_device = {} ms", ms_since_start());
 
   /* Jaguar1-only research features (TX-mode default, fast-retune hopping,
    * thermal telemetry, TXAGC override, BB-reg probe) are not part of the
    * IRtlDevice contract — reach them by downcasting. jag is null on Jaguar3,
-   * where those call sites are skipped. */
+   * where those call sites are skipped, and compiled out entirely when Jaguar1
+   * support isn't built. */
+#if defined(DEVOURER_HAVE_JAGUAR1)
   RtlJaguarDevice *jag = dynamic_cast<RtlJaguarDevice *>(rtlDevice.get());
+#endif
 
   int channel = 161;
   if (const char *ch_env = std::getenv("DEVOURER_CHANNEL")) {
@@ -547,7 +558,9 @@ int main(int argc, char **argv) {
   long pwr_next_step_ms = 0;
   bool txpwr_readback = std::getenv("DEVOURER_TX_PWR_READBACK") != nullptr;
   auto apply_txpwr = [&](int idx) {
-    if (!jag) /* TXAGC override is a Jaguar1 (RtlJaguarDevice) feature */
+    /* TXAGC override is a Jaguar1 (RtlJaguarDevice) feature; a no-op otherwise. */
+#if defined(DEVOURER_HAVE_JAGUAR1)
+    if (!jag)
       return;
     jag->SetTxPowerOverride(idx);
     jag->ApplyTxPower();  /* SetMonitorChannel early-returns on same ch */
@@ -564,6 +577,9 @@ int main(int argc, char **argv) {
              ofdm6m);
     }
     fflush(stdout);
+#else
+    (void)idx;
+#endif
   };
   if (const char *e = std::getenv("DEVOURER_TX_PWR_START")) {
     pwr_ramp = true;
@@ -634,10 +650,14 @@ int main(int argc, char **argv) {
         tx_buf = build_frame_with_channel(chan_to_freq(ch), beacon_frame + 10,
                                           sizeof(beacon_frame) - 10);
         mode = " radiotap";
-      } else if (hop_fast && jag) {
+      }
+#if defined(DEVOURER_HAVE_JAGUAR1)
+      else if (hop_fast && jag) {
         jag->FastRetune(static_cast<uint8_t>(ch), /*cache_rf=*/hop_fast != 2);
         mode = " fast";
-      } else {
+      }
+#endif
+      else {
         rtlDevice->SetMonitorChannel(SelectedChannel{
             .Channel = static_cast<uint8_t>(ch),
             .ChannelOffset = init_offset,
@@ -662,7 +682,8 @@ int main(int argc, char **argv) {
       fflush(stdout);
     }
     /* Thermal telemetry is a Jaguar1 (RtlJaguarDevice) feature; skip on
-     * Jaguar3, where jag is null. */
+     * Jaguar3, where jag is null; compiled out when Jaguar1 isn't built. */
+#if defined(DEVOURER_HAVE_JAGUAR1)
     if (jag && thermal_every > 0 && tx_count % thermal_every == 0) {
       auto t = jag->GetThermalStatus();
       if (t.valid) {
@@ -683,6 +704,7 @@ int main(int argc, char **argv) {
       }
       fflush(stdout);
     }
+#endif /* DEVOURER_HAVE_JAGUAR1 */
     if (rc) {
       consec_fail = 0;
     } else if (++consec_fail >= kMaxConsecFail) {

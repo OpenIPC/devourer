@@ -39,13 +39,13 @@ varies run-to-run (bracketed = best clean reading).
 | Part                          | RF / streams      | 2.4 GHz (ch6) | UNII-1 (ch36) | UNII-2/3 (ch149) | Notes                                       |
 | ----------------------------- | ----------------- | ------------- | ------------- | ---------------- | ------------------------------------------- |
 | **RTL8812AU**                 | 2T2R              | 56            | 52            | 52               | `0bda:8812`; reference part |
-| **RTL8811AU**                 | 1T1R              | mirrors 8812  | mirrors 8812  | mirrors 8812     | 1T1R cut of 8812 silicon; rides the 8812 code path (`RFType=RF_TYPE_1T1R` from `REG_SYS_CFG` bit 27). No unit on the bench |
+| **RTL8811AU**                 | 1T1R              | mirrors 8812  | mirrors 8812  | mirrors 8812     | 1T1R cut of 8812 silicon; rides the 8812 code path (`RFType=RF_TYPE_1T1R` from `REG_SYS_CFG` bit 27). Not benchmarked |
 | **RTL8814AU**                 | 4T4R, 3-SS max    | 65            | †(32)         | †(32)            | `0bda:8813`; 2-SS effective on USB-2 |
 | **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | TP-Link Archer T2U Plus (`2357:0120`) |
 | **RTL8812CU**                 | 2T2R              | 65            | 60            | 60               | LB-LINK WDN1300H (`0bda:c812`) |
-| **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | no unit on the bench (`0bda:c82c`) |
+| **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`0bda:c82c`) |
 | **RTL8812EU**                 | 2T2R              | 8             | 51            | 47               | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module |
-| **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | no unit on the bench (`rtl8822e`) |
+| **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`rtl8822e`) |
 
 The **`Jaguar2`** / **`Jaguar+`** family (8812BU, 8822**B**U/BE, etc.) and
 the later **`Kestrel`** 11ax generation are **out of scope**: they share

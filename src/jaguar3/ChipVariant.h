@@ -5,8 +5,8 @@ namespace jaguar3 {
 
 /* Which Jaguar3 MAC/DLFW fork a device is. Both variants share the rtl8822c PHY
  * generation (BB/AGC/RF tables, IQK/DACK, channel/bandwidth, 5/10 MHz
- * narrowband); they differ only in the firmware blob — and, if the bench ever
- * proves it, the power-on sequence / MAC-init (currently verified identical).
+ * narrowband); they differ only in the firmware blob (the power-on sequence and
+ * MAC-init are identical).
  *
  *   C8822C — rtl8822c: RTL8812CU / RTL8822CU  (SYS_CFG2 chip-id 0x13)
  *   C8822E — rtl8822e: RTL8812EU / RTL8822EU  (SYS_CFG2 chip-id 0x17)

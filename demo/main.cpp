@@ -30,6 +30,12 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0xc82c, /* RTL8822CU (Jaguar3) */
     0xc82e, /* RTL8822CU (Jaguar3) */
     0xc812, /* RTL8812CU WiFi-only (Jaguar3) */
+    0x881a, /* RTL8812EU variant (Jaguar3 EU) */
+    0x881b, /* RTL8812EU variant (Jaguar3 EU) */
+    0x881c, /* RTL8812EU variant (Jaguar3 EU) */
+    0xa81a, /* RTL8812EU — LB-LINK BL-M8812EU2 (Jaguar3 EU) */
+    0xe822, /* RTL8822EU (Jaguar3 EU) */
+    0xa82a, /* RTL8822EU (Jaguar3 EU) */
 };
 
 static int g_rx_count = 0;

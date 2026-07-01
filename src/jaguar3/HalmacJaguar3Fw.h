@@ -6,10 +6,11 @@
 
 #include "logger.h"
 #include "RtlUsbAdapter.h"
+#include "ChipVariant.h"
 
 namespace jaguar3 {
 
-/* Halmac8822cFw — the Jaguar3 firmware-download (DLFW) state machine, ported
+/* HalmacJaguar3Fw — the Jaguar3 firmware-download (DLFW) state machine, ported
  * faithfully from Realtek HalMAC (hal/halmac/halmac_88xx/halmac_fw_88xx.c:
  * download_firmware_88xx + start_dlfw + dlfw_to_mem + iddma + check_fw_chksum +
  * dlfw_end_flow + wlan_cpu_en + pltfm_reset).
@@ -23,9 +24,10 @@ namespace jaguar3 {
  * the chunk with an 8822C TX descriptor into the HIQ reserved page) are ported.
  * Validated on hardware: the chip boots its firmware (REG_MCUFW_CTRL == 0xC078),
  * confirmed via usbmon diff vs the kernel rtl88x2eu driver. */
-class Halmac8822cFw {
+class HalmacJaguar3Fw {
 public:
-  Halmac8822cFw(RtlUsbAdapter device, Logger_t logger);
+  HalmacJaguar3Fw(RtlUsbAdapter device, Logger_t logger,
+                ChipVariant variant = ChipVariant::C8822C);
 
   /* Download + boot the WLAN firmware image (fw_bin/size = the full
    * hal8822c_fw blob incl. 64-byte header). Returns true once the chip reports
@@ -64,6 +66,7 @@ private:
 
   RtlUsbAdapter _device;
   Logger_t _logger;
+  ChipVariant _variant; /* selects the firmware blob (8822c vs 8822e) */
   /* halmac adapter->dlfw_pkt_size — the per-chunk DDMA size. */
   uint32_t _dlfw_pkt_size = 4096;
   /* halmac adapter->txff_alloc.rsvd_boundary — the reserved-page boundary the

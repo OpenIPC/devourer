@@ -35,7 +35,7 @@ struct Jaguar3PhyContext {
 
 using Jaguar3PhyWriter = std::function<void(uint32_t addr, uint32_t data)>;
 
-class PhyTableLoader8822c {
+class PhyTableLoaderJaguar3 {
 public:
   /* Walk one array_mp_8822c_* table of `len` u32 words, applying the matched
    * register writes through `write`. Mirrors a single

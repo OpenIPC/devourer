@@ -12,12 +12,12 @@
  *   halmac_88xx/halmac_88xx_cfg.h       — sizes / OCP bases / poll counts
  *
  * Kept as a focused header (not a wholesale halmac import) per devourer's
- * minimal-subset philosophy. Only what Halmac8822cFw uses lives here.
+ * minimal-subset philosophy. Only what HalmacJaguar3Fw uses lives here.
  *
  * Several of these names (REG_CR, REG_BCN_CTRL, ...) are also #define macros in
  * the Realtek hal_com_reg.h pulled in via RtlUsbAdapter.h. The preprocessor
  * ignores namespaces, so we #undef them first and re-introduce them as scoped
- * constexpr constants. This header is included ONLY by Halmac8822cFw.cpp (which
+ * constexpr constants. This header is included ONLY by HalmacJaguar3Fw.cpp (which
  * uses no other definition of these names), so the #undef is local and safe. */
 #undef REG_SYS_FUNC_EN
 #undef REG_SYS_CLK_CTRL

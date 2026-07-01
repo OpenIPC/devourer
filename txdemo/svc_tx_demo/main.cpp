@@ -12,7 +12,7 @@
 //    header parse, trivial framing adapter.)
 //
 // All records are read up front, then injected in a continuous loop (so a
-// bench witness can capture a stable rate histogram). A live deployment would
+// receiver can capture a stable rate histogram). A live deployment would
 // inject each NAL as it arrives, once.
 //
 // Usage:

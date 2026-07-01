@@ -40,7 +40,9 @@
  * demo (demo/main.cpp). */
 static constexpr uint16_t kRealtekProductIds[] = {
     0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
-    0xc82c, 0xc82e, 0xc812, /* RTL8822CU/8812CU (Jaguar3) */
+    0xc82c, 0xc82e, 0xc812, /* RTL8822CU/8812CU (Jaguar3 CU) */
+    0x881a, 0x881b, 0x881c, 0xa81a, /* RTL8812EU (Jaguar3 EU; a81a = BL-M8812EU2) */
+    0xe822, 0xa82a, /* RTL8822EU (Jaguar3 EU) */
 };
 
 /* Process-start reference for the init-timing lines (see src/InitTimer.h).
@@ -354,11 +356,12 @@ int main(int argc, char **argv) {
     logger->info("DEVOURER_NB_BW={} — TX bandwidth {} MHz", nb, mhz);
   }
 
-  /* TX power: default reference 40; DEVOURER_TX_PWR=0xNN overrides it. */
-  int tx_pwr = 40;
+  /* TX power: only override when DEVOURER_TX_PWR is set. Without it, the library
+   * programs its own efuse-calibrated default per chip (see InitWrite) — the
+   * demo must NOT impose a flat reference or it clobbers that default (a
+   * hardcoded 40 left the 8822e ~3 dB below the kernel). */
   if (const char *p = std::getenv("DEVOURER_TX_PWR"))
-    tx_pwr = static_cast<int>(std::strtol(p, nullptr, 0));
-  rtlDevice->SetTxPower(static_cast<uint8_t>(tx_pwr));
+    rtlDevice->SetTxPower(static_cast<uint8_t>(std::strtol(p, nullptr, 0)));
 
   /* The original txdemo forked an RX child and a TX parent on the same
    * libusb handle. That pattern is Termux-specific (libusb_wrap_sys_device
@@ -415,10 +418,11 @@ int main(int argc, char **argv) {
    * default apply; a frame embedding its own rate radiotap overrides it per
    * packet. Default (no env) = 6 M legacy. Replaces the former per-knob
    * DEVOURER_TX_MCS/_VHT/_LDPC/_STBC/_BW env vars + the DEVOURER_TX_HT_MCS gate. */
-  /* TX-mode default is a Jaguar1 (RtlJaguarDevice) feature; on Jaguar3 the
-   * frame's own radiotap carries the rate. */
-  if (jag)
-    jag->SetTxMode(devourer::parse_tx_mode_env());
+  /* TX-mode default (DEVOURER_TX_RATE) — now a first-class IRtlDevice feature so
+   * it applies to Jaguar3 (8822CU/EU) too. The demo's beacon is rate-less, so
+   * without this its Jaguar3 TX fell back to MGN_1M (1 Mbps) regardless of
+   * DEVOURER_TX_RATE. Per-packet radiotap still overrides. */
+  rtlDevice->SetTxMode(devourer::parse_tx_mode_env());
 
   std::vector<uint8_t> tx_buf(beacon_frame, beacon_frame + sizeof(beacon_frame));
 
@@ -466,9 +470,11 @@ int main(int argc, char **argv) {
    * it (e.g. DEVOURER_TX_GAP_US=0) to raise the TX duty cycle for thermal /
    * heating experiments — at the default gap the PA barely warms. */
   long tx_gap_us = 2000;
+  bool tx_gap_set = false; /* explicit DEVOURER_TX_GAP_US wins (incl. 0 = no gap) */
   if (const char *e = std::getenv("DEVOURER_TX_GAP_US")) {
     tx_gap_us = std::strtol(e, nullptr, 0);
     if (tx_gap_us < 0) tx_gap_us = 0;
+    tx_gap_set = true;
   }
 
   /* Channel-hopping mode (frequency-diversity validation). When
@@ -686,9 +692,11 @@ int main(int argc, char **argv) {
                     consec_fail);
       break;
     }
-    if (tx_gap_us > 0)
-      std::this_thread::sleep_for(std::chrono::microseconds(tx_gap_us));
-    else if (tx_interval_ms > 0)
+    if (tx_gap_set) {
+      /* explicit gap wins: >0 sleeps, 0 = no inter-frame sleep (max flood) */
+      if (tx_gap_us > 0)
+        std::this_thread::sleep_for(std::chrono::microseconds(tx_gap_us));
+    } else if (tx_interval_ms > 0)
       std::this_thread::sleep_for(std::chrono::milliseconds(tx_interval_ms));
   }
 

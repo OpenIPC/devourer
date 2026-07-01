@@ -6,6 +6,7 @@
 #include <functional>
 
 #include "SelectedChannel.h"
+#include "TxMode.h"
 
 /* Packet is the parsed-RX type handed to the RX callback. Forward-declared here
  * (a reference in the std::function signature needs only an incomplete type) so
@@ -39,6 +40,14 @@ public:
    * RX/TX loop exits and BEFORE releasing/closing the USB interface, so the
    * adapter isn't abandoned with its USB core hung. Default no-op. */
   virtual void Stop() {}
+
+  /* Runtime TX-mode default: the modulation/rate/BW/GI/FEC used when a frame's
+   * radiotap carries no rate (per-packet radiotap always wins). Both chip
+   * families implement it; default no-op keeps other impls unaffected. Without
+   * it, a rate-less frame falls back to MGN_1M — e.g. an MCS7 flood would
+   * silently go on-air at 1 Mbps. */
+  virtual void SetTxMode(const devourer::TxMode & /*mode*/) {}
+  virtual void ClearTxMode() {}
 };
 
 #endif /* IRTL_DEVICE_H */

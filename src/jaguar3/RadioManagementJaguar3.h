@@ -9,7 +9,7 @@
 
 namespace jaguar3 {
 
-/* RadioManagement8822c — channel / bandwidth / TX-power for the Jaguar3 family.
+/* RadioManagementJaguar3 — channel / bandwidth / TX-power for the Jaguar3 family.
  *
  * The Jaguar3 channel+bandwidth path is procedural — a port of the vendor's
  * config_phydm_switch_channel_8822c / config_phydm_switch_bandwidth_8822c
@@ -20,9 +20,9 @@ namespace jaguar3 {
  * 5/10 MHz narrowband re-clock (the whole reason for the port) is reachable:
  * set_bandwidth_dividers applies it on top of an already-tuned channel via the
  * NB_* registers below (SDR-validated). */
-class RadioManagement8822c {
+class RadioManagementJaguar3 {
 public:
-  RadioManagement8822c(RtlUsbAdapter device, Logger_t logger);
+  RadioManagementJaguar3(RtlUsbAdapter device, Logger_t logger);
 
   void set_channel_bwmode(uint8_t channel, uint8_t channel_offset,
                           ChannelWidth_t bwmode);
@@ -31,10 +31,20 @@ public:
    * the baseband DAC/ADC clock + small-BW field for 5/10/20 MHz. */
   void set_bandwidth_dividers(ChannelWidth_t bwmode);
 
-  /* Override the TX-power reference (7-bit index, both paths) and flatten the
-   * per-rate diff table so every rate emits at that level. Wired to
-   * DEVOURER_TX_PWR for stronger TX than the bring-up default. */
-  void set_tx_power_ref(uint8_t idx);
+  /* Set the TX-power reference (7-bit index, both paths). With zero_diffs=true
+   * (the DEVOURER_TX_PWR debug knob) the per-rate diff table is flattened so
+   * every rate emits at `idx`. With zero_diffs=false (the default bring-up path)
+   * the diff table applied by the BB tables is preserved, so per-rate spread is
+   * kept and only the reference base is programmed. */
+  void set_tx_power_ref(uint8_t idx, bool zero_diffs = true);
+
+  /* Apply the 8822e phy_reg_pg power-by-rate table for `channel`'s band: sets
+   * the OFDM/CCK reference PER PATH (ref_a -> 0x18e8/0x18a0, ref_b -> 0x41e8/
+   * 0x41a0) and writes the per-rate diff table (0x3a00) so robust low rates get
+   * the kernel's by-rate boost instead of a flat reference. The per-path refs
+   * come from the efuse per-channel base (the kernel programs a distinct path-A/
+   * path-B base, e.g. 0x4b/0x54 at ch36). */
+  void apply_power_by_rate_8822e(uint8_t channel, uint8_t ref_a, uint8_t ref_b);
 
 private:
   /* Jaguar3 baseband bandwidth/clock registers (from

@@ -6,6 +6,7 @@
  *   hal/phydm/rtl8822c/halhwimg8822c_bb.c::array_mp_8822c_phy_reg_pg (46 lines)
  *   hal/phydm/halrf/rtl8822c/halhwimg8822c_rf.c::array_mp_8822c_radioa (18026 lines)
  *   hal/phydm/halrf/rtl8822c/halhwimg8822c_rf.c::array_mp_8822c_radiob (18494 lines)
+ *   hal/phydm/halrf/rtl8822c/halrf_rfk_init_8822c.h::array_mp_8822c_cal_init (2464 lines)
  * Edit the source files upstream and re-run; do not hand-edit. */
 
 #include "drv_types.h"
@@ -39889,8 +39890,7 @@ const u32 array_mp_8822c_radiob[] = {
 };
 const u32 array_mp_8822c_radiob_len = sizeof(array_mp_8822c_radiob) / sizeof(u32);
 
-
-const u32 array_mp_8822c_cal_init[] = {	
+const u32 array_mp_8822c_cal_init[] = {
 	0x1b00, 0x00000008,
 	0x1b00, 0x00A70008,
 	0x1b00, 0x00150008,
@@ -42357,3 +42357,4 @@ const u32 array_mp_8822c_cal_init[] = {
 	0x1b08, 0x00000000,
 };
 const u32 array_mp_8822c_cal_init_len = sizeof(array_mp_8822c_cal_init) / sizeof(u32);
+

@@ -18,8 +18,8 @@ path with `RFType=RF_TYPE_1T1R` selected via `REG_SYS_CFG` bit 27),
 **RTL8814AU** (4T4R RF / 3-SS baseband; host-pushed TX requires the
 on-chip 3081 MCU, which devourer boots during firmware download —
 a failed FW-boot poll means dead TX while RX still works), and
-**RTL8821AU** (1T1R AC + BT combo). These share one HAL (`src/HalModule`,
-`src/RtlJaguarDevice`) with chip-family branches.
+**RTL8821AU** (1T1R AC + BT combo). These share one HAL (`src/jaguar1/`,
+e.g. `HalModule`, `RtlJaguarDevice`) with chip-family branches.
 
 **Jaguar3.** A second, self-contained HAL under `src/jaguar3/` covering two PHY
 generations that share one core: **rtl8822c** (RTL8812CU / RTL8822CU, `0bda:c812`)
@@ -52,11 +52,22 @@ cmake -S . -B build
 cmake --build build -j
 ```
 
+Per-chip build options select which drivers are compiled in — all default ON,
+so the command above builds every chip. Turn off the ones you don't need to
+drop their firmware blobs + PHY tables (an 8812AU-only `WiFiDriverDemo` is
+~1.0 MB vs ~2.6 MB): `DEVOURER_JAGUAR1` (8812/8811/8821), `DEVOURER_8814`
+(requires JAGUAR1), `DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`.
+Configure fails on no-chip-selected or 8814-without-JAGUAR1. Each group exports
+a PUBLIC `DEVOURER_HAVE_*` define; sites referencing a dropped group are behind
+`#if defined(DEVOURER_HAVE_*)`, and the factory returns `nullptr` (logs) for a
+chip whose support isn't built.
+
 libusb-1.0 is required: `pkg-config` on Linux/macOS, vcpkg on Windows
 (`VCPKG_ROOT` must be set so the toolchain file resolves). CI matrix builds
 across GCC/Clang/MSVC on Ubuntu/macOS/Windows, plus a separate `build-mingw`
 job (mingw-w64 via MSYS2, libusb from pkg-config) covering the Windows-GCC
-toolchain the MSVC matrix cell doesn't
+toolchain the MSVC matrix cell doesn't; the `build-configs` matrix builds each
+per-chip subset and `reject-bad-configs` asserts the invalid option combos fail
 (`.github/workflows/cmake-multi-platform.yml`). `ctest` runs in every CI job;
 the one registered test (`stream_stdin_binary`) round-trips the stream demos'
 binary-stdin framing (`txdemo/stream_stdin.h`) headlessly, so a Windows
@@ -251,7 +262,20 @@ C8822E). Each orchestrator drives bring-up, RX, and TX through its own HAL.
 `RtlJaguarDevice` was previously named `Rtl8812aDevice` — a deprecated alias
 still exists for one release cycle.
 
-Module layout in `src/`:
+Generation-agnostic core in `src/` (always compiled; depends on neither
+generation's HAL):
+
+- `WiFiDriver` — the factory (`CreateRtlDevice`).
+- `RtlUsbAdapter` — libusb wrapper (vendor control + bulk transfers).
+- `Radiotap.c` — radiotap header iterator. TX buffers passed to
+  `send_packet` **must** begin with a radiotap header; rate / MCS / VHT /
+  STBC / LDPC / SGI / bandwidth are read from it.
+- `RateDefinitions.h` (`MGN_RATE`), `RxPacket.h` (`Packet` + RX descriptor
+  types), `TxDescBits.h` (`SET_BITS_TO_LE_4BYTE` + LE bit-field helpers) —
+  the symbols both generations' parsers build on, kept neutral so neither
+  generation's header pulls in the other's.
+
+The Jaguar1 HAL lives under `src/jaguar1/`:
 
 - `RtlJaguarDevice` — top-level orchestrator (Init / InitWrite / send_packet).
 - `HalModule` — chip bring-up, power sequencing, BB/AGC/RF table application,
@@ -266,12 +290,8 @@ Module layout in `src/`:
 - `PhyTableLoader` — runtime walker for Realtek's phydm-format register
   tables (opcode-encoded conditional blocks). Replicates upstream phydm's
   `check_positive` + state machine **without pulling in phydm itself**.
-- `RtlUsbAdapter` — libusb wrapper (vendor control + bulk transfers).
 - `FrameParser` — RX parsing and TX descriptor layout (`SET_TX_DESC_*_8812`
   macros are shared across the Jaguar family).
-- `Radiotap.c` — radiotap header iterator. TX buffers passed to
-  `send_packet` **must** begin with a radiotap header; rate / MCS / VHT /
-  STBC / LDPC / SGI / bandwidth are read from it.
 
 The Jaguar3 HAL is a parallel, self-contained set under `src/jaguar3/`. The core
 uses generation-neutral names; per-generation behaviour is behind two strategy
@@ -295,8 +315,8 @@ interfaces selected by `ChipVariant`:
 **generated** from the upstream aircrack-ng/rtl8814au source by
 `tools/extract_8814a_phy_tables.py`; the Jaguar3 tables under
 `hal/phydm/rtl8822{c,e}/` by `tools/extract_8822c_phy_tables.py`. Edit the
-generators, not the output. The runtime parser is `src/PhyTableLoader` (Jaguar1)
-/ `src/jaguar3/PhyTableLoaderJaguar3`, not the upstream phydm parser.
+generators, not the output. The runtime parser is `src/jaguar1/PhyTableLoader`
+(Jaguar1) / `src/jaguar3/PhyTableLoaderJaguar3`, not the upstream phydm parser.
 
 ## Hardware gotchas
 

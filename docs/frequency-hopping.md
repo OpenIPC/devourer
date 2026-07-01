@@ -226,15 +226,13 @@ all relevant to anyone building such a rig:
 - **Some clones deliver a spectrally-mirrored spectrum** (apparent channel
   order reverses, with the centre channel fixed). Accept either direction when
   matching the hop sequence.
-- **Do not trust a single reading on an unstable rail.** 5 GHz TX draws far
-  more PA current; on a bus-powered hub chain the rail browns out and on-air
-  power collapses intermittently while register writes still succeed. Keep a
-  known-good control and compare full-path vs fast-path: if the *full* path is
-  equally weak, the weakness is the rail, not your change.
+- **Don't trust a single on-air reading.** Take one clean SDR read per session
+  and compare full-path vs fast-path: if the *full* path is equally weak, the
+  weakness isn't your change.
 
-### Register parity (when clean on-air is impossible)
+### Register parity (when clean on-air is unavailable)
 
-When the rail can't support clean on-air at a given band/BW (5 GHz here), prove
+When a clean on-air reading isn't available at a given band/BW, prove
 the fast path leaves the chip in the **same channel/BW register state** as the
 known-good full path. `DumpCanary()` reads a fixed set of BB/MAC/RF registers;
 `tests/hop_parity_check.sh` drives the chip to the same target channel via the
@@ -319,8 +317,8 @@ Work through these in order:
 5. **Gate band changes out of the fast path** — they need the front-end
    reconfiguration and recalibration a hop skips.
 6. **Validate two ways:** wideband SDR on-air for end-to-end behaviour, and
-   register-parity against the full path for the cases the rail can't support
-   cleanly. Always run a full-vs-full control to separate inherent register
+   register-parity against the full path for cases where a clean on-air reading
+   isn't available. Always run a full-vs-full control to separate inherent register
    variance (timers, calibration jitter) from real parity breaks.
 
 The throughline: a channel switch is mostly work a *hop* does not need. Strip it

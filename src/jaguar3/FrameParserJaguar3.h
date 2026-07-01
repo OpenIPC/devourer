@@ -43,6 +43,10 @@ constexpr size_t RXDESC_SIZE_8822C = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_DATA_BW_8822C(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 5, 2, v)
 #define SET_TX_DESC_DATA_LDPC_8822C(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 7, 1, v)
 #define SET_TX_DESC_DATA_STBC_8822C(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 8, 2, v)
+#define SET_TX_DESC_DISQSELSEQ_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x00, 31, 1, v)
+#define SET_TX_DESC_G_ID_8822C(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x08, 24, 6, v)
+#define SET_TX_DESC_RTY_LMT_EN_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 17, 1, v)
+#define SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 18, 6, v)
 #define SET_TX_DESC_SW_DEFINE_8822C(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x18, 0, 12, v)
 #define SET_TX_DESC_TXDESC_CHECKSUM_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x1C, 0, 16, v)
 #define SET_TX_DESC_EN_HWSEQ_8822C(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x20, 15, 1, v)
@@ -86,15 +90,31 @@ inline void cal_txdesc_chksum_8822c(uint8_t *txdesc) {
  * DISDATAFB, HW sequence). */
 inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
                                     uint8_t rate_hw, uint8_t rate_id, uint8_t bw,
-                                    bool short_gi, bool ldpc, uint8_t stbc) {
+                                    bool short_gi, bool ldpc, uint8_t stbc,
+                                    bool bmc = false) {
   SET_TX_DESC_TXPKTSIZE_8822C(d, pkt_size);
   SET_TX_DESC_OFFSET_8822C(d, static_cast<uint32_t>(TXDESC_SIZE_8822C));
   SET_TX_DESC_LS_8822C(d, 1);
+  /* Broadcast/multicast marker: the kernel sets this whenever addr1 is a group
+   * address, so mark group-addressed frames the same way for a faithful port. */
+  SET_TX_DESC_BMC_8822C(d, bmc ? 1 : 0);
+  /* Remaining fields mirror the kernel's 8822e data/inject descriptor so the
+   * on-wire TXDESC is byte-identical (verified against a usbmon capture of the
+   * kernel's MCS7 inject): hw-managed sequence (DISQSELSEQ), SU/broadcast group
+   * (G_ID=63), a bounded per-frame retry limit (RTY_LMT_EN + RTS_DATA_RTY_LMT),
+   * RA-group 9, and a non-zero SW_DEFINE. NB: these do not change on-air
+   * throughput (the chip already airs a saturating MCS7 flood at ~77% duty with
+   * or without them) — they are here for a faithful port, not a fix. */
+  SET_TX_DESC_DISQSELSEQ_8822C(d, 1);
+  SET_TX_DESC_G_ID_8822C(d, 0x3f);
+  SET_TX_DESC_RTY_LMT_EN_8822C(d, 1);
+  SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(d, 12);
   SET_TX_DESC_MACID_8822C(d, 0x01);
   SET_TX_DESC_QSEL_8822C(d, 0x12); /* MGMT queue (mirrors Jaguar1 inject) */
-  SET_TX_DESC_RATE_ID_8822C(d, rate_id);
+  SET_TX_DESC_RATE_ID_8822C(d, 9); /* kernel uses RA-group 9 for the inject path */
   SET_TX_DESC_USE_RATE_8822C(d, 1);
-  SET_TX_DESC_DISDATAFB_8822C(d, 1);
+  SET_TX_DESC_DISDATAFB_8822C(d, 0);
+  SET_TX_DESC_SW_DEFINE_8822C(d, 1);
   SET_TX_DESC_DATARATE_8822C(d, rate_hw);
   SET_TX_DESC_DATA_BW_8822C(d, bw);
   SET_TX_DESC_DATA_SHORT_8822C(d, short_gi ? 1 : 0);

@@ -1,18 +1,19 @@
-#ifndef HALRF_8822C_IQK_H
-#define HALRF_8822C_IQK_H
+#ifndef HALRF_8822C_H
+#define HALRF_8822C_H
 
 #include <cstdint>
 
 #include "logger.h"
 #include "RtlUsbAdapter.h"
 #include "SelectedChannel.h"
+#include "Jaguar3Calibration.h"
 
 namespace jaguar3 {
 
-/* Halrf8822cIqk — userspace port of the RTL8822C IQK (IQ-imbalance / LO-leakage)
+/* Halrf8822c — userspace port of the RTL8822C IQK (IQ-imbalance / LO-leakage)
  * calibration from the OpenHD/rtl88x2cu vendor halrf (hal/phydm/halrf/rtl8822c/
  * halrf_iqk_8822c.c). Replaces the hardcoded captured IQK gain registers in
- * Hal8822c::init_rfk with a real calibration that runs fresh each boot — the
+ * HalJaguar3::init_rfk with a real calibration that runs fresh each boot — the
  * gains depend on chip + temperature, so the captured values don't survive
  * across boots (the cause of the flaky structured-path RX).
  *
@@ -20,19 +21,19 @@ namespace jaguar3 {
  * shim over RtlUsbAdapter: BB/MAC registers via rtw_read32/write32, RF registers
  * via the 8822C direct window (config_phydm_*_rf_reg_8822c: BB[0x3c00|0x4c00 +
  * (addr<<2)], 20-bit). The dm->IQK_info calibration state lives in IqkInfo. */
-class Halrf8822cIqk {
+class Halrf8822c : public Jaguar3Calibration {
 public:
-  Halrf8822cIqk(RtlUsbAdapter device, Logger_t logger);
+  Halrf8822c(RtlUsbAdapter device, Logger_t logger);
 
   /* phy_iq_calibrate_8822c entry — runs the full IQK (backup -> setup -> LOK/
    * TXK/RXK per path -> restore -> fill report). bw selects NB-IQK (5/10 MHz);
    * channel selects the 2.4/5 GHz band branch. */
-  void phy_iq_calibrate(ChannelWidth_t bw, uint8_t channel);
+  void phy_iq_calibrate(ChannelWidth_t bw, uint8_t channel) override;
 
   /* DAC calibration (halrf_dac_cal_8822c). Channel-independent; run once at
    * bring-up before IQK. Produces the operational BB DC/gain state (0x18bc/c0/
    * d8/dc + path-B) that gates strong on-air TX. */
-  void dac_calibrate();
+  void dac_calibrate() override;
 
   /* Persistently grant the shared antenna to WLAN. On this WiFi+BT combo the
    * coex firmware otherwise arbitrates the antenna away from WL after a few
@@ -42,7 +43,7 @@ public:
    *  - antenna path-control owner = WL: REG_SYS_SDIO_CTRL+3 (0x73) |=
    *    BIT_LTE_MUX_CTRL_PATH (BIT(26) -> 0x04 in byte 3). Without the owner bit
    *    GNT_WL doesn't actually hold the antenna. */
-  void force_wl_antenna() {
+  void force_wl_antenna() override {
     /* WL scoreboard = active|on (+BT_INT_EN): tells the BT firmware WiFi is on,
      * so it leaves the SW-forced GNT alone. REG_WIFI_BT_INFO=0xAA, val =
      * 0x2 | ACTIVE(BIT0) | ONOFF(BIT1) | BIT_BT_INT_EN(BIT15) = 0x8003. */
@@ -57,13 +58,13 @@ public:
    * that WL TX must never be masked by GNT_BT, then forces the antenna to WL.
    * Without this the coex firmware switches the antenna away ~12 s into TX. Call
    * once after bring-up (and force_wl_antenna() periodically as a backstop). */
-  void coex_wlan_only_init();
+  void coex_wlan_only_init() override;
 
   /* Periodic 5 GHz coex decision (port of rtw_coex_action_wl_under5g): GNT_BT to
    * HW-PTA + GNT_WL SW-high, antenna owner = WL, the WL-wins-all PTA table, and
    * the active scoreboard. Re-applied on the coex runtime tick so the FW's PTA
    * keeps the antenna with WLAN during sustained 5 GHz TX. */
-  void coex_run_5g();
+  void coex_run_5g() override;
 
   /* Thermal TX-power tracking (port of rtw8822c_pwr_track for 5 GHz). Each tick:
    * trigger + read the RF thermal meter (RF_T_METER 0x42), compute the delta vs
@@ -72,12 +73,12 @@ public:
    * upper-5 GHz PA droops with heat until the FW protection silences TX (~52 s);
    * with it the output is held and TX sustains. Reference is captured on the
    * first call (chip is coldest at bring-up). */
-  void pwr_track();
+  void pwr_track() override;
 
   /* Light periodic re-assertion of the WiFi-only coex state (no RF/BB writes):
    * re-disable the LTE/BT arbitration and re-grant the antenna to WL, in case
    * the coex firmware re-enables it. Safe to call on the TX hot path. */
-  void coex_keepalive() {
+  void coex_keepalive() override {
     btc_write_indirect(0x38, 0x80, 0x0);      /* LTE_COEX_CTRL BIT_LTE_COEX_EN=0 */
     btc_write_indirect(0xa0, 0xffff, 0xffff); /* LTE_WL_TRX_CTRL all-pass */
     btc_write_indirect(0xa4, 0xffff, 0xffff); /* LTE_BT_TRX_CTRL all-pass */

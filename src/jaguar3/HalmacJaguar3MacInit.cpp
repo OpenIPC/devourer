@@ -1,4 +1,4 @@
-#include "Halmac8822cMacInit.h"
+#include "HalmacJaguar3MacInit.h"
 
 #include <cstdint>
 
@@ -361,11 +361,11 @@ inline bool is_5m(ChannelWidth_t b) { return b == CHANNEL_WIDTH_5; }
 inline bool is_10m(ChannelWidth_t b) { return b == CHANNEL_WIDTH_10; }
 } /* namespace */
 
-Halmac8822cMacInit::Halmac8822cMacInit(RtlUsbAdapter device, Logger_t logger)
+HalmacJaguar3MacInit::HalmacJaguar3MacInit(RtlUsbAdapter device, Logger_t logger)
     : _device{device}, _logger{logger} {}
 
 /* enable_bb_rf_88xx */
-void Halmac8822cMacInit::enable_bb_rf(bool enable) {
+void HalmacJaguar3MacInit::enable_bb_rf(bool enable) {
   if (enable) {
     _device.rtw_write8(REG_SYS_FUNC_EN,
                        _device.rtw_read8(REG_SYS_FUNC_EN) | 0x03);
@@ -385,7 +385,7 @@ void Halmac8822cMacInit::enable_bb_rf(bool enable) {
 }
 
 /* pre_init_system_cfg_8822c (USB path) */
-void Halmac8822cMacInit::pre_init_system_cfg() {
+void HalmacJaguar3MacInit::pre_init_system_cfg() {
   _device.rtw_write8(REG_RSV_CTRL, 0);
 
   /* USB: REG_SYS_CFG2+3 == 0x20 workaround */
@@ -414,7 +414,7 @@ void Halmac8822cMacInit::pre_init_system_cfg() {
 /* init_usb_cfg_88xx: USB RX-DMA mode/burst + TX drop-data. REG_RXDMA_MODE
  * governs how the chip DMAs RX into the bulk-IN endpoint — without it the host's
  * bulk-IN reads time out (no frames delivered). */
-void Halmac8822cMacInit::init_usb_cfg() {
+void HalmacJaguar3MacInit::init_usb_cfg() {
   uint8_t v = static_cast<uint8_t>((1u << 1) | (0x3u << 2)); /* DMA_MODE|BURST_CNT */
   if (_device.rtw_read8(REG_SYS_CFG2 + 3) == 0x20)
     v |= (0x0u << 4); /* USB3 burst */
@@ -426,12 +426,33 @@ void Halmac8822cMacInit::init_usb_cfg() {
   _device.rtw_write16(REG_TXDMA_OFFSET_CHK,
                       _device.rtw_read16(REG_TXDMA_OFFSET_CHK) |
                           (1u << 9)); /* BIT_DROP_DATA_EN */
-  _logger->info("Jaguar3: init_usb_cfg (RXDMA_MODE=0x{:02x}) — RX DMA to bulk-IN",
+
+  /* Enable RX-DMA aggregation (port of halmac cfg_usb_rx_agg_88xx, USB mode).
+   * The kernel 8822eu driver writes these; devourer didn't. On 8822E silicon the
+   * RX-DMA engine does not flush received frames into the bulk-IN endpoint unless
+   * aggregation is enabled (the 8822C does by default), so without this the EU
+   * delivers zero RX bytes (usbmon: bulk-IN URBs complete empty) even with the RF
+   * in RX mode. Matches the kernel's values: 0x280=size0x5|timeout0x20<<8,
+   * 0x10C[2] BIT_RXDMA_AGG_EN, 0x283 USB-mode (bit7 clear). */
+  constexpr uint16_t kTxdmaPqMap = 0x010C;
+  constexpr uint16_t kRxdmaAggPgTh = 0x0280;
+  uint8_t dma_usb_agg = _device.rtw_read8(kRxdmaAggPgTh + 3);
+  uint8_t agg_enable = _device.rtw_read8(kTxdmaPqMap);
+  agg_enable |= (1u << 2);     /* BIT_RXDMA_AGG_EN */
+  dma_usb_agg &= ~(1u << 7);   /* HALMAC_RX_AGG_MODE_USB */
+  uint32_t v32 = _device.rtw_read32(kRxdmaAggPgTh);
+  _device.rtw_write32(kRxdmaAggPgTh, v32 & ~(1u << 29)); /* clear BIT_EN_PRE_CALC */
+  _device.rtw_write8(kTxdmaPqMap, agg_enable);
+  _device.rtw_write8(kRxdmaAggPgTh + 3, dma_usb_agg);
+  _device.rtw_write16(kRxdmaAggPgTh,
+                      static_cast<uint16_t>(0x05 | (0x20 << 8))); /* size|timeout */
+
+  _logger->info("Jaguar3: init_usb_cfg (RXDMA_MODE=0x{:02x}, RX-agg EN) — RX DMA to bulk-IN",
                 v);
 }
 
 /* init_system_cfg_8822c */
-void Halmac8822cMacInit::init_system_cfg(ChannelWidth_t bw, uint8_t cut) {
+void HalmacJaguar3MacInit::init_system_cfg(ChannelWidth_t bw, uint8_t cut) {
   uint32_t v = _device.rtw_read32(REG_CPU_DMEM_CON);
   v |= (1u << 16) | (1u << 8); /* BIT_WL_PLATFORM_RST | BIT_DDMA_EN */
   _device.rtw_write32(REG_CPU_DMEM_CON, v);
@@ -465,7 +486,7 @@ void Halmac8822cMacInit::init_system_cfg(ChannelWidth_t bw, uint8_t cut) {
                 static_cast<int>(bw), cut);
 }
 
-bool Halmac8822cMacInit::init_mac_cfg(ChannelWidth_t bw) {
+bool HalmacJaguar3MacInit::init_mac_cfg(ChannelWidth_t bw) {
   if (!init_trx_cfg())
     return false;
   init_protocol_cfg();
@@ -477,7 +498,7 @@ bool Halmac8822cMacInit::init_mac_cfg(ChannelWidth_t bw) {
 }
 
 /* init_trx_cfg_8822c */
-bool Halmac8822cMacInit::init_trx_cfg() {
+bool HalmacJaguar3MacInit::init_trx_cfg() {
   /* txdma_queue_mapping_8822c: NORMAL trx, USB 3-bulkout. pq_map =
    * VO/VI->NQ(2), BE/BK->LQ(1), MG/HI->HQ(3). REG_TXDMA_PQ_MAP packs each as
    * 2-bit fields: VOQ<<4 VIQ<<6 BEQ<<8 BKQ<<10 MGQ<<12 HIQ<<14. */
@@ -505,7 +526,7 @@ bool Halmac8822cMacInit::init_trx_cfg() {
 }
 
 /* priority_queue_cfg_8822c + set_trx_fifo_info_8822c + pg_num_parser */
-bool Halmac8822cMacInit::priority_queue_cfg() {
+bool HalmacJaguar3MacInit::priority_queue_cfg() {
   const uint16_t tx_fifo_pg_num = TX_FIFO_SIZE_8822C >> TX_PAGE_SHIFT; /* 2048 */
   const uint16_t rsvd_pg_num =
       RSVD_PG_DRV_NUM + RSVD_PG_H2C_EXTRAINFO_NUM + RSVD_PG_H2C_STATICINFO_NUM +
@@ -570,7 +591,7 @@ bool Halmac8822cMacInit::priority_queue_cfg() {
 }
 
 /* init_h2c_8822c */
-void Halmac8822cMacInit::init_h2c() {
+void HalmacJaguar3MacInit::init_h2c() {
   const uint16_t tx_fifo_pg_num = TX_FIFO_SIZE_8822C >> TX_PAGE_SHIFT;
   uint16_t cur = tx_fifo_pg_num - RSVD_PG_CSIBUF_NUM - RSVD_PG_FW_TXBUF_NUM -
                  RSVD_PG_CPU_INSTRUCTION_NUM - RSVD_PG_H2CQ_NUM;
@@ -593,14 +614,14 @@ void Halmac8822cMacInit::init_h2c() {
   _device.rtw_write8(REG_TXDMA_OFFSET_CHK + 1, v8);
 }
 
-void Halmac8822cMacInit::init_txq_ctrl() {
+void HalmacJaguar3MacInit::init_txq_ctrl() {
   uint8_t v8 = _device.rtw_read8(REG_FWHW_TXQ_CTRL);
   v8 |= (0x80 & ~0x02 & ~0x04); /* BIT(7) & ~BIT(1) & ~BIT(2) */
   _device.rtw_write8(REG_FWHW_TXQ_CTRL, v8);
   _device.rtw_write8(REG_FWHW_TXQ_CTRL + 1, WLAN_TXQ_RPT_EN);
 }
 
-void Halmac8822cMacInit::init_sifs_ctrl(ChannelWidth_t bw) {
+void HalmacJaguar3MacInit::init_sifs_ctrl(ChannelWidth_t bw) {
   if (is_5m(bw)) {
     _device.rtw_write16(REG_RESP_SIFS_OFDM,
                         WLAN_SIFS_OFDM_CTX_5M | (WLAN_SIFS_OFDM_IRX_5M << 8));
@@ -623,7 +644,7 @@ void Halmac8822cMacInit::init_sifs_ctrl(ChannelWidth_t bw) {
                       WLAN_SIFS_CCK_CTX | (WLAN_SIFS_CCK_IRX << 8));
 }
 
-void Halmac8822cMacInit::init_rate_fallback_ctrl() {
+void HalmacJaguar3MacInit::init_rate_fallback_ctrl() {
   _device.rtw_write32(REG_DARFRC, WLAN_DATA_RATE_FB_CNT_1_4);
   _device.rtw_write32(REG_DARFRCH, WLAN_DATA_RATE_FB_CNT_5_8);
   _device.rtw_write32(REG_RARFRCH, WLAN_RTS_RATE_FB_CNT_5_8);
@@ -638,7 +659,7 @@ void Halmac8822cMacInit::init_rate_fallback_ctrl() {
 }
 
 /* init_protocol_cfg_8822c */
-void Halmac8822cMacInit::init_protocol_cfg() {
+void HalmacJaguar3MacInit::init_protocol_cfg() {
   init_txq_ctrl();
   init_sifs_ctrl(CHANNEL_WIDTH_20); /* protocol-cfg path always uses base SIFS;
                                        bw SIFS is re-applied in edca/sifs above */
@@ -677,7 +698,7 @@ void Halmac8822cMacInit::init_protocol_cfg() {
                      _device.rtw_read8(REG_INIRTS_RATE_SEL) | (1u << 5));
 }
 
-void Halmac8822cMacInit::cfg_mac_clk() {
+void HalmacJaguar3MacInit::cfg_mac_clk() {
   _device.rtw_write32(REG_AFE_CTRL1,
                       _device.rtw_read32(REG_AFE_CTRL1) & ~(0x3u << 20));
   _device.rtw_write8(REG_USTIME_TSF, MAC_CLK_SPEED);
@@ -685,7 +706,7 @@ void Halmac8822cMacInit::cfg_mac_clk() {
 }
 
 /* init_edca_cfg_8822c */
-void Halmac8822cMacInit::init_edca_cfg(ChannelWidth_t bw) {
+void HalmacJaguar3MacInit::init_edca_cfg(ChannelWidth_t bw) {
   if (is_5m(bw)) {
     _device.rtw_write8(REG_SLOT, WLAN_SLOT_TIME_5M);
     _device.rtw_write8(REG_PIFS, WLAN_PIFS_TIME_5M);
@@ -737,7 +758,7 @@ void Halmac8822cMacInit::init_edca_cfg(ChannelWidth_t bw) {
 }
 
 /* init_wmac_cfg_8822c (halmac_init_low_pwr omitted — USB-LPS power feature) */
-void Halmac8822cMacInit::init_wmac_cfg(ChannelWidth_t bw) {
+void HalmacJaguar3MacInit::init_wmac_cfg(ChannelWidth_t bw) {
   if (is_5m(bw)) {
     _device.rtw_write8(REG_ACKTO, WLAN_ACK_TO_5M);
     _device.rtw_write8(REG_CTS2TO, WLAN_CTS2TO_5M);

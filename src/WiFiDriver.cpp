@@ -1,30 +1,30 @@
 #include "WiFiDriver.h"
 
-#include <algorithm>
-#include <array>
+#include <cstdint>
 #include <utility>
 
 #include <libusb.h>
 
 #include "RtlJaguarDevice.h"
+#include "RtlUsbAdapter.h"
 #include "jaguar3/RtlJaguar3Device.h"
 
 namespace {
 
-/* Unambiguous RTL8822C (Jaguar3) USB product IDs — the WiFi-function default
- * IDs from the vendor rtl88x2cu usb_intf.c. These do NOT collide with any
- * Jaguar1 PID, so PID matching is safe for them. (The 8812EU/8822EU variants can
- * share the 0x8812 RTL8812AU PID; telling those apart needs the SYS_CFG chip-id
- * read and is out of scope here — only the RTL8812CU/8822CU are dispatched.) */
-constexpr std::array<uint16_t, 3> kJaguar3ProductIds = {
-    0xC82C, /* RTL8822CU multi-function default */
-    0xC82E, /* RTL8822CU multi-function default */
-    0xC812, /* RTL8822CU WiFi-only default */
-};
-
-bool is_jaguar3_pid(uint16_t pid) {
-  return std::find(kJaguar3ProductIds.begin(), kJaguar3ProductIds.end(), pid) !=
-         kJaguar3ProductIds.end();
+/* Hardware chip-id at REG_SYS_CFG2 (0x00FC), read with a single vendor control
+ * transfer (no full RtlUsbAdapter, so the Jaguar1 construction path is unchanged
+ * and only one extra control read is added). Port of halmac get_chip_info
+ * (chip_id = REG_READ_8(REG_SYS_CFG2)):
+ *   0x13 = RTL8822C, 0x17 = RTL8822E (RTL8812EU / RTL8822EU)  -> Jaguar3
+ *   0x04 / 0x05 / 0x08 / 0x09 = 8812A / 8821A / 8814A / 8821C -> Jaguar1
+ * The chip-id (not the USB PID) is authoritative because the rtl8822e RTL8812EU
+ * shares PID 0x8812 with the Jaguar1 RTL8812AU. Returns 0 on a failed read,
+ * which falls through to the Jaguar1 path. */
+uint8_t read_chip_id(libusb_device_handle *dev_handle) {
+  uint8_t id = 0;
+  libusb_control_transfer(dev_handle, REALTEK_USB_VENQT_READ, 5, 0x00FC, 0, &id,
+                          sizeof(id), USB_TIMEOUT);
+  return id;
 }
 
 } /* namespace */
@@ -42,13 +42,18 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
       pid = desc.idProduct;
   }
 
-  if (is_jaguar3_pid(pid)) {
-    _logger->info("Creating RtlJaguar3Device from LibUSB (PID 0x{:04x})", pid);
+  uint8_t chip_id = read_chip_id(dev_handle);
+  if (chip_id == 0x13 || chip_id == 0x17) {
+    auto variant = chip_id == 0x17 ? jaguar3::ChipVariant::C8822E
+                                   : jaguar3::ChipVariant::C8822C;
+    _logger->info("Creating RtlJaguar3Device (PID 0x{:04x}, chip-id 0x{:02x})",
+                  pid, chip_id);
     return std::make_unique<RtlJaguar3Device>(
-        RtlUsbAdapter(dev_handle, _logger, ctx), _logger);
+        RtlUsbAdapter(dev_handle, _logger, ctx), _logger, variant);
   }
 
-  _logger->info("Creating RtlJaguarDevice from LibUSB (PID 0x{:04x})", pid);
+  _logger->info("Creating RtlJaguarDevice (PID 0x{:04x}, chip-id 0x{:02x})", pid,
+                chip_id);
   return std::make_unique<RtlJaguarDevice>(RtlUsbAdapter(dev_handle, _logger),
                                            _logger);
 }

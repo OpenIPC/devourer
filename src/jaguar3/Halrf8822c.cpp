@@ -1,6 +1,7 @@
-#include "Halrf8822cIqk.h"
+#include "Halrf8822c.h"
 
 #include <chrono>
+#include <memory>
 #include <thread>
 
 extern "C" {
@@ -36,22 +37,35 @@ inline uint32_t mask_shift(uint32_t mask) {
 }
 } /* namespace */
 
-Halrf8822cIqk::Halrf8822cIqk(RtlUsbAdapter device, Logger_t logger)
+Halrf8822c::Halrf8822c(RtlUsbAdapter device, Logger_t logger)
     : _device{device}, _logger{logger} {}
 
-uint32_t Halrf8822cIqk::bb_get(uint16_t addr, uint32_t mask) {
+/* Defined in Halrf8822e.cpp. */
+std::unique_ptr<Jaguar3Calibration> make_halrf_8822e(RtlUsbAdapter device,
+                                                     Logger_t logger);
+
+/* Calibration strategy factory: pick the per-generation halrf impl. */
+std::unique_ptr<Jaguar3Calibration>
+make_jaguar3_calibration(ChipVariant variant, RtlUsbAdapter device,
+                         Logger_t logger) {
+  if (variant == ChipVariant::C8822E)
+    return make_halrf_8822e(device, logger);
+  return std::make_unique<Halrf8822c>(device, logger);
+}
+
+uint32_t Halrf8822c::bb_get(uint16_t addr, uint32_t mask) {
   return (_device.rtw_read32(addr) & mask) >> mask_shift(mask);
 }
 
 /* config_phydm_read_rf_reg_8822c: RF read is a direct BB-window read,
  * BB[base + (addr&0xff)<<2], 20-bit. */
-uint32_t Halrf8822cIqk::rf_read(uint8_t path, uint16_t addr, uint32_t mask) {
+uint32_t Halrf8822c::rf_read(uint8_t path, uint16_t addr, uint32_t mask) {
   uint16_t direct = static_cast<uint16_t>(RF_WIN[path & 1] + ((addr & 0xff) << 2));
   return bb_get(direct, mask & RFREG_MASK);
 }
 
 /* config_phydm_direct_write_rf_reg_8822c: RF write via the same window. */
-void Halrf8822cIqk::rf_write(uint8_t path, uint16_t addr, uint32_t mask,
+void Halrf8822c::rf_write(uint8_t path, uint16_t addr, uint32_t mask,
                              uint32_t val) {
   uint16_t direct = static_cast<uint16_t>(RF_WIN[path & 1] + ((addr & 0xff) << 2));
   bb_set(direct, mask & RFREG_MASK, val);
@@ -60,7 +74,7 @@ void Halrf8822cIqk::rf_write(uint8_t path, uint16_t addr, uint32_t mask,
 /* _iqk_nctl_8822c — load the IQK calibration-engine microcode (generated table
  * from the vendor source). Each entry is a full-dword write (mask 0xffffffff) or
  * a masked BB RMW. */
-void Halrf8822cIqk::nctl() {
+void Halrf8822c::nctl() {
   for (unsigned i = 0; i < array_mp_8822c_iqk_nctl_len; i++) {
     const iqk_nctl_write &w = array_mp_8822c_iqk_nctl[i];
     if (w.mask == 0xFFFFFFFFu)
@@ -71,7 +85,7 @@ void Halrf8822cIqk::nctl() {
 }
 
 /* _iqk_backup_mac_bb_8822c / _iqk_backup_rf_8822c */
-void Halrf8822cIqk::backup_mac_bb(uint32_t *mac, uint32_t *bb) {
+void Halrf8822c::backup_mac_bb(uint32_t *mac, uint32_t *bb) {
   static const uint16_t macreg[MAC_REG_NUM_8822C] = {0x520, 0x1c, 0x70};
   static const uint16_t bbreg[BB_REG_NUM_8822C] = {
       0x0820, 0x0824, 0x1c38, 0x1c68, 0x1d60, 0x180c, 0x410c,
@@ -83,7 +97,7 @@ void Halrf8822cIqk::backup_mac_bb(uint32_t *mac, uint32_t *bb) {
     bb[i] = bb_read(bbreg[i]);
 }
 
-void Halrf8822cIqk::backup_rf(uint32_t rf[][2]) {
+void Halrf8822c::backup_rf(uint32_t rf[][2]) {
   static const uint16_t rfreg[RF_REG_NUM_8822C] = {0x19, 0xdf, 0x9e};
   for (int i = 0; i < RF_REG_NUM_8822C; i++) {
     rf[i][PATH_A] = rf_read(PATH_A, rfreg[i], RFREG_MASK);
@@ -92,7 +106,7 @@ void Halrf8822cIqk::backup_rf(uint32_t rf[][2]) {
 }
 
 /* _iqk_restore_mac_bb_8822c */
-void Halrf8822cIqk::restore_mac_bb(const uint32_t *mac, const uint32_t *bb) {
+void Halrf8822c::restore_mac_bb(const uint32_t *mac, const uint32_t *bb) {
   static const uint16_t macreg[MAC_REG_NUM_8822C] = {0x520, 0x1c, 0x70};
   static const uint16_t bbreg[BB_REG_NUM_8822C] = {
       0x0820, 0x0824, 0x1c38, 0x1c68, 0x1d60, 0x180c, 0x410c,
@@ -109,7 +123,7 @@ void Halrf8822cIqk::restore_mac_bb(const uint32_t *mac, const uint32_t *bb) {
 }
 
 /* _iqk_restore_rf_8822c */
-void Halrf8822cIqk::restore_rf(const uint32_t rf[][2]) {
+void Halrf8822c::restore_rf(const uint32_t rf[][2]) {
   static const uint16_t rfreg[RF_REG_NUM_8822C] = {0x19, 0xdf, 0x9e};
   rf_write(PATH_A, 0xef, 0xfffff, 0x0);
   rf_write(PATH_B, 0xef, 0xfffff, 0x0);
@@ -121,15 +135,15 @@ void Halrf8822cIqk::restore_rf(const uint32_t rf[][2]) {
   rf_write(PATH_B, 0xde, 1u << 16, 0x0);
 }
 
-void Halrf8822cIqk::delay_us(uint32_t us) {
+void Halrf8822c::delay_us(uint32_t us) {
   std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
-void Halrf8822cIqk::delay_ms(uint32_t ms) {
+void Halrf8822c::delay_ms(uint32_t ms) {
   std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
 /* _iqk_btc_wait_indirect_reg_ready_8822c: poll 0x1703[5] before 0x1700 access. */
-uint32_t Halrf8822cIqk::btc_wait_ready() {
+uint32_t Halrf8822c::btc_wait_ready() {
   uint32_t cnt = 0;
   while ((mac_read8(0x1703) & (1u << 5)) == 0) {
     delay_ms(10);
@@ -140,14 +154,14 @@ uint32_t Halrf8822cIqk::btc_wait_ready() {
 }
 
 /* _iqk_btc_read_indirect_reg_8822c */
-uint32_t Halrf8822cIqk::btc_read_indirect(uint16_t reg) {
+uint32_t Halrf8822c::btc_read_indirect(uint16_t reg) {
   btc_wait_ready();
   bb_write(0x1700, 0x800F0000u | reg);
   return bb_read(0x1708);
 }
 
 /* _iqk_btc_write_indirect_reg_8822c */
-void Halrf8822cIqk::btc_write_indirect(uint16_t reg, uint32_t mask, uint32_t val) {
+void Halrf8822c::btc_write_indirect(uint16_t reg, uint32_t mask, uint32_t val) {
   if (mask == 0)
     return;
   if (mask == 0xFFFFFFFFu) {
@@ -165,12 +179,12 @@ void Halrf8822cIqk::btc_write_indirect(uint16_t reg, uint32_t mask, uint32_t val
 }
 
 /* _iqk_set_gnt_wl_high_8822c (GNT_WL high during cal) */
-void Halrf8822cIqk::set_gnt_wl_high() {
+void Halrf8822c::set_gnt_wl_high() {
   btc_write_indirect(0x38, 0xff00, 0x77); /* 0x38[15:8] */
 }
 
 /* _iqk_set_gnt_wl_gnt_bt_8822c */
-void Halrf8822cIqk::set_gnt_wl_gnt_bt(bool before_k) {
+void Halrf8822c::set_gnt_wl_gnt_bt(bool before_k) {
   if (before_k)
     set_gnt_wl_high();
   else
@@ -179,7 +193,7 @@ void Halrf8822cIqk::set_gnt_wl_gnt_bt(bool before_k) {
 
 /* _iqk_check_cal_8822c: poll 0x2d9c==0x55 (ready), read fail from 0x1b08[26]
  * (LOK/cmd0 never fails); 300 ms timeout. */
-bool Halrf8822cIqk::check_cal(uint8_t path, uint8_t cmd) {
+bool Halrf8822c::check_cal(uint8_t path, uint8_t cmd) {
   bool notready = true, fail = true;
   uint32_t cnt = 0;
   while (notready) {
@@ -205,7 +219,7 @@ bool Halrf8822cIqk::check_cal(uint8_t path, uint8_t cmd) {
 
 /* iqk_get_cfir_8822c (debug=false -> channel slot ch=0): read the 17 CFIR
  * coefficients (the IQK filter result) from the 0x1bd8/0x1bfc readback path. */
-void Halrf8822cIqk::get_cfir(uint8_t idx, uint8_t path) {
+void Halrf8822c::get_cfir(uint8_t idx, uint8_t path) {
   constexpr uint32_t bit20_16 = (1u << 20) | (1u << 19) | (1u << 18) |
                                 (1u << 17) | (1u << 16);
   bb_write(0x1b00, 0x8u | (path << 1));
@@ -226,7 +240,7 @@ void Halrf8822cIqk::get_cfir(uint8_t idx, uint8_t path) {
 
 /* _iqk_backup_iqk_8822c: step 0 = rotate channel slot 0->1 + reset slot 0;
  * step 1 = backup LOK idac; step 2/3 = backup TX/RX CFIR. */
-void Halrf8822cIqk::backup_iqk(uint8_t step, uint8_t path) {
+void Halrf8822c::backup_iqk(uint8_t step, uint8_t path) {
   auto &q = _iqk;
   switch (step) {
   case 0:
@@ -271,7 +285,7 @@ void Halrf8822cIqk::backup_iqk(uint8_t step, uint8_t path) {
 /* _iqk_one_shot_8822c: build the per-bandwidth IQK command, trigger via 0x1b00,
  * poll check_cal, capture the pass/fail + result. (cut-E special-cases dropped:
  * the WDN1300H is cut D.) */
-bool Halrf8822cIqk::one_shot(uint8_t path, uint8_t idx) {
+bool Halrf8822c::one_shot(uint8_t path, uint8_t idx) {
   bool is_nb = _iqk.is_nb_iqk;
   uint32_t temp, iqk_cmd;
 
@@ -329,7 +343,7 @@ bool Halrf8822cIqk::one_shot(uint8_t path, uint8_t idx) {
 }
 
 /* _iqk_cal_path_off_8822c */
-void Halrf8822cIqk::cal_path_off(uint8_t /*unused*/) {
+void Halrf8822c::cal_path_off(uint8_t /*unused*/) {
   bb_set(0x1bb8, 1u << 20, 0x0);
   for (int p = 0; p < SS; p++) {
     bb_set(0x1b00, (1u << 2) | (1u << 1), p);
@@ -338,13 +352,13 @@ void Halrf8822cIqk::cal_path_off(uint8_t /*unused*/) {
 }
 
 /* _iqk_rf_direct_access_8822c (PI vs direct access on 0x1c / 0xec) */
-void Halrf8822cIqk::rf_direct_access(uint8_t path, bool direct) {
+void Halrf8822c::rf_direct_access(uint8_t path, bool direct) {
   uint16_t reg = (path == PATH_A) ? 0x1c : 0xec;
   bb_set(reg, (1u << 31) | (1u << 30), direct ? 0x2 : 0x0);
 }
 
 /* _iqk_lok_setting_8822c */
-void Halrf8822cIqk::lok_setting(uint8_t path, uint8_t idac_bs) {
+void Halrf8822c::lok_setting(uint8_t path, uint8_t idac_bs) {
   cal_path_off(path);
   bb_write(0x1b00, 0x8u | (path << 1));
   bb_set(0x1b20, (1u << 31) | (1u << 30), 0x0);
@@ -376,7 +390,7 @@ void Halrf8822cIqk::lok_setting(uint8_t path, uint8_t idac_bs) {
 }
 
 /* _lok_one_shot_8822c (cut-E special-cases dropped) */
-bool Halrf8822cIqk::lok_one_shot(uint8_t path, bool for_rxk) {
+bool Halrf8822c::lok_one_shot(uint8_t path, bool for_rxk) {
   set_gnt_wl_gnt_bt(true);
   uint32_t cmd = 0x8u | (1u << (4 + path)) | (path << 1);
   delay_us(10);
@@ -399,7 +413,7 @@ bool Halrf8822cIqk::lok_one_shot(uint8_t path, bool for_rxk) {
 }
 
 /* _lok_check_8822c: idac in-range test on RF 0x58 */
-bool Halrf8822cIqk::lok_check(uint8_t path) {
+bool Halrf8822c::lok_check(uint8_t path) {
   cal_path_off(path);
   bb_write(0x1b00, 0x8u | (path << 1));
   uint32_t t = rf_read(path, 0x58, 0xfffff);
@@ -411,7 +425,7 @@ bool Halrf8822cIqk::lok_check(uint8_t path) {
 }
 
 /* _iqk_lok_tune_8822c: sweep idac_bs 4..6 until LOK passes */
-void Halrf8822cIqk::lok_tune(uint8_t path) {
+void Halrf8822c::lok_tune(uint8_t path) {
   uint8_t idac_bs = 0x4;
   while (1) {
     lok_setting(path, idac_bs);
@@ -431,7 +445,7 @@ void Halrf8822cIqk::lok_tune(uint8_t path) {
  * thermal map isn't wired into this module yet, so we use the no-compensation
  * value (faithful when current thermal ~= cal thermal). TODO: thermal via
  * EepromManager. */
-void Halrf8822cIqk::txk_setting(uint8_t path) {
+void Halrf8822c::txk_setting(uint8_t path) {
   bb_write(0x1b00, 0x8u | (path << 1));
   bb_set(0x1bb8, 1u << 20, 0x0);
   bb_write(0x1b20, 0x00040008);
@@ -451,7 +465,7 @@ void Halrf8822cIqk::txk_setting(uint8_t path) {
 }
 
 /* _iqk_lok_for_rxk_setting_8822c */
-void Halrf8822cIqk::lok_for_rxk_setting(uint8_t path) {
+void Halrf8822c::lok_for_rxk_setting(uint8_t path) {
   cal_path_off(path);
   bb_write(0x1b00, 0x8u | (path << 1));
   bb_set(0x1bb8, 1u << 20, 0x0);
@@ -490,7 +504,7 @@ void Halrf8822cIqk::lok_for_rxk_setting(uint8_t path) {
 }
 
 /* _iqk_rxk1_setting_8822c */
-void Halrf8822cIqk::rxk1_setting(uint8_t path) {
+void Halrf8822c::rxk1_setting(uint8_t path) {
   cal_path_off(path);
   bb_write(0x1b00, 0x8u | (path << 1));
   bb_set(0x1bb8, 1u << 20, 0x0);
@@ -503,7 +517,7 @@ void Halrf8822cIqk::rxk1_setting(uint8_t path) {
 }
 
 /* _iqk_rxk2_setting_8822c */
-void Halrf8822cIqk::rxk2_setting(uint8_t path, bool is_gs) {
+void Halrf8822c::rxk2_setting(uint8_t path, bool is_gs) {
   bb_write(0x1b00, 0x8u | (path << 1));
   bb_set(0x1b20, (1u << 31) | (1u << 30), 0x0);
   if (!_iqk.is_5g) {
@@ -530,7 +544,7 @@ void Halrf8822cIqk::rxk2_setting(uint8_t path, bool is_gs) {
 
 /* _iqk_rx_iqk_gain_search_fail_8822c: RXK gain search via the IQMUX gain table,
  * stepping tmp1bcc up/down by the measured bb_idx until in range. */
-bool Halrf8822cIqk::gain_search_fail(uint8_t path, uint8_t step) {
+bool Halrf8822c::gain_search_fail(uint8_t path, uint8_t step) {
   bool fail = true;
   uint32_t cmd, rf_reg0, tmp, bb_idx;
   uint8_t idx = 0;
@@ -585,7 +599,7 @@ bool Halrf8822cIqk::gain_search_fail(uint8_t path, uint8_t step) {
 /* _iqk_rx_iqk_by_path_8822c: the RXK sub-step machine (LOK-for-RXK -> RXK1 ->
  * gain-search RXK2 -> RXK2). Steps 1 (GS-RXK1) and 5 (XYM check) are disabled in
  * the vendor source. Returns the per-step KFAIL. */
-bool Halrf8822cIqk::rx_iqk_by_path(uint8_t path) {
+bool Halrf8822c::rx_iqk_by_path(uint8_t path) {
   bool kfail = false, gonext;
   auto &q = _iqk;
   switch (q.rxiqk_step) {
@@ -658,7 +672,7 @@ bool Halrf8822cIqk::rx_iqk_by_path(uint8_t path) {
 /* _iqk_iqk_by_path_8822c: top step machine — S0(RXK,LOK,TXK) then S1(RXK,LOK,
  * TXK), then finalize. Each invocation advances one step (segment IQK yields
  * between steps). */
-void Halrf8822cIqk::iqk_by_path(bool /*segment*/) {
+void Halrf8822c::iqk_by_path(bool /*segment*/) {
   auto &q = _iqk;
   bool kfail;
   uint32_t counter;
@@ -748,7 +762,7 @@ void Halrf8822cIqk::iqk_by_path(bool /*segment*/) {
 
 /* _iqk_start_iqk_8822c: drive iqk_by_path until the step machine completes (or
  * the segment kcount limit is hit). */
-void Halrf8822cIqk::start_iqk(bool segment) {
+void Halrf8822c::start_iqk(bool segment) {
   uint8_t kcount_limit =
       (_iqk.bw_val == 2) ? kcount_limit_80m : kcount_limit_others;
   uint8_t i = 0;
@@ -763,7 +777,7 @@ void Halrf8822cIqk::start_iqk(bool segment) {
 }
 
 /* _iqk_information_8822c */
-void Halrf8822cIqk::information() {
+void Halrf8822c::information() {
   _iqk.is_tssi_mode = bb_get(0x1e7c, 1u << 30) != 0;
   uint32_t r18 = rf_read(PATH_A, 0x18, RFREG_MASK);
   _iqk.iqk_band = static_cast<uint8_t>((r18 & (1u << 16)) >> 16);
@@ -772,7 +786,7 @@ void Halrf8822cIqk::information() {
 }
 
 /* _iqk_macbb_8822c */
-void Halrf8822cIqk::macbb() {
+void Halrf8822c::macbb() {
   if (_iqk.is_tssi_mode) {
     bb_set(0x1e7c, 1u << 30, 0x0);
     bb_set(0x18a4, 1u << 28, 0x0);
@@ -789,7 +803,7 @@ void Halrf8822cIqk::macbb() {
 }
 
 /* _iqk_bb_for_dpk_setting_8822c */
-void Halrf8822cIqk::bb_for_dpk_setting() {
+void Halrf8822c::bb_for_dpk_setting() {
   bb_set(0x1e24, 1u << 17, 0x1);
   bb_set(0x1cd0, 1u << 28, 0x1);
   bb_set(0x1cd0, 1u << 29, 0x1);
@@ -808,7 +822,7 @@ void Halrf8822cIqk::bb_for_dpk_setting() {
 }
 
 /* _iqk_afe_setting_8822c */
-void Halrf8822cIqk::afe_setting(bool do_iqk) {
+void Halrf8822c::afe_setting(bool do_iqk) {
   auto ramp = [&](uint16_t reg) {
     bb_write(reg, 0x700f0001);
     for (uint32_t n = 0; n < 16; n++)
@@ -856,7 +870,7 @@ void Halrf8822cIqk::afe_setting(bool do_iqk) {
 }
 
 /* _iqk_fill_iqk_report_8822c: latch per-path fail bits + rxiqk_agc to HW. */
-void Halrf8822cIqk::fill_report(uint8_t ch) {
+void Halrf8822c::fill_report(uint8_t ch) {
   for (int i = 0; i < SS; i++) {
     uint32_t t1 = (_iqk.iqk_fail_report[ch][i][TX_IQK] & 1u) << i;
     uint32_t t2 = (_iqk.iqk_fail_report[ch][i][RX_IQK] & 1u) << (i + 4);
@@ -869,7 +883,7 @@ void Halrf8822cIqk::fill_report(uint8_t ch) {
 
 /* phy_iq_calibrate_8822c -> _phy_iq_calibrate_8822c (non-segment). Full IQK:
  * backup -> (macbb/dpk/afe/start_iqk/afe/restore) up to 3x -> fill report. */
-void Halrf8822cIqk::phy_iq_calibrate(ChannelWidth_t bw, uint8_t channel) {
+void Halrf8822c::phy_iq_calibrate(ChannelWidth_t bw, uint8_t channel) {
   _iqk.is_nb_iqk = (bw == CHANNEL_WIDTH_5 || bw == CHANNEL_WIDTH_10);
   _iqk.bw_val = _iqk.is_nb_iqk ? 0 : static_cast<uint8_t>(bw); /* 0/1/2=20/40/80 */
   _iqk.is_5g = (channel >= 36);
@@ -949,14 +963,14 @@ void dack_bsort(uint32_t *iv, uint32_t *qv, int n) {
 }
 } /* namespace */
 
-void Halrf8822cIqk::dack_poll(uint16_t add, uint32_t bmask, uint32_t data) {
+void Halrf8822c::dack_poll(uint16_t add, uint32_t bmask, uint32_t data) {
   for (uint32_t c = 0; c < 100000; c++)
     if (bb_get(add, bmask) == data) break;
 }
 
 /* halrf_mode_8822c: sample the BB DC report (0x2dbc) SN times, drop outliers,
  * average the central window -> {i,q} DC offset estimate. */
-void Halrf8822cIqk::dack_mode(uint32_t *i_value, uint32_t *q_value) {
+void Halrf8822c::dack_mode(uint32_t *i_value, uint32_t *q_value) {
   uint32_t iv[DACK_SN] = {}, qv[DACK_SN] = {}, temp;
   int i = 0;
   for (uint32_t c = 0; i < DACK_SN && c < 10000; c++) {
@@ -1000,7 +1014,7 @@ void Halrf8822cIqk::dack_mode(uint32_t *i_value, uint32_t *q_value) {
   *q_value = t;
 }
 
-void Halrf8822cIqk::dac_calibrate() {
+void Halrf8822c::dac_calibrate() {
   static const uint16_t bp_reg[16] = {0x180c,0x1810,0x410c,0x4110,0x1c3c,0x1c24,
       0x1d70,0x09b4,0x1a00,0x1a14,0x1d58,0x1c38,0x1e24,0x1e28,0x1860,0x4160};
   uint32_t bp[16], bprf[2];
@@ -1176,7 +1190,7 @@ void Halrf8822cIqk::dac_calibrate() {
   _logger->info("Jaguar3: DACK (DAC calibration) complete");
 }
 
-void Halrf8822cIqk::pwr_track() {
+void Halrf8822c::pwr_track() {
   /* 5 GHz swing tables (rtw8822c_pwrtrk_5g{a,b}_{p,n}; all 3 sub-bands are
    * identical in the vendor data, so one set covers UNII-1/2/3). Index = thermal
    * delta (0..29); value = TX-power-index compensation in 0.25 dB steps. */
@@ -1228,7 +1242,7 @@ void Halrf8822cIqk::pwr_track() {
   }
 }
 
-void Halrf8822cIqk::do_lck() {
+void Halrf8822c::do_lck() {
   /* Port of rtw8822c_do_lck (RF_SYN_CTRL=0xbb, SYN_PFD=0xb0, AAC_CTRL=0xca,
    * SYN_AAC=0xc9, FAST_LCK=0xcc). Re-locks the LC tank at the current freq. */
   rf_write(PATH_A, 0xbb, RFREG_MASK, 0x80010);
@@ -1250,7 +1264,7 @@ void Halrf8822cIqk::do_lck() {
   _logger->info("Jaguar3: LCK (synth re-lock) done");
 }
 
-void Halrf8822cIqk::coex_run_5g() {
+void Halrf8822c::coex_run_5g() {
   /* COEX_SET_ANT_5G: GNT_BT = HW-PTA (state 0), GNT_WL = SW-high (state 3),
    * path-control owner = WL. GNT fields in LTE_COEX_CTRL (0x38): BT @ 0xc000 &
    * 0x0c00, WL @ 0x3000 & 0x0300. */
@@ -1268,7 +1282,7 @@ void Halrf8822cIqk::coex_run_5g() {
   _device.rtw_write<uint16_t>(0xAA, 0x8003);
 }
 
-void Halrf8822cIqk::coex_wlan_only_init() {
+void Halrf8822c::coex_wlan_only_init() {
   /* byte read-modify-write (rtw_write8_mask): val is the field value, placed at
    * the mask's low bit. */
   auto w8m = [&](uint16_t reg, uint8_t mask, uint8_t val) {

@@ -1,4 +1,4 @@
-#include "Halmac8822cFw.h"
+#include "HalmacJaguar3Fw.h"
 
 #include <array>
 #include <chrono>
@@ -7,9 +7,10 @@
 #include <utility>
 #include <vector>
 
-#include "FrameParser8822c.h"
-#include "Halmac8822cRegs.h"
+#include "FrameParserJaguar3.h"
+#include "HalmacJaguar3Regs.h"
 #include "hal8822c_fw.h" /* array_mp_8822c_fw_nic[] + _len */
+#include "hal8822e_fw.h" /* array_mp_8822e_fw_nic[] + _len */
 
 using namespace jaguar3::halmac;
 
@@ -27,26 +28,31 @@ void delay_us(uint32_t us) {
 }
 } /* namespace */
 
-Halmac8822cFw::Halmac8822cFw(RtlUsbAdapter device, Logger_t logger)
-    : _device{device}, _logger{std::move(logger)} {}
+HalmacJaguar3Fw::HalmacJaguar3Fw(RtlUsbAdapter device, Logger_t logger,
+                             ChipVariant variant)
+    : _device{device}, _logger{std::move(logger)}, _variant{variant} {}
 
-bool Halmac8822cFw::download_default_firmware() {
+bool HalmacJaguar3Fw::download_default_firmware() {
+  /* The DLFW state machine is identical for 8822c/8822e (registers verified
+   * byte-identical); only the firmware image differs. */
+  if (_variant == ChipVariant::C8822E)
+    return download_firmware(array_mp_8822e_fw_nic, array_mp_8822e_fw_nic_len);
   return download_firmware(array_mp_8822c_fw_nic, array_mp_8822c_fw_nic_len);
 }
 
 /* --- register helpers (HALMAC_REG_R/W*) --- */
-uint8_t Halmac8822cFw::r8(uint16_t reg) { return _device.rtw_read8(reg); }
-uint16_t Halmac8822cFw::r16(uint16_t reg) { return _device.rtw_read16(reg); }
-uint32_t Halmac8822cFw::r32(uint16_t reg) { return _device.rtw_read32(reg); }
-void Halmac8822cFw::w8(uint16_t reg, uint8_t v) { _device.rtw_write8(reg, v); }
-void Halmac8822cFw::w16(uint16_t reg, uint16_t v) { _device.rtw_write16(reg, v); }
-void Halmac8822cFw::w32(uint16_t reg, uint32_t v) { _device.rtw_write32(reg, v); }
-void Halmac8822cFw::w32_set(uint16_t reg, uint32_t bits) {
+uint8_t HalmacJaguar3Fw::r8(uint16_t reg) { return _device.rtw_read8(reg); }
+uint16_t HalmacJaguar3Fw::r16(uint16_t reg) { return _device.rtw_read16(reg); }
+uint32_t HalmacJaguar3Fw::r32(uint16_t reg) { return _device.rtw_read32(reg); }
+void HalmacJaguar3Fw::w8(uint16_t reg, uint8_t v) { _device.rtw_write8(reg, v); }
+void HalmacJaguar3Fw::w16(uint16_t reg, uint16_t v) { _device.rtw_write16(reg, v); }
+void HalmacJaguar3Fw::w32(uint16_t reg, uint32_t v) { _device.rtw_write32(reg, v); }
+void HalmacJaguar3Fw::w32_set(uint16_t reg, uint32_t bits) {
   w32(reg, r32(reg) | bits);
 }
 
 /* Port of chk_fw_size_88xx — validates header + section sizes vs total. */
-bool Halmac8822cFw::chk_fw_size(const uint8_t *fw_bin, size_t size) {
+bool HalmacJaguar3Fw::chk_fw_size(const uint8_t *fw_bin, size_t size) {
   if (size < WLAN_FW_HDR_SIZE) {
     _logger->error("Jaguar3 DLFW: fw size < header");
     return false;
@@ -69,7 +75,7 @@ bool Halmac8822cFw::chk_fw_size(const uint8_t *fw_bin, size_t size) {
 }
 
 /* Port of wlan_cpu_en_88xx — enable/disable the 8051 + its IO interface. */
-void Halmac8822cFw::wlan_cpu_en(bool enable) {
+void HalmacJaguar3Fw::wlan_cpu_en(bool enable) {
   if (enable) {
     w8(REG_RSV_CTRL + 1, static_cast<uint8_t>(r8(REG_RSV_CTRL + 1) | 0x1));
     w8(REG_SYS_FUNC_EN + 1,
@@ -83,14 +89,14 @@ void Halmac8822cFw::wlan_cpu_en(bool enable) {
 
 /* Port of pltfm_reset_88xx (8822C/8822E path — the 8821C/8822B clock-sync
  * branch is N/A for our targets and intentionally omitted). */
-void Halmac8822cFw::pltfm_reset() {
+void HalmacJaguar3Fw::pltfm_reset() {
   w8(REG_CPU_DMEM_CON + 2,
      static_cast<uint8_t>(r8(REG_CPU_DMEM_CON + 2) & ~0x1));
   w8(REG_CPU_DMEM_CON + 2,
      static_cast<uint8_t>(r8(REG_CPU_DMEM_CON + 2) | 0x1));
 }
 
-bool Halmac8822cFw::iddma_en(uint32_t src, uint32_t dest, uint32_t ctrl) {
+bool HalmacJaguar3Fw::iddma_en(uint32_t src, uint32_t dest, uint32_t ctrl) {
   uint32_t cnt = HALMC_DDMA_POLLING_COUNT;
   w32(REG_DDMA_CH0SA, src);
   w32(REG_DDMA_CH0DA, dest);
@@ -102,7 +108,7 @@ bool Halmac8822cFw::iddma_en(uint32_t src, uint32_t dest, uint32_t ctrl) {
   return true;
 }
 
-bool Halmac8822cFw::iddma_dlfw(uint32_t src, uint32_t dest, uint32_t len,
+bool HalmacJaguar3Fw::iddma_dlfw(uint32_t src, uint32_t dest, uint32_t len,
                                bool first) {
   uint32_t cnt = HALMC_DDMA_POLLING_COUNT;
   uint32_t ch0_ctrl = BIT_DDMACH0_CHKSUM_EN | BIT_DDMACH0_OWN;
@@ -126,7 +132,7 @@ bool Halmac8822cFw::iddma_dlfw(uint32_t src, uint32_t dest, uint32_t len,
 }
 
 /* Port of check_fw_chksum_88xx — set IMEM/DMEM done+ok bits in MCUFW_CTRL. */
-bool Halmac8822cFw::check_fw_chksum(uint32_t mem_addr) {
+bool HalmacJaguar3Fw::check_fw_chksum(uint32_t mem_addr) {
   uint8_t fw_ctrl = r8(REG_MCUFW_CTRL);
   if (r32(REG_DDMA_CH0CTRL) & BIT_DDMACH0_CHKSUM_STS) {
     if (mem_addr < OCPBASE_DMEM_88XX) {
@@ -151,12 +157,12 @@ bool Halmac8822cFw::check_fw_chksum(uint32_t mem_addr) {
 /* Port of send_fwpkt_88xx -> dl_rsvd_page_88xx. The halmac side is a register
  * bracket around the platform PLTFM_SEND_RSVD_PAGE; the platform side (build an
  * 8822C TX descriptor for the chunk and bulk-OUT it to the beacon/rsvd page) is
- * devourer's, now that FrameParser8822c exists.
+ * devourer's, now that FrameParserJaguar3 exists.
  *
  * NB: only reachable after power-on/queue-init. _rsvd_boundary and the
  * HIQ/beacon endpoint come from the queue allocation; QSEL_BEACON and OFFSET
  * match the rsvd-page download convention. */
-bool Halmac8822cFw::send_fw_page(uint16_t pg_addr, const uint8_t *chunk,
+bool HalmacJaguar3Fw::send_fw_page(uint16_t pg_addr, const uint8_t *chunk,
                                  uint32_t size) {
   if (size == 0)
     return false;
@@ -213,7 +219,7 @@ bool Halmac8822cFw::send_fw_page(uint16_t pg_addr, const uint8_t *chunk,
 }
 
 /* Port of dlfw_to_mem_88xx — chunked rsvd-page TX + IDDMA copy + checksum. */
-bool Halmac8822cFw::dlfw_to_mem(const uint8_t *fw_bin, uint32_t src,
+bool HalmacJaguar3Fw::dlfw_to_mem(const uint8_t *fw_bin, uint32_t src,
                                 uint32_t dest, uint32_t size) {
   uint32_t mem_offset = 0;
   bool first = true;
@@ -239,7 +245,7 @@ bool Halmac8822cFw::dlfw_to_mem(const uint8_t *fw_bin, uint32_t src,
 }
 
 /* Port of start_dlfw_88xx — parse header, set FWDL_EN, push dmem/imem/emem. */
-bool Halmac8822cFw::start_dlfw(const uint8_t *fw_bin, size_t /*size*/) {
+bool HalmacJaguar3Fw::start_dlfw(const uint8_t *fw_bin, size_t /*size*/) {
   uint32_t dmem = le32(fw_bin + WLAN_FW_HDR_DMEM_SIZE) + WLAN_FW_HDR_CHKSUM_SIZE;
   uint32_t imem = le32(fw_bin + WLAN_FW_HDR_IMEM_SIZE) + WLAN_FW_HDR_CHKSUM_SIZE;
   uint32_t emem = 0;
@@ -271,7 +277,7 @@ bool Halmac8822cFw::start_dlfw(const uint8_t *fw_bin, size_t /*size*/) {
 
 /* Port of dlfw_end_flow_88xx — verify IMEM/DMEM chksum, set FW_DW_RDY, enable
  * CPU, poll REG_MCUFW_CTRL == 0xC078 (FW booted). */
-bool Halmac8822cFw::dlfw_end_flow() {
+bool HalmacJaguar3Fw::dlfw_end_flow() {
   w32(REG_TXDMA_STATUS, 1u << 2);
 
   uint16_t fw_ctrl = r16(REG_MCUFW_CTRL);
@@ -304,7 +310,7 @@ bool Halmac8822cFw::dlfw_end_flow() {
 /* Port of download_firmware_88xx (top level). NB: the halmac LTE-coex backup/
  * restore around 0x38 is intentionally omitted — no LTE coex in devourer's
  * monitor/inject scope. */
-bool Halmac8822cFw::download_firmware(const uint8_t *fw_bin, size_t size) {
+bool HalmacJaguar3Fw::download_firmware(const uint8_t *fw_bin, size_t size) {
   if (!chk_fw_size(fw_bin, size))
     return false;
 

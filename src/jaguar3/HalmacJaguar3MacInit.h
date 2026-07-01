@@ -7,7 +7,7 @@
 
 namespace jaguar3 {
 
-/* Halmac8822cMacInit — faithful userspace port of HalMAC's post-DLFW MAC
+/* HalmacJaguar3MacInit — faithful userspace port of HalMAC's post-DLFW MAC
  * configuration for the RTL8822C (init_mac_cfg_88xx -> init_trx/protocol/edca/
  * wmac, from the OpenHD/rtl88x2cu vendor tree, hal/halmac/halmac_88xx/
  * halmac_8822c/halmac_init_8822c.c).
@@ -16,9 +16,9 @@ namespace jaguar3 {
  * WDN1300H topology: EP 0x05/0x06/0x08), HALMAC_TRX_MODE_NORMAL. The EDCA /
  * WMAC / SIFS register sets branch on bandwidth so 5/10 MHz narrowband gets the
  * correct MAC timing (not just the baseband divider). */
-class Halmac8822cMacInit {
+class HalmacJaguar3MacInit {
 public:
-  Halmac8822cMacInit(RtlUsbAdapter device, Logger_t logger);
+  HalmacJaguar3MacInit(RtlUsbAdapter device, Logger_t logger);
 
   /* pre_init_system_cfg_8822c: pinmux / LED / GPIO + BB-RF disabled. Runs
    * BEFORE the mac power switch (card_en_flow). */

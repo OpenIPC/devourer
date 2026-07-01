@@ -36,6 +36,8 @@ add_library(WiFiDriver
     hal/hal8821a_fw.h
     hal/hal8822c_fw.c
     hal/hal8822c_fw.h
+    hal/hal8822e_fw.c
+    hal/hal8822e_fw.h
     hal/hal_com_reg.h
     hal/rtl8812a_hal.h
     hal/rtl8812a_recv.h
@@ -50,12 +52,18 @@ add_library(WiFiDriver
 
     # RTL8822C (Jaguar3) phydm-format BB/AGC/RF tables. Generated from the
     # rtl88x2cu tree by tools/extract_8822c_phy_tables.py. These use the newer
-    # "halbb" conditional encoding — walked by src/jaguar3/PhyTableLoader8822c,
+    # "halbb" conditional encoding — walked by src/jaguar3/PhyTableLoaderJaguar3,
     # NOT src/PhyTableLoader (which handles the Jaguar1 check_positive format).
     hal/phydm/rtl8822c/Hal8822c_PhyTables.c
     hal/phydm/rtl8822c/Hal8822c_PhyTables.h
     hal/phydm/rtl8822c/Hal8822c_IqkNctl.c
     hal/phydm/rtl8822c/Hal8822c_IqkNctl.h
+
+    # RTL8822E (Jaguar3 EU) phydm-format BB/AGC/RF tables. Generated from the
+    # rtl88x2eu tree by `tools/extract_8822c_phy_tables.py --chip 8822e`. Same
+    # halbb encoding as 8822c (one walker), different DATA.
+    hal/phydm/rtl8822e/Hal8822e_PhyTables.c
+    hal/phydm/rtl8822e/Hal8822e_PhyTables.h
 
     src/ieee80211_radiotap.h
     src/BbDbgportReader.cpp
@@ -100,22 +108,28 @@ add_library(WiFiDriver
     src/registry_priv.h
 
     # Jaguar3 (RTL8822CU / RTL8812EU / RTL8822EU) port.
+    src/jaguar3/Jaguar3PhyTables.h
+    src/jaguar3/Jaguar3Calibration.h
+    src/jaguar3/Phy8822cTables.cpp
+    src/jaguar3/Phy8822eTables.cpp
     src/jaguar3/RtlJaguar3Device.cpp
     src/jaguar3/RtlJaguar3Device.h
-    src/jaguar3/Hal8822c.cpp
-    src/jaguar3/Hal8822c.h
-    src/jaguar3/Halmac8822cFw.cpp
-    src/jaguar3/Halmac8822cFw.h
-    src/jaguar3/Halmac8822cMacInit.cpp
-    src/jaguar3/Halmac8822cMacInit.h
-    src/jaguar3/Halrf8822cIqk.cpp
-    src/jaguar3/Halrf8822cIqk.h
-    src/jaguar3/Halmac8822cRegs.h
-    src/jaguar3/RadioManagement8822c.cpp
-    src/jaguar3/RadioManagement8822c.h
-    src/jaguar3/FrameParser8822c.h
-    src/jaguar3/PhyTableLoader8822c.cpp
-    src/jaguar3/PhyTableLoader8822c.h
+    src/jaguar3/HalJaguar3.cpp
+    src/jaguar3/HalJaguar3.h
+    src/jaguar3/HalmacJaguar3Fw.cpp
+    src/jaguar3/HalmacJaguar3Fw.h
+    src/jaguar3/HalmacJaguar3MacInit.cpp
+    src/jaguar3/HalmacJaguar3MacInit.h
+    src/jaguar3/Halrf8822c.cpp
+    src/jaguar3/Halrf8822c.h
+    src/jaguar3/Halrf8822e.cpp
+    src/jaguar3/Halrf8822e.h
+    src/jaguar3/HalmacJaguar3Regs.h
+    src/jaguar3/RadioManagementJaguar3.cpp
+    src/jaguar3/RadioManagementJaguar3.h
+    src/jaguar3/FrameParserJaguar3.h
+    src/jaguar3/PhyTableLoaderJaguar3.cpp
+    src/jaguar3/PhyTableLoaderJaguar3.h
 )
 
 target_compile_features(WiFiDriver PUBLIC cxx_std_20)
@@ -126,6 +140,7 @@ target_link_libraries(WiFiDriver PUBLIC PkgConfig::libusb)
 target_include_directories(WiFiDriver PUBLIC hal)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8814a)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822c)
+target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822e)
 target_include_directories(WiFiDriver PUBLIC src)
 
 add_executable(WiFiDriverDemo

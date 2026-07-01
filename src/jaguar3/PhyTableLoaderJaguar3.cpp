@@ -1,4 +1,4 @@
-#include "PhyTableLoader8822c.h"
+#include "PhyTableLoaderJaguar3.h"
 
 namespace jaguar3 {
 
@@ -14,7 +14,7 @@ constexpr uint32_t CUT_DONT_CARE = 0xf;
 constexpr uint32_t RFE_DONT_CARE = 0xff;
 } /* namespace */
 
-bool PhyTableLoader8822c::sel_headline(const uint32_t *array, uint32_t array_len,
+bool PhyTableLoaderJaguar3::sel_headline(const uint32_t *array, uint32_t array_len,
                                        const Jaguar3PhyContext &ctx,
                                        uint8_t &headline_size,
                                        uint8_t &headline_idx) {
@@ -87,7 +87,7 @@ bool PhyTableLoader8822c::sel_headline(const uint32_t *array, uint32_t array_len
   return false;
 }
 
-void PhyTableLoader8822c::Load(const uint32_t *table, uint32_t array_len,
+void PhyTableLoaderJaguar3::Load(const uint32_t *table, uint32_t array_len,
                                const Jaguar3PhyContext &ctx,
                                const Jaguar3PhyWriter &write) {
   uint8_t h_size = 0;

@@ -1,13 +1,21 @@
-#include "RadioManagement8822c.h"
+#include "RadioManagementJaguar3.h"
 
+#include <array>
 #include <utility>
+
+#include "RadioManagementModule.h" /* MGN_* rate enum */
+#include "Hal8822e_PhyTables.h"    /* array_mp_8822e_phy_reg_pg */
+
+extern "C" {
+#include "ieee80211_radiotap.h" /* MRateToHwRate */
+}
 
 namespace jaguar3 {
 
-RadioManagement8822c::RadioManagement8822c(RtlUsbAdapter device, Logger_t logger)
+RadioManagementJaguar3::RadioManagementJaguar3(RtlUsbAdapter device, Logger_t logger)
     : _device{device}, _logger{std::move(logger)} {}
 
-void RadioManagement8822c::set_channel_bwmode(uint8_t channel,
+void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
                                               uint8_t /*channel_offset*/,
                                               ChannelWidth_t bwmode) {
   /* 40/80 MHz HT/VHT bandwidth programming is not ported yet (only the 20 MHz
@@ -110,7 +118,7 @@ void RadioManagement8822c::set_channel_bwmode(uint8_t channel,
     set_bandwidth_dividers(bwmode);
 }
 
-void RadioManagement8822c::set_tx_power_ref(uint8_t idx) {
+void RadioManagementJaguar3::set_tx_power_ref(uint8_t idx, bool zero_diffs) {
   /* Override the 8822C TX-power reference on both RF paths (port of
    * rtw8822c_set_write_tx_power_ref + zeroing the per-rate diffs). idx is a
    * 7-bit power index (0..0x7f); higher = more power. Each txagc write must be
@@ -129,14 +137,125 @@ void RadioManagement8822c::set_tx_power_ref(uint8_t idx) {
   wr(0x41e8, 0x1fc00, idx);
   wr(0x18a0, 0x7f0000, idx);
   wr(0x41a0, 0x7f0000, idx);
-  for (uint16_t off = 0x3a00; off <= 0x3a7c; off += 4)
-    wr(off, 0xffffffff, 0x0);
+  if (zero_diffs)
+    for (uint16_t off = 0x3a00; off <= 0x3a7c; off += 4)
+      wr(off, 0xffffffff, 0x0);
   _logger->info("Jaguar3: TX power reference set to 0x{:02x} on both paths "
-                "(per-rate diffs zeroed)",
-                idx);
+                "(per-rate diffs {})",
+                idx, zero_diffs ? "zeroed" : "kept");
 }
 
-void RadioManagement8822c::set_bandwidth_dividers(ChannelWidth_t bwmode) {
+/* Map a phy_reg_pg pseudo-address to the four MGN_* rates it encodes (byte i of
+ * the packed value -> Rate[i]). Ported from _phy_get_rate_values_of_txpwr_by_rate
+ * (hal_com_phycfg.c). Returns false for CCK/unknown addresses (handled via the
+ * CCK reference, not the OFDM/HT/VHT 0x3a00 diff table). Path-B addresses
+ * (0xE20..) carry identical values to path A, so only the 0xC2x/0xC3x/0xC4x set
+ * is needed to fill the (path-shared) 0x3a00 table. */
+static bool pg_addr_to_rates(uint32_t addr, std::array<uint8_t, 4> &rates) {
+  switch (addr) {
+  case 0xC24: rates = {MGN_6M, MGN_9M, MGN_12M, MGN_18M}; return true;
+  case 0xC28: rates = {MGN_24M, MGN_36M, MGN_48M, MGN_54M}; return true;
+  case 0xC2C: rates = {MGN_MCS0, MGN_MCS1, MGN_MCS2, MGN_MCS3}; return true;
+  case 0xC30: rates = {MGN_MCS4, MGN_MCS5, MGN_MCS6, MGN_MCS7}; return true;
+  case 0xC34: rates = {MGN_MCS8, MGN_MCS9, MGN_MCS10, MGN_MCS11}; return true;
+  case 0xC38: rates = {MGN_MCS12, MGN_MCS13, MGN_MCS14, MGN_MCS15}; return true;
+  case 0xC3C:
+    rates = {MGN_VHT1SS_MCS0, MGN_VHT1SS_MCS1, MGN_VHT1SS_MCS2,
+             MGN_VHT1SS_MCS3};
+    return true;
+  case 0xC40:
+    rates = {MGN_VHT1SS_MCS4, MGN_VHT1SS_MCS5, MGN_VHT1SS_MCS6,
+             MGN_VHT1SS_MCS7};
+    return true;
+  case 0xC44:
+    rates = {MGN_VHT1SS_MCS8, MGN_VHT1SS_MCS9, MGN_VHT2SS_MCS0,
+             MGN_VHT2SS_MCS1};
+    return true;
+  case 0xC48:
+    rates = {MGN_VHT2SS_MCS2, MGN_VHT2SS_MCS3, MGN_VHT2SS_MCS4,
+             MGN_VHT2SS_MCS5};
+    return true;
+  case 0xC4C:
+    rates = {MGN_VHT2SS_MCS6, MGN_VHT2SS_MCS7, MGN_VHT2SS_MCS8,
+             MGN_VHT2SS_MCS9};
+    return true;
+  default:
+    return false; /* 0xC20 = CCK, or a path-B / unknown address */
+  }
+}
+
+void RadioManagementJaguar3::apply_power_by_rate_8822e(uint8_t channel,
+                                                       uint8_t ref_a,
+                                                       uint8_t ref_b) {
+  /* Port of the phy_reg_pg (power-by-rate) apply that devourer's table walk
+   * skips. The 8822e TXAGC is ref + per-rate diff: the OFDM/HT/VHT reference
+   * lives in 0x18e8 (A)/0x41e8 (B), and the signed per-rate diff table at
+   * 0x3a00 + (hw_rate & 0xfc) (4 rates/word, byte = hw_rate & 3) — see
+   * phydm_hal_api8822e config_phydm_write_txagc_{ref,diff}. Without it every
+   * rate emits at the flat reference, so the robust low rates the kernel boosts
+   * (e.g. MCS0 = MCS7 + 6 dB) come out ~2 dB low.
+   *
+   * phy_reg_pg holds the per-rate absolute indices (PHY_REG_PG_EXACT_VALUE). We
+   * program diff[rate] = pg[rate] - pg[MCS7] so the reference (ref_base, tuned to
+   * match the kernel's MCS7 level) anchors MCS7 at diff 0 and the by-rate spread
+   * matches the kernel (MCS0 -> ref_base + 24 = the kernel's +6 dB). */
+  const uint32_t band = channel <= 14 ? 0u : 1u;
+  const uint32_t *pg = array_mp_8822e_phy_reg_pg;
+  const uint32_t n = array_mp_8822e_phy_reg_pg_len;
+  auto get_val = [](uint32_t v, int i) -> uint8_t {
+    return static_cast<uint8_t>((v >> (i * 8)) & 0xff);
+  };
+
+  /* Pass 1: find the MCS7 anchor value (addr 0xC30 byte 3) for this band. */
+  uint8_t anchor = 0;
+  for (uint32_t i = 0; i + 6 <= n; i += 6) {
+    if (pg[i] == band && pg[i + 1] == 0 && (pg[i + 3] & 0xffff) == 0xC30) {
+      anchor = get_val(pg[i + 5], 3);
+      break;
+    }
+  }
+  if (anchor == 0) {
+    _logger->info("Jaguar3: phy_reg_pg has no MCS7 anchor for band {} — "
+                  "skipping power-by-rate", band);
+    return;
+  }
+
+  /* Reference base on both paths (OFDM ref 0x18e8/0x41e8, field [16:10]). */
+  auto wr = [this](uint16_t off, uint32_t mask, uint32_t v) {
+    _device.phy_set_bb_reg(0x1c90, 1u << 15, 0); /* txagc write enable */
+    _device.phy_set_bb_reg(off, mask, v);
+  };
+  wr(0x18e8, 0x1fc00, ref_a);     /* path A OFDM/HT/VHT ref */
+  wr(0x41e8, 0x1fc00, ref_b);     /* path B (efuse gives a distinct per-path base) */
+  wr(0x18a0, 0x7f0000, ref_a);    /* CCK ref (2.4G) */
+  wr(0x41a0, 0x7f0000, ref_b);
+
+  /* Pass 2: write the per-rate diff table for this band (path-A entries; the
+   * 0x3a00 table is path-shared and path-B pg values are identical). */
+  int groups = 0;
+  for (uint32_t i = 0; i + 6 <= n; i += 6) {
+    if (pg[i] != band || pg[i + 1] != 0)
+      continue;
+    std::array<uint8_t, 4> rates{};
+    if (!pg_addr_to_rates(pg[i + 3] & 0xffff, rates))
+      continue;
+    const uint32_t value = pg[i + 5];
+    uint32_t diff_word = 0;
+    for (int j = 0; j < 4; ++j) {
+      int diff = static_cast<int>(get_val(value, j)) - static_cast<int>(anchor);
+      diff_word |= static_cast<uint32_t>(diff & 0x7f) << (j * 8);
+    }
+    uint8_t hw0 = MRateToHwRate(rates[0]);
+    uint16_t reg = static_cast<uint16_t>(0x3a00 + (hw0 & 0xfc));
+    wr(reg, 0xffffffff, diff_word);
+    ++groups;
+  }
+  _logger->info("Jaguar3: applied phy_reg_pg power-by-rate (band {}, {} rate "
+                "groups, ref A=0x{:02x} B=0x{:02x}, MCS7 anchor 0x{:02x})",
+                band, groups, ref_a, ref_b, anchor);
+}
+
+void RadioManagementJaguar3::set_bandwidth_dividers(ChannelWidth_t bwmode) {
   /* Narrowband baseband underclock — the Jaguar3-only payoff. Applies ONLY the
    * clock-divider / small-BW / RX-DFIR delta from config_phydm_switch_bandwidth
    * _8822c, on top of an already-tuned channel (this re-clocks the baseband

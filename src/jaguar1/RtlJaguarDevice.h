@@ -136,6 +136,12 @@ private:
   void StartWithMonitorMode(SelectedChannel selectedChannel);
   bool NetDevOpen(SelectedChannel selectedChannel);
 
+  /* One bulk-IN read + Jaguar1 RX-descriptor parse. Reentrant (local buffer +
+   * local FrameParser), so the RX worker pool can call it concurrently. The
+   * generation-agnostic USB read lives in RtlUsbAdapter::bulk_read_raw; the
+   * Jaguar1-specific parse stays here (Jaguar3 parses via FrameParserJaguar3). */
+  std::vector<Packet> read_frames();
+
   std::array<std::atomic<uint32_t>, 5> _qd_snap{};
   std::thread _qd_thread;
   std::atomic<bool> _qd_stop{false};

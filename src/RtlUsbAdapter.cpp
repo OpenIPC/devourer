@@ -7,7 +7,6 @@
 #else
 #include <libusb-1.0/libusb.h>
 #endif
-#include "FrameParser.h"
 #include "Hal8812PhyReg.h"
 #include "logger.h"
 #include <iomanip>
@@ -117,43 +116,6 @@ $ lsusb -v -d 0bda:8812
         wMaxPacketSize     0x0200  1x 512 bytes
         bInterval               0
 */
-
-std::vector<Packet> RtlUsbAdapter::infinite_read() {
-  /* Must cover one full chip-side RX aggregate: the 8814 init programs
-   * REG_RXDMA_AGG_PG_TH = 0x05 ("dmc agg th 20K"), and the kernel pairs
-   * that with MAX_RECVBUF_SZ = 32768 (rtl8814a_recv.h:25) — the threshold
-   * plus the in-flight frame must fit the host read. A 16 KB buffer (an
-   * exact multiple of wMaxPacketSize, so no short-packet terminates the
-   * transfer) split >16 KB aggregates and the tail bytes were then parsed
-   * as an RX descriptor at the head of the next transfer. */
-  static constexpr int BUF_SIZE = 32 * 1024;
-  uint8_t buffer[BUF_SIZE] = {};
-  int actual_length = 0;
-  int rc;
-
-  rc = libusb_bulk_transfer(_dev_handle, _bulk_in_ep, buffer, sizeof(buffer),
-                            &actual_length, USB_TIMEOUT * 10);
-
-  if (rc < 0) {
-    /* Rate-limit the error log: a fast-failing rc (e.g. LIBUSB_ERROR_NO_DEVICE
-     * after the chip dropped off USB) used to spin the outer Init() loop at
-     * full CPU, producing multi-GB log spam in a few seconds. Log every
-     * Nth failure + sleep enough to keep the loop sane until the caller's
-     * should_stop fires. */
-    static uint64_t err_count = 0;
-    if ((err_count++ % 100) == 0) {
-      _logger->error("libusb_bulk_transfer failed with error: {} (count={})",
-                     rc, err_count);
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  }
-
-  std::vector<Packet> packets;
-  FrameParser fp{_logger};
-  packets =
-      fp.recvbuf2recvframe(std::span<uint8_t>{buffer, (size_t)actual_length});
-  return packets;
-}
 
 bool RtlUsbAdapter::WriteBytes(uint16_t reg_num, uint8_t *ptr, size_t size) {
   if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_WRITE, 5, reg_num,
@@ -386,7 +348,7 @@ void RtlUsbAdapter::InitDvObj() {
        * descriptor offers a different IN endpoint, so libusb's
        * submit_bulk_transfer to 0x81 would return "endpoint not found on any
        * open interface". Capture whatever IN endpoint the chip actually
-       * exposes and use it in infinite_read(). */
+       * exposes and use it in bulk_read_raw(). */
       if (is_bulk && (endPointAddr & LIBUSB_ENDPOINT_IN) && !found_bulk_in) {
         _bulk_in_ep = endPointAddr;
         found_bulk_in = true;

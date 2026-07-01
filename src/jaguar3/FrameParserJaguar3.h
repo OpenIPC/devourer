@@ -6,7 +6,8 @@
 #include <cstdlib>
 
 #include "basic_types.h" /* cpu_to_le32 / le16_to_cpu used by the LE macros */
-#include "FrameParser.h" /* SET_BITS_TO_LE_4BYTE / LE_BITS_TO_4BYTE */
+#include "TxDescBits.h" /* SET_BITS_TO_LE_4BYTE / LE_BITS_TO_4BYTE */
+#include "RxPacket.h"   /* Packet / rx_pkt_attrib / RX_PACKET_TYPE */
 
 /* Jaguar3 (8822C/8812EU/8822EU) TX/RX descriptor layout.
  *

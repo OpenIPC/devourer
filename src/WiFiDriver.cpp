@@ -5,7 +5,7 @@
 
 #include <libusb.h>
 
-#include "RtlJaguarDevice.h"
+#include "jaguar1/RtlJaguarDevice.h"
 #include "RtlUsbAdapter.h"
 #include "jaguar3/RtlJaguar3Device.h"
 

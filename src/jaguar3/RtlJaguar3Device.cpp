@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "FrameParserJaguar3.h"
-#include "RadioManagementModule.h" /* MGN_* rate enum (shared across the family) */
+#include "RateDefinitions.h" /* MGN_* rate enum (shared across the family) */
 #include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
 
 extern "C" {

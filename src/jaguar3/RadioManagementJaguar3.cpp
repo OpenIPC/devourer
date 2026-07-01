@@ -3,7 +3,7 @@
 #include <array>
 #include <utility>
 
-#include "RadioManagementModule.h" /* MGN_* rate enum */
+#include "RateDefinitions.h" /* MGN_* rate enum */
 #include "Hal8822e_PhyTables.h"    /* array_mp_8822e_phy_reg_pg */
 
 extern "C" {

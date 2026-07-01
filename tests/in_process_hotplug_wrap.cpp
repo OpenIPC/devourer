@@ -71,10 +71,10 @@
 #include <libusb.h>
 
 #include "logger.h"
-#include "FrameParser.h"
+#include "jaguar1/FrameParser.h"
 #include "RtlUsbAdapter.h"
 #include "WiFiDriver.h"
-#include "RtlJaguarDevice.h"
+#include "jaguar1/RtlJaguarDevice.h"
 
 namespace {
 

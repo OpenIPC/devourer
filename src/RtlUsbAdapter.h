@@ -8,7 +8,6 @@
 #include <thread>
 #include <vector>
 
-#include "FrameParser.h"
 #include "drv_types.h"
 #include "hal_com_reg.h"
 #include "logger.h"
@@ -90,7 +89,6 @@ public:
   void bulk_clear_halt(uint8_t ep) { libusb_clear_halt(_dev_handle, ep); }
   int bulk_send_sync_ep(uint8_t ep, uint8_t *packet, size_t length,
                         int timeout_ms);
-  std::vector<Packet> infinite_read();
   /* Raw bulk-IN read on the discovered bulk-IN endpoint, returning bytes read
    * (or a negative libusb error). For chip families whose RX descriptor is not
    * the Jaguar1 layout (e.g. Jaguar3), the caller parses the buffer itself. */

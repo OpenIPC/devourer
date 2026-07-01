@@ -66,38 +66,41 @@ add_library(WiFiDriver
     hal/phydm/rtl8822e/Hal8822e_PhyTables.h
 
     src/ieee80211_radiotap.h
-    src/BbDbgportReader.cpp
-    src/BbDbgportReader.h
-    src/EepromManager.cpp
-    src/EepromManager.h
+    src/jaguar1/BbDbgportReader.cpp
+    src/jaguar1/BbDbgportReader.h
+    src/jaguar1/EepromManager.cpp
+    src/jaguar1/EepromManager.h
     src/Firmware.h
-    src/FirmwareManager.cpp
-    src/FirmwareManager.h
-    src/FrameParser.cpp
-    src/FrameParser.h
-    src/HalModule.cpp
-    src/HalModule.h
-    src/Iqk8812a.cpp
-    src/Iqk8812a.h
-    src/Iqk8814a.cpp
-    src/Iqk8814a.h
-    src/PhydmWatchdog.cpp
-    src/PhydmWatchdog.h
+    src/jaguar1/FirmwareManager.cpp
+    src/jaguar1/FirmwareManager.h
+    src/jaguar1/FrameParser.cpp
+    src/jaguar1/FrameParser.h
+    src/jaguar1/HalModule.cpp
+    src/jaguar1/HalModule.h
+    src/jaguar1/Iqk8812a.cpp
+    src/jaguar1/Iqk8812a.h
+    src/jaguar1/Iqk8814a.cpp
+    src/jaguar1/Iqk8814a.h
+    src/jaguar1/PhydmWatchdog.cpp
+    src/jaguar1/PhydmWatchdog.h
     src/ParsedRadioPacket.cpp
-    src/PhyTableLoader.cpp
-    src/PhyTableLoader.h
-    src/PowerTracking8812a.cpp
-    src/PowerTracking8812a.h
-    src/RadioManagementModule.cpp
-    src/RadioManagementModule.h
+    src/jaguar1/PhyTableLoader.cpp
+    src/jaguar1/PhyTableLoader.h
+    src/jaguar1/PowerTracking8812a.cpp
+    src/jaguar1/PowerTracking8812a.h
+    src/jaguar1/RadioManagementModule.cpp
+    src/jaguar1/RadioManagementModule.h
     src/Radiotap.c
     src/RadiotapBuilder.cpp
     src/RadiotapBuilder.h
-    src/RtlJaguarDevice.cpp
-    src/RtlJaguarDevice.h
+    src/jaguar1/RtlJaguarDevice.cpp
+    src/jaguar1/RtlJaguarDevice.h
     src/RtlUsbAdapter.cpp
     src/RtlUsbAdapter.h
     src/SelectedChannel.h
+    src/RateDefinitions.h
+    src/RxPacket.h
+    src/TxDescBits.h
     src/TxMode.cpp
     src/TxMode.h
     src/IRtlDevice.h

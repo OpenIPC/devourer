@@ -63,10 +63,10 @@
   #include <libusb-1.0/libusb.h>
 #endif
 
-#include "FrameParser.h"
+#include "jaguar1/FrameParser.h"
 #include "RadiotapBuilder.h"
 #include "RtlUsbAdapter.h"
-#include "RtlJaguarDevice.h"
+#include "jaguar1/RtlJaguarDevice.h"
 #include "WiFiDriver.h"
 #include "logger.h"
 #include "stream_stdin.h"

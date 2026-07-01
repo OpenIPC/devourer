@@ -26,8 +26,8 @@
   #include <libusb-1.0/libusb.h>
 #endif
 
-#include "FrameParser.h"
-#include "RtlJaguarDevice.h"
+#include "jaguar1/FrameParser.h"
+#include "jaguar1/RtlJaguarDevice.h"
 #include "RtlUsbAdapter.h"
 #include "SignalStop.h"
 #include "WiFiDriver.h"

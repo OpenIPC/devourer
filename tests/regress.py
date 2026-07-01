@@ -170,6 +170,8 @@ SUPPORTED_DUTS = {
     "0bda:b811": "RTL8811AU",
     "0bda:c812": "RTL8812CU (Jaguar3)",
     "0bda:c82c": "RTL8822CU (Jaguar3)",
+    "0bda:a81a": "RTL8812EU (Jaguar3 EU)",
+    "0bda:e822": "RTL8822EU (Jaguar3 EU)",
 }
 
 # Required external tools on the host. Each entry: (binary, install hint).

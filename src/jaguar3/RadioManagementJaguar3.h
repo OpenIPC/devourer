@@ -6,6 +6,7 @@
 #include "logger.h"
 #include "RtlUsbAdapter.h"
 #include "SelectedChannel.h"
+#include "ChipVariant.h"
 
 namespace jaguar3 {
 
@@ -22,7 +23,8 @@ namespace jaguar3 {
  * NB_* registers below (SDR-validated). */
 class RadioManagementJaguar3 {
 public:
-  RadioManagementJaguar3(RtlUsbAdapter device, Logger_t logger);
+  RadioManagementJaguar3(RtlUsbAdapter device, Logger_t logger,
+                         ChipVariant variant = ChipVariant::C8822C);
 
   void set_channel_bwmode(uint8_t channel, uint8_t channel_offset,
                           ChannelWidth_t bwmode);
@@ -64,6 +66,7 @@ private:
 
   RtlUsbAdapter _device;
   Logger_t _logger;
+  ChipVariant _variant;
 };
 
 } /* namespace jaguar3 */

@@ -14,8 +14,9 @@ extern "C" {
 
 namespace jaguar3 {
 
-RadioManagementJaguar3::RadioManagementJaguar3(RtlUsbAdapter device, Logger_t logger)
-    : _device{device}, _logger{std::move(logger)} {}
+RadioManagementJaguar3::RadioManagementJaguar3(RtlUsbAdapter device, Logger_t logger,
+                                               ChipVariant variant)
+    : _device{device}, _logger{std::move(logger)}, _variant{variant} {}
 
 void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
                                               uint8_t /*channel_offset*/,
@@ -51,31 +52,105 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
 
   /* --- channel tune (RF 0x18, config_phydm_switch_channel_8822c): clear
    * [18:17]/[16]/[9:8]/[7:0], set channel; for 5 GHz set BIT16|BIT8 ALWAYS plus
-   * the sub-band bit (ch>144 -> BIT18, ch>=80 -> BIT17, else none). The 0x3000
-   * band bits are preserved. Matches the kernel ch36 value 0x13124
-   * (0x24|0x3000|0x100|0x10000); e.g. ch149 -> 0x53195, ch100 -> 0x33164. --- */
-  uint32_t rf18 = (channel & 0xffu) | 0x3000u;
+   * the sub-band bit (ch>144 -> BIT18, ch>=80 -> BIT17, else none). --- */
+  const bool is_c = (_variant == ChipVariant::C8822C);
+  const bool is_2g = channel <= 14;
+  /* RF 0x18 channel/band tune. 8822C is a read-modify-write preserving [15:10]
+   * and setting the BW20 bits (config_phydm_switch_channel/bandwidth_8822c);
+   * 8822E configures its RF band via its own phydm path (config_channel_8822e),
+   * so it takes the plain write below. */
+  uint32_t rf18;
+  if (is_c) {
+    rf18 = (_device.rtw_read32(static_cast<uint16_t>(0x3c00 + (0x18 << 2))) &
+            0xfffffu & ~0x703ffu);
+    rf18 |= (channel & 0xffu);
+    rf18 |= (1u << 13) | (1u << 12); /* RF bandwidth = BW20 (vendor switch_bw) */
+  } else {
+    rf18 = (channel & 0xffu) | 0x3000u;
+  }
   if (channel > 14) { /* 5 GHz */
     rf18 |= (1u << 16) | (1u << 8);
     if (channel > 144) rf18 |= (1u << 18);
     else if (channel >= 80) rf18 |= (1u << 17);
   }
   _logger->info("Jaguar3: channel {} RF18=0x{:05x}", channel, rf18);
-  rf_write(0x3c00, 0x18, rf18);
-  rf_write(0x4c00, 0x18, rf18);
-  rf_write(0x3c00, 0x3f, 0x18);  /* RXBB 20/40 */
-  rf_write(0x4c00, 0x3f, 0x18);
-  bool is_2g = channel <= 14;
-  _device.phy_set_bb_reg(static_cast<uint16_t>(0x3c00 + (0xdf << 2)), 1u << 18,
-                         is_2g ? 1 : 0);
 
-  /* --- 2G/5G band BB --- */
+  if (is_c) {
+    /* RF writes are bracketed by phydm_rstb_3wire_8822c (HSSI/3-wire reset):
+     * (false) 0x1c90[8]=0 before, (true) 0x1c90[8]=1 + 0x1830[29]/0x4130[29]=1
+     * "force update anapar" after — the latter pushes the RF/analog shadow to
+     * hardware, which is required for the per-channel RF (RXBB/RF18) to reach the
+     * analog front-end. RXBB (RF 0x3f) is a gated write: RF 0xee[2]=1,
+     * RF 0x33[4:0]=0x12, RF 0x3f, RF 0xee[2]=0 (config_phydm_switch_bandwidth_8822c). */
+    _device.phy_set_bb_reg(0x1c90, 1u << 8, 0x0); /* rstb_3wire(false) */
+    for (uint16_t base : {uint16_t(0x3c00), uint16_t(0x4c00)}) {
+      _device.phy_set_bb_reg(static_cast<uint16_t>(base + (0xee << 2)), 0x4, 0x1);
+      _device.phy_set_bb_reg(static_cast<uint16_t>(base + (0x33 << 2)), 0x1f, 0x12);
+      rf_write(base, 0x3f, 0x18);  /* RXBB BW20 = BIT4|BIT3 */
+      _device.phy_set_bb_reg(static_cast<uint16_t>(base + (0xee << 2)), 0x4, 0x0);
+    }
+    rf_write(0x3c00, 0x18, rf18);
+    rf_write(0x4c00, 0x18, rf18);
+    _device.phy_set_bb_reg(static_cast<uint16_t>(0x3c00 + (0xdf << 2)), 1u << 18,
+                           is_2g ? 1 : 0);
+    _device.phy_set_bb_reg(0x1c90, 1u << 8, 0x1);   /* rstb_3wire(true) */
+    _device.phy_set_bb_reg(0x1830, 1u << 29, 0x1);  /* force update anapar (A) */
+    _device.phy_set_bb_reg(0x4130, 1u << 29, 0x1);  /* force update anapar (B) */
+  } else {
+    rf_write(0x3c00, 0x18, rf18);
+    rf_write(0x4c00, 0x18, rf18);
+    rf_write(0x3c00, 0x3f, 0x18);  /* RXBB 20/40 */
+    rf_write(0x4c00, 0x3f, 0x18);
+    _device.phy_set_bb_reg(static_cast<uint16_t>(0x3c00 + (0xdf << 2)), 1u << 18,
+                           is_2g ? 1 : 0);
+  }
+
+  /* Per-band RX AGC-table selection (phydm_cck/ofdm_agc_tab_sel_8822c) — 8822C
+   * only; the EU (8822e) selects its AGC table via its own phydm path. 0x18ac/
+   * 0x41ac [15:12]=CCK table, [8:4]=OFDM table; 0x828[7:3]=AGC lower bound
+   * (L_BND_DEFAULT_8822C 0xd; the measured ofdm_rxagc_l_bnd is not tracked). */
+  auto ofdm_agc_sel = [this](uint8_t table) {
+    _device.phy_set_bb_reg(0x18ac, 0x1f0, table);
+    _device.phy_set_bb_reg(0x41ac, 0x1f0, table);
+    _device.phy_set_bb_reg(0x828, 0xf8, 0xd);
+  };
+  auto cck_agc_sel = [this](uint8_t table) {
+    _device.phy_set_bb_reg(0x18ac, 0xf000, table);
+    _device.phy_set_bb_reg(0x41ac, 0xf000, table);
+  };
+  const bool bw20 = (bwmode == CHANNEL_WIDTH_20 || bwmode == CHANNEL_WIDTH_10 ||
+                     bwmode == CHANNEL_WIDTH_5);
+  if (!is_c) {
+    /* 8822E: skip 8822c AGC-table select entirely. */
+  } else if (channel <= 14) {
+    cck_agc_sel(bw20 ? 5 : 4);              /* CCK_BW20=5 / CCK_BW40=4 */
+    ofdm_agc_sel(bw20 ? 6 : 0);            /* OFDM_2G_BW20=6 / OFDM_2G_BW40=0 */
+  } else if (channel < 80) {
+    ofdm_agc_sel(1);                        /* OFDM_5G_LOW */
+  } else if (channel <= 144) {
+    ofdm_agc_sel(2);                        /* OFDM_5G_MID */
+  } else {
+    ofdm_agc_sel(3);                        /* OFDM_5G_HIGH */
+  }
+
+  /* --- 2G/5G band BB (phydm switch_channel "Other BB Settings") --- */
   if (is_2g) {
+    /* Enable CCK Rx IQ (phydm_cck_rxiq_8822c SET): CCK source 5 + weighting [1,1].
+     * 8822C only (EU has its own CCK-RXIQ path). */
+    if (is_c) {
+      _device.phy_set_bb_reg(0x1a9c, 1u << 20, 0x1);
+      _device.phy_set_bb_reg(0x1a14, 0x300, 0x0);
+    }
     _device.rtw_write8(0x454,
                        static_cast<uint8_t>(_device.rtw_read8(0x454) & ~0x80));
     _device.phy_set_bb_reg(0x1a80, 1u << 18, 0x0);
     _device.phy_set_bb_reg(0x1c80, 0x3F000000, 0xF);
   } else {
+    /* Disable CCK Rx IQ (phydm_cck_rxiq_8822c REVERT). 8822C only. */
+    if (is_c) {
+      _device.phy_set_bb_reg(0x1a9c, 1u << 20, 0x0);
+      _device.phy_set_bb_reg(0x1a14, 0x300, 0x3);
+    }
     _device.rtw_write8(0x454,
                        static_cast<uint8_t>(_device.rtw_read8(0x454) | 0x80));
     _device.phy_set_bb_reg(0x1a80, 1u << 18, 0x1);

@@ -26,7 +26,7 @@ static constexpr uint8_t JAGUAR3_TXPWR_REF_BASE_8822C = 0x28;
 RtlJaguar3Device::RtlJaguar3Device(RtlUsbAdapter device, Logger_t logger,
                                    jaguar3::ChipVariant variant)
     : _device{device}, _logger{logger}, _variant{variant},
-      _hal{device, logger, variant}, _radioManagement{device, logger} {
+      _hal{device, logger, variant}, _radioManagement{device, logger, variant} {
   _logger->info("RtlJaguar3Device constructed ({})",
                 variant == jaguar3::ChipVariant::C8822E ? "8822E/EU" : "8822C/CU");
 }

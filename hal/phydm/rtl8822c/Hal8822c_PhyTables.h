@@ -8,9 +8,6 @@
 
 #ifdef __cplusplus
 extern "C" {
-extern const u32 array_mp_8822c_cal_init[];
-extern const u32 array_mp_8822c_cal_init_len;
-
 #endif
 
 extern const u32 array_mp_8822c_agc_tab[];
@@ -23,6 +20,8 @@ extern const u32 array_mp_8822c_radioa[];
 extern const u32 array_mp_8822c_radioa_len;
 extern const u32 array_mp_8822c_radiob[];
 extern const u32 array_mp_8822c_radiob_len;
+extern const u32 array_mp_8822c_cal_init[];
+extern const u32 array_mp_8822c_cal_init_len;
 
 #ifdef __cplusplus
 }

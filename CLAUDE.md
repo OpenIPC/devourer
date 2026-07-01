@@ -21,46 +21,29 @@ a failed FW-boot poll means dead TX while RX still works), and
 **RTL8821AU** (1T1R AC + BT combo). These share one HAL (`src/HalModule`,
 `src/RtlJaguarDevice`) with chip-family branches.
 
-**Jaguar3 (`rtl8822c` PHY generation).** A second, self-contained HAL under
-`src/jaguar3/` for the **RTL8812CU / RTL8822CU** (`0bda:c812` etc.), built to
-reach **narrowband 5/10 MHz** (a baseband underclock the Jaguar-1 silicon
-physically lacks). It ports Realtek's vendor bring-up from source — power-on,
-HalMAC firmware download, MAC/BB/RF init, the halrf calibration steps needed
-for TX (3-wire RF + DACK + beamforming init), then RX and on-air TX at
-20 MHz plus the 5/10 MHz narrowband re-clock. Validated on RTL8812CU
-hardware. RTL8812EU/8822EU (the `rtl8822e` MAC/DLFW fork) are out of scope.
+**Jaguar3.** A second, self-contained HAL under `src/jaguar3/` covering two PHY
+generations that share one core: **rtl8822c** (RTL8812CU / RTL8822CU, `0bda:c812`)
+and **rtl8822e** (RTL8812EU / RTL8822EU, `0bda:a81a`). Bring-up is ported from
+Realtek's vendor source — power-on, HalMAC firmware download, MAC/BB/RF init,
+halrf calibration (DACK, IQK, TXGAPK, thermal tracking), RX, and on-air TX at
+20 MHz plus the **5/10 MHz narrowband** re-clock the Jaguar-1 silicon lacks.
+Per-generation PHY/RF tables and calibration sit behind strategy interfaces
+(`Jaguar3PhyTables`, `Jaguar3Calibration`); the flow and table-walker are shared.
 
-RX and narrowband are SDR-confirmed. **Sustained continuous TX is confirmed
-across the full 5 GHz band** — UNII-1 (ch36–48), UNII-2/DFS (ch100/120/144),
-and UNII-3 (ch149) — SDR-validated flat at ~93% channel duty / ~60 Mbps
-(MCS7/20) with zero bulk-OUT failures. The halrf thermal chain is ported —
-`pwr_track` (swing-table TX-power compensation) and `do_lck` (synth re-lock on
-drift) in `Halrf8822cIqk`; the remaining unported calibration is per-channel DPK
-(`rtw8822c_do_dpk`).
+Sustained 5 GHz TX needs the **coex runtime thread**
+(`RtlJaguar3Device::coex_runtime_loop`, started in `InitWrite`): it drains the
+firmware C2H reports off bulk-IN and every ~2 s re-applies the WiFi-only coex
+decision (GNT_WL, antenna owner = WL), the FW heartbeats, and thermal TX-power
+tracking. Without it the combo chip's coex firmware silences the antenna.
 
-Sustained 5 GHz TX is kept alive by a **coex runtime thread**
-(`RtlJaguar3Device::coex_runtime_loop`, started in `InitWrite`) that ports the
-rtw88 watchdog's coex path — it drains the firmware C2H reports off bulk-IN (so
-the on-chip C2H buffer never fills) and every ~2 s re-applies the 5 GHz coex
-decision (`Hal8822c::coex_run_5g`, a port of `rtw_coex_action_wl_under5g`:
-GNT_BT→HW-PTA + GNT_WL→SW-high, antenna owner = WL, the WL-wins PTA table) plus
-the FW heartbeats (`fw_update_wl_phy_info`, `fw_set_pwr_mode_active`,
-`fw_coex_query_bt_info`). Without it the combo chip's coex firmware silences the
-antenna after ~50 s; with it, 5 GHz TX runs indefinitely (SDR-validated to ~3 min
-across UNII-1/2/3).
+TX power: by default the chip transmits at its efuse-calibrated per-path,
+per-channel level (the rtl8822e TXAGC references match the kernel driver's).
+`DEVOURER_TX_PWR=0xNN` forces a flat TXAGC reference — a debug/SDR-visibility
+knob, not for sustained use.
 
-TX power: by default (no `DEVOURER_TX_PWR`) the chip transmits at its
-**efuse-calibrated power**, flat and sustained — the firmware reads efuse itself
-and holds that level (same firmware + efuse the kernel uses, so the sustained
-power matches the kernel's). `DEVOURER_TX_PWR=0xNN` writes a flat TXAGC reference
-that overdrives the PA for ~60 s until the FW's calibration reverts it to the
-efuse level; it's a debug/SDR-visibility knob, not for sustained use.
-
-NOT 8821AU's family confusion: it IS Jaguar wave 1 (CHIP_8821 = 7 in
-Realtek's HalVerDef, shares the enum with CHIP_8812), not Jaguar2 as
-sometimes claimed. The **Jaguar2 (8812BU, 8822BU/BE, ...) and Kestrel
-(11ax) families are out of scope** — they share the "AU"/"BU" branding
-but the baseband and HAL differ enough to need their own driver.
+**RTL8821AU is Jaguar wave 1** (CHIP_8821 = 7, shares the enum with CHIP_8812),
+not Jaguar2. The **Jaguar2 (8812BU, 8822BU/BE, …) and Kestrel (11ax) families are
+out of scope** — same "AU"/"BU" branding, different baseband/HAL.
 
 ## Build
 
@@ -261,11 +244,12 @@ to the factory. `demo/main.cpp` is the canonical boilerplate.
 
 **Chip identity is resolved at construction** from SYS_CFG bits + USB PID.
 `CreateRtlDevice` returns an `IRtlDevice` (`Init` / `InitWrite` / `send_packet`)
-and dispatches on chip generation: Jaguar-1 PIDs construct `RtlJaguarDevice`,
-Jaguar3 PIDs (`0bda:c812`, …) construct `RtlJaguar3Device`. Each orchestrator
-then drives bring-up, RX, and TX through its own HAL. `RtlJaguarDevice` was
-previously named `Rtl8812aDevice` — a deprecated alias still exists for one
-release cycle.
+and dispatches on chip generation: Jaguar-1 PIDs construct `RtlJaguarDevice`;
+Jaguar3 PIDs construct `RtlJaguar3Device`, with the generation (`rtl8822c` vs
+`rtl8822e`) selected from the `SYS_CFG2` chip-id (`0x13` → C8822C, `0x17` →
+C8822E). Each orchestrator drives bring-up, RX, and TX through its own HAL.
+`RtlJaguarDevice` was previously named `Rtl8812aDevice` — a deprecated alias
+still exists for one release cycle.
 
 Module layout in `src/`:
 
@@ -289,30 +273,30 @@ Module layout in `src/`:
   `send_packet` **must** begin with a radiotap header; rate / MCS / VHT /
   STBC / LDPC / SGI / bandwidth are read from it.
 
-The Jaguar3 HAL is a parallel, self-contained set under `src/jaguar3/`:
+The Jaguar3 HAL is a parallel, self-contained set under `src/jaguar3/`. The core
+uses generation-neutral names; per-generation behaviour is behind two strategy
+interfaces selected by `ChipVariant`:
 
 - `RtlJaguar3Device` — orchestrator (Init / InitWrite / send_packet / Stop).
-- `Hal8822c` — bring-up: power-on/off PWR_SEQ, MAC/USB config, BB/AGC/RF table
-  apply, `config_phydm_parameter_init` (3-wire RF), `bf_init` (beamforming),
-  and `enable_tx_path`. Calls into the calibration and FW modules.
-- `Halmac8822cFw` — verbatim-ported HalMAC firmware download/boot (the
-  `rtl8822c` analogue of the 8814 3081 path).
-- `Halrf8822cIqk` — ported halrf calibration: IQK plus the DAC DC cal (DACK,
-  `dac_calibrate`) the TX path requires.
-- `RadioManagement8822c` — channel / bandwidth / TX power, including the
-  `0x9b0`/`0x9b4` baseband-divider recipe for 5/10 MHz narrowband and the
-  RF18 channel-tune encoding.
-- `FrameParser8822c.h` / `PhyTableLoader8822c` — 8822C TX/RX descriptors and
-  the table walker for the `rtl8822c` phydm tables.
+- `HalJaguar3` — bring-up: power-on/off PWR_SEQ, MAC/USB config, BB/AGC/RF table
+  apply, `config_phydm_parameter_init` (3-wire RF), `bf_init`, `enable_tx_path`,
+  efuse access (incl. the 8822e OTP burst-mode / 2-byte-header decode), RFE pins.
+- `HalmacJaguar3Fw` / `HalmacJaguar3MacInit` — HalMAC firmware download + MAC init.
+- `Jaguar3Calibration` (interface) → `Halrf8822c` / `Halrf8822e`: halrf DACK, IQK,
+  TXGAPK, thermal TX-power tracking, coex/antenna control.
+- `Jaguar3PhyTables` (interface) → `Phy8822cTables` / `Phy8822eTables`.
+- `RadioManagementJaguar3` — channel / bandwidth / per-path TX power, the
+  `0x9b0`/`0x9b4` narrowband divider recipe, and the RF18 channel-tune encoding.
+- `FrameParserJaguar3.h` / `PhyTableLoaderJaguar3` — TX/RX descriptors and the
+  phydm table walker (shared across both generations).
 
 `hal/` holds vendor headers and tables ported from Realtek's tree. The
-8814-specific BB/AGC/RF tables under `hal/phydm/rtl8814a/Hal8814_PhyTables.{c,h}`
-are **generated** from the upstream aircrack-ng/rtl8814au source by
-`tools/extract_8814a_phy_tables.py` — edit the generator, not the output.
-The runtime parser for these tables is `src/PhyTableLoader`, not the upstream
-phydm parser. The Jaguar3 tables under `hal/phydm/rtl8822c/` are likewise
-generated by `tools/extract_8822c_phy_tables.py` and walked by
-`src/jaguar3/PhyTableLoader8822c`.
+8814-specific tables under `hal/phydm/rtl8814a/Hal8814_PhyTables.{c,h}` are
+**generated** from the upstream aircrack-ng/rtl8814au source by
+`tools/extract_8814a_phy_tables.py`; the Jaguar3 tables under
+`hal/phydm/rtl8822{c,e}/` by `tools/extract_8822c_phy_tables.py`. Edit the
+generators, not the output. The runtime parser is `src/PhyTableLoader` (Jaguar1)
+/ `src/jaguar3/PhyTableLoaderJaguar3`, not the upstream phydm parser.
 
 ## Hardware gotchas
 
@@ -324,21 +308,11 @@ generated by `tools/extract_8822c_phy_tables.py` and walked by
 - **rmmod/sysfs-unbind actively de-inits the chip** (RF off, MAC DMA off).
   After detaching a kernel driver, expect to re-init from cold, not warm.
   `DEVOURER_SKIP_RESET=1` only helps when firmware state is still intact.
-- **USB Vbus sag on bus-powered hub chains**: 5 GHz TX draws far more PA current
-  than 2.4 GHz. Fed through a deep bus-powered hub chain the rail can brown out
-  the PA. Symptom: frames submit fine (`rc` ok, 0 send-fails) but on-air power
-  collapses — SDR duty near the noise floor, or fully dark — *intermittently*, and
-  often on every plugged adapter at once, while 2.4 GHz keeps working. Recovers on
-  a `uhubctl` power-cycle of the hub tree (the most deeply-nested / highest-PA
-  adapter may need its own dedicated port cycle). **Do not mis-diagnose it** as a
-  per-chip dead PA, a 5 GHz code gate, a BT-coex/antenna issue, or an EFUSE
-  TX-power bug — every one of those was chased and refuted; it was the rail.
-  Defences: (1) keep a known-good control adapter and re-check it *each session* —
-  a sagging control silently makes the bench look like per-chip hardware death;
-  (2) measure TX as on-air **Mbps via SDR duty × PHY rate**, never monitor-sniffer
-  frame counts — a sensitive receiver decodes weak frames and masks a power
-  collapse; (3) don't trust a "fix validated" off a single reading on an unstable
-  rail. Durable fix: powered USB hub / direct root ports.
+- **Bench measurement**: measure TX as on-air **Mbps via SDR duty × PHY rate**
+  (`tests/bench_onair.py`), not monitor-sniffer frame counts — a sensitive
+  receiver decodes weak frames and masks a real drop. Keep a known-good control
+  adapter and re-check it each session; take one clean SDR read per session (a
+  second back-to-back `sdr_duty` read can fail to reacquire and report ~0).
 
 ## TX path
 

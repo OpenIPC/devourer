@@ -6,3 +6,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 reference/
+
+# Local lab notes / Claude Code state (never commit)
+INVENTORY.md
+.claude/

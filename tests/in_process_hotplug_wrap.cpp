@@ -71,10 +71,9 @@
 #include <libusb.h>
 
 #include "logger.h"
-#include "jaguar1/FrameParser.h"
+#include "RxPacket.h"
 #include "RtlUsbAdapter.h"
 #include "WiFiDriver.h"
-#include "jaguar1/RtlJaguarDevice.h"
 
 namespace {
 

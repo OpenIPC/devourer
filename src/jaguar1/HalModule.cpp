@@ -3,7 +3,9 @@
 #include "FirmwareManager.h"
 #include "InitTimer.h"
 #include "Hal8812PhyReg.h"
+#if defined(DEVOURER_HAVE_8814)
 #include "Hal8814_PhyTables.h"
+#endif
 #include "Hal8821PhyReg.h"
 #include "PhyTableLoader.h"
 #include "phydm_pre_define.h"
@@ -667,9 +669,11 @@ bool HalModule::InitPowerOn() {
    * false. */
   WLAN_PWR_CFG *enable_flow;
   switch (_eepromManager->version_id.ICType) {
+#if defined(DEVOURER_HAVE_8814)
   case CHIP_8814A:
     enable_flow = rtl8814A_card_enable_flow;
     break;
+#endif
   case CHIP_8821:
     enable_flow = Rtl8821A_NIC_ENABLE_FLOW;
     break;
@@ -941,15 +945,18 @@ void HalModule::PHY_MACConfig8812() {
 }
 
 void HalModule::odm_read_and_config_mp_8814a_mac_reg() {
+#if defined(DEVOURER_HAVE_8814)
   auto ctx = _eepromManager->GetPhyContext();
   PhyTableLoader::Load(array_mp_8814a_mac_reg, array_mp_8814a_mac_reg_len, ctx,
                        [this](uint32_t addr, uint32_t value) {
                          _device.rtw_write8(static_cast<uint16_t>(addr),
                                             static_cast<uint8_t>(value));
                        });
+#endif
 }
 
 void HalModule::odm_read_and_config_mp_8814a_phy_reg() {
+#if defined(DEVOURER_HAVE_8814)
   auto ctx = _eepromManager->GetPhyContext();
   /* odm_config_bb_phy_8812a is chip-agnostic for the phydm special addresses
    * 0xfe/fd/fc/fb/fa/f9 (sleep/delay opcodes shared across Realtek chips) and
@@ -959,14 +966,17 @@ void HalModule::odm_read_and_config_mp_8814a_phy_reg() {
                        [this](uint32_t addr, uint32_t value) {
                          odm_config_bb_phy_8812a(addr, 0xFFFFFFFFu, value);
                        });
+#endif
 }
 
 void HalModule::odm_read_and_config_mp_8814a_agc_tab() {
+#if defined(DEVOURER_HAVE_8814)
   auto ctx = _eepromManager->GetPhyContext();
   PhyTableLoader::Load(array_mp_8814a_agc_tab, array_mp_8814a_agc_tab_len, ctx,
                        [this](uint32_t addr, uint32_t value) {
                          odm_config_bb_agc_8812a(addr, 0xFFFFFFFFu, value);
                        });
+#endif
 }
 
 bool HalModule::phy_BB8814_Config_ParaFile() {
@@ -2642,6 +2652,7 @@ void HalModule::phy_RF6052_Config_ParaFile_8814() {
 }
 
 void HalModule::odm_read_and_config_mp_8814a_radioa() {
+#if defined(DEVOURER_HAVE_8814)
   auto ctx = _eepromManager->GetPhyContext();
   PhyTableLoader::Load(
       array_mp_8814a_radioa, array_mp_8814a_radioa_len, ctx,
@@ -2649,9 +2660,11 @@ void HalModule::odm_read_and_config_mp_8814a_radioa() {
         odm_config_rf_reg_8812a(addr, value, RfPath::RF_PATH_A,
                                 static_cast<uint16_t>(addr));
       });
+#endif
 }
 
 void HalModule::odm_read_and_config_mp_8814a_radiob() {
+#if defined(DEVOURER_HAVE_8814)
   auto ctx = _eepromManager->GetPhyContext();
   PhyTableLoader::Load(
       array_mp_8814a_radiob, array_mp_8814a_radiob_len, ctx,
@@ -2659,9 +2672,11 @@ void HalModule::odm_read_and_config_mp_8814a_radiob() {
         odm_config_rf_reg_8812a(addr, value, RfPath::RF_PATH_B,
                                 static_cast<uint16_t>(addr));
       });
+#endif
 }
 
 void HalModule::odm_read_and_config_mp_8814a_radioc() {
+#if defined(DEVOURER_HAVE_8814)
   auto ctx = _eepromManager->GetPhyContext();
   PhyTableLoader::Load(
       array_mp_8814a_radioc, array_mp_8814a_radioc_len, ctx,
@@ -2669,9 +2684,11 @@ void HalModule::odm_read_and_config_mp_8814a_radioc() {
         odm_config_rf_reg_8812a(addr, value, RfPath::RF_PATH_C,
                                 static_cast<uint16_t>(addr));
       });
+#endif
 }
 
 void HalModule::odm_read_and_config_mp_8814a_radiod() {
+#if defined(DEVOURER_HAVE_8814)
   auto ctx = _eepromManager->GetPhyContext();
   PhyTableLoader::Load(
       array_mp_8814a_radiod, array_mp_8814a_radiod_len, ctx,
@@ -2679,6 +2696,7 @@ void HalModule::odm_read_and_config_mp_8814a_radiod() {
         odm_config_rf_reg_8812a(addr, value, RfPath::RF_PATH_D,
                                 static_cast<uint16_t>(addr));
       });
+#endif
 }
 
 void HalModule::phy_RF6052_Config_ParaFile_8812() {

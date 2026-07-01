@@ -10,91 +10,49 @@ project(Rtl8812auNet)
 
 enable_testing()
 
+# ---------------------------------------------------------------------------
+# Per-chip build options. All default ON (backward compatible: a plain
+# `cmake -S . -B build` builds every chip). Turn off the ones you don't need to
+# drop their firmware blobs + generated PHY tables and shrink the binary — e.g.
+# an 8812AU-only build:
+#   cmake -S . -B build -DDEVOURER_8814=OFF \
+#         -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF
+# ---------------------------------------------------------------------------
+option(DEVOURER_JAGUAR1       "RTL8812AU / 8811AU / 8821AU (Jaguar1 core)"      ON)
+option(DEVOURER_8814          "RTL8814AU (4T4R; requires DEVOURER_JAGUAR1)"     ON)
+option(DEVOURER_JAGUAR3_8822C "RTL8812CU / 8822CU (Jaguar3, rtl8822c)"          ON)
+option(DEVOURER_JAGUAR3_8822E "RTL8812EU / 8822EU (Jaguar3, rtl8822e)"          ON)
+
+if(DEVOURER_8814 AND NOT DEVOURER_JAGUAR1)
+    message(FATAL_ERROR
+        "DEVOURER_8814=ON requires DEVOURER_JAGUAR1=ON (8814 reuses the Jaguar1 HAL).")
+endif()
+if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR3_8822C AND NOT DEVOURER_JAGUAR3_8822E)
+    message(FATAL_ERROR
+        "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
+        "DEVOURER_JAGUAR3_8822C / DEVOURER_JAGUAR3_8822E.")
+endif()
+# Convenience: the shared Jaguar3 port compiles when either variant is on.
+if(DEVOURER_JAGUAR3_8822C OR DEVOURER_JAGUAR3_8822E)
+    set(DEVOURER_JAGUAR3 ON)
+else()
+    set(DEVOURER_JAGUAR3 OFF)
+endif()
+
 # Find pkg-config and then use it to locate libusb.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(libusb REQUIRED IMPORTED_TARGET libusb-1.0)
 
 add_library(WiFiDriver
+    # --- generation-agnostic core (always compiled) ---
     src/logger.h
-
-    hal/Hal8812PhyReg.h
-    hal/Hal8812PwrSeq.c
-    hal/Hal8812PwrSeq.h
-    hal/Hal8812a_TxPwrTrack.cpp
-    hal/Hal8812a_TxPwrTrack.h
-    hal/Hal8814PwrSeq.c
-    hal/Hal8814PwrSeq.h
-    hal/Hal8821APwrSeq.c
-    hal/Hal8821APwrSeq.h
-    hal/Hal8821PhyReg.h
     hal/basic_types.h
-    hal/hal8812a_fw.c
-    hal/hal8812a_fw.h
-    hal/hal8814a_fw.c
-    hal/hal8814a_fw.h
-    hal/hal8821a_fw.c
-    hal/hal8821a_fw.h
-    hal/hal8822c_fw.c
-    hal/hal8822c_fw.h
-    hal/hal8822e_fw.c
-    hal/hal8822e_fw.h
     hal/hal_com_reg.h
-    hal/rtl8812a_hal.h
-    hal/rtl8812a_recv.h
-    hal/rtl8812a_spec.h
-
-    # RTL8814AU phydm-format register tables. The .c file is generated from the
-    # aircrack-ng/rtl8814au tree by tools/extract_8814a_phy_tables.py; the
-    # loader at src/PhyTableLoader walks the same conditional encoding the
-    # upstream phydm parser does, without pulling in phydm itself.
-    hal/phydm/rtl8814a/Hal8814_PhyTables.c
-    hal/phydm/rtl8814a/Hal8814_PhyTables.h
-
-    # RTL8822C (Jaguar3) phydm-format BB/AGC/RF tables. Generated from the
-    # rtl88x2cu tree by tools/extract_8822c_phy_tables.py. These use the newer
-    # "halbb" conditional encoding — walked by src/jaguar3/PhyTableLoaderJaguar3,
-    # NOT src/PhyTableLoader (which handles the Jaguar1 check_positive format).
-    hal/phydm/rtl8822c/Hal8822c_PhyTables.c
-    hal/phydm/rtl8822c/Hal8822c_PhyTables.h
-    hal/phydm/rtl8822c/Hal8822c_IqkNctl.c
-    hal/phydm/rtl8822c/Hal8822c_IqkNctl.h
-
-    # RTL8822E (Jaguar3 EU) phydm-format BB/AGC/RF tables. Generated from the
-    # rtl88x2eu tree by `tools/extract_8822c_phy_tables.py --chip 8822e`. Same
-    # halbb encoding as 8822c (one walker), different DATA.
-    hal/phydm/rtl8822e/Hal8822e_PhyTables.c
-    hal/phydm/rtl8822e/Hal8822e_PhyTables.h
-
     src/ieee80211_radiotap.h
-    src/jaguar1/BbDbgportReader.cpp
-    src/jaguar1/BbDbgportReader.h
-    src/jaguar1/EepromManager.cpp
-    src/jaguar1/EepromManager.h
-    src/Firmware.h
-    src/jaguar1/FirmwareManager.cpp
-    src/jaguar1/FirmwareManager.h
-    src/jaguar1/FrameParser.cpp
-    src/jaguar1/FrameParser.h
-    src/jaguar1/HalModule.cpp
-    src/jaguar1/HalModule.h
-    src/jaguar1/Iqk8812a.cpp
-    src/jaguar1/Iqk8812a.h
-    src/jaguar1/Iqk8814a.cpp
-    src/jaguar1/Iqk8814a.h
-    src/jaguar1/PhydmWatchdog.cpp
-    src/jaguar1/PhydmWatchdog.h
     src/ParsedRadioPacket.cpp
-    src/jaguar1/PhyTableLoader.cpp
-    src/jaguar1/PhyTableLoader.h
-    src/jaguar1/PowerTracking8812a.cpp
-    src/jaguar1/PowerTracking8812a.h
-    src/jaguar1/RadioManagementModule.cpp
-    src/jaguar1/RadioManagementModule.h
     src/Radiotap.c
     src/RadiotapBuilder.cpp
     src/RadiotapBuilder.h
-    src/jaguar1/RtlJaguarDevice.cpp
-    src/jaguar1/RtlJaguarDevice.h
     src/RtlUsbAdapter.cpp
     src/RtlUsbAdapter.h
     src/SelectedChannel.h
@@ -109,30 +67,6 @@ add_library(WiFiDriver
     src/WiFiDriver.cpp
     src/WiFiDriver.h
     src/registry_priv.h
-
-    # Jaguar3 (RTL8822CU / RTL8812EU / RTL8822EU) port.
-    src/jaguar3/Jaguar3PhyTables.h
-    src/jaguar3/Jaguar3Calibration.h
-    src/jaguar3/Phy8822cTables.cpp
-    src/jaguar3/Phy8822eTables.cpp
-    src/jaguar3/RtlJaguar3Device.cpp
-    src/jaguar3/RtlJaguar3Device.h
-    src/jaguar3/HalJaguar3.cpp
-    src/jaguar3/HalJaguar3.h
-    src/jaguar3/HalmacJaguar3Fw.cpp
-    src/jaguar3/HalmacJaguar3Fw.h
-    src/jaguar3/HalmacJaguar3MacInit.cpp
-    src/jaguar3/HalmacJaguar3MacInit.h
-    src/jaguar3/Halrf8822c.cpp
-    src/jaguar3/Halrf8822c.h
-    src/jaguar3/Halrf8822e.cpp
-    src/jaguar3/Halrf8822e.h
-    src/jaguar3/HalmacJaguar3Regs.h
-    src/jaguar3/RadioManagementJaguar3.cpp
-    src/jaguar3/RadioManagementJaguar3.h
-    src/jaguar3/FrameParserJaguar3.h
-    src/jaguar3/PhyTableLoaderJaguar3.cpp
-    src/jaguar3/PhyTableLoaderJaguar3.h
 )
 
 target_compile_features(WiFiDriver PUBLIC cxx_std_20)
@@ -145,6 +79,81 @@ target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8814a)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822c)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822e)
 target_include_directories(WiFiDriver PUBLIC src)
+
+# --- per-chip source groups (see options above) ---
+if(DEVOURER_JAGUAR1)
+    target_sources(WiFiDriver PRIVATE
+        hal/hal8812a_fw.c hal/hal8812a_fw.h
+        hal/hal8821a_fw.c hal/hal8821a_fw.h
+        hal/Hal8812PwrSeq.c hal/Hal8812PwrSeq.h
+        hal/Hal8821APwrSeq.c hal/Hal8821APwrSeq.h
+        hal/Hal8812a_TxPwrTrack.cpp hal/Hal8812a_TxPwrTrack.h
+        hal/Hal8812PhyReg.h hal/Hal8821PhyReg.h
+        hal/rtl8812a_hal.h hal/rtl8812a_recv.h hal/rtl8812a_spec.h
+        src/Firmware.h
+        src/jaguar1/RtlJaguarDevice.cpp src/jaguar1/RtlJaguarDevice.h
+        src/jaguar1/HalModule.cpp src/jaguar1/HalModule.h
+        src/jaguar1/RadioManagementModule.cpp src/jaguar1/RadioManagementModule.h
+        src/jaguar1/EepromManager.cpp src/jaguar1/EepromManager.h
+        src/jaguar1/FirmwareManager.cpp src/jaguar1/FirmwareManager.h
+        src/jaguar1/Iqk8812a.cpp src/jaguar1/Iqk8812a.h
+        src/jaguar1/PhydmWatchdog.cpp src/jaguar1/PhydmWatchdog.h
+        src/jaguar1/PhyTableLoader.cpp src/jaguar1/PhyTableLoader.h
+        src/jaguar1/PowerTracking8812a.cpp src/jaguar1/PowerTracking8812a.h
+        src/jaguar1/FrameParser.cpp src/jaguar1/FrameParser.h
+        src/jaguar1/BbDbgportReader.cpp src/jaguar1/BbDbgportReader.h)
+    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR1=1)
+endif()
+
+if(DEVOURER_8814)
+    target_sources(WiFiDriver PRIVATE
+        hal/hal8814a_fw.c hal/hal8814a_fw.h
+        hal/Hal8814PwrSeq.c hal/Hal8814PwrSeq.h
+        hal/Hal8814PhyReg.h
+        hal/phydm/rtl8814a/Hal8814_PhyTables.c
+        hal/phydm/rtl8814a/Hal8814_PhyTables.h
+        src/jaguar1/Iqk8814a.cpp src/jaguar1/Iqk8814a.h)
+    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_8814=1)
+endif()
+
+if(DEVOURER_JAGUAR3)
+    # Shared Jaguar3 port (compiled when either variant is on). Phy8822cTables.cpp
+    # and Halrf8822c.cpp also carry the make_jaguar3_*() dispatchers, so they are
+    # always built when Jaguar3 is on; their per-variant bodies are #if-guarded.
+    target_sources(WiFiDriver PRIVATE
+        src/jaguar3/Jaguar3PhyTables.h
+        src/jaguar3/Jaguar3Calibration.h
+        src/jaguar3/ChipVariant.h
+        src/jaguar3/RtlJaguar3Device.cpp src/jaguar3/RtlJaguar3Device.h
+        src/jaguar3/HalJaguar3.cpp src/jaguar3/HalJaguar3.h
+        src/jaguar3/HalmacJaguar3Fw.cpp src/jaguar3/HalmacJaguar3Fw.h
+        src/jaguar3/HalmacJaguar3MacInit.cpp src/jaguar3/HalmacJaguar3MacInit.h
+        src/jaguar3/HalmacJaguar3Regs.h
+        src/jaguar3/RadioManagementJaguar3.cpp src/jaguar3/RadioManagementJaguar3.h
+        src/jaguar3/FrameParserJaguar3.h
+        src/jaguar3/PhyTableLoaderJaguar3.cpp src/jaguar3/PhyTableLoaderJaguar3.h
+        src/jaguar3/Phy8822cTables.cpp
+        src/jaguar3/Halrf8822c.cpp src/jaguar3/Halrf8822c.h)
+    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR3=1)
+endif()
+
+if(DEVOURER_JAGUAR3_8822C)
+    target_sources(WiFiDriver PRIVATE
+        hal/hal8822c_fw.c hal/hal8822c_fw.h
+        hal/phydm/rtl8822c/Hal8822c_PhyTables.c hal/phydm/rtl8822c/Hal8822c_PhyTables.h
+        hal/phydm/rtl8822c/Hal8822c_IqkNctl.c hal/phydm/rtl8822c/Hal8822c_IqkNctl.h)
+    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR3_8822C=1)
+endif()
+
+if(DEVOURER_JAGUAR3_8822E)
+    target_sources(WiFiDriver PRIVATE
+        hal/hal8822e_fw.c hal/hal8822e_fw.h
+        hal/phydm/rtl8822e/Hal8822e_PhyTables.c hal/phydm/rtl8822e/Hal8822e_PhyTables.h
+        src/jaguar3/Phy8822eTables.cpp
+        src/jaguar3/Halrf8822e.cpp src/jaguar3/Halrf8822e.h)
+    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR3_8822E=1)
+endif()
+
 
 add_executable(WiFiDriverDemo
     demo/main.cpp

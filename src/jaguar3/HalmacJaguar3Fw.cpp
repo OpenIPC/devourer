@@ -9,8 +9,12 @@
 
 #include "FrameParserJaguar3.h"
 #include "HalmacJaguar3Regs.h"
+#if defined(DEVOURER_HAVE_JAGUAR3_8822C)
 #include "hal8822c_fw.h" /* array_mp_8822c_fw_nic[] + _len */
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR3_8822E)
 #include "hal8822e_fw.h" /* array_mp_8822e_fw_nic[] + _len */
+#endif
 
 using namespace jaguar3::halmac;
 
@@ -35,9 +39,16 @@ HalmacJaguar3Fw::HalmacJaguar3Fw(RtlUsbAdapter device, Logger_t logger,
 bool HalmacJaguar3Fw::download_default_firmware() {
   /* The DLFW state machine is identical for 8822c/8822e (registers verified
    * byte-identical); only the firmware image differs. */
+#if defined(DEVOURER_HAVE_JAGUAR3_8822E)
   if (_variant == ChipVariant::C8822E)
     return download_firmware(array_mp_8822e_fw_nic, array_mp_8822e_fw_nic_len);
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR3_8822C)
   return download_firmware(array_mp_8822c_fw_nic, array_mp_8822c_fw_nic_len);
+#else
+  _logger->error("Jaguar3: no firmware image compiled for this chip variant");
+  return false;
+#endif
 }
 
 /* --- register helpers (HALMAC_REG_R/W*) --- */

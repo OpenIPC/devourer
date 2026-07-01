@@ -4,7 +4,9 @@
 #include <utility>
 
 #include "RateDefinitions.h" /* MGN_* rate enum */
+#if defined(DEVOURER_HAVE_JAGUAR3_8822E)
 #include "Hal8822e_PhyTables.h"    /* array_mp_8822e_phy_reg_pg */
+#endif
 
 extern "C" {
 #include "ieee80211_radiotap.h" /* MRateToHwRate */
@@ -151,6 +153,7 @@ void RadioManagementJaguar3::set_tx_power_ref(uint8_t idx, bool zero_diffs) {
  * CCK reference, not the OFDM/HT/VHT 0x3a00 diff table). Path-B addresses
  * (0xE20..) carry identical values to path A, so only the 0xC2x/0xC3x/0xC4x set
  * is needed to fill the (path-shared) 0x3a00 table. */
+#if defined(DEVOURER_HAVE_JAGUAR3_8822E)
 static bool pg_addr_to_rates(uint32_t addr, std::array<uint8_t, 4> &rates) {
   switch (addr) {
   case 0xC24: rates = {MGN_6M, MGN_9M, MGN_12M, MGN_18M}; return true;
@@ -183,10 +186,12 @@ static bool pg_addr_to_rates(uint32_t addr, std::array<uint8_t, 4> &rates) {
     return false; /* 0xC20 = CCK, or a path-B / unknown address */
   }
 }
+#endif /* DEVOURER_HAVE_JAGUAR3_8822E */
 
 void RadioManagementJaguar3::apply_power_by_rate_8822e(uint8_t channel,
                                                        uint8_t ref_a,
                                                        uint8_t ref_b) {
+#if defined(DEVOURER_HAVE_JAGUAR3_8822E)
   /* Port of the phy_reg_pg (power-by-rate) apply that devourer's table walk
    * skips. The 8822e TXAGC is ref + per-rate diff: the OFDM/HT/VHT reference
    * lives in 0x18e8 (A)/0x41e8 (B), and the signed per-rate diff table at
@@ -253,6 +258,11 @@ void RadioManagementJaguar3::apply_power_by_rate_8822e(uint8_t channel,
   _logger->info("Jaguar3: applied phy_reg_pg power-by-rate (band {}, {} rate "
                 "groups, ref A=0x{:02x} B=0x{:02x}, MCS7 anchor 0x{:02x})",
                 band, groups, ref_a, ref_b, anchor);
+#else
+  (void)channel;
+  (void)ref_a;
+  (void)ref_b;
+#endif
 }
 
 void RadioManagementJaguar3::set_bandwidth_dividers(ChannelWidth_t bwmode) {

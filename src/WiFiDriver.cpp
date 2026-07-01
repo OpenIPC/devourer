@@ -5,9 +5,13 @@
 
 #include <libusb.h>
 
-#include "jaguar1/RtlJaguarDevice.h"
 #include "RtlUsbAdapter.h"
+#if defined(DEVOURER_HAVE_JAGUAR1)
+#include "jaguar1/RtlJaguarDevice.h"
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR3)
 #include "jaguar3/RtlJaguar3Device.h"
+#endif
 
 namespace {
 
@@ -44,16 +48,47 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
 
   uint8_t chip_id = read_chip_id(dev_handle);
   if (chip_id == 0x13 || chip_id == 0x17) {
+#if defined(DEVOURER_HAVE_JAGUAR3)
+    /* Reject the variant whose support wasn't compiled in (0x13 = 8822C,
+     * 0x17 = 8822E) rather than construct a device whose PHY-table /
+     * calibration dispatchers were built out. */
+#if !defined(DEVOURER_HAVE_JAGUAR3_8822C)
+    if (chip_id == 0x13) {
+      _logger->error("RTL8822C (chip-id 0x13) support not compiled in "
+                     "(DEVOURER_JAGUAR3_8822C=OFF)");
+      return nullptr;
+    }
+#endif
+#if !defined(DEVOURER_HAVE_JAGUAR3_8822E)
+    if (chip_id == 0x17) {
+      _logger->error("RTL8822E (chip-id 0x17) support not compiled in "
+                     "(DEVOURER_JAGUAR3_8822E=OFF)");
+      return nullptr;
+    }
+#endif
     auto variant = chip_id == 0x17 ? jaguar3::ChipVariant::C8822E
                                    : jaguar3::ChipVariant::C8822C;
     _logger->info("Creating RtlJaguar3Device (PID 0x{:04x}, chip-id 0x{:02x})",
                   pid, chip_id);
     return std::make_unique<RtlJaguar3Device>(
         RtlUsbAdapter(dev_handle, _logger, ctx), _logger, variant);
+#else
+    _logger->error("Jaguar3 chip (chip-id 0x{:02x}) detected but Jaguar3 "
+                   "support not compiled in",
+                   chip_id);
+    return nullptr;
+#endif
   }
 
+#if defined(DEVOURER_HAVE_JAGUAR1)
   _logger->info("Creating RtlJaguarDevice (PID 0x{:04x}, chip-id 0x{:02x})", pid,
                 chip_id);
   return std::make_unique<RtlJaguarDevice>(RtlUsbAdapter(dev_handle, _logger),
                                            _logger);
+#else
+  _logger->error("Jaguar1 chip (PID 0x{:04x}, chip-id 0x{:02x}) detected but "
+                 "Jaguar1 support not compiled in",
+                 pid, chip_id);
+  return nullptr;
+#endif
 }

@@ -149,3 +149,67 @@ jobs:
       - name: Test
         working-directory: build
         run: ctest --output-on-failure
+
+  # Per-chip compile-time selection (CMakeLists DEVOURER_* options). The default
+  # matrix above already covers all-chips-ON; this job builds each stripped
+  # config so a missing #if guard (which only fails to link when a chip's
+  # sources are dropped) is caught, plus the two invalid configs that must
+  # fail configure with a FATAL_ERROR.
+  build-configs:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: jaguar1-only
+            flags: "-DDEVOURER_8814=OFF -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF"
+          - name: jaguar1+8814
+            flags: "-DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF"
+          - name: 8822c-only
+            flags: "-DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR3_8822E=OFF"
+          - name: 8822e-only
+            flags: "-DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR3_8822C=OFF"
+          - name: jaguar3-only
+            flags: "-DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependency libraries
+        run: sudo apt install libusb-1.0-0-dev
+
+      - name: Configure (${{ matrix.name }})
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.flags }} -S ${{ github.workspace }}
+
+      - name: Build (${{ matrix.name }})
+        run: cmake --build build
+
+      - name: Test (${{ matrix.name }})
+        working-directory: build
+        run: ctest --output-on-failure
+
+  # Invalid option combinations must fail at configure time, not silently
+  # produce a broken binary.
+  reject-bad-configs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependency libraries
+        run: sudo apt install libusb-1.0-0-dev
+
+      - name: Reject "no chip selected"
+        run: |
+          if cmake -B build-none -DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF \
+                -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF \
+                -S "${{ github.workspace }}" 2>err.log; then
+            echo "ERROR: configure should have failed (no chip selected)"; cat err.log; exit 1
+          fi
+          grep -q "No chip support selected" err.log
+
+      - name: Reject "8814 without jaguar1"
+        run: |
+          if cmake -B build-bad -DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=ON \
+                -S "${{ github.workspace }}" 2>err.log; then
+            echo "ERROR: configure should have failed (8814 without jaguar1)"; cat err.log; exit 1
+          fi
+          grep -q "requires DEVOURER_JAGUAR1" err.log

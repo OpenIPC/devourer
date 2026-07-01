@@ -52,8 +52,12 @@ RadioManagementModule::RadioManagementModule(
     Logger_t logger)
     : _device{device}, _eepromManager{eepromManager}, _logger{logger},
       _pwrTrk{device, eepromManager, this, logger},
-      _iqk{device, eepromManager, this, logger},
-      _iqk8814{device, eepromManager, this, logger} {}
+      _iqk{device, eepromManager, this, logger}
+#if defined(DEVOURER_HAVE_8814)
+      ,
+      _iqk8814{device, eepromManager, this, logger}
+#endif
+{}
 
 void RadioManagementModule::RunIQK() {
   _iqk.Calibrate(_currentChannel, current_band_type, /*is_recovery=*/false);
@@ -531,10 +535,13 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     if (_eepromManager->version_id.ICType == CHIP_8812) {
       _iqk.Calibrate(_currentChannel, current_band_type,
                      /*is_recovery=*/false);
-    } else if (_eepromManager->version_id.ICType == CHIP_8814A) {
+    }
+#if defined(DEVOURER_HAVE_8814)
+    else if (_eepromManager->version_id.ICType == CHIP_8814A) {
       _iqk8814.Calibrate(_currentChannel, current_band_type,
                          /*is_recovery=*/false);
     }
+#endif
   }
   _needIQK = false;
   timer.stage("iqk");

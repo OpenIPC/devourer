@@ -10,8 +10,10 @@
 
 #include <libusb.h>
 
-#include "jaguar1/FrameParser.h"
+#include "RxPacket.h"
+#if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
+#endif
 #include "RtlUsbAdapter.h"
 #include "SignalStop.h"
 #include "WiFiDriver.h"
@@ -39,7 +41,9 @@ static constexpr uint16_t kRealtekProductIds[] = {
 };
 
 static int g_rx_count = 0;
+#if defined(DEVOURER_HAVE_JAGUAR1)
 static RtlJaguarDevice *g_rtl_device = nullptr;
+#endif
 
 /* Process-start reference for the init-timing lines (see src/InitTimer.h).
  * `init-timing: demo.first_rx_frame` is the end-to-end "ready to RX" mark:
@@ -202,7 +206,9 @@ static void packetProcessor(const Packet &packet) {
                hits, g_rx_count, packet.Data.size());
         fflush(stdout);
       }
-      /* F2: BB-dbgport sweep on the first kCsiMaxFrames canonical-SA frames. */
+#if defined(DEVOURER_HAVE_JAGUAR1)
+      /* F2: BB-dbgport sweep on the first kCsiMaxFrames canonical-SA frames.
+       * Jaguar1-only (RtlJaguarDevice); g_rtl_device is null on Jaguar3. */
       if (!g_csi_selectors.empty() && g_rtl_device != nullptr &&
           hits <= kCsiMaxFrames && !g_rtl_device->bb_dbgport_wedged()) {
         for (uint32_t sel : g_csi_selectors) {
@@ -219,6 +225,7 @@ static void packetProcessor(const Packet &packet) {
         }
         fflush(stdout);
       }
+#endif
       /* DEVOURER_DUMP_SCRAMBLER=1: print the descrambler seed the chip
        * recovered from this frame's SERVICE field. Consumed by
        * tools/precoder/seed_probe.py --mode rx to learn the seed a precoder TX
@@ -409,10 +416,18 @@ int main() {
 
   WiFiDriver wifi_driver(logger);
   auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle, ctx);
+  if (!rtlDevice) {
+    /* The factory returns null when the plugged chip's generation wasn't
+     * compiled in (per-chip CMake options); it already logged which. */
+    logger->error("No driver for this chip in this build — exiting");
+    return 1;
+  }
   logger->info("init-timing: demo.create_device = {} ms", ms_since_start());
-  /* The BB-debug-port / queue-depth research helpers are Jaguar1-only, so they
-   * live on RtlJaguarDevice rather than the IRtlDevice interface. dynamic_cast
-   * yields nullptr for a Jaguar3 device, which disables those helpers cleanly. */
+  /* The BB-debug-port / queue-depth / thermal research helpers are Jaguar1-only,
+   * so they live on RtlJaguarDevice rather than the IRtlDevice interface. The
+   * whole block compiles out when Jaguar1 support isn't built; when it is, the
+   * dynamic_cast yields nullptr for a Jaguar3 device, disabling them cleanly. */
+#if defined(DEVOURER_HAVE_JAGUAR1)
   g_rtl_device = dynamic_cast<RtlJaguarDevice *>(rtlDevice.get());
   std::atomic<bool> qd_emitter_stop{false};
   std::thread qd_emitter;
@@ -468,6 +483,7 @@ int main() {
       }
     });
   }
+#endif /* DEVOURER_HAVE_JAGUAR1 */
   /* Default channel 36 (5 GHz) for the 8812 reference. Override with
    * DEVOURER_CHANNEL=N env var (e.g. DEVOURER_CHANNEL=6 for busy 2.4 GHz). */
   int channel = 36;

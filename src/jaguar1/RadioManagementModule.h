@@ -6,7 +6,9 @@
 
 #include "EepromManager.h"
 #include "Iqk8812a.h"
+#if defined(DEVOURER_HAVE_8814)
 #include "Iqk8814a.h"
+#endif
 #include "PowerTracking8812a.h"
 #include "RfPath.h"
 #include "RtlUsbAdapter.h"
@@ -125,7 +127,9 @@ class RadioManagementModule {
   int txpwr_override_ = -1;
   PowerTracking8812a _pwrTrk;
   Iqk8812a _iqk;
+#if defined(DEVOURER_HAVE_8814)
   Iqk8814a _iqk8814;
+#endif
 
 public:
   RadioManagementModule(RtlUsbAdapter device,

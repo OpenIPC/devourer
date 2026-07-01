@@ -20,8 +20,8 @@ Devourer targets **RTL8812AU**, **RTL8811AU**, **RTL8814AU**, and
 **RTL8821AU** — all members of Realtek's first-generation 802.11ac
 silicon family, internally codenamed **"Jaguar"**. The HAL,
 register-table layout, firmware-download plumbing, and
-`SET_TX_DESC_*_8812` macros in `src/FrameParser.h` are shared across the
-family; chip-specific EEPROM handling, firmware blobs, and RF tables are
+`SET_TX_DESC_*_8812` macros in `src/jaguar1/FrameParser.h` are shared across
+the family; chip-specific EEPROM handling, firmware blobs, and RF tables are
 layered on top.
 
 It also targets the second-generation **Jaguar3** parts through a
@@ -108,6 +108,29 @@ root.
   fd passed as `argv[1]` (the Termux-on-Android pattern using
   `libusb_wrap_sys_device`). Forks RX into a child, TX-loops a hardcoded
   beacon in the parent.
+
+### Selecting which chips to build
+
+All chips are compiled in by default. Turn off the ones you don't need to
+drop their firmware blobs and generated PHY tables and shrink the binary —
+an 8812AU-only `WiFiDriverDemo` is ~1.0 MB versus ~2.6 MB with everything on.
+
+| CMake option | default | chips |
+|---|---|---|
+| `DEVOURER_JAGUAR1` | ON | RTL8812AU / 8811AU / 8821AU |
+| `DEVOURER_8814` | ON | RTL8814AU (requires `DEVOURER_JAGUAR1`) |
+| `DEVOURER_JAGUAR3_8822C` | ON | RTL8812CU / 8822CU |
+| `DEVOURER_JAGUAR3_8822E` | ON | RTL8812EU / 8822EU |
+
+```sh
+# 8812AU/8811AU/8821AU only
+cmake -S . -B build -DDEVOURER_8814=OFF \
+      -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF
+```
+
+Configure fails if no chip is selected, or if `DEVOURER_8814` is on without
+`DEVOURER_JAGUAR1`. A chip whose support isn't built is rejected at runtime
+(the factory returns `nullptr` and logs which).
 
 ### Demo env vars
 
@@ -233,8 +256,17 @@ hal/      Vendor headers and tables ported from Realtek's tree
           Hal8812a_TxPwrTrack.[h,cpp]        (phydm thermal-meter delta-swing tables)
           hal8822c_fw.[ch], phydm/rtl8822c/  (Jaguar3 firmware blob + BB/AGC/RF tables)
 src/      Driver implementation
-          WiFiDriver             thin factory (dispatches Jaguar1 vs Jaguar3 by PID)
+          Generation-agnostic core (always compiled):
+          WiFiDriver             thin factory (dispatches Jaguar1 vs Jaguar3 by chip-id)
           IRtlDevice             chip-family-agnostic device interface
+          RtlUsbAdapter          libusb wrapper (vendor + bulk transfers)
+          Radiotap.c             radiotap header iterator
+          RateDefinitions.h      MGN_* rate enum (shared by both generations)
+          RxPacket.h             RX packet / descriptor types (shared)
+          TxDescBits.h           little-endian TX-descriptor bit-field macros (shared)
+          TxMode                 runtime TX-mode parsing
+
+          jaguar1/               Jaguar1 (8812/8811/8821/8814) HAL
           RtlJaguarDevice        Jaguar1 orchestrator (RX + TX entry points)
           HalModule              chip bring-up / power sequencing
           RadioManagementModule  channel, bandwidth, TX power, up to 4 RF paths
@@ -242,18 +274,19 @@ src/      Driver implementation
           FirmwareManager        chip-specific firmware download
           PhyTableLoader         applies chip-cut-conditional BB/AGC tables
           PowerTracking8812a     phydm thermal-meter TX BB-swing compensation
-          Iqk8812a               phydm I/Q calibration for 8812 / 8821
-          Iqk8814a               phydm I/Q calibration for 8814 (4-path)
+          Iqk8812a / Iqk8814a    phydm I/Q calibration (8812/8821; 8814 4-path)
           PhydmWatchdog          opt-in periodic DM thread (FA stats + DIG)
-          RtlUsbAdapter          libusb wrapper (vendor + bulk transfers)
           FrameParser            RX parsing, TX descriptor layout
-          Radiotap.c             radiotap header iterator
-          jaguar3/               Jaguar3 (rtl8822c) HAL — RtlJaguar3Device, Hal8822c,
+
+          jaguar3/               Jaguar3 (rtl8822c / rtl8822e) HAL — RtlJaguar3Device,
                                  HalMAC firmware download, halrf calibration, 5/10 MHz
-                                 narrowband, 8822C TX/RX descriptors
+                                 narrowband, per-generation PHY/RF tables + TX/RX descriptors
 demo/     RX example
 txdemo/   TX example (Android / Termux pattern)
 ```
+
+Each chip generation can be compiled out to shrink the binary — see
+**Selecting which chips to build** below.
 
 ## License
 

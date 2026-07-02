@@ -1,13 +1,14 @@
 # Beamforming self-sounding — per-subcarrier CSI from two adapters
 
-![per-subcarrier SNR waterfall](img/bf_waterfall.svg)
+![per-subcarrier SNR waterfall](img/bf_waterfall.gif)
 
 *Live per-subcarrier SNR waterfall from an 8822CU MU self-sounding session
-(`tests/bf_waterfall.sh` → `tools/bf_waterfall.py`): frequency across, time
-down, colour = the per-tone SNR and the modulation a rate-adaptive link would
-pick on each subcarrier. The frequency-selective tilt is real measured channel —
-16-QAM on the stronger low-frequency tones, QPSK on the weaker high-frequency
-ones.*
+(`tests/bf_waterfall.sh` → `tools/bf_waterfall.py`; the animation is
+`tools/bf_waterfall_gif.py` over a real capture): frequency across, time
+scrolling down, colour = the per-tone SNR and the modulation a rate-adaptive
+link would pick on each subcarrier. The frequency-selective tilt is real
+measured channel — 16-QAM on the stronger low-frequency tones, QPSK on the
+weaker high-frequency ones.*
 
 802.11ac beamforming sounding leaks per-subcarrier channel state: a beamformee
 estimates the channel matrix H(k) per subcarrier from a sounding NDP, compresses

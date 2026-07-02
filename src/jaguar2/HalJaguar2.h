@@ -77,6 +77,11 @@ public:
    * gnt_wl=1/gnt_bt=0, antenna mux to WL. Must run before enable_rx. */
   void coex_wlan_only();
 
+  /* Force a flat per-rate TXAGC power index (0..63) on both paths — a debug /
+   * SDR-visibility knob (DEVOURER_TX_PWR). 8822B TXAGC is 4 rates packed per
+   * dword at 0x1d00 (path A) / 0x1d80 (path B). */
+  void set_tx_power_flat(uint8_t idx);
+
   /* One DIG (dynamic initial gain) iteration: read the per-window false-alarm
    * count (OFDM 0xf48 + CCK 0xa5c), reset the counters, and nudge IGI
    * (0xc50/0xe50) up when FA is high or down when FA is low, bounded

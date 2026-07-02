@@ -61,6 +61,11 @@ private:
   std::thread _dig_thread;
   std::atomic<bool> _dig_stop{false};
   void stop_dig();
+
+  /* Shared cold bring-up (power-on -> DLFW -> MAC/BB/RF -> channel -> LCK ->
+   * IQK -> coex -> enable RX/TX engine). Used by both Init (RX) and InitWrite
+   * (TX). Leaves the chip fully calibrated on `channel`. */
+  void bring_up(SelectedChannel channel);
 };
 
 #endif /* RTL_JAGUAR2_DEVICE_H */

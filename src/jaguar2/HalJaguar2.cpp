@@ -452,12 +452,22 @@ void HalJaguar2::config_trx_mode() {
   if (_ver.rf_2t2r)
     _device.phy_set_bb_reg(0x0e08, 0x0000ffff, 0x3231);
 
-  /* --- phydm_config_tx_path_8822b (antenna-path HW-block enable; the CCK/OFDM
-   * TX-logic-map sub-config is deferred to the TX milestone) --- */
+  /* --- phydm_config_tx_path_8822b (antenna-path HW-block enable + TX logic
+   * map). tx_path = AB (2T2R) or A (1T1R); tx_path_sel_1ss = A. --- */
   _device.phy_set_bb_reg(0x093c, (1u << 19) | (1u << 18), 0x3);
   _device.phy_set_bb_reg(0x080c, (1u << 29) | (1u << 28), 0x1);
-  _device.phy_set_bb_reg(0x080c, (1u << 30), 0x1);
+  _device.phy_set_bb_reg(0x080c, (1u << 30), 0x1); /* CCK TX path via 0xa07[7] */
   _device.phy_set_bb_reg(0x080c, 0xff, (path << 4) | path);
+  /* CCK TX path (phydm_config_cck_tx_path_8822b): AB->0xc, A->0x8. */
+  _device.phy_set_bb_reg(0x0a04, 0xf0000000, _ver.rf_2t2r ? 0xc : 0x8);
+  /* OFDM TX path (phydm_config_ofdm_tx_path_8822b, 1ss=A). */
+  _device.phy_set_bb_reg(0x093c, 0xfff00000, 0x001);
+  if (_ver.rf_2t2r) {
+    _device.phy_set_bb_reg(0x0940, 0xfff0, 0x043);
+  } else {
+    _device.phy_set_bb_reg(0x0940, 0xf0, 0x1);
+    _device.phy_set_bb_reg(0x0940, 0xff00, 0x0);
+  }
 
   /* --- phydm_config_rx_path_8822b(AB) --- */
   _device.phy_set_bb_reg(0x0a2c, (1u << 22), 0x0); /* disable MRC CCK CCA */
@@ -541,6 +551,16 @@ void HalJaguar2::coex_wlan_only() {
   _device.phy_set_bb_reg(0x1704, 0xffffffff, 0x7700);     /* gnt_wl=1 gnt_bt=0 */
   _device.phy_set_bb_reg(0x1700, 0xffffffff, 0xc00f0038);
   _logger->info("Jaguar2: coex WL-only antenna grant applied");
+}
+
+void HalJaguar2::set_tx_power_flat(uint8_t idx) {
+  idx &= 0x3f;
+  const uint32_t v = static_cast<uint32_t>(idx) * 0x01010101u;
+  for (uint16_t off = 0; off <= 0x54; off += 4) {
+    _device.rtw_write32(static_cast<uint16_t>(0x1d00 + off), v); /* path A */
+    _device.rtw_write32(static_cast<uint16_t>(0x1d80 + off), v); /* path B */
+  }
+  _logger->info("Jaguar2: TXAGC flat index 0x{:02x} applied", idx);
 }
 
 void HalJaguar2::dig_step() {

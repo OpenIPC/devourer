@@ -1,5 +1,14 @@
 # Beamforming self-sounding — per-subcarrier CSI from two adapters
 
+![per-subcarrier SNR waterfall](img/bf_waterfall.svg)
+
+*Live per-subcarrier SNR waterfall from an 8822CU MU self-sounding session
+(`tests/bf_waterfall.sh` → `tools/bf_waterfall.py`): frequency across, time
+down, colour = the per-tone SNR and the modulation a rate-adaptive link would
+pick on each subcarrier. The frequency-selective tilt is real measured channel —
+16-QAM on the stronger low-frequency tones, QPSK on the weaker high-frequency
+ones.*
+
 802.11ac beamforming sounding leaks per-subcarrier channel state: a beamformee
 estimates the channel matrix H(k) per subcarrier from a sounding NDP, compresses
 the steering matrix V(k) into Givens angles, and **transmits it back over the
@@ -107,9 +116,12 @@ Group ID Management handshake is needed (recipe from `hal_txbf_8822b_enter()`).
 The MU report is longer (e.g. 153 vs 99 bytes for a 20 MHz 2×1). After the
 V-angle field, Realtek packs the SNR as 8-bit values in pairs; **series A** (the
 even bytes) is the per-tone SNR that swings with the channel. `bf_report_decode`
-extracts it, maps it to dB (`22 + 0.25·int8`) and to a modulation per tone
-(256-QAM ≥ 45 dB … QPSK ≥ 21 dB), trimming devourer's trailing chip-FCS/RX
-bytes at the point the smooth SNR series collapses. `--operating-snr N`
-re-centres the *measured* per-tone shape to a stated link budget, which turns
-the real frequency-selective structure into the textbook per-tone QAM ladder
-even when the bench link itself is uniformly strong.
+extracts it, maps it to dB (**unsigned**, `-10 + 0.25·v` — the per-tone values
+cross 128, so a signed reading would wrap the *stronger* tones to negative) and
+to a modulation per tone (256-QAM ≥ 30 dB … QPSK ≥ 11 dB), trimming devourer's
+trailing chip-FCS/RX bytes at the point the smooth SNR series collapses. A
+measured bench capture gives a realistic ~13–21 dB per-tone SNR with an ~8 dB
+frequency-selective swing — 16-QAM on the stronger tones, QPSK on the weaker.
+`--operating-snr N` optionally re-centres the measured shape to a stated link
+budget. `tools/bf_waterfall.py` renders the same per-tone SNR live as a
+scrolling truecolor spectrogram (see the waterfall above).

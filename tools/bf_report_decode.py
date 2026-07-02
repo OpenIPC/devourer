@@ -127,19 +127,21 @@ def parse_mu_snr(frame, ns, vbytes):
 
 
 def u8_snr_db(v):
-    """8-bit SNR field -> dB, same mapping as the avg-SNR field (22 + 0.25*int8,
-    range -10..53.75)."""
-    return 22.0 + 0.25 * (v if v < 128 else v - 256)
+    """Per-tone MU SNR byte -> dB. UNSIGNED: dB = -10 + 0.25*v (range
+    -10..53.75). The per-tone values cross 128 (e.g. 131 > 122 = a stronger
+    tone), so a signed int8 reading would wrap the strong tones to negative —
+    they are unsigned, monotonic over the full 0..255."""
+    return -10.0 + 0.25 * v
 
 
 def snr_to_qam(db):
-    """Textbook per-tone SNR -> modulation. Thresholds are illustrative
-    (uncoded ~1e-3 BER ballpark)."""
-    if db >= 45: return "256-QAM", "#"
-    if db >= 37: return "64-QAM ", "%"
-    if db >= 29: return "16-QAM ", "+"
-    if db >= 21: return "QPSK   ", ":"
-    if db >= 15: return "BPSK   ", "."
+    """Per-tone SNR -> modulation. Thresholds are the ~1e-3 uncoded-BER
+    ballpark for each constellation."""
+    if db >= 30: return "256-QAM", "#"
+    if db >= 24: return "64-QAM ", "%"
+    if db >= 18: return "16-QAM ", "+"
+    if db >= 11: return "QPSK   ", ":"
+    if db >= 6:  return "BPSK   ", "."
     return "unused ", " "
 
 

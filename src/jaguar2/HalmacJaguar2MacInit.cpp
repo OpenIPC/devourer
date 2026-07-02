@@ -496,19 +496,21 @@ void HalmacJaguar2MacInit::init_usb_cfg() {
   _device.rtw_write16(REG_TXDMA_OFFSET_CHK,
                       _device.rtw_read16(REG_TXDMA_OFFSET_CHK) | (1u << 9));
 
-  /* cfg_usb_rx_agg_88xx (USB mode): 0x0280 size|timeout, 0x010C[2] agg-en,
-   * 0x0283 USB-mode, clear 0x0280 BIT_EN_PRE_CALC. */
+  /* cfg_usb_rx_agg_88xx (USB mode), verbatim: enable BIT_RXDMA_AGG_EN (0x010C[2]),
+   * clear the USB-mode bit (0x0283[7]), clear EN_PRE_CALC (0x0280 BIT29), and set
+   * the agg page-threshold/timeout (SS: size 5 / timeout 0xA). */
   constexpr uint16_t kRxdmaAggPgTh = 0x0280;
   uint8_t dma_usb_agg = _device.rtw_read8(kRxdmaAggPgTh + 3);
   uint8_t agg_enable = _device.rtw_read8(REG_TXDMA_PQ_MAP);
-  agg_enable |= (1u << 2);   /* BIT_RXDMA_AGG_EN */
-  dma_usb_agg &= ~(1u << 7); /* HALMAC_RX_AGG_MODE_USB */
+  agg_enable |= (1u << 2);
+  dma_usb_agg &= ~(1u << 7);
   uint32_t v32 = _device.rtw_read32(kRxdmaAggPgTh);
   _device.rtw_write32(kRxdmaAggPgTh, v32 & ~(1u << 29));
   _device.rtw_write8(REG_TXDMA_PQ_MAP, agg_enable);
   _device.rtw_write8(kRxdmaAggPgTh + 3, dma_usb_agg);
+  const uint8_t ss = (_device.rtw_read8(REG_SYS_CFG2 + 3) == 0x20);
   _device.rtw_write16(kRxdmaAggPgTh,
-                      static_cast<uint16_t>(0x01 << 8)); /* kernel: thr=0 timeout=1 fast flush */
+                      static_cast<uint16_t>(0x05 | ((ss ? 0x0A : 0x20) << 8)));
   _logger->info("Jaguar2: init_usb_cfg (RXDMA_MODE=0x{:02x}, RX-agg EN)", v);
 }
 

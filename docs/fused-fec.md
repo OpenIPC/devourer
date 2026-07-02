@@ -71,6 +71,19 @@ hard-decision Viterbi lands in the second; a soft-decision path
 decoder — not at the outer code; see
 [Soft information](#soft-information-inner-decoder-vs-outer-code).
 
+**Spatial diversity feeds the same precondition.** What pushes a frame from the
+localized regime into the frame-wide regime is a *deep fade* — the SNR dropping
+far enough that the whole frame smears. A multi-chain receiver
+(`docs/measuring-spatial-diversity.md`) attacks exactly that: combining
+decorrelated antennas cuts the SNR *variance*, which is what deep fades are, so it
+moves frames out of the frame-wide (lost) bin and into the localized
+(SBI-salvageable) one. It improves SBI's precondition rather than just delivering
+more. And because the variance only shrinks when the antennas decorrelate — the
+measured static-vs-motion result — this is a mobility effect, largest exactly
+where a long-range link spends its time. `spatial_sbi_sim.py` quantifies it: at a
+static, correlated position the frame-wide-loss bin barely moves, while under
+motion it collapses and the salvageable fraction of corrupt frames rises sharply.
+
 ## Outer codes
 
 `tools/precoder/stream_fec.py` is a thin dispatcher selecting one of three outer
@@ -196,6 +209,7 @@ for both receivers. Only the receiver — and thus the inner decode — differs:
 | `stream_fec.py` | dispatcher (adds the `rs` scheme + `FEC_MAGIC_RS`) |
 | `svc_uep_fec.py` | per-SVC-layer FEC-rate UEP (HEVC NAL → layer → RS config) |
 | `svc_spatial_uep_sim.py` | per-SVC-layer spatial UEP — the 3-axis staircase (MCS + FEC + STBC), quantifying the spatial knob's survival-SNR contribution |
+| `spatial_sbi_sim.py` | spatial diversity keeps corruption localized — how combining (by fade correlation ρ) moves frames out of the frame-wide-loss bin into the SBI-salvageable one |
 | `fused_fec_link.py` | chip-path `FusedFecSender` / `FusedFecReceiver` (baseline-vs-SBI) |
 | `fused_fec_tx.py` / `fused_fec_rx.py` | chip-path CLIs (bytes ↔ `StreamTxDemo` / `<devourer-stream>`) |
 | `fec_fusion_sim.py` | offline simulation: quantify SBI gain, size sub-blocks, no hardware |

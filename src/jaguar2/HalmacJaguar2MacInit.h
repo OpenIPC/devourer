@@ -46,9 +46,22 @@ public:
    * rsvd-page restore). Valid after init_trx_cfg(). */
   uint16_t rsvd_boundary() const { return _rsvd_boundary; }
 
+  /* Post-DLFW MAC configuration (halmac init_mac_cfg_88xx flow):
+   * init_trx_cfg -> init_protocol_cfg -> init_edca_cfg -> init_wmac_cfg, using
+   * the 8822B-specific bodies (halmac_init_8822b.c). Runs after the firmware
+   * boots. */
+  bool init_mac_cfg(ChannelWidth_t bw);
+
+  /* USB RX-DMA mode + RX aggregation (init_usb_cfg_88xx) so received frames are
+   * delivered to the bulk-IN endpoint. */
+  void init_usb_cfg();
+
 private:
   bool priority_queue_cfg();
   void init_h2c();
+  void init_protocol_cfg();
+  void init_edca_cfg();
+  void init_wmac_cfg();
 
   RtlUsbAdapter _device;
   Logger_t _logger;

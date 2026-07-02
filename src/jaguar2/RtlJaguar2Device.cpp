@@ -37,8 +37,17 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   if (!_fw.download_default_firmware())
     throw std::runtime_error("RtlJaguar2Device: firmware DLFW failed");
   _logger->info("RtlJaguar2Device: firmware booted (bw={})", (int)bw);
+
+  /* M4: post-DLFW MAC config + USB RX-DMA + BB/RF enable (HalMAC
+   * _halmac_init_hal order: init_mac_flow -> init_mac_register -> EN_BB_RF). */
+  if (!_macinit.init_mac_cfg(channel.ChannelWidth))
+    throw std::runtime_error("RtlJaguar2Device: init_mac_cfg failed");
+  _macinit.init_usb_cfg();
+  _macinit.enable_bb_rf(true);
+  _logger->info("RtlJaguar2Device: MAC cfg + BB/RF enabled");
+
   throw std::runtime_error(
-      "RtlJaguar2Device: power-on + DLFW OK; RX bring-up not yet implemented "
+      "RtlJaguar2Device: MAC/USB/BB-RF up; PHY tables + RX not yet implemented "
       "(RTL8822BU port at M4)");
 }
 

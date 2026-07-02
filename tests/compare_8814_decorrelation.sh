@@ -27,7 +27,7 @@ METRIC="${METRIC:-rssi}"
 OUTDIR="$(mktemp -d -t devourer-8814cmp.XXXXXX)"
 
 cleanup() {
-    for comm in WiFiDriverDemo WiFiDriverTxDemo; do
+    for comm in WiFiDriverDemo WiFiDriverTxDem; do
         pkill -x "$comm" 2>/dev/null || true
     done
     rm -f "${TXLOG:-}" 2>/dev/null || true

@@ -145,6 +145,15 @@ bool parse_uint(const std::string& s, size_t pos, unsigned* out) {
 /* Parse the rate mnemonic (first '/'-token) into cfg. Returns false if the
  * token is not a recognised rate. */
 bool parse_rate_token(const std::string& s, TxMode* cfg) {
+  /* CCK (2.4GHz only — the chip drops CCK at 5GHz, see RtlJaguarDevice). The
+   * 500kbps count doubles as the MGN_* byte here too: 1M=2=MGN_1M, 2M=4=MGN_2M,
+   * 5.5M=11=MGN_5_5M, 11M=22=MGN_11M. 1M CCK is the most robust rate (~9dB more
+   * link budget than 6M OFDM) for a long-range beacon. */
+  if (s == "1M")   { cfg->legacy_rate_500kbps = 2;  return true; }
+  if (s == "2M")   { cfg->legacy_rate_500kbps = 4;  return true; }
+  if (s == "5.5M" || s == "5_5M") { cfg->legacy_rate_500kbps = 11; return true; }
+  if (s == "11M")  { cfg->legacy_rate_500kbps = 22; return true; }
+
   if (s == "6M")  { cfg->legacy_rate_500kbps = 12;  return true; }
   if (s == "9M")  { cfg->legacy_rate_500kbps = 18;  return true; }
   if (s == "12M") { cfg->legacy_rate_500kbps = 24;  return true; }

@@ -426,6 +426,53 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
                 (int)bw, rf18);
 }
 
+void HalJaguar2::config_trx_mode() {
+  const uint8_t path = _ver.rf_2t2r ? 0x3 : 0x1; /* BB_PATH_AB or A */
+
+  /* RF mode table (3-wire state per path: 0 shutdown/1 standby/2 TX/3 RX). */
+  _device.phy_set_bb_reg(0x0c08, 0x0000ffff, 0x3231);
+  if (_ver.rf_2t2r)
+    _device.phy_set_bb_reg(0x0e08, 0x0000ffff, 0x3231);
+
+  /* --- phydm_config_tx_path_8822b (antenna-path HW-block enable; the CCK/OFDM
+   * TX-logic-map sub-config is deferred to the TX milestone) --- */
+  _device.phy_set_bb_reg(0x093c, (1u << 19) | (1u << 18), 0x3);
+  _device.phy_set_bb_reg(0x080c, (1u << 29) | (1u << 28), 0x1);
+  _device.phy_set_bb_reg(0x080c, (1u << 30), 0x1);
+  _device.phy_set_bb_reg(0x080c, 0xff, (path << 4) | path);
+
+  /* --- phydm_config_rx_path_8822b(AB) --- */
+  _device.phy_set_bb_reg(0x0a2c, (1u << 22), 0x0); /* disable MRC CCK CCA */
+  _device.phy_set_bb_reg(0x0a2c, (1u << 18), 0x0); /* disable MRC CCK barker */
+  _device.phy_set_bb_reg(0x0a04, 0x0f000000, 0x0); /* CCK RX path A first */
+  _device.phy_set_bb_reg(0x0808, 0xff, (path << 4) | path); /* RX path enable */
+  if (_ver.rf_2t2r) {
+    _device.phy_set_bb_reg(0x1904, (1u << 16), 0x1); /* antenna weighting */
+    _device.phy_set_bb_reg(0x0800, (1u << 28), 0x1); /* htstf ant-wgt */
+    _device.phy_set_bb_reg(0x0850, (1u << 23), 0x1); /* MRC modified-ZF */
+  } else {
+    _device.phy_set_bb_reg(0x1904, (1u << 16), 0x0);
+    _device.phy_set_bb_reg(0x0800, (1u << 28), 0x0);
+    _device.phy_set_bb_reg(0x0850, (1u << 23), 0x0);
+  }
+
+  /* RF mode-table sync: poll RF_A 0x33 until it reads back 0x1. */
+  for (int i = 0; i < 100; i++) {
+    rf_write(0, 0xef, 0x80000);
+    rf_write(0, 0x33, 0x00001);
+    std::this_thread::sleep_for(std::chrono::microseconds(2));
+    if ((rf_read(0, 0x33) & 0xfffff) == 0x00001)
+      break;
+  }
+  /* Normal mode (no path-B-only TRX): 0xef/0x33/0x3e/0x3f then 0xef=0. */
+  rf_write(0, 0xef, 0x80000);
+  rf_write(0, 0x33, 0x00001);
+  rf_write(0, 0x3e, 0x00034);
+  rf_write(0, 0x3f, 0x4080c);
+  rf_write(0, 0xef, 0x00000);
+  _logger->info("Jaguar2: trx_mode configured (path=0x{:x})", path);
+}
+
 void HalJaguar2::enable_rx() {
   /* CR (0x100) full MAC enable: TRX-DMA | PROTOCOL | SCHEDULE | MACTX | MACRX
    * (+ENSWBCN), matching the jaguar3 RX-enable value 0x06FF. init_mac_cfg only

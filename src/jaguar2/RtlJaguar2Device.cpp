@@ -57,6 +57,10 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   _hal.apply_bb_rf_agc_tables(rfe);
   _logger->info("RtlJaguar2Device: PHY tables applied");
 
+  /* TRX antenna-path / RF-mode-table setup (config_phydm_trx_mode_8822b) — puts
+   * the RF paths into TRX mode so the front-end can receive. */
+  _hal.config_trx_mode();
+
   /* Channel + bandwidth (RF18 tune, RFE pins, RX-path/IGI), then enable the
    * MAC RX engine. */
   _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel), bw, rfe);

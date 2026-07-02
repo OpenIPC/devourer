@@ -58,6 +58,13 @@ public:
   /* Enable the MAC RX engine (CR MACRXEN + promiscuous RCR for monitor). */
   void enable_rx();
 
+  /* config_phydm_trx_mode_8822b: RF mode table (0xc08/0xe08 = 0x3231), TX/RX
+   * antenna-path HW-block enable, RX-path config, and the RF 0xef/0x33/0x3e/
+   * 0x3f mode-table sync. Puts the RF paths into TRX mode — without it the RF
+   * never enters RX and the chip delivers no frames. Called before the channel
+   * set. 2T2R -> tx=rx=AB (0x3). */
+  void config_trx_mode();
+
 private:
   /* config_phydm_parameter_init_8822b: OFDM/CCK block enable via 0x808[29:28]
    * (post=0x3) / disable (pre=0x0). */

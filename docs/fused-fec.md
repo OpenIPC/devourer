@@ -106,6 +106,20 @@ Verified graceful-degradation staircase at 30 % loss: blocks decoded
 critical 17 / T0 16 / T1 12 / T2 7 (of 20). Together with `svc_tx.h`'s MCS
 ladder, base/IDR layers get the most robust MCS **and** the heaviest FEC.
 
+### The third axis: per-layer spatial diversity
+
+Protection runs on a *third* knob as well. `svc_tx.h`'s ladder already flies the
+critical and base layers with **STBC** (its default is `MCS0/LDPC/STBC` and
+`MCS1/LDPC/STBC`) and leaves the enhancement layers single-stream — so the same
+layers that get the robust MCS and the heavy FEC also get transmit diversity.
+Measuring what STBC buys (a ~2–3 dB coding gain plus diversity that widens under
+motion) makes this a real axis, not a flag: a critical layer flown at a robust
+MCS, with heavy FEC, *and* STBC survives several dB deeper into a fade than any
+one axis alone, while the enhancement layers — cheap on all three — shed first.
+`space_freq_diversity_sim.py`'s spatial factor and `svc_spatial_uep_sim.py`
+quantify the staircase: the spatial knob extends the critical/base layers'
+survival SNR by the STBC coding gain, stacked on the MCS and FEC knobs.
+
 ## Frequency diversity (a complementary erasure source)
 
 The outer erasure code recovers symbols that don't arrive, whatever the cause —
@@ -181,6 +195,7 @@ for both receivers. Only the receiver — and thus the inner decode — differs:
 | `stream_fec_rs.py` | Reed-Solomon outer scheme (GF(2⁸), systematic Vandermonde) |
 | `stream_fec.py` | dispatcher (adds the `rs` scheme + `FEC_MAGIC_RS`) |
 | `svc_uep_fec.py` | per-SVC-layer FEC-rate UEP (HEVC NAL → layer → RS config) |
+| `svc_spatial_uep_sim.py` | per-SVC-layer spatial UEP — the 3-axis staircase (MCS + FEC + STBC), quantifying the spatial knob's survival-SNR contribution |
 | `fused_fec_link.py` | chip-path `FusedFecSender` / `FusedFecReceiver` (baseline-vs-SBI) |
 | `fused_fec_tx.py` / `fused_fec_rx.py` | chip-path CLIs (bytes ↔ `StreamTxDemo` / `<devourer-stream>`) |
 | `fec_fusion_sim.py` | offline simulation: quantify SBI gain, size sub-blocks, no hardware |

@@ -28,11 +28,12 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   _hal.power_on();
   _hal.read_chip_version();
   _macinit.init_system_cfg(channel.ChannelWidth, _hal.chip_version().cut);
-  /* 8822B needs the priority-queue/RQPN page allocation BEFORE firmware download
-   * (the DLFW rsvd-page bulk-OUT stalls otherwise). */
-  if (!_macinit.init_trx_cfg())
+  /* 8822B needs the TX-FIFO page allocation + LLT before DLFW for the rsvd-page
+   * bulk-OUT to drain — but WITHOUT the beacon-boundary writes, which would make
+   * the page-0 beacon download fail its bcn-valid latch. (set_bcn_boundary is
+   * applied later in the full MAC init.) */
+  if (!_macinit.init_trx_cfg(/*set_bcn_boundary=*/false))
     throw std::runtime_error("RtlJaguar2Device: init_trx_cfg failed");
-  _fw.set_rsvd_boundary(_macinit.rsvd_boundary());
   if (!_fw.download_default_firmware())
     throw std::runtime_error("RtlJaguar2Device: firmware DLFW failed");
   _logger->info("RtlJaguar2Device: firmware booted (bw={})", (int)bw);

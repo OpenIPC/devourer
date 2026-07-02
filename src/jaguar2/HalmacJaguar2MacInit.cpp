@@ -162,20 +162,20 @@ void HalmacJaguar2MacInit::pre_init_system_cfg() {
 }
 
 void HalmacJaguar2MacInit::init_system_cfg(ChannelWidth_t bw, uint8_t cut) {
+  (void)bw;
+  (void)is_5m;
+  (void)is_10m;
+  (void)WLAN_PHY_REQ_DELAY;
+  /* NB: init_system_cfg_8822b differs from _8822c — it sets ONLY
+   * BIT_WL_PLATFORM_RST in REG_CPU_DMEM_CON (NOT BIT_DDMA_EN), and does NOT
+   * write PHY_REQ_DELAY. Setting DDMA_EN here (the 8822c value) wedged the
+   * DLFW rsvd-page TX FIFO on 8822B. */
   uint32_t v = _device.rtw_read32(REG_CPU_DMEM_CON);
-  v |= (1u << 16) | (1u << 8); /* BIT_WL_PLATFORM_RST | BIT_DDMA_EN */
+  v |= (1u << 16); /* BIT_WL_PLATFORM_RST only */
   _device.rtw_write32(REG_CPU_DMEM_CON, v);
 
   _device.rtw_write8(REG_SYS_FUNC_EN + 1,
                      _device.rtw_read8(REG_SYS_FUNC_EN + 1) | SYS_FUNC_EN_VAL);
-
-  /* PHY_REQ_DELAY 0x1100[27:24] by bandwidth (narrowband uses wider delays;
-   * 8822B has no narrowband so this is the default path). */
-  uint8_t d = _device.rtw_read8(REG_CR_EXT + 3) & 0xF0;
-  (void)is_5m;
-  (void)is_10m;
-  d |= WLAN_PHY_REQ_DELAY;
-  _device.rtw_write8(REG_CR_EXT + 3, d);
 
   /* disable boot-from-flash */
   uint32_t tmp = _device.rtw_read32(REG_MCUFW_CTRL);
@@ -195,7 +195,8 @@ void HalmacJaguar2MacInit::init_system_cfg(ChannelWidth_t bw, uint8_t cut) {
 /* txdma_queue_mapping (NORMAL, USB 3-bulkout) + priority-queue page alloc.
  * Ported from HalmacJaguar3MacInit::init_trx_cfg (88xx-common; 8822B page numbers
  * match 8822C). */
-bool HalmacJaguar2MacInit::init_trx_cfg() {
+bool HalmacJaguar2MacInit::init_trx_cfg(bool set_bcn_boundary) {
+  _set_bcn_boundary = set_bcn_boundary;
   uint16_t pqmap = (3u << 14) | (3u << 12) | (1u << 10) | (1u << 8) |
                    (2u << 6) | (2u << 4); /* VO/VI->NQ, BE/BK->LQ, MG/HI->HQ */
   _device.rtw_write16(REG_TXDMA_PQ_MAP, pqmap);
@@ -246,13 +247,15 @@ bool HalmacJaguar2MacInit::priority_queue_cfg() {
   _device.rtw_write32(REG_RQPN_CTRL_2,
                       _device.rtw_read32(REG_RQPN_CTRL_2) | (1u << 31));
 
-  _device.rtw_write16(REG_FIFOPAGE_CTRL_2, rsvd_boundary);
   _device.rtw_write16(REG_WMAC_CSIDMA_CFG, rsvd_csibuf_addr);
   _device.rtw_write8(REG_FWHW_TXQ_CTRL + 2,
                      _device.rtw_read8(REG_FWHW_TXQ_CTRL + 2) | (1u << 4));
-  _device.rtw_write16(REG_BCNQ_BDNY_V1, rsvd_boundary);
-  _device.rtw_write16(REG_FIFOPAGE_CTRL_2 + 2, rsvd_boundary);
-  _device.rtw_write16(REG_BCNQ1_BDNY_V1, rsvd_boundary);
+  if (_set_bcn_boundary) {
+    _device.rtw_write16(REG_FIFOPAGE_CTRL_2, rsvd_boundary);
+    _device.rtw_write16(REG_BCNQ_BDNY_V1, rsvd_boundary);
+    _device.rtw_write16(REG_FIFOPAGE_CTRL_2 + 2, rsvd_boundary);
+    _device.rtw_write16(REG_BCNQ1_BDNY_V1, rsvd_boundary);
+  }
 
   _device.rtw_write32(REG_RXFF_BNDY, RX_FIFO_SIZE - C2H_PKT_BUF - 1);
 

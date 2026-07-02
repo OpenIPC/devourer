@@ -35,7 +35,12 @@ public:
    * download queue to have TX-FIFO pages allocated, else the chip NAKs at 2048
    * bytes. (8822C's power-on RQPN defaults happen to suffice; 8822B's do not.)
    * Page numbers are identical to 8822C (TX_FIFO 262144, HQ/NQ/LQ 64/64/64). */
-  bool init_trx_cfg();
+  /* set_bcn_boundary=false skips the beacon-queue boundary writes (BCNQ_BDNY /
+   * FIFOPAGE_CTRL_2=boundary). Used for the pre-DLFW call: 8822B needs the page
+   * allocation + LLT for the download-queue FIFO to drain, but setting the
+   * beacon boundary to rsvd_boundary(1938) makes the page-0 rsvd-page beacon
+   * download fail its bcn-valid latch. The boundary is set later, post-DLFW. */
+  bool init_trx_cfg(bool set_bcn_boundary = true);
 
   /* Reserved-page boundary computed by init_trx_cfg (feeds HalmacJaguar2Fw's
    * rsvd-page restore). Valid after init_trx_cfg(). */
@@ -48,6 +53,7 @@ private:
   RtlUsbAdapter _device;
   Logger_t _logger;
   uint16_t _rsvd_boundary = 0;
+  bool _set_bcn_boundary = true;
 };
 
 } /* namespace jaguar2 */

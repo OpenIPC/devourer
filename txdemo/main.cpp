@@ -513,6 +513,37 @@ int main(int argc, char **argv) {
     }
   }
 
+  /* DEVOURER_TX_NDPA_RA=aa:bb:cc:dd:ee:ff — beamforming-sounding probe:
+   * replace the beacon with a 19-byte VHT NDP Announcement control frame
+   * (IEEE 802.11-2016 9.3.1.19) addressed to RA, TA = the canonical SA.
+   * Pair with DEVOURER_TX_NDPA=1 (library-side TX-descriptor NDPA bit, so
+   * the MAC auto-appends the hardware-generated NDP) and
+   * DEVOURER_TX_RATE=VHT2SS_MCS0 (sounding must be a VHT PPDU).
+   * STA Info = AID 0 (non-AP/unassociated), SU feedback, Nc index 0. */
+  if (const char *ra_env = std::getenv("DEVOURER_TX_NDPA_RA")) {
+    unsigned ra[6];
+    if (std::sscanf(ra_env, "%x:%x:%x:%x:%x:%x", &ra[0], &ra[1], &ra[2],
+                    &ra[3], &ra[4], &ra[5]) != 6) {
+      logger->error("DEVOURER_TX_NDPA_RA — bad MAC '{}'", ra_env);
+      return 1;
+    }
+    std::vector<uint8_t> ndpa(tx_buf.begin(), tx_buf.begin() + 10); // radiotap
+    const uint8_t ndpa_body[19] = {
+        0x54, 0x00,             /* FC: type=control, subtype=NDPA */
+        0x64, 0x00,             /* duration ~100 us */
+        static_cast<uint8_t>(ra[0]), static_cast<uint8_t>(ra[1]),
+        static_cast<uint8_t>(ra[2]), static_cast<uint8_t>(ra[3]),
+        static_cast<uint8_t>(ra[4]), static_cast<uint8_t>(ra[5]),
+        0x57, 0x42, 0x75, 0x05, 0xd6, 0x00, /* TA = canonical SA */
+        0x04,                   /* sounding dialog token: seq=1, bits[1:0]=0 */
+        0x00, 0x00              /* STA Info: AID=0, SU feedback, Nc=0 */
+    };
+    ndpa.insert(ndpa.end(), ndpa_body, ndpa_body + sizeof(ndpa_body));
+    tx_buf = std::move(ndpa);
+    logger->info("DEVOURER_TX_NDPA_RA — sending VHT NDPA to {} instead of "
+                 "the beacon", ra_env);
+  }
+
   /* Thermal monitoring — read inline on the TX (owning) thread, so no
    * background thread shares the libusb handle (no USB contention). Cadence is
    * derived from DEVOURER_THERMAL_POLL_MS over the ~2 ms/packet loop; 0 =

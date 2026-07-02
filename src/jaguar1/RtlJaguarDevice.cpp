@@ -1,4 +1,5 @@
 #include "RtlJaguarDevice.h"
+#include "BeamformingSounder.h"
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
 #include "SignalStop.h"
@@ -30,6 +31,15 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
   StartWithMonitorMode(channel);
   SetMonitorChannel(channel);
   _logger->info("In Monitor Mode");
+
+  /* DEVOURER_BF_ARM_SOUNDER=1 — beamforming self-sounding probe (beamformer
+   * side): arm the MAC's hardware sounding engine so a TX-descriptor-marked
+   * NDPA (DEVOURER_TX_NDPA=1) is followed by a hardware-generated NDP. See
+   * BeamformingSounder.h for the vendor register recipe. */
+  if (std::getenv("DEVOURER_BF_ARM_SOUNDER")) {
+    devourer::bf::arm_sounder(_device);
+    _logger->info("BF sounder armed (beamformer side)");
+  }
 }
 
 /* Map a radiotap CHANNEL frequency (MHz) to a Wi-Fi channel number. Returns 0
@@ -344,6 +354,22 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
 
   SET_TX_DESC_DATA_STBC_8812(usb_frame, stbc & 3);
 
+  /* DEVOURER_TX_NDPA=1 — beamforming self-sounding probe: mark the injected
+   * frame as an NDPA (TX-desc Dword3 [23:22]=1) so the MAC sounding engine
+   * follows it with a hardware-generated NDP (pairs with
+   * DEVOURER_BF_ARM_SOUNDER + the txdemo NDPA builder DEVOURER_TX_NDPA_RA).
+   * The descriptor layout is Jaguar-1-specific, so this stays in the HAL
+   * (the shared BeamformingSounder.h only holds the generation-neutral MAC
+   * register recipe). NDPA is a unicast control frame: no HW sequence stamp,
+   * not broadcast, use-header NAV, no rate fallback. */
+  if (std::getenv("DEVOURER_TX_NDPA")) {
+    SET_TX_DESC_NDPA_8812(usb_frame, 1);
+    SET_TX_DESC_HWSEQ_EN_8812(usb_frame, 0);
+    SET_TX_DESC_BMC_8812(usb_frame, 0);
+    SET_TX_DESC_NAV_USE_HDR_8812(usb_frame, 1);
+    SET_TX_DESC_DISABLE_FB_8812(usb_frame, 1);
+  }
+
   rtl8812a_cal_txdesc_chksum(usb_frame);
   _logger->debug("tx desc formed");
 #ifdef DEBUG
@@ -404,6 +430,24 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
 
   StartWithMonitorMode(channel);
   SetMonitorChannel(channel);
+
+  /* DEVOURER_BF_ARM_BFEE=aa:bb:cc:dd:ee:ff — beamforming self-sounding probe
+   * (beamformee side): arm the hardware CSI responder so an NDPA+NDP from the
+   * given beamformer MAC triggers a hardware-built VHT Compressed Beamforming
+   * report, with NO association. The chip's own MAC (0x610, from EFUSE) is the
+   * NDPA RA match. See BeamformingSounder.h for the register recipe. */
+  if (const char *bfer = std::getenv("DEVOURER_BF_ARM_BFEE")) {
+    unsigned m[6];
+    if (std::sscanf(bfer, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3],
+                    &m[4], &m[5]) == 6) {
+      uint8_t mac[6];
+      for (int i = 0; i < 6; ++i) mac[i] = static_cast<uint8_t>(m[i]);
+      devourer::bf::arm_beamformee(_device, mac, devourer::bf::kBfeeJaguar1);
+      _logger->info("BF beamformee armed for beamformer {}", bfer);
+    } else {
+      _logger->error("DEVOURER_BF_ARM_BFEE — bad MAC '{}'", bfer);
+    }
+  }
 
   /* DEVOURER_RX_PATHS=0xNN restricts which RX chains the chip enables/combines,
    * by masking the RX-path-enable register (0x808 byte 0: bits 0/4 = path A

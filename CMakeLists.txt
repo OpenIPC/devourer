@@ -59,6 +59,7 @@ add_library(WiFiDriver
     src/RateDefinitions.h
     src/RxPacket.h
     src/TxDescBits.h
+    src/BeamformingSounder.h
     src/TxMode.cpp
     src/TxMode.h
     src/IRtlDevice.h

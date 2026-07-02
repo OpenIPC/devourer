@@ -1,8 +1,12 @@
 #include "RtlJaguar3Device.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <utility>
 #include <vector>
+
+#include "BeamformingSounder.h" /* generation-neutral BF self-sounding recipe */
 
 #include "FrameParserJaguar3.h"
 #include "RateDefinitions.h" /* MGN_* rate enum (shared across the family) */
@@ -45,6 +49,33 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
   _hal.config_rfe(channel.Channel); /* 8822e RFE/PAPE antenna-switch pins */
   _hal.config_channel_8822e(channel.Channel); /* 8822e band TX scaling/backoff + shaping */
   _hal.coex_wlan_only_init(); /* lock antenna to WLAN (disable BT/LTE coex) */
+
+  /* DEVOURER_BF_ARM_BFEE=aa:bb:cc:dd:ee:ff — beamforming self-sounding probe
+   * (beamformee side), Jaguar-3 variant. Arms the hardware CSI responder to
+   * reply to NDPA+NDP from the given beamformer MAC with a VHT Compressed
+   * Beamforming report, no association. Uses the shared MAC recipe with the
+   * Jaguar-2/3 config (0xDB, 16-bit CSI param, RX-filter + own-AID gates, and
+   * crucially NO 0x9B4 write — that address is the narrowband clock divider on
+   * this generation). See BeamformingSounder.h. */
+  if (const char *bfer = std::getenv("DEVOURER_BF_ARM_BFEE")) {
+    unsigned m[6];
+    if (std::sscanf(bfer, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3],
+                    &m[4], &m[5]) == 6) {
+      uint8_t mac[6];
+      for (int i = 0; i < 6; ++i) mac[i] = static_cast<uint8_t>(m[i]);
+      /* Jaguar-3 bring-up never programs the self-MAC (0x0610), so the NDPA
+       * RA has nothing to match. Give the beamformee a known identity here so
+       * the sounder can address it; log it for the test harness. */
+      static const uint8_t kBfeeMac[6] = {0x00, 0xe0, 0x4c, 0x88, 0x22, 0xce};
+      for (uint16_t i = 0; i < 6; ++i)
+        _device.rtw_write8(0x0610 + i, kBfeeMac[i]);
+      devourer::bf::arm_beamformee(_device, mac, devourer::bf::kBfeeJaguar23);
+      _logger->info("Jaguar3 BF beamformee armed for beamformer {} — "
+                    "beamformee MAC 00:e0:4c:88:22:ce", bfer);
+    } else {
+      _logger->error("DEVOURER_BF_ARM_BFEE — bad MAC '{}'", bfer);
+    }
+  }
 
   _logger->info("Jaguar3: entering RX loop (kernel-style async URB queue)");
   uint64_t frames = 0, reads = 0;

@@ -243,6 +243,26 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
                   _device.rtw_read16(0x0100), _device.rtw_read8(0x0522),
                   _device.rtw_read16(0x020C));
   }
+  if (const char *rf = getenv("DEVOURER_TX_REPLAY")) {
+    /* Replay the kernel's captured TX-enable write sequence (usbmon golden):
+     * "0xREG WIDTH 0xVAL" lines, applied in order at the native width. */
+    FILE *f = fopen(rf, "r");
+    if (f) {
+      unsigned reg, w, val;
+      int n = 0;
+      while (fscanf(f, "%x %u %x", &reg, &w, &val) == 3) {
+        if (w == 1)
+          _device.rtw_write8(static_cast<uint16_t>(reg), static_cast<uint8_t>(val));
+        else if (w == 2)
+          _device.rtw_write16(static_cast<uint16_t>(reg), static_cast<uint16_t>(val));
+        else
+          _device.rtw_write32(static_cast<uint16_t>(reg), val);
+        n++;
+      }
+      fclose(f);
+      _logger->info("Jaguar2: TX_REPLAY applied {} kernel writes", n);
+    }
+  }
   if (const char *e = getenv("DEVOURER_TX_PWR")) {
     uint8_t idx = static_cast<uint8_t>(strtol(e, nullptr, 0) & 0x3f);
     _hal.set_tx_power_flat(idx);
@@ -353,11 +373,22 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
   const uint8_t *dot11 = packet + radiotap_length;
   bool bmc = frame_len >= 6 && (dot11[4] & 0x01);
 
+  /* 802.11 header length for the descriptor WHEADER_LEN field: base 24 B, +2
+   * for QoS data, +6 for 4-address (ToDS+FromDS). */
+  uint8_t hdrlen = 24;
+  if (frame_len >= 2) {
+    uint8_t fc0 = dot11[0], fc1 = dot11[1];
+    if ((fc0 & 0x0c) == 0x08 && (fc0 & 0x80))
+      hdrlen += 2; /* QoS data */
+    if ((fc1 & 0x03) == 0x03)
+      hdrlen += 6; /* 4-address */
+  }
+
   std::vector<uint8_t> usb_frame(jaguar2::TXDESC_SIZE_8822B + frame_len, 0);
   jaguar2::fill_data_tx_desc_8822b(
       usb_frame.data(), static_cast<uint16_t>(frame_len),
       MRateToHwRate(fixed_rate), rate_id, bw_desc, sgi != 0, ldpc != 0, stbc,
-      bmc);
+      bmc, static_cast<uint8_t>(hdrlen >> 1));
   std::memcpy(usb_frame.data() + jaguar2::TXDESC_SIZE_8822B, dot11, frame_len);
 
   uint8_t tx_ep = _device.first_bulk_out_ep();

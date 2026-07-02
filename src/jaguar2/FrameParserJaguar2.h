@@ -34,6 +34,8 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_RATE_ID_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x04, 16, 5, v)
 #define SET_TX_DESC_PKT_OFFSET_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x04, 24, 5, v)
 #define SET_TX_DESC_USE_RATE_8822B(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x0C, 8, 1, v)
+#define SET_TX_DESC_WHEADER_LEN_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x0C, 0, 5, v)
+#define SET_TX_DESC_CHK_EN_8822B(d, v)     SET_BITS_TO_LE_4BYTE((d) + 0x0C, 14, 1, v)
 #define SET_TX_DESC_DISDATAFB_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x0C, 10, 1, v)
 #define SET_TX_DESC_DATARATE_8822B(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x10, 0, 7, v)
 #define SET_TX_DESC_DATA_SHORT_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x14, 4, 1, v)
@@ -84,7 +86,7 @@ inline void cal_txdesc_chksum_8822b(uint8_t *txdesc) {
 inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
                                     uint8_t rate_hw, uint8_t rate_id, uint8_t bw,
                                     bool short_gi, bool ldpc, uint8_t stbc,
-                                    bool bmc = false) {
+                                    bool bmc = false, uint8_t wheader_len = 12) {
   SET_TX_DESC_TXPKTSIZE_8822B(d, pkt_size);
   SET_TX_DESC_OFFSET_8822B(d, static_cast<uint32_t>(TXDESC_SIZE_8822B));
   SET_TX_DESC_LS_8822B(d, 1);
@@ -105,6 +107,12 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
   SET_TX_DESC_DATA_LDPC_8822B(d, ldpc ? 1 : 0);
   SET_TX_DESC_DATA_STBC_8822B(d, stbc & 0x3);
   SET_TX_DESC_EN_HWSEQ_8822B(d, 1);
+  /* The 8822B TXDMA descriptor-check (DROP_DATA_EN) needs the 802.11 header
+   * length (WHEADER_LEN, in 2-byte units) and the checksum-enable bit to accept
+   * and schedule the frame — the vendor update_txdesc sets both. Without them
+   * the MAC never dequeues the frame to the BB. */
+  SET_TX_DESC_WHEADER_LEN_8822B(d, wheader_len);
+  SET_TX_DESC_CHK_EN_8822B(d, 1);
   cal_txdesc_chksum_8822b(d);
 }
 

@@ -409,6 +409,20 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
       bmc, static_cast<uint8_t>(hdrlen >> 1));
   std::memcpy(usb_frame.data() + jaguar2::TXDESC_SIZE_8822B, dot11, frame_len);
 
+  /* Test knob: override QSEL (default 0x12 MGNT). The mgmt/HQ queue may not be
+   * serviced by the scheduler in monitor mode; a data AC (BE=0x00/VO=0x07) uses
+   * the EDCA path. Re-fill the QSEL field + recompute the desc checksum. */
+  if (const char *q = getenv("DEVOURER_TX_QSEL")) {
+    uint8_t qsel = static_cast<uint8_t>(strtol(q, nullptr, 0) & 0x1f);
+    SET_TX_DESC_QSEL_8822B(usb_frame.data(), qsel);
+    if (const char *rid = getenv("DEVOURER_TX_RATEID"))
+      SET_TX_DESC_RATE_ID_8822B(usb_frame.data(),
+                                strtol(rid, nullptr, 0) & 0x1f);
+    if (const char *mid = getenv("DEVOURER_TX_MACID"))
+      SET_TX_DESC_MACID_8822B(usb_frame.data(), strtol(mid, nullptr, 0) & 0x7f);
+    jaguar2::cal_txdesc_chksum_8822b(usb_frame.data());
+  }
+
   uint8_t tx_ep = _device.first_bulk_out_ep();
   if (const char *e = getenv("DEVOURER_TX_EP"))
     tx_ep = static_cast<uint8_t>(strtol(e, nullptr, 0));

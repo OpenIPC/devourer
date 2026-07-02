@@ -107,12 +107,14 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
   SET_TX_DESC_DATA_LDPC_8822B(d, ldpc ? 1 : 0);
   SET_TX_DESC_DATA_STBC_8822B(d, stbc & 0x3);
   SET_TX_DESC_EN_HWSEQ_8822B(d, 1);
-  /* The 8822B TXDMA descriptor-check (DROP_DATA_EN) needs the 802.11 header
-   * length (WHEADER_LEN, in 2-byte units) and the checksum-enable bit to accept
-   * and schedule the frame — the vendor update_txdesc sets both. Without them
-   * the MAC never dequeues the frame to the BB. */
-  SET_TX_DESC_WHEADER_LEN_8822B(d, wheader_len);
-  SET_TX_DESC_CHK_EN_8822B(d, 1);
+  /* WHEADER_LEN / CHK_EN are LEFT UNSET to match the kernel rtl88x2bu monitor-
+   * inject descriptor exactly (usbmon ground truth: dword3 = 0x00000100, i.e.
+   * USE_RATE only). Setting WHEADER_LEN made the 8822B MAC apply header-based
+   * (security/QoS) processing to a raw-injected frame and DROP it at the TXDMA
+   * check (DROP_DATA_EN) — BB TX-enable never keyed. The 16-bit descriptor
+   * checksum at 0x1C is still computed (the kernel fills it even with CHK_EN=0).
+   * `wheader_len` is retained in the signature for callers but not written. */
+  (void)wheader_len;
   cal_txdesc_chksum_8822b(d);
 }
 

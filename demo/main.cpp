@@ -38,6 +38,10 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0xa81a, /* RTL8812EU — LB-LINK BL-M8812EU2 (Jaguar3 EU) */
     0xe822, /* RTL8822EU (Jaguar3 EU) */
     0xa82a, /* RTL8822EU (Jaguar3 EU) */
+    0xb812, /* RTL8822BU WiFi-only (Jaguar2) */
+    0xb82c, /* RTL8822BU (Jaguar2) */
+    /* OEM-rebadged RTL8822BU (e.g. TP-Link Archer T3U 2357:012d) enumerate under
+     * a non-Realtek VID — reach those with DEVOURER_VID / DEVOURER_PID. */
 };
 
 static int g_rx_count = 0;

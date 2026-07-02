@@ -228,6 +228,21 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
    * efuse/table-calibrated TXAGC; DEVOURER_TX_PWR=0xNN forces a flat reference
    * (SDR-visibility debug knob). */
   bring_up(channel);
+  if (getenv("DEVOURER_NO_DROPDATA")) {
+    /* Clear BIT_DROP_DATA_EN (0x020C[9], set by init_usb_cfg). The MAC drops TX
+     * frames whose length fails the desc OFFSET/size check; a mismatch would
+     * silently prevent the BB from ever keying TX. Test knob. */
+    uint16_t v = _device.rtw_read16(0x020C);
+    _device.rtw_write16(0x020C, v & ~(1u << 9));
+    _logger->info("Jaguar2: DROP_DATA_EN cleared (0x020C=0x{:04x})",
+                  v & ~(1u << 9));
+  }
+  if (getenv("DEVOURER_TX_DEBUG")) {
+    _logger->info("Jaguar2 TXstate: CR(0x100)=0x{:04x} TXPAUSE(0x522)=0x{:02x} "
+                  "TXDMA_OFFCHK(0x20c)=0x{:04x}",
+                  _device.rtw_read16(0x0100), _device.rtw_read8(0x0522),
+                  _device.rtw_read16(0x020C));
+  }
   if (const char *e = getenv("DEVOURER_TX_PWR")) {
     uint8_t idx = static_cast<uint8_t>(strtol(e, nullptr, 0) & 0x3f);
     _hal.set_tx_power_flat(idx);
@@ -348,6 +363,20 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
   uint8_t tx_ep = _device.first_bulk_out_ep();
   int rc = _device.bulk_send_sync_ep(tx_ep, usb_frame.data(), usb_frame.size(),
                                      /*timeout_ms=*/20);
+  /* TX diagnostic (DEVOURER_TX_DEBUG): every 400 frames, read the BB TX-enable
+   * counters (0x2de0 OFDM txen/txon, 0x2de4 CCK txen/txon). Non-zero => the BB
+   * is keying TX (RF-radiate issue is downstream); zero => the frame is dropped
+   * before reaching the BB TX (descriptor/queue/MAC issue). */
+  if (getenv("DEVOURER_TX_DEBUG")) {
+    static int c = 0;
+    if ((++c % 400) == 0) {
+      uint32_t ofdm = _device.rtw_read32(0x2de0);
+      uint32_t cck = _device.rtw_read32(0x2de4);
+      _logger->info("Jaguar2 TXDBG[{}]: OFDM(txen={} txon={}) CCK(txen={} "
+                    "txon={})",
+                    c, ofdm & 0xffff, ofdm >> 16, cck & 0xffff, cck >> 16);
+    }
+  }
   return rc >= 0;
 }
 

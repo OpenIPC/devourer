@@ -176,6 +176,7 @@ if(DEVOURER_JAGUAR2)
         src/jaguar2/HalmacJaguar2MacInit.cpp src/jaguar2/HalmacJaguar2MacInit.h
         src/jaguar2/HalmacJaguar2Regs.h
         src/jaguar2/FrameParserJaguar2.h
+        src/jaguar2/Halrf8822b.cpp src/jaguar2/Halrf8822b.h
         src/jaguar2/PhyTableLoaderJaguar2.cpp src/jaguar2/PhyTableLoaderJaguar2.h)
     target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2=1)
 endif()

@@ -1,6 +1,7 @@
 #include "RtlJaguar2Device.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <chrono>
 #include <span>
@@ -92,6 +93,41 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
    * (0xF04/0xF14/0xF08/0xF48) are hold-type and only advance when the DIG/FA
    * thread pulses their reset, so they are NOT a reliable live-RX signal here —
    * dumped for reference only. */
+  if (const char *pf = getenv("DEVOURER_BB_PATCH")) {
+    /* Canary bisect: apply "0xADDR 0xVAL" BB-register overrides from a file
+     * (kernel golden values) right before RX, to find the decode-critical
+     * register(s). */
+    FILE *f = fopen(pf, "r");
+    if (f) {
+      unsigned addr, val;
+      int n = 0;
+      while (fscanf(f, "%x %x", &addr, &val) == 2) {
+        _device.rtw_write32(static_cast<uint16_t>(addr), val);
+        n++;
+      }
+      fclose(f);
+      _logger->info("Jaguar2: BB_PATCH applied {} registers from {}", n, pf);
+    }
+  }
+  if (getenv("DEVOURER_BB_DUMP")) {
+    /* Full BB/RF register dump in the vendor rtw_proc format for canary diff
+     * against the kernel driver (tests/jaguar2_rx_canary.sh). */
+    for (uint32_t a = 0x0; a <= 0x7fc; a += 0x10)
+      _logger->info("BBDUMP 0x{:04x} 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x}", a,
+                    _device.rtw_read32(a), _device.rtw_read32(a + 4),
+                    _device.rtw_read32(a + 8), _device.rtw_read32(a + 12));
+    for (uint32_t a = 0x800; a <= 0xffc; a += 0x10)
+      _logger->info("BBDUMP 0x{:04x} 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x}", a,
+                    _device.rtw_read32(a), _device.rtw_read32(a + 4),
+                    _device.rtw_read32(a + 8), _device.rtw_read32(a + 12));
+    for (uint32_t a = 0x1800; a <= 0x1afc; a += 0x10)
+      _logger->info("BBDUMP 0x{:04x} 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x}", a,
+                    _device.rtw_read32(a), _device.rtw_read32(a + 4),
+                    _device.rtw_read32(a + 8), _device.rtw_read32(a + 12));
+    for (uint32_t r = 0x0; r <= 0xff; r++)
+      _logger->info("RFDUMP 0x{:02x} A=0x{:05x} B=0x{:05x}", r,
+                    _hal.dbg_rf_read(0, r), _hal.dbg_rf_read(1, r));
+  }
   if (getenv("DEVOURER_RX_DEBUG")) {
     _logger->info(
         "Jaguar2 RXDBG: CR=0x{:04x} RCR=0x{:08x} RXpath(0x808)=0x{:08x} "

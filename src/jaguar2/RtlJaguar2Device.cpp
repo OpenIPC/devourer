@@ -28,12 +28,12 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   _hal.power_on();
   _hal.read_chip_version();
   _macinit.init_system_cfg(channel.ChannelWidth, _hal.chip_version().cut);
-  /* 8822B needs the TX-FIFO page allocation + LLT before DLFW for the rsvd-page
-   * bulk-OUT to drain — but WITHOUT the beacon-boundary writes, which would make
-   * the page-0 beacon download fail its bcn-valid latch. (set_bcn_boundary is
-   * applied later in the full MAC init.) */
-  if (!_macinit.init_trx_cfg(/*set_bcn_boundary=*/false))
-    throw std::runtime_error("RtlJaguar2Device: init_trx_cfg failed");
+  /* Firmware download BEFORE trx/queue config — the HalMAC _halmac_init_hal
+   * order (matches the working jaguar3 flow and the vendor rtl88x2bu golden):
+   * download_firmware_88xx self-configures its own temporary HIQ page map and
+   * restores it. Running init_trx_cfg first over-allocates the FIFOPAGE_INFO
+   * queues, which wedges the rsvd-page bcn-valid latch on the 2nd (IMEM)
+   * DLFW segment. */
   if (!_fw.download_default_firmware())
     throw std::runtime_error("RtlJaguar2Device: firmware DLFW failed");
   _logger->info("RtlJaguar2Device: firmware booted (bw={})", (int)bw);

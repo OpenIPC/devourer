@@ -78,10 +78,18 @@ void HalmacJaguar2Fw::wlan_cpu_en(bool enable) {
 }
 
 void HalmacJaguar2Fw::pltfm_reset() {
+  /* Mirrors pltfm_reset_88xx (halmac_fw_88xx.c). The SYS_CLK_CTRL+1 BIT6
+   * toggle bracketing the CPU_DMEM_CON reset is the 8822B/8821C clock-sync
+   * fix — without it the download-CPU clock is not resynced and the rsvd-page
+   * bcn-valid latch never asserts (DLFW hangs at the first chunk). */
   w8(REG_CPU_DMEM_CON + 2,
      static_cast<uint8_t>(r8(REG_CPU_DMEM_CON + 2) & ~0x1));
+  w8(REG_SYS_CLK_CTRL + 1,
+     static_cast<uint8_t>(r8(REG_SYS_CLK_CTRL + 1) & ~(1u << 6)));
   w8(REG_CPU_DMEM_CON + 2,
      static_cast<uint8_t>(r8(REG_CPU_DMEM_CON + 2) | 0x1));
+  w8(REG_SYS_CLK_CTRL + 1,
+     static_cast<uint8_t>(r8(REG_SYS_CLK_CTRL + 1) | (1u << 6)));
 }
 
 bool HalmacJaguar2Fw::iddma_en(uint32_t src, uint32_t dest, uint32_t ctrl) {
@@ -154,15 +162,18 @@ bool HalmacJaguar2Fw::send_fw_page(uint16_t pg_addr, const uint8_t *chunk,
   uint8_t txq2 = r8(REG_FWHW_TXQ_CTRL + 2);
   w8(REG_FWHW_TXQ_CTRL + 2, static_cast<uint8_t>(txq2 & ~(1u << 6)));
 
+  /* Minimal rsvd-page TX descriptor, matching the vendor rtl88x2bu DLFW golden
+   * capture exactly: TXPKTSIZE + OFFSET + QSEL_BEACON only. The rtl88x2cu path
+   * (jaguar3) additionally sets USE_RATE/DATARATE/DISDATAFB/LS, and that is
+   * harmless on 8822C/E — but on 8822B those extra fields make the beacon-queue
+   * engine mismanage rsvd-page allocation across the DMEM->IMEM segment
+   * boundary, depleting the HIQ so the first IMEM chunk's bulk-OUT NAKs at
+   * 2048 bytes (or fails its bcn-valid latch). Keep it minimal here. */
   std::vector<uint8_t> frame(TXDESC_SIZE_8822B + size, 0);
   uint8_t *d = frame.data();
   SET_TX_DESC_TXPKTSIZE_8822B(d, size);
   SET_TX_DESC_OFFSET_8822B(d, static_cast<uint32_t>(TXDESC_SIZE_8822B));
   SET_TX_DESC_QSEL_8822B(d, QSEL_BEACON);
-  SET_TX_DESC_USE_RATE_8822B(d, 1);
-  SET_TX_DESC_DATARATE_8822B(d, 0);
-  SET_TX_DESC_DISDATAFB_8822B(d, 1);
-  SET_TX_DESC_LS_8822B(d, 1);
   std::memcpy(d + TXDESC_SIZE_8822B, chunk, size);
   cal_txdesc_chksum_8822b(d);
 
@@ -198,7 +209,12 @@ bool HalmacJaguar2Fw::dlfw_to_mem(const uint8_t *fw_bin, uint32_t src,
   bool first = true;
   uint32_t residue = size;
 
-  w32(REG_DDMA_CH0CTRL, BIT_DDMACH0_RESET_CHKSUM_STS);
+  /* W32_SET (read-modify-write), NOT a plain write: the reference
+   * dlfw_to_mem_88xx uses HALMAC_REG_W32_SET here. A plain write clobbers the
+   * residual DDMA CH0CTRL bits left by the previous segment's last iddma, which
+   * on the second (IMEM) segment wedges the rsvd-page engine so its bcn-valid
+   * latch never asserts. */
+  w32_set(REG_DDMA_CH0CTRL, BIT_DDMACH0_RESET_CHKSUM_STS);
 
   while (residue != 0) {
     uint32_t pkt = (residue >= _dlfw_pkt_size) ? _dlfw_pkt_size : residue;

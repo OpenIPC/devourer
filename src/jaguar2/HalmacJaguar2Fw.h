@@ -55,10 +55,11 @@ private:
 
   RtlUsbAdapter _device;
   Logger_t _logger;
-  /* Per-chunk DLFW size. The rsvd-page staging buffer is DLFW_RSVDPG_SIZE =
-   * 2048 bytes (halmac_h2c_extra_info_nic.h), so each rsvd-page chunk must be
-   * <= 2048 (a 4096 chunk stalls the bulk-OUT at 2048 on 8822B). */
-  uint32_t _dlfw_pkt_size = 2048;
+  /* Per-chunk DLFW size. The vendor 8822B driver downloads in 4096-byte chunks
+   * (4144-byte bulk-OUT incl. the 48-byte TX desc); this fits the HIQ page
+   * space allocated by init_trx_cfg (64 pages) with margin. DLFW_PKT_MAX_SIZE is
+   * 8192 upstream, but 8192+48 exceeds the 8192-byte HIQ, so 4096 is used. */
+  uint32_t _dlfw_pkt_size = 4096;
   uint16_t _rsvd_boundary = 0;
 };
 

@@ -271,29 +271,15 @@ uint32_t bit_shift(uint32_t mask) {
 } /* namespace */
 
 uint32_t HalJaguar2::rf_read(uint8_t path, uint32_t addr) {
-  /* Jaguar 3-wire LSSI read (phy_RFSerialRead): write the RF offset to
-   * rHSSIRead_Jaguar (0x8B0[7:0]), then read back the 20-bit value from the
-   * SI/PI readback register per the path's PI-mode bit. */
-  constexpr uint16_t rHSSIRead = 0x08B0;
-  constexpr uint32_t bHSSIRead_addr = 0xFF;
-  constexpr uint32_t rRead_data = 0x000FFFFF;
-  const uint16_t pi_sel = (path == 0) ? 0x0C00 : 0x0E00;
-  const uint16_t si_read = (path == 0) ? 0x0D08 : 0x0D48;
-  const uint16_t pi_read = (path == 0) ? 0x0D04 : 0x0D44;
-
-  if (addr != 0x0)
-    _device.phy_set_bb_reg(0x0838, 0x8, 1); /* rCCAonSec: CCA off while reading */
-
-  _device.phy_set_bb_reg(rHSSIRead, bHSSIRead_addr, addr & 0xff);
-
-  /* C-cut needs a settle before the readback latches. */
-  if (_ver.cut >= 2)
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-
-  uint32_t pi_mode = (_device.rtw_read32(pi_sel) >> 2) & 0x1;
-  uint16_t rb = pi_mode ? pi_read : si_read;
-  uint32_t v = _device.rtw_read32(rb);
-  return (v & rRead_data) >> bit_shift(rRead_data);
+  /* config_phydm_read_rf_reg_8822b: 8822B reads RF registers through a direct
+   * BB shadow window (NOT the 3-wire LSSI readback the old driver PHY_QueryRFReg
+   * uses) — base 0x2800 (path A) / 0x2c00 (path B) + (rf_addr & 0xff) << 2,
+   * masked to the 20-bit RF register width. This is the mechanism all phydm/RF
+   * code (channel set, IQK) uses; the 3-wire readback returns stale/garbage and
+   * corrupted every masked RF read-modify-write. */
+  const uint32_t base = (path == 0) ? 0x2800u : 0x2c00u;
+  const uint16_t direct = static_cast<uint16_t>(base + ((addr & 0xff) << 2));
+  return _device.rtw_read32(direct) & 0x000FFFFFu;
 }
 
 void HalJaguar2::rf_set(uint8_t path, uint32_t addr, uint32_t mask,

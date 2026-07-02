@@ -162,6 +162,13 @@ def summarise(arr: np.ndarray, metric: str) -> dict:
     worst = float(np.nanmax(np.abs(off))) if n > 1 else float("nan")
     combo = combining_analysis(arr)
     std = arr.std(axis=0)
+    # Effective number of independent branches = participation ratio of the
+    # correlation matrix, N_eff = (Sum lambda_i)^2 / Sum lambda_i^2 =
+    # n^2 / Sum_ij rho_ij^2 (since trace(R)=n and trace(R^2)=Sum rho_ij^2).
+    # n uncorrelated chains -> N_eff = n; fully correlated -> N_eff = 1. This is
+    # the "how many chains actually buy me diversity" number. Only meaningful
+    # when the channel actually fades (see fading_ok).
+    neff = float(n * n / np.nansum(corr**2)) if n > 1 else 1.0
     return {
         "n_frames": n_frames,
         "n_paths": n,
@@ -174,6 +181,7 @@ def summarise(arr: np.ndarray, metric: str) -> dict:
         "max_std": float(std.max()),
         "railed": [i for i in range(n) if std[i] < RAIL_STD],
         "fading_ok": float(std.max()) >= MIN_FADING_STD,
+        "eff_branches": neff,
     }
 
 
@@ -218,6 +226,9 @@ def report(s: dict) -> str:
         for lb, row in zip(labels, s["corr"]):
             L.append(f"   {lb:>3}" + "".join(f"{v:7.3f}" for v in row))
         L.append(f"worst pairwise |rho| = {s['worst_rho']:.3f}")
+        if s["fading_ok"]:
+            L.append(f"effective branches (N_eff) = {s['eff_branches']:.2f} "
+                     f"of {s['n_paths']} chains")
         c = s["combo"]
         L.append(
             f"combining (best chain = {labels[c['best_chain']]}, "
@@ -318,6 +329,15 @@ def self_test() -> int:
     ok &= cond
     print(f"[{status}] fading guard: static channel -> INCONCLUSIVE, "
           f"railed={s['railed']}, max_std={s['max_std']:.2f}")
+
+    # 6) effective-branch metric: independent 4-chain ~ 4; correlated < 4.
+    indep_neff = summarise(_synth_chains(20000, 4, 0.0, seed=6), "rssi")["eff_branches"]
+    corr_neff = summarise(_synth_chains(20000, 4, 0.8, seed=7), "rssi")["eff_branches"]
+    cond = (indep_neff > 3.5) and (corr_neff < indep_neff)
+    status = "ok" if cond else "FAIL"
+    ok &= cond
+    print(f"[{status}] N_eff: independent 4-chain={indep_neff:.2f} (~4), "
+          f"correlated(rho=.8)={corr_neff:.2f} (< independent)")
 
     print("=== PASS ===" if ok else "=== FAIL ===")
     return 0 if ok else 1

@@ -52,7 +52,10 @@ echo "   TX injecting ($(grep -m1 'fixed rate' "$TXLOG" 2>/dev/null || echo '?')
 echo "== RX: 8812 for ${DURATION}s, reading the STBC bit =="
 timeout "$((DURATION+2))" env DEVOURER_PID=0x8812 DEVOURER_STREAM_OUT=1 \
     DEVOURER_CHANNEL="$CHANNEL" "$DEMO" >"$RXLOG" 2>/dev/null &
-sleep "$DURATION"; pkill -x WiFiDriverDemo 2>/dev/null || true; wait 2>/dev/null || true
+rxpid=$!
+sleep "$DURATION"
+kill "$rxpid" 2>/dev/null || true
+wait "$rxpid" 2>/dev/null || true   # only the RX — the TX beacon runs on
 
 TOTAL=$(grep -c '<devourer-stream>' "$RXLOG" || true)
 STBC1=$(grep -c '<devourer-stream>.*stbc=1' "$RXLOG" || true)

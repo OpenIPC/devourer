@@ -18,6 +18,30 @@
 #undef REG_ANAPAR_MAC_0
 #undef REG_CPU_DMEM_CON
 #undef REG_CR_EXT
+#undef REG_CR
+#undef REG_TXDMA_PQ_MAP
+#undef REG_RXFF_BNDY
+#undef REG_FIFOPAGE_CTRL_2
+#undef REG_AUTO_LLT_V1
+#undef REG_TXDMA_OFFSET_CHK
+#undef REG_RQPN_CTRL_2
+#undef REG_FIFOPAGE_INFO_1
+#undef REG_FIFOPAGE_INFO_2
+#undef REG_FIFOPAGE_INFO_3
+#undef REG_FIFOPAGE_INFO_4
+#undef REG_FIFOPAGE_INFO_5
+#undef REG_H2C_HEAD
+#undef REG_H2C_TAIL
+#undef REG_H2C_READ_ADDR
+#undef REG_H2C_INFO
+#undef REG_FWFF_CTRL
+#undef REG_FWFF_PKT_INFO
+#undef REG_FWHW_TXQ_CTRL
+#undef REG_BCNQ_BDNY_V1
+#undef REG_BCNQ1_BDNY_V1
+#undef REG_WMAC_CSIDMA_CFG
+#undef REG_H2CQ_CSR
+#undef REG_WMAC_FWPKT_CR
 
 namespace jaguar2 {
 
@@ -41,6 +65,51 @@ constexpr uint16_t REG_CR_EXT         = 0x1100;
 constexpr uint8_t SYS_FUNC_EN_VAL         = 0xD8;
 constexpr uint8_t WLAN_PHY_REQ_DELAY      = 0xC;
 constexpr uint8_t CHIP_VER_B_CUT          = 1;
+
+/* TRX / priority-queue registers (88xx-common) */
+constexpr uint16_t REG_CR                = 0x0100;
+constexpr uint16_t REG_TXDMA_PQ_MAP      = 0x010C;
+constexpr uint16_t REG_RXFF_BNDY         = 0x011C;
+constexpr uint16_t REG_FIFOPAGE_CTRL_2   = 0x0204;
+constexpr uint16_t REG_AUTO_LLT_V1       = 0x0208;
+constexpr uint16_t REG_TXDMA_OFFSET_CHK  = 0x020C;
+constexpr uint16_t REG_RQPN_CTRL_2       = 0x022C;
+constexpr uint16_t REG_FIFOPAGE_INFO_1   = 0x0230;
+constexpr uint16_t REG_FIFOPAGE_INFO_2   = 0x0234;
+constexpr uint16_t REG_FIFOPAGE_INFO_3   = 0x0238;
+constexpr uint16_t REG_FIFOPAGE_INFO_4   = 0x023C;
+constexpr uint16_t REG_FIFOPAGE_INFO_5   = 0x0240;
+constexpr uint16_t REG_H2C_HEAD          = 0x0244;
+constexpr uint16_t REG_H2C_TAIL          = 0x0248;
+constexpr uint16_t REG_H2C_READ_ADDR     = 0x024C;
+constexpr uint16_t REG_H2C_INFO          = 0x0254;
+constexpr uint16_t REG_FWFF_CTRL         = 0x029C;
+constexpr uint16_t REG_FWFF_PKT_INFO     = 0x02A0;
+constexpr uint16_t REG_FWHW_TXQ_CTRL     = 0x0420;
+constexpr uint16_t REG_BCNQ_BDNY_V1      = 0x0424;
+constexpr uint16_t REG_BCNQ1_BDNY_V1     = 0x0456;
+constexpr uint16_t REG_WMAC_FWPKT_CR     = 0x0601;
+constexpr uint16_t REG_WMAC_CSIDMA_CFG   = 0x169C;
+constexpr uint16_t REG_H2CQ_CSR          = 0x1330;
+
+constexpr uint8_t MAC_TRX_ENABLE = 0x0F; /* HCI_TXDMA|HCI_RXDMA|TXDMA|RXDMA */
+constexpr uint8_t BIT_FWEN = 0x80;
+constexpr uint8_t BIT_AUTO_INIT_LLT_V1 = 0x01;
+constexpr uint8_t BLK_DESC_NUM = 0x3;
+
+/* fifo allocation — TX_FIFO/page numbers identical to 8822C */
+constexpr uint32_t TX_FIFO_SIZE = 262144;
+constexpr uint32_t RX_FIFO_SIZE = 24576;
+constexpr uint32_t TX_PAGE_SHIFT = 7; /* 128B pages */
+constexpr uint32_t C2H_PKT_BUF = 256;
+constexpr uint16_t RSVD_PG_DRV_NUM = 16;
+constexpr uint16_t RSVD_PG_H2C_EXTRAINFO_NUM = 24;
+constexpr uint16_t RSVD_PG_H2C_STATICINFO_NUM = 8;
+constexpr uint16_t RSVD_PG_H2CQ_NUM = 8;
+constexpr uint16_t RSVD_PG_CPU_INSTRUCTION_NUM = 0;
+constexpr uint16_t RSVD_PG_FW_TXBUF_NUM = 4;
+constexpr uint16_t RSVD_PG_CSIBUF_NUM = 50;
+constexpr uint16_t PG_HQ = 64, PG_NQ = 64, PG_LQ = 64, PG_EXQ = 0, PG_GAP = 1;
 
 bool is_5m(ChannelWidth_t bw) {
   return bw == ChannelWidth_t::CHANNEL_WIDTH_5;
@@ -121,6 +190,116 @@ void HalmacJaguar2MacInit::init_system_cfg(ChannelWidth_t bw, uint8_t cut) {
                        _device.rtw_read8(REG_ANAPAR_MAC_0) & ~0x07);
   _logger->info("Jaguar2: init_system_cfg done (bw={} cut={})",
                 static_cast<int>(bw), cut);
+}
+
+/* txdma_queue_mapping (NORMAL, USB 3-bulkout) + priority-queue page alloc.
+ * Ported from HalmacJaguar3MacInit::init_trx_cfg (88xx-common; 8822B page numbers
+ * match 8822C). */
+bool HalmacJaguar2MacInit::init_trx_cfg() {
+  uint16_t pqmap = (3u << 14) | (3u << 12) | (1u << 10) | (1u << 8) |
+                   (2u << 6) | (2u << 4); /* VO/VI->NQ, BE/BK->LQ, MG/HI->HQ */
+  _device.rtw_write16(REG_TXDMA_PQ_MAP, pqmap);
+
+  uint8_t en_fwff = _device.rtw_read8(REG_WMAC_FWPKT_CR) & BIT_FWEN;
+  if (en_fwff)
+    _device.rtw_write8(REG_WMAC_FWPKT_CR,
+                       _device.rtw_read8(REG_WMAC_FWPKT_CR) & ~BIT_FWEN);
+  _device.rtw_write8(REG_CR, 0);
+  _device.rtw_write16(REG_FWFF_CTRL, _device.rtw_read16(REG_FWFF_PKT_INFO));
+  _device.rtw_write8(REG_CR, MAC_TRX_ENABLE);
+  if (en_fwff)
+    _device.rtw_write8(REG_WMAC_FWPKT_CR,
+                       _device.rtw_read8(REG_WMAC_FWPKT_CR) | BIT_FWEN);
+  _device.rtw_write32(REG_H2CQ_CSR, 1u << 31);
+
+  if (!priority_queue_cfg())
+    return false;
+  init_h2c();
+  return true;
+}
+
+bool HalmacJaguar2MacInit::priority_queue_cfg() {
+  const uint16_t tx_fifo_pg_num = TX_FIFO_SIZE >> TX_PAGE_SHIFT; /* 2048 */
+  const uint16_t rsvd_pg_num =
+      RSVD_PG_DRV_NUM + RSVD_PG_H2C_EXTRAINFO_NUM + RSVD_PG_H2C_STATICINFO_NUM +
+      RSVD_PG_H2CQ_NUM + RSVD_PG_CPU_INSTRUCTION_NUM + RSVD_PG_FW_TXBUF_NUM +
+      RSVD_PG_CSIBUF_NUM; /* 110 */
+  const uint16_t acq_pg_num = tx_fifo_pg_num - rsvd_pg_num; /* 1938 */
+  const uint16_t rsvd_boundary = acq_pg_num;
+  _rsvd_boundary = rsvd_boundary;
+
+  uint16_t cur = tx_fifo_pg_num;
+  cur -= RSVD_PG_CSIBUF_NUM;
+  const uint16_t rsvd_csibuf_addr = cur;
+  cur -= RSVD_PG_FW_TXBUF_NUM;
+  cur -= RSVD_PG_CPU_INSTRUCTION_NUM;
+  cur -= RSVD_PG_H2CQ_NUM;
+
+  const uint16_t pub_pg =
+      acq_pg_num - PG_HQ - PG_NQ - PG_LQ - PG_EXQ - PG_GAP;
+
+  _device.rtw_write16(REG_FIFOPAGE_INFO_1, PG_HQ);
+  _device.rtw_write16(REG_FIFOPAGE_INFO_2, PG_LQ);
+  _device.rtw_write16(REG_FIFOPAGE_INFO_3, PG_NQ);
+  _device.rtw_write16(REG_FIFOPAGE_INFO_4, PG_EXQ);
+  _device.rtw_write16(REG_FIFOPAGE_INFO_5, pub_pg);
+  _device.rtw_write32(REG_RQPN_CTRL_2,
+                      _device.rtw_read32(REG_RQPN_CTRL_2) | (1u << 31));
+
+  _device.rtw_write16(REG_FIFOPAGE_CTRL_2, rsvd_boundary);
+  _device.rtw_write16(REG_WMAC_CSIDMA_CFG, rsvd_csibuf_addr);
+  _device.rtw_write8(REG_FWHW_TXQ_CTRL + 2,
+                     _device.rtw_read8(REG_FWHW_TXQ_CTRL + 2) | (1u << 4));
+  _device.rtw_write16(REG_BCNQ_BDNY_V1, rsvd_boundary);
+  _device.rtw_write16(REG_FIFOPAGE_CTRL_2 + 2, rsvd_boundary);
+  _device.rtw_write16(REG_BCNQ1_BDNY_V1, rsvd_boundary);
+
+  _device.rtw_write32(REG_RXFF_BNDY, RX_FIFO_SIZE - C2H_PKT_BUF - 1);
+
+  uint8_t v8 = _device.rtw_read8(REG_AUTO_LLT_V1);
+  v8 &= ~(0xf << 4);
+  v8 |= (BLK_DESC_NUM << 4);
+  _device.rtw_write8(REG_AUTO_LLT_V1, v8);
+  _device.rtw_write8(REG_AUTO_LLT_V1 + 3, BLK_DESC_NUM);
+  _device.rtw_write8(REG_TXDMA_OFFSET_CHK + 1,
+                     _device.rtw_read8(REG_TXDMA_OFFSET_CHK + 1) | (1u << 1));
+
+  _device.rtw_write8(REG_AUTO_LLT_V1,
+                     _device.rtw_read8(REG_AUTO_LLT_V1) | BIT_AUTO_INIT_LLT_V1);
+  uint32_t cnt = 1000;
+  while (_device.rtw_read8(REG_AUTO_LLT_V1) & BIT_AUTO_INIT_LLT_V1) {
+    if (--cnt == 0) {
+      _logger->error("Jaguar2: LLT auto-init timeout");
+      return false;
+    }
+  }
+  _device.rtw_write8(REG_CR + 3, 0); /* transfer mode NORMAL */
+  _logger->info("Jaguar2: priority_queue_cfg done (rsvd_boundary={})",
+                rsvd_boundary);
+  return true;
+}
+
+void HalmacJaguar2MacInit::init_h2c() {
+  const uint16_t tx_fifo_pg_num = TX_FIFO_SIZE >> TX_PAGE_SHIFT;
+  uint16_t cur = tx_fifo_pg_num - RSVD_PG_CSIBUF_NUM - RSVD_PG_FW_TXBUF_NUM -
+                 RSVD_PG_CPU_INSTRUCTION_NUM - RSVD_PG_H2CQ_NUM;
+  const uint32_t h2cq_addr = static_cast<uint32_t>(cur) << TX_PAGE_SHIFT;
+  const uint32_t h2cq_size = static_cast<uint32_t>(RSVD_PG_H2CQ_NUM)
+                             << TX_PAGE_SHIFT;
+
+  uint32_t v = (_device.rtw_read32(REG_H2C_HEAD) & 0xFFFC0000) | h2cq_addr;
+  _device.rtw_write32(REG_H2C_HEAD, v);
+  v = (_device.rtw_read32(REG_H2C_READ_ADDR) & 0xFFFC0000) | h2cq_addr;
+  _device.rtw_write32(REG_H2C_READ_ADDR, v);
+  v = (_device.rtw_read32(REG_H2C_TAIL) & 0xFFFC0000) | (h2cq_addr + h2cq_size);
+  _device.rtw_write32(REG_H2C_TAIL, v);
+
+  uint8_t v8 = static_cast<uint8_t>((_device.rtw_read8(REG_H2C_INFO) & 0xFC) | 0x01);
+  _device.rtw_write8(REG_H2C_INFO, v8);
+  v8 = static_cast<uint8_t>((_device.rtw_read8(REG_H2C_INFO) & 0xFB) | 0x04);
+  _device.rtw_write8(REG_H2C_INFO, v8);
+  v8 = static_cast<uint8_t>((_device.rtw_read8(REG_TXDMA_OFFSET_CHK + 1) & 0x7f) | 0x80);
+  _device.rtw_write8(REG_TXDMA_OFFSET_CHK + 1, v8);
 }
 
 } /* namespace jaguar2 */

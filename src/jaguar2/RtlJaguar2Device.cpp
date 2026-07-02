@@ -28,6 +28,11 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   _hal.power_on();
   _hal.read_chip_version();
   _macinit.init_system_cfg(channel.ChannelWidth, _hal.chip_version().cut);
+  /* 8822B needs the priority-queue/RQPN page allocation BEFORE firmware download
+   * (the DLFW rsvd-page bulk-OUT stalls otherwise). */
+  if (!_macinit.init_trx_cfg())
+    throw std::runtime_error("RtlJaguar2Device: init_trx_cfg failed");
+  _fw.set_rsvd_boundary(_macinit.rsvd_boundary());
   if (!_fw.download_default_firmware())
     throw std::runtime_error("RtlJaguar2Device: firmware DLFW failed");
   _logger->info("RtlJaguar2Device: firmware booted (bw={})", (int)bw);

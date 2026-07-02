@@ -30,9 +30,24 @@ public:
   /* Toggle SYS_FUNC_EN BB + RF_CTRL + WLRF1 RF-on bits. */
   void enable_bb_rf(bool enable);
 
+  /* TX/RX DMA + priority-queue page allocation (RQPN) + LLT auto-init. On 8822B
+   * this MUST run BEFORE firmware download: the DLFW rsvd-page bulk-OUT needs the
+   * download queue to have TX-FIFO pages allocated, else the chip NAKs at 2048
+   * bytes. (8822C's power-on RQPN defaults happen to suffice; 8822B's do not.)
+   * Page numbers are identical to 8822C (TX_FIFO 262144, HQ/NQ/LQ 64/64/64). */
+  bool init_trx_cfg();
+
+  /* Reserved-page boundary computed by init_trx_cfg (feeds HalmacJaguar2Fw's
+   * rsvd-page restore). Valid after init_trx_cfg(). */
+  uint16_t rsvd_boundary() const { return _rsvd_boundary; }
+
 private:
+  bool priority_queue_cfg();
+  void init_h2c();
+
   RtlUsbAdapter _device;
   Logger_t _logger;
+  uint16_t _rsvd_boundary = 0;
 };
 
 } /* namespace jaguar2 */

@@ -1,11 +1,15 @@
 #include "RtlJaguar2Device.h"
 
 #include <cstdint>
+#include <cstdlib>
+#include <chrono>
 #include <span>
+#include <thread>
 #include <stdexcept>
 #include <utility>
 
 #include "FrameParserJaguar2.h"
+#include "Halrf8822b.h"
 #include "RxPacket.h"
 #include "SignalStop.h" /* g_devourer_should_stop */
 
@@ -65,7 +69,37 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
    * MAC RX engine. */
   _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel), bw, rfe);
   _hal.do_lck(); /* LC calibration — lock the RF LO so the front-end receives */
+
+  /* IQK (halrf phy_iq_calibrate_8822b): LOK/TXK/RXK per path so the RX front-end
+   * resolves real frames into MPDUs (marginal decode without it -> RXPKT_NUM=0). */
+  if (!getenv("DEVOURER_SKIP_IQK")) {
+    jaguar2::Halrf8822b halrf(_device, _logger, _hal.chip_version().cut,
+                              _hal.chip_version().rf_2t2r != 0);
+    halrf.iqk_trigger(channel.Channel <= 14);
+  } else {
+    _logger->info("Jaguar2: IQK SKIPPED (DEVOURER_SKIP_IQK)");
+  }
+  /* Grant the antenna to WLAN (combo chip) — must precede enable_rx or the WL
+   * RX front-end stays deaf with the antenna owned by BT. */
+  _hal.coex_wlan_only();
   _hal.enable_rx();
+
+  /* RX bring-up register dump (DEVOURER_RX_DEBUG): confirms the enable_rx /
+   * channel / RF-mode / coex writes landed. The phydm BB decode counters
+   * (0xF04/0xF14/0xF08/0xF48) are hold-type and only advance when the DIG/FA
+   * thread pulses their reset, so they are NOT a reliable live-RX signal here —
+   * dumped for reference only. */
+  if (getenv("DEVOURER_RX_DEBUG")) {
+    _logger->info(
+        "Jaguar2 RXDBG: CR=0x{:04x} RCR=0x{:08x} RXpath(0x808)=0x{:08x} "
+        "RF0A/B(0x0)=0x{:05x}/0x{:05x} RF18A/B=0x{:05x}/0x{:05x} "
+        "RFmodeTbl(0xc08/0xe08)=0x{:08x}/0x{:08x}",
+        _device.rtw_read16(0x0100), _device.rtw_read32(0x0608),
+        _device.rtw_read32(0x0808), _hal.dbg_rf_read(0, 0x0),
+        _hal.dbg_rf_read(1, 0x0), _hal.dbg_rf_read(0, 0x18),
+        _hal.dbg_rf_read(1, 0x18), _device.rtw_read32(0x0c08),
+        _device.rtw_read32(0x0e08));
+  }
   _logger->info("RtlJaguar2Device: entering RX loop (ch={})", channel.Channel);
 
   /* RX loop: async bulk-IN URB queue; walk the aggregated 8822B RX descriptors

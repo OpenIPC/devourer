@@ -70,6 +70,16 @@ public:
    * front-end receives nothing. Run after the channel is set. */
   void do_lck();
 
+  /* Grant the antenna to WLAN (WiFi-only coex). 8822B is a WiFi+BT combo: on
+   * power-up the PTA/antenna switch can be owned by BT, leaving the WL RX
+   * front-end deaf (correct BB/RF config but no energy reaches the LNA). Ported
+   * verbatim from ex_hal8822b_wifi_only_hw_config: switch to WL-side controller,
+   * gnt_wl=1/gnt_bt=0, antenna mux to WL. Must run before enable_rx. */
+  void coex_wlan_only();
+
+  /* Debug: direct RF register read (direct-BB window). For RX bring-up probes. */
+  uint32_t dbg_rf_read(uint8_t path, uint32_t addr) { return rf_read(path, addr); }
+
 private:
   /* config_phydm_parameter_init_8822b: OFDM/CCK block enable via 0x808[29:28]
    * (post=0x3) / disable (pre=0x0). */

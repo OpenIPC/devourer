@@ -497,17 +497,33 @@ void HalJaguar2::do_lck() {
   _logger->info("Jaguar2: LCK done");
 }
 
+/* ex_hal8822b_wifi_only_hw_config: grant the antenna to WLAN. Without this the
+ * combo chip leaves the antenna switch owned by BT and the WL RX is deaf. */
+void HalJaguar2::coex_wlan_only() {
+  _device.phy_set_bb_reg(0x004c, 0x01800000, 0x2); /* BB control */
+  _device.phy_set_bb_reg(0x0cb4, 0xff, 0x77);      /* SW control */
+  _device.phy_set_bb_reg(0x0974, 0x300, 0x3);      /* antenna mux switch */
+  _device.phy_set_bb_reg(0x1990, 0x300, 0x0);
+  _device.phy_set_bb_reg(0x0cbc, 0x80000, 0x0);
+  _device.phy_set_bb_reg(0x0070, 0xff000000, 0x0e); /* WL-side controller */
+  _device.phy_set_bb_reg(0x1704, 0xffffffff, 0x7700);     /* gnt_wl=1 gnt_bt=0 */
+  _device.phy_set_bb_reg(0x1700, 0xffffffff, 0xc00f0038);
+  _logger->info("Jaguar2: coex WL-only antenna grant applied");
+}
+
 void HalJaguar2::enable_rx() {
   /* CR (0x100) full MAC enable: TRX-DMA | PROTOCOL | SCHEDULE | MACTX | MACRX
    * (+ENSWBCN), matching the jaguar3 RX-enable value 0x06FF. init_mac_cfg only
    * set the DMA bits; without MACRXEN (BIT7) the MAC RX engine never runs. */
   _device.rtw_write16(0x0100, 0x06FF);
-  /* Promiscuous RX for monitor: accept all frames (RCR AAP|APM|AM|AB|APWRMGT|
-   * ADF|AMF|HTC-LOC + APP_PHYST). */
-  /* RCR = the working kernel value at SS (rtw88_8822bu golden), which delivers
-   * RX to bulk-IN. Includes APP_PHYST/APP_ICV etc; plus AAP (BIT0) for monitor
-   * promiscuity so non-directed frames are accepted. */
-  _device.rtw_write32(0x0608, 0xF410400E | (1u << 0));
+  /* Promiscuous RX for monitor. The frame-type-accept bits are the critical
+   * ones: ADF(BIT11)/ACF(BIT12)/AMF(BIT13) gate data/control/management frames
+   * at WMAC — without them the BB decodes frames (CRC-OK) but the MAC RX FIFO
+   * stays empty (RXPKT_NUM=0). Value = the vendor monitor RCR (hal_com.c:
+   * RCR_AAP|APM|AM|AB|APWRMGT|ADF|AMF|APP_PHYST_RXFF|APP_MIC|APP_ICV) plus ACF
+   * so control frames are captured too:
+   *   0x7000282F | ACF(0x1000) = 0x7000382F. */
+  _device.rtw_write32(0x0608, 0x7000382Fu);
 
   /* Interim fixed IGI (initial gain) until the phydm DIG thread is ported: the
    * BB/AGC table default leaves IGI too low, so the RX drowns in false alarms
@@ -515,7 +531,7 @@ void HalJaguar2::enable_rx() {
    * and yields clean OFDM CRC-OK frames. */
   _device.phy_set_bb_reg(0x0c50, 0x7f, 0x40);
   _device.phy_set_bb_reg(0x0e50, 0x7f, 0x40);
-  _logger->info("Jaguar2: RX enabled (CR=0x06ff, RCR=0xf410400f, IGI=0x40)");
+  _logger->info("Jaguar2: RX enabled (CR=0x06ff, RCR=0x7000382f, IGI=0x40)");
 }
 
 } /* namespace jaguar2 */

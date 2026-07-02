@@ -63,12 +63,38 @@ private:
   void rxk2_setting(uint8_t path, bool is_gs);
   void set_rf0x8(uint8_t path);
 
+  /* --- nctl (0x1b00 bank) LTE-coex gnt + measurement one-shots --- */
+  uint32_t ltec_read(uint16_t reg);
+  void ltec_write(uint16_t reg, uint32_t mask, uint32_t val);
+  bool check_cal(uint8_t path, uint8_t cmd); /* returns fail */
+  bool lok_one_shot(uint8_t path);
+  bool rxk_gsearch(uint8_t path, uint8_t step);
+  bool one_shot(uint8_t path, uint8_t idx);
+  bool rx_iqk_by_path(uint8_t path);
+  void iqk_by_path_subfunction(uint8_t path);
+  void iqk_by_path();
+  void start_iqk();
+  void iqk_init();
+
   RtlUsbAdapter _device;
   Logger_t _logger;
   uint8_t _cut;
   bool _2t2r;
   bool _band2g = true; /* set per iqk_trigger */
+  uint8_t _bw = 0;     /* 0=20MHz (2.4G monitor) */
   uint8_t _tmp1bcc = 0x12;
+
+  /* IQK run state (dm_iqk_info subset; fresh-IQK path, no reload/CFIR cache) */
+  int _iqk_step = 1;
+  int _rxiqk_step = 1;
+  int _kcount = 0;
+  uint8_t _retry[2][3] = {};    /* [path][TXIQK|RXIQK1|RXIQK2] */
+  uint8_t _gs_retry[2][2] = {}; /* [path][gs1|gs2] */
+  bool _lok_fail[2] = {true, true};
+  uint8_t _rxiqk_fail_code[2] = {};
+  uint8_t _lna_idx = 0;
+  bool _isbnd = false;
+  uint32_t _tmp_gntwl = 0;
 };
 
 } /* namespace jaguar2 */

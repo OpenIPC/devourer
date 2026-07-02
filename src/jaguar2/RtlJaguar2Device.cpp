@@ -228,6 +228,24 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
    * efuse/table-calibrated TXAGC; DEVOURER_TX_PWR=0xNN forces a flat reference
    * (SDR-visibility debug knob). */
   bring_up(channel);
+  if (getenv("DEVOURER_TX_RSVD")) {
+    /* FW reserved-page download — the kernel does this on interface-up (usbmon:
+     * FIFOPAGE_CTRL_2 beacon-head arm + bulk-OUT template + bcn-valid). The FW
+     * requires its rsvd page before it enables the MAC TX scheduler. This dummy
+     * template (null-data + qos-null placeholders) exercises the mechanism but
+     * is NOT the real template set — a minimal blob did not unlock TX, so the
+     * FW likely needs the true probe_rsp/null/qos_null templates (per
+     * _rtw_hal_set_fw_rsvd_page) and/or the iddma copy step. Opt-in for now. */
+    std::vector<uint8_t> tmpl(256, 0);
+    tmpl[0] = 0x48;   /* null-data FC */
+    tmpl[128] = 0x88; /* qos-null FC */
+    tmpl[129] = 0x01;
+    uint16_t pg = _macinit.rsvd_boundary();
+    bool ok = _fw.download_rsvd_page(pg, tmpl.data(),
+                                     static_cast<uint32_t>(tmpl.size()));
+    _logger->info("Jaguar2: FW rsvd-page download {} (pg={})",
+                  ok ? "OK" : "FAIL", pg);
+  }
   if (getenv("DEVOURER_NO_DROPDATA")) {
     /* Clear BIT_DROP_DATA_EN (0x020C[9], set by init_usb_cfg). The MAC drops TX
      * frames whose length fails the desc OFFSET/size check; a mismatch would

@@ -31,6 +31,15 @@ public:
    * rsvd-page chunk (from the queue/page allocation). Set by MacInit before
    * download_firmware(). */
   void set_rsvd_boundary(uint16_t b) { _rsvd_boundary = b; }
+  uint16_t rsvd_boundary() const { return _rsvd_boundary; }
+
+  /* Download an FW reserved-page template blob to page `pg_addr` (halmac
+   * dl_rsvd_page_88xx == send_fw_page). The FW requires its reserved-page set
+   * before it enables the MAC TX scheduler; without it RX works but TX frames
+   * never leave the MAC. */
+  bool download_rsvd_page(uint16_t pg_addr, const uint8_t *buf, uint32_t size) {
+    return send_fw_page(pg_addr, buf, size);
+  }
 
 private:
   bool start_dlfw(const uint8_t *fw_bin, size_t size);

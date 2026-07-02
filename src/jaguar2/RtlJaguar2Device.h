@@ -1,7 +1,9 @@
 #ifndef RTL_JAGUAR2_DEVICE_H
 #define RTL_JAGUAR2_DEVICE_H
 
+#include <atomic>
 #include <optional>
+#include <thread>
 
 #include "logger.h"
 #include "IRtlDevice.h"
@@ -53,6 +55,12 @@ private:
   Action_ParsedRadioPacket _packetProcessor = nullptr;
   int _tx_pwr_override = -1;
   std::optional<devourer::TxMode> _tx_mode_default;
+
+  /* DIG (dynamic initial gain) background thread — periodically runs
+   * HalJaguar2::dig_step so IGI tracks the false-alarm rate for weak-signal RX. */
+  std::thread _dig_thread;
+  std::atomic<bool> _dig_stop{false};
+  void stop_dig();
 };
 
 #endif /* RTL_JAGUAR2_DEVICE_H */

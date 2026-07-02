@@ -543,6 +543,41 @@ void HalJaguar2::coex_wlan_only() {
   _logger->info("Jaguar2: coex WL-only antenna grant applied");
 }
 
+void HalJaguar2::dig_step() {
+  /* Per-window false-alarm counts (accumulated since the last reset below). */
+  uint32_t ofdm_fa = _device.rtw_read32(0x0f48) & 0xffff;
+  uint32_t cck_fa = _device.rtw_read32(0x0a5c) & 0xffff;
+  uint32_t fa = ofdm_fa + cck_fa;
+  _last_fa = fa;
+
+  /* Reset the hold-type FA/CCA counters so the next window is a fresh delta
+   * (11AC phydm_reset_bb_hw_cnt path): OFDM-FA 0x9a4[17] (1->0 = reset->enable),
+   * CCK-FA 0xa2c[15] (0->1), CCA 0xb58[0] (1->0). */
+  _device.phy_set_bb_reg(0x09a4, 1u << 17, 1);
+  _device.phy_set_bb_reg(0x09a4, 1u << 17, 0);
+  _device.phy_set_bb_reg(0x0a2c, 1u << 15, 0);
+  _device.phy_set_bb_reg(0x0a2c, 1u << 15, 1);
+  _device.phy_set_bb_reg(0x0b58, 1u << 0, 1);
+  _device.phy_set_bb_reg(0x0b58, 1u << 0, 0);
+
+  uint8_t igi = static_cast<uint8_t>(_device.rtw_read8(0x0c50) & 0x7f);
+  uint8_t ni = igi;
+  if (fa > 750)
+    ni = static_cast<uint8_t>(igi + 2);
+  else if (fa > 500)
+    ni = static_cast<uint8_t>(igi + 1);
+  else if (fa < 250)
+    ni = static_cast<uint8_t>(igi >= 2 ? igi - 2 : igi);
+  if (ni < 0x1c)
+    ni = 0x1c;
+  if (ni > 0x3e)
+    ni = 0x3e;
+  if (ni != igi) {
+    _device.phy_set_bb_reg(0x0c50, 0x7f, ni);
+    _device.phy_set_bb_reg(0x0e50, 0x7f, ni);
+  }
+}
+
 void HalJaguar2::enable_rx() {
   /* CR (0x100) full MAC enable: TRX-DMA | PROTOCOL | SCHEDULE | MACTX | MACRX
    * (+ENSWBCN), matching the jaguar3 RX-enable value 0x06FF. init_mac_cfg only

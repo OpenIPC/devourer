@@ -77,6 +77,16 @@ public:
    * gnt_wl=1/gnt_bt=0, antenna mux to WL. Must run before enable_rx. */
   void coex_wlan_only();
 
+  /* One DIG (dynamic initial gain) iteration: read the per-window false-alarm
+   * count (OFDM 0xf48 + CCK 0xa5c), reset the counters, and nudge IGI
+   * (0xc50/0xe50) up when FA is high or down when FA is low, bounded
+   * [0x1c, 0x3e]. Ported from phydm phydm_new_igi_by_fa (fa_th {250,500,750},
+   * step {2,1,2}). Called on a ~100 ms cadence by the orchestrator's DIG thread
+   * so weak signals are caught (low IGI) without drowning in false alarms. */
+  void dig_step();
+  uint8_t dbg_igi() { return static_cast<uint8_t>(_device.rtw_read8(0x0c50) & 0x7f); }
+  uint32_t dbg_last_fa() const { return _last_fa; }
+
   /* Debug: direct RF register read (direct-BB window). For RX bring-up probes. */
   uint32_t dbg_rf_read(uint8_t path, uint32_t addr) { return rf_read(path, addr); }
   /* Debug: RF register write (3-wire LSSI). For canary-patch bisect. */
@@ -107,6 +117,7 @@ private:
   Logger_t _logger;
   ChipVersion _ver{};
   bool _aac_checked = false;
+  uint32_t _last_fa = 0; /* last DIG-window false-alarm count (telemetry) */
 };
 
 } /* namespace jaguar2 */

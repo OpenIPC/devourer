@@ -23,7 +23,7 @@ RtlJaguar2Device::RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger)
     : _device{device}, _logger{logger}, _hal{device, logger},
       _macinit{device, logger}, _fw{device, logger} {}
 
-RtlJaguar2Device::~RtlJaguar2Device() = default;
+RtlJaguar2Device::~RtlJaguar2Device() { stop_dig(); }
 
 void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
@@ -161,6 +161,24 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                     (r284 >> 16) & 1);
     }
   }
+  /* Start the DIG thread: track IGI to the false-alarm rate so weak signals are
+   * caught without an FA storm (a fixed IGI can't span the range). */
+  _dig_stop = false;
+  if (!getenv("DEVOURER_SKIP_DIG")) {
+    const bool dig_dbg = getenv("DEVOURER_RX_DEBUG") != nullptr;
+    _dig_thread = std::thread([this, dig_dbg] {
+      int tick = 0;
+      while (!_dig_stop && !g_devourer_should_stop) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        _hal.dig_step();
+        if (dig_dbg && (++tick % 10) == 0)
+          _logger->info("Jaguar2 DIG: IGI=0x{:02x} FA={}", _hal.dbg_igi(),
+                        _hal.dbg_last_fa());
+      }
+    });
+    _logger->info("RtlJaguar2Device: DIG thread started");
+  }
+
   _logger->info("RtlJaguar2Device: entering RX loop (ch={})", channel.Channel);
 
   /* RX loop: async bulk-IN URB queue; walk the aggregated 8822B RX descriptors
@@ -196,8 +214,15 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
     }
   };
   _device.bulk_read_async_loop(32 * 1024, 8, on_data, g_devourer_should_stop);
+  stop_dig();
   _logger->info("RtlJaguar2Device: RX loop exited ({} frames, {} reads)", frames,
                 reads);
+}
+
+void RtlJaguar2Device::stop_dig() {
+  _dig_stop = true;
+  if (_dig_thread.joinable())
+    _dig_thread.join();
 }
 
 void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
@@ -220,7 +245,7 @@ bool RtlJaguar2Device::send_packet(const uint8_t * /*packet*/,
 
 SelectedChannel RtlJaguar2Device::GetSelectedChannel() { return _channel; }
 
-void RtlJaguar2Device::Stop() {}
+void RtlJaguar2Device::Stop() { stop_dig(); }
 
 void RtlJaguar2Device::SetTxMode(const devourer::TxMode &mode) {
   _tx_mode_default = mode;

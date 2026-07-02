@@ -259,4 +259,182 @@ void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type) {
                 rfe_type);
 }
 
+namespace {
+uint32_t bit_shift(uint32_t mask) {
+  if (mask == 0)
+    return 0;
+  uint32_t s = 0;
+  while (!((mask >> s) & 1u))
+    s++;
+  return s;
+}
+} /* namespace */
+
+uint32_t HalJaguar2::rf_read(uint8_t path, uint32_t addr) {
+  /* Jaguar 3-wire LSSI read (phy_RFSerialRead): write the RF offset to
+   * rHSSIRead_Jaguar (0x8B0[7:0]), then read back the 20-bit value from the
+   * SI/PI readback register per the path's PI-mode bit. */
+  constexpr uint16_t rHSSIRead = 0x08B0;
+  constexpr uint32_t bHSSIRead_addr = 0xFF;
+  constexpr uint32_t rRead_data = 0x000FFFFF;
+  const uint16_t pi_sel = (path == 0) ? 0x0C00 : 0x0E00;
+  const uint16_t si_read = (path == 0) ? 0x0D08 : 0x0D48;
+  const uint16_t pi_read = (path == 0) ? 0x0D04 : 0x0D44;
+
+  if (addr != 0x0)
+    _device.phy_set_bb_reg(0x0838, 0x8, 1); /* rCCAonSec: CCA off while reading */
+
+  _device.phy_set_bb_reg(rHSSIRead, bHSSIRead_addr, addr & 0xff);
+
+  /* C-cut needs a settle before the readback latches. */
+  if (_ver.cut >= 2)
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+  uint32_t pi_mode = (_device.rtw_read32(pi_sel) >> 2) & 0x1;
+  uint16_t rb = pi_mode ? pi_read : si_read;
+  uint32_t v = _device.rtw_read32(rb);
+  return (v & rRead_data) >> bit_shift(rRead_data);
+}
+
+void HalJaguar2::rf_set(uint8_t path, uint32_t addr, uint32_t mask,
+                        uint32_t value) {
+  if (mask == 0)
+    return;
+  uint32_t data = value;
+  if (mask != 0x000FFFFF) { /* not a full-register (RFREGOFFSETMASK) write */
+    uint32_t orig = rf_read(path, addr);
+    data = (orig & ~mask) | (value << bit_shift(mask));
+  }
+  rf_write(path, addr, data);
+}
+
+/* phydm_rfe_ifem (rfe_type 0 path) — antenna-switch pins for 2.4G/5G. */
+void HalJaguar2::rfe_ifem(uint8_t channel) {
+  const bool g2 = channel <= 14;
+  if (g2) {
+    _device.phy_set_bb_reg(0x0cb0, 0xffffff, 0x745774);
+    _device.phy_set_bb_reg(0x0eb0, 0xffffff, 0x745774);
+    _device.phy_set_bb_reg(0x0cb4, 0x0000ff00, 0x57);
+    _device.phy_set_bb_reg(0x0eb4, 0x0000ff00, 0x57);
+  } else {
+    _device.phy_set_bb_reg(0x0cb0, 0xffffff, 0x477547);
+    _device.phy_set_bb_reg(0x0eb0, 0xffffff, 0x477547);
+    _device.phy_set_bb_reg(0x0cb4, 0x0000ff00, 0x75);
+    _device.phy_set_bb_reg(0x0eb4, 0x0000ff00, 0x75);
+  }
+  _device.phy_set_bb_reg(0x0cbc, 0x3f, 0x0);
+  _device.phy_set_bb_reg(0x0cbc, (1u << 11) | (1u << 10), 0x0);
+  _device.phy_set_bb_reg(0x0ebc, 0x3f, 0x0);
+  _device.phy_set_bb_reg(0x0ebc, (1u << 11) | (1u << 10), 0x0);
+  /* antenna switch table: 2T2R => 2TX/2RX branch (rx_ant_status == BB_PATH_AB) */
+  if (g2) {
+    _device.phy_set_bb_reg(0x0ca0, 0x0000ffff, 0xa501);
+    _device.phy_set_bb_reg(0x0ea0, 0x0000ffff, 0xa501);
+  } else {
+    _device.phy_set_bb_reg(0x0ca0, 0x0000ffff, 0xa5a5);
+    _device.phy_set_bb_reg(0x0ea0, 0x0000ffff, 0xa5a5);
+  }
+}
+
+void HalJaguar2::igi_toggle() {
+  uint32_t igi = _device.rtw_read32(0x0c50) & 0x7f;
+  _device.phy_set_bb_reg(0x0c50, 0x7f, igi - 2);
+  _device.phy_set_bb_reg(0x0c50, 0x7f, igi);
+  _device.phy_set_bb_reg(0x0e50, 0x7f, igi - 2);
+  _device.phy_set_bb_reg(0x0e50, 0x7f, igi);
+}
+
+void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
+  const bool g2 = channel <= 14;
+  const bool r2t2r = _ver.rf_2t2r != 0;
+
+  /* --- config_phydm_switch_channel_8822b --- */
+  rfe_ifem(channel); /* RFE pins for the band (rfe_type 0) */
+  (void)rfe_type;
+
+  uint32_t rf18 = rf_read(0, 0x18);
+  rf18 &= ~((1u << 18) | (1u << 17) | 0xffu); /* clear band/MASKBYTE0 */
+  rf18 |= channel;
+
+  if (g2) {
+    _device.phy_set_bb_reg(0x0958, 0x1f, 0x0);       /* AGC table idx 0 */
+    _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x96a); /* fc for CFO tracking */
+    if (channel == 14) {
+      _device.phy_set_bb_reg(0x0a24, 0xffffffff, 0x00006577);
+      _device.phy_set_bb_reg(0x0a28, 0x0000ffff, 0x0000);
+    } else {
+      _device.phy_set_bb_reg(0x0a24, 0xffffffff, 0x384f6577);
+      _device.phy_set_bb_reg(0x0a28, 0x0000ffff, 0x1525);
+    }
+  } else {
+    /* 5G AGC table + fc (config_phydm_switch_channel_8822b 5G branch) */
+    if (channel >= 36 && channel <= 64)
+      _device.phy_set_bb_reg(0x0958, 0x1f, 0x1);
+    else if (channel >= 100 && channel <= 144)
+      _device.phy_set_bb_reg(0x0958, 0x1f, 0x2);
+    else if (channel >= 149)
+      _device.phy_set_bb_reg(0x0958, 0x1f, 0x3);
+    if (channel >= 36 && channel <= 48)
+      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x494);
+    else if (channel >= 52 && channel <= 64)
+      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x453);
+    else if (channel >= 100 && channel <= 116)
+      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x452);
+    else if (channel >= 118 && channel <= 177)
+      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x412);
+  }
+
+  /* RF 0xBE[17:15] phase-noise: 0 for 2.4G (5G low/mid/high tables omitted —
+   * 20MHz 2.4G RX is the current target). */
+  rf_set(0, 0xbe, (1u << 17) | (1u << 16) | (1u << 15), g2 ? 0x0 : 0x0);
+
+  if (channel == 144) {
+    rf_set(0, 0xdf, (1u << 18), 0x1);
+    rf18 |= (1u << 17);
+  } else {
+    rf_set(0, 0xdf, (1u << 18), 0x0);
+    if (channel > 144)
+      rf18 |= (1u << 18);
+    else if (channel >= 80)
+      rf18 |= (1u << 17);
+  }
+
+  /* --- config_phydm_switch_bandwidth_8822b (20 MHz) --- */
+  uint32_t v8ac = _device.rtw_read32(0x08ac);
+  v8ac &= 0xFFCFFC00;
+  v8ac |= 0x0; /* CHANNEL_WIDTH_20 = 0 */
+  _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+  _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1); /* ADC buffer clock */
+  rf18 |= (1u << 11) | (1u << 10);                 /* RF BW 20M */
+
+  rf_write(0, 0x18, rf18);
+  if (r2t2r)
+    rf_write(1, 0x18, rf18);
+
+  /* RF read-error debug toggle (RF_A 0xb8[19] 0->1) */
+  rf_set(0, 0xb8, (1u << 19), 0);
+  rf_set(0, 0xb8, (1u << 19), 1);
+
+  /* RX-path toggle (0x808 MASKBYTE0) to leave RX dead-zone, then IGI. rx_ant
+   * = A+B (0x3) for 2T2R => 0x33 (CCK+OFDM both paths). */
+  uint8_t rx_ant = r2t2r ? 0x3 : 0x1;
+  _device.phy_set_bb_reg(0x0808, 0xff, 0x0);
+  _device.phy_set_bb_reg(0x0808, 0xff, rx_ant | (rx_ant << 4));
+  igi_toggle();
+
+  _logger->info("Jaguar2: channel set ch={} bw={} (rf18=0x{:05x})", channel,
+                (int)bw, rf18);
+}
+
+void HalJaguar2::enable_rx() {
+  /* CR (0x100) full MAC enable: TRX-DMA | PROTOCOL | SCHEDULE | MACTX | MACRX
+   * (+ENSWBCN), matching the jaguar3 RX-enable value 0x06FF. init_mac_cfg only
+   * set the DMA bits; without MACRXEN (BIT7) the MAC RX engine never runs. */
+  _device.rtw_write16(0x0100, 0x06FF);
+  /* Promiscuous RX for monitor: accept all frames (RCR AAP|APM|AM|AB|APWRMGT|
+   * ADF|AMF|HTC-LOC + APP_PHYST). */
+  _device.rtw_write32(0x0608, 0xF400220E | (1u << 28) | (1u << 22));
+  _logger->info("Jaguar2: RX enabled (CR=0x06ff, RCR promiscuous)");
+}
+
 } /* namespace jaguar2 */

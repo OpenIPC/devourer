@@ -49,6 +49,15 @@ public:
    * the conditional table blocks. */
   void apply_bb_rf_agc_tables(uint8_t rfe_type);
 
+  /* Set RF channel + bandwidth (config_phydm_switch_channel_8822b +
+   * config_phydm_switch_bandwidth_8822b): RF18 tune, band AGC/fc/CCK-filter,
+   * RFE antenna pins, RX-path + IGI toggle. bw: 0=20MHz (only 20 supported for
+   * now). rfe_type selects the RFE-pin table. rf_2t2r drives path-B writes. */
+  void set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type);
+
+  /* Enable the MAC RX engine (CR MACRXEN + promiscuous RCR for monitor). */
+  void enable_rx();
+
 private:
   /* config_phydm_parameter_init_8822b: OFDM/CCK block enable via 0x808[29:28]
    * (post=0x3) / disable (pre=0x0). */
@@ -59,6 +68,14 @@ private:
   /* RF table writer: Jaguar 3-wire LSSI write (rA/rB_LSSIWrite_Jaguar 0xC90 /
    * 0xE90) — data = (addr<<20)|(val&0xfffff), masked to 28 bits. path: 0=A,1=B. */
   void rf_write(uint8_t path, uint32_t addr, uint32_t value);
+  /* RF 3-wire LSSI read (rHSSIRead_Jaguar 0x8B0 -> rA/rB SI/PI readback). */
+  uint32_t rf_read(uint8_t path, uint32_t addr);
+  /* Masked RF write: full-mask -> direct LSSI write; else read-modify-write. */
+  void rf_set(uint8_t path, uint32_t addr, uint32_t mask, uint32_t value);
+  /* phydm_rfe_ifem 2.4G/5G antenna-switch pins (rfe_type 0 path). */
+  void rfe_ifem(uint8_t channel);
+  /* phydm_igi_toggle_8822b: toggle 0xc50/0xe50 IGI to enter RX mode. */
+  void igi_toggle();
 
   RtlUsbAdapter _device;
   Logger_t _logger;

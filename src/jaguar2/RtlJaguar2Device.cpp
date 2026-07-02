@@ -1,7 +1,13 @@
 #include "RtlJaguar2Device.h"
 
+#include <cstdint>
+#include <span>
 #include <stdexcept>
 #include <utility>
+
+#include "FrameParserJaguar2.h"
+#include "RxPacket.h"
+#include "SignalStop.h" /* g_devourer_should_stop */
 
 /* M0 scaffold: the orchestrator compiles and constructs, but bring-up is not yet
  * wired. Each entry point logs and (for the data-path calls) throws/returns so a
@@ -51,9 +57,47 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   _hal.apply_bb_rf_agc_tables(rfe);
   _logger->info("RtlJaguar2Device: PHY tables applied");
 
-  throw std::runtime_error(
-      "RtlJaguar2Device: PHY tables applied; channel set + RX not yet "
-      "implemented (RTL8822BU port at M4)");
+  /* Channel + bandwidth (RF18 tune, RFE pins, RX-path/IGI), then enable the
+   * MAC RX engine. */
+  _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel), bw, rfe);
+  _hal.enable_rx();
+  _logger->info("RtlJaguar2Device: entering RX loop (ch={})", channel.Channel);
+
+  /* RX loop: async bulk-IN URB queue; walk the aggregated 8822B RX descriptors
+   * per completion and hand each PSDU to the packet processor. */
+  uint64_t frames = 0, reads = 0;
+  auto on_data = [&](const uint8_t *data, int n) {
+    if (++reads <= 8)
+      _logger->info("Jaguar2 RX: completion #{} -> {} bytes", reads, n);
+    uint32_t off = 0;
+    while (off + jaguar2::RXDESC_SIZE_8822B <= static_cast<uint32_t>(n)) {
+      jaguar2::Rx8822bFrame f;
+      if (!jaguar2::parse_rx_8822b(data + off, static_cast<size_t>(n) - off, f))
+        break;
+      if (_packetProcessor) {
+        Packet p{};
+        p.RxAtrib.pkt_len = static_cast<uint16_t>(f.frame_len);
+        p.RxAtrib.crc_err = f.crc_err;
+        p.RxAtrib.icv_err = f.icv_err;
+        p.RxAtrib.data_rate = f.rx_rate;
+        p.RxAtrib.drvinfo_sz = static_cast<uint8_t>(f.drvinfo_size);
+        p.RxAtrib.shift_sz = f.shift;
+        p.RxAtrib.pkt_rpt_type = RX_PACKET_TYPE::NORMAL_RX;
+        p.Data =
+            std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
+        _packetProcessor(p);
+      }
+      if (++frames <= 5)
+        _logger->info("Jaguar2 RX: frame len={} rate={} crc={}", f.frame_len,
+                      f.rx_rate, f.crc_err);
+      if (f.next_offset == 0)
+        break;
+      off += f.next_offset;
+    }
+  };
+  _device.bulk_read_async_loop(32 * 1024, 8, on_data, g_devourer_should_stop);
+  _logger->info("RtlJaguar2Device: RX loop exited ({} frames, {} reads)", frames,
+                reads);
 }
 
 void RtlJaguar2Device::InitWrite(SelectedChannel channel) {

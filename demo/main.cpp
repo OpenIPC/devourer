@@ -262,6 +262,27 @@ static void packetProcessor(const Packet &packet) {
       static const bool keep_corrupted =
           std::getenv("DEVOURER_RX_KEEP_CORRUPTED") != nullptr;
       const bool corrupted = packet.RxAtrib.crc_err || packet.RxAtrib.icv_err;
+      /* DEVOURER_RX_ALLPATHS=1: emit all four RX chains (A,B,C,D) of per-stream
+       * RSSI / SNR / EVM on a distinct <devourer-rxpath> line. Opt-in and
+       * separate so the canonical two-path <devourer-stream>/<devourer-body>
+       * format its regex consumers key on stays untouched. Paths C/D are
+       * non-zero only on the 8814AU (4T4R); on 8812/8821 they read 0. Consumed
+       * by tests/antenna_decorrelation.py to measure inter-chain envelope
+       * correlation and realised diversity gain (spatial-diversity axis). */
+      static const bool rxpath_out =
+          std::getenv("DEVOURER_RX_ALLPATHS") != nullptr;
+      if (rxpath_out && (!corrupted || keep_corrupted)) {
+        printf("<devourer-rxpath>seq=%u rssi=%d,%d,%d,%d snr=%d,%d,%d,%d "
+               "evm=%d,%d,%d,%d\n",
+               packet.RxAtrib.seq_num, packet.RxAtrib.rssi[0],
+               packet.RxAtrib.rssi[1], packet.RxAtrib.rssi[2],
+               packet.RxAtrib.rssi[3], packet.RxAtrib.snr[0],
+               packet.RxAtrib.snr[1], packet.RxAtrib.snr[2],
+               packet.RxAtrib.snr[3], packet.RxAtrib.evm[0],
+               packet.RxAtrib.evm[1], packet.RxAtrib.evm[2],
+               packet.RxAtrib.evm[3]);
+        fflush(stdout);
+      }
       if (stream_out && (!corrupted || keep_corrupted)) {
         /* Per-stream phy soft metrics (RSSI / EVM / SNR for paths A,B; on
          * 8814AU paths C,D would also be non-zero but we surface only A,B
@@ -363,7 +384,44 @@ int main() {
     logger->info("DEVOURER_VID={:04x} (overriding default VID)", target_vid);
   }
   libusb_device_handle *dev_handle = nullptr;
+
+  /* DEVOURER_USB_BUS (+ optional DEVOURER_USB_PORT) select a specific device by
+   * USB topology when several share one VID:PID and even the serial — e.g. two
+   * RTL8814AU dongles (CF-938AC vs CF-960AC) that enumerate identically, so only
+   * the bus/port tells them apart. DEVOURER_USB_PORT is the dotted libusb port
+   * path (as in sysfs `devpath` / `lsusb -t`, e.g. "2.3.2"). When bus is unset,
+   * the VID:PID open loop below runs as before. */
+  if (const char *bus_env = std::getenv("DEVOURER_USB_BUS")) {
+    const auto want_bus = static_cast<uint8_t>(std::strtoul(bus_env, nullptr, 0));
+    const char *port_env = std::getenv("DEVOURER_USB_PORT");
+    libusb_device **list = nullptr;
+    ssize_t n = libusb_get_device_list(ctx, &list);
+    for (ssize_t i = 0; i < n && dev_handle == NULL; ++i) {
+      libusb_device_descriptor dd{};
+      if (libusb_get_device_descriptor(list[i], &dd) != 0) continue;
+      if (dd.idVendor != target_vid) continue;
+      if (target_pid != 0 && dd.idProduct != target_pid) continue;
+      if (libusb_get_bus_number(list[i]) != want_bus) continue;
+      if (port_env != nullptr) {
+        uint8_t ports[8];
+        int pc = libusb_get_port_numbers(list[i], ports, sizeof(ports));
+        std::string path;
+        for (int p = 0; p < pc; ++p)
+          path += (path.empty() ? "" : ".") + std::to_string(ports[p]);
+        if (path != port_env) continue;
+      }
+      if (libusb_open(list[i], &dev_handle) == 0)
+        logger->info("Opened device {:04x}:{:04x} on bus {} port {}", dd.idVendor,
+                     dd.idProduct, want_bus, port_env ? port_env : "(any)");
+    }
+    if (list != nullptr) libusb_free_device_list(list, 1);
+    if (dev_handle == NULL)
+      logger->error("DEVOURER_USB_BUS={} PORT={} matched no device", want_bus,
+                    port_env ? port_env : "(any)");
+  }
+
   for (uint16_t pid : kRealtekProductIds) {
+    if (dev_handle != NULL) break;
     if (target_pid != 0 && pid != target_pid) continue;
     dev_handle = libusb_open_device_with_vid_pid(ctx, target_vid, pid);
     if (dev_handle != NULL) {

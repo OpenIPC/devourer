@@ -137,6 +137,12 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   `0x8813` for RTL8814AU); without it, the demo iterates every Realtek PID.
 - `DEVOURER_VID=0xNNNN` — override VID (default `0x0bda`); needed for
   OEM-rebadged dongles like the TP-Link Archer T2U Plus (`2357:0120`).
+- `DEVOURER_USB_BUS=N` (+ optional `DEVOURER_USB_PORT=a.b.c`) — select a device
+  by USB topology instead of first-match VID:PID. Needed when two adapters share
+  one VID:PID **and serial** and can't otherwise be told apart (two RTL8814AU
+  dongles, e.g. CF-938AC vs CF-960AC). `DEVOURER_USB_PORT` is the dotted libusb
+  port path (sysfs `devpath` / `lsusb -t`). Unset = the normal VID:PID open loop.
+  Used by `tests/compare_8814_decorrelation.sh`.
 - `DEVOURER_CHANNEL=N` — override monitor channel.
 - `DEVOURER_SKIP_RESET=1` — skip `libusb_reset_device` before claim; useful
   when picking up a chip whose firmware is already running.
@@ -150,6 +156,13 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   output. This is the entry point for the fused-FEC sub-block-salvage layer
   (see `docs/fused-fec.md`); opt-in, since a body with a corrupt tail is the
   worst-case input for an IP-stack consumer that didn't ask for it.
+- `DEVOURER_RX_ALLPATHS=1` — emit a `<devourer-rxpath>` line per canonical-SA
+  frame carrying all four RX chains (A,B,C,D) of per-stream `rssi`/`snr`/`evm`,
+  where the canonical `<devourer-stream>`/`<devourer-body>` lines surface only
+  A,B. Paths C/D are non-zero only on the 8814AU (4T4R); 0 on 2T2R parts.
+  Opt-in and on a distinct tag so the two-path format its regex consumers key on
+  is untouched. Consumed by `tests/antenna_decorrelation.py` to measure
+  inter-chain envelope correlation and realised diversity gain.
 - `DEVOURER_USB_DEBUG=1` — raise libusb log level from the default WARNING to
   DEBUG (produces ~7 MB per 15 s — has filled `/tmp` mid-capture and adds
   0.5-0.8 s to init even with stderr discarded). `DEVOURER_USB_QUIET` is

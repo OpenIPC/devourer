@@ -172,7 +172,7 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   reverts it, so it targets a single-channel RX capture. The knob for measuring
   the chip's hardware maximal-ratio-combining gain — compare frame delivery at
   `0x11`/`0x33`/`0x77`/`0xFF` over a *marginal* link (see
-  `docs/effective-branches-rotation.md`). A **toggle spec**
+  `docs/measuring-spatial-diversity.md`). A **toggle spec**
   `0xAA:0xBB[:0xCC]@<ms>` (e.g. `0x22:0xFF@300`) cycles the mask on a timer
   thread instead of setting it once, printing a `<devourer-rxpath-mask>0xNN`
   marker inline with the frame stream on each switch — the stimulus for the

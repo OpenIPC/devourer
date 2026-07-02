@@ -1,13 +1,16 @@
-# Measuring effective diversity branches by rotation
+# Measuring spatial diversity on a multi-chain adapter
 
 A multi-chain adapter's spec sheet counts **RF chains** (2T2R, 4T4R). What a
 diversity receiver actually gets is **effective branches** — the number of chains
-whose fading is independent enough to add diversity. Those are not the same
-number. Two adapters built on identical 4T4R silicon can deliver very different
-effective diversity if one wires four decorrelated antennas and the other feeds
-four chains from two antennas. This document is a lab procedure for finding the
-truth experimentally, using nothing but a second adapter and your hands to rotate
-the device under test.
+whose fading is independent enough to add diversity — and, ultimately, the
+**combining gain** those branches deliver. Those are not the same as the chain
+count. Two adapters built on identical 4T4R silicon can behave very differently if
+one wires four decorrelated antennas and the other feeds four chains from two.
+This document is a lab procedure for finding the truth experimentally, using
+nothing but a second adapter and your hands — with three escalating stimuli
+(**rotate** the device in place, **relocate** the transmitter into multipath, and
+**move** the receiver), because how much diversity you can measure depends
+entirely on how much you make the channel vary.
 
 It is written as an instruction: the concept first, then the method, then how to
 run it, read it, and not fool yourself.
@@ -62,11 +65,18 @@ Rotation measures **pattern/orientation decorrelation** under strong line of
 sight. That is a *proxy* for the multipath envelope correlation a deployed link
 sees — not identical to it, but it captures the property that dominates whether an
 adapter's chains are redundant: do the antennas respond differently to the same
-incoming wave. The *relative* comparison between two adapters on the same bench is
-robust; the absolute ρ shifts in a real multipath field. Treat rotation as the
-quick screen and relocation/mobility as the confirmation.
+incoming wave. Treat rotation as the quick screen for *potential*; relocation and
+motion are where you learn what a deployment actually gets — and, as the closing
+sections show, that can shift or even invert the rotation ranking.
 
-## The method
+## The method — correlation screen (rotation)
+
+This section covers the quick screen: measure the antennas' *correlation* and
+effective-branch count by rotating the receiver. It answers "could these chains
+help?" The two sections after it turn that potential into a realised
+combining-gain number ("do they help?") — first with path-masking, then under
+motion. All three share the same beacon and per-chain readout; only the stimulus
+and what you compute change.
 
 The receiver only needs a controlled, steady signal to measure against, and a way
 to report each chain's level per frame:
@@ -109,7 +119,8 @@ to report each chain's level per frame:
 The receiver's per-chain emission is opt-in (it does not disturb the normal
 output): the RX demo publishes an all-chains line per beacon frame when asked,
 and the analyser turns a capture into the report above. A capture is only valid
-if the operator rotates the adapter for its full duration.
+if the operator keeps the adapter moving for its full duration — rotating for the
+correlation screen, translating for the motion measurement.
 
 - **One adapter, one shot.** `tests/run_antenna_decorrelation.sh` builds
   everything, brings up the beacon transmitter (and waits for it to actually
@@ -125,6 +136,11 @@ if the operator rotates the adapter for its full duration.
   capture, and has a hardware-independent self-test that validates the correlation
   estimator, the effective-branch metric, and the combining math against
   synthesised correlated fading — run that first if you change the tool.
+- **Combining gain and motion.** The path-masking sweep restricts the active
+  chains via `DEVOURER_RX_PATHS=0xNN` (see the next section); the motion
+  measurement toggles that mask (`DEVOURER_RX_PATHS=0x22:0xFF@300`) while you move
+  the receiver, and `tests/mrc_mobility.py` reports the per-mask delivery and the
+  shifting-best-chain trace.
 
 The metric to capture is the received level; SNR and EVM are also emitted if you
 prefer to correlate on those.
@@ -163,18 +179,25 @@ Two USB adapters built on the same 4T4R chip, differing only in antenna
 front-end, measured on one bench against one beacon on the 2.4 GHz test channel,
 each rotated vigorously through a capture:
 
-| Adapter | Antennas | Worst \|ρ\| | Effective branches N_eff | MRC gain at 1 % outage | Verdict |
-|---|---|---|---|---|---|
-| 4-internal-antenna puck | 4 on-PCB internal | 0.19 | **3.8** of 4 | ~14 dB | well decorrelated |
-| 2-external-dipole stick | 2 external dipoles | 0.64 | **2.6** of 4 | ~11 dB | partially correlated |
+| Adapter | Antennas | Worst \|ρ\| | Effective branches N_eff | Verdict |
+|---|---|---|---|---|
+| 4-internal-antenna puck | 4 on-PCB internal | 0.19 | **3.8** of 4 | well decorrelated |
+| 2-external-dipole stick | 2 external dipoles | 0.64 | **2.6** of 4 | partially correlated |
 
 The stick drives four RF chains from only two physical antennas, so two of its
 chains are strongly coupled and its effective branch count sits near its antenna
 count, not its chain count. The puck's four genuine antennas decorrelate on every
-pair and it delivers close to its full four-branch diversity — and materially more
-combining gain at the low-outage tail, which is where a long-range link lives.
-Same silicon, different truth. That difference is invisible on the spec sheet and
-obvious in five minutes of rotation.
+pair, so on this rotation screen it shows the higher *potential* — N_eff 3.8 vs
+2.6.
+
+But note the word *potential*: N_eff from rotation says how decorrelated the
+antennas **could** be if you exercise every orientation. Whether that potential
+turns into realised **combining gain** is a separate question — the one the next
+two sections answer — and the answer can **invert this ranking.** The puck's four
+antennas are packed close together and see nearly the same channel at rest, so
+their potential only pays off under motion; the stick's two widely-spaced dipoles
+decorrelate even stationary. Same silicon, different truth — and "more antennas"
+is not the same as "more diversity."
 
 ## From branch count to combining gain
 
@@ -205,13 +228,59 @@ Combining gain and effective branches are two views of the same property:
 N_eff says how many independent chains exist; the path-masking curve says how
 much link margin they actually buy.
 
-## Toward the gold standard
+## Diversity under motion — where it actually pays
 
-Rotation answers "are these chains independent enough to matter" cheaply and
-comparatively. To turn a relative screen into a deployment number, repeat the
-capture with the transmitter relocated into genuine non-line-of-sight multipath
-(another room, a balcony, across a floor) and, ultimately, with one end in
-motion. The tooling is identical — only the stimulus changes; the beacon can run
-on a second host anywhere the receiver can still hear it. Expect the *ordering*
-between adapters to hold and the absolute correlation to rise toward the values a
-flying link actually experiences.
+Everything above measures *potential* — how decorrelated the antennas could be.
+The decisive question for a real link is whether combining delivers a gain **while
+the receiver moves**, because a deployed link (a flying drone, a walking operator)
+is never static. This is a different and more revealing measurement than the
+static combining sweep, and it needs the comparison to be motion-fair.
+
+**The trap.** Comparing a single-chain capture against an all-chains capture
+*sequentially* is invalid under motion: the receiver is at a different point in
+its fade during each, so any difference is motion, not combining. The comparison
+must sample the *same* fading process. The fix is to **alternate the active-chain
+set fast relative to the motion** — toggle a fixed single chain against all chains
+every few hundred milliseconds while the operator moves the receiver continuously,
+and tag every frame with the set that was active when it arrived. Because the
+toggle is fast and the motion slow, both configurations see the same fades.
+
+**The stimulus.** Translate the receiver through space — slide it back and forth
+through several wavelengths — rather than rotating it in place. Translation sweeps
+the antennas through the multipath standing-wave field, which is what makes each
+chain's fading rise and fall and the best chain change; rotation only re-points a
+fixed pattern.
+
+**What to read.** Per toggle window (equal duration, so directly comparable):
+frames delivered, and especially the *worst* windows. The signatures of real
+diversity under motion are (1) the **best chain keeps changing** — no single
+antenna wins most windows, where a static position had one clear winner; (2) a
+*fixed* single antenna hits **deep-fade windows** (dropouts), which combining
+**fills**; and (3) combining **halves the delivery variance**. The headline is not
+the modest mean gain — it is the **elimination of the dropouts** that a
+single-antenna video link would show as frozen frames.
+
+**Always run a static control** at the same spot with motion off. The result that
+matters is the *difference* between moving and static: a combining gain (and a
+shifting best chain) that appear only when moving are the confirmation that the
+value is diversity, not link margin.
+
+### What this reveals about antenna design
+
+Run across adapters, the moving-vs-static contrast exposes a design truth the
+static numbers hide: **physical antenna spacing decides whether diversity helps at
+rest.** Widely-separated antennas sit at different points of the standing-wave
+field and so decorrelate *even stationary* — they show a real combining gain
+static and only a little more moving. Antennas packed close together (a compact
+internal array) see nearly the same channel at rest — one dominates, combining is
+worthless — and only decorrelate once the array moves. Both converge to a similar
+gain under motion, and both eliminate the fixed-antenna dropouts. So a *stationary*
+ground station wants widely-spaced external antennas; a compact internal array
+earns its extra chains only on a *moving* platform. Note this can invert the
+static rotation ranking — rotation measures orientation potential, but real fading
+decorrelation rewards spacing, so fewer well-separated antennas can beat more
+closely-packed ones.
+
+The tooling is the same throughout — only the stimulus (rotate, relocate, move)
+and the mask schedule (fixed vs toggled) change; the beacon can run on a second
+host anywhere the receiver still hears it.

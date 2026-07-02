@@ -146,6 +146,13 @@ private:
   std::thread _qd_thread;
   std::atomic<bool> _qd_stop{false};
 
+  /* DEVOURER_RX_PATHS toggle thread — cycles the RX-path mask (0x808) for the
+   * mobile/fading combining measurement. */
+  void start_rx_path_toggle(const std::vector<uint8_t> &masks,
+                            uint32_t interval_ms);
+  std::thread _rxmask_thread;
+  std::atomic<bool> _rxmask_stop{false};
+
   std::thread _therm_thread;
   std::atomic<bool> _therm_stop{false};
   /* Packed last thermal snapshot: bit0 = valid, [8:15] = raw,

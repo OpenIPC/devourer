@@ -4,8 +4,10 @@
 #include "SignalStop.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -413,10 +415,33 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
    * (IQK saves/restores 0x808); a later channel switch reverts it to the table
    * default, so it targets a single-channel RX capture. The 8814 has 4 paths;
    * on 8812/8821 the high bits are no-ops. */
+  /* A toggle spec `0xAA:0xBB[:0xCC]@<ms>` cycles the mask on a timer thread
+   * instead of setting it once — the stimulus for the mobile/fading combining
+   * measurement: alternate a fixed single chain vs all-4 fast relative to the
+   * operator's motion, so both configs sample the same fading process. Each
+   * switch prints a `<devourer-rxpath-mask>0xNN` marker inline with the frame
+   * stream so the analyser can tag each frame with the active mask. A plain
+   * `0xNN` applies once, as before. */
   if (const char *e = std::getenv("DEVOURER_RX_PATHS")) {
-    auto mask = static_cast<uint8_t>(std::strtoul(e, nullptr, 0));
-    _device.rtw_write8(0x808, mask);
-    _logger->info("DEVOURER_RX_PATHS: RX-path mask 0x808[7:0]=0x{:02x}", mask);
+    std::string spec(e);
+    auto at = spec.find('@');
+    if (at != std::string::npos && spec.find(':') != std::string::npos) {
+      uint32_t interval_ms =
+          static_cast<uint32_t>(std::strtoul(spec.c_str() + at + 1, nullptr, 0));
+      std::vector<uint8_t> masks;
+      for (size_t pos = 0; pos < at;) {
+        size_t colon = spec.find(':', pos);
+        size_t end = (colon == std::string::npos || colon > at) ? at : colon;
+        masks.push_back(static_cast<uint8_t>(
+            std::strtoul(spec.substr(pos, end - pos).c_str(), nullptr, 0)));
+        pos = end + 1;
+      }
+      start_rx_path_toggle(masks, interval_ms);
+    } else {
+      auto mask = static_cast<uint8_t>(std::strtoul(spec.c_str(), nullptr, 0));
+      _device.rtw_write8(0x808, mask);
+      _logger->info("DEVOURER_RX_PATHS: RX-path mask 0x808[7:0]=0x{:02x}", mask);
+    }
   }
 
   _logger->info("Listening air...");
@@ -455,6 +480,10 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
   }
   for (auto &t : workers)
     t.join();
+
+  _rxmask_stop.store(true);
+  if (_rxmask_thread.joinable())
+    _rxmask_thread.join();
 
 #if 0
   _device.UsbDevice.SetBulkDataHandler(BulkDataHandler);
@@ -530,6 +559,35 @@ RtlJaguarDevice::~RtlJaguarDevice() {
   if (_therm_thread.joinable()) {
     _therm_thread.join();
   }
+  _rxmask_stop.store(true);
+  if (_rxmask_thread.joinable()) {
+    _rxmask_thread.join();
+  }
+}
+
+/* Cycle the RX-path mask (0x808 byte 0) through `masks` every `interval_ms` on a
+ * background thread, printing a `<devourer-rxpath>mask` marker on each switch.
+ * The control-transfer write runs concurrently with the RX bulk-IN workers on a
+ * different endpoint, which libusb permits (see the queue-depth poller). Used by
+ * the mobile/fading combining measurement. */
+void RtlJaguarDevice::start_rx_path_toggle(const std::vector<uint8_t> &masks,
+                                           uint32_t interval_ms) {
+  if (masks.empty() || interval_ms == 0)
+    return;
+  _logger->info("DEVOURER_RX_PATHS toggle: {} masks @ {} ms", masks.size(),
+                interval_ms);
+  _rxmask_thread = std::thread([this, masks, interval_ms]() {
+    size_t i = 0;
+    while (!_rxmask_stop.load()) {
+      uint8_t m = masks[i++ % masks.size()];
+      _device.rtw_write8(0x808, m);
+      std::printf("<devourer-rxpath-mask>0x%02x\n", m);
+      std::fflush(stdout);
+      for (uint32_t slept = 0; slept < interval_ms && !_rxmask_stop.load();
+           slept += 25)
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+  });
 }
 
 void RtlJaguarDevice::start_queue_depth_poller(uint32_t interval_ms) {

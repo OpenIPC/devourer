@@ -176,6 +176,35 @@ combining gain at the low-outage tail, which is where a long-range link lives.
 Same silicon, different truth. That difference is invisible on the spec sheet and
 obvious in five minutes of rotation.
 
+## From branch count to combining gain
+
+Effective branches tell you how many chains *could* help; the payoff is the
+**combining gain** the receiver actually extracts from them. A multi-antenna
+802.11 chip combines its RX chains in hardware and hands up one decoded frame —
+there is no per-chain baseband to combine in software — so the gain is measured
+by *starving* the chip of chains and watching what it loses:
+
+- Restrict the chip to a subset of its RX chains (one, then two, then all) and
+  compare frame delivery and post-combine link quality at each step. On this
+  driver the active-chain set is a mask on the RX-path-enable register; masking a
+  path drops its per-chain level to the noise floor, confirming the chip is
+  genuinely down a chain (not just hiding a readout).
+- The catch: at a **strong** signal a single chain already decodes everything, so
+  every subset looks identical and you learn nothing. The gain only appears at a
+  **marginal** link — deep enough that a single chain drops frames the full set
+  still recovers. So this measurement, like the correlation one, requires a weak
+  or fading channel (attenuation, distance, or the relocation below), not a
+  bench with the transmitter inches away.
+- Read the result as a curve: frames delivered (or effective SNR) versus number
+  of active chains. Its slope is the realised diversity/array gain, and it should
+  flatten once the added chains are too correlated to help — tying directly back
+  to the effective-branch count. An adapter with N_eff ≈ 2 will stop improving
+  past two chains even if it has four.
+
+Combining gain and effective branches are two views of the same property:
+N_eff says how many independent chains exist; the path-masking curve says how
+much link margin they actually buy.
+
 ## Toward the gold standard
 
 Rotation answers "are these chains independent enough to matter" cheaply and

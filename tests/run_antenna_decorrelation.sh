@@ -37,7 +37,7 @@ CAP="$(mktemp -t devourer-decorr.XXXXXX.log)"
 
 cleanup() {
     # Exact-comm kills only — never a broad pkill pattern.
-    for comm in WiFiDriverDemo WiFiDriverTxDemo; do
+    for comm in WiFiDriverDemo WiFiDriverTxDem; do
         pkill -x "$comm" 2>/dev/null || true
     done
     rm -f "$CAP" "${TXLOG:-}" 2>/dev/null || true

@@ -403,6 +403,22 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
   StartWithMonitorMode(channel);
   SetMonitorChannel(channel);
 
+  /* DEVOURER_RX_PATHS=0xNN restricts which RX chains the chip enables/combines,
+   * by masking the RX-path-enable register (0x808 byte 0: bits 0/4 = path A
+   * CCK/OFDM, 1/5 = B, 2/6 = C, 3/7 = D). Default is all paths (0xFF, from the
+   * BB table). This is the knob for measuring the chip's hardware maximal-ratio
+   * combining gain: capture per-chain metrics (DEVOURER_RX_ALLPATHS) at 0x11
+   * (A only), 0x33 (A+B), 0x77 (A+B+C), 0xFF (all) and compare frame delivery
+   * at a marginal link. Written after SetMonitorChannel so it is the final word
+   * (IQK saves/restores 0x808); a later channel switch reverts it to the table
+   * default, so it targets a single-channel RX capture. The 8814 has 4 paths;
+   * on 8812/8821 the high bits are no-ops. */
+  if (const char *e = std::getenv("DEVOURER_RX_PATHS")) {
+    auto mask = static_cast<uint8_t>(std::strtoul(e, nullptr, 0));
+    _device.rtw_write8(0x808, mask);
+    _logger->info("DEVOURER_RX_PATHS: RX-path mask 0x808[7:0]=0x{:02x}", mask);
+  }
+
   _logger->info("Listening air...");
   /* Keep several bulk-IN transfers in flight at once (mirrors the kernel's ~4
    * always-posted RX URBs — confirmed via usbmon: rtw88 re-submits each URB

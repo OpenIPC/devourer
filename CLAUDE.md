@@ -163,6 +163,16 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   Opt-in and on a distinct tag so the two-path format its regex consumers key on
   is untouched. Consumed by `tests/antenna_decorrelation.py` to measure
   inter-chain envelope correlation and realised diversity gain.
+- `DEVOURER_RX_PATHS=0xNN` — (Jaguar1 RX) restrict which RX chains the chip
+  enables/combines by masking the RX-path-enable register (`0x808` byte 0: bits
+  0/4 = path A CCK/OFDM, 1/5 = B, 2/6 = C, 3/7 = D). Default all paths (`0xFF`).
+  `0x11` = A only, `0x33` = A+B, `0x77` = A+B+C. Validated on the 8814: a masked
+  path's per-chain RSSI collapses to the noise floor while the enabled ones stay
+  up. Applied after the channel set (so it survives IQK); a later channel switch
+  reverts it, so it targets a single-channel RX capture. The knob for measuring
+  the chip's hardware maximal-ratio-combining gain — compare frame delivery at
+  `0x11`/`0x33`/`0x77`/`0xFF` over a *marginal* link (see
+  `docs/effective-branches-rotation.md`).
 - `DEVOURER_USB_DEBUG=1` — raise libusb log level from the default WARNING to
   DEBUG (produces ~7 MB per 15 s — has filled `/tmp` mid-capture and adds
   0.5-0.8 s to init even with stderr discarded). `DEVOURER_USB_QUIET` is

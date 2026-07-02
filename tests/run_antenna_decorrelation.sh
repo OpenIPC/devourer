@@ -40,7 +40,7 @@ cleanup() {
     for comm in WiFiDriverDemo WiFiDriverTxDemo; do
         pkill -x "$comm" 2>/dev/null || true
     done
-    rm -f "$CAP" 2>/dev/null || true
+    rm -f "$CAP" "${TXLOG:-}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -66,13 +66,39 @@ PY="$HERE/.venv/bin/python"
 if [ -n "${TX_PID:-}" ]; then
     [ -x "$TXDEMO" ] || { echo "WiFiDriverTxDemo not built" >&2; exit 1; }
     echo "== starting TX beacon on PID $TX_PID ch$CHANNEL =="
-    DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$CHANNEL" "$TXDEMO" >/dev/null 2>&1 &
-    sleep 3   # let it claim + start injecting before RX starts counting
+    TXLOG="$(mktemp -t devourer-txbeacon.XXXXXX.log)"
+    stdbuf -oL -eL env DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$CHANNEL" "$TXDEMO" >"$TXLOG" 2>&1 &
+    # Poll until the beacon actually injects — TX+RX each need ~7-10s to init
+    # (efuse read + settle), and the 8812 TX occasionally fails to claim on the
+    # first try when launched alongside the RX's USB reset. Waiting for a
+    # confirmed inject (a `TX #.. rc=1` line) instead of a fixed sleep is what
+    # makes a zero-frame capture (dead TX window) reliable to avoid.
+    for _ in $(seq 1 30); do
+        grep -q 'TX #.* rc=1' "$TXLOG" 2>/dev/null && break
+        sleep 1
+    done
+    if ! grep -q 'TX #.* rc=1' "$TXLOG" 2>/dev/null; then
+        echo "TX beacon did not confirm an inject within 30s — check $TXLOG" >&2
+        exit 3
+    fi
+    echo "== TX beacon confirmed injecting =="
 fi
 
-echo "== capturing RX per-chain metrics for ${DURATION}s (ch$CHANNEL) =="
 RX_ENV=(DEVOURER_RX_ALLPATHS=1 DEVOURER_CHANNEL="$CHANNEL")
 [ -n "${RX_PID:-}" ] && RX_ENV+=(DEVOURER_PID="$RX_PID")
+# Optional USB-topology selection to pin one of several identical adapters.
+[ -n "${USB_BUS:-}" ] && RX_ENV+=(DEVOURER_USB_BUS="$USB_BUS")
+[ -n "${USB_PORT:-}" ] && RX_ENV+=(DEVOURER_USB_PORT="$USB_PORT")
+
+# ROTATE=1 turns this into a decorrelation-stimulus capture: a static bench
+# channel can't be measured (see antenna_decorrelation.py's fading guard), so
+# the operator rotates/tilts the adapter through the window to sweep each
+# antenna's pattern against the fixed TX. A short countdown gives time to start.
+if [ "${ROTATE:-0}" = "1" ]; then
+    echo "== ROTATION CAPTURE — start rotating/tilting the adapter continuously =="
+    for s in 3 2 1; do echo "   capture starts in $s..."; sleep 1; done
+fi
+echo "== capturing RX per-chain metrics for ${DURATION}s (ch$CHANNEL) =="
 env "${RX_ENV[@]}" "$DEMO" >"$CAP" 2>/dev/null &
 RX_PID_RUNNING=$!
 sleep "$DURATION"

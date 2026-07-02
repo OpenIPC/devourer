@@ -30,6 +30,7 @@ cleanup() {
     for comm in WiFiDriverDemo WiFiDriverTxDemo; do
         pkill -x "$comm" 2>/dev/null || true
     done
+    rm -f "${TXLOG:-}" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -57,8 +58,18 @@ mapfile -t DEVS < <(
 echo "== found ${#DEVS[@]} RTL8814AU device(s): ${DEVS[*]/#/[}"
 
 echo "== starting beacon TX on PID $TX_PID ch$CHANNEL =="
-DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$CHANNEL" "$TXDEMO" >/dev/null 2>&1 &
-sleep 3
+TXLOG="$(mktemp -t devourer-txbeacon.XXXXXX.log)"
+stdbuf -oL -eL env DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$CHANNEL" "$TXDEMO" >"$TXLOG" 2>&1 &
+# Wait for a confirmed inject rather than a fixed sleep — the 8812 TX needs
+# ~10s to init and occasionally fails to claim on the first try, which would
+# otherwise leave every device's capture empty.
+for _ in $(seq 1 30); do
+    grep -q 'TX #.* rc=1' "$TXLOG" 2>/dev/null && break
+    sleep 1
+done
+grep -q 'TX #.* rc=1' "$TXLOG" 2>/dev/null || {
+    echo "TX beacon did not confirm an inject within 30s — check $TXLOG" >&2; exit 3; }
+echo "== TX beacon confirmed injecting =="
 
 for dev in "${DEVS[@]}"; do
     read -r bus port <<<"$dev"

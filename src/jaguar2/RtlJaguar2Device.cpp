@@ -64,6 +64,7 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   /* Channel + bandwidth (RF18 tune, RFE pins, RX-path/IGI), then enable the
    * MAC RX engine. */
   _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel), bw, rfe);
+  _hal.do_lck(); /* LC calibration — lock the RF LO so the front-end receives */
   _hal.enable_rx();
   _logger->info("RtlJaguar2Device: entering RX loop (ch={})", channel.Channel);
 

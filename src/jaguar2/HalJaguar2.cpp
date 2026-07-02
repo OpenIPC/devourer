@@ -473,6 +473,44 @@ void HalJaguar2::config_trx_mode() {
   _logger->info("Jaguar2: trx_mode configured (path=0x{:x})", path);
 }
 
+void HalJaguar2::do_lck() {
+  /* aac_check_8822b (once): fix the AAC code if out of range. */
+  if (!_aac_checked) {
+    uint32_t temp = (rf_read(0, 0xc9) & 0xf8) >> 3;
+    if (temp < 4 || temp > 7) {
+      rf_set(0, 0xca, (1u << 19), 0x0);
+      rf_set(0, 0xb2, 0x7c000, 0x6);
+    }
+    _aac_checked = true;
+  }
+
+  uint32_t c00 = _device.rtw_read32(0x0c00);
+  uint32_t e00 = _device.rtw_read32(0x0e00);
+  _device.rtw_write32(0x0c00, 0x4);
+  _device.rtw_write32(0x0e00, 0x4);
+  rf_write(0, 0x0, 0x10000);
+  if (_ver.rf_2t2r)
+    rf_write(1, 0x0, 0x10000);
+
+  uint32_t lc_cal = rf_read(0, 0x18); /* backup RF CHNLBW */
+  rf_write(0, 0xc4, 0x01402);         /* disable RTK */
+  rf_write(0, 0x18, lc_cal | 0x08000); /* start LCK */
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  for (int cnt = 0; cnt < 5; cnt++) {
+    if ((rf_read(0, 0x18) & 0x8000) == 0)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  rf_write(0, 0x18, lc_cal);  /* recover channel */
+  rf_write(0, 0xc4, 0x81402); /* enable RTK */
+  _device.rtw_write32(0x0c00, c00);
+  _device.rtw_write32(0x0e00, e00);
+  rf_write(0, 0x0, 0x3ffff);
+  if (_ver.rf_2t2r)
+    rf_write(1, 0x0, 0x3ffff);
+  _logger->info("Jaguar2: LCK done");
+}
+
 void HalJaguar2::enable_rx() {
   /* CR (0x100) full MAC enable: TRX-DMA | PROTOCOL | SCHEDULE | MACTX | MACRX
    * (+ENSWBCN), matching the jaguar3 RX-enable value 0x06FF. init_mac_cfg only

@@ -65,6 +65,11 @@ public:
    * set. 2T2R -> tx=rx=AB (0x3). */
   void config_trx_mode();
 
+  /* halrf LC calibration (_phy_lc_calibrate_8822b): locks the RF LO tank at the
+   * current channel. Without it the RF synthesizer does not lock and the
+   * front-end receives nothing. Run after the channel is set. */
+  void do_lck();
+
 private:
   /* config_phydm_parameter_init_8822b: OFDM/CCK block enable via 0x808[29:28]
    * (post=0x3) / disable (pre=0x0). */
@@ -87,6 +92,7 @@ private:
   RtlUsbAdapter _device;
   Logger_t _logger;
   ChipVersion _ver{};
+  bool _aac_checked = false;
 };
 
 } /* namespace jaguar2 */

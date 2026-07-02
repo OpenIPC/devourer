@@ -560,9 +560,13 @@ void HalJaguar2::enable_rx() {
    * BB/AGC table default leaves IGI too low, so the RX drowns in false alarms
    * (~4000/s) and rarely decodes a clean frame. IGI 0x40 drops the FA rate ~7x
    * and yields clean OFDM CRC-OK frames. */
-  _device.phy_set_bb_reg(0x0c50, 0x7f, 0x40);
-  _device.phy_set_bb_reg(0x0e50, 0x7f, 0x40);
-  _logger->info("Jaguar2: RX enabled (CR=0x06ff, RCR=0x{:08x}, IGI=0x40)", rcr);
+  uint8_t igi = 0x40;
+  if (const char *e = getenv("DEVOURER_IGI"))
+    igi = static_cast<uint8_t>(strtol(e, nullptr, 0) & 0x7f);
+  _device.phy_set_bb_reg(0x0c50, 0x7f, igi);
+  _device.phy_set_bb_reg(0x0e50, 0x7f, igi);
+  _logger->info("Jaguar2: RX enabled (CR=0x06ff, RCR=0x{:08x}, IGI=0x{:02x})",
+                rcr, igi);
 }
 
 } /* namespace jaguar2 */

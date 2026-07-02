@@ -1,0 +1,150 @@
+#ifndef FRAME_PARSER_8822B_H
+#define FRAME_PARSER_8822B_H
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+
+#include "basic_types.h"
+#include "TxDescBits.h"
+#include "RxPacket.h"
+
+/* Jaguar2 (RTL8822B) TX/RX descriptor layout. 8822B is a HalMAC 88xx chip, so
+ * the descriptor is the common 88xx layout — the same 48-byte TX / 24-byte RX
+ * format as Jaguar3 (TX_DESC_SIZE_88XX / RX_DESC_SIZE_88XX both 48/24, verified
+ * identical between the rtl88x2bu and rtl88x2cu halmac trees). Field
+ * offsets/widths are the halmac_tx_desc_nic.h / halmac_rx_desc_nic.h positions;
+ * the 16-bit descriptor checksum at 0x1C is verified by the USB MAC. Macros are
+ * suffixed _8822B (distinct symbols from the Jaguar3 _8822C set). */
+
+namespace jaguar2 {
+
+constexpr size_t TXDESC_SIZE_8822B = 48; /* TX_DESC_SIZE_88XX */
+constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
+
+} /* namespace jaguar2 */
+
+/* --- TX descriptor fields --- */
+#define SET_TX_DESC_TXPKTSIZE_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x00, 0, 16, v)
+#define SET_TX_DESC_OFFSET_8822B(d, v)     SET_BITS_TO_LE_4BYTE((d) + 0x00, 16, 8, v)
+#define SET_TX_DESC_BMC_8822B(d, v)        SET_BITS_TO_LE_4BYTE((d) + 0x00, 24, 1, v)
+#define SET_TX_DESC_LS_8822B(d, v)         SET_BITS_TO_LE_4BYTE((d) + 0x00, 26, 1, v)
+#define SET_TX_DESC_MACID_8822B(d, v)      SET_BITS_TO_LE_4BYTE((d) + 0x04, 0, 7, v)
+#define SET_TX_DESC_QSEL_8822B(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x04, 8, 5, v)
+#define SET_TX_DESC_RATE_ID_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x04, 16, 5, v)
+#define SET_TX_DESC_PKT_OFFSET_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x04, 24, 5, v)
+#define SET_TX_DESC_USE_RATE_8822B(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x0C, 8, 1, v)
+#define SET_TX_DESC_DISDATAFB_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x0C, 10, 1, v)
+#define SET_TX_DESC_DATARATE_8822B(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x10, 0, 7, v)
+#define SET_TX_DESC_DATA_SHORT_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x14, 4, 1, v)
+#define SET_TX_DESC_DATA_BW_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 5, 2, v)
+#define SET_TX_DESC_DATA_LDPC_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 7, 1, v)
+#define SET_TX_DESC_DATA_STBC_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 8, 2, v)
+#define SET_TX_DESC_DISQSELSEQ_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x00, 31, 1, v)
+#define SET_TX_DESC_G_ID_8822B(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x08, 24, 6, v)
+#define SET_TX_DESC_RTY_LMT_EN_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 17, 1, v)
+#define SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 18, 6, v)
+#define SET_TX_DESC_SW_DEFINE_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x18, 0, 12, v)
+#define SET_TX_DESC_TXDESC_CHECKSUM_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x1C, 0, 16, v)
+#define SET_TX_DESC_EN_HWSEQ_8822B(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x20, 15, 1, v)
+#define GET_TX_DESC_PKT_OFFSET_8822B(d)    LE_BITS_TO_4BYTE((d) + 0x04, 24, 5)
+
+/* --- RX descriptor fields --- */
+#define GET_RX_DESC_PKT_LEN_8822B(r)       LE_BITS_TO_4BYTE((r) + 0x00, 0, 14)
+#define GET_RX_DESC_CRC32_8822B(r)         LE_BITS_TO_4BYTE((r) + 0x00, 14, 1)
+#define GET_RX_DESC_ICV_ERR_8822B(r)       LE_BITS_TO_4BYTE((r) + 0x00, 15, 1)
+#define GET_RX_DESC_DRV_INFO_SIZE_8822B(r) LE_BITS_TO_4BYTE((r) + 0x00, 16, 4)
+#define GET_RX_DESC_SHIFT_8822B(r)         LE_BITS_TO_4BYTE((r) + 0x00, 24, 2)
+#define GET_RX_DESC_PHYST_8822B(r)         LE_BITS_TO_4BYTE((r) + 0x00, 26, 1)
+#define GET_RX_DESC_RX_RATE_8822B(r)       LE_BITS_TO_4BYTE((r) + 0x0C, 0, 7)
+
+namespace jaguar2 {
+
+/* Port of fill_txdesc_check_sum (halmac): clear the 16-bit checksum, XOR all
+ * 16-bit LE words, store. Byte-wise read so the on-wire result is host-endian
+ * independent. */
+inline void cal_txdesc_chksum_8822b(uint8_t *txdesc) {
+  SET_TX_DESC_TXDESC_CHECKSUM_8822B(txdesc, 0);
+  auto le16 = [&](size_t word) -> uint16_t {
+    return static_cast<uint16_t>(txdesc[2 * word] |
+                                 (txdesc[2 * word + 1] << 8));
+  };
+  uint16_t pkt_offset =
+      static_cast<uint16_t>(GET_TX_DESC_PKT_OFFSET_8822B(txdesc));
+  uint16_t pairs =
+      static_cast<uint16_t>((pkt_offset + (TXDESC_SIZE_8822B >> 3)) << 1);
+  uint16_t chksum = 0;
+  for (uint16_t i = 0; i < pairs; i++)
+    chksum ^= static_cast<uint16_t>(le16(2 * i) ^ le16(2 * i + 1));
+  SET_TX_DESC_TXDESC_CHECKSUM_8822B(txdesc, chksum);
+}
+
+/* Fill an 8822B data/monitor-inject TX descriptor (48 bytes, zeroed by caller)
+ * and finalise its checksum. Mirrors the Jaguar3 inject field choices. */
+inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
+                                    uint8_t rate_hw, uint8_t rate_id, uint8_t bw,
+                                    bool short_gi, bool ldpc, uint8_t stbc,
+                                    bool bmc = false) {
+  SET_TX_DESC_TXPKTSIZE_8822B(d, pkt_size);
+  SET_TX_DESC_OFFSET_8822B(d, static_cast<uint32_t>(TXDESC_SIZE_8822B));
+  SET_TX_DESC_LS_8822B(d, 1);
+  SET_TX_DESC_BMC_8822B(d, bmc ? 1 : 0);
+  SET_TX_DESC_DISQSELSEQ_8822B(d, 1);
+  SET_TX_DESC_G_ID_8822B(d, 0x3f);
+  SET_TX_DESC_RTY_LMT_EN_8822B(d, 1);
+  SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(d, 12);
+  SET_TX_DESC_MACID_8822B(d, 0x01);
+  SET_TX_DESC_QSEL_8822B(d, 0x12);
+  SET_TX_DESC_RATE_ID_8822B(d, 9);
+  SET_TX_DESC_USE_RATE_8822B(d, 1);
+  SET_TX_DESC_DISDATAFB_8822B(d, 0);
+  SET_TX_DESC_SW_DEFINE_8822B(d, 1);
+  SET_TX_DESC_DATARATE_8822B(d, rate_hw);
+  SET_TX_DESC_DATA_BW_8822B(d, bw);
+  SET_TX_DESC_DATA_SHORT_8822B(d, short_gi ? 1 : 0);
+  SET_TX_DESC_DATA_LDPC_8822B(d, ldpc ? 1 : 0);
+  SET_TX_DESC_DATA_STBC_8822B(d, stbc & 0x3);
+  SET_TX_DESC_EN_HWSEQ_8822B(d, 1);
+  cal_txdesc_chksum_8822b(d);
+}
+
+struct Rx8822bFrame {
+  const uint8_t *frame;
+  uint32_t frame_len;
+  bool crc_err;
+  bool icv_err;
+  uint8_t rx_rate;
+  uint16_t drvinfo_size;
+  uint8_t shift;
+  uint32_t next_offset;
+};
+
+/* Decode the leading RX descriptor of `buf` and locate its PSDU (24-byte desc +
+ * drvinfo + shift). Returns false on a truncated/malformed buffer. */
+inline bool parse_rx_8822b(const uint8_t *buf, size_t buflen,
+                           Rx8822bFrame &out) {
+  if (buf == nullptr || buflen < RXDESC_SIZE_8822B)
+    return false;
+
+  out.frame_len = static_cast<uint32_t>(GET_RX_DESC_PKT_LEN_8822B(buf));
+  out.drvinfo_size =
+      static_cast<uint16_t>(GET_RX_DESC_DRV_INFO_SIZE_8822B(buf) * 8);
+  out.shift = static_cast<uint8_t>(GET_RX_DESC_SHIFT_8822B(buf));
+  out.crc_err = GET_RX_DESC_CRC32_8822B(buf) != 0;
+  out.icv_err = GET_RX_DESC_ICV_ERR_8822B(buf) != 0;
+  out.rx_rate = static_cast<uint8_t>(GET_RX_DESC_RX_RATE_8822B(buf));
+
+  uint32_t frame_off =
+      static_cast<uint32_t>(RXDESC_SIZE_8822B) + out.drvinfo_size + out.shift;
+  uint64_t end = static_cast<uint64_t>(frame_off) + out.frame_len;
+  if (out.frame_len == 0 || end > buflen)
+    return false;
+
+  out.frame = buf + frame_off;
+  out.next_offset = (static_cast<uint32_t>(end) + 7) & ~0x7u;
+  return true;
+}
+
+} /* namespace jaguar2 */
+
+#endif /* FRAME_PARSER_8822B_H */

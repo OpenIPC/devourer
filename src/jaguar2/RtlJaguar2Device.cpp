@@ -361,6 +361,8 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
   std::memcpy(usb_frame.data() + jaguar2::TXDESC_SIZE_8822B, dot11, frame_len);
 
   uint8_t tx_ep = _device.first_bulk_out_ep();
+  if (const char *e = getenv("DEVOURER_TX_EP"))
+    tx_ep = static_cast<uint8_t>(strtol(e, nullptr, 0));
   int rc = _device.bulk_send_sync_ep(tx_ep, usb_frame.data(), usb_frame.size(),
                                      /*timeout_ms=*/20);
   /* TX diagnostic (DEVOURER_TX_DEBUG): every 400 frames, read the BB TX-enable
@@ -369,7 +371,7 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
    * before reaching the BB TX (descriptor/queue/MAC issue). */
   if (getenv("DEVOURER_TX_DEBUG")) {
     static int c = 0;
-    if ((++c % 400) == 0) {
+    if ((++c % 60) == 0) {
       uint32_t ofdm = _device.rtw_read32(0x2de0);
       uint32_t cck = _device.rtw_read32(0x2de4);
       _logger->info("Jaguar2 TXDBG[{}]: OFDM(txen={} txon={}) CCK(txen={} "

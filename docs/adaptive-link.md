@@ -67,11 +67,25 @@ bit, while a faster modulation cuts airtime — and therefore PA-on time — dir
 | Modulation / FEC (time-on-air) | strong | **strong** — less airtime, fewer Joules/bit |
 | Channel / bandwidth | strong | moderate |
 | Transmit power | **strongest** | **weak** — baseline draw dominates |
+| Active receive chains | conditional | **conditional** — see below |
 
 So the energy-minimizing reflex is to ride the highest modulation the link will
 bear (short airtime) and spend only the *minimum* power that clears it. When the
 link is strong, it backs power and FEC off and lets the amplifier idle — exactly
 where a quality-maximizer would instead spend the headroom on bitrate.
+
+**The number of active receive chains is a fade-state lever.** A multi-chain
+receiver can light up one antenna or several. Each extra chain adds always-on
+baseline draw, but combining several chains improves delivery — which, for a
+fixed video rate, means less airtime spent covering losses and the baseline
+amortised over more delivered bits. Whether that trade pays depends entirely on
+how *decorrelated* the antennas are: at a static position, closely-spaced
+antennas see nearly the same channel, so combining barely improves delivery and
+the extra chains are pure baseline cost; under motion the antennas decorrelate,
+so combining fills the fades and the added chains cheapen delivery by more than
+they cost. The energy-minimizing chain count is therefore not fixed — it collapses
+toward a single chain on a still, strong link and opens up as the link fades or
+the platform moves. It adapts to the fade state, not merely to range.
 
 **The quality floor is per-layer, not a single number.** Scalable video splits
 into a base layer (decodable alone, low frame rate) plus enhancement layers that

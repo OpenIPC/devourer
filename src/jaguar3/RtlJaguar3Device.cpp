@@ -69,9 +69,19 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
       static const uint8_t kBfeeMac[6] = {0x00, 0xe0, 0x4c, 0x88, 0x22, 0xce};
       for (uint16_t i = 0; i < 6; ++i)
         _device.rtw_write8(0x0610 + i, kBfeeMac[i]);
-      devourer::bf::arm_beamformee(_device, mac, devourer::bf::kBfeeJaguar23);
-      _logger->info("Jaguar3 BF beamformee armed for beamformer {} — "
-                    "beamformee MAC 00:e0:4c:88:22:ce", bfer);
+      /* DEVOURER_BF_ARM_BFEE_MU=1 upgrades the responder to an MU beamformee,
+       * whose report appends the per-subcarrier delta-SNR (MU Exclusive
+       * Beamforming Report) the SU report omits. Pair with the sounder's
+       * DEVOURER_TX_NDPA_MU=1 (MU feedback bit in the NDPA STA-info). */
+      if (std::getenv("DEVOURER_BF_ARM_BFEE_MU")) {
+        devourer::bf::arm_beamformee_mu(_device, mac, devourer::bf::kBfeeJaguar23);
+        _logger->info("Jaguar3 BF MU-beamformee armed for beamformer {} — "
+                      "beamformee MAC 00:e0:4c:88:22:ce", bfer);
+      } else {
+        devourer::bf::arm_beamformee(_device, mac, devourer::bf::kBfeeJaguar23);
+        _logger->info("Jaguar3 BF beamformee armed for beamformer {} — "
+                      "beamformee MAC 00:e0:4c:88:22:ce", bfer);
+      }
     } else {
       _logger->error("DEVOURER_BF_ARM_BFEE — bad MAC '{}'", bfer);
     }

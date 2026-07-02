@@ -92,3 +92,24 @@ confirmed by an MSB-first control blowing the variance up ~70×. On a short LOS
 bench link the channel is flat across 20 MHz (coherence bandwidth exceeds the
 channel), so per-tone structure is quantisation-limited; a wider bandwidth or a
 multipath geometry is needed to exercise real frequency selectivity.
+
+## MU report — per-subcarrier SNR
+
+An **SU** report carries only the per-tone steering direction plus a per-stream
+*scalar* SNR. An **MU** report additionally appends the *MU Exclusive
+Beamforming Report* — genuine per-subcarrier SNR. Arm the beamformee for MU with
+`DEVOURER_BF_ARM_BFEE_MU=1` and set the NDPA MU feedback bit with
+`DEVOURER_TX_NDPA_MU=1`; `arm_beamformee_mu()` layers the MU group-table
+registers (`0x14C0`/`0x14C4`/`0x14C8`/`0x14CC`, entry `0x1684`) on top of the SU
+responder base, programming the group/user-position directly so no over-the-air
+Group ID Management handshake is needed (recipe from `hal_txbf_8822b_enter()`).
+
+The MU report is longer (e.g. 153 vs 99 bytes for a 20 MHz 2×1). After the
+V-angle field, Realtek packs the SNR as 8-bit values in pairs; **series A** (the
+even bytes) is the per-tone SNR that swings with the channel. `bf_report_decode`
+extracts it, maps it to dB (`22 + 0.25·int8`) and to a modulation per tone
+(256-QAM ≥ 45 dB … QPSK ≥ 21 dB), trimming devourer's trailing chip-FCS/RX
+bytes at the point the smooth SNR series collapses. `--operating-snr N`
+re-centres the *measured* per-tone shape to a stated link budget, which turns
+the real frequency-selective structure into the textbook per-tone QAM ladder
+even when the bench link itself is uniformly strong.

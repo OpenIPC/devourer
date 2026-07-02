@@ -103,7 +103,44 @@ def parse_frame(hexstr: str):
     snr = list(d[29:29 + nc])             # avg SNR per column (signed 0.25 dB)
     angle_bytes = d[29 + nc:len(d) - 4]   # drop 4-byte FCS
     return dict(sa=sa, nc=nc, nr=nr, bw=bw, ng=ng, codebook=codebook,
-                feedback=feedback, snr=snr, angle_bytes=angle_bytes)
+                feedback=feedback, snr=snr, angle_bytes=angle_bytes, raw=d)
+
+
+def parse_mu_snr(frame, ns, vbytes):
+    """Extract per-subcarrier SNR from the MU Exclusive Beamforming Report that
+    an MU report appends after the V angles. Realtek packs it as 8-bit values
+    in pairs (series A = per-tone SNR that swings with the channel, series B =
+    a flatter companion); series A is the one that maps to the textbook
+    per-tone SNR. Trims devourer's trailing chip-FCS/RX junk by stopping when
+    the smooth SNR series collapses. Returns series-A bytes, or None."""
+    d = frame["raw"]
+    mu_start = 29 + frame["nc"] + vbytes
+    if mu_start + 4 >= len(d):
+        return None
+    vals, i, last = [], mu_start, None
+    while i + 1 < len(d) - 2:
+        a = d[i]
+        if a < 40 or (last is not None and abs(a - last) > 40):
+            break                         # trailer/junk boundary
+        vals.append(a); last = a; i += 2
+    return vals if len(vals) >= 4 else None
+
+
+def u8_snr_db(v):
+    """8-bit SNR field -> dB, same mapping as the avg-SNR field (22 + 0.25*int8,
+    range -10..53.75)."""
+    return 22.0 + 0.25 * (v if v < 128 else v - 256)
+
+
+def snr_to_qam(db):
+    """Textbook per-tone SNR -> modulation. Thresholds are illustrative
+    (uncoded ~1e-3 BER ballpark)."""
+    if db >= 45: return "256-QAM", "#"
+    if db >= 37: return "64-QAM ", "%"
+    if db >= 29: return "16-QAM ", "+"
+    if db >= 21: return "QPSK   ", ":"
+    if db >= 15: return "BPSK   ", "."
+    return "unused ", " "
 
 
 def angle_layout(nr: int, nc: int):
@@ -147,6 +184,10 @@ def main() -> int:
     ap.add_argument("--csv", help="write per-subcarrier CSV here")
     ap.add_argument("--max-frames", type=int, default=200)
     ap.add_argument("--msb", action="store_true", help="MSB-first bit order")
+    ap.add_argument("--operating-snr", type=float, default=None,
+                    help="re-centre the MEASURED per-tone SNR shape so its mean "
+                         "= this dB (models a weaker/longer-range link at the "
+                         "same frequency-selectivity — shows the QAM ladder)")
     args = ap.parse_args()
 
     global _MSB
@@ -171,13 +212,21 @@ def main() -> int:
     ns = NS_TABLE.get(bw, {}).get(ng)
     layout = angle_layout(nr, nc)
     na = len(layout)
-    nbits = len(f0["angle_bytes"]) * 8
     print(f"# {len(frames)} reports  SA={f0['sa']}  Nr={nr} Nc={nc} "
           f"BW={20 << bw}MHz Ng={ng} codebook={f0['codebook']} "
           f"feedback={'MU' if f0['feedback'] else 'SU'}")
     if not ns:
         print(f"# unknown Ns for BW={bw} Ng={ng}", file=sys.stderr)
         return 1
+    # For an MU report the angle field is followed by the MU Exclusive report,
+    # so the V-angle byte count is NOT the whole tail — it is Ns x the compact
+    # codebook (10 bits/subcarrier for Realtek's 2x1/2x2). Slice to just the V
+    # angles so the split logic sees the right budget; the rest is per-tone SNR.
+    if f0["feedback"]:
+        vbytes0 = (ns * 10 + 7) // 8
+        for f in frames:
+            f["angle_bytes"] = f["angle_bytes"][:vbytes0]
+    nbits = len(f0["angle_bytes"]) * 8
     per_sc_bits = nbits / ns
     print(f"# angle payload {len(f0['angle_bytes'])} B = {nbits} bits, "
           f"Ns={ns} -> {per_sc_bits:.2f} bits/subcarrier over {na} angle(s)")
@@ -305,6 +354,36 @@ def main() -> int:
             for (k, psi, phi, ratio, var) in rows:
                 fh.write(f"{k},{psi:.5f},{phi:.5f},{ratio:.5f},{var:.6f}\n")
         print(f"# wrote {args.csv}")
+
+    # --- MU per-tone SNR -> QAM (the textbook per-subcarrier picture) ---
+    vbytes = len(f0["angle_bytes"])       # SU baseline V-angle size for this BW
+    if f0["feedback"]:                    # MU: V-angles are only the first vbytes
+        vbytes = (ns * per_sc_bits + 7) // 8
+    mu = [parse_mu_snr(f, ns, vbytes) for f in frames]
+    mu = [m for m in mu if m]
+    if mu:
+        n = min(len(m) for m in mu)
+        avg = [sum(m[k] for m in mu) / len(mu) for k in range(n)]
+        dbs = [u8_snr_db(v) for v in avg]
+        print(f"\n# MU Exclusive Beamforming Report — per-subcarrier SNR "
+              f"({n} groups across {20 << bw} MHz, {len(mu)} reports)")
+        print(f"# measured SNR range {min(dbs):.1f}..{max(dbs):.1f} dB "
+              f"(swing {max(dbs) - min(dbs):.1f} dB)")
+        if args.operating_snr is not None:
+            shift = args.operating_snr - (sum(dbs) / len(dbs))
+            dbs = [d + shift for d in dbs]
+            print(f"# re-centred to operating mean {args.operating_snr:.0f} dB "
+                  f"(measured shape shifted {shift:+.1f} dB — models a weaker "
+                  f"link; the per-tone *shape* is real)")
+        from collections import Counter
+        dist = Counter(snr_to_qam(d)[0].strip() for d in dbs)
+        print("#   freq → (each column = one subcarrier group, low → high)")
+        print("#   SNR:  " + " ".join(f"{d:2.0f}" for d in dbs))
+        print("#   QAM:  " + "  ".join(snr_to_qam(d)[1] for d in dbs))
+        print(f"#   per-tone modulation: "
+              f"{', '.join(f'{k}:{v}' for k, v in dist.items())}")
+    elif f0["feedback"]:
+        print("# MU report flagged but no per-tone SNR series recovered")
     return 0
 
 

@@ -179,7 +179,15 @@ uint8_t HalJaguar2::read_efuse_rfe() {
       break;
   }
   uint8_t rfe = map[kRfeOff];
-  _logger->info("Jaguar2: EFUSE rfe_type=0x{:02x}", rfe);
+  /* Unprogrammed efuse (0xFF) falls back to rfe_type 0 — matches the vendor
+   * Hal_ReadRFEType_8822b error path (rtl8822b_ops.c). Many retail 8812BU/
+   * 8822BU dongles (incl. the Archer T3U) ship with a blank RFE byte. */
+  if (rfe == 0xFF) {
+    _logger->info("Jaguar2: EFUSE rfe_type unprogrammed (0xff) -> default 0");
+    rfe = 0;
+  } else {
+    _logger->info("Jaguar2: EFUSE rfe_type=0x{:02x}", rfe);
+  }
   return rfe;
 }
 

@@ -35,11 +35,12 @@ uint8_t read_chip_id(libusb_device_handle *dev_handle) {
   return id;
 }
 
-/* RTL8822B (Jaguar2) SYS_CFG2 chip-id. PLACEHOLDER — the real value is read
- * off hardware in M2 (ref rtl8822b_ops.c read_chip_version); 0x0F is an unused
- * id that cannot collide with the Jaguar1/Jaguar3 ids above, so until M2 no
- * real chip is misrouted to the (stub) Jaguar2 path. */
-constexpr uint8_t kChipId8822B = 0x0F;
+/* RTL8822B (Jaguar2) SYS_CFG2 chip-id. Read off hardware (M2): a TP-Link Archer
+ * T3U (RTL8822BU) reports REG_SYS_CFG2 (0x00FC) = 0x50, with SYS_CFG1 0x0c492537
+ * (bit27=1 -> 2T2R). Validated against the known 8822C on the same probe
+ * (0x13). Does not collide with the Jaguar1 (0x04/05/08/09) or Jaguar3
+ * (0x13/0x17) ids. */
+constexpr uint8_t kChipId8822B = 0x50;
 
 } /* namespace */
 

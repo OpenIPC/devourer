@@ -262,6 +262,27 @@ static void packetProcessor(const Packet &packet) {
       static const bool keep_corrupted =
           std::getenv("DEVOURER_RX_KEEP_CORRUPTED") != nullptr;
       const bool corrupted = packet.RxAtrib.crc_err || packet.RxAtrib.icv_err;
+      /* DEVOURER_RX_ALLPATHS=1: emit all four RX chains (A,B,C,D) of per-stream
+       * RSSI / SNR / EVM on a distinct <devourer-rxpath> line. Opt-in and
+       * separate so the canonical two-path <devourer-stream>/<devourer-body>
+       * format its regex consumers key on stays untouched. Paths C/D are
+       * non-zero only on the 8814AU (4T4R); on 8812/8821 they read 0. Consumed
+       * by tests/antenna_decorrelation.py to measure inter-chain envelope
+       * correlation and realised diversity gain (spatial-diversity axis). */
+      static const bool rxpath_out =
+          std::getenv("DEVOURER_RX_ALLPATHS") != nullptr;
+      if (rxpath_out && (!corrupted || keep_corrupted)) {
+        printf("<devourer-rxpath>seq=%u rssi=%d,%d,%d,%d snr=%d,%d,%d,%d "
+               "evm=%d,%d,%d,%d\n",
+               packet.RxAtrib.seq_num, packet.RxAtrib.rssi[0],
+               packet.RxAtrib.rssi[1], packet.RxAtrib.rssi[2],
+               packet.RxAtrib.rssi[3], packet.RxAtrib.snr[0],
+               packet.RxAtrib.snr[1], packet.RxAtrib.snr[2],
+               packet.RxAtrib.snr[3], packet.RxAtrib.evm[0],
+               packet.RxAtrib.evm[1], packet.RxAtrib.evm[2],
+               packet.RxAtrib.evm[3]);
+        fflush(stdout);
+      }
       if (stream_out && (!corrupted || keep_corrupted)) {
         /* Per-stream phy soft metrics (RSSI / EVM / SNR for paths A,B; on
          * 8814AU paths C,D would also be non-zero but we surface only A,B

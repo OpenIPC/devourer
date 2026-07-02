@@ -150,6 +150,13 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   output. This is the entry point for the fused-FEC sub-block-salvage layer
   (see `docs/fused-fec.md`); opt-in, since a body with a corrupt tail is the
   worst-case input for an IP-stack consumer that didn't ask for it.
+- `DEVOURER_RX_ALLPATHS=1` — emit a `<devourer-rxpath>` line per canonical-SA
+  frame carrying all four RX chains (A,B,C,D) of per-stream `rssi`/`snr`/`evm`,
+  where the canonical `<devourer-stream>`/`<devourer-body>` lines surface only
+  A,B. Paths C/D are non-zero only on the 8814AU (4T4R); 0 on 2T2R parts.
+  Opt-in and on a distinct tag so the two-path format its regex consumers key on
+  is untouched. Consumed by `tests/antenna_decorrelation.py` to measure
+  inter-chain envelope correlation and realised diversity gain.
 - `DEVOURER_USB_DEBUG=1` — raise libusb log level from the default WARNING to
   DEBUG (produces ~7 MB per 15 s — has filled `/tmp` mid-capture and adds
   0.5-0.8 s to init even with stderr discarded). `DEVOURER_USB_QUIET` is

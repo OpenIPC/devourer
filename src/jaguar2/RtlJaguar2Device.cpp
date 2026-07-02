@@ -46,9 +46,14 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   _macinit.enable_bb_rf(true);
   _logger->info("RtlJaguar2Device: MAC cfg + BB/RF enabled");
 
+  /* PHY: EFUSE rfe_type -> BB/AGC/RF phydm tables (init_bb_reg/init_rf_reg). */
+  uint8_t rfe = _hal.read_efuse_rfe();
+  _hal.apply_bb_rf_agc_tables(rfe);
+  _logger->info("RtlJaguar2Device: PHY tables applied");
+
   throw std::runtime_error(
-      "RtlJaguar2Device: MAC/USB/BB-RF up; PHY tables + RX not yet implemented "
-      "(RTL8822BU port at M4)");
+      "RtlJaguar2Device: PHY tables applied; channel set + RX not yet "
+      "implemented (RTL8822BU port at M4)");
 }
 
 void RtlJaguar2Device::InitWrite(SelectedChannel channel) {

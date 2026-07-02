@@ -36,7 +36,30 @@ public:
   };
   ChipVersion chip_version() const { return _ver; }
 
+  /* Read the EFUSE logical map (standard 88xx OneByteRead + 2-byte-header
+   * decode) and return the RFE type at EEPROM_RFE_OPTION_8822B (0xCA). The
+   * phydm BB/AGC/RF tables are gated on rfe_type; a wrong value leaves the RX
+   * front-end unconfigured. */
+  uint8_t read_efuse_rfe();
+
+  /* Apply the 8822B BB (phy_reg), AGC (agc_tab) and RF (radioa/radiob) phydm
+   * tables via the shared check_positive walker, bracketed by the OFDM/CCK
+   * block disable/enable (config_phydm_parameter_init_8822b PRE/POST). Mirrors
+   * rtl8822b_phy.c: PRE -> init_bb_reg -> init_rf_reg -> POST. rfe_type selects
+   * the conditional table blocks. */
+  void apply_bb_rf_agc_tables(uint8_t rfe_type);
+
 private:
+  /* config_phydm_parameter_init_8822b: OFDM/CCK block enable via 0x808[29:28]
+   * (post=0x3) / disable (pre=0x0). */
+  void phydm_pre_post_setting(bool post);
+  /* BB/AGC table writer: phydm delay opcodes (0xfe..0xf9) else a full-dword BB
+   * register write, +1us settle (odm_config_bb_phy_8812a pattern). */
+  void bb_write(uint32_t addr, uint32_t value);
+  /* RF table writer: Jaguar 3-wire LSSI write (rA/rB_LSSIWrite_Jaguar 0xC90 /
+   * 0xE90) — data = (addr<<20)|(val&0xfffff), masked to 28 bits. path: 0=A,1=B. */
+  void rf_write(uint8_t path, uint32_t addr, uint32_t value);
+
   RtlUsbAdapter _device;
   Logger_t _logger;
   ChipVersion _ver{};

@@ -5,6 +5,9 @@
 #include <thread>
 #include <utility>
 
+#include "PhyTableLoader.h"
+#include "PhyTableLoaderJaguar2.h"
+
 namespace jaguar2 {
 
 namespace {
@@ -128,6 +131,124 @@ void HalJaguar2::read_chip_version() {
   _logger->info("Jaguar2 chip: 8822B cut={} ({}{}) {} (SYS_CFG1=0x{:08x})",
                 _ver.cut, vn[_ver.vendor], _ver.test_chip ? ",test" : "",
                 _ver.rf_2t2r ? "2T2R" : "1T1R", v);
+}
+
+uint8_t HalJaguar2::read_efuse_rfe() {
+  /* Standard 88xx EFUSE logical-map decode (efuse_OneByteRead + 2-byte
+   * extended-header format). Ported from the jaguar3 non-EU path; 8822B uses
+   * the same physical primitive. Walk only far enough to cover 0xCA. */
+  constexpr uint16_t kRfeOff = 0xCA; /* EEPROM_RFE_OPTION_8822B */
+  constexpr uint16_t kPhysMax = 1024;
+  uint8_t map[0xD0];
+  for (auto &b : map) b = 0xFF;
+
+  auto rd = [this](uint16_t a) -> uint8_t {
+    uint8_t d = 0xFF;
+    return _device.efuse_OneByteRead(a, &d) ? d : 0xFF;
+  };
+
+  uint16_t phys = 0;
+  while (phys < kPhysMax) {
+    uint8_t hdr = rd(phys++);
+    if (hdr == 0xFF)
+      break;
+    uint16_t offset;
+    uint8_t word_en;
+    if ((hdr & 0x1F) == 0x0F) { /* extended header */
+      uint8_t ext = rd(phys++);
+      if ((ext & 0x0F) == 0x0F)
+        continue;
+      offset = static_cast<uint16_t>(((ext & 0xF0) >> 1) | ((hdr & 0xE0) >> 5));
+      word_en = ext & 0x0F;
+    } else {
+      offset = (hdr >> 4) & 0x0F;
+      word_en = hdr & 0x0F;
+    }
+    uint16_t base = static_cast<uint16_t>(offset << 3);
+    for (uint8_t i = 0; i < 4; i++) {
+      if (word_en & (1u << i))
+        continue;
+      for (uint8_t k = 0; k < 2; k++) {
+        uint8_t d = rd(phys++);
+        uint16_t idx = static_cast<uint16_t>(base + i * 2 + k);
+        if (idx < sizeof(map))
+          map[idx] = d;
+      }
+    }
+    if (base > kRfeOff + 8)
+      break;
+  }
+  uint8_t rfe = map[kRfeOff];
+  _logger->info("Jaguar2: EFUSE rfe_type=0x{:02x}", rfe);
+  return rfe;
+}
+
+void HalJaguar2::phydm_pre_post_setting(bool post) {
+  /* config_phydm_parameter_init_8822b: 0x808[29:28] = 0 (pre, disable OFDM/CCK)
+   * or 0x3 (post, enable). */
+  _device.phy_set_bb_reg(0x808, (1u << 28) | (1u << 29), post ? 0x3 : 0x0);
+}
+
+void HalJaguar2::bb_write(uint32_t addr, uint32_t value) {
+  switch (addr) {
+  case 0xfe: std::this_thread::sleep_for(std::chrono::milliseconds(50)); return;
+  case 0xfd: std::this_thread::sleep_for(std::chrono::milliseconds(5)); return;
+  case 0xfc: std::this_thread::sleep_for(std::chrono::milliseconds(1)); return;
+  case 0xfb: std::this_thread::sleep_for(std::chrono::microseconds(50)); return;
+  case 0xfa: std::this_thread::sleep_for(std::chrono::microseconds(5)); return;
+  case 0xf9: std::this_thread::sleep_for(std::chrono::microseconds(1)); return;
+  default: break;
+  }
+  _device.phy_set_bb_reg(static_cast<uint16_t>(addr), 0xFFFFFFFFu, value);
+  std::this_thread::sleep_for(std::chrono::microseconds(1));
+}
+
+void HalJaguar2::rf_write(uint8_t path, uint32_t addr, uint32_t value) {
+  if (addr == 0xfe || addr == 0xffe) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    return;
+  }
+  /* Jaguar 3-wire LSSI write: BB reg 0xC90 (path A) / 0xE90 (path B),
+   * data = (rf_addr << 20) | (rf_data & 0xfffff), masked to 28 bits. */
+  const uint16_t lssi = (path == 0) ? 0x0C90 : 0x0E90;
+  uint32_t data_and_addr =
+      (((addr & 0xff) << 20) | (value & 0x000fffffu)) & 0x0fffffffu;
+  _device.phy_set_bb_reg(lssi, 0xFFFFFFFFu, data_and_addr);
+  std::this_thread::sleep_for(std::chrono::microseconds(1));
+}
+
+void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type) {
+  JaguarPhyContext ctx{};
+  ctx.cut_version = _ver.cut;
+  ctx.support_interface = 0x02; /* ODM_ITRF_USB */
+  ctx.support_platform = 0x04;  /* ODM_CE */
+  ctx.package_type = 0;
+  ctx.rfe_type = rfe_type;
+
+  /* rtl8822b_phy.c order: PRE -> init_bb_reg (phy_reg, agc_tab) ->
+   * init_rf_reg (radioa, radiob) -> POST. */
+  phydm_pre_post_setting(/*post=*/false);
+
+  auto bb = [this](uint32_t a, uint32_t v) { bb_write(a, v); };
+  const auto phy_reg = PhyTableLoaderJaguar2::phy_reg();
+  const auto agc_tab = PhyTableLoaderJaguar2::agc_tab();
+  _logger->info("Jaguar2: applying BB phy_reg ({} words) + agc_tab ({} words)",
+                phy_reg.len, agc_tab.len);
+  PhyTableLoader::Load(phy_reg.data, phy_reg.len, ctx, bb);
+  PhyTableLoader::Load(agc_tab.data, agc_tab.len, ctx, bb);
+
+  const auto radioa = PhyTableLoaderJaguar2::radioa();
+  const auto radiob = PhyTableLoaderJaguar2::radiob();
+  _logger->info("Jaguar2: applying RF radioa ({} words) + radiob ({} words)",
+                radioa.len, radiob.len);
+  PhyTableLoader::Load(radioa.data, radioa.len, ctx,
+                       [this](uint32_t a, uint32_t v) { rf_write(0, a, v); });
+  PhyTableLoader::Load(radiob.data, radiob.len, ctx,
+                       [this](uint32_t a, uint32_t v) { rf_write(1, a, v); });
+
+  phydm_pre_post_setting(/*post=*/true);
+  _logger->info("Jaguar2: BB/AGC/RF tables applied (rfe_type=0x{:02x})",
+                rfe_type);
 }
 
 } /* namespace jaguar2 */

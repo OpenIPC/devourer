@@ -81,7 +81,10 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   }
   /* Grant the antenna to WLAN (combo chip) — must precede enable_rx or the WL
    * RX front-end stays deaf with the antenna owned by BT. */
-  _hal.coex_wlan_only();
+  if (!getenv("DEVOURER_SKIP_COEX"))
+    _hal.coex_wlan_only();
+  else
+    _logger->info("Jaguar2: coex WL grant SKIPPED (DEVOURER_SKIP_COEX)");
   _hal.enable_rx();
 
   /* RX bring-up register dump (DEVOURER_RX_DEBUG): confirms the enable_rx /

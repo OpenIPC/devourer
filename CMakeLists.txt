@@ -85,6 +85,7 @@ target_include_directories(WiFiDriver PUBLIC hal)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8814a)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822c)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822e)
+target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822b)
 target_include_directories(WiFiDriver PUBLIC src)
 
 # --- per-chip source groups (see options above) ---
@@ -167,7 +168,10 @@ endif()
 # Single chip, so no per-variant strategy dispatch.
 if(DEVOURER_JAGUAR2)
     target_sources(WiFiDriver PRIVATE
-        src/jaguar2/RtlJaguar2Device.cpp src/jaguar2/RtlJaguar2Device.h)
+        hal/hal8822b_fw.c hal/hal8822b_fw.h
+        hal/phydm/rtl8822b/Hal8822b_PhyTables.c hal/phydm/rtl8822b/Hal8822b_PhyTables.h
+        src/jaguar2/RtlJaguar2Device.cpp src/jaguar2/RtlJaguar2Device.h
+        src/jaguar2/PhyTableLoaderJaguar2.cpp src/jaguar2/PhyTableLoaderJaguar2.h)
     target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2=1)
 endif()
 

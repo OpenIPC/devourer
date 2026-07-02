@@ -203,8 +203,10 @@ gate any more (an HT-MCS radiotap is honoured unconditionally):
 
 - `DEVOURER_TX_RATE=<rate>[/<bw>][/SGI][/LDPC][/STBC]` (case-insensitive). Unset
   = `6M` legacy. Examples: `MCS7`, `MCS7/40/SGI`, `VHT2SS_MCS3/80/LDPC`, `54M`.
-  - `<rate>`: `6M`/`9M`/`12M`/`18M`/`24M`/`36M`/`48M`/`54M` (legacy OFDM),
-    `MCS0`..`MCS31` (HT), or `VHT1SS_MCS0`..`VHT4SS_MCS9` (VHT).
+  - `<rate>`: `1M`/`2M`/`5.5M`/`11M` (CCK, 2.4 GHz only — the chip drops CCK at
+    5 GHz; `1M` is the most robust rate, ~9 dB more link budget than `6M` for a
+    long-range beacon), `6M`/`9M`/`12M`/`18M`/`24M`/`36M`/`48M`/`54M` (legacy
+    OFDM), `MCS0`..`MCS31` (HT), or `VHT1SS_MCS0`..`VHT4SS_MCS9` (VHT).
   - `<bw>`: `20`|`40`|`80`|`160` (default 20; legacy is always 20).
   - `SGI` / `LDPC` / `STBC`: optional modifiers.
 

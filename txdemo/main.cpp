@@ -161,7 +161,44 @@ int main(int argc, char **argv) {
       target_vid = static_cast<uint16_t>(std::strtoul(vid_env, nullptr, 0));
       logger->info("DEVOURER_VID={:04x} (overriding default VID)", target_vid);
     }
+    /* DEVOURER_USB_BUS (+ optional DEVOURER_USB_PORT) select a device by USB
+     * topology when several share one VID:PID and even the serial — e.g. two
+     * identical RTL8814AU dongles. DEVOURER_USB_PORT is the dotted libusb port
+     * path (sysfs `devpath` / `lsusb -t`). Unset = the VID:PID open loop below.
+     * Mirrors the RX demo (demo/main.cpp). */
+    if (const char *bus_env = std::getenv("DEVOURER_USB_BUS")) {
+      const auto want_bus =
+          static_cast<uint8_t>(std::strtoul(bus_env, nullptr, 0));
+      const char *port_env = std::getenv("DEVOURER_USB_PORT");
+      libusb_device **list = nullptr;
+      ssize_t n = libusb_get_device_list(context, &list);
+      for (ssize_t i = 0; i < n && handle == NULL; ++i) {
+        libusb_device_descriptor dd{};
+        if (libusb_get_device_descriptor(list[i], &dd) != 0) continue;
+        if (dd.idVendor != target_vid) continue;
+        if (target_pid != 0 && dd.idProduct != target_pid) continue;
+        if (libusb_get_bus_number(list[i]) != want_bus) continue;
+        if (port_env != nullptr) {
+          uint8_t ports[8];
+          int pc = libusb_get_port_numbers(list[i], ports, sizeof(ports));
+          std::string path;
+          for (int p = 0; p < pc; ++p)
+            path += (path.empty() ? "" : ".") + std::to_string(ports[p]);
+          if (path != port_env) continue;
+        }
+        if (libusb_open(list[i], &handle) == 0)
+          logger->info("Opened device {:04x}:{:04x} on bus {} port {}",
+                       dd.idVendor, dd.idProduct, want_bus,
+                       port_env ? port_env : "(any)");
+      }
+      if (list != nullptr) libusb_free_device_list(list, 1);
+      if (handle == NULL)
+        logger->error("DEVOURER_USB_BUS={} PORT={} matched no device", want_bus,
+                      port_env ? port_env : "(any)");
+    }
+
     for (uint16_t pid : kRealtekProductIds) {
+      if (handle != NULL) break;
       if (target_pid != 0 && pid != target_pid) continue;
       handle = libusb_open_device_with_vid_pid(context, target_vid, pid);
       if (handle != NULL) {

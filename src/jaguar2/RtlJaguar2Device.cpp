@@ -205,7 +205,8 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
             std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
         _packetProcessor(p);
       }
-      if (++frames <= 5)
+      ++frames;
+      if (getenv("DEVOURER_RX_DEBUG"))
         _logger->info("Jaguar2 RX: frame len={} rate={} crc={}", f.frame_len,
                       f.rx_rate, f.crc_err);
       if (f.next_offset == 0)

@@ -1351,9 +1351,9 @@ uint32_t RadioManagementModule::phy_get_tx_bb_swing_8812a(BandType Band,
       } else if (bbSwing_2G == 0)
         swing = 0x00; /* 0 dB */
       else if (bbSwing_2G == -3)
-        swing = 0x05; /* -3 dB */
+        swing = 0x55; /* -3 dB (all 4 paths; matches PHY_GetTxBBSwing_8814A) */
       else if (bbSwing_2G == -6)
-        swing = 0x0A; /* -6 dB */
+        swing = 0xAA; /* -6 dB (all 4 paths) */
       else if (bbSwing_2G == -9)
         swing = 0xFF; /* -9 dB */
       else
@@ -1366,9 +1366,9 @@ uint32_t RadioManagementModule::phy_get_tx_bb_swing_8812a(BandType Band,
       } else if (bbSwing_5G == 0)
         swing = 0x00; /* 0 dB */
       else if (bbSwing_5G == -3)
-        swing = 0x05; /* -3 dB */
+        swing = 0x55; /* -3 dB (all 4 paths; matches PHY_GetTxBBSwing_8814A) */
       else if (bbSwing_5G == -6)
-        swing = 0x0A; /* -6 dB */
+        swing = 0xAA; /* -6 dB (all 4 paths) */
       else if (bbSwing_5G == -9)
         swing = 0xFF; /* -9 dB */
       else

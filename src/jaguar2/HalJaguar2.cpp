@@ -394,6 +394,14 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
   _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1); /* ADC buffer clock */
   rf18 |= (1u << 11) | (1u << 10);                 /* RF BW 20M */
 
+  /* Mask RF18 (RF_CHNLBW) to only its valid fields: channel [7:0], RF-BW-mode
+   * [11:10], band-select [18:17]. The RF radioA table leaves spurious bits 8
+   * and 16 set; the read-modify-write above preserves them, and those extra
+   * bits detune the synth so the OFDM demod never locks (energy detected, zero
+   * PSDUs to MAC). The kernel driver's RF18 is a clean channel|BW value. This
+   * masking was the missing piece for first RX. */
+  rf18 &= 0x00060cffu;
+
   rf_write(0, 0x18, rf18);
   if (r2t2r)
     rf_write(1, 0x18, rf18);

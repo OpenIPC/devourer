@@ -79,6 +79,10 @@ public:
 
   /* Debug: direct RF register read (direct-BB window). For RX bring-up probes. */
   uint32_t dbg_rf_read(uint8_t path, uint32_t addr) { return rf_read(path, addr); }
+  /* Debug: RF register write (3-wire LSSI). For canary-patch bisect. */
+  void dbg_rf_write(uint8_t path, uint32_t addr, uint32_t val) {
+    rf_write(path, addr, val);
+  }
 
 private:
   /* config_phydm_parameter_init_8822b: OFDM/CCK block enable via 0x808[29:28]

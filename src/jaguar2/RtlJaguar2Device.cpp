@@ -99,11 +99,21 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
      * register(s). */
     FILE *f = fopen(pf, "r");
     if (f) {
-      unsigned addr, val;
+      char line[128];
       int n = 0;
-      while (fscanf(f, "%x %x", &addr, &val) == 2) {
-        _device.rtw_write32(static_cast<uint16_t>(addr), val);
-        n++;
+      while (fgets(line, sizeof(line), f)) {
+        unsigned addr, val;
+        if (line[0] == 'A' && sscanf(line + 1, "%x %x", &addr, &val) == 2) {
+          _hal.dbg_rf_write(0, addr, val);
+          n++;
+        } else if (line[0] == 'B' &&
+                   sscanf(line + 1, "%x %x", &addr, &val) == 2) {
+          _hal.dbg_rf_write(1, addr, val);
+          n++;
+        } else if (sscanf(line, "%x %x", &addr, &val) == 2) {
+          _device.rtw_write32(static_cast<uint16_t>(addr), val);
+          n++;
+        }
       }
       fclose(f);
       _logger->info("Jaguar2: BB_PATCH applied {} registers from {}", n, pf);

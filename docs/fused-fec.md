@@ -129,6 +129,32 @@ SDR, or a lockstep-hopping radio — simply add up. `hop_diversity_sim.py` prove
 the recovery threshold against the real codec, and `hop_rx_combine.py` is the
 front-end-agnostic combiner.
 
+### Adding the spatial axis
+
+A multi-chain receiver (see `docs/measuring-spatial-diversity.md`) adds a second,
+orthogonal erasure defence. Frequency diversity and spatial diversity attack a
+channel outage from different directions:
+
+- **frequency (hopping) SPREADS erasures** — a dead channel takes out only a
+  slice of each block rather than the whole block;
+- **spatial (antenna combining) makes a channel LESS LIKELY to die** — a channel
+  is lost only if the combined signal across all antennas is in outage, rarer
+  than any single antenna's.
+
+Because the two act on different terms — one on *how many* symbols a dead channel
+costs, the other on *how often* a channel dies — they multiply. But the spatial
+factor is not free: it is worth only as much as the antennas are decorrelated,
+the quantity the measurement doc quantifies. Independent antennas turn a
+per-branch outage *p* into *p^N*; fully correlated antennas leave it at *p*. So
+the spatial contribution tracks the deployment: a static receiver whose antennas
+see nearly the same channel gets little, while a moving one — whose antennas
+decorrelate — gets the full multiplication. Frequency diversity, by contrast, is
+independent of that correlation, which makes it the dependable axis and spatial
+the conditional bonus. `space_freq_diversity_sim.py` sweeps this against the real
+codec: as the modelled correlation falls from static to mobile, the spatial axis
+goes from near-useless to near-perfect recovery, and the combined
+space-frequency configuration dominates both single axes throughout.
+
 ## Two receive scenarios, one shared framing
 
 The SBI framing, outer code, and per-sub-block CRC erasure decision are identical
@@ -161,6 +187,7 @@ for both receivers. Only the receiver — and thus the inner decode — differs:
 | `soft_erasure_fec.py` | errors-and-erasures Reed-Solomon (BCH form) + soft-reliability GMD; the reference that quantifies the inner-vs-outer soft-information question |
 | `fec_ab_sim.py` | the SBI-vs-plain-block-FEC A/B over measured channels (does SBI beat just adding parity, at equal overhead?) |
 | `hop_diversity_sim.py` | frequency-diversity recovery vs the real RS codec — the single-channel-loss threshold (see `docs/frequency-hopping.md`) |
+| `space_freq_diversity_sim.py` | space×frequency recovery vs the real RS codec — spatial diversity (parameterised by the measured antenna correlation ρ) times frequency hopping |
 | `hop_rx_combine.py` | diversity-RX combiner — merge per-channel symbol feeds into one erasure decode |
 | `test_*.py` | unit tests for each module (215 in the suite) |
 

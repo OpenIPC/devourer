@@ -518,8 +518,18 @@ void HalJaguar2::enable_rx() {
   _device.rtw_write16(0x0100, 0x06FF);
   /* Promiscuous RX for monitor: accept all frames (RCR AAP|APM|AM|AB|APWRMGT|
    * ADF|AMF|HTC-LOC + APP_PHYST). */
-  _device.rtw_write32(0x0608, 0xF400220E | (1u << 28) | (1u << 22));
-  _logger->info("Jaguar2: RX enabled (CR=0x06ff, RCR promiscuous)");
+  /* RCR = the working kernel value at SS (rtw88_8822bu golden), which delivers
+   * RX to bulk-IN. Includes APP_PHYST/APP_ICV etc; plus AAP (BIT0) for monitor
+   * promiscuity so non-directed frames are accepted. */
+  _device.rtw_write32(0x0608, 0xF410400E | (1u << 0));
+
+  /* Interim fixed IGI (initial gain) until the phydm DIG thread is ported: the
+   * BB/AGC table default leaves IGI too low, so the RX drowns in false alarms
+   * (~4000/s) and rarely decodes a clean frame. IGI 0x40 drops the FA rate ~7x
+   * and yields clean OFDM CRC-OK frames. */
+  _device.phy_set_bb_reg(0x0c50, 0x7f, 0x40);
+  _device.phy_set_bb_reg(0x0e50, 0x7f, 0x40);
+  _logger->info("Jaguar2: RX enabled (CR=0x06ff, RCR=0xf410400f, IGI=0x40)");
 }
 
 } /* namespace jaguar2 */

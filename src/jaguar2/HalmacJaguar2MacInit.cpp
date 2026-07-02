@@ -508,7 +508,7 @@ void HalmacJaguar2MacInit::init_usb_cfg() {
   _device.rtw_write8(REG_TXDMA_PQ_MAP, agg_enable);
   _device.rtw_write8(kRxdmaAggPgTh + 3, dma_usb_agg);
   _device.rtw_write16(kRxdmaAggPgTh,
-                      static_cast<uint16_t>(0x05 | (0x20 << 8)));
+                      static_cast<uint16_t>(0x01 << 8)); /* kernel: thr=0 timeout=1 fast flush */
   _logger->info("Jaguar2: init_usb_cfg (RXDMA_MODE=0x{:02x}, RX-agg EN)", v);
 }
 

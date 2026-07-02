@@ -1,8 +1,10 @@
 #include "RtlJaguar2Device.h"
 
+#include <chrono>
 #include <cstdint>
 #include <span>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #include "FrameParserJaguar2.h"

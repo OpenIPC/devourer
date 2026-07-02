@@ -111,9 +111,18 @@ void usb_event_loop(Logger_t _logger, libusb_context *ctx) {
   while (!g_devourer_should_stop) {
     struct timeval tv {0, 100000};
     int r = libusb_handle_events_timeout_completed(ctx, &tv, nullptr);
-    if (r < 0 && r != LIBUSB_ERROR_TIMEOUT) {
-      _logger->error("Error handling events: {}", r);
-      break;
+    /* TIMEOUT is normal poll-expiry; INTERRUPTED (EINTR) is a transient wakeup
+     * (a signal hit the underlying poll, more likely under concurrent USB load).
+     * Neither is fatal. Do NOT break on them: this thread services async TX
+     * completions, so if it exits, the completion callbacks stop firing,
+     * submitted URBs are never freed, and within a few frames every
+     * libusb_submit_transfer fails — the "TX works briefly then every send
+     * fails" wedge (seen intermittently while an RX ran concurrently). Keep
+     * polling; only log a genuinely unexpected error and carry on. */
+    if (r < 0 && r != LIBUSB_ERROR_TIMEOUT && r != LIBUSB_ERROR_INTERRUPTED) {
+      static int logged = 0;
+      if (logged++ < 5)
+        _logger->error("libusb_handle_events: {} (continuing)", r);
     }
   }
 }
@@ -161,7 +170,44 @@ int main(int argc, char **argv) {
       target_vid = static_cast<uint16_t>(std::strtoul(vid_env, nullptr, 0));
       logger->info("DEVOURER_VID={:04x} (overriding default VID)", target_vid);
     }
+    /* DEVOURER_USB_BUS (+ optional DEVOURER_USB_PORT) select a device by USB
+     * topology when several share one VID:PID and even the serial — e.g. two
+     * identical RTL8814AU dongles. DEVOURER_USB_PORT is the dotted libusb port
+     * path (sysfs `devpath` / `lsusb -t`). Unset = the VID:PID open loop below.
+     * Mirrors the RX demo (demo/main.cpp). */
+    if (const char *bus_env = std::getenv("DEVOURER_USB_BUS")) {
+      const auto want_bus =
+          static_cast<uint8_t>(std::strtoul(bus_env, nullptr, 0));
+      const char *port_env = std::getenv("DEVOURER_USB_PORT");
+      libusb_device **list = nullptr;
+      ssize_t n = libusb_get_device_list(context, &list);
+      for (ssize_t i = 0; i < n && handle == NULL; ++i) {
+        libusb_device_descriptor dd{};
+        if (libusb_get_device_descriptor(list[i], &dd) != 0) continue;
+        if (dd.idVendor != target_vid) continue;
+        if (target_pid != 0 && dd.idProduct != target_pid) continue;
+        if (libusb_get_bus_number(list[i]) != want_bus) continue;
+        if (port_env != nullptr) {
+          uint8_t ports[8];
+          int pc = libusb_get_port_numbers(list[i], ports, sizeof(ports));
+          std::string path;
+          for (int p = 0; p < pc; ++p)
+            path += (path.empty() ? "" : ".") + std::to_string(ports[p]);
+          if (path != port_env) continue;
+        }
+        if (libusb_open(list[i], &handle) == 0)
+          logger->info("Opened device {:04x}:{:04x} on bus {} port {}",
+                       dd.idVendor, dd.idProduct, want_bus,
+                       port_env ? port_env : "(any)");
+      }
+      if (list != nullptr) libusb_free_device_list(list, 1);
+      if (handle == NULL)
+        logger->error("DEVOURER_USB_BUS={} PORT={} matched no device", want_bus,
+                      port_env ? port_env : "(any)");
+    }
+
     for (uint16_t pid : kRealtekProductIds) {
+      if (handle != NULL) break;
       if (target_pid != 0 && pid != target_pid) continue;
       handle = libusb_open_device_with_vid_pid(context, target_vid, pid);
       if (handle != NULL) {
@@ -433,7 +479,17 @@ int main(int argc, char **argv) {
    * it applies to Jaguar3 (8822CU/EU) too. The demo's beacon is rate-less, so
    * without this its Jaguar3 TX fell back to MGN_1M (1 Mbps) regardless of
    * DEVOURER_TX_RATE. Per-packet radiotap still overrides. */
-  rtlDevice->SetTxMode(devourer::parse_tx_mode_env());
+  const devourer::TxMode tx_mode_base = devourer::parse_tx_mode_env();
+  rtlDevice->SetTxMode(tx_mode_base);
+
+  /* DEVOURER_TX_STBC_TOGGLE=1 alternates the STBC bit every frame (keeping the
+   * rate from DEVOURER_TX_RATE, which must be HT/VHT for STBC to apply). The RX
+   * reports the received STBC bit per frame, so an alternating TX lets one
+   * moving capture compare STBC vs single-stream delivery on the same fading —
+   * the transmit-side mobility measurement, tagged for free by the receiver. */
+  const bool stbc_toggle = std::getenv("DEVOURER_TX_STBC_TOGGLE") != nullptr;
+  if (stbc_toggle)
+    logger->info("DEVOURER_TX_STBC_TOGGLE: alternating STBC on/off per frame");
 
   std::vector<uint8_t> tx_buf(beacon_frame, beacon_frame + sizeof(beacon_frame));
 
@@ -672,6 +728,11 @@ int main(int argc, char **argv) {
              dwell_no, dwell_no / static_cast<long>(hop_channels.size()), ch,
              tx_count, switch_us, ms_since_start(), mode);
       fflush(stdout);
+    }
+    if (stbc_toggle) {
+      devourer::TxMode m = tx_mode_base;
+      m.stbc = static_cast<uint8_t>(tx_count & 1);   /* 0,1,0,1,… per frame */
+      rtlDevice->SetTxMode(m);
     }
     rc = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
     ++tx_count;

@@ -60,7 +60,7 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 [ -d "$HERE/.venv" ] || uv venv "$HERE/.venv" >/dev/null
-uv pip install --python "$HERE/.venv/bin/python" -q -e "$HERE" >/dev/null
+uv pip install --python "$HERE/.venv/bin/python" -q numpy >/dev/null
 PY="$HERE/.venv/bin/python"
 
 if [ -n "${TX_PID:-}" ]; then

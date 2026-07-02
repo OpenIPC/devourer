@@ -62,6 +62,15 @@ _STREAM = re.compile(
 
 # Correlation bands for the verdict (worst pairwise |rho|).
 GOOD, MODERATE = 0.3, 0.7
+# A valid envelope-correlation estimate needs a *fading* channel. A static
+# near-field bench beacon barely varies (std ~0.5 unit), so the correlation just
+# tracks quantisation noise and means nothing. Require at least this much
+# per-chain spread (metric units) on the strongest-varying chain before trusting
+# the estimate; below it the run is inconclusive and needs motion/multipath.
+MIN_FADING_STD = 2.0
+# A chain pinned to a near-constant value (often a railed/saturated per-path
+# reading, e.g. path C clamping high) carries no information.
+RAIL_STD = 0.15
 
 
 def parse(lines, metric: str = "rssi"):
@@ -152,24 +161,34 @@ def summarise(arr: np.ndarray, metric: str) -> dict:
     np.fill_diagonal(off, np.nan)
     worst = float(np.nanmax(np.abs(off))) if n > 1 else float("nan")
     combo = combining_analysis(arr)
+    std = arr.std(axis=0)
     return {
         "n_frames": n_frames,
         "n_paths": n,
         "metric": metric,
         "mean": arr.mean(axis=0),
-        "std": arr.std(axis=0),
+        "std": std,
         "corr": corr,
         "worst_rho": worst,
         "combo": combo,
+        "max_std": float(std.max()),
+        "railed": [i for i in range(n) if std[i] < RAIL_STD],
+        "fading_ok": float(std.max()) >= MIN_FADING_STD,
     }
 
 
-def verdict(worst_rho: float) -> str:
-    if np.isnan(worst_rho):
+def verdict(s: dict) -> str:
+    if not s["fading_ok"]:
+        return (f"INCONCLUSIVE — channel too static (max per-chain std "
+                f"{s['max_std']:.2f} < {MIN_FADING_STD:.1f} units). Envelope "
+                f"correlation needs a fading channel: move an antenna / add "
+                f"multipath / vary the path, or measure a mobile link.")
+    worst = s["worst_rho"]
+    if np.isnan(worst):
         return "N/A (single chain)"
-    if worst_rho < GOOD:
+    if worst < GOOD:
         return "GOOD — chains well decorrelated, near-full diversity available"
-    if worst_rho < MODERATE:
+    if worst < MODERATE:
         return "MODERATE — partial correlation, diversity gain reduced"
     return "POOR — chains highly correlated, diversity gain largely lost"
 
@@ -184,6 +203,14 @@ def report(s: dict) -> str:
         f"{lb}: mean={m:6.2f} std={sd:5.2f}"
         for lb, m, sd in zip(labels, s["mean"], s["std"])
     ))
+    if s["railed"]:
+        rl = ",".join(labels[i] for i in s["railed"])
+        L.append(f"  NOTE: chain(s) {rl} near-constant (std < {RAIL_STD}) — "
+                 f"likely railed/saturated per-path reading, treat as no-signal")
+    if not s["fading_ok"]:
+        L.append(f"  WARNING: max per-chain std {s['max_std']:.2f} < "
+                 f"{MIN_FADING_STD:.1f} — channel too static for a valid "
+                 f"correlation estimate (see VERDICT)")
     if s["n_paths"] > 1:
         L.append("envelope correlation matrix (linear amplitude):")
         header = "      " + "".join(f"{lb:>7}" for lb in labels)
@@ -204,7 +231,7 @@ def report(s: dict) -> str:
             f"   SC  gain over best single: @10%out={c['sc_gain_p10']:.2f} dB  "
             f"@1%out={c['sc_gain_p1']:.2f} dB"
         )
-    L.append(f"VERDICT: {verdict(s['worst_rho'])}")
+    L.append(f"VERDICT: {verdict(s)}")
     return "\n".join(L)
 
 
@@ -278,6 +305,19 @@ def self_test() -> int:
     status = "ok" if a.shape == (2, 4) else "FAIL"  # stream row zero-padded to 4
     ok &= a.shape == (2, 4)
     print(f"[{status}] parser: 2 rows x 4 cols from mixed formats -> {a.shape}")
+
+    # 5) fading guard: a near-static channel (like a bench beacon) is flagged
+    #    INCONCLUSIVE, and a pinned chain is flagged railed.
+    rng = np.random.default_rng(5)
+    static = 78.0 + 0.3 * rng.standard_normal((2000, 4))
+    static[:, 2] = 82.0  # railed chain
+    s = summarise(static, "rssi")
+    cond = (not s["fading_ok"]) and (2 in s["railed"]) and \
+        verdict(s).startswith("INCONCLUSIVE")
+    status = "ok" if cond else "FAIL"
+    ok &= cond
+    print(f"[{status}] fading guard: static channel -> INCONCLUSIVE, "
+          f"railed={s['railed']}, max_std={s['max_std']:.2f}")
 
     print("=== PASS ===" if ok else "=== FAIL ===")
     return 0 if ok else 1

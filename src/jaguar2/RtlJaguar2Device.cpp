@@ -99,6 +99,18 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
         _hal.dbg_rf_read(1, 0x0), _hal.dbg_rf_read(0, 0x18),
         _hal.dbg_rf_read(1, 0x18), _device.rtw_read32(0x0c08),
         _device.rtw_read32(0x0e08));
+    /* MAC RX-FIFO occupancy poll (0x0284): RXPKT_NUM[31:24] = packets buffered
+     * awaiting DMA, RXDMA_IDLE=BIT17, RXPKT_FULL=BIT16. Distinguishes WMAC-drop
+     * (stays 0) from USB-DMA-stall (climbs). Also poll RXFF read/write ptrs
+     * 0x0288 (RXFF_RD_PTR)/0x028c-ish via 0x0284 dword. */
+    for (int i = 0; i < 10; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+      uint32_t r284 = _device.rtw_read32(0x0284);
+      _logger->info("Jaguar2 MACRX[{}]: 0x284=0x{:08x} (RXPKT_NUM={} "
+                    "RXDMA_IDLE={} FULL={})",
+                    i, r284, (r284 >> 24) & 0xff, (r284 >> 17) & 1,
+                    (r284 >> 16) & 1);
+    }
   }
   _logger->info("RtlJaguar2Device: entering RX loop (ch={})", channel.Channel);
 

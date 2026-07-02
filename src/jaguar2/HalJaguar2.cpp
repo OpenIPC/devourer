@@ -1,6 +1,7 @@
 #include "HalJaguar2.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -401,6 +402,29 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
   rf_set(0, 0xb8, (1u << 19), 0);
   rf_set(0, 0xb8, (1u << 19), 1);
 
+  /* --- phydm_rxdfirpar_by_bw_8822b (RX digital filter, BW20 path) ---
+   * The RX DFIR must match the bandwidth or the OFDM demod filter is wrong:
+   * energy is detected (CCA/FA fire) but no PSDU ever completes and nothing
+   * reaches the MAC RX FIFO. This was the missing piece for first RX. */
+  _device.phy_set_bb_reg(0x0948, (1u << 29) | (1u << 28), 0x2);
+  _device.phy_set_bb_reg(0x094c, (1u << 29) | (1u << 28), 0x2);
+  _device.phy_set_bb_reg(0x0c20, (1u << 31), 0x1);
+  _device.phy_set_bb_reg(0x0e20, (1u << 31), 0x1);
+
+  /* --- phydm_ccapar_by_rfe_8822b (CCA thresholds; rfe_type 0 => iFEM C-cut) ---
+   * col: 2G/5G x 1R/2R. reg82c/830/838 from cca_ifem_ccut. */
+  {
+    const int col = g2 ? (r2t2r ? 1 : 0) : (r2t2r ? 3 : 2);
+    static const uint32_t cca_ifem[3][4] = {
+        {0x75C97010, 0x75C97010, 0x75C97010, 0x75C97010}, /* 0x82c */
+        {0x79a0eaaa, 0x79A0EAAC, 0x79a0eaaa, 0x79a0eaaa}, /* 0x830 */
+        {0x87765541, 0x87746341, 0x87765541, 0x87746341}, /* 0x838 */
+    };
+    _device.phy_set_bb_reg(0x082c, 0xffffffff, cca_ifem[0][col]);
+    _device.phy_set_bb_reg(0x0830, 0xffffffff, cca_ifem[1][col]);
+    _device.phy_set_bb_reg(0x0838, 0xffffffff, cca_ifem[2][col]);
+  }
+
   /* RX-path toggle (0x808 MASKBYTE0) to leave RX dead-zone, then IGI. rx_ant
    * = A+B (0x3) for 2T2R => 0x33 (CCK+OFDM both paths). */
   uint8_t rx_ant = r2t2r ? 0x3 : 0x1;
@@ -523,7 +547,14 @@ void HalJaguar2::enable_rx() {
    * RCR_AAP|APM|AM|AB|APWRMGT|ADF|AMF|APP_PHYST_RXFF|APP_MIC|APP_ICV) plus ACF
    * so control frames are captured too:
    *   0x7000282F | ACF(0x1000) = 0x7000382F. */
-  _device.rtw_write32(0x0608, 0x7000382Fu);
+  uint32_t rcr = 0x7000382Fu;
+  /* DEVOURER_RX_KEEP_CORRUPTED: also accept CRC32/ICV-error frames (ACRC32 BIT8,
+   * AICV BIT9) so the BB's demodulated-but-failed frames still reach the host.
+   * Doubles as a bring-up discriminator: if reads>0 with this set but 0 without,
+   * MAC->USB delivery works and only clean-decode is marginal. */
+  if (getenv("DEVOURER_RX_KEEP_CORRUPTED"))
+    rcr |= (1u << 8) | (1u << 9);
+  _device.rtw_write32(0x0608, rcr);
 
   /* Interim fixed IGI (initial gain) until the phydm DIG thread is ported: the
    * BB/AGC table default leaves IGI too low, so the RX drowns in false alarms
@@ -531,7 +562,7 @@ void HalJaguar2::enable_rx() {
    * and yields clean OFDM CRC-OK frames. */
   _device.phy_set_bb_reg(0x0c50, 0x7f, 0x40);
   _device.phy_set_bb_reg(0x0e50, 0x7f, 0x40);
-  _logger->info("Jaguar2: RX enabled (CR=0x06ff, RCR=0x7000382f, IGI=0x40)");
+  _logger->info("Jaguar2: RX enabled (CR=0x06ff, RCR=0x{:08x}, IGI=0x40)", rcr);
 }
 
 } /* namespace jaguar2 */

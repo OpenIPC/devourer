@@ -9,7 +9,7 @@
  * these bodies with the ported HalMAC / phydm / halrf sub-modules. */
 
 RtlJaguar2Device::RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger)
-    : _device{std::move(device)}, _logger{std::move(logger)} {}
+    : _device{device}, _logger{logger}, _hal{device, logger} {}
 
 RtlJaguar2Device::~RtlJaguar2Device() = default;
 
@@ -17,8 +17,14 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
   _packetProcessor = std::move(packetProcessor);
   _channel = channel;
+  /* M2: power-on + chip-version (validatable on hardware). The remaining
+   * bring-up (firmware DLFW, MAC/BB/RF init, calibration, RX enable) lands in
+   * M3..M5 — until then, Init completes power-on then reports not-yet-ready. */
+  _hal.power_on();
+  _hal.read_chip_version();
   throw std::runtime_error(
-      "RtlJaguar2Device::Init not yet implemented (RTL8822BU port in progress)");
+      "RtlJaguar2Device: power-on OK; RX bring-up not yet implemented "
+      "(RTL8822BU port at M2)");
 }
 
 void RtlJaguar2Device::InitWrite(SelectedChannel channel) {

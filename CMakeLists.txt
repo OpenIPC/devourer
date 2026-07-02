@@ -171,6 +171,7 @@ if(DEVOURER_JAGUAR2)
         hal/hal8822b_fw.c hal/hal8822b_fw.h
         hal/phydm/rtl8822b/Hal8822b_PhyTables.c hal/phydm/rtl8822b/Hal8822b_PhyTables.h
         src/jaguar2/RtlJaguar2Device.cpp src/jaguar2/RtlJaguar2Device.h
+        src/jaguar2/HalJaguar2.cpp src/jaguar2/HalJaguar2.h
         src/jaguar2/PhyTableLoaderJaguar2.cpp src/jaguar2/PhyTableLoaderJaguar2.h)
     target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2=1)
 endif()

@@ -8,6 +8,7 @@
 #include "TxMode.h"
 #include "RtlUsbAdapter.h"
 #include "SelectedChannel.h"
+#include "HalJaguar2.h"
 
 /* RtlJaguar2Device is the orchestrator for the Realtek "Jaguar2" 802.11ac family
  * — RTL8822BU (chip 8822B, 2T2R, USB). It is the Jaguar2 sibling of
@@ -43,6 +44,7 @@ public:
 private:
   RtlUsbAdapter _device;
   Logger_t _logger;
+  jaguar2::HalJaguar2 _hal;
   SelectedChannel _channel{};
   Action_ParsedRadioPacket _packetProcessor = nullptr;
   int _tx_pwr_override = -1;

@@ -163,13 +163,22 @@ bool HalmacJaguar2Fw::send_fw_page(uint16_t pg_addr, const uint8_t *chunk,
   w8(REG_FWHW_TXQ_CTRL + 2, static_cast<uint8_t>(txq2 & ~(1u << 6)));
 
   /* Minimal rsvd-page TX descriptor, matching the vendor rtl88x2bu DLFW golden
-   * capture exactly: TXPKTSIZE + OFFSET + QSEL_BEACON only. The rtl88x2cu path
-   * (jaguar3) additionally sets USE_RATE/DATARATE/DISDATAFB/LS, and that is
-   * harmless on 8822C/E — but on 8822B those extra fields make the beacon-queue
-   * engine mismanage rsvd-page allocation across the DMEM->IMEM segment
-   * boundary, depleting the HIQ so the first IMEM chunk's bulk-OUT NAKs at
-   * 2048 bytes (or fails its bcn-valid latch). Keep it minimal here. */
-  std::vector<uint8_t> frame(TXDESC_SIZE_8822B + size, 0);
+   * (and the in-tree rtw88_8822bu) exactly: TXPKTSIZE + OFFSET + QSEL_BEACON.
+   * The rtl88x2cu path (jaguar3) additionally sets USE_RATE/DATARATE/DISDATAFB/
+   * LS; those are harmless there but are not part of the 8822B download desc. */
+  /* send_fwpkt_88xx +1 dummy-byte quirk: when (desc + payload) is an exact
+   * multiple of the USB bulk max-packet size (512 covers both HS and SS, since
+   * SS's 1024 is a multiple of 512), the bulk-OUT has no terminating short
+   * packet and the chip's bulk controller waits indefinitely for transfer-end
+   * signaling — the next chunk's bulk-OUT then NAKs/stalls. Appending one dummy
+   * byte breaks the exact-multiple so a short packet terminates the transfer.
+   * (DMEM's last chunk is 3024+48 = 3072 = 6*512; without this it wedges the
+   * IMEM segment.) TXPKTSIZE stays the true payload size; the extra byte is
+   * ignored by the chip. */
+  uint32_t frame_len = TXDESC_SIZE_8822B + size;
+  if ((frame_len & (512u - 1)) == 0)
+    frame_len += 1;
+  std::vector<uint8_t> frame(frame_len, 0);
   uint8_t *d = frame.data();
   SET_TX_DESC_TXPKTSIZE_8822B(d, size);
   SET_TX_DESC_OFFSET_8822B(d, static_cast<uint32_t>(TXDESC_SIZE_8822B));

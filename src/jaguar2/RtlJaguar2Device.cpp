@@ -9,7 +9,8 @@
  * these bodies with the ported HalMAC / phydm / halrf sub-modules. */
 
 RtlJaguar2Device::RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger)
-    : _device{device}, _logger{logger}, _hal{device, logger} {}
+    : _device{device}, _logger{logger}, _hal{device, logger},
+      _macinit{device, logger}, _fw{device, logger} {}
 
 RtlJaguar2Device::~RtlJaguar2Device() = default;
 
@@ -17,14 +18,22 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
   _packetProcessor = std::move(packetProcessor);
   _channel = channel;
-  /* M2: power-on + chip-version (validatable on hardware). The remaining
-   * bring-up (firmware DLFW, MAC/BB/RF init, calibration, RX enable) lands in
-   * M3..M5 — until then, Init completes power-on then reports not-yet-ready. */
+  /* M2 power-on + M3 firmware DLFW bring-up (validatable on hardware). Order
+   * mirrors HalJaguar3::rtw_hal_init: pre-init -> power-on -> chip-version ->
+   * init_system_cfg (DDMA/SYS_FUNC_EN) -> firmware download. The remaining
+   * bring-up (post-DLFW MAC cfg, BB/AGC/RF tables, channel set, RX enable) lands
+   * next in M4. */
+  const uint8_t bw = static_cast<uint8_t>(channel.ChannelWidth);
+  _macinit.pre_init_system_cfg();
   _hal.power_on();
   _hal.read_chip_version();
+  _macinit.init_system_cfg(channel.ChannelWidth, _hal.chip_version().cut);
+  if (!_fw.download_default_firmware())
+    throw std::runtime_error("RtlJaguar2Device: firmware DLFW failed");
+  _logger->info("RtlJaguar2Device: firmware booted (bw={})", (int)bw);
   throw std::runtime_error(
-      "RtlJaguar2Device: power-on OK; RX bring-up not yet implemented "
-      "(RTL8822BU port at M2)");
+      "RtlJaguar2Device: power-on + DLFW OK; RX bring-up not yet implemented "
+      "(RTL8822BU port at M4)");
 }
 
 void RtlJaguar2Device::InitWrite(SelectedChannel channel) {

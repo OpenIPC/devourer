@@ -55,7 +55,10 @@ private:
 
   RtlUsbAdapter _device;
   Logger_t _logger;
-  uint32_t _dlfw_pkt_size = 4096;
+  /* Per-chunk DLFW size. The rsvd-page staging buffer is DLFW_RSVDPG_SIZE =
+   * 2048 bytes (halmac_h2c_extra_info_nic.h), so each rsvd-page chunk must be
+   * <= 2048 (a 4096 chunk stalls the bulk-OUT at 2048 on 8822B). */
+  uint32_t _dlfw_pkt_size = 2048;
   uint16_t _rsvd_boundary = 0;
 };
 

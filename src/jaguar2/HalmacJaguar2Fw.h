@@ -61,6 +61,9 @@ private:
    * 8192 upstream, but 8192+48 exceeds the 8192-byte HIQ, so 4096 is used. */
   uint32_t _dlfw_pkt_size = 4096;
   uint16_t _rsvd_boundary = 0;
+  /* Packet-offset (bytes) applied by the last send_fw_page() for an
+   * exact-bulk-multiple chunk; the iddma source skips it to reach the payload. */
+  uint32_t _last_pkt_offset = 0;
 };
 
 } /* namespace jaguar2 */

@@ -166,37 +166,58 @@ bool HalmacJaguar2Fw::send_fw_page(uint16_t pg_addr, const uint8_t *chunk,
    * (and the in-tree rtw88_8822bu) exactly: TXPKTSIZE + OFFSET + QSEL_BEACON.
    * The rtl88x2cu path (jaguar3) additionally sets USE_RATE/DATARATE/DISDATAFB/
    * LS; those are harmless there but are not part of the 8822B download desc. */
-  /* send_fwpkt_88xx +1 dummy-byte quirk: when (desc + payload) is an exact
-   * multiple of the USB bulk max-packet size (512 covers both HS and SS, since
-   * SS's 1024 is a multiple of 512), the bulk-OUT has no terminating short
-   * packet and the chip's bulk controller waits indefinitely for transfer-end
-   * signaling — the next chunk's bulk-OUT then NAKs/stalls. Appending one dummy
-   * byte breaks the exact-multiple so a short packet terminates the transfer.
-   * (DMEM's last chunk is 3024+48 = 3072 = 6*512; without this it wedges the
-   * IMEM segment.) TXPKTSIZE stays the true payload size; the extra byte is
-   * ignored by the chip. */
-  uint32_t frame_len = TXDESC_SIZE_8822B + size;
-  if ((frame_len & (512u - 1)) == 0)
-    frame_len += 1;
-  std::vector<uint8_t> frame(frame_len, 0);
+  /* Packet-offset padding, ported verbatim from usb_write_data_not_xmitframe
+   * (rtl8822bu_halmac.c): when (desc + payload) is an exact multiple of the USB
+   * bulk max-packet size (512 covers both HS 512 and SS 1024), insert
+   * PACKET_OFFSET_SZ (8) bytes BETWEEN the descriptor and the payload and mark
+   * them in the descriptor (OFFSET = desc + 8, PKT_OFFSET = 1). This both breaks
+   * the exact-multiple (so a short packet terminates the bulk) AND keeps the
+   * chip's beacon-FIFO write pointer aligned — a trailing pad byte the chip is
+   * not told about (via PKT_OFFSET) misaligns the FIFO by one byte, corrupting
+   * the descriptor of the *next* segment's chunk so its bcn-valid never latches. */
+  constexpr uint32_t PACKET_OFFSET_SZ = 8;
+  const uint32_t desclen = TXDESC_SIZE_8822B;
+  uint32_t len = desclen + size;
+  const bool add_pkt_offset = ((len % 512u) == 0);
+  if (add_pkt_offset)
+    len += PACKET_OFFSET_SZ;
+  /* Carry the packet-offset to the iddma: the beacon download writes
+   * desc + [pkt_offset] + payload into the TX FIFO, so the iddma source (which
+   * skips the descriptor) must also skip the pkt_offset to copy the true
+   * payload — otherwise the DDMA checksum sees the pad bytes and fails. */
+  _last_pkt_offset = add_pkt_offset ? PACKET_OFFSET_SZ : 0;
+  std::vector<uint8_t> frame(len, 0);
   uint8_t *d = frame.data();
   SET_TX_DESC_TXPKTSIZE_8822B(d, size);
-  SET_TX_DESC_OFFSET_8822B(d, static_cast<uint32_t>(TXDESC_SIZE_8822B));
+  if (add_pkt_offset) {
+    std::memcpy(d + desclen + PACKET_OFFSET_SZ, chunk, size);
+    SET_TX_DESC_OFFSET_8822B(d, desclen + PACKET_OFFSET_SZ);
+    SET_TX_DESC_PKT_OFFSET_8822B(d, 1);
+  } else {
+    std::memcpy(d + desclen, chunk, size);
+    SET_TX_DESC_OFFSET_8822B(d, desclen);
+  }
   SET_TX_DESC_QSEL_8822B(d, QSEL_BEACON);
-  std::memcpy(d + TXDESC_SIZE_8822B, chunk, size);
   cal_txdesc_chksum_8822b(d);
 
-  bool sent = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
-                                        frame.data(),
-                                        static_cast<int>(frame.size()),
-                                        1000) >= 0;
+  /* Submit the rsvd-page bulk. The vendor (usb_write_data_not_xmitframe ->
+   * usb_submit_urb) treats the bcn-valid latch — not the bulk completion — as
+   * the success criterion. With libusb sync transfers the chip delivers all the
+   * data but does not always signal bulk completion the way libusb expects,
+   * returning a timeout with the full byte count transferred; that is fine, so
+   * long as every byte went out we proceed to poll bcn-valid. */
+  int got = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(), frame.data(),
+                                      static_cast<int>(frame.size()), 1000);
+  bool sent = (got == static_cast<int>(frame.size()));
   bool status = sent;
 
   if (sent) {
     uint32_t cnt = 1000;
     while ((r8(REG_FIFOPAGE_CTRL_2 + 1) & (1u << 7)) == 0) {
       if (--cnt == 0) {
-        _logger->error("Jaguar2 DLFW: rsvd-page (bcn valid) poll failed");
+        _logger->error("Jaguar2 DLFW: rsvd-page (bcn valid) poll failed "
+                       "(pg={} size={})",
+                       pg_addr, size);
         status = false;
         break;
       }
@@ -229,7 +250,8 @@ bool HalmacJaguar2Fw::dlfw_to_mem(const uint8_t *fw_bin, uint32_t src,
     uint32_t pkt = (residue >= _dlfw_pkt_size) ? _dlfw_pkt_size : residue;
     if (!send_fw_page(static_cast<uint16_t>(src >> 7), fw_bin + mem_offset, pkt))
       return false;
-    if (!iddma_dlfw(OCPBASE_TXBUF_88XX + src + TX_DESC_SIZE_88XX,
+    if (!iddma_dlfw(OCPBASE_TXBUF_88XX + src + TX_DESC_SIZE_88XX +
+                        _last_pkt_offset,
                     dest + mem_offset, pkt, first))
       return false;
     first = false;

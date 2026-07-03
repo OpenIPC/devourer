@@ -150,11 +150,7 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
       _logger->info("BBDUMP 0x{:04x} 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x}", a,
                     _device.rtw_read32(a), _device.rtw_read32(a + 4),
                     _device.rtw_read32(a + 8), _device.rtw_read32(a + 12));
-    for (uint32_t a = 0x800; a <= 0xffc; a += 0x10)
-      _logger->info("BBDUMP 0x{:04x} 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x}", a,
-                    _device.rtw_read32(a), _device.rtw_read32(a + 4),
-                    _device.rtw_read32(a + 8), _device.rtw_read32(a + 12));
-    for (uint32_t a = 0x1800; a <= 0x1afc; a += 0x10)
+    for (uint32_t a = 0x800; a <= 0x2ffc; a += 0x10)
       _logger->info("BBDUMP 0x{:04x} 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x}", a,
                     _device.rtw_read32(a), _device.rtw_read32(a + 4),
                     _device.rtw_read32(a + 8), _device.rtw_read32(a + 12));

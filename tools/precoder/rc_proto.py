@@ -39,6 +39,55 @@ F_DISCOVERY = 0x04          # discovery context
 PWR_NO_CHANGE = 0xFF        # PWR_IDX sentinel: leave TX power as-is
 
 
+# --------------------------------------------------------------------------- #
+# PROFILE byte encoding v2 — bandwidth-dimension aware.
+# bits[3:0] = MCS (0..8), bits[5:4] = bw code (0=20, 1=40, 2=80), bit6 = VHT.
+# Legacy v1 values 0..7 decode as HT/20, so a v1 receiver (which clamps the
+# byte to 0..7) still gets a sane MCS from a v2 sender.
+# --------------------------------------------------------------------------- #
+_BW_CODE = {20: 0, 40: 1, 80: 2}
+_BW_FROM_CODE = {v: k for k, v in _BW_CODE.items()}
+
+
+def encode_profile(mode: str, mcs: int, bw: int = 20) -> int:
+    """(mode, mcs, bw) -> wire PROFILE byte."""
+    p = (mcs & 0x0F) | (_BW_CODE.get(bw, 0) << 4)
+    if mode == "vht":
+        p |= 0x40
+    return p
+
+
+def decode_profile(p: int) -> tuple[str, int, int]:
+    """Wire PROFILE byte -> (mode, mcs, bw)."""
+    mode = "vht" if p & 0x40 else "ht"
+    bw = _BW_FROM_CODE.get((p >> 4) & 0x3, 20)
+    mcs = p & 0x0F
+    return mode, min(mcs, 8 if mode == "vht" else 7), bw
+
+
+# --------------------------------------------------------------------------- #
+# Bandwidth probe schedule — a PROTOCOL INVARIANT both ends derive from the
+# video seq alone, so per-rung delivery sensing needs no extra wire fields:
+# the VTX flies the scheduled seqs on the scheduled rung, the VRX attributes
+# every (received or gap-inferred-lost) seq to its rung by the same rule.
+# Slots 0/8/16 of each 32-seq cycle probe the sorted rungs of the (config-
+# agreed) bw_set; every other seq rides the commanded operating bandwidth.
+# ~3% duty per rung — cheap enough to leave always on.
+# --------------------------------------------------------------------------- #
+PROBE_PERIOD = 32
+_PROBE_SLOTS = (0, 8, 16)
+
+
+def probe_bw(seq: int, bw_set) -> int | None:
+    """Bandwidth this video seq must fly at as a rung probe, else None."""
+    rungs = sorted(bw_set)
+    slot = seq % PROBE_PERIOD
+    for i, s in enumerate(_PROBE_SLOTS):
+        if slot == s and i < len(rungs):
+            return rungs[i]
+    return None
+
+
 def _crc(buf: bytes) -> int:
     return fec_subblock.crc16_ccitt(buf)
 

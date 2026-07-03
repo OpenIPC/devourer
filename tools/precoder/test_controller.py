@@ -182,3 +182,38 @@ def test_bandwidth_dimension_wide_when_strong_narrow_when_weak():
     assert strong.bw > weak.bw
     assert strong.bw == 80                       # airtime-min rides the top rung
     assert strong.e_bit < weak.e_bit
+
+
+def test_rung_blocking_vacates_dirty_wide_rung_and_recovers():
+    """Probe sensing says the 80 rung's extra spectrum is dirty (delivery
+    contrast vs the best rung): the controller must vacate 80 even though the
+    SNR estimate alone says it is the cheapest, then return after the hold."""
+    # improve_frac=0 disables the anti-churn hysteresis: this test pins the
+    # rung block/unblock semantics, and the 80-vs-40 e_bit gap at low airtime
+    # duty is smaller than the default 3% churn threshold.
+    c = _ctrl(target=0.99, allow_shed=False, bw_set=(20, 40, 80), mode="vht",
+              src_bitrate_bps=8e6, rung_block_hold_ms=5000, improve_frac=0.0)
+    assert c.update(45.0, 32, now_ms=0).bw == 80          # strong link rides 80
+    c.report_rung_delivery({20: (1.0, 12), 40: (1.0, 12), 80: (0.4, 12)},
+                           now_ms=100)
+    op = c.update(45.0, 32, now_ms=200)
+    assert op.bw <= 40                                     # vacated the dirty rung
+    assert not c.primary_dirty                             # narrow rungs are fine
+    # after the hold expires (and probes look clean) 80 is rankable again
+    c.report_rung_delivery({20: (1.0, 12), 40: (1.0, 12), 80: (1.0, 12)},
+                           now_ms=6000)
+    late = c.update(45.0, 32, now_ms=20000)                # past hysteresis holds
+    assert late.bw == 80
+
+
+def test_primary_dirty_fires_only_when_narrowest_rung_bad_too():
+    c = _ctrl(target=0.99, allow_shed=False, bw_set=(20, 40, 80), mode="vht")
+    c.report_rung_delivery({20: (0.5, 12), 40: (0.5, 12), 80: (0.4, 12)},
+                           now_ms=0)
+    assert c.primary_dirty                                 # nothing bw can fix
+    c.report_rung_delivery({20: (1.0, 12), 40: (0.5, 12), 80: (0.4, 12)},
+                           now_ms=100)
+    assert not c.primary_dirty                             # 20 is clean: avoidable
+    # too few samples -> no verdict change
+    c.report_rung_delivery({20: (0.0, 2)}, now_ms=200)
+    assert not c.primary_dirty

@@ -102,3 +102,48 @@ class ScoreWindow:
         loss = self.seq_gap_loss() if residual_loss is None else residual_loss
         s -= self.cfg.loss_penalty * loss
         return int(max(1000, min(2000, s)))
+
+
+class RungWindow:
+    """Per-rung (bandwidth) delivery from the video seq stream.
+
+    Both ends derive each seq's rung from the shared probe schedule
+    (rc_proto.probe_bw), so no wire fields are needed: received seqs are
+    attributed on arrival, missed seqs are inferred from the wrap-safe gaps
+    between arrivals and attributed the same way. Only scheduled probe seqs
+    are tracked — the commanded-op frames tell us nothing about the OTHER
+    rungs, which is the whole point of probing.
+    """
+
+    def __init__(self, bw_set, samples_per_rung: int = 24):
+        import rc_proto as _rp
+        self._probe_bw = _rp.probe_bw
+        self.bw_set = tuple(sorted(bw_set))
+        self._hist: dict[int, deque] = {bw: deque(maxlen=samples_per_rung)
+                                        for bw in self.bw_set}
+        self._last_seq: int | None = None
+
+    def _attribute(self, seq: int, ok: bool) -> None:
+        bw = self._probe_bw(seq, self.bw_set)
+        if bw is not None:
+            self._hist[bw].append(ok)
+
+    def add_seq(self, seq: int) -> None:
+        """One RECEIVED video seq; the (wrap-safe) gap since the previous
+        arrival is attributed as losses."""
+        if self._last_seq is not None:
+            gap = (seq - self._last_seq) % 4096
+            # walk the missing seqs (bounded: a monster gap is a link outage,
+            # not per-rung information — cap the walk at one probe period x4)
+            for d in range(1, min(gap, 128)):
+                self._attribute((self._last_seq + d) % 4096, ok=False)
+        self._attribute(seq, ok=True)
+        self._last_seq = seq
+
+    def stats(self) -> dict[int, tuple[float, int]]:
+        """bw -> (delivery fraction, n samples) for rungs with any samples."""
+        out = {}
+        for bw, h in self._hist.items():
+            if h:
+                out[bw] = (sum(h) / len(h), len(h))
+        return out

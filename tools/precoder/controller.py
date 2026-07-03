@@ -62,6 +62,18 @@ class ControllerConfig:
     fade_margin_k: float = 0.0        # 0 = disabled
     fade_margin_max_db: float = 12.0  # clamp on the extra TXAGC headroom (dB)
     fade_var_alpha: float = 0.2       # EWMA weight for the path-loss variance
+    # Per-rung interference sensing (with bw_set): report_rung_delivery()
+    # BLOCKS a rung whose probed delivery falls this far below the best
+    # rung's — detection by CONTRAST across rungs, not by model prediction, so
+    # it fires on the interference signature (one rung's extra spectrum is
+    # dirty) and not on plain path loss (all rungs sag together). The
+    # narrowest rung is never blocked: it is the fallback; when IT also
+    # underperforms alongside every other rung the primary itself is dirty
+    # (`primary_dirty`), which no unilateral bandwidth choice can fix — the
+    # escalation to a coordinated channel move belongs to the embedding app.
+    rung_block_delta: float = 0.15
+    rung_block_hold_ms: int = 5000
+    rung_min_samples: int = 8
 
 
 class Controller:
@@ -80,15 +92,45 @@ class Controller:
         self._last_change_ms = -1 << 60
         self._last_downgrade_ms = -1 << 60
         self._last_feedback_ms = -1 << 60
+        self._rung_block: dict[int, float] = {}   # bw -> blocked-until (ms)
+        self._now_ms: float = -1 << 60            # last update() time, for _best
+        self.primary_dirty = False                # all rungs bad incl. narrowest
 
     # --- estimation -------------------------------------------------------- #
     def _path_loss(self, reported_snr: float, reported_txagc: int) -> float:
         """Channel SNR with TX power removed: snr = path_loss + gain(txagc)."""
         return reported_snr - self.calib.gain_db(reported_txagc)
 
+    def _rung_blocked(self, bw: int) -> bool:
+        until = self._rung_block.get(bw)
+        return until is not None and self._now_ms < until
+
+    def report_rung_delivery(self, stats: dict[int, tuple[float, int]],
+                             now_ms: float) -> None:
+        """Feed per-rung probe delivery (bw -> (delivery, n), score.RungWindow
+        .stats()). Blocks rungs whose delivery contrasts badly with the best
+        rung's (interference on that rung's extra spectrum); sets
+        `primary_dirty` when every sampled rung — the narrowest included —
+        misses the target (nothing a bandwidth choice can fix)."""
+        usable = {bw: d for bw, (d, n) in stats.items()
+                  if n >= self.cfg.rung_min_samples}
+        if not usable:
+            return
+        best = max(usable.values())
+        narrowest = min(usable)
+        for bw, d in usable.items():
+            if bw != narrowest and d < best - self.cfg.rung_block_delta:
+                self._rung_block[bw] = now_ms + self.cfg.rung_block_hold_ms
+        self.primary_dirty = (len(usable) >= 2 and
+                              all(d < self.cfg.target -
+                                  self.cfg.rung_block_delta
+                                  for d in usable.values()))
+
     def _best(self, path_loss: float, margin: float) -> OpPoint | None:
         best = None
         for r in self.rows:
+            if self._rung_blocked(r.bw):
+                continue
             op = resolve(r, path_loss, self.calib, self.link,
                          self.cfg.payload_bytes, self.cfg.src_bitrate_bps, margin)
             # skip rows that can't clear the SLA OR can't carry the bitrate (e_bit=inf)
@@ -104,6 +146,7 @@ class Controller:
         """Apply one VRX feedback sample; return the chosen op point (or None if
         this layer is shed)."""
         self._last_feedback_ms = now_ms
+        self._now_ms = now_ms
         # EWMA the PATH LOSS (channel SNR with TX power removed), not the SNR —
         # SNR moves with our own TXAGC, path loss doesn't. Asymmetric: track a
         # worsening channel fast (raise power in time), an improving one slow. Also
@@ -132,7 +175,8 @@ class Controller:
                               self.cur.bw, self.cur.sgi, self.cur.overhead,
                               self.cur.snr_req), path_loss, self.calib, self.link,
                               self.cfg.payload_bytes, self.cfg.src_bitrate_bps, 0.0)
-            cur_ok = cur_now is not None and cur_now.p_deliver >= self.cfg.target
+            cur_ok = (cur_now is not None and cur_now.p_deliver >= self.cfg.target
+                      and not self._rung_blocked(self.cur.bw))
             if cur_ok:
                 self.cur = cur_now            # refresh txagc/e_bit at new path loss
 

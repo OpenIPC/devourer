@@ -25,24 +25,28 @@ from dataclasses import dataclass
 import rc_proto as rp
 import rendezvous as rz
 from controller import Controller, ControllerConfig
-from score import ScoreWindow, ScoreConfig
+from score import ScoreWindow, ScoreConfig, RungWindow
 import op_table
 
 
-def op_to_ladder(op) -> str:
-    """Map a controller OpPoint to a DEVOURER_SVC_LADDER spec (per-layer MCS).
+def ladder_spec(mode: str, mcs: int, bw: int) -> str:
+    """DEVOURER_SVC_LADDER spec for a (mode, base-MCS, bw) operating point.
     Base/critical fly the chosen (robust) MCS; enhancement steps up from there.
     VHT rows (the bandwidth-dimension rungs, incl. 80 MHz) map to VHT1SS_MCSn
     rate strings; the bandwidth rides every layer's /bw suffix — per-packet
     and unilateral while it stays on the RX's primary
-    (tests/rx80_narrow_tx_probe.sh)."""
-    m = op.mcs
-    bw = op.bw
-    top, name = (8, "VHT1SS_MCS") if getattr(op, "mode", "ht") == "vht" \
-        else (7, "MCS")
+    (tests/rx80_narrow_tx_probe.sh). Shared by the VRX-side op mapping and the
+    VTX-side RCF profile decode so both ends build the identical ladder."""
+    top, name = (8, "VHT1SS_MCS") if mode == "vht" else (7, "MCS")
+    m = max(0, min(top, mcs))
     e = min(top, m + 2)
     return (f"CRIT={name}{m}/{bw};T0={name}{m}/{bw};"
             f"T1={name}{min(top, m + 1)}/{bw};T2={name}{e}/{bw}")
+
+
+def op_to_ladder(op) -> str:
+    """Map a controller OpPoint to a DEVOURER_SVC_LADDER spec."""
+    return ladder_spec(getattr(op, "mode", "ht"), op.mcs, op.bw)
 
 
 def overhead_to_16ths(ov: float) -> int:
@@ -60,6 +64,14 @@ class AdaptiveVrx:
         self.vtx_id = vtx_id
         self.ctrl = Controller(link, calib, ctrl_cfg or ControllerConfig())
         self.win = ScoreWindow(score_cfg)
+        # Per-rung delivery sensing (with the bandwidth dimension open): every
+        # video seq — received or gap-inferred-lost — is attributed to its
+        # probe rung by the shared schedule, and the stats feed the
+        # controller's rung blocker / primary-dirty detector each feedback
+        # tick. `primary_dirty` (property below) is the escalation signal the
+        # embedding app turns into a coordinated channel move.
+        bw_set = self.ctrl.cfg.bw_set
+        self.rungs = RungWindow(bw_set) if bw_set else None
         self.rz = rz.VrxRendezvous(rz.VrxConfig(vtx_id=vtx_id, op_channel=op_channel))
         self.feedback_period_ms = feedback_period_ms
         self._last_fb_ms = -1 << 60
@@ -67,9 +79,15 @@ class AdaptiveVrx:
         self.cur_op = op_table.MAX_RANGE
         self._cur_txagc = 32
 
+    @property
+    def primary_dirty(self) -> bool:
+        return self.ctrl.primary_dirty
+
     def on_video(self, rssi: float, snr: float, crc_err: bool, seq: int,
                  now_ms: float, residual_loss: float | None = None) -> None:
         self.win.add_frame(rssi, snr, crc_err, seq, now_ms / 1000.0)
+        if self.rungs is not None:
+            self.rungs.add_seq(seq)
         self.rz.feed_video(now_ms)
         self._residual = residual_loss
 
@@ -88,6 +106,8 @@ class AdaptiveVrx:
         if now_ms - self._last_fb_ms < self.feedback_period_ms:
             return None
         self._last_fb_ms = now_ms
+        if self.rungs is not None:
+            self.ctrl.report_rung_delivery(self.rungs.stats(), now_ms)
         snr = self.win.snr_estimate()
         if snr is not None:
             op = self.ctrl.update(snr, self._cur_txagc, now_ms)
@@ -95,10 +115,12 @@ class AdaptiveVrx:
                 self.cur_op = op
                 self._cur_txagc = op.txagc
         self._seq = (self._seq + 1) & 0xFFFF
-        # profile carries the GS-chosen base MCS (0..7); the VTX builds its SVC
-        # ladder from it (base/critical at this MCS, enhancement steps up).
+        # profile carries the GS-chosen operating point — mode/MCS/bw packed by
+        # the shared v2 encoding; the VTX builds its SVC ladder from it
+        # (base/critical at this MCS, enhancement steps up).
         rcf = rp.Rcf(vtx_id=self.vtx_id, seq=self._seq, ack_seq=self.win.ack_seq(),
-                     profile=self.cur_op.mcs,
+                     profile=rp.encode_profile(getattr(self.cur_op, "mode", "ht"),
+                                               self.cur_op.mcs, self.cur_op.bw),
                      score=self.win.score(getattr(self, "_residual", None)),
                      pwr_idx=self.cur_op.txagc,
                      fec_overhead_16ths=overhead_to_16ths(self.cur_op.overhead),
@@ -120,7 +142,8 @@ class TxState:
 class AdaptiveVtx:
     def __init__(self, vtx_id: int, vtx_cfg: rz.VtxConfig | None = None,
                  failsafe_txagc: int = 63, failsafe_overhead: float = 1.0,
-                 failsafe_ladder: str | None = None):
+                 failsafe_ladder: str | None = None,
+                 bw_set: tuple | None = None):
         self.vtx_id = vtx_id
         self.rz = rz.VtxRendezvous(vtx_cfg or rz.VtxConfig(vtx_id=vtx_id))
         self.state = TxState()
@@ -128,6 +151,18 @@ class AdaptiveVtx:
         self.failsafe_overhead = failsafe_overhead
         self.failsafe_ladder = failsafe_ladder or \
             "CRIT=MCS0/20/LDPC;T0=MCS0/20/LDPC;T1=MCS0/20;T2=MCS0/20"
+        # Bandwidth-probe rungs — must match the VRX controller's bw_set (a
+        # config invariant, like the profile-table version). None = no probing.
+        self.bw_set = tuple(sorted(bw_set)) if bw_set else None
+
+    def probe_bw_for_seq(self, seq: int) -> int | None:
+        """Rung this video seq must fly at as a bandwidth probe (the shared
+        schedule the VRX attributes against), else None -> the commanded op
+        bandwidth. Injectors apply it as the frame's radiotap bandwidth —
+        per-packet and unilateral (tests/rx80_narrow_tx_probe.sh)."""
+        if self.bw_set is None or self.state.failsafe:
+            return None
+        return rp.probe_bw(seq, self.bw_set)
 
     def on_rc_frame(self, buf: bytes, now_ms: float) -> bytes | None:
         """Process an inbound control frame. Applies an RCF (updates TxState) or
@@ -142,11 +177,10 @@ class AdaptiveVtx:
                 self.state.txagc = r.pwr_idx
             self.state.overhead = r.fec_overhead
             self.state.failsafe = False
-            # MCS ladder follows the GS-chosen base MCS in `profile`.
-            m = max(0, min(7, r.profile))
-            bw = 20
-            self.state.ladder = (f"CRIT=MCS{m}/{bw};T0=MCS{m}/{bw};"
-                                 f"T1=MCS{min(7, m + 1)}/{bw};T2=MCS{min(7, m + 2)}/{bw}")
+            # Ladder follows the GS-chosen operating point in `profile`
+            # (mode/MCS/bw, shared v2 encoding + shared ladder builder).
+            mode, m, bw = rp.decode_profile(r.profile)
+            self.state.ladder = ladder_spec(mode, m, bw)
             return None
         if t == rp.T_DISC:
             d = rp.parse_disc(buf)

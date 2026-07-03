@@ -74,3 +74,32 @@ def test_profile_table():
     # index 0 = most robust (max power, heaviest FEC)
     assert rp.DEFAULT_PROFILE_TABLE[0].pwr_idx >= rp.DEFAULT_PROFILE_TABLE[-1].pwr_idx
     assert rp.DEFAULT_PROFILE_TABLE[0].fec_overhead >= rp.DEFAULT_PROFILE_TABLE[-1].fec_overhead
+
+
+def test_profile_v2_encoding_roundtrip_and_legacy_compat():
+    # v2 roundtrip across the bandwidth ladder
+    for mode in ("ht", "vht"):
+        for bw in (20, 40, 80):
+            for mcs in (0, 3, 7):
+                p = rp.encode_profile(mode, mcs, bw)
+                assert rp.decode_profile(p) == (mode, mcs, bw)
+    # legacy v1 bytes (raw MCS 0..7) decode as HT/20 — wire compatible
+    for m in range(8):
+        assert rp.decode_profile(m) == ("ht", m, 20)
+    # and an HT/20 v2 encoding IS the legacy byte
+    assert rp.encode_profile("ht", 5, 20) == 5
+
+
+def test_probe_schedule_is_shared_and_low_duty():
+    bw_set = (20, 40, 80)
+    # slots 0/8/16 probe the sorted rungs; everything else rides the op bw
+    assert rp.probe_bw(0, bw_set) == 20
+    assert rp.probe_bw(8, bw_set) == 40
+    assert rp.probe_bw(16, bw_set) == 80
+    assert rp.probe_bw(1, bw_set) is None
+    assert rp.probe_bw(32, bw_set) == 20          # periodic
+    # duty: 3 probes per 32 seqs
+    probes = sum(1 for s in range(320) if rp.probe_bw(s, bw_set) is not None)
+    assert probes == 30
+    # two-rung set only uses two slots
+    assert rp.probe_bw(16, (20, 40)) is None

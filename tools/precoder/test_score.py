@@ -63,3 +63,19 @@ def test_ack_seq_tracks_max():
     w = ScoreWindow()
     _fill(w, 5, -60, 20, start_seq=100)
     assert w.ack_seq() == 104
+
+
+def test_rung_window_attributes_losses_by_probe_schedule():
+    """Kill exactly the seqs whose probe rung is 80 MHz: the 80 rung's delivery
+    collapses while 20/40 stay perfect — per-rung sensing from seq gaps alone."""
+    import rc_proto as rp
+    from score import RungWindow
+    bw_set = (20, 40, 80)
+    rw = RungWindow(bw_set)
+    for s in range(0, 32 * 12):
+        if rp.probe_bw(s, bw_set) == 80:
+            continue                       # lost on air -> a gap at the VRX
+        rw.add_seq(s)
+    st = rw.stats()
+    assert st[20][0] == 1.0 and st[40][0] == 1.0
+    assert st[80][0] == 0.0 and st[80][1] >= 8

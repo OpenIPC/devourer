@@ -324,6 +324,17 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
                   "TXDMA_OFFCHK(0x20c)=0x{:04x}",
                   _device.rtw_read16(0x0100), _device.rtw_read8(0x0522),
                   _device.rtw_read16(0x020C));
+    /* TSF-tick check: read the free-running TSF timer (0x560/0x564) twice with a
+     * 5 ms gap. If it does not advance, the MAC timing engine is frozen and the
+     * EDCA backoff can never count down -> TX never scheduled (RX unaffected). */
+    uint32_t tsf0 = _device.rtw_read32(0x0560);
+    uint32_t tsfh0 = _device.rtw_read32(0x0564);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    uint32_t tsf1 = _device.rtw_read32(0x0560);
+    uint32_t tsfh1 = _device.rtw_read32(0x0564);
+    _logger->info("Jaguar2 TSF: {:08x}{:08x} -> {:08x}{:08x} ({})", tsfh0, tsf0,
+                  tsfh1, tsf1,
+                  (tsf0 != tsf1 || tsfh0 != tsfh1) ? "TICKING" : "FROZEN");
   }
   if (const char *rfp = getenv("DEVOURER_RF_REPLAY")) {
     /* Replay kernel RF-register state via the 3-wire LSSI ("path addr val"

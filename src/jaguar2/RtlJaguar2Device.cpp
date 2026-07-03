@@ -367,6 +367,20 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
     uint8_t idx = static_cast<uint8_t>(strtol(e, nullptr, 0) & 0x3f);
     _hal.set_tx_power_flat(idx);
   }
+  if (getenv("DEVOURER_TX_DRAIN")) {
+    /* Drain bulk-IN (FW C2H reports) during TX. The RX demo submits async
+     * bulk-IN URBs; the TX demo never reads bulk-IN, so the FW's C2H buffer can
+     * back up and stall the FW's TX flow-control (RX works, TX never keys the
+     * BB). This thread continuously reads + discards bulk-IN to keep C2H space
+     * free — the jaguar2 analogue of the Jaguar3 coex_runtime C2H drain. */
+    _dig_thread = std::thread([this] {
+      std::vector<uint8_t> buf(16 * 1024);
+      while (!g_devourer_should_stop) {
+        _device.bulk_read_raw(buf.data(), static_cast<int>(buf.size()), 20);
+      }
+    });
+    _logger->info("Jaguar2: TX_DRAIN bulk-IN C2H drain thread started");
+  }
   _logger->info("Jaguar2: ready for TX (monitor inject, ch={})",
                 channel.Channel);
 }

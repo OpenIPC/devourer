@@ -64,6 +64,12 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   _logger->info("RtlJaguar2Device: MAC cfg + BB/RF enabled");
 
   uint8_t rfe = _hal.read_efuse_rfe();
+  /* The kernel uses rfe_type=3 for the T3U even with an unprogrammed efuse
+   * (devourer reads 0xff -> defaults 0). rfe_type selects the BB/RF phydm
+   * conditional blocks AND the RFE antenna-switch pins; the wrong variant leaves
+   * the TX front-end mis-routed. DEVOURER_RFE=N overrides. */
+  if (const char *e = getenv("DEVOURER_RFE"))
+    rfe = static_cast<uint8_t>(strtol(e, nullptr, 0));
   _hal.apply_bb_rf_agc_tables(rfe);
   _logger->info("RtlJaguar2Device: PHY tables applied");
 
@@ -247,6 +253,12 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
      * halmac_fw_88xx.c proc_send_general_info/phydm_info + halmac_fw_offload_
      * h2c_nic.h bit layout. */
     auto send_fw_h2c = [&](const uint8_t pkt[32]) {
+      /* Delivery check: REG_H2C_PKT_WRITEADDR(0x10D4) advances when the packet
+       * enters the H2C queue; REG_H2C_PKT_READADDR(0x10D0) advances when the FW
+       * CONSUMES it. If WRITE doesn't move -> bad QSEL routing; if WRITE moves
+       * but READ doesn't -> FW isn't reading the queue (handshake dead). */
+      uint32_t w0 = _device.rtw_read32(0x10D4) & 0x3FFFF;
+      uint32_t r0 = _device.rtw_read32(0x10D0) & 0x3FFFF;
       std::vector<uint8_t> buf(jaguar2::TXDESC_SIZE_8822B + 32, 0);
       SET_TX_DESC_TXPKTSIZE_8822B(buf.data(), 32);
       SET_TX_DESC_QSEL_8822B(buf.data(), 0x13); /* QSEL_H2C_CMD */
@@ -254,25 +266,42 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
       jaguar2::cal_txdesc_chksum_8822b(buf.data());
       _device.bulk_send_sync_ep(_device.first_bulk_out_ep(), buf.data(),
                                 static_cast<int>(buf.size()), 20);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      uint32_t w1 = _device.rtw_read32(0x10D4) & 0x3FFFF;
+      uint32_t r1 = _device.rtw_read32(0x10D0) & 0x3FFFF;
+      _logger->info("Jaguar2 H2C-deliver: WPTR {:05x}->{:05x} RPTR {:05x}->{:05x}"
+                    " ({})", w0, w1, r0, r1,
+                    (r1 != r0) ? "FW CONSUMED" : (w1 != w0) ? "queued, FW IDLE"
+                                                            : "NOT queued");
     };
     auto put32 = [](uint8_t *p, uint32_t v) {
       p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
     };
     const uint8_t cut = _hal.chip_version().cut;
     const uint8_t ant = _hal.chip_version().rf_2t2r ? 0x3 : 0x1; /* AB / A */
-    /* general_info: sub=0x0D, CATEGORY=1, CMD_ID=0xFF; content FW_TX_BOUNDARY
-     * (rsvd_fw_txbuf_addr 1994 - rsvd_boundary 1938 = 0x38) at [0x08] bits16-23 */
+    /* general_info: sub=0x0D. FW_TX_BOUNDARY = rsvd_fw_txbuf_addr - rsvd_boundary;
+     * kernel-observed value is 0x30 (my earlier 0x38 double-counted CPU_INSTR/
+     * H2CQ pages). Override with DEVOURER_TXBND if the page alloc changes. */
+    uint32_t txbnd = 0x30;
+    if (const char *b = getenv("DEVOURER_TXBND")) txbnd = strtol(b, nullptr, 0);
     uint8_t gi[32] = {0};
     put32(gi + 0, 0x01u | (0xFFu << 8) | (0x0Du << 16));
     put32(gi + 4, 12u | (0u << 16)); /* total_len=12, seq=0 */
-    put32(gi + 8, static_cast<uint32_t>(0x38) << 16);
+    put32(gi + 8, txbnd << 16);
     send_fw_h2c(gi);
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    /* phydm_info: sub=0x11; content rfe_type/rf_type(2=2T2R)/cut/rx_ant/tx_ant */
+    /* phydm_info: sub=0x11. Kernel(T3U): rfe_type=3, rf_type=4(1T1R), cut=3,
+     * rx_ant=tx_ant=1(A). DEVOURER_PHYDM=0xNN overrides rfe_type; rf_type/ant
+     * follow rf_2t2r (force with DEVOURER_FORCE_1T1R). */
+    uint8_t rfe_pi = 0x03;
+    if (const char *r = getenv("DEVOURER_PHYDM")) rfe_pi = strtol(r, nullptr, 0);
+    uint8_t rftype = _hal.chip_version().rf_2t2r ? 0x2 : 0x4;
     uint8_t pi[32] = {0};
     put32(pi + 0, 0x01u | (0xFFu << 8) | (0x11u << 16));
     put32(pi + 4, 16u | (1u << 16)); /* total_len=16, seq=1 */
-    put32(pi + 8, 0x0u | (0x2u << 8) | (static_cast<uint32_t>(cut) << 16) |
+    put32(pi + 8, static_cast<uint32_t>(rfe_pi) |
+                      (static_cast<uint32_t>(rftype) << 8) |
+                      (static_cast<uint32_t>(cut) << 16) |
                       (static_cast<uint32_t>(ant) << 24) |
                       (static_cast<uint32_t>(ant) << 28));
     put32(pi + 12, 0u); /* ext_pa=0, package_type=0, mp_mode=0 */

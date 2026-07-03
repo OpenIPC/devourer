@@ -125,6 +125,12 @@ void HalJaguar2::read_chip_version() {
   _ver.test_chip = (v & (1u << 23)) != 0;
   _ver.cut = static_cast<uint8_t>((v >> 12) & 0xf);
   _ver.rf_2t2r = (v & (1u << 27)) ? 1 : 0;
+  /* The kernel rtl88x2bu_ohd tells the FW rf_type=1T1R, tx_ant/rx_ant=A for the
+   * Archer T3U (RTL8812BU) even though SYS_CFG bit27 reports 2T2R silicon —
+   * the dongle operates single-path. devourer's AB config may route TX to a
+   * path the dongle doesn't wire. Force single-path-A to match the kernel. */
+  if (getenv("DEVOURER_FORCE_1T1R"))
+    _ver.rf_2t2r = 0;
   uint8_t vend = static_cast<uint8_t>(((v >> 16) & 0xf) >> 2);
   _ver.vendor = (vend <= 2) ? vend : 0;
 

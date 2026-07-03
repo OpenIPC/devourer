@@ -558,19 +558,21 @@ int main() {
     channel = std::atoi(ch_env);
     logger->info("DEVOURER_CHANNEL set — tuning to channel {}", channel);
   }
-  /* RX bandwidth: 20 MHz by default. DEVOURER_BW=40 selects a 40 MHz monitor
-   * channel (for receiving HT40 frames); DEVOURER_CHOFFSET picks the secondary
-   * half (1 = secondary above the primary, 2 = secondary below).
+  /* RX bandwidth: 20 MHz by default. DEVOURER_BW=40|80 selects a wide monitor
+   * channel (for receiving HT40 / VHT80 frames); DEVOURER_CHOFFSET picks the
+   * secondary half (1 = secondary above the primary, 2 = secondary below).
    * DEVOURER_NB_BW=5|10 re-clocks the baseband to narrowband (Jaguar3 only). */
   ChannelWidth_t width = CHANNEL_WIDTH_20;
   uint8_t ch_offset = 0;
   if (const char *bw_env = std::getenv("DEVOURER_BW")) {
-    if (std::atoi(bw_env) == 40) {
-      width = CHANNEL_WIDTH_40;
+    int bw = std::atoi(bw_env);
+    if (bw == 40 || bw == 80) {
+      width = (bw == 40) ? CHANNEL_WIDTH_40 : CHANNEL_WIDTH_80;
       ch_offset = 1; // default: secondary channel above the primary
       if (const char *off_env = std::getenv("DEVOURER_CHOFFSET"))
         ch_offset = static_cast<uint8_t>(std::atoi(off_env));
-      logger->info("DEVOURER_BW=40 — 40 MHz RX, channel-offset {}", ch_offset);
+      logger->info("DEVOURER_BW={} — {} MHz RX, channel-offset {}", bw, bw,
+                   ch_offset);
     }
   }
   if (const char *nb = std::getenv("DEVOURER_NB_BW")) {

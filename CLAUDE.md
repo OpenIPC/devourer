@@ -195,6 +195,20 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   mobile/fading combining measurement (alternate a fixed chain vs all-4 fast
   relative to RX motion so both sample the same fading). Analyse with
   `tests/mrc_mobility.py`.
+- `DEVOURER_RX_CSI_MASK=<f_lo>[-<f_hi>][/wgt]` — (all generations, RX)
+  de-weight a frequency range (MHz) in the receive equalizer's per-tone CSI
+  mask — the RX half of pseudo preamble puncturing (`src/ToneMask.h`,
+  `docs/pseudo-preamble-puncturing.md`). Masks every 312.5 kHz subcarrier in
+  the range (e.g. `5230-5250` = the top 20 MHz slice of the ch36 80 MHz
+  block); `/wgt` (0..7, default 7) is the Jaguar3 per-tone weight. Applied
+  when the RX loop starts, after the channel set; a channel switch reverts it
+  (same contract as `DEVOURER_RX_PATHS`). Register-landing checked per chip by
+  `tests/tone_mask_regcheck.sh`. NB measured: inert against a *jammed* slice
+  (that loss is pre-FCS sync/AGC, upstream of the equalizer) — it targets
+  in-band spurs riding on decodable frames.
+- `DEVOURER_RX_NBI=<f_mhz>` — (all generations, RX) arm the narrowband-
+  interference notch filter at one in-channel frequency (vendor-parity,
+  LUT-quantized — a single narrow notch, not a slice mask).
 - `DEVOURER_TX_WITH_RX=thread` — (`WiFiDriverTxDemo`) run the RX worker loop on
   a `std::thread` alongside the TX loop, on the **same claimed adapter**: one
   bring-up (`InitWrite`), then `StartRxLoop(packetProcessor)` — the programmatic

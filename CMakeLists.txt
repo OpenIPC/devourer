@@ -245,3 +245,14 @@ add_test(
             -DSELFTEST_EXE=$<TARGET_FILE:StreamStdinSelftest>
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/stream_stdin_test.cmake
 )
+
+# Headless guard for the ToneMask tone-index math (src/ToneMask.h) — the fc
+# derivation + subcarrier enumeration behind DEVOURER_RX_CSI_MASK /
+# DEVOURER_RX_NBI. Pure math only; the register encodings are hardware-checked
+# via the apply-time readback logging.
+add_executable(ToneMaskSelftest
+    tests/tone_mask_selftest.cpp
+)
+target_link_libraries(ToneMaskSelftest PRIVATE WiFiDriver)
+
+add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)

@@ -3,6 +3,7 @@
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
 #include "SignalStop.h"
+#include "ToneMask.h"
 
 #include <chrono>
 #include <cstdio>
@@ -492,6 +493,20 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
       _device.rtw_write8(0x808, mask);
       _logger->info("DEVOURER_RX_PATHS: RX-path mask 0x808[7:0]=0x{:02x}", mask);
     }
+  }
+
+  /* DEVOURER_RX_CSI_MASK / DEVOURER_RX_NBI — RX-side per-subcarrier masking
+   * (receive-equalizer CSI mask / narrowband notch), the poor-man's preamble
+   * puncturing. Applied here for the same reason as DEVOURER_RX_PATHS: after
+   * the channel set it is the final word; a later channel switch reverts it,
+   * so it targets a single-channel RX capture. See ToneMask.h. */
+  {
+    auto fam = (_eepromManager->version_id.ICType == CHIP_8814A)
+                   ? devourer::tonemask::Family::AC2_8814
+                   : devourer::tonemask::Family::AC1;
+    devourer::tonemask::apply_from_env(
+        _device, _logger, fam, _channel,
+        (_eepromManager->version_id.ICType == CHIP_8814A) ? 4 : 2);
   }
 
   _logger->info("Listening air...");

@@ -83,7 +83,8 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   slow();
   _hal.config_trx_mode(); /* RF mode table + TX/RX antenna-path HW blocks */
   slow();
-  _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel), bw, rfe);
+  _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel), bw, rfe,
+                      channel.ChannelOffset);
   slow();
   _hal.do_lck(); /* LC calibration — lock the RF LO */
   slow();
@@ -96,9 +97,35 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
     _logger->info("Jaguar2: IQK SKIPPED (DEVOURER_SKIP_IQK)");
   }
   slow();
+  /* Re-assert the TX/RX antenna-path routing AFTER IQK. In the vendor flow
+   * config_phydm_trx_mode runs from the post-calibration channel-set (PHY_SwChnl),
+   * i.e. AFTER IQK — devourer ran it before IQK, and IQK's TX-path loopback +
+   * one-shot apply-bit toggling (0xc94/0x80c/0x93c) leave the TX antenna path
+   * disturbed with nothing to restore it (RX is unaffected, which is why RX
+   * worked but TX radiated no valid frame). Gated for A/B bisection. */
+  if (!getenv("DEVOURER_SKIP_TRX_REASSERT")) {
+    _hal.config_trx_mode();
+    _logger->info("Jaguar2: TX/RX path re-asserted post-IQK");
+  }
+  slow();
+  /* phydm DM-init RFE mux + TXBF init — the kernel runs these from
+   * odm_dm_init (phydm_rfe_init) and rtl8822b_phy_bf_init after calibration.
+   * devourer previously skipped both, leaving 0x1990=0 (RFE source mux) and
+   * 0x1c94=0x5fff5fff (BB-table default, not the bf_init 0xafffafff). */
+  if (!getenv("DEVOURER_SKIP_RFEINIT")) {
+    _hal.rfe_init();
+    _hal.bf_init();
+  }
+  slow();
+  /* Program per-rate TXAGC from the EFUSE power-by-rate calibration (the level
+   * the kernel uses). DEVOURER_TX_PWR (flat override) applied later in InitWrite
+   * still wins for debug. DEVOURER_SKIP_TXPWR keeps the BB-table default. */
+  if (!getenv("DEVOURER_SKIP_TXPWR"))
+    _hal.apply_tx_power(static_cast<uint8_t>(channel.Channel), bw, rfe);
+  slow();
   /* Grant the antenna to WLAN (combo chip) — must precede enable. */
   if (!getenv("DEVOURER_SKIP_COEX"))
-    _hal.coex_wlan_only();
+    _hal.coex_wlan_only(channel.Channel > 14);
   else
     _logger->info("Jaguar2: coex WL grant SKIPPED (DEVOURER_SKIP_COEX)");
   slow();
@@ -449,11 +476,12 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
      * intermittent (a frame slips through between silencings). Re-apply the
      * WL-only HW grant every ~500 ms — the jaguar2 analogue of the Jaguar3
      * coex_runtime_loop. Runs on _coex_thread for the demo lifetime. */
-    _coex_thread = std::thread([this] {
+    bool is_5g = _channel.Channel > 14;
+    _coex_thread = std::thread([this, is_5g] {
       while (!g_devourer_should_stop) {
         for (int i = 0; i < 50 && !g_devourer_should_stop; i++)
           std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        _hal.coex_wlan_only();
+        _hal.coex_wlan_only(is_5g);
       }
     });
     _logger->info("Jaguar2: coex runtime thread started (WL-only re-assert)");

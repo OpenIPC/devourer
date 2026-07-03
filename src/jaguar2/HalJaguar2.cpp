@@ -6,6 +6,7 @@
 #include <thread>
 #include <utility>
 
+#include "Hal8822b_TxpwrLmt.h" /* generated: hal8822b_txpwr_lmt() WW-min limits */
 #include "PhyTableLoader.h"
 #include "PhyTableLoaderJaguar2.h"
 
@@ -140,19 +141,39 @@ void HalJaguar2::read_chip_version() {
                 _ver.rf_2t2r ? "2T2R" : "1T1R", v);
 }
 
-uint8_t HalJaguar2::read_efuse_rfe() {
+void HalJaguar2::read_efuse_logical_map(uint8_t *map, uint16_t map_size,
+                                        bool dump) {
   /* Standard 88xx EFUSE logical-map decode (efuse_OneByteRead + 2-byte
    * extended-header format). Ported from the jaguar3 non-EU path; 8822B uses
-   * the same physical primitive. Walk only far enough to cover 0xCA. */
-  constexpr uint16_t kRfeOff = 0xCA; /* EEPROM_RFE_OPTION_8822B */
+   * the same physical primitive.
+   *
+   * The physical efuse stores logical words in an arbitrary order (a block for a
+   * high logical offset can appear physically before a block for a low offset),
+   * so the whole chain must be walked to the natural end (hdr == 0xFF). An
+   * earlier version broke out as soon as a block's base exceeded a target offset
+   * — but the VID/PID block (logical base 0x100) appears near the *start* of the
+   * physical layout, so the walk aborted long before reaching the physically-
+   * later blocks (RFE 0xCA always read back 0xFF). */
   constexpr uint16_t kPhysMax = 1024;
-  uint8_t map[0xD0];
-  for (auto &b : map) b = 0xFF;
+  for (uint16_t i = 0; i < map_size; i++)
+    map[i] = 0xFF;
 
   auto rd = [this](uint16_t a) -> uint8_t {
     uint8_t d = 0xFF;
     return _device.efuse_OneByteRead(a, &d) ? d : 0xFF;
   };
+
+  if (dump) {
+    /* Raw physical efuse dump (first 0x100 bytes) for hand-decoding the header
+     * chain — proves whether the logical-map walk sees the programmed words. */
+    char line[3 * 16 + 1];
+    for (uint16_t p = 0; p < 0x100; p += 16) {
+      int n = 0;
+      for (uint16_t i = 0; i < 16; i++)
+        n += snprintf(line + n, sizeof(line) - n, "%02x ", rd(p + i));
+      _logger->info("Jaguar2: EFUSE phys[{:03x}]: {}", p, line);
+    }
+  }
 
   uint16_t phys = 0;
   while (phys < kPhysMax) {
@@ -178,14 +199,25 @@ uint8_t HalJaguar2::read_efuse_rfe() {
       for (uint8_t k = 0; k < 2; k++) {
         uint8_t d = rd(phys++);
         uint16_t idx = static_cast<uint16_t>(base + i * 2 + k);
-        if (idx < sizeof(map))
+        if (idx < map_size)
           map[idx] = d;
       }
     }
-    if (base > kRfeOff + 8)
-      break;
   }
-  uint8_t rfe = map[kRfeOff];
+  if (dump) {
+    _logger->info("Jaguar2: EFUSE dump VID={:02x}{:02x} PID={:02x}{:02x} "
+                  "chplan(0xB8)={:02x} rfe(0xCA)={:02x} txcal(0xC8)={:02x}",
+                  map[0x101], map[0x100], map[0x103], map[0x102], map[0xB8],
+                  map[0xCA], map[0xC8]);
+  }
+}
+
+uint8_t HalJaguar2::read_efuse_rfe() {
+  constexpr uint16_t kRfeOff = 0xCA; /* EEPROM_RFE_OPTION_8822B */
+  read_efuse_logical_map(_efuse_map, sizeof(_efuse_map),
+                         getenv("DEVOURER_EFUSE_DUMP") != nullptr);
+  _efuse_valid = true; /* cache for apply_tx_power (avoid a 2nd physical walk) */
+  uint8_t rfe = _efuse_map[kRfeOff];
   /* Unprogrammed efuse (0xFF) falls back to rfe_type 0 — matches the vendor
    * Hal_ReadRFEType_8822b error path (rtl8822b_ops.c). Many retail 8812BU/
    * 8822BU dongles (incl. the Archer T3U) ship with a blank RFE byte. */
@@ -337,22 +369,36 @@ void HalJaguar2::igi_toggle() {
   _device.phy_set_bb_reg(0x0e50, 0x7f, igi);
 }
 
-void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
-  const bool g2 = channel <= 14;
+void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
+                               uint8_t primary_ch_idx) {
+  /* The RF/AGC tune to the CENTRAL channel of the wide channel; `channel` is the
+   * primary 20 MHz channel and primary_ch_idx its position. 20 MHz: central =
+   * primary. 40 MHz: primary_ch_idx 1(lower)/2(upper) -> ±2. 80 MHz: 1..4 ->
+   * +6/+2/-2/-6. (The vendor's higher layer passes the central channel to
+   * config_phydm_switch_channel_8822b and primary_ch_idx to switch_bandwidth.) */
+  uint8_t cch = channel;
+  if (bw == 1)
+    cch = static_cast<uint8_t>(primary_ch_idx == 2 ? channel - 2 : channel + 2);
+  else if (bw == 2) {
+    static const int off80[5] = {0, 6, 2, -2, -6};
+    cch = static_cast<uint8_t>(channel +
+                               off80[primary_ch_idx <= 4 ? primary_ch_idx : 0]);
+  }
+  const bool g2 = cch <= 14;
   const bool r2t2r = _ver.rf_2t2r != 0;
 
-  /* --- config_phydm_switch_channel_8822b --- */
-  rfe_ifem(channel); /* RFE pins for the band (rfe_type 0) */
+  /* --- config_phydm_switch_channel_8822b (on the central channel) --- */
+  rfe_ifem(cch); /* RFE pins for the band (rfe_type 0) */
   (void)rfe_type;
 
   uint32_t rf18 = rf_read(0, 0x18);
   rf18 &= ~((1u << 18) | (1u << 17) | 0xffu); /* clear band/MASKBYTE0 */
-  rf18 |= channel;
+  rf18 |= cch;
 
   if (g2) {
     _device.phy_set_bb_reg(0x0958, 0x1f, 0x0);       /* AGC table idx 0 */
     _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x96a); /* fc for CFO tracking */
-    if (channel == 14) {
+    if (cch == 14) {
       _device.phy_set_bb_reg(0x0a24, 0xffffffff, 0x00006577);
       _device.phy_set_bb_reg(0x0a28, 0x0000ffff, 0x0000);
     } else {
@@ -361,52 +407,98 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
     }
   } else {
     /* 5G AGC table + fc (config_phydm_switch_channel_8822b 5G branch) */
-    if (channel >= 36 && channel <= 64)
+    if (cch >= 36 && cch <= 64)
       _device.phy_set_bb_reg(0x0958, 0x1f, 0x1);
-    else if (channel >= 100 && channel <= 144)
+    else if (cch >= 100 && cch <= 144)
       _device.phy_set_bb_reg(0x0958, 0x1f, 0x2);
-    else if (channel >= 149)
+    else if (cch >= 149)
       _device.phy_set_bb_reg(0x0958, 0x1f, 0x3);
-    if (channel >= 36 && channel <= 48)
+    if (cch >= 36 && cch <= 48)
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x494);
-    else if (channel >= 52 && channel <= 64)
+    else if (cch >= 52 && cch <= 64)
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x453);
-    else if (channel >= 100 && channel <= 116)
+    else if (cch >= 100 && cch <= 116)
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x452);
-    else if (channel >= 118 && channel <= 177)
+    else if (cch >= 118 && cch <= 177)
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x412);
   }
 
-  /* RF 0xBE[17:15] phase-noise: 0 for 2.4G (5G low/mid/high tables omitted —
-   * 20MHz 2.4G RX is the current target). */
-  rf_set(0, 0xbe, (1u << 17) | (1u << 16) | (1u << 15), g2 ? 0x0 : 0x0);
+  /* RF 0xBE[17:15] per-channel phase-noise / VCO-band setting
+   * (config_phydm_switch_channel_8822b): 0 for 2.4G, else a per-5G-channel band
+   * value from the low/middle/high-band tables. Omitting it (writing 0 on 5G)
+   * leaves the 5G VCO mis-tuned so 5G RX/TX fail entirely — this was the sole
+   * gap blocking 5G. Path A only (matches the vendor). */
+  static const uint8_t low_band[15] = {0x7, 0x6, 0x6, 0x5, 0x0, 0x0, 0x7, 0xff,
+                                       0x6, 0x5, 0x0, 0x0, 0x7, 0x6, 0x6};
+  static const uint8_t middle_band[23] = {
+      0x6, 0x5, 0x0, 0x0, 0x7, 0x6, 0x6, 0xff, 0x0, 0x0, 0x7, 0x6,
+      0x6, 0x5, 0x0, 0xff, 0x7, 0x6, 0x6, 0x5, 0x0, 0x0, 0x7};
+  static const uint8_t high_band[15] = {0x5, 0x5, 0x0, 0x7, 0x7, 0x6, 0x5, 0xff,
+                                        0x0, 0x7, 0x7, 0x6, 0x5, 0x5, 0x0};
+  uint8_t rf_be = 0xff;
+  if (cch <= 14)
+    rf_be = 0x0;
+  else if (cch >= 36 && cch <= 64)
+    rf_be = low_band[(cch - 36) >> 1];
+  else if (cch >= 100 && cch <= 144)
+    rf_be = middle_band[(cch - 100) >> 1];
+  else if (cch >= 149 && cch <= 177)
+    rf_be = high_band[(cch - 149) >> 1];
+  if (rf_be != 0xff)
+    rf_set(0, 0xbe, (1u << 17) | (1u << 16) | (1u << 15), rf_be);
 
-  if (channel == 144) {
+  if (cch == 144) {
     rf_set(0, 0xdf, (1u << 18), 0x1);
     rf18 |= (1u << 17);
   } else {
     rf_set(0, 0xdf, (1u << 18), 0x0);
-    if (channel > 144)
+    if (cch > 144)
       rf18 |= (1u << 18);
-    else if (channel >= 80)
+    else if (cch >= 80)
       rf18 |= (1u << 17);
   }
 
-  /* --- config_phydm_switch_bandwidth_8822b (20 MHz) --- */
+  /* --- config_phydm_switch_bandwidth_8822b (20/40/80 MHz) --- */
   uint32_t v8ac = _device.rtw_read32(0x08ac);
-  v8ac &= 0xFFCFFC00;
-  v8ac |= 0x0; /* CHANNEL_WIDTH_20 = 0 */
-  _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
-  _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1); /* ADC buffer clock */
-  rf18 |= (1u << 11) | (1u << 10);                 /* RF BW 20M */
+  const uint8_t sub = static_cast<uint8_t>((primary_ch_idx & 0xf) << 2);
+  if (bw == 1) { /* 40 MHz */
+    _device.phy_set_bb_reg(0x0a00, 1u << 4, primary_ch_idx == 1 ? 1 : 0);
+    v8ac &= 0xFF3FF300;
+    v8ac |= (sub | 0x1u); /* CHANNEL_WIDTH_40 = 1 */
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
+    rf18 &= ~((1u << 11) | (1u << 10));
+    rf18 |= (1u << 11); /* RF BW 40M */
+  } else if (bw == 2) { /* 80 MHz */
+    v8ac &= 0xFCEFCF00;
+    v8ac |= (sub | 0x2u); /* CHANNEL_WIDTH_80 = 2 */
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
+    rf18 &= ~((1u << 11) | (1u << 10));
+    rf18 |= (1u << 10); /* RF BW 80M */
+    if (rfe_type == 2 || rfe_type == 3 || rfe_type == 17) {
+      _device.phy_set_bb_reg(0x0840, 0x0000f000, 0x6);
+      _device.phy_set_bb_reg(0x08c8, (1u << 10), 0x1);
+    }
+  } else { /* 20 MHz */
+    v8ac &= 0xFFCFFC00;
+    v8ac |= 0x0u; /* CHANNEL_WIDTH_20 = 0 */
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
+    rf18 |= (1u << 11) | (1u << 10); /* RF BW 20M */
+  }
 
-  /* Mask RF18 (RF_CHNLBW) to only its valid fields: channel [7:0], RF-BW-mode
-   * [11:10], band-select [18:17]. The RF radioA table leaves spurious bits 8
-   * and 16 set; the read-modify-write above preserves them, and those extra
-   * bits detune the synth so the OFDM demod never locks (energy detected, zero
-   * PSDUs to MAC). The kernel driver's RF18 is a clean channel|BW value. This
-   * masking was the missing piece for first RX. */
-  rf18 &= 0x00060cffu;
+  /* RF18 final value. The vendor (config_phydm_switch_channel_8822b) preserves
+   * bits 8-16 from the read and never masks — its RF18 comes out clean on 2.4G
+   * (0x0c09) and with the 5G band bits (8+16) set on 5G (0x10d24). devourer's
+   * direct RF18 read carries SPURIOUS bits 8/16 on 2.4G (an upstream RF-state
+   * quirk), so on 2.4G we clear them to reproduce the vendor's clean value; on
+   * 5G those bits are the real band indicator and must be kept (masking them was
+   * what left the 5G synth in 2.4G mode -> dead 5G RX). Net: devourer's RF18 now
+   * matches the vendor's per-band value. DEVOURER_RF18_MASK forces the old
+   * always-mask for bisection. */
+  if (g2 || getenv("DEVOURER_RF18_MASK"))
+    rf18 &= 0x00060cffu;
 
   rf_write(0, 0x18, rf18);
   if (r2t2r)
@@ -464,8 +556,12 @@ void HalJaguar2::config_trx_mode() {
   _device.phy_set_bb_reg(0x080c, (1u << 29) | (1u << 28), 0x1);
   _device.phy_set_bb_reg(0x080c, (1u << 30), 0x1); /* CCK TX path via 0xa07[7] */
   _device.phy_set_bb_reg(0x080c, 0xff, (path << 4) | path);
-  /* CCK TX path (phydm_config_cck_tx_path_8822b): AB->0xc, A->0x8. */
-  _device.phy_set_bb_reg(0x0a04, 0xf0000000, _ver.rf_2t2r ? 0xc : 0x8);
+  /* CCK TX path (phydm_config_cck_tx_path_8822b). The vendor calls
+   * phydm_config_tx_path_8822b(dm, tx_path, tx_path_sel_1ss, tx_path_sel_1ss) —
+   * i.e. tx_path_sel_cck == tx_path_sel_1ss == BB_PATH_A, so CCK is single-path A
+   * (0xa04[31:28]=0x8) even on a 2T2R part. (devourer previously used the full
+   * AB path 0xc here; the kernel reads 0x8.) */
+  _device.phy_set_bb_reg(0x0a04, 0xf0000000, 0x8);
   /* OFDM TX path (phydm_config_ofdm_tx_path_8822b, 1ss=A). */
   _device.phy_set_bb_reg(0x093c, 0xfff00000, 0x001);
   if (_ver.rf_2t2r) {
@@ -526,14 +622,14 @@ void HalJaguar2::do_lck() {
   if (_ver.rf_2t2r)
     rf_write(1, 0x0, 0x10000);
 
-  uint32_t lc_cal = rf_read(0, 0x18); /* backup RF CHNLBW */
-  /* Mask to channel/BW/band bits (like the RF18 write mask) so the value fed
-   * back into the LCK matches the kernel's clean 0xc09. NB: the LCK-done poll
-   * below "times out" because devourer's 3-wire read of RF 0x18 returns status
-   * bits (0x18c09) transiently — but the LO does lock (a later settled read is
-   * 0xc09, matching the kernel), so the timeout is a read artifact, not a real
-   * lock failure. */
-  lc_cal &= 0x00060cffu;
+  /* Backup RF CHNLBW using the FULL read, exactly like the vendor
+   * _phy_lc_calibrate_8822b (odm_get_rf_reg RF_CHNLBW, RFREGOFFSETMASK). An
+   * earlier version masked lc_cal to 0x00060cff — but on 5G that clears the band
+   * bits (8/16), so the LC calibration ran against a 2.4G-band RF18 (mis-tuning
+   * the 5G VCO) AND the recover-write left RF18 masked, overriding the correct
+   * 5G channel from set_channel_bw. The LCK-done poll may "time out" (the direct
+   * RF read returns transient status bits) but the LO does lock. */
+  uint32_t lc_cal = rf_read(0, 0x18); /* backup RF CHNLBW (full, no mask) */
   rf_write(0, 0xc4, 0x01402);         /* disable RTK */
   rf_write(0, 0x18, lc_cal | 0x08000); /* start LCK */
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -554,9 +650,14 @@ void HalJaguar2::do_lck() {
                 rf_read(0, 0x18), rf_read(0, 0x0));
 }
 
-/* ex_hal8822b_wifi_only_hw_config: grant the antenna to WLAN. Without this the
- * combo chip leaves the antenna switch owned by BT and the WL RX is deaf. */
-void HalJaguar2::coex_wlan_only() {
+/* ex_hal8822b_wifi_only_hw_config + hal8822b_wifi_only_switch_antenna: grant the
+ * antenna to WLAN. Without the hw_config block the combo chip leaves the antenna
+ * switch owned by BT and the WL RX is deaf. The switch_antenna write (0xcbc[9:8])
+ * selects which physical antenna path the WL side drives, per band — the kernel
+ * fires it from rtw_btcoex_wifionly_switchband_notify() during every channel/band
+ * set. Omitting it leaves the antenna-path select bits at their reset value, so
+ * WL TX/RX runs through an unselected/mismatched path (weak, distorted on air). */
+void HalJaguar2::coex_wlan_only(bool is_5g) {
   _device.phy_set_bb_reg(0x004c, 0x01800000, 0x2); /* BB control */
   _device.phy_set_bb_reg(0x0cb4, 0xff, 0x77);      /* SW control */
   _device.phy_set_bb_reg(0x0974, 0x300, 0x3);      /* antenna mux switch */
@@ -565,7 +666,48 @@ void HalJaguar2::coex_wlan_only() {
   _device.phy_set_bb_reg(0x0070, 0xff000000, 0x0e); /* WL-side controller */
   _device.phy_set_bb_reg(0x1704, 0xffffffff, 0x7700);     /* gnt_wl=1 gnt_bt=0 */
   _device.phy_set_bb_reg(0x1700, 0xffffffff, 0xc00f0038);
-  _logger->info("Jaguar2: coex WL-only antenna grant applied");
+  /* hal8822b_wifi_only_switch_antenna(is_5g): 0xcbc[9:8] = 1 (5G) / 2 (2.4G) */
+  _device.phy_set_bb_reg(0x0cbc, 0x300, is_5g ? 0x1 : 0x2);
+  _logger->info("Jaguar2: coex WL-only antenna grant applied (is_5g={})",
+                is_5g ? 1 : 0);
+}
+
+void HalJaguar2::rfe_init() {
+  /* phydm_rfe_8822b_init (verbatim): chip-top mux + RFE s0/s1 source select.
+   * The kernel runs this from odm_dm_init->phydm_rfe_init after BB/RF config. */
+  _device.phy_set_bb_reg(0x0064, (1u << 29) | (1u << 28), 0x3); /* chip top mux */
+  _device.phy_set_bb_reg(0x004c, (1u << 26) | (1u << 25), 0x0);
+  _device.phy_set_bb_reg(0x0040, (1u << 2), 0x1);
+  _device.phy_set_bb_reg(0x1990, 0x3f, 0x30);                   /* from s0/s1 */
+  _device.phy_set_bb_reg(0x1990, (1u << 11) | (1u << 10), 0x3);
+  _device.phy_set_bb_reg(0x0974, 0x3f, 0x3f);                   /* in / out */
+  _device.phy_set_bb_reg(0x0974, (1u << 11) | (1u << 10), 0x3);
+  _logger->info("Jaguar2: RFE init (chip-top mux, 0x1990=0xc30)");
+}
+
+void HalJaguar2::bf_init() {
+  /* rtl8822b_phy_bf_init (verbatim): MU-MIMO / TXBF default setup. Register
+   * offsets/bits from halmac_reg_8822b.h + rtl8822b_phy.c. */
+  uint32_t v32 = _device.rtw_read32(0x14c0);        /* REG_MU_TX_CTL */
+  v32 |= (1u << 16);                                /* MU P1 wait-state en */
+  v32 = (v32 & ~(0xFu << 12)) | (0xAu << 12);       /* MU retry limit = 0xA */
+  v32 &= ~(1u << 7);                                /* disable MU-MIMO */
+  v32 &= ~0x3fu;                                    /* clear MU table valid */
+  _device.rtw_write32(0x14c0, v32);
+
+  _device.rtw_write8(0x167c, (3u << 4) | (1u << 6)); /* MU BF ACKPOLICY=3, EN */
+  _device.rtw_write16(0x1680, 0);                    /* MU BF ctl default */
+
+  uint8_t v8 = _device.rtw_read8(0x042f);            /* REG_TXBF_CTRL+3 */
+  v8 |= (1u << 6);                                   /* USE_NDPA_PARAMETER>>24 */
+  _device.rtw_write8(0x042f, v8);
+  _device.rtw_write8(0x045f, 0x10);                  /* NDPA rate OFDM_6M/BW20 */
+
+  v8 = _device.rtw_read8(0x06df);
+  v8 = (v8 & 0xC0) | 0x4;                            /* STA2 CSI rate = 6M */
+  _device.rtw_write8(0x06df, v8);
+  _device.rtw_write32(0x1c94, 0xAFFFAFFFu);          /* grouping bitmap */
+  _logger->info("Jaguar2: BF init (0x1c94=0xafffafff)");
 }
 
 void HalJaguar2::set_tx_power_flat(uint8_t idx) {
@@ -576,6 +718,110 @@ void HalJaguar2::set_tx_power_flat(uint8_t idx) {
     _device.rtw_write32(static_cast<uint16_t>(0x1d80 + off), v); /* path B */
   }
   _logger->info("Jaguar2: TXAGC flat index 0x{:02x} applied", idx);
+}
+
+void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
+  /* Port of phy_get_pg_txpwr_idx (hal_com_phycfg.c) + the 4-byte TXAGC write
+   * (config_phydm_write_txagc_8822b): TXAGC[rate] = pg-base(rate-section) +
+   * per-Nss diff, clamped to the txpwr_lmt regulatory limit, written to 0x1d00
+   * (path A) / 0x1d80 (path B). CONFIG_TXPWR_BY_RATE_EN is off upstream, so the
+   * rate-section base is the value. Replaces the hot BB-table default that
+   * overdrives high-order QAM into PA compression. Handles 2.4G and 5G (20 MHz);
+   * BW40/80 is future work (uses BW40/BW80 diffs). */
+  if (channel == 0)
+    return;
+  const bool g5 = channel > 14;
+
+  /* EFUSE power-by-rate from logical 0x10 (pg_txpwr_saddr). Per path: 2.4G block
+   * 18 B then 5G block 24 B (42 B/path). Path p: 2G @ 0x10+p*42, 5G @ 0x22+p*42.
+   * Reuse the map read once by read_efuse_rfe earlier in bring_up. */
+  if (!_efuse_valid) {
+    read_efuse_logical_map(_efuse_map, sizeof(_efuse_map), /*dump=*/false);
+    _efuse_valid = true;
+  }
+  const uint8_t *map = _efuse_map;
+
+  /* channel -> rate group (rtw_get_ch_group). */
+  auto group_2g = [](uint8_t ch) -> uint8_t {
+    if (ch <= 2) return 0; if (ch <= 5) return 1; if (ch <= 8) return 2;
+    if (ch <= 11) return 3; return 4;
+  };
+  auto group_5g = [](uint8_t ch) -> uint8_t {
+    if (ch <= 42) return 0; if (ch <= 48) return 1; if (ch <= 58) return 2;
+    if (ch <= 80) return 3; if (ch <= 106) return 4; if (ch <= 114) return 5;
+    if (ch <= 122) return 6; if (ch <= 130) return 7; if (ch <= 138) return 8;
+    if (ch <= 144) return 9; if (ch <= 155) return 10; if (ch <= 161) return 11;
+    if (ch <= 171) return 12; return 13;
+  };
+  const uint8_t group = g5 ? group_5g(channel) : group_2g(channel);
+  const uint8_t cck_group = (channel == 14) ? 5 : group;
+
+  auto s4 = [](uint8_t nib) -> int { /* s4bit -> s8 sign-extend */
+    int v = nib & 0x0f; return (v & 0x8) ? (v - 16) : v;
+  };
+  /* Regulatory limits — exact per (rfe_type, band, bw, section, ntx, channel)
+   * from the generated txpwr_lmt table (worldwide-min across FCC/ETSI/MKK; the
+   * rfe_type-3 table for the T3U). Keeps high-order QAM out of PA compression.
+   * The demo path is 1Tx; the ht2 (2SS) clamp reuses the 1Tx limit (conservative
+   * for the rare 2SS injection). sec: 0=CCK 1=OFDM 2=HT. */
+  const uint8_t band_i = g5 ? 1 : 0;
+  const int lmt_cck = g5 ? 63 : hal8822b_txpwr_lmt(rfe_type, band_i, bw, 0, 1, channel);
+  const int lmt_ofdm = hal8822b_txpwr_lmt(rfe_type, band_i, bw, 1, 1, channel);
+  const int lmt_ht = hal8822b_txpwr_lmt(rfe_type, band_i, bw, 2, 1, channel);
+  auto clamp63 = [](int v) -> uint8_t {
+    return static_cast<uint8_t>(v < 0 ? 0 : (v > 63 ? 63 : v));
+  };
+  auto clamp_lmt = [&](int v, int lmt) -> uint8_t {
+    if (v > lmt) v = lmt; return clamp63(v);
+  };
+
+  for (uint8_t path = 0; path < 2; path++) {
+    /* base offset of this path's band block, and the BW40-base / first-diff
+     * byte offsets within it. 2.4G: 6 CCK-base + 5 BW40-base + diffs (diff@11).
+     * 5G: 14 BW40-base + diffs (diff@14), no CCK. */
+    const uint16_t blk = static_cast<uint16_t>(0x10 + path * 42 + (g5 ? 18 : 0));
+    const uint8_t cck_base = g5 ? 0 : map[blk + cck_group];
+    const uint8_t bw40_base = g5 ? map[blk + group] : map[blk + 6 + group];
+    if (bw40_base == 0xFF || (!g5 && cck_base == 0xFF)) {
+      _logger->info("Jaguar2: apply_tx_power path {} ch{} EFUSE base unprogrammed "
+                    "— leaving TXAGC default", path, channel);
+      continue;
+    }
+    const uint8_t d0 = map[blk + (g5 ? 14 : 11)]; /* MSB BW20_Diff0 / LSB OFDM_Diff0 */
+    const uint8_t d1 = map[blk + (g5 ? 15 : 12)]; /* LSB BW20_Diff1 (2nd Tx) */
+    const int ofdm_diff0 = s4(d0 & 0x0f);
+    const int bw20_diff0 = s4((d0 >> 4) & 0x0f);
+    const int bw20_diff1 = s4(d1 & 0x0f);
+
+    /* HT bandwidth diff (phy_get_pg_txpwr_idx): BW20 = BW40_base + BW20_Diff;
+     * BW40 = BW40_base + BW40_Diff (BW40_Diff[1Tx] is the reference = 0, i.e. the
+     * base is the BW40 value); BW80 (5G) = BW40_base + BW80_Diff. Only BW20 adds
+     * a diff for the 1Tx path — so BW40/80 use the raw base. (BW80's exact 5G
+     * BW80_Diff is a further refinement; the base is a close conservative value.) */
+    const int ht_diff0 = (bw == 0) ? bw20_diff0 : 0;
+    const int ht_diff1 = (bw == 0) ? bw20_diff1 : 0;
+    const uint8_t cck_idx = clamp_lmt(cck_base, lmt_cck);
+    const uint8_t ofdm_idx = clamp_lmt(bw40_base + ofdm_diff0, lmt_ofdm);
+    const uint8_t ht1_idx = clamp_lmt(bw40_base + ht_diff0, lmt_ht);
+    const uint8_t ht2_idx = clamp_lmt(bw40_base + ht_diff0 + ht_diff1, lmt_ht);
+
+    /* Write TXAGC (4 rates / dword). hw_rate: 0x00-03 CCK, 0x04-0b OFDM,
+     * 0x0c-13 HT MCS0-7 (1SS), 0x14-1b HT MCS8-15 (2SS). 5G has no CCK. */
+    const uint16_t p = static_cast<uint16_t>(0x1d00 + path * 0x80);
+    auto wr = [&](uint16_t off, uint8_t idx) {
+      _device.rtw_write32(static_cast<uint16_t>(p + off), idx * 0x01010101u);
+    };
+    if (!g5)
+      wr(0x00, cck_idx);
+    wr(0x04, ofdm_idx); wr(0x08, ofdm_idx);
+    wr(0x0c, ht1_idx);  wr(0x10, ht1_idx);
+    wr(0x14, ht2_idx);  wr(0x18, ht2_idx);
+
+    _logger->info("Jaguar2: TXAGC path {} ch{} {} (g{}): CCK={:#x} OFDM={:#x} "
+                  "HT1SS={:#x} HT2SS={:#x} (bw40_base={})", path, channel,
+                  g5 ? "5G" : "2G", group, cck_idx, ofdm_idx, ht1_idx, ht2_idx,
+                  bw40_base);
+  }
 }
 
 void HalJaguar2::dig_step() {

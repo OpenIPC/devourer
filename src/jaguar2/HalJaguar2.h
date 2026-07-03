@@ -42,6 +42,19 @@ public:
    * front-end unconfigured. */
   uint8_t read_efuse_rfe();
 
+  /* Walk the physical EFUSE header chain and decode it into a logical map
+   * (map[i] = 0xFF where unprogrammed). Shared by read_efuse_rfe and
+   * apply_tx_power. `dump`=true logs the raw physical bytes + a few key fields. */
+  void read_efuse_logical_map(uint8_t *map, uint16_t map_size, bool dump);
+
+  /* Program the per-rate TXAGC (0x1d00 path A / 0x1d80 path B) from the EFUSE
+   * power-by-rate calibration for `channel` at bandwidth `bw` (0=20/1=40/2=80) —
+   * the efuse-calibrated level the kernel uses. Without it the TXAGC sits at the
+   * hot BB-table default which overdrives high-order QAM (MCS5/7) into PA
+   * compression. Ports phy_get_pg_txpwr_idx (base + per-BW/Nss diff) +
+   * config_phydm_write_txagc_8822b. Both bands. */
+  void apply_tx_power(uint8_t channel, uint8_t bw = 0, uint8_t rfe_type = 0);
+
   /* Apply the 8822B BB (phy_reg), AGC (agc_tab) and RF (radioa/radiob) phydm
    * tables via the shared check_positive walker, bracketed by the OFDM/CCK
    * block disable/enable (config_phydm_parameter_init_8822b PRE/POST). Mirrors
@@ -51,9 +64,12 @@ public:
 
   /* Set RF channel + bandwidth (config_phydm_switch_channel_8822b +
    * config_phydm_switch_bandwidth_8822b): RF18 tune, band AGC/fc/CCK-filter,
-   * RFE antenna pins, RX-path + IGI toggle. bw: 0=20MHz (only 20 supported for
-   * now). rfe_type selects the RFE-pin table. rf_2t2r drives path-B writes. */
-  void set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type);
+   * RFE antenna pins, RX-path + IGI toggle. bw: 0=20/1=40/2=80 MHz.
+   * primary_ch_idx = sub-channel index for 40/80 (the vendor primary_ch_idx;
+   * from SelectedChannel.ChannelOffset). rfe_type selects the RFE-pin table
+   * and the BW80 extra writes; rf_2t2r drives path-B writes. */
+  void set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
+                      uint8_t primary_ch_idx = 0);
 
   /* Enable the MAC RX engine (CR MACRXEN + promiscuous RCR for monitor). */
   void enable_rx();
@@ -75,7 +91,18 @@ public:
    * front-end deaf (correct BB/RF config but no energy reaches the LNA). Ported
    * verbatim from ex_hal8822b_wifi_only_hw_config: switch to WL-side controller,
    * gnt_wl=1/gnt_bt=0, antenna mux to WL. Must run before enable_rx. */
-  void coex_wlan_only();
+  void coex_wlan_only(bool is_5g);
+
+  /* phydm_rfe_8822b_init: RFE chip-top-mux init (0x64/0x4c/0x40 top mux, 0x1990
+   * s0/s1 select, 0x974 in/out). The kernel runs this from odm_dm_init
+   * (phydm_rfe_init) after BB/RF config; devourer skipped it, leaving 0x1990 at 0
+   * (kernel = 0xc30) so the RFE antenna-mux source select was never applied. */
+  void rfe_init();
+
+  /* rtl8822b_phy_bf_init: MU-MIMO / TXBF init. Only the grouping-bitmap write
+   * (0x1c94 = 0xafffafff, overriding the BB-table default 0x5fff5fff) affects a
+   * non-beamformed frame, but ported whole for parity. Runs after rfe_init. */
+  void bf_init();
 
   /* Force a flat per-rate TXAGC power index (0..63) on both paths — a debug /
    * SDR-visibility knob (DEVOURER_TX_PWR). 8822B TXAGC is 4 rates packed per
@@ -123,6 +150,11 @@ private:
   ChipVersion _ver{};
   bool _aac_checked = false;
   uint32_t _last_fa = 0; /* last DIG-window false-alarm count (telemetry) */
+  /* Decoded logical EFUSE map, read once (a full physical walk is ~hundreds of
+   * USB control transfers ≈ 0.5s). read_efuse_rfe populates it; apply_tx_power
+   * reuses it — avoids a second walk that would slow every cold init. */
+  uint8_t _efuse_map[0x200];
+  bool _efuse_valid = false;
 };
 
 } /* namespace jaguar2 */

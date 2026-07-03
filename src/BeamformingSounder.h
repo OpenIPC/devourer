@@ -131,6 +131,53 @@ inline void arm_beamformee(RtlUsbAdapter& dev, const uint8_t beamformer_mac[6],
     dev.rtw_write32(cfg.csi_content_reg, cfg.csi_content_val);
 }
 
+/* Jaguar-2/3 MU-beamformee registers (8822B/C/E). MU-BF group table. */
+enum : uint16_t {
+  kMuTxCtl    = 0x14C0, /* [10:8] STA-table index, [5:0] STA validity      */
+  kMuGidTab   = 0x14C4, /* gid_valid table (reset to 0 here)               */
+  kMuUserPosL = 0x14C8, /* user-position low 32                            */
+  kMuUserPosH = 0x14CC, /* user-position high 32                           */
+  kMuBfmee0   = 0x1684, /* MU BFee entry 0 (2 bytes): [8:0] P_AID, BIT9 en */
+  kNdpaRate   = 0x045D, /* NDPA TX rate                                    */
+  kNdpaOpt    = 0x045F, /* NDPA option ctrl                                */
+};
+
+/* Beamformee MU layer: on top of arm_beamformee (which sets the SU responder
+ * base — sounding enable, beamformer MAC, RX-filter), add the MU group-table
+ * registers so the beamformee emits an MU report (which appends the per-tone
+ * delta-SNR "MU Exclusive Beamforming Report" the SU report omits). For
+ * self-sounding we program the group/user-position tables directly, skipping
+ * the over-the-air VHT Group ID Management handshake the vendor normally does.
+ * Recipe from hal_txbf_8822b_enter() MU BFee branch (haltxbf8822b.c:484-598),
+ * MU register index 0: gid_valid=0x7fe, user_position_l=0x111110, p_aid=0. */
+inline void arm_beamformee_mu(RtlUsbAdapter& dev, const uint8_t beamformer_mac[6],
+                              const BfeeConfig& cfg) {
+  arm_beamformee(dev, beamformer_mac, cfg);            /* SU responder base */
+
+  /* select MU STA table index 0 (0x14C0[10:8]=0), then mark it valid ([0]=1) */
+  uint32_t mtc = dev.rtw_read<uint32_t>(kMuTxCtl);
+  mtc &= ~0x0700u;                                     /* index 0 */
+  dev.rtw_write<uint32_t>(kMuTxCtl, mtc);
+  mtc = (mtc & 0xFFFFFFC0u) | 0x01u;                   /* STA-0 valid */
+  dev.rtw_write<uint32_t>(kMuTxCtl, mtc);
+
+  dev.rtw_write<uint32_t>(kMuGidTab, 0x00000000u);     /* reset gid table */
+  dev.rtw_write<uint32_t>(kMuUserPosL, 0x00111110u);   /* index-0 user pos */
+  dev.rtw_write<uint32_t>(kMuUserPosH, 0x00000000u);
+
+  uint16_t e = dev.rtw_read<uint16_t>(kMuBfmee0);
+  e = (e & 0xFE00u) | 0x0200u;                         /* BIT9 enable, P_AID=0 */
+  dev.rtw_write16(kMuBfmee0, e);
+
+  uint8_t t = dev.rtw_read8(kTxbfCtrl + 3);
+  dev.rtw_write8(kTxbfCtrl + 3, t | 0xD0);             /* CSI-report src bits */
+  dev.rtw_write8(kNdpaRate, 0x04);                     /* NDPA 6M */
+  uint8_t o = dev.rtw_read8(kNdpaOpt);
+  dev.rtw_write8(kNdpaOpt, o & 0xFC);
+  uint32_t sp = dev.rtw_read<uint32_t>(kSndPtclCtrl);
+  dev.rtw_write<uint32_t>(kSndPtclCtrl, (sp & 0xFF0000FFu) | 0x00020200u);
+}
+
 }  // namespace bf
 }  // namespace devourer
 

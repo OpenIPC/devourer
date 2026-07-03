@@ -73,9 +73,20 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   _hal.apply_bb_rf_agc_tables(rfe);
   _logger->info("RtlJaguar2Device: PHY tables applied");
 
+  /* DEVOURER_SLOW: insert kernel-like settle delays between bring-up steps. If
+   * the running FW samples register state at specific init stages and latches a
+   * TX-enable decision, devourer's fast init may catch it mid-configuration. */
+  static const int slow_ms = getenv("DEVOURER_SLOW")
+                                 ? atoi(getenv("DEVOURER_SLOW")) : 0;
+  auto slow = [] { if (slow_ms) std::this_thread::sleep_for(
+                       std::chrono::milliseconds(slow_ms)); };
+  slow();
   _hal.config_trx_mode(); /* RF mode table + TX/RX antenna-path HW blocks */
+  slow();
   _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel), bw, rfe);
+  slow();
   _hal.do_lck(); /* LC calibration — lock the RF LO */
+  slow();
 
   if (!getenv("DEVOURER_SKIP_IQK")) {
     jaguar2::Halrf8822b halrf(_device, _logger, _hal.chip_version().cut,
@@ -84,12 +95,15 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   } else {
     _logger->info("Jaguar2: IQK SKIPPED (DEVOURER_SKIP_IQK)");
   }
+  slow();
   /* Grant the antenna to WLAN (combo chip) — must precede enable. */
   if (!getenv("DEVOURER_SKIP_COEX"))
     _hal.coex_wlan_only();
   else
     _logger->info("Jaguar2: coex WL grant SKIPPED (DEVOURER_SKIP_COEX)");
+  slow();
   _hal.enable_rx(); /* CR MACTX|MACRX + RCR + IGI — enables both TX and RX */
+  slow();
 }
 
 void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,

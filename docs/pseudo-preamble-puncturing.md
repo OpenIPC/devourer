@@ -104,6 +104,22 @@ next-narrower-bandwidth quantization (80 → 40 loses the clean ch44 slice
 too) — that gap, [clean][clean][dirty][clean] → 60 MHz usable vs 40 MHz
 usable, is the real cost of not having puncturing signaling.
 
+**And it is unilateral, at zero receiver cost.** A receiver tuned at 80 MHz
+decodes narrower frames sent on its primary sub-channels *without retuning*
+(`tests/rx80_narrow_tx_probe.sh`), and pays no measurable sensitivity price
+for staying wide: the differential delivery-vs-noise sweep puts the wide-RX
+penalty at 0 dB (≤ 1 dB, bounded by the capture-cliff width —
+`tests/wide_rx_penalty_sweep.sh`). So the RX parks at 80 MHz and the TX
+shrinks or grows per-packet along the **primary-nested ladder**
+`20 ⊂ 40 ⊂ 80` with no coordination — the one geometric constraint being
+that every rung must contain the RX's primary 20 MHz (the upper-40 is
+unreachable without a coordinated primary move). The adaptive-link
+controller consumes exactly this: bandwidth as an energy-ranked op-table
+dimension (`ControllerConfig.bw_set`), a shared seq-derived probe schedule
+that senses per-rung delivery with zero extra wire fields
+(`rc_proto.probe_bw`, `score.RungWindow`), and a `primary_dirty` escalation
+for the one case no unilateral bandwidth choice can fix.
+
 ## Finding the dirty slice
 
 Two detectors measured (`tests/pseudo_puncture_detect.sh`):

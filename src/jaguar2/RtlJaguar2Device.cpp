@@ -325,6 +325,24 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
                   _device.rtw_read16(0x0100), _device.rtw_read8(0x0522),
                   _device.rtw_read16(0x020C));
   }
+  if (const char *rfp = getenv("DEVOURER_RF_REPLAY")) {
+    /* Replay kernel RF-register state via the 3-wire LSSI ("path addr val"
+     * lines). RF writes go through BB LSSI regs (0xc90/0xe90), so RF state is
+     * invisible to the vendor-reg-write set diff and was never replayed. RF
+     * 0x08 reads 0 on devourer vs 0x9c060 on the kernel — a whole RF register
+     * that may gate the TX path. */
+    FILE *f = fopen(rfp, "r");
+    if (f) {
+      unsigned path, addr, val;
+      int n = 0;
+      while (fscanf(f, "%x %x %x", &path, &addr, &val) == 3) {
+        _hal.dbg_rf_write(static_cast<uint8_t>(path), addr, val);
+        n++;
+      }
+      fclose(f);
+      _logger->info("Jaguar2: RF_REPLAY applied {} RF writes", n);
+    }
+  }
   if (const char *rf = getenv("DEVOURER_TX_REPLAY")) {
     /* Replay the kernel's captured TX-enable write sequence (usbmon golden):
      * "0xREG WIDTH 0xVAL" lines, applied in order at the native width. */

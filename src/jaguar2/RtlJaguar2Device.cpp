@@ -602,9 +602,15 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
     if ((++c % 60) == 0) {
       uint32_t ofdm = _device.rtw_read32(0x2de0);
       uint32_t cck = _device.rtw_read32(0x2de4);
-      _logger->info("Jaguar2 TXDBG[{}]: OFDM(txen={} txon={}) CCK(txen={} "
-                    "txon={})",
-                    c, ofdm & 0xffff, ofdm >> 16, cck & 0xffff, cck >> 16);
+      /* NOTE: 0x2de0/0x2de4 are PMAC-only (read 0 on the kernel during working
+       * TX) — NOT a valid host-TX indicator. VALID indicators: REG_TXPKT_EMPTY
+       * (0x41a: bit per queue, 0=has-packets while draining), the BB activity
+       * counter 0xfb4, and REG_SCH/schedule status. rc = last bulk-OUT status. */
+      uint16_t txempty = _device.rtw_read16(0x041a);
+      uint32_t fb4 = _device.rtw_read32(0x0fb4);
+      _logger->info("Jaguar2 TXDBG[{}]: 2de0={:x}/{:x} TXPKT_EMPTY(0x41a)=0x{:04x}"
+                    " 0xfb4={:x} bulk_rc={}",
+                    c, ofdm & 0xffff, cck & 0xffff, txempty, fb4, rc);
     }
   }
   return rc >= 0;

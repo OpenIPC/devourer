@@ -48,15 +48,6 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
     throw std::runtime_error("RtlJaguar2Device: firmware DLFW failed");
   _logger->info("RtlJaguar2Device: firmware booted (bw={})", (int)bw);
 
-  if (getenv("DEVOURER_DLFW_ONLY")) {
-    /* Stop after DLFW so a from-scratch kernel-write replay (DEVOURER_TX_REPLAY)
-     * can reconstruct the ENTIRE post-DLFW init in the kernel's exact order,
-     * without devourer's own bring-up first setting any internal latch that an
-     * on-top replay can't clear. Tests true sequence parity. */
-    _logger->info("RtlJaguar2Device: DLFW_ONLY — skipping devourer init");
-    return;
-  }
-
   if (!_macinit.init_mac_cfg(channel.ChannelWidth))
     throw std::runtime_error("RtlJaguar2Device: init_mac_cfg failed");
   _macinit.init_usb_cfg();
@@ -73,21 +64,10 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   _hal.apply_bb_rf_agc_tables(rfe);
   _logger->info("RtlJaguar2Device: PHY tables applied");
 
-  /* DEVOURER_SLOW: insert kernel-like settle delays between bring-up steps. If
-   * the running FW samples register state at specific init stages and latches a
-   * TX-enable decision, devourer's fast init may catch it mid-configuration. */
-  static const int slow_ms = getenv("DEVOURER_SLOW")
-                                 ? atoi(getenv("DEVOURER_SLOW")) : 0;
-  auto slow = [] { if (slow_ms) std::this_thread::sleep_for(
-                       std::chrono::milliseconds(slow_ms)); };
-  slow();
   _hal.config_trx_mode(); /* RF mode table + TX/RX antenna-path HW blocks */
-  slow();
   _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel), bw, rfe,
                       channel.ChannelOffset);
-  slow();
   _hal.do_lck(); /* LC calibration — lock the RF LO */
-  slow();
 
   if (!getenv("DEVOURER_SKIP_IQK")) {
     jaguar2::Halrf8822b halrf(_device, _logger, _hal.chip_version().cut,
@@ -96,7 +76,6 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   } else {
     _logger->info("Jaguar2: IQK SKIPPED (DEVOURER_SKIP_IQK)");
   }
-  slow();
   /* Re-assert the TX/RX antenna-path routing AFTER IQK. In the vendor flow
    * config_phydm_trx_mode runs from the post-calibration channel-set (PHY_SwChnl),
    * i.e. AFTER IQK — devourer ran it before IQK, and IQK's TX-path loopback +
@@ -107,7 +86,6 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
     _hal.config_trx_mode();
     _logger->info("Jaguar2: TX/RX path re-asserted post-IQK");
   }
-  slow();
   /* phydm DM-init RFE mux + TXBF init — the kernel runs these from
    * odm_dm_init (phydm_rfe_init) and rtl8822b_phy_bf_init after calibration.
    * devourer previously skipped both, leaving 0x1990=0 (RFE source mux) and
@@ -116,21 +94,17 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
     _hal.rfe_init();
     _hal.bf_init();
   }
-  slow();
   /* Program per-rate TXAGC from the EFUSE power-by-rate calibration (the level
    * the kernel uses). DEVOURER_TX_PWR (flat override) applied later in InitWrite
    * still wins for debug. DEVOURER_SKIP_TXPWR keeps the BB-table default. */
   if (!getenv("DEVOURER_SKIP_TXPWR"))
     _hal.apply_tx_power(static_cast<uint8_t>(channel.Channel), bw, rfe);
-  slow();
   /* Grant the antenna to WLAN (combo chip) — must precede enable. */
   if (!getenv("DEVOURER_SKIP_COEX"))
     _hal.coex_wlan_only(channel.Channel > 14);
   else
     _logger->info("Jaguar2: coex WL grant SKIPPED (DEVOURER_SKIP_COEX)");
-  slow();
   _hal.enable_rx(); /* CR MACTX|MACRX + RCR + IGI — enables both TX and RX */
-  slow();
 }
 
 void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
@@ -139,37 +113,6 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   _channel = channel;
   bring_up(channel);
 
-  /* RX bring-up register dump (DEVOURER_RX_DEBUG): confirms the enable_rx /
-   * channel / RF-mode / coex writes landed. The phydm BB decode counters
-   * (0xF04/0xF14/0xF08/0xF48) are hold-type and only advance when the DIG/FA
-   * thread pulses their reset, so they are NOT a reliable live-RX signal here —
-   * dumped for reference only. */
-  if (const char *pf = getenv("DEVOURER_BB_PATCH")) {
-    /* Canary bisect: apply "0xADDR 0xVAL" BB-register overrides from a file
-     * (kernel golden values) right before RX, to find the decode-critical
-     * register(s). */
-    FILE *f = fopen(pf, "r");
-    if (f) {
-      char line[128];
-      int n = 0;
-      while (fgets(line, sizeof(line), f)) {
-        unsigned addr, val;
-        if (line[0] == 'A' && sscanf(line + 1, "%x %x", &addr, &val) == 2) {
-          _hal.dbg_rf_write(0, addr, val);
-          n++;
-        } else if (line[0] == 'B' &&
-                   sscanf(line + 1, "%x %x", &addr, &val) == 2) {
-          _hal.dbg_rf_write(1, addr, val);
-          n++;
-        } else if (sscanf(line, "%x %x", &addr, &val) == 2) {
-          _device.rtw_write32(static_cast<uint16_t>(addr), val);
-          n++;
-        }
-      }
-      fclose(f);
-      _logger->info("Jaguar2: BB_PATCH applied {} registers from {}", n, pf);
-    }
-  }
   if (getenv("DEVOURER_BB_DUMP")) {
     /* Full BB/RF register dump in the vendor rtw_proc format for canary diff
      * against the kernel driver (tests/jaguar2_rx_canary.sh). */
@@ -185,42 +128,14 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
       _logger->info("RFDUMP 0x{:02x} A=0x{:05x} B=0x{:05x}", r,
                     _hal.dbg_rf_read(0, r), _hal.dbg_rf_read(1, r));
   }
-  if (getenv("DEVOURER_RX_DEBUG")) {
-    _logger->info(
-        "Jaguar2 RXDBG: CR=0x{:04x} RCR=0x{:08x} RXpath(0x808)=0x{:08x} "
-        "RF0A/B(0x0)=0x{:05x}/0x{:05x} RF18A/B=0x{:05x}/0x{:05x} "
-        "RFmodeTbl(0xc08/0xe08)=0x{:08x}/0x{:08x}",
-        _device.rtw_read16(0x0100), _device.rtw_read32(0x0608),
-        _device.rtw_read32(0x0808), _hal.dbg_rf_read(0, 0x0),
-        _hal.dbg_rf_read(1, 0x0), _hal.dbg_rf_read(0, 0x18),
-        _hal.dbg_rf_read(1, 0x18), _device.rtw_read32(0x0c08),
-        _device.rtw_read32(0x0e08));
-    /* MAC RX-FIFO occupancy poll (0x0284): RXPKT_NUM[31:24] = packets buffered
-     * awaiting DMA, RXDMA_IDLE=BIT17, RXPKT_FULL=BIT16. Distinguishes WMAC-drop
-     * (stays 0) from USB-DMA-stall (climbs). Also poll RXFF read/write ptrs
-     * 0x0288 (RXFF_RD_PTR)/0x028c-ish via 0x0284 dword. */
-    for (int i = 0; i < 10; i++) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(500));
-      uint32_t r284 = _device.rtw_read32(0x0284);
-      _logger->info("Jaguar2 MACRX[{}]: 0x284=0x{:08x} (RXPKT_NUM={} "
-                    "RXDMA_IDLE={} FULL={})",
-                    i, r284, (r284 >> 24) & 0xff, (r284 >> 17) & 1,
-                    (r284 >> 16) & 1);
-    }
-  }
   /* Start the DIG thread: track IGI to the false-alarm rate so weak signals are
    * caught without an FA storm (a fixed IGI can't span the range). */
   _dig_stop = false;
   if (!getenv("DEVOURER_SKIP_DIG")) {
-    const bool dig_dbg = getenv("DEVOURER_RX_DEBUG") != nullptr;
-    _dig_thread = std::thread([this, dig_dbg] {
-      int tick = 0;
+    _dig_thread = std::thread([this] {
       while (!_dig_stop && !g_devourer_should_stop) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         _hal.dig_step();
-        if (dig_dbg && (++tick % 10) == 0)
-          _logger->info("Jaguar2 DIG: IGI=0x{:02x} FA={}", _hal.dbg_igi(),
-                        _hal.dbg_last_fa());
       }
     });
     _logger->info("RtlJaguar2Device: DIG thread started");
@@ -253,9 +168,6 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
         _packetProcessor(p);
       }
       ++frames;
-      if (getenv("DEVOURER_RX_DEBUG"))
-        _logger->info("Jaguar2 RX: frame len={} rate={} crc={}", f.frame_len,
-                      f.rx_rate, f.crc_err);
       if (f.next_offset == 0)
         break;
       off += f.next_offset;
@@ -271,8 +183,6 @@ void RtlJaguar2Device::stop_dig() {
   _dig_stop = true;
   if (_dig_thread.joinable())
     _dig_thread.join();
-  if (_coex_thread.joinable())
-    _coex_thread.join();
 }
 
 void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
@@ -282,219 +192,11 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
    * efuse/table-calibrated TXAGC; DEVOURER_TX_PWR=0xNN forces a flat reference
    * (SDR-visibility debug knob). */
   bring_up(channel);
-  if (getenv("DEVOURER_TX_FWINFO")) {
-    /* halmac post-DLFW FW handshake the kernel does (hal_halmac.c
-     * _send_general_info + phydm_info) that devourer skipped entirely — sent via
-     * the H2C-packet queue (32-byte FW-offload packet, QSEL_H2C_CMD=0x13, bulk-
-     * OUT with a TX descriptor), NOT the 8-byte HMEBOX path. These tell the FW
-     * the TX boundary + chip/RF/antenna identity; without them the FW's host-TX
-     * handling may stay disabled (RX works, BB never keys TX). Format from
-     * halmac_fw_88xx.c proc_send_general_info/phydm_info + halmac_fw_offload_
-     * h2c_nic.h bit layout. */
-    auto send_fw_h2c = [&](const uint8_t pkt[32]) {
-      /* Delivery check: REG_H2C_PKT_WRITEADDR(0x10D4) advances when the packet
-       * enters the H2C queue; REG_H2C_PKT_READADDR(0x10D0) advances when the FW
-       * CONSUMES it. If WRITE doesn't move -> bad QSEL routing; if WRITE moves
-       * but READ doesn't -> FW isn't reading the queue (handshake dead). */
-      uint32_t w0 = _device.rtw_read32(0x10D4) & 0x3FFFF;
-      uint32_t r0 = _device.rtw_read32(0x10D0) & 0x3FFFF;
-      std::vector<uint8_t> buf(jaguar2::TXDESC_SIZE_8822B + 32, 0);
-      SET_TX_DESC_TXPKTSIZE_8822B(buf.data(), 32);
-      SET_TX_DESC_QSEL_8822B(buf.data(), 0x13); /* QSEL_H2C_CMD */
-      std::memcpy(buf.data() + jaguar2::TXDESC_SIZE_8822B, pkt, 32);
-      jaguar2::cal_txdesc_chksum_8822b(buf.data());
-      _device.bulk_send_sync_ep(_device.first_bulk_out_ep(), buf.data(),
-                                static_cast<int>(buf.size()), 20);
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      uint32_t w1 = _device.rtw_read32(0x10D4) & 0x3FFFF;
-      uint32_t r1 = _device.rtw_read32(0x10D0) & 0x3FFFF;
-      _logger->info("Jaguar2 H2C-deliver: WPTR {:05x}->{:05x} RPTR {:05x}->{:05x}"
-                    " ({})", w0, w1, r0, r1,
-                    (r1 != r0) ? "FW CONSUMED" : (w1 != w0) ? "queued, FW IDLE"
-                                                            : "NOT queued");
-    };
-    auto put32 = [](uint8_t *p, uint32_t v) {
-      p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
-    };
-    const uint8_t cut = _hal.chip_version().cut;
-    const uint8_t ant = _hal.chip_version().rf_2t2r ? 0x3 : 0x1; /* AB / A */
-    /* general_info: sub=0x0D. FW_TX_BOUNDARY = rsvd_fw_txbuf_addr - rsvd_boundary;
-     * kernel-observed value is 0x30 (my earlier 0x38 double-counted CPU_INSTR/
-     * H2CQ pages). Override with DEVOURER_TXBND if the page alloc changes. */
-    uint32_t txbnd = 0x30;
-    if (const char *b = getenv("DEVOURER_TXBND")) txbnd = strtol(b, nullptr, 0);
-    uint8_t gi[32] = {0};
-    put32(gi + 0, 0x01u | (0xFFu << 8) | (0x0Du << 16));
-    put32(gi + 4, 12u | (0u << 16)); /* total_len=12, seq=0 */
-    put32(gi + 8, txbnd << 16);
-    send_fw_h2c(gi);
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    /* phydm_info: sub=0x11. Kernel(T3U): rfe_type=3, rf_type=4(1T1R), cut=3,
-     * rx_ant=tx_ant=1(A). DEVOURER_PHYDM=0xNN overrides rfe_type; rf_type/ant
-     * follow rf_2t2r (force with DEVOURER_FORCE_1T1R). */
-    uint8_t rfe_pi = 0x03;
-    if (const char *r = getenv("DEVOURER_PHYDM")) rfe_pi = strtol(r, nullptr, 0);
-    uint8_t rftype = _hal.chip_version().rf_2t2r ? 0x2 : 0x4;
-    uint8_t pi[32] = {0};
-    put32(pi + 0, 0x01u | (0xFFu << 8) | (0x11u << 16));
-    put32(pi + 4, 16u | (1u << 16)); /* total_len=16, seq=1 */
-    put32(pi + 8, static_cast<uint32_t>(rfe_pi) |
-                      (static_cast<uint32_t>(rftype) << 8) |
-                      (static_cast<uint32_t>(cut) << 16) |
-                      (static_cast<uint32_t>(ant) << 24) |
-                      (static_cast<uint32_t>(ant) << 28));
-    put32(pi + 12, 0u); /* ext_pa=0, package_type=0, mp_mode=0 */
-    send_fw_h2c(pi);
-    _logger->info("Jaguar2: TX_FWINFO general_info+phydm_info H2C sent (FW "
-                  "handshake, QSEL_H2C_CMD)");
-  }
-  if (getenv("DEVOURER_TX_RSVD")) {
-    /* FW reserved-page download — the kernel does this on interface-up (usbmon:
-     * FIFOPAGE_CTRL_2 beacon-head arm + bulk-OUT template + bcn-valid). The FW
-     * requires its rsvd page before it enables the MAC TX scheduler. This dummy
-     * template (null-data + qos-null placeholders) exercises the mechanism but
-     * is NOT the real template set — a minimal blob did not unlock TX, so the
-     * FW likely needs the true probe_rsp/null/qos_null templates (per
-     * _rtw_hal_set_fw_rsvd_page) and/or the iddma copy step. Opt-in for now. */
-    std::vector<uint8_t> tmpl(256, 0);
-    tmpl[0] = 0x48;   /* null-data FC */
-    tmpl[128] = 0x88; /* qos-null FC */
-    tmpl[129] = 0x01;
-    uint16_t pg = _macinit.rsvd_boundary();
-    bool ok = _fw.download_rsvd_page(pg, tmpl.data(),
-                                     static_cast<uint32_t>(tmpl.size()));
-    _logger->info("Jaguar2: FW rsvd-page download {} (pg={})",
-                  ok ? "OK" : "FAIL", pg);
-  }
-  if (getenv("DEVOURER_NO_DROPDATA")) {
-    /* Clear BIT_DROP_DATA_EN (0x020C[9], set by init_usb_cfg). The MAC drops TX
-     * frames whose length fails the desc OFFSET/size check; a mismatch would
-     * silently prevent the BB from ever keying TX. Test knob. */
-    uint16_t v = _device.rtw_read16(0x020C);
-    _device.rtw_write16(0x020C, v & ~(1u << 9));
-    _logger->info("Jaguar2: DROP_DATA_EN cleared (0x020C=0x{:04x})",
-                  v & ~(1u << 9));
-  }
-  if (getenv("DEVOURER_TX_H2C")) {
-    /* Send the 2 phydm FW H2C the kernel issues at monitor-up (usbmon golden):
-     * element 0x4c = PHYDM_H2C_FW_GENERAL_INIT, via the HMEBOX box protocol
-     * (poll REG_HMETFR box0 free -> write HMEBOX_EXT0 0x1f0 -> write HMEBOX0
-     * 0x1d0, which triggers the FW read). The prior register-replay failed
-     * because it wrote both back-to-back with no box-free poll, so the 2nd
-     * clobbered the 1st before the FW consumed it. */
-    auto send_h2c = [&](uint32_t box0, uint32_t ext) {
-      for (int i = 0; i < 100; i++) {
-        if ((_device.rtw_read8(0x01cc) & 0x1) == 0)
-          break; /* REG_HMETFR bit0 = box0 busy */
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-      _device.rtw_write32(0x01f0, ext);  /* HMEBOX_EXT0 (h2c[4..7]) */
-      _device.rtw_write32(0x01d0, box0); /* HMEBOX0 (h2c[0..3]) triggers */
-    };
-    send_h2c(0x0300034c, 0x00000011);
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    send_h2c(0x0302034c, 0x00000033);
-    _logger->info("Jaguar2: TX_H2C FW_GENERAL_INIT (0x4c) x2 sent via HMEBOX");
-  }
-  if (getenv("DEVOURER_TX_DEBUG")) {
-    _logger->info("Jaguar2 TXstate: CR(0x100)=0x{:04x} TXPAUSE(0x522)=0x{:02x} "
-                  "TXDMA_OFFCHK(0x20c)=0x{:04x}",
-                  _device.rtw_read16(0x0100), _device.rtw_read8(0x0522),
-                  _device.rtw_read16(0x020C));
-    /* TSF-tick check: read the free-running TSF timer (0x560/0x564) twice with a
-     * 5 ms gap. If it does not advance, the MAC timing engine is frozen and the
-     * EDCA backoff can never count down -> TX never scheduled (RX unaffected). */
-    uint32_t tsf0 = _device.rtw_read32(0x0560);
-    uint32_t tsfh0 = _device.rtw_read32(0x0564);
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    uint32_t tsf1 = _device.rtw_read32(0x0560);
-    uint32_t tsfh1 = _device.rtw_read32(0x0564);
-    _logger->info("Jaguar2 TSF: {:08x}{:08x} -> {:08x}{:08x} ({})", tsfh0, tsf0,
-                  tsfh1, tsf1,
-                  (tsf0 != tsf1 || tsfh0 != tsfh1) ? "TICKING" : "FROZEN");
-  }
-  if (const char *rfp = getenv("DEVOURER_RF_REPLAY")) {
-    /* Replay kernel RF-register state via the 3-wire LSSI ("path addr val"
-     * lines). RF writes go through BB LSSI regs (0xc90/0xe90), so RF state is
-     * invisible to the vendor-reg-write set diff and was never replayed. RF
-     * 0x08 reads 0 on devourer vs 0x9c060 on the kernel — a whole RF register
-     * that may gate the TX path. */
-    FILE *f = fopen(rfp, "r");
-    if (f) {
-      unsigned path, addr, val;
-      int n = 0;
-      while (fscanf(f, "%x %x %x", &path, &addr, &val) == 3) {
-        _hal.dbg_rf_write(static_cast<uint8_t>(path), addr, val);
-        n++;
-      }
-      fclose(f);
-      _logger->info("Jaguar2: RF_REPLAY applied {} RF writes", n);
-    }
-  }
-  if (const char *rf = getenv("DEVOURER_TX_REPLAY")) {
-    /* Replay the kernel's captured TX-enable write sequence (usbmon golden):
-     * "0xREG WIDTH 0xVAL" lines, applied in order at the native width. */
-    FILE *f = fopen(rf, "r");
-    if (f) {
-      unsigned reg, w, val;
-      int n = 0;
-      while (fscanf(f, "%x %u %x", &reg, &w, &val) == 3) {
-        if (w == 1)
-          _device.rtw_write8(static_cast<uint16_t>(reg), static_cast<uint8_t>(val));
-        else if (w == 2)
-          _device.rtw_write16(static_cast<uint16_t>(reg), static_cast<uint16_t>(val));
-        else
-          _device.rtw_write32(static_cast<uint16_t>(reg), val);
-        n++;
-      }
-      fclose(f);
-      _logger->info("Jaguar2: TX_REPLAY applied {} kernel writes", n);
-    }
-  }
+  /* DEVOURER_TX_PWR=0xNN forces a flat per-rate TXAGC reference (SDR-visibility
+   * debug knob) over the efuse-calibrated level bring_up applied. */
   if (const char *e = getenv("DEVOURER_TX_PWR")) {
     uint8_t idx = static_cast<uint8_t>(strtol(e, nullptr, 0) & 0x3f);
     _hal.set_tx_power_flat(idx);
-  }
-  if (getenv("DEVOURER_TX_DRAIN")) {
-    /* Drain bulk-IN (FW C2H reports) during TX. The RX demo submits async
-     * bulk-IN URBs; the TX demo never reads bulk-IN, so the FW's C2H buffer can
-     * back up and stall the FW's TX flow-control (RX works, TX never keys the
-     * BB). This thread continuously reads + discards bulk-IN to keep C2H space
-     * free — the jaguar2 analogue of the Jaguar3 coex_runtime C2H drain. */
-    _dig_thread = std::thread([this] {
-      std::vector<uint8_t> buf(16 * 1024);
-      while (!g_devourer_should_stop) {
-        _device.bulk_read_raw(buf.data(), static_cast<int>(buf.size()), 20);
-      }
-    });
-    _logger->info("Jaguar2: TX_DRAIN bulk-IN C2H drain thread started");
-  }
-  if (getenv("DEVOURER_TX_COEX_LOOP")) {
-    /* Coex runtime: 8822B is a WiFi+BT combo — its coex firmware periodically
-     * re-grabs the antenna/PTA for BT, silencing WL TX (RX unaffected). Without
-     * a runtime that re-asserts WiFi-only ownership the on-air TX is marginal/
-     * intermittent (a frame slips through between silencings). Re-apply the
-     * WL-only HW grant every ~500 ms — the jaguar2 analogue of the Jaguar3
-     * coex_runtime_loop. Runs on _coex_thread for the demo lifetime. */
-    bool is_5g = _channel.Channel > 14;
-    _coex_thread = std::thread([this, is_5g] {
-      while (!g_devourer_should_stop) {
-        for (int i = 0; i < 50 && !g_devourer_should_stop; i++)
-          std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        _hal.coex_wlan_only(is_5g);
-      }
-    });
-    _logger->info("Jaguar2: coex runtime thread started (WL-only re-assert)");
-  }
-  if (getenv("DEVOURER_TX_DEBUG")) {
-    /* Post-replay chip-liveness: TSF advancing => the (possibly replayed) init
-     * produced a functional MAC. Distinguishes "chip dead / replay incomplete"
-     * from "chip live but TX still won't key". */
-    uint32_t a = _device.rtw_read32(0x0560);
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    uint32_t b = _device.rtw_read32(0x0560);
-    _logger->info("Jaguar2 TSF(post-init): {:08x}->{:08x} ({}) CR=0x{:04x}", a, b,
-                  a != b ? "TICKING" : "FROZEN", _device.rtw_read16(0x0100));
   }
   _logger->info("Jaguar2: ready for TX (monitor inject, ch={})",
                 channel.Channel);
@@ -620,45 +322,9 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
       bmc, static_cast<uint8_t>(hdrlen >> 1));
   std::memcpy(usb_frame.data() + jaguar2::TXDESC_SIZE_8822B, dot11, frame_len);
 
-  /* Test knob: override QSEL (default 0x12 MGNT). The mgmt/HQ queue may not be
-   * serviced by the scheduler in monitor mode; a data AC (BE=0x00/VO=0x07) uses
-   * the EDCA path. Re-fill the QSEL field + recompute the desc checksum. */
-  if (const char *q = getenv("DEVOURER_TX_QSEL")) {
-    uint8_t qsel = static_cast<uint8_t>(strtol(q, nullptr, 0) & 0x1f);
-    SET_TX_DESC_QSEL_8822B(usb_frame.data(), qsel);
-    if (const char *rid = getenv("DEVOURER_TX_RATEID"))
-      SET_TX_DESC_RATE_ID_8822B(usb_frame.data(),
-                                strtol(rid, nullptr, 0) & 0x1f);
-    if (const char *mid = getenv("DEVOURER_TX_MACID"))
-      SET_TX_DESC_MACID_8822B(usb_frame.data(), strtol(mid, nullptr, 0) & 0x7f);
-    jaguar2::cal_txdesc_chksum_8822b(usb_frame.data());
-  }
-
-  uint8_t tx_ep = _device.first_bulk_out_ep();
-  if (const char *e = getenv("DEVOURER_TX_EP"))
-    tx_ep = static_cast<uint8_t>(strtol(e, nullptr, 0));
-  int rc = _device.bulk_send_sync_ep(tx_ep, usb_frame.data(), usb_frame.size(),
+  int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
+                                     usb_frame.data(), usb_frame.size(),
                                      /*timeout_ms=*/20);
-  /* TX diagnostic (DEVOURER_TX_DEBUG): every 400 frames, read the BB TX-enable
-   * counters (0x2de0 OFDM txen/txon, 0x2de4 CCK txen/txon). Non-zero => the BB
-   * is keying TX (RF-radiate issue is downstream); zero => the frame is dropped
-   * before reaching the BB TX (descriptor/queue/MAC issue). */
-  if (getenv("DEVOURER_TX_DEBUG")) {
-    static int c = 0;
-    if ((++c % 60) == 0) {
-      uint32_t ofdm = _device.rtw_read32(0x2de0);
-      uint32_t cck = _device.rtw_read32(0x2de4);
-      /* NOTE: 0x2de0/0x2de4 are PMAC-only (read 0 on the kernel during working
-       * TX) — NOT a valid host-TX indicator. VALID indicators: REG_TXPKT_EMPTY
-       * (0x41a: bit per queue, 0=has-packets while draining), the BB activity
-       * counter 0xfb4, and REG_SCH/schedule status. rc = last bulk-OUT status. */
-      uint16_t txempty = _device.rtw_read16(0x041a);
-      uint32_t fb4 = _device.rtw_read32(0x0fb4);
-      _logger->info("Jaguar2 TXDBG[{}]: 2de0={:x}/{:x} TXPKT_EMPTY(0x41a)=0x{:04x}"
-                    " 0xfb4={:x} bulk_rc={}",
-                    c, ofdm & 0xffff, cck & 0xffff, txempty, fb4, rc);
-    }
-  }
   return rc >= 0;
 }
 

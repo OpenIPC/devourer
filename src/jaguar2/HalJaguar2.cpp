@@ -126,12 +126,6 @@ void HalJaguar2::read_chip_version() {
   _ver.test_chip = (v & (1u << 23)) != 0;
   _ver.cut = static_cast<uint8_t>((v >> 12) & 0xf);
   _ver.rf_2t2r = (v & (1u << 27)) ? 1 : 0;
-  /* The kernel rtl88x2bu_ohd tells the FW rf_type=1T1R, tx_ant/rx_ant=A for the
-   * Archer T3U (RTL8812BU) even though SYS_CFG bit27 reports 2T2R silicon —
-   * the dongle operates single-path. devourer's AB config may route TX to a
-   * path the dongle doesn't wire. Force single-path-A to match the kernel. */
-  if (getenv("DEVOURER_FORCE_1T1R"))
-    _ver.rf_2t2r = 0;
   uint8_t vend = static_cast<uint8_t>(((v >> 16) & 0xf) >> 2);
   _ver.vendor = (vend <= 2) ? vend : 0;
 
@@ -495,9 +489,8 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
    * quirk), so on 2.4G we clear them to reproduce the vendor's clean value; on
    * 5G those bits are the real band indicator and must be kept (masking them was
    * what left the 5G synth in 2.4G mode -> dead 5G RX). Net: devourer's RF18 now
-   * matches the vendor's per-band value. DEVOURER_RF18_MASK forces the old
-   * always-mask for bisection. */
-  if (g2 || getenv("DEVOURER_RF18_MASK"))
+   * matches the vendor's per-band value. */
+  if (g2)
     rf18 &= 0x00060cffu;
 
   rf_write(0, 0x18, rf18);

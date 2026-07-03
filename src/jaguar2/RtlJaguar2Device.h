@@ -59,7 +59,6 @@ private:
   /* DIG (dynamic initial gain) background thread — periodically runs
    * HalJaguar2::dig_step so IGI tracks the false-alarm rate for weak-signal RX. */
   std::thread _dig_thread;
-  std::thread _coex_thread; /* combo-chip WL-only coex re-assert (TX path) */
   std::atomic<bool> _dig_stop{false};
   void stop_dig();
 

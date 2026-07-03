@@ -255,6 +255,27 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
     _logger->info("Jaguar2: DROP_DATA_EN cleared (0x020C=0x{:04x})",
                   v & ~(1u << 9));
   }
+  if (getenv("DEVOURER_TX_H2C")) {
+    /* Send the 2 phydm FW H2C the kernel issues at monitor-up (usbmon golden):
+     * element 0x4c = PHYDM_H2C_FW_GENERAL_INIT, via the HMEBOX box protocol
+     * (poll REG_HMETFR box0 free -> write HMEBOX_EXT0 0x1f0 -> write HMEBOX0
+     * 0x1d0, which triggers the FW read). The prior register-replay failed
+     * because it wrote both back-to-back with no box-free poll, so the 2nd
+     * clobbered the 1st before the FW consumed it. */
+    auto send_h2c = [&](uint32_t box0, uint32_t ext) {
+      for (int i = 0; i < 100; i++) {
+        if ((_device.rtw_read8(0x01cc) & 0x1) == 0)
+          break; /* REG_HMETFR bit0 = box0 busy */
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      _device.rtw_write32(0x01f0, ext);  /* HMEBOX_EXT0 (h2c[4..7]) */
+      _device.rtw_write32(0x01d0, box0); /* HMEBOX0 (h2c[0..3]) triggers */
+    };
+    send_h2c(0x0300034c, 0x00000011);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    send_h2c(0x0302034c, 0x00000033);
+    _logger->info("Jaguar2: TX_H2C FW_GENERAL_INIT (0x4c) x2 sent via HMEBOX");
+  }
   if (getenv("DEVOURER_TX_DEBUG")) {
     _logger->info("Jaguar2 TXstate: CR(0x100)=0x{:04x} TXPAUSE(0x522)=0x{:02x} "
                   "TXDMA_OFFCHK(0x20c)=0x{:04x}",

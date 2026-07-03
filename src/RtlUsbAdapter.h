@@ -3,6 +3,8 @@
 
 #include <iostream>
 
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <libusb.h>
 #include <thread>
@@ -115,6 +117,13 @@ public:
   }
 
   template <typename T> bool rtw_write(uint16_t reg_num, T value) {
+    /* DEVOURER_LOG_WRITES=1: emit every vendor reg write as "0xADDR N 0xVAL"
+     * (matches tests/decode_wseq.py output) so devourer's bring-up write set can
+     * be diffed against the kernel golden. Cached so getenv runs once. */
+    static const int log_writes = getenv("DEVOURER_LOG_WRITES") ? 1 : 0;
+    if (log_writes)
+      fprintf(stderr, "<wlog>0x%04x %zu 0x%0*x\n", reg_num, sizeof(T),
+              (int)(sizeof(T) * 2), (unsigned)value);
     if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_WRITE, 5,
                                 reg_num, 0, (uint8_t *)&value, sizeof(T),
                                 USB_TIMEOUT) == sizeof(T)) {

@@ -1,6 +1,8 @@
 #ifndef RTL_JAGUAR3_DEVICE_H
 #define RTL_JAGUAR3_DEVICE_H
 
+#include <atomic>
+#include <mutex>
 #include <optional>
 #include <thread>
 
@@ -31,6 +33,18 @@ public:
 
   void Init(Action_ParsedRadioPacket packetProcessor,
             SelectedChannel channel) override;
+  /* Blocking RX worker loop on an already-brought-up chip (see IRtlDevice).
+   * Init = bring-up + BFEE arm + StartRxLoop; a TX+RX caller (self-sounding
+   * single-radio ground station) does InitWrite once, then runs this on its
+   * own std::thread next to the TX loop. NB: for reliable RX the TX+RX intent
+   * must be declared at InitWrite time (DEVOURER_TX_WITH_RX set) — InitWrite
+   * then keeps the RX filters open and enables the RX path during bring-up.
+   * On a plain TX-only bring-up this falls back to a best-effort retrofit
+   * (filter re-open + enable_rx_path), which has proven unreliable on 8822E.
+   * Takes over the bulk-IN endpoint from the coex thread's C2H drain for as
+   * long as it runs. */
+  void StartRxLoop(Action_ParsedRadioPacket packetProcessor) override;
+  void StopRxLoop() override { _rx_stop = true; }
   void SetMonitorChannel(SelectedChannel channel) override;
   void InitWrite(SelectedChannel channel) override;
   void SetTxPower(uint8_t power) override;
@@ -63,13 +77,27 @@ private:
    * C2H reports (BT-info etc.) and runs the periodic coex decision so the FW's
    * PTA keeps the antenna with WLAN during sustained TX.
    * THREADING CONTRACT: while a TX session is active (between InitWrite and Stop)
-   * this thread owns all chip register access. The TX hot path (send_packet) does
-   * no register I/O, so it runs lock-free alongside it; callers must NOT invoke
-   * SetMonitorChannel/SetTxPower (which do register RMW) during an active TX
-   * session, or those reads-modify-writes will race the coex thread. */
+   * this thread owns all chip register access; the ~2 s housekeeping tick and
+   * StartRxLoop's one-shot RX-filter restore serialize on _reg_mu. The TX hot
+   * path (send_packet) does no register I/O, so it runs lock-free alongside it;
+   * callers must NOT invoke SetMonitorChannel/SetTxPower (which do register RMW)
+   * during an active TX session, or those reads-modify-writes will race the coex
+   * thread. Bulk-IN has exactly one reader at a time: while StartRxLoop is
+   * active (_rx_loop_active) the coex thread skips its C2H drain — the RX async
+   * loop sees the C2H reports as part of its stream. */
   std::thread _coex_thread;
   volatile bool _coex_stop = false;
   void coex_runtime_loop();
+  /* StartRxLoop stop request (StopRxLoop). */
+  volatile bool _rx_stop = false;
+  /* True while StartRxLoop owns bulk-IN (gates the coex thread's drain). */
+  std::atomic<bool> _rx_loop_active{false};
+  /* Set when InitWrite zeroes the RX filters (0x6A0-0x6A4) for TX-only
+   * throughput; StartRxLoop restores the monitor_rx_cfg values and clears it. */
+  bool _rx_filters_closed = false;
+  /* Serializes the coex housekeeping tick against StartRxLoop's register
+   * restore (the only two register writers during an active TX session). */
+  std::mutex _reg_mu;
 };
 
 #endif /* RTL_JAGUAR3_DEVICE_H */

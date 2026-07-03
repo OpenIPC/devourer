@@ -195,6 +195,25 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   mobile/fading combining measurement (alternate a fixed chain vs all-4 fast
   relative to RX motion so both sample the same fading). Analyse with
   `tests/mrc_mobility.py`.
+- `DEVOURER_TX_WITH_RX=thread` — (`WiFiDriverTxDemo`) run the RX worker loop on
+  a `std::thread` alongside the TX loop, on the **same claimed adapter**: one
+  bring-up (`InitWrite`), then `StartRxLoop(packetProcessor)` — the programmatic
+  API for concurrent TX+RX on one handle (all three generations). On Jaguar3 the
+  env must be set **before** `InitWrite` (it keeps the RX filters open and
+  enables the RX path during bring-up — retrofitting RX onto a TX-only bring-up
+  is unreliable), and the coex thread's C2H drain yields bulk-IN to the RX loop.
+  On the 8822E, TX+RX mode trades the per-rate TXAGC + DPK-bypass away for a
+  working RX (either one desenses the EU's RX to near-deaf; flat table TX power
+  instead). This is the single-radio beamforming self-sounding ground station —
+  pair with `DEVOURER_BF_ARM_SOUNDER`/`DEVOURER_TX_NDPA` and
+  `DEVOURER_BF_DETECT_REPORT` to sound and capture your own reports in one
+  process (`docs/beamforming-self-sounding.md`; hardware-validated on Jaguar1 —
+  the 8814AU captures its own report stream; on Jaguar3 the sounder emits
+  NDPA+NDP and the beamformee replies, but the sounder's own RX does not
+  surface the report frames — capture them on a second radio there). Any other
+  non-empty value selects the legacy `fork()` RX child — Termux-only
+  (`libusb_wrap_sys_device` keeps the fd shared across fork); on regular Linux
+  the forked bring-ups race and die with `rtw_read: iostream error`.
 - `DEVOURER_USB_DEBUG=1` — raise libusb log level from the default WARNING to
   DEBUG (produces ~7 MB per 15 s — has filled `/tmp` mid-capture and adds
   0.5-0.8 s to init even with stderr discarded). `DEVOURER_USB_QUIET` is
@@ -301,7 +320,10 @@ thin — `libusb_init`, device open, kernel driver detach, and
 to the factory. `demo/main.cpp` is the canonical boilerplate.
 
 **Chip identity is resolved at construction** from SYS_CFG bits + USB PID.
-`CreateRtlDevice` returns an `IRtlDevice` (`Init` / `InitWrite` / `send_packet`)
+`CreateRtlDevice` returns an `IRtlDevice` (`Init` / `InitWrite` / `send_packet` /
+`StartRxLoop` — the last is the blocking RX worker loop on an already-brought-up
+chip, so one process can `InitWrite` once and run TX + RX concurrently on the
+same claimed handle; `Init` = bring-up + `StartRxLoop` for RX-only callers)
 and dispatches on chip generation: Jaguar-1 PIDs construct `RtlJaguarDevice`;
 the Jaguar2 8822BU PID constructs `RtlJaguar2Device` (`SYS_CFG2` chip-id `0x0a`);
 Jaguar3 PIDs construct `RtlJaguar3Device`, with the generation (`rtl8822c` vs
@@ -325,7 +347,8 @@ generation's HAL):
 
 The Jaguar1 HAL lives under `src/jaguar1/`:
 
-- `RtlJaguarDevice` — top-level orchestrator (Init / InitWrite / send_packet).
+- `RtlJaguarDevice` — top-level orchestrator (Init / InitWrite / send_packet /
+  StartRxLoop).
 - `HalModule` — chip bring-up, power sequencing, BB/AGC/RF table application,
   USB EP priority, FIFO/page-boundary init. Most of the chip-family-specific
   divergence lives here (`_8812A`, `_8814A`, `_8821A` suffixed methods).
@@ -353,7 +376,8 @@ The Jaguar3 HAL is a parallel, self-contained set under `src/jaguar3/`. The core
 uses generation-neutral names; per-generation behaviour is behind two strategy
 interfaces selected by `ChipVariant`:
 
-- `RtlJaguar3Device` — orchestrator (Init / InitWrite / send_packet / Stop).
+- `RtlJaguar3Device` — orchestrator (Init / InitWrite / send_packet /
+  StartRxLoop / Stop).
 - `HalJaguar3` — bring-up: power-on/off PWR_SEQ, MAC/USB config, BB/AGC/RF table
   apply, `config_phydm_parameter_init` (3-wire RF), `bf_init`, `enable_tx_path`,
   efuse access (incl. the 8822e OTP burst-mode / 2-byte-header decode), RFE pins.

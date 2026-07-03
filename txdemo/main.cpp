@@ -26,6 +26,7 @@
   #include <libusb-1.0/libusb.h>
 #endif
 
+#include "BfReportDetect.h"
 #include "RxPacket.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
@@ -88,7 +89,21 @@ static std::vector<uint8_t> build_frame_with_channel(uint16_t freq,
 
 static int g_rx_count = 0;
 static void packetProcessor(const Packet &packet) {
+  /* C2H packets are chip-side status (one per TX during concurrent TX+RX on
+   * Jaguar3), not 802.11 frames — skip before counting/parsing. */
+  if (packet.RxAtrib.pkt_rpt_type == RX_PACKET_TYPE::C2H_PACKET)
+    return;
   ++g_rx_count;
+  /* RX liveness marker for the TX+RX=thread mode: first frame + every 500th.
+   * Without it a deaf RX loop is indistinguishable from a quiet channel. */
+  if (g_rx_count == 1 || g_rx_count % 500 == 0) {
+    printf("<devourer-rx>total=%d len=%zu\n", g_rx_count, packet.Data.size());
+    fflush(stdout);
+  }
+  /* BF self-sounding report detector (DEVOURER_BF_DETECT_REPORT modes 1-4,
+   * shared with WiFiDriverDemo): with DEVOURER_TX_WITH_RX=thread this is how
+   * a single-radio sounder surfaces its own captured beamforming reports. */
+  devourer::bf::detect_report(packet);
   /* Surface frames whose source MAC matches the txdemo's injected beacon
    * (57:42:75:05:d6:00). The 802.11 header starts at packet.Data[0]; SA is
    * at bytes [10..15] for a non-FromDS, non-ToDS frame. */
@@ -421,16 +436,23 @@ int main(int argc, char **argv) {
   if (const char *p = std::getenv("DEVOURER_TX_PWR"))
     rtlDevice->SetTxPower(static_cast<uint8_t>(std::strtol(p, nullptr, 0)));
 
-  /* The original txdemo forked an RX child and a TX parent on the same
-   * libusb handle. That pattern is Termux-specific (libusb_wrap_sys_device
-   * keeps the kernel fd shared across fork); on a regular Linux libusb
-   * context after fork(), both processes race on the same URB submission
-   * queue and the first vendor request after fork tends to fail with
-   * "rtw_read: iostream error". Skip the fork unless DEVOURER_TX_WITH_RX=1
-   * is explicitly set (Termux callers can opt back in). For cross-adapter
-   * TX validation a second RX process on a separate adapter is what you
-   * want anyway. */
-  if (std::getenv("DEVOURER_TX_WITH_RX")) {
+  /* DEVOURER_TX_WITH_RX — concurrent RX alongside the TX loop on the SAME
+   * claimed adapter. Two modes:
+   *
+   * =thread (recommended): one bring-up (InitWrite below), then StartRxLoop on
+   * a std::thread next to the TX loop — the single-radio self-sounding ground
+   * station (arm the sounder with DEVOURER_BF_ARM_SOUNDER and surface the
+   * captured reports with DEVOURER_BF_DETECT_REPORT). The RX thread is spawned
+   * after InitWrite, further down.
+   *
+   * Any other non-empty value: the legacy fork of an RX child on the same
+   * handle. That pattern is Termux-specific (libusb_wrap_sys_device keeps the
+   * kernel fd shared across fork); on a regular Linux libusb context after
+   * fork(), both processes race on the same URB submission queue and the first
+   * vendor request after fork tends to fail with "rtw_read: iostream error". */
+  const char *tx_with_rx = std::getenv("DEVOURER_TX_WITH_RX");
+  const bool rx_thread_mode = tx_with_rx && std::string(tx_with_rx) == "thread";
+  if (tx_with_rx && !rx_thread_mode) {
     pid_t fpid = fork();
     if (fpid == 0) {
       rtlDevice->Init(packetProcessor,
@@ -452,6 +474,25 @@ int main(int argc, char **argv) {
   logger->info("init-timing: txdemo.init_write = {} ms", ms_since_start());
 
   std::thread usb_thread(usb_event_loop, logger, context);
+
+  /* DEVOURER_TX_WITH_RX=thread: run the RX worker loop on its own thread next
+   * to the TX loop — one bring-up (the InitWrite above), one claimed handle.
+   * StartRxLoop assumes the chip is up and takes over bulk-IN; send_packet's
+   * bulk-OUT is safe alongside it. packetProcessor runs on this thread. */
+  std::thread rx_thread;
+  if (rx_thread_mode) {
+    rx_thread = std::thread([&rtlDevice, logger] {
+      /* An uncaught exception in a std::thread is std::terminate — a transient
+       * USB read failure in the RX loop must not tear down the TX process. */
+      try {
+        rtlDevice->StartRxLoop(packetProcessor);
+      } catch (const std::exception &e) {
+        logger->error("RX loop died: {} (TX continues)", e.what());
+      }
+    });
+    logger->info("DEVOURER_TX_WITH_RX=thread: RX loop started alongside TX");
+  }
+
   uint8_t beacon_frame[] = {
       0x00, 0x00, 0x0a, 0x00, 0x00, 0x80, 0x00, 0x00, 0x08,
       0x00, // radiotap: TX_FLAGS only (rate-less) — rate comes from SetTxMode
@@ -832,6 +873,11 @@ int main(int argc, char **argv) {
    * (core dump). Setting the flag also covers the back-off exit path, where no
    * signal was delivered. */
   g_devourer_should_stop = true;
+  /* Join the RX loop BEFORE Stop(): the chip de-init must not race in-flight
+   * RX URBs (and StartRxLoop's event pump must exit before libusb_exit). */
+  rtlDevice->StopRxLoop();
+  if (rx_thread.joinable())
+    rx_thread.join();
   if (usb_thread.joinable())
     usb_thread.join();
 

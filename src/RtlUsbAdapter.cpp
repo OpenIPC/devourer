@@ -19,15 +19,15 @@ namespace {
 /* Shared state for the async RX URB queue. */
 struct AsyncRxShared {
   const std::function<void(const uint8_t *, int)> *cb;
-  const volatile bool *stop;
+  const std::function<bool()> *stop;
   int active;
 };
 extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
   auto *s = static_cast<AsyncRxShared *>(t->user_data);
   if (t->status == LIBUSB_TRANSFER_COMPLETED && t->actual_length > 0)
     (*s->cb)(t->buffer, t->actual_length);
-  bool resubmit = !*s->stop && (t->status == LIBUSB_TRANSFER_COMPLETED ||
-                                t->status == LIBUSB_TRANSFER_TIMED_OUT);
+  bool resubmit = !(*s->stop)() && (t->status == LIBUSB_TRANSFER_COMPLETED ||
+                                    t->status == LIBUSB_TRANSFER_TIMED_OUT);
   if (resubmit && libusb_submit_transfer(t) == 0)
     return;
   s->active--; /* not resubmitted -> this URB is done */
@@ -37,8 +37,8 @@ extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
 void RtlUsbAdapter::bulk_read_async_loop(
     int buf_size, int n_urbs,
     const std::function<void(const uint8_t *, int)> &on_data,
-    const volatile bool &stop) {
-  AsyncRxShared sh{&on_data, &stop, 0};
+    const std::function<bool()> &should_stop) {
+  AsyncRxShared sh{&on_data, &should_stop, 0};
   std::vector<libusb_transfer *> xfers;
   std::vector<std::vector<uint8_t>> bufs(n_urbs,
                                          std::vector<uint8_t>(buf_size));
@@ -54,7 +54,7 @@ void RtlUsbAdapter::bulk_read_async_loop(
     }
   }
   _logger->info("Jaguar3 RX: async queue of {} URBs submitted", sh.active);
-  while (!stop && sh.active > 0) {
+  while (!should_stop() && sh.active > 0) {
     struct timeval tv {0, 100000};
     libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
   }

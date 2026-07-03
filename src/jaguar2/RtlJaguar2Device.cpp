@@ -109,7 +109,6 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
 
 void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
-  _packetProcessor = std::move(packetProcessor);
   _channel = channel;
   bring_up(channel);
 
@@ -128,6 +127,14 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
       _logger->info("RFDUMP 0x{:02x} A=0x{:05x} B=0x{:05x}", r,
                     _hal.dbg_rf_read(0, r), _hal.dbg_rf_read(1, r));
   }
+
+  StartRxLoop(std::move(packetProcessor));
+}
+
+void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
+  _packetProcessor = std::move(packetProcessor);
+  /* Restartable: clear any stop request left by a prior StopRxLoop(). */
+  _rx_stop = false;
   /* Start the DIG thread: track IGI to the false-alarm rate so weak signals are
    * caught without an FA storm (a fixed IGI can't span the range). */
   _dig_stop = false;
@@ -141,7 +148,7 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
     _logger->info("RtlJaguar2Device: DIG thread started");
   }
 
-  _logger->info("RtlJaguar2Device: entering RX loop (ch={})", channel.Channel);
+  _logger->info("RtlJaguar2Device: entering RX loop (ch={})", _channel.Channel);
 
   /* RX loop: async bulk-IN URB queue; walk the aggregated 8822B RX descriptors
    * per completion and hand each PSDU to the packet processor. */
@@ -173,7 +180,9 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
       off += f.next_offset;
     }
   };
-  _device.bulk_read_async_loop(32 * 1024, 8, on_data, g_devourer_should_stop);
+  _device.bulk_read_async_loop(32 * 1024, 8, on_data, [this]() -> bool {
+    return _rx_stop || g_devourer_should_stop;
+  });
   stop_dig();
   _logger->info("RtlJaguar2Device: RX loop exited ({} frames, {} reads)", frames,
                 reads);

@@ -426,8 +426,6 @@ std::vector<Packet> RtlJaguarDevice::read_frames() {
 
 void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
                           SelectedChannel channel) {
-  _packetProcessor = packetProcessor;
-
   StartWithMonitorMode(channel);
   SetMonitorChannel(channel);
 
@@ -448,6 +446,14 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
       _logger->error("DEVOURER_BF_ARM_BFEE — bad MAC '{}'", bfer);
     }
   }
+
+  StartRxLoop(std::move(packetProcessor));
+}
+
+void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
+  _packetProcessor = std::move(packetProcessor);
+  /* Restartable: clear any stop request left by a prior StopRxLoop(). */
+  should_stop = false;
 
   /* DEVOURER_RX_PATHS=0xNN restricts which RX chains the chip enables/combines,
    * by masking the RX-path-enable register (0x808 byte 0: bits 0/4 = path A

@@ -88,11 +88,13 @@ constexpr BfeeConfig kBfeeJaguar23{
     /*csi_content_reg*/ 0, /*csi_content_val*/ 0,
     /*set_our_aid*/ true, /*set_rxflt*/ true};
 
-/* Beamformer side (fully shared): arm the MAC sounding engine so a
+/* Beamformer side (shared): arm the MAC sounding engine so a
  * TX-descriptor-marked NDPA is followed by a hardware-generated NDP.
- * Beamformee entry 0, P_AID = 0 (unassociated). */
-inline void arm_sounder(RtlUsbAdapter& dev) {
-  dev.rtw_write8(kSndPtclCtrl, 0xCB);
+ * Beamformee entry 0, P_AID = 0 (unassociated). The one per-generation byte is
+ * the sounding-protocol control (0x718): 0xCB on Jaguar-1
+ * (hal_txbf_jaguar_enter), 0xDB on Jaguar-2/3 (hal_txbf_8822b_enter). */
+inline void arm_sounder(RtlUsbAdapter& dev, uint8_t snd_ptcl_ctrl = 0xCB) {
+  dev.rtw_write8(kSndPtclCtrl, snd_ptcl_ctrl);
   dev.rtw_write8(kSndNdpStandby, 0x50);
   dev.rtw_write16(kTxbfCtrl, 0x0000);                 /* P_AID = 0 */
   uint8_t v = dev.rtw_read8(kTxbfCtrl + 3);

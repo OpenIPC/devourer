@@ -530,9 +530,9 @@ void HalJaguar2::do_lck() {
   rf_write(0, 0xc4, 0x01402);         /* disable RTK */
   rf_write(0, 0x18, lc_cal | 0x08000); /* start LCK */
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  bool locked = false;
   for (int cnt = 0; cnt < 5; cnt++) {
-    if ((rf_read(0, 0x18) & 0x8000) == 0)
-      break;
+    if ((rf_read(0, 0x18) & 0x8000) == 0) { locked = true; break; }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   rf_write(0, 0x18, lc_cal);  /* recover channel */
@@ -542,7 +542,9 @@ void HalJaguar2::do_lck() {
   rf_write(0, 0x0, 0x3ffff);
   if (_ver.rf_2t2r)
     rf_write(1, 0x0, 0x3ffff);
-  _logger->info("Jaguar2: LCK done");
+  _logger->info("Jaguar2: LCK {} (RF_A 0x18={:05x} 0x00={:05x})",
+                locked ? "LOCKED" : "TIMEOUT (LO not locked!)",
+                rf_read(0, 0x18), rf_read(0, 0x0));
 }
 
 /* ex_hal8822b_wifi_only_hw_config: grant the antenna to WLAN. Without this the

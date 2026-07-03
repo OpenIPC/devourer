@@ -3,13 +3,13 @@
 The Realtek 11ac driver that simply devours its competitors.
 
 Devourer is a userspace re-implementation of Realtek's RTL88xxAU Wi-Fi
-driver, speaking to the chip directly through libusb. It covers two chip
+driver, speaking to the chip directly through libusb. It covers three chip
 generations: the first-generation **Jaguar** 802.11ac family (RTL8812AU,
 RTL8814AU, and RTL8821AU shipping on every band, RTL8811AU via the 8812
-code path) and the second-generation **Jaguar3** parts — `rtl8822c`
-(RTL8812CU / RTL8822CU) and `rtl8822e` (RTL8812EU / RTL8822EU) — which
-additionally reach **5/10 MHz narrowband** operation the Jaguar-1 silicon
-physically can't. No kernel module, no
+code path); the **Jaguar2** **RTL8822BU** (2.4/5 GHz at 20/40/80 MHz); and
+the **Jaguar3** parts — `rtl8822c` (RTL8812CU / RTL8822CU) and `rtl8822e`
+(RTL8812EU / RTL8822EU) — which additionally reach **5/10 MHz narrowband**
+operation the Jaguar-1 silicon physically can't. No kernel module, no
 `rtl8812au` DKMS tree — just a C++20 static library (`WiFiDriver`) plus two
 demo executables for RX and TX. It is the OpenIPC project's driver of choice
 for long-range video links built on top of cheap Realtek 11ac USB radios.
@@ -32,6 +32,15 @@ self-contained HAL under `src/jaguar3/`, dispatched at the factory from the
 operation the Jaguar-1 silicon lacks. Bring-up is ported from Realtek's vendor
 source.
 
+Between the two sits the **Jaguar2** **RTL8822BU** (chip **8822B**, 2T2R USB,
+`2357:012d` / `0bda:b82c`), handled by a third self-contained HAL under
+`src/jaguar2/` and dispatched from the `SYS_CFG2` chip-id (`0x0a`). Jaguar2 is a
+hybrid of the other two: HalMAC firmware download, MAC init and power sequencing
+follow the Jaguar3 path, while the BB/AGC/RF register tables use the older phydm
+`check_positive` format like Jaguar1. Bring-up is ported from the vendor
+rtl88x2bu tree and reaches on-air RX + TX across **2.4 and 5 GHz at
+20/40/80 MHz** with per-rate, bandwidth-aware efuse TX power.
+
 Band cells are **devourer on-air TX throughput** (Mbps, HT MCS7, 20 MHz) via
 USRP channel-occupancy (`tests/bench_onair.py`). `†` = on-air but the reading
 varies run-to-run (bracketed = best clean reading).
@@ -42,19 +51,20 @@ varies run-to-run (bracketed = best clean reading).
 | **RTL8811AU**                 | 1T1R              | mirrors 8812  | mirrors 8812  | mirrors 8812     | 1T1R cut of 8812 silicon; rides the 8812 code path (`RFType=RF_TYPE_1T1R` from `REG_SYS_CFG` bit 27). Not benchmarked |
 | **RTL8814AU**                 | 4T4R, 3-SS max    | 65            | †(32)         | †(32)            | `0bda:8813`; tested on COMFAST CF-938AC (2 ext antennas) and CF-960AC (4 internal) — effective RX-diversity branches differ (N_eff ≈ 3.8 vs 2.6) despite identical silicon, see [`docs/measuring-spatial-diversity.md`](docs/measuring-spatial-diversity.md) |
 | **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | TP-Link Archer T2U Plus (`2357:0120`) |
+| **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | TP-Link Archer T3U (`2357:012d`) |
 | **RTL8812CU**                 | 2T2R              | 65            | 60            | 60               | LB-LINK WDN1300H (`0bda:c812`) |
 | **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`0bda:c82c`) |
 | **RTL8812EU**                 | 2T2R              | 8             | 51            | 47               | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module |
 | **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`rtl8822e`) |
 
-The **`Jaguar2`** / **`Jaguar+`** family (8812BU, 8822**B**U/BE, etc.) and
-the later **`Kestrel`** 11ax generation are **out of scope**: they share
-the Realtek "AU" / "BU" branding but the baseband and HAL differ enough
-that they would need their own driver. Two naming traps worth calling out:
-RTL8821AU is Jaguar wave 1 (CHIP_8821 = 7 in Realtek's HalVerDef, shares
-the enum with CHIP_8812), **not** Jaguar2; and the in-scope RTL8822**C**U
-(Jaguar3, `rtl8822c`) is a different chip from the out-of-scope RTL8822**B**U
-(Jaguar2) despite the shared "8822" number.
+The **8822BE** (the PCIe sibling of the in-scope 8822BU) and the later
+**`Kestrel`** 11ax generation are **out of scope**: they share the Realtek
+"AU" / "BU" branding but the bus or baseband differs enough that they would
+need their own driver. Two naming traps worth calling out: RTL8821AU is
+Jaguar wave 1 (CHIP_8821 = 7 in Realtek's HalVerDef, shares the enum with
+CHIP_8812), **not** Jaguar2; and the RTL8822**B**U (Jaguar2) is a different
+chip from the RTL8822**C**U (Jaguar3, `rtl8822c`) despite the shared "8822"
+number — devourer supports both through separate HALs.
 
 > Heads up — some Realtek USB sticks ship in "ZeroCD" mode and enumerate first
 > as a USB mass-storage device exposing the Windows driver installer
@@ -119,12 +129,13 @@ an 8812AU-only `WiFiDriverDemo` is ~1.0 MB versus ~2.6 MB with everything on.
 |---|---|---|
 | `DEVOURER_JAGUAR1` | ON | RTL8812AU / 8811AU / 8821AU |
 | `DEVOURER_8814` | ON | RTL8814AU (requires `DEVOURER_JAGUAR1`) |
+| `DEVOURER_JAGUAR2` | ON | RTL8822BU / 8812BU |
 | `DEVOURER_JAGUAR3_8822C` | ON | RTL8812CU / 8822CU |
 | `DEVOURER_JAGUAR3_8822E` | ON | RTL8812EU / 8822EU |
 
 ```sh
 # 8812AU/8811AU/8821AU only
-cmake -S . -B build -DDEVOURER_8814=OFF \
+cmake -S . -B build -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2=OFF \
       -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF
 ```
 

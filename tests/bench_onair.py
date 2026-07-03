@@ -26,11 +26,12 @@ CHIPS = {
     "RTL8821AU": ("9-1.4", "0x2357", "0x0120"),
     "RTL8812CU": ("3-2.4", "0x0bda", "0xc812"),   # Jaguar3 (rtl8822c)
     "RTL8812EU": ("3-2.3.3", "0x0bda", "0xa81a"),   # Jaguar3 EU (rtl8822e); adjust sysfs
+    "RTL8822BU": ("4-2.3.3", "0x2357", "0x012d"),   # Jaguar2 (8822b); TP-Link Archer T3U
 }
 BANDS = [("2.4 GHz (ch6)", 6, 2437e6), ("UNII-1 (ch36)", 36, 5180e6),
          ("UNII-2/3 (ch149)", 149, 5745e6)]
 KDRIVERS = ["rtw88_8812au", "rtw88_8814au", "rtw88_8821au", "rtw88_8822cu",
-            "8812eu", "rtl88x2eu", "rtl88xxau_wfb"]
+            "rtw88_8822bu", "8812eu", "rtl88x2eu", "rtl88xxau_wfb"]
 DUTY_RE = re.compile(r"duty=([\d.]+)%\s+noise=([-\d.]+)dB.*on_air~=([\d.]+)Mbps")
 
 
@@ -82,10 +83,15 @@ def main() -> int:
     ap.add_argument("--noise-db", type=float, default=-62.0)
     ap.add_argument("--skip-rail-check", action="store_true",
                     help="skip the CU-control 5 GHz rail-sag pre-flight (rail_check.sh)")
+    ap.add_argument("--only", help="comma-separated chip labels to bench "
+                    "(default: every plugged-in chip in CHIPS)")
     args = ap.parse_args()
     regress._install_cleanup_handlers()
     present = {c: v for c, v in CHIPS.items()
                if Path(f"/sys/bus/usb/devices/{v[0]}").exists()}
+    if args.only:
+        want = {s.strip().upper() for s in args.only.split(",")}
+        present = {c: v for c, v in present.items() if c.upper() in want}
     print(f"# chips: {', '.join(present)}  | MCS{args.mcs}/{args.bw}MHz/{args.size}B\n")
 
     # Pre-flight rail-sag guard (CLAUDE.md defence #1): the bus-powered hub rail

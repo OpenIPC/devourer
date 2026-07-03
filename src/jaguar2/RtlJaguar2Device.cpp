@@ -13,6 +13,7 @@
 
 #include "FrameParserJaguar2.h"
 #include "Halrf8822b.h"
+#include "ToneMask.h"
 #include "RateDefinitions.h"
 #include "RxPacket.h"
 #include "SignalStop.h" /* g_devourer_should_stop */
@@ -147,6 +148,13 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
     });
     _logger->info("RtlJaguar2Device: DIG thread started");
   }
+
+  /* DEVOURER_RX_CSI_MASK / DEVOURER_RX_NBI — RX-side per-subcarrier masking
+   * (receive-equalizer CSI mask / narrowband notch). Applied after the channel
+   * set so it is the final word for a single-channel capture. See ToneMask.h. */
+  devourer::tonemask::apply_from_env(_device, _logger,
+                                     devourer::tonemask::Family::AC2_8822B,
+                                     _channel, 2);
 
   _logger->info("RtlJaguar2Device: entering RX loop (ch={})", _channel.Channel);
 

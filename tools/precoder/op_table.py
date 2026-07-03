@@ -43,13 +43,24 @@ class OpPoint:
 
 def build_link_rows(link, target: float, mcs_set=range(8),
                     overhead_set=(0.10, 0.25, 0.50, 0.75, 1.00),
-                    bw: int = 20, sgi: bool = False, sbi: bool = True) -> list[LinkRow]:
-    """(MCS, overhead) -> snr_req for the given delivery target. Computed once."""
+                    bw: int = 20, sgi: bool = False, sbi: bool = True,
+                    bw_set=None, mode: str = "ht") -> list[LinkRow]:
+    """(bw, MCS, overhead) -> snr_req for the given delivery target. Computed once.
+
+    `bw_set` opens the BANDWIDTH dimension (e.g. (20, 40, 80) with mode='vht'):
+    one row per rung of the primary-nested ladder the TX can pick per-packet
+    with no RX coordination (the RX parks at the widest rung —
+    tests/rx80_narrow_tx_probe.sh). A wider row's snr_req carries its
+    +3 dB/doubling noise-bandwidth cost (em.bw_noise_db), so the e_bit ranking
+    trades airtime against noise bandwidth honestly; the measured wide-RX
+    penalty for narrower-than-tune frames is 0 dB and adds nothing. Default
+    (bw_set=None) keeps the single-bw behaviour."""
     rows = []
-    for mcs in mcs_set:
-        for ov in overhead_set:
-            req = link.snr_required(mcs, ov, target, sbi=sbi)
-            rows.append(LinkRow("ht", mcs, bw, sgi, ov, req))
+    for w in (bw_set if bw_set is not None else (bw,)):
+        for mcs in mcs_set:
+            for ov in overhead_set:
+                req = link.snr_required(mcs, ov, target, sbi=sbi)
+                rows.append(LinkRow(mode, mcs, w, sgi, ov, req + em.bw_noise_db(w)))
     return rows
 
 
@@ -64,7 +75,10 @@ def resolve(row: LinkRow, path_loss_db: float, calib, link,
     if txagc is None:
         return None
     recv = path_loss_db + calib.gain_db(txagc)
-    pdel = link.p_deliver(recv, row.mcs, row.overhead)
+    # recv is in the 20 MHz-noise reference frame (path loss + gain); the
+    # demodulator at this row's bandwidth sees bw_noise_db less SNR — the same
+    # term build_link_rows folded into snr_req, kept consistent here.
+    pdel = link.p_deliver(recv - em.bw_noise_db(row.bw), row.mcs, row.overhead)
     eb = em.energy_per_delivered_bit(
         em.TxPoint(row.mode, row.mcs, row.bw, row.sgi, txagc),
         src_bitrate_bps, row.overhead, payload_bytes, pdel, calib)

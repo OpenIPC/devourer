@@ -101,6 +101,16 @@ def main(argv=None) -> int:
         # +2.5 MHz tone within the band — a deterministic, strong interferer.
         t = np.arange(nsamps) / args.rate
         tone = (args.amplitude * np.exp(2j * np.pi * 2.5e6 * t)).astype(np.complex64)
+    else:
+        # Pre-generated noise ring: drawing fresh Gaussians per 8192-sample
+        # buffer in Python cannot keep 20 MS/s fed — the TX stream starves
+        # (solid 'U' underflow spam) and the jam radiates only in bursts.
+        # 64 fixed-seed buffers cycle with a ~26 ms period at 20 MS/s: still
+        # band-filling AWGN to the victim PHY, still reproducible per seed.
+        NRING = 64
+        ring = [((rng.standard_normal(nsamps) + 1j * rng.standard_normal(nsamps))
+                 / np.sqrt(2)).astype(np.complex64) for _ in range(NRING)]
+        ring_scaled = [(args.amplitude * b).astype(np.complex64) for b in ring]
 
     sys.stderr.write(
         f"[interferer] freq={args.freq/1e9:.4f} GHz rate={args.rate/1e6:g} MS/s "
@@ -145,10 +155,10 @@ def main(argv=None) -> int:
             amp = args.amplitude
         if args.mode == "cw":
             buf = (tone * (amp / max(1e-9, args.amplitude))).astype(np.complex64)
+        elif fade_on:
+            buf = (amp * ring[nbuf % NRING]).astype(np.complex64)
         else:
-            buf = (amp *
-                   (rng.standard_normal(nsamps) + 1j * rng.standard_normal(nsamps))
-                   / np.sqrt(2)).astype(np.complex64)
+            buf = ring_scaled[nbuf % NRING]
         tx.send(buf.reshape(1, -1), md)
         md.start_of_burst = False
         sent += nsamps

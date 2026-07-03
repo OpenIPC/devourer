@@ -11,6 +11,7 @@
 #include "FrameParserJaguar3.h"
 #include "RateDefinitions.h" /* MGN_* rate enum (shared across the family) */
 #include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
+#include "ToneMask.h"   /* DEVOURER_RX_CSI_MASK / DEVOURER_RX_NBI knobs */
 
 extern "C" {
 #include "ieee80211_radiotap.h" /* MRateToHwRate + radiotap iterator */
@@ -128,6 +129,17 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
       }
     }
+  }
+
+  /* DEVOURER_RX_CSI_MASK / DEVOURER_RX_NBI — RX-side per-subcarrier masking
+   * (receive-equalizer CSI mask / narrowband notch). Applied after the channel
+   * set so it is the final word for a single-channel capture; serialized
+   * against the coex housekeeping tick like every other register writer here.
+   * See ToneMask.h. */
+  if (std::getenv("DEVOURER_RX_CSI_MASK") || std::getenv("DEVOURER_RX_NBI")) {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    devourer::tonemask::apply_from_env(
+        _device, _logger, devourer::tonemask::Family::JGR3, _channel, 2);
   }
 
   _logger->info("Jaguar3: entering RX loop (kernel-style async URB queue)");

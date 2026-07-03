@@ -154,10 +154,22 @@ def main() -> int:
         # bright scan edge on the newest row
         d.rectangle([padL, padT, padL + grid_w, padT + 2], fill=cyan)
         draw_readout(d, cur)
-        imgs.append(img.convert("P", palette=Image.ADAPTIVE, colors=args.colors))
+        imgs.append(img)                                  # keep RGB for now
 
-    imgs[0].save(args.out, save_all=True, append_images=imgs[1:],
-                 duration=args.ms, loop=0, optimize=True, disposal=2)
+    # One GLOBAL palette shared by every frame. Per-frame ADAPTIVE palettes make
+    # identical static pixels quantise to slightly different colours each frame
+    # (the "trembling" text); a single fixed palette + no dithering keeps every
+    # unchanged pixel bit-identical across frames. Build the palette from a
+    # montage of sampled frames so it covers the full gradient + UI colours.
+    sample = imgs[:: max(1, len(imgs) // 8)]
+    montage = Image.new("RGB", (W, H * len(sample)))
+    for i, im in enumerate(sample):
+        montage.paste(im, (0, i * H))
+    pal = montage.quantize(colors=args.colors, method=Image.MEDIANCUT)
+    quant = [im.quantize(palette=pal, dither=Image.Dither.NONE) for im in imgs]
+
+    quant[0].save(args.out, save_all=True, append_images=quant[1:],
+                  duration=args.ms, loop=0, optimize=False, disposal=1)
     kb = os.path.getsize(args.out) / 1024
     print(f"wrote {args.out}  {W}x{H}  {len(imgs)} frames  {kb:.0f} KB")
     return 0

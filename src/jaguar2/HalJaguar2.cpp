@@ -527,6 +527,13 @@ void HalJaguar2::do_lck() {
     rf_write(1, 0x0, 0x10000);
 
   uint32_t lc_cal = rf_read(0, 0x18); /* backup RF CHNLBW */
+  /* Mask to channel/BW/band bits (like the RF18 write mask) so the value fed
+   * back into the LCK matches the kernel's clean 0xc09. NB: the LCK-done poll
+   * below "times out" because devourer's 3-wire read of RF 0x18 returns status
+   * bits (0x18c09) transiently — but the LO does lock (a later settled read is
+   * 0xc09, matching the kernel), so the timeout is a read artifact, not a real
+   * lock failure. */
+  lc_cal &= 0x00060cffu;
   rf_write(0, 0xc4, 0x01402);         /* disable RTK */
   rf_write(0, 0x18, lc_cal | 0x08000); /* start LCK */
   std::this_thread::sleep_for(std::chrono::milliseconds(100));

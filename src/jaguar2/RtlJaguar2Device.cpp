@@ -48,6 +48,15 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
     throw std::runtime_error("RtlJaguar2Device: firmware DLFW failed");
   _logger->info("RtlJaguar2Device: firmware booted (bw={})", (int)bw);
 
+  if (getenv("DEVOURER_DLFW_ONLY")) {
+    /* Stop after DLFW so a from-scratch kernel-write replay (DEVOURER_TX_REPLAY)
+     * can reconstruct the ENTIRE post-DLFW init in the kernel's exact order,
+     * without devourer's own bring-up first setting any internal latch that an
+     * on-top replay can't clear. Tests true sequence parity. */
+    _logger->info("RtlJaguar2Device: DLFW_ONLY — skipping devourer init");
+    return;
+  }
+
   if (!_macinit.init_mac_cfg(channel.ChannelWidth))
     throw std::runtime_error("RtlJaguar2Device: init_mac_cfg failed");
   _macinit.init_usb_cfg();
@@ -391,6 +400,16 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
       }
     });
     _logger->info("Jaguar2: TX_DRAIN bulk-IN C2H drain thread started");
+  }
+  if (getenv("DEVOURER_TX_DEBUG")) {
+    /* Post-replay chip-liveness: TSF advancing => the (possibly replayed) init
+     * produced a functional MAC. Distinguishes "chip dead / replay incomplete"
+     * from "chip live but TX still won't key". */
+    uint32_t a = _device.rtw_read32(0x0560);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    uint32_t b = _device.rtw_read32(0x0560);
+    _logger->info("Jaguar2 TSF(post-init): {:08x}->{:08x} ({}) CR=0x{:04x}", a, b,
+                  a != b ? "TICKING" : "FROZEN", _device.rtw_read16(0x0100));
   }
   _logger->info("Jaguar2: ready for TX (monitor inject, ch={})",
                 channel.Channel);

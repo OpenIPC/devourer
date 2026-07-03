@@ -244,6 +244,8 @@ void RtlJaguar2Device::stop_dig() {
   _dig_stop = true;
   if (_dig_thread.joinable())
     _dig_thread.join();
+  if (_coex_thread.joinable())
+    _coex_thread.join();
 }
 
 void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
@@ -439,6 +441,22 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
       }
     });
     _logger->info("Jaguar2: TX_DRAIN bulk-IN C2H drain thread started");
+  }
+  if (getenv("DEVOURER_TX_COEX_LOOP")) {
+    /* Coex runtime: 8822B is a WiFi+BT combo — its coex firmware periodically
+     * re-grabs the antenna/PTA for BT, silencing WL TX (RX unaffected). Without
+     * a runtime that re-asserts WiFi-only ownership the on-air TX is marginal/
+     * intermittent (a frame slips through between silencings). Re-apply the
+     * WL-only HW grant every ~500 ms — the jaguar2 analogue of the Jaguar3
+     * coex_runtime_loop. Runs on _coex_thread for the demo lifetime. */
+    _coex_thread = std::thread([this] {
+      while (!g_devourer_should_stop) {
+        for (int i = 0; i < 50 && !g_devourer_should_stop; i++)
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        _hal.coex_wlan_only();
+      }
+    });
+    _logger->info("Jaguar2: coex runtime thread started (WL-only re-assert)");
   }
   if (getenv("DEVOURER_TX_DEBUG")) {
     /* Post-replay chip-liveness: TSF advancing => the (possibly replayed) init

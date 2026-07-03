@@ -36,6 +36,12 @@ public:
 
   void Init(Action_ParsedRadioPacket packetProcessor,
             SelectedChannel channel) override;
+  /* Blocking RX worker loop on an already-brought-up chip (see IRtlDevice).
+   * Init = bring_up + StartRxLoop; a TX+RX caller does InitWrite once, then
+   * runs this on its own std::thread next to the TX loop. Starts (and on exit
+   * stops) the DIG thread — TX-only sessions stay DIG-free. */
+  void StartRxLoop(Action_ParsedRadioPacket packetProcessor) override;
+  void StopRxLoop() override { _rx_stop = true; }
   void SetMonitorChannel(SelectedChannel channel) override;
   void InitWrite(SelectedChannel channel) override;
   void SetTxPower(uint8_t power) override;
@@ -61,6 +67,10 @@ private:
   std::thread _dig_thread;
   std::atomic<bool> _dig_stop{false};
   void stop_dig();
+
+  /* StartRxLoop stop request (StopRxLoop). volatile (not atomic) to match the
+   * signal-flag pattern used across the library (g_devourer_should_stop). */
+  volatile bool _rx_stop = false;
 
   /* Shared cold bring-up (power-on -> DLFW -> MAC/BB/RF -> channel -> LCK ->
    * IQK -> coex -> enable RX/TX engine). Used by both Init (RX) and InitWrite

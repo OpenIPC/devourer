@@ -54,6 +54,11 @@ public:
   ~RtlJaguarDevice() override;
   void Init(Action_ParsedRadioPacket packetProcessor,
             SelectedChannel channel) override;
+  /* Blocking RX worker loop on an already-brought-up chip (see IRtlDevice).
+   * Init = bring-up + BFEE arm + StartRxLoop; a TX+RX caller does InitWrite
+   * once, then runs this on its own std::thread next to the TX loop. */
+  void StartRxLoop(Action_ParsedRadioPacket packetProcessor) override;
+  void StopRxLoop() override { should_stop = true; }
   void SetMonitorChannel(SelectedChannel channel) override;
   /* Lean frequency-hop retune: switches the RF channel only, skipping the
    * per-rate TX-power loop, bandwidth post-set, and thermal pwrtrk tick that

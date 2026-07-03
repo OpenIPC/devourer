@@ -342,6 +342,60 @@ void HalJaguar3::bf_init() {
   _logger->info("Jaguar3: bf_init (NDPA/MU TX setup) applied");
 }
 
+/* Port of phydm_txbf_rfmode (phydm_hal_txbf_api.c), su_bfee_cnt > 0 branch —
+ * the beamformer-side RF/BB sounding config. The RF mode-table entries make
+ * the RF front-end able to transmit while the mode table says "RX" (the NDP
+ * goes out SIFS after the NDPA, while the chip is turning to receive the
+ * report); the BB writes enable the TxBF antenna mapping so the 2-antenna NDP
+ * is emitted on both paths. RF registers are written through the direct
+ * per-path BB window (0x3c00/0x4c00 + (addr<<2), 20-bit), the same mechanism
+ * as the RF table load and the halrf calibration code. All masks are
+ * contiguous, so phy_set_bb_reg's field-value semantics match the vendor
+ * odm_set_rf_reg. */
+void HalJaguar3::txbf_rfmode_sounder() {
+  auto rf = [this](int path, uint16_t addr, uint32_t mask, uint32_t val) {
+    uint16_t direct = static_cast<uint16_t>((path ? 0x4c00 : 0x3c00) +
+                                            ((addr & 0xff) << 2));
+    _device.phy_set_bb_reg(direct, mask & 0xfffff, val);
+  };
+  if (_variant == jaguar3::ChipVariant::C8822C) {
+    /* Path A: RX-mode table entry with TX IQ generator on */
+    rf(0, 0xef, 1u << 19, 1);      /* mode-table write enable */
+    rf(0, 0x33, 0xF, 3);           /* select RX mode entry */
+    rf(0, 0x3e, 0x3, 0x2);
+    rf(0, 0x3f, 0xfffff, 0x65AFF);
+    rf(0, 0xef, 1u << 19, 0);
+    /* Path B: RX-mode + standby-mode entries */
+    rf(1, 0xef, 1u << 19, 1);
+    rf(1, 0x33, 0xF, 3);
+    rf(1, 0x3f, 0xfffff, 0x996BF);
+    rf(1, 0x33, 0xF, 1);           /* select standby entry */
+    rf(1, 0x3f, 0xfffff, 0x99230);
+    rf(1, 0xef, 1u << 19, 0);
+  } else { /* C8822E */
+    rf(0, 0xef, 1u << 19, 1);
+    rf(0, 0x33, 0xF, 3);
+    rf(0, 0x3e, 0xF, 0x4);
+    rf(0, 0x3f, 0xfffff, 0xc1aff);
+    rf(0, 0xef, 1u << 19, 0);
+    rf(1, 0xef, 1u << 19, 1);
+    rf(1, 0x33, 0xF, 3);
+    rf(1, 0x3e, 0xF, 0x1);
+    rf(1, 0x3f, 0xfffff, 0x306bf);
+    rf(1, 0xef, 1u << 19, 0);
+  }
+  /* BB TxBF antenna mapping (same on both variants). */
+  _device.phy_set_bb_reg(0x1e24, 1u << 11, 1); /* Nsts > Nc: no V matrix */
+  _device.phy_set_bb_reg(0x1e24, (1u << 28) | (1u << 29), 0x2);
+  _device.phy_set_bb_reg(0x1e24, 1u << 30, 1);
+  /* TX BF logic map + TX path enable for Nsts 1..2 */
+  _device.phy_set_bb_reg(0x0820, 0xff, 0x33);
+  _device.phy_set_bb_reg(0x1e2c, 0xffff, 0x404);
+  _device.phy_set_bb_reg(0x0820, 0xffff0000, 0x33);
+  _device.phy_set_bb_reg(0x1e30, 0xffff, 0x404);
+  _logger->info("Jaguar3: txbf rf-mode (beamformer sounding RF/BB) applied");
+}
+
 /* Clean de-init — the counterpart to rtw_hal_init, run on shutdown. The kernel
  * rtw88 driver does this on unbind and the adapter always re-enumerates cleanly
  * afterwards; devourer skipping it is what left the chip hung (RX DMA running,

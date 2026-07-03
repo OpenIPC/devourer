@@ -90,6 +90,13 @@ public:
    * set (the 3-wire RX-mode command must follow the channel config). */
   void enable_rx_path();
 
+  /* Beamformer-side sounding RF/BB config (port of phydm_txbf_rfmode, the
+   * su_bfee_cnt > 0 branch): RF mode-table entries + the BB TxBF antenna
+   * mapping (0x1e24/0x820/0x1e2c/0x1e30) the chip needs to emit the hardware
+   * NDP that follows a descriptor-marked NDPA. Per-variant RF values (8822C vs
+   * 8822E). Call when arming the self-sounding beamformer, after bring-up. */
+  void txbf_rfmode_sounder();
+
   /* Configure the 8822E RFE control pins (port of phydm_rfe_8822e). These drive
    * the external antenna-switch / PAPE (PA enable) GPIOs and are only set for
    * rfe_type 21..24; without them the TX PA is not enabled (TX dark) even when

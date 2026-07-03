@@ -37,7 +37,6 @@ RtlJaguar3Device::RtlJaguar3Device(RtlUsbAdapter device, Logger_t logger,
 
 void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
-  _packetProcessor = std::move(packetProcessor);
   _channel = channel;
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
   /* Tune the channel/bandwidth (5/10 MHz ChannelWidth re-clocks to narrowband),
@@ -87,6 +86,50 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
     }
   }
 
+  StartRxLoop(std::move(packetProcessor));
+}
+
+void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
+  _packetProcessor = std::move(packetProcessor);
+  /* Restartable: clear any stop request left by a prior StopRxLoop(). */
+  _rx_stop = false;
+  /* Take over bulk-IN from the coex thread's C2H drain up front — also during
+   * the register restore below, so its 200 ms bulk reads don't interleave with
+   * the RX-path enable sequence. */
+  _rx_loop_active = true;
+
+  /* An InitWrite bring-up is TX-oriented: it closed the RX filters
+   * (0x6A0-0x6A4, so a TX-only session's unread frames can't fill the on-chip
+   * RX FIFO) and never ran enable_rx_path (the 3-wire IGI toggle that puts the
+   * RF into RX mode — without it the chip delivers zero frames). This caller
+   * wants RX, so restore the monitor_rx_cfg accept-all filters and enable the
+   * RX path. Serialized against the coex housekeeping tick, the only other
+   * register writer right now. */
+  if (_rx_filters_closed) {
+    /* A register read can transiently fail right after InitWrite (the FW is
+     * still settling from the coex H2C burst) — give it a beat and retry a few
+     * times instead of letting the exception tear down the caller's RX
+     * thread. */
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    for (int attempt = 0; attempt < 5; ++attempt) {
+      try {
+        std::lock_guard<std::mutex> lk(_reg_mu);
+        _device.rtw_write<uint16_t>(0x06A0, 0xFFFF);
+        _device.rtw_write<uint16_t>(0x06A2, 0xFFFF);
+        _device.rtw_write<uint16_t>(0x06A4, 0xFFFF);
+        _hal.enable_rx_path();
+        _rx_filters_closed = false;
+        _logger->info("Jaguar3: RX filters re-opened + RX path enabled for "
+                      "concurrent TX+RX");
+        break;
+      } catch (const std::exception &e) {
+        _logger->error("Jaguar3: RX-path restore failed ({}){}", e.what(),
+                       attempt < 4 ? " — retrying" : " — giving up");
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      }
+    }
+  }
+
   _logger->info("Jaguar3: entering RX loop (kernel-style async URB queue)");
   uint64_t frames = 0, reads = 0;
   /* Process one bulk-IN completion: walk the aggregated 8822C RX descriptors. */
@@ -106,7 +149,13 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
         p.RxAtrib.data_rate = f.rx_rate;
         p.RxAtrib.drvinfo_sz = static_cast<uint8_t>(f.drvinfo_size);
         p.RxAtrib.shift_sz = f.shift;
-        p.RxAtrib.pkt_rpt_type = RX_PACKET_TYPE::NORMAL_RX;
+        /* RX desc word2 BIT(28) = FW C2H report, not an 802.11 frame. During
+         * concurrent TX+RX the FW emits one small C2H per TX, so tag them for
+         * the packetProcessor (which skips C2H) instead of surfacing a flood
+         * of short "frames". Same check the coex drain uses. */
+        p.RxAtrib.pkt_rpt_type = (data[off + 11] & 0x10)
+                                     ? RX_PACKET_TYPE::C2H_PACKET
+                                     : RX_PACKET_TYPE::NORMAL_RX;
         p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
         _packetProcessor(p);
       }
@@ -118,7 +167,13 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
       off += f.next_offset;
     }
   };
-  _device.bulk_read_async_loop(32 * 1024, 8, on_data, g_devourer_should_stop);
+  /* _rx_loop_active was set on entry (bulk-IN handover from the coex thread's
+   * C2H drain — its one in-flight 200 ms bulk_read_raw may steal at most one
+   * completion, harmless). Give the endpoint back on exit. */
+  _device.bulk_read_async_loop(32 * 1024, 8, on_data, [this]() -> bool {
+    return _rx_stop || g_devourer_should_stop;
+  });
+  _rx_loop_active = false;
 }
 
 /* Coex runtime (port of the rtw88 watchdog's coex path): drain the firmware's
@@ -143,18 +198,26 @@ void RtlJaguar3Device::coex_runtime_loop() {
   auto next_tick = std::chrono::steady_clock::now();
   const auto period = std::chrono::seconds(2);
   while (!_coex_stop && !g_devourer_should_stop) {
-    /* Drain bulk-IN (empties the FW C2H buffer). 200 ms timeout bounds shutdown
-     * latency when the pipe is idle. */
-    int n = _device.bulk_read_raw(buf.data(), static_cast<int>(buf.size()), 200);
-    if (n >= static_cast<int>(jaguar3::RXDESC_SIZE_8822C)) {
-      ++rx;
-      if (buf[11] & 0x10) /* RX desc word2 BIT(28) = C2H report */
-        ++c2h;
+    if (!_rx_loop_active.load()) {
+      /* Drain bulk-IN (empties the FW C2H buffer). 200 ms timeout bounds
+       * shutdown latency when the pipe is idle. */
+      int n =
+          _device.bulk_read_raw(buf.data(), static_cast<int>(buf.size()), 200);
+      if (n >= static_cast<int>(jaguar3::RXDESC_SIZE_8822C)) {
+        ++rx;
+        if (buf[11] & 0x10) /* RX desc word2 BIT(28) = C2H report */
+          ++c2h;
+      }
+    } else {
+      /* StartRxLoop owns bulk-IN — its async URB queue sees the C2H reports
+       * as part of the RX stream. Keep the loop pacing without reading. */
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     if (std::chrono::steady_clock::now() < next_tick)
       continue;
     next_tick += period;
     try {
+      std::lock_guard<std::mutex> lk(_reg_mu);
       _hal.coex_run_5g();
       _hal.pwr_track(); /* thermal TX-power compensation (sustains upper 5 GHz) */
       _hal.fw_update_wl_phy_info();
@@ -182,14 +245,36 @@ void RtlJaguar3Device::Stop() {
 
 void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   _channel = channel;
+  /* Concurrent TX+RX intent (DEVOURER_TX_WITH_RX / a later StartRxLoop on this
+   * bring-up): enable the RX path at the same point in the sequence Init does
+   * and keep the RX filters open. Retrofitting RX state after the TX-oriented
+   * bring-up completes is not reliable (validated on 8822EU: enable_rx_path
+   * after the coex/FW steps leaves the RX path dead, and the register RMWs
+   * race the running TX). */
+  const bool want_rx = std::getenv("DEVOURER_TX_WITH_RX") != nullptr;
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
   _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                       channel.ChannelWidth);
   _hal.run_iqk(channel);
-  _hal.dpk_force_bypass_8822e(); /* 8822e rfe 21/22: kernel bypasses DPK (after IQK) */
+  if (want_rx)
+    _hal.enable_rx_path(); /* RF into RX mode — same slot as the Init path */
+  /* 8822e DPK force-bypass + per-rate TXAGC (below) each DESENSE the EU's RX
+   * to near-deaf when applied on a bring-up that also runs the RX path (bisected
+   * on hardware: either alone kills RX; skipping both restores it; a later
+   * enable_rx_path does not recover). In TX+RX mode trade them away: TX runs at
+   * the flat table power (no per-rate spread, no DPK-LUT bypass state), RX
+   * works. TX-only behavior is unchanged. Root cause is an open question —
+   * suspect the RMW reads of the live 0x18e8/0x1b00 blocks folding HW-status
+   * bits back into config. */
+  if (!want_rx)
+    _hal.dpk_force_bypass_8822e(); /* 8822e rfe 21/22: kernel bypasses DPK (after IQK) */
   _hal.config_rfe(channel.Channel); /* 8822e RFE/PAPE antenna-switch pins (PA enable) */
   _hal.config_channel_8822e(channel.Channel); /* 8822e band TX scaling/backoff + shaping */
-  if (_tx_pwr_override >= 0) {
+  if (want_rx && _variant == jaguar3::ChipVariant::C8822E) {
+    /* See the DPK note above — the EU's TXAGC ref/diff writes desense RX. */
+    _logger->info("Jaguar3(8822e): TX+RX mode — flat table TX power "
+                  "(per-rate TXAGC skipped, keeps RX alive)");
+  } else if (_tx_pwr_override >= 0) {
     _radioManagement.set_tx_power_ref(static_cast<uint8_t>(_tx_pwr_override));
   } else if (_variant == jaguar3::ChipVariant::C8822E) {
     /* Default TX power (8822e). The TXAGC reference base is the per-channel 5 GHz
@@ -239,13 +324,41 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   _hal.fw_set_pwr_mode_active(); /* keep all FW power domains on (no auto-PS) */
   _hal.fw_coex_query_bt_info();  /* make the FW confirm BT is absent */
   _hal.fw_coex_tdma_off();       /* disable coex time-division (WL keeps antenna) */
-  /* TX-only: the bring-up enables accept-all RX (monitor_rx_cfg), but the TX path
-   * never reads bulk-IN — so on a trafficked channel the on-chip RX FIFO fills
-   * with unread frames and throttles TX. Close the RX filter so no over-the-air
-   * frames are buffered (the coex thread still receives FW C2H reports). */
-  _device.rtw_write<uint16_t>(0x06A0, 0x0000);
-  _device.rtw_write<uint16_t>(0x06A2, 0x0000);
-  _device.rtw_write<uint16_t>(0x06A4, 0x0000);
+  /* DEVOURER_BF_ARM_SOUNDER=1 — beamforming self-sounding probe (beamformer
+   * side): arm the MAC's hardware sounding engine so a TX-descriptor-marked
+   * NDPA (DEVOURER_TX_NDPA=1) is followed by a hardware-generated NDP. The MAC
+   * sounding registers are family-neutral (BeamformingSounder.h); the Jaguar-3
+   * sounding-protocol control byte is 0xDB (hal_txbf_8822b_enter, shared
+   * 8822B/C/E) where Jaguar-1 uses 0xCB. */
+  if (const char *snd = std::getenv("DEVOURER_BF_ARM_SOUNDER")) {
+    /* Jaguar-3 bring-up never programs the self-MAC (0x0610); the sounding
+     * engine matches the injected NDPA's TA against it before firing the NDP.
+     * DEVOURER_BF_ARM_SOUNDER=aa:bb:cc:dd:ee:ff programs that MAC (use the
+     * NDPA TA the caller injects — the txdemo's canonical SA); a bare "1"
+     * leaves it unprogrammed (Jaguar-1 semantics). */
+    unsigned m[6];
+    if (std::sscanf(snd, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3],
+                    &m[4], &m[5]) == 6) {
+      for (uint16_t i = 0; i < 6; ++i)
+        _device.rtw_write8(0x0610 + i, static_cast<uint8_t>(m[i]));
+      _logger->info("Jaguar3 BF sounder: self-MAC programmed to {}", snd);
+    }
+    _hal.txbf_rfmode_sounder(); /* RF/BB sounding config — needed for the NDP */
+    devourer::bf::arm_sounder(_device, /*snd_ptcl_ctrl=*/0xDB);
+    _logger->info("Jaguar3 BF sounder armed (beamformer side)");
+  }
+  /* TX-only: the bring-up enables accept-all RX (monitor_rx_cfg), but the TX
+   * path never reads bulk-IN — so on a trafficked channel the on-chip RX FIFO
+   * fills with unread frames and throttles TX. Close the RX filter so no
+   * over-the-air frames are buffered (the coex thread still receives FW C2H
+   * reports). Skipped when the caller wants concurrent RX — the RX loop will
+   * drain bulk-IN. */
+  if (!want_rx) {
+    _device.rtw_write<uint16_t>(0x06A0, 0x0000);
+    _device.rtw_write<uint16_t>(0x06A2, 0x0000);
+    _device.rtw_write<uint16_t>(0x06A4, 0x0000);
+    _rx_filters_closed = true; /* StartRxLoop re-opens them (best effort) */
+  }
   /* Start the coex runtime thread: it drains C2H and re-applies the 5 GHz coex
    * decision every ~2 s so sustained TX isn't silenced by the FW's PTA. */
   _coex_thread = std::thread([this] { coex_runtime_loop(); });
@@ -373,11 +486,15 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
    * the kernel's descriptor for group-addressed frames. */
   const uint8_t *dot11 = packet + radiotap_length;
   bool bmc = frame_len >= 6 && (dot11[4] & 0x01);
+  /* DEVOURER_TX_NDPA=1 — beamforming self-sounding probe: mark injected frames
+   * as NDPA so the armed sounding engine (DEVOURER_BF_ARM_SOUNDER, InitWrite)
+   * follows each with a hardware NDP. Same knob as the Jaguar-1 path. */
+  static const bool ndpa = std::getenv("DEVOURER_TX_NDPA") != nullptr;
   std::vector<uint8_t> usb_frame(jaguar3::TXDESC_SIZE_8822C + frame_len, 0);
   jaguar3::fill_data_tx_desc_8822c(
       usb_frame.data(), static_cast<uint16_t>(frame_len),
       MRateToHwRate(fixed_rate), rate_id, bw_desc, sgi != 0, ldpc != 0, stbc,
-      bmc);
+      bmc, ndpa);
   std::memcpy(usb_frame.data() + jaguar3::TXDESC_SIZE_8822C,
               packet + radiotap_length, frame_len);
 

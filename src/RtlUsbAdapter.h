@@ -66,7 +66,14 @@ public:
    * Requires the libusb context the handle belongs to (passed at construction). */
   void bulk_read_async_loop(int buf_size, int n_urbs,
                             const std::function<void(const uint8_t *, int)> &on_data,
-                            const volatile bool &stop);
+                            const std::function<bool()> &should_stop);
+  /* Convenience overload for callers whose stop condition is a single flag. */
+  void bulk_read_async_loop(int buf_size, int n_urbs,
+                            const std::function<void(const uint8_t *, int)> &on_data,
+                            const volatile bool &stop) {
+    bulk_read_async_loop(buf_size, n_urbs, on_data,
+                         [&stop]() -> bool { return stop; });
+  }
 
   uint16_t idVendor() const { return _idVendor; }
   uint16_t idProduct() const { return _idProduct; }

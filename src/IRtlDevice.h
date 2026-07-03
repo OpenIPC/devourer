@@ -16,8 +16,9 @@ struct Packet;
 using Action_ParsedRadioPacket = std::function<void(const Packet &)>;
 
 /* IRtlDevice is the chip-family-agnostic device contract used by the demos and
- * the WiFiDriver factory. Two implementations exist:
+ * the WiFiDriver factory. Three implementations exist:
  *   - RtlJaguarDevice   — Realtek "Jaguar" wave-1 (8812AU/8811AU/8821AU/8814AU)
+ *   - RtlJaguar2Device  — Realtek "Jaguar2" (8822BU/8812BU)
  *   - RtlJaguar3Device  — Realtek "Jaguar3" (8822CU/8812EU/8822EU)
  *
  * Chip-family-specific research helpers (BB-debug-port reads, the 8814 queue
@@ -30,6 +31,19 @@ public:
   virtual void Init(Action_ParsedRadioPacket packetProcessor,
                     SelectedChannel channel) = 0;
   virtual void InitWrite(SelectedChannel channel) = 0;
+
+  /* Blocking RX worker loop. Assumes the chip is already brought up (a prior
+   * Init or InitWrite on this device) — performs NO bring-up, channel set, or
+   * beamforming arming. Runs on the CALLER's thread and returns once
+   * StopRxLoop() is called or the global stop flag is set; it is restartable
+   * after it returns. This is the piece that lets one process bring up once
+   * (InitWrite) and then run TX and RX concurrently on the same claimed handle
+   * — Init is the RX-only convenience wrapper (bring-up + StartRxLoop). */
+  virtual void StartRxLoop(Action_ParsedRadioPacket packetProcessor) = 0;
+
+  /* Ask a running StartRxLoop to exit (sets a flag; the caller then joins
+   * whatever thread runs StartRxLoop). Default no-op. */
+  virtual void StopRxLoop() {}
   virtual void SetMonitorChannel(SelectedChannel channel) = 0;
   virtual void SetTxPower(uint8_t power) = 0;
   virtual bool send_packet(const uint8_t *packet, size_t length) = 0;

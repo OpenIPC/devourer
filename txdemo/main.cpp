@@ -42,6 +42,7 @@
  * demo (demo/main.cpp). */
 static constexpr uint16_t kRealtekProductIds[] = {
     0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
+    0xb812, 0xb82c, /* RTL8822BU (Jaguar2); OEM VIDs via DEVOURER_VID/PID */
     0xc82c, 0xc82e, 0xc812, /* RTL8822CU/8812CU (Jaguar3 CU) */
     0x881a, 0x881b, 0x881c, 0xa81a, /* RTL8812EU (Jaguar3 EU; a81a = BL-M8812EU2) */
     0xe822, 0xa82a, /* RTL8822EU (Jaguar3 EU) */

@@ -47,6 +47,24 @@ CHIPS = {
         "header": "Hal8822e_PhyTables.h",
         "guard": "HAL8822E_PHYTABLES_H",
     },
+    # 8822B (Jaguar2) uses the OLDER phydm check_positive table format (flat
+    # addr,value + conditional blocks), walked at runtime by the shared
+    # src/PhyTableLoader — not the halbb walker the 8822c/e tables use. The
+    # extraction itself is format-agnostic (it just lifts the array bodies), so
+    # the same generator serves it. No cal_init array (8822B RFK init is
+    # procedural, ported into Halrf8822b); mac_reg IS a check_positive table.
+    "8822b": {
+        "tag": "OpenHD/rtl88x2bu (rtl8822b phydm)",
+        "inputs": [
+            "hal/phydm/rtl8822b/halhwimg8822b_bb.c",
+            "hal/phydm/rtl8822b/halhwimg8822b_mac.c",
+            "hal/phydm/halrf/rtl8822b/halhwimg8822b_rf.c",
+        ],
+        "out_c": "hal/phydm/rtl8822b/Hal8822b_PhyTables.c",
+        "out_h": "hal/phydm/rtl8822b/Hal8822b_PhyTables.h",
+        "header": "Hal8822b_PhyTables.h",
+        "guard": "HAL8822B_PHYTABLES_H",
+    },
 }
 
 SCRIPT = Path(__file__).name

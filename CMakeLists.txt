@@ -15,11 +15,12 @@ enable_testing()
 # `cmake -S . -B build` builds every chip). Turn off the ones you don't need to
 # drop their firmware blobs + generated PHY tables and shrink the binary — e.g.
 # an 8812AU-only build:
-#   cmake -S . -B build -DDEVOURER_8814=OFF \
+#   cmake -S . -B build -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2=OFF \
 #         -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF
 # ---------------------------------------------------------------------------
 option(DEVOURER_JAGUAR1       "RTL8812AU / 8811AU / 8821AU (Jaguar1 core)"      ON)
 option(DEVOURER_8814          "RTL8814AU (4T4R; requires DEVOURER_JAGUAR1)"     ON)
+option(DEVOURER_JAGUAR2       "RTL8822BU (Jaguar2, rtl8822b, 2T2R USB)"         ON)
 option(DEVOURER_JAGUAR3_8822C "RTL8812CU / 8822CU (Jaguar3, rtl8822c)"          ON)
 option(DEVOURER_JAGUAR3_8822E "RTL8812EU / 8822EU (Jaguar3, rtl8822e)"          ON)
 
@@ -27,10 +28,11 @@ if(DEVOURER_8814 AND NOT DEVOURER_JAGUAR1)
     message(FATAL_ERROR
         "DEVOURER_8814=ON requires DEVOURER_JAGUAR1=ON (8814 reuses the Jaguar1 HAL).")
 endif()
-if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR3_8822C AND NOT DEVOURER_JAGUAR3_8822E)
+if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3_8822C
+   AND NOT DEVOURER_JAGUAR3_8822E)
     message(FATAL_ERROR
         "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
-        "DEVOURER_JAGUAR3_8822C / DEVOURER_JAGUAR3_8822E.")
+        "DEVOURER_JAGUAR2 / DEVOURER_JAGUAR3_8822C / DEVOURER_JAGUAR3_8822E.")
 endif()
 # Convenience: the shared Jaguar3 port compiles when either variant is on.
 if(DEVOURER_JAGUAR3_8822C OR DEVOURER_JAGUAR3_8822E)
@@ -68,6 +70,10 @@ add_library(WiFiDriver
     src/WiFiDriver.cpp
     src/WiFiDriver.h
     src/registry_priv.h
+    # phydm check_positive table walker — shared by Jaguar1 and Jaguar2
+    # (both use the older addr/value + check_positive table format).
+    src/PhyTableLoader.cpp
+    src/PhyTableLoader.h
 )
 
 target_compile_features(WiFiDriver PUBLIC cxx_std_20)
@@ -79,6 +85,7 @@ target_include_directories(WiFiDriver PUBLIC hal)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8814a)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822c)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822e)
+target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822b)
 target_include_directories(WiFiDriver PUBLIC src)
 
 # --- per-chip source groups (see options above) ---
@@ -99,9 +106,9 @@ if(DEVOURER_JAGUAR1)
         src/jaguar1/FirmwareManager.cpp src/jaguar1/FirmwareManager.h
         src/jaguar1/Iqk8812a.cpp src/jaguar1/Iqk8812a.h
         src/jaguar1/PhydmWatchdog.cpp src/jaguar1/PhydmWatchdog.h
-        src/jaguar1/PhyTableLoader.cpp src/jaguar1/PhyTableLoader.h
         src/jaguar1/PowerTracking8812a.cpp src/jaguar1/PowerTracking8812a.h
         src/jaguar1/FrameParser.cpp src/jaguar1/FrameParser.h
+        # NB: PhyTableLoader was promoted to src/ (shared with Jaguar2).
         src/jaguar1/BbDbgportReader.cpp src/jaguar1/BbDbgportReader.h)
     target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR1=1)
 endif()
@@ -115,6 +122,25 @@ if(DEVOURER_8814)
         hal/phydm/rtl8814a/Hal8814_PhyTables.h
         src/jaguar1/Iqk8814a.cpp src/jaguar1/Iqk8814a.h)
     target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_8814=1)
+endif()
+
+# --- Jaguar2 (RTL8822BU / chip 8822B) ---
+# Hybrid: HalMAC firmware/MAC-init/pwr-seq (like Jaguar3) + the older
+# check_positive phydm table format (shared src/PhyTableLoader, like Jaguar1).
+# Single chip, so no per-variant strategy dispatch.
+if(DEVOURER_JAGUAR2)
+    target_sources(WiFiDriver PRIVATE
+        hal/hal8822b_fw.c hal/hal8822b_fw.h
+        hal/phydm/rtl8822b/Hal8822b_PhyTables.c hal/phydm/rtl8822b/Hal8822b_PhyTables.h
+        src/jaguar2/RtlJaguar2Device.cpp src/jaguar2/RtlJaguar2Device.h
+        src/jaguar2/HalJaguar2.cpp src/jaguar2/HalJaguar2.h
+        src/jaguar2/HalmacJaguar2Fw.cpp src/jaguar2/HalmacJaguar2Fw.h
+        src/jaguar2/HalmacJaguar2MacInit.cpp src/jaguar2/HalmacJaguar2MacInit.h
+        src/jaguar2/HalmacJaguar2Regs.h
+        src/jaguar2/FrameParserJaguar2.h
+        src/jaguar2/Halrf8822b.cpp src/jaguar2/Halrf8822b.h
+        src/jaguar2/PhyTableLoaderJaguar2.cpp src/jaguar2/PhyTableLoaderJaguar2.h)
+    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2=1)
 endif()
 
 if(DEVOURER_JAGUAR3)

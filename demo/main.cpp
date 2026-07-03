@@ -29,6 +29,10 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0xa811, /* RTL8811AU */
     0xb811, /* RTL8811AU/8821AU variants */
     0x8813, /* RTL8814AU (Realtek demoboard PID, used by CF-938AC/CF-960AC) */
+    0xb812, /* RTL8822BU WiFi-only (Jaguar2) */
+    0xb82c, /* RTL8822BU (Jaguar2) */
+    /* OEM-rebadged RTL8822BU (e.g. TP-Link Archer T3U 2357:012d) enumerate under
+     * a non-Realtek VID — reach those with DEVOURER_VID / DEVOURER_PID. */
     0xc82c, /* RTL8822CU (Jaguar3) */
     0xc82e, /* RTL8822CU (Jaguar3) */
     0xc812, /* RTL8812CU WiFi-only (Jaguar3) */

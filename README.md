@@ -6,7 +6,8 @@ Devourer is a userspace re-implementation of Realtek's RTL88xxAU Wi-Fi
 driver, speaking to the chip directly through libusb. It covers three chip
 generations: the first-generation **Jaguar** 802.11ac family (RTL8812AU,
 RTL8814AU, and RTL8821AU shipping on every band, RTL8811AU via the 8812
-code path); the **Jaguar2** **RTL8822BU** (2.4/5 GHz at 20/40/80 MHz); and
+code path); the **Jaguar2** **RTL8822BU** (RTL8812BU via the 8822B code path,
+2.4/5 GHz at 20/40/80 MHz); and
 the **Jaguar3** parts — `rtl8822c` (RTL8812CU / RTL8822CU) and `rtl8822e`
 (RTL8812EU / RTL8822EU) — which additionally reach **5/10 MHz narrowband**
 operation the Jaguar-1 silicon physically can't. No kernel module, no
@@ -25,8 +26,9 @@ the family; chip-specific EEPROM handling, firmware blobs, and RF tables are
 layered on top.
 
 It also targets the **Jaguar2** **RTL8822BU** (chip **8822B**, 2T2R USB,
-`2357:012d` / `0bda:b82c`) through a second self-contained HAL under
-`src/jaguar2/`, dispatched from the `SYS_CFG2` chip-id (`0x0a`). Jaguar2 is a
+`2357:012d` / `0bda:b82c`) — and its 1T1R cut **RTL8812BU**, single-path via
+`REG_SYS_CFG` bit 27 like RTL8811AU on Jaguar1 — through a second self-contained
+HAL under `src/jaguar2/`, dispatched from the `SYS_CFG2` chip-id (`0x0a`). Jaguar2 is a
 hybrid of the other two: HalMAC firmware download, MAC init and power sequencing
 follow the Jaguar3 path, while the BB/AGC/RF register tables use the older phydm
 `check_positive` format like Jaguar1. Bring-up is ported from the vendor
@@ -51,6 +53,7 @@ varies run-to-run (bracketed = best clean reading).
 | **RTL8814AU**                 | 4T4R, 3-SS max    | 65            | †(32)         | †(32)            | `0bda:8813`; tested on COMFAST CF-938AC (2 ext antennas) and CF-960AC (4 internal) — effective RX-diversity branches differ (N_eff ≈ 3.8 vs 2.6) despite identical silicon, see [`docs/measuring-spatial-diversity.md`](docs/measuring-spatial-diversity.md) |
 | **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | TP-Link Archer T2U Plus (`2357:0120`) |
 | **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | TP-Link Archer T3U (`2357:012d`) |
+| **RTL8812BU**                 | 1T1R + BT         | —             | —             | —                | 1T1R cut of the 8822B silicon; rides the 8822BU code path (single-path via `REG_SYS_CFG` bit 27). Not benchmarked (`0xb812`) |
 | **RTL8812CU**                 | 2T2R              | 65            | 60            | 60               | LB-LINK WDN1300H (`0bda:c812`) |
 | **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`0bda:c82c`) |
 | **RTL8812EU**                 | 2T2R              | 8             | 51            | 47               | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module |

@@ -25,6 +25,11 @@ def test_op_to_ladder_and_overhead_mapping():
         mcs, bw, overhead = 3, 20, 0.5
     spec = al.op_to_ladder(Op())
     assert "CRIT=MCS3/20" in spec and "T2=MCS5/20" in spec   # base robust, enh steps up
+
+    class VhtOp:                       # bandwidth-dimension rung (VHT row)
+        mcs, bw, overhead, mode = 3, 80, 0.5, "vht"
+    vspec = al.op_to_ladder(VhtOp())
+    assert "CRIT=VHT1SS_MCS3/80" in vspec and "T2=VHT1SS_MCS5/80" in vspec
     assert al.overhead_to_16ths(0.25) == 4
     assert al.overhead_to_16ths(1.0) == 16
     assert al.overhead_to_16ths(0.0) == 1                    # clamped to >=1

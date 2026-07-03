@@ -30,24 +30,42 @@ numpy-free (imports into the GNU Radio / orchestrator env like fec_subblock).
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 
 # --------------------------------------------------------------------------- #
-# 802.11 PHY data rates (Mbps). HT = 1 spatial stream, MCS 0..7.
+# 802.11 PHY data rates (Mbps). HT/VHT = 1 spatial stream. HT MCS 0..7;
+# VHT MCS 0..8 (MCS9 is invalid for 1SS/20 and 1SS with BCC constraints vary,
+# and the link model has no SNR centre for it — 0..8 is the modelled set).
+# VHT 80 MHz is the bandwidth rung HT lacks — the ladder the adaptive
+# controller's bandwidth dimension rides (20 c 40 c 80, primary-nested).
 # --------------------------------------------------------------------------- #
 HT20_LGI_MBPS = [6.5, 13.0, 19.5, 26.0, 39.0, 52.0, 58.5, 65.0]
 HT40_LGI_MBPS = [13.5, 27.0, 40.5, 54.0, 81.0, 108.0, 121.5, 135.0]
+VHT_LGI_MBPS = {
+    20: [6.5, 13.0, 19.5, 26.0, 39.0, 52.0, 58.5, 65.0, 78.0],
+    40: [13.5, 27.0, 40.5, 54.0, 81.0, 108.0, 121.5, 135.0, 162.0],
+    80: [29.3, 58.5, 87.8, 117.0, 175.5, 234.0, 263.3, 292.5, 351.0],
+}
 LEGACY_MBPS = {6: 6.0, 9: 9.0, 12: 12.0, 18: 18.0, 24: 24.0, 36: 36.0, 48: 48.0,
                54: 54.0}
 SGI_FACTOR = 10.0 / 9.0  # short guard interval: 400 vs 800 ns -> x1.111
 
 
 def phy_rate_mbps(mode: str, mcs: int, bw: int = 20, sgi: bool = False) -> float:
-    """On-air PHY data rate. mode='ht' (mcs 0..7) or 'legacy' (mcs = Mbps)."""
+    """On-air PHY data rate. mode='ht' (mcs 0..7), 'vht' (1SS mcs 0..8,
+    bw 20/40/80) or 'legacy' (mcs = Mbps)."""
     if mode == "ht":
         base = HT40_LGI_MBPS if bw == 40 else HT20_LGI_MBPS
         if not (0 <= mcs < len(base)):
             raise ValueError(f"HT mcs {mcs} out of range 0..7")
+        r = base[mcs]
+    elif mode == "vht":
+        if bw not in VHT_LGI_MBPS:
+            raise ValueError(f"VHT bw {bw} not one of 20/40/80")
+        base = VHT_LGI_MBPS[bw]
+        if not (0 <= mcs < len(base)):
+            raise ValueError(f"VHT 1SS mcs {mcs} out of range 0..8")
         r = base[mcs]
     elif mode == "legacy":
         if mcs not in LEGACY_MBPS:
@@ -56,6 +74,19 @@ def phy_rate_mbps(mode: str, mcs: int, bw: int = 20, sgi: bool = False) -> float
     else:
         raise ValueError(f"unknown mode {mode!r}")
     return r * (SGI_FACTOR if sgi else 1.0)
+
+
+def bw_noise_db(bw: int) -> float:
+    """Extra noise power a receiver integrates at `bw` vs the 20 MHz reference:
+    10*log10(bw/20) — +3 dB per bandwidth doubling. The op-table adds this to a
+    row's required SNR so wider rows honestly pay their noise-bandwidth cost.
+    The measured WIDE-RX penalty (an 80 MHz-tuned RX decoding a narrower frame
+    on its primary, vs retuning) is 0 dB / <=1 dB on real silicon
+    (tests/wide_rx_penalty_sweep.sh), so no extra term is added for rows
+    narrower than the RX tune."""
+    if bw <= 20:
+        return 0.0
+    return 10.0 * math.log10(bw / 20.0)
 
 
 # --------------------------------------------------------------------------- #

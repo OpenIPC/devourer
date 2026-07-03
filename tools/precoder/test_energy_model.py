@@ -27,6 +27,29 @@ def test_phy_rates():
     assert em.phy_rate_mbps("legacy", 54) == 54.0
 
 
+def test_vht_rates_and_bandwidth_ladder():
+    """VHT 1SS rates for the bandwidth dimension (20 c 40 c 80)."""
+    assert em.phy_rate_mbps("vht", 0, bw=20) == 6.5     # matches HT MCS0
+    assert em.phy_rate_mbps("vht", 7, bw=40) == 135.0   # matches HT40 MCS7
+    assert em.phy_rate_mbps("vht", 0, bw=80) == 29.3
+    assert em.phy_rate_mbps("vht", 8, bw=80) == 351.0
+    for bw in (40, 80):                                  # wider is always faster
+        assert em.phy_rate_mbps("vht", 3, bw=bw) > \
+               em.phy_rate_mbps("vht", 3, bw=bw // 2)
+    try:
+        em.phy_rate_mbps("vht", 0, bw=160)
+        assert False, "bw=160 must raise"
+    except ValueError:
+        pass
+
+
+def test_bw_noise_db():
+    """+3 dB of noise bandwidth per doubling; 20 MHz is the reference."""
+    assert em.bw_noise_db(20) == 0.0
+    assert abs(em.bw_noise_db(40) - 3.0103) < 1e-3
+    assert abs(em.bw_noise_db(80) - 6.0206) < 1e-3
+
+
 def test_higher_mcs_lowers_energy_per_bit_clean():
     """Core thesis: carrying a fixed bitrate, higher MCS = less airtime = less
     energy/bit (monotone)."""

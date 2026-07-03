@@ -31,12 +31,18 @@ import op_table
 
 def op_to_ladder(op) -> str:
     """Map a controller OpPoint to a DEVOURER_SVC_LADDER spec (per-layer MCS).
-    Base/critical fly the chosen (robust) MCS; enhancement steps up from there."""
+    Base/critical fly the chosen (robust) MCS; enhancement steps up from there.
+    VHT rows (the bandwidth-dimension rungs, incl. 80 MHz) map to VHT1SS_MCSn
+    rate strings; the bandwidth rides every layer's /bw suffix — per-packet
+    and unilateral while it stays on the RX's primary
+    (tests/rx80_narrow_tx_probe.sh)."""
     m = op.mcs
-    e = min(7, m + 2)
     bw = op.bw
-    return (f"CRIT=MCS{m}/{bw};T0=MCS{m}/{bw};"
-            f"T1=MCS{min(7, m + 1)}/{bw};T2=MCS{e}/{bw}")
+    top, name = (8, "VHT1SS_MCS") if getattr(op, "mode", "ht") == "vht" \
+        else (7, "MCS")
+    e = min(top, m + 2)
+    return (f"CRIT={name}{m}/{bw};T0={name}{m}/{bw};"
+            f"T1={name}{min(top, m + 1)}/{bw};T2={name}{e}/{bw}")
 
 
 def overhead_to_16ths(ov: float) -> int:

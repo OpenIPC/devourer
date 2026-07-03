@@ -35,6 +35,13 @@ class ControllerConfig:
     mcs_set: tuple = tuple(range(8))
     overhead_set: tuple = (0.10, 0.25, 0.50, 0.75, 1.00)
     bw: int = 20
+    # Bandwidth dimension (opt-in, default None -> single-bw rows as before):
+    # the primary-nested rungs the TX may pick per-packet while the RX parks at
+    # the widest (e.g. bw_set=(20, 40, 80), mode='vht'). Rows pay their
+    # +3 dB/doubling noise-bandwidth cost in snr_req; the e_bit ranking then
+    # answers "drop bandwidth or drop MCS?" per tick.
+    bw_set: tuple | None = None
+    mode: str = "ht"
     sbi: bool = True
     ema_alpha: float = 0.3            # SNR EWMA weight when SNR is RISING (cautious)
     ema_alpha_down: float = 0.8       # ...when FALLING (react fast -> raise power in time)
@@ -63,7 +70,9 @@ class Controller:
         self.calib = calib
         self.cfg = cfg or ControllerConfig()
         self.rows = build_link_rows(link, self.cfg.target, self.cfg.mcs_set,
-                                    self.cfg.overhead_set, self.cfg.bw, sbi=self.cfg.sbi)
+                                    self.cfg.overhead_set, self.cfg.bw,
+                                    sbi=self.cfg.sbi, bw_set=self.cfg.bw_set,
+                                    mode=self.cfg.mode)
         self.snr_ema: float | None = None
         self.pl_var_ema: float = 0.0        # EWMA of path-loss variance (fade depth)
         self.cur: OpPoint | None = None

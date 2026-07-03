@@ -62,21 +62,22 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 
 namespace jaguar2 {
 
-/* Port of fill_txdesc_check_sum (halmac): clear the 16-bit checksum, XOR all
- * 16-bit LE words, store. Byte-wise read so the on-wire result is host-endian
- * independent. */
+/* Port of fill_txdesc_check_sum_8822b (halmac_common_8822b.c): clear the 16-bit
+ * checksum then XOR the first 16 LE words (dwords 0-7). CRITICAL: the 8822B HW
+ * checksums ONLY the first 32 bytes ("HW calculates only 32byte" per the vendor,
+ * fixed 8-pair loop) — NOT the full 48-byte descriptor. The earlier
+ * (pkt_offset + TXDESC_SIZE/8)<<1 form (ported from the Jaguar3 path, which
+ * covers 48 B) computed the checksum over dwords 0-11, so the HW's 32-byte
+ * checksum never matched and the MAC silently DROPPED every TX frame at the
+ * TXDMA — the MAC->BB TX-arm looked dead. Must be exactly 8 pairs / 32 bytes. */
 inline void cal_txdesc_chksum_8822b(uint8_t *txdesc) {
   SET_TX_DESC_TXDESC_CHECKSUM_8822B(txdesc, 0);
   auto le16 = [&](size_t word) -> uint16_t {
     return static_cast<uint16_t>(txdesc[2 * word] |
                                  (txdesc[2 * word + 1] << 8));
   };
-  uint16_t pkt_offset =
-      static_cast<uint16_t>(GET_TX_DESC_PKT_OFFSET_8822B(txdesc));
-  uint16_t pairs =
-      static_cast<uint16_t>((pkt_offset + (TXDESC_SIZE_8822B >> 3)) << 1);
   uint16_t chksum = 0;
-  for (uint16_t i = 0; i < pairs; i++)
+  for (uint16_t i = 0; i < 8; i++)
     chksum ^= static_cast<uint16_t>(le16(2 * i) ^ le16(2 * i + 1));
   SET_TX_DESC_TXDESC_CHECKSUM_8822B(txdesc, chksum);
 }

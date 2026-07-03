@@ -9,11 +9,11 @@
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
-#if defined(DEVOURER_HAVE_JAGUAR3)
-#include "jaguar3/RtlJaguar3Device.h"
-#endif
 #if defined(DEVOURER_HAVE_JAGUAR2)
 #include "jaguar2/RtlJaguar2Device.h"
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR3)
+#include "jaguar3/RtlJaguar3Device.h"
 #endif
 
 namespace {
@@ -22,9 +22,9 @@ namespace {
  * transfer (no full RtlUsbAdapter, so the Jaguar1 construction path is unchanged
  * and only one extra control read is added). Port of halmac get_chip_info
  * (chip_id = REG_READ_8(REG_SYS_CFG2)):
- *   0x13 = RTL8822C, 0x17 = RTL8822E (RTL8812EU / RTL8822EU)  -> Jaguar3
- *   0xNN = RTL8822B (RTL8822BU)                               -> Jaguar2 (M2 TBD)
  *   0x04 / 0x05 / 0x08 / 0x09 = 8812A / 8821A / 8814A / 8821C -> Jaguar1
+ *   0x0a = RTL8822B (RTL8822BU)                               -> Jaguar2
+ *   0x13 = RTL8822C, 0x17 = RTL8822E (RTL8812EU / RTL8822EU)  -> Jaguar3
  * The chip-id (not the USB PID) is authoritative because the rtl8822e RTL8812EU
  * shares PID 0x8812 with the Jaguar1 RTL8812AU. Returns 0 on a failed read,
  * which falls through to the Jaguar1 path. */
@@ -63,6 +63,20 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
   }
 
   uint8_t chip_id = read_chip_id(dev_handle);
+  if (is_8822b_chip_id(chip_id)) {
+#if defined(DEVOURER_HAVE_JAGUAR2)
+    _logger->info("Creating RtlJaguar2Device (PID 0x{:04x}, chip-id 0x{:02x})",
+                  pid, chip_id);
+    return std::make_unique<RtlJaguar2Device>(
+        RtlUsbAdapter(dev_handle, _logger, ctx), _logger);
+#else
+    _logger->error("RTL8822B (chip-id 0x{:02x}) detected but Jaguar2 support "
+                   "not compiled in (DEVOURER_JAGUAR2=OFF)",
+                   chip_id);
+    return nullptr;
+#endif
+  }
+
   if (chip_id == 0x13 || chip_id == 0x17) {
 #if defined(DEVOURER_HAVE_JAGUAR3)
     /* Reject the variant whose support wasn't compiled in (0x13 = 8822C,
@@ -91,20 +105,6 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
 #else
     _logger->error("Jaguar3 chip (chip-id 0x{:02x}) detected but Jaguar3 "
                    "support not compiled in",
-                   chip_id);
-    return nullptr;
-#endif
-  }
-
-  if (is_8822b_chip_id(chip_id)) {
-#if defined(DEVOURER_HAVE_JAGUAR2)
-    _logger->info("Creating RtlJaguar2Device (PID 0x{:04x}, chip-id 0x{:02x})",
-                  pid, chip_id);
-    return std::make_unique<RtlJaguar2Device>(
-        RtlUsbAdapter(dev_handle, _logger, ctx), _logger);
-#else
-    _logger->error("RTL8822B (chip-id 0x{:02x}) detected but Jaguar2 support "
-                   "not compiled in (DEVOURER_JAGUAR2=OFF)",
                    chip_id);
     return nullptr;
 #endif

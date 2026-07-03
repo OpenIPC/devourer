@@ -24,22 +24,21 @@ register-table layout, firmware-download plumbing, and
 the family; chip-specific EEPROM handling, firmware blobs, and RF tables are
 layered on top.
 
-It also targets the second-generation **Jaguar3** parts through a
-self-contained HAL under `src/jaguar3/`, dispatched at the factory from the
-`SYS_CFG2` chip-id and USB PID: the `rtl8822c` generation (**RTL8812CU** /
-**RTL8822CU**, `0bda:c812`, `0bda:c82c`) and the `rtl8822e` generation
-(**RTL8812EU** / **RTL8822EU**, `0bda:a81a`). These add **5/10 MHz narrowband**
-operation the Jaguar-1 silicon lacks. Bring-up is ported from Realtek's vendor
-source.
-
-Between the two sits the **Jaguar2** **RTL8822BU** (chip **8822B**, 2T2R USB,
-`2357:012d` / `0bda:b82c`), handled by a third self-contained HAL under
-`src/jaguar2/` and dispatched from the `SYS_CFG2` chip-id (`0x0a`). Jaguar2 is a
+It also targets the **Jaguar2** **RTL8822BU** (chip **8822B**, 2T2R USB,
+`2357:012d` / `0bda:b82c`) through a second self-contained HAL under
+`src/jaguar2/`, dispatched from the `SYS_CFG2` chip-id (`0x0a`). Jaguar2 is a
 hybrid of the other two: HalMAC firmware download, MAC init and power sequencing
 follow the Jaguar3 path, while the BB/AGC/RF register tables use the older phydm
 `check_positive` format like Jaguar1. Bring-up is ported from the vendor
 rtl88x2bu tree and reaches on-air RX + TX across **2.4 and 5 GHz at
 20/40/80 MHz** with per-rate, bandwidth-aware efuse TX power.
+
+Finally, the **Jaguar3** parts run through a third self-contained HAL under
+`src/jaguar3/`, dispatched at the factory from the `SYS_CFG2` chip-id and USB
+PID: the `rtl8822c` generation (**RTL8812CU** / **RTL8822CU**, `0bda:c812`,
+`0bda:c82c`) and the `rtl8822e` generation (**RTL8812EU** / **RTL8822EU**,
+`0bda:a81a`). These add **5/10 MHz narrowband** operation the Jaguar-1 silicon
+lacks. Bring-up is ported from Realtek's vendor source.
 
 Band cells are **devourer on-air TX throughput** (Mbps, HT MCS7, 20 MHz) via
 USRP channel-occupancy (`tests/bench_onair.py`). `†` = on-air but the reading

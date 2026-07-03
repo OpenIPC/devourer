@@ -228,6 +228,49 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
    * efuse/table-calibrated TXAGC; DEVOURER_TX_PWR=0xNN forces a flat reference
    * (SDR-visibility debug knob). */
   bring_up(channel);
+  if (getenv("DEVOURER_TX_FWINFO")) {
+    /* halmac post-DLFW FW handshake the kernel does (hal_halmac.c
+     * _send_general_info + phydm_info) that devourer skipped entirely — sent via
+     * the H2C-packet queue (32-byte FW-offload packet, QSEL_H2C_CMD=0x13, bulk-
+     * OUT with a TX descriptor), NOT the 8-byte HMEBOX path. These tell the FW
+     * the TX boundary + chip/RF/antenna identity; without them the FW's host-TX
+     * handling may stay disabled (RX works, BB never keys TX). Format from
+     * halmac_fw_88xx.c proc_send_general_info/phydm_info + halmac_fw_offload_
+     * h2c_nic.h bit layout. */
+    auto send_fw_h2c = [&](const uint8_t pkt[32]) {
+      std::vector<uint8_t> buf(jaguar2::TXDESC_SIZE_8822B + 32, 0);
+      SET_TX_DESC_TXPKTSIZE_8822B(buf.data(), 32);
+      SET_TX_DESC_QSEL_8822B(buf.data(), 0x13); /* QSEL_H2C_CMD */
+      std::memcpy(buf.data() + jaguar2::TXDESC_SIZE_8822B, pkt, 32);
+      jaguar2::cal_txdesc_chksum_8822b(buf.data());
+      _device.bulk_send_sync_ep(_device.first_bulk_out_ep(), buf.data(),
+                                static_cast<int>(buf.size()), 20);
+    };
+    auto put32 = [](uint8_t *p, uint32_t v) {
+      p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
+    };
+    const uint8_t cut = _hal.chip_version().cut;
+    const uint8_t ant = _hal.chip_version().rf_2t2r ? 0x3 : 0x1; /* AB / A */
+    /* general_info: sub=0x0D, CATEGORY=1, CMD_ID=0xFF; content FW_TX_BOUNDARY
+     * (rsvd_fw_txbuf_addr 1994 - rsvd_boundary 1938 = 0x38) at [0x08] bits16-23 */
+    uint8_t gi[32] = {0};
+    put32(gi + 0, 0x01u | (0xFFu << 8) | (0x0Du << 16));
+    put32(gi + 4, 12u | (0u << 16)); /* total_len=12, seq=0 */
+    put32(gi + 8, static_cast<uint32_t>(0x38) << 16);
+    send_fw_h2c(gi);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    /* phydm_info: sub=0x11; content rfe_type/rf_type(2=2T2R)/cut/rx_ant/tx_ant */
+    uint8_t pi[32] = {0};
+    put32(pi + 0, 0x01u | (0xFFu << 8) | (0x11u << 16));
+    put32(pi + 4, 16u | (1u << 16)); /* total_len=16, seq=1 */
+    put32(pi + 8, 0x0u | (0x2u << 8) | (static_cast<uint32_t>(cut) << 16) |
+                      (static_cast<uint32_t>(ant) << 24) |
+                      (static_cast<uint32_t>(ant) << 28));
+    put32(pi + 12, 0u); /* ext_pa=0, package_type=0, mp_mode=0 */
+    send_fw_h2c(pi);
+    _logger->info("Jaguar2: TX_FWINFO general_info+phydm_info H2C sent (FW "
+                  "handshake, QSEL_H2C_CMD)");
+  }
   if (getenv("DEVOURER_TX_RSVD")) {
     /* FW reserved-page download — the kernel does this on interface-up (usbmon:
      * FIFOPAGE_CTRL_2 beacon-head arm + bulk-OUT template + bcn-valid). The FW

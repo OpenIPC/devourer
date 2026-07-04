@@ -1083,6 +1083,15 @@ void HalJaguar2::enable_rx() {
    * so control frames are captured too:
    *   0x7000282F | ACF(0x1000) = 0x7000382F. */
   uint32_t rcr = 0x7000382Fu;
+  /* 8821C: drop APP_PHYST_RXFF (BIT28). The 8821C appends a 32-byte PHY-status
+   * block before each RX frame in the RXFF, but its RX descriptor reports
+   * drv_info_size=0 (unlike the 8822B, which counts it) — so the shared parser
+   * puts the frame pointer 32 bytes early (onto the phy-status) and mis-advances
+   * the aggregation, garbling every frame. Monitor RX doesn't need the phy-
+   * status, so clearing the append bit makes the frame sit cleanly at
+   * descriptor+drvinfo(0)+shift and decode. */
+  if (_variant == ChipVariant::C8821C)
+    rcr &= ~(1u << 28);
   /* DEVOURER_RX_KEEP_CORRUPTED: also accept CRC32/ICV-error frames (ACRC32 BIT8,
    * AICV BIT9) so the BB's demodulated-but-failed frames still reach the host.
    * Doubles as a bring-up discriminator: if reads>0 with this set but 0 without,

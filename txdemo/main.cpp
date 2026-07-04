@@ -2,6 +2,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
+#include <climits>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -747,7 +748,16 @@ int main(int argc, char **argv) {
    * non-draining endpoint for the whole run is what wedged its USB core. Bail
    * out after a short burst of consecutive failures so we shut down cleanly
    * (Stop()) instead of flooding the chip into a -71 hang. */
-  constexpr long kMaxConsecFail = 8;
+  /* DEVOURER_TX_MAXFAIL raises the consecutive-failure abort threshold (0 =
+   * never abort). Lets a bench run ride out transient bulk-OUT NAK bursts
+   * instead of bailing on the first one — e.g. when characterising sustained
+   * wide-bandwidth TX — the way the kernel driver (which retries forever) does. */
+  long kMaxConsecFail = 8;
+  if (const char *mf = std::getenv("DEVOURER_TX_MAXFAIL")) {
+    long v = std::atol(mf);
+    kMaxConsecFail = (v <= 0) ? LONG_MAX : v; /* LONG_MAX, not std::...::max() —
+      MSVC <windows.h> defines a max() macro that would mangle the latter */
+  }
   /* Inter-frame delay (default 2 ms ~ 500 fps). DEVOURER_TX_INTERVAL_MS overrides
    * it — used to test whether the Jaguar3 sustained-TX ceiling is wall-clock
    * (timer) or frame-count (per-frame resource) bound. */

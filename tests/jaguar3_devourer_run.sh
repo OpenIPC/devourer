@@ -68,6 +68,11 @@ sudo env DEVOURER_VID=0x0bda DEVOURER_PID="0x$PID" \
      DEVOURER_NB_DAC="${DEVOURER_NB_DAC:-}" \
      DEVOURER_TX_PWR="${DEVOURER_TX_PWR:-}" \
      DEVOURER_TX_GAP_US="${DEVOURER_TX_GAP_US:-}" \
+     DEVOURER_HOP_BW="${DEVOURER_HOP_BW:-}" \
+     DEVOURER_HOP_OFFSET="${DEVOURER_HOP_OFFSET:-}" \
+     DEVOURER_TX_RATE="${DEVOURER_TX_RATE:-}" \
+     DEVOURER_TX_MAXFAIL="${DEVOURER_TX_MAXFAIL:-}" \
+     DEVOURER_TX_PAYLOAD_BYTES="${DEVOURER_TX_PAYLOAD_BYTES:-}" \
      DEVOURER_SKIP_RESET="${DEVOURER_SKIP_RESET:-}" \
      stdbuf -oL -eL timeout -k 5 "$SECS" "$BIN" 2>&1 | sed -E 's/^/[dev] /'
 # timeout sends SIGTERM at $SECS; the binary now catches it, runs a clean chip

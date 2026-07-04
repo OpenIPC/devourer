@@ -704,20 +704,25 @@ void HalJaguar2::do_lck_8821c() {
  * (BT-shared, path B) vs WLG (WiFi-only, path A) is chosen from rfe_type_expand.
  * The base mux writes (0xcb8/0xa84/0xa80) apply in normal (non-MP) operation;
  * the agc_tab_diff overlay + IGI toggle are MP-mode-only and omitted. */
-void HalJaguar2::switch_rf_set_8821c(bool btg) {
+void HalJaguar2::switch_rf_set_8821c(uint8_t rf_set) {
+  /* rf_set: 0=BTG (2.4G BT-shared, path B), 1=WLG (2.4G WiFi, path A),
+   * 2=WLA (5G). Transcribed from config_phydm_switch_rf_set_8821c. */
   _device.phy_set_bb_reg(0x1080, (1u << 16), 0x1);
   _device.phy_set_bb_reg(0x0000, (1u << 26), 0x1);
   uint32_t cb8 = _device.rtw_read32(0x0cb8);
-  if (btg) {
+  if (rf_set == 0) { /* BTG */
     cb8 |= (1u << 16);
     cb8 &= ~((1u << 18) | (1u << 20) | (1u << 21) | (1u << 22) | (1u << 23));
     _device.phy_set_bb_reg(0x0a84, 0x00ff0000, 0x0e);
     _device.phy_set_bb_reg(0x0a80, 0x0000ffff, 0xfc84);
-  } else {
+  } else if (rf_set == 1) { /* WLG */
     cb8 |= (1u << 20) | (1u << 21) | (1u << 22);
     cb8 &= ~((1u << 16) | (1u << 18) | (1u << 23));
     _device.phy_set_bb_reg(0x0a84, 0x00ff0000, 0x12);
     _device.phy_set_bb_reg(0x0a80, 0x0000ffff, 0x7532);
+  } else { /* WLA (5G) — cb8 bits only, no 0xa84/0xa80 override */
+    cb8 |= (1u << 20) | (1u << 22) | (1u << 23);
+    cb8 &= ~((1u << 16) | (1u << 18) | (1u << 21));
   }
   _device.phy_set_bb_reg(0x0cb8, 0xffffffff, cb8);
 }
@@ -751,7 +756,7 @@ void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
     _device.phy_set_bb_reg(0x0814, 0x0000FC00, 15);  /* CCA mask default */
     rf18 &= ~((1u << 16) | (1u << 9) | (1u << 8) | 0xffu);
     rf18 |= cch;
-    switch_rf_set_8821c(btg);
+    switch_rf_set_8821c(btg ? 0 : 1); /* BTG or WLG */
     rf_set(0, 0xdf, (1u << 6), 0x1);   /* RF TXA_TANK LUT mode */
     rf_set(0, 0x64, 0x0000f, 0xf);     /* RF TXA_PA_TANK */
   } else {
@@ -761,6 +766,7 @@ void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
     _device.phy_set_bb_reg(0x0814, 0x0000FC00, 15);
     rf18 &= ~((1u << 16) | (1u << 9) | (1u << 8) | 0xffu);
     rf18 |= (1u << 8) | (1u << 16) | cch;
+    switch_rf_set_8821c(2); /* WLA (5G) */
     rf_set(0, 0xdf, (1u << 6), 0x0);
   }
   rf_write(0, 0x18, rf18);

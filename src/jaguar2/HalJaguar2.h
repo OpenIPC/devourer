@@ -162,9 +162,9 @@ private:
    * C8821C. `rfe_raw` is the raw efuse RFE byte (rfe_type_expand). --- */
   void set_channel_bw_8821c(uint8_t channel, uint8_t bw, uint8_t rfe_raw,
                             uint8_t primary_ch_idx);
-  /* config_phydm_switch_rf_set_8821c: 2.4G BTG (path B) vs WLG (path A) RX mux
-   * (0xcb8/0xa84/0xa80). btg=true selects BTG. */
-  void switch_rf_set_8821c(bool btg);
+  /* config_phydm_switch_rf_set_8821c: RX front-end mux (0xcb8/0xa84/0xa80).
+   * rf_set: 0=BTG (2.4G path B), 1=WLG (2.4G path A), 2=WLA (5G). */
+  void switch_rf_set_8821c(uint8_t rf_set);
   /* _phy_lc_calibrate_8821c: RF-firmware LCK (RF 0xcc/0xc4), no poll. */
   void do_lck_8821c();
 

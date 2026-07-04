@@ -32,6 +32,9 @@
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
+#if defined(DEVOURER_HAVE_JAGUAR2)
+#include "jaguar2/RtlJaguar2Device.h"
+#endif
 #include "RtlUsbAdapter.h"
 #include "SignalStop.h"
 #include "WiFiDriver.h"
@@ -397,6 +400,10 @@ int main(int argc, char **argv) {
    * support isn't built. */
 #if defined(DEVOURER_HAVE_JAGUAR1)
   RtlJaguarDevice *jag = dynamic_cast<RtlJaguarDevice *>(rtlDevice.get());
+#endif
+  /* Jaguar2 (8822BU) downcast — used only for the CW single-tone idle-hold. */
+#if defined(DEVOURER_HAVE_JAGUAR2)
+  RtlJaguar2Device *jag2 = dynamic_cast<RtlJaguar2Device *>(rtlDevice.get());
 #endif
 
   int channel = 161;
@@ -764,6 +771,32 @@ int main(int argc, char **argv) {
   int tx_interval_ms = 2;
   if (const char *iv = std::getenv("DEVOURER_TX_INTERVAL_MS"))
     tx_interval_ms = std::atoi(iv);
+
+  /* DEVOURER_CW_TONE: the CW carrier was armed inside InitWrite (Jaguar-1 or
+   * Jaguar-2) — the baseband modulators are off, so there is nothing to
+   * transmit. Idle-hold until SIGINT keeps the carrier up, then StopCwTone
+   * restores the chip; control falls through to the normal de-init below. */
+  if (std::getenv("DEVOURER_CW_TONE")) {
+    bool cw = false;
+#if defined(DEVOURER_HAVE_JAGUAR1)
+    if (jag) cw = true;
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR2)
+    if (jag2) cw = true;
+#endif
+    if (cw) {
+      logger->info("CW tone hold — idling until SIGINT (Ctrl-C to stop)");
+      while (!g_devourer_should_stop)
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+#if defined(DEVOURER_HAVE_JAGUAR1)
+      if (jag) jag->StopCwTone();
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR2)
+      if (jag2) jag2->StopCwTone();
+#endif
+    }
+  }
+
   while (!g_devourer_should_stop) {
     if (tx_count == 0) {
       logger->info("init-timing: txdemo.first_tx_submit = {} ms",

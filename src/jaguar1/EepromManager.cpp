@@ -1256,8 +1256,29 @@ void EepromManager::hal_InitPGData_8812A() {
     }
   }
 
+  /* The 11 TX-power-index PG bytes reading back all-0xFF means the EFUSE map
+   * came up blank. On the 8812AU this is usually a transient EFUSE read glitch
+   * during cold bring-up (the same fragility behind the intermittent
+   * _FWFreeToGo8812 poll-fail), not a genuinely unprogrammed part — so re-read
+   * the shadow map a few times before giving up. */
+  for (int attempt = 0;
+       attempt < 3 && IsEfuseTxPowerInfoValid(efuse_eeprom_data) == false;
+       attempt++) {
+    _logger->warn("EFUSE TX-power PG data blank (attempt {}/3) — re-reading map",
+                  attempt + 1);
+    Efuse_ReadAllMap(EFUSE_WIFI, efuse_eeprom_data);
+  }
+
   if (IsEfuseTxPowerInfoValid(efuse_eeprom_data) == false) {
-    throw std::logic_error("Hal_readPGDataFromConfigFile not yet implemented");
+    /* Still blank after retries. The vendor reads PG data from a config file
+     * here (Hal_readPGDataFromConfigFile); a userspace driver has no such file,
+     * so — like the kernel driver on an autoload-fail — proceed with the map
+     * left at its 0xFF default. LoadTxPowerInfo()'s per-cell fallback chain then
+     * supplies the IC-default PG table (kPgTxpwrDef8812a / generic). TX power is
+     * default rather than efuse-calibrated; logged loudly so a degraded read
+     * isn't mistaken for a good one. */
+    _logger->error("EFUSE TX-power PG data invalid after retries — using "
+                   "default TX-power calibration (autoload-fail fallback)");
   }
 }
 

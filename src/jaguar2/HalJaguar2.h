@@ -125,6 +125,11 @@ public:
   void dbg_rf_write(uint8_t path, uint32_t addr, uint32_t val) {
     rf_write(path, addr, val);
   }
+  /* Masked RF register write (read-modify-write; full-register write when
+   * mask == RFREGOFFSETMASK). Used by the CW single-tone path. */
+  void dbg_rf_set(uint8_t path, uint32_t addr, uint32_t mask, uint32_t val) {
+    rf_set(path, addr, mask, val);
+  }
 
 private:
   /* config_phydm_parameter_init_8822b: OFDM/CCK block enable via 0x808[29:28]

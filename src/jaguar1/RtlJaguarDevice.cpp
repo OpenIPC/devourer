@@ -1,6 +1,7 @@
 #include "RtlJaguarDevice.h"
 #include "BeamformingSounder.h"
 #include "EepromManager.h"
+#include "Hal8812PhyReg.h"
 #include "RadioManagementModule.h"
 #include "SignalStop.h"
 #include "ToneMask.h"
@@ -19,6 +20,18 @@
 static constexpr uint16_t kFifoPageInfoRegs_8814A[5] = {
     0x0230, 0x0234, 0x0238, 0x023C, 0x0240,
 };
+
+/* RF LO-enable register (vendor `lna_low_gain_3`) — RF 0x58 bit1 gates the
+ * bare local-oscillator carrier for MP single-tone. Not aliased in devourer's
+ * hal/ headers, so named here. */
+static constexpr uint16_t RF_LNA_LOW_GAIN_3 = 0x58;
+
+/* 8814A path-C / path-D TX-scale BB registers (rC/rD_TxScale_Jaguar2). Only
+ * defined in hal/Hal8814PhyReg.h, which can't be included here without clashing
+ * with Hal8812PhyReg.h's overlapping Jaguar symbols — so named locally, the
+ * same pattern RadioManagementModule uses for the 8814 path-C/D offsets. */
+static constexpr uint16_t rC_TxScale_8814 = 0x181C;
+static constexpr uint16_t rD_TxScale_8814 = 0x1A1C;
 
 RtlJaguarDevice::RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger)
     : _device{device},
@@ -41,6 +54,137 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
     devourer::bf::arm_sounder(_device);
     _logger->info("BF sounder armed (beamformer side)");
   }
+
+  /* DEVOURER_CW_TONE — radiate a bare RF LO carrier at the channel center
+   * (MP single-tone). The channel is already tuned above, so the LO sits at the
+   * center frequency. DEVOURER_CW_TONE_GAIN=0..31 sets RF 0x00[4:0]. */
+  if (std::getenv("DEVOURER_CW_TONE")) {
+    uint8_t g = 0;
+    if (const char *e = std::getenv("DEVOURER_CW_TONE_GAIN"))
+      g = static_cast<uint8_t>(std::atoi(e)) & 0x1F;
+    StartCwTone(g);
+  }
+}
+
+/* MP single-tone (CW carrier), Jaguar-1 path A. The RF writes are common to the
+ * whole family (path A -> TX mode + gain + LO enable); the baseband setup that
+ * keys the TX path differs by chip, so the two families branch:
+ *   8812/8821 — hal_mpt_SetSingleToneTx() JAGUAR branch: OFDM/CCK modulators
+ *               off + RFE pinmux forced to TX (+ ext-PA pins).
+ *   8814      — mpt_SetSingleTone_8814A(): CCA off + per-path TX-scale zeroed.
+ * The pre-tone RF/BB state is snapshotted for StopCwTone(). */
+void RtlJaguarDevice::StartCwTone(uint8_t gain) {
+  if (_cw_active)
+    return;
+
+  const bool is8814 = _eepromManager->version_id.ICType == CHIP_8814A;
+
+  /* RF 0x00 is a 20-bit register — snapshot the full width for a clean restore
+   * (bLSSIWrite_data_Jaguar mask). */
+  _cw_rf00 = _radioManagement->phy_query_rf_reg(RfPath::RF_PATH_A, RF_AC_Jaguar,
+                                                bLSSIWrite_data_Jaguar);
+
+  /* Common RF path-A key-up: TX mode (0x00[19:16]=2), gain index (0x00[4:0]),
+   * LO enable (0x58 bit1) — the bare local-oscillator carrier. */
+  auto key_rf_path_a = [&] {
+    _radioManagement->phy_set_rf_reg(RfPath::RF_PATH_A, RF_AC_Jaguar, 0xF0000,
+                                     0x2);
+    _radioManagement->phy_set_rf_reg(RfPath::RF_PATH_A, RF_AC_Jaguar, 0x1F,
+                                     gain & 0x1F);
+    _radioManagement->phy_set_rf_reg(RfPath::RF_PATH_A, RF_LNA_LOW_GAIN_3, BIT1,
+                                     0x1);
+  };
+
+  if (is8814) {
+    /* Snapshot the four per-path TX-scale words. */
+    _cw_bb[0] = _radioManagement->phy_query_bb_reg_public(rA_TxScale_Jaguar,
+                                                          bMaskDWord);
+    _cw_bb[1] = _radioManagement->phy_query_bb_reg_public(rB_TxScale_Jaguar,
+                                                          bMaskDWord);
+    _cw_bb[2] =
+        _radioManagement->phy_query_bb_reg_public(rC_TxScale_8814, bMaskDWord);
+    _cw_bb[3] =
+        _radioManagement->phy_query_bb_reg_public(rD_TxScale_8814, bMaskDWord);
+
+    /* Disable secondary CCA (0x838 bit1). */
+    _device.phy_set_bb_reg(rCCAonSec_Jaguar, BIT1, 0x1);
+
+    key_rf_path_a();
+
+    /* Zero the TX-scale [31:21] on all four paths (kills any residual digital
+     * signal; the bare LO still radiates). */
+    _device.phy_set_bb_reg(rA_TxScale_Jaguar, 0xFFE00000, 0x0);
+    _device.phy_set_bb_reg(rB_TxScale_Jaguar, 0xFFE00000, 0x0);
+    _device.phy_set_bb_reg(rC_TxScale_8814, 0xFFE00000, 0x0);
+    _device.phy_set_bb_reg(rD_TxScale_8814, 0xFFE00000, 0x0);
+  } else {
+    /* Snapshot the RFE-pinmux words (0xCB0/0xEB0 and their +4 siblings). */
+    _cw_bb[0] = _radioManagement->phy_query_bb_reg_public(rA_RFE_Pinmux_Jaguar,
+                                                          bMaskDWord);
+    _cw_bb[1] = _radioManagement->phy_query_bb_reg_public(rB_RFE_Pinmux_Jaguar,
+                                                          bMaskDWord);
+    _cw_bb[2] = _radioManagement->phy_query_bb_reg_public(
+        rA_RFE_Pinmux_Jaguar + 4, bMaskDWord);
+    _cw_bb[3] = _radioManagement->phy_query_bb_reg_public(
+        rB_RFE_Pinmux_Jaguar + 4, bMaskDWord);
+
+    /* Disable OFDM + CCK modulators (0x808[29:28] = 0). */
+    _device.phy_set_bb_reg(rOFDMCCKEN_Jaguar, BIT29 | BIT28, 0x0);
+
+    key_rf_path_a();
+
+    /* RFE pinmux to force the TX path. */
+    _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, 0xFF00F0, 0x77007);
+    _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar, 0xFF00F0, 0x77007);
+
+    /* External-PA parts only: enable the ext-PA pin (vendor priority — 5G flag
+     * takes 0x12, else 2G flag takes 0x11). Parts with no ext PA skip this. */
+    if (_eepromManager->GetExternalPa5G()) {
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar + 4, 0xFF00000, 0x12);
+      _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar + 4, 0xFF00000, 0x12);
+    } else if (_eepromManager->ExternalPA_2G) {
+      _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar + 4, 0xFF00000, 0x11);
+      _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar + 4, 0xFF00000, 0x11);
+    }
+  }
+
+  _cw_active = true;
+  _logger->info("CW single-tone armed @ ch{} gain={} ({})", _channel.Channel,
+                static_cast<int>(gain & 0x1F), is8814 ? "8814A" : "8812/8821");
+}
+
+/* Mirror of the vendor STOP path: undo the baseband key-up, restore RF 0x00 and
+ * the four BB words captured in StartCwTone(), and disable the LO. */
+void RtlJaguarDevice::StopCwTone() {
+  if (!_cw_active)
+    return;
+
+  const bool is8814 = _eepromManager->version_id.ICType == CHIP_8814A;
+
+  if (is8814) {
+    _radioManagement->phy_set_rf_reg(RfPath::RF_PATH_A, RF_LNA_LOW_GAIN_3, BIT1,
+                                     0x0);
+    _radioManagement->phy_set_rf_reg(RfPath::RF_PATH_A, RF_AC_Jaguar,
+                                     bLSSIWrite_data_Jaguar, _cw_rf00);
+    _device.phy_set_bb_reg(rCCAonSec_Jaguar, BIT1, 0x0); /* re-enable CCA */
+    _device.phy_set_bb_reg(rA_TxScale_Jaguar, bMaskDWord, _cw_bb[0]);
+    _device.phy_set_bb_reg(rB_TxScale_Jaguar, bMaskDWord, _cw_bb[1]);
+    _device.phy_set_bb_reg(rC_TxScale_8814, bMaskDWord, _cw_bb[2]);
+    _device.phy_set_bb_reg(rD_TxScale_8814, bMaskDWord, _cw_bb[3]);
+  } else {
+    _device.phy_set_bb_reg(rOFDMCCKEN_Jaguar, BIT29 | BIT28, 0x3);
+    _radioManagement->phy_set_rf_reg(RfPath::RF_PATH_A, RF_AC_Jaguar,
+                                     bLSSIWrite_data_Jaguar, _cw_rf00);
+    _radioManagement->phy_set_rf_reg(RfPath::RF_PATH_A, RF_LNA_LOW_GAIN_3, BIT1,
+                                     0x0);
+    _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar, bMaskDWord, _cw_bb[0]);
+    _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar, bMaskDWord, _cw_bb[1]);
+    _device.phy_set_bb_reg(rA_RFE_Pinmux_Jaguar + 4, bMaskDWord, _cw_bb[2]);
+    _device.phy_set_bb_reg(rB_RFE_Pinmux_Jaguar + 4, bMaskDWord, _cw_bb[3]);
+  }
+
+  _cw_active = false;
+  _logger->info("CW single-tone stopped — chip restored");
 }
 
 /* Map a radiotap CHANNEL frequency (MHz) to a Wi-Fi channel number. Returns 0
@@ -587,6 +731,9 @@ bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {
 }
 
 RtlJaguarDevice::~RtlJaguarDevice() {
+  /* Safety net: if a CW tone is still armed (caller forgot StopCwTone), restore
+   * the chip before teardown so it isn't left radiating a bare carrier. */
+  StopCwTone();
   _qd_stop.store(true);
   if (_qd_thread.joinable()) {
     _qd_thread.join();

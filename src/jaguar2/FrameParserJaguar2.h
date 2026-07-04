@@ -42,6 +42,8 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_DATA_BW_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 5, 2, v)
 #define SET_TX_DESC_DATA_LDPC_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 7, 1, v)
 #define SET_TX_DESC_DATA_STBC_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 8, 2, v)
+#define SET_TX_DESC_NAVUSEHDR_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x0C, 15, 1, v)
+#define SET_TX_DESC_NDPA_8822B(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x0C, 22, 2, v)
 #define SET_TX_DESC_DISQSELSEQ_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x00, 31, 1, v)
 #define SET_TX_DESC_G_ID_8822B(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x08, 24, 6, v)
 #define SET_TX_DESC_RTY_LMT_EN_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 17, 1, v)
@@ -87,7 +89,8 @@ inline void cal_txdesc_chksum_8822b(uint8_t *txdesc) {
 inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
                                     uint8_t rate_hw, uint8_t rate_id, uint8_t bw,
                                     bool short_gi, bool ldpc, uint8_t stbc,
-                                    bool bmc = false, uint8_t wheader_len = 12) {
+                                    bool bmc = false, uint8_t wheader_len = 12,
+                                    bool ndpa = false) {
   SET_TX_DESC_TXPKTSIZE_8822B(d, pkt_size);
   SET_TX_DESC_OFFSET_8822B(d, static_cast<uint32_t>(TXDESC_SIZE_8822B));
   SET_TX_DESC_LS_8822B(d, 1);
@@ -116,6 +119,19 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
    * checksum at 0x1C is still computed (the kernel fills it even with CHK_EN=0).
    * `wheader_len` is retained in the signature for callers but not written. */
   (void)wheader_len;
+  /* Beamforming self-sounding: mark the frame as an NDPA (halmac NDPA field,
+   * dword3 [23:22] = 1) so the armed MAC sounding engine follows it with a
+   * hardware-generated NDP — same recipe as the Jaguar-1/-3 paths: unicast
+   * control frame, so no HW sequence stamp, not broadcast, use-header NAV, no
+   * rate fallback. Must stay ABOVE the checksum: dword3 is inside the 32 bytes
+   * the 8822B HW checksums, and a mismatch silently drops the frame at TXDMA. */
+  if (ndpa) {
+    SET_TX_DESC_NDPA_8822B(d, 1);
+    SET_TX_DESC_EN_HWSEQ_8822B(d, 0);
+    SET_TX_DESC_BMC_8822B(d, 0);
+    SET_TX_DESC_NAVUSEHDR_8822B(d, 1);
+    SET_TX_DESC_DISDATAFB_8822B(d, 1);
+  }
   cal_txdesc_chksum_8822b(d);
 }
 

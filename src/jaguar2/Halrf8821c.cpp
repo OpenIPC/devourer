@@ -73,7 +73,7 @@ void Halrf8821c::backup_mac_bb(uint32_t *mac_bk, uint32_t *bb_bk,
                                const uint32_t *bb_reg) {
   for (int i = 0; i < 3; i++) /* MAC_REG_NUM_8821C */
     mac_bk[i] = r32(static_cast<uint16_t>(mac_reg[i]));
-  for (int i = 0; i < 12; i++) /* BB_REG_NUM_8821C (+0xc94,0xb00 for TX-path restore) */
+  for (int i = 0; i < 16; i++) /* BB_REG_NUM_8821C (+0xc94,0xb00 for TX-path restore) */
     bb_bk[i] = r32(static_cast<uint16_t>(bb_reg[i]));
 }
 void Halrf8821c::backup_rf(uint32_t *rf_bk, const uint32_t *reg) {
@@ -85,7 +85,7 @@ void Halrf8821c::restore_mac_bb(const uint32_t *mac_bk, const uint32_t *bb_bk,
                                 const uint32_t *bb_reg) {
   for (int i = 0; i < 3; i++)
     w32(static_cast<uint16_t>(mac_reg[i]), mac_bk[i]);
-  for (int i = 0; i < 12; i++)
+  for (int i = 0; i < 16; i++)
     w32(static_cast<uint16_t>(bb_reg[i]), bb_bk[i]);
 }
 /* backup_rf_reg = {0xdf, 0xde, 0x8f, 0x0, 0x1}; RF_backup[i] path A. */
@@ -775,17 +775,21 @@ void Halrf8821c::iqk_trigger(bool band2g) {
   _band2g = band2g;
   _bw = 0; /* 20 MHz */
 
-  uint32_t mac_bk[3], bb_bk[12], rf_bk[5];
+  uint32_t mac_bk[3], bb_bk[16], rf_bk[5];
   const uint32_t mac_reg[3] = {0x520, 0x550, 0x1518};
-  /* 0xc94 ("tx from IQK") and 0xb00[8] ("disable PMAC" modulator) are NOT in
-   * the vendor backup list — the vendor relies on the post-IQK channel-set /
-   * trx re-init to reset configure_macbb's changes. devourer's 8821C
-   * config_trx_mode is a no-op, so nothing un-sticks them and OFDM/HT TX stays
-   * broken after IQK (CCK uses a different path, so 1M keeps working). Add both
-   * here so their pre-IQK values are saved and restored — the devourer analogue
-   * of the 8822B post-IQK trx re-assert. */
-  const uint32_t bb_reg[12] = {0x808, 0x90c, 0xc00,  0xcb0, 0xcb4, 0xcbc,
-                               0x1990, 0x9a4, 0xa04, 0x838, 0xc94, 0xb00};
+  /* The vendor backup list is {0x808,0x90c,0xc00,0xcb0,0xcb4,0xcbc,0x1990,0x9a4,
+   * 0xa04,0x838} — it relies on its continued post-IQK PHY init to reset the
+   * OTHER registers configure_macbb / afe_setting(false) disturb. devourer's
+   * 8821C config_trx_mode is a no-op, so nothing resets them and OFDM/HT TX
+   * stays broken after IQK (CCK uses a different path, so 1M keeps working).
+   * Extend the backup so those are saved (operational value, pre-IQK) and
+   * restored — restore_mac_bb runs AFTER afe_setting(false), so it wins:
+   *   0xc94 ("tx from IQK"), 0xb00[8] ("disable PMAC"), and the AFE quad
+   *   0xc58/0xc5c/0xc60/0xc6c (afe_setting(false) leaves these at IQK-exit
+   *   values, not the operational ones the BB tables set). */
+  const uint32_t bb_reg[16] = {0x808,  0x90c, 0xc00,  0xcb0, 0xcb4, 0xcbc,
+                               0x1990, 0x9a4, 0xa04,  0x838, 0xc94, 0xb00,
+                               0xc58,  0xc5c, 0xc60,  0xc6c};
   const uint32_t rf_reg[5] = {0xdf, 0xde, 0x8f, 0x0, 0x1};
 
   /* is_btg from BB 0xcb8[16] (RFE front-end config). */

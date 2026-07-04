@@ -564,6 +564,13 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
 }
 
 void HalJaguar2::config_trx_mode() {
+  /* config_phydm_trx_mode_8821c is a no-op in the vendor (return true): the
+   * 8821C RF path/mode comes from the radioa table + switch_rf_set (BTG/WLG) +
+   * the 0x808 block-enable, NOT an 8822B-style RF mode-table poke. Running the
+   * 8822B sequence below (RF 0xc08/0x3e/0x3f mode table, 0x808/0x940 path map)
+   * on the 8821C RF drives it into a wrong mode. Skip for C8821C. */
+  if (_variant == ChipVariant::C8821C)
+    return;
   const uint8_t path = _ver.rf_2t2r ? 0x3 : 0x1; /* BB_PATH_AB or A */
 
   /* RF mode table (3-wire state per path: 0 shutdown/1 standby/2 TX/3 RX). */

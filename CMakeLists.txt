@@ -20,7 +20,8 @@ enable_testing()
 # ---------------------------------------------------------------------------
 option(DEVOURER_JAGUAR1       "RTL8812AU / 8811AU / 8821AU (Jaguar1 core)"      ON)
 option(DEVOURER_8814          "RTL8814AU (4T4R; requires DEVOURER_JAGUAR1)"     ON)
-option(DEVOURER_JAGUAR2       "RTL8822BU (Jaguar2, rtl8822b, 2T2R USB)"         ON)
+option(DEVOURER_JAGUAR2_8822B "RTL8822BU (Jaguar2, rtl8822b, 2T2R USB)"         ON)
+option(DEVOURER_JAGUAR2_8821C "RTL8811CU / 8821CU (Jaguar2, rtl8821c, 1T1R)"    ON)
 option(DEVOURER_JAGUAR3_8822C "RTL8812CU / 8822CU (Jaguar3, rtl8822c)"          ON)
 option(DEVOURER_JAGUAR3_8822E "RTL8812EU / 8822EU (Jaguar3, rtl8822e)"          ON)
 
@@ -28,17 +29,24 @@ if(DEVOURER_8814 AND NOT DEVOURER_JAGUAR1)
     message(FATAL_ERROR
         "DEVOURER_8814=ON requires DEVOURER_JAGUAR1=ON (8814 reuses the Jaguar1 HAL).")
 endif()
-if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3_8822C
-   AND NOT DEVOURER_JAGUAR3_8822E)
-    message(FATAL_ERROR
-        "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
-        "DEVOURER_JAGUAR2 / DEVOURER_JAGUAR3_8822C / DEVOURER_JAGUAR3_8822E.")
+# Convenience: the shared Jaguar2 HAL compiles when either chip variant is on.
+if(DEVOURER_JAGUAR2_8822B OR DEVOURER_JAGUAR2_8821C)
+    set(DEVOURER_JAGUAR2 ON)
+else()
+    set(DEVOURER_JAGUAR2 OFF)
 endif()
 # Convenience: the shared Jaguar3 port compiles when either variant is on.
 if(DEVOURER_JAGUAR3_8822C OR DEVOURER_JAGUAR3_8822E)
     set(DEVOURER_JAGUAR3 ON)
 else()
     set(DEVOURER_JAGUAR3 OFF)
+endif()
+if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3_8822C
+   AND NOT DEVOURER_JAGUAR3_8822E)
+    message(FATAL_ERROR
+        "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
+        "DEVOURER_JAGUAR2_8822B / DEVOURER_JAGUAR2_8821C / DEVOURER_JAGUAR3_8822C "
+        "/ DEVOURER_JAGUAR3_8822E.")
 endif()
 
 # Find pkg-config and then use it to locate libusb.
@@ -90,6 +98,7 @@ target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8814a)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822c)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822e)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822b)
+target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8821c)
 target_include_directories(WiFiDriver PUBLIC src)
 
 # --- per-chip source groups (see options above) ---
@@ -150,12 +159,25 @@ if(DEVOURER_JAGUAR2)
         src/jaguar2/Phy8822bTables.cpp
         src/jaguar2/Halrf8822b.cpp src/jaguar2/Halrf8822b.h)
     target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2=1)
-    # 8822B variant data (firmware blob + generated phydm tables). In M0 this is
-    # the only variant; M1 splits it behind a DEVOURER_JAGUAR2_8822B option.
+endif()
+
+# 8822B variant data (2T2R): firmware blob + generated phydm tables + txpwr_lmt.
+if(DEVOURER_JAGUAR2_8822B)
     target_sources(WiFiDriver PRIVATE
         hal/hal8822b_fw.c hal/hal8822b_fw.h
         hal/phydm/rtl8822b/Hal8822b_PhyTables.c hal/phydm/rtl8822b/Hal8822b_PhyTables.h)
     target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2_8822B=1)
+endif()
+
+# 8821C variant (1T1R): per-variant dispatcher impls (Phy8821cTables / Halrf8821c)
+# + firmware blob + generated phydm tables. Mirrors the Jaguar3 8822E block.
+if(DEVOURER_JAGUAR2_8821C)
+    target_sources(WiFiDriver PRIVATE
+        src/jaguar2/Phy8821cTables.cpp
+        src/jaguar2/Halrf8821c.cpp src/jaguar2/Halrf8821c.h
+        hal/hal8821c_fw.c hal/hal8821c_fw.h
+        hal/phydm/rtl8821c/Hal8821c_PhyTables.c hal/phydm/rtl8821c/Hal8821c_PhyTables.h)
+    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2_8821C=1)
 endif()
 
 if(DEVOURER_JAGUAR3)

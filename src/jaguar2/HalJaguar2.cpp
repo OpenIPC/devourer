@@ -6,7 +6,9 @@
 #include <thread>
 #include <utility>
 
+#if defined(DEVOURER_HAVE_JAGUAR2_8822B)
 #include "Hal8822b_TxpwrLmt.h" /* generated: hal8822b_txpwr_lmt() WW-min limits */
+#endif
 #include "PhyTableLoader.h"
 
 namespace jaguar2 {
@@ -285,8 +287,11 @@ void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type) {
                 radioa.len, radiob.len);
   PhyTableLoader::Load(radioa.data, radioa.len, ctx,
                        [this](uint32_t a, uint32_t v) { rf_write(0, a, v); });
-  PhyTableLoader::Load(radiob.data, radiob.len, ctx,
-                       [this](uint32_t a, uint32_t v) { rf_write(1, a, v); });
+  /* 1T1R chips (8821C) supply no radiob table (path A only) — skip the path-B
+   * RF walk rather than feed the loader a null table. */
+  if (radiob.len)
+    PhyTableLoader::Load(radiob.data, radiob.len, ctx,
+                         [this](uint32_t a, uint32_t v) { rf_write(1, a, v); });
 
   phydm_pre_post_setting(/*post=*/true);
   _logger->info("Jaguar2: BB/AGC/RF tables applied (rfe_type=0x{:02x})",
@@ -759,9 +764,21 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
    * The demo path is 1Tx; the ht2 (2SS) clamp reuses the 1Tx limit (conservative
    * for the rare 2SS injection). sec: 0=CCK 1=OFDM 2=HT. */
   const uint8_t band_i = g5 ? 1 : 0;
-  const int lmt_cck = g5 ? 63 : hal8822b_txpwr_lmt(rfe_type, band_i, bw, 0, 1, channel);
-  const int lmt_ofdm = hal8822b_txpwr_lmt(rfe_type, band_i, bw, 1, 1, channel);
-  const int lmt_ht = hal8822b_txpwr_lmt(rfe_type, band_i, bw, 2, 1, channel);
+  /* Per-chip regulatory limit lookup. 8822B has the generated worldwide-min
+   * table; the 8821C table (a packed txpwr_lmt_t_8821c[]) is ported in M7 —
+   * until then it returns 63 (no clamp), so the efuse-calibrated level applies
+   * unclamped. sec: 0=CCK 1=OFDM 2=HT. */
+  auto lmt = [&](uint8_t sec) -> int {
+#if defined(DEVOURER_HAVE_JAGUAR2_8822B)
+    if (_variant == ChipVariant::C8822B)
+      return hal8822b_txpwr_lmt(rfe_type, band_i, bw, sec, 1, channel);
+#endif
+    (void)sec;
+    return 63; /* C8821C: no regulatory clamp yet (M7) */
+  };
+  const int lmt_cck = g5 ? 63 : lmt(0);
+  const int lmt_ofdm = lmt(1);
+  const int lmt_ht = lmt(2);
   auto clamp63 = [](int v) -> uint8_t {
     return static_cast<uint8_t>(v < 0 ? 0 : (v > 63 ? 63 : v));
   };

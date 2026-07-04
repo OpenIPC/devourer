@@ -9,7 +9,12 @@
 
 #include "FrameParserJaguar2.h"
 #include "HalmacJaguar2Regs.h"
+#if defined(DEVOURER_HAVE_JAGUAR2_8822B)
 #include "hal8822b_fw.h" /* array_mp_8822b_fw_nic[] + _len */
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+#include "hal8821c_fw.h" /* array_mp_8821c_fw_nic[] + _len */
+#endif
 
 using namespace jaguar2::halmac;
 
@@ -31,7 +36,18 @@ HalmacJaguar2Fw::HalmacJaguar2Fw(RtlUsbAdapter device, Logger_t logger,
     : _device{device}, _logger{std::move(logger)}, _variant{variant} {}
 
 bool HalmacJaguar2Fw::download_default_firmware() {
+  /* Select the bundled NIC image for this chip. The HalMAC DLFW state machine
+   * (download_firmware) is generation-shared; only the blob differs. */
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+  if (_variant == ChipVariant::C8821C)
+    return download_firmware(array_mp_8821c_fw_nic, array_mp_8821c_fw_nic_len);
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR2_8822B)
   return download_firmware(array_mp_8822b_fw_nic, array_mp_8822b_fw_nic_len);
+#else
+  _logger->error("HalmacJaguar2Fw: no firmware blob compiled for this variant");
+  return false;
+#endif
 }
 
 uint8_t HalmacJaguar2Fw::r8(uint16_t reg) { return _device.rtw_read8(reg); }

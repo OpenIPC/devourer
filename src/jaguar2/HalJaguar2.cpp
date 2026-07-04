@@ -944,14 +944,34 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
    * calibration + txpwr_lmt clamp is a follow-up; DEVOURER_TX_PWR (flat TXAGC
    * override) still works for SDR power control. */
   if (_variant == ChipVariant::C8821C) {
-    /* 8821C has no EEPROM_TX_PWR_INX (8822B 0x10 layout N/A) and its phy_reg
-     * BB-table TXAGC baseline is too low for OFDM/HT (1M CCK is robust to it, so
-     * it "worked", but MCS TX did not radiate a decodable frame). Program a flat,
-     * on-air-validated per-rate TXAGC index instead of the wrong efuse layout —
-     * DEVOURER_TX_PWR still overrides for SDR sweeps. Proper phy_reg_pg-based
-     * per-rate power + txpwr_lmt is a follow-up (needs SDR power ground-truth). */
-    constexpr uint8_t k8821cTxAgc = 0x2d; /* validated: 1M + MCS7 decode on air */
-    set_tx_power_flat(k8821cTxAgc);
+    /* 8821C has no EEPROM_TX_PWR_INX (the 8822B 0x10 efuse layout is N/A). Its
+     * per-rate TX power is the phy_reg_pg base (array_mp_8821c_phy_reg_pg),
+     * written to the TXAGC regs 0x1d00 + (hw_rate & 0xfc) by
+     * config_phydm_write_txagc_8821c. With CONFIG_TXPWR_BY_RATE_EN off (upstream
+     * default) the phy_reg_pg byte IS the txagc index, so transcribe those base
+     * values here. Rate-section -> 0x1d00 offset: 0xc20->0x00 (CCK), 0xc24->0x04
+     * / 0xc28->0x08 (OFDM), 0xc2c->0x0c (HT MCS0-3), 0xc30->0x10 (HT MCS4-7).
+     * A flat baseline covers VHT / the remaining slots (untested here). Per-
+     * channel efuse deltas + the txpwr_lmt regulatory clamp are a follow-up
+     * (needs SDR power ground-truth); DEVOURER_TX_PWR overrides. */
+    const bool g5 = channel > 14;
+    set_tx_power_flat(0x2d); /* baseline for VHT + uncovered slots */
+    struct PgRow { uint16_t off; uint32_t v2g, v5g; };
+    static const PgRow pg[] = {
+        {0x00, 0x32343638, 0x00000000}, /* CCK (2.4G only) */
+        {0x04, 0x36363636, 0x34343434}, /* OFDM 6/9/12/18 */
+        {0x08, 0x28303234, 0x26283032}, /* OFDM 24/36/48/54 */
+        {0x0c, 0x34363636, 0x32343434}, /* HT MCS0-3 */
+        {0x10, 0x26283032, 0x24262830}, /* HT MCS4-7 */
+    };
+    for (const auto &r : pg) {
+      uint32_t v = g5 ? r.v5g : r.v2g;
+      if (v == 0) /* no CCK on 5G — keep the flat baseline */
+        continue;
+      _device.rtw_write32(static_cast<uint16_t>(0x1d00 + r.off), v);
+    }
+    _logger->info("Jaguar2/8821C: per-rate TXAGC applied (phy_reg_pg base, {})",
+                  g5 ? "5G" : "2.4G");
     return;
   }
   const bool g5 = channel > 14;

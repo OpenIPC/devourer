@@ -51,6 +51,16 @@ public:
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;
 
+  /* Realtek MP single-tone (CW carrier) — radiate a bare RF local-oscillator
+   * carrier at the tuned channel center. Path A; RTL8822BU (2T2R). Ported from
+   * the vendor hal_mpt_SetSingleToneTx() 8822B branch: OFDM/CCK modulators off,
+   * RFE pinmux + RFE-inverse forced to TX, RF path A to TX mode at `gain`
+   * (RF 0x00[4:0]) with the LO enabled. StopCwTone() restores the state saved at
+   * start and disables the LO. Idempotent. A controllable narrowband interferer
+   * / MP tone source (see the Jaguar-1 sibling in RtlJaguarDevice). */
+  void StartCwTone(uint8_t gain);
+  void StopCwTone();
+
 private:
   RtlUsbAdapter _device;
   Logger_t _logger;
@@ -61,6 +71,13 @@ private:
   Action_ParsedRadioPacket _packetProcessor = nullptr;
   int _tx_pwr_override = -1;
   std::optional<devourer::TxMode> _tx_mode_default;
+
+  /* CW single-tone (StartCwTone/StopCwTone) saved state for a clean restore:
+   * the pre-tone RF 0x00 (path A) and the four RFE-pinmux BB words
+   * (0xCB0/0xEB0/0xCB4/0xEB4). _cw_active guards double start/stop. */
+  bool _cw_active = false;
+  uint32_t _cw_rf00 = 0;
+  uint32_t _cw_bb[4] = {0, 0, 0, 0};
 
   /* DIG (dynamic initial gain) background thread — periodically runs
    * HalJaguar2::dig_step so IGI tracks the false-alarm rate for weak-signal RX. */

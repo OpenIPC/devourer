@@ -49,6 +49,14 @@ class RtlJaguarDevice : public IRtlDevice {
    * only when the frame's radiotap carries no rate. */
   std::optional<devourer::TxMode> _tx_mode_default;
 
+  /* CW single-tone (StartCwTone/StopCwTone) saved state for a clean restore:
+   * the pre-tone RF 0x00 and four BB dwords — RFE-pinmux words on 8812/8821
+   * (0xCB0/0xEB0/0xCB4/0xEB4), per-path TX-scale words on 8814 (0xC1C/0xE1C/
+   * 0x181C/0x1A1C). _cw_active guards against double start/stop. */
+  bool _cw_active = false;
+  uint32_t _cw_rf00 = 0;
+  uint32_t _cw_bb[4] = {0, 0, 0, 0};
+
 public:
   RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger);
   ~RtlJaguarDevice() override;
@@ -82,6 +90,17 @@ public:
   /* Read a baseband register (debug/diagnostic). Thin passthrough to the
    * radio manager's BB read — handy for confirming a TXAGC write landed. */
   uint32_t ReadBBReg(uint16_t addr, uint32_t mask);
+
+  /* Realtek MP single-tone (CW carrier) — radiate a bare RF local-oscillator
+   * carrier at the tuned channel center. Path A; all Jaguar-1 members —
+   * 8812AU (2T2R) / 8821AU (1T1R) via hal_mpt_SetSingleToneTx() (OFDM/CCK off +
+   * RFE pinmux), and 8814AU (4T4R) via mpt_SetSingleTone_8814A() (CCA off +
+   * per-path TX-scale zero). `gain` is the RF 0x00[4:0] gain index (0 = lowest).
+   * A controllable narrowband interferer / MP tone source. StopCwTone() restores
+   * the state saved at start and disables the LO — returning the chip to normal
+   * TX/RX. Idempotent. */
+  void StartCwTone(uint8_t gain);
+  void StopCwTone();
 
   /* Runtime TX-mode default. send_packet honours a frame's own radiotap rate
    * fields per-packet; when a frame's radiotap carries no rate, this mode

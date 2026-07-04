@@ -31,7 +31,11 @@ RtlJaguar2Device::RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger)
     : _device{device}, _logger{logger}, _hal{device, logger},
       _macinit{device, logger}, _fw{device, logger} {}
 
-RtlJaguar2Device::~RtlJaguar2Device() { stop_dig(); }
+RtlJaguar2Device::~RtlJaguar2Device() {
+  /* Safety net: restore the chip if a CW tone is still armed. */
+  StopCwTone();
+  stop_dig();
+}
 
 void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   /* Cold bring-up shared by Init (RX) and InitWrite (TX). Order mirrors the
@@ -277,8 +281,102 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
     devourer::bf::arm_sounder(_device, /*snd_ptcl_ctrl=*/0xDB);
     _logger->info("Jaguar2 BF sounder armed (beamformer side)");
   }
+  /* DEVOURER_CW_TONE — radiate a bare RF LO carrier at the channel center (MP
+   * single-tone). The channel was tuned in bring_up, so the LO sits at the
+   * center frequency. DEVOURER_CW_TONE_GAIN=0..31 sets RF 0x00[4:0]. */
+  if (std::getenv("DEVOURER_CW_TONE")) {
+    uint8_t g = 0;
+    if (const char *e = std::getenv("DEVOURER_CW_TONE_GAIN"))
+      g = static_cast<uint8_t>(std::atoi(e)) & 0x1F;
+    StartCwTone(g);
+  }
   _logger->info("Jaguar2: ready for TX (monitor inject, ch={})",
                 channel.Channel);
+}
+
+/* MP single-tone (CW carrier), Jaguar2 (RTL8822BU) path A. Ported from the
+ * vendor hal_mpt_SetSingleToneTx() 8822B branch: disable the OFDM/CCK
+ * modulators, force RF path A into TX mode at `gain`, flip the LO enable, and
+ * set the 8822B RFE pinmux + RFE-inverse so the TX path is keyed — leaving a
+ * clean local-oscillator carrier at the tuned channel center. The pre-tone
+ * RF/RFE state is snapshotted for StopCwTone(). */
+void RtlJaguar2Device::StartCwTone(uint8_t gain) {
+  if (_cw_active)
+    return;
+
+  /* RF register addresses (named locally — the Jaguar2 HAL is self-contained and
+   * does not pull in Hal8812PhyReg.h). RFREGOFFSETMASK (0xFFFFF) reads/writes
+   * the full 20-bit RF register. */
+  constexpr uint32_t RF_AC = 0x00;             /* RF mode / gain */
+  constexpr uint32_t RF_LNA_LOW_GAIN_3 = 0x58; /* RF LO enable (bit1) */
+  /* BB registers. */
+  constexpr uint16_t REG_OFDMCCKEN = 0x808;
+  constexpr uint16_t rA_RFE_Pinmux = 0xCB0;
+  constexpr uint16_t rB_RFE_Pinmux = 0xEB0;
+  constexpr uint16_t rA_RFE_Inverse = 0xCBC;
+  constexpr uint16_t rB_RFE_Inverse = 0xEBC;
+  constexpr uint32_t bMaskDWord = 0xFFFFFFFF;
+  constexpr uint32_t bMaskLWord = 0x0000FFFF;
+
+  /* Snapshot for a clean restore: RF 0x00 (full 20-bit) + the four RFE-pinmux
+   * words (BB reads are full-dword via rtw_read32). */
+  _cw_rf00 = _hal.dbg_rf_read(/*path A*/ 0, RF_AC);
+  _cw_bb[0] = _device.rtw_read32(rA_RFE_Pinmux);
+  _cw_bb[1] = _device.rtw_read32(rB_RFE_Pinmux);
+  _cw_bb[2] = _device.rtw_read32(rA_RFE_Pinmux + 4);
+  _cw_bb[3] = _device.rtw_read32(rB_RFE_Pinmux + 4);
+
+  /* Disable OFDM + CCK modulators (0x808[29:28] = 0). */
+  _device.phy_set_bb_reg(REG_OFDMCCKEN, (1u << 28) | (1u << 29), 0x0);
+
+  /* RF path A -> TX mode (0x00[19:16]=2), gain index (0x00[4:0]), LO enable
+   * (0x58 bit1). */
+  _hal.dbg_rf_set(/*path A*/ 0, RF_AC, 0xF0000, 0x2);
+  _hal.dbg_rf_set(/*path A*/ 0, RF_AC, 0x1F, gain & 0x1F);
+  _hal.dbg_rf_set(/*path A*/ 0, RF_LNA_LOW_GAIN_3, (1u << 1), 0x1);
+
+  /* 8822B RFE pinmux + inverse to force the TX path. */
+  _device.phy_set_bb_reg(rA_RFE_Pinmux, bMaskDWord, 0x77777777);
+  _device.phy_set_bb_reg(rB_RFE_Pinmux, bMaskDWord, 0x77777777);
+  _device.phy_set_bb_reg(rA_RFE_Pinmux + 4, bMaskLWord, 0x7777);
+  _device.phy_set_bb_reg(rB_RFE_Pinmux + 4, bMaskLWord, 0x7777);
+  _device.phy_set_bb_reg(rA_RFE_Inverse, 0xFFF, 0xb);
+  _device.phy_set_bb_reg(rB_RFE_Inverse, 0xFFF, 0x830);
+
+  _cw_active = true;
+  _logger->info("CW single-tone armed @ ch{} gain={} (8822B)", _channel.Channel,
+                static_cast<int>(gain & 0x1F));
+}
+
+/* Mirror of the vendor STOP path: re-enable OFDM/CCK, restore RF 0x00 and the
+ * RFE-pinmux words captured in StartCwTone(), disable the LO, and clear the
+ * 8822B RFE-inverse pins. */
+void RtlJaguar2Device::StopCwTone() {
+  if (!_cw_active)
+    return;
+
+  constexpr uint32_t RF_AC = 0x00;
+  constexpr uint32_t RF_LNA_LOW_GAIN_3 = 0x58;
+  constexpr uint32_t RF_OFFSET_MASK = 0x000FFFFF;
+  constexpr uint16_t REG_OFDMCCKEN = 0x808;
+  constexpr uint16_t rA_RFE_Pinmux = 0xCB0;
+  constexpr uint16_t rB_RFE_Pinmux = 0xEB0;
+  constexpr uint16_t rA_RFE_Inverse = 0xCBC;
+  constexpr uint16_t rB_RFE_Inverse = 0xEBC;
+  constexpr uint32_t bMaskDWord = 0xFFFFFFFF;
+
+  _device.phy_set_bb_reg(REG_OFDMCCKEN, (1u << 28) | (1u << 29), 0x3);
+  _device.phy_set_bb_reg(rA_RFE_Pinmux, bMaskDWord, _cw_bb[0]);
+  _device.phy_set_bb_reg(rB_RFE_Pinmux, bMaskDWord, _cw_bb[1]);
+  _device.phy_set_bb_reg(rA_RFE_Pinmux + 4, bMaskDWord, _cw_bb[2]);
+  _device.phy_set_bb_reg(rB_RFE_Pinmux + 4, bMaskDWord, _cw_bb[3]);
+  _hal.dbg_rf_set(/*path A*/ 0, RF_AC, RF_OFFSET_MASK, _cw_rf00);
+  _hal.dbg_rf_set(/*path A*/ 0, RF_LNA_LOW_GAIN_3, (1u << 1), 0x0);
+  _device.phy_set_bb_reg(rA_RFE_Inverse, 0xFFF, 0x0);
+  _device.phy_set_bb_reg(rB_RFE_Inverse, 0xFFF, 0x0);
+
+  _cw_active = false;
+  _logger->info("CW single-tone stopped — chip restored");
 }
 
 void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {

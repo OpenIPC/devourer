@@ -9,6 +9,9 @@
 #if defined(DEVOURER_HAVE_JAGUAR2_8822B)
 #include "Hal8822b_TxpwrLmt.h" /* generated: hal8822b_txpwr_lmt() WW-min limits */
 #endif
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+#include "Hal8821c_TxpwrLmt.h" /* generated: hal8821c_txpwr_lmt() WW-min limits */
+#endif
 #include "PhyTableLoader.h"
 
 namespace jaguar2 {
@@ -955,23 +958,53 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
      * channel efuse deltas + the txpwr_lmt regulatory clamp are a follow-up
      * (needs SDR power ground-truth); DEVOURER_TX_PWR overrides. */
     const bool g5 = channel > 14;
-    set_tx_power_flat(0x2d); /* baseline for VHT + uncovered slots */
-    struct PgRow { uint16_t off; uint32_t v2g, v5g; };
+    /* Regulatory clamp (config_phydm_get_tx_power_limit_8821c worldwide-min):
+     * the phy_reg_pg base is the chip's per-rate capability (~50), which is above
+     * the legal limit; the vendor clamps it to txpwr_lmt (min in TXAGC-index
+     * units, exactly like the 8822B). Without this devourer would TX above the
+     * regulatory limit — and the 8822B's own clamped output is ~30, so this also
+     * corrects the 8821C's otherwise-too-high level. sec: 0=CCK 1=OFDM 2=HT. */
+    auto lmt = [&](uint8_t sec) -> int {
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+      return hal8821c_txpwr_lmt(g5 ? 1 : 0, bw, sec, 1, channel);
+#else
+      (void)sec;
+      return 63;
+#endif
+    };
+    const int lmt_cck = g5 ? 63 : lmt(0), lmt_ofdm = lmt(1), lmt_ht = lmt(2);
+    auto clamp_dw = [](uint32_t v, int lim) -> uint32_t {
+      uint32_t o = 0;
+      for (int b = 0; b < 4; b++) {
+        int by = static_cast<int>((v >> (b * 8)) & 0xff);
+        if (by > lim) by = lim;
+        if (by < 0) by = 0;
+        o |= static_cast<uint32_t>(by & 0xff) << (b * 8);
+      }
+      return o;
+    };
+    /* Baseline for VHT + uncovered slots: flat, clamped to the OFDM limit. */
+    const int flat = 0x2d < lmt_ofdm ? 0x2d : lmt_ofdm;
+    set_tx_power_flat(static_cast<uint8_t>(flat < 0 ? 0 : flat));
+    struct PgRow { uint16_t off; uint8_t sec; uint32_t v2g, v5g; };
     static const PgRow pg[] = {
-        {0x00, 0x32343638, 0x00000000}, /* CCK (2.4G only) */
-        {0x04, 0x36363636, 0x34343434}, /* OFDM 6/9/12/18 */
-        {0x08, 0x28303234, 0x26283032}, /* OFDM 24/36/48/54 */
-        {0x0c, 0x34363636, 0x32343434}, /* HT MCS0-3 */
-        {0x10, 0x26283032, 0x24262830}, /* HT MCS4-7 */
+        {0x00, 0, 0x32343638, 0x00000000}, /* CCK (2.4G only) */
+        {0x04, 1, 0x36363636, 0x34343434}, /* OFDM 6/9/12/18 */
+        {0x08, 1, 0x28303234, 0x26283032}, /* OFDM 24/36/48/54 */
+        {0x0c, 2, 0x34363636, 0x32343434}, /* HT MCS0-3 */
+        {0x10, 2, 0x26283032, 0x24262830}, /* HT MCS4-7 */
     };
     for (const auto &r : pg) {
       uint32_t v = g5 ? r.v5g : r.v2g;
       if (v == 0) /* no CCK on 5G — keep the flat baseline */
         continue;
-      _device.rtw_write32(static_cast<uint16_t>(0x1d00 + r.off), v);
+      const int lim = r.sec == 0 ? lmt_cck : (r.sec == 1 ? lmt_ofdm : lmt_ht);
+      _device.rtw_write32(static_cast<uint16_t>(0x1d00 + r.off),
+                          clamp_dw(v, lim));
     }
-    _logger->info("Jaguar2/8821C: per-rate TXAGC applied (phy_reg_pg base, {})",
-                  g5 ? "5G" : "2.4G");
+    _logger->info("Jaguar2/8821C: per-rate TXAGC applied (phy_reg_pg base + "
+                  "txpwr_lmt clamp cck/ofdm/ht={}/{}/{}, {})",
+                  lmt_cck, lmt_ofdm, lmt_ht, g5 ? "5G" : "2.4G");
     return;
   }
   const bool g5 = channel > 14;

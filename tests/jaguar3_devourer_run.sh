@@ -12,8 +12,14 @@ set -u
 PID=${PID:-c812}
 SYS=${SYS:-}
 if [ -z "$SYS" ]; then
-  for d in /sys/bus/usb/devices/*/idProduct; do
-    [ "$(cat "$d" 2>/dev/null)" = "$PID" ] && { SYS=$(basename "$(dirname "$d")"); break; }
+  # Retry the search: a prior run's recovery power-cycle can leave the DUT
+  # still re-enumerating for several seconds.
+  for _try in $(seq 15); do
+    for d in /sys/bus/usb/devices/*/idProduct; do
+      [ "$(cat "$d" 2>/dev/null)" = "$PID" ] && { SYS=$(basename "$(dirname "$d")"); break; }
+    done
+    [ -n "$SYS" ] && break
+    sleep 1
   done
 fi
 if [ -z "$SYS" ] || [ ! -e "/sys/bus/usb/devices/$SYS" ]; then
@@ -56,10 +62,12 @@ if [ -n "$MONOUT" ]; then
 fi
 
 echo "=== running $BIN for ${SECS}s against $SYS (devnum $DEVNUM) ==="
-sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0xc812 \
+sudo env DEVOURER_VID=0x0bda DEVOURER_PID="0x$PID" \
      DEVOURER_CHANNEL="${DEVOURER_CHANNEL:-36}" \
      DEVOURER_NB_BW="${DEVOURER_NB_BW:-}" \
+     DEVOURER_NB_DAC="${DEVOURER_NB_DAC:-}" \
      DEVOURER_TX_PWR="${DEVOURER_TX_PWR:-}" \
+     DEVOURER_TX_GAP_US="${DEVOURER_TX_GAP_US:-}" \
      DEVOURER_SKIP_RESET="${DEVOURER_SKIP_RESET:-}" \
      stdbuf -oL -eL timeout -k 5 "$SECS" "$BIN" 2>&1 | sed -E 's/^/[dev] /'
 # timeout sends SIGTERM at $SECS; the binary now catches it, runs a clean chip

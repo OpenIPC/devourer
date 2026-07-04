@@ -26,7 +26,7 @@ import numpy as np
 import uhd
 
 
-def measure(freq, rate, gain, nsamps):
+def measure(freq, rate, gain, nsamps, median=False):
     usrp = uhd.usrp.MultiUSRP("")
     # recv_num_samps tunes, sets rate+gain, streams, and returns a complex64
     # array shaped (channels, nsamps). One channel (RX A).
@@ -42,11 +42,22 @@ def measure(freq, rate, gain, nsamps):
     nfft = 4096
     win = np.hanning(nfft)
     nseg = len(x) // nfft
-    acc = np.zeros(nfft)
-    for i in range(nseg):
-        seg = x[i * nfft:(i + 1) * nfft] * win
-        acc += np.abs(np.fft.fftshift(np.fft.fft(seg))) ** 2
-    psd = acc / max(nseg, 1)
+    if median:
+        # Median across segments instead of mean: suppresses bursty, low-duty
+        # ambient (an AP beaconing through the capture) so a high-duty DUT
+        # (DEVOURER_TX_GAP_US=0) dominates the estimate. Use for differential
+        # A/Bs on a band with neighbours.
+        segs = np.empty((nseg, nfft), dtype=np.float32)
+        for i in range(nseg):
+            seg = x[i * nfft:(i + 1) * nfft] * win
+            segs[i] = np.abs(np.fft.fftshift(np.fft.fft(seg))) ** 2
+        psd = np.median(segs, axis=0).astype(np.float64)
+    else:
+        acc = np.zeros(nfft)
+        for i in range(nseg):
+            seg = x[i * nfft:(i + 1) * nfft] * win
+            acc += np.abs(np.fft.fftshift(np.fft.fft(seg))) ** 2
+        psd = acc / max(nseg, 1)
     freqs = np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / rate))
 
     total = psd.sum()
@@ -79,10 +90,12 @@ def main():
     ap.add_argument("--label", default="probe")
     ap.add_argument("--json", default="", help="append result as JSON to this file")
     ap.add_argument("--psd-out", default="", help="save [freqs;psd] to this .npy")
+    ap.add_argument("--psd-median", action="store_true",
+                    help="median PSD across segments (suppresses bursty ambient)")
     a = ap.parse_args()
 
     r, freqs, psd = measure(float(a.freq), float(a.rate), float(a.gain),
-                            float(a.nsamps))
+                            float(a.nsamps), median=a.psd_median)
     r["label"] = a.label
     if a.psd_out:
         np.save(a.psd_out, np.vstack([freqs, psd]))

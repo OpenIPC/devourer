@@ -64,18 +64,33 @@ private:
   static constexpr uint16_t R_SMALL_BW_8822C  = 0x9b0; /* [7:6] small-BW field */
   static constexpr uint16_t R_CLK_DIV_8822C   = 0x9b4; /* [10:8] DAC, [22:20] ADC clk */
 
-  /* Narrowband recipe (small-BW field at 0x9b0[7:6]):
-   *   5 MHz  -> 0x1 ;  10 MHz -> 0x2 ;  20 MHz -> 0x0
-   * DAC clock 0x9b4[10:8]:  5M->0x4(120M)  10M->0x6(240M)  20M->0x7(480M)
-   * ADC clock 0x9b4[22:20]: 5M->0x4(40M)   10M->0x5(80M)   20M->0x6(160M)
-   * RX DFIR  0x810[13:4]:   5/10M->0x2ab   20M->0x19b
-   * 5 MHz has known DAC mirror/leakage; 10 MHz is the reliable target. */
+  /* Narrowband recipe (both variants — the 8822c codes):
+   *   small-BW 0x9b0[7:6]:    5M->0x1  10M->0x2  20M->0x0
+   *   DAC clk  0x9b4[10:8]:   5M->0x4  10M->0x6  20M->0x7 (120/240/480M)
+   *   ADC clk  0x9b4[22:20]:  5M->0x4  10M->0x5  20M->0x6 (40/80/160M)
+   *   RX DFIR  0x810[13:4]:   5/10M->0x2ab  20M->0x19b
+   * The 8822e vendor phydm ships lower DAC codes (5M=0x2/10M=0x4/20M=0x6,
+   * same clock comments) but on real 8812EU silicon 0x2 does not transmit —
+   * SDR-bisected in set_bandwidth_dividers; the 8822c codes air on both
+   * chips. On the 8822e, narrowband ALSO needs the MAC-clock reconfig
+   * (REG_AFE_CTRL1 0x24[21:20] + the 0x55c/0x638 us-tick clocks) applied in
+   * set_bandwidth_dividers — without it 5 MHz never reaches the air at any
+   * DAC code. */
   static constexpr uint8_t NB_SMALLBW_5M  = 0x1;
   static constexpr uint8_t NB_SMALLBW_10M = 0x2;
+
+  /* 8822e AFE write-with-readback-check + DACK soft reset (the vendor's
+   * halrf_ex_dac_fifo_rst: "fix dac fifo error after TXCK setting" — required
+   * after a DAC-clock change or the FIFO can misalign and emit images).
+   * Duplicates Halrf8822e's private helpers; folding both into a shared
+   * Jaguar3RfAccess base is the already-noted follow-up. */
+  void write_check_afe_8822e(uint16_t add, uint32_t data);
+  void dack_soft_rst_8822e();
 
   RtlUsbAdapter _device;
   Logger_t _logger;
   ChipVariant _variant;
+  uint8_t _last_channel = 0; /* set by set_channel_bwmode; 0 = not yet tuned */
 };
 
 } /* namespace jaguar3 */

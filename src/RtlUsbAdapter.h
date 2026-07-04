@@ -3,10 +3,12 @@
 
 #include <iostream>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <libusb.h>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -54,6 +56,17 @@ class RtlUsbAdapter {
 
   uint16_t _idVendor = 0;
   uint16_t _idProduct = 0;
+
+  /* Set by transfer_callback when an async TX bulk-OUT completes non-OK
+   * (TIMED_OUT / stall). Consumed at the top of the next send_packet on the TX
+   * thread to re-clear_halt the endpoint — a mid-stream stall (e.g. hardware
+   * NDP generation on some xhci hosts) would otherwise stay wedged, since the
+   * first-send clear_halt only runs once. Heap-owned via shared_ptr because
+   * RtlUsbAdapter is a copyable value type (passed by value throughout); an
+   * atomic member would delete the copy ctor. All copies of an adapter share
+   * the one flag (only the TX-driving copy touches it). */
+  std::shared_ptr<std::atomic<bool>> _tx_wedged =
+      std::make_shared<std::atomic<bool>>(false);
 
 public:
   RtlUsbAdapter(libusb_device_handle *dev_handle, Logger_t logger,
@@ -146,6 +159,10 @@ public:
   void ReadEFuseByte(uint16_t _offset, uint8_t *pbuf);
 
 private:
+  /* Async TX bulk-OUT completion callback. user_data is the RtlUsbAdapter* so
+   * it can flag _tx_wedged on a non-OK completion; a static member (not a free
+   * function) to reach that private state. */
+  static void transfer_callback(struct libusb_transfer *transfer);
   void InitDvObj();
   const char *strUsbSpeed();
   void GetChipOutEP8812();

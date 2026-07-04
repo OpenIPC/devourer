@@ -404,27 +404,6 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   return resp;
 }
 
-std::vector<Packet> RtlJaguarDevice::read_frames() {
-  /* Cover one full chip-side RX aggregate (the 8814 pairs a 20K DMA-agg
-   * threshold with a 32K host read). 32K buffer, an exact multiple of
-   * wMaxPacketSize so no short packet truncates the transfer. */
-  static constexpr int BUF_SIZE = 32 * 1024;
-  uint8_t buffer[BUF_SIZE] = {};
-  int n = _device.bulk_read_raw(buffer, sizeof(buffer), USB_TIMEOUT * 10);
-  if (n < 0) {
-    /* Rate-limit the error log + sleep so a fast-failing rc (e.g. NO_DEVICE
-     * after the chip drops off USB) can't spin the RX loop at full CPU. */
-    static uint64_t err_count = 0;
-    if ((err_count++ % 100) == 0)
-      _logger->error("bulk_read_raw failed with error: {} (count={})", n,
-                     err_count);
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    n = 0;
-  }
-  FrameParser fp{_logger};
-  return fp.recvbuf2recvframe(std::span<uint8_t>{buffer, (size_t)n});
-}
-
 void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
                           SelectedChannel channel) {
   StartWithMonitorMode(channel);
@@ -510,41 +489,33 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   }
 
   _logger->info("Listening air...");
-  /* Keep several bulk-IN transfers in flight at once (mirrors the kernel's ~4
-   * always-posted RX URBs — confirmed via usbmon: rtw88 re-submits each URB
-   * ~20us after completion and cycles 4 of them). With a single synchronous
-   * transfer there is a window between transfers where NO URB is posted; the
-   * 8814's RX-DMA ring pauses in that gap and, under sparse traffic,
-   * intermittently wedges after a short burst — the "RX stalls at ~10 frames"
-   * bug (8812/8821 tolerate it, the 8814 does not). read_frames() is
-   * reentrant (local buffer + local FrameParser; libusb is thread-safe), so a
-   * small worker pool restores the always-posted behaviour. Frame order across
-   * workers is not preserved, which is fine for monitor-mode RX. Set
-   * DEVOURER_RX_URBS=1 to restore the old single-transfer behaviour. */
-  int rx_workers = 4;
+  /* Unified RX transport (shared with Jaguar2/3): a single-threaded async
+   * bulk-IN URB queue keeps N URBs always-posted on the bulk-IN endpoint and
+   * parses each completion inline (while its buffer is alive), instead of a
+   * pool of blocking bulk_read_raw worker threads. The always-posted URBs give
+   * the 8814's RX-DMA ring the continuity the old worker pool existed to
+   * provide (no gap between transfers), and removing the blocking worker
+   * threads removes the multi-thread USB contention that starved concurrent
+   * NDP-generation TX on some xhci hosts — the beamforming-sounding wedge on
+   * the radxa-x4. Consumes on the event pump, so no proc_mu is needed.
+   * DEVOURER_RX_URBS sets the queue depth (default 8). */
+  int rx_urbs = 8;
   if (const char *e = std::getenv("DEVOURER_RX_URBS")) {
-    rx_workers = std::atoi(e);
-    if (rx_workers < 1) rx_workers = 1;
+    rx_urbs = std::atoi(e);
+    if (rx_urbs < 1) rx_urbs = 1;
   }
-  std::mutex proc_mu;
-  std::vector<std::thread> workers;
-  for (int i = 0; i < rx_workers; ++i) {
-    workers.emplace_back([this, &proc_mu]() {
-      while (!should_stop && !g_devourer_should_stop) {
-        auto packets = read_frames();
-        if (packets.empty())
-          continue;
-        std::lock_guard<std::mutex> lk(proc_mu);
-        for (auto &p : packets) {
-          if (should_stop || g_devourer_should_stop)
-            break;
-          _packetProcessor(p);
-        }
-      }
-    });
-  }
-  for (auto &t : workers)
-    t.join();
+  auto on_data = [this](const uint8_t *data, int n) {
+    FrameParser fp{_logger};
+    for (auto &p : fp.recvbuf2recvframe(
+             std::span<uint8_t>{const_cast<uint8_t *>(data), (size_t)n})) {
+      if (should_stop || g_devourer_should_stop)
+        break;
+      _packetProcessor(p);
+    }
+  };
+  _device.bulk_read_async_loop(32 * 1024, rx_urbs, on_data, [this]() -> bool {
+    return should_stop || g_devourer_should_stop;
+  });
 
   _rxmask_stop.store(true);
   if (_rxmask_thread.joinable())

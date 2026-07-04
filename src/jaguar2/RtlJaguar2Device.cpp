@@ -77,13 +77,26 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
                       channel.ChannelOffset);
   _hal.do_lck(); /* LC calibration — lock the RF LO */
 
-  if (!getenv("DEVOURER_SKIP_IQK")) {
+  /* IQK gating. 8822B: run by default (its RX is marginal without IQK), skip
+   * with DEVOURER_SKIP_IQK. 8821C: OPT-IN (DEVOURER_IQK=1) — the halrf_iqk_8821c
+   * port runs and reports a clean pass (LOK/TXK/RXK fail=0), but its post-IQK
+   * exit doesn't fully re-establish the OFDM/HT TX path (devourer's 8821C
+   * config_trx_mode is a no-op, unlike the vendor's continued init), so enabling
+   * it by default regresses OFDM/HT TX. The 8821C RX/TX work well uncalibrated
+   * (validated on air), so IQK stays opt-in until the OFDM-TX-path exit is
+   * resolved with SDR-EVM validation. */
+  const bool is_8821c = _variant == jaguar2::ChipVariant::C8821C;
+  const bool run_iqk = is_8821c ? (getenv("DEVOURER_IQK") != nullptr)
+                                : (getenv("DEVOURER_SKIP_IQK") == nullptr);
+  if (run_iqk) {
     auto cal = jaguar2::make_jaguar2_calibration(
         _variant, _device, _logger, _hal.chip_version().cut,
         _hal.chip_version().rf_2t2r != 0);
     cal->iqk_trigger(channel.Channel <= 14);
   } else {
-    _logger->info("Jaguar2: IQK SKIPPED (DEVOURER_SKIP_IQK)");
+    _logger->info("Jaguar2: IQK {}", is_8821c
+                                         ? "opt-in (set DEVOURER_IQK=1)"
+                                         : "SKIPPED (DEVOURER_SKIP_IQK)");
   }
   /* Re-assert the TX/RX antenna-path routing AFTER IQK. In the vendor flow
    * config_phydm_trx_mode runs from the post-calibration channel-set (PHY_SwChnl),

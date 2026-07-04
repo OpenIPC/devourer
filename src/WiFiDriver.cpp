@@ -1,11 +1,14 @@
 #include "WiFiDriver.h"
 
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <utility>
 
 #include <libusb.h>
 
 #include "RtlUsbAdapter.h"
+#include "UsbDeviceLock.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
@@ -53,7 +56,8 @@ WiFiDriver::WiFiDriver(Logger_t logger) : _logger{std::move(logger)} {}
 
 std::unique_ptr<IRtlDevice>
 WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
-                            libusb_context *ctx) {
+                            libusb_context *ctx,
+                            std::shared_ptr<devourer::UsbDeviceLock> usb_lock) {
   uint16_t pid = 0;
   libusb_device *dev = libusb_get_device(dev_handle);
   if (dev != nullptr) {
@@ -62,13 +66,41 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
       pid = desc.idProduct;
   }
 
+  /* Exclusive per-adapter USB lock (see UsbDeviceLock.h). The recommended open
+   * path (devourer::claim_interface_then_reset) already took this lock BEFORE
+   * the reset and hands it in here — in that case we must NOT re-acquire (a
+   * same-process flock on the same file would self-conflict); we just hold it
+   * for the device lifetime. A caller that opened/claimed the handle itself
+   * passes null, so acquire our own here as a best-effort second gate: genuine
+   * contention -> refuse (return nullptr, same contract as an unsupported chip);
+   * a lock-infrastructure error degrades to a warning. Either way the lock rides
+   * into the RtlUsbAdapter below and is released at device destruction. */
+  if (!usb_lock) {
+    auto lock = std::make_shared<devourer::UsbDeviceLock>();
+    std::string lock_why;
+    switch (lock->try_acquire(dev, &lock_why)) {
+    case devourer::UsbDeviceLock::Result::Busy:
+      _logger->error("USB adapter in use — refusing to open ({})", lock_why);
+      return nullptr;
+    case devourer::UsbDeviceLock::Result::Error:
+      _logger->warn("USB adapter lock unavailable ({}) — proceeding without "
+                    "exclusive access",
+                    lock_why);
+      break;
+    case devourer::UsbDeviceLock::Result::Acquired:
+      _logger->info("USB adapter {} locked for exclusive access", lock->key());
+      usb_lock = std::move(lock);
+      break;
+    }
+  }
+
   uint8_t chip_id = read_chip_id(dev_handle);
   if (is_8822b_chip_id(chip_id)) {
 #if defined(DEVOURER_HAVE_JAGUAR2)
     _logger->info("Creating RtlJaguar2Device (PID 0x{:04x}, chip-id 0x{:02x})",
                   pid, chip_id);
     return std::make_unique<RtlJaguar2Device>(
-        RtlUsbAdapter(dev_handle, _logger, ctx), _logger);
+        RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock), _logger);
 #else
     _logger->error("RTL8822B (chip-id 0x{:02x}) detected but Jaguar2 support "
                    "not compiled in (DEVOURER_JAGUAR2=OFF)",
@@ -101,7 +133,7 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
     _logger->info("Creating RtlJaguar3Device (PID 0x{:04x}, chip-id 0x{:02x})",
                   pid, chip_id);
     return std::make_unique<RtlJaguar3Device>(
-        RtlUsbAdapter(dev_handle, _logger, ctx), _logger, variant);
+        RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock), _logger, variant);
 #else
     _logger->error("Jaguar3 chip (chip-id 0x{:02x}) detected but Jaguar3 "
                    "support not compiled in",
@@ -117,7 +149,7 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
    * async URB queue (bulk_read_async_loop) whose event pump needs the same
    * libusb context the handle was opened on (as Jaguar2/3 already do above). */
   return std::make_unique<RtlJaguarDevice>(
-      RtlUsbAdapter(dev_handle, _logger, ctx), _logger);
+      RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock), _logger);
 #else
   _logger->error("Jaguar1 chip (PID 0x{:04x}, chip-id 0x{:02x}) detected but "
                  "Jaguar1 support not compiled in",

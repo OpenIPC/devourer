@@ -82,8 +82,10 @@ void RtlUsbAdapter::bulk_read_async_loop(
 }
 
 RtlUsbAdapter::RtlUsbAdapter(libusb_device_handle *dev_handle, Logger_t logger,
-                             libusb_context *ctx)
-    : _dev_handle{dev_handle}, _ctx{ctx}, _logger{logger} {
+                             libusb_context *ctx,
+                             std::shared_ptr<devourer::UsbDeviceLock> usb_lock)
+    : _dev_handle{dev_handle}, _ctx{ctx}, _logger{logger},
+      _usb_lock{std::move(usb_lock)} {
   libusb_device_descriptor desc{};
   if (libusb_get_device_descriptor(libusb_get_device(_dev_handle), &desc) ==
       LIBUSB_SUCCESS) {

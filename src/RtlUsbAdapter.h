@@ -16,6 +16,10 @@
 #include "hal_com_reg.h"
 #include "logger.h"
 
+namespace devourer {
+class UsbDeviceLock;
+}
+
 #define rtw_read8 rtw_read<uint8_t>
 #define rtw_read16 rtw_read<uint16_t>
 #define rtw_read32 rtw_read<uint32_t>
@@ -68,9 +72,19 @@ class RtlUsbAdapter {
   std::shared_ptr<std::atomic<bool>> _tx_wedged =
       std::make_shared<std::atomic<bool>>(false);
 
+  /* Exclusive per-adapter USB lock, acquired by WiFiDriver::CreateRtlDevice and
+   * held for the device's lifetime (see UsbDeviceLock.h). shared_ptr because
+   * RtlUsbAdapter is a copyable value type copied into every sub-manager
+   * (EepromManager / RadioManagementModule / HalModule / the device itself);
+   * all copies share the one lock, so it releases only when the last copy — and
+   * thus the whole device — is destroyed. Null when no lock was taken (graceful
+   * degradation on a lock-infrastructure error). */
+  std::shared_ptr<devourer::UsbDeviceLock> _usb_lock;
+
 public:
   RtlUsbAdapter(libusb_device_handle *dev_handle, Logger_t logger,
-                libusb_context *ctx = nullptr);
+                libusb_context *ctx = nullptr,
+                std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr);
 
   /* Kernel-style async RX: keep n_urbs concurrent bulk-IN transfers in flight on
    * the discovered bulk-IN endpoint, invoking on_data(buf,len) for each non-empty

@@ -64,6 +64,7 @@
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
+#include "UsbOpen.h"
 #include "WiFiDriver.h"
 #include "logger.h"
 #include "stream_stdin.h"
@@ -332,17 +333,21 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (libusb_kernel_driver_active(handle, 0)) {
-    libusb_detach_kernel_driver(handle, 0);
+  /* Claim-before-reset (see src/UsbOpen.h): the exclusive claim is the primary
+   * guard — a second devourer on this adapter gets BUSY here and bails before
+   * the reset, so it can't re-enumerate the adapter out from under the owner. */
+  std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
+  rc = devourer::claim_interface_then_reset(
+      handle, 0, logger,
+      termux_fd == 0 && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
+  if (rc != 0) {
+    libusb_close(handle);
+    libusb_exit(context);
+    return 1;
   }
-  if (termux_fd == 0 && !std::getenv("DEVOURER_SKIP_RESET")) {
-    libusb_reset_device(handle);
-  }
-  rc = libusb_claim_interface(handle, 0);
-  assert(rc == 0);
 
   WiFiDriver wifi_driver{logger};
-  auto rtlDevice = wifi_driver.CreateRtlDevice(handle);
+  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock);
 
   int channel = 6;
   if (const char *ch_env = std::getenv("DEVOURER_CHANNEL")) {

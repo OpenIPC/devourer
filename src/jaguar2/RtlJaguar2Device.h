@@ -13,6 +13,7 @@
 #include "HalJaguar2.h"
 #include "HalmacJaguar2MacInit.h"
 #include "HalmacJaguar2Fw.h"
+#include "ChipVariant.h"
 
 /* RtlJaguar2Device is the orchestrator for the Realtek "Jaguar2" 802.11ac family
  * — RTL8822BU (chip 8822B, 2T2R, USB). It is the Jaguar2 sibling of
@@ -20,18 +21,21 @@
  * same IRtlDevice contract so the demos and the WiFiDriver factory treat all
  * three uniformly.
  *
- * 8822B is a hybrid of the two existing generations: firmware download, MAC init
- * and power sequencing follow the HalMAC path (like Jaguar3), while the phydm
- * BB/AGC/RF register tables use the older `check_positive` format (like Jaguar1,
- * via the shared PhyTableLoader). Bring-up is ported from the vendor
- * rtl88x2bu tree. Single chip — no per-variant strategy dispatch.
+ * Jaguar2 is a hybrid of the two existing generations: firmware download, MAC
+ * init and power sequencing follow the HalMAC path (like Jaguar3), while the
+ * phydm BB/AGC/RF register tables use the older `check_positive` format (like
+ * Jaguar1, via the shared PhyTableLoader). Bring-up is ported from the vendor
+ * rtl88x2bu (8822B) / rtl8821cu (8821C) trees.
  *
- * Milestone status: scaffold (M0). The bring-up sub-modules (HalJaguar2,
- * HalmacJaguar2Fw/MacInit, RadioManagementJaguar2, FrameParserJaguar2,
- * Halrf8822b) are added as the port progresses. */
+ * Multi-chip via jaguar2::ChipVariant (C8822B 2T2R / C8821C 1T1R), selected in
+ * the WiFiDriver factory from the SYS_CFG2 chip-id and threaded into HalJaguar2
+ * (Jaguar2PhyTables table data + RF-path count), HalmacJaguar2Fw (blob) and the
+ * Jaguar2Calibration IQK factory — the same strategy-dispatch shape as the
+ * Jaguar3 8822C/8822E HAL. */
 class RtlJaguar2Device : public IRtlDevice {
 public:
-  RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger);
+  RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger,
+                   jaguar2::ChipVariant variant = jaguar2::ChipVariant::C8822B);
   ~RtlJaguar2Device() override;
 
   void Init(Action_ParsedRadioPacket packetProcessor,
@@ -64,6 +68,7 @@ public:
 private:
   RtlUsbAdapter _device;
   Logger_t _logger;
+  jaguar2::ChipVariant _variant;
   jaguar2::HalJaguar2 _hal;
   jaguar2::HalmacJaguar2MacInit _macinit;
   jaguar2::HalmacJaguar2Fw _fw;

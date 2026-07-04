@@ -26,8 +26,9 @@ void delay_us(uint32_t us) {
 }
 } /* namespace */
 
-HalmacJaguar2Fw::HalmacJaguar2Fw(RtlUsbAdapter device, Logger_t logger)
-    : _device{device}, _logger{std::move(logger)} {}
+HalmacJaguar2Fw::HalmacJaguar2Fw(RtlUsbAdapter device, Logger_t logger,
+                                 ChipVariant variant)
+    : _device{device}, _logger{std::move(logger)}, _variant{variant} {}
 
 bool HalmacJaguar2Fw::download_default_firmware() {
   return download_firmware(array_mp_8822b_fw_nic, array_mp_8822b_fw_nic_len);

@@ -128,23 +128,34 @@ if(DEVOURER_8814)
     target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_8814=1)
 endif()
 
-# --- Jaguar2 (RTL8822BU / chip 8822B) ---
+# --- Jaguar2 (RTL8822BU / RTL8811CU-8821CU) ---
 # Hybrid: HalMAC firmware/MAC-init/pwr-seq (like Jaguar3) + the older
 # check_positive phydm table format (shared src/PhyTableLoader, like Jaguar1).
-# Single chip, so no per-variant strategy dispatch.
+# Multi-chip via ChipVariant strategy dispatch (Jaguar2PhyTables / Jaguar2-
+# Calibration), mirroring the Jaguar3 8822C/8822E split. The shared block below
+# holds the orchestrator/HAL/halmac/strategy-trio + the per-variant dispatcher
+# .cpp files (self-guarded on DEVOURER_HAVE_JAGUAR2_8822B/_8821C); each chip's
+# firmware blob + generated tables live in its own variant block.
 if(DEVOURER_JAGUAR2)
     target_sources(WiFiDriver PRIVATE
-        hal/hal8822b_fw.c hal/hal8822b_fw.h
-        hal/phydm/rtl8822b/Hal8822b_PhyTables.c hal/phydm/rtl8822b/Hal8822b_PhyTables.h
         src/jaguar2/RtlJaguar2Device.cpp src/jaguar2/RtlJaguar2Device.h
         src/jaguar2/HalJaguar2.cpp src/jaguar2/HalJaguar2.h
         src/jaguar2/HalmacJaguar2Fw.cpp src/jaguar2/HalmacJaguar2Fw.h
         src/jaguar2/HalmacJaguar2MacInit.cpp src/jaguar2/HalmacJaguar2MacInit.h
         src/jaguar2/HalmacJaguar2Regs.h
         src/jaguar2/FrameParserJaguar2.h
-        src/jaguar2/Halrf8822b.cpp src/jaguar2/Halrf8822b.h
-        src/jaguar2/PhyTableLoaderJaguar2.cpp src/jaguar2/PhyTableLoaderJaguar2.h)
+        src/jaguar2/ChipVariant.h
+        src/jaguar2/Jaguar2PhyTables.h
+        src/jaguar2/Jaguar2Calibration.h
+        src/jaguar2/Phy8822bTables.cpp
+        src/jaguar2/Halrf8822b.cpp src/jaguar2/Halrf8822b.h)
     target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2=1)
+    # 8822B variant data (firmware blob + generated phydm tables). In M0 this is
+    # the only variant; M1 splits it behind a DEVOURER_JAGUAR2_8822B option.
+    target_sources(WiFiDriver PRIVATE
+        hal/hal8822b_fw.c hal/hal8822b_fw.h
+        hal/phydm/rtl8822b/Hal8822b_PhyTables.c hal/phydm/rtl8822b/Hal8822b_PhyTables.h)
+    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2_8822B=1)
 endif()
 
 if(DEVOURER_JAGUAR3)

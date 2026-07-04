@@ -5,6 +5,7 @@
 
 #include "logger.h"
 #include "RtlUsbAdapter.h"
+#include "Jaguar2Calibration.h"
 
 namespace jaguar2 {
 
@@ -23,13 +24,13 @@ namespace jaguar2 {
  *
  * Milestone status: M5, incremental — foundation (backup/restore + per-K
  * settings) first; the nctl tone-measurement loops + orchestrator follow. */
-class Halrf8822b {
+class Halrf8822b : public Jaguar2Calibration {
 public:
   Halrf8822b(RtlUsbAdapter device, Logger_t logger, uint8_t cut, bool is_2t2r);
 
   /* phy_iq_calibrate_8822b entry (SW path). band2g: true=2.4G. Runs the full
    * per-path LOK/TXK/RXK, backing up and restoring MAC/BB/RF around it. */
-  void iqk_trigger(bool band2g);
+  void iqk_trigger(bool band2g) override;
 
 private:
   /* --- MASKDWORD/RF primitives (dm API shims) --- */

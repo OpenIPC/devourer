@@ -8,7 +8,6 @@
 
 #include "Hal8822b_TxpwrLmt.h" /* generated: hal8822b_txpwr_lmt() WW-min limits */
 #include "PhyTableLoader.h"
-#include "PhyTableLoaderJaguar2.h"
 
 namespace jaguar2 {
 
@@ -105,8 +104,10 @@ void run_pwr_seq(RtlUsbAdapter &dev, const PwrCfg *seq, uint32_t poll_max,
 }
 } /* namespace */
 
-HalJaguar2::HalJaguar2(RtlUsbAdapter device, Logger_t logger)
-    : _device{std::move(device)}, _logger{std::move(logger)} {}
+HalJaguar2::HalJaguar2(RtlUsbAdapter device, Logger_t logger,
+                       ChipVariant variant)
+    : _device{std::move(device)}, _logger{std::move(logger)},
+      _variant{variant}, _tables{make_jaguar2_phy_tables(variant)} {}
 
 void HalJaguar2::power_off() {
   run_pwr_seq(_device, kPwrOff8822bUsb, /*poll_max=*/2000, /*poll_fatal=*/false);
@@ -271,15 +272,15 @@ void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type) {
   phydm_pre_post_setting(/*post=*/false);
 
   auto bb = [this](uint32_t a, uint32_t v) { bb_write(a, v); };
-  const auto phy_reg = PhyTableLoaderJaguar2::phy_reg();
-  const auto agc_tab = PhyTableLoaderJaguar2::agc_tab();
+  const auto phy_reg = _tables->phy_reg();
+  const auto agc_tab = _tables->agc_tab();
   _logger->info("Jaguar2: applying BB phy_reg ({} words) + agc_tab ({} words)",
                 phy_reg.len, agc_tab.len);
   PhyTableLoader::Load(phy_reg.data, phy_reg.len, ctx, bb);
   PhyTableLoader::Load(agc_tab.data, agc_tab.len, ctx, bb);
 
-  const auto radioa = PhyTableLoaderJaguar2::radioa();
-  const auto radiob = PhyTableLoaderJaguar2::radiob();
+  const auto radioa = _tables->radioa();
+  const auto radiob = _tables->radiob();
   _logger->info("Jaguar2: applying RF radioa ({} words) + radiob ({} words)",
                 radioa.len, radiob.len);
   PhyTableLoader::Load(radioa.data, radioa.len, ctx,

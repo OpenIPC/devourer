@@ -6,6 +6,7 @@
 #include "logger.h"
 #include "RtlUsbAdapter.h"
 #include "SelectedChannel.h"
+#include "ChipVariant.h"
 
 namespace jaguar2 {
 
@@ -18,7 +19,8 @@ namespace jaguar2 {
  * cfg) lands next. */
 class HalmacJaguar2MacInit {
 public:
-  HalmacJaguar2MacInit(RtlUsbAdapter device, Logger_t logger);
+  HalmacJaguar2MacInit(RtlUsbAdapter device, Logger_t logger,
+                       ChipVariant variant = ChipVariant::C8822B);
 
   /* Pinmux / LED / GPIO + BB-RF disabled. Runs BEFORE power_on. */
   void pre_init_system_cfg();
@@ -65,6 +67,7 @@ private:
 
   RtlUsbAdapter _device;
   Logger_t _logger;
+  ChipVariant _variant;
   uint16_t _rsvd_boundary = 0;
   bool _set_bcn_boundary = true;
 };

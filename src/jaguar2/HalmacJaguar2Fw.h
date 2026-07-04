@@ -6,6 +6,7 @@
 
 #include "logger.h"
 #include "RtlUsbAdapter.h"
+#include "ChipVariant.h"
 
 namespace jaguar2 {
 
@@ -22,10 +23,11 @@ namespace jaguar2 {
  * have run first — supplied by HalmacJaguar2MacInit (M4). */
 class HalmacJaguar2Fw {
 public:
-  HalmacJaguar2Fw(RtlUsbAdapter device, Logger_t logger);
+  HalmacJaguar2Fw(RtlUsbAdapter device, Logger_t logger,
+                  ChipVariant variant = ChipVariant::C8822B);
 
   bool download_firmware(const uint8_t *fw_bin, size_t size);
-  bool download_default_firmware(); /* bundled hal8822b_fw NIC image */
+  bool download_default_firmware(); /* bundled per-variant NIC image */
 
   /* The reserved-page boundary FIFOPAGE_CTRL_2 is restored to after each
    * rsvd-page chunk (from the queue/page allocation). Set by MacInit before
@@ -64,6 +66,7 @@ private:
 
   RtlUsbAdapter _device;
   Logger_t _logger;
+  ChipVariant _variant;
   /* Per-chunk DLFW size. The vendor 8822B driver downloads in 4096-byte chunks
    * (4144-byte bulk-OUT incl. the 48-byte TX desc); this fits the HIQ page
    * space allocated by init_trx_cfg (64 pages) with margin. DLFW_PKT_MAX_SIZE is

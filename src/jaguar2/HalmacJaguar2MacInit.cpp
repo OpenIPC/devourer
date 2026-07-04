@@ -220,8 +220,10 @@ bool is_10m(ChannelWidth_t bw) {
 }
 } /* namespace */
 
-HalmacJaguar2MacInit::HalmacJaguar2MacInit(RtlUsbAdapter device, Logger_t logger)
-    : _device{std::move(device)}, _logger{std::move(logger)} {}
+HalmacJaguar2MacInit::HalmacJaguar2MacInit(RtlUsbAdapter device, Logger_t logger,
+                                           ChipVariant variant)
+    : _device{std::move(device)}, _logger{std::move(logger)},
+      _variant{variant} {}
 
 void HalmacJaguar2MacInit::enable_bb_rf(bool enable) {
   if (enable) {

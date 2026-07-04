@@ -13,7 +13,7 @@
 
 #include "BeamformingSounder.h"
 #include "FrameParserJaguar2.h"
-#include "Halrf8822b.h"
+#include "Jaguar2Calibration.h"
 #include "ToneMask.h"
 #include "RateDefinitions.h"
 #include "RxPacket.h"
@@ -27,9 +27,11 @@ extern "C" {
  * premature use is loud rather than silently wrong. Milestones M2..M7 replace
  * these bodies with the ported HalMAC / phydm / halrf sub-modules. */
 
-RtlJaguar2Device::RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger)
-    : _device{device}, _logger{logger}, _hal{device, logger},
-      _macinit{device, logger}, _fw{device, logger} {}
+RtlJaguar2Device::RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger,
+                                   jaguar2::ChipVariant variant)
+    : _device{device}, _logger{logger}, _variant{variant},
+      _hal{device, logger, variant}, _macinit{device, logger, variant},
+      _fw{device, logger, variant} {}
 
 RtlJaguar2Device::~RtlJaguar2Device() {
   /* Safety net: restore the chip if a CW tone is still armed. */
@@ -76,9 +78,10 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   _hal.do_lck(); /* LC calibration — lock the RF LO */
 
   if (!getenv("DEVOURER_SKIP_IQK")) {
-    jaguar2::Halrf8822b halrf(_device, _logger, _hal.chip_version().cut,
-                              _hal.chip_version().rf_2t2r != 0);
-    halrf.iqk_trigger(channel.Channel <= 14);
+    auto cal = jaguar2::make_jaguar2_calibration(
+        _variant, _device, _logger, _hal.chip_version().cut,
+        _hal.chip_version().rf_2t2r != 0);
+    cal->iqk_trigger(channel.Channel <= 14);
   } else {
     _logger->info("Jaguar2: IQK SKIPPED (DEVOURER_SKIP_IQK)");
   }

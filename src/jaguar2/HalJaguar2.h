@@ -2,9 +2,12 @@
 #define HAL_JAGUAR2_H
 
 #include <cstdint>
+#include <memory>
 
 #include "logger.h"
 #include "RtlUsbAdapter.h"
+#include "ChipVariant.h"
+#include "Jaguar2PhyTables.h"
 
 namespace jaguar2 {
 
@@ -16,7 +19,8 @@ namespace jaguar2 {
  * Firmware DLFW, MAC/BB/RF init and calibration are added in later milestones. */
 class HalJaguar2 {
 public:
-  HalJaguar2(RtlUsbAdapter device, Logger_t logger);
+  HalJaguar2(RtlUsbAdapter device, Logger_t logger,
+             ChipVariant variant = ChipVariant::C8822B);
 
   /* Card-enable power sequence (card-disable -> card-emulation -> active),
    * transcribed from halmac card_en_flow_8822b (USB/ALL entries). Runs
@@ -152,6 +156,9 @@ private:
 
   RtlUsbAdapter _device;
   Logger_t _logger;
+  ChipVariant _variant;
+  /* Per-chip phydm BB/AGC/RF table data, selected by _variant. */
+  std::unique_ptr<Jaguar2PhyTables> _tables;
   ChipVersion _ver{};
   bool _aac_checked = false;
   uint32_t _last_fa = 0; /* last DIG-window false-alarm count (telemetry) */

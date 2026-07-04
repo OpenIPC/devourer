@@ -486,6 +486,16 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
                                                    : 0;
   uint8_t rate_id = vht ? 9 : 8;
 
+  /* 40-in-80: a 40 MHz frame on an 80 MHz-configured channel needs a data
+   * sub-channel telling the PHY which 40 MHz half to use — the lower 40 (which
+   * carries the primary), VHT_DATA_SC_40_LOWER_OF_80MHZ = 10. The 40 MHz
+   * waveform then rides the 80 MHz RF path and stays decodable by a standard
+   * HT40 receiver on the lower-40 channel (the `iw 80MHz` + 40 MHz-radiotap
+   * equivalent). */
+  uint8_t data_sc = 0;
+  if (_channel.ChannelWidth == CHANNEL_WIDTH_80 && bwidth == CHANNEL_WIDTH_40)
+    data_sc = 10; /* VHT_DATA_SC_40_LOWER_OF_80MHZ */
+
   /* Group-address (broadcast/multicast) detection: addr1 is the first MAC
    * address in the 802.11 header (after the 2-byte FC + 2-byte duration). Its
    * I/G bit (bit0 of the first octet) marks a group address; set BMC to match
@@ -500,7 +510,7 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
   jaguar3::fill_data_tx_desc_8822c(
       usb_frame.data(), static_cast<uint16_t>(frame_len),
       MRateToHwRate(fixed_rate), rate_id, bw_desc, sgi != 0, ldpc != 0, stbc,
-      bmc, ndpa);
+      bmc, ndpa, data_sc);
   std::memcpy(usb_frame.data() + jaguar3::TXDESC_SIZE_8822C,
               packet + radiotap_length, frame_len);
 

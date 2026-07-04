@@ -40,7 +40,13 @@ generations that share one core: **rtl8822c** (RTL8812CU / RTL8822CU, `0bda:c812
 and **rtl8822e** (RTL8812EU / RTL8822EU, `0bda:a81a`). Bring-up is ported from
 Realtek's vendor source — power-on, HalMAC firmware download, MAC/BB/RF init,
 halrf calibration (DACK, IQK, TXGAPK, thermal tracking), RX, and on-air TX at
-20 MHz plus the **5/10 MHz narrowband** re-clock the Jaguar-1 silicon lacks.
+20/40 MHz, the **5/10 MHz narrowband** re-clock the Jaguar-1 silicon lacks, and
+an **80 MHz** channel that also carries a **40-in-80** frame (a 40 MHz frame on
+an 80 MHz-tuned channel, landing on the lower 40 via the TX-descriptor DATA_SC —
+the userspace equivalent of `iw 80MHz` + a 40 MHz radiotap; the 40 MHz frame
+decodes on a standard HT40 receiver on the lower-40 channel). HT40 tunes the
+central channel (primary ± 2, `DEVOURER_HOP_BW=40` / `DEVOURER_HOP_OFFSET`);
+80 MHz takes the block's lowest 20 MHz as primary (`DEVOURER_HOP_BW=80`).
 Per-generation PHY/RF tables and calibration sit behind strategy interfaces
 (`Jaguar3PhyTables`, `Jaguar3Calibration`); the flow and table-walker are shared.
 

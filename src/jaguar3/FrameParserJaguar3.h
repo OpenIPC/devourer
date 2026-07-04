@@ -42,6 +42,7 @@ constexpr size_t RXDESC_SIZE_8822C = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_NAVUSEHDR_8822C(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x0C, 15, 1, v)
 #define SET_TX_DESC_NDPA_8822C(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x0C, 22, 2, v)
 #define SET_TX_DESC_DATARATE_8822C(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x10, 0, 7, v)
+#define SET_TX_DESC_DATA_SC_8822C(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 0, 4, v)
 #define SET_TX_DESC_DATA_SHORT_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x14, 4, 1, v)
 #define SET_TX_DESC_DATA_BW_8822C(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 5, 2, v)
 #define SET_TX_DESC_DATA_LDPC_8822C(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 7, 1, v)
@@ -94,7 +95,8 @@ inline void cal_txdesc_chksum_8822c(uint8_t *txdesc) {
 inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
                                     uint8_t rate_hw, uint8_t rate_id, uint8_t bw,
                                     bool short_gi, bool ldpc, uint8_t stbc,
-                                    bool bmc = false, bool ndpa = false) {
+                                    bool bmc = false, bool ndpa = false,
+                                    uint8_t data_sc = 0) {
   SET_TX_DESC_TXPKTSIZE_8822C(d, pkt_size);
   SET_TX_DESC_OFFSET_8822C(d, static_cast<uint32_t>(TXDESC_SIZE_8822C));
   SET_TX_DESC_LS_8822C(d, 1);
@@ -120,6 +122,10 @@ inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
   SET_TX_DESC_SW_DEFINE_8822C(d, 1);
   SET_TX_DESC_DATARATE_8822C(d, rate_hw);
   SET_TX_DESC_DATA_BW_8822C(d, bw);
+  /* Data sub-channel: which 20/40 MHz slice of a wider configured channel the
+   * frame occupies (VHT_DATA_SC_*). 0 = DONT_CARE (frame BW == channel BW). Set
+   * for a 40 MHz frame on an 80 MHz channel — the stall-free 40-in-80 path. */
+  SET_TX_DESC_DATA_SC_8822C(d, data_sc);
   SET_TX_DESC_DATA_SHORT_8822C(d, short_gi ? 1 : 0);
   SET_TX_DESC_DATA_LDPC_8822C(d, ldpc ? 1 : 0);
   SET_TX_DESC_DATA_STBC_8822C(d, stbc & 0x3);

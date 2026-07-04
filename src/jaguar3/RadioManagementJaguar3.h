@@ -33,6 +33,11 @@ public:
    * the baseband DAC/ADC clock + small-BW field for 5/10/20 MHz. */
   void set_bandwidth_dividers(ChannelWidth_t bwmode);
 
+  /* MAC-side bandwidth + TX sub-channel (halmac cfg_bw_88xx / cfg_pri_ch_idx):
+   * REG_WMAC_TRXPTCL_CTL 0x668 BIT7 (40M) and REG_DATA_SC 0x483 TXSC fields.
+   * pri is the BB primary-sub-channel index (0 for 20M). */
+  void set_mac_bw_txsc(ChannelWidth_t bw, uint8_t pri);
+
   /* Set the TX-power reference (7-bit index, both paths). With zero_diffs=true
    * (the DEVOURER_TX_PWR debug knob) the per-rate diff table is flattened so
    * every rate emits at `idx`. With zero_diffs=false (the default bring-up path)

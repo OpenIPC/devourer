@@ -165,6 +165,10 @@ private:
   /* config_phydm_switch_rf_set_8821c: RX front-end mux (0xcb8/0xa84/0xa80).
    * rf_set: 0=BTG (2.4G path B), 1=WLG (2.4G path A), 2=WLA (5G). */
   void switch_rf_set_8821c(uint8_t rf_set);
+  /* ex_hal8821c_wifi_only_hw_config + switch_antenna: 8821C-specific WiFi-only
+   * coex (GNT->WL + 0xcb4[29:28] SPDT antenna switch), distinct from the 8822B
+   * coex_wlan_only register set. */
+  void coex_wlan_only_8821c(bool is_5g);
   /* _phy_lc_calibrate_8821c: RF-firmware LCK (RF 0xcc/0xc4), no poll. */
   void do_lck_8821c();
 

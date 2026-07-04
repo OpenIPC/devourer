@@ -866,6 +866,10 @@ void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
  * set. Omitting it leaves the antenna-path select bits at their reset value, so
  * WL TX/RX runs through an unselected/mismatched path (weak, distorted on air). */
 void HalJaguar2::coex_wlan_only(bool is_5g) {
+  if (_variant == ChipVariant::C8821C) {
+    coex_wlan_only_8821c(is_5g);
+    return;
+  }
   _device.phy_set_bb_reg(0x004c, 0x01800000, 0x2); /* BB control */
   _device.phy_set_bb_reg(0x0cb4, 0xff, 0x77);      /* SW control */
   _device.phy_set_bb_reg(0x0974, 0x300, 0x3);      /* antenna mux switch */
@@ -878,6 +882,48 @@ void HalJaguar2::coex_wlan_only(bool is_5g) {
   _device.phy_set_bb_reg(0x0cbc, 0x300, is_5g ? 0x1 : 0x2);
   _logger->info("Jaguar2: coex WL-only antenna grant applied (is_5g={})",
                 is_5g ? 1 : 0);
+}
+
+/* ex_hal8821c_wifi_only_hw_config + hal8821c_wifi_only_switch_antenna
+ * (reference/8821cu/hal/btc/halbtc8821cwifionly.c). The 8821C wifi-only coex
+ * differs from the 8822B: the GNT/owner and the SPDT/DPDT external-antenna
+ * switch use different registers (0x70[26], 0x1700/0x1704, 0x6c0/0x6c4, and the
+ * antenna switch on 0xcb4[29:28] driven by rfe_module_type — NOT the 8822B
+ * 0xcbc[9:8]). */
+void HalJaguar2::coex_wlan_only_8821c(bool is_5g) {
+  /* hw_config: GNT owner -> WL, gnt_wl=1/gnt_bt=0. */
+  _device.phy_set_bb_reg(0x0070, 0x04000000, 0x1);
+  _device.phy_set_bb_reg(0x1704, 0xffffffff, 0x7700);
+  _device.phy_set_bb_reg(0x1700, 0xffffffff, 0xc00f0038);
+  _device.phy_set_bb_reg(0x06c0, 0xffffffff, 0xaaaaaaaa);
+  _device.phy_set_bb_reg(0x06c4, 0xffffffff, 0xaaaaaaaa);
+
+  /* switch_antenna: rfe_module_type = efuse RFE & 0x1f decides the ext-ant
+   * switch existence + polarity. */
+  const uint8_t rfe_mod =
+      static_cast<uint8_t>((_efuse_valid ? _efuse_map[0xCA] : 0) & 0x1f);
+  const bool exist = !(rfe_mod == 5 || rfe_mod == 6);
+  if (!exist) {
+    _logger->info("Jaguar2/8821C: coex WL-only (rfe_mod={} no ext-ant switch)",
+                  rfe_mod);
+    return;
+  }
+  const bool wlg_at_btg = (rfe_mod == 2 || rfe_mod == 4 || rfe_mod == 7);
+  const bool ant_at_main = !(rfe_mod == 3 || rfe_mod == 4);
+  bool inv = false; /* ext_ant_switch_ctrl_polarity = 0 */
+  if (!ant_at_main)
+    inv = !inv;
+  if (!is_5g && !wlg_at_btg) /* WLG: swap if WLG not at BTG */
+    inv = !inv;
+
+  /* BBSW control (no antenna-diversity): 0x4c[24:23]=2, 0xcb4[7:0]=0x77,
+   * 0xcb4[29:28] = 1 (no inverse) / 2 (inverse). */
+  _device.phy_set_bb_reg(0x004c, 0x01800000, 0x2);
+  _device.phy_set_bb_reg(0x0cb4, 0x000000ff, 0x77);
+  _device.phy_set_bb_reg(0x0cb4, 0x30000000, inv ? 0x2 : 0x1);
+  _logger->info("Jaguar2/8821C: coex WL-only antenna (rfe_mod={} wlg@btg={} "
+                "main={} inv={} is_5g={})",
+                rfe_mod, wlg_at_btg, ant_at_main, inv, is_5g ? 1 : 0);
 }
 
 void HalJaguar2::rfe_init() {

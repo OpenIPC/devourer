@@ -216,15 +216,15 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   env must be set **before** `InitWrite` (it keeps the RX filters open and
   enables the RX path during bring-up — retrofitting RX onto a TX-only bring-up
   is unreliable), and the coex thread's C2H drain yields bulk-IN to the RX loop.
-  On the 8822E, TX+RX mode trades the per-rate TXAGC + DPK-bypass away for a
-  working RX (either one desenses the EU's RX to near-deaf; flat table TX power
-  instead). This is the single-radio beamforming self-sounding ground station —
-  pair with `DEVOURER_BF_ARM_SOUNDER`/`DEVOURER_TX_NDPA` and
+  On the 8822E, TX+RX mode leaves the path-B OFDM TXAGC reference (0x41e8) at
+  its table default — any nonzero value in that one field desenses the EU's RX
+  to near-deaf (hardware-bisected, value-independent; the rest of the per-rate
+  power applies normally). This is the single-radio beamforming self-sounding
+  ground station — pair with `DEVOURER_BF_ARM_SOUNDER`/`DEVOURER_TX_NDPA` and
   `DEVOURER_BF_DETECT_REPORT` to sound and capture your own reports in one
-  process (`docs/beamforming-self-sounding.md`; hardware-validated on Jaguar1 —
-  the 8814AU captures its own report stream; on Jaguar3 the sounder emits
-  NDPA+NDP and the beamformee replies, but the sounder's own RX does not
-  surface the report frames — capture them on a second radio there). Any other
+  process (`docs/beamforming-self-sounding.md`; hardware-validated on Jaguar1
+  (8814AU) and on both Jaguar3 variants — 50k+ self-captured reports per 20 s
+  at full sounding rate). Any other
   non-empty value selects the legacy `fork()` RX child — Termux-only
   (`libusb_wrap_sys_device` keeps the fd shared across fork); on regular Linux
   the forked bring-ups race and die with `rtw_read: iostream error`.

@@ -69,23 +69,17 @@ DEVOURER_PID=0x8812 DEVOURER_CHANNEL=100 DEVOURER_TX_RATE=VHT2SS_MCS0 \
 DEVOURER_PID=0x8813 DEVOURER_CHANNEL=100 DEVOURER_BF_DETECT_REPORT=4 \
   WiFiDriverDemo | tools/bf_report_decode.py
 
-# single-radio beamformer (Jaguar-1): the report is addressed TO the sounder,
-# so one adapter can sound and capture its own reports —
-# DEVOURER_TX_WITH_RX=thread runs the RX worker loop on a thread next to the
-# TX loop (one bring-up, one claimed handle; see StartRxLoop in IRtlDevice).
-# Hardware-validated on the 8814AU (thousands of self-captured reports); on a
-# Jaguar-3 sounder the NDPA+NDP+report exchange works but the sounder's own RX
-# does not surface the reports — use a second capture radio there.
+# single-radio beamformer: the report is addressed TO the sounder, so one
+# adapter can sound and capture its own reports — DEVOURER_TX_WITH_RX=thread
+# runs the RX worker loop on a thread next to the TX loop (one bring-up, one
+# claimed handle; see StartRxLoop in IRtlDevice). Hardware-validated on the
+# 8814AU (Jaguar-1) and on both Jaguar-3 variants (8822CU / 8822EU, 50k+
+# self-captured reports per 20 s at full sounding rate). On Jaguar-3,
+# DEVOURER_BF_ARM_SOUNDER takes the sounder MAC (programs the self-MAC 0x610).
 DEVOURER_PID=0x8812 DEVOURER_CHANNEL=100 DEVOURER_TX_RATE=VHT2SS_MCS0 \
   DEVOURER_TX_NDPA_RA=<beamformee-mac> DEVOURER_TX_NDPA=1 \
   DEVOURER_BF_ARM_SOUNDER=1 DEVOURER_TX_WITH_RX=thread \
   DEVOURER_BF_DETECT_REPORT=4 WiFiDriverTxDemo | tools/bf_report_decode.py
-
-# Jaguar-3 sounder (NDPA descriptor mark + MAC sounding-engine arm;
-# DEVOURER_BF_ARM_SOUNDER also takes the sounder MAC to program 0x610):
-DEVOURER_PID=0xc812 DEVOURER_CHANNEL=100 DEVOURER_TX_RATE=VHT2SS_MCS0 \
-  DEVOURER_TX_NDPA_RA=<beamformee-mac> DEVOURER_TX_NDPA=1 \
-  DEVOURER_BF_ARM_SOUNDER=57:42:75:05:d6:00 WiFiDriverTxDemo
 ```
 
 Gotchas that cost time during bring-up:

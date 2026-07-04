@@ -263,9 +263,8 @@ static bool pg_addr_to_rates(uint32_t addr, std::array<uint8_t, 4> &rates) {
 }
 #endif /* DEVOURER_HAVE_JAGUAR3_8822E */
 
-void RadioManagementJaguar3::apply_power_by_rate_8822e(uint8_t channel,
-                                                       uint8_t ref_a,
-                                                       uint8_t ref_b) {
+void RadioManagementJaguar3::apply_power_by_rate_8822e(
+    uint8_t channel, uint8_t ref_a, uint8_t ref_b, bool skip_path_b_ofdm_ref) {
 #if defined(DEVOURER_HAVE_JAGUAR3_8822E)
   /* Port of the phy_reg_pg (power-by-rate) apply that devourer's table walk
    * skips. The 8822e TXAGC is ref + per-rate diff: the OFDM/HT/VHT reference
@@ -306,7 +305,8 @@ void RadioManagementJaguar3::apply_power_by_rate_8822e(uint8_t channel,
     _device.phy_set_bb_reg(off, mask, v);
   };
   wr(0x18e8, 0x1fc00, ref_a);     /* path A OFDM/HT/VHT ref */
-  wr(0x41e8, 0x1fc00, ref_b);     /* path B (efuse gives a distinct per-path base) */
+  if (!skip_path_b_ofdm_ref)
+    wr(0x41e8, 0x1fc00, ref_b);   /* path B — RX-desense hazard, see header */
   wr(0x18a0, 0x7f0000, ref_a);    /* CCK ref (2.4G) */
   wr(0x41a0, 0x7f0000, ref_b);
 

@@ -929,6 +929,19 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
    * BW40/80 is future work (uses BW40/BW80 diffs). */
   if (channel == 0)
     return;
+  /* 8821C per-rate TX power comes from the phy_reg_pg table (+ EFUSE bb-swing /
+   * per-channel deltas), NOT the 8822B 0x10 EFUSE power-by-rate layout this
+   * function reads — there is no EEPROM_TX_PWR_INX_8821C. Applying the 8822B
+   * layout to an 8821C efuse feeds it unrelated bytes, so skip it and keep the
+   * TXAGC the 8821C phy_reg BB table already programmed (the chip's designed
+   * baseline; TX radiates and decodes). Full phy_reg_pg-based per-rate
+   * calibration + txpwr_lmt clamp is a follow-up; DEVOURER_TX_PWR (flat TXAGC
+   * override) still works for SDR power control. */
+  if (_variant == ChipVariant::C8821C) {
+    _logger->info("Jaguar2/8821C: apply_tx_power — using phy_reg TXAGC baseline "
+                  "(8822B efuse power-by-rate layout N/A on 8821C)");
+    return;
+  }
   const bool g5 = channel > 14;
 
   /* EFUSE power-by-rate from logical 0x10 (pg_txpwr_saddr). Per path: 2.4G block

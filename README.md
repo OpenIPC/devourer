@@ -193,12 +193,15 @@ Common to both demos:
   `N + 40`). For throughput testing — `N=3993` is wfb-ng's max frame payload.
 - `DEVOURER_CW_TONE=1` — emit a bare RF local-oscillator CW carrier at the
   `DEVOURER_CHANNEL` center frequency (Realtek MP single-tone, path A). Supported
-  on Jaguar-1 (8812AU/8821AU via OFDM/CCK off + RFE pinmux; 8814AU via CCA off +
-  per-path TX-scale zero) and Jaguar-2 (8822BU via OFDM/CCK off + RFE pinmux +
-  RFE-inverse). The demo idle-holds the carrier until SIGINT, then restores the
-  chip. `DEVOURER_CW_TONE_GAIN=0..31` sets the RF gain index (`RF 0x00[4:0]`,
-  default 0 = lowest). A controllable narrowband interferer / MP tone source;
-  SDR-validate with `tests/cw_tone_sdr.sh` (+ `tests/cw_tone_probe.py`).
+  on all USB generations, each via its own vendor recipe: Jaguar-1 (8812AU/8821AU
+  via OFDM/CCK off + RFE pinmux; 8814AU via CCA off + per-path TX-scale zero),
+  Jaguar-2 (8822BU via OFDM/CCK off + RFE pinmux + RFE-inverse), and Jaguar-3
+  (8822CU/8822EU — the halbb generation needs the RF-mode register written through
+  the HSSI 3-wire port and the BB held in continuous TX, else its RF state machine
+  re-drives the mode back to RX). The demo idle-holds the carrier until SIGINT,
+  then restores the chip. `DEVOURER_CW_TONE_GAIN=0..31` sets the RF gain index
+  (`RF 0x00[4:0]`, default 0 = lowest). A controllable narrowband interferer / MP
+  tone source; SDR-validate with `tests/cw_tone_sdr.sh` (+ `tests/cw_tone_probe.py`).
 
 On-air TX throughput vs wfb-ng (SDR-verified parity; how to reproduce) is
 documented in [`docs/wfb-ng-tuning.md`](docs/wfb-ng-tuning.md).

@@ -11,6 +11,30 @@ namespace jaguar3 {
 namespace {
 constexpr uint32_t MASKDWORD = 0xFFFFFFFFu;
 
+/* Run a bring-up calibration step that issues a very large number of USB
+ * control-IN reads (DACK/IQK poll loops fire tens of thousands of rtw_read
+ * calls), re-running it if a transient USB glitch makes rtw_read throw
+ * std::ios_base::failure. Without this a single mid-DACK NAK/timeout aborts the
+ * whole bring-up (std::terminate) — the same class of glitch StartRxLoop already
+ * retry-wraps for post-InitWrite reads. Each calibration pass resets the AFE, so
+ * a re-run is idempotent. Rethrows after `tries` exhausted (a persistent failure
+ * is a real error, not a glitch). */
+template <typename F>
+void retry_cal(Logger_t &logger, const char *what, F &&step, int tries = 3) {
+  for (int attempt = 1;; ++attempt) {
+    try {
+      step();
+      return;
+    } catch (const std::exception &e) {
+      if (attempt >= tries)
+        throw;
+      logger->error("Jaguar3 {}: USB read glitch ({}) — retry {}/{}", what,
+                    e.what(), attempt, tries - 1);
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+  }
+}
+
 /* Writer for BB / AGC tables: handles the 0xf9..0xfe pseudo-address delay
  * encoding (see odm_config_bb_phy_8822c) and otherwise does a full-dword BB
  * write. */
@@ -42,7 +66,11 @@ void HalJaguar3::run_iqk(SelectedChannel channel) {
     _device.rtw_write16(0x0522, 0x0000);
     return;
   }
-  _cal->phy_iq_calibrate(channel.ChannelWidth, channel.Channel);
+  /* IQK shares DACK's heavy USB-read poll profile — retry on a transient glitch
+   * rather than aborting bring-up. */
+  retry_cal(_logger, "IQK", [&] {
+    _cal->phy_iq_calibrate(channel.ChannelWidth, channel.Channel);
+  });
   /* IQK's macbb() sets REG_TXPAUSE (0x522)=0xff to halt TX during calibration,
    * and the IQK MAC restore only covers {0x520,0x1c,0x70} — TXPAUSE is left
    * paused. The vendor clears it when bringing TX up; for monitor inject we must
@@ -97,7 +125,10 @@ void HalJaguar3::rtw_hal_init(SelectedChannel channel) {
   config_pa_bias_8822e();          /* kfree: efuse PA-bias trim -> RF 0x60 */
   config_phydm_parameter_init();   /* POST_SETTING: 3-wire + OFDM/CCK block + bb-reset */
   init_rfk();                      /* RF cal_init (0x1B00); IQK runs via run_iqk */
-  _cal->dac_calibrate();            /* halrf DACK — DAC cal before IQK (halrf_init) */
+  /* halrf DACK — DAC cal before IQK. Retry-wrapped: its status-poll loops issue
+   * tens of thousands of USB reads and an intermittent glitch was aborting
+   * bring-up (rtw_read iostream error, seen on 8822EU). */
+  retry_cal(_logger, "DACK", [this] { _cal->dac_calibrate(); });
   bf_init();                       /* rtl8822c_phy_bf_init (rtl8822c_halinit.c) */
   monitor_rx_cfg();                /* devourer monitor-mode RX enable */
   enable_tx_path();                /* enable OFDM/CCK TX block (gates on-air TX) */

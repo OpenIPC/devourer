@@ -113,8 +113,11 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
 #if defined(DEVOURER_HAVE_JAGUAR1)
   _logger->info("Creating RtlJaguarDevice (PID 0x{:04x}, chip-id 0x{:02x})", pid,
                 chip_id);
-  return std::make_unique<RtlJaguarDevice>(RtlUsbAdapter(dev_handle, _logger),
-                                           _logger);
+  /* Pass ctx so RtlUsbAdapter::_ctx is set: the Jaguar1 RX loop now drives an
+   * async URB queue (bulk_read_async_loop) whose event pump needs the same
+   * libusb context the handle was opened on (as Jaguar2/3 already do above). */
+  return std::make_unique<RtlJaguarDevice>(
+      RtlUsbAdapter(dev_handle, _logger, ctx), _logger);
 #else
   _logger->error("Jaguar1 chip (PID 0x{:04x}, chip-id 0x{:02x}) detected but "
                  "Jaguar1 support not compiled in",

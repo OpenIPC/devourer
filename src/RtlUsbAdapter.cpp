@@ -1,5 +1,6 @@
 #include "RtlUsbAdapter.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #if defined(__ANDROID__) || defined(_MSC_VER) || defined(__APPLE__)
@@ -20,7 +21,10 @@ namespace {
 struct AsyncRxShared {
   const std::function<void(const uint8_t *, int)> *cb;
   const std::function<bool()> *stop;
-  int active;
+  /* Atomic: in co-running (TX + self-capture RX) mode both the RX loop's own
+   * event pump and the TX event loop may run this callback, so `active` is
+   * written from the pump thread while the loop below reads it. */
+  std::atomic<int> active{0};
 };
 extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
   auto *s = static_cast<AsyncRxShared *>(t->user_data);
@@ -38,7 +42,7 @@ void RtlUsbAdapter::bulk_read_async_loop(
     int buf_size, int n_urbs,
     const std::function<void(const uint8_t *, int)> &on_data,
     const std::function<bool()> &should_stop) {
-  AsyncRxShared sh{&on_data, &should_stop, 0};
+  AsyncRxShared sh{&on_data, &should_stop};
   std::vector<libusb_transfer *> xfers;
   std::vector<std::vector<uint8_t>> bufs(n_urbs,
                                          std::vector<uint8_t>(buf_size));
@@ -53,7 +57,7 @@ void RtlUsbAdapter::bulk_read_async_loop(
       libusb_free_transfer(t);
     }
   }
-  _logger->info("Jaguar3 RX: async queue of {} URBs submitted", sh.active);
+  _logger->info("RX: async queue of {} URBs submitted", sh.active.load());
   while (!should_stop() && sh.active > 0) {
     struct timeval tv {0, 100000};
     libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
@@ -410,15 +414,18 @@ void RtlUsbAdapter::GetChipOutEP8812() {
                 (int)OutEpNumber);
 }
 
-void transfer_callback(struct libusb_transfer *transfer) {
-  Logger *_logger = (Logger *)(transfer->user_data);
+void RtlUsbAdapter::transfer_callback(struct libusb_transfer *transfer) {
+  auto *self = static_cast<RtlUsbAdapter *>(transfer->user_data);
   if (transfer->status == LIBUSB_TRANSFER_COMPLETED &&
       transfer->actual_length == transfer->length) {
-    _logger->debug("Packet {} sent successfully, length: {}", _logger,
-                  transfer->length);
+    self->_logger->debug("Packet sent successfully, length: {}",
+                         transfer->length);
   } else {
-    _logger->error("Failed to send packet {}, status: {}, actual length: {}",
-                   _logger, transfer->status, transfer->actual_length);
+    /* Flag the bulk-OUT as possibly halted so the next send_packet (on the TX
+     * thread) re-clear_halts it before the following frame. */
+    self->_tx_wedged->store(true, std::memory_order_relaxed);
+    self->_logger->error("Failed to send packet, status: {}, actual length: {}",
+                         transfer->status, transfer->actual_length);
   }
   libusb_free_transfer(transfer);
 }
@@ -443,6 +450,24 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
       return _bulk_out_eps[0];
     }
     return 0x02;
+  }();
+
+  /* Recover a bulk-OUT that a prior async TX wedged (TIMED_OUT / stall). Only
+   * the first send used to clear_halt; a mid-stream stall (e.g. hardware NDP
+   * generation on some xhci hosts) then stayed wedged forever. */
+  if (_tx_wedged->exchange(false)) {
+    int hr = libusb_clear_halt(_dev_handle, tx_ep);
+    _logger->info("TX EP 0x{:02X} re-clear_halt after wedge rc={}", (int)tx_ep,
+                  hr);
+  }
+
+  /* TX bulk-OUT timeout (ms). DEVOURER_TX_TIMEOUT_MS override, default
+   * USB_TIMEOUT. Scoped to TX only — control transfers keep USB_TIMEOUT.
+   * Computed once. */
+  static const unsigned tx_timeout_ms = []() -> unsigned {
+    if (const char *e = std::getenv("DEVOURER_TX_TIMEOUT_MS"))
+      return static_cast<unsigned>(std::strtoul(e, nullptr, 0));
+    return USB_TIMEOUT;
   }();
 
   /* On the FIRST send only, dump the bulk-OUT bytes to compare against
@@ -484,8 +509,8 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
   }
 
   libusb_fill_bulk_transfer(transfer, _dev_handle, tx_ep, packet, length,
-                            transfer_callback, (void *)(_logger.get()),
-                            USB_TIMEOUT);
+                            &RtlUsbAdapter::transfer_callback, (void *)this,
+                            tx_timeout_ms);
   /* Upstream OOT (rtl8814a/usb/rtl8814au_xmit.c) sets URB_ZERO_PACKET on
    * every TX URB. libusb equivalent: LIBUSB_TRANSFER_ADD_ZERO_PACKET.
    * Without it the chip's SuperSpeed bulk OUT controller can wait

@@ -48,8 +48,17 @@ void RtlUsbAdapter::bulk_read_async_loop(
                                          std::vector<uint8_t>(buf_size));
   for (int i = 0; i < n_urbs; i++) {
     libusb_transfer *t = libusb_alloc_transfer(0);
+    /* timeout=0 (infinite): a persistent RX ring — each URB stays posted until
+     * a frame arrives (COMPLETED), the queue is torn down (CANCELLED, below),
+     * or the device errors. This is the kernel rtw88 RX-URB idiom. A finite
+     * timeout here would fire once per idle interval on a quiet channel, and
+     * libusb's darwin backend logs every LIBUSB_TRANSFER_TIMED_OUT at WARNING
+     * level — a continuous "transfer error: timed out" flood that carries no
+     * information (RX is healthy; bulk-IN is simply idle) and can bloat a long
+     * capture's stderr. The devourer_rx_cb resubmit-on-TIMED_OUT branch is kept
+     * as a defensive no-op should a backend still surface a timeout. */
     libusb_fill_bulk_transfer(t, _dev_handle, _bulk_in_ep, bufs[i].data(),
-                              buf_size, devourer_rx_cb, &sh, 1000);
+                              buf_size, devourer_rx_cb, &sh, 0);
     if (libusb_submit_transfer(t) == 0) {
       xfers.push_back(t);
       sh.active++;

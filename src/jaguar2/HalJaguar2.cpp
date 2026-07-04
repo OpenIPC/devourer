@@ -133,7 +133,8 @@ void HalJaguar2::read_chip_version() {
   _ver.vendor = (vend <= 2) ? vend : 0;
 
   static const char *vn[] = {"TSMC", "SMIC", "UMC"};
-  _logger->info("Jaguar2 chip: 8822B cut={} ({}{}) {} (SYS_CFG1=0x{:08x})",
+  const char *chip = _variant == ChipVariant::C8821C ? "8821C" : "8822B";
+  _logger->info("Jaguar2 chip: {} cut={} ({}{}) {} (SYS_CFG1=0x{:08x})", chip,
                 _ver.cut, vn[_ver.vendor], _ver.test_chip ? ",test" : "",
                 _ver.rf_2t2r ? "2T2R" : "1T1R", v);
 }

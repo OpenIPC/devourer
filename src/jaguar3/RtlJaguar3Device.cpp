@@ -196,6 +196,9 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
  * (exception path / caller that drops the device) — a joinable std::thread in
  * the destructor would otherwise std::terminate. Idempotent with Stop(). */
 RtlJaguar3Device::~RtlJaguar3Device() {
+  /* Safety net: restore the chip if a CW tone is still armed (before the coex
+   * thread is joined — StopCwTone serializes on _reg_mu with it). */
+  StopCwTone();
   _coex_stop = true;
   if (_coex_thread.joinable())
     _coex_thread.join();
@@ -273,6 +276,47 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   _hal.dpk_force_bypass_8822e(); /* 8822e rfe 21/22: kernel bypasses DPK (after IQK) */
   _hal.config_rfe(channel.Channel); /* 8822e RFE/PAPE antenna-switch pins (PA enable) */
   _hal.config_channel_8822e(channel.Channel); /* 8822e band TX scaling/backoff + shaping */
+
+  /* DEVOURER_CW_TONE — a bare RF LO carrier. Armed HERE (before the FW power-mode
+   * / coex H2C steps below, which on the 8812EU at 5 GHz leave the chip NAKing
+   * control-IN reads that StartCwTone's BB reads need). A bare tone needs none of
+   * the per-rate TX power / coex / FW-coex setup. On the 8822e the RFE PA-enable
+   * pins (GPIO_MUXCFG 0x40 / PAD_CTRL 0x64) still must be driven for 5 GHz PA
+   * output — but that write ALSO breaks subsequent BB reads, so we snapshot the
+   * two registers first, arm the tone (reads intact), then blind-write the PA
+   * pins. No coex thread (its tick would re-drive RF 0x00 back to RX). */
+  if (std::getenv("DEVOURER_CW_TONE")) {
+    uint8_t g = 0;
+    if (const char *e = std::getenv("DEVOURER_CW_TONE_GAIN"))
+      g = static_cast<uint8_t>(std::atoi(e)) & 0x1F;
+    const bool is_eu = _variant == jaguar3::ChipVariant::C8822E;
+    uint32_t v40 = 0, v64 = 0;
+    if (is_eu) {
+      v40 = _device.rtw_read<uint32_t>(0x0040);
+      v64 = _device.rtw_read<uint32_t>(0x0064);
+    }
+    for (int attempt = 1;; ++attempt) {
+      try {
+        StartCwTone(g);
+        break;
+      } catch (const std::exception &ex) {
+        if (attempt >= 4) {
+          _logger->error("CW tone arm failed after retries ({})", ex.what());
+          break;
+        }
+        _logger->error("CW tone arm: USB glitch ({}) — retry {}/3", ex.what(),
+                       attempt);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+      }
+    }
+    if (is_eu) { /* drive the RFE PA-enable pins with blind writes (no read) */
+      _device.rtw_write<uint32_t>(0x0040, v40 | 0x14030008u);
+      _device.rtw_write<uint32_t>(0x0064, v64 & ~0x02040000u);
+    }
+    _logger->info("Jaguar3: CW tone hold (minimal bring-up, no coex thread)");
+    return;
+  }
+
   if (_tx_pwr_override >= 0) {
     _radioManagement.set_tx_power_ref(static_cast<uint8_t>(_tx_pwr_override));
   } else if (_variant == jaguar3::ChipVariant::C8822E) {
@@ -327,6 +371,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     uint32_t v64 = _device.rtw_read<uint32_t>(0x0064);
     _device.rtw_write<uint32_t>(0x0064, v64 & ~0x02040000u); /* PAD_CTRL1: RFE pads */
   }
+
   _hal.fw_set_pwr_mode_active(); /* keep all FW power domains on (no auto-PS) */
   _hal.fw_coex_query_bt_info();  /* make the FW confirm BT is absent */
   _hal.fw_coex_tdma_off();       /* disable coex time-division (WL keeps antenna) */
@@ -365,10 +410,106 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     _device.rtw_write<uint16_t>(0x06A4, 0x0000);
     _rx_filters_closed = true; /* StartRxLoop re-opens them (best effort) */
   }
+  /* DEVOURER_CW_TONE — radiate a bare RF LO carrier at the channel center (MP
+   * single-tone). Armed BEFORE the coex thread starts so the arming writes don't
+   * contend with the coex tick. DEVOURER_CW_TONE_GAIN=0..31 sets RF 0x00[4:0]. */
   /* Start the coex runtime thread: it drains C2H and re-applies the 5 GHz coex
-   * decision every ~2 s so sustained TX isn't silenced by the FW's PTA. */
+   * decision every ~2 s so sustained TX isn't silenced by the FW's PTA. (The CW
+   * tone path returned earlier and never reaches here.) */
   _coex_thread = std::thread([this] { coex_runtime_loop(); });
   _logger->info("Jaguar3: ready for TX (monitor inject)");
+}
+
+/* MP single-tone (CW carrier), Jaguar3 (rtl8822c / rtl8822e) path A. Ported from
+ * the vendor phydm_mp_set_single_tone_jgr3 + phydm_set_pmac_txon_jgr3. Two
+ * Jaguar3-specific quirks the older chips don't have:
+ *   1. RF 0x00 (the RF-mode register) is WRITE-ONLY through the HSSI 3-wire port
+ *      (0x1808 path A); the direct BB->RF window (0x3c00) is a read-only shadow
+ *      for RF 0x00, so a window write is silently dropped. RF 0x58 (LO enable)
+ *      is a normal RF reg and uses the direct window.
+ *   2. The bare LO only reaches the PA once the BB/MAC TX path is keyed on via
+ *      PMAC (0x1d08[0]=1) + TX-OFDM-on (0x1e70[3:0]=4).
+ * The full RF 0x00 word (TX-mode 0x2 + gain, over the snapshot) is written to
+ * HSSI as (addr<<20)|(data&0xFFFFF); addr=0 so it's just data&0xFFFFF. */
+void RtlJaguar3Device::StartCwTone(uint8_t gain) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_cw_active)
+    return;
+
+  constexpr uint16_t HSSI_WR_A = 0x1808;         /* path-A HSSI RF-write port */
+  const uint16_t rf58 = 0x3c00 + (0x58 << 2);    /* RF 0x58 via direct window */
+  const bool is_2g = _channel.Channel <= 14;
+
+  /* Disable CCA so the bare carrier isn't gated by energy detection. (Pausing
+   * MAC TX / disabling CCK TX here was tried and BREAKS the RF 0x00 HSSI write —
+   * it re-drives RF 0x00 back to RX mode — so it's deliberately omitted.) */
+  if (is_2g) {
+    _device.phy_set_bb_reg(0x1a9c, 1u << 20, 0x0);
+    _device.phy_set_bb_reg(0x1a14, 0x300, 0x3);
+  }
+  _device.phy_set_bb_reg(0x1d58, 0xff8, 0x1ff); /* OFDM CCA off */
+
+  /* Key the BB/MAC TX path: PMAC on + TX OFDM on (phydm_set_pmac_txon_jgr3). */
+  _device.phy_set_bb_reg(0x1d08, 1u << 0, 0x1);
+  _device.phy_set_bb_reg(0x1e70, 0xf, 0x0);
+  _device.phy_set_bb_reg(0x1e70, 0xf, 0x4);
+
+  /* Hold the BB in continuous TX (phydm_start_ofdm_cont_tx_jgr3). Without this
+   * the BB stays in RX and its RF state machine re-drives RF 0x00 back to RX
+   * mode within ~ms, so the manual TX-mode write below doesn't persist and no
+   * carrier comes out. */
+  _device.phy_set_bb_reg(0x1c3c, 1u << 0, 0x1); /* OFDM block on */
+  _device.phy_set_bb_reg(0x1a00, 0x3, 0x0);     /* CCK test mode off */
+  _device.phy_set_bb_reg(0x1a00, 1u << 3, 0x1); /* scramble on */
+  _device.phy_set_bb_reg(0x1ca4, 0x7, 0x1);     /* continuous TX on */
+
+  /* Snapshot RF 0x00 (read the direct-window shadow — the correct read path). */
+  _cw_rf00 = _device.rtw_read<uint32_t>(0x3c00) & 0x000fffff;
+
+  /* RF 0x00 -> TX mode (0x00[19:16]=2) + gain (0x00[4:0]) via the HSSI port. */
+  const uint32_t rf0 =
+      (_cw_rf00 & ~0xf0000u & ~0x1fu) | (0x2u << 16) | (gain & 0x1f);
+  _device.rtw_write<uint32_t>(HSSI_WR_A, rf0 & 0x000fffff);
+
+  /* RF LO enable (0x58 bit1) via the direct window. */
+  _device.phy_set_bb_reg(rf58, 1u << 1, 0x1);
+
+  _cw_active = true;
+  _logger->info("CW single-tone armed @ ch{} gain={} ({})", _channel.Channel,
+                static_cast<int>(gain & 0x1f),
+                _variant == jaguar3::ChipVariant::C8822E ? "8822e" : "8822c");
+}
+
+/* Mirror of the vendor STOP path: disable the LO, restore RF 0x00 (HSSI),
+ * un-key the TX path, re-enable CCA. Serializes on _reg_mu (runs while the coex
+ * thread is active). */
+void RtlJaguar3Device::StopCwTone() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (!_cw_active)
+    return;
+
+  constexpr uint16_t HSSI_WR_A = 0x1808;
+  const uint16_t rf58 = 0x3c00 + (0x58 << 2);
+  const bool is_2g = _channel.Channel <= 14;
+
+  _device.phy_set_bb_reg(rf58, 1u << 1, 0x0);                 /* LO off */
+  _device.rtw_write<uint32_t>(HSSI_WR_A, _cw_rf00 & 0x000fffff); /* restore RF 0x00 */
+  /* Stop continuous TX (phydm_stop_ofdm_cont_tx_jgr3): test modes off, then BB
+   * reset. */
+  _device.phy_set_bb_reg(0x1ca4, 0x7, 0x0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  _device.phy_set_bb_reg(0x1d0c, 1u << 16, 0x0);
+  _device.phy_set_bb_reg(0x1d0c, 1u << 16, 0x1);
+  _device.phy_set_bb_reg(0x1e70, 0xf, 0x0);     /* TX OFDM off */
+  _device.phy_set_bb_reg(0x1d08, 1u << 0, 0x0); /* PMAC off */
+  _device.phy_set_bb_reg(0x1d58, 0xff8, 0x0);   /* OFDM CCA on */
+  if (is_2g) {
+    _device.phy_set_bb_reg(0x1a9c, 1u << 20, 0x1);
+    _device.phy_set_bb_reg(0x1a14, 0x300, 0x0);
+  }
+
+  _cw_active = false;
+  _logger->info("CW single-tone stopped — chip restored");
 }
 
 void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {

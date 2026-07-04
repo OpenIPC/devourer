@@ -35,6 +35,9 @@
 #if defined(DEVOURER_HAVE_JAGUAR2)
 #include "jaguar2/RtlJaguar2Device.h"
 #endif
+#if defined(DEVOURER_HAVE_JAGUAR3)
+#include "jaguar3/RtlJaguar3Device.h"
+#endif
 #include "RtlUsbAdapter.h"
 #include "SignalStop.h"
 #include "UsbOpen.h"
@@ -401,6 +404,10 @@ int main(int argc, char **argv) {
   /* Jaguar2 (8822BU) downcast — used only for the CW single-tone idle-hold. */
 #if defined(DEVOURER_HAVE_JAGUAR2)
   RtlJaguar2Device *jag2 = dynamic_cast<RtlJaguar2Device *>(rtlDevice.get());
+#endif
+  /* Jaguar3 (8822C/E) downcast — used only for the CW single-tone idle-hold. */
+#if defined(DEVOURER_HAVE_JAGUAR3)
+  RtlJaguar3Device *jag3 = dynamic_cast<RtlJaguar3Device *>(rtlDevice.get());
 #endif
 
   int channel = 161;
@@ -781,6 +788,9 @@ int main(int argc, char **argv) {
 #if defined(DEVOURER_HAVE_JAGUAR2)
     if (jag2) cw = true;
 #endif
+#if defined(DEVOURER_HAVE_JAGUAR3)
+    if (jag3) cw = true;
+#endif
     if (cw) {
       logger->info("CW tone hold — idling until SIGINT (Ctrl-C to stop)");
       while (!g_devourer_should_stop)
@@ -790,6 +800,9 @@ int main(int argc, char **argv) {
 #endif
 #if defined(DEVOURER_HAVE_JAGUAR2)
       if (jag2) jag2->StopCwTone();
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR3)
+      if (jag3) jag3->StopCwTone();
 #endif
     }
   }

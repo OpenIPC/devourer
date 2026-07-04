@@ -57,6 +57,19 @@ public:
    * was ported for Jaguar1 (RtlJaguarDevice) but not Jaguar3. */
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;
+
+  /* Realtek MP single-tone (CW carrier) — radiate a bare RF local-oscillator
+   * carrier at the tuned channel center. Path A; Jaguar3 (rtl8822c / rtl8822e,
+   * identical recipe). Unlike the older chips, Jaguar3's RF mode register (0x00)
+   * is written through the HSSI 3-wire port (0x1808), NOT the direct BB->RF
+   * window (which is read-only for RF 0x00), and the tone only radiates once the
+   * BB/MAC TX path is keyed via PMAC (0x1d08/0x1e70) — see phydm_mp_set_single_
+   * tone_jgr3 + phydm_set_pmac_txon_jgr3. `gain` is RF 0x00[4:0]. StopCwTone()
+   * restores RF 0x00, re-enables CCA and disables the LO + PMAC. Serializes on
+   * _reg_mu against the coex runtime thread. Idempotent. */
+  void StartCwTone(uint8_t gain);
+  void StopCwTone();
+
   bool should_stop = false;
 
 private:
@@ -73,6 +86,12 @@ private:
   int _tx_pwr_override = -1;
   /* Runtime TX-mode default (SetTxMode/ClearTxMode). */
   std::optional<devourer::TxMode> _tx_mode_default;
+
+  /* CW single-tone (StartCwTone/StopCwTone) saved state: the pre-tone RF 0x00
+   * (path A, full 20-bit). CCA/PMAC restore to fixed values, so no BB snapshot
+   * is needed. _cw_active guards double start/stop. */
+  bool _cw_active = false;
+  uint32_t _cw_rf00 = 0;
   /* Coex runtime: a background thread that drains bulk-IN, dispatches firmware
    * C2H reports (BT-info etc.) and runs the periodic coex decision so the FW's
    * PTA keeps the antenna with WLAN during sustained TX.

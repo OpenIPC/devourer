@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "BeamformingSounder.h"
 #include "FrameParserJaguar2.h"
 #include "Halrf8822b.h"
 #include "ToneMask.h"
@@ -113,6 +114,44 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   _channel = channel;
   bring_up(channel);
 
+  /* DEVOURER_BF_ARM_BFEE=aa:bb:cc:dd:ee:ff — beamforming self-sounding
+   * (beamformee side), Jaguar-2 variant. Arms the hardware CSI responder to
+   * reply to NDPA+NDP from the given beamformer MAC with a VHT Compressed
+   * Beamforming report, no association. Uses the shared MAC recipe with the
+   * Jaguar-2/3 config (0xDB, 16-bit CSI param, RX-filter + own-AID gates) —
+   * kBfeeJaguar23 is transcribed from the vendor hal_txbf_8822b_enter(), i.e.
+   * it IS the 8822B recipe. Must come after bring_up: the recipe RMWs the
+   * RXFLTMAP registers init_wmac_cfg writes. See BeamformingSounder.h. */
+  if (const char *bfer = std::getenv("DEVOURER_BF_ARM_BFEE")) {
+    unsigned m[6];
+    if (std::sscanf(bfer, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3],
+                    &m[4], &m[5]) == 6) {
+      uint8_t mac[6];
+      for (int i = 0; i < 6; ++i) mac[i] = static_cast<uint8_t>(m[i]);
+      /* Jaguar-2 bring-up never programs the self-MAC (0x0610), so the NDPA
+       * RA has nothing to match. Give the beamformee a known identity here so
+       * the sounder can address it; log it for the test harness. */
+      static const uint8_t kBfeeMac[6] = {0x00, 0xe0, 0x4c, 0x88, 0x22, 0xbb};
+      for (uint16_t i = 0; i < 6; ++i)
+        _device.rtw_write8(0x0610 + i, kBfeeMac[i]);
+      /* DEVOURER_BF_ARM_BFEE_MU=1 upgrades the responder to an MU beamformee,
+       * whose report appends the per-subcarrier delta-SNR (MU Exclusive
+       * Beamforming Report) the SU report omits. Pair with the sounder's
+       * DEVOURER_TX_NDPA_MU=1 (MU feedback bit in the NDPA STA-info). */
+      if (std::getenv("DEVOURER_BF_ARM_BFEE_MU")) {
+        devourer::bf::arm_beamformee_mu(_device, mac, devourer::bf::kBfeeJaguar23);
+        _logger->info("Jaguar2 BF MU-beamformee armed for beamformer {} — "
+                      "beamformee MAC 00:e0:4c:88:22:bb", bfer);
+      } else {
+        devourer::bf::arm_beamformee(_device, mac, devourer::bf::kBfeeJaguar23);
+        _logger->info("Jaguar2 BF beamformee armed for beamformer {} — "
+                      "beamformee MAC 00:e0:4c:88:22:bb", bfer);
+      }
+    } else {
+      _logger->error("DEVOURER_BF_ARM_BFEE — bad MAC '{}'", bfer);
+    }
+  }
+
   if (getenv("DEVOURER_BB_DUMP")) {
     /* Full BB/RF register dump in the vendor rtw_proc format for canary diff
      * against the kernel driver (tests/jaguar2_rx_canary.sh). */
@@ -214,6 +253,29 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
   if (const char *e = getenv("DEVOURER_TX_PWR")) {
     uint8_t idx = static_cast<uint8_t>(strtol(e, nullptr, 0) & 0x3f);
     _hal.set_tx_power_flat(idx);
+  }
+  /* DEVOURER_BF_ARM_SOUNDER — beamforming self-sounding (beamformer side):
+   * arm the MAC's hardware sounding engine so a TX-descriptor-marked NDPA
+   * (DEVOURER_TX_NDPA=1) is followed by a hardware-generated NDP. The MAC
+   * sounding registers are family-neutral (BeamformingSounder.h); the
+   * sounding-protocol control byte is 0xDB (hal_txbf_8822b_enter — Jaguar-1
+   * uses 0xCB). No RF mode-table poke here, unlike Jaguar-3: the vendor's
+   * hal_txbf_8822b_rf_mode() body is entirely #if 0'd out. */
+  if (const char *snd = std::getenv("DEVOURER_BF_ARM_SOUNDER")) {
+    /* Jaguar-2 bring-up never programs the self-MAC (0x0610); the sounding
+     * engine matches the injected NDPA's TA against it before firing the NDP.
+     * DEVOURER_BF_ARM_SOUNDER=aa:bb:cc:dd:ee:ff programs that MAC (use the
+     * NDPA TA the caller injects — the txdemo's canonical SA); a bare "1"
+     * leaves it unprogrammed (Jaguar-1 semantics). */
+    unsigned m[6];
+    if (std::sscanf(snd, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3],
+                    &m[4], &m[5]) == 6) {
+      for (uint16_t i = 0; i < 6; ++i)
+        _device.rtw_write8(0x0610 + i, static_cast<uint8_t>(m[i]));
+      _logger->info("Jaguar2 BF sounder: self-MAC programmed to {}", snd);
+    }
+    devourer::bf::arm_sounder(_device, /*snd_ptcl_ctrl=*/0xDB);
+    _logger->info("Jaguar2 BF sounder armed (beamformer side)");
   }
   _logger->info("Jaguar2: ready for TX (monitor inject, ch={})",
                 channel.Channel);
@@ -332,11 +394,15 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
       hdrlen += 6; /* 4-address */
   }
 
+  /* DEVOURER_TX_NDPA=1 — beamforming self-sounding: mark injected frames as
+   * NDPA so the armed sounding engine (DEVOURER_BF_ARM_SOUNDER, InitWrite)
+   * follows each with a hardware-generated NDP. Same knob as Jaguar-1/-3. */
+  static const bool ndpa = std::getenv("DEVOURER_TX_NDPA") != nullptr;
   std::vector<uint8_t> usb_frame(jaguar2::TXDESC_SIZE_8822B + frame_len, 0);
   jaguar2::fill_data_tx_desc_8822b(
       usb_frame.data(), static_cast<uint16_t>(frame_len),
       MRateToHwRate(fixed_rate), rate_id, bw_desc, sgi != 0, ldpc != 0, stbc,
-      bmc, static_cast<uint8_t>(hdrlen >> 1));
+      bmc, static_cast<uint8_t>(hdrlen >> 1), ndpa);
   std::memcpy(usb_frame.data() + jaguar2::TXDESC_SIZE_8822B, dot11, frame_len);
 
   int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),

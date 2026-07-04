@@ -40,9 +40,11 @@ Two hardware facts made this work, both validated on real silicon:
 
 ## Register recipe
 
-All register values are in `src/jaguar1/BeamformingSounder.h`, transcribed from
-the vendor `hal_txbf_jaguar_enter()`
-(`reference/rtl8812au/hal/phydm/txbf/haltxbfjaguar.c`). Entry 0, P_AID 0.
+All register values are in the generation-shared `src/BeamformingSounder.h`,
+transcribed from the vendor beamformee-entry functions — Jaguar-1
+`hal_txbf_jaguar_enter()` (`reference/rtl8812au/hal/phydm/txbf/haltxbfjaguar.c`),
+Jaguar-2/3 `hal_txbf_8822b_enter()` (`haltxbf8822b.c`, byte-identical between
+the rtl88x2bu and rtl88x2cu trees). Entry 0, P_AID 0.
 
 - **Beamformer (`arm_sounder`)**: `REG_SND_PTCL_CTRL` enable, NDP standby
   timeout, `REG_TXBF_CTRL` NDPA-transmit enables, `REG_BFMEE_SEL` entry select.
@@ -73,9 +75,10 @@ DEVOURER_PID=0x8813 DEVOURER_CHANNEL=100 DEVOURER_BF_DETECT_REPORT=4 \
 # adapter can sound and capture its own reports — DEVOURER_TX_WITH_RX=thread
 # runs the RX worker loop on a thread next to the TX loop (one bring-up, one
 # claimed handle; see StartRxLoop in IRtlDevice). Hardware-validated on the
-# 8814AU (Jaguar-1) and on both Jaguar-3 variants (8822CU / 8822EU, 50k+
-# self-captured reports per 20 s at full sounding rate). On Jaguar-3,
-# DEVOURER_BF_ARM_SOUNDER takes the sounder MAC (programs the self-MAC 0x610).
+# 8814AU (Jaguar-1), the 8822BU (Jaguar-2) and both Jaguar-3 variants
+# (8822CU / 8822EU) — 50k+ self-captured reports per 20 s at full sounding
+# rate. On Jaguar-2/3, DEVOURER_BF_ARM_SOUNDER takes the sounder MAC
+# (programs the self-MAC 0x610).
 DEVOURER_PID=0x8812 DEVOURER_CHANNEL=100 DEVOURER_TX_RATE=VHT2SS_MCS0 \
   DEVOURER_TX_NDPA_RA=<beamformee-mac> DEVOURER_TX_NDPA=1 \
   DEVOURER_BF_ARM_SOUNDER=1 DEVOURER_TX_WITH_RX=thread \

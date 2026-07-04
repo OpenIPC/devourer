@@ -87,7 +87,8 @@ public:
 
   /* halrf LC calibration (_phy_lc_calibrate_8822b): locks the RF LO tank at the
    * current channel. Without it the RF synthesizer does not lock and the
-   * front-end receives nothing. Run after the channel is set. */
+   * front-end receives nothing. Run after the channel is set. On C8821C this
+   * dispatches to do_lck_8821c() (a different RF sequence). */
   void do_lck();
 
   /* Grant the antenna to WLAN (WiFi-only coex). 8822B is a WiFi+BT combo: on
@@ -154,6 +155,19 @@ private:
   /* phydm_igi_toggle_8822b: toggle 0xc50/0xe50 IGI to enter RX mode. */
   void igi_toggle();
 
+  /* --- 8821C-specific (C8821C variant) channel/RF-set/LCK, transcribed from
+   * reference/8821cu phydm_hal_api8821c.c + halrf_8821c.c. The 8822B channel-set
+   * reuse diverges materially for the 1T1R 8821C (BTG/WLG RF-set mux, 0xc1c AGC
+   * index, RF-firmware LCK), so these replace the 8822B path when _variant is
+   * C8821C. `rfe_raw` is the raw efuse RFE byte (rfe_type_expand). --- */
+  void set_channel_bw_8821c(uint8_t channel, uint8_t bw, uint8_t rfe_raw,
+                            uint8_t primary_ch_idx);
+  /* config_phydm_switch_rf_set_8821c: 2.4G BTG (path B) vs WLG (path A) RX mux
+   * (0xcb8/0xa84/0xa80). btg=true selects BTG. */
+  void switch_rf_set_8821c(bool btg);
+  /* _phy_lc_calibrate_8821c: RF-firmware LCK (RF 0xcc/0xc4), no poll. */
+  void do_lck_8821c();
+
   RtlUsbAdapter _device;
   Logger_t _logger;
   ChipVariant _variant;
@@ -167,6 +181,12 @@ private:
    * reuses it — avoids a second walk that would slow every cold init. */
   uint8_t _efuse_map[0x200];
   bool _efuse_valid = false;
+
+  /* 8821C CCK TX-filter defaults (0xa24/0xa28/0xaac) snapshotted from the BB
+   * table at parameter-init POST; config_phydm_switch_channel_8821c restores
+   * them for 2.4G non-ch14. Saved once when the 8821C tables are applied. */
+  uint32_t _cck_a24_8821c = 0, _cck_a28_8821c = 0, _cck_aac_8821c = 0;
+  bool _cck_saved_8821c = false;
 };
 
 } /* namespace jaguar2 */

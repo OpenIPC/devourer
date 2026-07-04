@@ -268,7 +268,14 @@ void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type) {
   ctx.support_interface = 0x02; /* ODM_ITRF_USB */
   ctx.support_platform = 0x04;  /* ODM_CE */
   ctx.package_type = 0;
-  ctx.rfe_type = rfe_type;
+  /* The phydm table conditional blocks are gated on the DECODED rfe_type. On
+   * 8821C the raw efuse RFE byte is `rfe_type_expand` and the value the tables
+   * match against is `rfe_type_expand >> 3` (config_phydm_parameter_init_8821c:
+   * `dm->rfe_type = dm->rfe_type_expand >> 3`). Feeding the raw byte (e.g. 0x22)
+   * matches no rfe block, so the rfe-specific AGC/RF rows never apply. 8822B
+   * uses the raw byte directly. */
+  ctx.rfe_type =
+      (_variant == ChipVariant::C8821C) ? (rfe_type >> 3) : rfe_type;
 
   /* rtl8822b_phy.c order: PRE -> init_bb_reg (phy_reg, agc_tab) ->
    * init_rf_reg (radioa, radiob) -> POST. */
@@ -295,6 +302,16 @@ void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type) {
                          [this](uint32_t a, uint32_t v) { rf_write(1, a, v); });
 
   phydm_pre_post_setting(/*post=*/true);
+
+  /* 8821C: snapshot the CCK TX-filter defaults the BB table just loaded
+   * (config_phydm_parameter_init_8821c POST saves rega24/28/aac_8821c). The
+   * per-channel 2.4G tune restores these for non-ch14. */
+  if (_variant == ChipVariant::C8821C) {
+    _cck_a24_8821c = _device.rtw_read32(0x0a24);
+    _cck_a28_8821c = _device.rtw_read32(0x0a28);
+    _cck_aac_8821c = _device.rtw_read32(0x0aac);
+    _cck_saved_8821c = true;
+  }
   _logger->info("Jaguar2: BB/AGC/RF tables applied (rfe_type=0x{:02x})",
                 rfe_type);
 }
@@ -372,6 +389,10 @@ void HalJaguar2::igi_toggle() {
 
 void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
                                uint8_t primary_ch_idx) {
+  if (_variant == ChipVariant::C8821C) {
+    set_channel_bw_8821c(channel, bw, rfe_type, primary_ch_idx);
+    return;
+  }
   /* The RF/AGC tune to the CENTRAL channel of the wide channel; `channel` is the
    * primary 20 MHz channel and primary_ch_idx its position. 20 MHz: central =
    * primary. 40 MHz: primary_ch_idx 1(lower)/2(upper) -> ±2. 80 MHz: 1..4 ->
@@ -604,6 +625,10 @@ void HalJaguar2::config_trx_mode() {
 }
 
 void HalJaguar2::do_lck() {
+  if (_variant == ChipVariant::C8821C) {
+    do_lck_8821c();
+    return;
+  }
   /* aac_check_8822b (once): fix the AAC code if out of range. */
   if (!_aac_checked) {
     uint32_t temp = (rf_read(0, 0xc9) & 0xf8) >> 3;
@@ -648,6 +673,173 @@ void HalJaguar2::do_lck() {
   _logger->info("Jaguar2: LCK {} (RF_A 0x18={:05x} 0x00={:05x})",
                 locked ? "LOCKED" : "TIMEOUT (LO not locked!)",
                 rf_read(0, 0x18), rf_read(0, 0x0));
+}
+
+/* _phy_lc_calibrate_8821c: the 8821C LCK is an RF-firmware poke sequence (no
+ * host poll) — completely unlike the 8822B RF 0x18[15] toggle+poll (which just
+ * times out on 8821C). aac_check first, then RF 0xcc/0xc4/0xcc. */
+void HalJaguar2::do_lck_8821c() {
+  if (!_aac_checked) {
+    uint32_t temp = (rf_read(0, 0xc9) & 0xf8) >> 3;
+    if (temp < 4 || temp > 7) {
+      rf_set(0, 0xca, (1u << 19), 0x0);
+      rf_set(0, 0xb2, 0x7c000, 0x6);
+    }
+    _aac_checked = true;
+  }
+  rf_write(0, 0xcc, 0x2018);
+  rf_write(0, 0xc4, 0x8f602);
+  rf_write(0, 0xcc, 0x201c);
+  _logger->info("Jaguar2/8821C: LCK applied (RF-fw poke)");
+}
+
+/* config_phydm_switch_rf_set_8821c: select the 2.4G RX front-end path. BTG
+ * (BT-shared, path B) vs WLG (WiFi-only, path A) is chosen from rfe_type_expand.
+ * The base mux writes (0xcb8/0xa84/0xa80) apply in normal (non-MP) operation;
+ * the agc_tab_diff overlay + IGI toggle are MP-mode-only and omitted. */
+void HalJaguar2::switch_rf_set_8821c(bool btg) {
+  _device.phy_set_bb_reg(0x1080, (1u << 16), 0x1);
+  _device.phy_set_bb_reg(0x0000, (1u << 26), 0x1);
+  uint32_t cb8 = _device.rtw_read32(0x0cb8);
+  if (btg) {
+    cb8 |= (1u << 16);
+    cb8 &= ~((1u << 18) | (1u << 20) | (1u << 21) | (1u << 22) | (1u << 23));
+    _device.phy_set_bb_reg(0x0a84, 0x00ff0000, 0x0e);
+    _device.phy_set_bb_reg(0x0a80, 0x0000ffff, 0xfc84);
+  } else {
+    cb8 |= (1u << 20) | (1u << 21) | (1u << 22);
+    cb8 &= ~((1u << 16) | (1u << 18) | (1u << 23));
+    _device.phy_set_bb_reg(0x0a84, 0x00ff0000, 0x12);
+    _device.phy_set_bb_reg(0x0a80, 0x0000ffff, 0x7532);
+  }
+  _device.phy_set_bb_reg(0x0cb8, 0xffffffff, cb8);
+}
+
+/* config_phydm_switch_band/channel/bandwidth_8821c, transcribed from
+ * reference/8821cu phydm_hal_api8821c.c. 1T1R, RF path A; the 2.4G RX path is
+ * routed by switch_rf_set (BTG/WLG). Focused on 2.4G/20MHz (the current bring-up
+ * target); 5G and 40/80 tune are handled for completeness (M8 validates them). */
+void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
+                                      uint8_t rfe_raw, uint8_t primary_ch_idx) {
+  uint8_t cch = channel;
+  if (bw == 1)
+    cch = static_cast<uint8_t>(primary_ch_idx == 2 ? channel - 2 : channel + 2);
+  else if (bw == 2) {
+    static const int off80[5] = {0, 6, 2, -2, -6};
+    cch = static_cast<uint8_t>(channel +
+                               off80[primary_ch_idx <= 4 ? primary_ch_idx : 0]);
+  }
+  const bool g2 = cch <= 14;
+  /* rfe_type_expand -> BTG (else WLG) per config_phydm_parameter_init_8821c. */
+  const bool btg = rfe_raw == 2 || rfe_raw == 4 || rfe_raw == 7 ||
+                   rfe_raw == 0x22 || rfe_raw == 0x24 || rfe_raw == 0x27 ||
+                   rfe_raw == 0x2a || rfe_raw == 0x2c || rfe_raw == 0x2f;
+
+  /* --- config_phydm_switch_band_8821c --- */
+  uint32_t rf18 = rf_read(0, 0x18);
+  if (g2) {
+    _device.phy_set_bb_reg(0x0808, (1u << 28), 0x1); /* enable CCK block */
+    _device.phy_set_bb_reg(0x0454, (1u << 7), 0x0);  /* MAC CCK check off */
+    _device.phy_set_bb_reg(0x0a80, (1u << 18), 0x0); /* BB CCK check off */
+    _device.phy_set_bb_reg(0x0814, 0x0000FC00, 15);  /* CCA mask default */
+    rf18 &= ~((1u << 16) | (1u << 9) | (1u << 8) | 0xffu);
+    rf18 |= cch;
+    switch_rf_set_8821c(btg);
+    rf_set(0, 0xdf, (1u << 6), 0x1);   /* RF TXA_TANK LUT mode */
+    rf_set(0, 0x64, 0x0000f, 0xf);     /* RF TXA_PA_TANK */
+  } else {
+    _device.phy_set_bb_reg(0x0a80, (1u << 18), 0x1);
+    _device.phy_set_bb_reg(0x0454, (1u << 7), 0x1);
+    _device.phy_set_bb_reg(0x0808, (1u << 28), 0x0);
+    _device.phy_set_bb_reg(0x0814, 0x0000FC00, 15);
+    rf18 &= ~((1u << 16) | (1u << 9) | (1u << 8) | 0xffu);
+    rf18 |= (1u << 8) | (1u << 16) | cch;
+    rf_set(0, 0xdf, (1u << 6), 0x0);
+  }
+  rf_write(0, 0x18, rf18);
+
+  /* --- config_phydm_switch_channel_8821c --- */
+  rf18 = rf_read(0, 0x18);
+  rf18 &= ~((1u << 18) | (1u << 17) | 0xffu);
+  rf18 |= cch;
+  if (g2) {
+    _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x0);      /* AGC table idx 0 */
+    _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x96a);    /* fc for CFO track */
+    if (cch == 14) {
+      _device.phy_set_bb_reg(0x0a24, 0xffffffff, 0x0000b81c);
+      _device.phy_set_bb_reg(0x0a28, 0x0000ffff, 0x0000);
+      _device.phy_set_bb_reg(0x0aac, 0xffffffff, 0x00003667);
+    } else if (_cck_saved_8821c) {
+      _device.phy_set_bb_reg(0x0a24, 0xffffffff, _cck_a24_8821c);
+      _device.phy_set_bb_reg(0x0a28, 0x0000ffff, _cck_a28_8821c & 0xffff);
+      _device.phy_set_bb_reg(0x0aac, 0xffffffff, _cck_aac_8821c);
+    }
+  } else {
+    if (cch >= 36 && cch <= 64)
+      _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x1);
+    else if (cch >= 100 && cch <= 144)
+      _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x2);
+    else if (cch >= 149)
+      _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x3);
+    if (cch >= 36 && cch <= 48)
+      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x494);
+    else if (cch >= 52 && cch <= 64)
+      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x453);
+    else if (cch >= 100 && cch <= 116)
+      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x452);
+    else if (cch >= 118 && cch <= 177)
+      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x412);
+    if (cch >= 100 && cch <= 140)
+      rf18 |= (1u << 17);
+    else if (cch > 140)
+      rf18 |= (1u << 18);
+  }
+  rf_write(0, 0x18, rf18);
+
+  /* --- config_phydm_switch_bandwidth_8821c --- */
+  rf18 = rf_read(0, 0x18);
+  if (bw == 1) { /* 40 MHz */
+    _device.phy_set_bb_reg(0x0a00, (1u << 4), primary_ch_idx == 1 ? 1 : 0);
+    uint32_t v8ac = _device.rtw_read32(0x08ac);
+    v8ac &= 0xff8ff800;
+    v8ac |= (static_cast<uint32_t>((primary_ch_idx & 0xf) << 2) | 0x20020000u |
+             0x1u);
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
+    rf18 &= ~((1u << 11) | (1u << 10));
+    rf18 |= (1u << 11);
+  } else if (bw == 2) { /* 80 MHz */
+    uint32_t v8ac = _device.rtw_read32(0x08ac);
+    v8ac &= 0xfccffc00;
+    v8ac |= (static_cast<uint32_t>((primary_ch_idx & 0xf) << 2) | 0x30030000u |
+             0x2u);
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
+    rf18 &= ~((1u << 11) | (1u << 10));
+    rf18 |= (1u << 10);
+  } else { /* 20 MHz */
+    uint32_t v8ac = _device.rtw_read32(0x08ac);
+    v8ac &= 0xffcffc00;
+    v8ac |= 0x10010000;
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
+    rf18 |= (1u << 11) | (1u << 10);
+  }
+  rf_write(0, 0x18, rf18);
+
+  /* phydm_rxdfirpar_by_bw_8821c: the RX digital filter must match the bandwidth
+   * or the OFDM demod never completes a PSDU (energy detected, nothing reaches
+   * the MAC RX FIFO) — the 8821C "first RX" piece. 1T1R: path A regs only
+   * (0x948/0x94c/0xc20/0x8f0), distinct from the 8822B set. */
+  _device.phy_set_bb_reg(0x0948, (1u << 29) | (1u << 28), 0x2);
+  _device.phy_set_bb_reg(0x094c, (1u << 29) | (1u << 28),
+                         bw == 2 ? 0x1u : 0x2u);
+  _device.phy_set_bb_reg(0x0c20, (1u << 31), bw == 0 ? 0x1u : 0x0u);
+  _device.phy_set_bb_reg(0x08f0, (1u << 31), bw == 2 ? 0x1u : 0x0u);
+
+  igi_toggle();
+  _logger->info("Jaguar2/8821C: channel set ch={} bw={} cch={} {} (rf18={:05x})",
+                channel, (int)bw, cch, btg ? "BTG" : "WLG", rf18);
 }
 
 /* ex_hal8822b_wifi_only_hw_config + hal8822b_wifi_only_switch_antenna: grant the

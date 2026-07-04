@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# M6 narrowband validation for the Jaguar-3 port (RTL8812CU, 0bda:c812).
+# M6 narrowband validation for the Jaguar-3 port (RTL8812CU, 0bda:c812, the
+# default; PID=a81a selects the RTL8812EU).
 #
 # The original goal of the whole Jaguar-3 port: 5/10 MHz channels via the
 # baseband clock divider (0x9b0/0x9b4), which Jaguar-1 cannot do. Radiotap stays
@@ -15,7 +16,10 @@
 set -u
 cd "$(dirname "$0")/.."
 
-FREQ=5180e6
+# CHANNEL/FREQ must agree (ch36=5180e6, ch44=5220e6). Default ch44 — ch36
+# frequently has a strong ambient AP that swamps the differential PSD.
+CHANNEL=${CHANNEL:-44}
+FREQ=${FREQ:-5220e6}
 RATE=46.08e6   # wide enough to see the full 20 MHz channel + skirts
 OUT=/tmp/j3_nb
 rm -rf "$OUT"; mkdir -p "$OUT"
@@ -30,7 +34,11 @@ probe baseline "$OUT/baseline.npy"
 
 for BW in 20 10 5; do
   echo "=== TX at ${BW} MHz: devourer continuous, capture PSD ==="
-  sudo DEVOURER_NB_BW="$BW" SECS=24 tests/jaguar3_devourer_run.sh \
+  # TX_PWR: optional flat-TXAGC boost (e.g. TX_PWR=0x3f) — needed on the EU,
+  # whose efuse-level TX can sit below the ambient floor at bench distance.
+  sudo PID="${PID:-c812}" DEVOURER_CHANNEL="$CHANNEL" DEVOURER_NB_BW="$BW" \
+      DEVOURER_TX_PWR="${TX_PWR:-}" \
+      SECS=24 tests/jaguar3_devourer_run.sh \
       build/WiFiDriverTxDemo 24 > "$OUT/dev_${BW}.log" 2>&1 &
   H=$!
   sleep 11   # power-on -> DLFW -> replay -> narrowband re-clock -> TX
@@ -61,10 +69,18 @@ def occ_bw(label):
     lo = np.searchsorted(csum, 0.005*tot)
     hi = np.searchsorted(csum, 0.995*tot)
     bw = f[min(hi, len(f)-1)] - f[max(lo,0)]
-    # also -10 dB width about the peak for a second estimate
+    # also -10 dB width about the peak for a second estimate. CONTIGUOUS run
+    # containing the peak — first/last-above-threshold bridges the DUT lobe
+    # with any ambient burst elsewhere in the span and inflates the width.
     pk = sm.max(); thr = pk/10.0
-    above = np.where(sm >= thr)[0]
-    bw10 = (f[above[-1]] - f[above[0]]) if len(above) else 0.0
+    ipk = int(np.argmax(sm))
+    lo_i = ipk
+    while lo_i > 0 and sm[lo_i-1] >= thr:
+        lo_i -= 1
+    hi_i = ipk
+    while hi_i < len(sm)-1 and sm[hi_i+1] >= thr:
+        hi_i += 1
+    bw10 = f[hi_i] - f[lo_i]
     return bw, bw10
 
 # The -10 dB-about-peak width is the clean discriminator for an OFDM signal with

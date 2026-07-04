@@ -1,6 +1,7 @@
 #include "RadioManagementJaguar3.h"
 
 #include <array>
+#include <cstdlib>
 #include <utility>
 
 #include "RateDefinitions.h" /* MGN_* rate enum */
@@ -37,6 +38,8 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
     _device.phy_set_bb_reg(static_cast<uint16_t>(base + (rfaddr << 2)),
                            0x000fffff, v);
   };
+
+  _last_channel = channel;
 
   /* --- bandwidth 20 MHz (config_phydm_switch_bandwidth_8822c) --- */
   _device.phy_set_bb_reg(0x810, 0x3ff0, 0x19b);        /* RX DFIR 20M */
@@ -343,15 +346,20 @@ void RadioManagementJaguar3::apply_power_by_rate_8822e(
 void RadioManagementJaguar3::set_bandwidth_dividers(ChannelWidth_t bwmode) {
   /* Narrowband baseband underclock — the Jaguar3-only payoff. Applies ONLY the
    * clock-divider / small-BW / RX-DFIR delta from config_phydm_switch_bandwidth
-   * _8822c, on top of an already-tuned channel (this re-clocks the baseband
-   * without re-running the RF channel tune). 10 MHz halves the DAC/ADC clock,
-   * 5 MHz quarters it; radiotap stays
-   * 20 MHz so only an SDR sees the change.
-   *
-   *   small-BW 0x9b0[7:6] : 20M=0x0  10M=0x2  5M=0x1
-   *   DAC clk  0x9b4[10:8] : 20M=0x7  10M=0x6  5M=0x4
-   *   ADC clk  0x9b4[22:20]: 20M=0x6  10M=0x5  5M=0x4
-   *   RX DFIR  0x810[13:4] : 20M=0x19b  5/10M=0x2ab */
+   * _8822c / _8822e, on top of an already-tuned channel (this re-clocks the
+   * baseband without re-running the RF channel tune). 10 MHz halves the DAC/ADC
+   * clock, 5 MHz quarters it; radiotap stays 20 MHz so only an SDR sees the
+   * change. The DAC-divider codes differ per variant for the SAME clock — see
+   * the encoding table in the header. */
+  const bool is_e = (_variant == ChipVariant::C8822E);
+  /* One DAC-code table for BOTH variants — the 8822c values. The 8822e
+   * vendor phydm ships different codes (5M=0x2/10M=0x4/20M=0x6, commented as
+   * the same clocks) but 0x2 is DEAD on real 8812EU silicon (TX keys up,
+   * frames drain, nothing airs — SDR-bisected via DEVOURER_NB_DAC sweep:
+   * only 0x4 and 0x6 emit the 5 MHz lobe). libc0607 hit the same wall and
+   * patched the vendor table to these values ("Fix DAC clock setting for
+   * 5MHz BW, from 8812cu driver"), which the OpenHD ecosystem has been
+   * running at 10 MHz on 8812EU since. */
   uint8_t small_bw, dac, adc;
   uint16_t dfir;
   switch (bwmode) {
@@ -360,25 +368,135 @@ void RadioManagementJaguar3::set_bandwidth_dividers(ChannelWidth_t bwmode) {
   case CHANNEL_WIDTH_5:
     small_bw = NB_SMALLBW_5M;  dac = 0x4; adc = 0x4; dfir = 0x2ab; break;
   default: /* CHANNEL_WIDTH_20 — restore full-rate clocks */
-    small_bw = 0x0; dac = 0x7; adc = 0x6; dfir = 0x19b; break;
+    small_bw = 0x0;            dac = 0x7; adc = 0x6; dfir = 0x19b; break;
+  }
+  /* DEVOURER_NB_DAC=0xN — debug knob: force the DAC-divider code. For mirror
+   * A/B experiments and for empirically mapping the (undocumented) divider
+   * field encoding; not for normal use. */
+  const char *dac_env = std::getenv("DEVOURER_NB_DAC");
+  if (dac_env != nullptr && *dac_env != '\0') {
+    dac = static_cast<uint8_t>(std::strtol(dac_env, nullptr, 0) & 0x7);
+    _logger->info("Jaguar3: DEVOURER_NB_DAC override — DAC code {:#x}", dac);
   }
   _device.phy_set_bb_reg(R_RX_DFIR_8822C, 0x3ff0, dfir);
-  _device.phy_set_bb_reg(R_SMALL_BW_8822C, 0xc0, small_bw);   /* 0x9b0[7:6] */
+  /* 8822e vendor parity: the small-BW write also zeroes the TX/RX pri-ch
+   * fields [15:8] (mask 0xffc0); the SDR-validated 8822c path keeps its
+   * original [7:6]-only write. */
+  _device.phy_set_bb_reg(R_SMALL_BW_8822C, is_e ? 0xffc0 : 0xc0, small_bw);
   _device.phy_set_bb_reg(R_CLK_DIV_8822C, 0x00000700, dac);   /* 0x9b4[10:8] */
   _device.phy_set_bb_reg(R_CLK_DIV_8822C, 0x00700000, adc);   /* 0x9b4[22:20] */
 
-  /* phydm_bb_reset_8822c: toggle MAC 0x0 BIT16 (1->0->1) so the receiver/DFE
+  if (is_e) {
+    /* halmac cfg_mac_clk_88xx — the MAC-side half of the narrowband re-clock:
+     * MAC clock select at REG_AFE_CTRL1 0x24[21:20] (0=80M, 2=20M, 3=the
+     * dedicated 20M_BW_5 mode) + the TSF/EDCA microsecond-tick clocks
+     * (0x55c/0x638, in MHz). The vendor applies this for BW5/BW10 on every
+     * Jaguar3; the SDR-validated 8822c NB path works without it, so it is
+     * applied on the 8822e only, where 5 MHz TX never reaches the air without
+     * the 20M_BW_5 MAC mode. */
+    uint8_t clk_sel, ustime;
+    if (bwmode == CHANNEL_WIDTH_5)       { clk_sel = 3; ustime = 20; }
+    else if (bwmode == CHANNEL_WIDTH_10) { clk_sel = 2; ustime = 20; }
+    else                                 { clk_sel = 0; ustime = 80; }
+    uint32_t afe = _device.rtw_read32(0x24);
+    afe = (afe & ~((1u << 20) | (1u << 21))) |
+          (static_cast<uint32_t>(clk_sel) << 20);
+    _device.rtw_write32(0x24, afe);
+    _device.rtw_write8(0x55c, ustime);
+    _device.rtw_write8(0x638, ustime);
+
+    /* config_phydm_switch_bandwidth_8822e narrowband extras the 8822c recipe
+     * doesn't have: CFR (crest-factor reduction) params + TX triangular-shape
+     * spectrum shaping OFF for 5/10 MHz; the 20 MHz restore re-applies the
+     * band-dependent shaping (phydm_tx_triangular_shap_cfg_8822e). */
+    if (bwmode == CHANNEL_WIDTH_5 || bwmode == CHANNEL_WIDTH_10) {
+      _device.phy_set_bb_reg(0xa74, 1u << 31, 0x0);
+      _device.phy_set_bb_reg(0xa74, 0x3ff, 0x15);
+      _device.phy_set_bb_reg(0xa74, 0xffc00, 0x13);
+      _device.phy_set_bb_reg(0x808, 0x70, 0x1);
+      _device.phy_set_bb_reg(0x80c, 0xf, 0x5);
+      _device.phy_set_bb_reg(0x81c, 0xff, 0x0);
+      _device.phy_set_bb_reg(0x81c, 0xf000000, 0x0);
+      _device.phy_set_bb_reg(0x8a0, 0xf0000000, 0x0);
+    } else {
+      const bool is_2g = (_last_channel != 0 && _last_channel <= 14);
+      _device.phy_set_bb_reg(0xa74, 1u << 31, 0x1);
+      _device.phy_set_bb_reg(0x808, 0x70, 0x3);
+      if (is_2g) {
+        _device.phy_set_bb_reg(0xa74, 0x3ff, 0x15);
+        _device.phy_set_bb_reg(0xa74, 0xffc00, 0x13);
+        _device.phy_set_bb_reg(0x80c, 0xf, 0x5);
+        _device.phy_set_bb_reg(0x81c, 0xff, 0xff);
+        _device.phy_set_bb_reg(0x81c, 0xf000000, 0x0);
+        _device.phy_set_bb_reg(0x8a0, 0xf0000000, 0xb);
+      } else {
+        _device.phy_set_bb_reg(0xa74, 0x3ff, 0x3f);
+        _device.phy_set_bb_reg(0xa74, 0xffc00, 0x3f);
+        _device.phy_set_bb_reg(0x80c, 0xf, 0x8);
+        _device.phy_set_bb_reg(0x81c, 0xff, 0x55);
+        _device.phy_set_bb_reg(0x81c, 0xf000000, 0x7);
+        _device.phy_set_bb_reg(0x8a0, 0xf0000000, 0x0);
+      }
+    }
+  }
+
+  /* phydm_bb_reset: toggle MAC 0x0 BIT16 (1->0->1) so the receiver/DFE
    * relatches at the new sample rate — without it the re-clock doesn't take. */
   uint32_t r0 = _device.rtw_read32(0x0);
   _device.rtw_write32(0x0, r0 | (1u << 16));
   _device.rtw_write32(0x0, r0 & ~(1u << 16));
   _device.rtw_write32(0x0, r0 | (1u << 16));
 
+  if (is_e) {
+    /* phydm_igi_toggle_8822e: bump IGI down/up so the BB HW issues 3-wire and
+     * the RF re-enters RX — the BB does not send 3-wire automatically on a
+     * path/channel/BW config change. */
+    uint32_t igi = _device.rtw_read32(0x1d70);
+    _device.rtw_write32(0x1d70, igi - 0x202);
+    _device.rtw_write32(0x1d70, igi);
+
+    /* halrf_ex_dac_fifo_rst — "fix dac fifo error after TXCK setting": the
+     * DAC FIFO can come out of a TX-clock change misaligned and emit spectral
+     * images (the OpenHD 5 MHz "mirror"); soft-reset the AFE DACK banks. */
+    dack_soft_rst_8822e();
+  }
+
   const char *name = bwmode == CHANNEL_WIDTH_10  ? "10 MHz"
                      : bwmode == CHANNEL_WIDTH_5 ? "5 MHz"
                                                  : "20 MHz";
   _logger->info("Jaguar3: baseband re-clocked to {} (small_bw={} DAC={} ADC={} "
                 "DFIR=0x{:03x})", name, small_bw, dac, adc, dfir);
+}
+
+/* halrf_write_check_afe_8822e: an AFE write must be confirmed (the bank reads
+ * back non-zero); retry up to 100x past an IO race. Faithful duplicate of
+ * Halrf8822e::write_check_afe (see the header note on the shared-base
+ * follow-up). */
+void RadioManagementJaguar3::write_check_afe_8822e(uint16_t add, uint32_t data) {
+  const uint32_t wd = (add == 0x3800 || add == 0x3900) ? data : 0xee32001fu;
+  const uint16_t wa = ((add >> 8) == 0x38) ? 0x3800 : 0x3900;
+  for (uint32_t count = 0; count < 100; ++count) {
+    _device.rtw_write32(0x2dd4, 0x0);
+    _device.rtw_write32(add, data);
+    _device.rtw_write32(add, data);
+    _device.rtw_write32(0x2dd4, 0x0);
+    if (_device.rtw_read32(wa) != 0x0)
+      return;
+    _device.rtw_write32(wa, wd);
+    _device.rtw_write32(wa, wd);
+  }
+}
+
+/* halrf_dack_soft_rst_8822e — soft-reset all four AFE DACK banks (S0/S1 x I/Q). */
+void RadioManagementJaguar3::dack_soft_rst_8822e() {
+  write_check_afe_8822e(0x3800, 0xee30001fu);
+  write_check_afe_8822e(0x3800, 0xee32001fu);
+  write_check_afe_8822e(0x382c, 0xee30001fu);
+  write_check_afe_8822e(0x382c, 0xee32001fu);
+  write_check_afe_8822e(0x3900, 0xee30001fu);
+  write_check_afe_8822e(0x3900, 0xee32001fu);
+  write_check_afe_8822e(0x392c, 0xee30001fu);
+  write_check_afe_8822e(0x392c, 0xee32001fu);
 }
 
 } /* namespace jaguar3 */

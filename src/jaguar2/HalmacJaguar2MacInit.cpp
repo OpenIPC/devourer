@@ -443,6 +443,14 @@ void HalmacJaguar2MacInit::init_protocol_cfg() {
   _device.rtw_write8(REG_FAST_EDCA_BEBK_SETTING + 2, WLAN_FAST_EDCA_BK_TH);
   _device.rtw_write8(REG_INIRTS_RATE_SEL,
                      _device.rtw_read8(REG_INIRTS_RATE_SEL) | (1u << 5));
+
+  /* 8821C-only: pre-transmit-count control (init_protocol_cfg_8821c). The 8822B
+   * init_protocol_cfg has no REG_PRECNT_CTRL write. pre_txcnt =
+   * WLAN_PRE_TXCNT_TIME_TH (0x1E4) | BIT_EN_PRECNT (BIT11) = 0x9E4. */
+  if (_variant == ChipVariant::C8821C) {
+    _device.rtw_write8(0x04E5, 0xE4); /* REG_PRECNT_CTRL[7:0] */
+    _device.rtw_write8(0x04E6, 0x09); /* REG_PRECNT_CTRL[15:8] */
+  }
 }
 
 /* init_edca_cfg_8822b (20 MHz path) */
@@ -473,6 +481,10 @@ void HalmacJaguar2MacInit::init_wmac_cfg() {
   _device.rtw_write16(REG_RXFLTMAP2, WLAN_RX_FILTER2);
   _device.rtw_write32(REG_RCR, WLAN_RCR_CFG);
   _device.rtw_write8(REG_RX_PKT_LIMIT, WLAN_RXPKT_MAX_SZ_512);
+  /* 8821C-only: CCK ACK timeout (init_wmac_cfg_8821c REG_ACKTO_CCK =
+   * WLAN_ACK_TO_CCK 0x40). The 8822B init_wmac_cfg has no such write. */
+  if (_variant == ChipVariant::C8821C)
+    _device.rtw_write8(0x0639, 0x40);
   _device.rtw_write8(REG_TCR + 2, WLAN_TX_FUNC_CFG2);
   _device.rtw_write8(REG_TCR + 1, WLAN_TX_FUNC_CFG1);
   _device.rtw_write8(REG_WMAC_TRXPTCL_CTL + 4,

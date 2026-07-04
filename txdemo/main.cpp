@@ -37,6 +37,7 @@
 #endif
 #include "RtlUsbAdapter.h"
 #include "SignalStop.h"
+#include "UsbOpen.h"
 #include "WiFiDriver.h"
 #include "RadiotapBuilder.h"
 #include "logger.h"
@@ -257,26 +258,22 @@ int main(int argc, char **argv) {
   logger->info("Vendor/Product ID: {:04x}:{:04x}", desc.idVendor,
                desc.idProduct);
 
-  if (libusb_kernel_driver_active(handle, 0)) {
-    rc = libusb_detach_kernel_driver(handle, 0);
-    if (rc != 0) logger->error("libusb_detach_kernel_driver: {}", rc);
-  }
-
   logger->info("init-timing: txdemo.open_device = {} ms", ms_since_start());
-  if (!termux_mode && !std::getenv("DEVOURER_SKIP_RESET")) {
-    libusb_reset_device(handle);
-  }
+  /* Claim-before-reset (see src/UsbOpen.h): the exclusive interface claim is the
+   * primary guard — a second devourer on this adapter gets BUSY and we bail here
+   * before the reset, so it can't re-enumerate the adapter out from under the
+   * owner. Reset skipped in termux_mode (forked child shares the fd) and for
+   * DEVOURER_SKIP_RESET (warm pickup). */
+  std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
+  rc = devourer::claim_interface_then_reset(
+      handle, 0, logger,
+      !termux_mode && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
   logger->info("init-timing: txdemo.usb_reset = {} ms", ms_since_start());
-
-  /* Self-set the USB configuration (don't rely on the kernel) so we run on a
-   * truly cold chip; no-op if config 1 is already active. */
-  {
-    int cfg = 0;
-    if (libusb_get_configuration(handle, &cfg) != 0 || cfg != 1)
-      libusb_set_configuration(handle, 1);
+  if (rc != 0) {
+    libusb_close(handle);
+    libusb_exit(context);
+    return 1;
   }
-  rc = libusb_claim_interface(handle, 0);
-  assert(rc == 0);
 
   /* USB-wire sentinel writes — gated behind DEVOURER_USB_SENTINEL=1. Used by
    * tools/usbmon_pcap_diff.py --phase-split to delimit the init phase in a
@@ -384,7 +381,7 @@ int main(int argc, char **argv) {
   }
 
   WiFiDriver wifi_driver{logger};
-  auto rtlDevice = wifi_driver.CreateRtlDevice(handle);
+  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock);
   if (!rtlDevice) {
     /* Factory returns null when this chip's generation wasn't compiled in
      * (per-chip CMake options); it already logged which. */

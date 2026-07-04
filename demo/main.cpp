@@ -17,6 +17,7 @@
 #endif
 #include "RtlUsbAdapter.h"
 #include "SignalStop.h"
+#include "UsbOpen.h"
 #include "WiFiDriver.h"
 
 #define USB_VENDOR_ID 0x0bda
@@ -454,35 +455,28 @@ int main() {
     return 1;
   }
 
-  // Check if the kernel driver attached
-  if (libusb_kernel_driver_active(dev_handle, 0)) {
-    rc = libusb_detach_kernel_driver(dev_handle, 0); // detach driver
-  }
-
-  /* Skip USB reset if DEVOURER_SKIP_RESET=1. Used when picking up a chip
-   * with firmware already running (e.g. after a patched-rtw88 sysfs unbind):
-   * USB reset would clobber fw state and force us to re-run fwdl. */
   logger->info("init-timing: demo.open_device = {} ms", ms_since_start());
-  if (!std::getenv("DEVOURER_SKIP_RESET")) {
-    libusb_reset_device(dev_handle);
-  } else {
-    logger->info("DEVOURER_SKIP_RESET set — skipping libusb_reset_device");
-  }
+  /* Claim-before-reset: the kernel's exclusive interface claim is the primary
+   * guard against a second devourer driving this adapter — it returns BUSY, and
+   * bailing on BUSY *before* the reset keeps a second launch from re-enumerating
+   * the adapter out from under the process that already owns it. DEVOURER_SKIP_RESET
+   * still suppresses the reset for a warm pickup (firmware already running).
+   * See src/UsbOpen.h. */
+  std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
+  rc = devourer::claim_interface_then_reset(
+      dev_handle, 0, logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr,
+      usb_lock);
   logger->info("init-timing: demo.usb_reset = {} ms", ms_since_start());
-  /* Set the USB configuration ourselves rather than relying on the kernel
-   * having done it — required when the device was never kernel-configured
-   * (e.g. drivers_autoprobe off / a truly cold chip), where bulk transfers
-   * otherwise fail with errno=3 (ESRCH). No-op if config 1 is already active. */
-  {
-    int cfg = 0;
-    if (libusb_get_configuration(dev_handle, &cfg) != 0 || cfg != 1)
-      libusb_set_configuration(dev_handle, 1);
+  if (rc != 0) {
+    /* BUSY => another process owns the adapter; any other error => open failed.
+     * Either way, exit cleanly rather than asserting. */
+    libusb_close(dev_handle);
+    libusb_exit(ctx);
+    return 1;
   }
-  rc = libusb_claim_interface(dev_handle, 0);
-  assert(rc == 0);
 
   WiFiDriver wifi_driver(logger);
-  auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle, ctx);
+  auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle, ctx, usb_lock);
   if (!rtlDevice) {
     /* The factory returns null when the plugged chip's generation wasn't
      * compiled in (per-chip CMake options); it already logged which. */

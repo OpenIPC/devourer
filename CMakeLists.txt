@@ -57,6 +57,10 @@ add_library(WiFiDriver
     src/RadiotapBuilder.h
     src/RtlUsbAdapter.cpp
     src/RtlUsbAdapter.h
+    src/UsbDeviceLock.cpp
+    src/UsbDeviceLock.h
+    src/UsbOpen.cpp
+    src/UsbOpen.h
     src/SelectedChannel.h
     src/RateDefinitions.h
     src/RxPacket.h

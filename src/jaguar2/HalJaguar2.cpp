@@ -944,8 +944,14 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
    * calibration + txpwr_lmt clamp is a follow-up; DEVOURER_TX_PWR (flat TXAGC
    * override) still works for SDR power control. */
   if (_variant == ChipVariant::C8821C) {
-    _logger->info("Jaguar2/8821C: apply_tx_power — using phy_reg TXAGC baseline "
-                  "(8822B efuse power-by-rate layout N/A on 8821C)");
+    /* 8821C has no EEPROM_TX_PWR_INX (8822B 0x10 layout N/A) and its phy_reg
+     * BB-table TXAGC baseline is too low for OFDM/HT (1M CCK is robust to it, so
+     * it "worked", but MCS TX did not radiate a decodable frame). Program a flat,
+     * on-air-validated per-rate TXAGC index instead of the wrong efuse layout —
+     * DEVOURER_TX_PWR still overrides for SDR sweeps. Proper phy_reg_pg-based
+     * per-rate power + txpwr_lmt is a follow-up (needs SDR power ground-truth). */
+    constexpr uint8_t k8821cTxAgc = 0x2d; /* validated: 1M + MCS7 decode on air */
+    set_tx_power_flat(k8821cTxAgc);
     return;
   }
   const bool g5 = channel > 14;

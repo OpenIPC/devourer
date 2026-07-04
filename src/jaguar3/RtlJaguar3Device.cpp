@@ -270,23 +270,10 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   _hal.run_iqk(channel);
   if (want_rx)
     _hal.enable_rx_path(); /* RF into RX mode — same slot as the Init path */
-  /* 8822e DPK force-bypass + per-rate TXAGC (below) each DESENSE the EU's RX
-   * to near-deaf when applied on a bring-up that also runs the RX path (bisected
-   * on hardware: either alone kills RX; skipping both restores it; a later
-   * enable_rx_path does not recover). In TX+RX mode trade them away: TX runs at
-   * the flat table power (no per-rate spread, no DPK-LUT bypass state), RX
-   * works. TX-only behavior is unchanged. Root cause is an open question —
-   * suspect the RMW reads of the live 0x18e8/0x1b00 blocks folding HW-status
-   * bits back into config. */
-  if (!want_rx)
-    _hal.dpk_force_bypass_8822e(); /* 8822e rfe 21/22: kernel bypasses DPK (after IQK) */
+  _hal.dpk_force_bypass_8822e(); /* 8822e rfe 21/22: kernel bypasses DPK (after IQK) */
   _hal.config_rfe(channel.Channel); /* 8822e RFE/PAPE antenna-switch pins (PA enable) */
   _hal.config_channel_8822e(channel.Channel); /* 8822e band TX scaling/backoff + shaping */
-  if (want_rx && _variant == jaguar3::ChipVariant::C8822E) {
-    /* See the DPK note above — the EU's TXAGC ref/diff writes desense RX. */
-    _logger->info("Jaguar3(8822e): TX+RX mode — flat table TX power "
-                  "(per-rate TXAGC skipped, keeps RX alive)");
-  } else if (_tx_pwr_override >= 0) {
+  if (_tx_pwr_override >= 0) {
     _radioManagement.set_tx_power_ref(static_cast<uint8_t>(_tx_pwr_override));
   } else if (_variant == jaguar3::ChipVariant::C8822E) {
     /* Default TX power (8822e). The TXAGC reference base is the per-channel 5 GHz
@@ -303,7 +290,14 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     _hal.read_efuse_txpwr_base_8822e(channel.Channel, efuse_a, efuse_b);
     uint8_t ref_a = (efuse_a <= 127) ? efuse_a : JAGUAR3_TXPWR_REF_BASE;
     uint8_t ref_b = (efuse_b <= 127) ? efuse_b : JAGUAR3_TXPWR_REF_BASE;
-    _radioManagement.apply_power_by_rate_8822e(channel.Channel, ref_a, ref_b);
+    /* TX+RX mode: the path-B OFDM reference (0x41e8) desenses the EU's RX
+     * (hardware-bisected, value-independent) — skip that one write and keep
+     * the rest of the per-rate power intact. See apply_power_by_rate_8822e. */
+    _radioManagement.apply_power_by_rate_8822e(channel.Channel, ref_a, ref_b,
+                                               /*skip_path_b_ofdm_ref=*/want_rx);
+    if (want_rx)
+      _logger->info("Jaguar3(8822e): TX+RX mode — path-B OFDM TXAGC ref left "
+                    "at table default (keeps RX alive)");
   } else {
     /* 8822c (CU): preserve the flat reference the demo used to impose (40) so
      * the SDR-validated CU TX power is unchanged now that the demo no longer

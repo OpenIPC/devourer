@@ -45,8 +45,17 @@ public:
    * 0x41a0) and writes the per-rate diff table (0x3a00) so robust low rates get
    * the kernel's by-rate boost instead of a flat reference. The per-path refs
    * come from the efuse per-channel base (the kernel programs a distinct path-A/
-   * path-B base, e.g. 0x4b/0x54 at ch36). */
-  void apply_power_by_rate_8822e(uint8_t channel, uint8_t ref_a, uint8_t ref_b);
+   * path-B base, e.g. 0x4b/0x54 at ch36).
+   *
+   * skip_path_b_ofdm_ref: leave 0x41e8 (path-B OFDM ref) at its table default.
+   * Hardware-bisected: ANY nonzero value in that one field desenses the EU's RX
+   * to near-deaf (value-independent; path-A ref, CCK refs, the diff table and
+   * the DPK bypass are all RX-safe) — root cause open, suspected path-B
+   * TSSI/gain-stage asymmetry in devourer's bring-up vs the kernel's. TX+RX
+   * callers set this so RX works at the cost of path-B OFDM TX running at the
+   * table-default reference. */
+  void apply_power_by_rate_8822e(uint8_t channel, uint8_t ref_a, uint8_t ref_b,
+                                 bool skip_path_b_ofdm_ref = false);
 
 private:
   /* Jaguar3 baseband bandwidth/clock registers (from

@@ -358,6 +358,10 @@ void HalJaguar3::txbf_rfmode_sounder() {
                                             ((addr & 0xff) << 2));
     _device.phy_set_bb_reg(direct, mask & 0xfffff, val);
   };
+  /* Bracket the RF mode-table writes with rstb_3wire like the RF table load
+   * (RadioManagementJaguar3 / apply_bb_rf_agc_tables do the same) — without
+   * it the mode-table entry writes can be dropped by the live 3-wire engine. */
+  _device.phy_set_bb_reg(0x1c90, 1u << 8, 0);
   if (_variant == jaguar3::ChipVariant::C8822C) {
     /* Path A: RX-mode table entry with TX IQ generator on */
     rf(0, 0xef, 1u << 19, 1);      /* mode-table write enable */
@@ -384,6 +388,10 @@ void HalJaguar3::txbf_rfmode_sounder() {
     rf(1, 0x3f, 0xfffff, 0x306bf);
     rf(1, 0xef, 1u << 19, 0);
   }
+  /* rstb_3wire back on + force anapar update (same tail as the table load). */
+  _device.phy_set_bb_reg(0x1c90, 1u << 8, 1);
+  _device.phy_set_bb_reg(0x1830, 1u << 29, 1);
+  _device.phy_set_bb_reg(0x4130, 1u << 29, 1);
   /* BB TxBF antenna mapping (same on both variants). */
   _device.phy_set_bb_reg(0x1e24, 1u << 11, 1); /* Nsts > Nc: no V matrix */
   _device.phy_set_bb_reg(0x1e24, (1u << 28) | (1u << 29), 0x2);
@@ -423,8 +431,14 @@ void HalJaguar3::monitor_rx_cfg() {
    * MACRXEN(+ENSWBCN). init_mac_cfg only set CR=0x0F (DMA enable); without
    * MACRXEN (BIT7) the MAC RX engine never runs — the structured-path RX gap. */
   _device.rtw_write16(0x0100, 0x06FF);
-  /* accept-all + keep FCS/ICV-error frames + append phy-status (BIT28) */
-  _device.rtw_write32(REG_RCR_8822C, 0xF410400E | (1u << 28));
+  /* accept-all + keep FCS/ICV-error frames + append phy-status (BIT28).
+   * BIT0 (AAP) is what makes monitor mode promiscuous for unicast: without it
+   * the WMAC passes only broadcast/multicast/physical-match (APM|AM|AB) up,
+   * silently dropping unicast frames addressed to third parties — e.g. NDPA
+   * control frames and VHT beamforming reports, which is why the beamformee
+   * (whose arm programs the self-MAC to the NDPA RA) saw sounding frames while
+   * a plain monitor did not. */
+  _device.rtw_write32(REG_RCR_8822C, 0xF410400F | (1u << 28));
   _device.rtw_write8(REG_RX_DRVINFO_SZ_8822C, 0x04);
   _device.rtw_write16(REG_RXFLTMAP0_8822C, 0xFFFF);
   _device.rtw_write16(REG_RXFLTMAP1_8822C, 0xFFFF);

@@ -90,6 +90,12 @@ public:
   bool fast_retune(uint8_t channel, uint8_t bw, uint8_t primary_ch_idx,
                    bool cache_rf);
 
+  /* Channel/BW register-canary dump for tests/hop_parity_check.sh — the same
+   * grep format as the Jaguar1/Jaguar3 DumpCanary. Emitted by both the full
+   * and fast channel paths when DEVOURER_DUMP_CANARY is set. Live registers
+   * (IGI 0xc50/0xe50, FA counters) deliberately excluded. */
+  void DumpCanary();
+
   /* Enable the MAC RX engine (CR MACRXEN + promiscuous RCR for monitor). */
   void enable_rx();
 

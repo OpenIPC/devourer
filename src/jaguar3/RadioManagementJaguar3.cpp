@@ -253,6 +253,44 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
   /* For 5/10 MHz: channel is now tuned at 20 MHz; re-clock the baseband. */
   if (bwmode == CHANNEL_WIDTH_5 || bwmode == CHANNEL_WIDTH_10)
     set_bandwidth_dividers(bwmode);
+
+  if (std::getenv("DEVOURER_DUMP_CANARY"))
+    DumpCanary();
+}
+
+void RadioManagementJaguar3::DumpCanary() {
+  /* Channel/BW-relevant set: TX DFIR + block enables (0x808), RX DFIR (0x810),
+   * AGC bound/tables (0x828/0x18ac/0x41ac), subtune (0x88c), small-BW/RF-BW/
+   * pri-ch (0x9b0), clock dividers (0x9b4), SCO (0xc30), pilot smoothing
+   * (0xcbc), CCK block regs (0x1a00/0x1a14/0x1a80/0x1a9c/0x1abc/0x1ae8/0x1aec),
+   * AGC 5G bound (0x1c80), 80 MHz decimation (0x1944/0x4044). MAC: BB-reset
+   * word (0x0), AFE clk (0x24, 8822e NB), CCK check (0x454), DATA_SC (0x483),
+   * us-ticks (0x55c/0x638), TRXPTCL (0x668). RF (via the BB direct window,
+   * both paths): 0x18 channel, 0x1a RXBB (8822e), 0x3f RXBB (8822c), 0xdf.
+   * Live counters (IGI 0x1d70, FA/CCA) deliberately excluded. */
+  static const uint16_t bb_canary[] = {
+      0x808, 0x810, 0x828,  0x88c,  0x9b0,  0x9b4,  0xc30,  0xcbc,
+      0x1a00, 0x1a14, 0x1a80, 0x1a9c, 0x1abc, 0x1ae8, 0x1aec, 0x1c80,
+      0x18ac, 0x41ac, 0x1944, 0x4044};
+  static const uint16_t mac_canary[] = {0x0, 0x24, 0x454, 0x483,
+                                        0x55c, 0x638, 0x668};
+  static const uint8_t rf_canary[] = {0x18, 0x1a, 0x3f, 0xdf};
+
+  _logger->info("=== DEVOURER_DUMP_CANARY (post channel-set ch={}) ===",
+                unsigned(_last_channel));
+  for (uint16_t a : bb_canary)
+    _logger->info("BB 0x{:04x} = 0x{:08X}", a, _device.rtw_read32(a));
+  for (uint16_t a : mac_canary)
+    _logger->info("MAC 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+  for (uint8_t a : rf_canary)
+    _logger->info("RF[A] 0x{:02x} = 0x{:05X}", a,
+                  _device.rtw_read32(static_cast<uint16_t>(0x3c00 + (a << 2))) &
+                      0xfffffu);
+  for (uint8_t a : rf_canary)
+    _logger->info("RF[B] 0x{:02x} = 0x{:05X}", a,
+                  _device.rtw_read32(static_cast<uint16_t>(0x4c00 + (a << 2))) &
+                      0xfffffu);
+  _logger->info("=== END DEVOURER_DUMP_CANARY ===");
 }
 
 void RadioManagementJaguar3::central_and_pri(uint8_t channel,
@@ -462,6 +500,11 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
   _last_channel = channel;
   _logger->debug("Jaguar3: fast retune -> ch {} (central {}, RF18=0x{:05x})",
                  channel, central, rf18);
+  /* The J1 parity lesson: the fast path must emit the canary itself — it does
+   * not pass through the full path, so without this the parity diff would
+   * compare the fast run's stale full-set dump. */
+  if (std::getenv("DEVOURER_DUMP_CANARY"))
+    DumpCanary();
   return true;
 }
 

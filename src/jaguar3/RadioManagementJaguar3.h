@@ -48,6 +48,14 @@ public:
   bool fast_retune(uint8_t channel, uint8_t channel_offset,
                    ChannelWidth_t bwmode, bool cache_rf);
 
+  /* Channel/BW register-canary dump for tests/hop_parity_check.sh — the same
+   * grep format as the Jaguar1 DumpCanary (BB/MAC/RF[A|B] ADDR = VALUE inside
+   * === DEVOURER_DUMP_CANARY === markers). Emitted by both the full and fast
+   * channel paths when DEVOURER_DUMP_CANARY is set, so a full-vs-fast diff
+   * compares the same post-set snapshot. Live counters (IGI/FA) are excluded
+   * — they'd be pure run-variant noise. */
+  void DumpCanary();
+
   /* Narrowband re-clock applied on top of an already-tuned channel: switches
    * the baseband DAC/ADC clock + small-BW field for 5/10/20 MHz. */
   void set_bandwidth_dividers(ChannelWidth_t bwmode);

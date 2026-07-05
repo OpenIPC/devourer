@@ -475,6 +475,8 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   if (_variant == ChipVariant::C8821C) {
     set_channel_bw_8821c(channel, bw, rfe_type, primary_ch_idx);
     _last_tuned_ch = channel;
+    if (std::getenv("DEVOURER_DUMP_CANARY"))
+      DumpCanary();
     return;
   }
   const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
@@ -618,6 +620,39 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _last_tuned_ch = channel;
   _logger->info("Jaguar2: channel set ch={} bw={} (rf18=0x{:05x})", channel,
                 (int)bw, rf18);
+  if (std::getenv("DEVOURER_DUMP_CANARY"))
+    DumpCanary();
+}
+
+void HalJaguar2::DumpCanary() {
+  /* Channel/BW-relevant set (both variants; the control run in the parity
+   * script classifies natural run-variance): RX path (0x808), CCA thresholds
+   * (0x82c/0x830/0x838), fc (0x860), BW block (0x8ac/0x8c4/0x8f0), RX DFIR
+   * (0x948/0x94c/0xc20/0xe20), AGC index (0x958 8822B / 0xc1c 8821C), CCK pri
+   * (0xa00), spur / CCK filter (0xa24/0xa28/0xaac), 8821C band block
+   * (0xa80/0xa84/0x814), RFE pins (0xcb0/0xcb4/0xcb8/0xca0/0xeb0/0xeb4/0xea0).
+   * MAC: CCK check (0x454). RF via the direct read window: 0x18 channel,
+   * 0xbe VCO band, 0xdf, 0xb8. IGI (0xc50/0xe50) excluded — live. */
+  static const uint16_t bb_canary[] = {
+      0x808, 0x814, 0x82c, 0x830, 0x838, 0x860, 0x8ac, 0x8c4, 0x8f0,
+      0x948, 0x94c, 0x958, 0xa00, 0xa24, 0xa28, 0xaac, 0xa80, 0xa84,
+      0xc1c, 0xc20, 0xe20, 0xca0, 0xcb0, 0xcb4, 0xcb8, 0xea0, 0xeb0, 0xeb4};
+  static const uint16_t mac_canary[] = {0x454};
+  static const uint8_t rf_canary[] = {0x18, 0xb8, 0xbe, 0xdf};
+  const bool r2t2r = _ver.rf_2t2r != 0;
+
+  _logger->info("=== DEVOURER_DUMP_CANARY (post channel-set ch={}) ===",
+                unsigned(_last_tuned_ch));
+  for (uint16_t a : bb_canary)
+    _logger->info("BB 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+  for (uint16_t a : mac_canary)
+    _logger->info("MAC 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+  for (uint8_t a : rf_canary)
+    _logger->info("RF[A] 0x{:02x} = 0x{:05X}", a, rf_read(0, a));
+  if (r2t2r)
+    for (uint8_t a : rf_canary)
+      _logger->info("RF[B] 0x{:02x} = 0x{:05X}", a, rf_read(1, a));
+  _logger->info("=== END DEVOURER_DUMP_CANARY ===");
 }
 
 /* RF 0xBE[17:15] per-5G-channel phase-noise / VCO-band value
@@ -789,6 +824,10 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   _last_tuned_ch = channel;
   _logger->debug("Jaguar2: fast retune -> ch {} (central {}, RF18=0x{:05x})",
                  channel, cch, rf18);
+  /* The fast path must emit the canary itself (it does not pass through the
+   * full path) or the parity diff compares a stale full-set dump. */
+  if (std::getenv("DEVOURER_DUMP_CANARY"))
+    DumpCanary();
   return true;
 }
 

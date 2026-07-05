@@ -235,11 +235,18 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         p.RxAtrib.data_rate = f.rx_rate;
         p.RxAtrib.drvinfo_sz = static_cast<uint8_t>(f.drvinfo_size);
         p.RxAtrib.shift_sz = f.shift;
-        p.RxAtrib.pkt_rpt_type = RX_PACKET_TYPE::NORMAL_RX;
+        /* RX desc word2 BIT(28) (GET_RX_DESC_C2H, halmac_rx_desc_nic.h:230) marks
+         * a firmware C2H report, not an 802.11 frame. Tag it so the processor
+         * skips the SA/frame path (the vendor routes C2H to its own handler and
+         * never treats it as a recvframe). Mirrors the Jaguar-1/-3 RX loops. */
+        const bool is_c2h = (data[off + 11] & 0x10) != 0;
+        p.RxAtrib.pkt_rpt_type = is_c2h ? RX_PACKET_TYPE::C2H_PACKET
+                                        : RX_PACKET_TYPE::NORMAL_RX;
         /* Per-frame RSSI/SNR/EVM from the jgr2 PHY-status (present when
          * APP_PHYSTS is on, i.e. drvinfo carries the 32-byte report). CCK rates
-         * (DESC_RATE1M..11M = 0..3) use type0, everything else type1. */
-        if (f.drvinfo_size >= 28)
+         * (DESC_RATE1M..11M = 0..3) use type0, everything else type1. C2H has no
+         * phy-status (drvinfo=0), so the size guard already skips it. */
+        if (!is_c2h && f.drvinfo_size >= 28)
           jaguar2::parse_phy_sts_jgr2(data + off + jaguar2::RXDESC_SIZE_8822B,
                                       f.drvinfo_size, f.rx_rate <= 3, p.RxAtrib);
         p.Data =

@@ -298,33 +298,51 @@ constants once); every subsequent same-band hop is ~1.5 ms.
 point (default = the full `SetMonitorChannel` at the current width/offset), and
 every generation overrides it with a lean path built from the tricks above:
 
-| DUT | full path | fast (cached) | fast (no cache) |
-|-----|-----------|---------------|-----------------|
-| RTL8812AU (Jaguar1) | ~251 ms | **~1.6 ms** | ~99 ms |
-| RTL8822BU (Jaguar2) | ~62 ms | **~18 ms** | ~20 ms |
-| RTL8821CU (Jaguar2) | ~29 ms | **~5.6 ms** | ~5.6 ms |
-| RTL8822CU (Jaguar3) | ~11 ms | **~3.6 ms** | ~3 ms |
-| RTL8812EU (Jaguar3) | ~11 ms | **~4.3 ms** | ~3 ms |
+| DUT | full path | fast (cached) | USB op cost | fast ops/hop |
+|-----|-----------|---------------|-------------|--------------|
+| RTL8812AU (Jaguar1) | ~277 ms | **~1.6 ms** | ~0.8 ms | 2 |
+| RTL8822BU (Jaguar2) | ~65 ms | **~2.5 ms** | ~1.0 ms | 2 |
+| RTL8821CU (Jaguar2) | ~30 ms | **~0.55 ms** | ~0.5 ms | 1 |
+| RTL8822CU (Jaguar3) | ~12 ms | **~1.9 ms** | ~0.21 ms | 9 |
+| RTL8812EU (Jaguar3) | ~12 ms | **~2.4 ms** | ~0.27 ms | 9 |
 
-(Median `<devourer-hop>switch_us` over a 1/6/11 hop set. The newer generations'
-full paths are already far cheaper than Jaguar1's — no 20 ms C-cut read sleeps —
-so their win comes from transfer-count reduction, and `cache_rf=false` costs
-only the one extra RF18 read.)
+(Median `<devourer-hop>switch_us` over a 1/6/11 hop set; per-stage numbers from
+`DEVOURER_HOP_PROF=1`. Every hop microsecond is USB round-trips: one register
+read or write is one synchronous control transfer, whose latency is a property
+of the chip's EP0 handling — it varies 5× across the family — so the only code
+lever is op count. FHSS-soak-validated: 12,000 (8822CU) and 9,000 (8822BU)
+consecutive dwell-1 per-packet hops, zero bulk-OUT failures; a kickless hopping
+receiver holds a constant catch rate over ~850 retunes.)
 
-**Jaguar2** (`HalJaguar2::fast_retune`, both variants): one cached full-register
-RF18 write collapses the full path's read-modify-write rounds (three of them on
-the 8821C's band/channel/BW split); AGC index, CFO fc, the 8822B RF 0xBE VCO
-band / ch144 RF 0xDF flag / 2G spur registers and the 8821C 2G CCK filter are
-written on bucket change; the per-hop RX kick (8822B RF 0xb8 + RX-path toggles,
-IGI toggle on both variants) runs every hop. RFE pins and the 8821C
-switch-band/RF-set block are band-keyed and stay untouched.
+Two techniques carried the newer generations to the table above, beyond the
+original tricks:
+
+- **The compose cache (Trick 2 generalised to every masked write).** A masked
+  `phy_set_bb_reg` is a read-modify-write — two control transfers. The fast
+  path primes the full dwords of every register it touches ONCE per epoch
+  (first fast hop, lazily — priming at full-set time would cache values that
+  init calibration then rewrites), composes bit changes in memory, and writes
+  whole dwords: the steady hop is write-only. Correct by construction — the
+  untouched bits are written back as read.
+- **No per-hop RX kick.** The vendor `switch_channel` tail (Jaguar2's RF 0xb8
+  toggle, RX-path toggle, IGI toggle — 13 of the 19 transfers the first Jaguar2
+  port paid) belongs to the full path only: hardware A/B on both Jaguar2
+  variants, both directions, shows identical hopping-RX catch rate (no decay
+  over hundreds of kickless retunes) and identical hopping-TX delivery without
+  it. A hop needs the channel write, not the state-machine kick.
+
+**Jaguar2** (`HalJaguar2::fast_retune`, both variants): one composed
+full-register RF18 write per path collapses the full path's read-modify-write
+rounds (three of them on the 8821C's band/channel/BW split) — the 8821CU hop is
+a **single LSSI write**; AGC index, CFO fc, the 8822B RF 0xBE VCO band / ch144
+RF 0xDF flag / 2G spur registers and the 8821C 2G CCK filter are composed
+writes on bucket change. RFE pins and the 8821C switch-band/RF-set block are
+band-keyed and stay untouched.
 
 **Jaguar3** (`RadioManagementJaguar3::fast_retune`, both variants): the RF18
-write inside its 3-wire bracket + force-anapar + BB reset every hop; SCO fc,
-TX DFIR and the AGC table on bucket change; the 8822c RF18 read-modify-write
-becomes a lazily-primed cached write (primed on the first fast hop, after
-init-time IQK has settled RF18 — priming at full-set time would cache a value
-calibration then rewrites). In 5/10 MHz narrowband mode fast hops preserve the
+window write inside its 3-wire bracket + force-anapar + BB reset every hop —
+nine composed writes total; SCO fc, TX DFIR (both nibbles in one dword) and the
+AGC table on bucket change. In 5/10 MHz narrowband mode fast hops preserve the
 divider re-clock (no per-dwell `set_bandwidth_dividers` + DAC-FIFO reset), and
 the TX-DFIR write uses the NB-owned `0x808[6:4]` value on the 8822e.
 

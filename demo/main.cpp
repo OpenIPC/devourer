@@ -169,22 +169,67 @@ static const uint32_t g_rx_sweep_dwell_ms = []() -> uint32_t {
   return (e && *e) ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 300;
 }();
 
-/* Rolling per-frame RSSI/SNR aggregate (the frame-driven signal, all gens):
- * updated per received frame in packetProcessor, drained each interval by the
- * energy emitter. */
+/* Rolling per-frame RSSI/SNR/EVM aggregate (the frame-driven signal, all
+ * gens): updated per received frame in packetProcessor, drained each interval
+ * by the energy emitter and per dwell by the sweep loop. EVM counts only
+ * frames that report one (CCK / non-type1 phy-status leaves it 0), so a mixed
+ * stream doesn't bias the mean toward 0. */
 static std::mutex g_rxagg_mu;
 struct RxAgg {
   uint32_t n = 0;
   int32_t rssi_sum = 0, rssi_max = -128, snr_sum = 0, snr_min = 127;
-  void add(int rssi, int snr) {
+  int32_t evm_sum = 0;
+  uint32_t evm_n = 0;
+  void add(int rssi, int snr, int evm) {
     ++n;
     rssi_sum += rssi;
     if (rssi > rssi_max) rssi_max = rssi;
     snr_sum += snr;
     if (snr < snr_min) snr_min = snr;
+    if (evm != 0) { evm_sum += evm; ++evm_n; }
   }
 };
 static RxAgg g_rxagg;
+
+/* The canonical txdemo beacon SA (same constant as txdemo/main.cpp and
+ * tests/regress.py CANONICAL_SA — change all three together): the
+ * <devourer-tx-hit> matcher and the "canon" aggregate filter below. */
+static const uint8_t kTxSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+
+/* DEVOURER_RX_AGG_SA: restrict the per-frame aggregate to frames whose SA
+ * matches — the active-sounding filter, so ambient traffic doesn't pollute the
+ * per-bin link stats (a sweep dwell hears everything on the bin; H(f) wants
+ * only the probe TX). "canon" = kTxSa; "aa:bb:cc:dd:ee:ff" = that address;
+ * unset/"any" = every frame (existing behaviour). */
+static bool g_agg_sa_filter = false;
+static uint8_t g_agg_sa[6];
+static const bool g_agg_sa_parsed = []() {
+  const char *e = std::getenv("DEVOURER_RX_AGG_SA");
+  if (!e || !*e || std::strcmp(e, "any") == 0)
+    return false;
+  if (std::strcmp(e, "canon") == 0) {
+    std::memcpy(g_agg_sa, kTxSa, 6);
+    g_agg_sa_filter = true;
+    return true;
+  }
+  unsigned b[6];
+  if (std::sscanf(e, "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3], &b[4],
+                  &b[5]) == 6) {
+    for (int i = 0; i < 6; i++)
+      g_agg_sa[i] = static_cast<uint8_t>(b[i]);
+    g_agg_sa_filter = true;
+    return true;
+  }
+  return false;
+}();
+static bool agg_sa_match(const Packet &packet) {
+  if (!g_agg_sa_filter)
+    return true;
+  /* SA at offset 10 (FC + duration + addr1) — same layout the tx-hit matcher
+   * keys on; frames too short to carry it don't count. */
+  return packet.Data.size() >= 16 &&
+         std::memcmp(packet.Data.data() + 10, g_agg_sa, 6) == 0;
+}
 
 /* Emit the frame-free NHM power histogram (IRtlDevice::GetRxEnergy fills it) as
  * a distinct <devourer-nhm> line so it never disturbs the <devourer-energy>
@@ -254,11 +299,14 @@ static void packetProcessor(const Packet &packet) {
 
   ++g_rx_count;
 
-  /* Feed the rolling per-frame RSSI/SNR aggregate for DEVOURER_RX_ENERGY_MS
-   * (the frame-driven half of the energy telemetry). path-A chain. */
-  if (g_rx_energy_ms > 0) {
+  /* Feed the rolling per-frame RSSI/SNR/EVM aggregate for DEVOURER_RX_ENERGY_MS
+   * and the sweep's per-dwell frame stats (the frame-driven half of the energy
+   * telemetry). path-A chain; DEVOURER_RX_AGG_SA optionally restricts it to the
+   * sounding probe's SA. */
+  if ((g_rx_energy_ms > 0 || !g_rx_sweep.empty()) && agg_sa_match(packet)) {
     std::lock_guard<std::mutex> lk(g_rxagg_mu);
-    g_rxagg.add(packet.RxAtrib.rssi[0], packet.RxAtrib.snr[0]);
+    g_rxagg.add(packet.RxAtrib.rssi[0], packet.RxAtrib.snr[0],
+                packet.RxAtrib.evm[0]);
   }
 
   if (g_rx_count == 1) {
@@ -302,7 +350,6 @@ static void packetProcessor(const Packet &packet) {
    * one adapter while WiFiDriverTxDemo runs against another on the same
    * channel, each hit confirms an injected frame made it over the air. */
   if (packet.Data.size() >= 16) {
-    static const uint8_t kTxSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
     if (std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
       static int hits = 0;
       ++hits;
@@ -681,11 +728,14 @@ int main() {
         else std::snprintf(igi, 16, "-");
         int rssi_mean = agg.n ? agg.rssi_sum / static_cast<int>(agg.n) : 0;
         int snr_mean = agg.n ? agg.snr_sum / static_cast<int>(agg.n) : 0;
+        int evm_mean =
+            agg.evm_n ? agg.evm_sum / static_cast<int>(agg.evm_n) : 0;
         printf("<devourer-energy>cca_ofdm=%s cca_cck=%s fa_ofdm=%s fa_cck=%s "
                "igi=%s frames=%u rssi_mean=%d rssi_max=%d snr_mean=%d "
-               "snr_min=%d\n",
+               "snr_min=%d evm_mean=%d\n",
                cco, ccc, fao, fac, igi, agg.n, rssi_mean,
-               agg.n ? agg.rssi_max : 0, snr_mean, agg.n ? agg.snr_min : 0);
+               agg.n ? agg.rssi_max : 0, snr_mean, agg.n ? agg.snr_min : 0,
+               evm_mean);
         fflush(stdout);
         emit_nhm(e, -1);
         nap(g_rx_energy_ms);
@@ -742,19 +792,48 @@ int main() {
         fflush(stdout);
       }
     });
-    /* Let bring-up complete before the first retune. */
-    for (int s = 0; s < 2500 && !g_devourer_should_stop; s += 50)
+    /* Let bring-up complete before the first retune: a retune racing the
+     * worker thread's init (FW download, DACK/IQK on Jaguar3) interleaves
+     * register writes with calibration. The first RX frame proves bring-up
+     * finished; a silent channel falls through after the 10 s cap. */
+    for (int s = 0; s < 10000 && !g_devourer_should_stop && g_rx_count == 0;
+         s += 50)
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
     size_t bi = 0;
+    /* Dwell retunes ride FastRetune (lean intra-band fast path on every
+     * generation, internal full-path fallback on a band change);
+     * DEVOURER_RX_SWEEP_FULL=1 forces the full SetMonitorChannel per dwell
+     * (A/B escape hatch). */
+    const bool sweep_full = std::getenv("DEVOURER_RX_SWEEP_FULL") != nullptr;
     while (!g_devourer_should_stop) {
       int ch = g_rx_sweep[bi % g_rx_sweep.size()];
       ++bi;
-      dev->SetMonitorChannel(
-          SelectedChannel{static_cast<uint8_t>(ch), ch_offset, width});
+      const auto rt0 = std::chrono::steady_clock::now();
+      if (sweep_full)
+        dev->SetMonitorChannel(
+            SelectedChannel{static_cast<uint8_t>(ch), ch_offset, width});
+      else
+        dev->FastRetune(static_cast<uint8_t>(ch), /*cache_rf=*/true);
+      const long long retune_us =
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - rt0)
+              .count();
+      {
+        /* Drop frames captured before/during the retune — the dwell's frame
+         * stats must only cover this bin. */
+        std::lock_guard<std::mutex> lk(g_rxagg_mu);
+        g_rxagg = RxAgg{};
+      }
       for (uint32_t s = 0; s < g_rx_sweep_dwell_ms && !g_devourer_should_stop;
            s += 50)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
       RxEnergy e = dev->GetRxEnergy();
+      RxAgg agg;
+      {
+        std::lock_guard<std::mutex> lk(g_rxagg_mu);
+        agg = g_rxagg;
+        g_rxagg = RxAgg{};
+      }
       char cco[16], ccc[16], fao[16], fac[16], igi[16];
       auto u = [](char *b, bool v, uint32_t x) {
         if (v) std::snprintf(b, 16, "%u", x); else std::snprintf(b, 16, "-");
@@ -764,9 +843,15 @@ int main() {
       u(fao, e.valid_fa, e.fa_ofdm);
       u(fac, e.valid_fa, e.fa_cck);
       u(igi, e.valid_igi, e.igi);
+      int rssi_mean = agg.n ? agg.rssi_sum / static_cast<int>(agg.n) : 0;
+      int snr_mean = agg.n ? agg.snr_sum / static_cast<int>(agg.n) : 0;
+      int evm_mean = agg.evm_n ? agg.evm_sum / static_cast<int>(agg.evm_n) : 0;
       printf("<devourer-energy>ch=%d cca_ofdm=%s cca_cck=%s fa_ofdm=%s "
-             "fa_cck=%s igi=%s\n",
-             ch, cco, ccc, fao, fac, igi);
+             "fa_cck=%s igi=%s retune_us=%lld frames=%u rssi_mean=%d "
+             "rssi_max=%d snr_mean=%d snr_min=%d evm_mean=%d\n",
+             ch, cco, ccc, fao, fac, igi, retune_us, agg.n, rssi_mean,
+             agg.n ? agg.rssi_max : 0, snr_mean, agg.n ? agg.snr_min : 0,
+             evm_mean);
       fflush(stdout);
       emit_nhm(e, ch);
     }

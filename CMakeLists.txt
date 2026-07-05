@@ -77,6 +77,9 @@ add_library(WiFiDriver
     src/BeamformingSounder.h
     src/TxMode.cpp
     src/TxMode.h
+    src/TxPower.cpp
+    src/TxPower.h
+    src/ThermalStatus.h
     src/IRtlDevice.h
     src/SignalStop.cpp
     src/SignalStop.h
@@ -314,6 +317,16 @@ add_executable(SweepSpecSelftest
 target_link_libraries(SweepSpecSelftest PRIVATE WiFiDriver)
 
 add_test(NAME sweep_spec_math COMMAND SweepSpecSelftest)
+
+# Headless guard for the TX-power offset quantization (src/TxPower.h) — the
+# qdB->index-step rounding/clamping behind SetTxPowerOffsetQdb, so a rounding
+# regression fails `ctest` instead of only surfacing as a wrong on-air level.
+add_executable(TxPowerQuantSelftest
+    tests/txpower_quant_selftest.cpp
+)
+target_link_libraries(TxPowerQuantSelftest PRIVATE WiFiDriver)
+
+add_test(NAME txpower_quant_math COMMAND TxPowerQuantSelftest)
 
 # Headless guard for the beamforming-report decoder (src/BfReportDecode.h) — the
 # LSB-first Givens-angle unpacking + per-tone variance behind WiFiSenseDemo. It

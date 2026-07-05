@@ -52,35 +52,13 @@ enum RATE_SECTION {
 
 #include "RateDefinitions.h"
 
-/* Read-only snapshot of the chip's thermal meter. `raw` is the live
- * RF[A][0x42][15:10] reading (0..63, Realtek "thermal units" — roughly
- * 1.5-2 C each, NOT absolute degrees). `baseline` is the EFUSE
- * factory-calibrated reading (0xFF = autoload failed / no baseline).
- * `delta = raw - baseline` (signed) is the heat signal — positive means
- * the chip is running hotter than calibration. `valid` is false when no
- * EFUSE baseline is available, in which case only `raw` is meaningful. */
-struct ThermalStatus {
-  uint8_t raw = 0;
-  uint8_t baseline = 0xFF;
-  int delta = 0;
-  bool valid = false;
-};
-
-/* Coarse, honest health label for a thermal reading. The meter is NOT a
- * calibrated °C sensor (Realtek publishes no °C transfer function for the AU
- * family; the value is an RF/PA-bias tracking index), so we deliberately bucket
- * the delta-from-baseline rather than fake a precise temperature — the same
- * stance the rtl88x2eu driver takes (cool/warm/hot/...). Thresholds are in
- * thermal units above the EFUSE baseline; "hot" aligns with the default
- * DEVOURER_THERMAL_WARN_DELTA of 15. Returns "unknown" when no EFUSE baseline
- * is available (delta is meaningless without it). */
-inline const char *ThermalBucket(const ThermalStatus &s) {
-  if (!s.valid) return "unknown";
-  if (s.delta < 8) return "cool";
-  if (s.delta < 15) return "warm";
-  if (s.delta < 25) return "hot";
-  return "critical";
-}
+/* ThermalStatus/ThermalBucket moved to the generation-agnostic
+ * src/ThermalStatus.h when GetThermalStatus was promoted to IRtlDevice;
+ * the alias keeps the many existing Jaguar1 + demo references compiling
+ * unchanged. */
+#include "../ThermalStatus.h"
+using ThermalStatus = devourer::ThermalStatus;
+using devourer::ThermalBucket;
 
 class RadioManagementModule {
   RtlUsbAdapter _device;

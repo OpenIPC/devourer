@@ -7,7 +7,9 @@
 
 #include "RxSense.h"
 #include "SelectedChannel.h"
+#include "ThermalStatus.h"
 #include "TxMode.h"
+#include "TxPower.h"
 
 /* Packet is the parsed-RX type handed to the RX callback. Forward-declared here
  * (a reference in the std::function signature needs only an incomplete type) so
@@ -63,7 +65,64 @@ public:
     SetMonitorChannel(c);
   }
 
+  /* Force a flat absolute TXAGC index across all rates (the debug /
+   * SDR-visibility knob — kept for source compatibility; new callers should
+   * prefer SetTxPowerIndexOverride, which is the same knob with an explicit
+   * clear). Live on a brought-up chip, recorded-and-applied-at-InitWrite
+   * otherwise. */
   virtual void SetTxPower(uint8_t power) = 0;
+
+  /* --- Runtime TX-power control (see src/TxPower.h for the full model) ---
+   *
+   * THREADING CONTRACT: like every other control-plane entry point
+   * (SetMonitorChannel, FastRetune, SetTxMode, Start/StopCwTone), these are
+   * single-control-thread calls — invoke them from the thread that owns the
+   * device's control plane, never concurrently with a channel set. Jaguar3
+   * additionally serializes against its coex/thermal tick internally; on
+   * Jaguar1/2 the USB-touching apply itself is the caller's to sequence.
+   * GetTxPowerCaps and the cached (non-readback) part of GetTxPowerState are
+   * safe from any thread. */
+
+  /* Static capabilities of this family's TX-power knobs; supported=false on
+   * the default (a generation without the API wired). */
+  virtual devourer::TxPowerCaps GetTxPowerCaps() { return {}; }
+
+  /* Adjust TX power RELATIVE to the efuse-calibrated per-rate table (or the
+   * flat override when one is active) in quarter-dB. Quantized to the family
+   * step and clamped to the caps range; returns the APPLIED qdB (0 when
+   * unsupported), so a closed-loop controller knows exactly what moved.
+   * Sticky: survives SetMonitorChannel (re-folded against the new channel's
+   * table) and FastRetune (hop paths never rewrite TXAGC). Refused (returns
+   * 0, logs) while a CW tone holds the chip — TXAGC does not modulate a bare
+   * LO carrier. */
+  virtual int SetTxPowerOffsetQdb(int qdb) {
+    (void)qdb;
+    return 0;
+  }
+
+  /* Force / clear the flat absolute TXAGC index: idx >= 0 forces it for all
+   * rates (composes with the offset), idx < 0 reverts to the efuse per-rate
+   * baseline. Default forwards to the legacy SetTxPower for generations that
+   * predate the unified API. */
+  virtual void SetTxPowerIndexOverride(int idx) {
+    if (idx >= 0)
+      SetTxPower(static_cast<uint8_t>(idx));
+  }
+
+  /* Re-program the TX-power registers from the current knob state at the
+   * CURRENT channel — the hook tests use to force a re-apply without moving
+   * any knob. Returns false when unsupported or the chip isn't brought up. */
+  virtual bool ReApplyTxPower() { return false; }
+
+  /* Snapshot of the knob state + representative effective indices (register
+   * readback where the family's TXAGC block is readable). */
+  virtual devourer::TxPowerState GetTxPowerState() { return {}; }
+
+  /* Chip thermal-meter snapshot (RF 0x42 family; efuse baseline where the
+   * family wires one — see src/ThermalStatus.h). The PA-heating input of the
+   * adaptive-link controller. Default returns an all-invalid reading. */
+  virtual devourer::ThermalStatus GetThermalStatus() { return {}; }
+
   virtual bool send_packet(const uint8_t *packet, size_t length) = 0;
   virtual SelectedChannel GetSelectedChannel() = 0;
 

@@ -108,6 +108,10 @@ public:
    * (0x1c94 = 0xafffafff, overriding the BB-table default 0x5fff5fff) affects a
    * non-beamformed frame, but ported whole for parity. Runs after rfe_init. */
   void bf_init();
+  /* rtl8821c_phy_bf_init: 8821C MU-MIMO/TXBF MAC setup (0x14C0/0x167C/0x1680/
+   * 0x042F/0x045F/0x6DF + 0x1c94). Replaces the 8822B bf_init (which only wrote
+   * 0x1c94 and missed the MU/TXBF MAC registers). */
+  void bf_init_8821c();
 
   /* Force a flat per-rate TXAGC power index (0..63) on both paths — a debug /
    * SDR-visibility knob (DEVOURER_TX_PWR). 8822B TXAGC is 4 rates packed per

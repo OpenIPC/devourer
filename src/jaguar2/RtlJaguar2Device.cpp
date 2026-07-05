@@ -103,13 +103,17 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
    * odm_dm_init (phydm_rfe_init) and rtl8822b_phy_bf_init after calibration.
    * devourer previously skipped both, leaving 0x1990=0 (RFE source mux) and
    * 0x1c94=0x5fff5fff (BB-table default, not the bf_init 0xafffafff).
-   * 8821C: phydm_rfe_8821c is #if 0 in the vendor (no RFE-mux writes) and it is
-   * 1T1R (no beamformer), so these 8822B-specific writes don't apply — the 8821C
-   * antenna is routed by switch_rf_set + coex_wlan_only_8821c instead. */
-  if (_variant != jaguar2::ChipVariant::C8821C &&
-      !getenv("DEVOURER_SKIP_RFEINIT")) {
-    _hal.rfe_init();
-    _hal.bf_init();
+   * 8821C: phydm_rfe_8821c is #if 0 in the vendor (no RFE-mux writes) so
+   * rfe_init is skipped; the 8821C antenna is routed by switch_rf_set +
+   * coex_wlan_only_8821c. bf_init IS run (rtl8821c_phy_bf_init) but via the
+   * 8821C-specific MU/TXBF setup, not the 8822B 0x1c94-only write. */
+  if (!getenv("DEVOURER_SKIP_RFEINIT")) {
+    if (_variant == jaguar2::ChipVariant::C8821C) {
+      _hal.bf_init_8821c();
+    } else {
+      _hal.rfe_init();
+      _hal.bf_init();
+    }
   }
   /* Program per-rate TXAGC from the EFUSE power-by-rate calibration (the level
    * the kernel uses). DEVOURER_TX_PWR (flat override) applied later in InitWrite

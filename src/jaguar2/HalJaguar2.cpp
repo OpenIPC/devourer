@@ -926,6 +926,39 @@ void HalJaguar2::coex_wlan_only_8821c(bool is_5g) {
                 rfe_mod, wlg_at_btg, ant_at_main, inv, is_5g ? 1 : 0);
 }
 
+/* rtl8821c_phy_bf_init (reference/8821cu/hal/rtl8821c/rtl8821c_phy.c): MU-MIMO /
+ * TXBF MAC setup the vendor runs every init. The 8822B bf_init devourer used
+ * only wrote 0x1c94 (the grouping bitmap, the LAST write here) and missed the
+ * MU/TXBF MAC registers — so the 8821C gets its own faithful bf_init. */
+void HalJaguar2::bf_init_8821c() {
+  /* REG_MU_TX_CTL (0x14C0): P1 wait-state EN, MU RL=0xA, disable MU-MIMO until
+   * sounding done, clear MU-STA table valid. */
+  uint32_t v32 = _device.rtw_read32(0x14C0);
+  v32 |= (1u << 16);                          /* BIT_R_MU_P1_WAIT_STATE_EN */
+  v32 = (v32 & ~(0xfu << 12)) | (0xAu << 12); /* MU RL = 0xA */
+  v32 &= ~(1u << 7);                          /* disable MU-MIMO */
+  v32 &= ~(0x3fu << 0);                       /* MU table valid = 0 */
+  _device.rtw_write32(0x14C0, v32);
+
+  /* REG_MU_BF_OPTION (0x167C): TXMU ACKPOLICY=3 + EN = 0x70. */
+  _device.rtw_write8(0x167C, static_cast<uint8_t>((3u << 4) | (1u << 6)));
+  /* REG_WMAC_MU_BF_CTL (0x1680) = 0. */
+  _device.rtw_write16(0x1680, 0x0);
+
+  /* REG_TXBF_CTRL+3 (0x042F): use NDPA parameter from 0x45F (BIT30>>24=0x40). */
+  _device.rtw_write8(0x042F, static_cast<uint8_t>(
+                                 _device.rtw_read8(0x042F) | 0x40));
+  /* REG_NDPA_OPT_CTRL (0x045F) = 0x10 (NDPA rate OFDM_6M, BW20). */
+  _device.rtw_write8(0x045F, 0x10);
+
+  /* STA2 CSI rate fixed at 6M (0x6DF[5:0]=0x4, keep [7:6]). */
+  _device.rtw_write8(0x06DF, static_cast<uint8_t>(
+                                 (_device.rtw_read8(0x06DF) & 0xC0) | 0x4));
+  /* Grouping bitmap (0x1C94) — same value as the 8822B bf_init. */
+  _device.rtw_write32(0x1C94, 0xAFFFAFFFu);
+  _logger->info("Jaguar2/8821C: bf_init (MU/TXBF MAC setup + 0x1c94)");
+}
+
 void HalJaguar2::rfe_init() {
   /* phydm_rfe_8822b_init (verbatim): chip-top mux + RFE s0/s1 source select.
    * The kernel runs this from odm_dm_init->phydm_rfe_init after BB/RF config. */

@@ -23,7 +23,7 @@ void interrupt_handler_8814au(_adapter *padapter, u16 pkt_len, u8 *pbuf)
 	HAL_DATA_TYPE	*pHalData = GET_HAL_DATA(padapter);
 	struct reportpwrstate_parm pwr_rpt;
 
-	if (pkt_len != INTERRUPT_MSG_FORMAT_LEN) {
+	if (pbuf == NULL || pkt_len < INTERRUPT_MSG_FORMAT_LEN) {
 		RTW_INFO("%s Invalid interrupt content length (%d)!\n", __FUNCTION__, pkt_len);
 		return ;
 	}

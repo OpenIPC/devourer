@@ -1,6 +1,7 @@
 #ifndef RADIOMANAGEMENTMODULE_H
 #define RADIOMANAGEMENTMODULE_H
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -101,8 +102,19 @@ class RadioManagementModule {
    * value instead of the EFUSE-derived per-rate table (or the `power`
    * fallback). -1 = disabled (normal behaviour). Set via SetTxPowerOverride
    * and re-applied on the next channel-set; used by the thermal-vs-gain
-   * ramp in WiFiDriverTxDemo. */
-  int txpwr_override_ = -1;
+   * ramp in WiFiDriverTxDemo. Atomic so GetTxPowerState's cached snapshot is
+   * readable from any thread (setters remain control-plane-thread calls). */
+  std::atomic<int> txpwr_override_{-1};
+  /* Runtime TX-power offset in TXAGC index steps (0.5 dB each), folded onto
+   * the per-rate baseline (EFUSE table or flat override) AFTER the per-rate
+   * regulatory min and clamped only at the 6-bit rails — the relative knob
+   * behind IRtlDevice::SetTxPowerOffsetQdb. The saturation flags record
+   * whether the last apply hit a rail on any rate (reset per
+   * PHY_SetTxPowerLevel8812 pass) — the "knob out of travel" signal for a
+   * closed-loop controller. */
+  std::atomic<int> txpwr_offset_steps_{0};
+  std::atomic<bool> txpwr_sat_low_{false};
+  std::atomic<bool> txpwr_sat_high_{false};
   PowerTracking8812a _pwrTrk;
   Iqk8812a _iqk;
 #if defined(DEVOURER_HAVE_8814)
@@ -173,10 +185,26 @@ public:
    * (EFUSE-driven) behaviour. Takes effect when set_channel_bwmode runs, or
    * immediately via ApplyTxPower(). */
   void SetTxPowerOverride(int idx) { txpwr_override_ = idx; }
+  /* Runtime TX-power offset in index steps (see txpwr_offset_steps_). Takes
+   * effect on the next channel-set, or immediately via ApplyTxPower(). */
+  void SetTxPowerOffsetSteps(int steps) { txpwr_offset_steps_ = steps; }
+  int GetTxPowerOffsetSteps() const { return txpwr_offset_steps_; }
+  int GetTxPowerOverride() const { return txpwr_override_; }
+  bool TxPowerSaturatedLow() const { return txpwr_sat_low_; }
+  bool TxPowerSaturatedHigh() const { return txpwr_sat_high_; }
+  /* Effective per-rate TXAGC index for the current channel/BW: the flat
+   * override (when armed) or the EFUSE per-rate base (or the legacy `power`
+   * fallback), plus the runtime offset, clamped to the 6-bit field with the
+   * saturation flags recording rail hits. The single computation behind both
+   * the per-rate apply loop and the 0xc54 power-training word; public so the
+   * device layer can build the software-shadow TxPowerState on the 8814A,
+   * whose packed TXAGC port (0x1998) is write-only. */
+  uint8_t ComputeTxPowerIndex(uint8_t path, uint8_t rate, uint8_t ntx_idx);
   /* Re-run the per-rate TXAGC writes for the current channel WITHOUT a channel
    * switch. set_channel_bwmode early-returns when the channel/bw is unchanged,
-   * so this is the only way to push a freshly-set SetTxPowerOverride() value to
-   * the TXAGC registers mid-session (used by the thermal-vs-gain ramp). */
+   * so this is the only way to push a freshly-set SetTxPowerOverride() /
+   * SetTxPowerOffsetSteps() value to the TXAGC registers mid-session (used by
+   * the thermal-vs-gain ramp and SetTxPowerOffsetQdb). */
   void ApplyTxPower() { PHY_SetTxPowerLevel8812(_currentChannel); }
 
 private:

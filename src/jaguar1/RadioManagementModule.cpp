@@ -1998,6 +1998,10 @@ uint8_t RadioManagementModule::phy_GetSecondaryChnl_8812() {
 
 void RadioManagementModule::PHY_SetTxPowerLevel8812(uint8_t Channel) {
   const bool is_8814a = _eepromManager->version_id.ICType == CHIP_8814A;
+  /* Fresh saturation snapshot for this apply pass: ComputeTxPowerIndex sets
+   * the flags whenever the offset/override pushes any rate onto a 6-bit rail. */
+  txpwr_sat_low_ = false;
+  txpwr_sat_high_ = false;
   for (uint8_t path = 0; (uint8_t)path < _eepromManager->numTotalRfPath;
        path++) {
     phy_set_tx_power_level_by_path(Channel, (RfPath)path);
@@ -2137,24 +2141,44 @@ void RadioManagementModule::PHY_SetTxPowerIndexByRateArray(
     if (r >= 0xBE && r <= 0xC7) return 3; /* VHT4SS */
     return 0;
   };
-  const uint8_t bw = static_cast<uint8_t>(_currentChannelBw);
   for (int i = 0; i < rates.size(); ++i) {
     MGN_RATE rate = rates[i];
-    uint32_t powerIndex;
-    if (txpwr_override_ >= 0) {
-      /* Experiment override: force every rate to the same TXAGC index,
-       * bypassing the EFUSE per-rate table. Clamp to the 6-bit field. */
-      powerIndex = static_cast<uint32_t>(txpwr_override_ > 63 ? 63
-                                                              : txpwr_override_);
-    } else if (_eepromManager->TxPowerInfoLoaded) {
-      powerIndex = _eepromManager->GetTxPowerIndexBase(
-          static_cast<uint8_t>(rfPath), static_cast<uint8_t>(rate),
-          rate_ntx(static_cast<uint8_t>(rate)), bw, _currentChannel);
-    } else {
-      powerIndex = power;
-    }
+    const uint32_t powerIndex = ComputeTxPowerIndex(
+        static_cast<uint8_t>(rfPath), static_cast<uint8_t>(rate),
+        rate_ntx(static_cast<uint8_t>(rate)));
     PHY_SetTxPowerIndex_8812A(powerIndex, rfPath, rate);
   }
+}
+
+uint8_t RadioManagementModule::ComputeTxPowerIndex(uint8_t path, uint8_t rate,
+                                                   uint8_t ntx_idx) {
+  int idx;
+  if (txpwr_override_ >= 0) {
+    /* Experiment override: force every rate to the same TXAGC index,
+     * bypassing the EFUSE per-rate table. */
+    idx = txpwr_override_;
+  } else if (_eepromManager->TxPowerInfoLoaded) {
+    idx = _eepromManager->GetTxPowerIndexBase(
+        path, rate, ntx_idx, static_cast<uint8_t>(_currentChannelBw),
+        _currentChannel);
+  } else {
+    idx = power;
+  }
+  /* Runtime offset folds AFTER the per-rate table (whose values arrive
+   * regulatory-bounded from GetTxPowerIndexBase), inside the hardware clamp:
+   * the calibrated per-rate shape is preserved until individual rates
+   * saturate at a rail, and positive offsets get the full 6-bit headroom —
+   * same permissiveness as the flat override. */
+  idx += txpwr_offset_steps_;
+  if (idx < 0) {
+    idx = 0;
+    txpwr_sat_low_ = true;
+  }
+  if (idx > 63) {
+    idx = 63;
+    txpwr_sat_high_ = true;
+  }
+  return static_cast<uint8_t>(idx);
 }
 
 void RadioManagementModule::PHY_SetTxPowerIndex_8812A(uint32_t powerIndex,
@@ -2661,13 +2685,16 @@ void RadioManagementModule::PHY_TxPowerTrainingByPath_8812(RfPath rfPath) {
    * HT MCS7 (1-stream). devourer used to read the uniform `power` class
    * member instead, which produced 0xc54 = 0x10161E vs kernel's 0x171D25
    * at ch6 (the T1 canary diff's last outstanding divergence in the
-   * TX-power cluster). MGN_MCS7 = 0x87, ntx_idx = 0 (1-stream rate). */
-  uint32_t powerLevel = _eepromManager->TxPowerInfoLoaded
-      ? _eepromManager->GetTxPowerIndexBase(
-            static_cast<uint8_t>(rfPath), /*rate MGN_MCS7=*/0x87,
-            /*ntx_idx=*/0,
-            static_cast<uint8_t>(_currentChannelBw), _currentChannel)
-      : power;
+   * TX-power cluster). MGN_MCS7 = 0x87, ntx_idx = 0 (1-stream rate).
+   *
+   * ComputeTxPowerIndex is the same computation the per-rate apply loop
+   * uses, so the flat override AND the runtime offset now reach the
+   * training word too (previously the override was ignored here — the one
+   * TX-power register the ramp didn't move). Signed arithmetic: an offset
+   * can legitimately push the level below the -10/-8/-6 ladder, where the
+   * old uint32_t underflowed past the >2 floor. */
+  int powerLevel = ComputeTxPowerIndex(static_cast<uint8_t>(rfPath),
+                                       /*rate MGN_MCS7=*/0x87, /*ntx_idx=*/0);
 
   if (rfPath == RfPath::RF_PATH_A) {
     writeOffset = rA_TxPwrTraing_Jaguar;
@@ -2684,7 +2711,8 @@ void RadioManagementModule::PHY_TxPowerTrainingByPath_8812(RfPath rfPath) {
     } else {
       powerLevel = powerLevel - 6;
     }
-    writeData |= (((powerLevel > 2) ? (powerLevel) : 2) << (i * 8));
+    writeData |= static_cast<uint32_t>((powerLevel > 2) ? powerLevel : 2)
+                 << (i * 8);
   }
 
   _device.phy_set_bb_reg(writeOffset, 0xffffff, writeData);

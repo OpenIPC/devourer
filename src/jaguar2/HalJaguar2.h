@@ -76,17 +76,21 @@ public:
 
   /* Lean intra-band, same-bandwidth hop retune — the Jaguar2 FastRetune core
    * (see docs/frequency-hopping.md), variant-dispatched like set_channel_bw.
-   * Only the per-hop essentials run: one cached full-register RF18 write (a
-   * single direct-window read primes the cache, collapsing the full path's
-   * read-modify-write rounds), the channel-keyed constants (AGC table index,
-   * CFO-tracking fc, 8822B RF 0xBE VCO band / ch144 RF 0xDF flag / 2G spur
-   * regs, 8821C 2G CCK filter) written only when their bucket moves, and the
-   * per-hop RX kick (8822B RF 0xb8 toggle + RX-path toggle; both variants the
-   * IGI toggle). Everything bandwidth-keyed (0x8ac/0x8c4 block, RX DFIR, CCA
-   * thresholds) and band-keyed (RFE pins, 8821C switch-band/RF-set block)
-   * stays untouched — set by the last full set at this BW/band. Returns false
-   * (chip untouched) on a band change or when the radio was never tuned; the
-   * caller falls back to the full set_channel_bw. */
+   * Only the per-hop essentials run: one cached full-register RF18 write per
+   * path (a compose cache primed on the first fast hop collapses the full
+   * path's read-modify-write rounds — the steady hop is write-only), plus the
+   * channel-keyed constants (AGC table index, CFO-tracking fc, 8822B RF 0xBE
+   * VCO band / ch144 RF 0xDF flag / 2G spur regs, 8821C 2G CCK filter) as
+   * composed writes only when their bucket moves. The vendor switch_channel
+   * tail (RF 0xb8 / RX-path / IGI toggles) stays in the full path only — a
+   * hop does not need it (hardware-measured on both variants, both
+   * directions: identical hopping-RX catch rate and hopping-TX delivery with
+   * and without, no decay over repeated kickless retunes). Everything
+   * bandwidth-keyed (0x8ac/0x8c4 block, RX DFIR, CCA thresholds) and
+   * band-keyed (RFE pins, 8821C switch-band/RF-set block) stays untouched —
+   * set by the last full set at this BW/band. Returns false (chip untouched)
+   * on a band change or when the radio was never tuned; the caller falls back
+   * to the full set_channel_bw. */
   bool fast_retune(uint8_t channel, uint8_t bw, uint8_t primary_ch_idx,
                    bool cache_rf);
 
@@ -197,7 +201,13 @@ private:
    * fast path (0 = never tuned / unknown band). */
   uint8_t _last_tuned_ch = 0;
   uint32_t _rf18_cache = 0;
-  bool _rf18_cached = false;
+  /* Compose cache (the Jaguar1 cached-LSSI trick generalised): the dwords the
+   * fast path touches are primed by one read each on the first fast hop of an
+   * epoch; thereafter bit changes are composed in memory and written as whole
+   * dwords — zero per-hop reads (every masked write is otherwise a read+write
+   * USB round-trip). _cw_rfbe is the 8822B RF 0xBE 20-bit word. */
+  bool _cw_primed = false;
+  uint32_t _cw_agc = 0, _cw_fc = 0, _cw_rfbe = 0;
   int _last_agc_bucket = -1;
   uint32_t _last_fc = 0xffffffff;
   int _last_rf_be = -1;

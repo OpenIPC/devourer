@@ -46,6 +46,18 @@ public:
   void StartRxLoop(Action_ParsedRadioPacket packetProcessor) override;
   void StopRxLoop() override { _rx_stop = true; }
   void SetMonitorChannel(SelectedChannel channel) override;
+  /* Lean frequency-hop retune (Jaguar3 port of the Jaguar1 FastRetune — see
+   * docs/frequency-hopping.md): the RF18 channel write inside its 3-wire
+   * bracket + force-anapar + BB reset, with the channel-keyed constants (SCO,
+   * TX DFIR, AGC table) written only when their bucket changes. Skips the
+   * bandwidth block, RXBB, MAC BW/TXSC, and — in 5/10 MHz mode — preserves the
+   * narrowband dividers, so fast hops keep the NB re-clock without re-running
+   * the divider recipe. Falls back to the full set_channel_bwmode on a band
+   * change. cache_rf selects the cached-RF18 variant (meaningful on the 8822c,
+   * whose RF18 is a read-modify-write; the 8822e composes it from scratch).
+   * Serializes on _reg_mu, so it is safe during an active TX session — the
+   * sanctioned in-session hop primitive (unlike a bare SetMonitorChannel). */
+  void FastRetune(uint8_t channel, bool cache_rf) override;
   void InitWrite(SelectedChannel channel) override;
   void SetTxPower(uint8_t power) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
@@ -121,12 +133,13 @@ private:
    * C2H reports (BT-info etc.) and runs the periodic coex decision so the FW's
    * PTA keeps the antenna with WLAN during sustained TX.
    * THREADING CONTRACT: while a TX session is active (between InitWrite and Stop)
-   * this thread owns all chip register access; the ~2 s housekeeping tick and
-   * StartRxLoop's one-shot RX-filter restore serialize on _reg_mu. The TX hot
-   * path (send_packet) does no register I/O, so it runs lock-free alongside it;
-   * callers must NOT invoke SetMonitorChannel/SetTxPower (which do register RMW)
-   * during an active TX session, or those reads-modify-writes will race the coex
-   * thread. Bulk-IN has exactly one reader at a time: while StartRxLoop is
+   * the ~2 s housekeeping tick, StartRxLoop's one-shot RX-filter restore, and
+   * every channel retune (SetMonitorChannel / FastRetune — register RMW)
+   * serialize on _reg_mu. The TX hot path (send_packet) does no register I/O of
+   * its own, so it runs lock-free alongside them; a radiotap-CHANNEL hop inside
+   * send_packet takes the lock only for the retune itself (so a hop can be
+   * delayed by up to one coex tick). Callers must still not invoke SetTxPower
+   * mid-session. Bulk-IN has exactly one reader at a time: while StartRxLoop is
    * active (_rx_loop_active) the coex thread skips its C2H drain — the RX async
    * loop sees the C2H reports as part of its stream. */
   std::thread _coex_thread;

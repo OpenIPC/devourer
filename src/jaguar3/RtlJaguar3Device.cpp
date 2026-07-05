@@ -649,9 +649,30 @@ RxEnergy RtlJaguar3Device::GetRxEnergy() {
 }
 
 void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
+  /* Serialize against the coex thread's housekeeping tick (and any concurrent
+   * FastRetune) — channel config is register RMW. Init/InitWrite call the
+   * radio-management core directly (no lock needed: the coex thread isn't
+   * running yet), so locking here cannot self-deadlock. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
   _channel = channel;
   _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                       channel.ChannelWidth);
+}
+
+void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (channel == _channel.Channel)
+    return;
+  if (_radioManagement.fast_retune(channel, _channel.ChannelOffset,
+                                   _channel.ChannelWidth, cache_rf)) {
+    _channel.Channel = channel;
+    return;
+  }
+  /* Fast path declined (band change / never tuned) — full channel set at the
+   * current bandwidth + offset, under the same lock (the core is unlocked). */
+  _channel.Channel = channel;
+  _radioManagement.set_channel_bwmode(channel, _channel.ChannelOffset,
+                                      _channel.ChannelWidth);
 }
 
 void RtlJaguar3Device::SetTxPower(uint8_t power) {

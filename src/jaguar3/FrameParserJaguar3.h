@@ -188,6 +188,57 @@ inline bool parse_rx_8822c(const uint8_t *buf, size_t buflen,
   return true;
 }
 
+/* Parse the Jaguar-3 (phydm "jgr3") PHY-status report that precedes the PSDU
+ * when APP_PHYSTS is enabled (monitor_rx_cfg sets RCR BIT28 + RX_DRVINFO_SZ=4,
+ * so the 32-byte report is counted in the descriptor drvinfo). `physts` points
+ * at the report (immediately after the 24-byte RX descriptor). Fills the
+ * per-path signal metrics from the vendor phy_sts_rpt_jgr3_type0 (CCK) /
+ * type1 (OFDM/HT/VHT) layout (reference rtl88x2{c,e}u hal/phydm/phydm_phystatus.h).
+ *
+ * The jgr3 type1 byte offsets are identical to jgr2 type1 (per-path pwdb[4] at
+ * bytes 1..4, l_rxsc/ht_rxsc at byte 5, flag byte at 7, s(8,1) rxevm[4] at
+ * bytes 16..19, s(8,1) rxsnr[4] at bytes 24..27); the shared OFDM header
+ * (phy_sts_rpt_jgr3_ofdm_cmn) carries pwdb/rxsc/flags for every OFDM page.
+ * Values are stored as the raw phy-status bytes, matching the Jaguar-1/Jaguar-2
+ * convention (rssi = per-path power byte, dBm = value-110; snr/evm as the
+ * vendor's s(8,1) fields). The page type is taken from byte0 low nibble
+ * (page_num) rather than guessed from the rate: 0 = CCK type0, else an OFDM
+ * page; per-stream EVM/SNR are only present on the type1 OFDM page.
+ * Requires physts_len >= 28. */
+inline void parse_phy_sts_jgr3(const uint8_t *physts, uint16_t physts_len,
+                               rx_pkt_attrib &a) {
+  if (physts == nullptr || physts_len < 28)
+    return;
+  const uint8_t page_num = physts[0] & 0x0f;
+  if (page_num == 0) {
+    /* type0 (CCK): DW0 = page_num(0), pwdb_a(1). Single path-A power. */
+    a.rssi[0] = physts[1];
+    return;
+  }
+  /* OFDM header (valid for every jgr3 OFDM page): per-path pwdb[4] at bytes
+   * 1..4, DW1 byte5 l_rxsc[3:0]/ht_rxsc[7:4], DW1 byte7 flags. */
+  for (int i = 0; i < 4; i++)
+    a.rssi[i] = physts[1 + i];
+  /* DW1 byte7: [5]=ldpc [6]=stbc [7]=beamformed (phy_sts_rpt_jgr3_ofdm_cmn). */
+  const uint8_t f7 = physts[7];
+  a.ldpc = (f7 >> 5) & 1;
+  a.stbc = (f7 >> 6) & 1;
+  /* RX bandwidth from the active rxsc: legacy OFDM uses l_rxsc, HT/VHT uses
+   * ht_rxsc; rxsc 1-8 = 20, 9-12 = 40, >=13 = 80 MHz (phydm_rxsc_2_bw). */
+  const uint8_t l_rxsc = physts[5] & 0x0f, ht_rxsc = (physts[5] >> 4) & 0x0f;
+  const uint8_t rxsc = (a.data_rate >= 4 && a.data_rate <= 11) ? l_rxsc : ht_rxsc;
+  a.bw = rxsc >= 13 ? 2 : rxsc >= 9 ? 1 : 0;
+  /* Per-stream EVM/SNR only exist on the type1 page (DW4 rxevm[4] at 16..19,
+   * DW6 rxsnr[4] at 24..27); other OFDM pages (2/3/4/5/6) reuse those offsets
+   * for other data, so leave evm/snr at 0 there. */
+  if (page_num == 1) {
+    for (int i = 0; i < 4; i++) {
+      a.evm[i] = static_cast<int8_t>(physts[16 + i]);
+      a.snr[i] = static_cast<int8_t>(physts[24 + i]);
+    }
+  }
+}
+
 } /* namespace jaguar3 */
 
 #endif /* FRAME_PARSER_8822C_H */

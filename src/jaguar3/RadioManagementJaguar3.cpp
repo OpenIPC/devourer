@@ -180,28 +180,46 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
     _device.phy_set_bb_reg(0x1830, 1u << 29, 0x1);  /* force update anapar (A) */
     _device.phy_set_bb_reg(0x4130, 1u << 29, 0x1);  /* force update anapar (B) */
   } else {
+    /* rstb_3wire(false) before the RF writes — see the force-update-anapar note
+     * below (phydm_rstb_3wire_8822e). */
+    _device.phy_set_bb_reg(0x1c90, 1u << 8, 0x0);
     rf_write(0x3c00, 0x18, rf18);
     rf_write(0x4c00, 0x18, rf18);
-    if (is40 || is80) {
-      /* 8822e switch_bandwidth CH_40/CH_80: RF 0x1a TXBB/RXBB bits [12:10]
-       * (20M is BIT11|BIT10) via RMW — 40M = BIT12|BIT11, 80M = BIT13|BIT10;
-       * plus the TX_CCK_IND workaround (RF 0x1a BIT0=1, BIT16=0) at 40M only. */
-      const uint32_t bb = is80 ? ((1u << 13) | (1u << 10))
-                               : ((1u << 12) | (1u << 11));
-      for (uint16_t base : {uint16_t(0x3c00), uint16_t(0x4c00)}) {
-        uint32_t r1a = _device.rtw_read32(
-            static_cast<uint16_t>(base + (0x1a << 2))) & 0xfffffu;
-        r1a &= ~0x7c00u;
-        r1a |= bb;
-        if (is40) { r1a |= (1u << 0); r1a &= ~(1u << 16); }
-        rf_write(base, 0x1a, r1a);
-      }
-    } else {
-      rf_write(0x3c00, 0x3f, 0x18);  /* RXBB 20 */
-      rf_write(0x4c00, 0x3f, 0x18);
+    /* 8822e switch_bandwidth: RXBB/TXBB bandwidth lives in RF 0x1a[14:10]
+     * (config_phydm_switch_bandwidth_8822e RMW: rf_reg1a &= ~0x7c00 then set
+     * the BW bits) — 20M = BIT11|BIT10, 40M = BIT12|BIT11, 80M = BIT13|BIT10;
+     * the 40M path also does the TX_CCK_IND workaround (RF 0x1a BIT0=1,
+     * BIT16=0). The 8822e has NO RF 0x3f RXBB register (that is an 8822c-only
+     * write): the 20 MHz path previously wrote RF 0x3f=0x18 and left RF 0x1a
+     * unset, so the 8822e RX baseband filter stayed at the wrong bandwidth and
+     * the receiver was deaf on 2.4 GHz (5 GHz limped on whatever the init RF
+     * table left in RF 0x1a). Set RF 0x1a for every bandwidth, matching the
+     * vendor (kernel 2G RF 0x1a = 0xc00, RF 0x3f = 0x2 default). */
+    const uint32_t bb = is80  ? ((1u << 13) | (1u << 10))
+                        : is40 ? ((1u << 12) | (1u << 11))
+                               : ((1u << 11) | (1u << 10)); /* 20M */
+    for (uint16_t base : {uint16_t(0x3c00), uint16_t(0x4c00)}) {
+      uint32_t r1a = _device.rtw_read32(
+          static_cast<uint16_t>(base + (0x1a << 2))) & 0xfffffu;
+      r1a &= ~0x7c00u;
+      r1a |= bb;
+      if (is40) { r1a |= (1u << 0); r1a &= ~(1u << 16); }
+      rf_write(base, 0x1a, r1a);
     }
     _device.phy_set_bb_reg(static_cast<uint16_t>(0x3c00 + (0xdf << 2)), 1u << 18,
                            is_2g ? 1 : 0);
+    /* Force-update-anapar (phydm_rstb_3wire_8822e, enable=true): 0x1c90[8]=1 +
+     * 0x1830[29]/0x4130[29]=1. devourer writes RF via the BB direct-write window
+     * (0x3c00/0x4c00), which — exactly as on the 8822c (#138) — does NOT push the
+     * per-channel RF/analog shadow (RF18/RXBB) to the 2.4 GHz analog front-end on
+     * its own; the vendor's real 3-wire (odm_set_rf_reg) writes do. Without this
+     * the EU's 2G front-end never re-tunes and the receiver is deaf on 2.4 GHz
+     * (5 GHz survives on the init-table defaults). The vendor keeps the brackets
+     * commented in switch_channel_8822e because it uses true 3-wire writes; the
+     * BB-window port needs them. */
+    _device.phy_set_bb_reg(0x1c90, 1u << 8, 0x1);
+    _device.phy_set_bb_reg(0x1830, 1u << 29, 0x1);
+    _device.phy_set_bb_reg(0x4130, 1u << 29, 0x1);
   }
 
   /* Per-band RX AGC-table selection (phydm_cck/ofdm_agc_tab_sel_8822c) — 8822C
@@ -220,7 +238,24 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
   const bool bw20 = (bwmode == CHANNEL_WIDTH_20 || bwmode == CHANNEL_WIDTH_10 ||
                      bwmode == CHANNEL_WIDTH_5);
   if (!is_c) {
-    /* 8822E: skip 8822c AGC-table select entirely. */
+    /* 8822E AGC-table selection (phydm_set_agc_table_8822e / ofdm_agc_tab_sel_
+     * 8822e / cck_agc_tab_sel_8822e). Same registers as the 8822c lambdas, but
+     * 8822e-specific table indices (phydm_hal_api8822e.h): OFDM 2G=0 / 5G_LOW=1
+     * / MID=2 / HIGH=3, CCK 2G=8. The 8822e index is per-band (no BW20/BW40
+     * split). Without this the EU keeps the init-table AGC index when it tunes
+     * to 2.4 GHz, so the front-end runs at the wrong gain and the receiver is
+     * stone deaf on 2G (5 GHz survives on the init-table defaults). WiFi-only
+     * coex here, so the no-BT table (not the *_BTC variants). */
+    if (central <= 14) {
+      cck_agc_sel(8);   /* CCK_8822E */
+      ofdm_agc_sel(0);  /* OFDM_2G_8822E */
+    } else if (central < 80) {
+      ofdm_agc_sel(1);  /* OFDM_5G_LOW_BAND_8822E */
+    } else if (central <= 144) {
+      ofdm_agc_sel(2);  /* OFDM_5G_MID_BAND_8822E */
+    } else {
+      ofdm_agc_sel(3);  /* OFDM_5G_HIGH_BAND_8822E */
+    }
   } else if (central <= 14) {
     cck_agc_sel(bw20 ? 5 : 4);              /* CCK_BW20=5 / CCK_BW40=4 */
     ofdm_agc_sel(bw20 ? 6 : 0);            /* OFDM_2G_BW20=6 / OFDM_2G_BW40=0 */
@@ -234,22 +269,20 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
 
   /* --- 2G/5G band BB (phydm switch_channel "Other BB Settings") --- */
   if (is_2g) {
-    /* Enable CCK Rx IQ (phydm_cck_rxiq_8822c SET): CCK source 5 + weighting [1,1].
-     * 8822C only (EU has its own CCK-RXIQ path). */
-    if (is_c) {
-      _device.phy_set_bb_reg(0x1a9c, 1u << 20, 0x1);
-      _device.phy_set_bb_reg(0x1a14, 0x300, 0x0);
-    }
+    /* Enable CCK Rx IQ (phydm_cck_rxiq_8822{c,e} SET): CCK source 5 + weighting
+     * [1,1]. The 8822c and 8822e writes are register-identical (0x1a9c[20]=1,
+     * 0x1a14[9:8]=0), so both variants take this path — the EU needs it too. */
+    _device.phy_set_bb_reg(0x1a9c, 1u << 20, 0x1);
+    _device.phy_set_bb_reg(0x1a14, 0x300, 0x0);
     _device.rtw_write8(0x454,
                        static_cast<uint8_t>(_device.rtw_read8(0x454) & ~0x80));
     _device.phy_set_bb_reg(0x1a80, 1u << 18, 0x0);
     _device.phy_set_bb_reg(0x1c80, 0x3F000000, 0xF);
   } else {
-    /* Disable CCK Rx IQ (phydm_cck_rxiq_8822c REVERT). 8822C only. */
-    if (is_c) {
-      _device.phy_set_bb_reg(0x1a9c, 1u << 20, 0x0);
-      _device.phy_set_bb_reg(0x1a14, 0x300, 0x3);
-    }
+    /* Disable CCK Rx IQ (phydm_cck_rxiq_8822{c,e} REVERT). Register-identical
+     * across variants (0x1a9c[20]=0, 0x1a14[9:8]=3). */
+    _device.phy_set_bb_reg(0x1a9c, 1u << 20, 0x0);
+    _device.phy_set_bb_reg(0x1a14, 0x300, 0x3);
     _device.rtw_write8(0x454,
                        static_cast<uint8_t>(_device.rtw_read8(0x454) | 0x80));
     _device.phy_set_bb_reg(0x1a80, 1u << 18, 0x1);

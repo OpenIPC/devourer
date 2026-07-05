@@ -302,22 +302,35 @@ that exercise the salvage path.
 
 ## Frequency hopping
 
-`RtlJaguarDevice::FastRetune(channel)` is a lean intra-band, same-bandwidth
-channel retune (~1.5 ms vs ~275 ms for a full `SetMonitorChannel`) — it does the
-RF channel switch only, skipping the per-rate TX-power loop, bandwidth post-set,
-and thermal tick a hop doesn't need, and writes `RF_CHNLBW` from a cached value
-so it never pays the C-cut RF-read sleep. It falls back to the full path on a
-band change. `send_packet` also honours a radiotap `CHANNEL` field, so hopping is
+`IRtlDevice::FastRetune(channel)` is a lean intra-band, same-bandwidth channel
+retune every generation implements (default = the full `SetMonitorChannel`): it
+does the RF channel switch only, skipping the steady-state work a hop doesn't
+need, writes the channel RF register from a cached value, and re-writes the
+channel-keyed constants only when their bucket changes. Measured medians:
+8812AU ~251→1.6 ms, 8822BU ~62→18 ms, 8821CU ~29→5.6 ms, 8822CU/8812EU
+~11→3-4 ms. It falls back to the full path on a band change; on Jaguar3 it
+serializes on the coex thread's register mutex (the sanctioned in-session hop)
+and preserves the 5/10 MHz narrowband dividers across hops. `send_packet` on
+all three generations also honours a radiotap `CHANNEL` field, so hopping is
 per-packet and radiotap-driven like rate. Both demos hop via
-`DEVOURER_HOP_CHANNELS="1,6,11"` (+ `DEVOURER_HOP_DWELL_FRAMES`,
+`DEVOURER_HOP_CHANNELS="1,6,11"` (SweepSpec grammar — also `36-48/4` channel
+ranges and `5170-5250/5` MHz ranges; + `DEVOURER_HOP_DWELL_FRAMES`,
 `DEVOURER_HOP_ROUNDS`, `DEVOURER_HOP_FAST=0|1|2`, `DEVOURER_HOP_RADIOTAP`,
 `DEVOURER_HOP_BW`/`DEVOURER_HOP_OFFSET`). Per-packet hopping doubles as a
 frequency-diversity interleaver for the outer FEC. Validated by
 `tests/run_hop_validation.sh` (B210 wideband), `tests/hop_parity_check.sh`
-(register parity for the 40/80 path), and `tools/precoder/hop_diversity_sim.py`.
-The implementation and the in-code techniques are documented in
-**`docs/frequency-hopping.md`** (also a porting guideline for other chip
-generations).
+(family-aware register parity — all three generations dump the same canary
+from both paths), and `tools/precoder/hop_diversity_sim.py`. The
+implementation, the in-code techniques, and the per-generation ports are
+documented in **`docs/frequency-hopping.md`**.
+
+The hop-driven RX counterpart is the sweep/sounding pair: `DEVOURER_RX_SWEEP`
+dwells FastRetune-cheap bins emitting per-bin energy + frame stats
+(`DEVOURER_RX_SWEEP_FULL=1` forces full retunes; `DEVOURER_RX_AGG_SA=canon`
+filters the frame stats to the canonical probe SA), and
+`tests/sounding_sweep.sh` + `tests/sounding_map.py` run the two-ended active
+sounding that recovers a coarse per-bin H(f) of the link — down to 5 MHz bins
+on Jaguar3 (`docs/rx-spectrum-sensing.md`).
 
 `WiFiDriverTxDemo` also honours a TX-gain ramp + duty knob for thermal /
 TX-power characterisation (drives `RtlJaguarDevice::SetTxPowerOverride` +

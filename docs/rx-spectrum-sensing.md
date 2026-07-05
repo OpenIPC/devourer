@@ -105,19 +105,68 @@ stays in the moderate regime where `cca_ofdm` rises without saturating.
 
 The energy sensor reads one channel at a time; to localise an interferer in
 frequency, sweep. With `DEVOURER_RX_SWEEP="1,6,11"` the sensor cycles the listed
-channels — the RX loop runs on a worker thread while the main thread retunes
-between reads (`SetMonitorChannel`, uniform across all three generations) — and
-emits one `<devourer-energy>ch=N` line per bin. Aggregating those into an
-energy-vs-frequency bar chart peaks (or, on the saturating 1T1R parts, dips) at
-the tone's channel.
+bins — the RX loop runs on a worker thread while the main thread retunes between
+reads via `IRtlDevice::FastRetune` (the lean intra-band hop path every
+generation implements; `DEVOURER_RX_SWEEP_FULL=1` forces the full
+`SetMonitorChannel` per dwell for A/B) — and emits one `<devourer-energy>ch=N`
+line per bin. Aggregating those into an energy-vs-frequency bar chart peaks (or,
+on the saturating 1T1R parts, dips) at the tone's channel.
+
+The bin spec uses the SweepSpec grammar (`src/SweepSpec.h`, shared with
+`DEVOURER_HOP_CHANNELS`): channel lists (`1,6,11`), channel ranges (`36-48/4`),
+or centre-frequency MHz ranges (`5170-5250/5`).
+
+Each `ch=N` line carries the frame-free counters plus `retune_us=` (the measured
+dwell-switch cost) and the per-dwell frame aggregate —
+`frames/rssi_mean/rssi_max/snr_mean/snr_min/evm_mean` over the frames decoded
+during that dwell. `DEVOURER_RX_AGG_SA=canon|<mac>` restricts the aggregate to
+one transmitter's SA (the active-sounding filter; default counts every frame).
+The aggregate is drained at each dwell start, so retune-transient frames never
+leak into a bin.
 
 The resolution is the channel grid: 20 MHz on the 2.4/5 GHz plan, and down to
 ~5 MHz on Jaguar3 (`DEVOURER_NB_BW=5` — the 2.4 GHz channels are 5 MHz apart, so
-stepping them at 5 MHz bandwidth gives 5 MHz bins). This is a scalar-energy
-spectrum, not an FFT — there is no sub-channel structure within a bin.
+stepping them at 5 MHz bandwidth gives 5 MHz bins; fast dwells preserve the
+narrowband dividers, so an NB sweep never re-runs the re-clock recipe). This is
+a scalar-energy spectrum, not an FFT — there is no sub-channel structure within
+a bin.
+
+Passive-map caveat (measured, both retune paths): a bare CW tone sitting exactly
+on an NB bin's centre lands at DC after downconversion and the receiver's DC
+null hides it from CCA — the tone registers on the *adjacent* 5 MHz bins
+instead. A modulated interferer doesn't have this blind spot.
 
 `tests/rx_spectrum_sweep.sh` runs a single live sweep and `tests/rx_spectrum_sweep.py`
 renders the map + flags the peak/dip bin.
+
+## Active two-ended sounding — a coarse H(f) of the link
+
+The passive map sees interferers but is blind to fading of *our own* path (a
+faded-but-quiet bin looks clean). Active sounding probes it: the TX end hops
+fixed-rate probe beacons (the canonical SA) across the bin list via FastRetune
+while the RX end sweeps the same bins with `DEVOURER_RX_AGG_SA=canon`, so each
+`ch=N` line reports the probe's per-bin RSSI/EVM — a genuine coarse sounding of
+H(f) over the actual link.
+
+Synchronisation is asymmetric-duty with no control channel: the TX cycles all
+bins fast and the RX dwells ≥ ~2 full TX cycles per bin, so every dwell overlaps
+at least one probe visit. `tests/sounding_sweep.sh` orchestrates the pair
+(computing the duty maths from the bin count), and `tests/sounding_map.py`
+renders the recovered map — headline metric is the per-bin median of `rssi_max`
+(off-channel bleed decodes weaker, never stronger, so the dwell max is
+bleed-robust), with NOTCH (≥ 6 dB below the across-bin median) and DEAD (no
+probe frames while other bins hit) flags, and an optional Spearman
+rank-correlation against a B210 wideband capture
+(`tests/hop_rx_probe.py --bin-power-csv`).
+
+Measured (8822CU → 8812EU, 5 GHz, `--bins 5170-5250/5 --nb-bw 5`): all 17
+five-MHz bins sounded, recovering a smooth ~15 dB notch centred at 5230 MHz with
+monotone roll-in/out across neighbouring bins — frequency-selective structure a
+20 MHz scalar cannot resolve. NB sounding needs both ends narrowband (the probe
+must decode); a retune can wedge one in-flight probe frame into a bulk-OUT
+timeout (seen on the 8812EU at NB on both retune paths), which the orchestrator
+rides out with `DEVOURER_TX_MAXFAIL=0` — scattered single-frame loss is noise to
+the map.
 
 ## Per-tone localisation
 

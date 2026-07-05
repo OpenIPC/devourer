@@ -210,14 +210,25 @@ Common to both demos:
   mass into higher buckets (measured: peak bucket 5→8 on the 8822CU under a
   co-located CW tone). All three generations.
 - `DEVOURER_RX_SWEEP="1,6,11"` — coarse **live spectrum map**. Cycle the listed
-  channels, dwelling `DEVOURER_RX_SWEEP_DWELL_MS` (default 300) on each, and emit
-  one `<devourer-energy>ch=N` line per bin. The RX loop runs on a worker thread
-  while the main thread retunes (`SetMonitorChannel`) between reads — one process,
-  uniform across all three generations. Park a `DEVOURER_CW_TONE` on one channel
-  (another adapter) and the map peaks (or, on the saturating 1T1R parts, dips) at
-  that channel. Resolution = the channel grid (20 MHz), down to ~5 MHz on Jaguar3
-  with `DEVOURER_NB_BW=5`. Render with `tests/rx_spectrum_sweep.sh` +
+  bins (also accepts channel ranges `36-48/4` and MHz ranges `5170-5250/5`),
+  dwelling `DEVOURER_RX_SWEEP_DWELL_MS` (default 300) on each, and emit one
+  `<devourer-energy>ch=N` line per bin carrying the frame-free counters, the
+  measured `retune_us`, and the dwell's per-frame
+  `frames/rssi_mean/rssi_max/snr_mean/snr_min/evm_mean` aggregate. The RX loop
+  runs on a worker thread while the main thread retunes between reads via the
+  lean `FastRetune` (`DEVOURER_RX_SWEEP_FULL=1` forces the full
+  `SetMonitorChannel` per dwell) — one process, uniform across all three
+  generations. Park a `DEVOURER_CW_TONE` on one channel (another adapter) and
+  the map peaks (or, on the saturating 1T1R parts, dips) at that channel.
+  Resolution = the channel grid (20 MHz), down to ~5 MHz on Jaguar3 with
+  `DEVOURER_NB_BW=5`. Render with `tests/rx_spectrum_sweep.sh` +
   `tests/rx_spectrum_sweep.py`.
+- `DEVOURER_RX_AGG_SA=canon|<mac>` — restrict the per-frame aggregate (energy
+  telemetry + sweep) to frames whose SA matches (`canon` = the canonical txdemo
+  beacon SA). The active-sounding filter: a prober hopping fixed-rate beacons
+  across the sweep's bins (`tests/sounding_sweep.sh`) turns the sweep into a
+  coarse per-bin H(f) map of the actual link, rendered by
+  `tests/sounding_map.py` (see `docs/rx-spectrum-sensing.md`).
 
 `WiFiDriverTxDemo`-only knobs:
 

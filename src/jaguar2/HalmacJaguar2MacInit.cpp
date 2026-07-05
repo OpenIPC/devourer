@@ -305,7 +305,10 @@ void HalmacJaguar2MacInit::init_system_cfg(ChannelWidth_t bw, uint8_t cut) {
                         _device.rtw_read32(REG_GPIO_MUXCFG) & ~(1u << 19));
   }
 
-  if (cut == CHIP_VER_B_CUT)
+  /* ANAPAR_MAC_0 B-cut analog fix is 8822B-lineage only; vendor
+   * init_system_cfg_8821c never touches 0x1018. Gate on variant so the 8821C
+   * matches its vendor init exactly (it would otherwise fire on a B-cut part). */
+  if (_variant == ChipVariant::C8822B && cut == CHIP_VER_B_CUT)
     _device.rtw_write8(REG_ANAPAR_MAC_0,
                        _device.rtw_read8(REG_ANAPAR_MAC_0) & ~0x07);
   _logger->info("Jaguar2: init_system_cfg done (bw={} cut={})",

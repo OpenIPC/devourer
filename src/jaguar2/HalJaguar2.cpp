@@ -84,6 +84,54 @@ const PwrCfg kPwrOff8822bUsb[] = {
     {0, PC_END, 0, 0},
 };
 
+/* card_en_flow_8821c = CARDDIS_TO_CARDEMU + CARDEMU_TO_ACT (USB/ALL),
+ * transcribed from reference/8821cu/hal/halmac/halmac_88xx/halmac_8821c/
+ * halmac_pwr_seq_8821c.c. Every row is PWR_CUT_ALL_MSK (no cut-specific rows,
+ * unlike 8822B). PCI/SDIO-only rows dropped. */
+const PwrCfg kPwrOn8821cUsb[] = {
+    /* --- card-disable -> card-emulation --- */
+    {0x004A, PC_WRITE, B(0), 0},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(3) | B(4) | B(7)), 0},
+    /* --- card-emulation -> active --- */
+    {0x0020, PC_WRITE, B(0), B(0)},
+    {0x0001, PC_DELAY, 0, 1}, /* 1 ms */
+    {0x0000, PC_WRITE, B(5), 0},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(4) | B(3) | B(2)), 0},
+    {0x0006, PC_POLL, B(1), B(1)},
+    {0x0006, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_WRITE, B(7), 0},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(4) | B(3)), 0},
+    {0x10C3, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_POLL, B(0), 0},
+    {0x0020, PC_WRITE, B(3), B(3)},
+    {0x007C, PC_WRITE, B(1), 0},
+    {0, PC_END, 0, 0},
+};
+
+/* card_dis_flow_8821c = ACT_TO_CARDEMU + CARDEMU_TO_CARDDIS (USB/ALL). */
+const PwrCfg kPwrOff8821cUsb[] = {
+    /* --- active -> card-emulation --- */
+    {0x0093, PC_WRITE, 0xFF, 0xC4},
+    {0x001F, PC_WRITE, 0xFF, 0},
+    {0x0049, PC_WRITE, B(1), 0},
+    {0x0006, PC_WRITE, B(0), B(0)},
+    {0x0002, PC_WRITE, B(1), 0},
+    {0x10C3, PC_WRITE, B(0), 0},
+    {0x0005, PC_WRITE, B(1), B(1)},
+    {0x0005, PC_POLL, B(1), 0},
+    {0x0020, PC_WRITE, B(3), 0},
+    {0x0000, PC_WRITE, B(5), B(5)},
+    /* --- card-emulation -> card-disable --- */
+    {0x0007, PC_WRITE, 0xFF, 0x20},
+    {0x0067, PC_WRITE, B(5), 0},
+    {0x004A, PC_WRITE, B(0), 0},
+    {0x0081, PC_WRITE, static_cast<uint8_t>(B(7) | B(6)), 0},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(3) | B(4)), B(3)},
+    {0x0090, PC_WRITE, B(1), 0},
+    {0, PC_END, 0, 0},
+};
+
 void run_pwr_seq(RtlUsbAdapter &dev, const PwrCfg *seq, uint32_t poll_max,
                  bool poll_fatal) {
   for (const PwrCfg *p = seq; p->cmd != PC_END; ++p) {
@@ -115,13 +163,17 @@ HalJaguar2::HalJaguar2(RtlUsbAdapter device, Logger_t logger,
       _variant{variant}, _tables{make_jaguar2_phy_tables(variant)} {}
 
 void HalJaguar2::power_off() {
-  run_pwr_seq(_device, kPwrOff8822bUsb, /*poll_max=*/2000, /*poll_fatal=*/false);
+  const PwrCfg *seq =
+      _variant == ChipVariant::C8821C ? kPwrOff8821cUsb : kPwrOff8822bUsb;
+  run_pwr_seq(_device, seq, /*poll_max=*/2000, /*poll_fatal=*/false);
   _logger->info("Jaguar2: power-off (card-disable) sequence applied");
 }
 
 void HalJaguar2::power_on() {
   power_off(); /* reset from any prior (kernel-left active) state first */
-  run_pwr_seq(_device, kPwrOn8822bUsb, /*poll_max=*/5000, /*poll_fatal=*/true);
+  const PwrCfg *seq =
+      _variant == ChipVariant::C8821C ? kPwrOn8821cUsb : kPwrOn8822bUsb;
+  run_pwr_seq(_device, seq, /*poll_max=*/5000, /*poll_fatal=*/true);
   _logger->info("Jaguar2: power-on sequence complete (card active)");
 }
 

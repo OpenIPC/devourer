@@ -521,6 +521,80 @@ void RtlJaguar3Device::StopCwTone() {
   _logger->info("CW single-tone stopped — chip restored");
 }
 
+/* Modulated continuous TX (Jaguar3). The JGR3 hardware-continuous hold
+ * (0x1ca4) only engages under the full PMAC packet-generator setup, which emits
+ * a test pattern rather than decodable frames — no good for a link probe that
+ * needs per-frame SNR/EVM. So the HW 100%-duty path is NOT engaged here; we
+ * apply the rate and let the caller's back-to-back send_packet loop supply the
+ * modulated stimulus at beacon duty. True HW continuous is a documented
+ * follow-up (needs the PMAC TX-packet config). */
+void RtlJaguar3Device::StartContinuousTx(const devourer::TxMode &mode) {
+  SetTxMode(mode);
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_cont_active)
+    return;
+
+  /* --- Stop the normal TRX (phydm_stop_ic_trx) so the PMAC can drive TX --- */
+  _cont_txpause = _device.rtw_read8(0x522);        /* save TX-queue bitmap */
+  _device.rtw_write8(0x522, 0xff);                 /* pause all TX queues */
+  _device.phy_set_bb_reg(0x1d58, 0xff8, 0x1ff);    /* disable OFDM RX CCA */
+  _cont_ccktx = _device.rtw_read<uint32_t>(0x1a04) & 0xf0000000u; /* save */
+  _device.phy_set_bb_reg(0x1a14, 0x300, 0x3);      /* CCK RxIQ weight = 0 */
+  _device.phy_set_bb_reg(0x1a04, 0xf0000000, 0x0); /* disable CCK Tx */
+
+  /* --- Start OFDM continuous TX (phydm_start_ofdm_cont_tx_jgr3) --- */
+  _device.phy_set_bb_reg(0x1c3c, 1u << 0, 0x1);    /* OFDM block on */
+  _device.phy_set_bb_reg(0x1a00, 0x3, 0x0);        /* CCK test mode off */
+  _device.phy_set_bb_reg(0x1a00, 1u << 3, 0x1);    /* scrambler on */
+  _device.phy_set_bb_reg(0x1ca4, 0x7, 0x1);        /* continuous TX hold on */
+
+  /* --- Define the PMAC packet: legacy 6M OFDM (phydm_set_sig_jgr3 +
+   * phydm_set_mac_phy_txinfo_jgr3). L-SIG bytes {0x0b,0x7d,0x02} = rate 6M,
+   * length 1000 B, parity — the vendor's hardcoded 6M packet. --- */
+  _device.phy_set_bb_reg(0x1eb4, 0xfffff, 0x1);    /* packet_count = 1 */
+  _device.phy_set_bb_reg(0x908, 0xffffff, 0x00027d0b); /* L-SIG (6M) */
+  _device.phy_set_bb_reg(0xa58, 0x003f8000, 0x04); /* tx_rate = ODM_RATE6M */
+  _device.phy_set_bb_reg(0x900, 1u << 1, 0x0);     /* ndp_sound = 0 */
+  _device.phy_set_bb_reg(0x900, 0xff000000, 0x0);  /* txsc/bw/stbc = 0 (20 MHz) */
+  _device.phy_set_bb_reg(0x1ae0, 0x7000, 0x0);     /* tx_sc = duplicate */
+  _device.phy_set_bb_reg(0x900, 1u << 0, 0x0);     /* not HT */
+  _device.phy_set_bb_reg(0x900, 1u << 2, 0x0);     /* not VHT (legacy) */
+  _device.phy_set_bb_reg(0x9b8, 0xffff0000, 2000); /* packet period ~500us */
+
+  /* --- Turn on PMAC + TX-OFDM (phydm_set_pmac_txon_jgr3) --- */
+  _device.phy_set_bb_reg(0x1d08, 1u << 0, 0x1);    /* PMAC on */
+  _device.phy_set_bb_reg(0x1e70, 0xf, 0x0);
+  _device.phy_set_bb_reg(0x1e70, 0xf, 0x4);        /* TX OFDM on */
+
+  _cont_active = true;
+  _logger->info("Modulated continuous TX armed @ ch{} (Jaguar3 PMAC 6M HW "
+                "100%%-duty carrier; idle-hold, StopContinuousTx to end)",
+                _channel.Channel);
+}
+
+void RtlJaguar3Device::StopContinuousTx() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (!_cont_active)
+    return;
+
+  /* Stop OFDM continuous (phydm_stop_ofdm_cont_tx_jgr3). */
+  _device.phy_set_bb_reg(0x1ca4, 0x7, 0x0);        /* continuous hold off */
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  _device.phy_set_bb_reg(0x1d0c, 1u << 16, 0x0);   /* BB reset pulse */
+  _device.phy_set_bb_reg(0x1d0c, 1u << 16, 0x1);
+  _device.phy_set_bb_reg(0x1e70, 0xf, 0x0);        /* TX OFDM off */
+  _device.phy_set_bb_reg(0x1d08, 1u << 0, 0x0);    /* PMAC off */
+
+  /* Revert the TRX stop (phydm_stop_ic_trx REVERT). */
+  _device.rtw_write8(0x522, _cont_txpause);        /* release TX queues */
+  _device.phy_set_bb_reg(0x1d58, 0xff8, 0x0);      /* re-enable OFDM RX CCA */
+  _device.phy_set_bb_reg(0x1a14, 0x300, 0x0);      /* restore CCK RxIQ */
+  _device.phy_set_bb_reg(0x1a04, 0xf0000000, _cont_ccktx); /* restore CCK Tx */
+
+  _cont_active = false;
+  _logger->info("Modulated continuous TX stopped — chip restored");
+}
+
 /* Frame-free RX energy snapshot for the Jaguar3 (8822C/E) BB. Ported from
  * phydm_fa_cnt_statistics_jgr3 + phydm_reset_bb_hw_cnt (reference/rtl88x2cu
  * phydm_dig.c / phydm_api.c): the newer BB holds the same FA/CCA facilities as

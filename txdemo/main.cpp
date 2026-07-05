@@ -536,6 +536,32 @@ int main(int argc, char **argv) {
   const devourer::TxMode tx_mode_base = devourer::parse_tx_mode_env();
   rtlDevice->SetTxMode(tx_mode_base);
 
+  /* DEVOURER_CONT_TX: arm modulated continuous TX (the sibling of the CW tone).
+   * All three generations engage a true 100%-duty hardware modulated carrier the
+   * demo idle-holds (cont_hw): Jaguar1 via the 0x914 continuous mode, Jaguar2 via
+   * the same once rCCAonSec (0x838) is set, Jaguar3 via the JGR3 PMAC packet
+   * generator (a fixed 6M OFDM carrier). Rate from DEVOURER_TX_RATE (Jaguar1/2). */
+  const bool cont_tx = std::getenv("DEVOURER_CONT_TX") != nullptr;
+  bool cont_hw = false; /* true = HW continuous engaged (idle-hold); false = feed */
+  if (cont_tx) {
+    bool armed = false;
+#if defined(DEVOURER_HAVE_JAGUAR1)
+    if (jag) { jag->StartContinuousTx(tx_mode_base); armed = true; cont_hw = true; }
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR2)
+    if (jag2) { jag2->StartContinuousTx(tx_mode_base); armed = true; cont_hw = true; }
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR3)
+    if (jag3) { jag3->StartContinuousTx(tx_mode_base); armed = true; cont_hw = true; }
+#endif
+    if (armed)
+      logger->info("DEVOURER_CONT_TX: armed ({})",
+                   cont_hw ? "HW 100%-duty carrier, idle-hold"
+                           : "rate applied, beacon feed");
+    else
+      logger->error("DEVOURER_CONT_TX set but device is not a supported chip");
+  }
+
   /* DEVOURER_TX_STBC_TOGGLE=1 alternates the STBC bit every frame (keeping the
    * rate from DEVOURER_TX_RATE, which must be HT/VHT for STBC to apply). The RX
    * reports the received STBC bit per frame, so an alternating TX lets one
@@ -807,6 +833,22 @@ int main(int argc, char **argv) {
     }
   }
 
+  /* DEVOURER_CONT_TX HW-continuous idle-hold (all generations): the continuous
+   * mode holds a 100%-duty modulated carrier once armed. Prime a few frames so
+   * the Jaguar1/2 engine has a PPDU to repeat (harmless on Jaguar3, whose PMAC
+   * self-generates), then idle-hold — the carrier self-radiates. SIGINT falls
+   * through to StopContinuousTx in the de-init below. NB: this is the
+   * spectral/thermal stimulus; the link probe uses the plain feed + power ramp
+   * (no DEVOURER_CONT_TX) for decodable per-frame SNR. */
+  if (cont_tx && cont_hw) {
+    for (int i = 0; i < 64 && !g_devourer_should_stop; i++)
+      rtlDevice->send_packet(tx_buf.data(), tx_buf.size()); /* prime (NAKs ok) */
+    logger->info("DEVOURER_CONT_TX hold — 100%%-duty modulated carrier up, "
+                 "idling until SIGINT (Ctrl-C to stop)");
+    while (!g_devourer_should_stop)
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+
   while (!g_devourer_should_stop) {
     if (tx_count == 0) {
       logger->info("init-timing: txdemo.first_tx_submit = {} ms",
@@ -926,6 +968,21 @@ int main(int argc, char **argv) {
    * (core dump). Setting the flag also covers the back-off exit path, where no
    * signal was delivered. */
   g_devourer_should_stop = true;
+
+  /* Undo modulated continuous TX before de-init (clears the 0x914/0x1ca4 hold +
+   * BB reset), so the chip returns to normal TX/RX and re-enumerates cleanly. */
+  if (cont_tx) {
+#if defined(DEVOURER_HAVE_JAGUAR1)
+    if (jag) jag->StopContinuousTx();
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR2)
+    if (jag2) jag2->StopContinuousTx();
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR3)
+    if (jag3) jag3->StopContinuousTx();
+#endif
+  }
+
   /* Join the RX loop BEFORE Stop(): the chip de-init must not race in-flight
    * RX URBs (and StartRxLoop's event pump must exit before libusb_exit). */
   rtlDevice->StopRxLoop();

@@ -240,6 +240,11 @@ Common to both demos:
   then restores the chip. `DEVOURER_CW_TONE_GAIN=0..31` sets the RF gain index
   (`RF 0x00[4:0]`, default 0 = lowest). A controllable narrowband interferer / MP
   tone source; SDR-validate with `tests/cw_tone_sdr.sh` (+ `tests/cw_tone_probe.py`).
+- `DEVOURER_CONT_TX=1` — the modulated sibling of the CW tone: a true 100%-duty
+  modulated OFDM carrier (Realtek's MP hardware continuous-TX mode) on all three
+  generations, instead of a bare tone. A full-channel active stimulus for
+  spectral / power / thermal characterisation and the active-link probe. See
+  [`docs/adaptive-link-building-blocks.md`](docs/adaptive-link-building-blocks.md).
 
 On-air TX throughput vs wfb-ng (SDR-verified parity; how to reproduce) is
 documented in [`docs/wfb-ng-tuning.md`](docs/wfb-ng-tuning.md).

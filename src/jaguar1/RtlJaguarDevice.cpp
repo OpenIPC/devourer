@@ -188,6 +188,51 @@ void RtlJaguarDevice::StopCwTone() {
   _logger->info("CW single-tone stopped — chip restored");
 }
 
+/* Modulated continuous TX — vendor mpt_StartOfdmContTx (hal_mp.c). Unlike the
+ * CW tone this leaves the OFDM modulator + scrambler running and drives the
+ * normal TX pipeline; the caller feeds frames with send_packet and the chip
+ * holds a continuous modulated carrier. Rate comes from `mode` (SetTxMode);
+ * per-rate TXAGC/power is the normal path (SetTxPowerOverride/efuse). */
+void RtlJaguarDevice::StartContinuousTx(const devourer::TxMode &mode) {
+  if (_cont_active)
+    return;
+  SetTxMode(mode);
+
+  /* OFDM block on. */
+  if (!(_radioManagement->phy_query_bb_reg_public(rFPGA0_RFMOD, bOFDMEn)))
+    _device.phy_set_bb_reg(rFPGA0_RFMOD, bOFDMEn, 1);
+  /* CCK test mode off, scrambler on. */
+  _device.phy_set_bb_reg(rCCK0_System, bCCKBBMode, 0);
+  _device.phy_set_bb_reg(rCCK0_System, bCCKScramble, 1);
+  /* Continuous-TX mode bits 0x914[18:16] = OFDM_ContinuousTx (1). */
+  _device.phy_set_bb_reg(rSingleTone_ContTx_Jaguar, BIT18 | BIT17 | BIT16, 0x1);
+  /* HSSI params the vendor sets for the continuous stream. */
+  _device.phy_set_bb_reg(rFPGA0_XA_HSSIParameter1, bMaskDWord, 0x01000500);
+  _device.phy_set_bb_reg(rFPGA0_XB_HSSIParameter1, bMaskDWord, 0x01000500);
+
+  _cont_active = true;
+  _logger->info("Modulated continuous TX armed @ ch{} (feed frames via "
+                "send_packet; StopContinuousTx to end)",
+                _channel.Channel);
+}
+
+/* Mirror of the vendor mpt_StopOfdmContTx: clear the continuous-TX mode bits,
+ * settle, pulse a BB reset, restore the HSSI params. */
+void RtlJaguarDevice::StopContinuousTx() {
+  if (!_cont_active)
+    return;
+  _device.phy_set_bb_reg(rSingleTone_ContTx_Jaguar, BIT18 | BIT17 | BIT16, 0x0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  /* BB reset pulse. */
+  _device.phy_set_bb_reg(rPMAC_Reset, bBBResetB, 0x0);
+  _device.phy_set_bb_reg(rPMAC_Reset, bBBResetB, 0x1);
+  _device.phy_set_bb_reg(rFPGA0_XA_HSSIParameter1, bMaskDWord, 0x01000100);
+  _device.phy_set_bb_reg(rFPGA0_XB_HSSIParameter1, bMaskDWord, 0x01000100);
+
+  _cont_active = false;
+  _logger->info("Modulated continuous TX stopped — chip restored");
+}
+
 /* Frame-free RX energy snapshot for the AC (Jaguar-1) BB. Reads the phydm
  * OFDM/CCK false-alarm (0xF48/0xA5C) + CCA (0xF08) counters and the DIG IGI
  * (0xC50), then resets the counters (phydm_false_alarm_counter_reg_reset AC:

@@ -57,6 +57,9 @@ class RtlJaguarDevice : public IRtlDevice {
   uint32_t _cw_rf00 = 0;
   uint32_t _cw_bb[4] = {0, 0, 0, 0};
 
+  /* Modulated continuous TX (StartContinuousTx/StopContinuousTx) guard. */
+  bool _cont_active = false;
+
 public:
   RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger);
   ~RtlJaguarDevice() override;
@@ -101,6 +104,20 @@ public:
    * TX/RX. Idempotent. */
   void StartCwTone(uint8_t gain);
   void StopCwTone();
+
+  /* Realtek MP modulated continuous TX — the sibling of StartCwTone. Where the
+   * CW tone radiates a bare unmodulated LO carrier, this streams a *real*
+   * OFDM/HT/VHT waveform back-to-back at `mode`'s rate (the vendor
+   * mpt_StartOfdmContTx path: OFDM block on, scrambler on, continuous-TX mode
+   * bits 0x914[18:16]=1). It applies `mode` via SetTxMode; the caller primes a
+   * few frames to load a PPDU, then the chip holds a 100%-duty modulated carrier
+   * (idle-hold — no continuous feed needed). Full-channel, full-MCS occupancy —
+   * the active stimulus for spectral / power / thermal characterisation.
+   * StopContinuousTx clears the mode bits, pulses a BB reset, and restores.
+   * Idempotent via _cont_active. TXAGC/power is the normal per-rate path
+   * (SetTxPowerOverride), not a bare RF gain like the CW tone. */
+  void StartContinuousTx(const devourer::TxMode& mode);
+  void StopContinuousTx();
 
   /* Frame-free RX energy / channel-busy snapshot (see RxSense.h) — reads the
    * phydm OFDM/CCK false-alarm + CCA counters (0xF48/0xA5C/0xF08) and the DIG

@@ -70,6 +70,17 @@ public:
   void StartCwTone(uint8_t gain);
   void StopCwTone();
 
+  /* Modulated continuous TX — sibling of StartCwTone. Engages the JGR3 hardware
+   * continuous mode via the phydm PMAC packet generator: stop the normal TRX
+   * (pause TX queues 0x522, disable OFDM/CCK CCA), define a legacy-6M PMAC packet
+   * (L-SIG + rate + tx-info), enable PMAC (0x1d08) + TX-OFDM (0x1e70) + the
+   * continuous hold (0x1ca4). Radiates a 100%-duty modulated OFDM carrier at 6M
+   * (the SIG encoding is simplest for legacy OFDM; the stimulus rate is fixed at
+   * 6M regardless of `mode`). Idle-hold; StopContinuousTx reverses it. Serializes
+   * on _reg_mu against the coex thread. */
+  void StartContinuousTx(const devourer::TxMode& mode);
+  void StopContinuousTx();
+
   /* Frame-free RX energy / channel-busy snapshot (see RxSense.h). Jaguar3's
    * phydm DIG/FA machinery was never ported to devourer, but the 8822C/E BB has
    * the same facilities in a newer register space — OFDM/CCK CCA (0x2c08), CCK
@@ -100,6 +111,12 @@ private:
    * is needed. _cw_active guards double start/stop. */
   bool _cw_active = false;
   uint32_t _cw_rf00 = 0;
+  /* Modulated continuous TX (StartContinuousTx/StopContinuousTx) guard + saved
+   * TRX state for a clean restore (TX-queue pause byte 0x522, CCK-TX path
+   * 0x1a04[31:28]), captured by the phydm_stop_ic_trx-equivalent at start. */
+  bool _cont_active = false;
+  uint8_t _cont_txpause = 0;
+  uint32_t _cont_ccktx = 0;
   /* Coex runtime: a background thread that drains bulk-IN, dispatches firmware
    * C2H reports (BT-info etc.) and runs the periodic coex decision so the FW's
    * PTA keeps the antenna with WLAN during sustained TX.

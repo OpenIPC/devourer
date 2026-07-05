@@ -159,8 +159,39 @@ for dut in "${DUTS[@]}"; do
             fail "$name parity: canary diverged from master ($OUT/$tag-canary-{master,new}.regs)"
             diff "$OUT/$tag-canary-master.regs" "$OUT/$tag-canary-new.regs" | head -8 | sed 's/^/    /'
         fi
+        # Jaguar2's canary omits the TXAGC block; the bring-up log carries the
+        # computed per-section indices — compare those (the fold refactor must
+        # be value-identical at offset 0). VHT lines are new-build-only (the
+        # approved 8822B VHT extension) and excluded.
+        if [ "$FAMILY" = "jaguar2" ]; then
+            # 8822B logs "TXAGC path N ..." per path; 8821C logs the vendor-
+            # formula line with the per-section bases + limits. VHT lines are
+            # new-build-only (the approved 8822B VHT extension) and excluded.
+            txagc_log() { grep -ohE "TXAGC path [01] ch[0-9]+ .*|per-rate TXAGC \(vendor formula\) .*" "$1" | grep -v VHT | sort -u; }
+            txagc_log "$OUT/$tag-canary-master.log" >"$OUT/$tag-txagc-master.txt"
+            txagc_log "$OUT/$tag-canary-new.log"    >"$OUT/$tag-txagc-new.txt"
+            if [ ! -s "$OUT/$tag-txagc-master.txt" ]; then
+                skip "$name txagc-log parity (no TXAGC log lines from master)"
+            elif diff -q "$OUT/$tag-txagc-master.txt" "$OUT/$tag-txagc-new.txt" >/dev/null; then
+                pass "$name txagc-log parity: per-section indices identical to master"
+            else
+                fail "$name txagc-log parity: computed TXAGC diverged from master"
+                diff "$OUT/$tag-txagc-master.txt" "$OUT/$tag-txagc-new.txt" | head -6 | sed 's/^/    /'
+            fi
+        fi
     else
         skip "$name parity (master baseline build failed)"
+    fi
+
+    # -- thermal plausibility --------------------------------------------------
+    th="$OUT/$tag-thermal.log"
+    run_step_demo "$th" --vid "$VID" --pid "$PID" --channel "$CH_A" --thermal
+    raw="$(awk '/<devourer-thermal>/ { sub(/^.*<devourer-thermal>/,"");
+        for (i=1;i<=NF;i++) { split($i,kv,"="); if (kv[1]=="raw") { print kv[2]; exit } } }' "$th" | tr -d '\r')"
+    if [ -n "$raw" ] && [ "$raw" -ge 1 ] 2>/dev/null && [ "$raw" -le 63 ]; then
+        pass "$name thermal: raw=$raw plausible (baseline=$(awk '/<devourer-thermal>/ { sub(/^.*<devourer-thermal>/,""); for (i=1;i<=NF;i++) { split($i,kv,"="); if (kv[1]=="baseline") { print kv[2]; exit } } }' "$th"))"
+    else
+        fail "$name thermal: raw='$raw' implausible/missing"
     fi
 
     # -- move: -24 qdB shifts every index by exactly steps24 ------------------

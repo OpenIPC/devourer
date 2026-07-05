@@ -1278,10 +1278,23 @@ void HalJaguar2::set_tx_power_flat(uint8_t idx) {
     _device.rtw_write32(static_cast<uint16_t>(0x1d00 + off), v); /* path A */
     _device.rtw_write32(static_cast<uint16_t>(0x1d80 + off), v); /* path B */
   }
+  set_txagc_shadow_flat(idx); /* the block is write-only — see txagc_shadow */
   _logger->info("Jaguar2: TXAGC flat index 0x{:02x} applied", idx);
 }
 
-void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
+void HalJaguar2::read_thermal(uint8_t &raw, uint8_t &baseline) {
+  /* Vendor 8822B/8821C halrf reads the meter with a plain
+   * odm_get_rf_reg(RF_PATH_A, 0x42, 0xfc00) — no trigger needed. */
+  raw = static_cast<uint8_t>((rf_read(0, 0x42) >> 10) & 0x3f);
+  if (!_efuse_valid) {
+    read_efuse_logical_map(_efuse_map, sizeof(_efuse_map), /*dump=*/false);
+    _efuse_valid = true;
+  }
+  baseline = _efuse_map[0xBA]; /* EEPROM_THERMAL_METER_8822B/_8821C */
+}
+
+void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type,
+                                int offset_steps) {
   /* Port of phy_get_pg_txpwr_idx (hal_com_phycfg.c) + the 4-byte TXAGC write
    * (config_phydm_write_txagc_8822b): TXAGC[rate] = pg-base(rate-section) +
    * per-Nss diff, clamped to the txpwr_lmt regulatory limit, written to 0x1d00
@@ -1291,6 +1304,11 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
    * BW40/80 is future work (uses BW40/BW80 diffs). */
   if (channel == 0)
     return;
+
+  /* Fresh rail-hit snapshot for this apply (SetTxPowerOffsetQdb's "knob out
+   * of travel" signal). */
+  _txpwr_sat_low = false;
+  _txpwr_sat_high = false;
 
   /* 8821C: the vendor hal_com_get_txpwr_idx computes per-rate power
    *   idx[rate] = clamp(base + (min(by_rate[rate], lmt) - rs_target), 0, 63)
@@ -1344,7 +1362,10 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
 #endif
       };
       /* write a rate-section: per byte (rate) in each dword,
-       * idx = clamp(base + (min(by_rate, lmt) - rs), 0, 63). */
+       * idx = clamp(base + (min(by_rate, lmt) - rs) + offset, 0, 63) — the
+       * runtime offset folds after the regulatory min() (headroom above the
+       * worldwide-min table up to the hw rail, same permissiveness as the
+       * flat override). */
       auto wsec = [&](uint16_t off, int base, int rs, int lm,
                       const uint32_t *dw, int ndw) {
         for (int w = 0; w < ndw; w++) {
@@ -1352,15 +1373,25 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
           for (int b = 0; b < 4; b++) {
             int byr = static_cast<int>((dw[w] >> (b * 8)) & 0xff);
             int rt = byr < lm ? byr : lm;
-            int idx = base + (rt - rs);
-            if (idx < 0) idx = 0;
-            if (idx > 63) idx = 63;
+            int idx = base + (rt - rs) + offset_steps;
+            if (idx < 0) { idx = 0; _txpwr_sat_low = true; }
+            if (idx > 63) { idx = 63; _txpwr_sat_high = true; }
             out |= static_cast<uint32_t>(idx & 0xff) << (b * 8);
           }
           _device.rtw_write32(static_cast<uint16_t>(0x1d00 + off + w * 4), out);
         }
       };
-      /* by_rate dwords (array_mp_8821c_phy_reg_pg) + rs = ref-rate by_rate. */
+      /* by_rate dwords (array_mp_8821c_phy_reg_pg) + rs = ref-rate by_rate.
+       * Representative-rate shadow (the TXAGC block is write-only): the value
+       * wsec computes for hw_rate 0x00 (CCK 1M) / 0x04 (OFDM 6M) / 0x13
+       * (MCS7) — byte 0 of the section's first dword resp. byte 3 of the HT
+       * section's second dword. */
+      auto sec_idx = [&](int base, int rs, int lm, uint32_t dw, int b) -> int {
+        int byr = static_cast<int>((dw >> (b * 8)) & 0xff);
+        int rt = byr < lm ? byr : lm;
+        int idx = base + (rt - rs) + offset_steps;
+        return idx < 0 ? 0 : (idx > 63 ? 63 : idx);
+      };
       if (!g5c) {
         const uint32_t cck[] = {0x32343638};
         const uint32_t ofdm[] = {0x36363636, 0x28303234};
@@ -1370,6 +1401,9 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
         wsec(0x04, ofdm_base, 40, lmtc(1), ofdm, 2);
         wsec(0x0c, ht_base, 38, lmtc(2), ht, 2);
         wsec(0x2c, ht_base, 38, lmtc(2), vht, 3); /* VHT1SS: HT base/lmt */
+        _txagc_shadow_cck = sec_idx(cck_base, 50, lmtc(0), cck[0], 0);
+        _txagc_shadow_ofdm = sec_idx(ofdm_base, 40, lmtc(1), ofdm[0], 0);
+        _txagc_shadow_mcs7 = sec_idx(ht_base, 38, lmtc(2), ht[1], 3);
       } else {
         const uint32_t ofdm[] = {0x34343434, 0x26283032};
         const uint32_t ht[] = {0x32343434, 0x24262830};
@@ -1377,6 +1411,9 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
         wsec(0x04, ofdm_base, 38, lmtc(1), ofdm, 2);
         wsec(0x0c, ht_base, 36, lmtc(2), ht, 2);
         wsec(0x2c, ht_base, 36, lmtc(2), vht, 3);
+        _txagc_shadow_cck = -1; /* no CCK at 5G */
+        _txagc_shadow_ofdm = sec_idx(ofdm_base, 38, lmtc(1), ofdm[0], 0);
+        _txagc_shadow_mcs7 = sec_idx(ht_base, 36, lmtc(2), ht[1], 3);
       }
       _logger->info("Jaguar2/8821C: per-rate TXAGC (vendor formula) ch{} {} "
                     "cck_base={} ofdm_base={} ht_base={} lmt cck/ofdm/ht={}/{}/{}",
@@ -1445,11 +1482,17 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
   const int lmt_cck = g5 ? 63 : lmt(0);
   const int lmt_ofdm = lmt(1);
   const int lmt_ht = lmt(2);
-  auto clamp63 = [](int v) -> uint8_t {
-    return static_cast<uint8_t>(v < 0 ? 0 : (v > 63 ? 63 : v));
+  auto clamp63 = [&](int v) -> uint8_t {
+    if (v < 0) { v = 0; _txpwr_sat_low = true; }
+    if (v > 63) { v = 63; _txpwr_sat_high = true; }
+    return static_cast<uint8_t>(v);
   };
+  /* min() against the regulatory table FIRST, then the runtime offset, then
+   * the hw rail — a positive offset may exceed the worldwide-min table
+   * (operator's call, same as the flat override), a negative one always
+   * takes effect. */
   auto clamp_lmt = [&](int v, int lmt) -> uint8_t {
-    if (v > lmt) v = lmt; return clamp63(v);
+    if (v > lmt) v = lmt; return clamp63(v + offset_steps);
   };
 
   /* 8821C is 1T1R — only path A has a valid EFUSE base + a real RF path (its
@@ -1463,8 +1506,13 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
     const uint8_t cck_base = g5 ? 0 : map[blk + cck_group];
     const uint8_t bw40_base = g5 ? map[blk + group] : map[blk + 6 + group];
     if (bw40_base == 0xFF || (!g5 && cck_base == 0xFF)) {
-      _logger->info("Jaguar2: apply_tx_power path {} ch{} EFUSE base unprogrammed "
-                    "— leaving TXAGC default", path, channel);
+      if (offset_steps != 0)
+        _logger->warn("Jaguar2: TX-power offset has no EFUSE baseline to fold "
+                      "into on path {} (unprogrammed) — TXAGC left at BB-table "
+                      "default", path);
+      else
+        _logger->info("Jaguar2: apply_tx_power path {} ch{} EFUSE base unprogrammed "
+                      "— leaving TXAGC default", path, channel);
       continue;
     }
     const uint8_t d0 = map[blk + (g5 ? 14 : 11)]; /* MSB BW20_Diff0 / LSB OFDM_Diff0 */
@@ -1496,14 +1544,46 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
     wr(0x04, ofdm_idx); wr(0x08, ofdm_idx);
     wr(0x0c, ht1_idx);  wr(0x10, ht1_idx);
     wr(0x14, ht2_idx);  wr(0x18, ht2_idx);
+    if (path == 0) { /* representative shadow — the block is write-only */
+      _txagc_shadow_cck = g5 ? -1 : cck_idx;
+      _txagc_shadow_ofdm = ofdm_idx;
+      _txagc_shadow_mcs7 = ht1_idx; /* MCS7 = hw_rate 0x13, HT1SS section */
+    }
     /* VHT1SS — the 8821C's AC mode — uses the same 1SS BW base as HT1SS, and the
      * vendor efuse-calibrates it (config_phydm_write_txagc_8821c writes hw_rate
      * up to VHT; 0x2c-0x35 = VHT1SS MCS0-9 -> regs 0x1d2c/0x1d30/0x1d34). Without
      * this VHT TXAGC stays at the BB-table default — uncalibrated and
-     * inconsistent with the CCK/OFDM/HT rates above. 8821C-only so the 8822B's
-     * VHT2SS handling stays byte-identical. */
+     * inconsistent with the CCK/OFDM/HT rates above. */
     if (_variant == ChipVariant::C8821C) {
       wr(0x2c, ht1_idx); wr(0x30, ht1_idx); wr(0x34, ht1_idx);
+    }
+    /* VHT (8822B, 2SS): vendor phy_get_pg_txpwr_idx computes the PG index by
+     * rate-section STREAM COUNT only — VHT1SS rides the same base+BW20-diff as
+     * HT1SS, VHT2SS the same as HT2SS — clamped to the VHT regulatory section
+     * (sec 3). hw_rate 0x2c-0x35 = VHT1SS MCS0-9, 0x36-0x3f = VHT2SS MCS0-9;
+     * dword 0x34 straddles the sections (bytes 0-1 = 1SS MCS8/9, 2-3 = 2SS
+     * MCS0/1). Before this, 8822B VHT rates rode the hot BB-table default —
+     * uncalibrated, regulatory-unclamped, and out of reach of the runtime
+     * TX-power offset. */
+    if (_variant == ChipVariant::C8822B) {
+      /* The worldwide-min table has no 2.4G VHT rows (non-standard mode), so
+       * the sec-3 lookup falls back to 63 there — which would let 2.4G VHT
+       * ride hotter than the HT clamp. Bound it by the HT limit instead;
+       * 5G has real VHT rows and uses them. */
+      int lmt_vht = lmt(3);
+      if (!g5 && lmt_vht > lmt_ht)
+        lmt_vht = lmt_ht;
+      const uint8_t v1 = clamp_lmt(bw40_base + ht_diff0, lmt_vht);
+      const uint8_t v2 = clamp_lmt(bw40_base + ht_diff0 + ht_diff1, lmt_vht);
+      wr(0x2c, v1); wr(0x30, v1);
+      _device.rtw_write32(static_cast<uint16_t>(p + 0x34),
+                          static_cast<uint32_t>(v1) |
+                              (static_cast<uint32_t>(v1) << 8) |
+                              (static_cast<uint32_t>(v2) << 16) |
+                              (static_cast<uint32_t>(v2) << 24));
+      wr(0x38, v2); wr(0x3c, v2);
+      _logger->info("Jaguar2/8822B: VHT TXAGC path {}: VHT1SS={:#x} VHT2SS={:#x} "
+                    "(lmt_vht={})", path, v1, v2, lmt_vht);
     }
 
     _logger->info("Jaguar2: TXAGC path {} ch{} {} (g{}): CCK={:#x} OFDM={:#x} "

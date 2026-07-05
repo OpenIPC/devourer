@@ -1,6 +1,7 @@
 #ifndef HAL_JAGUAR2_H
 #define HAL_JAGUAR2_H
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -55,8 +56,50 @@ public:
    * the efuse-calibrated level the kernel uses. Without it the TXAGC sits at the
    * hot BB-table default which overdrives high-order QAM (MCS5/7) into PA
    * compression. Ports phy_get_pg_txpwr_idx (base + per-BW/Nss diff) +
-   * config_phydm_write_txagc_8822b. Both bands. */
-  void apply_tx_power(uint8_t channel, uint8_t bw = 0, uint8_t rfe_type = 0);
+   * config_phydm_write_txagc_8822b. Both bands. On the 8822B this covers the
+   * VHT sections too (vendor parity: phy_get_pg_txpwr_idx computes VHT by
+   * stream count only, so VHT1SS/VHT2SS ride the HT 1SS/2SS bases with the
+   * VHT regulatory clamp — hw_rate 0x2c-0x3f).
+   *
+   * `offset_steps` is the runtime TX-power offset (TXAGC index steps, 0.5 dB
+   * each) behind IRtlDevice::SetTxPowerOffsetQdb: folded AFTER the min() with
+   * the regulatory table, clamped only at the 6-bit rails (the saturation
+   * flags below record rail hits — reset per apply). */
+  void apply_tx_power(uint8_t channel, uint8_t bw = 0, uint8_t rfe_type = 0,
+                      int offset_steps = 0);
+
+  /* Rail-hit flags from the last apply_tx_power/flat-compose (see
+   * apply_tx_power). Atomic so a state snapshot may read them cross-thread. */
+  bool txpwr_saturated_low() const { return _txpwr_sat_low; }
+  bool txpwr_saturated_high() const { return _txpwr_sat_high; }
+  void set_txpwr_saturation(bool lo, bool hi) {
+    _txpwr_sat_low = lo;
+    _txpwr_sat_high = hi;
+  }
+
+  /* Software shadow of the last path-A TXAGC write for the representative
+   * rates (CCK 1M / OFDM 6M / HT MCS7). The Jaguar2 TXAGC block
+   * (0x1d00/0x1d80) is WRITE-ONLY — reads return 0 (hardware-verified on
+   * 8822BU + 8821CU) — so GetTxPowerState reports these with
+   * hw_readback=false, like the 8814A's packed TXAGC port. -1 = never
+   * written (TXAGC still at the BB-table default). */
+  void txagc_shadow(int &cck, int &ofdm, int &mcs7) const {
+    cck = _txagc_shadow_cck;
+    ofdm = _txagc_shadow_ofdm;
+    mcs7 = _txagc_shadow_mcs7;
+  }
+  void set_txagc_shadow_flat(int idx) {
+    _txagc_shadow_cck = idx;
+    _txagc_shadow_ofdm = idx;
+    _txagc_shadow_mcs7 = idx;
+  }
+
+  /* Chip thermal meter: raw = RF[A] 0x42[15:10] (a plain direct-window read —
+   * the vendor 8822B/8821C halrf reads it with no trigger), baseline = the
+   * EFUSE thermal calibration at logical 0xBA (EEPROM_THERMAL_METER_8822B /
+   * _8821C — same offset both variants; 0xFF = unprogrammed). Reads the
+   * cached logical map (lazy-read on first use, like apply_tx_power). */
+  void read_thermal(uint8_t &raw, uint8_t &baseline);
 
   /* Apply the 8822B BB (phy_reg), AGC (agc_tab) and RF (radioa/radiob) phydm
    * tables via the shared check_positive walker, bracketed by the OFDM/CCK
@@ -244,6 +287,13 @@ private:
    * USB control transfers ≈ 0.5s). read_efuse_rfe populates it; apply_tx_power
    * reuses it — avoids a second walk that would slow every cold init. */
   uint8_t _efuse_map[0x200];
+  /* Rail-hit flags from the last TXAGC apply (see txpwr_saturated_low/high). */
+  std::atomic<bool> _txpwr_sat_low{false};
+  std::atomic<bool> _txpwr_sat_high{false};
+  /* Path-A TXAGC software shadow (see txagc_shadow — the block is write-only). */
+  std::atomic<int> _txagc_shadow_cck{-1};
+  std::atomic<int> _txagc_shadow_ofdm{-1};
+  std::atomic<int> _txagc_shadow_mcs7{-1};
   bool _efuse_valid = false;
 
   /* 8821C CCK TX-filter defaults (0xa24/0xa28/0xaac) snapshotted from the BB

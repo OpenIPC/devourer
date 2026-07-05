@@ -30,10 +30,10 @@ LOGDIR=/tmp/devourer-rx80-narrow-tx
 rm -rf "$LOGDIR"; mkdir -p "$LOGDIR"
 
 cleanup() {
-  pkill -INT -x WiFiDriverTxDemo 2>/dev/null
+  pkill -INT -x WiFiDriverTxDem 2>/dev/null
   pkill -INT -x WiFiDriverDemo 2>/dev/null
   sleep 1
-  pkill -KILL -x WiFiDriverTxDemo 2>/dev/null
+  pkill -KILL -x WiFiDriverTxDem 2>/dev/null
   pkill -KILL -x WiFiDriverDemo 2>/dev/null
 }
 trap cleanup EXIT INT TERM

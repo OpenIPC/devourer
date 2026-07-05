@@ -26,7 +26,7 @@ RAIL_MIN_DUTY=${RAIL_MIN_DUTY:-50}    # absolute 5 GHz duty floor (%), tune per 
 RAIL_MIN_RATIO=${RAIL_MIN_RATIO:-0.6} # min 5GHz/2.4GHz duty ratio on a healthy rail
 TXBIN=${TXBIN:-build/WiFiDriverTxDemo}
 
-cleanup(){ sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null; }
+cleanup(){ sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; }
 trap cleanup EXIT
 
 # free the control from any bound kernel driver

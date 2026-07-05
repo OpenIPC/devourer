@@ -7,10 +7,10 @@ set -u
 KMOD=rtl88x2eu_ohd
 HUB=3-2.3
 FREQ=5180e6
-cleanup(){ sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null; }
+cleanup(){ sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null; }
 trap cleanup EXIT
 
-cycle(){ sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null
+cycle(){ sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null
          sudo rmmod $KMOD 2>/dev/null; sleep 1; sudo uhubctl -l $HUB -a cycle >/dev/null 2>&1; sleep 4; }
 
 sweep(){ # prints "8:xx 10:xx 12:xx 14:xx"
@@ -34,7 +34,7 @@ meas_devourer(){
     stdbuf -oL timeout -k 5 30 build/WiFiDriverTxDemo >/dev/null 2>&1 &
   sleep 5
   echo "  devourer:$(sweep)"
-  sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null; sleep 1
+  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; sleep 1
 }
 
 meas_kernel(){

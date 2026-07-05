@@ -20,7 +20,7 @@ MON=/sys/kernel/debug/usb/usbmon/${RXBUS}u
 echo "[harness] TX 8812AU=$TXS  RX c812=$RXS (bus $RXBUS dev $RXDEV)"
 
 cleanup() {
-  sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null
+  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null
   sudo pkill -9 -x WiFiDriverDemo 2>/dev/null
   sudo pkill -9 -f "cat $MON" 2>/dev/null
   echo "$TXS:1.0" | sudo tee /sys/bus/usb/drivers/rtw88_8812au/bind >/dev/null 2>&1

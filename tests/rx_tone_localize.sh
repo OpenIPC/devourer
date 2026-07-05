@@ -53,7 +53,7 @@ done
 mkdir -p "$OUT"
 
 cleanup() {
-  for c in WiFiDriverTxDemo WiFiDriverDemo; do pkill -x "$c" 2>/dev/null || true; done
+  for c in WiFiDriverTxDem WiFiDriverDemo; do pkill -x "$c" 2>/dev/null || true; done
   wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM

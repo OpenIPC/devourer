@@ -44,7 +44,7 @@ if [ -z "${FAMILY:-}" ]; then
 fi
 echo "family: $FAMILY (TX_PID=$TX_PID)"
 
-cleanup() { pkill -x WiFiDriverTxDemo 2>/dev/null || true; }
+cleanup() { pkill -x WiFiDriverTxDem 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
 echo "== building WiFiDriverTxDemo =="

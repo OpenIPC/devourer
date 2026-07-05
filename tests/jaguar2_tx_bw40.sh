@@ -12,7 +12,7 @@ SNIFF_IF=${SNIFF_IF:-wlp4s0u2u4}   # 8822cu (supports 5G + HT40)
 CANON=57:42:75:05:d6:00
 DUR=${DUR:-16}
 
-cleanup() { sudo pkill -f "tcpdump -i $SNIFF_IF" 2>/dev/null; sudo pkill -x WiFiDriverTxDemo 2>/dev/null; }
+cleanup() { sudo pkill -f "tcpdump -i $SNIFF_IF" 2>/dev/null; sudo pkill -x WiFiDriverTxDem 2>/dev/null; }
 trap cleanup EXIT
 
 echo "[bw40] recovering T3U first"

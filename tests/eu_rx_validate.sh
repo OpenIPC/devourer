@@ -28,7 +28,7 @@ echo "[harness] TX $TXPID=$TXS  RX $RXPID=$RXS  ch=$CH  ${SECS}s"
 TXHUB=${TXS%.*}; TXPORT=${TXS##*.}
 
 cleanup() {
-  sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null
+  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null
   sudo pkill -9 -x WiFiDriverDemo 2>/dev/null
   echo "$TXS:1.0" | sudo tee /sys/bus/usb/drivers/$TXDRV/bind >/dev/null 2>&1
   [ -n "$RXDRV" ] && echo "$RXS:1.0" | sudo tee /sys/bus/usb/drivers/$RXDRV/bind >/dev/null 2>&1

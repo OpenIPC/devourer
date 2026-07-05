@@ -18,7 +18,7 @@ PWR=0x2d
 OUT=/tmp/j2_8821c_bw_sdr
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-cleanup() { sudo pkill -x WiFiDriverTxDemo 2>/dev/null; sudo modprobe rtw88_8821cu 2>/dev/null; }
+cleanup() { sudo pkill -x WiFiDriverTxDem 2>/dev/null; sudo modprobe rtw88_8821cu 2>/dev/null; }
 trap cleanup EXIT
 
 probe() { # label freq
@@ -39,10 +39,10 @@ run_bw() { # bw offset ch freq label
       ./build/WiFiDriverTxDemo >"$OUT/dev_${LBL}.log" 2>&1 &
     sleep 10   # power-on -> DLFW -> init -> TX flooding
     if grep -q 'ready for TX' "$OUT/dev_${LBL}.log"; then break; fi
-    echo "  (try $try: bring-up failed, retrying)"; sudo pkill -x WiFiDriverTxDemo 2>/dev/null; wait 2>/dev/null
+    echo "  (try $try: bring-up failed, retrying)"; sudo pkill -x WiFiDriverTxDem 2>/dev/null; wait 2>/dev/null
   done
   probe "$LBL" "$FREQ"
-  sudo pkill -x WiFiDriverTxDemo 2>/dev/null; wait 2>/dev/null; sleep 1
+  sudo pkill -x WiFiDriverTxDem 2>/dev/null; wait 2>/dev/null; sleep 1
 }
 
 echo "[bw-sdr] baseline (no TX) @ 5755MHz"

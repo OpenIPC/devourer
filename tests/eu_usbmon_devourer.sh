@@ -4,7 +4,7 @@
 #   sudo tests/eu_usbmon_devourer.sh
 set -u
 BUS=3; MON=/sys/kernel/debug/usb/usbmon/${BUS}u; RAW=/tmp/eu_dev_usbmon.txt
-cleanup(){ sudo pkill -9 -f "cat $MON" 2>/dev/null; sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null; }
+cleanup(){ sudo pkill -9 -f "cat $MON" 2>/dev/null; sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; }
 trap cleanup EXIT
 for i in $(ls /sys/class/net | grep -E "^wl"); do sudo ip link set "$i" down 2>/dev/null; done
 sudo rmmod rtl88x2eu_ohd 2>/dev/null; sleep 2

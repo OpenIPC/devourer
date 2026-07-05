@@ -9,11 +9,11 @@ FREQ=5180e6
 N=${1:-4}
 KMOD=rtl88x2eu_ohd
 
-cleanup(){ sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null; }
+cleanup(){ sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null; }
 trap cleanup EXIT
 
 cold_cycle(){ # full VBUS off/on of the EU's hub port
-  sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null
+  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null
   sudo rmmod $KMOD 2>/dev/null; sleep 1
   sudo uhubctl -l $HUB -a off >/dev/null 2>&1; sleep 4
   sudo uhubctl -l $HUB -a on  >/dev/null 2>&1; sleep 6
@@ -38,7 +38,7 @@ for i in $(seq 1 $N); do
     stdbuf -oL timeout -k 5 14 build/WiFiDriverTxDemo >/tmp/cold_dev_$i.log 2>&1 &
   sleep 6
   echo "  devourer cold run $i:$(sweep)"
-  sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null; sleep 1
+  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; sleep 1
 done
 
 echo "=== $N COLD kernel EU 5G runs (power-cycled each) ==="

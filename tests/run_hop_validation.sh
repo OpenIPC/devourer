@@ -45,7 +45,7 @@ TX_LOG="$OUT/tx.log"
 RX_LOG="$OUT/rx.log"
 
 cleanup() {
-    pkill -x WiFiDriverTxDemo 2>/dev/null || true
+    pkill -x WiFiDriverTxDem 2>/dev/null || true
     pkill -f "tests/hop_rx_probe.py" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM

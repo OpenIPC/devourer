@@ -47,7 +47,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$TX_PID" ] && [ -n "$RX_PID" ] || { echo "need --tx-pid and --rx-pid" >&2; exit 2; }
 
-cleanup() { for c in WiFiDriverTxDemo WiFiDriverDemo; do pkill -x "$c" 2>/dev/null || true; done; }
+cleanup() { for c in WiFiDriverTxDem WiFiDriverDemo; do pkill -x "$c" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 
 echo "== building =="

@@ -12,7 +12,7 @@ cleanup(){
 trap cleanup EXIT
 
 # Ensure no devourer userspace holds the device.
-sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null
+sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null
 sudo pkill -9 -x WiFiDriverDe 2>/dev/null
 sleep 1
 

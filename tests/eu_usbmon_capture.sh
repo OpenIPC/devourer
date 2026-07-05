@@ -12,7 +12,7 @@ cleanup(){ sudo pkill -9 -f "cat $MON" 2>/dev/null; }
 trap cleanup EXIT
 
 # Start fresh: unload driver so we capture a clean cold init.
-sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null
+sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null
 for i in $(ls /sys/class/net | grep -E "^wl"); do sudo ip link set "$i" down 2>/dev/null; done
 sudo rmmod rtl88x2eu_ohd 2>/dev/null; sleep 2
 

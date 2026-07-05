@@ -31,10 +31,10 @@ milliseconds, so a controller can retune between frames.
 | Lever | Effect on the link | Effect on energy/bit | How it moves |
 |---|---|---|---|
 | **Modulation / MCS** (time-on-air) | strong | **strong** — less airtime, fewer Joules/bit | per-packet radiotap rate, or the device TX-mode default (`DEVOURER_TX_RATE`); immediate |
-| **FEC strength** | strong | strong | application-layer (the outer code / per-layer ladder), not a PHY register |
-| **Channel / bandwidth** | strong | moderate | per-packet retune (~1–2 ms intra-band fast retune, longer on a band change); the channel-agility lever |
+| **FEC strength** | strong | strong | application-layer — the outer code + the per-temporal-layer MCS/FEC ladder (`DEVOURER_SVC_LADDER`, [`fused-fec.md`](fused-fec.md)), not a PHY register |
+| **Channel / bandwidth** | strong | moderate | per-packet retune (~1–2 ms intra-band fast retune / `DEVOURER_HOP_*`, longer on a band change); 20/40/80 MHz plus a 5/10 MHz **narrowband re-clock** that trades throughput for link budget |
 | **Transmit power** | **strongest** | **weak** — the always-on baseline draw dominates | runtime TXAGC override, re-applied without a channel switch |
-| **Active receive chains** | conditional | **conditional** — pays only when the antennas decorrelate (motion) | RX-path enable mask; a fade-state lever, not a range lever |
+| **Active receive chains** | conditional | **conditional** — pays only when the antennas decorrelate (motion) | the RX-path enable mask (`DEVOURER_RX_PATHS`); a fade-state lever, not a range lever |
 | **Duty cycle** | — | direct | inter-frame gap; back-to-back for maximum airtime, idle to save it |
 
 The energy asymmetry is the crux the design leans on: modulation and airtime are
@@ -65,7 +65,23 @@ baseband directly; see [`rx-spectrum-sensing.md`](rx-spectrum-sensing.md)):
 - **per-tone interference localizer** — from a self-sounded beamforming report,
   per-subcarrier SNR / phase-variance that locates a narrowband interferer to a
   fraction of the channel. The finest frequency-resolution sensor the silicon
-  offers (no raw per-subcarrier CSI is exported to the host).
+  offers (no raw per-subcarrier CSI is exported to the host). Once an interferer
+  is located, the receiver can **act** on it in-band: a narrowband notch
+  (`DEVOURER_RX_NBI`) or a per-tone de-weighting mask (`DEVOURER_RX_CSI_MASK`, the
+  RX half of [pseudo preamble puncturing](pseudo-preamble-puncturing.md)) — the
+  sense→act pair for a spur riding on decodable frames — or simply hop the channel
+  away from it.
+
+**Environment** (the fade state itself, not the link quality):
+
+- **motion / presence sensing** — the same self-sounded beamforming report,
+  read across frames, yields the channel's temporal variation: a static channel
+  is near-constant, a moving person or platform makes it churn. That churn *is*
+  the fade state the receive-chain lever adapts to — decorrelated, fast-fading
+  antennas are where combining more chains pays, so a motion signal tells the
+  controller when to open chains up and when to collapse to one. (The
+  `WiFiSenseDemo` example surfaces this as a motion-energy readout; see
+  [`beamforming-victim-sensing.md`](beamforming-victim-sensing.md).)
 
 **Thermal** (a local safety input, not a link sensor):
 
@@ -136,13 +152,17 @@ The design's decisions map onto the blocks above:
 - **Ride the highest MCS, spend the least power that clears it** — the
   power↔margin and MCS-headroom probes measure that boundary; the rate and power
   levers act on it.
-- **Pick a clean channel / bandwidth** — sweep the frame-free energy sensor across
-  candidate channels (a coarse spectrum map), or localize an interferer per-tone,
-  then retune the channel lever there. A modulated continuous burst on a candidate
-  channel lets the far end confirm it carries the target rate.
+- **Pick a clean channel / bandwidth, or mitigate in place** — sweep the
+  frame-free energy sensor across candidate channels (a coarse spectrum map), or
+  localize an interferer per-tone; then either retune the channel lever away from
+  it, narrow the bandwidth (5/10 MHz) to buy link budget, or — for an in-band spur
+  on otherwise-decodable frames — notch/mask it (`DEVOURER_RX_NBI` /
+  `DEVOURER_RX_CSI_MASK`) without moving. A modulated continuous burst on a
+  candidate channel lets the far end confirm it carries the target rate.
 - **Adapt receive chains to the fade state** — combine more chains under motion
   (decorrelated antennas fill fades), collapse to one on a still, strong link; the
-  RX-path lever, driven by the per-chain sensors.
+  RX-path lever (`DEVOURER_RX_PATHS`), driven by the per-chain sensors and the
+  motion signal that tells the controller *which* fade state it is in.
 - **Hold the thermal / regulatory ceiling** — the thermal telemetry bounds the
   power/duty the controller may request; the continuous-TX stimulus is the
   worst-case duty for characterising that ceiling, and the link-probe overlay

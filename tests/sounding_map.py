@@ -189,18 +189,16 @@ def main() -> int:
         elif r["rssi_max"] is not None and levels and \
                 r["rssi_max"] <= med - args.notch_db:
             flag = " NOTCH"
+        def fmt(v):  # medians come back int or float; render uniformly
+            return "   -" if v is None else f"{v:>4g}"
         if r["rssi_max"] is None:
             bar = ""
-            lvl = "   -"
         else:
             bar = "#" * max(1, round(width * (r["rssi_max"] - lo) / span))
-            lvl = f"{r['rssi_max']:>4}"
-        evm = f"{r['evm_mean']:>4}" if r["evm_mean"] is not None else "   -"
-        rmean = f"{r['rssi_mean']:>4}" if r["rssi_mean"] is not None else "   -"
-        snr = f"{r['snr_mean']:>4}" if r["snr_mean"] is not None else "   -"
-        print(f"  ch {ch:>3} ({mhz:>4} MHz) | {bar:<{width}} rssi_max={lvl} "
-              f"rssi_mean={rmean} snr={snr} evm={evm} hits={r['hits']:>4} "
-              f"live={r['live']}/{r['dwells']}{flag}")
+        print(f"  ch {ch:>3} ({mhz:>4} MHz) | {bar:<{width}} "
+              f"rssi_max={fmt(r['rssi_max'])} rssi_mean={fmt(r['rssi_mean'])} "
+              f"snr={fmt(r['snr_mean'])} evm={fmt(r['evm_mean'])} "
+              f"hits={fmt(r['hits'])} live={r['live']}/{r['dwells']}{flag}")
 
     n_dead = sum(1 for r in rows if r["live"] == 0 and any_live)
     n_notch = sum(1 for r in rows if r["live"] > 0 and r["rssi_max"] is not None
@@ -217,15 +215,21 @@ def main() -> int:
                 if len(parts) >= 2:
                     sdr[int(parts[0])] = float(parts[1])
         common = [r for r in sounded if r["ch"] in sdr and r["rssi_max"] is not None]
-        if len(common) >= 3:
-            rho = spearman([float(r["rssi_max"]) for r in common],
-                           [sdr[r["ch"]] for r in common])
+        vals = [float(r["rssi_max"]) for r in common]
+        spread = (max(vals) - min(vals)) if vals else 0.0
+        if len(common) < 3:
+            print(f"sdr-crosscheck: only {len(common)} common live bins — "
+                  "need >=3 for a rank correlation")
+        elif spread <= 2.0:
+            # A flat map (bench near-field, no frequency selectivity) has no
+            # rank structure to correlate — rho on ties+noise is meaningless.
+            print(f"sdr-crosscheck: map is flat (rssi_max spread {spread:g}) "
+                  "— nothing to rank-correlate; both ends see a flat channel")
+        else:
+            rho = spearman(vals, [sdr[r["ch"]] for r in common])
             verdict = "MATCH" if rho >= 0.5 else "WEAK" if rho > 0 else "MISMATCH"
             print(f"sdr-crosscheck bins={len(common)} spearman_rho={rho:.2f} "
                   f"-> {verdict}")
-        else:
-            print(f"sdr-crosscheck: only {len(common)} common live bins — "
-                  "need >=3 for a rank correlation")
 
     if not any_live:
         print("\nSOUNDING: FAIL — no probe frames on any bin (prober down, "

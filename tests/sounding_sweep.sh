@@ -70,8 +70,14 @@ echo "bins: $CHLIST"
 echo "duty: TX cycle ~${CYCLE_MS} ms -> RX dwell ${RX_DWELL} ms x $ROUNDS rounds (~${RX_SECS}s)"
 
 echo "== prober: $TX_PID hopping $NBINS bins at $RATE (dwell $DWELL_FRAMES frames) =="
+# DEVOURER_TX_MAXFAIL=0: a retune can wedge one in-flight frame into a
+# bulk-OUT timeout (hardware-observed on the 8812EU at 5 MHz NB, on BOTH the
+# full and fast paths — the BB reset lands while a frame is draining). A
+# scattered lost probe frame is noise to the map; the prober must ride it out
+# rather than take the consecutive-failure bail mid-sweep.
 timeout -sINT "$((RX_SECS + 30))" env DEVOURER_VID="$TX_VID" DEVOURER_PID="$TX_PID" \
   DEVOURER_CHANNEL="$FIRST_CH" DEVOURER_TX_RATE="$RATE" \
+  DEVOURER_TX_MAXFAIL=0 \
   ${NB_BW:+DEVOURER_NB_BW="$NB_BW"} \
   DEVOURER_HOP_CHANNELS="$BINS" DEVOURER_HOP_DWELL_FRAMES="$DWELL_FRAMES" \
   DEVOURER_HOP_FAST=1 DEVOURER_TX_GAP_US="$GAP_US" \

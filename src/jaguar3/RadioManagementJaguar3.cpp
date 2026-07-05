@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <utility>
 
+#include "HopProf.h"         /* DEVOURER_HOP_PROF fast-retune stage timing */
 #include "RateDefinitions.h" /* MGN_* rate enum */
 #if defined(DEVOURER_HAVE_JAGUAR3_8822E)
 #include "Hal8822e_PhyTables.h"    /* array_mp_8822e_phy_reg_pg */
@@ -43,11 +44,7 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
   /* Any full channel set rewrites what fast_retune caches (RF18 BW/band bits,
    * SCO, TX DFIR, AGC tables, RXBB) — invalidate; the caches only ever mirror
    * fast-path writes (the J1 RadioManagementModule pattern). */
-  _rf18_cached = false;
-  _last_sco = 0xffffffff;
-  _last_dfir = 0xffffffff;
-  _last_agc_key = -1;
-  _rxbb_asserted = false;
+  invalidate_fast_caches();
 
   _last_channel = channel;
 
@@ -424,6 +421,14 @@ void RadioManagementJaguar3::bb_reset_toggle() {
   _device.rtw_write32(0x0, r0 | (1u << 16));
 }
 
+void RadioManagementJaguar3::invalidate_fast_caches() {
+  _last_sco = 0xffffffff;
+  _last_dfir = 0xffffffff;
+  _last_agc_key = -1;
+  _rxbb_asserted = false;
+  _cw_primed = false;
+}
+
 bool RadioManagementJaguar3::fast_retune(uint8_t channel,
                                          uint8_t channel_offset,
                                          ChannelWidth_t bwmode, bool cache_rf) {
@@ -435,26 +440,37 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
   if (channel == _last_channel)
     return true; /* no-op hop */
 
+  devourer::HopProf prof("j3", channel);
   uint8_t central, pri;
   central_and_pri(channel, channel_offset, bwmode, central, pri);
 
-  /* RF18: merge the new central into the cached full value (8822c — one
-   * BB-window read primes the cache; cache_rf=false re-reads per hop for A/B
-   * measurement) or compose from scratch (8822e — plain write, no read ever). */
+  /* Compose-cache prime: every masked write costs a read+write round-trip, so
+   * read the full dwords of everything the hop touches ONCE per epoch, then
+   * compose bit changes in memory and write whole dwords — zero per-hop reads
+   * (Jaguar1's cached-LSSI trick generalised). cache_rf=false re-primes every
+   * hop (the A/B knob now measures the whole read penalty). */
   const bool is_c = (_variant == ChipVariant::C8822C);
-  uint32_t rf18;
-  if (is_c) {
-    if (!cache_rf || !_rf18_cached) {
-      _rf18_cache = _device.rtw_read32(
-                        static_cast<uint16_t>(0x3c00 + (0x18 << 2))) &
-                    0xfffffu;
-      _rf18_cached = true;
-    }
-    rf18 = rf18_for(central, bwmode, _rf18_cache);
-    _rf18_cache = rf18; /* refresh so the next hop merges into what we wrote */
-  } else {
-    rf18 = rf18_for(central, bwmode, 0);
+  if (!cache_rf || !_cw_primed) {
+    _cw_1c90 = _device.rtw_read32(0x1c90);
+    _cw_1830 = _device.rtw_read32(0x1830);
+    _cw_4130 = _device.rtw_read32(0x4130);
+    _cw_r0 = _device.rtw_read32(0x0);
+    _cw_c30 = _device.rtw_read32(0xc30);
+    _cw_808 = _device.rtw_read32(0x808);
+    _cw_rfwin_a =
+        _device.rtw_read32(static_cast<uint16_t>(0x3c00 + (0x18 << 2)));
+    _cw_rfwin_b =
+        _device.rtw_read32(static_cast<uint16_t>(0x4c00 + (0x18 << 2)));
+    _cw_primed = true;
   }
+  /* RF18: merge the new central into the cached low 20 bits (8822c — the
+   * primed read carries the current BW/band bits) or compose from scratch
+   * (8822e); the window dword's top 12 bits ride along from the prime. */
+  const uint32_t rf18 = is_c ? rf18_for(central, bwmode, _cw_rfwin_a)
+                             : rf18_for(central, bwmode, 0);
+  const uint32_t win_a = (_cw_rfwin_a & 0xfff00000u) | rf18;
+  const uint32_t win_b = (_cw_rfwin_b & 0xfff00000u) | rf18;
+  prof.mark("prime");
 
   /* The per-hop core of config_phydm_switch_channel: 3-wire bracket, RF18 on
    * both paths, force-update-anapar (pushes the RF/analog shadow to the
@@ -466,17 +482,23 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
    * in RF 0x1a) and a fast hop must end in the full path's state; per-variant
    * order matches the full path (8822c: RXBB then RF18; 8822e: RF18 then
    * RF 0x1a). */
-  _device.phy_set_bb_reg(0x1c90, 1u << 8, 0x0); /* rstb_3wire(false) */
+  _device.rtw_write32(0x1c90, _cw_1c90 & ~(1u << 8)); /* rstb_3wire(false) */
   if (is_c && !_rxbb_asserted)
     apply_rxbb(bwmode);
-  rf_window_write(0x3c00, 0x18, rf18);
-  rf_window_write(0x4c00, 0x18, rf18);
+  _device.rtw_write32(static_cast<uint16_t>(0x3c00 + (0x18 << 2)), win_a);
+  _device.rtw_write32(static_cast<uint16_t>(0x4c00 + (0x18 << 2)), win_b);
   if (!is_c && !_rxbb_asserted)
     apply_rxbb(bwmode);
   _rxbb_asserted = true;
-  _device.phy_set_bb_reg(0x1c90, 1u << 8, 0x1);  /* rstb_3wire(true) */
-  _device.phy_set_bb_reg(0x1830, 1u << 29, 0x1); /* force update anapar (A) */
-  _device.phy_set_bb_reg(0x4130, 1u << 29, 0x1); /* force update anapar (B) */
+  _device.rtw_write32(0x1c90, _cw_1c90 | (1u << 8)); /* rstb_3wire(true) */
+  _device.rtw_write32(0x1830, _cw_1830 | (1u << 29)); /* force anapar (A) */
+  _device.rtw_write32(0x4130, _cw_4130 | (1u << 29)); /* force anapar (B) */
+  _cw_1c90 |= (1u << 8);
+  _cw_1830 |= (1u << 29);
+  _cw_4130 |= (1u << 29);
+  _cw_rfwin_a = win_a;
+  _cw_rfwin_b = win_b;
+  prof.mark("bracket");
 
   /* Channel-keyed constants, written only when their bucket moves (invalidated
    * by every full set, so the first fast hop writes them once). */
@@ -494,7 +516,8 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
 
   const uint32_t sco = sco_for(central);
   if (sco != _last_sco) {
-    _device.phy_set_bb_reg(0xc30, 0xfff, sco);
+    _cw_c30 = (_cw_c30 & ~0xfffu) | sco;
+    _device.rtw_write32(0xc30, _cw_c30);
     _last_sco = sco;
   }
 
@@ -513,14 +536,22 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
                         : 0x3u;
   const uint32_t dfir = (dfir_msb << 8) | dfir_lsb;
   if (dfir != _last_dfir) {
-    _device.phy_set_bb_reg(0x808, 0x700000, dfir_msb);
-    _device.phy_set_bb_reg(0x808, 0x70, dfir_lsb);
+    /* Both nibbles composed into one dword write. */
+    _cw_808 = (_cw_808 & ~0x700070u) | (dfir_msb << 20) | (dfir_lsb << 4);
+    _device.rtw_write32(0x808, _cw_808);
     _last_dfir = dfir;
   }
 
+  prof.mark("consts");
+
   /* BB reset every hop (the kernel runs it after every switch_channel; the RX
-   * engine must relatch on the new channel). */
-  bb_reset_toggle();
+   * engine must relatch on the new channel) — three composed writes from the
+   * primed dword. */
+  _device.rtw_write32(0x0, _cw_r0 | (1u << 16));
+  _device.rtw_write32(0x0, _cw_r0 & ~(1u << 16));
+  _device.rtw_write32(0x0, _cw_r0 | (1u << 16));
+  _cw_r0 |= (1u << 16);
+  prof.mark("bbrst");
 
   _last_channel = channel;
   _logger->debug("Jaguar3: fast retune -> ch {} (central {}, RF18=0x{:05x})",
@@ -553,6 +584,9 @@ void RadioManagementJaguar3::set_mac_bw_txsc(ChannelWidth_t bw, uint8_t pri) {
 }
 
 void RadioManagementJaguar3::set_tx_power_ref(uint8_t idx, bool zero_diffs) {
+  /* Writes the 0x1c90 TXAGC gate below — the fast path's composed 0x1c90
+   * cache would go stale. */
+  invalidate_fast_caches();
   /* Override the 8822C TX-power reference on both RF paths (port of
    * rtw8822c_set_write_tx_power_ref + zeroing the per-rate diffs). idx is a
    * 7-bit power index (0..0x7f); higher = more power. Each txagc write must be
@@ -622,6 +656,7 @@ static bool pg_addr_to_rates(uint32_t addr, std::array<uint8_t, 4> &rates) {
 
 void RadioManagementJaguar3::apply_power_by_rate_8822e(
     uint8_t channel, uint8_t ref_a, uint8_t ref_b, bool skip_path_b_ofdm_ref) {
+  invalidate_fast_caches(); /* writes the 0x1c90 TXAGC gate below */
 #if defined(DEVOURER_HAVE_JAGUAR3_8822E)
   /* Port of the phy_reg_pg (power-by-rate) apply that devourer's table walk
    * skips. The 8822e TXAGC is ref + per-rate diff: the OFDM/HT/VHT reference
@@ -698,6 +733,9 @@ void RadioManagementJaguar3::apply_power_by_rate_8822e(
 }
 
 void RadioManagementJaguar3::set_bandwidth_dividers(ChannelWidth_t bwmode) {
+  /* Writes 0x808 (8822e shaping) + the BB-reset word — stale-proof the fast
+   * path's composed caches. */
+  invalidate_fast_caches();
   /* Narrowband baseband underclock — the Jaguar3-only payoff. Applies ONLY the
    * clock-divider / small-BW / RX-DFIR delta from config_phydm_switch_bandwidth
    * _8822c / _8822e, on top of an already-tuned channel (this re-clocks the

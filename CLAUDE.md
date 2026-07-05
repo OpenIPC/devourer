@@ -305,10 +305,14 @@ that exercise the salvage path.
 `IRtlDevice::FastRetune(channel)` is a lean intra-band, same-bandwidth channel
 retune every generation implements (default = the full `SetMonitorChannel`): it
 does the RF channel switch only, skipping the steady-state work a hop doesn't
-need, writes the channel RF register from a cached value, and re-writes the
-channel-keyed constants only when their bucket changes. Measured medians:
-8812AU ~251→1.6 ms, 8822BU ~62→18 ms, 8821CU ~29→5.6 ms, 8822CU/8812EU
-~11→3-4 ms. It falls back to the full path on a band change; on Jaguar3 it
+need, and runs write-only from a compose cache (full dwords primed once per
+epoch, bit changes composed in memory — a masked register write is otherwise a
+read+write USB round-trip, and hop cost is purely transfer count × the chip's
+EP0 latency). Measured medians: 8812AU ~277→1.6 ms, 8822BU ~65→2.5 ms, 8821CU
+~30→0.55 ms, 8822CU/8812EU ~12→2-2.4 ms — FHSS-grade on every generation
+(soak: 12k consecutive dwell-1 per-packet hops, zero TX stalls; kickless
+hopping RX holds a constant catch rate). `DEVOURER_HOP_PROF=1` emits per-stage
+hop timing. It falls back to the full path on a band change; on Jaguar3 it
 serializes on the coex thread's register mutex (the sanctioned in-session hop)
 and preserves the 5/10 MHz narrowband dividers across hops. `send_packet` on
 all three generations also honours a radiotap `CHANNEL` field, so hopping is

@@ -40,11 +40,12 @@ public:
    * narrowband re-clock owns 0x808 on the 8822e), so fast hops preserve the
    * narrowband clocking without re-running the divider recipe.
    *
-   * cache_rf=true reuses the cached full RF18 value (primed by one BB-window
-   * read on the first fast hop; the 8822e composes RF18 from scratch and
-   * needs no cache/read at all). Returns false — chip untouched — when the
-   * hop crosses the 2.4/5 GHz boundary or the radio was never tuned; the
-   * caller falls back to the full set_channel_bwmode. */
+   * cache_rf=true runs from the compose cache (all touched dwords primed by
+   * one read each on the first fast hop; thereafter the hop is write-only);
+   * cache_rf=false re-primes every hop (the A/B knob measuring the read
+   * penalty). Returns false — chip untouched — when the hop crosses the
+   * 2.4/5 GHz boundary or the radio was never tuned; the caller falls back to
+   * the full set_channel_bwmode. */
   bool fast_retune(uint8_t channel, uint8_t channel_offset,
                    ChannelWidth_t bwmode, bool cache_rf);
 
@@ -146,11 +147,24 @@ private:
    * set_channel_bwmode runs (it rewrites all of them); refreshed by the fast
    * path's own writes, so they only ever mirror fast-path state — the J1
    * RadioManagementModule pattern. */
-  uint32_t _rf18_cache = 0;   /* 8822c full RF18 (BB-window read, 20-bit) */
-  bool _rf18_cached = false;
   uint32_t _last_sco = 0xffffffff;
   uint32_t _last_dfir = 0xffffffff; /* packed (0x808[22:20]<<8)|[6:4] */
   int _last_agc_key = -1;           /* band/sub-band bucket + bw20 flag */
+
+  /* Compose cache — the FHSS hop-latency trick generalised from Jaguar1's
+   * cached LSSI write: every masked phy_set_bb_reg is a read+write (two USB
+   * control transfers, ~0.2-1 ms each depending on the chip's EP0 latency), so
+   * the fast path primes the full dwords of the registers it touches ONCE per
+   * epoch and thereafter composes the bit changes in memory and writes whole
+   * dwords — zero per-hop reads, correct by construction (untouched bits are
+   * written back as read). Invalidated with the rest of the fast-path caches,
+   * plus wherever these registers are written outside the channel paths
+   * (set_tx_power_ref / apply_power_by_rate write the 0x1c90 TXAGC gate). */
+  bool _cw_primed = false;
+  uint32_t _cw_1c90 = 0, _cw_1830 = 0, _cw_4130 = 0, _cw_r0 = 0;
+  uint32_t _cw_c30 = 0, _cw_808 = 0;
+  uint32_t _cw_rfwin_a = 0, _cw_rfwin_b = 0; /* 0x3c60/0x4c60 full dwords */
+  void invalidate_fast_caches();
   /* BW-keyed RXBB state, re-asserted on the first fast hop of each epoch:
    * the init-time halrf calibration rewrites it after the channel set
    * (hardware-observed on the 8812EU — IQK clears the 40 MHz TX_CCK_IND bit

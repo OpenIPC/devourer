@@ -12,6 +12,7 @@
 #if defined(DEVOURER_HAVE_JAGUAR2_8821C)
 #include "Hal8821c_TxpwrLmt.h" /* generated: hal8821c_txpwr_lmt() WW-min limits */
 #endif
+#include "HopProf.h" /* DEVOURER_HOP_PROF fast-retune stage timing */
 #include "PhyTableLoader.h"
 
 namespace jaguar2 {
@@ -465,7 +466,7 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   /* Any full channel set rewrites what fast_retune caches (RF18 band/BW bits,
    * AGC/fc buckets, RF 0xBE, spur/CCK-filter regs) — invalidate; the caches
    * only ever mirror fast-path writes. */
-  _rf18_cached = false;
+  _cw_primed = false;
   _last_agc_bucket = -1;
   _last_fc = 0xffffffff;
   _last_rf_be = -1;
@@ -686,19 +687,26 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   if (channel == _last_tuned_ch)
     return true; /* no-op hop */
 
+  devourer::HopProf prof("j2", channel);
   const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
   const bool g2 = cch <= 14;
   const bool c8821 = (_variant == ChipVariant::C8821C);
   const bool r2t2r = _ver.rf_2t2r != 0;
 
-  /* RF18: one cached full-register write replaces the full path's
-   * read-modify-write round(s) (three of them on the 8821C). One direct-window
-   * read primes the cache; the band bits ([16]/[8], band-keyed) and the BW bits
-   * ([11:10], bandwidth-keyed) ride along in the cached value. */
-  if (!cache_rf || !_rf18_cached) {
+  /* Compose-cache prime — one read per touched register per epoch; the hop
+   * itself is then write-only. RF18's band bits ([16]/[8], band-keyed) and BW
+   * bits ([11:10], bandwidth-keyed) ride along in the cached value; the AGC /
+   * fc / RF 0xBE dwords carry their untouched neighbour bits the same way.
+   * cache_rf=false re-primes every hop (the A/B read-penalty knob). */
+  if (!cache_rf || !_cw_primed) {
     _rf18_cache = rf_read(0, 0x18);
-    _rf18_cached = true;
+    _cw_agc = _device.rtw_read32(c8821 ? 0x0c1c : 0x0958);
+    _cw_fc = _device.rtw_read32(0x0860);
+    if (!c8821)
+      _cw_rfbe = rf_read(0, 0xbe);
+    _cw_primed = true;
   }
+  prof.mark("prime");
   uint32_t rf18 = _rf18_cache & ~((1u << 18) | (1u << 17) | 0xffu);
   rf18 |= cch;
 
@@ -718,11 +726,14 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   else if (cch >= 149)
     agc_bucket = 3;
   if (agc_bucket >= 0 && agc_bucket != _last_agc_bucket) {
-    if (c8821)
-      _device.phy_set_bb_reg(0x0c1c, 0x00000F00,
-                             static_cast<uint32_t>(agc_bucket));
-    else
-      _device.phy_set_bb_reg(0x0958, 0x1f, static_cast<uint32_t>(agc_bucket));
+    if (c8821) {
+      _cw_agc = (_cw_agc & ~0x00000F00u) |
+                (static_cast<uint32_t>(agc_bucket) << 8);
+      _device.rtw_write32(0x0c1c, _cw_agc);
+    } else {
+      _cw_agc = (_cw_agc & ~0x1Fu) | static_cast<uint32_t>(agc_bucket);
+      _device.rtw_write32(0x0958, _cw_agc);
+    }
     _last_agc_bucket = agc_bucket;
   }
 
@@ -738,7 +749,8 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   else if (cch >= 118 && cch <= 177)
     fc = 0x412;
   if (fc != 0xffffffff && fc != _last_fc) {
-    _device.phy_set_bb_reg(0x0860, 0x1ffe0000, fc);
+    _cw_fc = (_cw_fc & ~0x1ffe0000u) | (fc << 17);
+    _device.rtw_write32(0x0860, _cw_fc);
     _last_fc = fc;
   }
 
@@ -747,7 +759,9 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
      * VCO), the ch144 RF 0xDF[18] flag, and the 2G spur registers. */
     const uint8_t rf_be = rf_be_for_8822b(cch);
     if (rf_be != 0xff && rf_be != _last_rf_be) {
-      rf_set(0, 0xbe, (1u << 17) | (1u << 16) | (1u << 15), rf_be);
+      _cw_rfbe = (_cw_rfbe & ~0x38000u) |
+                 (static_cast<uint32_t>(rf_be) << 15);
+      rf_write(0, 0xbe, _cw_rfbe);
       _last_rf_be = rf_be;
     }
     const int df18 = (cch == 144) ? 1 : 0;
@@ -803,23 +817,20 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
     }
   }
 
+  prof.mark("consts");
   rf_write(0, 0x18, rf18);
   if (!c8821 && r2t2r)
     rf_write(1, 0x18, rf18);
   _rf18_cache = rf18; /* refresh so the next hop merges into what we wrote */
+  prof.mark("rf18");
 
-  /* Per-hop RX kick — the vendor switch_channel tail: 8822B RF read-error
-   * toggle + RX-path toggle (leave the RX dead-zone), then the IGI toggle on
-   * both variants. */
-  if (!c8821) {
-    rf_set(0, 0xb8, (1u << 19), 0);
-    rf_set(0, 0xb8, (1u << 19), 1);
-    const uint8_t rx_ant = r2t2r ? 0x3 : 0x1;
-    _device.phy_set_bb_reg(0x0808, 0xff, 0x0);
-    _device.phy_set_bb_reg(0x0808, 0xff,
-                           static_cast<uint32_t>(rx_ant | (rx_ant << 4)));
-  }
-  igi_toggle();
+  /* No per-hop RX kick. The vendor switch_channel tail (8822B RF 0xb8 +
+   * RX-path toggles, IGI toggle) stays in the full path, but a hop does not
+   * need it — hardware-measured on both variants, both directions: a hopping
+   * receiver catches a parked beacon at the same per-dwell rate with and
+   * without the kick (8822BU/8821CU: identical medians, no decay over ~70
+   * kickless retunes), and hopping-TX delivery is unchanged. The kick was
+   * >80% of the hop's USB round-trips. */
 
   _last_tuned_ch = channel;
   _logger->debug("Jaguar2: fast retune -> ch {} (central {}, RF18=0x{:05x})",

@@ -444,6 +444,58 @@ void RtlJaguar2Device::StopCwTone() {
   _logger->info("CW single-tone stopped — chip restored");
 }
 
+/* Modulated continuous TX. On Jaguar2 the vendor 0x914 continuous-TX register
+ * mode wedges the USB TX FIFO (bulk-OUT NAKs) rather than holding a carrier, so
+ * the hardware-continuous path is NOT engaged here (unlike Jaguar1). Instead we
+ * apply the rate and let the caller's back-to-back send_packet loop
+ * (DEVOURER_TX_GAP_US=0) supply the modulated stimulus at beacon duty — enough
+ * for the link probe's per-frame SNR/EVM read. True 100%-duty HW continuous on
+ * Jaguar2 is a documented follow-up (needs the FIFO-safe MP setup). */
+void RtlJaguar2Device::StartContinuousTx(const devourer::TxMode &mode) {
+  if (_cont_active)
+    return;
+  SetTxMode(mode);
+
+  /* Jaguar2 HW continuous TX. Setting 0x914[18:16]=1 alone wedges the USB TX
+   * FIFO; the missing piece is rCCAonSec (0x838)=0x6d (the vendor sets it before
+   * continuous mode, ioctl_mp.c). With it, the 0x914 continuous mode radiates a
+   * 100%-duty modulated carrier from BB state (SDR-verified: flat ~18 MHz OFDM
+   * block) — no send_packet feed required (the demo idle-holds). */
+  constexpr uint16_t REG_RFMOD = 0x800;       /* bOFDMEn = bit25 */
+  constexpr uint16_t REG_CCK0_SYSTEM = 0xa00; /* [1:0]=BBmode, [3]=scramble */
+  constexpr uint16_t REG_CCAonSec = 0x838;
+  constexpr uint16_t REG_CONT_TX = 0x914;     /* [18:16] = OFDM_TX_MODE */
+
+  _cont_cca838 = _device.rtw_read32(REG_CCAonSec);
+  _device.phy_set_bb_reg(REG_CCAonSec, 0xff, 0x6d);
+  if (!(_device.rtw_read32(REG_RFMOD) & 0x2000000u))
+    _device.phy_set_bb_reg(REG_RFMOD, 0x2000000u, 1); /* OFDM block on */
+  _device.phy_set_bb_reg(REG_CCK0_SYSTEM, 0x3u, 0);   /* CCK test mode off */
+  _device.phy_set_bb_reg(REG_CCK0_SYSTEM, 0x8u, 1);   /* scrambler on */
+  _device.phy_set_bb_reg(REG_CONT_TX, (7u << 16), 0x1); /* OFDM_ContinuousTx */
+
+  _cont_active = true;
+  _logger->info("Modulated continuous TX armed @ ch{} (Jaguar2 HW 100%%-duty "
+                "carrier; idle-hold, StopContinuousTx to end)",
+                _channel.Channel);
+}
+
+void RtlJaguar2Device::StopContinuousTx() {
+  if (!_cont_active)
+    return;
+  constexpr uint16_t REG_CONT_TX = 0x914;
+  constexpr uint16_t REG_PMAC_RESET = 0x100; /* bBBResetB = bit8 */
+  constexpr uint16_t REG_CCAonSec = 0x838;
+
+  _device.phy_set_bb_reg(REG_CONT_TX, (7u << 16), 0x0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  _device.phy_set_bb_reg(REG_PMAC_RESET, 0x100u, 0x0);
+  _device.phy_set_bb_reg(REG_PMAC_RESET, 0x100u, 0x1);
+  _device.phy_set_bb_reg(REG_CCAonSec, 0xff, _cont_cca838 & 0xff);
+  _cont_active = false;
+  _logger->info("Modulated continuous TX stopped — chip restored");
+}
+
 void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
   _channel = channel;
   /* Retune the RF/BB to the new channel. set_channel_bw is a pure tune (RF18 +

@@ -66,6 +66,15 @@ public:
   void StartCwTone(uint8_t gain);
   void StopCwTone();
 
+  /* Modulated continuous TX — sibling of StartCwTone. Streams a 100%-duty
+   * modulated OFDM carrier via the vendor 0x914 continuous mode. The 0x914 bit
+   * alone wedges the USB TX FIFO; the fix is rCCAonSec (0x838)=0x6d first, after
+   * which the carrier self-radiates from BB state (no send_packet feed needed —
+   * the demo idle-holds). SDR-verified as a flat ~18 MHz OFDM block.
+   * StopContinuousTx clears the mode, pulses a BB reset, restores 0x838. */
+  void StartContinuousTx(const devourer::TxMode& mode);
+  void StopContinuousTx();
+
   /* Frame-free RX energy snapshot (see RxSense.h) — the FA/CCA/IGI values
    * dig_step samples over its ~100 ms window, plus a fresh NHM power histogram.
    * The read side of the CW tone. */
@@ -92,6 +101,11 @@ private:
   bool _cw_active = false;
   uint32_t _cw_rf00 = 0;
   uint32_t _cw_bb[4] = {0, 0, 0, 0};
+
+  /* Modulated continuous TX (StartContinuousTx/StopContinuousTx) guard + saved
+   * pre-continuous rCCAonSec (0x838) for a clean restore. */
+  bool _cont_active = false;
+  uint32_t _cont_cca838 = 0;
 
   /* DIG (dynamic initial gain) background thread — periodically runs
    * HalJaguar2::dig_step so IGI tracks the false-alarm rate for weak-signal RX. */

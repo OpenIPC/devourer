@@ -435,8 +435,8 @@ void RadioManagementModule::PHY_HandleSwChnlAndSetBW8812(
   }
 
   if (!_setChannelBw && !_swChannel && _needIQK != true) {
-    _logger->error("[{}]: _swChannel {}, _setChannelBw {}", __func__,
-                   _swChannel, _setChannelBw);
+    _logger->info("[{}]: _swChannel {}, _setChannelBw {}", __func__,
+                  _swChannel, _setChannelBw);
     return;
   }
 

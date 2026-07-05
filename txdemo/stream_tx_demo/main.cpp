@@ -321,11 +321,10 @@ int main(int argc, char **argv) {
      * it per packet is fine. */
     if (!hop_channels.empty()) {
       int ch = hop_channels[(tx_count / hop_dwell) % hop_channels.size()];
-#if defined(DEVOURER_HAVE_JAGUAR1)
-      if (hop_fast && jag)
-        jag->FastRetune(static_cast<uint8_t>(ch), /*cache_rf=*/hop_fast != 2);
+      if (hop_fast)
+        rtlDevice->FastRetune(static_cast<uint8_t>(ch),
+                              /*cache_rf=*/hop_fast != 2);
       else
-#endif
         rtlDevice->SetMonitorChannel(SelectedChannel{
             .Channel = static_cast<uint8_t>(ch),
             .ChannelOffset = 0,

@@ -908,9 +908,9 @@ int main(int argc, char **argv) {
         mode = " radiotap";
       }
       else if (hop_fast) {
-        /* IRtlDevice virtual: Jaguar1/Jaguar3 take their lean fast path (with
-         * the internal band-change fallback); generations without one run the
-         * full SetMonitorChannel default — switch_us tells the truth. */
+        /* IRtlDevice virtual: every generation implements the lean fast path
+         * (cached RF18 write + on-change constants, with the internal
+         * band-change fallback to the full set). */
         rtlDevice->FastRetune(static_cast<uint8_t>(ch),
                               /*cache_rf=*/hop_fast != 2);
         mode = " fast";

@@ -47,6 +47,16 @@ public:
   void StartRxLoop(Action_ParsedRadioPacket packetProcessor) override;
   void StopRxLoop() override { _rx_stop = true; }
   void SetMonitorChannel(SelectedChannel channel) override;
+  /* Lean frequency-hop retune (the Jaguar2 port of the Jaguar1 FastRetune —
+   * see docs/frequency-hopping.md): cached RF18 write + on-change channel
+   * constants + the RX kick, via HalJaguar2::fast_retune; falls back to the
+   * full set_channel_bw on a band change. Same concurrency model as
+   * SetMonitorChannel: no lock — the DIG thread (RX sessions only) may
+   * interleave IGI writes with the retune's IGI toggle, which is benign
+   * (single-register writes; DIG re-converges), and TX-only sessions have no
+   * concurrent register writer. cache_rf=false re-reads RF18 per hop (A/B
+   * measurement). */
+  void FastRetune(uint8_t channel, bool cache_rf) override;
   void InitWrite(SelectedChannel channel) override;
   void SetTxPower(uint8_t power) override;
   bool send_packet(const uint8_t *packet, size_t length) override;

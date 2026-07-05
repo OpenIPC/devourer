@@ -508,6 +508,21 @@ void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
                       channel.ChannelOffset);
 }
 
+void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
+  if (channel == _channel.Channel)
+    return;
+  if (_hal.fast_retune(channel, static_cast<uint8_t>(_channel.ChannelWidth),
+                       _channel.ChannelOffset, cache_rf)) {
+    _channel.Channel = channel;
+    return;
+  }
+  /* Fast path declined (band change / never tuned) — full channel set at the
+   * current bandwidth + offset. */
+  _channel.Channel = channel;
+  _hal.set_channel_bw(channel, static_cast<uint8_t>(_channel.ChannelWidth),
+                      _rfe, _channel.ChannelOffset);
+}
+
 RxEnergy RtlJaguar2Device::GetRxEnergy() {
   /* Scalar FA/CCA/IGI come from the DIG thread's cached snapshot (no USB);
    * append a fresh NHM power histogram (11AC register map). NHM's registers

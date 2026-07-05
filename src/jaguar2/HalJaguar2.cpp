@@ -442,25 +442,42 @@ void HalJaguar2::igi_toggle() {
   _device.phy_set_bb_reg(0x0e50, 0x7f, igi);
 }
 
+/* Central channel of the wide channel; `channel` is the primary 20 MHz channel
+ * and primary_ch_idx its position. 20 MHz: central = primary. 40 MHz:
+ * primary_ch_idx 1(lower)/2(upper) -> ±2. 80 MHz: 1..4 -> +6/+2/-2/-6. (The
+ * vendor's higher layer passes the central channel to
+ * config_phydm_switch_channel_* and primary_ch_idx to switch_bandwidth.) */
+uint8_t HalJaguar2::central_ch(uint8_t channel, uint8_t bw,
+                               uint8_t primary_ch_idx) {
+  if (bw == 1)
+    return static_cast<uint8_t>(primary_ch_idx == 2 ? channel - 2
+                                                    : channel + 2);
+  if (bw == 2) {
+    static const int off80[5] = {0, 6, 2, -2, -6};
+    return static_cast<uint8_t>(
+        channel + off80[primary_ch_idx <= 4 ? primary_ch_idx : 0]);
+  }
+  return channel;
+}
+
 void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
                                uint8_t primary_ch_idx) {
+  /* Any full channel set rewrites what fast_retune caches (RF18 band/BW bits,
+   * AGC/fc buckets, RF 0xBE, spur/CCK-filter regs) — invalidate; the caches
+   * only ever mirror fast-path writes. */
+  _rf18_cached = false;
+  _last_agc_bucket = -1;
+  _last_fc = 0xffffffff;
+  _last_rf_be = -1;
+  _last_df18 = -1;
+  _last_cck_key = -1;
+
   if (_variant == ChipVariant::C8821C) {
     set_channel_bw_8821c(channel, bw, rfe_type, primary_ch_idx);
+    _last_tuned_ch = channel;
     return;
   }
-  /* The RF/AGC tune to the CENTRAL channel of the wide channel; `channel` is the
-   * primary 20 MHz channel and primary_ch_idx its position. 20 MHz: central =
-   * primary. 40 MHz: primary_ch_idx 1(lower)/2(upper) -> ±2. 80 MHz: 1..4 ->
-   * +6/+2/-2/-6. (The vendor's higher layer passes the central channel to
-   * config_phydm_switch_channel_8822b and primary_ch_idx to switch_bandwidth.) */
-  uint8_t cch = channel;
-  if (bw == 1)
-    cch = static_cast<uint8_t>(primary_ch_idx == 2 ? channel - 2 : channel + 2);
-  else if (bw == 2) {
-    static const int off80[5] = {0, 6, 2, -2, -6};
-    cch = static_cast<uint8_t>(channel +
-                               off80[primary_ch_idx <= 4 ? primary_ch_idx : 0]);
-  }
+  const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
   const bool g2 = cch <= 14;
   const bool r2t2r = _ver.rf_2t2r != 0;
 
@@ -500,27 +517,11 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x412);
   }
 
-  /* RF 0xBE[17:15] per-channel phase-noise / VCO-band setting
-   * (config_phydm_switch_channel_8822b): 0 for 2.4G, else a per-5G-channel band
-   * value from the low/middle/high-band tables. Omitting it (writing 0 on 5G)
-   * leaves the 5G VCO mis-tuned so 5G RX/TX fail entirely — this was the sole
-   * gap blocking 5G. Path A only (matches the vendor). */
-  static const uint8_t low_band[15] = {0x7, 0x6, 0x6, 0x5, 0x0, 0x0, 0x7, 0xff,
-                                       0x6, 0x5, 0x0, 0x0, 0x7, 0x6, 0x6};
-  static const uint8_t middle_band[23] = {
-      0x6, 0x5, 0x0, 0x0, 0x7, 0x6, 0x6, 0xff, 0x0, 0x0, 0x7, 0x6,
-      0x6, 0x5, 0x0, 0xff, 0x7, 0x6, 0x6, 0x5, 0x0, 0x0, 0x7};
-  static const uint8_t high_band[15] = {0x5, 0x5, 0x0, 0x7, 0x7, 0x6, 0x5, 0xff,
-                                        0x0, 0x7, 0x7, 0x6, 0x5, 0x5, 0x0};
-  uint8_t rf_be = 0xff;
-  if (cch <= 14)
-    rf_be = 0x0;
-  else if (cch >= 36 && cch <= 64)
-    rf_be = low_band[(cch - 36) >> 1];
-  else if (cch >= 100 && cch <= 144)
-    rf_be = middle_band[(cch - 100) >> 1];
-  else if (cch >= 149 && cch <= 177)
-    rf_be = high_band[(cch - 149) >> 1];
+  /* RF 0xBE[17:15] per-channel phase-noise / VCO-band setting (shared with
+   * fast_retune). Omitting it (writing 0 on 5G) leaves the 5G VCO mis-tuned so
+   * 5G RX/TX fail entirely — this was the sole gap blocking 5G. Path A only
+   * (matches the vendor). */
+  const uint8_t rf_be = rf_be_for_8822b(cch);
   if (rf_be != 0xff)
     rf_set(0, 0xbe, (1u << 17) | (1u << 16) | (1u << 15), rf_be);
 
@@ -614,8 +615,181 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _device.phy_set_bb_reg(0x0808, 0xff, rx_ant | (rx_ant << 4));
   igi_toggle();
 
+  _last_tuned_ch = channel;
   _logger->info("Jaguar2: channel set ch={} bw={} (rf18=0x{:05x})", channel,
                 (int)bw, rf18);
+}
+
+/* RF 0xBE[17:15] per-5G-channel phase-noise / VCO-band value
+ * (config_phydm_switch_channel_8822b low/middle/high-band tables). */
+uint8_t HalJaguar2::rf_be_for_8822b(uint8_t cch) {
+  static const uint8_t low_band[15] = {0x7, 0x6, 0x6, 0x5, 0x0, 0x0, 0x7, 0xff,
+                                       0x6, 0x5, 0x0, 0x0, 0x7, 0x6, 0x6};
+  static const uint8_t middle_band[23] = {
+      0x6, 0x5, 0x0, 0x0, 0x7, 0x6, 0x6, 0xff, 0x0, 0x0, 0x7, 0x6,
+      0x6, 0x5, 0x0, 0xff, 0x7, 0x6, 0x6, 0x5, 0x0, 0x0, 0x7};
+  static const uint8_t high_band[15] = {0x5, 0x5, 0x0, 0x7, 0x7, 0x6, 0x5, 0xff,
+                                        0x0, 0x7, 0x7, 0x6, 0x5, 0x5, 0x0};
+  if (cch <= 14)
+    return 0x0;
+  if (cch >= 36 && cch <= 64)
+    return low_band[(cch - 36) >> 1];
+  if (cch >= 100 && cch <= 144)
+    return middle_band[(cch - 100) >> 1];
+  if (cch >= 149 && cch <= 177)
+    return high_band[(cch - 149) >> 1];
+  return 0xff;
+}
+
+bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
+                             uint8_t primary_ch_idx, bool cache_rf) {
+  if (_last_tuned_ch == 0)
+    return false; /* never tuned — unknown band, cold BW/band state */
+  const bool cur_2g = _last_tuned_ch <= 14;
+  if (cur_2g != (channel <= 14))
+    return false; /* band change needs RFE pins / band block — full path only */
+  if (channel == _last_tuned_ch)
+    return true; /* no-op hop */
+
+  const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
+  const bool g2 = cch <= 14;
+  const bool c8821 = (_variant == ChipVariant::C8821C);
+  const bool r2t2r = _ver.rf_2t2r != 0;
+
+  /* RF18: one cached full-register write replaces the full path's
+   * read-modify-write round(s) (three of them on the 8821C). One direct-window
+   * read primes the cache; the band bits ([16]/[8], band-keyed) and the BW bits
+   * ([11:10], bandwidth-keyed) ride along in the cached value. */
+  if (!cache_rf || !_rf18_cached) {
+    _rf18_cache = rf_read(0, 0x18);
+    _rf18_cached = true;
+  }
+  uint32_t rf18 = _rf18_cache & ~((1u << 18) | (1u << 17) | 0xffu);
+  rf18 |= cch;
+
+  /* Channel-keyed constants, written only when their bucket moves (the caches
+   * are invalidated by every full set, so the first fast hop writes them once).
+   * AGC table index + CFO-tracking fc share buckets across the variants; only
+   * the AGC register differs (0x958[4:0] on 8822B, 0xc1c[11:8] on 8821C). The
+   * bucket gaps (e.g. cch 65..99) match the full path, which leaves the
+   * registers untouched there. */
+  int agc_bucket = -1;
+  if (g2)
+    agc_bucket = 0;
+  else if (cch >= 36 && cch <= 64)
+    agc_bucket = 1;
+  else if (cch >= 100 && cch <= 144)
+    agc_bucket = 2;
+  else if (cch >= 149)
+    agc_bucket = 3;
+  if (agc_bucket >= 0 && agc_bucket != _last_agc_bucket) {
+    if (c8821)
+      _device.phy_set_bb_reg(0x0c1c, 0x00000F00,
+                             static_cast<uint32_t>(agc_bucket));
+    else
+      _device.phy_set_bb_reg(0x0958, 0x1f, static_cast<uint32_t>(agc_bucket));
+    _last_agc_bucket = agc_bucket;
+  }
+
+  uint32_t fc = 0xffffffff;
+  if (g2)
+    fc = 0x96a;
+  else if (cch >= 36 && cch <= 48)
+    fc = 0x494;
+  else if (cch >= 52 && cch <= 64)
+    fc = 0x453;
+  else if (cch >= 100 && cch <= 116)
+    fc = 0x452;
+  else if (cch >= 118 && cch <= 177)
+    fc = 0x412;
+  if (fc != 0xffffffff && fc != _last_fc) {
+    _device.phy_set_bb_reg(0x0860, 0x1ffe0000, fc);
+    _last_fc = fc;
+  }
+
+  if (!c8821) {
+    /* 8822B: RF 0xBE VCO band (per-5G-channel — omitting it detunes the 5G
+     * VCO), the ch144 RF 0xDF[18] flag, and the 2G spur registers. */
+    const uint8_t rf_be = rf_be_for_8822b(cch);
+    if (rf_be != 0xff && rf_be != _last_rf_be) {
+      rf_set(0, 0xbe, (1u << 17) | (1u << 16) | (1u << 15), rf_be);
+      _last_rf_be = rf_be;
+    }
+    const int df18 = (cch == 144) ? 1 : 0;
+    if (df18 != _last_df18) {
+      rf_set(0, 0xdf, (1u << 18), static_cast<uint32_t>(df18));
+      _last_df18 = df18;
+    }
+    if (cch == 144)
+      rf18 |= (1u << 17);
+    else if (cch > 144)
+      rf18 |= (1u << 18);
+    else if (cch >= 80)
+      rf18 |= (1u << 17);
+    if (g2) {
+      const int key = (cch == 14) ? 1 : 0;
+      if (key != _last_cck_key) {
+        if (cch == 14) {
+          _device.phy_set_bb_reg(0x0a24, 0xffffffff, 0x00006577);
+          _device.phy_set_bb_reg(0x0a28, 0x0000ffff, 0x0000);
+        } else {
+          _device.phy_set_bb_reg(0x0a24, 0xffffffff, 0x384f6577);
+          _device.phy_set_bb_reg(0x0a28, 0x0000ffff, 0x1525);
+        }
+        _last_cck_key = key;
+      }
+      /* Reproduce the vendor's clean 2G RF18 (the primed read can carry the
+       * spurious bits 8/16 — see set_channel_bw). */
+      rf18 &= 0x00060cffu;
+    }
+  } else {
+    /* 8821C: 5G sub-band bits use its own buckets; 2G CCK filter is ch14 vs
+     * the BB-table snapshot. The band bits [16]/[8] and the BTG/WLG/WLA RF-set
+     * are band-keyed (switch_band) and stay untouched. */
+    if (!g2) {
+      if (cch >= 100 && cch <= 140)
+        rf18 |= (1u << 17);
+      else if (cch > 140)
+        rf18 |= (1u << 18);
+    } else {
+      const int key = (cch == 14) ? 1 : 0;
+      if (key != _last_cck_key) {
+        if (cch == 14) {
+          _device.phy_set_bb_reg(0x0a24, 0xffffffff, 0x0000b81c);
+          _device.phy_set_bb_reg(0x0a28, 0x0000ffff, 0x0000);
+          _device.phy_set_bb_reg(0x0aac, 0xffffffff, 0x00003667);
+        } else if (_cck_saved_8821c) {
+          _device.phy_set_bb_reg(0x0a24, 0xffffffff, _cck_a24_8821c);
+          _device.phy_set_bb_reg(0x0a28, 0x0000ffff, _cck_a28_8821c & 0xffff);
+          _device.phy_set_bb_reg(0x0aac, 0xffffffff, _cck_aac_8821c);
+        }
+        _last_cck_key = key;
+      }
+    }
+  }
+
+  rf_write(0, 0x18, rf18);
+  if (!c8821 && r2t2r)
+    rf_write(1, 0x18, rf18);
+  _rf18_cache = rf18; /* refresh so the next hop merges into what we wrote */
+
+  /* Per-hop RX kick — the vendor switch_channel tail: 8822B RF read-error
+   * toggle + RX-path toggle (leave the RX dead-zone), then the IGI toggle on
+   * both variants. */
+  if (!c8821) {
+    rf_set(0, 0xb8, (1u << 19), 0);
+    rf_set(0, 0xb8, (1u << 19), 1);
+    const uint8_t rx_ant = r2t2r ? 0x3 : 0x1;
+    _device.phy_set_bb_reg(0x0808, 0xff, 0x0);
+    _device.phy_set_bb_reg(0x0808, 0xff,
+                           static_cast<uint32_t>(rx_ant | (rx_ant << 4)));
+  }
+  igi_toggle();
+
+  _last_tuned_ch = channel;
+  _logger->debug("Jaguar2: fast retune -> ch {} (central {}, RF18=0x{:05x})",
+                 channel, cch, rf18);
+  return true;
 }
 
 void HalJaguar2::config_trx_mode() {
@@ -787,14 +961,7 @@ void HalJaguar2::switch_rf_set_8821c(uint8_t rf_set) {
  * routed by switch_rf_set (BTG/WLG). Covers 2.4G and 5G at 20/40/80 MHz. */
 void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
                                       uint8_t rfe_raw, uint8_t primary_ch_idx) {
-  uint8_t cch = channel;
-  if (bw == 1)
-    cch = static_cast<uint8_t>(primary_ch_idx == 2 ? channel - 2 : channel + 2);
-  else if (bw == 2) {
-    static const int off80[5] = {0, 6, 2, -2, -6};
-    cch = static_cast<uint8_t>(channel +
-                               off80[primary_ch_idx <= 4 ? primary_ch_idx : 0]);
-  }
+  const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
   const bool g2 = cch <= 14;
   /* rfe_type_expand -> BTG (else WLG) per config_phydm_parameter_init_8821c. */
   const bool btg = rfe_raw == 2 || rfe_raw == 4 || rfe_raw == 7 ||

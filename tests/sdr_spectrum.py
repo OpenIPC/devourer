@@ -83,6 +83,8 @@ def main() -> int:
     ap.add_argument("--args", default="type=b200")
     ap.add_argument("--duration", type=float, default=1.5)
     ap.add_argument("--label", default="")
+    ap.add_argument("--dump", default=None,
+                    help="write freq_MHz,psd_dB CSV (for the docs spectrum diagram)")
     args = ap.parse_args()
 
     nsamp = max(1 << 16, int(args.rate * args.duration))
@@ -111,6 +113,12 @@ def main() -> int:
     print(f"  {line}")
     print(f"  peakiness={peakiness:.1f} dB  occ_bw={occ_mhz:.1f} MHz  "
           f"(tone: high peakiness/low occ; modulated: low peakiness/wide occ)")
+    if args.dump:
+        with open(args.dump, "w") as fh:
+            fh.write("freq_mhz,psd_db\n")
+            for f, p in zip(freqs, psd):
+                fh.write(f"{(args.freq + f) / 1e6:.4f},{p:.3f}\n")
+        print(f"  wrote {args.dump}")
     return 0
 
 

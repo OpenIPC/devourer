@@ -304,6 +304,11 @@ sandbox; and [`docs/fused-fec.md`](docs/fused-fec.md) — the cross-layer
 (PHY-MCS ⊕ sub-block-integrity ⊕ outer erasure) FEC stack the link's per-layer
 quality SLA is stated against.
 
+New to the low-level RF machinery? [`docs/rf-primer.md`](docs/rf-primer.md) is a
+visual primer — four short animations (the OFDM channel, the constellation, a
+tone vs a modulated carrier, and AGC saturation) that make the rest of the docs
+click.
+
 ### Startup time
 
 Devourer reaches ready-to-RX/TX faster than the `aircrack-ng/88XXau`

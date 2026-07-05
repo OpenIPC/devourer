@@ -437,7 +437,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
    * — at the honest cost of stalling this send by the retune latency. Done
    * before the 5 GHz CCK clamp below so the clamp keys off the new channel. */
   if (radiotap_channel > 0 && radiotap_channel != _channel.Channel) {
-    FastRetune(static_cast<uint8_t>(radiotap_channel));
+    FastRetune(static_cast<uint8_t>(radiotap_channel), /*cache_rf=*/true);
   }
 
   /* The radiotap carried no rate → apply the runtime TX-mode default set via

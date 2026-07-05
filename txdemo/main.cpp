@@ -907,12 +907,14 @@ int main(int argc, char **argv) {
                                           sizeof(beacon_frame) - 10);
         mode = " radiotap";
       }
-#if defined(DEVOURER_HAVE_JAGUAR1)
-      else if (hop_fast && jag) {
-        jag->FastRetune(static_cast<uint8_t>(ch), /*cache_rf=*/hop_fast != 2);
+      else if (hop_fast) {
+        /* IRtlDevice virtual: Jaguar1/Jaguar3 take their lean fast path (with
+         * the internal band-change fallback); generations without one run the
+         * full SetMonitorChannel default — switch_us tells the truth. */
+        rtlDevice->FastRetune(static_cast<uint8_t>(ch),
+                              /*cache_rf=*/hop_fast != 2);
         mode = " fast";
       }
-#endif
       else {
         rtlDevice->SetMonitorChannel(SelectedChannel{
             .Channel = static_cast<uint8_t>(ch),

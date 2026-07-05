@@ -198,7 +198,9 @@ constexpr uint8_t BIT_FWEN = 0x80;
 constexpr uint8_t BIT_AUTO_INIT_LLT_V1 = 0x01;
 constexpr uint8_t BLK_DESC_NUM = 0x3;
 
-/* fifo allocation — TX_FIFO/page numbers identical to 8822C */
+/* fifo allocation — 8822B/8822C TX_FIFO/page numbers. The 8821C has a
+ * physically smaller FIFO (65536 TX / 16384 RX) and different page counts;
+ * those are selected per-variant via fifo_params() below. */
 constexpr uint32_t TX_FIFO_SIZE = 262144;
 constexpr uint32_t RX_FIFO_SIZE = 24576;
 constexpr uint32_t TX_PAGE_SHIFT = 7; /* 128B pages */
@@ -211,6 +213,21 @@ constexpr uint16_t RSVD_PG_CPU_INSTRUCTION_NUM = 0;
 constexpr uint16_t RSVD_PG_FW_TXBUF_NUM = 4;
 constexpr uint16_t RSVD_PG_CSIBUF_NUM = 50;
 constexpr uint16_t PG_HQ = 64, PG_NQ = 64, PG_LQ = 64, PG_EXQ = 0, PG_GAP = 1;
+
+/* Per-variant FIFO/page allocation. Defaults above are 8822B/8822C; 8821C
+ * values are from reference/8821cu halmac_8821c_cfg.h (FIFO sizes) +
+ * halmac_init_8821c.c (RSVD_PG_CSIBUF_NUM=0, HALMAC_PG_NUM_3BULKOUT_8821C =
+ * hq/nq/lq/exq/gap 16/16/16/0/1). */
+struct FifoParams {
+  uint32_t tx_fifo_size, rx_fifo_size;
+  uint16_t rsvd_csibuf_num, pg_hq, pg_nq, pg_lq, pg_exq, pg_gap;
+};
+constexpr FifoParams fifo_params(ChipVariant v) {
+  return v == ChipVariant::C8821C
+             ? FifoParams{65536, 16384, 0, 16, 16, 16, 0, 1}
+             : FifoParams{TX_FIFO_SIZE, RX_FIFO_SIZE, RSVD_PG_CSIBUF_NUM,
+                          PG_HQ, PG_NQ, PG_LQ, PG_EXQ, PG_GAP};
+}
 
 bool is_5m(ChannelWidth_t bw) {
   return bw == ChannelWidth_t::CHANNEL_WIDTH_5;
@@ -323,29 +340,30 @@ bool HalmacJaguar2MacInit::init_trx_cfg(bool set_bcn_boundary) {
 }
 
 bool HalmacJaguar2MacInit::priority_queue_cfg() {
-  const uint16_t tx_fifo_pg_num = TX_FIFO_SIZE >> TX_PAGE_SHIFT; /* 2048 */
+  const FifoParams fp = fifo_params(_variant);
+  const uint16_t tx_fifo_pg_num = fp.tx_fifo_size >> TX_PAGE_SHIFT; /* 2048 */
   const uint16_t rsvd_pg_num =
       RSVD_PG_DRV_NUM + RSVD_PG_H2C_EXTRAINFO_NUM + RSVD_PG_H2C_STATICINFO_NUM +
       RSVD_PG_H2CQ_NUM + RSVD_PG_CPU_INSTRUCTION_NUM + RSVD_PG_FW_TXBUF_NUM +
-      RSVD_PG_CSIBUF_NUM; /* 110 */
+      fp.rsvd_csibuf_num; /* 110 */
   const uint16_t acq_pg_num = tx_fifo_pg_num - rsvd_pg_num; /* 1938 */
   const uint16_t rsvd_boundary = acq_pg_num;
   _rsvd_boundary = rsvd_boundary;
 
   uint16_t cur = tx_fifo_pg_num;
-  cur -= RSVD_PG_CSIBUF_NUM;
+  cur -= fp.rsvd_csibuf_num;
   const uint16_t rsvd_csibuf_addr = cur;
   cur -= RSVD_PG_FW_TXBUF_NUM;
   cur -= RSVD_PG_CPU_INSTRUCTION_NUM;
   cur -= RSVD_PG_H2CQ_NUM;
 
   const uint16_t pub_pg =
-      acq_pg_num - PG_HQ - PG_NQ - PG_LQ - PG_EXQ - PG_GAP;
+      acq_pg_num - fp.pg_hq - fp.pg_nq - fp.pg_lq - fp.pg_exq - fp.pg_gap;
 
-  _device.rtw_write16(REG_FIFOPAGE_INFO_1, PG_HQ);
-  _device.rtw_write16(REG_FIFOPAGE_INFO_2, PG_LQ);
-  _device.rtw_write16(REG_FIFOPAGE_INFO_3, PG_NQ);
-  _device.rtw_write16(REG_FIFOPAGE_INFO_4, PG_EXQ);
+  _device.rtw_write16(REG_FIFOPAGE_INFO_1, fp.pg_hq);
+  _device.rtw_write16(REG_FIFOPAGE_INFO_2, fp.pg_lq);
+  _device.rtw_write16(REG_FIFOPAGE_INFO_3, fp.pg_nq);
+  _device.rtw_write16(REG_FIFOPAGE_INFO_4, fp.pg_exq);
   _device.rtw_write16(REG_FIFOPAGE_INFO_5, pub_pg);
   _device.rtw_write32(REG_RQPN_CTRL_2,
                       _device.rtw_read32(REG_RQPN_CTRL_2) | (1u << 31));
@@ -360,7 +378,7 @@ bool HalmacJaguar2MacInit::priority_queue_cfg() {
     _device.rtw_write16(REG_BCNQ1_BDNY_V1, rsvd_boundary);
   }
 
-  _device.rtw_write32(REG_RXFF_BNDY, RX_FIFO_SIZE - C2H_PKT_BUF - 1);
+  _device.rtw_write32(REG_RXFF_BNDY, fp.rx_fifo_size - C2H_PKT_BUF - 1);
 
   uint8_t v8 = _device.rtw_read8(REG_AUTO_LLT_V1);
   v8 &= ~(0xf << 4);
@@ -386,8 +404,9 @@ bool HalmacJaguar2MacInit::priority_queue_cfg() {
 }
 
 void HalmacJaguar2MacInit::init_h2c() {
-  const uint16_t tx_fifo_pg_num = TX_FIFO_SIZE >> TX_PAGE_SHIFT;
-  uint16_t cur = tx_fifo_pg_num - RSVD_PG_CSIBUF_NUM - RSVD_PG_FW_TXBUF_NUM -
+  const FifoParams fp = fifo_params(_variant);
+  const uint16_t tx_fifo_pg_num = fp.tx_fifo_size >> TX_PAGE_SHIFT;
+  uint16_t cur = tx_fifo_pg_num - fp.rsvd_csibuf_num - RSVD_PG_FW_TXBUF_NUM -
                  RSVD_PG_CPU_INSTRUCTION_NUM - RSVD_PG_H2CQ_NUM;
   const uint32_t h2cq_addr = static_cast<uint32_t>(cur) << TX_PAGE_SHIFT;
   const uint32_t h2cq_size = static_cast<uint32_t>(RSVD_PG_H2CQ_NUM)
@@ -431,8 +450,14 @@ void HalmacJaguar2MacInit::init_protocol_cfg() {
   _device.rtw_write8(REG_TX_HANG_CTRL,
                      _device.rtw_read8(REG_TX_HANG_CTRL) | BIT_EN_EOF_V1);
 
+  /* 8821C caps aggregation at 0x10 packets (halmac_init_8821c.c); 8822B at
+   * 0x20 (halmac_init_8822b.c). */
+  const uint32_t max_agg =
+      _variant == ChipVariant::C8821C ? 0x10u : WLAN_MAX_AGG_PKT_LIMIT;
+  const uint32_t rts_max_agg =
+      _variant == ChipVariant::C8821C ? 0x10u : WLAN_RTS_MAX_AGG_PKT_LIMIT;
   uint32_t v = WLAN_RTS_LEN_TH | (WLAN_RTS_TX_TIME_TH << 8) |
-               (WLAN_MAX_AGG_PKT_LIMIT << 16) | (WLAN_RTS_MAX_AGG_PKT_LIMIT << 24);
+               (max_agg << 16) | (rts_max_agg << 24);
   _device.rtw_write32(REG_PROT_MODE_CTRL, v);
   _device.rtw_write16(REG_BAR_MODE_CTRL + 2,
                       static_cast<uint16_t>(WLAN_BAR_RETRY_LIMIT |

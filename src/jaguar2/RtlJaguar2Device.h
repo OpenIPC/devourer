@@ -56,12 +56,13 @@ public:
   void ClearTxMode() override;
 
   /* Realtek MP single-tone (CW carrier) — radiate a bare RF local-oscillator
-   * carrier at the tuned channel center. Path A; RTL8822BU (2T2R). Ported from
-   * the vendor hal_mpt_SetSingleToneTx() 8822B branch: OFDM/CCK modulators off,
-   * RFE pinmux + RFE-inverse forced to TX, RF path A to TX mode at `gain`
-   * (RF 0x00[4:0]) with the LO enabled. StopCwTone() restores the state saved at
-   * start and disables the LO. Idempotent. A controllable narrowband interferer
-   * / MP tone source (see the Jaguar-1 sibling in RtlJaguarDevice). */
+   * carrier at the tuned channel center. Path A; both Jaguar2 variants, per the
+   * vendor hal_mpt_SetSingleToneTx() branches: OFDM/CCK modulators off, RF path A
+   * to TX mode at `gain` (RF 0x00[4:0]) with the LO enabled. 8822B forces the
+   * RFE pinmux (0x77777777) + RFE-inverse; 8821C uses its own path-A pinmux
+   * (0xCB0[0xF0F0]=0x707) and gates the LO via RF 0x75[16] on 2.4 GHz (BTG) /
+   * RF 0x58[1] on 5 GHz. StopCwTone() restores the saved state and disables the
+   * LO. Idempotent. A controllable narrowband interferer / MP tone source. */
   void StartCwTone(uint8_t gain);
   void StopCwTone();
 

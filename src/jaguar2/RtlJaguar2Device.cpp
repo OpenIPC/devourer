@@ -493,6 +493,31 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
                     : (bwidth == CHANNEL_WIDTH_80) ? 2
                                                    : 0;
   uint8_t rate_id = vht ? 9 : 8;
+
+  /* Sub-channel (rtl8821c_sc_mapping): when the frame BW is narrower than the
+   * tuned channel BW, tell the PHY which 20/40 MHz slice it occupies so the
+   * frame lands on the primary rather than the block centre. Same-BW -> 0
+   * (DONT_CARE), byte-identical to the prior behaviour. _channel.ChannelOffset
+   * is the primary_ch_idx (40 MHz: 1=lower/2=upper; 80 MHz: 1..4 lowest..
+   * highest, per off80 = +6/+2/-2/-6). VHT_DATA_SC_* codes from rtw_rf.h. */
+  uint8_t data_sc = 0;
+  {
+    const uint8_t pidx = _channel.ChannelOffset;
+    if (_channel.ChannelWidth == CHANNEL_WIDTH_80) {
+      if (bwidth == CHANNEL_WIDTH_40)
+        data_sc = (pidx <= 2) ? 10 : 9; /* 40 LOWER / UPPER of 80 */
+      else if (bwidth == CHANNEL_WIDTH_20)
+        data_sc = (pidx == 1)   ? 4      /* 20 LOWEST  */
+                  : (pidx == 2) ? 2      /* 20 LOWER   */
+                  : (pidx == 3) ? 1      /* 20 UPPER   */
+                  : (pidx == 4) ? 3      /* 20 UPPERST */
+                                : 0;
+    } else if (_channel.ChannelWidth == CHANNEL_WIDTH_40 &&
+               bwidth == CHANNEL_WIDTH_20) {
+      data_sc = (pidx == 2) ? 1 : (pidx == 1) ? 2 : 0; /* 20 UPPER/LOWER of 40 */
+    }
+  }
+
   const uint8_t *dot11 = packet + radiotap_length;
   bool bmc = frame_len >= 6 && (dot11[4] & 0x01);
 
@@ -515,7 +540,7 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
   jaguar2::fill_data_tx_desc_8822b(
       usb_frame.data(), static_cast<uint16_t>(frame_len),
       MRateToHwRate(fixed_rate), rate_id, bw_desc, sgi != 0, ldpc != 0, stbc,
-      bmc, static_cast<uint8_t>(hdrlen >> 1), ndpa);
+      bmc, static_cast<uint8_t>(hdrlen >> 1), ndpa, data_sc);
   std::memcpy(usb_frame.data() + jaguar2::TXDESC_SIZE_8822B, dot11, frame_len);
 
   int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),

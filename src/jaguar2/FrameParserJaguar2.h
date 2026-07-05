@@ -38,6 +38,7 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_CHK_EN_8822B(d, v)     SET_BITS_TO_LE_4BYTE((d) + 0x0C, 14, 1, v)
 #define SET_TX_DESC_DISDATAFB_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x0C, 10, 1, v)
 #define SET_TX_DESC_DATARATE_8822B(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x10, 0, 7, v)
+#define SET_TX_DESC_DATA_SC_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 0, 4, v)
 #define SET_TX_DESC_DATA_SHORT_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x14, 4, 1, v)
 #define SET_TX_DESC_DATA_BW_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 5, 2, v)
 #define SET_TX_DESC_DATA_LDPC_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 7, 1, v)
@@ -90,7 +91,7 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
                                     uint8_t rate_hw, uint8_t rate_id, uint8_t bw,
                                     bool short_gi, bool ldpc, uint8_t stbc,
                                     bool bmc = false, uint8_t wheader_len = 12,
-                                    bool ndpa = false) {
+                                    bool ndpa = false, uint8_t data_sc = 0) {
   SET_TX_DESC_TXPKTSIZE_8822B(d, pkt_size);
   SET_TX_DESC_OFFSET_8822B(d, static_cast<uint32_t>(TXDESC_SIZE_8822B));
   SET_TX_DESC_LS_8822B(d, 1);
@@ -107,6 +108,11 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
   SET_TX_DESC_SW_DEFINE_8822B(d, 1);
   SET_TX_DESC_DATARATE_8822B(d, rate_hw);
   SET_TX_DESC_DATA_BW_8822B(d, bw);
+  /* Sub-channel: which 20/40 MHz slice a narrower-than-tuned frame occupies
+   * (VHT_DATA_SC_*, rtl8821c_sc_mapping). 0 = DONT_CARE (frame BW == channel
+   * BW, the common case). Non-zero places e.g. a 40-in-80 frame on the primary
+   * lower-40 instead of the block centre. */
+  SET_TX_DESC_DATA_SC_8822B(d, data_sc);
   SET_TX_DESC_DATA_SHORT_8822B(d, short_gi ? 1 : 0);
   SET_TX_DESC_DATA_LDPC_8822B(d, ldpc ? 1 : 0);
   SET_TX_DESC_DATA_STBC_8822B(d, stbc & 0x3);

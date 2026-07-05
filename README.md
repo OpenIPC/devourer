@@ -48,8 +48,8 @@ varies run-to-run (bracketed = best clean reading).
 
 | Part                          | RF / streams      | 2.4 GHz (ch6) | UNII-1 (ch36) | UNII-2/3 (ch149) | Notes                                       |
 | ----------------------------- | ----------------- | ------------- | ------------- | ---------------- | ------------------------------------------- |
-| **RTL8812AU**                 | 2T2R              | 56            | 52            | 52               | `0bda:8812`; reference part |
-| **RTL8811AU**                 | 1T1R              | mirrors 8812  | mirrors 8812  | mirrors 8812     | 1T1R cut of 8812 silicon; rides the 8812 code path (`RFType=RF_TYPE_1T1R` from `REG_SYS_CFG` bit 27). Not benchmarked |
+| **RTL8812AU**                 | 2T2R              | 56            | 52            | 52               | [CHANEVE CHW50L](https://www.aliexpress.com/item/4000762461362.html) (`0bda:8812`) |
+| **RTL8811AU**                 | 1T1R              | —             | —             | —                | 1T1R cut of 8812 silicon; rides the 8812 code path (`RFType=RF_TYPE_1T1R` from `REG_SYS_CFG` bit 27). Not benchmarked |
 | **RTL8814AU**                 | 4T4R, 3-SS max    | 65            | †(32)         | †(32)            | `0bda:8813`; tested on COMFAST CF-938AC (2 ext antennas) and CF-960AC (4 internal) — effective RX-diversity branches differ (N_eff ≈ 3.8 vs 2.6) despite identical silicon, see [`docs/measuring-spatial-diversity.md`](docs/measuring-spatial-diversity.md) |
 | **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | TP-Link Archer T2U Plus (`2357:0120`) |
 | **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | TP-Link Archer T3U (`2357:012d`) |

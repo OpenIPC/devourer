@@ -89,7 +89,9 @@ link reveal itself on demand.
   whole 20/40/80 MHz and loads the PA like real traffic, it is the *realistic*
   stimulus — what you want for spectral-occupancy, power, and thermal-duty
   characterisation. It idle-holds the carrier until stopped, then restores the
-  chip. (SDR spectrum-shape check: `tests/sdr_spectrum.py` distinguishes a
+  chip. 100% duty is the worst-case PA heat, so it is a debug / characterisation
+  stimulus — not for sustained use; pair it with the thermal telemetry and watch
+  the drift. (SDR spectrum-shape check: `tests/sdr_spectrum.py` distinguishes a
   full-channel modulated block from a bare tone by occupied bandwidth.)
 
 The two are complementary: the tone probes *one frequency* narrowly; the modulated
@@ -102,6 +104,14 @@ a stimulus and a sensor into an operating-point recommendation. One adapter emit
 a modulated feed and **sweeps a lever** in steps (marking each step); the ground
 station reads its per-step SNR and NHM; the analyzer aligns the two by time and
 reports the **margin-vs-lever curve** plus the operating point that meets a target.
+
+The probe deliberately uses a **beacon feed** (fresh, gap-separated frames), not
+the 100%-duty continuous carrier: the receiver needs decodable per-frame SNR at
+each step, and the continuous carrier — a spectral/thermal stimulus — is not a
+clean frame source (its looped payload isn't FCS-valid, and a gapless carrier
+offers no frame boundaries to lock onto). Stimulus and probe are thus decoupled:
+the continuous carrier characterises the spectrum/power/thermal; the beacon feed
+carries the per-frame link quality.
 
 - **Power↔margin** — sweep transmit power, read the ground SNR at each level, and
   pick the *minimum power that clears the margin*. This is the energy-min reflex

@@ -243,7 +243,9 @@ Common to both demos:
 - `DEVOURER_CONT_TX=1` — the modulated sibling of the CW tone: a true 100%-duty
   modulated OFDM carrier (Realtek's MP hardware continuous-TX mode) on all three
   generations, instead of a bare tone. A full-channel active stimulus for
-  spectral / power / thermal characterisation and the active-link probe. See
+  spectral / power / thermal characterisation and the active-link probe. 100% duty
+  is the worst-case PA heat — a debug/characterisation knob, not for sustained
+  use. See
   [`docs/adaptive-link-building-blocks.md`](docs/adaptive-link-building-blocks.md).
 
 On-air TX throughput vs wfb-ng (SDR-verified parity; how to reproduce) is

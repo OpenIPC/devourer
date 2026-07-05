@@ -13,8 +13,13 @@ into the emitter step window it falls in.
 
 For each swept level it reports the ground's mean SNR / NHM-peak, then picks the
 operating point: the *minimum* TX-power index whose ground SNR clears
---target-snr (the energy-min reflex: least power that holds the margin). The
-same harness serves the MCS axis when the emitter steps MCS instead of power.
+--target-snr (the energy-min reflex: least power that holds the margin).
+
+The same analyzer serves the MCS-headroom axis: when the emitter steps its rate
+(DEVOURER_TX_MCS_SWEEP) it prints <devourer-contx>mcs=<spec> markers instead, and
+this reports per-MCS ground SNR + frame delivery and picks the *highest* rate that
+still clears the floor (the highest modulation the link holds). The axis is auto-
+detected from whichever marker the emitter log carries.
 
     tests/link_probe.py --emit emit.log --ground ground.log --target-snr 20
 """
@@ -26,9 +31,11 @@ import statistics
 import sys
 
 TS = re.compile(r"^(\d+\.\d+)\s+(.*)$")
-STEP = re.compile(r"<devourer-txpwr>index=(\d+)")
+STEP_PWR = re.compile(r"<devourer-txpwr>index=(\d+)")
+STEP_MCS = re.compile(r"<devourer-contx>mcs=(\S+)")
 ENERGY = re.compile(r"<devourer-energy>(.*)")
 NHM = re.compile(r"<devourer-nhm>.*peak=(\d+)")
+THERMAL = re.compile(r"<devourer-thermal>raw=(\d+)")
 KV = re.compile(r"(\w+)=(-?\d+)")
 
 
@@ -56,15 +63,21 @@ def main() -> int:
     emit = read_stamped(args.emit)
     ground = read_stamped(args.ground)
 
-    # Build step windows: [(t_start, index), ...] from the emitter markers.
-    steps = []
+    # Auto-detect the swept axis from the emitter markers.
+    steps = []           # [(t_start, label), ...]
+    axis = None
     for t, text in emit:
-        m = STEP.search(text)
-        if m:
-            steps.append((t, int(m.group(1))))
+        mp = STEP_PWR.search(text)
+        mm = STEP_MCS.search(text)
+        if mp:
+            axis = axis or "power"
+            steps.append((t, mp.group(1)))
+        elif mm:
+            axis = axis or "mcs"
+            steps.append((t, mm.group(1)))
     if not steps:
-        print("no <devourer-txpwr>index= markers in emitter log — was the power "
-              "ramp (DEVOURER_TX_PWR_START/STOP/STEP) set?", file=sys.stderr)
+        print("no step markers in emitter log — set DEVOURER_TX_PWR_START/STOP/STEP "
+              "(power axis) or DEVOURER_TX_MCS_SWEEP (MCS axis)", file=sys.stderr)
         return 1
 
     # Ground samples: (t, snr_mean, frames, nhm_peak).
@@ -80,38 +93,66 @@ def main() -> int:
             kv = dict((k, int(v)) for k, v in KV.findall(me.group(1)))
             samples.append((t, kv.get("snr_mean"), kv.get("frames", 0), last_nhm))
 
-    # Assign each ground sample to the step window it falls in.
-    rows = []
-    for i, (t0, idx) in enumerate(steps):
+    # Assign each ground sample to the step window it falls in, accumulating by
+    # label (the sweep may cycle through the levels more than once).
+    agg = {}             # label -> {snr:[], nhm:[], frames:int}
+    order = []           # unique labels in first-seen (sweep) order
+    for i, (t0, label) in enumerate(steps):
         t1 = steps[i + 1][0] if i + 1 < len(steps) else float("inf")
-        snrs = [s for (t, s, fr, _) in samples
-                if t0 + args.settle_ms / 1000.0 <= t < t1 and s is not None and fr]
-        nhms = [n for (t, s, fr, n) in samples
-                if t0 + args.settle_ms / 1000.0 <= t < t1 and n is not None]
-        if not snrs and not nhms:
+        win = [(s, fr, n) for (t, s, fr, n) in samples
+               if t0 + args.settle_ms / 1000.0 <= t < t1]
+        if label not in agg:
+            agg[label] = {"snr": [], "nhm": [], "frames": 0}
+            order.append(label)
+        agg[label]["snr"] += [s for (s, fr, n) in win if s is not None and fr]
+        agg[label]["nhm"] += [n for (s, fr, n) in win if n is not None]
+        agg[label]["frames"] += sum(fr for (s, fr, n) in win if fr)
+
+    rows = []            # (label, snr, nhm, frames, n) in sweep order
+    for label in order:
+        a = agg[label]
+        if not a["snr"] and not a["nhm"]:
             continue
-        rows.append((idx,
-                     statistics.mean(snrs) if snrs else None,
-                     statistics.median(nhms) if nhms else None,
-                     len(snrs)))
+        rows.append((label,
+                     statistics.mean(a["snr"]) if a["snr"] else None,
+                     statistics.median(a["nhm"]) if a["nhm"] else None,
+                     a["frames"], len(a["snr"])))
 
     if not rows:
         print("no ground samples aligned to any step window — check that both "
               "sides ran concurrently and the RX heard the emitter", file=sys.stderr)
         return 1
 
-    print(f"# link probe: {len(rows)} levels, {len(samples)} ground samples")
-    print(f"# {'index':>5} {'gnd_SNR':>8} {'nhm_peak':>8} {'n':>4}")
-    for idx, snr, nhm, n in rows:
+    col = "index" if axis == "power" else "MCS"
+    print(f"# link probe ({axis} axis): {len(rows)} levels, {len(samples)} "
+          f"ground samples")
+    print(f"# {col:>8} {'gnd_SNR':>8} {'frames':>7} {'nhm_peak':>8} {'n':>4}")
+    for label, snr, nhm, frames, n in rows:
         s = f"{snr:6.1f}" if snr is not None else "   -  "
         nn = f"{nhm}" if nhm is not None else "-"
-        print(f"  {idx:5d} {s:>8} {nn:>8} {n:>4}")
+        print(f"  {label:>8} {s:>8} {frames:>7} {nn:>8} {n:>4}")
 
-    if args.target_snr is not None:
-        ok = [(idx, snr) for idx, snr, _, _ in rows
-              if snr is not None and snr >= args.target_snr]
+    # Thermal-budget overlay: the emitter's PA thermal-meter delta over the sweep
+    # (DEVOURER_THERMAL_POLL_MS on the emitter). Continuous stepping at full duty
+    # is the worst-case heat; this reports how far the PA drifted, bounding the
+    # power/duty a controller may sustain (the drone's local safety override).
+    raws = [int(m.group(1)) for _, text in emit
+            for m in [THERMAL.search(text)] if m]
+    if raws:
+        print(f"\n# PA thermal (emitter raw meter): {raws[0]} -> {raws[-1]} "
+              f"units over the sweep (range {min(raws)}..{max(raws)}, "
+              f"+{max(raws) - min(raws)}); ~1.5-2 C/unit. Bounds the sustainable "
+              f"power/duty.")
+
+    if args.target_snr is None:
+        return 0
+
+    ok = [(label, snr) for label, snr, _, _, _ in rows
+          if snr is not None and snr >= args.target_snr]
+    if axis == "power":
+        # Cheapest power that clears the floor (levels are numeric indices).
         if ok:
-            best = min(ok, key=lambda r: r[0])
+            best = min(ok, key=lambda r: int(r[0]))
             print(f"\nRECOMMEND: TX-power index {best[0]} — the minimum that clears "
                   f"the {args.target_snr:.0f} dB SNR floor (ground SNR "
                   f"{best[1]:.1f} dB). Energy-min: least power that holds margin.")
@@ -120,6 +161,17 @@ def main() -> int:
             print(f"\nRECOMMEND: no level clears {args.target_snr:.0f} dB — best is "
                   f"index {top[0]} at {top[1]:.1f} dB. Link too weak for this rate; "
                   f"drop MCS or raise power ceiling.")
+    else:
+        # Highest MCS that still holds the floor (list order = ascending rate).
+        held = [label for (label, snr, _, frames, _) in rows
+                if snr is not None and snr >= args.target_snr and frames]
+        if held:
+            print(f"\nRECOMMEND: {held[-1]} — the highest swept rate whose ground "
+                  f"SNR clears the {args.target_snr:.0f} dB floor. Energy-min: ride "
+                  f"the fastest modulation the link holds.")
+        else:
+            print(f"\nRECOMMEND: no swept rate clears {args.target_snr:.0f} dB — the "
+                  f"link can't hold these MCS; sweep lower rates or raise power.")
     return 0
 
 

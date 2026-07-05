@@ -40,8 +40,8 @@ STREAM=$(grep -c "<devourer-stream>" "$LOG")
 COMPL=$(grep -c "RX: completion" "$LOG")
 echo "--- counts: C8821C-construct=$DEV  stream=$STREAM  rx-completions=$COMPL ---"
 if [ "$DEV" -ge 1 ]; then
-    echo "M1 PASS: CF-811AC dispatches to RtlJaguar2Device C8821C"
+    echo "PASS: CF-811AC dispatches to RtlJaguar2Device C8821C"
 else
-    echo "M1 FAIL: did not construct C8821C — full log:"; tail -30 "$LOG"
+    echo "FAIL: did not construct C8821C — full log:"; tail -30 "$LOG"
 fi
 echo "(full log: $LOG)"

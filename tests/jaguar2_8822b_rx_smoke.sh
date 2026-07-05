@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M0 regression gate: prove the ChipVariant strategy-dispatch refactor did NOT
+# Regression gate: prove the ChipVariant strategy-dispatch refactor did NOT
 # regress the hardware-validated RTL8822B path. Runs devourer RX on the connected
 # TP-Link Archer T3U (2357:012d, chip 8822B) and checks it still (a) constructs
 # RtlJaguar2Device and (b) decodes live 802.11 frames.

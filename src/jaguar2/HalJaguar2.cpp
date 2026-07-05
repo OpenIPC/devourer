@@ -784,8 +784,7 @@ void HalJaguar2::switch_rf_set_8821c(uint8_t rf_set) {
 
 /* config_phydm_switch_band/channel/bandwidth_8821c, transcribed from
  * reference/8821cu phydm_hal_api8821c.c. 1T1R, RF path A; the 2.4G RX path is
- * routed by switch_rf_set (BTG/WLG). Focused on 2.4G/20MHz (the current bring-up
- * target); 5G and 40/80 tune are handled for completeness (M8 validates them). */
+ * routed by switch_rf_set (BTG/WLG). Covers 2.4G and 5G at 20/40/80 MHz. */
 void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
                                       uint8_t rfe_raw, uint8_t primary_ch_idx) {
   uint8_t cch = channel;

@@ -11,12 +11,10 @@
 
 namespace jaguar2 {
 
-/* HalJaguar2 — RTL8822B (Jaguar2) chip bring-up. Jaguar2 sibling of
- * src/jaguar3/HalJaguar3, but single-chip and using the HalMAC power sequence +
- * the shared check_positive PHY-table walker.
- *
- * Milestone status: M2 — power-on/off (halmac 8822b pwr_seq) + chip-version.
- * Firmware DLFW, MAC/BB/RF init and calibration are added in later milestones. */
+/* HalJaguar2 — RTL8822B / RTL8821C (Jaguar2) chip bring-up. Jaguar2 sibling of
+ * src/jaguar3/HalJaguar3, using the HalMAC power sequence + the shared
+ * check_positive PHY-table walker, with per-variant PHY tables and calibration
+ * selected via ChipVariant. */
 class HalJaguar2 {
 public:
   HalJaguar2(RtlUsbAdapter device, Logger_t logger,

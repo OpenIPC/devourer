@@ -22,11 +22,6 @@ extern "C" {
 #include "ieee80211_radiotap.h" /* MRateToHwRate + radiotap iterator */
 }
 
-/* M0 scaffold: the orchestrator compiles and constructs, but bring-up is not yet
- * wired. Each entry point logs and (for the data-path calls) throws/returns so a
- * premature use is loud rather than silently wrong. Milestones M2..M7 replace
- * these bodies with the ported HalMAC / phydm / halrf sub-modules. */
-
 RtlJaguar2Device::RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger,
                                    jaguar2::ChipVariant variant)
     : _device{device}, _logger{logger}, _variant{variant},

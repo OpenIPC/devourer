@@ -20,10 +20,7 @@ namespace jaguar2 {
  *
  * RF access matches phydm: RF read = direct BB shadow window (0x2800/0x2c00 +
  * addr<<2); RF write = 3-wire LSSI (0xC90/0xE90). BB access via phy_set_bb_reg
- * / rtw_read32.
- *
- * Milestone status: M5, incremental — foundation (backup/restore + per-K
- * settings) first; the nctl tone-measurement loops + orchestrator follow. */
+ * / rtw_read32. */
 class Halrf8822b : public Jaguar2Calibration {
 public:
   Halrf8822b(RtlUsbAdapter device, Logger_t logger, uint8_t cut, bool is_2t2r);

@@ -20,7 +20,7 @@ namespace jaguar2 {
  *
  * Boot success = REG_MCUFW_CTRL == 0xC078. Requires the pre-DLFW MAC config
  * (DDMA enable, SYS_FUNC_EN) and the queue/page allocation (_rsvd_boundary) to
- * have run first — supplied by HalmacJaguar2MacInit (M4). */
+ * have run first — supplied by HalmacJaguar2MacInit. */
 class HalmacJaguar2Fw {
 public:
   HalmacJaguar2Fw(RtlUsbAdapter device, Logger_t logger,

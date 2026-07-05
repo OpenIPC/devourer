@@ -10,13 +10,12 @@
 
 namespace jaguar2 {
 
-/* HalmacJaguar2MacInit — RTL8822B MAC configuration, ported from the HalMAC 88xx
- * init flow (halmac_init_88xx.c) mirroring src/jaguar3/HalmacJaguar3MacInit.
- *
- * Milestone status: M4 (part 1) — the pre-DLFW system config
- * (pre_init_system_cfg / init_system_cfg / enable_bb_rf) needed to boot the
- * firmware. The full post-DLFW MAC config (trx/queue/protocol/edca/wmac + USB
- * cfg) lands next. */
+/* HalmacJaguar2MacInit — RTL8822B / RTL8821C MAC configuration, ported from the
+ * HalMAC 88xx init flow (halmac_init_88xx.c) mirroring
+ * src/jaguar3/HalmacJaguar3MacInit. Covers the pre-DLFW system config
+ * (pre_init_system_cfg / init_system_cfg / enable_bb_rf) and the post-DLFW MAC
+ * config (trx/queue/protocol/edca/wmac + USB cfg), per-variant where the two
+ * chips diverge. */
 class HalmacJaguar2MacInit {
 public:
   HalmacJaguar2MacInit(RtlUsbAdapter device, Logger_t logger,

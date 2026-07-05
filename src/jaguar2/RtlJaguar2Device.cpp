@@ -334,11 +334,13 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
                 channel.Channel);
 }
 
-/* MP single-tone (CW carrier), Jaguar2 (RTL8822BU) path A. Ported from the
- * vendor hal_mpt_SetSingleToneTx() 8822B branch: disable the OFDM/CCK
- * modulators, force RF path A into TX mode at `gain`, flip the LO enable, and
- * set the 8822B RFE pinmux + RFE-inverse so the TX path is keyed — leaving a
- * clean local-oscillator carrier at the tuned channel center. The pre-tone
+/* MP single-tone (CW carrier), Jaguar2 path A. Ported from the vendor
+ * hal_mpt_SetSingleToneTx() 8822B / 8821C branches: disable the OFDM/CCK
+ * modulators, force RF path A into TX mode at `gain`, enable the LO, and set the
+ * per-variant RFE pinmux so the TX path is keyed — leaving a clean local-
+ * oscillator carrier at the tuned channel center. The 1T1R 8821C differs from
+ * the 2T2R 8822B in the RFE pinmux and in the LO-enable register (RF 0x75[16] in
+ * 2.4 GHz BTG mode vs RF 0x58[1]); both branch on _variant below. The pre-tone
  * RF/RFE state is snapshotted for StopCwTone(). */
 void RtlJaguar2Device::StartCwTone(uint8_t gain) {
   if (_cw_active)
@@ -369,23 +371,37 @@ void RtlJaguar2Device::StartCwTone(uint8_t gain) {
   /* Disable OFDM + CCK modulators (0x808[29:28] = 0). */
   _device.phy_set_bb_reg(REG_OFDMCCKEN, (1u << 28) | (1u << 29), 0x0);
 
-  /* RF path A -> TX mode (0x00[19:16]=2), gain index (0x00[4:0]), LO enable
-   * (0x58 bit1). */
+  /* RF path A -> TX mode (0x00[19:16]=2), gain index (0x00[4:0]). */
   _hal.dbg_rf_set(/*path A*/ 0, RF_AC, 0xF0000, 0x2);
   _hal.dbg_rf_set(/*path A*/ 0, RF_AC, 0x1F, gain & 0x1F);
-  _hal.dbg_rf_set(/*path A*/ 0, RF_LNA_LOW_GAIN_3, (1u << 1), 0x1);
 
-  /* 8822B RFE pinmux + inverse to force the TX path. */
-  _device.phy_set_bb_reg(rA_RFE_Pinmux, bMaskDWord, 0x77777777);
-  _device.phy_set_bb_reg(rB_RFE_Pinmux, bMaskDWord, 0x77777777);
-  _device.phy_set_bb_reg(rA_RFE_Pinmux + 4, bMaskLWord, 0x7777);
-  _device.phy_set_bb_reg(rB_RFE_Pinmux + 4, bMaskLWord, 0x7777);
-  _device.phy_set_bb_reg(rA_RFE_Inverse, 0xFFF, 0xb);
-  _device.phy_set_bb_reg(rB_RFE_Inverse, 0xFFF, 0x830);
+  const bool is_8821c = _variant == jaguar2::ChipVariant::C8821C;
+  if (is_8821c) {
+    /* 8821C (1T1R) LO enable: on 2.4 GHz the RF is in BTG (shared BT/G-band)
+     * mode and the LO gate is RF 0x75[16]; on 5 GHz it is the normal RF 0x58[1]
+     * (hal_mpt_SetSingleToneTx 8821C branch). */
+    if (_channel.Channel <= 14)
+      _hal.dbg_rf_set(/*path A*/ 0, 0x75, (1u << 16), 0x1);
+    else
+      _hal.dbg_rf_set(/*path A*/ 0, RF_LNA_LOW_GAIN_3, (1u << 1), 0x1);
+    /* 8821C RFE pinmux — path A only. (ExternalPA_2G/5G parts also set
+     * 0xCB4[0xA00000]=0x1; this HAL doesn't expose those flags and the validated
+     * CF-811AC has no external PA, so that optional write is skipped.) */
+    _device.phy_set_bb_reg(rA_RFE_Pinmux, 0xF0F0, 0x707);
+  } else {
+    /* 8822B LO enable (RF 0x58[1]) + RFE pinmux + inverse to force the TX path. */
+    _hal.dbg_rf_set(/*path A*/ 0, RF_LNA_LOW_GAIN_3, (1u << 1), 0x1);
+    _device.phy_set_bb_reg(rA_RFE_Pinmux, bMaskDWord, 0x77777777);
+    _device.phy_set_bb_reg(rB_RFE_Pinmux, bMaskDWord, 0x77777777);
+    _device.phy_set_bb_reg(rA_RFE_Pinmux + 4, bMaskLWord, 0x7777);
+    _device.phy_set_bb_reg(rB_RFE_Pinmux + 4, bMaskLWord, 0x7777);
+    _device.phy_set_bb_reg(rA_RFE_Inverse, 0xFFF, 0xb);
+    _device.phy_set_bb_reg(rB_RFE_Inverse, 0xFFF, 0x830);
+  }
 
   _cw_active = true;
-  _logger->info("CW single-tone armed @ ch{} gain={} (8822B)", _channel.Channel,
-                static_cast<int>(gain & 0x1F));
+  _logger->info("CW single-tone armed @ ch{} gain={} ({})", _channel.Channel,
+                static_cast<int>(gain & 0x1F), is_8821c ? "8821C" : "8822B");
 }
 
 /* Mirror of the vendor STOP path: re-enable OFDM/CCK, restore RF 0x00 and the
@@ -411,9 +427,16 @@ void RtlJaguar2Device::StopCwTone() {
   _device.phy_set_bb_reg(rA_RFE_Pinmux + 4, bMaskDWord, _cw_bb[2]);
   _device.phy_set_bb_reg(rB_RFE_Pinmux + 4, bMaskDWord, _cw_bb[3]);
   _hal.dbg_rf_set(/*path A*/ 0, RF_AC, RF_OFFSET_MASK, _cw_rf00);
-  _hal.dbg_rf_set(/*path A*/ 0, RF_LNA_LOW_GAIN_3, (1u << 1), 0x0);
-  _device.phy_set_bb_reg(rA_RFE_Inverse, 0xFFF, 0x0);
-  _device.phy_set_bb_reg(rB_RFE_Inverse, 0xFFF, 0x0);
+  if (_variant == jaguar2::ChipVariant::C8821C) {
+    /* 8821C: disable both LO gates (BTG RF 0x75[16] + normal RF 0x58[1]); no
+     * RFE-inverse to restore. */
+    _hal.dbg_rf_set(/*path A*/ 0, 0x75, (1u << 16), 0x0);
+    _hal.dbg_rf_set(/*path A*/ 0, RF_LNA_LOW_GAIN_3, (1u << 1), 0x0);
+  } else {
+    _hal.dbg_rf_set(/*path A*/ 0, RF_LNA_LOW_GAIN_3, (1u << 1), 0x0);
+    _device.phy_set_bb_reg(rA_RFE_Inverse, 0xFFF, 0x0);
+    _device.phy_set_bb_reg(rB_RFE_Inverse, 0xFFF, 0x0);
+  }
 
   _cw_active = false;
   _logger->info("CW single-tone stopped — chip restored");

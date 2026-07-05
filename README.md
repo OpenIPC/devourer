@@ -202,7 +202,8 @@ Common to both demos:
   `DEVOURER_CHANNEL` center frequency (Realtek MP single-tone, path A). Supported
   on all USB generations, each via its own vendor recipe: Jaguar-1 (8812AU/8821AU
   via OFDM/CCK off + RFE pinmux; 8814AU via CCA off + per-path TX-scale zero),
-  Jaguar-2 (8822BU via OFDM/CCK off + RFE pinmux + RFE-inverse), and Jaguar-3
+  Jaguar-2 (8822BU via OFDM/CCK off + RFE pinmux + RFE-inverse; 8811CU/8821CU via
+  the 8821C path-A pinmux + RF 0x75[16] BTG / RF 0x58[1] LO gate), and Jaguar-3
   (8822CU/8822EU — the halbb generation needs the RF-mode register written through
   the HSSI 3-wire port and the BB held in continuous TX, else its RF state machine
   re-drives the mode back to RX). The demo idle-holds the carrier until SIGINT,

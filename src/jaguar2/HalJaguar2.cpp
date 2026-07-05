@@ -1075,6 +1075,101 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
    * BW40/80 is future work (uses BW40/BW80 diffs). */
   if (channel == 0)
     return;
+
+  /* 8821C: the vendor hal_com_get_txpwr_idx computes per-rate power
+   *   idx[rate] = clamp(base + (min(by_rate[rate], lmt) - rs_target), 0, 63)
+   * where base = efuse per-channel section index (phy_get_pg_txpwr_idx),
+   * by_rate = the phy_reg_pg value for the rate (array_mp_8821c_phy_reg_pg),
+   * rs_target = by_rate of the section reference rate (rate_sec_base: CCK->11M,
+   * OFDM->54M, HT->MCS7, VHT1SS->VHT1SS_MCS7), and lmt = worldwide-min
+   * txpwr_lmt. This differs from the shared 8822B flat-per-section clamp; the
+   * 8821C is 1T1R so only path A (0x1d00) is written. On an unprogrammed EFUSE
+   * fall through to the shared path. */
+  if (_variant == ChipVariant::C8821C) {
+    if (!_efuse_valid) {
+      read_efuse_logical_map(_efuse_map, sizeof(_efuse_map), /*dump=*/false);
+      _efuse_valid = true;
+    }
+    const uint8_t *ef = _efuse_map;
+    const bool g5c = channel > 14;
+    const bool prog = g5c ? (ef[0x22] != 0xff)
+                          : (ef[0x10] != 0xff && ef[0x16] != 0xff);
+    if (prog) {
+      const bool ht40 = bw >= 1;
+      auto s4v = [](int x) { int v = x & 0xf; return (v & 8) ? v - 16 : v; };
+      int g, bw40b, dpg;
+      if (!g5c) {
+        g = channel <= 2 ? 0 : channel <= 5 ? 1 : channel <= 8 ? 2
+            : channel <= 11 ? 3 : 4;
+        bw40b = ef[0x16 + g];
+        dpg = ef[0x1b];
+      } else {
+        static const uint8_t lo[] = {36,  44,  50,  60,  100, 108, 116,
+                                     124, 132, 140, 149, 157, 165, 173};
+        static const uint8_t hi[] = {42,  48,  58,  64,  106, 114, 122,
+                                     130, 138, 144, 155, 161, 171, 177};
+        g = 0;
+        for (int i = 0; i < 14; i++)
+          if (channel >= lo[i] && channel <= hi[i]) { g = i; break; }
+        bw40b = ef[0x22 + g];
+        dpg = ef[0x30];
+      }
+      const int ofdm_diff = s4v(dpg & 0xf), bw20_diff = s4v((dpg >> 4) & 0xf);
+      const int cg = (!g5c && channel == 14) ? 5 : g;
+      const int cck_base = g5c ? 0 : ef[0x10 + cg];
+      const int ofdm_base = bw40b + ofdm_diff;
+      const int ht_base = bw40b + (ht40 ? 0 : bw20_diff);
+      auto lmtc = [&](uint8_t sec) -> int {
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+        return hal8821c_txpwr_lmt(g5c ? 1 : 0, bw, sec, 1, channel);
+#else
+        (void)sec;
+        return 63;
+#endif
+      };
+      /* write a rate-section: per byte (rate) in each dword,
+       * idx = clamp(base + (min(by_rate, lmt) - rs), 0, 63). */
+      auto wsec = [&](uint16_t off, int base, int rs, int lm,
+                      const uint32_t *dw, int ndw) {
+        for (int w = 0; w < ndw; w++) {
+          uint32_t out = 0;
+          for (int b = 0; b < 4; b++) {
+            int byr = static_cast<int>((dw[w] >> (b * 8)) & 0xff);
+            int rt = byr < lm ? byr : lm;
+            int idx = base + (rt - rs);
+            if (idx < 0) idx = 0;
+            if (idx > 63) idx = 63;
+            out |= static_cast<uint32_t>(idx & 0xff) << (b * 8);
+          }
+          _device.rtw_write32(static_cast<uint16_t>(0x1d00 + off + w * 4), out);
+        }
+      };
+      /* by_rate dwords (array_mp_8821c_phy_reg_pg) + rs = ref-rate by_rate. */
+      if (!g5c) {
+        const uint32_t cck[] = {0x32343638};
+        const uint32_t ofdm[] = {0x36363636, 0x28303234};
+        const uint32_t ht[] = {0x34363636, 0x26283032};
+        const uint32_t vht[] = {0x34363636, 0x26283032, 0x22222224};
+        wsec(0x00, cck_base, 50, lmtc(0), cck, 1);
+        wsec(0x04, ofdm_base, 40, lmtc(1), ofdm, 2);
+        wsec(0x0c, ht_base, 38, lmtc(2), ht, 2);
+        wsec(0x2c, ht_base, 38, lmtc(2), vht, 3); /* VHT1SS: HT base/lmt */
+      } else {
+        const uint32_t ofdm[] = {0x34343434, 0x26283032};
+        const uint32_t ht[] = {0x32343434, 0x24262830};
+        const uint32_t vht[] = {0x32343434, 0x24262830, 0x20202022};
+        wsec(0x04, ofdm_base, 38, lmtc(1), ofdm, 2);
+        wsec(0x0c, ht_base, 36, lmtc(2), ht, 2);
+        wsec(0x2c, ht_base, 36, lmtc(2), vht, 3);
+      }
+      _logger->info("Jaguar2/8821C: per-rate TXAGC (vendor formula) ch{} {} "
+                    "cck_base={} ofdm_base={} ht_base={} lmt cck/ofdm/ht={}/{}/{}",
+                    channel, g5c ? "5G" : "2.4G", cck_base, ofdm_base, ht_base,
+                    lmtc(0), lmtc(1), lmtc(2));
+      return;
+    }
+    /* unprogrammed efuse -> shared flat path below */
+  }
   /* Both variants use the same EFUSE power-by-rate layout at pg_txpwr_saddr=0x10
    * (rtl8821c_halinit.c:61 == the 8822B value). The 8821C is 1T1R, so its path-1
    * EFUSE base reads 0xff and is skipped by the per-path loop below — the shared

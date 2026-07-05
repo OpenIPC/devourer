@@ -110,6 +110,14 @@ else
     TXPWR=''
     IQK=''
     LIVE=''
+    # 8822C only: RF 0x1a is not written by any channel path on the C (it is
+    # the 8822E's RXBB register) and its bit17 floats — observed flipping
+    # between two full-path runs. Excluded statically since the full-vs-full
+    # control catches it only probabilistically. On the E it is REAL RXBB
+    # config and stays checked.
+    case "$TX_PID" in
+        0xc812|0xc82c|0xc82e) LIVE='0x1a' ;;
+    esac
 fi
 
 echo; echo "== fast-vs-full diff (< full  > fast) =="

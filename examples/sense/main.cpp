@@ -11,6 +11,10 @@
  * that responds in hardware. Two dongles; the effect is stronger when they are
  * physically separated (a static short channel barely moves).
  */
+#ifdef _WIN32
+#define NOMINMAX /* keep windows.h (via libusb.h) from defining min/max macros */
+#endif
+
 #if defined(__ANDROID__) || defined(_MSC_VER) || defined(__APPLE__)
 #include <libusb.h>
 #else
@@ -40,6 +44,16 @@
 using devourer::bf::MotionMeter;
 using devourer::bf::parse_report;
 using devourer::bf::ReportHdr;
+
+/* Portable environment set (the demo hands arming flags to the library via env):
+ * POSIX setenv, or _putenv_s on Windows (MSVC + MinGW have no POSIX setenv). */
+static void set_env(const char *name, const char *value) {
+#ifdef _WIN32
+  _putenv_s(name, value);
+#else
+  ::setenv(name, value, 1);
+#endif
+}
 
 /* The sounder's TA and the address a beamformee arms to respond to (matches the
  * canonical SA used across devourer's TX path). */
@@ -352,8 +366,8 @@ static int run_active(uint16_t snd_vid, uint16_t snd_pid, uint16_t bfe_vid,
                       uint16_t bfe_pid, int channel, const Logger_t &logger,
                       Sensor &sensor) {
   /* Beamformee first: arm it (env, read at Init), bring it up on a thread. */
-  ::setenv("DEVOURER_BF_ARM_BFEE", "57:42:75:05:d6:00", 1);
-  ::setenv("DEVOURER_BF_ARM_BFEE_MU", "1", 1);
+  set_env("DEVOURER_BF_ARM_BFEE", "57:42:75:05:d6:00");
+  set_env("DEVOURER_BF_ARM_BFEE_MU", "1");
   Adapter bfe;
   if (!open_adapter(bfe, bfe_vid, bfe_pid, logger)) {
     logger->error("active: failed to open beamformee {:04x}", bfe_pid);
@@ -379,8 +393,8 @@ static int run_active(uint16_t snd_vid, uint16_t snd_pid, uint16_t bfe_vid,
   /* Sounder: arm the sounding engine (env, read at InitWrite), VHT2SS_MCS0.
    * DEVOURER_TX_WITH_RX=thread must be set BEFORE InitWrite so a Jaguar3 sounder
    * keeps its RX filters open for the self-capture (no-op on Jaguar1/2). */
-  ::setenv("DEVOURER_BF_ARM_SOUNDER", "1", 1);
-  ::setenv("DEVOURER_TX_WITH_RX", "thread", 1);
+  set_env("DEVOURER_BF_ARM_SOUNDER", "1");
+  set_env("DEVOURER_TX_WITH_RX", "thread");
   Adapter snd;
   if (!open_adapter(snd, snd_vid, snd_pid, logger)) {
     logger->error("active: failed to open sounder {:04x}", snd_pid);
@@ -392,7 +406,7 @@ static int run_active(uint16_t snd_vid, uint16_t snd_pid, uint16_t bfe_vid,
                                      .ChannelOffset = 0,
                                      .ChannelWidth = CHANNEL_WIDTH_20});
   snd.dev->SetTxMode(devourer::parse_tx_mode_str("VHT2SS_MCS0"));
-  ::setenv("DEVOURER_TX_NDPA", "1", 1); /* send_packet marks the NDPA descriptor */
+  set_env("DEVOURER_TX_NDPA", "1"); /* send_packet marks the NDPA descriptor */
 
   /* Self-capture the returned reports on the sounder's RX loop. */
   std::thread snd_rx([&snd, &sensor]() {

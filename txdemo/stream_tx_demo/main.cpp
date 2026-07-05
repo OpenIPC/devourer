@@ -200,33 +200,32 @@ int main(int argc, char **argv) {
     logger->info("DEVOURER_CHANNEL set — tuning TX to channel {}", channel);
   }
 
-  /* DEVOURER_TX_POWER overrides the per-rate "txpower" register value
-   * (default 40, low single-digits for an attenuated/noisy bench). Useful
-   * for stress-testing the RX path's corruption handling — lowering this
-   * forces marginal SNR, which raises the chip's CRC-failure rate so the
-   * corrupted-frame surfacing path actually gets exercised. */
-  int tx_power = 40;
-  if (const char *p = std::getenv("DEVOURER_TX_POWER")) tx_power = std::atoi(p);
-  rtlDevice->SetTxPower(static_cast<uint8_t>(tx_power));
+  /* DEVOURER_TX_POWER forces a flat TXAGC index (low single-digits for an
+   * attenuated/noisy bench). Useful for stress-testing the RX path's
+   * corruption handling — lowering this forces marginal SNR, which raises the
+   * chip's CRC-failure rate so the corrupted-frame surfacing path actually
+   * gets exercised. Unset = each family's calibrated default (SetTxPower is
+   * now a real flat override on EVERY generation — the old unconditional
+   * SetTxPower(40) here was a no-op on Jaguar1/2 and would now flatten their
+   * efuse per-rate table; the 8822C's 40 default lives in its reference base). */
+  if (const char *p = std::getenv("DEVOURER_TX_POWER"))
+    rtlDevice->SetTxPower(static_cast<uint8_t>(std::atoi(p)));
   rtlDevice->InitWrite(SelectedChannel{.Channel = static_cast<uint8_t>(channel),
                                        .ChannelOffset = 0,
                                        .ChannelWidth = CHANNEL_WIDTH_20});
 
-  /* DEVOURER_TX_PWR_OVERRIDE: force an absolute per-rate TXAGC index (0..63),
+  /* DEVOURER_TX_PWR_OVERRIDE: force an absolute per-rate TXAGC index,
    * bypassing the EFUSE/SetTxPower table — the finest-grained, lowest TX-power
    * knob for pushing the link into the marginal-SNR regime where the RX's
    * corrupted-frame salvage path gets exercised (pairs with the B210 interferer
    * in tests/fused_fec_onair.sh). Applied once and held, unlike
-   * WiFiDriverTxDemo's DEVOURER_TX_PWR_START ramp. Must follow InitWrite so the
-   * channel-set has run; ApplyTxPower re-pushes the index to the registers. */
-#if defined(DEVOURER_HAVE_JAGUAR1)
-  if (const char *o = std::getenv("DEVOURER_TX_PWR_OVERRIDE"); o && jag) {
+   * WiFiDriverTxDemo's DEVOURER_TX_PWR_START ramp. Must follow InitWrite so it
+   * applies live. Generation-agnostic (IRtlDevice runtime TX-power API). */
+  if (const char *o = std::getenv("DEVOURER_TX_PWR_OVERRIDE")) {
     int idx = std::atoi(o);
-    jag->SetTxPowerOverride(idx);
-    jag->ApplyTxPower();
+    rtlDevice->SetTxPowerIndexOverride(idx);
     logger->info("DEVOURER_TX_PWR_OVERRIDE — forced absolute TXAGC index {}", idx);
   }
-#endif
   /* Channel hopping for frequency diversity. DEVOURER_HOP_CHANNELS="1,6,11"
    * cycles the TX channel every DEVOURER_HOP_DWELL_FRAMES PSDUs (default 1 =
    * per-packet hop, which spreads an outer-FEC block's shards across channels

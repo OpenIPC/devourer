@@ -569,18 +569,14 @@ RxEnergy RtlJaguar2Device::GetRxEnergy() {
   return e;
 }
 
-void RtlJaguar2Device::SetTxPower(uint8_t power) {
-  /* Legacy entry point — same knob as SetTxPowerIndexOverride. (Previously
-   * this stored an override nothing read; the unified path applies it.) */
-  SetTxPowerIndexOverride(power);
-}
-
 devourer::TxPowerCaps RtlJaguar2Device::GetTxPowerCaps() {
   devourer::TxPowerCaps caps;
   caps.supported = true;
   caps.index_max = 63;
   caps.step_qdb = 2; /* 0.5 dB per TXAGC index step */
-  caps.step_measured = false;
+  /* On-air slope (tests/txpwr_offset_onair.sh): 8822BU 0.488, 8821CU
+   * 0.581 dB/idx @ ch36 — nominal confirmed. */
+  caps.step_measured = true;
   caps.offset_min_qdb = -126;
   caps.offset_max_qdb = 126;
   return caps;

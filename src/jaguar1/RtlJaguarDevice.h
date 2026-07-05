@@ -88,15 +88,18 @@ public:
    * resolve statically, so overrides must not re-declare it.) */
   void FastRetune(uint8_t channel, bool cache_rf) override;
   void InitWrite(SelectedChannel channel) override;
-  void SetTxPower(uint8_t power) override;
-  /* Force the per-rate TXAGC index (0..63), bypassing the EFUSE per-rate
-   * table; -1 restores normal behaviour. Re-applied on the next
-   * SetMonitorChannel. Used by the thermal-vs-gain ramp in WiFiDriverTxDemo. */
-  void SetTxPowerOverride(int idx);
-  /* Re-apply the per-rate TX power for the current channel immediately (no
-   * channel switch). Needed because SetMonitorChannel early-returns when the
-   * channel is unchanged. Call after SetTxPowerOverride to make it take. */
-  void ApplyTxPower();
+  /* Legacy per-rate TXAGC override pair — superseded by the IRtlDevice
+   * runtime TX-power API (SetTxPowerIndexOverride applies in one call).
+   * Inline forwards kept for one release cycle, Rtl8812aDevice-alias style. */
+  [[deprecated("use SetTxPowerIndexOverride (applies live)")]]
+  void SetTxPowerOverride(int idx) {
+    SetTxPowerIndexOverride(idx);
+  }
+  [[deprecated("SetTxPowerIndexOverride / SetTxPowerOffsetQdb apply live; "
+               "use ReApplyTxPower to force a re-program")]]
+  void ApplyTxPower() {
+    ReApplyTxPower();
+  }
 
   /* Runtime TX-power control (IRtlDevice contract; see src/TxPower.h).
    * Jaguar1 caps: 6-bit TXAGC index, 0.5 dB (2 qdB) per step. The offset

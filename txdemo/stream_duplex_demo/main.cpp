@@ -206,14 +206,9 @@ static void tx_thread(TxArgs args) {
         break;
       uint8_t op = ctl[0];
       if (op == 1 && clen >= 2) {                 // SET_PWR <idx>
-        /* TXAGC override is a Jaguar1 (RtlJaguarDevice) feature; the SET_PWR
-         * control op is a no-op when Jaguar1 support isn't built. */
-#if defined(DEVOURER_HAVE_JAGUAR1)
-        if (auto *jag = dynamic_cast<RtlJaguarDevice *>(args.rtl)) {
-          jag->SetTxPowerOverride(ctl[1]);
-          jag->ApplyTxPower();
-        }
-#endif
+        /* Flat TXAGC override via the generation-agnostic runtime TX-power
+         * API (previously Jaguar1-only): applies live on every family. */
+        args.rtl->SetTxPowerIndexOverride(ctl[1]);
       } else if (op == 2 && clen >= 2) {          // SET_RATE <spec ascii>
         std::string spec(ctl.begin() + 1, ctl.end());
         auto rt = devourer::build_stream_radiotap(devourer::parse_tx_mode_str(spec));
@@ -353,7 +348,12 @@ int main(int argc, char **argv) {
   if (const char *ch_env = std::getenv("DEVOURER_CHANNEL")) {
     channel = std::atoi(ch_env);
   }
-  rtlDevice->SetTxPower(40);
+  /* DEVOURER_TX_POWER: flat TXAGC index (see StreamTxDemo). Unset = each
+   * family's calibrated default — SetTxPower is now a real flat override on
+   * EVERY generation, so the old unconditional SetTxPower(40) (a no-op on
+   * Jaguar1/2) is gone. */
+  if (const char *p = std::getenv("DEVOURER_TX_POWER"))
+    rtlDevice->SetTxPower(static_cast<uint8_t>(std::atoi(p)));
 
   std::atomic<bool> should_stop{false};
 

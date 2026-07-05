@@ -59,7 +59,6 @@ public:
    * sanctioned in-session hop primitive (unlike a bare SetMonitorChannel). */
   void FastRetune(uint8_t channel, bool cache_rf) override;
   void InitWrite(SelectedChannel channel) override;
-  void SetTxPower(uint8_t power) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
   SelectedChannel GetSelectedChannel() override;
   void Stop() override;

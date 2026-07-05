@@ -776,22 +776,19 @@ void RtlJaguarDevice::StartWithMonitorMode(SelectedChannel selectedChannel) {
   _brought_up = true;
 }
 
-void RtlJaguarDevice::SetTxPower(uint8_t power) {
-  _radioManagement->SetTxPower(power);
-}
-
-void RtlJaguarDevice::SetTxPowerOverride(int idx) {
-  _radioManagement->SetTxPowerOverride(idx);
-}
-
-void RtlJaguarDevice::ApplyTxPower() { _radioManagement->ApplyTxPower(); }
-
 devourer::TxPowerCaps RtlJaguarDevice::GetTxPowerCaps() {
   devourer::TxPowerCaps caps;
   caps.supported = true;
   caps.index_max = 63;
   caps.step_qdb = 2; /* 0.5 dB per TXAGC index step */
-  caps.step_measured = false;
+  /* On-air slope (tests/txpwr_offset_onair.sh, chip-RSSI ground station):
+   * 8812AU 0.496 dB/idx, 8814AU 0.425 dB/idx @ ch36 — nominal confirmed.
+   * 8821AU: 0.50 dB/idx exactly at 2.4 GHz but FLAT at 5 GHz (registers move
+   * — regcheck readback — while on-air power stays pinned: the 5 GHz chain
+   * on that part ignores BB TXAGC), so its measured flag stays false and the
+   * power lever should be treated as 2.4 GHz-only there. */
+  caps.step_measured =
+      _eepromManager->version_id.ICType != CHIP_8821;
   caps.offset_min_qdb = -126;
   caps.offset_max_qdb = 126;
   return caps;

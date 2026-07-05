@@ -66,11 +66,14 @@ public:
   }
 
   /* Force a flat absolute TXAGC index across all rates (the debug /
-   * SDR-visibility knob — kept for source compatibility; new callers should
-   * prefer SetTxPowerIndexOverride, which is the same knob with an explicit
-   * clear). Live on a brought-up chip, recorded-and-applied-at-InitWrite
-   * otherwise. */
-  virtual void SetTxPower(uint8_t power) = 0;
+   * SDR-visibility knob — same knob as SetTxPowerIndexOverride, kept for
+   * source compatibility; the override form has the explicit clear). NB this
+   * is a REAL flat override on every generation now — it previously had three
+   * divergent semantics (Jaguar1: pre-efuse fallback, silently ignored with
+   * loaded EFUSE; Jaguar2: dead store; Jaguar3: flat reference). */
+  virtual void SetTxPower(uint8_t power) {
+    SetTxPowerIndexOverride(static_cast<int>(power));
+  }
 
   /* --- Runtime TX-power control (see src/TxPower.h for the full model) ---
    *
@@ -102,12 +105,9 @@ public:
 
   /* Force / clear the flat absolute TXAGC index: idx >= 0 forces it for all
    * rates (composes with the offset), idx < 0 reverts to the efuse per-rate
-   * baseline. Default forwards to the legacy SetTxPower for generations that
-   * predate the unified API. */
-  virtual void SetTxPowerIndexOverride(int idx) {
-    if (idx >= 0)
-      SetTxPower(static_cast<uint8_t>(idx));
-  }
+   * baseline. The primary knob — SetTxPower forwards here; a generation
+   * without the API wired ignores it (caps.supported=false). */
+  virtual void SetTxPowerIndexOverride(int idx) { (void)idx; }
 
   /* Re-program the TX-power registers from the current knob state at the
    * CURRENT channel — the hook tests use to force a re-apply without moving

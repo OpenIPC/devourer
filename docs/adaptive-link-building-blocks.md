@@ -33,7 +33,7 @@ milliseconds, so a controller can retune between frames.
 | **Modulation / MCS** (time-on-air) | strong | **strong** — less airtime, fewer Joules/bit | per-packet radiotap rate, or the device TX-mode default (`DEVOURER_TX_RATE`); immediate |
 | **FEC strength** | strong | strong | application-layer — the outer code + the per-temporal-layer MCS/FEC ladder (`DEVOURER_SVC_LADDER`, [`fused-fec.md`](fused-fec.md)), not a PHY register |
 | **Channel / bandwidth** | strong | moderate | per-packet retune (~1–2 ms intra-band fast retune / `DEVOURER_HOP_*`, longer on a band change); 20/40/80 MHz plus a 5/10 MHz **narrowband re-clock** that trades throughput for link budget |
-| **Transmit power** | **strongest** | **weak** — the always-on baseline draw dominates | runtime TXAGC override, re-applied without a channel switch |
+| **Transmit power** | **strongest** | **weak** — the always-on baseline draw dominates | the runtime TX-power API on every generation: `SetTxPowerOffsetQdb` (quarter-dB offset relative to the efuse per-rate table — the closed-loop knob, sticky across retunes, with saturation flags), `SetTxPowerIndexOverride` (flat index), `GetTxPowerState`/`GetTxPowerCaps` readback, `GetThermalStatus` (the PA-heating budget input); applied live, no channel switch |
 | **Active receive chains** | conditional | **conditional** — pays only when the antennas decorrelate (motion) | the RX-path enable mask (`DEVOURER_RX_PATHS`); a fade-state lever, not a range lever |
 | **Duty cycle** | — | direct | inter-frame gap; back-to-back for maximum airtime, idle to save it |
 

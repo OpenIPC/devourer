@@ -660,15 +660,6 @@ void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
                                       _channel.ChannelWidth);
 }
 
-void RtlJaguar3Device::SetTxPower(uint8_t power) {
-  /* Legacy entry point — same knob as SetTxPowerIndexOverride. (The previous
-   * post-bring-up live apply called set_tx_power_ref with NO _reg_mu — racing
-   * the coex tick's pwr_track RMW on the same 0x18a0/0x41a0 dwords — and
-   * unconditionally re-zeroed the 8822E per-rate diffs + wrote the 0x41e8
-   * path-B ref even in TX+RX mode. The unified path fixes all three.) */
-  SetTxPowerIndexOverride(power);
-}
-
 /* Re-program TXAGC from the current knob state (see header). The 0x41e8
  * TX+RX quirk is 8822E-specific, so the skip flag is derived here — once —
  * from _rx_wanted AND the variant; the 8822C keeps its path-B ref writes. */
@@ -748,8 +739,15 @@ devourer::TxPowerCaps RtlJaguar3Device::GetTxPowerCaps() {
   devourer::TxPowerCaps caps;
   caps.supported = true;
   caps.index_max = 127;
-  caps.step_qdb = 1; /* 0.25 dB per reference step (RtlJaguar3Device.cpp:22) */
-  caps.step_measured = false;
+  caps.step_qdb = 1; /* 0.25 dB per reference step */
+  /* On-air slope (tests/txpwr_offset_onair.sh): 8822CU 0.325 dB/idx @ ch36
+   * (classifies at the 0.25 nominal, rms 0.60). The 8822EU measures ~0.55
+   * dB/idx with an accelerating curve (0.3 low range -> 0.9 around ref 72) —
+   * its TSSI/kfree trims reshape the ref->power transfer, so one reference
+   * step is NOT a constant 0.25 dB there and the measured flag stays false:
+   * a controller should calibrate its own dB-per-step on the E (or lean on
+   * GetTxPowerState readback + the ground's RSSI). */
+  caps.step_measured = _variant == jaguar3::ChipVariant::C8822C;
   caps.offset_min_qdb = -127;
   caps.offset_max_qdb = 127;
   return caps;

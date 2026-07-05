@@ -869,7 +869,7 @@ void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
   if (bw == 1) { /* 40 MHz */
     _device.phy_set_bb_reg(0x0a00, (1u << 4), primary_ch_idx == 1 ? 1 : 0);
     uint32_t v8ac = _device.rtw_read32(0x08ac);
-    v8ac &= 0xff8ff800;
+    v8ac &= 0xff3ff300;
     v8ac |= (static_cast<uint32_t>((primary_ch_idx & 0xf) << 2) | 0x20020000u |
              0x1u);
     _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
@@ -878,8 +878,8 @@ void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
     rf18 |= (1u << 11);
   } else if (bw == 2) { /* 80 MHz */
     uint32_t v8ac = _device.rtw_read32(0x08ac);
-    v8ac &= 0xfccffc00;
-    v8ac |= (static_cast<uint32_t>((primary_ch_idx & 0xf) << 2) | 0x30030000u |
+    v8ac &= 0xfcffcf00;
+    v8ac |= (static_cast<uint32_t>((primary_ch_idx & 0xf) << 2) | 0x40040000u |
              0x2u);
     _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
     _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);

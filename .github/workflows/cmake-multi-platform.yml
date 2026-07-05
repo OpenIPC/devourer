@@ -146,7 +146,7 @@ jobs:
         run: >
           cmake --build build --target
           WiFiDriver StreamTxDemo StreamDuplexDemo StreamStdinSelftest
-          ToneMaskSelftest
+          ToneMaskSelftest BfReportDecodeSelftest
 
       - name: Test
         working-directory: build

@@ -57,17 +57,15 @@ bool HalmacJaguar2Fw::download_default_firmware() {
     return false;
   }
 
-  /* Retry the whole DLFW on a transient FW-boot hang. download_firmware()
-   * re-disables + platform-resets the WLAN CPU on entry, so a re-attempt starts
-   * from a clean CPU state. The combo chip occasionally leaves the coex/CPU
-   * subsystem mid-transition when re-initialised from a warm state and the
-   * 0x80=0xC078 boot handshake never asserts; a fresh download always boots. */
-  constexpr int kMaxTries = 3;
+  /* A cheap in-place CPU-reset retry catches easy transients (download_firmware
+   * re-disables + platform-resets the WLAN CPU on entry). Deeper warm-state
+   * hangs need a full power cycle, which the bring_up caller does around this. */
+  constexpr int kMaxTries = 2;
   for (int t = 0; t < kMaxTries; t++) {
     if (download_firmware(fw, fw_len))
       return true;
-    _logger->error("Jaguar2 DLFW: attempt {}/{} failed — retrying", t + 1,
-                   kMaxTries);
+    if (t + 1 < kMaxTries)
+      _logger->error("Jaguar2 DLFW: cpu-reset retry {}/{}", t + 1, kMaxTries);
   }
   return false;
 }

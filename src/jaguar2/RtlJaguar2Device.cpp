@@ -46,13 +46,30 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
    * USB RX-DMA + BB/RF enable -> BB/AGC/RF phydm tables -> TRX mode -> channel
    * -> LCK -> IQK -> coex WL grant -> enable RX/TX MAC engine. */
   const uint8_t bw = static_cast<uint8_t>(channel.ChannelWidth);
-  _macinit.pre_init_system_cfg();
-  _hal.power_on();
-  _hal.read_chip_version();
-  _macinit.init_system_cfg(channel.ChannelWidth, _hal.chip_version().cut);
-  /* Firmware download BEFORE trx/queue config (HalMAC order): running init_trx
-   * first over-allocates the FIFOPAGE queues and wedges the DLFW bcn-valid. */
-  if (!_fw.download_default_firmware())
+  /* DLFW download BEFORE trx/queue config (HalMAC order): running init_trx first
+   * over-allocates the FIFOPAGE queues and wedges the DLFW bcn-valid.
+   *
+   * Retry the FULL power-on + DLFW as a unit. On a warm/idle chip the FW-boot
+   * handshake (0x80=0xC078) intermittently hangs, and re-resetting only the CPU
+   * (download_firmware's own retry) is often not enough — the combo chip needs a
+   * fresh power cycle. The vendor recovers the same way: _halmac_init_hal's
+   * power_on re-toggles OFF/ON on a "warm reboot" (PWR_UNCHANGE) and the driver
+   * layer retries init on failure. Each attempt here re-runs the complete
+   * pre-init -> power-on -> system-cfg -> DLFW, giving the chip a clean slate. */
+  bool fw_ok = false;
+  constexpr int kBringupTries = 4;
+  for (int attempt = 0; attempt < kBringupTries && !fw_ok; attempt++) {
+    if (attempt > 0)
+      _logger->error("RtlJaguar2Device: DLFW failed — full power-cycle retry "
+                     "{}/{}",
+                     attempt + 1, kBringupTries);
+    _macinit.pre_init_system_cfg();
+    _hal.power_on();
+    _hal.read_chip_version();
+    _macinit.init_system_cfg(channel.ChannelWidth, _hal.chip_version().cut);
+    fw_ok = _fw.download_default_firmware();
+  }
+  if (!fw_ok)
     throw std::runtime_error("RtlJaguar2Device: firmware DLFW failed");
   _logger->info("RtlJaguar2Device: firmware booted (bw={})", (int)bw);
 

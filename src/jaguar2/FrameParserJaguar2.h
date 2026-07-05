@@ -202,6 +202,16 @@ inline void parse_phy_sts_jgr2(const uint8_t *physts, uint16_t physts_len,
       a.evm[i] = static_cast<int8_t>(physts[16 + i]);
       a.snr[i] = static_cast<int8_t>(physts[24 + i]);
     }
+    /* DW1 byte7 flags: [5]=ldpc [6]=stbc [7]=beamformed (phy_sts_rpt_jgr2_type1).
+     * DW1 byte5: l_rxsc[3:0] / ht_rxsc[7:4]; the vendor derives RX bandwidth from
+     * the active rxsc (legacy OFDM uses l_rxsc, HT/VHT uses ht_rxsc): rxsc 1-8 =
+     * 20, 9-12 = 40, >=13 = 80 MHz (phydm_get_phy_sts_type1). */
+    const uint8_t f7 = physts[7];
+    a.ldpc = (f7 >> 5) & 1;
+    a.stbc = (f7 >> 6) & 1;
+    const uint8_t l_rxsc = physts[5] & 0x0f, ht_rxsc = (physts[5] >> 4) & 0x0f;
+    const uint8_t rxsc = (a.data_rate >= 4 && a.data_rate <= 11) ? l_rxsc : ht_rxsc;
+    a.bw = rxsc >= 13 ? 2 : rxsc >= 9 ? 1 : 0;
   }
 }
 

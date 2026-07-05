@@ -442,10 +442,15 @@ bool HalmacJaguar2MacInit::init_mac_cfg(ChannelWidth_t bw) {
   return true;
 }
 
-/* init_protocol_cfg_8822b */
+/* init_protocol_cfg_8822b / _8821c */
 void HalmacJaguar2MacInit::init_protocol_cfg() {
-  _device.rtw_write8(REG_SW_AMPDU_BURST_MODE_CTRL,
-                     _device.rtw_read8(REG_SW_AMPDU_BURST_MODE_CTRL) & ~(1u << 6));
+  /* The SW_AMPDU_BURST_MODE_CTRL (0x04BC) BIT6 clear is 8822B-only
+   * (halmac_init_8822b.c:759); the 8821C init_protocol_cfg starts at
+   * REG_AMPDU_MAX_TIME_V1 with no 0x04BC write. */
+  if (_variant != ChipVariant::C8821C)
+    _device.rtw_write8(REG_SW_AMPDU_BURST_MODE_CTRL,
+                       _device.rtw_read8(REG_SW_AMPDU_BURST_MODE_CTRL) &
+                           ~(1u << 6));
   _device.rtw_write8(REG_AMPDU_MAX_TIME_V1, WLAN_AMPDU_MAX_TIME);
   _device.rtw_write8(REG_TX_HANG_CTRL,
                      _device.rtw_read8(REG_TX_HANG_CTRL) | BIT_EN_EOF_V1);

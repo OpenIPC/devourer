@@ -38,16 +38,38 @@ HalmacJaguar2Fw::HalmacJaguar2Fw(RtlUsbAdapter device, Logger_t logger,
 bool HalmacJaguar2Fw::download_default_firmware() {
   /* Select the bundled NIC image for this chip. The HalMAC DLFW state machine
    * (download_firmware) is generation-shared; only the blob differs. */
+  const uint8_t *fw = nullptr;
+  size_t fw_len = 0;
 #if defined(DEVOURER_HAVE_JAGUAR2_8821C)
-  if (_variant == ChipVariant::C8821C)
-    return download_firmware(array_mp_8821c_fw_nic, array_mp_8821c_fw_nic_len);
+  if (_variant == ChipVariant::C8821C) {
+    fw = array_mp_8821c_fw_nic;
+    fw_len = array_mp_8821c_fw_nic_len;
+  }
 #endif
 #if defined(DEVOURER_HAVE_JAGUAR2_8822B)
-  return download_firmware(array_mp_8822b_fw_nic, array_mp_8822b_fw_nic_len);
-#else
-  _logger->error("HalmacJaguar2Fw: no firmware blob compiled for this variant");
-  return false;
+  if (_variant == ChipVariant::C8822B) {
+    fw = array_mp_8822b_fw_nic;
+    fw_len = array_mp_8822b_fw_nic_len;
+  }
 #endif
+  if (fw == nullptr) {
+    _logger->error("HalmacJaguar2Fw: no firmware blob compiled for this variant");
+    return false;
+  }
+
+  /* Retry the whole DLFW on a transient FW-boot hang. download_firmware()
+   * re-disables + platform-resets the WLAN CPU on entry, so a re-attempt starts
+   * from a clean CPU state. The combo chip occasionally leaves the coex/CPU
+   * subsystem mid-transition when re-initialised from a warm state and the
+   * 0x80=0xC078 boot handshake never asserts; a fresh download always boots. */
+  constexpr int kMaxTries = 3;
+  for (int t = 0; t < kMaxTries; t++) {
+    if (download_firmware(fw, fw_len))
+      return true;
+    _logger->error("Jaguar2 DLFW: attempt {}/{} failed — retrying", t + 1,
+                   kMaxTries);
+  }
+  return false;
 }
 
 uint8_t HalmacJaguar2Fw::r8(uint16_t reg) { return _device.rtw_read8(reg); }
@@ -107,6 +129,41 @@ void HalmacJaguar2Fw::pltfm_reset() {
      static_cast<uint8_t>(r8(REG_CPU_DMEM_CON + 2) | 0x1));
   w8(REG_SYS_CLK_CTRL + 1,
      static_cast<uint8_t>(r8(REG_SYS_CLK_CTRL + 1) | (1u << 6)));
+}
+
+/* WL2LTECOEX indirect register access (ltecoex_reg_read/write_88xx,
+ * halmac_common_88xx.c). Ctrl 0x1700, write-data 0x1704, read-data 0x1708; the
+ * ready handshake is CTRL+3 BIT5. The DLFW flow reads offset 0x38 up front and
+ * restores it at the end — the read's ready-poll also synchronises the LTE/BT
+ * coex subsystem (which on this combo shares the WLAN CPU) before the CPU is
+ * reset and re-booted, without which the FW-boot handshake (0x80=0xC078)
+ * intermittently hangs. */
+bool HalmacJaguar2Fw::ltecoex_read(uint16_t offset, uint32_t &val) {
+  uint32_t cnt = 10000;
+  while ((r8(0x1700 + 3) & (1u << 5)) == 0) {
+    if (cnt-- == 0) {
+      _logger->error("Jaguar2 DLFW: ltecoex not ready (R)");
+      return false;
+    }
+    delay_us(50);
+  }
+  w32(0x1700, 0x800F0000u | offset);
+  val = r32(0x1708);
+  return true;
+}
+
+bool HalmacJaguar2Fw::ltecoex_write(uint16_t offset, uint32_t val) {
+  uint32_t cnt = 10000;
+  while ((r8(0x1700 + 3) & (1u << 5)) == 0) {
+    if (cnt-- == 0) {
+      _logger->error("Jaguar2 DLFW: ltecoex not ready (W)");
+      return false;
+    }
+    delay_us(50);
+  }
+  w32(0x1704, val);
+  w32(0x1700, 0xC00F0000u | offset);
+  return true;
 }
 
 bool HalmacJaguar2Fw::iddma_en(uint32_t src, uint32_t dest, uint32_t ctrl) {
@@ -341,6 +398,12 @@ bool HalmacJaguar2Fw::download_firmware(const uint8_t *fw_bin, size_t size) {
   if (!chk_fw_size(fw_bin, size))
     return false;
 
+  /* Back up the LTE/BT-coex register 0x38 across the download (vendor
+   * download_firmware_88xx). The read also polls the coex-ready handshake,
+   * synchronising the subsystem before the CPU is reset. */
+  uint32_t lte_coex_backup = 0;
+  ltecoex_read(0x38, lte_coex_backup);
+
   wlan_cpu_en(false);
 
   struct Bkp { uint16_t reg; uint8_t len; uint32_t val; };
@@ -390,8 +453,10 @@ bool HalmacJaguar2Fw::download_firmware(const uint8_t *fw_bin, size_t size) {
     w8(REG_MCUFW_CTRL, static_cast<uint8_t>(r8(REG_MCUFW_CTRL) & ~0x1));
     w8(REG_SYS_FUNC_EN + 1,
        static_cast<uint8_t>(r8(REG_SYS_FUNC_EN + 1) | (1u << 2)));
+    ltecoex_write(0x38, lte_coex_backup);
     return false;
   }
+  ltecoex_write(0x38, lte_coex_backup);
   return true;
 }
 

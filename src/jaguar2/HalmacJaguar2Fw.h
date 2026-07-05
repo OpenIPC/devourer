@@ -53,6 +53,8 @@ private:
   bool dlfw_end_flow();
   void wlan_cpu_en(bool enable);
   void pltfm_reset();
+  bool ltecoex_read(uint16_t offset, uint32_t &val);
+  bool ltecoex_write(uint16_t offset, uint32_t val);
   bool chk_fw_size(const uint8_t *fw_bin, size_t size);
   bool send_fw_page(uint16_t pg_addr, const uint8_t *chunk, uint32_t size);
 

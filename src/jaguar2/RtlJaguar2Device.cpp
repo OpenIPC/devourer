@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "BeamformingSounder.h"
+#include "ChannelFreq.h" /* radiotap CHANNEL freq -> channel (per-packet hop) */
 #include "FrameParserJaguar2.h"
 #include "Jaguar2Calibration.h"
 #include "NhmReader.h"
@@ -559,6 +560,8 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
   ChannelWidth_t bwidth = CHANNEL_WIDTH_20;
   bool vht = (radiotap_length != 0x0d);
   bool rate_from_radiotap = false;
+  /* Per-packet hop target from a radiotap CHANNEL field (0 = none present). */
+  int radiotap_channel = 0;
 
   auto *rtap_hdr = reinterpret_cast<struct ieee80211_radiotap_header *>(
       const_cast<uint8_t *>(packet));
@@ -573,6 +576,13 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
     case IEEE80211_RADIOTAP_RATE:
       fixed_rate = *it.this_arg;
       rate_from_radiotap = true;
+      break;
+    case IEEE80211_RADIOTAP_CHANNEL:
+      /* 2 x __le16: frequency (MHz), then flags. Frequency is authoritative
+       * for the per-packet hop target; flags are ignored (rate/BW come from
+       * the RATE/MCS/VHT fields). Same contract as the Jaguar1/Jaguar3 paths. */
+      radiotap_channel =
+          devourer::freq_to_chan(get_unaligned_le16(it.this_arg));
       break;
     case IEEE80211_RADIOTAP_MCS: {
       uint8_t mcs_flags = it.this_arg[1];
@@ -619,6 +629,13 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
       break;
     }
   }
+
+  /* Radiotap CHANNEL is authoritative for per-packet frequency, exactly as
+   * RATE/MCS are for rate: a frame asking for a different channel triggers a
+   * lean FastRetune before the descriptor is built (same contract as the
+   * Jaguar1/Jaguar3 paths). */
+  if (radiotap_channel > 0 && radiotap_channel != _channel.Channel)
+    FastRetune(static_cast<uint8_t>(radiotap_channel), /*cache_rf=*/true);
 
   /* Rate-less frame -> apply the SetTxMode default; per-packet radiotap wins. */
   if (!rate_from_radiotap && _tx_mode_default.has_value()) {

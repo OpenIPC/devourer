@@ -1185,6 +1185,15 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
     wr(0x04, ofdm_idx); wr(0x08, ofdm_idx);
     wr(0x0c, ht1_idx);  wr(0x10, ht1_idx);
     wr(0x14, ht2_idx);  wr(0x18, ht2_idx);
+    /* VHT1SS — the 8821C's AC mode — uses the same 1SS BW base as HT1SS, and the
+     * vendor efuse-calibrates it (config_phydm_write_txagc_8821c writes hw_rate
+     * up to VHT; 0x2c-0x35 = VHT1SS MCS0-9 -> regs 0x1d2c/0x1d30/0x1d34). Without
+     * this VHT TXAGC stays at the BB-table default — uncalibrated and
+     * inconsistent with the CCK/OFDM/HT rates above. 8821C-only so the 8822B's
+     * VHT2SS handling stays byte-identical. */
+    if (_variant == ChipVariant::C8821C) {
+      wr(0x2c, ht1_idx); wr(0x30, ht1_idx); wr(0x34, ht1_idx);
+    }
 
     _logger->info("Jaguar2: TXAGC path {} ch{} {} (g{}): CCK={:#x} OFDM={:#x} "
                   "HT1SS={:#x} HT2SS={:#x} (bw40_base={})", path, channel,

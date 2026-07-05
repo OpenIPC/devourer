@@ -20,6 +20,12 @@
 # channel 36 (5 GHz): the 2.4 GHz ISM band's ambient swings cell means by
 # several dB run-to-run (observed on ch6), swamping a few-step delta.
 #
+# MAGNITUDE CAVEAT: at bench range the B210 front end compresses on the DUT's
+# frames at any RX gain (see tests/txpwr_offset_onair.sh, which measures TXAGC
+# slope with a chip ground-station for exactly this reason), so the measured
+# A-B delta is compressed toward zero — treat it as a lower bound and rely on
+# the direction + the bounded-delta gate, not the dB value.
+#
 # Usage: sudo -v && tests/txpwr_vht_onair_ab.sh [ch] (default 36; 8822BU T3U)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

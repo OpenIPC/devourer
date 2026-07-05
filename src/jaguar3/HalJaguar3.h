@@ -135,6 +135,11 @@ public:
   void coex_keepalive() { _cal->coex_keepalive(); }
   void coex_run_5g() { _cal->coex_run_5g(); }
   void pwr_track() { _cal->pwr_track(); }
+  /* One-shot thermal-meter read for GetThermalStatus (see Jaguar3Calibration).
+   * Caller serializes against pwr_track (same RF 0x42 trigger RMW). */
+  bool read_thermal(uint8_t &raw, uint8_t &baseline) {
+    return _cal ? _cal->read_thermal(raw, baseline) : false;
+  }
 
   /* Runtime H2C (host-to-firmware) over the HMEBOX mailboxes (port of
    * rtw_fw_send_h2c_command): 8-byte command, round-robin across 4 boxes. */

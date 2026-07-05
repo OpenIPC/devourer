@@ -70,8 +70,12 @@ public:
    * (the DEVOURER_TX_PWR debug knob) the per-rate diff table is flattened so
    * every rate emits at `idx`. With zero_diffs=false (the default bring-up path)
    * the diff table applied by the BB tables is preserved, so per-rate spread is
-   * kept and only the reference base is programmed. */
-  void set_tx_power_ref(uint8_t idx, bool zero_diffs = true);
+   * kept and only the reference base is programmed. skip_path_b_ofdm_ref leaves
+   * 0x41e8 at its table default — the 8822E TX+RX RX-desense quirk (see
+   * apply_power_by_rate_8822e); previously a flat override on a TX+RX session
+   * wrote it unconditionally and deafened the EU's RX. */
+  void set_tx_power_ref(uint8_t idx, bool zero_diffs = true,
+                        bool skip_path_b_ofdm_ref = false);
 
   /* Apply the 8822e phy_reg_pg power-by-rate table for `channel`'s band: sets
    * the OFDM/CCK reference PER PATH (ref_a -> 0x18e8/0x18a0, ref_b -> 0x41e8/
@@ -89,6 +93,18 @@ public:
    * table-default reference. */
   void apply_power_by_rate_8822e(uint8_t channel, uint8_t ref_a, uint8_t ref_b,
                                  bool skip_path_b_ofdm_ref = false);
+
+  /* Light TX-power step (8822e): just the gated reference writes of
+   * apply_power_by_rate_8822e — 0x18e8[16:10] (path-A OFDM), optionally
+   * 0x41e8[16:10] (path B, same RX-desense hazard/flag as above),
+   * 0x18a0/0x41a0[22:16] (CCK) — WITHOUT the 0x3a00 per-rate diff walk. The
+   * diff table is offset-invariant (an offset shifts the reference anchor;
+   * the calibrated per-rate shape rides on top), so a runtime offset step is
+   * ~8 register ops instead of the full by-rate apply. Refs are clamped to
+   * the 7-bit field here — the BB masked write truncates mod 128, so an
+   * unclamped over-range ref would wrap to near-zero TX silently. */
+  void apply_tx_power_refs_8822e(uint8_t ref_a, uint8_t ref_b,
+                                 bool skip_path_b_ofdm_ref);
 
 private:
   /* Jaguar3 baseband bandwidth/clock registers (from

@@ -75,6 +75,13 @@ public:
    * first call (chip is coldest at bring-up). */
   void pwr_track() override;
 
+  /* One-shot path-A meter read for GetThermalStatus (see Jaguar3Calibration):
+   * trigger + read RF 0x42[6:1], like a pwr_track tick without the swing
+   * write. No efuse thermal baseline is wired on the CU, so the baseline is
+   * the first-read cold reference (delta = "since first read"); shares
+   * _thermal_ref[0] with pwr_track so both agree on the reference. */
+  bool read_thermal(uint8_t &raw, uint8_t &baseline) override;
+
   /* Light periodic re-assertion of the WiFi-only coex state (no RF/BB writes):
    * re-disable the LTE/BT arbitration and re-grant the antenna to WL, in case
    * the coex firmware re-enables it. Safe to call on the TX hot path. */

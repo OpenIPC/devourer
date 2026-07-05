@@ -85,8 +85,11 @@ last_canary() { # $1 = log file  (same extractor as hop_parity_check.sh)
 
 # Run-variant registers excluded from the parity diff (same list the
 # hop-parity canary uses): TSF, IQK/RxIQC measurement jitter, live AGC /
-# thermal RF words (RF 0x00 / 0x42 — hop_parity_check.sh's LIVE list).
-PARITY_EXCLUDE='MAC 0x560|BB 0xc10|BB 0xc14|BB 0xe10|BB 0xe14|BB 0xc90|BB 0xc94|BB 0xe90|BB 0xe94|RF\[[AB]\] 0x00 |RF\[[AB]\] 0x42 '
+# thermal RF words (RF 0x00 / 0x42 — hop_parity_check.sh's LIVE list), and
+# the 8822E RXBB word RF 0x1a — its bit 18 latches prior-session residue
+# (the chip retains state across soft re-init; A/B/A/B standalone runs of
+# both builds read identically, only the in-script cell ordering flips it).
+PARITY_EXCLUDE='MAC 0x560|BB 0xc10|BB 0xc14|BB 0xe10|BB 0xe14|BB 0xc90|BB 0xc94|BB 0xe90|BB 0xe94|RF\[[AB]\] 0x00 |RF\[[AB]\] 0x42 |RF\[[AB]\] 0x1a '
 
 ensure_master_build() {
     [ -x "$MASTER_BUILD/WiFiDriverTxDemo" ] && return 0
@@ -151,13 +154,23 @@ for dut in "${DUTS[@]}"; do
         run_canary "$TX_DEMO" "$PID" "$VID" "$CH_A" "$OUT/$tag-canary-new.log"
         last_canary "$OUT/$tag-canary-master.log" | grep -Ev "$PARITY_EXCLUDE" >"$OUT/$tag-canary-master.regs"
         last_canary "$OUT/$tag-canary-new.log"    | grep -Ev "$PARITY_EXCLUDE" >"$OUT/$tag-canary-new.regs"
+        # Compare on the INTERSECTION of dumped addresses: this branch adds
+        # registers to the canary (e.g. the Jaguar3 TXAGC refs) that master
+        # doesn't dump — additions are reported, not failed; every register
+        # master dumps must be byte-identical.
+        rm -f "$OUT/$tag-common-master.regs" "$OUT/$tag-common-new.regs"
+        awk 'NR==FNR { m[$1" "$2]=$0; next }
+             ($1" "$2) in m { print m[$1" "$2] >> "'"$OUT/$tag-common-master.regs"'";
+                              print $0        >> "'"$OUT/$tag-common-new.regs"'" }' \
+            "$OUT/$tag-canary-master.regs" "$OUT/$tag-canary-new.regs"
+        added=$(( $(wc -l <"$OUT/$tag-canary-new.regs") - $(wc -l <"$OUT/$tag-common-new.regs" 2>/dev/null || echo 0) ))
         if [ ! -s "$OUT/$tag-canary-master.regs" ]; then
             skip "$name parity (no canary block from master build — family lacks DUMP_CANARY?)"
-        elif diff -q "$OUT/$tag-canary-master.regs" "$OUT/$tag-canary-new.regs" >/dev/null; then
-            pass "$name parity: canary byte-identical to master ($(wc -l <"$OUT/$tag-canary-new.regs") regs)"
+        elif diff -q "$OUT/$tag-common-master.regs" "$OUT/$tag-common-new.regs" >/dev/null 2>&1; then
+            pass "$name parity: canary byte-identical to master ($(wc -l <"$OUT/$tag-common-new.regs") regs common, $added new-only)"
         else
-            fail "$name parity: canary diverged from master ($OUT/$tag-canary-{master,new}.regs)"
-            diff "$OUT/$tag-canary-master.regs" "$OUT/$tag-canary-new.regs" | head -8 | sed 's/^/    /'
+            fail "$name parity: canary diverged from master ($OUT/$tag-common-{master,new}.regs)"
+            diff "$OUT/$tag-common-master.regs" "$OUT/$tag-common-new.regs" | head -8 | sed 's/^/    /'
         fi
         # Jaguar2's canary omits the TXAGC block; the bring-up log carries the
         # computed per-section indices — compare those (the fold refactor must
@@ -251,6 +264,53 @@ for dut in "${DUTS[@]}"; do
         pass "$name sticky-fast: FastRetune left TXAGC untouched"
     else
         fail "$name sticky-fast: ofdm $ofdm_sw->$ofdm_rt mcs7 $mcs7_sw->$mcs7_rt across FastRetune"
+    fi
+
+    # -- 8822E TX+RX 0x41e8 quirk: no offset churn may write the path-B OFDM
+    #    ref while RX is alive (any nonzero value desenses the EU's RX).
+    #    Canary #1 dumps at the InitWrite channel-set (pre-power, BB-table
+    #    default); canary #2 at --switch-channel still holds the FIRST
+    #    channel's applied refs (the re-apply runs after the dump). TX-only:
+    #    0x41e8 ref must move between the dumps (written); TX+RX: it must be
+    #    IDENTICAL (never written) while path A (0x18e8) moves in both.
+    if [ "$PID" = "0xa81a" ]; then
+        qref() { # $1=log $2=reg $3=which(1=first,2=last) -> 7-bit ref field
+            python3 - "$1" "$2" "$3" <<'PYEOF'
+import re, sys
+log, reg, which = sys.argv[1], sys.argv[2].lower(), int(sys.argv[3])
+vals = [int(m.group(1), 16) for m in
+        re.finditer(r"BB 0x0*" + reg.replace("0x", "") + r" = 0x([0-9A-Fa-f]+)",
+                    open(log).read())]
+if not vals:
+    print("nan"); sys.exit(0)
+v = vals[0] if which == 1 else vals[-1]
+print((v >> 10) & 0x7f)
+PYEOF
+        }
+        qt="$OUT/$tag-quirk-txonly.log"; qr="$OUT/$tag-quirk-txrx.log"
+        sudo -n env DEVOURER_DUMP_CANARY=1 timeout 90 "$STEP_DEMO" \
+            --vid "$VID" --pid "$PID" --channel "$CH_A" \
+            --offset-start -24 --offset-stop -24 --switch-channel "$CH_B" \
+            >"$qt" 2>&1
+        sudo -n env DEVOURER_DUMP_CANARY=1 DEVOURER_TX_WITH_RX=thread \
+            timeout 90 "$STEP_DEMO" \
+            --vid "$VID" --pid "$PID" --channel "$CH_A" \
+            --offset-start -24 --offset-stop -24 --switch-channel "$CH_B" \
+            >"$qr" 2>&1
+        b1_txonly="$(qref "$qt" 41e8 1)"; b2_txonly="$(qref "$qt" 41e8 2)"
+        b1_txrx="$(qref "$qr" 41e8 1)";   b2_txrx="$(qref "$qr" 41e8 2)"
+        a1_txrx="$(qref "$qr" 18e8 1)";   a2_txrx="$(qref "$qr" 18e8 2)"
+        if [ "$b1_txrx" = "nan" ] || [ "$a1_txrx" = "nan" ]; then
+            fail "$name quirk-41e8: no canary refs in TX+RX run"
+        elif [ "$b1_txrx" != "$b2_txrx" ]; then
+            fail "$name quirk-41e8: TX+RX run WROTE 0x41e8 ($b1_txrx -> $b2_txrx) — EU RX desense"
+        elif [ "$a1_txrx" = "$a2_txrx" ]; then
+            fail "$name quirk-41e8: TX+RX run never applied path-A power (0x18e8 $a1_txrx unchanged)"
+        elif [ "$b1_txonly" = "$b2_txonly" ]; then
+            fail "$name quirk-41e8: TX-only run did NOT write 0x41e8 ($b1_txonly) — path-B power missing"
+        else
+            pass "$name quirk-41e8: TX+RX kept 0x41e8 at table default ($b1_txrx) while path A moved ($a1_txrx->$a2_txrx); TX-only wrote it ($b1_txonly->$b2_txonly)"
+        fi
     fi
 done
 

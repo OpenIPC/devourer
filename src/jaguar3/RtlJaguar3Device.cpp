@@ -41,6 +41,7 @@ RtlJaguar3Device::RtlJaguar3Device(RtlUsbAdapter device, Logger_t logger,
 void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
   _channel = channel;
+  _rx_wanted = true; /* RX-side bring-up: no TXAGC apply may touch 0x41e8 */
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
   /* Tune the channel/bandwidth (5/10 MHz ChannelWidth re-clocks to narrowband),
    * then run IQK calibration (it reads RF18 for the tuned channel). */
@@ -51,6 +52,7 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
   _hal.config_rfe(channel.Channel); /* 8822e RFE/PAPE antenna-switch pins */
   _hal.config_channel_8822e(channel.Channel); /* 8822e band TX scaling/backoff + shaping */
   _hal.coex_wlan_only_init(); /* lock antenna to WLAN (disable BT/LTE coex) */
+  _brought_up = true;
 
   /* DEVOURER_BF_ARM_BFEE=aa:bb:cc:dd:ee:ff — beamforming self-sounding probe
    * (beamformee side), Jaguar-3 variant. Arms the hardware CSI responder to
@@ -277,6 +279,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * after the coex/FW steps leaves the RX path dead, and the register RMWs
    * race the running TX). */
   const bool want_rx = std::getenv("DEVOURER_TX_WITH_RX") != nullptr;
+  _rx_wanted = want_rx; /* consumed by every TXAGC ref write (0x41e8 quirk) */
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
   _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                       channel.ChannelWidth);
@@ -327,38 +330,11 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     return;
   }
 
-  if (_tx_pwr_override >= 0) {
-    _radioManagement.set_tx_power_ref(static_cast<uint8_t>(_tx_pwr_override));
-  } else if (_variant == jaguar3::ChipVariant::C8822E) {
-    /* Default TX power (8822e). The TXAGC reference base is the per-channel 5 GHz
-     * power index the kernel programs. It reads that from the efuse power-by-rate
-     * table (logical 0x22 path A / 0x4C path B, per channel-group); when the byte
-     * is valid (<= txgi_max 127) we use it verbatim for kernel-faithful
-     * per-channel power. On bare modules the byte is unprogrammed (0xFF); the
-     * kernel's own fallback there is a fixed default (0x33 for the plain path,
-     * reshaped by the TSSI codeword on 8822e), and devourer falls back to
-     * JAGUAR3_TXPWR_REF_BASE — an empirically on-air-matched default that is not
-     * below the kernel's. The per-rate diffs come from the BB phy_reg_pg table
-     * (apply_power_by_rate_8822e); full TSSI-offset power-by-rate is a follow-up. */
-    uint8_t efuse_a = 0xFF, efuse_b = 0xFF;
-    _hal.read_efuse_txpwr_base_8822e(channel.Channel, efuse_a, efuse_b);
-    uint8_t ref_a = (efuse_a <= 127) ? efuse_a : JAGUAR3_TXPWR_REF_BASE;
-    uint8_t ref_b = (efuse_b <= 127) ? efuse_b : JAGUAR3_TXPWR_REF_BASE;
-    /* TX+RX mode: the path-B OFDM reference (0x41e8) desenses the EU's RX
-     * (hardware-bisected, value-independent) — skip that one write and keep
-     * the rest of the per-rate power intact. See apply_power_by_rate_8822e. */
-    _radioManagement.apply_power_by_rate_8822e(channel.Channel, ref_a, ref_b,
-                                               /*skip_path_b_ofdm_ref=*/want_rx);
-    if (want_rx)
-      _logger->info("Jaguar3(8822e): TX+RX mode — path-B OFDM TXAGC ref left "
-                    "at table default (keeps RX alive)");
-  } else {
-    /* 8822c (CU): preserve the flat reference the demo used to impose (40) so
-     * the SDR-validated CU TX power is unchanged now that the demo no longer
-     * sets it. The CU's efuse-calibrated per-rate default is a follow-up. */
-    _radioManagement.set_tx_power_ref(JAGUAR3_TXPWR_REF_BASE_8822C,
-                                      /*zero_diffs=*/true);
-  }
+  /* TXAGC from the current runtime-knob state (flat override / offset folded
+   * onto the efuse-calibrated refs) — see apply_tx_power_current. Pre-coex,
+   * so no _reg_mu needed here. */
+  apply_tx_power_current(/*full=*/true);
+  _brought_up = true;
   /* WiFi-only coex bring-up: disable the BT/LTE antenna arbitration and lock the
    * antenna to WLAN so on-air TX is not killed by the coex firmware. */
   _hal.coex_wlan_only_init();
@@ -655,9 +631,17 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
    * radio-management core directly (no lock needed: the coex thread isn't
    * running yet), so locking here cannot self-deadlock. */
   std::lock_guard<std::mutex> lk(_reg_mu);
+  const bool ch_changed = channel.Channel != _channel.Channel;
   _channel = channel;
   _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                       channel.ChannelWidth);
+  /* Runtime TX-power knobs in use: re-fold them against the NEW channel
+   * group's efuse refs (8822E bases are per-group). Gated on a knob being
+   * active so the legacy no-knob path stays byte-identical. */
+  if (ch_changed)
+    _pwr_ref_valid = false;
+  if (_brought_up && (_tx_pwr_offset_steps != 0 || _tx_pwr_override >= 0))
+    apply_tx_power_current(/*full=*/true);
 }
 
 void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
@@ -677,12 +661,184 @@ void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
 }
 
 void RtlJaguar3Device::SetTxPower(uint8_t power) {
-  /* Record a flat TXAGC reference override; applied during InitWrite (may be
-   * called before bring-up). Without it the chip uses its efuse-calibrated
-   * power. If the device is already brought up, apply immediately. */
-  _tx_pwr_override = power;
-  if (_coex_thread.joinable())
-    _radioManagement.set_tx_power_ref(power);
+  /* Legacy entry point — same knob as SetTxPowerIndexOverride. (The previous
+   * post-bring-up live apply called set_tx_power_ref with NO _reg_mu — racing
+   * the coex tick's pwr_track RMW on the same 0x18a0/0x41a0 dwords — and
+   * unconditionally re-zeroed the 8822E per-rate diffs + wrote the 0x41e8
+   * path-B ref even in TX+RX mode. The unified path fixes all three.) */
+  SetTxPowerIndexOverride(power);
+}
+
+/* Re-program TXAGC from the current knob state (see header). The 0x41e8
+ * TX+RX quirk is 8822E-specific, so the skip flag is derived here — once —
+ * from _rx_wanted AND the variant; the 8822C keeps its path-B ref writes. */
+void RtlJaguar3Device::apply_tx_power_current(bool full) {
+  const int off = _tx_pwr_offset_steps;
+  const int flat = _tx_pwr_override;
+  const bool skip_b =
+      _rx_wanted && _variant == jaguar3::ChipVariant::C8822E;
+  _txpwr_sat_low = false;
+  _txpwr_sat_high = false;
+  auto clamp127 = [&](int v) -> uint8_t {
+    if (v < 0) {
+      v = 0;
+      _txpwr_sat_low = true;
+    }
+    if (v > 0x7f) {
+      v = 0x7f;
+      _txpwr_sat_high = true;
+    }
+    return static_cast<uint8_t>(v);
+  };
+
+  if (flat >= 0) {
+    /* Flat semantics: reference = flat + offset, per-rate diffs zeroed (once —
+     * offset-only steps skip the 32-dword re-zero). */
+    _radioManagement.set_tx_power_ref(clamp127(flat + off),
+                                      /*zero_diffs=*/!_diffs_zeroed, skip_b);
+    _diffs_zeroed = true;
+    return;
+  }
+
+  if (_variant == jaguar3::ChipVariant::C8822E) {
+    /* Default TX power (8822e). The TXAGC reference base is the per-channel
+     * power index the kernel programs, from the efuse power-by-rate table
+     * (logical 0x22 path A / 0x4C path B, per channel-group); when the byte is
+     * valid (<= txgi_max 127) it is used verbatim for kernel-faithful
+     * per-channel power. On bare modules the byte is unprogrammed (0xFF) and
+     * devourer falls back to JAGUAR3_TXPWR_REF_BASE — an empirically
+     * on-air-matched default that is not below the kernel's. The per-rate
+     * diffs come from the BB phy_reg_pg table (apply_power_by_rate_8822e);
+     * full TSSI-offset power-by-rate is a follow-up. The derived base refs
+     * are cached so an offset-only step is just the light ref writes. */
+    if (full || !_pwr_ref_valid) {
+      uint8_t efuse_a = 0xFF, efuse_b = 0xFF;
+      _hal.read_efuse_txpwr_base_8822e(_channel.Channel, efuse_a, efuse_b);
+      _pwr_ref_a = (efuse_a <= 127) ? efuse_a : JAGUAR3_TXPWR_REF_BASE;
+      _pwr_ref_b = (efuse_b <= 127) ? efuse_b : JAGUAR3_TXPWR_REF_BASE;
+      _pwr_ref_valid = true;
+    }
+    const uint8_t ra = clamp127(static_cast<int>(_pwr_ref_a) + off);
+    const uint8_t rb = clamp127(static_cast<int>(_pwr_ref_b) + off);
+    if (full || _diffs_zeroed) {
+      /* Full apply: refs + the per-rate diff walk (also the path back from
+       * flat semantics, which zeroed the diffs). */
+      _radioManagement.apply_power_by_rate_8822e(_channel.Channel, ra, rb,
+                                                 skip_b);
+      _diffs_zeroed = false;
+      if (skip_b)
+        _logger->info("Jaguar3(8822e): TX+RX mode — path-B OFDM TXAGC ref left "
+                      "at table default (keeps RX alive)");
+    } else {
+      _radioManagement.apply_tx_power_refs_8822e(ra, rb, skip_b);
+    }
+    return;
+  }
+
+  /* 8822c (CU): preserve the flat reference the demo used to impose (40) so
+   * the SDR-validated CU TX power is unchanged. The CU's efuse-calibrated
+   * per-rate default is a follow-up; the offset shifts this reference. */
+  _radioManagement.set_tx_power_ref(
+      clamp127(static_cast<int>(JAGUAR3_TXPWR_REF_BASE_8822C) + off),
+      /*zero_diffs=*/!_diffs_zeroed, skip_b);
+  _diffs_zeroed = true;
+}
+
+devourer::TxPowerCaps RtlJaguar3Device::GetTxPowerCaps() {
+  devourer::TxPowerCaps caps;
+  caps.supported = true;
+  caps.index_max = 127;
+  caps.step_qdb = 1; /* 0.25 dB per reference step (RtlJaguar3Device.cpp:22) */
+  caps.step_measured = false;
+  caps.offset_min_qdb = -127;
+  caps.offset_max_qdb = 127;
+  return caps;
+}
+
+int RtlJaguar3Device::SetTxPowerOffsetQdb(int qdb) {
+  if (_cw_active) {
+    _logger->warn("SetTxPowerOffsetQdb refused: CW tone active (TXAGC does "
+                  "not modulate a bare LO carrier)");
+    return 0;
+  }
+  int steps = 0;
+  const int applied = devourer::quantize_offset_qdb(qdb, GetTxPowerCaps(),
+                                                    &steps);
+  _tx_pwr_offset_steps = steps;
+  if (_brought_up) {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    apply_tx_power_current(/*full=*/false);
+  }
+  _logger->info("TX-power offset: {} qdB requested -> {} qdB applied "
+                "({} steps){}",
+                qdb, applied, steps,
+                _brought_up ? "" : " (recorded; applies at bring-up)");
+  return applied;
+}
+
+void RtlJaguar3Device::SetTxPowerIndexOverride(int idx) {
+  if (_cw_active) {
+    _logger->warn("SetTxPowerIndexOverride refused: CW tone active");
+    return;
+  }
+  _tx_pwr_override = idx < 0 ? -1 : (idx > 0x7f ? 0x7f : idx);
+  if (_brought_up) {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    /* Clearing back to the efuse baseline needs the full apply (the flat
+     * override zeroed the 8822E per-rate diffs). */
+    apply_tx_power_current(/*full=*/idx < 0);
+  }
+}
+
+bool RtlJaguar3Device::ReApplyTxPower() {
+  if (!_brought_up || _cw_active)
+    return false;
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  apply_tx_power_current(/*full=*/true);
+  return true;
+}
+
+devourer::TxPowerState RtlJaguar3Device::GetTxPowerState() {
+  devourer::TxPowerState s;
+  s.valid = true;
+  s.flat_index = static_cast<int16_t>(_tx_pwr_override.load());
+  s.offset_steps = static_cast<int16_t>(_tx_pwr_offset_steps.load());
+  s.offset_qdb = s.offset_steps; /* 1 qdB per step on Jaguar3 */
+  s.saturated_low = _txpwr_sat_low;
+  s.saturated_high = _txpwr_sat_high;
+  if (_brought_up && !_cw_active) {
+    /* Reference readback (the Jaguar3 TXAGC refs ARE readable): OFDM ref
+     * 0x18e8[16:10]; MCS7 is the per-rate diff table's zero anchor, so it
+     * equals the OFDM ref; CCK ref 0x18a0[22:16]. Under _reg_mu for a
+     * coherent snapshot vs the coex tick. */
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    const uint32_t ofdm = (_device.rtw_read32(0x18e8) >> 10) & 0x7f;
+    s.ofdm_index = static_cast<int16_t>(ofdm);
+    s.mcs7_index = static_cast<int16_t>(ofdm);
+    s.cck_index =
+        static_cast<int16_t>((_device.rtw_read32(0x18a0) >> 16) & 0x7f);
+    s.hw_readback = true;
+  }
+  return s;
+}
+
+devourer::ThermalStatus RtlJaguar3Device::GetThermalStatus() {
+  devourer::ThermalStatus t;
+  if (!_brought_up || _cw_active)
+    return t; /* RF reads need a live, non-CW-held chip */
+  uint8_t raw = 0, baseline = 0xFF;
+  bool ok;
+  {
+    /* The meter trigger is an RF 0x42 RMW — the same register the coex
+     * tick's pwr_track toggles. */
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    ok = _hal.read_thermal(raw, baseline);
+  }
+  t.raw = raw;
+  t.baseline = baseline;
+  t.valid = ok && baseline != 0xFF;
+  t.delta = t.valid ? static_cast<int>(raw) - static_cast<int>(baseline) : 0;
+  return t;
 }
 
 bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {

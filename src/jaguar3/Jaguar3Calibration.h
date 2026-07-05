@@ -37,6 +37,18 @@ public:
                                  uint8_t /*thermal_base_b*/,
                                  uint8_t /*channel*/) {}
 
+  /* One-shot thermal-meter read (path A) for IRtlDevice::GetThermalStatus:
+   * `raw` = the live RF 0x42[6:1] reading, `baseline` = the calibration
+   * reference — the efuse baseline on the 8822e (0xFF = unprogrammed), the
+   * first-read cold reference on the 8822c (no efuse baseline is wired on the
+   * CU, so its delta means "since first read"). Read-only apart from the
+   * meter's own one-time enable trigger (RF 0x42[19]) — does NOT write the
+   * pwr_track swing registers. Returns false when unimplemented / the meter
+   * is not ready. Caller must serialize against pwr_track (same trigger RMW). */
+  virtual bool read_thermal(uint8_t & /*raw*/, uint8_t & /*baseline*/) {
+    return false;
+  }
+
   /* Coex antenna control (combo chips). */
   virtual void force_wl_antenna() = 0;
   virtual void coex_wlan_only_init() = 0;

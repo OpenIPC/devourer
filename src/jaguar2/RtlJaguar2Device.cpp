@@ -13,7 +13,7 @@
 
 #include "BeamformingSounder.h"
 #include "FrameParserJaguar2.h"
-#include "Halrf8822b.h"
+#include "Jaguar2Calibration.h"
 #include "ToneMask.h"
 #include "RateDefinitions.h"
 #include "RxPacket.h"
@@ -22,14 +22,11 @@ extern "C" {
 #include "ieee80211_radiotap.h" /* MRateToHwRate + radiotap iterator */
 }
 
-/* M0 scaffold: the orchestrator compiles and constructs, but bring-up is not yet
- * wired. Each entry point logs and (for the data-path calls) throws/returns so a
- * premature use is loud rather than silently wrong. Milestones M2..M7 replace
- * these bodies with the ported HalMAC / phydm / halrf sub-modules. */
-
-RtlJaguar2Device::RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger)
-    : _device{device}, _logger{logger}, _hal{device, logger},
-      _macinit{device, logger}, _fw{device, logger} {}
+RtlJaguar2Device::RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger,
+                                   jaguar2::ChipVariant variant)
+    : _device{device}, _logger{logger}, _variant{variant},
+      _hal{device, logger, variant}, _macinit{device, logger, variant},
+      _fw{device, logger, variant} {}
 
 RtlJaguar2Device::~RtlJaguar2Device() {
   /* Safety net: restore the chip if a CW tone is still armed. */
@@ -44,13 +41,30 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
    * USB RX-DMA + BB/RF enable -> BB/AGC/RF phydm tables -> TRX mode -> channel
    * -> LCK -> IQK -> coex WL grant -> enable RX/TX MAC engine. */
   const uint8_t bw = static_cast<uint8_t>(channel.ChannelWidth);
-  _macinit.pre_init_system_cfg();
-  _hal.power_on();
-  _hal.read_chip_version();
-  _macinit.init_system_cfg(channel.ChannelWidth, _hal.chip_version().cut);
-  /* Firmware download BEFORE trx/queue config (HalMAC order): running init_trx
-   * first over-allocates the FIFOPAGE queues and wedges the DLFW bcn-valid. */
-  if (!_fw.download_default_firmware())
+  /* DLFW download BEFORE trx/queue config (HalMAC order): running init_trx first
+   * over-allocates the FIFOPAGE queues and wedges the DLFW bcn-valid.
+   *
+   * Retry the FULL power-on + DLFW as a unit. On a warm/idle chip the FW-boot
+   * handshake (0x80=0xC078) intermittently hangs, and re-resetting only the CPU
+   * (download_firmware's own retry) is often not enough — the combo chip needs a
+   * fresh power cycle. The vendor recovers the same way: _halmac_init_hal's
+   * power_on re-toggles OFF/ON on a "warm reboot" (PWR_UNCHANGE) and the driver
+   * layer retries init on failure. Each attempt here re-runs the complete
+   * pre-init -> power-on -> system-cfg -> DLFW, giving the chip a clean slate. */
+  bool fw_ok = false;
+  constexpr int kBringupTries = 4;
+  for (int attempt = 0; attempt < kBringupTries && !fw_ok; attempt++) {
+    if (attempt > 0)
+      _logger->error("RtlJaguar2Device: DLFW failed — full power-cycle retry "
+                     "{}/{}",
+                     attempt + 1, kBringupTries);
+    _macinit.pre_init_system_cfg();
+    _hal.power_on();
+    _hal.read_chip_version();
+    _macinit.init_system_cfg(channel.ChannelWidth, _hal.chip_version().cut);
+    fw_ok = _fw.download_default_firmware();
+  }
+  if (!fw_ok)
     throw std::runtime_error("RtlJaguar2Device: firmware DLFW failed");
   _logger->info("RtlJaguar2Device: firmware booted (bw={})", (int)bw);
 
@@ -75,10 +89,15 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
                       channel.ChannelOffset);
   _hal.do_lck(); /* LC calibration — lock the RF LO */
 
+  /* IQK runs by default on both variants (DEVOURER_SKIP_IQK to skip). The 8821C
+   * halrf_iqk_8821c port reports a clean pass and — with the AFE quad
+   * (0xc58/0xc5c/0xc60/0xc6c) added to its backup/restore so afe_setting(false)'s
+   * IQK-exit values don't persist — no longer disturbs the OFDM/HT TX path. */
   if (!getenv("DEVOURER_SKIP_IQK")) {
-    jaguar2::Halrf8822b halrf(_device, _logger, _hal.chip_version().cut,
-                              _hal.chip_version().rf_2t2r != 0);
-    halrf.iqk_trigger(channel.Channel <= 14);
+    auto cal = jaguar2::make_jaguar2_calibration(
+        _variant, _device, _logger, _hal.chip_version().cut,
+        _hal.chip_version().rf_2t2r != 0);
+    cal->iqk_trigger(channel.Channel <= 14);
   } else {
     _logger->info("Jaguar2: IQK SKIPPED (DEVOURER_SKIP_IQK)");
   }
@@ -95,10 +114,18 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   /* phydm DM-init RFE mux + TXBF init — the kernel runs these from
    * odm_dm_init (phydm_rfe_init) and rtl8822b_phy_bf_init after calibration.
    * devourer previously skipped both, leaving 0x1990=0 (RFE source mux) and
-   * 0x1c94=0x5fff5fff (BB-table default, not the bf_init 0xafffafff). */
+   * 0x1c94=0x5fff5fff (BB-table default, not the bf_init 0xafffafff).
+   * 8821C: phydm_rfe_8821c is #if 0 in the vendor (no RFE-mux writes) so
+   * rfe_init is skipped; the 8821C antenna is routed by switch_rf_set +
+   * coex_wlan_only_8821c. bf_init IS run (rtl8821c_phy_bf_init) but via the
+   * 8821C-specific MU/TXBF setup, not the 8822B 0x1c94-only write. */
   if (!getenv("DEVOURER_SKIP_RFEINIT")) {
-    _hal.rfe_init();
-    _hal.bf_init();
+    if (_variant == jaguar2::ChipVariant::C8821C) {
+      _hal.bf_init_8821c();
+    } else {
+      _hal.rfe_init();
+      _hal.bf_init();
+    }
   }
   /* Program per-rate TXAGC from the EFUSE power-by-rate calibration (the level
    * the kernel uses). DEVOURER_TX_PWR (flat override) applied later in InitWrite
@@ -220,7 +247,20 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         p.RxAtrib.data_rate = f.rx_rate;
         p.RxAtrib.drvinfo_sz = static_cast<uint8_t>(f.drvinfo_size);
         p.RxAtrib.shift_sz = f.shift;
-        p.RxAtrib.pkt_rpt_type = RX_PACKET_TYPE::NORMAL_RX;
+        /* RX desc word2 BIT(28) (GET_RX_DESC_C2H, halmac_rx_desc_nic.h:230) marks
+         * a firmware C2H report, not an 802.11 frame. Tag it so the processor
+         * skips the SA/frame path (the vendor routes C2H to its own handler and
+         * never treats it as a recvframe). Mirrors the Jaguar-1/-3 RX loops. */
+        const bool is_c2h = (data[off + 11] & 0x10) != 0;
+        p.RxAtrib.pkt_rpt_type = is_c2h ? RX_PACKET_TYPE::C2H_PACKET
+                                        : RX_PACKET_TYPE::NORMAL_RX;
+        /* Per-frame RSSI/SNR/EVM from the jgr2 PHY-status (present when
+         * APP_PHYSTS is on, i.e. drvinfo carries the 32-byte report). CCK rates
+         * (DESC_RATE1M..11M = 0..3) use type0, everything else type1. C2H has no
+         * phy-status (drvinfo=0), so the size guard already skips it. */
+        if (!is_c2h && f.drvinfo_size >= 28)
+          jaguar2::parse_phy_sts_jgr2(data + off + jaguar2::RXDESC_SIZE_8822B,
+                                      f.drvinfo_size, f.rx_rate <= 3, p.RxAtrib);
         p.Data =
             std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
         _packetProcessor(p);
@@ -478,6 +518,31 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
                     : (bwidth == CHANNEL_WIDTH_80) ? 2
                                                    : 0;
   uint8_t rate_id = vht ? 9 : 8;
+
+  /* Sub-channel (rtl8821c_sc_mapping): when the frame BW is narrower than the
+   * tuned channel BW, tell the PHY which 20/40 MHz slice it occupies so the
+   * frame lands on the primary rather than the block centre. Same-BW -> 0
+   * (DONT_CARE), byte-identical to the prior behaviour. _channel.ChannelOffset
+   * is the primary_ch_idx (40 MHz: 1=lower/2=upper; 80 MHz: 1..4 lowest..
+   * highest, per off80 = +6/+2/-2/-6). VHT_DATA_SC_* codes from rtw_rf.h. */
+  uint8_t data_sc = 0;
+  {
+    const uint8_t pidx = _channel.ChannelOffset;
+    if (_channel.ChannelWidth == CHANNEL_WIDTH_80) {
+      if (bwidth == CHANNEL_WIDTH_40)
+        data_sc = (pidx <= 2) ? 10 : 9; /* 40 LOWER / UPPER of 80 */
+      else if (bwidth == CHANNEL_WIDTH_20)
+        data_sc = (pidx == 1)   ? 4      /* 20 LOWEST  */
+                  : (pidx == 2) ? 2      /* 20 LOWER   */
+                  : (pidx == 3) ? 1      /* 20 UPPER   */
+                  : (pidx == 4) ? 3      /* 20 UPPERST */
+                                : 0;
+    } else if (_channel.ChannelWidth == CHANNEL_WIDTH_40 &&
+               bwidth == CHANNEL_WIDTH_20) {
+      data_sc = (pidx == 2) ? 1 : (pidx == 1) ? 2 : 0; /* 20 UPPER/LOWER of 40 */
+    }
+  }
+
   const uint8_t *dot11 = packet + radiotap_length;
   bool bmc = frame_len >= 6 && (dot11[4] & 0x01);
 
@@ -500,7 +565,7 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
   jaguar2::fill_data_tx_desc_8822b(
       usb_frame.data(), static_cast<uint16_t>(frame_len),
       MRateToHwRate(fixed_rate), rate_id, bw_desc, sgi != 0, ldpc != 0, stbc,
-      bmc, static_cast<uint8_t>(hdrlen >> 1), ndpa);
+      bmc, static_cast<uint8_t>(hdrlen >> 1), ndpa, data_sc);
   std::memcpy(usb_frame.data() + jaguar2::TXDESC_SIZE_8822B, dot11, frame_len);
 
   int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),

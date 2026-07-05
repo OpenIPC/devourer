@@ -65,6 +65,24 @@ CHIPS = {
         "header": "Hal8822b_PhyTables.h",
         "guard": "HAL8822B_PHYTABLES_H",
     },
+    # 8821C (Jaguar2, 1T1R) — same OLD check_positive format as 8822B (shared
+    # src/PhyTableLoader). 1T1R: there is NO array_mp_8821c_radiob (path A only).
+    # The u32 regex lifts radioa but skips array_mp_8821c_txpwr_lmt (a packed
+    # `struct txpwr_lmt_t_8821c[]`, not u32[]) — that regulatory table is handled
+    # separately by tools/extract_8821c_txpwr_lmt.py. mac_reg IS a u32
+    # check_positive table.
+    "8821c": {
+        "tag": "morrownr/8821cu-20210916 (rtl8821c phydm, FW v5.12.0.4)",
+        "inputs": [
+            "hal/phydm/rtl8821c/halhwimg8821c_bb.c",
+            "hal/phydm/rtl8821c/halhwimg8821c_mac.c",
+            "hal/phydm/halrf/rtl8821c/halhwimg8821c_rf.c",
+        ],
+        "out_c": "hal/phydm/rtl8821c/Hal8821c_PhyTables.c",
+        "out_h": "hal/phydm/rtl8821c/Hal8821c_PhyTables.h",
+        "header": "Hal8821c_PhyTables.h",
+        "guard": "HAL8821C_PHYTABLES_H",
+    },
 }
 
 SCRIPT = Path(__file__).name

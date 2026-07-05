@@ -1,6 +1,7 @@
 #include "Halrf8822b.h"
 
 #include <chrono>
+#include <memory>
 #include <thread>
 #include <utility>
 
@@ -674,6 +675,26 @@ void Halrf8822b::iqk_trigger(bool band2g) {
                 _gs_retry[1][1], _retry[0][RXIQK1], _retry[0][RXIQK2],
                 _retry[1][RXIQK1], _retry[1][RXIQK2], _rxiqk_fail_code[0],
                 _rxiqk_fail_code[1]);
+}
+
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+/* Defined in Halrf8821c.cpp. */
+std::unique_ptr<Jaguar2Calibration>
+make_calibration_8821c(RtlUsbAdapter device, Logger_t logger, uint8_t cut,
+                       bool is_2t2r);
+#endif
+
+std::unique_ptr<Jaguar2Calibration>
+make_jaguar2_calibration(ChipVariant variant, RtlUsbAdapter device,
+                         Logger_t logger, uint8_t cut, bool is_2t2r) {
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+  if (variant == ChipVariant::C8821C)
+    return make_calibration_8821c(std::move(device), std::move(logger), cut,
+                                  is_2t2r);
+#endif
+  (void)variant;
+  return std::make_unique<Halrf8822b>(std::move(device), std::move(logger), cut,
+                                      is_2t2r);
 }
 
 } /* namespace jaguar2 */

@@ -15,12 +15,14 @@ enable_testing()
 # `cmake -S . -B build` builds every chip). Turn off the ones you don't need to
 # drop their firmware blobs + generated PHY tables and shrink the binary — e.g.
 # an 8812AU-only build:
-#   cmake -S . -B build -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2=OFF \
+#   cmake -S . -B build -DDEVOURER_8814=OFF \
+#         -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR2_8821C=OFF \
 #         -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF
 # ---------------------------------------------------------------------------
 option(DEVOURER_JAGUAR1       "RTL8812AU / 8811AU / 8821AU (Jaguar1 core)"      ON)
 option(DEVOURER_8814          "RTL8814AU (4T4R; requires DEVOURER_JAGUAR1)"     ON)
-option(DEVOURER_JAGUAR2       "RTL8822BU (Jaguar2, rtl8822b, 2T2R USB)"         ON)
+option(DEVOURER_JAGUAR2_8822B "RTL8822BU (Jaguar2, rtl8822b, 2T2R USB)"         ON)
+option(DEVOURER_JAGUAR2_8821C "RTL8811CU / 8821CU (Jaguar2, rtl8821c, 1T1R)"    ON)
 option(DEVOURER_JAGUAR3_8822C "RTL8812CU / 8822CU (Jaguar3, rtl8822c)"          ON)
 option(DEVOURER_JAGUAR3_8822E "RTL8812EU / 8822EU (Jaguar3, rtl8822e)"          ON)
 
@@ -28,17 +30,24 @@ if(DEVOURER_8814 AND NOT DEVOURER_JAGUAR1)
     message(FATAL_ERROR
         "DEVOURER_8814=ON requires DEVOURER_JAGUAR1=ON (8814 reuses the Jaguar1 HAL).")
 endif()
-if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3_8822C
-   AND NOT DEVOURER_JAGUAR3_8822E)
-    message(FATAL_ERROR
-        "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
-        "DEVOURER_JAGUAR2 / DEVOURER_JAGUAR3_8822C / DEVOURER_JAGUAR3_8822E.")
+# Convenience: the shared Jaguar2 HAL compiles when either chip variant is on.
+if(DEVOURER_JAGUAR2_8822B OR DEVOURER_JAGUAR2_8821C)
+    set(DEVOURER_JAGUAR2 ON)
+else()
+    set(DEVOURER_JAGUAR2 OFF)
 endif()
 # Convenience: the shared Jaguar3 port compiles when either variant is on.
 if(DEVOURER_JAGUAR3_8822C OR DEVOURER_JAGUAR3_8822E)
     set(DEVOURER_JAGUAR3 ON)
 else()
     set(DEVOURER_JAGUAR3 OFF)
+endif()
+if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3_8822C
+   AND NOT DEVOURER_JAGUAR3_8822E)
+    message(FATAL_ERROR
+        "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
+        "DEVOURER_JAGUAR2_8822B / DEVOURER_JAGUAR2_8821C / DEVOURER_JAGUAR3_8822C "
+        "/ DEVOURER_JAGUAR3_8822E.")
 endif()
 
 # Find pkg-config and then use it to locate libusb.
@@ -90,6 +99,7 @@ target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8814a)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822c)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822e)
 target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822b)
+target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8821c)
 target_include_directories(WiFiDriver PUBLIC src)
 
 # --- per-chip source groups (see options above) ---
@@ -128,23 +138,47 @@ if(DEVOURER_8814)
     target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_8814=1)
 endif()
 
-# --- Jaguar2 (RTL8822BU / chip 8822B) ---
+# --- Jaguar2 (RTL8822BU / RTL8811CU-8821CU) ---
 # Hybrid: HalMAC firmware/MAC-init/pwr-seq (like Jaguar3) + the older
 # check_positive phydm table format (shared src/PhyTableLoader, like Jaguar1).
-# Single chip, so no per-variant strategy dispatch.
+# Multi-chip via ChipVariant strategy dispatch (Jaguar2PhyTables / Jaguar2-
+# Calibration), mirroring the Jaguar3 8822C/8822E split. The shared block below
+# holds the orchestrator/HAL/halmac/strategy-trio + the per-variant dispatcher
+# .cpp files (self-guarded on DEVOURER_HAVE_JAGUAR2_8822B/_8821C); each chip's
+# firmware blob + generated tables live in its own variant block.
 if(DEVOURER_JAGUAR2)
     target_sources(WiFiDriver PRIVATE
-        hal/hal8822b_fw.c hal/hal8822b_fw.h
-        hal/phydm/rtl8822b/Hal8822b_PhyTables.c hal/phydm/rtl8822b/Hal8822b_PhyTables.h
         src/jaguar2/RtlJaguar2Device.cpp src/jaguar2/RtlJaguar2Device.h
         src/jaguar2/HalJaguar2.cpp src/jaguar2/HalJaguar2.h
         src/jaguar2/HalmacJaguar2Fw.cpp src/jaguar2/HalmacJaguar2Fw.h
         src/jaguar2/HalmacJaguar2MacInit.cpp src/jaguar2/HalmacJaguar2MacInit.h
         src/jaguar2/HalmacJaguar2Regs.h
         src/jaguar2/FrameParserJaguar2.h
-        src/jaguar2/Halrf8822b.cpp src/jaguar2/Halrf8822b.h
-        src/jaguar2/PhyTableLoaderJaguar2.cpp src/jaguar2/PhyTableLoaderJaguar2.h)
+        src/jaguar2/ChipVariant.h
+        src/jaguar2/Jaguar2PhyTables.h
+        src/jaguar2/Jaguar2Calibration.h
+        src/jaguar2/Phy8822bTables.cpp
+        src/jaguar2/Halrf8822b.cpp src/jaguar2/Halrf8822b.h)
     target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2=1)
+endif()
+
+# 8822B variant data (2T2R): firmware blob + generated phydm tables + txpwr_lmt.
+if(DEVOURER_JAGUAR2_8822B)
+    target_sources(WiFiDriver PRIVATE
+        hal/hal8822b_fw.c hal/hal8822b_fw.h
+        hal/phydm/rtl8822b/Hal8822b_PhyTables.c hal/phydm/rtl8822b/Hal8822b_PhyTables.h)
+    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2_8822B=1)
+endif()
+
+# 8821C variant (1T1R): per-variant dispatcher impls (Phy8821cTables / Halrf8821c)
+# + firmware blob + generated phydm tables. Mirrors the Jaguar3 8822E block.
+if(DEVOURER_JAGUAR2_8821C)
+    target_sources(WiFiDriver PRIVATE
+        src/jaguar2/Phy8821cTables.cpp
+        src/jaguar2/Halrf8821c.cpp src/jaguar2/Halrf8821c.h
+        hal/hal8821c_fw.c hal/hal8821c_fw.h
+        hal/phydm/rtl8821c/Hal8821c_PhyTables.c hal/phydm/rtl8821c/Hal8821c_PhyTables.h)
+    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2_8821C=1)
 endif()
 
 if(DEVOURER_JAGUAR3)

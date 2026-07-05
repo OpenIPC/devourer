@@ -6,6 +6,7 @@
 
 #include "logger.h"
 #include "RtlUsbAdapter.h"
+#include "ChipVariant.h"
 
 namespace jaguar2 {
 
@@ -19,13 +20,14 @@ namespace jaguar2 {
  *
  * Boot success = REG_MCUFW_CTRL == 0xC078. Requires the pre-DLFW MAC config
  * (DDMA enable, SYS_FUNC_EN) and the queue/page allocation (_rsvd_boundary) to
- * have run first — supplied by HalmacJaguar2MacInit (M4). */
+ * have run first — supplied by HalmacJaguar2MacInit. */
 class HalmacJaguar2Fw {
 public:
-  HalmacJaguar2Fw(RtlUsbAdapter device, Logger_t logger);
+  HalmacJaguar2Fw(RtlUsbAdapter device, Logger_t logger,
+                  ChipVariant variant = ChipVariant::C8822B);
 
   bool download_firmware(const uint8_t *fw_bin, size_t size);
-  bool download_default_firmware(); /* bundled hal8822b_fw NIC image */
+  bool download_default_firmware(); /* bundled per-variant NIC image */
 
   /* The reserved-page boundary FIFOPAGE_CTRL_2 is restored to after each
    * rsvd-page chunk (from the queue/page allocation). Set by MacInit before
@@ -51,6 +53,8 @@ private:
   bool dlfw_end_flow();
   void wlan_cpu_en(bool enable);
   void pltfm_reset();
+  bool ltecoex_read(uint16_t offset, uint32_t &val);
+  bool ltecoex_write(uint16_t offset, uint32_t val);
   bool chk_fw_size(const uint8_t *fw_bin, size_t size);
   bool send_fw_page(uint16_t pg_addr, const uint8_t *chunk, uint32_t size);
 
@@ -64,6 +68,7 @@ private:
 
   RtlUsbAdapter _device;
   Logger_t _logger;
+  ChipVariant _variant;
   /* Per-chunk DLFW size. The vendor 8822B driver downloads in 4096-byte chunks
    * (4144-byte bulk-OUT incl. the 48-byte TX desc); this fits the HIQ page
    * space allocated by init_trx_cfg (64 pages) with margin. DLFW_PKT_MAX_SIZE is

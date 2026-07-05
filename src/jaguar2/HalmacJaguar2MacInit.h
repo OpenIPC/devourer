@@ -6,19 +6,20 @@
 #include "logger.h"
 #include "RtlUsbAdapter.h"
 #include "SelectedChannel.h"
+#include "ChipVariant.h"
 
 namespace jaguar2 {
 
-/* HalmacJaguar2MacInit — RTL8822B MAC configuration, ported from the HalMAC 88xx
- * init flow (halmac_init_88xx.c) mirroring src/jaguar3/HalmacJaguar3MacInit.
- *
- * Milestone status: M4 (part 1) — the pre-DLFW system config
- * (pre_init_system_cfg / init_system_cfg / enable_bb_rf) needed to boot the
- * firmware. The full post-DLFW MAC config (trx/queue/protocol/edca/wmac + USB
- * cfg) lands next. */
+/* HalmacJaguar2MacInit — RTL8822B / RTL8821C MAC configuration, ported from the
+ * HalMAC 88xx init flow (halmac_init_88xx.c) mirroring
+ * src/jaguar3/HalmacJaguar3MacInit. Covers the pre-DLFW system config
+ * (pre_init_system_cfg / init_system_cfg / enable_bb_rf) and the post-DLFW MAC
+ * config (trx/queue/protocol/edca/wmac + USB cfg), per-variant where the two
+ * chips diverge. */
 class HalmacJaguar2MacInit {
 public:
-  HalmacJaguar2MacInit(RtlUsbAdapter device, Logger_t logger);
+  HalmacJaguar2MacInit(RtlUsbAdapter device, Logger_t logger,
+                       ChipVariant variant = ChipVariant::C8822B);
 
   /* Pinmux / LED / GPIO + BB-RF disabled. Runs BEFORE power_on. */
   void pre_init_system_cfg();
@@ -65,6 +66,7 @@ private:
 
   RtlUsbAdapter _device;
   Logger_t _logger;
+  ChipVariant _variant;
   uint16_t _rsvd_boundary = 0;
   bool _set_bcn_boundary = true;
 };

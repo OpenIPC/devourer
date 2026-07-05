@@ -38,6 +38,7 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_CHK_EN_8822B(d, v)     SET_BITS_TO_LE_4BYTE((d) + 0x0C, 14, 1, v)
 #define SET_TX_DESC_DISDATAFB_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x0C, 10, 1, v)
 #define SET_TX_DESC_DATARATE_8822B(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x10, 0, 7, v)
+#define SET_TX_DESC_DATA_SC_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 0, 4, v)
 #define SET_TX_DESC_DATA_SHORT_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x14, 4, 1, v)
 #define SET_TX_DESC_DATA_BW_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 5, 2, v)
 #define SET_TX_DESC_DATA_LDPC_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 7, 1, v)
@@ -90,7 +91,7 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
                                     uint8_t rate_hw, uint8_t rate_id, uint8_t bw,
                                     bool short_gi, bool ldpc, uint8_t stbc,
                                     bool bmc = false, uint8_t wheader_len = 12,
-                                    bool ndpa = false) {
+                                    bool ndpa = false, uint8_t data_sc = 0) {
   SET_TX_DESC_TXPKTSIZE_8822B(d, pkt_size);
   SET_TX_DESC_OFFSET_8822B(d, static_cast<uint32_t>(TXDESC_SIZE_8822B));
   SET_TX_DESC_LS_8822B(d, 1);
@@ -107,6 +108,11 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
   SET_TX_DESC_SW_DEFINE_8822B(d, 1);
   SET_TX_DESC_DATARATE_8822B(d, rate_hw);
   SET_TX_DESC_DATA_BW_8822B(d, bw);
+  /* Sub-channel: which 20/40 MHz slice a narrower-than-tuned frame occupies
+   * (VHT_DATA_SC_*, rtl8821c_sc_mapping). 0 = DONT_CARE (frame BW == channel
+   * BW, the common case). Non-zero places e.g. a 40-in-80 frame on the primary
+   * lower-40 instead of the block centre. */
+  SET_TX_DESC_DATA_SC_8822B(d, data_sc);
   SET_TX_DESC_DATA_SHORT_8822B(d, short_gi ? 1 : 0);
   SET_TX_DESC_DATA_LDPC_8822B(d, ldpc ? 1 : 0);
   SET_TX_DESC_DATA_STBC_8822B(d, stbc & 0x3);
@@ -170,6 +176,43 @@ inline bool parse_rx_8822b(const uint8_t *buf, size_t buflen,
   out.frame = buf + frame_off;
   out.next_offset = (static_cast<uint32_t>(end) + 7) & ~0x7u;
   return true;
+}
+
+/* Parse the jaguar-series (jgr2) PHY-status report that precedes the PSDU when
+ * APP_PHYSTS is enabled (8821C monitor). `physts` points at the 32-byte block
+ * (RXDESC end); `is_cck` selects type0 (CCK) vs type1 (OFDM/HT/VHT). Fills the
+ * per-path signal metrics from the vendor phy_sts_rpt_jgr2_type0/type1 layout
+ * (phydm_phystatus.h): OFDM per-path RX power pwdb[i] (dBm = pwdb-110), per-path
+ * SNR rxsnr[i] and per-stream EVM rxevm[i] (both s(8,1), i.e. half-dB units, as
+ * the vendor stores them). Values are the raw phy-status fields, matching the
+ * Jaguar-1 FrameParser convention (rssi = per-path power byte, dBm = value-110).
+ * CCK (type0) reports a single path-A pwdb. Requires physts_len >= 28. */
+inline void parse_phy_sts_jgr2(const uint8_t *physts, uint16_t physts_len,
+                               bool is_cck, rx_pkt_attrib &a) {
+  if (physts == nullptr || physts_len < 28)
+    return;
+  if (is_cck) {
+    /* type0: DW0 = page_num(0), pwdb(1), ... */
+    a.rssi[0] = physts[1];
+  } else {
+    /* type1: DW0/1 pwdb[4] at bytes 1..4; DW4 rxevm[4] at bytes 16..19;
+     * DW6 rxsnr[4] at bytes 24..27. */
+    for (int i = 0; i < 4; i++) {
+      a.rssi[i] = physts[1 + i];
+      a.evm[i] = static_cast<int8_t>(physts[16 + i]);
+      a.snr[i] = static_cast<int8_t>(physts[24 + i]);
+    }
+    /* DW1 byte7 flags: [5]=ldpc [6]=stbc [7]=beamformed (phy_sts_rpt_jgr2_type1).
+     * DW1 byte5: l_rxsc[3:0] / ht_rxsc[7:4]; the vendor derives RX bandwidth from
+     * the active rxsc (legacy OFDM uses l_rxsc, HT/VHT uses ht_rxsc): rxsc 1-8 =
+     * 20, 9-12 = 40, >=13 = 80 MHz (phydm_get_phy_sts_type1). */
+    const uint8_t f7 = physts[7];
+    a.ldpc = (f7 >> 5) & 1;
+    a.stbc = (f7 >> 6) & 1;
+    const uint8_t l_rxsc = physts[5] & 0x0f, ht_rxsc = (physts[5] >> 4) & 0x0f;
+    const uint8_t rxsc = (a.data_rate >= 4 && a.data_rate <= 11) ? l_rxsc : ht_rxsc;
+    a.bw = rxsc >= 13 ? 2 : rxsc >= 9 ? 1 : 0;
+  }
 }
 
 } /* namespace jaguar2 */

@@ -6,9 +6,13 @@
 #include <thread>
 #include <utility>
 
+#if defined(DEVOURER_HAVE_JAGUAR2_8822B)
 #include "Hal8822b_TxpwrLmt.h" /* generated: hal8822b_txpwr_lmt() WW-min limits */
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+#include "Hal8821c_TxpwrLmt.h" /* generated: hal8821c_txpwr_lmt() WW-min limits */
+#endif
 #include "PhyTableLoader.h"
-#include "PhyTableLoaderJaguar2.h"
 
 namespace jaguar2 {
 
@@ -80,6 +84,54 @@ const PwrCfg kPwrOff8822bUsb[] = {
     {0, PC_END, 0, 0},
 };
 
+/* card_en_flow_8821c = CARDDIS_TO_CARDEMU + CARDEMU_TO_ACT (USB/ALL),
+ * transcribed from reference/8821cu/hal/halmac/halmac_88xx/halmac_8821c/
+ * halmac_pwr_seq_8821c.c. Every row is PWR_CUT_ALL_MSK (no cut-specific rows,
+ * unlike 8822B). PCI/SDIO-only rows dropped. */
+const PwrCfg kPwrOn8821cUsb[] = {
+    /* --- card-disable -> card-emulation --- */
+    {0x004A, PC_WRITE, B(0), 0},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(3) | B(4) | B(7)), 0},
+    /* --- card-emulation -> active --- */
+    {0x0020, PC_WRITE, B(0), B(0)},
+    {0x0001, PC_DELAY, 0, 1}, /* 1 ms */
+    {0x0000, PC_WRITE, B(5), 0},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(4) | B(3) | B(2)), 0},
+    {0x0006, PC_POLL, B(1), B(1)},
+    {0x0006, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_WRITE, B(7), 0},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(4) | B(3)), 0},
+    {0x10C3, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_POLL, B(0), 0},
+    {0x0020, PC_WRITE, B(3), B(3)},
+    {0x007C, PC_WRITE, B(1), 0},
+    {0, PC_END, 0, 0},
+};
+
+/* card_dis_flow_8821c = ACT_TO_CARDEMU + CARDEMU_TO_CARDDIS (USB/ALL). */
+const PwrCfg kPwrOff8821cUsb[] = {
+    /* --- active -> card-emulation --- */
+    {0x0093, PC_WRITE, 0xFF, 0xC4},
+    {0x001F, PC_WRITE, 0xFF, 0},
+    {0x0049, PC_WRITE, B(1), 0},
+    {0x0006, PC_WRITE, B(0), B(0)},
+    {0x0002, PC_WRITE, B(1), 0},
+    {0x10C3, PC_WRITE, B(0), 0},
+    {0x0005, PC_WRITE, B(1), B(1)},
+    {0x0005, PC_POLL, B(1), 0},
+    {0x0020, PC_WRITE, B(3), 0},
+    {0x0000, PC_WRITE, B(5), B(5)},
+    /* --- card-emulation -> card-disable --- */
+    {0x0007, PC_WRITE, 0xFF, 0x20},
+    {0x0067, PC_WRITE, B(5), 0},
+    {0x004A, PC_WRITE, B(0), 0},
+    {0x0081, PC_WRITE, static_cast<uint8_t>(B(7) | B(6)), 0},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(3) | B(4)), B(3)},
+    {0x0090, PC_WRITE, B(1), 0},
+    {0, PC_END, 0, 0},
+};
+
 void run_pwr_seq(RtlUsbAdapter &dev, const PwrCfg *seq, uint32_t poll_max,
                  bool poll_fatal) {
   for (const PwrCfg *p = seq; p->cmd != PC_END; ++p) {
@@ -105,17 +157,23 @@ void run_pwr_seq(RtlUsbAdapter &dev, const PwrCfg *seq, uint32_t poll_max,
 }
 } /* namespace */
 
-HalJaguar2::HalJaguar2(RtlUsbAdapter device, Logger_t logger)
-    : _device{std::move(device)}, _logger{std::move(logger)} {}
+HalJaguar2::HalJaguar2(RtlUsbAdapter device, Logger_t logger,
+                       ChipVariant variant)
+    : _device{std::move(device)}, _logger{std::move(logger)},
+      _variant{variant}, _tables{make_jaguar2_phy_tables(variant)} {}
 
 void HalJaguar2::power_off() {
-  run_pwr_seq(_device, kPwrOff8822bUsb, /*poll_max=*/2000, /*poll_fatal=*/false);
+  const PwrCfg *seq =
+      _variant == ChipVariant::C8821C ? kPwrOff8821cUsb : kPwrOff8822bUsb;
+  run_pwr_seq(_device, seq, /*poll_max=*/2000, /*poll_fatal=*/false);
   _logger->info("Jaguar2: power-off (card-disable) sequence applied");
 }
 
 void HalJaguar2::power_on() {
   power_off(); /* reset from any prior (kernel-left active) state first */
-  run_pwr_seq(_device, kPwrOn8822bUsb, /*poll_max=*/5000, /*poll_fatal=*/true);
+  const PwrCfg *seq =
+      _variant == ChipVariant::C8821C ? kPwrOn8821cUsb : kPwrOn8822bUsb;
+  run_pwr_seq(_device, seq, /*poll_max=*/5000, /*poll_fatal=*/true);
   _logger->info("Jaguar2: power-on sequence complete (card active)");
 }
 
@@ -130,7 +188,8 @@ void HalJaguar2::read_chip_version() {
   _ver.vendor = (vend <= 2) ? vend : 0;
 
   static const char *vn[] = {"TSMC", "SMIC", "UMC"};
-  _logger->info("Jaguar2 chip: 8822B cut={} ({}{}) {} (SYS_CFG1=0x{:08x})",
+  const char *chip = _variant == ChipVariant::C8821C ? "8821C" : "8822B";
+  _logger->info("Jaguar2 chip: {} cut={} ({}{}) {} (SYS_CFG1=0x{:08x})", chip,
                 _ver.cut, vn[_ver.vendor], _ver.test_chip ? ",test" : "",
                 _ver.rf_2t2r ? "2T2R" : "1T1R", v);
 }
@@ -264,30 +323,50 @@ void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type) {
   ctx.support_interface = 0x02; /* ODM_ITRF_USB */
   ctx.support_platform = 0x04;  /* ODM_CE */
   ctx.package_type = 0;
-  ctx.rfe_type = rfe_type;
+  /* The phydm table conditional blocks are gated on the DECODED rfe_type. On
+   * 8821C the raw efuse RFE byte is `rfe_type_expand` and the value the tables
+   * match against is `rfe_type_expand >> 3` (config_phydm_parameter_init_8821c:
+   * `dm->rfe_type = dm->rfe_type_expand >> 3`). Feeding the raw byte (e.g. 0x22)
+   * matches no rfe block, so the rfe-specific AGC/RF rows never apply. 8822B
+   * uses the raw byte directly. */
+  ctx.rfe_type =
+      (_variant == ChipVariant::C8821C) ? (rfe_type >> 3) : rfe_type;
 
   /* rtl8822b_phy.c order: PRE -> init_bb_reg (phy_reg, agc_tab) ->
    * init_rf_reg (radioa, radiob) -> POST. */
   phydm_pre_post_setting(/*post=*/false);
 
   auto bb = [this](uint32_t a, uint32_t v) { bb_write(a, v); };
-  const auto phy_reg = PhyTableLoaderJaguar2::phy_reg();
-  const auto agc_tab = PhyTableLoaderJaguar2::agc_tab();
+  const auto phy_reg = _tables->phy_reg();
+  const auto agc_tab = _tables->agc_tab();
   _logger->info("Jaguar2: applying BB phy_reg ({} words) + agc_tab ({} words)",
                 phy_reg.len, agc_tab.len);
   PhyTableLoader::Load(phy_reg.data, phy_reg.len, ctx, bb);
   PhyTableLoader::Load(agc_tab.data, agc_tab.len, ctx, bb);
 
-  const auto radioa = PhyTableLoaderJaguar2::radioa();
-  const auto radiob = PhyTableLoaderJaguar2::radiob();
+  const auto radioa = _tables->radioa();
+  const auto radiob = _tables->radiob();
   _logger->info("Jaguar2: applying RF radioa ({} words) + radiob ({} words)",
                 radioa.len, radiob.len);
   PhyTableLoader::Load(radioa.data, radioa.len, ctx,
                        [this](uint32_t a, uint32_t v) { rf_write(0, a, v); });
-  PhyTableLoader::Load(radiob.data, radiob.len, ctx,
-                       [this](uint32_t a, uint32_t v) { rf_write(1, a, v); });
+  /* 1T1R chips (8821C) supply no radiob table (path A only) — skip the path-B
+   * RF walk rather than feed the loader a null table. */
+  if (radiob.len)
+    PhyTableLoader::Load(radiob.data, radiob.len, ctx,
+                         [this](uint32_t a, uint32_t v) { rf_write(1, a, v); });
 
   phydm_pre_post_setting(/*post=*/true);
+
+  /* 8821C: snapshot the CCK TX-filter defaults the BB table just loaded
+   * (config_phydm_parameter_init_8821c POST saves rega24/28/aac_8821c). The
+   * per-channel 2.4G tune restores these for non-ch14. */
+  if (_variant == ChipVariant::C8821C) {
+    _cck_a24_8821c = _device.rtw_read32(0x0a24);
+    _cck_a28_8821c = _device.rtw_read32(0x0a28);
+    _cck_aac_8821c = _device.rtw_read32(0x0aac);
+    _cck_saved_8821c = true;
+  }
   _logger->info("Jaguar2: BB/AGC/RF tables applied (rfe_type=0x{:02x})",
                 rfe_type);
 }
@@ -365,6 +444,10 @@ void HalJaguar2::igi_toggle() {
 
 void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
                                uint8_t primary_ch_idx) {
+  if (_variant == ChipVariant::C8821C) {
+    set_channel_bw_8821c(channel, bw, rfe_type, primary_ch_idx);
+    return;
+  }
   /* The RF/AGC tune to the CENTRAL channel of the wide channel; `channel` is the
    * primary 20 MHz channel and primary_ch_idx its position. 20 MHz: central =
    * primary. 40 MHz: primary_ch_idx 1(lower)/2(upper) -> ±2. 80 MHz: 1..4 ->
@@ -536,6 +619,13 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
 }
 
 void HalJaguar2::config_trx_mode() {
+  /* config_phydm_trx_mode_8821c is a no-op in the vendor (return true): the
+   * 8821C RF path/mode comes from the radioa table + switch_rf_set (BTG/WLG) +
+   * the 0x808 block-enable, NOT an 8822B-style RF mode-table poke. Running the
+   * 8822B sequence below (RF 0xc08/0x3e/0x3f mode table, 0x808/0x940 path map)
+   * on the 8821C RF drives it into a wrong mode. Skip for C8821C. */
+  if (_variant == ChipVariant::C8821C)
+    return;
   const uint8_t path = _ver.rf_2t2r ? 0x3 : 0x1; /* BB_PATH_AB or A */
 
   /* RF mode table (3-wire state per path: 0 shutdown/1 standby/2 TX/3 RX). */
@@ -597,6 +687,10 @@ void HalJaguar2::config_trx_mode() {
 }
 
 void HalJaguar2::do_lck() {
+  if (_variant == ChipVariant::C8821C) {
+    do_lck_8821c();
+    return;
+  }
   /* aac_check_8822b (once): fix the AAC code if out of range. */
   if (!_aac_checked) {
     uint32_t temp = (rf_read(0, 0xc9) & 0xf8) >> 3;
@@ -643,6 +737,178 @@ void HalJaguar2::do_lck() {
                 rf_read(0, 0x18), rf_read(0, 0x0));
 }
 
+/* _phy_lc_calibrate_8821c: the 8821C LCK is an RF-firmware poke sequence (no
+ * host poll) — completely unlike the 8822B RF 0x18[15] toggle+poll (which just
+ * times out on 8821C). aac_check first, then RF 0xcc/0xc4/0xcc. */
+void HalJaguar2::do_lck_8821c() {
+  if (!_aac_checked) {
+    uint32_t temp = (rf_read(0, 0xc9) & 0xf8) >> 3;
+    if (temp < 4 || temp > 7) {
+      rf_set(0, 0xca, (1u << 19), 0x0);
+      rf_set(0, 0xb2, 0x7c000, 0x6);
+    }
+    _aac_checked = true;
+  }
+  rf_write(0, 0xcc, 0x2018);
+  rf_write(0, 0xc4, 0x8f602);
+  rf_write(0, 0xcc, 0x201c);
+  _logger->info("Jaguar2/8821C: LCK applied (RF-fw poke)");
+}
+
+/* config_phydm_switch_rf_set_8821c: select the 2.4G RX front-end path. BTG
+ * (BT-shared, path B) vs WLG (WiFi-only, path A) is chosen from rfe_type_expand.
+ * The base mux writes (0xcb8/0xa84/0xa80) apply in normal (non-MP) operation;
+ * the agc_tab_diff overlay + IGI toggle are MP-mode-only and omitted. */
+void HalJaguar2::switch_rf_set_8821c(uint8_t rf_set) {
+  /* rf_set: 0=BTG (2.4G BT-shared, path B), 1=WLG (2.4G WiFi, path A),
+   * 2=WLA (5G). Transcribed from config_phydm_switch_rf_set_8821c. */
+  _device.phy_set_bb_reg(0x1080, (1u << 16), 0x1);
+  _device.phy_set_bb_reg(0x0000, (1u << 26), 0x1);
+  uint32_t cb8 = _device.rtw_read32(0x0cb8);
+  if (rf_set == 0) { /* BTG */
+    cb8 |= (1u << 16);
+    cb8 &= ~((1u << 18) | (1u << 20) | (1u << 21) | (1u << 22) | (1u << 23));
+    _device.phy_set_bb_reg(0x0a84, 0x00ff0000, 0x0e);
+    _device.phy_set_bb_reg(0x0a80, 0x0000ffff, 0xfc84);
+  } else if (rf_set == 1) { /* WLG */
+    cb8 |= (1u << 20) | (1u << 21) | (1u << 22);
+    cb8 &= ~((1u << 16) | (1u << 18) | (1u << 23));
+    _device.phy_set_bb_reg(0x0a84, 0x00ff0000, 0x12);
+    _device.phy_set_bb_reg(0x0a80, 0x0000ffff, 0x7532);
+  } else { /* WLA (5G) — cb8 bits only, no 0xa84/0xa80 override */
+    cb8 |= (1u << 20) | (1u << 22) | (1u << 23);
+    cb8 &= ~((1u << 16) | (1u << 18) | (1u << 21));
+  }
+  _device.phy_set_bb_reg(0x0cb8, 0xffffffff, cb8);
+}
+
+/* config_phydm_switch_band/channel/bandwidth_8821c, transcribed from
+ * reference/8821cu phydm_hal_api8821c.c. 1T1R, RF path A; the 2.4G RX path is
+ * routed by switch_rf_set (BTG/WLG). Covers 2.4G and 5G at 20/40/80 MHz. */
+void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
+                                      uint8_t rfe_raw, uint8_t primary_ch_idx) {
+  uint8_t cch = channel;
+  if (bw == 1)
+    cch = static_cast<uint8_t>(primary_ch_idx == 2 ? channel - 2 : channel + 2);
+  else if (bw == 2) {
+    static const int off80[5] = {0, 6, 2, -2, -6};
+    cch = static_cast<uint8_t>(channel +
+                               off80[primary_ch_idx <= 4 ? primary_ch_idx : 0]);
+  }
+  const bool g2 = cch <= 14;
+  /* rfe_type_expand -> BTG (else WLG) per config_phydm_parameter_init_8821c. */
+  const bool btg = rfe_raw == 2 || rfe_raw == 4 || rfe_raw == 7 ||
+                   rfe_raw == 0x22 || rfe_raw == 0x24 || rfe_raw == 0x27 ||
+                   rfe_raw == 0x2a || rfe_raw == 0x2c || rfe_raw == 0x2f;
+
+  /* --- config_phydm_switch_band_8821c --- */
+  uint32_t rf18 = rf_read(0, 0x18);
+  if (g2) {
+    _device.phy_set_bb_reg(0x0808, (1u << 28), 0x1); /* enable CCK block */
+    _device.phy_set_bb_reg(0x0454, (1u << 7), 0x0);  /* MAC CCK check off */
+    _device.phy_set_bb_reg(0x0a80, (1u << 18), 0x0); /* BB CCK check off */
+    _device.phy_set_bb_reg(0x0814, 0x0000FC00, 15);  /* CCA mask default */
+    rf18 &= ~((1u << 16) | (1u << 9) | (1u << 8) | 0xffu);
+    rf18 |= cch;
+    switch_rf_set_8821c(btg ? 0 : 1); /* BTG or WLG */
+    rf_set(0, 0xdf, (1u << 6), 0x1);   /* RF TXA_TANK LUT mode */
+    rf_set(0, 0x64, 0x0000f, 0xf);     /* RF TXA_PA_TANK */
+  } else {
+    _device.phy_set_bb_reg(0x0a80, (1u << 18), 0x1);
+    _device.phy_set_bb_reg(0x0454, (1u << 7), 0x1);
+    _device.phy_set_bb_reg(0x0808, (1u << 28), 0x0);
+    _device.phy_set_bb_reg(0x0814, 0x0000FC00, 15);
+    rf18 &= ~((1u << 16) | (1u << 9) | (1u << 8) | 0xffu);
+    rf18 |= (1u << 8) | (1u << 16) | cch;
+    switch_rf_set_8821c(2); /* WLA (5G) */
+    rf_set(0, 0xdf, (1u << 6), 0x0);
+  }
+  rf_write(0, 0x18, rf18);
+
+  /* --- config_phydm_switch_channel_8821c --- */
+  rf18 = rf_read(0, 0x18);
+  rf18 &= ~((1u << 18) | (1u << 17) | 0xffu);
+  rf18 |= cch;
+  if (g2) {
+    _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x0);      /* AGC table idx 0 */
+    _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x96a);    /* fc for CFO track */
+    if (cch == 14) {
+      _device.phy_set_bb_reg(0x0a24, 0xffffffff, 0x0000b81c);
+      _device.phy_set_bb_reg(0x0a28, 0x0000ffff, 0x0000);
+      _device.phy_set_bb_reg(0x0aac, 0xffffffff, 0x00003667);
+    } else if (_cck_saved_8821c) {
+      _device.phy_set_bb_reg(0x0a24, 0xffffffff, _cck_a24_8821c);
+      _device.phy_set_bb_reg(0x0a28, 0x0000ffff, _cck_a28_8821c & 0xffff);
+      _device.phy_set_bb_reg(0x0aac, 0xffffffff, _cck_aac_8821c);
+    }
+  } else {
+    if (cch >= 36 && cch <= 64)
+      _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x1);
+    else if (cch >= 100 && cch <= 144)
+      _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x2);
+    else if (cch >= 149)
+      _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x3);
+    if (cch >= 36 && cch <= 48)
+      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x494);
+    else if (cch >= 52 && cch <= 64)
+      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x453);
+    else if (cch >= 100 && cch <= 116)
+      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x452);
+    else if (cch >= 118 && cch <= 177)
+      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x412);
+    if (cch >= 100 && cch <= 140)
+      rf18 |= (1u << 17);
+    else if (cch > 140)
+      rf18 |= (1u << 18);
+  }
+  rf_write(0, 0x18, rf18);
+
+  /* --- config_phydm_switch_bandwidth_8821c --- */
+  rf18 = rf_read(0, 0x18);
+  if (bw == 1) { /* 40 MHz */
+    _device.phy_set_bb_reg(0x0a00, (1u << 4), primary_ch_idx == 1 ? 1 : 0);
+    uint32_t v8ac = _device.rtw_read32(0x08ac);
+    v8ac &= 0xff3ff300;
+    v8ac |= (static_cast<uint32_t>((primary_ch_idx & 0xf) << 2) | 0x20020000u |
+             0x1u);
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
+    rf18 &= ~((1u << 11) | (1u << 10));
+    rf18 |= (1u << 11);
+  } else if (bw == 2) { /* 80 MHz */
+    uint32_t v8ac = _device.rtw_read32(0x08ac);
+    v8ac &= 0xfcffcf00;
+    v8ac |= (static_cast<uint32_t>((primary_ch_idx & 0xf) << 2) | 0x40040000u |
+             0x2u);
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
+    rf18 &= ~((1u << 11) | (1u << 10));
+    rf18 |= (1u << 10);
+  } else { /* 20 MHz */
+    uint32_t v8ac = _device.rtw_read32(0x08ac);
+    v8ac &= 0xffcffc00;
+    v8ac |= 0x10010000;
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
+    rf18 |= (1u << 11) | (1u << 10);
+  }
+  rf_write(0, 0x18, rf18);
+
+  /* phydm_rxdfirpar_by_bw_8821c: the RX digital filter must match the bandwidth
+   * or the OFDM demod never completes a PSDU (energy detected, nothing reaches
+   * the MAC RX FIFO) — the 8821C "first RX" piece. 1T1R: path A regs only
+   * (0x948/0x94c/0xc20/0x8f0), distinct from the 8822B set. */
+  _device.phy_set_bb_reg(0x0948, (1u << 29) | (1u << 28), 0x2);
+  _device.phy_set_bb_reg(0x094c, (1u << 29) | (1u << 28),
+                         bw == 2 ? 0x1u : 0x2u);
+  _device.phy_set_bb_reg(0x0c20, (1u << 31), bw == 0 ? 0x1u : 0x0u);
+  _device.phy_set_bb_reg(0x08f0, (1u << 31), bw == 2 ? 0x1u : 0x0u);
+
+  igi_toggle();
+  _logger->info("Jaguar2/8821C: channel set ch={} bw={} cch={} {} (rf18={:05x})",
+                channel, (int)bw, cch, btg ? "BTG" : "WLG", rf18);
+}
+
 /* ex_hal8822b_wifi_only_hw_config + hal8822b_wifi_only_switch_antenna: grant the
  * antenna to WLAN. Without the hw_config block the combo chip leaves the antenna
  * switch owned by BT and the WL RX is deaf. The switch_antenna write (0xcbc[9:8])
@@ -651,6 +917,10 @@ void HalJaguar2::do_lck() {
  * set. Omitting it leaves the antenna-path select bits at their reset value, so
  * WL TX/RX runs through an unselected/mismatched path (weak, distorted on air). */
 void HalJaguar2::coex_wlan_only(bool is_5g) {
+  if (_variant == ChipVariant::C8821C) {
+    coex_wlan_only_8821c(is_5g);
+    return;
+  }
   _device.phy_set_bb_reg(0x004c, 0x01800000, 0x2); /* BB control */
   _device.phy_set_bb_reg(0x0cb4, 0xff, 0x77);      /* SW control */
   _device.phy_set_bb_reg(0x0974, 0x300, 0x3);      /* antenna mux switch */
@@ -663,6 +933,87 @@ void HalJaguar2::coex_wlan_only(bool is_5g) {
   _device.phy_set_bb_reg(0x0cbc, 0x300, is_5g ? 0x1 : 0x2);
   _logger->info("Jaguar2: coex WL-only antenna grant applied (is_5g={})",
                 is_5g ? 1 : 0);
+}
+
+/* ex_hal8821c_wifi_only_hw_config + hal8821c_wifi_only_switch_antenna
+ * (reference/8821cu/hal/btc/halbtc8821cwifionly.c). The 8821C wifi-only coex
+ * differs from the 8822B: the GNT/owner and the SPDT/DPDT external-antenna
+ * switch use different registers (0x70[26], 0x1700/0x1704, 0x6c0/0x6c4, and the
+ * antenna switch on 0xcb4[29:28] driven by rfe_module_type — NOT the 8822B
+ * 0xcbc[9:8]). */
+void HalJaguar2::coex_wlan_only_8821c(bool is_5g) {
+  /* hw_config: GNT owner -> WL, gnt_wl=1/gnt_bt=0. */
+  _device.phy_set_bb_reg(0x0070, 0x04000000, 0x1);
+  _device.phy_set_bb_reg(0x1704, 0xffffffff, 0x7700);
+  _device.phy_set_bb_reg(0x1700, 0xffffffff, 0xc00f0038);
+  _device.phy_set_bb_reg(0x06c0, 0xffffffff, 0xaaaaaaaa);
+  _device.phy_set_bb_reg(0x06c4, 0xffffffff, 0xaaaaaaaa);
+
+  /* switch_antenna: rfe_module_type = efuse RFE & 0x1f decides the ext-ant
+   * switch existence + polarity. */
+  const uint8_t rfe_mod =
+      static_cast<uint8_t>((_efuse_valid ? _efuse_map[0xCA] : 0) & 0x1f);
+  const bool exist = !(rfe_mod == 5 || rfe_mod == 6);
+  if (!exist) {
+    _logger->info("Jaguar2/8821C: coex WL-only (rfe_mod={} no ext-ant switch)",
+                  rfe_mod);
+    return;
+  }
+  const bool wlg_at_btg = (rfe_mod == 2 || rfe_mod == 4 || rfe_mod == 7);
+  const bool ant_at_main = !(rfe_mod == 3 || rfe_mod == 4);
+  bool inv = false; /* ext_ant_switch_ctrl_polarity = 0 */
+  if (!ant_at_main)
+    inv = !inv;
+  if (!is_5g && !wlg_at_btg) /* WLG: swap if WLG not at BTG */
+    inv = !inv;
+
+  /* BBSW control (no antenna-diversity): 0x4c[24:23]=2, 0xcb4[7:0]=0x77,
+   * 0xcb4[29:28] = 1 (no inverse) / 2 (inverse). */
+  _device.phy_set_bb_reg(0x004c, 0x01800000, 0x2);
+  _device.phy_set_bb_reg(0x0cb4, 0x000000ff, 0x77);
+  _device.phy_set_bb_reg(0x0cb4, 0x30000000, inv ? 0x2 : 0x1);
+  _logger->info("Jaguar2/8821C: coex WL-only antenna (rfe_mod={} wlg@btg={} "
+                "main={} inv={} is_5g={})",
+                rfe_mod, wlg_at_btg, ant_at_main, inv, is_5g ? 1 : 0);
+}
+
+/* rtl8821c_phy_bf_init (reference/8821cu/hal/rtl8821c/rtl8821c_phy.c): MU-MIMO /
+ * TXBF MAC setup the vendor runs every init. The 8822B bf_init devourer used
+ * only wrote 0x1c94 (the grouping bitmap, the LAST write here) and missed the
+ * MU/TXBF MAC registers — so the 8821C gets its own faithful bf_init. */
+void HalJaguar2::bf_init_8821c() {
+  /* REG_MU_TX_CTL (0x14C0): P1 wait-state EN, MU RL=0xA, disable MU-MIMO until
+   * sounding done, clear MU-STA table valid. */
+  uint32_t v32 = _device.rtw_read32(0x14C0);
+  v32 |= (1u << 16);                          /* BIT_R_MU_P1_WAIT_STATE_EN */
+  v32 = (v32 & ~(0xfu << 12)) | (0xAu << 12); /* MU RL = 0xA */
+  v32 &= ~(1u << 7);                          /* disable MU-MIMO */
+  v32 &= ~(0x3fu << 0);                       /* MU table valid = 0 */
+  _device.rtw_write32(0x14C0, v32);
+
+  /* REG_MU_BF_OPTION (0x167C): TXMU ACKPOLICY=3 + EN = 0x70. */
+  _device.rtw_write8(0x167C, static_cast<uint8_t>((3u << 4) | (1u << 6)));
+  /* REG_WMAC_MU_BF_CTL (0x1680) = 0. */
+  _device.rtw_write16(0x1680, 0x0);
+
+  /* REG_TXBF_CTRL+3 (0x042F): use NDPA parameter from 0x45F (BIT30>>24=0x40). */
+  _device.rtw_write8(0x042F, static_cast<uint8_t>(
+                                 _device.rtw_read8(0x042F) | 0x40));
+  /* REG_NDPA_OPT_CTRL (0x045F) = 0x10 (NDPA rate OFDM_6M, BW20). */
+  _device.rtw_write8(0x045F, 0x10);
+
+  /* STA2 CSI rate fixed at 6M (0x6DF[5:0]=0x4, keep [7:6]). */
+  _device.rtw_write8(0x06DF, static_cast<uint8_t>(
+                                 (_device.rtw_read8(0x06DF) & 0xC0) | 0x4));
+  /* Grouping bitmap (0x1C94) — same value as the 8822B bf_init. */
+  _device.rtw_write32(0x1C94, 0xAFFFAFFFu);
+
+  /* rfe_type-2 (1212 module) 5G-RX hardware fix from rtl8821c_hal_init_misc:
+   * REG_PAD_CTRL1+3 (0x0067) = 0x36. Only for rfe_type 2 (efuse RFE & 0x1f). */
+  if (((_efuse_valid ? _efuse_map[0xCA] : 0) & 0x1f) == 2)
+    _device.rtw_write8(0x0067, 0x36);
+
+  _logger->info("Jaguar2/8821C: bf_init (MU/TXBF MAC setup + 0x1c94)");
 }
 
 void HalJaguar2::rfe_init() {
@@ -723,6 +1074,107 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
    * BW40/80 is future work (uses BW40/BW80 diffs). */
   if (channel == 0)
     return;
+
+  /* 8821C: the vendor hal_com_get_txpwr_idx computes per-rate power
+   *   idx[rate] = clamp(base + (min(by_rate[rate], lmt) - rs_target), 0, 63)
+   * where base = efuse per-channel section index (phy_get_pg_txpwr_idx),
+   * by_rate = the phy_reg_pg value for the rate (array_mp_8821c_phy_reg_pg),
+   * rs_target = by_rate of the section reference rate (rate_sec_base: CCK->11M,
+   * OFDM->54M, HT->MCS7, VHT1SS->VHT1SS_MCS7), and lmt = worldwide-min
+   * txpwr_lmt. This differs from the shared 8822B flat-per-section clamp; the
+   * 8821C is 1T1R so only path A (0x1d00) is written. On an unprogrammed EFUSE
+   * fall through to the shared path. */
+  if (_variant == ChipVariant::C8821C) {
+    if (!_efuse_valid) {
+      read_efuse_logical_map(_efuse_map, sizeof(_efuse_map), /*dump=*/false);
+      _efuse_valid = true;
+    }
+    const uint8_t *ef = _efuse_map;
+    const bool g5c = channel > 14;
+    const bool prog = g5c ? (ef[0x22] != 0xff)
+                          : (ef[0x10] != 0xff && ef[0x16] != 0xff);
+    if (prog) {
+      const bool ht40 = bw >= 1;
+      auto s4v = [](int x) { int v = x & 0xf; return (v & 8) ? v - 16 : v; };
+      int g, bw40b, dpg;
+      if (!g5c) {
+        g = channel <= 2 ? 0 : channel <= 5 ? 1 : channel <= 8 ? 2
+            : channel <= 11 ? 3 : 4;
+        bw40b = ef[0x16 + g];
+        dpg = ef[0x1b];
+      } else {
+        static const uint8_t lo[] = {36,  44,  50,  60,  100, 108, 116,
+                                     124, 132, 140, 149, 157, 165, 173};
+        static const uint8_t hi[] = {42,  48,  58,  64,  106, 114, 122,
+                                     130, 138, 144, 155, 161, 171, 177};
+        g = 0;
+        for (int i = 0; i < 14; i++)
+          if (channel >= lo[i] && channel <= hi[i]) { g = i; break; }
+        bw40b = ef[0x22 + g];
+        dpg = ef[0x30];
+      }
+      const int ofdm_diff = s4v(dpg & 0xf), bw20_diff = s4v((dpg >> 4) & 0xf);
+      const int cg = (!g5c && channel == 14) ? 5 : g;
+      const int cck_base = g5c ? 0 : ef[0x10 + cg];
+      const int ofdm_base = bw40b + ofdm_diff;
+      const int ht_base = bw40b + (ht40 ? 0 : bw20_diff);
+      auto lmtc = [&](uint8_t sec) -> int {
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+        return hal8821c_txpwr_lmt(g5c ? 1 : 0, bw, sec, 1, channel);
+#else
+        (void)sec;
+        return 63;
+#endif
+      };
+      /* write a rate-section: per byte (rate) in each dword,
+       * idx = clamp(base + (min(by_rate, lmt) - rs), 0, 63). */
+      auto wsec = [&](uint16_t off, int base, int rs, int lm,
+                      const uint32_t *dw, int ndw) {
+        for (int w = 0; w < ndw; w++) {
+          uint32_t out = 0;
+          for (int b = 0; b < 4; b++) {
+            int byr = static_cast<int>((dw[w] >> (b * 8)) & 0xff);
+            int rt = byr < lm ? byr : lm;
+            int idx = base + (rt - rs);
+            if (idx < 0) idx = 0;
+            if (idx > 63) idx = 63;
+            out |= static_cast<uint32_t>(idx & 0xff) << (b * 8);
+          }
+          _device.rtw_write32(static_cast<uint16_t>(0x1d00 + off + w * 4), out);
+        }
+      };
+      /* by_rate dwords (array_mp_8821c_phy_reg_pg) + rs = ref-rate by_rate. */
+      if (!g5c) {
+        const uint32_t cck[] = {0x32343638};
+        const uint32_t ofdm[] = {0x36363636, 0x28303234};
+        const uint32_t ht[] = {0x34363636, 0x26283032};
+        const uint32_t vht[] = {0x34363636, 0x26283032, 0x22222224};
+        wsec(0x00, cck_base, 50, lmtc(0), cck, 1);
+        wsec(0x04, ofdm_base, 40, lmtc(1), ofdm, 2);
+        wsec(0x0c, ht_base, 38, lmtc(2), ht, 2);
+        wsec(0x2c, ht_base, 38, lmtc(2), vht, 3); /* VHT1SS: HT base/lmt */
+      } else {
+        const uint32_t ofdm[] = {0x34343434, 0x26283032};
+        const uint32_t ht[] = {0x32343434, 0x24262830};
+        const uint32_t vht[] = {0x32343434, 0x24262830, 0x20202022};
+        wsec(0x04, ofdm_base, 38, lmtc(1), ofdm, 2);
+        wsec(0x0c, ht_base, 36, lmtc(2), ht, 2);
+        wsec(0x2c, ht_base, 36, lmtc(2), vht, 3);
+      }
+      _logger->info("Jaguar2/8821C: per-rate TXAGC (vendor formula) ch{} {} "
+                    "cck_base={} ofdm_base={} ht_base={} lmt cck/ofdm/ht={}/{}/{}",
+                    channel, g5c ? "5G" : "2.4G", cck_base, ofdm_base, ht_base,
+                    lmtc(0), lmtc(1), lmtc(2));
+      return;
+    }
+    /* unprogrammed efuse -> shared flat path below */
+  }
+  /* Both variants use the same EFUSE power-by-rate layout at pg_txpwr_saddr=0x10
+   * (rtl8821c_halinit.c:61 == the 8822B value). The 8821C is 1T1R, so its path-1
+   * EFUSE base reads 0xff and is skipped by the per-path loop below — the shared
+   * code reads the real path-A per-channel base, adds the section BW/rate diffs,
+   * and clamps to the per-chip txpwr_lmt (8821C table wired into `lmt` above).
+   * This replaces the earlier 8821C-only branch that ignored the EFUSE base. */
   const bool g5 = channel > 14;
 
   /* EFUSE power-by-rate from logical 0x10 (pg_txpwr_saddr). Per path: 2.4G block
@@ -758,9 +1210,24 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
    * The demo path is 1Tx; the ht2 (2SS) clamp reuses the 1Tx limit (conservative
    * for the rare 2SS injection). sec: 0=CCK 1=OFDM 2=HT. */
   const uint8_t band_i = g5 ? 1 : 0;
-  const int lmt_cck = g5 ? 63 : hal8822b_txpwr_lmt(rfe_type, band_i, bw, 0, 1, channel);
-  const int lmt_ofdm = hal8822b_txpwr_lmt(rfe_type, band_i, bw, 1, 1, channel);
-  const int lmt_ht = hal8822b_txpwr_lmt(rfe_type, band_i, bw, 2, 1, channel);
+  /* Per-chip regulatory limit lookup (worldwide-min across FCC/ETSI/MKK, in
+   * TXAGC-index units). 8822B uses the rfe_type-aware table; 8821C the packed
+   * txpwr_lmt_t_8821c[] (rfe-independent). sec: 0=CCK 1=OFDM 2=HT. */
+  auto lmt = [&](uint8_t sec) -> int {
+#if defined(DEVOURER_HAVE_JAGUAR2_8822B)
+    if (_variant == ChipVariant::C8822B)
+      return hal8822b_txpwr_lmt(rfe_type, band_i, bw, sec, 1, channel);
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+    if (_variant == ChipVariant::C8821C)
+      return hal8821c_txpwr_lmt(band_i, bw, sec, 1, channel);
+#endif
+    (void)sec;
+    return 63;
+  };
+  const int lmt_cck = g5 ? 63 : lmt(0);
+  const int lmt_ofdm = lmt(1);
+  const int lmt_ht = lmt(2);
   auto clamp63 = [](int v) -> uint8_t {
     return static_cast<uint8_t>(v < 0 ? 0 : (v > 63 ? 63 : v));
   };
@@ -768,7 +1235,10 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
     if (v > lmt) v = lmt; return clamp63(v);
   };
 
-  for (uint8_t path = 0; path < 2; path++) {
+  /* 8821C is 1T1R — only path A has a valid EFUSE base + a real RF path (its
+   * path-1 block bytes are not tx-power data and 0x1d80 has no path-B PA). */
+  const uint8_t npath = _variant == ChipVariant::C8821C ? 1 : 2;
+  for (uint8_t path = 0; path < npath; path++) {
     /* base offset of this path's band block, and the BW40-base / first-diff
      * byte offsets within it. 2.4G: 6 CCK-base + 5 BW40-base + diffs (diff@11).
      * 5G: 14 BW40-base + diffs (diff@14), no CCK. */
@@ -809,6 +1279,15 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
     wr(0x04, ofdm_idx); wr(0x08, ofdm_idx);
     wr(0x0c, ht1_idx);  wr(0x10, ht1_idx);
     wr(0x14, ht2_idx);  wr(0x18, ht2_idx);
+    /* VHT1SS — the 8821C's AC mode — uses the same 1SS BW base as HT1SS, and the
+     * vendor efuse-calibrates it (config_phydm_write_txagc_8821c writes hw_rate
+     * up to VHT; 0x2c-0x35 = VHT1SS MCS0-9 -> regs 0x1d2c/0x1d30/0x1d34). Without
+     * this VHT TXAGC stays at the BB-table default — uncalibrated and
+     * inconsistent with the CCK/OFDM/HT rates above. 8821C-only so the 8822B's
+     * VHT2SS handling stays byte-identical. */
+    if (_variant == ChipVariant::C8821C) {
+      wr(0x2c, ht1_idx); wr(0x30, ht1_idx); wr(0x34, ht1_idx);
+    }
 
     _logger->info("Jaguar2: TXAGC path {} ch{} {} (g{}): CCK={:#x} OFDM={:#x} "
                   "HT1SS={:#x} HT2SS={:#x} (bw40_base={})", path, channel,
@@ -865,6 +1344,32 @@ void HalJaguar2::enable_rx() {
    * so control frames are captured too:
    *   0x7000282F | ACF(0x1000) = 0x7000382F. */
   uint32_t rcr = 0x7000382Fu;
+  /* 8821C: drop APP_PHYST_RXFF (BIT28). The 8821C appends a 32-byte PHY-status
+   * block before each RX frame in the RXFF, but its RX descriptor reports
+   * drv_info_size=0 (unlike the 8822B, which counts it) — so the shared parser
+   * puts the frame pointer 32 bytes early (onto the phy-status) and mis-advances
+   * the aggregation, garbling every frame. Monitor RX doesn't need the phy-
+   * status, so clearing the append bit makes the frame sit cleanly at
+   * descriptor+drvinfo(0)+shift and decode. */
+  if (_variant == ChipVariant::C8821C) {
+    if (!getenv("DEVOURER_8821C_NO_PHYST")) {
+      /* cfg_drv_info_8821c(HALMAC_DRV_INFO_PHY_STATUS): keep RCR APP_PHYSTS
+       * (bit28, like the vendor monitor path) and make the chip prepend a
+       * 32-byte PHY-status (jgr2 type0/type1) as drvinfo AND — crucially — count
+       * it in the RX descriptor's drv_info_size. REG_TRXFF_BNDY+1 low-nibble =
+       * 0xF is the vendor's "rxdesc len = 0 issue" fix, without which the
+       * descriptor reports drv_info_size=0 despite PHYST=1 and the shared parser
+       * mis-locates the body (garbling every frame). With it, drv_info_size
+       * reads 32, the body sits cleanly at desc+32+shift, and the phy-status
+       * carries per-frame RSSI/SNR/EVM (FrameParserJaguar2 fills RxAtrib).
+       * DEVOURER_8821C_NO_PHYST drops the phy-status for the leanest RX. */
+      _device.rtw_write8(0x060F, 4); /* REG_RX_DRVINFO_SZ = 4 units = 32 B */
+      uint8_t v = _device.rtw_read8(0x0115);
+      _device.rtw_write8(0x0115, static_cast<uint8_t>((v & 0xF0) | 0x0F));
+    } else {
+      rcr &= ~(1u << 28);
+    }
+  }
   /* DEVOURER_RX_KEEP_CORRUPTED: also accept CRC32/ICV-error frames (ACRC32 BIT8,
    * AICV BIT9) so the BB's demodulated-but-failed frames still reach the host.
    * Doubles as a bring-up discriminator: if reads>0 with this set but 0 without,

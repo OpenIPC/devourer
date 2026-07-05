@@ -29,6 +29,33 @@ public:
   void set_channel_bwmode(uint8_t channel, uint8_t channel_offset,
                           ChannelWidth_t bwmode);
 
+  /* Lean intra-band, same-bandwidth hop retune — the FastRetune core (see
+   * docs/frequency-hopping.md). The subset of set_channel_bwmode a hop needs:
+   * the RF18 channel write inside its 3-wire bracket + force-anapar, the BB
+   * reset, and the channel-keyed constants (SCO fc, TX DFIR, AGC table) only
+   * when their bucket changes. Everything bandwidth-keyed (clock/DFIR block,
+   * RXBB, MAC BW/TXSC, narrowband dividers, DAC-FIFO reset) and band-keyed
+   * (CCK-RxIQ, RF 0xdf) is untouched — set by the last full set at this
+   * BW/band. In 5/10 MHz mode the TX-DFIR write is skipped entirely (the
+   * narrowband re-clock owns 0x808 on the 8822e), so fast hops preserve the
+   * narrowband clocking without re-running the divider recipe.
+   *
+   * cache_rf=true reuses the cached full RF18 value (primed by one BB-window
+   * read on the first fast hop; the 8822e composes RF18 from scratch and
+   * needs no cache/read at all). Returns false — chip untouched — when the
+   * hop crosses the 2.4/5 GHz boundary or the radio was never tuned; the
+   * caller falls back to the full set_channel_bwmode. */
+  bool fast_retune(uint8_t channel, uint8_t channel_offset,
+                   ChannelWidth_t bwmode, bool cache_rf);
+
+  /* Channel/BW register-canary dump for tests/hop_parity_check.sh — the same
+   * grep format as the Jaguar1 DumpCanary (BB/MAC/RF[A|B] ADDR = VALUE inside
+   * === DEVOURER_DUMP_CANARY === markers). Emitted by both the full and fast
+   * channel paths when DEVOURER_DUMP_CANARY is set, so a full-vs-fast diff
+   * compares the same post-set snapshot. Live counters (IGI/FA) are excluded
+   * — they'd be pure run-variant noise. */
+  void DumpCanary();
+
   /* Narrowband re-clock applied on top of an already-tuned channel: switches
    * the baseband DAC/ADC clock + small-BW field for 5/10/20 MHz. */
   void set_bandwidth_dividers(ChannelWidth_t bwmode);
@@ -92,10 +119,44 @@ private:
   void write_check_afe_8822e(uint16_t add, uint32_t data);
   void dack_soft_rst_8822e();
 
+  /* Shared by the full and fast channel paths so they cannot diverge. */
+  static void central_and_pri(uint8_t channel, uint8_t channel_offset,
+                              ChannelWidth_t bwmode, uint8_t &central,
+                              uint8_t &pri);
+  static uint32_t sco_for(uint8_t central);      /* BB 0xc30[11:0] value */
+  static uint32_t rf18_for(uint8_t central, ChannelWidth_t bwmode,
+                           uint32_t base);       /* merge into base (0 = none) */
+  void select_agc_tables(uint8_t central, ChannelWidth_t bwmode);
+  void apply_tx_dfir(uint8_t central);
+  void bb_reset_toggle();                        /* MAC 0x0 BIT16 1->0->1 */
+  /* RF register write via the direct-write window: BB[base + (rf_addr<<2)],
+   * 20-bit mask. base 0x3c00 (A) / 0x4c00 (B). */
+  void rf_window_write(uint16_t base, uint8_t rfaddr, uint32_t v);
+  /* BW-keyed RXBB filter (8822c RF 0x3f gated sequence / 8822e RF 0x1a RMW).
+   * Must run inside a rstb_3wire(false)..(true) bracket — the caller owns the
+   * bracket. */
+  void apply_rxbb(ChannelWidth_t bwmode);
+
   RtlUsbAdapter _device;
   Logger_t _logger;
   ChipVariant _variant;
   uint8_t _last_channel = 0; /* set by set_channel_bwmode; 0 = not yet tuned */
+
+  /* fast_retune write-on-change caches. Invalidated whenever the full
+   * set_channel_bwmode runs (it rewrites all of them); refreshed by the fast
+   * path's own writes, so they only ever mirror fast-path state — the J1
+   * RadioManagementModule pattern. */
+  uint32_t _rf18_cache = 0;   /* 8822c full RF18 (BB-window read, 20-bit) */
+  bool _rf18_cached = false;
+  uint32_t _last_sco = 0xffffffff;
+  uint32_t _last_dfir = 0xffffffff; /* packed (0x808[22:20]<<8)|[6:4] */
+  int _last_agc_key = -1;           /* band/sub-band bucket + bw20 flag */
+  /* BW-keyed RXBB state, re-asserted on the first fast hop of each epoch:
+   * the init-time halrf calibration rewrites it after the channel set
+   * (hardware-observed on the 8812EU — IQK clears the 40 MHz TX_CCK_IND bit
+   * in RF 0x1a), and the fast path must end in the same state as the full
+   * path, which re-imposes it on every retune. */
+  bool _rxbb_asserted = false;
 };
 
 } /* namespace jaguar3 */

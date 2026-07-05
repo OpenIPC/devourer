@@ -15,7 +15,7 @@ PY=${PY:-python3}
 SECS=5
 EU_VID=0x0bda; EU_PID=0xa81a
 
-cleanup(){ sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null; }
+cleanup(){ sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; }
 trap cleanup EXIT
 
 cell() { # $1=label $2=channel $3=freq $4=extra-env

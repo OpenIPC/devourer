@@ -78,8 +78,10 @@ public:
    * crosses the 2.4/5 GHz boundary or the current bandwidth isn't 20 MHz.
    * cache_rf=true additionally avoids the per-write 20 ms C-cut RF-read sleep
    * by writing RF_CHNLBW from a cached value. Intended for channel hopping;
-   * keeps the device channel state in sync for the 5 GHz CCK clamp. */
-  void FastRetune(uint8_t channel, bool cache_rf = true);
+   * keeps the device channel state in sync for the 5 GHz CCK clamp.
+   * (The cache_rf default binds at IRtlDevice — virtual default arguments
+   * resolve statically, so overrides must not re-declare it.) */
+  void FastRetune(uint8_t channel, bool cache_rf) override;
   void InitWrite(SelectedChannel channel) override;
   void SetTxPower(uint8_t power) override;
   /* Force the per-rate TXAGC index (0..63), bypassing the EFUSE per-rate

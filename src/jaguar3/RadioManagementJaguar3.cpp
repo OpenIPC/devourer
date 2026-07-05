@@ -37,26 +37,17 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
    * 40 MHz frame lands on the lower 40 of the block. */
   const bool is40 = (bwmode == CHANNEL_WIDTH_40);
   const bool is80 = (bwmode == CHANNEL_WIDTH_80);
-  uint8_t central = channel;
-  uint8_t pri = 0; /* 0 = 20 MHz / no sub-channel */
-  if (is40) {
-    if (channel_offset == 2) { central = channel - 2; pri = 1; } /* HT40- */
-    else                     { central = channel + 2; pri = 2; } /* HT40+ */
-  } else if (is80) {
-    central = static_cast<uint8_t>(channel + 6); /* 80 MHz centre */
-    /* pri-ch index for 80 MHz is a VHT_DATA_SC_* code (get_pri_ch_id), NOT a
-     * plain 0-3 slot: primary = lowest 20 => VHT_DATA_SC_20_LOWEST_OF_80MHZ = 4.
-     * This lands in 0x9b0[15:8]=0x44 and REG_DATA_SC 0x483=0xa4 (kernel-parity;
-     * verified against a register dump of `iw 149 80MHz`). */
-    pri = 4;
-  }
+  uint8_t central, pri;
+  central_and_pri(channel, channel_offset, bwmode, central, pri);
 
-  /* RF register write via the 8822C direct-write window:
-   * BB[base + (rf_addr<<2)], 20-bit mask. base 0x3c00 (A) / 0x4c00 (B). */
-  auto rf_write = [this](uint16_t base, uint8_t rfaddr, uint32_t v) {
-    _device.phy_set_bb_reg(static_cast<uint16_t>(base + (rfaddr << 2)),
-                           0x000fffff, v);
-  };
+  /* Any full channel set rewrites what fast_retune caches (RF18 BW/band bits,
+   * SCO, TX DFIR, AGC tables, RXBB) — invalidate; the caches only ever mirror
+   * fast-path writes (the J1 RadioManagementModule pattern). */
+  _rf18_cached = false;
+  _last_sco = 0xffffffff;
+  _last_dfir = 0xffffffff;
+  _last_agc_key = -1;
+  _rxbb_asserted = false;
 
   _last_channel = channel;
 
@@ -127,31 +118,12 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
   /* RF 0x18 channel/band tune. 8822C is a read-modify-write preserving [15:10]
    * and setting the BW20 bits (config_phydm_switch_channel/bandwidth_8822c);
    * 8822E configures its RF band via its own phydm path (config_channel_8822e),
-   * so it takes the plain write below. */
-  /* RF bandwidth bits in RF18: BW20 = BIT13|BIT12, BW40 = BIT13, BW80 = BIT12
-   * (config_phydm_switch_bandwidth). */
-  const uint32_t rf_bw_bits = is80   ? (1u << 12)
-                              : is40  ? (1u << 13)
-                                      : ((1u << 13) | (1u << 12));
-  uint32_t rf18;
-  if (is_c) {
-    /* Clear the channel/band bits AND the BW bits [13:12]: the vendor does
-     * rf_reg18 &= ~(BIT13|BIT12) before setting them, and the RMW mask must
-     * too — otherwise a prior 20 MHz tune's BIT12 survives and a 40 MHz tune
-     * ends up BIT13|BIT12 = 20 MHz RF while BB/descriptor say 40 MHz, which
-     * halts the TX engine (frames fill TXPKTBUF but never drain). */
-    rf18 = (_device.rtw_read32(static_cast<uint16_t>(0x3c00 + (0x18 << 2))) &
-            0xfffffu & ~0x733ffu);
-    rf18 |= (central & 0xffu);
-    rf18 |= rf_bw_bits;
-  } else {
-    rf18 = (central & 0xffu) | rf_bw_bits;
-  }
-  if (central > 14) { /* 5 GHz */
-    rf18 |= (1u << 16) | (1u << 8);
-    if (central > 144) rf18 |= (1u << 18);
-    else if (central >= 80) rf18 |= (1u << 17);
-  }
+   * so it composes the value from scratch (base 0). */
+  const uint32_t rf18 =
+      is_c ? rf18_for(central, bwmode,
+                      _device.rtw_read32(
+                          static_cast<uint16_t>(0x3c00 + (0x18 << 2))))
+           : rf18_for(central, bwmode, 0);
   _logger->info("Jaguar3: central ch {} (pri idx {}) RF18=0x{:05x}", central,
                 pri, rf18);
 
@@ -160,20 +132,11 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
      * (false) 0x1c90[8]=0 before, (true) 0x1c90[8]=1 + 0x1830[29]/0x4130[29]=1
      * "force update anapar" after — the latter pushes the RF/analog shadow to
      * hardware, which is required for the per-channel RF (RXBB/RF18) to reach the
-     * analog front-end. RXBB (RF 0x3f) is a gated write: RF 0xee[2]=1,
-     * RF 0x33[4:0]=0x12, RF 0x3f, RF 0xee[2]=0 (config_phydm_switch_bandwidth_8822c). */
-    /* RXBB (RF 0x3f): BW20 = BIT4|BIT3 (0x18), BW40 = BIT4 (0x10),
-     * BW80 = BIT3 (0x08) (config_phydm_switch_bandwidth_8822c). */
-    const uint32_t rxbb = is80 ? 0x08u : is40 ? 0x10u : 0x18u;
+     * analog front-end. */
     _device.phy_set_bb_reg(0x1c90, 1u << 8, 0x0); /* rstb_3wire(false) */
-    for (uint16_t base : {uint16_t(0x3c00), uint16_t(0x4c00)}) {
-      _device.phy_set_bb_reg(static_cast<uint16_t>(base + (0xee << 2)), 0x4, 0x1);
-      _device.phy_set_bb_reg(static_cast<uint16_t>(base + (0x33 << 2)), 0x1f, 0x12);
-      rf_write(base, 0x3f, rxbb);
-      _device.phy_set_bb_reg(static_cast<uint16_t>(base + (0xee << 2)), 0x4, 0x0);
-    }
-    rf_write(0x3c00, 0x18, rf18);
-    rf_write(0x4c00, 0x18, rf18);
+    apply_rxbb(bwmode);
+    rf_window_write(0x3c00, 0x18, rf18);
+    rf_window_write(0x4c00, 0x18, rf18);
     _device.phy_set_bb_reg(static_cast<uint16_t>(0x3c00 + (0xdf << 2)), 1u << 18,
                            is_2g ? 1 : 0);
     _device.phy_set_bb_reg(0x1c90, 1u << 8, 0x1);   /* rstb_3wire(true) */
@@ -183,29 +146,9 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
     /* rstb_3wire(false) before the RF writes — see the force-update-anapar note
      * below (phydm_rstb_3wire_8822e). */
     _device.phy_set_bb_reg(0x1c90, 1u << 8, 0x0);
-    rf_write(0x3c00, 0x18, rf18);
-    rf_write(0x4c00, 0x18, rf18);
-    /* 8822e switch_bandwidth: RXBB/TXBB bandwidth lives in RF 0x1a[14:10]
-     * (config_phydm_switch_bandwidth_8822e RMW: rf_reg1a &= ~0x7c00 then set
-     * the BW bits) — 20M = BIT11|BIT10, 40M = BIT12|BIT11, 80M = BIT13|BIT10;
-     * the 40M path also does the TX_CCK_IND workaround (RF 0x1a BIT0=1,
-     * BIT16=0). The 8822e has NO RF 0x3f RXBB register (that is an 8822c-only
-     * write): the 20 MHz path previously wrote RF 0x3f=0x18 and left RF 0x1a
-     * unset, so the 8822e RX baseband filter stayed at the wrong bandwidth and
-     * the receiver was deaf on 2.4 GHz (5 GHz limped on whatever the init RF
-     * table left in RF 0x1a). Set RF 0x1a for every bandwidth, matching the
-     * vendor (kernel 2G RF 0x1a = 0xc00, RF 0x3f = 0x2 default). */
-    const uint32_t bb = is80  ? ((1u << 13) | (1u << 10))
-                        : is40 ? ((1u << 12) | (1u << 11))
-                               : ((1u << 11) | (1u << 10)); /* 20M */
-    for (uint16_t base : {uint16_t(0x3c00), uint16_t(0x4c00)}) {
-      uint32_t r1a = _device.rtw_read32(
-          static_cast<uint16_t>(base + (0x1a << 2))) & 0xfffffu;
-      r1a &= ~0x7c00u;
-      r1a |= bb;
-      if (is40) { r1a |= (1u << 0); r1a &= ~(1u << 16); }
-      rf_write(base, 0x1a, r1a);
-    }
+    rf_window_write(0x3c00, 0x18, rf18);
+    rf_window_write(0x4c00, 0x18, rf18);
+    apply_rxbb(bwmode); /* 8822e RF 0x1a RMW — see apply_rxbb */
     _device.phy_set_bb_reg(static_cast<uint16_t>(0x3c00 + (0xdf << 2)), 1u << 18,
                            is_2g ? 1 : 0);
     /* Force-update-anapar (phydm_rstb_3wire_8822e, enable=true): 0x1c90[8]=1 +
@@ -222,50 +165,8 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
     _device.phy_set_bb_reg(0x4130, 1u << 29, 0x1);
   }
 
-  /* Per-band RX AGC-table selection (phydm_cck/ofdm_agc_tab_sel_8822c) — 8822C
-   * only; the EU (8822e) selects its AGC table via its own phydm path. 0x18ac/
-   * 0x41ac [15:12]=CCK table, [8:4]=OFDM table; 0x828[7:3]=AGC lower bound
-   * (L_BND_DEFAULT_8822C 0xd; the measured ofdm_rxagc_l_bnd is not tracked). */
-  auto ofdm_agc_sel = [this](uint8_t table) {
-    _device.phy_set_bb_reg(0x18ac, 0x1f0, table);
-    _device.phy_set_bb_reg(0x41ac, 0x1f0, table);
-    _device.phy_set_bb_reg(0x828, 0xf8, 0xd);
-  };
-  auto cck_agc_sel = [this](uint8_t table) {
-    _device.phy_set_bb_reg(0x18ac, 0xf000, table);
-    _device.phy_set_bb_reg(0x41ac, 0xf000, table);
-  };
-  const bool bw20 = (bwmode == CHANNEL_WIDTH_20 || bwmode == CHANNEL_WIDTH_10 ||
-                     bwmode == CHANNEL_WIDTH_5);
-  if (!is_c) {
-    /* 8822E AGC-table selection (phydm_set_agc_table_8822e / ofdm_agc_tab_sel_
-     * 8822e / cck_agc_tab_sel_8822e). Same registers as the 8822c lambdas, but
-     * 8822e-specific table indices (phydm_hal_api8822e.h): OFDM 2G=0 / 5G_LOW=1
-     * / MID=2 / HIGH=3, CCK 2G=8. The 8822e index is per-band (no BW20/BW40
-     * split). Without this the EU keeps the init-table AGC index when it tunes
-     * to 2.4 GHz, so the front-end runs at the wrong gain and the receiver is
-     * stone deaf on 2G (5 GHz survives on the init-table defaults). WiFi-only
-     * coex here, so the no-BT table (not the *_BTC variants). */
-    if (central <= 14) {
-      cck_agc_sel(8);   /* CCK_8822E */
-      ofdm_agc_sel(0);  /* OFDM_2G_8822E */
-    } else if (central < 80) {
-      ofdm_agc_sel(1);  /* OFDM_5G_LOW_BAND_8822E */
-    } else if (central <= 144) {
-      ofdm_agc_sel(2);  /* OFDM_5G_MID_BAND_8822E */
-    } else {
-      ofdm_agc_sel(3);  /* OFDM_5G_HIGH_BAND_8822E */
-    }
-  } else if (central <= 14) {
-    cck_agc_sel(bw20 ? 5 : 4);              /* CCK_BW20=5 / CCK_BW40=4 */
-    ofdm_agc_sel(bw20 ? 6 : 0);            /* OFDM_2G_BW20=6 / OFDM_2G_BW40=0 */
-  } else if (central < 80) {
-    ofdm_agc_sel(1);                        /* OFDM_5G_LOW */
-  } else if (central <= 144) {
-    ofdm_agc_sel(2);                        /* OFDM_5G_MID */
-  } else {
-    ofdm_agc_sel(3);                        /* OFDM_5G_HIGH */
-  }
+  /* Per-band RX AGC-table selection (shared with fast_retune). */
+  select_agc_tables(central, bwmode);
 
   /* --- 2G/5G band BB (phydm switch_channel "Other BB Settings") --- */
   if (is_2g) {
@@ -290,27 +191,11 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
   }
 
   /* SCO tracking f_c (phydm_sco_trk_fc_setting_8822c): BB 0xc30[11:0]. Keyed
-   * on the central channel. */
-  uint32_t sco;
-  if (central >= 36 && central <= 51) sco = 0x494;
-  else if (central >= 52 && central <= 55) sco = 0x493;
-  else if (central >= 56 && central <= 111) sco = 0x453;
-  else if (central >= 112 && central <= 119) sco = 0x452;
-  else if (central >= 120 && central <= 172) sco = 0x412;
-  else if (central >= 173) sco = 0x411;
-  else if (central >= 1 && central <= 10) sco = 0x9aa;
-  else if (central == 11 || central == 12) sco = 0x96a;
-  else sco = 0x969; /* 13/14 */
-  _device.phy_set_bb_reg(0xc30, 0xfff, sco);
+   * on the central channel (shared with fast_retune). */
+  _device.phy_set_bb_reg(0xc30, 0xfff, sco_for(central));
 
-  /* TX DFIR (phydm_tx_dfir_setting_8822c): BB 0x808[22:20] + [6:4]. */
-  if (is_2g) {
-    _device.phy_set_bb_reg(0x808, 0x700000, central == 11 ? 0x3 : 0x1);
-    _device.phy_set_bb_reg(0x808, 0x70, central == 13 ? 0x3 : 0x1);
-  } else {
-    _device.phy_set_bb_reg(0x808, 0x700000, 0x1);
-    _device.phy_set_bb_reg(0x808, 0x70, 0x3);
-  }
+  /* TX DFIR (phydm_tx_dfir_setting_8822c, shared with fast_retune). */
+  apply_tx_dfir(central);
 
   /* MAC-side bandwidth + TX sub-channel (halmac cfg_bw / cfg_pri_ch_idx). */
   set_mac_bw_txsc(bwmode, pri);
@@ -318,10 +203,7 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
   /* phydm_bb_reset_8822c: toggle the BB reset (MAC reg 0x0 BIT16, 1->0->1) to
    * (re)start the receiver after channel/BW config — the kernel does this after
    * every switch_channel; without it the RX engine never runs. */
-  uint32_t r0 = _device.rtw_read32(0x0);
-  _device.rtw_write32(0x0, r0 | (1u << 16));
-  _device.rtw_write32(0x0, r0 & ~(1u << 16));
-  _device.rtw_write32(0x0, r0 | (1u << 16));
+  bb_reset_toggle();
 
   /* halrf_ex_dac_fifo_rst — the vendor runs this after EVERY switch_bandwidth
    * ("fix dac fifo error after TXCK setting"): 40/80 MHz change the TX clock,
@@ -336,6 +218,319 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
   /* For 5/10 MHz: channel is now tuned at 20 MHz; re-clock the baseband. */
   if (bwmode == CHANNEL_WIDTH_5 || bwmode == CHANNEL_WIDTH_10)
     set_bandwidth_dividers(bwmode);
+
+  if (std::getenv("DEVOURER_DUMP_CANARY"))
+    DumpCanary();
+}
+
+void RadioManagementJaguar3::DumpCanary() {
+  /* Channel/BW-relevant set: TX DFIR + block enables (0x808), RX DFIR (0x810),
+   * AGC bound/tables (0x828/0x18ac/0x41ac), subtune (0x88c), small-BW/RF-BW/
+   * pri-ch (0x9b0), clock dividers (0x9b4), SCO (0xc30), pilot smoothing
+   * (0xcbc), CCK block regs (0x1a00/0x1a14/0x1a80/0x1a9c/0x1abc/0x1ae8/0x1aec),
+   * AGC 5G bound (0x1c80), 80 MHz decimation (0x1944/0x4044). MAC: BB-reset
+   * word (0x0), AFE clk (0x24, 8822e NB), CCK check (0x454), DATA_SC (0x483),
+   * us-ticks (0x55c/0x638), TRXPTCL (0x668). RF (via the BB direct window,
+   * both paths): 0x18 channel, 0x1a RXBB (8822e), 0x3f RXBB (8822c), 0xdf.
+   * Live counters (IGI 0x1d70, FA/CCA) deliberately excluded. */
+  static const uint16_t bb_canary[] = {
+      0x808, 0x810, 0x828,  0x88c,  0x9b0,  0x9b4,  0xc30,  0xcbc,
+      0x1a00, 0x1a14, 0x1a80, 0x1a9c, 0x1abc, 0x1ae8, 0x1aec, 0x1c80,
+      0x18ac, 0x41ac, 0x1944, 0x4044};
+  static const uint16_t mac_canary[] = {0x0, 0x24, 0x454, 0x483,
+                                        0x55c, 0x638, 0x668};
+  static const uint8_t rf_canary[] = {0x18, 0x1a, 0x3f, 0xdf};
+
+  _logger->info("=== DEVOURER_DUMP_CANARY (post channel-set ch={}) ===",
+                unsigned(_last_channel));
+  for (uint16_t a : bb_canary)
+    _logger->info("BB 0x{:04x} = 0x{:08X}", a, _device.rtw_read32(a));
+  for (uint16_t a : mac_canary)
+    _logger->info("MAC 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+  for (uint8_t a : rf_canary)
+    _logger->info("RF[A] 0x{:02x} = 0x{:05X}", a,
+                  _device.rtw_read32(static_cast<uint16_t>(0x3c00 + (a << 2))) &
+                      0xfffffu);
+  for (uint8_t a : rf_canary)
+    _logger->info("RF[B] 0x{:02x} = 0x{:05X}", a,
+                  _device.rtw_read32(static_cast<uint16_t>(0x4c00 + (a << 2))) &
+                      0xfffffu);
+  _logger->info("=== END DEVOURER_DUMP_CANARY ===");
+}
+
+void RadioManagementJaguar3::central_and_pri(uint8_t channel,
+                                             uint8_t channel_offset,
+                                             ChannelWidth_t bwmode,
+                                             uint8_t &central, uint8_t &pri) {
+  central = channel;
+  pri = 0; /* 0 = 20 MHz / no sub-channel */
+  if (bwmode == CHANNEL_WIDTH_40) {
+    if (channel_offset == 2) { central = channel - 2; pri = 1; } /* HT40- */
+    else                     { central = channel + 2; pri = 2; } /* HT40+ */
+  } else if (bwmode == CHANNEL_WIDTH_80) {
+    central = static_cast<uint8_t>(channel + 6); /* 80 MHz centre */
+    /* pri-ch index for 80 MHz is a VHT_DATA_SC_* code (get_pri_ch_id), NOT a
+     * plain 0-3 slot: primary = lowest 20 => VHT_DATA_SC_20_LOWEST_OF_80MHZ = 4.
+     * This lands in 0x9b0[15:8]=0x44 and REG_DATA_SC 0x483=0xa4 (kernel-parity;
+     * verified against a register dump of `iw 149 80MHz`). */
+    pri = 4;
+  }
+}
+
+/* RF bandwidth bits in RF18: BW20 = BIT13|BIT12, BW40 = BIT13, BW80 = BIT12
+ * (config_phydm_switch_bandwidth; 5/10 MHz tune the RF at 20 MHz). The base's
+ * channel/band bits AND the BW bits [13:12] are cleared before merging: the
+ * vendor does rf_reg18 &= ~(BIT13|BIT12) before setting them, and the RMW mask
+ * must too — otherwise a prior 20 MHz tune's BIT12 survives and a 40 MHz tune
+ * ends up BIT13|BIT12 = 20 MHz RF while BB/descriptor say 40 MHz, which halts
+ * the TX engine (frames fill TXPKTBUF but never drain). base 0 (8822e) composes
+ * the value from scratch. */
+uint32_t RadioManagementJaguar3::rf18_for(uint8_t central,
+                                          ChannelWidth_t bwmode,
+                                          uint32_t base) {
+  const uint32_t rf_bw_bits = (bwmode == CHANNEL_WIDTH_80)   ? (1u << 12)
+                              : (bwmode == CHANNEL_WIDTH_40) ? (1u << 13)
+                                          : ((1u << 13) | (1u << 12));
+  uint32_t rf18 = (base & 0xfffffu & ~0x733ffu) | (central & 0xffu) | rf_bw_bits;
+  if (central > 14) { /* 5 GHz */
+    rf18 |= (1u << 16) | (1u << 8);
+    if (central > 144) rf18 |= (1u << 18);
+    else if (central >= 80) rf18 |= (1u << 17);
+  }
+  return rf18;
+}
+
+/* SCO tracking f_c value (phydm_sco_trk_fc_setting_8822c), keyed on central. */
+uint32_t RadioManagementJaguar3::sco_for(uint8_t central) {
+  if (central >= 36 && central <= 51) return 0x494;
+  if (central >= 52 && central <= 55) return 0x493;
+  if (central >= 56 && central <= 111) return 0x453;
+  if (central >= 112 && central <= 119) return 0x452;
+  if (central >= 120 && central <= 172) return 0x412;
+  if (central >= 173) return 0x411;
+  if (central >= 1 && central <= 10) return 0x9aa;
+  if (central == 11 || central == 12) return 0x96a;
+  return 0x969; /* 13/14 */
+}
+
+/* Per-band RX AGC-table selection. 8822C: phydm_cck/ofdm_agc_tab_sel_8822c —
+ * 0x18ac/0x41ac [15:12]=CCK table, [8:4]=OFDM table; 0x828[7:3]=AGC lower bound
+ * (L_BND_DEFAULT_8822C 0xd; the measured ofdm_rxagc_l_bnd is not tracked).
+ * 8822E: phydm_set_agc_table_8822e — same registers, 8822e-specific indices
+ * (OFDM 2G=0 / 5G_LOW=1 / MID=2 / HIGH=3, CCK 2G=8; per-band, no BW20/BW40
+ * split). Without this the EU keeps the init-table AGC index when it tunes to
+ * 2.4 GHz, so the front-end runs at the wrong gain and the receiver is stone
+ * deaf on 2G (5 GHz survives on the init-table defaults). WiFi-only coex here,
+ * so the no-BT table (not the *_BTC variants). */
+void RadioManagementJaguar3::select_agc_tables(uint8_t central,
+                                               ChannelWidth_t bwmode) {
+  auto ofdm_agc_sel = [this](uint8_t table) {
+    _device.phy_set_bb_reg(0x18ac, 0x1f0, table);
+    _device.phy_set_bb_reg(0x41ac, 0x1f0, table);
+    _device.phy_set_bb_reg(0x828, 0xf8, 0xd);
+  };
+  auto cck_agc_sel = [this](uint8_t table) {
+    _device.phy_set_bb_reg(0x18ac, 0xf000, table);
+    _device.phy_set_bb_reg(0x41ac, 0xf000, table);
+  };
+  const bool bw20 = (bwmode == CHANNEL_WIDTH_20 || bwmode == CHANNEL_WIDTH_10 ||
+                     bwmode == CHANNEL_WIDTH_5);
+  if (_variant != ChipVariant::C8822C) {
+    if (central <= 14) {
+      cck_agc_sel(8);   /* CCK_8822E */
+      ofdm_agc_sel(0);  /* OFDM_2G_8822E */
+    } else if (central < 80) {
+      ofdm_agc_sel(1);  /* OFDM_5G_LOW_BAND_8822E */
+    } else if (central <= 144) {
+      ofdm_agc_sel(2);  /* OFDM_5G_MID_BAND_8822E */
+    } else {
+      ofdm_agc_sel(3);  /* OFDM_5G_HIGH_BAND_8822E */
+    }
+  } else if (central <= 14) {
+    cck_agc_sel(bw20 ? 5 : 4);              /* CCK_BW20=5 / CCK_BW40=4 */
+    ofdm_agc_sel(bw20 ? 6 : 0);            /* OFDM_2G_BW20=6 / OFDM_2G_BW40=0 */
+  } else if (central < 80) {
+    ofdm_agc_sel(1);                        /* OFDM_5G_LOW */
+  } else if (central <= 144) {
+    ofdm_agc_sel(2);                        /* OFDM_5G_MID */
+  } else {
+    ofdm_agc_sel(3);                        /* OFDM_5G_HIGH */
+  }
+}
+
+void RadioManagementJaguar3::rf_window_write(uint16_t base, uint8_t rfaddr,
+                                             uint32_t v) {
+  _device.phy_set_bb_reg(static_cast<uint16_t>(base + (rfaddr << 2)),
+                         0x000fffff, v);
+}
+
+/* BW-keyed RXBB baseband-filter write, inside the caller's 3-wire bracket.
+ * 8822c: RF 0x3f gated sequence — RF 0xee[2]=1, RF 0x33[4:0]=0x12, RF 0x3f,
+ * RF 0xee[2]=0 (config_phydm_switch_bandwidth_8822c); BW20 = BIT4|BIT3 (0x18),
+ * BW40 = BIT4 (0x10), BW80 = BIT3 (0x08).
+ * 8822e: RXBB/TXBB bandwidth lives in RF 0x1a[14:10]
+ * (config_phydm_switch_bandwidth_8822e RMW: rf_reg1a &= ~0x7c00 then set the
+ * BW bits) — 20M = BIT11|BIT10, 40M = BIT12|BIT11, 80M = BIT13|BIT10; the 40M
+ * path also does the TX_CCK_IND workaround (RF 0x1a BIT0=1, BIT16=0). The
+ * 8822e has NO RF 0x3f RXBB register (that is an 8822c-only write): the 20 MHz
+ * path previously wrote RF 0x3f=0x18 and left RF 0x1a unset, so the 8822e RX
+ * baseband filter stayed at the wrong bandwidth and the receiver was deaf on
+ * 2.4 GHz (5 GHz limped on whatever the init RF table left in RF 0x1a). Set
+ * RF 0x1a for every bandwidth, matching the vendor (kernel 2G RF 0x1a = 0xc00,
+ * RF 0x3f = 0x2 default). */
+void RadioManagementJaguar3::apply_rxbb(ChannelWidth_t bwmode) {
+  const bool is40 = (bwmode == CHANNEL_WIDTH_40);
+  const bool is80 = (bwmode == CHANNEL_WIDTH_80);
+  if (_variant == ChipVariant::C8822C) {
+    const uint32_t rxbb = is80 ? 0x08u : is40 ? 0x10u : 0x18u;
+    for (uint16_t base : {uint16_t(0x3c00), uint16_t(0x4c00)}) {
+      _device.phy_set_bb_reg(static_cast<uint16_t>(base + (0xee << 2)), 0x4, 0x1);
+      _device.phy_set_bb_reg(static_cast<uint16_t>(base + (0x33 << 2)), 0x1f, 0x12);
+      rf_window_write(base, 0x3f, rxbb);
+      _device.phy_set_bb_reg(static_cast<uint16_t>(base + (0xee << 2)), 0x4, 0x0);
+    }
+  } else {
+    const uint32_t bb = is80  ? ((1u << 13) | (1u << 10))
+                        : is40 ? ((1u << 12) | (1u << 11))
+                               : ((1u << 11) | (1u << 10)); /* 20M */
+    for (uint16_t base : {uint16_t(0x3c00), uint16_t(0x4c00)}) {
+      uint32_t r1a = _device.rtw_read32(
+          static_cast<uint16_t>(base + (0x1a << 2))) & 0xfffffu;
+      r1a &= ~0x7c00u;
+      r1a |= bb;
+      if (is40) { r1a |= (1u << 0); r1a &= ~(1u << 16); }
+      rf_window_write(base, 0x1a, r1a);
+    }
+  }
+}
+
+/* TX DFIR (phydm_tx_dfir_setting_8822c): BB 0x808[22:20] + [6:4]. */
+void RadioManagementJaguar3::apply_tx_dfir(uint8_t central) {
+  if (central <= 14) {
+    _device.phy_set_bb_reg(0x808, 0x700000, central == 11 ? 0x3 : 0x1);
+    _device.phy_set_bb_reg(0x808, 0x70, central == 13 ? 0x3 : 0x1);
+  } else {
+    _device.phy_set_bb_reg(0x808, 0x700000, 0x1);
+    _device.phy_set_bb_reg(0x808, 0x70, 0x3);
+  }
+}
+
+/* phydm_bb_reset_8822c: toggle the BB reset (MAC reg 0x0 BIT16, 1->0->1) so
+ * the receiver (re)starts after channel/BW config. */
+void RadioManagementJaguar3::bb_reset_toggle() {
+  uint32_t r0 = _device.rtw_read32(0x0);
+  _device.rtw_write32(0x0, r0 | (1u << 16));
+  _device.rtw_write32(0x0, r0 & ~(1u << 16));
+  _device.rtw_write32(0x0, r0 | (1u << 16));
+}
+
+bool RadioManagementJaguar3::fast_retune(uint8_t channel,
+                                         uint8_t channel_offset,
+                                         ChannelWidth_t bwmode, bool cache_rf) {
+  if (_last_channel == 0)
+    return false; /* never tuned — unknown band, cold BW/band state */
+  const bool cur_2g = _last_channel <= 14;
+  if (cur_2g != (channel <= 14))
+    return false; /* band change needs RFE/AGC/CCK-RxIQ — full path only */
+  if (channel == _last_channel)
+    return true; /* no-op hop */
+
+  uint8_t central, pri;
+  central_and_pri(channel, channel_offset, bwmode, central, pri);
+
+  /* RF18: merge the new central into the cached full value (8822c — one
+   * BB-window read primes the cache; cache_rf=false re-reads per hop for A/B
+   * measurement) or compose from scratch (8822e — plain write, no read ever). */
+  const bool is_c = (_variant == ChipVariant::C8822C);
+  uint32_t rf18;
+  if (is_c) {
+    if (!cache_rf || !_rf18_cached) {
+      _rf18_cache = _device.rtw_read32(
+                        static_cast<uint16_t>(0x3c00 + (0x18 << 2))) &
+                    0xfffffu;
+      _rf18_cached = true;
+    }
+    rf18 = rf18_for(central, bwmode, _rf18_cache);
+    _rf18_cache = rf18; /* refresh so the next hop merges into what we wrote */
+  } else {
+    rf18 = rf18_for(central, bwmode, 0);
+  }
+
+  /* The per-hop core of config_phydm_switch_channel: 3-wire bracket, RF18 on
+   * both paths, force-update-anapar (pushes the RF/analog shadow to the
+   * front-end — required on both variants, see set_channel_bwmode). The
+   * band-keyed RF 0xdf write stays untouched (set by the last full set at
+   * this band). The BW-keyed RXBB is re-asserted ONCE per epoch — the
+   * init-time halrf calibration rewrites it after the channel set
+   * (hardware-observed on the 8812EU: IQK clears the 40 MHz TX_CCK_IND bit
+   * in RF 0x1a) and a fast hop must end in the full path's state; per-variant
+   * order matches the full path (8822c: RXBB then RF18; 8822e: RF18 then
+   * RF 0x1a). */
+  _device.phy_set_bb_reg(0x1c90, 1u << 8, 0x0); /* rstb_3wire(false) */
+  if (is_c && !_rxbb_asserted)
+    apply_rxbb(bwmode);
+  rf_window_write(0x3c00, 0x18, rf18);
+  rf_window_write(0x4c00, 0x18, rf18);
+  if (!is_c && !_rxbb_asserted)
+    apply_rxbb(bwmode);
+  _rxbb_asserted = true;
+  _device.phy_set_bb_reg(0x1c90, 1u << 8, 0x1);  /* rstb_3wire(true) */
+  _device.phy_set_bb_reg(0x1830, 1u << 29, 0x1); /* force update anapar (A) */
+  _device.phy_set_bb_reg(0x4130, 1u << 29, 0x1); /* force update anapar (B) */
+
+  /* Channel-keyed constants, written only when their bucket moves (invalidated
+   * by every full set, so the first fast hop writes them once). */
+  const bool bw20 = (bwmode == CHANNEL_WIDTH_20 || bwmode == CHANNEL_WIDTH_10 ||
+                     bwmode == CHANNEL_WIDTH_5);
+  const int agc_key = (central <= 14   ? 0
+                       : central < 80  ? 1
+                       : central <= 144 ? 2
+                                        : 3) |
+                      (bw20 ? 0x10 : 0);
+  if (agc_key != _last_agc_key) {
+    select_agc_tables(central, bwmode);
+    _last_agc_key = agc_key;
+  }
+
+  const uint32_t sco = sco_for(central);
+  if (sco != _last_sco) {
+    _device.phy_set_bb_reg(0xc30, 0xfff, sco);
+    _last_sco = sco;
+  }
+
+  /* TX DFIR: write the full path's END state. [22:20] is the per-channel rule
+   * (2G ch11) everywhere; [6:4] is the per-channel rule (2G ch13 / 5G 0x3)
+   * EXCEPT in 5/10 MHz mode on the 8822e, where the narrowband re-clock owns
+   * it (set_bandwidth_dividers writes [6:4]=0x1 after apply_tx_dfir, so the
+   * full path always ends at 0x1 there — the ch13 rule must not undo it). */
+  const bool nb =
+      (bwmode == CHANNEL_WIDTH_5 || bwmode == CHANNEL_WIDTH_10);
+  const uint32_t dfir_msb =
+      (central <= 14) ? (central == 11 ? 0x3u : 0x1u) : 0x1u;
+  const uint32_t dfir_lsb =
+      (nb && !is_c) ? 0x1u
+      : (central <= 14) ? (central == 13 ? 0x3u : 0x1u)
+                        : 0x3u;
+  const uint32_t dfir = (dfir_msb << 8) | dfir_lsb;
+  if (dfir != _last_dfir) {
+    _device.phy_set_bb_reg(0x808, 0x700000, dfir_msb);
+    _device.phy_set_bb_reg(0x808, 0x70, dfir_lsb);
+    _last_dfir = dfir;
+  }
+
+  /* BB reset every hop (the kernel runs it after every switch_channel; the RX
+   * engine must relatch on the new channel). */
+  bb_reset_toggle();
+
+  _last_channel = channel;
+  _logger->debug("Jaguar3: fast retune -> ch {} (central {}, RF18=0x{:05x})",
+                 channel, central, rf18);
+  /* The J1 parity lesson: the fast path must emit the canary itself — it does
+   * not pass through the full path, so without this the parity diff would
+   * compare the fast run's stale full-set dump. */
+  if (std::getenv("DEVOURER_DUMP_CANARY"))
+    DumpCanary();
+  return true;
 }
 
 void RadioManagementJaguar3::set_mac_bw_txsc(ChannelWidth_t bw, uint8_t pri) {

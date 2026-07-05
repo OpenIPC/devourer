@@ -25,7 +25,7 @@ OP_SNR="${1:-}"
 [ -x "$TXDEMO" ] && [ -x "$RXDEMO" ] || { echo "build demos first"; exit 1; }
 
 cleanup() {
-    pkill -x WiFiDriverTxDemo 2>/dev/null
+    pkill -x WiFiDriverTxDem 2>/dev/null
     pkill -x WiFiDriverDemo 2>/dev/null
     wait 2>/dev/null
 }

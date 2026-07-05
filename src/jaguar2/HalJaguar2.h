@@ -74,6 +74,28 @@ public:
   void set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
                       uint8_t primary_ch_idx = 0);
 
+  /* Lean intra-band, same-bandwidth hop retune — the Jaguar2 FastRetune core
+   * (see docs/frequency-hopping.md), variant-dispatched like set_channel_bw.
+   * Only the per-hop essentials run: one cached full-register RF18 write (a
+   * single direct-window read primes the cache, collapsing the full path's
+   * read-modify-write rounds), the channel-keyed constants (AGC table index,
+   * CFO-tracking fc, 8822B RF 0xBE VCO band / ch144 RF 0xDF flag / 2G spur
+   * regs, 8821C 2G CCK filter) written only when their bucket moves, and the
+   * per-hop RX kick (8822B RF 0xb8 toggle + RX-path toggle; both variants the
+   * IGI toggle). Everything bandwidth-keyed (0x8ac/0x8c4 block, RX DFIR, CCA
+   * thresholds) and band-keyed (RFE pins, 8821C switch-band/RF-set block)
+   * stays untouched — set by the last full set at this BW/band. Returns false
+   * (chip untouched) on a band change or when the radio was never tuned; the
+   * caller falls back to the full set_channel_bw. */
+  bool fast_retune(uint8_t channel, uint8_t bw, uint8_t primary_ch_idx,
+                   bool cache_rf);
+
+  /* Channel/BW register-canary dump for tests/hop_parity_check.sh — the same
+   * grep format as the Jaguar1/Jaguar3 DumpCanary. Emitted by both the full
+   * and fast channel paths when DEVOURER_DUMP_CANARY is set. Live registers
+   * (IGI 0xc50/0xe50, FA counters) deliberately excluded. */
+  void DumpCanary();
+
   /* Enable the MAC RX engine (CR MACRXEN + promiscuous RCR for monitor). */
   void enable_rx();
 
@@ -162,6 +184,25 @@ private:
   void rfe_ifem(uint8_t channel);
   /* phydm_igi_toggle_8822b: toggle 0xc50/0xe50 IGI to enter RX mode. */
   void igi_toggle();
+  /* Central channel of the wide channel (shared full/fast paths): 20 MHz ->
+   * primary; 40 MHz -> ±2 by primary_ch_idx; 80 MHz -> +6/+2/-2/-6. */
+  static uint8_t central_ch(uint8_t channel, uint8_t bw, uint8_t primary_ch_idx);
+  /* RF 0xBE[17:15] per-5G-channel phase-noise / VCO-band value (8822B); 0 for
+   * 2.4 GHz, 0xff = no write (shared full/fast paths). */
+  static uint8_t rf_be_for_8822b(uint8_t cch);
+
+  /* fast_retune write-on-change caches. Invalidated by every full
+   * set_channel_bw (either variant); they only ever mirror fast-path writes —
+   * the Jaguar1 RadioManagementModule pattern. _last_tuned_ch also gates the
+   * fast path (0 = never tuned / unknown band). */
+  uint8_t _last_tuned_ch = 0;
+  uint32_t _rf18_cache = 0;
+  bool _rf18_cached = false;
+  int _last_agc_bucket = -1;
+  uint32_t _last_fc = 0xffffffff;
+  int _last_rf_be = -1;
+  int _last_df18 = -1;   /* 8822B ch144 RF 0xdf[18] state */
+  int _last_cck_key = -1; /* 2G spur (8822B) / CCK-filter (8821C) key: ch14? */
 
   /* --- 8821C-specific (C8821C variant) channel/RF-set/LCK, transcribed from
    * reference/8821cu phydm_hal_api8821c.c + halrf_8821c.c. The 8822B channel-set

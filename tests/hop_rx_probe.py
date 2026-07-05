@@ -187,6 +187,21 @@ def analyse(args, channels, rate, center, total, overflows) -> int:
         peak_snr.append(float(np.max(pdb[ci]) - floor_db[ci]))
         strong_frac.append(float(np.mean(strong[ci])))
 
+    # Per-bin integrated power export (--bin-power-csv): the near-field TX
+    # level per channel = median power over that channel's STRONG slices (its
+    # dwells), falling back to the peak when a bin never crosses the strong
+    # threshold. This is the wideband ground truth tests/sounding_map.py
+    # rank-correlates against the sounding sweep's per-bin RSSI.
+    if args.bin_power_csv:
+        with open(args.bin_power_csv, "w") as f:
+            f.write("ch,power_db,peak_snr_db,strong_frac,bursts\n")
+            for ci, ch in enumerate(channels):
+                sel = pdb[ci][strong[ci]]
+                p = float(np.median(sel)) if sel.size else float(np.max(pdb[ci]))
+                f.write(f"{ch},{p:.2f},{peak_snr[ci]:.2f},"
+                        f"{strong_frac[ci]:.4f},{counts[ci]}\n")
+        sys.stderr.write(f"hop_rx_probe: per-bin power -> {args.bin_power_csv}\n")
+
     # Dominant strong channel over coarse time windows -> hop sequence.
     win_slices = max(1, int((args.seq_window_ms * 1e-3) / slice_dt))
     nwin = nslices // win_slices
@@ -299,6 +314,9 @@ def main() -> int:
                     help="time granularity for the dominant-channel sequence")
     ap.add_argument("--expect-rounds", type=int, default=0,
                     help="expected full hop cycles (0 = just require order+presence)")
+    ap.add_argument("--bin-power-csv", default="",
+                    help="write per-channel integrated power (CSV) — the SDR "
+                         "ground truth for tests/sounding_map.py --sdr-csv")
     ap.add_argument("--analyse-only", action="store_true",
                     help="skip capture, analyse an existing --raw file")
     args = ap.parse_args()

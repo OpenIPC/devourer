@@ -70,7 +70,7 @@ done
 DEMO_PID=""
 cleanup() {
     [ -n "$DEMO_PID" ] && kill "$DEMO_PID" 2>/dev/null || true
-    pkill -x WiFiDriverTxDemo 2>/dev/null || true
+    pkill -x WiFiDriverTxDem 2>/dev/null || true
     pkill -f "tests/cw_tone_probe.py" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM

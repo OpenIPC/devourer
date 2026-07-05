@@ -30,7 +30,7 @@ DUR=8
 mkdir -p "$OUT"
 
 cleanup() {
-    pkill -x WiFiDriverTxDemo 2>/dev/null
+    pkill -x WiFiDriverTxDem 2>/dev/null
     pkill -f "bf_ndpa_probe.py" 2>/dev/null
     wait 2>/dev/null
 }

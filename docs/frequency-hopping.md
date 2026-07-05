@@ -292,10 +292,51 @@ constants once); every subsequent same-band hop is ~1.5 ms.
 - The receiver still needs N adapters, a wideband SDR, or lockstep hopping to
   hear all channels — one adapter has one LO on RX too.
 
-## Porting to other generations
+## The ports: all three generations
 
-The same recipe ports to any Realtek generation (Jaguar2 / Jaguar3 / Kestrel).
-Work through these in order:
+`IRtlDevice::FastRetune(channel, cache_rf)` is the generation-agnostic entry
+point (default = the full `SetMonitorChannel` at the current width/offset), and
+every generation overrides it with a lean path built from the tricks above:
+
+| DUT | full path | fast (cached) | fast (no cache) |
+|-----|-----------|---------------|-----------------|
+| RTL8812AU (Jaguar1) | ~251 ms | **~1.6 ms** | ~99 ms |
+| RTL8822BU (Jaguar2) | ~62 ms | **~18 ms** | ~20 ms |
+| RTL8821CU (Jaguar2) | ~29 ms | **~5.6 ms** | ~5.6 ms |
+| RTL8822CU (Jaguar3) | ~11 ms | **~3.6 ms** | ~3 ms |
+| RTL8812EU (Jaguar3) | ~11 ms | **~4.3 ms** | ~3 ms |
+
+(Median `<devourer-hop>switch_us` over a 1/6/11 hop set. The newer generations'
+full paths are already far cheaper than Jaguar1's — no 20 ms C-cut read sleeps —
+so their win comes from transfer-count reduction, and `cache_rf=false` costs
+only the one extra RF18 read.)
+
+**Jaguar2** (`HalJaguar2::fast_retune`, both variants): one cached full-register
+RF18 write collapses the full path's read-modify-write rounds (three of them on
+the 8821C's band/channel/BW split); AGC index, CFO fc, the 8822B RF 0xBE VCO
+band / ch144 RF 0xDF flag / 2G spur registers and the 8821C 2G CCK filter are
+written on bucket change; the per-hop RX kick (8822B RF 0xb8 + RX-path toggles,
+IGI toggle on both variants) runs every hop. RFE pins and the 8821C
+switch-band/RF-set block are band-keyed and stay untouched.
+
+**Jaguar3** (`RadioManagementJaguar3::fast_retune`, both variants): the RF18
+write inside its 3-wire bracket + force-anapar + BB reset every hop; SCO fc,
+TX DFIR and the AGC table on bucket change; the 8822c RF18 read-modify-write
+becomes a lazily-primed cached write (primed on the first fast hop, after
+init-time IQK has settled RF18 — priming at full-set time would cache a value
+calibration then rewrites). In 5/10 MHz narrowband mode fast hops preserve the
+divider re-clock (no per-dwell `set_bandwidth_dividers` + DAC-FIFO reset), and
+the TX-DFIR write uses the NB-owned `0x808[6:4]` value on the 8822e.
+
+**End-state parity, not step parity** — the subtlety the Jaguar3 port
+hardware-taught: init-time calibration (halrf IQK) rewrites BW-keyed state
+*after* the channel set (e.g. it clears the 40 MHz TX_CCK_IND bit in the
+8822e's RF 0x1a), and the full path re-imposes the channel-set values on every
+retune. "Skip BW-keyed work" must therefore mean "re-assert it once per
+fast-hop epoch", not "never touch it" — the parity oracle defines correct as
+"the fast path ends in the same register state the full path ends in".
+
+## Porting to another generation (the method that produced the above)
 
 1. **Find the channel write and the per-stage cost.** Instrument the channel
    set with a per-stage timer. Identify which stages are channel-dependent and
@@ -315,11 +356,16 @@ Work through these in order:
    one-time secondary-channel write (Trick 4). Otherwise, reuse the full BW
    post-set with a skip-heavy flag.
 5. **Gate band changes out of the fast path** — they need the front-end
-   reconfiguration and recalibration a hop skips.
-6. **Validate two ways:** wideband SDR on-air for end-to-end behaviour, and
-   register-parity against the full path for cases where a clean on-air reading
-   isn't available. Always run a full-vs-full control to separate inherent register
-   variance (timers, calibration jitter) from real parity breaks.
+   reconfiguration and recalibration a hop skips. And check what the
+   generation's *calibration* rewrites after a channel set: anything it touches
+   that the full path re-imposes must be re-asserted once per fast-hop epoch
+   (the end-state parity rule above).
+6. **Validate two ways:** wideband SDR on-air for end-to-end behaviour
+   (`tests/run_hop_validation.sh`), and register-parity against the full path
+   (`tests/hop_parity_check.sh` — family-aware; all three generations emit the
+   same `DumpCanary` format from both paths). Always run a full-vs-full control
+   to separate inherent register variance (timers, calibration jitter, live
+   AGC/thermal state) from real parity breaks.
 
 The throughline: a channel switch is mostly work a *hop* does not need. Strip it
 to the one register that actually changes, and remove the read that change

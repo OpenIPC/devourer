@@ -23,7 +23,7 @@ cleanup() {
     kill -KILL "$CHILD_PID" 2>/dev/null
   fi
   # Backstop: reap any stray demo by exact comm name.
-  pkill -KILL -x WiFiDriverTxDemo 2>/dev/null
+  pkill -KILL -x WiFiDriverTxDem 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 

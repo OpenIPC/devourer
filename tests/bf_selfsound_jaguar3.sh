@@ -30,7 +30,7 @@ mkdir -p "$OUT"
 tag="$(echo "$BFEE_PID" | tr -d 'x')"
 
 cleanup() {
-    pkill -x WiFiDriverTxDemo 2>/dev/null
+    pkill -x WiFiDriverTxDem 2>/dev/null
     pkill -x WiFiDriverDemo 2>/dev/null
     wait 2>/dev/null
 }

@@ -8,6 +8,7 @@
 
 #include "BeamformingSounder.h" /* generation-neutral BF self-sounding recipe */
 
+#include "ChannelFreq.h" /* radiotap CHANNEL freq -> channel (per-packet hop) */
 #include "FrameParserJaguar3.h"
 #include "NhmReader.h"       /* frame-free NHM power histogram (shared) */
 #include "RateDefinitions.h" /* MGN_* rate enum (shared across the family) */
@@ -649,9 +650,30 @@ RxEnergy RtlJaguar3Device::GetRxEnergy() {
 }
 
 void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
+  /* Serialize against the coex thread's housekeeping tick (and any concurrent
+   * FastRetune) — channel config is register RMW. Init/InitWrite call the
+   * radio-management core directly (no lock needed: the coex thread isn't
+   * running yet), so locking here cannot self-deadlock. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
   _channel = channel;
   _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                       channel.ChannelWidth);
+}
+
+void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (channel == _channel.Channel)
+    return;
+  if (_radioManagement.fast_retune(channel, _channel.ChannelOffset,
+                                   _channel.ChannelWidth, cache_rf)) {
+    _channel.Channel = channel;
+    return;
+  }
+  /* Fast path declined (band change / never tuned) — full channel set at the
+   * current bandwidth + offset, under the same lock (the core is unlocked). */
+  _channel.Channel = channel;
+  _radioManagement.set_channel_bwmode(channel, _channel.ChannelOffset,
+                                      _channel.ChannelWidth);
 }
 
 void RtlJaguar3Device::SetTxPower(uint8_t power) {
@@ -682,6 +704,8 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
   ChannelWidth_t bwidth = CHANNEL_WIDTH_20;
   bool vht = (radiotap_length != 0x0d);
   bool rate_from_radiotap = false; /* did the frame's radiotap carry a rate? */
+  /* Per-packet hop target from a radiotap CHANNEL field (0 = none present). */
+  int radiotap_channel = 0;
 
   auto *rtap_hdr = reinterpret_cast<struct ieee80211_radiotap_header *>(
       const_cast<uint8_t *>(packet));
@@ -696,6 +720,13 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
     case IEEE80211_RADIOTAP_RATE:
       fixed_rate = *it.this_arg;
       rate_from_radiotap = true;
+      break;
+    case IEEE80211_RADIOTAP_CHANNEL:
+      /* 2 x __le16: frequency (MHz), then flags. Frequency is authoritative
+       * for the per-packet hop target; flags are ignored (rate/BW come from
+       * the RATE/MCS/VHT fields). Same contract as the Jaguar1 path. */
+      radiotap_channel =
+          devourer::freq_to_chan(get_unaligned_le16(it.this_arg));
       break;
     case IEEE80211_RADIOTAP_MCS: {
       uint8_t mcs_known = it.this_arg[0];
@@ -743,6 +774,14 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
       break;
     }
   }
+
+  /* Radiotap CHANNEL is authoritative for per-packet frequency, exactly as
+   * RATE/MCS are for rate: a frame asking for a different channel triggers a
+   * lean FastRetune before the descriptor is built (so the 40-in-80 DATA_SC
+   * below keys off up-to-date channel state). FastRetune takes _reg_mu for the
+   * retune only — the TX hot path stays lock-free when not hopping. */
+  if (radiotap_channel > 0 && radiotap_channel != _channel.Channel)
+    FastRetune(static_cast<uint8_t>(radiotap_channel), /*cache_rf=*/true);
 
   /* Radiotap carried no rate -> apply the runtime TX-mode default (SetTxMode).
    * Without this a rate-less frame (e.g. the demo's beacon) falls back to

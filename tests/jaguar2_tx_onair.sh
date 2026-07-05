@@ -16,7 +16,7 @@ DUR=${DUR:-10}
 
 cleanup() {
   sudo pkill -f "tcpdump -i $SNIFF_IF" 2>/dev/null
-  sudo pkill -x WiFiDriverTxDemo 2>/dev/null
+  sudo pkill -x WiFiDriverTxDem 2>/dev/null
 }
 trap cleanup EXIT
 

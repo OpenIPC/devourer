@@ -28,7 +28,9 @@
 #endif
 
 #include "BfReportDetect.h"
+#include "ChannelFreq.h"
 #include "RxPacket.h"
+#include "SweepSpec.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
@@ -66,14 +68,6 @@ static long long ms_since_start() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::steady_clock::now() - g_proc_start)
       .count();
-}
-
-/* Wi-Fi channel number -> center frequency (MHz), for the radiotap CHANNEL
- * field that drives the library's per-packet retune (DEVOURER_HOP_RADIOTAP). */
-static uint16_t chan_to_freq(int ch) {
-  if (ch == 14) return 2484;
-  if (ch <= 14) return static_cast<uint16_t>(2407 + 5 * ch);
-  return static_cast<uint16_t>(5000 + 5 * ch);
 }
 
 /* Build a radiotap header carrying CHANNEL (freq) + TX_FLAGS, then append the
@@ -682,22 +676,10 @@ int main(int argc, char **argv) {
    * exercises the radiotap-driven path. */
   const char *hop_rt_env = std::getenv("DEVOURER_HOP_RADIOTAP");
   const bool hop_radiotap = hop_rt_env != nullptr && hop_rt_env[0] != '\0';
-  if (const char *e = std::getenv("DEVOURER_HOP_CHANNELS")) {
-    std::string s(e);
-    size_t pos = 0;
-    while (pos < s.size()) {
-      size_t comma = s.find(',', pos);
-      std::string tok = s.substr(pos, comma == std::string::npos
-                                          ? std::string::npos
-                                          : comma - pos);
-      if (!tok.empty()) {
-        int ch = std::atoi(tok.c_str());
-        if (ch > 0) hop_channels.push_back(ch);
-      }
-      if (comma == std::string::npos) break;
-      pos = comma + 1;
-    }
-  }
+  /* SweepSpec grammar: channels ("1,6,11"), channel ranges ("36-48/4"), or
+   * MHz ranges ("5170-5250/5") — the same bin-list language as
+   * DEVOURER_RX_SWEEP, so a sounding pair takes one spec for both sides. */
+  hop_channels = devourer::parse_sweep_spec(std::getenv("DEVOURER_HOP_CHANNELS"));
   if (!hop_channels.empty()) {
     if (const char *e = std::getenv("DEVOURER_HOP_DWELL_FRAMES")) {
       hop_dwell = std::strtol(e, nullptr, 0);
@@ -909,16 +891,19 @@ int main(int argc, char **argv) {
       if (hop_radiotap) {
         /* Library retunes from the CHANNEL field on the next send_packet; the
          * 802.11 body is beacon_frame past its 10-byte radiotap. */
-        tx_buf = build_frame_with_channel(chan_to_freq(ch), beacon_frame + 10,
+        tx_buf = build_frame_with_channel(devourer::chan_to_freq(ch),
+                                          beacon_frame + 10,
                                           sizeof(beacon_frame) - 10);
         mode = " radiotap";
       }
-#if defined(DEVOURER_HAVE_JAGUAR1)
-      else if (hop_fast && jag) {
-        jag->FastRetune(static_cast<uint8_t>(ch), /*cache_rf=*/hop_fast != 2);
+      else if (hop_fast) {
+        /* IRtlDevice virtual: every generation implements the lean fast path
+         * (cached RF18 write + on-change constants, with the internal
+         * band-change fallback to the full set). */
+        rtlDevice->FastRetune(static_cast<uint8_t>(ch),
+                              /*cache_rf=*/hop_fast != 2);
         mode = " fast";
       }
-#endif
       else {
         rtlDevice->SetMonitorChannel(SelectedChannel{
             .Channel = static_cast<uint8_t>(ch),

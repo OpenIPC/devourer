@@ -46,6 +46,23 @@ public:
    * whatever thread runs StartRxLoop). Default no-op. */
   virtual void StopRxLoop() {}
   virtual void SetMonitorChannel(SelectedChannel channel) = 0;
+
+  /* Lean intra-band, same-bandwidth channel retune for hop/sweep dwells: the RF
+   * channel switch only, skipping the per-rate TX-power loop and bandwidth
+   * post-set a hop doesn't need (see docs/frequency-hopping.md). Generations
+   * with a fast path override this (Jaguar1, Jaguar3 — both fall back to the
+   * full path internally on a band change); the default is the full
+   * SetMonitorChannel at the current width/offset, so callers may hop through
+   * this unconditionally on any chip. `cache_rf` selects the cached-RF-write
+   * variant where one exists (false = re-read per hop, for A/B measurement);
+   * the default argument binds here, at the interface. */
+  virtual void FastRetune(uint8_t channel, bool cache_rf = true) {
+    (void)cache_rf;
+    SelectedChannel c = GetSelectedChannel();
+    c.Channel = channel;
+    SetMonitorChannel(c);
+  }
+
   virtual void SetTxPower(uint8_t power) = 0;
   virtual bool send_packet(const uint8_t *packet, size_t length) = 0;
   virtual SelectedChannel GetSelectedChannel() = 0;

@@ -28,9 +28,9 @@ RX_PIDS=("${RX_PIDS[@]:-0xc812 0xa81a}")
 mkdir -p "$OUT"
 
 cleanup() {
-    # NB: the kernel truncates comm to 15 chars, so `pkill -x WiFiDriverTxDemo`
+    # NB: the kernel truncates comm to 15 chars, so `pkill -x WiFiDriverTxDem`
     # (16 chars) never matches — use the truncated form.
-    pkill -x WiFiDriverTxDe 2>/dev/null || true
+    pkill -x WiFiDriverTxDem 2>/dev/null || true
     pkill -x WiFiDriverDemo 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM

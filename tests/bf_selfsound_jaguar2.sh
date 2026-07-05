@@ -45,7 +45,7 @@ J1AUX_PID="${J1AUX_PID:-0x0120}"      #   (8821AU, Archer T2U Plus)
 mkdir -p "$OUT"
 
 cleanup() {
-    pkill -x WiFiDriverTxDemo 2>/dev/null
+    pkill -x WiFiDriverTxDem 2>/dev/null
     pkill -x WiFiDriverDemo 2>/dev/null
     wait 2>/dev/null
 }

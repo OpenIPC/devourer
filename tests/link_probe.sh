@@ -63,7 +63,7 @@ TS='import sys,time
 for l in sys.stdin:
     sys.stdout.write(f"{time.time():.3f} {l}"); sys.stdout.flush()'
 
-cleanup() { for c in WiFiDriverTxDemo WiFiDriverDemo; do pkill -x "$c" 2>/dev/null || true; done; }
+cleanup() { for c in WiFiDriverTxDem WiFiDriverDemo; do pkill -x "$c" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 
 echo "== building =="

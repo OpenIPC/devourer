@@ -17,7 +17,7 @@ OUT=/tmp/eu_regdiff
 mkdir -p $OUT
 
 cleanup(){
-  sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null
+  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null
   sudo pkill -9 -f kernel_tx_inject 2>/dev/null
   sudo pkill -9 -f "cat /sys/kernel/debug/usb/usbmon" 2>/dev/null
 }

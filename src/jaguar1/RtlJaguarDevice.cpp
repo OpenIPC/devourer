@@ -1,5 +1,6 @@
 #include "RtlJaguarDevice.h"
 #include "BeamformingSounder.h"
+#include "ChannelFreq.h"
 #include "EepromManager.h"
 #include "Hal8812PhyReg.h"
 #include "NhmReader.h"
@@ -271,18 +272,6 @@ RxEnergy RtlJaguarDevice::GetRxEnergy() {
   return e;
 }
 
-/* Map a radiotap CHANNEL frequency (MHz) to a Wi-Fi channel number. Returns 0
- * for a frequency outside the bands devourer drives (caller ignores it). */
-static int freq_to_chan(uint16_t freq_mhz) {
-  if (freq_mhz == 2484)
-    return 14;
-  if (freq_mhz >= 2412 && freq_mhz <= 2472)
-    return (freq_mhz - 2407) / 5;        /* 2.4 GHz ch1..13 */
-  if (freq_mhz >= 5000 && freq_mhz <= 5895)
-    return (freq_mhz - 5000) / 5;        /* 5 GHz UNII ch */
-  return 0;
-}
-
 SelectedChannel RtlJaguarDevice::GetSelectedChannel() { return _channel; }
 
 bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
@@ -347,7 +336,8 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
       /* 2 x __le16: frequency (MHz), then flags. Frequency is authoritative
        * for the per-packet hop target; flags are ignored (rate/BW come from
        * the RATE/MCS/VHT fields). */
-      radiotap_channel = freq_to_chan(get_unaligned_le16(iterator.this_arg));
+      radiotap_channel =
+          devourer::freq_to_chan(get_unaligned_le16(iterator.this_arg));
       break;
 
     case IEEE80211_RADIOTAP_MCS: {
@@ -447,7 +437,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
    * — at the honest cost of stalling this send by the retune latency. Done
    * before the 5 GHz CCK clamp below so the clamp keys off the new channel. */
   if (radiotap_channel > 0 && radiotap_channel != _channel.Channel) {
-    FastRetune(static_cast<uint8_t>(radiotap_channel));
+    FastRetune(static_cast<uint8_t>(radiotap_channel), /*cache_rf=*/true);
   }
 
   /* The radiotap carried no rate → apply the runtime TX-mode default set via

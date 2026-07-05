@@ -16,7 +16,7 @@ TXS=$(find_sys 8812)
 [ -z "$TXS" ] && { echo "no 8812AU"; exit 1; }
 
 cleanup() {
-  sudo pkill -9 -x WiFiDriverTxDe 2>/dev/null
+  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null
   sudo pkill -9 -f "tcpdump -i ${CUIF}mon" 2>/dev/null
   sudo iw dev ${CUIF}mon del 2>/dev/null
   sudo ip link set "$CUIF" up 2>/dev/null

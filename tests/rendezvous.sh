@@ -42,7 +42,7 @@ done
 [ -n "$BEACON_PID" ] && [ -n "$SCANNER_PID" ] || {
   echo "need --beacon-pid and --scanner-pid" >&2; exit 2; }
 
-cleanup() { for c in WiFiDriverTxDemo WiFiDriverDemo; do pkill -x "$c" 2>/dev/null || true; done; }
+cleanup() { for c in WiFiDriverTxDem WiFiDriverDemo; do pkill -x "$c" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 
 echo "== building =="

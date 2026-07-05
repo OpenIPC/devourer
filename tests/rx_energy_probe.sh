@@ -45,7 +45,7 @@ done
 [ -n "$SENSOR_PID" ] && [ -n "$TONE_PID" ] || {
   echo "need --sensor-pid and --tone-pid" >&2; exit 2; }
 
-cleanup() { for c in WiFiDriverDemo WiFiDriverTxDemo; do pkill -x "$c" 2>/dev/null || true; done; }
+cleanup() { for c in WiFiDriverDemo WiFiDriverTxDem; do pkill -x "$c" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 
 echo "== building =="

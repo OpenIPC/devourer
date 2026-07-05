@@ -100,9 +100,16 @@ VARIANT="$(diff "$OUT/full.regs" "$OUT/full2.regs" | addrs || true)"
 if [ "$FAMILY" = jaguar1 ]; then
     TXPWR='0x8b0 0xc1c 0xe1c 0xc20 0xc24 0xc28 0xc2c 0xc30 0xc34 0xc38 0xc3c 0xc40 0xe20 0xe24 0xe28 0xe2c 0xe30 0xe34 0xe38 0xe3c 0xe40'
     IQK='0xc10 0xc14 0xe10 0xe14 0xc90 0xc94 0xe90 0xe94'
+    # Live chip state in the J1 canary, not channel/BW config: RF 0x00's low
+    # bits carry the AGC-driven mode/gain word (samples differently depending
+    # on the instant of the read) and RF 0x42 is the thermal meter. Like the
+    # IQK outputs, the full-vs-full control catches them only probabilistically
+    # — observed flipping between runs — so exclude them statically.
+    LIVE='0x00 0x42'
 else
     TXPWR=''
     IQK=''
+    LIVE=''
 fi
 
 echo; echo "== fast-vs-full diff (< full  > fast) =="
@@ -113,9 +120,9 @@ echo; echo "run-variant (control): ${VARIANT:-none}"
 echo "tx-power (fast skips):  $TXPWR"
 
 # A real channel/BW break = a fast-vs-full diff address that's neither
-# run-variant nor an intentionally-skipped tx-power register.
-EXCLUDE="$(printf '%s\n%s\n%s\n' "$VARIANT" "$(echo $TXPWR | tr ' ' '\n')" \
-          "$(echo $IQK | tr ' ' '\n')" | sort -u)"
+# run-variant, an intentionally-skipped tx-power register, nor live chip state.
+EXCLUDE="$(printf '%s\n%s\n%s\n%s\n' "$VARIANT" "$(echo $TXPWR | tr ' ' '\n')" \
+          "$(echo $IQK | tr ' ' '\n')" "$(echo $LIVE | tr ' ' '\n')" | sort -u)"
 BREAKS=""
 for a in $FAST_DIFF; do
     echo "$EXCLUDE" | grep -qx "$a" || BREAKS="$BREAKS $a"

@@ -129,6 +129,13 @@ private:
   void select_agc_tables(uint8_t central, ChannelWidth_t bwmode);
   void apply_tx_dfir(uint8_t central);
   void bb_reset_toggle();                        /* MAC 0x0 BIT16 1->0->1 */
+  /* RF register write via the direct-write window: BB[base + (rf_addr<<2)],
+   * 20-bit mask. base 0x3c00 (A) / 0x4c00 (B). */
+  void rf_window_write(uint16_t base, uint8_t rfaddr, uint32_t v);
+  /* BW-keyed RXBB filter (8822c RF 0x3f gated sequence / 8822e RF 0x1a RMW).
+   * Must run inside a rstb_3wire(false)..(true) bracket — the caller owns the
+   * bracket. */
+  void apply_rxbb(ChannelWidth_t bwmode);
 
   RtlUsbAdapter _device;
   Logger_t _logger;
@@ -144,6 +151,12 @@ private:
   uint32_t _last_sco = 0xffffffff;
   uint32_t _last_dfir = 0xffffffff; /* packed (0x808[22:20]<<8)|[6:4] */
   int _last_agc_key = -1;           /* band/sub-band bucket + bw20 flag */
+  /* BW-keyed RXBB state, re-asserted on the first fast hop of each epoch:
+   * the init-time halrf calibration rewrites it after the channel set
+   * (hardware-observed on the 8812EU — IQK clears the 40 MHz TX_CCK_IND bit
+   * in RF 0x1a), and the fast path must end in the same state as the full
+   * path, which re-imposes it on every retune. */
+  bool _rxbb_asserted = false;
 };
 
 } /* namespace jaguar3 */

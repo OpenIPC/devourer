@@ -15,7 +15,8 @@ enable_testing()
 # `cmake -S . -B build` builds every chip). Turn off the ones you don't need to
 # drop their firmware blobs + generated PHY tables and shrink the binary — e.g.
 # an 8812AU-only build:
-#   cmake -S . -B build -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2=OFF \
+#   cmake -S . -B build -DDEVOURER_8814=OFF \
+#         -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR2_8821C=OFF \
 #         -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF
 # ---------------------------------------------------------------------------
 option(DEVOURER_JAGUAR1       "RTL8812AU / 8811AU / 8821AU (Jaguar1 core)"      ON)

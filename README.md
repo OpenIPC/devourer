@@ -6,8 +6,9 @@ Devourer is a userspace re-implementation of Realtek's RTL88xxAU Wi-Fi
 driver, speaking to the chip directly through libusb. It covers three chip
 generations: the first-generation **Jaguar** 802.11ac family (RTL8812AU,
 RTL8814AU, and RTL8821AU shipping on every band, RTL8811AU via the 8812
-code path); the **Jaguar2** **RTL8822BU** (RTL8812BU via the 8822B code path,
-2.4/5 GHz at 20/40/80 MHz); and
+code path); the **Jaguar2** **RTL8822BU** (RTL8812BU via the 8822B code path)
+and the 1T1R + BT **RTL8811CU** (chip **8821C**),
+2.4/5 GHz at 20/40/80 MHz; and
 the **Jaguar3** parts — `rtl8822c` (RTL8812CU / RTL8822CU) and `rtl8822e`
 (RTL8812EU / RTL8822EU) — which additionally reach **5/10 MHz narrowband**
 operation the Jaguar-1 silicon physically can't. No kernel module, no
@@ -25,15 +26,18 @@ register-table layout, firmware-download plumbing, and
 the family; chip-specific EEPROM handling, firmware blobs, and RF tables are
 layered on top.
 
-It also targets the **Jaguar2** **RTL8822BU** (chip **8822B**, 2T2R USB,
-`2357:012d` / `0bda:b82c`) — and its 1T1R cut **RTL8812BU**, single-path via
-`REG_SYS_CFG` bit 27 like RTL8811AU on Jaguar1 — through a second self-contained
-HAL under `src/jaguar2/`, dispatched from the `SYS_CFG2` chip-id (`0x0a`). Jaguar2 is a
-hybrid of the other two: HalMAC firmware download, MAC init and power sequencing
-follow the Jaguar3 path, while the BB/AGC/RF register tables use the older phydm
-`check_positive` format like Jaguar1. Bring-up is ported from the vendor
-rtl88x2bu tree and reaches on-air RX + TX across **2.4 and 5 GHz at
-20/40/80 MHz** with per-rate, bandwidth-aware efuse TX power.
+It also targets the **Jaguar2** family through a second self-contained HAL under
+`src/jaguar2/`, dispatched on the `SYS_CFG2` chip-id: the **RTL8822BU** (chip
+**8822B**, 2T2R USB, `2357:012d` / `0bda:b82c`, chip-id `0x0a`) and its 1T1R cut
+**RTL8812BU** (single-path via `REG_SYS_CFG` bit 27 like RTL8811AU on Jaguar1),
+plus the 1T1R + BT **RTL8811CU** (chip **8821C**, `0bda:c811`, chip-id
+`0x09`). The two silicon are selected behind `ChipVariant` strategy interfaces
+(per-generation PHY tables + halrf calibration), mirroring the Jaguar3 split.
+Jaguar2 is a hybrid of the other two: HalMAC firmware download, MAC init and
+power sequencing follow the Jaguar3 path, while the BB/AGC/RF register tables use
+the older phydm `check_positive` format like Jaguar1. Bring-up is ported from the
+vendor rtl88x2bu / rtl8821cu trees and reaches on-air RX + TX across **2.4 and
+5 GHz at 20/40/80 MHz** with per-rate, bandwidth-aware efuse TX power.
 
 Finally, the **Jaguar3** parts run through a third self-contained HAL under
 `src/jaguar3/`, dispatched at the factory from the `SYS_CFG2` chip-id and USB
@@ -54,6 +58,7 @@ varies run-to-run (bracketed = best clean reading).
 | **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | TP-Link Archer T2U Plus (`2357:0120`) |
 | **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | TP-Link Archer T3U (`2357:012d`) |
 | **RTL8812BU**                 | 1T1R + BT         | —             | —             | —                | 1T1R cut of the 8822B silicon; rides the 8822BU code path (single-path via `REG_SYS_CFG` bit 27). Not benchmarked (`0xb812`) |
+| **RTL8811CU**                 | 1T1R + BT         | 36            | 29            | 28               | COMFAST CF-811AC (`0bda:c811`) |
 | **RTL8812CU**                 | 2T2R              | 65            | 60            | 60               | LB-LINK WDN1300H (`0bda:c812`) |
 | **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`0bda:c82c`) |
 | **RTL8812EU**                 | 2T2R              | 8             | 51            | 47               | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module |
@@ -131,13 +136,15 @@ an 8812AU-only `WiFiDriverDemo` is ~1.0 MB versus ~2.6 MB with everything on.
 |---|---|---|
 | `DEVOURER_JAGUAR1` | ON | RTL8812AU / 8811AU / 8821AU |
 | `DEVOURER_8814` | ON | RTL8814AU (requires `DEVOURER_JAGUAR1`) |
-| `DEVOURER_JAGUAR2` | ON | RTL8822BU / 8812BU |
+| `DEVOURER_JAGUAR2_8822B` | ON | RTL8822BU / 8812BU |
+| `DEVOURER_JAGUAR2_8821C` | ON | RTL8811CU |
 | `DEVOURER_JAGUAR3_8822C` | ON | RTL8812CU / 8822CU |
 | `DEVOURER_JAGUAR3_8822E` | ON | RTL8812EU / 8822EU |
 
 ```sh
 # 8812AU/8811AU/8821AU only
-cmake -S . -B build -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2=OFF \
+cmake -S . -B build -DDEVOURER_8814=OFF \
+      -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR2_8821C=OFF \
       -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF
 ```
 

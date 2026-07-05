@@ -178,6 +178,33 @@ inline bool parse_rx_8822b(const uint8_t *buf, size_t buflen,
   return true;
 }
 
+/* Parse the jaguar-series (jgr2) PHY-status report that precedes the PSDU when
+ * APP_PHYSTS is enabled (8821C monitor). `physts` points at the 32-byte block
+ * (RXDESC end); `is_cck` selects type0 (CCK) vs type1 (OFDM/HT/VHT). Fills the
+ * per-path signal metrics from the vendor phy_sts_rpt_jgr2_type0/type1 layout
+ * (phydm_phystatus.h): OFDM per-path RX power pwdb[i] (dBm = pwdb-110), per-path
+ * SNR rxsnr[i] and per-stream EVM rxevm[i] (both s(8,1), i.e. half-dB units, as
+ * the vendor stores them). Values are the raw phy-status fields, matching the
+ * Jaguar-1 FrameParser convention (rssi = per-path power byte, dBm = value-110).
+ * CCK (type0) reports a single path-A pwdb. Requires physts_len >= 28. */
+inline void parse_phy_sts_jgr2(const uint8_t *physts, uint16_t physts_len,
+                               bool is_cck, rx_pkt_attrib &a) {
+  if (physts == nullptr || physts_len < 28)
+    return;
+  if (is_cck) {
+    /* type0: DW0 = page_num(0), pwdb(1), ... */
+    a.rssi[0] = physts[1];
+  } else {
+    /* type1: DW0/1 pwdb[4] at bytes 1..4; DW4 rxevm[4] at bytes 16..19;
+     * DW6 rxsnr[4] at bytes 24..27. */
+    for (int i = 0; i < 4; i++) {
+      a.rssi[i] = physts[1 + i];
+      a.evm[i] = static_cast<int8_t>(physts[16 + i]);
+      a.snr[i] = static_cast<int8_t>(physts[24 + i]);
+    }
+  }
+}
+
 } /* namespace jaguar2 */
 
 #endif /* FRAME_PARSER_8822B_H */

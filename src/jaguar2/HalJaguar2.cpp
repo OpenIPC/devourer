@@ -1312,8 +1312,25 @@ void HalJaguar2::enable_rx() {
    * the aggregation, garbling every frame. Monitor RX doesn't need the phy-
    * status, so clearing the append bit makes the frame sit cleanly at
    * descriptor+drvinfo(0)+shift and decode. */
-  if (_variant == ChipVariant::C8821C)
-    rcr &= ~(1u << 28);
+  if (_variant == ChipVariant::C8821C) {
+    if (!getenv("DEVOURER_8821C_NO_PHYST")) {
+      /* cfg_drv_info_8821c(HALMAC_DRV_INFO_PHY_STATUS): keep RCR APP_PHYSTS
+       * (bit28, like the vendor monitor path) and make the chip prepend a
+       * 32-byte PHY-status (jgr2 type0/type1) as drvinfo AND — crucially — count
+       * it in the RX descriptor's drv_info_size. REG_TRXFF_BNDY+1 low-nibble =
+       * 0xF is the vendor's "rxdesc len = 0 issue" fix, without which the
+       * descriptor reports drv_info_size=0 despite PHYST=1 and the shared parser
+       * mis-locates the body (garbling every frame). With it, drv_info_size
+       * reads 32, the body sits cleanly at desc+32+shift, and the phy-status
+       * carries per-frame RSSI/SNR/EVM (FrameParserJaguar2 fills RxAtrib).
+       * DEVOURER_8821C_NO_PHYST drops the phy-status for the leanest RX. */
+      _device.rtw_write8(0x060F, 4); /* REG_RX_DRVINFO_SZ = 4 units = 32 B */
+      uint8_t v = _device.rtw_read8(0x0115);
+      _device.rtw_write8(0x0115, static_cast<uint8_t>((v & 0xF0) | 0x0F));
+    } else {
+      rcr &= ~(1u << 28);
+    }
+  }
   /* DEVOURER_RX_KEEP_CORRUPTED: also accept CRC32/ICV-error frames (ACRC32 BIT8,
    * AICV BIT9) so the BB's demodulated-but-failed frames still reach the host.
    * Doubles as a bring-up discriminator: if reads>0 with this set but 0 without,

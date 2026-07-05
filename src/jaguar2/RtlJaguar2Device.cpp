@@ -236,6 +236,12 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         p.RxAtrib.drvinfo_sz = static_cast<uint8_t>(f.drvinfo_size);
         p.RxAtrib.shift_sz = f.shift;
         p.RxAtrib.pkt_rpt_type = RX_PACKET_TYPE::NORMAL_RX;
+        /* Per-frame RSSI/SNR/EVM from the jgr2 PHY-status (present when
+         * APP_PHYSTS is on, i.e. drvinfo carries the 32-byte report). CCK rates
+         * (DESC_RATE1M..11M = 0..3) use type0, everything else type1. */
+        if (f.drvinfo_size >= 28)
+          jaguar2::parse_phy_sts_jgr2(data + off + jaguar2::RXDESC_SIZE_8822B,
+                                      f.drvinfo_size, f.rx_rate <= 3, p.RxAtrib);
         p.Data =
             std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
         _packetProcessor(p);

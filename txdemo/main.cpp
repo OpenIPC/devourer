@@ -30,6 +30,7 @@
 #include "BfReportDetect.h"
 #include "ChannelFreq.h"
 #include "RxPacket.h"
+#include "SweepSpec.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
@@ -675,22 +676,10 @@ int main(int argc, char **argv) {
    * exercises the radiotap-driven path. */
   const char *hop_rt_env = std::getenv("DEVOURER_HOP_RADIOTAP");
   const bool hop_radiotap = hop_rt_env != nullptr && hop_rt_env[0] != '\0';
-  if (const char *e = std::getenv("DEVOURER_HOP_CHANNELS")) {
-    std::string s(e);
-    size_t pos = 0;
-    while (pos < s.size()) {
-      size_t comma = s.find(',', pos);
-      std::string tok = s.substr(pos, comma == std::string::npos
-                                          ? std::string::npos
-                                          : comma - pos);
-      if (!tok.empty()) {
-        int ch = std::atoi(tok.c_str());
-        if (ch > 0) hop_channels.push_back(ch);
-      }
-      if (comma == std::string::npos) break;
-      pos = comma + 1;
-    }
-  }
+  /* SweepSpec grammar: channels ("1,6,11"), channel ranges ("36-48/4"), or
+   * MHz ranges ("5170-5250/5") — the same bin-list language as
+   * DEVOURER_RX_SWEEP, so a sounding pair takes one spec for both sides. */
+  hop_channels = devourer::parse_sweep_spec(std::getenv("DEVOURER_HOP_CHANNELS"));
   if (!hop_channels.empty()) {
     if (const char *e = std::getenv("DEVOURER_HOP_DWELL_FRAMES")) {
       hop_dwell = std::strtol(e, nullptr, 0);

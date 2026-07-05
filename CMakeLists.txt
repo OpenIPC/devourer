@@ -304,6 +304,17 @@ target_link_libraries(ToneMaskSelftest PRIVATE WiFiDriver)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
 
+# Headless guard for the sweep/hop bin-list grammar (src/SweepSpec.h) — the
+# channel-list / channel-range / MHz-range parsing behind DEVOURER_RX_SWEEP and
+# DEVOURER_HOP_CHANNELS, so a grammar regression fails `ctest` instead of only
+# surfacing on a radio.
+add_executable(SweepSpecSelftest
+    tests/sweep_spec_selftest.cpp
+)
+target_link_libraries(SweepSpecSelftest PRIVATE WiFiDriver)
+
+add_test(NAME sweep_spec_math COMMAND SweepSpecSelftest)
+
 # Headless guard for the beamforming-report decoder (src/BfReportDecode.h) — the
 # LSB-first Givens-angle unpacking + per-tone variance behind WiFiSenseDemo. It
 # decodes a real captured VHT MU report and checks the angles against an offline

@@ -13,6 +13,7 @@
 
 #include "BfReportDetect.h"
 #include "RxPacket.h"
+#include "SweepSpec.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
@@ -142,28 +143,16 @@ static const uint32_t g_rx_energy_ms = []() -> uint32_t {
   return (e && *e) ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0;
 }();
 
-/* DEVOURER_RX_SWEEP="1,6,11": live coarse spectrum sweep. Cycle the listed
- * channels, dwelling DEVOURER_RX_SWEEP_DWELL_MS (default 300) on each, and emit
- * one <devourer-energy>ch=N line per bin. The RX loop runs on a worker thread so
- * the main thread is free to retune (SetMonitorChannel) between reads — a live
+/* DEVOURER_RX_SWEEP="1,6,11" | "36-48/4" | "5170-5250/5": live coarse spectrum
+ * sweep. Cycle the listed bins (SweepSpec grammar: channels, channel ranges,
+ * or MHz ranges — the latter for issue-#149-style narrowband maps), dwelling
+ * DEVOURER_RX_SWEEP_DWELL_MS (default 300) on each, and emit one
+ * <devourer-energy>ch=N line per bin. The RX loop runs on a worker thread so
+ * the main thread is free to retune (FastRetune) between reads — a live
  * energy-vs-frequency map that localizes an interferer (peaks, or dips on the
  * 1T1R parts that saturate, at the tone's channel). Empty = disabled. */
-static const std::vector<int> g_rx_sweep = []() -> std::vector<int> {
-  std::vector<int> out;
-  const char *e = std::getenv("DEVOURER_RX_SWEEP");
-  if (!e || !*e) return out;
-  std::string s = e;
-  size_t pos = 0;
-  while (pos < s.size()) {
-    size_t c = s.find(',', pos);
-    std::string tok =
-        s.substr(pos, c == std::string::npos ? std::string::npos : c - pos);
-    if (!tok.empty()) out.push_back(std::atoi(tok.c_str()));
-    if (c == std::string::npos) break;
-    pos = c + 1;
-  }
-  return out;
-}();
+static const std::vector<int> g_rx_sweep =
+    devourer::parse_sweep_spec(std::getenv("DEVOURER_RX_SWEEP"));
 static const uint32_t g_rx_sweep_dwell_ms = []() -> uint32_t {
   const char *e = std::getenv("DEVOURER_RX_SWEEP_DWELL_MS");
   return (e && *e) ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 300;

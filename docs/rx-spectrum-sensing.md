@@ -60,6 +60,16 @@ band), `busy` the percent of samples above the lowest bucket, `hist` the 12 raw
 IGI-referenced counts (low→high power). A frame-free measurement: the driver sets
 11 thresholds, pulses a trigger, polls a ready bit, and reads 12 counters.
 
+![NHM in-band power histogram](img/nhm_histogram.gif)
+
+*The NHM histogram, animated (`tools/nhm_histogram_gif.py`; the shapes are the
+real distributions devourer measured). Twelve IGI-referenced power buckets, quiet
+on the left, loud on the right. On a clean channel the mass sits low (peaking
+around bucket 5); as a narrowband interferer rises it marches into the hot
+buckets — the whole detection signal, frame-free, no received frame required. On
+the 2T2R 8822CU a co-located CW tone drives the peak from bucket 5 to bucket 8;
+a strong carrier saturates it into bucket 11.*
+
 The facilities differ by generation but all three read the same fields:
 
 | Generation | FA/CCA/IGI + NHM | register map |

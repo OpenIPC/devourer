@@ -504,6 +504,15 @@ void HalmacJaguar2MacInit::init_edca_cfg() {
 void HalmacJaguar2MacInit::init_wmac_cfg() {
   _device.rtw_write32(REG_RXFLTMAP0, WLAN_RX_FILTER0);
   _device.rtw_write16(REG_RXFLTMAP2, WLAN_RX_FILTER2);
+  /* RXFLTMAP1 (0x06A2) is the control-frame subtype filter. halmac's
+   * init_wmac_cfg leaves it at reset; the vendor driver's init_misc then sets
+   * it to 0x0400 (PS-Poll only, station mode). enable_rx() sets the RCR ACF
+   * (accept-control-frames) bit, which this register gates a second time — so
+   * for a promiscuous monitor all control subtypes must pass, matching the
+   * already wide-open RXFLTMAP0/2. 8821C-only to keep the 8822B path
+   * byte-identical. */
+  if (_variant == ChipVariant::C8821C)
+    _device.rtw_write16(0x06A2, 0xFFFF);
   _device.rtw_write32(REG_RCR, WLAN_RCR_CFG);
   _device.rtw_write8(REG_RX_PKT_LIMIT, WLAN_RXPKT_MAX_SZ_512);
   /* 8821C-only: CCK ACK timeout (init_wmac_cfg_8821c REG_ACKTO_CCK =

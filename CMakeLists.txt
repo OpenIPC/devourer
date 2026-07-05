@@ -266,6 +266,15 @@ add_executable(StreamDuplexDemo
 target_link_libraries(StreamDuplexDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
 target_include_directories(StreamDuplexDemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/txdemo)
 
+# WiFiSenseDemo — Wi-Fi motion/presence sensor from beamforming reports. Drives
+# two adapters (a sounder + a beamformee) on one host, self-captures the reports,
+# decodes the per-tone Givens angles (src/BfReportDecode.h), and shows a live
+# motion readout. See examples/sense/README.md and docs/beamforming-victim-sensing.md.
+add_executable(WiFiSenseDemo
+    examples/sense/main.cpp
+)
+target_link_libraries(WiFiSenseDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
+
 # Headless regression guard for the binary-stdin framing shared by the two
 # stream demos above (txdemo/stream_stdin.h). No libusb, no radio — just the
 # set_stdin_binary() + read_exact() path, so a text-mode regression (e.g. the
@@ -294,3 +303,14 @@ add_executable(ToneMaskSelftest
 target_link_libraries(ToneMaskSelftest PRIVATE WiFiDriver)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
+
+# Headless guard for the beamforming-report decoder (src/BfReportDecode.h) — the
+# LSB-first Givens-angle unpacking + per-tone variance behind WiFiSenseDemo. It
+# decodes a real captured VHT MU report and checks the angles against an offline
+# reference, so a port regression fails `ctest` instead of only on a radio.
+add_executable(BfReportDecodeSelftest
+    examples/sense/bf_report_decode_selftest.cpp
+)
+target_link_libraries(BfReportDecodeSelftest PRIVATE WiFiDriver)
+
+add_test(NAME bf_report_decode COMMAND BfReportDecodeSelftest)

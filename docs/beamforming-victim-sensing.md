@@ -225,6 +225,29 @@ tools/bf_report_decode.py cap.raw --csv cap.csv
 # interference:       per-tone cross-frame variance of psi (Result 2/3)
 ```
 
+## Try it — `WiFiSenseDemo`
+
+`WiFiSenseDemo` turns the above into a runnable motion/presence sensor: one binary
+drives two adapters — a sounder and a beamformee — sounds continuously,
+self-captures the reports, decodes the per-tone angles in C++
+(`src/BfReportDecode.h`), and prints a live readout (the mean per-tone cross-frame
+variance of the phase angle) against a **self-calibrating noise floor** — a
+CFAR-style test shown as `σ`, with `CLEAR` / `MOTION` verdicts.
+
+```sh
+WiFiSenseDemo --channel 6 \
+  --sounder 0x0bda:0x8812 --beamformee 0x0bda:0xc812
+```
+
+Give it a few seconds to calibrate, then move near the adapters — the `σ` reading
+climbs and the verdict flips to `MOTION`. The effect is strongest with the two
+adapters **physically separated**; side by side they share an almost-static short
+channel a hand barely perturbs.
+
+**Full hands-on guide — hardware, placement, all the knobs, the decoding/detector
+maths, and a capture→analyse loop for trying your own formulas — is in
+[`examples/sense/README.md`](../examples/sense/README.md).**
+
 ## Related
 
 - [beamforming-self-sounding.md](beamforming-self-sounding.md) — the sounding

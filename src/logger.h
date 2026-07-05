@@ -131,9 +131,19 @@ using format_string_t = std::string_view;
 
 class Logger {
 public:
+    /* Verbosity threshold. A message at level L is emitted only when
+     * _level <= L, so Debug shows everything and Silent shows nothing. Defaults
+     * to Debug, so existing consumers' output is unchanged; a caller that wants
+     * a clean stdout (e.g. WiFiSenseDemo's live display) can quiet the library
+     * with set_level(Logger::Level::Warn). */
+    enum class Level { Debug, Info, Warn, Error, Silent };
+    void set_level(Level l) { _level = l; }
+    Level level() const { return _level; }
+
     template<typename... Args>
     void debug(format_string_t<Args...> fmt, Args &&...args) {
 #if !defined(NDEBUG)
+        if (_level > Level::Debug) return;
         std::string txt = format(fmt, args...);
         DEVOURER_LOGD(txt.c_str());
 #endif
@@ -141,21 +151,27 @@ public:
 
     template<typename... Args>
     void info(format_string_t<Args...> fmt, Args &&...args) {
+        if (_level > Level::Info) return;
         std::string txt = format(fmt, args...);
         DEVOURER_LOGI(txt.c_str());
     }
 
     template<typename... Args>
     void warn(format_string_t<Args...> fmt, Args &&...args) {
+        if (_level > Level::Warn) return;
         std::string txt = format(fmt, args...);
         DEVOURER_LOGW(txt.c_str());
     }
 
     template<typename... Args>
     void error(format_string_t<Args...> fmt, Args &&...args) {
+        if (_level > Level::Error) return;
         std::string txt = format(fmt, args...);
         DEVOURER_LOGE(txt.c_str());
     }
+
+private:
+    Level _level = Level::Debug;
 };
 
 using Logger_t = std::shared_ptr<Logger>;

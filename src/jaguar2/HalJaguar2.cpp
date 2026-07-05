@@ -956,6 +956,12 @@ void HalJaguar2::bf_init_8821c() {
                                  (_device.rtw_read8(0x06DF) & 0xC0) | 0x4));
   /* Grouping bitmap (0x1C94) — same value as the 8822B bf_init. */
   _device.rtw_write32(0x1C94, 0xAFFFAFFFu);
+
+  /* rfe_type-2 (1212 module) 5G-RX hardware fix from rtl8821c_hal_init_misc:
+   * REG_PAD_CTRL1+3 (0x0067) = 0x36. Only for rfe_type 2 (efuse RFE & 0x1f). */
+  if (((_efuse_valid ? _efuse_map[0xCA] : 0) & 0x1f) == 2)
+    _device.rtw_write8(0x0067, 0x36);
+
   _logger->info("Jaguar2/8821C: bf_init (MU/TXBF MAC setup + 0x1c94)");
 }
 

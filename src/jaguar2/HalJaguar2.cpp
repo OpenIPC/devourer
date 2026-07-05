@@ -1084,16 +1084,23 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type) {
    * calibration + txpwr_lmt clamp is a follow-up; DEVOURER_TX_PWR (flat TXAGC
    * override) still works for SDR power control. */
   if (_variant == ChipVariant::C8821C) {
-    /* 8821C has no EEPROM_TX_PWR_INX (the 8822B 0x10 efuse layout is N/A). Its
-     * per-rate TX power is the phy_reg_pg base (array_mp_8821c_phy_reg_pg),
-     * written to the TXAGC regs 0x1d00 + (hw_rate & 0xfc) by
-     * config_phydm_write_txagc_8821c. With CONFIG_TXPWR_BY_RATE_EN off (upstream
-     * default) the phy_reg_pg byte IS the txagc index, so transcribe those base
-     * values here. Rate-section -> 0x1d00 offset: 0xc20->0x00 (CCK), 0xc24->0x04
-     * / 0xc28->0x08 (OFDM), 0xc2c->0x0c (HT MCS0-3), 0xc30->0x10 (HT MCS4-7).
-     * A flat baseline covers VHT / the remaining slots (untested here). Per-
-     * channel efuse deltas + the txpwr_lmt regulatory clamp are a follow-up
-     * (needs SDR power ground-truth); DEVOURER_TX_PWR overrides. */
+    /* The 8821C uses the common TXPWR_PG_WITH_PWR_IDX path (vendor
+     * rtl8821c_ops.c: txpwr_pg_mode = TXPWR_PG_WITH_PWR_IDX,
+     * get_tx_power_index_handler = hal_com_get_txpwr_idx): the on-air per-rate
+     * index is a per-channel EFUSE power base (Index24G/5G_*_Base, from the PG
+     * table) PLUS the phy_reg_pg by-rate diff (array_mp_8821c_phy_reg_pg),
+     * clamped to txpwr_lmt, written to 0x1d00 + (hw_rate & 0xfc) by
+     * config_phydm_write_txagc_8821c.
+     *
+     * DIVERGENCE (SDR-gated, deferred per plan M8 / "efuse fine-deltas"): this
+     * uses the phy_reg_pg by-rate values as an absolute base and does NOT add
+     * the per-channel EFUSE power-index base, so absolute per-channel power
+     * differs from the vendor by the (typically small, board-calibrated) base
+     * delta. It radiates and decodes; only absolute-power accuracy is affected,
+     * which needs SDR ground-truth to port+verify faithfully. The txpwr_lmt
+     * regulatory clamp below IS applied. DEVOURER_TX_PWR overrides. Rate-section
+     * -> 0x1d00 offset: 0xc20->0x00 (CCK), 0xc24->0x04 / 0xc28->0x08 (OFDM),
+     * 0xc2c->0x0c (HT MCS0-3), 0xc30->0x10 (HT MCS4-7); flat baseline for VHT. */
     const bool g5 = channel > 14;
     /* Regulatory clamp (config_phydm_get_tx_power_limit_8821c worldwide-min):
      * the phy_reg_pg base is the chip's per-rate capability (~50), which is above

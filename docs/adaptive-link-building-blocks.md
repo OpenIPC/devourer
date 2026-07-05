@@ -89,7 +89,9 @@ link reveal itself on demand.
   whole 20/40/80 MHz and loads the PA like real traffic, it is the *realistic*
   stimulus — what you want for spectral-occupancy, power, and thermal-duty
   characterisation. It idle-holds the carrier until stopped, then restores the
-  chip. (SDR spectrum-shape check: `tests/sdr_spectrum.py` distinguishes a
+  chip. 100% duty is the worst-case PA heat, so it is a debug / characterisation
+  stimulus — not for sustained use; pair it with the thermal telemetry and watch
+  the drift. (SDR spectrum-shape check: `tests/sdr_spectrum.py` distinguishes a
   full-channel modulated block from a bare tone by occupied bandwidth.)
 
 The two are complementary: the tone probes *one frequency* narrowly; the modulated
@@ -97,20 +99,32 @@ carrier probes *the whole channel* realistically.
 
 ## Active probing — turning a stimulus into a decision
 
-The **active link-probe** (`tests/link_probe.sh` + `tests/link_probe.py`) composes
-a stimulus and a sensor into an operating-point recommendation. One adapter emits
-a modulated feed and **sweeps a lever** in steps (marking each step); the ground
-station reads its per-step SNR and NHM; the analyzer aligns the two by time and
-reports the **margin-vs-lever curve** plus the operating point that meets a target.
+The **active link-probe** (`tests/link_probe.sh --axis power|mcs` +
+`tests/link_probe.py`) composes a stimulus and a sensor into an operating-point
+recommendation. One adapter emits a modulated feed and **sweeps a lever** in steps
+(marking each step); the ground station reads its per-step SNR and NHM; the
+analyzer aligns the two by time and reports the **margin-vs-lever curve** plus the
+operating point that meets a target. It also polls the emitter's PA thermal meter
+during the sweep and reports the drift — the thermal-budget overlay below.
 
-- **Power↔margin** — sweep transmit power, read the ground SNR at each level, and
-  pick the *minimum power that clears the margin*. This is the energy-min reflex
-  made measurable: rather than guess the power or discover it by degrading video,
-  measure the cheapest power that holds the link. (Sweep the noise-limited,
-  lower-power regime for a clean monotonic curve; very high power into a strong
-  link just saturates the receiver.)
-- **MCS-headroom** — the same harness with the rate as the swept axis: does the
-  next modulation still clear the SNR/EVM floor? A proactive rate-adaptation input.
+The probe deliberately uses a **beacon feed** (fresh, gap-separated frames), not
+the 100%-duty continuous carrier: the receiver needs decodable per-frame SNR at
+each step, and the continuous carrier — a spectral/thermal stimulus — is not a
+clean frame source (its looped payload isn't FCS-valid, and a gapless carrier
+offers no frame boundaries to lock onto). Stimulus and probe are thus decoupled:
+the continuous carrier characterises the spectrum/power/thermal; the beacon feed
+carries the per-frame link quality.
+
+- **Power↔margin** (`--axis power`, the `DEVOURER_TX_PWR_*` ramp) — sweep transmit
+  power, read the ground SNR at each level, and pick the *minimum power that clears
+  the margin*. This is the energy-min reflex made measurable: rather than guess the
+  power or discover it by degrading video, measure the cheapest power that holds
+  the link. (Sweep the noise-limited, lower-power regime for a clean monotonic
+  curve; very high power into a strong link just saturates the receiver.)
+- **MCS-headroom** (`--axis mcs`, `DEVOURER_TX_MCS_SWEEP="MCS0,MCS2,…"`) — the same
+  harness with the rate as the swept axis: does the next modulation still clear the
+  SNR floor? The analyzer reports each rate's ground SNR and delivery and picks the
+  *highest rate the link holds* — a proactive rate-adaptation input.
 
 This is the concrete building block an energy-min controller uses to place the
 operating point *before* committing the video stream to it.
@@ -131,10 +145,13 @@ The design's decisions map onto the blocks above:
   RX-path lever, driven by the per-chain sensors.
 - **Hold the thermal / regulatory ceiling** — the thermal telemetry bounds the
   power/duty the controller may request; the continuous-TX stimulus is the
-  worst-case duty for characterising that ceiling.
-- **Re-find each other when feedback drops** — a modulated continuous (or periodic)
-  carrier as the ground's cheap re-find beacon, detected by the drone's low-duty
-  energy sensor — the asymmetric-duty rendezvous the design describes.
+  worst-case duty for characterising that ceiling, and the link-probe overlay
+  reports the PA drift under the swept load.
+- **Re-find each other when feedback drops** — a modulated continuous carrier as
+  the ground's cheap re-find beacon, detected by the drone's low-duty energy
+  sensor: `tests/rendezvous.sh` parks the beacon on one channel and the scanner
+  discovers it from a channel sweep. The asymmetric-duty rendezvous the design
+  describes.
 
 None of these is a policy in itself; each is a lever to pull or a number to read.
 The controller that weighs them against the energy objective and the per-layer

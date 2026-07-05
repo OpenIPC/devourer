@@ -729,6 +729,29 @@ int main(int argc, char **argv) {
   long pwr_step_ms = 30000;
   long pwr_next_step_ms = 0;
   bool txpwr_readback = std::getenv("DEVOURER_TX_PWR_READBACK") != nullptr;
+
+  /* DEVOURER_TX_MCS_SWEEP="MCS0,MCS2,MCS4,..." — the MCS-headroom axis of the
+   * link probe: step the on-air rate through the list every DEVOURER_TX_MCS_STEP_MS
+   * (default 2000), emitting a <devourer-contx>mcs=<spec> marker per step. A
+   * beacon-feed rate sweep (decoupled from the idle-hold HW carrier, like the
+   * power ramp) so the ground reads decodable per-frame SNR/delivery at each MCS
+   * and picks the highest rate the link holds. */
+  std::vector<std::pair<devourer::TxMode, std::string>> mcs_sweep;
+  long mcs_step_ms = 2000, mcs_next_step_ms = 0;
+  size_t mcs_idx = 0;
+  if (const char *e = std::getenv("DEVOURER_TX_MCS_SWEEP")) {
+    std::string s = e, tok;
+    std::stringstream ss(s);
+    while (std::getline(ss, tok, ',')) {
+      if (tok.empty()) continue;
+      mcs_sweep.emplace_back(devourer::parse_tx_mode_str(tok), tok);
+    }
+    if (const char *ms = std::getenv("DEVOURER_TX_MCS_STEP_MS"))
+      mcs_step_ms = std::strtol(ms, nullptr, 0);
+    if (!mcs_sweep.empty())
+      logger->info("DEVOURER_TX_MCS_SWEEP — {} rates, {} ms/step",
+                   mcs_sweep.size(), mcs_step_ms);
+  }
   auto apply_txpwr = [&](int idx) {
     /* TXAGC override is a Jaguar1 (RtlJaguarDevice) feature; a no-op otherwise. */
 #if defined(DEVOURER_HAVE_JAGUAR1)
@@ -863,6 +886,16 @@ int main(int argc, char **argv) {
       if (pwr_cur > pwr_stop) pwr_cur = pwr_stop;
       apply_txpwr(pwr_cur);
       pwr_next_step_ms = ms_since_start() + pwr_step_ms;
+    }
+    /* MCS-headroom sweep: apply each rate for one dwell, marking the boundary. */
+    if (!mcs_sweep.empty() &&
+        (tx_count == 0 || ms_since_start() >= mcs_next_step_ms)) {
+      if (tx_count != 0) mcs_idx = (mcs_idx + 1) % mcs_sweep.size();
+      rtlDevice->SetTxMode(mcs_sweep[mcs_idx].first);
+      printf("<devourer-contx>mcs=%s t_ms=%ld\n",
+             mcs_sweep[mcs_idx].second.c_str(), ms_since_start());
+      fflush(stdout);
+      mcs_next_step_ms = ms_since_start() + mcs_step_ms;
     }
     /* Retune at each dwell boundary. The first iteration (frames_in_dwell==0,
      * dwell_no==-1) selects the first hop channel; SetMonitorChannel

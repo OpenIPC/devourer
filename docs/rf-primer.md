@@ -3,9 +3,10 @@
 devourer talks to a Wi-Fi radio at a very low level — subcarriers, constellations,
 gain control, the transmit and receive chains. If you're new to that machinery,
 the terms in the other docs (per-tone SNR, EVM, CCA, AGC, occupied bandwidth) can
-feel like jargon. This page is a picture book: four short animations, each
+feel like jargon. This page is a picture book: eight short animations, each
 built in the DEVOURER live-monitor style, that show what the machinery actually
-looks like. Read it top to bottom and the rest of the docs will click.
+looks like — from a single subcarrier all the way to a hopping, diversity-combined
+link. Read it top to bottom and the rest of the docs will click.
 
 Everything here is grounded in what devourer measures — the constellation noise
 follows the textbook AWGN model, the spectrum levels are from a real USRP B210
@@ -42,7 +43,21 @@ packs them so tight the *same* noise smears the clusters together and the link
 breaks. That boundary — the highest modulation a given SNR can hold — is exactly
 what the [MCS-headroom probe](adaptive-link-building-blocks.md) measures.
 
-## 3. On the air — a bare tone vs a modulated carrier
+## 3. Building the waveform — the transmit pipeline
+
+![TX pipeline](img/tx_pipeline.gif)
+
+So how does a block of bits actually *become* those constellation points on those
+subcarriers? A short assembly line: the bits are **scrambled** (whitened so there
+are no long runs), **forward-error-coded** (redundancy added so the receiver can
+repair errors), **interleaved** (spread out so a fade damages many codewords a
+little rather than one a lot), **mapped** onto the subcarrier constellations, run
+through an **inverse FFT** that turns all those subcarriers into one time-domain
+OFDM symbol, given a **cyclic-prefix** guard (the tail copied to the front, so
+echoes off walls don't smear the next symbol), and finally up-converted and
+radiated. That last waveform is exactly what the spectrum analyzer below shows.
+
+## 4. On the air — a bare tone vs a modulated carrier
 
 ![CW tone vs modulated spectrum](img/spectrum_compare.gif)
 
@@ -55,7 +70,7 @@ real traffic looks like, and the realistic stimulus for link probing. Same
 transmitter, two completely different spectral footprints. (Levels here are a real
 B210 capture on ch100: a −25 dB floor, the tone ~+18 dB above it, the block ~+28.)
 
-## 4. At the receiver — gain control, and why a strong signal goes deaf
+## 5. At the receiver — gain control, and why a strong signal goes deaf
 
 ![AGC gain and saturation](img/agc_saturation.gif)
 
@@ -68,6 +83,42 @@ against the rails. A clipped waveform can't be demodulated: the receiver goes
 deaf. That's why, in the [sensing docs](rx-spectrum-sensing.md), a *moderate*
 interferer makes the CCA counter **spike** while a *strong* co-located one makes
 frames and CCA **collapse** toward zero — the AGC saturating is the collapse.
+
+## 6. Measuring the channel — beamforming self-sounding
+
+![Beamforming self-sounding sequence](img/bf_sequence.gif)
+
+To know *how good* each subcarrier is, you have to measure the channel between two
+radios. The sequence: the **sounder** announces (NDPA), sends a **known waveform**
+on every subcarrier (NDP), the **beamformee** compares what arrived to what it
+knows was sent — that's the per-subcarrier channel `H(k)` — and sends back a
+compressed **CSI report**. With two adapters you own, you play both roles yourself
+(*self-sounding*). That report is the source of the per-subcarrier SNR waterfall,
+the per-tone interference localizer, and the motion sensor.
+
+## 7. Combining two antennas — diversity under motion
+
+![MRC antenna diversity](img/mrc_diversity.gif)
+
+Multipath makes a signal **fade** — deep dips that come and go. Two antennas help,
+but only when they see *different* fades. Held **still**, closely-spaced antennas
+see almost the same channel: they dip together, so combining them (maximal-ratio
+combining) barely fills the holes and the second chain is mostly wasted power.
+Under **motion** the antennas decorrelate — when one is in a fade the other
+usually isn't — so the combined signal fills the deep fades and outages drop
+sharply. That's why the number of active receive chains is a *fade-state* lever,
+not a range lever, and why a motion signal tells the controller when to open them.
+
+## 8. Spreading across the band — frequency hopping
+
+![Frequency-hopping pattern](img/hop_pattern.gif)
+
+Instead of parking on one channel, the link can **hop** channel to channel every
+dwell, spreading its energy across the band. A narrowband interferer sitting on
+one channel then only clips the occasional hop that lands on it — every other hop
+escapes. Done per-packet (`DEVOURER_HOP_*`), hopping doubles as a
+frequency-diversity interleaver for the outer FEC: losses are spread thin across
+frequencies instead of wiping out a run of packets on one.
 
 ---
 

@@ -305,9 +305,9 @@ sandbox; and [`docs/fused-fec.md`](docs/fused-fec.md) — the cross-layer
 quality SLA is stated against.
 
 New to the low-level RF machinery? [`docs/rf-primer.md`](docs/rf-primer.md) is a
-visual primer — four short animations (the OFDM channel, the constellation, a
-tone vs a modulated carrier, and AGC saturation) that make the rest of the docs
-click.
+visual primer — eight short animations (the OFDM channel, the constellation, the
+TX pipeline, a tone vs a modulated carrier, AGC saturation, channel sounding,
+antenna diversity, and frequency hopping) that make the rest of the docs click.
 
 ### Startup time
 

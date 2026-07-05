@@ -6,6 +6,7 @@
 
 #include "logger.h"
 #include "RtlUsbAdapter.h"
+#include "RxSense.h"
 #include "ChipVariant.h"
 #include "Jaguar2PhyTables.h"
 
@@ -125,6 +126,11 @@ public:
   void dig_step();
   uint8_t dbg_igi() { return static_cast<uint8_t>(_device.rtw_read8(0x0c50) & 0x7f); }
   uint32_t dbg_last_fa() const { return _last_fa; }
+  /* Frame-free RX energy snapshot from the last dig_step window (FA/CCA/IGI).
+   * dig_step already reads+resets these counters on its ~100 ms cadence, so the
+   * energy poller piggybacks it rather than racing the reset. Invalid until
+   * dig_step has run at least once (i.e. requires the DIG thread — default on). */
+  RxEnergy last_energy() const { return _energy; }
 
   /* Debug: direct RF register read (direct-BB window). For RX bring-up probes. */
   uint32_t dbg_rf_read(uint8_t path, uint32_t addr) { return rf_read(path, addr); }
@@ -182,6 +188,7 @@ private:
   ChipVersion _ver{};
   bool _aac_checked = false;
   uint32_t _last_fa = 0; /* last DIG-window false-alarm count (telemetry) */
+  RxEnergy _energy{};    /* last DIG-window FA/CCA/IGI snapshot (telemetry) */
   /* Decoded logical EFUSE map, read once (a full physical walk is ~hundreds of
    * USB control transfers ≈ 0.5s). read_efuse_rfe populates it; apply_tx_power
    * reuses it — avoids a second walk that would slow every cold init. */

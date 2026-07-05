@@ -14,6 +14,7 @@
 #include "BeamformingSounder.h"
 #include "FrameParserJaguar2.h"
 #include "Jaguar2Calibration.h"
+#include "NhmReader.h"
 #include "ToneMask.h"
 #include "RateDefinitions.h"
 #include "RxPacket.h"
@@ -81,6 +82,7 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
    * the TX front-end mis-routed. DEVOURER_RFE=N overrides. */
   if (const char *e = getenv("DEVOURER_RFE"))
     rfe = static_cast<uint8_t>(strtol(e, nullptr, 0));
+  _rfe = rfe; /* cache for SetMonitorChannel retune */
   _hal.apply_bb_rf_agc_tables(rfe);
   _logger->info("RtlJaguar2Device: PHY tables applied");
 
@@ -444,6 +446,31 @@ void RtlJaguar2Device::StopCwTone() {
 
 void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
   _channel = channel;
+  /* Retune the RF/BB to the new channel. set_channel_bw is a pure tune (RF18 +
+   * bandwidth registers) — no per-channel LCK/IQK/TX-power — so it is cheap
+   * enough to drive a live spectrum sweep. The stale IQK from bring-up slightly
+   * degrades RX quality on the new channel but does not affect the frame-free
+   * CCA/FA energy counters the sweep reads. */
+  _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel),
+                      static_cast<uint8_t>(channel.ChannelWidth), _rfe,
+                      channel.ChannelOffset);
+}
+
+RxEnergy RtlJaguar2Device::GetRxEnergy() {
+  /* Scalar FA/CCA/IGI come from the DIG thread's cached snapshot (no USB);
+   * append a fresh NHM power histogram (11AC register map). NHM's registers
+   * (0x994/0x990/0x998.. + 0xfa8/0xfb4) don't overlap the DIG thread's
+   * (0xc50 IGI + FA counters), so the concurrent read is race-free enough for
+   * this diagnostic. */
+  RxEnergy e = _hal.last_energy();
+  devourer::read_nhm(
+      devourer::nhm_regs_11ac(), e.igi,
+      [this](uint16_t a) { return _device.rtw_read<uint32_t>(a); },
+      [this](uint16_t a, uint32_t m, uint32_t v) {
+        _device.phy_set_bb_reg(a, m, v);
+      },
+      e);
+  return e;
 }
 
 void RtlJaguar2Device::SetTxPower(uint8_t power) { _tx_pwr_override = power; }

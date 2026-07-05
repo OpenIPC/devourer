@@ -189,6 +189,36 @@ Common to both demos:
   to DEBUG (produces ~7 MB per 15 s, can fill `/tmp` mid-capture, and slows
   init measurably). `DEVOURER_USB_QUIET` is accepted as a no-op.
 
+`WiFiDriverDemo` (RX)-only knobs:
+
+- `DEVOURER_RX_ENERGY_MS=N` — frame-free RX energy / interferer-detection
+  telemetry (the read side of `DEVOURER_CW_TONE`). Every `N` ms emit a
+  `<devourer-energy>` line combining the chip's phydm false-alarm + CCA
+  (channel-busy) counters and DIG IGI (`IRtlDevice::GetRxEnergy`, frame-free,
+  all three generations) with a rolling per-frame RSSI/SNR aggregate. A second
+  adapter running this detects the first adapter's CW carrier: co-located, a
+  strong tone pushes `cca_ofdm` far out of its ambient band — a large spike (the
+  2T2R 8822CU registers the carrier as busy) or a collapse toward zero (the
+  1T1R parts' AGC saturates and RX goes deaf). No SDR needed. 0 = disabled.
+  Validate with `tests/rx_energy_probe.sh` (+ `tests/rx_energy_check.py`).
+  Reads channel-wide scalars, not per-subcarrier CSI (no Realtek 88xx chip
+  exports CSI to the host); build a coarse spectrum by sweeping channels.
+  Each interval also emits a `<devourer-nhm>` line — the frame-free phydm NHM
+  (noise histogram): a 12-bucket, IGI-referenced in-band power distribution
+  (`peak` = fullest bucket, `busy` = percent above the noise floor, `hist` =
+  the raw counts low→high power). An in-band interferer shifts the histogram's
+  mass into higher buckets (measured: peak bucket 5→8 on the 8822CU under a
+  co-located CW tone). All three generations.
+- `DEVOURER_RX_SWEEP="1,6,11"` — coarse **live spectrum map**. Cycle the listed
+  channels, dwelling `DEVOURER_RX_SWEEP_DWELL_MS` (default 300) on each, and emit
+  one `<devourer-energy>ch=N` line per bin. The RX loop runs on a worker thread
+  while the main thread retunes (`SetMonitorChannel`) between reads — one process,
+  uniform across all three generations. Park a `DEVOURER_CW_TONE` on one channel
+  (another adapter) and the map peaks (or, on the saturating 1T1R parts, dips) at
+  that channel. Resolution = the channel grid (20 MHz), down to ~5 MHz on Jaguar3
+  with `DEVOURER_NB_BW=5`. Render with `tests/rx_spectrum_sweep.sh` +
+  `tests/rx_spectrum_sweep.py`.
+
 `WiFiDriverTxDemo`-only knobs:
 
 - `DEVOURER_TX_RATE=<rate>[/<bw>][/SGI][/LDPC][/STBC]` — the on-air TX mode,

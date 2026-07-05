@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -129,6 +130,93 @@ static const std::vector<uint32_t> g_csi_selectors = []() -> std::vector<uint32_
 }();
 static constexpr int kCsiMaxFrames = 8;
 
+/* DEVOURER_RX_ENERGY_MS=N: periodic frame-free RX energy / channel-busy
+ * telemetry — the read side of DEVOURER_CW_TONE. Each interval emits one
+ * <devourer-energy> line combining the chip's phydm FA/CCA counters + IGI
+ * (IRtlDevice::GetRxEnergy, frame-free, all three generations) with a rolling
+ * per-frame RSSI/SNR aggregate. A second adapter running this detects the first
+ * adapter's CW carrier as a jump in cca_ofdm / fa_ofdm and a rise in igi.
+ * 0 = disabled. */
+static const uint32_t g_rx_energy_ms = []() -> uint32_t {
+  const char *e = std::getenv("DEVOURER_RX_ENERGY_MS");
+  return (e && *e) ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0;
+}();
+
+/* DEVOURER_RX_SWEEP="1,6,11": live coarse spectrum sweep. Cycle the listed
+ * channels, dwelling DEVOURER_RX_SWEEP_DWELL_MS (default 300) on each, and emit
+ * one <devourer-energy>ch=N line per bin. The RX loop runs on a worker thread so
+ * the main thread is free to retune (SetMonitorChannel) between reads — a live
+ * energy-vs-frequency map that localizes an interferer (peaks, or dips on the
+ * 1T1R parts that saturate, at the tone's channel). Empty = disabled. */
+static const std::vector<int> g_rx_sweep = []() -> std::vector<int> {
+  std::vector<int> out;
+  const char *e = std::getenv("DEVOURER_RX_SWEEP");
+  if (!e || !*e) return out;
+  std::string s = e;
+  size_t pos = 0;
+  while (pos < s.size()) {
+    size_t c = s.find(',', pos);
+    std::string tok =
+        s.substr(pos, c == std::string::npos ? std::string::npos : c - pos);
+    if (!tok.empty()) out.push_back(std::atoi(tok.c_str()));
+    if (c == std::string::npos) break;
+    pos = c + 1;
+  }
+  return out;
+}();
+static const uint32_t g_rx_sweep_dwell_ms = []() -> uint32_t {
+  const char *e = std::getenv("DEVOURER_RX_SWEEP_DWELL_MS");
+  return (e && *e) ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 300;
+}();
+
+/* Rolling per-frame RSSI/SNR aggregate (the frame-driven signal, all gens):
+ * updated per received frame in packetProcessor, drained each interval by the
+ * energy emitter. */
+static std::mutex g_rxagg_mu;
+struct RxAgg {
+  uint32_t n = 0;
+  int32_t rssi_sum = 0, rssi_max = -128, snr_sum = 0, snr_min = 127;
+  void add(int rssi, int snr) {
+    ++n;
+    rssi_sum += rssi;
+    if (rssi > rssi_max) rssi_max = rssi;
+    snr_sum += snr;
+    if (snr < snr_min) snr_min = snr;
+  }
+};
+static RxAgg g_rxagg;
+
+/* Emit the frame-free NHM power histogram (IRtlDevice::GetRxEnergy fills it) as
+ * a distinct <devourer-nhm> line so it never disturbs the <devourer-energy>
+ * format its regex consumers key on. `peak` = the fullest bucket (0 = quiet
+ * noise floor, higher = energy is landing in a higher power band, e.g. under an
+ * interferer); `busy` = percent of samples above the lowest bucket; `hist` =
+ * the 12 raw bucket counts (IGI-referenced, low→high power). ch<0 omits the
+ * channel field (steady-state emitter); ch>=0 tags it (sweep). */
+static void emit_nhm(const RxEnergy &e, int ch) {
+  if (!e.valid_nhm)
+    return;
+  uint32_t total = 0, peak = 0;
+  int peak_k = 0;
+  for (int k = 0; k < 12; k++) {
+    total += e.nhm[k];
+    if (e.nhm[k] > peak) { peak = e.nhm[k]; peak_k = k; }
+  }
+  int busy = total ? static_cast<int>(100 * (total - e.nhm[0]) / total) : 0;
+  char hist[96];
+  int off = 0;
+  for (int k = 0; k < 12; k++)
+    off += std::snprintf(hist + off, sizeof(hist) - off, "%s%u",
+                         k ? "," : "", e.nhm[k]);
+  if (ch >= 0)
+    printf("<devourer-nhm>ch=%d peak=%d busy=%d dur=%u hist=%s\n", ch, peak_k,
+           busy, e.nhm_duration, hist);
+  else
+    printf("<devourer-nhm>peak=%d busy=%d dur=%u hist=%s\n", peak_k, busy,
+           e.nhm_duration, hist);
+  fflush(stdout);
+}
+
 static void packetProcessor(const Packet &packet) {
   /* C2H packets carry chip-side status updates, not 802.11 frames. Handle
    * them up front so the rest of this function (which assumes a normal
@@ -165,6 +253,13 @@ static void packetProcessor(const Packet &packet) {
   }
 
   ++g_rx_count;
+
+  /* Feed the rolling per-frame RSSI/SNR aggregate for DEVOURER_RX_ENERGY_MS
+   * (the frame-driven half of the energy telemetry). path-A chain. */
+  if (g_rx_energy_ms > 0) {
+    std::lock_guard<std::mutex> lk(g_rxagg_mu);
+    g_rxagg.add(packet.RxAtrib.rssi[0], packet.RxAtrib.snr[0]);
+  }
 
   if (g_rx_count == 1) {
     printf("<devourer>init-timing: demo.first_rx_frame = %lld ms\n",
@@ -545,6 +640,59 @@ int main() {
     });
   }
 #endif /* DEVOURER_HAVE_JAGUAR1 */
+
+  /* DEVOURER_RX_ENERGY_MS: frame-free RX energy / channel-busy telemetry — the
+   * read side of DEVOURER_CW_TONE. Cross-generation (IRtlDevice::GetRxEnergy),
+   * so it runs off the base device pointer, not the Jaguar1 downcast. The thread
+   * sleeps one interval first (so its first read lands after bring-up completes,
+   * not mid-init), then each interval reads GetRxEnergy() + drains the rolling
+   * frame aggregate and emits one <devourer-energy> line. Concurrency caveat:
+   * the FA/CCA reads share libusb with the RX bulk loop (like the thermal
+   * poller) — keep the cadence conservative (>= a few hundred ms). */
+  std::atomic<bool> energy_emitter_stop{false};
+  std::thread energy_emitter;
+  if (g_rx_energy_ms > 0) {
+    logger->info("DEVOURER_RX_ENERGY_MS={} — starting RX energy telemetry",
+                 g_rx_energy_ms);
+    IRtlDevice *dev = rtlDevice.get();
+    energy_emitter = std::thread([&energy_emitter_stop, dev]() {
+      auto nap = [&](uint32_t ms) {
+        for (uint32_t s = 0; s < ms && !energy_emitter_stop.load(); s += 50)
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      };
+      nap(g_rx_energy_ms); /* let bring-up finish before the first read */
+      while (!energy_emitter_stop.load()) {
+        RxEnergy e = dev->GetRxEnergy();
+        RxAgg agg;
+        {
+          std::lock_guard<std::mutex> lk(g_rxagg_mu);
+          agg = g_rxagg;
+          g_rxagg = RxAgg{};
+        }
+        char fao[16], fac[16], cco[16], ccc[16], igi[16];
+        auto u = [](char *b, bool v, uint32_t x) {
+          if (v) std::snprintf(b, 16, "%u", x); else std::snprintf(b, 16, "-");
+        };
+        u(fao, e.valid_fa, e.fa_ofdm);
+        u(fac, e.valid_fa, e.fa_cck);
+        u(cco, e.valid_fa, e.cca_ofdm);
+        u(ccc, e.valid_fa, e.cca_cck);
+        if (e.valid_igi) std::snprintf(igi, 16, "%u", e.igi);
+        else std::snprintf(igi, 16, "-");
+        int rssi_mean = agg.n ? agg.rssi_sum / static_cast<int>(agg.n) : 0;
+        int snr_mean = agg.n ? agg.snr_sum / static_cast<int>(agg.n) : 0;
+        printf("<devourer-energy>cca_ofdm=%s cca_cck=%s fa_ofdm=%s fa_cck=%s "
+               "igi=%s frames=%u rssi_mean=%d rssi_max=%d snr_mean=%d "
+               "snr_min=%d\n",
+               cco, ccc, fao, fac, igi, agg.n, rssi_mean,
+               agg.n ? agg.rssi_max : 0, snr_mean, agg.n ? agg.snr_min : 0);
+        fflush(stdout);
+        emit_nhm(e, -1);
+        nap(g_rx_energy_ms);
+      }
+    });
+  }
+
   /* Default channel 36 (5 GHz) for the 8812 reference. Override with
    * DEVOURER_CHANNEL=N env var (e.g. DEVOURER_CHANNEL=6 for busy 2.4 GHz). */
   int channel = 36;
@@ -577,11 +725,73 @@ int main() {
       width = CHANNEL_WIDTH_10;
     logger->info("DEVOURER_NB_BW={} — RX bandwidth {} MHz", nb, mhz);
   }
+
+  /* DEVOURER_RX_SWEEP: live spectrum sweep. Run the (blocking) RX bring-up +
+   * loop on a worker thread so the main thread is free to retune between energy
+   * reads. StopRxLoop unblocks it on SIGINT. */
+  if (!g_rx_sweep.empty()) {
+    logger->info("DEVOURER_RX_SWEEP: {} bins, dwell {} ms — live spectrum map",
+                 g_rx_sweep.size(), g_rx_sweep_dwell_ms);
+    IRtlDevice *dev = rtlDevice.get();
+    SelectedChannel first{static_cast<uint8_t>(g_rx_sweep[0]), ch_offset, width};
+    std::thread rx([dev, first]() {
+      try {
+        dev->Init(packetProcessor, first);
+      } catch (const std::exception &e) {
+        printf("<devourer>RX-sweep bring-up failed: %s\n", e.what());
+        fflush(stdout);
+      }
+    });
+    /* Let bring-up complete before the first retune. */
+    for (int s = 0; s < 2500 && !g_devourer_should_stop; s += 50)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    size_t bi = 0;
+    while (!g_devourer_should_stop) {
+      int ch = g_rx_sweep[bi % g_rx_sweep.size()];
+      ++bi;
+      dev->SetMonitorChannel(
+          SelectedChannel{static_cast<uint8_t>(ch), ch_offset, width});
+      for (uint32_t s = 0; s < g_rx_sweep_dwell_ms && !g_devourer_should_stop;
+           s += 50)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      RxEnergy e = dev->GetRxEnergy();
+      char cco[16], ccc[16], fao[16], fac[16], igi[16];
+      auto u = [](char *b, bool v, uint32_t x) {
+        if (v) std::snprintf(b, 16, "%u", x); else std::snprintf(b, 16, "-");
+      };
+      u(cco, e.valid_fa, e.cca_ofdm);
+      u(ccc, e.valid_fa, e.cca_cck);
+      u(fao, e.valid_fa, e.fa_ofdm);
+      u(fac, e.valid_fa, e.fa_cck);
+      u(igi, e.valid_igi, e.igi);
+      printf("<devourer-energy>ch=%d cca_ofdm=%s cca_cck=%s fa_ofdm=%s "
+             "fa_cck=%s igi=%s\n",
+             ch, cco, ccc, fao, fac, igi);
+      fflush(stdout);
+      emit_nhm(e, ch);
+    }
+    dev->StopRxLoop();
+    if (rx.joinable())
+      rx.join();
+    dev->Stop();
+    rc = libusb_release_interface(dev_handle, 0);
+    if (rc != 0)
+      logger->info("libusb_release_interface rc={}", rc);
+    libusb_close(dev_handle);
+    libusb_exit(ctx);
+    return 0;
+  }
+
   rtlDevice->Init(packetProcessor, SelectedChannel{
                                        .Channel = static_cast<uint8_t>(channel),
                                        .ChannelOffset = ch_offset,
                                        .ChannelWidth = width,
                                    });
+
+  /* Stop the energy telemetry thread before de-init (it reads chip registers). */
+  energy_emitter_stop = true;
+  if (energy_emitter.joinable())
+    energy_emitter.join();
 
   /* Clean chip de-init before dropping the interface (card-disable PWR_SEQ), so
    * the adapter re-enumerates instead of hanging its USB core. */

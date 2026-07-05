@@ -165,9 +165,17 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
          * concurrent TX+RX the FW emits one small C2H per TX, so tag them for
          * the packetProcessor (which skips C2H) instead of surfacing a flood
          * of short "frames". Same check the coex drain uses. */
-        p.RxAtrib.pkt_rpt_type = (data[off + 11] & 0x10)
-                                     ? RX_PACKET_TYPE::C2H_PACKET
-                                     : RX_PACKET_TYPE::NORMAL_RX;
+        bool is_c2h = (data[off + 11] & 0x10) != 0;
+        p.RxAtrib.pkt_rpt_type = is_c2h ? RX_PACKET_TYPE::C2H_PACKET
+                                        : RX_PACKET_TYPE::NORMAL_RX;
+        /* Decode the jgr3 PHY-status report (per-frame RSSI/SNR/EVM) when it is
+         * present (monitor_rx_cfg enables APP_PHYSTS + RX_DRVINFO_SZ=4, so the
+         * 32-byte report is counted in drvinfo). Skips C2H reports and any
+         * frame whose drvinfo is too short (e.g. CCK, which carries no OFDM
+         * report). The report sits immediately after the 24-byte descriptor. */
+        if (!is_c2h && f.drvinfo_size >= 28)
+          jaguar3::parse_phy_sts_jgr3(data + off + jaguar3::RXDESC_SIZE_8822C,
+                                      f.drvinfo_size, p.RxAtrib);
         p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
         _packetProcessor(p);
       }

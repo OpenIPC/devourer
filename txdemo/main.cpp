@@ -28,6 +28,7 @@
 #endif
 
 #include "BfReportDetect.h"
+#include "ChannelFreq.h"
 #include "RxPacket.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
@@ -66,14 +67,6 @@ static long long ms_since_start() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::steady_clock::now() - g_proc_start)
       .count();
-}
-
-/* Wi-Fi channel number -> center frequency (MHz), for the radiotap CHANNEL
- * field that drives the library's per-packet retune (DEVOURER_HOP_RADIOTAP). */
-static uint16_t chan_to_freq(int ch) {
-  if (ch == 14) return 2484;
-  if (ch <= 14) return static_cast<uint16_t>(2407 + 5 * ch);
-  return static_cast<uint16_t>(5000 + 5 * ch);
 }
 
 /* Build a radiotap header carrying CHANNEL (freq) + TX_FLAGS, then append the
@@ -909,7 +902,8 @@ int main(int argc, char **argv) {
       if (hop_radiotap) {
         /* Library retunes from the CHANNEL field on the next send_packet; the
          * 802.11 body is beacon_frame past its 10-byte radiotap. */
-        tx_buf = build_frame_with_channel(chan_to_freq(ch), beacon_frame + 10,
+        tx_buf = build_frame_with_channel(devourer::chan_to_freq(ch),
+                                          beacon_frame + 10,
                                           sizeof(beacon_frame) - 10);
         mode = " radiotap";
       }

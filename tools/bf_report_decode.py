@@ -179,6 +179,146 @@ def decode_angles(angle_bytes: bytes, ns: int, na: int, bphi: int, bpsi: int,
     return out
 
 
+def read_frames(src, max_frames=200):
+    """Parse `<devourer-bf-report-raw>` (or bare hex) lines into frame dicts."""
+    frames = []
+    for line in src:
+        line = line.strip()
+        if "<devourer-bf-report-raw>" in line:
+            line = line.split("<devourer-bf-report-raw>", 1)[1]
+        f = parse_frame(line)
+        if f:
+            frames.append(f)
+        if len(frames) >= max_frames:
+            break
+    return frames
+
+
+def select_split(frames, ns, na, layout, per_sc_bits):
+    """Choose the (b_phi, b_psi) angle bit-split by cross-frame stability.
+
+    Returns (bphi, bpsi, scored) where scored is a list of
+    (bphi, bpsi, xframe_var, tone_corr) for every candidate. The correct split
+    decodes a quasi-static channel to repeatable angles (low cross-frame var);
+    a wrong split smears the LSBs frame-to-frame. Tone correlation only helps on
+    a frequency-selective channel, so cross-frame var is the discriminator."""
+    nphi, npsi = layout.count("phi"), layout.count("psi")
+    candidates = []
+    for bphi in range(2, per_sc_bits - 1):
+        bpsi = (per_sc_bits - nphi * bphi) // npsi if npsi else 0
+        if bpsi < 2:
+            continue
+        if nphi * bphi + npsi * bpsi != per_sc_bits:
+            continue
+        candidates.append((bphi, bpsi))
+    if not candidates:
+        candidates = [(per_sc_bits // 2, per_sc_bits - per_sc_bits // 2)]
+
+    def stability(bphi, bpsi):
+        cols = [[] for _ in range(ns)]
+        for f in frames:
+            dec = decode_angles(f["angle_bytes"], ns, na, bphi, bpsi, layout)
+            if dec is None:
+                return math.inf
+            for k in range(ns):
+                cols[k].append(dec[k]["psi"][0])
+        var = 0.0
+        for c in cols:
+            m = sum(c) / len(c)
+            var += sum((x - m) ** 2 for x in c) / len(c)
+        return var / ns
+
+    def smoothness(bphi, bpsi):
+        tot, n = 0.0, 0
+        for f in frames[:20]:
+            dec = decode_angles(f["angle_bytes"], ns, na, bphi, bpsi, layout)
+            if dec is None:
+                return -1.0
+            x = [dec[k]["psi"][0] for k in range(ns)]
+            m = sum(x) / ns
+            xc = [v - m for v in x]
+            denom = sum(v * v for v in xc) or 1e-9
+            num = sum(xc[i] * xc[i + 1] for i in range(ns - 1))
+            tot += num / denom
+            n += 1
+        return tot / n if n else -1.0
+
+    scored = [(bphi, bpsi, stability(bphi, bpsi), smoothness(bphi, bpsi))
+              for (bphi, bpsi) in candidates]
+    best = min(scored, key=lambda t: t[2])
+    return best[0], best[1], scored
+
+
+def analyze_frames(frames, operating_snr=None):
+    """Decode a list of BF-report frames into per-tone metrics. Returns a dict
+    with the geometry (ns/nr/nc/bw/ng), the chosen split, per-stream SNR, the
+    per-tone rows (k, psi, phi, |h_B/h_A|, cross-frame psi variance), and — for
+    an MU report — the per-tone SNR curve in dB. The single source of truth for
+    both the decoder CLI and the interference localizer. Returns None on an
+    undecodable/empty capture."""
+    if not frames:
+        return None
+    f0 = frames[0]
+    nr, nc, bw, ng = f0["nr"], f0["nc"], f0["bw"], f0["ng"]
+    ns = NS_TABLE.get(bw, {}).get(ng)
+    if not ns:
+        return None
+    layout = angle_layout(nr, nc)
+    na = len(layout)
+    # An MU report appends the MU Exclusive (per-tone SNR) report after the V
+    # angles; slice to just the V angles (Ns x the 10-bit compact codebook) so
+    # the split logic sees the right budget.
+    if f0["feedback"]:
+        vbytes0 = (ns * 10 + 7) // 8
+        for f in frames:
+            f["angle_bytes"] = f["angle_bytes"][:vbytes0]
+    nbits = len(f0["angle_bytes"]) * 8
+    per_sc_bits_f = nbits / ns
+    per_sc_bits = int(per_sc_bits_f)
+
+    bphi, bpsi, scored = select_split(frames, ns, na, layout, per_sc_bits)
+
+    acc = [dict(psi=0.0, phi=0.0) for _ in range(ns)]
+    psi_all = [[] for _ in range(ns)]
+    for f in frames:
+        dec = decode_angles(f["angle_bytes"], ns, na, bphi, bpsi, layout)
+        for k in range(ns):
+            acc[k]["psi"] += dec[k]["psi"][0]
+            acc[k]["phi"] += dec[k]["phi"][0]
+            psi_all[k].append(dec[k]["psi"][0])
+    nfr = len(frames)
+    rows = []
+    for k in range(ns):
+        psi = acc[k]["psi"] / nfr
+        phi = acc[k]["phi"] / nfr
+        ratio = math.tan(psi)
+        var = sum((x - psi) ** 2 for x in psi_all[k]) / nfr
+        rows.append((k, psi, phi, ratio, var))
+
+    snr_db = [(22.0 + 0.25 * (b if b < 128 else b - 256)) for b in f0["snr"]]
+
+    # MU per-tone SNR curve.
+    vbytes = len(f0["angle_bytes"])
+    if f0["feedback"]:
+        vbytes = (ns * per_sc_bits + 7) // 8
+    mu = [m for m in (parse_mu_snr(f, ns, vbytes) for f in frames) if m]
+    mu_dbs = mu_shift = None
+    if mu:
+        n = min(len(m) for m in mu)
+        avg = [sum(m[k] for m in mu) / len(mu) for k in range(n)]
+        mu_dbs = [u8_snr_db(v) for v in avg]
+        if operating_snr is not None:
+            mu_shift = operating_snr - (sum(mu_dbs) / len(mu_dbs))
+            mu_dbs = [d + mu_shift for d in mu_dbs]
+
+    return dict(sa=f0["sa"], nr=nr, nc=nc, bw=bw, ng=ng, ns=ns,
+                codebook=f0["codebook"], feedback=f0["feedback"],
+                bphi=bphi, bpsi=bpsi, scored=scored, per_sc_bits=per_sc_bits,
+                per_sc_bits_f=per_sc_bits_f, angle_len=len(f0["angle_bytes"]),
+                nbits=nbits, na=na, nfr=nfr, rows=rows, per_stream_snr_db=snr_db,
+                mu_reports=len(mu), mu_snr_db=mu_dbs, mu_shift=mu_shift)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -195,115 +335,32 @@ def main() -> int:
     global _MSB
     _MSB = args.msb
     src = open(args.infile) if args.infile else sys.stdin
-    frames = []
-    for line in src:
-        line = line.strip()
-        if "<devourer-bf-report-raw>" in line:
-            line = line.split("<devourer-bf-report-raw>", 1)[1]
-        f = parse_frame(line)
-        if f:
-            frames.append(f)
-        if len(frames) >= args.max_frames:
-            break
+    frames = read_frames(src, args.max_frames)
     if not frames:
         print("no VHT/HT compressed-beamforming reports found", file=sys.stderr)
         return 1
 
-    f0 = frames[0]
-    nr, nc, bw, ng = f0["nr"], f0["nc"], f0["bw"], f0["ng"]
-    ns = NS_TABLE.get(bw, {}).get(ng)
-    layout = angle_layout(nr, nc)
-    na = len(layout)
-    print(f"# {len(frames)} reports  SA={f0['sa']}  Nr={nr} Nc={nc} "
-          f"BW={20 << bw}MHz Ng={ng} codebook={f0['codebook']} "
-          f"feedback={'MU' if f0['feedback'] else 'SU'}")
-    if not ns:
-        print(f"# unknown Ns for BW={bw} Ng={ng}", file=sys.stderr)
+    a = analyze_frames(frames, args.operating_snr)
+    print(f"# {len(frames)} reports  SA={a['sa']}  Nr={a['nr']} Nc={a['nc']} "
+          f"BW={20 << a['bw']}MHz Ng={a['ng']} codebook={a['codebook']} "
+          f"feedback={'MU' if a['feedback'] else 'SU'}")
+    if a is None or not a["ns"]:
+        print(f"# unknown Ns", file=sys.stderr)
         return 1
-    # For an MU report the angle field is followed by the MU Exclusive report,
-    # so the V-angle byte count is NOT the whole tail — it is Ns x the compact
-    # codebook (10 bits/subcarrier for Realtek's 2x1/2x2). Slice to just the V
-    # angles so the split logic sees the right budget; the rest is per-tone SNR.
-    if f0["feedback"]:
-        vbytes0 = (ns * 10 + 7) // 8
-        for f in frames:
-            f["angle_bytes"] = f["angle_bytes"][:vbytes0]
-    nbits = len(f0["angle_bytes"]) * 8
-    per_sc_bits = nbits / ns
-    print(f"# angle payload {len(f0['angle_bytes'])} B = {nbits} bits, "
-          f"Ns={ns} -> {per_sc_bits:.2f} bits/subcarrier over {na} angle(s)")
-    if per_sc_bits != int(per_sc_bits):
+    print(f"# angle payload {a['angle_len']} B = {a['nbits']} bits, "
+          f"Ns={a['ns']} -> {a['per_sc_bits_f']:.2f} bits/subcarrier over "
+          f"{a['na']} angle(s)")
+    if a["per_sc_bits_f"] != int(a["per_sc_bits_f"]):
         print("# WARN: non-integer bits/subcarrier — Ns or Na guess wrong",
               file=sys.stderr)
-    per_sc_bits = int(per_sc_bits)
-
-    # Candidate (bphi, bpsi) splits summing to the per-subcarrier budget for a
-    # 2x1 (one phi + one psi). Standard SU pairs are (7,5)/(9,7); Realtek's
-    # compact report may use a smaller codebook, so enumerate all splits and
-    # pick the one whose psi(k) is most stable across the (quasi-static) frames.
-    nphi, npsi = layout.count("phi"), layout.count("psi")
-    candidates = []
-    for bphi in range(2, per_sc_bits - 1):
-        bpsi = (per_sc_bits - nphi * bphi) // npsi if npsi else 0
-        if bpsi < 2:
-            continue
-        if nphi * bphi + npsi * bpsi != per_sc_bits:
-            continue
-        candidates.append((bphi, bpsi))
-    if not candidates:
-        candidates = [(per_sc_bits // 2, per_sc_bits - per_sc_bits // 2)]
-
-    def stability(bphi, bpsi):
-        """Mean cross-frame variance of psi[0] per subcarrier — lower is a
-        more self-consistent decode of a static channel."""
-        cols = [[] for _ in range(ns)]
-        for f in frames:
-            dec = decode_angles(f["angle_bytes"], ns, na, bphi, bpsi, layout)
-            if dec is None:
-                return math.inf
-            for k in range(ns):
-                cols[k].append(dec[k]["psi"][0])
-        var = 0.0
-        for c in cols:
-            m = sum(c) / len(c)
-            var += sum((x - m) ** 2 for x in c) / len(c)
-        return var / ns
-
-    def smoothness(bphi, bpsi):
-        """Lag-1 correlation of psi[0] across subcarriers, averaged over
-        frames. Real (band-limited) CSI is smooth vs frequency -> high
-        correlation; a wrong bit-split scrambles tones -> ~0."""
-        tot, n = 0.0, 0
-        for f in frames[:20]:
-            dec = decode_angles(f["angle_bytes"], ns, na, bphi, bpsi, layout)
-            if dec is None:
-                return -1.0
-            x = [dec[k]["psi"][0] for k in range(ns)]
-            m = sum(x) / ns
-            xc = [v - m for v in x]
-            denom = sum(v * v for v in xc) or 1e-9
-            num = sum(xc[i] * xc[i + 1] for i in range(ns - 1))
-            tot += num / denom
-            n += 1
-        return tot / n if n else -1.0
 
     print("# candidate split validation (want low cross-frame var AND high "
           "adjacent-tone corr):")
     print("#   b_phi b_psi   xframe_var   tone_corr")
-    scored = []
-    for (bphi, bpsi) in candidates:
-        v = stability(bphi, bpsi)
-        s = smoothness(bphi, bpsi)
-        scored.append((bphi, bpsi, v, s))
+    for (bphi, bpsi, v, s) in a["scored"]:
         print(f"#   {bphi:5d} {bpsi:5d}   {v:10.5f}   {s:+.3f}")
-    # Cross-frame variance is the reliable discriminator: the correct bit-split
-    # decodes a static channel to repeatable angles (low var); a wrong split
-    # smears the LSBs into different values frame-to-frame (high var). Tone
-    # correlation only helps on a *frequency-selective* channel — on a flat
-    # bench LOS link it is near zero for every split and can't disambiguate.
-    best = min(scored, key=lambda t: t[2])
-    bphi, bpsi = best[0], best[1]
-    print(f"# chose b_phi={bphi} b_psi={bpsi} by min cross-frame var "
+    best = min(a["scored"], key=lambda t: t[2])
+    print(f"# chose b_phi={a['bphi']} b_psi={a['bpsi']} by min cross-frame var "
           f"({best[2]:.5f}); phi=psi+2 matches the standard Givens structure. "
           f"tone_corr={best[3]:+.3f}")
     if best[3] < 0.3:
@@ -312,35 +369,11 @@ def main() -> int:
               "quantisation-limited. Use wider BW or multipath to see "
               "frequency selectivity.")
 
-    # Average the decoded angles over all frames -> the per-tone channel shape.
-    acc = [dict(psi=0.0, phi=0.0) for _ in range(ns)]
-    psi_var = [0.0] * ns
-    psi_all = [[] for _ in range(ns)]
-    for f in frames:
-        dec = decode_angles(f["angle_bytes"], ns, na, bphi, bpsi, layout)
-        for k in range(ns):
-            acc[k]["psi"] += dec[k]["psi"][0]
-            acc[k]["phi"] += dec[k]["phi"][0]
-            psi_all[k].append(dec[k]["psi"][0])
-    nfr = len(frames)
-    rows = []
-    for k in range(ns):
-        psi = acc[k]["psi"] / nfr
-        phi = acc[k]["phi"] / nfr
-        ratio = math.tan(psi)                     # |h_B|/|h_A|
-        m = psi
-        var = sum((x - m) ** 2 for x in psi_all[k]) / nfr
-        rows.append((k, psi, phi, ratio, var))
-
-    # Avg SNR of space-time stream: int8, dB = 22 + 0.25*v -> range -10..53.75.
-    snr0 = frames[0]["snr"]
-    snr_db = [(22.0 + 0.25 * (b if b < 128 else b - 256)) for b in snr0]
+    rows = a["rows"]
     print(f"# per-stream avg SNR (col dB): "
-          f"{', '.join(f'{s:.2f}' for s in snr_db)}")
-    print(f"# per-tone relative channel |h_B/h_A| across {ns} subcarriers "
+          f"{', '.join(f'{s:.2f}' for s in a['per_stream_snr_db'])}")
+    print(f"# per-tone relative channel |h_B/h_A| across {a['ns']} subcarriers "
           f"(psi->amplitude ratio); '#'=strong on antenna B, '.'=on antenna A")
-
-    # ASCII plot of the amplitude ratio across subcarriers (the frequency shape)
     ratios = [r[3] for r in rows]
     lo, hi = min(ratios), max(ratios)
     span = (hi - lo) or 1.0
@@ -357,26 +390,19 @@ def main() -> int:
                 fh.write(f"{k},{psi:.5f},{phi:.5f},{ratio:.5f},{var:.6f}\n")
         print(f"# wrote {args.csv}")
 
-    # --- MU per-tone SNR -> QAM (the textbook per-subcarrier picture) ---
-    vbytes = len(f0["angle_bytes"])       # SU baseline V-angle size for this BW
-    if f0["feedback"]:                    # MU: V-angles are only the first vbytes
-        vbytes = (ns * per_sc_bits + 7) // 8
-    mu = [parse_mu_snr(f, ns, vbytes) for f in frames]
-    mu = [m for m in mu if m]
-    if mu:
-        n = min(len(m) for m in mu)
-        avg = [sum(m[k] for m in mu) / len(mu) for k in range(n)]
-        dbs = [u8_snr_db(v) for v in avg]
+    if a["mu_snr_db"] is not None:
+        dbs = a["mu_snr_db"]
+        n = len(dbs)
         print(f"\n# MU Exclusive Beamforming Report — per-subcarrier SNR "
-              f"({n} groups across {20 << bw} MHz, {len(mu)} reports)")
-        print(f"# measured SNR range {min(dbs):.1f}..{max(dbs):.1f} dB "
-              f"(swing {max(dbs) - min(dbs):.1f} dB)")
-        if args.operating_snr is not None:
-            shift = args.operating_snr - (sum(dbs) / len(dbs))
-            dbs = [d + shift for d in dbs]
+              f"({n} groups across {20 << a['bw']} MHz, {a['mu_reports']} reports)")
+        # The measured range (pre-shift) is recoverable by subtracting the shift.
+        raw = [d - (a["mu_shift"] or 0.0) for d in dbs]
+        print(f"# measured SNR range {min(raw):.1f}..{max(raw):.1f} dB "
+              f"(swing {max(raw) - min(raw):.1f} dB)")
+        if a["mu_shift"] is not None:
             print(f"# re-centred to operating mean {args.operating_snr:.0f} dB "
-                  f"(measured shape shifted {shift:+.1f} dB — models a weaker "
-                  f"link; the per-tone *shape* is real)")
+                  f"(measured shape shifted {a['mu_shift']:+.1f} dB — models a "
+                  f"weaker link; the per-tone *shape* is real)")
         from collections import Counter
         dist = Counter(snr_to_qam(d)[0].strip() for d in dbs)
         print("#   freq → (each column = one subcarrier group, low → high)")
@@ -384,7 +410,7 @@ def main() -> int:
         print("#   QAM:  " + "  ".join(snr_to_qam(d)[1] for d in dbs))
         print(f"#   per-tone modulation: "
               f"{', '.join(f'{k}:{v}' for k, v in dist.items())}")
-    elif f0["feedback"]:
+    elif a["feedback"]:
         print("# MU report flagged but no per-tone SNR series recovered")
     return 0
 

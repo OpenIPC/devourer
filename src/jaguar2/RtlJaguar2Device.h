@@ -66,6 +66,11 @@ public:
   void StartCwTone(uint8_t gain);
   void StopCwTone();
 
+  /* Frame-free RX energy snapshot (see RxSense.h) — the FA/CCA/IGI values
+   * dig_step samples over its ~100 ms window, plus a fresh NHM power histogram.
+   * The read side of the CW tone. */
+  RxEnergy GetRxEnergy() override;
+
 private:
   RtlUsbAdapter _device;
   Logger_t _logger;
@@ -76,6 +81,9 @@ private:
   SelectedChannel _channel{};
   Action_ParsedRadioPacket _packetProcessor = nullptr;
   int _tx_pwr_override = -1;
+  /* rfe_type resolved during bring_up (efuse + DEVOURER_RFE), cached so
+   * SetMonitorChannel can retune (set_channel_bw needs it). */
+  uint8_t _rfe = 0;
   std::optional<devourer::TxMode> _tx_mode_default;
 
   /* CW single-tone (StartCwTone/StopCwTone) saved state for a clean restore:

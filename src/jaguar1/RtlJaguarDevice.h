@@ -102,6 +102,13 @@ public:
   void StartCwTone(uint8_t gain);
   void StopCwTone();
 
+  /* Frame-free RX energy / channel-busy snapshot (see RxSense.h) — reads the
+   * phydm OFDM/CCK false-alarm + CCA counters (0xF48/0xA5C/0xF08) and the DIG
+   * IGI noise-floor (0xC50), then resets the counters so the next call is a
+   * fresh delta. The read side of the CW tone. NB: if DEVOURER_PHYDM_WATCHDOG is
+   * also running it shares/steals these counters. */
+  RxEnergy GetRxEnergy() override;
+
   /* Runtime TX-mode default. send_packet honours a frame's own radiotap rate
    * fields per-packet; when a frame's radiotap carries no rate, this mode
    * supplies the modulation / MCS / BW / GI / FEC / STBC instead of the

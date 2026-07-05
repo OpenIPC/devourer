@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 
+#include "RxSense.h"
 #include "SelectedChannel.h"
 #include "TxMode.h"
 
@@ -62,6 +63,14 @@ public:
    * silently go on-air at 1 Mbps. */
   virtual void SetTxMode(const devourer::TxMode & /*mode*/) {}
   virtual void ClearTxMode() {}
+
+  /* Frame-free RX energy / channel-busy snapshot (see RxSense.h) — the read side
+   * of the DEVOURER_CW_TONE emitter, used for spectrum-sensing / interferer
+   * detection. Reads the chip's phydm false-alarm + CCA counters, DIG/IGI, and
+   * (optionally) the NHM power histogram. FA/CCA counts are the delta since the
+   * previous call. Default returns an all-invalid snapshot; each generation
+   * overrides with a real reader. */
+  virtual RxEnergy GetRxEnergy() { return {}; }
 };
 
 #endif /* IRTL_DEVICE_H */

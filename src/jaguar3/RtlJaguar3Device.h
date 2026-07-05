@@ -70,6 +70,14 @@ public:
   void StartCwTone(uint8_t gain);
   void StopCwTone();
 
+  /* Frame-free RX energy / channel-busy snapshot (see RxSense.h). Jaguar3's
+   * phydm DIG/FA machinery was never ported to devourer, but the 8822C/E BB has
+   * the same facilities in a newer register space — OFDM/CCK CCA (0x2c08), CCK
+   * FA (0x1a5c), OFDM FA (sum of 0x2d04/08/10/20/0c), IGI (0x1d70) — reset via
+   * 0x1a2c + 0x1eb4[25]. Read-then-reset for a per-call delta; serialized on
+   * _reg_mu against the coex runtime thread. The read side of the CW tone. */
+  RxEnergy GetRxEnergy() override;
+
   bool should_stop = false;
 
 private:

@@ -2,6 +2,7 @@
 #include "BeamformingSounder.h"
 #include "EepromManager.h"
 #include "Hal8812PhyReg.h"
+#include "NhmReader.h"
 #include "RadioManagementModule.h"
 #include "SignalStop.h"
 #include "ToneMask.h"
@@ -185,6 +186,44 @@ void RtlJaguarDevice::StopCwTone() {
 
   _cw_active = false;
   _logger->info("CW single-tone stopped — chip restored");
+}
+
+/* Frame-free RX energy snapshot for the AC (Jaguar-1) BB. Reads the phydm
+ * OFDM/CCK false-alarm (0xF48/0xA5C) + CCA (0xF08) counters and the DIG IGI
+ * (0xC50), then resets the counters (phydm_false_alarm_counter_reg_reset AC:
+ * 0x9a4[17], 0xa2c[15], 0xb58[0]) so the next call sees only the delta. Same
+ * register set PhydmWatchdog::ReadFaCountersAc uses. */
+RxEnergy RtlJaguarDevice::GetRxEnergy() {
+  RxEnergy e;
+  auto bb = [this](uint16_t addr) {
+    return _radioManagement->phy_query_bb_reg_public(addr, 0xFFFFFFFF);
+  };
+  e.fa_ofdm = bb(0x0F48) & 0xFFFF;
+  e.fa_cck = bb(0x0A5C) & 0xFFFF;
+  const uint32_t cca = bb(0x0F08);
+  e.cca_ofdm = (cca >> 16) & 0xFFFF;
+  e.cca_cck = cca & 0xFFFF;
+  e.valid_fa = true;
+  e.igi = static_cast<uint8_t>(_device.rtw_read8(0x0C50) & 0x7F);
+  e.valid_igi = true;
+
+  /* Reset the FA/CCA counter latches (read-then-reset = per-call delta). */
+  _device.phy_set_bb_reg(0x09A4, 1u << 17, 1);
+  _device.phy_set_bb_reg(0x09A4, 1u << 17, 0);
+  _device.phy_set_bb_reg(0x0A2C, 1u << 15, 0);
+  _device.phy_set_bb_reg(0x0A2C, 1u << 15, 1);
+  _device.phy_set_bb_reg(0x0B58, 1u << 0, 1);
+  _device.phy_set_bb_reg(0x0B58, 1u << 0, 0);
+
+  /* NHM 12-bucket power histogram (frame-free, 11AC register map). */
+  devourer::read_nhm(
+      devourer::nhm_regs_11ac(), e.igi,
+      [this](uint16_t a) { return _device.rtw_read<uint32_t>(a); },
+      [this](uint16_t a, uint32_t m, uint32_t v) {
+        _device.phy_set_bb_reg(a, m, v);
+      },
+      e);
+  return e;
 }
 
 /* Map a radiotap CHANNEL frequency (MHz) to a Wi-Fi channel number. Returns 0

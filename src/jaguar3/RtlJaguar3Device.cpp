@@ -9,6 +9,7 @@
 #include "BeamformingSounder.h" /* generation-neutral BF self-sounding recipe */
 
 #include "FrameParserJaguar3.h"
+#include "NhmReader.h"       /* frame-free NHM power histogram (shared) */
 #include "RateDefinitions.h" /* MGN_* rate enum (shared across the family) */
 #include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
 #include "ToneMask.h"   /* DEVOURER_RX_CSI_MASK / DEVOURER_RX_NBI knobs */
@@ -518,6 +519,59 @@ void RtlJaguar3Device::StopCwTone() {
 
   _cw_active = false;
   _logger->info("CW single-tone stopped — chip restored");
+}
+
+/* Frame-free RX energy snapshot for the Jaguar3 (8822C/E) BB. Ported from
+ * phydm_fa_cnt_statistics_jgr3 + phydm_reset_bb_hw_cnt (reference/rtl88x2cu
+ * phydm_dig.c / phydm_api.c): the newer BB holds the same FA/CCA facilities as
+ * the AC classic map, just at different addresses. CCA (0x2c08) is the primary
+ * channel-busy signal (a CW tone spikes OFDM CCA); OFDM FA is the vendor sum of
+ * the sub-counters. Read-then-reset for a per-call delta; serialized on _reg_mu
+ * so it does not race the coex thread's register access. */
+RxEnergy RtlJaguar3Device::GetRxEnergy() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  RxEnergy e;
+  auto rd = [this](uint16_t addr) { return _device.rtw_read<uint32_t>(addr); };
+
+  const uint32_t cca = rd(0x2c08);
+  e.cca_ofdm = (cca >> 16) & 0xffff;
+  e.cca_cck = cca & 0xffff;
+  e.fa_cck = rd(0x1a5c) & 0xffff;
+  /* OFDM FA = parity + rate-illegal + crc8 + mcs + fast-fsync + sb-search +
+   * mcs-vht + crc8-vhta (phydm_fa_cnt_statistics_jgr3). */
+  const uint32_t r2d04 = rd(0x2d04), r2d08 = rd(0x2d08), r2d10 = rd(0x2d10),
+                 r2d20 = rd(0x2d20), r2d0c = rd(0x2d0c);
+  e.fa_ofdm = ((r2d04 >> 16) & 0xffff) + (r2d08 & 0xffff) +
+              ((r2d08 >> 16) & 0xffff) + (r2d10 & 0xffff) + (r2d20 & 0xffff) +
+              ((r2d20 >> 16) & 0xffff) + ((r2d10 >> 16) & 0xffff) +
+              (r2d0c & 0xffff);
+  e.valid_fa = true;
+  e.igi = static_cast<uint8_t>(rd(0x1d70) & 0x7f);
+  e.valid_igi = true;
+
+  /* NHM 12-bucket power histogram (frame-free, JGR3 register map). Runs its own
+   * ~2 ms measurement window before the FA-counter reset below (0x1eb4[25] also
+   * clears BB HW counters). Holds _reg_mu across the short wait — tolerable at
+   * the emitter's >=100 ms cadence vs the coex thread's ~2 s tick. */
+  devourer::read_nhm(
+      devourer::nhm_regs_jgr3(), e.igi, rd,
+      [this](uint16_t a, uint32_t m, uint32_t v) {
+        _device.phy_set_bb_reg(a, m, v);
+      },
+      e);
+
+  /* Reset: CCK FA 0x1a2c[15:14] 0->2, CCK CCA 0x1a2c[13:12] 0->2, then OFDM
+   * CCA/FA (phydm_reset_bb_hw_cnt jgr3: 0x1eb4[25] 1->0, wrapped by the
+   * 0x1d2c[31] rx-clk-gate disable/enable). */
+  _device.phy_set_bb_reg(0x1a2c, 0x3u << 14, 0x0);
+  _device.phy_set_bb_reg(0x1a2c, 0x3u << 14, 0x2);
+  _device.phy_set_bb_reg(0x1a2c, 0x3u << 12, 0x0);
+  _device.phy_set_bb_reg(0x1a2c, 0x3u << 12, 0x2);
+  _device.phy_set_bb_reg(0x1d2c, 1u << 31, 0x0);
+  _device.phy_set_bb_reg(0x1eb4, 1u << 25, 0x1);
+  _device.phy_set_bb_reg(0x1eb4, 1u << 25, 0x0);
+  _device.phy_set_bb_reg(0x1d2c, 1u << 31, 0x1);
+  return e;
 }
 
 void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {

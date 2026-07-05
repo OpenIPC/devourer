@@ -1303,6 +1303,17 @@ void HalJaguar2::dig_step() {
   uint32_t fa = ofdm_fa + cck_fa;
   _last_fa = fa;
 
+  /* Frame-free energy snapshot for GetRxEnergy() — the CCA (channel-busy) count
+   * (0x0f08[31:16]=OFDM, [15:0]=CCK) is the primary in-band-energy signal (a CW
+   * tone spikes OFDM CCA), captured over the same window as the FA counts just
+   * before the reset. IGI is stored below. */
+  uint32_t cca = _device.rtw_read32(0x0f08);
+  _energy.fa_ofdm = ofdm_fa;
+  _energy.fa_cck = cck_fa;
+  _energy.cca_ofdm = (cca >> 16) & 0xffff;
+  _energy.cca_cck = cca & 0xffff;
+  _energy.valid_fa = true;
+
   /* Reset the hold-type FA/CCA counters so the next window is a fresh delta
    * (11AC phydm_reset_bb_hw_cnt path): OFDM-FA 0x9a4[17] (1->0 = reset->enable),
    * CCK-FA 0xa2c[15] (0->1), CCA 0xb58[0] (1->0). */
@@ -1314,6 +1325,8 @@ void HalJaguar2::dig_step() {
   _device.phy_set_bb_reg(0x0b58, 1u << 0, 0);
 
   uint8_t igi = static_cast<uint8_t>(_device.rtw_read8(0x0c50) & 0x7f);
+  _energy.igi = igi;
+  _energy.valid_igi = true;
   uint8_t ni = igi;
   if (fa > 750)
     ni = static_cast<uint8_t>(igi + 2);

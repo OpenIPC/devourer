@@ -314,3 +314,16 @@ add_executable(BfReportDecodeSelftest
 target_link_libraries(BfReportDecodeSelftest PRIVATE WiFiDriver)
 
 add_test(NAME bf_report_decode COMMAND BfReportDecodeSelftest)
+
+# Headless guard for the per-tone interference localizer's detection +
+# frequency-mapping math (tests/rx_tone_localize.py). Pure Python, no hardware:
+# synthetic psi-variance spikes / SNR notches must localize to the right tone
+# group. The RF-side capture path is validated out-of-band (tests/rx_tone_localize.sh).
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME rx_tone_localize_math
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/rx_tone_localize.py --self-test
+    )
+endif()

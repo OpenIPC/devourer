@@ -107,15 +107,17 @@ def main() -> int:
                     d.text((cx0, cyc + 26), "48 bits → 64 (rate-3/4 example)",
                            font=font(11), fill=OK)
             elif kind == "qam":
-                # a 16-QAM constellation with points appearing
-                g = detail_h - 40
-                ox, oy = cx0 + 120, detail_y + 20
+                # a 16-QAM constellation, centred; caption below it (no overlap)
+                g = detail_h - 70
+                ox, oy = cx0 + 180, detail_y + 22
+                d.text((cx0, detail_y + 14), "16-QAM", font=font(11), fill=DIM)
                 for iq in range(4):
                     for qq in range(4):
                         px = ox + iq * (g // 4)
                         py = oy + qq * (g // 4)
                         d.ellipse([px - 3, py - 3, px + 3, py + 3], fill=CYAN)
-                d.text((cx0, cyc), "each subcarrier picks one point",
+                d.text((cx0, detail_y + detail_h - 26),
+                       "each subcarrier picks one constellation point",
                        font=font(12), fill=INK)
             else:
                 # waveform (sum of a few sines = an OFDM symbol)

@@ -95,7 +95,7 @@ def main() -> int:
             x = padL + (k + 32) * binw
             d.text((x - 12, base_y + 22), f"{k*312.5/1000:+.1f}",
                    font=font(11), fill=DIM)
-        d.text((padL, base_y + 44), "frequency offset from centre (MHz)  ·  "
+        d.text((padL, base_y + 40), "frequency offset from centre (MHz)  ·  "
                "each bar = one 312.5 kHz subcarrier", font=font(11), fill=DIM)
 
         # cursor callout
@@ -109,12 +109,12 @@ def main() -> int:
                f"{cur_k*312.5/1000:+.3f} MHz", font=font(12, True), fill=cc)
         d.text((padL + 220, padT - 25), names[reg], font=font(11), fill=INK)
 
-        # legend
-        lx = padL
+        # legend (a clear row below the frequency caption)
+        lx, ly = padL, base_y + 64
         for reg2, lbl in (("data", "data ×52"), ("pilot", "pilot ×4"),
                           ("dc", "DC null"), ("guard", "guard")):
-            d.rectangle([lx, H - 74, lx + 14, H - 63], fill=COL[reg2])
-            d.text((lx + 20, H - 75), lbl, font=font(11), fill=INK)
+            d.rectangle([lx, ly, lx + 14, ly + 11], fill=COL[reg2])
+            d.text((lx + 20, ly - 1), lbl, font=font(11), fill=INK)
             lx += 150
 
         # bandwidth ticker (cycles ~ every 12 frames)

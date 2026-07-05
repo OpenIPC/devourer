@@ -76,8 +76,10 @@ def main() -> int:
             gy0, gy1 = padT + 12 + devH, airBot
             cxa = devX + devW // 2
             d.line([cxa, gy0, cxa, gy1], fill=(26, 36, 50))
-            d.text((devX + devW + 8, (gy0 + gy1) // 2 - 6), "air gap",
-                   font=font(10), fill=(60, 78, 96))
+            # label on the far left of the gap — clear of the flying packet and
+            # the readout panel on the right
+            d.text((devX + 4, (gy0 + gy1) // 2 - 6), "air gap", font=font(10),
+                   fill=(60, 78, 96))
 
             if direction != 0:
                 # packet flying along the air gap

@@ -73,7 +73,9 @@ def main() -> int:
     lo, hi = -28.0, 8.0
 
     def yof(db):
-        return base_y - int((db - lo) / (hi - lo) * gh)
+        # clamp inside the plot box so deep fades (< lo) don't draw below it
+        y = base_y - int((db - lo) / (hi - lo) * gh)
+        return max(padT, min(base_y, y))
 
     # accumulate outage counts over the whole run (per phase)
     for fi in range(args.frames):

@@ -185,11 +185,23 @@ Three specialised modes layered on top of the default 4-cell matrix:
 
 Init/startup-time benchmarking lives in `tests/bench_init.py`: per-DUT
 cold-init timing of devourer RX (`exec → first RX frame`), devourer TX
-(`exec → first bulk-OUT`), and — with `--vm-name`/`--vm-ssh` — the kernel
-driver (`virsh attach → monitor up → first frame`). Per-stage numbers come
-from the `init-timing: <scope>.<stage> = N ms` lines the library emits
-(`src/InitTimer.h`); A/B variants isolate libusb log level, USB reset, and
-the TX-power loop.
+(`exec → first bulk-OUT`), and the kernel driver — with `--kernel-host`
+via the vendor `.ko`s built under `reference/` (`insmod → netdev →
+monitor → first frame`; 88XXau for Jaguar1, rtl88x2bu / 8821cu /
+rtl88x2cu / rtl88x2eu for Jaguar2/3 — all build against the host 6.18
+kernel with local compat patches in those trees), or with
+`--vm-name`/`--vm-ssh` via the pinned-kernel VM (driver-behaviour
+comparisons only — virtualized USB adds latency, don't cite its
+timings). Per-stage
+numbers come from the `init-timing: <scope>.<stage> = N ms` lines the
+library emits (`src/InitTimer.h`); A/B variants isolate libusb log level,
+USB reset, and the TX-power loop. `--traffic-from PID` dedicates a plugged
+non-DUT adapter to a devourer beacon flood on the bench channel — without
+it, every first-frame marker (devourer and kernel tcpdump alike) starves in
+an RF-quiet room. NB the per-rep `authorized`-toggle is warm, not a true
+cold plug (vendor drivers re-init a calibrated chip ~2× faster) —
+first-plug comparisons need a per-rep VBUS cycle (uhubctl). Numbers +
+methodology: `docs/startup-time.md`.
 
 DUTs are routed between host and VM per cell via `virsh attach-device`.
 Re-run with `--keep-logs` to inspect per-cell logs (and per-cell pcaps

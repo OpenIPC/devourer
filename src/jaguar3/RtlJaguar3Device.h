@@ -163,6 +163,16 @@ private:
   bool _brought_up = false;
   /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
   devourer::RxQualityAccumulator _rxq;
+  /* Frame counter for periodic NDPA sounding (DEVOURER_TX_NDPA=N). */
+  uint64_t _ndpa_ctr = 0;
+  /* TX beamforming apply state (DEVOURER_BF_TXBF). The entry is configured at
+   * InitWrite (arm_beamformer_entry); the apply toggle is enabled from the RX
+   * loop only after a Compressed Beamforming Report from _bf_peer is ingested
+   * (blind apply degrades). */
+  bool _bf_txbf_armed = false;
+  std::atomic<bool> _bf_apply_on{false};
+  std::atomic<uint64_t> _bf_cbr_count{0};
+  uint8_t _bf_peer[6] = {0};
   /* dis_cca sticky state — re-applied after SetMonitorChannel (the channel set
    * rewrites the BB CCA registers). Caller holds _reg_mu. */
   bool _cca_disabled = false;

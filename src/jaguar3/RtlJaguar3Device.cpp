@@ -187,6 +187,27 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
         if (!p.RxAtrib.crc_err)
           _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
+        /* TX-BF apply gate (DEVOURER_BF_TXBF): a VHT Compressed Beamforming
+         * Report (category 0x15, action 0x00) from the target peer (addr2) means
+         * the WMAC just ingested a fresh V matrix — enable the apply toggle so
+         * subsequent TX is steered. Enabling it before any CBR (no V) degrades
+         * the link, so this is the gate. One-shot; V refreshes on each periodic
+         * re-sound automatically. */
+        if (_bf_txbf_armed && !p.RxAtrib.crc_err && f.frame_len >= 26) {
+          const uint8_t *fb = f.frame;
+          if (fb[24] == 0x15 && fb[25] == 0x00 &&
+              std::memcmp(fb + 10, _bf_peer, 6) == 0) {
+            _bf_cbr_count.fetch_add(1, std::memory_order_relaxed);
+            if (!_bf_apply_on.load(std::memory_order_relaxed)) {
+              std::lock_guard<std::mutex> lk(_reg_mu);
+              devourer::bf::apply_vmatrix(
+                  _device, true, static_cast<uint8_t>(_channel.ChannelWidth));
+              _bf_apply_on.store(true, std::memory_order_relaxed);
+              _logger->info("Jaguar3 BF: CBR from peer ingested — TXBF apply "
+                            "ENABLED (steering subsequent TX)");
+            }
+          }
+        }
         _packetProcessor(p);
       }
       if (++frames <= 5)
@@ -389,6 +410,27 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     _hal.txbf_rfmode_sounder(); /* RF/BB sounding config — needed for the NDP */
     devourer::bf::arm_sounder(_device, /*snd_ptcl_ctrl=*/0xDB);
     _logger->info("Jaguar3 BF sounder armed (beamformer side)");
+  }
+
+  /* DEVOURER_BF_TXBF=aa:bb:cc:dd:ee:ff — TX beamforming APPLY (needs the sounder
+   * above + DEVOURER_TX_WITH_RX so the beamformer's RX can receive the peer's
+   * report). Configure the beamformer entry for `peer_mac` so the WMAC accepts
+   * and ingests the peer's Compressed Beamforming Report into the V matrix (in
+   * hardware). The apply toggle is NOT flipped here — it is enabled from the RX
+   * loop once a CBR from the peer is seen (a blind apply with no V degrades the
+   * link). Periodic re-sounding (DEVOURER_TX_NDPA=N>1) keeps V fresh. */
+  if (const char *bftx = std::getenv("DEVOURER_BF_TXBF")) {
+    unsigned m[6];
+    if (std::sscanf(bftx, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4],
+                    &m[5]) == 6) {
+      for (int i = 0; i < 6; ++i) _bf_peer[i] = static_cast<uint8_t>(m[i]);
+      devourer::bf::arm_beamformer_entry(_device, _bf_peer, /*rx_nss=*/2);
+      _bf_txbf_armed = true;
+      _logger->info("Jaguar3 BF TXBF entry configured for peer {} — apply gates "
+                    "on the first CBR (needs DEVOURER_TX_WITH_RX)", bftx);
+    } else {
+      _logger->error("DEVOURER_BF_TXBF — bad MAC '{}'", bftx);
+    }
   }
   /* TX-only: the bring-up enables accept-all RX (monitor_rx_cfg), but the TX
    * path never reads bulk-IN — so on a trafficked channel the on-chip RX FIFO
@@ -1004,6 +1046,32 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
     bwidth = static_cast<ChannelWidth_t>(tp.bwidth);
   }
 
+  /* DEVOURER_TX_NDPA=N — beamforming-sounding probe: mark injected frames as
+   * NDPA so the armed sounding engine (DEVOURER_BF_ARM_SOUNDER, InitWrite)
+   * follows each with a hardware NDP. N is the PERIOD: 1 (or non-numeric) =
+   * every frame (self-sounding capture, the original behaviour); N>1 = every Nth
+   * frame, so the interleaved data frames stay steerable for TX beamforming. */
+  static const int ndpa_period = []() -> int {
+    const char *e = std::getenv("DEVOURER_TX_NDPA");
+    if (!e) return 0;
+    int p = std::atoi(e);
+    return p > 0 ? p : 1;
+  }();
+  bool ndpa = false;
+  if (ndpa_period > 0) {
+    ndpa = (_ndpa_ctr % static_cast<uint64_t>(ndpa_period)) == 0;
+    ++_ndpa_ctr;
+  }
+  /* Periodic sounding (N>1, the TX-BF case) needs a 2-stream NDP to fill the
+   * 2-antenna V matrix, so force those NDPA frames to VHT-2SS regardless of the
+   * data rate (measured: a 1SS NDP yields no CBR); the interleaved data frames
+   * keep their radiotap rate (1SS/HT), which is what gets steered. N==1
+   * (every-frame self-sounding capture) keeps the caller's rate unchanged. */
+  if (ndpa && ndpa_period > 1) {
+    fixed_rate = MGN_VHT2SS_MCS0;
+    vht = true;
+  }
+
   uint8_t bw_desc = (bwidth == CHANNEL_WIDTH_40)   ? 1
                     : (bwidth == CHANNEL_WIDTH_80) ? 2
                                                    : 0;
@@ -1025,10 +1093,6 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
    * the kernel's descriptor for group-addressed frames. */
   const uint8_t *dot11 = packet + radiotap_length;
   bool bmc = frame_len >= 6 && (dot11[4] & 0x01);
-  /* DEVOURER_TX_NDPA=1 — beamforming self-sounding probe: mark injected frames
-   * as NDPA so the armed sounding engine (DEVOURER_BF_ARM_SOUNDER, InitWrite)
-   * follows each with a hardware NDP. Same knob as the Jaguar-1 path. */
-  static const bool ndpa = std::getenv("DEVOURER_TX_NDPA") != nullptr;
   /* STBC guard (IRtlDevice contract) — 8822C/8822E are 2T2R so this never
    * fires today, but keeps the invariant uniform across families: never air an
    * STBC frame the chip can't do. */

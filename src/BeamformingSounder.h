@@ -52,6 +52,8 @@ enum : uint16_t {
   kSndNdpStandby   = 0x071B,
   kBbCsiContent    = 0x09B4, /* Jaguar-1 only (clock divider on Jaguar-3) */
   kOurAid          = 0x1680, /* Jaguar-2/3 only: our AID [11:0]           */
+  kBbpsfCtrl       = 0x06DC, /* CSI GID select (BIT30 + gid BIT12)        */
+  kCsiRrsr         = 0x1678, /* CSI response-rate set (= 0x550)           */
 };
 
 enum : uint8_t {
@@ -131,6 +133,49 @@ inline void arm_beamformee(RtlUsbAdapter& dev, const uint8_t beamformer_mac[6],
   }
   if (cfg.csi_content_reg)
     dev.rtw_write32(cfg.csi_content_reg, cfg.csi_content_val);
+}
+
+/* Beamformer-side steering entry — the TX-BF *apply* half, layered on top of
+ * arm_sounder() (which already set SND_PTCL_CTRL, the TXBF_CTRL NDPA-enables +
+ * P_AID=0, and BFMEE_SEL entry-0/TXUSER_ID0). This configures the entry so the
+ * WMAC accepts the beamformee's Compressed Beamforming Report and builds the V
+ * matrix from it IN HARDWARE (software never touches coefficients — see
+ * reference/rtl88x2cu/hal/rtl8822c/rtl8822c_bf_monitor.c bf_monitor_config_*).
+ * `peer_mac` = the beamformee we steer toward (each side writes the other's MAC
+ * into BFMER0_INFO). `rx_nss` = GET_RX_NSS (2 on the 2T2R 8822B/C/E). Registers
+ * are family-shared, so this is generation-neutral like arm_sounder. Apply is
+ * NOT enabled here — call apply_vmatrix() once a CBR has been ingested. */
+inline void arm_beamformer_entry(RtlUsbAdapter& dev, const uint8_t peer_mac[6],
+                                 uint8_t rx_nss = 2, uint8_t g_id = 0) {
+  for (uint16_t i = 0; i < 6; ++i)
+    dev.rtw_write8(kBfmer0Info + i, peer_mac[i]);
+  /* Expected CSI-report dims: nc=rx_nss-1, nr=1, grouping=0, codebook=1 (vht),
+   * coeff=3 (bf_monitor_config_beamformer). */
+  const uint8_t nc = rx_nss ? static_cast<uint8_t>(rx_nss - 1) : 0;
+  const uint16_t csi_param =
+      static_cast<uint16_t>((3u << 10) | (1u << 8) | (1u << 3) | nc);
+  dev.rtw_write16(kCsiRptParam20, csi_param);
+  dev.rtw_write8(kSndNdpStandby, 0x70);           /* ndp_rx_standby_timer */
+  uint32_t bbpsf = dev.rtw_read<uint32_t>(kBbpsfCtrl) | (1u << 30);
+  bbpsf = (g_id == 63) ? (bbpsf | (1u << 12)) : (bbpsf & ~(1u << 12));
+  dev.rtw_write<uint32_t>(kBbpsfCtrl, bbpsf);
+  dev.rtw_write<uint32_t>(kCsiRrsr, 0x550);
+}
+
+/* Flip the V-matrix apply toggle: TXBF_CTRL[11:9] per bandwidth (BIT9=20,
+ * +BIT10=40, +BIT11=80) + DIS_NDP_BFEN (BIT15). Enable ONLY after the WMAC has
+ * ingested a valid CBR (bf_monitor_enable_txbf gates on csi_matrix_len>0) —
+ * enabling with no V degrades the link. `bw`: 0=20, 1=40, 2=80. */
+inline void apply_vmatrix(RtlUsbAdapter& dev, bool enable, uint8_t bw) {
+  uint32_t txbf = dev.rtw_read<uint32_t>(kTxbfCtrl);
+  txbf &= ~((1u << 9) | (1u << 10) | (1u << 11));
+  if (enable) {
+    txbf |= (1u << 9);
+    if (bw >= 1) txbf |= (1u << 10);
+    if (bw >= 2) txbf |= (1u << 11);
+    txbf |= (1u << 15);                           /* BIT_DIS_NDP_BFEN */
+  }
+  dev.rtw_write<uint32_t>(kTxbfCtrl, txbf);
 }
 
 /* Jaguar-2/3 MU-beamformee registers (8822B/C/E). MU-BF group table. */

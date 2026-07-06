@@ -89,6 +89,26 @@ static std::vector<uint8_t> build_frame_with_channel(uint16_t freq,
   return f;
 }
 
+/* Rebuild a rate-less beacon's radiotap to carry a DBM_TX_POWER field (signed
+ * dB), for validating the library's per-packet TX-power path (Jaguar2 honours
+ * it as a per-packet offset quantized to the TXPWR_OFSET LUT). Keeps it
+ * rate-less so SetTxMode still supplies the rate. `body`/`body_len` is the
+ * 802.11 frame (radiotap already stripped). Present = DBM_TX_POWER(bit10) |
+ * TX_FLAGS(bit15); fields in ascending bit order with natural alignment. */
+static std::vector<uint8_t> build_frame_with_pkt_pwr(int8_t db,
+                                                     const uint8_t *body,
+                                                     size_t body_len) {
+  std::vector<uint8_t> f;
+  const uint8_t hdr[] = {0x00, 0x00, 0x0c, 0x00, 0x00, 0x84, 0x00, 0x00};
+  f.insert(f.end(), hdr, hdr + sizeof(hdr));
+  f.push_back(static_cast<uint8_t>(db)); /* DBM_TX_POWER (offset 8, 1 signed B) */
+  f.push_back(0x00);                     /* pad to 2-byte align for TX_FLAGS */
+  f.push_back(0x08);                     /* TX_FLAGS le16 */
+  f.push_back(0x00);
+  f.insert(f.end(), body, body + body_len);
+  return f;
+}
+
 static int g_rx_count = 0;
 static void packetProcessor(const Packet &packet) {
   /* C2H packets are chip-side status (one per TX during concurrent TX+RX on
@@ -442,6 +462,17 @@ int main(int argc, char **argv) {
   if (const char *p = std::getenv("DEVOURER_TX_PWR"))
     rtlDevice->SetTxPower(static_cast<uint8_t>(std::strtol(p, nullptr, 0)));
 
+  /* DEVOURER_TX_PKT_OFSET=N — (Jaguar2 8822B/8821C) default per-packet
+   * TXPWR_OFSET LUT step written into every TX descriptor: 0=none, 1=-3dB,
+   * 2=-7dB, 3=-11dB, 4=+3dB, 5=+6dB. The measurement driver for the descriptor
+   * per-packet power lever (tests/txpkt_pwr_ofset_onair.sh). */
+#if defined(DEVOURER_HAVE_JAGUAR2)
+  if (const char *p = std::getenv("DEVOURER_TX_PKT_OFSET")) {
+    if (jag2)
+      jag2->SetTxPacketPowerStep(static_cast<uint8_t>(std::strtol(p, nullptr, 0)));
+  }
+#endif
+
   /* DEVOURER_TX_WITH_RX — concurrent RX alongside the TX loop on the SAME
    * claimed adapter. Two modes:
    *
@@ -566,6 +597,18 @@ int main(int argc, char **argv) {
     logger->info("DEVOURER_TX_STBC_TOGGLE: alternating STBC on/off per frame");
 
   std::vector<uint8_t> tx_buf(beacon_frame, beacon_frame + sizeof(beacon_frame));
+
+  /* DEVOURER_TX_PKT_PWR_DB=N — carry a per-packet TX-power delta (dB) in the
+   * beacon's radiotap DBM_TX_POWER field. Exercises the LIBRARY's per-packet
+   * path (vs DEVOURER_TX_PKT_OFSET, which sets the device default) — the
+   * adaptive-link integration point. Rebuilds the rate-less radiotap; the
+   * 802.11 body starts after the beacon's 10-byte radiotap prefix. */
+  if (const char *e = std::getenv("DEVOURER_TX_PKT_PWR_DB")) {
+    const int8_t db = static_cast<int8_t>(std::strtol(e, nullptr, 0));
+    tx_buf = build_frame_with_pkt_pwr(db, beacon_frame + 10,
+                                      sizeof(beacon_frame) - 10);
+    logger->info("DEVOURER_TX_PKT_PWR_DB={} — per-packet power via radiotap", db);
+  }
 
   /* Frame-size knob for throughput benchmarking. DEVOURER_TX_PAYLOAD_BYTES=N
    * pads the 802.11 body so the on-air PSDU is exactly N bytes — send_packet

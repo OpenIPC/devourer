@@ -43,6 +43,12 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_DATA_BW_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 5, 2, v)
 #define SET_TX_DESC_DATA_LDPC_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 7, 1, v)
 #define SET_TX_DESC_DATA_STBC_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 8, 2, v)
+/* Per-packet TX-power offset (halmac TXPWR_OFSET, txdesc+0x14[30:28]). A 3-bit
+ * hardware LUT applied per-frame on top of the rate's TXAGC — the vendor's
+ * dynamic-TX-power field (phydm dpt_lv): 0=none, 1=-3dB, 2=-7dB, 3=-11dB,
+ * 4=+3dB, 5=+6dB (PHYDM_OFFSET_* in phydm_dynamictxpower.h). Zero-cost
+ * per-packet power trim — a bitfield in the descriptor devourer already builds. */
+#define SET_TX_DESC_TXPWR_OFSET_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x14, 28, 3, v)
 #define SET_TX_DESC_NAVUSEHDR_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x0C, 15, 1, v)
 #define SET_TX_DESC_NDPA_8822B(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x0C, 22, 2, v)
 #define SET_TX_DESC_DISQSELSEQ_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x00, 31, 1, v)
@@ -87,11 +93,37 @@ inline void cal_txdesc_chksum_8822b(uint8_t *txdesc) {
 
 /* Fill an 8822B data/monitor-inject TX descriptor (48 bytes, zeroed by caller)
  * and finalise its checksum. Mirrors the Jaguar3 inject field choices. */
+/* Quantize a requested per-packet power delta (dB) to the nearest hardware
+ * TXPWR_OFSET LUT step. The field is discrete — {0, -3, -7, -11, +3, +6} dB —
+ * so an adaptive link's continuous request lands on the closest rung. Pure;
+ * unit-tested in tests/txpkt_pwr_selftest.cpp. */
+inline uint8_t txpkt_pwr_step_for_db(int db) {
+  static const struct { int db; uint8_t step; } lut[] = {
+      {0, 0}, {-3, 1}, {-7, 2}, {-11, 3}, {3, 4}, {6, 5}};
+  uint8_t best = 0;
+  int best_err = 1 << 30;
+  for (const auto &e : lut) {
+    int err = db > e.db ? db - e.db : e.db - db;
+    if (err < best_err) {
+      best_err = err;
+      best = e.step;
+    }
+  }
+  return best;
+}
+
+/* Inverse: the nominal dB of a LUT step (for readback / logging). */
+inline int txpkt_pwr_db_for_step(uint8_t step) {
+  static const int db[] = {0, -3, -7, -11, 3, 6};
+  return step < 6 ? db[step] : 0;
+}
+
 inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
                                     uint8_t rate_hw, uint8_t rate_id, uint8_t bw,
                                     bool short_gi, bool ldpc, uint8_t stbc,
                                     bool bmc = false, uint8_t wheader_len = 12,
-                                    bool ndpa = false, uint8_t data_sc = 0) {
+                                    bool ndpa = false, uint8_t data_sc = 0,
+                                    uint8_t pwr_ofset = 0) {
   SET_TX_DESC_TXPKTSIZE_8822B(d, pkt_size);
   SET_TX_DESC_OFFSET_8822B(d, static_cast<uint32_t>(TXDESC_SIZE_8822B));
   SET_TX_DESC_LS_8822B(d, 1);
@@ -113,6 +145,10 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
    * BW, the common case). Non-zero places e.g. a 40-in-80 frame on the primary
    * lower-40 instead of the block centre. */
   SET_TX_DESC_DATA_SC_8822B(d, data_sc);
+  /* Per-packet TX-power offset (0 = none, byte-identical to the prior desc).
+   * Inside the 32-byte checksummed region (0x14), so set before the checksum. */
+  if (pwr_ofset)
+    SET_TX_DESC_TXPWR_OFSET_8822B(d, pwr_ofset & 0x7);
   SET_TX_DESC_DATA_SHORT_8822B(d, short_gi ? 1 : 0);
   SET_TX_DESC_DATA_LDPC_8822B(d, ldpc ? 1 : 0);
   SET_TX_DESC_DATA_STBC_8822B(d, stbc & 0x3);

@@ -638,6 +638,13 @@ devourer::TxPowerState RtlJaguar2Device::GetTxPowerState() {
   return s;
 }
 
+void RtlJaguar2Device::SetTxPacketPowerStep(uint8_t step) {
+  _tx_pkt_pwr_step = step & 0x7;
+  _logger->info("Jaguar2: per-packet TXPWR_OFSET default step = {} "
+                "(0=none 1=-3 2=-7 3=-11 4=+3 5=+6 dB)",
+                step & 0x7);
+}
+
 devourer::ThermalStatus RtlJaguar2Device::GetThermalStatus() {
   devourer::ThermalStatus t;
   if (!_brought_up)
@@ -670,6 +677,11 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
   bool rate_from_radiotap = false;
   /* Per-packet hop target from a radiotap CHANNEL field (0 = none present). */
   int radiotap_channel = 0;
+  /* Per-packet TX-power delta (dB) from a radiotap DBM_TX_POWER field; on an
+   * INJECTED frame we treat it as a delta to the rate's calibrated power and
+   * quantize to the descriptor TXPWR_OFSET LUT (the vendor skips this field, so
+   * there is no absolute-dBm convention to violate). INT_MIN = not present. */
+  int radiotap_pkt_pwr_db = INT_MIN;
 
   auto *rtap_hdr = reinterpret_cast<struct ieee80211_radiotap_header *>(
       const_cast<uint8_t *>(packet));
@@ -691,6 +703,10 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
        * the RATE/MCS/VHT fields). Same contract as the Jaguar1/Jaguar3 paths. */
       radiotap_channel =
           devourer::freq_to_chan(get_unaligned_le16(it.this_arg));
+      break;
+    case IEEE80211_RADIOTAP_DBM_TX_POWER:
+      /* Signed 1-byte dB — the per-packet power delta (see the field decl). */
+      radiotap_pkt_pwr_db = static_cast<int8_t>(*it.this_arg);
       break;
     case IEEE80211_RADIOTAP_MCS: {
       uint8_t mcs_flags = it.this_arg[1];
@@ -803,11 +819,18 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
    * NDPA so the armed sounding engine (DEVOURER_BF_ARM_SOUNDER, InitWrite)
    * follows each with a hardware-generated NDP. Same knob as Jaguar-1/-3. */
   static const bool ndpa = std::getenv("DEVOURER_TX_NDPA") != nullptr;
+  /* Per-packet TX power: a radiotap DBM_TX_POWER on this frame (quantized to
+   * the descriptor LUT) wins per-packet; otherwise the SetTxPacketPowerStep
+   * default. Zero cost — a descriptor bitfield, no register write. */
+  const uint8_t pkt_pwr_step =
+      radiotap_pkt_pwr_db != INT_MIN
+          ? jaguar2::txpkt_pwr_step_for_db(radiotap_pkt_pwr_db)
+          : _tx_pkt_pwr_step.load();
   std::vector<uint8_t> usb_frame(jaguar2::TXDESC_SIZE_8822B + frame_len, 0);
   jaguar2::fill_data_tx_desc_8822b(
       usb_frame.data(), static_cast<uint16_t>(frame_len),
       MRateToHwRate(fixed_rate), rate_id, bw_desc, sgi != 0, ldpc != 0, stbc,
-      bmc, static_cast<uint8_t>(hdrlen >> 1), ndpa, data_sc);
+      bmc, static_cast<uint8_t>(hdrlen >> 1), ndpa, data_sc, pkt_pwr_step);
   std::memcpy(usb_frame.data() + jaguar2::TXDESC_SIZE_8822B, dot11, frame_len);
 
   int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),

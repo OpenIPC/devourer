@@ -79,6 +79,9 @@ public:
   bool ReApplyTxPower() override;
   devourer::TxPowerState GetTxPowerState() override;
   devourer::ThermalStatus GetThermalStatus() override;
+  /* Per-chip TX caps (IRtlDevice): the 8821C is 1T1R (no STBC), the 8822B
+   * 2T2R. send_packet drops an STBC request the variant can't honour. */
+  devourer::TxCaps GetTxCaps() override;
 
   /* Per-packet TX-power offset — the zero-cost per-frame power trim the
    * adaptive link wants (distinct from the per-rate TXAGC that

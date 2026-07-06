@@ -83,6 +83,8 @@ public:
   bool ReApplyTxPower() override;
   devourer::TxPowerState GetTxPowerState() override;
   devourer::ThermalStatus GetThermalStatus() override;
+  /* Per-chip TX caps (IRtlDevice): 8822C/8822E are 2T2R (STBC ok). */
+  devourer::TxCaps GetTxCaps() override;
   /* Runtime TX-mode default — applied in send_packet when the radiotap carries
    * no rate. Without this the Jaguar3 TX path fell back to MGN_1M for rate-less
    * frames (so DEVOURER_TX_RATE/an MCS flood went on-air at 1 Mbps): the feature

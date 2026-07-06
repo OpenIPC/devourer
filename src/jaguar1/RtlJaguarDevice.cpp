@@ -471,6 +471,19 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
 
   ptxdesc = (struct tx_desc *)usb_frame;
 
+  /* Drop an STBC request the chip can't honour: STBC needs >=2 TX chains, so a
+   * 1T1R part (8811AU/8821AU) that airs an STBC-marked frame produces a
+   * malformed PPDU that never decodes (a known adaptive-link footgun). Warn
+   * once; leave 2T2R/4T4R untouched. */
+  if (stbc && !GetTxCaps().stbc_ok) {
+    static bool warned = false;
+    if (!warned) {
+      _logger->warn("STBC requested but this chip is 1T1R (no STBC) — dropping "
+                    "the STBC flag to keep frames decodable");
+      warned = true;
+    }
+    stbc = 0;
+  }
   _logger->debug("fixed rate:{}, sgi:{}, radiotap_bwidth:{}, ldpc:{}, stbc:{}",
                 (int)fixed_rate, (int)sgi, (int)bwidth, (int)ldpc, (int)stbc);
 
@@ -843,6 +856,13 @@ bool RtlJaguarDevice::ReApplyTxPower() {
     return false;
   _radioManagement->ApplyTxPower();
   return true;
+}
+
+devourer::TxCaps RtlJaguarDevice::GetTxCaps() {
+  /* numTotalRfPath is the TX chain count the EFUSE RF-type resolves to (1 on
+   * the 8811AU/8821AU 1T1R cuts, 2 on 8812AU, 4 on 8814AU). All Jaguar-1 AC
+   * parts do LDPC/SGI and VHT80. */
+  return devourer::tx_caps_for_chains(_eepromManager->numTotalRfPath);
 }
 
 devourer::TxPowerState RtlJaguarDevice::GetTxPowerState() {

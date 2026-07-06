@@ -322,12 +322,9 @@ antenna diversity, and frequency hopping) that make the rest of the docs click.
 
 ### Startup time
 
-Devourer reaches ready-to-RX/TX faster than the `aircrack-ng/88XXau`
-kernel driver on every supported chip, in both directions (RTL8812AU
-~2s, RTL8814AU ~6s, RTL8821AU ~1s cold-init to first frame). Run your
-own numbers with `tests/bench_init.py` — it benchmarks cold init per
-adapter, devourer vs kernel driver, with a per-stage breakdown from the
-library's `init-timing:` log lines.
+Devourer reaches ready-to-RX/TX faster than the kernel driver on every
+supported chip — measured numbers and the benchmark methodology
+(`tests/bench_init.py`) in [`docs/startup-time.md`](docs/startup-time.md).
 
 ## Project layout
 

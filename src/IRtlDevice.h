@@ -10,6 +10,7 @@
 #include "ThermalStatus.h"
 #include "TxMode.h"
 #include "TxPower.h"
+#include "TxStats.h"
 
 /* Packet is the parsed-RX type handed to the RX callback. Forward-declared here
  * (a reference in the std::function signature needs only an incomplete type) so
@@ -139,6 +140,13 @@ public:
    * silently go on-air at 1 Mbps. */
   virtual void SetTxMode(const devourer::TxMode & /*mode*/) {}
   virtual void ClearTxMode() {}
+
+  /* TX submission health snapshot (see TxStats.h) — the driver-side drop /
+   * congestion signal an adaptive-link controller uses to detect a full TX FIFO
+   * (a bulk-OUT TIMEOUT = recoverable back-pressure) vs a hard error. Counted at
+   * the shared USB bulk-OUT layer, so every generation reports it. Default is an
+   * all-zero snapshot. */
+  virtual devourer::TxStats GetTxStats() { return {}; }
 
   /* Frame-free RX energy / channel-busy snapshot (see RxSense.h) — the read side
    * of the DEVOURER_CW_TONE emitter, used for spectrum-sensing / interferer

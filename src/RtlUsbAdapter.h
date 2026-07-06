@@ -15,6 +15,7 @@
 #include "drv_types.h"
 #include "hal_com_reg.h"
 #include "logger.h"
+#include "TxStats.h"
 
 namespace devourer {
 class UsbDeviceLock;
@@ -72,6 +73,19 @@ class RtlUsbAdapter {
   std::shared_ptr<std::atomic<bool>> _tx_wedged =
       std::make_shared<std::atomic<bool>>(false);
 
+  /* TX submission counters (the driver-drop / congestion signal, see
+   * TxStats.h). Heap-shared for the same reason as _tx_wedged: RtlUsbAdapter is
+   * a copyable value type, and the async transfer_callback runs on whichever
+   * copy submitted — all copies must increment the one set of counters. */
+  struct TxStatsCounters {
+    std::atomic<uint64_t> submitted{0};
+    std::atomic<uint64_t> failed{0};
+    std::atomic<int> last_rc{0};
+    std::atomic<bool> last_timeout{false};
+  };
+  std::shared_ptr<TxStatsCounters> _tx_stats =
+      std::make_shared<TxStatsCounters>();
+
   /* Exclusive per-adapter USB lock, acquired by WiFiDriver::CreateRtlDevice and
    * held for the device's lifetime (see UsbDeviceLock.h). shared_ptr because
    * RtlUsbAdapter is a copyable value type copied into every sub-manager
@@ -125,6 +139,18 @@ public:
   void bulk_clear_halt(uint8_t ep) { libusb_clear_halt(_dev_handle, ep); }
   int bulk_send_sync_ep(uint8_t ep, uint8_t *packet, size_t length,
                         int timeout_ms);
+
+  /* Snapshot of the TX submission counters (see TxStats.h). Safe from any
+   * thread — the fields are read from atomics (a torn read across the four is
+   * harmless for a monitoring counter). */
+  devourer::TxStats GetTxStats() const {
+    devourer::TxStats s;
+    s.submitted = _tx_stats->submitted.load(std::memory_order_relaxed);
+    s.failed = _tx_stats->failed.load(std::memory_order_relaxed);
+    s.last_error_rc = _tx_stats->last_rc.load(std::memory_order_relaxed);
+    s.last_was_timeout = _tx_stats->last_timeout.load(std::memory_order_relaxed);
+    return s;
+  }
   /* Raw bulk-IN read on the discovered bulk-IN endpoint, returning bytes read
    * (or a negative libusb error). For chip families whose RX descriptor is not
    * the Jaguar1 layout (e.g. Jaguar3), the caller parses the buffer itself. */

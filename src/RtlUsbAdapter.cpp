@@ -435,6 +435,14 @@ void RtlUsbAdapter::transfer_callback(struct libusb_transfer *transfer) {
     /* Flag the bulk-OUT as possibly halted so the next send_packet (on the TX
      * thread) re-clear_halts it before the following frame. */
     self->_tx_wedged->store(true, std::memory_order_relaxed);
+    /* Async completion failure — the real drop for the async TX path. A
+     * TIMED_OUT status is the FIFO-full back-pressure (congestion); anything
+     * else is a hard error. Record the negated status as the rc. */
+    self->_tx_stats->failed.fetch_add(1, std::memory_order_relaxed);
+    self->_tx_stats->last_rc.store(-transfer->status, std::memory_order_relaxed);
+    self->_tx_stats->last_timeout.store(
+        transfer->status == LIBUSB_TRANSFER_TIMED_OUT,
+        std::memory_order_relaxed);
     self->_logger->error("Failed to send packet, status: {}, actual length: {}",
                          transfer->status, transfer->actual_length);
   }
@@ -530,6 +538,9 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
    * every completion with status=-2 (ENOENT/cancelled), data_len=0. */
   transfer->flags |= LIBUSB_TRANSFER_ADD_ZERO_PACKET;
   auto start = std::chrono::high_resolution_clock::now();
+  /* Count the submission here; async completion (incl. TIMED_OUT) is counted in
+   * transfer_callback, a submit error just below. */
+  _tx_stats->submitted.fetch_add(1, std::memory_order_relaxed);
   int rc = rc = libusb_submit_transfer(transfer);
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double, std::milli> elapsed = end - start;
@@ -538,6 +549,10 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
                   elapsed.count());
     return true;
   } else {
+    _tx_stats->failed.fetch_add(1, std::memory_order_relaxed);
+    _tx_stats->last_rc.store(rc, std::memory_order_relaxed);
+    _tx_stats->last_timeout.store(rc == LIBUSB_ERROR_TIMEOUT,
+                                  std::memory_order_relaxed);
     _logger->error("Failed to send packet, error code: {}", rc);
     libusb_free_transfer(transfer);
     return false;
@@ -556,9 +571,14 @@ int RtlUsbAdapter::bulk_send_sync_ep(uint8_t ep, uint8_t *packet, size_t length,
    * normal TX-queue operation, not the per-send hot path. Resetting the
    * data toggle bit corrupts the chip's state machine. */
   int actual = 0;
+  _tx_stats->submitted.fetch_add(1, std::memory_order_relaxed);
   int rc = libusb_bulk_transfer(_dev_handle, ep, packet,
                                 static_cast<int>(length), &actual, timeout_ms);
   if (rc != LIBUSB_SUCCESS) {
+    _tx_stats->failed.fetch_add(1, std::memory_order_relaxed);
+    _tx_stats->last_rc.store(rc, std::memory_order_relaxed);
+    _tx_stats->last_timeout.store(rc == LIBUSB_ERROR_TIMEOUT,
+                                  std::memory_order_relaxed);
     _logger->error("bulk_send EP {} FAIL rc={} got {}/{}", (int)ep, rc,
                    actual, (int)length);
     return rc;

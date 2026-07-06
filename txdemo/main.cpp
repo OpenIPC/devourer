@@ -972,6 +972,14 @@ int main(int argc, char **argv) {
       frames_in_dwell = 0;
     if (tx_count <= 10 || tx_count % 500 == 0) {
       printf("<devourer-tx>TX #%ld rc=%d\n", tx_count, rc);
+      /* TX submission health — the driver-drop / congestion feed (xtx). A
+       * climbing failed with was_timeout=1 is a full TX FIFO (recoverable
+       * back-pressure); a hard rc is a broken path. */
+      auto ts = rtlDevice->GetTxStats();
+      printf("<devourer-txstats>submitted=%llu failed=%llu was_timeout=%d "
+             "last_rc=%d\n",
+             (unsigned long long)ts.submitted, (unsigned long long)ts.failed,
+             ts.last_was_timeout ? 1 : 0, ts.last_error_rc);
       fflush(stdout);
     }
     /* Thermal telemetry via the generation-agnostic GetThermalStatus

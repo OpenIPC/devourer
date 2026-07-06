@@ -79,6 +79,7 @@ add_library(WiFiDriver
     src/TxMode.h
     src/TxPower.cpp
     src/TxPower.h
+    src/TxStats.h
     src/ThermalStatus.h
     src/TxCaps.h
     src/LinkHealth.cpp

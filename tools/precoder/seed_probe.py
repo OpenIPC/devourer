@@ -8,7 +8,7 @@ strategies, mirroring the plan:
 
   --mode rx  (primary intent)
       Read the descrambler seed the chip recovers from frames it *receives*.
-      Run `WiFiDriverDemo` with DEVOURER_DUMP_SCRAMBLER=1 on a second adapter
+      Run `rxdemo` with DEVOURER_DUMP_SCRAMBLER=1 on a second adapter
       pointed at the precoder TX; it prints `<devourer-scrambler>seed=0xNN`
       lines. This script parses them and reports whether the seed is CONSTANT
       (one shaped PSDU works) or VARYING per frame (brute-force needed).
@@ -140,7 +140,7 @@ def mode_bruteforce(args) -> int:
             fh.write(res.psdu_bytes)
     print(f"seed_probe: wrote 128 candidate PSDUs to {prefix}.seed_*.bin "
           f"({phy.name}, {targets.shape[0]} symbol(s)).")
-    print("Transmit them in a loop (e.g. cycle PrecoderDemo --psdu over each "
+    print("Transmit them in a loop (e.g. cycle precoder --psdu over each "
           "file); frames whose variant index matches the chip's per-frame seed "
           "will carry the target pattern. Capture with fft_capture.py.")
     return 0
@@ -151,8 +151,8 @@ def main(argv: "list[str] | None" = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", choices=("rx", "bruteforce"), required=True)
     # rx
-    ap.add_argument("--demo-bin", default="../../build/WiFiDriverDemo",
-                    help="path to WiFiDriverDemo (rx mode)")
+    ap.add_argument("--demo-bin", default="../../build/rxdemo",
+                    help="path to rxdemo (rx mode)")
     ap.add_argument("--rx-pid", help="DEVOURER_PID for the RX adapter (rx mode)")
     ap.add_argument("--channel", type=int, help="capture channel (rx mode)")
     ap.add_argument("--duration", type=float, default=20.0,

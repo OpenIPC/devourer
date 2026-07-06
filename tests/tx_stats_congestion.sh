@@ -21,12 +21,12 @@ PASS=0; FAIL=0; SKIP=0
 pass() { echo "  PASS: $*"; PASS=$((PASS+1)); }
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
 skip() { echo "  SKIP: $*"; SKIP=$((SKIP+1)); }
-cleanup() { pkill -x WiFiDriverTxDem 2>/dev/null||true; true; }
+cleanup() { pkill -x txdemo 2>/dev/null||true; true; }
 trap cleanup EXIT INT TERM
 plugged() { lsusb -d "$(printf '%04x:%04x' "$2" "$1")" >/dev/null 2>&1; }
 
 echo "== building =="
-cmake --build "$ROOT/build" -j --target WiFiDriverTxDemo >/dev/null || exit 1
+cmake --build "$ROOT/build" -j --target txdemo >/dev/null || exit 1
 
 # pid vid label
 DUTS=(
@@ -40,7 +40,7 @@ run_cell() { # $1=pid $2=vid $3=gap $4=tag
     local log="$OUT/$4.log"
     sudo -n env DEVOURER_PID="$1" DEVOURER_VID="$2" DEVOURER_CHANNEL="$CH" \
         DEVOURER_TX_RATE=MCS3 DEVOURER_TX_GAP_US="$3" \
-        timeout "$DUR" "$ROOT/build/WiFiDriverTxDemo" >"$log" 2>&1 || true
+        timeout "$DUR" "$ROOT/build/txdemo" >"$log" 2>&1 || true
     local line
     line=$(grep "<devourer-txstats>" "$log" | tail -1)
     echo "$line" | sed -E 's/.*submitted=([0-9]+) failed=([0-9]+) was_timeout=([0-9]+) last_rc=(-?[0-9]+).*/\1 \2 \3 \4/'

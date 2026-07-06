@@ -1,4 +1,4 @@
-# ctest driver for StreamStdinSelftest — see txdemo/stream_stdin_selftest.cpp.
+# ctest driver for StreamStdinSelftest — see examples/common/stream_stdin_selftest.cpp.
 #
 # Pipes the self-test's --gen output (the canonical <u32_le len><PSDU> stream,
 # which embeds 0x1A / 0x0D / 0x0A) straight into a second invocation that reads
@@ -30,7 +30,7 @@ foreach(rc IN LISTS all_rc)
     message(FATAL_ERROR
       "StreamStdinSelftest pipeline stage exited ${rc} — binary stdin/stdout is "
       "broken (a 0x1A or CRLF byte corrupted the length-prefixed stream). Check "
-      "set_stdin_binary()/set_stdout_binary() in txdemo/stream_stdin.h.\n"
+      "set_stdin_binary()/set_stdout_binary() in examples/common/stream_stdin.h.\n"
       "stdout:\n${check_out}\nstderr:\n${check_err}")
   endif()
 endforeach()

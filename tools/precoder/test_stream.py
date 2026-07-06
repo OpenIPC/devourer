@@ -304,7 +304,7 @@ def test_shape_mode_alternating_quarter_pattern():
 
 
 def test_shape_mode_mid_frame_offset_and_entry_state():
-    # The README's body offset for PrecoderDemo: SERVICE(16) + 24B header.
+    # The README's body offset for precoder: SERVICE(16) + 24B header.
     rng = np.random.default_rng(6)
     prefix = rng.integers(0, 2, size=16 + 24 * 8, dtype=np.uint8)
     entry_state = enc.bcc_final_state(prefix)

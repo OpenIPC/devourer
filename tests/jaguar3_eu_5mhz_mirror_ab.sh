@@ -40,7 +40,7 @@ run_case() { # name  nb_bw  nb_dac('' = default)
   # PSD at bench distance.
   sudo PID=a81a DEVOURER_CHANNEL="$CHANNEL" DEVOURER_NB_BW="$bw" \
       DEVOURER_NB_DAC="$dacovr" DEVOURER_TX_PWR="${TX_PWR:-0x3f}" SECS=24 \
-      tests/jaguar3_devourer_run.sh build/WiFiDriverTxDemo 24 \
+      tests/jaguar3_devourer_run.sh build/txdemo 24 \
       > "$OUT/dev_${name}.log" 2>&1 &
   local H=$!
   sleep 11   # power-on -> DLFW -> init -> narrowband re-clock -> TX

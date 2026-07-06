@@ -14,7 +14,7 @@ NS=4e6
 OUT=/tmp/j2_bw_sdr
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-cleanup() { sudo pkill -x WiFiDriverTxDem 2>/dev/null; }
+cleanup() { sudo pkill -x txdemo 2>/dev/null; }
 trap cleanup EXIT
 
 recover() {
@@ -39,10 +39,10 @@ run_bw() { # bw offset ch freq label
   timeout 26 sudo env DEVOURER_VID=0x2357 DEVOURER_PID=0x012d DEVOURER_CHANNEL=$CH \
     ${BW:+DEVOURER_HOP_BW=$BW} ${OFF:+DEVOURER_HOP_OFFSET=$OFF} \
     DEVOURER_TX_RATE=MCS1${BW:+/$BW} DEVOURER_TX_GAP_US=0 \
-    ./build/WiFiDriverTxDemo >"$OUT/dev_${LBL}.log" 2>&1 &
+    ./build/txdemo >"$OUT/dev_${LBL}.log" 2>&1 &
   sleep 12   # power-on -> DLFW -> init -> TX flooding
   probe "$LBL" "$FREQ"
-  sudo pkill -x WiFiDriverTxDem 2>/dev/null; wait 2>/dev/null; sleep 1
+  sudo pkill -x txdemo 2>/dev/null; wait 2>/dev/null; sleep 1
 }
 
 run_bw ""  ""  149 5745e6 bw20   # 20 MHz (no HOP_BW)

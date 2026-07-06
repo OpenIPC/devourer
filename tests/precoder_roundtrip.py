@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Two-adapter, no-SDR round-trip test for the precoder PoC.
 
-TX one devourer adapter (PrecoderDemo, shaped PSDU) and RX a second devourer
-adapter (WiFiDriverDemo, monitor mode) on the same channel, then check:
+TX one devourer adapter (precoder, shaped PSDU) and RX a second devourer
+adapter (rxdemo, monitor mode) on the same channel, then check:
 
   1. TRANSPORT   - the canonical-SA frame is received at all (hits > 0).
   2. PHY RATE    - it flew as 6 Mbps legacy OFDM (RX rate index == DESC_RATE6M
@@ -232,8 +232,8 @@ def main(argv: "list[str] | None" = None) -> int:
                     help="scrambler seed for auto-generation")
     ap.add_argument("--n-sym", type=int, default=8,
                     help="OFDM symbols of shaped payload (auto-generation)")
-    ap.add_argument("--tx-bin", default=str(REPO / "build" / "PrecoderDemo"))
-    ap.add_argument("--rx-bin", default=str(REPO / "build" / "WiFiDriverDemo"))
+    ap.add_argument("--tx-bin", default=str(REPO / "build" / "precoder"))
+    ap.add_argument("--rx-bin", default=str(REPO / "build" / "rxdemo"))
     ap.add_argument("--duration", type=float, default=20.0)
     ap.add_argument("--rx-warmup", type=float, default=12.0,
                     help="seconds to let the RX radio come up before TX. Some "

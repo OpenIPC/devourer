@@ -20,8 +20,8 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-DEMO_TX="$ROOT/build/WiFiDriverTxDemo"
-DEMO_RX="$ROOT/build/WiFiDriverDemo"
+DEMO_TX="$ROOT/build/txdemo"
+DEMO_RX="$ROOT/build/rxdemo"
 
 TX_VID=0x0bda TX_PID="" RX_VID=0x0bda RX_PID=""
 BINS="1,6,11" ROUNDS=4 RATE=MCS0 DWELL_FRAMES=20 GAP_US=2000 NB_BW=""
@@ -47,7 +47,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$TX_PID" ] && [ -n "$RX_PID" ] || { echo "need --tx-pid and --rx-pid" >&2; exit 2; }
 
-cleanup() { for c in WiFiDriverTxDem WiFiDriverDemo; do pkill -x "$c" 2>/dev/null || true; done; }
+cleanup() { for c in txdemo rxdemo; do pkill -x "$c" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 
 echo "== building =="

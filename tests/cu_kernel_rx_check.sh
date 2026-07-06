@@ -16,7 +16,7 @@ TXS=$(find_sys 8812)
 [ -z "$TXS" ] && { echo "no 8812AU"; exit 1; }
 
 cleanup() {
-  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null
+  sudo pkill -9 -x txdemo 2>/dev/null
   sudo pkill -9 -f "tcpdump -i ${CUIF}mon" 2>/dev/null
   sudo iw dev ${CUIF}mon del 2>/dev/null
   sudo ip link set "$CUIF" up 2>/dev/null
@@ -38,7 +38,7 @@ iw dev "$MONIF" info 2>/dev/null | grep -iE "type|channel" | sed 's/^/  /'
 # 8812AU -> devourer beacon flood
 echo "$TXS:1.0" | sudo tee /sys/bus/usb/drivers/rtw88_8812au/unbind >/dev/null 2>&1; sleep 1
 sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0x8812 DEVOURER_CHANNEL=$CH \
-     stdbuf -oL timeout -k 5 "$SECS" build/WiFiDriverTxDemo >/tmp/cuk_tx.log 2>&1 &
+     stdbuf -oL timeout -k 5 "$SECS" build/txdemo >/tmp/cuk_tx.log 2>&1 &
 sleep 5
 
 echo "=== tcpdump on $MONIF for $((SECS-7))s ==="

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Two-adapter byte-stream round-trip on the precoder stream link.
 
-Streams `--bytes N` random bytes from one devourer adapter (StreamTxDemo,
+Streams `--bytes N` random bytes from one devourer adapter (streamtx,
 fed by tools/precoder/stream_tx.py) to a second devourer adapter
-(WiFiDriverDemo with DEVOURER_STREAM_OUT=1), then decodes the received
+(rxdemo with DEVOURER_STREAM_OUT=1), then decodes the received
 <devourer-stream> lines via stream.decode_body and checks:
 
   1. TRANSPORT  — at least `--min-frames` frames decoded.
@@ -19,7 +19,7 @@ subcarriers honour the pin pattern. That is a model-bound check (it proves
 pinned subcarriers"); proving the chip actually radiates those subcarriers
 on-air still needs an SDR / BB-dbgport observer — see tools/precoder/README.md.
 
-Defaults match PrecoderDemo's matrix-validated cell: 2.4 GHz channel 6,
+Defaults match precoder's matrix-validated cell: 2.4 GHz channel 6,
 RTL8812AU TX and RTL8821AU / RTL8811AU RX. RTL8814AU is out of scope (TX
 flakiness, issue #36).
 
@@ -150,7 +150,7 @@ def run_test(args) -> int:
     rx_reader.start()
     time.sleep(args.rx_warmup)
 
-    # 2. TX side: stream_tx.py | StreamTxDemo, with shape/seed/offset/etc.
+    # 2. TX side: stream_tx.py | streamtx, with shape/seed/offset/etc.
     tx_env = dict(os.environ, DEVOURER_PID=args.tx_pid, DEVOURER_VID=args.tx_vid,
                   DEVOURER_CHANNEL=str(args.channel), DEVOURER_USB_QUIET="1")
     pyenv = dict(os.environ)
@@ -306,10 +306,10 @@ def main(argv: "list[str] | None" = None) -> int:
     ap.add_argument("--offset", type=int, default=None,
                     help="scrambler-phase offset of the body (default 0 — the "
                          "shape pins are honoured by the model but not "
-                         "on-air; pass 208 to match PrecoderDemo placement)")
+                         "on-air; pass 208 to match precoder placement)")
     ap.add_argument("--entry-state", type=lambda s: int(s, 0), default=None)
-    ap.add_argument("--tx-bin", default=str(REPO / "build" / "StreamTxDemo"))
-    ap.add_argument("--rx-bin", default=str(REPO / "build" / "WiFiDriverDemo"))
+    ap.add_argument("--tx-bin", default=str(REPO / "build" / "streamtx"))
+    ap.add_argument("--rx-bin", default=str(REPO / "build" / "rxdemo"))
     ap.add_argument("--interval-ms", type=int, default=2)
     ap.add_argument("--repeat", type=int, default=4,
                     help="TX-side per-frame replication to combat early-frame "

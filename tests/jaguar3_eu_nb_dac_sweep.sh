@@ -33,7 +33,7 @@ for CODE in $CODES; do
   echo "=== NB_BW=${NB_BW} DAC code ${CODE} ==="
   sudo PID=a81a DEVOURER_CHANNEL="$CHANNEL" DEVOURER_NB_BW="$NB_BW" \
       DEVOURER_NB_DAC="$CODE" DEVOURER_TX_PWR="${TX_PWR:-0x3f}" SECS=24 \
-      tests/jaguar3_devourer_run.sh build/WiFiDriverTxDemo 24 \
+      tests/jaguar3_devourer_run.sh build/txdemo 24 \
       > "$OUT/dev_${CODE}.log" 2>&1 &
   H=$!
   sleep 11

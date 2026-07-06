@@ -37,8 +37,8 @@ DUT_PID=0xa81a DUT_VID=0x0bda           # 8822EU — J3 static-IGI DUT
 CTL_PID=0x012d CTL_VID=0x2357           # 8822BU (T3U) — J2 adaptive-IGI control
 
 cleanup() {
-    sudo -n pkill -x WiFiDriverDemo 2>/dev/null || true
-    sudo -n pkill -x WiFiDriverTxDem 2>/dev/null || true
+    sudo -n pkill -x rxdemo 2>/dev/null || true
+    sudo -n pkill -x txdemo 2>/dev/null || true
     sudo -n pkill -f sdr_interferer 2>/dev/null || true
     true
 }
@@ -52,7 +52,7 @@ for d in "$TX_PID $TX_VID beacon-8812AU" "$DUT_PID $DUT_VID DUT-8822EU" \
 done
 
 echo "== building =="
-cmake --build "$ROOT/build" -j --target WiFiDriverDemo WiFiDriverTxDemo >/dev/null || exit 1
+cmake --build "$ROOT/build" -j --target rxdemo txdemo >/dev/null || exit 1
 
 # One RX cell against a running interferer + beacon. Echoes "hits igi_med fa_med".
 run_cell() { # $1=rx_pid $2=rx_vid $3=gain $4=tag
@@ -67,13 +67,13 @@ run_cell() { # $1=rx_pid $2=rx_vid $3=gain $4=tag
     sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_VID="$TX_VID" \
         DEVOURER_CHANNEL="$CH" DEVOURER_TX_RATE=MCS3 DEVOURER_TX_PWR="$BEACON_PWR" \
         DEVOURER_TX_GAP_US=1500 \
-        timeout $((DUR + 8)) "$ROOT/build/WiFiDriverTxDemo" >/dev/null 2>&1 &
+        timeout $((DUR + 8)) "$ROOT/build/txdemo" >/dev/null 2>&1 &
     local tx=$!
     sleep 3
     # RX under test.
     sudo -n env DEVOURER_PID="$rxpid" DEVOURER_VID="$rxvid" \
         DEVOURER_CHANNEL="$CH" DEVOURER_RX_ENERGY_MS=500 \
-        timeout "$DUR" "$ROOT/build/WiFiDriverDemo" >"$OUT/$tag.log" 2>&1 || true
+        timeout "$DUR" "$ROOT/build/rxdemo" >"$OUT/$tag.log" 2>&1 || true
     kill "$tx" 2>/dev/null; wait "$tx" 2>/dev/null
     kill "$jam" 2>/dev/null; wait "$jam" 2>/dev/null
     sudo -n pkill -f sdr_interferer 2>/dev/null

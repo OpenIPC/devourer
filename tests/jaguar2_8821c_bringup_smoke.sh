@@ -7,7 +7,7 @@
 # Usage: sudo tests/jaguar2_8821c_bringup_smoke.sh [channel] [seconds]
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-DEMO="$HERE/../build/WiFiDriverDemo"
+DEMO="$HERE/../build/rxdemo"
 VID=0x0bda PID=0xc811 CH=${1:-6} SECS=${2:-10}
 LOG=$(mktemp /tmp/j2-8821c.XXXX.log)
 restored=0
@@ -15,7 +15,7 @@ restored=0
 cleanup() {
     [ "$restored" = 1 ] && return
     restored=1
-    pkill -f "WiFiDriverDemo" 2>/dev/null
+    pkill -f "rxdemo" 2>/dev/null
     echo "=== restore rtw88_8821cu ==="
     modprobe rtw88_8821cu 2>/dev/null
     sleep 1

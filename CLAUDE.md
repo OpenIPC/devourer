@@ -5,9 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Userspace re-implementation of Realtek's RTL88xxAU Wi-Fi driver — speaks to the chip
-directly via libusb instead of a kernel module. Static library `WiFiDriver` + two
-demo binaries (`WiFiDriverDemo` for RX, `WiFiDriverTxDemo` for TX). Used by the
-OpenIPC project for long-range video links.
+directly via libusb instead of a kernel module. Static library `devourer` (CMake
+target) + example executables under `examples/` — the two canonical demos are
+`rxdemo` (RX) and `txdemo` (TX). Used by the OpenIPC project for long-range
+video links.
 
 Three chip generations are supported, dispatched at construction (see
 **Architecture**):
@@ -78,7 +79,7 @@ rewrites TXAGC). `GetTxPowerCaps` reports the family step (0.5 dB Jaguar1/2,
 uses a second chip's per-frame RSSI as the sensor: at bench range the B210
 front-end limits on the frames at any gain and cannot see TXAGC slopes).
 `GetThermalStatus` reads the RF 0x42 meter with the family baseline on every
-generation. `TxPowerStepDemo` (examples/txpower/, CLI-only) is the reference
+generation. `txpower` (examples/txpower/, CLI-only) is the reference
 consumer; register-level validation lives in `tests/txpwr_offset_regcheck.sh`
 (canary parity vs master, exact-step moves, rails, stickiness, the 8822E
 TX+RX 0x41e8 quirk cell). The 8822B's VHT TXAGC sections are programmed from
@@ -118,7 +119,7 @@ cmake --build build -j
 
 Per-chip build options select which drivers are compiled in — all default ON,
 so the command above builds every chip. Turn off the ones you don't need to
-drop their firmware blobs + PHY tables (an 8812AU-only `WiFiDriverDemo` is
+drop their firmware blobs + PHY tables (an 8812AU-only `rxdemo` is
 ~1.0 MB vs ~2.6 MB): `DEVOURER_JAGUAR1` (8812/8811/8821), `DEVOURER_8814`
 (requires JAGUAR1), `DEVOURER_JAGUAR2_8822B` (8822BU/8812BU),
 `DEVOURER_JAGUAR2_8821C` (8811CU/8821CU), `DEVOURER_JAGUAR3_8822C`,
@@ -136,7 +137,7 @@ toolchain the MSVC matrix cell doesn't; the `build-configs` matrix builds each
 per-chip subset and `reject-bad-configs` asserts the invalid option combos fail
 (`.github/workflows/cmake-multi-platform.yml`). `ctest` runs in every CI job;
 the one registered test (`stream_stdin_binary`) round-trips the stream demos'
-binary-stdin framing (`txdemo/stream_stdin.h`) headlessly, so a Windows
+binary-stdin framing (`examples/common/stream_stdin.h`) headlessly, so a Windows
 text-mode regression fails CI instead of only surfacing on a radio. Hardware
 regression testing happens out-of-band via `tests/regress.py`.
 
@@ -209,7 +210,7 @@ when `--sniffer-iface` is active) at `/tmp/devourer-regress-last/`. See
 
 ## Demo env vars
 
-Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
+Both `rxdemo` and `txdemo` honour:
 
 - `DEVOURER_PID=0xNNNN` — restrict the open loop to a single PID (e.g.
   `0x8813` for RTL8814AU); without it, the demo iterates every Realtek PID.
@@ -230,7 +231,7 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
 - `DEVOURER_RX_KEEP_CORRUPTED=1` — pass frames that fail the 802.11 FCS (CRC32)
   or decryption-ICV check up to the host instead of dropping them at the WMAC
   filter (sets RCR `ACRC32|AICV`). They arrive with `crc_err`/`icv_err` set on
-  the RX descriptor; `WiFiDriverDemo` surfaces them in its `<devourer-stream>`
+  the RX descriptor; `rxdemo` surfaces them in its `<devourer-stream>`
   output. This is the entry point for the fused-FEC sub-block-salvage layer
   (see `docs/fused-fec.md`); opt-in, since a body with a corrupt tail is the
   worst-case input for an IP-stack consumer that didn't ask for it.
@@ -276,7 +277,7 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
 - `DEVOURER_RX_NBI=<f_mhz>` — (all generations, RX) arm the narrowband-
   interference notch filter at one in-channel frequency (vendor-parity,
   LUT-quantized — a single narrow notch, not a slice mask).
-- `DEVOURER_TX_WITH_RX=thread` — (`WiFiDriverTxDemo`) run the RX worker loop on
+- `DEVOURER_TX_WITH_RX=thread` — (`txdemo`) run the RX worker loop on
   a `std::thread` alongside the TX loop, on the **same claimed adapter**: one
   bring-up (`InitWrite`), then `StartRxLoop(packetProcessor)` — the programmatic
   API for concurrent TX+RX on one handle (all three generations). On Jaguar3 the
@@ -306,8 +307,8 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   `delta = raw − baseline`, and a coarse `status` bucket (cool/warm/hot/critical,
   keyed off delta — the meter has no calibrated °C, so this is deliberately
   bucketed rather than a fake temperature). Works on every Jaguar chip; read-only (does not
-  alter TX-power tracking). 0/unset = disabled. In `WiFiDriverDemo` (RX) this
-  spawns a background poller at the given cadence; in `WiFiDriverTxDemo` it is
+  alter TX-power tracking). 0/unset = disabled. In `rxdemo` (RX) this
+  spawns a background poller at the given cadence; in `txdemo` it is
   read inline on the TX thread (no extra USB contention) every `N/2` frames.
   Jaguar-1 has no hard thermal TX shutdown — a rising `delta` is the early
   warning that the PA is heating and TX power is being backed off. NB: on the
@@ -316,7 +317,7 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
 - `DEVOURER_THERMAL_WARN_DELTA=N` — thermal-units-above-baseline threshold at
   which a one-shot `warn` fires (default `15`); re-arms once the chip cools
   back below it.
-- `DEVOURER_LINKHEALTH=1` — (`WiFiDriverDemo` RX, needs `DEVOURER_RX_ENERGY_MS`)
+- `DEVOURER_LINKHEALTH=1` — (`rxdemo` RX, needs `DEVOURER_RX_ENERGY_MS`)
   emit a `<devourer-linkhealth>` verdict line per energy window: the RX sensor
   tuple classified into a plain-language cause + fix (`src/LinkHealth.h`). The
   point is to tell a **near-field saturation** problem (strong RSSI + poor EVM —
@@ -330,7 +331,7 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   guarded (`tests/link_health_selftest.cpp`), SAT-vs-HEALTHY verified on-air
   (`tests/link_health_onair.sh`). See **`docs/bench-testing-near-field.md`**.
 
-`WiFiDriverTxDemo` selects the on-air TX mode with a single env var that it
+`txdemo` selects the on-air TX mode with a single env var that it
 parses into a `devourer::TxMode` and hands to `RtlJaguarDevice::SetTxMode`
 (the canonical runtime API; the demo sends a rate-less beacon so this mode
 applies). The library itself is radiotap-driven — a frame that carries its own
@@ -349,9 +350,9 @@ gate any more (an HT-MCS radiotap is honoured unconditionally):
 (Programmatic equivalent: `dev->SetTxMode(devourer::TxMode{...})`;
 `dev->ClearTxMode()` reverts to the built-in default.)
 
-`SvcTxDemo` is a per-packet-rate showcase: it reads length-prefixed HEVC NALs
+`svctx` is a per-packet-rate showcase: it reads length-prefixed HEVC NALs
 from stdin, classifies each by `temporal_id` / IRAP-or-parameter-set criticality
-(`txdemo/svc_tx_demo/svc_tx.h`), and injects each at the PHY rate its SVC-T layer
+(`examples/svctx/svc_tx.h`), and injects each at the PHY rate its SVC-T layer
 deserves — a per-layer unequal-error-protection ladder (robust MCS for base/IDR,
 fast MCS for enhancement), since the radiotap is honoured per-packet. The ladder
 is `DEVOURER_SVC_LADDER="CRIT=<spec>;T0=<spec>;T1=<spec>;..."` where each `<spec>`
@@ -362,7 +363,7 @@ The SVC ladder is the PHY-MCS half of cross-layer unequal error protection. The
 application-FEC half — a sub-block-integrity layer that salvages FCS-failed
 frames (`DEVOURER_RX_KEEP_CORRUPTED`) plus a Reed-Solomon outer code with
 per-layer redundancy — lives in `tools/precoder/` and is documented in
-**`docs/fused-fec.md`**. `StreamTxDemo` adds `DEVOURER_TX_PWR_OVERRIDE=N`
+**`docs/fused-fec.md`**. `streamtx` adds `DEVOURER_TX_PWR_OVERRIDE=N`
 (absolute per-rate TXAGC index 0..63, held) for the marginal-SNR bench setups
 that exercise the salvage path.
 
@@ -402,7 +403,7 @@ filters the frame stats to the canonical probe SA), and
 sounding that recovers a coarse per-bin H(f) of the link — down to 5 MHz bins
 on Jaguar3 (`docs/rx-spectrum-sensing.md`).
 
-`WiFiDriverTxDemo` also honours a TX-gain ramp + duty knob for thermal /
+`txdemo` also honours a TX-gain ramp + duty knob for thermal /
 TX-power characterisation (drives `RtlJaguarDevice::SetTxPowerOverride` +
 `ApplyTxPower`):
 
@@ -429,7 +430,7 @@ and `tests/run_thermal_gain_sweep.sh` (build + uv venv + sudo run).
 **The caller owns libusb.** `WiFiDriver::CreateRtlDevice` is intentionally
 thin — `libusb_init`, device open, kernel driver detach, and
 `libusb_claim_interface(handle, 0)` must happen **before** handing the handle
-to the factory. `demo/main.cpp` is the canonical boilerplate.
+to the factory. `examples/rx/main.cpp` is the canonical boilerplate.
 
 **Chip identity is resolved at construction** from SYS_CFG bits + USB PID.
 `CreateRtlDevice` returns an `IRtlDevice` (`Init` / `InitWrite` / `send_packet` /
@@ -553,7 +554,7 @@ dev->InitWrite(SelectedChannel{ .Channel = 36, .ChannelOffset = 0,
 dev->send_packet(buffer, len);  // buffer[0..] = radiotap header, then 802.11
 ```
 
-The canonical test beacon (`txdemo/main.cpp`) uses SA `57:42:75:05:d6:00` —
-the same constant is hardcoded into `demo/main.cpp` as the `<devourer-tx-hit>`
+The canonical test beacon (`examples/tx/main.cpp`) uses SA `57:42:75:05:d6:00` —
+the same constant is hardcoded into `examples/rx/main.cpp` as the `<devourer-tx-hit>`
 matcher and into `tests/regress.py` (`CANONICAL_SA`). Change all three
 together if it ever moves.

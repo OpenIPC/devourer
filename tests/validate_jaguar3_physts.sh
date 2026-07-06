@@ -8,7 +8,7 @@
 #
 # Rig: one known-good TX adapter (default 8812AU) beacons the canonical SA
 # (57:42:75:05:d6:00) at HT MCS1 on ch6; each Jaguar3 RX adapter runs
-# WiFiDriverDemo with DEVOURER_DUMP_BODY=1 and we assert the <devourer-body>
+# rxdemo with DEVOURER_DUMP_BODY=1 and we assert the <devourer-body>
 # lines (canonical-SA hits) show non-zero rssi AND snr (and evm for MCS/HT).
 #
 #   sudo ./tests/validate_jaguar3_physts.sh
@@ -28,20 +28,18 @@ RX_PIDS=("${RX_PIDS[@]:-0xc812 0xa81a}")
 mkdir -p "$OUT"
 
 cleanup() {
-    # NB: the kernel truncates comm to 15 chars, so `pkill -x WiFiDriverTxDem`
-    # (16 chars) never matches — use the truncated form.
-    pkill -x WiFiDriverTxDem 2>/dev/null || true
-    pkill -x WiFiDriverDemo 2>/dev/null || true
+    pkill -x txdemo 2>/dev/null || true
+    pkill -x rxdemo 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 echo "== building demos =="
-cmake --build "$ROOT/build" -j --target WiFiDriverTxDemo WiFiDriverDemo >/dev/null
+cmake --build "$ROOT/build" -j --target txdemo rxdemo >/dev/null
 
 echo "== starting TX beacon: PID=$TX_PID ch=$CH rate=$RATE =="
 sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$CH" \
     DEVOURER_TX_RATE="$RATE" \
-    "$ROOT/build/WiFiDriverTxDemo" >"$OUT/tx.log" 2>&1 &
+    "$ROOT/build/txdemo" >"$OUT/tx.log" 2>&1 &
 sleep 4   # let the TX chip finish bring-up and start airing beacons
 
 overall=0
@@ -50,7 +48,7 @@ for pid in ${RX_PIDS[@]}; do
     echo "== RX $pid on ch$CH for ${SECS}s =="
     sudo -n env DEVOURER_PID="$pid" DEVOURER_CHANNEL="$CH" \
         DEVOURER_DUMP_BODY=1 \
-        timeout "$SECS" "$ROOT/build/WiFiDriverDemo" >"$log" 2>&1 || true
+        timeout "$SECS" "$ROOT/build/rxdemo" >"$log" 2>&1 || true
 
     hits=$(grep -c "<devourer-tx-hit>" "$log" || true)
     body=$(grep "<devourer-body>" "$log" || true)

@@ -38,7 +38,7 @@ from collections import Counter
 from pathlib import Path
 
 
-# Source MAC matches the canonical beacon SA in txdemo/main.cpp and
+# Source MAC matches the canonical beacon SA in examples/tx/main.cpp and
 # inject_beacon.py. Don't change without updating both.
 CANONICAL_SA = bytes.fromhex("574275 05d600".replace(" ", ""))
 

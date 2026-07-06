@@ -1,4 +1,4 @@
-# WiFiSenseDemo — Wi-Fi motion sensing you can run on your own dongles
+# sense — Wi-Fi motion sensing you can run on your own dongles
 
 A runnable example built on the `devourer` library that turns two cheap Realtek
 Wi-Fi adapters into a **motion / presence sensor**. No SDR, no special AP — one
@@ -60,7 +60,7 @@ From the repo root:
 
 ```sh
 cmake -S . -B build
-cmake --build build -j --target WiFiSenseDemo
+cmake --build build -j --target sense
 ```
 
 The decoder has a headless self-test that runs under `ctest` (no radio needed):
@@ -74,7 +74,7 @@ ctest --test-dir build -R bf_report_decode
 ## 4. Run it
 
 ```sh
-./build/WiFiSenseDemo --channel 6 \
+./build/sense --channel 6 \
   --sounder    0x0bda:0xc812 \
   --beamformee 0x0bda:0xb82c
 ```
@@ -259,7 +259,7 @@ them offline:
 
 ```sh
 # capture ~30 s of reports to a file (stderr carries the raw dump)
-DEVOURER_SENSE_DUMP=1 ./build/WiFiSenseDemo --channel 6 \
+DEVOURER_SENSE_DUMP=1 ./build/sense --channel 6 \
   --sounder 0x0bda:0xc812 --beamformee 0x0bda:0xb82c \
   2> capture.txt
 
@@ -318,7 +318,7 @@ chosen.
 
 | File | What |
 |------|------|
-| `examples/sense/main.cpp` | the `WiFiSenseDemo` binary: adapter bring-up, sounding loop, `AdaptiveDetector`, display, watchdog. |
+| `examples/sense/main.cpp` | the `sense` binary: adapter bring-up, sounding loop, `AdaptiveDetector`, display, watchdog. |
 | `src/BfReportDecode.h` | header-only report decoder + `MotionMeter` (reusable; no libusb dependency). |
 | `examples/sense/bf_report_decode_selftest.cpp` | headless `ctest` that guards the decoder against a real captured report. |
 | `docs/beamforming-victim-sensing.md` | the theory: why a beamforming report measures the channel and senses motion. |

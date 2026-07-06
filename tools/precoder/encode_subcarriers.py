@@ -26,15 +26,15 @@ The originating plan's prose ("48 data + 4 pilot", "24 input bits") describes
 *legacy* 802.11a OFDM (6 Mbps BPSK). It also said to select the rate via the HT
 radiotap MCS field — but HT MCS 0 is a DIFFERENT numerology (52 SD, 26 info
 bits, 13x4 interleaver), so the working OFDM-BPSK path is legacy 6 Mbps
-(honoured via the radiotap RATE field), which is what `PrecoderDemo`
+(honoured via the radiotap RATE field), which is what `precoder`
 transmits. Both numerologies are implemented:
 
     --phy legacy   (default)  N_SD=48  N_CBPS=48  N_DBPS=24  interleaver 16x3
     --phy ht                  N_SD=52  N_CBPS=52  N_DBPS=26  interleaver 13x4
 
-`legacy` is the default to match `PrecoderDemo`'s 6 Mbps OFDM frame (and the
+`legacy` is the default to match `precoder`'s 6 Mbps OFDM frame (and the
 plan's prose). `--phy ht` is correct math but won't reach the air until
-send_packet's HT-MCS-index gap is fixed AND PrecoderDemo emits an HT radiotap.
+send_packet's HT-MCS-index gap is fixed AND precoder emits an HT radiotap.
 
 SCOPE / ASSUMPTIONS (documented, deliberate for a PoC)
 ------------------------------------------------------
@@ -482,7 +482,7 @@ def build_argparser() -> argparse.ArgumentParser:
                          "discover the real one with seed_probe.py")
     ap.add_argument("--phy", choices=("ht", "legacy"), default="legacy",
                     help="legacy = 802.11a/g 6 Mbps BPSK (48 SD, default, "
-                         "matches PrecoderDemo's on-air rate); ht = HT MCS0 "
+                         "matches precoder's on-air rate); ht = HT MCS0 "
                          "(52 SD, correct math but not reachable on air — see "
                          "module docstring)")
     ap.add_argument("--mcs", type=int, default=0,

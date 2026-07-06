@@ -12,8 +12,8 @@
 # Usage: sudo tests/jaguar2_8821c_bw_txhit.sh <rx|tx> <40|80> [channel] [seconds]
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-RXDEMO="$HERE/../build/WiFiDriverDemo"
-TXDEMO="$HERE/../build/WiFiDriverTxDemo"
+RXDEMO="$HERE/../build/rxdemo"
+TXDEMO="$HERE/../build/txdemo"
 DIR=${1:-rx} BW=${2:-40} CH=${3:-1} SECS=${4:-15}
 C811_VID=0x0bda C811_PID=0xc811   # CF-811AC (8821C)
 T3U_VID=0x2357  T3U_PID=0x012d     # T3U (8822B, known-good wide TX)
@@ -27,8 +27,8 @@ restored=0
 cleanup() {
     [ "$restored" = 1 ] && return
     restored=1
-    pkill -f WiFiDriverTxDemo 2>/dev/null
-    pkill -f WiFiDriverDemo 2>/dev/null
+    pkill -f txdemo 2>/dev/null
+    pkill -f rxdemo 2>/dev/null
     sleep 1
     modprobe rtw88_8821cu rtw88_8822bu 2>/dev/null
     echo "=== kernel drivers restored ==="

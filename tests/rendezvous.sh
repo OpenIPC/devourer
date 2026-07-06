@@ -17,8 +17,8 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-DEMO_TX="$ROOT/build/WiFiDriverTxDemo"
-DEMO_RX="$ROOT/build/WiFiDriverDemo"
+DEMO_TX="$ROOT/build/txdemo"
+DEMO_RX="$ROOT/build/rxdemo"
 
 BEACON_VID=0x0bda BEACON_PID="" BEACON_CHANNEL=6 RATE=MCS0
 SCANNER_VID=0x0bda SCANNER_PID="" CHANNELS="1,6,11" DWELL_MS=350 ROUNDS=4
@@ -42,7 +42,7 @@ done
 [ -n "$BEACON_PID" ] && [ -n "$SCANNER_PID" ] || {
   echo "need --beacon-pid and --scanner-pid" >&2; exit 2; }
 
-cleanup() { for c in WiFiDriverTxDem WiFiDriverDemo; do pkill -x "$c" 2>/dev/null || true; done; }
+cleanup() { for c in txdemo rxdemo; do pkill -x "$c" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 
 echo "== building =="

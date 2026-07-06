@@ -28,8 +28,8 @@ echo "[harness] TX $TXPID=$TXS  RX $RXPID=$RXS  ch=$CH  ${SECS}s"
 TXHUB=${TXS%.*}; TXPORT=${TXS##*.}
 
 cleanup() {
-  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null
-  sudo pkill -9 -x WiFiDriverDemo 2>/dev/null
+  sudo pkill -9 -x txdemo 2>/dev/null
+  sudo pkill -9 -x rxdemo 2>/dev/null
   echo "$TXS:1.0" | sudo tee /sys/bus/usb/drivers/$TXDRV/bind >/dev/null 2>&1
   [ -n "$RXDRV" ] && echo "$RXS:1.0" | sudo tee /sys/bus/usb/drivers/$RXDRV/bind >/dev/null 2>&1
   sleep 2
@@ -41,13 +41,13 @@ trap cleanup EXIT
 echo "$TXS:1.0" | sudo tee /sys/bus/usb/drivers/$TXDRV/unbind >/dev/null 2>&1; sleep 1
 echo "=== starting $TXPID beacon flood on ch$CH ==="
 sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0x$TXPID DEVOURER_CHANNEL=$CH \
-     stdbuf -oL timeout -k 5 "$SECS" "${TXBIN:-build/WiFiDriverTxDemo}" >/tmp/eu_rxval_tx.log 2>&1 &
+     stdbuf -oL timeout -k 5 "$SECS" "${TXBIN:-build/txdemo}" >/tmp/eu_rxval_tx.log 2>&1 &
 sleep 6   # let TX come up before RX starts listening
 
 # --- run RX DUT ---
 echo "=== running RX DUT ($RXPID) on ch$CH ==="
 sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0x$RXPID DEVOURER_CHANNEL=$CH \
-     stdbuf -oL -eL timeout -k 5 $((SECS-7)) "${RXBIN:-build/WiFiDriverDemo}" 2>&1 \
+     stdbuf -oL -eL timeout -k 5 $((SECS-7)) "${RXBIN:-build/rxdemo}" 2>&1 \
      | tee /tmp/eu_rxval_rx.log | grep -iE "IQK done|RX pkt|tx-hit|entering RX" | sed 's/^/[rx] /'
 
 echo "==================== RESULT ===================="

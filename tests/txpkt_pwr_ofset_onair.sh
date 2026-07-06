@@ -23,20 +23,20 @@ STEPS="0 4 5 1 2 3"
 declare -A DB=( [0]=0 [4]=3 [5]=6 [1]=-3 [2]=-7 [3]=-11 )
 mkdir -p "$OUT"
 
-cleanup() { pkill -x WiFiDriverTxDem 2>/dev/null||true; pkill -x WiFiDriverDemo 2>/dev/null||true; true; }
+cleanup() { pkill -x txdemo 2>/dev/null||true; pkill -x rxdemo 2>/dev/null||true; true; }
 trap cleanup EXIT INT TERM
 plugged() { lsusb -d "$(printf '%04x:%04x' "$2" "$1")" >/dev/null 2>&1; }
 plugged "$TX_PID" "$TX_VID" || { echo "SKIP: 8822BU (TX) not plugged"; exit 0; }
 plugged "$GROUND_PID" "$GROUND_VID" || { echo "SKIP: ground $GROUND_PID not plugged"; exit 0; }
 
 echo "== building =="
-cmake --build "$ROOT/build" -j --target WiFiDriverTxDemo WiFiDriverDemo >/dev/null || exit 1
+cmake --build "$ROOT/build" -j --target txdemo rxdemo >/dev/null || exit 1
 
 echo "== ground RX ($GROUND_PID) on ch$CH =="
 : >"$OUT/ground.log"
 sudo -n env DEVOURER_PID="$GROUND_PID" DEVOURER_VID="$GROUND_VID" \
     DEVOURER_CHANNEL="$CH" DEVOURER_STREAM_OUT=1 \
-    stdbuf -oL timeout 300 "$ROOT/build/WiFiDriverDemo" 2>"$OUT/ground.err" \
+    stdbuf -oL timeout 300 "$ROOT/build/rxdemo" 2>"$OUT/ground.err" \
     | while IFS= read -r l; do printf '%s %s\n' "$(date +%s.%N)" "$l"; done \
     >>"$OUT/ground.log" &
 GJ=$!
@@ -49,12 +49,12 @@ for step in $STEPS; do
     sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_VID="$TX_VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_TX_RATE=MCS3 DEVOURER_TX_PWR=40 DEVOURER_TX_PKT_OFSET="$step" \
         DEVOURER_TX_GAP_US=1500 \
-        timeout 12 "$ROOT/build/WiFiDriverTxDemo" >/dev/null 2>&1 || true
+        timeout 12 "$ROOT/build/txdemo" >/dev/null 2>&1 || true
     t1="$(date +%s.%N)"
     echo "$step ${DB[$step]} $t0 $t1" >>"$OUT/cells.txt"
     sleep 2
 done
-sudo -n pkill -x WiFiDriverDemo 2>/dev/null; wait "$GJ" 2>/dev/null
+sudo -n pkill -x rxdemo 2>/dev/null; wait "$GJ" 2>/dev/null
 
 # --- radiotap path: same effect via a per-packet DBM_TX_POWER field (not the
 #     device default) — proves send_packet honours per-frame power. Two cells
@@ -62,7 +62,7 @@ sudo -n pkill -x WiFiDriverDemo 2>/dev/null; wait "$GJ" 2>/dev/null
 echo "== ground still up: radiotap DBM_TX_POWER cells ==" >&2
 sudo -n env DEVOURER_PID="$GROUND_PID" DEVOURER_VID="$GROUND_VID" \
     DEVOURER_CHANNEL="$CH" DEVOURER_STREAM_OUT=1 \
-    stdbuf -oL timeout 90 "$ROOT/build/WiFiDriverDemo" 2>/dev/null \
+    stdbuf -oL timeout 90 "$ROOT/build/rxdemo" 2>/dev/null \
     | while IFS= read -r l; do printf '%s %s\n' "$(date +%s.%N)" "$l"; done \
     >>"$OUT/ground.log" &
 GJ2=$!
@@ -73,12 +73,12 @@ for pair in "0:0" "6:6" "-11:-11"; do
     sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_VID="$TX_VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_TX_RATE=MCS3 DEVOURER_TX_PWR=40 DEVOURER_TX_PKT_PWR_DB="$db" \
         DEVOURER_TX_GAP_US=1500 \
-        timeout 12 "$ROOT/build/WiFiDriverTxDemo" >/dev/null 2>&1 || true
+        timeout 12 "$ROOT/build/txdemo" >/dev/null 2>&1 || true
     t1="$(date +%s.%N)"
     echo "r$db $db $t0 $t1" >>"$OUT/cells.txt"
     sleep 2
 done
-sudo -n pkill -x WiFiDriverDemo 2>/dev/null; wait "$GJ2" 2>/dev/null
+sudo -n pkill -x rxdemo 2>/dev/null; wait "$GJ2" 2>/dev/null
 
 python3 - "$OUT/ground.log" "$OUT/cells.txt" <<'PYEOF'
 import re, statistics, sys

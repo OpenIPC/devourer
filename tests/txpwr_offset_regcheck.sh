@@ -24,8 +24,8 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${TXPWR_REGCHECK_OUT:-/tmp/devourer-txpwr-regcheck}"
 MASTER_BUILD="${MASTER_BUILD:-/tmp/devourer-master-build}"
-STEP_DEMO="$ROOT/build/TxPowerStepDemo"
-TX_DEMO="$ROOT/build/WiFiDriverTxDemo"
+STEP_DEMO="$ROOT/build/txpower"
+TX_DEMO="$ROOT/build/txdemo"
 mkdir -p "$OUT"
 
 PASS=0; FAIL=0; SKIP=0
@@ -34,13 +34,13 @@ fail() { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
 skip() { echo "  SKIP: $*"; SKIP=$((SKIP+1)); }
 
 cleanup() {
-    pkill -x TxPowerStepDemo 2>/dev/null || true
-    pkill -x WiFiDriverTxDem 2>/dev/null || true
+    pkill -x txpower 2>/dev/null || true
+    pkill -x txdemo 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 echo "== building =="
-cmake --build "$ROOT/build" -j --target TxPowerStepDemo WiFiDriverTxDemo >/dev/null || exit 1
+cmake --build "$ROOT/build" -j --target txpower txdemo >/dev/null || exit 1
 
 # DUT table: pid vid ch_a ch_b family
 # ch_a/ch_b are same-band channels in different efuse channel groups so the
@@ -92,12 +92,12 @@ last_canary() { # $1 = log file  (same extractor as hop_parity_check.sh)
 PARITY_EXCLUDE='MAC 0x560|BB 0xc10|BB 0xc14|BB 0xe10|BB 0xe14|BB 0xc90|BB 0xc94|BB 0xe90|BB 0xe94|RF\[[AB]\] 0x00 |RF\[[AB]\] 0x42 |RF\[[AB]\] 0x1a '
 
 ensure_master_build() {
-    [ -x "$MASTER_BUILD/WiFiDriverTxDemo" ] && return 0
+    [ -x "$MASTER_BUILD/txdemo" ] && return 0
     echo "== building master baseline (one-time, $MASTER_BUILD) =="
     local wt="/tmp/devourer-master-worktree"
     git -C "$ROOT" worktree add --force "$wt" origin/master >/dev/null 2>&1 || return 1
     cmake -S "$wt" -B "$MASTER_BUILD" -DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config >/dev/null 2>&1 || return 1
-    cmake --build "$MASTER_BUILD" -j --target WiFiDriverTxDemo >/dev/null 2>&1 || return 1
+    cmake --build "$MASTER_BUILD" -j --target txdemo >/dev/null 2>&1 || return 1
 }
 
 run_canary() { # $1=binary $2=pid $3=vid $4=channel $5=outfile
@@ -150,7 +150,7 @@ for dut in "${DUTS[@]}"; do
     if [ "${SKIP_PARITY:-0}" = "1" ]; then
         skip "$name parity (SKIP_PARITY=1)"
     elif ensure_master_build; then
-        run_canary "$MASTER_BUILD/WiFiDriverTxDemo" "$PID" "$VID" "$CH_A" "$OUT/$tag-canary-master.log"
+        run_canary "$MASTER_BUILD/txdemo" "$PID" "$VID" "$CH_A" "$OUT/$tag-canary-master.log"
         run_canary "$TX_DEMO" "$PID" "$VID" "$CH_A" "$OUT/$tag-canary-new.log"
         last_canary "$OUT/$tag-canary-master.log" | grep -Ev "$PARITY_EXCLUDE" >"$OUT/$tag-canary-master.regs"
         last_canary "$OUT/$tag-canary-new.log"    | grep -Ev "$PARITY_EXCLUDE" >"$OUT/$tag-canary-new.regs"

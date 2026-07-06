@@ -33,14 +33,14 @@ fail() { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
 skip() { echo "  SKIP: $*"; SKIP=$((SKIP+1)); }
 
 cleanup() {
-    pkill -x WiFiDriverTxDem 2>/dev/null || true
-    pkill -x WiFiDriverDemo 2>/dev/null || true
+    pkill -x txdemo 2>/dev/null || true
+    pkill -x rxdemo 2>/dev/null || true
     true
 }
 trap cleanup EXIT INT TERM
 
 echo "== building =="
-cmake --build "$ROOT/build" -j --target WiFiDriverTxDemo WiFiDriverDemo >/dev/null || exit 1
+cmake --build "$ROOT/build" -j --target txdemo rxdemo >/dev/null || exit 1
 
 # DUT table: pid vid ramp_start ramp_stop nominal_db_per_step channel
 #  - 8821AU runs at ch6: its 5 GHz chain IGNORES BB TXAGC (measured flat at
@@ -95,7 +95,7 @@ for dut in "${DUTS[@]}"; do
     : >"$OUT/$tag-ground.log"
     sudo -n env DEVOURER_PID="$GPID" DEVOURER_VID="$GVID" \
         DEVOURER_CHANNEL="$CH" DEVOURER_STREAM_OUT=1 \
-        stdbuf -oL timeout 300 "$ROOT/build/WiFiDriverDemo" 2>"$OUT/$tag-ground.err" \
+        stdbuf -oL timeout 300 "$ROOT/build/rxdemo" 2>"$OUT/$tag-ground.err" \
         | while IFS= read -r line; do
             printf '%s %s\n' "$(date +%s.%N)" "$line"
         done >>"$OUT/$tag-ground.log" &
@@ -111,12 +111,12 @@ for dut in "${DUTS[@]}"; do
         sudo -n env DEVOURER_PID="$PID" DEVOURER_VID="$VID" \
             DEVOURER_CHANNEL="$CH" DEVOURER_TX_PWR="$idx" \
             DEVOURER_TX_GAP_US=2000 \
-            timeout 14 "$ROOT/build/WiFiDriverTxDemo" >"$OUT/$tag-cell$idx.log" 2>&1 || true
+            timeout 14 "$ROOT/build/txdemo" >"$OUT/$tag-cell$idx.log" 2>&1 || true
         t1="$(date +%s.%N)"
         echo "$idx $t0 $t1" >>"$OUT/$tag-cells.txt"
         sleep 2
     done
-    sudo -n pkill -x WiFiDriverDemo 2>/dev/null
+    sudo -n pkill -x rxdemo 2>/dev/null
     wait "$GROUND_JOB" 2>/dev/null
 
     # Slope fit: per cell, median ground RSSI (chain A) of the canonical-SA

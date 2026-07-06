@@ -45,13 +45,13 @@ TX_LOG="$OUT/tx.log"
 RX_LOG="$OUT/rx.log"
 
 cleanup() {
-    pkill -x WiFiDriverTxDem 2>/dev/null || true
+    pkill -x txdemo 2>/dev/null || true
     pkill -f "tests/hop_rx_probe.py" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-echo "== building WiFiDriverTxDemo =="
-cmake --build "$ROOT/build" -j --target WiFiDriverTxDemo >/dev/null
+echo "== building txdemo =="
+cmake --build "$ROOT/build" -j --target txdemo >/dev/null
 
 echo "== preparing uv venv (system site-packages for uhd) =="
 cd "$HERE"
@@ -86,7 +86,7 @@ sudo --preserve-env \
         DEVOURER_HOP_RADIOTAP="${HOP_RADIOTAP:-}" \
         DEVOURER_TX_GAP_US="$GAP_US" \
         DEVOURER_TX_RATE="$TX_RATE" \
-    "$ROOT/build/WiFiDriverTxDemo" >"$TX_LOG" 2>&1 &
+    "$ROOT/build/txdemo" >"$TX_LOG" 2>&1 &
 TX_PID_PROC=$!
 
 # Wait until the TX is actually hopping (first <devourer-hop> marker) before we

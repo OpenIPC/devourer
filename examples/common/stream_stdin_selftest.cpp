@@ -1,6 +1,6 @@
-// StreamStdinSelftest — headless regression test for txdemo/stream_stdin.h.
+// StreamStdinSelftest — headless regression test for examples/common/stream_stdin.h.
 //
-// The stdin-driven stream demos (StreamTxDemo, StreamDuplexDemo) read a binary
+// The stdin-driven stream demos (streamtx, duplex) read a binary
 // <u32_le len><PSDU> stream from stdin. On Windows that only works if stdin is
 // put into binary mode; the gate has to be `_WIN32` (not `_MSC_VER`) so it also
 // fires under mingw/GCC. A regression there is invisible to a build-only CI job

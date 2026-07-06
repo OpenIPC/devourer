@@ -4,7 +4,7 @@
 # DUT:     RTL8812CU (0bda:c812, 9-1.3) runs devourer's Jaguar-3 TX demo,
 #          injecting the canonical beacon SA 57:42:75:05:d6:00 on ch36.
 # Witness: RTL8812AU (0bda:8812, 9-2) runs devourer's Jaguar-1 RX demo in
-#          monitor on ch36 — demo/main.cpp already prints <devourer-tx-hit>
+#          monitor on ch36 — examples/rx/main.cpp already prints <devourer-tx-hit>
 #          when it decodes that SA. Dogfoods devourer on both ends and avoids
 #          the RTL8814AU host-capture path entirely.
 # Bonus:   USRP B210 in-band power at 5180 MHz.
@@ -17,7 +17,7 @@ SNIFF_LOG=/tmp/j3_sniff.log
 DUT_LOG=/tmp/j3_dut_tx.log
 rm -f "$SNIFF_LOG" "$DUT_LOG"
 
-SNIFF_COMM=$(basename build/WiFiDriverDemo | cut -c1-15)
+SNIFF_COMM=$(basename build/rxdemo | cut -c1-15)
 cleanup() {
   sudo pkill -9 -x "$SNIFF_COMM" 2>/dev/null
 }
@@ -25,7 +25,7 @@ trap cleanup EXIT
 
 echo "=== start RX sniffer: devourer on RTL8812AU (ch36 monitor) ==="
 sudo env DEVOURER_PID=0x8812 DEVOURER_VID=0x0bda DEVOURER_CHANNEL=36 \
-     stdbuf -oL -eL build/WiFiDriverDemo > "$SNIFF_LOG" 2>&1 &
+     stdbuf -oL -eL build/rxdemo > "$SNIFF_LOG" 2>&1 &
 SNIFF=$!
 # Wait until the sniffer is actually in its RX loop before keying the DUT.
 for i in $(seq 1 20); do
@@ -36,7 +36,7 @@ sleep 2
 echo "    sniffer up ($(wc -l < "$SNIFF_LOG") log lines)"
 
 echo "=== key DUT: devourer Jaguar-3 TX on RTL8812CU (ch36) ==="
-sudo SECS=22 tests/jaguar3_devourer_run.sh build/WiFiDriverTxDemo 22 \
+sudo SECS=22 tests/jaguar3_devourer_run.sh build/txdemo 22 \
     > "$DUT_LOG" 2>&1 &
 HARNESS=$!
 

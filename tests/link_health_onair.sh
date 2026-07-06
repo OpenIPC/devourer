@@ -16,7 +16,7 @@
 # cases calibrated from the AWGN sweep (tests/j3_dig_penalty_sweep.sh). A third
 # regime here injects B210 AWGN as an informational check only (no pass/fail).
 #
-# Ground = a second devourer part running WiFiDriverDemo with
+# Ground = a second devourer part running rxdemo with
 # DEVOURER_RX_ENERGY_MS + DEVOURER_LINKHEALTH.
 #
 # Usage: sudo -v && tests/link_health_onair.sh [tx_pid] [ground_pid]
@@ -35,8 +35,8 @@ fail() { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
 skip() { echo "  SKIP: $*"; SKIP=$((SKIP+1)); }
 
 cleanup() {
-    pkill -x WiFiDriverTxDem 2>/dev/null || true
-    pkill -x WiFiDriverDemo 2>/dev/null || true
+    pkill -x txdemo 2>/dev/null || true
+    pkill -x rxdemo 2>/dev/null || true
     sudo -n pkill -f sdr_interferer 2>/dev/null || true
     true
 }
@@ -46,7 +46,7 @@ plugged "$TX_PID" "$TX_VID" || { echo "SKIP: TX $TX_PID not plugged"; exit 0; }
 plugged "$GROUND_PID" "$GROUND_VID" || { echo "SKIP: ground $GROUND_PID not plugged"; exit 0; }
 
 echo "== building =="
-cmake --build "$ROOT/build" -j --target WiFiDriverDemo WiFiDriverTxDemo >/dev/null || exit 1
+cmake --build "$ROOT/build" -j --target rxdemo txdemo >/dev/null || exit 1
 
 # Run a ground-RX window against a beacon at TX index $1 (+ optional interferer
 # gain in $2); echo the MODAL <devourer-linkhealth> verdict over the window.
@@ -61,15 +61,15 @@ run_regime() { # $1=tx_idx $2=jam_gain("" = none) $3=tag
     fi
     sudo -n env DEVOURER_PID="$GROUND_PID" DEVOURER_VID="$GROUND_VID" \
         DEVOURER_CHANNEL="$CH" DEVOURER_RX_ENERGY_MS=500 DEVOURER_LINKHEALTH=1 \
-        timeout 22 "$ROOT/build/WiFiDriverDemo" >"$OUT/$tag.log" 2>&1 &
+        timeout 22 "$ROOT/build/rxdemo" >"$OUT/$tag.log" 2>&1 &
     local gj=$!
     sleep 6
     sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_VID="$TX_VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_TX_RATE=MCS3 DEVOURER_TX_PWR="$idx" DEVOURER_TX_GAP_US=1500 \
-        timeout 14 "$ROOT/build/WiFiDriverTxDemo" >/dev/null 2>&1 &
+        timeout 14 "$ROOT/build/txdemo" >/dev/null 2>&1 &
     local tx=$!
     wait "$tx" 2>/dev/null
-    sudo -n pkill -x WiFiDriverDemo 2>/dev/null; wait "$gj" 2>/dev/null
+    sudo -n pkill -x rxdemo 2>/dev/null; wait "$gj" 2>/dev/null
     [ -n "$jampid" ] && { kill "$jampid" 2>/dev/null; sudo -n pkill -f sdr_interferer 2>/dev/null; }
     sleep 2
     # Modal verdict across the window's linkhealth lines (skip the first, it can

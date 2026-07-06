@@ -14,7 +14,7 @@
 #    "partially corrupt" — it kills DETECTION (preamble too weak), so the RX gets
 #    ZERO frames. Power controls reception; MCS (and the optional interferer)
 #    control data corruption.
-#  * Capture-then-offline-analyse (not a live pipe): WiFiDriverDemo → raw log,
+#  * Capture-then-offline-analyse (not a live pipe): rxdemo → raw log,
 #    then fused_fec_rx reads the log. Robust + re-analysable with different FEC
 #    params.
 #  * Optional USRP B210 interferer (USE_INTERFERER=1, IGAIN dB) raises the noise
@@ -47,7 +47,7 @@ IMODE=${IMODE:-noise}                     # noise | cw
 
 RAW=/tmp/fused_fec_rx_raw.log
 
-KILL(){ sudo pkill -9 StreamTxDem 2>/dev/null; sudo pkill -9 WiFiDriverDem 2>/dev/null
+KILL(){ sudo pkill -9 streamtx 2>/dev/null; sudo pkill -9 rxdemo 2>/dev/null
         sudo pkill -9 -f fused_fec 2>/dev/null; sudo pkill -9 -f sdr_interferer 2>/dev/null; }
 trap KILL EXIT
 
@@ -88,7 +88,7 @@ fi
 : > "$RAW"
 sudo env DEVOURER_VID=$RX_VID DEVOURER_PID=$RX_PID DEVOURER_CHANNEL=$CH \
      DEVOURER_STREAM_OUT=1 DEVOURER_RX_KEEP_CORRUPTED=1 \
-     timeout $((SECS + 30)) "$ROOT/build/WiFiDriverDemo" >"$RAW" 2>/dev/null &
+     timeout $((SECS + 30)) "$ROOT/build/rxdemo" >"$RAW" 2>/dev/null &
 RXBG=$!
 sleep 8   # RX init (open + reset + monitor up)
 
@@ -100,11 +100,11 @@ pwr_env=""
 $PY "$FEC/fused_fec_tx.py" --input /tmp/fused_fec_src.bin --repeat 4 $FEC_ARGS 2>/dev/null \
   | sudo env DEVOURER_VID=$TX_VID DEVOURER_PID=$TX_PID DEVOURER_CHANNEL=$CH \
          DEVOURER_TX_RATE=$TX_RATE $pwr_env \
-         timeout "$SECS" "$ROOT/build/StreamTxDemo" >/dev/null 2>&1
+         timeout "$SECS" "$ROOT/build/streamtx" >/dev/null 2>&1
 
 sleep 3
 sudo pkill -9 -f sdr_interferer 2>/dev/null
-sudo pkill -9 WiFiDriverDem 2>/dev/null
+sudo pkill -9 rxdemo 2>/dev/null
 wait "$RXBG" 2>/dev/null
 
 # Offline analysis: same FEC params, baseline vs SBI.

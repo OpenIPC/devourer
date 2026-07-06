@@ -41,8 +41,8 @@ TX_PID=0x8812 TX_VID=0x0bda             # 8812AU beacon source
 DUT_PID=0xa81a DUT_VID=0x0bda           # 8822EU — Jaguar3, the community chip
 
 cleanup() {
-    sudo -n pkill -x WiFiDriverDemo 2>/dev/null || true
-    sudo -n pkill -x WiFiDriverTxDem 2>/dev/null || true
+    sudo -n pkill -x rxdemo 2>/dev/null || true
+    sudo -n pkill -x txdemo 2>/dev/null || true
     sudo -n pkill -f sdr_interferer 2>/dev/null || true
     true
 }
@@ -55,7 +55,7 @@ for d in "$TX_PID $TX_VID beacon-8812AU" "$DUT_PID $DUT_VID DUT-8822EU"; do
 done
 
 echo "== building =="
-cmake --build "$ROOT/build" -j --target WiFiDriverDemo WiFiDriverTxDemo >/dev/null || exit 1
+cmake --build "$ROOT/build" -j --target rxdemo txdemo >/dev/null || exit 1
 
 # One RX cell against a running interferer + beacon. $5 = "1" arms dis_cca.
 # Echoes "hits igi_med fa_med".
@@ -69,14 +69,14 @@ run_cell() { # $1=gain $2=tag $3=discca(0|1)
     sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_VID="$TX_VID" \
         DEVOURER_CHANNEL="$CH" DEVOURER_TX_RATE=MCS3 DEVOURER_TX_PWR="$BEACON_PWR" \
         DEVOURER_TX_GAP_US=1500 \
-        timeout $((DUR + 8)) "$ROOT/build/WiFiDriverTxDemo" >/dev/null 2>&1 &
+        timeout $((DUR + 8)) "$ROOT/build/txdemo" >/dev/null 2>&1 &
     local tx=$!
     sleep 3
     local discca_env=""
     [ "$discca" = "1" ] && discca_env="DEVOURER_DIS_CCA=1"
     sudo -n env DEVOURER_PID="$DUT_PID" DEVOURER_VID="$DUT_VID" \
         DEVOURER_CHANNEL="$CH" DEVOURER_RX_ENERGY_MS=500 $discca_env \
-        timeout "$DUR" "$ROOT/build/WiFiDriverDemo" >"$OUT/$tag.log" 2>&1 || true
+        timeout "$DUR" "$ROOT/build/rxdemo" >"$OUT/$tag.log" 2>&1 || true
     kill "$tx" 2>/dev/null; wait "$tx" 2>/dev/null
     kill "$jam" 2>/dev/null; wait "$jam" 2>/dev/null
     sudo -n pkill -f sdr_interferer 2>/dev/null
@@ -105,7 +105,7 @@ PYEOF
 # Confirm the knob actually lands its registers once (no interferer) before the sweep.
 echo "== register-landing check (no interferer) =="
 sudo -n env DEVOURER_PID="$DUT_PID" DEVOURER_VID="$DUT_VID" DEVOURER_CHANNEL="$CH" \
-    DEVOURER_DIS_CCA=1 timeout 6 "$ROOT/build/WiFiDriverDemo" 2>&1 \
+    DEVOURER_DIS_CCA=1 timeout 6 "$ROOT/build/rxdemo" 2>&1 \
     | grep -m1 "CCA/EDCCA" || echo "  WARN: no CCA/EDCCA log line seen"
 
 printf "%-8s | %-22s | %-22s\n" "gain_dB" "dis_cca=0 (hits/igi/fa)" "dis_cca=1 (hits/igi/fa)"

@@ -4,9 +4,9 @@
 Measures, per plugged DUT, how long it takes from process start until the
 driver can actually move frames:
 
-  * devourer RX  — `WiFiDriverDemo` until `init-timing: demo.first_rx_frame`
+  * devourer RX  — `rxdemo` until `init-timing: demo.first_rx_frame`
                    (exec → first 802.11 frame delivered).
-  * devourer TX  — `WiFiDriverTxDemo` until `init-timing: txdemo.first_tx_submit`
+  * devourer TX  — `txdemo` until `init-timing: txdemo.first_tx_submit`
                    (exec → first bulk-OUT submitted; includes txdemo's settle
                    sleep, deliberately — that's the user-visible latency).
   * kernel       — two flavours, same stage names:
@@ -126,7 +126,7 @@ def run_devourer_cell(
     `txdemo.first_tx_submit` (tx); the process is killed as soon as the
     marker appears, or at timeout.
     """
-    binary = "WiFiDriverDemo" if mode == "rx" else "WiFiDriverTxDemo"
+    binary = "rxdemo" if mode == "rx" else "txdemo"
     end_marker = "demo.first_rx_frame" if mode == "rx" else "txdemo.first_tx_submit"
 
     detach_from_host_kernel(dut)
@@ -264,7 +264,7 @@ def start_traffic_source(
     log_path = logdir / f"traffic-{src.pid}.log"
     fh = open(log_path, "w")
     proc = regress._register_local_proc(subprocess.Popen(
-        [str(devourer_root / "build" / "WiFiDriverTxDemo")],
+        [str(devourer_root / "build" / "txdemo")],
         env=env, stdout=fh, stderr=subprocess.STDOUT,
         preexec_fn=regress._child_preexec,
     ))

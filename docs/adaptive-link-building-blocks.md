@@ -80,7 +80,7 @@ baseband directly; see [`rx-spectrum-sensing.md`](rx-spectrum-sensing.md)):
   the fade state the receive-chain lever adapts to — decorrelated, fast-fading
   antennas are where combining more chains pays, so a motion signal tells the
   controller when to open chains up and when to collapse to one. (The
-  `WiFiSenseDemo` example surfaces this as a motion-energy readout; see
+  `sense` example surfaces this as a motion-energy readout; see
   [`beamforming-victim-sensing.md`](beamforming-victim-sensing.md).)
 
 **Thermal** (a local safety input, not a link sensor):

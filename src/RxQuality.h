@@ -4,7 +4,7 @@
  *
  * devourer already exposes per-frame RSSI/SNR/EVM (the Packet callback) and
  * frame-free FA/CCA/IGI (GetRxEnergy), but the windowing + the LinkHealth
- * verdict lived only in demo/main.cpp. This promotes that into the library: the
+ * verdict lived only in examples/rx/main.cpp. This promotes that into the library: the
  * device aggregates per-frame RX quality internally, and GetRxQuality() returns
  * one struct fusing the frame aggregate, the frame-free energy, a passive
  * noise-floor estimate, and the plain-language verdict.

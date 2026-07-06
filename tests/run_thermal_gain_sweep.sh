@@ -18,7 +18,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 
 cleanup() {
     # Exact-comm kills only — never a broad pkill pattern.
-    for comm in WiFiDriverTxDemo sdr_power_probe.py; do
+    for comm in txdemo sdr_power_probe.py; do
         pkill -x "$comm" 2>/dev/null || true
     done
     # sdr_power_probe runs as `python3 .../sdr_power_probe.py`; comm is python3,

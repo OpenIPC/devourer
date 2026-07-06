@@ -13,13 +13,13 @@ default, never cooperate:
    every 802.11 MCS. Its code rate is fixed by the MCS choice. devourer already
    selects it per packet from the radiotap header / `TxMode`
    (`src/RadiotapBuilder.cpp`, `src/RtlJaguarDevice.cpp`), and the SVC ladder
-   (`txdemo/svc_tx_demo/svc_tx.h`) already picks a robust MCS for important
+   (`examples/svctx/svc_tx.h`) already picks a robust MCS for important
    video layers.
 2. **Application-layer FEC** — a packet-erasure code spread across radio frames
    (Reed-Solomon / RaptorQ / RLC). It recovers whole frames that are *lost*.
 3. **Corrupted-frame retention** — `DEVOURER_RX_KEEP_CORRUPTED` keeps frames
    that fail the 802.11 FCS instead of dropping them
-   (`src/RadioManagementModule.cpp` sets RCR `ACRC32|AICV`; `demo/main.cpp`
+   (`src/RadioManagementModule.cpp` sets RCR `ACRC32|AICV`; `examples/rx/main.cpp`
    surfaces the body with `crc_err`/`icv_err` + per-frame RSSI/EVM/SNR).
 
 **The gap:** a frame that fails the FCS is normally dropped wholesale, so the
@@ -104,7 +104,7 @@ where RaptorQ's probabilistic overhead is worst.
 
 `tools/precoder/svc_uep_fec.py` is the application-FEC half of cross-layer
 unequal error protection (Abdel-Khalek & Heath, JSAC 2012). The PHY-MCS half
-already lives in C++ (`txdemo/svc_tx_demo/svc_tx.h`, `DEVOURER_SVC_LADDER`).
+already lives in C++ (`examples/svctx/svc_tx.h`, `DEVOURER_SVC_LADDER`).
 This module maps each HEVC temporal layer to its own RS redundancy — heavy on
 base/IDR, light on enhancement — routed by an SBI `stream_id`:
 
@@ -211,7 +211,7 @@ for both receivers. Only the receiver — and thus the inner decode — differs:
 | `svc_spatial_uep_sim.py` | per-SVC-layer spatial UEP — the 3-axis staircase (MCS + FEC + STBC), quantifying the spatial knob's survival-SNR contribution |
 | `spatial_sbi_sim.py` | spatial diversity keeps corruption localized — how combining (by fade correlation ρ) moves frames out of the frame-wide-loss bin into the SBI-salvageable one |
 | `fused_fec_link.py` | chip-path `FusedFecSender` / `FusedFecReceiver` (baseline-vs-SBI) |
-| `fused_fec_tx.py` / `fused_fec_rx.py` | chip-path CLIs (bytes ↔ `StreamTxDemo` / `<devourer-stream>`) |
+| `fused_fec_tx.py` / `fused_fec_rx.py` | chip-path CLIs (bytes ↔ `streamtx` / `<devourer-stream>`) |
 | `fec_fusion_sim.py` | offline simulation: quantify SBI gain, size sub-blocks, no hardware |
 | `soft_erasure_fec.py` | errors-and-erasures Reed-Solomon (BCH form) + soft-reliability GMD; the reference that quantifies the inner-vs-outer soft-information question |
 | `fec_ab_sim.py` | the SBI-vs-plain-block-FEC A/B over measured channels (does SBI beat just adding parity, at equal overhead?) |
@@ -297,7 +297,7 @@ To exercise the salvage path reproducibly on a bench without an attenuator
   AWGN/CW source. A given `--tx-gain` reproduces the same interference (fixed
   RNG seed), so the FCS-failure rate becomes a function of one number — the
   reproducible knob when the natural rate is too low.
-- **`DEVOURER_TX_PWR_OVERRIDE`** (StreamTxDemo) forces an absolute per-rate
+- **`DEVOURER_TX_PWR_OVERRIDE`** (streamtx) forces an absolute per-rate
   TXAGC index 0–63 for fine control.
 
 Note: a `uhubctl` power-cycle of a **root-hub** port (e.g. the 8812 on root hub

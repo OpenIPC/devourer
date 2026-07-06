@@ -1,4 +1,4 @@
-// PrecoderDemo — transmit a pre-shaped PSDU produced by
+// precoder — transmit a pre-shaped PSDU produced by
 // tools/precoder/encode_subcarriers.py.
 //
 // This is the on-air vehicle for the pre-modulator subcarrier PoC: the Python
@@ -21,7 +21,7 @@
 // Encode shaped PSDUs with `--phy legacy` (the encoder default) to match.
 //
 // Usage:
-//   DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 ./build/PrecoderDemo --psdu shaped.bin
+//   DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 ./build/precoder --psdu shaped.bin
 //   [--count N] [--interval-ms MS]   (Termux: pass the numeric USB fd as argv[1])
 //
 // Env: DEVOURER_VID / DEVOURER_PID / DEVOURER_CHANNEL / DEVOURER_SKIP_RESET —
@@ -77,12 +77,12 @@ static const uint8_t kRadiotapLegacy6M[13] = {
     0x00, 0x00, 0x0d, 0x00, 0x04, 0x80, 0x00,
     0x00, 0x0c, 0x00, 0x08, 0x00, 0x00};
 
-// Canonical TX-validation source MAC — shared with txdemo/main.cpp,
-// demo/main.cpp's `<devourer-tx-hit>` matcher, tests/regress.py (CANONICAL_SA)
+// Canonical TX-validation source MAC — shared with examples/tx/main.cpp,
+// examples/rx/main.cpp's `<devourer-tx-hit>` matcher, tests/regress.py (CANONICAL_SA)
 // and tests/inject_beacon.py. Change all of them together if it ever moves.
 static const uint8_t kCanonicalSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
 
-// 802.11 probe-request mgmt header (24 bytes), mirroring txdemo/main.cpp's
+// 802.11 probe-request mgmt header (24 bytes), mirroring examples/tx/main.cpp's
 // frame. DATA frames (ToDS) get silently NAKed by the chip in monitor mode —
 // the plan's "Data frame" wording is superseded by txdemo's hard-won
 // probe-request, which the SA matcher recognises identically (addr2 at +10).
@@ -131,7 +131,7 @@ int main(int argc, char **argv) {
   }
 
   if (psdu_path.empty()) {
-    logger->error("usage: PrecoderDemo --psdu <shaped.bin> [--count N] "
+    logger->error("usage: precoder --psdu <shaped.bin> [--count N] "
                   "[--interval-ms MS]");
     return 2;
   }

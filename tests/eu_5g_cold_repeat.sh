@@ -9,11 +9,11 @@ FREQ=5180e6
 N=${1:-4}
 KMOD=rtl88x2eu_ohd
 
-cleanup(){ sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null; }
+cleanup(){ sudo pkill -9 -x txdemo 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null; }
 trap cleanup EXIT
 
 cold_cycle(){ # full VBUS off/on of the EU's hub port
-  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null
+  sudo pkill -9 -x txdemo 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null
   sudo rmmod $KMOD 2>/dev/null; sleep 1
   sudo uhubctl -l $HUB -a off >/dev/null 2>&1; sleep 4
   sudo uhubctl -l $HUB -a on  >/dev/null 2>&1; sleep 6
@@ -35,10 +35,10 @@ for i in $(seq 1 $N); do
   if ! lsusb | grep -qi a81a; then echo "  run $i: EU did not enumerate"; continue; fi
   sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0xa81a DEVOURER_CHANNEL=36 \
     DEVOURER_TX_RATE=MCS7 DEVOURER_TX_GAP_US=0 DEVOURER_TX_PAYLOAD_BYTES=1465 \
-    stdbuf -oL timeout -k 5 14 build/WiFiDriverTxDemo >/tmp/cold_dev_$i.log 2>&1 &
+    stdbuf -oL timeout -k 5 14 build/txdemo >/tmp/cold_dev_$i.log 2>&1 &
   sleep 6
   echo "  devourer cold run $i:$(sweep)"
-  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; sleep 1
+  sudo pkill -9 -x txdemo 2>/dev/null; sleep 1
 done
 
 echo "=== $N COLD kernel EU 5G runs (power-cycled each) ==="

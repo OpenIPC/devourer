@@ -30,7 +30,7 @@
  *   destructive until proven otherwise.
  *
  * Gating: every helper is no-op unless an explicit env var is set in
- * demo/main.cpp. There is no automatic invocation — read+restore happens
+ * examples/rx/main.cpp. There is no automatic invocation — read+restore happens
  * only when a researcher asks for it.
  */
 

@@ -12,7 +12,7 @@ SNIFF_IF=${SNIFF_IF:-wlp4s0u2u4}   # 8822cu (supports 5G + HT40)
 CANON=57:42:75:05:d6:00
 DUR=${DUR:-16}
 
-cleanup() { sudo pkill -f "tcpdump -i $SNIFF_IF" 2>/dev/null; sudo pkill -x WiFiDriverTxDem 2>/dev/null; }
+cleanup() { sudo pkill -f "tcpdump -i $SNIFF_IF" 2>/dev/null; sudo pkill -x txdemo 2>/dev/null; }
 trap cleanup EXIT
 
 echo "[bw40] recovering T3U first"
@@ -43,7 +43,7 @@ HOPBW=${HOPBW:-40}   # devourer TX bandwidth (40 or 80)
 echo "[bw40] TX ch$CH bw$HOPBW offset$OFFSET rate $RATE"
 timeout "$DUR" sudo env DEVOURER_VID=0x2357 DEVOURER_PID=0x012d DEVOURER_CHANNEL=$CH \
   DEVOURER_HOP_BW=$HOPBW DEVOURER_HOP_OFFSET=$OFFSET DEVOURER_TX_RATE=$RATE \
-  ./build/WiFiDriverTxDemo >/tmp/j2_bw40_demo.txt 2>&1 || true
+  ./build/txdemo >/tmp/j2_bw40_demo.txt 2>&1 || true
 sleep 2
 echo "=== rf18/bw: $(grep -oE 'channel set ch=[0-9]+ bw=[0-9]+ .rf18=0x[0-9a-f]+' /tmp/j2_bw40_demo.txt | head -1) ==="
 echo "=== sent: $(grep -c bulk_send /tmp/j2_bw40_demo.txt) ==="

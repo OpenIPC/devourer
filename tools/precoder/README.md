@@ -67,7 +67,7 @@ sudo bash ../../tests/fused_fec_onair.sh        # reports FUSED-FEC GAIN
 ```
 
 The PHY-MCS half of SVC unequal error protection lives in C++
-(`txdemo/svc_tx_demo/svc_tx.h`, `DEVOURER_SVC_LADDER`); `svc_uep_fec.py` adds the
+(`examples/svctx/svc_tx.h`, `DEVOURER_SVC_LADDER`); `svc_uep_fec.py` adds the
 matching FEC-rate ladder so base/IDR layers get robust MCS **and** heavy FEC.
 `svc_pipeline.py` runs both halves end-to-end against a synthetic HEVC stream and
 shows the graceful-degradation staircase (T2 sheds first, base/IDR last):
@@ -94,7 +94,7 @@ energy headline (`tests/sim_loop.py`) all live alongside this suite.
 
 ```sh
 # 0. Build the C++ side from the repo root.
-cmake -S . -B build && cmake --build build -j      # -> build/PrecoderDemo
+cmake -S . -B build && cmake --build build -j      # -> build/precoder
 
 # 1. Characterise the chip's scrambler seed (does it re-seed per frame?).
 #    Run an RX adapter at the precoder's TX channel:
@@ -102,12 +102,12 @@ uv run python seed_probe.py --mode rx --rx-pid 0x8813 --channel 6
 #    CONSTANT seed -> one shaped PSDU works; VARYING -> use bruteforce (below).
 
 # 2. Encode a target subcarrier pattern (one ±1 per data subcarrier per line;
-#    48 values/symbol for legacy). Default --phy legacy matches PrecoderDemo.
+#    48 values/symbol for legacy). Default --phy legacy matches precoder.
 uv run python encode_subcarriers.py --pattern target.txt \
     --scrambler-seed 0x5d --psdu-out shaped.bin
 
 # 3. Transmit it.
-DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 ./build/PrecoderDemo --psdu shaped.bin
+DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 ./build/precoder --psdu shaped.bin
 
 # 4. Phase A — two adapters, no SDR (transport + PHY rate + byte round-trip):
 sudo python3 ../../tests/precoder_roundtrip.py \
@@ -199,7 +199,7 @@ transport works, but not per-subcarrier IQ. Specifically:
 
 #### Using the framework to look for a selector
 
-`DEVOURER_RX_DUMP_CSI=0x1a,0x20,0x40 ./build/WiFiDriverDemo` performs
+`DEVOURER_RX_DUMP_CSI=0x1a,0x20,0x40 ./build/rxdemo` performs
 the save→write→read→restore dance for each selector on the first 8
 canonical-SA frames and emits
 
@@ -292,7 +292,7 @@ observer; the off-chip counterpart to Tier 4.
   file or a SoapySDR device, not an RTL-SDR at 20 MHz.
 
 * **"Data frame".** Data/ToDS frames get NAK'd by the chip in monitor mode
-  (`txdemo/main.cpp`), so `PrecoderDemo` injects a **probe-request** with the
+  (`examples/tx/main.cpp`), so `precoder` injects a **probe-request** with the
   canonical SA — the SA matcher recognises it identically.
 
 ## Real-frame placement (offset + entry_state)
@@ -303,7 +303,7 @@ of OFDM data symbols, starting from BCC `entry_state` at scrambler phase
 stream is `[SERVICE(16b) | MAC header | body | tail | pad]`, so the body does
 **not** start at the head:
 
-* `PrecoderDemo` prepends a 24-byte MAC header → body starts at scrambled-bit
+* `precoder` prepends a 24-byte MAC header → body starts at scrambled-bit
   offset `16 + 24·8 = 208`. For legacy (`N_DBPS=24`), 208 is **not** a symbol
   boundary (208 = 8·24 + 16), so the body starts mid-symbol-8; the first fully
   controllable symbol begins at bit 216 (= 9·24), i.e. one byte into the body.

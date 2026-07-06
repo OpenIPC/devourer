@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """On-air TX throughput per chip per band (devourer), via USRP duty-cycle.
 
-For each plugged Jaguar chip and each band, floods with WiFiDriverTxDemo at a
+For each plugged Jaguar chip and each band, floods with txdemo at a
 fixed HT MCS/BW and measures channel occupancy with sdr_duty.py (ceiling-free).
 Emits a markdown table for the README. Optionally also measures wfb-ng (svpcom
 driver + a raw-AF_PACKET blaster) for the parity comparison.
@@ -70,7 +70,7 @@ def devourer_flood(vid, pid, ch, mcs, bw, size):
                DEVOURER_TX_RATE=f"MCS{mcs}/{bw}",
                DEVOURER_TX_PAYLOAD_BYTES=str(size), DEVOURER_TX_GAP_US="0")
     return regress._register_local_proc(subprocess.Popen(
-        [str(ROOT / "build" / "WiFiDriverTxDemo")], env=env,
+        [str(ROOT / "build" / "txdemo")], env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         preexec_fn=regress._child_preexec))
 

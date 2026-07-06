@@ -37,8 +37,8 @@ IDXS="${IDXS:-8 16 24 32 40 48 56 63}"
 mkdir -p "$OUT"
 
 cleanup() {
-    pkill -x WiFiDriverTxDem 2>/dev/null || true
-    pkill -x WiFiDriverDemo 2>/dev/null || true
+    pkill -x txdemo 2>/dev/null || true
+    pkill -x rxdemo 2>/dev/null || true
     true
 }
 trap cleanup EXIT INT TERM
@@ -47,13 +47,13 @@ plugged "$TX_PID" "$TX_VID" || { echo "SKIP: TX $TX_PID not plugged"; exit 0; }
 plugged "$GROUND_PID" "$GROUND_VID" || { echo "SKIP: ground $GROUND_PID not plugged"; exit 0; }
 
 echo "== building =="
-cmake --build "$ROOT/build" -j --target WiFiDriverTxDemo WiFiDriverDemo >/dev/null || exit 1
+cmake --build "$ROOT/build" -j --target txdemo rxdemo >/dev/null || exit 1
 
 echo "== ground RX ($GROUND_PID) up on ch$CH =="
 : >"$OUT/ground.log"
 sudo -n env DEVOURER_PID="$GROUND_PID" DEVOURER_VID="$GROUND_VID" \
     DEVOURER_CHANNEL="$CH" DEVOURER_STREAM_OUT=1 \
-    stdbuf -oL timeout 1200 "$ROOT/build/WiFiDriverDemo" 2>"$OUT/ground.err" \
+    stdbuf -oL timeout 1200 "$ROOT/build/rxdemo" 2>"$OUT/ground.err" \
     | while IFS= read -r line; do printf '%s %s\n' "$(date +%s.%N)" "$line"; done \
     >>"$OUT/ground.log" &
 GJ=$!
@@ -65,13 +65,13 @@ for mcs in $MCSES; do
         t0="$(date +%s.%N)"
         sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_VID="$TX_VID" DEVOURER_CHANNEL="$CH" \
             DEVOURER_TX_RATE="$mcs" DEVOURER_TX_PWR="$idx" DEVOURER_TX_GAP_US=1500 \
-            timeout 10 "$ROOT/build/WiFiDriverTxDemo" >/dev/null 2>&1 || true
+            timeout 10 "$ROOT/build/txdemo" >/dev/null 2>&1 || true
         t1="$(date +%s.%N)"
         echo "$mcs $idx $t0 $t1" >>"$OUT/cells.txt"
         sleep 1.5
     done
 done
-sudo -n pkill -x WiFiDriverDemo 2>/dev/null
+sudo -n pkill -x rxdemo 2>/dev/null
 wait "$GJ" 2>/dev/null
 
 python3 - "$OUT/ground.log" "$OUT/cells.txt" <<'PYEOF'

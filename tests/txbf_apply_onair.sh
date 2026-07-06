@@ -29,8 +29,8 @@ TXPWR="${TXPWR:-16}"
 mkdir -p "$OUT"
 
 cleanup() {
-    pkill -x WiFiDriverTxDem 2>/dev/null || true
-    pkill -x WiFiDriverDemo 2>/dev/null || true
+    pkill -x txdemo 2>/dev/null || true
+    pkill -x rxdemo 2>/dev/null || true
     true
 }
 trap cleanup EXIT INT TERM
@@ -41,7 +41,7 @@ for d in "$A_PID $A_VID beamformer-8822EU" "$B_PID $B_VID beamformee-8822CU"; do
 done
 
 echo "== building =="
-cmake --build "$ROOT/build" -j --target WiFiDriverTxDemo WiFiDriverDemo >/dev/null || exit 1
+cmake --build "$ROOT/build" -j --target txdemo rxdemo >/dev/null || exit 1
 
 # One cell. $1 = apply(0|1)  $2 = tag. Echoes "rssi snr applied".
 run_cell() {
@@ -49,7 +49,7 @@ run_cell() {
     : >"$OUT/$tag-b.log"; : >"$OUT/$tag-a.log"
     sudo -n env DEVOURER_PID="$B_PID" DEVOURER_VID="$B_VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_BF_ARM_BFEE="$BFER" DEVOURER_RXQUALITY=1 DEVOURER_RX_ENERGY_MS=1000 \
-        timeout $((DUR + 20)) "$ROOT/build/WiFiDriverDemo" 2>&1 \
+        timeout $((DUR + 20)) "$ROOT/build/rxdemo" 2>&1 \
         | tee "$OUT/$tag-b.full.log" | grep --line-buffered devourer-rxquality \
         >"$OUT/$tag-b.log" &
     local bpid=$!
@@ -66,8 +66,8 @@ run_cell() {
         DEVOURER_TX_WITH_RX=thread DEVOURER_BF_ARM_SOUNDER="$BFER" \
         DEVOURER_TX_NDPA_RA="$BFEE" DEVOURER_TX_NDPA=64 DEVOURER_TX_RATE=VHT1SS_MCS0 \
         DEVOURER_TX_PWR="$TXPWR" DEVOURER_TX_GAP_US=1000 "${extra[@]}" \
-        timeout "$DUR" "$ROOT/build/WiFiDriverTxDemo" >"$OUT/$tag-a.log" 2>&1 || true
-    sudo -n pkill -x WiFiDriverDemo 2>/dev/null || true
+        timeout "$DUR" "$ROOT/build/txdemo" >"$OUT/$tag-a.log" 2>&1 || true
+    sudo -n pkill -x rxdemo 2>/dev/null || true
     wait "$bpid" 2>/dev/null || true
     sleep 2
     # median rssi_mean / snr_mean over settled windows (frames>0)

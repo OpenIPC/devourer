@@ -8,9 +8,9 @@ RF-quiet rooms) that make naive startup benchmarks lie.
 
 "Ready" is measured, not inferred:
 
-- **devourer RX** — `exec → first 802.11 frame delivered` (`WiFiDriverDemo`,
+- **devourer RX** — `exec → first 802.11 frame delivered` (`rxdemo`,
   its `init-timing: demo.first_rx_frame` line).
-- **devourer TX** — `exec → first bulk-OUT submitted` (`WiFiDriverTxDemo`,
+- **devourer TX** — `exec → first bulk-OUT submitted` (`txdemo`,
   `init-timing: txdemo.first_tx_submit`; includes the demo's settle sleep —
   that's the user-visible latency).
 - **kernel** — `insmod → netdev registered → monitor-mode setup → first

@@ -18,7 +18,7 @@ PWR=0x2d
 OUT=/tmp/j2_8821c_bw_sdr
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-cleanup() { sudo pkill -x WiFiDriverTxDem 2>/dev/null; sudo modprobe rtw88_8821cu 2>/dev/null; }
+cleanup() { sudo pkill -x txdemo 2>/dev/null; sudo modprobe rtw88_8821cu 2>/dev/null; }
 trap cleanup EXIT
 
 probe() { # label freq
@@ -36,13 +36,13 @@ run_bw() { # bw offset ch freq label
     timeout 24 sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0xc811 DEVOURER_CHANNEL=$CH \
       ${BW:+DEVOURER_HOP_BW=$BW} ${OFF:+DEVOURER_HOP_OFFSET=$OFF} \
       DEVOURER_TX_RATE=MCS1${BW:+/$BW} DEVOURER_TX_GAP_US=0 DEVOURER_TX_PWR=$PWR \
-      ./build/WiFiDriverTxDemo >"$OUT/dev_${LBL}.log" 2>&1 &
+      ./build/txdemo >"$OUT/dev_${LBL}.log" 2>&1 &
     sleep 10   # power-on -> DLFW -> init -> TX flooding
     if grep -q 'ready for TX' "$OUT/dev_${LBL}.log"; then break; fi
-    echo "  (try $try: bring-up failed, retrying)"; sudo pkill -x WiFiDriverTxDem 2>/dev/null; wait 2>/dev/null
+    echo "  (try $try: bring-up failed, retrying)"; sudo pkill -x txdemo 2>/dev/null; wait 2>/dev/null
   done
   probe "$LBL" "$FREQ"
-  sudo pkill -x WiFiDriverTxDem 2>/dev/null; wait 2>/dev/null; sleep 1
+  sudo pkill -x txdemo 2>/dev/null; wait 2>/dev/null; sleep 1
 }
 
 echo "[bw-sdr] baseline (no TX) @ 5755MHz"

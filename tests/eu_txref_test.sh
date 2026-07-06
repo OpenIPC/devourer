@@ -5,7 +5,7 @@
 #   sudo tests/eu_txref_test.sh
 set -u
 PY=${PY:-python3}; EU_VID=0x0bda; EU_PID=0xa81a; CH=6; FREQ=2437e6; SECS=5
-cleanup(){ sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; }
+cleanup(){ sudo pkill -9 -x txdemo 2>/dev/null; }
 trap cleanup EXIT
 sudo rmmod rtl88x2eu_ohd 2>/dev/null
 
@@ -13,7 +13,7 @@ cell() { # $1=label $2=extra-env
   cleanup; sleep 2
   sudo env DEVOURER_VID=$EU_VID DEVOURER_PID=$EU_PID DEVOURER_CHANNEL=$CH \
        DEVOURER_TX_RATE=MCS7 DEVOURER_TX_GAP_US=0 DEVOURER_RFDUMP=1 $2 \
-       stdbuf -oL timeout -k 5 $((SECS+5)) build/WiFiDriverTxDemo \
+       stdbuf -oL timeout -k 5 $((SECS+5)) build/txdemo \
        >/tmp/txref_$1.log 2>&1 &
   sleep 5
   echo "--- $1 ($2) ---"

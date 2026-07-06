@@ -2,7 +2,7 @@
 # tone_mask_regcheck.sh — register-landing check for the DEVOURER_RX_CSI_MASK /
 # DEVOURER_RX_NBI knobs (src/ToneMask.h) on every plugged Jaguar generation.
 #
-# Per DUT: run WiFiDriverDemo briefly with a CSI-mask slice + an NBI notch
+# Per DUT: run rxdemo briefly with a CSI-mask slice + an NBI notch
 # inside the tuned channel, then assert from the demo log that
 #   - the CSI mask enumerated >0 tones and the enable bit reads back set
 #     (0x874[0] on 11ac, 0xC0C[3] on Jaguar-3), and
@@ -17,7 +17,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-DEMO=./build/WiFiDriverDemo
+DEMO=./build/rxdemo
 [ -x "$DEMO" ] || { echo "FATAL: $DEMO not built"; exit 2; }
 
 LOGDIR=/tmp/devourer-tonemask-regcheck
@@ -25,9 +25,9 @@ rm -rf "$LOGDIR"; mkdir -p "$LOGDIR"
 
 cleanup() {
   # Exact-comm kill: only our demo binary, nothing else.
-  pkill -INT -x WiFiDriverDemo 2>/dev/null
+  pkill -INT -x rxdemo 2>/dev/null
   sleep 1
-  pkill -KILL -x WiFiDriverDemo 2>/dev/null
+  pkill -KILL -x rxdemo 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 

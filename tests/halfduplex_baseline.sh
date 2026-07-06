@@ -29,7 +29,7 @@ VIDEO=/tmp/hdx_video.bin
 VRX_LOG=/tmp/hdx_vrx.log; VTX_LOG=/tmp/hdx_vtx.log
 
 KILL(){ sudo pkill -9 -f adaptive_link 2>/dev/null
-        sudo pkill -9 StreamDuplexD 2>/dev/null; }
+        sudo pkill -9 duplex 2>/dev/null; }
 trap KILL EXIT
 
 free_adapters(){
@@ -49,12 +49,12 @@ run_once(){                # $1 = feedback period ms
   sudo env DEVOURER_VID=$VRX_VID DEVOURER_PID=$VRX_PID PYTHONPATH="$PREC" \
        python3 "$PREC/adaptive_link.py" --role vrx --pid $VRX_PID --channel $CH \
        --vtx-id $VTX_ID --feedback-ms "$fb" \
-       --duplex "$ROOT/build/StreamDuplexDemo" >"$VRX_LOG" 2>&1 &
+       --duplex "$ROOT/build/duplex" >"$VRX_LOG" 2>&1 &
   sleep 4
   sudo env DEVOURER_VID=$VTX_VID DEVOURER_PID=$VTX_PID PYTHONPATH="$PREC" \
        python3 "$PREC/adaptive_link.py" --role vtx --pid $VTX_PID --channel $CH \
        --vtx-id $VTX_ID --video "$VIDEO" \
-       --duplex "$ROOT/build/StreamDuplexDemo" >"$VTX_LOG" 2>&1 &
+       --duplex "$ROOT/build/duplex" >"$VTX_LOG" 2>&1 &
   for _ in $(seq 1 20); do grep -q 'state=SESSION' "$VRX_LOG" && break; sleep 1; done
   sleep "$SECS"; KILL; sleep 2
 }

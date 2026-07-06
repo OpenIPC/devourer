@@ -64,7 +64,7 @@ the on-air comparison below.
 ## On-air validation
 
 The bench is two RTL88xxAU adapters (an 8812AU transmitter, an 8821AU receiver)
-driven by `StreamDuplexDemo` and `tools/precoder/adaptive_link.py`, plus a USRP
+driven by `duplex` and `tools/precoder/adaptive_link.py`, plus a USRP
 B210 raising the receiver's noise floor as a controllable, reproducible
 interferer.
 
@@ -123,7 +123,7 @@ is real end-to-end loss (on-air + processing), now measured honestly.
    absolute energy numbers (relative savings hold without it).
 
 3. **On-air adaptive SVC.** The per-temporal-layer ladder flies at fixed MCS today
-   (`SvcTxDemo`, `tests/svc_uep_onair.sh`); retuning the per-layer ladder and shed
+   (`svctx`, `tests/svc_uep_onair.sh`); retuning the per-layer ladder and shed
    set live from the ground controller is validated in simulation (linklab) but
    not yet on air.
 
@@ -178,7 +178,7 @@ uv run python -m linklab.train.run --history 8 --fading-k 4 --n-envs 512
 On-air (needs two RTL88xxAU adapters + a USRP B210):
 
 ```sh
-cmake -S . -B build && cmake --build build -j        # build StreamDuplexDemo
+cmake -S . -B build && cmake --build build -j        # build duplex
 # baseline link diagnosis (no interferer): localize any frame loss
 sudo bash tests/halfduplex_baseline.sh
 # fade-SLA sweep: static vs mean-matched fading across interferer gains

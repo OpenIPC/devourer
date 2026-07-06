@@ -13,8 +13,8 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
-TXDEMO="$ROOT/build/WiFiDriverTxDemo"
-RXDEMO="$ROOT/build/WiFiDriverDemo"
+TXDEMO="$ROOT/build/txdemo"
+RXDEMO="$ROOT/build/rxdemo"
 OUT="/tmp/bf-report-sniff"
 CHANNEL=100
 DUR=8
@@ -24,8 +24,8 @@ BFER_MAC="57:42:75:05:d6:00"   # canonical SA = NDPA TA (8812AU sounder)
 mkdir -p "$OUT"
 
 cleanup() {
-    pkill -x WiFiDriverTxDem 2>/dev/null
-    pkill -x WiFiDriverDemo 2>/dev/null
+    pkill -x txdemo 2>/dev/null
+    pkill -x rxdemo 2>/dev/null
     wait 2>/dev/null
 }
 trap cleanup EXIT INT TERM

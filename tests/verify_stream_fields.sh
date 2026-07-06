@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # M0 verification: confirm the <devourer-stream> RX line now carries the decoded
-# PHY descriptor fields (bw/stbc/ldpc/sgi) added in demo/main.cpp.
+# PHY descriptor fields (bw/stbc/ldpc/sgi) added in examples/rx/main.cpp.
 #
 # Two-adapter loopback, NO SDR: an 8821AU transmits the canonical-SA beacon
-# (WiFiDriverTxDemo) while an 8812AU receives with DEVOURER_STREAM_OUT=1. The
+# (txdemo) while an 8812AU receives with DEVOURER_STREAM_OUT=1. The
 # stream line only fires on canonical-SA frames, so a devourer TX is required.
 #
 #   TX: RTL8821AU (TP-Link Archer T2U Plus, 2357:0120)  --ch6-->  air
@@ -20,20 +20,20 @@ TXLOG=$(mktemp /tmp/devourer-tx-verify.XXXXXX)
 
 cleanup() {
   # exact-comm kills so we never reap an unrelated process
-  pkill -f "WiFiDriverTxDemo" 2>/dev/null
-  pkill -f "WiFiDriverDemo"   2>/dev/null
+  pkill -f "txdemo" 2>/dev/null
+  pkill -f "rxdemo"   2>/dev/null
   rm -f "$OUT" "$TXLOG"
 }
 trap cleanup EXIT INT TERM
 
 echo "[verify] starting 8821AU canonical-SA TX on ch$CH ..."
 DEVOURER_VID=$TXVID DEVOURER_PID=$TXPID DEVOURER_CHANNEL=$CH \
-  "$BIN/WiFiDriverTxDemo" >"$TXLOG" 2>&1 &
+  "$BIN/txdemo" >"$TXLOG" 2>&1 &
 sleep 8   # let the TX adapter init + start injecting
 
 echo "[verify] starting 8812AU RX (STREAM_OUT) for 30s ..."
 timeout 30 env DEVOURER_PID=$RXPID DEVOURER_CHANNEL=$CH DEVOURER_STREAM_OUT=1 \
-  "$BIN/WiFiDriverDemo" 2>/dev/null >"$OUT"
+  "$BIN/rxdemo" 2>/dev/null >"$OUT"
 
 N=$(grep -c devourer-stream "$OUT")
 echo "[verify] <devourer-stream> lines: $N"

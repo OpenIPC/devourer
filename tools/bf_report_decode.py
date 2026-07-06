@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decode 802.11ac VHT Compressed Beamforming reports into per-subcarrier CSI.
 
-Input: `<devourer-bf-report-raw>HEX` lines (from WiFiDriverDemo with
+Input: `<devourer-bf-report-raw>HEX` lines (from rxdemo with
 DEVOURER_BF_DETECT_REPORT=4) on stdin or a file, or bare hex frames.
 
 For the two-adapter self-sounding path a 2-TX beamformer sounds a 1-RX
@@ -22,7 +22,7 @@ cross-frame stability — the correct split makes psi(k)/phi(k) repeatable
 across reports of a quasi-static channel; a wrong split looks like noise.
 
 Usage:
-    WiFiDriverDemo ... DEVOURER_BF_DETECT_REPORT=4 | tools/bf_report_decode.py
+    rxdemo ... DEVOURER_BF_DETECT_REPORT=4 | tools/bf_report_decode.py
     tools/bf_report_decode.py captured_frames.txt --csv out.csv
 """
 from __future__ import annotations

@@ -7,7 +7,7 @@
 # port power-cycle.
 #
 #   sudo tests/eu_devourer_run.sh <binary> [seconds] [usbmon_out]
-# e.g. sudo tests/eu_devourer_run.sh build/WiFiDriverDemo 12 /tmp/eu_dev.txt
+# e.g. sudo tests/eu_devourer_run.sh build/rxdemo 12 /tmp/eu_dev.txt
 set -u
 
 PID=${PID:-a81a}
@@ -23,7 +23,7 @@ fi
 HUBLOC=${SYS%.*}      # 3-2.3.3 -> 3-2.3  (uhubctl hub location)
 HUBPORT=${SYS##*.}    # 3-2.3.3 -> 3      (uhubctl port number)
 echo "[harness] a81a at $SYS (uhubctl $HUBLOC port $HUBPORT)"
-BIN=${1:-build/WiFiDriverDemo}
+BIN=${1:-build/rxdemo}
 SECS=${2:-12}
 MONOUT=${3:-}
 COMM=$(basename "$BIN" | cut -c1-15)   # /proc comm is truncated to 15 chars

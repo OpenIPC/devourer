@@ -2,17 +2,17 @@
 """Corruption analysis for the precoder stream link.
 
 Reads `<devourer-stream>` lines on stdin (typically piped from
-`WiFiDriverDemo` with both `DEVOURER_STREAM_OUT=1` and
+`rxdemo` with both `DEVOURER_STREAM_OUT=1` and
 `DEVOURER_RX_KEEP_CORRUPTED=1`), reconstructs what each received body
 *should* have been from a known source file, and reports byte/bit-level
 error statistics.
 
 Workflow (TX side):
     python3 tools/precoder/stream_tx.py --input source.bin --repeat 1 | \
-        ./build/StreamTxDemo
+        ./build/streamtx
 
 Workflow (RX side, this tool):
-    DEVOURER_STREAM_OUT=1 DEVOURER_RX_KEEP_CORRUPTED=1 ./build/WiFiDriverDemo |
+    DEVOURER_STREAM_OUT=1 DEVOURER_RX_KEEP_CORRUPTED=1 ./build/rxdemo |
         python3 tools/precoder/corruption_analysis.py --source source.bin
 
 The TX side encodes `source.bin` deterministically into N body frames. RX

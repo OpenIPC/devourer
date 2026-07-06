@@ -2,7 +2,7 @@
 """Coarse H(f) map from a two-ended sounding sweep (issue #149).
 
 Parses the RX side's per-dwell `<devourer-energy>ch=N ... frames=N
-rssi_mean=.. rssi_max=.. snr_mean=.. evm_mean=..` lines (WiFiDriverDemo with
+rssi_mean=.. rssi_max=.. snr_mean=.. evm_mean=..` lines (rxdemo with
 DEVOURER_RX_SWEEP + DEVOURER_RX_AGG_SA=canon, driven by tests/sounding_sweep.sh)
 and renders the recovered per-bin link map.
 

@@ -1,23 +1,23 @@
-// StreamDuplexDemo — single-chip full-duplex for the precoder stream link.
+// duplex — single-chip full-duplex for the precoder stream link.
 //
-// Combines WiFiDriverDemo's RX loop (Init → infinite_read → packet callback)
-// with StreamTxDemo's stdin-driven TX (read length-prefixed PSDU body →
+// Combines rxdemo's RX loop (Init → infinite_read → packet callback)
+// with streamtx's stdin-driven TX (read length-prefixed PSDU body →
 // send_packet) on ONE claimed interface. RX runs in the main thread; TX in a
 // worker thread reads stdin and calls send_packet concurrently. libusb is
 // thread-safe; the two bulk endpoints (_bulk_in_ep, _bulk_out_ep) don't share
 // transfer state.
 //
 // Used by tools/precoder/tun_p2p.py in --mode=duplex with a single PID per
-// peer. Replaces the StreamTxDemo + WiFiDriverDemo pair (one adapter per
+// peer. Replaces the streamtx + rxdemo pair (one adapter per
 // direction) with a single binary per peer (one adapter per peer, ergo two
 // adapters total for a P2P link instead of four).
 //
-// On-wire wire format on stdin is identical to StreamTxDemo:
+// On-wire wire format on stdin is identical to streamtx:
 //     <u32_le length><length bytes of descrambled PSDU body>
 // EOF on stdin closes the TX side cleanly; RX keeps running until the process
 // terminates.
 //
-// RX emission on stdout mirrors demo/main.cpp's DEVOURER_STREAM_OUT path —
+// RX emission on stdout mirrors examples/rx/main.cpp's DEVOURER_STREAM_OUT path —
 // `<devourer-stream>rate=R len=L body=HEX` for every frame matching the
 // canonical SA. Other stdout output is suppressed; stderr carries logger and
 // counters.
@@ -75,12 +75,12 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
 };
 
-// Same probe-request header as StreamTxDemo / PrecoderDemo; radiotap is now
+// Same probe-request header as streamtx / precoder; radiotap is now
 // built once at startup from DEVOURER_STREAM_RATE — accepts legacy
 // (6M..54M), HT (MCS0..MCS31), or VHT (VHT1SS_MCS0..VHT4SS_MCS9) carrier
 // modes. Default is 6M legacy OFDM, bit-identical to the historic
 // kRadiotapLegacy6M constant. The canonical SA matcher in the packet
-// processor below is identical to demo/main.cpp's, so any tooling that
+// processor below is identical to examples/rx/main.cpp's, so any tooling that
 // already grep'd <devourer-stream> lines keeps working unchanged.
 // Radiotap is MUTABLE here (the adaptive link rewrites the on-air rate live via
 // the stdin SET_RATE control op). Guarded by g_rt_mu against the TX thread.
@@ -110,7 +110,7 @@ static std::atomic<long> g_rx_hits{0};
 
 /* DEVOURER_TX_STATUS=1: surface chip-side C2H frames (TX-status reports
  * from the same 8812/8821 chip we're TXing on). Best-effort 8814A TX_RPT
- * decode mirrors demo/main.cpp; the C2H sub-type ID isn't enumerated in
+ * decode mirrors examples/rx/main.cpp; the C2H sub-type ID isn't enumerated in
  * the vendored headers so the raw hex stays in the line. */
 static const bool g_tx_status_enabled =
     std::getenv("DEVOURER_TX_STATUS") != nullptr;
@@ -144,7 +144,7 @@ static void packet_processor(const Packet &packet) {
   if (std::memcmp(packet.Data.data() + 10, kCanonicalSa, 6) != 0) return;
   long hits = ++g_rx_hits;
   std::lock_guard<std::mutex> lk(g_print_mu);
-  // Full field set (mirrors demo/main.cpp) so the adaptive VRX can score RSSI/SNR
+  // Full field set (mirrors examples/rx/main.cpp) so the adaptive VRX can score RSSI/SNR
   // and the VTX can read RCF/DISC bodies + ACK_SEQ.
   std::printf("<devourer-stream>rate=%u len=%zu crc_err=%u icv_err=%u "
               "rssi=%d,%d evm=%d,%d snr=%d,%d seq=%u tsfl=%u "
@@ -277,7 +277,7 @@ int main(int argc, char **argv) {
 
   // Make stdin binary so a 0x1A/CRLF doesn't corrupt the length-prefixed PSDU
   // stream. Gated on _WIN32 (not _MSC_VER) in the shared helper — see
-  // txdemo/stream_stdin.h.
+  // examples/common/stream_stdin.h.
   stream_stdin::set_stdin_binary();
 
   libusb_context *context = nullptr;
@@ -296,7 +296,7 @@ int main(int argc, char **argv) {
   } else {
     rc = libusb_init(&context);
     if (rc < 0) return rc;
-    /* Match WiFiDriverDemo's libusb log level convention — WARNING by
+    /* Match rxdemo's libusb log level convention — WARNING by
      * default, DEVOURER_USB_DEBUG=1 opts into DEBUG. */
     libusb_set_option(context, LIBUSB_OPTION_LOG_LEVEL,
                       std::getenv("DEVOURER_USB_DEBUG")
@@ -348,7 +348,7 @@ int main(int argc, char **argv) {
   if (const char *ch_env = std::getenv("DEVOURER_CHANNEL")) {
     channel = std::atoi(ch_env);
   }
-  /* DEVOURER_TX_POWER: flat TXAGC index (see StreamTxDemo). Unset = each
+  /* DEVOURER_TX_POWER: flat TXAGC index (see streamtx). Unset = each
    * family's calibrated default — SetTxPower is now a real flat override on
    * EVERY generation, so the old unconditional SetTxPower(40) (a no-op on
    * Jaguar1/2) is gone. */
@@ -363,9 +363,9 @@ int main(int argc, char **argv) {
   TxArgs txa{rtlDevice.get(), interval_ms, max_psdu, &should_stop, logger};
   std::thread tx{tx_thread, std::move(txa)};
 
-  logger->info("StreamDuplexDemo entering RX loop on ch {} — TX thread ready",
+  logger->info("duplex entering RX loop on ch {} — TX thread ready",
                channel);
-  // RX loop. Same Init() path as WiFiDriverDemo; SelectedChannel sets up the
+  // RX loop. Same Init() path as rxdemo; SelectedChannel sets up the
   // shared monitor-mode bring-up (StartWithMonitorMode + SetMonitorChannel).
   rtlDevice->Init(packet_processor,
                   SelectedChannel{.Channel = static_cast<uint8_t>(channel),

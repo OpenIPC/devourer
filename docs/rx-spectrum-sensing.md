@@ -35,7 +35,7 @@ whose per-tone SNR / V-angle variance localises an interferer to ~1 MHz.
 
 ## `DEVOURER_RX_ENERGY_MS` — the energy sensor
 
-`WiFiDriverDemo` with `DEVOURER_RX_ENERGY_MS=N` emits one `<devourer-energy>`
+`rxdemo` with `DEVOURER_RX_ENERGY_MS=N` emits one `<devourer-energy>`
 line every `N` ms:
 
 ```

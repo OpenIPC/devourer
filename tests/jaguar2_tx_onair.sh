@@ -16,7 +16,7 @@ DUR=${DUR:-10}
 
 cleanup() {
   sudo pkill -f "tcpdump -i $SNIFF_IF" 2>/dev/null
-  sudo pkill -x WiFiDriverTxDem 2>/dev/null
+  sudo pkill -x txdemo 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -45,7 +45,7 @@ sudo timeout $((DUR + 3)) tcpdump -i "$SNIFF_IF" -nn -e -c 20 \
 SNIFF_PID=$!
 sleep 1
 
-echo "[tx] starting WiFiDriverTxDemo (ch$CH rate $RATE)"
+echo "[tx] starting txdemo (ch$CH rate $RATE)"
 timeout "$DUR" sudo stdbuf -oL env \
   DEVOURER_VID=0x2357 DEVOURER_PID=0x012d DEVOURER_CHANNEL=$CH \
   DEVOURER_TX_RATE=$RATE ${DEVOURER_TX_PWR:+DEVOURER_TX_PWR=$DEVOURER_TX_PWR} \
@@ -53,7 +53,7 @@ timeout "$DUR" sudo stdbuf -oL env \
   ${DEVOURER_TX_COEX_LOOP:+DEVOURER_TX_COEX_LOOP=$DEVOURER_TX_COEX_LOOP} \
   ${DEVOURER_RFE:+DEVOURER_RFE=$DEVOURER_RFE} \
   ${DEVOURER_TX_PWR_OVERRIDE:+DEVOURER_TX_PWR_OVERRIDE=$DEVOURER_TX_PWR_OVERRIDE} \
-  ./build/WiFiDriverTxDemo >/tmp/j2_tx_demo.txt 2>&1 || true
+  ./build/txdemo >/tmp/j2_tx_demo.txt 2>&1 || true
 
 wait $SNIFF_PID 2>/dev/null
 echo "=== TX demo tail ==="; grep -iE 'bulk|TX|ready for TX|error|send' /tmp/j2_tx_demo.txt | tail -5

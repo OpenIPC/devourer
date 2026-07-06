@@ -43,12 +43,12 @@ rm -rf "$LOGDIR"; mkdir -p "$LOGDIR"
 JAM_PID=""
 cleanup() {
   [ -n "$JAM_PID" ] && kill -INT "$JAM_PID" 2>/dev/null
-  pkill -INT -x WiFiDriverTxDem 2>/dev/null
-  pkill -INT -x WiFiDriverDemo 2>/dev/null
+  pkill -INT -x txdemo 2>/dev/null
+  pkill -INT -x rxdemo 2>/dev/null
   pkill -INT -f sdr_interferer 2>/dev/null
   sleep 1
-  pkill -KILL -x WiFiDriverTxDem 2>/dev/null
-  pkill -KILL -x WiFiDriverDemo 2>/dev/null
+  pkill -KILL -x txdemo 2>/dev/null
+  pkill -KILL -x rxdemo 2>/dev/null
   pkill -KILL -f sdr_interferer 2>/dev/null
 }
 trap cleanup EXIT INT TERM
@@ -75,7 +75,7 @@ run_cell() {
 
   env DEVOURER_VID="0x$RX_VID" DEVOURER_PID="0x$RX_PID" DEVOURER_CHANNEL=36 \
       DEVOURER_BW="$rx_bw" \
-      timeout -s INT -k 5 $((DUR + 60)) ./build/WiFiDriverDemo >"$rxlog" 2>&1 &
+      timeout -s INT -k 5 $((DUR + 60)) ./build/rxdemo >"$rxlog" 2>&1 &
   local rxpid=$!
   for _ in $(seq 60); do
     grep -q "Listening air" "$rxlog" && break
@@ -93,7 +93,7 @@ run_cell() {
   for attempt in 1 2; do
     env DEVOURER_VID="0x$TX_VID" DEVOURER_PID="0x$TX_PID" DEVOURER_CHANNEL=36 \
         DEVOURER_HOP_BW=40 DEVOURER_TX_RATE="$RATE" DEVOURER_TX_PWR="$TXAGC" \
-        timeout -s INT -k 5 $((DUR + 12)) ./build/WiFiDriverTxDemo >"$txlog" 2>&1 \
+        timeout -s INT -k 5 $((DUR + 12)) ./build/txdemo >"$txlog" 2>&1 \
       && break
     grep -q "DLFW failed" "$txlog" || break
     echo "    (TX DLFW warm-failure — retrying cell TX)"

@@ -43,7 +43,7 @@ RAW=/tmp/h2h_chip_raw.log
 CAP=/tmp/h2h_sdr.cf32
 BODIES=/tmp/h2h_bodies.bin
 
-KILL(){ sudo pkill -9 StreamTxDem 2>/dev/null; sudo pkill -9 WiFiDriverDem 2>/dev/null
+KILL(){ sudo pkill -9 streamtx 2>/dev/null; sudo pkill -9 rxdemo 2>/dev/null
         sudo pkill -9 -f tools_record_iq 2>/dev/null; sudo pkill -9 -f fused_fec 2>/dev/null; }
 trap KILL EXIT
 
@@ -77,14 +77,14 @@ echo "[h2h] TX bodies: $(wc -c <"$BODIES") bytes  rate=$TX_RATE pwr=$TX_PWR_OVER
 : > "$RAW"
 sudo env DEVOURER_VID=$RX_VID DEVOURER_PID=$RX_PID DEVOURER_CHANNEL=$CH \
      DEVOURER_STREAM_OUT=1 DEVOURER_RX_KEEP_CORRUPTED=1 \
-     timeout $((SECS + 25)) "$ROOT/build/WiFiDriverDemo" >"$RAW" 2>/dev/null &
+     timeout $((SECS + 25)) "$ROOT/build/rxdemo" >"$RAW" 2>/dev/null &
 sleep 8   # chip init (open + reset + monitor up)
 
 # --- TX (8812): marginal MCS7, background, for the window ---
 echo "[h2h] TX + simultaneous chip-RX & B210-record ..."
 sudo env DEVOURER_VID=$TX_VID DEVOURER_PID=$TX_PID DEVOURER_CHANNEL=$CH \
      DEVOURER_TX_RATE=$TX_RATE DEVOURER_TX_PWR_OVERRIDE=$TX_PWR_OVERRIDE \
-     timeout "$SECS" "$ROOT/build/StreamTxDemo" < "$BODIES" >/tmp/h2h_tx.log 2>&1 &
+     timeout "$SECS" "$ROOT/build/streamtx" < "$BODIES" >/tmp/h2h_tx.log 2>&1 &
 sleep 2   # let TX ramp
 
 # --- SDR RX (B210): record IQ mid-window (foreground; both others are live) ---
@@ -97,7 +97,7 @@ else
 fi
 
 # let TX finish, then stop the chip RX
-sleep $((SECS)); sudo pkill -9 StreamTxDem 2>/dev/null; sudo pkill -9 WiFiDriverDem 2>/dev/null
+sleep $((SECS)); sudo pkill -9 streamtx 2>/dev/null; sudo pkill -9 rxdemo 2>/dev/null
 sleep 1
 
 # ===================== offline analysis (same FEC params) =====================

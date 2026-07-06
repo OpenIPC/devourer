@@ -1,4 +1,4 @@
-// SvcTxDemo — TID-aware unequal-error-protection (UEP) injector.
+// svctx — TID-aware unequal-error-protection (UEP) injector.
 //
 // Reads a sequence of length-prefixed HEVC NAL units from stdin, classifies
 // each by its temporal_id / criticality (svc_tx.h), and injects it at the PHY
@@ -16,7 +16,7 @@
 // inject each NAL as it arrives, once.
 //
 // Usage:
-//   DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 ./build/SvcTxDemo \
+//   DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 ./build/svctx \
 //       [--mtu N] [--gap-us US] < nals.bin
 
 #ifndef NOMINMAX
@@ -198,7 +198,7 @@ int main(int argc, char** argv) {
     nals.push_back(std::move(nal));
   }
   if (nals.empty()) { logger->error("no NALs on stdin"); return 2; }
-  logger->info("SvcTxDemo: {} NALs, mtu={}, ch{} — looping", nals.size(), mtu,
+  logger->info("svctx: {} NALs, mtu={}, ch{} — looping", nals.size(), mtu,
                channel);
 
   long sent[9] = {0};  // [0..7] per TID, [8] = critical

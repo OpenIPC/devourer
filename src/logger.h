@@ -134,7 +134,7 @@ public:
     /* Verbosity threshold. A message at level L is emitted only when
      * _level <= L, so Debug shows everything and Silent shows nothing. Defaults
      * to Debug, so existing consumers' output is unchanged; a caller that wants
-     * a clean stdout (e.g. WiFiSenseDemo's live display) can quiet the library
+     * a clean stdout (e.g. sense's live display) can quiet the library
      * with set_level(Logger::Level::Warn). */
     enum class Level { Debug, Info, Warn, Error, Silent };
     void set_level(Level l) { _level = l; }

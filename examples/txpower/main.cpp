@@ -1,4 +1,4 @@
-/* TxPowerStepDemo — reference consumer of the runtime TX-power API.
+/* txpower — reference consumer of the runtime TX-power API.
  *
  * Opens one adapter, brings it up for TX, prints the family's TxPowerCaps,
  * then walks the requested knob sequence — a quarter-dB offset ramp

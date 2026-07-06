@@ -46,12 +46,12 @@ mkdir -p "$LOGDIR"
 JAM_PID=""
 cleanup() {
   [ -n "$JAM_PID" ] && kill -INT "$JAM_PID" 2>/dev/null
-  pkill -INT -x WiFiDriverTxDem 2>/dev/null
-  pkill -INT -x WiFiDriverDemo 2>/dev/null
+  pkill -INT -x txdemo 2>/dev/null
+  pkill -INT -x rxdemo 2>/dev/null
   pkill -INT -f sdr_interferer 2>/dev/null
   sleep 1
-  pkill -KILL -x WiFiDriverTxDem 2>/dev/null
-  pkill -KILL -x WiFiDriverDemo 2>/dev/null
+  pkill -KILL -x txdemo 2>/dev/null
+  pkill -KILL -x rxdemo 2>/dev/null
   pkill -KILL -f sdr_interferer 2>/dev/null
 }
 trap cleanup EXIT INT TERM
@@ -80,19 +80,19 @@ sound_slice() { # <label> <channel>
 
   env DEVOURER_PID=$BFEE_PID DEVOURER_CHANNEL="$ch" \
       DEVOURER_BF_ARM_BFEE="$BFER_MAC" DEVOURER_BF_ARM_BFEE_MU=1 \
-      timeout -s INT -k 5 $((DUR + 55)) ./build/WiFiDriverDemo >"$bfee_log" 2>&1 &
+      timeout -s INT -k 5 $((DUR + 55)) ./build/rxdemo >"$bfee_log" 2>&1 &
   local bfee_pid=$!
   for _ in $(seq 80); do grep -q "entering RX loop\|Listening air" "$bfee_log" && break; sleep 0.5; done
 
   env DEVOURER_PID=$SNF_PID DEVOURER_CHANNEL="$ch" DEVOURER_BF_DETECT_REPORT=4 \
-      timeout -s INT -k 5 $((DUR + 35)) ./build/WiFiDriverDemo >"$snf_log" 2>&1 &
+      timeout -s INT -k 5 $((DUR + 35)) ./build/rxdemo >"$snf_log" 2>&1 &
   local snf_pid=$!
   for _ in $(seq 60); do grep -q "Listening air\|entering RX loop" "$snf_log" && break; sleep 0.5; done
 
   env DEVOURER_PID=$SND_PID DEVOURER_CHANNEL="$ch" DEVOURER_TX_RATE=VHT2SS_MCS0 \
       DEVOURER_TX_NDPA_RA="$BFEE_MAC" DEVOURER_TX_NDPA=1 DEVOURER_TX_NDPA_MU=1 \
       DEVOURER_BF_ARM_SOUNDER=1 \
-      timeout -s INT -k 5 "$DUR" ./build/WiFiDriverTxDemo >"$tx_log" 2>&1
+      timeout -s INT -k 5 "$DUR" ./build/txdemo >"$tx_log" 2>&1
 
   kill -INT "$bfee_pid" "$snf_pid" 2>/dev/null
   wait "$bfee_pid" "$snf_pid" 2>/dev/null
@@ -132,13 +132,13 @@ probe_slice() { # <label> <channel>
 
   env DEVOURER_VID="0x$PROBE_TX_VID" DEVOURER_PID="$PROBE_TX_PID" \
       DEVOURER_CHANNEL="$ch" \
-      timeout -s INT -k 5 $((DUR + 10)) ./build/WiFiDriverTxDemo >"$txlog" 2>&1 &
+      timeout -s INT -k 5 $((DUR + 10)) ./build/txdemo >"$txlog" 2>&1 &
   local txpid=$!
   sleep 5
 
   env DEVOURER_VID="0x$PROBE_RX_VID" DEVOURER_PID="$PROBE_RX_PID" \
       DEVOURER_CHANNEL="$ch" \
-      timeout -s INT -k 5 "$DUR" ./build/WiFiDriverDemo >"$rxlog" 2>&1
+      timeout -s INT -k 5 "$DUR" ./build/rxdemo >"$rxlog" 2>&1
   wait "$txpid" 2>/dev/null
   sleep 5
 

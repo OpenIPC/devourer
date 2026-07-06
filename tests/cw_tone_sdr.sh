@@ -6,7 +6,7 @@
 # (carrier-to-spur), power monotonicity vs the gain index, a clean stop (carrier
 # vanishes + normal beacon TX resumes), and a 60 s frequency-drift hold.
 #
-# Each measurement launches its OWN WiFiDriverTxDemo session: the tone is armed
+# Each measurement launches its OWN txdemo session: the tone is armed
 # in InitWrite, so a fresh gain index means a fresh bring-up (no live-gain API).
 #
 # Requires: two USB Wi-Fi adapters (8812AU + 8821AU) plugged in, a UHD SDR near
@@ -23,7 +23,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-DEMO="$ROOT/build/WiFiDriverTxDemo"
+DEMO="$ROOT/build/txdemo"
 
 # --- matrix cells: name|VID|PID|channel|sdr_center_mhz -------------------------
 # VID/PID are the adapter's USB IDs (`lsusb`); override the whole cell list with
@@ -70,7 +70,7 @@ done
 DEMO_PID=""
 cleanup() {
     [ -n "$DEMO_PID" ] && kill "$DEMO_PID" 2>/dev/null || true
-    pkill -x WiFiDriverTxDem 2>/dev/null || true
+    pkill -x txdemo 2>/dev/null || true
     pkill -f "tests/cw_tone_probe.py" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM

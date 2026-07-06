@@ -41,7 +41,7 @@ sudo sh -c "cat /sys/kernel/debug/usb/usbmon/${BUS}u > ${OUT}.raw" &
 sleep 0.4
 
 sudo env $EXTRA DEVOURER_VID=0x0bda DEVOURER_PID=0xc812 \
-     DEVOURER_CHANNEL=36 stdbuf -oL -eL timeout 9 build/WiFiDriverDemo \
+     DEVOURER_CHANNEL=36 stdbuf -oL -eL timeout 9 build/rxdemo \
      > "${OUT}.log" 2>&1
 
 sudo pkill -9 -f "usbmon/${BUS}u" 2>/dev/null

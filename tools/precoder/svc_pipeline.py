@@ -13,7 +13,7 @@ against a *realistic* synthetic HEVC stream:
       -> per-NAL delivery per layer
 
 The two halves of unequal error protection are *both* applied per layer:
-  - PHY MCS    (DEFAULT_SVC_MCS, mirroring txdemo/svc_tx_demo/svc_tx.h default_policy)
+  - PHY MCS    (DEFAULT_SVC_MCS, mirroring examples/svctx/svc_tx.h default_policy)
   - outer FEC  (default_uep_policy — heavier RS overhead on the robust layers)
 so a dropping SNR produces a graceful staircase (T2 sheds first, base/IDR last)
 instead of one cliff. `run_svc_pipeline` returns per-layer delivery; `main()`

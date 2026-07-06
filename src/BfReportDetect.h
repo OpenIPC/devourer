@@ -1,6 +1,6 @@
 /* BfReportDetect — console detector for beamforming self-sounding reports,
- * shared by WiFiDriverDemo (2-adapter rig: separate capture radio) and
- * WiFiDriverTxDemo (single-radio: the sounder captures its own reports via
+ * shared by rxdemo (2-adapter rig: separate capture radio) and
+ * txdemo (single-radio: the sounder captures its own reports via
  * StartRxLoop). Header-only so the demos stay identical consumers.
  *
  * A VHT/HT Compressed Beamforming report is a management Action frame —

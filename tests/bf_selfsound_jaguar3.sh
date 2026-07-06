@@ -16,8 +16,8 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
-TXDEMO="$ROOT/build/WiFiDriverTxDemo"
-RXDEMO="$ROOT/build/WiFiDriverDemo"
+TXDEMO="$ROOT/build/txdemo"
+RXDEMO="$ROOT/build/rxdemo"
 OUT="/tmp/bf-jaguar3"
 CHANNEL=100
 DUR=8
@@ -30,8 +30,8 @@ mkdir -p "$OUT"
 tag="$(echo "$BFEE_PID" | tr -d 'x')"
 
 cleanup() {
-    pkill -x WiFiDriverTxDem 2>/dev/null
-    pkill -x WiFiDriverDemo 2>/dev/null
+    pkill -x txdemo 2>/dev/null
+    pkill -x rxdemo 2>/dev/null
     wait 2>/dev/null
 }
 trap cleanup EXIT INT TERM

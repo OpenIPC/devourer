@@ -15,18 +15,18 @@ run_tx() {  # $1=pid $2=sysfs $3=driver $4=label
   local pid=$1 sys=$2 drv=$3 label=$4
   [ -n "$drv" ] && { echo "$sys:1.0" | sudo tee /sys/bus/usb/drivers/$drv/unbind >/dev/null 2>&1; sleep 1; }
   sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0x$pid DEVOURER_CHANNEL=$CH DEVOURER_TX_RATE=MCS7/20 \
-       stdbuf -oL timeout -k 5 $((SECS+4)) build/WiFiDriverTxDemo >/tmp/eutx_$label.log 2>&1 &
+       stdbuf -oL timeout -k 5 $((SECS+4)) build/txdemo >/tmp/eutx_$label.log 2>&1 &
   local txpid=$!
   sleep 4
   echo "--- $label TX duty @ ${FREQ}Hz ---"
   sudo $PY tests/sdr_duty.py --freq $FREQ --secs $SECS --mcs 7 --bw 20 2>&1 | grep -iE "duty|mbps|noise|error" | head
-  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; wait $txpid 2>/dev/null
+  sudo pkill -9 -x txdemo 2>/dev/null; wait $txpid 2>/dev/null
   [ -n "$drv" ] && echo "$sys:1.0" | sudo tee /sys/bus/usb/drivers/$drv/bind >/dev/null 2>&1
   sleep 2
   echo "   ($label sends: $(grep -c 'rc=1\|bulk_send.*OK' /tmp/eutx_$label.log), fails: $(grep -c 'Failed to send' /tmp/eutx_$label.log))"
 }
 
-trap 'sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null' EXIT
+trap 'sudo pkill -9 -x txdemo 2>/dev/null' EXIT
 [ -n "$CUS" ] && run_tx c812 "$CUS" rtw88_8822cu CU-control
 [ -n "$EUS" ] && run_tx a81a "$EUS" "" EU
 echo "Done. duty >> noise = radiates; duty ~ noise = dark front-end."

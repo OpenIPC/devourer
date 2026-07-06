@@ -198,7 +198,7 @@ struct RxAgg {
 };
 static RxAgg g_rxagg;
 
-/* The canonical txdemo beacon SA (same constant as txdemo/main.cpp and
+/* The canonical txdemo beacon SA (same constant as examples/tx/main.cpp and
  * tests/regress.py CANONICAL_SA — change all three together): the
  * <devourer-tx-hit> matcher and the "canon" aggregate filter below. */
 static const uint8_t kTxSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
@@ -349,12 +349,12 @@ static void packetProcessor(const Packet &packet) {
     fflush(stdout);
   }
   /* BF self-sounding report detector (DEVOURER_BF_DETECT_REPORT modes 1-4) —
-   * shared with WiFiDriverTxDemo's single-radio capture, see BfReportDetect.h. */
+   * shared with txdemo's single-radio capture, see BfReportDetect.h. */
   devourer::bf::detect_report(packet);
 
   /* TX-validation hook: detect frames whose SA matches the txdemo's hardcoded
    * injected beacon (57:42:75:05:d6:00). When running this RX demo against
-   * one adapter while WiFiDriverTxDemo runs against another on the same
+   * one adapter while txdemo runs against another on the same
    * channel, each hit confirms an injected frame made it over the air. */
   if (packet.Data.size() >= 16) {
     if (std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
@@ -403,7 +403,7 @@ static void packetProcessor(const Packet &packet) {
       /* DEVOURER_DUMP_BODY=1: print the RX rate index (DESC_RATE*: 0x04=6M
        * OFDM, 0x00=1M CCK, 0x0c+=HT/VHT MCS) and the 802.11 frame body
        * (everything after the 24-byte mgmt header) as hex. Consumed by
-       * tests/precoder_roundtrip.py to confirm a PrecoderDemo frame flew as
+       * tests/precoder_roundtrip.py to confirm a precoder frame flew as
        * 6M OFDM and that its shaped PSDU bytes round-tripped intact — the
        * two-adapter, no-SDR verification. First few hits only. */
       static const bool dump_body = std::getenv("DEVOURER_DUMP_BODY") != nullptr;

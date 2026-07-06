@@ -1,6 +1,6 @@
-// StreamTxDemo — stdin-driven TX for the precoder stream link.
+// streamtx — stdin-driven TX for the precoder stream link.
 //
-// Mirrors PrecoderDemo's chip-setup boilerplate (legacy 6M OFDM probe-request
+// Mirrors precoder's chip-setup boilerplate (legacy 6M OFDM probe-request
 // carrier, single-stream BPSK/BCC, RTL8812AU/8821AU/8811AU), but instead of
 // looping on one shaped PSDU it reads a sequence of length-prefixed PSDU
 // bodies from stdin and sends one probe-request per body. The encoder
@@ -19,10 +19,10 @@
 // ends.
 //
 // Usage:
-//   DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 ./build/StreamTxDemo \\
+//   DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 ./build/streamtx \\
 //       [--interval-ms MS] [--max-psdu BYTES] < bodies.bin
 //   uv run python tools/precoder/stream_tx.py < data.bin | \\
-//       ./build/StreamTxDemo
+//       ./build/streamtx
 //
 // Env: same conventions as the other demos (DEVOURER_VID / DEVOURER_PID /
 // DEVOURER_CHANNEL / DEVOURER_SKIP_RESET).
@@ -79,12 +79,12 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
 };
 
-// Identical 802.11 probe-request header to PrecoderDemo; radiotap is now
+// Identical 802.11 probe-request header to precoder; radiotap is now
 // built once at startup from DEVOURER_STREAM_RATE — accepts legacy
 // (6M..54M), HT (MCS0..MCS31), or VHT (VHT1SS_MCS0..VHT4SS_MCS9) carrier
 // modes. Default is 6M legacy OFDM, bit-identical to the historic
 // kRadiotapLegacy6M constant. Same canonical SA, same matcher in
-// demo/main.cpp's RX path — keep these three in lockstep, see CLAUDE.md.
+// examples/rx/main.cpp's RX path — keep these three in lockstep, see CLAUDE.md.
 static const std::vector<uint8_t> kStreamRadiotap =
     devourer::build_stream_radiotap(devourer::parse_tx_mode_env());
 static const uint8_t kCanonicalSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
@@ -124,7 +124,7 @@ int main(int argc, char **argv) {
   }
 
   // Make stdin binary so a 0x1A or CRLF doesn't corrupt PSDU bytes. Gated on
-  // _WIN32 (not _MSC_VER) inside the shared helper — see txdemo/stream_stdin.h.
+  // _WIN32 (not _MSC_VER) inside the shared helper — see examples/common/stream_stdin.h.
   stream_stdin::set_stdin_binary();
 
   libusb_context *context = nullptr;
@@ -219,7 +219,7 @@ int main(int argc, char **argv) {
    * knob for pushing the link into the marginal-SNR regime where the RX's
    * corrupted-frame salvage path gets exercised (pairs with the B210 interferer
    * in tests/fused_fec_onair.sh). Applied once and held, unlike
-   * WiFiDriverTxDemo's DEVOURER_TX_PWR_START ramp. Must follow InitWrite so it
+   * txdemo's DEVOURER_TX_PWR_START ramp. Must follow InitWrite so it
    * applies live. Generation-agnostic (IRtlDevice runtime TX-power API). */
   if (const char *o = std::getenv("DEVOURER_TX_PWR_OVERRIDE")) {
     int idx = std::atoi(o);
@@ -337,7 +337,7 @@ int main(int argc, char **argv) {
     tx_buf.insert(tx_buf.end(), psdu.begin(), psdu.end());
     bool ok = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
     ++tx_count;
-    // Tag matches PrecoderDemo's so existing log-watchers keep working; route
+    // Tag matches precoder's so existing log-watchers keep working; route
     // to stderr to leave stdout clean for downstream callers that may chain
     // this binary.
     if (tx_count <= 5 || tx_count % 500 == 0) {

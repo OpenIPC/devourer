@@ -6,7 +6,7 @@ if(WIN32 AND NOT "$ENV{VCPKG_ROOT}" STREQUAL "")
     set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
 endif()
 
-project(Rtl8812auNet)
+project(devourer)
 
 enable_testing()
 
@@ -54,7 +54,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(libusb REQUIRED IMPORTED_TARGET libusb-1.0)
 
-add_library(WiFiDriver
+add_library(devourer
     # --- generation-agnostic core (always compiled) ---
     src/logger.h
     hal/basic_types.h
@@ -97,22 +97,22 @@ add_library(WiFiDriver
     src/PhyTableLoader.h
 )
 
-target_compile_features(WiFiDriver PUBLIC cxx_std_20)
+target_compile_features(devourer PUBLIC cxx_std_20)
 
-# Link WiFiDriver with libusb as found via pkg-config.
-target_link_libraries(WiFiDriver PUBLIC PkgConfig::libusb)
+# Link devourer with libusb as found via pkg-config.
+target_link_libraries(devourer PUBLIC PkgConfig::libusb)
 
-target_include_directories(WiFiDriver PUBLIC hal)
-target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8814a)
-target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822c)
-target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822e)
-target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8822b)
-target_include_directories(WiFiDriver PUBLIC hal/phydm/rtl8821c)
-target_include_directories(WiFiDriver PUBLIC src)
+target_include_directories(devourer PUBLIC hal)
+target_include_directories(devourer PUBLIC hal/phydm/rtl8814a)
+target_include_directories(devourer PUBLIC hal/phydm/rtl8822c)
+target_include_directories(devourer PUBLIC hal/phydm/rtl8822e)
+target_include_directories(devourer PUBLIC hal/phydm/rtl8822b)
+target_include_directories(devourer PUBLIC hal/phydm/rtl8821c)
+target_include_directories(devourer PUBLIC src)
 
 # --- per-chip source groups (see options above) ---
 if(DEVOURER_JAGUAR1)
-    target_sources(WiFiDriver PRIVATE
+    target_sources(devourer PRIVATE
         hal/hal8812a_fw.c hal/hal8812a_fw.h
         hal/hal8821a_fw.c hal/hal8821a_fw.h
         hal/Hal8812PwrSeq.c hal/Hal8812PwrSeq.h
@@ -132,18 +132,18 @@ if(DEVOURER_JAGUAR1)
         src/jaguar1/FrameParser.cpp src/jaguar1/FrameParser.h
         # NB: PhyTableLoader was promoted to src/ (shared with Jaguar2).
         src/jaguar1/BbDbgportReader.cpp src/jaguar1/BbDbgportReader.h)
-    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR1=1)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR1=1)
 endif()
 
 if(DEVOURER_8814)
-    target_sources(WiFiDriver PRIVATE
+    target_sources(devourer PRIVATE
         hal/hal8814a_fw.c hal/hal8814a_fw.h
         hal/Hal8814PwrSeq.c hal/Hal8814PwrSeq.h
         hal/Hal8814PhyReg.h
         hal/phydm/rtl8814a/Hal8814_PhyTables.c
         hal/phydm/rtl8814a/Hal8814_PhyTables.h
         src/jaguar1/Iqk8814a.cpp src/jaguar1/Iqk8814a.h)
-    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_8814=1)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_8814=1)
 endif()
 
 # --- Jaguar2 (RTL8822BU / RTL8811CU-8821CU) ---
@@ -155,7 +155,7 @@ endif()
 # .cpp files (self-guarded on DEVOURER_HAVE_JAGUAR2_8822B/_8821C); each chip's
 # firmware blob + generated tables live in its own variant block.
 if(DEVOURER_JAGUAR2)
-    target_sources(WiFiDriver PRIVATE
+    target_sources(devourer PRIVATE
         src/jaguar2/RtlJaguar2Device.cpp src/jaguar2/RtlJaguar2Device.h
         src/jaguar2/HalJaguar2.cpp src/jaguar2/HalJaguar2.h
         src/jaguar2/HalmacJaguar2Fw.cpp src/jaguar2/HalmacJaguar2Fw.h
@@ -167,33 +167,33 @@ if(DEVOURER_JAGUAR2)
         src/jaguar2/Jaguar2Calibration.h
         src/jaguar2/Phy8822bTables.cpp
         src/jaguar2/Halrf8822b.cpp src/jaguar2/Halrf8822b.h)
-    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2=1)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR2=1)
 endif()
 
 # 8822B variant data (2T2R): firmware blob + generated phydm tables + txpwr_lmt.
 if(DEVOURER_JAGUAR2_8822B)
-    target_sources(WiFiDriver PRIVATE
+    target_sources(devourer PRIVATE
         hal/hal8822b_fw.c hal/hal8822b_fw.h
         hal/phydm/rtl8822b/Hal8822b_PhyTables.c hal/phydm/rtl8822b/Hal8822b_PhyTables.h)
-    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2_8822B=1)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR2_8822B=1)
 endif()
 
 # 8821C variant (1T1R): per-variant dispatcher impls (Phy8821cTables / Halrf8821c)
 # + firmware blob + generated phydm tables. Mirrors the Jaguar3 8822E block.
 if(DEVOURER_JAGUAR2_8821C)
-    target_sources(WiFiDriver PRIVATE
+    target_sources(devourer PRIVATE
         src/jaguar2/Phy8821cTables.cpp
         src/jaguar2/Halrf8821c.cpp src/jaguar2/Halrf8821c.h
         hal/hal8821c_fw.c hal/hal8821c_fw.h
         hal/phydm/rtl8821c/Hal8821c_PhyTables.c hal/phydm/rtl8821c/Hal8821c_PhyTables.h)
-    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR2_8821C=1)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR2_8821C=1)
 endif()
 
 if(DEVOURER_JAGUAR3)
     # Shared Jaguar3 port (compiled when either variant is on). Phy8822cTables.cpp
     # and Halrf8822c.cpp also carry the make_jaguar3_*() dispatchers, so they are
     # always built when Jaguar3 is on; their per-variant bodies are #if-guarded.
-    target_sources(WiFiDriver PRIVATE
+    target_sources(devourer PRIVATE
         src/jaguar3/Jaguar3PhyTables.h
         src/jaguar3/Jaguar3Calibration.h
         src/jaguar3/ChipVariant.h
@@ -207,103 +207,103 @@ if(DEVOURER_JAGUAR3)
         src/jaguar3/PhyTableLoaderJaguar3.cpp src/jaguar3/PhyTableLoaderJaguar3.h
         src/jaguar3/Phy8822cTables.cpp
         src/jaguar3/Halrf8822c.cpp src/jaguar3/Halrf8822c.h)
-    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR3=1)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR3=1)
 endif()
 
 if(DEVOURER_JAGUAR3_8822C)
-    target_sources(WiFiDriver PRIVATE
+    target_sources(devourer PRIVATE
         hal/hal8822c_fw.c hal/hal8822c_fw.h
         hal/phydm/rtl8822c/Hal8822c_PhyTables.c hal/phydm/rtl8822c/Hal8822c_PhyTables.h
         hal/phydm/rtl8822c/Hal8822c_IqkNctl.c hal/phydm/rtl8822c/Hal8822c_IqkNctl.h)
-    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR3_8822C=1)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR3_8822C=1)
 endif()
 
 if(DEVOURER_JAGUAR3_8822E)
-    target_sources(WiFiDriver PRIVATE
+    target_sources(devourer PRIVATE
         hal/hal8822e_fw.c hal/hal8822e_fw.h
         hal/phydm/rtl8822e/Hal8822e_PhyTables.c hal/phydm/rtl8822e/Hal8822e_PhyTables.h
         src/jaguar3/Phy8822eTables.cpp
         src/jaguar3/Halrf8822e.cpp src/jaguar3/Halrf8822e.h)
-    target_compile_definitions(WiFiDriver PUBLIC DEVOURER_HAVE_JAGUAR3_8822E=1)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR3_8822E=1)
 endif()
 
 
-add_executable(WiFiDriverDemo
-    demo/main.cpp
+add_executable(rxdemo
+    examples/rx/main.cpp
 )
-target_link_libraries(WiFiDriverDemo PUBLIC WiFiDriver)
+target_link_libraries(rxdemo PUBLIC devourer)
 
-add_executable(WiFiDriverTxDemo
-    txdemo/main.cpp
+add_executable(txdemo
+    examples/tx/main.cpp
 )
-target_link_libraries(WiFiDriverTxDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
+target_link_libraries(txdemo PUBLIC devourer PRIVATE PkgConfig::libusb)
 
 # Pre-modulator subcarrier PoC: transmits PSDU bytes shaped by
 # tools/precoder/encode_subcarriers.py so chosen OFDM data subcarriers carry
 # chosen bits. Single-stream BPSK / HT MCS0 / BCC on 8812/8821/8811.
-add_executable(PrecoderDemo
-    txdemo/precoder_demo/main.cpp
+add_executable(precoder
+    examples/precoder/main.cpp
 )
-target_link_libraries(PrecoderDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
+target_link_libraries(precoder PUBLIC devourer PRIVATE PkgConfig::libusb)
 
 # Stream-link TX: reads length-prefixed PSDU bodies from stdin and transmits
 # one probe-request per body. Driven by tools/precoder/stream_tx.py — the
 # C++/Python split keeps libusb out of the framing math.
-add_executable(StreamTxDemo
-    txdemo/stream_tx_demo/main.cpp
+add_executable(streamtx
+    examples/streamtx/main.cpp
 )
-target_link_libraries(StreamTxDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
-# stream_stdin.h (shared binary-stdin framing) lives in txdemo/.
-target_include_directories(StreamTxDemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/txdemo)
+target_link_libraries(streamtx PUBLIC devourer PRIVATE PkgConfig::libusb)
+# stream_stdin.h (shared binary-stdin framing) lives in examples/common/.
+target_include_directories(streamtx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
 # SVC-T UEP injector: maps each HEVC NAL's temporal_id -> a robust/fast TxMode
 # (svc_tx.h), so base/IDR layers fly robust and enhancement layers ride fast.
-add_executable(SvcTxDemo
-    txdemo/svc_tx_demo/main.cpp
+add_executable(svctx
+    examples/svctx/main.cpp
 )
-target_link_libraries(SvcTxDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
-target_include_directories(SvcTxDemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/txdemo)
+target_link_libraries(svctx PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(svctx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
 # Stream-link DUPLEX: one binary, one chip, both directions. Combines the RX
-# loop from WiFiDriverDemo and the stdin-driven TX from StreamTxDemo —
+# loop from rxdemo and the stdin-driven TX from streamtx —
 # stdin = length-prefixed PSDU bodies, stdout = <devourer-stream> lines.
 # tools/precoder/tun_p2p.py spawns this for --mode=duplex.
-add_executable(StreamDuplexDemo
-    txdemo/stream_duplex_demo/main.cpp
+add_executable(duplex
+    examples/duplex/main.cpp
 )
-target_link_libraries(StreamDuplexDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
-target_include_directories(StreamDuplexDemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/txdemo)
+target_link_libraries(duplex PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(duplex PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
-# TxPowerStepDemo — reference consumer of the runtime TX-power API
+# txpower — reference consumer of the runtime TX-power API
 # (IRtlDevice::SetTxPowerOffsetQdb / SetTxPowerIndexOverride / GetTxPowerState /
 # GetThermalStatus): opens one adapter, steps the knobs from CLI args (no env
 # vars), and prints machine-readable state markers. The register-level
 # validation driver for tests/txpwr_offset_regcheck.sh and the shape of an
 # adaptive-link controller's power leg.
-add_executable(TxPowerStepDemo
+add_executable(txpower
     examples/txpower/main.cpp
 )
-target_link_libraries(TxPowerStepDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
+target_link_libraries(txpower PUBLIC devourer PRIVATE PkgConfig::libusb)
 
-# WiFiSenseDemo — Wi-Fi motion/presence sensor from beamforming reports. Drives
+# sense — Wi-Fi motion/presence sensor from beamforming reports. Drives
 # two adapters (a sounder + a beamformee) on one host, self-captures the reports,
 # decodes the per-tone Givens angles (src/BfReportDecode.h), and shows a live
 # motion readout. See examples/sense/README.md and docs/beamforming-victim-sensing.md.
-add_executable(WiFiSenseDemo
+add_executable(sense
     examples/sense/main.cpp
 )
-target_link_libraries(WiFiSenseDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
+target_link_libraries(sense PUBLIC devourer PRIVATE PkgConfig::libusb)
 
 # Headless regression guard for the binary-stdin framing shared by the two
-# stream demos above (txdemo/stream_stdin.h). No libusb, no radio — just the
+# stream demos above (examples/common/stream_stdin.h). No libusb, no radio — just the
 # set_stdin_binary() + read_exact() path, so a text-mode regression (e.g. the
 # _setmode gate slipping back to _MSC_VER, which is invisible to a build-only
 # check) fails `ctest` on the Windows/mingw jobs. See tests/stream_stdin_test.cmake.
 add_executable(StreamStdinSelftest
-    txdemo/stream_stdin_selftest.cpp
+    examples/common/stream_stdin_selftest.cpp
 )
 target_compile_features(StreamStdinSelftest PRIVATE cxx_std_20)
-target_include_directories(StreamStdinSelftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/txdemo)
+target_include_directories(StreamStdinSelftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
 add_test(
     NAME stream_stdin_binary
@@ -319,7 +319,7 @@ add_test(
 add_executable(ToneMaskSelftest
     tests/tone_mask_selftest.cpp
 )
-target_link_libraries(ToneMaskSelftest PRIVATE WiFiDriver)
+target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
 
@@ -330,7 +330,7 @@ add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
 add_executable(SweepSpecSelftest
     tests/sweep_spec_selftest.cpp
 )
-target_link_libraries(SweepSpecSelftest PRIVATE WiFiDriver)
+target_link_libraries(SweepSpecSelftest PRIVATE devourer)
 
 add_test(NAME sweep_spec_math COMMAND SweepSpecSelftest)
 
@@ -340,7 +340,7 @@ add_test(NAME sweep_spec_math COMMAND SweepSpecSelftest)
 add_executable(TxPowerQuantSelftest
     tests/txpower_quant_selftest.cpp
 )
-target_link_libraries(TxPowerQuantSelftest PRIVATE WiFiDriver)
+target_link_libraries(TxPowerQuantSelftest PRIVATE devourer)
 
 add_test(NAME txpower_quant_math COMMAND TxPowerQuantSelftest)
 
@@ -351,7 +351,7 @@ add_test(NAME txpower_quant_math COMMAND TxPowerQuantSelftest)
 add_executable(LinkHealthSelftest
     tests/link_health_selftest.cpp
 )
-target_link_libraries(LinkHealthSelftest PRIVATE WiFiDriver)
+target_link_libraries(LinkHealthSelftest PRIVATE devourer)
 
 add_test(NAME link_health_classify COMMAND LinkHealthSelftest)
 
@@ -360,7 +360,7 @@ add_test(NAME link_health_classify COMMAND LinkHealthSelftest)
 add_executable(RxQualitySelftest
     tests/rx_quality_selftest.cpp
 )
-target_link_libraries(RxQualitySelftest PRIVATE WiFiDriver)
+target_link_libraries(RxQualitySelftest PRIVATE devourer)
 
 add_test(NAME rx_quality_derive COMMAND RxQualitySelftest)
 
@@ -369,7 +369,7 @@ add_test(NAME rx_quality_derive COMMAND RxQualitySelftest)
 add_executable(TxCapsSelftest
     tests/tx_caps_selftest.cpp
 )
-target_link_libraries(TxCapsSelftest PRIVATE WiFiDriver)
+target_link_libraries(TxCapsSelftest PRIVATE devourer)
 
 add_test(NAME tx_caps_derive COMMAND TxCapsSelftest)
 
@@ -380,19 +380,19 @@ if(DEVOURER_JAGUAR2_8822B OR DEVOURER_JAGUAR2_8821C)
     add_executable(TxPktPwrSelftest
         tests/txpkt_pwr_selftest.cpp
     )
-    target_link_libraries(TxPktPwrSelftest PRIVATE WiFiDriver)
+    target_link_libraries(TxPktPwrSelftest PRIVATE devourer)
     target_include_directories(TxPktPwrSelftest PRIVATE src)
     add_test(NAME txpkt_pwr_quant COMMAND TxPktPwrSelftest)
 endif()
 
 # Headless guard for the beamforming-report decoder (src/BfReportDecode.h) — the
-# LSB-first Givens-angle unpacking + per-tone variance behind WiFiSenseDemo. It
+# LSB-first Givens-angle unpacking + per-tone variance behind sense. It
 # decodes a real captured VHT MU report and checks the angles against an offline
 # reference, so a port regression fails `ctest` instead of only on a radio.
 add_executable(BfReportDecodeSelftest
     examples/sense/bf_report_decode_selftest.cpp
 )
-target_link_libraries(BfReportDecodeSelftest PRIVATE WiFiDriver)
+target_link_libraries(BfReportDecodeSelftest PRIVATE devourer)
 
 add_test(NAME bf_report_decode COMMAND BfReportDecodeSelftest)
 

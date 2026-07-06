@@ -645,6 +645,12 @@ void RtlJaguar2Device::SetTxPacketPowerStep(uint8_t step) {
                 step & 0x7);
 }
 
+devourer::TxCaps RtlJaguar2Device::GetTxCaps() {
+  /* 8821C is 1T1R (no STBC); 8822B is 2T2R. */
+  const uint8_t chains = _variant == jaguar2::ChipVariant::C8821C ? 1 : 2;
+  return devourer::tx_caps_for_chains(chains);
+}
+
 devourer::ThermalStatus RtlJaguar2Device::GetThermalStatus() {
   devourer::ThermalStatus t;
   if (!_brought_up)
@@ -799,6 +805,18 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
                bwidth == CHANNEL_WIDTH_20) {
       data_sc = (pidx == 2) ? 1 : (pidx == 1) ? 2 : 0; /* 20 UPPER/LOWER of 40 */
     }
+  }
+
+  /* Drop STBC on the 1T1R variant (8821C) — STBC needs >=2 TX chains, so an
+   * STBC-marked frame there is malformed and never decodes. Warn once. */
+  if (stbc && !GetTxCaps().stbc_ok) {
+    static bool warned = false;
+    if (!warned) {
+      _logger->warn("STBC requested on a 1T1R chip (8821C) — dropping the STBC "
+                    "flag to keep frames decodable");
+      warned = true;
+    }
+    stbc = 0;
   }
 
   const uint8_t *dot11 = packet + radiotap_length;

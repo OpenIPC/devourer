@@ -8,6 +8,7 @@
 #include "RxSense.h"
 #include "SelectedChannel.h"
 #include "ThermalStatus.h"
+#include "TxCaps.h"
 #include "TxMode.h"
 #include "TxPower.h"
 
@@ -122,6 +123,13 @@ public:
    * family wires one — see src/ThermalStatus.h). The PA-heating input of the
    * adaptive-link controller. Default returns an all-invalid reading. */
   virtual devourer::ThermalStatus GetThermalStatus() { return {}; }
+
+  /* Per-chip TX capability report (see src/TxCaps.h): spatial streams, STBC /
+   * LDPC / SGI support, max bandwidth — derived from the chip identity resolved
+   * at construction. A caller (or send_packet) uses it to avoid requesting a
+   * feature the silicon can't do (e.g. STBC on a 1T1R part, which produces a
+   * frame that never decodes). Default returns supported=false. */
+  virtual devourer::TxCaps GetTxCaps() { return {}; }
 
   virtual bool send_packet(const uint8_t *packet, size_t length) = 0;
   virtual SelectedChannel GetSelectedChannel() = 0;

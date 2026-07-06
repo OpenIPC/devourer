@@ -288,6 +288,19 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
 - `DEVOURER_THERMAL_WARN_DELTA=N` — thermal-units-above-baseline threshold at
   which a one-shot `warn` fires (default `15`); re-arms once the chip cools
   back below it.
+- `DEVOURER_LINKHEALTH=1` — (`WiFiDriverDemo` RX, needs `DEVOURER_RX_ENERGY_MS`)
+  emit a `<devourer-linkhealth>` verdict line per energy window: the RX sensor
+  tuple classified into a plain-language cause + fix (`src/LinkHealth.h`). The
+  point is to tell a **near-field saturation** problem (strong RSSI + poor EVM —
+  *back OFF* TX power, add attenuation/distance) apart from a genuine weak link
+  (*add* power) so a user isn't chasing the wrong remedy — EVM, not SNR, is the
+  saturation tell (SNR looks fine while the constellation collapses). Verdicts:
+  `SATURATED` / `INTERFERENCE` / `WEAK` / `MARGINAL` / `HEALTHY` / `NO_SIGNAL`.
+  Uses `rssi_max` (window peak) as the strength signal since near-field
+  saturation drags the mean down. Thresholds calibrated on-air
+  (`tests/saturation_knee_sweep.sh`, `tests/j3_dig_penalty_sweep.sh`), unit-
+  guarded (`tests/link_health_selftest.cpp`), SAT-vs-HEALTHY verified on-air
+  (`tests/link_health_onair.sh`). See **`docs/bench-testing-near-field.md`**.
 
 `WiFiDriverTxDemo` selects the on-air TX mode with a single env var that it
 parses into a `devourer::TxMode` and hands to `RtlJaguarDevice::SetTxMode`

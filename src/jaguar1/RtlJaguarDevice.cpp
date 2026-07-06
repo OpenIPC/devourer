@@ -687,7 +687,7 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
       start_rx_path_toggle(masks, interval_ms);
     } else {
       auto mask = static_cast<uint8_t>(std::strtoul(spec.c_str(), nullptr, 0));
-      _device.rtw_write8(0x808, mask);
+      SetRxPathMask(mask);
       _logger->info("DEVOURER_RX_PATHS: RX-path mask 0x808[7:0]=0x{:02x}", mask);
     }
   }
@@ -753,6 +753,21 @@ void RtlJaguarDevice::SetMonitorChannel(SelectedChannel channel) {
   _channel = channel;
   _radioManagement->set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                        channel.ChannelWidth);
+  /* Re-apply a runtime RX-path mask: the channel set runs IQK, which
+   * saves/restores 0x808 and thereby reverts the mask to the table default.
+   * Gated on the mask having been set (SetRxPathMask), so the default
+   * all-paths behaviour is byte-identical when the knob is unused. */
+  if (_rx_path_mask >= 0)
+    _device.rtw_write8(0x808, static_cast<uint8_t>(_rx_path_mask.load()));
+}
+
+void RtlJaguarDevice::SetRxPathMask(uint8_t mask) {
+  _rx_path_mask = mask;
+  _device.rtw_write8(0x808, mask);
+}
+
+int RtlJaguarDevice::GetRxPathMask() {
+  return _radioManagement->phy_query_bb_reg_public(0x808, 0x000000ff);
 }
 
 void RtlJaguarDevice::FastRetune(uint8_t channel, bool cache_rf) {

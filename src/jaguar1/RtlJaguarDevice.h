@@ -160,6 +160,23 @@ public:
   bool send_packet(const uint8_t* packet, size_t length) override;
   SelectedChannel GetSelectedChannel() override;
 
+  /* Runtime RX-chain selection — the adaptive-link spatial-diversity lever
+   * (the read/write superset of the DEVOURER_RX_PATHS env knob). Writes the
+   * RX-path-enable mask 0x808[7:0] (bits 0/4 = path A CCK/OFDM, 1/5 = B,
+   * 2/6 = C, 3/7 = D): 0x11 = A only, 0x33 = A+B, 0x77 = A+B+C, 0xFF = all.
+   * The 8814 has 4 chains to trade; on 8812/8821 the high bits are no-ops.
+   * Masking a chain drops its per-chain RSSI to the noise floor — it changes
+   * WHICH chains combine, not their gain. A controller with a motion/fade
+   * signal switches this live instead of on the env toggle's fixed timer.
+   *
+   * STICKY: once set, the mask is cached and re-applied after every
+   * SetMonitorChannel (IQK saves/restores 0x808, so a channel set would
+   * otherwise revert it to the table default) — the same channel-sticky
+   * contract as the runtime TX-power knobs. GetRxPathMask reads 0x808 back;
+   * -1 = never set (chip at the table default, all paths). */
+  void SetRxPathMask(uint8_t mask);
+  int GetRxPathMask();
+
   bool should_stop = false;
 
   /* Per-queue free-page snapshot read from REG_FIFOPAGE_INFO_1..5
@@ -219,6 +236,10 @@ private:
                             uint32_t interval_ms);
   std::thread _rxmask_thread;
   std::atomic<bool> _rxmask_stop{false};
+  /* Cached RX-path mask for SetRxPathMask stickiness: -1 = never set (leave
+   * the chip's table default across channel sets). Atomic so the toggle
+   * thread and a control-plane SetMonitorChannel see a consistent value. */
+  std::atomic<int> _rx_path_mask{-1};
 
   std::thread _therm_thread;
   std::atomic<bool> _therm_stop{false};

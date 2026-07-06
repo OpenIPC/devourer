@@ -218,11 +218,16 @@ Both `WiFiDriverDemo` and `WiFiDriverTxDemo` honour:
   0/4 = path A CCK/OFDM, 1/5 = B, 2/6 = C, 3/7 = D). Default all paths (`0xFF`).
   `0x11` = A only, `0x33` = A+B, `0x77` = A+B+C. Validated on the 8814: a masked
   path's per-chain RSSI collapses to the noise floor while the enabled ones stay
-  up. Applied after the channel set (so it survives IQK); a later channel switch
-  reverts it, so it targets a single-channel RX capture. The knob for measuring
-  the chip's hardware maximal-ratio-combining gain — compare frame delivery at
+  up. Routes through the runtime `RtlJaguarDevice::SetRxPathMask(mask)` /
+  `GetRxPathMask()` API (the adaptive-link spatial-diversity lever — a
+  controller with a motion/fade signal switches chains live instead of on the
+  toggle's fixed timer); once set, the mask is **sticky** — re-applied after
+  every `SetMonitorChannel` (a channel set runs IQK, which saves/restores
+  `0x808`), so it survives channel hops. The knob for measuring the chip's
+  hardware maximal-ratio-combining gain — compare frame delivery at
   `0x11`/`0x33`/`0x77`/`0xFF` over a *marginal* link (see
-  `docs/measuring-spatial-diversity.md`). A **toggle spec**
+  `docs/measuring-spatial-diversity.md`); register + stickiness validation in
+  `tests/rx_path_mask_check.sh`. A **toggle spec**
   `0xAA:0xBB[:0xCC]@<ms>` (e.g. `0x22:0xFF@300`) cycles the mask on a timer
   thread instead of setting it once, printing a `<devourer-rxpath-mask>0xNN`
   marker inline with the frame stream on each switch — the stimulus for the

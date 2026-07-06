@@ -77,6 +77,9 @@ add_library(WiFiDriver
     src/BeamformingSounder.h
     src/TxMode.cpp
     src/TxMode.h
+    src/TxPower.cpp
+    src/TxPower.h
+    src/ThermalStatus.h
     src/IRtlDevice.h
     src/SignalStop.cpp
     src/SignalStop.h
@@ -266,6 +269,17 @@ add_executable(StreamDuplexDemo
 target_link_libraries(StreamDuplexDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
 target_include_directories(StreamDuplexDemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/txdemo)
 
+# TxPowerStepDemo — reference consumer of the runtime TX-power API
+# (IRtlDevice::SetTxPowerOffsetQdb / SetTxPowerIndexOverride / GetTxPowerState /
+# GetThermalStatus): opens one adapter, steps the knobs from CLI args (no env
+# vars), and prints machine-readable state markers. The register-level
+# validation driver for tests/txpwr_offset_regcheck.sh and the shape of an
+# adaptive-link controller's power leg.
+add_executable(TxPowerStepDemo
+    examples/txpower/main.cpp
+)
+target_link_libraries(TxPowerStepDemo PUBLIC WiFiDriver PRIVATE PkgConfig::libusb)
+
 # WiFiSenseDemo — Wi-Fi motion/presence sensor from beamforming reports. Drives
 # two adapters (a sounder + a beamformee) on one host, self-captures the reports,
 # decodes the per-tone Givens angles (src/BfReportDecode.h), and shows a live
@@ -314,6 +328,16 @@ add_executable(SweepSpecSelftest
 target_link_libraries(SweepSpecSelftest PRIVATE WiFiDriver)
 
 add_test(NAME sweep_spec_math COMMAND SweepSpecSelftest)
+
+# Headless guard for the TX-power offset quantization (src/TxPower.h) — the
+# qdB->index-step rounding/clamping behind SetTxPowerOffsetQdb, so a rounding
+# regression fails `ctest` instead of only surfacing as a wrong on-air level.
+add_executable(TxPowerQuantSelftest
+    tests/txpower_quant_selftest.cpp
+)
+target_link_libraries(TxPowerQuantSelftest PRIVATE WiFiDriver)
+
+add_test(NAME txpower_quant_math COMMAND TxPowerQuantSelftest)
 
 # Headless guard for the beamforming-report decoder (src/BfReportDecode.h) — the
 # LSB-first Givens-angle unpacking + per-tone variance behind WiFiSenseDemo. It

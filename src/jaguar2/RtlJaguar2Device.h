@@ -57,12 +57,28 @@ public:
    * measurement). */
   void FastRetune(uint8_t channel, bool cache_rf) override;
   void InitWrite(SelectedChannel channel) override;
-  void SetTxPower(uint8_t power) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
   SelectedChannel GetSelectedChannel() override;
   void Stop() override;
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;
+
+  /* Runtime TX-power control (IRtlDevice contract; see src/TxPower.h).
+   * Jaguar2 caps: 6-bit TXAGC index, 0.5 dB (2 qdB) per step. The offset
+   * folds into HalJaguar2::apply_tx_power after the regulatory min() (or onto
+   * the flat override), covering CCK/OFDM/HT and — 8822B included — the VHT
+   * sections. Live once brought up; recorded and folded at bring-up before.
+   * A full SetMonitorChannel re-applies the knobs against the new channel's
+   * efuse group (gated on a knob being active so the legacy no-knob path
+   * stays byte-identical); FastRetune never touches TXAGC. Readback from
+   * 0x1d00/0x1d04/0x1d10. GetThermalStatus reads RF[A] 0x42[15:10] + the
+   * efuse baseline at 0xBA. */
+  devourer::TxPowerCaps GetTxPowerCaps() override;
+  int SetTxPowerOffsetQdb(int qdb) override;
+  void SetTxPowerIndexOverride(int idx) override;
+  bool ReApplyTxPower() override;
+  devourer::TxPowerState GetTxPowerState() override;
+  devourer::ThermalStatus GetThermalStatus() override;
 
   /* Realtek MP single-tone (CW carrier) — radiate a bare RF local-oscillator
    * carrier at the tuned channel center. Path A; both Jaguar2 variants, per the
@@ -98,7 +114,18 @@ private:
   jaguar2::HalmacJaguar2Fw _fw;
   SelectedChannel _channel{};
   Action_ParsedRadioPacket _packetProcessor = nullptr;
-  int _tx_pwr_override = -1;
+  /* Runtime TX-power knobs (atomic so GetTxPowerState's cached snapshot is
+   * readable cross-thread; setters are control-plane-thread calls). Flat
+   * override -1 = efuse per-rate baseline; offset in 0.5 dB index steps. */
+  std::atomic<int> _tx_pwr_override{-1};
+  std::atomic<int> _tx_pwr_offset_steps{0};
+  /* Bring-up completion: gates the live apply in the TX-power setters. */
+  bool _brought_up = false;
+  /* Re-program TXAGC from the current knob state at the current channel:
+   * flat override (+offset) via set_tx_power_flat, else the efuse per-rate
+   * path with the offset folded. Called from bring_up and live from the
+   * setters/SetMonitorChannel. */
+  void apply_tx_power_current();
   /* rfe_type resolved during bring_up (efuse + DEVOURER_RFE), cached so
    * SetMonitorChannel can retune (set_channel_bw needs it). */
   uint8_t _rfe = 0;

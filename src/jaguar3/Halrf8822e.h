@@ -226,6 +226,13 @@ private:
    * path, compare to the efuse baseline, look up a per-band swing index, and
    * write it to the BB TX-power-adjust register (0x18a0/0x41a0[7:0]). */
   void thermal_track_8822e();
+
+public:
+  /* One-shot path-A meter read for GetThermalStatus (see Jaguar3Calibration):
+   * shares the tracker's one-time RF 0x42[19] trigger; baseline = efuse 0xd0. */
+  bool read_thermal(uint8_t &raw, uint8_t &baseline) override;
+
+private:
   uint8_t _therm_base[2] = {0xFF, 0xFF}; /* efuse 0xd0/0xd1 baseline per path */
   uint8_t _track_channel = 0;
   bool _tm_triggered = false;

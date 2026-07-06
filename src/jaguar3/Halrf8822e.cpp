@@ -1101,6 +1101,23 @@ void Halrf8822e::set_pwr_track_ctx(uint8_t thermal_base_a, uint8_t thermal_base_
 
 void Halrf8822e::pwr_track() { thermal_track_8822e(); }
 
+bool Halrf8822e::read_thermal(uint8_t &raw, uint8_t &baseline) {
+  /* Same one-time meter enable the tracker uses (RF 0x42[19] 1->0->1 per
+   * path, then the meter free-runs). Caller serializes against pwr_track. */
+  if (!_tm_triggered) {
+    for (uint8_t p = 0; p < 2; ++p) {
+      rf_write(p, 0x42, 1u << 19, 1);
+      rf_write(p, 0x42, 1u << 19, 0);
+      rf_write(p, 0x42, 1u << 19, 1);
+    }
+    _tm_triggered = true;
+    delay_us(300);
+  }
+  raw = static_cast<uint8_t>(rf_read(0, 0x42, 0x7e)); /* RF 0x42[6:1] */
+  baseline = _therm_base[0];                          /* efuse 0xd0 */
+  return raw != 0; /* 0 = meter not ready this cycle */
+}
+
 void Halrf8822e::thermal_track_8822e() {
   /* 5 GHz only (2.4 G swing tables not wired); need a valid efuse baseline. */
   const uint8_t ch = _track_channel;

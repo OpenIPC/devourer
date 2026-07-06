@@ -5,8 +5,8 @@
 # histogram at each step. tests/link_probe.py aligns the two by wall-clock and
 # reports the margin-vs-lever curve + the operating point that meets a target:
 #   power axis — the cheapest power that clears the SNR floor (least power that
-#     holds the link); the emitter must be a Jaguar1 part (the TXAGC ramp
-#     DEVOURER_TX_PWR_START/STOP/STEP is Jaguar1-only).
+#     holds the link); works on any emitter generation (the TXAGC ramp
+#     DEVOURER_TX_PWR_START/STOP/STEP rides the runtime TX-power API).
 #   mcs axis  — the highest rate whose ground SNR clears the floor (ride the
 #     fastest modulation the link holds); works on any emitter generation.
 # The ground can be any generation. Two adapters, no SDR. The emitter's PA thermal
@@ -56,7 +56,7 @@ while [ $# -gt 0 ]; do
 done
 [ "$AXIS" = power ] || [ "$AXIS" = mcs ] || { echo "--axis power|mcs" >&2; exit 2; }
 [ -n "$EMIT_PID" ] && [ -n "$GROUND_PID" ] || {
-  echo "need --emit-pid (Jaguar1) and --ground-pid" >&2; exit 2; }
+  echo "need --emit-pid and --ground-pid" >&2; exit 2; }
 
 # Host-side line timestamper (no moreutils dependency).
 TS='import sys,time

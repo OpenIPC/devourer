@@ -161,9 +161,10 @@ int main(int argc, char** argv) {
 
   int channel = 6;
   if (const char* ch = std::getenv("DEVOURER_CHANNEL")) channel = std::atoi(ch);
-  int tx_power = 40;
-  if (const char* p = std::getenv("DEVOURER_TX_POWER")) tx_power = std::atoi(p);
-  rtlDevice->SetTxPower(static_cast<uint8_t>(tx_power));
+  /* DEVOURER_TX_POWER: flat TXAGC index. Unset = the family's calibrated
+   * default (SetTxPower is now a real flat override on every generation). */
+  if (const char* p = std::getenv("DEVOURER_TX_POWER"))
+    rtlDevice->SetTxPower(static_cast<uint8_t>(std::atoi(p)));
   rtlDevice->InitWrite(SelectedChannel{.Channel = static_cast<uint8_t>(channel),
                                        .ChannelOffset = 0,
                                        .ChannelWidth = CHANNEL_WIDTH_20});

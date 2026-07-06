@@ -773,17 +773,96 @@ void RtlJaguarDevice::StartWithMonitorMode(SelectedChannel selectedChannel) {
   }
 
   _radioManagement->SetMonitorMode();
+  _brought_up = true;
 }
 
-void RtlJaguarDevice::SetTxPower(uint8_t power) {
-  _radioManagement->SetTxPower(power);
+devourer::TxPowerCaps RtlJaguarDevice::GetTxPowerCaps() {
+  devourer::TxPowerCaps caps;
+  caps.supported = true;
+  caps.index_max = 63;
+  caps.step_qdb = 2; /* 0.5 dB per TXAGC index step */
+  /* On-air slope (tests/txpwr_offset_onair.sh, chip-RSSI ground station):
+   * 8812AU 0.496 dB/idx, 8814AU 0.425 dB/idx @ ch36 — nominal confirmed.
+   * 8821AU: 0.50 dB/idx exactly at 2.4 GHz but FLAT at 5 GHz (registers move
+   * — regcheck readback — while on-air power stays pinned: the 5 GHz chain
+   * on that part ignores BB TXAGC), so its measured flag stays false and the
+   * power lever should be treated as 2.4 GHz-only there. */
+  caps.step_measured =
+      _eepromManager->version_id.ICType != CHIP_8821;
+  caps.offset_min_qdb = -126;
+  caps.offset_max_qdb = 126;
+  return caps;
 }
 
-void RtlJaguarDevice::SetTxPowerOverride(int idx) {
-  _radioManagement->SetTxPowerOverride(idx);
+int RtlJaguarDevice::SetTxPowerOffsetQdb(int qdb) {
+  if (_cw_active) {
+    _logger->warn("SetTxPowerOffsetQdb refused: CW tone active (TXAGC does "
+                  "not modulate a bare LO carrier)");
+    return 0;
+  }
+  int steps = 0;
+  const int applied = devourer::quantize_offset_qdb(qdb, GetTxPowerCaps(),
+                                                    &steps);
+  _radioManagement->SetTxPowerOffsetSteps(steps);
+  if (_brought_up)
+    _radioManagement->ApplyTxPower();
+  _logger->info("TX-power offset: {} qdB requested -> {} qdB applied "
+                "({} steps){}",
+                qdb, applied, steps,
+                _brought_up ? "" : " (recorded; applies at bring-up)");
+  return applied;
 }
 
-void RtlJaguarDevice::ApplyTxPower() { _radioManagement->ApplyTxPower(); }
+void RtlJaguarDevice::SetTxPowerIndexOverride(int idx) {
+  if (_cw_active) {
+    _logger->warn("SetTxPowerIndexOverride refused: CW tone active");
+    return;
+  }
+  _radioManagement->SetTxPowerOverride(idx < 0 ? -1 : (idx > 63 ? 63 : idx));
+  if (_brought_up)
+    _radioManagement->ApplyTxPower();
+}
+
+bool RtlJaguarDevice::ReApplyTxPower() {
+  if (!_brought_up || _cw_active)
+    return false;
+  _radioManagement->ApplyTxPower();
+  return true;
+}
+
+devourer::TxPowerState RtlJaguarDevice::GetTxPowerState() {
+  devourer::TxPowerState s;
+  s.valid = true;
+  s.flat_index = static_cast<int16_t>(_radioManagement->GetTxPowerOverride());
+  s.offset_steps =
+      static_cast<int16_t>(_radioManagement->GetTxPowerOffsetSteps());
+  s.offset_qdb = static_cast<int16_t>(s.offset_steps * 2);
+  s.saturated_low = _radioManagement->TxPowerSaturatedLow();
+  s.saturated_high = _radioManagement->TxPowerSaturatedHigh();
+  const bool is_8814 = _eepromManager->version_id.ICType == CHIP_8814A;
+  if (_brought_up && !is_8814 && !_cw_active) {
+    /* Path-A representative indices straight from the TXAGC registers:
+     * 0xc20[7:0] = CCK 1M, 0xc24[7:0] = OFDM 6M, 0xc30[31:24] = HT MCS7. */
+    s.cck_index = static_cast<int16_t>(
+        _radioManagement->phy_query_bb_reg_public(0xc20, 0x000000ff));
+    s.ofdm_index = static_cast<int16_t>(
+        _radioManagement->phy_query_bb_reg_public(0xc24, 0x000000ff));
+    s.mcs7_index = static_cast<int16_t>(
+        _radioManagement->phy_query_bb_reg_public(0xc30, 0xff000000));
+    s.hw_readback = true;
+  } else {
+    /* 8814A (write-only packed TXAGC port) / pre-bring-up: software shadow —
+     * the same computation the apply loop writes. */
+    s.cck_index = _radioManagement->ComputeTxPowerIndex(
+        0, static_cast<uint8_t>(MGN_1M), 0);
+    s.ofdm_index = _radioManagement->ComputeTxPowerIndex(
+        0, static_cast<uint8_t>(MGN_6M), 0);
+    s.mcs7_index = _radioManagement->ComputeTxPowerIndex(
+        0, static_cast<uint8_t>(MGN_MCS7), 0);
+    s.hw_readback = false;
+  }
+  return s;
+}
 
 void RtlJaguarDevice::SetTxMode(const devourer::TxMode& mode) {
   _tx_mode_default = mode;

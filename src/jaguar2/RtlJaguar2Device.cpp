@@ -131,16 +131,37 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
     }
   }
   /* Program per-rate TXAGC from the EFUSE power-by-rate calibration (the level
-   * the kernel uses). DEVOURER_TX_PWR (flat override) applied later in InitWrite
-   * still wins for debug. DEVOURER_SKIP_TXPWR keeps the BB-table default. */
+   * the kernel uses), through the runtime-knob composer so a flat override /
+   * offset recorded before bring-up folds in here. DEVOURER_TX_PWR (flat
+   * override) applied later in InitWrite still wins for debug.
+   * DEVOURER_SKIP_TXPWR keeps the BB-table default. */
   if (!getenv("DEVOURER_SKIP_TXPWR"))
-    _hal.apply_tx_power(static_cast<uint8_t>(channel.Channel), bw, rfe);
+    apply_tx_power_current();
   /* Grant the antenna to WLAN (combo chip) — must precede enable. */
   if (!getenv("DEVOURER_SKIP_COEX"))
     _hal.coex_wlan_only(channel.Channel > 14);
   else
     _logger->info("Jaguar2: coex WL grant SKIPPED (DEVOURER_SKIP_COEX)");
   _hal.enable_rx(); /* CR MACTX|MACRX + RCR + IGI — enables both TX and RX */
+  _brought_up = true;
+}
+
+void RtlJaguar2Device::apply_tx_power_current() {
+  const int off = _tx_pwr_offset_steps;
+  const int flat = _tx_pwr_override;
+  if (flat >= 0) {
+    /* Flat override + offset, composed BEFORE set_tx_power_flat (whose &0x3f
+     * would wrap an over-range compose instead of clamping). */
+    int idx = flat + off;
+    bool lo = false, hi = false;
+    if (idx < 0) { idx = 0; lo = true; }
+    if (idx > 63) { idx = 63; hi = true; }
+    _hal.set_txpwr_saturation(lo, hi);
+    _hal.set_tx_power_flat(static_cast<uint8_t>(idx));
+    return;
+  }
+  _hal.apply_tx_power(static_cast<uint8_t>(_channel.Channel),
+                      static_cast<uint8_t>(_channel.ChannelWidth), _rfe, off);
 }
 
 void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
@@ -296,11 +317,11 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
    * (SDR-visibility debug knob). */
   bring_up(channel);
   /* DEVOURER_TX_PWR=0xNN forces a flat per-rate TXAGC reference (SDR-visibility
-   * debug knob) over the efuse-calibrated level bring_up applied. */
-  if (const char *e = getenv("DEVOURER_TX_PWR")) {
-    uint8_t idx = static_cast<uint8_t>(strtol(e, nullptr, 0) & 0x3f);
-    _hal.set_tx_power_flat(idx);
-  }
+   * debug knob) over the efuse-calibrated level bring_up applied — routed
+   * through the runtime flat-override knob so it composes with the offset and
+   * shows up in GetTxPowerState. */
+  if (const char *e = getenv("DEVOURER_TX_PWR"))
+    SetTxPowerIndexOverride(static_cast<int>(strtol(e, nullptr, 0) & 0x3f));
   /* DEVOURER_BF_ARM_SOUNDER — beamforming self-sounding (beamformer side):
    * arm the MAC's hardware sounding engine so a TX-descriptor-marked NDPA
    * (DEVOURER_TX_NDPA=1) is followed by a hardware-generated NDP. The MAC
@@ -507,6 +528,13 @@ void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
   _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel),
                       static_cast<uint8_t>(channel.ChannelWidth), _rfe,
                       channel.ChannelOffset);
+  /* Runtime TX-power knobs in use: re-fold them against the NEW channel's
+   * efuse group so the offset stays relative to the calibrated table (TXAGC
+   * registers are not per-channel — a cross-group move would otherwise keep
+   * the old group's absolute level). Gated on a knob being active so the
+   * legacy no-knob path stays byte-identical to the pure tune above. */
+  if (_brought_up && (_tx_pwr_offset_steps != 0 || _tx_pwr_override >= 0))
+    apply_tx_power_current();
 }
 
 void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
@@ -541,7 +569,87 @@ RxEnergy RtlJaguar2Device::GetRxEnergy() {
   return e;
 }
 
-void RtlJaguar2Device::SetTxPower(uint8_t power) { _tx_pwr_override = power; }
+devourer::TxPowerCaps RtlJaguar2Device::GetTxPowerCaps() {
+  devourer::TxPowerCaps caps;
+  caps.supported = true;
+  caps.index_max = 63;
+  caps.step_qdb = 2; /* 0.5 dB per TXAGC index step */
+  /* On-air slope (tests/txpwr_offset_onair.sh): 8822BU 0.488, 8821CU
+   * 0.581 dB/idx @ ch36 — nominal confirmed. */
+  caps.step_measured = true;
+  caps.offset_min_qdb = -126;
+  caps.offset_max_qdb = 126;
+  return caps;
+}
+
+int RtlJaguar2Device::SetTxPowerOffsetQdb(int qdb) {
+  if (_cw_active) {
+    _logger->warn("SetTxPowerOffsetQdb refused: CW tone active (TXAGC does "
+                  "not modulate a bare LO carrier)");
+    return 0;
+  }
+  int steps = 0;
+  const int applied = devourer::quantize_offset_qdb(qdb, GetTxPowerCaps(),
+                                                    &steps);
+  _tx_pwr_offset_steps = steps;
+  if (_brought_up)
+    apply_tx_power_current();
+  _logger->info("TX-power offset: {} qdB requested -> {} qdB applied "
+                "({} steps){}",
+                qdb, applied, steps,
+                _brought_up ? "" : " (recorded; applies at bring-up)");
+  return applied;
+}
+
+void RtlJaguar2Device::SetTxPowerIndexOverride(int idx) {
+  if (_cw_active) {
+    _logger->warn("SetTxPowerIndexOverride refused: CW tone active");
+    return;
+  }
+  _tx_pwr_override = idx < 0 ? -1 : (idx > 63 ? 63 : idx);
+  if (_brought_up)
+    apply_tx_power_current();
+}
+
+bool RtlJaguar2Device::ReApplyTxPower() {
+  if (!_brought_up || _cw_active)
+    return false;
+  apply_tx_power_current();
+  return true;
+}
+
+devourer::TxPowerState RtlJaguar2Device::GetTxPowerState() {
+  devourer::TxPowerState s;
+  s.valid = true;
+  s.flat_index = static_cast<int16_t>(_tx_pwr_override.load());
+  s.offset_steps = static_cast<int16_t>(_tx_pwr_offset_steps.load());
+  s.offset_qdb = static_cast<int16_t>(s.offset_steps * 2);
+  s.saturated_low = _hal.txpwr_saturated_low();
+  s.saturated_high = _hal.txpwr_saturated_high();
+  /* The Jaguar2 TXAGC block (0x1d00/0x1d80) is write-only — reads return 0
+   * (hardware-verified on 8822BU + 8821CU) — so the representative indices
+   * come from the HAL's software shadow of the last apply, like the 8814A. */
+  int cck = -1, ofdm = -1, mcs7 = -1;
+  _hal.txagc_shadow(cck, ofdm, mcs7);
+  s.cck_index = static_cast<int16_t>(cck);
+  s.ofdm_index = static_cast<int16_t>(ofdm);
+  s.mcs7_index = static_cast<int16_t>(mcs7);
+  s.hw_readback = false;
+  return s;
+}
+
+devourer::ThermalStatus RtlJaguar2Device::GetThermalStatus() {
+  devourer::ThermalStatus t;
+  if (!_brought_up)
+    return t; /* RF reads need a powered chip */
+  uint8_t raw = 0, baseline = 0xFF;
+  _hal.read_thermal(raw, baseline);
+  t.raw = raw;
+  t.baseline = baseline;
+  t.valid = baseline != 0xFF;
+  t.delta = t.valid ? static_cast<int>(raw) - static_cast<int>(baseline) : 0;
+  return t;
+}
 
 bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
   /* Parse the radiotap header for rate/bw/coding, build an 8822B TX descriptor

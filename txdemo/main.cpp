@@ -735,28 +735,26 @@ int main(int argc, char **argv) {
                    mcs_sweep.size(), mcs_step_ms);
   }
   auto apply_txpwr = [&](int idx) {
-    /* TXAGC override is a Jaguar1 (RtlJaguarDevice) feature; a no-op otherwise. */
-#if defined(DEVOURER_HAVE_JAGUAR1)
-    if (!jag)
+    /* Unified runtime TX-power API — the flat-index override applies live on
+     * every generation (previously Jaguar1-only via SetTxPowerOverride +
+     * ApplyTxPower), so the ramp — and tests/link_probe.sh --axis power —
+     * covers Jaguar2/Jaguar3 emitters too. */
+    if (!rtlDevice->GetTxPowerCaps().supported)
       return;
-    jag->SetTxPowerOverride(idx);
-    jag->ApplyTxPower();  /* SetMonitorChannel early-returns on same ch */
+    rtlDevice->SetTxPowerIndexOverride(idx);
     printf("<devourer-txpwr>index=%d t_ms=%lld\n", idx,
            static_cast<long long>(ms_since_start()));
     if (txpwr_readback) {
-      /* Confirm the per-rate TXAGC writes landed: path-A 1M-CCK is byte0 of
-       * 0xc20, 6M-OFDM is byte0 of 0xc24. If these read back == idx but on-air
-       * power doesn't follow (CCK), the chip floors CCK elsewhere; if they read
-       * back != idx, something clobbered the write. */
-      uint32_t cck1m = jag->ReadBBReg(0xc20, 0x000000ff);
-      uint32_t ofdm6m = jag->ReadBBReg(0xc24, 0x000000ff);
-      printf("<devourer-txpwr-rb>index=%d cck1m=%u ofdm6m=%u\n", idx, cck1m,
-             ofdm6m);
+      /* Confirm the TXAGC writes landed: representative path-A indices from
+       * GetTxPowerState — register readback where the family's TXAGC block is
+       * readable (rb=1), the software shadow otherwise (Jaguar2 / 8814A,
+       * whose TXAGC ports are write-only). */
+      const devourer::TxPowerState st = rtlDevice->GetTxPowerState();
+      printf("<devourer-txpwr-rb>index=%d cck1m=%d ofdm6m=%d mcs7=%d rb=%d\n",
+             idx, st.cck_index, st.ofdm_index, st.mcs7_index,
+             st.hw_readback ? 1 : 0);
     }
     fflush(stdout);
-#else
-    (void)idx;
-#endif
   };
   if (const char *e = std::getenv("DEVOURER_TX_PWR_START")) {
     pwr_ramp = true;
@@ -933,14 +931,15 @@ int main(int argc, char **argv) {
       printf("<devourer-tx>TX #%ld rc=%d\n", tx_count, rc);
       fflush(stdout);
     }
-    /* Thermal telemetry is a Jaguar1 (RtlJaguarDevice) feature; skip on
-     * Jaguar3, where jag is null; compiled out when Jaguar1 isn't built. */
-#if defined(DEVOURER_HAVE_JAGUAR1)
-    if (jag && thermal_every > 0 && tx_count % thermal_every == 0) {
-      auto t = jag->GetThermalStatus();
+    /* Thermal telemetry via the generation-agnostic GetThermalStatus
+     * (previously Jaguar1-only): every family reads its RF 0x42 meter —
+     * Jaguar1 [15:10] + EFUSE baseline, Jaguar2 [15:10] + efuse 0xBA,
+     * Jaguar3 [6:1] + efuse 0xd0 (E) / first-read cold reference (C). */
+    if (thermal_every > 0 && tx_count % thermal_every == 0) {
+      auto t = rtlDevice->GetThermalStatus();
       if (t.valid) {
         printf("<devourer-thermal>raw=%u baseline=%u delta=%+d status=%s\n",
-               t.raw, t.baseline, t.delta, ThermalBucket(t));
+               t.raw, t.baseline, t.delta, devourer::ThermalBucket(t));
         if (t.delta >= thermal_warn_delta && !thermal_warned) {
           logger->warn("thermal: chip running hot — raw={} baseline={} "
                        "delta=+{} (>= {}); TX power tracking backing off, "
@@ -950,13 +949,12 @@ int main(int argc, char **argv) {
         } else if (t.delta < thermal_warn_delta) {
           thermal_warned = false;
         }
-      } else {
+      } else if (t.raw != 0) {
         printf("<devourer-thermal>raw=%u baseline=none status=%s\n",
-               t.raw, ThermalBucket(t));
+               t.raw, devourer::ThermalBucket(t));
       }
       fflush(stdout);
     }
-#endif /* DEVOURER_HAVE_JAGUAR1 */
     if (rc) {
       consec_fail = 0;
     } else if (++consec_fail >= kMaxConsecFail) {

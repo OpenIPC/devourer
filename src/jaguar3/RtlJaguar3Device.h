@@ -59,10 +59,30 @@ public:
    * sanctioned in-session hop primitive (unlike a bare SetMonitorChannel). */
   void FastRetune(uint8_t channel, bool cache_rf) override;
   void InitWrite(SelectedChannel channel) override;
-  void SetTxPower(uint8_t power) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
   SelectedChannel GetSelectedChannel() override;
   void Stop() override;
+
+  /* Runtime TX-power control (IRtlDevice contract; see src/TxPower.h).
+   * Jaguar3 caps: 7-bit TXAGC reference, 0.25 dB (1 qdB) per step. The offset
+   * shifts the per-path reference anchor (0x18e8/0x41e8 OFDM, 0x18a0/0x41a0
+   * CCK) — the 0x3a00 per-rate diff table is offset-invariant, so a live step
+   * is ~8 gated register writes (apply_tx_power_refs_8822e / a diffs-kept
+   * set_tx_power_ref) under _reg_mu, serialized against the coex tick's
+   * pwr_track (which RMWs the [7:0] thermal field of the SAME 0x18a0/0x41a0
+   * dwords — field-disjoint, so thermal compensation and the offset compose).
+   * The 8822E TX+RX 0x41e8 quirk is enforced structurally: every ref write
+   * takes skip_path_b_ofdm_ref from _rx_wanted. A full SetMonitorChannel
+   * re-folds the knobs against the new channel group's efuse refs (gated on a
+   * knob being active); FastRetune never touches TXAGC. GetThermalStatus
+   * reads RF 0x42[6:1] via the calibration impl (efuse baseline on the E,
+   * first-read cold reference on the C). */
+  devourer::TxPowerCaps GetTxPowerCaps() override;
+  int SetTxPowerOffsetQdb(int qdb) override;
+  void SetTxPowerIndexOverride(int idx) override;
+  bool ReApplyTxPower() override;
+  devourer::TxPowerState GetTxPowerState() override;
+  devourer::ThermalStatus GetThermalStatus() override;
   /* Runtime TX-mode default — applied in send_packet when the radiotap carries
    * no rate. Without this the Jaguar3 TX path fell back to MGN_1M for rate-less
    * frames (so DEVOURER_TX_RATE/an MCS flood went on-air at 1 Mbps): the feature
@@ -111,10 +131,35 @@ private:
   jaguar3::RadioManagementJaguar3 _radioManagement;
   SelectedChannel _channel{};
   Action_ParsedRadioPacket _packetProcessor = nullptr;
-  /* Optional flat TXAGC override from SetTxPower(); -1 = use the chip's
-   * efuse-calibrated power. Applied during InitWrite (so it may be set before
-   * the device is brought up). */
-  int _tx_pwr_override = -1;
+  /* Runtime TX-power knobs (atomic so GetTxPowerState's cached snapshot is
+   * readable cross-thread). Flat override -1 = the chip's efuse-calibrated
+   * power; offset in 0.25 dB reference steps. Applied live under _reg_mu once
+   * brought up; recorded and folded at InitWrite before. */
+  std::atomic<int> _tx_pwr_override{-1};
+  std::atomic<int> _tx_pwr_offset_steps{0};
+  /* Rail-hit flags from the last apply (references clamped at 0/0x7f). */
+  std::atomic<bool> _txpwr_sat_low{false};
+  std::atomic<bool> _txpwr_sat_high{false};
+  /* Bring-up completion: gates the live apply (+ _reg_mu use) in the setters. */
+  bool _brought_up = false;
+  /* TX+RX intent (DEVOURER_TX_WITH_RX at InitWrite / an RX-side Init):
+   * consumed as skip_path_b_ofdm_ref by EVERY TXAGC ref write, so no offset
+   * churn can ever touch 0x41e8 while RX is alive (the 8822E RX-desense
+   * quirk is enforced structurally, not by call-site discipline). */
+  bool _rx_wanted = false;
+  /* Cached 8822E per-channel-group efuse base refs (the values InitWrite
+   * derived, incl. the 0x4b fallback) so an offset-only step recomputes
+   * effective refs without re-deriving; invalidated by a channel change. */
+  uint8_t _pwr_ref_a = 0, _pwr_ref_b = 0;
+  bool _pwr_ref_valid = false;
+  /* True while the 0x3a00 per-rate diff table is zeroed (flat semantics /
+   * 8822C default) — repeated flat steps then skip the 32-dword re-zero. */
+  bool _diffs_zeroed = false;
+  /* Re-program TXAGC from the current knob state. full=true re-derives the
+   * 8822E efuse refs + rewrites the per-rate diff table (bring-up / channel
+   * change / flat<->efuse transitions); full=false is the light offset step.
+   * Caller holds _reg_mu when the coex thread may be running. */
+  void apply_tx_power_current(bool full);
   /* Runtime TX-mode default (SetTxMode/ClearTxMode). */
   std::optional<devourer::TxMode> _tx_mode_default;
 

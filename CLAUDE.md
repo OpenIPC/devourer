@@ -66,6 +66,26 @@ per-channel level (the rtl8822e TXAGC references match the kernel driver's).
 `DEVOURER_TX_PWR=0xNN` forces a flat TXAGC reference — a debug/SDR-visibility
 knob, not for sustained use.
 
+Runtime TX-power control (all three generations, the adaptive-link power
+lever — see `src/TxPower.h`): `SetTxPowerOffsetQdb(qdb)` adjusts power in
+quarter-dB relative to the efuse per-rate table (per-rate shape preserved
+until rates saturate at the rails; saturation flags in `GetTxPowerState`),
+`SetTxPowerIndexOverride(idx)` forces/clears the flat index (`SetTxPower`
+forwards here), both live mid-stream and sticky across `SetMonitorChannel`
+(re-folded against the new channel's table) and `FastRetune` (hop path never
+rewrites TXAGC). `GetTxPowerCaps` reports the family step (0.5 dB Jaguar1/2,
+0.25 dB Jaguar3 — on-air-measured via `tests/txpwr_offset_onair.sh`, which
+uses a second chip's per-frame RSSI as the sensor: at bench range the B210
+front-end limits on the frames at any gain and cannot see TXAGC slopes).
+`GetThermalStatus` reads the RF 0x42 meter with the family baseline on every
+generation. `TxPowerStepDemo` (examples/txpower/, CLI-only) is the reference
+consumer; register-level validation lives in `tests/txpwr_offset_regcheck.sh`
+(canary parity vs master, exact-step moves, rails, stickiness, the 8822E
+TX+RX 0x41e8 quirk cell). The 8822B's VHT TXAGC sections are programmed from
+the same stream-count bases as HT (vendor parity) so the offset covers VHT
+there; the Jaguar2 TXAGC block and the 8814A's packed port are write-only, so
+their `GetTxPowerState` reports the software shadow (`hw_readback=false`).
+
 **RTL8821AU is Jaguar wave 1** (CHIP_8821 = 7, shares the enum with CHIP_8812),
 not Jaguar2 — distinct from the Jaguar2 **RTL8821C** (8811CU/8821CU) despite the
 similar name. The Jaguar2 **8822BU/8812BU** and **8811CU/8821CU** USB parts are

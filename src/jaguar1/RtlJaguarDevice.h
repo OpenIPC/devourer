@@ -60,6 +60,11 @@ class RtlJaguarDevice : public IRtlDevice {
   /* Modulated continuous TX (StartContinuousTx/StopContinuousTx) guard. */
   bool _cont_active = false;
 
+  /* Bring-up completion (StartWithMonitorMode succeeded): gates the live
+   * apply in the runtime TX-power setters — before bring-up they only record
+   * state (an ApplyTxPower on a cold chip would write an unpowered BB). */
+  bool _brought_up = false;
+
 public:
   RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger);
   ~RtlJaguarDevice() override;
@@ -83,15 +88,31 @@ public:
    * resolve statically, so overrides must not re-declare it.) */
   void FastRetune(uint8_t channel, bool cache_rf) override;
   void InitWrite(SelectedChannel channel) override;
-  void SetTxPower(uint8_t power) override;
-  /* Force the per-rate TXAGC index (0..63), bypassing the EFUSE per-rate
-   * table; -1 restores normal behaviour. Re-applied on the next
-   * SetMonitorChannel. Used by the thermal-vs-gain ramp in WiFiDriverTxDemo. */
-  void SetTxPowerOverride(int idx);
-  /* Re-apply the per-rate TX power for the current channel immediately (no
-   * channel switch). Needed because SetMonitorChannel early-returns when the
-   * channel is unchanged. Call after SetTxPowerOverride to make it take. */
-  void ApplyTxPower();
+  /* Legacy per-rate TXAGC override pair — superseded by the IRtlDevice
+   * runtime TX-power API (SetTxPowerIndexOverride applies in one call).
+   * Inline forwards kept for one release cycle, Rtl8812aDevice-alias style. */
+  [[deprecated("use SetTxPowerIndexOverride (applies live)")]]
+  void SetTxPowerOverride(int idx) {
+    SetTxPowerIndexOverride(idx);
+  }
+  [[deprecated("SetTxPowerIndexOverride / SetTxPowerOffsetQdb apply live; "
+               "use ReApplyTxPower to force a re-program")]]
+  void ApplyTxPower() {
+    ReApplyTxPower();
+  }
+
+  /* Runtime TX-power control (IRtlDevice contract; see src/TxPower.h).
+   * Jaguar1 caps: 6-bit TXAGC index, 0.5 dB (2 qdB) per step. The offset
+   * folds into ComputeTxPowerIndex, so it reaches the per-rate TXAGC fanout
+   * (0xc20..0xc4c / packed 0x1998 on 8814) AND the 0xc54 power-training
+   * word, and is re-folded by every SetMonitorChannel. Readback comes from
+   * 0xc20/0xc24/0xc30 on 8812/8811/8821; the 8814's packed TXAGC port is
+   * write-only, so it reports the software shadow (hw_readback=false). */
+  devourer::TxPowerCaps GetTxPowerCaps() override;
+  int SetTxPowerOffsetQdb(int qdb) override;
+  void SetTxPowerIndexOverride(int idx) override;
+  bool ReApplyTxPower() override;
+  devourer::TxPowerState GetTxPowerState() override;
   /* Read a baseband register (debug/diagnostic). Thin passthrough to the
    * radio manager's BB read — handy for confirming a TXAGC write landed. */
   uint32_t ReadBBReg(uint16_t addr, uint32_t mask);
@@ -159,8 +180,10 @@ public:
    * baseline. Read-only — leaves the TX-power-tracking BB-swing registers
    * untouched. Works on every Jaguar member. Safe to call from the thread
    * that owns the device (e.g. inline in a TX loop) — no USB contention.
-   * See ThermalStatus in RadioManagementModule.h for field semantics. */
-  ThermalStatus GetThermalStatus();
+   * See devourer::ThermalStatus (src/ThermalStatus.h) for field semantics.
+   * NB: on the 8814 the EFUSE baseline is read at the 8812 offset, so the
+   * absolute delta may be off there; the raw trend is still valid. */
+  ThermalStatus GetThermalStatus() override;
 
   /* Spawn a background thread that samples the thermal meter every
    * interval_ms and stores a snapshot (queryable via get_thermal_snapshot).

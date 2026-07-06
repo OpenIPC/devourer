@@ -233,7 +233,12 @@ void RadioManagementJaguar3::DumpCanary() {
   static const uint16_t bb_canary[] = {
       0x808, 0x810, 0x828,  0x88c,  0x9b0,  0x9b4,  0xc30,  0xcbc,
       0x1a00, 0x1a14, 0x1a80, 0x1a9c, 0x1abc, 0x1ae8, 0x1aec, 0x1c80,
-      0x18ac, 0x41ac, 0x1944, 0x4044};
+      0x18ac, 0x41ac, 0x1944, 0x4044,
+      /* TXAGC refs (runtime TX-power API): OFDM 0x18e8/0x41e8, CCK
+       * 0x18a0/0x41a0, + the first per-rate diff dword. The regcheck's
+       * TX+RX cell asserts 0x41e8 stays at its table default (the 8822E
+       * RX-desense quirk) while path A moves with the offset. */
+      0x18e8, 0x41e8, 0x18a0, 0x41a0, 0x3a00};
   static const uint16_t mac_canary[] = {0x0, 0x24, 0x454, 0x483,
                                         0x55c, 0x638, 0x668};
   static const uint8_t rf_canary[] = {0x18, 0x1a, 0x3f, 0xdf};
@@ -583,7 +588,8 @@ void RadioManagementJaguar3::set_mac_bw_txsc(ChannelWidth_t bw, uint8_t pri) {
   _device.rtw_write8(0x483, sc);
 }
 
-void RadioManagementJaguar3::set_tx_power_ref(uint8_t idx, bool zero_diffs) {
+void RadioManagementJaguar3::set_tx_power_ref(uint8_t idx, bool zero_diffs,
+                                              bool skip_path_b_ofdm_ref) {
   /* Writes the 0x1c90 TXAGC gate below — the fast path's composed 0x1c90
    * cache would go stale. */
   invalidate_fast_caches();
@@ -602,15 +608,19 @@ void RadioManagementJaguar3::set_tx_power_ref(uint8_t idx, bool zero_diffs) {
     _device.phy_set_bb_reg(off, mask, v);
   };
   wr(0x18e8, 0x1fc00, idx);
-  wr(0x41e8, 0x1fc00, idx);
+  if (!skip_path_b_ofdm_ref)
+    wr(0x41e8, 0x1fc00, idx); /* path B — 8822E TX+RX RX-desense hazard */
   wr(0x18a0, 0x7f0000, idx);
   wr(0x41a0, 0x7f0000, idx);
   if (zero_diffs)
     for (uint16_t off = 0x3a00; off <= 0x3a7c; off += 4)
       wr(off, 0xffffffff, 0x0);
-  _logger->info("Jaguar3: TX power reference set to 0x{:02x} on both paths "
+  _logger->info("Jaguar3: TX power reference set to 0x{:02x} ({}) "
                 "(per-rate diffs {})",
-                idx, zero_diffs ? "zeroed" : "kept");
+                idx,
+                skip_path_b_ofdm_ref ? "path A + CCK B; 0x41e8 kept"
+                                     : "both paths",
+                zero_diffs ? "zeroed" : "kept");
 }
 
 /* Map a phy_reg_pg pseudo-address to the four MGN_* rates it encodes (byte i of
@@ -654,9 +664,33 @@ static bool pg_addr_to_rates(uint32_t addr, std::array<uint8_t, 4> &rates) {
 }
 #endif /* DEVOURER_HAVE_JAGUAR3_8822E */
 
+void RadioManagementJaguar3::apply_tx_power_refs_8822e(
+    uint8_t ref_a, uint8_t ref_b, bool skip_path_b_ofdm_ref) {
+  invalidate_fast_caches(); /* writes the 0x1c90 TXAGC gate below */
+  /* Clamp to the 7-bit ref field — the masked BB write truncates mod 128. */
+  if (ref_a > 0x7f)
+    ref_a = 0x7f;
+  if (ref_b > 0x7f)
+    ref_b = 0x7f;
+  auto wr = [this](uint16_t off, uint32_t mask, uint32_t v) {
+    _device.phy_set_bb_reg(0x1c90, 1u << 15, 0); /* txagc write enable */
+    _device.phy_set_bb_reg(off, mask, v);
+  };
+  wr(0x18e8, 0x1fc00, ref_a);   /* path A OFDM/HT/VHT ref */
+  if (!skip_path_b_ofdm_ref)
+    wr(0x41e8, 0x1fc00, ref_b); /* path B — RX-desense hazard, see header */
+  wr(0x18a0, 0x7f0000, ref_a);  /* CCK ref */
+  wr(0x41a0, 0x7f0000, ref_b);
+}
+
 void RadioManagementJaguar3::apply_power_by_rate_8822e(
     uint8_t channel, uint8_t ref_a, uint8_t ref_b, bool skip_path_b_ofdm_ref) {
   invalidate_fast_caches(); /* writes the 0x1c90 TXAGC gate below */
+  /* Clamp to the 7-bit ref fields (masked BB writes truncate mod 128). */
+  if (ref_a > 0x7f)
+    ref_a = 0x7f;
+  if (ref_b > 0x7f)
+    ref_b = 0x7f;
 #if defined(DEVOURER_HAVE_JAGUAR3_8822E)
   /* Port of the phy_reg_pg (power-by-rate) apply that devourer's table walk
    * skips. The 8822e TXAGC is ref + per-rate diff: the OFDM/HT/VHT reference

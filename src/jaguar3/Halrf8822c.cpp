@@ -1258,6 +1258,22 @@ void Halrf8822c::pwr_track() {
   }
 }
 
+bool Halrf8822c::read_thermal(uint8_t &raw, uint8_t &baseline) {
+  /* Trigger a fresh reading, same sequence as the pwr_track tick. Caller
+   * serializes against pwr_track (identical RF 0x42[19] RMW). */
+  rf_write(PATH_A, 0x42, 1u << 19, 1);
+  rf_write(PATH_A, 0x42, 1u << 19, 0);
+  rf_write(PATH_A, 0x42, 1u << 19, 1);
+  delay_us(15);
+  raw = static_cast<uint8_t>(rf_read(PATH_A, 0x42, 0x7e)); /* RF_T_METER[6:1] */
+  if (raw == 0)
+    return false; /* meter not ready */
+  if (_thermal_ref[0] < 0)
+    _thermal_ref[0] = raw; /* first read = the cold reference pwr_track uses */
+  baseline = static_cast<uint8_t>(_thermal_ref[0]);
+  return true;
+}
+
 void Halrf8822c::do_lck() {
   /* Port of rtw8822c_do_lck (RF_SYN_CTRL=0xbb, SYN_PFD=0xb0, AAC_CTRL=0xca,
    * SYN_AAC=0xc9, FAST_LCK=0xcc). Re-locks the LC tank at the current freq. */

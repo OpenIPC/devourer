@@ -212,7 +212,10 @@ int main(int argc, char **argv) {
     logger->info("DEVOURER_CHANNEL set — tuning TX to channel {}", channel);
   }
 
-  rtlDevice->SetTxPower(40);
+  /* DEVOURER_TX_POWER: flat TXAGC index. Unset = the family's calibrated
+   * default (SetTxPower is now a real flat override on every generation). */
+  if (const char *p = std::getenv("DEVOURER_TX_POWER"))
+    rtlDevice->SetTxPower(static_cast<uint8_t>(std::atoi(p)));
   rtlDevice->InitWrite(SelectedChannel{.Channel = static_cast<uint8_t>(channel),
                                        .ChannelOffset = 0,
                                        .ChannelWidth = CHANNEL_WIDTH_20});

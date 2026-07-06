@@ -148,6 +148,7 @@ jobs:
           WiFiDriver StreamTxDemo StreamDuplexDemo StreamStdinSelftest
           ToneMaskSelftest BfReportDecodeSelftest SweepSpecSelftest
           TxPowerQuantSelftest LinkHealthSelftest TxCapsSelftest TxPktPwrSelftest
+          RxQualitySelftest
 
       - name: Test
         working-directory: build

@@ -185,6 +185,8 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
           jaguar3::parse_phy_sts_jgr3(data + off + jaguar3::RXDESC_SIZE_8822C,
                                       f.drvinfo_size, p.RxAtrib);
         p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
+        if (!p.RxAtrib.crc_err)
+          _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
         _packetProcessor(p);
       }
       if (++frames <= 5)

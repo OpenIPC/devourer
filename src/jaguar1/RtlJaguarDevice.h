@@ -65,6 +65,11 @@ class RtlJaguarDevice : public IRtlDevice {
    * state (an ApplyTxPower on a cold chip would write an unpowered BB). */
   bool _brought_up = false;
 
+  /* Rolling per-frame RX link-quality aggregate (GetRxQuality). Fed from the RX
+   * loop for every decoded frame; drained by GetRxQuality on the caller's
+   * cadence. */
+  devourer::RxQualityAccumulator _rxq;
+
 public:
   RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger);
   ~RtlJaguarDevice() override;
@@ -152,6 +157,12 @@ public:
    * fresh delta. The read side of the CW tone. NB: if DEVOURER_PHYDM_WATCHDOG is
    * also running it shares/steals these counters. */
   RxEnergy GetRxEnergy() override;
+
+  /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — subsumes
+   * GetRxEnergy. Fed per decoded frame in the RX loop via _rxq. */
+  devourer::RxQuality GetRxQuality() override {
+    return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy());
+  }
 
   /* Runtime TX-mode default. send_packet honours a frame's own radiotap rate
    * fields per-packet; when a frame's radiotap carries no rate, this mode

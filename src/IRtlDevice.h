@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 
+#include "RxQuality.h"
 #include "RxSense.h"
 #include "SelectedChannel.h"
 #include "ThermalStatus.h"
@@ -163,6 +164,17 @@ public:
    * previous call. Default returns an all-invalid snapshot; each generation
    * overrides with a real reader. */
   virtual RxEnergy GetRxEnergy() { return {}; }
+
+  /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — the
+   * runtime feed a closed-loop adaptive-link controller reads instead of
+   * scraping the demo's stdout. Fuses the per-frame RSSI/SNR/EVM aggregate the
+   * device accumulates internally, a passive noise-floor estimate (rssi - snr,
+   * the self-jamming signal), the frame-free FA/CCA/IGI energy, and the
+   * LinkHealth verdict. Drains the window (delta semantics) and SUBSUMES
+   * GetRxEnergy (it calls it internally + consumes the FA/CCA delta — don't also
+   * poll GetRxEnergy separately on the same cadence). Default is an all-invalid
+   * snapshot; each generation overrides. */
+  virtual devourer::RxQuality GetRxQuality() { return {}; }
 };
 
 #endif /* IRTL_DEVICE_H */

@@ -124,6 +124,14 @@ public:
    * _reg_mu against the coex runtime thread. The read side of the CW tone. */
   RxEnergy GetRxEnergy() override;
 
+  /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — subsumes
+   * GetRxEnergy. Fed per decoded frame in the RX loop via _rxq. On Jaguar3 the
+   * noise-floor is the passive rssi-snr estimate (this generation has no
+   * background DIG, so IGI is static and can't track the floor). */
+  devourer::RxQuality GetRxQuality() override {
+    return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy());
+  }
+
   /* dis_cca / EDCCA-disable investigation knob (DEVOURER_DIS_CCA). Writes the
    * vendor rtw_proc.c dis_cca recipe (MAC BIT_DIS_EDCCA 0x520[15] + EDCCA-mask
    * countdown 0x524[11], BB 0x1a9c[20]/0x1a14[9:8]/0x1d58[0xff8]); disabled=false
@@ -153,6 +161,8 @@ private:
   std::atomic<bool> _txpwr_sat_high{false};
   /* Bring-up completion: gates the live apply (+ _reg_mu use) in the setters. */
   bool _brought_up = false;
+  /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
+  devourer::RxQualityAccumulator _rxq;
   /* dis_cca sticky state — re-applied after SetMonitorChannel (the channel set
    * rewrites the BB CCA registers). Caller holds _reg_mu. */
   bool _cca_disabled = false;

@@ -84,6 +84,7 @@ add_library(WiFiDriver
     src/TxCaps.h
     src/LinkHealth.cpp
     src/LinkHealth.h
+    src/RxQuality.h
     src/IRtlDevice.h
     src/SignalStop.cpp
     src/SignalStop.h
@@ -353,6 +354,15 @@ add_executable(LinkHealthSelftest
 target_link_libraries(LinkHealthSelftest PRIVATE WiFiDriver)
 
 add_test(NAME link_health_classify COMMAND LinkHealthSelftest)
+
+# Headless guard for the RX link-quality feed (src/RxQuality.h) — the aggregate
+# math + passive noise-floor formula + verdict fuse behind GetRxQuality().
+add_executable(RxQualitySelftest
+    tests/rx_quality_selftest.cpp
+)
+target_link_libraries(RxQualitySelftest PRIVATE WiFiDriver)
+
+add_test(NAME rx_quality_derive COMMAND RxQualitySelftest)
 
 # Headless guard for the TX-capability derivation (src/TxCaps.h) — the
 # STBC-needs-2-chains rule the send_packet 1T1R guard relies on.

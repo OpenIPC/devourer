@@ -39,7 +39,7 @@ for BW in 20 10 5; do
   sudo PID="${PID:-c812}" DEVOURER_CHANNEL="$CHANNEL" DEVOURER_NB_BW="$BW" \
       DEVOURER_TX_PWR="${TX_PWR:-}" \
       SECS=24 tests/jaguar3_devourer_run.sh \
-      build/WiFiDriverTxDemo 24 > "$OUT/dev_${BW}.log" 2>&1 &
+      build/txdemo 24 > "$OUT/dev_${BW}.log" 2>&1 &
   H=$!
   sleep 11   # power-on -> DLFW -> replay -> narrowband re-clock -> TX
   probe "tx${BW}" "$OUT/tx_${BW}.npy"

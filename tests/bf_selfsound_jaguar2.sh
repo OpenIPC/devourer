@@ -27,8 +27,8 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
-TXDEMO="$ROOT/build/WiFiDriverTxDemo"
-RXDEMO="$ROOT/build/WiFiDriverDemo"
+TXDEMO="$ROOT/build/txdemo"
+RXDEMO="$ROOT/build/rxdemo"
 OUT="/tmp/bf-jaguar2"
 CHANNEL=100
 DUR=8
@@ -45,8 +45,8 @@ J1AUX_PID="${J1AUX_PID:-0x0120}"      #   (8821AU, Archer T2U Plus)
 mkdir -p "$OUT"
 
 cleanup() {
-    pkill -x WiFiDriverTxDem 2>/dev/null
-    pkill -x WiFiDriverDemo 2>/dev/null
+    pkill -x txdemo 2>/dev/null
+    pkill -x rxdemo 2>/dev/null
     wait 2>/dev/null
 }
 trap cleanup EXIT INT TERM

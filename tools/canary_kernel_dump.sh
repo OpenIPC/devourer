@@ -16,7 +16,7 @@
 #   sudo tools/canary_kernel_dump.sh <iface> <channel> > /tmp/krn.canary
 #   # then on devourer side:
 #   sudo env DEVOURER_VID=... DEVOURER_PID=... DEVOURER_CHANNEL=<channel> \
-#       DEVOURER_DUMP_CANARY=1 ./build/WiFiDriverTxDemo 2>&1 \
+#       DEVOURER_DUMP_CANARY=1 ./build/txdemo 2>&1 \
 #     | awk '/DEVOURER_DUMP_CANARY \(post channel-set ch=<channel>\)/,
 #            /END DEVOURER_DUMP_CANARY/' \
 #     | sed 's/^<devourer>//' \

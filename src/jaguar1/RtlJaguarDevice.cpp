@@ -362,7 +362,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
       /* STBC (radiotap MCS known bit5 / flags bits5-6) and FEC=LDPC (known bit4 /
        * flags bit4). The HT branch previously read neither, so an HT frame tagged
        * STBC/LDPC in radiotap silently transmitted as BCC SISO -- only the VHT
-       * branch honoured them. Reading them here lets WiFiDriverTxDemo emit a real
+       * branch honoured them. Reading them here lets txdemo emit a real
        * HT STBC / HT LDPC frame (needed as a chip reference for the gr-ieee802-11
        * fork's modern-format TX). */
       if (mcs_known & 0x20) {

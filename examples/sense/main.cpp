@@ -1,4 +1,4 @@
-/* WiFiSenseDemo — a runnable Wi-Fi motion/presence sensor built on devourer.
+/* sense — a runnable Wi-Fi motion/presence sensor built on devourer.
  *
  * An 802.11ac beamforming report is a measurement taken at the beamformee: its
  * per-tone Givens angles track the channel, so a moving person perturbs them
@@ -508,7 +508,7 @@ int main(int argc, char **argv) {
     else if (a == "--verbose" || a == "-v") verbose = true;
     else if (a == "-h" || a == "--help") {
       std::printf(
-          "WiFiSenseDemo — Wi-Fi motion sensing from beamforming reports\n"
+          "sense — Wi-Fi motion sensing from beamforming reports\n"
           "  drives two adapters: a sounder + a beamformee, on one host.\n"
           "  --channel N                 (default 6)\n"
           "  --sensitivity low|med|high  detector threshold (default med)\n"

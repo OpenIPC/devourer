@@ -34,8 +34,8 @@ TX_PID=0x8812 TX_VID=0x0bda
 RX_PID=0xa81a RX_VID=0x0bda
 
 cleanup() {
-    sudo -n pkill -x WiFiDriverDemo 2>/dev/null || true
-    sudo -n pkill -x WiFiDriverTxDem 2>/dev/null || true
+    sudo -n pkill -x rxdemo 2>/dev/null || true
+    sudo -n pkill -x txdemo 2>/dev/null || true
     true
 }
 trap cleanup EXIT INT TERM
@@ -46,19 +46,19 @@ for d in "$TX_PID $TX_VID beacon-8812AU" "$RX_PID $RX_VID RX-8822EU"; do
 done
 
 echo "== building =="
-cmake --build "$ROOT/build" -j --target WiFiDriverDemo WiFiDriverTxDemo >/dev/null || exit 1
+cmake --build "$ROOT/build" -j --target rxdemo txdemo >/dev/null || exit 1
 
 # One cell at flat TX index $1. Echoes "frames nf rssi snr verdict" (medians).
 run_cell() {
     local idx="$1" log="$OUT/idx$idx.log"
     sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_VID="$TX_VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_TX_RATE=MCS5 DEVOURER_TX_PWR="$idx" DEVOURER_TX_GAP_US=1200 \
-        timeout $((DUR + 6)) "$ROOT/build/WiFiDriverTxDemo" >/dev/null 2>&1 &
+        timeout $((DUR + 6)) "$ROOT/build/txdemo" >/dev/null 2>&1 &
     local tx=$!
     sleep 3
     sudo -n env DEVOURER_PID="$RX_PID" DEVOURER_VID="$RX_VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_RX_ENERGY_MS=1000 DEVOURER_RXQUALITY=1 \
-        timeout "$DUR" "$ROOT/build/WiFiDriverDemo" 2>&1 \
+        timeout "$DUR" "$ROOT/build/rxdemo" 2>&1 \
         | grep "devourer-rxquality" >"$log" || true
     kill "$tx" 2>/dev/null; wait "$tx" 2>/dev/null
     sleep 2

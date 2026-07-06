@@ -44,11 +44,11 @@ if [ -z "${FAMILY:-}" ]; then
 fi
 echo "family: $FAMILY (TX_PID=$TX_PID)"
 
-cleanup() { pkill -x WiFiDriverTxDem 2>/dev/null || true; }
+cleanup() { pkill -x txdemo 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
-echo "== building WiFiDriverTxDemo =="
-cmake --build "$ROOT/build" -j --target WiFiDriverTxDemo >/dev/null
+echo "== building txdemo =="
+cmake --build "$ROOT/build" -j --target txdemo >/dev/null
 
 # Run the demo to: InitWrite(INIT@BW) [full], then hop to TARGET@BW via the
 # selected path. One full round of [INIT,TARGET] reaches TARGET last; the final
@@ -62,7 +62,7 @@ run_path() {  # $1 = HOP_FAST value, $2 = output file
         DEVOURER_HOP_OFFSET="$OFFSET" \
         DEVOURER_HOP_DWELL_FRAMES=3 DEVOURER_HOP_ROUNDS=1 \
         DEVOURER_HOP_FAST="$1" \
-        timeout 60 "$ROOT/build/WiFiDriverTxDemo" >"$2" 2>&1 || true
+        timeout 60 "$ROOT/build/txdemo" >"$2" 2>&1 || true
 }
 
 # Extract the LAST canary block (the TARGET channel) as "REG ADDR = VALUE" lines.

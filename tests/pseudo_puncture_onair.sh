@@ -45,12 +45,12 @@ rm -rf "$LOGDIR"; mkdir -p "$LOGDIR"
 JAM_PID=""
 cleanup() {
   [ -n "$JAM_PID" ] && kill -INT "$JAM_PID" 2>/dev/null
-  pkill -INT -x WiFiDriverTxDem 2>/dev/null
-  pkill -INT -x WiFiDriverDemo 2>/dev/null
+  pkill -INT -x txdemo 2>/dev/null
+  pkill -INT -x rxdemo 2>/dev/null
   pkill -INT -f sdr_interferer 2>/dev/null
   sleep 1
-  pkill -KILL -x WiFiDriverTxDem 2>/dev/null
-  pkill -KILL -x WiFiDriverDemo 2>/dev/null
+  pkill -KILL -x txdemo 2>/dev/null
+  pkill -KILL -x rxdemo 2>/dev/null
   pkill -KILL -f sdr_interferer 2>/dev/null
 }
 trap cleanup EXIT INT TERM
@@ -79,13 +79,13 @@ run_cell() {
 
   env DEVOURER_VID="0x$TX_VID" DEVOURER_PID="0x$TX_PID" DEVOURER_CHANNEL=36 \
       DEVOURER_HOP_BW="$bw" DEVOURER_TX_RATE="$rate" \
-      timeout -s INT -k 5 $((DUR + 10)) ./build/WiFiDriverTxDemo >"$txlog" 2>&1 &
+      timeout -s INT -k 5 $((DUR + 10)) ./build/txdemo >"$txlog" 2>&1 &
   local txpid=$!
   sleep 5  # TX bring-up (DLFW + cal)
 
   env DEVOURER_VID="0x$RX_VID" DEVOURER_PID="0x$RX_PID" DEVOURER_CHANNEL=36 \
       DEVOURER_BW="$bw" "${mask_env[@]}" \
-      timeout -s INT -k 5 "$DUR" ./build/WiFiDriverDemo >"$rxlog" 2>&1
+      timeout -s INT -k 5 "$DUR" ./build/rxdemo >"$rxlog" 2>&1
 
   wait "$txpid" 2>/dev/null
   sleep 5  # warm-FW settle before the same dongles re-open

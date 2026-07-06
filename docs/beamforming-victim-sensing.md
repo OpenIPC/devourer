@@ -200,21 +200,21 @@ DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 DEVOURER_TX_RATE=VHT2SS_MCS0 \
   DEVOURER_TX_NDPA_RA=<beamformee-MAC> DEVOURER_TX_NDPA=1 \
   DEVOURER_BF_ARM_SOUNDER=1 DEVOURER_TX_WITH_RX=thread \
   DEVOURER_BF_DETECT_REPORT=4 DEVOURER_TX_GAP_US=4000 \
-  ./build/WiFiDriverTxDemo 2>/dev/null | grep '<devourer-bf-report-raw>' > cap.raw
+  ./build/txdemo 2>/dev/null | grep '<devourer-bf-report-raw>' > cap.raw
 ```
 
 Beamformee (the client), on its adapter:
 
 ```sh
 DEVOURER_CHANNEL=6 DEVOURER_BF_ARM_BFEE=57:42:75:05:d6:00 \
-  ./build/WiFiDriverDemo
+  ./build/rxdemo
 ```
 
 5 MHz narrowband interferer (for the interference experiment), on a Jaguar3 part:
 
 ```sh
 DEVOURER_PID=0xc812 DEVOURER_CHANNEL=6 DEVOURER_NB_BW=5 \
-  DEVOURER_TX_GAP_US=0 DEVOURER_TX_PWR=8 ./build/WiFiDriverTxDemo
+  DEVOURER_TX_GAP_US=0 DEVOURER_TX_PWR=8 ./build/txdemo
 ```
 
 Decode + per-tone readouts:
@@ -225,9 +225,9 @@ tools/bf_report_decode.py cap.raw --csv cap.csv
 # interference:       per-tone cross-frame variance of psi (Result 2/3)
 ```
 
-## Try it — `WiFiSenseDemo`
+## Try it — `sense`
 
-`WiFiSenseDemo` turns the above into a runnable motion/presence sensor: one binary
+`sense` turns the above into a runnable motion/presence sensor: one binary
 drives two adapters — a sounder and a beamformee — sounds continuously,
 self-captures the reports, decodes the per-tone angles in C++
 (`src/BfReportDecode.h`), and prints a live readout (the mean per-tone cross-frame
@@ -235,7 +235,7 @@ variance of the phase angle) against a **self-calibrating noise floor** — a
 CFAR-style test shown as `σ`, with `CLEAR` / `MOTION` verdicts.
 
 ```sh
-WiFiSenseDemo --channel 6 \
+sense --channel 6 \
   --sounder 0x0bda:0x8812 --beamformee 0x0bda:0xc812
 ```
 

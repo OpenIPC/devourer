@@ -1,5 +1,5 @@
-// Shared stdin framing for the stdin-driven stream demos (StreamTxDemo,
-// StreamDuplexDemo) and their headless regression self-test
+// Shared stdin framing for the stdin-driven stream demos (streamtx,
+// duplex) and their headless regression self-test
 // (StreamStdinSelftest).
 //
 // Centralises the two things that have to stay correct on every Windows

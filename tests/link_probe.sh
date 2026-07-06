@@ -25,8 +25,8 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-TXDEMO="$ROOT/build/WiFiDriverTxDemo"
-RXDEMO="$ROOT/build/WiFiDriverDemo"
+TXDEMO="$ROOT/build/txdemo"
+RXDEMO="$ROOT/build/rxdemo"
 
 EMIT_VID=0x0bda EMIT_PID="" GROUND_VID=0x0bda GROUND_PID=""
 CHANNEL=36 RATE=MCS4
@@ -63,7 +63,7 @@ TS='import sys,time
 for l in sys.stdin:
     sys.stdout.write(f"{time.time():.3f} {l}"); sys.stdout.flush()'
 
-cleanup() { for c in WiFiDriverTxDem WiFiDriverDemo; do pkill -x "$c" 2>/dev/null || true; done; }
+cleanup() { for c in txdemo rxdemo; do pkill -x "$c" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 
 echo "== building =="

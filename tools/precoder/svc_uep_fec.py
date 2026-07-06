@@ -1,6 +1,6 @@
 """Per-SVC-layer FEC-rate UEP — the application-FEC half of cross-layer UEP.
 
-`txdemo/svc_tx_demo/svc_tx.h` already maps each HEVC temporal layer to a PHY
+`examples/svctx/svc_tx.h` already maps each HEVC temporal layer to a PHY
 MCS (the PHY-rate half of unequal error protection). This adds the *outer-FEC-
 rate* half: each temporal layer gets its own Reed-Solomon redundancy, so the
 base/IDR layers — which `svc_tx.h` already flies at the most robust MCS — also

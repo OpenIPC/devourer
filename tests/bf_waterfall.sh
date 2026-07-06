@@ -14,8 +14,8 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
-TXDEMO="$ROOT/build/WiFiDriverTxDemo"
-RXDEMO="$ROOT/build/WiFiDriverDemo"
+TXDEMO="$ROOT/build/txdemo"
+RXDEMO="$ROOT/build/rxdemo"
 WF="$ROOT/tools/bf_waterfall.py"
 CHANNEL=100
 BFER_MAC="57:42:75:05:d6:00"
@@ -25,8 +25,8 @@ OP_SNR="${1:-}"
 [ -x "$TXDEMO" ] && [ -x "$RXDEMO" ] || { echo "build demos first"; exit 1; }
 
 cleanup() {
-    pkill -x WiFiDriverTxDem 2>/dev/null
-    pkill -x WiFiDriverDemo 2>/dev/null
+    pkill -x txdemo 2>/dev/null
+    pkill -x rxdemo 2>/dev/null
     wait 2>/dev/null
 }
 trap cleanup EXIT INT TERM

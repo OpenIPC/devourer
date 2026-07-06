@@ -26,7 +26,7 @@ echo "=== [2/3] TX: devourer transmits continuously while SDR captures ==="
 # Run the TX demo in the background via the standard run harness (it unbinds the
 # kernel driver, forces the Jaguar-3 family, and handles power-cycle recovery on
 # exit). Give it time to power-on + DLFW + replay before the chip starts TXing.
-sudo SECS=25 tests/jaguar3_devourer_run.sh build/WiFiDriverTxDemo 25 \
+sudo SECS=25 tests/jaguar3_devourer_run.sh build/txdemo 25 \
     > /tmp/j3_tx_onair_dev.log 2>&1 &
 HARNESS=$!
 sleep 10   # power-on -> DLFW -> kernel replay -> first bulk-OUT

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Thermal-vs-TX-gain experiment orchestrator.
 
-Drives one continuous WiFiDriverTxDemo TX session on an RTL88xxAU adapter while
+Drives one continuous txdemo TX session on an RTL88xxAU adapter while
 ramping the absolute TXAGC index up over time (DEVOURER_TX_PWR_* knobs), and
 captures three interleaved streams:
 
@@ -114,7 +114,7 @@ def main() -> int:
     args = ap.parse_args()
 
     devourer_root = Path(__file__).resolve().parent.parent
-    txdemo = devourer_root / "build" / "WiFiDriverTxDemo"
+    txdemo = devourer_root / "build" / "txdemo"
     if not txdemo.exists():
         sys.exit(f"{txdemo} not built — run `cmake --build build` first")
 

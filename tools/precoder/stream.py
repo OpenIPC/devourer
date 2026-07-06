@@ -2,7 +2,7 @@
 
 Wraps PSDU bodies in a tiny seq/length/CRC envelope so a TX→RX pair can carry
 a sequenced byte stream over the legacy-6M-OFDM probe-request link from
-PrecoderDemo. Optionally also encodes a per-OFDM-symbol shape constraint
+precoder. Optionally also encodes a per-OFDM-symbol shape constraint
 (pinned per-subcarrier ±1 values) on every body symbol — the remaining
 null-space dimensions of the BCC+interleaver linear map carry the framing
 bits, so one frame demonstrates frequency-domain control AND sequenced data
@@ -57,7 +57,7 @@ HEADER_LEN = 8            # MAGIC + SEQ + TOTAL + PLEN
 TRAILER_LEN = 2           # CRC16
 ENVELOPE_LEN = HEADER_LEN + TRAILER_LEN   # 10 bytes overhead
 
-# Default body size matches PrecoderDemo's 24-byte probe-request body.
+# Default body size matches precoder's 24-byte probe-request body.
 DEFAULT_BODY_BYTES = 24
 
 
@@ -281,7 +281,7 @@ def parse_envelope(body: bytes) -> Optional[StreamFrame]:
 
     PLEN is authoritative for envelope size, so trailing bytes added by the
     chip (typically the 4-byte 802.11 FCS plus any RX trailer that survives
-    `demo/main.cpp`'s body dump) are ignored. The CRC is read from
+    `examples/rx/main.cpp`'s body dump) are ignored. The CRC is read from
     `HEADER_LEN + plen .. HEADER_LEN + plen + 2`, NOT from `body[-2:]`.
     """
     if len(body) < ENVELOPE_LEN:

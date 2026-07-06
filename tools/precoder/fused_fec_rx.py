@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Fused-FEC RX driver — <devourer-stream> → SBI salvage → RS decode.
 
-Reads WiFiDriverDemo's stdout (run it with DEVOURER_STREAM_OUT=1 AND
+Reads rxdemo's stdout (run it with DEVOURER_STREAM_OUT=1 AND
 DEVOURER_RX_KEEP_CORRUPTED=1 so FCS-failed bodies are surfaced), salvages each
 frame's CRC-valid sub-blocks, and Reed-Solomon-decodes the recovered symbols.
 Recovered packet bytes go to stdout; the baseline-vs-SBI gain report to stderr.
 
     DEVOURER_PID=0x8821 DEVOURER_STREAM_OUT=1 DEVOURER_RX_KEEP_CORRUPTED=1 \
-        ./build/WiFiDriverDemo | python3 fused_fec_rx.py > recovered.bin
+        ./build/rxdemo | python3 fused_fec_rx.py > recovered.bin
 
 FEC parameters MUST match fused_fec_tx.py.
 """

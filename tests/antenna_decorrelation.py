@@ -9,7 +9,7 @@ same-polarisation antennas see almost the same fading, and the theoretical
 measures the decorrelation that a given antenna layout actually delivers,
 instead of assuming it.
 
-Input is the per-chain PHY link metric emitted by ``WiFiDriverDemo`` under
+Input is the per-chain PHY link metric emitted by ``rxdemo`` under
 ``DEVOURER_RX_ALLPATHS=1`` — one ``<devourer-rxpath>`` line per received frame:
 
     <devourer-rxpath>seq=N rssi=a,b,c,d snr=a,b,c,d evm=a,b,c,d
@@ -366,7 +366,7 @@ def main() -> int:
     arr = parse(lines, args.metric)
     if arr.size == 0:
         print("no <devourer-rxpath> or <devourer-stream> lines found — did you "
-              "run WiFiDriverDemo with DEVOURER_RX_ALLPATHS=1 (and receive "
+              "run rxdemo with DEVOURER_RX_ALLPATHS=1 (and receive "
               "frames)?", file=sys.stderr)
         return 2
     print(report(summarise(arr, args.metric)))

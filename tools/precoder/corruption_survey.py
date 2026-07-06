@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Corruption-pattern survey for FEC design.
 
-Reads `<devourer-corrupt-any>` lines (emitted by `WiFiDriverDemo` with
+Reads `<devourer-corrupt-any>` lines (emitted by `rxdemo` with
 `DEVOURER_RX_DUMP_ALL=1` + `DEVOURER_RX_KEEP_CORRUPTED=1`) and aggregates
 descriptive statistics about the corruption rate, frame-size distribution,
 and link-quality distribution — the empirical inputs for choosing the
@@ -11,7 +11,7 @@ Workflow:
 
     sudo DEVOURER_PID=0x0120 DEVOURER_VID=0x2357 DEVOURER_CHANNEL=6 \
          DEVOURER_RX_DUMP_ALL=1 DEVOURER_RX_KEEP_CORRUPTED=1 \
-         ./build/WiFiDriverDemo | \
+         ./build/rxdemo | \
         python3 tools/precoder/corruption_survey.py [--duration 300]
 
 The tool reads stdin until EOF or `--duration` seconds have elapsed, then

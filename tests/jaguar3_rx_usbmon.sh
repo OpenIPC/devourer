@@ -20,8 +20,8 @@ MON=/sys/kernel/debug/usb/usbmon/${RXBUS}u
 echo "[harness] TX 8812AU=$TXS  RX c812=$RXS (bus $RXBUS dev $RXDEV)"
 
 cleanup() {
-  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null
-  sudo pkill -9 -x WiFiDriverDemo 2>/dev/null
+  sudo pkill -9 -x txdemo 2>/dev/null
+  sudo pkill -9 -x rxdemo 2>/dev/null
   sudo pkill -9 -f "cat $MON" 2>/dev/null
   echo "$TXS:1.0" | sudo tee /sys/bus/usb/drivers/rtw88_8812au/bind >/dev/null 2>&1
   echo "$RXS:1.0" | sudo tee /sys/bus/usb/drivers/rtw88_8822cu/bind >/dev/null 2>&1
@@ -35,11 +35,11 @@ echo "$RXS:1.0" | sudo tee /sys/bus/usb/drivers/rtw88_8822cu/unbind >/dev/null 2
 sleep 1
 
 sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0x8812 DEVOURER_CHANNEL=$CH \
-     stdbuf -oL timeout -k 5 "$SECS" build/WiFiDriverTxDemo >/tmp/j3rx_tx.log 2>&1 &
+     stdbuf -oL timeout -k 5 "$SECS" build/txdemo >/tmp/j3rx_tx.log 2>&1 &
 sleep 5
 sudo sh -c "cat $MON > /tmp/j3rx_mon.raw" & sleep 0.3
 sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0xc812 DEVOURER_CHANNEL=$CH \
-     stdbuf -oL -eL timeout -k 5 $((SECS-7)) build/WiFiDriverDemo >/tmp/j3rx_rx.log 2>&1
+     stdbuf -oL -eL timeout -k 5 $((SECS-7)) build/rxdemo >/tmp/j3rx_rx.log 2>&1
 sudo pkill -9 -f "cat $MON" 2>/dev/null; sleep 0.3
 sudo chown "$(id -u):$(id -g)" /tmp/j3rx_mon.raw 2>/dev/null || true
 

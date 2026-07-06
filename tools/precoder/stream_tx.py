@@ -4,9 +4,9 @@
 Reads bytes from stdin (or --input), chunks them via `stream.pack_stream`,
 encodes each frame via `stream.encode_body` (optionally with a shape
 constraint sourced from the environment), and writes a sequence of
-length-prefixed PSDU bodies to stdout. Piped into the C++ StreamTxDemo:
+length-prefixed PSDU bodies to stdout. Piped into the C++ streamtx:
 
-    python3 tools/precoder/stream_tx.py < data.bin | ./build/StreamTxDemo
+    python3 tools/precoder/stream_tx.py < data.bin | ./build/streamtx
 
 Wire format on stdout:  <u32_le length><length bytes of descrambled PSDU>
 
@@ -24,7 +24,7 @@ Environment knobs (all optional):
                                 on-air at the requested ±1; for byte-only
                                 use the default works.
     DEVOURER_STREAM_OFFSET      scrambler-phase offset for the body's first
-                                bit (default 0; the README's PrecoderDemo
+                                bit (default 0; the README's precoder
                                 placement is 208 = SERVICE(16) + MAC(24·8)).
                                 Byte mode ignores this.
     DEVOURER_STREAM_ENTRY_STATE  BCC entry state at the body (default 0).
@@ -163,7 +163,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         dump.close()
 
     # `layout` from the last encode_body call describes the geometry; logged
-    # so the caller can sanity-check body size matches StreamTxDemo's max-psdu.
+    # so the caller can sanity-check body size matches streamtx's max-psdu.
     sys.stderr.write(
         f"stream_tx: emitted {len(frames)} frame(s), {total_bytes} body bytes, "
         f"mode={'shape' if shape else 'byte'}, "

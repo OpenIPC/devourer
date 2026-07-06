@@ -1,6 +1,6 @@
 """Frequency-diversity simulation for the channel-hopping stream link.
 
-When the TX hops per packet across N_ch channels (StreamTxDemo with
+When the TX hops per packet across N_ch channels (streamtx with
 DEVOURER_HOP_CHANNELS, dwell=1), the symbols of one Reed-Solomon block — emitted
 in ESI order — land on channels round-robin: ESI i -> channel (g_i mod N_ch),
 where g_i is the global packet index. So a Reed-Solomon block of N symbols is
@@ -44,7 +44,7 @@ def _channel_for(symbol_index: int, block_id: int, esi: int, n: int,
                  n_ch: int, mode: str) -> int:
     """Which channel a symbol is transmitted on.
 
-    'hop'   — per-packet round-robin (what StreamTxDemo does at dwell=1):
+    'hop'   — per-packet round-robin (what streamtx does at dwell=1):
               keyed off the global symbol index so a block spreads across all
               channels.
     'nohop' — the whole block rides one channel (channel chosen per block).

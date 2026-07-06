@@ -50,7 +50,7 @@
 #define USB_VENDOR_ID 0x0bda
 
 /* Known USB product IDs for the Realtek Jaguar family — same set as the RX
- * demo (demo/main.cpp). */
+ * demo (examples/rx/main.cpp). */
 static constexpr uint16_t kRealtekProductIds[] = {
     0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
     0xb812, 0xb82c, /* RTL8822BU (Jaguar2); OEM VIDs via DEVOURER_VID/PID */
@@ -123,7 +123,7 @@ static void packetProcessor(const Packet &packet) {
     fflush(stdout);
   }
   /* BF self-sounding report detector (DEVOURER_BF_DETECT_REPORT modes 1-4,
-   * shared with WiFiDriverDemo): with DEVOURER_TX_WITH_RX=thread this is how
+   * shared with rxdemo): with DEVOURER_TX_WITH_RX=thread this is how
    * a single-radio sounder surfaces its own captured beamforming reports. */
   devourer::bf::detect_report(packet);
   /* Surface frames whose source MAC matches the txdemo's injected beacon
@@ -212,7 +212,7 @@ int main(int argc, char **argv) {
      * topology when several share one VID:PID and even the serial — e.g. two
      * identical RTL8814AU dongles. DEVOURER_USB_PORT is the dotted libusb port
      * path (sysfs `devpath` / `lsusb -t`). Unset = the VID:PID open loop below.
-     * Mirrors the RX demo (demo/main.cpp). */
+     * Mirrors the RX demo (examples/rx/main.cpp). */
     if (const char *bus_env = std::getenv("DEVOURER_USB_BUS")) {
       const auto want_bus =
           static_cast<uint8_t>(std::strtoul(bus_env, nullptr, 0));

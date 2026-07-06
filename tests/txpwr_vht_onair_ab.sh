@@ -41,7 +41,7 @@ PY="$HERE/.venv/bin/python"
 mkdir -p "$OUT"
 
 cleanup() {
-    pkill -x WiFiDriverTxDem 2>/dev/null || true
+    pkill -x txdemo 2>/dev/null || true
     [ -n "${PROBE_PID:-}" ] && kill "$PROBE_PID" 2>/dev/null
     [ -n "${STAMP_PID:-}" ] && kill "$STAMP_PID" 2>/dev/null
     true
@@ -49,12 +49,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "== building (new + master baseline) =="
-cmake --build "$ROOT/build" -j --target WiFiDriverTxDemo >/dev/null || exit 1
-if [ ! -x "$MASTER_BUILD/WiFiDriverTxDemo" ]; then
+cmake --build "$ROOT/build" -j --target txdemo >/dev/null || exit 1
+if [ ! -x "$MASTER_BUILD/txdemo" ]; then
     wt="/tmp/devourer-master-worktree"
     git -C "$ROOT" worktree add --force "$wt" origin/master >/dev/null 2>&1
     cmake -S "$wt" -B "$MASTER_BUILD" -DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config >/dev/null 2>&1
-    cmake --build "$MASTER_BUILD" -j --target WiFiDriverTxDemo >/dev/null 2>&1 || {
+    cmake --build "$MASTER_BUILD" -j --target txdemo >/dev/null 2>&1 || {
         echo "master build failed"; exit 1; }
 fi
 
@@ -99,8 +99,8 @@ declare -A W
 for r in $(seq 1 "$REPS"); do
     for cell in A:master:VHT2SS_MCS3 B:new:VHT2SS_MCS3 C:master:MCS7 D:new:MCS7; do
         IFS=: read -r key build rate <<<"$cell"
-        bin="$ROOT/build/WiFiDriverTxDemo"
-        [ "$build" = "master" ] && bin="$MASTER_BUILD/WiFiDriverTxDemo"
+        bin="$ROOT/build/txdemo"
+        [ "$build" = "master" ] && bin="$MASTER_BUILD/txdemo"
         echo "== rep $r cell $key: $build $rate =="
         W["$key$r"]="$(run_cell "$bin" "$rate" "cell$key$r")"
     done

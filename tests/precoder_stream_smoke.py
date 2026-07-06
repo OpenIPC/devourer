@@ -7,7 +7,7 @@ on the system Python.
 
 It drives the same encode → simulated-on-wire → decode path the two-adapter
 hardware harness uses, but synthesises the `<devourer-stream>` line that
-WiFiDriverDemo would print, so no USB is involved.
+rxdemo would print, so no USB is involved.
 
 The smoke covers:
   * byte-mode round-trip — frame the input, encode, decode, reassemble;
@@ -33,7 +33,7 @@ import stream  # noqa: E402
 
 
 def _frame_psdu_for_wire(body: bytes) -> bytes:
-    """Round-trip the StreamTxDemo wire format: length-prefixed PSDU body."""
+    """Round-trip the streamtx wire format: length-prefixed PSDU body."""
     return struct.pack("<I", len(body)) + body
 
 
@@ -61,7 +61,7 @@ def test_byte_mode_repo_smoke():
         bodies.append(body)
 
     # Simulate the wire: length-prefixed PSDU bodies in, the same bodies
-    # back out (StreamTxDemo emits them, demo's DEVOURER_STREAM_OUT dumps
+    # back out (streamtx emits them, demo's DEVOURER_STREAM_OUT dumps
     # them — identity on the byte plane).
     wire = b"".join(_frame_psdu_for_wire(b) for b in bodies)
     rx_bodies = _parse_length_prefixed(wire)

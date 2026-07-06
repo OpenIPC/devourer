@@ -5,7 +5,7 @@
 # RtlJaguar2Device and (b) decodes live 802.11 frames.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-DEMO="$HERE/../build/WiFiDriverDemo"
+DEMO="$HERE/../build/rxdemo"
 VID=0x2357 PID=0x012d CH=${1:-6} SECS=${2:-8}
 LOG=$(mktemp /tmp/j2-8822b-rx.XXXX.log)
 restored=0
@@ -13,7 +13,7 @@ restored=0
 cleanup() {
     [ "$restored" = 1 ] && return
     restored=1
-    pkill -f "WiFiDriverDemo" 2>/dev/null
+    pkill -f "rxdemo" 2>/dev/null
     # T3U had no kernel driver bound at start; nothing to restore. Re-probe in
     # case a driver auto-binds after the device resets.
     sleep 1

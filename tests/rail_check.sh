@@ -24,9 +24,9 @@ CTRL_PID=${CTRL_PID:-0xc812}          # CU (RTL8812CU) — the validated 5 GHz c
 SECS=${SECS:-5}
 RAIL_MIN_DUTY=${RAIL_MIN_DUTY:-50}    # absolute 5 GHz duty floor (%), tune per SDR setup
 RAIL_MIN_RATIO=${RAIL_MIN_RATIO:-0.6} # min 5GHz/2.4GHz duty ratio on a healthy rail
-TXBIN=${TXBIN:-build/WiFiDriverTxDemo}
+TXBIN=${TXBIN:-build/txdemo}
 
-cleanup(){ sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; }
+cleanup(){ sudo pkill -9 -x txdemo 2>/dev/null; }
 trap cleanup EXIT
 
 # free the control from any bound kernel driver

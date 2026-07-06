@@ -11,7 +11,7 @@ this project's userspace stack ("devourer") against the kernel driver
                        valid frames?]
 
 Each cell injects/receives a known-SA beacon (57:42:75:05:d6:00, matching
-the canonical frame in txdemo/main.cpp and the RX matcher in demo/main.cpp).
+the canonical frame in examples/tx/main.cpp and the RX matcher in examples/rx/main.cpp).
 A cell passes if the RX side observes >= --pass-threshold hits within the
 test duration. The baseline cell is run first; if it fails, the rig itself
 is broken (interference, channel, antennas) and the matrix is aborted.
@@ -67,15 +67,15 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 # Process leak prevention.
 #
-# Long-running Popens (WiFiDriverDemo, WiFiDriverTxDemo, kernel-side tcpdump)
+# Long-running Popens (rxdemo, txdemo, kernel-side tcpdump)
 # can outlive this script if:
 #   1. an outer `timeout` / SIGKILL hits Python before the run_cell finally
 #      block executes (the leaked child reparents to init with PPID=1);
 #   2. an unhandled exception propagates out of run_cell before _terminate
 #      runs on the in-flight Popen.
 #
-# A leaked WiFiDriverDemo keeps the USB device claimed, which manifests
-# in the kernel as `usbfs: process N (WiFiDriverDemo) did not claim
+# A leaked rxdemo keeps the USB device claimed, which manifests
+# in the kernel as `usbfs: process N (rxdemo) did not claim
 # interface 0 before use` spam and prevents `aircrack-ng/88XXau` from
 # binding in the VM — exactly what bit us during the 2026-05-30 / -31
 # 8821AU 5GHz UNII-2 investigation.
@@ -99,7 +99,7 @@ PR_SET_PDEATHSIG = 1
 def _child_preexec() -> None:
     """Runs in the child after fork, before exec. Asks the kernel to send
     SIGKILL to this child the moment its parent (the regress.py process)
-    dies. Belt-and-braces against orphaned WiFiDriverDemo processes when
+    dies. Belt-and-braces against orphaned rxdemo processes when
     Python is killed by an outer `timeout` / SIGKILL that can't be caught."""
     try:
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
@@ -153,8 +153,8 @@ def _install_cleanup_handlers() -> None:
     signal.signal(signal.SIGINT, _handler)
     signal.signal(signal.SIGHUP, _handler)
 
-# Source MAC of the canonical beacon — must match txdemo/main.cpp and the
-# `<devourer-tx-hit>` matcher in demo/main.cpp. tcpdump filter and scapy
+# Source MAC of the canonical beacon — must match examples/tx/main.cpp and the
+# `<devourer-tx-hit>` matcher in examples/rx/main.cpp. tcpdump filter and scapy
 # injector both use this.
 CANONICAL_SA = "57:42:75:05:d6:00"
 
@@ -453,7 +453,7 @@ def preflight(devourer_root: Path, kh: KernelHost) -> None:
         except ImportError:
             missing.append(f"  - python module `{mod}` not importable "
                            f"(install: {hint})")
-    for binary in ("WiFiDriverDemo", "WiFiDriverTxDemo"):
+    for binary in ("rxdemo", "txdemo"):
         if not (devourer_root / "build" / binary).is_file():
             missing.append(
                 f"  - devourer binary `build/{binary}` missing — run "
@@ -642,9 +642,9 @@ def _devourer_env(dut: Dut, channel: int,
     env["DEVOURER_CHANNEL"] = str(channel)
     if tx_encoding:
         # The TX rate/mode is a single DEVOURER_TX_RATE string read by
-        # WiFiDriverTxDemo (-> RtlJaguarDevice::SetTxMode):
+        # txdemo (-> RtlJaguarDevice::SetTxMode):
         #   "<rate>[/<bw>][/SGI][/LDPC][/STBC]".
-        # Only meaningful when spawning WiFiDriverTxDemo; harmless on the RX side.
+        # Only meaningful when spawning txdemo; harmless on the RX side.
         if tx_encoding.get("vht"):
             rate = (f"VHT{tx_encoding.get('nss', 1)}SS_MCS"
                     f"{tx_encoding.get('vht_mcs', 0)}")
@@ -670,7 +670,7 @@ def _spawn_devourer_rx(
 ) -> subprocess.Popen:
     fh = open(log_path, "w")
     return _register_local_proc(subprocess.Popen(
-        [str(devourer_root / "build" / "WiFiDriverDemo")],
+        [str(devourer_root / "build" / "rxdemo")],
         env=_devourer_env(dut, channel),
         stdout=fh, stderr=subprocess.STDOUT, preexec_fn=_child_preexec,
     ))
@@ -682,7 +682,7 @@ def _spawn_devourer_tx(
 ) -> subprocess.Popen:
     fh = open(log_path, "w")
     return _register_local_proc(subprocess.Popen(
-        [str(devourer_root / "build" / "WiFiDriverTxDemo")],
+        [str(devourer_root / "build" / "txdemo")],
         env=_devourer_env(dut, channel, tx_encoding=encoding),
         stdout=fh, stderr=subprocess.STDOUT, preexec_fn=_child_preexec,
     ))
@@ -1399,7 +1399,7 @@ def main():
     ap.add_argument(
         "--devourer-root", type=Path,
         default=Path(__file__).resolve().parent.parent,
-        help="repo root with build/WiFiDriverDemo + build/WiFiDriverTxDemo",
+        help="repo root with build/rxdemo + build/txdemo",
     )
     ap.add_argument(
         "--channel", type=int, default=6,

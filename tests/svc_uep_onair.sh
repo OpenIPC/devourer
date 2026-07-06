@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# On-air verification of SvcTxDemo's TID -> TxMode UEP mapping.
+# On-air verification of svctx's TID -> TxMode UEP mapping.
 #
 # Synthetic HEVC NALs (tests/gen_svc_nals.py: 4:8:16 T0/T1/T2 per GOP plus an
 # IDR access unit — VPS/SPS/PPS/IDR — every other GOP) are injected by the 8812;
@@ -13,7 +13,7 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SA=57:42:75:05:d6:00
 TX=9-2; WIT=4-2.3.2
-KILL(){ sudo pkill -9 SvcTxDemo 2>/dev/null; sudo pkill -9 -f gen_svc_nals 2>/dev/null; }
+KILL(){ sudo pkill -9 svctx 2>/dev/null; sudo pkill -9 -f gen_svc_nals 2>/dev/null; }
 trap KILL EXIT
 
 echo "=== fresh rail (power-cycle hub tree) ==="
@@ -38,9 +38,9 @@ for i in /sys/bus/usb/devices/$TX/$TX:*; do ifc=$(basename "$i"); drv=$(readlink
 python3 "$ROOT/tests/gen_svc_nals.py" 12 | \
   sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 \
        DEVOURER_SVC_LADDER="CRIT=MCS0;T0=MCS1;T1=MCS4;T2=MCS7" \
-       "$ROOT/build/SvcTxDemo" --gap-us 600 >/tmp/svc.log 2>&1 &
+       "$ROOT/build/svctx" --gap-us 600 >/tmp/svc.log 2>&1 &
 sleep 9
-echo "=== SvcTxDemo policy + per-TID counters ==="
+echo "=== svctx policy + per-TID counters ==="
 grep -E "SVC UEP policy|  T[0-9] ->|<svc>" /tmp/svc.log | tail -6
 echo "=== witness decoded MCS histogram (expect MCS0:MCS1:MCS4:MCS7 ~ 1:4:8:16) ==="
 sudo timeout 6 tcpdump -i "$W" -e -nn "ether src $SA" 2>/dev/null | grep -oE "MCS [0-9]+" | sort -V | uniq -c

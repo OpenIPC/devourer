@@ -2,7 +2,7 @@
 # Compare inter-chain antenna decorrelation across every plugged RTL8814AU.
 #
 # Two RTL8814AU dongles that enumerate identically (same VID:PID:serial) can only
-# be told apart by USB topology, so this drives WiFiDriverDemo's
+# be told apart by USB topology, so this drives rxdemo's
 # DEVOURER_USB_BUS/PORT selector once per device. Each is measured as RX against
 # one controlled beacon TX (the canonical SA), so the only variable between runs
 # is the adapter's antenna front-end — e.g. 2 external dipoles (CF-938AC) vs 4
@@ -27,7 +27,7 @@ METRIC="${METRIC:-rssi}"
 OUTDIR="$(mktemp -d -t devourer-8814cmp.XXXXXX)"
 
 cleanup() {
-    for comm in WiFiDriverDemo WiFiDriverTxDem; do
+    for comm in rxdemo txdemo; do
         pkill -x "$comm" 2>/dev/null || true
     done
     rm -f "${TXLOG:-}" 2>/dev/null || true
@@ -37,8 +37,8 @@ trap cleanup EXIT INT TERM
 echo "== building devourer =="
 [ -d "$ROOT/build" ] || cmake -S "$ROOT" -B "$ROOT/build" >/dev/null
 cmake --build "$ROOT/build" -j >/dev/null
-DEMO="$ROOT/build/WiFiDriverDemo"
-TXDEMO="$ROOT/build/WiFiDriverTxDemo"
+DEMO="$ROOT/build/rxdemo"
+TXDEMO="$ROOT/build/txdemo"
 
 # uv venv for the analyser (numpy only).
 command -v uv >/dev/null 2>&1 || { echo "uv not found" >&2; exit 1; }

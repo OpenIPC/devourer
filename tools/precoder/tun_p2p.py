@@ -2,11 +2,11 @@
 """TUN ⇄ stream-link bridge — IP-over-precoder for one P2P peer.
 
 First-cut "real-world P2P" demo built on the stream layer. Opens a Linux TUN
-device, spawns StreamTxDemo and/or WiFiDriverDemo as subprocesses, and runs
+device, spawns streamtx and/or rxdemo as subprocesses, and runs
 two threads:
 
-    tun fd ──read──► encode_body ─length-prefix─► StreamTxDemo (libusb TX)
-    WiFiDriverDemo (libusb RX) ─<devourer-stream>─► decode_body ──write──► tun fd
+    tun fd ──read──► encode_body ─length-prefix─► streamtx (libusb TX)
+    rxdemo (libusb RX) ─<devourer-stream>─► decode_body ──write──► tun fd
 
 ONE IP PACKET = ONE STREAM FRAME (seq increments per packet, total=0 = unbounded
 stream). body_bytes defaults to 1500 so a 1490-byte tun MTU fits cleanly with
@@ -361,7 +361,7 @@ def rx_thread(stop: StopBit, rx_stdout, tun_fd: int,
               dedup: Optional[SeqWindow], counters: dict,
               fec_dec: "Optional[stream_fec.FecDecoder]" = None,
               fec_block_expire_ms: int = 500) -> None:
-    """Read `<devourer-stream>` lines off the WiFiDriverDemo, decode the
+    """Read `<devourer-stream>` lines off the rxdemo, decode the
     stream envelope, then either:
       * byte mode: write the StreamFrame payload to the TUN as one IP packet,
       * FEC mode: feed the payload to the FecDecoder; when a block decodes,
@@ -446,7 +446,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                                        "duplex-split"),
                     default="duplex",
                     help="duplex (default) = one chip both directions via "
-                         "StreamDuplexDemo (needs --duplex-pid); "
+                         "duplex (needs --duplex-pid); "
                          "duplex-split = two chips, --tx-pid + --rx-pid "
                          "(the pre-duplex layout); "
                          "tx-only / rx-only drop the unused subprocess")
@@ -462,10 +462,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--tx-vid", default="0x0bda")
     ap.add_argument("--rx-vid", default="0x0bda")
     ap.add_argument("--channel", type=int, default=6)
-    ap.add_argument("--tx-bin", default=str(repo / "build" / "StreamTxDemo"))
-    ap.add_argument("--rx-bin", default=str(repo / "build" / "WiFiDriverDemo"))
+    ap.add_argument("--tx-bin", default=str(repo / "build" / "streamtx"))
+    ap.add_argument("--rx-bin", default=str(repo / "build" / "rxdemo"))
     ap.add_argument("--duplex-bin",
-                    default=str(repo / "build" / "StreamDuplexDemo"))
+                    default=str(repo / "build" / "duplex"))
     ap.add_argument("--interval-ms", type=int, default=2)
     ap.add_argument("--repeat", type=int, default=1,
                     help="blind per-frame replication (combine with the "

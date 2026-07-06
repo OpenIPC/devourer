@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse <devourer-csi> lines emitted by WiFiDriverDemo with
+"""Parse <devourer-csi> lines emitted by rxdemo with
 DEVOURER_RX_DUMP_CSI=hex,hex,... set and report which selectors look
 like a real BB bus vs static status flags.
 
@@ -18,7 +18,7 @@ A real per-subcarrier IQ selector would show:
   * NO sticky bits in the upper byte (no busy / clock-domain marker)
 
 Run:
-  ./build/WiFiDriverDemo > /tmp/csi.log 2>&1   # with DEVOURER_RX_DUMP_CSI set
+  ./build/rxdemo > /tmp/csi.log 2>&1   # with DEVOURER_RX_DUMP_CSI set
   uv run python tools/precoder/csi_dump.py /tmp/csi.log
 """
 
@@ -40,7 +40,7 @@ WEDGE_RE = re.compile(r"<devourer-csi-wedged>after selector=0x([0-9a-fA-F]+)")
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("log", type=Path, help="WiFiDriverDemo stdout/stderr capture")
+    p.add_argument("log", type=Path, help="rxdemo stdout/stderr capture")
     args = p.parse_args()
 
     if not args.log.exists():
@@ -103,7 +103,7 @@ def main() -> int:
     print("# Notes:")
     print("#  - 'DYNAMIC (wide-bit bus)' selectors are the IQ-candidate set;")
     print("#    cross-check against frame-by-frame variance by raising")
-    print("#    DEVOURER_RX_DUMP_CSI sample count (edit kCsiMaxFrames in demo/main.cpp).")
+    print("#    DEVOURER_RX_DUMP_CSI sample count (edit kCsiMaxFrames in examples/rx/main.cpp).")
     print("#  - Per-subcarrier IQ would pack int16 i + int16 q in one u32;")
     print("#    high16 AND low16 both swing wide. A 'DYNAMIC' selector with")
     print("#    only the low 16 bits toggling is more likely a counter.")

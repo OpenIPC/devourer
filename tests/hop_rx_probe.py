@@ -3,7 +3,7 @@
 
 Tunes a UHD device (B200/B210/LibreSDR) once to a center frequency wide enough
 to cover several Wi-Fi channels at the same time, then watches all of them
-simultaneously while a hopping transmitter (WiFiDriverTxDemo with
+simultaneously while a hopping transmitter (txdemo with
 DEVOURER_HOP_CHANNELS) cycles between them. Because one wideband receiver sees
 every hop channel at once, it can distinguish "the transmitter retuned away"
 from "the transmitter dropped frames" — which a narrowband receiver tuned to a

@@ -38,11 +38,11 @@
 // first time. Use this binary as a regression check against future
 // changes to HalModule's 8821 init.
 //
-// Build (against an existing master build with libWiFiDriver.a):
+// Build (against an existing master build with libdevourer.a):
 //
 //   g++ -std=c++20 -O2 tests/in_process_hotplug_wrap.cpp \
 //       -o /tmp/in_process_hotplug_wrap \
-//       -I src -I hal build/libWiFiDriver.a \
+//       -I src -I hal build/libdevourer.a \
 //       $(pkg-config --cflags --libs libusb-1.0) -pthread
 //
 // Run (needs root for sysfs unbind + /dev/bus/usb open):

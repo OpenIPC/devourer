@@ -133,7 +133,7 @@ static rx_pkt_attrib rtl8812_query_rx_desc_status(uint8_t *pdesc) {
 
   /* Offset 20 — chip-side TSF low (32 bits). Surfaced via RxAtrib.tsfl
    * for downstream latency measurement and dup-detection (see
-   * demo/main.cpp's <devourer-stream> line). The macro reads bits 0..31
+   * examples/rx/main.cpp's <devourer-stream> line). The macro reads bits 0..31
    * of pdesc+20 (full 4-byte u32), not a byte — the original commented
    * `(byte)` cast in master was a copy-paste from another field. */
   pattrib.tsfl = GET_RX_STATUS_DESC_TSFL_8812(pdesc);
@@ -259,7 +259,7 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
          * Layout per upstream Realtek convention: byte 0 = C2H cmd_id
          * (sub-type), byte 1 = seq, bytes 2..N = payload. Sub-type IDs
          * vary per chip and aren't enumerated in the vendored headers —
-         * demo/main.cpp does a best-effort decode of the 8814A TX_RPT
+         * examples/rx/main.cpp does a best-effort decode of the 8814A TX_RPT
          * payload via the GET_8814A_C2H_TX_RPT_* macros gated by
          * DEVOURER_TX_STATUS=1, plus a raw hex dump so observers can
          * validate the sub-type ID against on-air capture. */

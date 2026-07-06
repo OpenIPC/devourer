@@ -5,7 +5,7 @@ runtime-ephemeral register masking.
 A clean way to compare:
   - `tools/canary_kernel_dump.sh <iface> <channel> [chip]` output
     (kernel side via iwpriv)
-  - `DEVOURER_DUMP_CANARY=1 ./build/WiFiDriverDemo` block extracted
+  - `DEVOURER_DUMP_CANARY=1 ./build/rxdemo` block extracted
     by `awk '/DEVOURER_DUMP_CANARY \\(post channel-set ch=N\\)/,
     /END DEVOURER_DUMP_CANARY/' | sed 's/^<devourer>//'`
 

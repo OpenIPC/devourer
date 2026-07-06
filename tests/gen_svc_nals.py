@@ -16,7 +16,7 @@ Frame sizes track real HEVC: IRAP/parameter-set NALs are large, base-layer
 P-frames medium, enhancement frames small — so the airtime/energy and FEC
 accounting downstream see a realistic byte mix, not a flat one.
 
-  python3 tests/gen_svc_nals.py [GOPS] [PAYLOAD] | DEVOURER_PID=0x8812 ... ./build/SvcTxDemo
+  python3 tests/gen_svc_nals.py [GOPS] [PAYLOAD] | DEVOURER_PID=0x8812 ... ./build/svctx
 """
 import struct
 import sys

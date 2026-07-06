@@ -4,7 +4,7 @@
 # binary with the Jaguar-3 family forced, optionally usbmon-capture, then rebind.
 #
 #   sudo tests/jaguar3_devourer_run.sh <binary> [seconds] [usbmon_out]
-# e.g. sudo tests/jaguar3_devourer_run.sh build/WiFiDriverDemo 12 /tmp/j3_dev.txt
+# e.g. sudo tests/jaguar3_devourer_run.sh build/rxdemo 12 /tmp/j3_dev.txt
 set -u
 
 # Auto-detect the c812's sysfs node by PID (it moves between USB ports across
@@ -29,7 +29,7 @@ HUBLOC=${SYS%.*}      # 3-2.4 -> 3-2   (uhubctl hub location)
 HUBPORT=${SYS##*.}    # 3-2.4 -> 4     (uhubctl port number)
 echo "[harness] c812 at $SYS (uhubctl $HUBLOC port $HUBPORT)"
 DRV=rtw88_8822cu
-BIN=${1:-build/WiFiDriverDemo}
+BIN=${1:-build/rxdemo}
 SECS=${2:-12}
 MONOUT=${3:-}
 COMM=$(basename "$BIN" | cut -c1-15)   # /proc comm is truncated to 15 chars

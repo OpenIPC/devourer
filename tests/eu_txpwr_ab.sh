@@ -7,10 +7,10 @@ set -u
 KMOD=rtl88x2eu_ohd
 HUB=3-2.3
 FREQ=5180e6
-cleanup(){ sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null; }
+cleanup(){ sudo pkill -9 -x txdemo 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null; }
 trap cleanup EXIT
 
-cycle(){ sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null
+cycle(){ sudo pkill -9 -x txdemo 2>/dev/null; sudo pkill -9 -f kernel_tx_inject 2>/dev/null
          sudo rmmod $KMOD 2>/dev/null; sleep 1; sudo uhubctl -l $HUB -a cycle >/dev/null 2>&1; sleep 4; }
 
 sweep(){ # prints "8:xx 10:xx 12:xx 14:xx"
@@ -31,10 +31,10 @@ meas_devourer(){
   cycle
   sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0xa81a DEVOURER_CHANNEL=36 \
     DEVOURER_TX_RATE=MCS7 DEVOURER_TX_GAP_US=0 DEVOURER_TX_PAYLOAD_BYTES=1465 \
-    stdbuf -oL timeout -k 5 30 build/WiFiDriverTxDemo >/dev/null 2>&1 &
+    stdbuf -oL timeout -k 5 30 build/txdemo >/dev/null 2>&1 &
   sleep 5
   echo "  devourer:$(sweep)"
-  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null; sleep 1
+  sudo pkill -9 -x txdemo 2>/dev/null; sleep 1
 }
 
 meas_kernel(){

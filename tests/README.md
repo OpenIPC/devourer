@@ -14,7 +14,7 @@ RX = kernel       does dvr emit valid  baseline / rig sanity check
 ```
 
 Each cell injects/receives the canonical beacon (SA `57:42:75:05:d6:00`,
-matching `txdemo/main.cpp`) for `--duration` seconds and counts hits.
+matching `examples/tx/main.cpp`) for `--duration` seconds and counts hits.
 The baseline cell runs first — if it fails the rig itself is broken and
 the remaining cells are skipped (override with `--no-baseline-abort`).
 
@@ -94,7 +94,7 @@ probe on kernels 6.15+ (`failed to download firmware`, `error -22`), but
 ### On the host (both modes)
 
 - 2 supported USB Wi-Fi adapters plugged in
-- devourer built (`build/WiFiDriverDemo`, `build/WiFiDriverTxDemo`)
+- devourer built (`build/rxdemo`, `build/txdemo`)
 - Python 3.9+ with `scapy` (`pip install scapy` or `python3-scapy`)
 - `iw`, `tcpdump`, `ip` on PATH
 - Passwordless `sudo`, or run directly as root
@@ -289,7 +289,7 @@ reportedly fails at RX). Add more in `ENCODING_COMBOS` at the top of
 The underlying knobs are also usable standalone for one-off targeted TX:
 
 - **Devourer TX:** `DEVOURER_TX_RATE=<rate>[/<bw>][/SGI][/LDPC][/STBC]` read by
-  `WiFiDriverTxDemo` (parsed into a `devourer::TxMode`, applied via
+  `txdemo` (parsed into a `devourer::TxMode`, applied via
   `RtlJaguarDevice::SetTxMode`). `<rate>` = `6M`..`54M` (legacy) | `MCS0`..`MCS31`
   (HT) | `VHT1SS_MCS0`..`VHT4SS_MCS9` (VHT); `<bw>` = `20|40|80|160`. Examples:
   `MCS7/40/SGI`, `VHT2SS_MCS3/80/LDPC`.
@@ -319,7 +319,7 @@ sudo python3 tests/sniff_air.py --iface wlan0mon --channel 100 \
 ```
 
 The `d/k` and `d/d` rows are not affected by the kernel-TX caveat —
-`WiFiDriverTxDemo` writes the radiotap header directly into the
+`txdemo` writes the radiotap header directly into the
 chip's bulk-OUT buffer, so the `DEVOURER_TX_*` env vars are ground
 truth for what flies on devourer TX.
 

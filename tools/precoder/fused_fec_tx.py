@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Fused-FEC TX driver — bytes → RS+SBI bodies → StreamTxDemo.
+"""Fused-FEC TX driver — bytes → RS+SBI bodies → streamtx.
 
 Reads a byte stream (stdin or --input), Reed-Solomon-encodes it and packs the
 outer-code symbols into sub-block-integrity (SBI) bodies, then writes
-length-prefixed PSDU bodies to stdout for the C++ StreamTxDemo:
+length-prefixed PSDU bodies to stdout for the C++ streamtx:
 
-    python3 fused_fec_tx.py --input data.bin | DEVOURER_PID=0x8812 ./build/StreamTxDemo
+    python3 fused_fec_tx.py --input data.bin | DEVOURER_PID=0x8812 ./build/streamtx
 
 Wire format on stdout:  <u32_le length><length bytes of body>
 

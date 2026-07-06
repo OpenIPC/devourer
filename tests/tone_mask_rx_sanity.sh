@@ -26,11 +26,11 @@ LOGDIR=/tmp/devourer-tonemask-sanity
 rm -rf "$LOGDIR"; mkdir -p "$LOGDIR"
 
 cleanup() {
-  pkill -INT -x WiFiDriverTxDem 2>/dev/null
-  pkill -INT -x WiFiDriverDemo 2>/dev/null
+  pkill -INT -x txdemo 2>/dev/null
+  pkill -INT -x rxdemo 2>/dev/null
   sleep 1
-  pkill -KILL -x WiFiDriverTxDem 2>/dev/null
-  pkill -KILL -x WiFiDriverDemo 2>/dev/null
+  pkill -KILL -x txdemo 2>/dev/null
+  pkill -KILL -x rxdemo 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
@@ -44,13 +44,13 @@ run_cell() {
   [ -n "$csi" ] && csi_env=(DEVOURER_RX_CSI_MASK="$csi")
 
   env DEVOURER_VID="0x$TX_VID" DEVOURER_PID="0x$TX_PID" DEVOURER_CHANNEL="$CH" \
-      timeout -s INT -k 5 $((DUR + 8)) ./build/WiFiDriverTxDemo >"$txlog" 2>&1 &
+      timeout -s INT -k 5 $((DUR + 8)) ./build/txdemo >"$txlog" 2>&1 &
   local txpid=$!
   sleep 4  # TX bring-up
 
   env DEVOURER_VID="0x$RX_VID" DEVOURER_PID="0x$RX_PID" DEVOURER_CHANNEL="$CH" \
       "${csi_env[@]}" \
-      timeout -s INT -k 5 "$DUR" ./build/WiFiDriverDemo >"$rxlog" 2>&1
+      timeout -s INT -k 5 "$DUR" ./build/rxdemo >"$rxlog" 2>&1
 
   wait "$txpid" 2>/dev/null
   sleep 4  # settle before the next cell re-opens both dongles

@@ -138,14 +138,14 @@ jobs:
           -DCMAKE_CXX_COMPILER=g++
 
       - name: Build (library + stream demos + self-tests)
-        # WiFiDriverDemo / WiFiDriverTxDemo / PrecoderDemo use POSIX-only APIs
-        # (e.g. fork() in txdemo/main.cpp for the DEVOURER_TX_WITH_RX path) and
+        # rxdemo / txdemo / precoder use POSIX-only APIs
+        # (e.g. fork() in examples/tx/main.cpp for the DEVOURER_TX_WITH_RX path) and
         # are not mingw targets. This job guards the stdin-driven stream demos
         # and the headless self-tests ctest runs — every registered test's
         # binary must be listed here, or the Test step fails it as Not Run.
         run: >
           cmake --build build --target
-          WiFiDriver StreamTxDemo StreamDuplexDemo StreamStdinSelftest
+          devourer streamtx duplex StreamStdinSelftest
           ToneMaskSelftest BfReportDecodeSelftest SweepSpecSelftest
           TxPowerQuantSelftest LinkHealthSelftest TxCapsSelftest TxPktPwrSelftest
           RxQualitySelftest

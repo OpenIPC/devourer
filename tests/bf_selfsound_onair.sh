@@ -14,8 +14,8 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
-TXDEMO="$ROOT/build/WiFiDriverTxDemo"
-RXDEMO="$ROOT/build/WiFiDriverDemo"
+TXDEMO="$ROOT/build/txdemo"
+RXDEMO="$ROOT/build/rxdemo"
 PY="/usr/bin/python3"
 PROBE="$HERE/bf_ndpa_probe.py"
 OUT="/tmp/bf-selfsound"
@@ -29,8 +29,8 @@ BFER_MAC="57:42:75:05:d6:00"   # canonical SA = NDPA TA
 mkdir -p "$OUT"
 
 cleanup() {
-    pkill -x WiFiDriverTxDem 2>/dev/null
-    pkill -x WiFiDriverDemo 2>/dev/null
+    pkill -x txdemo 2>/dev/null
+    pkill -x rxdemo 2>/dev/null
     pkill -f "bf_ndpa_probe.py" 2>/dev/null
     wait 2>/dev/null
 }

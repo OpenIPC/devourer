@@ -30,8 +30,8 @@ fail() { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
 skip() { echo "  SKIP: $*"; SKIP=$((SKIP+1)); }
 
 cleanup() {
-    pkill -x WiFiDriverDemo 2>/dev/null || true
-    pkill -x WiFiDriverTxDem 2>/dev/null || true
+    pkill -x rxdemo 2>/dev/null || true
+    pkill -x txdemo 2>/dev/null || true
     true
 }
 trap cleanup EXIT INT TERM
@@ -41,7 +41,7 @@ if ! plugged "$RX_PID" "$RX_VID"; then echo "SKIP: 8814AU (RX) not plugged"; exi
 if ! plugged "$TX_PID" "$TX_VID"; then echo "SKIP: 8812AU (TX) not plugged"; exit 0; fi
 
 echo "== building =="
-cmake --build "$ROOT/build" -j --target WiFiDriverDemo WiFiDriverTxDemo >/dev/null || exit 1
+cmake --build "$ROOT/build" -j --target rxdemo txdemo >/dev/null || exit 1
 
 # Median per-chain RSSI (chains A B C D) over a run's <devourer-rxpath> lines,
 # restricted to a channel by cross-referencing the sweep's dwell markers is
@@ -68,12 +68,12 @@ PYEOF
 run_rx() { # $1=mask $2=outfile $3=extra_env
     sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_VID="$TX_VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_TX_RATE=MCS3 DEVOURER_TX_GAP_US=1500 \
-        timeout 40 "$ROOT/build/WiFiDriverTxDemo" >/dev/null 2>&1 &
+        timeout 40 "$ROOT/build/txdemo" >/dev/null 2>&1 &
     local txpid=$!
     sleep 4
     sudo -n env DEVOURER_PID="$RX_PID" DEVOURER_VID="$RX_VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_RX_ALLPATHS=1 DEVOURER_RX_PATHS="$1" $3 \
-        timeout 28 "$ROOT/build/WiFiDriverDemo" >"$2" 2>&1 || true
+        timeout 28 "$ROOT/build/rxdemo" >"$2" 2>&1 || true
     kill "$txpid" 2>/dev/null; wait "$txpid" 2>/dev/null
     sleep 2
 }

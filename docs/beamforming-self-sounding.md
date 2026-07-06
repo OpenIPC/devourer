@@ -59,17 +59,17 @@ the rtl88x2bu and rtl88x2cu trees). Entry 0, P_AID 0.
 ```sh
 # beamformee: arm to reply to sounding from the beamformer MAC (no association)
 DEVOURER_VID=0x2357 DEVOURER_PID=0x0120 DEVOURER_CHANNEL=100 \
-  DEVOURER_BF_ARM_BFEE=<beamformer-mac> WiFiDriverDemo
+  DEVOURER_BF_ARM_BFEE=<beamformer-mac> rxdemo
 
 # beamformer: inject an NDPA to the beamformee, arm the sounding engine
 DEVOURER_PID=0x8812 DEVOURER_CHANNEL=100 DEVOURER_TX_RATE=VHT2SS_MCS0 \
   DEVOURER_TX_NDPA_RA=<beamformee-mac> DEVOURER_TX_NDPA=1 \
-  DEVOURER_BF_ARM_SOUNDER=1 WiFiDriverTxDemo
+  DEVOURER_BF_ARM_SOUNDER=1 txdemo
 
 # capture + decode the reports (any monitor RX; the beamformer is addressed but
 # monitor mode is promiscuous). Mode 4 dumps full frames for the decoder.
 DEVOURER_PID=0x8813 DEVOURER_CHANNEL=100 DEVOURER_BF_DETECT_REPORT=4 \
-  WiFiDriverDemo | tools/bf_report_decode.py
+  rxdemo | tools/bf_report_decode.py
 
 # single-radio beamformer: the report is addressed TO the sounder, so one
 # adapter can sound and capture its own reports — DEVOURER_TX_WITH_RX=thread
@@ -82,7 +82,7 @@ DEVOURER_PID=0x8813 DEVOURER_CHANNEL=100 DEVOURER_BF_DETECT_REPORT=4 \
 DEVOURER_PID=0x8812 DEVOURER_CHANNEL=100 DEVOURER_TX_RATE=VHT2SS_MCS0 \
   DEVOURER_TX_NDPA_RA=<beamformee-mac> DEVOURER_TX_NDPA=1 \
   DEVOURER_BF_ARM_SOUNDER=1 DEVOURER_TX_WITH_RX=thread \
-  DEVOURER_BF_DETECT_REPORT=4 WiFiDriverTxDemo | tools/bf_report_decode.py
+  DEVOURER_BF_DETECT_REPORT=4 txdemo | tools/bf_report_decode.py
 ```
 
 Gotchas that cost time during bring-up:

@@ -20,8 +20,8 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
-TXDEMO="$ROOT/build/WiFiDriverTxDemo"
-RXDEMO="$ROOT/build/WiFiDriverDemo"
+TXDEMO="$ROOT/build/txdemo"
+RXDEMO="$ROOT/build/rxdemo"
 LOC="$HERE/rx_tone_localize.py"
 
 CHANNEL=100
@@ -53,7 +53,7 @@ done
 mkdir -p "$OUT"
 
 cleanup() {
-  for c in WiFiDriverTxDem WiFiDriverDemo; do pkill -x "$c" 2>/dev/null || true; done
+  for c in txdemo rxdemo; do pkill -x "$c" 2>/dev/null || true; done
   wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM

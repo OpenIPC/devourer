@@ -9,8 +9,8 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RX_BIN="$ROOT/build/WiFiDriverDemo"
-TX_BIN="$ROOT/build/WiFiDriverTxDemo"
+RX_BIN="$ROOT/build/rxdemo"
+TX_BIN="$ROOT/build/txdemo"
 DWELL=14            # seconds each RX cell listens
 TX_PID="${1:?TX pid, e.g. 0x8812}"
 CH="${2:?channel, e.g. 6}"
@@ -20,8 +20,8 @@ CANONICAL_SA_HIT="devourer-tx-hit"
 TX_PROC=""
 cleanup() {
   [ -n "$TX_PROC" ] && kill "$TX_PROC" 2>/dev/null
-  pkill -f "WiFiDriverTxDemo" 2>/dev/null
-  pkill -f "WiFiDriverDemo" 2>/dev/null
+  pkill -f "txdemo" 2>/dev/null
+  pkill -f "rxdemo" 2>/dev/null
   wait 2>/dev/null
 }
 trap cleanup EXIT INT TERM
@@ -54,6 +54,6 @@ for RX_PID in "$@"; do
   printf "  RX %-8s ch %-3s -> %s\n" "$RX_PID" "$CH" "$verdict"
 
   kill "$TX_PROC" 2>/dev/null; TX_PROC=""
-  pkill -f "WiFiDriverTxDemo" 2>/dev/null
+  pkill -f "txdemo" 2>/dev/null
   sleep 2
 done

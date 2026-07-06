@@ -2,7 +2,7 @@
 # Fade-SLA validation — does devourer's adaptive controller hold the delivery SLA
 # under time-correlated fading?
 #
-# Runs the closed loop (8812 VTX <-> 8821 VRX, both StreamDuplexDemo driven by
+# Runs the closed loop (8812 VTX <-> 8821 VRX, both duplex driven by
 # adaptive_link.py) TWICE under a B210 interferer at the SAME gain: once STATIC,
 # once FADING (--fade-coherence). It then compares the VRX's post-seq delivery
 # (the `deliv=` field of <adaptive-vrx>). The hypothesis, from the linklab sim, is
@@ -31,7 +31,7 @@ declare -A VTX_LOG=( [static]=/tmp/fade_sla_vtx_static.log [fading]=/tmp/fade_sl
 INTF_LOG=/tmp/fade_sla_intf.log
 
 KILL(){ sudo pkill -9 -f adaptive_link 2>/dev/null
-        sudo pkill -9 StreamDuplexD 2>/dev/null
+        sudo pkill -9 duplex 2>/dev/null
         sudo pkill -9 -f sdr_interferer 2>/dev/null; }
 trap KILL EXIT
 
@@ -55,11 +55,11 @@ run_phase(){               # $1=label  $2..=extra sdr_interferer args
   sleep 8
   sudo env DEVOURER_VID=$VRX_VID DEVOURER_PID=$VRX_PID PYTHONPATH="$PREC" \
        python3 "$PREC/adaptive_link.py" --role vrx --pid $VRX_PID --channel $CH \
-       --vtx-id $VTX_ID --duplex "$ROOT/build/StreamDuplexDemo" >"${VRX_LOG[$label]}" 2>&1 &
+       --vtx-id $VTX_ID --duplex "$ROOT/build/duplex" >"${VRX_LOG[$label]}" 2>&1 &
   sleep 4
   sudo env DEVOURER_VID=$VTX_VID DEVOURER_PID=$VTX_PID PYTHONPATH="$PREC" \
        python3 "$PREC/adaptive_link.py" --role vtx --pid $VTX_PID --channel $CH \
-       --vtx-id $VTX_ID --video "$VIDEO" --duplex "$ROOT/build/StreamDuplexDemo" \
+       --vtx-id $VTX_ID --video "$VIDEO" --duplex "$ROOT/build/duplex" \
        >"${VTX_LOG[$label]}" 2>&1 &
   # wait for the session to establish (rendezvous) before the measurement window
   for _ in $(seq 1 20); do

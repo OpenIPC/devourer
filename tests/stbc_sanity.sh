@@ -28,13 +28,13 @@ RXLOG="$(mktemp -t devourer-stbc-rx.XXXXXX.log)"
 TXLOG="$(mktemp -t devourer-stbc-tx.XXXXXX.log)"
 
 cleanup() {
-    for comm in WiFiDriverDemo WiFiDriverTxDem; do pkill -x "$comm" 2>/dev/null || true; done
+    for comm in rxdemo txdemo; do pkill -x "$comm" 2>/dev/null || true; done
     rm -f "$RXLOG" "$TXLOG" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
 echo "== building =="; cmake --build "$ROOT/build" -j >/dev/null
-DEMO="$ROOT/build/WiFiDriverDemo"; TXDEMO="$ROOT/build/WiFiDriverTxDemo"
+DEMO="$ROOT/build/rxdemo"; TXDEMO="$ROOT/build/txdemo"
 
 # Preflight: both chips present.
 lsusb | grep -qi "0bda:8812" || { echo "no RTL8812AU (RX) present — plug it into this host" >&2; exit 1; }

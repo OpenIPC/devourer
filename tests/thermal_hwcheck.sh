@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Hardware smoke-test for the thermal monitor probe.
 #
-# Runs WiFiDriverTxDemo against each plugged Jaguar adapter for a few seconds
+# Runs txdemo against each plugged Jaguar adapter for a few seconds
 # with DEVOURER_THERMAL_POLL_MS enabled, and prints the <devourer-thermal>
 # lines it emits. Read-only w.r.t. the probe — this just confirms the thermal
 # meter reads back a live, plausible value per chip.
@@ -10,7 +10,7 @@
 set -u
 
 BUILD_DIR="$(cd "$(dirname "$0")/.." && pwd)/build"
-TXDEMO="$BUILD_DIR/WiFiDriverTxDemo"
+TXDEMO="$BUILD_DIR/txdemo"
 RUN_SECS=6
 POLL_MS=500          # ~ every 250 TX frames inline
 WARN_DELTA=15
@@ -23,7 +23,7 @@ cleanup() {
     kill -KILL "$CHILD_PID" 2>/dev/null
   fi
   # Backstop: reap any stray demo by exact comm name.
-  pkill -KILL -x WiFiDriverTxDem 2>/dev/null
+  pkill -KILL -x txdemo 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 

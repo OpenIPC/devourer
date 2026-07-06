@@ -17,7 +17,7 @@ OUT=/tmp/eu_regdiff
 mkdir -p $OUT
 
 cleanup(){
-  sudo pkill -9 -x WiFiDriverTxDem 2>/dev/null
+  sudo pkill -9 -x txdemo 2>/dev/null
   sudo pkill -9 -f kernel_tx_inject 2>/dev/null
   sudo pkill -9 -f "cat /sys/kernel/debug/usb/usbmon" 2>/dev/null
 }
@@ -54,7 +54,7 @@ sudo timeout 20 cat /sys/kernel/debug/usb/usbmon/$BUS > $OUT/d_raw.txt &
 CAP=$!
 sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0xa81a DEVOURER_CHANNEL=36 \
   DEVOURER_TX_RATE=MCS7 DEVOURER_TX_GAP_US=2000 \
-  stdbuf -oL timeout -k 3 8 build/WiFiDriverTxDemo >/dev/null 2>&1 || true
+  stdbuf -oL timeout -k 3 8 build/txdemo >/dev/null 2>&1 || true
 sudo kill $CAP 2>/dev/null; wait $CAP 2>/dev/null
 
 echo ""

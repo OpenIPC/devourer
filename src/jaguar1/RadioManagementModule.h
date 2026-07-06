@@ -102,7 +102,7 @@ class RadioManagementModule {
    * value instead of the EFUSE-derived per-rate table (or the `power`
    * fallback). -1 = disabled (normal behaviour). Set via SetTxPowerOverride
    * and re-applied on the next channel-set; used by the thermal-vs-gain
-   * ramp in WiFiDriverTxDemo. Atomic so GetTxPowerState's cached snapshot is
+   * ramp in txdemo. Atomic so GetTxPowerState's cached snapshot is
    * readable from any thread (setters remain control-plane-thread calls). */
   std::atomic<int> txpwr_override_{-1};
   /* Runtime TX-power offset in TXAGC index steps (0.5 dB each), folded onto

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Stream RX driver — decodes stream frames out of WiFiDriverDemo's stdout.
+"""Stream RX driver — decodes stream frames out of rxdemo's stdout.
 
-Reads WiFiDriverDemo's stdout on this process's stdin, picks up the
+Reads rxdemo's stdout on this process's stdin, picks up the
 `<devourer-stream>` lines emitted when DEVOURER_STREAM_OUT=1 is set, decodes
 each body via `stream.decode_body` (optionally with a shape constraint),
 re-orders by sequence number, and writes the decoded payload bytes to stdout.
@@ -9,7 +9,7 @@ Gaps and duplicates are logged to stderr.
 
 Usage:
     DEVOURER_PID=0x8813 DEVOURER_CHANNEL=6 DEVOURER_STREAM_OUT=1 \
-        ./build/WiFiDriverDemo | \
+        ./build/rxdemo | \
         DEVOURER_STREAM_SHAPE='0:+1,10:-1' \
         python3 tools/precoder/stream_rx.py > received.bin
 

@@ -7,7 +7,7 @@ hypothesis is that under motion each chain's fading is time-varying and the best
 chain keeps changing, so a *fixed* single antenna repeatedly falls into nulls it
 can't escape while MRC fills them. This tool measures that.
 
-It consumes a capture from `WiFiDriverDemo` run with the RX-path *toggle*:
+It consumes a capture from `rxdemo` run with the RX-path *toggle*:
 
     DEVOURER_RX_PATHS=0x22:0xFF@300   # alternate chain-B-only and all-4 every 300ms
     DEVOURER_RX_ALLPATHS=1            # emit per-chain <devourer-rxpath> lines

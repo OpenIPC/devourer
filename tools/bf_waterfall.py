@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Live per-subcarrier waterfall from beamforming self-sounding reports.
 
-Pipe WiFiDriverDemo's raw report stream into this for a scrolling, truecolor
+Pipe rxdemo's raw report stream into this for a scrolling, truecolor
 per-tone spectrogram in the terminal — the channel across frequency (X) and
 time (Y):
 
-    WiFiDriverDemo ... DEVOURER_BF_DETECT_REPORT=4 | tools/bf_waterfall.py
+    rxdemo ... DEVOURER_BF_DETECT_REPORT=4 | tools/bf_waterfall.py
 
 - MU reports (DEVOURER_BF_ARM_BFEE_MU=1): each row is the per-subcarrier SNR;
   the colour ramp doubles as the modulation a rate-adaptive link would pick

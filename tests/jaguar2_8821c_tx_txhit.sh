@@ -7,8 +7,8 @@
 # Usage: sudo tests/jaguar2_8821c_tx_txhit.sh [channel] [seconds]
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-RXDEMO="$HERE/../build/WiFiDriverDemo"
-TXDEMO="$HERE/../build/WiFiDriverTxDemo"
+RXDEMO="$HERE/../build/rxdemo"
+TXDEMO="$HERE/../build/txdemo"
 CH=${1:-1} SECS=${2:-15}
 TX_VID=0x0bda TX_PID=0xc811   # CF-811AC (8821C) transmitter
 RX_VID=0x2357 RX_PID=0x0120   # T2U-Plus 8821AU (Jaguar1) receiver
@@ -18,8 +18,8 @@ restored=0
 cleanup() {
     [ "$restored" = 1 ] && return
     restored=1
-    pkill -f WiFiDriverTxDemo 2>/dev/null
-    pkill -f WiFiDriverDemo 2>/dev/null
+    pkill -f txdemo 2>/dev/null
+    pkill -f rxdemo 2>/dev/null
     sleep 1
     modprobe rtw88_8821cu rtw88_8821au 2>/dev/null
     echo "=== kernel drivers restored ==="

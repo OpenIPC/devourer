@@ -62,7 +62,7 @@ multipath-desense regime.
    and cross-polarised antennas.
 3. **Watch EVM, not SNR.** A strong RSSI with poor EVM is the saturation
    fingerprint. `DEVOURER_RX_ENERGY_MS=500 DEVOURER_LINKHEALTH=1` on
-   `WiFiDriverDemo` classifies each window and says so in plain language:
+   `rxdemo` classifies each window and says so in plain language:
 
    ```
    <devourer-linkhealth>verdict=SATURATED rssi_dbm=-33 snr_db=19.5 evm_db=-22.5

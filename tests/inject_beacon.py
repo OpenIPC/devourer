@@ -2,8 +2,8 @@
 """Inject the canonical devourer TX-validation beacon on a kernel-driver
 monitor interface.
 
-The frame mirrors txdemo/main.cpp's hardcoded beacon: a probe request with
-SA = 57:42:75:05:d6:00. WiFiDriverDemo and WiFiDriverTxDemo both grep for
+The frame mirrors examples/tx/main.cpp's hardcoded beacon: a probe request with
+SA = 57:42:75:05:d6:00. rxdemo and txdemo both grep for
 this SA on RX (the `<devourer-tx-hit>` matcher) so the same beacon works
 as the TX source whether the RX side is devourer or tcpdump.
 
@@ -21,8 +21,8 @@ import time
 
 from scapy.all import RadioTap, Dot11, Raw, sendp
 
-# Source MAC matches the canonical beacon SA in txdemo/main.cpp and the
-# `<devourer-tx-hit>` matcher in demo/main.cpp. Don't change without
+# Source MAC matches the canonical beacon SA in examples/tx/main.cpp and the
+# `<devourer-tx-hit>` matcher in examples/rx/main.cpp. Don't change without
 # updating both sides.
 CANONICAL_SA = "57:42:75:05:d6:00"
 
@@ -41,7 +41,7 @@ def _build_radiotap_mcs(*, mcs: int, ldpc: bool, stbc: int, bandwidth: int,
     its `MCS` post-field plumbing is brittle across versions. Easier to emit
     the bytes ourselves and prepend them as Raw. Layout: u8 version, u8 pad,
     u16 it_len (LE), u32 it_present (LE), u16 TX Flags, u8 MCS known, u8 MCS
-    flags, u8 MCS index. Total 13 bytes — matches txdemo/main.cpp's header.
+    flags, u8 MCS index. Total 13 bytes — matches examples/tx/main.cpp's header.
     """
     known = 0x37  # bandwidth | mcs_idx | gi | fec_type | stbc known
     flags = 0

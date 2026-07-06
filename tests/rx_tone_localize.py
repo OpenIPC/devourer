@@ -10,7 +10,7 @@ notch in the per-tone SNR and/or a spike in per-tone psi variance, which this
 script thresholds (robust median/MAD) to flag and locate the interferer to a
 subcarrier group (~312 kHz * Ng) — far finer than a channel.
 
-Input: `<devourer-bf-report-raw>HEX` lines (WiFiDriverDemo DEVOURER_BF_DETECT_
+Input: `<devourer-bf-report-raw>HEX` lines (rxdemo DEVOURER_BF_DETECT_
 REPORT=4) on stdin or a file. Reuses tools/bf_report_decode.py's analyzer.
 
 Two modes:
@@ -22,7 +22,7 @@ Two modes:
             More sensitive; needs a toggled interferer.
 
 Usage:
-  WiFiDriverDemo ... DEVOURER_BF_DETECT_REPORT=4 | tests/rx_tone_localize.py \
+  rxdemo ... DEVOURER_BF_DETECT_REPORT=4 | tests/rx_tone_localize.py \
       --channel 100 --bw 20
   tests/rx_tone_localize.py interferer.txt --baseline clean.txt --channel 100
 """

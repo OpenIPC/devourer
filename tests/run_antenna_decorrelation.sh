@@ -5,16 +5,16 @@
 # multi-chain Realtek adapter, against a *controlled* transmitter: devourer's RX
 # demo only surfaces per-chain metrics for the canonical beacon SA
 # (57:42:75:05:d6:00), so a second adapter must be injecting that beacon
-# (WiFiDriverTxDemo) on the same channel — the standard two-adapter bench setup.
+# (txdemo) on the same channel — the standard two-adapter bench setup.
 #
-# It builds devourer, runs WiFiDriverDemo (RX) with DEVOURER_RX_ALLPATHS=1 for a
+# It builds devourer, runs rxdemo (RX) with DEVOURER_RX_ALLPATHS=1 for a
 # fixed dwell capturing the <devourer-rxpath> lines, then feeds them to
 # antenna_decorrelation.py. Optionally starts the TX beacon too (set TX_PID).
 #
 # Env knobs (all optional):
 #   CHANNEL=6         monitor channel for both RX and (if started) TX
 #   RX_PID=0xNNNN     restrict the RX demo to one adapter PID (e.g. 0x8813 8814AU)
-#   TX_PID=0xNNNN     if set, also start WiFiDriverTxDemo on this PID as the source
+#   TX_PID=0xNNNN     if set, also start txdemo on this PID as the source
 #   DURATION=30       capture seconds
 #   METRIC=rssi       rssi | snr | evm  (forwarded to the analyser)
 #
@@ -37,7 +37,7 @@ CAP="$(mktemp -t devourer-decorr.XXXXXX.log)"
 
 cleanup() {
     # Exact-comm kills only — never a broad pkill pattern.
-    for comm in WiFiDriverDemo WiFiDriverTxDem; do
+    for comm in rxdemo txdemo; do
         pkill -x "$comm" 2>/dev/null || true
     done
     rm -f "$CAP" "${TXLOG:-}" 2>/dev/null || true
@@ -50,9 +50,9 @@ if [ ! -d "$ROOT/build" ]; then
 fi
 cmake --build "$ROOT/build" -j >/dev/null
 
-DEMO="$ROOT/build/WiFiDriverDemo"
-TXDEMO="$ROOT/build/WiFiDriverTxDemo"
-[ -x "$DEMO" ] || { echo "WiFiDriverDemo not built at $DEMO" >&2; exit 1; }
+DEMO="$ROOT/build/rxdemo"
+TXDEMO="$ROOT/build/txdemo"
+[ -x "$DEMO" ] || { echo "rxdemo not built at $DEMO" >&2; exit 1; }
 
 # uv venv for the analyser (numpy only; no system packages needed).
 if ! command -v uv >/dev/null 2>&1; then
@@ -64,7 +64,7 @@ uv pip install --python "$HERE/.venv/bin/python" -q numpy >/dev/null
 PY="$HERE/.venv/bin/python"
 
 if [ -n "${TX_PID:-}" ]; then
-    [ -x "$TXDEMO" ] || { echo "WiFiDriverTxDemo not built" >&2; exit 1; }
+    [ -x "$TXDEMO" ] || { echo "txdemo not built" >&2; exit 1; }
     echo "== starting TX beacon on PID $TX_PID ch$CHANNEL =="
     TXLOG="$(mktemp -t devourer-txbeacon.XXXXXX.log)"
     stdbuf -oL -eL env DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$CHANNEL" "$TXDEMO" >"$TXLOG" 2>&1 &

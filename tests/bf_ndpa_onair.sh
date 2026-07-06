@@ -15,7 +15,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
-TXDEMO="$ROOT/build/WiFiDriverTxDemo"
+TXDEMO="$ROOT/build/txdemo"
 # UHD python is a system package (the tests/.venv predates python 3.14).
 PY="/usr/bin/python3"
 PROBE="$HERE/bf_ndpa_probe.py"
@@ -25,12 +25,12 @@ FREQ=5500e6
 RATE=10e6
 DUR=8
 
-[ -x "$TXDEMO" ] || { echo "build WiFiDriverTxDemo first ($TXDEMO)"; exit 1; }
+[ -x "$TXDEMO" ] || { echo "build txdemo first ($TXDEMO)"; exit 1; }
 [ -x "$PY" ] || { echo "missing venv python $PY"; exit 1; }
 mkdir -p "$OUT"
 
 cleanup() {
-    pkill -x WiFiDriverTxDem 2>/dev/null
+    pkill -x txdemo 2>/dev/null
     pkill -f "bf_ndpa_probe.py" 2>/dev/null
     wait 2>/dev/null
 }

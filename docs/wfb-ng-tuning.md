@@ -68,7 +68,7 @@ is ~saturated because the low tail becomes signal.
 git clone https://github.com/svpcom/rtl8812au && cd rtl8812au && make && \
   sudo insmod 88XXau_wfb.ko rtw_tx_pwr_idx_override=30
 git clone https://github.com/svpcom/wfb-ng && cd wfb-ng && make
-# devourer side: build/WiFiDriverTxDemo with DEVOURER_TX_RATE=MCS7/20 + DEVOURER_TX_PAYLOAD_BYTES + DEVOURER_TX_GAP_US=0
+# devourer side: build/txdemo with DEVOURER_TX_RATE=MCS7/20 + DEVOURER_TX_PAYLOAD_BYTES + DEVOURER_TX_GAP_US=0
 # measure (ceiling-free) while either side floods a clean 5 GHz channel:
 sudo python3 tests/sdr_duty.py --freq 5745e6 --secs 4 --mcs 7 --bw 20 --noise-db -62
 ```

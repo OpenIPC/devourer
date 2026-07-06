@@ -12,8 +12,8 @@ and the 1T1R + BT **RTL8811CU** (chip **8821C**),
 the **Jaguar3** parts — `rtl8822c` (RTL8812CU / RTL8822CU) and `rtl8822e`
 (RTL8812EU / RTL8822EU) — which additionally reach **5/10 MHz narrowband**
 operation the Jaguar-1 silicon physically can't. No kernel module, no
-`rtl8812au` DKMS tree — just a C++20 static library (`WiFiDriver`) plus two
-demo executables for RX and TX. It is the OpenIPC project's driver of choice
+`rtl8812au` DKMS tree — just a C++20 static library (`devourer`) plus example
+executables under `examples/`. It is the OpenIPC project's driver of choice
 for long-range video links built on top of cheap Realtek 11ac USB radios.
 
 ## Hardware landscape
@@ -116,21 +116,23 @@ root.
 
 ### Build artifacts
 
-- `WiFiDriver` — static library; link this from your application.
-- `WiFiDriverDemo` — RX example built from `demo/main.cpp`. Walks every
+- `devourer` — static library; link this from your application.
+- `rxdemo` — RX example built from `examples/rx/main.cpp`. Walks every
   Realtek device under VID `0bda` and tries to open it; sets monitor mode
   on channel 36 / 20 MHz, runs the read loop.
-- `WiFiDriverTxDemo` — TX example built from `txdemo/main.cpp`. Opens the
+- `txdemo` — TX example built from `examples/tx/main.cpp`. Opens the
   device via `libusb_open_device_with_vid_pid` by default, or wraps a USB
   fd passed as `argv[1]` (the Termux-on-Android pattern using
   `libusb_wrap_sys_device`). Forks RX into a child, TX-loops a hardcoded
   beacon in the parent.
+- `streamtx` / `duplex` / `svctx` / `precoder` / `txpower` / `sense` —
+  specialised examples, one directory each under `examples/`.
 
 ### Selecting which chips to build
 
 All chips are compiled in by default. Turn off the ones you don't need to
 drop their firmware blobs and generated PHY tables and shrink the binary —
-an 8812AU-only `WiFiDriverDemo` is ~1.0 MB versus ~2.6 MB with everything on.
+an 8812AU-only `rxdemo` is ~1.0 MB versus ~2.6 MB with everything on.
 
 | CMake option | default | chips |
 |---|---|---|
@@ -189,7 +191,7 @@ Common to both demos:
   to DEBUG (produces ~7 MB per 15 s, can fill `/tmp` mid-capture, and slows
   init measurably). `DEVOURER_USB_QUIET` is accepted as a no-op.
 
-`WiFiDriverDemo` (RX)-only knobs:
+`rxdemo` (RX)-only knobs:
 
 - `DEVOURER_RX_ENERGY_MS=N` — frame-free RX energy / interferer-detection
   telemetry (the read side of `DEVOURER_CW_TONE`). Every `N` ms emit a
@@ -230,7 +232,7 @@ Common to both demos:
   coarse per-bin H(f) map of the actual link, rendered by
   `tests/sounding_map.py` (see `docs/rx-spectrum-sensing.md`).
 
-`WiFiDriverTxDemo`-only knobs:
+`txdemo`-only knobs:
 
 - `DEVOURER_TX_RATE=<rate>[/<bw>][/SGI][/LDPC][/STBC]` — the on-air TX mode,
   parsed into a `devourer::TxMode` and applied via `RtlJaguarDevice::SetTxMode`.
@@ -267,7 +269,7 @@ documented in [`docs/wfb-ng-tuning.md`](docs/wfb-ng-tuning.md).
 The caller owns libusb: you must `libusb_init`, open the device, detach any
 kernel driver, and `libusb_claim_interface(handle, 0)` **before** handing
 the handle to `WiFiDriver::CreateRtlDevice`. The factory is intentionally
-thin — see `demo/main.cpp` for the full boilerplate. A minimal RX path:
+thin — see `examples/rx/main.cpp` for the full boilerplate. A minimal RX path:
 
 ```cpp
 auto logger = std::make_shared<Logger>();
@@ -366,8 +368,16 @@ src/      Driver implementation
           jaguar3/               Jaguar3 (rtl8822c / rtl8822e) HAL — RtlJaguar3Device,
                                  HalMAC firmware download, halrf calibration, 5/10 MHz
                                  narrowband, per-generation PHY/RF tables + TX/RX descriptors
-demo/     RX example
-txdemo/   TX example (Android / Termux pattern)
+examples/ Example executables (one directory per demo)
+          rx/        RX example (rxdemo)
+          tx/        TX example (txdemo; Android / Termux pattern)
+          streamtx/  stdin-driven TX (streamtx)
+          duplex/    stdin TX + RX duplex (duplex)
+          svctx/     HEVC SVC-T UEP injector (svctx)
+          precoder/  OFDM subcarrier precoding PoC (precoder)
+          txpower/   runtime TX-power API reference (txpower)
+          sense/     beamforming motion/presence sensor (sense)
+          common/    stream_stdin.h shared framing + selftest
 ```
 
 Each chip generation can be compiled out to shrink the binary — see

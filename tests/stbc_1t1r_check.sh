@@ -25,12 +25,12 @@ pass() { echo "  PASS: $*"; PASS=$((PASS+1)); }
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL+1)); }
 skip() { echo "  SKIP: $*"; SKIP=$((SKIP+1)); }
 
-cleanup() { pkill -x WiFiDriverTxDem 2>/dev/null||true; pkill -x WiFiDriverDemo 2>/dev/null||true; true; }
+cleanup() { pkill -x txdemo 2>/dev/null||true; pkill -x rxdemo 2>/dev/null||true; true; }
 trap cleanup EXIT INT TERM
 plugged() { lsusb -d "$(printf '%04x:%04x' "$2" "$1")" >/dev/null 2>&1; }
 
 echo "== building =="
-cmake --build "$ROOT/build" -j --target WiFiDriverTxDemo WiFiDriverDemo >/dev/null || exit 1
+cmake --build "$ROOT/build" -j --target txdemo rxdemo >/dev/null || exit 1
 
 # DUT table: pid vid n_ss(1|2) ground_pid ground_vid
 DUTS=(
@@ -48,14 +48,14 @@ for dut in "${DUTS[@]}"; do
     echo "== DUT $PID (${NSS}T${NSS}R), ground $GPID =="
     : >"$OUT/$tag-g.log"
     sudo -n env DEVOURER_PID="$GPID" DEVOURER_VID="$GVID" DEVOURER_CHANNEL="$CH" \
-        stdbuf -oL timeout 45 "$ROOT/build/WiFiDriverDemo" 2>/dev/null \
+        stdbuf -oL timeout 45 "$ROOT/build/rxdemo" 2>/dev/null \
         | grep --line-buffered "tx-hit" >"$OUT/$tag-g.log" &
     GJ=$!
     sleep 10
     sudo -n env DEVOURER_PID="$PID" DEVOURER_VID="$VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_TX_RATE=MCS1/STBC DEVOURER_TX_GAP_US=2000 \
-        timeout 18 "$ROOT/build/WiFiDriverTxDemo" >"$OUT/$tag-tx.log" 2>&1 || true
-    sudo -n pkill -x WiFiDriverDemo 2>/dev/null; wait "$GJ" 2>/dev/null
+        timeout 18 "$ROOT/build/txdemo" >"$OUT/$tag-tx.log" 2>&1 || true
+    sudo -n pkill -x rxdemo 2>/dev/null; wait "$GJ" 2>/dev/null
     sleep 2
 
     warned=$(grep -c "dropping the STBC flag" "$OUT/$tag-tx.log")

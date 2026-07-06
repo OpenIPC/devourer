@@ -22,8 +22,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-DEMO_RX="$ROOT/build/WiFiDriverDemo"
-DEMO_TX="$ROOT/build/WiFiDriverTxDemo"
+DEMO_RX="$ROOT/build/rxdemo"
+DEMO_TX="$ROOT/build/txdemo"
 
 SENSOR_VID=0x0bda SENSOR_PID="" CHANNELS="1,6,11" DWELL_MS=300 ROUNDS=3
 NB_BW="" OUT=/tmp/devourer-rx-sweep
@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$SENSOR_PID" ] || { echo "need --sensor-pid" >&2; exit 2; }
 
-cleanup() { for c in WiFiDriverDemo WiFiDriverTxDem; do pkill -x "$c" 2>/dev/null || true; done; }
+cleanup() { for c in rxdemo txdemo; do pkill -x "$c" 2>/dev/null || true; done; }
 trap cleanup EXIT INT TERM
 
 echo "== building =="

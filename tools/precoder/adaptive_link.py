@@ -12,7 +12,7 @@ two roles:
     knobs (TX power, per-layer MCS ladder, FEC overhead), and runs the failsafe +
     discovery state machine.
 
-The radio I/O (a subprocess StreamDuplexDemo) is abstracted; `selftest()` wires a
+The radio I/O (a subprocess duplex) is abstracted; `selftest()` wires a
 VTX and a VRX through a simulated channel (link_model) so the whole closed loop is
 deterministically testable without hardware. The CLI (`--role vtx|vrx`) wires the
 real duplex binary; that path is exercised on-air by tests/adaptive_onair.sh.
@@ -248,7 +248,7 @@ def selftest(verbose: bool = False):
 
 
 # --------------------------------------------------------------------------- #
-# Live I/O: drive a real StreamDuplexDemo subprocess (exercised on-air by
+# Live I/O: drive a real duplex subprocess (exercised on-air by
 # tests/adaptive_onair.sh). The classes above hold all the policy; this is plumbing.
 # --------------------------------------------------------------------------- #
 import re
@@ -401,7 +401,7 @@ def main():
     ap.add_argument("--vtx-id", type=lambda x: int(x, 0), default=0xABCD)
     ap.add_argument("--video", help="VTX video source file (length-agnostic bytes)")
     ap.add_argument("--duplex", default=os.path.normpath(os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "..", "build", "StreamDuplexDemo")))
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "build", "duplex")))
     ap.add_argument("--link-calib"); ap.add_argument("--energy-calib")
     ap.add_argument("--feedback-ms", type=int, default=100,
                     help="VRX RCF feedback period (ms). Higher = fewer half-duplex "

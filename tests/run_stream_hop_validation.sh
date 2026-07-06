@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Integrated on-air check: StreamTxDemo (the precoder stream vehicle) hopping
+# Integrated on-air check: streamtx (the precoder stream vehicle) hopping
 # per-packet across a channel set via FastRetune, confirmed by the B210 seeing
 # frames on every channel. Proves the production TX path — not just the
-# WiFiDriverTxDemo beacon loop — hops correctly.
+# txdemo beacon loop — hops correctly.
 #
 #   ./tests/run_stream_hop_validation.sh
 #   HOP_CHANNELS=1,6,11 RECORDS=4000 ./tests/run_stream_hop_validation.sh
@@ -28,13 +28,13 @@ mkdir -p "$OUT"
 STREAM="$OUT/stream.bin"; TX_LOG="$OUT/tx.log"; RX_LOG="$OUT/rx.log"
 
 cleanup() {
-    pkill -x StreamTxDemo 2>/dev/null || true
+    pkill -x streamtx 2>/dev/null || true
     pkill -f "tests/hop_rx_probe.py" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-echo "== building StreamTxDemo =="
-cmake --build "$ROOT/build" -j --target StreamTxDemo >/dev/null
+echo "== building streamtx =="
+cmake --build "$ROOT/build" -j --target streamtx >/dev/null
 
 echo "== preparing uv venv =="
 cd "$HERE"
@@ -53,12 +53,12 @@ with open(path, "wb") as f:
         f.write(struct.pack("<I", len(body)) + body)
 PY
 
-echo "== starting hopping StreamTxDemo (RTL8812AU, init ch$INIT_CHANNEL) =="
+echo "== starting hopping streamtx (RTL8812AU, init ch$INIT_CHANNEL) =="
 : >"$TX_LOG"
 sudo --preserve-env \
     env DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$INIT_CHANNEL" \
         DEVOURER_HOP_CHANNELS="$HOP_CHANNELS" DEVOURER_HOP_FAST="$HOP_FAST" \
-    "$ROOT/build/StreamTxDemo" --interval-ms "$INTERVAL_MS" <"$STREAM" \
+    "$ROOT/build/streamtx" --interval-ms "$INTERVAL_MS" <"$STREAM" \
     >"$TX_LOG" 2>&1 &
 TX_PID_PROC=$!
 

@@ -3,9 +3,9 @@
 station's RX telemetry into a margin-vs-lever curve and a recommended operating
 point.
 
-The emitter (WiFiDriverTxDemo with DEVOURER_CONT_TX + a DEVOURER_TX_PWR ramp)
+The emitter (txdemo with DEVOURER_CONT_TX + a DEVOURER_TX_PWR ramp)
 prints one `<devourer-txpwr>index=N` marker per step; the ground station
-(WiFiDriverDemo with DEVOURER_RX_ENERGY_MS) prints `<devourer-energy>` (per-frame
+(rxdemo with DEVOURER_RX_ENERGY_MS) prints `<devourer-energy>` (per-frame
 SNR aggregate) and `<devourer-nhm>` (frame-free power histogram) lines. Both are
 captured with a host-side arrival timestamp (prefixed `<epoch> `), so this aligns
 them by wall-clock — no cross-process clock sync — binning each ground sample

@@ -1,5 +1,5 @@
 """Fused-FEC link core — RS + sub-block-integrity (SBI) sender/receiver that
-runs over the devourer chip↔chip stream link (StreamTxDemo / WiFiDriverDemo).
+runs over the devourer chip↔chip stream link (streamtx / rxdemo).
 
 This is the chip-path (scenario 1) sibling of the SDR capstone
 (`~/git/sdr2wifi/fused_fec_rung1.py`): the same SBI-over-RS framing, but the
@@ -16,7 +16,7 @@ directly:
   * baseline — drops any crc_err frame (today's behaviour),
   * sbi      — keeps it and salvages the CRC-valid sub-blocks.
 
-CLI wrappers: `fused_fec_tx.py` (bytes→bodies→StreamTxDemo) and
+CLI wrappers: `fused_fec_tx.py` (bytes→bodies→streamtx) and
 `fused_fec_rx.py` (`<devourer-stream>`→recovered bytes + gain report).
 """
 

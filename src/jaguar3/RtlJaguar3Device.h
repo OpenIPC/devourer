@@ -121,6 +121,14 @@ public:
    * _reg_mu against the coex runtime thread. The read side of the CW tone. */
   RxEnergy GetRxEnergy() override;
 
+  /* dis_cca / EDCCA-disable investigation knob (DEVOURER_DIS_CCA). Writes the
+   * vendor rtw_proc.c dis_cca recipe (MAC BIT_DIS_EDCCA 0x520[15] + EDCCA-mask
+   * countdown 0x524[11], BB 0x1a9c[20]/0x1a14[9:8]/0x1d58[0xff8]); disabled=false
+   * restores the inverse. Sticky across SetMonitorChannel; serialized on _reg_mu
+   * against the coex tick. Measure-first — kept for the swept-AWGN A/B; not on
+   * IRtlDevice until the measurement justifies it. */
+  void SetCcaMode(bool disabled);
+
   bool should_stop = false;
 
 private:
@@ -142,6 +150,10 @@ private:
   std::atomic<bool> _txpwr_sat_high{false};
   /* Bring-up completion: gates the live apply (+ _reg_mu use) in the setters. */
   bool _brought_up = false;
+  /* dis_cca sticky state — re-applied after SetMonitorChannel (the channel set
+   * rewrites the BB CCA registers). Caller holds _reg_mu. */
+  bool _cca_disabled = false;
+  void apply_cca_mode_locked(bool disabled);
   /* TX+RX intent (DEVOURER_TX_WITH_RX at InitWrite / an RX-side Init):
    * consumed as skip_path_b_ofdm_ref by EVERY TXAGC ref write, so no offset
    * churn can ever touch 0x41e8 while RX is alive (the 8822E RX-desense

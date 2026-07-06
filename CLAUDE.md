@@ -86,6 +86,22 @@ the same stream-count bases as HT (vendor parity) so the offset covers VHT
 there; the Jaguar2 TXAGC block and the 8814A's packed port are write-only, so
 their `GetTxPowerState` reports the software shadow (`hw_readback=false`).
 
+**Per-packet TX power (Jaguar2 only).** Distinct from the per-rate TXAGC that
+`SetTxPowerOffsetQdb` shifts, the 8822B/8821C TX descriptor has a `TXPWR_OFSET`
+field (`+0x14[30:28]`) — a hardware LUT applied per-frame *on top of* the
+rate's power at **zero USB cost** (a bitfield in the descriptor `send_packet`
+already builds): `0`=none, `1`=-3, `2`=-7, `3`=-11, `4`=+3, `5`=+6 dB
+(vendor `PHYDM_OFFSET_*`). `send_packet` honours a per-frame radiotap
+`DBM_TX_POWER` field as a dB delta quantized to that LUT
+(`jaguar2::txpkt_pwr_step_for_db`, selftest `tests/txpkt_pwr_selftest.cpp`) —
+the adaptive-link per-packet power knob (wfb-style injection sets it per
+frame); `RtlJaguar2Device::SetTxPacketPowerStep` sets a session default for
+rate-less frames. On-air-confirmed both paths (`tests/txpkt_pwr_ofset_onair.sh`:
+the LUT tracks on-air power ±dB). The classic 8812AU has no such descriptor
+field — its per-packet power *is* per-rate selection (radiotap rate → the
+TXAGC table), which the library already does; Jaguar3's `TXPWR_OFSET_TYPE` is
+a 2-bit variant left unwired.
+
 **RTL8821AU is Jaguar wave 1** (CHIP_8821 = 7, shares the enum with CHIP_8812),
 not Jaguar2 — distinct from the Jaguar2 **RTL8821C** (8811CU/8821CU) despite the
 similar name. The Jaguar2 **8822BU/8812BU** and **8811CU/8821CU** USB parts are

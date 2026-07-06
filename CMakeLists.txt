@@ -352,6 +352,18 @@ target_link_libraries(LinkHealthSelftest PRIVATE WiFiDriver)
 
 add_test(NAME link_health_classify COMMAND LinkHealthSelftest)
 
+# Headless guard for the Jaguar2 per-packet TX-power quantizer
+# (jaguar2::txpkt_pwr_step_for_db) — dB delta -> the descriptor TXPWR_OFSET LUT
+# step. Gated on Jaguar2 being built (the header is behind DEVOURER_HAVE_JAGUAR2).
+if(DEVOURER_JAGUAR2_8822B OR DEVOURER_JAGUAR2_8821C)
+    add_executable(TxPktPwrSelftest
+        tests/txpkt_pwr_selftest.cpp
+    )
+    target_link_libraries(TxPktPwrSelftest PRIVATE WiFiDriver)
+    target_include_directories(TxPktPwrSelftest PRIVATE src)
+    add_test(NAME txpkt_pwr_quant COMMAND TxPktPwrSelftest)
+endif()
+
 # Headless guard for the beamforming-report decoder (src/BfReportDecode.h) — the
 # LSB-first Givens-angle unpacking + per-tone variance behind WiFiSenseDemo. It
 # decodes a real captured VHT MU report and checks the angles against an offline

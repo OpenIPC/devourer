@@ -80,6 +80,18 @@ public:
   devourer::TxPowerState GetTxPowerState() override;
   devourer::ThermalStatus GetThermalStatus() override;
 
+  /* Per-packet TX-power offset — the zero-cost per-frame power trim the
+   * adaptive link wants (distinct from the per-rate TXAGC that
+   * SetTxPowerOffsetQdb shifts). Sets the 8822B/8821C TX-descriptor TXPWR_OFSET
+   * field (a hardware LUT applied on top of the rate's power); no register
+   * write, no channel-set cost. `step` is the raw 3-bit LUT index: 0=none,
+   * 1=-3dB, 2=-7dB, 3=-11dB, 4=+3dB, 5=+6dB. Applied as the default to every
+   * frame lacking a per-packet radiotap DBM_TX_POWER field (which, on an
+   * injected frame, send_packet honours as a per-packet dB delta quantized to
+   * this LUT — the true per-packet path). On-air-confirmed: the LUT tracks
+   * on-air power (tests/txpkt_pwr_ofset_onair.sh). */
+  void SetTxPacketPowerStep(uint8_t step);
+
   /* Realtek MP single-tone (CW carrier) — radiate a bare RF local-oscillator
    * carrier at the tuned channel center. Path A; both Jaguar2 variants, per the
    * vendor hal_mpt_SetSingleToneTx() branches: OFDM/CCK modulators off, RF path A
@@ -119,6 +131,8 @@ private:
    * override -1 = efuse per-rate baseline; offset in 0.5 dB index steps. */
   std::atomic<int> _tx_pwr_override{-1};
   std::atomic<int> _tx_pwr_offset_steps{0};
+  /* Default per-packet TXPWR_OFSET LUT step (0 = none) — see SetTxPacketPowerStep. */
+  std::atomic<uint8_t> _tx_pkt_pwr_step{0};
   /* Bring-up completion: gates the live apply in the TX-power setters. */
   bool _brought_up = false;
   /* Re-program TXAGC from the current knob state at the current channel:

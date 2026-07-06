@@ -113,6 +113,10 @@ public:
   void SetTxPowerIndexOverride(int idx) override;
   bool ReApplyTxPower() override;
   devourer::TxPowerState GetTxPowerState() override;
+  /* Per-chip TX caps (IRtlDevice): n_ss + STBC/LDPC/SGI/bw from the EFUSE
+   * RF-type. STBC needs >=2 chains, so 1T1R cuts (8811AU/8821AU) report
+   * stbc_ok=false and send_packet drops an STBC request. */
+  devourer::TxCaps GetTxCaps() override;
   /* Read a baseband register (debug/diagnostic). Thin passthrough to the
    * radio manager's BB read — handy for confirming a TXAGC write landed. */
   uint32_t ReadBBReg(uint16_t addr, uint32_t mask);

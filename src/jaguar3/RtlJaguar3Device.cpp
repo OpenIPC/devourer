@@ -796,6 +796,10 @@ bool RtlJaguar3Device::ReApplyTxPower() {
   return true;
 }
 
+devourer::TxCaps RtlJaguar3Device::GetTxCaps() {
+  return devourer::tx_caps_for_chains(2); /* 8822C/8822E are 2T2R */
+}
+
 devourer::TxPowerState RtlJaguar3Device::GetTxPowerState() {
   devourer::TxPowerState s;
   s.valid = true;
@@ -976,6 +980,11 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
    * as NDPA so the armed sounding engine (DEVOURER_BF_ARM_SOUNDER, InitWrite)
    * follows each with a hardware NDP. Same knob as the Jaguar-1 path. */
   static const bool ndpa = std::getenv("DEVOURER_TX_NDPA") != nullptr;
+  /* STBC guard (IRtlDevice contract) — 8822C/8822E are 2T2R so this never
+   * fires today, but keeps the invariant uniform across families: never air an
+   * STBC frame the chip can't do. */
+  if (stbc && !GetTxCaps().stbc_ok)
+    stbc = 0;
   std::vector<uint8_t> usb_frame(jaguar3::TXDESC_SIZE_8822C + frame_len, 0);
   jaguar3::fill_data_tx_desc_8822c(
       usb_frame.data(), static_cast<uint16_t>(frame_len),

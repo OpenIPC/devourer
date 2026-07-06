@@ -81,6 +81,7 @@ add_library(WiFiDriver
     src/TxPower.h
     src/TxStats.h
     src/ThermalStatus.h
+    src/TxCaps.h
     src/LinkHealth.cpp
     src/LinkHealth.h
     src/IRtlDevice.h
@@ -352,6 +353,15 @@ add_executable(LinkHealthSelftest
 target_link_libraries(LinkHealthSelftest PRIVATE WiFiDriver)
 
 add_test(NAME link_health_classify COMMAND LinkHealthSelftest)
+
+# Headless guard for the TX-capability derivation (src/TxCaps.h) — the
+# STBC-needs-2-chains rule the send_packet 1T1R guard relies on.
+add_executable(TxCapsSelftest
+    tests/tx_caps_selftest.cpp
+)
+target_link_libraries(TxCapsSelftest PRIVATE WiFiDriver)
+
+add_test(NAME tx_caps_derive COMMAND TxCapsSelftest)
 
 # Headless guard for the Jaguar2 per-packet TX-power quantizer
 # (jaguar2::txpkt_pwr_step_for_db) — dB delta -> the descriptor TXPWR_OFSET LUT

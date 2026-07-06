@@ -12,6 +12,7 @@
 #include <libusb.h>
 
 #include "BfReportDetect.h"
+#include "LinkHealth.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
@@ -141,6 +142,15 @@ static constexpr int kCsiMaxFrames = 8;
 static const uint32_t g_rx_energy_ms = []() -> uint32_t {
   const char *e = std::getenv("DEVOURER_RX_ENERGY_MS");
   return (e && *e) ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0;
+}();
+
+/* DEVOURER_LINKHEALTH=1 — emit a <devourer-linkhealth> verdict line alongside
+ * each <devourer-energy> window (src/LinkHealth.h): the sensor tuple classified
+ * into a plain-language cause + fix. Rides the DEVOURER_RX_ENERGY_MS cadence, so
+ * that must be set too (a linkhealth verdict needs the same window snapshot). */
+static const bool g_linkhealth = []() -> bool {
+  const char *e = std::getenv("DEVOURER_LINKHEALTH");
+  return e && *e && std::strcmp(e, "0") != 0;
 }();
 
 /* DEVOURER_RX_SWEEP="1,6,11" | "36-48/4" | "5170-5250/5": live coarse spectrum
@@ -727,6 +737,41 @@ int main() {
                evm_mean);
         fflush(stdout);
         emit_nhm(e, -1);
+        /* DEVOURER_LINKHEALTH=1 — classify the window into a plain-language
+         * verdict + fix (src/LinkHealth.h). Rides the energy cadence and the
+         * same sensor snapshot; the whole point is to tell a near-field
+         * saturation problem (strong RSSI, dirty EVM — back OFF power) apart
+         * from a weak link (add power) so a user isn't chasing the wrong
+         * remedy. IGI rails passed as the union J1/J2 floor (the saturation
+         * corroborator); J3 has no DIG so its IGI is a static hint only. */
+        if (g_linkhealth) {
+          devourer::LinkHealthInput in;
+          in.frames = agg.n;
+          /* Strength = window PEAK (near-field saturation drags the mean down;
+           * see LinkHealth.h). */
+          in.rssi_raw = agg.n ? agg.rssi_max : 0;
+          in.snr_raw = snr_mean;
+          in.evm_raw = evm_mean;
+          in.evm_valid = agg.evm_n > 0;
+          in.energy_valid = e.valid_fa;
+          in.fa_ofdm = e.fa_ofdm;
+          in.cca_ofdm = e.cca_ofdm;
+          in.igi_valid = e.valid_igi;
+          in.igi = e.igi;
+          in.igi_min = 0x1c; /* J1/J2 DIG floor — the saturation hint */
+          in.igi_max = 0x7f; /* J3 ceiling — never a false 'weak' rail */
+          devourer::LinkHealthVerdict h = devourer::classify_link_health(in);
+          char evmb[16];
+          if (in.evm_valid) std::snprintf(evmb, 16, "%.1f", h.evm_db);
+          else std::snprintf(evmb, 16, "-");
+          printf("<devourer-linkhealth>verdict=%s rssi_dbm=%d snr_db=%.1f "
+                 "evm_db=%s frames=%u fa_ofdm=%s igi=%s%s%s cause=\"%s\" "
+                 "fix=\"%s\"\n",
+                 h.label, h.rssi_dbm, h.snr_db, evmb, agg.n, fao, igi,
+                 h.igi_at_floor ? " igi_floor=1" : "",
+                 h.igi_at_ceiling ? " igi_ceil=1" : "", h.cause, h.fix);
+          fflush(stdout);
+        }
         nap(g_rx_energy_ms);
       }
     });

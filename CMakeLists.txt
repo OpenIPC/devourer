@@ -80,6 +80,8 @@ add_library(WiFiDriver
     src/TxPower.cpp
     src/TxPower.h
     src/ThermalStatus.h
+    src/LinkHealth.cpp
+    src/LinkHealth.h
     src/IRtlDevice.h
     src/SignalStop.cpp
     src/SignalStop.h
@@ -338,6 +340,17 @@ add_executable(TxPowerQuantSelftest
 target_link_libraries(TxPowerQuantSelftest PRIVATE WiFiDriver)
 
 add_test(NAME txpower_quant_math COMMAND TxPowerQuantSelftest)
+
+# Headless guard for the link-health classifier (src/LinkHealth.h) — the
+# sensor-tuple -> verdict mapping behind <devourer-linkhealth>, with cases
+# drawn from real on-air data (the saturation-knee + AWGN-interference sweeps).
+# A misclassification fails `ctest` instead of only surfacing as bad advice.
+add_executable(LinkHealthSelftest
+    tests/link_health_selftest.cpp
+)
+target_link_libraries(LinkHealthSelftest PRIVATE WiFiDriver)
+
+add_test(NAME link_health_classify COMMAND LinkHealthSelftest)
 
 # Headless guard for the beamforming-report decoder (src/BfReportDecode.h) — the
 # LSB-first Givens-angle unpacking + per-tone variance behind WiFiSenseDemo. It

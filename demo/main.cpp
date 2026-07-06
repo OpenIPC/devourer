@@ -153,6 +153,14 @@ static const bool g_linkhealth = []() -> bool {
   return e && *e && std::strcmp(e, "0") != 0;
 }();
 
+/* DEVOURER_RXQUALITY=1 — emit a <devourer-rxquality> line from the library's
+ * GetRxQuality() feed (the runtime API a linked adaptive-link controller reads).
+ * Rides the DEVOURER_RX_ENERGY_MS cadence like linkhealth. */
+static const bool g_rxquality = []() -> bool {
+  const char *e = std::getenv("DEVOURER_RXQUALITY");
+  return e && *e && std::strcmp(e, "0") != 0;
+}();
+
 /* DEVOURER_RX_SWEEP="1,6,11" | "36-48/4" | "5170-5250/5": live coarse spectrum
  * sweep. Cycle the listed bins (SweepSpec grammar: channels, channel ranges,
  * or MHz ranges — the latter for issue-#149-style narrowband maps), dwelling
@@ -770,6 +778,27 @@ int main() {
                  h.label, h.rssi_dbm, h.snr_db, evmb, agg.n, fao, igi,
                  h.igi_at_floor ? " igi_floor=1" : "",
                  h.igi_at_ceiling ? " igi_ceil=1" : "", h.cause, h.fix);
+          fflush(stdout);
+        }
+        /* DEVOURER_RXQUALITY=1 — dogfood the library GetRxQuality() feed: the
+         * same window a linked controller (fluke_gs) would read, incl. the
+         * passive noise-floor. NB it drains the device-internal accumulator +
+         * calls GetRxEnergy itself, so its counters are independent of the
+         * <devourer-energy>/<devourer-linkhealth> lines above (which use the
+         * demo's own g_rxagg). */
+        if (g_rxquality) {
+          devourer::RxQuality q = dev->GetRxQuality();
+          char nf[24], evmb[16];
+          if (q.nf_valid) std::snprintf(nf, sizeof nf, "%.1f", q.noise_floor_dbm);
+          else std::snprintf(nf, sizeof nf, "-");
+          if (q.evm_valid) std::snprintf(evmb, sizeof evmb, "%.1f", q.evm_mean_db);
+          else std::snprintf(evmb, sizeof evmb, "-");
+          printf("<devourer-rxquality>verdict=%s frames=%u rssi_mean_dbm=%d "
+                 "rssi_max_dbm=%d snr_mean_db=%.1f snr_min_db=%.1f evm_db=%s "
+                 "noise_floor_dbm=%s igi=%d\n",
+                 q.label, q.frames, q.rssi_mean_dbm, q.rssi_max_dbm,
+                 q.snr_mean_db, q.snr_min_db, evmb, nf,
+                 q.igi_valid ? q.igi : -1);
           fflush(stdout);
         }
         nap(g_rx_energy_ms);

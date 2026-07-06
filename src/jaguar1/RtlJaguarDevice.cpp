@@ -741,6 +741,8 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
              std::span<uint8_t>{const_cast<uint8_t *>(data), (size_t)n})) {
       if (should_stop || g_devourer_should_stop)
         break;
+      if (!p.RxAtrib.crc_err)
+        _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
       _packetProcessor(p);
     }
   };

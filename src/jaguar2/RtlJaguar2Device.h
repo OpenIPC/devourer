@@ -121,8 +121,16 @@ public:
    * The read side of the CW tone. */
   RxEnergy GetRxEnergy() override;
 
+  /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — subsumes
+   * GetRxEnergy. Fed per decoded frame in the RX loop via _rxq. */
+  devourer::RxQuality GetRxQuality() override {
+    return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy());
+  }
+
 private:
   RtlUsbAdapter _device;
+  /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
+  devourer::RxQualityAccumulator _rxq;
   Logger_t _logger;
   jaguar2::ChipVariant _variant;
   jaguar2::HalJaguar2 _hal;

@@ -14,7 +14,8 @@ namespace devourer {
 
 int claim_interface_then_reset(libusb_device_handle *handle, int iface,
                                const Logger_t &logger, bool do_reset,
-                               std::shared_ptr<UsbDeviceLock> &out_lock) {
+                               std::shared_ptr<UsbDeviceLock> &out_lock,
+                               const std::string &lock_dir) {
   if (handle == nullptr)
     return LIBUSB_ERROR_NO_DEVICE;
   libusb_device *dev = libusb_get_device(handle);
@@ -27,7 +28,7 @@ int claim_interface_then_reset(libusb_device_handle *handle, int iface,
    * kernel claim instead. */
   auto lock = std::make_shared<UsbDeviceLock>();
   std::string why;
-  switch (lock->try_acquire(dev, &why)) {
+  switch (lock->try_acquire(dev, &why, lock_dir)) {
   case UsbDeviceLock::Result::Busy:
     logger->error("USB adapter in use — refusing to open ({})", why);
     return LIBUSB_ERROR_BUSY;

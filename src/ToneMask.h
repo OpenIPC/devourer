@@ -373,17 +373,16 @@ inline void nbi_disable_jgr3(RtlUsbAdapter &dev) {
   dev.phy_set_bb_reg(0x4040, 1u << 31, 0);
 }
 
-/* ---- env-driven entry point ----------------------------------------------
+/* ---- spec-driven entry point ----------------------------------------------
  *
- * Reads DEVOURER_RX_CSI_MASK / DEVOURER_RX_NBI and applies whichever is set,
- * for the current channel state. Call after the channel set (like
- * DEVOURER_RX_PATHS, the mask is the final word for a single-channel capture;
- * a later channel switch does not re-derive it). n_paths: RX chains to arm for
+ * Applies whichever of the two specs is non-null (DeviceConfig rx.csi_mask /
+ * rx.nbi), for the current channel state. Call after the channel set (like
+ * rx.path_spec, the mask is the final word for a single-channel capture; a
+ * later channel switch does not re-derive it). n_paths: RX chains to arm for
  * the Jaguar-3 NBI / the 8822B second-path enable. */
-inline void apply_from_env(RtlUsbAdapter &dev, Logger_t logger, Family fam,
-                           const SelectedChannel &ch, int n_paths) {
-  const char *csi_env = std::getenv("DEVOURER_RX_CSI_MASK");
-  const char *nbi_env = std::getenv("DEVOURER_RX_NBI");
+inline void apply(RtlUsbAdapter &dev, Logger_t logger, Family fam,
+                  const SelectedChannel &ch, int n_paths,
+                  const char *csi_env, const char *nbi_env) {
   if (!csi_env && !nbi_env) return;
 
   uint32_t bw_mhz = bw_mhz_from(ch.ChannelWidth);

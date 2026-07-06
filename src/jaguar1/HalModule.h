@@ -39,6 +39,7 @@ enum odm_rf_config_type {
 
 class HalModule {
   RtlUsbAdapter _device;
+  devourer::DeviceConfig _cfg; /* phydm_watchdog gate + FirmwareManager forward */
   std::shared_ptr<EepromManager> _eepromManager;
   std::shared_ptr<RadioManagementModule> _radioManagementModule;
   Logger_t _logger;
@@ -59,7 +60,7 @@ class HalModule {
 public:
   HalModule(RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
             std::shared_ptr<RadioManagementModule> _radioManagementModule,
-            Logger_t logger);
+            Logger_t logger, const devourer::DeviceConfig &cfg = {});
   bool rtw_hal_init(SelectedChannel selectedChannel);
 
 private:

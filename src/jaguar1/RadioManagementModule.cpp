@@ -49,8 +49,11 @@ int get_40mhz_center_channel(int channel) {
 
 RadioManagementModule::RadioManagementModule(
     RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
-    Logger_t logger)
-    : _device{device}, _eepromManager{eepromManager}, _logger{logger},
+    Logger_t logger, const devourer::DeviceConfig &cfg)
+    : _device{device}, _tuning{cfg.tuning},
+      _keep_corrupted{cfg.rx.keep_corrupted},
+      _dump_canary{cfg.debug.dump_canary}, _eepromManager{eepromManager},
+      _logger{logger},
       _pwrTrk{device, eepromManager, this, logger},
       _iqk{device, eepromManager, this, logger}
 #if defined(DEVOURER_HAVE_8814)
@@ -145,7 +148,7 @@ void RadioManagementModule::hw_var_set_monitor() {
    * Guarded by the same env var as the demo's filter — keep them in lockstep
    * so a noisy RX never surprises an IP-stack consumer that didn't ask for
    * it. */
-  if (std::getenv("DEVOURER_RX_KEEP_CORRUPTED") != nullptr) {
+  if (_keep_corrupted) {
     rcr_bits |= RCR_ACRC32 | RCR_AICV;
   }
 
@@ -274,7 +277,7 @@ bool RadioManagementModule::fast_retune(uint8_t channel, bool cache_rf) {
       }
       timer.stage("sw_chnl_bw");
       timer.total();
-      if (std::getenv("DEVOURER_DUMP_CANARY"))
+      if (_dump_canary)
         DumpCanary();
       return true;
     }
@@ -307,7 +310,7 @@ bool RadioManagementModule::fast_retune(uint8_t channel, bool cache_rf) {
     phy_SwChnl8812();
   timer.stage("sw_chnl");
   timer.total();
-  if (std::getenv("DEVOURER_DUMP_CANARY"))
+  if (_dump_canary)
     DumpCanary();
   return true;
 }
@@ -478,9 +481,9 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
    * wrong bits and the chip's BB stalled on each one. Setting
    * DEVOURER_SKIP_TXPWR=1 keeps the old skip behaviour as an escape
    * hatch (e.g. for RX-only experiments). */
-  if (_fast_skip_heavy || std::getenv("DEVOURER_SKIP_TXPWR")) {
+  if (_fast_skip_heavy || _tuning.skip_txpwr) {
     if (!_fast_skip_heavy)
-      _logger->info("DEVOURER_SKIP_TXPWR=1 — skipping TX power setup");
+      _logger->info("tuning.skip_txpwr — skipping TX power setup");
   } else {
     PHY_SetTxPowerLevel8812(_currentChannel);
   }
@@ -505,7 +508,7 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
     _pwrTrk.TickThermalMeter(current_band_type, _currentChannel);
   }
 
-  /* Kernel cross-validation oracle: when DEVOURER_DUMP_CANARY=1
+  /* Kernel cross-validation oracle: when debug.dump_canary is set
    * is set, dump the canary BB/MAC/RF registers after channel-set is
    * complete. Output format matches `iwpriv <iface> read 4,<addr>` /
    * `iwpriv <iface> rfr <path> <addr>` so kernel and devourer dumps
@@ -530,8 +533,7 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
    * `HalModule::rtl8812au_hal_init` → `ArmIQKOnNextChannelSet`.
    * Optional override: `DEVOURER_FORCE_IQK=1` runs IQK on every
    * channel-set (used for canary-diff workflow against kernel). */
-  if ((_needIQK || std::getenv("DEVOURER_FORCE_IQK")) &&
-      !std::getenv("DEVOURER_DISABLE_IQK")) {
+  if ((_needIQK || _tuning.force_iqk) && !_tuning.disable_iqk) {
     if (_eepromManager->version_id.ICType == CHIP_8812) {
       _iqk.Calibrate(_currentChannel, current_band_type,
                      /*is_recovery=*/false);
@@ -550,7 +552,7 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
   /* Canary dump runs LAST so it captures the post-IQK / post-pwrtrk
    * state — same observation order as kernel iface reads via
    * `iwpriv read 4,<addr>`. */
-  if (std::getenv("DEVOURER_DUMP_CANARY")) {
+  if (_dump_canary) {
     DumpCanary();
   }
 }

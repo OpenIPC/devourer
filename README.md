@@ -156,6 +156,13 @@ Configure fails if no chip is selected, or if `DEVOURER_8814` is on without
 
 ### Demo env vars
 
+Env vars are the demos' interface, not the library's: the library is
+configured through `devourer::DeviceConfig` (`src/DeviceConfig.h`, passed to
+`CreateRtlDevice`) and the runtime setters on `IRtlDevice`, and reads no
+environment itself. The demos map each library-level `DEVOURER_*` var onto a
+`DeviceConfig` field in `examples/common/env_config.{h,cpp}`; each field's
+`env:` tag in `DeviceConfig.h` names its variable and value grammar.
+
 Common to both demos:
 
 - `DEVOURER_PID=0xNNNN` — restrict the device-open loop to a single PID
@@ -282,6 +289,20 @@ dev->Init(packetProcessor, SelectedChannel{
 });
 ```
 
+Construction-time knobs (RX filter behaviour, beamforming arming,
+calibration gates, diagnostics) go in a `devourer::DeviceConfig` passed as
+the factory's fourth argument — `src/DeviceConfig.h` documents every field:
+
+```cpp
+devourer::DeviceConfig cfg;
+cfg.rx.keep_corrupted = true;                  // FCS-failed frames to host
+cfg.debug.log_writes = true;                   // <wlog> register-write trace
+auto dev = driver.CreateRtlDevice(handle, ctx, lock, cfg);
+```
+
+Knobs that change mid-session are runtime setters on the device instead
+(`SetTxMode`, `SetTxPowerOffsetQdb`, `SetRxPathMask`, `SetCcaMode`, ...).
+
 `packetProcessor` is your `void(const Packet&)` callback. `Init` runs the
 RX loop until `should_stop` is set, then returns. For TX, use `InitWrite`
 on a channel followed by `send_packet(buffer, len)` where the buffer begins
@@ -342,6 +363,7 @@ hal/      Vendor headers and tables ported from Realtek's tree
 src/      Driver implementation
           Generation-agnostic core (always compiled):
           WiFiDriver             thin factory (dispatches Jaguar1 vs Jaguar3 by chip-id)
+          DeviceConfig.h         construction-time configuration (env-free library)
           IRtlDevice             chip-family-agnostic device interface
           RtlUsbAdapter          libusb wrapper (vendor + bulk transfers)
           Radiotap.c             radiotap header iterator
@@ -374,7 +396,8 @@ examples/ Example executables (one directory per demo)
           precoder/  OFDM subcarrier precoding PoC (precoder)
           txpower/   runtime TX-power API reference (txpower)
           sense/     beamforming motion/presence sensor (sense)
-          common/    stream_stdin.h shared framing + selftest
+          common/    env_config (DEVOURER_* -> DeviceConfig translator),
+                     stream_stdin.h shared framing + selftest
 ```
 
 Each chip generation can be compiled out to shrink the binary — see

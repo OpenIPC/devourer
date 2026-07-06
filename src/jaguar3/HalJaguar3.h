@@ -25,7 +25,8 @@ namespace jaguar3 {
 class HalJaguar3 {
 public:
   HalJaguar3(RtlUsbAdapter device, Logger_t logger,
-           ChipVariant variant = ChipVariant::C8822C);
+           ChipVariant variant = ChipVariant::C8822C,
+           const devourer::DeviceConfig &cfg = {});
 
   /* Full RX-capable bring-up: power-on -> FW download -> MAC/BB/RF config ->
    * band+channel set. Mirrors HalModule::rtw_hal_init() for Jaguar1. */
@@ -179,6 +180,7 @@ private:
   bool _efuse_cache_valid = false;
 
   RtlUsbAdapter _device;
+  devourer::DeviceConfig _cfg; /* skip_iqk + calibration forward */
   Logger_t _logger;
   HalmacJaguar3Fw _fw;
   HalmacJaguar3MacInit _macinit;

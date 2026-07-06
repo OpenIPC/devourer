@@ -46,8 +46,11 @@ public:
 
   /* Try to take the exclusive lock for the adapter behind `dev`. On a non-null
    * `reason`, a human-readable explanation is written for Busy/Error. Idempotent
-   * guard: calling twice on an already-held lock returns Acquired. */
-  Result try_acquire(libusb_device *dev, std::string *reason);
+   * guard: calling twice on an already-held lock returns Acquired. `lock_dir`
+   * is the lock-file directory (empty = "/tmp"; DeviceConfig usb.lock_dir — the
+   * demos map TMPDIR onto it); ignored on Windows (named mutex, no file). */
+  Result try_acquire(libusb_device *dev, std::string *reason,
+                     const std::string &lock_dir = {});
 
   bool held() const;
   /* The lock key (e.g. "3-1.4" = bus 3, port path 1.4). Empty until acquired. */

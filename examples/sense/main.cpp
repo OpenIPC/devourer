@@ -39,6 +39,7 @@
 #include "SignalStop.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "env_config.h"
 #include "logger.h"
 
 using devourer::bf::MotionMeter;
@@ -348,7 +349,8 @@ static bool open_adapter(Adapter &a, uint16_t vid, uint16_t pid,
   if (rc != 0)
     return false;
   WiFiDriver driver(logger);
-  a.dev = driver.CreateRtlDevice(a.handle, a.ctx, a.lock);
+  a.dev = driver.CreateRtlDevice(a.handle, a.ctx, a.lock,
+                                 devourer_config_from_env());
   return a.dev != nullptr;
 }
 

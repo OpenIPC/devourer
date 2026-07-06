@@ -46,18 +46,20 @@ Halrf8822c::Halrf8822c(RtlUsbAdapter device, Logger_t logger)
 
 #if defined(DEVOURER_HAVE_JAGUAR3_8822E)
 /* Defined in Halrf8822e.cpp. */
-std::unique_ptr<Jaguar3Calibration> make_halrf_8822e(RtlUsbAdapter device,
-                                                     Logger_t logger);
+std::unique_ptr<Jaguar3Calibration>
+make_halrf_8822e(RtlUsbAdapter device, Logger_t logger,
+                 const devourer::DeviceConfig &cfg);
 #endif
 
 /* Calibration strategy factory: pick the per-generation halrf impl. */
 std::unique_ptr<Jaguar3Calibration>
 make_jaguar3_calibration(ChipVariant variant, RtlUsbAdapter device,
-                         Logger_t logger) {
+                         Logger_t logger, const devourer::DeviceConfig &cfg) {
 #if defined(DEVOURER_HAVE_JAGUAR3_8822E)
   if (variant == ChipVariant::C8822E)
-    return make_halrf_8822e(device, logger);
+    return make_halrf_8822e(device, logger, cfg);
 #endif
+  (void)cfg; /* 8822c halrf has no config-driven knobs */
 #if defined(DEVOURER_HAVE_JAGUAR3_8822C)
   return std::make_unique<Halrf8822c>(device, logger);
 #else

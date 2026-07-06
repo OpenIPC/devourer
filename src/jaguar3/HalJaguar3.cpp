@@ -51,18 +51,19 @@ void write_bb(RtlUsbAdapter &dev, uint32_t addr, uint32_t data) {
 }
 } /* namespace */
 
-HalJaguar3::HalJaguar3(RtlUsbAdapter device, Logger_t logger, ChipVariant variant)
-    : _device{device}, _logger{logger}, _fw{device, logger, variant},
-      _macinit{device, logger},
-      _cal{make_jaguar3_calibration(variant, device, logger)},
+HalJaguar3::HalJaguar3(RtlUsbAdapter device, Logger_t logger,
+                       ChipVariant variant, const devourer::DeviceConfig &cfg)
+    : _device{device}, _cfg{cfg}, _logger{logger},
+      _fw{device, logger, variant}, _macinit{device, logger},
+      _cal{make_jaguar3_calibration(variant, device, logger, cfg)},
       _tables{make_jaguar3_phy_tables(variant)}, _variant{variant} {}
 
 /* Run the ported IQK calibration (halrf_iqk_8822c). Called after the channel is
  * tuned. Replaces the captured hardcoded IQK gain registers with a real per-boot
  * calibration. */
 void HalJaguar3::run_iqk(SelectedChannel channel) {
-  if (const char *e = std::getenv("DEVOURER_SKIP_IQK"); e && *e == '1') {
-    _logger->info("Jaguar3: IQK SKIPPED (DEVOURER_SKIP_IQK debug)");
+  if (_cfg.tuning.skip_iqk) {
+    _logger->info("Jaguar3: IQK SKIPPED (tuning.skip_iqk debug)");
     _device.rtw_write16(0x0522, 0x0000);
     return;
   }

@@ -70,6 +70,7 @@
 #endif
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "env_config.h"
 #include "logger.h"
 #include "stream_stdin.h"
 
@@ -86,7 +87,7 @@ static constexpr uint16_t kRealtekProductIds[] = {
 // kRadiotapLegacy6M constant. Same canonical SA, same matcher in
 // examples/rx/main.cpp's RX path — keep these three in lockstep, see CLAUDE.md.
 static const std::vector<uint8_t> kStreamRadiotap =
-    devourer::build_stream_radiotap(devourer::parse_tx_mode_env());
+    devourer::build_stream_radiotap(devourer_tx_mode_from_env());
 static const uint8_t kCanonicalSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
 
 static std::vector<uint8_t> build_dot11_probe_req() {
@@ -186,7 +187,8 @@ int main(int argc, char **argv) {
   }
 
   WiFiDriver wifi_driver{logger};
-  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock);
+  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+                                               devourer_config_from_env());
   /* Jaguar1-only research features (TXAGC override, fast-retune hopping) aren't
    * on the IRtlDevice contract — downcast for them; jag is null on Jaguar3, and
    * the downcast plus its call sites compile out when Jaguar1 isn't built. */

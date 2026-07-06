@@ -34,6 +34,10 @@ extern "C"
  * USB PID; this class drives bring-up, RX, and TX for whichever member of the
  * family is present. */
 class RtlJaguarDevice : public IRtlDevice {
+  /* Declared before every component that consumes it: members initialise in
+   * declaration order, and _eepromManager / _radioManagement / _halModule all
+   * take _cfg in the constructor's init list. */
+  const devourer::DeviceConfig _cfg;
   std::shared_ptr<EepromManager> _eepromManager;
   std::shared_ptr<RadioManagementModule> _radioManagement;
   /* Last channel handed to SetMonitorChannel. Value-initialised so the
@@ -71,7 +75,8 @@ class RtlJaguarDevice : public IRtlDevice {
   devourer::RxQualityAccumulator _rxq;
 
 public:
-  RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger);
+  RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger,
+                  devourer::DeviceConfig cfg = {});
   ~RtlJaguarDevice() override;
   void Init(Action_ParsedRadioPacket packetProcessor,
             SelectedChannel channel) override;

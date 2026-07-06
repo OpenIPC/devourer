@@ -210,6 +210,16 @@ when `--sniffer-iface` is active) at `/tmp/devourer-regress-last/`. See
 
 ## Demo env vars
 
+Env vars are the *demos'* interface, not the library's: the library is
+configured through `devourer::DeviceConfig` (src/DeviceConfig.h, passed to
+`CreateRtlDevice`; each field's `env:` tag names its variable) plus the
+runtime setters on `IRtlDevice`, and reads no environment itself. The demos
+translate every library-level `DEVOURER_*` var into a `DeviceConfig` via
+`examples/common/env_config.{h,cpp}` — so the vars below (and the test
+scripts using them) work on every example binary, while a library consumer
+sets the fields directly. Demo-local vars (device selection, timing loops)
+are parsed in each demo's own code.
+
 Both `rxdemo` and `txdemo` honour:
 
 - `DEVOURER_PID=0xNNNN` — restrict the open loop to a single PID (e.g.
@@ -450,6 +460,9 @@ Generation-agnostic core in `src/` (always compiled; depends on neither
 generation's HAL):
 
 - `WiFiDriver` — the factory (`CreateRtlDevice`).
+- `DeviceConfig.h` — construction-time configuration struct (rx / tx / bf /
+  tuning / debug / usb sections), the library's replacement for env-var
+  knobs; every component copies the sub-struct it consumes at construction.
 - `RtlUsbAdapter` — libusb wrapper (vendor control + bulk transfers).
 - `Radiotap.c` — radiotap header iterator. TX buffers passed to
   `send_packet` **must** begin with a radiotap header; rate / MCS / VHT /

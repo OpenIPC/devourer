@@ -7,7 +7,6 @@
 #endif
 
 #include <cstdint>
-#include <cstdlib>
 #include <string>
 
 namespace devourer {
@@ -43,7 +42,8 @@ std::string device_key(libusb_device *dev) {
 namespace devourer {
 
 UsbDeviceLock::Result UsbDeviceLock::try_acquire(libusb_device *dev,
-                                                 std::string *reason) {
+                                                 std::string *reason,
+                                                 const std::string &) {
   if (held())
     return Result::Acquired;
   _key = device_key(dev);
@@ -92,13 +92,13 @@ UsbDeviceLock::~UsbDeviceLock() {
 namespace devourer {
 
 UsbDeviceLock::Result UsbDeviceLock::try_acquire(libusb_device *dev,
-                                                 std::string *reason) {
+                                                 std::string *reason,
+                                                 const std::string &lock_dir) {
   if (held())
     return Result::Acquired;
   _key = device_key(dev);
 
-  const char *tmp = std::getenv("TMPDIR");
-  std::string dir = (tmp != nullptr && *tmp != '\0') ? tmp : "/tmp";
+  std::string dir = lock_dir.empty() ? std::string("/tmp") : lock_dir;
   while (!dir.empty() && dir.back() == '/')
     dir.pop_back();
   _path = dir + "/devourer-usb-" + _key + ".lock";

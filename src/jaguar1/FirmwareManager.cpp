@@ -54,8 +54,9 @@ auto since(std::chrono::time_point<clock_t, duration_t> const &start) {
   return std::chrono::duration_cast<result_t>(clock_t::now() - start);
 }
 
-FirmwareManager::FirmwareManager(RtlUsbAdapter device, Logger_t logger)
-    : _device{device}, _logger{logger} {}
+FirmwareManager::FirmwareManager(RtlUsbAdapter device, Logger_t logger,
+                                 const devourer::DeviceConfig &cfg)
+    : _device{device}, _logger{logger}, _tuning{cfg.tuning} {}
 
 /* The Jaguar firmware-header signature lives in the low 16 bits of the first
  * word: 0x95xx for 8812/8811, 0x88xx for 8814, 0x21xx for 8821A. */
@@ -215,11 +216,10 @@ void FirmwareManager::FirmwareDownload_8814A() {
    * the chip see the header.) */
   (void)FW_HEADER_SIZE_8814A;
 
-  /* Path select: kernel-faithful bracket by default; DEVOURER_8814_FWDL=rtw88
-   * restores the legacy rtw88-mimic sequence bit-for-bit (A/B fallback). */
-  const char *fwdl_mode = std::getenv("DEVOURER_8814_FWDL");
+  /* Path select: kernel-faithful bracket by default; tuning.fwdl_8814=Rtw88
+   * selects the legacy rtw88-mimic sequence bit-for-bit (A/B fallback). */
   const bool use_rtw88_path =
-      (fwdl_mode != nullptr && std::strcmp(fwdl_mode, "rtw88") == 0);
+      _tuning.fwdl_8814 == devourer::Fwdl8814Path::Rtw88;
 
   if (use_rtw88_path && (_device.rtw_read8(REG_MCUFWDL) & BIT7) != 0) {
     /* 8051 already running from previous session — reset it. (rtw88 path
@@ -725,10 +725,10 @@ void FirmwareManager::_Fwdl8814_KernelPath(const uint8_t *fw,
       TXDESC_OFFSET_8814A;
 
   uint32_t max_chunk = MAX_RSVD_PAGE_BUF_SZ_8814A;
-  if (const char *env_chunk = std::getenv("DEVOURER_8814_FWDL_CHUNK")) {
-    const unsigned long v = std::strtoul(env_chunk, nullptr, 0);
+  if (_tuning.fwdl_8814_chunk) {
+    const uint32_t v = *_tuning.fwdl_8814_chunk;
     if (v >= 64 && v <= MAX_RSVD_PAGE_CHUNK_SZ) {
-      max_chunk = (uint32_t)v;
+      max_chunk = v;
       _logger->info("_Fwdl8814_KernelPath: chunk override {} bytes", max_chunk);
     }
   }

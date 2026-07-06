@@ -16,9 +16,11 @@ extern "C" {
 
 namespace jaguar3 {
 
-RadioManagementJaguar3::RadioManagementJaguar3(RtlUsbAdapter device, Logger_t logger,
-                                               ChipVariant variant)
-    : _device{device}, _logger{std::move(logger)}, _variant{variant} {}
+RadioManagementJaguar3::RadioManagementJaguar3(
+    RtlUsbAdapter device, Logger_t logger, ChipVariant variant,
+    const devourer::DeviceConfig &cfg)
+    : _device{device}, _cfg{cfg}, _logger{std::move(logger)},
+      _variant{variant} {}
 
 void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
                                               uint8_t channel_offset,
@@ -82,10 +84,10 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
      * the kernel's 40 MHz-injection stall (libc0607/rtl88x2eu#7 — a kernel-side
      * issue devourer's own 40 MHz TX does not exhibit). */
     uint32_t rfbw_nib = 0x5;
-    if (const char *e = std::getenv("DEVOURER_TX_RF_BW")) {
-      uint32_t txbw = static_cast<uint32_t>(std::strtol(e, nullptr, 0)) & 0x3;
+    if (_cfg.tx.rf_bw) {
+      uint32_t txbw = *_cfg.tx.rf_bw & 0x3;
       rfbw_nib = txbw | (0x1 << 2); /* keep RX_RF_BW = 0b01 */
-      _logger->info("Jaguar3: DEVOURER_TX_RF_BW override — 0x9b0[3:0]=0x{:x}",
+      _logger->info("Jaguar3: tx.rf_bw override — 0x9b0[3:0]=0x{:x}",
                     rfbw_nib);
     }
     _device.phy_set_bb_reg(0x1a00, 1u << 4, pri == 1 ? 1 : 0); /* CCK pri ch */
@@ -216,7 +218,7 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
   if (bwmode == CHANNEL_WIDTH_5 || bwmode == CHANNEL_WIDTH_10)
     set_bandwidth_dividers(bwmode);
 
-  if (std::getenv("DEVOURER_DUMP_CANARY"))
+  if (_cfg.debug.dump_canary)
     DumpCanary();
 }
 
@@ -445,7 +447,7 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
   if (channel == _last_channel)
     return true; /* no-op hop */
 
-  devourer::HopProf prof("j3", channel);
+  devourer::HopProf prof(_cfg.debug.hop_prof, "j3", channel);
   uint8_t central, pri;
   central_and_pri(channel, channel_offset, bwmode, central, pri);
 
@@ -564,7 +566,7 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
   /* The J1 parity lesson: the fast path must emit the canary itself — it does
    * not pass through the full path, so without this the parity diff would
    * compare the fast run's stale full-set dump. */
-  if (std::getenv("DEVOURER_DUMP_CANARY"))
+  if (_cfg.debug.dump_canary)
     DumpCanary();
   return true;
 }
@@ -799,10 +801,9 @@ void RadioManagementJaguar3::set_bandwidth_dividers(ChannelWidth_t bwmode) {
   /* DEVOURER_NB_DAC=0xN — debug knob: force the DAC-divider code. For mirror
    * A/B experiments and for empirically mapping the (undocumented) divider
    * field encoding; not for normal use. */
-  const char *dac_env = std::getenv("DEVOURER_NB_DAC");
-  if (dac_env != nullptr && *dac_env != '\0') {
-    dac = static_cast<uint8_t>(std::strtol(dac_env, nullptr, 0) & 0x7);
-    _logger->info("Jaguar3: DEVOURER_NB_DAC override — DAC code {:#x}", dac);
+  if (_cfg.tuning.nb_dac) {
+    dac = *_cfg.tuning.nb_dac & 0x7;
+    _logger->info("Jaguar3: tuning.nb_dac override — DAC code {:#x}", dac);
   }
   _device.phy_set_bb_reg(R_RX_DFIR_8822C, 0x3ff0, dfir);
   /* 8822e vendor parity: the small-BW write also zeroes the TX/RX pri-ch

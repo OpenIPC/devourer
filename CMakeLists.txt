@@ -230,27 +230,34 @@ endif()
 
 add_executable(rxdemo
     examples/rx/main.cpp
+    examples/common/env_config.cpp
 )
 target_link_libraries(rxdemo PUBLIC devourer)
+target_include_directories(rxdemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
 add_executable(txdemo
     examples/tx/main.cpp
+    examples/common/env_config.cpp
 )
 target_link_libraries(txdemo PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(txdemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
 # Pre-modulator subcarrier PoC: transmits PSDU bytes shaped by
 # tools/precoder/encode_subcarriers.py so chosen OFDM data subcarriers carry
 # chosen bits. Single-stream BPSK / HT MCS0 / BCC on 8812/8821/8811.
 add_executable(precoder
     examples/precoder/main.cpp
+    examples/common/env_config.cpp
 )
 target_link_libraries(precoder PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(precoder PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
 # Stream-link TX: reads length-prefixed PSDU bodies from stdin and transmits
 # one probe-request per body. Driven by tools/precoder/stream_tx.py — the
 # C++/Python split keeps libusb out of the framing math.
 add_executable(streamtx
     examples/streamtx/main.cpp
+    examples/common/env_config.cpp
 )
 target_link_libraries(streamtx PUBLIC devourer PRIVATE PkgConfig::libusb)
 # stream_stdin.h (shared binary-stdin framing) lives in examples/common/.
@@ -260,6 +267,7 @@ target_include_directories(streamtx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples
 # (svc_tx.h), so base/IDR layers fly robust and enhancement layers ride fast.
 add_executable(svctx
     examples/svctx/main.cpp
+    examples/common/env_config.cpp
 )
 target_link_libraries(svctx PUBLIC devourer PRIVATE PkgConfig::libusb)
 target_include_directories(svctx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
@@ -270,6 +278,7 @@ target_include_directories(svctx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/co
 # tools/precoder/tun_p2p.py spawns this for --mode=duplex.
 add_executable(duplex
     examples/duplex/main.cpp
+    examples/common/env_config.cpp
 )
 target_link_libraries(duplex PUBLIC devourer PRIVATE PkgConfig::libusb)
 target_include_directories(duplex PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
@@ -282,8 +291,10 @@ target_include_directories(duplex PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/c
 # adaptive-link controller's power leg.
 add_executable(txpower
     examples/txpower/main.cpp
+    examples/common/env_config.cpp
 )
 target_link_libraries(txpower PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(txpower PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
 # sense — Wi-Fi motion/presence sensor from beamforming reports. Drives
 # two adapters (a sounder + a beamformee) on one host, self-captures the reports,
@@ -291,8 +302,10 @@ target_link_libraries(txpower PUBLIC devourer PRIVATE PkgConfig::libusb)
 # motion readout. See examples/sense/README.md and docs/beamforming-victim-sensing.md.
 add_executable(sense
     examples/sense/main.cpp
+    examples/common/env_config.cpp
 )
 target_link_libraries(sense PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(sense PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
 # Headless regression guard for the binary-stdin framing shared by the two
 # stream demos above (examples/common/stream_stdin.h). No libusb, no radio — just the

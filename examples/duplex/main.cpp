@@ -66,6 +66,7 @@
 #endif
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "env_config.h"
 #include "logger.h"
 #include "stream_stdin.h"
 
@@ -86,7 +87,7 @@ static constexpr uint16_t kRealtekProductIds[] = {
 // the stdin SET_RATE control op). Guarded by g_rt_mu against the TX thread.
 static std::mutex g_rt_mu;
 static std::vector<uint8_t> g_radiotap =
-    devourer::build_stream_radiotap(devourer::parse_tx_mode_env());
+    devourer::build_stream_radiotap(devourer_tx_mode_from_env());
 static const uint8_t kCanonicalSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
 
 static std::vector<uint8_t> build_dot11_probe_req() {
@@ -342,7 +343,8 @@ int main(int argc, char **argv) {
   }
 
   WiFiDriver wifi_driver{logger};
-  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock);
+  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+                                               devourer_config_from_env());
 
   int channel = 6;
   if (const char *ch_env = std::getenv("DEVOURER_CHANNEL")) {

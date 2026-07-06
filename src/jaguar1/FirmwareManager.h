@@ -8,9 +8,11 @@
 class FirmwareManager {
   RtlUsbAdapter _device;
   Logger_t _logger;
+  devourer::DeviceConfig::Tuning _tuning; /* fwdl_8814 / fwdl_8814_chunk */
 
 public:
-  FirmwareManager(RtlUsbAdapter device, Logger_t logger);
+  FirmwareManager(RtlUsbAdapter device, Logger_t logger,
+                  const devourer::DeviceConfig &cfg = {});
   /* Downloads the NIC firmware blob matched to `ic_type`. Header parsing /
    * download protocol are common across Jaguar (8812 / 8811 / 8814) — only the
    * blob and the header-signature check differ. */

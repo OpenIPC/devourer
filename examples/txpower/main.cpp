@@ -55,6 +55,7 @@
 #include "TxPower.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "env_config.h"
 #include "logger.h"
 
 namespace {
@@ -198,7 +199,8 @@ int main(int argc, char **argv) {
   }
 
   WiFiDriver driver(logger);
-  std::unique_ptr<IRtlDevice> dev = driver.CreateRtlDevice(handle, ctx, lock);
+  std::unique_ptr<IRtlDevice> dev =
+      driver.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
   if (!dev) {
     logger->error("CreateRtlDevice failed (chip support not built?)");
     libusb_close(handle);

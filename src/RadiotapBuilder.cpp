@@ -249,9 +249,4 @@ TxMode parse_tx_mode_str(const std::string& spec) {
   return cfg;
 }
 
-TxMode parse_tx_mode_env() {
-  const char* raw = std::getenv("DEVOURER_TX_RATE");
-  return parse_tx_mode_str(raw ? raw : "");
-}
-
 }  // namespace devourer

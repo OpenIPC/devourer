@@ -60,6 +60,7 @@
 #include "RtlUsbAdapter.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "env_config.h"
 #include "logger.h"
 #include "stream_stdin.h"
 #include "svc_tx.h"
@@ -157,7 +158,8 @@ int main(int argc, char** argv) {
   }
 
   WiFiDriver wifi_driver{logger};
-  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock);
+  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+                                               devourer_config_from_env());
 
   int channel = 6;
   if (const char* ch = std::getenv("DEVOURER_CHANNEL")) channel = std::atoi(ch);

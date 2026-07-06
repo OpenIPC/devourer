@@ -54,6 +54,10 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
   _hal.coex_wlan_only_init(); /* lock antenna to WLAN (disable BT/LTE coex) */
   _brought_up = true;
 
+  /* DEVOURER_DIS_CCA=1 — MAC EDCCA-disable research knob (see SetCcaMode). */
+  if (std::getenv("DEVOURER_DIS_CCA"))
+    SetCcaMode(true);
+
   /* DEVOURER_BF_ARM_BFEE=aa:bb:cc:dd:ee:ff — beamforming self-sounding probe
    * (beamformee side), Jaguar-3 variant. Arms the hardware CSI responder to
    * reply to NDPA+NDP from the given beamformer MAC with a VHT Compressed
@@ -402,6 +406,10 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   /* Start the coex runtime thread: it drains C2H and re-applies the 5 GHz coex
    * decision every ~2 s so sustained TX isn't silenced by the FW's PTA. (The CW
    * tone path returned earlier and never reaches here.) */
+  /* DEVOURER_DIS_CCA=1 — measure-first EDCCA-disable knob (see SetCcaMode).
+   * Applied before the coex thread starts so the writes don't contend. */
+  if (std::getenv("DEVOURER_DIS_CCA"))
+    SetCcaMode(true);
   _coex_thread = std::thread([this] { coex_runtime_loop(); });
   _logger->info("Jaguar3: ready for TX (monitor inject)");
 }
@@ -625,6 +633,41 @@ RxEnergy RtlJaguar3Device::GetRxEnergy() {
   return e;
 }
 
+/* Disable / restore the MAC EDCCA energy-detect gate (the vendor dis_cca proc's
+ * MAC half: BIT_DIS_EDCCA 0x520[15] + BIT_EDCCA_MSK_COUNTDOWN 0x524[11]). Caller
+ * holds _reg_mu.
+ *
+ * The vendor recipe ALSO writes three BB registers (0x1a9c[20], 0x1a14[9:8],
+ * 0x1d58[0xff8]); those are deliberately NOT done here. 0x1d58[0xff8]=0x1ff is
+ * the OFDM-CCA-off write (the CW-tone path uses it to stop OFDM detection for a
+ * bare carrier), so applying it makes the RX deaf to OFDM — MEASURED: the full
+ * recipe dropped 8822EU delivery from ~6800 to ~10 frames. The MAC EDCCA bit is
+ * the only part that's safe to touch on a live RX. See docs / the help-wanted
+ * issue for the measured null and why (EDCCA gates TX deferral, which devourer's
+ * monitor inject already bypasses). */
+void RtlJaguar3Device::apply_cca_mode_locked(bool disabled) {
+  uint32_t v520 = _device.rtw_read<uint32_t>(0x0520);
+  uint32_t v524 = _device.rtw_read<uint32_t>(0x0524);
+  if (disabled) {
+    v520 |= (1u << 15);
+    v524 &= ~(1u << 11);
+  } else {
+    v520 &= ~(1u << 15);
+    v524 |= (1u << 11);
+  }
+  _device.rtw_write<uint32_t>(0x0520, v520);
+  _device.rtw_write<uint32_t>(0x0524, v524);
+}
+
+void RtlJaguar3Device::SetCcaMode(bool disabled) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  _cca_disabled = disabled;
+  if (_brought_up)
+    apply_cca_mode_locked(disabled);
+  _logger->info("Jaguar3: MAC EDCCA {}", disabled ? "DISABLED (dis_cca)"
+                                                   : "enabled (default)");
+}
+
 void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
   /* Serialize against the coex thread's housekeeping tick (and any concurrent
    * FastRetune) — channel config is register RMW. Init/InitWrite call the
@@ -642,6 +685,10 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
     _pwr_ref_valid = false;
   if (_brought_up && (_tx_pwr_offset_steps != 0 || _tx_pwr_override >= 0))
     apply_tx_power_current(/*full=*/true);
+  /* dis_cca is sticky — the channel set rewrote the BB CCA registers, so
+   * re-assert the disable if it was armed. */
+  if (_brought_up && _cca_disabled)
+    apply_cca_mode_locked(true);
 }
 
 void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {

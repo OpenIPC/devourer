@@ -31,7 +31,7 @@ void delay_us(uint32_t us) {
 }
 } /* namespace */
 
-HalmacJaguar2Fw::HalmacJaguar2Fw(RtlUsbAdapter device, Logger_t logger,
+HalmacJaguar2Fw::HalmacJaguar2Fw(RtlAdapter device, Logger_t logger,
                                  ChipVariant variant)
     : _device{device}, _logger{std::move(logger)}, _variant{variant} {}
 

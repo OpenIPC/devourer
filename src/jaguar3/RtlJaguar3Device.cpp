@@ -30,7 +30,7 @@ static constexpr uint8_t JAGUAR3_TXPWR_REF_BASE = 0x4b;
  * setting a default. */
 static constexpr uint8_t JAGUAR3_TXPWR_REF_BASE_8822C = 0x28;
 
-RtlJaguar3Device::RtlJaguar3Device(RtlUsbAdapter device, Logger_t logger,
+RtlJaguar3Device::RtlJaguar3Device(RtlAdapter device, Logger_t logger,
                                    jaguar3::ChipVariant variant,
                                    devourer::DeviceConfig cfg)
     : _device{device}, _cfg{std::move(cfg)}, _logger{logger},

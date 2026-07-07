@@ -40,7 +40,7 @@
 #if defined(DEVOURER_HAVE_JAGUAR3)
 #include "jaguar3/RtlJaguar3Device.h"
 #endif
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SignalStop.h"
 #include "UsbOpen.h"
 #if defined(DEVOURER_HAVE_PCIE)
@@ -405,7 +405,7 @@ int main(int argc, char **argv) {
           if (reads <= 20 || (reads % 100) == 0) {
             char hex[64 * 2 + 1] = {0};
             /* Explicit template arg so MSVC's `windows.h` `min` macro doesn't
-             * mangle this — same pattern as RtlUsbAdapter.cpp:435. */
+             * mangle this — same pattern as RtlAdapter.cpp:435. */
             int hex_len = std::min<int>(actual, 32);
             for (int k = 0; k < hex_len; ++k) {
               static const char hd[] = "0123456789abcdef";

@@ -39,7 +39,7 @@
 
 #include <cstdint>
 
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "logger.h"
 
 namespace devourer {
@@ -53,7 +53,7 @@ class BbDbgportReader {
   static constexpr uint16_t kDbgPortSelectorReg = 0x08FC;
   static constexpr uint16_t kDbgPortReadbackReg = 0x0FA0;
 
-  BbDbgportReader(RtlUsbAdapter& device, Logger_t logger);
+  BbDbgportReader(RtlAdapter& device, Logger_t logger);
 
   /* Save 0x8FC, write `selector`, read 0xFA0, restore 0x8FC. Returns the
    * 32-bit value read from 0xFA0. Pre-condition: caller has already
@@ -78,7 +78,7 @@ class BbDbgportReader {
   bool is_wedged() const { return _wedged; }
 
  private:
-  RtlUsbAdapter& _device;
+  RtlAdapter& _device;
   Logger_t _logger;
   bool _wedged = false;
 };

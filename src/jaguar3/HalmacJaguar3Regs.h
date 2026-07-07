@@ -15,7 +15,7 @@
  * minimal-subset philosophy. Only what HalmacJaguar3Fw uses lives here.
  *
  * Several of these names (REG_CR, REG_BCN_CTRL, ...) are also #define macros in
- * the Realtek hal_com_reg.h pulled in via RtlUsbAdapter.h. The preprocessor
+ * the Realtek hal_com_reg.h pulled in via RtlAdapter.h. The preprocessor
  * ignores namespaces, so we #undef them first and re-introduce them as scoped
  * constexpr constants. This header is included ONLY by HalmacJaguar3Fw.cpp (which
  * uses no other definition of these names), so the #undef is local and safe. */

@@ -8,7 +8,7 @@
 #include "logger.h"
 #include "IRtlDevice.h"
 #include "TxMode.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "HalJaguar2.h"
 #include "HalmacJaguar2MacInit.h"
@@ -34,7 +34,7 @@
  * Jaguar3 8822C/8822E HAL. */
 class RtlJaguar2Device : public IRtlDevice {
 public:
-  RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger,
+  RtlJaguar2Device(RtlAdapter device, Logger_t logger,
                    jaguar2::ChipVariant variant = jaguar2::ChipVariant::C8822B,
                    devourer::DeviceConfig cfg = {});
   ~RtlJaguar2Device() override;
@@ -141,7 +141,7 @@ public:
   }
 
 private:
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   const devourer::DeviceConfig _cfg;
   /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
   devourer::RxQualityAccumulator _rxq;

@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #include "logger.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "ChipVariant.h"
 
@@ -23,7 +23,7 @@ namespace jaguar3 {
  * NB_* registers below (SDR-validated). */
 class RadioManagementJaguar3 {
 public:
-  RadioManagementJaguar3(RtlUsbAdapter device, Logger_t logger,
+  RadioManagementJaguar3(RtlAdapter device, Logger_t logger,
                          ChipVariant variant = ChipVariant::C8822C,
                          const devourer::DeviceConfig &cfg = {});
 
@@ -155,7 +155,7 @@ private:
    * bracket. */
   void apply_rxbb(ChannelWidth_t bwmode);
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   devourer::DeviceConfig _cfg; /* dump_canary / hop_prof / nb_dac / tx rf_bw */
   Logger_t _logger;
   ChipVariant _variant;

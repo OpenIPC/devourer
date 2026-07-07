@@ -24,7 +24,7 @@ uint32_t bshift(uint32_t mask) {
 }
 } /* namespace */
 
-Halrf8822b::Halrf8822b(RtlUsbAdapter device, Logger_t logger, uint8_t cut,
+Halrf8822b::Halrf8822b(RtlAdapter device, Logger_t logger, uint8_t cut,
                        bool is_2t2r)
     : _device{std::move(device)}, _logger{std::move(logger)}, _cut{cut},
       _2t2r{is_2t2r} {}
@@ -680,12 +680,12 @@ void Halrf8822b::iqk_trigger(bool band2g) {
 #if defined(DEVOURER_HAVE_JAGUAR2_8821C)
 /* Defined in Halrf8821c.cpp. */
 std::unique_ptr<Jaguar2Calibration>
-make_calibration_8821c(RtlUsbAdapter device, Logger_t logger, uint8_t cut,
+make_calibration_8821c(RtlAdapter device, Logger_t logger, uint8_t cut,
                        bool is_2t2r);
 #endif
 
 std::unique_ptr<Jaguar2Calibration>
-make_jaguar2_calibration(ChipVariant variant, RtlUsbAdapter device,
+make_jaguar2_calibration(ChipVariant variant, RtlAdapter device,
                          Logger_t logger, uint8_t cut, bool is_2t2r) {
 #if defined(DEVOURER_HAVE_JAGUAR2_8821C)
   if (variant == ChipVariant::C8821C)

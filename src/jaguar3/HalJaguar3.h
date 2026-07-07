@@ -5,7 +5,7 @@
 
 #include "AdapterHealth.h"
 #include "logger.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "ChipVariant.h"
 #include "Jaguar3PhyTables.h"
@@ -25,7 +25,7 @@ namespace jaguar3 {
  * HalMAC port in HalmacJaguar3Fw. */
 class HalJaguar3 {
 public:
-  HalJaguar3(RtlUsbAdapter device, Logger_t logger,
+  HalJaguar3(RtlAdapter device, Logger_t logger,
            ChipVariant variant = ChipVariant::C8822C,
            const devourer::DeviceConfig &cfg = {});
 
@@ -195,7 +195,7 @@ private:
   uint8_t _efuse_cache[0x100];
   bool _efuse_cache_valid = false;
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   devourer::DeviceConfig _cfg; /* skip_iqk + calibration forward */
   Logger_t _logger;
   HalmacJaguar3Fw _fw;

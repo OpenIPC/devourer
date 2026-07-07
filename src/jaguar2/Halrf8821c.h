@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #include "logger.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "Jaguar2Calibration.h"
 
 namespace jaguar2 {
@@ -30,7 +30,7 @@ namespace jaguar2 {
  * pass with retries capped exactly as the vendor caps them. */
 class Halrf8821c : public Jaguar2Calibration {
 public:
-  Halrf8821c(RtlUsbAdapter device, Logger_t logger, uint8_t cut, bool is_2t2r);
+  Halrf8821c(RtlAdapter device, Logger_t logger, uint8_t cut, bool is_2t2r);
 
   /* phy_iq_calibrate_8821c entry (SW path). band2g: true=2.4G. */
   void iqk_trigger(bool band2g) override;
@@ -80,7 +80,7 @@ private:
   void iqk_init();
   void fill_iqk_report();
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   Logger_t _logger;
   uint8_t _cut;
   bool _2t2r;

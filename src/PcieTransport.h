@@ -28,16 +28,18 @@
  * DMA-coherent — no cache sync beyond compiler ordering (volatile BD access +
  * the strongly-ordered MMIO doorbell write). */
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 
+#include "RtlTransport.h"
 #include "logger.h"
 
 namespace devourer {
 
-class PcieTransport {
+class PcieTransport final : public IRtlTransport {
 public:
   /* TX queues, indexing _tx_rings. Order is fixed (ring register map). */
   enum Queue : int {
@@ -75,11 +77,48 @@ public:
                                              const Config &cfg);
   static std::shared_ptr<PcieTransport> Open(const std::string &bdf,
                                              Logger_t logger);
-  ~PcieTransport();
+  ~PcieTransport() override;
   PcieTransport(const PcieTransport &) = delete;
   PcieTransport &operator=(const PcieTransport &) = delete;
 
-  /* ---- register plane (BAR2 MMIO) ---- */
+  /* ---- IRtlTransport: register plane (BAR2 MMIO) ---- */
+  bool is_usb() const override { return false; }
+  uint8_t read8(uint16_t reg) override { return guarded_read<uint8_t>(reg); }
+  uint16_t read16(uint16_t reg) override { return guarded_read<uint16_t>(reg); }
+  uint32_t read32(uint16_t reg) override { return guarded_read<uint32_t>(reg); }
+  bool write8(uint16_t reg, uint8_t v) override { return guarded_write(reg, v); }
+  bool write16(uint16_t reg, uint16_t v) override { return guarded_write(reg, v); }
+  bool write32(uint16_t reg, uint32_t v) override { return guarded_write(reg, v); }
+  bool write_bytes(uint16_t reg, const uint8_t *p, size_t n) override {
+    /* MMIO burst: plain byte stores (the multi-byte users of this path — MAC
+     * address / key material — have no width side-effects). */
+    for (size_t i = 0; i < n; i++)
+      if (!guarded_write<uint8_t>(reg + static_cast<uint16_t>(i), p[i]))
+        return false;
+    return true;
+  }
+
+  /* ---- IRtlTransport: frame plane (88xx BD rings) ---- */
+  /* The ring is chosen from the tx-descriptor QSEL at buf[5] bits [4:0]
+   * (identical position on every 88xx descriptor this library builds); the
+   * `ep` hint is USB addressing and ignored. QSEL_BEACON -> BCN ring is the
+   * DLFW rsvd-page path, exactly rtw88's write_data_rsvd_page ->
+   * RTW_TX_QUEUE_BCN mapping. */
+  bool tx_async(uint8_t ep, uint8_t *buf, size_t len,
+                unsigned timeout_ms) override {
+    return tx_sync(ep, buf, len, static_cast<int>(timeout_ms)) >= 0;
+  }
+  int tx_sync(uint8_t ep, uint8_t *buf, size_t len, int timeout_ms) override;
+  void rx_loop(int buf_size, int n_xfers,
+               const std::function<void(const uint8_t *, int)> &on_data,
+               const std::function<bool()> &should_stop) override {
+    (void)buf_size; /* USB URB tuning; the ring depth is fixed at creation */
+    (void)n_xfers;
+    rx_poll_loop(on_data, should_stop);
+  }
+  void hci_setup() override { setup_trx_rings(); }
+  TxStats tx_stats() const override;
+
   volatile uint8_t *mmio() const { return _mmio; }
   size_t mmio_len() const { return _mmio_len; }
 
@@ -126,6 +165,27 @@ private:
     *reinterpret_cast<volatile T *>(_mmio + reg) = v;
   }
 
+  /* Register access with the USB-page guard: 0xFE00..0xFEFF is USB-only
+   * register space — undefined over MMIO. The jaguar users (0xFE5B/0xFE10/
+   * 0xFE11) are is_usb()-gated; catch any stragglers instead of poking a
+   * hole in the BAR. */
+  template <typename T> T guarded_read(uint16_t reg) {
+    if (reg >= 0xFE00) {
+      _logger->warn("read(0x{:04x}) on PCIe: USB-page register, returning 0",
+                    reg);
+      return 0;
+    }
+    return mr<T>(reg);
+  }
+  template <typename T> bool guarded_write(uint16_t reg, T v) {
+    if (reg >= 0xFE00) {
+      _logger->warn("write(0x{:04x}) on PCIe: USB-page register, dropped", reg);
+      return false;
+    }
+    mw<T>(reg, v);
+    return true;
+  }
+
   struct TxRing {
     volatile uint8_t *bd = nullptr; /* BD slots (16 B each) in the DMA slab */
     uint64_t bd_iova = 0;
@@ -160,6 +220,11 @@ private:
 
   uint8_t *_slab = nullptr; /* DMA slab VA (anonymous, VFIO-pinned) */
   size_t _slab_len = 0;
+
+  /* TX submission counters (TxStats.h contract, like the USB transport). */
+  std::atomic<uint64_t> _tx_submitted{0};
+  std::atomic<uint64_t> _tx_failed{0};
+  std::atomic<int> _tx_last_rc{0};
 
   TxRing _tx[Q_MAX];
   RxRing _rx;

@@ -11,7 +11,7 @@
  * 0x0204, H2CQ_CSR 0x1330, RQPN_CTRL_2 0x022C, ...).
  *
  * As in HalmacJaguar3Regs.h, several names collide with #defines from the
- * Realtek hal_com_reg.h pulled in via RtlUsbAdapter.h; #undef them first and
+ * Realtek hal_com_reg.h pulled in via RtlAdapter.h; #undef them first and
  * re-introduce as scoped constexpr. Included ONLY by HalmacJaguar2Fw.cpp. */
 #undef REG_SYS_FUNC_EN
 #undef REG_SYS_CLK_CTRL

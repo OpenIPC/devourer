@@ -5,7 +5,7 @@
 #include <utility>
 
 /* These names are also #define macros in the Realtek hal_com_reg.h pulled in via
- * RtlUsbAdapter.h; #undef them so the scoped constexpr below compile (this .cpp
+ * RtlAdapter.h; #undef them so the scoped constexpr below compile (this .cpp
  * uses no other definition of them). */
 #undef REG_RSV_CTRL
 #undef REG_RF_CTRL
@@ -243,7 +243,7 @@ bool is_10m(ChannelWidth_t bw) {
 }
 } /* namespace */
 
-HalmacJaguar2MacInit::HalmacJaguar2MacInit(RtlUsbAdapter device, Logger_t logger,
+HalmacJaguar2MacInit::HalmacJaguar2MacInit(RtlAdapter device, Logger_t logger,
                                            ChipVariant variant)
     : _device{std::move(device)}, _logger{std::move(logger)},
       _variant{variant} {}

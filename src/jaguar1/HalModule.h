@@ -10,7 +10,7 @@ extern "C"{
 }
 #include "PhydmWatchdog.h"
 #include "RadioManagementModule.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "logger.h"
 
@@ -39,7 +39,7 @@ enum odm_rf_config_type {
 };
 
 class HalModule {
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   devourer::DeviceConfig _cfg; /* phydm_watchdog gate + FirmwareManager forward */
   std::shared_ptr<EepromManager> _eepromManager;
   std::shared_ptr<RadioManagementModule> _radioManagementModule;
@@ -62,7 +62,7 @@ class HalModule {
   devourer::FwBootStatus _fwBoot;
 
 public:
-  HalModule(RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
+  HalModule(RtlAdapter device, std::shared_ptr<EepromManager> eepromManager,
             std::shared_ptr<RadioManagementModule> _radioManagementModule,
             Logger_t logger, const devourer::DeviceConfig &cfg = {});
   bool rtw_hal_init(SelectedChannel selectedChannel);

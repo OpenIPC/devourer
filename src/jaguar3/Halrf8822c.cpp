@@ -40,20 +40,20 @@ inline uint32_t mask_shift(uint32_t mask) {
 }
 } /* namespace */
 
-Halrf8822c::Halrf8822c(RtlUsbAdapter device, Logger_t logger)
+Halrf8822c::Halrf8822c(RtlAdapter device, Logger_t logger)
     : _device{device}, _logger{logger} {}
 #endif /* DEVOURER_HAVE_JAGUAR3_8822C */
 
 #if defined(DEVOURER_HAVE_JAGUAR3_8822E)
 /* Defined in Halrf8822e.cpp. */
 std::unique_ptr<Jaguar3Calibration>
-make_halrf_8822e(RtlUsbAdapter device, Logger_t logger,
+make_halrf_8822e(RtlAdapter device, Logger_t logger,
                  const devourer::DeviceConfig &cfg);
 #endif
 
 /* Calibration strategy factory: pick the per-generation halrf impl. */
 std::unique_ptr<Jaguar3Calibration>
-make_jaguar3_calibration(ChipVariant variant, RtlUsbAdapter device,
+make_jaguar3_calibration(ChipVariant variant, RtlAdapter device,
                          Logger_t logger, const devourer::DeviceConfig &cfg) {
 #if defined(DEVOURER_HAVE_JAGUAR3_8822E)
   if (variant == ChipVariant::C8822E)

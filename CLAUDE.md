@@ -42,12 +42,14 @@ PCIe sibling of the 8821CU — rides the same Jaguar2 HAL through a vfio-pci
 transport (`src/PcieTransport.{h,cpp}`): registers are BAR2 MMIO (same
 0x0000..0xFFFF space the USB vendor-control path addresses), TX/RX are the
 88xx buffer-descriptor DMA rings (rtw88 pci.{c,h} layout), RX completion is
-polled (no interrupts). `RtlUsbAdapter` is bus-dual — an `_mmio` backend
-dispatches register I/O and the bulk TX/RX entry points, so the ~165 HAL call
-sites are untouched; the few genuinely bus-specific bring-up steps gate on
-`is_usb()` (PCIe power-seq rows, PQ map, no USB RX-agg, no DLFW 512-pad, RCR
-bits 11-13 cleared — on this MAC generation they are TA_BCN/RPFM_CAM, not the
-Jaguar1 accept bits, and TA_BCN drops every beacon). Factory:
+polled by default (MSI+eventfd wakeups when available). USB and PCIe are
+independent transports behind `devourer::IRtlTransport`
+(`src/RtlTransport.h`): `UsbTransport` (libusb) and `PcieTransport` each
+implement the register + frame planes, and the bus-neutral `RtlAdapter` value
+type the HALs hold forwards to whichever it was built with. The few genuinely
+bus-specific bring-up steps gate on `is_usb()` (PCIe power-seq rows, PQ map,
+no USB RX-agg, no DLFW 512-pad) or ride `hci_setup()` (pre-power TRX ring
+programming, no-op on USB). Factory:
 `WiFiDriver::CreateRtlDevicePcie(PcieTransport::Open(bdf, logger))` — the
 caller owns vfio like it owns libusb. Demos: `DEVOURER_PCIE_BDF=0000:01:00.0`
 on rxdemo and txdemo (TX = the data/MGMT BD rings behind the unchanged
@@ -288,8 +290,10 @@ Generation-agnostic core in `src/` (always compiled; depends on no HAL):
 - `WiFiDriver` — the factory (`CreateRtlDevice`).
 - `DeviceConfig.h` — construction-time configuration struct; every component
   copies the sub-struct it consumes at construction.
-- `RtlUsbAdapter` — libusb wrapper (vendor control + bulk transfers); a
-  copyable value type shared by every component.
+- `RtlAdapter` — the bus-neutral register/frame accessor; a copyable value
+  type shared by every component, forwarding to the `IRtlTransport` it was
+  built with (`UsbTransport` = libusb vendor control + bulk; `PcieTransport` =
+  BAR2 MMIO + DMA rings). `RtlUsbAdapter` is a deprecated alias.
 - `Radiotap.c` — radiotap iterator. TX buffers passed to `send_packet` **must**
   begin with a radiotap header; rate/MCS/VHT/STBC/LDPC/SGI/bandwidth are read
   from it.

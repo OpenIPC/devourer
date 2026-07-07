@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #include "logger.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "Jaguar3Calibration.h"
 
@@ -18,12 +18,12 @@ namespace jaguar3 {
  * across boots (the cause of the flaky structured-path RX).
  *
  * This is a large multi-part port. The phydm dm_struct is replaced by a thin
- * shim over RtlUsbAdapter: BB/MAC registers via rtw_read32/write32, RF registers
+ * shim over RtlAdapter: BB/MAC registers via rtw_read32/write32, RF registers
  * via the 8822C direct window (config_phydm_*_rf_reg_8822c: BB[0x3c00|0x4c00 +
  * (addr<<2)], 20-bit). The dm->IQK_info calibration state lives in IqkInfo. */
 class Halrf8822c : public Jaguar3Calibration {
 public:
-  Halrf8822c(RtlUsbAdapter device, Logger_t logger);
+  Halrf8822c(RtlAdapter device, Logger_t logger);
 
   /* phy_iq_calibrate_8822c entry — runs the full IQK (backup -> setup -> LOK/
    * TXK/RXK per path -> restore -> fill report). bw selects NB-IQK (5/10 MHz);
@@ -156,7 +156,7 @@ private:
   void restore_mac_bb(const uint32_t *mac, const uint32_t *bb);
   void restore_rf(const uint32_t rf[][2]);
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   Logger_t _logger;
 
   /* pwr_track thermal reference (per RF path), captured on the first pwr_track()

@@ -5,7 +5,7 @@
 #include <memory>
 
 #include "ChipVariant.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "logger.h"
 
 namespace jaguar2 {
@@ -32,7 +32,7 @@ public:
  * from HalJaguar2::chip_version(), so this is called during bring-up (after
  * read_chip_version), not at device construction. */
 std::unique_ptr<Jaguar2Calibration>
-make_jaguar2_calibration(ChipVariant variant, RtlUsbAdapter device,
+make_jaguar2_calibration(ChipVariant variant, RtlAdapter device,
                          Logger_t logger, uint8_t cut, bool is_2t2r);
 
 } /* namespace jaguar2 */

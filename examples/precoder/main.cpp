@@ -53,7 +53,7 @@
   #include <libusb-1.0/libusb.h>
 #endif
 
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
 #include "env_config.h"

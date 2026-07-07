@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #include "logger.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "ChipVariant.h"
 
@@ -18,7 +18,7 @@ namespace jaguar2 {
  * chips diverge. */
 class HalmacJaguar2MacInit {
 public:
-  HalmacJaguar2MacInit(RtlUsbAdapter device, Logger_t logger,
+  HalmacJaguar2MacInit(RtlAdapter device, Logger_t logger,
                        ChipVariant variant = ChipVariant::C8822B);
 
   /* Pinmux / LED / GPIO + BB-RF disabled. Runs BEFORE power_on. */
@@ -69,7 +69,7 @@ private:
   void init_edca_cfg();
   void init_wmac_cfg();
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   Logger_t _logger;
   ChipVariant _variant;
   uint16_t _rsvd_boundary = 0;

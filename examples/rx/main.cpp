@@ -18,7 +18,7 @@
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SignalStop.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"

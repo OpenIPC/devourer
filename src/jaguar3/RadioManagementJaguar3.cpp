@@ -17,7 +17,7 @@ extern "C" {
 namespace jaguar3 {
 
 RadioManagementJaguar3::RadioManagementJaguar3(
-    RtlUsbAdapter device, Logger_t logger, ChipVariant variant,
+    RtlAdapter device, Logger_t logger, ChipVariant variant,
     const devourer::DeviceConfig &cfg)
     : _device{device}, _cfg{cfg}, _logger{std::move(logger)},
       _variant{variant} {}

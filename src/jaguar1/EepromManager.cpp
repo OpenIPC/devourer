@@ -25,7 +25,7 @@ static int devourer_strcaseeq(const char *a, const char *b) {
   return *a == *b;
 }
 
-EepromManager::EepromManager(RtlUsbAdapter device, Logger_t logger,
+EepromManager::EepromManager(RtlAdapter device, Logger_t logger,
                              const devourer::DeviceConfig &cfg)
     : _device{device}, _logger{logger}, _tuning{cfg.tuning},
       _log_txpwr{cfg.debug.log_txpwr} {
@@ -177,7 +177,7 @@ static bool is_rtl8821a_pid(uint16_t vid, uint16_t pid) {
   }
 }
 
-void EepromManager::read_chip_version_8812a(RtlUsbAdapter device) {
+void EepromManager::read_chip_version_8812a(RtlAdapter device) {
   uint32_t value32 = device.rtw_read32(REG_SYS_CFG);
   _logger->info("read_chip_version_8812a SYS_CFG(0x{:X})=0x{:08X}", REG_SYS_CFG,
                 value32);
@@ -1569,7 +1569,7 @@ void EepromManager::Hal_EfuseParseIDCode8812A() {
 #define EEPROM_DEFAULT_VERSION 0
 #define EEPROM_VERSION_8812 0xC4
 
-uint8_t EepromManager::Hal_ReadPROMVersion8812A(RtlUsbAdapter device,
+uint8_t EepromManager::Hal_ReadPROMVersion8812A(RtlAdapter device,
                                                 uint8_t *efuse_eeprom_data) {
   uint8_t EEPROMVersion;
   if (device.AutoloadFailFlag) {
@@ -1589,7 +1589,7 @@ uint8_t EepromManager::Hal_ReadPROMVersion8812A(RtlUsbAdapter device,
 #define EEPROM_RF_BOARD_OPTION_8812 0xC1
 #define EEPROM_DEFAULT_BOARD_OPTION 0x00
 
-uint8_t EepromManager::Hal_ReadTxPowerInfo8812A(RtlUsbAdapter device,
+uint8_t EepromManager::Hal_ReadTxPowerInfo8812A(RtlAdapter device,
                                                 uint8_t *efuse_eeprom_data) {
   uint8_t EEPROMRegulatory;
   /* 2010/10/19 MH Add Regulator recognize for CU. */

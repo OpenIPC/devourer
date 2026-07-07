@@ -361,7 +361,7 @@ inline bool is_5m(ChannelWidth_t b) { return b == CHANNEL_WIDTH_5; }
 inline bool is_10m(ChannelWidth_t b) { return b == CHANNEL_WIDTH_10; }
 } /* namespace */
 
-HalmacJaguar3MacInit::HalmacJaguar3MacInit(RtlUsbAdapter device, Logger_t logger)
+HalmacJaguar3MacInit::HalmacJaguar3MacInit(RtlAdapter device, Logger_t logger)
     : _device{device}, _logger{logger} {}
 
 /* enable_bb_rf_88xx */

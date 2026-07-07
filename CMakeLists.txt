@@ -109,8 +109,12 @@ add_library(devourer
     src/Radiotap.c
     src/RadiotapBuilder.cpp
     src/RadiotapBuilder.h
-    src/RtlUsbAdapter.cpp
-    src/RtlUsbAdapter.h
+    src/RtlTransport.h
+    src/RtlAdapter.cpp
+    src/RtlAdapter.h
+    src/RtlUsbAdapter.h # compat alias shim (RtlUsbAdapter = RtlAdapter)
+    src/UsbTransport.cpp
+    src/UsbTransport.h
     src/UsbDeviceLock.cpp
     src/UsbDeviceLock.h
     src/UsbOpen.cpp

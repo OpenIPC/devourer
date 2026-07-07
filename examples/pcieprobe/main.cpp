@@ -24,7 +24,7 @@
 
 #include "Event.h"
 #include "PcieTransport.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "logger.h"
 
 #include "jaguar2/ChipVariant.h"
@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
   }
 
   /* ---- stage id (M0): pure MMIO register plane, no power, no DMA ---- */
-  RtlUsbAdapter adapter(transport, logger, {});
+  RtlAdapter adapter(transport, logger, {});
   const uint8_t chip_id = adapter.rtw_read8(0x00FC);
   const uint32_t sys_cfg1 = adapter.rtw_read32(0x00F0);
   const uint8_t cr = adapter.rtw_read8(0x0100);

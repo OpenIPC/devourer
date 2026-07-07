@@ -60,7 +60,7 @@
 
 #include "RxPacket.h"
 #include "RadiotapBuilder.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif

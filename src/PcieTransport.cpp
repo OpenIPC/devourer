@@ -18,6 +18,8 @@
 
 #include <atomic>
 
+#include "Event.h"
+
 namespace devourer {
 
 namespace {
@@ -512,6 +514,51 @@ void PcieTransport::setup_trx_rings() {
   _logger->info("PcieTransport: TRX rings programmed (RXBD {} slots @ IOVA "
                 "0x{:x})",
                 _rx.len, _rx.bd_iova);
+}
+
+int PcieTransport::tx_sync(uint8_t ep, uint8_t *buf, size_t len,
+                           int timeout_ms) {
+  (void)ep; /* USB addressing; the ring is chosen by descriptor QSEL */
+  if (len < 48) {
+    _tx_failed.fetch_add(1, std::memory_order_relaxed);
+    return -1;
+  }
+  const uint8_t qsel = buf[5] & 0x1F;
+  int queue;
+  switch (qsel) {
+  case 0x10: /* QSEL_BEACON — rsvd page / DLFW */
+    queue = Q_BCN;
+    break;
+  case 0x11: /* high */
+    queue = Q_HI0;
+    break;
+  case 0x12: /* mgmt (the monitor-inject descriptor) */
+    queue = Q_MGMT;
+    break;
+  case 0x13: /* h2c command */
+    queue = Q_H2C;
+    break;
+  default: /* AC data */
+    queue = Q_BE;
+    break;
+  }
+  _tx_submitted.fetch_add(1, std::memory_order_relaxed);
+  int rc = tx_submit_sync(queue, buf, len, timeout_ms);
+  if (rc < 0) {
+    _tx_failed.fetch_add(1, std::memory_order_relaxed);
+    _tx_last_rc.store(rc, std::memory_order_relaxed);
+    devourer::Ev(_logger->events(), "tx.fail").f("rc", rc).f("timeout", true);
+  }
+  return rc;
+}
+
+devourer::TxStats PcieTransport::tx_stats() const {
+  devourer::TxStats s;
+  s.submitted = _tx_submitted.load(std::memory_order_relaxed);
+  s.failed = _tx_failed.load(std::memory_order_relaxed);
+  s.last_error_rc = _tx_last_rc.load(std::memory_order_relaxed);
+  s.last_was_timeout = s.failed != 0;
+  return s;
 }
 
 int PcieTransport::tx_submit_sync(int queue, const uint8_t *buf, size_t len,

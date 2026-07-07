@@ -49,7 +49,7 @@ static constexpr uint16_t RF_LNA_LOW_GAIN_3 = 0x58;
 static constexpr uint16_t rC_TxScale_8814 = 0x181C;
 static constexpr uint16_t rD_TxScale_8814 = 0x1A1C;
 
-RtlJaguarDevice::RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger,
+RtlJaguarDevice::RtlJaguarDevice(RtlAdapter device, Logger_t logger,
                                  devourer::DeviceConfig cfg)
     : _cfg{std::move(cfg)},
       _eepromManager{std::make_shared<EepromManager>(device, logger, _cfg)},

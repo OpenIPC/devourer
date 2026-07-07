@@ -54,7 +54,7 @@ auto since(std::chrono::time_point<clock_t, duration_t> const &start) {
   return std::chrono::duration_cast<result_t>(clock_t::now() - start);
 }
 
-FirmwareManager::FirmwareManager(RtlUsbAdapter device, Logger_t logger,
+FirmwareManager::FirmwareManager(RtlAdapter device, Logger_t logger,
                                  const devourer::DeviceConfig &cfg)
     : _device{device}, _logger{logger}, _tuning{cfg.tuning} {}
 

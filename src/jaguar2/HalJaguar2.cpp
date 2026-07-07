@@ -184,7 +184,7 @@ const PwrCfg kPwrOff8821cPcie[] = {
 };
 #endif /* DEVOURER_HAVE_PCIE */
 
-void run_pwr_seq(RtlUsbAdapter &dev, const PwrCfg *seq, uint32_t poll_max,
+void run_pwr_seq(RtlAdapter &dev, const PwrCfg *seq, uint32_t poll_max,
                  bool poll_fatal) {
   /* rtw88 rtw_pwr_cmd_polling PCIe quirk: a timed-out POLL step is retried
    * once after toggling BIT_PFM_WOWL in REG_SYS_PW_CTRL (0x04[3]) set->clear —
@@ -221,7 +221,7 @@ void run_pwr_seq(RtlUsbAdapter &dev, const PwrCfg *seq, uint32_t poll_max,
 }
 } /* namespace */
 
-HalJaguar2::HalJaguar2(RtlUsbAdapter device, Logger_t logger,
+HalJaguar2::HalJaguar2(RtlAdapter device, Logger_t logger,
                        ChipVariant variant, const devourer::DeviceConfig &cfg)
     : _device{std::move(device)}, _logger{std::move(logger)}, _cfg{cfg},
       _variant{variant}, _tables{make_jaguar2_phy_tables(variant)} {}

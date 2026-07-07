@@ -3,7 +3,7 @@
 
 #include "EepromManager.h"
 #include "RfPath.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "logger.h"
 
@@ -54,7 +54,7 @@ class RadioManagementModule;
  */
 class PowerTracking8812a {
 public:
-  PowerTracking8812a(RtlUsbAdapter device,
+  PowerTracking8812a(RtlAdapter device,
                      std::shared_ptr<EepromManager> eepromManager,
                      RadioManagementModule *radio, Logger_t logger);
 
@@ -79,7 +79,7 @@ public:
   void ClearState();
 
 private:
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   std::shared_ptr<EepromManager> _eepromManager;
   RadioManagementModule *_radio; /* non-owning back-pointer for RF reads */
   Logger_t _logger;

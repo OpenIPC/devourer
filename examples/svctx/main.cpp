@@ -57,7 +57,7 @@
 #endif
 
 #include "RadiotapBuilder.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
 #include "env_config.h"

@@ -3,17 +3,17 @@
 
 #include "AdapterHealth.h"
 #include "HalVerDef.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "logger.h"
 
 class FirmwareManager {
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   Logger_t _logger;
   devourer::DeviceConfig::Tuning _tuning; /* fwdl_8814 / fwdl_8814_chunk */
   devourer::FwBootStatus _boot;           /* outcome of the last download */
 
 public:
-  FirmwareManager(RtlUsbAdapter device, Logger_t logger,
+  FirmwareManager(RtlAdapter device, Logger_t logger,
                   const devourer::DeviceConfig &cfg = {});
   /* Downloads the NIC firmware blob matched to `ic_type`. Header parsing /
    * download protocol are common across Jaguar (8812 / 8811 / 8814) — only the

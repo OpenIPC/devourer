@@ -40,6 +40,9 @@
 #include <vector>
 
 #if defined(_MSC_VER)
+  /* libusb.h explicitly: the pre-seam RtlUsbAdapter.h used to pull it in
+   * for every consumer; the bus-neutral RtlAdapter.h no longer does. */
+  #include <libusb.h>
   #include <io.h>
   #include <fcntl.h>
   #include <windows.h>

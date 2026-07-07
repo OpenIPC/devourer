@@ -19,13 +19,14 @@ RF-quiet rooms) that make naive startup benchmarks lie.
 ## The numbers
 
 From a **true cold plug** (VBUS power-cycled before every rep, 2.4 GHz
-ch 6, median of 2, rep spread < 1.5%), against the vendor out-of-tree
-drivers built from the trees under `reference/` for the same host kernel
-— every cell on host silicon and host USB, no VM (virtualized USB adds
-latency that would contaminate either column):
+ch 6, median of 2–4 reps), against the vendor out-of-tree drivers built
+from the trees under `reference/` for the same host kernel — every cell
+on host silicon and host USB, no VM (virtualized USB adds latency that
+would contaminate either column):
 
 | chip | devourer | vendor kernel driver |
 |---|---|---|
+| RTL8812AU | **1.7 s** | 2.1 s (88XXau) |
 | RTL8814AU | **5.7 s** | 6.9 s (88XXau) |
 | RTL8821AU (Archer T2U+) | **2.2 s** | 5.3 s (88XXau) |
 | RTL8822BU (Archer T3U) | **7.2 s** | 11.1 s (rtl88x2bu) |
@@ -49,6 +50,7 @@ pay the full bring-up + calibration bill. Same harness, warm
 
 | chip | devourer warm | kernel warm | kernel cold |
 |---|---|---|---|
+| RTL8812AU | 1.7 s | 2.0 s | 2.1 s |
 | RTL8814AU | 5.9 s | 6.1 s | 6.9 s |
 | RTL8821AU | 2.5 s | 2.4 s | 5.3 s |
 | RTL8822BU | 7.4 s | 11.2 s | 11.1 s |
@@ -58,6 +60,11 @@ pay the full bring-up + calibration bill. Same harness, warm
 
 The 8821AU's kernel driver even edges ahead by ~60 ms once the chip is
 warm — but warm is not what a user plugging in an adapter experiences.
+One more `authorized`-toggle caveat, seen on the 8812AU: an init from
+the toggled-warm state can come up RX-deaf with a fully green init
+(1 of 8 warm reps; 0 of 8 VBUS-cold reps) — a stuck-chip-state
+artifact of the toggle, so treat a deaf warm rep as suspect before
+blaming the driver or the unit.
 A benchmark that only `rmmod`s or unbinds between reps (never cutting
 VBUS) flatters the kernel driver and *understates* the devourer
 advantage at first plug, where the margins run 1.2–2.9×. Devourer's own
@@ -90,7 +97,7 @@ sudo python3 tests/bench_init.py --kernel-host --traffic-from 8812
 cells in a pinned-kernel VM — useful for driver-behaviour comparisons,
 but not for startup timing: virtualized USB adds latency to every stage.)
 
-Two things the harness needs to be honest:
+Three things the harness needs to be honest:
 
 - **A traffic source.** Every "first frame" marker — devourer's and the
   kernel cell's tcpdump alike — needs a frame on the bench channel. In an
@@ -102,8 +109,22 @@ Two things the harness needs to be honest:
 - **A real cold cycle when comparing drivers.** The harness's per-rep
   `authorized`-toggle re-enumerates the device but leaves calibration
   state in the chip (= the "warm" table above). For first-plug numbers,
-  VBUS-cycle the port between reps (`uhubctl -l HUB -p PORT -a off/on`)
-  — that's what the headline table uses.
+  VBUS-cycle the port between reps — that's what the headline table
+  uses. `REGRESS_VBUS_MAP="<sysfs_id>=<hubloc>:<port>"` (comma list)
+  makes `bench_init.py`/`regress.py` do it automatically for DUTs on
+  uhubctl-switchable hub ports; `tests/bench_8812au_row.sh` is the
+  worked example. Never map an xhci root port — uhubctl on a root port
+  has wedged a device here beyond anything but a machine power-off.
+- **No in-tree kernel driver racing the timed window.** Modern kernels
+  ship in-tree rtw88 USB drivers for every chip devourer supports; udev
+  auto-loads them by modalias at every (re-)enumeration, and their probe
+  runs a firmware download into the chip before the driver under test
+  ever opens it. `modprobe -r` does not survive the next re-enumeration
+  — write a temp blacklist (`/etc/modprobe.d/zz-temp-blacklist-*.conf`)
+  for the DUT's module for the session. This also biases any
+  "first init from cold" debugging, not just timing: a failed rtw88
+  probe (e.g. on a marginal unit) leaves the chip half-wedged mid-fwdl,
+  and whatever the next driver does runs from that state.
 
 Per-stage numbers come from the `init-timing: <scope>.<stage> = N ms`
 lines the library emits (`src/InitTimer.h`); `bench_init.py` aggregates

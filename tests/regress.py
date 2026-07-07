@@ -578,7 +578,7 @@ _RF_RESET_ENABLED: bool = True
 
 def usb_port_power_cycle(dut: Dut, settle_s: float = 2.0) -> None:
     """Toggle the USB port-level `authorized` flag to force a chip-power
-    cycle on `dut`.
+    cycle on `dut` — or, when mapped in REGRESS_VBUS_MAP, cut real VBUS.
 
     Why this exists: `libusb_reset_device` and sysfs unbind/rebind do
     NOT reset Realtek RF analog state — values written to RF registers
@@ -588,6 +588,15 @@ def usb_port_power_cycle(dut: Dut, settle_s: float = 2.0) -> None:
     RF[A]/[B] 0x18 retain band-select bits from the previous session,
     making per-cell comparisons unreliable.
 
+    The `authorized` toggle still leaves the chip warm in the
+    startup-time sense (calibration state survives — see
+    docs/startup-time.md "Cold chip vs warm chip"). For genuine
+    first-plug cold, set REGRESS_VBUS_MAP="<sysfs_id>=<hubloc>:<port>"
+    (comma list; e.g. "3-2.2=3-2:2") for DUTs on uhubctl-switchable
+    hub ports — those DUTs get a real VBUS off/on instead. NEVER map
+    xhci root ports on this rig (uhubctl on a root port has wedged a
+    device to the point of machine power-off).
+
     Skipped silently (with stderr note) if the sysfs node is missing
     or unwritable — the cell still runs, just from whatever state the
     chip happened to be in. Skipped entirely when `_RF_RESET_ENABLED`
@@ -595,6 +604,26 @@ def usb_port_power_cycle(dut: Dut, settle_s: float = 2.0) -> None:
     """
     if not _RF_RESET_ENABLED:
         return
+    for ent in os.environ.get("REGRESS_VBUS_MAP", "").split(","):
+        if ent.startswith(dut.sysfs_id + "="):
+            loc, _, port = ent.split("=", 1)[1].partition(":")
+            subprocess.run(["uhubctl", "-l", loc, "-p", port, "-a", "off"],
+                           capture_output=True)
+            time.sleep(5.0)
+            subprocess.run(["uhubctl", "-l", loc, "-p", port, "-a", "on"],
+                           capture_output=True)
+            probe = f"/sys/bus/usb/devices/{dut.sysfs_id}/idProduct"
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                if os.path.exists(probe):
+                    break
+                time.sleep(0.5)
+            else:
+                sys.stderr.write(
+                    f"usb_port_power_cycle({dut.sysfs_id}): no re-enumeration "
+                    f"after VBUS cycle on {loc}:{port}\n")
+            time.sleep(settle_s)
+            return
     auth_path = f"/sys/bus/usb/devices/{dut.sysfs_id}/authorized"
     try:
         with open(auth_path, "w") as f:

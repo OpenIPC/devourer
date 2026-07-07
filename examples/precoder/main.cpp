@@ -56,6 +56,7 @@
 #include "RtlUsbAdapter.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "env_config.h"
 #include "logger.h"
 
 #define USB_VENDOR_ID 0x0bda
@@ -203,7 +204,8 @@ int main(int argc, char **argv) {
   }
 
   WiFiDriver wifi_driver{logger};
-  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock);
+  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+                                               devourer_config_from_env());
 
   // 2.4 GHz channel 6 is the plan's matrix-validated cell for these chips.
   int channel = 6;

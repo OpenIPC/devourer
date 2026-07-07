@@ -60,7 +60,8 @@ public:
  * added in a later phase; until then both variants return the 8822c impl.) */
 std::unique_ptr<Jaguar3Calibration>
 make_jaguar3_calibration(ChipVariant variant, RtlUsbAdapter device,
-                         Logger_t logger);
+                         Logger_t logger,
+                         const devourer::DeviceConfig &cfg = {});
 
 } /* namespace jaguar3 */
 

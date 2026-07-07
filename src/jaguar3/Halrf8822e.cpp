@@ -35,8 +35,10 @@ uint32_t mask_shift(uint32_t mask) {
 }
 } /* namespace */
 
-Halrf8822e::Halrf8822e(RtlUsbAdapter device, Logger_t logger)
-    : _device{device}, _logger{logger} {}
+Halrf8822e::Halrf8822e(RtlUsbAdapter device, Logger_t logger,
+                       const devourer::DeviceConfig &cfg)
+    : _device{device}, _logger{logger}, _skip_txgapk{cfg.tuning.skip_txgapk},
+      _gaintab_dbg{cfg.debug.gaintab_dbg} {}
 
 /* --- dm_struct register-access shim (mirrors Halrf8822c) --- */
 uint32_t Halrf8822e::bb_get(uint16_t addr, uint32_t mask) {
@@ -1060,7 +1062,7 @@ void Halrf8822e::phy_iq_calibrate(ChannelWidth_t bw, uint8_t channel) {
 
   /* TX gain calibration — sets the 8822E TX gain table (the gross 5 GHz gain).
    * Runs after IQK on the tuned channel (halrf_init order: IQK then TXGAPK). */
-  if (const char *e = std::getenv("DEVOURER_SKIP_TXGAPK"); e && *e == '1')
+  if (_skip_txgapk)
     _logger->info("Jaguar3(8822e): TXGAPK SKIPPED (debug)");
   else
     do_txgapk(channel);
@@ -1521,8 +1523,7 @@ void Halrf8822e::txgapk_save_all() {
       }
       rf_write(path, 0x18, 0xfffff, rf18);
       bb_set(three_wire[path], 0x00000003, 0x3);
-      if (const char *e = std::getenv("DEVOURER_GAINTAB_DBG");
-          e && *e == '1' && path == 0)
+      if (_gaintab_dbg && path == 0)
         _logger->info("Jaguar3(8822e): gaintab band{} p0 = {:03x} {:03x} {:03x} "
                       "{:03x} {:03x} {:03x} {:03x} {:03x} {:03x} {:03x} {:03x}",
                       band, _txgapk.rf3f_bp[band][0][0] & 0xfff,
@@ -1634,9 +1635,10 @@ void Halrf8822e::do_txgapk(uint8_t channel) {
 }
 
 /* Maker, dispatched from make_jaguar3_calibration() in Halrf8822c.cpp. */
-std::unique_ptr<Jaguar3Calibration> make_halrf_8822e(RtlUsbAdapter device,
-                                                     Logger_t logger) {
-  return std::make_unique<Halrf8822e>(device, logger);
+std::unique_ptr<Jaguar3Calibration>
+make_halrf_8822e(RtlUsbAdapter device, Logger_t logger,
+                 const devourer::DeviceConfig &cfg) {
+  return std::make_unique<Halrf8822e>(device, logger, cfg);
 }
 
 } /* namespace jaguar3 */

@@ -14,6 +14,8 @@ typedef unsigned short ushort;
 class EepromManager {
   RtlUsbAdapter _device;
   Logger_t _logger;
+  devourer::DeviceConfig::Tuning _tuning; /* regulation / txpwr_by_rate */
+  bool _log_txpwr = false;                /* debug.log_txpwr */
 
   uint8_t efuse_eeprom_data[EFUSE_MAP_LEN_JAGUAR]; /*92C:256bytes, 88E:512bytes,
                                      we use union set (512bytes)*/
@@ -29,7 +31,8 @@ class EepromManager {
   uint8_t external_lna_5g;
 
 public:
-  EepromManager(RtlUsbAdapter device, Logger_t logger);
+  EepromManager(RtlUsbAdapter device, Logger_t logger,
+                const devourer::DeviceConfig &cfg = {});
   uint8_t GetBoardType();
   void efuse_ShadowRead1Byte(uint16_t Offset, uint8_t *Value);
   /* phydm thermal-meter pwrtrk baseline from EFUSE (set by

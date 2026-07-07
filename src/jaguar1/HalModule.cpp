@@ -71,8 +71,9 @@ constexpr uint16_t RX_DMA_BOUNDARY_8814A = MAX_RX_DMA_BUFFER_SIZE_8814A - 1;
 HalModule::HalModule(
     RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
     std::shared_ptr<RadioManagementModule> radioManagementModule,
-    Logger_t logger)
-    : _device{device}, _radioManagementModule{radioManagementModule},
+    Logger_t logger, const devourer::DeviceConfig &cfg)
+    : _device{device}, _cfg{cfg},
+      _radioManagementModule{radioManagementModule},
       _eepromManager{eepromManager}, _logger{logger} {}
 
 bool HalModule::rtw_hal_init(SelectedChannel selectedChannel) {
@@ -102,7 +103,7 @@ bool HalModule::rtw_hal_init(SelectedChannel selectedChannel) {
      * faster, watchdog-less path that matches kernel cold-init
      * behaviour anyway (kernel doesn't run phydm before the first
      * `iw set channel` either). */
-    if (std::getenv("DEVOURER_PHYDM_WATCHDOG")) {
+    if (_cfg.tuning.phydm_watchdog) {
       _phydmWatchdog = std::make_unique<PhydmWatchdog>(
           _device, _eepromManager, _radioManagementModule.get(), _logger);
       _phydmWatchdog->TickOnce();
@@ -184,7 +185,7 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   _InitHardwareDropIncorrectBulkOut_8812A();
   timer.stage("llt");
 
-  auto fwManager = std::make_unique<FirmwareManager>(_device, _logger);
+  auto fwManager = std::make_unique<FirmwareManager>(_device, _logger, _cfg);
   fwManager->FirmwareDownload(_eepromManager->version_id.ICType);
   timer.stage("fwdl");
 

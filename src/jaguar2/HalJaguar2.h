@@ -20,7 +20,8 @@ namespace jaguar2 {
 class HalJaguar2 {
 public:
   HalJaguar2(RtlUsbAdapter device, Logger_t logger,
-             ChipVariant variant = ChipVariant::C8822B);
+             ChipVariant variant = ChipVariant::C8822B,
+             const devourer::DeviceConfig &cfg = {});
 
   /* Card-enable power sequence (card-disable -> card-emulation -> active),
    * transcribed from halmac card_en_flow_8822b (USB/ALL entries). Runs
@@ -275,6 +276,8 @@ private:
   void do_lck_8821c();
 
   RtlUsbAdapter _device;
+  devourer::DeviceConfig _cfg; /* dump_canary / efuse_dump / hop_prof /
+                                  phy_status_8821c / igi / keep_corrupted */
   Logger_t _logger;
   ChipVariant _variant;
   /* Per-chip phydm BB/AGC/RF table data, selected by _variant. */

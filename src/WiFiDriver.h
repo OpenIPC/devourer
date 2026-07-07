@@ -3,6 +3,7 @@
 
 #include <memory>
 
+#include "DeviceConfig.h"
 #include "IRtlDevice.h"
 #include "logger.h"
 
@@ -29,11 +30,15 @@ public:
    * held for the device lifetime and not re-acquired. When null (a caller that
    * opened/claimed the handle itself), CreateRtlDevice acquires its own as a
    * best-effort second gate, and returns nullptr if the adapter is already in
-   * use. */
+   * use.
+   *
+   * `cfg` is the construction-time configuration (see DeviceConfig.h); the
+   * default gives stock behaviour. Fixed for the device's lifetime. */
   std::unique_ptr<IRtlDevice>
   CreateRtlDevice(libusb_device_handle *dev_handle,
                   libusb_context *ctx = nullptr,
-                  std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr);
+                  std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr,
+                  const devourer::DeviceConfig &cfg = {});
 };
 
 #endif /* WIFI_DRIVER_H */

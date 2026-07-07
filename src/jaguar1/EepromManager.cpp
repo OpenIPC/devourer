@@ -25,8 +25,10 @@ static int devourer_strcaseeq(const char *a, const char *b) {
   return *a == *b;
 }
 
-EepromManager::EepromManager(RtlUsbAdapter device, Logger_t logger)
-    : _device{device}, _logger{logger} {
+EepromManager::EepromManager(RtlUsbAdapter device, Logger_t logger,
+                             const devourer::DeviceConfig &cfg)
+    : _device{device}, _logger{logger}, _tuning{cfg.tuning},
+      _log_txpwr{cfg.debug.log_txpwr} {
   InitTimer timer(logger, "eeprom");
   read_chip_version_8812a(device);
   timer.stage("chip_version");
@@ -718,13 +720,9 @@ void EepromManager::LoadTxPowerLimit() {
   std::memset(TxPwrLimit2g, 63, sizeof(TxPwrLimit2g));
   std::memset(TxPwrLimit5g, 63, sizeof(TxPwrLimit5g));
 
-  /* Honour DEVOURER_REGULATION env override (FCC|ETSI|MKK|WW). */
-  if (const char *e = std::getenv("DEVOURER_REGULATION")) {
-    if (devourer_strcaseeq(e, "ETSI")) CurrentRegulation = 1;
-    else if (devourer_strcaseeq(e, "MKK")) CurrentRegulation = 2;
-    else if (devourer_strcaseeq(e, "WW")) CurrentRegulation = 3;
-    else CurrentRegulation = 0;
-  }
+  /* tuning.regulation override (FCC|ETSI|MKK|WW). */
+  if (_tuning.regulation)
+    CurrentRegulation = static_cast<int>(*_tuning.regulation);
 
   const size_t num_strings =
       sizeof(kHal8812aTxpwrLmt) / sizeof(kHal8812aTxpwrLmt[0]);
@@ -951,7 +949,7 @@ clamp_and_return:
    * deployments that want the PG-table offsets (mirrors upstream
    * CONFIG_TXPWR_BY_RATE_EN=y). */
   int by_rate_diff = 0;
-  if (std::getenv("DEVOURER_ENABLE_TXPWR_BY_RATE")) {
+  if (_tuning.txpwr_by_rate) {
     const int8_t section_classifier = rate_to_section(rate);
     const bool is_vht_24g =
         (band == 0) && section_classifier >= RS_VHT_1SS;
@@ -1006,7 +1004,7 @@ clamp_and_return:
   if (by_rate_diff > headroom) by_rate_diff = headroom;
   int base_before_apply = txPower;
   txPower += by_rate_diff + boost;
-  if (std::getenv("DEVOURER_LOG_TXPWR")) {
+  if (_log_txpwr) {
     _logger->info(
         "txpwr: ch={} path={} rate=0x{:02x} ntx={} bw={} -> "
         "base={} by_rate(capped)={} limit={} boost={} headroom={} final={}",

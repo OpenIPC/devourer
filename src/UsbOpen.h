@@ -2,6 +2,7 @@
 #define DEVOURER_USB_OPEN_H
 
 #include <memory>
+#include <string>
 
 #include "logger.h"
 
@@ -35,10 +36,12 @@ class UsbDeviceLock;
  * either the lock or the claim) — the caller should close the handle and exit
  * without touching the device. On success `out_lock` holds the exclusive lock
  * (or is null if the lock could only degrade to a warning — e.g. a read-only
- * tmpdir — in which case the kernel claim still guards). */
+ * tmpdir — in which case the kernel claim still guards). `lock_dir` is the
+ * lock-file directory (empty = "/tmp"; see UsbDeviceLock::try_acquire). */
 int claim_interface_then_reset(libusb_device_handle *handle, int iface,
                                const Logger_t &logger, bool do_reset,
-                               std::shared_ptr<UsbDeviceLock> &out_lock);
+                               std::shared_ptr<UsbDeviceLock> &out_lock,
+                               const std::string &lock_dir = {});
 
 } // namespace devourer
 

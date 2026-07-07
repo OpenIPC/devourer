@@ -66,7 +66,8 @@ WiFiDriver::WiFiDriver(Logger_t logger) : _logger{std::move(logger)} {}
 std::unique_ptr<IRtlDevice>
 WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
                             libusb_context *ctx,
-                            std::shared_ptr<devourer::UsbDeviceLock> usb_lock) {
+                            std::shared_ptr<devourer::UsbDeviceLock> usb_lock,
+                            const devourer::DeviceConfig &cfg) {
   uint16_t pid = 0;
   libusb_device *dev = libusb_get_device(dev_handle);
   if (dev != nullptr) {
@@ -87,7 +88,7 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
   if (!usb_lock) {
     auto lock = std::make_shared<devourer::UsbDeviceLock>();
     std::string lock_why;
-    switch (lock->try_acquire(dev, &lock_why)) {
+    switch (lock->try_acquire(dev, &lock_why, cfg.usb.lock_dir)) {
     case devourer::UsbDeviceLock::Result::Busy:
       _logger->error("USB adapter in use — refusing to open ({})", lock_why);
       return nullptr;
@@ -109,7 +110,8 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
     _logger->info("Creating RtlJaguar2Device (PID 0x{:04x}, chip-id 0x{:02x})",
                   pid, chip_id);
     return std::make_unique<RtlJaguar2Device>(
-        RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock), _logger);
+        RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger,
+        jaguar2::ChipVariant::C8822B, cfg);
 #else
     _logger->error("RTL8822B (chip-id 0x{:02x}) detected but Jaguar2 support "
                    "not compiled in (DEVOURER_JAGUAR2=OFF)",
@@ -124,8 +126,8 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
                   "0x{:02x})",
                   pid, chip_id);
     return std::make_unique<RtlJaguar2Device>(
-        RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock), _logger,
-        jaguar2::ChipVariant::C8821C);
+        RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger,
+        jaguar2::ChipVariant::C8821C, cfg);
 #else
     _logger->error("RTL8821C (chip-id 0x09) detected but 8821C support not "
                    "compiled in (DEVOURER_JAGUAR2_8821C=OFF)");
@@ -157,7 +159,8 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
     _logger->info("Creating RtlJaguar3Device (PID 0x{:04x}, chip-id 0x{:02x})",
                   pid, chip_id);
     return std::make_unique<RtlJaguar3Device>(
-        RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock), _logger, variant);
+        RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger, variant,
+        cfg);
 #else
     _logger->error("Jaguar3 chip (chip-id 0x{:02x}) detected but Jaguar3 "
                    "support not compiled in",
@@ -173,7 +176,7 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
    * async URB queue (bulk_read_async_loop) whose event pump needs the same
    * libusb context the handle was opened on (as Jaguar2/3 already do above). */
   return std::make_unique<RtlJaguarDevice>(
-      RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock), _logger);
+      RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger, cfg);
 #else
   _logger->error("Jaguar1 chip (PID 0x{:04x}, chip-id 0x{:02x}) detected but "
                  "Jaguar1 support not compiled in",

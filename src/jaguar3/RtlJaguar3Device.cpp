@@ -31,9 +31,11 @@ static constexpr uint8_t JAGUAR3_TXPWR_REF_BASE = 0x4b;
 static constexpr uint8_t JAGUAR3_TXPWR_REF_BASE_8822C = 0x28;
 
 RtlJaguar3Device::RtlJaguar3Device(RtlUsbAdapter device, Logger_t logger,
-                                   jaguar3::ChipVariant variant)
-    : _device{device}, _logger{logger}, _variant{variant},
-      _hal{device, logger, variant}, _radioManagement{device, logger, variant} {
+                                   jaguar3::ChipVariant variant,
+                                   devourer::DeviceConfig cfg)
+    : _device{device}, _cfg{std::move(cfg)}, _logger{logger},
+      _variant{variant}, _hal{device, logger, variant, _cfg},
+      _radioManagement{device, logger, variant, _cfg} {
   _logger->info("RtlJaguar3Device constructed ({})",
                 variant == jaguar3::ChipVariant::C8822E ? "8822E/EU" : "8822C/CU");
 }
@@ -54,8 +56,8 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
   _hal.coex_wlan_only_init(); /* lock antenna to WLAN (disable BT/LTE coex) */
   _brought_up = true;
 
-  /* DEVOURER_DIS_CCA=1 — MAC EDCCA-disable research knob (see SetCcaMode). */
-  if (std::getenv("DEVOURER_DIS_CCA"))
+  /* tuning.disable_cca — MAC EDCCA-disable research knob (see SetCcaMode). */
+  if (_cfg.tuning.disable_cca)
     SetCcaMode(true);
 
   /* DEVOURER_BF_ARM_BFEE=aa:bb:cc:dd:ee:ff — beamforming self-sounding probe
@@ -65,33 +67,29 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
    * Jaguar-2/3 config (0xDB, 16-bit CSI param, RX-filter + own-AID gates, and
    * crucially NO 0x9B4 write — that address is the narrowband clock divider on
    * this generation). See BeamformingSounder.h. */
-  if (const char *bfer = std::getenv("DEVOURER_BF_ARM_BFEE")) {
-    unsigned m[6];
-    if (std::sscanf(bfer, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3],
-                    &m[4], &m[5]) == 6) {
-      uint8_t mac[6];
-      for (int i = 0; i < 6; ++i) mac[i] = static_cast<uint8_t>(m[i]);
-      /* Jaguar-3 bring-up never programs the self-MAC (0x0610), so the NDPA
-       * RA has nothing to match. Give the beamformee a known identity here so
-       * the sounder can address it; log it for the test harness. */
-      static const uint8_t kBfeeMac[6] = {0x00, 0xe0, 0x4c, 0x88, 0x22, 0xce};
-      for (uint16_t i = 0; i < 6; ++i)
-        _device.rtw_write8(0x0610 + i, kBfeeMac[i]);
-      /* DEVOURER_BF_ARM_BFEE_MU=1 upgrades the responder to an MU beamformee,
-       * whose report appends the per-subcarrier delta-SNR (MU Exclusive
-       * Beamforming Report) the SU report omits. Pair with the sounder's
-       * DEVOURER_TX_NDPA_MU=1 (MU feedback bit in the NDPA STA-info). */
-      if (std::getenv("DEVOURER_BF_ARM_BFEE_MU")) {
-        devourer::bf::arm_beamformee_mu(_device, mac, devourer::bf::kBfeeJaguar23);
-        _logger->info("Jaguar3 BF MU-beamformee armed for beamformer {} — "
-                      "beamformee MAC 00:e0:4c:88:22:ce", bfer);
-      } else {
-        devourer::bf::arm_beamformee(_device, mac, devourer::bf::kBfeeJaguar23);
-        _logger->info("Jaguar3 BF beamformee armed for beamformer {} — "
-                      "beamformee MAC 00:e0:4c:88:22:ce", bfer);
-      }
+  if (_cfg.bf.beamformee_of) {
+    const uint8_t *mac = _cfg.bf.beamformee_of->data();
+    /* Jaguar-3 bring-up never programs the self-MAC (0x0610), so the NDPA
+     * RA has nothing to match. Give the beamformee a known identity here so
+     * the sounder can address it; log it for the test harness. */
+    static const uint8_t kBfeeMac[6] = {0x00, 0xe0, 0x4c, 0x88, 0x22, 0xce};
+    for (uint16_t i = 0; i < 6; ++i)
+      _device.rtw_write8(0x0610 + i, kBfeeMac[i]);
+    /* bf.mu upgrades the responder to an MU beamformee, whose report appends
+     * the per-subcarrier delta-SNR (MU Exclusive Beamforming Report) the SU
+     * report omits. */
+    if (_cfg.bf.mu) {
+      devourer::bf::arm_beamformee_mu(_device, mac, devourer::bf::kBfeeJaguar23);
+      _logger->info("Jaguar3 BF MU-beamformee armed for beamformer "
+                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} — "
+                    "beamformee MAC 00:e0:4c:88:22:ce",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     } else {
-      _logger->error("DEVOURER_BF_ARM_BFEE — bad MAC '{}'", bfer);
+      devourer::bf::arm_beamformee(_device, mac, devourer::bf::kBfeeJaguar23);
+      _logger->info("Jaguar3 BF beamformee armed for beamformer "
+                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} — "
+                    "beamformee MAC 00:e0:4c:88:22:ce",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     }
   }
 
@@ -144,10 +142,12 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
    * set so it is the final word for a single-channel capture; serialized
    * against the coex housekeeping tick like every other register writer here.
    * See ToneMask.h. */
-  if (std::getenv("DEVOURER_RX_CSI_MASK") || std::getenv("DEVOURER_RX_NBI")) {
+  if (_cfg.rx.csi_mask || _cfg.rx.nbi) {
     std::lock_guard<std::mutex> lk(_reg_mu);
-    devourer::tonemask::apply_from_env(
-        _device, _logger, devourer::tonemask::Family::JGR3, _channel, 2);
+    devourer::tonemask::apply(
+        _device, _logger, devourer::tonemask::Family::JGR3, _channel, 2,
+        _cfg.rx.csi_mask ? _cfg.rx.csi_mask->c_str() : nullptr,
+        _cfg.rx.nbi ? _cfg.rx.nbi->c_str() : nullptr);
   }
 
   _logger->info("Jaguar3: entering RX loop (kernel-style async URB queue)");
@@ -305,7 +305,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * bring-up completes is not reliable (validated on 8822EU: enable_rx_path
    * after the coex/FW steps leaves the RX path dead, and the register RMWs
    * race the running TX). */
-  const bool want_rx = std::getenv("DEVOURER_TX_WITH_RX") != nullptr;
+  const bool want_rx = _cfg.rx.enable_with_tx;
   _rx_wanted = want_rx; /* consumed by every TXAGC ref write (0x41e8 quirk) */
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
   _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
@@ -325,10 +325,8 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * output — but that write ALSO breaks subsequent BB reads, so we snapshot the
    * two registers first, arm the tone (reads intact), then blind-write the PA
    * pins. No coex thread (its tick would re-drive RF 0x00 back to RX). */
-  if (std::getenv("DEVOURER_CW_TONE")) {
-    uint8_t g = 0;
-    if (const char *e = std::getenv("DEVOURER_CW_TONE_GAIN"))
-      g = static_cast<uint8_t>(std::atoi(e)) & 0x1F;
+  if (_cfg.tx.cw_tone) {
+    const uint8_t g = _cfg.tx.cw_tone_gain & 0x1F;
     const bool is_eu = _variant == jaguar3::ChipVariant::C8822E;
     uint32_t v40 = 0, v64 = 0;
     if (is_eu) {
@@ -394,18 +392,19 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * sounding registers are family-neutral (BeamformingSounder.h); the Jaguar-3
    * sounding-protocol control byte is 0xDB (hal_txbf_8822b_enter, shared
    * 8822B/C/E) where Jaguar-1 uses 0xCB. */
-  if (const char *snd = std::getenv("DEVOURER_BF_ARM_SOUNDER")) {
+  if (_cfg.bf.arm_sounder || _cfg.bf.sounder_self_mac) {
     /* Jaguar-3 bring-up never programs the self-MAC (0x0610); the sounding
      * engine matches the injected NDPA's TA against it before firing the NDP.
-     * DEVOURER_BF_ARM_SOUNDER=aa:bb:cc:dd:ee:ff programs that MAC (use the
-     * NDPA TA the caller injects — the txdemo's canonical SA); a bare "1"
-     * leaves it unprogrammed (Jaguar-1 semantics). */
-    unsigned m[6];
-    if (std::sscanf(snd, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3],
-                    &m[4], &m[5]) == 6) {
+     * bf.sounder_self_mac programs that MAC (use the NDPA TA the caller
+     * injects — the txdemo's canonical SA); unset leaves it unprogrammed
+     * (Jaguar-1 semantics). */
+    if (_cfg.bf.sounder_self_mac) {
+      const uint8_t *m = _cfg.bf.sounder_self_mac->data();
       for (uint16_t i = 0; i < 6; ++i)
-        _device.rtw_write8(0x0610 + i, static_cast<uint8_t>(m[i]));
-      _logger->info("Jaguar3 BF sounder: self-MAC programmed to {}", snd);
+        _device.rtw_write8(0x0610 + i, m[i]);
+      _logger->info("Jaguar3 BF sounder: self-MAC programmed to "
+                    "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    m[0], m[1], m[2], m[3], m[4], m[5]);
     }
     _hal.txbf_rfmode_sounder(); /* RF/BB sounding config — needed for the NDP */
     devourer::bf::arm_sounder(_device, /*snd_ptcl_ctrl=*/0xDB);
@@ -419,18 +418,15 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * hardware). The apply toggle is NOT flipped here — it is enabled from the RX
    * loop once a CBR from the peer is seen (a blind apply with no V degrades the
    * link). Periodic re-sounding (DEVOURER_TX_NDPA=N>1) keeps V fresh. */
-  if (const char *bftx = std::getenv("DEVOURER_BF_TXBF")) {
-    unsigned m[6];
-    if (std::sscanf(bftx, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4],
-                    &m[5]) == 6) {
-      for (int i = 0; i < 6; ++i) _bf_peer[i] = static_cast<uint8_t>(m[i]);
-      devourer::bf::arm_beamformer_entry(_device, _bf_peer, /*rx_nss=*/2);
-      _bf_txbf_armed = true;
-      _logger->info("Jaguar3 BF TXBF entry configured for peer {} — apply gates "
-                    "on the first CBR (needs DEVOURER_TX_WITH_RX)", bftx);
-    } else {
-      _logger->error("DEVOURER_BF_TXBF — bad MAC '{}'", bftx);
-    }
+  if (_cfg.bf.txbf_peer) {
+    const uint8_t *m = _cfg.bf.txbf_peer->data();
+    for (int i = 0; i < 6; ++i) _bf_peer[i] = m[i];
+    devourer::bf::arm_beamformer_entry(_device, _bf_peer, /*rx_nss=*/2);
+    _bf_txbf_armed = true;
+    _logger->info("Jaguar3 BF TXBF entry configured for peer "
+                  "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} — apply gates "
+                  "on the first CBR (needs rx.enable_with_tx)",
+                  m[0], m[1], m[2], m[3], m[4], m[5]);
   }
   /* TX-only: the bring-up enables accept-all RX (monitor_rx_cfg), but the TX
    * path never reads bulk-IN — so on a trafficked channel the on-chip RX FIFO
@@ -452,7 +448,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * tone path returned earlier and never reaches here.) */
   /* DEVOURER_DIS_CCA=1 — measure-first EDCCA-disable knob (see SetCcaMode).
    * Applied before the coex thread starts so the writes don't contend. */
-  if (std::getenv("DEVOURER_DIS_CCA"))
+  if (_cfg.tuning.disable_cca)
     SetCcaMode(true);
   _coex_thread = std::thread([this] { coex_runtime_loop(); });
   _logger->info("Jaguar3: ready for TX (monitor inject)");
@@ -1051,12 +1047,7 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
    * follows each with a hardware NDP. N is the PERIOD: 1 (or non-numeric) =
    * every frame (self-sounding capture, the original behaviour); N>1 = every Nth
    * frame, so the interleaved data frames stay steerable for TX beamforming. */
-  static const int ndpa_period = []() -> int {
-    const char *e = std::getenv("DEVOURER_TX_NDPA");
-    if (!e) return 0;
-    int p = std::atoi(e);
-    return p > 0 ? p : 1;
-  }();
+  const int ndpa_period = _cfg.bf.ndpa_period;
   bool ndpa = false;
   if (ndpa_period > 0) {
     ndpa = (_ndpa_ctr % static_cast<uint64_t>(ndpa_period)) == 0;

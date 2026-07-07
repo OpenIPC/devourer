@@ -13,7 +13,7 @@
  * psi; psi = atan(|h_B|/|h_A|) is the relative per-tone channel between the
  * beamformer's two antennas — the quantity that jitters under channel motion.
  *
- * Header-only, like BfReportDetect.h / BeamformingSounder.h. No devourer runtime
+ * Header-only, like BeamformingSounder.h. No devourer runtime
  * dependency, so it is unit-testable in isolation (examples/sense/bf_report_decode_selftest.cpp). */
 #ifndef BF_REPORT_DECODE_H
 #define BF_REPORT_DECODE_H

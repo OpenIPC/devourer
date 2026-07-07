@@ -22,6 +22,7 @@
 #include "SignalStop.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "env_config.h"
 
 #define USB_VENDOR_ID 0x0bda
 
@@ -625,7 +626,8 @@ int main() {
   }
 
   WiFiDriver wifi_driver(logger);
-  auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle, ctx, usb_lock);
+  auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle, ctx, usb_lock,
+                                               devourer_config_from_env());
   if (!rtlDevice) {
     /* The factory returns null when the plugged chip's generation wasn't
      * compiled in (per-chip CMake options); it already logged which. */

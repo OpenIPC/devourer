@@ -63,6 +63,9 @@ using devourer::ThermalBucket;
 
 class RadioManagementModule {
   RtlUsbAdapter _device;
+  devourer::DeviceConfig::Tuning _tuning; /* skip_txpwr / force_iqk / disable_iqk */
+  bool _keep_corrupted = false;           /* rx.keep_corrupted */
+  bool _dump_canary = false;              /* debug.dump_canary */
   std::shared_ptr<EepromManager> _eepromManager;
   Logger_t _logger;
   HwPort _hwPort = HwPort::HW_PORT0;
@@ -124,7 +127,8 @@ class RadioManagementModule {
 public:
   RadioManagementModule(RtlUsbAdapter device,
                         std::shared_ptr<EepromManager> eepromManager,
-                        Logger_t logger);
+                        Logger_t logger,
+                        const devourer::DeviceConfig &cfg = {});
   /* Initialise phydm thermal-meter pwrtrk state. Call once after the
    * BB + RF table application is complete (mirrors phydm's
    * `phydm_rf_init -> odm_txpowertracking_init`). Reads EFUSE +

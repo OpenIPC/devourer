@@ -159,8 +159,8 @@ void run_pwr_seq(RtlUsbAdapter &dev, const PwrCfg *seq, uint32_t poll_max,
 } /* namespace */
 
 HalJaguar2::HalJaguar2(RtlUsbAdapter device, Logger_t logger,
-                       ChipVariant variant)
-    : _device{std::move(device)}, _logger{std::move(logger)},
+                       ChipVariant variant, const devourer::DeviceConfig &cfg)
+    : _device{std::move(device)}, _logger{std::move(logger)}, _cfg{cfg},
       _variant{variant}, _tables{make_jaguar2_phy_tables(variant)} {}
 
 void HalJaguar2::power_off() {
@@ -269,7 +269,7 @@ void HalJaguar2::read_efuse_logical_map(uint8_t *map, uint16_t map_size,
 uint8_t HalJaguar2::read_efuse_rfe() {
   constexpr uint16_t kRfeOff = 0xCA; /* EEPROM_RFE_OPTION_8822B */
   read_efuse_logical_map(_efuse_map, sizeof(_efuse_map),
-                         getenv("DEVOURER_EFUSE_DUMP") != nullptr);
+                         _cfg.debug.efuse_dump);
   _efuse_valid = true; /* cache for apply_tx_power (avoid a 2nd physical walk) */
   uint8_t rfe = _efuse_map[kRfeOff];
   /* Unprogrammed efuse (0xFF) falls back to rfe_type 0 — matches the vendor
@@ -476,7 +476,7 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   if (_variant == ChipVariant::C8821C) {
     set_channel_bw_8821c(channel, bw, rfe_type, primary_ch_idx);
     _last_tuned_ch = channel;
-    if (std::getenv("DEVOURER_DUMP_CANARY"))
+    if (_cfg.debug.dump_canary)
       DumpCanary();
     return;
   }
@@ -621,7 +621,7 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _last_tuned_ch = channel;
   _logger->info("Jaguar2: channel set ch={} bw={} (rf18=0x{:05x})", channel,
                 (int)bw, rf18);
-  if (std::getenv("DEVOURER_DUMP_CANARY"))
+  if (_cfg.debug.dump_canary)
     DumpCanary();
 }
 
@@ -687,7 +687,7 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   if (channel == _last_tuned_ch)
     return true; /* no-op hop */
 
-  devourer::HopProf prof("j2", channel);
+  devourer::HopProf prof(_cfg.debug.hop_prof, "j2", channel);
   const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
   const bool g2 = cch <= 14;
   const bool c8821 = (_variant == ChipVariant::C8821C);
@@ -837,7 +837,7 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
                  channel, cch, rf18);
   /* The fast path must emit the canary itself (it does not pass through the
    * full path) or the parity diff compares a stale full-set dump. */
-  if (std::getenv("DEVOURER_DUMP_CANARY"))
+  if (_cfg.debug.dump_canary)
     DumpCanary();
   return true;
 }
@@ -1662,7 +1662,7 @@ void HalJaguar2::enable_rx() {
    * status, so clearing the append bit makes the frame sit cleanly at
    * descriptor+drvinfo(0)+shift and decode. */
   if (_variant == ChipVariant::C8821C) {
-    if (!getenv("DEVOURER_8821C_NO_PHYST")) {
+    if (_cfg.rx.phy_status_8821c) {
       /* cfg_drv_info_8821c(HALMAC_DRV_INFO_PHY_STATUS): keep RCR APP_PHYSTS
        * (bit28, like the vendor monitor path) and make the chip prepend a
        * 32-byte PHY-status (jgr2 type0/type1) as drvinfo AND — crucially — count
@@ -1684,7 +1684,7 @@ void HalJaguar2::enable_rx() {
    * AICV BIT9) so the BB's demodulated-but-failed frames still reach the host.
    * Doubles as a bring-up discriminator: if reads>0 with this set but 0 without,
    * MAC->USB delivery works and only clean-decode is marginal. */
-  if (getenv("DEVOURER_RX_KEEP_CORRUPTED"))
+  if (_cfg.rx.keep_corrupted)
     rcr |= (1u << 8) | (1u << 9);
   _device.rtw_write32(0x0608, rcr);
 
@@ -1692,9 +1692,7 @@ void HalJaguar2::enable_rx() {
    * BB/AGC table default leaves IGI too low, so the RX drowns in false alarms
    * (~4000/s) and rarely decodes a clean frame. IGI 0x40 drops the FA rate ~7x
    * and yields clean OFDM CRC-OK frames. */
-  uint8_t igi = 0x40;
-  if (const char *e = getenv("DEVOURER_IGI"))
-    igi = static_cast<uint8_t>(strtol(e, nullptr, 0) & 0x7f);
+  const uint8_t igi = _cfg.rx.igi.value_or(0x40) & 0x7f;
   _device.phy_set_bb_reg(0x0c50, 0x7f, igi);
   _device.phy_set_bb_reg(0x0e50, 0x7f, igi);
   _logger->info("Jaguar2: RX enabled (CR=0x06ff, RCR=0x{:08x}, IGI=0x{:02x})",

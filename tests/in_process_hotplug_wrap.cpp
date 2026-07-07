@@ -74,6 +74,7 @@
 #include "RxPacket.h"
 #include "RtlUsbAdapter.h"
 #include "WiFiDriver.h"
+#include "env_config.h"
 
 namespace {
 
@@ -182,7 +183,8 @@ int run_session(libusb_context* ctx, uint16_t vid, uint16_t pid,
 
   int before = g_rx.load();
   WiFiDriver drv(logger);
-  auto dev = drv.CreateRtlDevice(h);
+  auto dev = drv.CreateRtlDevice(h, nullptr, nullptr,
+                                 devourer_config_from_env());
 
   std::thread t([&]{
     dev->Init(on_pkt, SelectedChannel{

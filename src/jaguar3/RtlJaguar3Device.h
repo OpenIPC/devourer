@@ -28,7 +28,8 @@
 class RtlJaguar3Device : public IRtlDevice {
 public:
   RtlJaguar3Device(RtlUsbAdapter device, Logger_t logger,
-                   jaguar3::ChipVariant variant = jaguar3::ChipVariant::C8822C);
+                   jaguar3::ChipVariant variant = jaguar3::ChipVariant::C8822C,
+                   devourer::DeviceConfig cfg = {});
   ~RtlJaguar3Device() override;
 
   void Init(Action_ParsedRadioPacket packetProcessor,
@@ -144,6 +145,7 @@ public:
 
 private:
   RtlUsbAdapter _device;
+  const devourer::DeviceConfig _cfg;
   Logger_t _logger;
   jaguar3::ChipVariant _variant;
   jaguar3::HalJaguar3 _hal;

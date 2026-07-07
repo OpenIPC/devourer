@@ -12,6 +12,7 @@
 #include <thread>
 #include <vector>
 
+#include "DeviceConfig.h"
 #include "drv_types.h"
 #include "hal_com_reg.h"
 #include "logger.h"
@@ -55,9 +56,15 @@ class RtlUsbAdapter {
   uint8_t _bulk_in_ep = 0x81;
   /* Bulk-OUT endpoint addresses, in descriptor order. 8812AU exposes 4 OUT
    * EPs at 0x02/0x03/0x04/0x05 (HQ/NQ/LQ/EQ); 8821AU exposes 0x05/0x06/0x08/
-   * 0x09. send_packet picks index 0 (HQ-equivalent) by default; DEVOURER_TX_EP
-   * env override still wins for diagnostic bisection. */
+   * 0x09. send_packet picks index 0 (HQ-equivalent) by default; the
+   * DeviceConfig tx.ep override wins for diagnostic bisection. */
   std::vector<uint8_t> _bulk_out_eps;
+
+  /* From DeviceConfig (see there for semantics). Plain values — RtlUsbAdapter
+   * is a copyable value type, every copy carries them. */
+  bool _log_writes = false;                /* debug.log_writes */
+  std::optional<uint8_t> _tx_ep_override;  /* tx.ep */
+  unsigned _tx_timeout_ms = USB_TIMEOUT;   /* tx.timeout_ms */
 
   uint16_t _idVendor = 0;
   uint16_t _idProduct = 0;
@@ -98,7 +105,8 @@ class RtlUsbAdapter {
 public:
   RtlUsbAdapter(libusb_device_handle *dev_handle, Logger_t logger,
                 libusb_context *ctx = nullptr,
-                std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr);
+                std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr,
+                const devourer::DeviceConfig &cfg = {});
 
   /* Kernel-style async RX: keep n_urbs concurrent bulk-IN transfers in flight on
    * the discovered bulk-IN endpoint, invoking on_data(buf,len) for each non-empty
@@ -177,11 +185,10 @@ public:
   }
 
   template <typename T> bool rtw_write(uint16_t reg_num, T value) {
-    /* DEVOURER_LOG_WRITES=1: emit every vendor reg write as "0xADDR N 0xVAL"
-     * (matches tests/decode_wseq.py output) so devourer's bring-up write set can
-     * be diffed against the kernel golden. Cached so getenv runs once. */
-    static const int log_writes = getenv("DEVOURER_LOG_WRITES") ? 1 : 0;
-    if (log_writes)
+    /* debug.log_writes: emit every vendor reg write as "0xADDR N 0xVAL"
+     * (matches tests/decode_wseq.py output) so devourer's bring-up write set
+     * can be diffed against the kernel golden. */
+    if (_log_writes)
       fprintf(stderr, "<wlog>0x%04x %zu 0x%0*x\n", reg_num, sizeof(T),
               (int)(sizeof(T) * 2), (unsigned)value);
     if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_WRITE, 5,

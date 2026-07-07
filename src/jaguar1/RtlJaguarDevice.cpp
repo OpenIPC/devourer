@@ -35,12 +35,14 @@ static constexpr uint16_t RF_LNA_LOW_GAIN_3 = 0x58;
 static constexpr uint16_t rC_TxScale_8814 = 0x181C;
 static constexpr uint16_t rD_TxScale_8814 = 0x1A1C;
 
-RtlJaguarDevice::RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger)
-    : _device{device},
-      _eepromManager{std::make_shared<EepromManager>(device, logger)},
+RtlJaguarDevice::RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger,
+                                 devourer::DeviceConfig cfg)
+    : _cfg{std::move(cfg)},
+      _eepromManager{std::make_shared<EepromManager>(device, logger, _cfg)},
       _radioManagement{std::make_shared<RadioManagementModule>(
-          device, _eepromManager, logger)},
-      _halModule{device, _eepromManager, _radioManagement, logger},
+          device, _eepromManager, logger, _cfg)},
+      _device{device},
+      _halModule{device, _eepromManager, _radioManagement, logger, _cfg},
       _logger{logger} {}
 
 void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
@@ -52,7 +54,7 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
    * side): arm the MAC's hardware sounding engine so a TX-descriptor-marked
    * NDPA (DEVOURER_TX_NDPA=1) is followed by a hardware-generated NDP. See
    * BeamformingSounder.h for the vendor register recipe. */
-  if (std::getenv("DEVOURER_BF_ARM_SOUNDER")) {
+  if (_cfg.bf.arm_sounder || _cfg.bf.sounder_self_mac) {
     devourer::bf::arm_sounder(_device);
     _logger->info("BF sounder armed (beamformer side)");
   }
@@ -60,12 +62,8 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
   /* DEVOURER_CW_TONE — radiate a bare RF LO carrier at the channel center
    * (MP single-tone). The channel is already tuned above, so the LO sits at the
    * center frequency. DEVOURER_CW_TONE_GAIN=0..31 sets RF 0x00[4:0]. */
-  if (std::getenv("DEVOURER_CW_TONE")) {
-    uint8_t g = 0;
-    if (const char *e = std::getenv("DEVOURER_CW_TONE_GAIN"))
-      g = static_cast<uint8_t>(std::atoi(e)) & 0x1F;
-    StartCwTone(g);
-  }
+  if (_cfg.tx.cw_tone)
+    StartCwTone(_cfg.tx.cw_tone_gain & 0x1F);
 }
 
 /* MP single-tone (CW carrier), Jaguar-1 path A. The RF writes are common to the
@@ -526,7 +524,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
    * is_8814a is false there and all writes fire as before. */
   const bool is_8814a =
       _eepromManager->version_id.ICType == CHIP_8814A &&
-      !std::getenv("DEVOURER_TX_LEGACY_8812_DESC");
+      !_cfg.tx.legacy_8812_desc;
 
   /* Single-fragment frame: LAST_SEG=1 (no FIRST_SEG). */
   SET_TX_DESC_LAST_SEG_8812(usb_frame, 1);
@@ -594,7 +592,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
    * (the shared BeamformingSounder.h only holds the generation-neutral MAC
    * register recipe). NDPA is a unicast control frame: no HW sequence stamp,
    * not broadcast, use-header NAV, no rate fallback. */
-  if (std::getenv("DEVOURER_TX_NDPA")) {
+  if (_cfg.bf.ndpa_period > 0) {
     SET_TX_DESC_NDPA_8812(usb_frame, 1);
     SET_TX_DESC_HWSEQ_EN_8812(usb_frame, 0);
     SET_TX_DESC_BMC_8812(usb_frame, 0);
@@ -645,17 +643,12 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
    * given beamformer MAC triggers a hardware-built VHT Compressed Beamforming
    * report, with NO association. The chip's own MAC (0x610, from EFUSE) is the
    * NDPA RA match. See BeamformingSounder.h for the register recipe. */
-  if (const char *bfer = std::getenv("DEVOURER_BF_ARM_BFEE")) {
-    unsigned m[6];
-    if (std::sscanf(bfer, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3],
-                    &m[4], &m[5]) == 6) {
-      uint8_t mac[6];
-      for (int i = 0; i < 6; ++i) mac[i] = static_cast<uint8_t>(m[i]);
-      devourer::bf::arm_beamformee(_device, mac, devourer::bf::kBfeeJaguar1);
-      _logger->info("BF beamformee armed for beamformer {}", bfer);
-    } else {
-      _logger->error("DEVOURER_BF_ARM_BFEE — bad MAC '{}'", bfer);
-    }
+  if (_cfg.bf.beamformee_of) {
+    const uint8_t *mac = _cfg.bf.beamformee_of->data();
+    devourer::bf::arm_beamformee(_device, mac, devourer::bf::kBfeeJaguar1);
+    _logger->info("BF beamformee armed for beamformer "
+                  "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   }
 
   StartRxLoop(std::move(packetProcessor));
@@ -683,8 +676,8 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
    * switch prints a `<devourer-rxpath-mask>0xNN` marker inline with the frame
    * stream so the analyser can tag each frame with the active mask. A plain
    * `0xNN` applies once, as before. */
-  if (const char *e = std::getenv("DEVOURER_RX_PATHS")) {
-    std::string spec(e);
+  if (_cfg.rx.path_spec) {
+    const std::string &spec = *_cfg.rx.path_spec;
     auto at = spec.find('@');
     if (at != std::string::npos && spec.find(':') != std::string::npos) {
       uint32_t interval_ms =
@@ -701,7 +694,7 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
     } else {
       auto mask = static_cast<uint8_t>(std::strtoul(spec.c_str(), nullptr, 0));
       SetRxPathMask(mask);
-      _logger->info("DEVOURER_RX_PATHS: RX-path mask 0x808[7:0]=0x{:02x}", mask);
+      _logger->info("rx.path_spec: RX-path mask 0x808[7:0]=0x{:02x}", mask);
     }
   }
 
@@ -714,9 +707,11 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
     auto fam = (_eepromManager->version_id.ICType == CHIP_8814A)
                    ? devourer::tonemask::Family::AC2_8814
                    : devourer::tonemask::Family::AC1;
-    devourer::tonemask::apply_from_env(
+    devourer::tonemask::apply(
         _device, _logger, fam, _channel,
-        (_eepromManager->version_id.ICType == CHIP_8814A) ? 4 : 2);
+        (_eepromManager->version_id.ICType == CHIP_8814A) ? 4 : 2,
+        _cfg.rx.csi_mask ? _cfg.rx.csi_mask->c_str() : nullptr,
+        _cfg.rx.nbi ? _cfg.rx.nbi->c_str() : nullptr);
   }
 
   _logger->info("Listening air...");
@@ -730,11 +725,9 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
    * NDP-generation TX on some xhci hosts — the beamforming-sounding wedge on
    * the radxa-x4. Consumes on the event pump, so no proc_mu is needed.
    * DEVOURER_RX_URBS sets the queue depth (default 8). */
-  int rx_urbs = 8;
-  if (const char *e = std::getenv("DEVOURER_RX_URBS")) {
-    rx_urbs = std::atoi(e);
-    if (rx_urbs < 1) rx_urbs = 1;
-  }
+  int rx_urbs = _cfg.rx.urbs.value_or(8);
+  if (rx_urbs < 1)
+    rx_urbs = 1;
   auto on_data = [this](const uint8_t *data, int n) {
     FrameParser fp{_logger};
     for (auto &p : fp.recvbuf2recvframe(

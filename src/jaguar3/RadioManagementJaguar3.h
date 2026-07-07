@@ -24,7 +24,8 @@ namespace jaguar3 {
 class RadioManagementJaguar3 {
 public:
   RadioManagementJaguar3(RtlUsbAdapter device, Logger_t logger,
-                         ChipVariant variant = ChipVariant::C8822C);
+                         ChipVariant variant = ChipVariant::C8822C,
+                         const devourer::DeviceConfig &cfg = {});
 
   void set_channel_bwmode(uint8_t channel, uint8_t channel_offset,
                           ChannelWidth_t bwmode);
@@ -155,6 +156,7 @@ private:
   void apply_rxbb(ChannelWidth_t bwmode);
 
   RtlUsbAdapter _device;
+  devourer::DeviceConfig _cfg; /* dump_canary / hop_prof / nb_dac / tx rf_bw */
   Logger_t _logger;
   ChipVariant _variant;
   uint8_t _last_channel = 0; /* set by set_channel_bwmode; 0 = not yet tuned */

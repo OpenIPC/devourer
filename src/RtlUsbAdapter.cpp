@@ -83,8 +83,11 @@ void RtlUsbAdapter::bulk_read_async_loop(
 
 RtlUsbAdapter::RtlUsbAdapter(libusb_device_handle *dev_handle, Logger_t logger,
                              libusb_context *ctx,
-                             std::shared_ptr<devourer::UsbDeviceLock> usb_lock)
+                             std::shared_ptr<devourer::UsbDeviceLock> usb_lock,
+                             const devourer::DeviceConfig &cfg)
     : _dev_handle{dev_handle}, _ctx{ctx}, _logger{logger},
+      _log_writes{cfg.debug.log_writes}, _tx_ep_override{cfg.tx.ep},
+      _tx_timeout_ms{cfg.tx.timeout_ms.value_or(USB_TIMEOUT)},
       _usb_lock{std::move(usb_lock)} {
   libusb_device_descriptor desc{};
   if (libusb_get_device_descriptor(libusb_get_device(_dev_handle), &desc) ==
@@ -457,19 +460,12 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
     return false;
   }
 
-  /* TX bulk OUT endpoint selection: DEVOURER_TX_EP env override > first
-   * discovered OUT endpoint > historic 8812AU default (0x02). Computed
-   * once on first send_packet call; captures `this` to access the
-   * descriptor-walked endpoint list from InitDvObj. */
-  static const uint8_t tx_ep = [this]() -> uint8_t {
-    if (const char *ep_env = std::getenv("DEVOURER_TX_EP")) {
-      return static_cast<uint8_t>(std::strtoul(ep_env, nullptr, 0));
-    }
-    if (!_bulk_out_eps.empty()) {
-      return _bulk_out_eps[0];
-    }
-    return 0x02;
-  }();
+  /* TX bulk OUT endpoint selection: DeviceConfig tx.ep override > first
+   * discovered OUT endpoint > historic 8812AU default (0x02). */
+  const uint8_t tx_ep = _tx_ep_override
+                            ? *_tx_ep_override
+                            : (!_bulk_out_eps.empty() ? _bulk_out_eps[0]
+                                                      : uint8_t{0x02});
 
   /* Recover a bulk-OUT that a prior async TX wedged (TIMED_OUT / stall). Only
    * the first send used to clear_halt; a mid-stream stall (e.g. hardware NDP
@@ -480,14 +476,9 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
                   hr);
   }
 
-  /* TX bulk-OUT timeout (ms). DEVOURER_TX_TIMEOUT_MS override, default
-   * USB_TIMEOUT. Scoped to TX only — control transfers keep USB_TIMEOUT.
-   * Computed once. */
-  static const unsigned tx_timeout_ms = []() -> unsigned {
-    if (const char *e = std::getenv("DEVOURER_TX_TIMEOUT_MS"))
-      return static_cast<unsigned>(std::strtoul(e, nullptr, 0));
-    return USB_TIMEOUT;
-  }();
+  /* TX bulk-OUT timeout (ms), DeviceConfig tx.timeout_ms. Scoped to TX only —
+   * control transfers keep USB_TIMEOUT. */
+  const unsigned tx_timeout_ms = _tx_timeout_ms;
 
   /* On the FIRST send only, dump the bulk-OUT bytes to compare against
    * the OOT-driver wire trace. */

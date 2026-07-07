@@ -2,7 +2,7 @@
  *
  * build_stream_radiotap() turns a devourer::TxMode into a complete, well-formed
  * radiotap header (Legacy OFDM / HT-MCS / VHT) that send_packet parses to set
- * the on-air rate. parse_tx_mode_env() reads the DEVOURER_TX_RATE env string
+ * the on-air rate. The demos parse DEVOURER_TX_RATE with parse_tx_mode_str
  * into a TxMode for the demos' command-line interface.
  *
  * Two wire-format facts send_packet relies on:
@@ -33,9 +33,6 @@ std::vector<uint8_t> build_stream_radiotap(const TxMode& mode);
  *     <bw>   : 20|40|80|160 (default 20)
  * Empty or unrecognised falls back to 6M legacy. */
 TxMode parse_tx_mode_str(const std::string& spec);
-
-/* parse_tx_mode_str applied to the DEVOURER_TX_RATE environment variable. */
-TxMode parse_tx_mode_env();
 
 }  // namespace devourer
 

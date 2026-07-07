@@ -35,7 +35,8 @@
 class RtlJaguar2Device : public IRtlDevice {
 public:
   RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger,
-                   jaguar2::ChipVariant variant = jaguar2::ChipVariant::C8822B);
+                   jaguar2::ChipVariant variant = jaguar2::ChipVariant::C8822B,
+                   devourer::DeviceConfig cfg = {});
   ~RtlJaguar2Device() override;
 
   void Init(Action_ParsedRadioPacket packetProcessor,
@@ -129,6 +130,7 @@ public:
 
 private:
   RtlUsbAdapter _device;
+  const devourer::DeviceConfig _cfg;
   /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
   devourer::RxQualityAccumulator _rxq;
   Logger_t _logger;

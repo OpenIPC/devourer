@@ -44,6 +44,7 @@
 #include "SignalStop.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "env_config.h"
 #include "RadiotapBuilder.h"
 #include "logger.h"
 
@@ -398,7 +399,8 @@ int main(int argc, char **argv) {
   }
 
   WiFiDriver wifi_driver{logger};
-  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock);
+  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+                                               devourer_config_from_env());
   if (!rtlDevice) {
     /* Factory returns null when this chip's generation wasn't compiled in
      * (per-chip CMake options); it already logged which. */
@@ -548,7 +550,7 @@ int main(int argc, char **argv) {
       0x8f, 0x28, 0x6f, 0x10, 0xb0, 0xa9, 0x5d, 0xbf, 0xcb, 0x6f};
 
   /* On-air rate/modulation comes from the device TX-mode default.
-   * parse_tx_mode_env() reads DEVOURER_TX_RATE — a single string
+   * devourer_tx_mode_from_env() reads DEVOURER_TX_RATE — a single string
    * "<rate>[/<bw>][/SGI][/LDPC][/STBC]" (e.g. "MCS7/40/SGI", "VHT2SS_MCS3/80",
    * "6M") — into a TxMode. The beacon's rate-less radiotap (above) lets that
    * default apply; a frame embedding its own rate radiotap overrides it per
@@ -558,7 +560,7 @@ int main(int argc, char **argv) {
    * it applies to Jaguar3 (8822CU/EU) too. The demo's beacon is rate-less, so
    * without this its Jaguar3 TX fell back to MGN_1M (1 Mbps) regardless of
    * DEVOURER_TX_RATE. Per-packet radiotap still overrides. */
-  const devourer::TxMode tx_mode_base = devourer::parse_tx_mode_env();
+  const devourer::TxMode tx_mode_base = devourer_tx_mode_from_env();
   rtlDevice->SetTxMode(tx_mode_base);
 
   /* DEVOURER_CONT_TX: arm modulated continuous TX (the sibling of the CW tone).

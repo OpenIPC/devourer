@@ -50,7 +50,9 @@ bits 11-13 cleared — on this MAC generation they are TA_BCN/RPFM_CAM, not the
 Jaguar1 accept bits, and TA_BCN drops every beacon). Factory:
 `WiFiDriver::CreateRtlDevicePcie(PcieTransport::Open(bdf, logger))` — the
 caller owns vfio like it owns libusb. Demos: `DEVOURER_PCIE_BDF=0000:01:00.0`
-on rxdemo; `pcieprobe <bdf> [id|power|fw]` validates the layers bottom-up.
+on rxdemo and txdemo (TX = the data/MGMT BD rings behind the unchanged
+`send_packet`); `pcieprobe <bdf> [id|power|fw]` validates the layers
+bottom-up.
 Bind/restore: `tests/pcie_vfio_bind.sh` (driver_override, not new_id — the
 in-tree rtw88 auto-probe race). Validation: `sudo python3
 tests/pcie_rx_smoke.py` on the radxa-x4 (`ssh radxa-x4`, 8821CE at

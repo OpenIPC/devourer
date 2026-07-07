@@ -57,6 +57,11 @@ public:
     uint32_t rx_buf_size = 11480; /* RTK_PCI_RX_BUF_SIZE (11478) 8-aligned */
     uint64_t iova_base = 0x10000000; /* slab IOVA; must stay < 4 GiB */
     int rx_poll_us = 200;            /* RX hw-index poll interval */
+    /* MSI-via-eventfd RX wakeups (VFIO_DEVICE_SET_IRQS). The reap logic is
+     * identical; MSI only replaces the fixed-interval sleep with an eventfd
+     * wait (100 ms safety timeout keeps a lost edge from ever stalling RX).
+     * Falls back to pure polling automatically when MSI setup fails. */
+    bool use_msi = true;
   };
 
   /* Open the vfio-pci device at `bdf` ("0000:01:00.0"). Returns null and logs
@@ -112,6 +117,7 @@ private:
   bool map_bar2();
   bool setup_config_space();
   bool init_dma();
+  bool setup_msi();
 
   template <typename T> T mr(uint16_t reg) {
     return *reinterpret_cast<volatile T *>(_mmio + reg);
@@ -146,6 +152,7 @@ private:
   std::string _bdf;
 
   int _container = -1, _group = -1, _device = -1;
+  int _msi_evt = -1;        /* eventfd signalled per MSI; -1 = polling mode */
   volatile uint8_t *_mmio = nullptr;
   size_t _mmio_len = 0;
   uint64_t _cfg_region_off = 0;

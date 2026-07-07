@@ -10,6 +10,8 @@
 
 #include <fcntl.h>
 #include <linux/vfio.h>
+#include <poll.h>
+#include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -60,6 +62,12 @@ constexpr uint32_t BIT_CLR_H2CQ_HW_IDX = 1u << 8;
 
 constexpr uint16_t RTK_PCI_TXBD_BCN_WORK = 0x383;
 constexpr uint8_t BIT_PCI_BCNQ_FLAG = 1u << 4;
+
+/* Interrupt registers (RX-relevant subset). */
+constexpr uint16_t RTK_PCI_HIMR0 = 0x0B0;
+constexpr uint16_t RTK_PCI_HISR0 = 0x0B4;
+constexpr uint32_t IMR_ROK = 1u << 0; /* RX DMA OK */
+constexpr uint32_t IMR_RDU = 1u << 1; /* RX descriptor unavailable */
 
 constexpr uint32_t TRX_BD_IDX_MASK = 0xFFF;
 
@@ -114,14 +122,57 @@ std::shared_ptr<PcieTransport> PcieTransport::Open(const std::string &bdf,
     return nullptr;
   if (!t->init_dma())
     return nullptr;
+  if (cfg.use_msi && !t->setup_msi())
+    logger->warn("PcieTransport: MSI setup failed — RX falls back to polling");
   logger->info("PcieTransport: {} ready (BAR2 {} KiB, DMA slab {} KiB @ IOVA "
-               "0x{:x})",
-               bdf, t->_mmio_len / 1024, t->_slab_len / 1024,
-               t->_cfg.iova_base);
+               "0x{:x}, RX {})",
+               bdf, t->_mmio_len / 1024, t->_slab_len / 1024, t->_cfg.iova_base,
+               t->_msi_evt >= 0 ? "MSI+eventfd" : "polled");
   return t;
 }
 
+bool PcieTransport::setup_msi() {
+  struct vfio_irq_info info{};
+  info.argsz = sizeof(info);
+  info.index = VFIO_PCI_MSI_IRQ_INDEX;
+  if (ioctl(_device, VFIO_DEVICE_GET_IRQ_INFO, &info) < 0 || info.count < 1) {
+    _logger->warn("PcieTransport: no MSI IRQ available");
+    return false;
+  }
+  int evt = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  if (evt < 0)
+    return false;
+  /* One MSI vector -> the eventfd. */
+  char buf[sizeof(struct vfio_irq_set) + sizeof(int32_t)] = {};
+  auto *is = reinterpret_cast<struct vfio_irq_set *>(buf);
+  is->argsz = sizeof(buf);
+  is->flags = VFIO_IRQ_SET_DATA_EVENTFD | VFIO_IRQ_SET_ACTION_TRIGGER;
+  is->index = VFIO_PCI_MSI_IRQ_INDEX;
+  is->start = 0;
+  is->count = 1;
+  memcpy(is->data, &evt, sizeof(int32_t));
+  if (ioctl(_device, VFIO_DEVICE_SET_IRQS, is) < 0) {
+    _logger->warn("PcieTransport: VFIO_DEVICE_SET_IRQS(MSI) failed: {}",
+                  strerror(errno));
+    close(evt);
+    return false;
+  }
+  _msi_evt = evt;
+  return true;
+}
+
 PcieTransport::~PcieTransport() {
+  if (_msi_evt >= 0) {
+    if (_mmio)
+      mw<uint32_t>(RTK_PCI_HIMR0, 0); /* mask before dropping the vector */
+    struct vfio_irq_set off{};
+    off.argsz = sizeof(off);
+    off.flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER;
+    off.index = VFIO_PCI_MSI_IRQ_INDEX;
+    off.count = 0;
+    ioctl(_device, VFIO_DEVICE_SET_IRQS, &off);
+    close(_msi_evt);
+  }
   if (_mmio)
     munmap(const_cast<uint8_t *>(_mmio), _mmio_len);
   if (_slab && _container >= 0) {
@@ -522,13 +573,33 @@ int PcieTransport::tx_submit_sync(int queue, const uint8_t *buf, size_t len,
 void PcieTransport::rx_poll_loop(
     const std::function<void(const uint8_t *, int)> &on_data,
     const std::function<bool()> &should_stop) {
-  _logger->info("PcieTransport: RX poll loop started (poll {} us)",
-                _cfg.rx_poll_us);
+  const bool msi = _msi_evt >= 0;
+  _logger->info("PcieTransport: RX loop started ({})",
+                msi ? "MSI+eventfd, 100 ms safety timeout"
+                    : "polled");
+  if (msi) {
+    /* Clear any latched status, then unmask RX-OK + ring-underrun. */
+    mw<uint32_t>(RTK_PCI_HISR0, mr<uint32_t>(RTK_PCI_HISR0));
+    mw<uint32_t>(RTK_PCI_HIMR0, IMR_ROK | IMR_RDU);
+  }
   uint64_t reaped = 0;
   while (!should_stop()) {
     uint32_t v = mr<uint32_t>(RTK_PCI_RXBD_IDX_MPDUQ);
     uint32_t hw_wp = (v >> 16) & TRX_BD_IDX_MASK;
     if (hw_wp == _rx.rp) {
+      if (msi) {
+        /* Wait for the MSI edge. 100 ms timeout = safety net against a lost
+         * edge (the ring index re-check above makes a spurious/late wake
+         * harmless); always drain the eventfd counter and W1C the HISR so the
+         * next frame generates a fresh edge. */
+        struct pollfd pfd {_msi_evt, POLLIN, 0};
+        (void)::poll(&pfd, 1, 100);
+        uint64_t cnt;
+        while (read(_msi_evt, &cnt, sizeof(cnt)) == sizeof(cnt)) {
+        }
+        mw<uint32_t>(RTK_PCI_HISR0, mr<uint32_t>(RTK_PCI_HISR0));
+        continue;
+      }
       sleep_us(static_cast<unsigned>(_cfg.rx_poll_us));
       continue;
     }
@@ -556,7 +627,9 @@ void PcieTransport::rx_poll_loop(
                    static_cast<uint16_t>(_rx.rp & TRX_BD_IDX_MASK));
     }
   }
-  _logger->info("PcieTransport: RX poll loop exited ({} BDs reaped)", reaped);
+  if (msi)
+    mw<uint32_t>(RTK_PCI_HIMR0, 0); /* re-mask on exit */
+  _logger->info("PcieTransport: RX loop exited ({} BDs reaped)", reaped);
 }
 
 } /* namespace devourer */

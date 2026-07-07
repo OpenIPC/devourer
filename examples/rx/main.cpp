@@ -544,6 +544,10 @@ int main() {
     devourer::PcieTransport::Config pcfg;
     if (const char *pp = std::getenv("DEVOURER_PCIE_RX_POLL_US"))
       pcfg.rx_poll_us = std::atoi(pp);
+    /* DEVOURER_PCIE_NO_MSI=1 — force the fixed-interval polled RX loop
+     * (A/B escape hatch; MSI+eventfd is the default). */
+    if (std::getenv("DEVOURER_PCIE_NO_MSI"))
+      pcfg.use_msi = false;
     auto transport = devourer::PcieTransport::Open(bdf, logger, pcfg);
     if (!transport)
       return 1;

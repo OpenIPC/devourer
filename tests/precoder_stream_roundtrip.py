@@ -4,7 +4,8 @@
 Streams `--bytes N` random bytes from one devourer adapter (streamtx,
 fed by tools/precoder/stream_tx.py) to a second devourer adapter
 (rxdemo with DEVOURER_STREAM_OUT=1), then decodes the received
-<devourer-stream> lines via stream.decode_body and checks:
+`{"ev":"rx.frame",...}` JSONL events (rxdemo stdout) via
+stream.decode_body and checks:
 
   1. TRANSPORT  — at least `--min-frames` frames decoded.
   2. RX RATE    — every decoded frame's RX rate index == DESC_RATE6M (0x04),
@@ -35,7 +36,6 @@ from __future__ import annotations
 import argparse
 import os
 import random
-import re
 import subprocess
 import sys
 import threading
@@ -45,20 +45,20 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 PRECODER = REPO / "tools" / "precoder"
+sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(PRECODER))
 import stream  # noqa: E402
 import encode_subcarriers as enc  # noqa: E402
+from devourer_events import iter_events  # noqa: E402
 
 DESC_RATE6M = 0x04
-_STREAM_RE = re.compile(
-    r"<devourer-stream>rate=(?P<rate>\d+)\s+len=(?P<len>\d+)"
-    r"(?:\s+crc_err=(?P<crc_err>\d+))?"
-    r"(?:\s+icv_err=(?P<icv_err>\d+))?"
-    r"(?:\s+rssi=(?P<rssi>-?\d+,-?\d+))?"
-    r"(?:\s+evm=(?P<evm>-?\d+,-?\d+))?"
-    r"(?:\s+snr=(?P<snr>-?\d+,-?\d+))?"
-    r"\s+body=(?P<hex>[0-9a-fA-F]*)"
-)
+
+# rxdemo's DEVOURER_STREAM_OUT emits one `{"ev":"rx.frame",...}` JSON Line
+# per frame on stdout (fields: rate, len, crc, icv, rssi/evm/snr, seq, tsfl,
+# bw, stbc, ldpc, sgi, body-hex). Human diagnostics go to stderr as
+# `devourer [I] ...` and never parse as events, so merging stderr into the
+# reader below stays safe. (streamtx routes its own events to stderr — its
+# stdin is the data path — but this harness DEVNULLs the TX side anyway.)
 
 
 def parse_shape(s: str | None):
@@ -182,7 +182,7 @@ def run_test(args) -> int:
     deadline = time.monotonic() + args.duration
     try:
         while time.monotonic() < deadline:
-            hits = sum(1 for l in rx_reader.lines if _STREAM_RE.search(l))
+            hits = sum(1 for _ in iter_events(rx_reader.lines, ev="rx.frame"))
             if hits >= expected_frames + 2:  # small buffer for retransmits
                 time.sleep(0.5)
                 break
@@ -219,14 +219,11 @@ def run_test(args) -> int:
     shape_checked = 0
     bodies_for_shape: list[tuple[bytes, int]] = []  # (body, plen)
 
-    for l in rx_reader.lines:
-        m = _STREAM_RE.search(l)
-        if not m:
-            continue
-        rate = int(m.group("rate"))
+    for ev in iter_events(rx_reader.lines, ev="rx.frame"):
+        rate = int(ev["rate"])
         if rate != DESC_RATE6M:
             rate_mismatch += 1
-        body = bytes.fromhex(m.group("hex"))
+        body = bytes.fromhex(ev.get("body", ""))
         frame = stream.decode_body(body, shape=shape, seed=seed,
                                    offset=offset, entry_state=entry_state)
         if frame is None:

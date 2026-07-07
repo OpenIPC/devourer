@@ -5,9 +5,14 @@ runtime-ephemeral register masking.
 A clean way to compare:
   - `tools/canary_kernel_dump.sh <iface> <channel> [chip]` output
     (kernel side via iwpriv)
-  - `DEVOURER_DUMP_CANARY=1 ./build/rxdemo` block extracted
-    by `awk '/DEVOURER_DUMP_CANARY \\(post channel-set ch=N\\)/,
-    /END DEVOURER_DUMP_CANARY/' | sed 's/^<devourer>//'`
+  - `DEVOURER_DUMP_CANARY=1 ./build/rxdemo` block. The dump is a
+    human diagnostic and goes to **stderr** as `devourer [I] `-prefixed
+    lines (stdout carries the JSONL event stream), so capture with
+    `2> rx.err` (or `2>&1` past the demo) and extract with
+    `awk '/DEVOURER_DUMP_CANARY \\(post channel-set ch=N\\)/,
+    /END DEVOURER_DUMP_CANARY/' | sed -E 's/^devourer \\[[A-Z]\\] //'`
+    — though the parser below strips the prefix itself, so raw
+    stderr files work unstripped too.
 
 Both files contain `KIND 0xADDR = 0xVALUE` lines in the same order
 (the kernel script mirrors devourer's emit order exactly per
@@ -176,6 +181,10 @@ LINE_RE = re.compile(
     r"^(BB|MAC|RF\[[AB]\])\s+0x([0-9a-fA-F]+)\s*=\s*0x([0-9a-fA-F]+)\s*$"
 )
 
+# Devourer human-diagnostic prefix on stderr: `devourer [I] ` (level letter
+# T/D/I/W/E). Stripped liberally so an unfiltered stderr capture parses.
+DIAG_PREFIX_RE = re.compile(r"^devourer \[[A-Z]\] ")
+
 
 @dataclass(frozen=True)
 class Reading:
@@ -187,10 +196,13 @@ class Reading:
 def parse_canary(path: Path) -> dict[tuple[str, int], int]:
     """Parse a canary file into {(kind, addr): value}. Skips lines
     outside the `=== DEVOURER_DUMP_CANARY ===` envelope (header,
-    log noise, etc.)."""
+    log noise, etc.). Devourer-side lines carry the stderr
+    `devourer [I] ` diagnostic prefix — stripped before matching, so
+    both pre-stripped and raw stderr captures parse."""
     readings: dict[tuple[str, int], int] = {}
     in_block = False
     for raw in path.read_text().splitlines():
+        raw = DIAG_PREFIX_RE.sub("", raw.strip())
         if "DEVOURER_DUMP_CANARY (post channel-set" in raw:
             in_block = True
             continue

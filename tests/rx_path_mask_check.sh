@@ -2,7 +2,7 @@
 # Hardware validation for the runtime RX-chain mask (SetRxPathMask, issue #189).
 # The 8814AU is the only plugged part with >2 chains to trade, so it is the RX;
 # an 8812AU beacon on the same channel is the source. DEVOURER_RX_ALLPATHS emits
-# per-chain RSSI (A,B,C,D) on <devourer-rxpath> lines — masking a chain drops
+# per-chain RSSI (A,B,C,D) on rx.path JSONL events — masking a chain drops
 # its RSSI to the noise floor, which is the functional truth the check keys on.
 #
 # Two things proven:
@@ -43,20 +43,23 @@ if ! plugged "$TX_PID" "$TX_VID"; then echo "SKIP: 8812AU (TX) not plugged"; exi
 echo "== building =="
 cmake --build "$ROOT/build" -j --target rxdemo txdemo >/dev/null || exit 1
 
-# Median per-chain RSSI (chains A B C D) over a run's <devourer-rxpath> lines,
+# Median per-chain RSSI (chains A B C D) over a run's rx.path events,
 # restricted to a channel by cross-referencing the sweep's dwell markers is
 # overkill here: the beacon is on ONE channel, so only that channel's dwells
-# catch frames — every <devourer-rxpath> line already belongs to it.
+# catch frames — every rx.path event already belongs to it.
 medians() { # $1=log -> "A B C D"
     python3 - "$1" <<'PYEOF'
-import re, statistics, sys
+import json, statistics, sys
 ch = {0: [], 1: [], 2: [], 3: []}
-rx = re.compile(r"<devourer-rxpath>.*\brssi=(-?\d+),(-?\d+),(-?\d+),(-?\d+)")
 for line in open(sys.argv[1], errors="replace"):
-    m = rx.search(line)
-    if m:
-        for i in range(4):
-            ch[i].append(int(m.group(i + 1)))
+    if not line.startswith('{"ev":"rx.path"'):
+        continue
+    try:
+        rssi = json.loads(line)["rssi"]
+    except (ValueError, KeyError):
+        continue
+    for i in range(4):
+        ch[i].append(int(rssi[i]))
 out = []
 for i in range(4):
     out.append(str(int(statistics.median(ch[i]))) if ch[i] else "nan")

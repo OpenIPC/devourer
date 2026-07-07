@@ -133,7 +133,7 @@ static rx_pkt_attrib rtl8812_query_rx_desc_status(uint8_t *pdesc) {
 
   /* Offset 20 — chip-side TSF low (32 bits). Surfaced via RxAtrib.tsfl
    * for downstream latency measurement and dup-detection (see
-   * examples/rx/main.cpp's <devourer-stream> line). The macro reads bits 0..31
+   * examples/rx/main.cpp's rx.frame event). The macro reads bits 0..31
    * of pdesc+20 (full 4-byte u32), not a byte — the original commented
    * `(byte)` cast in master was a copy-paste from another field. */
   pattrib.tsfl = GET_RX_STATUS_DESC_TSFL_8812(pdesc);
@@ -190,7 +190,7 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
      * corruption (corruption_analysis.py, FEC layers). The pkt_len check
      * above already guards the slice math against a corrupted descriptor. */
     if ((pattrib.crc_err) || (pattrib.icv_err)) {
-      _logger->debug("RX corrupted frame surfaced: crc_err={} icv_err={} "
+      DVR_DEBUG(_logger, "RX corrupted frame surfaced: crc_err={} icv_err={} "
                      "pkt_len={}",
                      pattrib.crc_err, pattrib.icv_err, pattrib.pkt_len);
     }
@@ -287,7 +287,7 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
    * never decremented it — so a non-zero value here is the norm for every
    * aggregated transfer, not an error. */
   if (pkt_cnt != 0) {
-    _logger->debug("RX aggregate carried {} packets (DMA_AGG_NUM)", pkt_cnt);
+    DVR_DEBUG(_logger, "RX aggregate carried {} packets (DMA_AGG_NUM)", pkt_cnt);
   }
   //_logger->info("{} received in frame", ret.size());
 

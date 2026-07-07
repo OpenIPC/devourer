@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Render a per-subcarrier SNR waterfall from captured MU beamforming reports
-to a standalone SVG (for docs — GitHub renders it, and it stays diff-able).
+(`{"ev":"bf.report_raw",...}` JSONL events, or bare hex lines) to a standalone
+SVG (for docs — GitHub renders it, and it stays diff-able).
 
     tools/bf_waterfall_svg.py capture.txt -o docs/img/bf_waterfall.svg \
         --operating-snr 28
@@ -32,9 +33,10 @@ def main() -> int:
 
     frames = []
     for line in open(args.infile):
-        if "<devourer-bf-report-raw>" in line:
-            line = line.split("<devourer-bf-report-raw>", 1)[1]
-        f = bf.parse_frame(line.strip())
+        h = bf.report_hex(line)
+        if h is None:
+            continue
+        f = bf.parse_frame(h)
         if f and f["feedback"]:
             frames.append(f)
     if not frames:

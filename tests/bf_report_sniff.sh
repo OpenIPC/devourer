@@ -4,7 +4,7 @@
 #   - 8812AU  : sounder  (TX NDPA + descriptor NDPA bit + arm sounder engine)
 #   - 8821AU  : beamformee (armed, unassociated)
 #   - 8814AU  : passive monitor sniffer, DEVOURER_BF_DETECT_REPORT=1
-# A <devourer-bf-report> line on the sniffer with SA = 8821AU MAC is the
+# A "ev":"bf.report" event on the sniffer with sa = 8821AU MAC is the
 # direct proof the unassociated responder emitted a VHT Compressed Beamforming
 # report. Run armed vs unarmed to show the report only appears when armed.
 #
@@ -74,9 +74,9 @@ run_cell() { # $1=name $2=arm(0|1)
     wait "$bfee_pid" "$sniff_pid" 2>/dev/null
 
     local n
-    n=$(grep -c "<devourer-bf-report>" "$OUT/$name.sniff.log")
+    n=$(grep -Fc '"ev":"bf.report"' "$OUT/$name.sniff.log")
     echo "  bf-report lines: $n"
-    grep "<devourer-bf-report>" "$OUT/$name.sniff.log" | head -3
+    grep -F '"ev":"bf.report"' "$OUT/$name.sniff.log" | head -3
 }
 
 run_cell unarmed 0
@@ -85,6 +85,6 @@ run_cell armed 1
 
 echo
 echo "== verdict =="
-echo "unarmed reports: $(grep -c '<devourer-bf-report>' "$OUT/unarmed.sniff.log")"
-echo "armed reports:   $(grep -c '<devourer-bf-report>' "$OUT/armed.sniff.log")"
+echo "unarmed reports: $(grep -Fc '"ev":"bf.report"' "$OUT/unarmed.sniff.log")"
+echo "armed reports:   $(grep -Fc '"ev":"bf.report"' "$OUT/armed.sniff.log")"
 echo "(expect armed reports with sa=$BFEE_MAC; logs in $OUT)"

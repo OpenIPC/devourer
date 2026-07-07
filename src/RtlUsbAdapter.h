@@ -185,12 +185,14 @@ public:
   }
 
   template <typename T> bool rtw_write(uint16_t reg_num, T value) {
-    /* debug.log_writes: emit every vendor reg write as "0xADDR N 0xVAL"
-     * (matches tests/decode_wseq.py output) so devourer's bring-up write set
-     * can be diffed against the kernel golden. */
+    /* debug.log_writes: emit every vendor reg write as a debug.wreg event
+     * (addr/width/val mirror tests/decode_wseq.py's tuple) so devourer's
+     * bring-up write set can be diffed against the kernel golden. */
     if (_log_writes)
-      fprintf(stderr, "<wlog>0x%04x %zu 0x%0*x\n", reg_num, sizeof(T),
-              (int)(sizeof(T) * 2), (unsigned)value);
+      devourer::Ev(_logger->events(), "debug.wreg")
+          .hexf("addr", reg_num, 4)
+          .f("width", sizeof(T))
+          .hexf("val", (unsigned long long)value, (int)(sizeof(T) * 2));
     if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_WRITE, 5,
                                 reg_num, 0, (uint8_t *)&value, sizeof(T),
                                 USB_TIMEOUT) == sizeof(T)) {

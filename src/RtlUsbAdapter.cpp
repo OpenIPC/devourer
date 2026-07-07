@@ -432,7 +432,7 @@ void RtlUsbAdapter::transfer_callback(struct libusb_transfer *transfer) {
   auto *self = static_cast<RtlUsbAdapter *>(transfer->user_data);
   if (transfer->status == LIBUSB_TRANSFER_COMPLETED &&
       transfer->actual_length == transfer->length) {
-    self->_logger->debug("Packet sent successfully, length: {}",
+    DVR_DEBUG(self->_logger, "Packet sent successfully, length: {}",
                          transfer->length);
   } else {
     /* Flag the bulk-OUT as possibly halted so the next send_packet (on the TX
@@ -448,6 +448,11 @@ void RtlUsbAdapter::transfer_callback(struct libusb_transfer *transfer) {
         std::memory_order_relaxed);
     self->_logger->error("Failed to send packet, status: {}, actual length: {}",
                          transfer->status, transfer->actual_length);
+    /* machine-readable mirror of the failure (tests/regress.py keys on it) */
+    devourer::Ev(self->_logger->events(), "tx.fail")
+        .f("status", (long long)transfer->status)
+        .f("actual_len", transfer->actual_length)
+        .f("timeout", transfer->status == LIBUSB_TRANSFER_TIMED_OUT);
   }
   libusb_free_transfer(transfer);
 }
@@ -536,7 +541,7 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double, std::milli> elapsed = end - start;
   if (rc == LIBUSB_SUCCESS) {
-    _logger->debug("Packet sent successfully, length: {},used time {}ms", length,
+    DVR_DEBUG(_logger, "Packet sent successfully, length: {},used time {}ms", length,
                   elapsed.count());
     return true;
   } else {
@@ -545,6 +550,9 @@ bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
     _tx_stats->last_timeout.store(rc == LIBUSB_ERROR_TIMEOUT,
                                   std::memory_order_relaxed);
     _logger->error("Failed to send packet, error code: {}", rc);
+    devourer::Ev(_logger->events(), "tx.fail")
+        .f("rc", rc)
+        .f("timeout", rc == LIBUSB_ERROR_TIMEOUT);
     libusb_free_transfer(transfer);
     return false;
   }

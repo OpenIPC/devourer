@@ -2,7 +2,7 @@
 """Verdict for tests/rx_energy_probe.sh: is a CW interferer detectable in the
 frame-free RX energy telemetry?
 
-Parses the sensor's <devourer-energy> lines from a baseline (tone off) capture
+Parses the sensor's rx.energy events from a baseline (tone off) capture
 and a tone-on capture, and asserts the two are clearly separable in the CCA
 counter. A strong co-located CW pushes the sensor's cca_ofdm out of its ambient
 band in one of two ways, both a valid detection:
@@ -19,21 +19,20 @@ was clearly active.
   python3 rx_energy_check.py baseline.log tone.log
 """
 from __future__ import annotations
-import re
 import sys
 import statistics
 
-_CCA = re.compile(r"cca_ofdm=(\d+)")
+from devourer_events import iter_events
 
 
 def cca_series(path: str) -> list[int]:
     out = []
     try:
         with open(path) as f:
-            for ln in f:
-                m = _CCA.search(ln)
-                if m:
-                    out.append(int(m.group(1)))
+            for ev in iter_events(f, ev="rx.energy"):
+                v = ev.get("cca_ofdm")
+                if v is not None:
+                    out.append(int(v))
     except FileNotFoundError:
         pass
     # drop the first sample (often the pre-bring-up 0)

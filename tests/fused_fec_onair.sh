@@ -109,6 +109,6 @@ wait "$RXBG" 2>/dev/null
 
 # Offline analysis: same FEC params, baseline vs SBI.
 echo "=== fused-FEC result (offline analysis of the on-air capture) ==="
-grep "<devourer-stream>" "$RAW" | $PY "$FEC/fused_fec_rx.py" $FEC_ARGS >/dev/null 2>/tmp/fused_gain.log
+grep -F '"ev":"rx.frame"' "$RAW" | $PY "$FEC/fused_fec_rx.py" $FEC_ARGS >/dev/null 2>/tmp/fused_gain.log
 grep "fused_fec_rx" /tmp/fused_gain.log || echo "  no frames captured — check TX rate/power and that both chips are unbound"
 echo "=== raw capture at $RAW (re-analyse with other FEC params if desired) ==="

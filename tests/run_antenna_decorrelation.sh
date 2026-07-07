@@ -8,7 +8,7 @@
 # (txdemo) on the same channel — the standard two-adapter bench setup.
 #
 # It builds devourer, runs rxdemo (RX) with DEVOURER_RX_ALLPATHS=1 for a
-# fixed dwell capturing the <devourer-rxpath> lines, then feeds them to
+# fixed dwell capturing the rx.path JSONL events, then feeds them to
 # antenna_decorrelation.py. Optionally starts the TX beacon too (set TX_PID).
 #
 # Env knobs (all optional):
@@ -71,13 +71,13 @@ if [ -n "${TX_PID:-}" ]; then
     # Poll until the beacon actually injects — TX+RX each need ~7-10s to init
     # (efuse read + settle), and the 8812 TX occasionally fails to claim on the
     # first try when launched alongside the RX's USB reset. Waiting for a
-    # confirmed inject (a `TX #.. rc=1` line) instead of a fixed sleep is what
-    # makes a zero-frame capture (dead TX window) reliable to avoid.
+    # confirmed inject (a tx.frame event with rc=1) instead of a fixed sleep is
+    # what makes a zero-frame capture (dead TX window) reliable to avoid.
     for _ in $(seq 1 30); do
-        grep -q 'TX #.* rc=1' "$TXLOG" 2>/dev/null && break
+        grep -q '"ev":"tx.frame".*"rc":1' "$TXLOG" 2>/dev/null && break
         sleep 1
     done
-    if ! grep -q 'TX #.* rc=1' "$TXLOG" 2>/dev/null; then
+    if ! grep -q '"ev":"tx.frame".*"rc":1' "$TXLOG" 2>/dev/null; then
         echo "TX beacon did not confirm an inject within 30s — check $TXLOG" >&2
         exit 3
     fi
@@ -105,8 +105,8 @@ sleep "$DURATION"
 kill "$RX_PID_RUNNING" 2>/dev/null || true
 wait "$RX_PID_RUNNING" 2>/dev/null || true
 
-RXLINES="$(grep -c '<devourer-rxpath>' "$CAP" || true)"
-echo "== captured $RXLINES <devourer-rxpath> frames =="
+RXLINES="$(grep -cF '"ev":"rx.path"' "$CAP" || true)"
+echo "== captured $RXLINES rx.path frames =="
 if [ "${RXLINES:-0}" -eq 0 ]; then
     echo "No canonical-SA frames captured. Is the beacon TX flying on ch$CHANNEL," \
          "and is RX_PID the right adapter?" >&2

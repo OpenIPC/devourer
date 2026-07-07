@@ -25,12 +25,12 @@
  *                               — proves the hop path leaves TXAGC alone
  *   --thermal                   print a thermal snapshot with each state line
  *
- * Machine-readable output (one line per step, consumed by
+ * Machine-readable output (one JSONL event per step, consumed by
  * tests/txpwr_offset_regcheck.sh):
  *
- *   <devourer-txpwr-caps>max=63 step_qdb=2 min=-126 max_qdb=126
- *   <devourer-txpwr-state>flat=-1 offset_qdb=-24 steps=-12 satlo=0 sathi=0 \
- *       cck=28 ofdm=34 mcs7=30 rb=1
+ *   {"ev":"txpwr.caps","supported":1,"max":63,"step_qdb":2,...}
+ *   {"ev":"txpwr.state","flat":-1,"offset_qdb":-24,"steps":-12,"satlo":0,
+ *    "sathi":0,"cck":28,"ofdm":34,"mcs7":30,"rb":1}
  */
 #ifdef _WIN32
 #define NOMINMAX
@@ -59,6 +59,10 @@
 #include "logger.h"
 
 namespace {
+
+/* Event sink for the demo's JSONL emissions (print_state is a free function)
+ * — points at the main() Logger's sink, set right after Logger construction. */
+devourer::EventSink *g_ev = nullptr;
 
 /* The Realtek PIDs the demos' open loop iterates; --pid narrows to one. */
 const uint16_t kRealtekPids[] = {0x8812, 0x8813, 0x881a, 0x0811, 0xa811,
@@ -122,7 +126,8 @@ bool parse_args(int argc, char **argv, Args &a) {
     else if (k == "--thermal")
       a.thermal = true;
     else {
-      std::fprintf(stderr, "unknown/incomplete arg: %s\n", k.c_str());
+      std::fprintf(stderr, "devourer [W] unknown/incomplete arg: %s\n",
+                   k.c_str());
       return false;
     }
   }
@@ -144,17 +149,26 @@ ChannelWidth_t bw_enum(int bw) {
 
 void print_state(IRtlDevice *dev, bool with_thermal) {
   const devourer::TxPowerState s = dev->GetTxPowerState();
-  std::printf("<devourer-txpwr-state>flat=%d offset_qdb=%d steps=%d satlo=%d "
-              "sathi=%d cck=%d ofdm=%d mcs7=%d rb=%d\n",
-              s.flat_index, s.offset_qdb, s.offset_steps,
-              s.saturated_low ? 1 : 0, s.saturated_high ? 1 : 0, s.cck_index,
-              s.ofdm_index, s.mcs7_index, s.hw_readback ? 1 : 0);
+  devourer::Ev(*g_ev, "txpwr.state")
+      .f("flat", s.flat_index)
+      .f("offset_qdb", s.offset_qdb)
+      .f("steps", s.offset_steps)
+      .f("satlo", s.saturated_low ? 1 : 0)
+      .f("sathi", s.saturated_high ? 1 : 0)
+      .f("cck", s.cck_index)
+      .f("ofdm", s.ofdm_index)
+      .f("mcs7", s.mcs7_index)
+      .f("rb", s.hw_readback ? 1 : 0);
   if (with_thermal) {
     const devourer::ThermalStatus t = dev->GetThermalStatus();
-    std::printf("<devourer-thermal>raw=%u baseline=%u delta=%d status=%s\n",
-                t.raw, t.baseline, t.delta, devourer::ThermalBucket(t));
+    devourer::Ev ev(*g_ev, "thermal");
+    ev.t().f("raw", t.raw);
+    if (t.valid)
+      ev.f("baseline", t.baseline).f("delta", t.delta);
+    else
+      ev.f("baseline", nullptr);
+    ev.f("status", devourer::ThermalBucket(t));
   }
-  std::fflush(stdout);
 }
 
 } // namespace
@@ -165,6 +179,8 @@ int main(int argc, char **argv) {
     return 2;
 
   auto logger = std::make_shared<Logger>();
+  apply_logging_env(*logger); /* DEVOURER_LOG_LEVEL / DEVOURER_EVENTS / ... */
+  g_ev = &logger->events();
   install_devourer_signal_handlers();
 
   libusb_context *ctx = nullptr;
@@ -209,12 +225,13 @@ int main(int argc, char **argv) {
   }
 
   const devourer::TxPowerCaps caps = dev->GetTxPowerCaps();
-  std::printf("<devourer-txpwr-caps>supported=%d max=%u step_qdb=%u "
-              "step_measured=%d min_qdb=%d max_qdb=%d\n",
-              caps.supported ? 1 : 0, caps.index_max, caps.step_qdb,
-              caps.step_measured ? 1 : 0, caps.offset_min_qdb,
-              caps.offset_max_qdb);
-  std::fflush(stdout);
+  devourer::Ev(*g_ev, "txpwr.caps")
+      .f("supported", caps.supported ? 1 : 0)
+      .f("max", caps.index_max)
+      .f("step_qdb", caps.step_qdb)
+      .f("step_measured", caps.step_measured ? 1 : 0)
+      .f("min_qdb", caps.offset_min_qdb)
+      .f("max_qdb", caps.offset_max_qdb);
   if (!caps.supported) {
     logger->error("TX-power API not wired for this family yet");
     dev->Stop();
@@ -245,8 +262,7 @@ int main(int argc, char **argv) {
          !g_devourer_should_stop;
          q += inc) {
       const int applied = dev->SetTxPowerOffsetQdb(q);
-      std::printf("<devourer-txpwr-offset>requested=%d applied=%d\n", q,
-                  applied);
+      devourer::Ev(*g_ev, "txpwr.offset").f("requested", q).f("applied", applied);
       print_state(dev.get(), a.thermal);
       std::this_thread::sleep_for(std::chrono::milliseconds(a.step_ms));
     }

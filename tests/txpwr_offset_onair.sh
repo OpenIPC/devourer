@@ -120,14 +120,14 @@ for dut in "${DUTS[@]}"; do
     wait "$GROUND_JOB" 2>/dev/null
 
     # Slope fit: per cell, median ground RSSI (chain A) of the canonical-SA
-    # stream lines in [t0+6, t1-1] (bring-up transmits nothing at first).
+    # rx.frame events in [t0+6, t1-1] (bring-up transmits nothing at first).
     python3 - "$OUT/$tag-ground.log" "$OUT/$tag-cells.txt" "$NOMINAL" >"$OUT/$tag-fit.txt" 2>&1 <<'PYEOF'
 import re, statistics, sys
 ground_log, cells_txt = sys.argv[1], sys.argv[2]
 tssi = sys.argv[3] == "tssi"
 nominal = None if tssi else float(sys.argv[3])
 frames = []
-rx = re.compile(r"^([0-9.]+) .*<devourer-stream>.*\brssi=(-?\d+),(-?\d+)")
+rx = re.compile(r'^([0-9.]+) .*"ev":"rx\.frame".*"rssi":\[(-?\d+),(-?\d+)\]')
 for line in open(ground_log, errors="replace"):
     m = rx.match(line)
     if m:

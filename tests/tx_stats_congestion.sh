@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate GetTxStats (<devourer-txstats>) — the driver-drop / congestion signal.
+# Validate GetTxStats (the tx.stats event) — the driver-drop / congestion signal.
 # Back-to-back TX (DEVOURER_TX_GAP_US=0) fills the on-chip TX FIFO, so the USB
 # bulk-OUT starts NAKing (LIBUSB_ERROR_TIMEOUT / LIBUSB_TRANSFER_TIMED_OUT) and
 # `failed` climbs with was_timeout=1 — the recoverable back-pressure an adaptive
@@ -42,8 +42,8 @@ run_cell() { # $1=pid $2=vid $3=gap $4=tag
         DEVOURER_TX_RATE=MCS3 DEVOURER_TX_GAP_US="$3" \
         timeout "$DUR" "$ROOT/build/txdemo" >"$log" 2>&1 || true
     local line
-    line=$(grep "<devourer-txstats>" "$log" | tail -1)
-    echo "$line" | sed -E 's/.*submitted=([0-9]+) failed=([0-9]+) was_timeout=([0-9]+) last_rc=(-?[0-9]+).*/\1 \2 \3 \4/'
+    line=$(grep -F '"ev":"tx.stats"' "$log" | tail -1)
+    echo "$line" | sed -E 's/.*"submitted":([0-9]+),"failed":([0-9]+),"was_timeout":([0-9]+),"last_rc":(-?[0-9]+).*/\1 \2 \3 \4/'
 }
 
 for dut in "${DUTS[@]}"; do

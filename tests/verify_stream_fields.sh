@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# M0 verification: confirm the <devourer-stream> RX line now carries the decoded
+# M0 verification: confirm the rx.frame RX event now carries the decoded
 # PHY descriptor fields (bw/stbc/ldpc/sgi) added in examples/rx/main.cpp.
 #
 # Two-adapter loopback, NO SDR: an 8821AU transmits the canonical-SA beacon
 # (txdemo) while an 8812AU receives with DEVOURER_STREAM_OUT=1. The
-# stream line only fires on canonical-SA frames, so a devourer TX is required.
+# rx.frame event only fires on canonical-SA frames, so a devourer TX is required.
 #
 #   TX: RTL8821AU (TP-Link Archer T2U Plus, 2357:0120)  --ch6-->  air
 #   RX: RTL8812AU (0bda:8812), DEVOURER_STREAM_OUT=1
@@ -35,12 +35,12 @@ echo "[verify] starting 8812AU RX (STREAM_OUT) for 30s ..."
 timeout 30 env DEVOURER_PID=$RXPID DEVOURER_CHANNEL=$CH DEVOURER_STREAM_OUT=1 \
   "$BIN/rxdemo" 2>/dev/null >"$OUT"
 
-N=$(grep -c devourer-stream "$OUT")
-echo "[verify] <devourer-stream> lines: $N"
+N=$(grep -cF '"ev":"rx.frame"' "$OUT")
+echo "[verify] rx.frame events: $N"
 if [ "$N" -gt 0 ]; then
   echo "[verify] sample (body truncated):"
-  grep -m2 devourer-stream "$OUT" | sed 's/body=.*/body=.../'
-  if grep -q "bw=.*stbc=.*ldpc=.*sgi=" "$OUT"; then
+  grep -m2 -F '"ev":"rx.frame"' "$OUT" | sed 's/"body":.*/"body":"..."}/'
+  if grep -q '"bw":.*"stbc":.*"ldpc":.*"sgi":' "$OUT"; then
     echo "[verify] RESULT: PASS — bw/stbc/ldpc/sgi present in stream line"
     exit 0
   fi

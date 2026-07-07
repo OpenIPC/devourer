@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Live per-subcarrier waterfall from beamforming self-sounding reports.
 
-Pipe rxdemo's raw report stream into this for a scrolling, truecolor
-per-tone spectrogram in the terminal — the channel across frequency (X) and
-time (Y):
+Pipe rxdemo's event stream (`{"ev":"bf.report_raw",...}` JSONL) into this for
+a scrolling, truecolor per-tone spectrogram in the terminal — the channel
+across frequency (X) and time (Y). Non-event lines are skipped:
 
     rxdemo ... DEVOURER_BF_DETECT_REPORT=4 | tools/bf_waterfall.py
 
@@ -141,9 +141,10 @@ def main() -> int:
 
     try:
         for line in sys.stdin:
-            if "<devourer-bf-report-raw>" in line:
-                line = line.split("<devourer-bf-report-raw>", 1)[1]
-            f = bf.parse_frame(line.strip())
+            h = bf.report_hex(line)
+            if h is None:
+                continue
+            f = bf.parse_frame(h)
             if not f:
                 continue
             if ns is None:
@@ -153,7 +154,6 @@ def main() -> int:
                 vbytes = (ns * 10 + 7) // 8
             # extract this report's per-tone series
             if mode == "MU":
-                f["raw"] = bytes.fromhex(line.strip()) if "raw" not in f else f["raw"]
                 s = bf.parse_mu_snr(f, ns, vbytes)
             else:
                 # SU: reuse the decoder's fixed compact split (bphi=6,bpsi=4)

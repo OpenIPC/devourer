@@ -26,6 +26,24 @@ option(DEVOURER_JAGUAR2_8821C "RTL8811CU / 8821CU (Jaguar2, rtl8821c, 1T1R)"    
 option(DEVOURER_JAGUAR3_8822C "RTL8812CU / 8822CU (Jaguar3, rtl8822c)"          ON)
 option(DEVOURER_JAGUAR3_8822E "RTL8812EU / 8822EU (Jaguar3, rtl8822e)"          ON)
 
+# Compile-time diagnostics floor (src/logger.h). Calls below the floor —
+# including their argument expressions at DVR_TRACE/DVR_DEBUG sites — compile
+# to nothing. Empty (the default) keeps the NDEBUG-derived behavior: release
+# builds drop trace/debug, debug builds keep everything. Example production
+# firmware build: -DDEVOURER_LOG_MAX_LEVEL=WARN
+set(DEVOURER_LOG_MAX_LEVEL "" CACHE STRING
+    "Compile-time log floor: TRACE, DEBUG, INFO, WARN, ERROR or SILENT (empty = NDEBUG-derived)")
+set_property(CACHE DEVOURER_LOG_MAX_LEVEL PROPERTY STRINGS
+    "" TRACE DEBUG INFO WARN ERROR SILENT)
+if(NOT DEVOURER_LOG_MAX_LEVEL STREQUAL "")
+    set(_devourer_ll_valid TRACE DEBUG INFO WARN ERROR SILENT)
+    if(NOT DEVOURER_LOG_MAX_LEVEL IN_LIST _devourer_ll_valid)
+        message(FATAL_ERROR
+            "DEVOURER_LOG_MAX_LEVEL=${DEVOURER_LOG_MAX_LEVEL} — must be one of "
+            "TRACE, DEBUG, INFO, WARN, ERROR, SILENT (or empty).")
+    endif()
+endif()
+
 if(DEVOURER_8814 AND NOT DEVOURER_JAGUAR1)
     message(FATAL_ERROR
         "DEVOURER_8814=ON requires DEVOURER_JAGUAR1=ON (8814 reuses the Jaguar1 HAL).")
@@ -57,6 +75,7 @@ pkg_check_modules(libusb REQUIRED IMPORTED_TARGET libusb-1.0)
 add_library(devourer
     # --- generation-agnostic core (always compiled) ---
     src/logger.h
+    src/Event.h
     hal/basic_types.h
     hal/hal_com_reg.h
     src/ieee80211_radiotap.h
@@ -98,6 +117,13 @@ add_library(devourer
 )
 
 target_compile_features(devourer PUBLIC cxx_std_20)
+
+# PUBLIC: logger.h is header-only, so the library and its consumers must agree
+# on the compile-time log floor (ODR).
+if(NOT DEVOURER_LOG_MAX_LEVEL STREQUAL "")
+    target_compile_definitions(devourer PUBLIC
+        DEVOURER_LOG_MAX_LEVEL=DEVOURER_LL_${DEVOURER_LOG_MAX_LEVEL})
+endif()
 
 # Link devourer with libusb as found via pkg-config.
 target_link_libraries(devourer PUBLIC PkgConfig::libusb)
@@ -346,6 +372,16 @@ add_executable(ToneMaskSelftest
 target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
+
+# Headless guard for the JSONL event emitter (src/Event.h) — the machine
+# event stream every test script parses (docs/logging.md): first-field
+# serialization guarantee, escaping, spill + truncation paths.
+add_executable(LogEventSelftest
+    tests/log_event_selftest.cpp
+)
+target_link_libraries(LogEventSelftest PRIVATE devourer)
+
+add_test(NAME log_event_json COMMAND LogEventSelftest)
 
 # Headless guard for the sweep/hop bin-list grammar (src/SweepSpec.h) — the
 # channel-list / channel-range / MHz-range parsing behind DEVOURER_RX_SWEEP and

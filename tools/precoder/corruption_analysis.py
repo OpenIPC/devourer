@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Corruption analysis for the precoder stream link.
 
-Reads `<devourer-stream>` lines on stdin (typically piped from
+Reads `rx.frame` JSONL events on stdin (typically piped from
 `rxdemo` with both `DEVOURER_STREAM_OUT=1` and
 `DEVOURER_RX_KEEP_CORRUPTED=1`), reconstructs what each received body
 *should* have been from a known source file, and reports byte/bit-level
@@ -17,7 +17,7 @@ Workflow (RX side, this tool):
 
 The TX side encodes `source.bin` deterministically into N body frames. RX
 captures every body matching the canonical SA, including those the chip
-flagged with crc_err / icv_err (without `KEEP_CORRUPTED` the parser drops
+flagged with crc / icv (without `KEEP_CORRUPTED` the parser drops
 them; with it on they reach us with the descriptor flags set). For each
 captured body we:
 
@@ -47,7 +47,6 @@ from __future__ import annotations
 import argparse
 import collections
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -55,25 +54,10 @@ from typing import Optional
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
 
 import stream  # noqa: E402
-
-_STREAM_RE = re.compile(
-    r"<devourer-stream>rate=(?P<rate>\d+)\s+len=(?P<len>\d+)"
-    r"(?:\s+crc_err=(?P<crc_err>\d+))?"
-    r"(?:\s+icv_err=(?P<icv_err>\d+))?"
-    r"(?:\s+rssi=(?P<rssi>-?\d+,-?\d+))?"
-    r"(?:\s+evm=(?P<evm>-?\d+,-?\d+))?"
-    r"(?:\s+snr=(?P<snr>-?\d+,-?\d+))?"
-    r"\s+body=(?P<hex>[0-9a-fA-F]*)"
-)
-
-
-def _parse_pair(s: Optional[str]) -> Optional[tuple[int, int]]:
-    if not s:
-        return None
-    a, b = s.split(",")
-    return int(a), int(b)
+from devourer_events import parse_event  # noqa: E402
 
 
 def _effective_snr(snr: Optional[tuple[int, int]]) -> Optional[int]:
@@ -160,13 +144,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     bucket_bits_compared: collections.Counter = collections.Counter()
 
     for line in sys.stdin:
-        m = _STREAM_RE.search(line)
-        if not m:
+        ev = parse_event(line, ev="rx.frame")
+        if ev is None:
             continue
         total_captured += 1
-        crc_err = int(m.group("crc_err") or 0)
-        icv_err = int(m.group("icv_err") or 0)
-        snr = _parse_pair(m.group("snr"))
+        crc_err = int(ev.get("crc") or 0)
+        icv_err = int(ev.get("icv") or 0)
+        snr = tuple(ev["snr"]) if ev.get("snr") else None
         eff = _effective_snr(snr)
         if eff is not None:
             (snr_corrupt if crc_err or icv_err else snr_clean).append(eff)
@@ -174,7 +158,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             total_corrupted += 1
         else:
             total_clean += 1
-        body = bytes.fromhex(m.group("hex"))
+        body = bytes.fromhex(ev.get("body") or "")
         if len(body) < stream.HEADER_LEN:
             unmatched_seq += 1
             continue
@@ -219,7 +203,7 @@ def main(argv: Optional[list[str]] = None) -> int:
           f"{total_captured} captured) ===")
     print(f"captured        : {total_captured}")
     print(f"  chip-clean    : {total_clean}")
-    print(f"  chip-corrupt  : {total_corrupted}  (crc_err or icv_err set)")
+    print(f"  chip-corrupt  : {total_corrupted}  (crc or icv set)")
     print(f"matched seq     : {matched_seq}")
     print(f"unmatched seq   : {unmatched_seq}  (likely lost, foreign, or "
           f"seq-bytes corrupted)")

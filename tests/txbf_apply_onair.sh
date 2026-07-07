@@ -7,7 +7,7 @@
 #     from its RX loop the moment it ingests the peer's Compressed Beamforming
 #     Report (the CBR gate; a blind apply with no V degrades the link).
 #   B (beamformee + sensor, 8822CU): responds to the NDPA with a CBR and measures
-#     A's frames via GetRxQuality (<devourer-rxquality>).
+#     A's frames via GetRxQuality ("ev":"rx.quality" events).
 # A/B: apply OFF (no DEVOURER_BF_TXBF) vs ON. PASS = ON lifts B's snr/rssi and
 # A logs "TXBF apply ENABLED". Low TX power dodges the near-field RSSI ceiling.
 #
@@ -50,7 +50,7 @@ run_cell() {
     sudo -n env DEVOURER_PID="$B_PID" DEVOURER_VID="$B_VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_BF_ARM_BFEE="$BFER" DEVOURER_RXQUALITY=1 DEVOURER_RX_ENERGY_MS=1000 \
         timeout $((DUR + 20)) "$ROOT/build/rxdemo" 2>&1 \
-        | tee "$OUT/$tag-b.full.log" | grep --line-buffered devourer-rxquality \
+        | tee "$OUT/$tag-b.full.log" | grep --line-buffered -F '"ev":"rx.quality"' \
         >"$OUT/$tag-b.log" &
     local bpid=$!
     # Jaguar3 beamformee init is long (DLFW + cals ~10-15s) — wait for the RX
@@ -72,15 +72,17 @@ run_cell() {
     sleep 2
     # median rssi_mean / snr_mean over settled windows (frames>0)
     python3 - "$OUT/$tag-b.log" <<'PYEOF'
-import re, statistics, sys
+import json, statistics, sys
 r, s = [], []
 for line in open(sys.argv[1], errors="replace"):
-    fr = re.search(r"frames=(\d+)", line)
-    if not fr or int(fr.group(1)) == 0: continue
-    m = re.search(r"rssi_mean_dbm=(-?\d+)", line)
-    n = re.search(r"snr_mean_db=(-?\d+\.?\d*)", line)
-    if m: r.append(int(m.group(1)))
-    if n: s.append(float(n.group(1)))
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        continue
+    if ev.get("ev") != "rx.quality" or not ev.get("frames"):
+        continue
+    if ev.get("rssi_mean_dbm") is not None: r.append(float(ev["rssi_mean_dbm"]))
+    if ev.get("snr_mean_db") is not None: s.append(float(ev["snr_mean_db"]))
 def med(a): return statistics.median(a) if a else float("nan")
 print(f"{med(r):.1f} {med(s):.1f}")
 PYEOF

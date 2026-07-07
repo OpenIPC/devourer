@@ -178,7 +178,7 @@ void PowerTracking8812a::ApplySwingToBb() {
 
 void PowerTracking8812a::TickThermalMeter(BandType band, uint8_t channel) {
   if (!_initialised) {
-    _logger->debug(
+    DVR_DEBUG(_logger, 
         "PowerTracking8812a::TickThermalMeter called before Init — skipped");
     return;
   }
@@ -221,7 +221,7 @@ void PowerTracking8812a::TickThermalMeter(BandType band, uint8_t channel) {
     delta_abs = static_cast<uint8_t>(_thermalValue - avg);
   }
 
-  _logger->debug(
+  DVR_DEBUG(_logger, 
       "pwrtrk tick: ch={} band={} thermal_raw=0x{:x} avg=0x{:x} eeprom=0x{:x} "
       "delta_abs={} last_thermal=0x{:x}",
       unsigned(channel), unsigned(band), unsigned(thermal_value), unsigned(avg),
@@ -239,7 +239,7 @@ void PowerTracking8812a::TickThermalMeter(BandType band, uint8_t channel) {
     }
     GetTrackingTable(band, channel, avg, delta);
 
-    _logger->debug(
+    DVR_DEBUG(_logger, 
         "pwrtrk delta={} abs_ofdm_swing_idx=[A={}, B={}] delta_pwr=[{}, {}] "
         "default_ofdm={} -> final=[A={}, B={}]",
         unsigned(delta), int(_absoluteOfdmSwingIdx[0]),

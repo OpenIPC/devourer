@@ -58,17 +58,14 @@ DUTS=(
 plugged() { lsusb -d "$(printf '%04x:%04x' "$2" "$1")" >/dev/null 2>&1; }
 
 # --- helpers ---------------------------------------------------------------
-# Extract field F from the Nth <devourer-txpwr-state> line of a log.
+# Extract numeric field F from the Nth txpwr.state event line of a log.
 state_field() { # $1=log $2=line-index(1-based) $3=field
-    awk -v n="$2" -v f="$3" '/<devourer-txpwr-state>/ {
-        c++; if (c==n) { sub(/^.*<devourer-txpwr-state>/,"");
-            for (i=1;i<=NF;i++) { split($i,kv,"=");
-                if (kv[1]==f) print kv[2]; } } }' "$1" | tr -d '\r'
+    grep -F '"ev":"txpwr.state"' "$1" | sed -n "$2p" \
+        | grep -o "\"$3\":-\?[0-9]*" | cut -d: -f2 | tr -d '\r'
 }
 caps_field() { # $1=log $2=field
-    awk -v f="$2" '/<devourer-txpwr-caps>/ { sub(/^.*<devourer-txpwr-caps>/,"");
-        for (i=1;i<=NF;i++) { split($i,kv,"=");
-            if (kv[1]==f) { print kv[2]; exit } } }' "$1" | tr -d '\r'
+    grep -F '"ev":"txpwr.caps"' "$1" | head -1 \
+        | grep -o "\"$2\":-\?[0-9]*" | cut -d: -f2 | tr -d '\r'
 }
 
 run_step_demo() { # $1=outfile, rest = args
@@ -76,6 +73,10 @@ run_step_demo() { # $1=outfile, rest = args
     sudo -n timeout 90 "$STEP_DEMO" "$@" >"$out" 2>&1
 }
 
+# The canary dump stays "KIND 0xADDR = 0xVALUE" text, but now arrives as
+# stderr diagnostics ("devourer [I] " prefix; master's build still emits the
+# old "<devourer>" stdout form). The grep -oE extraction is prefix-agnostic,
+# so one extractor serves both builds — run_canary captures 2>&1.
 last_canary() { # $1 = log file  (same extractor as hop_parity_check.sh)
     awk '/=== DEVOURER_DUMP_CANARY/{buf=""} {buf=buf $0 "\n"}
          /=== END DEVOURER_DUMP_CANARY/{last=buf} END{printf "%s", last}' "$1" \
@@ -199,10 +200,10 @@ for dut in "${DUTS[@]}"; do
     # -- thermal plausibility --------------------------------------------------
     th="$OUT/$tag-thermal.log"
     run_step_demo "$th" --vid "$VID" --pid "$PID" --channel "$CH_A" --thermal
-    raw="$(awk '/<devourer-thermal>/ { sub(/^.*<devourer-thermal>/,"");
-        for (i=1;i<=NF;i++) { split($i,kv,"="); if (kv[1]=="raw") { print kv[2]; exit } } }' "$th" | tr -d '\r')"
+    raw="$(grep -F '"ev":"thermal"' "$th" | head -1 \
+        | grep -o '"raw":[0-9-]*' | cut -d: -f2 | tr -d '\r')"
     if [ -n "$raw" ] && [ "$raw" -ge 1 ] 2>/dev/null && [ "$raw" -le 63 ]; then
-        pass "$name thermal: raw=$raw plausible (baseline=$(awk '/<devourer-thermal>/ { sub(/^.*<devourer-thermal>/,""); for (i=1;i<=NF;i++) { split($i,kv,"="); if (kv[1]=="baseline") { print kv[2]; exit } } }' "$th"))"
+        pass "$name thermal: raw=$raw plausible (baseline=$(grep -F '"ev":"thermal"' "$th" | head -1 | grep -o '"baseline":[^,}]*' | cut -d: -f2))"
     else
         fail "$name thermal: raw='$raw' implausible/missing"
     fi

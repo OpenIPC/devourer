@@ -687,7 +687,8 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   if (channel == _last_tuned_ch)
     return true; /* no-op hop */
 
-  devourer::HopProf prof(_cfg.debug.hop_prof, "j2", channel);
+  devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j2",
+                         channel);
   const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
   const bool g2 = cch <= 14;
   const bool c8821 = (_variant == ChipVariant::C8821C);
@@ -833,7 +834,7 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
    * >80% of the hop's USB round-trips. */
 
   _last_tuned_ch = channel;
-  _logger->debug("Jaguar2: fast retune -> ch {} (central {}, RF18=0x{:05x})",
+  DVR_DEBUG(_logger, "Jaguar2: fast retune -> ch {} (central {}, RF18=0x{:05x})",
                  channel, cch, rf18);
   /* The fast path must emit the canary itself (it does not pass through the
    * full path) or the parity diff compares a stale full-set dump. */

@@ -4,8 +4,8 @@
 # DUT:     RTL8812CU (0bda:c812, 9-1.3) runs devourer's Jaguar-3 TX demo,
 #          injecting the canonical beacon SA 57:42:75:05:d6:00 on ch36.
 # Witness: RTL8812AU (0bda:8812, 9-2) runs devourer's Jaguar-1 RX demo in
-#          monitor on ch36 — examples/rx/main.cpp already prints <devourer-tx-hit>
-#          when it decodes that SA. Dogfoods devourer on both ends and avoids
+#          monitor on ch36 — examples/rx/main.cpp already emits "ev":"rx.txhit"
+#          events when it decodes that SA. Dogfoods devourer on both ends and avoids
 #          the RTL8814AU host-capture path entirely.
 # Bonus:   USRP B210 in-band power at 5180 MHz.
 #
@@ -49,11 +49,11 @@ sleep 1
 cleanup
 
 echo "=== verdict ==="
-HITS=$(grep -c "devourer-tx-hit" "$SNIFF_LOG" 2>/dev/null || echo 0)
-echo "DUT TX submit lines: $(grep -cE 'bulk_send EP|TX #' "$DUT_LOG")"
-echo "sniffer total RX frames: $(grep -cE 'devourer.*hit|RX frame|<devourer>' "$SNIFF_LOG")"
-echo "<devourer-tx-hit> count: $HITS"
-grep "devourer-tx-hit" "$SNIFF_LOG" | head -3
+HITS=$(grep -Fc '"ev":"rx.txhit"' "$SNIFF_LOG" 2>/dev/null || echo 0)
+echo "DUT TX submit lines: $(grep -cE 'bulk_send EP|"ev":"tx\.frame"' "$DUT_LOG")"
+echo "sniffer total RX frames: $(grep -Fc '"ev":"rx.pkt"' "$SNIFF_LOG")"
+echo "rx.txhit event count: $HITS"
+grep -F '"ev":"rx.txhit"' "$SNIFF_LOG" | head -3
 if [ "$HITS" -gt 0 ]; then
   echo "ON-AIR TX CONFIRMED BY DECODE (canonical SA received over the air)"
 else

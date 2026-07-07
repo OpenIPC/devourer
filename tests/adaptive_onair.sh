@@ -6,8 +6,11 @@
 # (USE_INTERFERER=1) drives the link into the corrupt regime so the controller
 # visibly drops to a more robust profile.
 #
-# WITNESS (no extra instrumentation): the *peer's* <devourer-stream> rate= changes
-# when a SET_RATE lands, and rssi= rises when a SET_PWR raises power.
+# WITNESS (no extra instrumentation): the *peer's* rx.frame events change rate
+# when a SET_RATE lands, and rssi rises when a SET_PWR raises power. duplex's
+# stream.rx/stream.ctl events ride its stdout, which adaptive_link.py consumes
+# for the controller — they never reach these logs; the applied state is
+# witnessed via adaptive_link's own <adaptive-vtx>/<adaptive-vrx> stderr lines.
 #
 #   sudo bash tests/adaptive_onair.sh                 # steady-state adaptation
 #   USE_INTERFERER=1 IGAIN=75 sudo bash tests/adaptive_onair.sh
@@ -64,8 +67,11 @@ sudo env DEVOURER_VID=$VTX_VID DEVOURER_PID=$VTX_PID PYTHONPATH="$PREC" \
 sleep "$SECS"; KILL; sleep 1
 
 echo "=== RESULT ==="
-echo "[vrx] video frames heard from VTX (rx hits): $(grep -oP 'rx hits=\K\d+' "$VRX_LOG" | tail -1)"
-echo "[vtx] RCF applied: SET_PWR=$(grep -c 'ctl op=1' "$VTX_LOG") SET_RATE=$(grep -c 'ctl op=2' "$VTX_LOG")"
+echo "[vrx] last controller window (frames= is the scoring-window RX count):"
+grep '<adaptive-vrx>' "$VRX_LOG" | tail -1
+SETPTS=$(grep -oP '<adaptive-vtx>.*txagc=\K\d+' "$VTX_LOG" | uniq | wc -l)
+LADDERS=$(grep -oP '<adaptive-vtx>.*ladder=\K\S+' "$VTX_LOG" | uniq | wc -l)
+echo "[vtx] applied operating points: txagc set-points=$SETPTS rate ladders=$LADDERS (>1 of either = RCF landed)"
 echo "[vrx] controller trajectory (1 Hz):"
 grep '<adaptive-vrx>' "$VRX_LOG" | tail -8
 echo "[vtx] applied-state trajectory (1 Hz):"

@@ -125,7 +125,7 @@ Wave your hand near the adapters and the `σ` reading climbs; the verdict flips 
 | Var | Purpose |
 |-----|---------|
 | `DEVOURER_SENSE_K=<sigmas>` | override the CFAR threshold `k` directly (finer than `--sensitivity`). |
-| `DEVOURER_SENSE_DUMP=1` | print every captured report as a `<devourer-bf-report-raw>HEX` line on **stderr** — the input for offline analysis (§8). |
+| `DEVOURER_SENSE_DUMP=1` | emit every captured report as a `bf.report_raw` event on **stderr** — the input for offline analysis (§8). |
 | `DEVOURER_SENSE_DEBUG=1` | print the first few captured reports' geometry (SA, Nc/Nr, MU, Ns) for a sanity check. |
 
 ---
@@ -264,7 +264,7 @@ DEVOURER_SENSE_DUMP=1 ./build/sense --channel 6 \
   2> capture.txt
 
 # decode + inspect with the reference Python tool
-grep '<devourer-bf-report-raw>' capture.txt | tools/bf_report_decode.py
+grep -F '"ev":"bf.report_raw"' capture.txt | tools/bf_report_decode.py
 ```
 
 `tools/bf_report_decode.py` prints the header (Nc/Nr/BW/Ng), the chosen split,

@@ -211,7 +211,7 @@ for both receivers. Only the receiver — and thus the inner decode — differs:
 | `svc_spatial_uep_sim.py` | per-SVC-layer spatial UEP — the 3-axis staircase (MCS + FEC + STBC), quantifying the spatial knob's survival-SNR contribution |
 | `spatial_sbi_sim.py` | spatial diversity keeps corruption localized — how combining (by fade correlation ρ) moves frames out of the frame-wide-loss bin into the SBI-salvageable one |
 | `fused_fec_link.py` | chip-path `FusedFecSender` / `FusedFecReceiver` (baseline-vs-SBI) |
-| `fused_fec_tx.py` / `fused_fec_rx.py` | chip-path CLIs (bytes ↔ `streamtx` / `<devourer-stream>`) |
+| `fused_fec_tx.py` / `fused_fec_rx.py` | chip-path CLIs (bytes ↔ `streamtx` / `rx.frame` events) |
 | `fec_fusion_sim.py` | offline simulation: quantify SBI gain, size sub-blocks, no hardware |
 | `soft_erasure_fec.py` | errors-and-erasures Reed-Solomon (BCH form) + soft-reliability GMD; the reference that quantifies the inner-vs-outer soft-information question |
 | `fec_ab_sim.py` | the SBI-vs-plain-block-FEC A/B over measured channels (does SBI beat just adding parity, at equal overhead?) |

@@ -1,5 +1,5 @@
 /* Headless guard for the link-health classifier (src/LinkHealth.h) — the
- * sensor-tuple -> verdict mapping behind <devourer-linkhealth>. The cases are
+ * sensor-tuple -> verdict mapping behind the link.health event. The cases are
  * drawn from real on-air data: the saturation-knee sweep
  * (tests/saturation_knee_sweep.sh: clean EVM ~-56 at rssi 57, collapsed EVM
  * ~-27 at rssi 72) and the AWGN interference sweep (tests/j3_dig_penalty_sweep:

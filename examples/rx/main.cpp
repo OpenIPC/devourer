@@ -55,8 +55,12 @@ static int g_rx_count = 0;
 static RtlJaguarDevice *g_rtl_device = nullptr;
 #endif
 
-/* Process-start reference for the init-timing lines (see src/InitTimer.h).
- * `init-timing: demo.first_rx_frame` is the end-to-end "ready to RX" mark:
+/* Event sink for the demo's own JSONL emissions (packetProcessor is a free
+ * function) — points at the main() Logger's sink, set before Init(). */
+static devourer::EventSink *g_ev = nullptr;
+
+/* Process-start reference for the init.timing events (see src/InitTimer.h).
+ * stage=demo.first_rx_frame is the end-to-end "ready to RX" mark:
  * exec → first 802.11 frame delivered to the packet processor. */
 static const std::chrono::steady_clock::time_point g_proc_start =
     std::chrono::steady_clock::now();
@@ -67,14 +71,14 @@ static long long ms_since_start() {
 }
 
 /* DEVOURER_TX_STATUS=1: surface chip-side C2H frames (TX status reports,
- * various diagnostic pings) on `<devourer-c2h>` with a raw hex dump, plus
+ * various diagnostic pings) on `fw.c2h` events with a raw hex dump, plus
  * a best-effort decode of the 8814A TX_RPT payload layout. The C2H
  * sub-type ID isn't enumerated in the vendored headers, so the decode is
  * speculative — the raw hex stays in the line so an observer can
  * validate the sub-type against on-air capture.
  *
  * DEVOURER_QUEUE_POLL_MS=N: periodic snapshot of the 8814A REG_FIFOPAGE_INFO
- * registers, throttled to one `<devourer-queue>` line per second on RX hook.
+ * registers, throttled to one `tx.queue` event per second on RX hook.
  * 8814-only (8812/8821 don't expose these registers as per-queue free pages). */
 static const bool g_tx_status_enabled =
     std::getenv("DEVOURER_TX_STATUS") != nullptr;
@@ -84,7 +88,7 @@ static const uint32_t g_qd_poll_ms = []() -> uint32_t {
 }();
 
 /* DEVOURER_THERMAL_POLL_MS=N: periodic snapshot of the chip thermal meter
- * (RF[A][0x42][15:10]), one `<devourer-thermal>` line per interval. Works on
+ * (RF[A][0x42][15:10]), one `thermal` event per interval. Works on
  * every Jaguar member. 0 = disabled. DEVOURER_THERMAL_WARN_DELTA overrides the
  * warn threshold (thermal units above the EFUSE baseline; default 15). */
 static const uint32_t g_thermal_poll_ms = []() -> uint32_t {
@@ -98,8 +102,8 @@ static const int g_thermal_warn_delta = []() -> int {
 
 /* DEVOURER_RX_DUMP_CSI=hex,hex,... (or "0x1a,0x20,0x40"): F2 research
  * spike. On each canonical-SA RX frame (first N frames), read BB
- * dbgport 0x8FC at each selector and emit
- *   <devourer-csi>selector=0xNN value=0xNNNNNNNN
+ * dbgport 0x8FC at each selector and emit a csi.hit event
+ *   {"ev":"csi.hit","selector":"0xNN","value":"0xNNNNNNNN"}
  *
  * This is a SELECTOR-SWEEP framework — the actual per-subcarrier IQ
  * selector is missing from in-tree sources (see BbDbgportReader.h for
@@ -110,7 +114,7 @@ static const int g_thermal_warn_delta = []() -> int {
  *
  * BRICK RISK: enabling this writes to 0x8FC while RX is live. If the
  * chip stops responding after a sweep, the reader self-wedges (see
- * <devourer-csi-wedged>) and refuses further writes; recover with
+ * csi.wedged) and refuses further writes; recover with
  * libusb_reset_device / usbreset / power-cycle. */
 static const std::vector<uint32_t> g_csi_selectors = []() -> std::vector<uint32_t> {
   const char *e = std::getenv("DEVOURER_RX_DUMP_CSI");
@@ -135,7 +139,7 @@ static constexpr int kCsiMaxFrames = 8;
 
 /* DEVOURER_RX_ENERGY_MS=N: periodic frame-free RX energy / channel-busy
  * telemetry — the read side of DEVOURER_CW_TONE. Each interval emits one
- * <devourer-energy> line combining the chip's phydm FA/CCA counters + IGI
+ * rx.energy event combining the chip's phydm FA/CCA counters + IGI
  * (IRtlDevice::GetRxEnergy, frame-free, all three generations) with a rolling
  * per-frame RSSI/SNR aggregate. A second adapter running this detects the first
  * adapter's CW carrier as a jump in cca_ofdm / fa_ofdm and a rise in igi.
@@ -145,8 +149,8 @@ static const uint32_t g_rx_energy_ms = []() -> uint32_t {
   return (e && *e) ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0;
 }();
 
-/* DEVOURER_LINKHEALTH=1 — emit a <devourer-linkhealth> verdict line alongside
- * each <devourer-energy> window (src/LinkHealth.h): the sensor tuple classified
+/* DEVOURER_LINKHEALTH=1 — emit a link.health verdict event alongside
+ * each rx.energy window (src/LinkHealth.h): the sensor tuple classified
  * into a plain-language cause + fix. Rides the DEVOURER_RX_ENERGY_MS cadence, so
  * that must be set too (a linkhealth verdict needs the same window snapshot). */
 static const bool g_linkhealth = []() -> bool {
@@ -154,7 +158,7 @@ static const bool g_linkhealth = []() -> bool {
   return e && *e && std::strcmp(e, "0") != 0;
 }();
 
-/* DEVOURER_RXQUALITY=1 — emit a <devourer-rxquality> line from the library's
+/* DEVOURER_RXQUALITY=1 — emit an rx.quality event from the library's
  * GetRxQuality() feed (the runtime API a linked adaptive-link controller reads).
  * Rides the DEVOURER_RX_ENERGY_MS cadence like linkhealth. */
 static const bool g_rxquality = []() -> bool {
@@ -166,7 +170,7 @@ static const bool g_rxquality = []() -> bool {
  * sweep. Cycle the listed bins (SweepSpec grammar: channels, channel ranges,
  * or MHz ranges — the latter for issue-#149-style narrowband maps), dwelling
  * DEVOURER_RX_SWEEP_DWELL_MS (default 300) on each, and emit one
- * <devourer-energy>ch=N line per bin. The RX loop runs on a worker thread so
+ * rx.energy event (with ch=N) per bin. The RX loop runs on a worker thread so
  * the main thread is free to retune (FastRetune) between reads — a live
  * energy-vs-frequency map that localizes an interferer (peaks, or dips on the
  * 1T1R parts that saturate, at the tone's channel). Empty = disabled. */
@@ -201,7 +205,7 @@ static RxAgg g_rxagg;
 
 /* The canonical txdemo beacon SA (same constant as examples/tx/main.cpp and
  * tests/regress.py CANONICAL_SA — change all three together): the
- * <devourer-tx-hit> matcher and the "canon" aggregate filter below. */
+ * rx.txhit matcher and the "canon" aggregate filter below. */
 static const uint8_t kTxSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
 
 /* DEVOURER_RX_AGG_SA: restrict the per-frame aggregate to frames whose SA
@@ -240,8 +244,8 @@ static bool agg_sa_match(const Packet &packet) {
 }
 
 /* Emit the frame-free NHM power histogram (IRtlDevice::GetRxEnergy fills it) as
- * a distinct <devourer-nhm> line so it never disturbs the <devourer-energy>
- * format its regex consumers key on. `peak` = the fullest bucket (0 = quiet
+ * a distinct rx.nhm event so it never disturbs the rx.energy
+ * fields its consumers key on. `peak` = the fullest bucket (0 = quiet
  * noise floor, higher = energy is landing in a higher power band, e.g. under an
  * interferer); `busy` = percent of samples above the lowest bucket; `hist` =
  * the 12 raw bucket counts (IGI-referenced, low→high power). ch<0 omits the
@@ -251,23 +255,18 @@ static void emit_nhm(const RxEnergy &e, int ch) {
     return;
   uint32_t total = 0, peak = 0;
   int peak_k = 0;
+  int hist[12];
   for (int k = 0; k < 12; k++) {
     total += e.nhm[k];
     if (e.nhm[k] > peak) { peak = e.nhm[k]; peak_k = k; }
+    hist[k] = static_cast<int>(e.nhm[k]);
   }
   int busy = total ? static_cast<int>(100 * (total - e.nhm[0]) / total) : 0;
-  char hist[96];
-  int off = 0;
-  for (int k = 0; k < 12; k++)
-    off += std::snprintf(hist + off, sizeof(hist) - off, "%s%u",
-                         k ? "," : "", e.nhm[k]);
+  devourer::Ev ev(*g_ev, "rx.nhm");
   if (ch >= 0)
-    printf("<devourer-nhm>ch=%d peak=%d busy=%d dur=%u hist=%s\n", ch, peak_k,
-           busy, e.nhm_duration, hist);
-  else
-    printf("<devourer-nhm>peak=%d busy=%d dur=%u hist=%s\n", peak_k, busy,
-           e.nhm_duration, hist);
-  fflush(stdout);
+    ev.f("ch", ch);
+  ev.f("peak", peak_k).f("busy", busy).f("dur", e.nhm_duration)
+      .arr("hist", hist, 12);
 }
 
 static void packetProcessor(const Packet &packet) {
@@ -276,10 +275,9 @@ static void packetProcessor(const Packet &packet) {
    * 802.11 MPDU layout) doesn't try to read SA bytes from a C2H payload. */
   if (packet.RxAtrib.pkt_rpt_type == RX_PACKET_TYPE::C2H_PACKET) {
     if (g_tx_status_enabled) {
-      printf("<devourer-c2h>len=%zu bytes=", packet.Data.size());
-      for (size_t i = 0; i < packet.Data.size(); ++i)
-        printf("%02x", packet.Data[i]);
-      printf("\n");
+      devourer::Ev(*g_ev, "fw.c2h")
+          .f("len", packet.Data.size())
+          .hex("bytes", packet.Data.data(), packet.Data.size());
       /* Best-effort 8814A TX_RPT decode. The GET_8814A_C2H_TX_RPT_*
        * macros (hal/rtl8814a_cmd.h:118-125) read from a "_Header" pointer
        * — which, in upstream Realtek code, points one or two bytes past
@@ -295,12 +293,14 @@ static void packetProcessor(const Packet &packet) {
           uint16_t qt_raw  = static_cast<uint16_t>(h[3] | (h[4] << 8));
           uint32_t qt_us   = static_cast<uint32_t>(qt_raw) * 256u;
           uint8_t  rate    = h[5];
-          printf("<devourer-tx-status>hoff=%zu queue=%u retry=%u "
-                 "airtime_us=%u rate=%u\n",
-                 hoff, queue, retry, qt_us, rate);
+          devourer::Ev(*g_ev, "tx.status")
+              .f("hoff", hoff)
+              .f("queue", queue)
+              .f("retry", retry)
+              .f("airtime_us", qt_us)
+              .f("rate", rate);
         }
       }
-      fflush(stdout);
     }
     return;
   }
@@ -318,36 +318,40 @@ static void packetProcessor(const Packet &packet) {
   }
 
   if (g_rx_count == 1) {
-    printf("<devourer>init-timing: demo.first_rx_frame = %lld ms\n",
-           ms_since_start());
-    fflush(stdout);
+    devourer::Ev(*g_ev, "init.timing")
+        .f("stage", "demo.first_rx_frame")
+        .f("ms", ms_since_start());
   }
 
   if (g_rx_count <= 10 || g_rx_count % 100 == 0) {
-    printf("<devourer>RX pkt #%d (len=%zu)\n", g_rx_count, packet.Data.size());
-    fflush(stdout);
+    devourer::Ev(*g_ev, "rx.pkt")
+        .f("n", g_rx_count)
+        .f("len", packet.Data.size());
   }
-  /* DEVOURER_RX_DUMP_ALL=1: emit a `<devourer-corrupt-any>` line for EVERY
-   * frame regardless of SA, with chip-flag bits and phy-soft metrics.
+  /* DEVOURER_RX_DUMP_ALL=1: emit an `rx.corrupt` event for EVERY frame
+   * regardless of SA, with chip-flag bits and phy-soft metrics.
    * Consumed by tools/precoder/corruption_survey.py for the FEC-design
    * corruption-pattern survey. Pairs with DEVOURER_RX_KEEP_CORRUPTED to
    * also pass through chip-FCS-error frames. The body is omitted from this
-   * line by design (a hot survey would inflate the log past usable size);
+   * event by design (a hot survey would inflate the log past usable size);
    * pkt_len + the chip flags + phy metrics is what aggregates carry. */
   static const bool dump_all = std::getenv("DEVOURER_RX_DUMP_ALL") != nullptr;
   if (dump_all) {
-    printf("<devourer-corrupt-any>len=%zu crc_err=%u icv_err=%u "
-           "rate=%u bw=%u stbc=%u ldpc=%u sgi=%u rssi=%d,%d evm=%d,%d snr=%d,%d\n",
-           packet.Data.size(),
-           packet.RxAtrib.crc_err ? 1u : 0u,
-           packet.RxAtrib.icv_err ? 1u : 0u,
-           packet.RxAtrib.data_rate,
-           packet.RxAtrib.bw, packet.RxAtrib.stbc,
-           packet.RxAtrib.ldpc, packet.RxAtrib.sgi,
-           packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1],
-           packet.RxAtrib.evm[0], packet.RxAtrib.evm[1],
-           packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]);
-    fflush(stdout);
+    const int rssi[2] = {packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1]};
+    const int evm[2] = {packet.RxAtrib.evm[0], packet.RxAtrib.evm[1]};
+    const int snr[2] = {packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]};
+    devourer::Ev(*g_ev, "rx.corrupt")
+        .f("len", packet.Data.size())
+        .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
+        .f("icv", packet.RxAtrib.icv_err ? 1 : 0)
+        .f("rate", packet.RxAtrib.data_rate)
+        .f("bw", packet.RxAtrib.bw)
+        .f("stbc", packet.RxAtrib.stbc)
+        .f("ldpc", packet.RxAtrib.ldpc)
+        .f("sgi", packet.RxAtrib.sgi)
+        .arr("rssi", rssi, 2)
+        .arr("evm", evm, 2)
+        .arr("snr", snr, 2);
   }
   /* BF self-sounding report detector (DEVOURER_BF_DETECT_REPORT modes 1-4) —
    * shared with txdemo's single-radio capture, see BfReportDetect.h. */
@@ -362,9 +366,10 @@ static void packetProcessor(const Packet &packet) {
       static int hits = 0;
       ++hits;
       if (hits <= 10 || hits % 100 == 0) {
-        printf("<devourer-tx-hit>txdemo SA match: hits=%d total_rx=%d len=%zu\n",
-               hits, g_rx_count, packet.Data.size());
-        fflush(stdout);
+        devourer::Ev(*g_ev, "rx.txhit")
+            .f("hits", hits)
+            .f("total_rx", g_rx_count)
+            .f("len", packet.Data.size());
       }
 #if defined(DEVOURER_HAVE_JAGUAR1)
       /* F2: BB-dbgport sweep on the first kCsiMaxFrames canonical-SA frames.
@@ -374,16 +379,16 @@ static void packetProcessor(const Packet &packet) {
         for (uint32_t sel : g_csi_selectors) {
           uint32_t v = g_rtl_device->read_bb_dbgport(sel);
           if (g_rtl_device->bb_dbgport_wedged()) {
-            printf("<devourer-csi-wedged>after selector=0x%08x — reader "
-                   "refusing further writes. Recover with "
-                   "libusb_reset_device / usbreset.\n", sel);
-            fflush(stdout);
+            /* reader refuses further writes; recover with
+             * libusb_reset_device / usbreset */
+            devourer::Ev(*g_ev, "csi.wedged").hexf("selector", sel, 8);
             break;
           }
-          printf("<devourer-csi>hit=%d selector=0x%08x value=0x%08x\n",
-                 hits, sel, v);
+          devourer::Ev(*g_ev, "csi.hit")
+              .f("hit", hits)
+              .hexf("selector", sel, 8)
+              .hexf("value", v, 8);
         }
-        fflush(stdout);
       }
 #endif
       /* DEVOURER_DUMP_SCRAMBLER=1: print the descrambler seed the chip
@@ -396,10 +401,11 @@ static void packetProcessor(const Packet &packet) {
       static const bool dump_scrambler =
           std::getenv("DEVOURER_DUMP_SCRAMBLER") != nullptr;
       if (dump_scrambler && (hits <= 20 || hits % 100 == 0)) {
-        printf("<devourer-scrambler>seed=0x%02x rate=%u hits=%d len=%zu\n",
-               packet.RxAtrib.scrambler, packet.RxAtrib.data_rate, hits,
-               packet.Data.size());
-        fflush(stdout);
+        devourer::Ev(*g_ev, "rx.scrambler")
+            .hexf("seed", packet.RxAtrib.scrambler, 2)
+            .f("rate", packet.RxAtrib.data_rate)
+            .f("hits", hits)
+            .f("len", packet.Data.size());
       }
       /* DEVOURER_DUMP_BODY=1: print the RX rate index (DESC_RATE*: 0x04=6M
        * OFDM, 0x00=1M CCK, 0x0c+=HT/VHT MCS) and the 802.11 frame body
@@ -423,30 +429,31 @@ static void packetProcessor(const Packet &packet) {
           std::getenv("DEVOURER_RX_KEEP_CORRUPTED") != nullptr;
       const bool corrupted = packet.RxAtrib.crc_err || packet.RxAtrib.icv_err;
       /* DEVOURER_RX_ALLPATHS=1: emit all four RX chains (A,B,C,D) of per-stream
-       * RSSI / SNR / EVM on a distinct <devourer-rxpath> line. Opt-in and
-       * separate so the canonical two-path <devourer-stream>/<devourer-body>
-       * format its regex consumers key on stays untouched. Paths C/D are
-       * non-zero only on the 8814AU (4T4R); on 8812/8821 they read 0. Consumed
-       * by tests/antenna_decorrelation.py to measure inter-chain envelope
-       * correlation and realised diversity gain (spatial-diversity axis). */
+       * RSSI / SNR / EVM on a distinct `rx.path` event. Opt-in and separate so
+       * the canonical two-path `rx.frame`/`rx.body` events stay untouched.
+       * Paths C/D are non-zero only on the 8814AU (4T4R); on 8812/8821 they
+       * read 0. Consumed by tests/antenna_decorrelation.py to measure
+       * inter-chain envelope correlation and realised diversity gain
+       * (spatial-diversity axis). */
       static const bool rxpath_out =
           std::getenv("DEVOURER_RX_ALLPATHS") != nullptr;
       if (rxpath_out && (!corrupted || keep_corrupted)) {
-        printf("<devourer-rxpath>seq=%u rssi=%d,%d,%d,%d snr=%d,%d,%d,%d "
-               "evm=%d,%d,%d,%d\n",
-               packet.RxAtrib.seq_num, packet.RxAtrib.rssi[0],
-               packet.RxAtrib.rssi[1], packet.RxAtrib.rssi[2],
-               packet.RxAtrib.rssi[3], packet.RxAtrib.snr[0],
-               packet.RxAtrib.snr[1], packet.RxAtrib.snr[2],
-               packet.RxAtrib.snr[3], packet.RxAtrib.evm[0],
-               packet.RxAtrib.evm[1], packet.RxAtrib.evm[2],
-               packet.RxAtrib.evm[3]);
-        fflush(stdout);
+        const int rssi[4] = {packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1],
+                             packet.RxAtrib.rssi[2], packet.RxAtrib.rssi[3]};
+        const int snr[4] = {packet.RxAtrib.snr[0], packet.RxAtrib.snr[1],
+                            packet.RxAtrib.snr[2], packet.RxAtrib.snr[3]};
+        const int evm[4] = {packet.RxAtrib.evm[0], packet.RxAtrib.evm[1],
+                            packet.RxAtrib.evm[2], packet.RxAtrib.evm[3]};
+        devourer::Ev(*g_ev, "rx.path")
+            .f("seq", packet.RxAtrib.seq_num)
+            .arr("rssi", rssi, 4)
+            .arr("snr", snr, 4)
+            .arr("evm", evm, 4);
       }
       if (stream_out && (!corrupted || keep_corrupted)) {
         /* Per-stream phy soft metrics (RSSI / EVM / SNR for paths A,B; on
          * 8814AU paths C,D would also be non-zero but we surface only A,B
-         * here to stay aligned with <devourer-body>'s format). These are
+         * here to stay aligned with rx.body's fields). These are
          * link-quality measurements at the PHY before decoding — same
          * source as the Tier-2 diagnostics — so a consumer like
          * corruption_analysis.py can correlate BER with link quality on a
@@ -461,42 +468,46 @@ static void packetProcessor(const Packet &packet) {
          * frame devourer received carries the bandwidth / STBC / FEC / guard
          * interval the transmitter encoded. Valid on 8812/8821; on 8814AU the
          * RX descriptor doesn't expose these at this offset (FrameParser.cpp),
-         * so they read as the chip's defaults there. Inserted before body= so
-         * the trailing hex-dump pattern downstream regex consumers key on is
-         * unchanged. */
-        printf("<devourer-stream>rate=%u len=%zu crc_err=%u icv_err=%u "
-               "rssi=%d,%d evm=%d,%d snr=%d,%d seq=%u tsfl=%u "
-               "bw=%u stbc=%u ldpc=%u sgi=%u body=",
-               packet.RxAtrib.data_rate, packet.Data.size(),
-               packet.RxAtrib.crc_err ? 1u : 0u,
-               packet.RxAtrib.icv_err ? 1u : 0u,
-               packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1],
-               packet.RxAtrib.evm[0], packet.RxAtrib.evm[1],
-               packet.RxAtrib.snr[0], packet.RxAtrib.snr[1],
-               packet.RxAtrib.seq_num, packet.RxAtrib.tsfl,
-               packet.RxAtrib.bw, packet.RxAtrib.stbc,
-               packet.RxAtrib.ldpc, packet.RxAtrib.sgi);
-        for (size_t i = 24; i < packet.Data.size(); ++i)
-          printf("%02x", packet.Data[i]);
-        printf("\n");
-        fflush(stdout);
+         * so they read as the chip's defaults there. */
+        const int rssi[2] = {packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1]};
+        const int evm[2] = {packet.RxAtrib.evm[0], packet.RxAtrib.evm[1]};
+        const int snr[2] = {packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]};
+        const size_t body_len =
+            packet.Data.size() > 24 ? packet.Data.size() - 24 : 0;
+        devourer::Ev(*g_ev, "rx.frame")
+            .f("rate", packet.RxAtrib.data_rate)
+            .f("len", packet.Data.size())
+            .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
+            .f("icv", packet.RxAtrib.icv_err ? 1 : 0)
+            .arr("rssi", rssi, 2)
+            .arr("evm", evm, 2)
+            .arr("snr", snr, 2)
+            .f("seq", packet.RxAtrib.seq_num)
+            .f("tsfl", packet.RxAtrib.tsfl)
+            .f("bw", packet.RxAtrib.bw)
+            .f("stbc", packet.RxAtrib.stbc)
+            .f("ldpc", packet.RxAtrib.ldpc)
+            .f("sgi", packet.RxAtrib.sgi)
+            .hex("body", packet.Data.data() + 24, body_len);
       }
       if (dump_body && hits <= 5) {
         /* Tier-2 health diagnostics alongside the byte mirror: rate (0x04 =
          * 6M OFDM), per-stream RSSI/EVM/SNR (link quality — content-blind),
          * crc (always 0: CRC-failed frames are dropped upstream, so reaching
          * here is itself the decode-sanity signal). Then the body hex. */
-        printf("<devourer-body>rate=%u rssi=%d,%d evm=%d,%d snr=%d,%d crc=%d "
-               "len=%zu body=",
-               packet.RxAtrib.data_rate, packet.RxAtrib.rssi[0],
-               packet.RxAtrib.rssi[1], packet.RxAtrib.evm[0],
-               packet.RxAtrib.evm[1], packet.RxAtrib.snr[0],
-               packet.RxAtrib.snr[1], packet.RxAtrib.crc_err ? 1 : 0,
-               packet.Data.size());
-        for (size_t i = 24; i < packet.Data.size(); ++i)
-          printf("%02x", packet.Data[i]);
-        printf("\n");
-        fflush(stdout);
+        const int rssi[2] = {packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1]};
+        const int evm[2] = {packet.RxAtrib.evm[0], packet.RxAtrib.evm[1]};
+        const int snr[2] = {packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]};
+        const size_t body_len =
+            packet.Data.size() > 24 ? packet.Data.size() - 24 : 0;
+        devourer::Ev(*g_ev, "rx.body")
+            .f("rate", packet.RxAtrib.data_rate)
+            .arr("rssi", rssi, 2)
+            .arr("evm", evm, 2)
+            .arr("snr", snr, 2)
+            .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
+            .f("len", packet.Data.size())
+            .hex("body", packet.Data.data() + 24, body_len);
       }
     }
   }
@@ -507,6 +518,9 @@ int main() {
   int rc;
 
   auto logger = std::make_shared<Logger>();
+  apply_logging_env(*logger); /* DEVOURER_LOG_LEVEL / DEVOURER_EVENTS / ... */
+  g_ev = &logger->events();
+  devourer::bf::bf_events = g_ev; /* BfReportDetect.h emissions */
 
   /* SIGINT/SIGTERM -> clean shutdown (Stop() below). Without this the harness's
    * `timeout` SIGTERM killed us mid-RX, leaving the chip's USB core hung. */
@@ -605,7 +619,9 @@ int main() {
     return 1;
   }
 
-  logger->info("init-timing: demo.open_device = {} ms", ms_since_start());
+  devourer::Ev(*g_ev, "init.timing")
+      .f("stage", "demo.open_device")
+      .f("ms", ms_since_start());
   /* Claim-before-reset: the kernel's exclusive interface claim is the primary
    * guard against a second devourer driving this adapter — it returns BUSY, and
    * bailing on BUSY *before* the reset keeps a second launch from re-enumerating
@@ -616,7 +632,9 @@ int main() {
   rc = devourer::claim_interface_then_reset(
       dev_handle, 0, logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr,
       usb_lock);
-  logger->info("init-timing: demo.usb_reset = {} ms", ms_since_start());
+  devourer::Ev(*g_ev, "init.timing")
+      .f("stage", "demo.usb_reset")
+      .f("ms", ms_since_start());
   if (rc != 0) {
     /* BUSY => another process owns the adapter; any other error => open failed.
      * Either way, exit cleanly rather than asserting. */
@@ -634,7 +652,9 @@ int main() {
     logger->error("No driver for this chip in this build — exiting");
     return 1;
   }
-  logger->info("init-timing: demo.create_device = {} ms", ms_since_start());
+  devourer::Ev(*g_ev, "init.timing")
+      .f("stage", "demo.create_device")
+      .f("ms", ms_since_start());
   /* The BB-debug-port / queue-depth / thermal research helpers are Jaguar1-only,
    * so they live on RtlJaguarDevice rather than the IRtlDevice interface. The
    * whole block compiles out when Jaguar1 support isn't built; when it is, the
@@ -654,9 +674,12 @@ int main() {
       while (!qd_emitter_stop.load()) {
         if (g_rtl_device != nullptr) {
           auto q = g_rtl_device->get_queue_depth();
-          printf("<devourer-queue>q1=0x%08x q2=0x%08x q3=0x%08x q4=0x%08x "
-                 "q5=0x%08x\n", q[0], q[1], q[2], q[3], q[4]);
-          fflush(stdout);
+          devourer::Ev(*g_ev, "tx.queue")
+              .hexf("q1", q[0], 8)
+              .hexf("q2", q[1], 8)
+              .hexf("q3", q[2], 8)
+              .hexf("q4", q[3], 8)
+              .hexf("q5", q[4], 8);
         }
         for (uint32_t slept = 0; slept < g_qd_poll_ms && !qd_emitter_stop.load();
              slept += 50) {
@@ -678,14 +701,13 @@ int main() {
       while (!therm_emitter_stop.load()) {
         if (g_rtl_device != nullptr) {
           auto t = g_rtl_device->get_thermal_snapshot();
-          if (t.valid) {
-            printf("<devourer-thermal>raw=%u baseline=%u delta=%+d status=%s\n",
-                   t.raw, t.baseline, t.delta, ThermalBucket(t));
-          } else {
-            printf("<devourer-thermal>raw=%u baseline=none status=%s\n",
-                   t.raw, ThermalBucket(t));
-          }
-          fflush(stdout);
+          devourer::Ev ev(*g_ev, "thermal");
+          ev.t().f("raw", t.raw);
+          if (t.valid)
+            ev.f("baseline", t.baseline).f("delta", t.delta);
+          else
+            ev.f("baseline", nullptr);
+          ev.f("status", ThermalBucket(t));
         }
         for (uint32_t slept = 0;
              slept < g_thermal_poll_ms && !therm_emitter_stop.load();
@@ -702,7 +724,7 @@ int main() {
    * so it runs off the base device pointer, not the Jaguar1 downcast. The thread
    * sleeps one interval first (so its first read lands after bring-up completes,
    * not mid-init), then each interval reads GetRxEnergy() + drains the rolling
-   * frame aggregate and emits one <devourer-energy> line. Concurrency caveat:
+   * frame aggregate and emits one rx.energy event. Concurrency caveat:
    * the FA/CCA reads share libusb with the RX bulk loop (like the thermal
    * poller) — keep the cadence conservative (>= a few hundred ms). */
   std::atomic<bool> energy_emitter_stop{false};
@@ -725,27 +747,35 @@ int main() {
           agg = g_rxagg;
           g_rxagg = RxAgg{};
         }
-        char fao[16], fac[16], cco[16], ccc[16], igi[16];
-        auto u = [](char *b, bool v, uint32_t x) {
-          if (v) std::snprintf(b, 16, "%u", x); else std::snprintf(b, 16, "-");
-        };
-        u(fao, e.valid_fa, e.fa_ofdm);
-        u(fac, e.valid_fa, e.fa_cck);
-        u(cco, e.valid_fa, e.cca_ofdm);
-        u(ccc, e.valid_fa, e.cca_cck);
-        if (e.valid_igi) std::snprintf(igi, 16, "%u", e.igi);
-        else std::snprintf(igi, 16, "-");
         int rssi_mean = agg.n ? agg.rssi_sum / static_cast<int>(agg.n) : 0;
         int snr_mean = agg.n ? agg.snr_sum / static_cast<int>(agg.n) : 0;
         int evm_mean =
             agg.evm_n ? agg.evm_sum / static_cast<int>(agg.evm_n) : 0;
-        printf("<devourer-energy>cca_ofdm=%s cca_cck=%s fa_ofdm=%s fa_cck=%s "
-               "igi=%s frames=%u rssi_mean=%d rssi_max=%d snr_mean=%d "
-               "snr_min=%d evm_mean=%d\n",
-               cco, ccc, fao, fac, igi, agg.n, rssi_mean,
-               agg.n ? agg.rssi_max : 0, snr_mean, agg.n ? agg.snr_min : 0,
-               evm_mean);
-        fflush(stdout);
+        {
+          /* chip-counter fields go null when the chip doesn't expose them */
+          devourer::Ev ev(*g_ev, "rx.energy");
+          ev.t();
+          if (e.valid_fa)
+            ev.f("cca_ofdm", e.cca_ofdm)
+                .f("cca_cck", e.cca_cck)
+                .f("fa_ofdm", e.fa_ofdm)
+                .f("fa_cck", e.fa_cck);
+          else
+            ev.f("cca_ofdm", nullptr)
+                .f("cca_cck", nullptr)
+                .f("fa_ofdm", nullptr)
+                .f("fa_cck", nullptr);
+          if (e.valid_igi)
+            ev.f("igi", e.igi);
+          else
+            ev.f("igi", nullptr);
+          ev.f("frames", agg.n)
+              .f("rssi_mean", rssi_mean)
+              .f("rssi_max", agg.n ? agg.rssi_max : 0)
+              .f("snr_mean", snr_mean)
+              .f("snr_min", agg.n ? agg.snr_min : 0)
+              .f("evm_mean", evm_mean);
+        }
         emit_nhm(e, -1);
         /* DEVOURER_LINKHEALTH=1 — classify the window into a plain-language
          * verdict + fix (src/LinkHealth.h). Rides the energy cadence and the
@@ -771,37 +801,53 @@ int main() {
           in.igi_min = 0x1c; /* J1/J2 DIG floor — the saturation hint */
           in.igi_max = 0x7f; /* J3 ceiling — never a false 'weak' rail */
           devourer::LinkHealthVerdict h = devourer::classify_link_health(in);
-          char evmb[16];
-          if (in.evm_valid) std::snprintf(evmb, 16, "%.1f", h.evm_db);
-          else std::snprintf(evmb, 16, "-");
-          printf("<devourer-linkhealth>verdict=%s rssi_dbm=%d snr_db=%.1f "
-                 "evm_db=%s frames=%u fa_ofdm=%s igi=%s%s%s cause=\"%s\" "
-                 "fix=\"%s\"\n",
-                 h.label, h.rssi_dbm, h.snr_db, evmb, agg.n, fao, igi,
-                 h.igi_at_floor ? " igi_floor=1" : "",
-                 h.igi_at_ceiling ? " igi_ceil=1" : "", h.cause, h.fix);
-          fflush(stdout);
+          devourer::Ev ev(*g_ev, "link.health");
+          ev.f("verdict", h.label)
+              .f("rssi_dbm", h.rssi_dbm)
+              .f("snr_db", h.snr_db);
+          if (in.evm_valid)
+            ev.f("evm_db", h.evm_db);
+          else
+            ev.f("evm_db", nullptr);
+          ev.f("frames", agg.n);
+          if (e.valid_fa)
+            ev.f("fa_ofdm", e.fa_ofdm);
+          else
+            ev.f("fa_ofdm", nullptr);
+          if (e.valid_igi)
+            ev.f("igi", e.igi);
+          else
+            ev.f("igi", nullptr);
+          if (h.igi_at_floor)
+            ev.f("igi_floor", 1);
+          if (h.igi_at_ceiling)
+            ev.f("igi_ceil", 1);
+          ev.f("cause", h.cause).f("fix", h.fix);
         }
         /* DEVOURER_RXQUALITY=1 — dogfood the library GetRxQuality() feed: the
          * same window a linked controller (fluke_gs) would read, incl. the
          * passive noise-floor. NB it drains the device-internal accumulator +
          * calls GetRxEnergy itself, so its counters are independent of the
-         * <devourer-energy>/<devourer-linkhealth> lines above (which use the
+         * rx.energy/link.health events above (which use the
          * demo's own g_rxagg). */
         if (g_rxquality) {
           devourer::RxQuality q = dev->GetRxQuality();
-          char nf[24], evmb[16];
-          if (q.nf_valid) std::snprintf(nf, sizeof nf, "%.1f", q.noise_floor_dbm);
-          else std::snprintf(nf, sizeof nf, "-");
-          if (q.evm_valid) std::snprintf(evmb, sizeof evmb, "%.1f", q.evm_mean_db);
-          else std::snprintf(evmb, sizeof evmb, "-");
-          printf("<devourer-rxquality>verdict=%s frames=%u rssi_mean_dbm=%d "
-                 "rssi_max_dbm=%d snr_mean_db=%.1f snr_min_db=%.1f evm_db=%s "
-                 "noise_floor_dbm=%s igi=%d\n",
-                 q.label, q.frames, q.rssi_mean_dbm, q.rssi_max_dbm,
-                 q.snr_mean_db, q.snr_min_db, evmb, nf,
-                 q.igi_valid ? q.igi : -1);
-          fflush(stdout);
+          devourer::Ev ev(*g_ev, "rx.quality");
+          ev.f("verdict", q.label)
+              .f("frames", q.frames)
+              .f("rssi_mean_dbm", q.rssi_mean_dbm)
+              .f("rssi_max_dbm", q.rssi_max_dbm)
+              .f("snr_mean_db", q.snr_mean_db)
+              .f("snr_min_db", q.snr_min_db);
+          if (q.evm_valid)
+            ev.f("evm_db", q.evm_mean_db);
+          else
+            ev.f("evm_db", nullptr);
+          if (q.nf_valid)
+            ev.f("noise_floor_dbm", q.noise_floor_dbm);
+          else
+            ev.f("noise_floor_dbm", nullptr);
+          ev.f("igi", q.igi_valid ? q.igi : -1);
         }
         nap(g_rx_energy_ms);
       }
@@ -849,12 +895,11 @@ int main() {
                  g_rx_sweep.size(), g_rx_sweep_dwell_ms);
     IRtlDevice *dev = rtlDevice.get();
     SelectedChannel first{static_cast<uint8_t>(g_rx_sweep[0]), ch_offset, width};
-    std::thread rx([dev, first]() {
+    std::thread rx([dev, first, &logger]() {
       try {
         dev->Init(packetProcessor, first);
       } catch (const std::exception &e) {
-        printf("<devourer>RX-sweep bring-up failed: %s\n", e.what());
-        fflush(stdout);
+        logger->error("RX-sweep bring-up failed: {}", e.what());
       }
     });
     /* Let bring-up complete before the first retune: a retune racing the
@@ -899,25 +944,34 @@ int main() {
         agg = g_rxagg;
         g_rxagg = RxAgg{};
       }
-      char cco[16], ccc[16], fao[16], fac[16], igi[16];
-      auto u = [](char *b, bool v, uint32_t x) {
-        if (v) std::snprintf(b, 16, "%u", x); else std::snprintf(b, 16, "-");
-      };
-      u(cco, e.valid_fa, e.cca_ofdm);
-      u(ccc, e.valid_fa, e.cca_cck);
-      u(fao, e.valid_fa, e.fa_ofdm);
-      u(fac, e.valid_fa, e.fa_cck);
-      u(igi, e.valid_igi, e.igi);
       int rssi_mean = agg.n ? agg.rssi_sum / static_cast<int>(agg.n) : 0;
       int snr_mean = agg.n ? agg.snr_sum / static_cast<int>(agg.n) : 0;
       int evm_mean = agg.evm_n ? agg.evm_sum / static_cast<int>(agg.evm_n) : 0;
-      printf("<devourer-energy>ch=%d cca_ofdm=%s cca_cck=%s fa_ofdm=%s "
-             "fa_cck=%s igi=%s retune_us=%lld frames=%u rssi_mean=%d "
-             "rssi_max=%d snr_mean=%d snr_min=%d evm_mean=%d\n",
-             ch, cco, ccc, fao, fac, igi, retune_us, agg.n, rssi_mean,
-             agg.n ? agg.rssi_max : 0, snr_mean, agg.n ? agg.snr_min : 0,
-             evm_mean);
-      fflush(stdout);
+      {
+        devourer::Ev ev(*g_ev, "rx.energy");
+        ev.t().f("ch", ch);
+        if (e.valid_fa)
+          ev.f("cca_ofdm", e.cca_ofdm)
+              .f("cca_cck", e.cca_cck)
+              .f("fa_ofdm", e.fa_ofdm)
+              .f("fa_cck", e.fa_cck);
+        else
+          ev.f("cca_ofdm", nullptr)
+              .f("cca_cck", nullptr)
+              .f("fa_ofdm", nullptr)
+              .f("fa_cck", nullptr);
+        if (e.valid_igi)
+          ev.f("igi", e.igi);
+        else
+          ev.f("igi", nullptr);
+        ev.f("retune_us", retune_us)
+            .f("frames", agg.n)
+            .f("rssi_mean", rssi_mean)
+            .f("rssi_max", agg.n ? agg.rssi_max : 0)
+            .f("snr_mean", snr_mean)
+            .f("snr_min", agg.n ? agg.snr_min : 0)
+            .f("evm_mean", evm_mean);
+      }
       emit_nhm(e, ch);
     }
     dev->StopRxLoop();

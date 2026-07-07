@@ -1,4 +1,4 @@
-"""VRX link-quality scoring over a sliding window of <devourer-stream> frames.
+"""VRX link-quality scoring over a sliding window of `rx.frame` events.
 
 Feeds the controller an SNR estimate and produces the alink-compatible 1000..2000
 score carried in the RCF (telemetry + a future drone-decides mode). The score

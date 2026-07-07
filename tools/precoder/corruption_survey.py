@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Corruption-pattern survey for FEC design.
 
-Reads `<devourer-corrupt-any>` lines (emitted by `rxdemo` with
+Reads `rx.corrupt` JSONL events (emitted by `rxdemo` with
 `DEVOURER_RX_DUMP_ALL=1` + `DEVOURER_RX_KEEP_CORRUPTED=1`) and aggregates
 descriptive statistics about the corruption rate, frame-size distribution,
 and link-quality distribution — the empirical inputs for choosing the
@@ -45,21 +45,24 @@ from __future__ import annotations
 
 import argparse
 import collections
-import re
+import json
 import select
 import statistics
 import sys
 import time
 from typing import Optional
 
-_CORRUPT_ANY_RE = re.compile(
-    r"<devourer-corrupt-any>len=(?P<len>\d+)\s+"
-    r"crc_err=(?P<crc_err>\d+)\s+icv_err=(?P<icv_err>\d+)\s+"
-    r"rate=(?P<rate>\d+)\s+"
-    r"rssi=(?P<rssi_a>-?\d+),(?P<rssi_b>-?\d+)\s+"
-    r"evm=(?P<evm_a>-?\d+),(?P<evm_b>-?\d+)\s+"
-    r"snr=(?P<snr_a>-?\d+),(?P<snr_b>-?\d+)"
-)
+
+def _parse_corrupt(line: str) -> Optional[dict]:
+    """Parse one `rx.corrupt` event line; None for anything else."""
+    line = line.strip()
+    if not line.startswith('{"ev":"rx.corrupt"'):
+        return None
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return None
+    return ev if isinstance(ev, dict) and ev.get("ev") == "rx.corrupt" else None
 
 
 def _len_bucket(n: int) -> str:
@@ -130,21 +133,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     no_snr = 0
 
     for line in sys.stdin:
-        m = _CORRUPT_ANY_RE.search(line)
-        if not m:
+        ev = _parse_corrupt(line)
+        if ev is None:
             continue
         now = time.monotonic()
         if deadline is not None and now > deadline:
             break
         total += 1
-        crc_err = int(m.group("crc_err"))
-        icv_err = int(m.group("icv_err"))
+        crc_err = int(ev["crc"])
+        icv_err = int(ev["icv"])
         corrupted = bool(crc_err or icv_err)
-        plen = int(m.group("len"))
-        rate = int(m.group("rate"))
-        rssi_a = int(m.group("rssi_a")); rssi_b = int(m.group("rssi_b"))
-        evm_a = int(m.group("evm_a"));   evm_b = int(m.group("evm_b"))
-        snr_a = int(m.group("snr_a"));   snr_b = int(m.group("snr_b"))
+        plen = int(ev["len"])
+        rate = int(ev["rate"])
+        rssi_a, rssi_b = int(ev["rssi"][0]), int(ev["rssi"][1])
+        evm_a, evm_b = int(ev["evm"][0]), int(ev["evm"][1])
+        snr_a, snr_b = int(ev["snr"][0]), int(ev["snr"][1])
         # The chip only populates evm/snr for OFDM data frames; for CCK ACKs
         # and short mgmt frames both paths read 0. Treat (0,0) as "no
         # measurement" rather than "0 dB" so we don't artificially fill the
@@ -187,7 +190,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     elapsed = max(1e-9, time.monotonic() - start)
     if total == 0:
-        sys.stderr.write("survey: no <devourer-corrupt-any> lines parsed; "
+        sys.stderr.write("survey: no rx.corrupt events parsed; "
                          "is DEVOURER_RX_DUMP_ALL set?\n")
         return 1
 

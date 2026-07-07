@@ -60,8 +60,12 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0xe822, 0xa82a, /* RTL8822EU (Jaguar3 EU) */
 };
 
-/* Process-start reference for the init-timing lines (see src/InitTimer.h).
- * `init-timing: txdemo.first_tx_submit` is the end-to-end "ready to TX" mark:
+/* Event sink for the demo's own JSONL emissions (packetProcessor is a free
+ * function) — points at the main() Logger's sink, set before InitWrite(). */
+static devourer::EventSink *g_ev = nullptr;
+
+/* Process-start reference for the init.timing events (see src/InitTimer.h).
+ * stage=txdemo.first_tx_submit is the end-to-end "ready to TX" mark:
  * exec → first bulk-OUT submitted. */
 static const std::chrono::steady_clock::time_point g_proc_start =
     std::chrono::steady_clock::now();
@@ -120,8 +124,9 @@ static void packetProcessor(const Packet &packet) {
   /* RX liveness marker for the TX+RX=thread mode: first frame + every 500th.
    * Without it a deaf RX loop is indistinguishable from a quiet channel. */
   if (g_rx_count == 1 || g_rx_count % 500 == 0) {
-    printf("<devourer-rx>total=%d len=%zu\n", g_rx_count, packet.Data.size());
-    fflush(stdout);
+    devourer::Ev(*g_ev, "rx.count")
+        .f("total", g_rx_count)
+        .f("len", packet.Data.size());
   }
   /* BF self-sounding report detector (DEVOURER_BF_DETECT_REPORT modes 1-4,
    * shared with rxdemo): with DEVOURER_TX_WITH_RX=thread this is how
@@ -135,9 +140,11 @@ static void packetProcessor(const Packet &packet) {
     if (std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
       static int hits = 0;
       ++hits;
-      printf("<devourer-tx-hit>RX from txdemo SA: hits=%d total_rx=%d len=%zu\n",
-             hits, g_rx_count, packet.Data.size());
-      fflush(stdout);
+      /* rx.txhit fields are parsed by tests/regress.py — keep names stable. */
+      devourer::Ev(*g_ev, "rx.txhit")
+          .f("hits", hits)
+          .f("total_rx", g_rx_count)
+          .f("len", packet.Data.size());
     }
   }
 }
@@ -172,6 +179,9 @@ int main(int argc, char **argv) {
   int rc;
 
   auto logger = std::make_shared<Logger>();
+  apply_logging_env(*logger); /* DEVOURER_LOG_LEVEL / DEVOURER_EVENTS / ... */
+  g_ev = &logger->events();
+  devourer::bf::bf_events = g_ev; /* BfReportDetect.h emits through this */
 
   /* SIGINT/SIGTERM -> break the TX loop and run a clean chip de-init, so the
    * harness's `timeout` doesn't leave the adapter's USB core hung. */
@@ -276,7 +286,9 @@ int main(int argc, char **argv) {
   logger->info("Vendor/Product ID: {:04x}:{:04x}", desc.idVendor,
                desc.idProduct);
 
-  logger->info("init-timing: txdemo.open_device = {} ms", ms_since_start());
+  devourer::Ev(*g_ev, "init.timing")
+      .f("stage", "txdemo.open_device")
+      .f("ms", ms_since_start());
   /* Claim-before-reset (see src/UsbOpen.h): the exclusive interface claim is the
    * primary guard — a second devourer on this adapter gets BUSY and we bail here
    * before the reset, so it can't re-enumerate the adapter out from under the
@@ -286,7 +298,9 @@ int main(int argc, char **argv) {
   rc = devourer::claim_interface_then_reset(
       handle, 0, logger,
       !termux_mode && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
-  logger->info("init-timing: txdemo.usb_reset = {} ms", ms_since_start());
+  devourer::Ev(*g_ev, "init.timing")
+      .f("stage", "txdemo.usb_reset")
+      .f("ms", ms_since_start());
   if (rc != 0) {
     libusb_close(handle);
     libusb_exit(context);
@@ -407,7 +421,9 @@ int main(int argc, char **argv) {
     logger->error("No driver for this chip in this build — exiting");
     return 1;
   }
-  logger->info("init-timing: txdemo.create_device = {} ms", ms_since_start());
+  devourer::Ev(*g_ev, "init.timing")
+      .f("stage", "txdemo.create_device")
+      .f("ms", ms_since_start());
 
   /* Jaguar1-only research features (TX-mode default, fast-retune hopping,
    * thermal telemetry, TXAGC override, BB-reg probe) are not part of the
@@ -510,7 +526,9 @@ int main(int argc, char **argv) {
       .ChannelWidth = init_width});
 
   write_sentinel(0xBEEF, "post-init/pre-TX");
-  logger->info("init-timing: txdemo.init_write = {} ms", ms_since_start());
+  devourer::Ev(*g_ev, "init.timing")
+      .f("stage", "txdemo.init_write")
+      .f("ms", ms_since_start());
 
   std::thread usb_thread(usb_event_loop, logger, context);
 
@@ -703,7 +721,7 @@ int main(int argc, char **argv) {
    * DEVOURER_HOP_CHANNELS="1,6,11" is set the TX loop dwells DWELL_FRAMES
    * frames on each listed channel, then retunes to the next via
    * SetMonitorChannel, cycling for HOP_ROUNDS full passes (0 = forever). Each
-   * retune is wall-clock timed and announced as a <devourer-hop> marker so a
+   * retune is wall-clock timed and announced as a hop.dwell event so a
    * wideband SDR receiver can correlate which frames landed on which channel
    * and confirm none are dropped across the retune. Intra-band (e.g. all of
    * 1/6/11 in 2.4 GHz) is the cheap case — no band switch, no IQK — so the
@@ -748,7 +766,7 @@ int main(int argc, char **argv) {
    * set, force the per-rate TXAGC index to an absolute value and step it up by
    * STEP every STEP_MS, in one continuous TX session (chip never stops, so we
    * observe cumulative heating). Each (re-)apply re-runs the channel-set so the
-   * new index reaches the TXAGC registers. A <devourer-txpwr> marker is emitted
+   * new index reaches the TXAGC registers. A txpwr.set event is emitted
    * on every change so the harness can correlate gain index with the thermal /
    * SDR streams. Without START, behaviour is unchanged (EFUSE per-rate power). */
   bool pwr_ramp = false;
@@ -759,7 +777,7 @@ int main(int argc, char **argv) {
 
   /* DEVOURER_TX_MCS_SWEEP="MCS0,MCS2,MCS4,..." — the MCS-headroom axis of the
    * link probe: step the on-air rate through the list every DEVOURER_TX_MCS_STEP_MS
-   * (default 2000), emitting a <devourer-contx>mcs=<spec> marker per step. A
+   * (default 2000), emitting a tx.contx event (mcs=<spec>) per step. A
    * beacon-feed rate sweep (decoupled from the idle-hold HW carrier, like the
    * power ramp) so the ground reads decodable per-frame SNR/delivery at each MCS
    * and picks the highest rate the link holds. */
@@ -787,19 +805,22 @@ int main(int argc, char **argv) {
     if (!rtlDevice->GetTxPowerCaps().supported)
       return;
     rtlDevice->SetTxPowerIndexOverride(idx);
-    printf("<devourer-txpwr>index=%d t_ms=%lld\n", idx,
-           static_cast<long long>(ms_since_start()));
+    devourer::Ev(*g_ev, "txpwr.set")
+        .f("index", idx)
+        .f("t_ms", ms_since_start());
     if (txpwr_readback) {
       /* Confirm the TXAGC writes landed: representative path-A indices from
        * GetTxPowerState — register readback where the family's TXAGC block is
        * readable (rb=1), the software shadow otherwise (Jaguar2 / 8814A,
        * whose TXAGC ports are write-only). */
       const devourer::TxPowerState st = rtlDevice->GetTxPowerState();
-      printf("<devourer-txpwr-rb>index=%d cck1m=%d ofdm6m=%d mcs7=%d rb=%d\n",
-             idx, st.cck_index, st.ofdm_index, st.mcs7_index,
-             st.hw_readback ? 1 : 0);
+      devourer::Ev(*g_ev, "txpwr.readback")
+          .f("index", idx)
+          .f("cck1m", st.cck_index)
+          .f("ofdm6m", st.ofdm_index)
+          .f("mcs7", st.mcs7_index)
+          .f("rb", st.hw_readback ? 1 : 0);
     }
-    fflush(stdout);
   };
   if (const char *e = std::getenv("DEVOURER_TX_PWR_START")) {
     pwr_ramp = true;
@@ -899,8 +920,9 @@ int main(int argc, char **argv) {
 
   while (!g_devourer_should_stop) {
     if (tx_count == 0) {
-      logger->info("init-timing: txdemo.first_tx_submit = {} ms",
-                   ms_since_start());
+      devourer::Ev(*g_ev, "init.timing")
+          .f("stage", "txdemo.first_tx_submit")
+          .f("ms", ms_since_start());
       if (pwr_ramp) {
         apply_txpwr(pwr_cur);
         pwr_next_step_ms = ms_since_start() + pwr_step_ms;
@@ -917,9 +939,9 @@ int main(int argc, char **argv) {
         (tx_count == 0 || ms_since_start() >= mcs_next_step_ms)) {
       if (tx_count != 0) mcs_idx = (mcs_idx + 1) % mcs_sweep.size();
       rtlDevice->SetTxMode(mcs_sweep[mcs_idx].first);
-      printf("<devourer-contx>mcs=%s t_ms=%ld\n",
-             mcs_sweep[mcs_idx].second.c_str(), ms_since_start());
-      fflush(stdout);
+      devourer::Ev(*g_ev, "tx.contx")
+          .f("mcs", mcs_sweep[mcs_idx].second)
+          .f("t_ms", ms_since_start());
       mcs_next_step_ms = ms_since_start() + mcs_step_ms;
     }
     /* Retune at each dwell boundary. The first iteration (frames_in_dwell==0,
@@ -930,14 +952,14 @@ int main(int argc, char **argv) {
       if (total_dwells > 0 && dwell_no >= total_dwells) break;
       int ch = hop_channels[dwell_no % hop_channels.size()];
       auto sw0 = std::chrono::steady_clock::now();
-      const char *mode = "";
+      const char *mode = nullptr;
       if (hop_radiotap) {
         /* Library retunes from the CHANNEL field on the next send_packet; the
          * 802.11 body is beacon_frame past its 10-byte radiotap. */
         tx_buf = build_frame_with_channel(devourer::chan_to_freq(ch),
                                           beacon_frame + 10,
                                           sizeof(beacon_frame) - 10);
-        mode = " radiotap";
+        mode = "radiotap";
       }
       else if (hop_fast) {
         /* IRtlDevice virtual: every generation implements the lean fast path
@@ -945,7 +967,7 @@ int main(int argc, char **argv) {
          * band-change fallback to the full set). */
         rtlDevice->FastRetune(static_cast<uint8_t>(ch),
                               /*cache_rf=*/hop_fast != 2);
-        mode = " fast";
+        mode = "fast";
       }
       else {
         rtlDevice->SetMonitorChannel(SelectedChannel{
@@ -957,11 +979,17 @@ int main(int argc, char **argv) {
           std::chrono::duration_cast<std::chrono::microseconds>(
               std::chrono::steady_clock::now() - sw0)
               .count();
-      printf("<devourer-hop>dwell=%ld round=%ld channel=%d frame=%ld "
-             "switch_us=%lld t_ms=%lld%s\n",
-             dwell_no, dwell_no / static_cast<long>(hop_channels.size()), ch,
-             tx_count, switch_us, ms_since_start(), mode);
-      fflush(stdout);
+      {
+        devourer::Ev ev(*g_ev, "hop.dwell");
+        ev.f("dwell", dwell_no)
+            .f("round", dwell_no / static_cast<long>(hop_channels.size()))
+            .f("channel", ch)
+            .f("frame", tx_count)
+            .f("switch_us", switch_us)
+            .f("t_ms", ms_since_start());
+        if (mode != nullptr)
+          ev.f("mode", mode);
+      }
     }
     if (stbc_toggle) {
       devourer::TxMode m = tx_mode_base;
@@ -973,16 +1001,16 @@ int main(int argc, char **argv) {
     if (!hop_channels.empty() && ++frames_in_dwell >= hop_dwell)
       frames_in_dwell = 0;
     if (tx_count <= 10 || tx_count % 500 == 0) {
-      printf("<devourer-tx>TX #%ld rc=%d\n", tx_count, rc);
+      devourer::Ev(*g_ev, "tx.frame").f("n", tx_count).f("rc", rc);
       /* TX submission health — the driver-drop / congestion feed (xtx). A
        * climbing failed with was_timeout=1 is a full TX FIFO (recoverable
        * back-pressure); a hard rc is a broken path. */
       auto ts = rtlDevice->GetTxStats();
-      printf("<devourer-txstats>submitted=%llu failed=%llu was_timeout=%d "
-             "last_rc=%d\n",
-             (unsigned long long)ts.submitted, (unsigned long long)ts.failed,
-             ts.last_was_timeout ? 1 : 0, ts.last_error_rc);
-      fflush(stdout);
+      devourer::Ev(*g_ev, "tx.stats")
+          .f("submitted", (unsigned long long)ts.submitted)
+          .f("failed", (unsigned long long)ts.failed)
+          .f("was_timeout", ts.last_was_timeout ? 1 : 0)
+          .f("last_rc", ts.last_error_rc);
     }
     /* Thermal telemetry via the generation-agnostic GetThermalStatus
      * (previously Jaguar1-only): every family reads its RF 0x42 meter —
@@ -990,9 +1018,16 @@ int main(int argc, char **argv) {
      * Jaguar3 [6:1] + efuse 0xd0 (E) / first-read cold reference (C). */
     if (thermal_every > 0 && tx_count % thermal_every == 0) {
       auto t = rtlDevice->GetThermalStatus();
+      if (t.valid || t.raw != 0) {
+        devourer::Ev ev(*g_ev, "thermal");
+        ev.t().f("raw", t.raw);
+        if (t.valid)
+          ev.f("baseline", t.baseline).f("delta", t.delta);
+        else
+          ev.f("baseline", nullptr);
+        ev.f("status", devourer::ThermalBucket(t));
+      }
       if (t.valid) {
-        printf("<devourer-thermal>raw=%u baseline=%u delta=%+d status=%s\n",
-               t.raw, t.baseline, t.delta, devourer::ThermalBucket(t));
         if (t.delta >= thermal_warn_delta && !thermal_warned) {
           logger->warn("thermal: chip running hot — raw={} baseline={} "
                        "delta=+{} (>= {}); TX power tracking backing off, "
@@ -1002,11 +1037,7 @@ int main(int argc, char **argv) {
         } else if (t.delta < thermal_warn_delta) {
           thermal_warned = false;
         }
-      } else if (t.raw != 0) {
-        printf("<devourer-thermal>raw=%u baseline=none status=%s\n",
-               t.raw, devourer::ThermalBucket(t));
       }
-      fflush(stdout);
     }
     if (rc) {
       consec_fail = 0;
@@ -1028,8 +1059,9 @@ int main(int argc, char **argv) {
   /* Bounded hop mode (DEVOURER_HOP_ROUNDS>0) reaches here when its rounds
    * complete; the signal and back-off paths also fall through. */
   if (!hop_channels.empty()) {
-    printf("<devourer-hop-done>frames=%ld dwells=%ld\n", tx_count, dwell_no + 1);
-    fflush(stdout);
+    devourer::Ev(*g_ev, "hop.done")
+        .f("frames", tx_count)
+        .f("dwells", dwell_no + 1);
   }
 
   /* Stop and join the libusb event thread BEFORE any teardown: a thread still

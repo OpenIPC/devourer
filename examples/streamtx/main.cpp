@@ -104,6 +104,10 @@ static std::vector<uint8_t> build_dot11_probe_req() {
 
 int main(int argc, char **argv) {
   auto logger = std::make_shared<Logger>();
+  apply_logging_env(*logger); /* DEVOURER_LOG_LEVEL / DEVOURER_EVENTS / ... */
+  /* Events ride stderr here (overriding the stdout default): stdout is left
+   * clean for downstream callers that may chain this binary. */
+  logger->events().configure(stderr);
 
   int interval_ms = 2;
   // Sanity cap on a single PSDU body; protects against an upstream framing
@@ -285,9 +289,7 @@ int main(int argc, char **argv) {
       auto r = stream_stdin::read_exact(stdin, len_bytes, sizeof(len_bytes));
       if (r == stream_stdin::ReadResult::Eof) break;  // clean stdin close
       if (r == stream_stdin::ReadResult::Short) {
-        std::fprintf(stderr,
-                     "stream_tx_demo: short read on stdin len-prefix; record "
-                     "truncated\n");
+        logger->error("short read on stdin len-prefix; record truncated");
         std::exit(2);
       }
     }
@@ -296,23 +298,20 @@ int main(int argc, char **argv) {
                  | (static_cast<uint32_t>(len_bytes[2]) << 16)
                  | (static_cast<uint32_t>(len_bytes[3]) << 24);
     if (len == 0 || len > max_psdu) {
-      std::fprintf(stderr,
-                   "stream_tx_demo: PSDU length %u out of range (max %zu); "
-                   "stopping\n", len, max_psdu);
+      logger->error("PSDU length {} out of range (max {}); stopping", len,
+                    max_psdu);
       break;
     }
     std::vector<uint8_t> psdu(len);
     {
       auto r = stream_stdin::read_exact(stdin, psdu.data(), len);
       if (r == stream_stdin::ReadResult::Eof) {
-        std::fprintf(stderr,
-                     "stream_tx_demo: EOF mid-PSDU (expected %u bytes)\n", len);
+        logger->warn("EOF mid-PSDU (expected {} bytes)", len);
         break;
       }
       if (r == stream_stdin::ReadResult::Short) {
-        std::fprintf(stderr,
-                     "stream_tx_demo: short read mid-PSDU (expected %u bytes); "
-                     "record truncated\n", len);
+        logger->error("short read mid-PSDU (expected {} bytes); record "
+                      "truncated", len);
         std::exit(2);
       }
     }
@@ -339,21 +338,21 @@ int main(int argc, char **argv) {
     tx_buf.insert(tx_buf.end(), psdu.begin(), psdu.end());
     bool ok = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
     ++tx_count;
-    // Tag matches precoder's so existing log-watchers keep working; route
-    // to stderr to leave stdout clean for downstream callers that may chain
-    // this binary.
+    // TX progress marker (event stream rides stderr in this demo, keeping
+    // stdout clean for downstream callers that may chain this binary).
     if (tx_count <= 5 || tx_count % 500 == 0) {
-      std::fprintf(stderr,
-                   "<stream-tx>TX #%ld ok=%d psdu=%u total=%zu\n",
-                   tx_count, ok ? 1 : 0, len, tx_buf.size());
-      std::fflush(stderr);
+      devourer::Ev(logger->events(), "stream.tx")
+          .f("n", tx_count)
+          .f("ok", ok)
+          .f("psdu", len)
+          .f("total", tx_buf.size());
     }
     if (interval_ms > 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
     }
   }
 
-  std::fprintf(stderr, "<stream-tx>done; sent %ld PSDUs\n", tx_count);
+  devourer::Ev(logger->events(), "stream.done").f("sent", tx_count);
   libusb_release_interface(handle, 0);
   libusb_close(handle);
   libusb_exit(context);

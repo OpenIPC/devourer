@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Validate the passive noise-floor + the GetRxQuality() feed (src/RxQuality.h,
-# <devourer-rxquality>) ON-AIR. The passive noise floor is nf_dbm = rssi_dbm -
+# rx.quality events) ON-AIR. The passive noise floor is nf_dbm = rssi_dbm -
 # snr_db per decoded OFDM/HT frame — the effective noise+interference floor the
 # receiver sees, and the Fluke self-jamming signal ("decrease txpower until NF
 # returns to normal"): a raised floor drops SNR while RSSI holds, so nf rises.
@@ -58,28 +58,27 @@ run_cell() {
     sleep 3
     sudo -n env DEVOURER_PID="$RX_PID" DEVOURER_VID="$RX_VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_RX_ENERGY_MS=1000 DEVOURER_RXQUALITY=1 \
-        timeout "$DUR" "$ROOT/build/rxdemo" 2>&1 \
-        | grep "devourer-rxquality" >"$log" || true
+        timeout "$DUR" "$ROOT/build/rxdemo" 2>/dev/null \
+        | grep -F '"ev":"rx.quality"' >"$log" || true
     kill "$tx" 2>/dev/null; wait "$tx" 2>/dev/null
     sleep 2
     python3 - "$log" <<'PYEOF'
-import re, statistics, sys
+import json, statistics, sys
 nf, rssi, snr, verdicts, frames = [], [], [], [], []
 for line in open(sys.argv[1], errors="replace"):
-    fr = re.search(r"frames=(\d+)", line)
-    if not fr or int(fr.group(1)) == 0:
+    try:
+        ev = json.loads(line)
+    except ValueError:
         continue
-    def g(pat):
-        m = re.search(pat, line); return float(m.group(1)) if m else None
-    nfv = g(r"noise_floor_dbm=(-?\d+\.?\d*)")
-    rv = g(r"rssi_mean_dbm=(-?\d+\.?\d*)")
-    sv = g(r"snr_mean_db=(-?\d+\.?\d*)")
-    v = re.search(r"verdict=(\w+)", line)
-    frames.append(int(fr.group(1)))
-    if nfv is not None: nf.append(nfv)
-    if rv is not None: rssi.append(rv)
-    if sv is not None: snr.append(sv)
-    if v: verdicts.append(v.group(1))
+    if ev.get("ev") != "rx.quality" or not ev.get("frames"):
+        continue
+    frames.append(int(ev["frames"]))
+    nfv, rv, sv = ev.get("noise_floor_dbm"), ev.get("rssi_mean_dbm"), ev.get("snr_mean_db")
+    v = ev.get("verdict")
+    if nfv is not None: nf.append(float(nfv))
+    if rv is not None: rssi.append(float(rv))
+    if sv is not None: snr.append(float(sv))
+    if v: verdicts.append(v)
 def med(a): return statistics.median(a) if a else float("nan")
 tail = verdicts[len(verdicts)//2:] or verdicts
 vv = max(set(tail), key=tail.count) if tail else "NONE"

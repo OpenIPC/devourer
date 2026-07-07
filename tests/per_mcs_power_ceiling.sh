@@ -9,7 +9,7 @@
 #
 # This measures it directly, reusing this repo's diagnostics: for each MCS it
 # sweeps the flat TXAGC index (DEVOURER_TX_PWR) while a second devourer adapter
-# reports per-frame RSSI/EVM (<devourer-stream>). The ceiling per MCS is the
+# reports per-frame RSSI/EVM (rx.frame events). The ceiling per MCS is the
 # highest power that still DELIVERS cleanly — i.e. the point just before frames
 # garble and delivery collapses (exactly the community's "raise power until
 # garbage" cliff). NB the EVM *knee* (where the PA compresses) is nearly the
@@ -77,8 +77,8 @@ wait "$GJ" 2>/dev/null
 python3 - "$OUT/ground.log" "$OUT/cells.txt" <<'PYEOF'
 import re, statistics, sys
 frames = []  # (t, rssi0, snr0, evm0)
-rx = re.compile(r"^([0-9.]+) .*<devourer-stream>.*\brssi=(-?\d+),-?\d+ "
-                r"evm=(-?\d+),-?\d+ snr=(-?\d+),-?\d+")
+rx = re.compile(r'^([0-9.]+) .*"ev":"rx\.frame".*"rssi":\[(-?\d+),-?\d+\],'
+                r'"evm":\[(-?\d+),-?\d+\],"snr":\[(-?\d+),-?\d+\]')
 for line in open(sys.argv[1], errors="replace"):
     m = rx.match(line)
     if m:

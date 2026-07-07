@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Two-adapter RX validation for the RTL8812EU (0bda:a81a): the RTL8812AU
 # (Jaguar1, 9-2) floods canonical-SA beacons (57:42:75:05:d6:00) on a channel
-# while the EU runs the RX demo. Success = the EU prints <devourer-tx-hit>
+# while the EU runs the RX demo. Success = the EU emits "ev":"rx.txhit"
 # (it decoded the injected SA), proving the 8822e RX datapath delivers frames.
 #
 #   sudo tests/eu_rx_validate.sh [channel] [seconds]
@@ -48,10 +48,10 @@ sleep 6   # let TX come up before RX starts listening
 echo "=== running RX DUT ($RXPID) on ch$CH ==="
 sudo env DEVOURER_VID=0x0bda DEVOURER_PID=0x$RXPID DEVOURER_CHANNEL=$CH \
      stdbuf -oL -eL timeout -k 5 $((SECS-7)) "${RXBIN:-build/rxdemo}" 2>&1 \
-     | tee /tmp/eu_rxval_rx.log | grep -iE "IQK done|RX pkt|tx-hit|entering RX" | sed 's/^/[rx] /'
+     | tee /tmp/eu_rxval_rx.log | grep -E 'IQK done|"ev":"rx\.(pkt|txhit)"|entering RX' | sed 's/^/[rx] /'
 
 echo "==================== RESULT ===================="
-echo "EU RX pkt lines : $(grep -c 'RX pkt' /tmp/eu_rxval_rx.log)"
-echo "EU canonical hit: $(grep -c 'tx-hit' /tmp/eu_rxval_rx.log)"
+echo "EU RX pkt lines : $(grep -Fc '"ev":"rx.pkt"' /tmp/eu_rxval_rx.log)"
+echo "EU canonical hit: $(grep -Fc '"ev":"rx.txhit"' /tmp/eu_rxval_rx.log)"
 echo "TX bulk sends   : $(grep -c 'bulk_send' /tmp/eu_rxval_tx.log)"
-grep -m1 "tx-hit" /tmp/eu_rxval_rx.log && echo ">>> EU RX DATAPATH CONFIRMED <<<" || echo ">>> no canonical-SA hit (see /tmp/eu_rxval_{tx,rx}.log) <<<"
+grep -m1 -F '"ev":"rx.txhit"' /tmp/eu_rxval_rx.log && echo ">>> EU RX DATAPATH CONFIRMED <<<" || echo ">>> no canonical-SA hit (see /tmp/eu_rxval_{tx,rx}.log) <<<"

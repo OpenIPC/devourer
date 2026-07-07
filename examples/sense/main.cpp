@@ -59,6 +59,11 @@ static void set_env(const char *name, const char *value) {
 /* The sounder's TA and the address a beamformee arms to respond to (matches the
  * canonical SA used across devourer's TX path). */
 static const uint8_t kCanonicalSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+
+/* Event sink for the demo's JSONL emissions (Sensor::feed runs on the RX
+ * callback) — points at the main() Logger's sink, which sense routes to
+ * stderr so the live stdout display stays clean. */
+static devourer::EventSink *g_ev = nullptr;
 static constexpr uint16_t REG_MACID = 0x0610;
 static constexpr int kCalReports = 48;   /* reports to calibrate the bit split */
 static constexpr size_t kWindow = 512;   /* variance window (~0.3 s at a fast
@@ -175,13 +180,11 @@ public:
     ReportHdr hdr;
     if (!parse_report(frame, n, hdr))
       return;
-    if (std::getenv("DEVOURER_SENSE_DUMP")) {
-      /* python-tool-compatible raw dump (stderr, so the stdout display is
-       * untouched): capture with 2>file, analyse with tools/bf_report_decode.py */
-      std::fprintf(stderr, "<devourer-bf-report-raw>");
-      for (size_t i = 0; i < n; ++i)
-        std::fprintf(stderr, "%02x", frame[i]);
-      std::fprintf(stderr, "\n");
+    if (std::getenv("DEVOURER_SENSE_DUMP") && g_ev) {
+      /* python-tool-compatible raw dump (events ride stderr in sense, so the
+       * stdout display is untouched): capture with 2>file, analyse with
+       * tools/bf_report_decode.py */
+      devourer::Ev(*g_ev, "bf.report_raw").hex("frame", frame, n);
     }
     if (std::getenv("DEVOURER_SENSE_DEBUG")) {
       static int dbg = 0;
@@ -479,6 +482,12 @@ static uint16_t hex16(const char *s) {
 
 int main(int argc, char **argv) {
   auto logger = std::make_shared<Logger>();
+  apply_logging_env(*logger); /* DEVOURER_LOG_LEVEL / DEVOURER_EVENTS / ... */
+  /* Events go to stderr regardless of DEVOURER_EVENTS' default: stdout is the
+   * live motion display (\r progress lines), and a JSON line in the middle of
+   * it would shred the readout. Capture events with 2>file. */
+  logger->events().configure(stderr);
+  g_ev = &logger->events();
   install_devourer_signal_handlers();
 
   int channel = 6;
@@ -523,8 +532,10 @@ int main(int argc, char **argv) {
   }
 
   /* Quiet the library's per-operation info logging so the live display owns the
-   * console; --verbose restores the full bring-up log. */
-  if (!verbose)
+   * console; --verbose restores the full bring-up log, and an explicit
+   * DEVOURER_LOG_LEVEL (already applied by apply_logging_env above) wins over
+   * the quiet default. */
+  if (!verbose && std::getenv("DEVOURER_LOG_LEVEL") == nullptr)
     logger->set_level(Logger::Level::Warn);
 
   /* DEVOURER_SENSE_K overrides the detector threshold for on-rig fine-tuning. */

@@ -5,7 +5,7 @@
 # Alamouti across two TX antennas internally, sidestepping the SDR 2-channel
 # problem), and receives on an RTL8812AU — the 8812/8821 RX descriptor exposes
 # the received HT-SIG STBC bit, which the 8814 RX does NOT (it reports defaults).
-# A pass = frames arrive with stbc=1 in the <devourer-stream> line.
+# A pass = frames arrive with "stbc":1 in the rx.frame event.
 #
 # Hardware (all on ONE host, adapters inches apart for a STRONG link — a clean
 # yes/no needs the frame to decode easily; range confounds a zero result):
@@ -45,8 +45,9 @@ TX_ENV=(DEVOURER_PID=0x8813 DEVOURER_CHANNEL="$CHANNEL" DEVOURER_TX_RATE="${MCS}
 [ -n "${TX_BUS:-}" ] && TX_ENV+=(DEVOURER_USB_BUS="$TX_BUS")
 [ -n "${TX_PORT:-}" ] && TX_ENV+=(DEVOURER_USB_PORT="$TX_PORT")
 stdbuf -oL -eL env "${TX_ENV[@]}" "$TXDEMO" >"$TXLOG" 2>&1 &
-for _ in $(seq 1 30); do grep -q 'TX #.* rc=1' "$TXLOG" 2>/dev/null && break; sleep 1; done
-grep -q 'TX #.* rc=1' "$TXLOG" || { echo "TX beacon never injected — check $TXLOG" >&2; exit 3; }
+tx_ok() { grep -F '"ev":"tx.frame"' "$TXLOG" 2>/dev/null | grep -q '"rc":1'; }
+for _ in $(seq 1 30); do tx_ok && break; sleep 1; done
+tx_ok || { echo "TX beacon never injected — check $TXLOG" >&2; exit 3; }
 echo "   TX injecting ($(grep -m1 'fixed rate' "$TXLOG" 2>/dev/null || echo '?'))"
 
 echo "== RX: 8812 for ${DURATION}s, reading the STBC bit =="
@@ -57,10 +58,10 @@ sleep "$DURATION"
 kill "$rxpid" 2>/dev/null || true
 wait "$rxpid" 2>/dev/null || true   # only the RX — the TX beacon runs on
 
-TOTAL=$(grep -c '<devourer-stream>' "$RXLOG" || true)
-STBC1=$(grep -c '<devourer-stream>.*stbc=1' "$RXLOG" || true)
+TOTAL=$(grep -c -F '"ev":"rx.frame"' "$RXLOG" || true)
+STBC1=$(grep -c '"ev":"rx.frame".*"stbc":1' "$RXLOG" || true)
 echo "== result: canonical frames=$TOTAL  with stbc=1: $STBC1 =="
-grep -m3 '<devourer-stream>' "$RXLOG" | sed -E 's/body=.*//'
+grep -m3 -F '"ev":"rx.frame"' "$RXLOG" | sed -E 's/"body":.*//'
 if [ "${STBC1:-0}" -gt 0 ]; then
     echo "PASS — the chip emits decodable STBC on-air (stbc=1 seen). Proceed to the"
     echo "       TX-diversity mobility measurement (STBC vs single-stream, moving TX)."

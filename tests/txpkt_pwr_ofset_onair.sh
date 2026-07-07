@@ -83,7 +83,7 @@ sudo -n pkill -x rxdemo 2>/dev/null; wait "$GJ2" 2>/dev/null
 python3 - "$OUT/ground.log" "$OUT/cells.txt" <<'PYEOF'
 import re, statistics, sys
 frames = []
-rx = re.compile(r"^([0-9.]+) .*<devourer-stream>.*\brssi=(-?\d+),")
+rx = re.compile(r'^([0-9.]+) .*"ev":"rx\.frame".*"rssi":\[(-?\d+),')
 for line in open(sys.argv[1], errors="replace"):
     m = rx.match(line)
     if m:

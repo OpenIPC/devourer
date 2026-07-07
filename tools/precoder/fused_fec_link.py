@@ -3,7 +3,7 @@ runs over the devourer chip↔chip stream link (streamtx / rxdemo).
 
 This is the chip-path (scenario 1) sibling of the SDR capstone
 (`~/git/sdr2wifi/fused_fec_rung1.py`): the same SBI-over-RS framing, but the
-receiver consumes `<devourer-stream>` lines (with DEVOURER_RX_KEEP_CORRUPTED)
+receiver consumes `rx.frame` JSONL events (with DEVOURER_RX_KEEP_CORRUPTED)
 instead of gr-ieee802-11 PDUs. The chip gives only hard corrupted bytes (no
 LLRs), so erasure localization is purely the per-sub-block CRC.
 
@@ -17,7 +17,7 @@ directly:
   * sbi      — keeps it and salvages the CRC-valid sub-blocks.
 
 CLI wrappers: `fused_fec_tx.py` (bytes→bodies→streamtx) and
-`fused_fec_rx.py` (`<devourer-stream>`→recovered bytes + gain report).
+`fused_fec_rx.py` (`rx.frame` events→recovered bytes + gain report).
 """
 
 from __future__ import annotations

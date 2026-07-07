@@ -41,7 +41,7 @@ python3 "$ROOT/tests/gen_svc_nals.py" 12 | \
        "$ROOT/build/svctx" --gap-us 600 >/tmp/svc.log 2>&1 &
 sleep 9
 echo "=== svctx policy + per-TID counters ==="
-grep -E "SVC UEP policy|  T[0-9] ->|<svc>" /tmp/svc.log | tail -6
+grep -E 'SVC UEP policy|  T[0-9] ->|"ev":"svc.stats"' /tmp/svc.log | tail -6
 echo "=== witness decoded MCS histogram (expect MCS0:MCS1:MCS4:MCS7 ~ 1:4:8:16) ==="
 sudo timeout 6 tcpdump -i "$W" -e -nn "ether src $SA" 2>/dev/null | grep -oE "MCS [0-9]+" | sort -V | uniq -c
 KILL

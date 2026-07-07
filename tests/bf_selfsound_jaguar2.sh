@@ -6,7 +6,7 @@
 #     Jaguar-1 sounder (default 8814AU — proven single-radio GS path)
 #     8822BU  : beamformee   (shared recipe, kBfeeJaguar23) — chip under test
 #     Jaguar-1 sniffer (default 8821AU), DEVOURER_BF_DETECT_REPORT=4
-#     PASS = <devourer-bf-report> with SA = the Jaguar-2 beamformee MAC
+#     PASS = a "ev":"bf.report" event with sa = the Jaguar-2 beamformee MAC
 #     (00:e0:4c:88:22:bb, programmed at arm time) only when armed.
 #
 #   cell C (sounder direction + single-radio ground station):
@@ -14,7 +14,7 @@
 #     MAC learned from its init log)
 #     8822BU  : sounder + self-capture (DEVOURER_TX_WITH_RX=thread) — under test
 #     Jaguar-1 sniffer (default 8814AU) cross-check
-#     PASS = <devourer-bf-report> lines in the 8822BU's OWN log (self-capture).
+#     PASS = "ev":"bf.report" events in the 8822BU's OWN log (self-capture).
 #     Sniffer>0 with self-capture==0 isolates an RX-side issue; both 0 = the
 #     NDPA descriptor / HW NDP never fired.
 #
@@ -89,9 +89,9 @@ run_bfee_cell() { # $1=name $2=arm(0|1) $3=mu(0|1)
     kill "$bfee_pid" "$sniff_pid" 2>/dev/null
     wait "$bfee_pid" "$sniff_pid" 2>/dev/null
     local n
-    n=$(grep -c "<devourer-bf-report>" "$OUT/$name.sniff.log")
+    n=$(grep -Fc '"ev":"bf.report"' "$OUT/$name.sniff.log")
     echo "  sniffer bf-report lines: $n"
-    grep "<devourer-bf-report>" "$OUT/$name.sniff.log" | grep "$BFEE_MAC" | head -2
+    grep -F '"ev":"bf.report"' "$OUT/$name.sniff.log" | grep "$BFEE_MAC" | head -2
 }
 
 run_sounder_cell() { # cell C: Jaguar-2 as beamformer + single-radio self-capture
@@ -129,10 +129,10 @@ run_sounder_cell() { # cell C: Jaguar-2 as beamformer + single-radio self-captur
     kill "$bfee_pid" "$sniff_pid" 2>/dev/null
     wait "$bfee_pid" "$sniff_pid" 2>/dev/null
     local self air
-    self=$(grep -c "<devourer-bf-report>" "$OUT/$name.gs.log")
-    air=$(grep -c "<devourer-bf-report>" "$OUT/$name.sniff.log")
+    self=$(grep -Fc '"ev":"bf.report"' "$OUT/$name.gs.log")
+    air=$(grep -Fc '"ev":"bf.report"' "$OUT/$name.sniff.log")
     echo "  self-captured reports: $self   sniffer cross-check: $air"
-    grep "<devourer-bf-report>" "$OUT/$name.gs.log" | head -2
+    grep -F '"ev":"bf.report"' "$OUT/$name.gs.log" | head -2
 }
 
 run_bfee_cell "unarmed" 0
@@ -144,9 +144,9 @@ run_sounder_cell
 
 echo
 echo "== verdict ($J2_VID:$J2_PID) =="
-echo "bfee direction — unarmed reports: $(grep '<devourer-bf-report>' "$OUT/unarmed.sniff.log" | grep -c "$BFEE_MAC")"
-echo "bfee direction — armed   reports: $(grep '<devourer-bf-report>' "$OUT/armed.sniff.log" | grep -c "$BFEE_MAC")"
+echo "bfee direction — unarmed reports: $(grep -F '"ev":"bf.report"' "$OUT/unarmed.sniff.log" | grep -c "$BFEE_MAC")"
+echo "bfee direction — armed   reports: $(grep -F '"ev":"bf.report"' "$OUT/armed.sniff.log" | grep -c "$BFEE_MAC")"
 [ "${RUN_MU:-0}" = 1 ] && \
-echo "bfee direction — armed MU reports: $(grep '<devourer-bf-report>' "$OUT/armed_mu.sniff.log" | grep -c "$BFEE_MAC")"
-echo "sounder direction — self-captured: $(grep -c '<devourer-bf-report>' "$OUT/sounder_gs.gs.log" 2>/dev/null)"
+echo "bfee direction — armed MU reports: $(grep -F '"ev":"bf.report"' "$OUT/armed_mu.sniff.log" | grep -c "$BFEE_MAC")"
+echo "sounder direction — self-captured: $(grep -Fc '"ev":"bf.report"' "$OUT/sounder_gs.gs.log" 2>/dev/null)"
 echo "(logs in $OUT)"

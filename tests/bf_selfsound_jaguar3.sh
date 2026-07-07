@@ -8,7 +8,7 @@
 #   8822C/E : beamformee   (shared recipe, kBfeeJaguar23) — the chip under test
 #   8814AU  : passive monitor sniffer, DEVOURER_BF_DETECT_REPORT=1
 #
-# PASS = <devourer-bf-report> with SA = the Jaguar-3 beamformee MAC
+# PASS = a "ev":"bf.report" event with sa = the Jaguar-3 beamformee MAC
 # (00:e0:4c:88:22:ce, programmed at arm time) only when armed.
 #
 # Usage: sudo tests/bf_selfsound_jaguar3.sh <bfee_pid>   (c812 | a81a)
@@ -70,9 +70,9 @@ run_cell() { # $1=name $2=arm(0|1)
     kill "$bfee_pid" "$sniff_pid" 2>/dev/null
     wait "$bfee_pid" "$sniff_pid" 2>/dev/null
     local n
-    n=$(grep -c "<devourer-bf-report>" "$OUT/$name.sniff.log")
+    n=$(grep -Fc '"ev":"bf.report"' "$OUT/$name.sniff.log")
     echo "  bf-report lines: $n"
-    grep "<devourer-bf-report>" "$OUT/$name.sniff.log" | grep "$BFEE_MAC" | head -2
+    grep -F '"ev":"bf.report"' "$OUT/$name.sniff.log" | grep "$BFEE_MAC" | head -2
 }
 
 run_cell "${tag}_unarmed" 0
@@ -81,6 +81,6 @@ run_cell "${tag}_armed" 1
 
 echo
 echo "== verdict ($BFEE_PID) =="
-echo "unarmed reports from bfee: $(grep '<devourer-bf-report>' "$OUT/${tag}_unarmed.sniff.log" | grep -c "$BFEE_MAC")"
-echo "armed   reports from bfee: $(grep '<devourer-bf-report>' "$OUT/${tag}_armed.sniff.log" | grep -c "$BFEE_MAC")"
+echo "unarmed reports from bfee: $(grep -F '"ev":"bf.report"' "$OUT/${tag}_unarmed.sniff.log" | grep -c "$BFEE_MAC")"
+echo "armed   reports from bfee: $(grep -F '"ev":"bf.report"' "$OUT/${tag}_armed.sniff.log" | grep -c "$BFEE_MAC")"
 echo "(logs in $OUT)"

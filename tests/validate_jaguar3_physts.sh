@@ -8,8 +8,8 @@
 #
 # Rig: one known-good TX adapter (default 8812AU) beacons the canonical SA
 # (57:42:75:05:d6:00) at HT MCS1 on ch6; each Jaguar3 RX adapter runs
-# rxdemo with DEVOURER_DUMP_BODY=1 and we assert the <devourer-body>
-# lines (canonical-SA hits) show non-zero rssi AND snr (and evm for MCS/HT).
+# rxdemo with DEVOURER_DUMP_BODY=1 and we assert the "ev":"rx.body"
+# events (canonical-SA hits) show non-zero rssi AND snr (and evm for MCS/HT).
 #
 #   sudo ./tests/validate_jaguar3_physts.sh
 #   TX_PID=0x8812 CH=6 RATE=MCS1 ./tests/validate_jaguar3_physts.sh
@@ -50,20 +50,20 @@ for pid in ${RX_PIDS[@]}; do
         DEVOURER_DUMP_BODY=1 \
         timeout "$SECS" "$ROOT/build/rxdemo" >"$log" 2>&1 || true
 
-    hits=$(grep -c "<devourer-tx-hit>" "$log" || true)
-    body=$(grep "<devourer-body>" "$log" || true)
-    echo "   tx-hits=$hits  body-lines=$(printf '%s\n' "$body" | grep -c body= || true)"
+    hits=$(grep -Fc '"ev":"rx.txhit"' "$log" || true)
+    body=$(grep -F '"ev":"rx.body"' "$log" || true)
+    echo "   tx-hits=$hits  body-lines=$(printf '%s\n' "$body" | grep -c '"body":' || true)"
     if [ -z "$body" ]; then
-        echo "   FAIL: no canonical-SA <devourer-body> frames decoded (link/TX?)"
+        echo "   FAIL: no canonical-SA rx.body frames decoded (link/TX?)"
         overall=1
         continue
     fi
-    printf '%s\n' "$body" | head -3 | sed 's/body=.*/body=.../; s/^/     /'
+    printf '%s\n' "$body" | head -3 | sed 's/"body":.*/"body":.../; s/^/     /'
 
     # Assert at least one body frame has non-zero rssi AND non-zero snr.
     ok=$(printf '%s\n' "$body" | awk '
-        match($0, /rssi=(-?[0-9]+),(-?[0-9]+)/, r) &&
-        match($0, /snr=(-?[0-9]+),(-?[0-9]+)/, s) {
+        match($0, /"rssi":\[(-?[0-9]+),(-?[0-9]+)/, r) &&
+        match($0, /"snr":\[(-?[0-9]+),(-?[0-9]+)/, s) {
             if ((r[1]+0 != 0 || r[2]+0 != 0) && (s[1]+0 != 0 || s[2]+0 != 0)) n++
         } END { print n+0 }')
     echo "   frames with non-zero rssi & snr: $ok"

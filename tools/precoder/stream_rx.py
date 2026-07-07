@@ -2,7 +2,7 @@
 """Stream RX driver — decodes stream frames out of rxdemo's stdout.
 
 Reads rxdemo's stdout on this process's stdin, picks up the
-`<devourer-stream>` lines emitted when DEVOURER_STREAM_OUT=1 is set, decodes
+`rx.frame` JSONL events emitted when DEVOURER_STREAM_OUT=1 is set, decodes
 each body via `stream.decode_body` (optionally with a shape constraint),
 re-orders by sequence number, and writes the decoded payload bytes to stdout.
 Gaps and duplicates are logged to stderr.
@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import sys
 import time
 from typing import Optional
@@ -38,19 +37,10 @@ from typing import Optional
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..", "tests")))
 
 import stream  # noqa: E402
-
-# Mirrors stream_tx.py's parser without re-importing it (kept side-effect free).
-_STREAM_RE = re.compile(
-    r"<devourer-stream>rate=(?P<rate>\d+)\s+len=(?P<len>\d+)"
-    r"(?:\s+crc_err=(?P<crc_err>\d+))?"
-    r"(?:\s+icv_err=(?P<icv_err>\d+))?"
-    r"(?:\s+rssi=(?P<rssi>-?\d+,-?\d+))?"
-    r"(?:\s+evm=(?P<evm>-?\d+,-?\d+))?"
-    r"(?:\s+snr=(?P<snr>-?\d+,-?\d+))?"
-    r"\s+body=(?P<hex>[0-9a-fA-F]*)"
-)
+from devourer_events import parse_event  # noqa: E402
 
 
 def parse_shape_env(s: str) -> Optional[dict]:
@@ -129,16 +119,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     out_bytes = sys.stdout.buffer
 
     for line in sys.stdin:
-        m = _STREAM_RE.search(line)
-        if not m:
+        ev = parse_event(line, ev="rx.frame")
+        if ev is None:
             continue
-        rate = int(m.group("rate"))
+        rate = int(ev["rate"])
         if rate != 0x04:
             # Tier-1 sanity: every shaped frame must fly as legacy 6M OFDM. A
             # 0x00 here means the chip downgraded us to 1M CCK and OFDM
             # subcarriers don't exist at all (see precoder README).
             rate_mismatch += 1
-        body = bytes.fromhex(m.group("hex"))
+        body = bytes.fromhex(ev.get("body") or "")
         last_event = time.monotonic()
 
         frame = stream.decode_body(

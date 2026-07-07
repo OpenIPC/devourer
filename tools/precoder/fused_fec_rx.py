@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fused-FEC RX driver — <devourer-stream> → SBI salvage → RS decode.
+"""Fused-FEC RX driver — `rx.frame` events → SBI salvage → RS decode.
 
 Reads rxdemo's stdout (run it with DEVOURER_STREAM_OUT=1 AND
 DEVOURER_RX_KEEP_CORRUPTED=1 so FCS-failed bodies are surfaced), salvages each
@@ -15,23 +15,18 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import sys
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..", "tests")))
 
 from fused_fec_link import FusedFecReceiver  # noqa: E402
 from fused_fec_tx import add_fec_args  # noqa: E402  (shared FEC arg set)
 from stream_fec import FecConfig  # noqa: E402
-
-_STREAM_RE = re.compile(
-    r"<devourer-stream>rate=(?P<rate>\d+)\s+len=(?P<len>\d+)"
-    r"(?:\s+crc_err=(?P<crc_err>\d+))?"
-    r"(?:\s+icv_err=(?P<icv_err>\d+))?"
-    r".*?\s+body=(?P<hex>[0-9a-fA-F]*)")
+from devourer_events import parse_event  # noqa: E402
 
 
 def main(argv=None) -> int:
@@ -49,14 +44,13 @@ def main(argv=None) -> int:
     out = sys.stdout.buffer
     last = time.monotonic()
     for line in sys.stdin:
-        m = _STREAM_RE.search(line)
-        if not m:
+        ev = parse_event(line, ev="rx.frame")
+        if ev is None:
             if args.idle_timeout and (time.monotonic() - last) > args.idle_timeout:
                 break
             continue
-        body = bytes.fromhex(m.group("hex"))
-        crc_err = bool(int(m.group("crc_err") or 0)) or \
-            bool(int(m.group("icv_err") or 0))
+        body = bytes.fromhex(ev.get("body") or "")
+        crc_err = bool(ev.get("crc") or 0) or bool(ev.get("icv") or 0)
         for pkt in rcv.add_frame(body, crc_err):
             out.write(pkt)
         out.flush()

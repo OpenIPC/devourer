@@ -370,7 +370,7 @@ void Iqk8812a::DoTxRxCalibration(uint8_t chnl_idx, BandType band) {
     }
   }
 
-  _logger->debug("Iqk8812a TX: A_done={} B_done={} A_retry={} B_retry={}",
+  DVR_DEBUG(_logger, "Iqk8812a TX: A_done={} B_done={} A_retry={} B_retry={}",
                  unsigned(TX0_finish), unsigned(TX1_finish),
                  unsigned(cal0_retry), unsigned(cal1_retry));
 
@@ -574,7 +574,7 @@ void Iqk8812a::DoTxRxCalibration(uint8_t chnl_idx, BandType band) {
     }
   }
 
-  _logger->debug("Iqk8812a RX: A_done={} B_done={} A_retry={} B_retry={}",
+  DVR_DEBUG(_logger, "Iqk8812a RX: A_done={} B_done={} A_retry={} B_retry={}",
                  unsigned(RX0_finish), unsigned(RX1_finish),
                  unsigned(cal0_retry), unsigned(cal1_retry));
 

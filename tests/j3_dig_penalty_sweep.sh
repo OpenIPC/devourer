@@ -9,9 +9,9 @@
 # Same marginal TX beacon (8812AU, TX power dialled low via the runtime knob so
 # the noise sweep actually reaches a delivery cliff), same noise ladder.
 #
-# Per (chip, noise-gain) cell: delivery = the final <devourer-tx-hit>hits=N
+# Per (chip, noise-gain) cell: delivery = the final "ev":"rx.txhit" "hits":N
 # (canonical-SA beacons the RX decoded), plus the median IGI + false-alarm rate
-# from <devourer-energy> (DEVOURER_RX_ENERGY_MS). The story is in two numbers:
+# from "ev":"rx.energy" (DEVOURER_RX_ENERGY_MS). The story is in two numbers:
 #   - does the J3's IGI stay pinned while its FA climbs (confirming no DIG)?
 #   - is the J3's 50%-delivery noise-gain WORSE than the J2's (the penalty DIG
 #     would recover)?
@@ -79,20 +79,22 @@ run_cell() { # $1=rx_pid $2=rx_vid $3=gain $4=tag
     sudo -n pkill -f sdr_interferer 2>/dev/null
     sleep 3
     python3 - "$OUT/$tag.log" <<'PYEOF'
-import re, statistics, sys
-log = open(sys.argv[1], errors="replace").read()
+import json, statistics, sys
 hits = 0
-for m in re.finditer(r"<devourer-tx-hit>.*hits=(\d+)", log):
-    hits = max(hits, int(m.group(1)))
 igis, fas = [], []
-for m in re.finditer(r"<devourer-energy>.*", log):
-    s = m.group(0)
-    gi = re.search(r"\bigi=(-?\d+)", s)
-    fo = re.search(r"\bfa_ofdm=(-?\d+|-)", s)
-    if gi and gi.group(1) != "-":
-        igis.append(int(gi.group(1)))
-    if fo and fo.group(1) not in ("-",):
-        fas.append(int(fo.group(1)))
+for line in open(sys.argv[1], errors="replace"):
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        continue
+    name = ev.get("ev")
+    if name == "rx.txhit":
+        hits = max(hits, int(ev.get("hits", 0)))
+    elif name == "rx.energy":
+        if ev.get("igi") is not None:
+            igis.append(int(ev["igi"]))
+        if ev.get("fa_ofdm") is not None:
+            fas.append(int(ev["fa_ofdm"]))
 im = int(statistics.median(igis)) if igis else -1
 fm = int(statistics.median(fas)) if fas else -1
 # IGI spread: does it move at all across the cell? (max-min)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # TX validation (functional): does the RTL8821C (CF-811AC) TRANSMIT on air?
 # Inject the canonical txdemo beacon FROM the 8821C and receive on the known-good
-# Jaguar-1 8821AU (2357:0120); each <devourer-tx-hit> on the RX side proves an
+# Jaguar-1 8821AU (2357:0120); each rx.txhit event on the RX side proves an
 # 8821C-transmitted frame flew over the air. Restores kernel drivers on exit.
 #
 # Usage: sudo tests/jaguar2_8821c_tx_txhit.sh [channel] [seconds]
@@ -45,8 +45,8 @@ DEVOURER_VID=$RX_VID DEVOURER_PID=$RX_PID DEVOURER_CHANNEL=$CH \
 echo "--- TX side (8821C) ---"
 grep -iE "ready for TX|Creating|LCK|channel set|error|throw" /tmp/8821c-txside.log | head -5
 echo "--- RX side (8821AU) ---"
-HITS=$(grep -c "<devourer-tx-hit>" "$RXLOG")
-grep -E "<devourer-tx-hit>" "$RXLOG" | head -3
+HITS=$(grep -cF '"ev":"rx.txhit"' "$RXLOG")
+grep -F '"ev":"rx.txhit"' "$RXLOG" | head -3
 echo "$(grep -oE "RX loop exited \([0-9]+ frames, [0-9]+ reads" "$RXLOG" | head -1)"
 echo "--- 8821C-TX tx-hits: $HITS ---"
 if [ "$HITS" -ge 1 ]; then

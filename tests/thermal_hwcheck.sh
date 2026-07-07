@@ -2,9 +2,10 @@
 # Hardware smoke-test for the thermal monitor probe.
 #
 # Runs txdemo against each plugged Jaguar adapter for a few seconds
-# with DEVOURER_THERMAL_POLL_MS enabled, and prints the <devourer-thermal>
-# lines it emits. Read-only w.r.t. the probe — this just confirms the thermal
-# meter reads back a live, plausible value per chip.
+# with DEVOURER_THERMAL_POLL_MS enabled, and prints the thermal event
+# lines it emits ({"ev":"thermal",...} on stdout). Read-only w.r.t. the
+# probe — this just confirms the thermal meter reads back a live,
+# plausible value per chip.
 #
 # Usage: sudo tests/thermal_hwcheck.sh
 set -u
@@ -67,10 +68,12 @@ run_one() {
   CHILD_PID=""
 
   echo "--- thermal monitor lines ---"
-  grep -E "<devourer-thermal>|thermal:|ThermalMeter|thermal monitor on" "$log" | head -20
+  # thermal events land on stdout; the human diagnostics (devourer [I]/[W]
+  # "thermal: ...") on stderr — the log captures both (2>&1).
+  grep -E '"ev":"thermal"|thermal:|ThermalMeter|thermal monitor on' "$log" | head -20
   local n
-  n="$(grep -c "<devourer-thermal>" "$log")"
-  echo "--- ($n <devourer-thermal> lines total) ---"
+  n="$(grep -c -F '"ev":"thermal"' "$log")"
+  echo "--- ($n thermal event lines total) ---"
   if [[ "$n" -eq 0 ]]; then
     echo "    no thermal lines — tail of log for context:"
     tail -15 "$log" | sed 's/^/    /'

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Render a coarse RX spectrum map from a live DEVOURER_RX_SWEEP log.
 
-Parses the `<devourer-energy>ch=N ...` lines the sensor emits (one per dwell),
+Parses the `rx.energy` events (with a `ch` field) the sensor emits (one per
+dwell),
 aggregates the frame-free CCA-OFDM energy per channel across sweep rounds, and
 draws an ASCII energy-vs-frequency bar chart. Flags the peak bin (a spike
 interferer) and, when the floor is clearly non-zero, the deepest dip (a 1T1R
@@ -12,36 +13,23 @@ the resolution is the channel grid — 20 MHz on the 2.4/5 GHz plan, ~5 MHz on
 Jaguar3 with --nb-bw 5.
 """
 import argparse
-import re
 import statistics
 import sys
 
-LINE = re.compile(r"<devourer-energy>(.*)")
-KV = re.compile(r"(\w+)=(\S+)")
+from devourer_events import iter_events
 
 
 def parse(path):
     """channel -> list of cca_ofdm samples (ints), in file order."""
     per_ch = {}
     with open(path) as f:
-        for raw in f:
-            m = LINE.search(raw)
-            if not m:
+        for ev in iter_events(f, ev="rx.energy"):
+            if "ch" not in ev or ev["ch"] is None:
                 continue
-            kv = dict(KV.findall(m.group(1)))
-            if "ch" not in kv:
+            v = ev.get("cca_ofdm")
+            if v is None:
                 continue
-            try:
-                ch = int(kv["ch"])
-            except ValueError:
-                continue
-            v = kv.get("cca_ofdm", "-")
-            if v == "-":
-                continue
-            try:
-                per_ch.setdefault(ch, []).append(int(v))
-            except ValueError:
-                pass
+            per_ch.setdefault(int(ev["ch"]), []).append(int(v))
     return per_ch
 
 
@@ -53,7 +41,7 @@ def main():
 
     per_ch = parse(args.log)
     if not per_ch:
-        print("no <devourer-energy>ch= samples in log", file=sys.stderr)
+        print("no rx.energy samples with ch= in log", file=sys.stderr)
         return 1
 
     chans = sorted(per_ch)

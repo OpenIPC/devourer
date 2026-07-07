@@ -1,6 +1,6 @@
 /* Headless guard for the RxQuality accumulator + build_rx_quality fuse
  * (src/RxQuality.h) — the windowed RX-link-quality feed behind
- * <devourer-rxquality> / IRtlDevice::GetRxQuality(). Verifies the aggregate
+ * rx.quality event / IRtlDevice::GetRxQuality(). Verifies the aggregate
  * math (mean/max/min, EVM present-gate), the PASSIVE noise-floor formula
  * (nf_dbm = (rssi_raw-110) - snr_raw/2), the unit conversions, and that the
  * fused verdict matches classify_link_health. A regression fails ctest instead

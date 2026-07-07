@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Coarse H(f) map from a two-ended sounding sweep (issue #149).
 
-Parses the RX side's per-dwell `<devourer-energy>ch=N ... frames=N
-rssi_mean=.. rssi_max=.. snr_mean=.. evm_mean=..` lines (rxdemo with
+Parses the RX side's per-dwell `rx.energy` events (with `ch`, `frames`,
+`rssi_mean`, `rssi_max`, `snr_mean`, `evm_mean` fields; rxdemo with
 DEVOURER_RX_SWEEP + DEVOURER_RX_AGG_SA=canon, driven by tests/sounding_sweep.sh)
 and renders the recovered per-bin link map.
 
@@ -26,11 +26,10 @@ orchestrator's helper; mirrors src/SweepSpec.h).
 from __future__ import annotations
 
 import argparse
-import re
 import statistics
 import sys
 
-KV = re.compile(r"(\w+)=(-?\d+)")
+from devourer_events import iter_events
 
 
 def expand_spec(spec: str) -> list[int]:
@@ -117,7 +116,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--log", help="RX sweep log (<devourer-energy>ch= lines)")
+    ap.add_argument("--log", help="RX sweep log (rx.energy events with ch=)")
     ap.add_argument("--expand", metavar="SPEC",
                     help="print the channel list for a SweepSpec and exit")
     ap.add_argument("--notch-db", type=float, default=6.0,
@@ -138,18 +137,17 @@ def main() -> int:
     # Per-bin dwell records; the first dwell per bin is dropped (partial dwell
     # while the loops phase-align + AGC settle — same convention as
     # rx_spectrum_sweep.py).
-    dwells: dict[int, list[dict[str, int]]] = {}
-    for line in open(args.log, errors="replace"):
-        if "<devourer-energy>" not in line or "ch=" not in line:
-            continue
-        kv = {k: int(v) for k, v in KV.findall(line)}
+    dwells: dict[int, list[dict[str, float]]] = {}
+    for ev in iter_events(open(args.log, errors="replace"), ev="rx.energy"):
+        # keep the numeric fields only (drop the ev name and any null sensors)
+        kv = {k: v for k, v in ev.items() if isinstance(v, (int, float))}
         if "ch" not in kv or "frames" not in kv:
-            continue  # no per-dwell frame stats (older binary) or steady-state emitter
-        dwells.setdefault(kv["ch"], []).append(kv)
+            continue  # no sweep bin / per-dwell frame stats (steady-state emitter)
+        dwells.setdefault(int(kv["ch"]), []).append(kv)
     dwells = {ch: d[1:] if len(d) > 1 else d for ch, d in dwells.items()}
     if not dwells:
-        print("no sounding samples in log (need ch= lines with frames=)",
-              file=sys.stderr)
+        print("no sounding samples in log (need rx.energy events with ch and "
+              "frames)", file=sys.stderr)
         return 1
 
     rows = []

@@ -21,6 +21,16 @@
 #include <memory>
 #include <optional>
 
+#ifdef _WIN32
+/* The hal headers below lean on Windows types (BOOLEAN/VOID in rtw_efuse.h)
+ * and #define identifiers winuser.h uses as parameter names (bEnable in
+ * Hal8812PhyReg.h) — windows.h must be included BEFORE them, project-wide.
+ * The pre-seam RtlUsbAdapter.h guaranteed this implicitly by including
+ * libusb.h (-> windows.h) first; with libusb gone from this header, make the
+ * dependency explicit. */
+#include <windows.h>
+#endif
+
 #include "DeviceConfig.h"
 #include "RtlTransport.h"
 #include "TxStats.h"

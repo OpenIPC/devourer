@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "AdapterHealth.h"
 #include "logger.h"
 #include "RtlUsbAdapter.h"
 #include "ChipVariant.h"
@@ -28,6 +29,13 @@ public:
 
   bool download_firmware(const uint8_t *fw_bin, size_t size);
   bool download_default_firmware(); /* bundled per-variant NIC image */
+
+  /* Outcome of the last download_firmware attempt, recorded at the real
+   * hardware boundaries (see src/AdapterHealth.h): checksum_ok = the IMEM/DMEM
+   * checksum-ready bits (MCUFW_CTRL & 0x50), ready_ok = the FW-boot handshake
+   * (MCUFW_CTRL == 0xC078). Distinguishes a transport/checksum failure from a
+   * downloaded-but-never-booted MCU — the dying-adapter signature. */
+  const devourer::FwBootStatus &boot_status() const { return _boot; }
 
   /* The reserved-page boundary FIFOPAGE_CTRL_2 is restored to after each
    * rsvd-page chunk (from the queue/page allocation). Set by MacInit before
@@ -69,6 +77,7 @@ private:
   RtlUsbAdapter _device;
   Logger_t _logger;
   ChipVariant _variant;
+  devourer::FwBootStatus _boot; /* last download_firmware outcome */
   /* Per-chunk DLFW size. The vendor 8822B driver downloads in 4096-byte chunks
    * (4144-byte bulk-OUT incl. the 48-byte TX desc); this fits the HIQ page
    * space allocated by init_trx_cfg (64 pages) with margin. DLFW_PKT_MAX_SIZE is

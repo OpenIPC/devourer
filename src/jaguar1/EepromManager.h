@@ -54,6 +54,13 @@ public:
    * fwdl times out). Safe to call once fw is running. */
   void LateInitFor8814A();
 
+  /* One fresh PHYSICAL logical-map read into `map` (health probing — see
+   * src/AdapterHealth.h). Re-runs the efuse power-switch + controller read
+   * sequence; does NOT touch the cached shadow this manager parsed at
+   * construction. `len` must be EFUSE_MAP_LEN_JAGUAR. Post-bring-up only
+   * (8814AU: post-fwdl only, same constraint as LateInitFor8814A). */
+  bool ReadPhysicalEfuseMap(uint8_t *map, size_t len);
+
   /* Build the minimal phydm-context shim PhyTableLoader needs to evaluate
    * card-cut conditionals on the 8814AU BB/AGC/MAC tables. The fields are
    * populated from EFUSE values already read into this manager. */

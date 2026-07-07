@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 
+#include "AdapterHealth.h"
 #include "RxQuality.h"
 #include "RxSense.h"
 #include "SelectedChannel.h"
@@ -175,6 +176,26 @@ public:
    * poll GetRxEnergy separately on the same cadence). Default is an all-invalid
    * snapshot; each generation overrides. */
   virtual devourer::RxQuality GetRxQuality() { return {}; }
+
+  /* --- Adapter-health probes (see src/AdapterHealth.h; examples/doctor is
+   * the reference consumer) --- */
+
+  /* Perform `reads` fresh PHYSICAL EFUSE logical-map reads (each pass re-runs
+   * the efuse-controller read sequence — not the cached shadow) and
+   * cross-compare them. Dying silicon returns different content per read;
+   * healthy silicon is byte-identical every time. Post-bring-up only: returns
+   * supported=false before Init/InitWrite (on the 8814AU a pre-fwdl EFUSE
+   * read breaks the RSVD-page firmware download). Control-plane threading
+   * contract applies (same as SetMonitorChannel). */
+  virtual devourer::EfuseStability ProbeEfuseStability(int reads = 4) {
+    (void)reads;
+    return {};
+  }
+
+  /* Outcome of the most recent firmware download (populated during
+   * Init/InitWrite). On Jaguar1 a failed FW boot does not abort bring-up —
+   * this is the only place the failure is visible to a caller. */
+  virtual devourer::FwBootStatus GetFwBootStatus() { return {}; }
 };
 
 #endif /* IRTL_DEVICE_H */

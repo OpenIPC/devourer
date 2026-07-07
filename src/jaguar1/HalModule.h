@@ -1,6 +1,7 @@
 #ifndef HALMODULE_H
 #define HALMODULE_H
 
+#include "AdapterHealth.h"
 #include "EepromManager.h"
 extern "C"{
 #include "Hal8812PwrSeq.h"
@@ -56,12 +57,16 @@ class HalModule {
   /* Phydm DM watchdog. Lazily constructed in `rtw_hal_init` after
    * `RadioManagementModule` is fully wired up. */
   std::unique_ptr<PhydmWatchdog> _phydmWatchdog;
+  /* Outcome of the fw download run by the last rtw_hal_init (the
+   * FirmwareManager is a hal-init local; its status is copied out here). */
+  devourer::FwBootStatus _fwBoot;
 
 public:
   HalModule(RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
             std::shared_ptr<RadioManagementModule> _radioManagementModule,
             Logger_t logger, const devourer::DeviceConfig &cfg = {});
   bool rtw_hal_init(SelectedChannel selectedChannel);
+  const devourer::FwBootStatus &GetFwBootStatus() const { return _fwBoot; }
 
 private:
   bool rtl8812au_hal_init(uint8_t init_channel);

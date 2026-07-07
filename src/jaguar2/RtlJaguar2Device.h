@@ -128,6 +128,18 @@ public:
     return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy());
   }
 
+  /* Adapter-health probes (see src/AdapterHealth.h). EFUSE probe re-reads the
+   * physical logical map N times (~0.5 s per pass over USB control transfers)
+   * and cross-compares; post-bring-up only. FW status comes from the DLFW
+   * state machine's real hardware boundaries (HalmacJaguar2Fw::boot_status:
+   * checksum-ready bits vs the 0xC078 boot handshake) — on Jaguar2 a FW
+   * failure additionally aborts bring_up (throws after retries), but the
+   * status still tells WHICH stage died. */
+  devourer::EfuseStability ProbeEfuseStability(int reads) override;
+  devourer::FwBootStatus GetFwBootStatus() override {
+    return _fw.boot_status();
+  }
+
 private:
   RtlUsbAdapter _device;
   const devourer::DeviceConfig _cfg;

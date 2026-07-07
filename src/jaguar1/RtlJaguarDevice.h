@@ -169,6 +169,15 @@ public:
     return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy());
   }
 
+  /* Adapter-health probes (see src/AdapterHealth.h). The EFUSE probe re-runs
+   * the physical map read N times and cross-compares — post-bring-up only
+   * (guarded on _brought_up; on the 8814AU a pre-fwdl EFUSE read breaks the
+   * RSVD-page fwdl transport). */
+  devourer::EfuseStability ProbeEfuseStability(int reads) override;
+  devourer::FwBootStatus GetFwBootStatus() override {
+    return _halModule.GetFwBootStatus();
+  }
+
   /* Runtime TX-mode default. send_packet honours a frame's own radiotap rate
    * fields per-packet; when a frame's radiotap carries no rate, this mode
    * supplies the modulation / MCS / BW / GI / FEC / STBC instead of the

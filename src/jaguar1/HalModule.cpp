@@ -187,6 +187,7 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
 
   auto fwManager = std::make_unique<FirmwareManager>(_device, _logger, _cfg);
   fwManager->FirmwareDownload(_eepromManager->version_id.ICType);
+  _fwBoot = fwManager->GetBootStatus();
   timer.stage("fwdl");
 
   /* 8814AU: now that fw is running, the chip will accept EFUSE reads

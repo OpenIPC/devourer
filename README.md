@@ -166,6 +166,9 @@ one `IRtlDevice` interface covers all three generations.
   works and what it costs on each chip.
 - [Startup time](docs/startup-time.md) — devourer vs. kernel driver,
   measured on every supported chip.
+- [Adapter doctor](docs/adapter-doctor.md) — dying-dongle triage: EFUSE
+  read-stability, firmware-boot and RX-smoke probes with a
+  HEALTHY / SUSPECT / FAILING verdict.
 - [Spectrum sensing](docs/rx-spectrum-sensing.md),
   [spatial diversity](docs/measuring-spatial-diversity.md),
   [bench testing near-field](docs/bench-testing-near-field.md) — measurement

@@ -648,6 +648,22 @@ devourer::TxCaps RtlJaguar2Device::GetTxCaps() {
   return devourer::tx_caps_for_chains(chains);
 }
 
+devourer::EfuseStability RtlJaguar2Device::ProbeEfuseStability(int reads) {
+  if (!_brought_up)
+    return {}; /* supported=false — the efuse read needs a powered chip */
+  constexpr uint16_t kMapLen = 0x200;
+  auto st = devourer::ProbeEfuseStabilityImpl(
+      [this](uint8_t *buf) {
+        _hal.read_efuse_logical_map(buf, kMapLen, /*dump=*/false);
+        return true;
+      },
+      kMapLen, reads);
+  _logger->info(
+      "efuse-stability: reads={} mismatched={} invalid_id={} id=0x{:04x}",
+      st.reads, st.mismatched_reads, st.invalid_id_reads, st.eeprom_id);
+  return st;
+}
+
 devourer::ThermalStatus RtlJaguar2Device::GetThermalStatus() {
   devourer::ThermalStatus t;
   if (!_brought_up)

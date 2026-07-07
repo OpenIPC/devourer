@@ -371,6 +371,7 @@ bool HalmacJaguar2Fw::dlfw_end_flow() {
                    fw_ctrl);
     return false;
   }
+  _boot.checksum_ok = true;
   w16(REG_MCUFW_CTRL,
       static_cast<uint16_t>((fw_ctrl | BIT_FW_DW_RDY) & ~0x1));
 
@@ -388,11 +389,16 @@ bool HalmacJaguar2Fw::dlfw_end_flow() {
     cnt--;
     delay_us(50);
   }
+  _boot.ready_ok = true;
   _logger->info("Jaguar2 DLFW: FW ready (0x80 = 0xC078)");
   return true;
 }
 
 bool HalmacJaguar2Fw::download_firmware(const uint8_t *fw_bin, size_t size) {
+  _boot = {};
+  _boot.supported = true;
+  _boot.attempted = true;
+
   if (!chk_fw_size(fw_bin, size))
     return false;
 

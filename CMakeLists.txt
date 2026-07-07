@@ -307,6 +307,17 @@ add_executable(sense
 target_link_libraries(sense PUBLIC devourer PRIVATE PkgConfig::libusb)
 target_include_directories(sense PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
+# doctor — adapter health triage (src/AdapterHealth.h): EFUSE read-stability
+# probe + firmware-boot outcome + RX smoke, classified into
+# HEALTHY / SUSPECT / FAILING with reasons. Detects dying dongles that
+# enumerate and init green but read stochastic EFUSE garbage / never boot the
+# MCU (the #205 failure mode). Pure CLI; exit code carries the verdict. See
+# docs/adapter-doctor.md.
+add_executable(doctor
+    examples/doctor/main.cpp
+)
+target_link_libraries(doctor PUBLIC devourer PRIVATE PkgConfig::libusb)
+
 # Headless regression guard for the binary-stdin framing shared by the two
 # stream demos above (examples/common/stream_stdin.h). No libusb, no radio — just the
 # set_stdin_binary() + read_exact() path, so a text-mode regression (e.g. the
@@ -367,6 +378,18 @@ add_executable(LinkHealthSelftest
 target_link_libraries(LinkHealthSelftest PRIVATE devourer)
 
 add_test(NAME link_health_classify COMMAND LinkHealthSelftest)
+
+# Headless guard for the adapter-health classifier + EFUSE-stability probe
+# loop (src/AdapterHealth.h) — the verdict mapping behind examples/doctor,
+# with cases encoding the verdicts measured on a real dying unit vs its
+# healthy twin (#205). A misgrade fails `ctest` instead of only surfacing as
+# a wrong retire-or-keep call.
+add_executable(AdapterHealthSelftest
+    tests/adapter_health_selftest.cpp
+)
+target_link_libraries(AdapterHealthSelftest PRIVATE devourer)
+
+add_test(NAME adapter_health_classify COMMAND AdapterHealthSelftest)
 
 # Headless guard for the RX link-quality feed (src/RxQuality.h) — the aggregate
 # math + passive noise-floor formula + verdict fuse behind GetRxQuality().

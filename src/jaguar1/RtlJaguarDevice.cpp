@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -902,6 +903,20 @@ void RtlJaguarDevice::ClearTxMode() { _tx_mode_default.reset(); }
 
 uint32_t RtlJaguarDevice::ReadBBReg(uint16_t addr, uint32_t mask) {
   return _radioManagement->phy_query_bb_reg_public(addr, mask);
+}
+
+devourer::EfuseStability RtlJaguarDevice::ProbeEfuseStability(int reads) {
+  if (!_brought_up)
+    return {}; /* supported=false — needs a powered, brought-up chip */
+  auto st = devourer::ProbeEfuseStabilityImpl(
+      [this](uint8_t *buf) {
+        return _eepromManager->ReadPhysicalEfuseMap(buf, EFUSE_MAP_LEN_JAGUAR);
+      },
+      EFUSE_MAP_LEN_JAGUAR, reads);
+  _logger->info(
+      "efuse-stability: reads={} mismatched={} invalid_id={} id=0x{:04x}",
+      st.reads, st.mismatched_reads, st.invalid_id_reads, st.eeprom_id);
+  return st;
 }
 
 bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {

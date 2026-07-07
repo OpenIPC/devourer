@@ -887,6 +887,22 @@ devourer::TxCaps RtlJaguar3Device::GetTxCaps() {
   return devourer::tx_caps_for_chains(2); /* 8822C/8822E are 2T2R */
 }
 
+devourer::EfuseStability RtlJaguar3Device::ProbeEfuseStability(int reads) {
+  if (!_brought_up)
+    return {}; /* supported=false — the efuse read needs a powered chip */
+  std::lock_guard<std::mutex> lk(_reg_mu); /* serialize vs the coex tick */
+  constexpr uint16_t kMapLen = 0x100;      /* sizeof(HalJaguar3::_efuse_cache) */
+  auto st = devourer::ProbeEfuseStabilityImpl(
+      [this](uint8_t *buf) { return _hal.probe_efuse_map(buf, kMapLen); },
+      kMapLen, reads);
+  if (st.reads == 0)
+    return {}; /* 8822E: probe refused (OTP unreliable post-bring-up) */
+  _logger->info(
+      "efuse-stability: reads={} mismatched={} invalid_id={} id=0x{:04x}",
+      st.reads, st.mismatched_reads, st.invalid_id_reads, st.eeprom_id);
+  return st;
+}
+
 devourer::TxPowerState RtlJaguar3Device::GetTxPowerState() {
   devourer::TxPowerState s;
   s.valid = true;

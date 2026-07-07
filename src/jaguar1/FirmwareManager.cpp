@@ -71,6 +71,10 @@ static bool jaguar_fw_header_present(const uint8_t *buf, HAL_IC_TYPE_E ic_type) 
 }
 
 void FirmwareManager::FirmwareDownload(HAL_IC_TYPE_E ic_type) {
+  _boot = {};
+  _boot.supported = true;
+  _boot.attempted = true;
+
   if (ic_type == CHIP_8814A) {
     /* 8814AU uses an entirely different firmware transport (TX-FIFO reserved
      * page + internal DMA controller) than 8812. Hand off to the 8814 path.
@@ -137,11 +141,13 @@ void FirmwareManager::FirmwareDownload(HAL_IC_TYPE_E ic_type) {
   }
 
   _FWDownloadEnable_8812(false);
+  _boot.checksum_ok = (rtStatus == true);
   if (true != rtStatus) {
     return;
   }
 
   rtStatus = _FWFreeToGo8812(10, 200, ic_type);
+  _boot.ready_ok = (rtStatus == true);
   if (true != rtStatus) {
     return;
   }
@@ -641,6 +647,8 @@ void FirmwareManager::_Fwdl8814_Rtw88Path(const uint8_t *fw,
         _device.rtw_read32(REG_MCUFWDL));
     return;
   }
+  _boot.checksum_ok = true;
+  _boot.ready_ok = true;
 
   InitializeFirmwareVars8812();
 }
@@ -828,6 +836,8 @@ void FirmwareManager::_Fwdl8814_KernelPath(const uint8_t *fw,
   _logger->info("8814A firmware boot confirmed: CPU_DL_READY asserted "
                 "(REG_MCUFWDL=0x{:08X})",
                 _device.rtw_read32(REG_MCUFWDL));
+  _boot.checksum_ok = true;
+  _boot.ready_ok = true;
 
   InitializeFirmwareVars8812();
 }

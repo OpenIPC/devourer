@@ -1298,6 +1298,13 @@ void EepromManager::Efuse_ReadAllMap(uint8_t efuseType, uint8_t *Efuse) {
   EfusePowerSwitch8812A(false, false);
 }
 
+bool EepromManager::ReadPhysicalEfuseMap(uint8_t *map, size_t len) {
+  if (map == nullptr || len != EFUSE_MAP_LEN_JAGUAR)
+    return false;
+  Efuse_ReadAllMap(EFUSE_WIFI, map);
+  return true;
+}
+
 enum {
   VOLTAGE_V25 = 0x03,
   LDOE25_SHIFT = 28,

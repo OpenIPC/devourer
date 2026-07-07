@@ -3,6 +3,7 @@
 
 #include <memory>
 
+#include "AdapterHealth.h"
 #include "logger.h"
 #include "RtlUsbAdapter.h"
 #include "SelectedChannel.h"
@@ -69,6 +70,21 @@ public:
     bool test_chip = false;
   };
   ChipVersion chip_version() const { return _ver; }
+
+  /* One fresh PHYSICAL logical-map read for health probing (see
+   * src/AdapterHealth.h) — same holding-region window the rtw_hal_init cache
+   * read uses; bypasses _efuse_cache. `len` must be sizeof(_efuse_cache).
+   * Post-bring-up only, and 8822C ONLY: the 8822E's OTP is not reliably
+   * readable after TX/coex bring-up by design (see cache_efuse_8822e) — a
+   * stability probe there would flag healthy units. Returns false on 8822E. */
+  bool probe_efuse_map(uint8_t *map, size_t len);
+
+  /* Outcome of the fw download run by the last rtw_hal_init — forwarded from
+   * the DLFW state machine's real hardware boundaries (checksum-ready bits vs
+   * the 0xC078 boot handshake; see HalmacJaguar3Fw::boot_status). */
+  const devourer::FwBootStatus &fw_boot_status() const {
+    return _fw.boot_status();
+  }
 
 private:
   void power_off();           /* card-disable PWR_SEQ — reset from active state */

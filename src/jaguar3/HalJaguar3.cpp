@@ -597,6 +597,17 @@ void HalJaguar3::config_pa_bias_8822e() {
  * fills 0xFF for gaps). Standard Realtek section format: header (or header+ext)
  * gives a logical block offset + 4-bit word-enable; each enabled 2-byte word
  * follows. */
+bool HalJaguar3::probe_efuse_map(uint8_t *map, size_t len) {
+  /* 8822E OTP reads are not reliable after TX/coex bring-up (by design — see
+   * cache_efuse_8822e); probing there would flag healthy units. 8822C only. */
+  if (_variant != ChipVariant::C8822C)
+    return false;
+  if (map == nullptr || len != sizeof(_efuse_cache))
+    return false;
+  read_efuse_logical_map(map, len, 0xFA);
+  return true;
+}
+
 void HalJaguar3::read_efuse_logical_map(uint8_t *map, size_t len, uint16_t upto) {
   constexpr uint16_t kPhysMax = 1024; /* EFUSE_REAL_CONTENT_LEN_8822C */
   for (size_t i = 0; i < len; ++i) map[i] = 0xFF;

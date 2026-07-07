@@ -94,6 +94,17 @@ receiver decodes weak frames and masks a real drop. Keep a known-good control
 adapter, re-check it each session, and take one clean SDR read per session (a
 second back-to-back `sdr_duty` read can fail to reacquire and report ~0).
 
+Suspect a DUT itself (deaf with a green init, chronic FW-boot fails):
+`build/doctor` grades adapter health — EFUSE read-stability ×N, fw-boot,
+RX smoke → HEALTHY/SUSPECT/FAILING in the exit code;
+`tests/adapter_doctor_cold.sh` wraps it in per-rep VBUS cold + a vouched
+flood for a definitive verdict (`docs/adapter-doctor.md`). Two cold-init
+traps it encodes: the in-tree rtw88 modules auto-probe (and fw-download
+into) every Realtek dongle at each enumeration — `modprobe -r` does NOT
+survive re-enumeration, temp-blacklist instead; and `authorized`-toggle
+"cold" leaves chip state (real VBUS cold via `REGRESS_VBUS_MAP` /
+uhubctl — never on xhci root ports on this rig).
+
 ## Configuration
 
 **The library reads no environment.** Construction-time knobs live in

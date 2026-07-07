@@ -1,6 +1,7 @@
 #ifndef FIRMWAREMANAGER_H
 #define FIRMWAREMANAGER_H
 
+#include "AdapterHealth.h"
 #include "HalVerDef.h"
 #include "RtlUsbAdapter.h"
 #include "logger.h"
@@ -9,6 +10,7 @@ class FirmwareManager {
   RtlUsbAdapter _device;
   Logger_t _logger;
   devourer::DeviceConfig::Tuning _tuning; /* fwdl_8814 / fwdl_8814_chunk */
+  devourer::FwBootStatus _boot;           /* outcome of the last download */
 
 public:
   FirmwareManager(RtlUsbAdapter device, Logger_t logger,
@@ -17,6 +19,9 @@ public:
    * download protocol are common across Jaguar (8812 / 8811 / 8814) — only the
    * blob and the header-signature check differ. */
   void FirmwareDownload(HAL_IC_TYPE_E ic_type);
+  /* Outcome of the last FirmwareDownload (see src/AdapterHealth.h) — a failed
+   * FW boot is deliberately non-fatal on Jaguar1, so this is where it shows. */
+  const devourer::FwBootStatus &GetBootStatus() const { return _boot; }
 
 private:
   void _FWDownloadEnable_8812(bool enable);

@@ -141,6 +141,16 @@ public:
    * IRtlDevice until the measurement justifies it. */
   void SetCcaMode(bool disabled);
 
+  /* Adapter-health probes (see src/AdapterHealth.h). EFUSE probe is 8822C
+   * only — the 8822E's OTP is not reliably readable post-bring-up by design
+   * (HalJaguar3::cache_efuse_8822e), so probing it would flag healthy units;
+   * 8822E returns supported=false. Serialized on _reg_mu against the coex
+   * tick like every other register-touching entry point. */
+  devourer::EfuseStability ProbeEfuseStability(int reads) override;
+  devourer::FwBootStatus GetFwBootStatus() override {
+    return _hal.fw_boot_status();
+  }
+
   bool should_stop = false;
 
 private:

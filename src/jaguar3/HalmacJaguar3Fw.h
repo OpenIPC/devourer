@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "AdapterHealth.h"
 #include "logger.h"
 #include "RtlUsbAdapter.h"
 #include "ChipVariant.h"
@@ -38,6 +39,13 @@ public:
    * (hal/hal8822c_fw.c). */
   bool download_default_firmware();
 
+  /* Outcome of the last download_firmware attempt, recorded at the real
+   * hardware boundaries (see src/AdapterHealth.h): checksum_ok = the IMEM/DMEM
+   * checksum-ready bits (MCUFW_CTRL & 0x50), ready_ok = the FW-boot handshake
+   * (MCUFW_CTRL == 0xC078). Distinguishes a transport/checksum failure from a
+   * downloaded-but-never-booted MCU — the dying-adapter signature. */
+  const devourer::FwBootStatus &boot_status() const { return _boot; }
+
 private:
   /* --- ported halmac DLFW steps --- */
   bool start_dlfw(const uint8_t *fw_bin, size_t size);
@@ -67,6 +75,7 @@ private:
   RtlUsbAdapter _device;
   Logger_t _logger;
   ChipVariant _variant; /* selects the firmware blob (8822c vs 8822e) */
+  devourer::FwBootStatus _boot; /* last download_firmware outcome */
   /* halmac adapter->dlfw_pkt_size — the per-chunk DDMA size. */
   uint32_t _dlfw_pkt_size = 4096;
   /* halmac adapter->txff_alloc.rsvd_boundary — the reserved-page boundary the

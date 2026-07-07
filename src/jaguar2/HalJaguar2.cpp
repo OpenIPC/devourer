@@ -1718,27 +1718,21 @@ void HalJaguar2::enable_rx() {
    * (+ENSWBCN), matching the jaguar3 RX-enable value 0x06FF. init_mac_cfg only
    * set the DMA bits; without MACRXEN (BIT7) the MAC RX engine never runs. */
   _device.rtw_write16(0x0100, 0x06FF);
-  /* Promiscuous RX for monitor. The frame-type-accept bits are the critical
-   * ones: ADF(BIT11)/ACF(BIT12)/AMF(BIT13) gate data/control/management frames
-   * at WMAC — without them the BB decodes frames (CRC-OK) but the MAC RX FIFO
-   * stays empty (RXPKT_NUM=0). Value = the vendor monitor RCR (hal_com.c:
-   * RCR_AAP|APM|AM|AB|APWRMGT|ADF|AMF|APP_PHYST_RXFF|APP_MIC|APP_ICV) plus ACF
-   * so control frames are captured too:
-   *   0x7000282F | ACF(0x1000) = 0x7000382F. */
-  uint32_t rcr = 0x7000382Fu;
-#if defined(DEVOURER_HAVE_PCIE)
-  /* PCIe (8821CE): clear bits 11/12/13. On this MAC generation they are NOT
-   * the Jaguar1 ADF/ACF/AMF accept bits — rtw88 reg.h names BIT(11)
-   * BIT_TA_BCN (TA-gated beacon accept) and BIT(12) BIT_RPFM_CAM_ENABLE — and
-   * with BIT(11) set and no TA programmed the WMAC drops EVERY beacon /
-   * management frame (hardware-bisected on the RTL8821CE, 2026-07-07: RCR
-   * 0x7000382F -> 0 mgmt frames; clearing bit 11 -> beacons at the kernel
-   * driver's rate; ctrl/data unaffected, so the bits are not needed as accept
-   * gates here). The USB path keeps the vendor-monitor value byte-identical —
-   * on the 8822B the same bits were empirically required for RX delivery. */
-  if (!_device.is_usb())
-    rcr &= ~((1u << 11) | (1u << 12) | (1u << 13));
-#endif
+  /* Promiscuous RX for monitor: the vendor monitor RCR (hal_com.c:
+   * RCR_AAP|APM|AM|AB|APWRMGT|APP_PHYST_RXFF|APP_MIC|APP_ICV = 0x7000002F)
+   * WITHOUT the legacy "accept" trio at bits 11/12/13. On this MAC generation
+   * those are NOT the Jaguar1 ADF/ACF/AMF accept bits — rtw88 reg.h names
+   * BIT(11) BIT_TA_BCN (TA-gated beacon accept) and BIT(12)
+   * BIT_RPFM_CAM_ENABLE — and with BIT(11) set and no TA programmed the WMAC
+   * drops EVERY ambient beacon / management frame. Hardware-bisected on all
+   * three Jaguar2 parts (2026-07-07): 0x7000382F -> 0 ambient beacons on the
+   * RTL8821CE (PCIe), RTL8811CU and RTL8822BU (USB); with the bits cleared
+   * each receives ambient beacons at the kernel driver's rate, and ctrl/data
+   * delivery is unchanged — so the bits gate nothing monitor RX needs
+   * (rtw88's own default RCR never sets them). Injected canonical-SA beacons
+   * passed even WITH the bits set, which is how regress.py stayed green while
+   * every real AP's beacons were silently dropped. */
+  uint32_t rcr = 0x7000002Fu;
   /* 8821C: drop APP_PHYST_RXFF (BIT28). The 8821C appends a 32-byte PHY-status
    * block before each RX frame in the RXFF, but its RX descriptor reports
    * drv_info_size=0 (unlike the 8822B, which counts it) — so the shared parser

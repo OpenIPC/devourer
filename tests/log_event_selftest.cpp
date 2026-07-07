@@ -6,6 +6,7 @@
  * consumer, so it fails `ctest` instead. */
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 
 #include "Event.h"
@@ -71,7 +72,7 @@ int main() {
         .f("i", -42)
         .f("u", 18446744073709551615ull)
         .f("d", 2.5)
-        .f("nan", 0.0 / 0.0)
+        .f("nan", std::numeric_limits<double>::quiet_NaN())
         .f("b", true)
         .f("z", nullptr);
     expect_eq("numbers", c.text(),

@@ -59,19 +59,13 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`0bda:c82c`) |
 | **RTL8812EU**                 | 2T2R              | 8             | 51            | 47               | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module. 5/10 MHz capable |
 | **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked. 5/10 MHz capable |
-| **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | M.2 sibling of the 8821CU (`10ec:c821`), driven via vfio-pci (`DEVOURER_PCIE=ON`, Linux-only). RX + TX validated on-air; not throughput-benchmarked |
+| **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
 
 `†` = works on-air but the reading varies run-to-run (bracketed = best clean
 reading).
 
-PCIe: the RTL8821CE is supported through a vfio-pci transport (build with
-`-DDEVOURER_PCIE=ON`, bind the card with `tests/pcie_vfio_bind.sh`, then
-`DEVOURER_PCIE_BDF=0000:01:00.0` on the demos). The other HalMAC PCIe
-siblings (RTL8822BE / RTL8822CE) can ride the same transport — bring-up
-recipe in [#214](https://github.com/OpenIPC/devourer/issues/214). Out of
-scope: Jaguar1 PCIe parts (RTL8812AE/8821AE — pre-HalMAC silicon with a
-different DMA architecture) and the 11ax "Kestrel" generation — same
-branding, different bus or baseband.
+Out of scope: the pre-HalMAC PCIe parts (RTL8812AE/8821AE) and the 11ax
+"Kestrel" generation — same branding, different bus or baseband.
 
 > Heads up — some Realtek sticks ship in "ZeroCD" mode and first enumerate as
 > a USB flash drive holding a Windows installer (`0bda:1a2b` is the canonical

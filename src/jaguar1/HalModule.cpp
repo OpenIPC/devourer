@@ -69,7 +69,7 @@ constexpr uint16_t RX_DMA_BOUNDARY_8814A = MAX_RX_DMA_BUFFER_SIZE_8814A - 1;
 #define ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
 
 HalModule::HalModule(
-    RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
+    RtlAdapter device, std::shared_ptr<EepromManager> eepromManager,
     std::shared_ptr<RadioManagementModule> radioManagementModule,
     Logger_t logger, const devourer::DeviceConfig &cfg)
     : _device{device}, _cfg{cfg},
@@ -1988,7 +1988,7 @@ void HalModule::_InitBurstPktLen_8814A() {
   if (!supportUsb3) { /* USB2/1.1 Mode */
     /* Kernel keys this off UsbBulkOutSize (512 on high-speed, 64 on
      * full-speed). */
-    if (_device.speed() == LIBUSB_SPEED_HIGH) {
+    if (_device.speed() == devourer::kUsbSpeedHigh) {
       /* set burst pkt len=512B */
       _device.rtw_write8(REG_RXDMA_MODE_8814A, 0x1e);
     } else {

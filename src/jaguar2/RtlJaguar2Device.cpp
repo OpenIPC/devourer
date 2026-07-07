@@ -1,5 +1,6 @@
 #include "RtlJaguar2Device.h"
 
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -24,7 +25,7 @@ extern "C" {
 #include "ieee80211_radiotap.h" /* MRateToHwRate + radiotap iterator */
 }
 
-RtlJaguar2Device::RtlJaguar2Device(RtlUsbAdapter device, Logger_t logger,
+RtlJaguar2Device::RtlJaguar2Device(RtlAdapter device, Logger_t logger,
                                    jaguar2::ChipVariant variant,
                                    devourer::DeviceConfig cfg)
     : _device{device}, _cfg{std::move(cfg)}, _logger{logger},
@@ -56,11 +57,19 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
    * pre-init -> power-on -> system-cfg -> DLFW, giving the chip a clean slate. */
   bool fw_ok = false;
   constexpr int kBringupTries = 4;
+  /* rtw88 applies the PCIe interface-PHY MDIO config once at probe. */
+  if (!_device.is_usb())
+    _macinit.pcie_phy_cfg();
   for (int attempt = 0; attempt < kBringupTries && !fw_ok; attempt++) {
     if (attempt > 0)
       _logger->error("RtlJaguar2Device: DLFW failed — full power-cycle retry "
                      "{}/{}",
                      attempt + 1, kBringupTries);
+    /* rtw88 order: rtw_hci_setup precedes rtw_mac_power_on — on PCIe this
+     * programs the TRX buffer-descriptor ring registers (the DLFW rsvd-page
+     * path needs the BCN ring live), and it re-runs per attempt because the
+     * power seq touches 0x300. No-op on USB. */
+    _device.hci_setup();
     _macinit.pre_init_system_cfg();
     _hal.power_on();
     _hal.read_chip_version();
@@ -73,7 +82,8 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
 
   if (!_macinit.init_mac_cfg(channel.ChannelWidth))
     throw std::runtime_error("RtlJaguar2Device: init_mac_cfg failed");
-  _macinit.init_usb_cfg();
+  if (_device.is_usb())
+    _macinit.init_usb_cfg(); /* PCIe RX = the BD ring, no RX-DMA agg cfg */
   _macinit.enable_bb_rf(true);
   _logger->info("RtlJaguar2Device: MAC cfg + BB/RF enabled");
 

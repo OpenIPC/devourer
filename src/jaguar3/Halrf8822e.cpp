@@ -35,7 +35,7 @@ uint32_t mask_shift(uint32_t mask) {
 }
 } /* namespace */
 
-Halrf8822e::Halrf8822e(RtlUsbAdapter device, Logger_t logger,
+Halrf8822e::Halrf8822e(RtlAdapter device, Logger_t logger,
                        const devourer::DeviceConfig &cfg)
     : _device{device}, _logger{logger}, _skip_txgapk{cfg.tuning.skip_txgapk},
       _gaintab_dbg{cfg.debug.gaintab_dbg} {}
@@ -1636,7 +1636,7 @@ void Halrf8822e::do_txgapk(uint8_t channel) {
 
 /* Maker, dispatched from make_jaguar3_calibration() in Halrf8822c.cpp. */
 std::unique_ptr<Jaguar3Calibration>
-make_halrf_8822e(RtlUsbAdapter device, Logger_t logger,
+make_halrf_8822e(RtlAdapter device, Logger_t logger,
                  const devourer::DeviceConfig &cfg) {
   return std::make_unique<Halrf8822e>(device, logger, cfg);
 }

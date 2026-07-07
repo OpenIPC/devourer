@@ -8,7 +8,7 @@ namespace devourer {
 /* TX submission health — the driver-side drop signal an adaptive-link
  * controller uses to detect congestion (the "xtx" cut-bitrate trigger). Counted
  * at the USB bulk-OUT layer, so it is family-agnostic (all three HALs push TX
- * through the same RtlUsbAdapter).
+ * through the same RtlAdapter).
  *
  * `submitted` counts every frame handed to the USB stack; `failed` counts those
  * that did not complete OK — either a synchronous submit/transfer error or an

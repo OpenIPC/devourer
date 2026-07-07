@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #include "logger.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "ChipVariant.h"
 
@@ -18,7 +18,7 @@ namespace jaguar2 {
  * chips diverge. */
 class HalmacJaguar2MacInit {
 public:
-  HalmacJaguar2MacInit(RtlUsbAdapter device, Logger_t logger,
+  HalmacJaguar2MacInit(RtlAdapter device, Logger_t logger,
                        ChipVariant variant = ChipVariant::C8822B);
 
   /* Pinmux / LED / GPIO + BB-RF disabled. Runs BEFORE power_on. */
@@ -54,8 +54,13 @@ public:
   bool init_mac_cfg(ChannelWidth_t bw);
 
   /* USB RX-DMA mode + RX aggregation (init_usb_cfg_88xx) so received frames are
-   * delivered to the bulk-IN endpoint. */
+   * delivered to the bulk-IN endpoint. USB backend only — the PCIe RX path is
+   * the buffer-descriptor ring the transport programs pre-power-on. */
   void init_usb_cfg();
+
+  /* PCIe interface-PHY config (rtw_pci_phy_cfg's 8821C gen1 MDIO write).
+   * PCIe backend only; run once before the first power-on. */
+  void pcie_phy_cfg();
 
 private:
   bool priority_queue_cfg();
@@ -64,7 +69,7 @@ private:
   void init_edca_cfg();
   void init_wmac_cfg();
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   Logger_t _logger;
   ChipVariant _variant;
   uint16_t _rsvd_boundary = 0;

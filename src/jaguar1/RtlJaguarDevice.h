@@ -44,7 +44,7 @@ class RtlJaguarDevice : public IRtlDevice {
    * 5GHz CCK clamp in send_packet reads Channel=0 (clamp off) rather than
    * indeterminate garbage before the first channel set. */
   SelectedChannel _channel{};
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   HalModule _halModule;
   Logger_t _logger;
   uint8_t debug;
@@ -75,7 +75,7 @@ class RtlJaguarDevice : public IRtlDevice {
   devourer::RxQualityAccumulator _rxq;
 
 public:
-  RtlJaguarDevice(RtlUsbAdapter device, Logger_t logger,
+  RtlJaguarDevice(RtlAdapter device, Logger_t logger,
                   devourer::DeviceConfig cfg = {});
   ~RtlJaguarDevice() override;
   void Init(Action_ParsedRadioPacket packetProcessor,

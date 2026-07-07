@@ -12,7 +12,7 @@
 #endif
 #include "PowerTracking8812a.h"
 #include "RfPath.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "logger.h"
 
@@ -62,7 +62,7 @@ using ThermalStatus = devourer::ThermalStatus;
 using devourer::ThermalBucket;
 
 class RadioManagementModule {
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   devourer::DeviceConfig::Tuning _tuning; /* skip_txpwr / force_iqk / disable_iqk */
   bool _keep_corrupted = false;           /* rx.keep_corrupted */
   bool _dump_canary = false;              /* debug.dump_canary */
@@ -125,7 +125,7 @@ class RadioManagementModule {
 #endif
 
 public:
-  RadioManagementModule(RtlUsbAdapter device,
+  RadioManagementModule(RtlAdapter device,
                         std::shared_ptr<EepromManager> eepromManager,
                         Logger_t logger,
                         const devourer::DeviceConfig &cfg = {});

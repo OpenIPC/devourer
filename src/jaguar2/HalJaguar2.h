@@ -6,7 +6,7 @@
 #include <memory>
 
 #include "logger.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "RxSense.h"
 #include "ChipVariant.h"
 #include "Jaguar2PhyTables.h"
@@ -19,7 +19,7 @@ namespace jaguar2 {
  * selected via ChipVariant. */
 class HalJaguar2 {
 public:
-  HalJaguar2(RtlUsbAdapter device, Logger_t logger,
+  HalJaguar2(RtlAdapter device, Logger_t logger,
              ChipVariant variant = ChipVariant::C8822B,
              const devourer::DeviceConfig &cfg = {});
 
@@ -275,7 +275,7 @@ private:
   /* _phy_lc_calibrate_8821c: RF-firmware LCK (RF 0xcc/0xc4), no poll. */
   void do_lck_8821c();
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   devourer::DeviceConfig _cfg; /* dump_canary / efuse_dump / hop_prof /
                                   phy_status_8821c / igi / keep_corrupted */
   Logger_t _logger;

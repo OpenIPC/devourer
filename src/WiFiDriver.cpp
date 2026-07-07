@@ -7,8 +7,12 @@
 
 #include <libusb.h>
 
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "UsbDeviceLock.h"
+#include "UsbTransport.h" /* REALTEK_USB_VENQT_READ / USB_TIMEOUT for read_chip_id */
+#if defined(DEVOURER_HAVE_PCIE)
+#include "PcieTransport.h"
+#endif
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
@@ -22,7 +26,7 @@
 namespace {
 
 /* Hardware chip-id at REG_SYS_CFG2 (0x00FC), read with a single vendor control
- * transfer (no full RtlUsbAdapter, so the Jaguar1 construction path is unchanged
+ * transfer (no full RtlAdapter, so the Jaguar1 construction path is unchanged
  * and only one extra control read is added). Port of halmac get_chip_info
  * (chip_id = REG_READ_8(REG_SYS_CFG2)):
  *   0x04 / 0x05 / 0x08 = 8812A / 8821A / 8814A                -> Jaguar1
@@ -84,7 +88,7 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
    * passes null, so acquire our own here as a best-effort second gate: genuine
    * contention -> refuse (return nullptr, same contract as an unsupported chip);
    * a lock-infrastructure error degrades to a warning. Either way the lock rides
-   * into the RtlUsbAdapter below and is released at device destruction. */
+   * into the RtlAdapter below and is released at device destruction. */
   if (!usb_lock) {
     auto lock = std::make_shared<devourer::UsbDeviceLock>();
     std::string lock_why;
@@ -110,7 +114,7 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
     _logger->info("Creating RtlJaguar2Device (PID 0x{:04x}, chip-id 0x{:02x})",
                   pid, chip_id);
     return std::make_unique<RtlJaguar2Device>(
-        RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger,
+        RtlAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger,
         jaguar2::ChipVariant::C8822B, cfg);
 #else
     _logger->error("RTL8822B (chip-id 0x{:02x}) detected but Jaguar2 support "
@@ -126,7 +130,7 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
                   "0x{:02x})",
                   pid, chip_id);
     return std::make_unique<RtlJaguar2Device>(
-        RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger,
+        RtlAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger,
         jaguar2::ChipVariant::C8821C, cfg);
 #else
     _logger->error("RTL8821C (chip-id 0x09) detected but 8821C support not "
@@ -159,7 +163,7 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
     _logger->info("Creating RtlJaguar3Device (PID 0x{:04x}, chip-id 0x{:02x})",
                   pid, chip_id);
     return std::make_unique<RtlJaguar3Device>(
-        RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger, variant,
+        RtlAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger, variant,
         cfg);
 #else
     _logger->error("Jaguar3 chip (chip-id 0x{:02x}) detected but Jaguar3 "
@@ -172,11 +176,11 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
 #if defined(DEVOURER_HAVE_JAGUAR1)
   _logger->info("Creating RtlJaguarDevice (PID 0x{:04x}, chip-id 0x{:02x})", pid,
                 chip_id);
-  /* Pass ctx so RtlUsbAdapter::_ctx is set: the Jaguar1 RX loop now drives an
+  /* Pass ctx so RtlAdapter::_ctx is set: the Jaguar1 RX loop now drives an
    * async URB queue (bulk_read_async_loop) whose event pump needs the same
    * libusb context the handle was opened on (as Jaguar2/3 already do above). */
   return std::make_unique<RtlJaguarDevice>(
-      RtlUsbAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger, cfg);
+      RtlAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger, cfg);
 #else
   _logger->error("Jaguar1 chip (PID 0x{:04x}, chip-id 0x{:02x}) detected but "
                  "Jaguar1 support not compiled in",
@@ -184,3 +188,38 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
   return nullptr;
 #endif
 }
+
+#if defined(DEVOURER_HAVE_PCIE)
+std::unique_ptr<IRtlDevice> WiFiDriver::CreateRtlDevicePcie(
+    std::shared_ptr<devourer::PcieTransport> transport,
+    const devourer::DeviceConfig &cfg) {
+  if (!transport) {
+    _logger->error("CreateRtlDevicePcie: null transport");
+    return nullptr;
+  }
+  /* Chip identity from SYS_CFG2 (0x00FC) over BAR2 MMIO — the same dispatch
+   * signal the USB factory reads via a vendor control transfer. */
+  const uint8_t chip_id =
+      *reinterpret_cast<volatile uint8_t *>(transport->mmio() + 0x00FC);
+
+  if (chip_id == kChipId8821C) {
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+    _logger->info("Creating RtlJaguar2Device C8821C over PCIe ({}; chip-id "
+                  "0x{:02x})",
+                  transport->bdf(), chip_id);
+    return std::make_unique<RtlJaguar2Device>(
+        RtlAdapter(std::move(transport), _logger, cfg), _logger,
+        jaguar2::ChipVariant::C8821C, cfg);
+#else
+    _logger->error("RTL8821C[E] (chip-id 0x09) detected but 8821C support not "
+                   "compiled in (DEVOURER_JAGUAR2_8821C=OFF)");
+    return nullptr;
+#endif
+  }
+
+  _logger->error("PCIe chip-id 0x{:02x} at {} is not supported over PCIe "
+                 "(only RTL8821C[E], chip-id 0x09, for now)",
+                 chip_id, transport->bdf());
+  return nullptr;
+}
+#endif /* DEVOURER_HAVE_PCIE */

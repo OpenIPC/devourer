@@ -6,7 +6,7 @@
 #include "RfPath.h"
 
 PowerTracking8812a::PowerTracking8812a(
-    RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
+    RtlAdapter device, std::shared_ptr<EepromManager> eepromManager,
     RadioManagementModule *radio, Logger_t logger)
     : _device(device), _eepromManager(eepromManager), _radio(radio),
       _logger(logger) {}

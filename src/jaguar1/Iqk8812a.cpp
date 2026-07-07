@@ -31,7 +31,7 @@ inline void DelayMs(int ms) {
 
 } // namespace
 
-Iqk8812a::Iqk8812a(RtlUsbAdapter device,
+Iqk8812a::Iqk8812a(RtlAdapter device,
                    std::shared_ptr<EepromManager> eepromManager,
                    RadioManagementModule *radio, Logger_t logger)
     : _device(device), _eepromManager(eepromManager), _radio(radio),

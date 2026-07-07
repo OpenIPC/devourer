@@ -2,7 +2,7 @@
 #define EEPROMMANAGER_H
 
 #include "PhyTableLoader.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "logger.h"
 
 #include "HalVerDef.h"
@@ -12,7 +12,7 @@
 typedef unsigned short ushort;
 
 class EepromManager {
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   Logger_t _logger;
   devourer::DeviceConfig::Tuning _tuning; /* regulation / txpwr_by_rate */
   bool _log_txpwr = false;                /* debug.log_txpwr */
@@ -31,7 +31,7 @@ class EepromManager {
   uint8_t external_lna_5g;
 
 public:
-  EepromManager(RtlUsbAdapter device, Logger_t logger,
+  EepromManager(RtlAdapter device, Logger_t logger,
                 const devourer::DeviceConfig &cfg = {});
   uint8_t GetBoardType();
   void efuse_ShadowRead1Byte(uint16_t Offset, uint8_t *Value);
@@ -173,7 +173,7 @@ public:
   void LoadTxPowerLimit();
 
 private:
-  void read_chip_version_8812a(RtlUsbAdapter device);
+  void read_chip_version_8812a(RtlAdapter device);
   void dump_chip_info(HAL_VERSION ChipVersion);
   void rtw_hal_config_rftype();
   void hal_InitPGData_8812A();
@@ -187,9 +187,9 @@ private:
                                uint8_t *pbuf);
   void rtw_dump_cur_efuse();
   void Hal_EfuseParseIDCode8812A();
-  uint8_t Hal_ReadPROMVersion8812A(RtlUsbAdapter device,
+  uint8_t Hal_ReadPROMVersion8812A(RtlAdapter device,
                                    uint8_t *efuse_eeprom_data);
-  uint8_t Hal_ReadTxPowerInfo8812A(RtlUsbAdapter device,
+  uint8_t Hal_ReadTxPowerInfo8812A(RtlAdapter device,
                                    uint8_t *efuse_eeprom_data);
   void Hal_EfuseParseBTCoexistInfo8812A();
   void Hal_EfuseParseXtal_8812A();

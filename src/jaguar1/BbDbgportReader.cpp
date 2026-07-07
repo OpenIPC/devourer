@@ -6,7 +6,7 @@ namespace {
 constexpr uint16_t kRegSysCfg = 0x00F0;  // hal/hal_com_reg.h:101
 }  // namespace
 
-BbDbgportReader::BbDbgportReader(RtlUsbAdapter& device, Logger_t logger)
+BbDbgportReader::BbDbgportReader(RtlAdapter& device, Logger_t logger)
     : _device{device}, _logger{logger} {}
 
 bool BbDbgportReader::is_chip_alive() {

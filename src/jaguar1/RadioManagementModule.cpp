@@ -48,7 +48,7 @@ int get_40mhz_center_channel(int channel) {
 }
 
 RadioManagementModule::RadioManagementModule(
-    RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
+    RtlAdapter device, std::shared_ptr<EepromManager> eepromManager,
     Logger_t logger, const devourer::DeviceConfig &cfg)
     : _device{device}, _tuning{cfg.tuning},
       _keep_corrupted{cfg.rx.keep_corrupted},

@@ -47,7 +47,7 @@
 #include <string>
 #include <vector>
 
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "logger.h"
 
@@ -192,7 +192,7 @@ inline CsiMaskSpec parse_csi_spec(const char *s) {
  * subcarrier), 0x890-0x89F = negative (bit index 128 - |k|). Builds the full
  * 32-byte shadow host-side and writes 8 dwords, then sets the 0x874[0] enable.
  * Returns the number of tones masked. */
-inline size_t csi_mask_apply_11ac(RtlUsbAdapter &dev, uint32_t fc_mhz,
+inline size_t csi_mask_apply_11ac(RtlAdapter &dev, uint32_t fc_mhz,
                                   uint32_t bw_mhz, const CsiMaskSpec &spec) {
   auto tones = enumerate_tones(fc_mhz, bw_mhz, spec.f_lo_khz, spec.f_hi_khz);
   uint8_t shadow[32] = {};
@@ -217,7 +217,7 @@ inline size_t csi_mask_apply_11ac(RtlUsbAdapter &dev, uint32_t fc_mhz,
   return tones.size();
 }
 
-inline void csi_mask_clear_11ac(RtlUsbAdapter &dev) {
+inline void csi_mask_clear_11ac(RtlAdapter &dev) {
   for (int i = 0; i < 8; i++)
     dev.rtw_write32(uint16_t(0x880 + i * 4), 0);
   dev.phy_set_bb_reg(0x874, 0x1, 0);
@@ -226,7 +226,7 @@ inline void csi_mask_clear_11ac(RtlUsbAdapter &dev) {
 /* NBI notch, 11ac: quantize the tone offset (x10 fixed point, vendor units)
  * into the register LUT and write 0x87C[19:14] + the per-family enables.
  * f_intf must fall inside the tuned bandwidth. */
-inline bool nbi_apply_11ac(RtlUsbAdapter &dev, Family fam, uint32_t fc_mhz,
+inline bool nbi_apply_11ac(RtlAdapter &dev, Family fam, uint32_t fc_mhz,
                            uint32_t bw_mhz, uint32_t f_intf_mhz,
                            bool paths_ge_2t) {
   /* tone_idx x10 units */
@@ -266,7 +266,7 @@ inline bool nbi_apply_11ac(RtlUsbAdapter &dev, Family fam, uint32_t fc_mhz,
   return true;
 }
 
-inline void nbi_disable_11ac(RtlUsbAdapter &dev, Family fam,
+inline void nbi_disable_11ac(RtlAdapter &dev, Family fam,
                              bool paths_ge_2t) {
   dev.phy_set_bb_reg(0x87c, 1u << 13, 0);
   if (fam == Family::AC2_8822B) {
@@ -284,7 +284,7 @@ inline void nbi_disable_11ac(RtlUsbAdapter &dev, Family fam,
  * 0x9B0[3:2] (RF80 -> 128, else 64). Adjacent tones share a table byte, so the
  * per-address byte is accumulated host-side first — the vendor's one-tone
  * setter would clobber its neighbour's nibble when looped over a range. */
-inline size_t csi_mask_apply_jgr3(RtlUsbAdapter &dev, uint32_t fc_mhz,
+inline size_t csi_mask_apply_jgr3(RtlAdapter &dev, uint32_t fc_mhz,
                                   uint32_t bw_mhz, const CsiMaskSpec &spec) {
   uint8_t rf_bw = dev.rtw_read8(0x9b0);
   uint32_t tone_num = (((rf_bw & 0xc) >> 2) == 0x2) ? 128 : 64;
@@ -317,7 +317,7 @@ inline size_t csi_mask_apply_jgr3(RtlUsbAdapter &dev, uint32_t fc_mhz,
   return tones.size();
 }
 
-inline void csi_mask_clear_jgr3(RtlUsbAdapter &dev) {
+inline void csi_mask_clear_jgr3(RtlAdapter &dev) {
   dev.phy_set_bb_reg(0x1ee8, 0x3, 0x3);
   dev.phy_set_bb_reg(0x1d94, 0xc0000000, 0x1);
   for (uint32_t a = 0; a < 128; a++) {
@@ -331,7 +331,7 @@ inline void csi_mask_clear_jgr3(RtlUsbAdapter &dev) {
 /* NBI notch, Jaguar-3: tone index (312.5 kHz units, kHz-exact per the x2cu
  * tree) into 0x1944/0x4044[20:12] per path; enable 0x818[3]=0 (inverted on
  * 8822C/E) + 0x818[11]=1 + 0x1D3C[30:27]=0xF + 0x1940/0x4040[31]. */
-inline bool nbi_apply_jgr3(RtlUsbAdapter &dev, uint32_t fc_mhz,
+inline bool nbi_apply_jgr3(RtlAdapter &dev, uint32_t fc_mhz,
                            uint32_t bw_mhz, uint32_t f_intf_khz, int n_paths) {
   uint32_t fc_khz = fc_mhz * 1000;
   uint32_t bw_up = fc_khz + bw_mhz * 500, bw_low = fc_khz - bw_mhz * 500;
@@ -364,7 +364,7 @@ inline bool nbi_apply_jgr3(RtlUsbAdapter &dev, uint32_t fc_mhz,
 }
 
 /* phydm_nbi_reset_jgr3 (8822C/E subset). */
-inline void nbi_disable_jgr3(RtlUsbAdapter &dev) {
+inline void nbi_disable_jgr3(RtlAdapter &dev) {
   dev.phy_set_bb_reg(0x818, 1u << 3, 1);
   dev.phy_set_bb_reg(0x1d3c, 0x78000000, 0);
   dev.phy_set_bb_reg(0x818, 1u << 3, 0);
@@ -380,7 +380,7 @@ inline void nbi_disable_jgr3(RtlUsbAdapter &dev) {
  * rx.path_spec, the mask is the final word for a single-channel capture; a
  * later channel switch does not re-derive it). n_paths: RX chains to arm for
  * the Jaguar-3 NBI / the 8822B second-path enable. */
-inline void apply(RtlUsbAdapter &dev, Logger_t logger, Family fam,
+inline void apply(RtlAdapter &dev, Logger_t logger, Family fam,
                   const SelectedChannel &ch, int n_paths,
                   const char *csi_env, const char *nbi_env) {
   if (!csi_env && !nbi_env) return;

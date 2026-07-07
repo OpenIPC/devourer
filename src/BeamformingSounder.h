@@ -31,7 +31,7 @@
 
 #include <cstdint>
 
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 
 namespace devourer {
 namespace bf {
@@ -95,7 +95,7 @@ constexpr BfeeConfig kBfeeJaguar23{
  * Beamformee entry 0, P_AID = 0 (unassociated). The one per-generation byte is
  * the sounding-protocol control (0x718): 0xCB on Jaguar-1
  * (hal_txbf_jaguar_enter), 0xDB on Jaguar-2/3 (hal_txbf_8822b_enter). */
-inline void arm_sounder(RtlUsbAdapter& dev, uint8_t snd_ptcl_ctrl = 0xCB) {
+inline void arm_sounder(RtlAdapter& dev, uint8_t snd_ptcl_ctrl = 0xCB) {
   dev.rtw_write8(kSndPtclCtrl, snd_ptcl_ctrl);
   dev.rtw_write8(kSndNdpStandby, 0x50);
   dev.rtw_write16(kTxbfCtrl, 0x0000);                 /* P_AID = 0 */
@@ -109,7 +109,7 @@ inline void arm_sounder(RtlUsbAdapter& dev, uint8_t snd_ptcl_ctrl = 0xCB) {
 /* Beamformee side: arm the hardware CSI responder to reply to NDPA+NDP from
  * `beamformer_mac` (matched against the NDPA TA), no association required.
  * `cfg` selects the per-generation register recipe. */
-inline void arm_beamformee(RtlUsbAdapter& dev, const uint8_t beamformer_mac[6],
+inline void arm_beamformee(RtlAdapter& dev, const uint8_t beamformer_mac[6],
                            const BfeeConfig& cfg) {
   dev.rtw_write8(kSndPtclCtrl, cfg.snd_ptcl_ctrl);
   dev.rtw_write8(kSndNdpStandby, cfg.ndp_standby);
@@ -145,7 +145,7 @@ inline void arm_beamformee(RtlUsbAdapter& dev, const uint8_t beamformer_mac[6],
  * into BFMER0_INFO). `rx_nss` = GET_RX_NSS (2 on the 2T2R 8822B/C/E). Registers
  * are family-shared, so this is generation-neutral like arm_sounder. Apply is
  * NOT enabled here — call apply_vmatrix() once a CBR has been ingested. */
-inline void arm_beamformer_entry(RtlUsbAdapter& dev, const uint8_t peer_mac[6],
+inline void arm_beamformer_entry(RtlAdapter& dev, const uint8_t peer_mac[6],
                                  uint8_t rx_nss = 2, uint8_t g_id = 0) {
   for (uint16_t i = 0; i < 6; ++i)
     dev.rtw_write8(kBfmer0Info + i, peer_mac[i]);
@@ -166,7 +166,7 @@ inline void arm_beamformer_entry(RtlUsbAdapter& dev, const uint8_t peer_mac[6],
  * +BIT10=40, +BIT11=80) + DIS_NDP_BFEN (BIT15). Enable ONLY after the WMAC has
  * ingested a valid CBR (bf_monitor_enable_txbf gates on csi_matrix_len>0) —
  * enabling with no V degrades the link. `bw`: 0=20, 1=40, 2=80. */
-inline void apply_vmatrix(RtlUsbAdapter& dev, bool enable, uint8_t bw) {
+inline void apply_vmatrix(RtlAdapter& dev, bool enable, uint8_t bw) {
   uint32_t txbf = dev.rtw_read<uint32_t>(kTxbfCtrl);
   txbf &= ~((1u << 9) | (1u << 10) | (1u << 11));
   if (enable) {
@@ -197,7 +197,7 @@ enum : uint16_t {
  * the over-the-air VHT Group ID Management handshake the vendor normally does.
  * Recipe from hal_txbf_8822b_enter() MU BFee branch (haltxbf8822b.c:484-598),
  * MU register index 0: gid_valid=0x7fe, user_position_l=0x111110, p_aid=0. */
-inline void arm_beamformee_mu(RtlUsbAdapter& dev, const uint8_t beamformer_mac[6],
+inline void arm_beamformee_mu(RtlAdapter& dev, const uint8_t beamformer_mac[6],
                               const BfeeConfig& cfg) {
   arm_beamformee(dev, beamformer_mac, cfg);            /* SU responder base */
 

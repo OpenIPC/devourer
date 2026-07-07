@@ -6,7 +6,7 @@
 
 #include "ChipVariant.h"
 #include "SelectedChannel.h" /* ChannelWidth_t */
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "logger.h"
 
 namespace jaguar3 {
@@ -59,7 +59,7 @@ public:
 /* Factory: returns the calibration impl for the given generation. (8822e is
  * added in a later phase; until then both variants return the 8822c impl.) */
 std::unique_ptr<Jaguar3Calibration>
-make_jaguar3_calibration(ChipVariant variant, RtlUsbAdapter device,
+make_jaguar3_calibration(ChipVariant variant, RtlAdapter device,
                          Logger_t logger,
                          const devourer::DeviceConfig &cfg = {});
 

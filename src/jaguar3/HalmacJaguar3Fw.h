@@ -6,7 +6,7 @@
 
 #include "AdapterHealth.h"
 #include "logger.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "ChipVariant.h"
 
 namespace jaguar3 {
@@ -27,7 +27,7 @@ namespace jaguar3 {
  * confirmed via usbmon diff vs the kernel rtl88x2eu driver. */
 class HalmacJaguar3Fw {
 public:
-  HalmacJaguar3Fw(RtlUsbAdapter device, Logger_t logger,
+  HalmacJaguar3Fw(RtlAdapter device, Logger_t logger,
                 ChipVariant variant = ChipVariant::C8822C);
 
   /* Download + boot the WLAN firmware image (fw_bin/size = the full
@@ -72,7 +72,7 @@ private:
   void w32(uint16_t reg, uint32_t v);
   void w32_set(uint16_t reg, uint32_t bits);
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   Logger_t _logger;
   ChipVariant _variant; /* selects the firmware blob (8822c vs 8822e) */
   devourer::FwBootStatus _boot; /* last download_firmware outcome */

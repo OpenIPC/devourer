@@ -21,7 +21,7 @@ inline uint32_t Bit(int n) { return 1u << n; }
 
 } // namespace
 
-Iqk8814a::Iqk8814a(RtlUsbAdapter device,
+Iqk8814a::Iqk8814a(RtlAdapter device,
                    std::shared_ptr<EepromManager> eepromManager,
                    RadioManagementModule *radio, Logger_t logger)
     : _device(device), _eepromManager(eepromManager), _radio(radio),

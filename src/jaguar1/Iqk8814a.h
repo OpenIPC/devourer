@@ -3,7 +3,7 @@
 
 #include "EepromManager.h"
 #include "RfPath.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "logger.h"
 
 #include <cstdint>
@@ -42,7 +42,7 @@ enum class BandType;
  */
 class Iqk8814a {
 public:
-  Iqk8814a(RtlUsbAdapter device, std::shared_ptr<EepromManager> eepromManager,
+  Iqk8814a(RtlAdapter device, std::shared_ptr<EepromManager> eepromManager,
            RadioManagementModule *radio, Logger_t logger);
 
   /* Run a full I/Q calibration for 8814A. is_recovery == false runs
@@ -51,7 +51,7 @@ public:
   void Calibrate(uint8_t channel, BandType band, bool is_recovery);
 
 private:
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   std::shared_ptr<EepromManager> _eepromManager;
   RadioManagementModule *_radio;
   Logger_t _logger;

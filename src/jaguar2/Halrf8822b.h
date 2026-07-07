@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #include "logger.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "Jaguar2Calibration.h"
 
 namespace jaguar2 {
@@ -23,7 +23,7 @@ namespace jaguar2 {
  * / rtw_read32. */
 class Halrf8822b : public Jaguar2Calibration {
 public:
-  Halrf8822b(RtlUsbAdapter device, Logger_t logger, uint8_t cut, bool is_2t2r);
+  Halrf8822b(RtlAdapter device, Logger_t logger, uint8_t cut, bool is_2t2r);
 
   /* phy_iq_calibrate_8822b entry (SW path). band2g: true=2.4G. Runs the full
    * per-path LOK/TXK/RXK, backing up and restoring MAC/BB/RF around it. */
@@ -74,7 +74,7 @@ private:
   void start_iqk();
   void iqk_init();
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   Logger_t _logger;
   uint8_t _cut;
   bool _2t2r;

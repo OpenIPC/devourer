@@ -6,7 +6,7 @@
 
 #include "AdapterHealth.h"
 #include "logger.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "ChipVariant.h"
 
 namespace jaguar2 {
@@ -24,7 +24,7 @@ namespace jaguar2 {
  * have run first — supplied by HalmacJaguar2MacInit. */
 class HalmacJaguar2Fw {
 public:
-  HalmacJaguar2Fw(RtlUsbAdapter device, Logger_t logger,
+  HalmacJaguar2Fw(RtlAdapter device, Logger_t logger,
                   ChipVariant variant = ChipVariant::C8822B);
 
   bool download_firmware(const uint8_t *fw_bin, size_t size);
@@ -74,7 +74,7 @@ private:
   void w32(uint16_t reg, uint32_t v);
   void w32_set(uint16_t reg, uint32_t bits);
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   Logger_t _logger;
   ChipVariant _variant;
   devourer::FwBootStatus _boot; /* last download_firmware outcome */

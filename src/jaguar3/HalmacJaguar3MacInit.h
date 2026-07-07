@@ -2,7 +2,7 @@
 #define HALMAC_8822C_MAC_INIT_H
 
 #include "logger.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 
 namespace jaguar3 {
@@ -18,7 +18,7 @@ namespace jaguar3 {
  * correct MAC timing (not just the baseband divider). */
 class HalmacJaguar3MacInit {
 public:
-  HalmacJaguar3MacInit(RtlUsbAdapter device, Logger_t logger);
+  HalmacJaguar3MacInit(RtlAdapter device, Logger_t logger);
 
   /* pre_init_system_cfg_8822c: pinmux / LED / GPIO + BB-RF disabled. Runs
    * BEFORE the mac power switch (card_en_flow). */
@@ -52,7 +52,7 @@ private:
   void init_rate_fallback_ctrl();
   void cfg_mac_clk();
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   Logger_t _logger;
 };
 

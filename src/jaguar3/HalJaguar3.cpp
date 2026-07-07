@@ -38,7 +38,7 @@ void retry_cal(Logger_t &logger, const char *what, F &&step, int tries = 3) {
 /* Writer for BB / AGC tables: handles the 0xf9..0xfe pseudo-address delay
  * encoding (see odm_config_bb_phy_8822c) and otherwise does a full-dword BB
  * write. */
-void write_bb(RtlUsbAdapter &dev, uint32_t addr, uint32_t data) {
+void write_bb(RtlAdapter &dev, uint32_t addr, uint32_t data) {
   switch (addr) {
   case 0xfe: std::this_thread::sleep_for(std::chrono::milliseconds(50)); return;
   case 0xfd: std::this_thread::sleep_for(std::chrono::milliseconds(5)); return;
@@ -51,7 +51,7 @@ void write_bb(RtlUsbAdapter &dev, uint32_t addr, uint32_t data) {
 }
 } /* namespace */
 
-HalJaguar3::HalJaguar3(RtlUsbAdapter device, Logger_t logger,
+HalJaguar3::HalJaguar3(RtlAdapter device, Logger_t logger,
                        ChipVariant variant, const devourer::DeviceConfig &cfg)
     : _device{device}, _cfg{cfg}, _logger{logger},
       _fw{device, logger, variant}, _macinit{device, logger},
@@ -507,7 +507,7 @@ void HalJaguar3::read_chip_version() {
  * of enable/disable_efuse_sw_pwr_cut (halmac_efuse_8822e.c), read variant
  * (is_write=0, so the PMC unlock-code write is skipped). The 8822E OTP is only
  * readable while EV2EF power is cut in to the efuse macro via REG_SYS_ISO_CTRL;
- * the 8822C/Jaguar1 reader (RtlUsbAdapter::efuse_OneByteRead) never does this, so
+ * the 8822C/Jaguar1 reader (RtlAdapter::efuse_OneByteRead) never does this, so
  * 8822E efuse reads return 0xff. Bracket every physical read range with on/off. */
 void HalJaguar3::efuse_pwr_cut_8822e(bool on) {
   constexpr uint16_t SYS_ISO = 0x0000, PMC = 0x00CC;

@@ -1,9 +1,11 @@
 #include "HalmacJaguar2MacInit.h"
 
+#include <chrono>
+#include <thread>
 #include <utility>
 
 /* These names are also #define macros in the Realtek hal_com_reg.h pulled in via
- * RtlUsbAdapter.h; #undef them so the scoped constexpr below compile (this .cpp
+ * RtlAdapter.h; #undef them so the scoped constexpr below compile (this .cpp
  * uses no other definition of them). */
 #undef REG_RSV_CTRL
 #undef REG_RF_CTRL
@@ -222,11 +224,15 @@ struct FifoParams {
   uint32_t tx_fifo_size, rx_fifo_size;
   uint16_t rsvd_csibuf_num, pg_hq, pg_nq, pg_lq, pg_exq, pg_gap;
 };
-constexpr FifoParams fifo_params(ChipVariant v) {
-  return v == ChipVariant::C8821C
-             ? FifoParams{65536, 16384, 0, 16, 16, 16, 0, 1}
-             : FifoParams{TX_FIFO_SIZE, RX_FIFO_SIZE, RSVD_PG_CSIBUF_NUM,
-                          PG_HQ, PG_NQ, PG_LQ, PG_EXQ, PG_GAP};
+constexpr FifoParams fifo_params(ChipVariant v, bool is_usb = true) {
+  /* 8821C PCIe (RTL8821CE) page allocation differs only in the extra queue:
+   * rtw88 page_table_8821c[1] (PCIE) = hq/nq/lq/exq/gap 16/16/16/14/1 vs the
+   * 3-bulkout USB 16/16/16/0/1. */
+  if (v == ChipVariant::C8821C)
+    return is_usb ? FifoParams{65536, 16384, 0, 16, 16, 16, 0, 1}
+                  : FifoParams{65536, 16384, 0, 16, 16, 16, 14, 1};
+  return FifoParams{TX_FIFO_SIZE, RX_FIFO_SIZE, RSVD_PG_CSIBUF_NUM,
+                    PG_HQ, PG_NQ, PG_LQ, PG_EXQ, PG_GAP};
 }
 
 bool is_5m(ChannelWidth_t bw) {
@@ -237,7 +243,7 @@ bool is_10m(ChannelWidth_t bw) {
 }
 } /* namespace */
 
-HalmacJaguar2MacInit::HalmacJaguar2MacInit(RtlUsbAdapter device, Logger_t logger,
+HalmacJaguar2MacInit::HalmacJaguar2MacInit(RtlAdapter device, Logger_t logger,
                                            ChipVariant variant)
     : _device{std::move(device)}, _logger{std::move(logger)},
       _variant{variant} {}
@@ -261,9 +267,15 @@ void HalmacJaguar2MacInit::enable_bb_rf(bool enable) {
 void HalmacJaguar2MacInit::pre_init_system_cfg() {
   _device.rtw_write8(REG_RSV_CTRL, 0);
 
-  /* USB: REG_SYS_CFG2+3 == 0x20 workaround */
-  if (_device.rtw_read8(REG_SYS_CFG2 + 3) == 0x20)
+  /* USB: REG_SYS_CFG2+3 == 0x20 workaround (0xFExx is USB-page register space —
+   * undefined over PCIe MMIO, hence the gate). */
+  if (_device.is_usb() && _device.rtw_read8(REG_SYS_CFG2 + 3) == 0x20)
     _device.rtw_write8(0xFE5B, _device.rtw_read8(0xFE5B) | (1u << 4));
+
+  /* PCIe: rtw_mac_pre_system_cfg sets REG_HCI_OPT_CTRL BIT_USB_SUS_DIS
+   * (0x74[8]) — yes, on PCIe too in rtw88. */
+  if (!_device.is_usb())
+    _device.rtw_write32(0x0074, _device.rtw_read32(0x0074) | (1u << 8));
 
   /* pinmux */
   uint32_t v = _device.rtw_read32(REG_PAD_CTRL1) & ~((1u << 28) | (1u << 29));
@@ -322,6 +334,12 @@ bool HalmacJaguar2MacInit::init_trx_cfg(bool set_bcn_boundary) {
   _set_bcn_boundary = set_bcn_boundary;
   uint16_t pqmap = (3u << 14) | (3u << 12) | (1u << 10) | (1u << 8) |
                    (2u << 6) | (2u << 4); /* VO/VI->NQ, BE/BK->LQ, MG/HI->HQ */
+  /* PCIe queue mapping (rtw88 rqpn_table_8821c[1]): vo/vi->NQ, be/bk->LQ,
+   * mg->EXQ, hi->HQ — MG rides the extra queue (whose 14 pages the PCIe
+   * fifo_params allocate) instead of sharing HQ. */
+  if (!_device.is_usb())
+    pqmap = (3u << 14) | (0u << 12) | (1u << 10) | (1u << 8) | (2u << 6) |
+            (2u << 4);
   _device.rtw_write16(REG_TXDMA_PQ_MAP, pqmap);
 
   uint8_t en_fwff = _device.rtw_read8(REG_WMAC_FWPKT_CR) & BIT_FWEN;
@@ -343,7 +361,7 @@ bool HalmacJaguar2MacInit::init_trx_cfg(bool set_bcn_boundary) {
 }
 
 bool HalmacJaguar2MacInit::priority_queue_cfg() {
-  const FifoParams fp = fifo_params(_variant);
+  const FifoParams fp = fifo_params(_variant, _device.is_usb());
   const uint16_t tx_fifo_pg_num = fp.tx_fifo_size >> TX_PAGE_SHIFT; /* 2048 */
   const uint16_t rsvd_pg_num =
       RSVD_PG_DRV_NUM + RSVD_PG_H2C_EXTRAINFO_NUM + RSVD_PG_H2C_STATICINFO_NUM +
@@ -407,7 +425,7 @@ bool HalmacJaguar2MacInit::priority_queue_cfg() {
 }
 
 void HalmacJaguar2MacInit::init_h2c() {
-  const FifoParams fp = fifo_params(_variant);
+  const FifoParams fp = fifo_params(_variant, _device.is_usb());
   const uint16_t tx_fifo_pg_num = fp.tx_fifo_size >> TX_PAGE_SHIFT;
   uint16_t cur = tx_fifo_pg_num - fp.rsvd_csibuf_num - RSVD_PG_FW_TXBUF_NUM -
                  RSVD_PG_CPU_INSTRUCTION_NUM - RSVD_PG_H2CQ_NUM;
@@ -510,6 +528,15 @@ void HalmacJaguar2MacInit::init_edca_cfg() {
 
 /* init_wmac_cfg_8822b (init_low_pwr is a no-op on 8822B) */
 void HalmacJaguar2MacInit::init_wmac_cfg() {
+  /* Group-address hash filter wide open (REG_MAR = all-ones), as the Jaguar3
+   * init_wmac_cfg and halmac init_wmac_cfg_88xx do. With MAR at 0, every
+   * broadcast/multicast frame — i.e. all beacons — is dropped regardless of
+   * RCR AB/AM. The USB bring-up got away without it because the chip's warm
+   * state carried a set MAR; the PCIe path (post card-disable / FLR) starts
+   * from 0 and received no management frames until this write
+   * (hardware-bisected on the RTL8821CE, 2026-07-07). */
+  _device.rtw_write32(0x0620 /* REG_MAR */, 0xFFFFFFFF);
+  _device.rtw_write32(0x0624, 0xFFFFFFFF);
   _device.rtw_write32(REG_RXFLTMAP0, WLAN_RX_FILTER0);
   _device.rtw_write16(REG_RXFLTMAP2, WLAN_RX_FILTER2);
   /* RXFLTMAP1 (0x06A2) is the control-frame subtype filter. halmac's
@@ -568,6 +595,32 @@ void HalmacJaguar2MacInit::init_usb_cfg() {
   _device.rtw_write16(kRxdmaAggPgTh,
                       static_cast<uint16_t>(0x05 | ((ss ? 0x0A : 0x20) << 8)));
   _logger->info("Jaguar2: init_usb_cfg (RXDMA_MODE=0x{:02x}, RX-agg EN)", v);
+}
+
+/* PCIe interface-PHY config (rtw_pci_phy_cfg): the 8821C gen1 intf table is a
+ * single MDIO write {addr 0x09, val 0x6380} (gen2 is empty), issued through
+ * the REG_MDIO_V1 (0x3F4) / REG_PCIE_MIX_CFG (0x3F8) window — normal MAC
+ * registers, so plain rtw_read/write works. ASPM/CLKREQ tuning is skipped for
+ * bring-up (power saving only; the transport already clears ASPM in LNKCTL). */
+void HalmacJaguar2MacInit::pcie_phy_cfg() {
+  constexpr uint16_t REG_MDIO_V1 = 0x03F4;
+  constexpr uint16_t REG_PCIE_MIX_CFG = 0x03F8;
+  const uint8_t addr = 0x09;
+  const uint16_t data = 0x6380;
+  _device.rtw_write16(REG_MDIO_V1, data);
+  /* page = (addr < 32 ? 0 : 1) + G1 page offset (0). */
+  _device.rtw_write8(REG_PCIE_MIX_CFG, addr & 0x1F);
+  _device.rtw_write8(REG_PCIE_MIX_CFG + 3, 0);
+  _device.rtw_write32(REG_PCIE_MIX_CFG,
+                      _device.rtw_read32(REG_PCIE_MIX_CFG) | (1u << 5));
+  for (int i = 0; i < 20; i++) {
+    if ((_device.rtw_read32(REG_PCIE_MIX_CFG) & (1u << 5)) == 0) {
+      _logger->info("Jaguar2: PCIe MDIO gen1 cfg applied (0x09=0x6380)");
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(10));
+  }
+  _logger->warn("Jaguar2: PCIe MDIO write did not complete (non-fatal)");
 }
 
 } /* namespace jaguar2 */

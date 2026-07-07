@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #include "logger.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "Jaguar3Calibration.h"
 
@@ -26,7 +26,7 @@ namespace jaguar3 {
  */
 class Halrf8822e : public Jaguar3Calibration {
 public:
-  Halrf8822e(RtlUsbAdapter device, Logger_t logger,
+  Halrf8822e(RtlAdapter device, Logger_t logger,
              const devourer::DeviceConfig &cfg = {});
 
   void phy_iq_calibrate(ChannelWidth_t bw, uint8_t channel) override;
@@ -242,7 +242,7 @@ private:
   uint8_t _therm_avg_cnt[2] = {0, 0};
   int _last_swing[2] = {0x7fff, 0x7fff}; /* log-on-change sentinel */
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   Logger_t _logger;
   bool _skip_txgapk = false; /* tuning.skip_txgapk */
   bool _gaintab_dbg = false; /* debug.gaintab_dbg */

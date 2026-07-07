@@ -34,7 +34,7 @@ uint32_t bshift(uint32_t mask) {
 }
 } /* namespace */
 
-Halrf8821c::Halrf8821c(RtlUsbAdapter device, Logger_t logger, uint8_t cut,
+Halrf8821c::Halrf8821c(RtlAdapter device, Logger_t logger, uint8_t cut,
                        bool is_2t2r)
     : _device{std::move(device)}, _logger{std::move(logger)}, _cut{cut},
       _2t2r{is_2t2r} {}
@@ -850,7 +850,7 @@ void Halrf8821c::iqk_trigger(bool band2g) {
 /* Calibration-factory hook, called by make_jaguar2_calibration() in
  * Halrf8822b.cpp when the ChipVariant is C8821C. */
 std::unique_ptr<Jaguar2Calibration>
-make_calibration_8821c(RtlUsbAdapter device, Logger_t logger, uint8_t cut,
+make_calibration_8821c(RtlAdapter device, Logger_t logger, uint8_t cut,
                        bool is_2t2r) {
   return std::make_unique<Halrf8821c>(std::move(device), std::move(logger), cut,
                                       is_2t2r);

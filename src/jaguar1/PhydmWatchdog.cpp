@@ -37,7 +37,7 @@ constexpr auto kTickInterval = std::chrono::seconds(2);
 
 } // namespace
 
-PhydmWatchdog::PhydmWatchdog(RtlUsbAdapter device,
+PhydmWatchdog::PhydmWatchdog(RtlAdapter device,
                              std::shared_ptr<EepromManager> eepromManager,
                              RadioManagementModule *radio, Logger_t logger)
     : _device(device), _eepromManager(eepromManager), _radio(radio),

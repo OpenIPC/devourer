@@ -59,12 +59,13 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`0bda:c82c`) |
 | **RTL8812EU**                 | 2T2R              | 8             | 51            | 47               | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module. 5/10 MHz capable |
 | **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked. 5/10 MHz capable |
+| **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
 
 `†` = works on-air but the reading varies run-to-run (bracketed = best clean
 reading).
 
-Out of scope: the PCIe siblings (e.g. 8822BE) and the 11ax "Kestrel"
-generation — same branding, different bus or baseband.
+Out of scope: the pre-HalMAC PCIe parts (RTL8812AE/8821AE) and the 11ax
+"Kestrel" generation — same branding, different bus or baseband.
 
 > Heads up — some Realtek sticks ship in "ZeroCD" mode and first enumerate as
 > a USB flash drive holding a Windows installer (`0bda:1a2b` is the canonical

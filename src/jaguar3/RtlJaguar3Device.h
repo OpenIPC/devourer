@@ -9,7 +9,7 @@
 #include "logger.h"
 #include "IRtlDevice.h"
 #include "TxMode.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "ChipVariant.h"
 #include "HalJaguar3.h"
@@ -27,7 +27,7 @@
  * (coex_runtime_loop) — see CLAUDE.md. */
 class RtlJaguar3Device : public IRtlDevice {
 public:
-  RtlJaguar3Device(RtlUsbAdapter device, Logger_t logger,
+  RtlJaguar3Device(RtlAdapter device, Logger_t logger,
                    jaguar3::ChipVariant variant = jaguar3::ChipVariant::C8822C,
                    devourer::DeviceConfig cfg = {});
   ~RtlJaguar3Device() override;
@@ -154,7 +154,7 @@ public:
   bool should_stop = false;
 
 private:
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   const devourer::DeviceConfig _cfg;
   Logger_t _logger;
   jaguar3::ChipVariant _variant;

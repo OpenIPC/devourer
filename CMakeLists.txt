@@ -25,6 +25,15 @@ option(DEVOURER_JAGUAR2_8822B "RTL8822BU (Jaguar2, rtl8822b, 2T2R USB)"         
 option(DEVOURER_JAGUAR2_8821C "RTL8811CU / 8821CU (Jaguar2, rtl8821c, 1T1R)"    ON)
 option(DEVOURER_JAGUAR3_8822C "RTL8812CU / 8822CU (Jaguar3, rtl8822c)"          ON)
 option(DEVOURER_JAGUAR3_8822E "RTL8812EU / 8822EU (Jaguar3, rtl8822e)"          ON)
+# PCIe transport (vfio-pci). Linux-only. The transport implements the HalMAC-
+# generation (Jaguar2/3) 88xx buffer-descriptor DMA rings; the RTL8821CE is
+# the only chip with a PCIe bring-up implemented + hardware-validated so far,
+# hence the DEVOURER_JAGUAR2_8821C requirement below. Other HalMAC PCIe parts
+# (RTL8822BE / RTL8822CE) could ride the same rings with per-chip HAL gates;
+# Jaguar1 PCIe parts (RTL8812AE/8821AE) CANNOT — they are pre-HalMAC silicon
+# with the older rtlwifi-style own-bit descriptor DMA, a different engine.
+# OFF by default — libusb-only builds are bit-identical.
+option(DEVOURER_PCIE          "PCIe transport via vfio-pci (Linux; RTL8821CE)"  OFF)
 
 # Compile-time diagnostics floor (src/logger.h). Calls below the floor —
 # including their argument expressions at DVR_TRACE/DVR_DEBUG sites — compile
@@ -67,6 +76,23 @@ if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3_8822C
         "DEVOURER_JAGUAR2_8822B / DEVOURER_JAGUAR2_8821C / DEVOURER_JAGUAR3_8822C "
         "/ DEVOURER_JAGUAR3_8822E.")
 endif()
+if(DEVOURER_PCIE)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "DEVOURER_PCIE=ON requires Linux (vfio-pci).")
+    endif()
+    if(NOT DEVOURER_JAGUAR2_8821C)
+        message(FATAL_ERROR
+            "DEVOURER_PCIE=ON requires DEVOURER_JAGUAR2_8821C=ON: the RTL8821CE "
+            "(Jaguar2 8821C) is currently the only chip with a PCIe bring-up "
+            "implemented and hardware-validated, so a PCIe build without it has "
+            "no usable chip. Not an architectural limit for the HalMAC families "
+            "— RTL8822BE (Jaguar2) / RTL8822CE (Jaguar3) could reuse the same "
+            "buffer-descriptor ring transport with per-chip HAL gates. Jaguar1 "
+            "PCIe parts (RTL8812AE/8821AE) are out of reach of this transport: "
+            "pre-HalMAC silicon with rtlwifi-style own-bit descriptor DMA, a "
+            "different engine entirely.")
+    endif()
+endif()
 
 # Find pkg-config and then use it to locate libusb.
 find_package(PkgConfig REQUIRED)
@@ -83,8 +109,12 @@ add_library(devourer
     src/Radiotap.c
     src/RadiotapBuilder.cpp
     src/RadiotapBuilder.h
-    src/RtlUsbAdapter.cpp
-    src/RtlUsbAdapter.h
+    src/RtlTransport.h
+    src/RtlAdapter.cpp
+    src/RtlAdapter.h
+    src/RtlUsbAdapter.h # compat alias shim (RtlUsbAdapter = RtlAdapter)
+    src/UsbTransport.cpp
+    src/UsbTransport.h
     src/UsbDeviceLock.cpp
     src/UsbDeviceLock.h
     src/UsbOpen.cpp
@@ -215,6 +245,13 @@ if(DEVOURER_JAGUAR2_8821C)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR2_8821C=1)
 endif()
 
+# --- PCIe transport (vfio-pci; see src/PcieTransport.h) ---
+if(DEVOURER_PCIE)
+    target_sources(devourer PRIVATE
+        src/PcieTransport.cpp src/PcieTransport.h)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_PCIE=1)
+endif()
+
 if(DEVOURER_JAGUAR3)
     # Shared Jaguar3 port (compiled when either variant is on). Phy8822cTables.cpp
     # and Halrf8822c.cpp also carry the make_jaguar3_*() dispatchers, so they are
@@ -253,6 +290,17 @@ if(DEVOURER_JAGUAR3_8822E)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR3_8822E=1)
 endif()
 
+
+# pcieprobe — staged PCIe bring-up driver for the RTL8821CE milestones
+# (chip-id/MMIO sanity -> power-on + EFUSE -> firmware DLFW). rxdemo's
+# DEVOURER_PCIE_BDF branch is the full-RX consumer; this probe validates the
+# layers below it one at a time. Linux/vfio only.
+if(DEVOURER_PCIE)
+    add_executable(pcieprobe
+        examples/pcieprobe/main.cpp
+    )
+    target_link_libraries(pcieprobe PUBLIC devourer)
+endif()
 
 add_executable(rxdemo
     examples/rx/main.cpp

@@ -12,6 +12,9 @@
 #include <vector>
 
 #if defined(_MSC_VER)
+  /* libusb.h explicitly: the pre-seam RtlUsbAdapter.h used to pull it in
+   * for every consumer; the bus-neutral RtlAdapter.h no longer does. */
+  #include <libusb.h>
   #include <windows.h>
   #include <process.h>
   typedef int pid_t;
@@ -40,9 +43,12 @@
 #if defined(DEVOURER_HAVE_JAGUAR3)
 #include "jaguar3/RtlJaguar3Device.h"
 #endif
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "SignalStop.h"
 #include "UsbOpen.h"
+#if defined(DEVOURER_HAVE_PCIE)
+#include "PcieTransport.h"
+#endif
 #include "WiFiDriver.h"
 #include "env_config.h"
 #include "RadiotapBuilder.h"
@@ -196,7 +202,17 @@ int main(int argc, char **argv) {
   long fd = (argc >= 2) ? std::strtol(argv[1], nullptr, 0) : 0;
   const bool termux_mode = (fd > 0);
 
-  if (termux_mode) {
+  /* DEVOURER_PCIE_BDF=0000:01:00.0 — drive a PCIe adapter (RTL8821CE) through
+   * the vfio transport instead of libusb (DEVOURER_PCIE builds; mirrors the RX
+   * demo). USB open/claim is skipped; libusb is still initialised so the
+   * (idle) event thread below runs unchanged. */
+  const char *pcie_bdf = std::getenv("DEVOURER_PCIE_BDF");
+
+  if (pcie_bdf) {
+    rc = libusb_init(&context);
+    if (rc < 0)
+      return rc;
+  } else if (termux_mode) {
     logger->info("Termux mode: wrapping fd {}", fd);
     libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
     libusb_set_option(NULL, LIBUSB_OPTION_WEAK_AUTHORITY);
@@ -280,31 +296,33 @@ int main(int argc, char **argv) {
     }
   }
 
-  libusb_device *device = libusb_get_device(handle);
-  libusb_device_descriptor desc{};
-  libusb_get_device_descriptor(device, &desc);
-  logger->info("Vendor/Product ID: {:04x}:{:04x}", desc.idVendor,
-               desc.idProduct);
-
-  devourer::Ev(*g_ev, "init.timing")
-      .f("stage", "txdemo.open_device")
-      .f("ms", ms_since_start());
-  /* Claim-before-reset (see src/UsbOpen.h): the exclusive interface claim is the
-   * primary guard — a second devourer on this adapter gets BUSY and we bail here
-   * before the reset, so it can't re-enumerate the adapter out from under the
-   * owner. Reset skipped in termux_mode (forked child shares the fd) and for
-   * DEVOURER_SKIP_RESET (warm pickup). */
   std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
-  rc = devourer::claim_interface_then_reset(
-      handle, 0, logger,
-      !termux_mode && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
-  devourer::Ev(*g_ev, "init.timing")
-      .f("stage", "txdemo.usb_reset")
-      .f("ms", ms_since_start());
-  if (rc != 0) {
-    libusb_close(handle);
-    libusb_exit(context);
-    return 1;
+  if (!pcie_bdf) {
+    libusb_device *device = libusb_get_device(handle);
+    libusb_device_descriptor desc{};
+    libusb_get_device_descriptor(device, &desc);
+    logger->info("Vendor/Product ID: {:04x}:{:04x}", desc.idVendor,
+                 desc.idProduct);
+
+    devourer::Ev(*g_ev, "init.timing")
+        .f("stage", "txdemo.open_device")
+        .f("ms", ms_since_start());
+    /* Claim-before-reset (see src/UsbOpen.h): the exclusive interface claim is
+     * the primary guard — a second devourer on this adapter gets BUSY and we
+     * bail here before the reset, so it can't re-enumerate the adapter out from
+     * under the owner. Reset skipped in termux_mode (forked child shares the
+     * fd) and for DEVOURER_SKIP_RESET (warm pickup). */
+    rc = devourer::claim_interface_then_reset(
+        handle, 0, logger,
+        !termux_mode && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
+    devourer::Ev(*g_ev, "init.timing")
+        .f("stage", "txdemo.usb_reset")
+        .f("ms", ms_since_start());
+    if (rc != 0) {
+      libusb_close(handle);
+      libusb_exit(context);
+      return 1;
+    }
   }
 
   /* USB-wire sentinel writes — gated behind DEVOURER_USB_SENTINEL=1. Used by
@@ -390,7 +408,7 @@ int main(int argc, char **argv) {
           if (reads <= 20 || (reads % 100) == 0) {
             char hex[64 * 2 + 1] = {0};
             /* Explicit template arg so MSVC's `windows.h` `min` macro doesn't
-             * mangle this — same pattern as RtlUsbAdapter.cpp:435. */
+             * mangle this — same pattern as RtlAdapter.cpp:435. */
             int hex_len = std::min<int>(actual, 32);
             for (int k = 0; k < hex_len; ++k) {
               static const char hd[] = "0123456789abcdef";
@@ -413,8 +431,27 @@ int main(int argc, char **argv) {
   }
 
   WiFiDriver wifi_driver{logger};
-  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
-                                               devourer_config_from_env());
+  std::unique_ptr<IRtlDevice> rtlDevice;
+#if defined(DEVOURER_HAVE_PCIE)
+  if (pcie_bdf) {
+    auto transport = devourer::PcieTransport::Open(pcie_bdf, logger);
+    if (!transport)
+      return 1;
+    devourer::Ev(*g_ev, "init.timing")
+        .f("stage", "txdemo.open_device")
+        .f("ms", ms_since_start());
+    rtlDevice = wifi_driver.CreateRtlDevicePcie(std::move(transport),
+                                                devourer_config_from_env());
+  } else
+#endif
+  {
+    if (pcie_bdf) {
+      logger->error("DEVOURER_PCIE_BDF set but this build has DEVOURER_PCIE=OFF");
+      return 1;
+    }
+    rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+                                            devourer_config_from_env());
+  }
   if (!rtlDevice) {
     /* Factory returns null when this chip's generation wasn't compiled in
      * (per-chip CMake options); it already logged which. */
@@ -1097,12 +1134,14 @@ int main(int argc, char **argv) {
   rtlDevice->Stop();
 
   /* Tolerant teardown: if the chip already dropped off the bus (e.g. a TX-path
-   * wedge), release_interface returns an error — log it, don't assert/abort. */
-  rc = libusb_release_interface(handle, 0);
-  if (rc != 0)
-    logger->info("libusb_release_interface rc={} (device already gone?)", rc);
-
-  libusb_close(handle);
+   * wedge), release_interface returns an error — log it, don't assert/abort.
+   * PCIe runs have no USB handle; the transport tears down with the device. */
+  if (handle != nullptr) {
+    rc = libusb_release_interface(handle, 0);
+    if (rc != 0)
+      logger->info("libusb_release_interface rc={} (device already gone?)", rc);
+    libusb_close(handle);
+  }
   libusb_exit(context);
   return 0;
 }

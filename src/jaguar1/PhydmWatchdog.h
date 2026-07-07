@@ -2,7 +2,7 @@
 #define PHYDM_WATCHDOG_H
 
 #include "EepromManager.h"
-#include "RtlUsbAdapter.h"
+#include "RtlAdapter.h"
 #include "logger.h"
 
 #include <atomic>
@@ -41,7 +41,7 @@ class RadioManagementModule;
  * canary capture sees post-watchdog state). */
 class PhydmWatchdog {
 public:
-  PhydmWatchdog(RtlUsbAdapter device,
+  PhydmWatchdog(RtlAdapter device,
                 std::shared_ptr<EepromManager> eepromManager,
                 RadioManagementModule *radio, Logger_t logger);
   ~PhydmWatchdog();
@@ -92,7 +92,7 @@ private:
   void DigTick(uint32_t fa_cnt);
   void DigWriteIgi(uint8_t igi);
 
-  RtlUsbAdapter _device;
+  RtlAdapter _device;
   std::shared_ptr<EepromManager> _eepromManager;
   RadioManagementModule *_radio;
   Logger_t _logger;

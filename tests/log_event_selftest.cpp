@@ -29,6 +29,9 @@ struct Capture {
     std::string s((size_t)n, '\0');
     if (std::fread(s.data(), 1, s.size(), f) != s.size())
       s.clear();
+    /* C requires a reposition between a read and a subsequent write on an
+     * update stream — without this the next emit is UB (msvcrt drops it). */
+    std::fseek(f, 0, SEEK_END);
     return s;
   }
 };

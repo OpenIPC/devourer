@@ -25,9 +25,14 @@ option(DEVOURER_JAGUAR2_8822B "RTL8822BU (Jaguar2, rtl8822b, 2T2R USB)"         
 option(DEVOURER_JAGUAR2_8821C "RTL8811CU / 8821CU (Jaguar2, rtl8821c, 1T1R)"    ON)
 option(DEVOURER_JAGUAR3_8822C "RTL8812CU / 8822CU (Jaguar3, rtl8822c)"          ON)
 option(DEVOURER_JAGUAR3_8822E "RTL8812EU / 8822EU (Jaguar3, rtl8822e)"          ON)
-# PCIe transport (vfio-pci). Linux-only; the only supported PCIe chip is the
-# RTL8821CE (the PCIe sibling of the RTL8821CU), so it requires the 8821C
-# variant. OFF by default — libusb-only builds are bit-identical.
+# PCIe transport (vfio-pci). Linux-only. The transport implements the HalMAC-
+# generation (Jaguar2/3) 88xx buffer-descriptor DMA rings; the RTL8821CE is
+# the only chip with a PCIe bring-up implemented + hardware-validated so far,
+# hence the DEVOURER_JAGUAR2_8821C requirement below. Other HalMAC PCIe parts
+# (RTL8822BE / RTL8822CE) could ride the same rings with per-chip HAL gates;
+# Jaguar1 PCIe parts (RTL8812AE/8821AE) CANNOT — they are pre-HalMAC silicon
+# with the older rtlwifi-style own-bit descriptor DMA, a different engine.
+# OFF by default — libusb-only builds are bit-identical.
 option(DEVOURER_PCIE          "PCIe transport via vfio-pci (Linux; RTL8821CE)"  OFF)
 
 # Compile-time diagnostics floor (src/logger.h). Calls below the floor —
@@ -77,8 +82,15 @@ if(DEVOURER_PCIE)
     endif()
     if(NOT DEVOURER_JAGUAR2_8821C)
         message(FATAL_ERROR
-            "DEVOURER_PCIE=ON requires DEVOURER_JAGUAR2_8821C=ON (the supported "
-            "PCIe chip, RTL8821CE, is the Jaguar2 8821C).")
+            "DEVOURER_PCIE=ON requires DEVOURER_JAGUAR2_8821C=ON: the RTL8821CE "
+            "(Jaguar2 8821C) is currently the only chip with a PCIe bring-up "
+            "implemented and hardware-validated, so a PCIe build without it has "
+            "no usable chip. Not an architectural limit for the HalMAC families "
+            "— RTL8822BE (Jaguar2) / RTL8822CE (Jaguar3) could reuse the same "
+            "buffer-descriptor ring transport with per-chip HAL gates. Jaguar1 "
+            "PCIe parts (RTL8812AE/8821AE) are out of reach of this transport: "
+            "pre-HalMAC silicon with rtlwifi-style own-bit descriptor DMA, a "
+            "different engine entirely.")
     endif()
 endif()
 

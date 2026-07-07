@@ -64,10 +64,10 @@ stdbuf -oL -eL env DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$CHANNEL" "$TXDEMO" 
 # ~10s to init and occasionally fails to claim on the first try, which would
 # otherwise leave every device's capture empty.
 for _ in $(seq 1 30); do
-    grep -q 'TX #.* rc=1' "$TXLOG" 2>/dev/null && break
+    grep -q '"ev":"tx.frame".*"rc":1' "$TXLOG" 2>/dev/null && break
     sleep 1
 done
-grep -q 'TX #.* rc=1' "$TXLOG" 2>/dev/null || {
+grep -q '"ev":"tx.frame".*"rc":1' "$TXLOG" 2>/dev/null || {
     echo "TX beacon did not confirm an inject within 30s — check $TXLOG" >&2; exit 3; }
 echo "== TX beacon confirmed injecting =="
 
@@ -87,7 +87,7 @@ for dev in "${DEVS[@]}"; do
     kill "$rxpid" 2>/dev/null || true
     wait "$rxpid" 2>/dev/null || true
 
-    frames="$(grep -c '<devourer-rxpath>' "$cap" || true)"
+    frames="$(grep -cF '"ev":"rx.path"' "$cap" || true)"
     echo "captured ${frames:-0} canonical-SA frames"
     if [ "${frames:-0}" -gt 0 ]; then
         "$PY" "$HERE/antenna_decorrelation.py" --metric "$METRIC" "$cap"

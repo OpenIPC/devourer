@@ -39,7 +39,7 @@ struct rx_pkt_attrib
      * for the frame. With the seq_num just above it, a downstream layer
      * can drop duplicates by seq and measure one-way latency by diffing
      * the chip's TSF against its own wall clock. Populated by
-     * FrameParser; surfaced through examples/rx/main.cpp's <devourer-stream>. */
+     * FrameParser; surfaced through examples/rx/main.cpp's rx.frame event. */
     uint32_t tsfl;
     uint8_t data_rate;
     uint8_t bw;

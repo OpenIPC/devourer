@@ -42,7 +42,7 @@ build/doctor --bus 3 --port 2.3.3  # topology select (two same-PID adapters)
    (same trap as [startup-time](startup-time.md) benchmarking).
 
 Verdict → exit code: `HEALTHY`=0, `SUSPECT`=1, `FAILING`=2 (3 = tool /
-open error), plus a `<devourer-doctor>` machine line and per-reason
+open error), plus a `doctor.verdict` machine event and per-reason
 text. The classifier is pure logic (`src/AdapterHealth.h`, ctest'd in
 `tests/adapter_health_selftest.cpp`); grading rules and their
 rationale live next to the code.

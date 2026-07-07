@@ -895,7 +895,7 @@ void FirmwareManager::_SetDownLoadFwRsvdPagePkt_8814A(
     _logger->error("8814A RSVD chunk TX failed: sent={} of {} bytes", sent,
                    (int)total);
   } else {
-    _logger->debug("8814A RSVD chunk TX OK: {} bytes", sent);
+    DVR_DEBUG(_logger, "8814A RSVD chunk TX OK: {} bytes", sent);
   }
 }
 

@@ -34,22 +34,31 @@ CANARY_FOOTER = "=== END DEVOURER_DUMP_CANARY ==="
 
 
 def wrap(body: str) -> str:
+    """Kernel-style capture: bare `KIND 0xADDR = 0xVALUE` lines."""
     return f"{CANARY_HEADER}\n{textwrap.dedent(body).strip()}\n{CANARY_FOOTER}\n"
 
 
+def dwrap(body: str) -> str:
+    """Devourer-style capture: raw stderr with the `devourer [I] `
+    human-diagnostic prefix on every line (dump + envelope markers)."""
+    lines = [CANARY_HEADER, *textwrap.dedent(body).strip().splitlines(),
+             CANARY_FOOTER]
+    return "".join(f"devourer [I] {l.strip()}\n" for l in lines)
+
+
 def test_clean_diff_exits_zero(tmp_path: Path) -> None:
-    canary = wrap("""
+    body = """
         BB 0x808 = 0x3E028233
         MAC 0x040 = 0x000C0000
         RF[A] 0x00 = 0x33EA9
-    """)
-    res = run_diff(canary, canary, tmp_path=tmp_path)
+    """
+    res = run_diff(wrap(body), dwrap(body), tmp_path=tmp_path)
     assert res.returncode == 0, res.stdout + res.stderr
 
 
 def test_real_divergence_exits_one(tmp_path: Path) -> None:
     kernel = wrap("BB 0x808 = 0x3E028233")
-    devourer = wrap("BB 0x808 = 0x3E028299")
+    devourer = dwrap("BB 0x808 = 0x3E028299")
     res = run_diff(kernel, devourer, tmp_path=tmp_path)
     assert res.returncode == 1, res.stdout + res.stderr
     assert "BB 0x808" in res.stdout
@@ -60,7 +69,7 @@ def test_ephemeral_mac_counter_masked(tmp_path: Path) -> None:
     """MAC 0x550 is a beacon-window counter; differences should be
     masked out and exit 0."""
     kernel = wrap("MAC 0x550 = 0x00001019")
-    devourer = wrap("MAC 0x550 = 0x00001010")
+    devourer = dwrap("MAC 0x550 = 0x00001010")
     res = run_diff(kernel, devourer, tmp_path=tmp_path)
     assert res.returncode == 0, res.stdout + res.stderr
 
@@ -68,7 +77,7 @@ def test_ephemeral_mac_counter_masked(tmp_path: Path) -> None:
 def test_ephemeral_rf_thermal_masked(tmp_path: Path) -> None:
     """RF[A] 0x42 is the thermal-meter sample register."""
     kernel = wrap("RF[A] 0x42 = 0x0B160")
-    devourer = wrap("RF[A] 0x42 = 0x098F8")
+    devourer = dwrap("RF[A] 0x42 = 0x098F8")
     res = run_diff(kernel, devourer, tmp_path=tmp_path)
     assert res.returncode == 0, res.stdout + res.stderr
 
@@ -238,17 +247,30 @@ def test_empty_file_exits_two(tmp_path: Path) -> None:
 
 
 def test_lines_outside_envelope_ignored(tmp_path: Path) -> None:
-    """Devourer logs `<devourer>...` lines that the awk extractor
-    strips. If extra noise leaks in via a different path, the parser
-    should still only consider the envelope."""
+    """A raw devourer stderr capture carries other `devourer [X] `
+    diagnostic lines around the dump envelope. The parser should
+    strip the prefix but still only consider the envelope."""
     kernel = wrap("BB 0x808 = 0x3E028233")
     # Extra junk before + after the envelope.
     devourer = (
-        "spurious log line that should be ignored\n"
-        "BB 0x808 = 0xDEADBEEF\n"      # outside envelope — ignored
-        "MAC 0x040 = 0xCAFEBABE\n"     # outside envelope — ignored
-        + wrap("BB 0x808 = 0x3E028233")
+        "devourer [I] spurious diagnostic that should be ignored\n"
+        "devourer [W] BB 0x808 = 0xDEADBEEF\n"   # outside envelope — ignored
+        "MAC 0x040 = 0xCAFEBABE\n"               # outside envelope — ignored
+        + dwrap("BB 0x808 = 0x3E028233")
         + "trailing junk\n"
+    )
+    res = run_diff(kernel, devourer, tmp_path=tmp_path)
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_prefix_stripped_any_level_letter(tmp_path: Path) -> None:
+    """Prefix stripping is liberal: any `devourer [X] ` level letter
+    (T/D/I/W/E) parses, and pre-stripped devourer captures still work."""
+    kernel = wrap("BB 0x808 = 0x3E028233")
+    devourer = (
+        "devourer [D] === DEVOURER_DUMP_CANARY (post channel-set ch=6) ===\n"
+        "devourer [T] BB 0x808 = 0x3E028233\n"
+        "devourer [D] === END DEVOURER_DUMP_CANARY ===\n"
     )
     res = run_diff(kernel, devourer, tmp_path=tmp_path)
     assert res.returncode == 0, res.stdout + res.stderr

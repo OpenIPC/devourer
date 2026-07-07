@@ -3,8 +3,8 @@
 monitor interface.
 
 The frame mirrors examples/tx/main.cpp's hardcoded beacon: a probe request with
-SA = 57:42:75:05:d6:00. rxdemo and txdemo both grep for
-this SA on RX (the `<devourer-tx-hit>` matcher) so the same beacon works
+SA = 57:42:75:05:d6:00. rxdemo and txdemo both match
+this SA on RX (the `rx.txhit` event matcher) so the same beacon works
 as the TX source whether the RX side is devourer or tcpdump.
 
 Run from tests/regress.py's kernel-TX cell:
@@ -22,7 +22,7 @@ import time
 from scapy.all import RadioTap, Dot11, Raw, sendp
 
 # Source MAC matches the canonical beacon SA in examples/tx/main.cpp and the
-# `<devourer-tx-hit>` matcher in examples/rx/main.cpp. Don't change without
+# `rx.txhit` event matcher in examples/rx/main.cpp. Don't change without
 # updating both sides.
 CANONICAL_SA = "57:42:75:05:d6:00"
 

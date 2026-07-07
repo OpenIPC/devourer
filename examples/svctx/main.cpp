@@ -97,6 +97,7 @@ static const char* mode_str(const devourer::TxMode& m) {
 
 int main(int argc, char** argv) {
   auto logger = std::make_shared<Logger>();
+  apply_logging_env(*logger); /* DEVOURER_LOG_LEVEL / DEVOURER_EVENTS / ... */
 
   size_t mtu = 1400;
   long gap_us = 2000;
@@ -225,11 +226,16 @@ int main(int argc, char** argv) {
         if (gap_us > 0)
           std::this_thread::sleep_for(std::chrono::microseconds(gap_us));
       }
+      /* Per-layer injection counters. JSON keys are lowercase (t3plus stands
+       * in for "T3+": temporal layers 3..7 aggregated). */
       if (++frames % 200 == 0) {
-        printf("<svc>frames=%ld crit=%ld T0=%ld T1=%ld T2=%ld T3+=%ld\n", frames,
-               sent[8], sent[0], sent[1], sent[2],
-               sent[3] + sent[4] + sent[5] + sent[6] + sent[7]);
-        fflush(stdout);
+        devourer::Ev(logger->events(), "svc.stats")
+            .f("frames", frames)
+            .f("crit", sent[8])
+            .f("t0", sent[0])
+            .f("t1", sent[1])
+            .f("t2", sent[2])
+            .f("t3plus", sent[3] + sent[4] + sent[5] + sent[6] + sent[7]);
       }
     }
   }

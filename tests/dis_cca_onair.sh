@@ -10,8 +10,8 @@
 #
 # The test: ONE 8822EU DUT, ONE swept B210 AWGN interferer, ONE marginal beacon.
 # A/B is DEVOURER_DIS_CCA off vs on at each noise gain. delivery = the final
-# <devourer-tx-hit>hits (canonical-SA beacons decoded); we also log median IGI +
-# OFDM false-alarm from <devourer-energy>.
+# rx.txhit event's hits (canonical-SA beacons decoded); we also log median IGI +
+# OFDM false-alarm from the rx.energy events.
 #
 # MEASURED RESULT (8822EU, 5-point AWGN sweep 46..76 dB): NULL. The MAC
 # EDCCA-disable (DEVOURER_DIS_CCA=1) leaves delivery within 1% at every noise
@@ -82,31 +82,34 @@ run_cell() { # $1=gain $2=tag $3=discca(0|1)
     sudo -n pkill -f sdr_interferer 2>/dev/null
     sleep 3
     python3 - "$OUT/$tag.log" <<'PYEOF'
-import re, statistics, sys
-log = open(sys.argv[1], errors="replace").read()
+import json, statistics, sys
 hits = 0
-for m in re.finditer(r"<devourer-tx-hit>.*hits=(\d+)", log):
-    hits = max(hits, int(m.group(1)))
 igis, fas = [], []
-for m in re.finditer(r"<devourer-energy>.*", log):
-    s = m.group(0)
-    gi = re.search(r"\bigi=(-?\d+)", s)
-    fo = re.search(r"\bfa_ofdm=(-?\d+|-)", s)
-    if gi and gi.group(1) != "-":
-        igis.append(int(gi.group(1)))
-    if fo and fo.group(1) not in ("-",):
-        fas.append(int(fo.group(1)))
+for line in open(sys.argv[1], errors="replace"):
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        continue
+    name = ev.get("ev")
+    if name == "rx.txhit":
+        hits = max(hits, int(ev.get("hits", 0)))
+    elif name == "rx.energy":
+        if ev.get("igi") is not None:
+            igis.append(int(ev["igi"]))
+        if ev.get("fa_ofdm") is not None:
+            fas.append(int(ev["fa_ofdm"]))
 im = int(statistics.median(igis)) if igis else -1
 fm = int(statistics.median(fas)) if fas else -1
 print(f"{hits} {im} {fm}")
 PYEOF
 }
 
-# Confirm the knob actually lands its registers once (no interferer) before the sweep.
+# Confirm the knob actually lands its registers once (no interferer) before the
+# sweep. The "MAC EDCCA DISABLED" line is a human diagnostic on stderr.
 echo "== register-landing check (no interferer) =="
 sudo -n env DEVOURER_PID="$DUT_PID" DEVOURER_VID="$DUT_VID" DEVOURER_CHANNEL="$CH" \
-    DEVOURER_DIS_CCA=1 timeout 6 "$ROOT/build/rxdemo" 2>&1 \
-    | grep -m1 "CCA/EDCCA" || echo "  WARN: no CCA/EDCCA log line seen"
+    DEVOURER_DIS_CCA=1 timeout 6 "$ROOT/build/rxdemo" 2>&1 >/dev/null \
+    | grep -m1 "MAC EDCCA" || echo "  WARN: no MAC EDCCA diagnostic seen"
 
 printf "%-8s | %-22s | %-22s\n" "gain_dB" "dis_cca=0 (hits/igi/fa)" "dis_cca=1 (hits/igi/fa)"
 printf -- "---------+------------------------+------------------------\n"

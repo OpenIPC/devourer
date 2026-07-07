@@ -200,7 +200,7 @@ DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 DEVOURER_TX_RATE=VHT2SS_MCS0 \
   DEVOURER_TX_NDPA_RA=<beamformee-MAC> DEVOURER_TX_NDPA=1 \
   DEVOURER_BF_ARM_SOUNDER=1 DEVOURER_TX_WITH_RX=thread \
   DEVOURER_BF_DETECT_REPORT=4 DEVOURER_TX_GAP_US=4000 \
-  ./build/txdemo 2>/dev/null | grep '<devourer-bf-report-raw>' > cap.raw
+  ./build/txdemo 2>/dev/null | grep -F '"ev":"bf.report_raw"' > cap.raw
 ```
 
 Beamformee (the client), on its adapter:

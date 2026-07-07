@@ -65,7 +65,7 @@ multipath-desense regime.
    `rxdemo` classifies each window and says so in plain language:
 
    ```
-   <devourer-linkhealth>verdict=SATURATED rssi_dbm=-33 snr_db=19.5 evm_db=-22.5
+   {"ev":"link.health","verdict":"SATURATED","rssi_dbm":-33,"snr_db":19.5,"evm_db":-22.5,
      cause="strong RSSI but poor EVM — receiver front-end overload and/or the
      strong signal self-jamming via reflections (near-field). SNR alone can
      look fine here"
@@ -78,7 +78,7 @@ multipath-desense regime.
    antenna is the answer. If it says `SATURATED`, the answer is the opposite —
    and no amount of antenna tuning will fix a receiver that is clipping.
 
-## The link doctor (`<devourer-linkhealth>`)
+## The link doctor (the `link.health` event)
 
 `src/LinkHealth.h` maps the RX sensor tuple to one of: `SATURATED`,
 `INTERFERENCE`, `WEAK`, `MARGINAL`, `HEALTHY`, `NO_SIGNAL`, each with a

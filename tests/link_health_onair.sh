@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hardware validation for the link-health classifier (<devourer-linkhealth>).
+# Hardware validation for the link-health classifier (link.health events).
 # The classifier's core job is the near-field story from the brainstorm: tell
 # "strong but self-jamming, BACK OFF power" apart from a clean link. That is
 # the A/B this validates on-air, at a fixed short bench distance:
@@ -49,7 +49,7 @@ echo "== building =="
 cmake --build "$ROOT/build" -j --target rxdemo txdemo >/dev/null || exit 1
 
 # Run a ground-RX window against a beacon at TX index $1 (+ optional interferer
-# gain in $2); echo the MODAL <devourer-linkhealth> verdict over the window.
+# gain in $2); echo the MODAL link.health verdict over the window.
 run_regime() { # $1=tx_idx $2=jam_gain("" = none) $3=tag
     local idx="$1" jam="$2" tag="$3" jampid=""
     if [ -n "$jam" ]; then
@@ -74,8 +74,9 @@ run_regime() { # $1=tx_idx $2=jam_gain("" = none) $3=tag
     sleep 2
     # Modal verdict across the window's linkhealth lines (skip the first, it can
     # land during TX bring-up before frames arrive).
-    grep -oE "<devourer-linkhealth>verdict=[A-Z_]+" "$OUT/$tag.log" \
-        | sed 's/.*verdict=//' | tail -n +2 | sort | uniq -c | sort -rn | head -1 \
+    grep -F '"ev":"link.health"' "$OUT/$tag.log" \
+        | grep -o '"verdict":"[A-Z_]*"' | cut -d'"' -f4 \
+        | tail -n +2 | sort | uniq -c | sort -rn | head -1 \
         | awk '{print $2" ("$1" windows)"}'
 }
 

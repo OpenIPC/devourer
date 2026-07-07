@@ -52,7 +52,9 @@ cmake --build "$ROOT/build" -j --target txdemo >/dev/null
 
 # Run the demo to: InitWrite(INIT@BW) [full], then hop to TARGET@BW via the
 # selected path. One full round of [INIT,TARGET] reaches TARGET last; the final
-# canary block is TARGET's. DUMP_CANARY logs to the demo's stdout/err.
+# canary block is TARGET's. DUMP_CANARY is a stderr diagnostic ("devourer [I] "
+# prefixed "KIND 0xADDR = 0xVALUE" lines between the === markers) — captured
+# below with 2>&1; the extraction grep is prefix-agnostic.
 run_path() {  # $1 = HOP_FAST value, $2 = output file
     sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$INIT" \
         ${TX_VID:+DEVOURER_VID="$TX_VID"} \

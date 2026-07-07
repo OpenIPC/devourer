@@ -4,9 +4,9 @@ station's RX telemetry into a margin-vs-lever curve and a recommended operating
 point.
 
 The emitter (txdemo with DEVOURER_CONT_TX + a DEVOURER_TX_PWR ramp)
-prints one `<devourer-txpwr>index=N` marker per step; the ground station
-(rxdemo with DEVOURER_RX_ENERGY_MS) prints `<devourer-energy>` (per-frame
-SNR aggregate) and `<devourer-nhm>` (frame-free power histogram) lines. Both are
+emits one `txpwr.set` event (index=N) per step; the ground station
+(rxdemo with DEVOURER_RX_ENERGY_MS) emits `rx.energy` (per-frame
+SNR aggregate) and `rx.nhm` (frame-free power histogram) events. Both are
 captured with a host-side arrival timestamp (prefixed `<epoch> `), so this aligns
 them by wall-clock — no cross-process clock sync — binning each ground sample
 into the emitter step window it falls in.
@@ -16,7 +16,7 @@ operating point: the *minimum* TX-power index whose ground SNR clears
 --target-snr (the energy-min reflex: least power that holds the margin).
 
 The same analyzer serves the MCS-headroom axis: when the emitter steps its rate
-(DEVOURER_TX_MCS_SWEEP) it prints <devourer-contx>mcs=<spec> markers instead, and
+(DEVOURER_TX_MCS_SWEEP) it emits `tx.contx` events (mcs=<spec>) instead, and
 this reports per-MCS ground SNR + frame delivery and picks the *highest* rate that
 still clears the floor (the highest modulation the link holds). The axis is auto-
 detected from whichever marker the emitter log carries.
@@ -30,13 +30,9 @@ import re
 import statistics
 import sys
 
+from devourer_events import parse_event
+
 TS = re.compile(r"^(\d+\.\d+)\s+(.*)$")
-STEP_PWR = re.compile(r"<devourer-txpwr>index=(\d+)")
-STEP_MCS = re.compile(r"<devourer-contx>mcs=(\S+)")
-ENERGY = re.compile(r"<devourer-energy>(.*)")
-NHM = re.compile(r"<devourer-nhm>.*peak=(\d+)")
-THERMAL = re.compile(r"<devourer-thermal>raw=(\d+)")
-KV = re.compile(r"(\w+)=(-?\d+)")
 
 
 def read_stamped(path):
@@ -67,14 +63,15 @@ def main() -> int:
     steps = []           # [(t_start, label), ...]
     axis = None
     for t, text in emit:
-        mp = STEP_PWR.search(text)
-        mm = STEP_MCS.search(text)
-        if mp:
+        ev = parse_event(text)
+        if ev is None:
+            continue
+        if ev["ev"] == "txpwr.set":
             axis = axis or "power"
-            steps.append((t, mp.group(1)))
-        elif mm:
+            steps.append((t, str(ev["index"])))
+        elif ev["ev"] == "tx.contx":
             axis = axis or "mcs"
-            steps.append((t, mm.group(1)))
+            steps.append((t, str(ev["mcs"])))
     if not steps:
         print("no step markers in emitter log — set DEVOURER_TX_PWR_START/STOP/STEP "
               "(power axis) or DEVOURER_TX_MCS_SWEEP (MCS axis)", file=sys.stderr)
@@ -84,14 +81,15 @@ def main() -> int:
     samples = []
     last_nhm = None
     for t, text in ground:
-        mn = NHM.search(text)
-        if mn:
-            last_nhm = int(mn.group(1))
+        ev = parse_event(text)
+        if ev is None:
             continue
-        me = ENERGY.search(text)
-        if me:
-            kv = dict((k, int(v)) for k, v in KV.findall(me.group(1)))
-            samples.append((t, kv.get("snr_mean"), kv.get("frames", 0), last_nhm))
+        if ev["ev"] == "rx.nhm":
+            last_nhm = ev.get("peak")
+            continue
+        if ev["ev"] == "rx.energy":
+            samples.append((t, ev.get("snr_mean"),
+                            ev.get("frames") or 0, last_nhm))
 
     # Assign each ground sample to the step window it falls in, accumulating by
     # label (the sweep may cycle through the levels more than once).
@@ -136,8 +134,8 @@ def main() -> int:
     # (DEVOURER_THERMAL_POLL_MS on the emitter). Continuous stepping at full duty
     # is the worst-case heat; this reports how far the PA drifted, bounding the
     # power/duty a controller may sustain (the drone's local safety override).
-    raws = [int(m.group(1)) for _, text in emit
-            for m in [THERMAL.search(text)] if m]
+    raws = [int(ev["raw"]) for _, text in emit
+            for ev in [parse_event(text, "thermal")] if ev]
     if raws:
         print(f"\n# PA thermal (emitter raw meter): {raws[0]} -> {raws[-1]} "
               f"units over the sweep (range {min(raws)}..{max(raws)}, "

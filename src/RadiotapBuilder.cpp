@@ -228,8 +228,9 @@ TxMode parse_tx_mode_str(const std::string& spec) {
     start = slash + 1;
   }
   if (tokens.empty() || tokens[0].empty() || !parse_rate_token(tokens[0], &cfg)) {
+    /* free function, no Logger handle — hand-rolled diagnostic-plane line */
     std::fprintf(stderr,
-                 "<tx-mode>warning: unrecognised TX rate '%s', "
+                 "devourer [W] unrecognised TX rate '%s', "
                  "falling back to 6M legacy\n", spec.c_str());
     return TxMode{};
   }
@@ -243,7 +244,7 @@ TxMode parse_tx_mode_str(const std::string& spec) {
       cfg.bw_mhz = static_cast<uint8_t>(std::atoi(t.c_str()));
     else if (!t.empty())
       std::fprintf(stderr,
-                   "<tx-mode>warning: ignoring unrecognised TX-mode token "
+                   "devourer [W] ignoring unrecognised TX-mode token "
                    "'%s'\n", t.c_str());
   }
   return cfg;

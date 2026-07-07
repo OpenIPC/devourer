@@ -10,13 +10,13 @@ measures the decorrelation that a given antenna layout actually delivers,
 instead of assuming it.
 
 Input is the per-chain PHY link metric emitted by ``rxdemo`` under
-``DEVOURER_RX_ALLPATHS=1`` — one ``<devourer-rxpath>`` line per received frame:
+``DEVOURER_RX_ALLPATHS=1`` — one ``rx.path`` JSONL event per received frame:
 
-    <devourer-rxpath>seq=N rssi=a,b,c,d snr=a,b,c,d evm=a,b,c,d
+    {"ev":"rx.path","seq":N,"rssi":[a,b,c,d],"snr":[a,b,c,d],"evm":[a,b,c,d]}
 
 Paths C/D are meaningful only on the 8814AU (4T4R); on 2T2R parts they read 0
-and are dropped automatically. The two-path ``<devourer-stream>`` line is also
-parsed as a fallback (rssi=a,b / snr=a,b) so a 2T2R capture works with no demo
+and are dropped automatically. The two-path ``rx.frame`` event is also parsed
+as a fallback (rssi/snr arrays of 2) so a 2T2R capture works with no demo
 flag.
 
 What it computes, per capture:
@@ -46,19 +46,11 @@ run_antenna_decorrelation.sh.
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 
 import numpy as np
 
-# <devourer-rxpath>seq=12 rssi=40,38,0,0 snr=25,24,0,0 evm=10,11,0,0
-_RXPATH = re.compile(
-    r"<devourer-rxpath>seq=(\d+)\s+rssi=([\-\d,]+)\s+snr=([\-\d,]+)\s+evm=([\-\d,]+)"
-)
-# fallback: canonical two-path stream line
-_STREAM = re.compile(
-    r"<devourer-stream>.*?rssi=(-?\d+),(-?\d+)\s+evm=(-?\d+),(-?\d+)\s+snr=(-?\d+),(-?\d+)"
-)
+from devourer_events import parse_event
 
 # Correlation bands for the verdict (worst pairwise |rho|).
 GOOD, MODERATE = 0.3, 0.7
@@ -78,20 +70,15 @@ def parse(lines, metric: str = "rssi"):
 
     Trailing all-zero columns (idle paths C/D on a 2T2R part) are trimmed.
     """
-    mi = {"rssi": 0, "snr": 1, "evm": 2}[metric]
     rows: list[list[float]] = []
     for ln in lines:
-        m = _RXPATH.search(ln)
-        if m:
-            triplet = m.groups()[1:]  # rssi, snr, evm CSV strings
-            vals = [int(x) for x in triplet[mi].split(",")]
-            rows.append([float(v) for v in vals])
+        ev = parse_event(ln)
+        if ev is None:
             continue
-        m = _STREAM.search(ln)
-        if m:
-            g = [int(x) for x in m.groups()]
-            pick = {"rssi": g[0:2], "snr": g[4:6], "evm": g[2:4]}[metric]
-            rows.append([float(v) for v in pick])
+        # per-chain event (DEVOURER_RX_ALLPATHS=1), else the canonical two-path
+        # frame event as a fallback — both carry rssi/snr/evm arrays.
+        if ev["ev"] in ("rx.path", "rx.frame") and metric in ev:
+            rows.append([float(v) for v in ev[metric]])
     if not rows:
         return np.empty((0, 0))
     width = max(len(r) for r in rows)
@@ -305,12 +292,14 @@ def self_test() -> int:
     print(f"[{status}] 1%-outage MRC gain: independent={indep:.2f} dB > "
           f"correlated(rho=.9)={corr:.2f} dB")
 
-    # 4) parser round-trips both line formats
+    # 4) parser round-trips both event formats
     sample = [
-        "<devourer-rxpath>seq=1 rssi=40,38,20,18 snr=25,24,10,9 evm=5,6,7,8",
+        '{"ev":"rx.path","seq":1,"rssi":[40,38,20,18],"snr":[25,24,10,9],'
+        '"evm":[5,6,7,8]}',
         "junk line",
-        "<devourer-stream>rate=4 len=100 crc_err=0 icv_err=0 rssi=41,39 "
-        "evm=5,6 snr=26,25 seq=2 tsfl=0 bw=0 stbc=0 ldpc=0 sgi=0 body=deadbeef",
+        '{"ev":"rx.frame","rate":4,"len":100,"crc":0,"icv":0,"rssi":[41,39],'
+        '"evm":[5,6],"snr":[26,25],"seq":2,"tsfl":0,"bw":0,"stbc":0,"ldpc":0,'
+        '"sgi":0,"body":"deadbeef"}',
     ]
     a = parse(sample, "rssi")
     status = "ok" if a.shape == (2, 4) else "FAIL"  # stream row zero-padded to 4
@@ -347,7 +336,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input", nargs="?", default="-",
-                    help="capture file with <devourer-rxpath> lines, or '-' for stdin")
+                    help="capture file with rx.path events, or '-' for stdin")
     ap.add_argument("--metric", choices=("rssi", "snr", "evm"), default="rssi",
                     help="per-chain metric to analyse (default rssi)")
     ap.add_argument("--self-test", action="store_true",
@@ -365,7 +354,7 @@ def main() -> int:
 
     arr = parse(lines, args.metric)
     if arr.size == 0:
-        print("no <devourer-rxpath> or <devourer-stream> lines found — did you "
+        print("no rx.path or rx.frame events found — did you "
               "run rxdemo with DEVOURER_RX_ALLPATHS=1 (and receive "
               "frames)?", file=sys.stderr)
         return 2

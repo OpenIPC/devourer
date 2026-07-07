@@ -142,3 +142,38 @@ devourer::TxMode devourer_tx_mode_from_env() {
   const char *raw = std::getenv("DEVOURER_TX_RATE");
   return devourer::parse_tx_mode_str(raw ? raw : "");
 }
+
+void apply_logging_env(Logger &logger) {
+  if (const char *e = std::getenv("DEVOURER_LOG_LEVEL")) {
+    if (str_ieq(e, "trace"))
+      logger.set_level(Logger::Level::Trace);
+    else if (str_ieq(e, "debug"))
+      logger.set_level(Logger::Level::Debug);
+    else if (str_ieq(e, "info"))
+      logger.set_level(Logger::Level::Info);
+    else if (str_ieq(e, "warn"))
+      logger.set_level(Logger::Level::Warn);
+    else if (str_ieq(e, "error"))
+      logger.set_level(Logger::Level::Error);
+    else if (str_ieq(e, "silent"))
+      logger.set_level(Logger::Level::Silent);
+    else
+      std::fprintf(stderr, "devourer [W] DEVOURER_LOG_LEVEL='%s' unknown — "
+                           "keeping default\n", e);
+  }
+
+  const auto flush = env_flag("DEVOURER_EVENT_FLUSH") ||
+                             std::getenv("DEVOURER_EVENT_FLUSH") == nullptr
+                         ? devourer::EventSink::FlushPolicy::EveryLine
+                         : devourer::EventSink::FlushPolicy::Never;
+  if (const char *e = std::getenv("DEVOURER_EVENTS")) {
+    if (str_ieq(e, "off"))
+      logger.events().disable();
+    else if (str_ieq(e, "stderr"))
+      logger.events().configure(stderr, flush);
+    else
+      logger.events().configure(stdout, flush);
+  } else {
+    logger.events().configure(stdout, flush);
+  }
+}

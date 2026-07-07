@@ -306,7 +306,7 @@ every generation overrides it with a lean path built from the tricks above:
 | RTL8822CU (Jaguar3) | ~12 ms | **~1.9 ms** | ~0.21 ms | 9 |
 | RTL8812EU (Jaguar3) | ~12 ms | **~2.4 ms** | ~0.27 ms | 9 |
 
-(Median `<devourer-hop>switch_us` over a 1/6/11 hop set; per-stage numbers from
+(Median `hop.dwell` switch_us over a 1/6/11 hop set; per-stage numbers from
 `DEVOURER_HOP_PROF=1`. Every hop microsecond is USB round-trips: one register
 read or write is one synchronous control transfer, whose latency is a property
 of the chip's EP0 handling — it varies 5× across the family — so the only code

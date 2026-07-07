@@ -119,7 +119,7 @@ verify_flood() { # $1 = tag ; returns 0 if radiating
     DEVOURER_USB_BUS=9 DEVOURER_USB_PORT=1.3 \
     "$RXDEMO" > "$vlog" 2>&1
   local hits
-  hits=$(grep -o 'hits=[0-9]*' "$vlog" | tail -1 | cut -d= -f2)
+  hits=$(grep -o '"hits":[0-9]*' "$vlog" | tail -1 | cut -d: -f2)
   hits="${hits:-0}"
   log "flood verify ($1): hits=$hits (need >=$MIN_VERIFY_HITS)"
   [ "$hits" -ge "$MIN_VERIFY_HITS" ]
@@ -196,9 +196,9 @@ for i in $(seq 1 "$REPS"); do
     mac_state=$(grep -o "MAC has already power on\|MAC has not been powered on yet" "$RLOG" | tail -1)
     eeprom=$(grep -o "EEPROM ID=0x[0-9A-Fa-f]*" "$RLOG" | tail -1)
     fwrdy=$(grep -o "Polling FW ready OK\|Polling FW ready Fail" "$RLOG" | tail -1)
-    pon=$(grep "init-timing: hal_init.power_on" "$RLOG" | tail -1 | grep -o '= [0-9]* ms' | tr -dc 0-9)
-    tot=$(grep "init-timing: hal_init.total" "$RLOG" | tail -1 | grep -o '= [0-9]* ms' | tr -dc 0-9)
-    hits=$(grep -o 'hits=[0-9]*' "$RLOG" | tail -1 | cut -d= -f2); hits="${hits:-0}"
+    pon=$(grep -o '"ev":"init.timing","stage":"hal_init.power_on","ms":[0-9]*' "$RLOG" | tail -1 | grep -o '[0-9]*$')
+    tot=$(grep -o '"ev":"init.timing","stage":"hal_init.total","ms":[0-9]*' "$RLOG" | tail -1 | grep -o '[0-9]*$')
+    hits=$(grep -o '"hits":[0-9]*' "$RLOG" | tail -1 | cut -d: -f2); hits="${hits:-0}"
     fail=$(grep -c "InitLLTTable8812A failed\|InitPowerOn: run power on flow fail\|rtw_hal_init: fail" "$RLOG")
 
     if [ "$fail" -gt 0 ]; then v="INIT_FAIL(power_on=${pon:-?}ms)"

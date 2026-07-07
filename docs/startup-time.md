@@ -9,9 +9,9 @@ RF-quiet rooms) that make naive startup benchmarks lie.
 "Ready" is measured, not inferred:
 
 - **devourer RX** — `exec → first 802.11 frame delivered` (`rxdemo`,
-  its `init-timing: demo.first_rx_frame` line).
+  its `init.timing` event, stage `demo.first_rx_frame`).
 - **devourer TX** — `exec → first bulk-OUT submitted` (`txdemo`,
-  `init-timing: txdemo.first_tx_submit`; includes the demo's settle sleep —
+  the `txdemo.first_tx_submit` timing stage; includes the demo's settle sleep —
   that's the user-visible latency).
 - **kernel** — `insmod → netdev registered → monitor-mode setup → first
   tcpdump frame`. Same finish line: a frame in hand.
@@ -126,7 +126,7 @@ Three things the harness needs to be honest:
   probe (e.g. on a marginal unit) leaves the chip half-wedged mid-fwdl,
   and whatever the next driver does runs from that state.
 
-Per-stage numbers come from the `init-timing: <scope>.<stage> = N ms`
+Per-stage numbers come from the `{"ev":"init.timing","stage":"<scope>.<stage>","ms":N}`
 lines the library emits (`src/InitTimer.h`); `bench_init.py` aggregates
 medians and writes a markdown report. A/B variants (`--variants`)
 isolate libusb log level, USB reset, and the TX-power loop.

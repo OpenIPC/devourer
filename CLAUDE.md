@@ -86,8 +86,8 @@ rows are not authoritative for LDPC/STBC — that driver strips those bits),
 `--keep-logs` puts per-cell logs at `/tmp/devourer-regress-last/`. Full
 semantics: `tests/README.md`.
 
-Startup-time benchmarking: `tests/bench_init.py` (per-stage `init-timing:`
-lines from `src/InitTimer.h`; methodology + numbers in `docs/startup-time.md`).
+Startup-time benchmarking: `tests/bench_init.py` (per-stage `init.timing`
+events from `src/InitTimer.h`; methodology + numbers in `docs/startup-time.md`).
 On-air TX throughput: measure **Mbps via SDR duty × PHY rate**
 (`tests/bench_onair.py`), never monitor-sniffer frame counts — a sensitive
 receiver decodes weak frames and masks a real drop. Keep a known-good control
@@ -104,6 +104,25 @@ into) every Realtek dongle at each enumeration — `modprobe -r` does NOT
 survive re-enumeration, temp-blacklist instead; and `authorized`-toggle
 "cold" leaves chip state (real VBUS cold via `REGRESS_VBUS_MAP` /
 uhubctl — never on xhci root ports on this rig).
+
+## Logging
+
+Two planes (`docs/logging.md` is the schema source of truth): **machine events**
+= JSON Lines on stdout, one object per line, first field always
+`{"ev":"<name>",...}` — so `grep -F '"ev":"rx.txhit"'` works without a JSON
+parser, and `tests/devourer_events.py` (`iter_events`/`parse_event`) is the
+python helper every test script uses. **Human diagnostics** = stderr,
+`devourer [I] msg` (level letter T/D/I/W/E). Every line is written with one
+fwrite + flush, so piped consumers never stall on buffering and threads never
+interleave mid-line. `2>/dev/null` gives a pure event stream.
+
+Demo knobs: `DEVOURER_LOG_LEVEL=trace..silent` (stderr verbosity, default
+debug), `DEVOURER_EVENTS=stdout|stderr|off`, `DEVOURER_EVENT_FLUSH=0`
+(max-rate benches). Compile-time floor: `-DDEVOURER_LOG_MAX_LEVEL=WARN`
+compiles trace/debug out entirely (args included at `DVR_TRACE`/`DVR_DEBUG`
+sites) for production builds; unset = NDEBUG-derived. Exceptions kept as
+diffable text on the diagnostic plane: canary / bb / efuse / txpwr register
+dumps (kernel cross-validation format).
 
 ## Configuration
 
@@ -155,7 +174,7 @@ Knob-specific facts that aren't obvious from the field docs:
   saves/restores `0x808`). Toggle spec `0xAA:0xBB[:0xCC]@<ms>` cycles masks on
   a timer for mobility/MRC measurements (`docs/measuring-spatial-diversity.md`,
   `tests/mrc_mobility.py`). `DEVOURER_RX_ALLPATHS=1` emits per-chain
-  RSSI/SNR/EVM on a separate `<devourer-rxpath>` tag (C/D nonzero only on the
+  RSSI/SNR/EVM as a separate `rx.path` event (C/D nonzero only on the
   8814AU).
 - `DEVOURER_RX_CSI_MASK` / `DEVOURER_RX_NBI` (RX per-tone equalizer mask /
   narrowband notch, `src/ToneMask.h`) apply at RX-loop start and revert on a
@@ -166,7 +185,7 @@ Knob-specific facts that aren't obvious from the field docs:
   `crc_err`/`icv_err` set — the entry point for the fused-FEC salvage layer
   (`docs/fused-fec.md`). Opt-in: a body with a corrupt tail is the worst-case
   input for an IP-stack consumer that didn't ask for it.
-- `DEVOURER_THERMAL_POLL_MS=N` emits `<devourer-thermal>` lines from the RF
+- `DEVOURER_THERMAL_POLL_MS=N` emits `thermal` events from the RF
   0x42 meter: `raw` is 0..63 thermal units (~1.5–2 °C each, **not** absolute
   °C — hence bucketed status, not a fake temperature), `delta` = raw −
   EFUSE baseline. Jaguar1 has no hard thermal TX shutdown — a rising delta is
@@ -306,6 +325,6 @@ dev->send_packet(buffer, len);  // buffer[0..] = radiotap header, then 802.11
 
 The canonical test beacon (`examples/tx/main.cpp`) uses SA
 `57:42:75:05:d6:00` — the same constant is hardcoded into
-`examples/rx/main.cpp` as the `<devourer-tx-hit>` matcher and into
+`examples/rx/main.cpp` as the `rx.txhit` event matcher and into
 `tests/regress.py` (`CANONICAL_SA`). Change all three together if it ever
 moves.

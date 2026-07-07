@@ -185,8 +185,8 @@ struct DeviceConfig {
     bool bb_dump = false;
     /* env: DEVOURER_EFUSE_DUMP — Jaguar2: dump the efuse logical map. */
     bool efuse_dump = false;
-    /* env: DEVOURER_LOG_WRITES — emit every vendor register write as
-     * "<wlog>0xADDR N 0xVAL" (matches tests/decode_wseq.py). */
+    /* env: DEVOURER_LOG_WRITES — emit every vendor register write as a
+     * debug.wreg event (addr/width/val mirror tests/decode_wseq.py). */
     bool log_writes = false;
     /* env: DEVOURER_LOG_TXPWR — Jaguar1: log the per-channel/per-rate TX-power
      * derivation. */

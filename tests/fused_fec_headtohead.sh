@@ -3,7 +3,7 @@
 #
 # One devourer 8812 transmits fused-FEC bodies (HT MCS7, marginal power) once;
 # two receivers decode that SAME radiation simultaneously:
-#   * chip RX  — devourer 8821 (DEVOURER_RX_KEEP_CORRUPTED), live <devourer-stream>
+#   * chip RX  — devourer 8821 (DEVOURER_RX_KEEP_CORRUPTED), live rx.frame events
 #   * SDR RX   — USRP B210, IQ recorded to disk (no live-decode overflow), then
 #                replayed offline through the gr-ieee802-11 fork HARD and SOFT.
 # Both feed the identical FusedFecReceiver (same FEC params) so "RS blocks /
@@ -73,7 +73,7 @@ $PY "$FEC/fused_fec_tx.py" --input /tmp/h2h_src.bin --repeat 200 $FEC_ARGS \
     > "$BODIES" 2>/dev/null
 echo "[h2h] TX bodies: $(wc -c <"$BODIES") bytes  rate=$TX_RATE pwr=$TX_PWR_OVERRIDE"
 
-# --- chip RX (8821): capture <devourer-stream> for the whole window ---
+# --- chip RX (8821): capture the rx.frame events (stdout) for the whole window ---
 : > "$RAW"
 sudo env DEVOURER_VID=$RX_VID DEVOURER_PID=$RX_PID DEVOURER_CHANNEL=$CH \
      DEVOURER_STREAM_OUT=1 DEVOURER_RX_KEEP_CORRUPTED=1 \
@@ -103,18 +103,18 @@ sleep 1
 # ===================== offline analysis (same FEC params) =====================
 echo
 echo "=== CHIP RX (8821) ==="
-grep "<devourer-stream>" "$RAW" | $PY "$FEC/fused_fec_rx.py" $FEC_ARGS \
+grep -F '"ev":"rx.frame"' "$RAW" | $PY "$FEC/fused_fec_rx.py" $FEC_ARGS \
     >/dev/null 2>/tmp/h2h_chip.out
 grep "fused_fec_rx" /tmp/h2h_chip.out || echo "  (no chip frames — check rate/power/unbind)"
 # chip per-frame SNR split by FCS pass/fail
 $PY - "$RAW" <<'PYEOF'
-import re,sys,statistics
+import json,sys,statistics
 clean=[];corr=[]
-rx=re.compile(r"<devourer-stream>.*?crc_err=(\d+).*?snr=(-?\d+),")
 for line in open(sys.argv[1],errors="ignore"):
-    m=rx.search(line)
-    if not m: continue
-    (corr if int(m.group(1)) else clean).append(int(m.group(2)))
+    if not line.startswith('{"ev":"rx.frame"'): continue
+    try: ev=json.loads(line)
+    except ValueError: continue
+    (corr if ev.get("crc") else clean).append(int(ev["snr"][0]))
 def med(x): return f"{statistics.median(x):.0f}" if x else "-"
 print(f"  chip SNR(dB) median: clean={med(clean)} (n={len(clean)})  "
       f"corrupt={med(corr)} (n={len(corr)})")

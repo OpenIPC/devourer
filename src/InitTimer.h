@@ -2,18 +2,19 @@
 #define INIT_TIMER_H
 
 #include <chrono>
+#include <cstdio>
 #include <utility>
 
 #include "logger.h"
 
-/* Stage timer for init-path profiling. Emits one info line per checkpoint:
+/* Stage timer for init-path profiling. Emits one event per checkpoint:
  *
- *   init-timing: <scope>.<stage> = <N> ms
+ *   {"ev":"init.timing","stage":"<scope>.<stage>","ms":N}
  *
  * `stage()` reports time since the previous checkpoint (or construction);
- * `total()` reports time since construction. Always-on: a handful of log
- * lines per init, negligible next to the USB transfers being measured.
- * tests/bench_init.py parses these lines. */
+ * `total()` reports time since construction. Always-on: a handful of events
+ * per init, negligible next to the USB transfers being measured.
+ * tests/bench_init.py parses these events (docs/logging.md). */
 class InitTimer {
   using clock = std::chrono::steady_clock;
 
@@ -24,16 +25,21 @@ public:
 
   void stage(const char *name) {
     const auto now = clock::now();
-    _logger->info("init-timing: {}.{} = {} ms", _scope, name, ms(_last, now));
+    emit(name, ms(_last, now));
     _last = now;
   }
 
-  void total() {
-    _logger->info("init-timing: {}.total = {} ms", _scope,
-                  ms(_start, clock::now()));
-  }
+  void total() { emit("total", ms(_start, clock::now())); }
 
 private:
+  void emit(const char *name, long long millis) {
+    char stage[96];
+    std::snprintf(stage, sizeof(stage), "%s.%s", _scope, name);
+    devourer::Ev(_logger->events(), "init.timing")
+        .f("stage", stage)
+        .f("ms", millis);
+  }
+
   static long long ms(clock::time_point from, clock::time_point to) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(to - from)
         .count();

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse <devourer-csi> lines emitted by rxdemo with
+"""Parse `csi.hit` / `csi.wedged` JSONL events emitted by rxdemo with
 DEVOURER_RX_DUMP_CSI=hex,hex,... set and report which selectors look
 like a real BB bus vs static status flags.
 
@@ -25,16 +25,22 @@ Run:
 from __future__ import annotations
 
 import argparse
-import re
+import json
 import sys
 from collections import defaultdict
 from pathlib import Path
 
-CSI_RE = re.compile(
-    r"<devourer-csi>hit=(?P<hit>\d+)\s+selector=0x(?P<sel>[0-9a-fA-F]+)"
-    r"\s+value=0x(?P<val>[0-9a-fA-F]+)"
-)
-WEDGE_RE = re.compile(r"<devourer-csi-wedged>after selector=0x([0-9a-fA-F]+)")
+
+def _event(line: str) -> dict | None:
+    """Parse one JSONL event line; None for anything else."""
+    line = line.strip()
+    if not line.startswith('{"ev":"'):
+        return None
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return None
+    return ev if isinstance(ev, dict) and "ev" in ev else None
 
 
 def main() -> int:
@@ -51,18 +57,16 @@ def main() -> int:
     wedged_after: int | None = None
 
     for line in args.log.read_text().splitlines():
-        m = CSI_RE.search(line)
-        if m:
-            sel = int(m.group("sel"), 16)
-            val = int(m.group("val"), 16)
-            per_selector[sel].append(val)
+        ev = _event(line)
+        if ev is None:
             continue
-        w = WEDGE_RE.search(line)
-        if w:
-            wedged_after = int(w.group(1), 16)
+        if ev["ev"] == "csi.hit":
+            per_selector[int(ev["selector"], 16)].append(int(ev["value"], 16))
+        elif ev["ev"] == "csi.wedged":
+            wedged_after = int(ev["selector"], 16)
 
     if not per_selector:
-        print("no <devourer-csi> lines found", file=sys.stderr)
+        print("no csi.hit events found", file=sys.stderr)
         return 2
 
     print(f"# parsed {sum(len(v) for v in per_selector.values())} samples "

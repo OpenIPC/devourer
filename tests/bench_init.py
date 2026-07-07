@@ -4,9 +4,10 @@
 Measures, per plugged DUT, how long it takes from process start until the
 driver can actually move frames:
 
-  * devourer RX  — `rxdemo` until `init-timing: demo.first_rx_frame`
+  * devourer RX  — `rxdemo` until the `init.timing` event with
+                   stage `demo.first_rx_frame`
                    (exec → first 802.11 frame delivered).
-  * devourer TX  — `txdemo` until `init-timing: txdemo.first_tx_submit`
+  * devourer TX  — `txdemo` until stage `txdemo.first_tx_submit`
                    (exec → first bulk-OUT submitted; includes txdemo's settle
                    sleep, deliberately — that's the user-visible latency).
   * kernel       — two flavours, same stage names:
@@ -22,7 +23,7 @@ driver can actually move frames:
                    driver-behaviour comparisons only — virtualized USB adds
                    latency to every stage, so don't cite its timings.
 
-Per-stage breakdown comes from the `init-timing:` lines emitted by the
+Per-stage breakdown comes from the `init.timing` JSONL events emitted by the
 devourer library (src/InitTimer.h); this script only parses and aggregates.
 
 A/B variants isolate extrinsic overheads (libusb log level, USB reset,
@@ -42,7 +43,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import statistics
 import subprocess
 import sys
@@ -61,8 +61,21 @@ from regress import (  # noqa: E402
     discover_duts,
     usb_port_power_cycle,
 )
+from devourer_events import iter_events  # noqa: E402
 
-INIT_TIMING_RE = re.compile(r"init-timing: ([\w.]+) = (\d+) ms")
+
+def _read_timing_stages(log_path: Path) -> dict[str, int]:
+    """{stage: ms} from the demo's `init.timing` events. First occurrence
+    wins: the second channel_set (from mlme init) re-emits channel_set.* —
+    keep init-order stages stable. The end-marker only ever appears once."""
+    stages: dict[str, int] = {}
+    lines = log_path.read_text(errors="replace").splitlines()
+    for ev in iter_events(lines, ev="init.timing"):
+        try:
+            stages.setdefault(ev["stage"], int(ev["ms"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+    return stages
 
 # Variant name → env deltas applied on top of the demo defaults.
 # "quiet" (libusb WARNING) is the demo default; "debug" opts into libusb
@@ -144,7 +157,7 @@ def run_devourer_cell(
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 break  # crashed / exited early
-            if end_marker in log_path.read_text(errors="replace"):
+            if end_marker in _read_timing_stages(log_path):
                 break
             time.sleep(0.2)
     finally:
@@ -152,12 +165,7 @@ def run_devourer_cell(
         regress._unregister_local_proc(proc)
         fh.close()
 
-    stages: dict[str, int] = {}
-    for m in INIT_TIMING_RE.finditer(log_path.read_text(errors="replace")):
-        # First occurrence wins: the second channel_set (from mlme init)
-        # re-emits channel_set.* — keep init-order stages stable. The
-        # end-marker only ever appears once.
-        stages.setdefault(m.group(1), int(m.group(2)))
+    stages = _read_timing_stages(log_path)
     if end_marker not in stages:
         return None
     return stages
@@ -272,7 +280,7 @@ def start_traffic_source(
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             sys.exit(f"traffic source died at startup — see {log_path}")
-        if "txdemo.first_tx_submit" in log_path.read_text(errors="replace"):
+        if "txdemo.first_tx_submit" in _read_timing_stages(log_path):
             print(f"[traffic] {src.chipset} beaconing on ch {channel}",
                   flush=True)
             return proc

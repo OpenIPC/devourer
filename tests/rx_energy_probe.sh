@@ -3,7 +3,7 @@
 #
 # Runs a two-adapter, no-SDR test: one adapter emits a CW tone (DEVOURER_CW_TONE)
 # on a channel; a second adapter runs the RX demo with DEVOURER_RX_ENERGY_MS and
-# reports the frame-free energy telemetry (<devourer-energy>). We capture the
+# reports the frame-free energy telemetry (rx.energy events). We capture the
 # sensor's telemetry with the tone OFF (baseline) and ON, then assert the two are
 # clearly separable (rx_energy_check.py). A strong co-located CW pushes the
 # sensor's CCA counter far out of its ambient band — either a large spike (the
@@ -57,7 +57,7 @@ sense() { # $1=logfile
   timeout -sINT "$((SECS + 3))" env DEVOURER_VID="$SENSOR_VID" \
     DEVOURER_PID="$SENSOR_PID" DEVOURER_CHANNEL="$CHANNEL" \
     DEVOURER_RX_ENERGY_MS="$ENERGY_MS" "$DEMO_RX" 2>/dev/null \
-    | grep --line-buffered "devourer-energy" > "$1" || true
+    | grep --line-buffered -F '"ev":"rx.energy"' > "$1" || true
 }
 
 echo "== baseline (tone OFF) =="

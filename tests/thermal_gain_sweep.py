@@ -5,8 +5,8 @@ Drives one continuous txdemo TX session on an RTL88xxAU adapter while
 ramping the absolute TXAGC index up over time (DEVOURER_TX_PWR_* knobs), and
 captures three interleaved streams:
 
-  * `<devourer-txpwr>index=N`            — the gain step the demo just applied
-  * `<devourer-thermal>raw=.. delta=..`  — the chip's own thermal meter
+  * `txpwr.set` events (index=N)         — the gain step the demo just applied
+  * `thermal` events (raw/delta/status)  — the chip's own thermal meter
   * `sdr-power dbfs=..`                  — an independent USRP receive-power probe
 
 Every line from both subprocesses is stamped with a host-side monotonic
@@ -38,11 +38,8 @@ import time
 from pathlib import Path
 
 import regress  # reuse DUT discovery + process-hygiene helpers
+from devourer_events import parse_event
 
-TXPWR_RE = re.compile(r"<devourer-txpwr>index=(\d+)")
-THERMAL_RE = re.compile(
-    r"<devourer-thermal>raw=(\d+) baseline=(\d+|none)(?: delta=([+-]?\d+))? status=(\w+)"
-)
 SDR_RE = re.compile(r"sdr-power dbfs=([+-]?[\d.]+)")
 
 # UHD channel-center frequencies (MHz) for the channels we use.
@@ -164,21 +161,21 @@ def main() -> int:
             line = raw_line.rstrip("\n")
             t = now_ms()
             s = None
-            m = TXPWR_RE.search(line)
-            if m:
+            ev = parse_event(line)
+            if ev is not None and ev["ev"] == "txpwr.set":
                 s = Sample(t, "txpwr")
-                s.index = int(m.group(1))
-            if s is None:
-                m = THERMAL_RE.search(line)
-                if m:
-                    s = Sample(t, "thermal")
-                    s.raw = int(m.group(1))
-                    s.baseline = None if m.group(2) == "none" else int(m.group(2))
-                    s.delta = int(m.group(3)) if m.group(3) is not None else None
-                    s.status = m.group(4)
-                    if s.status == "critical":
-                        print(f"\n!! thermal critical at t={t/1000:.1f}s — aborting TX")
-                        abort.set()
+                s.index = int(ev["index"])
+            elif ev is not None and ev["ev"] == "thermal":
+                s = Sample(t, "thermal")
+                s.raw = int(ev["raw"])
+                baseline = ev.get("baseline")
+                s.baseline = None if baseline is None else int(baseline)
+                delta = ev.get("delta")  # present only when baseline valid
+                s.delta = None if delta is None else int(delta)
+                s.status = ev.get("status")
+                if s.status == "critical":
+                    print(f"\n!! thermal critical at t={t/1000:.1f}s — aborting TX")
+                    abort.set()
             if s is None:
                 m = SDR_RE.search(line)
                 if m:
@@ -280,7 +277,7 @@ def _summarize(rows: list[Sample]) -> None:
 
     if not per_index:
         print("no gain-index transitions captured (did the demo emit "
-              "<devourer-txpwr>?)")
+              "txpwr.set events?)")
         return
 
     print("\n=== per gain-index summary ===")

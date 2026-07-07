@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Coarse RX spectrum map — a single live sweep. One sensor process cycles the
 # listed channels (DEVOURER_RX_SWEEP), dwelling DEVOURER_RX_SWEEP_DWELL_MS on
-# each and emitting one <devourer-energy>ch=N line per bin from the frame-free
+# each and emitting one rx.energy event (with ch=N) per bin from the frame-free
 # energy sensor. The devourer-native spectrum analyzer: no per-tone CSI (the
 # silicon can't export it), just channel-wide energy per bin.
 #
@@ -75,7 +75,7 @@ echo "== live sweep: $CHANNELS x $ROUNDS rounds, ${DWELL_MS}ms dwell (~${secs}s)
 timeout -sINT "$secs" env DEVOURER_VID="$SENSOR_VID" \
   DEVOURER_PID="$SENSOR_PID" DEVOURER_RX_SWEEP="$CHANNELS" \
   DEVOURER_RX_SWEEP_DWELL_MS="$DWELL_MS" ${NB_BW:+DEVOURER_NB_BW="$NB_BW"} \
-  "$DEMO_RX" 2>/dev/null | grep --line-buffered "devourer-energy" \
+  "$DEMO_RX" 2>/dev/null | grep --line-buffered -F '"ev":"rx.energy"' \
   | tee "$OUT/sweep.log" || true
 cleanup
 

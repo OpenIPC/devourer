@@ -9,8 +9,8 @@ strategies, mirroring the plan:
   --mode rx  (primary intent)
       Read the descrambler seed the chip recovers from frames it *receives*.
       Run `rxdemo` with DEVOURER_DUMP_SCRAMBLER=1 on a second adapter
-      pointed at the precoder TX; it prints `<devourer-scrambler>seed=0xNN`
-      lines. This script parses them and reports whether the seed is CONSTANT
+      pointed at the precoder TX; it emits `{"ev":"rx.scrambler","seed":"0xNN",...}`
+      events. This script parses them and reports whether the seed is CONSTANT
       (one shaped PSDU works) or VARYING per frame (brute-force needed).
 
       CAVEAT: the seed field is only trustworthy when the RX adapter is an
@@ -39,30 +39,29 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import subprocess
 import sys
 from collections import Counter
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
 
 import encode_subcarriers as enc
-
-_SEED_RE = re.compile(rb"<devourer-scrambler>seed=0x([0-9a-fA-F]{2})")
+from devourer_events import parse_event  # noqa: E402
 
 
 def _iter_seed_lines(stream) -> "list[int]":
     seeds = []
     for raw in stream:
-        if isinstance(raw, str):
-            raw = raw.encode("utf-8", "replace")
-        m = _SEED_RE.search(raw)
-        if m:
-            seeds.append(int(m.group(1), 16))
+        ev = parse_event(raw, ev="rx.scrambler")
+        if ev is not None:
+            seeds.append(int(ev["seed"], 16))
     return seeds
 
 
 def _report(seeds: "list[int]") -> int:
     if not seeds:
-        print("seed_probe: no <devourer-scrambler> lines seen. Is the RX demo "
+        print("seed_probe: no rx.scrambler events seen. Is the RX demo "
               "running with DEVOURER_DUMP_SCRAMBLER=1, pointed at the precoder "
               "TX on the same channel?", file=sys.stderr)
         return 1
@@ -115,9 +114,9 @@ def mode_rx(args) -> int:
             line = proc.stdout.readline()
             if not line:
                 break
-            m = _SEED_RE.search(line)
-            if m:
-                seeds.append(int(m.group(1), 16))
+            ev = parse_event(line, ev="rx.scrambler")
+            if ev is not None:
+                seeds.append(int(ev["seed"], 16))
     finally:
         proc.terminate()
         try:

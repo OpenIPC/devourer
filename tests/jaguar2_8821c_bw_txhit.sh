@@ -2,8 +2,8 @@
 # Wide-bandwidth (HT40 / VHT80) tx-hit validation for the RTL8821C (CF-811AC).
 # Exercises set_channel_bw_8821c() at bw=40/80 in BOTH directions, which is where
 # the 0x8ac ADC/DAC clock word is programmed:
-#   rx: T3U (8822B) TX an HT40/VHT80 frame; 8821C RX at the same bandwidth. A
-#       <devourer-tx-hit> proves the 8821C wide RX (0x8ac clock) decodes on-air.
+#   rx: T3U (8822B) TX an HT40/VHT80 frame; 8821C RX at the same bandwidth. An
+#       rx.txhit event proves the 8821C wide RX (0x8ac clock) decodes on-air.
 #   tx: 8821C TX an HT40/VHT80 frame; T2U-Plus (8821AU) RX. A tx-hit proves the
 #       8821C wide TX tune works on-air.
 # Uses controlled traffic (no reliable ambient wide 2.4G at this bench). Restores
@@ -64,7 +64,7 @@ fi
 
 echo "--- 8821C side bring-up ---"
 grep -iE "channel set|bw=|error|throw|fail" "$([ "$DIR" = rx ] && echo "$RXLOG" || echo "$TXLOG")" | head -4
-HITS=$(grep -c "<devourer-tx-hit>" "$RXLOG")
+HITS=$(grep -cF '"ev":"rx.txhit"' "$RXLOG")
 echo "--- tx-hits: $HITS  (dir=$DIR bw=$BW) ---"
 if [ "$HITS" -ge 1 ]; then
     echo "PASS: 8821C wide $BW MHz $DIR decoded on-air (rx-log $RXLOG)"

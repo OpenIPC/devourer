@@ -11,7 +11,7 @@
 #   2T2R (8812AU / 8822BU): inject MCS1/STBC -> NO warning (STBC honoured) and
 #     the frame delivers.
 #
-# Ground = a second devourer part counting <devourer-tx-hit> from the canonical SA.
+# Ground = a second devourer part counting rx.txhit events from the canonical SA.
 #
 # Usage: sudo -v && tests/stbc_1t1r_check.sh
 set -u
@@ -49,7 +49,7 @@ for dut in "${DUTS[@]}"; do
     : >"$OUT/$tag-g.log"
     sudo -n env DEVOURER_PID="$GPID" DEVOURER_VID="$GVID" DEVOURER_CHANNEL="$CH" \
         stdbuf -oL timeout 45 "$ROOT/build/rxdemo" 2>/dev/null \
-        | grep --line-buffered "tx-hit" >"$OUT/$tag-g.log" &
+        | grep --line-buffered -F '"ev":"rx.txhit"' >"$OUT/$tag-g.log" &
     GJ=$!
     sleep 10
     sudo -n env DEVOURER_PID="$PID" DEVOURER_VID="$VID" DEVOURER_CHANNEL="$CH" \
@@ -58,8 +58,10 @@ for dut in "${DUTS[@]}"; do
     sudo -n pkill -x rxdemo 2>/dev/null; wait "$GJ" 2>/dev/null
     sleep 2
 
+    # The 1T1R guard warning is a stderr diagnostic (devourer [W]); the tx log
+    # captures 2>&1 so the grep still sees it.
     warned=$(grep -c "dropping the STBC flag" "$OUT/$tag-tx.log")
-    hits=$(grep -oE "hits=[0-9]+" "$OUT/$tag-g.log" | tail -1 | grep -oE "[0-9]+")
+    hits=$(grep -oE '"hits":[0-9]+' "$OUT/$tag-g.log" | tail -1 | grep -oE "[0-9]+")
     hits=${hits:-0}
     echo "  warning fired: $warned, delivery hits: $hits"
 

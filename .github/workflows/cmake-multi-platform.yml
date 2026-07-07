@@ -148,7 +148,7 @@ jobs:
           devourer streamtx duplex StreamStdinSelftest
           ToneMaskSelftest BfReportDecodeSelftest SweepSpecSelftest
           TxPowerQuantSelftest LinkHealthSelftest TxCapsSelftest TxPktPwrSelftest
-          RxQualitySelftest AdapterHealthSelftest
+          RxQualitySelftest AdapterHealthSelftest LogEventSelftest
 
       - name: Test
         working-directory: build

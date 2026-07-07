@@ -79,8 +79,9 @@ static const uint8_t kRadiotapLegacy6M[13] = {
     0x00, 0x0c, 0x00, 0x08, 0x00, 0x00};
 
 // Canonical TX-validation source MAC — shared with examples/tx/main.cpp,
-// examples/rx/main.cpp's `<devourer-tx-hit>` matcher, tests/regress.py (CANONICAL_SA)
-// and tests/inject_beacon.py. Change all of them together if it ever moves.
+// examples/rx/main.cpp's `rx.txhit` event matcher, tests/regress.py
+// (CANONICAL_SA) and tests/inject_beacon.py. Change all of them together if it
+// ever moves.
 static const uint8_t kCanonicalSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
 
 // 802.11 probe-request mgmt header (24 bytes), mirroring examples/tx/main.cpp's
@@ -110,6 +111,7 @@ static bool read_file(const std::string &path, std::vector<uint8_t> &out) {
 
 int main(int argc, char **argv) {
   auto logger = std::make_shared<Logger>();
+  apply_logging_env(*logger); /* DEVOURER_LOG_LEVEL / DEVOURER_EVENTS / ... */
 
   std::string psdu_path;
   long count = -1;        // -1 == loop forever (like txdemo)
@@ -246,9 +248,11 @@ int main(int argc, char **argv) {
   while (count < 0 || tx_count < count) {
     bool ok = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
     ++tx_count;
+    /* precoder's TX progress marker (consumed by tests/precoder_*.py). */
     if (tx_count <= 10 || tx_count % 500 == 0) {
-      printf("<precoder-tx>TX #%ld ok=%d\n", tx_count, ok ? 1 : 0);
-      fflush(stdout);
+      devourer::Ev(logger->events(), "tx.frame")
+          .f("n", tx_count)
+          .f("ok", ok);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
   }

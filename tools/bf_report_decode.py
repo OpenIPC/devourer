@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Decode 802.11ac VHT Compressed Beamforming reports into per-subcarrier CSI.
 
-Input: `<devourer-bf-report-raw>HEX` lines (from rxdemo with
-DEVOURER_BF_DETECT_REPORT=4) on stdin or a file, or bare hex frames.
+Input: `{"ev":"bf.report_raw","frame":"HEX"}` JSONL events (from rxdemo with
+DEVOURER_BF_DETECT_REPORT=4; the sense demo emits them on stderr) on stdin or
+a file, or bare hex frames. Non-event lines that aren't hex are skipped, so
+feeding a whole mixed capture works.
 
 For the two-adapter self-sounding path a 2-TX beamformer sounds a 1-RX
 beamformee, so each report carries a per-subcarrier 2x1 steering vector
@@ -24,10 +26,12 @@ across reports of a quasi-static channel; a wrong split looks like noise.
 Usage:
     rxdemo ... DEVOURER_BF_DETECT_REPORT=4 | tools/bf_report_decode.py
     tools/bf_report_decode.py captured_frames.txt --csv out.csv
+    grep -F '"ev":"bf.report_raw"' capture.txt | tools/bf_report_decode.py
 """
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 
@@ -179,14 +183,32 @@ def decode_angles(angle_bytes: bytes, ns: int, na: int, bphi: int, bpsi: int,
     return out
 
 
+def report_hex(line: str):
+    """Hex payload of one input line: a `bf.report_raw` event's `frame` field,
+    or the line itself when it's bare hex. Returns None for any other event
+    line (other-event JSON must not fall through to the hex parser)."""
+    line = line.strip()
+    if line.startswith('{"ev":"'):
+        if not line.startswith('{"ev":"bf.report_raw"'):
+            return None
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            return None
+        if not isinstance(obj, dict) or obj.get("ev") != "bf.report_raw":
+            return None
+        return obj.get("frame")
+    return line
+
+
 def read_frames(src, max_frames=200):
-    """Parse `<devourer-bf-report-raw>` (or bare hex) lines into frame dicts."""
+    """Parse `bf.report_raw` event (or bare hex) lines into frame dicts."""
     frames = []
     for line in src:
-        line = line.strip()
-        if "<devourer-bf-report-raw>" in line:
-            line = line.split("<devourer-bf-report-raw>", 1)[1]
-        f = parse_frame(line)
+        h = report_hex(line)
+        if h is None:
+            continue
+        f = parse_frame(h)
         if f:
             frames.append(f)
         if len(frames) >= max_frames:

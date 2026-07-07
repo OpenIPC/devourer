@@ -447,7 +447,8 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
   if (channel == _last_channel)
     return true; /* no-op hop */
 
-  devourer::HopProf prof(_cfg.debug.hop_prof, "j3", channel);
+  devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j3",
+                         channel);
   uint8_t central, pri;
   central_and_pri(channel, channel_offset, bwmode, central, pri);
 
@@ -561,7 +562,7 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
   prof.mark("bbrst");
 
   _last_channel = channel;
-  _logger->debug("Jaguar3: fast retune -> ch {} (central {}, RF18=0x{:05x})",
+  DVR_DEBUG(_logger, "Jaguar3: fast retune -> ch {} (central {}, RF18=0x{:05x})",
                  channel, central, rf18);
   /* The J1 parity lesson: the fast path must emit the canary itself — it does
    * not pass through the full path, so without this the parity diff would

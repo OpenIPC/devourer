@@ -6,7 +6,7 @@ device, spawns streamtx and/or rxdemo as subprocesses, and runs
 two threads:
 
     tun fd ──read──► encode_body ─length-prefix─► streamtx (libusb TX)
-    rxdemo (libusb RX) ─<devourer-stream>─► decode_body ──write──► tun fd
+    rxdemo (libusb RX) ─rx.frame events─► decode_body ──write──► tun fd
 
 ONE IP PACKET = ONE STREAM FRAME (seq increments per packet, total=0 = unbounded
 stream). body_bytes defaults to 1500 so a 1490-byte tun MTU fits cleanly with
@@ -86,7 +86,6 @@ import argparse
 import collections
 import fcntl
 import os
-import re
 import shutil
 import signal
 import struct
@@ -99,8 +98,10 @@ from typing import Optional
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
 
 import stream  # noqa: E402
+from devourer_events import parse_event  # noqa: E402
 
 # stream_fec pulls in `raptorq` from PyPI. Defer the import so byte-mode
 # users running on a python without the wheel installed don't get
@@ -117,16 +118,6 @@ def _import_stream_fec():  # noqa: E302
 TUNSETIFF = 0x400454CA
 IFF_TUN = 0x0001
 IFF_NO_PI = 0x1000
-
-_STREAM_RE = re.compile(
-    r"<devourer-stream>rate=(?P<rate>\d+)\s+len=(?P<len>\d+)"
-    r"(?:\s+crc_err=(?P<crc_err>\d+))?"
-    r"(?:\s+icv_err=(?P<icv_err>\d+))?"
-    r"(?:\s+rssi=(?P<rssi>-?\d+,-?\d+))?"
-    r"(?:\s+evm=(?P<evm>-?\d+,-?\d+))?"
-    r"(?:\s+snr=(?P<snr>-?\d+,-?\d+))?"
-    r"\s+body=(?P<hex>[0-9a-fA-F]*)"
-)
 
 
 # --------------------------------------------------------------------------- #
@@ -196,7 +187,7 @@ def launch_rx(args) -> subprocess.Popen:
 
 def launch_duplex(args) -> subprocess.Popen:
     """Single binary, one chip, both directions. stdin = length-prefixed
-    PSDU bodies (TX side), stdout = `<devourer-stream>` lines (RX side)."""
+    PSDU bodies (TX side), stdout = `rx.frame` JSONL events (RX side)."""
     env = dict(os.environ, DEVOURER_PID=args.duplex_pid,
                DEVOURER_VID=args.duplex_vid,
                DEVOURER_CHANNEL=str(args.channel), DEVOURER_USB_QUIET="1")
@@ -361,7 +352,7 @@ def rx_thread(stop: StopBit, rx_stdout, tun_fd: int,
               dedup: Optional[SeqWindow], counters: dict,
               fec_dec: "Optional[stream_fec.FecDecoder]" = None,
               fec_block_expire_ms: int = 500) -> None:
-    """Read `<devourer-stream>` lines off the rxdemo, decode the
+    """Read `rx.frame` events off the rxdemo, decode the
     stream envelope, then either:
       * byte mode: write the StreamFrame payload to the TUN as one IP packet,
       * FEC mode: feed the payload to the FecDecoder; when a block decodes,
@@ -376,12 +367,12 @@ def rx_thread(stop: StopBit, rx_stdout, tun_fd: int,
         for line in rx_stdout:
             if stop.stop:
                 return
-            m = _STREAM_RE.search(line)
-            if not m:
+            ev = parse_event(line, ev="rx.frame")
+            if ev is None:
                 continue
-            if int(m.group("rate")) != 0x04:
+            if int(ev["rate"]) != 0x04:
                 counters["rate_mismatch"] += 1
-            body = bytes.fromhex(m.group("hex"))
+            body = bytes.fromhex(ev.get("body") or "")
             frame = stream.decode_body(
                 body, shape=shape,
                 seed=seed, offset=offset, entry_state=entry_state,

@@ -18,9 +18,9 @@
 // terminates.
 //
 // RX emission on stdout mirrors examples/rx/main.cpp's DEVOURER_STREAM_OUT path —
-// `<devourer-stream>rate=R len=L body=HEX` for every frame matching the
-// canonical SA. Other stdout output is suppressed; stderr carries logger and
-// counters.
+// one `rx.frame` JSONL event for every frame matching the canonical SA.
+// stdout is the JSONL event plane (stream.* control telemetry included);
+// stderr carries the human diagnostics (logger).
 
 #include <atomic>
 #include <cassert>
@@ -81,8 +81,8 @@ static constexpr uint16_t kRealtekProductIds[] = {
 // (6M..54M), HT (MCS0..MCS31), or VHT (VHT1SS_MCS0..VHT4SS_MCS9) carrier
 // modes. Default is 6M legacy OFDM, bit-identical to the historic
 // kRadiotapLegacy6M constant. The canonical SA matcher in the packet
-// processor below is identical to examples/rx/main.cpp's, so any tooling that
-// already grep'd <devourer-stream> lines keeps working unchanged.
+// processor below is identical to examples/rx/main.cpp's, so tooling that
+// consumes rx.frame events sees the same frames from either demo.
 // Radiotap is MUTABLE here (the adaptive link rewrites the on-air rate live via
 // the stdin SET_RATE control op). Guarded by g_rt_mu against the TX thread.
 static std::mutex g_rt_mu;
@@ -102,12 +102,15 @@ static std::vector<uint8_t> build_dot11_probe_req() {
   return h;
 }
 
-// RX callback — emits `<devourer-stream>` on canonical-SA matches. Wrapped in
-// a mutex against the TX thread's printf calls so the two log streams don't
-// interleave mid-line. (The TX thread only writes to stderr, RX to stdout, so
-// in practice they don't collide, but keeping the mutex is cheap.)
-static std::mutex g_print_mu;
+// RX callback — emits an `rx.frame` event on canonical-SA matches. Event
+// lines are emitted atomically (one fwrite per line, see src/Event.h), so no
+// print mutex is needed against the TX thread's emissions.
 static std::atomic<long> g_rx_hits{0};
+
+/* Event sink for the demo's JSONL emissions (packet_processor and tx_thread
+ * are free functions) — points at the main() Logger's sink, set before the
+ * TX thread spawns / Init() runs. */
+static devourer::EventSink *g_ev = nullptr;
 
 /* DEVOURER_TX_STATUS=1: surface chip-side C2H frames (TX-status reports
  * from the same 8812/8821 chip we're TXing on). Best-effort 8814A TX_RPT
@@ -119,11 +122,9 @@ static const bool g_tx_status_enabled =
 static void packet_processor(const Packet &packet) {
   if (packet.RxAtrib.pkt_rpt_type == RX_PACKET_TYPE::C2H_PACKET) {
     if (!g_tx_status_enabled) return;
-    std::lock_guard<std::mutex> lk(g_print_mu);
-    std::printf("<devourer-c2h>len=%zu bytes=", packet.Data.size());
-    for (size_t i = 0; i < packet.Data.size(); ++i)
-      std::printf("%02x", packet.Data[i]);
-    std::printf("\n");
+    devourer::Ev(*g_ev, "fw.c2h")
+        .f("len", packet.Data.size())
+        .hex("bytes", packet.Data.data(), packet.Data.size());
     if (packet.Data.size() >= 8) {
       for (size_t hoff : {size_t(1), size_t(2)}) {
         if (packet.Data.size() < hoff + 6) continue;
@@ -133,38 +134,45 @@ static void packet_processor(const Packet &packet) {
         uint16_t qt_raw  = static_cast<uint16_t>(h[3] | (h[4] << 8));
         uint32_t qt_us   = static_cast<uint32_t>(qt_raw) * 256u;
         uint8_t  rate    = h[5];
-        std::printf("<devourer-tx-status>hoff=%zu queue=%u retry=%u "
-                    "airtime_us=%u rate=%u\n",
-                    hoff, queue, retry, qt_us, rate);
+        devourer::Ev(*g_ev, "tx.status")
+            .f("hoff", hoff)
+            .f("queue", queue)
+            .f("retry", retry)
+            .f("airtime_us", qt_us)
+            .f("rate", rate);
       }
     }
-    std::fflush(stdout);
     return;
   }
   if (packet.Data.size() < 16) return;
   if (std::memcmp(packet.Data.data() + 10, kCanonicalSa, 6) != 0) return;
   long hits = ++g_rx_hits;
-  std::lock_guard<std::mutex> lk(g_print_mu);
-  // Full field set (mirrors examples/rx/main.cpp) so the adaptive VRX can score RSSI/SNR
-  // and the VTX can read RCF/DISC bodies + ACK_SEQ.
-  std::printf("<devourer-stream>rate=%u len=%zu crc_err=%u icv_err=%u "
-              "rssi=%d,%d evm=%d,%d snr=%d,%d seq=%u tsfl=%u "
-              "bw=%u stbc=%u ldpc=%u sgi=%u body=",
-              packet.RxAtrib.data_rate, packet.Data.size(),
-              packet.RxAtrib.crc_err ? 1u : 0u, packet.RxAtrib.icv_err ? 1u : 0u,
-              packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1],
-              packet.RxAtrib.evm[0], packet.RxAtrib.evm[1],
-              packet.RxAtrib.snr[0], packet.RxAtrib.snr[1],
-              packet.RxAtrib.seq_num, packet.RxAtrib.tsfl,
-              packet.RxAtrib.bw, packet.RxAtrib.stbc,
-              packet.RxAtrib.ldpc, packet.RxAtrib.sgi);
-  for (size_t i = 24; i < packet.Data.size(); ++i)
-    std::printf("%02x", packet.Data[i]);
-  std::printf("\n");
-  std::fflush(stdout);
+  // Full field set (mirrors examples/rx/main.cpp's rx.frame) so the adaptive
+  // VRX can score RSSI/SNR and the VTX can read RCF/DISC bodies + ACK_SEQ.
+  {
+    const int rssi[2] = {packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1]};
+    const int evm[2] = {packet.RxAtrib.evm[0], packet.RxAtrib.evm[1]};
+    const int snr[2] = {packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]};
+    const size_t body_len =
+        packet.Data.size() > 24 ? packet.Data.size() - 24 : 0;
+    devourer::Ev(*g_ev, "rx.frame")
+        .f("rate", packet.RxAtrib.data_rate)
+        .f("len", packet.Data.size())
+        .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
+        .f("icv", packet.RxAtrib.icv_err ? 1 : 0)
+        .arr("rssi", rssi, 2)
+        .arr("evm", evm, 2)
+        .arr("snr", snr, 2)
+        .f("seq", packet.RxAtrib.seq_num)
+        .f("tsfl", packet.RxAtrib.tsfl)
+        .f("bw", packet.RxAtrib.bw)
+        .f("stbc", packet.RxAtrib.stbc)
+        .f("ldpc", packet.RxAtrib.ldpc)
+        .f("sgi", packet.RxAtrib.sgi)
+        .hex("body", packet.Data.data() + 24, body_len);
+  }
   if (hits <= 5 || hits % 500 == 0) {
-    std::fprintf(stderr, "<stream-duplex>rx hits=%ld\n", hits);
-    std::fflush(stderr);
+    devourer::Ev(*g_ev, "stream.rx").f("hits", hits);
   }
 }
 
@@ -188,7 +196,7 @@ static void tx_thread(TxArgs args) {
     if (stream_stdin::read_exact(stdin, len_bytes, sizeof(len_bytes)) !=
         stream_stdin::ReadResult::Ok) {
       // Clean EOF or short read — TX side done. RX keeps running.
-      std::fprintf(stderr, "<stream-duplex>tx EOF after %ld PSDUs\n", tx_count);
+      devourer::Ev(*g_ev, "stream.eof").f("tx_count", tx_count);
       break;
     }
     uint32_t len = static_cast<uint32_t>(len_bytes[0])
@@ -220,20 +228,20 @@ static void tx_thread(TxArgs args) {
             .Channel = ctl[1], .ChannelOffset = ctl[2],
             .ChannelWidth = static_cast<ChannelWidth_t>(ctl[3])});
       }
-      std::fprintf(stderr, "<stream-duplex>ctl op=%u len=%u\n", op, clen);
+      devourer::Ev(*g_ev, "stream.ctl").f("op", op).f("len", clen);
       continue;
     }
 
     if (len == 0 || len > args.max_psdu) {
-      std::fprintf(stderr,
-                   "<stream-duplex>tx PSDU len %u out of range (max %zu)\n",
-                   len, args.max_psdu);
+      args.logger->error("tx PSDU len {} out of range (max {})", len,
+                         args.max_psdu);
       break;
     }
     std::vector<uint8_t> psdu(len);
     if (stream_stdin::read_exact(stdin, psdu.data(), len) !=
         stream_stdin::ReadResult::Ok) {
-      std::fprintf(stderr, "<stream-duplex>tx EOF mid-PSDU (%u bytes)\n", len);
+      /* EOF mid-PSDU: `bytes` = the expected PSDU length that was cut short. */
+      devourer::Ev(*g_ev, "stream.eof").f("tx_count", tx_count).f("bytes", len);
       break;
     }
     tx_buf.clear();
@@ -246,10 +254,10 @@ static void tx_thread(TxArgs args) {
     bool ok = args.rtl->send_packet(tx_buf.data(), tx_buf.size());
     ++tx_count;
     if (tx_count <= 5 || tx_count % 500 == 0) {
-      std::fprintf(stderr,
-                   "<stream-duplex>tx #%ld ok=%d psdu=%u\n",
-                   tx_count, ok ? 1 : 0, len);
-      std::fflush(stderr);
+      devourer::Ev(*g_ev, "stream.tx")
+          .f("n", tx_count)
+          .f("ok", ok ? 1 : 0)
+          .f("psdu", len);
     }
     if (args.interval_ms > 0) {
       std::this_thread::sleep_for(std::chrono::milliseconds(args.interval_ms));
@@ -259,6 +267,8 @@ static void tx_thread(TxArgs args) {
 
 int main(int argc, char **argv) {
   auto logger = std::make_shared<Logger>();
+  apply_logging_env(*logger); /* DEVOURER_LOG_LEVEL / DEVOURER_EVENTS / ... */
+  g_ev = &logger->events();
 
   int interval_ms = 2;
   size_t max_psdu = 4096;

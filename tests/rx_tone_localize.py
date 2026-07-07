@@ -10,7 +10,7 @@ notch in the per-tone SNR and/or a spike in per-tone psi variance, which this
 script thresholds (robust median/MAD) to flag and locate the interferer to a
 subcarrier group (~312 kHz * Ng) — far finer than a channel.
 
-Input: `<devourer-bf-report-raw>HEX` lines (rxdemo DEVOURER_BF_DETECT_
+Input: `{"ev":"bf.report_raw",...}` event lines (rxdemo DEVOURER_BF_DETECT_
 REPORT=4) on stdin or a file. Reuses tools/bf_report_decode.py's analyzer.
 
 Two modes:

@@ -4,8 +4,8 @@ rendezvous into the VTX and VRX control loops.
 This is the policy plane (the mechanical knobs live in the C++ duplex binary). The
 two roles:
 
-  AdaptiveVrx (ground): consumes the VTX's video frames (<devourer-stream> RSSI/
-    SNR/crc/seq), scores the link, runs the energy-min controller to pick the
+  AdaptiveVrx (ground): consumes the VTX's video frames (`rx.frame` events:
+    RSSI/SNR/crc/seq), scores the link, runs the energy-min controller to pick the
     operating point, and emits RCF feedback (or DISC beacons when the VTX is
     lost) ~10 Hz.
   AdaptiveVtx (drone): consumes RCF/DISC, applies the operating point to the live
@@ -251,13 +251,12 @@ def selftest(verbose: bool = False):
 # Live I/O: drive a real duplex subprocess (exercised on-air by
 # tests/adaptive_onair.sh). The classes above hold all the policy; this is plumbing.
 # --------------------------------------------------------------------------- #
-import re
 import struct
+import sys
+from pathlib import Path
 
-_STREAM_RE = re.compile(
-    rb"<devourer-stream>rate=(?P<rate>\d+).*?crc_err=(?P<crc>\d+).*?"
-    rb"rssi=(?P<rssi>-?\d+),(?P<rssi2>-?\d+).*?snr=(?P<snr>-?\d+),(?P<snr2>-?\d+).*?"
-    rb"seq=(?P<seq>\d+).*?body=(?P<body>[0-9a-fA-F]*)")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
+from devourer_events import parse_event  # noqa: E402
 
 
 def ctl_frame(op: int, payload: bytes = b"") -> bytes:
@@ -287,23 +286,22 @@ def run_vrx(proc, link, calib, vtx_id, channel, feedback_period_ms=100):
 
     def reader():
         for line in proc.stdout:
-            m = _STREAM_RE.search(line)
-            if not m:
+            ev = parse_event(line, ev="rx.frame")
+            if ev is None:
                 continue
-            body = bytes.fromhex(m.group("body").decode())
+            body = bytes.fromhex(ev.get("body") or "")
             if rp.frame_type(body) == rp.T_DISC_ACK:
                 vrx.on_disc_ack(body, _now_ms())
                 continue
-            snr = max(int(m.group("snr")), int(m.group("snr2")))
-            rssi = max(int(m.group("rssi")), int(m.group("rssi2")))
+            snr = max(ev["snr"])
+            rssi = max(ev["rssi"])
             # App-level sequence: the VTX prefixes a 12-bit per-video-frame counter,
-            # so gap-based loss is EXACT. (The 802.11 seq=... advances per transmitted
+            # so gap-based loss is EXACT. (The 802.11 seq advances per transmitted
             # frame incl. retries, so it over-counts loss — see score.seq_gap_loss.)
             seq = (int.from_bytes(body[:2], "little") & 0xFFF
-                   if len(body) >= 2 else int(m.group("seq")))
-            vrx.on_video(rssi, snr, int(m.group("crc")) != 0, seq, _now_ms())
+                   if len(body) >= 2 else ev["seq"])
+            vrx.on_video(rssi, snr, ev["crc"] != 0, seq, _now_ms())
     threading.Thread(target=reader, daemon=True).start()
-    import sys
     import time
     last_log = 0.0
     while True:
@@ -331,10 +329,10 @@ def run_vtx(proc, vtx_id, video_path, channel):
 
     def reader():
         for line in proc.stdout:
-            m = _STREAM_RE.search(line)
-            if not m:
+            ev = parse_event(line, ev="rx.frame")
+            if ev is None:
                 continue
-            body = bytes.fromhex(m.group("body").decode())
+            body = bytes.fromhex(ev.get("body") or "")
             t = rp.frame_type(body)
             if t not in (rp.T_RCF, rp.T_DISC):
                 continue

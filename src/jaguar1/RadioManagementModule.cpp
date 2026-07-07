@@ -620,7 +620,7 @@ void RadioManagementModule::DumpCanary() {
 void RadioManagementModule::phy_set_rf_reg(RfPath eRFPath, uint16_t RegAddr,
                                            uint32_t BitMask, uint32_t Data) {
   uint32_t data = Data;
-  //_logger->debug("RFREG;{};{:X};{:X};{:X}", (uint8_t)eRFPath, (uint)RegAddr,
+  //DVR_DEBUG(_logger, "RFREG;{};{:X};{:X};{:X}", (uint8_t)eRFPath, (uint)RegAddr,
   //               BitMask, data);
   if (BitMask == 0) {
     return;
@@ -2187,7 +2187,7 @@ void RadioManagementModule::PHY_SetTxPowerIndex_8812A(uint32_t powerIndex,
                                                       RfPath rfPath,
                                                       MGN_RATE rate) {
 
-  _logger->debug("PHY_SetTxPowerIndex {} {} {}", powerIndex, (int)rfPath, rate);
+  DVR_DEBUG(_logger, "PHY_SetTxPowerIndex {} {} {}", powerIndex, (int)rfPath, rate);
 
   /* 8814A: per-rate per-path power index is programmed via a single packed
    * BB-register write at 0x1998. Port of PHY_SetTxPowerIndex_8814A from
@@ -2659,7 +2659,7 @@ void RadioManagementModule::PHY_SetTxPowerIndex_8812A(uint32_t powerIndex,
 
 void RadioManagementModule::phy_set_tx_power_index_by_rate_section(
     RfPath rfPath, uint8_t channel, RATE_SECTION rateSection) {
-  _logger->debug("SET_TX_POWER {} - {} - {}", (int)rfPath, (int)channel,
+  DVR_DEBUG(_logger, "SET_TX_POWER {} - {} - {}", (int)rfPath, (int)channel,
                  (int)rateSection);
 
   if (rateSection >= RATE_SECTION::RATE_SECTION_NUM) {

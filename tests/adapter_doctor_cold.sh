@@ -78,7 +78,7 @@ sleep 6
 kill -0 $! 2>/dev/null || { log "FATAL: flood txdemo died"; tail -5 "$LOG/flood.log"; exit 3; }
 timeout -k 5 -s INT 8 env $VERIFY_ARGS DEVOURER_CHANNEL="$CHANNEL" \
   "$RXDEMO" > "$LOG/verify.log" 2>&1
-hits=$(grep -o 'hits=[0-9]*' "$LOG/verify.log" | tail -1 | cut -d= -f2)
+hits=$(grep -o '"hits":[0-9]*' "$LOG/verify.log" | tail -1 | cut -d: -f2)
 [ "${hits:-0}" -ge 5 ] || { log "FATAL: flood not radiating (hits=${hits:-0})"; exit 3; }
 log "flood radiating (verify hits=$hits) — deaf verdicts are trustworthy"
 
@@ -107,7 +107,7 @@ for i in $(seq 1 "$REPS"); do
     --expect-traffic > "$LOG/rep$i.log" 2>&1
   rc=$?
   [ "$rc" -gt "$worst" ] && [ "$rc" -le 2 ] && worst=$rc
-  log "rep $i: $(grep -o '<devourer-doctor>.*' "$LOG/rep$i.log" | head -1) (rc=$rc)"
+  log "rep $i: $(grep -F '"ev":"doctor.verdict"' "$LOG/rep$i.log" | head -1) (rc=$rc)"
 done
 
 log "=== worst verdict across $REPS cold reps: rc=$worst (0=healthy 1=suspect 2=failing) ==="

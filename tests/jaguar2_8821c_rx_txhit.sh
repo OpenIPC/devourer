@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # RX validation: confirm the RTL8821C (CF-811AC) decodes a KNOWN over-the-air
 # frame. Inject the canonical txdemo beacon (SA 57:42:75:05:d6:00) from the T3U
-# (RTL8822B, known-good TX) and RX on the 8821C; a <devourer-tx-hit> proves the
+# (RTL8822B, known-good TX) and RX on the 8821C; an rx.txhit event proves the
 # 8821C RX decoded it end-to-end. Uses controlled traffic because this bench has
 # no reliable ambient 2.4G. Restores kernel drivers on exit.
 #
@@ -45,8 +45,8 @@ DEVOURER_VID=$RX_VID DEVOURER_PID=$RX_PID DEVOURER_CHANNEL=$CH \
 
 echo "--- TX side ---"; grep -iE "ready for TX|Creating|error" /tmp/8821c-tx.log | head -3
 echo "--- RX result ---"
-HITS=$(grep -c "<devourer-tx-hit>" "$RXLOG")
-grep -E "<devourer-tx-hit>" "$RXLOG" | head -3
+HITS=$(grep -cF '"ev":"rx.txhit"' "$RXLOG")
+grep -F '"ev":"rx.txhit"' "$RXLOG" | head -3
 echo "$(grep -oE "RX loop exited \([0-9]+ frames, [0-9]+ reads" "$RXLOG" | head -1)"
 echo "--- tx-hits: $HITS ---"
 if [ "$HITS" -ge 1 ]; then

@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import subprocess
 import sys
 import threading
@@ -48,13 +47,17 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 PRECODER = REPO / "tools" / "precoder"
 
+sys.path.insert(0, str(HERE))
+from devourer_events import iter_events, parse_event  # noqa: E402
+
 DESC_RATE6M = 0x04  # legacy OFDM 6 Mbps; CCK is 0x00-0x03, HT/VHT MCS is 0x0c+
 N_SD_LEGACY = 48
 
-_HIT_RE = re.compile(r"<devourer-tx-hit>")
-# Tolerant of the Tier-2 health fields inserted between rate= and len=.
-_BODY_RE = re.compile(r"<devourer-body>rate=(\d+).*? len=(\d+) body=([0-9a-fA-F]*)")
-_HEALTH_RE = re.compile(r"rssi=([-\d,]+) evm=([-\d,]+) snr=([-\d,]+) crc=(\d+)")
+# rxdemo emits machine events as JSON Lines on stdout:
+#   {"ev":"rx.txhit",...}  — canonical-SA frame match
+#   {"ev":"rx.body",...}   — DEVOURER_DUMP_BODY frame body + Tier-2 health
+# Human diagnostics go to stderr as `devourer [I] ...` and never parse as
+# events, so merging stderr into the reader below stays safe.
 
 
 def rate_name(idx: int) -> str:
@@ -153,7 +156,7 @@ def run_test(args) -> int:
     deadline = time.monotonic() + args.duration
     try:
         while time.monotonic() < deadline:
-            if any(_BODY_RE.search(l) for l in rx_reader.lines):
+            if any(parse_event(l, "rx.body") for l in rx_reader.lines):
                 time.sleep(1.0)  # let a couple more land
                 break
             time.sleep(0.5)
@@ -168,9 +171,8 @@ def run_test(args) -> int:
                 p.kill()
 
     # 5. verdict.
-    hits = sum(1 for l in rx_reader.lines if _HIT_RE.search(l))
-    body_lines = [l for l in rx_reader.lines if _BODY_RE.search(l)]
-    bodies = [_BODY_RE.search(l) for l in body_lines]
+    hits = sum(1 for _ in iter_events(rx_reader.lines, ev="rx.txhit"))
+    bodies = list(iter_events(rx_reader.lines, ev="rx.body"))
     if args.keep:
         log = Path(args.workdir) / "rx.log"
         log.write_text("".join(rx_reader.lines))
@@ -184,23 +186,23 @@ def run_test(args) -> int:
     ok &= hits > 0
 
     if not bodies:
-        print("[2/3] phy rate: no <devourer-body> line — FAIL")
+        print("[2/3] phy rate: no rx.body event — FAIL")
         print("[3/3] bytes:    n/a — FAIL")
         return 1 if not args.allow_fail else 0
 
-    m = bodies[0]
-    rate = int(m.group(1))
-    rx_body = bytes.fromhex(m.group(3))
+    ev = bodies[0]
+    rate = int(ev["rate"])
+    rx_body = bytes.fromhex(ev.get("body", ""))
     print(f"[2/3] phy rate: idx 0x{rate:02x} = {rate_name(rate)} — "
           + ("PASS" if rate == DESC_RATE6M else "FAIL"))
     ok &= rate == DESC_RATE6M
 
     # Tier-2 link-health diagnostics (info only — content-blind, never a
     # per-subcarrier or control signal; see the precoder README).
-    h = _HEALTH_RE.search(body_lines[0])
-    if h:
-        print(f"[ -- ] link health (info, not control): rssi={h.group(1)} "
-              f"evm={h.group(2)} snr={h.group(3)} crc_err={h.group(4)}")
+    if "rssi" in ev:
+        fmt = lambda k: ",".join(str(v) for v in ev.get(k, []))  # noqa: E731
+        print(f"[ -- ] link health (info, not control): rssi={fmt('rssi')} "
+              f"evm={fmt('evm')} snr={fmt('snr')} crc_err={ev.get('crc', 0)}")
 
     n = min(len(expected), len(rx_body))
     match = n > 0 and rx_body[:n] == expected[:n]

@@ -35,24 +35,25 @@ whose per-tone SNR / V-angle variance localises an interferer to ~1 MHz.
 
 ## `DEVOURER_RX_ENERGY_MS` — the energy sensor
 
-`rxdemo` with `DEVOURER_RX_ENERGY_MS=N` emits one `<devourer-energy>`
-line every `N` ms:
+`rxdemo` with `DEVOURER_RX_ENERGY_MS=N` emits one `rx.energy`
+event every `N` ms:
 
-```
-<devourer-energy>cca_ofdm=.. cca_cck=.. fa_ofdm=.. fa_cck=.. igi=.. frames=N
-                 rssi_mean=.. rssi_max=.. snr_mean=.. snr_min=..
+```json
+{"ev":"rx.energy","t":..,"cca_ofdm":..,"cca_cck":..,"fa_ofdm":..,"fa_cck":..,
+ "igi":..,"frames":N,"rssi_mean":..,"rssi_max":..,"snr_mean":..,"snr_min":..}
 ```
 
-`cca_*`/`fa_*`/`igi` are frame-free (`IRtlDevice::GetRxEnergy`); the FA/CCA counts
-are the delta since the previous line (each read resets the hardware counters).
+`cca_*`/`fa_*`/`igi` are frame-free (`IRtlDevice::GetRxEnergy`, `null` on a chip
+that doesn't expose them); the FA/CCA counts
+are the delta since the previous event (each read resets the hardware counters).
 `rssi_*`/`snr_*`/`frames` are the rolling per-frame aggregate over the interval.
 
 The same call also fills the **NHM power histogram**, emitted as a companion
-`<devourer-nhm>` line (kept on a distinct tag so the `<devourer-energy>` format
-its regex consumers key on is untouched):
+`rx.nhm` event (kept distinct so the `rx.energy` fields its consumers key on
+are untouched):
 
-```
-<devourer-nhm>peak=.. busy=.. dur=.. hist=b0,b1,..,b11
+```json
+{"ev":"rx.nhm","peak":..,"busy":..,"dur":..,"hist":[b0,b1,..,b11]}
 ```
 
 `peak` is the fullest bucket (0 = noise floor, higher = energy in a higher power
@@ -89,7 +90,7 @@ both an unambiguous detection:
 - **collapse** — a strong co-located carrier saturates the AGC, the RX goes deaf,
   and the count (and received frames) fall toward zero (the 1T1R 8821AU / 8821CU).
 
-The `<devourer-nhm>` histogram is the corroborating signal: the tone moves the
+The `rx.nhm` histogram is the corroborating signal: the tone moves the
 distribution's mass into higher power buckets (measured: peak bucket 5→8 on the
 8822CU under a co-located CW tone), so `peak` rises and the high-index `hist`
 buckets fill where the baseline had zeros.
@@ -108,8 +109,8 @@ frequency, sweep. With `DEVOURER_RX_SWEEP="1,6,11"` the sensor cycles the listed
 bins — the RX loop runs on a worker thread while the main thread retunes between
 reads via `IRtlDevice::FastRetune` (the lean intra-band hop path every
 generation implements; `DEVOURER_RX_SWEEP_FULL=1` forces the full
-`SetMonitorChannel` per dwell for A/B) — and emits one `<devourer-energy>ch=N`
-line per bin. Aggregating those into an energy-vs-frequency bar chart peaks (or,
+`SetMonitorChannel` per dwell for A/B) — and emits one `rx.energy`
+event (tagged `"ch":N`) per bin. Aggregating those into an energy-vs-frequency bar chart peaks (or,
 on the saturating 1T1R parts, dips) at the tone's channel.
 
 The bin spec uses the SweepSpec grammar (`src/SweepSpec.h`, shared with

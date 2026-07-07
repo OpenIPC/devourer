@@ -204,9 +204,9 @@ the save→write→read→restore dance for each selector on the first 8
 canonical-SA frames and emits
 
 ```
-<devourer-csi>hit=1 selector=0x0000001a value=0x????????
-<devourer-csi>hit=1 selector=0x00000020 value=0x????????
-<devourer-csi>hit=1 selector=0x00000040 value=0x????????
+{"ev":"csi.hit","hit":1,"selector":"0x0000001a","value":"0x????????"}
+{"ev":"csi.hit","hit":1,"selector":"0x00000020","value":"0x????????"}
+{"ev":"csi.hit","hit":1,"selector":"0x00000040","value":"0x????????"}
 ...
 ```
 
@@ -218,15 +218,15 @@ in a single u32, with selector encoding the subcarrier index in
 its low bits — that's the upstream phydm convention, but unverified
 here.
 
-`tools/precoder/csi_dump.py` parses `<devourer-csi>` lines and reports
+`tools/precoder/csi_dump.py` parses `csi.hit` events and reports
 which selectors changed across frames, which stayed constant, and
 the per-bit toggle ratio (high = bus, low = status flag).
 
 #### Brick recovery if the chip stalls after a sweep
 
-Symptoms: RX stops producing `<devourer>RX pkt` lines, control transfers
+Symptoms: RX stops producing `rx.pkt` events, control transfers
 still succeed. The `BbDbgportReader` auto-detects this via a SYS_CFG
-sanity read after every selector and self-wedges — `<devourer-csi-wedged>`
+sanity read after every selector and self-wedges — `csi.wedged`
 on stdout means subsequent selectors were skipped.
 
 Recovery ladder (each step is a fresh process invocation):

@@ -63,6 +63,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
+# Same-dir import: python puts the script's own directory on sys.path.
+from devourer_events import iter_events
+
 
 # ---------------------------------------------------------------------------
 # Process leak prevention.
@@ -154,7 +157,7 @@ def _install_cleanup_handlers() -> None:
     signal.signal(signal.SIGHUP, _handler)
 
 # Source MAC of the canonical beacon — must match examples/tx/main.cpp and the
-# `<devourer-tx-hit>` matcher in examples/rx/main.cpp. tcpdump filter and scapy
+# `rx.txhit` event matcher in examples/rx/main.cpp. tcpdump filter and scapy
 # injector both use this.
 CANONICAL_SA = "57:42:75:05:d6:00"
 
@@ -873,37 +876,35 @@ def _terminate(proc: subprocess.Popen, grace: float = 2.0) -> None:
 def _count_devourer_rx_hits(log_path: Path) -> int:
     last = 0
     try:
-        for line in log_path.read_text(errors="replace").splitlines():
-            if "<devourer-tx-hit>" in line:
-                for tok in line.split():
-                    if tok.startswith("hits="):
-                        try:
-                            last = max(last, int(tok.split("=", 1)[1]))
-                        except ValueError:
-                            pass
+        lines = log_path.read_text(errors="replace").splitlines()
     except FileNotFoundError:
-        pass
+        return 0
+    for ev in iter_events(lines, ev="rx.txhit"):
+        try:
+            last = max(last, int(ev["hits"]))
+        except (KeyError, TypeError, ValueError):
+            pass
     return last
 
 
 def _count_devourer_tx_attempts(log_path: Path) -> tuple[int, int]:
-    """Returns (max_tx_count_logged, send_failures). The print is rate-limited
-    so when sends fail often, max_tx_count_logged stays low — surface failure
-    count alongside so the picture is honest."""
+    """Returns (max_tx_count_logged, send_failures). The tx.frame event is
+    rate-limited so when sends fail often, max_tx_count_logged stays low —
+    surface the tx.fail count alongside so the picture is honest."""
     last = 0
     failures = 0
     try:
-        for line in log_path.read_text(errors="replace").splitlines():
-            if line.startswith("<devourer-tx>TX #"):
-                tok = line.split("#", 1)[1].split()[0]
-                try:
-                    last = max(last, int(tok))
-                except ValueError:
-                    pass
-            elif "Failed to send packet" in line:
-                failures += 1
+        lines = log_path.read_text(errors="replace").splitlines()
     except FileNotFoundError:
-        pass
+        return 0, 0
+    for ev in iter_events(lines):
+        if ev["ev"] == "tx.frame":
+            try:
+                last = max(last, int(ev["n"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+        elif ev["ev"] == "tx.fail":
+            failures += 1
     return last, failures
 
 

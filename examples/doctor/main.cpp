@@ -21,11 +21,11 @@
  *                      (bench flood / busy AP on the channel).
  *
  * Verdict: HEALTHY / SUSPECT / FAILING (+ reasons), exit code 0 / 1 / 2
- * (3 = tool/open error). Machine-readable summary on one line:
+ * (3 = tool/open error). Machine-readable summary as one JSONL event:
  *
- *   <devourer-doctor>verdict=FAILING reasons=0x12 efuse_reads=4 \
- *       efuse_mismatch=3 efuse_bad_id=4 efuse_id=0x1029 fw_attempted=1 \
- *       fw_ready=0 rx_ok=0 rx_crc=7 init=1
+ *   {"ev":"doctor.verdict","verdict":"FAILING","reasons":"0x12",
+ *    "efuse_reads":4,"efuse_mismatch":3,"efuse_bad_id":4,"efuse_id":"0x1029",
+ *    "fw_attempted":1,"fw_ready":0,"rx_ok":0,"rx_crc":7,"init":1}
  *
  * CLI (no environment variables — device selection included, since a rig may
  * hold two same-PID/same-serial adapters where only topology tells them
@@ -121,7 +121,8 @@ bool parse_args(int argc, char **argv, Args &a) {
     else if (k == "--expect-traffic")
       a.expect_traffic = true;
     else {
-      std::fprintf(stderr, "unknown/incomplete arg: %s\n", k.c_str());
+      std::fprintf(stderr, "devourer [W] unknown/incomplete arg: %s\n",
+                   k.c_str());
       return false;
     }
   }
@@ -318,15 +319,19 @@ int main(int argc, char **argv) {
     std::printf("  - heard nothing (supply known traffic + --expect-traffic "
                 "for a hard verdict)\n");
 
-  std::printf("<devourer-doctor>verdict=%s reasons=0x%x efuse_reads=%d "
-              "efuse_mismatch=%d efuse_bad_id=%d efuse_id=0x%04x "
-              "fw_attempted=%d fw_ready=%d rx_ok=%u rx_crc=%u init=%d\n",
-              devourer::AdapterVerdictName(v), reasons, in.efuse.reads,
-              in.efuse.mismatched_reads, in.efuse.invalid_id_reads,
-              in.efuse.eeprom_id, in.fw.attempted ? 1 : 0,
-              in.fw.ready_ok ? 1 : 0, in.rx_frames_ok, in.rx_frames_crc,
-              in.init_completed ? 1 : 0);
-  std::fflush(stdout);
+  /* Machine-parseable summary (consumed by tests/adapter_doctor_cold.sh). */
+  devourer::Ev(logger->events(), "doctor.verdict")
+      .f("verdict", devourer::AdapterVerdictName(v))
+      .hexf("reasons", reasons)
+      .f("efuse_reads", in.efuse.reads)
+      .f("efuse_mismatch", in.efuse.mismatched_reads)
+      .f("efuse_bad_id", in.efuse.invalid_id_reads)
+      .hexf("efuse_id", in.efuse.eeprom_id, 4)
+      .f("fw_attempted", in.fw.attempted ? 1 : 0)
+      .f("fw_ready", in.fw.ready_ok ? 1 : 0)
+      .f("rx_ok", in.rx_frames_ok)
+      .f("rx_crc", in.rx_frames_crc)
+      .f("init", in.init_completed ? 1 : 0);
 
   dev->Stop();
   libusb_close(handle);

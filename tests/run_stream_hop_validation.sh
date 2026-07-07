@@ -62,9 +62,11 @@ sudo --preserve-env \
     >"$TX_LOG" 2>&1 &
 TX_PID_PROC=$!
 
+# streamtx routes its events (stream.tx / stream.done) to STDERR — stdout is
+# its data path — so they land in $TX_LOG via the merged 2>&1 capture.
 echo "== waiting for first TX =="
 for _ in $(seq 1 300); do
-    grep -q "<stream-tx>" "$TX_LOG" 2>/dev/null && break
+    grep -qF '"ev":"stream.tx"' "$TX_LOG" 2>/dev/null && break
     kill -0 "$TX_PID_PROC" 2>/dev/null || { echo "TX exited early"; break; }
     sleep 0.1
 done
@@ -78,6 +80,6 @@ RX_PID=$!
 wait "$RX_PID" 2>/dev/null || true
 cleanup
 
-echo; echo "== TX summary =="; grep -E "stream-tx|HOP_CHANNELS" "$TX_LOG" | tail -5 || true
+echo; echo "== TX summary =="; grep -F -e '"ev":"stream.tx"' -e '"ev":"stream.done"' -e 'HOP_CHANNELS' "$TX_LOG" | tail -5 || true
 echo; echo "== SDR verdict =="; sed -n '/=== hop_rx_probe verdict ===/,$p' "$RX_LOG" || true
 echo; echo "Logs: $TX_LOG  $RX_LOG"

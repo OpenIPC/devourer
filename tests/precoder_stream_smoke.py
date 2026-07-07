@@ -6,8 +6,8 @@ runs without the uv toolchain — it skips cleanly when numpy isn't installed
 on the system Python.
 
 It drives the same encode → simulated-on-wire → decode path the two-adapter
-hardware harness uses, but synthesises the `<devourer-stream>` line that
-rxdemo would print, so no USB is involved.
+hardware harness uses, but synthesises the body bytes an rxdemo
+`{"ev":"rx.frame",...}` event would carry, so no USB is involved.
 
 The smoke covers:
   * byte-mode round-trip — frame the input, encode, decode, reassemble;
@@ -61,8 +61,8 @@ def test_byte_mode_repo_smoke():
         bodies.append(body)
 
     # Simulate the wire: length-prefixed PSDU bodies in, the same bodies
-    # back out (streamtx emits them, demo's DEVOURER_STREAM_OUT dumps
-    # them — identity on the byte plane).
+    # back out (streamtx emits them, rxdemo's DEVOURER_STREAM_OUT carries
+    # them in rx.frame events — identity on the byte plane).
     wire = b"".join(_frame_psdu_for_wire(b) for b in bodies)
     rx_bodies = _parse_length_prefixed(wire)
     assert rx_bodies == bodies

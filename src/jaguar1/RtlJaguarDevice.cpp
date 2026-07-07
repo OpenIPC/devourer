@@ -17,6 +17,19 @@
 #include <thread>
 #include <vector>
 
+/* comma-joined 0xNN hex dump for the DVR_TRACE TX-buffer dumps (argument is
+ * only evaluated when trace is enabled). */
+[[maybe_unused]] static std::string hex_join(const uint8_t *p, size_t n) {
+  std::string s;
+  s.reserve(n * 5);
+  char b[8];
+  for (size_t i = 0; i < n; i++) {
+    std::snprintf(b, sizeof(b), "%s0x%02x", i ? "," : "", p[i]);
+    s += b;
+  }
+  return s;
+}
+
 /* Per-queue free-page registers (8814A only — 0x0230..0x0240 don't decode
  * the same way on 8812/8821). Cross-checked against hal/rtl8814a_spec.h
  * and src/HalModule.cpp's REG_FIFOPAGE_INFO_*_8814A constants. */
@@ -304,7 +317,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
 
   usb_frame_length = real_packet_length + TXDESC_SIZE;
 
-  _logger->debug("radiotap length is {}, 80211 length is {}, usb_frame length "
+  DVR_DEBUG(_logger, "radiotap length is {}, 80211 length is {}, usb_frame length "
                 "should be {}",
                 radiotap_length, real_packet_length, usb_frame_length);
 
@@ -483,7 +496,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
     }
     stbc = 0;
   }
-  _logger->debug("fixed rate:{}, sgi:{}, radiotap_bwidth:{}, ldpc:{}, stbc:{}",
+  DVR_DEBUG(_logger, "fixed rate:{}, sgi:{}, radiotap_bwidth:{}, ldpc:{}, stbc:{}",
                 (int)fixed_rate, (int)sgi, (int)bwidth, (int)ldpc, (int)stbc);
 
   uint8_t BWSettingOfDesc;
@@ -494,7 +507,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   } else {
     BWSettingOfDesc = 0;
   }
-  _logger->debug("TX DESC BW decision: _channel.ChannelWidth(RX)={}, radiotap_bwidth(TX)={}, BWSettingOfDesc(TX_DESC)={}",
+  DVR_DEBUG(_logger, "TX DESC BW decision: _channel.ChannelWidth(RX)={}, radiotap_bwidth(TX)={}, BWSettingOfDesc(TX_DESC)={}",
                 (int)_channel.ChannelWidth, (int)bwidth, (int)BWSettingOfDesc);
 
   SET_TX_DESC_DATA_BW_8812(usb_frame, BWSettingOfDesc);
@@ -602,32 +615,12 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   }
 
   rtl8812a_cal_txdesc_chksum(usb_frame);
-  _logger->debug("tx desc formed");
-#ifdef DEBUG
-  for (size_t i = 0; i < usb_frame_length; ++i) {
-    std::cout << "0x" << std::hex << std::setw(2) << std::setfill('0')
-              << static_cast<int>(usb_frame[i]);
-
-    if (i < usb_frame_length - 1) {
-      std::cout << ",";
-    }
-  }
-  std::cout << std::dec << std::endl;
-#endif
+  DVR_TRACE(_logger, "tx desc formed: {}",
+            hex_join(usb_frame, usb_frame_length));
   uint8_t *addr = usb_frame + TXDESC_SIZE;
   memcpy(addr, packet + radiotap_length, real_packet_length);
-  _logger->debug("packet formed");
-#ifdef DEBUG
-  for (size_t i = 0; i < usb_frame_length; ++i) {
-    std::cout << "0x" << std::hex << std::setw(2) << std::setfill('0')
-              << static_cast<int>(usb_frame[i]);
-
-    if (i < usb_frame_length - 1) {
-      std::cout << ",";
-    }
-  }
-  std::cout << std::dec << std::endl;
-#endif
+  DVR_TRACE(_logger, "packet formed: {}",
+            hex_join(usb_frame, usb_frame_length));
   resp = _device.send_packet(usb_frame, usb_frame_length);
   delete[] usb_frame;
 
@@ -674,7 +667,7 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
    * instead of setting it once — the stimulus for the mobile/fading combining
    * measurement: alternate a fixed single chain vs all-4 fast relative to the
    * operator's motion, so both configs sample the same fading process. Each
-   * switch prints a `<devourer-rxpath-mask>0xNN` marker inline with the frame
+   * switch emits an `rx.path_mask` event inline with the frame
    * stream so the analyser can tag each frame with the active mask. A plain
    * `0xNN` applies once, as before. */
   if (_cfg.rx.path_spec) {
@@ -947,7 +940,7 @@ RtlJaguarDevice::~RtlJaguarDevice() {
 }
 
 /* Cycle the RX-path mask (0x808 byte 0) through `masks` every `interval_ms` on a
- * background thread, printing a `<devourer-rxpath>mask` marker on each switch.
+ * background thread, emitting an `rx.path_mask` event on each switch.
  * The control-transfer write runs concurrently with the RX bulk-IN workers on a
  * different endpoint, which libusb permits (see the queue-depth poller). Used by
  * the mobile/fading combining measurement. */
@@ -962,8 +955,7 @@ void RtlJaguarDevice::start_rx_path_toggle(const std::vector<uint8_t> &masks,
     while (!_rxmask_stop.load()) {
       uint8_t m = masks[i++ % masks.size()];
       _device.rtw_write8(0x808, m);
-      std::printf("<devourer-rxpath-mask>0x%02x\n", m);
-      std::fflush(stdout);
+      devourer::Ev(_logger->events(), "rx.path_mask").t().hexf("mask", m, 2);
       for (uint32_t slept = 0; slept < interval_ms && !_rxmask_stop.load();
            slept += 25)
         std::this_thread::sleep_for(std::chrono::milliseconds(25));

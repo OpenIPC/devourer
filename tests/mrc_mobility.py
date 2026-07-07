@@ -10,15 +10,15 @@ can't escape while MRC fills them. This tool measures that.
 It consumes a capture from `rxdemo` run with the RX-path *toggle*:
 
     DEVOURER_RX_PATHS=0x22:0xFF@300   # alternate chain-B-only and all-4 every 300ms
-    DEVOURER_RX_ALLPATHS=1            # emit per-chain <devourer-rxpath> lines
+    DEVOURER_RX_ALLPATHS=1            # emit per-chain rx.path events
 
-The library prints a `<devourer-rxpath>mask` marker on every switch, inline with
-the frame stream, so each frame is attributed to the mask active when it arrived:
+The library emits an `rx.path_mask` event on every switch, inline with the
+frame stream, so each frame is attributed to the mask active when it arrived:
 
-    <devourer-rxpath-mask>0x22
-    <devourer-rxpath>seq=.. rssi=a,b,c,d snr=.. evm=..
+    {"ev":"rx.path_mask","t":1234,"mask":"0x22"}
+    {"ev":"rx.path","seq":..,"rssi":[a,b,c,d],"snr":[...],"evm":[...]}
     ...
-    <devourer-rxpath-mask>0xff
+    {"ev":"rx.path_mask","t":1534,"mask":"0xff"}
     ...
 
 Because the toggle is fast relative to hand-motion, the two configs sample the
@@ -46,13 +46,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 
 import numpy as np
 
-_MARK = re.compile(r"<devourer-rxpath-mask>(0x[0-9a-fA-F]+)")
-_FRAME = re.compile(r"<devourer-rxpath>seq=\d+\s+rssi=([\-\d,]+)")
+from devourer_events import parse_event
+
 # How many frames to drop right after each switch. Toggling 0x808 causes a brief
 # RX/AGC transient that drops a few frames on the leading edge of a window;
 # dropping them de-biases the per-mask delivery. Tune with --settle if the
@@ -68,16 +67,16 @@ def parse_windows(lines):
     cur_mask = None
     cur_rows = []
     for ln in lines:
-        m = _MARK.search(ln)
-        if m:
+        ev = parse_event(ln)
+        if ev is None:
+            continue
+        if ev["ev"] == "rx.path_mask":
             if cur_mask is not None:
                 windows.append((cur_mask, cur_rows))
-            cur_mask = int(m.group(1), 16)
+            cur_mask = int(ev["mask"], 16)
             cur_rows = []
-            continue
-        f = _FRAME.search(ln)
-        if f and cur_mask is not None:
-            cur_rows.append([int(x) for x in f.group(1).split(",")])
+        elif ev["ev"] == "rx.path" and cur_mask is not None:
+            cur_rows.append([int(x) for x in ev["rssi"]])
     if cur_mask is not None:
         windows.append((cur_mask, cur_rows))
     return windows
@@ -174,14 +173,16 @@ def self_test() -> int:
     lines = []
     for w in range(40):
         # ALL window: steady ~40 frames, all chains ~70
-        lines.append("<devourer-rxpath-mask>0xff")
+        lines.append('{"ev":"rx.path_mask","t":0,"mask":"0xff"}')
         for _ in range(40):
-            lines.append("<devourer-rxpath>seq=1 rssi=70,71,69,72 snr=1,1,1,1 evm=0,0,0,0")
+            lines.append('{"ev":"rx.path","seq":1,"rssi":[70,71,69,72],'
+                         '"snr":[1,1,1,1],"evm":[0,0,0,0]}')
         # B-only window: fades — half the windows deliver few frames
-        lines.append("<devourer-rxpath-mask>0x22")
+        lines.append('{"ev":"rx.path_mask","t":0,"mask":"0x22"}')
         nb = 40 if rng.random() > 0.5 else int(rng.integers(0, 5))
         for _ in range(nb):
-            lines.append("<devourer-rxpath>seq=1 rssi=0,70,0,0 snr=1,1,1,1 evm=0,0,0,0")
+            lines.append('{"ev":"rx.path","seq":1,"rssi":[0,70,0,0],'
+                         '"snr":[1,1,1,1],"evm":[0,0,0,0]}')
 
     windows = parse_windows(lines)
     stats = per_mask_stats(windows)

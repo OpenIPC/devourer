@@ -89,12 +89,12 @@ sudo --preserve-env \
     "$ROOT/build/txdemo" >"$TX_LOG" 2>&1 &
 TX_PID_PROC=$!
 
-# Wait until the TX is actually hopping (first <devourer-hop> marker) before we
+# Wait until the TX is actually hopping (first hop.dwell event) before we
 # start the SDR — chip bring-up takes a few seconds and we don't want to burn
 # the capture window on it.
 echo "== waiting for TX to begin hopping =="
 for _ in $(seq 1 300); do
-    grep -q "<devourer-hop>" "$TX_LOG" 2>/dev/null && break
+    grep -qF '"ev":"hop.dwell"' "$TX_LOG" 2>/dev/null && break
     kill -0 "$TX_PID_PROC" 2>/dev/null || { echo "TX exited early"; break; }
     sleep 0.1
 done
@@ -112,8 +112,8 @@ echo "== TX finished; waiting for SDR capture to end =="
 wait "$RX_PID" 2>/dev/null || true
 
 echo
-echo "== TX hop markers (from $TX_LOG) =="
-grep -E "devourer-hop|devourer-hop-done" "$TX_LOG" | head -40 || true
+echo "== TX hop events (from $TX_LOG) =="
+grep -F -e '"ev":"hop.dwell"' -e '"ev":"hop.done"' "$TX_LOG" | head -40 || true
 echo
 echo "== SDR verdict (from $RX_LOG) =="
 sed -n '/=== hop_rx_probe verdict ===/,$p' "$RX_LOG" || true

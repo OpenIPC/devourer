@@ -29,8 +29,8 @@ echo "--- key log lines ---"
 grep -iE "Creating RtlJaguar2Device|firmware booted|PHY tables applied|entering RX loop|RX: completion" "$LOG" | head -12
 
 DEV=$(grep -c "Creating RtlJaguar2Device" "$LOG")
-STREAM=$(grep -c "<devourer-stream>" "$LOG")
-BODY=$(grep -c "<devourer-body>" "$LOG")
+STREAM=$(grep -cF '"ev":"rx.frame"' "$LOG")
+BODY=$(grep -cF '"ev":"rx.body"' "$LOG")
 COMPL=$(grep -c "RX: completion" "$LOG")
 echo "--- counts: RtlJaguar2Device=$DEV  stream=$STREAM  body=$BODY  rx-completions=$COMPL ---"
 

@@ -36,7 +36,7 @@ echo "--- bring-up progress ---"
 grep -iE "Creating RtlJaguar2Device|power-on|chip.version|cut=|rf_2t2r|firmware booted|DLFW|MAC cfg|PHY tables|channel set|IQK|RX enabled|entering RX loop|RX: completion|error|throw|fail" "$LOG" | head -30
 
 DEV=$(grep -c "Creating RtlJaguar2Device C8821C" "$LOG")
-STREAM=$(grep -c "<devourer-stream>" "$LOG")
+STREAM=$(grep -cF '"ev":"rx.frame"' "$LOG")
 COMPL=$(grep -c "RX: completion" "$LOG")
 echo "--- counts: C8821C-construct=$DEV  stream=$STREAM  rx-completions=$COMPL ---"
 if [ "$DEV" -ge 1 ]; then

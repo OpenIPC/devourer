@@ -243,7 +243,7 @@ void PhydmWatchdog::DigTick(uint32_t fa_cnt) {
   }
 
   if (new_igi != _cur_ig_value) {
-    _logger->debug("PhydmWatchdog::DigTick fa={} igi 0x{:02x}->0x{:02x}",
+    DVR_DEBUG(_logger, "PhydmWatchdog::DigTick fa={} igi 0x{:02x}->0x{:02x}",
                    fa_cnt, unsigned(_cur_ig_value), unsigned(new_igi));
     DigWriteIgi(new_igi);
     _cur_ig_value = new_igi;

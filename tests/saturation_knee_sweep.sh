@@ -2,7 +2,7 @@
 # Near-field saturation-knee sweep — the measurement behind the link-health
 # classifier and the bench-testing guidance. Walks the TX-power flat index over
 # its full range (the runtime knob DEVOURER_TX_PWR) while a ground adapter
-# reports per-frame RSSI / SNR / EVM (<devourer-stream>). On a healthy link EVM
+# reports per-frame RSSI / SNR / EVM (rx.frame events). On a healthy link EVM
 # improves monotonically as RSSI rises; at the front-end saturation knee it
 # STOPS improving and reverses — more signal made it worse. This finds that
 # knee and, as a side effect, calibrates the RSSI scale (does raw RSSI climb
@@ -67,8 +67,8 @@ wait "$GJ" 2>/dev/null
 python3 - "$OUT/ground.log" "$OUT/cells.txt" <<'PYEOF'
 import re, statistics, sys
 frames = []  # (t, rssi0, snr0, evm0)
-rx = re.compile(r"^([0-9.]+) .*<devourer-stream>.*\brssi=(-?\d+),-?\d+ "
-                r"evm=(-?\d+),-?\d+ snr=(-?\d+),-?\d+")
+rx = re.compile(r'^([0-9.]+) .*"ev":"rx\.frame".*"rssi":\[(-?\d+),-?\d+\],'
+                r'"evm":\[(-?\d+),-?\d+\],"snr":\[(-?\d+),-?\d+\]')
 for line in open(sys.argv[1], errors="replace"):
     m = rx.match(line)
     if m:

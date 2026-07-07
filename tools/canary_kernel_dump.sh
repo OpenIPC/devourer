@@ -14,14 +14,16 @@
 #
 # Usage:
 #   sudo tools/canary_kernel_dump.sh <iface> <channel> > /tmp/krn.canary
-#   # then on devourer side:
+#   # then on devourer side (the canary is a stderr diagnostic, prefixed
+#   # "devourer [I] " — hence the 2>&1 and the prefix strip):
 #   sudo env DEVOURER_VID=... DEVOURER_PID=... DEVOURER_CHANNEL=<channel> \
 #       DEVOURER_DUMP_CANARY=1 ./build/txdemo 2>&1 \
 #     | awk '/DEVOURER_DUMP_CANARY \(post channel-set ch=<channel>\)/,
 #            /END DEVOURER_DUMP_CANARY/' \
-#     | sed 's/^<devourer>//' \
+#     | sed -E 's/^devourer \[[A-Z]\] //' \
 #     > /tmp/dev.canary
 #   diff /tmp/krn.canary /tmp/dev.canary
+#   # (tests/canary_diff.py strips the prefix itself — raw captures are fine.)
 #
 # Iface is the wlx... or wlan? name the kernel driver enumerated. Run
 # `iw dev` to find it after `modprobe 88XXau`.

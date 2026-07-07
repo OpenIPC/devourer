@@ -20,6 +20,7 @@
 
 namespace devourer {
 class UsbDeviceLock;
+class PcieTransport;
 }
 
 #define rtw_read8 rtw_read<uint8_t>
@@ -42,9 +43,22 @@ enum TxSele {
 };
 
 class RtlUsbAdapter {
-  libusb_device_handle *_dev_handle;
+  libusb_device_handle *_dev_handle = nullptr; /* null on the PCIe backend */
   libusb_context *_ctx = nullptr;
   Logger_t _logger;
+
+  /* ---- PCIe backend (DEVOURER_PCIE) ----------------------------------
+   * The adapter is bus-dual: register I/O dispatches on `_mmio` — when set,
+   * rtw_read/rtw_write are plain volatile loads/stores on the BAR2 mapping
+   * (the same 0x0000..0xFFFF register space the USB vendor-control transfers
+   * address), and the bulk TX/RX entry points route to the PCIe TRX rings.
+   * `_mmio` is a raw pointer (cheap to copy — the adapter is a copyable value
+   * type); `_pcie` keeps the vfio fds + DMA rings alive until the last adapter
+   * copy dies, the same lifetime rule `_usb_lock` encodes for USB. Null on
+   * USB; empty/null on non-PCIe builds (a forward-declared shared_ptr member
+   * costs nothing). */
+  volatile uint8_t *_mmio = nullptr;
+  std::shared_ptr<devourer::PcieTransport> _pcie;
 
   enum libusb_speed usbSpeed;
   uint8_t numOutPipes = 0;
@@ -108,6 +122,20 @@ public:
                 std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr,
                 const devourer::DeviceConfig &cfg = {});
 
+#if defined(DEVOURER_HAVE_PCIE)
+  /* PCIe backend: registers via BAR2 MMIO, TX/RX via the transport's DMA
+   * rings. No USB descriptor walk / endpoint state — the endpoint-flavoured
+   * members stay at their defaults and are only consumed by USB-gated code. */
+  RtlUsbAdapter(std::shared_ptr<devourer::PcieTransport> transport,
+                Logger_t logger, const devourer::DeviceConfig &cfg = {});
+#endif
+
+  /* True on the libusb backend, false on PCIe. The HAL bring-up gates its few
+   * genuinely bus-specific steps (USB RX-aggregation config, 0xFExx USB-page
+   * workarounds, power-seq table choice) on this. */
+  bool is_usb() const { return _dev_handle != nullptr; }
+  devourer::PcieTransport *pcie() const { return _pcie.get(); }
+
   /* Kernel-style async RX: keep n_urbs concurrent bulk-IN transfers in flight on
    * the discovered bulk-IN endpoint, invoking on_data(buf,len) for each non-empty
    * completion and resubmitting, until `stop` is set. Mirrors the rtw88 RX URB
@@ -144,7 +172,10 @@ public:
   /* Synchronous bulk-OUT transfer that blocks until completion or timeout.
    * Returns the number of bytes actually transferred, or negative on error. */
   int bulk_send_sync(uint8_t *packet, size_t length, int timeout_ms);
-  void bulk_clear_halt(uint8_t ep) { libusb_clear_halt(_dev_handle, ep); }
+  void bulk_clear_halt(uint8_t ep) {
+    if (_dev_handle)
+      libusb_clear_halt(_dev_handle, ep);
+  }
   int bulk_send_sync_ep(uint8_t ep, uint8_t *packet, size_t length,
                         int timeout_ms);
 
@@ -163,6 +194,8 @@ public:
    * (or a negative libusb error). For chip families whose RX descriptor is not
    * the Jaguar1 layout (e.g. Jaguar3), the caller parses the buffer itself. */
   int bulk_read_raw(uint8_t *buf, int len, int timeout_ms) {
+    if (!_dev_handle)
+      return -1; /* PCIe RX goes through bulk_read_async_loop (ring reap) */
     int actual = 0;
     int rc = libusb_bulk_transfer(_dev_handle, _bulk_in_ep, buf, len, &actual,
                                   timeout_ms);
@@ -172,6 +205,18 @@ public:
   void phy_set_bb_reg(uint16_t regAddr, uint32_t bitMask, uint32_t data);
 
   template <typename T> T rtw_read(uint16_t reg_num) {
+    if (_mmio) {
+      /* 0xFE00..0xFEFF is USB-page register space — undefined over MMIO. The
+       * few jaguar users (0xFE5B/0xFE10/0xFE11) are is_usb()-gated; catch any
+       * stragglers instead of poking a hole in the BAR. */
+      if (reg_num >= 0xFE00) {
+        _logger->warn("rtw_read(0x{:04x}) on PCIe: USB-page register, "
+                      "returning 0",
+                      reg_num);
+        return 0;
+      }
+      return *reinterpret_cast<volatile T *>(_mmio + reg_num);
+    }
     T data = 0;
     if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5, reg_num,
                                 0, (uint8_t *)&data, sizeof(T),
@@ -187,12 +232,23 @@ public:
   template <typename T> bool rtw_write(uint16_t reg_num, T value) {
     /* debug.log_writes: emit every vendor reg write as a debug.wreg event
      * (addr/width/val mirror tests/decode_wseq.py's tuple) so devourer's
-     * bring-up write set can be diffed against the kernel golden. */
+     * bring-up write set can be diffed against the kernel golden. Applies to
+     * both backends — the kernel-diff tooling works unchanged over MMIO. */
     if (_log_writes)
       devourer::Ev(_logger->events(), "debug.wreg")
           .hexf("addr", reg_num, 4)
           .f("width", sizeof(T))
           .hexf("val", (unsigned long long)value, (int)(sizeof(T) * 2));
+    if (_mmio) {
+      if (reg_num >= 0xFE00) {
+        _logger->warn("rtw_write(0x{:04x}) on PCIe: USB-page register, "
+                      "dropped",
+                      reg_num);
+        return false;
+      }
+      *reinterpret_cast<volatile T *>(_mmio + reg_num) = value;
+      return true;
+    }
     if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_WRITE, 5,
                                 reg_num, 0, (uint8_t *)&value, sizeof(T),
                                 USB_TIMEOUT) == sizeof(T)) {
@@ -212,6 +268,11 @@ private:
    * it can flag _tx_wedged on a non-OK completion; a static member (not a free
    * function) to reach that private state. */
   static void transfer_callback(struct libusb_transfer *transfer);
+  /* PCIe TX: sniff QSEL from the tx descriptor at packet[0] and submit on the
+   * matching TRX ring (QSEL_BEACON -> BCN ring = the DLFW rsvd-page path,
+   * exactly rtw88's write_data_rsvd_page -> RTW_TX_QUEUE_BCN mapping).
+   * Defined only in DEVOURER_PCIE builds; every call site is _pcie-gated. */
+  int pcie_tx_dispatch(uint8_t *packet, size_t length, int timeout_ms);
   void InitDvObj();
   const char *strUsbSpeed();
   void GetChipOutEP8812();

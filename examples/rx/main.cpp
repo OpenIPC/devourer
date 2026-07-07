@@ -23,6 +23,9 @@
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
 #include "env_config.h"
+#if defined(DEVOURER_HAVE_PCIE)
+#include "PcieTransport.h"
+#endif
 
 #define USB_VENDOR_ID 0x0bda
 
@@ -340,7 +343,13 @@ static void packetProcessor(const Packet &packet) {
     const int rssi[2] = {packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1]};
     const int evm[2] = {packet.RxAtrib.evm[0], packet.RxAtrib.evm[1]};
     const int snr[2] = {packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]};
+    /* Frame-control word + addr2 lead byte: lets the survey classify frame
+     * types (beacon 0x80, ACK 0xd4, ...) without carrying whole bodies. */
+    const unsigned fc = packet.Data.size() >= 2
+                            ? (packet.Data[0] | (packet.Data[1] << 8))
+                            : 0;
     devourer::Ev(*g_ev, "rx.corrupt")
+        .hexf("fc", fc, 4)
         .f("len", packet.Data.size())
         .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
         .f("icv", packet.RxAtrib.icv_err ? 1 : 0)
@@ -525,6 +534,60 @@ int main() {
   /* SIGINT/SIGTERM -> clean shutdown (Stop() below). Without this the harness's
    * `timeout` SIGTERM killed us mid-RX, leaving the chip's USB core hung. */
   install_devourer_signal_handlers();
+
+#if defined(DEVOURER_HAVE_PCIE)
+  /* DEVOURER_PCIE_BDF=0000:01:00.0 — drive a PCIe adapter (RTL8821CE) through
+   * the vfio transport instead of libusb. The device must be bound to vfio-pci
+   * (tests/pcie_vfio_bind.sh). Minimal RX flow: transport -> factory -> Init;
+   * the USB-side pollers/sweep extras are not wired on this branch (yet). */
+  if (const char *bdf = std::getenv("DEVOURER_PCIE_BDF")) {
+    devourer::PcieTransport::Config pcfg;
+    if (const char *pp = std::getenv("DEVOURER_PCIE_RX_POLL_US"))
+      pcfg.rx_poll_us = std::atoi(pp);
+    auto transport = devourer::PcieTransport::Open(bdf, logger, pcfg);
+    if (!transport)
+      return 1;
+    devourer::Ev(*g_ev, "init.timing")
+        .f("stage", "demo.open_device")
+        .f("ms", ms_since_start());
+    WiFiDriver wifi_driver(logger);
+    auto dev = wifi_driver.CreateRtlDevicePcie(std::move(transport),
+                                               devourer_config_from_env());
+    if (!dev) {
+      logger->error("No driver for this PCIe chip in this build — exiting");
+      return 1;
+    }
+    devourer::Ev(*g_ev, "init.timing")
+        .f("stage", "demo.create_device")
+        .f("ms", ms_since_start());
+    int pch = 36;
+    if (const char *ch_env = std::getenv("DEVOURER_CHANNEL"))
+      pch = std::atoi(ch_env);
+    ChannelWidth_t pwidth = CHANNEL_WIDTH_20;
+    uint8_t poff = 0;
+    if (const char *bw_env = std::getenv("DEVOURER_BW")) {
+      int bw = std::atoi(bw_env);
+      if (bw == 40 || bw == 80) {
+        pwidth = (bw == 40) ? CHANNEL_WIDTH_40 : CHANNEL_WIDTH_80;
+        poff = 1;
+        if (const char *off_env = std::getenv("DEVOURER_CHOFFSET"))
+          poff = static_cast<uint8_t>(std::atoi(off_env));
+      }
+    }
+    logger->info("PCIe RX: {} ch={} bw={}", bdf, pch, (int)pwidth);
+    try {
+      dev->Init(packetProcessor,
+                SelectedChannel{.Channel = static_cast<uint8_t>(pch),
+                                .ChannelOffset = poff,
+                                .ChannelWidth = pwidth});
+    } catch (const std::exception &e) {
+      logger->error("PCIe bring-up failed: {}", e.what());
+      return 1;
+    }
+    dev->Stop();
+    return 0;
+  }
+#endif /* DEVOURER_HAVE_PCIE */
 
   rc = libusb_init(&ctx);
   if (rc < 0) {

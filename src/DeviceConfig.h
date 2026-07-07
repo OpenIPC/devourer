@@ -203,6 +203,15 @@ struct DeviceConfig {
      * devourer-usb-*.lock files. Empty = "/tmp". */
     std::string lock_dir;
   } usb;
+
+  /* ---- PCIe (DEVOURER_PCIE builds; see src/PcieTransport.h) ------------ */
+  struct Pcie {
+    /* env: DEVOURER_PCIE_RX_POLL_US — RX ring hardware-index poll interval in
+     * microseconds (unset = the transport default, 200). Demo-side only: the
+     * demos fold it into PcieTransport::Config before Open(); device selection
+     * (DEVOURER_PCIE_BDF) is likewise demo-local, like USB device selection. */
+    std::optional<int> rx_poll_us;
+  } pcie;
 };
 
 } // namespace devourer

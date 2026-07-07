@@ -54,8 +54,13 @@ public:
   bool init_mac_cfg(ChannelWidth_t bw);
 
   /* USB RX-DMA mode + RX aggregation (init_usb_cfg_88xx) so received frames are
-   * delivered to the bulk-IN endpoint. */
+   * delivered to the bulk-IN endpoint. USB backend only — the PCIe RX path is
+   * the buffer-descriptor ring the transport programs pre-power-on. */
   void init_usb_cfg();
+
+  /* PCIe interface-PHY config (rtw_pci_phy_cfg's 8821C gen1 MDIO write).
+   * PCIe backend only; run once before the first power-on. */
+  void pcie_phy_cfg();
 
 private:
   bool priority_queue_cfg();

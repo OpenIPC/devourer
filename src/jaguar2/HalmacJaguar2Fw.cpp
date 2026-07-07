@@ -250,7 +250,9 @@ bool HalmacJaguar2Fw::send_fw_page(uint16_t pg_addr, const uint8_t *chunk,
   constexpr uint32_t PACKET_OFFSET_SZ = 8;
   const uint32_t desclen = TXDESC_SIZE_8822B;
   uint32_t len = desclen + size;
-  const bool add_pkt_offset = ((len % 512u) == 0);
+  /* The 512-multiple pad exists to break USB bulk max-packet alignment; on the
+   * PCIe BCN-ring path there is no such framing (rtw88 never pads) — gate it. */
+  const bool add_pkt_offset = _device.is_usb() && ((len % 512u) == 0);
   if (add_pkt_offset)
     len += PACKET_OFFSET_SZ;
   /* Carry the packet-offset to the iddma: the beacon download writes

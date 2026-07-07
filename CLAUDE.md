@@ -34,8 +34,27 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
 
 Naming traps: **RTL8821AU is Jaguar1** (not Jaguar2, despite the Jaguar2
 RTL8821C's similar name); RTL8822**B**U (Jaguar2) ≠ RTL8822**C**U (Jaguar3).
-The 8822BE (PCIe) and the Kestrel 11ax families are out of scope. Full chip /
-bench-throughput table: README **Supported hardware**.
+The Kestrel 11ax families are out of scope. Full chip / bench-throughput
+table: README **Supported hardware**.
+
+**PCIe** (`DEVOURER_PCIE=ON`, Linux-only, default OFF): the RTL8821CE — the
+PCIe sibling of the 8821CU — rides the same Jaguar2 HAL through a vfio-pci
+transport (`src/PcieTransport.{h,cpp}`): registers are BAR2 MMIO (same
+0x0000..0xFFFF space the USB vendor-control path addresses), TX/RX are the
+88xx buffer-descriptor DMA rings (rtw88 pci.{c,h} layout), RX completion is
+polled (no interrupts). `RtlUsbAdapter` is bus-dual — an `_mmio` backend
+dispatches register I/O and the bulk TX/RX entry points, so the ~165 HAL call
+sites are untouched; the few genuinely bus-specific bring-up steps gate on
+`is_usb()` (PCIe power-seq rows, PQ map, no USB RX-agg, no DLFW 512-pad, RCR
+bits 11-13 cleared — on this MAC generation they are TA_BCN/RPFM_CAM, not the
+Jaguar1 accept bits, and TA_BCN drops every beacon). Factory:
+`WiFiDriver::CreateRtlDevicePcie(PcieTransport::Open(bdf, logger))` — the
+caller owns vfio like it owns libusb. Demos: `DEVOURER_PCIE_BDF=0000:01:00.0`
+on rxdemo; `pcieprobe <bdf> [id|power|fw]` validates the layers bottom-up.
+Bind/restore: `tests/pcie_vfio_bind.sh` (driver_override, not new_id — the
+in-tree rtw88 auto-probe race). Validation: `sudo python3
+tests/pcie_rx_smoke.py` on the radxa-x4 (`ssh radxa-x4`, 8821CE at
+0000:01:00.0, IOMMU group 12) — ambient beacons CRC-clean on ch 6 + 36.
 
 ## Build
 
@@ -48,7 +67,9 @@ libusb-1.0 via `pkg-config` (Linux/macOS) or vcpkg (`VCPKG_ROOT`, Windows).
 
 Per-chip options, all default ON: `DEVOURER_JAGUAR1`, `DEVOURER_8814` (requires
 JAGUAR1), `DEVOURER_JAGUAR2_8822B`, `DEVOURER_JAGUAR2_8821C`,
-`DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`. Turning groups off drops
+`DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`. `DEVOURER_PCIE` (default
+OFF, Linux-only, requires JAGUAR2_8821C) adds the vfio-pci transport +
+`pcieprobe`; OFF builds are byte-identical to before it existed. Turning groups off drops
 their firmware blobs + PHY tables (an 8812AU-only `rxdemo` is ~1.0 MB vs
 ~2.6 MB). Configure fails on no-chip-selected or 8814-without-JAGUAR1. Each
 group exports a PUBLIC `DEVOURER_HAVE_*` define; sites referencing a dropped

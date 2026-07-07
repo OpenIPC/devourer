@@ -12,6 +12,7 @@ struct libusb_context;
 
 namespace devourer {
 class UsbDeviceLock;
+class PcieTransport;
 }
 
 class WiFiDriver {
@@ -39,6 +40,21 @@ public:
                   libusb_context *ctx = nullptr,
                   std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr,
                   const devourer::DeviceConfig &cfg = {});
+
+#if defined(DEVOURER_HAVE_PCIE)
+  /* PCIe counterpart (DEVOURER_PCIE=ON, Linux/vfio only). The caller owns
+   * vfio, mirroring the USB doctrine: open the transport first —
+   * devourer::PcieTransport::Open("0000:01:00.0", logger) is the recommended
+   * path (the device must be bound to vfio-pci, see tests/pcie_vfio_bind.sh) —
+   * then hand it in here. Chip identity is read from SYS_CFG2 over MMIO;
+   * currently only chip-id 0x09 (RTL8821C — the RTL8821CE) is accepted,
+   * anything else logs and returns nullptr (same contract as an unsupported
+   * chip on USB). No UsbDeviceLock: a vfio device fd is exclusive by
+   * construction (a second open fails). */
+  std::unique_ptr<IRtlDevice>
+  CreateRtlDevicePcie(std::shared_ptr<devourer::PcieTransport> transport,
+                      const devourer::DeviceConfig &cfg = {});
+#endif
 };
 
 #endif /* WIFI_DRIVER_H */

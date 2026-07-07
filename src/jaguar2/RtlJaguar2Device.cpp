@@ -20,6 +20,9 @@
 #include "RateDefinitions.h"
 #include "RxPacket.h"
 #include "SignalStop.h" /* g_devourer_should_stop */
+#if defined(DEVOURER_HAVE_PCIE)
+#include "PcieTransport.h" /* setup_trx_rings in the PCIe bring-up gate */
+#endif
 extern "C" {
 #include "ieee80211_radiotap.h" /* MRateToHwRate + radiotap iterator */
 }
@@ -56,11 +59,23 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
    * pre-init -> power-on -> system-cfg -> DLFW, giving the chip a clean slate. */
   bool fw_ok = false;
   constexpr int kBringupTries = 4;
+#if defined(DEVOURER_HAVE_PCIE)
+  /* rtw88 applies the PCIe interface-PHY MDIO config once at probe. */
+  if (!_device.is_usb())
+    _macinit.pcie_phy_cfg();
+#endif
   for (int attempt = 0; attempt < kBringupTries && !fw_ok; attempt++) {
     if (attempt > 0)
       _logger->error("RtlJaguar2Device: DLFW failed — full power-cycle retry "
                      "{}/{}",
                      attempt + 1, kBringupTries);
+#if defined(DEVOURER_HAVE_PCIE)
+    /* rtw88 order: rtw_hci_setup (TRX buffer-descriptor ring registers)
+     * precedes rtw_mac_power_on — and the DLFW rsvd-page path needs the BCN
+     * ring live. Re-programmed per attempt (the power seq touches 0x300). */
+    if (!_device.is_usb())
+      _device.pcie()->setup_trx_rings();
+#endif
     _macinit.pre_init_system_cfg();
     _hal.power_on();
     _hal.read_chip_version();
@@ -73,7 +88,8 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
 
   if (!_macinit.init_mac_cfg(channel.ChannelWidth))
     throw std::runtime_error("RtlJaguar2Device: init_mac_cfg failed");
-  _macinit.init_usb_cfg();
+  if (_device.is_usb())
+    _macinit.init_usb_cfg(); /* PCIe RX = the BD ring, no RX-DMA agg cfg */
   _macinit.enable_bb_rf(true);
   _logger->info("RtlJaguar2Device: MAC cfg + BB/RF enabled");
 

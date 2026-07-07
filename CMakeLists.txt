@@ -25,6 +25,10 @@ option(DEVOURER_JAGUAR2_8822B "RTL8822BU (Jaguar2, rtl8822b, 2T2R USB)"         
 option(DEVOURER_JAGUAR2_8821C "RTL8811CU / 8821CU (Jaguar2, rtl8821c, 1T1R)"    ON)
 option(DEVOURER_JAGUAR3_8822C "RTL8812CU / 8822CU (Jaguar3, rtl8822c)"          ON)
 option(DEVOURER_JAGUAR3_8822E "RTL8812EU / 8822EU (Jaguar3, rtl8822e)"          ON)
+# PCIe transport (vfio-pci). Linux-only; the only supported PCIe chip is the
+# RTL8821CE (the PCIe sibling of the RTL8821CU), so it requires the 8821C
+# variant. OFF by default — libusb-only builds are bit-identical.
+option(DEVOURER_PCIE          "PCIe transport via vfio-pci (Linux; RTL8821CE)"  OFF)
 
 # Compile-time diagnostics floor (src/logger.h). Calls below the floor —
 # including their argument expressions at DVR_TRACE/DVR_DEBUG sites — compile
@@ -66,6 +70,16 @@ if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3_8822C
         "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
         "DEVOURER_JAGUAR2_8822B / DEVOURER_JAGUAR2_8821C / DEVOURER_JAGUAR3_8822C "
         "/ DEVOURER_JAGUAR3_8822E.")
+endif()
+if(DEVOURER_PCIE)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "DEVOURER_PCIE=ON requires Linux (vfio-pci).")
+    endif()
+    if(NOT DEVOURER_JAGUAR2_8821C)
+        message(FATAL_ERROR
+            "DEVOURER_PCIE=ON requires DEVOURER_JAGUAR2_8821C=ON (the supported "
+            "PCIe chip, RTL8821CE, is the Jaguar2 8821C).")
+    endif()
 endif()
 
 # Find pkg-config and then use it to locate libusb.
@@ -215,6 +229,13 @@ if(DEVOURER_JAGUAR2_8821C)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR2_8821C=1)
 endif()
 
+# --- PCIe transport (vfio-pci; see src/PcieTransport.h) ---
+if(DEVOURER_PCIE)
+    target_sources(devourer PRIVATE
+        src/PcieTransport.cpp src/PcieTransport.h)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_PCIE=1)
+endif()
+
 if(DEVOURER_JAGUAR3)
     # Shared Jaguar3 port (compiled when either variant is on). Phy8822cTables.cpp
     # and Halrf8822c.cpp also carry the make_jaguar3_*() dispatchers, so they are
@@ -253,6 +274,17 @@ if(DEVOURER_JAGUAR3_8822E)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR3_8822E=1)
 endif()
 
+
+# pcieprobe — staged PCIe bring-up driver for the RTL8821CE milestones
+# (chip-id/MMIO sanity -> power-on + EFUSE -> firmware DLFW). rxdemo's
+# DEVOURER_PCIE_BDF branch is the full-RX consumer; this probe validates the
+# layers below it one at a time. Linux/vfio only.
+if(DEVOURER_PCIE)
+    add_executable(pcieprobe
+        examples/pcieprobe/main.cpp
+    )
+    target_link_libraries(pcieprobe PUBLIC devourer)
+endif()
 
 add_executable(rxdemo
     examples/rx/main.cpp

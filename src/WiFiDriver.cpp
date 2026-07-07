@@ -9,6 +9,9 @@
 
 #include "RtlUsbAdapter.h"
 #include "UsbDeviceLock.h"
+#if defined(DEVOURER_HAVE_PCIE)
+#include "PcieTransport.h"
+#endif
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
@@ -184,3 +187,38 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
   return nullptr;
 #endif
 }
+
+#if defined(DEVOURER_HAVE_PCIE)
+std::unique_ptr<IRtlDevice> WiFiDriver::CreateRtlDevicePcie(
+    std::shared_ptr<devourer::PcieTransport> transport,
+    const devourer::DeviceConfig &cfg) {
+  if (!transport) {
+    _logger->error("CreateRtlDevicePcie: null transport");
+    return nullptr;
+  }
+  /* Chip identity from SYS_CFG2 (0x00FC) over BAR2 MMIO — the same dispatch
+   * signal the USB factory reads via a vendor control transfer. */
+  const uint8_t chip_id =
+      *reinterpret_cast<volatile uint8_t *>(transport->mmio() + 0x00FC);
+
+  if (chip_id == kChipId8821C) {
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+    _logger->info("Creating RtlJaguar2Device C8821C over PCIe ({}; chip-id "
+                  "0x{:02x})",
+                  transport->bdf(), chip_id);
+    return std::make_unique<RtlJaguar2Device>(
+        RtlUsbAdapter(std::move(transport), _logger, cfg), _logger,
+        jaguar2::ChipVariant::C8821C, cfg);
+#else
+    _logger->error("RTL8821C[E] (chip-id 0x09) detected but 8821C support not "
+                   "compiled in (DEVOURER_JAGUAR2_8821C=OFF)");
+    return nullptr;
+#endif
+  }
+
+  _logger->error("PCIe chip-id 0x{:02x} at {} is not supported over PCIe "
+                 "(only RTL8821C[E], chip-id 0x09, for now)",
+                 chip_id, transport->bdf());
+  return nullptr;
+}
+#endif /* DEVOURER_HAVE_PCIE */

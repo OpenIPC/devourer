@@ -14,6 +14,10 @@
 #include <iostream>
 #include <thread>
 
+#if defined(DEVOURER_HAVE_PCIE)
+#include "PcieTransport.h"
+#endif
+
 using namespace std::chrono_literals;
 
 namespace {
@@ -42,6 +46,17 @@ void RtlUsbAdapter::bulk_read_async_loop(
     int buf_size, int n_urbs,
     const std::function<void(const uint8_t *, int)> &on_data,
     const std::function<bool()> &should_stop) {
+#if defined(DEVOURER_HAVE_PCIE)
+  if (_pcie) {
+    /* PCIe: poll/reap the RX buffer-descriptor ring. One MPDU per on_data
+     * call (no USB aggregation); buf_size/n_urbs are USB tuning knobs and do
+     * not apply (ring depth is fixed at transport creation). */
+    (void)buf_size;
+    (void)n_urbs;
+    _pcie->rx_poll_loop(on_data, should_stop);
+    return;
+  }
+#endif
   AsyncRxShared sh{&on_data, &should_stop};
   std::vector<libusb_transfer *> xfers;
   std::vector<std::vector<uint8_t>> bufs(n_urbs,
@@ -121,6 +136,62 @@ RtlUsbAdapter::RtlUsbAdapter(libusb_device_handle *dev_handle, Logger_t logger,
                 (AutoloadFailFlag ? "Fail" : "OK"));
 }
 
+#if defined(DEVOURER_HAVE_PCIE)
+RtlUsbAdapter::RtlUsbAdapter(std::shared_ptr<devourer::PcieTransport> transport,
+                             Logger_t logger,
+                             const devourer::DeviceConfig &cfg)
+    : _logger{logger}, _log_writes{cfg.debug.log_writes},
+      _tx_timeout_ms{cfg.tx.timeout_ms.value_or(USB_TIMEOUT)},
+      _mmio{transport->mmio()}, _pcie{std::move(transport)} {
+  /* No USB descriptor walk / endpoint discovery — the endpoint members stay
+   * at defaults and are only consumed by USB-gated code paths. */
+  _logger->info("PCIe device {} (BAR2 MMIO register backend)", _pcie->bdf());
+
+  uint8_t eeValue = rtw_read8(REG_9346CR);
+  EepromOrEfuse = (eeValue & BOOT_FROM_EEPROM) != 0;
+  AutoloadFailFlag = (eeValue & EEPROM_EN) == 0;
+  _logger->info("Boot from {}, Autoload {} !",
+                EepromOrEfuse ? "EEPROM" : "EFUSE",
+                (AutoloadFailFlag ? "Fail" : "OK"));
+}
+
+int RtlUsbAdapter::pcie_tx_dispatch(uint8_t *packet, size_t length,
+                                    int timeout_ms) {
+  /* QSEL lives in tx-desc dword1 bits [12:8] = byte 5 bits [4:0] on every
+   * 88xx descriptor this library builds (8822B/8822C layouts agree). */
+  if (length < 48)
+    return -1;
+  const uint8_t qsel = packet[5] & 0x1F;
+  int queue;
+  switch (qsel) {
+  case 0x10: /* QSEL_BEACON — rsvd page / DLFW */
+    queue = devourer::PcieTransport::Q_BCN;
+    break;
+  case 0x11: /* high */
+    queue = devourer::PcieTransport::Q_HI0;
+    break;
+  case 0x12: /* mgmt (the monitor-inject descriptor) */
+    queue = devourer::PcieTransport::Q_MGMT;
+    break;
+  case 0x13: /* h2c command */
+    queue = devourer::PcieTransport::Q_H2C;
+    break;
+  default: /* AC data */
+    queue = devourer::PcieTransport::Q_BE;
+    break;
+  }
+  int rc = _pcie->tx_submit_sync(queue, packet, length, timeout_ms);
+  _tx_stats->submitted.fetch_add(1, std::memory_order_relaxed);
+  if (rc < 0) {
+    _tx_stats->failed.fetch_add(1, std::memory_order_relaxed);
+    _tx_stats->last_rc.store(rc, std::memory_order_relaxed);
+    _tx_stats->last_timeout.store(true, std::memory_order_relaxed);
+    devourer::Ev(_logger->events(), "tx.fail").f("rc", rc).f("timeout", true);
+  }
+  return rc;
+}
+#endif /* DEVOURER_HAVE_PCIE */
+
 /*
 $ lsusb -v -d 0bda:8812
       Endpoint Descriptor:
@@ -136,6 +207,13 @@ $ lsusb -v -d 0bda:8812
 */
 
 bool RtlUsbAdapter::WriteBytes(uint16_t reg_num, uint8_t *ptr, size_t size) {
+  if (_mmio) {
+    /* MMIO burst: plain byte stores (register space has no width side-effects
+     * for the multi-byte users of this path — MAC address / key material). */
+    for (size_t i = 0; i < size; i++)
+      *reinterpret_cast<volatile uint8_t *>(_mmio + reg_num + i) = ptr[i];
+    return true;
+  }
   if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_WRITE, 5, reg_num,
                               0, ptr, size, USB_TIMEOUT) == size) {
     return true;
@@ -458,6 +536,10 @@ void RtlUsbAdapter::transfer_callback(struct libusb_transfer *transfer) {
 }
 
 bool RtlUsbAdapter::send_packet(uint8_t *packet, size_t length) {
+#if defined(DEVOURER_HAVE_PCIE)
+  if (_pcie)
+    return pcie_tx_dispatch(packet, length, _tx_timeout_ms) >= 0;
+#endif
 
   libusb_transfer *transfer = libusb_alloc_transfer(0);
   if (!transfer) {
@@ -565,6 +647,12 @@ int RtlUsbAdapter::bulk_send_sync(uint8_t *packet, size_t length,
 
 int RtlUsbAdapter::bulk_send_sync_ep(uint8_t ep, uint8_t *packet, size_t length,
                                      int timeout_ms) {
+#if defined(DEVOURER_HAVE_PCIE)
+  if (_pcie) {
+    (void)ep; /* endpoint is USB addressing; the ring is chosen by QSEL */
+    return pcie_tx_dispatch(packet, length, timeout_ms);
+  }
+#endif
   /* No libusb_clear_halt here. rtw88_8814au's usbmon shows the first bulk
    * OUT is preceded by 0 CLEAR_FEATUREs; later CLEAR_FEATUREs happen during
    * normal TX-queue operation, not the per-send hot path. Resetting the

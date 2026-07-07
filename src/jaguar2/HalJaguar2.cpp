@@ -133,8 +133,71 @@ const PwrCfg kPwrOff8821cUsb[] = {
     {0, PC_END, 0, 0},
 };
 
+#if defined(DEVOURER_HAVE_PCIE)
+/* PCIe (RTL8821CE) power sequences, transcribed from the in-tree rtw88
+ * rtw8821c.c tables (v6.12 — the driver proven on this exact silicon), keeping
+ * the PCI- and ALL-interface rows and dropping USB/SDIO-only steps. The
+ * PCI-only enable rows gate the PCIe reference clock/power (0x75[0] toggle
+ * around the 0x06[1] poll, 0x74[5], 0x22[1] clear, 0x62/0x61 bit dance) —
+ * without them the power-on polls fail on the E-variant. */
+const PwrCfg kPwrOn8821cPcie[] = {
+    /* --- card-disable -> card-emulation --- */
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(3) | B(4) | B(7)), 0},
+    {0x0300, PC_WRITE, 0xFF, 0},
+    {0x0301, PC_WRITE, 0xFF, 0},
+    /* --- card-emulation -> active --- */
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(4) | B(3) | B(2)), 0},
+    {0x0075, PC_WRITE, B(0), B(0)},
+    {0x0006, PC_POLL, B(1), B(1)},
+    {0x0075, PC_WRITE, B(0), 0},
+    {0x0006, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_WRITE, B(7), 0},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(4) | B(3)), 0},
+    {0x0005, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_POLL, B(0), 0},
+    {0x0020, PC_WRITE, B(3), B(3)},
+    {0x0074, PC_WRITE, B(5), B(5)},
+    {0x0022, PC_WRITE, B(1), 0},
+    {0x0062, PC_WRITE, static_cast<uint8_t>(B(7) | B(6) | B(5)),
+     static_cast<uint8_t>(B(7) | B(6) | B(5))},
+    {0x0061, PC_WRITE, static_cast<uint8_t>(B(7) | B(6) | B(5)), 0},
+    {0x007C, PC_WRITE, B(1), 0},
+    {0, PC_END, 0, 0},
+};
+
+const PwrCfg kPwrOff8821cPcie[] = {
+    /* --- active -> card-emulation --- */
+    {0x0093, PC_WRITE, B(3), 0},
+    {0x001F, PC_WRITE, 0xFF, 0},
+    {0x0049, PC_WRITE, B(1), 0},
+    {0x0006, PC_WRITE, B(0), B(0)},
+    {0x0002, PC_WRITE, B(1), 0},
+    {0x0005, PC_WRITE, B(1), B(1)},
+    {0x0005, PC_POLL, B(1), 0},
+    {0x0020, PC_WRITE, B(3), 0},
+    /* --- card-emulation -> card-disable --- */
+    {0x0067, PC_WRITE, B(5), 0},
+    {0x0005, PC_WRITE, B(2), B(2)},
+    {0x0081, PC_WRITE, static_cast<uint8_t>(B(7) | B(6)), 0},
+    {0x0090, PC_WRITE, B(1), 0},
+    {0, PC_END, 0, 0},
+};
+#endif /* DEVOURER_HAVE_PCIE */
+
 void run_pwr_seq(RtlUsbAdapter &dev, const PwrCfg *seq, uint32_t poll_max,
                  bool poll_fatal) {
+  /* rtw88 rtw_pwr_cmd_polling PCIe quirk: a timed-out POLL step is retried
+   * once after toggling BIT_PFM_WOWL in REG_SYS_PW_CTRL (0x04[3]) set->clear —
+   * a known 8821CE cold-boot fixer. Applied on the PCIe backend only. */
+  auto poll_once = [&](const PwrCfg *p) -> bool {
+    uint32_t cnt = poll_max;
+    while ((dev.rtw_read8(p->off) & p->msk) != (p->val & p->msk)) {
+      if (--cnt == 0)
+        return false;
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+    }
+    return true;
+  };
   for (const PwrCfg *p = seq; p->cmd != PC_END; ++p) {
     if (p->cmd == PC_WRITE) {
       uint8_t v = dev.rtw_read8(p->off);
@@ -143,16 +206,16 @@ void run_pwr_seq(RtlUsbAdapter &dev, const PwrCfg *seq, uint32_t poll_max,
     } else if (p->cmd == PC_DELAY) {
       std::this_thread::sleep_for(std::chrono::milliseconds(p->val));
     } else { /* PC_POLL */
-      uint32_t cnt = poll_max;
-      while ((dev.rtw_read8(p->off) & p->msk) != (p->val & p->msk)) {
-        if (--cnt == 0) {
-          if (poll_fatal)
-            throw std::runtime_error(
-                "Jaguar2: power-on poll timeout (chip not responding)");
-          break;
-        }
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
+      bool ok = poll_once(p);
+      if (!ok && !dev.is_usb()) {
+        uint8_t v = dev.rtw_read8(0x0004);
+        dev.rtw_write8(0x0004, static_cast<uint8_t>(v | (1u << 3)));
+        dev.rtw_write8(0x0004, static_cast<uint8_t>(v & ~(1u << 3)));
+        ok = poll_once(p);
       }
+      if (!ok && poll_fatal)
+        throw std::runtime_error(
+            "Jaguar2: power-on poll timeout (chip not responding)");
     }
   }
 }
@@ -166,6 +229,10 @@ HalJaguar2::HalJaguar2(RtlUsbAdapter device, Logger_t logger,
 void HalJaguar2::power_off() {
   const PwrCfg *seq =
       _variant == ChipVariant::C8821C ? kPwrOff8821cUsb : kPwrOff8822bUsb;
+#if defined(DEVOURER_HAVE_PCIE)
+  if (!_device.is_usb())
+    seq = kPwrOff8821cPcie; /* only the 8821CE exists on PCIe */
+#endif
   run_pwr_seq(_device, seq, /*poll_max=*/2000, /*poll_fatal=*/false);
   _logger->info("Jaguar2: power-off (card-disable) sequence applied");
 }
@@ -174,6 +241,10 @@ void HalJaguar2::power_on() {
   power_off(); /* reset from any prior (kernel-left active) state first */
   const PwrCfg *seq =
       _variant == ChipVariant::C8821C ? kPwrOn8821cUsb : kPwrOn8822bUsb;
+#if defined(DEVOURER_HAVE_PCIE)
+  if (!_device.is_usb())
+    seq = kPwrOn8821cPcie;
+#endif
   run_pwr_seq(_device, seq, /*poll_max=*/5000, /*poll_fatal=*/true);
   _logger->info("Jaguar2: power-on sequence complete (card active)");
 }
@@ -1655,6 +1726,19 @@ void HalJaguar2::enable_rx() {
    * so control frames are captured too:
    *   0x7000282F | ACF(0x1000) = 0x7000382F. */
   uint32_t rcr = 0x7000382Fu;
+#if defined(DEVOURER_HAVE_PCIE)
+  /* PCIe (8821CE): clear bits 11/12/13. On this MAC generation they are NOT
+   * the Jaguar1 ADF/ACF/AMF accept bits — rtw88 reg.h names BIT(11)
+   * BIT_TA_BCN (TA-gated beacon accept) and BIT(12) BIT_RPFM_CAM_ENABLE — and
+   * with BIT(11) set and no TA programmed the WMAC drops EVERY beacon /
+   * management frame (hardware-bisected on the RTL8821CE, 2026-07-07: RCR
+   * 0x7000382F -> 0 mgmt frames; clearing bit 11 -> beacons at the kernel
+   * driver's rate; ctrl/data unaffected, so the bits are not needed as accept
+   * gates here). The USB path keeps the vendor-monitor value byte-identical —
+   * on the 8822B the same bits were empirically required for RX delivery. */
+  if (!_device.is_usb())
+    rcr &= ~((1u << 11) | (1u << 12) | (1u << 13));
+#endif
   /* 8821C: drop APP_PHYST_RXFF (BIT28). The 8821C appends a 32-byte PHY-status
    * block before each RX frame in the RXFF, but its RX descriptor reports
    * drv_info_size=0 (unlike the 8822B, which counts it) — so the shared parser

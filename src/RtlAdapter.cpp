@@ -1,3 +1,11 @@
+/* UsbTransport.h (-> libusb.h -> windows.h on Windows) MUST precede the hal
+ * headers: Hal8812PhyReg.h #defines identifiers like `bEnable` that
+ * winuser.h uses as parameter names, so hal-first poisons the Windows headers
+ * (MSVC C2143 inside winuser.h / mingw "expected ','" pointed at the
+ * #define). The pre-seam RtlUsbAdapter.h guaranteed this order by including
+ * libusb.h first; this TU is the only one mixing both after the split. */
+#include "UsbTransport.h"
+
 #include "RtlAdapter.h"
 
 #include <chrono>
@@ -5,7 +13,6 @@
 #include <utility>
 
 #include "Hal8812PhyReg.h"
-#include "UsbTransport.h"
 
 using namespace std::chrono_literals;
 

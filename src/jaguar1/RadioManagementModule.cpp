@@ -188,7 +188,11 @@ static uint8_t rtw_get_center_ch(uint8_t channel, ChannelWidth_t chnl_bw,
       center_ch = 7;
   } else if (chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_40) {
       center_ch = get_40mhz_center_channel(center_ch);
-  } else if (chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_20) {
+  } else if (chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_20 ||
+             chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_5 ||
+             chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_10) {
+    /* 5/10 MHz narrowband (SPIKE, 8812A): a 20 MHz-based baseband re-clock —
+     * the RF stays a 20 MHz tune, center == primary. */
     center_ch = channel;
   } else {
     throw std::logic_error("not yet implemented");
@@ -1156,6 +1160,12 @@ void RadioManagementModule::InitRFEGpio8814A() {
  * per bandwidth; both bands write the same value here. */
 void RadioManagementModule::phy_SetBwRegAdc_8814A(BandType Band,
                                                   ChannelWidth_t bw) {
+  /* NB: the 8814A ADC-clock BW config is a DIFFERENT mechanism from the
+   * 8812/8821 0x8ac[9:8] divider — here 0x8ac[1:0] is a mode selector
+   * (20M=0/40M=1/80M=2) paired with phy_SetBwRegAgc_8814A. The 8812AU
+   * narrowband divide (5/10 MHz) does not transplant here; 8814 narrowband
+   * is a separate, unported research effort (caps gate it off — see
+   * RtlJaguarDevice::GetAdapterCaps). */
   (void)Band;
   uint32_t val;
   switch (bw) {
@@ -1886,14 +1896,67 @@ void RadioManagementModule::phy_PostSetBwMode8812() {
 
     break;
 
+  case CHANNEL_WIDTH_5:
+  case CHANNEL_WIDTH_10: {
+    /* SPIKE — 5/10 MHz narrowband on Jaguar1 (no vendor reference). The
+     * 8812A shares the 8822B/8821C baseband clock block at 0x8ac: bits
+     * [9:8] are the ADC clock (phy_FixSpur_8812A calls [9:8]=3 "ADC 160M",
+     * [9:8]=2 "80M" — the normal 20 MHz value), [21:20] the DAC clock,
+     * [7:6] the (8822B) small-BW field. Divide the ADC/DAC clocks down and
+     * set small-BW to shrink the occupied bandwidth while the RF stays a
+     * 20 MHz tune — exactly the Jaguar2/3 trick. The divide codes are
+     * CHARACTERIZED on the 8812AU (SDR occupied-bandwidth grid + cross-RX vs
+     * a Jaguar3 peer — tests/jaguar1_nb_divide_sweep.sh): an octave step off
+     * the 20 MHz values (DAC 3 / ADC 2):
+     *   10 MHz -> DAC 2, ADC 1   (TX lobe 8.2 MHz; RX best at ADC 1: 4700
+     *                             vs 1900 hits at ADC 0)
+     *    5 MHz -> DAC 1, ADC 0   (TX lobe 4.1 MHz)
+     * The DAC code sets the emitted lobe width, the ADC code sets receive
+     * sensitivity. Overridable via DEVOURER_NB_ADC / DEVOURER_NB_DAC. */
+    /* 8812 die only — the 8821A's clock tree starves TX when the DAC clock
+     * is divided (see RtlJaguarDevice::GetAdapterCaps). Fall back to a plain
+     * 20 MHz baseband there rather than wedge the TX path. */
+    if (_eepromManager->version_id.ICType != CHIP_8812) {
+      _logger->warn("narrowband not supported on this Jaguar1 die — "
+                    "applying 20 MHz baseband");
+      _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x003003C3, 0x00300200);
+      _device.phy_set_bb_reg(rADC_Buf_Clk_Jaguar, BIT30, 0);
+      break;
+    }
+    const bool is5 = (_currentChannelBw == CHANNEL_WIDTH_5);
+    uint32_t adc = is5 ? 0u : 1u;
+    uint32_t dac = is5 ? 1u : 2u;
+    const uint32_t smallbw = is5 ? 1u : 2u;
+    if (_tuning.nb_adc)
+      adc = *_tuning.nb_adc & 0x3;
+    if (_tuning.nb_dac)
+      dac = *_tuning.nb_dac & 0x3;
+    const uint32_t v8ac =
+        (dac << 20) | (adc << 8) | (smallbw << 6) | 0x0u /* rf mode 20M */;
+    _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x003003C3, v8ac);
+    _device.phy_set_bb_reg(rADC_Buf_Clk_Jaguar, BIT30, 0); /* 0x8c4[30]=0 */
+    if (_eepromManager->numTotalRfPath >= 2)
+      _device.phy_set_bb_reg(rL1PeakTH_Jaguar, 0x03C00000, 7);
+    else
+      _device.phy_set_bb_reg(rL1PeakTH_Jaguar, 0x03C00000, 8);
+    _logger->info("SPIKE Jaguar1 narrowband: {} MHz — 0x8ac={:#010x} "
+                  "(adc={} dac={} smallbw={})",
+                  is5 ? 5 : 10, v8ac, adc, dac, smallbw);
+    break;
+  }
+
   default:
     _logger->error("phy_PostSetBWMode8812():	unknown Bandwidth: {}",
                    (int)_currentChannelBw);
     break;
   }
 
-  /* <20121109, Kordan> A workaround for 8812A only. */
-  phy_FixSpur_8812A(_currentChannelBw, _currentChannel);
+  /* <20121109, Kordan> A workaround for 8812A only. phy_FixSpur rewrites the
+   * 0x8ac[9:8] ADC clock field — skip it for narrowband so it doesn't stomp
+   * the divided clock. */
+  if (_currentChannelBw != CHANNEL_WIDTH_5 &&
+      _currentChannelBw != CHANNEL_WIDTH_10)
+    phy_FixSpur_8812A(_currentChannelBw, _currentChannel);
 
   /* RTW_INFO("phy_PostSetBwMode8812(): Reg483: %x\n", rtw_read8(adapterState,
    * 0x483)); */
@@ -1911,6 +1974,8 @@ void RadioManagementModule::phy_SetRegBW_8812(ChannelWidth_t CurrentBW) {
   RegRfMod_BW = _device.rtw_read16(REG_WMAC_TRXPTCL_CTL);
 
   switch (CurrentBW) {
+  case CHANNEL_WIDTH_5:  /* narrowband: MAC stays 20 MHz (BIT7=BIT8=0) */
+  case CHANNEL_WIDTH_10:
   case CHANNEL_WIDTH_20:
     _device.rtw_write16(
         REG_WMAC_TRXPTCL_CTL,
@@ -1944,6 +2009,8 @@ void RadioManagementModule::PHY_RF6052SetBandwidth8812(
    * Apply to every populated RF path (4 paths on 8814AU, 2 on 8812AU). */
   uint32_t bw_bits;
   switch (Bandwidth) {
+  case CHANNEL_WIDTH_5:  /* narrowband: RF stays in its 20 MHz mode */
+  case CHANNEL_WIDTH_10:
   case CHANNEL_WIDTH_20:
     bw_bits = 3;
     break;

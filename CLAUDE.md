@@ -16,7 +16,13 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
 - **Jaguar1** (`src/jaguar1/`): RTL8812AU (2T2R reference), RTL8811AU (1T1R cut,
   rides the 8812 path), RTL8814AU (4T4R RF / 3-SS baseband — host-pushed TX
   requires the on-chip 3081 MCU booted during FW download; a failed FW-boot
-  poll means dead TX while RX still works), RTL8821AU (1T1R + BT).
+  poll means dead TX while RX still works), RTL8821AU (1T1R + BT). **5/10 MHz
+  narrowband on the 8812 die** (8812AU/8811AU): the 8812A shares the Jaguar2
+  `0x8ac` ADC/DAC clock-divider block, so the same re-clock trick works even
+  though the vendor never wired it — TX+RX bench-characterized. The 8821A is
+  excluded (dividing its DAC clock starves the 1T1R TX DMA/USB path) and the
+  8814A uses a different BW block; both fall back to 20 MHz. See
+  `docs/narrowband.md`.
 - **Jaguar2** (`src/jaguar2/`): RTL8822BU / RTL8812BU (chip-id `0x0a`) and
   RTL8811CU / RTL8821CU (chip 8821C, chip-id `0x09`). A hybrid: HalMAC FW
   download / MAC init / power sequencing like Jaguar3, phydm `check_positive`
@@ -35,8 +41,8 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
   at the end of Init) is the debugging lever that found the RF18-edge bug.
 - **Jaguar3** (`src/jaguar3/`): rtl8822c (RTL8812CU/8822CU, chip-id `0x13`) and
   rtl8822e (RTL8812EU/8822EU, chip-id `0x17`). **5/10 MHz narrowband** (its
-  re-clock lives in the `0x9b0`/`0x9b4` dividers; Jaguar1 silicon has no
-  narrowband — the vendor drivers carry only dead enum values), 80 MHz (incl.
+  re-clock lives in the `0x9b0`/`0x9b4` dividers, vs the `0x8ac` block the
+  Jaguar1/2 chips share), 80 MHz (incl.
   a 40-in-80 frame via TX-descriptor DATA_SC), and halrf calibration
   (DACK/IQK/TXGAPK/thermal tracking).
   Sustained 5 GHz TX needs the **coex runtime thread**

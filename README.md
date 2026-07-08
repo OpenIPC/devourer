@@ -28,9 +28,9 @@ long-range digital video links.
 - **Frequency hopping at FHSS speed.** A channel hop costs ~0.5–2.5 ms
   depending on chip — fast enough to hop on every packet
   ([how](docs/frequency-hopping.md)).
-- **Narrowband modes the kernel can't do.** 5 and 10 MHz channels on the
-  Jaguar2 and Jaguar3 chips — half/quarter the bandwidth, more range from
-  the same power.
+- **Narrowband modes the kernel can't do.** 5 and 10 MHz channels — including
+  on the decade-old RTL8812AU the vendor never gave narrowband — half/quarter
+  the bandwidth, more range from the same power ([how](docs/narrowband.md)).
 - **A radio lab in a dongle.** Channel sounding, per-antenna signal quality,
   beamforming report capture (enough to do
   [motion sensing](docs/beamforming-victim-sensing.md)), spectrum sweeps,
@@ -49,8 +49,8 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 
 | Part                          | RF / streams      | 2.4 GHz (ch6) | UNII-1 (ch36) | UNII-2/3 (ch149) | Notes                                       |
 | ----------------------------- | ----------------- | ------------- | ------------- | ---------------- | ------------------------------------------- |
-| **RTL8812AU**                 | 2T2R              | 56            | 52            | 52               | [CHANEVE CHW50L](https://www.aliexpress.com/item/4000762461362.html) (`0bda:8812`) |
-| **RTL8811AU**                 | 1T1R              | —             | —             | —                | 1T1R cut of 8812 silicon; rides the 8812 code path. Not benchmarked |
+| **RTL8812AU**                 | 2T2R              | 56            | 52            | 52               | [CHANEVE CHW50L](https://www.aliexpress.com/item/4000762461362.html) (`0bda:8812`). 5/10 MHz capable |
+| **RTL8811AU**                 | 1T1R              | —             | —             | —                | 1T1R cut of 8812 silicon; rides the 8812 code path. Not benchmarked. 5/10 MHz capable |
 | **RTL8814AU**                 | 4T4R, 3-SS max    | 65            | †(32)         | †(32)            | `0bda:8813`; tested on COMFAST CF-938AC and CF-960AC — antenna builds differ in realised [RX diversity](docs/measuring-spatial-diversity.md) |
 | **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | TP-Link Archer T2U Plus (`2357:0120`) |
 | **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | TP-Link Archer T3U (`2357:012d`). 5/10 MHz capable |
@@ -167,6 +167,9 @@ one `IRtlDevice` interface covers all three generations.
   per-layer PHY rates, corrupt-frame salvage, outer erasure code.
 - [Frequency hopping](docs/frequency-hopping.md) — how per-packet hopping
   works and what it costs on each chip.
+- [Narrowband](docs/narrowband.md) — 5/10 MHz channels across all three
+  generations: the baseband re-clock, the per-chip register machinery, and the
+  walls (RF re-latch edges, per-die clock coupling, the 5 MHz/5 GHz CFO limit).
 - [Startup time](docs/startup-time.md) — devourer vs. kernel driver,
   measured on every supported chip.
 - [Adapter doctor](docs/adapter-doctor.md) — dying-dongle triage: EFUSE

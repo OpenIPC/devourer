@@ -164,7 +164,8 @@ chip-specific traps. The ones this port paid for, current-state:
    power-up), which is larger and faster than the trim step, so a fixed trim is
    a per-link qualification lever, not fire-and-forget. The production answer is
    the **closed loop** (`DEVOURER_CFO_TRACK`, all three generations): the receiver reads the
-   per-frame CFO tail from the OFDM phy-status (DW5 `cfo_tail`), and a
+   per-frame CFO tail from the OFDM phy-status (offset differs per generation —
+   see below), and a
    bang-bang controller (`src/CfoTracker.h`, ported from phydm
    `phydm_cfo_tracking`) steps the crystal cap on a ~2 s cadence to drive the
    CFO toward its minimum, tracking the warm-up drift live. It auto-detects the
@@ -234,5 +235,7 @@ fully, and **Jaguar1 on the 8812AU/8811AU and the 8814AU** — every generation.
 The 8821A is the one exclusion (its DAC-clock divide starves TX; see the walls).
 
 Test scripts: `tests/jaguar2_narrowband_sdr.sh` and
-`tests/jaguar1_nb_divide_sweep.sh` (SDR occupied-bandwidth), and
-`tests/narrowband_cross_rx.sh` (cross-generation decode).
+`tests/jaguar1_nb_divide_sweep.sh` (SDR occupied-bandwidth),
+`tests/narrowband_cross_rx.sh` (cross-generation decode),
+`tests/xtal_cfo_sweep.sh` (crystal-cap trim authority), and
+`tests/jaguar1_cfo_track_smoke.sh` (closed-loop tick fires on a Jaguar1 die).

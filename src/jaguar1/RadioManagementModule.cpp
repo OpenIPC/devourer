@@ -188,7 +188,11 @@ static uint8_t rtw_get_center_ch(uint8_t channel, ChannelWidth_t chnl_bw,
       center_ch = 7;
   } else if (chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_40) {
       center_ch = get_40mhz_center_channel(center_ch);
-  } else if (chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_20) {
+  } else if (chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_20 ||
+             chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_5 ||
+             chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_10) {
+    /* 5/10 MHz narrowband (SPIKE, 8812A): a 20 MHz-based baseband re-clock —
+     * the RF stays a 20 MHz tune, center == primary. */
     center_ch = channel;
   } else {
     throw std::logic_error("not yet implemented");
@@ -1886,14 +1890,53 @@ void RadioManagementModule::phy_PostSetBwMode8812() {
 
     break;
 
+  case CHANNEL_WIDTH_5:
+  case CHANNEL_WIDTH_10: {
+    /* SPIKE — 5/10 MHz narrowband on Jaguar1 (no vendor reference). The
+     * 8812A shares the 8822B/8821C baseband clock block at 0x8ac: bits
+     * [9:8] are the ADC clock (phy_FixSpur_8812A calls [9:8]=3 "ADC 160M",
+     * [9:8]=2 "80M" — the normal 20 MHz value), [21:20] the DAC clock,
+     * [7:6] the (8822B) small-BW field. Hypothesis: divide the ADC/DAC
+     * clocks down and set small-BW to shrink the occupied bandwidth while
+     * the RF stays a 20 MHz tune — exactly the Jaguar2/3 trick. The divide
+     * codes are the unknown (8812A encoding differs from the 8822B's), so
+     * they are sweepable via DEVOURER_NB_ADC / DEVOURER_NB_DAC; the
+     * defaults step one notch down from the 20 MHz values (ADC 2->1/0,
+     * DAC 3->2/1) per octave of bandwidth. */
+    const bool is5 = (_currentChannelBw == CHANNEL_WIDTH_5);
+    uint32_t adc = is5 ? 0u : 1u;         /* 20M ADC / 40M ADC */
+    uint32_t dac = is5 ? 1u : 2u;         /* divide DAC one/two notches */
+    const uint32_t smallbw = is5 ? 1u : 2u;
+    if (_tuning.nb_adc)
+      adc = *_tuning.nb_adc & 0x3;
+    if (_tuning.nb_dac)
+      dac = *_tuning.nb_dac & 0x3;
+    const uint32_t v8ac =
+        (dac << 20) | (adc << 8) | (smallbw << 6) | 0x0u /* rf mode 20M */;
+    _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x003003C3, v8ac);
+    _device.phy_set_bb_reg(rADC_Buf_Clk_Jaguar, BIT30, 0); /* 0x8c4[30]=0 */
+    if (_eepromManager->numTotalRfPath >= 2)
+      _device.phy_set_bb_reg(rL1PeakTH_Jaguar, 0x03C00000, 7);
+    else
+      _device.phy_set_bb_reg(rL1PeakTH_Jaguar, 0x03C00000, 8);
+    _logger->info("SPIKE Jaguar1 narrowband: {} MHz — 0x8ac={:#010x} "
+                  "(adc={} dac={} smallbw={})",
+                  is5 ? 5 : 10, v8ac, adc, dac, smallbw);
+    break;
+  }
+
   default:
     _logger->error("phy_PostSetBWMode8812():	unknown Bandwidth: {}",
                    (int)_currentChannelBw);
     break;
   }
 
-  /* <20121109, Kordan> A workaround for 8812A only. */
-  phy_FixSpur_8812A(_currentChannelBw, _currentChannel);
+  /* <20121109, Kordan> A workaround for 8812A only. phy_FixSpur rewrites the
+   * 0x8ac[9:8] ADC clock field — skip it for narrowband so it doesn't stomp
+   * the divided clock. */
+  if (_currentChannelBw != CHANNEL_WIDTH_5 &&
+      _currentChannelBw != CHANNEL_WIDTH_10)
+    phy_FixSpur_8812A(_currentChannelBw, _currentChannel);
 
   /* RTW_INFO("phy_PostSetBwMode8812(): Reg483: %x\n", rtw_read8(adapterState,
    * 0x483)); */
@@ -1911,6 +1954,8 @@ void RadioManagementModule::phy_SetRegBW_8812(ChannelWidth_t CurrentBW) {
   RegRfMod_BW = _device.rtw_read16(REG_WMAC_TRXPTCL_CTL);
 
   switch (CurrentBW) {
+  case CHANNEL_WIDTH_5:  /* narrowband: MAC stays 20 MHz (BIT7=BIT8=0) */
+  case CHANNEL_WIDTH_10:
   case CHANNEL_WIDTH_20:
     _device.rtw_write16(
         REG_WMAC_TRXPTCL_CTL,
@@ -1944,6 +1989,8 @@ void RadioManagementModule::PHY_RF6052SetBandwidth8812(
    * Apply to every populated RF path (4 paths on 8814AU, 2 on 8812AU). */
   uint32_t bw_bits;
   switch (Bandwidth) {
+  case CHANNEL_WIDTH_5:  /* narrowband: RF stays in its 20 MHz mode */
+  case CHANNEL_WIDTH_10:
   case CHANNEL_WIDTH_20:
     bw_bits = 3;
     break;

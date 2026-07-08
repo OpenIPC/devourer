@@ -868,6 +868,15 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
   c.rx_chains = chains;
   c.per_chain_rssi = chains >= 2;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
+  /* SPIKE: 5/10 MHz narrowband on the 8812/8821 die (NOT 8814, which has its
+   * own phy_PostSetBwMode8814A path). The 8812A shares the 8822B/8821C 0x8ac
+   * baseband clock-divider block — bench-demonstrated both directions at both
+   * widths. Experimental (5 MHz@5 GHz is CFO-limited, divide codes not fully
+   * characterized). */
+  if (_eepromManager->version_id.ICType != CHIP_8814A) {
+    c.bw_mask |= devourer::kBw5 | devourer::kBw10;
+    c.narrowband_ok = true;
+  }
   c.fastretune_ok = true; /* phy_SwChnl8812_fast (8812/8821) + full-path fallback */
   devourer::set_standard_freq_ranges(c);
 

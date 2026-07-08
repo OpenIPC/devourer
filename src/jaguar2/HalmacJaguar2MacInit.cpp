@@ -235,12 +235,6 @@ constexpr FifoParams fifo_params(ChipVariant v, bool is_usb = true) {
                     PG_HQ, PG_NQ, PG_LQ, PG_EXQ, PG_GAP};
 }
 
-bool is_5m(ChannelWidth_t bw) {
-  return bw == ChannelWidth_t::CHANNEL_WIDTH_5;
-}
-bool is_10m(ChannelWidth_t bw) {
-  return bw == ChannelWidth_t::CHANNEL_WIDTH_10;
-}
 } /* namespace */
 
 HalmacJaguar2MacInit::HalmacJaguar2MacInit(RtlAdapter device, Logger_t logger,
@@ -294,9 +288,12 @@ void HalmacJaguar2MacInit::pre_init_system_cfg() {
 }
 
 void HalmacJaguar2MacInit::init_system_cfg(ChannelWidth_t bw, uint8_t cut) {
+  /* bw unused by design: halmac cfg_bw_88xx treats HALMAC_BW_5/10 identically
+   * to 20 MHz at the MAC (REG_WMAC_TRXPTCL_CTL bits 7|8 cleared), so 5/10 MHz
+   * narrowband needs no MAC delta for monitor/injection use — the re-clock is
+   * pure PHY (set_channel_bw). Vendor SIFS scaling / CCK strip is AP/STA-only,
+   * same policy as Jaguar3. */
   (void)bw;
-  (void)is_5m;
-  (void)is_10m;
   (void)WLAN_PHY_REQ_DELAY;
   /* NB: init_system_cfg_8822b differs from _8822c — it sets ONLY
    * BIT_WL_PLATFORM_RST in REG_CPU_DMEM_CON (NOT BIT_DDMA_EN), and does NOT

@@ -948,7 +948,8 @@ int main() {
   /* RX bandwidth: 20 MHz by default. DEVOURER_BW=40|80 selects a wide monitor
    * channel (for receiving HT40 / VHT80 frames); DEVOURER_CHOFFSET picks the
    * secondary half (1 = secondary above the primary, 2 = secondary below).
-   * DEVOURER_NB_BW=5|10 re-clocks the baseband to narrowband (Jaguar3 only). */
+   * DEVOURER_NB_BW=5|10 re-clocks the baseband to narrowband (Jaguar2/3;
+   * check the adapter.caps narrowband_ok flag). */
   ChannelWidth_t width = CHANNEL_WIDTH_20;
   uint8_t ch_offset = 0;
   if (const char *bw_env = std::getenv("DEVOURER_BW")) {

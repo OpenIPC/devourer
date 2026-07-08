@@ -44,7 +44,15 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
    * chip-version -> init_system_cfg -> firmware DLFW -> post-DLFW MAC cfg +
    * USB RX-DMA + BB/RF enable -> BB/AGC/RF phydm tables -> TRX mode -> channel
    * -> LCK -> IQK -> coex WL grant -> enable RX/TX MAC engine. */
-  const uint8_t bw = static_cast<uint8_t>(channel.ChannelWidth);
+  /* 5/10 MHz narrowband: bring the chip up at 20 MHz and re-clock at the END
+   * (kernel-flow parity — the vendor NB switch only ever runs as a retune on
+   * an initialized interface via iw / the OpenHD monitor_chan_override; with
+   * the NB re-clock applied mid-bring-up, IQK and the TRX re-assert run
+   * against the divided BB clock and the chip comes up deaf both directions —
+   * hardware-bisected on the T3U with a known-good Jaguar3 NB peer). */
+  const uint8_t bw_final = static_cast<uint8_t>(channel.ChannelWidth);
+  const bool nb = (bw_final == 5 || bw_final == 6);
+  const uint8_t bw = nb ? 0 : bw_final;
   /* DLFW download BEFORE trx/queue config (HalMAC order): running init_trx first
    * over-allocates the FIFOPAGE queues and wedges the DLFW bcn-valid.
    *
@@ -154,6 +162,14 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   else
     _logger->info("Jaguar2: coex WL grant SKIPPED (tuning.skip_coex)");
   _hal.enable_rx(); /* CR MACTX|MACRX + RCR + IGI — enables both TX and RX */
+  if (nb) {
+    /* The end-of-bring-up narrowband re-clock (see the top of this function).
+     * A pure re-tune: RF18 comes out identical to the 20 MHz set (NB keeps
+     * the 20 MHz RF encoding), only the 0x8ac/0x8c4/0x8c8 clock state and the
+     * BB reset differ. */
+    _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel), bw_final, _rfe,
+                        channel.ChannelOffset);
+  }
   _brought_up = true;
 }
 
@@ -673,6 +689,20 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
   c.rx_chains = chains;
   c.per_chain_rssi = chains >= 2;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
+  /* 5/10 MHz baseband re-clock via the 0x8ac small-BW/clock word. 8821C only:
+   * hardware-validated at both widths cross-generation against Jaguar3. The
+   * 8822B path carries the same (vendor-parity) register recipe but the chip
+   * comes up with ~10% RX sync rate and dead NB TX — the OpenHD kernel module
+   * on the same dongle does full-rate NB with the SAME firmware blob and the
+   * same BB register state, so the missing piece is a runtime FW interaction
+   * (the kernel's NB switch retunes the RF RXBB LPF — RF 0x82/0xf2 move with
+   * bandwidth without any driver register write). Until that is ported the
+   * 8822B does not advertise narrowband. */
+  if (_variant == jaguar2::ChipVariant::C8821C) {
+    c.narrowband_ok = true;
+  } else {
+    c.bw_mask &= static_cast<uint8_t>(~(devourer::kBw5 | devourer::kBw10));
+  }
   c.fastretune_ok = true;
   c.per_packet_txpower = true; /* TX descriptor TXPWR_OFSET LUT — Jaguar2 only */
   devourer::set_standard_freq_ranges(c);

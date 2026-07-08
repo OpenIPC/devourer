@@ -53,7 +53,9 @@ public:
   void read_efuse_logical_map(uint8_t *map, uint16_t map_size, bool dump);
 
   /* Program the per-rate TXAGC (0x1d00 path A / 0x1d80 path B) from the EFUSE
-   * power-by-rate calibration for `channel` at bandwidth `bw` (0=20/1=40/2=80) —
+   * power-by-rate calibration for `channel` at bandwidth `bw` (0=20/1=40/2=80;
+   * 5/6 = 5/10 MHz narrowband, folded to the 20 MHz column — the RF runs in
+   * 20 MHz mode and the regulatory tables have no narrowband rows) —
    * the efuse-calibrated level the kernel uses. Without it the TXAGC sits at the
    * hot BB-table default which overdrives high-order QAM (MCS5/7) into PA
    * compression. Ports phy_get_pg_txpwr_idx (base + per-BW/Nss diff) +
@@ -111,10 +113,14 @@ public:
 
   /* Set RF channel + bandwidth (config_phydm_switch_channel_8822b +
    * config_phydm_switch_bandwidth_8822b): RF18 tune, band AGC/fc/CCK-filter,
-   * RFE antenna pins, RX-path + IGI toggle. bw: 0=20/1=40/2=80 MHz.
-   * primary_ch_idx = sub-channel index for 40/80 (the vendor primary_ch_idx;
-   * from SelectedChannel.ChannelOffset). rfe_type selects the RFE-pin table
-   * and the BW80 extra writes; rf_2t2r drives path-B writes. */
+   * RFE antenna pins, RX-path + IGI toggle. bw: 0=20/1=40/2=80 MHz, 5/6 =
+   * 5/10 MHz narrowband (raw ChannelWidth_t values) — a baseband ADC/DAC
+   * re-clock packed into the 0x8ac dword (small-BW [7:6] = 1/2) plus
+   * 0x8c4[30]=0 / 0x8c8[31]=1; the RF synth stays in its 20 MHz mode, so the
+   * RF18 BW bits equal the 20 MHz encoding. primary_ch_idx = sub-channel index
+   * for 40/80 (the vendor primary_ch_idx; from SelectedChannel.ChannelOffset).
+   * rfe_type selects the RFE-pin table and the BW80 extra writes; rf_2t2r
+   * drives path-B writes. */
   void set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
                       uint8_t primary_ch_idx = 0);
 
@@ -130,9 +136,11 @@ public:
    * hop does not need it (hardware-measured on both variants, both
    * directions: identical hopping-RX catch rate and hopping-TX delivery with
    * and without, no decay over repeated kickless retunes). Everything
-   * bandwidth-keyed (0x8ac/0x8c4 block, RX DFIR, CCA thresholds) and
-   * band-keyed (RFE pins, 8821C switch-band/RF-set block) stays untouched —
-   * set by the last full set at this BW/band. Returns false (chip untouched)
+   * bandwidth-keyed (0x8ac/0x8c4/0x8c8 block — including the 5/10 MHz
+   * narrowband re-clock state, whose RF18 BW bits equal the 20 MHz encoding,
+   * so NB survives fast hops with no divider re-cache — RX DFIR, CCA
+   * thresholds) and band-keyed (RFE pins, 8821C switch-band/RF-set block)
+   * stays untouched — set by the last full set at this BW/band. Returns false (chip untouched)
    * on a band change or when the radio was never tuned; the caller falls back
    * to the full set_channel_bw. */
   bool fast_retune(uint8_t channel, uint8_t bw, uint8_t primary_ch_idx,
@@ -232,6 +240,11 @@ private:
   void rfe_ifem(uint8_t channel);
   /* phydm_igi_toggle_8822b: toggle 0xc50/0xe50 IGI to enter RX mode. */
   void igi_toggle();
+
+  /* BB reset (MAC 0x0 BIT16 = FEN_BBRSTB toggle, the _iqk_bb_reset_8822b
+   * mechanism) — relatches the BB clock tree; required after the 5/10 MHz
+   * ADC/DAC re-clock (as on Jaguar3). */
+  void bb_reset();
   /* Central channel of the wide channel (shared full/fast paths): 20 MHz ->
    * primary; 40 MHz -> ±2 by primary_ch_idx; 80 MHz -> +6/+2/-2/-6. */
   static uint8_t central_ch(uint8_t channel, uint8_t bw, uint8_t primary_ch_idx);

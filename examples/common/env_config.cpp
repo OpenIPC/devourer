@@ -104,6 +104,8 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.tuning.rfe_type = static_cast<uint8_t>(v);
   if (env_long("DEVOURER_NB_DAC", &v))
     cfg.tuning.nb_dac = static_cast<uint8_t>(v & 0x7);
+  if (env_long("DEVOURER_NB_ADC", &v))
+    cfg.tuning.nb_adc = static_cast<uint8_t>(v & 0x7);
   if (const char *e = env_str("DEVOURER_REGULATION")) {
     if (str_ieq(e, "ETSI"))
       cfg.tuning.regulation = devourer::Regulation::ETSI;

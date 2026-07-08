@@ -26,8 +26,9 @@ int main() {
   const uint8_t ac = kBw20 | kBw40 | kBw80;
   expect("J1 bw = 20/40/80",
          bw_mask_for_generation(ChipGeneration::Jaguar1) == ac);
-  expect("J2 bw = 20/40/80",
-         bw_mask_for_generation(ChipGeneration::Jaguar2) == ac);
+  expect("J2 bw adds 5/10",
+         bw_mask_for_generation(ChipGeneration::Jaguar2) ==
+             (ac | kBw5 | kBw10));
   expect("J3 bw adds 5/10",
          bw_mask_for_generation(ChipGeneration::Jaguar3) ==
              (ac | kBw5 | kBw10));

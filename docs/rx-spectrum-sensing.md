@@ -28,7 +28,8 @@ What *is* available is **scalar, channel-wide** energy:
   the whole channel, available only on frames that arrive.
 
 To turn scalar energy into a coarse *spectrum*, sweep the channel/bandwidth and
-sample the energy per bin (narrowband down to 5 MHz on Jaguar3). Per-tone
+sample the energy per bin (narrowband down to 5 MHz on Jaguar3 and the
+Jaguar2 8821C). Per-tone
 interference localisation is possible through a different mechanism entirely —
 the self-sounding beamforming report (see `docs/beamforming-self-sounding.md`),
 whose per-tone SNR / V-angle variance localises an interferer to ~1 MHz.
@@ -126,7 +127,7 @@ The aggregate is drained at each dwell start, so retune-transient frames never
 leak into a bin.
 
 The resolution is the channel grid: 20 MHz on the 2.4/5 GHz plan, and down to
-~5 MHz on Jaguar3 (`DEVOURER_NB_BW=5` — the 2.4 GHz channels are 5 MHz apart, so
+~5 MHz on Jaguar3 and the Jaguar2 8821C (`DEVOURER_NB_BW=5` — the 2.4 GHz channels are 5 MHz apart, so
 stepping them at 5 MHz bandwidth gives 5 MHz bins; fast dwells preserve the
 narrowband dividers, so an NB sweep never re-runs the re-clock recipe). This is
 a scalar-energy spectrum, not an FFT — there is no sub-channel structure within

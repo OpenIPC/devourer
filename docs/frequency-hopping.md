@@ -337,7 +337,10 @@ rounds (three of them on the 8821C's band/channel/BW split) — the 8821CU hop i
 a **single LSSI write**; AGC index, CFO fc, the 8822B RF 0xBE VCO band / ch144
 RF 0xDF flag / 2G spur registers and the 8821C 2G CCK filter are composed
 writes on bucket change. RFE pins and the 8821C switch-band/RF-set block are
-band-keyed and stay untouched.
+band-keyed and stay untouched. 5/10 MHz narrowband (8821C) survives fast hops
+for free: the re-clock state lives in the bandwidth-keyed
+`0x8ac`/`0x8c4`/`0x8c8` block the hop never touches, and the NB RF18 BW bits
+equal the 20 MHz encoding, so the cached RF18 write is already correct.
 
 **Jaguar3** (`RadioManagementJaguar3::fast_retune`, both variants): the RF18
 window write inside its 3-wire bracket + force-anapar + BB reset every hop —

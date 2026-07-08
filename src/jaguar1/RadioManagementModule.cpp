@@ -1160,6 +1160,12 @@ void RadioManagementModule::InitRFEGpio8814A() {
  * per bandwidth; both bands write the same value here. */
 void RadioManagementModule::phy_SetBwRegAdc_8814A(BandType Band,
                                                   ChannelWidth_t bw) {
+  /* NB: the 8814A ADC-clock BW config is a DIFFERENT mechanism from the
+   * 8812/8821 0x8ac[9:8] divider — here 0x8ac[1:0] is a mode selector
+   * (20M=0/40M=1/80M=2) paired with phy_SetBwRegAgc_8814A. The 8812AU
+   * narrowband divide (5/10 MHz) does not transplant here; 8814 narrowband
+   * is a separate, unported research effort (caps gate it off — see
+   * RtlJaguarDevice::GetAdapterCaps). */
   (void)Band;
   uint32_t val;
   switch (bw) {
@@ -1896,16 +1902,20 @@ void RadioManagementModule::phy_PostSetBwMode8812() {
      * 8812A shares the 8822B/8821C baseband clock block at 0x8ac: bits
      * [9:8] are the ADC clock (phy_FixSpur_8812A calls [9:8]=3 "ADC 160M",
      * [9:8]=2 "80M" — the normal 20 MHz value), [21:20] the DAC clock,
-     * [7:6] the (8822B) small-BW field. Hypothesis: divide the ADC/DAC
-     * clocks down and set small-BW to shrink the occupied bandwidth while
-     * the RF stays a 20 MHz tune — exactly the Jaguar2/3 trick. The divide
-     * codes are the unknown (8812A encoding differs from the 8822B's), so
-     * they are sweepable via DEVOURER_NB_ADC / DEVOURER_NB_DAC; the
-     * defaults step one notch down from the 20 MHz values (ADC 2->1/0,
-     * DAC 3->2/1) per octave of bandwidth. */
+     * [7:6] the (8822B) small-BW field. Divide the ADC/DAC clocks down and
+     * set small-BW to shrink the occupied bandwidth while the RF stays a
+     * 20 MHz tune — exactly the Jaguar2/3 trick. The divide codes are
+     * CHARACTERIZED on the 8812AU (SDR occupied-bandwidth grid + cross-RX vs
+     * a Jaguar3 peer — tests/jaguar1_nb_divide_sweep.sh): an octave step off
+     * the 20 MHz values (DAC 3 / ADC 2):
+     *   10 MHz -> DAC 2, ADC 1   (TX lobe 8.2 MHz; RX best at ADC 1: 4700
+     *                             vs 1900 hits at ADC 0)
+     *    5 MHz -> DAC 1, ADC 0   (TX lobe 4.1 MHz)
+     * The DAC code sets the emitted lobe width, the ADC code sets receive
+     * sensitivity. Overridable via DEVOURER_NB_ADC / DEVOURER_NB_DAC. */
     const bool is5 = (_currentChannelBw == CHANNEL_WIDTH_5);
-    uint32_t adc = is5 ? 0u : 1u;         /* 20M ADC / 40M ADC */
-    uint32_t dac = is5 ? 1u : 2u;         /* divide DAC one/two notches */
+    uint32_t adc = is5 ? 0u : 1u;
+    uint32_t dac = is5 ? 1u : 2u;
     const uint32_t smallbw = is5 ? 1u : 2u;
     if (_tuning.nb_adc)
       adc = *_tuning.nb_adc & 0x3;

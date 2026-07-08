@@ -667,13 +667,18 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
      * recipe the chip syncs only ~10% of NB frames on RX and airs no valid NB
      * TX, while the OpenHD kernel module on the same dongle does full-rate NB
      * with the SAME firmware blob and the same page-8 BB state (hardware
-     * A/B'd via reference/rtl88x2bu/88x2bu_ohd.ko + write_reg bisect). The
-     * kernel additionally converges RF 0x82/0xf2 (RXBB) to NB values within
-     * ~3 s of the switch via a dynamic loop devourer doesn't run — but
-     * forcing those converged values statically does NOT recover devourer's
-     * RX (hardware-tested), so the operative delta is the dynamic mechanism
-     * itself or something still unobserved (FW H2C interplay, per-frame AGC).
-     * The 8821C variant has no such gap and is fully validated. */
+     * A/B'd via reference/rtl88x2bu/88x2bu_ohd.ko + write_reg bisect). A
+     * usbmon capture of the kernel's 20->10 MHz switch plus the following
+     * 5 s shows NO H2C and NO host RF write beyond RF18 — yet the kernel's
+     * RF 0x82/0xf2 (RXBB) converge to NB values within ~3 s (0x44 -> 0x50 ->
+     * 0x52), i.e. the on-chip FIRMWARE retunes the RX front-end for small-BW
+     * autonomously — and it does so under the kernel but not under devourer,
+     * whose FW never receives the interface-up H2C state (media status /
+     * macid / RA) that arms the FW dynamic engine. Forcing the converged RF
+     * values statically does NOT recover RX (hardware-tested), so the FW's
+     * runtime assist — not the final register values — is the operative
+     * delta. The 8821C variant has no such dependence and is fully
+     * validated. */
     const bool is5 = (bw == 5);
     v8ac &= is5 ? 0xEFEEFE00 : 0xEFFEFF00;
     v8ac |= is5 ? (1u << 6) : (1u << 7);

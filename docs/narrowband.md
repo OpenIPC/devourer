@@ -39,7 +39,7 @@ retune** on an already-tuned channel: bring the chip up at 20 MHz, then re-clock
 All three generations do the same thing — divide the ADC and DAC clocks and tell
 the baseband it is "small BW" — but the register block differs.
 
-### Jaguar1 (RTL8812AU / RTL8811AU) — the shared `0x8ac` block
+### Jaguar1 (RTL8812AU / RTL8811AU / RTL8814AU) — the shared `0x8ac` block
 
 The 8812A drives its bandwidth through BB register `0x8ac` (`rRFMOD_Jaguar`)
 under mask `0x003003C3`, whose fields are:
@@ -69,6 +69,19 @@ code sets receive sensitivity** — sweeping ADC while transmitting does nothing
 to the emission, while at 10 MHz an ADC of 1 receives roughly 2.5× better than 0.
 The codes are overridable via `DEVOURER_NB_ADC` / `DEVOURER_NB_DAC` for
 uncharacterized cuts.
+
+The **RTL8814AU (4T4R)** reaches the same block but with a different field
+encoding, and it is instructive. Its `phy_SetBwRegAdc_8814A` only pokes
+`0x8ac[1:0]` (a 20/40/80 mode selector with no sub-20 value), so the divider
+looks absent — but the vendor's own comment documents the full field set as
+`[28, 21:20, 16, 9:6, 1:0]`, which is the **Jaguar2 (8822B) layout**: the ADC
+clock is `[9:8]+[16]` and the DAC clock is `[21:20]+[28]`, with the `[16]`/`[28]`
+high bits dominating (a divide touching only `[9:8]`/`[21:20]` does nothing on
+the 8814). Clear those high bits and write the 8821C/8822B divide codes verbatim
+(10 MHz → 3/3, 5 MHz → 2/2, small-BW 2/1) and the 8814 narrows exactly as an
+8822B does — TX and RX. The lesson: the same register block can carry the same
+fields with a *different* value encoding per die; a divide that reads dead may
+just be landing in the wrong sub-field.
 
 ### Jaguar2 (RTL8822BU / RTL8821CU) — `0x8ac` packed, plus an RF re-latch edge
 
@@ -139,10 +152,13 @@ chip-specific traps. The ones this port paid for, current-state:
    a driver bug; the durable fix is a crystal-cap trim lever (tracked
    separately).
 
-4. **8814A uses a different bandwidth mechanism.** The 4T4R 8814A configures
-   bandwidth through `0x8ac[1:0]` as a mode selector plus a separate ADC/AGC
-   function, not the `[9:8]` divider the 8812A exposes. The 8812AU divide does
-   not transplant; 8814 narrowband is an unported research effort.
+4. **The same die-family can encode the divider differently.** The 8814A's
+   bandwidth register looked like a mode selector (`0x8ac[1:0]`) with no
+   narrowband value, and the 8812A divide (which writes `[9:8]`/`[21:20]`)
+   narrows nothing on it. The trap is assuming "no divide field" when the field
+   is there under a different encoding — the 8814 uses the 8822B's `[16]`/`[28]`
+   high bits (see the Jaguar1 section). Read the vendor's field comments, not
+   just the code it executes.
 
 ## Validation methodology
 
@@ -184,8 +200,8 @@ was characterized (the TX failure rate versus divide depth).
 it as `CHANNEL_WIDTH_5` / `CHANNEL_WIDTH_10` on `SelectedChannel`, and
 `IRtlDevice::GetAdapterCaps().narrowband_ok` reports whether the running chip
 supports it. Support today: **Jaguar2 (8822B/8821C) and Jaguar3 (8822C/8822E)**
-fully; **Jaguar1 on the 8812 die (8812AU/8811AU)** as a characterized addition;
-8821A and 8814A excluded (see the walls above).
+fully, and **Jaguar1 on the 8812AU/8811AU and the 8814AU** — every generation.
+The 8821A is the one exclusion (its DAC-clock divide starves TX; see the walls).
 
 Test scripts: `tests/jaguar2_narrowband_sdr.sh` and
 `tests/jaguar1_nb_divide_sweep.sh` (SDR occupied-bandwidth), and

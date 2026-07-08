@@ -12,8 +12,10 @@
 #if defined(DEVOURER_HAVE_JAGUAR2_8821C)
 #include "Hal8821c_TxpwrLmt.h" /* generated: hal8821c_txpwr_lmt() WW-min limits */
 #endif
+#include "ChannelFreq.h" /* chan_to_freq for the spur-notch center */
 #include "HopProf.h" /* DEVOURER_HOP_PROF fast-retune stage timing */
 #include "PhyTableLoader.h"
+#include "ToneMask.h" /* NBI notch + CSI mask appliers (spur calibration) */
 
 namespace jaguar2 {
 
@@ -631,6 +633,155 @@ void HalJaguar2::kfree_apply(uint8_t channel) {
   }
 }
 
+void HalJaguar2::spur_calibration(uint8_t channel, uint8_t cch, uint8_t bw) {
+  /* phydm_spur_calibration_8822b + phydm_dynamic_spur_det_eliminate port
+   * (8822B only; CONFIG_8822B_SPUR_CALIBRATION is on in the CE vendor
+   * build). The chip's own clock spurs land inside a fixed set of channels;
+   * on those the vendor PSD-scans the spur frequency and, above threshold,
+   * programs the NBI notch + CSI mask. On every other channel this reduces
+   * to the reset half (clear masks + notch disables) — still vendor parity
+   * on every channel set. */
+  if (_variant == ChipVariant::C8821C)
+    return;
+  const bool r2t2r = _ver.rf_2t2r != 0;
+
+  /* Entry disables + dsde_init: clear the CSI mask bank and both notch
+   * enables. */
+  _device.phy_set_bb_reg(0x087c, (1u << 13), 0x0);
+  _device.phy_set_bb_reg(0x0c20, (1u << 28), 0x0);
+  _device.phy_set_bb_reg(0x0e20, (1u << 28), 0x0);
+  for (uint16_t a = 0x880; a <= 0x89c; a += 4)
+    _device.rtw_write32(a, 0);
+  _device.phy_set_bb_reg(0x0874, 0x1, 0x0);
+
+  /* phydm_dsde_ch_idx: the spur-channel table. idx 16 = no spur here. */
+  const bool g2 = channel <= 14;
+  uint8_t idx = 16;
+  if (g2) {
+    if (bw == 0) { /* 20M: ch 5..8 -> 0..3, ch 13 -> 4 */
+      if (channel >= 5 && channel <= 8)
+        idx = static_cast<uint8_t>(channel - 5);
+      else if (channel == 13)
+        idx = 4;
+    } else if (bw == 1) { /* 40M: ch 3..11 -> 5..13 */
+      if (channel >= 3 && channel <= 11)
+        idx = static_cast<uint8_t>(channel + 2);
+    }
+  } else {
+    switch (channel) {
+    case 153: idx = 0; break;
+    case 161: idx = 1; break;
+    case 54:  idx = 2; break;
+    case 118: idx = 3; break;
+    case 151: idx = 4; break;
+    case 159: idx = 5; break;
+    case 58:  idx = 6; break;
+    case 122: idx = 7; break;
+    case 155: idx = 8; break;
+    default: break;
+    }
+  }
+  if (idx > 13)
+    return;
+
+  /* PSD scan at the spur frequency point ±1 (3 samples each): 3-wire off,
+   * one RX path at a time, PSD engine via 0x910 BIT(22)|freq_pt, report at
+   * 0xf44[15:0]. Restores 3-wire / 0x910[15:12] / RX paths and toggles IGI
+   * so the RF re-enters RX (the BB sends no 3-wire on path re-enable). */
+  static const uint32_t freq_2g[14] = {0xFC67, 0xFC27, 0xFFE6, 0xFFA6, 0xFC67,
+                                       0xFCE7, 0xFCA7, 0xFC67, 0xFC27, 0xFFE6,
+                                       0xFFA6, 0xFF66, 0xFF26, 0xFCE7};
+  static const uint32_t freq_5g[10] = {0xFFC0, 0xFFC0, 0xFC81, 0xFC81, 0xFC41,
+                                       0xFC40, 0xFF80, 0xFF80, 0xFF40, 0xFD42};
+  if (!g2 && idx >= 10)
+    return;
+  const uint32_t f_base = g2 ? freq_2g[idx] : freq_5g[idx];
+  uint32_t max_a = 0, max_b = 0;
+  for (int k = 0; k < 3; k++) {
+    const uint32_t f_pt = f_base - 1 + static_cast<uint32_t>(k);
+    for (int j = 0; j < 3; j++) {
+      _device.phy_set_bb_reg(0x0c00, 0xff, 0x4); /* 3-wire off */
+      _device.phy_set_bb_reg(0x0e00, 0xff, 0x4);
+      const uint32_t r910_15_12 =
+          (_device.rtw_read32(0x0910) >> 12) & 0xf;
+      /* path A */
+      _device.phy_set_bb_reg(0x0808, 0xff, 0x11);
+      _device.phy_set_bb_reg(0x0910, 0xffffffff, (1u << 22) | f_pt);
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+      uint32_t v = _device.rtw_read32(0x0f44) & 0xffff;
+      if (v > max_a)
+        max_a = v;
+      _device.phy_set_bb_reg(0x0910, (1u << 22), 0x0);
+      if (r2t2r) { /* path B: freq_pt | BIT(16) */
+        _device.phy_set_bb_reg(0x0808, 0xff, 0x22);
+        _device.phy_set_bb_reg(0x0910, 0xffffffff,
+                               (1u << 22) | (1u << 16) | f_pt);
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+        v = _device.rtw_read32(0x0f44) & 0xffff;
+        if (v > max_b)
+          max_b = v;
+        _device.phy_set_bb_reg(0x0910, (1u << 22), 0x0);
+      }
+      _device.phy_set_bb_reg(0x0c00, 0xff, 0x7); /* 3-wire on */
+      _device.phy_set_bb_reg(0x0e00, 0xff, 0x7);
+      _device.phy_set_bb_reg(0x0910, 0xf000, r910_15_12);
+      const uint8_t rx_ant = r2t2r ? 0x3 : 0x1;
+      _device.phy_set_bb_reg(0x0808, 0xff,
+                             static_cast<uint32_t>(rx_ant << 4) | rx_ant);
+      igi_toggle();
+    }
+  }
+
+  constexpr uint32_t kThreshold = 0x8D; /* NBI and CSI share it */
+  const bool do_nbi = max_a >= kThreshold || max_b >= kThreshold;
+  if (!do_nbi) {
+    _logger->info("Jaguar2 spur-cal: ch{} bw{} psd A={} B={} — below "
+                  "threshold, no notch",
+                  channel, bw, max_a, max_b);
+    return;
+  }
+
+  /* phydm_dsde_nbi: CCA tweak + notch at the spur frequency (MHz). The spur
+   * frequency per channel/BW, from the vendor tables. */
+  _device.phy_set_bb_reg(0x082c, 0xff000, 0x97);
+  _device.phy_set_bb_reg(0x082c, 0xf000, 0x7);
+  uint32_t f_int = 0;
+  const uint32_t bw_mhz = bw == 1 ? 40 : bw == 2 ? 80 : 20;
+  if (bw == 0) {
+    if (channel == 153) f_int = 5760;
+    else if (channel == 161) f_int = 5800;
+    else if (channel >= 5 && channel <= 8) f_int = 2440;
+    else if (channel == 13) f_int = 2480;
+  } else if (bw == 1) {
+    if (channel == 54) f_int = 5280;
+    else if (channel == 118) f_int = 5600;
+    else if (channel == 151) f_int = 5760;
+    else if (channel == 159) f_int = 5800;
+    else if (channel >= 4 && channel <= 6) f_int = 2440;
+    else if (channel == 11) f_int = 2480;
+  } else if (bw == 2) {
+    if (channel == 58) f_int = 5280;
+    else if (channel == 122) f_int = 5600;
+    else if (channel == 155) f_int = 5760;
+  }
+  if (f_int == 0)
+    return;
+  const uint32_t fc = devourer::chan_to_freq(cch);
+  devourer::tonemask::nbi_apply_11ac(_device,
+                                     devourer::tonemask::Family::AC2_8822B, fc,
+                                     bw_mhz, f_int, r2t2r);
+  /* phydm_dsde_csi: mask the tones around the spur (±600 kHz ~ the vendor's
+   * tone+neighbor weights). */
+  devourer::tonemask::CsiMaskSpec spec{};
+  spec.valid = true;
+  spec.f_lo_khz = static_cast<int32_t>(f_int) * 1000 - 600;
+  spec.f_hi_khz = static_cast<int32_t>(f_int) * 1000 + 600;
+  devourer::tonemask::csi_mask_apply_11ac(_device, fc, bw_mhz, spec);
+  _logger->info("Jaguar2 spur-cal: ch{} bw{} psd A={} B={} — NBI+CSI notch "
+                "at {} MHz",
+                channel, bw, max_a, max_b, f_int);
+}
+
 void HalJaguar2::bb_reset() {
   /* MAC 0x0 BIT16 (SYS_FUNC_EN FEN_BBRSTB) 0->1 — the _iqk_bb_reset_8822b /
    * _8821c mechanism; relatches the BB DAC/DFE clock tree. */
@@ -929,6 +1080,10 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _device.phy_set_bb_reg(0x0808, 0xff, 0x0);
   _device.phy_set_bb_reg(0x0808, 0xff, rx_ant | (rx_ant << 4));
   igi_toggle();
+
+  /* phydm_spur_calibration_8822b — reset the NBI/CSI notch state, and on the
+   * chip's own spur channels PSD-detect + notch (vendor switch_channel tail). */
+  spur_calibration(channel, cch, bw);
 
   /* 5/10 MHz: BB reset (MAC 0x0 BIT16 toggle — the same _iqk_bb_reset_8822b
    * mechanism) so the DAC/DFE relatch at the new sample rate. Hardware-taught

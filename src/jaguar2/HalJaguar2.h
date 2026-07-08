@@ -134,6 +134,13 @@ public:
   void kfree_init();
   void kfree_apply(uint8_t channel);
 
+  /* phydm_spur_calibration_8822b port: clear the NBI/CSI notch state on every
+   * channel set, and on the fixed spur-channel set (2G 5-8/13 @20M, 3-11
+   * @40M; 5G 153/161/54/118/151/159/58/122/155) PSD-scan the chip's own
+   * clock spur and program the NBI notch + CSI mask above threshold. 8822B
+   * only. `cch` = central channel (notch center frequency). */
+  void spur_calibration(uint8_t channel, uint8_t cch, uint8_t bw);
+
   /* Lean intra-band, same-bandwidth hop retune — the Jaguar2 FastRetune core
    * (see docs/frequency-hopping.md), variant-dispatched like set_channel_bw.
    * Only the per-hop essentials run: one cached full-register RF18 write per

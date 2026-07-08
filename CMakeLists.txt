@@ -390,6 +390,8 @@ target_include_directories(sense PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/co
 add_executable(doctor
     examples/doctor/main.cpp
 )
+# caps_event.h (shared adapter.caps emitter) lives in examples/common/.
+target_include_directories(doctor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 target_link_libraries(doctor PUBLIC devourer PRIVATE PkgConfig::libusb)
 
 # Headless regression guard for the binary-stdin framing shared by the two
@@ -492,6 +494,16 @@ add_executable(TxCapsSelftest
 target_link_libraries(TxCapsSelftest PRIVATE devourer)
 
 add_test(NAME tx_caps_derive COMMAND TxCapsSelftest)
+
+# Headless guard for the adapter-capabilities API pure logic (src/AdapterCaps.h
+# bw mask / gen names, the ActiveRxPaths classifier + accumulator in
+# src/RxQuality.h, and the extended freq<->chan mapping in src/ChannelFreq.h).
+add_executable(AdapterCapsSelftest
+    tests/adapter_caps_selftest.cpp
+)
+target_link_libraries(AdapterCapsSelftest PRIVATE devourer)
+
+add_test(NAME adapter_caps_derive COMMAND AdapterCapsSelftest)
 
 # Headless guard for the Jaguar2 per-packet TX-power quantizer
 # (jaguar2::txpkt_pwr_step_for_db) — dB delta -> the descriptor TXPWR_OFSET LUT

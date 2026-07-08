@@ -73,6 +73,7 @@ class RtlJaguarDevice : public IRtlDevice {
    * loop for every decoded frame; drained by GetRxQuality on the caller's
    * cadence. */
   devourer::RxQualityAccumulator _rxq;
+  devourer::RxPathActivityAccumulator _rxpaths;
 
 public:
   RtlJaguarDevice(RtlAdapter device, Logger_t logger,
@@ -127,6 +128,13 @@ public:
    * RF-type. STBC needs >=2 chains, so 1T1R cuts (8811AU/8821AU) report
    * stbc_ok=false and send_packet drops an STBC request. */
   devourer::TxCaps GetTxCaps() override;
+  /* Aggregate identity + radio + feature caps (IRtlDevice). Composes GetTxCaps
+   * / GetTxPowerCaps; identity from the EFUSE version-id + RF-type. */
+  devourer::AdapterCaps GetAdapterCaps() override;
+  /* Live per-chain RX-path activity (fed via _rxpaths in the RX loop). */
+  devourer::ActiveRxPaths GetActiveRxPaths() override {
+    return _rxpaths.snapshot();
+  }
   /* Read a baseband register (debug/diagnostic). Thin passthrough to the
    * radio manager's BB read — handy for confirming a TXAGC write landed. */
   uint32_t ReadBBReg(uint16_t addr, uint32_t mask);

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 
+#include "AdapterCaps.h"
 #include "AdapterHealth.h"
 #include "RxQuality.h"
 #include "RxSense.h"
@@ -133,6 +134,26 @@ public:
    * feature the silicon can't do (e.g. STBC on a 1T1R part, which produces a
    * frame that never decodes). Default returns supported=false. */
   virtual devourer::TxCaps GetTxCaps() { return {}; }
+
+  /* Aggregate STATIC adapter-capability report (see src/AdapterCaps.h):
+   * identity (chip name, generation, variant, transport, chip-id), TX/RX chain
+   * counts, the composed TxCaps + TxPowerCaps, the supported channel-width set,
+   * per-band tunable + characterized frequency spans, and the per-family
+   * feature flags (per-packet TX power, narrowband, fast retune, per-chain
+   * RSSI). Resolved at construction — safe from any thread and callable BEFORE
+   * Init/InitWrite (the demos emit it as the `adapter.caps` event right after
+   * CreateRtlDevice). Default returns supported=false. */
+  virtual devourer::AdapterCaps GetAdapterCaps() { return {}; }
+
+  /* Best-effort live estimate of which RX chains are actually carrying signal
+   * (see ActiveRxPaths in src/RxQuality.h) — derived from the per-frame
+   * per-chain RSSI the frame parser fills, so it needs an RX loop running and
+   * ambient traffic to mean anything. A chain whose mean RSSI sits far below
+   * the strongest is reported inactive (a disconnected/blocked antenna, or a
+   * software-masked path). Delta semantics like GetRxQuality: the window drains
+   * on read. Default is an all-invalid snapshot; a generation with >=2 RX
+   * chains overrides. NOT part of AdapterCaps, which is static. */
+  virtual devourer::ActiveRxPaths GetActiveRxPaths() { return {}; }
 
   virtual bool send_packet(const uint8_t *packet, size_t length) = 0;
   virtual SelectedChannel GetSelectedChannel() = 0;

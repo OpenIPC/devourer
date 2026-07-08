@@ -64,6 +64,7 @@
 #include <thread>
 
 #include "AdapterHealth.h"
+#include "caps_event.h"
 #include "RxPacket.h"
 #include "SignalStop.h"
 #include "UsbOpen.h"
@@ -225,6 +226,8 @@ int main(int argc, char **argv) {
     libusb_exit(ctx);
     return 3;
   }
+
+  devourer::emit_adapter_caps(logger->events(), dev.get());
 
   devourer::AdapterHealthInput in;
 

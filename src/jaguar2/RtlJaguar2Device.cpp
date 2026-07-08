@@ -295,8 +295,11 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
                                       f.drvinfo_size, f.rx_rate <= 3, p.RxAtrib);
         p.Data =
             std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
-        if (!p.RxAtrib.crc_err)
+        if (!p.RxAtrib.crc_err) {
           _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
+          _rxpaths.add(p.RxAtrib.rssi,
+                       _variant == jaguar2::ChipVariant::C8821C ? 1 : 2);
+        }
         _packetProcessor(p);
       }
       ++frames;
@@ -656,6 +659,37 @@ devourer::TxCaps RtlJaguar2Device::GetTxCaps() {
   /* 8821C is 1T1R (no STBC); 8822B is 2T2R. */
   const uint8_t chains = _variant == jaguar2::ChipVariant::C8821C ? 1 : 2;
   return devourer::tx_caps_for_chains(chains);
+}
+
+devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
+  devourer::AdapterCaps c;
+  c.supported = true;
+  c.generation = devourer::ChipGeneration::Jaguar2;
+  c.transport = _device.is_usb() ? "usb" : "pcie";
+  c.tx = GetTxCaps();
+  c.txpwr = GetTxPowerCaps();
+  const uint8_t chains = _variant == jaguar2::ChipVariant::C8821C ? 1 : 2;
+  c.tx_chains = chains;
+  c.rx_chains = chains;
+  c.per_chain_rssi = chains >= 2;
+  c.bw_mask = devourer::bw_mask_for_generation(c.generation);
+  c.fastretune_ok = true;
+  c.per_packet_txpower = true; /* TX descriptor TXPWR_OFSET LUT — Jaguar2 only */
+  devourer::set_standard_freq_ranges(c);
+
+  if (_variant == jaguar2::ChipVariant::C8821C) {
+    c.chip_name = "RTL8821C";
+    c.marketing_names = c.transport[0] == 'p' ? "RTL8821CE"
+                                              : "RTL8811CU/RTL8821CU";
+    c.chip_id = 0x09;
+    c.variant = "C8821C";
+  } else {
+    c.chip_name = "RTL8822B";
+    c.marketing_names = "RTL8822BU/RTL8812BU";
+    c.chip_id = 0x0a;
+    c.variant = "C8822B";
+  }
+  return c;
 }
 
 devourer::EfuseStability RtlJaguar2Device::ProbeEfuseStability(int reads) {

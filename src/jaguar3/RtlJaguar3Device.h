@@ -87,6 +87,13 @@ public:
   devourer::ThermalStatus GetThermalStatus() override;
   /* Per-chip TX caps (IRtlDevice): 8822C/8822E are 2T2R (STBC ok). */
   devourer::TxCaps GetTxCaps() override;
+  /* Aggregate identity + radio + feature caps (IRtlDevice). Composes GetTxCaps
+   * / GetTxPowerCaps; identity from ChipVariant, transport from the adapter. */
+  devourer::AdapterCaps GetAdapterCaps() override;
+  /* Live per-chain RX-path activity (fed via _rxpaths in the RX loop). */
+  devourer::ActiveRxPaths GetActiveRxPaths() override {
+    return _rxpaths.snapshot();
+  }
   /* Runtime TX-mode default — applied in send_packet when the radiotap carries
    * no rate. Without this the Jaguar3 TX path fell back to MGN_1M for rate-less
    * frames (so DEVOURER_TX_RATE/an MCS flood went on-air at 1 Mbps): the feature
@@ -175,6 +182,7 @@ private:
   bool _brought_up = false;
   /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
   devourer::RxQualityAccumulator _rxq;
+  devourer::RxPathActivityAccumulator _rxpaths;
   /* Frame counter for periodic NDPA sounding (DEVOURER_TX_NDPA=N). */
   uint64_t _ndpa_ctr = 0;
   /* TX beamforming apply state (DEVOURER_BF_TXBF). The entry is configured at

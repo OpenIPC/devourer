@@ -84,6 +84,13 @@ public:
   /* Per-chip TX caps (IRtlDevice): the 8821C is 1T1R (no STBC), the 8822B
    * 2T2R. send_packet drops an STBC request the variant can't honour. */
   devourer::TxCaps GetTxCaps() override;
+  /* Aggregate identity + radio + feature caps (IRtlDevice). Composes GetTxCaps
+   * / GetTxPowerCaps; identity from ChipVariant, transport from the adapter. */
+  devourer::AdapterCaps GetAdapterCaps() override;
+  /* Live per-chain RX-path activity (fed via _rxpaths in the RX loop). */
+  devourer::ActiveRxPaths GetActiveRxPaths() override {
+    return _rxpaths.snapshot();
+  }
 
   /* Per-packet TX-power offset — the zero-cost per-frame power trim the
    * adaptive link wants (distinct from the per-rate TXAGC that
@@ -145,6 +152,7 @@ private:
   const devourer::DeviceConfig _cfg;
   /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
   devourer::RxQualityAccumulator _rxq;
+  devourer::RxPathActivityAccumulator _rxpaths;
   Logger_t _logger;
   jaguar2::ChipVariant _variant;
   jaguar2::HalJaguar2 _hal;

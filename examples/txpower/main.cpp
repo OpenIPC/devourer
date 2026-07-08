@@ -55,6 +55,7 @@
 #include "TxPower.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "caps_event.h"
 #include "env_config.h"
 #include "logger.h"
 
@@ -223,6 +224,8 @@ int main(int argc, char **argv) {
     libusb_exit(ctx);
     return 1;
   }
+
+  devourer::emit_adapter_caps(*g_ev, dev.get());
 
   const devourer::TxPowerCaps caps = dev->GetTxPowerCaps();
   devourer::Ev(*g_ev, "txpwr.caps")

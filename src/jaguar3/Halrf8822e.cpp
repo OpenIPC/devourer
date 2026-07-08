@@ -1389,11 +1389,13 @@ void Halrf8822e::txgapk_calculate_offset(uint8_t path, uint8_t channel) {
     rf_write(path, 0xdf, 0x20000, 0x1);
     rf_write(path, 0x89, 0x00003, 0x3);
     rf_write(path, 0x00, 0x003e0, 0x0f);
-    if (channel >= 36 && channel <= 64)
+    /* Extended-range clamps: below-band 15..35 rides the low bucket, >177
+     * keeps the top bucket (the synth tunes past the vendor tables). */
+    if (channel <= 64)
       bb_set(0x1b98, 0x00007000, 0x2);
     else if (channel >= 100 && channel <= 144)
       bb_set(0x1b98, 0x00007000, 0x3);
-    else if (channel >= 149 && channel <= 177)
+    else if (channel >= 149)
       bb_set(0x1b98, 0x00007000, 0x4);
   }
 
@@ -1559,10 +1561,11 @@ void Halrf8822e::txgapk_save_all() {
 void Halrf8822e::txgapk_write_tx_gain(uint8_t channel) {
   uint32_t base = 0x20;
   int band = 1;
+  /* Extended-range clamps: 15..35 → low 5G band, >177 → top band. */
   if (channel >= 1 && channel <= 14) { base = 0x20; band = 1; }
-  else if (channel >= 36 && channel <= 64) { base = 0x200; band = 2; }
+  else if (channel >= 15 && channel <= 64) { base = 0x200; band = 2; }
   else if (channel >= 100 && channel <= 144) { base = 0x280; band = 3; }
-  else if (channel >= 149 && channel <= 177) { base = 0x300; band = 4; }
+  else if (channel >= 149) { base = 0x300; band = 4; }
 
   for (uint8_t path = 0; path < SS_8822E; ++path) {
     /* Guard: if the saved RF gain table for this band read back all-zero, the

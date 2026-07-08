@@ -904,7 +904,7 @@ void Halrf8822c::fill_report(uint8_t ch) {
 void Halrf8822c::phy_iq_calibrate(ChannelWidth_t bw, uint8_t channel) {
   _iqk.is_nb_iqk = (bw == CHANNEL_WIDTH_5 || bw == CHANNEL_WIDTH_10);
   _iqk.bw_val = _iqk.is_nb_iqk ? 0 : static_cast<uint8_t>(bw); /* 0/1/2=20/40/80 */
-  _iqk.is_5g = (channel >= 36);
+  _iqk.is_5g = (channel > 14); /* incl. below-band 15..35 extended-synth */
 
   uint32_t mac[MAC_REG_NUM_8822C], bbk[BB_REG_NUM_8822C], rf[RF_REG_NUM_8822C][2];
 

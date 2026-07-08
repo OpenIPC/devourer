@@ -160,6 +160,7 @@ private:
   Logger_t _logger;
   ChipVariant _variant;
   uint8_t _last_channel = 0; /* set by set_channel_bwmode; 0 = not yet tuned */
+  bool _warned_uncharacterized = false; /* one-shot extended-channel warning */
 
   /* fast_retune write-on-change caches. Invalidated whenever the full
    * set_channel_bwmode runs (it rewrites all of them); refreshed by the fast

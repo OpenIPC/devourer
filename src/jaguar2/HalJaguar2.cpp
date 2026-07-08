@@ -544,6 +544,19 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _last_df18 = -1;
   _last_cck_key = -1;
 
+  /* Extended-synth channels (below-band 15..35 / above 177, freq =
+   * 5000 + 5*ch up to ch 253): the RF tunes them, but the power tables and
+   * per-channel constants are clamped from the nearest characterized
+   * channel. Warn once so an unexpected retune there is visible. */
+  if (!_warned_uncharacterized &&
+      ((channel >= 15 && channel <= 35) || channel > 177)) {
+    _warned_uncharacterized = true;
+    _logger->warn("channel {} is outside the characterized range — TX power "
+                  "and per-channel constants extrapolated from the nearest "
+                  "table entry",
+                  channel);
+  }
+
   if (_variant == ChipVariant::C8821C) {
     set_channel_bw_8821c(channel, bw, rfe_type, primary_ch_idx);
     _last_tuned_ch = channel;
@@ -574,20 +587,23 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
       _device.phy_set_bb_reg(0x0a28, 0x0000ffff, 0x1525);
     }
   } else {
-    /* 5G AGC table + fc (config_phydm_switch_channel_8822b 5G branch) */
-    if (cch >= 36 && cch <= 64)
+    /* 5G AGC table + fc (config_phydm_switch_channel_8822b 5G branch).
+     * Extended-range clamps: below-band ch 15..35 rides the low bucket
+     * (mirrors Jaguar1's explicit 15..35 case) and ch >177 keeps the top
+     * bucket — the vendor tables end at 177 but the synth tunes past it. */
+    if (cch <= 64)
       _device.phy_set_bb_reg(0x0958, 0x1f, 0x1);
     else if (cch >= 100 && cch <= 144)
       _device.phy_set_bb_reg(0x0958, 0x1f, 0x2);
     else if (cch >= 149)
       _device.phy_set_bb_reg(0x0958, 0x1f, 0x3);
-    if (cch >= 36 && cch <= 48)
+    if (cch <= 48)
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x494);
     else if (cch >= 52 && cch <= 64)
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x453);
     else if (cch >= 100 && cch <= 116)
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x452);
-    else if (cch >= 118 && cch <= 177)
+    else if (cch >= 118)
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x412);
   }
 
@@ -739,12 +755,20 @@ uint8_t HalJaguar2::rf_be_for_8822b(uint8_t cch) {
                                         0x0, 0x7, 0x7, 0x6, 0x5, 0x5, 0x0};
   if (cch <= 14)
     return 0x0;
-  if (cch >= 36 && cch <= 64)
+  /* Extended-range clamps: the vendor tables cover 36..64 / 100..144 /
+   * 149..177; the synth tunes below 36 and above 177 (chan*5+5000 grid up to
+   * 253). Clamp to the nearest table edge so the VCO band is still set —
+   * extrapolated, not characterized. */
+  if (cch < 36)
+    return low_band[0];
+  if (cch <= 64)
     return low_band[(cch - 36) >> 1];
   if (cch >= 100 && cch <= 144)
     return middle_band[(cch - 100) >> 1];
   if (cch >= 149 && cch <= 177)
     return high_band[(cch - 149) >> 1];
+  if (cch > 177)
+    return high_band[(177 - 149) >> 1];
   return 0xff;
 }
 
@@ -791,7 +815,7 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   int agc_bucket = -1;
   if (g2)
     agc_bucket = 0;
-  else if (cch >= 36 && cch <= 64)
+  else if (cch <= 64) /* incl. below-band 15..35 (extended-range clamp) */
     agc_bucket = 1;
   else if (cch >= 100 && cch <= 144)
     agc_bucket = 2;
@@ -812,13 +836,13 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   uint32_t fc = 0xffffffff;
   if (g2)
     fc = 0x96a;
-  else if (cch >= 36 && cch <= 48)
+  else if (cch <= 48) /* incl. below-band 15..35 (extended-range clamp) */
     fc = 0x494;
   else if (cch >= 52 && cch <= 64)
     fc = 0x453;
   else if (cch >= 100 && cch <= 116)
     fc = 0x452;
-  else if (cch >= 118 && cch <= 177)
+  else if (cch >= 118) /* open-ended: extended channels >177 keep 0x412 */
     fc = 0x412;
   if (fc != 0xffffffff && fc != _last_fc) {
     _cw_fc = (_cw_fc & ~0x1ffe0000u) | (fc << 17);
@@ -1131,19 +1155,21 @@ void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
       _device.phy_set_bb_reg(0x0aac, 0xffffffff, _cck_aac_8821c);
     }
   } else {
-    if (cch >= 36 && cch <= 64)
+    /* Extended-range clamps (see the 8822B branch): ch 15..35 rides the low
+     * bucket, ch >177 keeps the top bucket. */
+    if (cch <= 64)
       _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x1);
     else if (cch >= 100 && cch <= 144)
       _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x2);
     else if (cch >= 149)
       _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x3);
-    if (cch >= 36 && cch <= 48)
+    if (cch <= 48)
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x494);
     else if (cch >= 52 && cch <= 64)
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x453);
     else if (cch >= 100 && cch <= 116)
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x452);
-    else if (cch >= 118 && cch <= 177)
+    else if (cch >= 118)
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x412);
     if (cch >= 100 && cch <= 140)
       rf18 |= (1u << 17);

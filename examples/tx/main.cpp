@@ -31,6 +31,7 @@
 #endif
 
 #include "BfReportDetect.h"
+#include "caps_event.h"
 #include "ChannelFreq.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
@@ -461,6 +462,7 @@ int main(int argc, char **argv) {
   devourer::Ev(*g_ev, "init.timing")
       .f("stage", "txdemo.create_device")
       .f("ms", ms_since_start());
+  devourer::emit_adapter_caps(*g_ev, rtlDevice.get());
 
   /* Jaguar1-only research features (TX-mode default, fast-retune hopping,
    * thermal telemetry, TXAGC override, BB-reg probe) are not part of the

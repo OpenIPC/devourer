@@ -17,12 +17,13 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
   rides the 8812 path), RTL8814AU (4T4R RF / 3-SS baseband — host-pushed TX
   requires the on-chip 3081 MCU booted during FW download; a failed FW-boot
   poll means dead TX while RX still works), RTL8821AU (1T1R + BT). **5/10 MHz
-  narrowband on the 8812 die** (8812AU/8811AU): the 8812A shares the Jaguar2
-  `0x8ac` ADC/DAC clock-divider block, so the same re-clock trick works even
-  though the vendor never wired it — TX+RX bench-characterized. The 8821A is
-  excluded (dividing its DAC clock starves the 1T1R TX DMA/USB path) and the
-  8814A uses a different BW block; both fall back to 20 MHz. See
-  `docs/narrowband.md`.
+  narrowband on the 8812AU/8811AU and the 8814AU**: both share the Jaguar2
+  `0x8ac` ADC/DAC clock-divider block, so the re-clock trick works even though
+  the vendor never wired it — TX+RX bench-characterized. The two dies use
+  different field encodings of the same register (the 8812A divides via
+  `[9:8]`/`[21:20]`, the 8814A via the 8822B's `[9:8]+[16]`/`[21:20]+[28]`).
+  The 8821A is excluded (dividing its DAC clock starves the 1T1R TX DMA/USB
+  path) and falls back to 20 MHz. See `docs/narrowband.md`.
 - **Jaguar2** (`src/jaguar2/`): RTL8822BU / RTL8812BU (chip-id `0x0a`) and
   RTL8811CU / RTL8821CU (chip 8821C, chip-id `0x09`). A hybrid: HalMAC FW
   download / MAC init / power sequencing like Jaguar3, phydm `check_positive`

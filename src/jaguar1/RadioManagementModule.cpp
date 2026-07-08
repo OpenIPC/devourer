@@ -1169,6 +1169,8 @@ void RadioManagementModule::phy_SetBwRegAdc_8814A(BandType Band,
   (void)Band;
   uint32_t val;
   switch (bw) {
+  case ChannelWidth_t::CHANNEL_WIDTH_5:  /* SPIKE: narrowband -> 20M mode */
+  case ChannelWidth_t::CHANNEL_WIDTH_10:
   case ChannelWidth_t::CHANNEL_WIDTH_20:
     val = 0x0;
     break;
@@ -1193,6 +1195,8 @@ void RadioManagementModule::phy_SetBwRegAgc_8814A(BandType Band,
                                                   ChannelWidth_t bw) {
   uint32_t agc;
   switch (bw) {
+  case ChannelWidth_t::CHANNEL_WIDTH_5:  /* SPIKE: narrowband -> 20M AGC */
+  case ChannelWidth_t::CHANNEL_WIDTH_10:
   case ChannelWidth_t::CHANNEL_WIDTH_20:
     agc = 6;
     break;
@@ -1782,6 +1786,34 @@ void RadioManagementModule::phy_PostSetBwMode8814A() {
   case ChannelWidth_t::CHANNEL_WIDTH_20:
     /* No extra writes for 20 MHz on 8814. */
     break;
+  case ChannelWidth_t::CHANNEL_WIDTH_5:
+  case ChannelWidth_t::CHANNEL_WIDTH_10: {
+    /* 8814AU narrowband. The 8814 sets its BW ADC clock via 0x8ac[1:0]
+     * (a 20/40/80 mode selector; phy_SetBwRegAdc_8814A), which has no sub-20
+     * MHz value — BUT its phy_SetBwRegAdc comment documents the full field set
+     * as [28, 21:20, 16, 9:6, 1:0], i.e. the 8814 shares the 8822B 0x8ac
+     * layout (ADC clock [9:8]+[16], DAC clock [21:20]+[28]) rather than the
+     * 8812A's ([9:8]/[21:20] only — dividing those alone did nothing here; the
+     * [16]/[28] high bits dominate). Clear the [16]/[28] high bits and set the
+     * low divide fields + small-BW; the codes are the 8821C/8822B narrowband
+     * codes verbatim (10 MHz -> 3/3, 5 MHz -> 2/2). Bench-verified TX+RX both
+     * directions. Sweepable via DEVOURER_NB_ADC / DEVOURER_NB_DAC. */
+    const bool is5 = (_currentChannelBw == CHANNEL_WIDTH_5);
+    uint32_t adc = is5 ? 2u : 3u;
+    uint32_t dac = is5 ? 2u : 3u;
+    const uint32_t smallbw = is5 ? 1u : 2u;
+    if (_tuning.nb_adc)
+      adc = *_tuning.nb_adc & 0x3;
+    if (_tuning.nb_dac)
+      dac = *_tuning.nb_dac & 0x3;
+    /* mask [28]+[21:20]+[16]+[9:6]+[1:0]; clears the [28]/[16] clock high
+     * bits, keeps [1:0]=0 (20M mode set above). */
+    _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x103103C3,
+                           (dac << 20) | (adc << 8) | (smallbw << 6));
+    _logger->info("SPIKE 8814AU narrowband: {} MHz (adc={} dac={} smallbw={})",
+                  is5 ? 5 : 10, adc, dac, smallbw);
+    break;
+  }
   case ChannelWidth_t::CHANNEL_WIDTH_40:
     _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x3C, SubChnlNum);
     if (SubChnlNum ==

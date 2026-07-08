@@ -26,6 +26,23 @@ public:
   /* phy_iq_calibrate entry (SW path). band2g: true = 2.4 GHz. Runs the full
    * per-path LOK/TXK/RXK, backing up and restoring MAC/BB/RF around it. */
   virtual void iqk_trigger(bool band2g) = 0;
+
+  /* Thermal TX-power tracking (8822B/8821C, default no-op so a
+   * future variant compiles without a stub). `set_pwr_track_ctx` wires the
+   * efuse thermal baseline + channel (band-table select) once bring-up is
+   * complete and primes the per-path rolling average + the reverse-mapped
+   * default BB-swing index (from 0xc1c[31:21]). `pwr_track` runs one
+   * compensation tick — reads the RF 0x42[15:10] meter per path, averages,
+   * and writes the vendor MIX_MODE swing (0xc94/0xe94 TXAGC coarse split +
+   * 0xc1c/0xe1c BB scale). `current_ofdm_index` is the live path-A OFDM TXAGC
+   * software shadow used for the MIX_MODE headroom (63 − idx); -1 = TXAGC
+   * never written (fall back to all-swing-into-BB). Serialization against the
+   * channel set / TX-power setters is the caller's responsibility. */
+  virtual void set_pwr_track_ctx(uint8_t baseline, uint8_t channel) {
+    (void)baseline;
+    (void)channel;
+  }
+  virtual void pwr_track(int current_ofdm_index) { (void)current_ofdm_index; }
 };
 
 /* Factory: returns the calibration impl for the given chip. cut / is_2t2r come

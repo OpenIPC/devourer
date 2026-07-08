@@ -99,6 +99,9 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.tuning.skip_rfe_init = env_flag("DEVOURER_SKIP_RFEINIT");
   cfg.tuning.skip_coex = env_flag("DEVOURER_SKIP_COEX");
   cfg.tuning.skip_dig = env_flag("DEVOURER_SKIP_DIG");
+  /* Default-on knob: unset = tracking on; only "0" disables it. */
+  if (const char *e = env_str("DEVOURER_THERMAL_TRACK"))
+    cfg.tuning.thermal_track = std::strcmp(e, "0") != 0;
   cfg.tuning.disable_cca = env_flag("DEVOURER_DIS_CCA");
   if (env_long("DEVOURER_RFE", &v))
     cfg.tuning.rfe_type = static_cast<uint8_t>(v);

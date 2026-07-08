@@ -151,6 +151,12 @@ struct DeviceConfig {
     bool skip_rfe_init = false;     /* env: DEVOURER_SKIP_RFEINIT (J2) */
     bool skip_coex = false;         /* env: DEVOURER_SKIP_COEX (J2) */
     bool skip_dig = false;          /* env: DEVOURER_SKIP_DIG (J2) */
+    /* env: DEVOURER_THERMAL_TRACK — Jaguar2 thermal TX-power tracking
+     * (default ON; "0" disables). A ~2 s tick reads the RF 0x42 thermal
+     * meter, computes the delta vs the efuse baseline, and writes the vendor
+     * MIX_MODE swing compensation (0xc94/0xe94 TXAGC + 0xc1c/0xe1c BB scale)
+     * so on-air power holds flat as the PA heats over a sustained TX link. */
+    bool thermal_track = true;
     /* env: DEVOURER_DIS_CCA — Jaguar3 EDCCA-disable at bring-up (before the
      * coex thread starts). Runtime equivalent: SetCcaMode. */
     bool disable_cca = false;

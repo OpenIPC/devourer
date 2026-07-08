@@ -35,6 +35,7 @@ RtlJaguar2Device::RtlJaguar2Device(RtlAdapter device, Logger_t logger,
 RtlJaguar2Device::~RtlJaguar2Device() {
   /* Safety net: restore the chip if a CW tone is still armed. */
   StopCwTone();
+  stop_pwrtrack();
   stop_dig();
 }
 
@@ -115,11 +116,13 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
    * halrf_iqk_8821c port reports a clean pass and — with the AFE quad
    * (0xc58/0xc5c/0xc60/0xc6c) added to its backup/restore so afe_setting(false)'s
    * IQK-exit values don't persist — no longer disturbs the OFDM/HT TX path. */
+  /* Persistent calibration (IQK + thermal tracking) — construct once here now
+   * that cut / rf-type are known, so the thermal tick can reuse it post-bring-up. */
+  _cal = jaguar2::make_jaguar2_calibration(
+      _variant, _device, _logger, _hal.chip_version().cut,
+      _hal.chip_version().rf_2t2r != 0);
   if (!_cfg.tuning.skip_iqk) {
-    auto cal = jaguar2::make_jaguar2_calibration(
-        _variant, _device, _logger, _hal.chip_version().cut,
-        _hal.chip_version().rf_2t2r != 0);
-    cal->iqk_trigger(channel.Channel <= 14);
+    _cal->iqk_trigger(channel.Channel <= 14);
   } else {
     _logger->info("Jaguar2: IQK SKIPPED (tuning.skip_iqk)");
   }
@@ -171,6 +174,52 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
                         channel.ChannelOffset);
   }
   _brought_up = true;
+
+  /* Thermal TX-power tracking: prime the calibration with the
+   * efuse baseline + channel and start the ~2 s tick. Covers both Init (RX)
+   * and InitWrite (TX-only). Disabled by knob or an unprogrammed efuse
+   * baseline (0xFF), where a delta would be meaningless. */
+  if (_cfg.tuning.thermal_track && _cal) {
+    uint8_t raw = 0, baseline = 0xff;
+    _hal.read_thermal(raw, baseline);
+    if (baseline != 0xff) {
+      _cal->set_pwr_track_ctx(baseline, static_cast<uint8_t>(channel.Channel));
+      start_pwrtrack();
+    } else {
+      _logger->info("Jaguar2: thermal tracking disabled (unprogrammed efuse "
+                    "baseline 0xBA=0xFF)");
+    }
+  }
+}
+
+void RtlJaguar2Device::start_pwrtrack() {
+  _pwrtrack_stop = false;
+  _pwrtrack_thread = std::thread([this] {
+    /* ~2 s cadence via steady_clock, polled in short slices so the dtor join
+     * returns promptly on shutdown. */
+    auto next = std::chrono::steady_clock::now();
+    while (!_pwrtrack_stop && !g_devourer_should_stop) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      if (std::chrono::steady_clock::now() < next)
+        continue;
+      next += std::chrono::seconds(2);
+      std::lock_guard<std::mutex> lk(_reg_mu);
+      /* Don't perturb a bare CW/continuous carrier — the tick's 0xc94/0xc1c
+       * writes would corrupt the tone and its saved-state restore. */
+      if (_cw_active || _cont_active)
+        continue;
+      int cck = -1, ofdm = -1, mcs7 = -1;
+      _hal.txagc_shadow(cck, ofdm, mcs7);
+      _cal->pwr_track(ofdm);
+    }
+  });
+  _logger->info("RtlJaguar2Device: thermal-track thread started");
+}
+
+void RtlJaguar2Device::stop_pwrtrack() {
+  _pwrtrack_stop = true;
+  if (_pwrtrack_thread.joinable())
+    _pwrtrack_thread.join();
 }
 
 void RtlJaguar2Device::apply_tx_power_current() {
@@ -545,6 +594,8 @@ void RtlJaguar2Device::StopContinuousTx() {
 }
 
 void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
+  /* Serialize against the thermal-track tick's RF-window read. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
   _channel = channel;
   /* Retune the RF/BB to the new channel. set_channel_bw is a pure tune (RF18 +
    * bandwidth registers) — no per-channel LCK/IQK/TX-power — so it is cheap
@@ -566,6 +617,8 @@ void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
 void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
   if (channel == _channel.Channel)
     return;
+  /* Serialize against the thermal-track tick's RF-window read. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
   if (_hal.fast_retune(channel, static_cast<uint8_t>(_channel.ChannelWidth),
                        _channel.ChannelOffset, cache_rf)) {
     _channel.Channel = channel;
@@ -609,6 +662,9 @@ devourer::TxPowerCaps RtlJaguar2Device::GetTxPowerCaps() {
 }
 
 int RtlJaguar2Device::SetTxPowerOffsetQdb(int qdb) {
+  /* Serialize the TXAGC write + shadow update against the thermal tick, which
+   * reads the OFDM shadow for its MIX_MODE headroom. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
   if (_cw_active) {
     _logger->warn("SetTxPowerOffsetQdb refused: CW tone active (TXAGC does "
                   "not modulate a bare LO carrier)");
@@ -628,6 +684,7 @@ int RtlJaguar2Device::SetTxPowerOffsetQdb(int qdb) {
 }
 
 void RtlJaguar2Device::SetTxPowerIndexOverride(int idx) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
   if (_cw_active) {
     _logger->warn("SetTxPowerIndexOverride refused: CW tone active");
     return;
@@ -638,6 +695,7 @@ void RtlJaguar2Device::SetTxPowerIndexOverride(int idx) {
 }
 
 bool RtlJaguar2Device::ReApplyTxPower() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
   if (!_brought_up || _cw_active)
     return false;
   apply_tx_power_current();
@@ -742,6 +800,8 @@ devourer::ThermalStatus RtlJaguar2Device::GetThermalStatus() {
   devourer::ThermalStatus t;
   if (!_brought_up)
     return t; /* RF reads need a powered chip */
+  /* Serialize the RF-window read against the thermal-track tick. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
   uint8_t raw = 0, baseline = 0xFF;
   _hal.read_thermal(raw, baseline);
   t.raw = raw;
@@ -946,7 +1006,10 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
 
 SelectedChannel RtlJaguar2Device::GetSelectedChannel() { return _channel; }
 
-void RtlJaguar2Device::Stop() { stop_dig(); }
+void RtlJaguar2Device::Stop() {
+  stop_pwrtrack();
+  stop_dig();
+}
 
 void RtlJaguar2Device::SetTxMode(const devourer::TxMode &mode) {
   _tx_mode_default = mode;

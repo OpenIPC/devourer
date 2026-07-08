@@ -232,12 +232,13 @@ inline void parse_phy_sts_jgr2(const uint8_t *physts, uint16_t physts_len,
     a.rssi[0] = physts[1];
   } else {
     /* type1: DW0/1 pwdb[4] at bytes 1..4; DW4 rxevm[4] at bytes 16..19;
-     * DW6 rxsnr[4] at bytes 24..27. */
+     * DW5 cfo_tail[4] at bytes 20..23; DW6 rxsnr[4] at bytes 24..27. */
     for (int i = 0; i < 4; i++) {
       a.rssi[i] = physts[1 + i];
       a.evm[i] = static_cast<int8_t>(physts[16 + i]);
       a.snr[i] = static_cast<int8_t>(physts[24 + i]);
     }
+    a.cfo_tail = static_cast<int8_t>(physts[20]); /* path-A CFO tail (#217) */
     /* DW1 byte7 flags: [5]=ldpc [6]=stbc [7]=beamformed (phy_sts_rpt_jgr2_type1).
      * DW1 byte5: l_rxsc[3:0] / ht_rxsc[7:4]; the vendor derives RX bandwidth from
      * the active rxsc (legacy OFDM uses l_rxsc, HT/VHT uses ht_rxsc): rxsc 1-8 =

@@ -383,10 +383,47 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
 
   _logger->info("RtlJaguar2Device: entering RX loop (ch={})", _channel.Channel);
 
+  /* Closed-loop CFO tracking on the receiver (#217): tick the controller on a
+   * ~2 s cadence from the RX loop. The crystal-cap fields (0x24[30:25] +
+   * 0x28[6:1]) are written READ-FREE from bases cached before the RX flood —
+   * a control-transfer read races the async bulk-IN and throws under load. */
+  uint32_t r24_base = 0, r28_base = 0;
+  bool cfo_ok = false;
+  if (_cfg.tuning.cfo_track) {
+    try {
+      r24_base = _device.rtw_read<uint32_t>(0x0024) & ~0x7E000000u;
+      r28_base = _device.rtw_read<uint32_t>(0x0028) & ~0x0000007Eu;
+      cfo_ok = true;
+    } catch (...) {
+      _logger->info("Jaguar2 cfo.track: AFE base read failed — disabled");
+    }
+  }
+  auto cfo_next = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  auto cfo_tick = [&]() {
+    if (!cfo_ok || std::chrono::steady_clock::now() < cfo_next)
+      return;
+    cfo_next += std::chrono::seconds(2);
+    double avg_khz = 0;
+    const int cur = _xtal_cap < 0 ? 0x20 : _xtal_cap;
+    const int nc = _cfo.step(cur, 0x3f, &avg_khz); /* 6-bit on Jaguar2 */
+    if (nc >= 0) {
+      try {
+        const uint32_t c = static_cast<uint32_t>(nc);
+        _device.rtw_write<uint32_t>(0x0024, r24_base | (c << 25));
+        _device.rtw_write<uint32_t>(0x0028, r28_base | (c << 1));
+        _xtal_cap = nc;
+        _logger->info("Jaguar2 cfo.track: cfo~{} (raw*2.5) xtal_cap=0x{:02x}",
+                      static_cast<int>(avg_khz), _xtal_cap);
+      } catch (...) {
+      }
+    }
+  };
+
   /* RX loop: async bulk-IN URB queue; walk the aggregated 8822B RX descriptors
    * per completion and hand each PSDU to the packet processor. */
   uint64_t frames = 0, reads = 0;
   auto on_data = [&](const uint8_t *data, int n) {
+    cfo_tick();
     if (++reads <= 8)
       _logger->info("Jaguar2 RX: completion #{} -> {} bytes", reads, n);
     uint32_t off = 0;
@@ -422,6 +459,8 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
           _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
           _rxpaths.add(p.RxAtrib.rssi,
                        _variant == jaguar2::ChipVariant::C8821C ? 1 : 2);
+          if (_cfg.tuning.cfo_track)
+            _cfo.add(p.RxAtrib.cfo_tail); /* closed-loop CFO input (#217) */
         }
         _packetProcessor(p);
       }

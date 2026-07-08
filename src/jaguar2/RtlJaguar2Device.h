@@ -12,6 +12,7 @@
 #include "TxMode.h"
 #include "RtlAdapter.h"
 #include "SelectedChannel.h"
+#include "CfoTracker.h"
 #include "HalJaguar2.h"
 #include "HalmacJaguar2MacInit.h"
 #include "HalmacJaguar2Fw.h"
@@ -161,6 +162,7 @@ private:
   Logger_t _logger;
   jaguar2::ChipVariant _variant;
   int _xtal_cap = -1; /* current crystal-cap code (SetXtalCap) */
+  devourer::CfoTracker _cfo; /* closed-loop CFO tracker (DEVOURER_CFO_TRACK) */
   jaguar2::HalJaguar2 _hal;
   jaguar2::HalmacJaguar2MacInit _macinit;
   jaguar2::HalmacJaguar2Fw _fw;

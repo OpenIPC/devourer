@@ -237,5 +237,8 @@ The 8821A is the one exclusion (its DAC-clock divide starves TX; see the walls).
 Test scripts: `tests/jaguar2_narrowband_sdr.sh` and
 `tests/jaguar1_nb_divide_sweep.sh` (SDR occupied-bandwidth),
 `tests/narrowband_cross_rx.sh` (cross-generation decode),
-`tests/xtal_cfo_sweep.sh` (crystal-cap trim authority), and
-`tests/jaguar1_cfo_track_smoke.sh` (closed-loop tick fires on a Jaguar1 die).
+`tests/xtal_cfo_sweep.sh` (crystal-cap trim authority),
+`tests/jaguar1_cfo_track_smoke.sh` (closed-loop tick fires against ambient
+traffic), and `tests/jaguar1_cfo_convergence.sh` (two-adapter Jaguar1 link:
+the receiver's loop engages and steps its cap to reduce a real inter-crystal
+offset — the same convergence behaviour validated on Jaguar2/Jaguar3).

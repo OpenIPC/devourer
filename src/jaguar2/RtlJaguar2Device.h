@@ -2,6 +2,8 @@
 #define RTL_JAGUAR2_DEVICE_H
 
 #include <atomic>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
 
@@ -14,6 +16,7 @@
 #include "HalmacJaguar2MacInit.h"
 #include "HalmacJaguar2Fw.h"
 #include "ChipVariant.h"
+#include "Jaguar2Calibration.h"
 
 /* RtlJaguar2Device is the orchestrator for the Realtek "Jaguar2" 802.11ac family
  * — RTL8822BU (chip 8822B, 2T2R, USB). It is the Jaguar2 sibling of
@@ -181,14 +184,17 @@ private:
 
   /* CW single-tone (StartCwTone/StopCwTone) saved state for a clean restore:
    * the pre-tone RF 0x00 (path A) and the four RFE-pinmux BB words
-   * (0xCB0/0xEB0/0xCB4/0xEB4). _cw_active guards double start/stop. */
-  bool _cw_active = false;
+   * (0xCB0/0xEB0/0xCB4/0xEB4). _cw_active guards double start/stop. Atomic so
+   * the thermal-track tick reads a coherent value for its skip-during-tone
+   * guard. */
+  std::atomic<bool> _cw_active{false};
   uint32_t _cw_rf00 = 0;
   uint32_t _cw_bb[4] = {0, 0, 0, 0};
 
   /* Modulated continuous TX (StartContinuousTx/StopContinuousTx) guard + saved
-   * pre-continuous rCCAonSec (0x838) for a clean restore. */
-  bool _cont_active = false;
+   * pre-continuous rCCAonSec (0x838) for a clean restore. Atomic — see
+   * _cw_active. */
+  std::atomic<bool> _cont_active{false};
   uint32_t _cont_cca838 = 0;
 
   /* DIG (dynamic initial gain) background thread — periodically runs
@@ -196,6 +202,24 @@ private:
   std::thread _dig_thread;
   std::atomic<bool> _dig_stop{false};
   void stop_dig();
+
+  /* Per-chip halrf calibration (IQK + thermal TX-power tracking).
+   * Persistent (not a bring_up local) so the thermal tick can reuse it after
+   * bring-up; constructed in bring_up once cut / rf-type are known. */
+  std::unique_ptr<jaguar2::Jaguar2Calibration> _cal;
+
+  /* Thermal TX-power tracking background thread. Reads the RF
+   * thermal meter every ~2 s and writes the MIX_MODE swing compensation via
+   * _cal->pwr_track(). Started at the end of bring_up so it covers BOTH the RX
+   * (Init) and TX-only (InitWrite) sessions — the sustained-TX case the DIG
+   * thread (RX-only) never reaches. Serialized against SetMonitorChannel /
+   * FastRetune / the TX-power setters / GetThermalStatus by _reg_mu (the RF
+   * read window is a multi-transfer sequence that must not tear). */
+  std::mutex _reg_mu;
+  std::thread _pwrtrack_thread;
+  std::atomic<bool> _pwrtrack_stop{false};
+  void start_pwrtrack();
+  void stop_pwrtrack();
 
   /* StartRxLoop stop request (StopRxLoop). volatile (not atomic) to match the
    * signal-flag pattern used across the library (g_devourer_should_stop). */

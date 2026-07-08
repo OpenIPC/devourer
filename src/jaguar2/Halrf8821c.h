@@ -35,7 +35,16 @@ public:
   /* phy_iq_calibrate_8821c entry (SW path). band2g: true=2.4G. */
   void iqk_trigger(bool band2g) override;
 
+  /* Thermal TX-power tracking — see Jaguar2Calibration. 1T1R:
+   * path A only (0xc94[6:1] TXAGC + 0xc1c[31:21] BB scale). */
+  void set_pwr_track_ctx(uint8_t baseline, uint8_t channel) override;
+  void pwr_track(int current_ofdm_index) override;
+
 private:
+  /* MIX_MODE split + register write, path A (get_mix_mode..._8822b family,
+   * 8821C register layout). */
+  void pwr_track_write(int swing, int current_ofdm_index);
+
   /* --- MASKDWORD/RF primitives (dm API shims; shared with 8822B) --- */
   uint32_t bb_get(uint16_t addr, uint32_t mask);
   void bb_set(uint16_t addr, uint32_t mask, uint32_t data);
@@ -104,6 +113,14 @@ private:
   bool _iqk_fail_report[2] = {true, true}; /* [TX_IQK|RX_IQK] */
   uint16_t _rxiqk_agc[2] = {};
   uint32_t _iqc_matrix[2] = {0x20000000, 0x20000000}; /* inert (no reload) */
+
+  /* --- thermal TX-power tracking state (path A only) --- */
+  uint8_t _pt_baseline = 0xff; /* efuse 0xBA; 0xff = disabled */
+  uint8_t _pt_channel = 0;
+  uint8_t _pt_default_ofdm = 24; /* reverse-mapped 0xc1c[31:21]; 24 = 0 dB */
+  int _pt_avg[4] = {};
+  int _pt_avg_idx = 0;
+  int _pt_last_swing = 0x7fffffff;
 };
 
 } /* namespace jaguar2 */

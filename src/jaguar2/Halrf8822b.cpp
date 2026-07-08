@@ -677,6 +677,143 @@ void Halrf8822b::iqk_trigger(bool band2g) {
                 _rxiqk_fail_code[1]);
 }
 
+/* ===== Thermal TX-power tracking =================================
+ * Vendor-faithful MIX_MODE port of odm_txpowertracking_new_callback_thermal_meter
+ * + odm_tx_pwr_track_set_pwr8822b / get_mix_mode_tx_agc_bb_swing_offset_8822b.
+ * Tables transcribed from reference/rtl88x2bu/hal/phydm/halrf/rtl8822b/
+ * halhwimg8822b_rf.c (delta_swingidx_mp_*_txpwrtrk_8822b, D_S_SIZE=30) and
+ * tx_scaling_table_jaguar (halrf_powertracking_ce.c, TXSCALE_TABLE_SIZE=37). */
+namespace {
+constexpr int D_S = 30; /* DELTA_SWINGIDX_SIZE */
+
+/* BB TX-scale multipliers (0xc1c/0xe1c[31:21]); index 24 = 0 dB, 0.5 dB/step. */
+const uint32_t tx_scaling_table_jaguar[37] = {
+    0x081, 0x088, 0x090, 0x099, 0x0A2, 0x0AC, 0x0B6, 0x0C0, 0x0CC, 0x0D8,
+    0x0E5, 0x0F2, 0x101, 0x110, 0x120, 0x131, 0x143, 0x156, 0x16A, 0x180,
+    0x197, 0x1AF, 0x1C8, 0x1E3, 0x200, 0x21E, 0x23E, 0x261, 0x285, 0x2AB,
+    0x2D3, 0x2FE, 0x32B, 0x35C, 0x38E, 0x3C4, 0x3FE};
+
+/* 2.4 GHz swing (path A = 2ga, path B = 2gb), warming (p) / cooling (n). */
+const uint8_t k2ga_p[D_S] = {0, 1, 2, 3, 3, 4, 5,  6,  6,  7,  8,  9,  9,  10, 11,
+                             12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 22, 22};
+const uint8_t k2ga_n[D_S] = {0, 1, 2, 3, 3, 4, 5,  6,  6,  7,  8,  9,  10, 11, 12,
+                             13, 13, 14, 15, 16, 17, 18, 18, 18, 18, 18, 18, 18, 18, 18};
+const uint8_t k2gb_p[D_S] = {0, 1, 1, 2, 3, 4, 4,  5,  6,  7,  7,  8,  9,  10, 11,
+                             12, 12, 13, 14, 15, 16, 17, 17, 18, 19, 20, 21, 22, 22, 22};
+const uint8_t k2gb_n[D_S] = {0, 1, 2, 3, 3, 4, 4,  5,  6,  7,  8,  9,  10, 11, 12,
+                             13, 13, 14, 15, 16, 16, 17, 18, 18, 18, 18, 18, 18, 18, 18};
+
+/* 5 GHz swing, 3 sub-bands: [0]=ch36-64, [1]=ch100-144, [2]=ch149-177. */
+const uint8_t k5ga_p[3][D_S] = {
+    {0, 1, 2, 2, 3, 4, 5, 5, 6, 7, 8, 9, 9, 10, 11, 12, 13, 14, 14, 15, 16, 17, 18, 19, 19, 20, 20, 20, 20, 20},
+    {0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7, 7, 8, 9, 9, 10, 11, 11, 12, 13, 14, 15, 16, 16, 17, 17, 18, 18, 18, 18},
+    {0, 1, 2, 3, 3, 4, 5, 5, 6, 6, 7, 8, 8, 9, 10, 11, 12, 12, 13, 14, 15, 15, 16, 17, 17, 18, 18, 18, 18, 18}};
+const uint8_t k5ga_n[3][D_S] = {
+    {0, 1, 2, 2, 3, 3, 4, 5, 6, 7, 8, 8, 9, 9, 10, 11, 11, 12, 12, 12, 13, 13, 14, 14, 14, 15, 15, 15, 15, 15},
+    {0, 1, 2, 2, 3, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 14, 14, 14, 14, 14},
+    {0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 12, 12, 13, 13, 14, 14, 14, 14, 14, 14, 14}};
+const uint8_t k5gb_p[3][D_S] = {
+    {0, 1, 2, 2, 3, 4, 5, 6, 7, 8, 8, 9, 10, 11, 11, 12, 13, 14, 15, 15, 16, 17, 18, 18, 19, 19, 19, 19, 19, 19},
+    {0, 1, 2, 2, 3, 4, 5, 6, 6, 7, 8, 8, 9, 9, 10, 11, 12, 12, 13, 14, 15, 16, 17, 17, 18, 18, 18, 18, 18, 18},
+    {0, 1, 2, 2, 3, 4, 5, 5, 6, 6, 7, 8, 8, 9, 10, 10, 11, 12, 13, 14, 15, 15, 16, 16, 17, 17, 17, 17, 17, 17}};
+const uint8_t k5gb_n[3][D_S] = {
+    {0, 1, 2, 3, 3, 4, 5, 6, 6, 7, 8, 9, 9, 10, 10, 11, 11, 12, 12, 12, 13, 13, 14, 14, 14, 15, 15, 15, 15, 15},
+    {0, 1, 1, 2, 2, 3, 3, 4, 5, 5, 6, 7, 7, 8, 8, 9, 10, 10, 11, 12, 12, 13, 13, 14, 14, 14, 14, 14, 14, 14},
+    {0, 1, 2, 2, 3, 3, 4, 4, 5, 6, 6, 7, 7, 8, 9, 9, 10, 10, 11, 12, 12, 13, 13, 14, 14, 14, 14, 14, 14, 14}};
+} /* namespace */
+
+void Halrf8822b::set_pwr_track_ctx(uint8_t baseline, uint8_t channel) {
+  _pt_baseline = baseline;
+  _pt_channel = channel;
+  for (auto &a : _pt_avg)
+    for (auto &x : a)
+      x = 0;
+  _pt_avg_idx[0] = _pt_avg_idx[1] = 0;
+  _pt_last_swing[0] = _pt_last_swing[1] = 0x7fffffff;
+  /* default_ofdm_index = reverse-map the current 0xc1c[31:21] BB swing to a
+   * tx_scaling_table_jaguar index (the level the phydm BB table left); 24
+   * (0 dB) if no exact match — matches the vendor `else` fallback. */
+  _pt_default_ofdm = 24;
+  const uint32_t cur = bb_get(0xc1c, 0xFFE00000);
+  for (int i = 0; i < 37; i++)
+    if (tx_scaling_table_jaguar[i] == cur) {
+      _pt_default_ofdm = static_cast<uint8_t>(i);
+      break;
+    }
+  _logger->info("Jaguar2 8822B thermal-track: baseline={} ch={} default_ofdm={}",
+                baseline, channel, _pt_default_ofdm);
+}
+
+void Halrf8822b::pwr_track_write(uint8_t path, int swing, int cur_ofdm_idx) {
+  /* MIX_MODE split: coarse steps to TXAGC (0xc94), remnant to BB swing (0xc1c),
+   * bounded by the headroom above the current OFDM index and the BB table. */
+  const int tx_pwr_idx = cur_ofdm_idx < 0 ? 63 : (cur_ofdm_idx > 63 ? 63 : cur_ofdm_idx);
+  int headroom = 63 - tx_pwr_idx; /* tx_power_index_offset */
+  if (headroom > 0xF)
+    headroom = 0xF;
+  const int def = _pt_default_ofdm;
+  const int ub = def + 10;
+  int tx_agc_index, bb_swing_index;
+  if (swing >= 0 && swing <= headroom) {
+    tx_agc_index = swing;
+    bb_swing_index = def;
+  } else if (swing > headroom) {
+    tx_agc_index = headroom;
+    bb_swing_index = def + (swing - headroom);
+    if (bb_swing_index > ub)
+      bb_swing_index = ub;
+  } else { /* swing < 0 (cooling) */
+    tx_agc_index = 0;
+    bb_swing_index = def > -swing ? def + swing : 0;
+  }
+  if (bb_swing_index < 0)
+    bb_swing_index = 0;
+  if (bb_swing_index > 36)
+    bb_swing_index = 36;
+  const uint16_t c94 = (path == 0) ? 0xc94 : 0xe94;
+  const uint16_t c1c = (path == 0) ? 0xc1c : 0xe1c;
+  bb_set(c94, 0x3E000000, static_cast<uint32_t>(tx_agc_index) & 0x1f); /* [29:25] */
+  bb_set(c1c, 0xFFE00000, tx_scaling_table_jaguar[bb_swing_index]);
+}
+
+void Halrf8822b::pwr_track(int current_ofdm_index) {
+  if (_pt_baseline == 0xff)
+    return;
+  const bool g2 = _pt_channel <= 14;
+  const int sub = g2 ? 0 : (_pt_channel <= 64 ? 0 : (_pt_channel <= 144 ? 1 : 2));
+  /* Single die thermal sensor: only path A's RF 0x42 meter reads back (path B
+   * reads 0 — its sensor isn't enabled in this bring-up), and both PA chains
+   * share the die and heat together, so one measured delta drives both. Each
+   * path still uses its own delta-swing curve (2ga/2gb, 5ga/5gb). */
+  const int cur = static_cast<int>((rf_get(0, 0x42) >> 10) & 0x3f);
+  _pt_avg[0][_pt_avg_idx[0]] = cur;
+  _pt_avg_idx[0] = (_pt_avg_idx[0] + 1) & 3;
+  int sum = 0, cnt = 0;
+  for (int i = 0; i < 4; i++)
+    if (_pt_avg[0][i]) {
+      sum += _pt_avg[0][i];
+      cnt++;
+    }
+  if (!cnt)
+    return; /* meter not ready — no valid sample yet */
+  const int avg = sum / cnt;
+  int delta = avg > _pt_baseline ? avg - _pt_baseline : _pt_baseline - avg;
+  if (delta > D_S - 1)
+    delta = D_S - 1;
+  const int paths = _2t2r ? 2 : 1;
+  for (int p = 0; p < paths; p++) {
+    const uint8_t *up = g2 ? (p == 0 ? k2ga_p : k2gb_p) : (p == 0 ? k5ga_p[sub] : k5gb_p[sub]);
+    const uint8_t *dn = g2 ? (p == 0 ? k2ga_n : k2gb_n) : (p == 0 ? k5ga_n[sub] : k5gb_n[sub]);
+    const int swing = avg > _pt_baseline ? up[delta] : -static_cast<int>(dn[delta]);
+    if (swing == _pt_last_swing[p])
+      continue; /* no change — skip the USB write */
+    _pt_last_swing[p] = swing;
+    pwr_track_write(static_cast<uint8_t>(p), swing, current_ofdm_index);
+    _logger->info("Jaguar2 8822B thermal-track: path{} avg={} d={} swing={}",
+                  p, avg, delta, swing);
+  }
+}
+
 #if defined(DEVOURER_HAVE_JAGUAR2_8821C)
 /* Defined in Halrf8821c.cpp. */
 std::unique_ptr<Jaguar2Calibration>

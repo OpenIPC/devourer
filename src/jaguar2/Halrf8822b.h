@@ -29,7 +29,17 @@ public:
    * per-path LOK/TXK/RXK, backing up and restoring MAC/BB/RF around it. */
   void iqk_trigger(bool band2g) override;
 
+  /* Thermal TX-power tracking — see Jaguar2Calibration. 2T2R:
+   * both paths tracked (0xc94/0xe94 + 0xc1c/0xe1c). */
+  void set_pwr_track_ctx(uint8_t baseline, uint8_t channel) override;
+  void pwr_track(int current_ofdm_index) override;
+
 private:
+  /* MIX_MODE split (get_mix_mode_tx_agc_bb_swing_offset_8822b) + register
+   * write for one path: coarse swing -> 0xc94/0xe94[29:25] TXAGC, remnant ->
+   * 0xc1c/0xe1c[31:21] BB scale via tx_scaling_table_jaguar. */
+  void pwr_track_write(uint8_t path, int swing, int current_ofdm_index);
+
   /* --- MASKDWORD/RF primitives (dm API shims) --- */
   uint32_t bb_get(uint16_t addr, uint32_t mask);
   void bb_set(uint16_t addr, uint32_t mask, uint32_t data);
@@ -93,6 +103,14 @@ private:
   uint8_t _lna_idx = 0;
   bool _isbnd = false;
   uint32_t _tmp_gntwl = 0;
+
+  /* --- thermal TX-power tracking state --- */
+  uint8_t _pt_baseline = 0xff; /* efuse 0xBA; 0xff = disabled */
+  uint8_t _pt_channel = 0;     /* for band-table select each tick */
+  uint8_t _pt_default_ofdm = 24; /* reverse-mapped 0xc1c[31:21]; 24 = 0 dB */
+  int _pt_avg[2][4] = {};        /* AVG_THERMAL_NUM_8822B=4 rolling window */
+  int _pt_avg_idx[2] = {};
+  int _pt_last_swing[2] = {0x7fffffff, 0x7fffffff}; /* write-on-change */
 };
 
 } /* namespace jaguar2 */

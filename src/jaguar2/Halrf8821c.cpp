@@ -847,6 +847,114 @@ void Halrf8821c::iqk_trigger(bool band2g) {
                 _iqk_fail_report[RX_IQK], _rxiqk_fail_code);
 }
 
+/* ===== Thermal TX-power tracking =================================
+ * 1T1R (path A only). Vendor MIX_MODE port — tables from reference/8821cu/hal/
+ * phydm/halrf/rtl8821c/halhwimg8821c_rf.c (delta_swingidx_mp_*_txpwrtrk_8821c,
+ * D_S_SIZE=30); tx_scaling_table_jaguar shared with the 8822B (37 entries). The
+ * 8821C writes the coarse TXAGC swing to 0xc94[6:1] (6-bit) vs the 8822B's
+ * [29:25], and has no path B. */
+namespace {
+constexpr int D_S = 30;
+
+const uint32_t tx_scaling_table_jaguar[37] = {
+    0x081, 0x088, 0x090, 0x099, 0x0A2, 0x0AC, 0x0B6, 0x0C0, 0x0CC, 0x0D8,
+    0x0E5, 0x0F2, 0x101, 0x110, 0x120, 0x131, 0x143, 0x156, 0x16A, 0x180,
+    0x197, 0x1AF, 0x1C8, 0x1E3, 0x200, 0x21E, 0x23E, 0x261, 0x285, 0x2AB,
+    0x2D3, 0x2FE, 0x32B, 0x35C, 0x38E, 0x3C4, 0x3FE};
+
+const uint8_t k2ga_p[D_S] = {0, 1, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5,
+                             5, 5, 5, 6, 6, 6, 7, 7, 7, 8, 8, 9, 9, 9, 9};
+const uint8_t k2ga_n[D_S] = {0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 4,
+                             4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 7, 7, 8, 8, 9};
+const uint8_t k5ga_p[3][D_S] = {
+    {0, 1, 1, 2, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12},
+    {0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 5, 6, 7, 7, 8, 8, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12},
+    {0, 1, 1, 1, 2, 3, 3, 3, 4, 4, 4, 5, 6, 6, 7, 7, 8, 8, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12}};
+const uint8_t k5ga_n[3][D_S] = {
+    {0, 1, 1, 2, 3, 3, 3, 4, 4, 5, 5, 6, 6, 6, 7, 8, 8, 8, 9, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12},
+    {0, 1, 1, 1, 2, 3, 3, 4, 4, 5, 5, 5, 6, 6, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12, 12},
+    {0, 1, 2, 2, 3, 4, 4, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 9, 10, 10, 11, 11, 12, 12, 12, 12, 12, 12}};
+} /* namespace */
+
+void Halrf8821c::set_pwr_track_ctx(uint8_t baseline, uint8_t channel) {
+  _pt_baseline = baseline;
+  _pt_channel = channel;
+  for (auto &x : _pt_avg)
+    x = 0;
+  _pt_avg_idx = 0;
+  _pt_last_swing = 0x7fffffff;
+  _pt_default_ofdm = 24;
+  const uint32_t cur = bb_get(0xc1c, 0xFFE00000);
+  for (int i = 0; i < 37; i++)
+    if (tx_scaling_table_jaguar[i] == cur) {
+      _pt_default_ofdm = static_cast<uint8_t>(i);
+      break;
+    }
+  _logger->info("Jaguar2 8821C thermal-track: baseline={} ch={} default_ofdm={}",
+                baseline, channel, _pt_default_ofdm);
+}
+
+void Halrf8821c::pwr_track_write(int swing, int cur_ofdm_idx) {
+  const int tx_pwr_idx = cur_ofdm_idx < 0 ? 63 : (cur_ofdm_idx > 63 ? 63 : cur_ofdm_idx);
+  int headroom = 63 - tx_pwr_idx;
+  if (headroom > 0xF)
+    headroom = 0xF;
+  const int def = _pt_default_ofdm;
+  const int ub = def + 10;
+  int tx_agc_index, bb_swing_index;
+  if (swing >= 0 && swing <= headroom) {
+    tx_agc_index = swing;
+    bb_swing_index = def;
+  } else if (swing > headroom) {
+    tx_agc_index = headroom;
+    bb_swing_index = def + (swing - headroom);
+    if (bb_swing_index > ub)
+      bb_swing_index = ub;
+  } else {
+    tx_agc_index = 0;
+    bb_swing_index = def > -swing ? def + swing : 0;
+  }
+  if (bb_swing_index < 0)
+    bb_swing_index = 0;
+  if (bb_swing_index > 36)
+    bb_swing_index = 36;
+  bb_set(0xc94, 0x0000007E, static_cast<uint32_t>(tx_agc_index) & 0x3f); /* [6:1] */
+  bb_set(0xc1c, 0xFFE00000, tx_scaling_table_jaguar[bb_swing_index]);
+}
+
+void Halrf8821c::pwr_track(int current_ofdm_index) {
+  if (_pt_baseline == 0xff)
+    return;
+  const bool g2 = _pt_channel <= 14;
+  int sub = 0;
+  if (!g2)
+    sub = _pt_channel <= 64 ? 0 : (_pt_channel <= 144 ? 1 : 2);
+  const int cur = static_cast<int>((rf_get(0, 0x42) >> 10) & 0x3f);
+  _pt_avg[_pt_avg_idx] = cur;
+  _pt_avg_idx = (_pt_avg_idx + 1) & 3;
+  int sum = 0, cnt = 0;
+  for (int i = 0; i < 4; i++)
+    if (_pt_avg[i]) {
+      sum += _pt_avg[i];
+      cnt++;
+    }
+  if (!cnt)
+    return; /* meter not ready — no valid sample yet */
+  const int avg = sum / cnt;
+  int delta = avg > _pt_baseline ? avg - _pt_baseline : _pt_baseline - avg;
+  if (delta > D_S - 1)
+    delta = D_S - 1;
+  const uint8_t *up = g2 ? k2ga_p : k5ga_p[sub];
+  const uint8_t *dn = g2 ? k2ga_n : k5ga_n[sub];
+  const int swing = avg > _pt_baseline ? up[delta] : -static_cast<int>(dn[delta]);
+  if (swing == _pt_last_swing)
+    return;
+  _pt_last_swing = swing;
+  pwr_track_write(swing, current_ofdm_index);
+  _logger->info("Jaguar2 8821C thermal-track: avg={} d={} swing={}", avg, delta,
+                swing);
+}
+
 /* Calibration-factory hook, called by make_jaguar2_calibration() in
  * Halrf8822b.cpp when the ChipVariant is C8821C. */
 std::unique_ptr<Jaguar2Calibration>

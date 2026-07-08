@@ -62,9 +62,23 @@ public:
    * PCIe backend only; run once before the first power-on. */
   void pcie_phy_cfg();
 
+  /* halmac send_general_info_88xx: hand the booted firmware its PHY/RF
+   * identity — two 32-byte H2C packets on the H2C queue (qsel 0x13):
+   * GENERAL_INFO (FW TX-buffer page offset) + PHYDM_INFO (rfe_type / rf_type /
+   * cut / TX+RX antenna status / package type). The kernel driver sends this
+   * pair right after DLFW and again on every channel/BW switch; without it
+   * the FW's dynamic engine never arms (usbmon-verified as the only H2C
+   * traffic the working 8822B kernel driver produces — the FW-side RXBB
+   * narrowband retune depends on it). Requires init_mac_cfg (H2C queue) to
+   * have run. */
+  bool send_fw_general_info(uint8_t rfe_type, bool r2t2r, uint8_t cut_ver,
+                            uint8_t package_type);
+
 private:
   bool priority_queue_cfg();
   void init_h2c();
+  /* One 32-byte halmac H2C packet -> H2C queue (48-byte txdesc, qsel 0x13). */
+  bool send_h2c_pkt(const uint8_t pkt[32]);
   void init_protocol_cfg();
   void init_edca_cfg();
   void init_wmac_cfg();
@@ -74,6 +88,7 @@ private:
   ChipVariant _variant;
   uint16_t _rsvd_boundary = 0;
   bool _set_bcn_boundary = true;
+  uint8_t _h2c_seq = 0; /* halmac h2c_info.seq_num */
 };
 
 } /* namespace jaguar2 */

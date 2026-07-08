@@ -615,6 +615,22 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x412);
   }
 
+  /* config_phydm_switch_band_8822b RxHP-with-SoML block (SoML is enabled at
+   * config_trx_mode): 5G SoML-on -> 0x8cc=0x08108000, 0x8d8[27]=0,
+   * 0xc04/0xe04[21|18]=0. 2.4G SoML-on with rfe_type 3/5/8/17 keeps the
+   * 0x08108492 defaults (vendor branch), other RFEs take the same values as
+   * 5G. Kernel-parity state read back from the working driver at ch44. */
+  _device.phy_set_bb_reg(0x0c04, (1u << 21) | (1u << 18), 0x0);
+  _device.phy_set_bb_reg(0x0e04, (1u << 21) | (1u << 18), 0x0);
+  if (!g2 || !(rfe_type == 3 || rfe_type == 5 || rfe_type == 8 ||
+               rfe_type == 17)) {
+    _device.phy_set_bb_reg(0x08cc, 0xffffffff, 0x08108000);
+    _device.phy_set_bb_reg(0x08d8, (1u << 27), 0x0);
+  } else {
+    _device.phy_set_bb_reg(0x08cc, 0xffffffff, 0x08108492);
+    _device.phy_set_bb_reg(0x08d8, (1u << 27), 0x1);
+  }
+
   /* RF 0xBE[17:15] per-channel phase-noise / VCO-band setting (shared with
    * fast_retune). Omitting it (writing 0 on 5G) leaves the 5G VCO mis-tuned so
    * 5G RX/TX fail entirely — this was the sole gap blocking 5G. Path A only
@@ -664,21 +680,27 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
      * incl. its masks keeping the ADC/DAC fields from the previous BW set).
      *
      * EXPERIMENTAL on the 8822B (caps report narrowband_ok=false): with this
-     * recipe the chip syncs only ~10% of NB frames on RX and airs no valid NB
-     * TX, while the OpenHD kernel module on the same dongle does full-rate NB
-     * with the SAME firmware blob and the same page-8 BB state (hardware
-     * A/B'd via reference/rtl88x2bu/88x2bu_ohd.ko + write_reg bisect). A
-     * usbmon capture of the kernel's 20->10 MHz switch plus the following
-     * 5 s shows NO H2C and NO host RF write beyond RF18 — yet the kernel's
-     * RF 0x82/0xf2 (RXBB) converge to NB values within ~3 s (0x44 -> 0x50 ->
-     * 0x52), i.e. the on-chip FIRMWARE retunes the RX front-end for small-BW
-     * autonomously — and it does so under the kernel but not under devourer,
-     * whose FW never receives the interface-up H2C state (media status /
-     * macid / RA) that arms the FW dynamic engine. Forcing the converged RF
-     * values statically does NOT recover RX (hardware-tested), so the FW's
-     * runtime assist — not the final register values — is the operative
-     * delta. The 8821C variant has no such dependence and is fully
-     * validated. */
+     * recipe the chip syncs only ~0.5% of NB frames on RX (~10/12 s vs the
+     * control's thousands) and airs no valid NB TX, while the OpenHD kernel
+     * module on the same dongle does full-rate NB with the SAME firmware
+     * blob. Hypotheses ELIMINATED by hardware A/B against
+     * reference/rtl88x2bu/88x2bu_ohd.ko (write_reg bisect + patched rebuild):
+     *  - every readable register: the kernel keeps full-rate NB RX with
+     *    devourer's ENTIRE differing MAC+BB state (116-register flip) and
+     *    with devourer's RF filter values; conversely forcing the kernel's
+     *    RF/BB/MAC values (incl. its NB-converged RF 0x82/0xf2 RXBB state)
+     *    on devourer does not recover RX;
+     *  - firmware arming: removing the kernel's only H2C traffic (the
+     *    GENERAL_INFO+PHYDM_INFO pair, patched out of the module) leaves its
+     *    NB fully working;
+     *  - devourer's optional init stages (IQK / TRX-reassert / DIG / RFE),
+     *    SoML, MAC-clock ticks, IGI: all tested, none move the needle.
+     * The causal delta is therefore UNREADABLE state — BB/RF gain LUTs
+     * written through write-only ports during table apply, or sequencing
+     * latches. Next experiment: golden-init replay (usbmon-capture the
+     * kernel's full post-DLFW write sequence and replay it verbatim from
+     * devourer, then bisect the sequence). The 8821C variant has no such
+     * dependence and is fully validated. */
     const bool is5 = (bw == 5);
     v8ac &= is5 ? 0xEFEEFE00 : 0xEFFEFF00;
     v8ac |= is5 ? (1u << 6) : (1u << 7);
@@ -1051,6 +1073,13 @@ void HalJaguar2::config_trx_mode() {
     _device.phy_set_bb_reg(0x0940, 0xf0, 0x1);
     _device.phy_set_bb_reg(0x0940, 0xff00, 0x0);
   }
+
+  /* phydm_somlrxhp_setting(true) — SoML (adaptive ML detection) ON, the
+   * kernel's steady state on the 8822B (0x19a8 = 0xd90a0000; devourer
+   * previously left the table default 0 = SoML off, a state the vendor only
+   * uses for specific RFE types). The band-specific RxHP companion values
+   * (0x8cc/0x8d8) are set in set_channel_bw's band block. */
+  _device.phy_set_bb_reg(0x19a8, 0xffffffff, 0xd90a0000);
 
   /* --- phydm_config_rx_path_8822b(AB) --- */
   _device.phy_set_bb_reg(0x0a2c, (1u << 22), 0x0); /* disable MRC CCK CCA */

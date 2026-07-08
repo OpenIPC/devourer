@@ -104,6 +104,20 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   if (_cfg.tuning.rfe_type)
     rfe = *_cfg.tuning.rfe_type;
   _rfe = rfe; /* cache for SetMonitorChannel retune */
+
+  /* Arm the FW dynamic engine: halmac send_general_info (GENERAL_INFO +
+   * PHYDM_INFO H2C pair) — the only H2C traffic the kernel driver produces
+   * (usbmon-verified), sent right after DLFW. Without it the 8822B FW never
+   * runs its bandwidth-keyed RXBB assist and narrowband RX/TX is dead.
+   * package_type is FW-reported via the mac-hidden C2H in the kernel flow
+   * (7 on the bench 8822BU); devourer doesn't parse that C2H yet — 7 for the
+   * 8822B, 0 (unknown) for the 8821C. */
+  {
+    const bool r2t2r = _hal.chip_version().rf_2t2r != 0;
+    const uint8_t pkg = _variant == jaguar2::ChipVariant::C8822B ? 7 : 0;
+    _macinit.send_fw_general_info(rfe, r2t2r, _hal.chip_version().cut, pkg);
+  }
+
   _hal.apply_bb_rf_agc_tables(rfe);
   _logger->info("RtlJaguar2Device: PHY tables applied");
 

@@ -1,8 +1,11 @@
 #include "HalmacJaguar2MacInit.h"
 
 #include <chrono>
+#include <cstring>
 #include <thread>
 #include <utility>
+
+#include "FrameParserJaguar2.h" /* H2C-queue txdesc macros + checksum */
 
 /* These names are also #define macros in the Realtek hal_com_reg.h pulled in via
  * RtlAdapter.h; #undef them so the scoped constexpr below compile (this .cpp
@@ -421,6 +424,87 @@ bool HalmacJaguar2MacInit::priority_queue_cfg() {
   return true;
 }
 
+bool HalmacJaguar2MacInit::send_h2c_pkt(const uint8_t pkt[32]) {
+  /* PLTFM_SEND_H2C_PKT (rtl8822bu_halmac.c): 48-byte txdesc with TXPKTSIZE=32
+   * + QSEL 0x13 (H2C queue), checksum, no OFFSET field — byte-verified against
+   * a usbmon capture of the kernel driver's GENERAL_INFO packet (desc
+   * 0x00000020 / 0x00001300 / ... / checksum 0x1320). */
+  uint8_t frame[TXDESC_SIZE_8822B + 32] = {0};
+  SET_TX_DESC_TXPKTSIZE_8822B(frame, 32);
+  SET_TX_DESC_QSEL_8822B(frame, 0x13);
+  cal_txdesc_chksum_8822b(frame);
+  std::memcpy(frame + TXDESC_SIZE_8822B, pkt, 32);
+  const int got = _device.bulk_send_sync_ep(
+      _device.first_bulk_out_ep(), frame, static_cast<int>(sizeof(frame)),
+      1000);
+  return got == static_cast<int>(sizeof(frame));
+}
+
+bool HalmacJaguar2MacInit::send_fw_general_info(uint8_t rfe_type, bool r2t2r,
+                                                uint8_t cut_ver,
+                                                uint8_t package_type) {
+  /* halmac h2c-pkt wire header (set_h2c_pkt_hdr_88xx, byte-verified via
+   * usbmon): {0x01, CMD_ID_FW_OFFLOAD=0xff, sub_cmd, 0, total_len, 0,
+   * seq_lo, seq_hi}; content from offset 8. */
+  const FifoParams fp = fifo_params(_variant, _device.is_usb());
+  const uint16_t tx_fifo_pg_num = fp.tx_fifo_size >> TX_PAGE_SHIFT;
+  const uint16_t rsvd_pg_num =
+      RSVD_PG_DRV_NUM + RSVD_PG_H2C_EXTRAINFO_NUM + RSVD_PG_H2C_STATICINFO_NUM +
+      RSVD_PG_H2CQ_NUM + RSVD_PG_CPU_INSTRUCTION_NUM + RSVD_PG_FW_TXBUF_NUM +
+      fp.rsvd_csibuf_num;
+  const uint16_t rsvd_boundary =
+      static_cast<uint16_t>(tx_fifo_pg_num - rsvd_pg_num);
+  const uint16_t fw_txbuf_addr = static_cast<uint16_t>(
+      tx_fifo_pg_num - fp.rsvd_csibuf_num - RSVD_PG_FW_TXBUF_NUM);
+
+  /* GENERAL_INFO (0x0d): FW TX-buffer page offset above the rsvd boundary
+   * (proc_send_general_info_88xx: rsvd_fw_txbuf_addr - rsvd_boundary). */
+  uint8_t gen[32] = {0};
+  gen[0] = 0x01;
+  gen[1] = 0xff;
+  gen[2] = 0x0d; /* SUB_CMD_ID_GENERAL_INFO */
+  gen[4] = 8 + 4;
+  gen[6] = _h2c_seq++;
+  gen[10] = static_cast<uint8_t>(fw_txbuf_addr - rsvd_boundary);
+  if (!send_h2c_pkt(gen)) {
+    _logger->error("Jaguar2: GENERAL_INFO H2C send failed");
+    return false;
+  }
+
+  /* PHYDM_INFO (0x11): rfe / rf-type (halmac enum: 2T2R=2, 1T1R=4) / cut /
+   * per-nibble RX|TX antenna masks / ext_pa / package type / mp_mode. */
+  uint8_t phy[32] = {0};
+  phy[0] = 0x01;
+  phy[1] = 0xff;
+  phy[2] = 0x11; /* SUB_CMD_ID_PHYDM_INFO */
+  phy[4] = 8 + 8;
+  phy[6] = _h2c_seq++;
+  phy[8] = rfe_type;
+  phy[9] = r2t2r ? 0x02 : 0x04;
+  phy[10] = cut_ver;
+  phy[11] = r2t2r ? 0x33 : 0x11; /* rx_ant | tx_ant<<4 */
+  phy[12] = 0x00; /* ext_pa */
+  phy[13] = package_type;
+  phy[14] = 0x00; /* mp_mode */
+  if (!send_h2c_pkt(phy)) {
+    _logger->error("Jaguar2: PHYDM_INFO H2C send failed");
+    return false;
+  }
+  /* FW-consumption check: the MAC advances H2C_HEAD as packets enter the
+   * queue and the FW advances H2C_READ_ADDR as it consumes them — equal
+   * pointers mean the FW has read everything (get_h2c_buf_free_space_88xx
+   * semantics). */
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  const uint32_t head = _device.rtw_read32(REG_H2C_HEAD) & 0x3ffff;
+  const uint32_t rd = _device.rtw_read32(REG_H2C_READ_ADDR) & 0x3ffff;
+  _logger->info("Jaguar2: FW general/phydm info H2C sent (rfe={} rf={} cut={} "
+                "pkg={} fw_txbuf_off={} h2cq head=0x{:x} read=0x{:x}{})",
+                rfe_type, r2t2r ? "2T2R" : "1T1R", cut_ver, package_type,
+                fw_txbuf_addr - rsvd_boundary, head, rd,
+                head == rd ? " CONSUMED" : " PENDING");
+  return true;
+}
+
 void HalmacJaguar2MacInit::init_h2c() {
   const FifoParams fp = fifo_params(_variant, _device.is_usb());
   const uint16_t tx_fifo_pg_num = fp.tx_fifo_size >> TX_PAGE_SHIFT;
@@ -453,6 +537,17 @@ bool HalmacJaguar2MacInit::init_mac_cfg(ChannelWidth_t bw) {
   (void)bw;
   if (!init_trx_cfg(/*set_bcn_boundary=*/true))
     return false;
+  /* halmac cfg_mac_clk_88xx (run by every kernel cfg_bw): MAC clock select
+   * 80 MHz (REG_AFE_CTRL1 0x24[21:20]=0) + the TSF/EDCA microsecond-tick
+   * dividers (0x55c/0x638 = 80). The chip reset defaults are WRONG for the
+   * running clock (0x55c=0x64, 0x638=0x28 read back on the 8822BU): with the
+   * µs ticks desynced 1.25-2x, ordinary 20 MHz frames survive but the 2-4x
+   * longer-in-air 5/10 MHz narrowband frames hit mistimed MAC RX limits
+   * (kernel-parity register diff; the working kernel runs 0x50/0x50). */
+  _device.rtw_write32(0x0024,
+                      _device.rtw_read32(0x0024) & ~((1u << 20) | (1u << 21)));
+  _device.rtw_write8(0x055c, 80);
+  _device.rtw_write8(0x0638, 80);
   init_protocol_cfg();
   init_edca_cfg();
   init_wmac_cfg();

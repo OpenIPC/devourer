@@ -1913,6 +1913,16 @@ void RadioManagementModule::phy_PostSetBwMode8812() {
      *    5 MHz -> DAC 1, ADC 0   (TX lobe 4.1 MHz)
      * The DAC code sets the emitted lobe width, the ADC code sets receive
      * sensitivity. Overridable via DEVOURER_NB_ADC / DEVOURER_NB_DAC. */
+    /* 8812 die only — the 8821A's clock tree starves TX when the DAC clock
+     * is divided (see RtlJaguarDevice::GetAdapterCaps). Fall back to a plain
+     * 20 MHz baseband there rather than wedge the TX path. */
+    if (_eepromManager->version_id.ICType != CHIP_8812) {
+      _logger->warn("narrowband not supported on this Jaguar1 die — "
+                    "applying 20 MHz baseband");
+      _device.phy_set_bb_reg(rRFMOD_Jaguar, 0x003003C3, 0x00300200);
+      _device.phy_set_bb_reg(rADC_Buf_Clk_Jaguar, BIT30, 0);
+      break;
+    }
     const bool is5 = (_currentChannelBw == CHANNEL_WIDTH_5);
     uint32_t adc = is5 ? 0u : 1u;
     uint32_t dac = is5 ? 1u : 2u;

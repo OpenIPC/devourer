@@ -249,6 +249,9 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
       ret.back().RxAtrib.evm[1] = driver_data.rxevm[1];
       ret.back().RxAtrib.evm[2] = driver_data.rxevm_cd[0];
       ret.back().RxAtrib.evm[3] = driver_data.rxevm_cd[1];
+      /* Path-A CFO tail — the closed-loop CFO tracker input (#217). 8812
+       * 11AC phy-status carries it as a named field (DW2 byte1). */
+      ret.back().RxAtrib.cfo_tail = driver_data.cfotail[0];
     } else {
       /* pkt_rpt_type == TX_REPORT1-CCX, TX_REPORT2-TX RTP,HIS_REPORT-USB HISR
        * RTP, C2H_PACKET */

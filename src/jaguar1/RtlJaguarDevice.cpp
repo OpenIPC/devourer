@@ -730,7 +730,55 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   int rx_urbs = _cfg.rx.urbs.value_or(8);
   if (rx_urbs < 1)
     rx_urbs = 1;
-  auto on_data = [this](const uint8_t *data, int n) {
+
+  /* Closed-loop CFO tracking on the receiver (#217): tick the controller on a
+   * ~2 s cadence from the RX loop, mirroring Jaguar2/3. The crystal-cap field
+   * (0x2C, per-die position — see SetXtalCap) is written READ-FREE from a base
+   * cached before the RX flood: a control-transfer read races the async
+   * bulk-IN and throws under load. */
+  uint32_t r2c_base = 0, r2c_mask = 0x7FF80000;
+  int r2c_shift = 19;
+  bool cfo_ok = false;
+  if (_cfg.tuning.cfo_track) {
+    switch (_eepromManager->version_id.ICType) {
+    case CHIP_8814A: r2c_mask = 0x07FF8000; r2c_shift = 15; break;
+    case CHIP_8821:  r2c_mask = 0x00FFF000; r2c_shift = 12; break;
+    default:         r2c_mask = 0x7FF80000; r2c_shift = 19; break;
+    }
+    try {
+      r2c_base = _device.rtw_read<uint32_t>(0x002C) & ~r2c_mask;
+      cfo_ok = true;
+    } catch (...) {
+      _logger->info("Jaguar1 cfo.track: AFE base read failed — disabled");
+    }
+  }
+  auto cfo_next = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  auto cfo_tick = [&]() {
+    if (!cfo_ok || std::chrono::steady_clock::now() < cfo_next)
+      return;
+    cfo_next += std::chrono::seconds(2);
+    double avg_khz = 0;
+    const int cur = _xtal_cap < 0 ? (_eepromManager->crystal_cap & 0x3F)
+                                  : _xtal_cap;
+    const int nc = _cfo.step(cur, 0x3f, &avg_khz); /* 6-bit on Jaguar1 */
+    DVR_DEBUG(_logger, "Jaguar1 cfo.track tick: cfo~{} (raw*2.5) cap=0x{:02x} {}",
+              static_cast<int>(avg_khz), cur,
+              nc >= 0 ? "step" : "hold");
+    if (nc >= 0) {
+      try {
+        const uint32_t c = static_cast<uint32_t>(nc);
+        const uint32_t field = (c | (c << 6)) << r2c_shift;
+        _device.rtw_write<uint32_t>(0x002C, r2c_base | (field & r2c_mask));
+        _xtal_cap = nc;
+        _logger->info("Jaguar1 cfo.track: cfo~{} (raw*2.5) xtal_cap=0x{:02x}",
+                      static_cast<int>(avg_khz), _xtal_cap);
+      } catch (...) {
+      }
+    }
+  };
+
+  auto on_data = [&](const uint8_t *data, int n) {
+    cfo_tick();
     FrameParser fp{_logger};
     for (auto &p : fp.recvbuf2recvframe(
              std::span<uint8_t>{const_cast<uint8_t *>(data), (size_t)n})) {
@@ -739,6 +787,8 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
       if (!p.RxAtrib.crc_err) {
         _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
         _rxpaths.add(p.RxAtrib.rssi, _eepromManager->numTotalRfPath);
+        if (_cfg.tuning.cfo_track)
+          _cfo.add(p.RxAtrib.cfo_tail); /* closed-loop CFO input (#217) */
       }
       _packetProcessor(p);
     }

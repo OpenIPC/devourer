@@ -406,6 +406,8 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
     double avg_khz = 0;
     const int cur = _xtal_cap < 0 ? 0x20 : _xtal_cap;
     const int nc = _cfo.step(cur, 0x3f, &avg_khz); /* 6-bit on Jaguar2 */
+    DVR_DEBUG(_logger, "Jaguar2 cfo.track tick: cfo~{} (raw*2.5) cap=0x{:02x} {}",
+              static_cast<int>(avg_khz), cur, nc >= 0 ? "step" : "hold");
     if (nc >= 0) {
       try {
         const uint32_t c = static_cast<uint32_t>(nc);

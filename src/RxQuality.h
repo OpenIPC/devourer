@@ -203,6 +203,114 @@ inline RxQuality build_rx_quality(const RxQualitySnapshot &s, const RxEnergy &e,
   return q;
 }
 
+/* --- Live per-chain RX-path activity (the companion to the static AdapterCaps
+ * chain count) ---
+ *
+ * AdapterCaps.rx_chains says how many chains the silicon HAS; this says how many
+ * currently look CONNECTED, inferred from the per-frame per-chain RSSI the frame
+ * parser fills (RxAtrib.rssi[0..3]). It's the one antenna question that can't be
+ * answered statically: a chain with a disconnected/blocked antenna (or one a
+ * caller software-masked via SetRxPathMask) still exists, but its RSSI collapses
+ * to the noise floor. Best-effort: only meaningful with an RX loop running and
+ * ambient traffic; a strong near-field frame can briefly light a dead chain via
+ * coupling, so treat single-window results as a hint, not a verdict. */
+struct ActiveRxPaths {
+  bool valid = false;    /* false when no frames were sampled in the window */
+  uint32_t frames = 0;
+  uint8_t n_chains = 0;  /* chains considered (the adapter's rx_chains) */
+  uint8_t n_active = 0;  /* chains classified active */
+  uint8_t active_mask = 0;      /* bit i set = chain i active */
+  int rssi_mean_dbm[4] = {0, 0, 0, 0}; /* per-chain window mean (raw - 110) */
+  bool chain_sampled[4] = {false, false, false, false}; /* had any sample */
+};
+
+/* Classify which of `n_chains` are active: a chain is active if it was sampled
+ * and its mean RSSI is within `margin_db` of the strongest sampled chain. Pure;
+ * unit-tested in tests/adapter_caps_selftest.cpp. `rssi_mean_dbm` and
+ * `sampled` are the per-chain window aggregates; fills `active_mask` and returns
+ * the active count. A single strong chain → mask 0x1; two balanced → 0x3; a
+ * chain pinned at the noise floor is excluded. */
+inline uint8_t classify_active_paths(const int *rssi_mean_dbm,
+                                     const bool *sampled, uint8_t n_chains,
+                                     int margin_db, uint8_t *active_mask) {
+  int strongest = -1000;
+  for (uint8_t i = 0; i < n_chains && i < 4; i++)
+    if (sampled[i] && rssi_mean_dbm[i] > strongest)
+      strongest = rssi_mean_dbm[i];
+  uint8_t mask = 0, count = 0;
+  if (strongest > -1000) {
+    for (uint8_t i = 0; i < n_chains && i < 4; i++) {
+      if (sampled[i] && (strongest - rssi_mean_dbm[i]) <= margin_db) {
+        mask |= static_cast<uint8_t>(1u << i);
+        ++count;
+      }
+    }
+  }
+  if (active_mask)
+    *active_mask = mask;
+  return count;
+}
+
+/* Thread-safe per-chain RSSI accumulator — the ActiveRxPaths analogue of
+ * RxQualityAccumulator. The device feeds add() the full rssi[0..3] tuple for
+ * every decoded frame; snapshot() drains the window (delta semantics) and
+ * classifies. `margin_db` default 20 dB: a chain more than 20 dB below the
+ * strongest is a disconnected/masked antenna, not thermal spread across
+ * connected chains. */
+class RxPathActivityAccumulator {
+public:
+  /* Feed the per-chain RSSI (raw devourer units) of one decoded frame; only the
+   * first `n_chains` are considered. A chain reading <= 0 (no phy-status power)
+   * is not a sample for that chain. */
+  void add(const uint8_t *rssi_raw, uint8_t n_chains) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (n_chains > 4)
+      n_chains = 4;
+    n_chains_ = n_chains;
+    bool any = false;
+    for (uint8_t i = 0; i < n_chains; i++) {
+      if (rssi_raw[i] == 0)
+        continue;
+      sum_[i] += rssi_raw[i];
+      ++cnt_[i];
+      any = true;
+    }
+    if (any)
+      ++frames_;
+  }
+
+  ActiveRxPaths snapshot(int margin_db = 20) {
+    ActiveRxPaths s;
+    std::lock_guard<std::mutex> lk(mu_);
+    s.frames = frames_;
+    s.n_chains = n_chains_;
+    s.valid = frames_ > 0;
+    for (uint8_t i = 0; i < n_chains_ && i < 4; i++) {
+      if (cnt_[i]) {
+        s.rssi_mean_dbm[i] =
+            static_cast<int>(sum_[i] / cnt_[i]) - 110;
+        s.chain_sampled[i] = true;
+      }
+    }
+    s.n_active = classify_active_paths(s.rssi_mean_dbm, s.chain_sampled,
+                                       s.n_chains, margin_db, &s.active_mask);
+    /* reset (delta semantics) */
+    frames_ = 0;
+    for (uint8_t i = 0; i < 4; i++) {
+      sum_[i] = 0;
+      cnt_[i] = 0;
+    }
+    return s;
+  }
+
+private:
+  std::mutex mu_;
+  uint32_t frames_ = 0;
+  uint8_t n_chains_ = 0;
+  uint64_t sum_[4] = {0, 0, 0, 0};
+  uint32_t cnt_[4] = {0, 0, 0, 0};
+};
+
 } // namespace devourer
 
 #endif /* DEVOURER_RX_QUALITY_H */

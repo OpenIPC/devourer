@@ -12,6 +12,7 @@
 #include <libusb.h>
 
 #include "BfReportDetect.h"
+#include "caps_event.h"
 #include "LinkHealth.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
@@ -564,6 +565,7 @@ int main() {
     devourer::Ev(*g_ev, "init.timing")
         .f("stage", "demo.create_device")
         .f("ms", ms_since_start());
+    devourer::emit_adapter_caps(*g_ev, dev.get());
     int pch = 36;
     if (const char *ch_env = std::getenv("DEVOURER_CHANNEL"))
       pch = std::atoi(ch_env);
@@ -722,6 +724,7 @@ int main() {
   devourer::Ev(*g_ev, "init.timing")
       .f("stage", "demo.create_device")
       .f("ms", ms_since_start());
+  devourer::emit_adapter_caps(*g_ev, rtlDevice.get());
   /* The BB-debug-port / queue-depth / thermal research helpers are Jaguar1-only,
    * so they live on RtlJaguarDevice rather than the IRtlDevice interface. The
    * whole block compiles out when Jaguar1 support isn't built; when it is, the
@@ -915,6 +918,20 @@ int main() {
           else
             ev.f("noise_floor_dbm", nullptr);
           ev.f("igi", q.igi_valid ? q.igi : -1);
+
+          /* Live per-chain RX-path activity (GetActiveRxPaths) — which
+           * antennas actually carry signal, vs the static rx_chains the caps
+           * report. Rides the same dogfood knob + cadence; only meaningful on
+           * a >=2-chain part with ambient traffic. */
+          devourer::ActiveRxPaths ap = dev->GetActiveRxPaths();
+          if (ap.valid) {
+            devourer::Ev pev(*g_ev, "adapter.rxpaths");
+            pev.hexf("active_mask", ap.active_mask, 2)
+                .f("n_active", ap.n_active)
+                .f("n_chains", ap.n_chains)
+                .f("frames", ap.frames)
+                .arr("rssi_dbm", ap.rssi_mean_dbm, ap.n_chains);
+          }
         }
         nap(g_rx_energy_ms);
       }

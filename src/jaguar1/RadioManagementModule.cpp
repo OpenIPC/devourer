@@ -1459,6 +1459,20 @@ void RadioManagementModule::Set_HW_VAR_ENABLE_RX_BAR(bool val) {
 }
 
 void RadioManagementModule::phy_SwChnl8812() {
+  /* Extended-synth channels (below-band 15..35 / above 177, freq =
+   * 5000 + 5*ch up to ch 253): the RF tunes them, but the power tables and
+   * per-channel constants are clamped from the nearest characterized
+   * channel. Warn once so an unexpected retune there is visible. */
+  if (!_warned_uncharacterized &&
+      ((_currentChannel >= 15 && _currentChannel <= 35) ||
+       _currentChannel > 177)) {
+    _warned_uncharacterized = true;
+    _logger->warn("channel {} is outside the characterized range — TX power "
+                  "and per-channel constants extrapolated from the nearest "
+                  "table entry",
+                  _currentChannel);
+  }
+
   /* 8814 has its own channel-set: different fc_area boundaries, RF_MOD_AG
    * channel ranges, a 5G AGC-table sub-select at 0x958[4:0], 2.4G CCK
    * TX DFIR writes, and the combined channel+mod RF write pattern. The
@@ -1609,9 +1623,11 @@ void RadioManagementModule::phy_SwChnl8814A() {
     _logger->error("error Chnl {} !", channelToSW);
   }
 
-  /* fc_area — 8814A boundaries. */
+  /* fc_area — 8814A boundaries. Below-band ch 15..35 rides the low 5G bucket
+   * (extended-synth clamp, matching the 8812 path); >177 is already covered by
+   * the open-ended 118<= case. */
   uint32_t fc_area;
-  if (36 <= channelToSW && channelToSW <= 48) {
+  if (15 <= channelToSW && channelToSW <= 48) {
     fc_area = 0x494;
   } else if (50 <= channelToSW && channelToSW <= 64) {
     fc_area = 0x453;
@@ -1626,9 +1642,9 @@ void RadioManagementModule::phy_SwChnl8814A() {
 
   for (uint8_t eRFPath = 0; eRFPath < _eepromManager->numTotalRfPath;
        ++eRFPath) {
-    /* RF_MOD_AG — 8814A boundaries. */
+    /* RF_MOD_AG — 8814A boundaries. ch 15..35 -> low band (extended-synth). */
     uint32_t rf_val;
-    if (36 <= channelToSW && channelToSW <= 64) {
+    if (15 <= channelToSW && channelToSW <= 64) {
       rf_val = 0x101;
     } else if (100 <= channelToSW && channelToSW <= 140) {
       rf_val = 0x301;
@@ -1648,8 +1664,9 @@ void RadioManagementModule::phy_SwChnl8814A() {
                    combined);
   }
 
-  /* 5G AGC table sub-select (rAGC_table_Jaguar2 = 0x958, 8814-only). */
-  if (36 <= channelToSW && channelToSW <= 64) {
+  /* 5G AGC table sub-select (rAGC_table_Jaguar2 = 0x958, 8814-only).
+   * ch 15..35 -> low-band table (extended-synth clamp). */
+  if (15 <= channelToSW && channelToSW <= 64) {
     _device.phy_set_bb_reg(0x958, 0x1F, 1);
   } else if (100 <= channelToSW && channelToSW <= 144) {
     _device.phy_set_bb_reg(0x958, 0x1F, 2);

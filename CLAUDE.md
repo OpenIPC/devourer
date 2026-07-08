@@ -158,6 +158,21 @@ grammar), passed as `CreateRtlDevice`'s defaulted fourth argument. Mid-session
 knobs are runtime setters on `IRtlDevice` (`SetTxMode`, `SetTxPowerOffsetQdb`,
 `SetTxPowerIndexOverride`, `SetRxPathMask`, `SetCcaMode`, `FastRetune`, ...).
 
+**Adapter capabilities**: `IRtlDevice::GetAdapterCaps()` (`src/AdapterCaps.h`)
+returns a static aggregate of chip identity (name / generation / variant /
+transport / chip-id), TX/RX chain counts, the composed `GetTxCaps` +
+`GetTxPowerCaps`, the supported channel-width set, per-band tunable +
+characterized frequency spans, and feature flags (per-packet TX power,
+narrowband, fast retune, per-chain RSSI) — resolved at construction, thread-safe,
+callable pre-`Init`. The demos emit it as the `adapter.caps` JSONL event.
+`GetActiveRxPaths()` is the live companion: a best-effort per-chain-RSSI estimate
+of which antennas actually carry signal (needs an RX loop + traffic). The 5 GHz
+synthesizer tunes past the UNII channels (extended range ~5080–6165 MHz, chan up
+to 253, `freq = 5000 + 5*chan`); out-of-band channels tune but their TX power /
+per-channel constants are extrapolated from the nearest characterized channel
+(one-shot `W` diagnostic). No regulatory enforcement — the caller owns
+compliance.
+
 **Env vars are the demos' interface**: `examples/common/env_config.{h,cpp}`
 maps every library-level `DEVOURER_*` var onto `DeviceConfig`, so the test
 scripts drive everything through env. For the per-var reference, read the

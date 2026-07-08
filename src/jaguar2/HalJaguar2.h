@@ -257,6 +257,7 @@ private:
   int _last_rf_be = -1;
   int _last_df18 = -1;   /* 8822B ch144 RF 0xdf[18] state */
   int _last_cck_key = -1; /* 2G spur (8822B) / CCK-filter (8821C) key: ch14? */
+  bool _warned_uncharacterized = false; /* one-shot extended-channel warning */
 
   /* --- 8821C-specific (C8821C variant) channel/RF-set/LCK, transcribed from
    * reference/8821cu phydm_hal_api8821c.c + halrf_8821c.c. The 8822B channel-set

@@ -398,7 +398,7 @@ static uint8_t classify_channel(uint8_t ch, uint8_t *group, uint8_t *cck_group) 
    * (core/rtw_rf.c). NB the gp3/gp4 split is at 98/100 (not 80/82) and the
    * top group runs to 253: channels 82..98 belong to gp3, not gp4. */
   int gp = -1;
-  if      (16  <= ch && ch <=  42) gp = 0;
+  if      (15  <= ch && ch <=  42) gp = 0; /* 15: below-band edge (kCenterCh5gAll[0]) */
   else if (44  <= ch && ch <=  48) gp = 1;
   else if (50  <= ch && ch <=  58) gp = 2;
   else if (60  <= ch && ch <=  98) gp = 3;
@@ -838,16 +838,25 @@ uint8_t EepromManager::GetTxPowerIndexBase(uint8_t path, uint8_t rate,
       return 0;
     ch_idx = static_cast<uint8_t>(channel - 1);
   } else {
-    bool found = false;
+    /* Nearest-entry fallback for channels the table doesn't list (odd-grid or
+     * extended-synth channels >177): returning 0 here would silently program
+     * a near-zero TX power index. The table is sorted, so track the closest
+     * entry — an exact hit still wins. Power on a non-listed channel is
+     * extrapolated, not characterized. */
+    uint8_t best = 0;
+    int best_d = 0x7fffffff;
     for (uint8_t i = 0; i < kCenterCh5gAllNum; i++) {
-      if (kCenterCh5gAll[i] == channel) {
-        ch_idx = i;
-        found = true;
-        break;
+      const int d = (kCenterCh5gAll[i] > channel)
+                        ? kCenterCh5gAll[i] - channel
+                        : channel - kCenterCh5gAll[i];
+      if (d < best_d) {
+        best_d = d;
+        best = i;
       }
+      if (d == 0)
+        break;
     }
-    if (!found)
-      return 0;
+    ch_idx = best;
   }
 
   int txPower = 0;

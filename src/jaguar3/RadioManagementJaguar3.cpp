@@ -48,6 +48,20 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
    * fast-path writes (the J1 RadioManagementModule pattern). */
   invalidate_fast_caches();
 
+  /* Extended-synth channels (below-band 15..35 / above 177, freq =
+   * 5000 + 5*ch up to ch 253): the RF tunes them, but the power tables,
+   * calibration bands and per-channel constants are clamped from the nearest
+   * characterized channel. Warn once so an unexpected retune there is
+   * visible. */
+  if (!_warned_uncharacterized &&
+      ((channel >= 15 && channel <= 35) || channel > 177)) {
+    _warned_uncharacterized = true;
+    _logger->warn("channel {} is outside the characterized range — TX power "
+                  "and per-channel constants extrapolated from the nearest "
+                  "table entry",
+                  channel);
+  }
+
   _last_channel = channel;
 
   /* --- bandwidth block (config_phydm_switch_bandwidth_8822c CH_20 / CH_40).
@@ -306,15 +320,18 @@ uint32_t RadioManagementJaguar3::rf18_for(uint8_t central,
 
 /* SCO tracking f_c value (phydm_sco_trk_fc_setting_8822c), keyed on central. */
 uint32_t RadioManagementJaguar3::sco_for(uint8_t central) {
-  if (central >= 36 && central <= 51) return 0x494;
-  if (central >= 52 && central <= 55) return 0x493;
-  if (central >= 56 && central <= 111) return 0x453;
-  if (central >= 112 && central <= 119) return 0x452;
-  if (central >= 120 && central <= 172) return 0x412;
-  if (central >= 173) return 0x411;
-  if (central >= 1 && central <= 10) return 0x9aa;
+  /* 2.4 GHz first so the 5 GHz test can carry an open lower bound. */
+  if (central <= 10) return 0x9aa;
   if (central == 11 || central == 12) return 0x96a;
-  return 0x969; /* 13/14 */
+  if (central <= 14) return 0x969; /* 13/14 */
+  /* 5 GHz. Below-band ch 15..35 rides the low bucket (extended-synth clamp);
+   * the upper bound is already open. */
+  if (central <= 51) return 0x494;
+  if (central <= 55) return 0x493;
+  if (central <= 111) return 0x453;
+  if (central <= 119) return 0x452;
+  if (central <= 172) return 0x412;
+  return 0x411;
 }
 
 /* Per-band RX AGC-table selection. 8822C: phydm_cck/ofdm_agc_tab_sel_8822c —

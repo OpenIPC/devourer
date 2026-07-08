@@ -185,8 +185,10 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
           jaguar3::parse_phy_sts_jgr3(data + off + jaguar3::RXDESC_SIZE_8822C,
                                       f.drvinfo_size, p.RxAtrib);
         p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
-        if (!p.RxAtrib.crc_err)
+        if (!p.RxAtrib.crc_err) {
           _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
+          _rxpaths.add(p.RxAtrib.rssi, 2); /* 8822C/8822E are 2T2R */
+        }
         /* TX-BF apply gate (DEVOURER_BF_TXBF): a VHT Compressed Beamforming
          * Report (category 0x15, action 0x00) from the target peer (addr2) means
          * the WMAC just ingested a fresh V matrix — enable the apply toggle so
@@ -885,6 +887,35 @@ bool RtlJaguar3Device::ReApplyTxPower() {
 
 devourer::TxCaps RtlJaguar3Device::GetTxCaps() {
   return devourer::tx_caps_for_chains(2); /* 8822C/8822E are 2T2R */
+}
+
+devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
+  devourer::AdapterCaps c;
+  c.supported = true;
+  c.generation = devourer::ChipGeneration::Jaguar3;
+  c.transport = _device.is_usb() ? "usb" : "pcie";
+  c.tx = GetTxCaps();
+  c.txpwr = GetTxPowerCaps();
+  c.tx_chains = 2; /* 8822C/8822E are 2T2R */
+  c.rx_chains = 2;
+  c.per_chain_rssi = true;
+  c.bw_mask = devourer::bw_mask_for_generation(c.generation);
+  c.fastretune_ok = true;
+  c.narrowband_ok = true; /* 5/10 MHz baseband re-clock — Jaguar3 only */
+  devourer::set_standard_freq_ranges(c);
+
+  if (_variant == jaguar3::ChipVariant::C8822E) {
+    c.chip_name = "RTL8822E";
+    c.marketing_names = "RTL8812EU/RTL8822EU";
+    c.chip_id = 0x17;
+    c.variant = "C8822E";
+  } else {
+    c.chip_name = "RTL8822C";
+    c.marketing_names = "RTL8812CU/RTL8822CU";
+    c.chip_id = 0x13;
+    c.variant = "C8822C";
+  }
+  return c;
 }
 
 devourer::EfuseStability RtlJaguar3Device::ProbeEfuseStability(int reads) {

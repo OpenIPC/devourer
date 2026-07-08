@@ -70,6 +70,7 @@ class RadioManagementModule {
   Logger_t _logger;
   HwPort _hwPort = HwPort::HW_PORT0;
   bool _needIQK = false;
+  bool _warned_uncharacterized = false; /* one-shot extended-channel warning */
   ChannelWidth_t _currentChannelBw;
   uint8_t _currentChannel;
   BandType current_band_type;

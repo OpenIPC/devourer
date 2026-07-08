@@ -728,8 +728,10 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
              std::span<uint8_t>{const_cast<uint8_t *>(data), (size_t)n})) {
       if (should_stop || g_devourer_should_stop)
         break;
-      if (!p.RxAtrib.crc_err)
+      if (!p.RxAtrib.crc_err) {
         _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
+        _rxpaths.add(p.RxAtrib.rssi, _eepromManager->numTotalRfPath);
+      }
       _packetProcessor(p);
     }
   };
@@ -852,6 +854,52 @@ devourer::TxCaps RtlJaguarDevice::GetTxCaps() {
    * the 8811AU/8821AU 1T1R cuts, 2 on 8812AU, 4 on 8814AU). All Jaguar-1 AC
    * parts do LDPC/SGI and VHT80. */
   return devourer::tx_caps_for_chains(_eepromManager->numTotalRfPath);
+}
+
+devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
+  devourer::AdapterCaps c;
+  c.supported = true;
+  c.generation = devourer::ChipGeneration::Jaguar1;
+  c.transport = _device.is_usb() ? "usb" : "pcie";
+  c.tx = GetTxCaps();
+  c.txpwr = GetTxPowerCaps();
+  const uint8_t chains = _eepromManager->numTotalRfPath;
+  c.tx_chains = chains;
+  c.rx_chains = chains;
+  c.per_chain_rssi = chains >= 2;
+  c.bw_mask = devourer::bw_mask_for_generation(c.generation);
+  c.fastretune_ok = true; /* phy_SwChnl8812_fast (8812/8821) + full-path fallback */
+  devourer::set_standard_freq_ranges(c);
+
+  /* Identity from the EFUSE version-id. The die name is refined by the RF-type:
+   * the 8812 die shipped as both the 2T2R 8812AU and the 1T1R 8811AU cut. */
+  switch (_eepromManager->version_id.ICType) {
+  case CHIP_8814A:
+    c.chip_name = "RTL8814A";
+    c.marketing_names = "RTL8814AU";
+    c.chip_id = 0x08;
+    c.variant = "8814A";
+    break;
+  case CHIP_8821:
+    c.chip_name = "RTL8821A";
+    c.marketing_names = "RTL8821AU";
+    c.chip_id = 0x05;
+    c.variant = "8821A";
+    break;
+  default: /* CHIP_8812 */
+    if (_eepromManager->version_id.RFType == RF_TYPE_1T1R) {
+      c.chip_name = "RTL8811A";
+      c.marketing_names = "RTL8811AU/RTL8811AR";
+      c.variant = "8811A";
+    } else {
+      c.chip_name = "RTL8812A";
+      c.marketing_names = "RTL8812AU/RTL8812AR";
+      c.variant = "8812A";
+    }
+    c.chip_id = 0x04;
+    break;
+  }
+  return c;
 }
 
 devourer::TxPowerState RtlJaguarDevice::GetTxPowerState() {

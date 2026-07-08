@@ -121,6 +121,13 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   _hal.apply_bb_rf_agc_tables(rfe);
   _logger->info("RtlJaguar2Device: PHY tables applied");
 
+  /* halrf kfree init: read the PPG efuse trims and apply the PA-bias RF LUT
+   * correction (write-only LUT state — the 0x3f sequence visible in the
+   * kernel's golden init). Vendor order: right after the table apply and
+   * BEFORE config_trx_mode — the mode-table window writes there (RF 0xef
+   * toggles) alias the RF 0x51/0x52 reads the PA-bias word is recomposed
+   * from. */
+  _hal.kfree_init();
   _hal.config_trx_mode(); /* RF mode table + TX/RX antenna-path HW blocks */
   _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel), bw, rfe,
                       channel.ChannelOffset);

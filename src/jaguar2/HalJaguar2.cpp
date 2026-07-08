@@ -514,6 +514,123 @@ void HalJaguar2::igi_toggle() {
   _device.phy_set_bb_reg(0x0e50, 0x7f, igi);
 }
 
+void HalJaguar2::kfree_init() {
+  /* halrf_kfree.c port (8822B): phydm_get_power_trim_offset_8822b +
+   * phydm_get_pa_bias_offset_8822b. All reads are PHYSICAL efuse bytes (the
+   * PPG region above the logical map). */
+  if (_variant == ChipVariant::C8821C)
+    return; /* 8821C kfree variant not ported yet */
+  auto rd = [this](uint16_t a) -> uint8_t {
+    uint8_t d = 0xFF;
+    return _device.efuse_OneByteRead(a, &d) ? d : 0xFF;
+  };
+
+  /* Power trim (per-band-group TX gain): 2G at 0x3EE (A low nibble / B high),
+   * 5G groups at 0x3EC..0x3DB per path. 0xFF = unprogrammed. */
+  const uint8_t pg2 = rd(0x3EE);
+  if (pg2 != 0xFF) {
+    _kfree_bb_gain[0][0] = pg2 & 0xF;
+    _kfree_bb_gain[0][1] = (pg2 & 0xF0) >> 4;
+    _kfree_2g = true;
+  }
+  const uint8_t g5l1a = rd(0x3EC);
+  if (g5l1a != 0xFF) {
+    static const uint16_t offs_a[5] = {0x3EC, 0x3E8, 0x3E4, 0x3E0, 0x3DC};
+    static const uint16_t offs_b[5] = {0x3EB, 0x3E7, 0x3E3, 0x3DF, 0x3DB};
+    for (int g = 0; g < 5; g++) {
+      _kfree_bb_gain[1 + g][0] = rd(offs_a[g]);
+      _kfree_bb_gain[1 + g][1] = rd(offs_b[g]);
+    }
+    _kfree_5g = true;
+  }
+  _logger->info("Jaguar2 kfree: power trim 2g={} 5g={} (0x3EE={:#04x})",
+                _kfree_2g, _kfree_5g, pg2);
+
+  /* PA bias (phydm_get_pa_bias_offset_8822b + set_pa_bias_to_rf): efuse
+   * 0x3D5 (path A) / 0x3D6 (path B), sign-magnitude nibble, folded into the
+   * RF 0x3f PA-bias word recomposed from RF 0x51/0x52 and written into RF
+   * LUT entries 0/1/3 through the 0xef[10] window — WRITE-ONLY state (this
+   * block is the 0x3f=0x4bb sequence in the kernel's usbmon golden init). */
+  const uint8_t pgba = rd(0x3D5);
+  if (pgba == 0xFF)
+    return;
+  for (uint8_t path = 0; path < (_ver.rf_2t2r ? 2u : 1u); path++) {
+    uint8_t pg = rd(path == 0 ? 0x3D5 : 0x3D6) & 0xF;
+    int8_t bias = (pg & 1) ? static_cast<int8_t>(pg >> 1)
+                           : static_cast<int8_t>(-(pg >> 1));
+    /* Close any LUT window the table apply left open — with 0xef nonzero the
+     * 0x51/0x52 reads alias LUT content, not the PA config (read back wrong
+     * as 0x1211 instead of the true 0x4bb until this was added). */
+    rf_write(path, 0xef, 0x00000);
+    const uint32_t r51 = rf_read(path, 0x51);
+    const uint32_t r52 = rf_read(path, 0x52);
+    uint32_t r3f = ((r52 & 0xe0000) >> 17) | (((r52 & 0x18000) >> 15) << 3) |
+                   ((r52 & 0xf) << 5) | (((r51 & 0x78) >> 3) << 9) |
+                   (((r52 & 0x2000) >> 13) << 13);
+    int pa = static_cast<int8_t>((r3f & 0x1e00) >> 9) + bias;
+    if (pa < 0)
+      pa = 0;
+    else if (pa > 7)
+      pa = 7;
+    r3f = (r3f & 0xfe1ff) | (static_cast<uint32_t>(pa) << 9);
+    rf_set(path, 0xef, (1u << 10), 0x1);
+    rf_write(path, 0x33, 0x0);
+    rf_write(path, 0x3f, r3f);
+    rf_set(path, 0x33, (1u << 0), 0x1);
+    rf_write(path, 0x3f, r3f);
+    rf_set(path, 0x33, (1u << 1), 0x1);
+    rf_write(path, 0x3f, r3f);
+    rf_set(path, 0x33, 0x3, 0x3);
+    rf_write(path, 0x3f, r3f);
+    rf_set(path, 0xef, (1u << 10), 0x0);
+    _logger->info("Jaguar2 kfree: PA bias path {} = {} (r51={:#07x} "
+                  "r52={:#07x} rf3f={:#07x})",
+                  path, bias, r51, r52, r3f);
+  }
+}
+
+void HalJaguar2::kfree_apply(uint8_t channel) {
+  /* phydm_config_kfree / phydm_do_kfree (8822B): per-channel-group TX gain
+   * trim via RF 0xde/0x65/0x55; clear-to-default when the efuse carries no
+   * trim for the band. */
+  if (_variant == ChipVariant::C8821C)
+    return;
+  const bool g2 = channel <= 14;
+  int idx = -1;
+  if (g2 && _kfree_2g) {
+    idx = 0;
+  } else if (!g2 && _kfree_5g) {
+    if (channel >= 36 && channel <= 48)
+      idx = 1;
+    else if (channel >= 52 && channel <= 64)
+      idx = 2;
+    else if (channel >= 100 && channel <= 120)
+      idx = 3;
+    else if (channel >= 122 && channel <= 144)
+      idx = 4;
+    else if (channel >= 149)
+      idx = 5;
+  }
+  for (uint8_t path = 0; path < (_ver.rf_2t2r ? 2u : 1u); path++) {
+    const uint8_t data = idx >= 0 ? _kfree_bb_gain[idx][path] : 0;
+    /* set (phydm_set_kfree_to_rf_8822b) — the clear variant appends the
+     * de-select tail. */
+    rf_set(path, 0xde, (1u << 0), 1);
+    rf_set(path, 0xde, (1u << 4), 1);
+    rf_set(path, 0x65, 0xffff, 0x9000);
+    rf_set(path, 0x55, (1u << 5), 1);
+    rf_set(path, 0x55, (1u << 19), data & 1);
+    rf_set(path, 0x55, 0x7c000, (data & 0x1f) >> 1);
+    if (idx < 0) { /* phydm_clear_kfree_to_rf_8822b tail */
+      rf_set(path, 0xde, (1u << 0), 0);
+      rf_set(path, 0xde, (1u << 4), 1);
+      rf_set(path, 0x65, 0xffff, 0x9000);
+      rf_set(path, 0x55, (1u << 5), 0);
+      rf_set(path, 0x55, (1u << 7), 0);
+    }
+  }
+}
+
 void HalJaguar2::bb_reset() {
   /* MAC 0x0 BIT16 (SYS_FUNC_EN FEN_BBRSTB) 0->1 — the _iqk_bb_reset_8822b /
    * _8821c mechanism; relatches the BB DAC/DFE clock tree. */
@@ -776,8 +893,12 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _device.phy_set_bb_reg(0x0c20, (1u << 31), 0x1);
   _device.phy_set_bb_reg(0x0e20, (1u << 31), 0x1);
 
-  /* --- phydm_ccapar_by_rfe_8822b (CCA thresholds; rfe_type 0 => iFEM C-cut) ---
-   * col: 2G/5G x 1R/2R. reg82c/830/838 from cca_ifem_ccut. */
+  /* --- phydm_ccapar_by_rfe_8822b (CCA thresholds) --- col: 2G/5G x 1R/2R.
+   * RFE types 3/5/12/15/16/17/19 (external-FEM boards, incl. the T3U's
+   * rfe_type 3) take the cca_ifem_ccut_rfe table — devourer previously
+   * hardcoded the plain iFEM C-cut column for every board, leaving eFEM
+   * boards with mis-set carrier-sense thresholds (kernel-parity write-
+   * sequence diff). */
   {
     const int col = g2 ? (r2t2r ? 1 : 0) : (r2t2r ? 3 : 2);
     static const uint32_t cca_ifem[3][4] = {
@@ -785,9 +906,21 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
         {0x79a0eaaa, 0x79A0EAAC, 0x79a0eaaa, 0x79a0eaaa}, /* 0x830 */
         {0x87765541, 0x87746341, 0x87765541, 0x87746341}, /* 0x838 */
     };
-    _device.phy_set_bb_reg(0x082c, 0xffffffff, cca_ifem[0][col]);
-    _device.phy_set_bb_reg(0x0830, 0xffffffff, cca_ifem[1][col]);
-    _device.phy_set_bb_reg(0x0838, 0xffffffff, cca_ifem[2][col]);
+    static const uint32_t cca_ifem_rfe[3][4] = {
+        {0x75da8010, 0x75da8010, 0x75da8010, 0x75da8010}, /* 0x82c */
+        {0x79a0eaaa, 0x97A0EAAC, 0x79a0eaaa, 0x79a0eaaa}, /* 0x830 */
+        {0x87765541, 0x86666341, 0x87765561, 0x86666361}, /* 0x838 */
+    };
+    const bool rfe_tab = rfe_type == 3 || rfe_type == 5 || rfe_type == 12 ||
+                         rfe_type == 15 || rfe_type == 16 || rfe_type == 17 ||
+                         rfe_type == 19;
+    const auto &cca = rfe_tab ? cca_ifem_rfe : cca_ifem;
+    _device.phy_set_bb_reg(0x082c, 0xffffffff, cca[0][col]);
+    _device.phy_set_bb_reg(0x0830, 0xffffffff, cca[1][col]);
+    _device.phy_set_bb_reg(0x0838, 0xffffffff, cca[2][col]);
+    /* 20 MHz DFS-channel CCA adjust (vendor tail). */
+    if (bw == 0 && !g2 && ((cch >= 52 && cch <= 64) || (cch >= 100 && cch <= 144)))
+      _device.phy_set_bb_reg(0x0838, 0xf0, 0x5);
   }
 
   /* RX-path toggle (0x808 MASKBYTE0) to leave RX dead-zone, then IGI. rx_ant
@@ -803,6 +936,11 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
    * the re-clock doesn't take. */
   if (bw == 5 || bw == 6)
     bb_reset();
+
+  /* phydm_config_kfree — per-channel-group efuse TX gain trim, applied by the
+   * vendor after every channel/BW set. Group-keyed, so FastRetune (intra-band
+   * hop) rides the last full set's trim. */
+  kfree_apply(channel);
 
   _last_tuned_ch = channel;
   _logger->info("Jaguar2: channel set ch={} bw={} (rf18=0x{:05x})", channel,

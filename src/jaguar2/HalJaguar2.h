@@ -124,6 +124,16 @@ public:
   void set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
                       uint8_t primary_ch_idx = 0);
 
+  /* halrf kfree (efuse power/PA-bias trim), 8822B port. kfree_init reads the
+   * PPG physical-efuse bytes (2G/5G per-band-group TX gain trims
+   * 0x3DB..0x3EE, 2G PA bias 0x3D5/0x3D6) and applies the PA-bias RF LUT
+   * correction (RF 0x51/0x52 -> 0x3f via the 0xef[10] window, entries 0/1/3
+   * — write-only LUT state a readable-register diff can never see).
+   * kfree_apply programs the per-channel-group TX gain trim (RF 0xde/0x65/
+   * 0x55), phydm_config_kfree parity; run by every full channel set. */
+  void kfree_init();
+  void kfree_apply(uint8_t channel);
+
   /* Lean intra-band, same-bandwidth hop retune — the Jaguar2 FastRetune core
    * (see docs/frequency-hopping.md), variant-dispatched like set_channel_bw.
    * Only the per-hop essentials run: one cached full-register RF18 write per
@@ -245,6 +255,7 @@ private:
    * mechanism) — relatches the BB clock tree; required after the 5/10 MHz
    * ADC/DAC re-clock (as on Jaguar3). */
   void bb_reset();
+
   /* Central channel of the wide channel (shared full/fast paths): 20 MHz ->
    * primary; 40 MHz -> ±2 by primary_ch_idx; 80 MHz -> +6/+2/-2/-6. */
   static uint8_t central_ch(uint8_t channel, uint8_t bw, uint8_t primary_ch_idx);
@@ -271,6 +282,11 @@ private:
   int _last_df18 = -1;   /* 8822B ch144 RF 0xdf[18] state */
   int _last_cck_key = -1; /* 2G spur (8822B) / CCK-filter (8821C) key: ch14? */
   bool _warned_uncharacterized = false; /* one-shot extended-channel warning */
+
+  /* kfree (efuse power-trim) state — see kfree_init/kfree_apply. bb_gain rows:
+   * 0=2G, 1..5 = 5G L1/L2/M1/M2/H per the PHYDM_5G* channel groups. */
+  uint8_t _kfree_bb_gain[6][2] = {};
+  bool _kfree_2g = false, _kfree_5g = false;
 
   /* --- 8821C-specific (C8821C variant) channel/RF-set/LCK, transcribed from
    * reference/8821cu phydm_hal_api8821c.c + halrf_8821c.c. The 8822B channel-set

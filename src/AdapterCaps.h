@@ -114,6 +114,9 @@ struct AdapterCaps {
   /* --- feature flags --- */
   bool per_packet_txpower = false; /* Jaguar2 descriptor TXPWR_OFSET LUT only */
   bool narrowband_ok = false;      /* 5/10 MHz re-clock (Jaguar2/Jaguar3) */
+  uint8_t xtal_cap_max = 0;        /* crystal-cap trim range top (0 = no trim;
+                                    * 0x3f on Jaguar1/2, 0x7f on Jaguar3) */
+  uint8_t xtal_cap_default = 0;    /* efuse/default crystal-cap code */
   bool fastretune_ok = false;      /* lean FastRetune override exists */
   bool per_chain_rssi = false;     /* frame parser fills per-chain rssi (>=2ch) */
 };

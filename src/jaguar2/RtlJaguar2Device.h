@@ -82,6 +82,8 @@ public:
   int SetTxPowerOffsetQdb(int qdb) override;
   void SetTxPowerIndexOverride(int idx) override;
   bool ReApplyTxPower() override;
+  int SetXtalCap(int cap) override;
+  int GetXtalCap() override { return _xtal_cap; }
   devourer::TxPowerState GetTxPowerState() override;
   devourer::ThermalStatus GetThermalStatus() override;
   /* Per-chip TX caps (IRtlDevice): the 8821C is 1T1R (no STBC), the 8822B
@@ -158,6 +160,7 @@ private:
   devourer::RxPathActivityAccumulator _rxpaths;
   Logger_t _logger;
   jaguar2::ChipVariant _variant;
+  int _xtal_cap = -1; /* current crystal-cap code (SetXtalCap) */
   jaguar2::HalJaguar2 _hal;
   jaguar2::HalmacJaguar2MacInit _macinit;
   jaguar2::HalmacJaguar2Fw _fw;

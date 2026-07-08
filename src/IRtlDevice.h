@@ -119,6 +119,23 @@ public:
    * any knob. Returns false when unsupported or the chip isn't brought up. */
   virtual bool ReApplyTxPower() { return false; }
 
+  /* Crystal (XTAL) load-capacitance trim — the CFO lever. Writes the AFE
+   * crystal-cap field (a per-chip register), pulling the chip's reference
+   * oscillator a few ppm to align a marginal TX/RX crystal pair; the payoff
+   * is narrowband at the edge of its CFO budget (5 MHz at 5 GHz). `cap` is a
+   * raw trim code in [0, GetAdapterCaps().xtal_cap_max]; cap < 0 reverts to
+   * the efuse/default value. Both physical caps (Xi/Xo) are set together.
+   * Returns the applied code, or -1 when unsupported. Sticky across channel
+   * changes (an AFE register, untouched by the RF retune). */
+  virtual int SetXtalCap(int cap) {
+    (void)cap;
+    return -1;
+  }
+
+  /* Current crystal-cap code (the last SetXtalCap value, or the efuse default
+   * at bring-up). -1 when unsupported. */
+  virtual int GetXtalCap() { return -1; }
+
   /* Snapshot of the knob state + representative effective indices (register
    * readback where the family's TXAGC block is readable). */
   virtual devourer::TxPowerState GetTxPowerState() { return {}; }

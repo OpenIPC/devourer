@@ -149,8 +149,22 @@ chip-specific traps. The ones this port paid for, current-state:
    pair is therefore **bimodal per bring-up** at 5 MHz/5 GHz — it syncs on one
    power-up and is deaf on the next — while a closer-crystal peer decodes the
    same transmitter and the same pair is stable at 2.4 GHz. This is physics, not
-   a driver bug; the durable fix is a crystal-cap trim lever (tracked
-   separately).
+   a driver bug. The lever is `IRtlDevice::SetXtalCap` (env `DEVOURER_XTAL_CAP`):
+   the AFE crystal load-capacitance trim pulls the chip's reference oscillator a
+   few ppm, so trimming one end of a marginal pair moves the offset off the sync
+   boundary. The trim range is per generation (`GetAdapterCaps().xtal_cap_max`:
+   0x3f on Jaguar1/2, 0x7f on Jaguar3); the efuse default is `xtal_cap_default`.
+   Bench-measured authority (SDR, CW tone, live-stepped on one warmed chip —
+   `tests/xtal_cfo_sweep.sh sdr`): ~51 Hz/code at 5.2 GHz, a smooth monotonic
+   pull, ~0.6 ppm over the mid-range and ~1.25 ppm across the full range —
+   enough to move a marginal pair (typically 1–2 ppm) off the boundary, and it
+   does not detune 20 MHz. Note the open-loop caveat: a crystal drifts ~3 ppm
+   during cold-start warm-up (this is *why* 5 MHz/5 GHz is bimodal per
+   power-up), which is larger and faster than the trim step, so a fixed trim is
+   a per-link qualification lever, not fire-and-forget. The production fix is a
+   closed loop that trims toward the RX-measured CFO continuously; the
+   live-step primitive it needs is in place (`DEVOURER_XTAL_STEP`), the control
+   loop is not wired yet.
 
 4. **The same die-family can encode the divider differently.** The 8814A's
    bandwidth register looked like a mode selector (`0x8ac[1:0]`) with no

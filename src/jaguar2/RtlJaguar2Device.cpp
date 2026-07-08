@@ -196,6 +196,11 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   }
   _brought_up = true;
 
+  /* DEVOURER_XTAL_CAP — apply the crystal-cap trim once the AFE is up
+   * (issue #217, the narrowband CFO lever). */
+  if (_cfg.tuning.xtal_cap)
+    SetXtalCap(*_cfg.tuning.xtal_cap);
+
   /* Thermal TX-power tracking: prime the calibration with the
    * efuse baseline + channel and start the ~2 s tick. Covers both Init (RX)
    * and InitWrite (TX-only). Disabled by knob or an unprogrammed efuse
@@ -684,6 +689,22 @@ void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
                       _rfe, _channel.ChannelOffset);
 }
 
+int RtlJaguar2Device::SetXtalCap(int cap) {
+  /* hal_set_crystal_cap (8822B/8821C): the 6-bit trim goes into 0x24[30:25]
+   * AND 0x28[6:1] (Xo and Xi legs). cap < 0 reverts to the efuse default
+   * (0xB9; 0x20 when unprogrammed). */
+  uint8_t def = _hal.efuse_logical_byte(0xB9);
+  if (def == 0xFF)
+    def = 0x20;
+  uint8_t c = cap < 0 ? def : static_cast<uint8_t>(cap & 0x3F);
+  _device.phy_set_bb_reg(0x0024, 0x7E000000, c);
+  _device.phy_set_bb_reg(0x0028, 0x0000007E, c);
+  _xtal_cap = c;
+  _logger->info("Jaguar2: crystal-cap set to 0x{:02x}{}", c,
+                cap < 0 ? " (efuse default)" : "");
+  return c;
+}
+
 RxEnergy RtlJaguar2Device::GetRxEnergy() {
   /* Scalar FA/CCA/IGI come from the DIG thread's cached snapshot (no USB);
    * append a fresh NHM power histogram (11AC register map). NHM's registers
@@ -806,6 +827,10 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
    * RF18 re-latch edge after the re-clock (see the set_channel_bw narrowband
    * branch). */
   c.narrowband_ok = true;
+  c.xtal_cap_max = 0x3f; /* 6-bit AFE crystal-cap trim (0x24/0x28) */
+  c.xtal_cap_default = _hal.efuse_logical_byte(0xB9) == 0xFF
+                           ? 0x20
+                           : (_hal.efuse_logical_byte(0xB9) & 0x3f);
   c.fastretune_ok = true;
   c.per_packet_txpower = true; /* TX descriptor TXPWR_OFSET LUT — Jaguar2 only */
   devourer::set_standard_freq_ranges(c);

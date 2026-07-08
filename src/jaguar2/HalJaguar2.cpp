@@ -339,6 +339,14 @@ void HalJaguar2::read_efuse_logical_map(uint8_t *map, uint16_t map_size,
   }
 }
 
+uint8_t HalJaguar2::efuse_logical_byte(uint16_t off) {
+  if (!_efuse_valid) {
+    read_efuse_logical_map(_efuse_map, sizeof(_efuse_map), /*dump=*/false);
+    _efuse_valid = true;
+  }
+  return off < sizeof(_efuse_map) ? _efuse_map[off] : 0xFF;
+}
+
 uint8_t HalJaguar2::read_efuse_rfe() {
   constexpr uint16_t kRfeOff = 0xCA; /* EEPROM_RFE_OPTION_8822B */
   read_efuse_logical_map(_efuse_map, sizeof(_efuse_map),

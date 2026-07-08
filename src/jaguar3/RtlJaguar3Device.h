@@ -83,6 +83,8 @@ public:
   int SetTxPowerOffsetQdb(int qdb) override;
   void SetTxPowerIndexOverride(int idx) override;
   bool ReApplyTxPower() override;
+  int SetXtalCap(int cap) override;
+  int GetXtalCap() override { return _xtal_cap; }
   devourer::TxPowerState GetTxPowerState() override;
   devourer::ThermalStatus GetThermalStatus() override;
   /* Per-chip TX caps (IRtlDevice): 8822C/8822E are 2T2R (STBC ok). */
@@ -165,6 +167,7 @@ private:
   const devourer::DeviceConfig _cfg;
   Logger_t _logger;
   jaguar3::ChipVariant _variant;
+  int _xtal_cap = -1; /* current crystal-cap code (SetXtalCap) */
   jaguar3::HalJaguar3 _hal;
   jaguar3::RadioManagementJaguar3 _radioManagement;
   SelectedChannel _channel{};

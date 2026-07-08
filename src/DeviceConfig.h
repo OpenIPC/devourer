@@ -172,6 +172,11 @@ struct DeviceConfig {
      * field — bits [1:0] -> 0x8ac[9:8], bit 2 -> 0x8ac[16] (divider-mapping
      * experiments only). */
     std::optional<uint8_t> nb_adc;
+    /* env: DEVOURER_XTAL_CAP — crystal-cap trim code applied at the end of
+     * bring-up (IRtlDevice::SetXtalCap). The CFO lever for narrowband at the
+     * edge of its budget; unset = efuse/default. Raw code, 0..0x3f (Jaguar1/2)
+     * or 0..0x7f (Jaguar3). */
+    std::optional<uint8_t> xtal_cap;
     /* env: DEVOURER_REGULATION — Jaguar1 regulatory domain override for the
      * TX-power limit tables (unset = efuse). */
     std::optional<Regulation> regulation;

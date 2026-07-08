@@ -64,6 +64,10 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
   SetMonitorChannel(channel);
   _logger->info("In Monitor Mode");
 
+  /* DEVOURER_XTAL_CAP — crystal-cap trim (issue #217, narrowband CFO lever). */
+  if (_cfg.tuning.xtal_cap)
+    SetXtalCap(*_cfg.tuning.xtal_cap);
+
   /* DEVOURER_BF_ARM_SOUNDER=1 — beamforming self-sounding probe (beamformer
    * side): arm the MAC's hardware sounding engine so a TX-descriptor-marked
    * NDPA (DEVOURER_TX_NDPA=1) is followed by a hardware-generated NDP. See
@@ -632,6 +636,10 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
   StartWithMonitorMode(channel);
   SetMonitorChannel(channel);
 
+  /* DEVOURER_XTAL_CAP — crystal-cap trim (issue #217, narrowband CFO lever). */
+  if (_cfg.tuning.xtal_cap)
+    SetXtalCap(*_cfg.tuning.xtal_cap);
+
   /* DEVOURER_BF_ARM_BFEE=aa:bb:cc:dd:ee:ff — beamforming self-sounding probe
    * (beamformee side): arm the hardware CSI responder so an NDPA+NDP from the
    * given beamformer MAC triggers a hardware-built VHT Compressed Beamforming
@@ -856,6 +864,27 @@ devourer::TxCaps RtlJaguarDevice::GetTxCaps() {
   return devourer::tx_caps_for_chains(_eepromManager->numTotalRfPath);
 }
 
+int RtlJaguarDevice::SetXtalCap(int cap) {
+  /* hal_set_crystal_cap (8812/8821/8814A): the 6-bit trim goes into REG
+   * MAC_PHY_CTRL (0x2C) as cap|(cap<<6), but the field position differs per
+   * die: 8812/8811 [30:19], 8814A [26:15], 8821A [23:12]. cap < 0 reverts to
+   * the efuse default (EepromManager::crystal_cap). */
+  const uint8_t c = cap < 0 ? (_eepromManager->crystal_cap & 0x3F)
+                            : static_cast<uint8_t>(cap & 0x3F);
+  const uint32_t val = static_cast<uint32_t>(c) | (static_cast<uint32_t>(c) << 6);
+  uint32_t mask;
+  switch (_eepromManager->version_id.ICType) {
+  case CHIP_8814A: mask = 0x07FF8000; break; /* 0x2C[26:21]=[20:15] */
+  case CHIP_8821:  mask = 0x00FFF000; break; /* 0x2C[23:18]=[17:12] */
+  default:         mask = 0x7FF80000; break; /* 8812/8811: 0x2C[30:25]=[24:19] */
+  }
+  _device.phy_set_bb_reg(0x002C, mask, val);
+  _xtal_cap = c;
+  _logger->info("Jaguar1: crystal-cap set to 0x{:02x}{}", c,
+                cap < 0 ? " (efuse default)" : "");
+  return c;
+}
+
 devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
   devourer::AdapterCaps c;
   c.supported = true;
@@ -885,6 +914,8 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
     c.narrowband_ok = true;
   }
   c.fastretune_ok = true; /* phy_SwChnl8812_fast (8812/8821) + full-path fallback */
+  c.xtal_cap_max = 0x3f; /* 6-bit AFE crystal-cap trim (0x2C) */
+  c.xtal_cap_default = _eepromManager->crystal_cap & 0x3f;
   devourer::set_standard_freq_ranges(c);
 
   /* Identity from the EFUSE version-id. The die name is refined by the RF-type:

@@ -52,6 +52,11 @@ public:
    * apply_tx_power. `dump`=true logs the raw physical bytes + a few key fields. */
   void read_efuse_logical_map(uint8_t *map, uint16_t map_size, bool dump);
 
+  /* One logical EFUSE byte from the cached map (lazy-reads the map on first
+   * use). 0xFF where unprogrammed / out of range. Used for the crystal-cap
+   * default (logical 0xB9). */
+  uint8_t efuse_logical_byte(uint16_t off);
+
   /* Program the per-rate TXAGC (0x1d00 path A / 0x1d80 path B) from the EFUSE
    * power-by-rate calibration for `channel` at bandwidth `bw` (0=20/1=40/2=80;
    * 5/6 = 5/10 MHz narrowband, folded to the 20 MHz column — the RF runs in

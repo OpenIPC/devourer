@@ -149,7 +149,8 @@ chip-specific traps. The ones this port paid for, current-state:
    pair is therefore **bimodal per bring-up** at 5 MHz/5 GHz — it syncs on one
    power-up and is deaf on the next — while a closer-crystal peer decodes the
    same transmitter and the same pair is stable at 2.4 GHz. This is physics, not
-   a driver bug. The lever is `IRtlDevice::SetXtalCap` (env `DEVOURER_XTAL_CAP`):
+   a driver bug — and it drifts, so a fixed trim is not enough (below). The
+   manual lever is `IRtlDevice::SetXtalCap` (env `DEVOURER_XTAL_CAP`):
    the AFE crystal load-capacitance trim pulls the chip's reference oscillator a
    few ppm, so trimming one end of a marginal pair moves the offset off the sync
    boundary. The trim range is per generation (`GetAdapterCaps().xtal_cap_max`:
@@ -161,10 +162,21 @@ chip-specific traps. The ones this port paid for, current-state:
    does not detune 20 MHz. Note the open-loop caveat: a crystal drifts ~3 ppm
    during cold-start warm-up (this is *why* 5 MHz/5 GHz is bimodal per
    power-up), which is larger and faster than the trim step, so a fixed trim is
-   a per-link qualification lever, not fire-and-forget. The production fix is a
-   closed loop that trims toward the RX-measured CFO continuously; the
-   live-step primitive it needs is in place (`DEVOURER_XTAL_STEP`), the control
-   loop is not wired yet.
+   a per-link qualification lever, not fire-and-forget. The production answer is
+   the **closed loop** (`DEVOURER_CFO_TRACK`, Jaguar3): the receiver reads the
+   per-frame CFO tail from the OFDM phy-status (DW5 `cfo_tail`), and a
+   bang-bang controller (`src/CfoTracker.h`, ported from phydm
+   `phydm_cfo_tracking`) steps the crystal cap on a ~2 s cadence to drive the
+   CFO toward its minimum, tracking the warm-up drift live. It auto-detects the
+   cap→LO polarity (which flips per silicon) and holds at the CFO-minimizing
+   cap; bench-verified to converge (measured CFO monotonically reduced as it
+   trims) while the link stays decoding. Caveats: the loop needs a
+   marginally-decoding link to bootstrap (no frames → no CFO error signal), it
+   runs on the receiver only, and where a pair's absolute offset exceeds the
+   ~1 ppm crystal-cap authority it converges to the rail (the best it can do)
+   rather than the deadband. The cfo_tail→kHz scale is the coarse vendor macro
+   (see `CfoTracker.h`) — the loop uses the CFO sign + deadband, not a
+   calibrated kHz.
 
 4. **The same die-family can encode the divider differently.** The 8814A's
    bandwidth register looked like a mode selector (`0x8ac[1:0]`) with no

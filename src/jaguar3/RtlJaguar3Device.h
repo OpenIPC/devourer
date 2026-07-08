@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "logger.h"
+#include "CfoTracker.h"
 #include "IRtlDevice.h"
 #include "TxMode.h"
 #include "RtlAdapter.h"
@@ -186,6 +187,7 @@ private:
   /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
   devourer::RxQualityAccumulator _rxq;
   devourer::RxPathActivityAccumulator _rxpaths;
+  devourer::CfoTracker _cfo; /* closed-loop CFO tracker (DEVOURER_CFO_TRACK) */
   /* Frame counter for periodic NDPA sounding (DEVOURER_TX_NDPA=N). */
   uint64_t _ndpa_ctr = 0;
   /* TX beamforming apply state (DEVOURER_BF_TXBF). The entry is configured at

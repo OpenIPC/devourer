@@ -59,6 +59,11 @@ struct rx_pkt_attrib
      * bytes — a link-quality metric, NOT a per-subcarrier or content signal.
      * Surfaced for the DEVOURER_DUMP_BODY Tier-2 health diagnostic. */
     int8_t evm[4];
+    /* Path-A CFO tail from the OFDM phy-status (signed HW units; kHz = raw *
+     * 2.5, phydm CFO_HW_RPT_2_KHZ). The carrier-frequency offset between this
+     * receiver's crystal and the transmitter's — the closed-loop CFO tracker's
+     * input (see IRtlDevice::SetXtalCap). 0 when the phy-status carries none. */
+    int8_t cfo_tail = 0;
     RX_PACKET_TYPE pkt_rpt_type;
 };
 

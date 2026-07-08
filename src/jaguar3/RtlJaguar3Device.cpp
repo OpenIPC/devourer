@@ -156,8 +156,52 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
 
   _logger->info("Jaguar3: entering RX loop (kernel-style async URB queue)");
   uint64_t frames = 0, reads = 0;
+  /* Closed-loop CFO tracking runs on the RECEIVER (#217): tick the controller
+   * on a ~2 s wall-clock cadence from within the RX loop, off the per-frame
+   * CFO fed below. (The coex thread's copy only runs on the TX path.) The
+   * crystal-cap register (0x1040) is written READ-FREE from a base cached
+   * before the RX flood — a control-transfer READ races the async bulk-IN and
+   * throws under load, so the tick composes the field onto the cached base and
+   * write32s it. */
+  uint32_t reg1040_base = 0;
+  bool reg1040_ok = false;
+  if (_cfg.tuning.cfo_track) {
+    try {
+      reg1040_base = _device.rtw_read<uint32_t>(0x1040) & ~0x00FFFC00u;
+      reg1040_ok = true;
+    } catch (...) {
+      _logger->info("Jaguar3 cfo.track: 0x1040 base read failed — disabled");
+    }
+  }
+  auto cfo_next = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  auto cfo_tick = [&]() {
+    if (!_cfg.tuning.cfo_track || !reg1040_ok)
+      return;
+    if (std::chrono::steady_clock::now() < cfo_next)
+      return;
+    cfo_next += std::chrono::seconds(2);
+    double avg_khz = 0;
+    const int cur = _xtal_cap < 0 ? 0x20 : _xtal_cap;
+    const int nc = _cfo.step(cur, 0x7f, &avg_khz);
+    if (nc >= 0) {
+      const uint32_t field = static_cast<uint32_t>(nc) |
+                             (static_cast<uint32_t>(nc) << 7); /* 14-bit */
+      try {
+        std::lock_guard<std::mutex> lk(_reg_mu);
+        _device.rtw_write<uint32_t>(0x1040,
+                                    reg1040_base | ((field << 10) & 0x00FFFC00u));
+        _xtal_cap = nc;
+      } catch (...) {
+        return;
+      }
+    }
+    if (nc >= 0) /* log only on an actual step, not every idle tick */
+      _logger->info("Jaguar3 cfo.track: cfo~{} (raw*2.5) xtal_cap=0x{:02x}",
+                    static_cast<int>(avg_khz), _xtal_cap);
+  };
   /* Process one bulk-IN completion: walk the aggregated 8822C RX descriptors. */
   auto on_data = [&](const uint8_t *data, int n) {
+    cfo_tick();
     if (++reads <= 8)
       _logger->info("Jaguar3 RX: async completion #{} -> {} bytes", reads, n);
     uint32_t off = 0;
@@ -192,6 +236,8 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         if (!p.RxAtrib.crc_err) {
           _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
           _rxpaths.add(p.RxAtrib.rssi, 2); /* 8822C/8822E are 2T2R */
+          if (_cfg.tuning.cfo_track)
+            _cfo.add(p.RxAtrib.cfo_tail); /* closed-loop CFO input (#217) */
         }
         /* TX-BF apply gate (DEVOURER_BF_TXBF): a VHT Compressed Beamforming
          * Report (category 0x15, action 0x00) from the target peer (addr2) means

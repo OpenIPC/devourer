@@ -228,10 +228,12 @@ inline void parse_phy_sts_jgr3(const uint8_t *physts, uint16_t physts_len,
   const uint8_t l_rxsc = physts[5] & 0x0f, ht_rxsc = (physts[5] >> 4) & 0x0f;
   const uint8_t rxsc = (a.data_rate >= 4 && a.data_rate <= 11) ? l_rxsc : ht_rxsc;
   a.bw = rxsc >= 13 ? 2 : rxsc >= 9 ? 1 : 0;
-  /* Per-stream EVM/SNR only exist on the type1 page (DW4 rxevm[4] at 16..19,
-   * DW6 rxsnr[4] at 24..27); other OFDM pages (2/3/4/5/6) reuse those offsets
-   * for other data, so leave evm/snr at 0 there. */
+  /* Per-stream EVM/SNR + per-path CFO tail only exist on the type1 page
+   * (phy_sts_rpt_jgr3_type1: DW4 rxevm[4] at 16..19, DW5 cfo_tail[4] at
+   * 20..23, DW6 rxsnr[4] at 24..27); other OFDM pages (2/3/4/5/6) reuse those
+   * offsets for other data, so leave them at 0 there. */
   if (page_num == 1) {
+    a.cfo_tail = static_cast<int8_t>(physts[20]); /* path-A CFO tail */
     for (int i = 0; i < 4; i++) {
       a.evm[i] = static_cast<int8_t>(physts[16 + i]);
       a.snr[i] = static_cast<int8_t>(physts[24 + i]);

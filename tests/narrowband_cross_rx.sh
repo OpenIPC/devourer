@@ -16,6 +16,14 @@
 # The 8821C TX at UNII needs a flat TXAGC (worldwide-min limit table clamps
 # it to 0): TX_PWR=0x2d is applied automatically for a c811 TX.
 #
+# 5 MHz at 5 GHz is CFO-limited: the quarter clock shrinks the subcarrier
+# spacing 4x, so a TX/RX crystal-offset pair near the sync tolerance is
+# BIMODAL per bring-up (measured: c812->c811 ch44 5M reads 9100 hits on one
+# bring-up and 0 on the next, while a closer-crystal peer catches 10200 from
+# the same TX; at 2.4 GHz — half the absolute offset — the same pair is
+# stable at 7000+). A 0 in the 5M cell at 5 GHz means "retry / try 2.4 GHz"
+# before it means "broken".
+#
 # Usage: sudo tests/narrowband_cross_rx.sh [TX_VID:PID] [RX_VID:PID] [DUR] [CH]
 set -u
 cd "$(dirname "$0")/.."
@@ -73,8 +81,12 @@ run_cell() {
   wait "$txpid" 2>/dev/null
   sleep 3
 
+  # rx.txhit events are throttled (first 10, then every 100th) — the true
+  # count is the `hits` field of the LAST event, not the event count.
   local hits
-  hits=$(grep -cF '"ev":"rx.txhit"' "$rxlog")
+  hits=$(grep '"ev":"rx.txhit"' "$rxlog" | tail -1 |
+         grep -oE '"hits":[0-9]+' | cut -d: -f2)
+  hits=${hits:-0}
   echo "$hits" >"$LOGDIR/$name.count"
   printf "  %-6s (%s MHz): %s hits\n" "$name" "${nb:-20}" "$hits"
 }

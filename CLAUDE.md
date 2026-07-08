@@ -23,7 +23,10 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
   register tables like Jaguar1 (shared `PhyTableLoader`). RX + TX on 2.4/5 GHz
   at 20/40/80 MHz, plus **5/10 MHz narrowband on the 8821C variant** (a
   baseband ADC/DAC re-clock packed into BB `0x8ac`; the RF stays in 20 MHz
-  mode; applied as an end-of-bring-up retune, kernel-flow parity). The 8822B
+  mode; applied as an end-of-bring-up retune, kernel-flow parity). 5 MHz at
+  5 GHz is CFO-limited: subcarrier spacing shrinks 4× and a far-offset
+  TX/RX crystal pair syncs bimodally per bring-up — at 2.4 GHz the same
+  pair is stable (`tests/narrowband_cross_rx.sh` header). The 8822B
   carries the same NB register recipe but is gated off (`narrowband_ok=false`):
   its NB RX syncs ~10% and NB TX airs nothing, while the OpenHD kernel module
   does full-rate NB on the same dongle with the same firmware — the kernel's

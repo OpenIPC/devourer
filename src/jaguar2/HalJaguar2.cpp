@@ -668,10 +668,12 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
      * TX, while the OpenHD kernel module on the same dongle does full-rate NB
      * with the SAME firmware blob and the same page-8 BB state (hardware
      * A/B'd via reference/rtl88x2bu/88x2bu_ohd.ko + write_reg bisect). The
-     * kernel's NB switch additionally retunes the RF RXBB LPF (RF 0x82/0xf2
-     * move with bandwidth with no driver register write — a runtime FW
-     * interaction devourer does not yet reproduce). The 8821C variant has no
-     * such gap and is fully validated. */
+     * kernel additionally converges RF 0x82/0xf2 (RXBB) to NB values within
+     * ~3 s of the switch via a dynamic loop devourer doesn't run — but
+     * forcing those converged values statically does NOT recover devourer's
+     * RX (hardware-tested), so the operative delta is the dynamic mechanism
+     * itself or something still unobserved (FW H2C interplay, per-frame AGC).
+     * The 8821C variant has no such gap and is fully validated. */
     const bool is5 = (bw == 5);
     v8ac &= is5 ? 0xEFEEFE00 : 0xEFFEFF00;
     v8ac |= is5 ? (1u << 6) : (1u << 7);

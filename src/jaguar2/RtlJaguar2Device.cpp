@@ -300,6 +300,38 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
     }
   }
 
+  if (!_cfg.debug.replay_wseq.empty()) {
+    /* Golden-init replay: apply a captured register write sequence verbatim
+     * (e.g. the kernel driver's post-DLFW init from a usbmon capture),
+     * OVERRIDING everything devourer configured above. Debug lever for
+     * hardware-diffing devourer's init against the vendor's — if a behavior
+     * gap survives an identical write stream, it is not host-register state. */
+    FILE *fp = fopen(_cfg.debug.replay_wseq.c_str(), "r");
+    if (!fp) {
+      _logger->error("replay_wseq: cannot open {}", _cfg.debug.replay_wseq);
+    } else {
+      unsigned addr, width;
+      unsigned long long val;
+      size_t n = 0;
+      while (fscanf(fp, "%x %u %llx", &addr, &width, &val) == 3) {
+        if (width == 1)
+          _device.rtw_write8(static_cast<uint16_t>(addr),
+                             static_cast<uint8_t>(val));
+        else if (width == 2)
+          _device.rtw_write16(static_cast<uint16_t>(addr),
+                              static_cast<uint16_t>(val));
+        else
+          _device.rtw_write32(static_cast<uint16_t>(addr),
+                              static_cast<uint32_t>(val));
+        if (++n % 1000 == 0)
+          _logger->info("replay_wseq: {} writes applied", n);
+      }
+      fclose(fp);
+      _logger->info("replay_wseq: DONE — {} writes from {}", n,
+                    _cfg.debug.replay_wseq);
+    }
+  }
+
   if (_cfg.debug.bb_dump) {
     /* Full BB/RF register dump in the vendor rtw_proc format for canary diff
      * against the kernel driver (tests/jaguar2_rx_canary.sh). */
@@ -768,20 +800,12 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
   c.rx_chains = chains;
   c.per_chain_rssi = chains >= 2;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
-  /* 5/10 MHz baseband re-clock via the 0x8ac small-BW/clock word. 8821C only:
-   * hardware-validated at both widths cross-generation against Jaguar3. The
-   * 8822B path carries the same (vendor-parity) register recipe but the chip
-   * comes up with ~10% RX sync rate and dead NB TX — the OpenHD kernel module
-   * on the same dongle does full-rate NB with the SAME firmware blob and the
-   * same BB register state, so the missing piece is a runtime FW interaction
-   * (the kernel's NB switch retunes the RF RXBB LPF — RF 0x82/0xf2 move with
-   * bandwidth without any driver register write). Until that is ported the
-   * 8822B does not advertise narrowband. */
-  if (_variant == jaguar2::ChipVariant::C8821C) {
-    c.narrowband_ok = true;
-  } else {
-    c.bw_mask &= static_cast<uint8_t>(~(devourer::kBw5 | devourer::kBw10));
-  }
+  /* 5/10 MHz baseband re-clock via the 0x8ac small-BW/clock word — both
+   * variants, hardware-validated at both widths, both directions and both
+   * bands cross-generation against Jaguar3. The 8822B additionally needs the
+   * RF18 re-latch edge after the re-clock (see the set_channel_bw narrowband
+   * branch). */
+  c.narrowband_ok = true;
   c.fastretune_ok = true;
   c.per_packet_txpower = true; /* TX descriptor TXPWR_OFSET LUT — Jaguar2 only */
   devourer::set_standard_freq_ranges(c);

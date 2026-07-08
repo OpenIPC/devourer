@@ -133,6 +133,8 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.debug.efuse_dump = env_flag("DEVOURER_EFUSE_DUMP");
   cfg.debug.log_writes = env_flag("DEVOURER_LOG_WRITES");
   cfg.debug.log_txpwr = env_flag("DEVOURER_LOG_TXPWR");
+  if (const char *e = env_str("DEVOURER_REPLAY_WSEQ"))
+    cfg.debug.replay_wseq = e;
   cfg.debug.hop_prof = env_flag("DEVOURER_HOP_PROF");
   cfg.debug.gaintab_dbg = env_flag("DEVOURER_GAINTAB_DBG");
 

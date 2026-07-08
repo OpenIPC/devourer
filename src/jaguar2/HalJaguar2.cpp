@@ -947,28 +947,15 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
      * config_phydm_switch_bandwidth_8822b CHANNEL_WIDTH_5/10 — verbatim,
      * incl. its masks keeping the ADC/DAC fields from the previous BW set).
      *
-     * EXPERIMENTAL on the 8822B (caps report narrowband_ok=false): with this
-     * recipe the chip syncs only ~0.5% of NB frames on RX (~10/12 s vs the
-     * control's thousands) and airs no valid NB TX, while the OpenHD kernel
-     * module on the same dongle does full-rate NB with the SAME firmware
-     * blob. Hypotheses ELIMINATED by hardware A/B against
-     * reference/rtl88x2bu/88x2bu_ohd.ko (write_reg bisect + patched rebuild):
-     *  - every readable register: the kernel keeps full-rate NB RX with
-     *    devourer's ENTIRE differing MAC+BB state (116-register flip) and
-     *    with devourer's RF filter values; conversely forcing the kernel's
-     *    RF/BB/MAC values (incl. its NB-converged RF 0x82/0xf2 RXBB state)
-     *    on devourer does not recover RX;
-     *  - firmware arming: removing the kernel's only H2C traffic (the
-     *    GENERAL_INFO+PHYDM_INFO pair, patched out of the module) leaves its
-     *    NB fully working;
-     *  - devourer's optional init stages (IQK / TRX-reassert / DIG / RFE),
-     *    SoML, MAC-clock ticks, IGI: all tested, none move the needle.
-     * The causal delta is therefore UNREADABLE state — BB/RF gain LUTs
-     * written through write-only ports during table apply, or sequencing
-     * latches. Next experiment: golden-init replay (usbmon-capture the
-     * kernel's full post-DLFW write sequence and replay it verbatim from
-     * devourer, then bisect the sequence). The 8821C variant has no such
-     * dependence and is fully validated. */
+     * The 8822B additionally requires an RF18 RE-LATCH EDGE after the
+     * re-clock — see the comment at the RF18 write below. (Found by
+     * golden-init replay: usbmon-capture the working kernel driver's full
+     * post-DLFW write stream, replay it verbatim from devourer via
+     * DEVOURER_REPLAY_WSEQ, delta-debug the 3630-write stream down to the
+     * causal pair. Every readable-register hypothesis had been eliminated
+     * first by A/B against reference/rtl88x2bu/88x2bu_ohd.ko: kernel NB
+     * survives devourer's entire differing MAC+BB+RF state and the removal
+     * of its only H2C traffic.) */
     const bool is5 = (bw == 5);
     v8ac &= is5 ? 0xEFEEFE00 : 0xEFFEFF00;
     v8ac |= is5 ? (1u << 6) : (1u << 7);
@@ -1026,6 +1013,22 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
    * matches the vendor's per-band value. */
   if (g2)
     rf18 &= 0x00060cffu;
+
+  /* 5/10 MHz: the RF synth only re-latches its internal channel state on an
+   * RF18 VALUE EDGE — a same-value rewrite does nothing, and after the
+   * baseband ADC/DAC re-clock the RF stays latched to pre-re-clock internals
+   * (RX deaf, TX invalid). The kernel never hits this because its flow always
+   * tunes through a channel/band change around a bandwidth switch; devourer's
+   * end-of-bring-up narrowband re-clock rewrites RF18 with the identical
+   * value. Force the edge: intermediate write with a different channel byte,
+   * then the real value. Isolated by golden-init replay bisection down to
+   * exactly this write pair (23300 vs 9 NB frames on the bench). */
+  if (bw == 5 || bw == 6) {
+    const uint32_t rf18_alt = (rf18 & ~0xffu) | (cch == 1 ? 2u : 1u);
+    rf_write(0, 0x18, rf18_alt);
+    if (r2t2r)
+      rf_write(1, 0x18, rf18_alt);
+  }
 
   rf_write(0, 0x18, rf18);
   if (r2t2r)

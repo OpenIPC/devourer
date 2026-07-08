@@ -29,7 +29,8 @@ long-range digital video links.
   depending on chip — fast enough to hop on every packet
   ([how](docs/frequency-hopping.md)).
 - **Narrowband modes the kernel can't do.** 5 and 10 MHz channels on the
-  newest chips — half/quarter the bandwidth, more range from the same power.
+  Jaguar3 chips and the Jaguar2 8821C — half/quarter the bandwidth, more
+  range from the same power.
 - **A radio lab in a dongle.** Channel sounding, per-antenna signal quality,
   beamforming report capture (enough to do
   [motion sensing](docs/beamforming-victim-sensing.md)), spectrum sweeps,
@@ -54,9 +55,10 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | TP-Link Archer T2U Plus (`2357:0120`) |
 | **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | TP-Link Archer T3U (`2357:012d`) |
 | **RTL8812BU**                 | 1T1R + BT         | —             | —             | —                | 1T1R cut of 8822B silicon; rides the 8822BU code path. Not benchmarked |
-| **RTL8811CU**                 | 1T1R + BT         | 36            | 29            | 28               | COMFAST CF-811AC (`0bda:c811`) |
-| **RTL8812CU**                 | 2T2R              | 65            | 60            | 60               | LB-LINK WDN1300H (`0bda:c812`) |
-| **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`0bda:c82c`) |
+| **RTL8811CU**                 | 1T1R + BT         | 36            | 29            | 28               | COMFAST CF-811AC (`0bda:c811`). 5/10 MHz capable |
+| **RTL8821CU**                 | 1T1R + BT         | —             | —             | —                | rides the 8811CU (8821C) code path. 5/10 MHz capable |
+| **RTL8812CU**                 | 2T2R              | 65            | 60            | 60               | LB-LINK WDN1300H (`0bda:c812`). 5/10 MHz capable |
+| **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`0bda:c82c`). 5/10 MHz capable |
 | **RTL8812EU**                 | 2T2R              | 8             | 51            | 47               | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module. 5/10 MHz capable |
 | **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked. 5/10 MHz capable |
 | **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |

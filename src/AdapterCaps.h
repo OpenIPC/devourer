@@ -49,21 +49,25 @@ inline const char *generation_name(ChipGeneration g) {
 }
 
 /* Supported channel widths, one bit per width (MHz). A mask, not a max, because
- * the set is not contiguous per family: Jaguar3 adds 5/10 MHz narrowband BELOW
- * the 20/40/80 the AC families do. */
+ * the set is not contiguous per family: Jaguar2/Jaguar3 add 5/10 MHz narrowband
+ * BELOW the 20/40/80 all AC families do. */
 constexpr uint8_t kBw5 = 1u << 0;
 constexpr uint8_t kBw10 = 1u << 1;
 constexpr uint8_t kBw20 = 1u << 2;
 constexpr uint8_t kBw40 = 1u << 3;
 constexpr uint8_t kBw80 = 1u << 4;
 
-/* J1/J2 do 20/40/80; J3 adds the 5/10 MHz narrowband re-clock. Pure;
- * unit-tested in tests/adapter_caps_selftest.cpp. */
+/* J1 does 20/40/80; J2 and J3 add the 5/10 MHz narrowband re-clock (J2 packs
+ * the ADC/DAC clock word into 0x8ac, J3 into 0x9b0/0x9b4 — same RF-stays-20MHz
+ * concept). Within J2 only the 8821C variant has working narrowband — the
+ * 8822B device fill clears kBw5|kBw10 (see RtlJaguar2Device::GetAdapterCaps).
+ * J1 has no vendor narrowband reference (the rtl8812au trees carry only dead
+ * enum values). Pure; unit-tested in tests/adapter_caps_selftest.cpp. */
 inline uint8_t bw_mask_for_generation(ChipGeneration g) {
   const uint8_t ac = kBw20 | kBw40 | kBw80;
-  return g == ChipGeneration::Jaguar3 ? (ac | kBw5 | kBw10)
+  return g == ChipGeneration::Jaguar1 ? ac
          : g == ChipGeneration::Unknown ? 0
-                                        : ac;
+                                        : (ac | kBw5 | kBw10);
 }
 
 /* A tunable / characterized frequency span (MHz). valid=false = band absent. */
@@ -110,7 +114,7 @@ struct AdapterCaps {
 
   /* --- feature flags --- */
   bool per_packet_txpower = false; /* Jaguar2 descriptor TXPWR_OFSET LUT only */
-  bool narrowband_ok = false;      /* 5/10 MHz re-clock (Jaguar3) */
+  bool narrowband_ok = false;      /* 5/10 MHz re-clock (Jaguar2 8821C, Jaguar3) */
   bool fastretune_ok = false;      /* lean FastRetune override exists */
   bool per_chain_rssi = false;     /* frame parser fills per-chain rssi (>=2ch) */
 };

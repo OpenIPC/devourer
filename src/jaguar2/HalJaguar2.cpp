@@ -514,6 +514,14 @@ void HalJaguar2::igi_toggle() {
   _device.phy_set_bb_reg(0x0e50, 0x7f, igi);
 }
 
+void HalJaguar2::bb_reset() {
+  /* MAC 0x0 BIT16 (SYS_FUNC_EN FEN_BBRSTB) 0->1 — the _iqk_bb_reset_8822b /
+   * _8821c mechanism; relatches the BB DAC/DFE clock tree. */
+  uint32_t r0 = _device.rtw_read32(0x0);
+  _device.rtw_write32(0x0, r0 & ~(1u << 16));
+  _device.rtw_write32(0x0, r0 | (1u << 16));
+}
+
 /* Central channel of the wide channel; `channel` is the primary 20 MHz channel
  * and primary_ch_idx its position. 20 MHz: central = primary. 40 MHz:
  * primary_ch_idx 1(lower)/2(upper) -> ±2. 80 MHz: 1..4 -> +6/+2/-2/-6. (The
@@ -626,7 +634,7 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
       rf18 |= (1u << 17);
   }
 
-  /* --- config_phydm_switch_bandwidth_8822b (20/40/80 MHz) --- */
+  /* --- config_phydm_switch_bandwidth_8822b (20/40/80 + 5/10 MHz) --- */
   uint32_t v8ac = _device.rtw_read32(0x08ac);
   const uint8_t sub = static_cast<uint8_t>((primary_ch_idx & 0xf) << 2);
   if (bw == 1) { /* 40 MHz */
@@ -647,6 +655,61 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
     if (rfe_type == 2 || rfe_type == 3 || rfe_type == 17) {
       _device.phy_set_bb_reg(0x0840, 0x0000f000, 0x6);
       _device.phy_set_bb_reg(0x08c8, (1u << 10), 0x1);
+    }
+  } else if (bw == 5 || bw == 6) {
+    /* CHANNEL_WIDTH_5 / _10 — narrowband baseband re-clock: small-BW
+     * 0x8ac[7:6] = 1/2, rf mode [1:0] = 20M, ADC clock [9:8]+[16], DAC clock
+     * [21:20]+[28]; the RF synth stays in its 20 MHz mode (vendor
+     * config_phydm_switch_bandwidth_8822b CHANNEL_WIDTH_5/10 — verbatim,
+     * incl. its masks keeping the ADC/DAC fields from the previous BW set).
+     *
+     * EXPERIMENTAL on the 8822B (caps report narrowband_ok=false): with this
+     * recipe the chip syncs only ~10% of NB frames on RX and airs no valid NB
+     * TX, while the OpenHD kernel module on the same dongle does full-rate NB
+     * with the SAME firmware blob and the same page-8 BB state (hardware
+     * A/B'd via reference/rtl88x2bu/88x2bu_ohd.ko + write_reg bisect). The
+     * kernel's NB switch additionally retunes the RF RXBB LPF (RF 0x82/0xf2
+     * move with bandwidth with no driver register write — a runtime FW
+     * interaction devourer does not yet reproduce). The 8821C variant has no
+     * such gap and is fully validated. */
+    const bool is5 = (bw == 5);
+    v8ac &= is5 ? 0xEFEEFE00 : 0xEFFEFF00;
+    v8ac |= is5 ? (1u << 6) : (1u << 7);
+    /* DEVOURER_NB_ADC / DEVOURER_NB_DAC — divider-mapping experiment knobs:
+     * force the ADC ([9:8] + bit16) / DAC ([21:20] + bit28) clock fields the
+     * vendor comments describe but its code never writes. */
+    if (_cfg.tuning.nb_adc) {
+      v8ac &= ~((0x3u << 8) | (1u << 16));
+      v8ac |= (static_cast<uint32_t>(*_cfg.tuning.nb_adc & 0x3) << 8) |
+              ((*_cfg.tuning.nb_adc & 0x4) ? (1u << 16) : 0u);
+      _logger->info("Jaguar2: tuning.nb_adc override — ADC code {:#x}",
+                    *_cfg.tuning.nb_adc);
+    }
+    if (_cfg.tuning.nb_dac) {
+      v8ac &= ~((0x3u << 20) | (1u << 28));
+      v8ac |= (static_cast<uint32_t>(*_cfg.tuning.nb_dac & 0x3) << 20) |
+              ((*_cfg.tuning.nb_dac & 0x4) ? (1u << 28) : 0u);
+      _logger->info("Jaguar2: tuning.nb_dac override — DAC code {:#x}",
+                    *_cfg.tuning.nb_dac);
+    }
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x0); /* ADC buffer clock */
+    _device.phy_set_bb_reg(0x08c8, (1u << 31), 0x1);
+    rf18 |= (1u << 11) | (1u << 10); /* RF stays 20M */
+    /* config_phydm_switch_band_8822b CCK-block trio (the 8821C path has it in
+     * its band block; the 8822B port never carried it). At 5G the CCK block
+     * must be OFF — the table-apply POST bracket leaves it on, harmless at
+     * 20 MHz but under the NB re-clock the mis-clocked CCK engine breaks the
+     * demod. NB-gated pending 20/40/80 regression of the full band block. */
+    if (g2) {
+      _device.phy_set_bb_reg(0x0808, (1u << 28), 0x1); /* CCK block on */
+      _device.phy_set_bb_reg(0x0454, (1u << 7), 0x0);  /* MAC CCK check off */
+      _device.phy_set_bb_reg(0x0a80, (1u << 18), 0x0); /* BB CCK check off */
+    } else {
+      _device.phy_set_bb_reg(0x0a80, (1u << 18), 0x1);
+      _device.phy_set_bb_reg(0x0454, (1u << 7), 0x1);
+      _device.phy_set_bb_reg(0x0808, (1u << 28), 0x0); /* CCK block off */
+      _device.phy_set_bb_reg(0x0814, 0x0000FC00, 34);  /* CCA mask 13.6us */
     }
   } else { /* 20 MHz */
     v8ac &= 0xFFCFFC00;
@@ -705,6 +768,13 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _device.phy_set_bb_reg(0x0808, 0xff, rx_ant | (rx_ant << 4));
   igi_toggle();
 
+  /* 5/10 MHz: BB reset (MAC 0x0 BIT16 toggle — the same _iqk_bb_reset_8822b
+   * mechanism) so the DAC/DFE relatch at the new sample rate. Hardware-taught
+   * on Jaguar3 (RadioManagementJaguar3::set_bandwidth_dividers): without it
+   * the re-clock doesn't take. */
+  if (bw == 5 || bw == 6)
+    bb_reset();
+
   _last_tuned_ch = channel;
   _logger->info("Jaguar2: channel set ch={} bw={} (rf18=0x{:05x})", channel,
                 (int)bw, rf18);
@@ -715,14 +785,15 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
 void HalJaguar2::DumpCanary() {
   /* Channel/BW-relevant set (both variants; the control run in the parity
    * script classifies natural run-variance): RX path (0x808), CCA thresholds
-   * (0x82c/0x830/0x838), fc (0x860), BW block (0x8ac/0x8c4/0x8f0), RX DFIR
+   * (0x82c/0x830/0x838), fc (0x860), BW block (0x8ac/0x8c4/0x8c8/0x8f0 —
+   * 0x8c8[31] is narrowband ADC-buffer state, set on 5/10 MHz), RX DFIR
    * (0x948/0x94c/0xc20/0xe20), AGC index (0x958 8822B / 0xc1c 8821C), CCK pri
    * (0xa00), spur / CCK filter (0xa24/0xa28/0xaac), 8821C band block
    * (0xa80/0xa84/0x814), RFE pins (0xcb0/0xcb4/0xcb8/0xca0/0xeb0/0xeb4/0xea0).
    * MAC: CCK check (0x454). RF via the direct read window: 0x18 channel,
    * 0xbe VCO band, 0xdf, 0xb8. IGI (0xc50/0xe50) excluded — live. */
   static const uint16_t bb_canary[] = {
-      0x808, 0x814, 0x82c, 0x830, 0x838, 0x860, 0x8ac, 0x8c4, 0x8f0,
+      0x808, 0x814, 0x82c, 0x830, 0x838, 0x860, 0x8ac, 0x8c4, 0x8c8, 0x8f0,
       0x948, 0x94c, 0x958, 0xa00, 0xa24, 0xa28, 0xaac, 0xa80, 0xa84,
       0xc1c, 0xc20, 0xe20, 0xca0, 0xcb0, 0xcb4, 0xcb8, 0xea0, 0xeb0, 0xeb4};
   static const uint16_t mac_canary[] = {0x454};
@@ -1199,6 +1270,26 @@ void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
     _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
     rf18 &= ~((1u << 11) | (1u << 10));
     rf18 |= (1u << 10);
+  } else if (bw == 5) { /* CHANNEL_WIDTH_5 — narrowband baseband re-clock:
+    * small-BW 0x8ac[7:6]=1, ADC clock 40M ([9:8]=0x2, [16]=0), DAC field
+    * ([21:20]=0x2, [28]=0); RF synth stays in 20 MHz mode (vendor
+    * config_phydm_switch_bandwidth_8821c CHANNEL_WIDTH_5). */
+    uint32_t v8ac = _device.rtw_read32(0x08ac);
+    v8ac &= 0xefcefc00;
+    v8ac |= (0x2u << 20) | (0x2u << 8) | (1u << 6);
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x0); /* ADC buffer clock */
+    _device.phy_set_bb_reg(0x08c8, (1u << 31), 0x1);
+    rf18 |= (1u << 11) | (1u << 10); /* RF stays 20M */
+  } else if (bw == 6) { /* CHANNEL_WIDTH_10 — small-BW=2, ADC 80M ([9:8]=0x3),
+                         * DAC field 0x3 */
+    uint32_t v8ac = _device.rtw_read32(0x08ac);
+    v8ac &= 0xefcefc00;
+    v8ac |= (0x3u << 20) | (0x3u << 8) | (1u << 7);
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x0); /* ADC buffer clock */
+    _device.phy_set_bb_reg(0x08c8, (1u << 31), 0x1);
+    rf18 |= (1u << 11) | (1u << 10); /* RF stays 20M */
   } else { /* 20 MHz */
     uint32_t v8ac = _device.rtw_read32(0x08ac);
     v8ac &= 0xffcffc00;
@@ -1212,14 +1303,22 @@ void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
   /* phydm_rxdfirpar_by_bw_8821c: the RX digital filter must match the bandwidth
    * or the OFDM demod never completes a PSDU (energy detected, nothing reaches
    * the MAC RX FIFO) — the 8821C "first RX" piece. 1T1R: path A regs only
-   * (0x948/0x94c/0xc20/0x8f0), distinct from the 8822B set. */
+   * (0x948/0x94c/0xc20/0x8f0), distinct from the 8822B set. 5/10 MHz share the
+   * BW20 filter values (the narrowing happens in the ADC/DAC re-clock, the
+   * demod still runs a 20 MHz signal shape). */
+  const bool nb = (bw == 5 || bw == 6);
   _device.phy_set_bb_reg(0x0948, (1u << 29) | (1u << 28), 0x2);
   _device.phy_set_bb_reg(0x094c, (1u << 29) | (1u << 28),
                          bw == 2 ? 0x1u : 0x2u);
-  _device.phy_set_bb_reg(0x0c20, (1u << 31), bw == 0 ? 0x1u : 0x0u);
+  _device.phy_set_bb_reg(0x0c20, (1u << 31), (bw == 0 || nb) ? 0x1u : 0x0u);
   _device.phy_set_bb_reg(0x08f0, (1u << 31), bw == 2 ? 0x1u : 0x0u);
 
   igi_toggle();
+
+  /* 5/10 MHz: BB reset so the DAC/DFE relatch at the new sample rate (see the
+   * 8822B path). */
+  if (nb)
+    bb_reset();
   _logger->info("Jaguar2/8821C: channel set ch={} bw={} cch={} {} (rf18={:05x})",
                 channel, (int)bw, cch, btg ? "BTG" : "WLG", rf18);
 }
@@ -1402,6 +1501,13 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type,
    * BW40/80 is future work (uses BW40/BW80 diffs). */
   if (channel == 0)
     return;
+
+  /* 5/10 MHz narrowband (CHANNEL_WIDTH_5=5 / _10=6) folds to the 20 MHz power
+   * column: the RF runs in its 20 MHz mode and the txpwr_lmt tables carry no
+   * narrowband rows (a raw 5/6 here would read as HT40 and miss the regulatory
+   * lookup entirely -> unclamped 63). Mirrors the Jaguar3 fold. */
+  if (bw >= 5)
+    bw = 0;
 
   /* Fresh rail-hit snapshot for this apply (SetTxPowerOffsetQdb's "knob out
    * of travel" signal). */

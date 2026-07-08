@@ -490,7 +490,8 @@ int main(int argc, char **argv) {
   /* Bandwidth for init + hopping. DEVOURER_HOP_BW = 20|40|80 (default 20),
    * DEVOURER_HOP_OFFSET = primary-channel offset (0=DONT_CARE, 1=LOWER/HT40+,
    * 2=UPPER/HT40-) for 40/80. FastRetune reuses the device's bandwidth.
-   * DEVOURER_NB_BW = 5|10 re-clocks the baseband to narrowband (Jaguar3 only). */
+   * DEVOURER_NB_BW = 5|10 re-clocks the baseband to narrowband (Jaguar2/3;
+   * check the adapter.caps narrowband_ok flag). */
   ChannelWidth_t init_width = CHANNEL_WIDTH_20;
   uint8_t init_offset = 0;
   if (const char *e = std::getenv("DEVOURER_HOP_BW")) {

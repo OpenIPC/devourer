@@ -21,19 +21,18 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
   RTL8811CU / RTL8821CU (chip 8821C, chip-id `0x09`). A hybrid: HalMAC FW
   download / MAC init / power sequencing like Jaguar3, phydm `check_positive`
   register tables like Jaguar1 (shared `PhyTableLoader`). RX + TX on 2.4/5 GHz
-  at 20/40/80 MHz, plus **5/10 MHz narrowband on the 8821C variant** (a
-  baseband ADC/DAC re-clock packed into BB `0x8ac`; the RF stays in 20 MHz
-  mode; applied as an end-of-bring-up retune, kernel-flow parity). 5 MHz at
-  5 GHz is CFO-limited: subcarrier spacing shrinks 4× and a far-offset
-  TX/RX crystal pair syncs bimodally per bring-up — at 2.4 GHz the same
-  pair is stable (`tests/narrowband_cross_rx.sh` header). The 8822B
-  carries the same NB register recipe but is gated off (`narrowband_ok=false`):
-  its NB RX syncs ~10% and NB TX airs nothing, while the OpenHD kernel module
-  does full-rate NB on the same dongle with the same firmware — the kernel's
-  NB switch retunes the RF RXBB LPF via a runtime FW interaction not yet
-  ported (see the `set_channel_bw` NB branch comment). Per-rate
+  at 20/40/80 MHz plus **5/10 MHz narrowband on both variants** (a baseband
+  ADC/DAC re-clock packed into BB `0x8ac`; the RF stays in 20 MHz mode;
+  applied as an end-of-bring-up retune. The 8822B RF synth only re-latches
+  on an RF18 *value edge*, so the narrowband path writes RF18 twice —
+  same-value rewrites do nothing; see the `set_channel_bw` NB branch).
+  5 MHz at 5 GHz is CFO-limited: subcarrier spacing shrinks 4× and a
+  far-offset TX/RX crystal pair syncs bimodally per bring-up — at 2.4 GHz
+  the same pair is stable (`tests/narrowband_cross_rx.sh` header). Per-rate
   bandwidth-aware efuse TX power clamped to generated `txpwr_lmt` tables
-  (narrowband folds to the 20 MHz column).
+  (narrowband folds to the 20 MHz column). Golden-init replay
+  (`DEVOURER_REPLAY_WSEQ`, a captured kernel write stream applied verbatim
+  at the end of Init) is the debugging lever that found the RF18-edge bug.
 - **Jaguar3** (`src/jaguar3/`): rtl8822c (RTL8812CU/8822CU, chip-id `0x13`) and
   rtl8822e (RTL8812EU/8822EU, chip-id `0x17`). **5/10 MHz narrowband** (its
   re-clock lives in the `0x9b0`/`0x9b4` dividers; Jaguar1 silicon has no

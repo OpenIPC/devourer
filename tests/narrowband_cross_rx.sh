@@ -7,8 +7,7 @@
 # Cells: a 20 MHz control brackets the bench, then 10 and 5 MHz with both ends
 # re-clocked. Defaults pair Jaguar3 TX (8812CU, whose narrowband is already
 # SDR-validated) with Jaguar2 8821C RX (8811CU) — run the reverse direction
-# too. The 8822BU (2357:012d) can be substituted but its NB is
-# EXPERIMENTAL/gated (partial RX, no NB TX):
+# and the 8822BU (2357:012d) variants too:
 #
 #   sudo tests/narrowband_cross_rx.sh                       # J3 c812 -> 8811CU
 #   sudo tests/narrowband_cross_rx.sh 0bda:c811 0bda:c812   # 8811CU  -> J3 c812

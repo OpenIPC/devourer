@@ -104,9 +104,30 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   if (_cfg.tuning.rfe_type)
     rfe = *_cfg.tuning.rfe_type;
   _rfe = rfe; /* cache for SetMonitorChannel retune */
+
+  /* Arm the FW dynamic engine: halmac send_general_info (GENERAL_INFO +
+   * PHYDM_INFO H2C pair) — the only H2C traffic the kernel driver produces
+   * (usbmon-verified), sent right after DLFW. Without it the 8822B FW never
+   * runs its bandwidth-keyed RXBB assist and narrowband RX/TX is dead.
+   * package_type is FW-reported via the mac-hidden C2H in the kernel flow
+   * (7 on the bench 8822BU); devourer doesn't parse that C2H yet — 7 for the
+   * 8822B, 0 (unknown) for the 8821C. */
+  {
+    const bool r2t2r = _hal.chip_version().rf_2t2r != 0;
+    const uint8_t pkg = _variant == jaguar2::ChipVariant::C8822B ? 7 : 0;
+    _macinit.send_fw_general_info(rfe, r2t2r, _hal.chip_version().cut, pkg);
+  }
+
   _hal.apply_bb_rf_agc_tables(rfe);
   _logger->info("RtlJaguar2Device: PHY tables applied");
 
+  /* halrf kfree init: read the PPG efuse trims and apply the PA-bias RF LUT
+   * correction (write-only LUT state — the 0x3f sequence visible in the
+   * kernel's golden init). Vendor order: right after the table apply and
+   * BEFORE config_trx_mode — the mode-table window writes there (RF 0xef
+   * toggles) alias the RF 0x51/0x52 reads the PA-bias word is recomposed
+   * from. */
+  _hal.kfree_init();
   _hal.config_trx_mode(); /* RF mode table + TX/RX antenna-path HW blocks */
   _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel), bw, rfe,
                       channel.ChannelOffset);
@@ -276,6 +297,38 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                     "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} — "
                     "beamformee MAC 00:e0:4c:88:22:bb",
                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+  }
+
+  if (!_cfg.debug.replay_wseq.empty()) {
+    /* Golden-init replay: apply a captured register write sequence verbatim
+     * (e.g. the kernel driver's post-DLFW init from a usbmon capture),
+     * OVERRIDING everything devourer configured above. Debug lever for
+     * hardware-diffing devourer's init against the vendor's — if a behavior
+     * gap survives an identical write stream, it is not host-register state. */
+    FILE *fp = fopen(_cfg.debug.replay_wseq.c_str(), "r");
+    if (!fp) {
+      _logger->error("replay_wseq: cannot open {}", _cfg.debug.replay_wseq);
+    } else {
+      unsigned addr, width;
+      unsigned long long val;
+      size_t n = 0;
+      while (fscanf(fp, "%x %u %llx", &addr, &width, &val) == 3) {
+        if (width == 1)
+          _device.rtw_write8(static_cast<uint16_t>(addr),
+                             static_cast<uint8_t>(val));
+        else if (width == 2)
+          _device.rtw_write16(static_cast<uint16_t>(addr),
+                              static_cast<uint16_t>(val));
+        else
+          _device.rtw_write32(static_cast<uint16_t>(addr),
+                              static_cast<uint32_t>(val));
+        if (++n % 1000 == 0)
+          _logger->info("replay_wseq: {} writes applied", n);
+      }
+      fclose(fp);
+      _logger->info("replay_wseq: DONE — {} writes from {}", n,
+                    _cfg.debug.replay_wseq);
     }
   }
 
@@ -747,20 +800,12 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
   c.rx_chains = chains;
   c.per_chain_rssi = chains >= 2;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
-  /* 5/10 MHz baseband re-clock via the 0x8ac small-BW/clock word. 8821C only:
-   * hardware-validated at both widths cross-generation against Jaguar3. The
-   * 8822B path carries the same (vendor-parity) register recipe but the chip
-   * comes up with ~10% RX sync rate and dead NB TX — the OpenHD kernel module
-   * on the same dongle does full-rate NB with the SAME firmware blob and the
-   * same BB register state, so the missing piece is a runtime FW interaction
-   * (the kernel's NB switch retunes the RF RXBB LPF — RF 0x82/0xf2 move with
-   * bandwidth without any driver register write). Until that is ported the
-   * 8822B does not advertise narrowband. */
-  if (_variant == jaguar2::ChipVariant::C8821C) {
-    c.narrowband_ok = true;
-  } else {
-    c.bw_mask &= static_cast<uint8_t>(~(devourer::kBw5 | devourer::kBw10));
-  }
+  /* 5/10 MHz baseband re-clock via the 0x8ac small-BW/clock word — both
+   * variants, hardware-validated at both widths, both directions and both
+   * bands cross-generation against Jaguar3. The 8822B additionally needs the
+   * RF18 re-latch edge after the re-clock (see the set_channel_bw narrowband
+   * branch). */
+  c.narrowband_ok = true;
   c.fastretune_ok = true;
   c.per_packet_txpower = true; /* TX descriptor TXPWR_OFSET LUT — Jaguar2 only */
   devourer::set_standard_freq_ranges(c);

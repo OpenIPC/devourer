@@ -59,10 +59,9 @@ constexpr uint8_t kBw80 = 1u << 4;
 
 /* J1 does 20/40/80; J2 and J3 add the 5/10 MHz narrowband re-clock (J2 packs
  * the ADC/DAC clock word into 0x8ac, J3 into 0x9b0/0x9b4 — same RF-stays-20MHz
- * concept). Within J2 only the 8821C variant has working narrowband — the
- * 8822B device fill clears kBw5|kBw10 (see RtlJaguar2Device::GetAdapterCaps).
- * J1 has no vendor narrowband reference (the rtl8812au trees carry only dead
- * enum values). Pure; unit-tested in tests/adapter_caps_selftest.cpp. */
+ * concept; the J2 8822B additionally needs an RF18 re-latch edge after the
+ * re-clock). J1 has no vendor narrowband reference (the rtl8812au trees carry
+ * only dead enum values). Pure; unit-tested in tests/adapter_caps_selftest.cpp. */
 inline uint8_t bw_mask_for_generation(ChipGeneration g) {
   const uint8_t ac = kBw20 | kBw40 | kBw80;
   return g == ChipGeneration::Jaguar1 ? ac
@@ -114,7 +113,7 @@ struct AdapterCaps {
 
   /* --- feature flags --- */
   bool per_packet_txpower = false; /* Jaguar2 descriptor TXPWR_OFSET LUT only */
-  bool narrowband_ok = false;      /* 5/10 MHz re-clock (Jaguar2 8821C, Jaguar3) */
+  bool narrowband_ok = false;      /* 5/10 MHz re-clock (Jaguar2/Jaguar3) */
   bool fastretune_ok = false;      /* lean FastRetune override exists */
   bool per_chain_rssi = false;     /* frame parser fills per-chain rssi (>=2ch) */
 };

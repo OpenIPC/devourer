@@ -207,6 +207,13 @@ struct DeviceConfig {
     bool hop_prof = false;
     /* env: DEVOURER_GAINTAB_DBG — 8822E: log the TXGAPK gain-table backup. */
     bool gaintab_dbg = false;
+    /* env: DEVOURER_REPLAY_WSEQ — golden-init replay (Jaguar2): path to a
+     * register write-sequence file (lines: "<addr_hex> <width 1|2|4>
+     * <val_hex>", e.g. extracted from a kernel-driver usbmon capture).
+     * Applied verbatim at the end of Init, OVERRIDING devourer's own
+     * configuration — a debugging lever for hardware-diffing devourer
+     * against the vendor driver's end state. */
+    std::string replay_wseq;
   } debug;
 
   /* ---- USB / process environment -------------------------------------- */

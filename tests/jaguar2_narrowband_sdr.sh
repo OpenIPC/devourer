@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # jaguar2_narrowband_sdr.sh — 5/10 MHz narrowband validation for Jaguar2
-# (RTL8811CU/8821C default — the validated variant; CHIP=8822b selects the
-# RTL8822BU, whose NB is EXPERIMENTAL/gated: partial RX, no NB TX — see the
-# set_channel_bw NB comment in HalJaguar2.cpp). The Jaguar2 twin of
+# (RTL8811CU/8821C default; CHIP=8822b selects the RTL8822BU). The Jaguar2
+# twin of
 # tests/jaguar3_narrowband_sdr.sh: radiotap stays 20 MHz in narrowband mode, so
 # the ONLY witness is an SDR. Measures the OCCUPIED BANDWIDTH of devourer's
 # continuous TX at 20 / 10 / 5 MHz with the USRP B210 and confirms it halves /

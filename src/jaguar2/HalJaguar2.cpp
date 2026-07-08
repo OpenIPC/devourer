@@ -12,8 +12,10 @@
 #if defined(DEVOURER_HAVE_JAGUAR2_8821C)
 #include "Hal8821c_TxpwrLmt.h" /* generated: hal8821c_txpwr_lmt() WW-min limits */
 #endif
+#include "ChannelFreq.h" /* chan_to_freq for the spur-notch center */
 #include "HopProf.h" /* DEVOURER_HOP_PROF fast-retune stage timing */
 #include "PhyTableLoader.h"
+#include "ToneMask.h" /* NBI notch + CSI mask appliers (spur calibration) */
 
 namespace jaguar2 {
 
@@ -514,6 +516,272 @@ void HalJaguar2::igi_toggle() {
   _device.phy_set_bb_reg(0x0e50, 0x7f, igi);
 }
 
+void HalJaguar2::kfree_init() {
+  /* halrf_kfree.c port (8822B): phydm_get_power_trim_offset_8822b +
+   * phydm_get_pa_bias_offset_8822b. All reads are PHYSICAL efuse bytes (the
+   * PPG region above the logical map). */
+  if (_variant == ChipVariant::C8821C)
+    return; /* 8821C kfree variant not ported yet */
+  auto rd = [this](uint16_t a) -> uint8_t {
+    uint8_t d = 0xFF;
+    return _device.efuse_OneByteRead(a, &d) ? d : 0xFF;
+  };
+
+  /* Power trim (per-band-group TX gain): 2G at 0x3EE (A low nibble / B high),
+   * 5G groups at 0x3EC..0x3DB per path. 0xFF = unprogrammed. */
+  const uint8_t pg2 = rd(0x3EE);
+  if (pg2 != 0xFF) {
+    _kfree_bb_gain[0][0] = pg2 & 0xF;
+    _kfree_bb_gain[0][1] = (pg2 & 0xF0) >> 4;
+    _kfree_2g = true;
+  }
+  const uint8_t g5l1a = rd(0x3EC);
+  if (g5l1a != 0xFF) {
+    static const uint16_t offs_a[5] = {0x3EC, 0x3E8, 0x3E4, 0x3E0, 0x3DC};
+    static const uint16_t offs_b[5] = {0x3EB, 0x3E7, 0x3E3, 0x3DF, 0x3DB};
+    for (int g = 0; g < 5; g++) {
+      _kfree_bb_gain[1 + g][0] = rd(offs_a[g]);
+      _kfree_bb_gain[1 + g][1] = rd(offs_b[g]);
+    }
+    _kfree_5g = true;
+  }
+  _logger->info("Jaguar2 kfree: power trim 2g={} 5g={} (0x3EE={:#04x})",
+                _kfree_2g, _kfree_5g, pg2);
+
+  /* PA bias (phydm_get_pa_bias_offset_8822b + set_pa_bias_to_rf): efuse
+   * 0x3D5 (path A) / 0x3D6 (path B), sign-magnitude nibble, folded into the
+   * RF 0x3f PA-bias word recomposed from RF 0x51/0x52 and written into RF
+   * LUT entries 0/1/3 through the 0xef[10] window — WRITE-ONLY state (this
+   * block is the 0x3f=0x4bb sequence in the kernel's usbmon golden init). */
+  const uint8_t pgba = rd(0x3D5);
+  if (pgba == 0xFF)
+    return;
+  for (uint8_t path = 0; path < (_ver.rf_2t2r ? 2u : 1u); path++) {
+    uint8_t pg = rd(path == 0 ? 0x3D5 : 0x3D6) & 0xF;
+    int8_t bias = (pg & 1) ? static_cast<int8_t>(pg >> 1)
+                           : static_cast<int8_t>(-(pg >> 1));
+    /* Close any LUT window the table apply left open — with 0xef nonzero the
+     * 0x51/0x52 reads alias LUT content, not the PA config (read back wrong
+     * as 0x1211 instead of the true 0x4bb until this was added). */
+    rf_write(path, 0xef, 0x00000);
+    const uint32_t r51 = rf_read(path, 0x51);
+    const uint32_t r52 = rf_read(path, 0x52);
+    uint32_t r3f = ((r52 & 0xe0000) >> 17) | (((r52 & 0x18000) >> 15) << 3) |
+                   ((r52 & 0xf) << 5) | (((r51 & 0x78) >> 3) << 9) |
+                   (((r52 & 0x2000) >> 13) << 13);
+    int pa = static_cast<int8_t>((r3f & 0x1e00) >> 9) + bias;
+    if (pa < 0)
+      pa = 0;
+    else if (pa > 7)
+      pa = 7;
+    r3f = (r3f & 0xfe1ff) | (static_cast<uint32_t>(pa) << 9);
+    rf_set(path, 0xef, (1u << 10), 0x1);
+    rf_write(path, 0x33, 0x0);
+    rf_write(path, 0x3f, r3f);
+    rf_set(path, 0x33, (1u << 0), 0x1);
+    rf_write(path, 0x3f, r3f);
+    rf_set(path, 0x33, (1u << 1), 0x1);
+    rf_write(path, 0x3f, r3f);
+    rf_set(path, 0x33, 0x3, 0x3);
+    rf_write(path, 0x3f, r3f);
+    rf_set(path, 0xef, (1u << 10), 0x0);
+    _logger->info("Jaguar2 kfree: PA bias path {} = {} (r51={:#07x} "
+                  "r52={:#07x} rf3f={:#07x})",
+                  path, bias, r51, r52, r3f);
+  }
+}
+
+void HalJaguar2::kfree_apply(uint8_t channel) {
+  /* phydm_config_kfree / phydm_do_kfree (8822B): per-channel-group TX gain
+   * trim via RF 0xde/0x65/0x55; clear-to-default when the efuse carries no
+   * trim for the band. */
+  if (_variant == ChipVariant::C8821C)
+    return;
+  const bool g2 = channel <= 14;
+  int idx = -1;
+  if (g2 && _kfree_2g) {
+    idx = 0;
+  } else if (!g2 && _kfree_5g) {
+    if (channel >= 36 && channel <= 48)
+      idx = 1;
+    else if (channel >= 52 && channel <= 64)
+      idx = 2;
+    else if (channel >= 100 && channel <= 120)
+      idx = 3;
+    else if (channel >= 122 && channel <= 144)
+      idx = 4;
+    else if (channel >= 149)
+      idx = 5;
+  }
+  for (uint8_t path = 0; path < (_ver.rf_2t2r ? 2u : 1u); path++) {
+    const uint8_t data = idx >= 0 ? _kfree_bb_gain[idx][path] : 0;
+    /* set (phydm_set_kfree_to_rf_8822b) — the clear variant appends the
+     * de-select tail. */
+    rf_set(path, 0xde, (1u << 0), 1);
+    rf_set(path, 0xde, (1u << 4), 1);
+    rf_set(path, 0x65, 0xffff, 0x9000);
+    rf_set(path, 0x55, (1u << 5), 1);
+    rf_set(path, 0x55, (1u << 19), data & 1);
+    rf_set(path, 0x55, 0x7c000, (data & 0x1f) >> 1);
+    if (idx < 0) { /* phydm_clear_kfree_to_rf_8822b tail */
+      rf_set(path, 0xde, (1u << 0), 0);
+      rf_set(path, 0xde, (1u << 4), 1);
+      rf_set(path, 0x65, 0xffff, 0x9000);
+      rf_set(path, 0x55, (1u << 5), 0);
+      rf_set(path, 0x55, (1u << 7), 0);
+    }
+  }
+}
+
+void HalJaguar2::spur_calibration(uint8_t channel, uint8_t cch, uint8_t bw) {
+  /* phydm_spur_calibration_8822b + phydm_dynamic_spur_det_eliminate port
+   * (8822B only; CONFIG_8822B_SPUR_CALIBRATION is on in the CE vendor
+   * build). The chip's own clock spurs land inside a fixed set of channels;
+   * on those the vendor PSD-scans the spur frequency and, above threshold,
+   * programs the NBI notch + CSI mask. On every other channel this reduces
+   * to the reset half (clear masks + notch disables) — still vendor parity
+   * on every channel set. */
+  if (_variant == ChipVariant::C8821C)
+    return;
+  const bool r2t2r = _ver.rf_2t2r != 0;
+
+  /* Entry disables + dsde_init: clear the CSI mask bank and both notch
+   * enables. */
+  _device.phy_set_bb_reg(0x087c, (1u << 13), 0x0);
+  _device.phy_set_bb_reg(0x0c20, (1u << 28), 0x0);
+  _device.phy_set_bb_reg(0x0e20, (1u << 28), 0x0);
+  for (uint16_t a = 0x880; a <= 0x89c; a += 4)
+    _device.rtw_write32(a, 0);
+  _device.phy_set_bb_reg(0x0874, 0x1, 0x0);
+
+  /* phydm_dsde_ch_idx: the spur-channel table. idx 16 = no spur here. */
+  const bool g2 = channel <= 14;
+  uint8_t idx = 16;
+  if (g2) {
+    if (bw == 0) { /* 20M: ch 5..8 -> 0..3, ch 13 -> 4 */
+      if (channel >= 5 && channel <= 8)
+        idx = static_cast<uint8_t>(channel - 5);
+      else if (channel == 13)
+        idx = 4;
+    } else if (bw == 1) { /* 40M: ch 3..11 -> 5..13 */
+      if (channel >= 3 && channel <= 11)
+        idx = static_cast<uint8_t>(channel + 2);
+    }
+  } else {
+    switch (channel) {
+    case 153: idx = 0; break;
+    case 161: idx = 1; break;
+    case 54:  idx = 2; break;
+    case 118: idx = 3; break;
+    case 151: idx = 4; break;
+    case 159: idx = 5; break;
+    case 58:  idx = 6; break;
+    case 122: idx = 7; break;
+    case 155: idx = 8; break;
+    default: break;
+    }
+  }
+  if (idx > 13)
+    return;
+
+  /* PSD scan at the spur frequency point ±1 (3 samples each): 3-wire off,
+   * one RX path at a time, PSD engine via 0x910 BIT(22)|freq_pt, report at
+   * 0xf44[15:0]. Restores 3-wire / 0x910[15:12] / RX paths and toggles IGI
+   * so the RF re-enters RX (the BB sends no 3-wire on path re-enable). */
+  static const uint32_t freq_2g[14] = {0xFC67, 0xFC27, 0xFFE6, 0xFFA6, 0xFC67,
+                                       0xFCE7, 0xFCA7, 0xFC67, 0xFC27, 0xFFE6,
+                                       0xFFA6, 0xFF66, 0xFF26, 0xFCE7};
+  static const uint32_t freq_5g[10] = {0xFFC0, 0xFFC0, 0xFC81, 0xFC81, 0xFC41,
+                                       0xFC40, 0xFF80, 0xFF80, 0xFF40, 0xFD42};
+  if (!g2 && idx >= 10)
+    return;
+  const uint32_t f_base = g2 ? freq_2g[idx] : freq_5g[idx];
+  uint32_t max_a = 0, max_b = 0;
+  for (int k = 0; k < 3; k++) {
+    const uint32_t f_pt = f_base - 1 + static_cast<uint32_t>(k);
+    for (int j = 0; j < 3; j++) {
+      _device.phy_set_bb_reg(0x0c00, 0xff, 0x4); /* 3-wire off */
+      _device.phy_set_bb_reg(0x0e00, 0xff, 0x4);
+      const uint32_t r910_15_12 =
+          (_device.rtw_read32(0x0910) >> 12) & 0xf;
+      /* path A */
+      _device.phy_set_bb_reg(0x0808, 0xff, 0x11);
+      _device.phy_set_bb_reg(0x0910, 0xffffffff, (1u << 22) | f_pt);
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
+      uint32_t v = _device.rtw_read32(0x0f44) & 0xffff;
+      if (v > max_a)
+        max_a = v;
+      _device.phy_set_bb_reg(0x0910, (1u << 22), 0x0);
+      if (r2t2r) { /* path B: freq_pt | BIT(16) */
+        _device.phy_set_bb_reg(0x0808, 0xff, 0x22);
+        _device.phy_set_bb_reg(0x0910, 0xffffffff,
+                               (1u << 22) | (1u << 16) | f_pt);
+        std::this_thread::sleep_for(std::chrono::microseconds(500));
+        v = _device.rtw_read32(0x0f44) & 0xffff;
+        if (v > max_b)
+          max_b = v;
+        _device.phy_set_bb_reg(0x0910, (1u << 22), 0x0);
+      }
+      _device.phy_set_bb_reg(0x0c00, 0xff, 0x7); /* 3-wire on */
+      _device.phy_set_bb_reg(0x0e00, 0xff, 0x7);
+      _device.phy_set_bb_reg(0x0910, 0xf000, r910_15_12);
+      const uint8_t rx_ant = r2t2r ? 0x3 : 0x1;
+      _device.phy_set_bb_reg(0x0808, 0xff,
+                             static_cast<uint32_t>(rx_ant << 4) | rx_ant);
+      igi_toggle();
+    }
+  }
+
+  constexpr uint32_t kThreshold = 0x8D; /* NBI and CSI share it */
+  const bool do_nbi = max_a >= kThreshold || max_b >= kThreshold;
+  if (!do_nbi) {
+    _logger->info("Jaguar2 spur-cal: ch{} bw{} psd A={} B={} — below "
+                  "threshold, no notch",
+                  channel, bw, max_a, max_b);
+    return;
+  }
+
+  /* phydm_dsde_nbi: CCA tweak + notch at the spur frequency (MHz). The spur
+   * frequency per channel/BW, from the vendor tables. */
+  _device.phy_set_bb_reg(0x082c, 0xff000, 0x97);
+  _device.phy_set_bb_reg(0x082c, 0xf000, 0x7);
+  uint32_t f_int = 0;
+  const uint32_t bw_mhz = bw == 1 ? 40 : bw == 2 ? 80 : 20;
+  if (bw == 0) {
+    if (channel == 153) f_int = 5760;
+    else if (channel == 161) f_int = 5800;
+    else if (channel >= 5 && channel <= 8) f_int = 2440;
+    else if (channel == 13) f_int = 2480;
+  } else if (bw == 1) {
+    if (channel == 54) f_int = 5280;
+    else if (channel == 118) f_int = 5600;
+    else if (channel == 151) f_int = 5760;
+    else if (channel == 159) f_int = 5800;
+    else if (channel >= 4 && channel <= 6) f_int = 2440;
+    else if (channel == 11) f_int = 2480;
+  } else if (bw == 2) {
+    if (channel == 58) f_int = 5280;
+    else if (channel == 122) f_int = 5600;
+    else if (channel == 155) f_int = 5760;
+  }
+  if (f_int == 0)
+    return;
+  const uint32_t fc = devourer::chan_to_freq(cch);
+  devourer::tonemask::nbi_apply_11ac(_device,
+                                     devourer::tonemask::Family::AC2_8822B, fc,
+                                     bw_mhz, f_int, r2t2r);
+  /* phydm_dsde_csi: mask the tones around the spur (±600 kHz ~ the vendor's
+   * tone+neighbor weights). */
+  devourer::tonemask::CsiMaskSpec spec{};
+  spec.valid = true;
+  spec.f_lo_khz = static_cast<int32_t>(f_int) * 1000 - 600;
+  spec.f_hi_khz = static_cast<int32_t>(f_int) * 1000 + 600;
+  devourer::tonemask::csi_mask_apply_11ac(_device, fc, bw_mhz, spec);
+  _logger->info("Jaguar2 spur-cal: ch{} bw{} psd A={} B={} — NBI+CSI notch "
+                "at {} MHz",
+                channel, bw, max_a, max_b, f_int);
+}
+
 void HalJaguar2::bb_reset() {
   /* MAC 0x0 BIT16 (SYS_FUNC_EN FEN_BBRSTB) 0->1 — the _iqk_bb_reset_8822b /
    * _8821c mechanism; relatches the BB DAC/DFE clock tree. */
@@ -615,6 +883,22 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
       _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x412);
   }
 
+  /* config_phydm_switch_band_8822b RxHP-with-SoML block (SoML is enabled at
+   * config_trx_mode): 5G SoML-on -> 0x8cc=0x08108000, 0x8d8[27]=0,
+   * 0xc04/0xe04[21|18]=0. 2.4G SoML-on with rfe_type 3/5/8/17 keeps the
+   * 0x08108492 defaults (vendor branch), other RFEs take the same values as
+   * 5G. Kernel-parity state read back from the working driver at ch44. */
+  _device.phy_set_bb_reg(0x0c04, (1u << 21) | (1u << 18), 0x0);
+  _device.phy_set_bb_reg(0x0e04, (1u << 21) | (1u << 18), 0x0);
+  if (!g2 || !(rfe_type == 3 || rfe_type == 5 || rfe_type == 8 ||
+               rfe_type == 17)) {
+    _device.phy_set_bb_reg(0x08cc, 0xffffffff, 0x08108000);
+    _device.phy_set_bb_reg(0x08d8, (1u << 27), 0x0);
+  } else {
+    _device.phy_set_bb_reg(0x08cc, 0xffffffff, 0x08108492);
+    _device.phy_set_bb_reg(0x08d8, (1u << 27), 0x1);
+  }
+
   /* RF 0xBE[17:15] per-channel phase-noise / VCO-band setting (shared with
    * fast_retune). Omitting it (writing 0 on 5G) leaves the 5G VCO mis-tuned so
    * 5G RX/TX fail entirely — this was the sole gap blocking 5G. Path A only
@@ -663,22 +947,15 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
      * config_phydm_switch_bandwidth_8822b CHANNEL_WIDTH_5/10 — verbatim,
      * incl. its masks keeping the ADC/DAC fields from the previous BW set).
      *
-     * EXPERIMENTAL on the 8822B (caps report narrowband_ok=false): with this
-     * recipe the chip syncs only ~10% of NB frames on RX and airs no valid NB
-     * TX, while the OpenHD kernel module on the same dongle does full-rate NB
-     * with the SAME firmware blob and the same page-8 BB state (hardware
-     * A/B'd via reference/rtl88x2bu/88x2bu_ohd.ko + write_reg bisect). A
-     * usbmon capture of the kernel's 20->10 MHz switch plus the following
-     * 5 s shows NO H2C and NO host RF write beyond RF18 — yet the kernel's
-     * RF 0x82/0xf2 (RXBB) converge to NB values within ~3 s (0x44 -> 0x50 ->
-     * 0x52), i.e. the on-chip FIRMWARE retunes the RX front-end for small-BW
-     * autonomously — and it does so under the kernel but not under devourer,
-     * whose FW never receives the interface-up H2C state (media status /
-     * macid / RA) that arms the FW dynamic engine. Forcing the converged RF
-     * values statically does NOT recover RX (hardware-tested), so the FW's
-     * runtime assist — not the final register values — is the operative
-     * delta. The 8821C variant has no such dependence and is fully
-     * validated. */
+     * The 8822B additionally requires an RF18 RE-LATCH EDGE after the
+     * re-clock — see the comment at the RF18 write below. (Found by
+     * golden-init replay: usbmon-capture the working kernel driver's full
+     * post-DLFW write stream, replay it verbatim from devourer via
+     * DEVOURER_REPLAY_WSEQ, delta-debug the 3630-write stream down to the
+     * causal pair. Every readable-register hypothesis had been eliminated
+     * first by A/B against reference/rtl88x2bu/88x2bu_ohd.ko: kernel NB
+     * survives devourer's entire differing MAC+BB+RF state and the removal
+     * of its only H2C traffic.) */
     const bool is5 = (bw == 5);
     v8ac &= is5 ? 0xEFEEFE00 : 0xEFFEFF00;
     v8ac |= is5 ? (1u << 6) : (1u << 7);
@@ -737,6 +1014,22 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   if (g2)
     rf18 &= 0x00060cffu;
 
+  /* 5/10 MHz: the RF synth only re-latches its internal channel state on an
+   * RF18 VALUE EDGE — a same-value rewrite does nothing, and after the
+   * baseband ADC/DAC re-clock the RF stays latched to pre-re-clock internals
+   * (RX deaf, TX invalid). The kernel never hits this because its flow always
+   * tunes through a channel/band change around a bandwidth switch; devourer's
+   * end-of-bring-up narrowband re-clock rewrites RF18 with the identical
+   * value. Force the edge: intermediate write with a different channel byte,
+   * then the real value. Isolated by golden-init replay bisection down to
+   * exactly this write pair (23300 vs 9 NB frames on the bench). */
+  if (bw == 5 || bw == 6) {
+    const uint32_t rf18_alt = (rf18 & ~0xffu) | (cch == 1 ? 2u : 1u);
+    rf_write(0, 0x18, rf18_alt);
+    if (r2t2r)
+      rf_write(1, 0x18, rf18_alt);
+  }
+
   rf_write(0, 0x18, rf18);
   if (r2t2r)
     rf_write(1, 0x18, rf18);
@@ -754,8 +1047,12 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _device.phy_set_bb_reg(0x0c20, (1u << 31), 0x1);
   _device.phy_set_bb_reg(0x0e20, (1u << 31), 0x1);
 
-  /* --- phydm_ccapar_by_rfe_8822b (CCA thresholds; rfe_type 0 => iFEM C-cut) ---
-   * col: 2G/5G x 1R/2R. reg82c/830/838 from cca_ifem_ccut. */
+  /* --- phydm_ccapar_by_rfe_8822b (CCA thresholds) --- col: 2G/5G x 1R/2R.
+   * RFE types 3/5/12/15/16/17/19 (external-FEM boards, incl. the T3U's
+   * rfe_type 3) take the cca_ifem_ccut_rfe table — devourer previously
+   * hardcoded the plain iFEM C-cut column for every board, leaving eFEM
+   * boards with mis-set carrier-sense thresholds (kernel-parity write-
+   * sequence diff). */
   {
     const int col = g2 ? (r2t2r ? 1 : 0) : (r2t2r ? 3 : 2);
     static const uint32_t cca_ifem[3][4] = {
@@ -763,9 +1060,21 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
         {0x79a0eaaa, 0x79A0EAAC, 0x79a0eaaa, 0x79a0eaaa}, /* 0x830 */
         {0x87765541, 0x87746341, 0x87765541, 0x87746341}, /* 0x838 */
     };
-    _device.phy_set_bb_reg(0x082c, 0xffffffff, cca_ifem[0][col]);
-    _device.phy_set_bb_reg(0x0830, 0xffffffff, cca_ifem[1][col]);
-    _device.phy_set_bb_reg(0x0838, 0xffffffff, cca_ifem[2][col]);
+    static const uint32_t cca_ifem_rfe[3][4] = {
+        {0x75da8010, 0x75da8010, 0x75da8010, 0x75da8010}, /* 0x82c */
+        {0x79a0eaaa, 0x97A0EAAC, 0x79a0eaaa, 0x79a0eaaa}, /* 0x830 */
+        {0x87765541, 0x86666341, 0x87765561, 0x86666361}, /* 0x838 */
+    };
+    const bool rfe_tab = rfe_type == 3 || rfe_type == 5 || rfe_type == 12 ||
+                         rfe_type == 15 || rfe_type == 16 || rfe_type == 17 ||
+                         rfe_type == 19;
+    const auto &cca = rfe_tab ? cca_ifem_rfe : cca_ifem;
+    _device.phy_set_bb_reg(0x082c, 0xffffffff, cca[0][col]);
+    _device.phy_set_bb_reg(0x0830, 0xffffffff, cca[1][col]);
+    _device.phy_set_bb_reg(0x0838, 0xffffffff, cca[2][col]);
+    /* 20 MHz DFS-channel CCA adjust (vendor tail). */
+    if (bw == 0 && !g2 && ((cch >= 52 && cch <= 64) || (cch >= 100 && cch <= 144)))
+      _device.phy_set_bb_reg(0x0838, 0xf0, 0x5);
   }
 
   /* RX-path toggle (0x808 MASKBYTE0) to leave RX dead-zone, then IGI. rx_ant
@@ -775,12 +1084,21 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _device.phy_set_bb_reg(0x0808, 0xff, rx_ant | (rx_ant << 4));
   igi_toggle();
 
+  /* phydm_spur_calibration_8822b — reset the NBI/CSI notch state, and on the
+   * chip's own spur channels PSD-detect + notch (vendor switch_channel tail). */
+  spur_calibration(channel, cch, bw);
+
   /* 5/10 MHz: BB reset (MAC 0x0 BIT16 toggle — the same _iqk_bb_reset_8822b
    * mechanism) so the DAC/DFE relatch at the new sample rate. Hardware-taught
    * on Jaguar3 (RadioManagementJaguar3::set_bandwidth_dividers): without it
    * the re-clock doesn't take. */
   if (bw == 5 || bw == 6)
     bb_reset();
+
+  /* phydm_config_kfree — per-channel-group efuse TX gain trim, applied by the
+   * vendor after every channel/BW set. Group-keyed, so FastRetune (intra-band
+   * hop) rides the last full set's trim. */
+  kfree_apply(channel);
 
   _last_tuned_ch = channel;
   _logger->info("Jaguar2: channel set ch={} bw={} (rf18=0x{:05x})", channel,
@@ -1051,6 +1369,13 @@ void HalJaguar2::config_trx_mode() {
     _device.phy_set_bb_reg(0x0940, 0xf0, 0x1);
     _device.phy_set_bb_reg(0x0940, 0xff00, 0x0);
   }
+
+  /* phydm_somlrxhp_setting(true) — SoML (adaptive ML detection) ON, the
+   * kernel's steady state on the 8822B (0x19a8 = 0xd90a0000; devourer
+   * previously left the table default 0 = SoML off, a state the vendor only
+   * uses for specific RFE types). The band-specific RxHP companion values
+   * (0x8cc/0x8d8) are set in set_channel_bw's band block. */
+  _device.phy_set_bb_reg(0x19a8, 0xffffffff, 0xd90a0000);
 
   /* --- phydm_config_rx_path_8822b(AB) --- */
   _device.phy_set_bb_reg(0x0a2c, (1u << 22), 0x0); /* disable MRC CCK CCA */

@@ -29,8 +29,8 @@ long-range digital video links.
   depending on chip — fast enough to hop on every packet
   ([how](docs/frequency-hopping.md)).
 - **Narrowband modes the kernel can't do.** 5 and 10 MHz channels on the
-  Jaguar3 chips and the Jaguar2 8821C — half/quarter the bandwidth, more
-  range from the same power.
+  Jaguar2 and Jaguar3 chips — half/quarter the bandwidth, more range from
+  the same power.
 - **A radio lab in a dongle.** Channel sounding, per-antenna signal quality,
   beamforming report capture (enough to do
   [motion sensing](docs/beamforming-victim-sensing.md)), spectrum sweeps,
@@ -53,7 +53,7 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8811AU**                 | 1T1R              | —             | —             | —                | 1T1R cut of 8812 silicon; rides the 8812 code path. Not benchmarked |
 | **RTL8814AU**                 | 4T4R, 3-SS max    | 65            | †(32)         | †(32)            | `0bda:8813`; tested on COMFAST CF-938AC and CF-960AC — antenna builds differ in realised [RX diversity](docs/measuring-spatial-diversity.md) |
 | **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | TP-Link Archer T2U Plus (`2357:0120`) |
-| **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | TP-Link Archer T3U (`2357:012d`) |
+| **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | TP-Link Archer T3U (`2357:012d`). 5/10 MHz capable |
 | **RTL8812BU**                 | 1T1R + BT         | —             | —             | —                | 1T1R cut of 8822B silicon; rides the 8822BU code path. Not benchmarked |
 | **RTL8811CU**                 | 1T1R + BT         | 36            | 29            | 28               | COMFAST CF-811AC (`0bda:c811`). 5/10 MHz capable |
 | **RTL8821CU**                 | 1T1R + BT         | —             | —             | —                | rides the 8811CU (8821C) code path. 5/10 MHz capable |

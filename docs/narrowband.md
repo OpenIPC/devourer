@@ -163,7 +163,7 @@ chip-specific traps. The ones this port paid for, current-state:
    during cold-start warm-up (this is *why* 5 MHz/5 GHz is bimodal per
    power-up), which is larger and faster than the trim step, so a fixed trim is
    a per-link qualification lever, not fire-and-forget. The production answer is
-   the **closed loop** (`DEVOURER_CFO_TRACK`, Jaguar3): the receiver reads the
+   the **closed loop** (`DEVOURER_CFO_TRACK`, Jaguar2 and Jaguar3): the receiver reads the
    per-frame CFO tail from the OFDM phy-status (DW5 `cfo_tail`), and a
    bang-bang controller (`src/CfoTracker.h`, ported from phydm
    `phydm_cfo_tracking`) steps the crystal cap on a ~2 s cadence to drive the
@@ -176,7 +176,9 @@ chip-specific traps. The ones this port paid for, current-state:
    ~1 ppm crystal-cap authority it converges to the rail (the best it can do)
    rather than the deadband. The cfo_tail→kHz scale is the coarse vendor macro
    (see `CfoTracker.h`) — the loop uses the CFO sign + deadband, not a
-   calibrated kHz.
+   calibrated kHz. Wired on Jaguar2 and Jaguar3 (both share the jgr2/jgr3
+   type1 phy-status, CFO tail at DW5); Jaguar1 is the documented follow-on
+   (its 11AC phy-status puts the tail at a different offset).
 
 4. **The same die-family can encode the divider differently.** The 8814A's
    bandwidth register looked like a mode selector (`0x8ac[1:0]`) with no

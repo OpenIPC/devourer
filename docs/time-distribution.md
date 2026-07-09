@@ -57,10 +57,44 @@ The inter-slave agreement tightens with beacon rate (≈18 µs at 100 ms → ≈
 `tsfl`); the master can be any transmitter (`ReadTsf()`, including Jaguar1).
 
 Run it with `tests/timesync_demo.sh` (one master + two slaves; joins the two
-`{"ev":"timesync.lock"}` streams by beacon seq into the inter-UE error). A
-hardware-timed master beacon (a MAC-transmitted beacon at TBTT, rather than a
-software-stamped injection) would drop the absolute-lock floor toward the
-inter-slave sub-µs, but that is a separate reserved-page/beacon-queue build.
+`{"ev":"timesync.lock"}` streams by beacon seq into the inter-UE error).
+
+## Hardware beacon — sub-µs downlink (`DEVOURER_TSYNC_HWBEACON`)
+
+The software downlink above is bounded by the master's stamp→air jitter. The
+hardware path removes it entirely: `IRtlDevice::StartBeacon` loads a beacon into
+the MAC's beacon reserved-page and lets the chip **auto-transmit it at each
+TBTT** — hardware-timed, and the MAC inserts the live 64-bit TSF into the
+beacon's timestamp field at the transmit instant. No `ReadTsf()`, no
+`send_packet`, no software in the timing path. One call suffices; the chip
+beacons indefinitely. Implemented on both HalMAC generations (Jaguar2 8822B/
+8812BU/8821C and Jaguar3 8822C/8822E); Jaguar1 has no reserved-page path.
+
+The slave then reads the *standard 802.11 beacon timestamp* (the master's live
+TSF) instead of a software tag, and fits it against its own arrival `tsfl`.
+
+The last limit is CSMA: a TBTT beacon still defers to carrier-sense and airs
+after a variable backoff, so its scheduled-TSF stamp and delayed air time
+diverge by ~hundreds of µs on a shared channel. In a time-distribution setup the
+master **owns** the channel, so that backoff is pure loss — the master disables
+EDCCA (`SetCcaMode`, on by default here; opt out with `DEVOURER_TSYNC_CSMA=1`)
+and the beacon airs exactly on schedule.
+
+Bench (HW-beacon master + slave, **crowded** ch6, 100 ms beacons):
+
+| config | downlink residual |
+|--------|-------------------|
+| software stamp | ~94 µs RMS |
+| HW beacon, CSMA on | ~470 µs RMS (backoff jitter) |
+| HW beacon + no-CSMA (default) | **0.31 µs RMS** (8822C) / 0.39 µs (8812BU) |
+
+So the master↔slave clocks track to sub-µs on any channel — the offset moves
+only with the crystal drift. `DEVOURER_TSYNC_HWBEACON=1` on both master and
+slave; `tests/beacon_ts_check.cpp` reads the raw beacon TSF for validation.
+
+Note: the beacon body must stay minimal (a long SSID / extra IEs was observed to
+break the hardware TSF insertion — the MAC wrote a per-beacon counter instead);
+`build_std_beacon` uses the validated minimal layout.
 
 ## Uplink timing advance (experimental)
 
@@ -82,7 +116,10 @@ userspace call-timing has no sub-slot control over air departure — the loop ha
 nothing fine to actuate. (The bench also has only one clean full-duplex
 Jaguar2/3 adapter; the RTL8822EU desenses its RX in TX+RX mode, adding jitter.)
 The measurement, feedback, and math are in place; closing the loop needs
-hardware-timed TX departure, which this path does not have.
+hardware-timed TX departure, which `send_packet` does not have — but the beacon
+path now does. A UE that transmits its uplink as a **TBTT-scheduled beacon**
+(`StartBeacon`) and advances by shifting its own TSF gets exactly the sub-slot
+air-departure control this loop was missing; that is the natural next iteration.
 
 Harness: `tests/timesync_ta_demo.sh` (+ `tests/timesync_ta_analyze.py`).
 
@@ -92,6 +129,10 @@ Harness: `tests/timesync_ta_demo.sh` (+ `tests/timesync_ta_analyze.py`).
 - `DEVOURER_TSYNC_INTERVAL_MS=N` — master beacon period (default 100)
 - `DEVOURER_TSYNC_RATE=<spec>` — beacon TX rate (default 6M; must be heard)
 - `DEVOURER_TSYNC_SECS=N` — run duration (0 = until signalled)
+- `DEVOURER_TSYNC_HWBEACON=1` — hardware-timed beacon downlink (StartBeacon) →
+  sub-µs; set on both master and slave
+- `DEVOURER_TSYNC_CSMA=1` — keep CSMA on the HW-beacon master (default: EDCCA
+  off so the beacon airs exactly at TBTT — the master owns the channel)
 - `DEVOURER_TSYNC_UPLINK=1` — enable the uplink timing-advance loop (experimental)
 - `DEVOURER_TSYNC_SLOT_MS=N` — uplink slot grid on the master TSF (default 20)
 - `DEVOURER_TSYNC_TA_GAIN=g` — TA integrator gain (default 0.3)

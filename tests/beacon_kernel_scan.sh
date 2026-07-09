@@ -12,10 +12,11 @@
 #
 #   sudo SCAN_IF=wlp4s0u2u4 B_VID=0x2357 B_PID=0x012d tests/beacon_kernel_scan.sh
 #
-# Proven result (8812BU beacon, rtw88 8822CU station, ch6):
-#   BSS 57:42:75:05:d6:00  TSF <live>  freq 2437  beacon interval 25 TUs
+# Proven result (8812BU beacon, rtw88 8822CU station) on BOTH bands — ch6
+# (CH=6 FREQ=2437) and ch36 (CH=36 FREQ=5180):
+#   BSS 57:42:75:05:d6:00  TSF <live>  freq <2437|5180>  beacon interval 25 TUs
 #   capability: ESS  SSID: devourerAP  Supported rates 1..54 (basic flags)
-#   DS Parameter set: channel 6  TIM: DTIM Count 0 Period 1  ERP: <no flags>
+#   DS Parameter set: channel <6|36>  TIM: DTIM Count 0 Period 1  ERP: <no flags>
 set -uo pipefail
 cd "$(dirname "$0")/.."
 SCAN_IF=${SCAN_IF:-wlp4s0u2u4}

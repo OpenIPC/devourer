@@ -121,7 +121,9 @@ devourer and scans for it with a second Realtek adapter bound to `rtw88`
 
 So devourer's beacon is not just wire-correct but accepted as a legitimate AP by
 the mac80211/rtw88 BSS parser — live TSF, capability, SSID, rates (with basic-rate
-flags), DS param, TIM/DTIM and ERP all interpreted correctly.
+flags), DS param, TIM/DTIM and ERP all interpreted correctly. Confirmed on **both
+bands** — ch6 (2437 MHz) and ch36 (5180 MHz). A dense beacon interval (e.g. 25 TU,
+`DEVOURER_BCN_TU`) is needed so the scan's per-channel dwell catches it.
 
 ## Uplink timing advance (experimental)
 

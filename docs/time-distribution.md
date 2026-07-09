@@ -119,19 +119,28 @@ full-duplex UE transmits one uplink per beacon, advanced by that correction, so
 its frames should land on the master's slot boundary. Both nodes come up
 full-duplex (`DEVOURER_TX_WITH_RX=thread`, InitWrite + StartRxLoop).
 
-The control loop converges in the headless selftest and the full-duplex plumbing
-works on-air — with a **fixed** advance the uplinks arrive tightly clustered
-(~±0.2 ms). But the closed loop does **not** converge on the bench, and a
+With the default `send_packet` uplink the loop does **not** converge, and a
 fixed-advance authority test shows why: changing the advance shifts the UE's
 send-*call* time but not the master-measured *arrival* phase. Under full-duplex,
 `send_packet` queues the frame and the chip airs it on its own schedule, so
 userspace call-timing has no sub-slot control over air departure — the loop has
-nothing fine to actuate. (The bench also has only one clean full-duplex
-Jaguar2/3 adapter; the RTL8822EU desenses its RX in TX+RX mode, adding jitter.)
-The measurement, feedback, and math are in place; closing the loop needs
-hardware-timed TX departure, which `send_packet` does not have — but the beacon
-path now does. A UE that transmits its uplink as a **TBTT-scheduled beacon**
-(`StartBeacon`) gets the sub-slot air-departure control this loop was missing.
+nothing fine to actuate (bench baseline: arrival phase RMS ~5.4 ms, drifting
+across the whole slot).
+
+**Closed loop (`DEVOURER_TSYNC_HWBEACON=1` on the UE).** The fix is a
+hardware-timed uplink: the UE airs its uplink from the **beacon engine**
+(`StartBeacon` stores a tdma Uplink frame in the rsvd page; the engine airs it at
+the UE's TBTT) and steers that TBTT with `AdjustBeaconTimingFine` per the master's
+TA — the sub-slot air-departure control `send_packet` lacked. The master's
+measurement path is unchanged (it matches the Uplink frame by class). Bench-proven
+to converge: master = 8812AU (Jaguar1, full-duplex — the master needs no fine
+steering, so it need not be J3), UE = 8822CU (J3, HW-beacon + µs-fine steer), ch36
+slot 20 ms. The arrival phase drops from ~6 ms to a bounded oscillation around
+zero at **~1.25 ms RMS steady-state** (gain 0.30) — a 4× improvement over the
+non-converging `send_packet` baseline. The residual is the fine actuator's USB
+read→write jitter (~0.5–1.2 ms per correction, §Microsecond-fine steering); it is
+the floor for a userspace-USB TSF write (a kernel PCIe driver with MMIO would be
+tighter). Harness: `tests/timesync_ta_demo.sh` with `HWBEACON=1`.
 
 **Steering the TBTT.** The actuator is `AdjustBeaconTiming(microseconds)`, not a
 TSF write: `WriteTsf` moves the reported TSF (and the beacon-body timestamp) but
@@ -178,7 +187,9 @@ Harness: `tests/timesync_ta_demo.sh` (+ `tests/timesync_ta_analyze.py`).
 - `DEVOURER_TSYNC_RATE=<spec>` — beacon TX rate (default 6M; must be heard)
 - `DEVOURER_TSYNC_SECS=N` — run duration (0 = until signalled)
 - `DEVOURER_TSYNC_HWBEACON=1` — hardware-timed beacon downlink (StartBeacon) →
-  sub-µs; set on both master and slave
+  sub-µs; set on both master and slave. On the **UE** (role=ue) it instead
+  selects the hardware-beacon uplink fine-steered by `AdjustBeaconTimingFine` —
+  the converging closed loop (J3 UE required for µs steering)
 - `DEVOURER_TSYNC_CSMA=1` — keep CSMA on the HW-beacon master (default: EDCCA
   off so the beacon airs exactly at TBTT — the master owns the channel)
 - `DEVOURER_TSYNC_UPLINK=1` — enable the uplink timing-advance loop (experimental)

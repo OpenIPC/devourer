@@ -363,6 +363,66 @@ static void run_ue(IRtlDevice* dev, const timesync::Config& c) {
   sleep_ms(2000);
   const auto rt = devourer::build_stream_radiotap(c.rate);
   const int64_t slot_us = (int64_t)c.slot_ms * 1000;
+
+  // --- Hardware-beacon uplink (fine-steered) — DEVOURER_TSYNC_HWBEACON --------
+  // The send_packet uplink below has no sub-slot air-departure control (the chip
+  // airs the queued frame on its own schedule), so the TA loop cannot converge
+  // (the doc's fixed-TA authority test: TA shifts the send-CALL time, not the
+  // measured arrival). Instead air the uplink from the BEACON engine —
+  // hardware-timed at the UE's TBTT — and steer that TBTT with
+  // AdjustBeaconTimingFine per the master's TA. The uplink is a tdma Uplink frame
+  // (not a beacon FC), which StartBeacon stores in the rsvd page and the engine
+  // airs verbatim at each TBTT, so the master's existing Uplink measurement path
+  // sees it unchanged. The UE owns its slot too, so drop EDCCA (like the master)
+  // for a crisp TBTT departure. This is the closed-loop LTE timing advance.
+  if (c.hwbeacon) {
+    dev->SetCcaMode(true);
+    int interval_tu = c.interval_ms * 1000 / 1024;
+    if (interval_tu < 1) interval_tu = 1;
+    auto up = tdma::build_frame(rt, static_cast<tdma::Class>(timesync::kClassUplink),
+                                0, 0, 0);
+    bool ok = dev->StartBeacon(up.data(), up.size(), interval_tu);
+    fprintf(stderr, "timesync ue(HW-beacon uplink): StartBeacon(%d TU) -> %s; "
+                    "steering via AdjustBeaconTimingFine\n",
+            interval_tu, ok ? "OK" : "FAILED");
+    if (!ok) { dev->StopRxLoop(); rx.join(); return; }
+    double applied_ta = 0;   // TA already actuated into the TBTT (cumulative)
+    uint64_t steers = 0;
+    auto nstat = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    auto deadline2 = std::chrono::steady_clock::now() + std::chrono::seconds(c.secs);
+    while (!g_devourer_should_stop) {
+      // Apply the TA increment: more TA => UE transmits earlier => advance (<0 µs).
+      double ta = g_ue_ta_us.load(std::memory_order_relaxed);
+      double delta = ta - applied_ta;
+      if (std::fabs(delta) >= 3.0) {
+        dev->AdjustBeaconTimingFine(-(int32_t)std::llround(delta));
+        applied_ta = ta;     // integrating loop: master measures the real arrival
+        ++steers; g_ue_tx.fetch_add(1, std::memory_order_relaxed);
+      }
+      if (std::chrono::steady_clock::now() >= nstat) {
+        nstat += std::chrono::seconds(1);
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      "{\"ev\":\"timesync.ue\",\"beacons\":%llu,\"steers\":%llu,"
+                      "\"ta_us\":%.1f}\n",
+                      (unsigned long long)g_ue_beacons.load(),
+                      (unsigned long long)steers, ta);
+        emit(buf);
+      }
+      if (c.secs && std::chrono::steady_clock::now() >= deadline2) break;
+      sleep_ms(50);   // rate-limit fine steers (each toggles EN_BCN_FUNCTION)
+    }
+    dev->StopRxLoop(); rx.join();
+    fprintf(stderr,
+            "\n=== timesync ue(HW-beacon) summary ===\n"
+            "  beacons heard : %llu\n"
+            "  fine steers   : %llu\n"
+            "  final TA      : %.2f us\n",
+            (unsigned long long)g_ue_beacons.load(), (unsigned long long)steers,
+            g_ue_ta_us.load());
+    return;
+  }
+
   fprintf(stderr, "timesync ue: ch%d, uplink one frame per beacon (TA-corrected)\n",
           c.channel);
 

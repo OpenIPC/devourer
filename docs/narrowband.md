@@ -309,6 +309,17 @@ they can be compared:
   bulk traffic, so the stamp is intermittent (n/a on a busy transmitter, a
   noisy ppm figure otherwise).
 
+The same per-frame TSF supports **multi-radio correlation**: two receivers that
+decode a common frame each latch it with their own hardware TSF, so relating
+their independent clocks needs no shared reference. `tests/tsf_tdoa_probe.cpp`
+matches frames both receivers heard (by the TD tag) and fits Δ(tsfl) vs time:
+on the bench (8822C + 8822B) it measures a stable **~16.5 ppm** inter-receiver
+crystal drift and a **~0.35 µs RMS** timestamp-tracking residual — the two
+clocks relate to sub-microsecond precision. That residual is the noise floor a
+TDOA solver would face; real localization needs baselines where the propagation
+difference exceeds it (hundreds of metres at 1 µs TSF resolution), so a bench
+shows the clock relationship, not geometry.
+
 A receiver switching in lockstep loses the ~switch-latency window at each phase
 edge, so it switches `guard_ms` **early** (the guard must exceed the chip's
 switch latency; bursts must be ≫ it). Roles:

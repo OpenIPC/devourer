@@ -145,15 +145,15 @@ multicast address, so rtw88 silently drops the auth before it hits the air
 (bench-proven across two station chips — `0x57` → no auth on air, `0x02` → auth on
 air and association completes). Use a locally-administered unicast BSSID (`0x02..`).
 
-**Data plane — a real station pings devourer's AP.** `ap_responder` also answers
-the post-association data plane (ARP requests for the AP IP → ARP replies, ICMP
-echo requests → echo replies, over 802.11 from-DS data frames), so an associated
-station running `ping 192.168.99.1` gets **0% packet loss, ~1.8 ms RTT**
-(`tests/ap_ping_demo.sh`; the station needs a static IP — there is no DHCP
-server). So devourer is a real, associable, pingable AP — a Linux station
-discovers it, authenticates, associates, and exchanges IP traffic with it over the
-air, exactly like a kernel-driven AP. (A full data path — DHCP, forwarding — is an
-AP *stack* concern beyond the driver.)
+**Data plane — a real station gets an IP and pings devourer's AP.** `ap_responder`
+answers the post-association data plane over 802.11 from-DS data frames: a minimal
+**DHCP server** (DISCOVER→OFFER, REQUEST→ACK leasing 192.168.99.2), **ARP**
+replies for the AP IP, and **ICMP** echo replies. So a Linux station associates,
+`dhcpcd` **automatically leases 192.168.99.2** from it, and `ping 192.168.99.1`
+returns **0% packet loss, ~2 ms RTT** — the full self-service chain (beacon → auth
+→ assoc → DHCP → ARP/ICMP → ping), like a hostapd+dnsmasq AP, in one userspace
+process. `tests/ap_ping_demo.sh` runs it end to end. (Beyond this — routing/NAT,
+WPA2 — is AP-stack scope, not driver parity.)
 
 ## Uplink timing advance (experimental)
 

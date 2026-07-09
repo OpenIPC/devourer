@@ -13,9 +13,11 @@
 // ~2 ms RTT. The AP sees AUTH/ASSOC with retry=0 (devourer HARDWARE-ACKs them —
 // MACID = BSSID, set by StartBeacon) and answers the data plane below: ARP
 // requests for the AP IP -> ARP replies, ICMP echo requests -> echo replies, over
-// 802.11 from-DS data frames. Run with a DENSE beacon (DEVOURER_BCN_TU=25 — a fast
-// channel-hopping supplicant scan misses a 100 TU beacon). The station needs a
-// static IP (192.168.99.2/24; the AP answers for .1) — there is no DHCP server.
+// 802.11 from-DS data frames — plus a minimal DHCP server, so the station gets
+// 192.168.99.2 AUTOMATICALLY (dhcpcd: offered/leased) with no manual IP. Run with
+// a DENSE beacon (DEVOURER_BCN_TU=25 — a fast channel-hopping supplicant scan
+// misses a 100 TU beacon). The whole chain (beacon -> auth -> assoc -> DHCP ->
+// ARP/ICMP -> ping 0% loss) is a self-service AP like hostapd+dnsmasq.
 // See tests/ap_ping_demo.sh.
 //
 // THE FIX that unblocked it: the BSSID must be UNICAST. The canonical test SA
@@ -89,6 +91,37 @@ static std::vector<uint8_t> build_data(const uint8_t* sta, uint16_t eth,
       (uint8_t)(eth >> 8), (uint8_t)(eth & 0xff)};
   m.insert(m.end(), pl, pl + plen);
   return m;
+}
+// Build a DHCP OFFER (msgtype 2) / ACK (5) leasing 192.168.99.2 to the station,
+// wrapped in UDP(67->68)/IP(AP->broadcast)/802.11-data. So the station gets an IP
+// automatically — no manual static config.
+static const uint8_t kLeaseIp[4] = {192, 168, 99, 2};
+static std::vector<uint8_t> build_dhcp_reply(const uint8_t* sta, const uint8_t* xid,
+                                             uint8_t msgtype) {
+  std::vector<uint8_t> b(236, 0);                      // BOOTP fixed area
+  b[0] = 2; b[1] = 1; b[2] = 6;                        // op=reply, htype=eth, hlen=6
+  std::memcpy(&b[4], xid, 4);                          // xid
+  std::memcpy(&b[16], kLeaseIp, 4);                    // yiaddr (offered IP)
+  std::memcpy(&b[20], kApIp, 4);                       // siaddr (server)
+  std::memcpy(&b[28], sta, 6);                         // chaddr (client MAC)
+  const uint8_t opt[] = {0x63,0x82,0x53,0x63,          // DHCP magic
+      53,1,msgtype, 54,4,kApIp[0],kApIp[1],kApIp[2],kApIp[3],
+      51,4,0,1,0x51,0x80,                              // lease 86400 s
+      1,4,255,255,255,0,                               // subnet /24
+      3,4,kApIp[0],kApIp[1],kApIp[2],kApIp[3],         // router
+      6,4,kApIp[0],kApIp[1],kApIp[2],kApIp[3], 255};   // DNS, end
+  b.insert(b.end(), opt, opt + sizeof(opt));
+  int ul = 8 + (int)b.size();                          // UDP len
+  std::vector<uint8_t> pl(28, 0);                      // IP(20)+UDP(8)
+  pl[0] = 0x45; int tot = 20 + ul; pl[2] = tot >> 8; pl[3] = tot & 0xff;
+  pl[8] = 64; pl[9] = 17;                              // TTL, proto UDP
+  std::memcpy(&pl[12], kApIp, 4);                      // src = AP
+  pl[16]=pl[17]=pl[18]=pl[19]=0xff;                    // dst = 255.255.255.255
+  uint16_t ic = csum16(pl.data(), 20); pl[10] = ic >> 8; pl[11] = ic & 0xff;
+  pl[20]=0; pl[21]=67; pl[22]=0; pl[23]=68;            // UDP sport 67 dport 68
+  pl[24] = ul >> 8; pl[25] = ul & 0xff;                // UDP len (csum 0 = allowed)
+  pl.insert(pl.end(), b.begin(), b.end());
+  return build_data(sta, 0x0800, pl.data(), (int)pl.size());
 }
 
 // Common: [SSID + rates + DS] IE tail for probe/assoc responses.
@@ -179,6 +212,19 @@ static void on_rx(const Packet& p) {
           uint16_t cc = csum16(r.data() + ihl, pllen - ihl);
           r[ihl + 2] = cc >> 8; r[ihl + 3] = cc & 0xff;
           enqueue(build_data(sta, 0x0800, r.data(), pllen)); g_data.fetch_add(1);
+        }
+      } else if (ip[9] == 17 && (int)pllen >= ihl + 8 + 240) {  // UDP -> DHCP
+        const uint8_t* udp = ip + ihl;
+        if (((udp[2] << 8) | udp[3]) == 67) {          // DHCP server port
+          const uint8_t* dh = udp + 8; const uint8_t* end = pl + pllen;
+          uint8_t mt = 0;                              // option 53 = message type
+          for (const uint8_t* o = dh + 240; o + 1 < end && *o != 0xff; ) {
+            if (*o == 0) { o++; continue; }
+            if (*o == 53 && o + 2 < end) mt = o[2];
+            o += 2 + o[1];
+          }
+          uint8_t reply = (mt == 1) ? 2 : (mt == 3) ? 5 : 0;  // DISCOVER->OFFER, REQUEST->ACK
+          if (reply) { enqueue(build_dhcp_reply(sta, dh + 4, reply)); g_data.fetch_add(1); }
         }
       }
     }

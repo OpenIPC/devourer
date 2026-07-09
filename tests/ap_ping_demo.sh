@@ -37,9 +37,17 @@ for i in $(seq 1 15); do
   L=$(sudo iw dev "$STA_IF" link 2>&1 | grep -oE 'Connected to [0-9a-f:]+') && { echo "-- link: $L (after ${i}s)"; break; }
   sleep 1
 done
-sudo ip addr flush dev "$STA_IF" 2>/dev/null; sudo ip addr add "$STAIP/24" dev "$STA_IF"
+# Get an IP from devourer's built-in DHCP server (no manual static config).
+sudo ip addr flush dev "$STA_IF" 2>/dev/null
+if command -v dhcpcd >/dev/null; then
+  sudo timeout 20 dhcpcd -4 -1 -t 18 "$STA_IF" 2>&1 | grep -iE "offered|leased" | sed 's/^/-- /'
+else
+  echo "-- (no dhcpcd; static IP fallback)"; sudo ip addr add "$STAIP/24" dev "$STA_IF"
+fi
+echo "-- station IP: $(ip -4 -o addr show "$STA_IF" | grep -oE '192\.168\.99\.[0-9]+' | head -1)"
 sudo ping -c 1 -W 2 -I "$STA_IF" "$APIP" >/dev/null 2>&1   # warm ARP
 echo "-- ping $APIP from $STA_IF --"
 sudo ping -c 6 -W 1 -I "$STA_IF" "$APIP" | tail -6
+sudo dhcpcd -x "$STA_IF" 2>/dev/null || true
 echo "-- AP handshake+data log --"
 grep -iE "AUTH req|ASSOC req|data\(" "$LOG" | tail -4

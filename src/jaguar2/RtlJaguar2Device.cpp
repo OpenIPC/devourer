@@ -1140,9 +1140,9 @@ bool RtlJaguar2Device::StartBeacon(const uint8_t *beacon, size_t len,
                                    int interval_tu) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   /* Mirrors the working Jaguar3 path (RtlJaguar3Device::StartBeacon) — the same
-   * two bugs (beacon at page 0, radiotap-in-rsvd-page) applied here. NOTE: this
-   * Jaguar2 port is by-construction identical to the validated J3 flow but is
-   * UNTESTED (no 8822B/8821C on the bench when it was written). */
+   * two bugs (beacon at page 0, radiotap-in-rsvd-page) applied here. Validated on
+   * hardware: RTL8812BU (2357:012d, Jaguar2) auto-transmits the beacon at TBTT,
+   * decoded by an 8822E RX (~100 beacons / 12 s). */
   size_t rt = (len >= 4) ? (size_t)(beacon[2] | (beacon[3] << 8)) : 0;
   if (rt > len) rt = 0;
   const uint8_t *mpdu = beacon + rt;
@@ -1175,9 +1175,20 @@ bool RtlJaguar2Device::StartBeacon(const uint8_t *beacon, size_t len,
   uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
   _device.rtw_write<uint32_t>(0x0420, txq | (1u << 22) /* BIT_EN_BCNQ_DL */);
   _logger->info("beacon(J2): beacon@rsvd_boundary, net_type->AP, BCN_CTRL=0x18, "
-                "EN_BCNQ_DL (interval {} TU) — UNTESTED port of the J3 fix",
-                interval_tu);
+                "EN_BCNQ_DL (interval {} TU)", interval_tu);
   return true;
+}
+
+void RtlJaguar2Device::SetCcaMode(bool disabled) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  uint32_t v520 = _device.rtw_read<uint32_t>(0x0520);
+  uint32_t v524 = _device.rtw_read<uint32_t>(0x0524);
+  if (disabled) { v520 |= (1u << 15); v524 &= ~(1u << 11); }
+  else          { v520 &= ~(1u << 15); v524 |= (1u << 11); }
+  _device.rtw_write<uint32_t>(0x0520, v520);
+  _device.rtw_write<uint32_t>(0x0524, v524);
+  _logger->info("Jaguar2: MAC EDCCA {}", disabled ? "DISABLED (dis_cca)"
+                                                  : "enabled (default)");
 }
 
 uint64_t RtlJaguar2Device::ReadTsf() {

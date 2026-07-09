@@ -68,6 +68,9 @@ public:
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+  /* Disable/restore the MAC EDCCA gate (BIT_DIS_EDCCA 0x520[15] + EDCCA-mask
+   * 0x524[11] — HalMAC-common with J3) so a TBTT beacon airs on schedule. */
+  void SetCcaMode(bool disabled) override;
   void Stop() override;
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;

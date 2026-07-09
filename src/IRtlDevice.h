@@ -199,6 +199,15 @@ public:
    * exception). */
   virtual uint64_t ReadTsf() { return 0; }
 
+  /* EXPERIMENTAL: load a beacon into the beacon queue + enable the MAC beacon
+   * function, so the chip auto-transmits it at each TBTT (hardware-timed,
+   * host-jitter-free). Returns false where unsupported (default). */
+  virtual bool BeaconTbttSpike(const uint8_t *beacon, size_t len,
+                               int interval_tu) {
+    (void)beacon; (void)len; (void)interval_tu;
+    return false;
+  }
+
   /* Clean shutdown: halt TRX DMA and power the chip down to a re-enumerable
    * state (mirrors the kernel driver's card-disable on unbind). Call after the
    * RX/TX loop exits and BEFORE releasing/closing the USB interface, so the

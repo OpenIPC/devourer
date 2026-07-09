@@ -152,8 +152,18 @@ replies for the AP IP, and **ICMP** echo replies. So a Linux station associates,
 `dhcpcd` **automatically leases 192.168.99.2** from it, and `ping 192.168.99.1`
 returns **0% packet loss, ~2 ms RTT** — the full self-service chain (beacon → auth
 → assoc → DHCP → ARP/ICMP → ping), like a hostapd+dnsmasq AP, in one userspace
-process. `tests/ap_ping_demo.sh` runs it end to end. (Beyond this — routing/NAT,
-WPA2 — is AP-stack scope, not driver parity.)
+process. `tests/ap_ping_demo.sh` runs it end to end.
+
+**WPA2-PSK.** `tests/ap_wpa2.cpp` runs the WPA2 **4-way handshake** authenticator —
+the beacon/assoc advertise an RSN IE and the AP does msg1→4 with PMK/PTK
+(PBKDF2+PRF), HMAC-SHA1 MIC and an AES-key-wrapped GTK (openssl in userspace). A
+real station completes it: wpa_supplicant reports `WPA: Key negotiation completed …
+[PTK=CCMP GTK=CCMP]` + `CTRL-EVENT-CONNECTED`. The handshake needs no CCMP
+(EAPOL-Key frames are cleartext, MIC-protected), so it works without the chip
+crypto engine. Encrypted CCMP *data* is the remaining follow-on (software AES-CCM
+on the data path); the station disconnects after the handshake because data isn't
+yet encrypted. (Routing/NAT and hardware CCMP offload are AP-stack / chip-descriptor
+scope beyond this.)
 
 ## Uplink timing advance (experimental)
 

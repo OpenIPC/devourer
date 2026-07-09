@@ -69,6 +69,7 @@ public:
   void WriteTsf(uint64_t tsf) override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
   int32_t AdjustBeaconTiming(int32_t microseconds) override;
+  int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
   void Stop() override;
 
   /* Runtime TX-power control (IRtlDevice contract; see src/TxPower.h).

@@ -73,6 +73,7 @@ public:
    * 0x524[11] — HalMAC-common with J3) so a TBTT beacon airs on schedule. */
   void SetCcaMode(bool disabled) override;
   int32_t AdjustBeaconTiming(int32_t microseconds) override;
+  int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
   void Stop() override;
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;

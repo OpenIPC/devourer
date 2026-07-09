@@ -72,6 +72,7 @@ int main(int argc,char**argv){
   libusb_context*ctx=nullptr; libusb_init(&ctx);
   libusb_set_option(ctx,LIBUSB_OPTION_LOG_LEVEL,LIBUSB_LOG_LEVEL_WARNING);
   uint16_t vid=0x0bda,pid=0xc812;
+  if(const char*v=std::getenv("DEVOURER_VID")) vid=(uint16_t)strtoul(v,0,0);
   if(const char*p=std::getenv("DEVOURER_PID")) pid=(uint16_t)strtoul(p,0,0);
   auto*h=libusb_open_device_with_vid_pid(ctx,vid,pid);
   if(!h){fprintf(stderr,"master open fail\n");return 1;}
@@ -88,8 +89,15 @@ int main(int argc,char**argv){
   fprintf(stderr,"MASTER beacon up @100TU, steady 7s then AdjustBeaconTiming\n");
   std::this_thread::sleep_for(std::chrono::seconds(7));
   int us = (SHORT-100)*1024;   // SHORT<100 => negative => advance (earlier)
-  printf("TWEAK_MS %ld short=%d req_us=%d\n", now_ms(), SHORT, us); fflush(stdout);
-  int applied = dev->AdjustBeaconTiming(us);                // productized primitive
+  int applied;
+  if (const char* f = std::getenv("FINE_US")) {             // µs-fine variant
+    us = atoi(f);
+    printf("TWEAK_MS %ld fine_us=%d\n", now_ms(), us); fflush(stdout);
+    applied = dev->AdjustBeaconTimingFine(us);
+  } else {
+    printf("TWEAK_MS %ld short=%d req_us=%d\n", now_ms(), SHORT, us); fflush(stdout);
+    applied = dev->AdjustBeaconTiming(us);                  // TU-quantized primitive
+  }
   printf("RESTORE_MS %ld applied_us=%d\n", now_ms(), applied); fflush(stdout);
   std::this_thread::sleep_for(std::chrono::seconds(7));
   return 0;
@@ -151,9 +159,9 @@ g++ $CXXFLAGS "$TMP/obs.cpp"    examples/common/env_config.cpp "$LIB" $LDLIBS -o
 cp "$TMP/bshift_master" /tmp/bshift_master; cp "$TMP/bshift_obs" /tmp/bshift_obs
 
 echo "== run: master 8822CU one-shot 100->$SHORT->100 TU, observer 8822EU, ch$CH =="
-sudo DEVOURER_CHANNEL="$CH" /tmp/bshift_obs >"$OLOG" 2>/dev/null &
+sudo DEVOURER_CHANNEL="$CH" DEVOURER_PID="${OBS_PID:-0xa81a}" /tmp/bshift_obs >"$OLOG" 2>/dev/null &
 sleep 3   # let observer's RX settle first
-sudo DEVOURER_CHANNEL="$CH" /tmp/bshift_master "$SHORT" >"$MLOG" 2>/tmp/bshift_m.err &
+sudo DEVOURER_CHANNEL="$CH" ${FINE_US:+FINE_US="$FINE_US"} /tmp/bshift_master "$SHORT" >"$MLOG" 2>/tmp/bshift_m.err &
 wait
 rm -f /tmp/bshift_master /tmp/bshift_obs
 

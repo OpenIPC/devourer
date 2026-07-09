@@ -1181,38 +1181,28 @@ bool RtlJaguar2Device::StartBeacon(const uint8_t *beacon, size_t len,
 }
 
 int32_t RtlJaguar2Device::AdjustBeaconTiming(int32_t microseconds) {
-  int nominal;
-  {
-    std::lock_guard<std::mutex> lk(_reg_mu);
-    nominal = _bcn_interval_tu;
+  (void)microseconds;
+  /* Beacon-TBTT STEERING IS NOT SUPPORTED ON JAGUAR2. Both mechanisms that work
+   * on Jaguar3 drop the beacon on the 8822B engine (bench-proven on the 8812BU,
+   * the beacon stops airing after the tweak): the one-shot REG_BCN_INTERVAL
+   * (0x0554) tweak AND the EN_BCN_FUNCTION-toggle + TSF-shift both lose the
+   * bcn-valid latch, and J2 does not retain the beacon bytes to re-download and
+   * re-assert it. So refuse rather than silently kill the beacon. (A fix would
+   * store the beacon bytes in StartBeacon and re-download after the tweak — the
+   * Jaguar3 store-bytes path — but that needs its own hardware validation.) The
+   * downlink (StartBeacon + SetCcaMode) is unaffected; only the uplink-TA
+   * actuator is J3-only. */
+  static bool warned = false;
+  if (!warned) {
+    warned = true;
+    _logger->warn("beacon(J2): TBTT steering not supported (8822B beacon engine "
+                  "drops the beacon on a TBTT re-latch) — uplink-TA is Jaguar3-only");
   }
-  if (nominal <= 0) return 0;  // no active beacon
-  /* Round to whole TU (REG_BCN_INTERVAL is integer TU); sign follows the request
-   * (>0 = later/retard => longer one-shot interval, <0 = earlier/advance). */
-  int delta_tu = (microseconds >= 0 ? microseconds + 512 : microseconds - 512) / 1024;
-  if (delta_tu == 0) return 0;  // below 1-TU resolution
-  int one = nominal + delta_tu;
-  if (one < 1) {  // can't shorten below one TU
-    one = 1;
-    delta_tu = one - nominal;
-  }
-  /* Latch one interval at the tweaked length; after exactly one TBTT fires under
-   * it the phase has shifted by delta_tu TU, so restore nominal. Steers the
-   * beacon-engine TBTT counter, not the TSF (WriteTsf can't; bench-proven).
-   * Release _reg_mu across the wait so the pwrtrack tick isn't starved. */
-  {
-    std::lock_guard<std::mutex> lk(_reg_mu);
-    _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */, static_cast<uint16_t>(one));
-  }
-  std::this_thread::sleep_for(std::chrono::microseconds(one * 1024 + 2000));
-  {
-    std::lock_guard<std::mutex> lk(_reg_mu);
-    _device.rtw_write16(0x0554, static_cast<uint16_t>(nominal));
-  }
-  _logger->info("beacon(J2): TBTT shift {} TU ({} us) via one-shot interval "
-                "{}->{}->{} TU",
-                delta_tu, delta_tu * 1024, nominal, one, nominal);
-  return delta_tu * 1024;
+  return 0;
+}
+
+int32_t RtlJaguar2Device::AdjustBeaconTimingFine(int32_t microseconds) {
+  return AdjustBeaconTiming(microseconds);  // both unsupported on J2 (beacon drops)
 }
 
 void RtlJaguar2Device::SetCcaMode(bool disabled) {

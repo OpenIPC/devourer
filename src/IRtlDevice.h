@@ -244,8 +244,29 @@ public:
    * microsecond). Requires an active StartBeacon. BLOCKS the caller ~one beacon
    * interval (the tweaked interval must latch and fire once before restore).
    * Returns the actual applied shift in µs (TU-quantized); 0 if no active beacon
-   * or |microseconds| < 512. Jaguar2/3 only; the base is a no-op. */
+   * or |microseconds| < 512. Jaguar3 only in practice: the Jaguar2 8822B beacon
+   * engine drops the beacon on any TBTT re-latch (bench-proven), so J2 refuses
+   * (returns 0) rather than silently kill it. Base is a no-op. */
   virtual int32_t AdjustBeaconTiming(int32_t microseconds) {
+    (void)microseconds;
+    return 0;
+  }
+
+  /* Fine (sub-TU, microsecond-granular) variant of AdjustBeaconTiming. Shifts the
+   * next beacon TBTT by `microseconds` (>0 = later/retard, <0 = earlier/advance)
+   * by toggling the MAC beacon function off, shifting the port-0 TSF, and toggling
+   * it back on so the TBTT counter re-derives from the shifted TSF. Unlike the
+   * interval-tweak AdjustBeaconTiming (quantized to whole TU), this steers at
+   * microsecond resolution — the µs-fine uplink timing-advance actuator. Note it
+   * also shifts this port's reported TSF (and the beacon-body timestamp) by the
+   * same amount, which is the intended behaviour for a UE advancing its own
+   * timebase. The USB read→write latency adds a sub-ms offset (~0.5–1.2 ms) that
+   * a closed timing-advance loop absorbs — the *resolution* is microseconds.
+   * Requires an active StartBeacon; returns the applied shift in µs. Jaguar3 only:
+   * the Jaguar2 beacon engine survives neither the beacon-function toggle nor the
+   * interval tweak (both drop the beacon), so J2 refuses (returns 0). Base is a
+   * no-op. */
+  virtual int32_t AdjustBeaconTimingFine(int32_t microseconds) {
     (void)microseconds;
     return 0;
   }

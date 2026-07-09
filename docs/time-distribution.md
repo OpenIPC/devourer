@@ -129,9 +129,32 @@ and the cadence thereafter — by Δ TU. Bench-proven to the microsecond on an
 8822C: `AdjustBeaconTiming(-20480)` advanced the TBTT by exactly 20 TU
 (observer arrival phase stepped 88018 → 67565 µs at the tweak). This is the
 802.11 IBSS/TSF-merge mechanism. Granularity is **1 TU = 1.024 ms** (the
-`REG_BCN_INTERVAL` field is integer TU) — a coarse slot/guard-alignment lever,
-not a µs-fine advance; the timesync uplink loop quantizes its correction to it.
-Actuator characterization: `tests/beacon_interval_shift.sh <short_TU>`.
+`REG_BCN_INTERVAL` field is integer TU) — a coarse slot/guard-alignment lever.
+
+**Microsecond-fine steering** (`AdjustBeaconTimingFine`, Jaguar3): the reason a
+bare `WriteTsf` doesn't move the TBTT is that the counter is latched while the
+beacon function runs — the vendor `reset_tsf` path clears `EN_BCN_FUNCTION`
+first. Toggling the beacon function off, shifting the port-0 TSF by the desired
+µs, and toggling it back on makes the TBTT re-derive from the shifted TSF at
+**microsecond resolution**. Bench-proven on an 8822C (arrival-phase steps, all
+sub-TU): `-5000 → -4479 µs`, `-10000 → -8997 µs`, `+6000 (retard) → +7172 µs`.
+The magnitude undershoots/overshoots the request by a **sub-ms USB
+read→write latency** (~0.5–1.2 ms, the real TSF advances during the register
+sequence) — a systematic offset a closed timing-advance loop absorbs; the
+resolution is what matters. It also shifts this port's TSF + beacon-body
+timestamp by the same amount, which is the intended UE-advances-its-own-timebase
+behaviour.
+
+Beacon-TBTT steering is **Jaguar3-only**. The Jaguar2 8822B beacon engine drops
+the beacon on *any* TBTT re-latch — bench-proven on the 8812BU, the beacon stops
+airing after both the interval tweak and the beacon-function toggle (the
+bcn-valid latch is lost, and J2 does not retain the beacon bytes to re-download).
+So `AdjustBeaconTiming` / `AdjustBeaconTimingFine` refuse on J2 (return 0) rather
+than silently kill the beacon; the downlink (`StartBeacon` + `SetCcaMode`) is
+unaffected.
+
+Actuator characterization: `tests/beacon_interval_shift.sh <short_TU>` (TU tweak),
+or `FINE_US=<µs> tests/beacon_interval_shift.sh` (µs-fine, Jaguar3).
 
 Harness: `tests/timesync_ta_demo.sh` (+ `tests/timesync_ta_analyze.py`).
 

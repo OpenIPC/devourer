@@ -1394,6 +1394,30 @@ int32_t RtlJaguar3Device::AdjustBeaconTiming(int32_t microseconds) {
   return delta_tu * 1024;
 }
 
+int32_t RtlJaguar3Device::AdjustBeaconTimingFine(int32_t microseconds) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_bcn_interval_tu <= 0) return 0;  // no active beacon
+  /* A bare TSF write with the beacon function running leaves the TBTT latched
+   * (bench-proven: WriteTsf moved the reported TSF but not the air-time). The
+   * vendor reset_tsf path clears EN_BCN_FUNCTION first, so do the same: toggle
+   * the beacon function off, shift the port-0 TSF, toggle on — the TBTT counter
+   * re-derives from the shifted TSF at microsecond resolution. TBTT fires at
+   * TSF % interval, so subtracting `microseconds` advances (<0) / retards (>0)
+   * the next boundary by that many µs. */
+  uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
+  uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
+  uint64_t tsf = (static_cast<uint64_t>(hi) << 32) | lo;
+  uint64_t nt = tsf - static_cast<uint64_t>(static_cast<int64_t>(microseconds));
+  uint8_t bc = _device.rtw_read8(0x0550 /* REG_BCN_CTRL */);
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc & ~(1u << 3)));  // clear EN_BCN_FUNCTION
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(nt));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(nt >> 32));
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc | (1u << 3)));   // set EN_BCN_FUNCTION
+  _logger->info("beacon(J3): fine TBTT shift {} us (TSF toggle: EN_BCN off/shift/on)",
+                microseconds);
+  return microseconds;
+}
+
 void RtlJaguar3Device::SetTxMode(const devourer::TxMode &mode) {
   _tx_mode_default = mode;
 }

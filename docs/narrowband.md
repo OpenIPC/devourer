@@ -268,7 +268,58 @@ The lever this unlocks: a receiver (or a burst-level TX scheme) can move between
 a robust narrowband link and a wide high-throughput one in well under a
 millisecond to a few milliseconds — not the ~90 ms of a full retune.
 
+## Burst-level bandwidth TDMA (the `tdma` example)
+
+`examples/tdma/` is a worked demonstration of what the cheap switch buys: a
+transmitter that alternates **bursts** between a robust narrowband width (for
+critical frames — the ~6 dB link-budget win) and a wide width (for bulk frames),
+flipping bandwidth with `FastSetBandwidth`. Two facts make it *burst*-level
+rather than per-frame: narrowband is an ADC-clock-domain state, not a radiotap
+field, and a receiver decodes exactly one width at a time — so frames of one
+protection class are grouped into a burst, both ends switch, then the next
+burst. Rate-UEP is layered on top (critical frames also ride a robust rate, bulk
+a fast MCS — reusing the `svctx` per-frame-rate mechanism).
+
+The interesting hard part is **schedule synchronization**, and devourer exposes
+no hardware time primitive (no host TSF read, no PPS/GPS hook — only a per-frame
+read-only `tsfl`). The example ships two receiver sync strategies, selectable so
+they can be compared:
+
+- **`wallclock`** — both ends compute the phase from `system_clock` (a shared
+  Unix-epoch anchor). Trivially aligned on one machine; across machines it needs
+  GPS/PPS/NTP-disciplined clocks (the caller's to provide — devourer has no
+  injection point).
+- **`marker`** — self-clocking: the TX emits a marker frame at each
+  narrowband-burst start; the receiver camps narrowband until it decodes one,
+  anchors its local schedule to it, coasts on `steady_clock`, and re-anchors on
+  each subsequent marker (drift-correcting). No external clock at all.
+
+A receiver switching in lockstep loses the ~switch-latency window at each phase
+edge, so it switches `guard_ms` **early** (the guard must exceed the chip's
+switch latency; bursts must be ≫ it). Roles:
+
+- `DEVOURER_TDMA_ROLE=tx` — run the schedule, inject class-tagged frames.
+- `=rx-sync` (`DEVOURER_TDMA_SYNC=wallclock|marker`) — switch in lockstep.
+- `=rx-camp` (`DEVOURER_TDMA_CAMP=5|10|20`) — camp permanently on one width.
+
+The second mode the user asked for — **1 TX + 2 RX** — is just a `tx` plus two
+`rx-camp` receivers, one narrowband and one wide: the narrowband receiver is an
+independent, always-listening robust link that catches every critical burst
+regardless of the wide link's health. Schedule knobs: `DEVOURER_TDMA_NB` /
+`_WIDE` (widths), `_NB_MS` / `_WIDE_MS` (burst lengths), `_EPOCH_MS` (shared
+anchor), `_GUARD_MS`, `_CRIT_RATE` / `_BULK_RATE` (per-class `TxMode`), `_GAP_US`.
+
+Bench-validated (`tests/tdma_demo.sh`, TX 8812AU, RX 8822CU/8822BU, ch 36, 10 MHz
+narrowband). Each receiver reports a per-band × per-class decode table; a correct
+run shows critical+marker frames under the narrowband band and bulk under the
+wide band, with near-zero off-diagonal (only frames caught mid-switch). Both sync
+modes lock and track; the dual-RX split is clean (each receiver hears only its
+band's bursts).
+
 ## Using it
+
+`DEVOURER_NB_BW=5` or `=10` on the demos selects narrowband; the library exposes
+it as `CHANNEL_WIDTH_5` / `CHANNEL_WIDTH_10` on `SelectedChannel`, and
 
 `DEVOURER_NB_BW=5` or `=10` on the demos selects narrowband; the library exposes
 it as `CHANNEL_WIDTH_5` / `CHANNEL_WIDTH_10` on `SelectedChannel`, and
@@ -286,4 +337,6 @@ traffic), and `tests/jaguar1_cfo_convergence.sh` (two-adapter Jaguar1 link:
 the receiver's loop engages and steps its cap to reduce a real inter-crystal
 offset — the same convergence behaviour validated on Jaguar2/Jaguar3), and
 `tests/fast_bw_parity.sh` (FastSetBandwidth timing + register parity +
-cross-RX decode, all three generations).
+cross-RX decode, all three generations), and `tests/tdma_demo.sh`
+(the burst-level bandwidth-TDMA example — both lockstep sync modes + the
+dual-RX per-band split).

@@ -161,12 +161,13 @@ real station completes it: wpa_supplicant reports `WPA: Key negotiation complete
 [PTK=CCMP GTK=CCMP]` + `CTRL-EVENT-CONNECTED`. The handshake needs no CCMP
 (EAPOL-Key frames are cleartext, MIC-protected), so it works without the chip
 crypto engine. And the **data plane is encrypted too**: the AP decrypts the
-station's CCMP frames (software AES-CCM with the TK) and answers ARP + ICMP
-encrypted, so a real station **pings the AP over WPA2/CCMP at 0% loss, ~2.5 ms
-RTT**. The station runs hardware CCMP, the AP software CCMP — they interoperate. So
-devourer is a complete WPA2-PSK AP: associate → 4-way → **encrypted** IP. (Hardware
-CCMP offload would need porting the J3 security TX/RX descriptor fields, absent in
-devourer; software CCMP sidesteps that.)
+station's CCMP frames (software AES-CCM with the TK) and answers ARP + ICMP + DHCP
+encrypted, so a real station **leases 192.168.99.2 over encrypted DHCP** and
+**pings the AP over WPA2/CCMP at 0% loss, ~2.5 ms RTT**. The station runs hardware
+CCMP, the AP software CCMP — they interoperate. So devourer is a complete
+zero-config WPA2-PSK AP: associate → 4-way → encrypted DHCP → **encrypted** IP.
+(Hardware CCMP offload would need porting the J3 security TX/RX descriptor fields,
+absent in devourer; software CCMP sidesteps that.)
 
 ## Uplink timing advance (experimental)
 

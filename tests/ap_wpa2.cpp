@@ -10,13 +10,12 @@
 // msg2(SNonce,MIC) -> derive PTK, verify MIC -> msg3(GTK,MIC) -> msg4.
 //
 // ENCRYPTED DATA plane too: after the handshake the AP decrypts the station's CCMP
-// data frames (software AES-CCM with the TK = PTK[32:48]) and answers ARP + ICMP
-// echo ENCRYPTED, so a real station pings the AP over WPA2/CCMP at 0% loss
-// (~2.5 ms RTT). The station runs hardware CCMP, the AP software CCMP — they
-// interoperate. So this is a COMPLETE WPA2-PSK AP: associate -> 4-way -> encrypted
-// IP. (A static IP is used; a DHCP-over-CCMP path would be the same handle_plain
-// extension. HW CCMP offload would need porting the J3 security TX/RX descriptor
-// fields.)
+// data frames (software AES-CCM with the TK = PTK[32:48]) and answers ARP + ICMP +
+// DHCP ENCRYPTED, so a real station leases 192.168.99.2 over encrypted DHCP (dhcpcd:
+// "leased") AND pings the AP over WPA2/CCMP at 0% loss (~2.5 ms RTT). The station
+// runs hardware CCMP, the AP software CCMP — they interoperate. So this is a COMPLETE
+// zero-config WPA2-PSK AP: associate -> 4-way -> encrypted DHCP -> encrypted IP.
+// (HW CCMP offload would need porting the J3 security TX/RX descriptor fields.)
 //
 // Details that mattered: (1) msg3 key-data pad is 0xDD then 0x00s (a 2nd 0xDD
 // mis-parses as a KDE and the station rejects msg3); (2) a prior WRONG_KEY failure
@@ -260,9 +259,28 @@ static std::vector<uint8_t> ccmp_tx(const uint8_t* sta, uint16_t eth,
   m.insert(m.end(), mic, mic+8);
   return m;
 }
-// Handle a decrypted L2 payload (LLC/SNAP + eth): answer ARP + ICMP, encrypted.
+// DHCP OFFER/ACK payload (IP+UDP+BOOTP) leasing 192.168.99.2 — encrypted by ccmp_tx.
+static const uint8_t kLeaseIp[4] = {192,168,99,2};
+static std::vector<uint8_t> dhcp_payload(const uint8_t* sta, const uint8_t* xid, uint8_t mt) {
+  std::vector<uint8_t> b(236, 0);
+  b[0]=2; b[1]=1; b[2]=6; memcpy(&b[4],xid,4);
+  memcpy(&b[16],kLeaseIp,4); memcpy(&b[20],kApIp,4); memcpy(&b[28],sta,6);
+  const uint8_t opt[]={0x63,0x82,0x53,0x63, 53,1,mt, 54,4,kApIp[0],kApIp[1],kApIp[2],kApIp[3],
+      51,4,0,1,0x51,0x80, 1,4,255,255,255,0, 3,4,kApIp[0],kApIp[1],kApIp[2],kApIp[3],
+      6,4,kApIp[0],kApIp[1],kApIp[2],kApIp[3], 255};
+  b.insert(b.end(), opt, opt+sizeof(opt));
+  int ul=8+(int)b.size();
+  std::vector<uint8_t> pl(28,0);
+  pl[0]=0x45; int tot=20+ul; pl[2]=tot>>8; pl[3]=tot&0xff; pl[8]=64; pl[9]=17;
+  memcpy(&pl[12],kApIp,4); pl[16]=pl[17]=pl[18]=pl[19]=0xff;
+  uint16_t ic=csum16(pl.data(),20); pl[10]=ic>>8; pl[11]=ic&0xff;
+  pl[20]=0; pl[21]=67; pl[22]=0; pl[23]=68; pl[24]=ul>>8; pl[25]=ul&0xff;
+  pl.insert(pl.end(), b.begin(), b.end());
+  return pl;
+}
+// Handle a decrypted L2 payload (LLC/SNAP + eth): answer ARP + ICMP + DHCP, encrypted.
 static void handle_plain(const uint8_t* sta, const uint8_t* d, int len) {
-  if (len < 8 || d[0]!=0xaa) return;
+  if (len < 8 || d[0]!=0xaa) return;                    // not LLC/SNAP (e.g. IPv6 ND)
   uint16_t eth = (d[6]<<8)|d[7]; const uint8_t* pl = d+8; int pllen = len-8;
   if (eth==0x0806 && pllen>=28) {                        // ARP
     if (((pl[6]<<8)|pl[7])==1 && memcmp(pl+24,kApIp,4)==0) {
@@ -273,13 +291,23 @@ static void handle_plain(const uint8_t* sta, const uint8_t* d, int len) {
     }
   } else if (eth==0x0800 && pllen>=28) {                 // IPv4/ICMP
     const uint8_t* ip=pl; int ihl=(ip[0]&0x0f)*4;
-    if (ip[9]==1 && pllen>=ihl+8 && memcmp(ip+16,kApIp,4)==0 && ip[ihl]==8) {
+    if (ip[9]==1 && pllen>=ihl+8 && memcmp(ip+16,kApIp,4)==0 && ip[ihl]==8) {  // ICMP echo
       std::vector<uint8_t> r(pl, pl+pllen);
       memcpy(r.data()+12,kApIp,4); memcpy(r.data()+16,ip+12,4);
       r[10]=r[11]=0; uint16_t ic=csum16(r.data(),ihl); r[10]=ic>>8; r[11]=ic&0xff;
       r[ihl]=0; r[ihl+2]=r[ihl+3]=0;
       uint16_t cc=csum16(r.data()+ihl,pllen-ihl); r[ihl+2]=cc>>8; r[ihl+3]=cc&0xff;
       enqueue(ccmp_tx(sta,0x0800,r.data(),pllen));
+    } else if (ip[9]==17 && pllen>=ihl+8+240) {          // UDP -> DHCP
+      const uint8_t* udp=ip+ihl;
+      if (((udp[2]<<8)|udp[3])==67) {
+        const uint8_t* dh=udp+8; const uint8_t* end=pl+pllen; uint8_t m=0;
+        for (const uint8_t* o=dh+240; o+1<end && *o!=0xff; ) {
+          if (*o==0){o++;continue;} if (*o==53 && o+2<end) m=o[2]; o+=2+o[1]; }
+        uint8_t reply = (m==1)?2 : (m==3)?5 : 0;
+        if (reply) { auto dp=dhcp_payload(sta, dh+4, reply);
+          enqueue(ccmp_tx(sta,0x0800,dp.data(),(int)dp.size())); }
+      }
     }
   }
 }

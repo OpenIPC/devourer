@@ -160,10 +160,13 @@ the beacon/assoc advertise an RSN IE and the AP does msg1→4 with PMK/PTK
 real station completes it: wpa_supplicant reports `WPA: Key negotiation completed …
 [PTK=CCMP GTK=CCMP]` + `CTRL-EVENT-CONNECTED`. The handshake needs no CCMP
 (EAPOL-Key frames are cleartext, MIC-protected), so it works without the chip
-crypto engine. Encrypted CCMP *data* is the remaining follow-on (software AES-CCM
-on the data path); the station disconnects after the handshake because data isn't
-yet encrypted. (Routing/NAT and hardware CCMP offload are AP-stack / chip-descriptor
-scope beyond this.)
+crypto engine. And the **data plane is encrypted too**: the AP decrypts the
+station's CCMP frames (software AES-CCM with the TK) and answers ARP + ICMP
+encrypted, so a real station **pings the AP over WPA2/CCMP at 0% loss, ~2.5 ms
+RTT**. The station runs hardware CCMP, the AP software CCMP — they interoperate. So
+devourer is a complete WPA2-PSK AP: associate → 4-way → **encrypted** IP. (Hardware
+CCMP offload would need porting the J3 security TX/RX descriptor fields, absent in
+devourer; software CCMP sidesteps that.)
 
 ## Uplink timing advance (experimental)
 

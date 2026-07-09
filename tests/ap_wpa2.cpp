@@ -9,11 +9,20 @@
 // IE (WPA2-PSK-CCMP); after assoc the AP runs the authenticator: msg1(ANonce) ->
 // msg2(SNonce,MIC) -> derive PTK, verify MIC -> msg3(GTK,MIC) -> msg4.
 //
-// After the handshake the station disconnects: encrypted CCMP *data* is the
-// follow-on (needs software AES-CCM on the data path), not implemented here. Two
-// details that mattered: (1) msg3 key-data pad is 0xDD then 0x00s (a 2nd 0xDD
+// ENCRYPTED DATA plane too: after the handshake the AP decrypts the station's CCMP
+// data frames (software AES-CCM with the TK = PTK[32:48]) and answers ARP + ICMP
+// echo ENCRYPTED, so a real station pings the AP over WPA2/CCMP at 0% loss
+// (~2.5 ms RTT). The station runs hardware CCMP, the AP software CCMP — they
+// interoperate. So this is a COMPLETE WPA2-PSK AP: associate -> 4-way -> encrypted
+// IP. (A static IP is used; a DHCP-over-CCMP path would be the same handle_plain
+// extension. HW CCMP offload would need porting the J3 security TX/RX descriptor
+// fields.)
+//
+// Details that mattered: (1) msg3 key-data pad is 0xDD then 0x00s (a 2nd 0xDD
 // mis-parses as a KDE and the station rejects msg3); (2) a prior WRONG_KEY failure
-// temp-disables the SSID in wpa_supplicant — cold-cycle the station for a clean run.
+// temp-disables the SSID in wpa_supplicant — cold-cycle the station for a clean run;
+// (3) CCMP AAD masks FC subtype/retry/pm/md + sets protected, and masks the seq
+// number (keep frag); the nonce is 0|A2|PN(6, big-endian).
 //
 // Build: g++ -std=c++20 -O2 -Isrc -Iexamples/common tests/ap_wpa2.cpp \
 //   examples/common/env_config.cpp build/libdevourer.a \
@@ -190,6 +199,91 @@ static void send_msg3() {
   fprintf(stderr, "  WPA2: sent msg3 (GTK, MIC) — 4-way in progress\n");
 }
 
+// --- CCMP data plane (software AES-CCM) so the station pings encrypted --------
+static const uint8_t kApIp[4] = {192, 168, 99, 1};
+static uint64_t g_txpn = 1;                              // AP outbound packet number
+static uint16_t csum16(const uint8_t* d, int len) {
+  uint32_t s = 0; for (int i=0;i+1<len;i+=2) s += (d[i]<<8)|d[i+1];
+  if (len&1) s += d[len-1]<<8; while (s>>16) s=(s&0xffff)+(s>>16); return (uint16_t)~s;
+}
+// CCMP AAD + nonce from the 802.11 header (802.11i 8.3.3.3.2/.3).
+static void ccmp_aad_nonce(const uint8_t* hdr, uint64_t pn, const uint8_t* a2,
+                           uint8_t* aad, int* aadlen, uint8_t* nonce) {
+  uint16_t fc = hdr[0] | (hdr[1] << 8);
+  fc &= ~0x0070; fc &= ~(0x0800|0x1000|0x2000); fc |= 0x4000;  // mask subtype/retry/pm/md, set prot
+  aad[0]=fc&0xff; aad[1]=fc>>8;
+  memcpy(aad+2, hdr+4, 18);                              // addr1,2,3
+  uint16_t seq = (hdr[22]|(hdr[23]<<8)) & 0x000f;        // keep frag, mask seqnum
+  aad[20]=seq&0xff; aad[21]=seq>>8; *aadlen=22;
+  nonce[0]=0; memcpy(nonce+1, a2, 6);
+  for (int i=0;i<6;i++) nonce[7+i] = (pn >> (8*(5-i))) & 0xff;
+}
+static bool ccm(bool enc, const uint8_t* key, const uint8_t* nonce, const uint8_t* aad,
+                int aadlen, const uint8_t* in, int inlen, uint8_t* out, uint8_t* tag) {
+  EVP_CIPHER_CTX* c = EVP_CIPHER_CTX_new(); int l; bool ok=true;
+  if (enc) {
+    EVP_EncryptInit_ex(c, EVP_aes_128_ccm(), 0,0,0);
+    EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_IVLEN, 13, 0);
+    EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_TAG, 8, 0);
+    EVP_EncryptInit_ex(c, 0,0,key,nonce);
+    EVP_EncryptUpdate(c, 0,&l,0,inlen); EVP_EncryptUpdate(c,0,&l,aad,aadlen);
+    EVP_EncryptUpdate(c, out,&l,in,inlen); EVP_EncryptFinal_ex(c,out+l,&l);
+    EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_GET_TAG, 8, tag);
+  } else {
+    EVP_DecryptInit_ex(c, EVP_aes_128_ccm(), 0,0,0);
+    EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_IVLEN, 13, 0);
+    EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_TAG, 8, tag);
+    EVP_DecryptInit_ex(c, 0,0,key,nonce);
+    EVP_DecryptUpdate(c, 0,&l,0,inlen); EVP_DecryptUpdate(c,0,&l,aad,aadlen);
+    ok = EVP_DecryptUpdate(c, out,&l,in,inlen) > 0;
+  }
+  EVP_CIPHER_CTX_free(c); return ok;
+}
+// Encrypt an AP->STA payload (LLC/SNAP+eth+data) into a CCMP data frame.
+static std::vector<uint8_t> ccmp_tx(const uint8_t* sta, uint16_t eth,
+                                    const uint8_t* pl, int plen) {
+  std::vector<uint8_t> pt = {0xaa,0xaa,0x03,0,0,0,(uint8_t)(eth>>8),(uint8_t)(eth&0xff)};
+  pt.insert(pt.end(), pl, pl+plen);
+  std::vector<uint8_t> hdr = {0x08,0x42,0,0,             // data, from-DS + protected
+      sta[0],sta[1],sta[2],sta[3],sta[4],sta[5],
+      kBssid[0],kBssid[1],kBssid[2],kBssid[3],kBssid[4],kBssid[5],
+      kBssid[0],kBssid[1],kBssid[2],kBssid[3],kBssid[4],kBssid[5], 0,0};
+  uint64_t pn = g_txpn++;
+  uint8_t aad[32], nonce[13], mic[8]; int aadlen;
+  ccmp_aad_nonce(hdr.data(), pn, kBssid, aad, &aadlen, nonce);
+  std::vector<uint8_t> ct(pt.size());
+  ccm(true, g_ptk+32, nonce, aad, aadlen, pt.data(), pt.size(), ct.data(), mic);
+  uint8_t ch8[8] = {(uint8_t)(pn&0xff),(uint8_t)((pn>>8)&0xff),0,0x20,
+      (uint8_t)((pn>>16)&0xff),(uint8_t)((pn>>24)&0xff),(uint8_t)((pn>>32)&0xff),(uint8_t)((pn>>40)&0xff)};
+  std::vector<uint8_t> m = hdr;
+  m.insert(m.end(), ch8, ch8+8); m.insert(m.end(), ct.begin(), ct.end());
+  m.insert(m.end(), mic, mic+8);
+  return m;
+}
+// Handle a decrypted L2 payload (LLC/SNAP + eth): answer ARP + ICMP, encrypted.
+static void handle_plain(const uint8_t* sta, const uint8_t* d, int len) {
+  if (len < 8 || d[0]!=0xaa) return;
+  uint16_t eth = (d[6]<<8)|d[7]; const uint8_t* pl = d+8; int pllen = len-8;
+  if (eth==0x0806 && pllen>=28) {                        // ARP
+    if (((pl[6]<<8)|pl[7])==1 && memcmp(pl+24,kApIp,4)==0) {
+      uint8_t a[28]={0,1,8,0,6,4,0,2, kBssid[0],kBssid[1],kBssid[2],kBssid[3],kBssid[4],kBssid[5],
+        kApIp[0],kApIp[1],kApIp[2],kApIp[3], pl[8],pl[9],pl[10],pl[11],pl[12],pl[13],
+        pl[14],pl[15],pl[16],pl[17]};
+      enqueue(ccmp_tx(sta,0x0806,a,28));
+    }
+  } else if (eth==0x0800 && pllen>=28) {                 // IPv4/ICMP
+    const uint8_t* ip=pl; int ihl=(ip[0]&0x0f)*4;
+    if (ip[9]==1 && pllen>=ihl+8 && memcmp(ip+16,kApIp,4)==0 && ip[ihl]==8) {
+      std::vector<uint8_t> r(pl, pl+pllen);
+      memcpy(r.data()+12,kApIp,4); memcpy(r.data()+16,ip+12,4);
+      r[10]=r[11]=0; uint16_t ic=csum16(r.data(),ihl); r[10]=ic>>8; r[11]=ic&0xff;
+      r[ihl]=0; r[ihl+2]=r[ihl+3]=0;
+      uint16_t cc=csum16(r.data()+ihl,pllen-ihl); r[ihl+2]=cc>>8; r[ihl+3]=cc&0xff;
+      enqueue(ccmp_tx(sta,0x0800,r.data(),pllen));
+    }
+  }
+}
+
 static void on_rx(const Packet& p) {
   if (p.Data.size() < 24 || p.RxAtrib.crc_err) return;
   const uint8_t fc0 = p.Data[0], fc1 = p.Data[1];
@@ -218,6 +312,23 @@ static void on_rx(const Packet& p) {
     send_msg1();
   } else if ((fc0 == 0x08 || fc0 == 0x88) && (fc1 & 0x01) && to_us) {  // data to-DS
     int hlen = 24 + (fc0 == 0x88 ? 2 : 0);
+    if ((fc1 & 0x40) && g_state == 2) {                 // PROTECTED (CCMP) data
+      int len = (int)p.Data.size();
+      if (len < hlen + 8 + 8) return;                   // hdr + CCMP hdr + MIC
+      const uint8_t* d = p.Data.data();
+      const uint8_t* cc = d + hlen;                     // CCMP header
+      uint64_t pn = cc[0] | (cc[1]<<8) | ((uint64_t)cc[4]<<16) | ((uint64_t)cc[5]<<24)
+                  | ((uint64_t)cc[6]<<32) | ((uint64_t)cc[7]<<40);
+      int ctlen = len - hlen - 8 - 8;
+      const uint8_t* ct = d + hlen + 8; const uint8_t* mic = ct + ctlen;
+      uint8_t aad[32], nonce[13], tag[8]; int aadlen;
+      ccmp_aad_nonce(d, pn, sta, aad, &aadlen, nonce);   // A2 = station
+      memcpy(tag, mic, 8);
+      std::vector<uint8_t> pt(ctlen);
+      if (ccm(false, g_ptk+32, nonce, aad, aadlen, ct, ctlen, pt.data(), tag))
+        handle_plain(sta, pt.data(), ctlen);             // decrypted -> ARP/ICMP
+      return;
+    }
     if ((int)p.Data.size() < hlen + 8) return;
     const uint8_t* llc = p.Data.data() + hlen;
     if (!(llc[0]==0xaa && llc[6]==0x88 && llc[7]==0x8e)) return;  // EAPOL

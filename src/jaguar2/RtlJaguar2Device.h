@@ -67,6 +67,7 @@ public:
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
+  bool BeaconTbttSpike(const uint8_t *beacon, size_t len, int interval_tu) override;
   void Stop() override;
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;

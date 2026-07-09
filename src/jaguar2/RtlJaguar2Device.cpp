@@ -1132,6 +1132,32 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
 
 SelectedChannel RtlJaguar2Device::GetSelectedChannel() { return _channel; }
 
+bool RtlJaguar2Device::BeaconTbttSpike(const uint8_t *beacon, size_t len,
+                                      int interval_tu) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* J2/J3 have a real halmac reserved-page download (unlike the 8812) — the
+   * blocker on Jaguar1. Load the beacon into the page-0 beacon rsvd-page
+   * (send_fw_page: QSEL_BEACON bulk-OUT + bcn-valid latch, BCN_CTRL gated). */
+  if (!_fw.download_rsvd_page(0, beacon, static_cast<uint32_t>(len))) {
+    _logger->error("beacon-tbtt(J2): rsvd-page beacon download failed");
+    return false;
+  }
+  /* Enable the MAC beacon function + interval + a TSF reset (REG_TCR TSFRST). */
+  _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */,
+                      static_cast<uint16_t>(interval_tu));
+  _device.rtw_write8(0x055A /* REG_ATIMWND */, 0x02);
+  uint32_t tcr = _device.rtw_read<uint32_t>(0x0604 /* REG_TCR */);
+  _device.rtw_write<uint32_t>(0x0604, tcr & ~0x1u);
+  _device.rtw_write<uint32_t>(0x0604, tcr | 0x1u);
+  uint8_t bcn = _device.rtw_read8(0x0550 /* REG_BCN_CTRL */);
+  _device.rtw_write8(0x0550,
+                     static_cast<uint8_t>(bcn | (1u << 3) | (1u << 1)));
+  _logger->info("beacon-tbtt(J2): rsvd-page beacon loaded + BCN function "
+                "enabled (interval {} TU, BCN_CTRL 0x{:02x}->0x{:02x})",
+                interval_tu, bcn, _device.rtw_read8(0x0550));
+  return true;
+}
+
 uint64_t RtlJaguar2Device::ReadTsf() {
   /* REG_TSFTR 0x0560 (low) / 0x0564 (high); hi/lo/hi with a wrap retry. Under
    * _reg_mu (shared with the coex/thermal tick). NB starved to 0 under a heavy

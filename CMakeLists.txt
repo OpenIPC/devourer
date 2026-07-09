@@ -358,6 +358,19 @@ target_include_directories(tdma PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/examples/common
     ${CMAKE_CURRENT_SOURCE_DIR}/examples/tdma)
 
+# timesync — LTE-eNB-style over-the-air time distribution. One MASTER broadcasts
+# its hardware TSF; SLAVES lock to it from the beacons alone (no GPS at the
+# slaves). Reuses the tdma TD frame tag. timesync.h is header-only.
+add_executable(timesync
+    examples/timesync/main.cpp
+    examples/common/env_config.cpp
+)
+target_link_libraries(timesync PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(timesync PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/tdma
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/timesync)
+
 # Stream-link DUPLEX: one binary, one chip, both directions. Combines the RX
 # loop from rxdemo and the stdin-driven TX from streamtx —
 # stdin = length-prefixed PSDU bodies, stdout = <devourer-stream> lines.
@@ -447,6 +460,21 @@ target_include_directories(TdmaTsfSelftest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/examples/tdma)
 
 add_test(NAME tdma_tsf_math COMMAND TdmaTsfSelftest)
+
+# Headless guard for the timesync example's pure logic (examples/timesync/
+# timesync.h): the LinFit master<->local fit (ppm recovery + prediction), the
+# inter-slave agreement bound, and the 32->64-bit TSF Recon wrap. No hardware —
+# the master/slave demo that needs real adapters stays manual (out-of-band).
+add_executable(TimesyncSelftest
+    tests/timesync_selftest.cpp
+)
+target_link_libraries(TimesyncSelftest PRIVATE devourer)
+target_include_directories(TimesyncSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/tdma
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/timesync)
+
+add_test(NAME timesync_math COMMAND TimesyncSelftest)
 
 # Headless guard for the JSONL event emitter (src/Event.h) — the machine
 # event stream every test script parses (docs/logging.md): first-field

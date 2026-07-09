@@ -199,11 +199,17 @@ public:
    * exception). */
   virtual uint64_t ReadTsf() { return 0; }
 
-  /* EXPERIMENTAL: load a beacon into the beacon queue + enable the MAC beacon
-   * function, so the chip auto-transmits it at each TBTT (hardware-timed,
-   * host-jitter-free). Returns false where unsupported (default). */
-  virtual bool BeaconTbttSpike(const uint8_t *beacon, size_t len,
-                               int interval_tu) {
+  /* Load a beacon into the beacon reserved-page + enable the MAC beacon function,
+   * so the chip AUTO-TRANSMITS it at each TBTT — hardware-timed and
+   * hardware-TSF-stamped (the MAC inserts the live 64-bit TSF into the beacon
+   * timestamp at TX), fully host-jitter-free. `beacon` is a full 802.11 beacon
+   * MPDU (a leading radiotap header, if present, is stripped); addr2/addr3 set
+   * the port MAC/BSSID. `interval_tu` is the beacon interval in TU (1 TU =
+   * 1024 µs). One call suffices — the hardware beacons indefinitely. Implemented
+   * on Jaguar2/3 (HalMAC reserved-page download); returns false where unsupported
+   * (Jaguar1 has no reserved-page path). See docs/time-distribution.md. */
+  virtual bool StartBeacon(const uint8_t *beacon, size_t len,
+                           int interval_tu) {
     (void)beacon; (void)len; (void)interval_tu;
     return false;
   }

@@ -207,7 +207,7 @@ public:
    * the MAC beacon function so the chip auto-transmits it at each TBTT — a
    * hardware-timed, host-jitter-free TX. Returns false if unsupported.
    * `interval_tu` is the beacon interval in TU (1024 µs). */
-  bool BeaconTbttSpike(const uint8_t* beacon, size_t len, int interval_tu);
+  bool StartBeacon(const uint8_t* beacon, size_t len, int interval_tu);
 
   /* Runtime RX-chain selection — the adaptive-link spatial-diversity lever
    * (the read/write superset of the DEVOURER_RX_PATHS env knob). Writes the

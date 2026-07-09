@@ -1,7 +1,7 @@
 // beacon_tbtt.cpp — experiment (idea 6): can the MAC transmit a beacon at each
 // TBTT (hardware-timed off the TSF) in devourer's monitor/injection mode? Brings
 // up TX on a Jaguar1 adapter, loads a beacon into the beacon queue + enables the
-// beacon function (IRtlDevice::BeaconTbttSpike), then IDLES — no send loop. If
+// beacon function (IRtlDevice::StartBeacon), then IDLES — no send loop. If
 // the beacon function works, the chip transmits the beacon on its own at the
 // interval. Observe with a second adapter running rxdemo (count rx.txhit of the
 // canonical SA; ~1 per 102.4 ms at 100 TU => hardware-timed TX confirmed).
@@ -67,8 +67,8 @@ int main(int argc, char** argv) {
       0x00, 0x03, 'T', 'B', 'T',                                   // SSID IE "TBT"
       0x01, 0x01, 0x82};                                          // supported rates (1M)
 
-  bool ok = dev->BeaconTbttSpike(f.data(), f.size(), interval_tu);
-  fprintf(stderr, "BeaconTbttSpike -> %s. Idling %d s (chip should self-TX at "
+  bool ok = dev->StartBeacon(f.data(), f.size(), interval_tu);
+  fprintf(stderr, "StartBeacon -> %s. Idling %d s (chip should self-TX at "
                   "TBTT every %d TU ≈ %.1f ms). Watch a 2nd RX's rx.txhit.\n",
           ok ? "OK" : "FAILED/unsupported", sec, interval_tu, interval_tu * 1.024);
   if (!ok) return 1;

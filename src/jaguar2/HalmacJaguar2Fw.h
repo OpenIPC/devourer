@@ -48,7 +48,7 @@ public:
    * before it enables the MAC TX scheduler; without it RX works but TX frames
    * never leave the MAC. */
   bool download_rsvd_page(uint16_t pg_addr, const uint8_t *buf, uint32_t size) {
-    return send_fw_page(pg_addr, buf, size);
+    return send_fw_page(pg_addr, buf, size, /*beacon_desc=*/true);
   }
 
 private:
@@ -64,7 +64,8 @@ private:
   bool ltecoex_read(uint16_t offset, uint32_t &val);
   bool ltecoex_write(uint16_t offset, uint32_t val);
   bool chk_fw_size(const uint8_t *fw_bin, size_t size);
-  bool send_fw_page(uint16_t pg_addr, const uint8_t *chunk, uint32_t size);
+  bool send_fw_page(uint16_t pg_addr, const uint8_t *chunk, uint32_t size,
+                    bool beacon_desc = false);
 
   uint8_t r8(uint16_t reg);
   uint16_t r16(uint16_t reg);

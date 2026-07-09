@@ -302,44 +302,16 @@ uint64_t RtlJaguarDevice::ReadTsf() {
   return (static_cast<uint64_t>(hi) << 32) | lo;
 }
 
-bool RtlJaguarDevice::BeaconTbttSpike(const uint8_t *beacon, size_t len,
-                                     int interval_tu) {
-  if (_eepromManager->version_id.ICType == CHIP_8814A)
-    return false; /* 8814 beacon path (IDDMA rsvd-page) differs — not spiked */
-
-  /* 1. Load the frame into the beacon queue (QSEL_BEACON = 0x10) via the normal
-   * TX path. NB: this is the OPEN QUESTION — whether a QSEL-beacon bulk-OUT
-   * loads the persistent beacon buffer (for TBTT re-TX) or transmits once. */
-  _tx_qsel = 0x10;
-  const bool loaded = send_packet(beacon, len);
-  _tx_qsel = 0x12;
-  if (!loaded) {
-    _logger->error("beacon-tbtt: beacon-queue load (bulk-OUT) failed");
-    return false;
-  }
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
-
-  /* 2. Beacon-timing registers (mirrors the reference
-   * SetBeaconRelatedRegisters8812A): interval + ATIM window, then a TSF reset
-   * (REG_TCR TSFRST 0x0604[0], clear→set) so the beacon fires on an aligned
-   * TSF boundary. */
-  _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */,
-                      static_cast<uint16_t>(interval_tu));
-  _device.rtw_write8(0x055A /* REG_ATIMWND */, 0x02);
-  uint32_t tcr = _device.rtw_read<uint32_t>(0x0604);
-  _device.rtw_write<uint32_t>(0x0604, tcr & ~0x1u);
-  _device.rtw_write<uint32_t>(0x0604, tcr | 0x1u);
-
-  /* 3. Enable the MAC beacon function: REG_BCN_CTRL 0x0550 EN_BCN_FUNCTION
-   * BIT3 (+ DIS_BCNQ_SUB BIT1). From here the chip should auto-transmit the
-   * beacon buffer at each TBTT. */
-  uint8_t bcn = _device.rtw_read8(0x0550);
-  _device.rtw_write8(0x0550,
-                     static_cast<uint8_t>(bcn | (1u << 3) | (1u << 1)));
-  _logger->info("beacon-tbtt: beacon loaded + BCN function enabled "
-                "(interval {} TU, BCN_CTRL 0x{:02x}->0x{:02x})",
-                interval_tu, bcn, _device.rtw_read8(0x0550));
-  return true;
+bool RtlJaguarDevice::StartBeacon(const uint8_t *beacon, size_t len,
+                                  int interval_tu) {
+  (void)beacon; (void)len; (void)interval_tu;
+  /* Unsupported on Jaguar1: the 8812/8821 have no HalMAC reserved-page download
+   * (a QSEL-beacon bulk-OUT transmits once, it does not load a persistent
+   * TBTT-retransmitted beacon buffer — bench-confirmed negative). The 8814's
+   * IDDMA rsvd-page path differs and is not ported. Hardware-timed beaconing is
+   * a Jaguar2/3 feature (see RtlJaguar3Device::StartBeacon). */
+  _logger->warn("StartBeacon: unsupported on Jaguar1 (no reserved-page download)");
+  return false;
 }
 
 bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {

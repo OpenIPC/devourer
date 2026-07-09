@@ -1274,7 +1274,7 @@ uint64_t RtlJaguar3Device::ReadTsf() {
   return (static_cast<uint64_t>(hi) << 32) | lo;
 }
 
-bool RtlJaguar3Device::BeaconTbttSpike(const uint8_t *beacon, size_t len,
+bool RtlJaguar3Device::StartBeacon(const uint8_t *beacon, size_t len,
                                       int interval_tu) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   /* The caller may pass [radiotap][802.11 MPDU]; the rsvd-page beacon must be the

@@ -163,7 +163,7 @@ public:
   void send_h2c_raw(uint32_t msg, uint32_t msg_ext);
 
   /* Load a beacon into the page-0 beacon rsvd-page for TBTT auto-TX
-   * (experimental — see RtlJaguar3Device::BeaconTbttSpike). */
+   * (experimental — see RtlJaguar3Device::StartBeacon). */
   bool download_beacon_page(const uint8_t *buf, uint32_t size) {
     return _fw.download_rsvd_page(_fw.rsvd_boundary(), buf, size);
   }

@@ -61,6 +61,7 @@ public:
    * writer. cache_rf=false re-primes the compose cache per hop (A/B
    * measurement). */
   void FastRetune(uint8_t channel, bool cache_rf) override;
+  void FastSetBandwidth(ChannelWidth_t bw) override;
   void InitWrite(SelectedChannel channel) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }

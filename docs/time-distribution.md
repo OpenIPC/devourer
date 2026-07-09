@@ -131,8 +131,20 @@ probe-response addressed to the requester — with **no beacon aired**, a real r
 station's `iw scan` still lists `devourerAP` (discovery via the probe response).
 send_packet must run off the RX event thread (queue the requester, TX from another
 thread — libusb returns BUSY otherwise). This works because management-frame timing
-is tens of ms (the userspace RX→TX round-trip is a few ms), unlike SIFS ACKs — and
-it de-risks the AP-side handshake (probe-resp → auth → assoc).
+is tens of ms (the userspace RX→TX round-trip is a few ms), unlike SIFS ACKs.
+
+**A real kernel station fully associates.** `tests/ap_responder.cpp` completes the
+whole open-network handshake (probe → auth → assoc): a real rtw88 station
+authenticates, associates, and stays `Connected` (wpa_supplicant
+`CTRL-EVENT-CONNECTED`, `iw link` Connected, stable). The station's auth/assoc
+requests arrive with **retry=0** — devourer hardware-ACKs them (the ACK engine
+matches `REG_MACID`, which `StartBeacon` sets to the BSSID). The one non-obvious
+requirement: **the BSSID must be unicast**. The canonical test SA `57:42:75:05:d6:00`
+has the I/G (multicast) bit set in `0x57`; a station cannot unicast-auth to a
+multicast address, so rtw88 silently drops the auth before it hits the air
+(bench-proven across two station chips — `0x57` → no auth on air, `0x02` → auth on
+air and association completes). Use a locally-administered unicast BSSID (`0x02..`).
+So devourer is a real, associable AP — not just a beacon source.
 
 ## Uplink timing advance (experimental)
 

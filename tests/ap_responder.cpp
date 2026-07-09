@@ -7,19 +7,22 @@
 // returns libusb BUSY). Management-frame timeouts are tens of ms, so the ~few-ms
 // userspace RX->TX round-trip fits.
 //
-// STATUS (bench): the AP side works — with a DENSE beacon (DEVOURER_BCN_TU=25,
-// so a fast channel-hopping scan catches it) wpa_supplicant discovers devourerAP,
-// selects it and reaches "SME: Trying to authenticate". Probe-response is proven
-// (station discovers the AP via it, tests/probe_responder.cpp). Full association
-// was NOT completed on this rig: the test station's rtw88 (2357:0120) never puts
-// the auth frame on air — two independent promiscuous monitors (this AP's RX +
-// an 8812AU sniffer) saw ZERO auth-to-BSSID, and this device's monitor RX is
-// promiscuous (sees ambient unicast to other MACs), so a present auth would be
-// seen. So the auth/assoc responder paths below are built but unexercised end to
-// end, pending a station that actually transmits auth. Not a devourer-side gap.
+// STATUS (bench): FULL ASSOCIATION ACHIEVED. A real Linux station (rtw88 8822cu,
+// wlp4s0u2u4) authenticates, associates, and stays "Connected to 02:42:75:05:d6:00"
+// (wpa_supplicant CTRL-EVENT-CONNECTED, iw link Connected, stable for 8 s+). The
+// AP sees the AUTH and ASSOC requests with retry=0 — devourer HARDWARE-ACKs them
+// (MACID = the BSSID, set by StartBeacon), so the responses land and the handshake
+// completes. Run with a DENSE beacon (DEVOURER_BCN_TU=25 — a fast channel-hopping
+// supplicant scan misses a 100 TU beacon).
 //
-// The log prints each auth/assoc request with its retry bit (a no-ACK stall,
-// once auth reaches us, would show as repeated retries).
+// THE FIX that unblocked it: the BSSID must be UNICAST. The canonical test SA
+// 0x57.. has the I/G bit set (multicast); a station cannot unicast-auth to a
+// multicast address, so rtw88 silently drops the auth before air (confirmed:
+// 0x57 -> no auth on air across two station chips; 0x02 -> auth on air +
+// association completes). kBssid below is 0x02.. (locally-administered unicast).
+//
+// The log prints each auth/assoc request with its retry bit (a no-ACK stall would
+// show as repeated retries; here retry=0).
 //
 // Build: g++ -std=c++20 -O2 -Isrc -Iexamples/common tests/ap_responder.cpp \
 //   examples/common/env_config.cpp build/libdevourer.a \
@@ -49,7 +52,12 @@
 #include "env_config.h"
 #include "logger.h"
 
-static const uint8_t kBssid[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+// BSSID MUST be UNICAST — the first octet's I/G bit (bit 0) must be 0. The
+// canonical test SA 0x57... has that bit SET (multicast), which is invalid as a
+// BSSID: a station cannot unicast-auth to a multicast address, so rtw88 silently
+// refuses to emit the auth (bench-proven — flipping 0x57->0x02 made the station
+// transmit auth). Use 0x02 (locally-administered unicast).
+static const uint8_t kBssid[6] = {0x02, 0x42, 0x75, 0x05, 0xd6, 0x00};
 static IRtlDevice* g_dev = nullptr;
 static std::vector<uint8_t> g_rt;
 static uint8_t g_chan = 6;

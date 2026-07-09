@@ -99,6 +99,7 @@ public:
    * (The cache_rf default binds at IRtlDevice — virtual default arguments
    * resolve statically, so overrides must not re-declare it.) */
   void FastRetune(uint8_t channel, bool cache_rf) override;
+  void FastSetBandwidth(ChannelWidth_t bw) override;
   void InitWrite(SelectedChannel channel) override;
   /* Legacy per-rate TXAGC override pair — superseded by the IRtlDevice
    * runtime TX-power API (SetTxPowerIndexOverride applies in one call).

@@ -70,6 +70,20 @@ public:
     SetMonitorChannel(c);
   }
 
+  /* Lean same-channel bandwidth switch between 20 MHz and 5/10 MHz narrowband —
+   * the bandwidth analogue of FastRetune. On the chips that support it the
+   * whole switch collapses to a single BB dword write, because across a
+   * 20<->5/10 toggle the RF stays in 20 MHz mode and only the baseband ADC/DAC
+   * re-clock register changes (everything else — RF bandwidth, MAC BW, TX
+   * power, IQK — is invariant, so it is skipped). Generations with a fast path
+   * override this; the default falls back to a full SetMonitorChannel at the
+   * current channel/offset, so callers may use it unconditionally. */
+  virtual void FastSetBandwidth(ChannelWidth_t bw) {
+    SelectedChannel c = GetSelectedChannel();
+    c.ChannelWidth = bw;
+    SetMonitorChannel(c);
+  }
+
   /* Force a flat absolute TXAGC index across all rates (the debug /
    * SDR-visibility knob — same knob as SetTxPowerIndexOverride, kept for
    * source compatibility; the override form has the explicit clear). NB this

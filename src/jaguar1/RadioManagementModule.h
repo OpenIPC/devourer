@@ -98,6 +98,15 @@ class RadioManagementModule {
    * heavy stages a hop doesn't need), while still doing the channel + BW
    * registers identically to the full path. */
   bool _fast_skip_heavy = false;
+  /* fast_set_bandwidth compose-cache: the 20 MHz-state value of BB 0x8ac
+   * (rRFMOD_Jaguar), the ONLY register that differs across a same-channel
+   * 20<->5/10 MHz toggle (0x8c4[30], L1PeakTH, 0x668, RF18, DATA_SC are all
+   * invariant — the RF stays in 20 MHz mode). Caching the full dword lets the
+   * toggle be a single write-only dword, and preserves whatever ADC-clock
+   * [9:8] value phy_FixSpur_8812A chose for this channel on the 20 MHz restore.
+   * Primed lazily from a 20 MHz state; invalidated by set_channel_bwmode. */
+  uint32_t _bw_cached_8ac = 0;
+  bool _bw_cache_valid = false;
   uint8_t _cur40MhzPrimeSc;
   uint8_t _cur80MhzPrimeSc;
   uint8_t _currentCenterFrequencyIndex;
@@ -169,6 +178,12 @@ public:
    * value instead of masked read-modify-writes, avoiding the per-read 20 ms
    * C-cut sleep — the dominant cost of phy_SwChnl on C-cut silicon. */
   bool fast_retune(uint8_t channel, bool cache_rf);
+  /* Lean same-channel bandwidth toggle between 20 MHz and 5/10 MHz narrowband:
+   * one BB 0x8ac dword write, skipping the RF read-modify-write (the ~40 ms
+   * cut-C sleep), the invariant MAC/RF/DATA_SC writes, TX-power re-fold, thermal
+   * pwrtrk, and IQK. Returns false (touching nothing) when the toggle involves
+   * 40/80 MHz or a non-8812 die — the caller falls back to set_channel_bwmode. */
+  bool fast_set_bandwidth(ChannelWidth_t new_bw);
   void phy_set_rf_reg(RfPath eRFPath, uint16_t RegAddr, uint32_t BitMask,
                       uint32_t Data);
   uint32_t phy_query_rf_reg(RfPath eRFPath, uint32_t RegAddr,

@@ -844,6 +844,18 @@ void RtlJaguarDevice::FastRetune(uint8_t channel, bool cache_rf) {
                                     .ChannelWidth = _channel.ChannelWidth});
 }
 
+void RtlJaguarDevice::FastSetBandwidth(ChannelWidth_t bw) {
+  if (_radioManagement->fast_set_bandwidth(bw)) {
+    _channel.ChannelWidth = bw;
+    return;
+  }
+  /* Fast path declined (40/80 MHz endpoint, non-8812 die, or no clean 20 MHz
+   * cache) — do the full channel set at the current channel/offset. */
+  SetMonitorChannel(SelectedChannel{.Channel = _channel.Channel,
+                                    .ChannelOffset = _channel.ChannelOffset,
+                                    .ChannelWidth = bw});
+}
+
 void RtlJaguarDevice::StartWithMonitorMode(SelectedChannel selectedChannel) {
   if (NetDevOpen(selectedChannel) == false) {
     throw std::ios_base::failure("StartWithMonitorMode failed NetDevOpen");

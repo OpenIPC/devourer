@@ -215,6 +215,7 @@ void RadioManagementModule::set_channel_bwmode(uint8_t channel,
   _last_fc_area = 0xffffffff;
   _last_spur_class = -1;
   _last_subchnl = -1;
+  _bw_cache_valid = false; /* full path rewrites 0x8ac (phy_FixSpur etc.) */
 
   center_ch = rtw_get_center_ch(channel, bwmode, channel_offset);
   if (bwmode == ChannelWidth_t::CHANNEL_WIDTH_80) {
@@ -313,6 +314,86 @@ bool RadioManagementModule::fast_retune(uint8_t channel, bool cache_rf) {
   else
     phy_SwChnl8812();
   timer.stage("sw_chnl");
+  timer.total();
+  if (_dump_canary)
+    DumpCanary();
+  return true;
+}
+
+bool RadioManagementModule::fast_set_bandwidth(ChannelWidth_t new_bw) {
+  /* 8812/8811 and 8814A only (8821 has no narrowband). Only toggles WITHIN
+   * {20, 5, 10}: for all three the RF stays in 20 MHz mode (RF18[11:10]=3) and
+   * the MAC stays 20 MHz (0x668 BW bits 0), so PHY_RF6052SetBandwidth8812 (the
+   * per-path RF read-modify-write that owns the ~40 ms cut-C sleep),
+   * phy_SetRegBW_8812, DATA_SC, and (8814) phy_SetBwRegAdc/Agc all write
+   * identical values — the ONLY register that changes is 0x8ac. So the switch
+   * is a single write-only dword. A 40/80 MHz endpoint DOES move
+   * RF18/0x668/DATA_SC -> decline to the full path.
+   *
+   * The two dies pack 0x8ac differently: the 8812 divides via [9:8]/[21:20]
+   * under mask 0x003003C3; the 8814 rides the 8822B layout ([9:8]+[16] /
+   * [21:20]+[28]) under mask 0x103103C3 with the 8821C/8822B divide codes. */
+  const auto ic = _eepromManager->version_id.ICType;
+  uint32_t mask;
+  uint32_t adc_nb5, adc_nb10, dac_nb5, dac_nb10;
+  if (ic == CHIP_8812) {
+    mask = 0x003003C3u;
+    adc_nb5 = 0; adc_nb10 = 1; dac_nb5 = 1; dac_nb10 = 2;
+#if defined(DEVOURER_HAVE_8814)
+  } else if (ic == CHIP_8814A) {
+    mask = 0x103103C3u;
+    adc_nb5 = 2; adc_nb10 = 3; dac_nb5 = 2; dac_nb10 = 3;
+#endif
+  } else {
+    return false;
+  }
+  auto in_set = [](ChannelWidth_t b) {
+    return b == CHANNEL_WIDTH_20 || b == CHANNEL_WIDTH_5 ||
+           b == CHANNEL_WIDTH_10;
+  };
+  const ChannelWidth_t cur = _currentChannelBw;
+  if (!in_set(cur) || !in_set(new_bw))
+    return false;
+  if (new_bw == cur)
+    return true;
+
+  InitTimer timer(_logger, "fast_bw");
+
+  /* Prime the compose-cache from a 20 MHz state ONLY — it must capture the
+   * undivided 0x8ac (incl. phy_FixSpur's per-channel ADC-clock choice on the
+   * 8812) so the 20 MHz restore is bit-exact. If we can't get a clean 20 MHz
+   * snapshot, decline to the full path rather than cache a divided clock. */
+  if (!_bw_cache_valid) {
+    if (cur != CHANNEL_WIDTH_20)
+      return false;
+    _bw_cached_8ac = _device.rtw_read32(rRFMOD_Jaguar);
+    _bw_cache_valid = true;
+  }
+
+  if (new_bw == CHANNEL_WIDTH_20) {
+    /* Restore the cached 20 MHz dword verbatim — write-only, no read sleep. */
+    _device.phy_set_bb_reg(rRFMOD_Jaguar, bMaskDWord, _bw_cached_8ac);
+  } else {
+    /* Compose the per-die narrowband divide codes onto the cached 20 MHz
+     * 0x8ac — same codes as phy_PostSetBwMode8812/8814A's 5/10 branch. */
+    const bool is5 = (new_bw == CHANNEL_WIDTH_5);
+    uint32_t adc = is5 ? adc_nb5 : adc_nb10;
+    uint32_t dac = is5 ? dac_nb5 : dac_nb10;
+    const uint32_t smallbw = is5 ? 1u : 2u;
+    if (_tuning.nb_adc)
+      adc = *_tuning.nb_adc & 0x3;
+    if (_tuning.nb_dac)
+      dac = *_tuning.nb_dac & 0x3;
+    const uint32_t fields =
+        ((dac << 20) | (adc << 8) | (smallbw << 6)) & mask;
+    const uint32_t v = (_bw_cached_8ac & ~mask) | fields;
+    _device.phy_set_bb_reg(rRFMOD_Jaguar, bMaskDWord, v);
+  }
+  _currentChannelBw = new_bw;
+  _logger->info("fast_bw: {} MHz (single 0x8ac write)",
+                new_bw == CHANNEL_WIDTH_5 ? 5 : new_bw == CHANNEL_WIDTH_10 ? 10
+                                                                          : 20);
+  timer.stage("bb_reclock");
   timer.total();
   if (_dump_canary)
     DumpCanary();

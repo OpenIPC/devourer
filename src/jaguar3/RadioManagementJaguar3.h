@@ -62,6 +62,21 @@ public:
    * the baseband DAC/ADC clock + small-BW field for 5/10/20 MHz. */
   void set_bandwidth_dividers(ChannelWidth_t bwmode);
 
+  /* Lean same-channel bandwidth toggle between 20 MHz and 5/10 MHz narrowband.
+   * On Jaguar3 the narrowband re-clock is already a self-contained delta
+   * (set_bandwidth_dividers, incl. the 20 MHz-restore default), so the fast
+   * path is just that delta + a BB reset — no RF channel tune, no calibration.
+   * Returns false if the radio was never tuned; the caller (which has already
+   * checked that both endpoints are in {20, 5, 10}) falls back to the full
+   * set_channel_bwmode for a 40/80 MHz endpoint. */
+  bool fast_set_bandwidth(ChannelWidth_t new_bw) {
+    if (_last_channel == 0)
+      return false;
+    set_bandwidth_dividers(new_bw);
+    bb_reset_toggle(); /* restart the RX engine at the new sample clock */
+    return true;
+  }
+
   /* MAC-side bandwidth + TX sub-channel (halmac cfg_bw_88xx / cfg_pri_ch_idx):
    * REG_WMAC_TRXPTCL_CTL 0x668 BIT7 (40M) and REG_DATA_SC 0x483 TXSC fields.
    * pri is the BB primary-sub-channel index (0 for 20M). */

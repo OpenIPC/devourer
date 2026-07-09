@@ -295,14 +295,19 @@ they can be compared:
   `steady_clock`, and re-anchors on each subsequent marker. No external clock.
 - **`tsf`** — the marker mode, but anchored on the **802.11 hardware TSF**
   instead of the host clock. Every RX frame carries a MAC-latched TSF
-  (`rx_pkt_attrib::tsfl`); a running host↔TSF least-squares fit de-jitters each
+  (`rx_pkt_attrib::tsfl`, the 32-bit low word at RX-descriptor offset 0x14 on all
+  three generations); a running host↔TSF least-squares fit de-jitters each
   marker's arrival time. Measured (8812AU): the marker anchor tightens from
   **~1.1 ms RMS** (raw host callback, dominated by USB batching + scheduling) to
-  **~40 µs RMS** — a ~25× tighter schedule anchor, so the guard can approach the
-  switch latency instead of the host-jitter floor. Jaguar1-only (the per-frame
-  `tsfl` is not surfaced on Jaguar2/3 yet). The TX also stamps each marker with
-  its own `ReadTsf()` for a TX↔RX crystal-drift readout — but a register read is
-  starved by heavy bulk traffic, so on a busy transmitter that stamp reads n/a.
+  **~44 µs RMS** — a ~25× tighter schedule anchor, so the guard can approach the
+  switch latency instead of the host-jitter floor. The delivery-level payoff:
+  in a short-burst guard sweep (8822C RX), the *misalignment* count (frames
+  decoded in the wrong band-window) runs **2–5× lower** than the host-clock
+  `marker` mode; total delivered frames are similar (a 25 ms burst is still ≫
+  the sub-ms jitter). The TX stamps each marker with its own `ReadTsf()` for a
+  rough TX↔RX crystal-drift readout, but a register read is starved by heavy
+  bulk traffic, so the stamp is intermittent (n/a on a busy transmitter, a
+  noisy ppm figure otherwise).
 
 A receiver switching in lockstep loses the ~switch-latency window at each phase
 edge, so it switches `guard_ms` **early** (the guard must exceed the chip's

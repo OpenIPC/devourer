@@ -149,7 +149,7 @@ jobs:
           ToneMaskSelftest BfReportDecodeSelftest SweepSpecSelftest
           TxPowerQuantSelftest LinkHealthSelftest TxCapsSelftest TxPktPwrSelftest
           RxQualitySelftest AdapterHealthSelftest LogEventSelftest
-          AdapterCapsSelftest
+          AdapterCapsSelftest TdmaTsfSelftest
 
       - name: Test
         working-directory: build

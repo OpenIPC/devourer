@@ -253,6 +253,12 @@ private:
   std::thread _coex_thread;
   volatile bool _coex_stop = false;
   void coex_runtime_loop();
+  /* Beacon-TBTT (experimental): periodic beacon re-download thread — rtw88
+   * refreshes the beacon rsvd page every beacon interval. */
+  std::thread _bcn_thread;
+  std::atomic<bool> _bcn_run{false};
+  std::vector<uint8_t> _bcn_bytes;
+  int _bcn_interval_ms = 100;
   /* StartRxLoop stop request (StopRxLoop). */
   volatile bool _rx_stop = false;
   /* True while StartRxLoop owns bulk-IN (gates the coex thread's drain). */

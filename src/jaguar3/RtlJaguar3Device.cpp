@@ -1283,6 +1283,20 @@ bool RtlJaguar3Device::BeaconTbttSpike(const uint8_t *beacon, size_t len,
     _logger->error("beacon-tbtt(J3): rsvd-page beacon download failed");
     return false;
   }
+  /* Port identity (rtw88 rtw_vif_port_config) — the beaconing port needs its own
+   * MAC address (REG_MACID 0x0610) and BSSID (REG_BSSID 0x0618). devourer's
+   * monitor bring-up sets NEITHER (usbmon diff vs the kernel IBSS), so the port
+   * has no identity and the MAC won't transmit its beacon. Take them from the
+   * beacon's own addr2 (SA) / addr3 (BSSID). */
+  if (len >= 24) {
+    const uint8_t *sa = beacon + 10, *bs = beacon + 16;
+    _device.rtw_write<uint32_t>(0x0610, (uint32_t)sa[0] | (sa[1] << 8) |
+                                            (sa[2] << 16) | ((uint32_t)sa[3] << 24));
+    _device.rtw_write16(0x0614, (uint16_t)(sa[4] | (sa[5] << 8)));
+    _device.rtw_write<uint32_t>(0x0618, (uint32_t)bs[0] | (bs[1] << 8) |
+                                            (bs[2] << 16) | ((uint32_t)bs[3] << 24));
+    _device.rtw_write16(0x061c, (uint16_t)(bs[4] | (bs[5] << 8)));
+  }
   /* Port-0 network type = AP (rtw88 rtw_vif_port_config: net_type at REG_CR
    * [17:16] = REG_CR+2 byte [1:0]); a beacon airs only in AP/Ad-hoc mode. */
   uint8_t nt = _device.rtw_read8(0x0102 /* REG_CR+2 */);

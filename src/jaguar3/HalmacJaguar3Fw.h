@@ -56,6 +56,12 @@ public:
    * of the reserved region, where the beacon lives and BCN_HEAD points. Valid
    * after the firmware download. */
   uint16_t rsvd_boundary() const { return _rsvd_boundary; }
+  /* Set the reserved-page boundary from MacInit's priority_queue_cfg. The FW
+   * download stages chunks BEFORE the queue init runs, so _rsvd_boundary defaults
+   * to 0 and send_fw_page's restore points BCN_HEAD at page 0; the caller must
+   * set the real boundary post-queue-init so the beacon downloads to the right
+   * page AND the head is restored there (where the TBTT engine reads). */
+  void set_rsvd_boundary(uint16_t b) { _rsvd_boundary = b; }
 
 private:
   /* --- ported halmac DLFW steps --- */

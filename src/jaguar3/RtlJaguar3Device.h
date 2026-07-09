@@ -68,6 +68,7 @@ public:
   uint64_t ReadTsf() override;
   void WriteTsf(uint64_t tsf) override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+  int32_t AdjustBeaconTiming(int32_t microseconds) override;
   void Stop() override;
 
   /* Runtime TX-power control (IRtlDevice contract; see src/TxPower.h).
@@ -261,6 +262,9 @@ private:
   std::atomic<bool> _bcn_run{false};
   std::vector<uint8_t> _bcn_bytes;
   int _bcn_interval_ms = 100;
+  /* Nominal beacon interval in TU while a beacon is active (0 = none); the
+   * AdjustBeaconTiming one-shot tweak restores to this. */
+  int _bcn_interval_tu = 0;
   /* StartRxLoop stop request (StopRxLoop). */
   volatile bool _rx_stop = false;
   /* True while StartRxLoop owns bulk-IN (gates the coex thread's drain). */

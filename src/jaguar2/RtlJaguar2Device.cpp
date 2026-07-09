@@ -1174,9 +1174,45 @@ bool RtlJaguar2Device::StartBeacon(const uint8_t *beacon, size_t len,
   _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 3) | (1u << 4));
   uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
   _device.rtw_write<uint32_t>(0x0420, txq | (1u << 22) /* BIT_EN_BCNQ_DL */);
+  _bcn_interval_tu = interval_tu > 0 ? interval_tu : 100;
   _logger->info("beacon(J2): beacon@rsvd_boundary, net_type->AP, BCN_CTRL=0x18, "
                 "EN_BCNQ_DL (interval {} TU)", interval_tu);
   return true;
+}
+
+int32_t RtlJaguar2Device::AdjustBeaconTiming(int32_t microseconds) {
+  int nominal;
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    nominal = _bcn_interval_tu;
+  }
+  if (nominal <= 0) return 0;  // no active beacon
+  /* Round to whole TU (REG_BCN_INTERVAL is integer TU); sign follows the request
+   * (>0 = later/retard => longer one-shot interval, <0 = earlier/advance). */
+  int delta_tu = (microseconds >= 0 ? microseconds + 512 : microseconds - 512) / 1024;
+  if (delta_tu == 0) return 0;  // below 1-TU resolution
+  int one = nominal + delta_tu;
+  if (one < 1) {  // can't shorten below one TU
+    one = 1;
+    delta_tu = one - nominal;
+  }
+  /* Latch one interval at the tweaked length; after exactly one TBTT fires under
+   * it the phase has shifted by delta_tu TU, so restore nominal. Steers the
+   * beacon-engine TBTT counter, not the TSF (WriteTsf can't; bench-proven).
+   * Release _reg_mu across the wait so the pwrtrack tick isn't starved. */
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */, static_cast<uint16_t>(one));
+  }
+  std::this_thread::sleep_for(std::chrono::microseconds(one * 1024 + 2000));
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    _device.rtw_write16(0x0554, static_cast<uint16_t>(nominal));
+  }
+  _logger->info("beacon(J2): TBTT shift {} TU ({} us) via one-shot interval "
+                "{}->{}->{} TU",
+                delta_tu, delta_tu * 1024, nominal, one, nominal);
+  return delta_tu * 1024;
 }
 
 void RtlJaguar2Device::SetCcaMode(bool disabled) {

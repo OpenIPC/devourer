@@ -118,8 +118,20 @@ Jaguar2/3 adapter; the RTL8822EU desenses its RX in TX+RX mode, adding jitter.)
 The measurement, feedback, and math are in place; closing the loop needs
 hardware-timed TX departure, which `send_packet` does not have — but the beacon
 path now does. A UE that transmits its uplink as a **TBTT-scheduled beacon**
-(`StartBeacon`) and advances by shifting its own TSF gets exactly the sub-slot
-air-departure control this loop was missing; that is the natural next iteration.
+(`StartBeacon`) gets the sub-slot air-departure control this loop was missing.
+
+**Steering the TBTT.** The actuator is `AdjustBeaconTiming(microseconds)`, not a
+TSF write: `WriteTsf` moves the reported TSF (and the beacon-body timestamp) but
+NOT the TBTT air-time — a separate per-port timer drives the beacon, so the TBTT
+is deaf to `REG_TSFTR`. A one-shot beacon-interval tweak *does* steer it: running
+one interval at (nominal ± Δ) TU then restoring advances/retards the next TBTT —
+and the cadence thereafter — by Δ TU. Bench-proven to the microsecond on an
+8822C: `AdjustBeaconTiming(-20480)` advanced the TBTT by exactly 20 TU
+(observer arrival phase stepped 88018 → 67565 µs at the tweak). This is the
+802.11 IBSS/TSF-merge mechanism. Granularity is **1 TU = 1.024 ms** (the
+`REG_BCN_INTERVAL` field is integer TU) — a coarse slot/guard-alignment lever,
+not a µs-fine advance; the timesync uplink loop quantizes its correction to it.
+Actuator characterization: `tests/beacon_interval_shift.sh <short_TU>`.
 
 Harness: `tests/timesync_ta_demo.sh` (+ `tests/timesync_ta_analyze.py`).
 

@@ -201,10 +201,13 @@ public:
 
   /* Write the 64-bit MAC TSF (REG_TSFTR). Sets the free-running microsecond clock
    * — the primitive for TSF *adoption* (a slave slewing its clock onto the
-   * master's) and for the LTE-style uplink timing-advance (shift the port TSF so
-   * a TBTT-scheduled uplink lands in its slot). The counter keeps running, so a
-   * read-add-write shifts by an approximate delta (a control loop absorbs the
-   * read→write latency). No-op where unsupported. */
+   * master's, so its per-frame `tsfl` reads in the master's timebase). The
+   * counter keeps running, so a read-add-write shifts by an approximate delta (a
+   * control loop absorbs the read→write latency). NOTE: this moves the reported
+   * TSF (and the beacon-body timestamp) but NOT the beacon TBTT air-time — a
+   * separate per-port timer drives the TBTT (bench-proven). To steer the
+   * hardware-timed beacon (the uplink timing-advance actuator) use
+   * AdjustBeaconTiming. No-op where unsupported. */
   virtual void WriteTsf(uint64_t tsf) { (void)tsf; }
 
   /* Load a beacon into the beacon reserved-page + enable the MAC beacon function,
@@ -229,6 +232,23 @@ public:
    * shared channel (the master owns the channel). Also DEVOURER_DIS_CCA at
    * construction. No-op where unimplemented. */
   virtual void SetCcaMode(bool disabled) { (void)disabled; }
+
+  /* Shift the next hardware beacon TBTT by `microseconds` (>0 = later/retard,
+   * <0 = earlier/advance), quantized to whole TU (1 TU = 1024 µs). One-shot
+   * REG_BCN_INTERVAL tweak: runs one beacon interval at (nominal + round(µs/1024))
+   * TU then restores nominal, so the next TBTT — and the cadence thereafter —
+   * shifts by that many TU. This is the beacon-timing / uplink timing-advance
+   * actuator: WriteTsf moves the reported TSF but NOT the TBTT air-time (a
+   * separate per-port timer drives it), whereas the interval tweak steers it
+   * deterministically (the 802.11 IBSS/TSF-merge mechanism; bench-proven to the
+   * microsecond). Requires an active StartBeacon. BLOCKS the caller ~one beacon
+   * interval (the tweaked interval must latch and fire once before restore).
+   * Returns the actual applied shift in µs (TU-quantized); 0 if no active beacon
+   * or |microseconds| < 512. Jaguar2/3 only; the base is a no-op. */
+  virtual int32_t AdjustBeaconTiming(int32_t microseconds) {
+    (void)microseconds;
+    return 0;
+  }
 
   /* Clean shutdown: halt TRX DMA and power the chip down to a re-enumerable
    * state (mirrors the kernel driver's card-disable on unbind). Call after the

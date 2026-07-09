@@ -1343,6 +1343,7 @@ bool RtlJaguar3Device::StartBeacon(const uint8_t *beacon, size_t len,
    * (BEACON_REFRESH=1) for content updates; the default is the clean HW-TBTT path. */
   _bcn_bytes.assign(mpdu, mpdu + mpdu_len);
   _bcn_interval_ms = interval_tu > 0 ? interval_tu * 1024 / 1000 : 100;
+  _bcn_interval_tu = interval_tu > 0 ? interval_tu : 100;
   if (std::getenv("BEACON_REFRESH") && !_bcn_run.exchange(true)) {
     _bcn_thread = std::thread([this] {
       while (_bcn_run.load()) {
@@ -1355,6 +1356,42 @@ bool RtlJaguar3Device::StartBeacon(const uint8_t *beacon, size_t len,
     });
   }
   return true;
+}
+
+int32_t RtlJaguar3Device::AdjustBeaconTiming(int32_t microseconds) {
+  int nominal;
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    nominal = _bcn_interval_tu;
+  }
+  if (nominal <= 0) return 0;  // no active beacon
+  /* Round to whole TU (REG_BCN_INTERVAL is integer TU); sign follows the request
+   * (>0 = later/retard => longer one-shot interval, <0 = earlier/advance). */
+  int delta_tu = (microseconds >= 0 ? microseconds + 512 : microseconds - 512) / 1024;
+  if (delta_tu == 0) return 0;  // below 1-TU resolution
+  int one = nominal + delta_tu;
+  if (one < 1) {  // can't shorten below one TU
+    one = 1;
+    delta_tu = one - nominal;
+  }
+  /* Latch one interval at the tweaked length; after exactly one TBTT fires under
+   * it the phase has advanced/retarded by delta_tu TU, so restore nominal. The
+   * TSF free-runs — this steers the beacon-engine TBTT counter, not the TSF
+   * (WriteTsf can't; bench-proven). Serialize the two writes on _reg_mu, but
+   * release it across the wait so the coex tick / other setters aren't starved. */
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */, static_cast<uint16_t>(one));
+  }
+  std::this_thread::sleep_for(std::chrono::microseconds(one * 1024 + 2000));
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    _device.rtw_write16(0x0554, static_cast<uint16_t>(nominal));
+  }
+  _logger->info("beacon(J3): TBTT shift {} TU ({} us) via one-shot interval "
+                "{}->{}->{} TU",
+                delta_tu, delta_tu * 1024, nominal, one, nominal);
+  return delta_tu * 1024;
 }
 
 void RtlJaguar3Device::SetTxMode(const devourer::TxMode &mode) {

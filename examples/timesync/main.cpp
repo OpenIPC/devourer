@@ -98,9 +98,44 @@ static libusb_device_handle* open_device(
 }
 
 // --- MASTER (eNB): broadcast the hardware TSF -------------------------------
+// A minimal raw 802.11 beacon MPDU (canonical SA/BSSID) — byte-identical to the
+// bench-validated tests/beacon_tbtt.cpp beacon (which the MAC fills with a clean
+// live TSF). The 8-byte timestamp is left zero; the MAC inserts the hardware TSF
+// at each TBTT. (An extended body — longer SSID / more rate IEs — broke the
+// hardware TSF insertion in testing, so keep this exact layout.)
+static std::vector<uint8_t> build_std_beacon(int interval_tu) {
+  return {
+      0x80, 0x00, 0x00, 0x00,                          // FC beacon + dur
+      0xff, 0xff, 0xff, 0xff, 0xff, 0xff,              // addr1 broadcast
+      0x57, 0x42, 0x75, 0x05, 0xd6, 0x00,             // addr2 = SA (canonical)
+      0x57, 0x42, 0x75, 0x05, 0xd6, 0x00,             // addr3 = BSSID
+      0x00, 0x00,                                      // seq
+      0, 0, 0, 0, 0, 0, 0, 0,                          // timestamp (HW fills)
+      static_cast<uint8_t>(interval_tu & 0xff),
+      static_cast<uint8_t>((interval_tu >> 8) & 0xff), // beacon interval
+      0x00, 0x00,                                      // capability
+      0x00, 0x03, 'T', 'B', 'T',                       // SSID IE
+      0x01, 0x01, 0x82};                               // supported rates (1M)
+}
+
 static void run_master(IRtlDevice* dev, const timesync::Config& c) {
   dev->InitWrite(SelectedChannel{c.channel, 0, CHANNEL_WIDTH_20});
   sleep_ms(2000);
+  if (c.hwbeacon) {
+    // Hardware-timed, hardware-TSF-stamped beacon at TBTT — no software send loop,
+    // no ReadTsf jitter. The MAC inserts the live TSF into the beacon at TX.
+    auto b = build_std_beacon(c.interval_ms > 0 ? c.interval_ms * 1000 / 1024 : 100);
+    bool ok = dev->StartBeacon(b.data(), b.size(),
+                               c.interval_ms > 0 ? c.interval_ms * 1000 / 1024 : 100);
+    fprintf(stderr, "timesync master(HW beacon): StartBeacon -> %s, ch%d\n",
+            ok ? "OK" : "UNSUPPORTED", c.channel);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(c.secs);
+    while (!g_devourer_should_stop) {
+      sleep_ms(200);
+      if (c.secs && std::chrono::steady_clock::now() >= deadline) break;
+    }
+    return;
+  }
   const auto rt = devourer::build_stream_radiotap(c.rate);
   fprintf(stderr, "timesync master: ch%d, sync beacon every %d ms\n", c.channel,
           c.interval_ms);
@@ -138,14 +173,30 @@ static uint64_t g_predicted = 0;     // frames predicted (fit was ready)
 static double g_resid_ss = 0;        // Σ resid² (µs²), for RMS
 static double g_resid_max = 0;
 
+static bool g_hwbeacon = false;
+
 static void slave_cb(const Packet& p) {
-  auto pr = tdma::parse_frame(p.Data.data(), p.Data.size());
-  if (!pr.ok || p.RxAtrib.crc_err) return;
-  if (pr.cls != tdma::Class::Marker || pr.tx_tsf == 0) return;  // sync beacons only
+  uint64_t master_tsf; uint32_t seq;
+  if (g_hwbeacon) {
+    // Standard 802.11 beacon: canonical SA at addr2, and the master's LIVE
+    // hardware TSF is the 8-byte timestamp field (MPDU offset 24). No TD tag.
+    static const uint8_t kSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+    if (p.Data.size() < 32 || p.RxAtrib.crc_err) return;
+    if ((p.Data[0] & 0xfc) != 0x80) return;                        // beacon subtype
+    if (std::memcmp(p.Data.data() + 10, kSa, 6) != 0) return;      // our master
+    master_tsf = 0;
+    for (int i = 0; i < 8; ++i) master_tsf |= (uint64_t)p.Data[24 + i] << (8 * i);
+    seq = (uint32_t)(p.RxAtrib.seq_num);
+  } else {
+    auto pr = tdma::parse_frame(p.Data.data(), p.Data.size());
+    if (!pr.ok || p.RxAtrib.crc_err) return;
+    if (pr.cls != tdma::Class::Marker || pr.tx_tsf == 0) return;   // sync beacons only
+    master_tsf = pr.tx_tsf; seq = pr.seq;
+  }
 
   std::lock_guard<std::mutex> lk(g_mu);
   double local_us = (double)g_recon(p.RxAtrib.tsfl);
-  double master_us = (double)pr.tx_tsf;
+  double master_us = (double)master_tsf;
   ++g_beacons;
 
   // Predict this beacon's master TSF from the fit built on PRIOR beacons,
@@ -161,7 +212,7 @@ static void slave_cb(const Packet& p) {
                   "{\"ev\":\"timesync.lock\",\"seq\":%u,\"master_tsf\":%llu,"
                   "\"local_tsf\":%llu,\"pred_master\":%.1f,\"resid_us\":%.2f,"
                   "\"ppm\":%.2f}\n",
-                  pr.seq, (unsigned long long)pr.tx_tsf,
+                  seq, (unsigned long long)master_tsf,
                   (unsigned long long)(int64_t)local_us, pred, resid, g_fit.ppm());
     emit(buf);
   }
@@ -356,6 +407,7 @@ int main() {
   install_devourer_signal_handlers();
 
   timesync::Config c = timesync::config_from_env();
+  g_hwbeacon = c.hwbeacon;   // slave reads the standard 802.11 beacon timestamp
 
   libusb_context* ctx = nullptr;
   std::shared_ptr<devourer::UsbDeviceLock> lock;

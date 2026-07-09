@@ -17,6 +17,19 @@
 // on `seq`: pred_master_A vs pred_master_B is the inter-UE sync error, measured
 // without either slave touching a wall clock (tests/timesync_demo.sh).
 //
+// UPLINK TIMING ADVANCE (DEVOURER_TSYNC_UPLINK=1, roles master + ue) is the LTE
+// closed-loop extension — a full-duplex master phase-measures each UE uplink
+// against its TSF slot grid and feeds back a timing advance. It is EXPERIMENTAL:
+// the control math converges in the headless selftest and the full-duplex
+// plumbing works on-air (arrivals cluster tightly, ~±0.2 ms with a FIXED TA),
+// but the closed loop does NOT converge on the bench — a fixed-TA authority test
+// shows the TA shifts the UE's send-CALL time yet not the master-measured
+// arrival phase. Root cause: under full-duplex, send_packet queues the frame and
+// the chip airs it on its own schedule, so userspace call-timing has no
+// sub-slot control over air departure (plus this bench has only one clean
+// full-duplex Jaguar2/3 adapter; the 8822E desenses its RX in TX+RX). See
+// docs and tests/timesync_ta_demo.sh.
+//
 // See timesync.h for the fit + env knobs. Metrics are JSONL on stdout.
 #include <atomic>
 #include <chrono>
@@ -181,6 +194,162 @@ static void run_slave(IRtlDevice* dev, const timesync::Config& c) {
           g_resid_max, g_fit.ppm());
 }
 
+// --- UPLINK TIMING ADVANCE (LTE TA), full-duplex ---------------------------
+// The master broadcasts beacons AND phase-measures each UE uplink against its
+// own TSF slot grid (arrival tsfl mod slot_us — reliable per-frame, no ReadTsf
+// which the RX loop would starve), integrating a per-UE timing-advance it feeds
+// back. The UE schedules its uplinks off the beacon-arrival cadence (a seq↔host
+// fit — rate-locked to the master) minus the TA. The loop drives each uplink's
+// arrival onto the master's slot boundary; open-loop it drifts across the slot
+// at the crystal offset. Both nodes are full-duplex (InitWrite + StartRxLoop).
+static int64_t steady_us() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Master TA state.
+static timesync::Recon g_m_recon;
+static std::atomic<double> g_ta_us{0};
+static std::mutex g_m_mu;
+static uint64_t g_uplinks = 0;
+static double g_phase_ss = 0, g_phase_max = 0;
+static uint64_t g_phase_n = 0;
+static double g_slot_us = 20000, g_ta_gain = 0.3;
+static bool g_ta_fixed = false;   // DEVOURER_TSYNC_TA_FIXED: hold TA constant (authority test)
+
+static void master_ta_cb(const Packet& p) {
+  auto pr = tdma::parse_frame(p.Data.data(), p.Data.size());
+  if (!pr.ok || p.RxAtrib.crc_err) return;
+  if (static_cast<uint8_t>(pr.cls) != timesync::kClassUplink) return;
+  std::lock_guard<std::mutex> lk(g_m_mu);
+  double arrival = (double)g_m_recon(p.RxAtrib.tsfl);
+  double phase = arrival - std::round(arrival / g_slot_us) * g_slot_us;  // (-slot/2, slot/2]
+  double ta = g_ta_us.load();
+  if (!g_ta_fixed) {
+    ta += g_ta_gain * phase;                       // late (phase>0) → more TA → UE earlier
+    if (ta > g_slot_us) ta = g_slot_us;            // clamp to one slot (no wrap — a hard
+    if (ta < -g_slot_us) ta = -g_slot_us;          // mod jump kicks the loop)
+    g_ta_us.store(ta);
+  }
+  ++g_uplinks; g_phase_ss += phase * phase; ++g_phase_n;
+  if (std::fabs(phase) > g_phase_max) g_phase_max = std::fabs(phase);
+  char buf[224];
+  std::snprintf(buf, sizeof(buf),
+                "{\"ev\":\"timesync.ta\",\"seq\":%u,\"n\":%llu,\"phase_us\":%.2f,"
+                "\"ta_us\":%.2f}\n",
+                pr.seq, (unsigned long long)g_uplinks, phase, ta);
+  emit(buf);
+}
+
+static void run_master_ta(IRtlDevice* dev, const timesync::Config& c) {
+  g_slot_us = c.slot_ms * 1000.0; g_ta_gain = c.ta_gain;
+  if (const char* f = std::getenv("DEVOURER_TSYNC_TA_FIXED")) {
+    g_ta_fixed = true; g_ta_us.store(std::atof(f));   // authority test: hold TA constant
+  }
+  dev->InitWrite(SelectedChannel{c.channel, 0, CHANNEL_WIDTH_20});
+  std::thread rx([&] { dev->StartRxLoop(master_ta_cb); });
+  sleep_ms(2000);
+  const auto rt = devourer::build_stream_radiotap(c.rate);
+  fprintf(stderr, "timesync master(TA): ch%d beacons=%dms slot=%dms gain=%.2f\n",
+          c.channel, c.interval_ms, c.slot_ms, c.ta_gain);
+
+  uint32_t seq = 0;
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(c.secs);
+  while (!g_devourer_should_stop) {
+    // The beacon carries the current TA in its tx_tsf field (unused for cadence),
+    // so every beacon the UE decodes delivers the latest TA — one send per slot,
+    // no separate frame to drop.
+    int64_t ta_i = (int64_t)std::llround(g_ta_us.load());  // signed µs → 8-byte tag
+    uint64_t ta_b; std::memcpy(&ta_b, &ta_i, 8);
+    auto b = tdma::build_frame(rt, tdma::Class::Marker, seq++, 0, ta_b);
+    dev->send_packet(b.data(), b.size());
+    if (c.secs && std::chrono::steady_clock::now() >= deadline) break;
+    sleep_ms(c.interval_ms);
+  }
+  dev->StopRxLoop(); rx.join();
+  std::lock_guard<std::mutex> lk(g_m_mu);
+  double rms = g_phase_n ? std::sqrt(g_phase_ss / (double)g_phase_n) : 0;
+  fprintf(stderr,
+          "\n=== timesync master(TA) summary ===\n"
+          "  uplinks measured   : %llu\n"
+          "  arrival phase (all): RMS %.2f us   max %.2f us\n"
+          "  final TA           : %.2f us\n",
+          (unsigned long long)g_uplinks, rms, g_phase_max, g_ta_us.load());
+}
+
+// UE state. Event-driven off actual beacon arrivals (rate-locked to the master),
+// so the TA directly and unambiguously shifts the uplink's arrival phase.
+static std::atomic<int64_t> g_ue_beacon_us{0};   // steady_us of the last beacon
+static std::atomic<uint32_t> g_ue_beacon_seq{0};
+static std::atomic<bool> g_ue_have{false};
+static std::atomic<double> g_ue_ta_us{0};
+static std::atomic<uint64_t> g_ue_beacons{0}, g_ue_tx{0};
+
+static void ue_cb(const Packet& p) {
+  auto pr = tdma::parse_frame(p.Data.data(), p.Data.size());
+  if (!pr.ok || p.RxAtrib.crc_err) return;
+  if (pr.cls == tdma::Class::Marker) {
+    g_ue_beacon_us.store(steady_us(), std::memory_order_relaxed);
+    g_ue_beacon_seq.store(pr.seq, std::memory_order_relaxed);
+    g_ue_have.store(true, std::memory_order_relaxed);
+    g_ue_beacons.fetch_add(1, std::memory_order_relaxed);
+    int64_t ta_i; uint64_t ta_b = pr.tx_tsf; std::memcpy(&ta_i, &ta_b, 8);  // TA rides the beacon
+    g_ue_ta_us.store((double)ta_i, std::memory_order_relaxed);
+  }
+}
+
+static void run_ue(IRtlDevice* dev, const timesync::Config& c) {
+  dev->InitWrite(SelectedChannel{c.channel, 0, CHANNEL_WIDTH_20});
+  std::thread rx([&] { dev->StartRxLoop(ue_cb); });
+  sleep_ms(2000);
+  const auto rt = devourer::build_stream_radiotap(c.rate);
+  const int64_t slot_us = (int64_t)c.slot_ms * 1000;
+  fprintf(stderr, "timesync ue: ch%d, uplink one frame per beacon (TA-corrected)\n",
+          c.channel);
+
+  uint32_t done = 0;   // last beacon seq we've already answered with an uplink
+  auto next_stat = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(c.secs);
+  while (!g_devourer_should_stop) {
+    if (std::chrono::steady_clock::now() >= next_stat) {
+      next_stat += std::chrono::seconds(1);
+      char buf[160];
+      std::snprintf(buf, sizeof(buf),
+                    "{\"ev\":\"timesync.ue\",\"beacons\":%llu,\"tx\":%llu,\"ta_us\":%.1f}\n",
+                    (unsigned long long)g_ue_beacons.load(),
+                    (unsigned long long)g_ue_tx.load(), g_ue_ta_us.load());
+      emit(buf);
+    }
+    if (!g_ue_have.load(std::memory_order_relaxed)) { sleep_ms(5); continue; }
+    uint32_t s = g_ue_beacon_seq.load(std::memory_order_relaxed);
+    if (s == done) { sleep_ms(1); continue; }   // wait for the next beacon (a slot tick)
+    done = s;
+    // Aim the uplink to ARRIVE one slot after this beacon (the next boundary),
+    // advanced by the master's TA. TA authority is direct: earlier send → earlier
+    // arrival → smaller measured phase.
+    int64_t send_at = g_ue_beacon_us.load(std::memory_order_relaxed) + slot_us -
+                      (int64_t)g_ue_ta_us.load(std::memory_order_relaxed);
+    int64_t wait = send_at - steady_us();
+    if (wait > 0 && wait < 2 * slot_us)
+      std::this_thread::sleep_for(std::chrono::microseconds(wait));
+    else if (wait >= 2 * slot_us)
+      continue;   // absurd — skip this slot
+    auto f = tdma::build_frame(rt, static_cast<tdma::Class>(timesync::kClassUplink),
+                               s, 0, 0);
+    dev->send_packet(f.data(), f.size());
+    g_ue_tx.fetch_add(1, std::memory_order_relaxed);
+    if (c.secs && std::chrono::steady_clock::now() >= deadline) break;
+  }
+  dev->StopRxLoop(); rx.join();
+  fprintf(stderr,
+          "\n=== timesync ue summary ===\n"
+          "  beacons heard : %llu\n"
+          "  uplinks sent  : %llu\n"
+          "  final TA      : %.2f us\n",
+          (unsigned long long)g_ue_beacons.load(),
+          (unsigned long long)g_ue_tx.load(), g_ue_ta_us.load());
+}
+
 int main() {
   auto logger = std::make_shared<Logger>();
   apply_logging_env(*logger);
@@ -197,7 +366,9 @@ int main() {
   auto dev = wifi.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
   if (!dev) { logger->error("no driver for this chip"); return 1; }
 
-  if (c.role == timesync::Role::Master) run_master(dev.get(), c);
+  if (c.role == timesync::Role::Ue) run_ue(dev.get(), c);
+  else if (c.role == timesync::Role::Master && c.uplink) run_master_ta(dev.get(), c);
+  else if (c.role == timesync::Role::Master) run_master(dev.get(), c);
   else run_slave(dev.get(), c);
   return 0;
 }

@@ -60,18 +60,27 @@ struct LinFit {
     double den = (double)n * sxx - sx * sx;
     return den == 0 ? 1.0 : ((double)n * sxy - sx * sy) / den;
   }
-  // Predicted master TSF (µs) at local TSF x (µs).
-  double at(double x) const {
+  double intercept() const { return (sy - slope() * sx) / (double)n; }
+  // Predicted y at x.
+  double at(double x) const { return y0 + slope() * (x - x0) + intercept(); }
+  // Inverse: the x that yields a given y (for scheduling in the fitted domain).
+  double inverse(double y) const {
     double a = slope();
-    double b = (sy - a * sx) / (double)n;
-    return y0 + a * (x - x0) + b;
+    return x0 + (a == 0 ? 0 : (y - y0 - intercept()) / a);
   }
-  // Master-vs-slave crystal offset in ppm (slope = dmaster/dlocal).
+  // Fitted crystal offset in ppm (slope = dy/dx).
   double ppm() const { return (slope() - 1.0) * 1e6; }
 };
 
+// Uplink extends the downlink beacon with two more TD-tag class codes (reusing
+// tdma::build_frame; parse_frame round-trips any class value, so tdma.h is
+// untouched). Uplink = UE→master frame the master phase-measures; Ta = the
+// master→UE timing-advance correction.
+static constexpr uint8_t kClassUplink = 3;
+static constexpr uint8_t kClassTa = 4;
+
 // --- Config (env) -----------------------------------------------------------
-enum class Role { Master, Slave };
+enum class Role { Master, Slave, Ue };
 
 struct Config {
   Role role = Role::Slave;
@@ -79,6 +88,10 @@ struct Config {
   int secs = 0;            // 0 = run until signalled
   uint8_t channel = 36;
   devourer::TxMode rate;   // master beacon rate (default 6M — must be heard)
+  // Uplink timing-advance (full-duplex, DEVOURER_TSYNC_UPLINK=1):
+  bool uplink = false;     // master: measure UE uplinks + feed back TA. ue: TX uplinks
+  int slot_ms = 20;        // uplink slot grid on the master TSF (a TDMA slot)
+  double ta_gain = 0.3;    // master TA integrator gain (0..1; error fraction/step)
 };
 
 inline int env_int(const char* n, int dflt) {
@@ -90,11 +103,14 @@ inline Config config_from_env() {
   Config c;
   if (const char* r = std::getenv("DEVOURER_TSYNC_ROLE")) {
     std::string s(r);
-    c.role = (s == "master") ? Role::Master : Role::Slave;
+    c.role = (s == "master") ? Role::Master : (s == "ue") ? Role::Ue : Role::Slave;
   }
   c.interval_ms = env_int("DEVOURER_TSYNC_INTERVAL_MS", 100);
   c.secs = env_int("DEVOURER_TSYNC_SECS", 0);
   c.channel = static_cast<uint8_t>(env_int("DEVOURER_CHANNEL", 36));
+  c.uplink = std::getenv("DEVOURER_TSYNC_UPLINK") != nullptr;
+  c.slot_ms = env_int("DEVOURER_TSYNC_SLOT_MS", 20);
+  if (const char* g = std::getenv("DEVOURER_TSYNC_TA_GAIN")) c.ta_gain = std::atof(g);
   const char* rt = std::getenv("DEVOURER_TSYNC_RATE");
   c.rate = devourer::parse_tx_mode_str(rt && *rt ? rt : "6M");
   return c;

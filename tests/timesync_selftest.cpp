@@ -96,7 +96,35 @@ int main() {
           "two slaves agree to sub-µs — the common master jitter cancels");
   }
 
-  // --- 3. Recon 32→64-bit TSF wrap ------------------------------------------
+  // --- 3. uplink timing-advance loop converges ------------------------------
+  // Model the master integrator exactly as master_ta_cb does: the UE's uplink
+  // arrives with a fixed latency offset L that must be nulled, while the UE↔
+  // master crystal offset drifts the arrival by d µs/slot. ta += gain·phase must
+  // drive the arrival phase from L down to the small drift-tracking residual
+  // (~d/gain), not diverge.
+  {
+    const double L = 520.0;      // initial arrival offset (latency), µs
+    const double d = 0.6;        // crystal drift per slot (≈30 ppm × 20 ms), µs
+    const double gain = 0.3;
+    uint32_t ns = 5;
+    auto noise = [&]() { ns = ns * 1664525u + 1013904223u;
+                         return ((int)((ns >> 8) % 20) - 10) * 0.1; };  // ±1 µs
+    double ta = 0.0, early_max = 0.0, late_ss = 0.0;
+    int late_n = 0;
+    const int STEPS = 400;
+    for (int k = 0; k < STEPS; ++k) {
+      double residual = L - ta + d * k;         // true arrival phase this slot
+      double phase = residual + noise();        // what the master measures
+      if (k < 3 && std::fabs(phase) > early_max) early_max = std::fabs(phase);
+      if (k >= STEPS - 80) { late_ss += phase * phase; ++late_n; }
+      ta += gain * phase;                        // master's TA integrator
+    }
+    CHECK(early_max > 200.0, "loop starts far off the slot boundary (~L)");
+    CHECK(std::sqrt(late_ss / late_n) < 8.0,
+          "TA loop converges: arrival locks to the slot within a few us");
+  }
+
+  // --- 4. Recon 32→64-bit TSF wrap ------------------------------------------
   {
     timesync::Recon r;
     CHECK(r(0xFFFFFF00u) == 0xFFFFFF00LL, "first sample = raw low word");

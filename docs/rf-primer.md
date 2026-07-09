@@ -122,7 +122,7 @@ frequencies instead of wiping out a run of packets on one.
 
 ## 9. Trading robustness for throughput in time — bandwidth TDMA
 
-![Bandwidth TDMA schedule](img/tdma_schedule.gif)
+![Bandwidth TDMA — two stations flipping together under a shared clock](img/tdma_schedule.gif)
 
 Narrowband (section 1) is more robust but slower; a wide channel is faster but
 needs a healthier link. You don't have to pick one for the whole session — you

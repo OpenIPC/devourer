@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Animated burst-level bandwidth TDMA — 'the link breathes between a robust
-narrowband burst and a wide throughput burst', in the DEVOURER live-monitor
+"""Animated burst-level bandwidth TDMA — two stations (TX + RX) flipping
+bandwidth in lockstep under a shared GPS clock, in the DEVOURER live-monitor
 style.
 
     tools/tdma_schedule_gif.py -o docs/img/tdma_schedule.gif
 
-A time-frequency view: time scrolls left, frequency (the 20 MHz channel span) up
-the side. The transmitter alternates BURSTS — a narrowband burst (a thin central
-band, ~10 MHz, carrying the critical frames at a robust rate) and a wide burst
-(the full 20 MHz block, carrying bulk frames at a fast MCS). Both ends flip
-bandwidth together in a fraction of a millisecond (FastSetBandwidth), so the
-occupied width "breathes" over time. The example is examples/tdma. Needs Pillow.
+The picture a newcomer needs: a transmitter and a receiver, a shared clock (GPS
+1-PPS) that ticks both at once, and a schedule of BURSTS. On each tick both ends
+flip together — a narrowband burst (thin, amber; critical frames, robust rate)
+then a wide burst (full, cyan; bulk frames, fast rate) — and the flip itself
+costs only ~0.2 ms (one baseband re-clock), versus ~90 ms for a full retune.
+That speed is what makes the alternation practical. The runnable version is
+examples/tdma. Needs Pillow.
 """
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 
@@ -22,114 +24,156 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from monitor_style import (AMBER, CYAN, DIM, GRID, INK, OK, WARN, chrome, font,
                            new_frame, save_gif)
 
-NB_CELLS = 6      # narrowband burst length (time cells)
-WIDE_CELLS = 8    # wide burst length
+NB_CELLS = 6       # narrowband burst length (schedule cells)
+WIDE_CELLS = 8     # wide burst length
 PERIOD = NB_CELLS + WIDE_CELLS
-NROWS = 24        # frequency rows = the 20 MHz span
-NB_ROWS = 10      # narrowband occupies a ~10 MHz central band
+NPER = 2           # periods drawn on the schedule strip
+TOTAL = NPER * PERIOD
+BOUNDS = [b for k in range(NPER + 1)
+          for b in (k * PERIOD, k * PERIOD + NB_CELLS)][: 2 * NPER + 1]
 
 
-def phase_nb(t: int) -> bool:
-    """True during the narrowband burst of the period containing time cell t."""
-    return (t % PERIOD) < NB_CELLS
+def phase_nb(cell: int) -> bool:
+    return (cell % PERIOD) < NB_CELLS
+
+
+def dash(d, x0, y0, x1, y1, col, on=7, off=6, w=1):
+    n = int(math.hypot(x1 - x0, y1 - y0) // (on + off)) + 1
+    for i in range(n):
+        a = i * (on + off) / max(1, (n * (on + off)))
+        b = min(1.0, (i * (on + off) + on) / max(1, (n * (on + off))))
+        d.line([x0 + (x1 - x0) * a, y0 + (y1 - y0) * a,
+                x0 + (x1 - x0) * b, y0 + (y1 - y0) * b], fill=col, width=w)
+
+
+def antenna(d, cx, cy, col):
+    d.line([cx, cy, cx, cy + 26], fill=col, width=2)          # mast
+    d.polygon([(cx - 6, cy), (cx + 6, cy), (cx, cy - 8)], fill=col)
+    for r in (9, 15):                                        # radiating arcs
+        d.arc([cx - r, cy - r - 4, cx + r, cy + r - 4], 210, 330, fill=col)
+
+
+def satellite(d, cx, cy, col):
+    d.rectangle([cx - 12, cy - 8, cx + 12, cy + 8], outline=col, width=2)
+    for sx in (-30, 18):                                     # solar panels
+        d.rectangle([cx + sx, cy - 6, cx + sx + 12, cy + 6], outline=col)
+        d.line([cx + sx + 6, cy - 6, cx + sx + 6, cy + 6], fill=col)
+    d.line([cx - 18, cy, cx - 12, cy], fill=col)
+    d.line([cx + 12, cy, cx + 18, cy], fill=col)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-o", "--out", default="tdma_schedule.gif")
     ap.add_argument("--frames", type=int, default=56)
-    ap.add_argument("--win", type=int, default=34, help="time cells shown")
-    ap.add_argument("--ms", type=int, default=110)
+    ap.add_argument("--ms", type=int, default=95)
     args = ap.parse_args()
 
-    padL, padT, padB = 60, 96, 52
-    gw, gh = 560, 300
-    panelW = 214
-    W = padL + gw + 24 + panelW
-    H = padT + gh + padB
-    cellw = gw / args.win
-    cellh = gh / NROWS
-    r_lo = (NROWS - NB_ROWS) // 2
-    r_hi = r_lo + NB_ROWS  # central narrowband band [r_lo, r_hi)
+    W, H = 920, 548
+    # --- fixed geometry -----------------------------------------------------
+    sat = (W // 2, 96)
+    tx = dict(box=(40, 150, 415, 320), ant=(150, 150))
+    rx = dict(box=(505, 150, 880, 320), ant=(770, 150))
+    strip = (44, 372, 876, 436)          # schedule timeline
+    sw = float(strip[2] - strip[0]) / TOTAL
 
-    def cell_x(ti):
-        return padL + ti * cellw
-
-    def row_y(r):
-        # r=0 at the bottom of the span, r=NROWS at the top
-        return padT + (NROWS - r) * cellh
+    def mode_panel(d, box, nb, sending, cx_ant, label, cls_txt, cls_col):
+        x0, y0, x1, y1 = box
+        d.rectangle(box, outline=(0, 70, 80))
+        antenna(d, cx_ant, y0, INK)
+        d.text((x0 + 14, y0 + 12), label, font=font(17, True), fill=CYAN)
+        # occupied-bandwidth bar: narrow+amber (NB) vs full+cyan (wide)
+        bar_y = y0 + 66
+        span = x1 - x0 - 40
+        col = AMBER if nb else CYAN
+        w = int(span * (0.36 if nb else 0.94))
+        bx0 = x0 + 20 + (span - w) // 2
+        d.rectangle([x0 + 20, bar_y, x0 + 20 + span, bar_y + 34],
+                    outline=GRID)
+        d.rectangle([bx0, bar_y, bx0 + w, bar_y + 34], fill=col)
+        d.text((x0 + 20, bar_y + 44), "10 MHz" if nb else "20 MHz",
+               font=font(15, True), fill=col)
+        d.text((x1 - 128, bar_y + 46), "occupied width", font=font(10), fill=DIM)
+        verb = "sending" if sending else "decoding"
+        d.text((x0 + 20, y1 - 34), f"{verb}", font=font(11), fill=DIM)
+        d.text((x0 + 96, y1 - 37), cls_txt, font=font(15, True), fill=cls_col)
+        if not sending:
+            d.ellipse([x1 - 34, y1 - 36, x1 - 16, y1 - 18], outline=OK, width=2)
+            d.line([x1 - 30, y1 - 27, x1 - 26, y1 - 22], fill=OK, width=2)
+            d.line([x1 - 26, y1 - 22, x1 - 19, y1 - 32], fill=OK, width=2)
 
     imgs = []
     for fi in range(args.frames):
+        p = (fi / args.frames) * TOTAL          # continuous position (cells)
+        cell = int(p) % PERIOD
+        nb = phase_nb(int(p))
+        last_b = max(b for b in BOUNDS if b <= p + 1e-6)
+        d_since = p - last_b                     # cells since last flip
+        flipping = d_since < 1.6                 # a tick just happened
+
         img, d = new_frame(W, H)
         chrome(d, W, H, "BANDWIDTH TDMA",
-               "time → · frequency ↑ · the link alternates a narrowband "
-               "(critical) and a wide (bulk) burst", fi)
+               "two stations, one clock: TX and RX flip bandwidth together each "
+               "burst", fi)
 
-        d.rectangle([padL, padT, padL + gw, padT + gh], outline=(0, 70, 80))
-        # frequency-span bracket + label
-        d.line([padL - 20, padT, padL - 20, padT + gh], fill=(0, 70, 80))
-        d.text((6, padT + gh // 2 - 30), "2\n0\nM\nH\nz".replace("\n", ""),
-               font=font(10), fill=DIM)
-        # faint band guides marking the narrowband slice edges
-        for r in (r_lo, r_hi):
-            y = row_y(r)
-            d.line([padL, y, padL + gw, y], fill=GRID)
+        # --- GPS shared clock + sync pulse ---------------------------------
+        satellite(d, sat[0], sat[1], OK if flipping else DIM)
+        d.text((sat[0] + 44, sat[1] - 6), "GPS · shared 1-PPS clock",
+               font=font(11), fill=OK if flipping else DIM)
+        for dest in (tx["ant"], rx["ant"]):
+            dash(d, sat[0], sat[1] + 12, dest[0], dest[1] - 12,
+                 (0, 90, 70) if not flipping else OK)
+            if flipping:                          # pulse travels to the stations
+                fr = min(1.0, d_since / 1.4)
+                px = sat[0] + (dest[0] - sat[0]) * fr
+                py = (sat[1] + 12) + (dest[1] - 12 - sat[1] - 12) * fr
+                d.ellipse([px - 4, py - 4, px + 4, py + 4], fill=OK)
+        if flipping:
+            d.text((sat[0] - 22, sat[1] + 26), "TICK", font=font(11, True), fill=OK)
 
-        # draw the breathing occupancy across the visible window
-        cur_nb = True
-        for ti in range(args.win):
-            t = fi + ti
-            nb = phase_nb(t)
-            newest = ti == args.win - 1
-            fade = 0.32 + 0.68 * (ti / args.win)
-            x = cell_x(ti)
-            if nb:
-                base = AMBER
-                y0, y1 = row_y(r_hi), row_y(r_lo)
-            else:
-                base = CYAN
-                y0, y1 = row_y(NROWS), row_y(0)
-            col = tuple(int(c * fade) for c in base)
-            d.rectangle([x + 1.5, y0 + 2, x + cellw - 1.5, y1 - 2], fill=col)
-            # a faint packet texture: two brighter ticks per cell
-            tick = tuple(min(255, int(c * min(1.0, fade + 0.25))) for c in base)
-            midx = x + cellw / 2
-            d.line([midx, y0 + 4, midx, y1 - 4], fill=tick)
-            if newest:
-                cur_nb = nb
-                d.rectangle([x + 1, y0 + 1, x + cellw - 1, y1 - 1],
-                            outline=INK, width=2)
+        # --- TX / RX stations ----------------------------------------------
+        cls_txt = "CRITICAL" if nb else "BULK"
+        cls_col = AMBER if nb else CYAN
+        mode_panel(d, tx["box"], nb, True, tx["ant"][0], "TX", cls_txt, cls_col)
+        mode_panel(d, rx["box"], nb, False, rx["ant"][0], "RX", cls_txt, cls_col)
 
-        d.text((padL, padT + gh + 8),
-               "time →   (narrowband burst = critical @ robust rate · "
-               "wide burst = bulk @ fast MCS)", font=font(11), fill=DIM)
+        # a frame in flight across the air gap (TX -> RX), colour = class
+        gy = 250
+        fx = 415 + ((fi * 22) % 90)
+        d.rectangle([fx, gy - 6, fx + 26, gy + 6], fill=cls_col)
+        d.polygon([(fx + 26, gy - 8), (fx + 40, gy), (fx + 26, gy + 8)], fill=cls_col)
 
-        # readout panel
-        x0 = padL + gw + 22
-        d.text((x0, padT - 2), "LIVE READOUT", font=font(12), fill=CYAN)
-        y = padT + 24
+        # --- schedule strip + playhead -------------------------------------
+        sx0, sy0, sx1, sy1 = strip
+        d.text((sx0, sy0 - 20), "SCHEDULE  (repeats — both ends run it)",
+               font=font(11), fill=CYAN)
+        for c in range(TOTAL):
+            cnb = phase_nb(c)
+            x = sx0 + c * sw
+            base = AMBER if cnb else CYAN
+            col = tuple(int(v * 0.42) for v in base)
+            d.rectangle([x + 1, sy0, x + sw - 1, sy1], fill=col)
+        for b in BOUNDS:                            # burst boundaries
+            d.line([sx0 + b * sw, sy0 - 4, sx0 + b * sw, sy1 + 4], fill=(0, 70, 80))
+        phx = sx0 + p * sw                          # the 'now' playhead
+        d.line([phx, sy0 - 8, phx, sy1 + 8], fill=INK, width=2)
+        d.polygon([(phx - 5, sy0 - 12), (phx + 5, sy0 - 12), (phx, sy0 - 4)], fill=INK)
+        if flipping:
+            d.text((min(phx + 6, sx1 - 66), sy0 + 6), "flip 0.2 ms",
+                   font=font(11, True), fill=OK)
+        d.text((sx0, sy1 + 8),
+               "amber = narrowband burst (critical, robust) · "
+               "cyan = wide burst (bulk, fast)", font=font(10), fill=DIM)
 
-        def line(lbl, val, c=INK):
-            nonlocal y
-            d.text((x0, y), lbl, font=font(11), fill=DIM)
-            d.text((x0 + 96, y - 3), val, font=font(16, True), fill=c)
-            y += 30
-
-        acc = AMBER if cur_nb else CYAN
-        line("phase", "NARROWBAND" if cur_nb else "WIDE", acc)
-        line("width", "10 MHz" if cur_nb else "20 MHz", acc)
-        line("carrying", "CRITICAL" if cur_nb else "BULK", acc)
-        line("rate", "6M robust" if cur_nb else "MCS7 fast", DIM)
-        y += 6
-        st = "ROBUST LINK" if cur_nb else "HIGH THROUGHPUT"
-        d.rectangle([x0, y, x0 + 190, y + 30], outline=acc, width=2)
-        d.ellipse([x0 + 8, y + 10, x0 + 18, y + 20], fill=acc)
-        d.text((x0 + 28, y + 8), st, font=font(13, True), fill=acc)
-        y += 46
-        for ln in ("TX + RX flip together", "in ~0.2 ms (one 0x8ac", "write) — a receiver",
-                   "decodes one width at a", "time, so the schedule", "is burst-level."):
-            d.text((x0, y), ln, font=font(11), fill=INK); y += 15
+        # --- switch-cost gauge (the achievement) ---------------------------
+        gx, gyb = 44, 468
+        d.text((gx, gyb), "SWITCH COST", font=font(11), fill=CYAN)
+        d.text((gx + 118, gyb), "FastSetBandwidth  0.2 ms", font=font(11, True), fill=OK)
+        d.rectangle([gx + 320, gyb + 1, gx + 322, gyb + 13], fill=OK)   # 0.2 ms
+        d.text((gx + 118, gyb + 18), "full SetMonitorChannel  90 ms",
+               font=font(11), fill=DIM)
+        d.rectangle([gx + 320, gyb + 19, gx + 320 + 300, gyb + 31], fill=(60, 40, 40))
+        d.text((gx + 118 + 300 + 26, gyb + 18), "~450×", font=font(11, True), fill=WARN)
         imgs.append(img)
 
     save_gif(imgs, args.out, ms=args.ms, colors=48)

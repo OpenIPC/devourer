@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <memory>
 #include <vector>
+#include <thread>
 
 #include <libusb.h>
 
@@ -71,6 +72,26 @@ int main(int argc, char **argv) {
 
   auto to20 = SelectedChannel{ch, 0, CHANNEL_WIDTH_20};
   auto to5  = SelectedChannel{ch, 0, CHANNEL_WIDTH_5};
+
+  // SDRHOLD=<5|10|20>: fast-toggle to that width, then transmit the canonical
+  // beacon continuously so a B210 can measure the occupied bandwidth of the
+  // fast-toggled emission (proves the fast switch re-clocked the TX, not just
+  // that registers match). Ctrl-C / SIGTERM to stop.
+  if (const char *e = std::getenv("SDRHOLD")) {
+    int w = atoi(e);
+    ChannelWidth_t cw = w == 5 ? CHANNEL_WIDTH_5
+                      : w == 10 ? CHANNEL_WIDTH_10 : CHANNEL_WIDTH_20;
+    dev->FastSetBandwidth(cw);
+    static uint8_t beacon[] = {
+        0x00, 0x00, 0x0a, 0x00, 0x00, 0x80, 0x00, 0x00, 0x08, 0x00,
+        0x40, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x57,
+        0x42, 0x75, 0x05, 0xd6, 0x00, 0x57, 0x42, 0x75, 0x05, 0xd6, 0x00,
+        0x80, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+        0x24, 0x4f, 0xa0, 0xc5, 0x4a, 0xbb, 0x6a, 0x55, 0x03, 0x72, 0xf8};
+    fprintf(stderr, "SDRHOLD: fast-toggled to %d MHz, transmitting beacon\n", w);
+    for (;;)
+      dev->send_packet(beacon, sizeof(beacon)); /* max duty for the SDR */
+  }
 
   // Parity mode: prove the fast path leaves 0x8ac bit-identical to the full
   // path. Run with DEVOURER_DUMP_CANARY=1; the "0x8ac" canary line printed

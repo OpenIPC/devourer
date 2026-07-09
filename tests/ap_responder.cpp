@@ -7,13 +7,16 @@
 // returns libusb BUSY). Management-frame timeouts are tens of ms, so the ~few-ms
 // userspace RX->TX round-trip fits.
 //
-// STATUS (bench): FULL ASSOCIATION ACHIEVED. A real Linux station (rtw88 8822cu,
-// wlp4s0u2u4) authenticates, associates, and stays "Connected to 02:42:75:05:d6:00"
-// (wpa_supplicant CTRL-EVENT-CONNECTED, iw link Connected, stable for 8 s+). The
-// AP sees the AUTH and ASSOC requests with retry=0 — devourer HARDWARE-ACKs them
-// (MACID = the BSSID, set by StartBeacon), so the responses land and the handshake
-// completes. Run with a DENSE beacon (DEVOURER_BCN_TU=25 — a fast channel-hopping
-// supplicant scan misses a 100 TU beacon).
+// STATUS (bench): FULL ASSOCIATION + DATA PLANE — a real Linux station (rtw88
+// 8822cu, wlp4s0u2u4) authenticates, associates, stays "Connected to
+// 02:42:75:05:d6:00", AND PINGS the AP: `ping 192.168.99.1` returns 0% loss,
+// ~2 ms RTT. The AP sees AUTH/ASSOC with retry=0 (devourer HARDWARE-ACKs them —
+// MACID = BSSID, set by StartBeacon) and answers the data plane below: ARP
+// requests for the AP IP -> ARP replies, ICMP echo requests -> echo replies, over
+// 802.11 from-DS data frames. Run with a DENSE beacon (DEVOURER_BCN_TU=25 — a fast
+// channel-hopping supplicant scan misses a 100 TU beacon). The station needs a
+// static IP (192.168.99.2/24; the AP answers for .1) — there is no DHCP server.
+// See tests/ap_ping_demo.sh.
 //
 // THE FIX that unblocked it: the BSSID must be UNICAST. The canonical test SA
 // 0x57.. has the I/G bit set (multicast); a station cannot unicast-auth to a
@@ -61,9 +64,32 @@ static const uint8_t kBssid[6] = {0x02, 0x42, 0x75, 0x05, 0xd6, 0x00};
 static IRtlDevice* g_dev = nullptr;
 static std::vector<uint8_t> g_rt;
 static uint8_t g_chan = 6;
-static std::atomic<uint64_t> g_probe{0}, g_auth{0}, g_assoc{0}, g_sent{0};
+static std::atomic<uint64_t> g_probe{0}, g_auth{0}, g_assoc{0}, g_sent{0}, g_data{0};
 static std::mutex g_q_mu;
 static std::vector<std::vector<uint8_t>> g_q;      // pre-built radiotap+MPDU frames
+static const uint8_t kApIp[4] = {192, 168, 99, 1}; // the AP's IP (station uses a static .2)
+
+// 16-bit one's-complement checksum (IP / ICMP), returned host-order big-endian.
+static uint16_t csum16(const uint8_t* d, int len) {
+  uint32_t s = 0;
+  for (int i = 0; i + 1 < len; i += 2) s += (uint32_t)(d[i] << 8) | d[i + 1];
+  if (len & 1) s += (uint32_t)d[len - 1] << 8;
+  while (s >> 16) s = (s & 0xffff) + (s >> 16);
+  return (uint16_t)~s;
+}
+// Build an AP->STA data frame (from-DS): 802.11 data hdr + LLC/SNAP + payload.
+static std::vector<uint8_t> build_data(const uint8_t* sta, uint16_t eth,
+                                       const uint8_t* pl, int plen) {
+  std::vector<uint8_t> m = {0x08, 0x02, 0x00, 0x00,      // data, from-DS
+      sta[0],sta[1],sta[2],sta[3],sta[4],sta[5],          // addr1 = STA (DA)
+      kBssid[0],kBssid[1],kBssid[2],kBssid[3],kBssid[4],kBssid[5],  // addr2 = BSSID (TA)
+      kBssid[0],kBssid[1],kBssid[2],kBssid[3],kBssid[4],kBssid[5],  // addr3 = SA
+      0x00, 0x00,
+      0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00,                 // LLC/SNAP
+      (uint8_t)(eth >> 8), (uint8_t)(eth & 0xff)};
+  m.insert(m.end(), pl, pl + plen);
+  return m;
+}
 
 // Common: [SSID + rates + DS] IE tail for probe/assoc responses.
 static void append_ies(std::vector<uint8_t>& m, bool with_ssid) {
@@ -119,6 +145,43 @@ static void on_rx(const Packet& p) {
     m.insert(m.end(), {0x01,0x00, 0x00,0x00, 0x01,0xc0});   // cap, status 0, AID 1
     append_ies(m, false);
     enqueue(std::move(m));
+  } else if ((fc0 == 0x08 || fc0 == 0x88) && (fc1 & 0x01) && to_us) {  // data, to-DS
+    // Data plane: answer ARP + ICMP echo so an associated station can ping the AP.
+    int hlen = 24 + (fc0 == 0x88 ? 2 : 0);               // QoS data adds 2 bytes
+    if ((int)p.Data.size() < hlen + 8) return;
+    const uint8_t* llc = p.Data.data() + hlen;
+    if (!(llc[0] == 0xaa && llc[1] == 0xaa && llc[2] == 0x03)) return;
+    uint16_t eth = (llc[6] << 8) | llc[7];
+    const uint8_t* pl = llc + 8;
+    int pllen = (int)p.Data.size() - (hlen + 8);
+    if (eth == 0x0806 && pllen >= 28) {                  // ARP
+      uint16_t oper = (pl[6] << 8) | pl[7];
+      const uint8_t* sha = pl + 8; const uint8_t* spa = pl + 14; const uint8_t* tpa = pl + 24;
+      if (oper == 1 && std::memcmp(tpa, kApIp, 4) == 0) {  // request for the AP IP
+        uint8_t a[28] = {0,1, 8,0, 6,4, 0,2,
+            kBssid[0],kBssid[1],kBssid[2],kBssid[3],kBssid[4],kBssid[5],
+            kApIp[0],kApIp[1],kApIp[2],kApIp[3],
+            sha[0],sha[1],sha[2],sha[3],sha[4],sha[5], spa[0],spa[1],spa[2],spa[3]};
+        enqueue(build_data(sta, 0x0806, a, 28)); g_data.fetch_add(1);
+      }
+    } else if (eth == 0x0800 && pllen >= 28) {           // IPv4
+      const uint8_t* ip = pl; int ihl = (ip[0] & 0x0f) * 4;
+      if (ip[9] == 1 && (int)pllen >= ihl + 8 && std::memcmp(ip + 16, kApIp, 4) == 0) {
+        const uint8_t* icmp = ip + ihl;
+        if (icmp[0] == 8) {                              // ICMP echo request -> reply
+          std::vector<uint8_t> r(pl, pl + pllen);
+          std::memcpy(r.data() + 12, kApIp, 4);          // IP src = AP
+          std::memcpy(r.data() + 16, ip + 12, 4);        // IP dst = original src
+          r[10] = r[11] = 0;
+          uint16_t ic = csum16(r.data(), ihl); r[10] = ic >> 8; r[11] = ic & 0xff;
+          r[ihl] = 0;                                    // ICMP type 0 (reply)
+          r[ihl + 2] = r[ihl + 3] = 0;
+          uint16_t cc = csum16(r.data() + ihl, pllen - ihl);
+          r[ihl + 2] = cc >> 8; r[ihl + 3] = cc & 0xff;
+          enqueue(build_data(sta, 0x0800, r.data(), pllen)); g_data.fetch_add(1);
+        }
+      }
+    }
   }
 }
 
@@ -167,8 +230,9 @@ int main(int argc, char** argv) {
     for (auto& f : batch) if (g_dev->send_packet(f.data(), f.size())) g_sent.fetch_add(1);
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  fprintf(stderr, "probe=%llu auth=%llu assoc=%llu  responses_sent=%llu\n",
+  fprintf(stderr, "probe=%llu auth=%llu assoc=%llu data(arp/icmp)=%llu  responses_sent=%llu\n",
           (unsigned long long)g_probe.load(), (unsigned long long)g_auth.load(),
-          (unsigned long long)g_assoc.load(), (unsigned long long)g_sent.load());
+          (unsigned long long)g_assoc.load(), (unsigned long long)g_data.load(),
+          (unsigned long long)g_sent.load());
   _exit(0);
 }

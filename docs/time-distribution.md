@@ -144,7 +144,16 @@ has the I/G (multicast) bit set in `0x57`; a station cannot unicast-auth to a
 multicast address, so rtw88 silently drops the auth before it hits the air
 (bench-proven across two station chips — `0x57` → no auth on air, `0x02` → auth on
 air and association completes). Use a locally-administered unicast BSSID (`0x02..`).
-So devourer is a real, associable AP — not just a beacon source.
+
+**Data plane — a real station pings devourer's AP.** `ap_responder` also answers
+the post-association data plane (ARP requests for the AP IP → ARP replies, ICMP
+echo requests → echo replies, over 802.11 from-DS data frames), so an associated
+station running `ping 192.168.99.1` gets **0% packet loss, ~1.8 ms RTT**
+(`tests/ap_ping_demo.sh`; the station needs a static IP — there is no DHCP
+server). So devourer is a real, associable, pingable AP — a Linux station
+discovers it, authenticates, associates, and exchanges IP traffic with it over the
+air, exactly like a kernel-driven AP. (A full data path — DHCP, forwarding — is an
+AP *stack* concern beyond the driver.)
 
 ## Uplink timing advance (experimental)
 

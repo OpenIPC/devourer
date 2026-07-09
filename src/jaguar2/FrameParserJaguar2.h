@@ -68,6 +68,9 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 #define GET_RX_DESC_SHIFT_8822B(r)         LE_BITS_TO_4BYTE((r) + 0x00, 24, 2)
 #define GET_RX_DESC_PHYST_8822B(r)         LE_BITS_TO_4BYTE((r) + 0x00, 26, 1)
 #define GET_RX_DESC_RX_RATE_8822B(r)       LE_BITS_TO_4BYTE((r) + 0x0C, 0, 7)
+/* DWORD 5 = the 32-bit TSF-low latched at receive (same offset as the 8812's
+ * GET_RX_STATUS_DESC_TSFL_8812 at +20). The hardware TSF timing reference. */
+#define GET_RX_DESC_TSFL_8822B(r)          LE_BITS_TO_4BYTE((r) + 0x14, 0, 32)
 
 namespace jaguar2 {
 
@@ -185,6 +188,7 @@ struct Rx8822bFrame {
   uint8_t rx_rate;
   uint16_t drvinfo_size;
   uint8_t shift;
+  uint32_t tsfl;              /* hardware TSF-low at receive */
   uint32_t next_offset;
 };
 
@@ -202,6 +206,7 @@ inline bool parse_rx_8822b(const uint8_t *buf, size_t buflen,
   out.crc_err = GET_RX_DESC_CRC32_8822B(buf) != 0;
   out.icv_err = GET_RX_DESC_ICV_ERR_8822B(buf) != 0;
   out.rx_rate = static_cast<uint8_t>(GET_RX_DESC_RX_RATE_8822B(buf));
+  out.tsfl = static_cast<uint32_t>(GET_RX_DESC_TSFL_8822B(buf));
 
   uint32_t frame_off =
       static_cast<uint32_t>(RXDESC_SIZE_8822B) + out.drvinfo_size + out.shift;

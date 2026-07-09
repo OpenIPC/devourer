@@ -439,6 +439,7 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         p.RxAtrib.crc_err = f.crc_err;
         p.RxAtrib.icv_err = f.icv_err;
         p.RxAtrib.data_rate = f.rx_rate;
+        p.RxAtrib.tsfl = f.tsfl;
         p.RxAtrib.drvinfo_sz = static_cast<uint8_t>(f.drvinfo_size);
         p.RxAtrib.shift_sz = f.shift;
         /* RX desc word2 BIT(28) (GET_RX_DESC_C2H, halmac_rx_desc_nic.h:230) marks
@@ -1130,6 +1131,20 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
 }
 
 SelectedChannel RtlJaguar2Device::GetSelectedChannel() { return _channel; }
+
+uint64_t RtlJaguar2Device::ReadTsf() {
+  /* REG_TSFTR 0x0560 (low) / 0x0564 (high); hi/lo/hi with a wrap retry. Under
+   * _reg_mu (shared with the coex/thermal tick). NB starved to 0 under a heavy
+   * RX bulk-IN flood — reliable from a quiet TX. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
+  uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
+  if (_device.rtw_read<uint32_t>(0x0564) != hi) {
+    hi = _device.rtw_read<uint32_t>(0x0564);
+    lo = _device.rtw_read<uint32_t>(0x0560);
+  }
+  return (static_cast<uint64_t>(hi) << 32) | lo;
+}
 
 void RtlJaguar2Device::Stop() {
   stop_pwrtrack();

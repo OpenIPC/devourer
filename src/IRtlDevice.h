@@ -189,6 +189,16 @@ public:
   virtual bool send_packet(const uint8_t *packet, size_t length) = 0;
   virtual SelectedChannel GetSelectedChannel() = 0;
 
+  /* Read the 64-bit hardware TSF (Timing Synchronization Function) timer — the
+   * 802.11 MAC's free-running microsecond clock (REG_TSFTR). It runs off the
+   * chip's crystal and is latched into every RX descriptor at receive
+   * (rx_pkt_attrib::tsfl, the low 32 bits), so it is a precise, host-jitter-free
+   * timing reference for multi-radio sync / TDOA / scheduled bursts. Returns 0
+   * where unsupported (default). NB: a register read is a control transfer —
+   * calling it concurrently with a heavy RX bulk-IN load can race (catch the
+   * exception). */
+  virtual uint64_t ReadTsf() { return 0; }
+
   /* Clean shutdown: halt TRX DMA and power the chip down to a re-enumerable
    * state (mirrors the kernel driver's card-disable on unbind). Call after the
    * RX/TX loop exits and BEFORE releasing/closing the USB interface, so the

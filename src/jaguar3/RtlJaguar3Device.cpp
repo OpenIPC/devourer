@@ -217,6 +217,7 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         p.RxAtrib.crc_err = f.crc_err;
         p.RxAtrib.icv_err = f.icv_err;
         p.RxAtrib.data_rate = f.rx_rate;
+        p.RxAtrib.tsfl = f.tsfl;
         p.RxAtrib.drvinfo_sz = static_cast<uint8_t>(f.drvinfo_size);
         p.RxAtrib.shift_sz = f.shift;
         /* RX desc word2 BIT(28) = FW C2H report, not an 802.11 frame. During
@@ -1255,6 +1256,20 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
 }
 
 SelectedChannel RtlJaguar3Device::GetSelectedChannel() { return _channel; }
+
+uint64_t RtlJaguar3Device::ReadTsf() {
+  /* REG_TSFTR 0x0560 (low) / 0x0564 (high); hi/lo/hi with a wrap retry. Under
+   * _reg_mu (shared with the coex runtime thread). Starved to 0 under a heavy
+   * RX bulk-IN flood — reliable from a quiet TX. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
+  uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
+  if (_device.rtw_read<uint32_t>(0x0564) != hi) {
+    hi = _device.rtw_read<uint32_t>(0x0564);
+    lo = _device.rtw_read<uint32_t>(0x0560);
+  }
+  return (static_cast<uint64_t>(hi) << 32) | lo;
+}
 
 void RtlJaguar3Device::SetTxMode(const devourer::TxMode &mode) {
   _tx_mode_default = mode;

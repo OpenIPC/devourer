@@ -47,13 +47,15 @@ inline const char* class_name(Class c) {
 //   [10..15] addr2 = SA           [24..] the TD tag
 static const uint8_t kSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
 static constexpr size_t kHdrLen = 24;     // 802.11 header up to the body
-static constexpr size_t kTagLen = 12;     // 'T''D' ver cls seq[4] burst[4]
+// 'T''D' ver cls seq[4] burst[4] tx_tsf[8]. The 8-byte TX-TSF stamp lets the
+// TSF-sync RX measure the TX↔RX crystal drift (0 when the TX can't read TSF).
+static constexpr size_t kTagLen = 20;
 static constexpr size_t kMinData = kHdrLen + kTagLen;
 
 // Build a full TX buffer: [radiotap for this class][802.11 header][TD tag].
 inline std::vector<uint8_t> build_frame(const std::vector<uint8_t>& radiotap,
-                                        Class cls, uint32_t seq,
-                                        uint32_t burst) {
+                                        Class cls, uint32_t seq, uint32_t burst,
+                                        uint64_t tx_tsf = 0) {
   static const uint8_t hdr[kHdrLen] = {
       0x40, 0x00, 0x00, 0x00,                         // FC + duration
       0xff, 0xff, 0xff, 0xff, 0xff, 0xff,             // addr1 broadcast
@@ -64,12 +66,13 @@ inline std::vector<uint8_t> build_frame(const std::vector<uint8_t>& radiotap,
   f.reserve(radiotap.size() + kHdrLen + kTagLen);
   f.insert(f.end(), radiotap.begin(), radiotap.end());
   f.insert(f.end(), hdr, hdr + kHdrLen);
-  const uint8_t tag[kTagLen] = {
+  uint8_t tag[kTagLen] = {
       'T', 'D', 1, static_cast<uint8_t>(cls),
       static_cast<uint8_t>(seq),        static_cast<uint8_t>(seq >> 8),
       static_cast<uint8_t>(seq >> 16),  static_cast<uint8_t>(seq >> 24),
       static_cast<uint8_t>(burst),      static_cast<uint8_t>(burst >> 8),
       static_cast<uint8_t>(burst >> 16),static_cast<uint8_t>(burst >> 24)};
+  for (int i = 0; i < 8; ++i) tag[12 + i] = static_cast<uint8_t>(tx_tsf >> (8 * i));
   f.insert(f.end(), tag, tag + kTagLen);
   return f;
 }
@@ -79,6 +82,7 @@ struct Parsed {
   Class cls = Class::Bulk;
   uint32_t seq = 0;
   uint32_t burst = 0;
+  uint64_t tx_tsf = 0;
 };
 
 // Parse an RX Packet.Data span (802.11 MPDU) into a TD tag, if it is one of ours.
@@ -93,9 +97,51 @@ inline Parsed parse_frame(const uint8_t* data, size_t len) {
           (static_cast<uint32_t>(t[6]) << 16) | (static_cast<uint32_t>(t[7]) << 24);
   p.burst = static_cast<uint32_t>(t[8]) | (static_cast<uint32_t>(t[9]) << 8) |
             (static_cast<uint32_t>(t[10]) << 16) | (static_cast<uint32_t>(t[11]) << 24);
+  for (int i = 0; i < 8; ++i)
+    p.tx_tsf |= static_cast<uint64_t>(t[12 + i]) << (8 * i);
   p.ok = true;
   return p;
 }
+
+// --- TSF clock: a running host↔hardware-TSF least-squares fit ---------------
+// Every RX frame carries a hardware TSF (rx_pkt_attrib::tsfl, latched in the MAC
+// at receive) and a host time (when our callback ran). The host time is noisy
+// (USB batching + scheduling, ~1 ms RMS on Jaguar1); the TSF is not. Fitting
+// host = a·tsf + b over many frames averages the noise out, so evaluating the
+// line at a marker's tsf gives a de-jittered host time for that marker — the
+// precise schedule anchor. All state in offset coords (relative to the first
+// sample) to keep the sums numerically well-conditioned.
+struct TsfClock {
+  bool init = false;
+  double x0 = 0, y0 = 0;
+  long long n = 0;
+  double sx = 0, sy = 0, sxx = 0, sxy = 0;
+  int64_t hi = 0;            // 32→64-bit tsf reconstruction (low word wraps)
+  uint32_t plo = 0;
+
+  int64_t recon(uint32_t lo) {
+    if (init && lo < plo) hi += (1LL << 32);
+    plo = lo;
+    return hi + lo;
+  }
+  // Feed one frame; returns the reconstructed 64-bit tsf (µs).
+  int64_t add(uint32_t tsfl, int64_t host_ns) {
+    int64_t t = recon(tsfl);
+    if (!init) { x0 = (double)t; y0 = (double)host_ns; init = true; }
+    double xi = (double)t - x0, yi = (double)host_ns - y0;
+    ++n; sx += xi; sy += yi; sxx += xi * xi; sxy += xi * yi;
+    return t;
+  }
+  bool ready() const { return n >= 16; }
+  // The de-jittered host time (ns) for a given reconstructed tsf.
+  double host_at(int64_t t) const {
+    double den = (double)n * sxx - sx * sx;
+    if (den == 0) return y0;
+    double a = ((double)n * sxy - sx * sy) / den;
+    double b = (sy - a * sx) / (double)n;
+    return y0 + a * ((double)t - x0) + b;
+  }
+};
 
 // --- Schedule ---------------------------------------------------------------
 enum class Phase { NB, WIDE };
@@ -129,7 +175,7 @@ struct Schedule {
 
 // --- Config (env) -----------------------------------------------------------
 enum class Role { Tx, RxSync, RxCamp };
-enum class Sync { WallClock, Marker };
+enum class Sync { WallClock, Marker, Tsf };
 
 struct Config {
   Role role = Role::Tx;
@@ -173,8 +219,12 @@ inline Config config_from_env() {
     else if (s == "rx-camp") c.role = Role::RxCamp;
     else c.role = Role::Tx;
   }
-  if (const char* s = std::getenv("DEVOURER_TDMA_SYNC"))
-    c.sync = std::string(s) == "marker" ? Sync::Marker : Sync::WallClock;
+  if (const char* s = std::getenv("DEVOURER_TDMA_SYNC")) {
+    std::string v(s);
+    c.sync = v == "marker" ? Sync::Marker
+             : v == "tsf"  ? Sync::Tsf
+                           : Sync::WallClock;
+  }
 
   c.sched.nb_w = width_of(env_int("DEVOURER_TDMA_NB", 10));
   c.sched.wide_w = width_of(env_int("DEVOURER_TDMA_WIDE", 20));

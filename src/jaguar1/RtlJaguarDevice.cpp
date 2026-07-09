@@ -290,6 +290,18 @@ RxEnergy RtlJaguarDevice::GetRxEnergy() {
 
 SelectedChannel RtlJaguarDevice::GetSelectedChannel() { return _channel; }
 
+uint64_t RtlJaguarDevice::ReadTsf() {
+  /* REG_TSFTR (0x0560) = TSF low 32, 0x0564 = TSF high 32. Read hi, lo, hi
+   * again and retry the pair once if the low word wrapped between the reads. */
+  uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
+  uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
+  if (_device.rtw_read<uint32_t>(0x0564) != hi) {
+    hi = _device.rtw_read<uint32_t>(0x0564);
+    lo = _device.rtw_read<uint32_t>(0x0560);
+  }
+  return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
 bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   struct tx_desc *ptxdesc;
   bool resp;

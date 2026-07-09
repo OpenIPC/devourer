@@ -125,6 +125,15 @@ flags), DS param, TIM/DTIM and ERP all interpreted correctly. Confirmed on **bot
 bands** — ch6 (2437 MHz) and ch36 (5180 MHz). A dense beacon interval (e.g. 25 TU,
 `DEVOURER_BCN_TU`) is needed so the scan's per-channel dwell catches it.
 
+devourer also answers **active scans** like a kernel AP: `tests/probe_responder.cpp`
+runs full-duplex, matches probe-requests in the RX callback and `send_packet`s a
+probe-response addressed to the requester — with **no beacon aired**, a real rtw88
+station's `iw scan` still lists `devourerAP` (discovery via the probe response).
+send_packet must run off the RX event thread (queue the requester, TX from another
+thread — libusb returns BUSY otherwise). This works because management-frame timing
+is tens of ms (the userspace RX→TX round-trip is a few ms), unlike SIFS ACKs — and
+it de-risks the AP-side handshake (probe-resp → auth → assoc).
+
 ## Uplink timing advance (experimental)
 
 `DEVOURER_TSYNC_UPLINK=1` adds the LTE closed-loop half: a full-duplex master

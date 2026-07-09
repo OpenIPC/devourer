@@ -280,10 +280,9 @@ protection class are grouped into a burst, both ends switch, then the next
 burst. Rate-UEP is layered on top (critical frames also ride a robust rate, bulk
 a fast MCS — reusing the `svctx` per-frame-rate mechanism).
 
-The interesting hard part is **schedule synchronization**, and devourer exposes
-no hardware time primitive (no host TSF read, no PPS/GPS hook — only a per-frame
-read-only `tsfl`). The example ships two receiver sync strategies, selectable so
-they can be compared:
+The interesting hard part is **schedule synchronization**, and the example ships
+three receiver sync strategies — spanning no shared hardware to full
+hardware-time — selectable so they can be compared:
 
 - **`wallclock`** — both ends compute the phase from `system_clock` (a shared
   Unix-epoch anchor). Trivially aligned on one machine; across machines it needs

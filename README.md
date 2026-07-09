@@ -32,6 +32,14 @@ long-range digital video links.
   supported generation — including the decade-old RTL8812AU and RTL8814AU the
   vendor never gave narrowband — half/quarter the bandwidth, more range from
   the same power ([how](docs/narrowband.md)).
+- **Hardware time, for coordinating radios.** Every received frame is stamped
+  with the chip's microsecond MAC clock (TSF) on all three generations, and the
+  64-bit timer reads back directly — the primitive multi-radio setups need.
+  Independent receivers correlate their clocks to sub-microsecond, and a
+  time-division burst schedule locks to a transmitter ~25× tighter than the host
+  clock manages — enough to interleave a robust narrowband link and a wide
+  high-throughput one on one shared channel
+  ([bandwidth TDMA](docs/narrowband.md)).
 - **A radio lab in a dongle.** Channel sounding, per-antenna signal quality,
   beamforming report capture (enough to do
   [motion sensing](docs/beamforming-victim-sensing.md)), spectrum sweeps,

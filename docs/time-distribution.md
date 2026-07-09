@@ -109,65 +109,11 @@ generations (J3 8822C and J2 8812BU). A frozen sequence number indicates a
 degraded engine (e.g. a J2 beacon left in the post-drop state after an
 `AdjustBeaconTiming` tweak, which J2 does not survive), not a healthy beacon.
 
-**End-to-end interop.** The strongest check is that a *real* Linux 802.11 station
-accepts the beacon: `tests/beacon_kernel_scan.sh` airs a full-content beacon from
-devourer and scans for it with a second Realtek adapter bound to `rtw88`
-(`iw dev <if> scan`). Proven — the kernel lists it and parses every element:
-
-    BSS 57:42:75:05:d6:00   TSF <live>   freq 2437   beacon interval 25 TUs
-    capability: ESS   SSID: devourerAP
-    Supported rates: 1.0* 2.0* 5.5* 11.0* 18.0 24.0 36.0 54.0
-    DS Parameter set: channel 6   TIM: DTIM Count 0 Period 1   ERP: <no flags>
-
-So devourer's beacon is not just wire-correct but accepted as a legitimate AP by
-the mac80211/rtw88 BSS parser — live TSF, capability, SSID, rates (with basic-rate
-flags), DS param, TIM/DTIM and ERP all interpreted correctly. Confirmed on **both
-bands** — ch6 (2437 MHz) and ch36 (5180 MHz). A dense beacon interval (e.g. 25 TU,
-`DEVOURER_BCN_TU`) is needed so the scan's per-channel dwell catches it.
-
-devourer also answers **active scans** like a kernel AP: `tests/probe_responder.cpp`
-runs full-duplex, matches probe-requests in the RX callback and `send_packet`s a
-probe-response addressed to the requester — with **no beacon aired**, a real rtw88
-station's `iw scan` still lists `devourerAP` (discovery via the probe response).
-send_packet must run off the RX event thread (queue the requester, TX from another
-thread — libusb returns BUSY otherwise). This works because management-frame timing
-is tens of ms (the userspace RX→TX round-trip is a few ms), unlike SIFS ACKs.
-
-**A real kernel station fully associates.** `tests/ap_responder.cpp` completes the
-whole open-network handshake (probe → auth → assoc): a real rtw88 station
-authenticates, associates, and stays `Connected` (wpa_supplicant
-`CTRL-EVENT-CONNECTED`, `iw link` Connected, stable). The station's auth/assoc
-requests arrive with **retry=0** — devourer hardware-ACKs them (the ACK engine
-matches `REG_MACID`, which `StartBeacon` sets to the BSSID). The one non-obvious
-requirement: **the BSSID must be unicast**. The canonical test SA `57:42:75:05:d6:00`
-has the I/G (multicast) bit set in `0x57`; a station cannot unicast-auth to a
-multicast address, so rtw88 silently drops the auth before it hits the air
-(bench-proven across two station chips — `0x57` → no auth on air, `0x02` → auth on
-air and association completes). Use a locally-administered unicast BSSID (`0x02..`).
-
-**Data plane — a real station gets an IP and pings devourer's AP.** `ap_responder`
-answers the post-association data plane over 802.11 from-DS data frames: a minimal
-**DHCP server** (DISCOVER→OFFER, REQUEST→ACK leasing 192.168.99.2), **ARP**
-replies for the AP IP, and **ICMP** echo replies. So a Linux station associates,
-`dhcpcd` **automatically leases 192.168.99.2** from it, and `ping 192.168.99.1`
-returns **0% packet loss, ~2 ms RTT** — the full self-service chain (beacon → auth
-→ assoc → DHCP → ARP/ICMP → ping), like a hostapd+dnsmasq AP, in one userspace
-process. `tests/ap_ping_demo.sh` runs it end to end.
-
-**WPA2-PSK.** `tests/ap_wpa2.cpp` runs the WPA2 **4-way handshake** authenticator —
-the beacon/assoc advertise an RSN IE and the AP does msg1→4 with PMK/PTK
-(PBKDF2+PRF), HMAC-SHA1 MIC and an AES-key-wrapped GTK (openssl in userspace). A
-real station completes it: wpa_supplicant reports `WPA: Key negotiation completed …
-[PTK=CCMP GTK=CCMP]` + `CTRL-EVENT-CONNECTED`. The handshake needs no CCMP
-(EAPOL-Key frames are cleartext, MIC-protected), so it works without the chip
-crypto engine. And the **data plane is encrypted too**: the AP decrypts the
-station's CCMP frames (software AES-CCM with the TK) and answers ARP + ICMP + DHCP
-encrypted, so a real station **leases 192.168.99.2 over encrypted DHCP** and
-**pings the AP over WPA2/CCMP at 0% loss, ~2.5 ms RTT**. The station runs hardware
-CCMP, the AP software CCMP — they interoperate. So devourer is a complete
-zero-config WPA2-PSK AP: associate → 4-way → encrypted DHCP → **encrypted** IP.
-(Hardware CCMP offload would need porting the J3 security TX/RX descriptor fields,
-absent in devourer; software CCMP sidesteps that.)
+The same hardware beacon is also the foundation for full **infrastructure AP
+mode** — a real Linux station discovers devourer, associates, gets an IP, and
+pings it (open or WPA2-PSK encrypted). That is a distinct feature with its own
+write-up: see **`docs/ap-mode.md`** (`tests/beacon_kernel_scan.sh`,
+`probe_responder`, `ap_responder`, `ap_wpa2`, `ap_ping_demo.sh`).
 
 ## Uplink timing advance (experimental)
 

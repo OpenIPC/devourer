@@ -201,6 +201,7 @@ public:
   bool send_packet(const uint8_t* packet, size_t length) override;
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
+  uint64_t ReadTsf() override;
 
   /* Runtime RX-chain selection — the adaptive-link spatial-diversity lever
    * (the read/write superset of the DEVOURER_RX_PATHS env knob). Writes the

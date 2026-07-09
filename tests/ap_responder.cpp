@@ -1,0 +1,166 @@
+// ap_responder.cpp — devourer as a minimal OPEN-network AP that answers the full
+// 802.11 handshake, toward the ultimate "behaves like a kernel AP": a real
+// station associating. It beacons (StartBeacon, discoverable + MACID set) and,
+// full-duplex, answers from its RX callback: probe-req -> probe-resp, auth-req
+// (open) -> auth-resp, (re)assoc-req -> assoc-resp. Responses are BUILT in the
+// callback but SENT from the main thread (send_packet from the RX event thread
+// returns libusb BUSY). Management-frame timeouts are tens of ms, so the ~few-ms
+// userspace RX->TX round-trip fits.
+//
+// STATUS (bench): the AP side works — with a DENSE beacon (DEVOURER_BCN_TU=25,
+// so a fast channel-hopping scan catches it) wpa_supplicant discovers devourerAP,
+// selects it and reaches "SME: Trying to authenticate". Probe-response is proven
+// (station discovers the AP via it, tests/probe_responder.cpp). Full association
+// was NOT completed on this rig: the test station's rtw88 (2357:0120) never puts
+// the auth frame on air — two independent promiscuous monitors (this AP's RX +
+// an 8812AU sniffer) saw ZERO auth-to-BSSID, and this device's monitor RX is
+// promiscuous (sees ambient unicast to other MACs), so a present auth would be
+// seen. So the auth/assoc responder paths below are built but unexercised end to
+// end, pending a station that actually transmits auth. Not a devourer-side gap.
+//
+// The log prints each auth/assoc request with its retry bit (a no-ACK stall,
+// once auth reaches us, would show as repeated retries).
+//
+// Build: g++ -std=c++20 -O2 -Isrc -Iexamples/common tests/ap_responder.cpp \
+//   examples/common/env_config.cpp build/libdevourer.a \
+//   $(pkg-config --cflags --libs libusb-1.0) -lpthread -o build/ap_responder
+// Run: sudo DEVOURER_PID=0xc812 DEVOURER_CHANNEL=6 DEVOURER_TX_WITH_RX=thread \
+//   build/ap_responder [sec]
+//   then on a kernel station: iw dev <if> connect -w devourerAP   (open network)
+#include <atomic>
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
+#include <unistd.h>
+#include <libusb.h>
+#include "RadiotapBuilder.h"
+#include "RxPacket.h"
+#include "SelectedChannel.h"
+#include "TxMode.h"
+#include "UsbOpen.h"
+#include "WiFiDriver.h"
+#include "env_config.h"
+#include "logger.h"
+
+static const uint8_t kBssid[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+static IRtlDevice* g_dev = nullptr;
+static std::vector<uint8_t> g_rt;
+static uint8_t g_chan = 6;
+static std::atomic<uint64_t> g_probe{0}, g_auth{0}, g_assoc{0}, g_sent{0};
+static std::mutex g_q_mu;
+static std::vector<std::vector<uint8_t>> g_q;      // pre-built radiotap+MPDU frames
+
+// Common: [SSID + rates + DS] IE tail for probe/assoc responses.
+static void append_ies(std::vector<uint8_t>& m, bool with_ssid) {
+  if (with_ssid) { const char* s = "devourerAP";
+    m.insert(m.end(), {0x00, 0x0a}); m.insert(m.end(), s, s + 10); }
+  m.insert(m.end(), {0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c});
+  m.insert(m.end(), {0x03, 0x01, g_chan});
+}
+static void enqueue(std::vector<uint8_t> mpdu) {
+  std::vector<uint8_t> f; f.reserve(g_rt.size() + mpdu.size());
+  f.insert(f.end(), g_rt.begin(), g_rt.end());
+  f.insert(f.end(), mpdu.begin(), mpdu.end());
+  std::lock_guard<std::mutex> lk(g_q_mu);
+  if (g_q.size() < 128) g_q.push_back(std::move(f));
+}
+static std::vector<uint8_t> mgmt_hdr(uint8_t subtype_fc, const uint8_t* sta) {
+  return {subtype_fc, 0x00, 0x00, 0x00,
+          sta[0],sta[1],sta[2],sta[3],sta[4],sta[5],
+          kBssid[0],kBssid[1],kBssid[2],kBssid[3],kBssid[4],kBssid[5],
+          kBssid[0],kBssid[1],kBssid[2],kBssid[3],kBssid[4],kBssid[5],
+          0x00, 0x00};
+}
+
+static void on_rx(const Packet& p) {
+  if (p.Data.size() < 24 || p.RxAtrib.crc_err) return;
+  const uint8_t fc0 = p.Data[0], fc1 = p.Data[1];
+  const uint8_t* a1 = p.Data.data() + 4;             // addr1 (RA)
+  const uint8_t* sta = p.Data.data() + 10;           // addr2 (TA = station)
+  bool to_us = std::memcmp(a1, kBssid, 6) == 0;
+  bool bcast = (a1[0] & 0x01) != 0;
+  bool retry = (fc1 & 0x08) != 0;
+
+  if (fc0 == 0x40) {                                 // probe-request
+    if (!bcast && !to_us) return;
+    g_probe.fetch_add(1);
+    auto m = mgmt_hdr(0x50, sta);                    // probe-response
+    m.insert(m.end(), {0,0,0,0,0,0,0,0, 0x64,0x00, 0x01,0x00});  // ts, bcn int, cap
+    append_ies(m, true);
+    enqueue(std::move(m));
+  } else if (fc0 == 0xb0 && to_us) {                 // authentication
+    g_auth.fetch_add(1);
+    uint16_t alg = p.Data[24] | (p.Data[25] << 8), seq = p.Data[26] | (p.Data[27] << 8);
+    fprintf(stderr, "  AUTH req from %02x:%02x:%02x:%02x:%02x:%02x alg=%u seq=%u retry=%d\n",
+            sta[0],sta[1],sta[2],sta[3],sta[4],sta[5], alg, seq, retry);
+    auto m = mgmt_hdr(0xb0, sta);                    // auth response
+    m.insert(m.end(), {0x00,0x00, 0x02,0x00, 0x00,0x00});  // open, seq 2, status 0
+    enqueue(std::move(m));
+  } else if ((fc0 == 0x00 || fc0 == 0x20) && to_us) {  // (re)assoc request
+    g_assoc.fetch_add(1);
+    fprintf(stderr, "  ASSOC req from %02x:%02x:%02x:%02x:%02x:%02x retry=%d\n",
+            sta[0],sta[1],sta[2],sta[3],sta[4],sta[5], retry);
+    auto m = mgmt_hdr(0x10, sta);                    // assoc response
+    m.insert(m.end(), {0x01,0x00, 0x00,0x00, 0x01,0xc0});   // cap, status 0, AID 1
+    append_ies(m, false);
+    enqueue(std::move(m));
+  }
+}
+
+int main(int argc, char** argv) {
+  int sec = argc > 1 ? atoi(argv[1]) : 60;
+  if (const char* c = std::getenv("DEVOURER_CHANNEL")) g_chan = (uint8_t)atoi(c);
+  auto logger = std::make_shared<Logger>();
+  apply_logging_env(*logger);
+  libusb_context* ctx = nullptr; libusb_init(&ctx);
+  libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_WARNING);
+  uint16_t vid = 0x0bda, pid = 0xc812;
+  if (const char* v = std::getenv("DEVOURER_VID")) vid = (uint16_t)strtoul(v, 0, 0);
+  if (const char* p = std::getenv("DEVOURER_PID")) pid = (uint16_t)strtoul(p, 0, 0);
+  auto* h = libusb_open_device_with_vid_pid(ctx, vid, pid);
+  if (!h) { fprintf(stderr, "open %04x:%04x fail\n", vid, pid); return 1; }
+  std::shared_ptr<devourer::UsbDeviceLock> lk;
+  if (devourer::claim_interface_then_reset(h, 0, logger, true, lk) != 0) return 1;
+  WiFiDriver wifi(logger);
+  auto dev = wifi.CreateRtlDevice(h, ctx, lk, devourer_config_from_env());
+  g_dev = dev.get();
+  if (!g_dev) return 1;
+  g_rt = devourer::build_stream_radiotap(devourer::parse_tx_mode_str("6M"));
+  g_dev->InitWrite(SelectedChannel{g_chan, 0, CHANNEL_WIDTH_20});
+  // Beacon so the AP is discoverable + MACID/BSSID set (the ACK filter needs it).
+  std::vector<uint8_t> bcn = {
+      0x00,0x00,0x0a,0x00,0x00,0x80,0x00,0x00,0x08,0x00,   // radiotap
+      0x80,0x00,0x00,0x00, 0xff,0xff,0xff,0xff,0xff,0xff,
+      kBssid[0],kBssid[1],kBssid[2],kBssid[3],kBssid[4],kBssid[5],
+      kBssid[0],kBssid[1],kBssid[2],kBssid[3],kBssid[4],kBssid[5],
+      0x00,0x00, 0,0,0,0,0,0,0,0, 0x64,0x00, 0x01,0x00};
+  { const char* s = "devourerAP"; bcn.insert(bcn.end(), {0x00,0x0a});
+    bcn.insert(bcn.end(), s, s + 10);
+    bcn.insert(bcn.end(), {0x01,0x08,0x82,0x84,0x8b,0x96,0x24,0x30,0x48,0x6c});
+    bcn.insert(bcn.end(), {0x03,0x01,g_chan}); }
+  int bcn_tu = 100;
+  if (const char* iv = std::getenv("DEVOURER_BCN_TU")) bcn_tu = atoi(iv);
+  bool bok = g_dev->StartBeacon(bcn.data(), bcn.size(), bcn_tu);
+  std::thread rx([&]{ g_dev->StartRxLoop(on_rx); });
+  fprintf(stderr, "ap_responder up on ch%d SSID devourerAP (beacon %s). %ds. "
+                  "Connect a station: iw dev <if> connect -w devourerAP\n",
+          g_chan, bok ? "OK" : "FAIL", sec);
+  auto end = std::chrono::steady_clock::now() + std::chrono::seconds(sec);
+  while (std::chrono::steady_clock::now() < end) {
+    std::vector<std::vector<uint8_t>> batch;
+    { std::lock_guard<std::mutex> lk2(g_q_mu); batch.swap(g_q); }
+    for (auto& f : batch) if (g_dev->send_packet(f.data(), f.size())) g_sent.fetch_add(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  fprintf(stderr, "probe=%llu auth=%llu assoc=%llu  responses_sent=%llu\n",
+          (unsigned long long)g_probe.load(), (unsigned long long)g_auth.load(),
+          (unsigned long long)g_assoc.load(), (unsigned long long)g_sent.load());
+  _exit(0);
+}

@@ -174,7 +174,7 @@ bool HalmacJaguar3Fw::check_fw_chksum(uint32_t mem_addr) {
  * HIQ/beacon endpoint come from the queue allocation; QSEL_BEACON and OFFSET
  * match the rsvd-page download convention. */
 bool HalmacJaguar3Fw::send_fw_page(uint16_t pg_addr, const uint8_t *chunk,
-                                 uint32_t size) {
+                                 uint32_t size, bool beacon_desc) {
   if (size == 0)
     return false;
 
@@ -197,6 +197,14 @@ bool HalmacJaguar3Fw::send_fw_page(uint16_t pg_addr, const uint8_t *chunk,
   SET_TX_DESC_DATARATE_8822C(d, 0); /* lowest rate */
   SET_TX_DESC_DISDATAFB_8822C(d, 1);
   SET_TX_DESC_LS_8822C(d, 1);
+  if (beacon_desc) {
+    /* A real beacon-TX descriptor (rtw_tx_rsvd_page_pkt_info_update, RSVD_BEACON):
+     * broadcast, hardware sequence numbering, qsel-seq disabled — without these
+     * the TBTT engine won't transmit the stored page. */
+    SET_TX_DESC_BMC_8822C(d, 1);
+    SET_TX_DESC_EN_HWSEQ_8822C(d, 1);
+    SET_TX_DESC_DISQSELSEQ_8822C(d, 1);
+  }
   std::memcpy(d + TXDESC_SIZE_8822C, chunk, size);
   cal_txdesc_chksum_8822c(d);
 

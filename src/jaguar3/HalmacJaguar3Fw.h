@@ -50,7 +50,7 @@ public:
    * (experimental — reuses the DLFW send_fw_page: QSEL_BEACON bulk-OUT +
    * bcn-valid latch). */
   bool download_rsvd_page(uint16_t pg_addr, const uint8_t *buf, uint32_t size) {
-    return send_fw_page(pg_addr, buf, size);
+    return send_fw_page(pg_addr, buf, size, /*beacon_desc=*/true);
   }
   /* The reserved-page boundary (halmac txff_alloc.rsvd_boundary) — the head page
    * of the reserved region, where the beacon lives and BCN_HEAD points. Valid
@@ -72,7 +72,8 @@ private:
 
   /* Per-chunk transport (halmac send_fwpkt_88xx/dl_rsvd_page_88xx): build the
    * 8822C rsvd-page TX descriptor and bulk-OUT the chunk. */
-  bool send_fw_page(uint16_t pg_addr, const uint8_t *chunk, uint32_t size);
+  bool send_fw_page(uint16_t pg_addr, const uint8_t *chunk, uint32_t size,
+                    bool beacon_desc = false);
 
   /* --- register helpers (HALMAC_REG_R/W*) --- */
   uint8_t r8(uint16_t reg);

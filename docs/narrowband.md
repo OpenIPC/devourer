@@ -149,8 +149,39 @@ chip-specific traps. The ones this port paid for, current-state:
    pair is therefore **bimodal per bring-up** at 5 MHz/5 GHz — it syncs on one
    power-up and is deaf on the next — while a closer-crystal peer decodes the
    same transmitter and the same pair is stable at 2.4 GHz. This is physics, not
-   a driver bug; the durable fix is a crystal-cap trim lever (tracked
-   separately).
+   a driver bug — and it drifts, so a fixed trim is not enough (below). The
+   manual lever is `IRtlDevice::SetXtalCap` (env `DEVOURER_XTAL_CAP`):
+   the AFE crystal load-capacitance trim pulls the chip's reference oscillator a
+   few ppm, so trimming one end of a marginal pair moves the offset off the sync
+   boundary. The trim range is per generation (`GetAdapterCaps().xtal_cap_max`:
+   0x3f on Jaguar1/2, 0x7f on Jaguar3); the efuse default is `xtal_cap_default`.
+   Bench-measured authority (SDR, CW tone, live-stepped on one warmed chip —
+   `tests/xtal_cfo_sweep.sh sdr`): ~51 Hz/code at 5.2 GHz, a smooth monotonic
+   pull, ~0.6 ppm over the mid-range and ~1.25 ppm across the full range —
+   enough to move a marginal pair (typically 1–2 ppm) off the boundary, and it
+   does not detune 20 MHz. Note the open-loop caveat: a crystal drifts ~3 ppm
+   during cold-start warm-up (this is *why* 5 MHz/5 GHz is bimodal per
+   power-up), which is larger and faster than the trim step, so a fixed trim is
+   a per-link qualification lever, not fire-and-forget. The production answer is
+   the **closed loop** (`DEVOURER_CFO_TRACK`, all three generations): the receiver reads the
+   per-frame CFO tail from the OFDM phy-status (offset differs per generation —
+   see below), and a
+   bang-bang controller (`src/CfoTracker.h`, ported from phydm
+   `phydm_cfo_tracking`) steps the crystal cap on a ~2 s cadence to drive the
+   CFO toward its minimum, tracking the warm-up drift live. It auto-detects the
+   cap→LO polarity (which flips per silicon) and holds at the CFO-minimizing
+   cap; bench-verified to converge (measured CFO monotonically reduced as it
+   trims) while the link stays decoding. Caveats: the loop needs a
+   marginally-decoding link to bootstrap (no frames → no CFO error signal), it
+   runs on the receiver only, and where a pair's absolute offset exceeds the
+   ~1 ppm crystal-cap authority it converges to the rail (the best it can do)
+   rather than the deadband. The cfo_tail→kHz scale is the coarse vendor macro
+   (see `CfoTracker.h`) — the loop uses the CFO sign + deadband, not a
+   calibrated kHz. Wired on all three generations: Jaguar2/Jaguar3 share the
+   jgr2/jgr3 type1 phy-status (CFO tail at DW5), while Jaguar1's 11AC
+   phy-status carries it as the named `cfotail[0]` field of
+   `_phy_status_rpt_8812` (DW2 byte 1) — the same `CfoTracker` control law
+   feeds off whichever the parser fills.
 
 4. **The same die-family can encode the divider differently.** The 8814A's
    bandwidth register looked like a mode selector (`0x8ac[1:0]`) with no
@@ -204,5 +235,10 @@ fully, and **Jaguar1 on the 8812AU/8811AU and the 8814AU** — every generation.
 The 8821A is the one exclusion (its DAC-clock divide starves TX; see the walls).
 
 Test scripts: `tests/jaguar2_narrowband_sdr.sh` and
-`tests/jaguar1_nb_divide_sweep.sh` (SDR occupied-bandwidth), and
-`tests/narrowband_cross_rx.sh` (cross-generation decode).
+`tests/jaguar1_nb_divide_sweep.sh` (SDR occupied-bandwidth),
+`tests/narrowband_cross_rx.sh` (cross-generation decode),
+`tests/xtal_cfo_sweep.sh` (crystal-cap trim authority),
+`tests/jaguar1_cfo_track_smoke.sh` (closed-loop tick fires against ambient
+traffic), and `tests/jaguar1_cfo_convergence.sh` (two-adapter Jaguar1 link:
+the receiver's loop engages and steps its cap to reduce a real inter-crystal
+offset — the same convergence behaviour validated on Jaguar2/Jaguar3).

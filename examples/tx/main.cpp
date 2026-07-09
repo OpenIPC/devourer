@@ -928,6 +928,30 @@ int main(int argc, char **argv) {
 #endif
     if (cw) {
       logger->info("CW tone hold — idling until SIGINT (Ctrl-C to stop)");
+      /* DEVOURER_XTAL_STEP="c1,c2,..." + DEVOURER_XTAL_STEP_MS=N: step the
+       * crystal-cap trim live on the warmed carrier (no re-bring-up), logging
+       * a `xtal.step` event per value. Lets an SDR measure the LO shift per
+       * cap on ONE chip — the thermal drift between adjacent steps is seconds,
+       * not a cold power-cycle. This is also the primitive a closed-loop CFO
+       * controller drives. */
+      const char *steps = std::getenv("DEVOURER_XTAL_STEP");
+      if (steps) {
+        int dwell = 4000;
+        if (const char *ms = std::getenv("DEVOURER_XTAL_STEP_MS"))
+          dwell = std::atoi(ms);
+        std::string s(steps);
+        size_t pos = 0;
+        while (!g_devourer_should_stop && pos < s.size()) {
+          size_t comma = s.find(',', pos);
+          int cap = std::strtol(s.substr(pos, comma - pos).c_str(), nullptr, 0);
+          pos = (comma == std::string::npos) ? s.size() : comma + 1;
+          int applied = rtlDevice->SetXtalCap(cap);
+          devourer::Ev(*g_ev, "xtal.step").f("cap", applied);
+          logger->info("xtal.step cap=0x{:02x}", applied);
+          for (int t = 0; t < dwell && !g_devourer_should_stop; t += 100)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+      }
       while (!g_devourer_should_stop)
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
 #if defined(DEVOURER_HAVE_JAGUAR1)

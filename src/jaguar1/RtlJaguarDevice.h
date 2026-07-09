@@ -19,6 +19,7 @@
 #include "RadioManagementModule.h"
 #include "FrameParser.h"
 #include "TxMode.h"
+#include "CfoTracker.h"
 
 extern "C"
 {
@@ -123,6 +124,8 @@ public:
   int SetTxPowerOffsetQdb(int qdb) override;
   void SetTxPowerIndexOverride(int idx) override;
   bool ReApplyTxPower() override;
+  int SetXtalCap(int cap) override;
+  int GetXtalCap() override { return _xtal_cap; }
   devourer::TxPowerState GetTxPowerState() override;
   /* Per-chip TX caps (IRtlDevice): n_ss + STBC/LDPC/SGI/bw from the EFUSE
    * RF-type. STBC needs >=2 chains, so 1T1R cuts (8811AU/8821AU) report
@@ -278,6 +281,8 @@ private:
    * the chip's table default across channel sets). Atomic so the toggle
    * thread and a control-plane SetMonitorChannel see a consistent value. */
   std::atomic<int> _rx_path_mask{-1};
+  int _xtal_cap = -1; /* current crystal-cap code (SetXtalCap) */
+  devourer::CfoTracker _cfo; /* closed-loop CFO tracker (#217) */
 
   std::thread _therm_thread;
   std::atomic<bool> _therm_stop{false};

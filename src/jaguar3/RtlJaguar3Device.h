@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "logger.h"
+#include "CfoTracker.h"
 #include "IRtlDevice.h"
 #include "TxMode.h"
 #include "RtlAdapter.h"
@@ -83,6 +84,8 @@ public:
   int SetTxPowerOffsetQdb(int qdb) override;
   void SetTxPowerIndexOverride(int idx) override;
   bool ReApplyTxPower() override;
+  int SetXtalCap(int cap) override;
+  int GetXtalCap() override { return _xtal_cap; }
   devourer::TxPowerState GetTxPowerState() override;
   devourer::ThermalStatus GetThermalStatus() override;
   /* Per-chip TX caps (IRtlDevice): 8822C/8822E are 2T2R (STBC ok). */
@@ -165,6 +168,7 @@ private:
   const devourer::DeviceConfig _cfg;
   Logger_t _logger;
   jaguar3::ChipVariant _variant;
+  int _xtal_cap = -1; /* current crystal-cap code (SetXtalCap) */
   jaguar3::HalJaguar3 _hal;
   jaguar3::RadioManagementJaguar3 _radioManagement;
   SelectedChannel _channel{};
@@ -183,6 +187,7 @@ private:
   /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
   devourer::RxQualityAccumulator _rxq;
   devourer::RxPathActivityAccumulator _rxpaths;
+  devourer::CfoTracker _cfo; /* closed-loop CFO tracker (DEVOURER_CFO_TRACK) */
   /* Frame counter for periodic NDPA sounding (DEVOURER_TX_NDPA=N). */
   uint64_t _ndpa_ctr = 0;
   /* TX beamforming apply state (DEVOURER_BF_TXBF). The entry is configured at

@@ -196,6 +196,11 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   }
   _brought_up = true;
 
+  /* DEVOURER_XTAL_CAP — apply the crystal-cap trim once the AFE is up
+   * (issue #217, the narrowband CFO lever). */
+  if (_cfg.tuning.xtal_cap)
+    SetXtalCap(*_cfg.tuning.xtal_cap);
+
   /* Thermal TX-power tracking: prime the calibration with the
    * efuse baseline + channel and start the ~2 s tick. Covers both Init (RX)
    * and InitWrite (TX-only). Disabled by knob or an unprogrammed efuse
@@ -378,10 +383,49 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
 
   _logger->info("RtlJaguar2Device: entering RX loop (ch={})", _channel.Channel);
 
+  /* Closed-loop CFO tracking on the receiver (#217): tick the controller on a
+   * ~2 s cadence from the RX loop. The crystal-cap fields (0x24[30:25] +
+   * 0x28[6:1]) are written READ-FREE from bases cached before the RX flood —
+   * a control-transfer read races the async bulk-IN and throws under load. */
+  uint32_t r24_base = 0, r28_base = 0;
+  bool cfo_ok = false;
+  if (_cfg.tuning.cfo_track) {
+    try {
+      r24_base = _device.rtw_read<uint32_t>(0x0024) & ~0x7E000000u;
+      r28_base = _device.rtw_read<uint32_t>(0x0028) & ~0x0000007Eu;
+      cfo_ok = true;
+    } catch (...) {
+      _logger->info("Jaguar2 cfo.track: AFE base read failed — disabled");
+    }
+  }
+  auto cfo_next = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  auto cfo_tick = [&]() {
+    if (!cfo_ok || std::chrono::steady_clock::now() < cfo_next)
+      return;
+    cfo_next += std::chrono::seconds(2);
+    double avg_khz = 0;
+    const int cur = _xtal_cap < 0 ? 0x20 : _xtal_cap;
+    const int nc = _cfo.step(cur, 0x3f, &avg_khz); /* 6-bit on Jaguar2 */
+    DVR_DEBUG(_logger, "Jaguar2 cfo.track tick: cfo~{} (raw*2.5) cap=0x{:02x} {}",
+              static_cast<int>(avg_khz), cur, nc >= 0 ? "step" : "hold");
+    if (nc >= 0) {
+      try {
+        const uint32_t c = static_cast<uint32_t>(nc);
+        _device.rtw_write<uint32_t>(0x0024, r24_base | (c << 25));
+        _device.rtw_write<uint32_t>(0x0028, r28_base | (c << 1));
+        _xtal_cap = nc;
+        _logger->info("Jaguar2 cfo.track: cfo~{} (raw*2.5) xtal_cap=0x{:02x}",
+                      static_cast<int>(avg_khz), _xtal_cap);
+      } catch (...) {
+      }
+    }
+  };
+
   /* RX loop: async bulk-IN URB queue; walk the aggregated 8822B RX descriptors
    * per completion and hand each PSDU to the packet processor. */
   uint64_t frames = 0, reads = 0;
   auto on_data = [&](const uint8_t *data, int n) {
+    cfo_tick();
     if (++reads <= 8)
       _logger->info("Jaguar2 RX: completion #{} -> {} bytes", reads, n);
     uint32_t off = 0;
@@ -417,6 +461,8 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
           _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
           _rxpaths.add(p.RxAtrib.rssi,
                        _variant == jaguar2::ChipVariant::C8821C ? 1 : 2);
+          if (_cfg.tuning.cfo_track)
+            _cfo.add(p.RxAtrib.cfo_tail); /* closed-loop CFO input (#217) */
         }
         _packetProcessor(p);
       }
@@ -684,6 +730,22 @@ void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
                       _rfe, _channel.ChannelOffset);
 }
 
+int RtlJaguar2Device::SetXtalCap(int cap) {
+  /* hal_set_crystal_cap (8822B/8821C): the 6-bit trim goes into 0x24[30:25]
+   * AND 0x28[6:1] (Xo and Xi legs). cap < 0 reverts to the efuse default
+   * (0xB9; 0x20 when unprogrammed). */
+  uint8_t def = _hal.efuse_logical_byte(0xB9);
+  if (def == 0xFF)
+    def = 0x20;
+  uint8_t c = cap < 0 ? def : static_cast<uint8_t>(cap & 0x3F);
+  _device.phy_set_bb_reg(0x0024, 0x7E000000, c);
+  _device.phy_set_bb_reg(0x0028, 0x0000007E, c);
+  _xtal_cap = c;
+  _logger->info("Jaguar2: crystal-cap set to 0x{:02x}{}", c,
+                cap < 0 ? " (efuse default)" : "");
+  return c;
+}
+
 RxEnergy RtlJaguar2Device::GetRxEnergy() {
   /* Scalar FA/CCA/IGI come from the DIG thread's cached snapshot (no USB);
    * append a fresh NHM power histogram (11AC register map). NHM's registers
@@ -806,6 +868,10 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
    * RF18 re-latch edge after the re-clock (see the set_channel_bw narrowband
    * branch). */
   c.narrowband_ok = true;
+  c.xtal_cap_max = 0x3f; /* 6-bit AFE crystal-cap trim (0x24/0x28) */
+  c.xtal_cap_default = _hal.efuse_logical_byte(0xB9) == 0xFF
+                           ? 0x20
+                           : (_hal.efuse_logical_byte(0xB9) & 0x3f);
   c.fastretune_ok = true;
   c.per_packet_txpower = true; /* TX descriptor TXPWR_OFSET LUT — Jaguar2 only */
   devourer::set_standard_freq_ranges(c);

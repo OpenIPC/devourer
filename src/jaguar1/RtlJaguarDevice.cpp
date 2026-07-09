@@ -302,6 +302,18 @@ uint64_t RtlJaguarDevice::ReadTsf() {
   return (static_cast<uint64_t>(hi) << 32) | lo;
 }
 
+bool RtlJaguarDevice::StartBeacon(const uint8_t *beacon, size_t len,
+                                  int interval_tu) {
+  (void)beacon; (void)len; (void)interval_tu;
+  /* Unsupported on Jaguar1: the 8812/8821 have no HalMAC reserved-page download
+   * (a QSEL-beacon bulk-OUT transmits once, it does not load a persistent
+   * TBTT-retransmitted beacon buffer — bench-confirmed negative). The 8814's
+   * IDDMA rsvd-page path differs and is not ported. Hardware-timed beaconing is
+   * a Jaguar2/3 feature (see RtlJaguar3Device::StartBeacon). */
+  _logger->warn("StartBeacon: unsupported on Jaguar1 (no reserved-page download)");
+  return false;
+}
+
 bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   struct tx_desc *ptxdesc;
   bool resp;
@@ -586,7 +598,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   SET_TX_DESC_BMC_8812(usb_frame, 1);
   SET_TX_DESC_RATE_ID_8812(usb_frame, static_cast<uint8_t>(rate_id));
 
-  SET_TX_DESC_QUEUE_SEL_8812(usb_frame, 0x12);
+  SET_TX_DESC_QUEUE_SEL_8812(usb_frame, _tx_qsel);
   SET_TX_DESC_HWSEQ_EN_8812(usb_frame, static_cast<uint8_t>(1));
   if (!is_8814a) {
     /* 88XXau leaves GID=0 for monitor injection on 8814A. */

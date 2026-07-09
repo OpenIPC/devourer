@@ -293,6 +293,9 @@ RtlJaguar3Device::~RtlJaguar3Device() {
   /* Safety net: restore the chip if a CW tone is still armed (before the coex
    * thread is joined — StopCwTone serializes on _reg_mu with it). */
   StopCwTone();
+  _bcn_run.store(false);
+  if (_bcn_thread.joinable())
+    _bcn_thread.join();
   _coex_stop = true;
   if (_coex_thread.joinable())
     _coex_thread.join();
@@ -1269,6 +1272,81 @@ uint64_t RtlJaguar3Device::ReadTsf() {
     lo = _device.rtw_read<uint32_t>(0x0560);
   }
   return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
+bool RtlJaguar3Device::StartBeacon(const uint8_t *beacon, size_t len,
+                                      int interval_tu) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* The caller may pass [radiotap][802.11 MPDU]; the rsvd-page beacon must be the
+   * RAW 802.11 MPDU (the TX descriptor carries the PHY, not a radiotap header).
+   * radiotap it_len is bytes [2:3] LE. Strip it. */
+  size_t rt = (len >= 4) ? (size_t)(beacon[2] | (beacon[3] << 8)) : 0;
+  if (rt > len) rt = 0;
+  const uint8_t *mpdu = beacon + rt;
+  size_t mpdu_len = len - rt;
+  /* Load the beacon into the beacon rsvd-page (halmac send_fw_page: QSEL_BEACON
+   * bulk-OUT + bcn-valid latch), same mechanism as J2. */
+  if (!_hal.download_beacon_page(mpdu, static_cast<uint32_t>(mpdu_len))) {
+    _logger->error("beacon-tbtt(J3): rsvd-page beacon download failed");
+    return false;
+  }
+  /* Port identity (rtw88 rtw_vif_port_config) — the beaconing port needs its own
+   * MAC address (REG_MACID 0x0610) and BSSID (REG_BSSID 0x0618). devourer's
+   * monitor bring-up sets NEITHER (usbmon diff vs the kernel IBSS), so the port
+   * has no identity and the MAC won't transmit its beacon. Take them from the
+   * MPDU's addr2 (SA) / addr3 (BSSID). */
+  if (mpdu_len >= 24) {
+    const uint8_t *sa = mpdu + 10, *bs = mpdu + 16;
+    _device.rtw_write<uint32_t>(0x0610, (uint32_t)sa[0] | (sa[1] << 8) |
+                                            (sa[2] << 16) | ((uint32_t)sa[3] << 24));
+    _device.rtw_write16(0x0614, (uint16_t)(sa[4] | (sa[5] << 8)));
+    _device.rtw_write<uint32_t>(0x0618, (uint32_t)bs[0] | (bs[1] << 8) |
+                                            (bs[2] << 16) | ((uint32_t)bs[3] << 24));
+    _device.rtw_write16(0x061c, (uint16_t)(bs[4] | (bs[5] << 8)));
+  }
+  /* Port-0 network type = AP (rtw88 rtw_vif_port_config: net_type at REG_CR
+   * [17:16] = REG_CR+2 byte [1:0]); a beacon airs only in AP/Ad-hoc mode. */
+  uint8_t nt = _device.rtw_read8(0x0102 /* REG_CR+2 */);
+  _device.rtw_write8(0x0102, static_cast<uint8_t>((nt & ~0x03u) | 0x03u));
+  /* Beacon interval; the TSF free-runs from init so TBTT fires on TSF % interval. */
+  _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */,
+                      static_cast<uint16_t>(interval_tu));
+  /* BCN_CTRL = EN_BCN_FUNCTION | DIS_TSF_UDT (rtw88 bcn_ctrl for AP/Ad-hoc). */
+  _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 3) | (1u << 4));
+  /* THE enable: BIT_EN_BCNQ_DL (BIT22) in REG_FWHW_TXQ_CTRL — rtw88 turns
+   * beaconing on here (mac80211 BSS_CHANGED_BEACON_ENABLED: rtw_write32_set(
+   * REG_FWHW_TXQ_CTRL, BIT_EN_BCNQ_DL)). Without it the beacon never leaves the
+   * queue no matter what BCN_CTRL / net_type say. */
+  uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
+  _device.rtw_write<uint32_t>(0x0420, txq | (1u << 22) /* BIT_EN_BCNQ_DL */);
+  /* H2C RSVD_PAGE (cmd 0x00): rtw88 sends this after each beacon download to tell
+   * the FW the rsvd-page locations. The combo FW gates beacon TX, so it may need
+   * this to start beaconing. Payload from the golden dump (probe/pspoll/null page
+   * offsets) — approximate for the beacon-only layout, a probe of the hypothesis. */
+  _hal.send_h2c_raw(0x690c0100u, 0x00000000u);
+  _logger->info("beacon-tbtt(J3): beacon loaded, net_type->AP, BCN_CTRL=0x18, "
+                "EN_BCNQ_DL set + H2C RSVD_PAGE (TXQ 0x{:08x}, interval {} TU)",
+                _device.rtw_read<uint32_t>(0x0420), interval_tu);
+
+  /* A SINGLE download is enough — the hardware auto-transmits the beacon at every
+   * TBTT (bench-verified: one download airs ~8 beacons/s indefinitely on both
+   * bands). rtw88 re-downloads each interval only to refresh the beacon CONTENT
+   * (TSF/TIM), not to keep it airing. So the periodic refresh is opt-in
+   * (BEACON_REFRESH=1) for content updates; the default is the clean HW-TBTT path. */
+  _bcn_bytes.assign(mpdu, mpdu + mpdu_len);
+  _bcn_interval_ms = interval_tu > 0 ? interval_tu * 1024 / 1000 : 100;
+  if (std::getenv("BEACON_REFRESH") && !_bcn_run.exchange(true)) {
+    _bcn_thread = std::thread([this] {
+      while (_bcn_run.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(_bcn_interval_ms));
+        if (!_bcn_run.load()) break;
+        std::lock_guard<std::mutex> lk(_reg_mu);
+        _hal.download_beacon_page(_bcn_bytes.data(),
+                                  static_cast<uint32_t>(_bcn_bytes.size()));
+      }
+    });
+  }
+  return true;
 }
 
 void RtlJaguar3Device::SetTxMode(const devourer::TxMode &mode) {

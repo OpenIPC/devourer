@@ -91,6 +91,10 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
 
   if (!_macinit.init_mac_cfg(channel.ChannelWidth))
     throw std::runtime_error("RtlJaguar2Device: init_mac_cfg failed");
+  /* Propagate the queue-init reserved-page boundary to the FW downloader (0 during
+   * the pre-queue-init FW stage) so a beacon rsvd-page download targets the real
+   * boundary, not page 0 — the page-0 bug fixed on J3. */
+  _fw.set_rsvd_boundary(_macinit.rsvd_boundary());
   if (_device.is_usb())
     _macinit.init_usb_cfg(); /* PCIe RX = the BD ring, no RX-DMA agg cfg */
   _macinit.enable_bb_rf(true);
@@ -1131,6 +1135,50 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
 }
 
 SelectedChannel RtlJaguar2Device::GetSelectedChannel() { return _channel; }
+
+bool RtlJaguar2Device::StartBeacon(const uint8_t *beacon, size_t len,
+                                   int interval_tu) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* Mirrors the working Jaguar3 path (RtlJaguar3Device::StartBeacon) — the same
+   * two bugs (beacon at page 0, radiotap-in-rsvd-page) applied here. NOTE: this
+   * Jaguar2 port is by-construction identical to the validated J3 flow but is
+   * UNTESTED (no 8822B/8821C on the bench when it was written). */
+  size_t rt = (len >= 4) ? (size_t)(beacon[2] | (beacon[3] << 8)) : 0;
+  if (rt > len) rt = 0;
+  const uint8_t *mpdu = beacon + rt;
+  size_t mpdu_len = len - rt;
+  /* Download to the real reserved-page boundary (send_fw_page beacon descriptor:
+   * QSEL_BEACON + BMC/HWSEQ/DISQSELSEQ + bcn-valid latch). */
+  if (!_fw.download_rsvd_page(_fw.rsvd_boundary(), mpdu,
+                              static_cast<uint32_t>(mpdu_len))) {
+    _logger->error("beacon(J2): rsvd-page beacon download failed");
+    return false;
+  }
+  /* Port identity: MAC (REG_MACID 0x0610) + BSSID (REG_BSSID 0x0618) from the
+   * MPDU's addr2/addr3 (rtw_vif_port_config). */
+  if (mpdu_len >= 24) {
+    const uint8_t *sa = mpdu + 10, *bs = mpdu + 16;
+    _device.rtw_write<uint32_t>(0x0610, (uint32_t)sa[0] | (sa[1] << 8) |
+                                            (sa[2] << 16) | ((uint32_t)sa[3] << 24));
+    _device.rtw_write16(0x0614, (uint16_t)(sa[4] | (sa[5] << 8)));
+    _device.rtw_write<uint32_t>(0x0618, (uint32_t)bs[0] | (bs[1] << 8) |
+                                            (bs[2] << 16) | ((uint32_t)bs[3] << 24));
+    _device.rtw_write16(0x061c, (uint16_t)(bs[4] | (bs[5] << 8)));
+  }
+  /* net_type = AP (REG_CR+2 0x0102 [1:0]); interval; BCN_CTRL = EN_BCN_FUNCTION |
+   * DIS_TSF_UDT (0x18); EN_BCNQ_DL (BIT22 REG_FWHW_TXQ_CTRL). */
+  uint8_t nt = _device.rtw_read8(0x0102);
+  _device.rtw_write8(0x0102, static_cast<uint8_t>((nt & ~0x03u) | 0x03u));
+  _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */,
+                      static_cast<uint16_t>(interval_tu));
+  _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 3) | (1u << 4));
+  uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
+  _device.rtw_write<uint32_t>(0x0420, txq | (1u << 22) /* BIT_EN_BCNQ_DL */);
+  _logger->info("beacon(J2): beacon@rsvd_boundary, net_type->AP, BCN_CTRL=0x18, "
+                "EN_BCNQ_DL (interval {} TU) — UNTESTED port of the J3 fix",
+                interval_tu);
+  return true;
+}
 
 uint64_t RtlJaguar2Device::ReadTsf() {
   /* REG_TSFTR 0x0560 (low) / 0x0564 (high); hi/lo/hi with a wrap retry. Under

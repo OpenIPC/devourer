@@ -203,6 +203,12 @@ public:
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
 
+  /* EXPERIMENTAL (idea 6 spike): load a beacon into the beacon queue and enable
+   * the MAC beacon function so the chip auto-transmits it at each TBTT — a
+   * hardware-timed, host-jitter-free TX. Returns false if unsupported.
+   * `interval_tu` is the beacon interval in TU (1024 µs). */
+  bool StartBeacon(const uint8_t* beacon, size_t len, int interval_tu);
+
   /* Runtime RX-chain selection — the adaptive-link spatial-diversity lever
    * (the read/write superset of the DEVOURER_RX_PATHS env knob). Writes the
    * RX-path-enable mask 0x808[7:0] (bits 0/4 = path A CCK/OFDM, 1/5 = B,
@@ -284,6 +290,7 @@ private:
    * thread and a control-plane SetMonitorChannel see a consistent value. */
   std::atomic<int> _rx_path_mask{-1};
   int _xtal_cap = -1; /* current crystal-cap code (SetXtalCap) */
+  uint8_t _tx_qsel = 0x12; /* TX-desc QUEUE_SEL (0x12 mgmt; 0x10 = beacon) */
   devourer::CfoTracker _cfo; /* closed-loop CFO tracker (#217) */
 
   std::thread _therm_thread;

@@ -534,6 +534,7 @@ bool HalmacJaguar3MacInit::priority_queue_cfg() {
       RSVD_PG_CSIBUF_NUM; /* 110 */
   const uint16_t acq_pg_num = tx_fifo_pg_num - rsvd_pg_num; /* 1938 */
   const uint16_t rsvd_boundary = acq_pg_num;                /* 1938 */
+  _rsvd_boundary = rsvd_boundary;  /* propagate to the beacon/rsvd-page download */
 
   uint16_t cur = tx_fifo_pg_num;
   cur -= RSVD_PG_CSIBUF_NUM;

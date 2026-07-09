@@ -120,6 +120,10 @@ void HalJaguar3::rtw_hal_init(SelectedChannel channel) {
     _logger->error("Jaguar3: init_mac_cfg FAILED (structured)");
     return;
   }
+  /* Propagate the queue-init reserved-page boundary to the FW downloader — it
+   * was 0 during the pre-queue-init FW stage, so a beacon rsvd-page download
+   * would otherwise target page 0 instead of the real boundary. */
+  _fw.set_rsvd_boundary(_macinit.rsvd_boundary());
   _macinit.init_usb_cfg();         /* USB RX-DMA mode — RX delivery to bulk-IN */
   _macinit.enable_bb_rf(true);     /* set_hw_value(EN_BB_RF) */
   apply_bb_rf_agc_tables();        /* init_phy: BB + AGC + RF tables */

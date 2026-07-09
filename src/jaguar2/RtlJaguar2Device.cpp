@@ -1142,6 +1142,11 @@ bool RtlJaguar2Device::BeaconTbttSpike(const uint8_t *beacon, size_t len,
     _logger->error("beacon-tbtt(J2): rsvd-page beacon download failed");
     return false;
   }
+  /* The TBTT engine only pulls the beacon queue when the port's network type is
+   * AP (or Ad-hoc); monitor-mode bring-up leaves REG_MSR (0x0102) port-0 at
+   * NoLink, so a validly-downloaded beacon never airs. Set port-0 = AP. */
+  uint8_t msr = _device.rtw_read8(0x0102 /* REG_MSR */);
+  _device.rtw_write8(0x0102, static_cast<uint8_t>((msr & ~0x03u) | 0x03u));
   /* Enable the MAC beacon function + interval + a TSF reset (REG_TCR TSFRST). */
   _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */,
                       static_cast<uint16_t>(interval_tu));
@@ -1152,9 +1157,9 @@ bool RtlJaguar2Device::BeaconTbttSpike(const uint8_t *beacon, size_t len,
   uint8_t bcn = _device.rtw_read8(0x0550 /* REG_BCN_CTRL */);
   _device.rtw_write8(0x0550,
                      static_cast<uint8_t>(bcn | (1u << 3) | (1u << 1)));
-  _logger->info("beacon-tbtt(J2): rsvd-page beacon loaded + BCN function "
-                "enabled (interval {} TU, BCN_CTRL 0x{:02x}->0x{:02x})",
-                interval_tu, bcn, _device.rtw_read8(0x0550));
+  _logger->info("beacon-tbtt(J2): rsvd-page beacon loaded, MSR 0x{:02x}->AP, "
+                "BCN function enabled (interval {} TU, BCN_CTRL 0x{:02x}->0x{:02x})",
+                msr, interval_tu, bcn, _device.rtw_read8(0x0550));
   return true;
 }
 

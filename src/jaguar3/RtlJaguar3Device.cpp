@@ -1271,6 +1271,36 @@ uint64_t RtlJaguar3Device::ReadTsf() {
   return (static_cast<uint64_t>(hi) << 32) | lo;
 }
 
+bool RtlJaguar3Device::BeaconTbttSpike(const uint8_t *beacon, size_t len,
+                                      int interval_tu) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* Load the beacon into the page-0 beacon rsvd-page (halmac send_fw_page:
+   * QSEL_BEACON bulk-OUT + bcn-valid latch), same mechanism as J2. */
+  if (!_hal.download_beacon_page(beacon, static_cast<uint32_t>(len))) {
+    _logger->error("beacon-tbtt(J3): rsvd-page beacon download failed");
+    return false;
+  }
+  /* The beacon is downloaded to the rsvd_boundary head page, where BCN_HEAD
+   * already points (send_fw_page restores it) — the TBTT engine DMAs from there.
+   * The TBTT engine only pulls the beacon queue when the port's network type is
+   * AP (or Ad-hoc); monitor bring-up leaves REG_MSR (0x0102) port-0 at NoLink,
+   * so a validly-downloaded beacon never airs. Set port-0 = AP. */
+  uint8_t msr = _device.rtw_read8(0x0102 /* REG_MSR */);
+  _device.rtw_write8(0x0102, static_cast<uint8_t>((msr & ~0x03u) | 0x03u));
+  /* Beacon interval; the TSF free-runs from init so TBTT fires on TSF % interval
+   * (no reset needed — REG_DUAL_TSF_RST 0x0553 bit0 would be the port-0 reset,
+   * NOT REG_TCR). */
+  _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */,
+                      static_cast<uint16_t>(interval_tu));
+  uint8_t bcn = _device.rtw_read8(0x0550 /* REG_BCN_CTRL */);
+  _device.rtw_write8(0x0550,
+                     static_cast<uint8_t>(bcn | (1u << 3) | (1u << 1)));
+  _logger->info("beacon-tbtt(J3): rsvd-page beacon loaded, MSR 0x{:02x}->AP, "
+                "BCN function enabled (interval {} TU, BCN_CTRL 0x{:02x}->0x{:02x})",
+                msr, interval_tu, bcn, _device.rtw_read8(0x0550));
+  return true;
+}
+
 void RtlJaguar3Device::SetTxMode(const devourer::TxMode &mode) {
   _tx_mode_default = mode;
 }

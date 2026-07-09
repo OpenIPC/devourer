@@ -162,6 +162,12 @@ public:
    * rtw_fw_send_h2c_command): 8-byte command, round-robin across 4 boxes. */
   void send_h2c_raw(uint32_t msg, uint32_t msg_ext);
 
+  /* Load a beacon into the page-0 beacon rsvd-page for TBTT auto-TX
+   * (experimental — see RtlJaguar3Device::BeaconTbttSpike). */
+  bool download_beacon_page(const uint8_t *buf, uint32_t size) {
+    return _fw.download_rsvd_page(_fw.rsvd_boundary(), buf, size);
+  }
+
   /* WL_PHY_INFO heartbeat (H2C 0x58, port of rtw_fw_update_wl_phy_info). The
    * firmware's idle detection relies on the host reporting WL PHY activity every
    * ~2 s; without it the FW powers the RF down after ~30 s. Call periodically

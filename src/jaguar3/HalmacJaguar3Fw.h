@@ -46,6 +46,17 @@ public:
    * downloaded-but-never-booted MCU — the dying-adapter signature. */
   const devourer::FwBootStatus &boot_status() const { return _boot; }
 
+  /* Load an arbitrary beacon into the page-0 beacon rsvd-page for TBTT auto-TX
+   * (experimental — reuses the DLFW send_fw_page: QSEL_BEACON bulk-OUT +
+   * bcn-valid latch). */
+  bool download_rsvd_page(uint16_t pg_addr, const uint8_t *buf, uint32_t size) {
+    return send_fw_page(pg_addr, buf, size);
+  }
+  /* The reserved-page boundary (halmac txff_alloc.rsvd_boundary) — the head page
+   * of the reserved region, where the beacon lives and BCN_HEAD points. Valid
+   * after the firmware download. */
+  uint16_t rsvd_boundary() const { return _rsvd_boundary; }
+
 private:
   /* --- ported halmac DLFW steps --- */
   bool start_dlfw(const uint8_t *fw_bin, size_t size);

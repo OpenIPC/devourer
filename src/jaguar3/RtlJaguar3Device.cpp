@@ -1298,9 +1298,14 @@ bool RtlJaguar3Device::BeaconTbttSpike(const uint8_t *beacon, size_t len,
    * queue no matter what BCN_CTRL / net_type say. */
   uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
   _device.rtw_write<uint32_t>(0x0420, txq | (1u << 22) /* BIT_EN_BCNQ_DL */);
+  /* H2C RSVD_PAGE (cmd 0x00): rtw88 sends this after each beacon download to tell
+   * the FW the rsvd-page locations. The combo FW gates beacon TX, so it may need
+   * this to start beaconing. Payload from the golden dump (probe/pspoll/null page
+   * offsets) — approximate for the beacon-only layout, a probe of the hypothesis. */
+  _hal.send_h2c_raw(0x690c0100u, 0x00000000u);
   _logger->info("beacon-tbtt(J3): beacon loaded, net_type->AP, BCN_CTRL=0x18, "
-                "EN_BCNQ_DL set (TXQ 0x{:08x}->0x{:08x}, interval {} TU)",
-                txq, _device.rtw_read<uint32_t>(0x0420), interval_tu);
+                "EN_BCNQ_DL set + H2C RSVD_PAGE (TXQ 0x{:08x}, interval {} TU)",
+                _device.rtw_read<uint32_t>(0x0420), interval_tu);
 
   /* Periodic beacon refresh: rtw88 re-downloads the beacon every beacon interval
    * (~94 ms observed) rather than relying on a one-shot HW-TBTT auto-TX. Spawn a

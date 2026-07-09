@@ -435,6 +435,19 @@ target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
 
+# Headless guard for the burst-TDMA example's pure logic (examples/tdma/tdma.h):
+# the TsfClock host<->TSF least-squares fit, the frame-tag round-trip, and the
+# schedule phase math. No hardware — the tsf_probe / tsf_tdoa_probe /
+# tdma_tsf_test harnesses that need real adapters stay manual (out-of-band).
+add_executable(TdmaTsfSelftest
+    tests/tdma_tsf_selftest.cpp
+)
+target_link_libraries(TdmaTsfSelftest PRIVATE devourer)
+target_include_directories(TdmaTsfSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/tdma)
+
+add_test(NAME tdma_tsf_math COMMAND TdmaTsfSelftest)
+
 # Headless guard for the JSONL event emitter (src/Event.h) — the machine
 # event stream every test script parses (docs/logging.md): first-field
 # serialization guarantee, escaping, spill + truncation paths.

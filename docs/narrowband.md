@@ -291,15 +291,25 @@ they can be compared:
   injection point).
 - **`marker`** — self-clocking: the TX emits a marker frame at each
   narrowband-burst start; the receiver camps narrowband until it decodes one,
-  anchors its local schedule to it, coasts on `steady_clock`, and re-anchors on
-  each subsequent marker (drift-correcting). No external clock at all.
+  anchors its local schedule to the marker's host-clock arrival time, coasts on
+  `steady_clock`, and re-anchors on each subsequent marker. No external clock.
+- **`tsf`** — the marker mode, but anchored on the **802.11 hardware TSF**
+  instead of the host clock. Every RX frame carries a MAC-latched TSF
+  (`rx_pkt_attrib::tsfl`); a running host↔TSF least-squares fit de-jitters each
+  marker's arrival time. Measured (8812AU): the marker anchor tightens from
+  **~1.1 ms RMS** (raw host callback, dominated by USB batching + scheduling) to
+  **~40 µs RMS** — a ~25× tighter schedule anchor, so the guard can approach the
+  switch latency instead of the host-jitter floor. Jaguar1-only (the per-frame
+  `tsfl` is not surfaced on Jaguar2/3 yet). The TX also stamps each marker with
+  its own `ReadTsf()` for a TX↔RX crystal-drift readout — but a register read is
+  starved by heavy bulk traffic, so on a busy transmitter that stamp reads n/a.
 
 A receiver switching in lockstep loses the ~switch-latency window at each phase
 edge, so it switches `guard_ms` **early** (the guard must exceed the chip's
 switch latency; bursts must be ≫ it). Roles:
 
 - `DEVOURER_TDMA_ROLE=tx` — run the schedule, inject class-tagged frames.
-- `=rx-sync` (`DEVOURER_TDMA_SYNC=wallclock|marker`) — switch in lockstep.
+- `=rx-sync` (`DEVOURER_TDMA_SYNC=wallclock|marker|tsf`) — switch in lockstep.
 - `=rx-camp` (`DEVOURER_TDMA_CAMP=5|10|20`) — camp permanently on one width.
 
 The second mode the user asked for — **1 TX + 2 RX** — is just a `tx` plus two

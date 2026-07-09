@@ -92,9 +92,14 @@ So the master↔slave clocks track to sub-µs on any channel — the offset move
 only with the crystal drift. `DEVOURER_TSYNC_HWBEACON=1` on both master and
 slave; `tests/beacon_ts_check.cpp` reads the raw beacon TSF for validation.
 
-Note: the beacon body must stay minimal (a long SSID / extra IEs was observed to
-break the hardware TSF insertion — the MAC wrote a per-beacon counter instead);
-`build_std_beacon` uses the validated minimal layout.
+Note: the beacon body may carry full kernel-AP content. A well-formed 70-byte
+body (10-char SSID + 8 supported rates + DS param + TIM + ERP IEs) inserts the
+live hardware TSF correctly — bench-verified on an 8822C, the timestamp field
+steps ~102400 µs per beacon exactly as the minimal body does
+(`tests/beacon_fullbody.cpp`). An earlier report that an extended body broke the
+TSF insertion was a *malformed* test frame (bad IE lengths), not a hardware
+limit; there is no minimal-body requirement. `build_std_beacon` keeps a compact
+layout only because the timesync demo needs no more.
 
 ## Uplink timing advance (experimental)
 

@@ -98,11 +98,12 @@ static libusb_device_handle* open_device(
 }
 
 // --- MASTER (eNB): broadcast the hardware TSF -------------------------------
-// A minimal raw 802.11 beacon MPDU (canonical SA/BSSID) — byte-identical to the
-// bench-validated tests/beacon_tbtt.cpp beacon (which the MAC fills with a clean
-// live TSF). The 8-byte timestamp is left zero; the MAC inserts the hardware TSF
-// at each TBTT. (An extended body — longer SSID / more rate IEs — broke the
-// hardware TSF insertion in testing, so keep this exact layout.)
+// A compact raw 802.11 beacon MPDU (canonical SA/BSSID) matching the
+// bench-validated tests/beacon_tbtt.cpp beacon. The 8-byte timestamp is left
+// zero; the MAC inserts the hardware TSF at each TBTT. A full kernel-AP body
+// (SSID + rates + DS + TIM + ...) also inserts the TSF correctly
+// (tests/beacon_fullbody.cpp) — this stays compact only because the timesync
+// demo needs no extra IEs.
 static std::vector<uint8_t> build_std_beacon(int interval_tu) {
   return {
       0x80, 0x00, 0x00, 0x00,                          // FC beacon + dur

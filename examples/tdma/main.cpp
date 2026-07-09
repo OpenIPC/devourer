@@ -25,16 +25,20 @@
 #include <thread>
 #include <vector>
 
-#if defined(__MINGW32__) || defined(__MINGW64__)
+#if defined(_MSC_VER)
+  #include <libusb.h>
+#elif defined(__MINGW32__) || defined(__MINGW64__)
   #include <libusb-1.0/libusb.h>
-  #include <unistd.h>
 #elif defined(__APPLE__) || defined(__ANDROID__)
   #include <libusb.h>
-  #include <unistd.h>
 #else
-  #include <unistd.h>
   #include <libusb-1.0/libusb.h>
 #endif
+
+// Portable sleeps (no <unistd.h> — MSVC lacks it): std::this_thread only.
+static inline void sleep_us(long us) {
+  std::this_thread::sleep_for(std::chrono::microseconds(us));
+}
 
 #include "RadiotapBuilder.h"
 #include "RxPacket.h"
@@ -91,7 +95,7 @@ static libusb_device_handle* open_device(
 // --- TX role ----------------------------------------------------------------
 static void run_tx(IRtlDevice* dev, const tdma::Config& c) {
   dev->InitWrite(SelectedChannel{c.channel, 0, CHANNEL_WIDTH_20});
-  sleep(2);
+  std::this_thread::sleep_for(std::chrono::seconds(2));
   const auto rt_crit = devourer::build_stream_radiotap(c.crit_rate);
   const auto rt_bulk = devourer::build_stream_radiotap(c.bulk_rate);
   // Markers ride the robust critical rate (they must be heard to sync).
@@ -131,7 +135,7 @@ static void run_tx(IRtlDevice* dev, const tdma::Config& c) {
                     seq[0], seq[1], seq[2], tdma::mhz_of(cur_w));
       emit(buf);
     }
-    if (c.gap_us > 0) usleep(c.gap_us);
+    if (c.gap_us > 0) sleep_us(c.gap_us);
   }
 }
 
@@ -182,7 +186,7 @@ static void run_rx(IRtlDevice* dev, const tdma::Config& c) {
   // Let Init finish bring-up before the control thread touches the RF registers
   // — a FastSetBandwidth racing the bring-up corrupts a half-configured chip.
   for (int i = 0; i < 250 && !g_devourer_should_stop; ++i)
-    usleep(10000);  // ~2.5 s settle
+    sleep_us(10000);  // ~2.5 s settle
 
   ChannelWidth_t cur_w = start_w;
   auto next_stat = std::chrono::steady_clock::now() + std::chrono::seconds(1);
@@ -209,7 +213,7 @@ static void run_rx(IRtlDevice* dev, const tdma::Config& c) {
           tdma::mhz_of(cur_w));
       emit(buf);
     }
-    usleep(2000);
+    sleep_us(2000);
   }
   dev->StopRxLoop();
   rx.join();

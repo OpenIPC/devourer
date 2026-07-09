@@ -91,6 +91,7 @@ struct Config {
   // Uplink timing-advance (full-duplex, DEVOURER_TSYNC_UPLINK=1):
   bool uplink = false;     // master: measure UE uplinks + feed back TA. ue: TX uplinks
   bool hwbeacon = false;  // master: HW-TBTT beacon (StartBeacon); slave: read 802.11 TS
+  bool no_csma = false;   // master: disable EDCCA so the beacon airs exactly at TBTT
   int slot_ms = 20;        // uplink slot grid on the master TSF (a TDMA slot)
   double ta_gain = 0.3;    // master TA integrator gain (0..1; error fraction/step)
 };
@@ -111,6 +112,7 @@ inline Config config_from_env() {
   c.channel = static_cast<uint8_t>(env_int("DEVOURER_CHANNEL", 36));
   c.uplink = std::getenv("DEVOURER_TSYNC_UPLINK") != nullptr;
   c.hwbeacon = std::getenv("DEVOURER_TSYNC_HWBEACON") != nullptr;
+  c.no_csma = std::getenv("DEVOURER_TSYNC_NO_CSMA") != nullptr;
   c.slot_ms = env_int("DEVOURER_TSYNC_SLOT_MS", 20);
   if (const char* g = std::getenv("DEVOURER_TSYNC_TA_GAIN")) c.ta_gain = std::atof(g);
   const char* rt = std::getenv("DEVOURER_TSYNC_RATE");

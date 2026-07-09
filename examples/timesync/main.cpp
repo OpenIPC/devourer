@@ -124,6 +124,13 @@ static void run_master(IRtlDevice* dev, const timesync::Config& c) {
   if (c.hwbeacon) {
     // Hardware-timed, hardware-TSF-stamped beacon at TBTT — no software send loop,
     // no ReadTsf jitter. The MAC inserts the live TSF into the beacon at TX.
+    if (c.no_csma) {
+      // The master owns the channel: disable EDCCA so the beacon airs exactly on
+      // the TBTT schedule (no CSMA backoff). Collapses the downlink residual from
+      // ~hundreds of µs to sub-µs even on a crowded channel.
+      dev->SetCcaMode(true);
+      fprintf(stderr, "timesync master: CSMA/EDCCA disabled (master owns channel)\n");
+    }
     auto b = build_std_beacon(c.interval_ms > 0 ? c.interval_ms * 1000 / 1024 : 100);
     bool ok = dev->StartBeacon(b.data(), b.size(),
                                c.interval_ms > 0 ? c.interval_ms * 1000 / 1024 : 100);

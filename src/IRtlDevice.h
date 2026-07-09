@@ -214,6 +214,14 @@ public:
     return false;
   }
 
+  /* Disable / restore the MAC EDCCA energy-detect gate (the vendor dis_cca
+   * recipe). With EDCCA off the MAC does not defer TX to carrier-sense, so a
+   * TBTT beacon airs exactly on schedule instead of after a CSMA backoff — the
+   * lever that collapses the hardware-beacon downlink residual to sub-µs on a
+   * shared channel (the master owns the channel). Also DEVOURER_DIS_CCA at
+   * construction. No-op where unimplemented. */
+  virtual void SetCcaMode(bool disabled) { (void)disabled; }
+
   /* Clean shutdown: halt TRX DMA and power the chip down to a re-enumerable
    * state (mirrors the kernel driver's card-disable on unbind). Call after the
    * RX/TX loop exits and BEFORE releasing/closing the USB interface, so the

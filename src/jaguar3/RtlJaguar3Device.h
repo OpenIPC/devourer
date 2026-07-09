@@ -150,9 +150,10 @@ public:
    * vendor rtw_proc.c dis_cca recipe (MAC BIT_DIS_EDCCA 0x520[15] + EDCCA-mask
    * countdown 0x524[11], BB 0x1a9c[20]/0x1a14[9:8]/0x1d58[0xff8]); disabled=false
    * restores the inverse. Sticky across SetMonitorChannel; serialized on _reg_mu
-   * against the coex tick. Measure-first — kept for the swept-AWGN A/B; not on
-   * IRtlDevice until the measurement justifies it. */
-  void SetCcaMode(bool disabled);
+   * against the coex tick. On IRtlDevice: measured to collapse the hardware-beacon
+   * downlink residual from ~472 µs to 0.39 µs on a crowded channel (the TBTT
+   * beacon airs on schedule instead of after a CSMA backoff). */
+  void SetCcaMode(bool disabled) override;
 
   /* Adapter-health probes (see src/AdapterHealth.h). EFUSE probe is 8822C
    * only — the 8822E's OTP is not reliably readable post-bring-up by design

@@ -1277,9 +1277,16 @@ uint64_t RtlJaguar3Device::ReadTsf() {
 bool RtlJaguar3Device::BeaconTbttSpike(const uint8_t *beacon, size_t len,
                                       int interval_tu) {
   std::lock_guard<std::mutex> lk(_reg_mu);
-  /* Load the beacon into the page-0 beacon rsvd-page (halmac send_fw_page:
-   * QSEL_BEACON bulk-OUT + bcn-valid latch), same mechanism as J2. */
-  if (!_hal.download_beacon_page(beacon, static_cast<uint32_t>(len))) {
+  /* The caller may pass [radiotap][802.11 MPDU]; the rsvd-page beacon must be the
+   * RAW 802.11 MPDU (the TX descriptor carries the PHY, not a radiotap header).
+   * radiotap it_len is bytes [2:3] LE. Strip it. */
+  size_t rt = (len >= 4) ? (size_t)(beacon[2] | (beacon[3] << 8)) : 0;
+  if (rt > len) rt = 0;
+  const uint8_t *mpdu = beacon + rt;
+  size_t mpdu_len = len - rt;
+  /* Load the beacon into the beacon rsvd-page (halmac send_fw_page: QSEL_BEACON
+   * bulk-OUT + bcn-valid latch), same mechanism as J2. */
+  if (!_hal.download_beacon_page(mpdu, static_cast<uint32_t>(mpdu_len))) {
     _logger->error("beacon-tbtt(J3): rsvd-page beacon download failed");
     return false;
   }
@@ -1287,9 +1294,9 @@ bool RtlJaguar3Device::BeaconTbttSpike(const uint8_t *beacon, size_t len,
    * MAC address (REG_MACID 0x0610) and BSSID (REG_BSSID 0x0618). devourer's
    * monitor bring-up sets NEITHER (usbmon diff vs the kernel IBSS), so the port
    * has no identity and the MAC won't transmit its beacon. Take them from the
-   * beacon's own addr2 (SA) / addr3 (BSSID). */
-  if (len >= 24) {
-    const uint8_t *sa = beacon + 10, *bs = beacon + 16;
+   * MPDU's addr2 (SA) / addr3 (BSSID). */
+  if (mpdu_len >= 24) {
+    const uint8_t *sa = mpdu + 10, *bs = mpdu + 16;
     _device.rtw_write<uint32_t>(0x0610, (uint32_t)sa[0] | (sa[1] << 8) |
                                             (sa[2] << 16) | ((uint32_t)sa[3] << 24));
     _device.rtw_write16(0x0614, (uint16_t)(sa[4] | (sa[5] << 8)));
@@ -1324,7 +1331,7 @@ bool RtlJaguar3Device::BeaconTbttSpike(const uint8_t *beacon, size_t len,
   /* Periodic beacon refresh: rtw88 re-downloads the beacon every beacon interval
    * (~94 ms observed) rather than relying on a one-shot HW-TBTT auto-TX. Spawn a
    * thread that re-downloads on the interval, serialized on _reg_mu. */
-  _bcn_bytes.assign(beacon, beacon + len);
+  _bcn_bytes.assign(mpdu, mpdu + mpdu_len);
   _bcn_interval_ms = interval_tu > 0 ? interval_tu * 1024 / 1000 : 100;
   if (!_bcn_run.exchange(true)) {
     _bcn_thread = std::thread([this] {

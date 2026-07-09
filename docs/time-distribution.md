@@ -101,6 +101,14 @@ TSF insertion was a *malformed* test frame (bad IE lengths), not a hardware
 limit; there is no minimal-body requirement. `build_std_beacon` keeps a compact
 layout only because the timesync demo needs no more.
 
+On-wire kernel-equivalence is verifiable with `tests/beacon_wire_check.cpp`: the
+beacon carries the right frame control (0x0080), an 802.11 sequence number that
+**increments by 1 per beacon** (the hardware sequence numbering a kernel AP does
+via `EN_HWSEQ`), and the live hardware TSF — bench-confirmed on both HalMAC
+generations (J3 8822C and J2 8812BU). A frozen sequence number indicates a
+degraded engine (e.g. a J2 beacon left in the post-drop state after an
+`AdjustBeaconTiming` tweak, which J2 does not survive), not a healthy beacon.
+
 ## Uplink timing advance (experimental)
 
 `DEVOURER_TSYNC_UPLINK=1` adds the LTE closed-loop half: a full-duplex master

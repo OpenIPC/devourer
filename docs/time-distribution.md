@@ -109,6 +109,20 @@ generations (J3 8822C and J2 8812BU). A frozen sequence number indicates a
 degraded engine (e.g. a J2 beacon left in the post-drop state after an
 `AdjustBeaconTiming` tweak, which J2 does not survive), not a healthy beacon.
 
+**End-to-end interop.** The strongest check is that a *real* Linux 802.11 station
+accepts the beacon: `tests/beacon_kernel_scan.sh` airs a full-content beacon from
+devourer and scans for it with a second Realtek adapter bound to `rtw88`
+(`iw dev <if> scan`). Proven — the kernel lists it and parses every element:
+
+    BSS 57:42:75:05:d6:00   TSF <live>   freq 2437   beacon interval 25 TUs
+    capability: ESS   SSID: devourerAP
+    Supported rates: 1.0* 2.0* 5.5* 11.0* 18.0 24.0 36.0 54.0
+    DS Parameter set: channel 6   TIM: DTIM Count 0 Period 1   ERP: <no flags>
+
+So devourer's beacon is not just wire-correct but accepted as a legitimate AP by
+the mac80211/rtw88 BSS parser — live TSF, capability, SSID, rates (with basic-rate
+flags), DS param, TIM/DTIM and ERP all interpreted correctly.
+
 ## Uplink timing advance (experimental)
 
 `DEVOURER_TSYNC_UPLINK=1` adds the LTE closed-loop half: a full-duplex master

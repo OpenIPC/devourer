@@ -61,6 +61,7 @@ static std::vector<uint8_t> full_beacon(int interval_tu, uint8_t chan) {
 int main(int argc, char** argv) {
   int sec = argc > 1 ? atoi(argv[1]) : 20;
   int interval_tu = 100;
+  if (const char* iv = std::getenv("DEVOURER_BCN_TU")) interval_tu = atoi(iv);
   uint8_t ch = 36;
   if (const char* c = std::getenv("DEVOURER_CHANNEL")) ch = (uint8_t)atoi(c);
 

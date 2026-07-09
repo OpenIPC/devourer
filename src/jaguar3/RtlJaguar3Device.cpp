@@ -1328,12 +1328,14 @@ bool RtlJaguar3Device::BeaconTbttSpike(const uint8_t *beacon, size_t len,
                 "EN_BCNQ_DL set + H2C RSVD_PAGE (TXQ 0x{:08x}, interval {} TU)",
                 _device.rtw_read<uint32_t>(0x0420), interval_tu);
 
-  /* Periodic beacon refresh: rtw88 re-downloads the beacon every beacon interval
-   * (~94 ms observed) rather than relying on a one-shot HW-TBTT auto-TX. Spawn a
-   * thread that re-downloads on the interval, serialized on _reg_mu. */
+  /* A SINGLE download is enough — the hardware auto-transmits the beacon at every
+   * TBTT (bench-verified: one download airs ~8 beacons/s indefinitely on both
+   * bands). rtw88 re-downloads each interval only to refresh the beacon CONTENT
+   * (TSF/TIM), not to keep it airing. So the periodic refresh is opt-in
+   * (BEACON_REFRESH=1) for content updates; the default is the clean HW-TBTT path. */
   _bcn_bytes.assign(mpdu, mpdu + mpdu_len);
   _bcn_interval_ms = interval_tu > 0 ? interval_tu * 1024 / 1000 : 100;
-  if (!_bcn_run.exchange(true)) {
+  if (std::getenv("BEACON_REFRESH") && !_bcn_run.exchange(true)) {
     _bcn_thread = std::thread([this] {
       while (_bcn_run.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(_bcn_interval_ms));

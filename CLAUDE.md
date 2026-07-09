@@ -298,6 +298,14 @@ timing. Validation: `tests/run_hop_validation.sh`, `tests/hop_parity_check.sh`
 (register parity full-vs-fast). Implementation + per-generation ports:
 `docs/frequency-hopping.md`.
 
+`IRtlDevice::FastSetBandwidth(bw)` is the bandwidth analogue — a lean
+same-channel toggle between 20 MHz and 5/10 MHz narrowband (the RF stays in
+20 MHz mode, so only the baseband ADC/DAC re-clock changes: a single `0x8ac`
+write on Jaguar1, a cached read-free re-clock delta on Jaguar2/3). ~0.18 ms
+(8812AU) vs ~90 ms for the full `SetMonitorChannel`; falls back to the full path
+for a 40/80 MHz endpoint. Validation: `tests/fast_bw_parity.sh` (timing +
+register parity + cross-RX decode). See `docs/narrowband.md`.
+
 RX counterpart: `DEVOURER_RX_SWEEP` dwells FastRetune-cheap bins emitting
 per-bin energy + frame stats; `tests/sounding_sweep.sh` + `tests/sounding_map.py`
 recover a coarse per-bin H(f) — down to 5 MHz bins on Jaguar3

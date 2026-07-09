@@ -199,6 +199,14 @@ public:
    * exception). */
   virtual uint64_t ReadTsf() { return 0; }
 
+  /* Write the 64-bit MAC TSF (REG_TSFTR). Sets the free-running microsecond clock
+   * — the primitive for TSF *adoption* (a slave slewing its clock onto the
+   * master's) and for the LTE-style uplink timing-advance (shift the port TSF so
+   * a TBTT-scheduled uplink lands in its slot). The counter keeps running, so a
+   * read-add-write shifts by an approximate delta (a control loop absorbs the
+   * read→write latency). No-op where unsupported. */
+  virtual void WriteTsf(uint64_t tsf) { (void)tsf; }
+
   /* Load a beacon into the beacon reserved-page + enable the MAC beacon function,
    * so the chip AUTO-TRANSMITS it at each TBTT — hardware-timed and
    * hardware-TSF-stamped (the MAC inserts the live 64-bit TSF into the beacon

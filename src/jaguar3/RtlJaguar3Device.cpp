@@ -1274,6 +1274,14 @@ uint64_t RtlJaguar3Device::ReadTsf() {
   return (static_cast<uint64_t>(hi) << 32) | lo;
 }
 
+void RtlJaguar3Device::WriteTsf(uint64_t tsf) {
+  /* REG_TSFTR 0x0560 (low) / 0x0564 (high). Serialized on _reg_mu against the
+   * coex tick. The counter keeps running, so this sets it to ~tsf. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
+}
+
 bool RtlJaguar3Device::StartBeacon(const uint8_t *beacon, size_t len,
                                       int interval_tu) {
   std::lock_guard<std::mutex> lk(_reg_mu);

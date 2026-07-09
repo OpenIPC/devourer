@@ -805,6 +805,28 @@ void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
                                       _channel.ChannelWidth);
 }
 
+void RtlJaguar3Device::FastSetBandwidth(ChannelWidth_t bw) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (bw == _channel.ChannelWidth)
+    return;
+  auto in_set = [](ChannelWidth_t b) {
+    return b == CHANNEL_WIDTH_20 || b == CHANNEL_WIDTH_5 ||
+           b == CHANNEL_WIDTH_10;
+  };
+  /* Only a same-channel toggle within {20, 5, 10} — a 40/80 endpoint moves the
+   * RF bandwidth, needing the full tune. */
+  if (in_set(bw) && in_set(_channel.ChannelWidth) &&
+      _radioManagement.fast_set_bandwidth(bw)) {
+    _channel.ChannelWidth = bw;
+    return;
+  }
+  /* Fast path declined (40/80 endpoint, cold radio) — full channel set, under
+   * the same lock (the core is unlocked). */
+  _radioManagement.set_channel_bwmode(_channel.Channel, _channel.ChannelOffset,
+                                      bw);
+  _channel.ChannelWidth = bw;
+}
+
 /* Re-program TXAGC from the current knob state (see header). The 0x41e8
  * TX+RX quirk is 8822E-specific, so the skip flag is derived here — once —
  * from _rx_wanted AND the variant; the 8822C keeps its path-B ref writes. */

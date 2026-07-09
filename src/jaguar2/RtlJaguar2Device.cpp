@@ -730,6 +730,20 @@ void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
                       _rfe, _channel.ChannelOffset);
 }
 
+void RtlJaguar2Device::FastSetBandwidth(ChannelWidth_t bw) {
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    if (_hal.fast_set_bandwidth(static_cast<uint8_t>(bw))) {
+      _channel.ChannelWidth = bw;
+      return;
+    }
+  }
+  /* Fast path declined (40/80 endpoint, 8821C, or cold cache) — full set. */
+  SetMonitorChannel(SelectedChannel{.Channel = _channel.Channel,
+                                    .ChannelOffset = _channel.ChannelOffset,
+                                    .ChannelWidth = bw});
+}
+
 int RtlJaguar2Device::SetXtalCap(int cap) {
   /* hal_set_crystal_cap (8822B/8821C): the 6-bit trim goes into 0x24[30:25]
    * AND 0x28[6:1] (Xo and Xi legs). cap < 0 reverts to the efuse default

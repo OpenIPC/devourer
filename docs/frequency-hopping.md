@@ -391,3 +391,15 @@ fast-hop epoch", not "never touch it" — the parity oracle defines correct as
 The throughline: a channel switch is mostly work a *hop* does not need. Strip it
 to the one register that actually changes, and remove the read that change
 implies.
+
+## The bandwidth analogue: FastSetBandwidth
+
+The same method applies to a *bandwidth* switch. `IRtlDevice::FastSetBandwidth(bw)`
+is a lean same-channel toggle between 20 MHz and 5/10 MHz narrowband — and it
+collapses even harder than a hop, because narrowband keeps the RF in 20 MHz mode
+(so the RF bandwidth register, MAC BW, sub-channel, TX power, and IQK are all
+invariant) and the only register that changes is the baseband ADC/DAC re-clock.
+On Jaguar1 that is a single dword write (~0.18 ms vs ~90 ms full); Jaguar2/3
+replay a slightly larger but still cached, read-free re-clock delta. Same
+validation discipline — register parity vs the full path plus on-air decode.
+Full treatment in `docs/narrowband.md` (the "Fast bandwidth switching" section).

@@ -165,6 +165,13 @@ public:
    * stays untouched — set by the last full set at this BW/band. Returns false (chip untouched)
    * on a band change or when the radio was never tuned; the caller falls back
    * to the full set_channel_bw. */
+  /* Lean same-channel bandwidth toggle between 20 MHz and 5/10 MHz narrowband
+   * (8822B only for now). Replays only the BW-dependent re-clock delta
+   * (0x8ac/0x8c4/0x8c8, the 8822B RF18 re-latch edge, the CCK trio, BB reset)
+   * from the cached channel state — skipping the RF channel tune, RF18 read,
+   * CCA/DFIR tail, TX power, and calibrations. Returns false when the toggle
+   * involves 40/80 MHz, the 8821C variant, or a cold/uncached channel. */
+  bool fast_set_bandwidth(uint8_t bw);
   bool fast_retune(uint8_t channel, uint8_t bw, uint8_t primary_ch_idx,
                    bool cache_rf);
 
@@ -294,6 +301,20 @@ private:
   int _last_df18 = -1;   /* 8822B ch144 RF 0xdf[18] state */
   int _last_cck_key = -1; /* 2G spur (8822B) / CCK-filter (8821C) key: ch14? */
   bool _warned_uncharacterized = false; /* one-shot extended-channel warning */
+
+  /* fast_set_bandwidth cache: the values a full set_channel_bw computes for the
+   * current channel, so a same-channel 20<->5/10 toggle can replay the
+   * narrowband re-clock delta without the RF channel tune, RF18 read, TX power,
+   * or calibrations. _fbw_8ac_20m is the 20 MHz-state 0x8ac (captured on a
+   * bw==0 set) — the base the narrowband/20 compose masks are applied to.
+   * Invalidated (validity flags) by every full set_channel_bw. */
+  uint32_t _fbw_rf18 = 0;   /* final RF18 the full path wrote (20 MHz-mode) */
+  uint32_t _fbw_8ac_20m = 0;
+  uint8_t _fbw_cch = 0;
+  bool _fbw_g2 = false, _fbw_r2t2r = false;
+  bool _fbw_cache_valid = false; /* rf18/cch/g2/r2t2r captured this channel */
+  bool _fbw_8ac_valid = false;   /* _fbw_8ac_20m holds a real 20 MHz snapshot */
+  uint8_t _fbw_cur_bw = 0xff;    /* bw of the last full/fast set (0/5/6/...) */
 
   /* kfree (efuse power-trim) state — see kfree_init/kfree_apply. bb_gain rows:
    * 0=2G, 1..5 = 5G L1/L2/M1/M2/H per the PHYDM_5G* channel groups. */

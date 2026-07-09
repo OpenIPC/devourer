@@ -225,6 +225,49 @@ sweep against the SDR (TX lobe) and cross-RX (decode quality). This is how the
 8812AU codes above were pinned rather than guessed, and how the 8821A DAC-starve
 was characterized (the TX failure rate versus divide depth).
 
+## Fast bandwidth switching
+
+Switching bandwidth through the full `SetMonitorChannel` is expensive — a
+complete channel set: the RF channel tune, the per-rate TX-power re-fold, and
+(Jaguar1/2) an IQK and a thermal tick. Measured 20↔5 MHz cost: ~90 ms on the
+8812AU, ~197 ms on the 8814AU, ~85 ms on the 8822B (~4–8 ms on Jaguar3, which
+already uses register-window RF writes). That is a session-level cost, far too
+slow to interleave with traffic.
+
+But a *same-channel* 20↔5/10 MHz toggle changes almost nothing. Narrowband
+keeps the RF in 20 MHz mode (RF18[11:10] unchanged) and the MAC at 20 MHz, so
+the RF bandwidth register, the MAC BW bits, the sub-channel, the RX DFIR/CCA
+tail, TX power (narrowband folds to the 20 MHz column), and IQK are all
+invariant. The only thing that actually changes is the baseband ADC/DAC
+re-clock register. `IRtlDevice::FastSetBandwidth(bw)` — the bandwidth analogue
+of `FastRetune` (`docs/frequency-hopping.md`) — writes just that delta from a
+cached channel state, and falls back to the full `SetMonitorChannel` for a
+40/80 MHz endpoint:
+
+- **Jaguar1** (8812/8814): a single write to the `0x8ac` re-clock word,
+  composed onto a cached 20 MHz-state value (which also preserves the channel's
+  `phy_FixSpur` ADC-clock choice for a bit-exact 20 MHz restore). ~0.18 ms
+  (8812AU), ~0.74 ms (8814AU) — a 265–490× speedup.
+- **Jaguar2** (8822B): the re-clock is larger — `0x8ac`/`0x8c4`/`0x8c8`, the
+  band-keyed CCK trio, the RF18 re-latch *edge* (the 8822B synth only re-latches
+  on an RF18 value change), and a BB reset — but all replayed from a cache with
+  no RF read. ~15 ms (20→NB, bounded by the RF18 edge) / ~3 ms (NB→20).
+- **Jaguar3** (8822C/8822E): the narrowband re-clock is already a self-contained
+  delta (`set_bandwidth_dividers`, incl. a 20 MHz-restore default and the
+  8822e MAC-clock/TX-shaping), so the fast path is that delta + a BB reset.
+  ~0.8 ms (8822C).
+
+Validation (`tests/fast_bw_parity.sh`): the fast path's re-clock registers come
+out **bit-for-bit identical** to the full narrowband path (Jaguar1/2 `0x8ac`
+verified at 5/10/20 MHz), and a **cross-RX** test proves it on-air — with a
+narrowband TX partner, a fast-toggled receiver decodes the beacon ONLY in the
+narrowband window and not in either 20 MHz window (narrowband and 20 MHz are
+different ADC clock domains, so a receiver decodes exactly one at a time).
+
+The lever this unlocks: a receiver (or a burst-level TX scheme) can move between
+a robust narrowband link and a wide high-throughput one in well under a
+millisecond to a few milliseconds — not the ~90 ms of a full retune.
+
 ## Using it
 
 `DEVOURER_NB_BW=5` or `=10` on the demos selects narrowband; the library exposes
@@ -241,4 +284,6 @@ Test scripts: `tests/jaguar2_narrowband_sdr.sh` and
 `tests/jaguar1_cfo_track_smoke.sh` (closed-loop tick fires against ambient
 traffic), and `tests/jaguar1_cfo_convergence.sh` (two-adapter Jaguar1 link:
 the receiver's loop engages and steps its cap to reduce a real inter-crystal
-offset — the same convergence behaviour validated on Jaguar2/Jaguar3).
+offset — the same convergence behaviour validated on Jaguar2/Jaguar3), and
+`tests/fast_bw_parity.sh` (FastSetBandwidth timing + register parity +
+cross-RX decode, all three generations).

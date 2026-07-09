@@ -1109,6 +1109,20 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   kfree_apply(channel);
 
   _last_tuned_ch = channel;
+  /* Cache the channel-keyed state a fast_set_bandwidth toggle replays. rf18 is
+   * the 20 MHz-mode value (narrowband keeps it), cch/g2/r2t2r drive the RF18
+   * edge + CCK trio. Capture the 20 MHz-state 0x8ac only on a 20 MHz set — the
+   * base the narrowband/20 compose masks apply to. */
+  _fbw_rf18 = rf18;
+  _fbw_cch = cch;
+  _fbw_g2 = g2;
+  _fbw_r2t2r = r2t2r;
+  _fbw_cur_bw = bw;
+  _fbw_cache_valid = true;
+  if (bw == 0) {
+    _fbw_8ac_20m = v8ac;
+    _fbw_8ac_valid = true;
+  }
   _logger->info("Jaguar2: channel set ch={} bw={} (rf18=0x{:05x})", channel,
                 (int)bw, rf18);
   if (_cfg.debug.dump_canary)
@@ -1174,6 +1188,86 @@ uint8_t HalJaguar2::rf_be_for_8822b(uint8_t cch) {
   if (cch > 177)
     return high_band[(177 - 149) >> 1];
   return 0xff;
+}
+
+bool HalJaguar2::fast_set_bandwidth(uint8_t bw) {
+  /* 8822B only for now (the 8821C narrowband path differs — future work). */
+  if (_variant != ChipVariant::C8822B)
+    return false;
+  auto in_set = [](uint8_t b) { return b == 0 || b == 5 || b == 6; };
+  if (!in_set(_fbw_cur_bw) || !in_set(bw))
+    return false;
+  if (bw == _fbw_cur_bw)
+    return true;
+  if (!_fbw_cache_valid || !_fbw_8ac_valid)
+    return false; /* need a full set (incl. a 20 MHz one) to prime the cache */
+
+  devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j2bw",
+                         _last_tuned_ch);
+  const bool g2 = _fbw_g2;
+  const bool r2t2r = _fbw_r2t2r;
+
+  if (bw == 5 || bw == 6) {
+    /* 20 -> narrowband: the exact CHANNEL_WIDTH_5/10 delta from
+     * set_channel_bw, composed onto the cached 20 MHz 0x8ac. */
+    const bool is5 = (bw == 5);
+    uint32_t v8ac = _fbw_8ac_20m;
+    v8ac &= is5 ? 0xEFEEFE00u : 0xEFFEFF00u;
+    v8ac |= is5 ? (1u << 6) : (1u << 7);
+    if (_cfg.tuning.nb_adc) {
+      v8ac &= ~((0x3u << 8) | (1u << 16));
+      v8ac |= (static_cast<uint32_t>(*_cfg.tuning.nb_adc & 0x3) << 8) |
+              ((*_cfg.tuning.nb_adc & 0x4) ? (1u << 16) : 0u);
+    }
+    if (_cfg.tuning.nb_dac) {
+      v8ac &= ~((0x3u << 20) | (1u << 28));
+      v8ac |= (static_cast<uint32_t>(*_cfg.tuning.nb_dac & 0x3) << 20) |
+              ((*_cfg.tuning.nb_dac & 0x4) ? (1u << 28) : 0u);
+    }
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x0);
+    _device.phy_set_bb_reg(0x08c8, (1u << 31), 0x1);
+    /* CCK trio (band-keyed, exactly as the full narrowband branch). */
+    if (g2) {
+      _device.phy_set_bb_reg(0x0808, (1u << 28), 0x1);
+      _device.phy_set_bb_reg(0x0454, (1u << 7), 0x0);
+      _device.phy_set_bb_reg(0x0a80, (1u << 18), 0x0);
+    } else {
+      _device.phy_set_bb_reg(0x0a80, (1u << 18), 0x1);
+      _device.phy_set_bb_reg(0x0454, (1u << 7), 0x1);
+      _device.phy_set_bb_reg(0x0808, (1u << 28), 0x0);
+      _device.phy_set_bb_reg(0x0814, 0x0000FC00, 34);
+    }
+    /* RF18 re-latch edge (the 8822B narrowband requirement) then the real
+     * value — both write-only from the cached rf18, no RF read. */
+    const uint32_t rf18 = _fbw_rf18;
+    const uint32_t rf18_alt = (rf18 & ~0xffu) | (_fbw_cch == 1 ? 2u : 1u);
+    rf_write(0, 0x18, rf18_alt);
+    if (r2t2r)
+      rf_write(1, 0x18, rf18_alt);
+    rf_write(0, 0x18, rf18);
+    if (r2t2r)
+      rf_write(1, 0x18, rf18);
+    rf_set(0, 0xb8, (1u << 19), 0);
+    rf_set(0, 0xb8, (1u << 19), 1);
+    bb_reset(); /* relatch the DAC/DFE at the new sample rate */
+  } else {
+    /* narrowband -> 20 MHz: restore the cached 20 MHz 0x8ac + ADC buffer clock
+     * (exactly the CHANNEL_WIDTH_20 branch; no edge / no bb_reset, matching the
+     * full path). */
+    _device.phy_set_bb_reg(0x08ac, 0xffffffff, _fbw_8ac_20m);
+    _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
+    const uint32_t rf18 = _fbw_rf18;
+    rf_write(0, 0x18, rf18);
+    if (r2t2r)
+      rf_write(1, 0x18, rf18);
+  }
+  _fbw_cur_bw = bw;
+  prof.mark("bb_reclock");
+  _logger->info("Jaguar2: fast_bw {} MHz", bw == 5 ? 5 : bw == 6 ? 10 : 20);
+  if (_cfg.debug.dump_canary)
+    DumpCanary();
+  return true;
 }
 
 bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,

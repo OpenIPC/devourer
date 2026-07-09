@@ -3,10 +3,10 @@
 devourer talks to a Wi-Fi radio at a very low level — subcarriers, constellations,
 gain control, the transmit and receive chains. If you're new to that machinery,
 the terms in the other docs (per-tone SNR, EVM, CCA, AGC, occupied bandwidth) can
-feel like jargon. This page is a picture book: eight short animations, each
+feel like jargon. This page is a picture book: nine short animations, each
 built in the DEVOURER live-monitor style, that show what the machinery actually
-looks like — from a single subcarrier all the way to a hopping, diversity-combined
-link. Read it top to bottom and the rest of the docs will click.
+looks like — from a single subcarrier all the way to a hopping, diversity-combined,
+bandwidth-hopping link. Read it top to bottom and the rest of the docs will click.
 
 Everything here is grounded in what devourer measures — the constellation noise
 follows the textbook AWGN model, the spectrum levels are from a real USRP B210
@@ -120,6 +120,27 @@ escapes. Done per-packet (`DEVOURER_HOP_*`), hopping doubles as a
 frequency-diversity interleaver for the outer FEC: losses are spread thin across
 frequencies instead of wiping out a run of packets on one.
 
+## 9. Trading robustness for throughput in time — bandwidth TDMA
+
+![Bandwidth TDMA — two stations flipping together under a shared clock](img/tdma_schedule.gif)
+
+Narrowband (section 1) is more robust but slower; a wide channel is faster but
+needs a healthier link. You don't have to pick one for the whole session — you
+can **alternate them in time**. The link runs a schedule of bursts: a narrowband
+burst carries the frames you cannot lose (a keyframe, a control message) at a
+robust rate, then a wide burst carries the bulk at a fast rate, then back — so
+the occupied width **breathes** burst to burst. What makes this practical is that
+switching bandwidth is nearly free (~0.2 ms — a single baseband re-clock register
+via [`FastSetBandwidth`](narrowband.md)), so the schedule can flip many times a
+second. The catch, and the reason it's *bursts* and not per-frame: narrowband and
+20 MHz are different sample-clock domains, so a receiver decodes exactly one width
+at a time — both ends have to flip **together**. Either the receiver switches in
+lockstep with the transmitter (synced by a shared clock or by the transmitter's
+own marker frames), or a second receiver camps permanently on the narrowband band
+as an independent, always-listening robust link for the critical frames. The
+runnable version is the [`tdma`](narrowband.md) example; the switch machinery it
+rides on is in [`narrowband.md`](narrowband.md).
+
 ---
 
 ## Where to go next
@@ -134,3 +155,5 @@ With the machinery in hand, the rest reads straight:
 - [`adaptive-link-building-blocks.md`](adaptive-link-building-blocks.md) — the
   levers, sensors, and probes that turn all of the above into an adaptive link,
   and [`adaptive-link.md`](adaptive-link.md) — the objective they serve.
+- [`narrowband.md`](narrowband.md) — the 5/10 MHz re-clock machinery, the cheap
+  bandwidth switch, and the burst-TDMA example from section 9.

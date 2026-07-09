@@ -346,6 +346,18 @@ add_executable(svctx
 target_link_libraries(svctx PUBLIC devourer PRIVATE PkgConfig::libusb)
 target_include_directories(svctx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
+# tdma — burst-level bandwidth TDMA demo (docs/narrowband.md). Alternates
+# narrowband/wide BURSTS via FastSetBandwidth; roles tx / rx-sync (lockstep,
+# wallclock or TX-marker sync) / rx-camp (fixed band). tdma.h is header-only.
+add_executable(tdma
+    examples/tdma/main.cpp
+    examples/common/env_config.cpp
+)
+target_link_libraries(tdma PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(tdma PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/examples/tdma)
+
 # Stream-link DUPLEX: one binary, one chip, both directions. Combines the RX
 # loop from rxdemo and the stdin-driven TX from streamtx —
 # stdin = length-prefixed PSDU bodies, stdout = <devourer-stream> lines.

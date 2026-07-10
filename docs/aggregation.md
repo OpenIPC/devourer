@@ -7,8 +7,10 @@ devourer's TX path supports three independent, separable capabilities:
 2. **Per-frame TX-status reports** — the firmware's CCX report per
    transmission (delivered / retry count / queue time / final rate).
 3. **802.11 A-MPDU formation** — the MAC aggregating co-queued frames into one
-   PPDU (the air-time amortization), via `SetAmpduMode`: +30% on-air goodput at
-   MCS7/20, more at higher rates, given a deep TX feed.
+   PPDU (the air-time amortization), via `SetAmpduMode`: +30% goodput at
+   MCS7/20 on the HalMAC generations, more at higher rates, given a deep TX
+   feed. (This is a *goodput* gain — delivered payload — not a channel-occupancy
+   one; see the note under the A-MPDU section.)
 
 A fourth capability — the hardware **ACK/BlockAck responder** — makes a monitor
 radio auto-acknowledge frames addressed to it, which turns both single-frame
@@ -113,13 +115,30 @@ airtime ground truth):
   spacing forms better aggregates; density 0 measures ~10% slower).
 - **Feed depth is half the win**: a shallow sync-URB feed SIFS-bursts
   single-MPDU aggregates; `DEVOURER_TX_THREADS=N` (N URBs in flight) restores
-  multi-MPDU amortization, saturating at ~4.
-- On-air (8822BU, ch149, MCS7/20, 1026-byte MPDUs, B210 duty): singles 73.3%
-  duty vs deep-fed `SetAmpduMode` 79.2% duty — **+30% goodput** (RX-capture
-  cross-check: +33% delivered unique frames). The multiplier grows with PHY
-  rate, since preamble overhead is a bigger fraction at high MCS.
+  multi-MPDU amortization, saturating at ~4. This works on the HalMAC
+  generations (J2/J3), whose TX path is synchronous bulk (each sender thread
+  blocks on its own transfer). **Jaguar1 uses the fire-and-forget async TX
+  path, which does not parallelize** — a multi-thread feed collapses its
+  throughput (8812AU 55 → 14 Mbps at threads=4 with no aggregation at all), so
+  the deep feed A-MPDU needs is currently HalMAC-only. Jaguar1's descriptor
+  path still marks frames aggregatable, but the multiplier is not reachable
+  without a feed rework.
+- **The gain is goodput, not channel occupancy.** On-air (8822BU, ch149,
+  MCS7/20, B210 duty), aggregation raised delivered goodput **~+30%** (73.3% →
+  79.2% duty plus a per-airtime payload increase; RX-capture cross-check +33%
+  delivered unique frames). But `tests/bench_onair.py`'s metric — SDR duty ×
+  PHY rate — is channel *occupancy*, and these chips already run at ~80% duty
+  near the 65 Mbps PHY ceiling, so that number moves only ~+2% (8822BU 51 → 52,
+  8812CU 51 → 52). The occupancy metric structurally cannot show A-MPDU's
+  payload gain on a near-saturated chip; measure goodput (delivered payload)
+  to see it. The multiplier grows with PHY rate, since preamble overhead is a
+  bigger fraction at high MCS.
 - `ppdu_cnt` reads 0 on the 8812CU RX used for the bench; `paggr` + `tsfl`
   clustering are the working RX markers.
+
+`tests/bench_onair.py --ampdu` measures the singles / feed-depth / A-MPDU
+comparison per chip per band (SDR duty), and is the harness the occupancy
+numbers above came from.
 
 ## Hardware ACK/BlockAck responder — reliable unicast
 

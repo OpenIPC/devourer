@@ -79,6 +79,12 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 `†` = works on-air but the reading varies run-to-run (bracketed = best clean
 reading).
 
+These cells are single-frame injection (the default TX path), measured as
+channel occupancy × PHY rate. A-MPDU (`SetAmpduMode`) does **not** move them on
+a chip already near the PHY ceiling — it raises *goodput* (delivered payload)
+~30% at MCS7/20 by amortizing per-frame overhead, which an occupancy metric
+can't show. See [aggregation & hardware ACK](docs/aggregation.md).
+
 Out of scope: the pre-HalMAC PCIe parts (RTL8812AE/8821AE) and the 11ax
 "Kestrel" generation — same branding, different bus or baseband.
 

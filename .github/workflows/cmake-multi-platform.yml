@@ -140,16 +140,12 @@ jobs:
       - name: Build (library + stream demos + self-tests)
         # rxdemo / txdemo / precoder use POSIX-only APIs
         # (e.g. fork() in examples/tx/main.cpp for the DEVOURER_TX_WITH_RX path) and
-        # are not mingw targets. This job guards the stdin-driven stream demos
-        # and the headless self-tests ctest runs — every registered test's
-        # binary must be listed here, or the Test step fails it as Not Run.
-        run: >
-          cmake --build build --target
-          devourer streamtx duplex StreamStdinSelftest
-          ToneMaskSelftest BfReportDecodeSelftest SweepSpecSelftest
-          TxPowerQuantSelftest LinkHealthSelftest TxCapsSelftest TxPktPwrSelftest
-          RxQualitySelftest AdapterHealthSelftest LogEventSelftest
-          AdapterCapsSelftest TdmaTsfSelftest TimesyncSelftest TsfSyncSelftest
+        # are not mingw targets, so this job can't build the whole tree. It builds
+        # the stdin-driven stream demos plus the `selftests` aggregate — a target
+        # that depends on every *Selftest binary (collected automatically in
+        # CMakeLists.txt), so a newly-added self-test is picked up here without
+        # touching this file, and can never be skipped into a ctest "Not Run".
+        run: cmake --build build --target devourer streamtx duplex selftests
 
       - name: Test
         working-directory: build

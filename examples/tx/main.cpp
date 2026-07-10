@@ -818,6 +818,25 @@ int main(int argc, char **argv) {
    * within the batch. */
   std::vector<std::vector<uint8_t>> tx_batch_bufs;
 
+  /* DEVOURER_TX_THREADS=N (A-MPDU feed-depth bench): N-1 auxiliary sender
+   * threads run send_packets floods in parallel with the main loop, each with
+   * its own stamped buffer copies drawing frame counters from a shared atomic
+   * — so the chip's TX queue holds ~N URBs in flight (sync bulk transfers on
+   * one endpoint are legal from multiple threads and simply queue). Deeper
+   * co-residency is what lets the MAC form multi-MPDU aggregates instead of
+   * SIFS-bursting single-MPDU ones. Aux threads emit no events and skip the
+   * hop/thermal machinery; frame accounting rides tx_counter. Default 1. */
+  long tx_threads = 1;
+  if (const char *e = std::getenv("DEVOURER_TX_THREADS")) {
+    tx_threads = std::strtol(e, nullptr, 0);
+    if (tx_threads < 1)
+      tx_threads = 1;
+    if (tx_threads > 1)
+      logger->info("DEVOURER_TX_THREADS — {} parallel senders", tx_threads);
+  }
+  std::atomic<long> tx_counter{0}; /* shared frame-stamp source (threads>1) */
+  std::vector<std::thread> tx_aux;
+
   /* Channel-hopping mode (frequency-diversity validation). When
    * DEVOURER_HOP_CHANNELS="1,6,11" is set the TX loop dwells DWELL_FRAMES
    * frames on each listed channel, then retunes to the next via
@@ -1128,6 +1147,31 @@ int main(int argc, char **argv) {
       uint32_t v = static_cast<uint32_t>(tx_count);
       std::memcpy(tx_buf.data() + 10 + 26, &v, 4);
     }
+    /* Lazy-start the auxiliary senders on the first main-loop pass (the
+     * chip is up and the first frame primed by then). */
+    if (tx_threads > 1 && tx_aux.empty()) {
+      for (long t = 1; t < tx_threads; ++t) {
+        tx_aux.emplace_back([&, t]() {
+          std::vector<std::vector<uint8_t>> bufs(
+              static_cast<size_t>(tx_batch > 1 ? tx_batch : 1), tx_buf);
+          std::vector<TxPacketView> views;
+          while (!g_devourer_should_stop) {
+            views.clear();
+            const long base =
+                tx_counter.fetch_add(static_cast<long>(bufs.size()));
+            for (size_t k = 0; k < bufs.size(); ++k) {
+              auto &b = bufs[k];
+              if (qos_stamp && b.size() >= 10 + 26 + 4) {
+                uint32_t v = static_cast<uint32_t>(base + (long)k);
+                std::memcpy(b.data() + 10 + 26, &v, 4);
+              }
+              views.push_back(TxPacketView{b.data(), b.size()});
+            }
+            rtlDevice->send_packets(views.data(), views.size());
+          }
+        });
+      }
+    }
     if (tx_batch > 1) {
       /* Batch mode: N frames through send_packets (each keeps its own
        * descriptor; the library packs them into shared URBs when
@@ -1141,7 +1185,8 @@ int main(int argc, char **argv) {
       for (long k = 0; k < tx_batch; ++k) {
         auto &b = tx_batch_bufs[static_cast<size_t>(k)];
         if (qos_stamp && b.size() >= 10 + 26 + 4) {
-          uint32_t v = static_cast<uint32_t>(tx_count + k);
+          uint32_t v = static_cast<uint32_t>(
+              tx_threads > 1 ? tx_counter.fetch_add(1) : tx_count + k);
           std::memcpy(b.data() + 10 + 26, &v, 4);
         }
         tx_batch_views.push_back(TxPacketView{b.data(), b.size()});
@@ -1213,6 +1258,11 @@ int main(int argc, char **argv) {
     } else if (tx_interval_ms > 0)
       std::this_thread::sleep_for(std::chrono::milliseconds(tx_interval_ms));
   }
+
+  g_devourer_should_stop = 1; /* stop the aux senders with the main loop */
+  for (auto &th : tx_aux)
+    if (th.joinable())
+      th.join();
 
   /* Bounded hop mode (DEVOURER_HOP_ROUNDS>0) reaches here when its rounds
    * complete; the signal and back-off paths also fall through. */

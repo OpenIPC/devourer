@@ -169,6 +169,10 @@ public:
   }
 
 private:
+  /* Golden-init replay (DEVOURER_REPLAY_WSEQ) — applied at the end of both
+   * Init and InitWrite (see the definition for semantics). */
+  void apply_replay_wseq();
+
   /* Parse one send_packet-contract buffer (radiotap + 802.11) and build its
    * TXDMA block — 48-byte descriptor, pkt_offset×8 pad, frame — at `out`
    * (zeroed, sized desc + pad + frame by the caller). Performs the per-packet

@@ -275,6 +275,42 @@ void RtlJaguar2Device::apply_tx_power_current() {
                       static_cast<uint8_t>(_channel.ChannelWidth), _rfe, off);
 }
 
+void RtlJaguar2Device::apply_replay_wseq() {
+  /* Golden-init replay (DEVOURER_REPLAY_WSEQ): apply a captured register
+   * write sequence verbatim (e.g. the kernel driver's post-DLFW init from a
+   * usbmon capture), OVERRIDING everything devourer configured — the debug
+   * lever for hardware-diffing devourer against the vendor's end state, and
+   * for sweeping individual MAC registers post-bring-up (e.g. the A-MPDU
+   * pacing regs, tests/ampdu_pacing_sweep.sh). Runs at the end of BOTH Init
+   * and InitWrite, so RX and TX bring-ups can be poked alike. */
+  if (_cfg.debug.replay_wseq.empty())
+    return;
+  FILE *fp = fopen(_cfg.debug.replay_wseq.c_str(), "r");
+  if (!fp) {
+    _logger->error("replay_wseq: cannot open {}", _cfg.debug.replay_wseq);
+    return;
+  }
+  unsigned addr, width;
+  unsigned long long val;
+  size_t n = 0;
+  while (fscanf(fp, "%x %u %llx", &addr, &width, &val) == 3) {
+    if (width == 1)
+      _device.rtw_write8(static_cast<uint16_t>(addr),
+                         static_cast<uint8_t>(val));
+    else if (width == 2)
+      _device.rtw_write16(static_cast<uint16_t>(addr),
+                          static_cast<uint16_t>(val));
+    else
+      _device.rtw_write32(static_cast<uint16_t>(addr),
+                          static_cast<uint32_t>(val));
+    if (++n % 1000 == 0)
+      _logger->info("replay_wseq: {} writes applied", n);
+  }
+  fclose(fp);
+  _logger->info("replay_wseq: DONE — {} writes from {}", n,
+                _cfg.debug.replay_wseq);
+}
+
 void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
   _channel = channel;
@@ -314,37 +350,7 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
     }
   }
 
-  if (!_cfg.debug.replay_wseq.empty()) {
-    /* Golden-init replay: apply a captured register write sequence verbatim
-     * (e.g. the kernel driver's post-DLFW init from a usbmon capture),
-     * OVERRIDING everything devourer configured above. Debug lever for
-     * hardware-diffing devourer's init against the vendor's — if a behavior
-     * gap survives an identical write stream, it is not host-register state. */
-    FILE *fp = fopen(_cfg.debug.replay_wseq.c_str(), "r");
-    if (!fp) {
-      _logger->error("replay_wseq: cannot open {}", _cfg.debug.replay_wseq);
-    } else {
-      unsigned addr, width;
-      unsigned long long val;
-      size_t n = 0;
-      while (fscanf(fp, "%x %u %llx", &addr, &width, &val) == 3) {
-        if (width == 1)
-          _device.rtw_write8(static_cast<uint16_t>(addr),
-                             static_cast<uint8_t>(val));
-        else if (width == 2)
-          _device.rtw_write16(static_cast<uint16_t>(addr),
-                              static_cast<uint16_t>(val));
-        else
-          _device.rtw_write32(static_cast<uint16_t>(addr),
-                              static_cast<uint32_t>(val));
-        if (++n % 1000 == 0)
-          _logger->info("replay_wseq: {} writes applied", n);
-      }
-      fclose(fp);
-      _logger->info("replay_wseq: DONE — {} writes from {}", n,
-                    _cfg.debug.replay_wseq);
-    }
-  }
+  apply_replay_wseq();
 
   if (_cfg.debug.bb_dump) {
     /* Full BB/RF register dump in the vendor rtw_proc format for canary diff
@@ -547,6 +553,7 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
    * center frequency. DEVOURER_CW_TONE_GAIN=0..31 sets RF 0x00[4:0]. */
   if (_cfg.tx.cw_tone)
     StartCwTone(_cfg.tx.cw_tone_gain & 0x1F);
+  apply_replay_wseq();
   _logger->info("Jaguar2: ready for TX (monitor inject, ch={})",
                 channel.Channel);
 }

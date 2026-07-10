@@ -88,13 +88,30 @@ Bench-established (8822BU TX, monitor-inject USE_RATE frames):
   unique goodput 7× below singles). The `rty` component set to 0 suppresses
   it completely (receptions == uniques, 0% retry-flagged) — the
   broadcast/no-ack flavor is `DEVOURER_TX_AMPDU=<max>/<density>/0`.
-- **Open item — aggregate-launch pacing**: the chip flow-controls each
-  aggregate launch at ~3 ms under sustained feed (tracks
-  `REG_AMPDU_MAX_TIME_V1` 0x455 = 0x70, the aggregate-fill timer), so net
-  unique goodput at MCS7/20 MHz is currently BELOW plain singles. Promoting
-  the spike to a session API waits on a 0x455 / burst-mode (0x4BC) / queue
-  page-allocation sweep. `ppdu_cnt` reads 0 on the 8812CU RX used for the
-  bench; `paggr` + `tsfl` clustering are the working markers.
+- **Aggregate-launch pacing — solved by register pokes + feed depth**
+  (tests/ampdu_pacing_sweep.sh, tests/ampdu_onair_ab.sh; SDR duty is the
+  ground truth — RX-capture comparisons vary wildly between sessions):
+  - `REG_AMPDU_MAX_TIME_V1` (0x455): the bring-up value 0x70 paces each
+    aggregate launch at ~3 ms; **0x20 unlocks it** (URB acceptance
+    ~0.8 ms). Values ≤ 0x08 DISABLE aggregation entirely (frames revert to
+    slow singles) — the register is a cliff, not a dial.
+  - `REG_SW_AMPDU_BURST_MODE_CTRL` (0x4BC): **clearing it** (the halmac
+    bring-up sets BIT6) is worth ~+40% on the aggregated path.
+  - Both pokes ride `DEVOURER_REPLAY_WSEQ`, which now also applies at the
+    end of InitWrite (TX bring-ups can be swept like RX ones).
+  - **Feed depth is the other half**: with the sync 3-frame URB feed the
+    queue holds ≤3 frames and the MAC SIFS-bursts single-MPDU aggregates.
+    Parallel senders (txdemo `DEVOURER_TX_THREADS=N`; sync bulk from N
+    threads queues N URBs in flight) restore multi-MPDU amortization —
+    saturating at ~4 threads.
+  - On-air result (8822BU, ch149, MCS7/20, 1026-byte MPDUs, B210 duty):
+    singles 73.3% duty at ~3500 fps (28.7 Mbps MAC goodput) vs deep-fed
+    A-MPDU 79.3% duty at ~4550 fps (**37.4 Mbps, +30%**, +20% frames per
+    duty-point). The multiplier grows with PHY rate (overhead fraction);
+    a session API should bundle: data QSEL + AGG_EN + rty0 + 0x455=0x20 +
+    0x4BC=0 + a ≥4-deep feed.
+  - `ppdu_cnt` reads 0 on the 8812CU RX used for the bench; `paggr` +
+    `tsfl` clustering are the working RX markers.
 
 ## Ack stack (deferred)
 

@@ -239,6 +239,20 @@ struct DeviceConfig {
      * configuration — a debugging lever for hardware-diffing devourer
      * against the vendor driver's end state. */
     std::string replay_wseq;
+    /* env: DEVOURER_TX_QSEL — EXPERIMENTAL (A-MPDU spike, tests/ampdu_spike):
+     * override the data TX-descriptor QSEL (default 0x12 = MGMT queue, the
+     * monitor-inject convention). Data-queue values are the TID (0..7);
+     * hardware A-MPDU formation is expected only on data queues. */
+    std::optional<uint8_t> tx_qsel;
+    /* env: DEVOURER_TX_AMPDU="max[/density]" — EXPERIMENTAL (A-MPDU spike):
+     * set AGG_EN=1 + MAX_AGG_NUM (1..0x1f; hardware units of 2 MPDUs) +
+     * AMPDU_DENSITY (0..7, default 0) on every data TX descriptor, asking the
+     * MAC to aggregate co-queued same-RA/TID frames into A-MPDUs. Whether the
+     * hardware honours it for host-pushed USE_RATE frames is exactly what the
+     * spike measures. Pair with tx_qsel, QoS-Data frames (txdemo
+     * DEVOURER_TX_QOS_DATA) and USB TX agg for co-queueing. */
+    std::optional<uint8_t> tx_ampdu_max;
+    uint8_t tx_ampdu_density = 0;
   } debug;
 
   /* ---- USB / process environment -------------------------------------- */

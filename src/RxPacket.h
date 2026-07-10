@@ -65,6 +65,14 @@ struct rx_pkt_attrib
      * receiver's crystal and the transmitter's — the closed-loop CFO tracker's
      * input (see IRtlDevice::SetXtalCap). 0 when the phy-status carries none. */
     int8_t cfo_tail = 0;
+    /* A-MPDU RX markers. paggr: this MPDU arrived inside an aggregated PPDU
+     * (rx-desc PAGGR — 8812 dword1[15], same position in the halmac layout).
+     * ppdu_cnt (halmac only): the MAC's 2-bit received-PPDU counter —
+     * consecutive frames sharing a value shared one PPDU, THE ground-truth
+     * A-MPDU detection signal on the RX side (with paggr and the fact that
+     * only an aggregate's first subframe carries a PHY status). */
+    bool paggr = false;
+    uint8_t ppdu_cnt = 0;
     RX_PACKET_TYPE pkt_rpt_type;
 };
 

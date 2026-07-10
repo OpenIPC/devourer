@@ -449,6 +449,8 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         p.RxAtrib.icv_err = f.icv_err;
         p.RxAtrib.data_rate = f.rx_rate;
         p.RxAtrib.tsfl = f.tsfl;
+        p.RxAtrib.paggr = f.paggr;
+        p.RxAtrib.ppdu_cnt = f.ppdu_cnt;
         p.RxAtrib.drvinfo_sz = static_cast<uint8_t>(f.drvinfo_size);
         p.RxAtrib.shift_sz = f.shift;
         /* RX desc word2 BIT(28) (GET_RX_DESC_C2H, halmac_rx_desc_nic.h:230) marks
@@ -1259,6 +1261,20 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
      * checksummed span — re-checksum (idempotent). */
     SET_TX_DESC_SPE_RPT_8822B(out, 1);
     SET_TX_DESC_SW_DEFINE_8822B(out, _tx_rpt_tag.fetch_add(1) & 0xff);
+    jaguar2::cal_txdesc_chksum_8822b(out);
+  }
+  if (_cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {
+    /* EXPERIMENTAL A-MPDU spike overrides (DEVOURER_TX_QSEL /
+     * DEVOURER_TX_AMPDU — DeviceConfig debug section): route the frame to a
+     * data queue and/or mark it aggregatable. All inside the checksummed
+     * span — re-checksum. */
+    if (_cfg.debug.tx_qsel)
+      SET_TX_DESC_QSEL_8822B(out, *_cfg.debug.tx_qsel);
+    if (_cfg.debug.tx_ampdu_max) {
+      SET_TX_DESC_AGG_EN_8822B(out, 1);
+      SET_TX_DESC_MAX_AGG_NUM_8822B(out, *_cfg.debug.tx_ampdu_max & 0x1f);
+      SET_TX_DESC_AMPDU_DENSITY_8822B(out, _cfg.debug.tx_ampdu_density & 0x7);
+    }
     jaguar2::cal_txdesc_chksum_8822b(out);
   }
   const size_t frame_off =

@@ -141,6 +141,19 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.debug.log_txpwr = env_flag("DEVOURER_LOG_TXPWR");
   if (const char *e = env_str("DEVOURER_REPLAY_WSEQ"))
     cfg.debug.replay_wseq = e;
+  if (env_long("DEVOURER_TX_QSEL", &v))
+    cfg.debug.tx_qsel = static_cast<uint8_t>(v & 0x1f);
+  /* "max[/density]" — A-MPDU spike descriptor overrides. */
+  if (const char *e = env_str("DEVOURER_TX_AMPDU")) {
+    char *end = nullptr;
+    long maxn = std::strtol(e, &end, 0);
+    if (maxn > 0) {
+      cfg.debug.tx_ampdu_max = static_cast<uint8_t>(maxn & 0x1f);
+      if (end && *end == '/')
+        cfg.debug.tx_ampdu_density =
+            static_cast<uint8_t>(std::strtol(end + 1, nullptr, 0) & 0x7);
+    }
+  }
   cfg.debug.hop_prof = env_flag("DEVOURER_HOP_PROF");
   cfg.debug.gaintab_dbg = env_flag("DEVOURER_GAINTAB_DBG");
 

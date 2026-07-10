@@ -670,6 +670,46 @@ int main(int argc, char **argv) {
     logger->info("DEVOURER_TX_PKT_PWR_DB={} — per-packet power via radiotap", db);
   }
 
+  /* DEVOURER_TX_QOS_DATA=1 — A-MPDU spike frame shape (tests/ampdu_spike.sh):
+   * replace the mgmt probe with a QoS-Data frame (FC 0x88, no-DS), TID 0 —
+   * the only frame type the MAC's A-MPDU engine aggregates. SA/BSSID stay the
+   * canonical TX SA so the rxdemo rx.txhit matcher keeps working; RA defaults
+   * to broadcast (DEVOURER_TX_RA=aa:bb:.. overrides — unicast toward a
+   * hardware-ACKing peer is the ACKed flavor). DEVOURER_TX_QOS_NOACK=1 sets
+   * the QoS ack-policy to No-Ack (the wfb-style broadcast flavor). Body =
+   * 64 zero bytes; DEVOURER_TX_PAYLOAD_BYTES below pads it further. Overrides
+   * the PKT_PWR/NDPA frame shapes. */
+  if (std::getenv("DEVOURER_TX_QOS_DATA") != nullptr) {
+    static const uint8_t kQosSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+    uint8_t ra[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    if (const char *e = std::getenv("DEVOURER_TX_RA")) {
+      if (auto m = devourer::parse_mac(e))
+        std::memcpy(ra, m->data(), 6);
+      else
+        logger->warn("DEVOURER_TX_RA unparseable — keeping broadcast RA");
+    }
+    const bool noack = std::getenv("DEVOURER_TX_QOS_NOACK") != nullptr;
+    /* Same rate-less TX_FLAGS-only radiotap as the probe frame above. */
+    static const uint8_t kRtap[10] = {0x00, 0x00, 0x0a, 0x00, 0x00,
+                                      0x80, 0x00, 0x00, 0x08, 0x00};
+    std::vector<uint8_t> f(kRtap, kRtap + sizeof(kRtap));
+    const uint8_t qos_hdr[26] = {
+        0x88, 0x00, /* FC: QoS Data, no To/FromDS */
+        0x00, 0x00, /* duration */
+        ra[0], ra[1], ra[2], ra[3], ra[4], ra[5],
+        kQosSa[0], kQosSa[1], kQosSa[2], kQosSa[3], kQosSa[4], kQosSa[5],
+        kQosSa[0], kQosSa[1], kQosSa[2], kQosSa[3], kQosSa[4], kQosSa[5],
+        0x00, 0x00, /* seq (EN_HWSEQ overwrites) */
+        /* QoS ctrl: TID 0; ack-policy bits [6:5] = 01 (No Ack) / 00. */
+        static_cast<uint8_t>(noack ? 0x20 : 0x00), 0x00};
+    f.insert(f.end(), qos_hdr, qos_hdr + sizeof(qos_hdr));
+    f.insert(f.end(), 64, 0x00);
+    tx_buf = std::move(f);
+    logger->info("DEVOURER_TX_QOS_DATA — QoS-Data TID0, RA {}, ack-policy {}",
+                 (ra[0] == 0xff) ? "broadcast" : "unicast",
+                 noack ? "no-ack" : "normal");
+  }
+
   /* Frame-size knob for throughput benchmarking. DEVOURER_TX_PAYLOAD_BYTES=N
    * pads the 802.11 body so the on-air PSDU is exactly N bytes — send_packet
    * writes real_packet_length (= PSDU) into the 16-bit TX-desc PKT_SIZE, so N

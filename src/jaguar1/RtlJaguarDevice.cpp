@@ -760,6 +760,20 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
     SET_TX_DESC_DISABLE_FB_8812(usb_frame, 1);
   }
 
+  if (_cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {
+    /* EXPERIMENTAL A-MPDU spike overrides (DEVOURER_TX_QSEL /
+     * DEVOURER_TX_AMPDU — DeviceConfig debug section): route the frame to a
+     * data queue and/or mark it aggregatable. Dword2/3 — inside the
+     * checksummed 32 bytes (checksum runs below). */
+    if (_cfg.debug.tx_qsel)
+      SET_TX_DESC_QUEUE_SEL_8812(usb_frame, *_cfg.debug.tx_qsel);
+    if (_cfg.debug.tx_ampdu_max) {
+      SET_TX_DESC_AGG_ENABLE_8812(usb_frame, 1);
+      SET_TX_DESC_MAX_AGG_NUM_8812(usb_frame, *_cfg.debug.tx_ampdu_max & 0x1f);
+      SET_TX_DESC_AMPDU_DENSITY_8812(usb_frame, _cfg.debug.tx_ampdu_density & 0x7);
+    }
+  }
+
   /* USB-agg boundary shim: pkt_offset × 8 bytes of pad between descriptor and
    * frame (PKT_OFFSET, unit 8 B; dword1 sits inside the checksummed 32 bytes,
    * so it precedes the checksum). 0 = none (byte-identical). */

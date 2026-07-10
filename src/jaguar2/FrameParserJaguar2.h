@@ -56,6 +56,12 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 /* Per-frame TX-status report request (halmac SPE_RPT): the fw answers this
  * frame's transmission with a CCX C2H report (src/TxReport.h). */
 #define SET_TX_DESC_SPE_RPT_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x08, 19, 1, v)
+/* A-MPDU formation (halmac AGG_EN / MAX_AGG_NUM / AMPDU_DENSITY): ask the MAC
+ * to aggregate co-queued same-RA/TID frames into an A-MPDU (spike knobs
+ * DEVOURER_TX_AMPDU / DEVOURER_TX_QSEL; see DeviceConfig debug section). */
+#define SET_TX_DESC_AGG_EN_8822B(d, v)        SET_BITS_TO_LE_4BYTE((d) + 0x08, 12, 1, v)
+#define SET_TX_DESC_MAX_AGG_NUM_8822B(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x0C, 17, 5, v)
+#define SET_TX_DESC_AMPDU_DENSITY_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x08, 20, 3, v)
 #define SET_TX_DESC_RTY_LMT_EN_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 17, 1, v)
 #define SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 18, 6, v)
 #define SET_TX_DESC_SW_DEFINE_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x18, 0, 12, v)
@@ -76,6 +82,10 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 #define GET_RX_DESC_SHIFT_8822B(r)         LE_BITS_TO_4BYTE((r) + 0x00, 24, 2)
 #define GET_RX_DESC_PHYST_8822B(r)         LE_BITS_TO_4BYTE((r) + 0x00, 26, 1)
 #define GET_RX_DESC_RX_RATE_8822B(r)       LE_BITS_TO_4BYTE((r) + 0x0C, 0, 7)
+/* A-MPDU markers: PAGGR = MPDU arrived inside an aggregate; PPDU_CNT = the
+ * MAC's 2-bit received-PPDU counter (halmac_rx_desc_nic.h). */
+#define GET_RX_DESC_PAGGR_8822B(r)         LE_BITS_TO_4BYTE((r) + 0x04, 15, 1)
+#define GET_RX_DESC_PPDU_CNT_8822B(r)      LE_BITS_TO_4BYTE((r) + 0x08, 29, 2)
 /* DWORD 5 = the 32-bit TSF-low latched at receive (same offset as the 8812's
  * GET_RX_STATUS_DESC_TSFL_8812 at +20). The hardware TSF timing reference. */
 #define GET_RX_DESC_TSFL_8822B(r)          LE_BITS_TO_4BYTE((r) + 0x14, 0, 32)
@@ -204,6 +214,8 @@ struct Rx8822bFrame {
   uint16_t drvinfo_size;
   uint8_t shift;
   uint32_t tsfl;              /* hardware TSF-low at receive */
+  bool paggr;                 /* MPDU arrived inside an A-MPDU */
+  uint8_t ppdu_cnt;           /* 2-bit received-PPDU counter */
   uint32_t next_offset;
 };
 
@@ -222,6 +234,8 @@ inline bool parse_rx_8822b(const uint8_t *buf, size_t buflen,
   out.icv_err = GET_RX_DESC_ICV_ERR_8822B(buf) != 0;
   out.rx_rate = static_cast<uint8_t>(GET_RX_DESC_RX_RATE_8822B(buf));
   out.tsfl = static_cast<uint32_t>(GET_RX_DESC_TSFL_8822B(buf));
+  out.paggr = GET_RX_DESC_PAGGR_8822B(buf) != 0;
+  out.ppdu_cnt = static_cast<uint8_t>(GET_RX_DESC_PPDU_CNT_8822B(buf));
 
   uint32_t frame_off =
       static_cast<uint32_t>(RXDESC_SIZE_8822B) + out.drvinfo_size + out.shift;

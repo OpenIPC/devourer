@@ -51,7 +51,10 @@ static void report(const char *what, RtlAdapter &a) {
 
 int main() {
   auto lg = std::make_shared<Logger>();
-  if (const char *n = std::getenv("DEVOURER_REGLAT_N")) N = std::max(100, atoi(n));
+  if (const char *n = std::getenv("DEVOURER_REGLAT_N")) {
+    int nn = atoi(n);  // (not std::max: <windows.h> defines a max() macro on MSVC)
+    N = nn > 100 ? nn : 100;
+  }
 
 #if defined(DEVOURER_HAVE_PCIE)
   if (const char *bdf = std::getenv("DEVOURER_PCIE_BDF")) {

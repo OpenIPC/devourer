@@ -586,6 +586,18 @@ if(DEVOURER_JAGUAR2_8822B OR DEVOURER_JAGUAR2_8821C)
     add_test(NAME txpkt_pwr_quant COMMAND TxPktPwrSelftest)
 endif()
 
+# Headless guard for the USB TX-aggregation URB packing (src/TxAggPlan.h) —
+# block alignment, the never-a-bulk-multiple boundary shim, the OQT
+# descs-per-bulk guard, the frame/byte caps — plus the HalMAC descriptor agg
+# fields (DMA_TXAGG_NUM placement and PKT_OFFSET checksum coverage; those
+# parts self-gate on the DEVOURER_HAVE_JAGUAR2/3 defines the library exports).
+add_executable(TxAggSelftest
+    tests/txagg_selftest.cpp
+)
+target_link_libraries(TxAggSelftest PRIVATE devourer)
+target_include_directories(TxAggSelftest PRIVATE src)
+add_test(NAME txagg_pack COMMAND TxAggSelftest)
+
 # Headless guard for the beamforming-report decoder (src/BfReportDecode.h) — the
 # LSB-first Givens-angle unpacking + per-tone variance behind sense. It
 # decodes a real captured VHT MU report and checks the angles against an offline

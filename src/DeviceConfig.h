@@ -112,6 +112,13 @@ struct DeviceConfig {
      * Runtime equivalent: StartCwTone/StopCwTone on the concrete device. */
     bool cw_tone = false;
     uint8_t cw_tone_gain = 0;
+    /* env: DEVOURER_TX_USB_AGG — USB TX aggregation: max frames packed into
+     * one bulk-OUT URB by send_packets (0 = off, the default: send_packets
+     * degrades to a per-frame loop and every TX path is byte-identical to
+     * before the knob existed). Clamped to the 8-bit agg-num field (255; 64
+     * on Jaguar1) and the vendor packing rules (see src/TxAggPlan.h). USB
+     * only; the PCIe rings take frames individually. */
+    unsigned usb_agg_max = 0;
   } tx;
 
   /* ---- Beamforming (bring-up-time arming; see docs/beamforming-*.md) --- */

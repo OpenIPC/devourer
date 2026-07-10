@@ -5,9 +5,12 @@
 #include "Hal8812PhyReg.h"
 #include "NhmReader.h"
 #include "RadioManagementModule.h"
+#include "RadiotapPeek.h" /* send_packets batch pre-parse */
 #include "SignalStop.h"
 #include "ToneMask.h"
+#include "TxAggPlan.h" /* USB TX aggregation URB packing */
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -315,9 +318,119 @@ bool RtlJaguarDevice::StartBeacon(const uint8_t *beacon, size_t len,
 }
 
 bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
-  struct tx_desc *ptxdesc;
-  bool resp;
-  uint8_t *usb_frame;
+  /* Build one TXDMA block (40-byte descriptor + frame, build_tx_block) and
+   * submit it as one async bulk-OUT. */
+  const uint16_t rlen = devourer::radiotap_hdr_len(packet, length);
+  if (rlen == 0)
+    return false;
+  std::vector<uint8_t> usb_frame(TXDESC_SIZE + (length - rlen), 0);
+  if (build_tx_block(packet, length, usb_frame.data(), 0) == 0)
+    return false;
+  return _device.send_packet(usb_frame.data(), usb_frame.size());
+}
+
+size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
+  /* USB TX aggregation (DEVOURER_TX_USB_AGG): pack consecutive frames into
+   * shared bulk-OUT URBs — each frame keeps its own 40-byte descriptor, blocks
+   * start 8-byte aligned, the FIRST descriptor carries the block count
+   * (USB_TXAGG_NUM; the matching TXDMA TDECTRL block-desc count is programmed
+   * at bring-up by usb_AggSettingTxUpdate_8812A when the knob is on). Packing
+   * rules in src/TxAggPlan.h. Knob off -> the interface-default loop. */
+  const unsigned agg = _cfg.tx.usb_agg_max;
+  if (agg <= 1 || !_device.is_usb() || count == 0)
+    return IRtlDevice::send_packets(pkts, count);
+
+  devourer::TxAggLimits lim;
+  lim.desc_size = TXDESC_SIZE;
+  lim.bulk_size = _device.speed() >= devourer::kUsbSpeedSuper  ? 1024
+                  : _device.speed() >= devourer::kUsbSpeedHigh ? 512
+                                                               : 64;
+  /* MAX_TX_AGG_PACKET_NUMBER_8812: the Jaguar1 TXDMA takes at most 64 blocks
+   * per transfer (vendor hal_com_reg.h). */
+  lim.max_frames = std::min(agg, 64u);
+  /* Vendor UsbTxAggDescNum: how many descriptors may START inside one bulk
+   * window — 8812A silicon overflows its OQT beyond 1 (the vendor "OQT
+   * overflow" clamp); the 8821A takes 6, the 8814A runs the kernel's 3. */
+  const auto ic = _eepromManager->version_id.ICType;
+  lim.descs_per_bulk = ic == CHIP_8814A ? 3 : ic == CHIP_8821 ? 6 : 1;
+
+  size_t done = 0, ok = 0;
+  while (done < count) {
+    /* Collect the contiguous run for ONE URB: well-formed frames staying on
+     * one channel. A frame whose radiotap CHANNEL differs ends the run — the
+     * pending URB airs on the old channel, and the retune happens inside
+     * build_tx_block when that frame leads the next URB. */
+    std::vector<size_t> lens;
+    int run_chan = 0; /* 0 = no per-packet CHANNEL seen yet (current channel) */
+    for (size_t i = done; i < count && lens.size() < lim.max_frames; ++i) {
+      const uint16_t rlen =
+          devourer::radiotap_hdr_len(pkts[i].data, pkts[i].len);
+      if (rlen == 0) {
+        if (lens.empty())
+          ++done; /* skip a malformed leading frame (contract: skipped) */
+        break;
+      }
+      const int want =
+          devourer::radiotap_peek_channel(pkts[i].data, pkts[i].len);
+      if (lens.empty())
+        run_chan = want;
+      else if (want > 0 &&
+               want != (run_chan > 0 ? run_chan : _channel.Channel))
+        break;
+      lens.push_back(pkts[i].len - rlen);
+    }
+    if (lens.empty())
+      continue;
+
+    const devourer::TxAggPlan plan =
+        devourer::plan_tx_agg(lens.data(), lens.size(), lim);
+    if (plan.frames() <= 1) {
+      /* One block (or a frame the URB cap refuses): the classic single-frame
+       * path is byte-identical and uncapped. */
+      if (send_packet(pkts[done].data, pkts[done].len))
+        ++ok;
+      ++done;
+      continue;
+    }
+
+    std::vector<uint8_t> urb(plan.total, 0);
+    size_t built = 0;
+    for (size_t k = 0; k < plan.frames(); ++k) {
+      const uint8_t poff = (k == 0 && plan.shim) ? 1 : 0;
+      if (build_tx_block(pkts[done + k].data, pkts[done + k].len,
+                         urb.data() + plan.blocks[k].offset, poff) == 0)
+        break; /* pre-validated, so only a defensive bail */
+      ++built;
+    }
+    if (built != plan.frames()) {
+      for (size_t k = 0; k < plan.frames(); ++k, ++done)
+        if (send_packet(pkts[done].data, pkts[done].len))
+          ++ok;
+      continue;
+    }
+
+    /* First descriptor advertises the block count. Dword7 sits inside the
+     * checksummed 32 bytes, so re-checksum (idempotent — the checksum field
+     * is re-zeroed first). */
+    uint8_t *first = urb.data() + plan.blocks[0].offset;
+    SET_TX_DESC_USB_TXAGG_NUM_8812(first, plan.frames());
+    rtl8812a_cal_txdesc_chksum(first);
+
+    const bool sent = _device.send_packet(urb.data(), urb.size());
+    devourer::Ev(_logger->events(), "tx.agg")
+        .f("frames", (unsigned long long)plan.frames())
+        .f("bytes", (unsigned long long)urb.size())
+        .f("shim", plan.shim)
+        .f("ok", sent);
+    if (sent)
+      ok += plan.frames();
+    done += plan.frames();
+  }
+  return ok;
+}
+
+size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
+                                       uint8_t *out, uint8_t pkt_offset) {
   int real_packet_length, usb_frame_length, radiotap_length;
 
   bool vht = false;
@@ -332,18 +445,19 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   /* Per-packet hop target from a radiotap CHANNEL field (0 = none present). */
   int radiotap_channel = 0;
   if (length < sizeof(struct ieee80211_radiotap_header)) {
-    return false;
+    return 0;
   }
   radiotap_length = get_unaligned_le16(packet + 2);
   if (radiotap_length == 0 || (size_t)radiotap_length >= length) {
-    return false;
+    return 0;
   }
   real_packet_length = length - radiotap_length;
 
   if (radiotap_length != 0x0d)
     vht = true;
 
-  usb_frame_length = real_packet_length + TXDESC_SIZE;
+  usb_frame_length =
+      real_packet_length + TXDESC_SIZE + (int)pkt_offset * 8;
 
   DVR_DEBUG(_logger, "radiotap length is {}, 80211 length is {}, usb_frame length "
                 "should be {}",
@@ -507,9 +621,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
     fixed_rate = MGN_6M;
   }
 
-  usb_frame = new uint8_t[usb_frame_length]();
-
-  ptxdesc = (struct tx_desc *)usb_frame;
+  uint8_t *usb_frame = out; /* caller-provided zeroed block */
 
   /* Drop an STBC request the chip can't honour: STBC needs >=2 TX chains, so a
    * 1T1R part (8811AU/8821AU) that airs an STBC-marked frame produces a
@@ -642,17 +754,19 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
     SET_TX_DESC_DISABLE_FB_8812(usb_frame, 1);
   }
 
+  /* USB-agg boundary shim: pkt_offset × 8 bytes of pad between descriptor and
+   * frame (PKT_OFFSET, unit 8 B; dword1 sits inside the checksummed 32 bytes,
+   * so it precedes the checksum). 0 = none (byte-identical). */
+  if (pkt_offset)
+    SET_TX_DESC_PKT_OFFSET_8812(usb_frame, pkt_offset & 0x1f);
   rtl8812a_cal_txdesc_chksum(usb_frame);
-  DVR_TRACE(_logger, "tx desc formed: {}",
-            hex_join(usb_frame, usb_frame_length));
-  uint8_t *addr = usb_frame + TXDESC_SIZE;
+  DVR_TRACE(_logger, "tx desc formed: {}", hex_join(usb_frame, TXDESC_SIZE));
+  uint8_t *addr = usb_frame + TXDESC_SIZE + (size_t)pkt_offset * 8;
   memcpy(addr, packet + radiotap_length, real_packet_length);
   DVR_TRACE(_logger, "packet formed: {}",
             hex_join(usb_frame, usb_frame_length));
-  resp = _device.send_packet(usb_frame, usb_frame_length);
-  delete[] usb_frame;
 
-  return resp;
+  return (size_t)usb_frame_length;
 }
 
 void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,

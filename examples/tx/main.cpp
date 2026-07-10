@@ -757,6 +757,21 @@ int main(int argc, char **argv) {
     tx_gap_set = true;
   }
 
+  /* DEVOURER_TX_BATCH=N: drive the send_packets batch API in groups of N
+   * frames per call — the USB TX aggregation bench mode. Pair with
+   * DEVOURER_TX_USB_AGG (library knob) to actually pack the group into shared
+   * bulk-OUT URBs; without it send_packets degrades to the per-frame loop.
+   * Default 1 = the classic send_packet loop, byte-identical. */
+  long tx_batch = 1;
+  if (const char *e = std::getenv("DEVOURER_TX_BATCH")) {
+    tx_batch = std::strtol(e, nullptr, 0);
+    if (tx_batch < 1)
+      tx_batch = 1;
+    if (tx_batch > 1)
+      logger->info("DEVOURER_TX_BATCH — send_packets batches of {}", tx_batch);
+  }
+  std::vector<TxPacketView> tx_batch_views;
+
   /* Channel-hopping mode (frequency-diversity validation). When
    * DEVOURER_HOP_CHANNELS="1,6,11" is set the TX loop dwells DWELL_FRAMES
    * frames on each listed channel, then retunes to the next via
@@ -1060,8 +1075,22 @@ int main(int argc, char **argv) {
       m.stbc = static_cast<uint8_t>(tx_count & 1);   /* 0,1,0,1,… per frame */
       rtlDevice->SetTxMode(m);
     }
-    rc = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
-    ++tx_count;
+    if (tx_batch > 1) {
+      /* Batch mode: N copies of the frame through send_packets (each keeps
+       * its own descriptor; the library packs them into shared URBs when
+       * DEVOURER_TX_USB_AGG is on). rc = the whole batch submitted. */
+      tx_batch_views.assign(static_cast<size_t>(tx_batch),
+                            TxPacketView{tx_buf.data(), tx_buf.size()});
+      const size_t okn = rtlDevice->send_packets(tx_batch_views.data(),
+                                                 tx_batch_views.size());
+      rc = okn == tx_batch_views.size();
+      tx_count += tx_batch;
+      if (!hop_channels.empty())
+        frames_in_dwell += tx_batch - 1; /* the shared ++ below adds one */
+    } else {
+      rc = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
+      ++tx_count;
+    }
     if (!hop_channels.empty() && ++frames_in_dwell >= hop_dwell)
       frames_in_dwell = 0;
     if (tx_count <= 10 || tx_count % 500 == 0) {

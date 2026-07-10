@@ -57,6 +57,11 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 18, 6, v)
 #define SET_TX_DESC_SW_DEFINE_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x18, 0, 12, v)
 #define SET_TX_DESC_TXDESC_CHECKSUM_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x1C, 0, 16, v)
+/* USB TX aggregation: number of [txdesc][frame] blocks in this bulk-OUT
+ * transfer, set on the FIRST descriptor only (halmac DMA_TXAGG_NUM,
+ * dword7[31:24]). Inside the 32-byte checksummed region — set BEFORE
+ * cal_txdesc_chksum_8822b. */
+#define SET_TX_DESC_DMA_TXAGG_NUM_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x1C, 24, 8, v)
 #define SET_TX_DESC_EN_HWSEQ_8822B(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x20, 15, 1, v)
 #define GET_TX_DESC_PKT_OFFSET_8822B(d)    LE_BITS_TO_4BYTE((d) + 0x04, 24, 5)
 
@@ -126,7 +131,8 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
                                     bool short_gi, bool ldpc, uint8_t stbc,
                                     bool bmc = false, uint8_t wheader_len = 12,
                                     bool ndpa = false, uint8_t data_sc = 0,
-                                    uint8_t pwr_ofset = 0) {
+                                    uint8_t pwr_ofset = 0,
+                                    uint8_t pkt_offset = 0) {
   SET_TX_DESC_TXPKTSIZE_8822B(d, pkt_size);
   SET_TX_DESC_OFFSET_8822B(d, static_cast<uint32_t>(TXDESC_SIZE_8822B));
   SET_TX_DESC_LS_8822B(d, 1);
@@ -152,6 +158,12 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
    * Inside the 32-byte checksummed region (0x14), so set before the checksum. */
   if (pwr_ofset)
     SET_TX_DESC_TXPWR_OFSET_8822B(d, pwr_ofset & 0x7);
+  /* USB-agg boundary shim: pkt_offset × 8 bytes of pad between this descriptor
+   * and its frame (halmac PKT_OFFSET, unit 8 B) — the vendor's lever for
+   * keeping an aggregated transfer off an exact bulk-size multiple. 0 = none
+   * (byte-identical). Inside the checksummed region (0x04). */
+  if (pkt_offset)
+    SET_TX_DESC_PKT_OFFSET_8822B(d, pkt_offset & 0x1f);
   SET_TX_DESC_DATA_SHORT_8822B(d, short_gi ? 1 : 0);
   SET_TX_DESC_DATA_LDPC_8822B(d, ldpc ? 1 : 0);
   SET_TX_DESC_DATA_STBC_8822B(d, stbc & 0x3);

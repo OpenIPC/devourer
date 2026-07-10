@@ -53,6 +53,11 @@ constexpr size_t RXDESC_SIZE_8822C = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 18, 6, v)
 #define SET_TX_DESC_SW_DEFINE_8822C(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x18, 0, 12, v)
 #define SET_TX_DESC_TXDESC_CHECKSUM_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x1C, 0, 16, v)
+/* USB TX aggregation: number of [txdesc][frame] blocks in this bulk-OUT
+ * transfer, set on the FIRST descriptor only (halmac DMA_TXAGG_NUM,
+ * dword7[31:24]). Inside the checksummed span — set BEFORE
+ * cal_txdesc_chksum_8822c. */
+#define SET_TX_DESC_DMA_TXAGG_NUM_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x1C, 24, 8, v)
 #define SET_TX_DESC_EN_HWSEQ_8822C(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x20, 15, 1, v)
 #define GET_TX_DESC_PKT_OFFSET_8822C(d)    LE_BITS_TO_4BYTE((d) + 0x04, 24, 5)
 
@@ -99,7 +104,8 @@ inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
                                     uint8_t rate_hw, uint8_t rate_id, uint8_t bw,
                                     bool short_gi, bool ldpc, uint8_t stbc,
                                     bool bmc = false, bool ndpa = false,
-                                    uint8_t data_sc = 0) {
+                                    uint8_t data_sc = 0,
+                                    uint8_t pkt_offset = 0) {
   SET_TX_DESC_TXPKTSIZE_8822C(d, pkt_size);
   SET_TX_DESC_OFFSET_8822C(d, static_cast<uint32_t>(TXDESC_SIZE_8822C));
   SET_TX_DESC_LS_8822C(d, 1);
@@ -133,6 +139,13 @@ inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
   SET_TX_DESC_DATA_LDPC_8822C(d, ldpc ? 1 : 0);
   SET_TX_DESC_DATA_STBC_8822C(d, stbc & 0x3);
   SET_TX_DESC_EN_HWSEQ_8822C(d, 1);
+  /* USB-agg boundary shim: pkt_offset × 8 bytes of pad between this descriptor
+   * and its frame (halmac PKT_OFFSET, unit 8 B). 0 = none (byte-identical).
+   * MUST precede the checksum: on the 8822C the checksum span itself extends
+   * by pkt_offset dword-pairs (cal_txdesc_chksum_8822c reads the field), and
+   * the pad bytes it covers are the caller's zeroed buffer. */
+  if (pkt_offset)
+    SET_TX_DESC_PKT_OFFSET_8822C(d, pkt_offset & 0x1f);
   /* Beamforming self-sounding: mark the frame as an NDPA (halmac NDPA field,
    * dword3 [23:22] = 1) so the armed MAC sounding engine follows it with a
    * hardware-generated NDP — the Jaguar-3 mirror of the Jaguar-1

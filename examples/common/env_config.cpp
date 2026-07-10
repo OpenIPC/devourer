@@ -72,6 +72,8 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.tx.cw_tone = env_flag("DEVOURER_CW_TONE");
   if (env_long("DEVOURER_CW_TONE_GAIN", &v))
     cfg.tx.cw_tone_gain = static_cast<uint8_t>(v) & 0x1F;
+  if (env_long("DEVOURER_TX_USB_AGG", &v) && v > 0)
+    cfg.tx.usb_agg_max = static_cast<unsigned>(v);
 
   /* ---- bf ---- */
   if (const char *snd = env_str("DEVOURER_BF_ARM_SOUNDER")) {

@@ -199,6 +199,13 @@ public:
   void ClearTxMode();
 
   bool send_packet(const uint8_t* packet, size_t length) override;
+  /* Batch TX with USB aggregation (IRtlDevice contract): with
+   * cfg.tx.usb_agg_max > 1 consecutive frames are packed into shared bulk-OUT
+   * URBs — one [txdesc][frame] block per frame, first descriptor carrying the
+   * count in USB_TXAGG_NUM (see src/TxAggPlan.h; the MAC-side TDECTRL
+   * block-desc count is programmed at bring-up when the knob is on). Falls
+   * back to the per-frame loop when the knob is off. */
+  size_t send_packets(const TxPacketView *pkts, size_t count) override;
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
@@ -274,6 +281,15 @@ public:
 private:
   void StartWithMonitorMode(SelectedChannel selectedChannel);
   bool NetDevOpen(SelectedChannel selectedChannel);
+
+  /* Parse one send_packet-contract buffer (radiotap + 802.11) and build its
+   * TXDMA block — 40-byte descriptor, pkt_offset×8 pad, frame — at `out`
+   * (zeroed, sized desc + pad + frame by the caller). Performs the per-packet
+   * radiotap CHANNEL retune, exactly like send_packet. Returns the block
+   * length, 0 on malformed input. Shared by send_packet (pkt_offset=0) and
+   * the send_packets URB packer. */
+  size_t build_tx_block(const uint8_t *packet, size_t length, uint8_t *out,
+                        uint8_t pkt_offset);
 
   std::array<std::atomic<uint32_t>, 5> _qd_snap{};
   std::thread _qd_thread;

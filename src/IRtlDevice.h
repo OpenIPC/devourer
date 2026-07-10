@@ -23,6 +23,13 @@ struct Packet;
 
 using Action_ParsedRadioPacket = std::function<void(const Packet &)>;
 
+/* One TX frame handed to send_packets: radiotap header + 802.11 MPDU, the
+ * same buffer contract as send_packet. */
+struct TxPacketView {
+  const uint8_t *data;
+  size_t len;
+};
+
 /* IRtlDevice is the chip-family-agnostic device contract used by the demos and
  * the WiFiDriver factory. Three implementations exist:
  *   - RtlJaguarDevice   — Realtek "Jaguar" wave-1 (8812AU/8811AU/8821AU/8814AU)
@@ -187,6 +194,26 @@ public:
   virtual devourer::ActiveRxPaths GetActiveRxPaths() { return {}; }
 
   virtual bool send_packet(const uint8_t *packet, size_t length) = 0;
+
+  /* Batch TX: submit `count` frames (each buffer = radiotap header + 802.11
+   * MPDU, the send_packet contract) in one call. With USB TX aggregation
+   * enabled (DeviceConfig tx.usb_agg_max > 0) the USB generations pack
+   * consecutive frames into shared bulk-OUT URBs (see src/TxAggPlan.h) — one
+   * transfer per burst instead of one per frame, and the frames land in the
+   * TXDMA back-to-back. The default (and the PCIe / agg-off behaviour) is a
+   * plain send_packet loop, so callers may use this unconditionally.
+   * Semantics notes: a frame whose radiotap CHANNEL differs from the current
+   * channel flushes the pending URB before the retune (per-packet hopping
+   * stays radiotap-driven); a malformed frame is skipped. Returns the number
+   * of frames successfully submitted. */
+  virtual size_t send_packets(const TxPacketView *pkts, size_t count) {
+    size_t ok = 0;
+    for (size_t i = 0; i < count; ++i)
+      if (pkts[i].data != nullptr && send_packet(pkts[i].data, pkts[i].len))
+        ++ok;
+    return ok;
+  }
+
   virtual SelectedChannel GetSelectedChannel() = 0;
 
   /* Read the 64-bit hardware TSF (Timing Synchronization Function) timer — the

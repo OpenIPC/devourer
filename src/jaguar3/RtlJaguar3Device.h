@@ -63,6 +63,12 @@ public:
   void FastSetBandwidth(ChannelWidth_t bw) override;
   void InitWrite(SelectedChannel channel) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
+  /* Batch TX with USB aggregation (IRtlDevice contract): with
+   * cfg.tx.usb_agg_max > 1 consecutive frames are packed into shared bulk-OUT
+   * URBs — one [txdesc][frame] block per frame, first descriptor carrying the
+   * count in DMA_TXAGG_NUM (see src/TxAggPlan.h). Falls back to the per-frame
+   * loop when the knob is off. */
+  size_t send_packets(const TxPacketView *pkts, size_t count) override;
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
@@ -171,6 +177,15 @@ public:
   bool should_stop = false;
 
 private:
+  /* Parse one send_packet-contract buffer (radiotap + 802.11) and build its
+   * TXDMA block — 48-byte descriptor, pkt_offset×8 pad, frame — at `out`
+   * (zeroed, sized desc + pad + frame by the caller). Performs the per-packet
+   * radiotap CHANNEL retune and the NDPA-period accounting, exactly like
+   * send_packet. Returns the block length, 0 on malformed input. Shared by
+   * send_packet (pkt_offset=0) and the send_packets URB packer. */
+  size_t build_tx_block(const uint8_t *packet, size_t length, uint8_t *out,
+                        uint8_t pkt_offset);
+
   RtlAdapter _device;
   const devourer::DeviceConfig _cfg;
   Logger_t _logger;

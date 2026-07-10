@@ -88,6 +88,10 @@ cmake --build build -j
 
 libusb-1.0 via `pkg-config` (Linux/macOS) or vcpkg (`VCPKG_ROOT`, Windows).
 
+The vendor kernel drivers under `reference/` are git submodules (fork rationale
++ layout in `reference/README.md`); `git submodule update --init --recursive`
+before running `tools/extract_*.py` or the hardware-testing kernel cells.
+
 Per-chip options, all default ON: `DEVOURER_JAGUAR1`, `DEVOURER_8814` (requires
 JAGUAR1), `DEVOURER_JAGUAR2_8822B`, `DEVOURER_JAGUAR2_8821C`,
 `DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`. `DEVOURER_PCIE` (default

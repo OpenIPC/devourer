@@ -1,0 +1,28 @@
+rtw88: surface the MAC RX TSF to SO_TIMESTAMPING on the PCIe path
+
+rtw88 already extracts the RX-descriptor TSF into rx_status->mactime (rx.c),
+which mac80211 turns into the radiotap TSFT on monitor interfaces. But that
+never reaches a data socket's SO_TIMESTAMPING, because mac80211 does not attach
+the skb hardware timestamp for frames delivered up the netdev.
+
+Attach it in the driver, right before handing the skb to mac80211: the same
+MAC-latched TSF (pkt_stat.tsf_low, us) becomes skb_hwtstamps()->hwtstamp, so a
+SO_TIMESTAMPING/RAW_HARDWARE consumer reads the 802.11 hardware RX timestamp —
+the honest apples-vs-apples primitive, now on the PCIe transport too. It is a
+free-running counter (RAW_HARDWARE, 32-bit us wrap), not CLOCK_REALTIME.
+
+This is the PCIe/mac80211 parallel to the USB full-MAC rtl88x2cu change.
+
+--- a/drivers/net/wireless/realtek/rtw88/pci.c
++++ b/drivers/net/wireless/realtek/rtw88/pci.c
+@@ -1090,6 +1090,9 @@
+ 			rtw_update_rx_freq_for_invalid(rtwdev, new, &rx_status, &pkt_stat);
+ 			rtw_rx_stats(rtwdev, pkt_stat.vif, new);
+ 			memcpy(new->cb, &rx_status, sizeof(rx_status));
++			/* surface the MAC RX TSF (latched in hw at receive) to
++			 * SO_TIMESTAMPING; RAW_HARDWARE, free-running us->ns */
++			skb_hwtstamps(new)->hwtstamp =
++				ns_to_ktime((u64)pkt_stat.tsf_low * NSEC_PER_USEC);
+ 			ieee80211_rx_napi(rtwdev->hw, NULL, new, napi);
+ 			rx_done++;
+ 		}

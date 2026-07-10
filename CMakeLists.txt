@@ -302,6 +302,12 @@ if(DEVOURER_PCIE)
     target_link_libraries(pcieprobe PUBLIC devourer)
 endif()
 
+# reglat — register round-trip latency microbench (USB ctrl-xfer vs PCIe MMIO).
+# Times RtlAdapter::rtw_read32; the PCIe path compiles only with DEVOURER_PCIE
+# (inherited via the devourer PUBLIC DEVOURER_HAVE_PCIE define). See its header.
+add_executable(reglat tests/reglat.cpp)
+target_link_libraries(reglat PUBLIC devourer PRIVATE PkgConfig::libusb)
+
 add_executable(rxdemo
     examples/rx/main.cpp
     examples/common/env_config.cpp

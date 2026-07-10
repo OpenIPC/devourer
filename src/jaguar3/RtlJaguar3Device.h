@@ -291,6 +291,12 @@ private:
   /* Nominal beacon interval in TU while a beacon is active (0 = none); the
    * AdjustBeaconTiming one-shot tweak restores to this. */
   int _bcn_interval_tu = 0;
+  /* TBTT-grid offset vs the TSF, in µs: TBTT fires at TSF % period == this.
+   * 0 after StartBeacon and after every fine steer (the EN_BCN_FUNCTION
+   * re-latch re-derives the grid from the TSF); each coarse interval-tweak
+   * steer moves the grid by its applied shift without moving the TSF, so the
+   * coarse path's TBTT phase-alignment must subtract it. Guarded by _reg_mu. */
+  int64_t _tbtt_off_us = 0;
   /* StartRxLoop stop request (StopRxLoop). */
   volatile bool _rx_stop = false;
   /* True while StartRxLoop owns bulk-IN (gates the coex thread's drain). */

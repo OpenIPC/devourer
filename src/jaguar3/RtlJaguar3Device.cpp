@@ -1579,6 +1579,7 @@ bool RtlJaguar3Device::StartBeacon(const uint8_t *beacon, size_t len,
    * content-update path (not this static beacon) and belongs behind a
    * DeviceConfig knob, not env — the library reads no environment. */
   _bcn_interval_tu = interval_tu > 0 ? interval_tu : 100;
+  _tbtt_off_us = 0;  // fresh beacon function: TBTT grid at TSF % period == 0
   return true;
 }
 
@@ -1599,18 +1600,53 @@ int32_t RtlJaguar3Device::AdjustBeaconTiming(int32_t microseconds) {
     delta_tu = one - nominal;
   }
   /* Latch one interval at the tweaked length; after exactly one TBTT fires under
-   * it the phase has advanced/retarded by delta_tu TU, so restore nominal. The
+   * it the phase has advanced/retarded by delta_tu TU, then restore nominal. The
    * TSF free-runs — this steers the beacon-engine TBTT counter, not the TSF
-   * (WriteTsf can't; bench-proven). Serialize the two writes on _reg_mu, but
-   * release it across the wait so the coex tick / other setters aren't starved. */
+   * (WriteTsf can't; bench-proven).
+   *
+   * The interval register latches at a TBTT, so the shift count = the number of
+   * TBTTs between the tweak-latch and the restore-latch — a fixed sleep races
+   * with the beacon phase (bench-caught on the J2 8821CE, same latch semantics:
+   * an advance whose write+restore land inside one period is a silent no-op;
+   * one held past two shortened periods double-shifts). Phase-align off the TSF
+   * instead (TBTT fires at TSF % interval == 0): read the in-period position,
+   * write the tweak, then time the restore to land mid-way into the FIRST
+   * tweaked interval — the restore latches at that interval's closing TBTT, so
+   * exactly one fires under the tweak. Positions are measured against the TBTT
+   * grid (TSF % period == _tbtt_off_us — prior coarse steers move the grid off
+   * the TSF). Serialize register access on _reg_mu but release it across the
+   * waits so the coex tick isn't starved. */
+  const int64_t period_us = static_cast<int64_t>(nominal) * 1024;
+  auto grid_pos = [&]() {  // in-period position vs the TBTT grid; under _reg_mu
+    uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
+    uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
+    int64_t p = static_cast<int64_t>(((static_cast<uint64_t>(hi) << 32) | lo) %
+                                     static_cast<uint64_t>(period_us));
+    return ((p - _tbtt_off_us) % period_us + period_us) % period_us;
+  };
+  int64_t pos;
   {
     std::lock_guard<std::mutex> lk(_reg_mu);
+    pos = grid_pos();
+  }
+  /* Keep the tweak write clear of the next TBTT (so the latching TBTT is
+   * unambiguous even against register/sleep jitter). */
+  if (pos > period_us - 20000)
+    std::this_thread::sleep_for(
+        std::chrono::microseconds(period_us - pos + 5000));
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    pos = grid_pos();
     _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */, static_cast<uint16_t>(one));
   }
-  std::this_thread::sleep_for(std::chrono::microseconds(one * 1024 + 2000));
+  /* latch TBTT in (period - pos) µs; restore mid-first-tweaked-interval. */
+  std::this_thread::sleep_for(std::chrono::microseconds(
+      (period_us - pos) + static_cast<int64_t>(one) * 512));
   {
     std::lock_guard<std::mutex> lk(_reg_mu);
     _device.rtw_write16(0x0554, static_cast<uint16_t>(nominal));
+    _tbtt_off_us = ((_tbtt_off_us + static_cast<int64_t>(delta_tu) * 1024) %
+                        period_us + period_us) % period_us;
   }
   _logger->info("beacon(J3): TBTT shift {} TU ({} us) via one-shot interval "
                 "{}->{}->{} TU",
@@ -1637,6 +1673,7 @@ int32_t RtlJaguar3Device::AdjustBeaconTimingFine(int32_t microseconds) {
   _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(nt));
   _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(nt >> 32));
   _device.rtw_write8(0x0550, static_cast<uint8_t>(bc | (1u << 3)));   // set EN_BCN_FUNCTION
+  _tbtt_off_us = 0;  // the re-latch re-derives the TBTT grid from the TSF
   _logger->info("beacon(J3): fine TBTT shift {} us (TSF toggle: EN_BCN off/shift/on)",
                 microseconds);
   return microseconds;

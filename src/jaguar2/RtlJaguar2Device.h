@@ -70,6 +70,9 @@ public:
    * count in DMA_TXAGG_NUM (see src/TxAggPlan.h). Falls back to the
    * per-frame loop when the knob is off. */
   size_t send_packets(const TxPacketView *pkts, size_t count) override;
+  /* Hardware ACK responder (IRtlDevice contract; src/AckResponder.h). */
+  bool SetAckResponder(const devourer::MacAddr &mac) override;
+  void ClearAckResponder() override;
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;

@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "AckResponder.h"
 #include "RadiotapPeek.h" /* send_packets batch pre-parse */
 #include "TxAggPlan.h"    /* USB TX aggregation URB packing */
 #include "TxReport.h"     /* CCX TX-status report decode + tx.report event */
@@ -102,6 +103,8 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
     }
   }
 
+  if (_cfg.rx.ack_responder)
+    SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
   StartRxLoop(std::move(packetProcessor));
 }
 
@@ -543,6 +546,8 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   if (_cfg.tuning.xtal_cap)
     SetXtalCap(*_cfg.tuning.xtal_cap);
   _coex_thread = std::thread([this] { coex_runtime_loop(); });
+  if (_cfg.rx.ack_responder)
+    SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
   _logger->info("Jaguar3: ready for TX (monitor inject)");
 }
 
@@ -1452,6 +1457,26 @@ void RtlJaguar3Device::WriteTsf(uint64_t tsf) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
   _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
+}
+
+bool RtlJaguar3Device::SetAckResponder(const devourer::MacAddr &mac) {
+  /* Hardware ACK responder (src/AckResponder.h): port identity + net_type so
+   * the MAC auto-ACKs unicast frames to `mac`. Same registers the proven
+   * StartBeacon/AP path programs, minus the beacon machinery. Serialized on
+   * _reg_mu like every other register-touching control call. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  devourer::ack::enable(_device, mac.data());
+  _logger->info("Jaguar3: hardware ACK responder armed for "
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac.bytes[0], mac.bytes[1], mac.bytes[2], mac.bytes[3],
+                mac.bytes[4], mac.bytes[5]);
+  return true;
+}
+
+void RtlJaguar3Device::ClearAckResponder() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  devourer::ack::disable(_device);
+  _logger->info("Jaguar3: hardware ACK responder disarmed (net_type=NoLink)");
 }
 
 bool RtlJaguar3Device::StartBeacon(const uint8_t *beacon, size_t len,

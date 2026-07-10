@@ -682,7 +682,18 @@ int main(int argc, char **argv) {
   bool qos_stamp = false;
   if (std::getenv("DEVOURER_TX_QOS_DATA") != nullptr) {
     qos_stamp = true;
-    static const uint8_t kQosSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+    /* SA/TA defaults to the canonical TX SA so rx.txhit keeps matching — but
+     * note its I/G bit is SET (a group address). An ACK's RA is the
+     * soliciting frame's addr2, so hardware-ACK experiments need a UNICAST
+     * TA: DEVOURER_TX_SA overrides (the third appearance of the I/G footgun
+     * after docs/ap-mode.md's BSSID and the responder MAC). */
+    uint8_t kQosSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+    if (const char *e = std::getenv("DEVOURER_TX_SA")) {
+      if (auto m = devourer::parse_mac(e))
+        std::memcpy(kQosSa, m->data(), 6);
+      else
+        logger->warn("DEVOURER_TX_SA unparseable — keeping the canonical SA");
+    }
     uint8_t ra[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
     if (const char *e = std::getenv("DEVOURER_TX_RA")) {
       if (auto m = devourer::parse_mac(e))

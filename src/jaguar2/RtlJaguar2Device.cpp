@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "AckResponder.h"
 #include "RadiotapPeek.h"
 #include "TxAggPlan.h"
 #include "TxReport.h"
@@ -311,6 +312,23 @@ void RtlJaguar2Device::apply_replay_wseq() {
                 _cfg.debug.replay_wseq);
 }
 
+bool RtlJaguar2Device::SetAckResponder(const devourer::MacAddr &mac) {
+  /* Hardware ACK responder (src/AckResponder.h): port identity + net_type so
+   * the MAC auto-ACKs unicast frames to `mac`. Same registers the proven
+   * StartBeacon/AP path programs, minus the beacon machinery. */
+  devourer::ack::enable(_device, mac.data());
+  _logger->info("Jaguar2: hardware ACK responder armed for "
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac.bytes[0], mac.bytes[1], mac.bytes[2], mac.bytes[3],
+                mac.bytes[4], mac.bytes[5]);
+  return true;
+}
+
+void RtlJaguar2Device::ClearAckResponder() {
+  devourer::ack::disable(_device);
+  _logger->info("Jaguar2: hardware ACK responder disarmed (net_type=NoLink)");
+}
+
 void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
   _channel = channel;
@@ -350,6 +368,8 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
     }
   }
 
+  if (_cfg.rx.ack_responder)
+    SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
   apply_replay_wseq();
 
   if (_cfg.debug.bb_dump) {
@@ -553,6 +573,8 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
    * center frequency. DEVOURER_CW_TONE_GAIN=0..31 sets RF 0x00[4:0]. */
   if (_cfg.tx.cw_tone)
     StartCwTone(_cfg.tx.cw_tone_gain & 0x1F);
+  if (_cfg.rx.ack_responder)
+    SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
   apply_replay_wseq();
   _logger->info("Jaguar2: ready for TX (monitor inject, ch={})",
                 channel.Channel);

@@ -67,6 +67,17 @@ int main(int argc, char** argv) {
       0x00, 0x03, 'T', 'B', 'T',                                   // SSID IE "TBT"
       0x01, 0x01, 0x82};                                          // supported rates (1M)
 
+  /* DEVOURER_BCN_SA=aa:bb:.. — override the beacon SA/BSSID (the canonical
+   * 57:42:.. has the I/G bit set; a hardware-ACK experiment needs a UNICAST
+   * port identity, same footgun as docs/ap-mode.md). */
+  if (const char *e = std::getenv("DEVOURER_BCN_SA")) {
+    unsigned m[6];
+    if (sscanf(e, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4],
+               &m[5]) == 6)
+      for (int i = 0; i < 6; ++i)
+        f[10 + 10 + i] = f[10 + 16 + i] = static_cast<uint8_t>(m[i]);
+  }
+
   bool ok = dev->StartBeacon(f.data(), f.size(), interval_tu);
   fprintf(stderr, "StartBeacon -> %s. Idling %d s (chip should self-TX at "
                   "TBTT every %d TU ≈ %.1f ms). Watch a 2nd RX's rx.txhit.\n",

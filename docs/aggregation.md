@@ -113,8 +113,31 @@ Bench-established (8822BU TX, monitor-inject USE_RATE frames):
   - `ppdu_cnt` reads 0 on the 8812CU RX used for the bench; `paggr` +
     `tsfl` clustering are the working RX markers.
 
-## Ack stack (deferred)
+## Hardware ACK responder — reliable unicast
 
-Hardware ACK responder mode (the `StartBeacon` MACID+MSR recipe as a
-first-class monitor-mode API) and reliable-unicast measurement via TX reports
-are the next round; see `docs/ap-mode.md` for the proven responder behaviour.
+`IRtlDevice::SetAckResponder(mac)` / `ClearAckResponder()` (env
+`DEVOURER_ACK_RESPONDER=<unicast mac>`, all generations; `src/AckResponder.h`)
+arms the MAC's autonomous ACK engine while monitor RX/injection continue
+unchanged: port identity (MACID/BSSID 0x610/0x618 = `mac`) + net_type (0x102
+[1:0] = AP). No beacon machinery needed — the identity+net_type pair alone is
+the gate (bench-bisected; `StartBeacon`'s extra registers are not required).
+
+With a responder armed, a peer TXing unicast QoS-Data (normal ack-policy) to
+`mac` gets the full hardware ARQ loop — SIFS-timed ACKs from the responder,
+autonomous retransmission on the TX, both ends host-free.
+`tests/ack_responder_check.sh` is the closed-loop A/B, judged by the TX
+side's CCX reports: responder ON = 100% delivered at mean 0.4 retries (67%
+first-try); OFF = 0% delivered, every frame pinned at the 12-retry limit.
+The retry distribution doubles as the per-frame TX-side link-quality sensor.
+
+THE footgun (three strikes now): every MAC in the loop must be UNICAST (I/G
+bit clear) — the responder `mac` (an ACK can't target a group address), and
+the TX frame's TA/addr2 (the ACK's RA is the soliciting frame's addr2; the
+canonical TX SA `57:42:75:05:d6:00` is a GROUP address, so txdemo's QoS shape
+takes `DEVOURER_TX_SA` to override). A group TA silently yields
+retry-limit-pinned reports with the responder perfectly armed.
+
+Opt-in only: arming turns a passive monitor into an active transmitter.
+Remaining ack-stack items: BA-session/ACKed-A-MPDU (aggregates currently need
+retry-limit 0 because a BlockAck responder does not exist yet) and software
+ARQ policy above the reports.

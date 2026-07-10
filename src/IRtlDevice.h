@@ -6,6 +6,7 @@
 #include <functional>
 
 #include "AdapterCaps.h"
+#include "DeviceConfig.h"
 #include "AdapterHealth.h"
 #include "RxQuality.h"
 #include "RxSense.h"
@@ -194,6 +195,21 @@ public:
   virtual devourer::ActiveRxPaths GetActiveRxPaths() { return {}; }
 
   virtual bool send_packet(const uint8_t *packet, size_t length) = 0;
+
+  /* Hardware ACK responder (src/AckResponder.h): program the port identity
+   * (MACID/BSSID = `mac`, net_type = AP) so the MAC auto-ACKs — SIFS-timed,
+   * zero host involvement — any unicast frame addressed to `mac`, while
+   * monitor RX/injection continue unchanged. The reliable-unicast enabler:
+   * a peer TXing to `mac` with normal ack-policy gets hardware
+   * retransmissions until the ACK (its tx.report shows retries~0). `mac`
+   * must be unicast (I/G clear). Turning a passive monitor into an active
+   * transmitter is opt-in only — never a default. Returns false where
+   * unsupported. Clear = net_type back to No Link. */
+  virtual bool SetAckResponder(const devourer::MacAddr &mac) {
+    (void)mac;
+    return false;
+  }
+  virtual void ClearAckResponder() {}
 
   /* Batch TX: submit `count` frames (each buffer = radiotap header + 802.11
    * MPDU, the send_packet contract) in one call. With USB TX aggregation

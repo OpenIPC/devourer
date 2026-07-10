@@ -58,6 +58,8 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.rx.phy_status_8821c = !env_flag("DEVOURER_8821C_NO_PHYST");
   if (env_long("DEVOURER_IGI", &v))
     cfg.rx.igi = static_cast<uint8_t>(v & 0x7f);
+  if (const char *e = env_str("DEVOURER_ACK_RESPONDER"))
+    cfg.rx.ack_responder = devourer::parse_mac(e);
 
   /* ---- tx ---- */
   if (env_long("DEVOURER_TX_EP", &v))

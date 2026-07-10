@@ -87,6 +87,12 @@ struct DeviceConfig {
     /* env: DEVOURER_IGI — Jaguar2 fixed initial-gain index override, 7 bits
      * (unset = 0x40, the FA-rate-validated default). */
     std::optional<uint8_t> igi;
+    /* env: DEVOURER_ACK_RESPONDER=<unicast mac> — arm the hardware ACK
+     * responder at the end of bring-up (src/AckResponder.h): the MAC
+     * auto-ACKs unicast frames addressed to this MAC while monitor RX and
+     * injection continue unchanged. Runtime equivalent: SetAckResponder /
+     * ClearAckResponder. OPT-IN: makes a passive monitor transmit. */
+    std::optional<MacAddr> ack_responder;
   } rx;
 
   /* ---- TX ------------------------------------------------------------- */

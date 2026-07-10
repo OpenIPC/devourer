@@ -5,6 +5,7 @@
 #include "Hal8812PhyReg.h"
 #include "NhmReader.h"
 #include "RadioManagementModule.h"
+#include "AckResponder.h" /* hardware ACK responder recipe */
 #include "RadiotapPeek.h" /* send_packets batch pre-parse */
 #include "SignalStop.h"
 #include "ToneMask.h"
@@ -67,6 +68,9 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
   StartWithMonitorMode(channel);
   SetMonitorChannel(channel);
   _logger->info("In Monitor Mode");
+
+  if (_cfg.rx.ack_responder)
+    SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
 
   /* DEVOURER_XTAL_CAP — crystal-cap trim (issue #217, narrowband CFO lever). */
   if (_cfg.tuning.xtal_cap)
@@ -328,6 +332,22 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   if (build_tx_block(packet, length, usb_frame.data(), 0) == 0)
     return false;
   return _device.send_packet(usb_frame.data(), usb_frame.size());
+}
+
+bool RtlJaguarDevice::SetAckResponder(const devourer::MacAddr &mac) {
+  /* Hardware ACK responder (src/AckResponder.h) — same register recipe as
+   * the HalMAC generations (0x610/0x618/0x102 are map-identical here). */
+  devourer::ack::enable(_device, mac.data());
+  _logger->info("Jaguar1: hardware ACK responder armed for "
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac.bytes[0], mac.bytes[1], mac.bytes[2], mac.bytes[3],
+                mac.bytes[4], mac.bytes[5]);
+  return true;
+}
+
+void RtlJaguarDevice::ClearAckResponder() {
+  devourer::ack::disable(_device);
+  _logger->info("Jaguar1: hardware ACK responder disarmed (net_type=NoLink)");
 }
 
 size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
@@ -798,6 +818,9 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
                           SelectedChannel channel) {
   StartWithMonitorMode(channel);
   SetMonitorChannel(channel);
+
+  if (_cfg.rx.ack_responder)
+    SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
 
   /* DEVOURER_XTAL_CAP — crystal-cap trim (issue #217, narrowband CFO lever). */
   if (_cfg.tuning.xtal_cap)

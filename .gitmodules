@@ -1,0 +1,29 @@
+[submodule "reference/8821cu"]
+	path = reference/8821cu
+	url = https://github.com/morrownr/8821cu-20210916.git
+	shallow = true
+[submodule "reference/rtl8812au"]
+	path = reference/rtl8812au
+	url = https://github.com/josephnef/rtl8812au.git
+	branch = devourer-kbuild
+	shallow = true
+[submodule "reference/rtl88x2bu"]
+	path = reference/rtl88x2bu
+	url = https://github.com/josephnef/rtl88x2bu.git
+	branch = devourer-kbuild
+	shallow = true
+[submodule "reference/rtl88x2cu"]
+	path = reference/rtl88x2cu
+	url = https://github.com/josephnef/rtl88x2cu.git
+	branch = devourer-kbuild
+	shallow = true
+[submodule "reference/rtl88x2eu"]
+	path = reference/rtl88x2eu
+	url = https://github.com/josephnef/rtl88x2eu.git
+	branch = devourer-kbuild
+	shallow = true
+[submodule "reference/rtl88x2eu-5mhz"]
+	path = reference/rtl88x2eu-5mhz
+	url = https://github.com/libc0607/rtl88x2eu-20230815.git
+	branch = 5mhz_bw
+	shallow = true

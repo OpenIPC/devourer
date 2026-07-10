@@ -2,7 +2,8 @@
 # 5 MHz spectral A/B on the RTL8812EU (0bda:a81a, chip 8822e).
 #
 # Compares the SHIPPED 5 MHz DAC-divider code (0x9b4[10:8]=0x4, the 8822c
-# value libc0607's rtl88x2eu 5mhz_bw branch adopted) against the 8822e vendor
+# value libc0607's 5mhz_bw branch adopted — see the reference/rtl88x2eu-5mhz
+# submodule) against the 8822e vendor
 # phydm's own table value (0x2), which is dead on real silicon (TX keys up
 # and frames drain but nothing airs). Quantifies the worst out-of-lobe spur
 # relative to the main lobe in a differential PSD (TX minus silent baseline):

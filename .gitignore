@@ -5,7 +5,10 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
-reference/
+
+# reference/ vendor drivers are git submodules (see reference/README.md).
+# Ignore only the compiled chip-id probe if built locally from tests/.
+tests/chipid_probe
 
 # Local lab notes / Claude Code state (never commit)
 INVENTORY.md

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Kernel-driver ground truth for 8812EU narrowband: measure the ACTUAL
-# libc0607 rtl88x2eu-20230815 5mhz_bw driver's on-air spectrum at 5/10/20 MHz
-# with the B210, from the same host harness used for devourer.
+# libc0607 5mhz_bw driver's on-air spectrum at 5/10/20 MHz with the B210, from
+# the same host harness used for devourer. Driver source: the
+# reference/rtl88x2eu-5mhz submodule (libc0607/rtl88x2eu-20230815 @ 5mhz_bw).
 #
 # The driver runs inside the pinned-kernel VM (Ubuntu 22.04 / 5.15) with the
 # 8812EU virsh-attached; injection is tests/inject_beacon.py over ssh. This is

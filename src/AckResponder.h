@@ -12,6 +12,13 @@
  * responder for one MAC address while everything else about monitor mode
  * (promiscuous RX, injection) is unchanged.
  *
+ * The SAME gate is a hardware BlockAck responder: the MAC's immediate-response
+ * engine generates a SIFS-timed BlockAck for a received A-MPDU addressed to
+ * its MACID, no ADDBA session state required (bench-proven,
+ * tests/ampdu_ba_check.sh). So this one knob enables both reliable-unicast
+ * ACK (for singles) and reliable-unicast A-MPDU (SetAmpduMode no_ack=false)
+ * on the peer.
+ *
  * The registers are generation-neutral (same map on Jaguar1/2/3):
  *   0x0610..0x0615  REG_MACID   — the RA the ACK engine matches
  *   0x0618..0x061d  REG_BSSID   — port identity companion (the proven AP

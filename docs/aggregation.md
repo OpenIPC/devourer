@@ -134,14 +134,26 @@ side's CCX reports: responder ON = 100% delivered at mean 0.4 retries (67%
 first-try); OFF = 0% delivered, every frame pinned at the 12-retry limit.
 The retry distribution doubles as the per-frame TX-side link-quality sensor.
 
+**The same responder is a hardware BlockAck responder** — no ADDBA session
+state, no separate API. The MAC's immediate-response engine generates a
+SIFS-timed BlockAck for a received A-MPDU addressed to its MACID exactly as it
+generates an ACK for a unicast frame; the gate is the same MACID + net_type
+pair. So reliable-unicast **ACKed A-MPDU** works end to end: the TX runs
+`SetAmpduMode` with `no_ack = false` (normal ack-policy, retry limit kept) and
+the peer runs `SetAckResponder`. `tests/ampdu_ba_check.sh` proves it: with the
+responder armed, aggregates deliver at 100% / mean 0.1 retries and ~27× the
+throughput of the responder-off case (where every aggregate re-airs to the
+retry limit for a BlockAck no one sends). The `no_ack = true` default stays the
+broadcast/FEC flavor (OpenIPC wfb — no responder, no re-air storm); `false` is
+the reliable-unicast flavor against a BA responder.
+
 THE footgun (three strikes now): every MAC in the loop must be UNICAST (I/G
-bit clear) — the responder `mac` (an ACK can't target a group address), and
-the TX frame's TA/addr2 (the ACK's RA is the soliciting frame's addr2; the
-canonical TX SA `57:42:75:05:d6:00` is a GROUP address, so txdemo's QoS shape
-takes `DEVOURER_TX_SA` to override). A group TA silently yields
-retry-limit-pinned reports with the responder perfectly armed.
+bit clear) — the responder `mac` (an ACK/BlockAck can't target a group
+address), and the TX frame's TA/addr2 (the response's RA is the soliciting
+frame's addr2; the canonical TX SA `57:42:75:05:d6:00` is a GROUP address, so
+txdemo's QoS shape takes `DEVOURER_TX_SA` to override). A group TA silently
+yields retry-limit-pinned reports with the responder perfectly armed.
 
 Opt-in only: arming turns a passive monitor into an active transmitter.
-Remaining ack-stack items: BA-session/ACKed-A-MPDU (aggregates currently need
-retry-limit 0 because a BlockAck responder does not exist yet) and software
-ARQ policy above the reports.
+Remaining ack-stack item: a software ARQ policy above the CCX reports (the
+hardware ARQ — ACK, BlockAck, autonomous retransmit — is complete).

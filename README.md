@@ -40,6 +40,10 @@ long-range digital video links.
   clock manages — enough to interleave a robust narrowband link and a wide
   high-throughput one on one shared channel
   ([bandwidth TDMA](docs/narrowband.md)).
+- **Aggregation and hardware ACKs in userspace.** USB TX aggregation, 802.11
+  A-MPDU for +30% on-air goodput, and a hardware ACK/BlockAck responder that
+  turns unicast into a reliable hardware-ARQ link — with per-frame TX-status
+  reports as the transmit-side link sensor ([how](docs/aggregation.md)).
 - **A radio lab in a dongle.** Channel sounding, per-antenna signal quality,
   beamforming report capture (enough to do
   [motion sensing](docs/beamforming-victim-sensing.md)), spectrum sweeps,
@@ -197,6 +201,9 @@ one `IRtlDevice` interface covers all three generations.
 - [AP mode](docs/ap-mode.md) — devourer as an infrastructure access point a real
   Linux station associates with: beacon → probe/auth/assoc → DHCP/ARP/ICMP → ping,
   open or WPA2-PSK (4-way handshake + software CCMP), validated against rtw88.
+- [Aggregation & hardware ACK](docs/aggregation.md) — USB TX aggregation,
+  per-frame CCX TX-status reports, 802.11 A-MPDU (`SetAmpduMode`, +30% on-air
+  goodput), and the hardware ACK/BlockAck responder for reliable-unicast links.
 
 ## Testing
 

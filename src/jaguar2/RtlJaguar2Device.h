@@ -73,6 +73,12 @@ public:
   /* Hardware ACK responder (IRtlDevice contract; src/AckResponder.h). */
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
+  /* A-MPDU TX mode (IRtlDevice contract; src/AmpduMode.h). Programs the
+   * 8822B pacing regs (0x455 max-time, 0x4BC burst-mode) under _reg_mu and
+   * records the descriptor state the TX path reads. */
+  bool SetAmpduMode(const devourer::AmpduMode &mode) override;
+  void ClearAmpduMode() override;
+  devourer::AmpduMode GetAmpduMode() override { return _ampdu; }
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
@@ -209,6 +215,10 @@ private:
   /* Rotating SW_DEFINE tag stamped when tx.report is on — the CCX report
    * echoes its low byte, correlating reports to frames (src/TxReport.h). */
   std::atomic<uint16_t> _tx_rpt_tag{0};
+  /* A-MPDU TX mode (SetAmpduMode). Read lock-free in the TX descriptor path
+   * (same pattern as _tx_mode_default); a control-plane write during TX is
+   * the caller's to sequence and at worst tears one frame's mode benignly. */
+  devourer::AmpduMode _ampdu;
   /* Bring-up completion: gates the live apply in the TX-power setters. */
   bool _brought_up = false;
   /* Re-program TXAGC from the current knob state at the current channel:

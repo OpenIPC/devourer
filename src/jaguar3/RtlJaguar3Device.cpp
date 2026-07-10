@@ -548,6 +548,8 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   _coex_thread = std::thread([this] { coex_runtime_loop(); });
   if (_cfg.rx.ack_responder)
     SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
+  if (_cfg.tx.ampdu)
+    SetAmpduMode(*_cfg.tx.ampdu); /* DEVOURER_TX_AMPDU_MODE */
   _logger->info("Jaguar3: ready for TX (monitor inject)");
 }
 
@@ -1413,11 +1415,19 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
     SET_TX_DESC_SW_DEFINE_8822C(out, _tx_rpt_tag.fetch_add(1) & 0xff);
     jaguar3::cal_txdesc_chksum_8822c(out);
   }
-  if (_cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {
-    /* EXPERIMENTAL A-MPDU spike overrides (DEVOURER_TX_QSEL /
-     * DEVOURER_TX_AMPDU — DeviceConfig debug section): route the frame to a
-     * data queue and/or mark it aggregatable. All inside the checksummed
-     * span — re-checksum. */
+  const devourer::AmpduMode am = _ampdu; /* one lock-free load */
+  if (am.enabled || _cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {
+    /* A-MPDU descriptor half. The product SetAmpduMode state applies first,
+     * then the raw DEVOURER_TX_QSEL / DEVOURER_TX_AMPDU spike knobs override
+     * for register-level experimentation. All inside the checksummed span —
+     * re-checksum once at the end. */
+    if (am.enabled) {
+      SET_TX_DESC_QSEL_8822C(out, am.tid);
+      SET_TX_DESC_AGG_EN_8822C(out, 1);
+      SET_TX_DESC_MAX_AGG_NUM_8822C(out, am.max_num & 0x1f);
+      SET_TX_DESC_AMPDU_DENSITY_8822C(out, am.density & 0x7);
+      SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(out, am.no_ack ? 0 : 12);
+    }
     if (_cfg.debug.tx_qsel)
       SET_TX_DESC_QSEL_8822C(out, *_cfg.debug.tx_qsel);
     if (_cfg.debug.tx_ampdu_max) {
@@ -1478,6 +1488,35 @@ void RtlJaguar3Device::ClearAckResponder() {
   devourer::ack::disable(_device);
   _logger->info("Jaguar3: hardware ACK responder disarmed (net_type=NoLink)");
 }
+
+bool RtlJaguar3Device::SetAmpduMode(const devourer::AmpduMode &mode) {
+  /* A-MPDU TX mode (src/AmpduMode.h): record the descriptor state the TX path
+   * reads and program the 8822C aggregate-fill timer live. The descriptor
+   * half is applied per-frame in build_tx_block. The 8822C has no
+   * bring-up 0x04BC write (unlike the 8822B), so clear_burst_mode is a no-op
+   * here — the 0x0455 timer is the pacing lever on this family (the on-air
+   * unlock was bench-proven on the 8822B; the 8822C shares the register). */
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    if (mode.enabled) {
+      if (mode.max_time != 0)
+        _device.rtw_write8(0x0455, mode.max_time);
+    } else {
+      _device.rtw_write8(0x0455, 0x70); /* restore the bring-up default */
+    }
+  }
+  _ampdu = mode;
+  if (mode.enabled)
+    _logger->info("Jaguar3: A-MPDU mode ON (tid={} max={} density={} {} "
+                  "max_time=0x{:02x})",
+                  mode.tid, mode.max_num, mode.density,
+                  mode.no_ack ? "no-ack" : "ack", mode.max_time);
+  else
+    _logger->info("Jaguar3: A-MPDU mode OFF (pacing restored)");
+  return true;
+}
+
+void RtlJaguar3Device::ClearAmpduMode() { SetAmpduMode(devourer::AmpduMode{}); }
 
 bool RtlJaguar3Device::StartBeacon(const uint8_t *beacon, size_t len,
                                       int interval_tu) {

@@ -7,10 +7,9 @@ Three layers, separable:
 2. **Per-frame TX-status reports** — the firmware's CCX report per
    transmission (delivered / retry count / queue time / final rate). Shipped.
 3. **802.11 A-MPDU formation** — the MAC aggregating co-queued frames into
-   one PPDU (the air-time amortization). EXPERIMENTAL: hardware formation is
-   bench-proven via the spike knobs, but net goodput is still gated on an
-   aggregate-launch pacing quirk (below), so there is no first-class session
-   API yet.
+   one PPDU (the air-time amortization). Shipped as `SetAmpduMode`
+   (`DEVOURER_TX_AMPDU_MODE`); +30% on-air goodput at MCS7/20, more at higher
+   rates. Needs a deep TX feed to reach the multiplier (below).
 
 ## USB TX aggregation (`send_packets`)
 
@@ -63,55 +62,60 @@ thread's C2H drain; TX+RX sessions via the RX loop.
 This is the TX-side link sensor: retry counts feed adaptive rate/power the
 way RSSI/EVM feed the RX side.
 
-## A-MPDU (experimental spike surface)
+## A-MPDU (`SetAmpduMode`)
 
-Spike knobs (DeviceConfig debug section, all generations):
-`DEVOURER_TX_QSEL=<0..7|0x12>` (descriptor queue),
-`DEVOURER_TX_AMPDU="max[/density[/rty]]"` (AGG_EN + MAX_AGG_NUM +
-AMPDU_DENSITY + optional per-frame retry-limit override), plus txdemo's
-`DEVOURER_TX_QOS_DATA` / `DEVOURER_TX_QOS_NOACK` / `DEVOURER_TX_RA` QoS-Data
-frame shape. RX side surfaces `paggr` (rx-desc "inside an aggregate") and
-`ppdu_cnt` in `rx_pkt_attrib` and the rxdemo `rx.frame`/`rx.txhit` events.
-`tests/ampdu_spike.sh` runs the matrix.
+`IRtlDevice::SetAmpduMode(AmpduMode)` / `ClearAmpduMode()` / `GetAmpduMode()`
+(env `DEVOURER_TX_AMPDU_MODE="tid/maxnum[/density[/noack[/maxtime_hex]]]"`,
+`src/AmpduMode.h`, all generations) bundle the whole proven recipe in one
+call: it marks every data frame aggregatable (data QSEL + AGG_EN +
+MAX_AGG_NUM + AMPDU_DENSITY + retry-limit) AND programs the MAC pacing
+registers live. The struct defaults are the tuned recipe, so the minimal spec
+`0/16` (TID 0, 16 MPDUs) is: density 7, no-ack, max_time 0x20, burst-mode
+cleared. Off keeps every TX byte-identical.
 
-Bench-established (8822BU TX, monitor-inject USE_RATE frames):
+The caller still supplies the frame shape (QoS-Data on the mode's TID — txdemo
+`DEVOURER_TX_QOS_DATA`) and, critically, a **deep TX feed**: send_packets with
+enough frames in flight, or txdemo `DEVOURER_TX_THREADS=N` (N parallel
+senders; ~4 saturates). A shallow feed leaves the MAC SIFS-bursting
+single-MPDU aggregates — the descriptor says "aggregatable" but there's
+nothing co-queued to aggregate with.
 
-- **The MAC aggregates host-pushed frames** on a data queue: QoS-Data TID0 +
-  `AGG_EN` → true multi-MPDU aggregates (6 subframes at the default max-time,
-  shared RX `tsfl`, `paggr` on every subframe) — broadcast RA included. The
-  aggregation engine renumbers subframe sequence numbers consecutively.
-- **The MGMT queue (0x12, the monitor-inject default) never aggregates**;
-  AGG_EN there wedges the queue.
-- **QoS No-Ack policy does NOT stop aggregate retransmission**: the MAC
-  retries each aggregate to the retry limit waiting for a BlockAck no
-  monitor receiver sends (92% retry-flagged receptions, ~12× re-airings,
-  unique goodput 7× below singles). The `rty` component set to 0 suppresses
-  it completely (receptions == uniques, 0% retry-flagged) — the
-  broadcast/no-ack flavor is `DEVOURER_TX_AMPDU=<max>/<density>/0`.
-- **Aggregate-launch pacing — solved by register pokes + feed depth**
-  (tests/ampdu_pacing_sweep.sh, tests/ampdu_onair_ab.sh; SDR duty is the
-  ground truth — RX-capture comparisons vary wildly between sessions):
-  - `REG_AMPDU_MAX_TIME_V1` (0x455): the bring-up value 0x70 paces each
-    aggregate launch at ~3 ms; **0x20 unlocks it** (URB acceptance
-    ~0.8 ms). Values ≤ 0x08 DISABLE aggregation entirely (frames revert to
-    slow singles) — the register is a cliff, not a dial.
-  - `REG_SW_AMPDU_BURST_MODE_CTRL` (0x4BC): **clearing it** (the halmac
-    bring-up sets BIT6) is worth ~+40% on the aggregated path.
-  - Both pokes ride `DEVOURER_REPLAY_WSEQ`, which now also applies at the
-    end of InitWrite (TX bring-ups can be swept like RX ones).
-  - **Feed depth is the other half**: with the sync 3-frame URB feed the
-    queue holds ≤3 frames and the MAC SIFS-bursts single-MPDU aggregates.
-    Parallel senders (txdemo `DEVOURER_TX_THREADS=N`; sync bulk from N
-    threads queues N URBs in flight) restore multi-MPDU amortization —
-    saturating at ~4 threads.
-  - On-air result (8822BU, ch149, MCS7/20, 1026-byte MPDUs, B210 duty):
-    singles 73.3% duty at ~3500 fps (28.7 Mbps MAC goodput) vs deep-fed
-    A-MPDU 79.3% duty at ~4550 fps (**37.4 Mbps, +30%**, +20% frames per
-    duty-point). The multiplier grows with PHY rate (overhead fraction);
-    a session API should bundle: data QSEL + AGG_EN + rty0 + 0x455=0x20 +
-    0x4BC=0 + a ≥4-deep feed.
-  - `ppdu_cnt` reads 0 on the 8812CU RX used for the bench; `paggr` +
-    `tsfl` clustering are the working RX markers.
+The lower-level spike knobs stay as an experimentation layer that composes on
+top: `DEVOURER_TX_QSEL=<0..7|0x12>` (raw QSEL), `DEVOURER_TX_AMPDU=
+"max[/density[/rty]]"` (raw AGG fields), both applied AFTER the product mode
+in the descriptor. RX side surfaces `paggr` (rx-desc "inside an aggregate")
+and `ppdu_cnt` in `rx_pkt_attrib` + the rxdemo `rx.frame`/`rx.txhit` events.
+`tests/ampdu_spike.sh` runs the discovery matrix; `tests/ampdu_pacing_sweep.sh`
+the register sweep; `tests/ampdu_onair_ab.sh` the SDR A/B.
+
+What the sweep + on-air validation established (8822BU TX, monitor-inject
+USE_RATE frames; SDR duty is the ground truth — RX-capture goodput varies
+session to session):
+
+- **The MAC aggregates host-pushed frames** on a data queue (QoS-Data TID0 +
+  AGG_EN), broadcast RA included; the aggregation engine renumbers subframe
+  seqs consecutively. **The MGMT queue (0x12, the monitor-inject default)
+  never aggregates** — AGG_EN there wedges the queue.
+- **QoS No-Ack does NOT stop aggregate retransmission**: without a per-frame
+  retry limit the MAC re-airs each aggregate to the retry limit waiting for a
+  BlockAck no one sends (92% wasted re-airings). `no_ack` = retry-limit 0
+  airs each aggregate once (FEC covers loss, not ARQ) — the broadcast flavor.
+- **Pacing registers** (programmed by `SetAmpduMode`): the aggregate-fill
+  timer `REG_AMPDU_MAX_TIME` (0x0455 HalMAC, **0x0456 Jaguar1**) — bring-up
+  0x70 paces launches at ~3 ms, `0x20` unlocks to ~0.8 ms; a CLIFF, values
+  ≤ 0x08 disable aggregation. The burst-mode gate
+  `REG_SW_AMPDU_BURST_MODE_CTRL` (0x04BC BIT6, halmac/8814A set it) cleared =
+  ~+40%. `AMPDU_DENSITY` counter-intuitively wants 7 (permissive spacing
+  forms better aggregates; density 0 measured ~10% slower).
+- **Feed depth is half the win**: a shallow sync-URB feed SIFS-bursts
+  single-MPDU aggregates; `DEVOURER_TX_THREADS=N` (N URBs in flight)
+  restores multi-MPDU amortization, saturating at ~4.
+- **On-air result** (8822BU, ch149, MCS7/20, 1026-byte MPDUs, B210 duty):
+  singles 73.3% duty vs deep-fed `SetAmpduMode` 79.2% duty — **+30% goodput**
+  (RX-capture cross-check: +33% delivered unique frames). The multiplier
+  grows with PHY rate (overhead is a bigger fraction at high MCS).
+- `ppdu_cnt` reads 0 on the 8812CU RX used for the bench; `paggr` + `tsfl`
+  clustering are the working RX markers.
 
 ## Hardware ACK responder — reliable unicast
 

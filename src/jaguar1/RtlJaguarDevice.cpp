@@ -90,6 +90,9 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
    * center frequency. DEVOURER_CW_TONE_GAIN=0..31 sets RF 0x00[4:0]. */
   if (_cfg.tx.cw_tone)
     StartCwTone(_cfg.tx.cw_tone_gain & 0x1F);
+
+  if (_cfg.tx.ampdu)
+    SetAmpduMode(*_cfg.tx.ampdu); /* DEVOURER_TX_AMPDU_MODE */
 }
 
 /* MP single-tone (CW carrier), Jaguar-1 path A. The RF writes are common to the
@@ -349,6 +352,43 @@ void RtlJaguarDevice::ClearAckResponder() {
   devourer::ack::disable(_device);
   _logger->info("Jaguar1: hardware ACK responder disarmed (net_type=NoLink)");
 }
+
+bool RtlJaguarDevice::SetAmpduMode(const devourer::AmpduMode &mode) {
+  /* A-MPDU TX mode (src/AmpduMode.h): record the descriptor state the TX path
+   * reads and program the Jaguar1 MAC pacing registers. NB the aggregate-fill
+   * timer is REG_AMPDU_MAX_TIME_8812 = 0x0456 here (the HalMAC families use
+   * 0x0455) — a family register-map difference. The 0x04BC burst-mode gate is
+   * an 8814A register (rtl8814a_spec.h); on the 8812/8811/8821 it is not
+   * written at bring-up, so clear_burst_mode is applied 8814A-only. Control
+   * calls are the caller's to sequence (Jaguar1 has no register mutex, same
+   * as SetMonitorChannel). */
+  const bool is8814 = _eepromManager->version_id.ICType == CHIP_8814A;
+  if (mode.enabled) {
+    if (mode.max_time != 0)
+      _device.rtw_write8(0x0456, mode.max_time);
+    if (mode.clear_burst_mode && is8814)
+      _device.rtw_write8(0x04BC, _device.rtw_read8(0x04BC) &
+                                     static_cast<uint8_t>(~(1u << 6)));
+  } else {
+    /* Restore the bring-up default (0x5e on 8821, 0x70 otherwise — see
+     * HalModule init_ampdu). */
+    const bool is8821 = _eepromManager->version_id.ICType == CHIP_8821;
+    _device.rtw_write8(0x0456, is8821 ? 0x5e : 0x70);
+    if (is8814)
+      _device.rtw_write8(0x04BC, _device.rtw_read8(0x04BC) | (1u << 6));
+  }
+  _ampdu = mode;
+  if (mode.enabled)
+    _logger->info("Jaguar1: A-MPDU mode ON (tid={} max={} density={} {} "
+                  "max_time=0x{:02x})",
+                  mode.tid, mode.max_num, mode.density,
+                  mode.no_ack ? "no-ack" : "ack", mode.max_time);
+  else
+    _logger->info("Jaguar1: A-MPDU mode OFF (pacing restored)");
+  return true;
+}
+
+void RtlJaguarDevice::ClearAmpduMode() { SetAmpduMode(devourer::AmpduMode{}); }
 
 size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
   /* USB TX aggregation (DEVOURER_TX_USB_AGG): pack consecutive frames into
@@ -783,11 +823,19 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
     SET_TX_DESC_DISABLE_FB_8812(usb_frame, 1);
   }
 
-  if (_cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {
-    /* EXPERIMENTAL A-MPDU spike overrides (DEVOURER_TX_QSEL /
-     * DEVOURER_TX_AMPDU — DeviceConfig debug section): route the frame to a
-     * data queue and/or mark it aggregatable. Dword2/3 — inside the
-     * checksummed 32 bytes (checksum runs below). */
+  const devourer::AmpduMode am = _ampdu; /* one lock-free load */
+  if (am.enabled || _cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {
+    /* A-MPDU descriptor half. The product SetAmpduMode state applies first,
+     * then the raw DEVOURER_TX_QSEL / DEVOURER_TX_AMPDU spike knobs override
+     * for register-level experimentation. Dword2/3 — inside the checksummed
+     * 32 bytes (checksum runs below). */
+    if (am.enabled) {
+      SET_TX_DESC_QUEUE_SEL_8812(usb_frame, am.tid);
+      SET_TX_DESC_AGG_ENABLE_8812(usb_frame, 1);
+      SET_TX_DESC_MAX_AGG_NUM_8812(usb_frame, am.max_num & 0x1f);
+      SET_TX_DESC_AMPDU_DENSITY_8812(usb_frame, am.density & 0x7);
+      SET_TX_DESC_DATA_RETRY_LIMIT_8812(usb_frame, am.no_ack ? 0 : 12);
+    }
     if (_cfg.debug.tx_qsel)
       SET_TX_DESC_QUEUE_SEL_8812(usb_frame, *_cfg.debug.tx_qsel);
     if (_cfg.debug.tx_ampdu_max) {

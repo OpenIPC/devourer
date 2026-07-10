@@ -53,6 +53,9 @@ class RtlJaguarDevice : public IRtlDevice {
   /* Runtime TX-mode default (SetTxMode/ClearTxMode); applied in send_packet
    * only when the frame's radiotap carries no rate. */
   std::optional<devourer::TxMode> _tx_mode_default;
+  /* A-MPDU TX mode (SetAmpduMode). Read lock-free in the TX descriptor path
+   * (same pattern as _tx_mode_default). */
+  devourer::AmpduMode _ampdu;
 
   /* CW single-tone (StartCwTone/StopCwTone) saved state for a clean restore:
    * the pre-tone RF 0x00 and four BB dwords — RFE-pinmux words on 8812/8821
@@ -209,6 +212,13 @@ public:
   /* Hardware ACK responder (IRtlDevice contract; src/AckResponder.h). */
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
+  /* A-MPDU TX mode (IRtlDevice contract; src/AmpduMode.h). Programs the
+   * Jaguar1 aggregate-fill timer (0x0456 — NOT the 0x0455 the HalMAC chips
+   * use) + the 8814A burst-mode gate (0x04BC), and records the descriptor
+   * state the TX path reads. */
+  bool SetAmpduMode(const devourer::AmpduMode &mode) override;
+  void ClearAmpduMode() override;
+  devourer::AmpduMode GetAmpduMode() override { return _ampdu; }
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;

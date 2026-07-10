@@ -77,6 +77,11 @@ devourer::DeviceConfig devourer_config_from_env() {
   if (env_long("DEVOURER_TX_USB_AGG", &v) && v > 0)
     cfg.tx.usb_agg_max = static_cast<unsigned>(v);
   cfg.tx.report = env_flag("DEVOURER_TX_REPORT");
+  if (const char *e = env_str("DEVOURER_TX_AMPDU_MODE")) {
+    devourer::AmpduMode m;
+    if (devourer::parse_ampdu_mode(e, m))
+      cfg.tx.ampdu = m;
+  }
 
   /* ---- bf ---- */
   if (const char *snd = env_str("DEVOURER_BF_ARM_SOUNDER")) {

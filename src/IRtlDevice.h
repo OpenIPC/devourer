@@ -6,6 +6,7 @@
 #include <functional>
 
 #include "AdapterCaps.h"
+#include "AmpduMode.h"
 #include "DeviceConfig.h"
 #include "AdapterHealth.h"
 #include "RxQuality.h"
@@ -210,6 +211,24 @@ public:
     return false;
   }
   virtual void ClearAckResponder() {}
+
+  /* 802.11 A-MPDU TX mode (src/AmpduMode.h): the first-class bundle of the
+   * recipe the spike + pacing sweep proved on-air. When enabled, every data
+   * frame is marked aggregatable (data QSEL + AGG_EN + MAX_AGG_NUM +
+   * AMPDU_DENSITY, and — for the no-BlockAck-peer broadcast case — a per-frame
+   * retry limit of 0), and the call programs the MAC aggregate-fill timer +
+   * burst-mode gate live (the pacing that gates net goodput). Amortizes one
+   * PHY preamble over many MPDUs: +30% on-air goodput at MCS7/20, more at
+   * higher rates. The caller must keep the TX queue fed deep enough for the
+   * MAC to aggregate (send_packets with enough in flight). Off keeps every TX
+   * byte-identical. Returns false where unsupported (USB HalMAC + Jaguar1;
+   * PCIe not wired). The lower-level DEVOURER_TX_QSEL / DEVOURER_TX_AMPDU
+   * spike knobs still compose on top for register-level experimentation. */
+  virtual bool SetAmpduMode(const devourer::AmpduMode & /*mode*/) {
+    return false;
+  }
+  virtual void ClearAmpduMode() {}
+  virtual devourer::AmpduMode GetAmpduMode() { return {}; }
 
   /* Batch TX: submit `count` frames (each buffer = radiotap header + 802.11
    * MPDU, the send_packet contract) in one call. With USB TX aggregation

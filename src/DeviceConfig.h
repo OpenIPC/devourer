@@ -17,6 +17,8 @@
 #include <string>
 #include <string_view>
 
+#include "AmpduMode.h"
+
 namespace devourer {
 
 /* 6-byte MAC address carrier (replaces the per-site uint8_t[6] + sscanf). */
@@ -134,6 +136,14 @@ struct DeviceConfig {
      * echoes (per-frame correlation). Default off (descriptors
      * byte-identical). Needs an RX loop to deliver the C2H reports. */
     bool report = false;
+    /* env: DEVOURER_TX_AMPDU_MODE="tid/maxnum[/density[/noack[/maxtime_hex]]]"
+     * — arm the first-class A-MPDU TX mode (src/AmpduMode.h) at the end of
+     * bring-up: mark data frames aggregatable and program the MAC pacing
+     * registers. The product form of the DEVOURER_TX_QSEL / DEVOURER_TX_AMPDU
+     * spike knobs (which still compose on top). Runtime equivalent:
+     * SetAmpduMode. Unset = off (byte-identical). Pair with a deep feed
+     * (send_packets / DEVOURER_TX_THREADS) for the goodput win. */
+    std::optional<AmpduMode> ampdu;
   } tx;
 
   /* ---- Beamforming (bring-up-time arming; see docs/beamforming-*.md) --- */

@@ -64,9 +64,12 @@ run_mode() { # $1 = name, rest = extra TX env
 }
 
 run_mode singles
-run_mode ampdu DEVOURER_TX_QSEL=0 DEVOURER_TX_AMPDU=16/7/0 \
+# The product API in one knob (DEVOURER_TX_AMPDU_MODE = tid/max/density/noack/
+# maxtime): programs the pacing regs AND marks frames aggregatable — no manual
+# REPLAY_WSEQ, no raw spike knobs. Deep-fed via DEVOURER_TX_THREADS.
+run_mode ampdu DEVOURER_TX_AMPDU_MODE=0/16 \
                DEVOURER_TX_BATCH=3 DEVOURER_TX_USB_AGG=3 \
-               DEVOURER_REPLAY_WSEQ="$OUT/pacing.wseq"
+               DEVOURER_TX_THREADS=4
 
 echo
 echo "=== SUMMARY (ch$CH MCS$MCS/$BW payload=$PAYLOAD) ==="

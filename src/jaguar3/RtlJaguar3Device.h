@@ -72,6 +72,12 @@ public:
   /* Hardware ACK responder (IRtlDevice contract; src/AckResponder.h). */
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
+  /* A-MPDU TX mode (IRtlDevice contract; src/AmpduMode.h). Programs the 8822C
+   * aggregate-fill timer (0x455) under _reg_mu (serialized against the coex
+   * thread) and records the descriptor state the TX path reads. */
+  bool SetAmpduMode(const devourer::AmpduMode &mode) override;
+  void ClearAmpduMode() override;
+  devourer::AmpduMode GetAmpduMode() override { return _ampdu; }
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
@@ -207,6 +213,10 @@ private:
   /* Rotating SW_DEFINE tag stamped when tx.report is on — the CCX report
    * echoes its low byte, correlating reports to frames (src/TxReport.h). */
   std::atomic<uint16_t> _tx_rpt_tag{0};
+  /* A-MPDU TX mode (SetAmpduMode). Read lock-free in the TX descriptor path
+   * (same pattern as the TX-mode default); a control write during TX is the
+   * caller's to sequence and at worst tears one frame's mode benignly. */
+  devourer::AmpduMode _ampdu;
   /* Rail-hit flags from the last apply (references clamped at 0/0x7f). */
   std::atomic<bool> _txpwr_sat_low{false};
   std::atomic<bool> _txpwr_sat_high{false};

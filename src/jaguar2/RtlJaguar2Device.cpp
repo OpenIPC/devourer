@@ -329,6 +329,44 @@ void RtlJaguar2Device::ClearAckResponder() {
   _logger->info("Jaguar2: hardware ACK responder disarmed (net_type=NoLink)");
 }
 
+bool RtlJaguar2Device::SetAmpduMode(const devourer::AmpduMode &mode) {
+  /* A-MPDU TX mode (src/AmpduMode.h): record the descriptor state the TX path
+   * reads and program the 8822B MAC pacing registers live. The descriptor
+   * half (AGG_EN/QSEL/MAX_AGG_NUM/density/retry) is applied per-frame in
+   * build_tx_block; here we set the pacing that gates net goodput. */
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    if (mode.enabled) {
+      /* Aggregate-fill timer (0x0455): 0x70 bring-up default paces launches at
+       * ~3 ms; 0x20 is the proven unlock. 0 = leave the default. Cliff: the
+       * mode struct is responsible for staying above the ~0x08 disable floor. */
+      if (mode.max_time != 0)
+        _device.rtw_write8(0x0455, mode.max_time);
+      /* Burst-mode gate (0x04BC BIT6, halmac sets it): clearing = +40%. */
+      if (mode.clear_burst_mode)
+        _device.rtw_write8(0x04BC, _device.rtw_read8(0x04BC) &
+                                       static_cast<uint8_t>(~(1u << 6)));
+    } else {
+      /* Restore the bring-up pacing so a cleared mode leaves no residue. */
+      _device.rtw_write8(0x0455, 0x70);
+      _device.rtw_write8(0x04BC,
+                         _device.rtw_read8(0x04BC) | (1u << 6));
+    }
+  }
+  _ampdu = mode;
+  if (mode.enabled)
+    _logger->info("Jaguar2: A-MPDU mode ON (tid={} max={} density={} "
+                  "{} max_time=0x{:02x} burst_clr={})",
+                  mode.tid, mode.max_num, mode.density,
+                  mode.no_ack ? "no-ack" : "ack", mode.max_time,
+                  mode.clear_burst_mode);
+  else
+    _logger->info("Jaguar2: A-MPDU mode OFF (pacing restored)");
+  return true;
+}
+
+void RtlJaguar2Device::ClearAmpduMode() { SetAmpduMode(devourer::AmpduMode{}); }
+
 void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
   _channel = channel;
@@ -575,6 +613,8 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
     StartCwTone(_cfg.tx.cw_tone_gain & 0x1F);
   if (_cfg.rx.ack_responder)
     SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
+  if (_cfg.tx.ampdu)
+    SetAmpduMode(*_cfg.tx.ampdu); /* DEVOURER_TX_AMPDU_MODE */
   apply_replay_wseq();
   _logger->info("Jaguar2: ready for TX (monitor inject, ch={})",
                 channel.Channel);
@@ -1297,11 +1337,20 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
     SET_TX_DESC_SW_DEFINE_8822B(out, _tx_rpt_tag.fetch_add(1) & 0xff);
     jaguar2::cal_txdesc_chksum_8822b(out);
   }
-  if (_cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {
-    /* EXPERIMENTAL A-MPDU spike overrides (DEVOURER_TX_QSEL /
-     * DEVOURER_TX_AMPDU — DeviceConfig debug section): route the frame to a
-     * data queue and/or mark it aggregatable. All inside the checksummed
-     * span — re-checksum. */
+  const devourer::AmpduMode am = _ampdu; /* one lock-free load */
+  if (am.enabled || _cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {
+    /* A-MPDU descriptor half. The product SetAmpduMode state applies first
+     * (data QSEL + AGG_EN + MAX_AGG_NUM + density + retry), then the raw
+     * DEVOURER_TX_QSEL / DEVOURER_TX_AMPDU spike knobs override for
+     * register-level experimentation. All inside the checksummed span —
+     * re-checksum once at the end. */
+    if (am.enabled) {
+      SET_TX_DESC_QSEL_8822B(out, am.tid);
+      SET_TX_DESC_AGG_EN_8822B(out, 1);
+      SET_TX_DESC_MAX_AGG_NUM_8822B(out, am.max_num & 0x1f);
+      SET_TX_DESC_AMPDU_DENSITY_8822B(out, am.density & 0x7);
+      SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(out, am.no_ack ? 0 : 12);
+    }
     if (_cfg.debug.tx_qsel)
       SET_TX_DESC_QSEL_8822B(out, *_cfg.debug.tx_qsel);
     if (_cfg.debug.tx_ampdu_max) {

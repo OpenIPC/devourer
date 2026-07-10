@@ -290,7 +290,6 @@ private:
    * thread and a control-plane SetMonitorChannel see a consistent value. */
   std::atomic<int> _rx_path_mask{-1};
   int _xtal_cap = -1; /* current crystal-cap code (SetXtalCap) */
-  uint8_t _tx_qsel = 0x12; /* TX-desc QUEUE_SEL (0x12 mgmt; 0x10 = beacon) */
   devourer::CfoTracker _cfo; /* closed-loop CFO tracker (#217) */
 
   std::thread _therm_thread;

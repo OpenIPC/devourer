@@ -230,9 +230,6 @@ private:
    * FastRetune / the TX-power setters / GetThermalStatus by _reg_mu (the RF
    * read window is a multi-transfer sequence that must not tear). */
   std::mutex _reg_mu;
-  /* Nominal beacon interval in TU while a beacon is active (0 = none); the
-   * AdjustBeaconTiming one-shot tweak restores to this. */
-  int _bcn_interval_tu = 0;
   std::thread _pwrtrack_thread;
   std::atomic<bool> _pwrtrack_stop{false};
   void start_pwrtrack();

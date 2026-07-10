@@ -1174,7 +1174,6 @@ bool RtlJaguar2Device::StartBeacon(const uint8_t *beacon, size_t len,
   _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 3) | (1u << 4));
   uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
   _device.rtw_write<uint32_t>(0x0420, txq | (1u << 22) /* BIT_EN_BCNQ_DL */);
-  _bcn_interval_tu = interval_tu > 0 ? interval_tu : 100;
   _logger->info("beacon(J2): beacon@rsvd_boundary, net_type->AP, BCN_CTRL=0x18, "
                 "EN_BCNQ_DL (interval {} TU)", interval_tu);
   return true;

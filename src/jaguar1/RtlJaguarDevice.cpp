@@ -598,7 +598,7 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   SET_TX_DESC_BMC_8812(usb_frame, 1);
   SET_TX_DESC_RATE_ID_8812(usb_frame, static_cast<uint8_t>(rate_id));
 
-  SET_TX_DESC_QUEUE_SEL_8812(usb_frame, _tx_qsel);
+  SET_TX_DESC_QUEUE_SEL_8812(usb_frame, 0x12);
   SET_TX_DESC_HWSEQ_EN_8812(usb_frame, static_cast<uint8_t>(1));
   if (!is_8814a) {
     /* 88XXau leaves GID=0 for monitor injection on 8814A. */

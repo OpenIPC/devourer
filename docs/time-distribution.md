@@ -158,8 +158,15 @@ and the cadence thereafter — by Δ TU. Bench-proven to the microsecond on an
 (observer arrival phase stepped 88018 → 67565 µs at the tweak). This is the
 802.11 IBSS/TSF-merge mechanism. Granularity is **1 TU = 1.024 ms** (the
 `REG_BCN_INTERVAL` field is integer TU) — a coarse slot/guard-alignment lever.
+The interval register **latches at a TBTT**, so the actuator phase-aligns off
+the TSF (write the tweak early in a beacon period, restore mid-way into the
+first tweaked interval) — a fixed hold instead races with the beacon phase:
+bench-caught on the 8821CE, an advance can silently no-op (write+restore inside
+one period) or double-shift (two shortened TBTTs before the restore latches).
+Consecutive coarse steers move the TBTT grid off `TSF % period == 0`; the
+actuator tracks that offset (a fine steer or `StartBeacon` re-zeroes it).
 
-**Microsecond-fine steering** (`AdjustBeaconTimingFine`, Jaguar3): the reason a
+**Microsecond-fine steering** (`AdjustBeaconTimingFine`): the reason a
 bare `WriteTsf` doesn't move the TBTT is that the counter is latched while the
 beacon function runs — the vendor `reset_tsf` path clears `EN_BCN_FUNCTION`
 first. Toggling the beacon function off, shifting the port-0 TSF by the desired
@@ -173,16 +180,32 @@ resolution is what matters. It also shifts this port's TSF + beacon-body
 timestamp by the same amount, which is the intended UE-advances-its-own-timebase
 behaviour.
 
-Beacon-TBTT steering is **Jaguar3-only**. The Jaguar2 8822B beacon engine drops
-the beacon on *any* TBTT re-latch — bench-proven on the 8812BU, the beacon stops
-airing after both the interval tweak and the beacon-function toggle (the
-bcn-valid latch is lost, and J2 does not retain the beacon bytes to re-download).
-So `AdjustBeaconTiming` / `AdjustBeaconTimingFine` refuse on J2 (return 0) rather
-than silently kill the beacon; the downlink (`StartBeacon` + `SetCcaMode`) is
-unaffected.
+**Jaguar2 steer-then-re-download.** The Jaguar2 beacon engine loses its
+bcn-valid latch on *any* TBTT re-latch — bench-proven on the 8812BU, the beacon
+stops airing after both the interval tweak and the beacon-function toggle — and
+the hardware does not retain the reserved-page bytes to re-arm it. The driver
+does (`StartBeacon` keeps the MPDU), so the J2 actuators steer and then re-run
+the reserved-page beacon download to re-assert the latch — at most one skipped
+beacon per correction. Bench (fine steers, observer arrival phase, hardware seq
+consecutive across every steer):
+
+- **8812BU (USB)**: 0–1 beacon lost per steer, ~9 ms per fine steer; the fine
+  shift undershoots the request by a systematic ~2–3 ms (USB register latency,
+  larger than J3's ~0.5–1.2 ms) that a closed loop absorbs.
+- **8821CE (PCIe MMIO)**: 0–1 beacon lost per steer, ~0–1 ms per fine steer;
+  fine accuracy **−4842…−5047 µs for a −5000 µs request** (systematic offset
+  ~30 µs — the MMIO register path is µs-scale) and coarse −20 TU steers land
+  within ~±150 µs, including back-to-back. This is the actuator that closes
+  the AP-beacon ↔ network-PTP discipline loop on the Radxa X4's 8821CE.
+
+At a realistic discipline cadence (~10 s between corrections against ~40 ppm
+crystal drift and a ~500 µs guard) the cost is ~1 lost beacon per 100. Jaguar3
+needs no re-download — its engine survives the re-latch.
 
 Actuator characterization: `tests/beacon_interval_shift.sh <short_TU>` (TU tweak),
-or `FINE_US=<µs> tests/beacon_interval_shift.sh` (µs-fine, Jaguar3).
+or `FINE_US=<µs> tests/beacon_interval_shift.sh` (µs-fine). Steer *survival* +
+repeated-steer accuracy (incl. a PCIe master via `MASTER_CMD='ssh …'`):
+`tests/beacon_steer_survival.sh [n] [steer_us] [period_s]`.
 
 Harness: `tests/timesync_ta_demo.sh` (+ `tests/timesync_ta_analyze.py`).
 
@@ -195,7 +218,7 @@ Harness: `tests/timesync_ta_demo.sh` (+ `tests/timesync_ta_analyze.py`).
 - `DEVOURER_TSYNC_HWBEACON=1` — hardware-timed beacon downlink (StartBeacon) →
   sub-µs; set on both master and slave. On the **UE** (role=ue) it instead
   selects the hardware-beacon uplink fine-steered by `AdjustBeaconTimingFine` —
-  the converging closed loop (J3 UE required for µs steering)
+  the converging closed loop (Jaguar2/3 UE)
 - `DEVOURER_TSYNC_CSMA=1` — keep CSMA on the HW-beacon master (default: EDCCA
   off so the beacon airs exactly at TBTT — the master owns the channel)
 - `DEVOURER_TSYNC_UPLINK=1` — enable the uplink timing-advance loop (experimental)

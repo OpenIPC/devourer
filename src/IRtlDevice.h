@@ -306,9 +306,10 @@ public:
    * microsecond). Requires an active StartBeacon. BLOCKS the caller ~one beacon
    * interval (the tweaked interval must latch and fire once before restore).
    * Returns the actual applied shift in µs (TU-quantized); 0 if no active beacon
-   * or |microseconds| < 512. Jaguar3 only in practice: the Jaguar2 8822B beacon
-   * engine drops the beacon on any TBTT re-latch (bench-proven), so J2 refuses
-   * (returns 0) rather than silently kill it. Base is a no-op. */
+   * or |microseconds| < 512. Jaguar3 and Jaguar2: the J2 beacon engine loses its
+   * bcn-valid latch on any TBTT re-latch (bench-proven), so the J2 path follows
+   * the steer with a reserved-page re-download of the retained beacon — one
+   * skipped beacon per correction. Base is a no-op. */
   virtual int32_t AdjustBeaconTiming(int32_t microseconds) {
     (void)microseconds;
     return 0;
@@ -324,10 +325,10 @@ public:
    * same amount, which is the intended behaviour for a UE advancing its own
    * timebase. The USB read→write latency adds a sub-ms offset (~0.5–1.2 ms) that
    * a closed timing-advance loop absorbs — the *resolution* is microseconds.
-   * Requires an active StartBeacon; returns the applied shift in µs. Jaguar3 only:
-   * the Jaguar2 beacon engine survives neither the beacon-function toggle nor the
-   * interval tweak (both drop the beacon), so J2 refuses (returns 0). Base is a
-   * no-op. */
+   * Requires an active StartBeacon; returns the applied shift in µs. Jaguar3 and
+   * Jaguar2: the J2 beacon engine drops its bcn-valid latch on the toggle, so the
+   * J2 path re-downloads the retained reserved-page beacon after the re-latch —
+   * one skipped beacon per correction. Base is a no-op. */
   virtual int32_t AdjustBeaconTimingFine(int32_t microseconds) {
     (void)microseconds;
     return 0;

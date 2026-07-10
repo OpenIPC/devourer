@@ -17,6 +17,8 @@
 #include <string>
 #include <string_view>
 
+#include "AmpduMode.h"
+
 namespace devourer {
 
 /* 6-byte MAC address carrier (replaces the per-site uint8_t[6] + sscanf). */
@@ -87,6 +89,12 @@ struct DeviceConfig {
     /* env: DEVOURER_IGI — Jaguar2 fixed initial-gain index override, 7 bits
      * (unset = 0x40, the FA-rate-validated default). */
     std::optional<uint8_t> igi;
+    /* env: DEVOURER_ACK_RESPONDER=<unicast mac> — arm the hardware ACK
+     * responder at the end of bring-up (src/AckResponder.h): the MAC
+     * auto-ACKs unicast frames addressed to this MAC while monitor RX and
+     * injection continue unchanged. Runtime equivalent: SetAckResponder /
+     * ClearAckResponder. OPT-IN: makes a passive monitor transmit. */
+    std::optional<MacAddr> ack_responder;
   } rx;
 
   /* ---- TX ------------------------------------------------------------- */
@@ -112,6 +120,30 @@ struct DeviceConfig {
      * Runtime equivalent: StartCwTone/StopCwTone on the concrete device. */
     bool cw_tone = false;
     uint8_t cw_tone_gain = 0;
+    /* env: DEVOURER_TX_USB_AGG — USB TX aggregation: max frames packed into
+     * one bulk-OUT URB by send_packets (0 = off, the default: send_packets
+     * degrades to a per-frame loop and every TX path is byte-identical to
+     * before the knob existed). Clamped to the 8-bit agg-num field (255; 64
+     * on Jaguar1) and the vendor packing rules (see src/TxAggPlan.h). USB
+     * only; the PCIe rings take frames individually. */
+    unsigned usb_agg_max = 0;
+    /* env: DEVOURER_TX_REPORT — per-frame TX-status reports (src/TxReport.h):
+     * sets SPE_RPT in every data TX descriptor so the firmware answers each
+     * transmission with a CCX report (delivered/retry-drop + hardware retry
+     * count + queue time + final rate), decoded off the C2H RX path into
+     * `tx.report` events. The TX-side link sensor. On the HalMAC chips the
+     * descriptor SW_DEFINE also carries a rotating 8-bit tag the report
+     * echoes (per-frame correlation). Default off (descriptors
+     * byte-identical). Needs an RX loop to deliver the C2H reports. */
+    bool report = false;
+    /* env: DEVOURER_TX_AMPDU_MODE="tid/maxnum[/density[/noack[/maxtime_hex]]]"
+     * — arm the first-class A-MPDU TX mode (src/AmpduMode.h) at the end of
+     * bring-up: mark data frames aggregatable and program the MAC pacing
+     * registers. The product form of the DEVOURER_TX_QSEL / DEVOURER_TX_AMPDU
+     * spike knobs (which still compose on top). Runtime equivalent:
+     * SetAmpduMode. Unset = off (byte-identical). Pair with a deep feed
+     * (send_packets / DEVOURER_TX_THREADS) for the goodput win. */
+    std::optional<AmpduMode> ampdu;
   } tx;
 
   /* ---- Beamforming (bring-up-time arming; see docs/beamforming-*.md) --- */
@@ -223,6 +255,26 @@ struct DeviceConfig {
      * configuration — a debugging lever for hardware-diffing devourer
      * against the vendor driver's end state. */
     std::string replay_wseq;
+    /* env: DEVOURER_TX_QSEL — EXPERIMENTAL (A-MPDU spike, tests/ampdu_spike):
+     * override the data TX-descriptor QSEL (default 0x12 = MGMT queue, the
+     * monitor-inject convention). Data-queue values are the TID (0..7);
+     * hardware A-MPDU formation is expected only on data queues. */
+    std::optional<uint8_t> tx_qsel;
+    /* env: DEVOURER_TX_AMPDU="max[/density]" — EXPERIMENTAL (A-MPDU spike):
+     * set AGG_EN=1 + MAX_AGG_NUM (1..0x1f; hardware units of 2 MPDUs) +
+     * AMPDU_DENSITY (0..7, default 0) on every data TX descriptor, asking the
+     * MAC to aggregate co-queued same-RA/TID frames into A-MPDUs. Whether the
+     * hardware honours it for host-pushed USE_RATE frames is exactly what the
+     * spike measures. Pair with tx_qsel, QoS-Data frames (txdemo
+     * DEVOURER_TX_QOS_DATA) and USB TX agg for co-queueing. */
+    std::optional<uint8_t> tx_ampdu_max;
+    uint8_t tx_ampdu_density = 0;
+    /* Optional third component of DEVOURER_TX_AMPDU ("max[/density[/rty]]"):
+     * override the per-frame data retry limit (RTY_LMT_EN stays 1). The
+     * A-MPDU spike found the MAC retries an aggregate to the limit waiting
+     * for a BlockAck no monitor-mode receiver sends — rty=0 airs each
+     * aggregate exactly once (the broadcast/no-ack flavor). */
+    std::optional<uint8_t> tx_ampdu_rty;
   } debug;
 
   /* ---- USB / process environment -------------------------------------- */

@@ -53,6 +53,9 @@ class RtlJaguarDevice : public IRtlDevice {
   /* Runtime TX-mode default (SetTxMode/ClearTxMode); applied in send_packet
    * only when the frame's radiotap carries no rate. */
   std::optional<devourer::TxMode> _tx_mode_default;
+  /* A-MPDU TX mode (SetAmpduMode). Read lock-free in the TX descriptor path
+   * (same pattern as _tx_mode_default). */
+  devourer::AmpduMode _ampdu;
 
   /* CW single-tone (StartCwTone/StopCwTone) saved state for a clean restore:
    * the pre-tone RF 0x00 and four BB dwords — RFE-pinmux words on 8812/8821
@@ -199,6 +202,23 @@ public:
   void ClearTxMode();
 
   bool send_packet(const uint8_t* packet, size_t length) override;
+  /* Batch TX with USB aggregation (IRtlDevice contract): with
+   * cfg.tx.usb_agg_max > 1 consecutive frames are packed into shared bulk-OUT
+   * URBs — one [txdesc][frame] block per frame, first descriptor carrying the
+   * count in USB_TXAGG_NUM (see src/TxAggPlan.h; the MAC-side TDECTRL
+   * block-desc count is programmed at bring-up when the knob is on). Falls
+   * back to the per-frame loop when the knob is off. */
+  size_t send_packets(const TxPacketView *pkts, size_t count) override;
+  /* Hardware ACK responder (IRtlDevice contract; src/AckResponder.h). */
+  bool SetAckResponder(const devourer::MacAddr &mac) override;
+  void ClearAckResponder() override;
+  /* A-MPDU TX mode (IRtlDevice contract; src/AmpduMode.h). Programs the
+   * Jaguar1 aggregate-fill timer (0x0456 — NOT the 0x0455 the HalMAC chips
+   * use) + the 8814A burst-mode gate (0x04BC), and records the descriptor
+   * state the TX path reads. */
+  bool SetAmpduMode(const devourer::AmpduMode &mode) override;
+  void ClearAmpduMode() override;
+  devourer::AmpduMode GetAmpduMode() override { return _ampdu; }
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
@@ -274,6 +294,15 @@ public:
 private:
   void StartWithMonitorMode(SelectedChannel selectedChannel);
   bool NetDevOpen(SelectedChannel selectedChannel);
+
+  /* Parse one send_packet-contract buffer (radiotap + 802.11) and build its
+   * TXDMA block — 40-byte descriptor, pkt_offset×8 pad, frame — at `out`
+   * (zeroed, sized desc + pad + frame by the caller). Performs the per-packet
+   * radiotap CHANNEL retune, exactly like send_packet. Returns the block
+   * length, 0 on malformed input. Shared by send_packet (pkt_offset=0) and
+   * the send_packets URB packer. */
+  size_t build_tx_block(const uint8_t *packet, size_t length, uint8_t *out,
+                        uint8_t pkt_offset);
 
   std::array<std::atomic<uint32_t>, 5> _qd_snap{};
   std::thread _qd_thread;

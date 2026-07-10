@@ -53,10 +53,24 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_NDPA_8822B(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x0C, 22, 2, v)
 #define SET_TX_DESC_DISQSELSEQ_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x00, 31, 1, v)
 #define SET_TX_DESC_G_ID_8822B(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x08, 24, 6, v)
+/* Per-frame TX-status report request (halmac SPE_RPT): the fw answers this
+ * frame's transmission with a CCX C2H report (src/TxReport.h). */
+#define SET_TX_DESC_SPE_RPT_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x08, 19, 1, v)
+/* A-MPDU formation (halmac AGG_EN / MAX_AGG_NUM / AMPDU_DENSITY): ask the MAC
+ * to aggregate co-queued same-RA/TID frames into an A-MPDU (spike knobs
+ * DEVOURER_TX_AMPDU / DEVOURER_TX_QSEL; see DeviceConfig debug section). */
+#define SET_TX_DESC_AGG_EN_8822B(d, v)        SET_BITS_TO_LE_4BYTE((d) + 0x08, 12, 1, v)
+#define SET_TX_DESC_MAX_AGG_NUM_8822B(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x0C, 17, 5, v)
+#define SET_TX_DESC_AMPDU_DENSITY_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x08, 20, 3, v)
 #define SET_TX_DESC_RTY_LMT_EN_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 17, 1, v)
 #define SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 18, 6, v)
 #define SET_TX_DESC_SW_DEFINE_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x18, 0, 12, v)
 #define SET_TX_DESC_TXDESC_CHECKSUM_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x1C, 0, 16, v)
+/* USB TX aggregation: number of [txdesc][frame] blocks in this bulk-OUT
+ * transfer, set on the FIRST descriptor only (halmac DMA_TXAGG_NUM,
+ * dword7[31:24]). Inside the 32-byte checksummed region — set BEFORE
+ * cal_txdesc_chksum_8822b. */
+#define SET_TX_DESC_DMA_TXAGG_NUM_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x1C, 24, 8, v)
 #define SET_TX_DESC_EN_HWSEQ_8822B(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x20, 15, 1, v)
 #define GET_TX_DESC_PKT_OFFSET_8822B(d)    LE_BITS_TO_4BYTE((d) + 0x04, 24, 5)
 
@@ -68,6 +82,10 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 #define GET_RX_DESC_SHIFT_8822B(r)         LE_BITS_TO_4BYTE((r) + 0x00, 24, 2)
 #define GET_RX_DESC_PHYST_8822B(r)         LE_BITS_TO_4BYTE((r) + 0x00, 26, 1)
 #define GET_RX_DESC_RX_RATE_8822B(r)       LE_BITS_TO_4BYTE((r) + 0x0C, 0, 7)
+/* A-MPDU markers: PAGGR = MPDU arrived inside an aggregate; PPDU_CNT = the
+ * MAC's 2-bit received-PPDU counter (halmac_rx_desc_nic.h). */
+#define GET_RX_DESC_PAGGR_8822B(r)         LE_BITS_TO_4BYTE((r) + 0x04, 15, 1)
+#define GET_RX_DESC_PPDU_CNT_8822B(r)      LE_BITS_TO_4BYTE((r) + 0x08, 29, 2)
 /* DWORD 5 = the 32-bit TSF-low latched at receive (same offset as the 8812's
  * GET_RX_STATUS_DESC_TSFL_8812 at +20). The hardware TSF timing reference. */
 #define GET_RX_DESC_TSFL_8822B(r)          LE_BITS_TO_4BYTE((r) + 0x14, 0, 32)
@@ -126,7 +144,8 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
                                     bool short_gi, bool ldpc, uint8_t stbc,
                                     bool bmc = false, uint8_t wheader_len = 12,
                                     bool ndpa = false, uint8_t data_sc = 0,
-                                    uint8_t pwr_ofset = 0) {
+                                    uint8_t pwr_ofset = 0,
+                                    uint8_t pkt_offset = 0) {
   SET_TX_DESC_TXPKTSIZE_8822B(d, pkt_size);
   SET_TX_DESC_OFFSET_8822B(d, static_cast<uint32_t>(TXDESC_SIZE_8822B));
   SET_TX_DESC_LS_8822B(d, 1);
@@ -152,6 +171,12 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
    * Inside the 32-byte checksummed region (0x14), so set before the checksum. */
   if (pwr_ofset)
     SET_TX_DESC_TXPWR_OFSET_8822B(d, pwr_ofset & 0x7);
+  /* USB-agg boundary shim: pkt_offset × 8 bytes of pad between this descriptor
+   * and its frame (halmac PKT_OFFSET, unit 8 B) — the vendor's lever for
+   * keeping an aggregated transfer off an exact bulk-size multiple. 0 = none
+   * (byte-identical). Inside the checksummed region (0x04). */
+  if (pkt_offset)
+    SET_TX_DESC_PKT_OFFSET_8822B(d, pkt_offset & 0x1f);
   SET_TX_DESC_DATA_SHORT_8822B(d, short_gi ? 1 : 0);
   SET_TX_DESC_DATA_LDPC_8822B(d, ldpc ? 1 : 0);
   SET_TX_DESC_DATA_STBC_8822B(d, stbc & 0x3);
@@ -189,6 +214,8 @@ struct Rx8822bFrame {
   uint16_t drvinfo_size;
   uint8_t shift;
   uint32_t tsfl;              /* hardware TSF-low at receive */
+  bool paggr;                 /* MPDU arrived inside an A-MPDU */
+  uint8_t ppdu_cnt;           /* 2-bit received-PPDU counter */
   uint32_t next_offset;
 };
 
@@ -207,6 +234,8 @@ inline bool parse_rx_8822b(const uint8_t *buf, size_t buflen,
   out.icv_err = GET_RX_DESC_ICV_ERR_8822B(buf) != 0;
   out.rx_rate = static_cast<uint8_t>(GET_RX_DESC_RX_RATE_8822B(buf));
   out.tsfl = static_cast<uint32_t>(GET_RX_DESC_TSFL_8822B(buf));
+  out.paggr = GET_RX_DESC_PAGGR_8822B(buf) != 0;
+  out.ppdu_cnt = static_cast<uint8_t>(GET_RX_DESC_PPDU_CNT_8822B(buf));
 
   uint32_t frame_off =
       static_cast<uint32_t>(RXDESC_SIZE_8822B) + out.drvinfo_size + out.shift;

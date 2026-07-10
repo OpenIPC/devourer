@@ -36,6 +36,22 @@ KDRIVERS = ["rtw88_8812au", "rtw88_8814au", "rtw88_8821au", "rtw88_8822cu",
 DUTY_RE = re.compile(r"duty=([\d.]+)%\s+noise=([-\d.]+)dB.*on_air~=([\d.]+)Mbps")
 
 
+def resolve_sysfs(vid: str, pid: str, fallback: str) -> str | None:
+    """Find the current sysfs id for a VID:PID (topology-independent), so the
+    hardcoded CHIPS ports don't have to match this rig. Returns the fallback if
+    the scan finds nothing (and None if even the fallback is absent)."""
+    vlo, plo = vid.lower().replace("0x", ""), pid.lower().replace("0x", "")
+    root = Path("/sys/bus/usb/devices")
+    for d in root.glob("*"):
+        try:
+            if (d / "idVendor").read_text().strip() == vlo and \
+               (d / "idProduct").read_text().strip() == plo:
+                return d.name
+        except OSError:
+            continue
+    return fallback if (root / fallback).exists() else None
+
+
 def free_chip(sysfs: str) -> None:
     for drv in KDRIVERS:
         base = f"/sys/bus/usb/drivers/{drv}"
@@ -64,11 +80,21 @@ def sdr_duty(freq: float, mcs: int, bw: int, noise_db: float | None,
     return (duty, noise, mbps) if return_noise else (duty, mbps)
 
 
-def devourer_flood(vid, pid, ch, mcs, bw, size):
+def devourer_flood(vid, pid, ch, mcs, bw, size, ampdu=False, threads=1):
+    """Flood txdemo. Default = single-frame injection (the baseline table
+    metric). ampdu=True adds the A-MPDU recipe (QoS-Data on a data queue +
+    SetAmpduMode + a deep multi-thread feed) so the MAC actually aggregates;
+    threads>1 alone is the feed-depth control (no aggregation)."""
     env = dict(__import__("os").environ,
                DEVOURER_VID=vid, DEVOURER_PID=pid, DEVOURER_CHANNEL=str(ch),
                DEVOURER_TX_RATE=f"MCS{mcs}/{bw}",
                DEVOURER_TX_PAYLOAD_BYTES=str(size), DEVOURER_TX_GAP_US="0")
+    if threads > 1:
+        env["DEVOURER_TX_THREADS"] = str(threads)
+    if ampdu:
+        env.update(DEVOURER_TX_QOS_DATA="1", DEVOURER_TX_QOS_NOACK="1",
+                   DEVOURER_TX_AMPDU_MODE="0/16",
+                   DEVOURER_TX_BATCH="3", DEVOURER_TX_USB_AGG="3")
     return regress._register_local_proc(subprocess.Popen(
         [str(ROOT / "build" / "txdemo")], env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -86,10 +112,22 @@ def main() -> int:
                     help="skip the CU-control 5 GHz rail-sag pre-flight (rail_check.sh)")
     ap.add_argument("--only", help="comma-separated chip labels to bench "
                     "(default: every plugged-in chip in CHIPS)")
+    ap.add_argument("--ampdu", action="store_true",
+                    help="also measure the deep-fed A-MPDU flood + a feed-depth "
+                    "control, emitting a singles/feed/A-MPDU comparison")
+    ap.add_argument("--threads", type=int, default=4,
+                    help="parallel-sender depth for the A-MPDU + feed modes")
+    ap.add_argument("--bands", help="comma-separated band substrings to bench "
+                    "(default: all; e.g. --bands 149 for the clean 5 GHz band)")
     args = ap.parse_args()
     regress._install_cleanup_handlers()
-    present = {c: v for c, v in CHIPS.items()
-               if Path(f"/sys/bus/usb/devices/{v[0]}").exists()}
+    # Resolve each chip's actual sysfs port from its VID:PID so a stale
+    # hardcoded CHIPS port doesn't drop a plugged-in adapter.
+    present = {}
+    for c, (sysfs, vid, pid) in CHIPS.items():
+        s = resolve_sysfs(vid, pid, sysfs)
+        if s:
+            present[c] = (s, vid, pid)
     if args.only:
         want = {s.strip().upper() for s in args.only.split(",")}
         present = {c: v for c, v in present.items() if c.upper() in want}
@@ -109,8 +147,25 @@ def main() -> int:
             print("!! (2.4 GHz numbers are unaffected. Pass --skip-rail-check to override.)")
             print("!" * 70 + "\n")
 
+    bands = BANDS
+    if args.bands:
+        want = [b.strip() for b in args.bands.split(",")]
+        bands = [b for b in BANDS if any(w in b[0] for w in want)]
+
+    # Modes to measure per chip/band. Default: just the single-frame baseline
+    # (the historical table metric). --ampdu adds the feed-depth control and the
+    # full A-MPDU recipe, so any gain is attributable (feed depth vs aggregation).
+    modes = [("singles", dict())]
+    if args.ampdu:
+        modes = [("singles", dict()),
+                 ("feed", dict(threads=args.threads)),
+                 ("ampdu", dict(ampdu=True, threads=args.threads))]
+
+    def flood(vid, pid, ch, opts):
+        return devourer_flood(vid, pid, ch, args.mcs, args.bw, args.size, **opts)
+
     results: dict = {}
-    for label, ch, freq in BANDS:
+    for label, ch, freq in bands:
         # Calibrate this band's idle noise floor (all chips quiet) so the
         # threshold is right — a fixed floor mis-reads a noisier 2.4 GHz band.
         for sysfs, _, _ in CHIPS.values():
@@ -119,28 +174,46 @@ def main() -> int:
         floor = cal[1] if cal else args.noise_db  # cal = (duty, noise, mbps)
         print(f"  [{label}] idle noise floor {floor:.1f} dB", flush=True)
         for chip, (sysfs, vid, pid) in present.items():
-            print(f"  {chip} {label} …", flush=True)
-            d = None
-            for _ in range(2):  # one retry
-                free_chip(sysfs)
-                proc = devourer_flood(vid, pid, ch, args.mcs, args.bw, args.size)
-                time.sleep(6)
-                d = sdr_duty(freq, args.mcs, args.bw, floor, args.secs)
-                regress._terminate(proc)
-                if d and d[0] > 5:
-                    break
-            results[(chip, label)] = d
-            print(f"     -> {d[1]:.1f} Mbps ({d[0]:.0f}% duty)" if d else "     -> FAIL")
+            for mode, opts in modes:
+                print(f"  {chip} {label} {mode} …", flush=True)
+                d = None
+                for _ in range(2):  # one retry
+                    free_chip(sysfs)
+                    proc = flood(vid, pid, ch, opts)
+                    time.sleep(6)
+                    d = sdr_duty(freq, args.mcs, args.bw, floor, args.secs)
+                    regress._terminate(proc)
+                    if d and d[0] > 5:
+                        break
+                results[(chip, label, mode)] = d
+                print(f"     -> {d[1]:.1f} Mbps ({d[0]:.0f}% duty)" if d
+                      else "     -> FAIL")
 
-    # markdown
-    print("\n| Part | " + " | ".join(l for l, _, _ in BANDS) + " |")
-    print("|------|" + "|".join("------" for _ in BANDS) + "|")
-    for chip in present:
-        cells = []
-        for label, _, _ in BANDS:
-            d = results.get((chip, label))
-            cells.append(f"{d[1]:.0f} Mbps" if d and d[1] > 0.5 else "—")
-        print(f"| {chip} | " + " | ".join(cells) + " |")
+    def cell(chip, label, mode):
+        d = results.get((chip, label, mode))
+        return f"{d[1]:.0f}" if d and d[1] > 0.5 else "—"
+
+    if not args.ampdu:
+        # markdown — the historical single-frame table
+        print("\n| Part | " + " | ".join(l for l, _, _ in bands) + " |")
+        print("|------|" + "|".join("------" for _ in bands) + "|")
+        for chip in present:
+            cells = [cell(chip, l, "singles") + " Mbps" if cell(chip, l, "singles") != "—"
+                     else "—" for l, _, _ in bands]
+            print(f"| {chip} | " + " | ".join(cells) + " |")
+        return 0
+
+    # A-MPDU comparison: per band, singles / feed / A-MPDU on-air Mbps (SDR
+    # duty x PHY rate). NB this metric is channel occupancy x modulation rate;
+    # for a chip already near the PHY ceiling it can't rise even as A-MPDU
+    # raises payload goodput (see docs/aggregation.md).
+    for label, _, _ in bands:
+        print(f"\n### {label}  (on-air Mbps = SDR duty x PHY rate)")
+        print("| Part | singles | +deep feed | +A-MPDU |")
+        print("|------|--------:|-----------:|--------:|")
+        for chip in present:
+            s, f, a = (cell(chip, label, m) for m in ("singles", "feed", "ampdu"))
+            print(f"| {chip} | {s} | {f} | {a} |")
     return 0
 
 

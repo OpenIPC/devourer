@@ -49,10 +49,24 @@ constexpr size_t RXDESC_SIZE_8822C = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_DATA_STBC_8822C(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 8, 2, v)
 #define SET_TX_DESC_DISQSELSEQ_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x00, 31, 1, v)
 #define SET_TX_DESC_G_ID_8822C(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x08, 24, 6, v)
+/* Per-frame TX-status report request (halmac SPE_RPT): the fw answers this
+ * frame's transmission with a CCX C2H report (src/TxReport.h). */
+#define SET_TX_DESC_SPE_RPT_8822C(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x08, 19, 1, v)
+/* A-MPDU formation (halmac AGG_EN / MAX_AGG_NUM / AMPDU_DENSITY): ask the MAC
+ * to aggregate co-queued same-RA/TID frames into an A-MPDU (spike knobs
+ * DEVOURER_TX_AMPDU / DEVOURER_TX_QSEL; see DeviceConfig debug section). */
+#define SET_TX_DESC_AGG_EN_8822C(d, v)        SET_BITS_TO_LE_4BYTE((d) + 0x08, 12, 1, v)
+#define SET_TX_DESC_MAX_AGG_NUM_8822C(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x0C, 17, 5, v)
+#define SET_TX_DESC_AMPDU_DENSITY_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x08, 20, 3, v)
 #define SET_TX_DESC_RTY_LMT_EN_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 17, 1, v)
 #define SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 18, 6, v)
 #define SET_TX_DESC_SW_DEFINE_8822C(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x18, 0, 12, v)
 #define SET_TX_DESC_TXDESC_CHECKSUM_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x1C, 0, 16, v)
+/* USB TX aggregation: number of [txdesc][frame] blocks in this bulk-OUT
+ * transfer, set on the FIRST descriptor only (halmac DMA_TXAGG_NUM,
+ * dword7[31:24]). Inside the checksummed span — set BEFORE
+ * cal_txdesc_chksum_8822c. */
+#define SET_TX_DESC_DMA_TXAGG_NUM_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x1C, 24, 8, v)
 #define SET_TX_DESC_EN_HWSEQ_8822C(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x20, 15, 1, v)
 #define GET_TX_DESC_PKT_OFFSET_8822C(d)    LE_BITS_TO_4BYTE((d) + 0x04, 24, 5)
 
@@ -64,6 +78,10 @@ constexpr size_t RXDESC_SIZE_8822C = 24; /* RX_DESC_SIZE_88XX */
 #define GET_RX_DESC_SHIFT_8822C(r)         LE_BITS_TO_4BYTE((r) + 0x00, 24, 2)
 #define GET_RX_DESC_PHYST_8822C(r)         LE_BITS_TO_4BYTE((r) + 0x00, 26, 1)
 #define GET_RX_DESC_RX_RATE_8822C(r)       LE_BITS_TO_4BYTE((r) + 0x0C, 0, 7)
+/* A-MPDU markers: PAGGR = MPDU arrived inside an aggregate; PPDU_CNT = the
+ * MAC's 2-bit received-PPDU counter (halmac_rx_desc_nic.h). */
+#define GET_RX_DESC_PAGGR_8822C(r)         LE_BITS_TO_4BYTE((r) + 0x04, 15, 1)
+#define GET_RX_DESC_PPDU_CNT_8822C(r)      LE_BITS_TO_4BYTE((r) + 0x08, 29, 2)
 /* DWORD 5 = the 32-bit TSF-low latched at receive (same +0x14 offset as the
  * 8812 GET_RX_STATUS_DESC_TSFL_8812). The hardware TSF timing reference. */
 #define GET_RX_DESC_TSFL_8822C(r)          LE_BITS_TO_4BYTE((r) + 0x14, 0, 32)
@@ -99,7 +117,8 @@ inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
                                     uint8_t rate_hw, uint8_t rate_id, uint8_t bw,
                                     bool short_gi, bool ldpc, uint8_t stbc,
                                     bool bmc = false, bool ndpa = false,
-                                    uint8_t data_sc = 0) {
+                                    uint8_t data_sc = 0,
+                                    uint8_t pkt_offset = 0) {
   SET_TX_DESC_TXPKTSIZE_8822C(d, pkt_size);
   SET_TX_DESC_OFFSET_8822C(d, static_cast<uint32_t>(TXDESC_SIZE_8822C));
   SET_TX_DESC_LS_8822C(d, 1);
@@ -133,6 +152,13 @@ inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
   SET_TX_DESC_DATA_LDPC_8822C(d, ldpc ? 1 : 0);
   SET_TX_DESC_DATA_STBC_8822C(d, stbc & 0x3);
   SET_TX_DESC_EN_HWSEQ_8822C(d, 1);
+  /* USB-agg boundary shim: pkt_offset × 8 bytes of pad between this descriptor
+   * and its frame (halmac PKT_OFFSET, unit 8 B). 0 = none (byte-identical).
+   * MUST precede the checksum: on the 8822C the checksum span itself extends
+   * by pkt_offset dword-pairs (cal_txdesc_chksum_8822c reads the field), and
+   * the pad bytes it covers are the caller's zeroed buffer. */
+  if (pkt_offset)
+    SET_TX_DESC_PKT_OFFSET_8822C(d, pkt_offset & 0x1f);
   /* Beamforming self-sounding: mark the frame as an NDPA (halmac NDPA field,
    * dword3 [23:22] = 1) so the armed MAC sounding engine follows it with a
    * hardware-generated NDP — the Jaguar-3 mirror of the Jaguar-1
@@ -160,6 +186,8 @@ struct Rx8822cFrame {
   uint16_t drvinfo_size; /* bytes (DRV_INFO_SIZE * 8) */
   uint8_t shift;         /* SHIFT_SZ */
   uint32_t tsfl;         /* hardware TSF-low at receive */
+  bool paggr;            /* MPDU arrived inside an A-MPDU */
+  uint8_t ppdu_cnt;      /* 2-bit received-PPDU counter */
   uint32_t next_offset;  /* 8-byte-aligned offset of the next frame in an agg */
 };
 
@@ -180,6 +208,8 @@ inline bool parse_rx_8822c(const uint8_t *buf, size_t buflen,
   out.icv_err = GET_RX_DESC_ICV_ERR_8822C(buf) != 0;
   out.rx_rate = static_cast<uint8_t>(GET_RX_DESC_RX_RATE_8822C(buf));
   out.tsfl = static_cast<uint32_t>(GET_RX_DESC_TSFL_8822C(buf));
+  out.paggr = GET_RX_DESC_PAGGR_8822C(buf) != 0;
+  out.ppdu_cnt = static_cast<uint8_t>(GET_RX_DESC_PPDU_CNT_8822C(buf));
 
   uint32_t frame_off =
       static_cast<uint32_t>(RXDESC_SIZE_8822C) + out.drvinfo_size + out.shift;

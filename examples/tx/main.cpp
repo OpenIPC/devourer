@@ -670,6 +670,59 @@ int main(int argc, char **argv) {
     logger->info("DEVOURER_TX_PKT_PWR_DB={} — per-packet power via radiotap", db);
   }
 
+  /* DEVOURER_TX_QOS_DATA=1 — A-MPDU spike frame shape (tests/ampdu_spike.sh):
+   * replace the mgmt probe with a QoS-Data frame (FC 0x88, no-DS), TID 0 —
+   * the only frame type the MAC's A-MPDU engine aggregates. SA/BSSID stay the
+   * canonical TX SA so the rxdemo rx.txhit matcher keeps working; RA defaults
+   * to broadcast (DEVOURER_TX_RA=aa:bb:.. overrides — unicast toward a
+   * hardware-ACKing peer is the ACKed flavor). DEVOURER_TX_QOS_NOACK=1 sets
+   * the QoS ack-policy to No-Ack (the wfb-style broadcast flavor). Body =
+   * 64 zero bytes; DEVOURER_TX_PAYLOAD_BYTES below pads it further. Overrides
+   * the PKT_PWR/NDPA frame shapes. */
+  bool qos_stamp = false;
+  if (std::getenv("DEVOURER_TX_QOS_DATA") != nullptr) {
+    qos_stamp = true;
+    /* SA/TA defaults to the canonical TX SA so rx.txhit keeps matching — but
+     * note its I/G bit is SET (a group address). An ACK's RA is the
+     * soliciting frame's addr2, so hardware-ACK experiments need a UNICAST
+     * TA: DEVOURER_TX_SA overrides (the third appearance of the I/G footgun
+     * after docs/ap-mode.md's BSSID and the responder MAC). */
+    uint8_t kQosSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+    if (const char *e = std::getenv("DEVOURER_TX_SA")) {
+      if (auto m = devourer::parse_mac(e))
+        std::memcpy(kQosSa, m->data(), 6);
+      else
+        logger->warn("DEVOURER_TX_SA unparseable — keeping the canonical SA");
+    }
+    uint8_t ra[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    if (const char *e = std::getenv("DEVOURER_TX_RA")) {
+      if (auto m = devourer::parse_mac(e))
+        std::memcpy(ra, m->data(), 6);
+      else
+        logger->warn("DEVOURER_TX_RA unparseable — keeping broadcast RA");
+    }
+    const bool noack = std::getenv("DEVOURER_TX_QOS_NOACK") != nullptr;
+    /* Same rate-less TX_FLAGS-only radiotap as the probe frame above. */
+    static const uint8_t kRtap[10] = {0x00, 0x00, 0x0a, 0x00, 0x00,
+                                      0x80, 0x00, 0x00, 0x08, 0x00};
+    std::vector<uint8_t> f(kRtap, kRtap + sizeof(kRtap));
+    const uint8_t qos_hdr[26] = {
+        0x88, 0x00, /* FC: QoS Data, no To/FromDS */
+        0x00, 0x00, /* duration */
+        ra[0], ra[1], ra[2], ra[3], ra[4], ra[5],
+        kQosSa[0], kQosSa[1], kQosSa[2], kQosSa[3], kQosSa[4], kQosSa[5],
+        kQosSa[0], kQosSa[1], kQosSa[2], kQosSa[3], kQosSa[4], kQosSa[5],
+        0x00, 0x00, /* seq (EN_HWSEQ overwrites) */
+        /* QoS ctrl: TID 0; ack-policy bits [6:5] = 01 (No Ack) / 00. */
+        static_cast<uint8_t>(noack ? 0x20 : 0x00), 0x00};
+    f.insert(f.end(), qos_hdr, qos_hdr + sizeof(qos_hdr));
+    f.insert(f.end(), 64, 0x00);
+    tx_buf = std::move(f);
+    logger->info("DEVOURER_TX_QOS_DATA — QoS-Data TID0, RA {}, ack-policy {}",
+                 (ra[0] == 0xff) ? "broadcast" : "unicast",
+                 noack ? "no-ack" : "normal");
+  }
+
   /* Frame-size knob for throughput benchmarking. DEVOURER_TX_PAYLOAD_BYTES=N
    * pads the 802.11 body so the on-air PSDU is exactly N bytes — send_packet
    * writes real_packet_length (= PSDU) into the 16-bit TX-desc PKT_SIZE, so N
@@ -756,6 +809,44 @@ int main(int argc, char **argv) {
     if (tx_gap_us < 0) tx_gap_us = 0;
     tx_gap_set = true;
   }
+
+  /* DEVOURER_TX_BATCH=N: drive the send_packets batch API in groups of N
+   * frames per call — the USB TX aggregation bench mode. Pair with
+   * DEVOURER_TX_USB_AGG (library knob) to actually pack the group into shared
+   * bulk-OUT URBs; without it send_packets degrades to the per-frame loop.
+   * Default 1 = the classic send_packet loop, byte-identical. */
+  long tx_batch = 1;
+  if (const char *e = std::getenv("DEVOURER_TX_BATCH")) {
+    tx_batch = std::strtol(e, nullptr, 0);
+    if (tx_batch < 1)
+      tx_batch = 1;
+    if (tx_batch > 1)
+      logger->info("DEVOURER_TX_BATCH — send_packets batches of {}", tx_batch);
+  }
+  std::vector<TxPacketView> tx_batch_views;
+  /* Batch mode sends N frames per send_packets call — each needs its OWN
+   * buffer so the per-frame counter stamp (QoS spike uniqueness) differs
+   * within the batch. */
+  std::vector<std::vector<uint8_t>> tx_batch_bufs;
+
+  /* DEVOURER_TX_THREADS=N (A-MPDU feed-depth bench): N-1 auxiliary sender
+   * threads run send_packets floods in parallel with the main loop, each with
+   * its own stamped buffer copies drawing frame counters from a shared atomic
+   * — so the chip's TX queue holds ~N URBs in flight (sync bulk transfers on
+   * one endpoint are legal from multiple threads and simply queue). Deeper
+   * co-residency is what lets the MAC form multi-MPDU aggregates instead of
+   * SIFS-bursting single-MPDU ones. Aux threads emit no events and skip the
+   * hop/thermal machinery; frame accounting rides tx_counter. Default 1. */
+  long tx_threads = 1;
+  if (const char *e = std::getenv("DEVOURER_TX_THREADS")) {
+    tx_threads = std::strtol(e, nullptr, 0);
+    if (tx_threads < 1)
+      tx_threads = 1;
+    if (tx_threads > 1)
+      logger->info("DEVOURER_TX_THREADS — {} parallel senders", tx_threads);
+  }
+  std::atomic<long> tx_counter{0}; /* shared frame-stamp source (threads>1) */
+  std::vector<std::thread> tx_aux;
 
   /* Channel-hopping mode (frequency-diversity validation). When
    * DEVOURER_HOP_CHANNELS="1,6,11" is set the TX loop dwells DWELL_FRAMES
@@ -1060,8 +1151,67 @@ int main(int argc, char **argv) {
       m.stbc = static_cast<uint8_t>(tx_count & 1);   /* 0,1,0,1,… per frame */
       rtlDevice->SetTxMode(m);
     }
-    rc = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
-    ++tx_count;
+    /* QoS spike frames carry a per-frame counter at body[0..3] (MPDU bytes
+     * 26..29) so the receiver can count UNIQUE frames vs hardware re-airings
+     * (the A-MPDU engine renumbers seqs per aggregate, so seq can't). */
+    if (qos_stamp && tx_buf.size() >= 10 + 26 + 4) {
+      uint32_t v = static_cast<uint32_t>(tx_count);
+      std::memcpy(tx_buf.data() + 10 + 26, &v, 4);
+    }
+    /* Lazy-start the auxiliary senders on the first main-loop pass (the
+     * chip is up and the first frame primed by then). */
+    if (tx_threads > 1 && tx_aux.empty()) {
+      for (long t = 1; t < tx_threads; ++t) {
+        tx_aux.emplace_back([&, t]() {
+          std::vector<std::vector<uint8_t>> bufs(
+              static_cast<size_t>(tx_batch > 1 ? tx_batch : 1), tx_buf);
+          std::vector<TxPacketView> views;
+          while (!g_devourer_should_stop) {
+            views.clear();
+            const long base =
+                tx_counter.fetch_add(static_cast<long>(bufs.size()));
+            for (size_t k = 0; k < bufs.size(); ++k) {
+              auto &b = bufs[k];
+              if (qos_stamp && b.size() >= 10 + 26 + 4) {
+                uint32_t v = static_cast<uint32_t>(base + (long)k);
+                std::memcpy(b.data() + 10 + 26, &v, 4);
+              }
+              views.push_back(TxPacketView{b.data(), b.size()});
+            }
+            rtlDevice->send_packets(views.data(), views.size());
+          }
+        });
+      }
+    }
+    if (tx_batch > 1) {
+      /* Batch mode: N frames through send_packets (each keeps its own
+       * descriptor; the library packs them into shared URBs when
+       * DEVOURER_TX_USB_AGG is on). Each batch entry is its own buffer copy
+       * with a DISTINCT counter stamp — stamping one shared buffer would
+       * make every frame in the batch byte-identical and fake a
+       * "first-frame repeated" signature on the receiver. rc = the whole
+       * batch submitted. */
+      tx_batch_bufs.assign(static_cast<size_t>(tx_batch), tx_buf);
+      tx_batch_views.clear();
+      for (long k = 0; k < tx_batch; ++k) {
+        auto &b = tx_batch_bufs[static_cast<size_t>(k)];
+        if (qos_stamp && b.size() >= 10 + 26 + 4) {
+          uint32_t v = static_cast<uint32_t>(
+              tx_threads > 1 ? tx_counter.fetch_add(1) : tx_count + k);
+          std::memcpy(b.data() + 10 + 26, &v, 4);
+        }
+        tx_batch_views.push_back(TxPacketView{b.data(), b.size()});
+      }
+      const size_t okn = rtlDevice->send_packets(tx_batch_views.data(),
+                                                 tx_batch_views.size());
+      rc = okn == tx_batch_views.size();
+      tx_count += tx_batch;
+      if (!hop_channels.empty())
+        frames_in_dwell += tx_batch - 1; /* the shared ++ below adds one */
+    } else {
+      rc = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
+      ++tx_count;
+    }
     if (!hop_channels.empty() && ++frames_in_dwell >= hop_dwell)
       frames_in_dwell = 0;
     if (tx_count <= 10 || tx_count % 500 == 0) {
@@ -1119,6 +1269,11 @@ int main(int argc, char **argv) {
     } else if (tx_interval_ms > 0)
       std::this_thread::sleep_for(std::chrono::milliseconds(tx_interval_ms));
   }
+
+  g_devourer_should_stop = 1; /* stop the aux senders with the main loop */
+  for (auto &th : tx_aux)
+    if (th.joinable())
+      th.join();
 
   /* Bounded hop mode (DEVOURER_HOP_ROUNDS>0) reaches here when its rounds
    * complete; the signal and back-off paths also fall through. */

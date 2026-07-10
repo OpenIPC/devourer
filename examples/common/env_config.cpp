@@ -58,6 +58,8 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.rx.phy_status_8821c = !env_flag("DEVOURER_8821C_NO_PHYST");
   if (env_long("DEVOURER_IGI", &v))
     cfg.rx.igi = static_cast<uint8_t>(v & 0x7f);
+  if (const char *e = env_str("DEVOURER_ACK_RESPONDER"))
+    cfg.rx.ack_responder = devourer::parse_mac(e);
 
   /* ---- tx ---- */
   if (env_long("DEVOURER_TX_EP", &v))
@@ -72,6 +74,14 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.tx.cw_tone = env_flag("DEVOURER_CW_TONE");
   if (env_long("DEVOURER_CW_TONE_GAIN", &v))
     cfg.tx.cw_tone_gain = static_cast<uint8_t>(v) & 0x1F;
+  if (env_long("DEVOURER_TX_USB_AGG", &v) && v > 0)
+    cfg.tx.usb_agg_max = static_cast<unsigned>(v);
+  cfg.tx.report = env_flag("DEVOURER_TX_REPORT");
+  if (const char *e = env_str("DEVOURER_TX_AMPDU_MODE")) {
+    devourer::AmpduMode m;
+    if (devourer::parse_ampdu_mode(e, m))
+      cfg.tx.ampdu = m;
+  }
 
   /* ---- bf ---- */
   if (const char *snd = env_str("DEVOURER_BF_ARM_SOUNDER")) {
@@ -138,6 +148,23 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.debug.log_txpwr = env_flag("DEVOURER_LOG_TXPWR");
   if (const char *e = env_str("DEVOURER_REPLAY_WSEQ"))
     cfg.debug.replay_wseq = e;
+  if (env_long("DEVOURER_TX_QSEL", &v))
+    cfg.debug.tx_qsel = static_cast<uint8_t>(v & 0x1f);
+  /* "max[/density[/rty]]" — A-MPDU spike descriptor overrides. */
+  if (const char *e = env_str("DEVOURER_TX_AMPDU")) {
+    char *end = nullptr;
+    long maxn = std::strtol(e, &end, 0);
+    if (maxn > 0) {
+      cfg.debug.tx_ampdu_max = static_cast<uint8_t>(maxn & 0x1f);
+      if (end && *end == '/') {
+        cfg.debug.tx_ampdu_density =
+            static_cast<uint8_t>(std::strtol(end + 1, &end, 0) & 0x7);
+        if (end && *end == '/')
+          cfg.debug.tx_ampdu_rty =
+              static_cast<uint8_t>(std::strtol(end + 1, nullptr, 0) & 0x3f);
+      }
+    }
+  }
   cfg.debug.hop_prof = env_flag("DEVOURER_HOP_PROF");
   cfg.debug.gaintab_dbg = env_flag("DEVOURER_GAINTAB_DBG");
 

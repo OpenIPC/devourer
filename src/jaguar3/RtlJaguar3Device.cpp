@@ -1,10 +1,16 @@
 #include "RtlJaguar3Device.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <utility>
 #include <vector>
+
+#include "AckResponder.h"
+#include "RadiotapPeek.h" /* send_packets batch pre-parse */
+#include "TxAggPlan.h"    /* USB TX aggregation URB packing */
+#include "TxReport.h"     /* CCX TX-status report decode + tx.report event */
 
 #include "BeamformingSounder.h" /* generation-neutral BF self-sounding recipe */
 
@@ -97,6 +103,8 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
     }
   }
 
+  if (_cfg.rx.ack_responder)
+    SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
   StartRxLoop(std::move(packetProcessor));
 }
 
@@ -218,6 +226,8 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         p.RxAtrib.icv_err = f.icv_err;
         p.RxAtrib.data_rate = f.rx_rate;
         p.RxAtrib.tsfl = f.tsfl;
+        p.RxAtrib.paggr = f.paggr;
+        p.RxAtrib.ppdu_cnt = f.ppdu_cnt;
         p.RxAtrib.drvinfo_sz = static_cast<uint8_t>(f.drvinfo_size);
         p.RxAtrib.shift_sz = f.shift;
         /* RX desc word2 BIT(28) = FW C2H report, not an 802.11 frame. During
@@ -227,6 +237,13 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         bool is_c2h = (data[off + 11] & 0x10) != 0;
         p.RxAtrib.pkt_rpt_type = is_c2h ? RX_PACKET_TYPE::C2H_PACKET
                                         : RX_PACKET_TYPE::NORMAL_RX;
+        /* CCX TX report (DEVOURER_TX_REPORT / SPE_RPT feedback): the halmac
+         * C2H pkt 0xFF/0x0F carries per-frame delivery + retry count —
+         * decode + emit tx.report (src/TxReport.h). */
+        if (is_c2h && devourer::is_ccx_halmac(f.frame, f.frame_len))
+          devourer::emit_tx_report(
+              _logger->events(),
+              devourer::parse_ccx_halmac(f.frame, f.frame_len), "halmac");
         /* Decode the jgr3 PHY-status report (per-frame RSSI/SNR/EVM) when it is
          * present (monitor_rx_cfg enables APP_PHYSTS + RX_DRVINFO_SZ=4, so the
          * 32-byte report is counted in drvinfo). Skips C2H reports and any
@@ -316,6 +333,25 @@ void RtlJaguar3Device::coex_runtime_loop() {
         ++rx;
         if (buf[11] & 0x10) /* RX desc word2 BIT(28) = C2H report */
           ++c2h;
+        /* TX-only sessions get their CCX TX reports (DEVOURER_TX_REPORT) on
+         * this drain — walk the buffer and emit tx.report for each
+         * (src/TxReport.h); the RX loop covers TX+RX sessions. */
+        if (_cfg.tx.report) {
+          size_t off = 0;
+          jaguar3::Rx8822cFrame f{};
+          while (off + jaguar3::RXDESC_SIZE_8822C <= static_cast<size_t>(n) &&
+                 jaguar3::parse_rx_8822c(buf.data() + off,
+                                         static_cast<size_t>(n) - off, f)) {
+            if ((buf[off + 11] & 0x10) &&
+                devourer::is_ccx_halmac(f.frame, f.frame_len))
+              devourer::emit_tx_report(
+                  _logger->events(),
+                  devourer::parse_ccx_halmac(f.frame, f.frame_len), "halmac");
+            if (f.next_offset == 0)
+              break;
+            off += f.next_offset;
+          }
+        }
       }
     } else {
       /* StartRxLoop owns bulk-IN — its async URB queue sees the C2H reports
@@ -510,6 +546,10 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   if (_cfg.tuning.xtal_cap)
     SetXtalCap(*_cfg.tuning.xtal_cap);
   _coex_thread = std::thread([this] { coex_runtime_loop(); });
+  if (_cfg.rx.ack_responder)
+    SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
+  if (_cfg.tx.ampdu)
+    SetAmpduMode(*_cfg.tx.ampdu); /* DEVOURER_TX_AMPDU_MODE */
   _logger->info("Jaguar3: ready for TX (monitor inject)");
 }
 
@@ -1078,15 +1118,144 @@ devourer::ThermalStatus RtlJaguar3Device::GetThermalStatus() {
 bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
   /* The coex runtime thread (coex_runtime_loop) drives the periodic coex
    * decision + FW heartbeats + C2H draining, so the TX hot path stays lean. */
-  /* Parse the radiotap header (same fields the Jaguar1 path reads) and build an
-   * 8822C TX descriptor + synchronous bulk-OUT. The TX path is enabled during
-   * rtw_hal_init (3-wire RF + DACK + bf_init + enable_tx_path), so frames go
-   * on-air at the tuned channel. */
-  if (length < sizeof(struct ieee80211_radiotap_header))
+  /* Build one TXDMA block (48-byte descriptor + frame, build_tx_block) and
+   * synchronously bulk-OUT. The TX path is enabled during rtw_hal_init
+   * (3-wire RF + DACK + bf_init + enable_tx_path), so frames go on-air at the
+   * tuned channel.
+   *
+   * Synchronous, bounded bulk-OUT. The async submit path (_device.send_packet)
+   * never reaped its completions on the Jaguar3 TX loop (nothing calls
+   * libusb_handle_events there), leaking a libusb_transfer per send. A blocking
+   * transfer with a finite timeout completes-or-fails each send and stays
+   * responsive to the caller's stop flag. No per-send clear_halt: resetting the
+   * data-toggle on the hot path corrupts the chip's USB state machine (see
+   * bulk_send_sync_ep). The caller backs off when these fail repeatedly — until
+   * the TX-path enable registers are programmed the chip NAKs every frame, and
+   * hammering a non-draining endpoint is exactly what wedged its USB core. */
+  const uint16_t rlen = devourer::radiotap_hdr_len(packet, length);
+  if (rlen == 0)
     return false;
+  std::vector<uint8_t> usb_frame(jaguar3::TXDESC_SIZE_8822C + (length - rlen),
+                                 0);
+  if (build_tx_block(packet, length, usb_frame.data(), 0) == 0)
+    return false;
+  int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
+                                     usb_frame.data(), usb_frame.size(),
+                                     /*timeout_ms=*/20);
+  return rc >= 0;
+}
+
+size_t RtlJaguar3Device::send_packets(const TxPacketView *pkts, size_t count) {
+  /* USB TX aggregation (DEVOURER_TX_USB_AGG): pack consecutive frames into
+   * shared bulk-OUT URBs — each frame keeps its own 48-byte descriptor, blocks
+   * start 8-byte aligned, the FIRST descriptor carries the block count
+   * (DMA_TXAGG_NUM). Packing rules in src/TxAggPlan.h. Knob off / PCIe -> the
+   * interface-default per-frame loop. */
+  const unsigned agg = _cfg.tx.usb_agg_max;
+  if (agg <= 1 || !_device.is_usb() || count == 0)
+    return IRtlDevice::send_packets(pkts, count);
+
+  devourer::TxAggLimits lim;
+  lim.desc_size = jaguar3::TXDESC_SIZE_8822C;
+  lim.bulk_size = _device.speed() >= devourer::kUsbSpeedSuper  ? 1024
+                  : _device.speed() >= devourer::kUsbSpeedHigh ? 512
+                                                               : 64;
+  /* HalMAC chips parse at most 3 descriptors per bulk transfer (rtw88
+   * usb_tx_agg_desc_num / halmac BLK_DESC_NUM) — beyond that the TXDMA
+   * misparses (bench-proven on the 8822BU sibling: block 1 re-aired agg-num
+   * times). Layout is rtw88-parity: no first-block PKT_OFFSET reserve. */
+  lim.max_frames = std::min<unsigned>(agg, 3u);
+  lim.descs_per_bulk = 0;
+  lim.first_reserve = false;
+
+  size_t done = 0, ok = 0;
+  while (done < count) {
+    /* Collect the contiguous run for ONE URB: well-formed frames staying on
+     * one channel. A frame whose radiotap CHANNEL differs ends the run — the
+     * pending URB airs on the old channel, and the retune happens inside
+     * build_tx_block when that frame leads the next URB. */
+    std::vector<size_t> lens;
+    int run_chan = 0; /* 0 = no per-packet CHANNEL seen yet (current channel) */
+    for (size_t i = done; i < count && lens.size() < lim.max_frames; ++i) {
+      const uint16_t rlen =
+          devourer::radiotap_hdr_len(pkts[i].data, pkts[i].len);
+      if (rlen == 0) {
+        if (lens.empty())
+          ++done; /* skip a malformed leading frame (contract: skipped) */
+        break;
+      }
+      const int want =
+          devourer::radiotap_peek_channel(pkts[i].data, pkts[i].len);
+      if (lens.empty())
+        run_chan = want;
+      else if (want > 0 &&
+               want != (run_chan > 0 ? run_chan : _channel.Channel))
+        break;
+      lens.push_back(pkts[i].len - rlen);
+    }
+    if (lens.empty())
+      continue;
+
+    const devourer::TxAggPlan plan =
+        devourer::plan_tx_agg(lens.data(), lens.size(), lim);
+    if (plan.frames() <= 1) {
+      /* One block (or a frame the URB cap refuses): the classic single-frame
+       * path is byte-identical and uncapped. */
+      if (send_packet(pkts[done].data, pkts[done].len))
+        ++ok;
+      ++done;
+      continue;
+    }
+
+    std::vector<uint8_t> urb(plan.total, 0);
+    size_t built = 0;
+    for (size_t k = 0; k < plan.frames(); ++k) {
+      const uint8_t poff = (k == 0 && plan.shim) ? 1 : 0;
+      if (build_tx_block(pkts[done + k].data, pkts[done + k].len,
+                         urb.data() + plan.blocks[k].offset, poff) == 0)
+        break; /* pre-validated, so only a defensive bail */
+      ++built;
+    }
+    if (built != plan.frames()) {
+      for (size_t k = 0; k < plan.frames(); ++k, ++done)
+        if (send_packet(pkts[done].data, pkts[done].len))
+          ++ok;
+      continue;
+    }
+
+    /* First descriptor advertises the block count. Dword7 sits inside the
+     * checksummed span, so re-checksum (idempotent — the checksum field is
+     * re-zeroed first, and the 8822C span extension reads the PKT_OFFSET
+     * field that is already in place). */
+    uint8_t *first = urb.data() + plan.blocks[0].offset;
+    SET_TX_DESC_DMA_TXAGG_NUM_8822C(first, plan.frames());
+    jaguar3::cal_txdesc_chksum_8822c(first);
+
+    const int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
+                                             urb.data(), urb.size(),
+                                             /*timeout_ms=*/50);
+    devourer::Ev(_logger->events(), "tx.agg")
+        .f("frames", (unsigned long long)plan.frames())
+        .f("bytes", (unsigned long long)urb.size())
+        .f("shim", plan.shim)
+        .f("ok", rc >= 0);
+    if (rc >= 0)
+      ok += plan.frames();
+    done += plan.frames();
+  }
+  return ok;
+}
+
+size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
+                                        uint8_t *out, uint8_t pkt_offset) {
+  /* Parse the radiotap header (same fields the Jaguar1 path reads) and fill
+   * the 8822C TX descriptor + 802.11 frame at `out` (contract in the header
+   * decl). */
+  if (length < sizeof(struct ieee80211_radiotap_header))
+    return 0;
   uint16_t radiotap_length = get_unaligned_le16(packet + 2);
   if (radiotap_length == 0 || static_cast<size_t>(radiotap_length) >= length)
-    return false;
+    return 0;
   const size_t frame_len = length - radiotap_length;
 
   uint8_t fixed_rate = MGN_1M;
@@ -1234,27 +1403,46 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
    * STBC frame the chip can't do. */
   if (stbc && !GetTxCaps().stbc_ok)
     stbc = 0;
-  std::vector<uint8_t> usb_frame(jaguar3::TXDESC_SIZE_8822C + frame_len, 0);
   jaguar3::fill_data_tx_desc_8822c(
-      usb_frame.data(), static_cast<uint16_t>(frame_len),
-      MRateToHwRate(fixed_rate), rate_id, bw_desc, sgi != 0, ldpc != 0, stbc,
-      bmc, ndpa, data_sc);
-  std::memcpy(usb_frame.data() + jaguar3::TXDESC_SIZE_8822C,
-              packet + radiotap_length, frame_len);
-
-  /* Synchronous, bounded bulk-OUT. The async submit path (_device.send_packet)
-   * never reaped its completions on the Jaguar3 TX loop (nothing calls
-   * libusb_handle_events there), leaking a libusb_transfer per send. A blocking
-   * transfer with a finite timeout completes-or-fails each send and stays
-   * responsive to the caller's stop flag. No per-send clear_halt: resetting the
-   * data-toggle on the hot path corrupts the chip's USB state machine (see
-   * bulk_send_sync_ep). The caller backs off when these fail repeatedly — until
-   * the TX-path enable registers are programmed the chip NAKs every frame, and
-   * hammering a non-draining endpoint is exactly what wedged its USB core. */
-  uint8_t tx_ep = _device.first_bulk_out_ep();
-  int rc = _device.bulk_send_sync_ep(tx_ep, usb_frame.data(),
-                                     usb_frame.size(), /*timeout_ms=*/20);
-  return rc >= 0;
+      out, static_cast<uint16_t>(frame_len), MRateToHwRate(fixed_rate), rate_id,
+      bw_desc, sgi != 0, ldpc != 0, stbc, bmc, ndpa, data_sc, pkt_offset);
+  if (_cfg.tx.report) {
+    /* DEVOURER_TX_REPORT: SPE_RPT asks the fw for a per-frame CCX TX report;
+     * the report echoes SW_DEFINE's low byte, so stamp a rotating tag for
+     * per-frame correlation (src/TxReport.h). Both fields sit inside the
+     * checksummed span — re-checksum (idempotent). */
+    SET_TX_DESC_SPE_RPT_8822C(out, 1);
+    SET_TX_DESC_SW_DEFINE_8822C(out, _tx_rpt_tag.fetch_add(1) & 0xff);
+    jaguar3::cal_txdesc_chksum_8822c(out);
+  }
+  const devourer::AmpduMode am = _ampdu; /* one lock-free load */
+  if (am.enabled || _cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {
+    /* A-MPDU descriptor half. The product SetAmpduMode state applies first,
+     * then the raw DEVOURER_TX_QSEL / DEVOURER_TX_AMPDU spike knobs override
+     * for register-level experimentation. All inside the checksummed span —
+     * re-checksum once at the end. */
+    if (am.enabled) {
+      SET_TX_DESC_QSEL_8822C(out, am.tid);
+      SET_TX_DESC_AGG_EN_8822C(out, 1);
+      SET_TX_DESC_MAX_AGG_NUM_8822C(out, am.max_num & 0x1f);
+      SET_TX_DESC_AMPDU_DENSITY_8822C(out, am.density & 0x7);
+      SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(out, am.no_ack ? 0 : 12);
+    }
+    if (_cfg.debug.tx_qsel)
+      SET_TX_DESC_QSEL_8822C(out, *_cfg.debug.tx_qsel);
+    if (_cfg.debug.tx_ampdu_max) {
+      SET_TX_DESC_AGG_EN_8822C(out, 1);
+      SET_TX_DESC_MAX_AGG_NUM_8822C(out, *_cfg.debug.tx_ampdu_max & 0x1f);
+      SET_TX_DESC_AMPDU_DENSITY_8822C(out, _cfg.debug.tx_ampdu_density & 0x7);
+      if (_cfg.debug.tx_ampdu_rty)
+        SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(out, *_cfg.debug.tx_ampdu_rty);
+    }
+    jaguar3::cal_txdesc_chksum_8822c(out);
+  }
+  const size_t frame_off =
+      jaguar3::TXDESC_SIZE_8822C + static_cast<size_t>(pkt_offset) * 8;
+  std::memcpy(out + frame_off, packet + radiotap_length, frame_len);
+  return frame_off + frame_len;
 }
 
 SelectedChannel RtlJaguar3Device::GetSelectedChannel() { return _channel; }
@@ -1280,6 +1468,55 @@ void RtlJaguar3Device::WriteTsf(uint64_t tsf) {
   _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
   _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
 }
+
+bool RtlJaguar3Device::SetAckResponder(const devourer::MacAddr &mac) {
+  /* Hardware ACK responder (src/AckResponder.h): port identity + net_type so
+   * the MAC auto-ACKs unicast frames to `mac`. Same registers the proven
+   * StartBeacon/AP path programs, minus the beacon machinery. Serialized on
+   * _reg_mu like every other register-touching control call. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  devourer::ack::enable(_device, mac.data());
+  _logger->info("Jaguar3: hardware ACK responder armed for "
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                mac.bytes[0], mac.bytes[1], mac.bytes[2], mac.bytes[3],
+                mac.bytes[4], mac.bytes[5]);
+  return true;
+}
+
+void RtlJaguar3Device::ClearAckResponder() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  devourer::ack::disable(_device);
+  _logger->info("Jaguar3: hardware ACK responder disarmed (net_type=NoLink)");
+}
+
+bool RtlJaguar3Device::SetAmpduMode(const devourer::AmpduMode &mode) {
+  /* A-MPDU TX mode (src/AmpduMode.h): record the descriptor state the TX path
+   * reads and program the 8822C aggregate-fill timer live. The descriptor
+   * half is applied per-frame in build_tx_block. The 8822C has no
+   * bring-up 0x04BC write (unlike the 8822B), so clear_burst_mode is a no-op
+   * here — the 0x0455 timer is the pacing lever on this family (the on-air
+   * unlock was bench-proven on the 8822B; the 8822C shares the register). */
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    if (mode.enabled) {
+      if (mode.max_time != 0)
+        _device.rtw_write8(0x0455, mode.max_time);
+    } else {
+      _device.rtw_write8(0x0455, 0x70); /* restore the bring-up default */
+    }
+  }
+  _ampdu = mode;
+  if (mode.enabled)
+    _logger->info("Jaguar3: A-MPDU mode ON (tid={} max={} density={} {} "
+                  "max_time=0x{:02x})",
+                  mode.tid, mode.max_num, mode.density,
+                  mode.no_ack ? "no-ack" : "ack", mode.max_time);
+  else
+    _logger->info("Jaguar3: A-MPDU mode OFF (pacing restored)");
+  return true;
+}
+
+void RtlJaguar3Device::ClearAmpduMode() { SetAmpduMode(devourer::AmpduMode{}); }
 
 bool RtlJaguar3Device::StartBeacon(const uint8_t *beacon, size_t len,
                                       int interval_tu) {

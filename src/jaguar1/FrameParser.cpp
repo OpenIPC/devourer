@@ -98,6 +98,9 @@ static rx_pkt_attrib rtl8812_query_rx_desc_status(uint8_t *pdesc) {
   pattrib.seq_num = GET_RX_STATUS_DESC_SEQ_8812(pdesc);
   pattrib.frag_num = GET_RX_STATUS_DESC_FRAG_8812(pdesc);
   /* fragmentation number */
+  /* A-MPDU marker (dword1[15]): this MPDU arrived inside an aggregated PPDU.
+   * The 8812-series rx-desc has no PPDU counter (that is halmac-only). */
+  pattrib.paggr = GET_RX_STATUS_DESC_PAGGR_8812(pdesc) != 0;
 
   if (GET_RX_STATUS_DESC_RPT_SEL_8812(pdesc)) {
     pattrib.pkt_rpt_type = RX_PACKET_TYPE::C2H_PACKET;

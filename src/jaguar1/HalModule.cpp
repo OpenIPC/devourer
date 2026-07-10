@@ -1778,6 +1778,18 @@ void HalModule::usb_AggSettingTxUpdate_8812A() {
     _device.rtw_write8(REG_TDECTRL + 3, kUsbTxAggDescNum << 1);
     return;
   }
+  /* DEVOURER_TX_USB_AGG: run the kernel's default UsbTxAggMode=1 path (vendor
+   * usb_AggSettingTxUpdate_8812A) so the TXDMA accepts the multi-block
+   * bulk-OUT transfers send_packets builds. Gated on the knob — a no-knob
+   * bring-up stays byte-identical (_usbTxAggMode defaults false). Block-desc
+   * count per chip: 8812A/8811A = 1 (the vendor "OQT overflow" clamp),
+   * 8821A = 6 (kernel default). Must match the descs_per_bulk the URB packer
+   * plans with (RtlJaguarDevice::send_packets). */
+  if (_cfg.tx.usb_agg_max > 0) {
+    _usbTxAggMode = true;
+    _usbTxAggDescNum =
+        _eepromManager->version_id.ICType == CHIP_8821 ? 6 : 1;
+  }
   if (_usbTxAggMode) {
     uint32_t value32 = _device.rtw_read32(REG_TDECTRL);
     value32 = value32 & ~(BLK_DESC_NUM_MASK << BLK_DESC_NUM_SHIFT);

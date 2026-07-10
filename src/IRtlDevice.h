@@ -6,6 +6,8 @@
 #include <functional>
 
 #include "AdapterCaps.h"
+#include "AmpduMode.h"
+#include "DeviceConfig.h"
 #include "AdapterHealth.h"
 #include "RxQuality.h"
 #include "RxSense.h"
@@ -22,6 +24,13 @@
 struct Packet;
 
 using Action_ParsedRadioPacket = std::function<void(const Packet &)>;
+
+/* One TX frame handed to send_packets: radiotap header + 802.11 MPDU, the
+ * same buffer contract as send_packet. */
+struct TxPacketView {
+  const uint8_t *data;
+  size_t len;
+};
 
 /* IRtlDevice is the chip-family-agnostic device contract used by the demos and
  * the WiFiDriver factory. Three implementations exist:
@@ -187,6 +196,59 @@ public:
   virtual devourer::ActiveRxPaths GetActiveRxPaths() { return {}; }
 
   virtual bool send_packet(const uint8_t *packet, size_t length) = 0;
+
+  /* Hardware ACK responder (src/AckResponder.h): program the port identity
+   * (MACID/BSSID = `mac`, net_type = AP) so the MAC auto-ACKs — SIFS-timed,
+   * zero host involvement — any unicast frame addressed to `mac`, while
+   * monitor RX/injection continue unchanged. The reliable-unicast enabler:
+   * a peer TXing to `mac` with normal ack-policy gets hardware
+   * retransmissions until the ACK (its tx.report shows retries~0). `mac`
+   * must be unicast (I/G clear). Turning a passive monitor into an active
+   * transmitter is opt-in only — never a default. Returns false where
+   * unsupported. Clear = net_type back to No Link. */
+  virtual bool SetAckResponder(const devourer::MacAddr &mac) {
+    (void)mac;
+    return false;
+  }
+  virtual void ClearAckResponder() {}
+
+  /* 802.11 A-MPDU TX mode (src/AmpduMode.h): the first-class bundle of the
+   * recipe the spike + pacing sweep proved on-air. When enabled, every data
+   * frame is marked aggregatable (data QSEL + AGG_EN + MAX_AGG_NUM +
+   * AMPDU_DENSITY, and — for the no-BlockAck-peer broadcast case — a per-frame
+   * retry limit of 0), and the call programs the MAC aggregate-fill timer +
+   * burst-mode gate live (the pacing that gates net goodput). Amortizes one
+   * PHY preamble over many MPDUs: +30% on-air goodput at MCS7/20, more at
+   * higher rates. The caller must keep the TX queue fed deep enough for the
+   * MAC to aggregate (send_packets with enough in flight). Off keeps every TX
+   * byte-identical. Returns false where unsupported (USB HalMAC + Jaguar1;
+   * PCIe not wired). The lower-level DEVOURER_TX_QSEL / DEVOURER_TX_AMPDU
+   * spike knobs still compose on top for register-level experimentation. */
+  virtual bool SetAmpduMode(const devourer::AmpduMode & /*mode*/) {
+    return false;
+  }
+  virtual void ClearAmpduMode() {}
+  virtual devourer::AmpduMode GetAmpduMode() { return {}; }
+
+  /* Batch TX: submit `count` frames (each buffer = radiotap header + 802.11
+   * MPDU, the send_packet contract) in one call. With USB TX aggregation
+   * enabled (DeviceConfig tx.usb_agg_max > 0) the USB generations pack
+   * consecutive frames into shared bulk-OUT URBs (see src/TxAggPlan.h) — one
+   * transfer per burst instead of one per frame, and the frames land in the
+   * TXDMA back-to-back. The default (and the PCIe / agg-off behaviour) is a
+   * plain send_packet loop, so callers may use this unconditionally.
+   * Semantics notes: a frame whose radiotap CHANNEL differs from the current
+   * channel flushes the pending URB before the retune (per-packet hopping
+   * stays radiotap-driven); a malformed frame is skipped. Returns the number
+   * of frames successfully submitted. */
+  virtual size_t send_packets(const TxPacketView *pkts, size_t count) {
+    size_t ok = 0;
+    for (size_t i = 0; i < count; ++i)
+      if (pkts[i].data != nullptr && send_packet(pkts[i].data, pkts[i].len))
+        ++ok;
+    return ok;
+  }
+
   virtual SelectedChannel GetSelectedChannel() = 0;
 
   /* Read the 64-bit hardware TSF (Timing Synchronization Function) timer — the

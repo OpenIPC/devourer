@@ -379,7 +379,10 @@ static void packetProcessor(const Packet &packet) {
         devourer::Ev(*g_ev, "rx.txhit")
             .f("hits", hits)
             .f("total_rx", g_rx_count)
-            .f("len", packet.Data.size());
+            .f("len", packet.Data.size())
+            .f("seq", packet.RxAtrib.seq_num)
+            .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
+            .f("ppdu", packet.RxAtrib.ppdu_cnt);
       }
 #if defined(DEVOURER_HAVE_JAGUAR1)
       /* F2: BB-dbgport sweep on the first kCsiMaxFrames canonical-SA frames.
@@ -497,7 +500,16 @@ static void packetProcessor(const Packet &packet) {
             .f("bw", packet.RxAtrib.bw)
             .f("stbc", packet.RxAtrib.stbc)
             .f("ldpc", packet.RxAtrib.ldpc)
-            .f("sgi", packet.RxAtrib.sgi);
+            .f("sgi", packet.RxAtrib.sgi)
+            /* A-MPDU RX markers (src/RxPacket.h): paggr = inside an
+             * aggregate; ppdu = the halmac 2-bit received-PPDU counter
+             * (frames sharing a value shared one PPDU). */
+            .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
+            .f("ppdu", packet.RxAtrib.ppdu_cnt)
+            /* FC flags byte (frame byte 1): bit3 = the 802.11 RETRY flag —
+             * distinguishes hardware retransmissions (e.g. an A-MPDU
+             * re-aired for want of a BlockAck) from first airings. */
+            .f("fc1", packet.Data.size() > 1 ? packet.Data[1] : 0);
         /* tx_tsf: the sender's hardware TX-egress TSF (beacons / probe responses
          * only). Pair with tsfl — the local hardware RX timestamp above — for
          * one-way hardware time sync with no host-clock jitter on either end. */

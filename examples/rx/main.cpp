@@ -484,8 +484,8 @@ static void packetProcessor(const Packet &packet) {
         const int snr[2] = {packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]};
         const size_t body_len =
             packet.Data.size() > 24 ? packet.Data.size() - 24 : 0;
-        devourer::Ev(*g_ev, "rx.frame")
-            .f("rate", packet.RxAtrib.data_rate)
+        auto ev = devourer::Ev(*g_ev, "rx.frame");
+        ev.f("rate", packet.RxAtrib.data_rate)
             .f("len", packet.Data.size())
             .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
             .f("icv", packet.RxAtrib.icv_err ? 1 : 0)
@@ -497,8 +497,13 @@ static void packetProcessor(const Packet &packet) {
             .f("bw", packet.RxAtrib.bw)
             .f("stbc", packet.RxAtrib.stbc)
             .f("ldpc", packet.RxAtrib.ldpc)
-            .f("sgi", packet.RxAtrib.sgi)
-            .hex("body", packet.Data.data() + 24, body_len);
+            .f("sgi", packet.RxAtrib.sgi);
+        /* tx_tsf: the sender's hardware TX-egress TSF (beacons / probe responses
+         * only). Pair with tsfl — the local hardware RX timestamp above — for
+         * one-way hardware time sync with no host-clock jitter on either end. */
+        if (auto tx = packet.TxEgressTsf())
+          ev.f("tx_tsf", (unsigned long long)*tx);
+        ev.hex("body", packet.Data.data() + 24, body_len);
       }
       if (dump_body && hits <= 5) {
         /* Tier-2 health diagnostics alongside the byte mirror: rate (0x04 =

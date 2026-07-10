@@ -887,6 +887,8 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
    * RF18 re-latch edge after the re-clock (see the set_channel_bw narrowband
    * branch). */
   c.narrowband_ok = true;
+  c.hw_rx_timestamp = true;  /* FrameParserJaguar2 fills RxAtrib.tsfl */
+  c.hw_beacon_txtsf = true;  /* StartBeacon: MAC inserts the egress TSF into beacons */
   c.xtal_cap_max = 0x3f; /* 6-bit AFE crystal-cap trim (0x24/0x28) */
   c.xtal_cap_default = _hal.efuse_logical_byte(0xB9) == 0xFF
                            ? 0x20

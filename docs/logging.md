@@ -86,7 +86,7 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | ev | emitter | fields |
 |---|---|---|
 | `rx.pkt` | RX | n, len (first 10 + every 100th frame) |
-| `rx.frame` | RX (`DEVOURER_STREAM_OUT`), duplex | rate, len, crc, icv, rssi[2], evm[2], snr[2], seq, tsfl, bw, stbc, ldpc, sgi, body hex |
+| `rx.frame` | RX (`DEVOURER_STREAM_OUT`), duplex | rate, len, crc, icv, rssi[2], evm[2], snr[2], seq, tsfl, bw, stbc, ldpc, sgi, body hex; `tx_tsf` (sender's hardware egress TSF) on beacons/probe-responses only |
 | `rx.body` | RX (`DEVOURER_DUMP_BODY`) | rate, rssi[2], evm[2], snr[2], crc, len, body hex |
 | `rx.corrupt` | RX (`DEVOURER_RX_DUMP_ALL`) | len, crc, icv, rate, bw, stbc, ldpc, sgi, rssi[2], evm[2], snr[2] |
 | `rx.txhit` | RX, TX | hits, total_rx, len — canonical-SA (57:42:75:05:d6:00) matcher |

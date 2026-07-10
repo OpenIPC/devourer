@@ -203,6 +203,12 @@ public:
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
 
+  /* EXPERIMENTAL (idea 6 spike): load a beacon into the beacon queue and enable
+   * the MAC beacon function so the chip auto-transmits it at each TBTT — a
+   * hardware-timed, host-jitter-free TX. Returns false if unsupported.
+   * `interval_tu` is the beacon interval in TU (1024 µs). */
+  bool StartBeacon(const uint8_t* beacon, size_t len, int interval_tu);
+
   /* Runtime RX-chain selection — the adaptive-link spatial-diversity lever
    * (the read/write superset of the DEVOURER_RX_PATHS env knob). Writes the
    * RX-path-enable mask 0x808[7:0] (bits 0/4 = path A CCK/OFDM, 1/5 = B,

@@ -188,6 +188,12 @@ one `IRtlDevice` interface covers all three generations.
   [spatial diversity](docs/measuring-spatial-diversity.md),
   [bench testing near-field](docs/bench-testing-near-field.md) — measurement
   guides for the built-in radio instrumentation.
+- [Time distribution](docs/time-distribution.md) — LTE-eNB-style over-the-air
+  clock distribution off the hardware beacon TSF: sub-µs downlink, TSF adoption,
+  µs-fine TBTT steering and a converging closed-loop uplink timing advance.
+- [AP mode](docs/ap-mode.md) — devourer as an infrastructure access point a real
+  Linux station associates with: beacon → probe/auth/assoc → DHCP/ARP/ICMP → ping,
+  open or WPA2-PSK (4-way handshake + software CCMP), validated against rtw88.
 
 ## Testing
 

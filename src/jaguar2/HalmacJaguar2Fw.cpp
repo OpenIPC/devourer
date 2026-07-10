@@ -222,7 +222,7 @@ bool HalmacJaguar2Fw::check_fw_chksum(uint32_t mem_addr) {
 }
 
 bool HalmacJaguar2Fw::send_fw_page(uint16_t pg_addr, const uint8_t *chunk,
-                                   uint32_t size) {
+                                   uint32_t size, bool beacon_desc) {
   if (size == 0)
     return false;
 
@@ -232,7 +232,10 @@ bool HalmacJaguar2Fw::send_fw_page(uint16_t pg_addr, const uint8_t *chunk,
   uint8_t cr1 = r8(REG_CR + 1);
   w8(REG_CR + 1, static_cast<uint8_t>(cr1 | 0x1));
   uint8_t txq2 = r8(REG_FWHW_TXQ_CTRL + 2);
-  w8(REG_FWHW_TXQ_CTRL + 2, static_cast<uint8_t>(txq2 & ~(1u << 6)));
+  /* rtw88 clears BIT_EN_BCNQ_DL during download only for PCIe; on USB keep it
+   * set so a TBTT-overlapping beacon refresh isn't suppressed (mirrors J3). */
+  if (!beacon_desc)
+    w8(REG_FWHW_TXQ_CTRL + 2, static_cast<uint8_t>(txq2 & ~(1u << 6)));
 
   /* Minimal rsvd-page TX descriptor, matching the vendor rtl88x2bu DLFW golden
    * (and the in-tree rtw88_8822bu) exactly: TXPKTSIZE + OFFSET + QSEL_BEACON.
@@ -272,6 +275,14 @@ bool HalmacJaguar2Fw::send_fw_page(uint16_t pg_addr, const uint8_t *chunk,
     SET_TX_DESC_OFFSET_8822B(d, desclen);
   }
   SET_TX_DESC_QSEL_8822B(d, QSEL_BEACON);
+  if (beacon_desc) {
+    /* Real beacon-TX descriptor (rtw_tx_rsvd_page_pkt_info_update RSVD_BEACON):
+     * broadcast + hardware sequence + qsel-seq disabled, or the TBTT engine won't
+     * transmit the stored page (mirrors the J3 fix). */
+    SET_TX_DESC_BMC_8822B(d, 1);
+    SET_TX_DESC_EN_HWSEQ_8822B(d, 1);
+    SET_TX_DESC_DISQSELSEQ_8822B(d, 1);
+  }
   cal_txdesc_chksum_8822b(d);
 
   /* Submit the rsvd-page bulk. The vendor (usb_write_data_not_xmitframe ->

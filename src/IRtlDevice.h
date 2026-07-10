@@ -199,6 +199,78 @@ public:
    * exception). */
   virtual uint64_t ReadTsf() { return 0; }
 
+  /* Write the 64-bit MAC TSF (REG_TSFTR). Sets the free-running microsecond clock
+   * — the primitive for TSF *adoption* (a slave slewing its clock onto the
+   * master's, so its per-frame `tsfl` reads in the master's timebase). The
+   * counter keeps running, so a read-add-write shifts by an approximate delta (a
+   * control loop absorbs the read→write latency). NOTE: this moves the reported
+   * TSF (and the beacon-body timestamp) but NOT the beacon TBTT air-time — a
+   * separate per-port timer drives the TBTT (bench-proven). To steer the
+   * hardware-timed beacon (the uplink timing-advance actuator) use
+   * AdjustBeaconTiming. No-op where unsupported. */
+  virtual void WriteTsf(uint64_t tsf) { (void)tsf; }
+
+  /* Load a beacon into the beacon reserved-page + enable the MAC beacon function,
+   * so the chip AUTO-TRANSMITS it at each TBTT — hardware-timed and
+   * hardware-TSF-stamped (the MAC inserts the live 64-bit TSF into the beacon
+   * timestamp at TX), fully host-jitter-free. `beacon` is a full 802.11 beacon
+   * MPDU (a leading radiotap header, if present, is stripped); addr2/addr3 set
+   * the port MAC/BSSID. `interval_tu` is the beacon interval in TU (1 TU =
+   * 1024 µs). One call suffices — the hardware beacons indefinitely. Implemented
+   * on Jaguar2/3 (HalMAC reserved-page download); returns false where unsupported
+   * (Jaguar1 has no reserved-page path). See docs/time-distribution.md. */
+  virtual bool StartBeacon(const uint8_t *beacon, size_t len,
+                           int interval_tu) {
+    (void)beacon; (void)len; (void)interval_tu;
+    return false;
+  }
+
+  /* Disable / restore the MAC EDCCA energy-detect gate (the vendor dis_cca
+   * recipe). With EDCCA off the MAC does not defer TX to carrier-sense, so a
+   * TBTT beacon airs exactly on schedule instead of after a CSMA backoff — the
+   * lever that collapses the hardware-beacon downlink residual to sub-µs on a
+   * shared channel (the master owns the channel). Also DEVOURER_DIS_CCA at
+   * construction. No-op where unimplemented. */
+  virtual void SetCcaMode(bool disabled) { (void)disabled; }
+
+  /* Shift the next hardware beacon TBTT by `microseconds` (>0 = later/retard,
+   * <0 = earlier/advance), quantized to whole TU (1 TU = 1024 µs). One-shot
+   * REG_BCN_INTERVAL tweak: runs one beacon interval at (nominal + round(µs/1024))
+   * TU then restores nominal, so the next TBTT — and the cadence thereafter —
+   * shifts by that many TU. This is the beacon-timing / uplink timing-advance
+   * actuator: WriteTsf moves the reported TSF but NOT the TBTT air-time (a
+   * separate per-port timer drives it), whereas the interval tweak steers it
+   * deterministically (the 802.11 IBSS/TSF-merge mechanism; bench-proven to the
+   * microsecond). Requires an active StartBeacon. BLOCKS the caller ~one beacon
+   * interval (the tweaked interval must latch and fire once before restore).
+   * Returns the actual applied shift in µs (TU-quantized); 0 if no active beacon
+   * or |microseconds| < 512. Jaguar3 only in practice: the Jaguar2 8822B beacon
+   * engine drops the beacon on any TBTT re-latch (bench-proven), so J2 refuses
+   * (returns 0) rather than silently kill it. Base is a no-op. */
+  virtual int32_t AdjustBeaconTiming(int32_t microseconds) {
+    (void)microseconds;
+    return 0;
+  }
+
+  /* Fine (sub-TU, microsecond-granular) variant of AdjustBeaconTiming. Shifts the
+   * next beacon TBTT by `microseconds` (>0 = later/retard, <0 = earlier/advance)
+   * by toggling the MAC beacon function off, shifting the port-0 TSF, and toggling
+   * it back on so the TBTT counter re-derives from the shifted TSF. Unlike the
+   * interval-tweak AdjustBeaconTiming (quantized to whole TU), this steers at
+   * microsecond resolution — the µs-fine uplink timing-advance actuator. Note it
+   * also shifts this port's reported TSF (and the beacon-body timestamp) by the
+   * same amount, which is the intended behaviour for a UE advancing its own
+   * timebase. The USB read→write latency adds a sub-ms offset (~0.5–1.2 ms) that
+   * a closed timing-advance loop absorbs — the *resolution* is microseconds.
+   * Requires an active StartBeacon; returns the applied shift in µs. Jaguar3 only:
+   * the Jaguar2 beacon engine survives neither the beacon-function toggle nor the
+   * interval tweak (both drop the beacon), so J2 refuses (returns 0). Base is a
+   * no-op. */
+  virtual int32_t AdjustBeaconTimingFine(int32_t microseconds) {
+    (void)microseconds;
+    return 0;
+  }
+
   /* Clean shutdown: halt TRX DMA and power the chip down to a re-enumerable
    * state (mirrors the kernel driver's card-disable on unbind). Call after the
    * RX/TX loop exits and BEFORE releasing/closing the USB interface, so the

@@ -66,6 +66,10 @@ public:
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
+  void WriteTsf(uint64_t tsf) override;
+  bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+  int32_t AdjustBeaconTiming(int32_t microseconds) override;
+  int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
   void Stop() override;
 
   /* Runtime TX-power control (IRtlDevice contract; see src/TxPower.h).
@@ -149,9 +153,10 @@ public:
    * vendor rtw_proc.c dis_cca recipe (MAC BIT_DIS_EDCCA 0x520[15] + EDCCA-mask
    * countdown 0x524[11], BB 0x1a9c[20]/0x1a14[9:8]/0x1d58[0xff8]); disabled=false
    * restores the inverse. Sticky across SetMonitorChannel; serialized on _reg_mu
-   * against the coex tick. Measure-first — kept for the swept-AWGN A/B; not on
-   * IRtlDevice until the measurement justifies it. */
-  void SetCcaMode(bool disabled);
+   * against the coex tick. On IRtlDevice: measured to collapse the hardware-beacon
+   * downlink residual from ~472 µs to 0.39 µs on a crowded channel (the TBTT
+   * beacon airs on schedule instead of after a CSMA backoff). */
+  void SetCcaMode(bool disabled) override;
 
   /* Adapter-health probes (see src/AdapterHealth.h). EFUSE probe is 8822C
    * only — the 8822E's OTP is not reliably readable post-bring-up by design
@@ -252,6 +257,9 @@ private:
   std::thread _coex_thread;
   volatile bool _coex_stop = false;
   void coex_runtime_loop();
+  /* Nominal beacon interval in TU while a beacon is active (0 = none); the
+   * AdjustBeaconTiming one-shot tweak restores to this. */
+  int _bcn_interval_tu = 0;
   /* StartRxLoop stop request (StopRxLoop). */
   volatile bool _rx_stop = false;
   /* True while StartRxLoop owns bulk-IN (gates the coex thread's drain). */

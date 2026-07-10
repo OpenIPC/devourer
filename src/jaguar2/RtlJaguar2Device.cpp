@@ -91,6 +91,10 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
 
   if (!_macinit.init_mac_cfg(channel.ChannelWidth))
     throw std::runtime_error("RtlJaguar2Device: init_mac_cfg failed");
+  /* Propagate the queue-init reserved-page boundary to the FW downloader (0 during
+   * the pre-queue-init FW stage) so a beacon rsvd-page download targets the real
+   * boundary, not page 0 — the page-0 bug fixed on J3. */
+  _fw.set_rsvd_boundary(_macinit.rsvd_boundary());
   if (_device.is_usb())
     _macinit.init_usb_cfg(); /* PCIe RX = the BD ring, no RX-DMA agg cfg */
   _macinit.enable_bb_rf(true);
@@ -1132,6 +1136,86 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
 
 SelectedChannel RtlJaguar2Device::GetSelectedChannel() { return _channel; }
 
+bool RtlJaguar2Device::StartBeacon(const uint8_t *beacon, size_t len,
+                                   int interval_tu) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* Mirrors the working Jaguar3 path (RtlJaguar3Device::StartBeacon) — the same
+   * two bugs (beacon at page 0, radiotap-in-rsvd-page) applied here. Validated on
+   * hardware: RTL8812BU (2357:012d, Jaguar2) auto-transmits the beacon at TBTT,
+   * decoded by an 8822E RX (~100 beacons / 12 s). */
+  size_t rt = (len >= 4) ? (size_t)(beacon[2] | (beacon[3] << 8)) : 0;
+  if (rt > len) rt = 0;
+  const uint8_t *mpdu = beacon + rt;
+  size_t mpdu_len = len - rt;
+  /* Download to the real reserved-page boundary (send_fw_page beacon descriptor:
+   * QSEL_BEACON + BMC/HWSEQ/DISQSELSEQ + bcn-valid latch). */
+  if (!_fw.download_rsvd_page(_fw.rsvd_boundary(), mpdu,
+                              static_cast<uint32_t>(mpdu_len))) {
+    _logger->error("beacon(J2): rsvd-page beacon download failed");
+    return false;
+  }
+  /* Port identity: MAC (REG_MACID 0x0610) + BSSID (REG_BSSID 0x0618) from the
+   * MPDU's addr2/addr3 (rtw_vif_port_config). */
+  if (mpdu_len >= 24) {
+    const uint8_t *sa = mpdu + 10, *bs = mpdu + 16;
+    _device.rtw_write<uint32_t>(0x0610, (uint32_t)sa[0] | (sa[1] << 8) |
+                                            (sa[2] << 16) | ((uint32_t)sa[3] << 24));
+    _device.rtw_write16(0x0614, (uint16_t)(sa[4] | (sa[5] << 8)));
+    _device.rtw_write<uint32_t>(0x0618, (uint32_t)bs[0] | (bs[1] << 8) |
+                                            (bs[2] << 16) | ((uint32_t)bs[3] << 24));
+    _device.rtw_write16(0x061c, (uint16_t)(bs[4] | (bs[5] << 8)));
+  }
+  /* net_type = AP (REG_CR+2 0x0102 [1:0]); interval; BCN_CTRL = EN_BCN_FUNCTION |
+   * DIS_TSF_UDT (0x18); EN_BCNQ_DL (BIT22 REG_FWHW_TXQ_CTRL). */
+  uint8_t nt = _device.rtw_read8(0x0102);
+  _device.rtw_write8(0x0102, static_cast<uint8_t>((nt & ~0x03u) | 0x03u));
+  _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */,
+                      static_cast<uint16_t>(interval_tu));
+  _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 3) | (1u << 4));
+  uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
+  _device.rtw_write<uint32_t>(0x0420, txq | (1u << 22) /* BIT_EN_BCNQ_DL */);
+  _logger->info("beacon(J2): beacon@rsvd_boundary, net_type->AP, BCN_CTRL=0x18, "
+                "EN_BCNQ_DL (interval {} TU)", interval_tu);
+  return true;
+}
+
+int32_t RtlJaguar2Device::AdjustBeaconTiming(int32_t microseconds) {
+  (void)microseconds;
+  /* Beacon-TBTT STEERING IS NOT SUPPORTED ON JAGUAR2. Both mechanisms that work
+   * on Jaguar3 drop the beacon on the 8822B engine (bench-proven on the 8812BU,
+   * the beacon stops airing after the tweak): the one-shot REG_BCN_INTERVAL
+   * (0x0554) tweak AND the EN_BCN_FUNCTION-toggle + TSF-shift both lose the
+   * bcn-valid latch, and J2 does not retain the beacon bytes to re-download and
+   * re-assert it. So refuse rather than silently kill the beacon. (A fix would
+   * store the beacon bytes in StartBeacon and re-download after the tweak — the
+   * Jaguar3 store-bytes path — but that needs its own hardware validation.) The
+   * downlink (StartBeacon + SetCcaMode) is unaffected; only the uplink-TA
+   * actuator is J3-only. */
+  static bool warned = false;
+  if (!warned) {
+    warned = true;
+    _logger->warn("beacon(J2): TBTT steering not supported (8822B beacon engine "
+                  "drops the beacon on a TBTT re-latch) — uplink-TA is Jaguar3-only");
+  }
+  return 0;
+}
+
+int32_t RtlJaguar2Device::AdjustBeaconTimingFine(int32_t microseconds) {
+  return AdjustBeaconTiming(microseconds);  // both unsupported on J2 (beacon drops)
+}
+
+void RtlJaguar2Device::SetCcaMode(bool disabled) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  uint32_t v520 = _device.rtw_read<uint32_t>(0x0520);
+  uint32_t v524 = _device.rtw_read<uint32_t>(0x0524);
+  if (disabled) { v520 |= (1u << 15); v524 &= ~(1u << 11); }
+  else          { v520 &= ~(1u << 15); v524 |= (1u << 11); }
+  _device.rtw_write<uint32_t>(0x0520, v520);
+  _device.rtw_write<uint32_t>(0x0524, v524);
+  _logger->info("Jaguar2: MAC EDCCA {}", disabled ? "DISABLED (dis_cca)"
+                                                  : "enabled (default)");
+}
+
 uint64_t RtlJaguar2Device::ReadTsf() {
   /* REG_TSFTR 0x0560 (low) / 0x0564 (high); hi/lo/hi with a wrap retry. Under
    * _reg_mu (shared with the coex/thermal tick). NB starved to 0 under a heavy
@@ -1144,6 +1228,14 @@ uint64_t RtlJaguar2Device::ReadTsf() {
     lo = _device.rtw_read<uint32_t>(0x0560);
   }
   return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
+void RtlJaguar2Device::WriteTsf(uint64_t tsf) {
+  /* REG_TSFTR 0x0560 (low) / 0x0564 (high). Serialized on _reg_mu against the
+   * coex/thermal tick. The counter keeps running, so this sets it to ~tsf. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
 }
 
 void RtlJaguar2Device::Stop() {

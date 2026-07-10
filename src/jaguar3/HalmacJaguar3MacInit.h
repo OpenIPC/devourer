@@ -40,6 +40,11 @@ public:
    * LLT auto-init timeout (the only failure path in the ported flow). */
   bool init_mac_cfg(ChannelWidth_t bw);
 
+  /* Reserved-page boundary computed by priority_queue_cfg (txff_pg_num -
+   * rsvd_pg_num) — the head page of the beacon/rsvd region, where the beacon is
+   * downloaded and BCN_HEAD points. Valid after init_mac_cfg. */
+  uint16_t rsvd_boundary() const { return _rsvd_boundary; }
+
 private:
   bool init_trx_cfg();
   bool priority_queue_cfg();
@@ -52,6 +57,7 @@ private:
   void init_rate_fallback_ctrl();
   void cfg_mac_clk();
 
+  uint16_t _rsvd_boundary = 0;
   RtlAdapter _device;
   Logger_t _logger;
 };

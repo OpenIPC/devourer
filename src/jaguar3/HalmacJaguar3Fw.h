@@ -46,6 +46,23 @@ public:
    * downloaded-but-never-booted MCU — the dying-adapter signature. */
   const devourer::FwBootStatus &boot_status() const { return _boot; }
 
+  /* Load an arbitrary beacon into the page-0 beacon rsvd-page for TBTT auto-TX
+   * (experimental — reuses the DLFW send_fw_page: QSEL_BEACON bulk-OUT +
+   * bcn-valid latch). */
+  bool download_rsvd_page(uint16_t pg_addr, const uint8_t *buf, uint32_t size) {
+    return send_fw_page(pg_addr, buf, size, /*beacon_desc=*/true);
+  }
+  /* The reserved-page boundary (halmac txff_alloc.rsvd_boundary) — the head page
+   * of the reserved region, where the beacon lives and BCN_HEAD points. Valid
+   * after the firmware download. */
+  uint16_t rsvd_boundary() const { return _rsvd_boundary; }
+  /* Set the reserved-page boundary from MacInit's priority_queue_cfg. The FW
+   * download stages chunks BEFORE the queue init runs, so _rsvd_boundary defaults
+   * to 0 and send_fw_page's restore points BCN_HEAD at page 0; the caller must
+   * set the real boundary post-queue-init so the beacon downloads to the right
+   * page AND the head is restored there (where the TBTT engine reads). */
+  void set_rsvd_boundary(uint16_t b) { _rsvd_boundary = b; }
+
 private:
   /* --- ported halmac DLFW steps --- */
   bool start_dlfw(const uint8_t *fw_bin, size_t size);
@@ -61,7 +78,8 @@ private:
 
   /* Per-chunk transport (halmac send_fwpkt_88xx/dl_rsvd_page_88xx): build the
    * 8822C rsvd-page TX descriptor and bulk-OUT the chunk. */
-  bool send_fw_page(uint16_t pg_addr, const uint8_t *chunk, uint32_t size);
+  bool send_fw_page(uint16_t pg_addr, const uint8_t *chunk, uint32_t size,
+                    bool beacon_desc = false);
 
   /* --- register helpers (HALMAC_REG_R/W*) --- */
   uint8_t r8(uint16_t reg);

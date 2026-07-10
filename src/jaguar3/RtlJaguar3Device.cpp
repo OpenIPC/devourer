@@ -1271,6 +1271,138 @@ uint64_t RtlJaguar3Device::ReadTsf() {
   return (static_cast<uint64_t>(hi) << 32) | lo;
 }
 
+void RtlJaguar3Device::WriteTsf(uint64_t tsf) {
+  /* REG_TSFTR 0x0560 (low) / 0x0564 (high). Serialized on _reg_mu against the
+   * coex tick. The counter keeps running, so this sets it to ~tsf. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
+}
+
+bool RtlJaguar3Device::StartBeacon(const uint8_t *beacon, size_t len,
+                                      int interval_tu) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* The caller may pass [radiotap][802.11 MPDU]; the rsvd-page beacon must be the
+   * RAW 802.11 MPDU (the TX descriptor carries the PHY, not a radiotap header).
+   * radiotap it_len is bytes [2:3] LE. Strip it. */
+  size_t rt = (len >= 4) ? (size_t)(beacon[2] | (beacon[3] << 8)) : 0;
+  if (rt > len) rt = 0;
+  const uint8_t *mpdu = beacon + rt;
+  size_t mpdu_len = len - rt;
+  /* Load the beacon into the beacon rsvd-page (halmac send_fw_page: QSEL_BEACON
+   * bulk-OUT + bcn-valid latch), same mechanism as J2. */
+  if (!_hal.download_beacon_page(mpdu, static_cast<uint32_t>(mpdu_len))) {
+    _logger->error("beacon-tbtt(J3): rsvd-page beacon download failed");
+    return false;
+  }
+  /* Port identity (rtw88 rtw_vif_port_config) — the beaconing port needs its own
+   * MAC address (REG_MACID 0x0610) and BSSID (REG_BSSID 0x0618). devourer's
+   * monitor bring-up sets NEITHER (usbmon diff vs the kernel IBSS), so the port
+   * has no identity and the MAC won't transmit its beacon. Take them from the
+   * MPDU's addr2 (SA) / addr3 (BSSID). */
+  if (mpdu_len >= 24) {
+    const uint8_t *sa = mpdu + 10, *bs = mpdu + 16;
+    _device.rtw_write<uint32_t>(0x0610, (uint32_t)sa[0] | (sa[1] << 8) |
+                                            (sa[2] << 16) | ((uint32_t)sa[3] << 24));
+    _device.rtw_write16(0x0614, (uint16_t)(sa[4] | (sa[5] << 8)));
+    _device.rtw_write<uint32_t>(0x0618, (uint32_t)bs[0] | (bs[1] << 8) |
+                                            (bs[2] << 16) | ((uint32_t)bs[3] << 24));
+    _device.rtw_write16(0x061c, (uint16_t)(bs[4] | (bs[5] << 8)));
+  }
+  /* Port-0 network type = AP (rtw88 rtw_vif_port_config: net_type at REG_CR
+   * [17:16] = REG_CR+2 byte [1:0]); a beacon airs only in AP/Ad-hoc mode. */
+  uint8_t nt = _device.rtw_read8(0x0102 /* REG_CR+2 */);
+  _device.rtw_write8(0x0102, static_cast<uint8_t>((nt & ~0x03u) | 0x03u));
+  /* Beacon interval; the TSF free-runs from init so TBTT fires on TSF % interval. */
+  _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */,
+                      static_cast<uint16_t>(interval_tu));
+  /* BCN_CTRL = EN_BCN_FUNCTION | DIS_TSF_UDT (rtw88 bcn_ctrl for AP/Ad-hoc). */
+  _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 3) | (1u << 4));
+  /* THE enable: BIT_EN_BCNQ_DL (BIT22) in REG_FWHW_TXQ_CTRL — rtw88 turns
+   * beaconing on here (mac80211 BSS_CHANGED_BEACON_ENABLED: rtw_write32_set(
+   * REG_FWHW_TXQ_CTRL, BIT_EN_BCNQ_DL)). Without it the beacon never leaves the
+   * queue no matter what BCN_CTRL / net_type say. */
+  uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
+  _device.rtw_write<uint32_t>(0x0420, txq | (1u << 22) /* BIT_EN_BCNQ_DL */);
+  /* H2C RSVD_PAGE (cmd 0x00): rtw88 sends this after each beacon download to tell
+   * the FW the rsvd-page locations. The combo FW gates beacon TX, so it may need
+   * this to start beaconing. Payload from the golden dump (probe/pspoll/null page
+   * offsets) — approximate for the beacon-only layout, a probe of the hypothesis. */
+  _hal.send_h2c_raw(0x690c0100u, 0x00000000u);
+  _logger->info("beacon-tbtt(J3): beacon loaded, net_type->AP, BCN_CTRL=0x18, "
+                "EN_BCNQ_DL set + H2C RSVD_PAGE (TXQ 0x{:08x}, interval {} TU)",
+                _device.rtw_read<uint32_t>(0x0420), interval_tu);
+
+  /* A SINGLE download is enough — the hardware auto-transmits the beacon at every
+   * TBTT (bench-verified: one download airs ~8 beacons/s indefinitely on both
+   * bands), so there is no periodic re-download. rtw88 re-downloads each interval
+   * only to refresh dynamic beacon CONTENT (TSF/TIM); that would need a
+   * content-update path (not this static beacon) and belongs behind a
+   * DeviceConfig knob, not env — the library reads no environment. */
+  _bcn_interval_tu = interval_tu > 0 ? interval_tu : 100;
+  return true;
+}
+
+int32_t RtlJaguar3Device::AdjustBeaconTiming(int32_t microseconds) {
+  int nominal;
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    nominal = _bcn_interval_tu;
+  }
+  if (nominal <= 0) return 0;  // no active beacon
+  /* Round to whole TU (REG_BCN_INTERVAL is integer TU); sign follows the request
+   * (>0 = later/retard => longer one-shot interval, <0 = earlier/advance). */
+  int delta_tu = (microseconds >= 0 ? microseconds + 512 : microseconds - 512) / 1024;
+  if (delta_tu == 0) return 0;  // below 1-TU resolution
+  int one = nominal + delta_tu;
+  if (one < 1) {  // can't shorten below one TU
+    one = 1;
+    delta_tu = one - nominal;
+  }
+  /* Latch one interval at the tweaked length; after exactly one TBTT fires under
+   * it the phase has advanced/retarded by delta_tu TU, so restore nominal. The
+   * TSF free-runs — this steers the beacon-engine TBTT counter, not the TSF
+   * (WriteTsf can't; bench-proven). Serialize the two writes on _reg_mu, but
+   * release it across the wait so the coex tick / other setters aren't starved. */
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */, static_cast<uint16_t>(one));
+  }
+  std::this_thread::sleep_for(std::chrono::microseconds(one * 1024 + 2000));
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    _device.rtw_write16(0x0554, static_cast<uint16_t>(nominal));
+  }
+  _logger->info("beacon(J3): TBTT shift {} TU ({} us) via one-shot interval "
+                "{}->{}->{} TU",
+                delta_tu, delta_tu * 1024, nominal, one, nominal);
+  return delta_tu * 1024;
+}
+
+int32_t RtlJaguar3Device::AdjustBeaconTimingFine(int32_t microseconds) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_bcn_interval_tu <= 0) return 0;  // no active beacon
+  /* A bare TSF write with the beacon function running leaves the TBTT latched
+   * (bench-proven: WriteTsf moved the reported TSF but not the air-time). The
+   * vendor reset_tsf path clears EN_BCN_FUNCTION first, so do the same: toggle
+   * the beacon function off, shift the port-0 TSF, toggle on — the TBTT counter
+   * re-derives from the shifted TSF at microsecond resolution. TBTT fires at
+   * TSF % interval, so subtracting `microseconds` advances (<0) / retards (>0)
+   * the next boundary by that many µs. */
+  uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
+  uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
+  uint64_t tsf = (static_cast<uint64_t>(hi) << 32) | lo;
+  uint64_t nt = tsf - static_cast<uint64_t>(static_cast<int64_t>(microseconds));
+  uint8_t bc = _device.rtw_read8(0x0550 /* REG_BCN_CTRL */);
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc & ~(1u << 3)));  // clear EN_BCN_FUNCTION
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(nt));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(nt >> 32));
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc | (1u << 3)));   // set EN_BCN_FUNCTION
+  _logger->info("beacon(J3): fine TBTT shift {} us (TSF toggle: EN_BCN off/shift/on)",
+                microseconds);
+  return microseconds;
+}
+
 void RtlJaguar3Device::SetTxMode(const devourer::TxMode &mode) {
   _tx_mode_default = mode;
 }

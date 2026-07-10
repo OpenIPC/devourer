@@ -9,6 +9,7 @@
 #include "SignalStop.h"
 #include "ToneMask.h"
 #include "TxAggPlan.h" /* USB TX aggregation URB packing */
+#include "TxReport.h"  /* CCX TX-status report decode + tx.report event */
 
 #include <algorithm>
 #include <chrono>
@@ -717,6 +718,11 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
     SET_TX_DESC_GID_8812(usb_frame, static_cast<uint8_t>(0x3F));
   }
   SET_TX_DESC_SW_DEFINE_8812(usb_frame, static_cast<uint16_t>(0x001));
+  /* DEVOURER_TX_REPORT: SPE_RPT asks the fw for a per-frame CCX TX report
+   * (delivered / retry count / queue time — src/TxReport.h). Dword2, inside
+   * the checksummed 32 bytes. */
+  if (_cfg.tx.report)
+    SET_TX_DESC_SPE_RPT_8812(usb_frame, 1);
   SET_TX_DESC_RETRY_LIMIT_ENABLE_8812(usb_frame, 1);
   if (!is_8814a) {
     /* 88XXau leaves DATA_RETRY_LIMIT=0 for monitor injection on 8814A
@@ -927,6 +933,18 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         _rxpaths.add(p.RxAtrib.rssi, _eepromManager->numTotalRfPath);
         if (_cfg.tuning.cfo_track)
           _cfo.add(p.RxAtrib.cfo_tail); /* closed-loop CFO input (#217) */
+      }
+      /* CCX TX report (DEVOURER_TX_REPORT / SPE_RPT feedback): C2H id 0x03,
+       * 8812/8821 format (byte0=id, byte1=seq, 6-byte payload) — decode +
+       * emit tx.report (src/TxReport.h). The 8814A firmware uses its own
+       * TX_RPT layout (examples/rx best-effort decodes it), so skip there. */
+      if (p.RxAtrib.pkt_rpt_type == RX_PACKET_TYPE::C2H_PACKET &&
+          _eepromManager->version_id.ICType != CHIP_8814A &&
+          p.Data.size() >= 8 && p.Data[0] == 0x03) {
+        const devourer::TxReport r =
+            devourer::parse_ccx_8812(p.Data.data() + 2, p.Data.size() - 2);
+        if (r.valid)
+          devourer::emit_tx_report(_logger->events(), r, "8812");
       }
       _packetProcessor(p);
     }

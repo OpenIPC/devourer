@@ -119,6 +119,15 @@ struct DeviceConfig {
      * on Jaguar1) and the vendor packing rules (see src/TxAggPlan.h). USB
      * only; the PCIe rings take frames individually. */
     unsigned usb_agg_max = 0;
+    /* env: DEVOURER_TX_REPORT — per-frame TX-status reports (src/TxReport.h):
+     * sets SPE_RPT in every data TX descriptor so the firmware answers each
+     * transmission with a CCX report (delivered/retry-drop + hardware retry
+     * count + queue time + final rate), decoded off the C2H RX path into
+     * `tx.report` events. The TX-side link sensor. On the HalMAC chips the
+     * descriptor SW_DEFINE also carries a rotating 8-bit tag the report
+     * echoes (per-frame correlation). Default off (descriptors
+     * byte-identical). Needs an RX loop to deliver the C2H reports. */
+    bool report = false;
   } tx;
 
   /* ---- Beamforming (bring-up-time arming; see docs/beamforming-*.md) --- */

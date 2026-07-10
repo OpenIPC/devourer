@@ -9,6 +9,7 @@
 
 #include "RadiotapPeek.h" /* send_packets batch pre-parse */
 #include "TxAggPlan.h"    /* USB TX aggregation URB packing */
+#include "TxReport.h"     /* CCX TX-status report decode + tx.report event */
 
 #include "BeamformingSounder.h" /* generation-neutral BF self-sounding recipe */
 
@@ -231,6 +232,13 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         bool is_c2h = (data[off + 11] & 0x10) != 0;
         p.RxAtrib.pkt_rpt_type = is_c2h ? RX_PACKET_TYPE::C2H_PACKET
                                         : RX_PACKET_TYPE::NORMAL_RX;
+        /* CCX TX report (DEVOURER_TX_REPORT / SPE_RPT feedback): the halmac
+         * C2H pkt 0xFF/0x0F carries per-frame delivery + retry count —
+         * decode + emit tx.report (src/TxReport.h). */
+        if (is_c2h && devourer::is_ccx_halmac(f.frame, f.frame_len))
+          devourer::emit_tx_report(
+              _logger->events(),
+              devourer::parse_ccx_halmac(f.frame, f.frame_len), "halmac");
         /* Decode the jgr3 PHY-status report (per-frame RSSI/SNR/EVM) when it is
          * present (monitor_rx_cfg enables APP_PHYSTS + RX_DRVINFO_SZ=4, so the
          * 32-byte report is counted in drvinfo). Skips C2H reports and any
@@ -320,6 +328,25 @@ void RtlJaguar3Device::coex_runtime_loop() {
         ++rx;
         if (buf[11] & 0x10) /* RX desc word2 BIT(28) = C2H report */
           ++c2h;
+        /* TX-only sessions get their CCX TX reports (DEVOURER_TX_REPORT) on
+         * this drain — walk the buffer and emit tx.report for each
+         * (src/TxReport.h); the RX loop covers TX+RX sessions. */
+        if (_cfg.tx.report) {
+          size_t off = 0;
+          jaguar3::Rx8822cFrame f{};
+          while (off + jaguar3::RXDESC_SIZE_8822C <= static_cast<size_t>(n) &&
+                 jaguar3::parse_rx_8822c(buf.data() + off,
+                                         static_cast<size_t>(n) - off, f)) {
+            if ((buf[off + 11] & 0x10) &&
+                devourer::is_ccx_halmac(f.frame, f.frame_len))
+              devourer::emit_tx_report(
+                  _logger->events(),
+                  devourer::parse_ccx_halmac(f.frame, f.frame_len), "halmac");
+            if (f.next_offset == 0)
+              break;
+            off += f.next_offset;
+          }
+        }
       }
     } else {
       /* StartRxLoop owns bulk-IN — its async URB queue sees the C2H reports
@@ -1365,6 +1392,15 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   jaguar3::fill_data_tx_desc_8822c(
       out, static_cast<uint16_t>(frame_len), MRateToHwRate(fixed_rate), rate_id,
       bw_desc, sgi != 0, ldpc != 0, stbc, bmc, ndpa, data_sc, pkt_offset);
+  if (_cfg.tx.report) {
+    /* DEVOURER_TX_REPORT: SPE_RPT asks the fw for a per-frame CCX TX report;
+     * the report echoes SW_DEFINE's low byte, so stamp a rotating tag for
+     * per-frame correlation (src/TxReport.h). Both fields sit inside the
+     * checksummed span — re-checksum (idempotent). */
+    SET_TX_DESC_SPE_RPT_8822C(out, 1);
+    SET_TX_DESC_SW_DEFINE_8822C(out, _tx_rpt_tag.fetch_add(1) & 0xff);
+    jaguar3::cal_txdesc_chksum_8822c(out);
+  }
   const size_t frame_off =
       jaguar3::TXDESC_SIZE_8822C + static_cast<size_t>(pkt_offset) * 8;
   std::memcpy(out + frame_off, packet + radiotap_length, frame_len);

@@ -201,6 +201,9 @@ private:
    * brought up; recorded and folded at InitWrite before. */
   std::atomic<int> _tx_pwr_override{-1};
   std::atomic<int> _tx_pwr_offset_steps{0};
+  /* Rotating SW_DEFINE tag stamped when tx.report is on — the CCX report
+   * echoes its low byte, correlating reports to frames (src/TxReport.h). */
+  std::atomic<uint16_t> _tx_rpt_tag{0};
   /* Rail-hit flags from the last apply (references clamped at 0/0x7f). */
   std::atomic<bool> _txpwr_sat_low{false};
   std::atomic<bool> _txpwr_sat_high{false};

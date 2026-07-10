@@ -15,6 +15,7 @@
 
 #include "RadiotapPeek.h"
 #include "TxAggPlan.h"
+#include "TxReport.h"
 
 #include "BeamformingSounder.h"
 #include "ChannelFreq.h" /* radiotap CHANNEL freq -> channel (per-packet hop) */
@@ -457,6 +458,13 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         const bool is_c2h = (data[off + 11] & 0x10) != 0;
         p.RxAtrib.pkt_rpt_type = is_c2h ? RX_PACKET_TYPE::C2H_PACKET
                                         : RX_PACKET_TYPE::NORMAL_RX;
+        /* CCX TX report (DEVOURER_TX_REPORT / SPE_RPT feedback): the halmac
+         * C2H pkt 0xFF/0x0F carries per-frame delivery + retry count —
+         * decode + emit tx.report (src/TxReport.h). */
+        if (is_c2h && devourer::is_ccx_halmac(f.frame, f.frame_len))
+          devourer::emit_tx_report(
+              _logger->events(),
+              devourer::parse_ccx_halmac(f.frame, f.frame_len), "halmac");
         /* Per-frame RSSI/SNR/EVM from the jgr2 PHY-status (present when
          * APP_PHYSTS is on, i.e. drvinfo carries the 32-byte report). CCK rates
          * (DESC_RATE1M..11M = 0..3) use type0, everything else type1. C2H has no
@@ -1244,6 +1252,15 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
       bw_desc, sgi != 0, ldpc != 0, stbc, bmc,
       static_cast<uint8_t>(hdrlen >> 1), ndpa, data_sc, pkt_pwr_step,
       pkt_offset);
+  if (_cfg.tx.report) {
+    /* DEVOURER_TX_REPORT: SPE_RPT asks the fw for a per-frame CCX TX report;
+     * the report echoes SW_DEFINE's low byte, so stamp a rotating tag for
+     * per-frame correlation (src/TxReport.h). Both fields sit inside the
+     * checksummed span — re-checksum (idempotent). */
+    SET_TX_DESC_SPE_RPT_8822B(out, 1);
+    SET_TX_DESC_SW_DEFINE_8822B(out, _tx_rpt_tag.fetch_add(1) & 0xff);
+    jaguar2::cal_txdesc_chksum_8822b(out);
+  }
   const size_t frame_off =
       jaguar2::TXDESC_SIZE_8822B + static_cast<size_t>(pkt_offset) * 8;
   std::memcpy(out + frame_off, dot11, frame_len);

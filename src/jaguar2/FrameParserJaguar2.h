@@ -53,6 +53,9 @@ constexpr size_t RXDESC_SIZE_8822B = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_NDPA_8822B(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x0C, 22, 2, v)
 #define SET_TX_DESC_DISQSELSEQ_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x00, 31, 1, v)
 #define SET_TX_DESC_G_ID_8822B(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x08, 24, 6, v)
+/* Per-frame TX-status report request (halmac SPE_RPT): the fw answers this
+ * frame's transmission with a CCX C2H report (src/TxReport.h). */
+#define SET_TX_DESC_SPE_RPT_8822B(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x08, 19, 1, v)
 #define SET_TX_DESC_RTY_LMT_EN_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 17, 1, v)
 #define SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 18, 6, v)
 #define SET_TX_DESC_SW_DEFINE_8822B(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x18, 0, 12, v)

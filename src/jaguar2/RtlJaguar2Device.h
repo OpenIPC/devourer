@@ -199,6 +199,9 @@ private:
   std::atomic<int> _tx_pwr_offset_steps{0};
   /* Default per-packet TXPWR_OFSET LUT step (0 = none) — see SetTxPacketPowerStep. */
   std::atomic<uint8_t> _tx_pkt_pwr_step{0};
+  /* Rotating SW_DEFINE tag stamped when tx.report is on — the CCX report
+   * echoes its low byte, correlating reports to frames (src/TxReport.h). */
+  std::atomic<uint16_t> _tx_rpt_tag{0};
   /* Bring-up completion: gates the live apply in the TX-power setters. */
   bool _brought_up = false;
   /* Re-program TXAGC from the current knob state at the current channel:

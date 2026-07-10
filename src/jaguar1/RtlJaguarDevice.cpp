@@ -408,7 +408,7 @@ size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
                                                                : 64;
   /* MAX_TX_AGG_PACKET_NUMBER_8812: the Jaguar1 TXDMA takes at most 64 blocks
    * per transfer (vendor hal_com_reg.h). */
-  lim.max_frames = std::min(agg, 64u);
+  lim.max_frames = std::min<unsigned>(agg, 64u);
   /* Vendor UsbTxAggDescNum: how many descriptors may START inside one bulk
    * window — 8812A silicon overflows its OQT beyond 1 (the vendor "OQT
    * overflow" clamp); the 8821A takes 6, the 8814A runs the kernel's 3. */

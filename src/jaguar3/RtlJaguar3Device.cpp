@@ -1164,7 +1164,7 @@ size_t RtlJaguar3Device::send_packets(const TxPacketView *pkts, size_t count) {
    * usb_tx_agg_desc_num / halmac BLK_DESC_NUM) — beyond that the TXDMA
    * misparses (bench-proven on the 8822BU sibling: block 1 re-aired agg-num
    * times). Layout is rtw88-parity: no first-block PKT_OFFSET reserve. */
-  lim.max_frames = std::min(agg, 3u);
+  lim.max_frames = std::min<unsigned>(agg, 3u);
   lim.descs_per_bulk = 0;
   lim.first_reserve = false;
 

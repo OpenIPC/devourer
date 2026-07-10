@@ -609,3 +609,19 @@ if(Python3_Interpreter_FOUND)
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/rx_tone_localize.py --self-test
     )
 endif()
+
+# --- selftest aggregate ----------------------------------------------------
+# `cmake --build build --target selftests` builds every headless test binary in
+# one go. The mingw CI job builds this instead of a hand-maintained target list:
+# it can't build the whole tree (some examples aren't mingw targets), yet `ctest`
+# runs every registered test, so a binary missing from the build is a "Not Run"
+# failure. Collected by naming convention — every selftest target ends in
+# "Selftest" — so a newly-added selftest is picked up automatically and can never
+# be silently skipped. Must sit AFTER all *Selftest targets are defined.
+add_custom_target(selftests)
+get_directory_property(_dvr_targets BUILDSYSTEM_TARGETS)
+foreach(_dvr_t IN LISTS _dvr_targets)
+    if(_dvr_t MATCHES "Selftest$")
+        add_dependencies(selftests ${_dvr_t})
+    endif()
+endforeach()

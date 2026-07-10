@@ -354,6 +354,9 @@ size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
    * overflow" clamp); the 8821A takes 6, the 8814A runs the kernel's 3. */
   const auto ic = _eepromManager->version_id.ICType;
   lim.descs_per_bulk = ic == CHIP_8814A ? 3 : ic == CHIP_8821 ? 6 : 1;
+  /* Vendor rtl8812au layout: the first aggregated block carries the 8-byte
+   * PKT_OFFSET reserve (xmit_frame pkt_offset = 1). */
+  lim.first_reserve = true;
 
   size_t done = 0, ok = 0;
   while (done < count) {
@@ -771,6 +774,8 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
       SET_TX_DESC_AGG_ENABLE_8812(usb_frame, 1);
       SET_TX_DESC_MAX_AGG_NUM_8812(usb_frame, *_cfg.debug.tx_ampdu_max & 0x1f);
       SET_TX_DESC_AMPDU_DENSITY_8812(usb_frame, _cfg.debug.tx_ampdu_density & 0x7);
+      if (_cfg.debug.tx_ampdu_rty)
+        SET_TX_DESC_DATA_RETRY_LIMIT_8812(usb_frame, *_cfg.debug.tx_ampdu_rty);
     }
   }
 

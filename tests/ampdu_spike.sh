@@ -77,6 +77,15 @@ run_cell ampdu_q0     DEVOURER_TX_QOS_NOACK=1 DEVOURER_TX_QSEL=0 \
 run_cell ampdu_q0_urb DEVOURER_TX_QOS_NOACK=1 DEVOURER_TX_QSEL=0 \
                       DEVOURER_TX_AMPDU=$AGG/$DENSITY \
                       DEVOURER_TX_BATCH=$AGG DEVOURER_TX_USB_AGG=$AGG
+# AGG_EN + data queue + RETRY LIMIT 0: the no-ack flavor. Without it the MAC
+# retries every aggregate to the limit waiting for a BlockAck no monitor-mode
+# receiver ever sends (bench-proven: 92% retry-flagged, unique goodput 7x
+# below singles) — rty=0 airs each aggregate exactly once.
+run_cell ampdu_rty0   DEVOURER_TX_QOS_NOACK=1 DEVOURER_TX_QSEL=0 \
+                      DEVOURER_TX_AMPDU=$AGG/$DENSITY/0
+run_cell ampdu_rty0_urb DEVOURER_TX_QOS_NOACK=1 DEVOURER_TX_QSEL=0 \
+                      DEVOURER_TX_AMPDU=$AGG/$DENSITY/0 \
+                      DEVOURER_TX_BATCH=$AGG DEVOURER_TX_USB_AGG=$AGG
 # optional: unicast RA, normal ack policy (nobody ACKs -> hw retry behaviour).
 if [ -n "$FULL" ]; then
   run_cell ampdu_ucast DEVOURER_TX_QSEL=0 DEVOURER_TX_AMPDU=$AGG/$DENSITY \
@@ -86,16 +95,16 @@ fi
 
 echo
 echo "=== RESULTS (payload=$PAYLOAD rate=$RATE agg=$AGG) ==="
-python3 - "$OUT" "$PAYLOAD" <<'PYEOF'
+python3 - "$OUT" "$PAYLOAD" "$SECS" <<'PYEOF'
 import glob, json, os, sys
 
-out, payload = sys.argv[1], int(sys.argv[2])
+out, payload, secs = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
 # RX pkt_len may include the 4-byte FCS depending on APPFCS handling.
 want_len = {payload, payload + 4}
 
 for path in sorted(glob.glob(os.path.join(out, "rx_*.jsonl"))):
     cell = os.path.basename(path)[3:-6]
-    frames = []
+    frames, uniq, retry = [], set(), 0
     for line in open(path, errors="replace"):
         if not line.startswith('{"ev":"rx.frame"'):
             continue
@@ -105,28 +114,30 @@ for path in sorted(glob.glob(os.path.join(out, "rx_*.jsonl"))):
             continue
         if ev.get("len") in want_len and not ev.get("crc"):
             frames.append(ev)
+            if ev.get("fc1", 0) & 0x08:
+                retry += 1
+            body = ev.get("body", "")
+            if len(body) >= 12:
+                uniq.add(body[4:12])  # txdemo per-frame counter, MPDU bytes 26..29
     n = len(frames)
     if n == 0:
-        print(f"{cell:>14}: NO FRAMES (delivery broken in this cell?)")
+        print(f"{cell:>16}: NO FRAMES (delivery broken in this cell?)")
         continue
     paggr = sum(1 for f in frames if f.get("paggr"))
-    # Burst structure from the 2-bit PPDU counter: consecutive frames sharing
-    # a value shared one PPDU. Also cross-check with tsfl adjacency (<200 us).
+    # Burst structure: subframes of one PPDU latch the SAME rx tsfl.
     bursts, cur = [], 1
     for a, b in zip(frames, frames[1:]):
-        same_ppdu = a.get("ppdu") == b.get("ppdu")
-        dt = (b.get("tsfl", 0) - a.get("tsfl", 0)) & 0xFFFFFFFF
-        if same_ppdu and dt < 200:
+        if ((b.get("tsfl", 0) - a.get("tsfl", 0)) & 0xFFFFFFFF) == 0:
             cur += 1
         else:
             bursts.append(cur); cur = 1
     bursts.append(cur)
     mean_burst = sum(bursts) / len(bursts)
     max_burst = max(bursts)
-    multi = sum(b for b in bursts if b > 1)
-    verdict = "AGGREGATED" if (max_burst >= 4 and multi > n * 0.5) else \
-              "partial" if max_burst >= 2 and paggr else "singles"
-    print(f"{cell:>14}: {verdict:>10}  frames={n} paggr={paggr} "
+    agg = "AGGREGATED" if max_burst >= 4 and paggr > n * 0.5 else \
+          "partial" if max_burst >= 2 and paggr else "singles"
+    print(f"{cell:>16}: {agg:>10}  rx={n} unique={len(uniq)} "
+          f"({len(uniq)/secs:.0f} uniq fps)  retry_flagged={100*retry//max(n,1)}% "
           f"mean_burst={mean_burst:.1f} max_burst={max_burst}")
 PYEOF
 echo "raw logs: $OUT"

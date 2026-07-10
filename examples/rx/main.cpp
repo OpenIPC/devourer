@@ -505,7 +505,11 @@ static void packetProcessor(const Packet &packet) {
              * aggregate; ppdu = the halmac 2-bit received-PPDU counter
              * (frames sharing a value shared one PPDU). */
             .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
-            .f("ppdu", packet.RxAtrib.ppdu_cnt);
+            .f("ppdu", packet.RxAtrib.ppdu_cnt)
+            /* FC flags byte (frame byte 1): bit3 = the 802.11 RETRY flag —
+             * distinguishes hardware retransmissions (e.g. an A-MPDU
+             * re-aired for want of a BlockAck) from first airings. */
+            .f("fc1", packet.Data.size() > 1 ? packet.Data[1] : 0);
         /* tx_tsf: the sender's hardware TX-egress TSF (beacons / probe responses
          * only). Pair with tsfl — the local hardware RX timestamp above — for
          * one-way hardware time sync with no host-clock jitter on either end. */

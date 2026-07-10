@@ -679,7 +679,9 @@ int main(int argc, char **argv) {
    * the QoS ack-policy to No-Ack (the wfb-style broadcast flavor). Body =
    * 64 zero bytes; DEVOURER_TX_PAYLOAD_BYTES below pads it further. Overrides
    * the PKT_PWR/NDPA frame shapes. */
+  bool qos_stamp = false;
   if (std::getenv("DEVOURER_TX_QOS_DATA") != nullptr) {
+    qos_stamp = true;
     static const uint8_t kQosSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
     uint8_t ra[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
     if (const char *e = std::getenv("DEVOURER_TX_RA")) {
@@ -811,6 +813,10 @@ int main(int argc, char **argv) {
       logger->info("DEVOURER_TX_BATCH — send_packets batches of {}", tx_batch);
   }
   std::vector<TxPacketView> tx_batch_views;
+  /* Batch mode sends N frames per send_packets call — each needs its OWN
+   * buffer so the per-frame counter stamp (QoS spike uniqueness) differs
+   * within the batch. */
+  std::vector<std::vector<uint8_t>> tx_batch_bufs;
 
   /* Channel-hopping mode (frequency-diversity validation). When
    * DEVOURER_HOP_CHANNELS="1,6,11" is set the TX loop dwells DWELL_FRAMES
@@ -1115,12 +1121,31 @@ int main(int argc, char **argv) {
       m.stbc = static_cast<uint8_t>(tx_count & 1);   /* 0,1,0,1,… per frame */
       rtlDevice->SetTxMode(m);
     }
+    /* QoS spike frames carry a per-frame counter at body[0..3] (MPDU bytes
+     * 26..29) so the receiver can count UNIQUE frames vs hardware re-airings
+     * (the A-MPDU engine renumbers seqs per aggregate, so seq can't). */
+    if (qos_stamp && tx_buf.size() >= 10 + 26 + 4) {
+      uint32_t v = static_cast<uint32_t>(tx_count);
+      std::memcpy(tx_buf.data() + 10 + 26, &v, 4);
+    }
     if (tx_batch > 1) {
-      /* Batch mode: N copies of the frame through send_packets (each keeps
-       * its own descriptor; the library packs them into shared URBs when
-       * DEVOURER_TX_USB_AGG is on). rc = the whole batch submitted. */
-      tx_batch_views.assign(static_cast<size_t>(tx_batch),
-                            TxPacketView{tx_buf.data(), tx_buf.size()});
+      /* Batch mode: N frames through send_packets (each keeps its own
+       * descriptor; the library packs them into shared URBs when
+       * DEVOURER_TX_USB_AGG is on). Each batch entry is its own buffer copy
+       * with a DISTINCT counter stamp — stamping one shared buffer would
+       * make every frame in the batch byte-identical and fake a
+       * "first-frame repeated" signature on the receiver. rc = the whole
+       * batch submitted. */
+      tx_batch_bufs.assign(static_cast<size_t>(tx_batch), tx_buf);
+      tx_batch_views.clear();
+      for (long k = 0; k < tx_batch; ++k) {
+        auto &b = tx_batch_bufs[static_cast<size_t>(k)];
+        if (qos_stamp && b.size() >= 10 + 26 + 4) {
+          uint32_t v = static_cast<uint32_t>(tx_count + k);
+          std::memcpy(b.data() + 10 + 26, &v, 4);
+        }
+        tx_batch_views.push_back(TxPacketView{b.data(), b.size()});
+      }
       const size_t okn = rtlDevice->send_packets(tx_batch_views.data(),
                                                  tx_batch_views.size());
       rc = okn == tx_batch_views.size();

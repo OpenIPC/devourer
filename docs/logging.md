@@ -86,10 +86,10 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | ev | emitter | fields |
 |---|---|---|
 | `rx.pkt` | RX | n, len (first 10 + every 100th frame) |
-| `rx.frame` | RX (`DEVOURER_STREAM_OUT`), duplex | rate, len, crc, icv, rssi[2], evm[2], snr[2], seq, tsfl, bw, stbc, ldpc, sgi, body hex; `tx_tsf` (sender's hardware egress TSF) on beacons/probe-responses only |
+| `rx.frame` | RX (`DEVOURER_STREAM_OUT`), duplex | rate, len, crc, icv, rssi[2], evm[2], snr[2], seq, tsfl, bw, stbc, ldpc, sgi, paggr, ppdu, fc1 (FC flags byte; bit3 = 802.11 RETRY), body hex; `tx_tsf` (sender's hardware egress TSF) on beacons/probe-responses only |
 | `rx.body` | RX (`DEVOURER_DUMP_BODY`) | rate, rssi[2], evm[2], snr[2], crc, len, body hex |
 | `rx.corrupt` | RX (`DEVOURER_RX_DUMP_ALL`) | len, crc, icv, rate, bw, stbc, ldpc, sgi, rssi[2], evm[2], snr[2] |
-| `rx.txhit` | RX, TX | hits, total_rx, len — canonical-SA (57:42:75:05:d6:00) matcher |
+| `rx.txhit` | RX, TX | hits, total_rx, len, seq, paggr, ppdu — canonical-SA (57:42:75:05:d6:00) matcher |
 | `rx.count` | TX (its RX thread) | total, len |
 | `rx.path` | RX (`DEVOURER_RX_ALLPATHS`) | seq, rssi[4], snr[4], evm[4] |
 | `rx.path_mask` | L (toggle spec) | t, mask "0xNN" |
@@ -106,6 +106,8 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 |---|---|---|
 | `tx.frame` | TX | n, rc — precoder demo variant: n, ok |
 | `tx.stats` | TX | submitted, failed, was_timeout, last_rc |
+| `tx.agg` | L (`DEVOURER_TX_USB_AGG`, send_packets) | frames, bytes, shim, ok — one per multi-frame bulk-OUT URB |
+| `tx.report` | L (`DEVOURER_TX_REPORT`, CCX decode) | state (0=delivered, 1=retry-drop), ok, retries, final_rate, queue_time_raw, bmc, macid, fmt ("8812"\|"halmac"); halmac adds tag (SW_DEFINE echo), rts_retries, missed |
 | `tx.status` | RX, duplex (C2H TX_RPT decode) | hoff, queue, retry, airtime_us, rate |
 | `tx.queue` | RX (`DEVOURER_QUEUE_POLL_MS`, 8814) | q1…q5 "0x%08x" |
 | `tx.contx` | TX (continuous mode) | mcs, t_ms |

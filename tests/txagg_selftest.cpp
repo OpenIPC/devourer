@@ -42,7 +42,8 @@ static devourer::TxAggLimits lim_halmac_hs() {
 }
 
 static void test_plan_basic() {
-  /* Three 1500-byte frames: blocks at 8-aligned offsets, no shim needed. */
+  /* HalMAC policy (rtw88 parity): NO first-block reserve — blocks at
+   * 8-aligned offsets, stride = 48 + rnd8(frame). */
   const size_t lens[] = {1500, 1500, 1500};
   const auto p = devourer::plan_tx_agg(lens, 3, lim_halmac_hs());
   CHECK(p.frames() == 3, "basic: frames=%zu want 3", p.frames());
@@ -58,49 +59,74 @@ static void test_plan_basic() {
   }
   CHECK(p.total == p.blocks[2].offset + p.blocks[2].length,
         "basic: total %zu mismatch", p.total);
-  CHECK(!p.shim, "basic: unexpected shim");
+  CHECK(!p.shim, "basic: unexpected reserve in halmac policy");
   CHECK(p.total % 512 != 0, "basic: total %zu on bulk boundary", p.total);
+
+  /* Jaguar1 policy (vendor parity): reserve present by default. */
+  auto lim1 = lim_halmac_hs();
+  lim1.desc_size = 40;
+  lim1.first_reserve = true;
+  const auto q = devourer::plan_tx_agg(lens, 3, lim1);
+  CHECK(q.frames() == 3, "basic-j1: frames=%zu", q.frames());
+  CHECK(q.shim, "basic-j1: reserve missing");
+  CHECK(q.blocks[0].length == 40 + 8 + 1500, "basic-j1: block0 len %zu",
+        q.blocks[0].length);
+  CHECK(q.blocks[1].length == 40 + 1500, "basic-j1: block1 len %zu",
+        q.blocks[1].length);
+  CHECK(q.total % 512 != 0, "basic-j1: total %zu on boundary", q.total);
 }
 
 static void test_plan_shim() {
-  /* One frame sized so desc+frame == 512 exactly -> the shim must fire and
-   * move the total off the boundary. */
+  /* HalMAC policy: a 464-byte frame alone (48+464 = 512, exact multiple) ->
+   * the escape INSERTS the reserve: shim=true, total 520. */
   const size_t lens1[] = {512 - 48};
   const auto p1 = devourer::plan_tx_agg(lens1, 1, lim_halmac_hs());
   CHECK(p1.frames() == 1, "shim1: frames=%zu", p1.frames());
-  CHECK(p1.shim, "shim1: shim not applied at total==512");
+  CHECK(p1.shim, "shim1: reserve not inserted at total==512");
   CHECK(p1.total == 520, "shim1: total=%zu want 520", p1.total);
   CHECK(p1.blocks[0].length == 48 + 8 + (512 - 48), "shim1: block0 len %zu",
         p1.blocks[0].length);
 
-  /* Two frames landing exactly on 1024 (two bulk packets): 512-48 = 464 and
-   * second block padded start. Construct: block0 = 512 (aligned end 512),
-   * block1 = 512 -> total 1024. */
-  const size_t lens2[] = {464, 464};
-  const auto p2 = devourer::plan_tx_agg(lens2, 2, lim_halmac_hs());
-  CHECK(p2.frames() == 2, "shim2: frames=%zu", p2.frames());
-  CHECK(p2.shim, "shim2: shim not applied at total==1024");
-  CHECK(p2.total == 1032, "shim2: total=%zu want 1032", p2.total);
-  CHECK(p2.blocks[1].offset == 512 + 8, "shim2: block1 offset %zu want 520",
-        p2.blocks[1].offset);
-  CHECK(p2.blocks[1].offset % 8 == 0, "shim2: block1 not aligned");
+  /* Off-boundary frame: no reserve at all. */
+  const size_t lens_off[] = {456};
+  const auto po = devourer::plan_tx_agg(lens_off, 1, lim_halmac_hs());
+  CHECK(!po.shim, "shim-off: unexpected reserve");
+  CHECK(po.total == 504, "shim-off: total=%zu want 504", po.total);
 
-  /* Sweep: no plan may ever total an exact bulk multiple. */
-  for (size_t flen = 1; flen < 1600; ++flen) {
-    const size_t lens[] = {flen, flen, flen, flen};
-    const auto p = devourer::plan_tx_agg(lens, 4, lim_halmac_hs());
-    if (p.frames() != 0)
-      CHECK(p.total % 512 != 0, "sweep: flen=%zu total=%zu on boundary", flen,
-            p.total);
+  /* Jaguar1 policy removal: reserved total 40+8+464 = 512 -> escape DROPS
+   * the reserve, total 504. */
+  auto lim1 = lim_halmac_hs();
+  lim1.desc_size = 40;
+  lim1.first_reserve = true;
+  const size_t lens_rm[] = {464};
+  const auto pr = devourer::plan_tx_agg(lens_rm, 1, lim1);
+  CHECK(pr.frames() == 1, "shim-rm: frames=%zu", pr.frames());
+  CHECK(!pr.shim, "shim-rm: reserve not removed at reserved-total==512");
+  CHECK(pr.total == 504, "shim-rm: total=%zu want 504", pr.total);
+  CHECK(pr.blocks[0].length == 40 + 464, "shim-rm: block0 len %zu",
+        pr.blocks[0].length);
+
+  /* Sweep both policies: no plan may ever total an exact bulk multiple. */
+  for (int reserve = 0; reserve < 2; ++reserve) {
+    auto lim = lim_halmac_hs();
+    lim.first_reserve = reserve != 0;
+    for (size_t flen = 1; flen < 1600; ++flen) {
+      const size_t lens[] = {flen, flen, flen, flen};
+      const auto p = devourer::plan_tx_agg(lens, 4, lim);
+      if (p.frames() != 0)
+        CHECK(p.total % 512 != 0, "sweep(res=%d): flen=%zu total=%zu on boundary",
+              reserve, flen, p.total);
+    }
   }
 }
 
 static void test_plan_oqt_guard() {
-  /* 8812A-style descs_per_bulk=1: a second small block would start inside the
-   * first 512-byte window -> packing stops at 1 frame. */
+  /* 8812A-style descs_per_bulk=1 (Jaguar1 policy): a second small block would
+   * start inside the first 512-byte window -> packing stops at 1 frame. */
   auto lim = lim_halmac_hs();
   lim.desc_size = 40;
   lim.descs_per_bulk = 1;
+  lim.first_reserve = true;
   const size_t small[] = {100, 100, 100, 100};
   const auto p1 = devourer::plan_tx_agg(small, 4, lim);
   CHECK(p1.frames() == 1, "oqt1: frames=%zu want 1", p1.frames());
@@ -110,11 +136,10 @@ static void test_plan_oqt_guard() {
   const auto p2 = devourer::plan_tx_agg(big, 4, lim);
   CHECK(p2.frames() == 4, "oqt2: frames=%zu want 4", p2.frames());
 
-  /* HalMAC descs_per_bulk=3 with tiny frames: the guard counts each next
-   * start inside the first window and stops at the cap -> 3 frames (the
-   * vendor loop breaks after appending the frame whose NEXT start is the
-   * 3rd in-window). */
+  /* HalMAC flat cap: max_frames clamps regardless of frame size (the chip
+   * parses at most 3 descriptors per bulk transfer). */
   auto lim3 = lim_halmac_hs();
+  lim3.max_frames = 3;
   const size_t tiny[] = {40, 40, 40, 40, 40, 40, 40, 40};
   const auto p3 = devourer::plan_tx_agg(tiny, 8, lim3);
   CHECK(p3.frames() == 3, "oqt3: frames=%zu want 3", p3.frames());

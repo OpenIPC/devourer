@@ -989,8 +989,13 @@ size_t RtlJaguar2Device::send_packets(const TxPacketView *pkts, size_t count) {
   lim.bulk_size = _device.speed() >= devourer::kUsbSpeedSuper  ? 1024
                   : _device.speed() >= devourer::kUsbSpeedHigh ? 512
                                                                : 64;
-  lim.max_frames = std::min(agg, 255u);
-  lim.descs_per_bulk = 3; /* halmac BLK_DESC_NUM (8822B and 8821C) */
+  /* HalMAC chips parse at most 3 descriptors per bulk transfer (rtw88
+   * usb_tx_agg_desc_num / halmac BLK_DESC_NUM) — beyond that the TXDMA
+   * misparses (bench-proven on the 8822BU: block 1 re-aired agg-num times).
+   * Layout is rtw88-parity: no first-block PKT_OFFSET reserve. */
+  lim.max_frames = std::min(agg, 3u);
+  lim.descs_per_bulk = 0;
+  lim.first_reserve = false;
 
   size_t done = 0, ok = 0;
   while (done < count) {
@@ -1274,6 +1279,8 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
       SET_TX_DESC_AGG_EN_8822B(out, 1);
       SET_TX_DESC_MAX_AGG_NUM_8822B(out, *_cfg.debug.tx_ampdu_max & 0x1f);
       SET_TX_DESC_AMPDU_DENSITY_8822B(out, _cfg.debug.tx_ampdu_density & 0x7);
+      if (_cfg.debug.tx_ampdu_rty)
+        SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(out, *_cfg.debug.tx_ampdu_rty);
     }
     jaguar2::cal_txdesc_chksum_8822b(out);
   }

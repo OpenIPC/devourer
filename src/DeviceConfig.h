@@ -253,6 +253,12 @@ struct DeviceConfig {
      * DEVOURER_TX_QOS_DATA) and USB TX agg for co-queueing. */
     std::optional<uint8_t> tx_ampdu_max;
     uint8_t tx_ampdu_density = 0;
+    /* Optional third component of DEVOURER_TX_AMPDU ("max[/density[/rty]]"):
+     * override the per-frame data retry limit (RTY_LMT_EN stays 1). The
+     * A-MPDU spike found the MAC retries an aggregate to the limit waiting
+     * for a BlockAck no monitor-mode receiver sends — rty=0 airs each
+     * aggregate exactly once (the broadcast/no-ack flavor). */
+    std::optional<uint8_t> tx_ampdu_rty;
   } debug;
 
   /* ---- USB / process environment -------------------------------------- */

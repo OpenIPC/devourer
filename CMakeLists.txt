@@ -564,6 +564,16 @@ target_link_libraries(AdapterCapsSelftest PRIVATE devourer)
 
 add_test(NAME adapter_caps_derive COMMAND AdapterCapsSelftest)
 
+# Headless guard for the TsfSync one-way time-distribution fit (src/TsfSync.h):
+# skew/offset recovery from beacon {egress, arrival} TSF pairs, clock
+# translation, the local 32-bit TSF wrap, and the Packet::TxEgressTsf pick.
+add_executable(TsfSyncSelftest
+    tests/tsf_sync_selftest.cpp
+)
+target_link_libraries(TsfSyncSelftest PRIVATE devourer)
+
+add_test(NAME tsf_sync_math COMMAND TsfSyncSelftest)
+
 # Headless guard for the Jaguar2 per-packet TX-power quantizer
 # (jaguar2::txpkt_pwr_step_for_db) — dB delta -> the descriptor TXPWR_OFSET LUT
 # step. Gated on Jaguar2 being built (the header is behind DEVOURER_HAVE_JAGUAR2).

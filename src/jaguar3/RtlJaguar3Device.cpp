@@ -996,6 +996,8 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   c.fastretune_ok = true;
   c.narrowband_ok = true; /* 5/10 MHz baseband re-clock — Jaguar3 only */
+  c.hw_rx_timestamp = true;  /* FrameParserJaguar3 fills RxAtrib.tsfl */
+  c.hw_beacon_txtsf = true;  /* StartBeacon: MAC inserts the egress TSF into beacons */
   c.xtal_cap_max = 0x7f;   /* 7-bit AFE crystal-cap trim (0x1040) */
   c.xtal_cap_default = 0x20;
   devourer::set_standard_freq_ranges(c);

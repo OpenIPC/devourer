@@ -1000,6 +1000,8 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
     c.narrowband_ok = true;
   }
   c.fastretune_ok = true; /* phy_SwChnl8812_fast (8812/8821) + full-path fallback */
+  c.hw_rx_timestamp = true;   /* FrameParser fills RxAtrib.tsfl on every frame */
+  c.hw_beacon_txtsf = false;  /* no reserved-page beacon download on Jaguar1 */
   c.xtal_cap_max = 0x3f; /* 6-bit AFE crystal-cap trim (0x2C) */
   c.xtal_cap_default = _eepromManager->crystal_cap & 0x3f;
   devourer::set_standard_freq_ranges(c);

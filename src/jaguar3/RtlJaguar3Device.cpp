@@ -293,9 +293,6 @@ RtlJaguar3Device::~RtlJaguar3Device() {
   /* Safety net: restore the chip if a CW tone is still armed (before the coex
    * thread is joined — StopCwTone serializes on _reg_mu with it). */
   StopCwTone();
-  _bcn_run.store(false);
-  if (_bcn_thread.joinable())
-    _bcn_thread.join();
   _coex_stop = true;
   if (_coex_thread.joinable())
     _coex_thread.join();
@@ -1338,23 +1335,11 @@ bool RtlJaguar3Device::StartBeacon(const uint8_t *beacon, size_t len,
 
   /* A SINGLE download is enough — the hardware auto-transmits the beacon at every
    * TBTT (bench-verified: one download airs ~8 beacons/s indefinitely on both
-   * bands). rtw88 re-downloads each interval only to refresh the beacon CONTENT
-   * (TSF/TIM), not to keep it airing. So the periodic refresh is opt-in
-   * (BEACON_REFRESH=1) for content updates; the default is the clean HW-TBTT path. */
-  _bcn_bytes.assign(mpdu, mpdu + mpdu_len);
-  _bcn_interval_ms = interval_tu > 0 ? interval_tu * 1024 / 1000 : 100;
+   * bands), so there is no periodic re-download. rtw88 re-downloads each interval
+   * only to refresh dynamic beacon CONTENT (TSF/TIM); that would need a
+   * content-update path (not this static beacon) and belongs behind a
+   * DeviceConfig knob, not env — the library reads no environment. */
   _bcn_interval_tu = interval_tu > 0 ? interval_tu : 100;
-  if (std::getenv("BEACON_REFRESH") && !_bcn_run.exchange(true)) {
-    _bcn_thread = std::thread([this] {
-      while (_bcn_run.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(_bcn_interval_ms));
-        if (!_bcn_run.load()) break;
-        std::lock_guard<std::mutex> lk(_reg_mu);
-        _hal.download_beacon_page(_bcn_bytes.data(),
-                                  static_cast<uint32_t>(_bcn_bytes.size()));
-      }
-    });
-  }
   return true;
 }
 

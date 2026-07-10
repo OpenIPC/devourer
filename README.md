@@ -191,6 +191,9 @@ one `IRtlDevice` interface covers all three generations.
 - [Time distribution](docs/time-distribution.md) — LTE-eNB-style over-the-air
   clock distribution off the hardware beacon TSF: sub-µs downlink, TSF adoption,
   µs-fine TBTT steering and a converging closed-loop uplink timing advance.
+- [Timing accuracy](docs/timing-accuracy.md) — measured comparison vs NTP/PTP over
+  Wi-Fi (why the hardware TSF beats software timestamps ~3000×, why PTP can't run),
+  and the USB-vs-PCIe transport-latency microbench (`tests/reglat.cpp`).
 - [AP mode](docs/ap-mode.md) — devourer as an infrastructure access point a real
   Linux station associates with: beacon → probe/auth/assoc → DHCP/ARP/ICMP → ping,
   open or WPA2-PSK (4-way handshake + software CCMP), validated against rtw88.

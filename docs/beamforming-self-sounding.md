@@ -118,6 +118,18 @@ bench link the channel is flat across 20 MHz (coherence bandwidth exceeds the
 channel), so per-tone structure is quantisation-limited; a wider bandwidth or a
 multipath geometry is needed to exercise real frequency selectivity.
 
+![per-tone channel-direction constellation](img/bf_constellation.gif)
+
+*That decoded quantity, live on the complex plane
+(`tools/bf_constellation_gif.py` over an SU capture): every subcarrier is a
+point `h_B/h_A = tan ψ · e^{jφ}` — the **unit circle** is "both TX antennas
+equally strong", inside means antenna A dominates, outside B, and the angle is
+their relative phase. The tones trace an arc (the channel's signature across
+frequency, coloured −10…+10 MHz) that shimmers with the real report-to-report
+jitter, while a marker sweeps tone by tone with a per-subcarrier readout. On
+this flat LOS bench the arc is short and hugs one region — a multipath channel
+would stretch it into a spiral.*
+
 ## MU report — per-subcarrier SNR
 
 An **SU** report carries only the per-tone steering direction plus a per-stream

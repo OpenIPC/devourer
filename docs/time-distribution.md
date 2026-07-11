@@ -56,6 +56,16 @@ The inter-slave agreement tightens with beacon rate (≈18 µs at 100 ms → ≈
 50 ms) as the fits densify and balance. Slaves must be Jaguar2/3 (per-frame
 `tsfl`); the master can be any transmitter (`ReadTsf()`, including Jaguar1).
 
+The ~94 µs absolute bound is the **transport's submit-to-air floor**, not a
+protocol property: measured with an embedded-submit-TSF frame stream and a
+robust (outlier-rejecting) fit against a witness receiver, USB floors at
+~93 µs RMS (dominated by the USB submit path) while **PCIe floors at ~12 µs
+RMS** (the residual MAC TX pipeline — the transport stops being the limiter).
+A PCIe master (8821CE) therefore lifts every slave's *absolute* software-path
+lock ~8×; the inter-slave difference and the hardware-beacon path below are
+unaffected (already transport-free). Tool: `tests/pcie_txegress_tx.cpp` +
+`tests/txegress_witness.cpp`.
+
 Run it with `tests/timesync_demo.sh` (one master + two slaves; joins the two
 `{"ev":"timesync.lock"}` streams by beacon seq into the inter-UE error).
 
@@ -237,6 +247,28 @@ repeated-steer accuracy (incl. a PCIe master via `MASTER_CMD='ssh …'`):
 `tests/beacon_steer_survival.sh [n] [steer_us] [period_s]`.
 
 Harness: `tests/timesync_ta_demo.sh` (+ `tests/timesync_ta_analyze.py`).
+
+## Bridging to network PTP (IEEE 1588)
+
+The missing half of a wired-time → Wi-Fi-time bridge is holding the Wi-Fi TSF
+against a real PTP clock. On the Radxa X4 the 8821CE's TSF is exposed as a
+Linux PTP Hardware Clock (`tests/pcie_phc/` — a kernel module serving
+`/dev/ptpN` from the TSF over BAR2 MMIO), and `phc2sys` disciplines it to the
+board's Intel I226 (a full IEEE-1588 NIC):
+
+| metric | value |
+|--------|-------|
+| held residual vs the I226 PHC | **~290 ns RMS**, mean ~0, stable over minutes |
+| raw crystal offset removed by the servo | ~+42 ppm |
+
+The ~290 ns residual is the TSF's own **1 µs-quantization floor** (uniform
+±0.5 µs → 289 ns RMS) — once the crystal offset is servoed out, the Wi-Fi MAC
+TSF holds like genuine PTP hardware. Combined with the TBTT steering actuator
+above, this closes the loop: network PTP disciplines the master's TSF, the
+TSF-locked hardware beacon distributes it over the air, and the slaves inherit
+the wired timebase at the sub-µs beacon floor. Validation:
+`tests/pcie_phc/ptp_crosscheck.sh` (the Wi-Fi side must be in monitor mode so
+the MAC/TSF is clocked).
 
 ## Env knobs
 

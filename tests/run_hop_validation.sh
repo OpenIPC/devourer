@@ -29,6 +29,12 @@ GAP_US="${GAP_US:-2000}"
 TX_RATE="${TX_RATE:-6M}"          # 6M OFDM: wide, easy for the SDR to see
 TX_PID="${TX_PID:-0x8812}"        # RTL8812AU
 HOP_FAST="${HOP_FAST:-0}"         # 0=full SetMonitorChannel, 1=FastRetune(cached), 2=FastRetune(no cache)
+# Keyed FHSS (optional): set SEED to a hex key to drive the SipHash schedule,
+# and SLOT_MS to hop on a wall-clock slot instead of frame dwell (required by
+# keyed mode — DWELL and slot mode are mutually exclusive). When SEED is set the
+# SDR probe is told the same key so it aligns against the keyed order.
+SEED="${SEED:-}"
+SLOT_MS="${SLOT_MS:-}"
 SDR_CENTER="${SDR_CENTER:-2437e6}"
 SDR_RATE="${SDR_RATE:-61.44e6}"
 SDR_GAIN="${SDR_GAIN:-45}"
@@ -68,24 +74,43 @@ fi
 # Auto-size the SDR capture from the run length if not overridden.
 nch=$(awk -F, '{print NF}' <<<"$HOP_CHANNELS")
 if [ "$SDR_DURATION" = "0" ]; then
-    # per-dwell ≈ dwell*gap + ~0.30s retune; +3s margin.
-    SDR_DURATION=$(awk -v r="$ROUNDS" -v n="$nch" -v d="$DWELL" -v g="$GAP_US" \
-        'BEGIN{printf "%.0f", r*n*(d*g/1e6 + 0.30) + 3}')
+    if [ -n "$SLOT_MS" ]; then
+        # slot mode: each dwell is a fixed wall-clock slot; +3s margin.
+        SDR_DURATION=$(awk -v r="$ROUNDS" -v n="$nch" -v s="$SLOT_MS" \
+            'BEGIN{printf "%.0f", r*n*s/1e3 + 3}')
+    else
+        # per-dwell ≈ dwell*gap + ~0.30s retune; +3s margin.
+        SDR_DURATION=$(awk -v r="$ROUNDS" -v n="$nch" -v d="$DWELL" -v g="$GAP_US" \
+            'BEGIN{printf "%.0f", r*n*(d*g/1e6 + 0.30) + 3}')
+    fi
 fi
 echo "== auto SDR_DURATION=${SDR_DURATION}s (rounds=$ROUNDS nch=$nch dwell=$DWELL) =="
 
 echo "== starting hopping TX (RTL8812AU, init ch$TX_INIT_CHANNEL, hop $HOP_CHANNELS) =="
 : >"$TX_LOG"
+# Build the TX hop env: keyed slot mode (SEED+SLOT_MS) drops the frame-dwell var
+# because the two are mutually exclusive; otherwise the historic frame dwell.
+# TX hops CONTINUOUSLY (no DEVOURER_HOP_ROUNDS) so it spans the whole SDR
+# capture. A bounded TX run under-runs the capture: the B210 needs a second or
+# two to bring up before its IQ stream starts, and a short bounded TX can finish
+# during that gap — the capture then sees only a sliver of the hopping. The
+# cleanup trap stops the TX once the capture (RX_PID) closes. ROUNDS still sizes
+# the capture window and the probe's expected-round threshold.
+tx_env=(DEVOURER_PID="$TX_PID"
+        DEVOURER_CHANNEL="$TX_INIT_CHANNEL"
+        DEVOURER_HOP_CHANNELS="$HOP_CHANNELS"
+        DEVOURER_HOP_FAST="$HOP_FAST"
+        DEVOURER_HOP_RADIOTAP="${HOP_RADIOTAP:-}"
+        DEVOURER_TX_GAP_US="$GAP_US"
+        DEVOURER_TX_RATE="$TX_RATE")
+if [ -n "$SLOT_MS" ]; then
+    tx_env+=(DEVOURER_HOP_SLOT_MS="$SLOT_MS")
+else
+    tx_env+=(DEVOURER_HOP_DWELL_FRAMES="$DWELL")
+fi
+[ -n "$SEED" ] && tx_env+=(DEVOURER_HOP_SEED="$SEED")
 sudo --preserve-env \
-    env DEVOURER_PID="$TX_PID" \
-        DEVOURER_CHANNEL="$TX_INIT_CHANNEL" \
-        DEVOURER_HOP_CHANNELS="$HOP_CHANNELS" \
-        DEVOURER_HOP_DWELL_FRAMES="$DWELL" \
-        DEVOURER_HOP_ROUNDS="$ROUNDS" \
-        DEVOURER_HOP_FAST="$HOP_FAST" \
-        DEVOURER_HOP_RADIOTAP="${HOP_RADIOTAP:-}" \
-        DEVOURER_TX_GAP_US="$GAP_US" \
-        DEVOURER_TX_RATE="$TX_RATE" \
+    env "${tx_env[@]}" \
     "$ROOT/build/txdemo" >"$TX_LOG" 2>&1 &
 TX_PID_PROC=$!
 
@@ -100,15 +125,22 @@ for _ in $(seq 1 300); do
 done
 
 echo "== starting SDR probe (RX), capturing the hop run =="
+# In keyed mode the probe must know the same key to align against the SipHash
+# order instead of a fixed round-robin.
+probe_seed=(); [ -n "$SEED" ] && probe_seed=(--seed "$SEED")
 sudo --preserve-env=UHD_IMAGES_DIR "$PY" "$HERE/hop_rx_probe.py" \
     --channels "$HOP_CHANNELS" --center "$SDR_CENTER" --rate "$SDR_RATE" \
     --gain "$SDR_GAIN" --duration "$SDR_DURATION" --expect-rounds "$ROUNDS" \
-    "$@" >"$RX_LOG" 2>&1 &
+    "${probe_seed[@]}" "$@" >"$RX_LOG" 2>&1 &
 RX_PID=$!
 
-# Wait for the bounded TX run to finish (it std::exit(0)s after ROUNDS).
-wait "$TX_PID_PROC" 2>/dev/null || true
-echo "== TX finished; waiting for SDR capture to end =="
+# The SDR capture is the bounded operation now; the TX hops until we stop it, so
+# it fully covers the capture regardless of B210 bring-up latency. Wait for the
+# probe (capture + analysis), then the cleanup trap stops the continuous TX.
+echo "== capturing; TX hops until the SDR window closes =="
+if ! kill -0 "$TX_PID_PROC" 2>/dev/null; then
+    echo "WARNING: TX exited before capture — check $TX_LOG" >&2
+fi
 wait "$RX_PID" 2>/dev/null || true
 
 echo

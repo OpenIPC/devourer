@@ -35,6 +35,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -66,6 +67,7 @@
   #include <libusb-1.0/libusb.h>
 #endif
 
+#include "HopSchedule.h"
 #include "RadiotapBuilder.h"
 #include "RtlAdapter.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
@@ -79,31 +81,31 @@
 
 #define USB_VENDOR_ID 0x0bda
 
-static constexpr uint16_t kRealtekProductIds[] = {
-    0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
-};
-
-// Identical 802.11 probe-request header to precoder; radiotap is now
-// built once at startup from DEVOURER_STREAM_RATE — accepts legacy
-// (6M..54M), HT (MCS0..MCS31), or VHT (VHT1SS_MCS0..VHT4SS_MCS9) carrier
-// modes. Default is 6M legacy OFDM, bit-identical to the historic
-// kRadiotapLegacy6M constant. Same canonical SA, same matcher in
-// examples/rx/main.cpp's RX path — keep these three in lockstep, see CLAUDE.md.
-static const std::vector<uint8_t> kStreamRadiotap =
-    devourer::build_stream_radiotap(devourer_tx_mode_from_env());
-static const uint8_t kCanonicalSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
-
-static std::vector<uint8_t> build_dot11_probe_req() {
-  std::vector<uint8_t> h = {
-      0x40, 0x00, 0x00, 0x00,
-      0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+  static constexpr uint16_t kRealtekProductIds[] = {
+      0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
   };
-  h.insert(h.end(), kCanonicalSa, kCanonicalSa + 6);
-  h.insert(h.end(), kCanonicalSa, kCanonicalSa + 6);
-  h.push_back(0x80);
-  h.push_back(0x00);
-  return h;
-}
+
+  // Identical 802.11 probe-request header to precoder; radiotap is now
+  // built once at startup from DEVOURER_STREAM_RATE — accepts legacy
+  // (6M..54M), HT (MCS0..MCS31), or VHT (VHT1SS_MCS0..VHT4SS_MCS9) carrier
+  // modes. Default is 6M legacy OFDM, bit-identical to the historic
+  // kRadiotapLegacy6M constant. Same canonical SA, same matcher in
+  // examples/rx/main.cpp's RX path — keep these three in lockstep, see
+  // CLAUDE.md.
+  static const std::vector<uint8_t> kStreamRadiotap =
+      devourer::build_stream_radiotap(devourer_tx_mode_from_env());
+  static const uint8_t kCanonicalSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+
+  static std::vector<uint8_t> build_dot11_probe_req() {
+    std::vector<uint8_t> h = {
+        0x40, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    };
+    h.insert(h.end(), kCanonicalSa, kCanonicalSa + 6);
+    h.insert(h.end(), kCanonicalSa, kCanonicalSa + 6);
+    h.push_back(0x80);
+    h.push_back(0x00);
+    return h;
+  }
 
 int main(int argc, char **argv) {
   auto logger = std::make_shared<Logger>();
@@ -113,6 +115,15 @@ int main(int argc, char **argv) {
   logger->events().configure(stderr);
 
   int interval_ms = 2;
+  // Lockstep sync-marker cadence: emit one marker-only frame every N data
+  // frames in slot-hop mode so a tracking RX keeps its slot lock (a marker only
+  // at each slot boundary is too sparse — a single miss drops the lock). The
+  // caller's FEC PSDUs are never touched; the marker rides its own frame.
+  int sync_every = 4;
+  if (const char *e = std::getenv("DEVOURER_HOP_SYNC_EVERY")) {
+    sync_every = std::atoi(e);   // avoid std::max — windows.h's max macro
+    if (sync_every < 1) sync_every = 1;
+  }
   // Sanity cap on a single PSDU body; protects against an upstream framing
   // bug that would otherwise have us allocate gigabytes from a stray length
   // prefix. 4096 covers any realistic legacy-6M probe-request payload.
@@ -245,6 +256,8 @@ int main(int argc, char **argv) {
    * Intra-band 20 MHz only; a cross-band entry falls back automatically. */
   std::vector<int> hop_channels;
   long hop_dwell = 1;
+  long hop_slot_ms = 0;
+  std::optional<devourer::HopSchedule> hop_schedule;
   const int hop_fast = std::getenv("DEVOURER_HOP_FAST")
                            ? std::atoi(std::getenv("DEVOURER_HOP_FAST"))
                            : 1;
@@ -266,6 +279,20 @@ int main(int argc, char **argv) {
       hop_dwell = std::strtol(d, nullptr, 0);
       if (hop_dwell < 1) hop_dwell = 1;
     }
+    if (const char *s = std::getenv("DEVOURER_HOP_SLOT_MS")) {
+      hop_slot_ms = std::strtol(s, nullptr, 0);
+      if (hop_slot_ms < 1)
+        throw std::invalid_argument("DEVOURER_HOP_SLOT_MS must be positive");
+      if (std::getenv("DEVOURER_HOP_DWELL_FRAMES"))
+        throw std::invalid_argument(
+            "hop slot and frame dwell are mutually exclusive");
+    }
+    if (const char *seed = std::getenv("DEVOURER_HOP_SEED"))
+      hop_schedule.emplace(devourer::HopSchedule::parse_seed(seed));
+    else if (hop_slot_ms > 0)
+      // Slot-mode sequential hopping rides the keyless schedule so it still
+      // emits the lockstep sync marker (same channels[slot % n] order).
+      hop_schedule.emplace(devourer::HopSchedule::sequential());
     if (!hop_channels.empty()) {
       std::string list;
       for (size_t i = 0; i < hop_channels.size(); ++i)
@@ -286,6 +313,13 @@ int main(int argc, char **argv) {
       "from stdin", channel);
 
   long tx_count = 0;
+  const auto hop_start = std::chrono::steady_clock::now();
+  uint64_t last_hop_slot = UINT64_MAX;
+  // Per-process epoch for the lockstep sync marker (see below): lets a tracking
+  // RX detect a TX restart and re-anchor its slot clock.
+  const uint32_t hop_epoch = static_cast<uint32_t>(
+      std::chrono::high_resolution_clock::now().time_since_epoch().count());
+  std::vector<uint8_t> sync_buf;
   while (true) {
     uint8_t len_bytes[4];
     {
@@ -323,7 +357,26 @@ int main(int argc, char **argv) {
      * is a cheap no-op when the channel is unchanged within a dwell, so calling
      * it per packet is fine. */
     if (!hop_channels.empty()) {
-      int ch = hop_channels[(tx_count / hop_dwell) % hop_channels.size()];
+      uint64_t slot =
+          hop_slot_ms > 0
+              ? static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - hop_start)
+                        .count() /
+                    hop_slot_ms)
+              : static_cast<uint64_t>(tx_count / hop_dwell);
+      int ch = hop_schedule ? hop_schedule->channel(slot, hop_channels)
+                            : hop_channels[slot % hop_channels.size()];
+      const bool slot_changed = (slot != last_hop_slot);
+      if (slot_changed) {
+        auto ev = devourer::Ev(logger->events(), "hop.dwell");
+        ev.f("slot", (unsigned long long)slot)
+            .f("round", (unsigned long long)(slot / hop_channels.size()))
+            .f("channel", ch);
+        if (hop_schedule)
+          ev.hexf("seed_fp", hop_schedule->fingerprint(), 8);
+        last_hop_slot = slot;
+      }
       if (hop_fast)
         rtlDevice->FastRetune(static_cast<uint8_t>(ch),
                               /*cache_rf=*/hop_fast != 2);
@@ -332,6 +385,30 @@ int main(int argc, char **argv) {
             .Channel = static_cast<uint8_t>(ch),
             .ChannelOffset = 0,
             .ChannelWidth = CHANNEL_WIDTH_20});
+
+      /* Lockstep sync: emit a marker-only frame at each slot boundary AND every
+       * sync_every data frames, so a tracking RX keeps the TX slot clock locked
+       * (one marker per slot is too sparse to survive a miss). It rides its own
+       * frame — the caller's FEC PSDUs stay byte-for-byte untouched — with the
+       * canonical SA, so the RX's marker matcher sees it. Slot-hop mode only. */
+      if (hop_schedule && hop_slot_ms > 0 &&
+          (slot_changed || tx_count % sync_every == 0)) {
+        const uint64_t slot_us = static_cast<uint64_t>(hop_slot_ms) * 1000;
+        const uint64_t us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - hop_start)
+                .count());
+        devourer::HopSyncMarker marker{hop_schedule->fingerprint(), hop_epoch,
+                                       static_cast<uint32_t>(us % slot_us),
+                                       us / slot_us};
+        auto wire = devourer::HopSyncMarker::encode(marker);
+        sync_buf.clear();
+        sync_buf.insert(sync_buf.end(), kStreamRadiotap.begin(),
+                        kStreamRadiotap.end());
+        sync_buf.insert(sync_buf.end(), dot11.begin(), dot11.end());
+        sync_buf.insert(sync_buf.end(), wire.begin(), wire.end());
+        rtlDevice->send_packet(sync_buf.data(), sync_buf.size());
+      }
     }
 
     tx_buf.clear();
@@ -356,6 +433,12 @@ int main(int argc, char **argv) {
   }
 
   devourer::Ev(logger->events(), "stream.done").f("sent", tx_count);
+  // Destruct the device before tearing down libusb: on Jaguar1 the TX path is
+  // asynchronous, and closing the handle with transfers still in flight reaps
+  // completions against a freed handle (segfault, and the crash leaks the USB
+  // claim so the next run hits "adapter in use"). reset() runs the dtor, which
+  // drains outstanding transfers while the handle is still valid.
+  rtlDevice.reset();
   libusb_release_interface(handle, 0);
   libusb_close(handle);
   libusb_exit(context);

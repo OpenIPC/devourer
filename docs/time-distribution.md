@@ -351,6 +351,10 @@ a tracking filter (PLL-style) at the slave would follow the pinned timebase
 tighter. PHC validation: `tests/pcie_phc/ptp_crosscheck.sh` (the Wi-Fi side
 must be in monitor mode so the MAC/TSF is clocked).
 
+What this unlocks at the multi-AP level — coordinated scheduling between
+cells, make-before-break handover, robots as roaming UEs — is mapped out in
+[`multi-ap-cellular.md`](multi-ap-cellular.md).
+
 ## Env knobs
 
 - `DEVOURER_TSYNC_ROLE=master|slave|ue`

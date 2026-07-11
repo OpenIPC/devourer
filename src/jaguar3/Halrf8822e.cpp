@@ -54,8 +54,26 @@ uint32_t Halrf8822e::rf_read(uint8_t path, uint16_t addr, uint32_t mask) {
 }
 void Halrf8822e::rf_write(uint8_t path, uint16_t addr, uint32_t mask,
                           uint32_t val) {
+  /* config_phydm_write_rf_reg_8822e: RF reg 0x0 (the mode register) canNOT be
+   * written through the direct 0x3c00/0x4c00 window — that write silently
+   * no-ops (hardware-observed: TXGAPK's gain-index select via RF 0x0 never
+   * took, so the 5 GHz gain-table readback came back all-zero). It must go
+   * through the legacy FON write port 0x1808 (A) / 0x4108 (B), addr in
+   * [27:20], data in [19:0]. Reads stay direct for every register. */
+  mask &= RFREG_MASK;
+  if ((addr & 0xff) == 0x0) {
+    uint32_t data = val;
+    if (mask != RFREG_MASK) {
+      uint32_t orig = rf_read(path, addr, RFREG_MASK);
+      data = (orig & ~mask) | ((val << mask_shift(mask)) & mask);
+    }
+    uint32_t data_and_addr =
+        (((addr & 0xffu) << 20) | (data & 0x000fffffu)) & 0x0fffffffu;
+    _device.rtw_write32(path & 1 ? 0x4108 : 0x1808, data_and_addr);
+    return;
+  }
   uint16_t direct = static_cast<uint16_t>(RF_WIN[path & 1] + ((addr & 0xff) << 2));
-  bb_set(direct, mask & RFREG_MASK, val);
+  bb_set(direct, mask, val);
 }
 
 /* --- calibration (Phase C: ported incrementally, hardware-iterated) --- */
@@ -1158,6 +1176,22 @@ void Halrf8822e::thermal_track_8822e() {
       sum += _therm_avg[p][i];
     uint8_t avg = static_cast<uint8_t>(sum / _therm_avg_cnt[p]);
 
+    /* LCK track (halrf_lck_track_8822e): the RF synthesizer's VCO drifts
+     * with temperature — when the averaged thermal moves >= 4 units from the
+     * LCK baseline, re-run the synthesizer calibration (AACK+RTK) and
+     * re-base. Without it, hours of sustained TX let the LO wander with chip
+     * heating (spectral regrowth / EVM drift). The kernel runs this from the
+     * same ~2 s watchdog as the swing tracking. */
+    if (_lck_base[p] < 0) {
+      _lck_base[p] = avg; /* first valid average = baseline */
+    } else if (avg - _lck_base[p] >= 4 || _lck_base[p] - avg >= 4) {
+      _logger->info("Jaguar3(8822e): LCK re-lock (path{} thermal avg={} "
+                    "lck_base={})",
+                    p, avg, _lck_base[p]);
+      lck_trigger();
+      _lck_base[0] = _lck_base[1] = avg;
+    }
+
     int delta = avg > base ? (avg - base) : (base - avg);
     if (delta >= D_S)
       delta = D_S - 1;
@@ -1175,6 +1209,31 @@ void Halrf8822e::thermal_track_8822e() {
                     p, avg, base, delta, swing);
     }
   }
+}
+
+/* phy_lc_calibrate_8822e — the LCK trigger: AACK (RF-A 0xca[0] pulse, poll
+ * 0xc9[5] clear) then RTK (RF-A 0xcc[18] pulse, poll 0xce[11] clear, then
+ * de-assert). Path A only — the synthesizer lives on path A. ~ms-scale; the
+ * kernel fires it live from its watchdog, so a brief mid-TX glitch is the
+ * vendor-sanctioned behavior. */
+void Halrf8822e::lck_trigger() {
+  /* AACK */
+  rf_write(0, 0xca, 1u << 0, 0x0);
+  rf_write(0, 0xca, 1u << 0, 0x1);
+  for (int i = 0; i < 100; ++i) {
+    delay_ms(1);
+    if (rf_read(0, 0xc9, 1u << 5) != 0x1)
+      break;
+  }
+  /* RTK */
+  rf_write(0, 0xcc, 1u << 18, 0x0);
+  rf_write(0, 0xcc, 1u << 18, 0x1);
+  for (int i = 0; i < 100; ++i) {
+    delay_ms(1);
+    if (rf_read(0, 0xce, 1u << 11) != 0x1)
+      break;
+  }
+  rf_write(0, 0xcc, 1u << 18, 0x0);
 }
 
 /* Coex / antenna control — port of the 8822c WiFi-only coex (Halrf8822c). Even

@@ -86,43 +86,39 @@ public:
    * (the DEVOURER_TX_PWR debug knob) the per-rate diff table is flattened so
    * every rate emits at `idx`. With zero_diffs=false (the default bring-up path)
    * the diff table applied by the BB tables is preserved, so per-rate spread is
-   * kept and only the reference base is programmed. skip_path_b_ofdm_ref leaves
-   * 0x41e8 at its table default — the 8822E TX+RX RX-desense quirk (see
-   * apply_power_by_rate_8822e); previously a flat override on a TX+RX session
-   * wrote it unconditionally and deafened the EU's RX. */
-  void set_tx_power_ref(uint8_t idx, bool zero_diffs = true,
-                        bool skip_path_b_ofdm_ref = false);
+   * kept and only the reference base is programmed. Both TXAGC paths are
+   * written in every mode (TX+RX included). */
+  void set_tx_power_ref(uint8_t idx, bool zero_diffs = true);
 
   /* Apply the 8822e phy_reg_pg power-by-rate table for `channel`'s band: sets
    * the OFDM/CCK reference PER PATH (ref_a -> 0x18e8/0x18a0, ref_b -> 0x41e8/
    * 0x41a0) and writes the per-rate diff table (0x3a00) so robust low rates get
    * the kernel's by-rate boost instead of a flat reference. The per-path refs
    * come from the efuse per-channel base (the kernel programs a distinct path-A/
-   * path-B base, e.g. 0x4b/0x54 at ch36).
-   *
-   * skip_path_b_ofdm_ref: leave 0x41e8 (path-B OFDM ref) at its table default.
-   * Hardware-bisected: ANY nonzero value in that one field desenses the EU's RX
-   * to near-deaf (value-independent; path-A ref, CCK refs, the diff table and
-   * the DPK bypass are all RX-safe) — root cause open, suspected path-B
-   * TSSI/gain-stage asymmetry in devourer's bring-up vs the kernel's. TX+RX
-   * callers set this so RX works at the cost of path-B OFDM TX running at the
-   * table-default reference. */
-  void apply_power_by_rate_8822e(uint8_t channel, uint8_t ref_a, uint8_t ref_b,
-                                 bool skip_path_b_ofdm_ref = false);
+   * path-B base, e.g. 0x4b/0x54 at ch36). */
+  void apply_power_by_rate_8822e(uint8_t channel, uint8_t ref_a, uint8_t ref_b);
 
   /* Light TX-power step (8822e): just the gated reference writes of
-   * apply_power_by_rate_8822e — 0x18e8[16:10] (path-A OFDM), optionally
-   * 0x41e8[16:10] (path B, same RX-desense hazard/flag as above),
+   * apply_power_by_rate_8822e — 0x18e8/0x41e8[16:10] (OFDM per path),
    * 0x18a0/0x41a0[22:16] (CCK) — WITHOUT the 0x3a00 per-rate diff walk. The
    * diff table is offset-invariant (an offset shifts the reference anchor;
    * the calibrated per-rate shape rides on top), so a runtime offset step is
    * ~8 register ops instead of the full by-rate apply. Refs are clamped to
    * the 7-bit field here — the BB masked write truncates mod 128, so an
    * unclamped over-range ref would wrap to near-zero TX silently. */
-  void apply_tx_power_refs_8822e(uint8_t ref_a, uint8_t ref_b,
-                                 bool skip_path_b_ofdm_ref);
+  void apply_tx_power_refs_8822e(uint8_t ref_a, uint8_t ref_b);
 
 private:
+  /* 8822E channel-switch helpers (straight phydm ports, 8822E-gated):
+   * CCK TX shaping filter + spur elimination (manual NBI / CSI mask). */
+  void cck_tx_shaping_8822e(uint8_t central);
+  void spur_eliminate_8822e(uint8_t ch, ChannelWidth_t bw);
+  static bool is_spur_combo_8822e(uint8_t ch, ChannelWidth_t bw);
+  void set_manual_nbi_8822e(bool en, uint32_t tone_idx);
+  void set_nbi_wa_para_8822e(bool en, ChannelWidth_t bw);
+  void set_csi_mask_8822e(uint32_t tone_idx, uint8_t weight);
+  void clean_csi_mask_8822e();
+
   /* Jaguar3 baseband bandwidth/clock registers (from
    * config_phydm_switch_bandwidth_8822c). These do NOT exist on Jaguar1. */
   static constexpr uint16_t R_RX_DFIR_8822C   = 0x810; /* [13:4] RX DFIR coeff */

@@ -267,13 +267,14 @@ for dut in "${DUTS[@]}"; do
         fail "$name sticky-fast: ofdm $ofdm_sw->$ofdm_rt mcs7 $mcs7_sw->$mcs7_rt across FastRetune"
     fi
 
-    # -- 8822E TX+RX 0x41e8 quirk: no offset churn may write the path-B OFDM
-    #    ref while RX is alive (any nonzero value desenses the EU's RX).
+    # -- 8822E path-B OFDM ref (0x41e8): applied in BOTH TX-only and TX+RX
+    #    modes. (The historical RX-desense quirk that pinned it to the table
+    #    default in TX+RX is RESOLVED — it was the DPDT/pin-mux front-end
+    #    mis-config; re-tested clean by tests/eu_41e8_desense_recheck.sh.)
     #    Canary #1 dumps at the InitWrite channel-set (pre-power, BB-table
     #    default); canary #2 at --switch-channel still holds the FIRST
-    #    channel's applied refs (the re-apply runs after the dump). TX-only:
-    #    0x41e8 ref must move between the dumps (written); TX+RX: it must be
-    #    IDENTICAL (never written) while path A (0x18e8) moves in both.
+    #    channel's applied refs (the re-apply runs after the dump). Both
+    #    modes: 0x41e8 AND 0x18e8 refs must move between the dumps.
     if [ "$PID" = "0xa81a" ]; then
         qref() { # $1=log $2=reg $3=which(1=first,2=last) -> 7-bit ref field
             python3 - "$1" "$2" "$3" <<'PYEOF'
@@ -302,15 +303,15 @@ PYEOF
         b1_txrx="$(qref "$qr" 41e8 1)";   b2_txrx="$(qref "$qr" 41e8 2)"
         a1_txrx="$(qref "$qr" 18e8 1)";   a2_txrx="$(qref "$qr" 18e8 2)"
         if [ "$b1_txrx" = "nan" ] || [ "$a1_txrx" = "nan" ]; then
-            fail "$name quirk-41e8: no canary refs in TX+RX run"
-        elif [ "$b1_txrx" != "$b2_txrx" ]; then
-            fail "$name quirk-41e8: TX+RX run WROTE 0x41e8 ($b1_txrx -> $b2_txrx) — EU RX desense"
+            fail "$name pathb-41e8: no canary refs in TX+RX run"
+        elif [ "$b1_txrx" = "$b2_txrx" ]; then
+            fail "$name pathb-41e8: TX+RX run did NOT write 0x41e8 ($b1_txrx) — path-B power missing (desense-era skip resurrected?)"
         elif [ "$a1_txrx" = "$a2_txrx" ]; then
-            fail "$name quirk-41e8: TX+RX run never applied path-A power (0x18e8 $a1_txrx unchanged)"
+            fail "$name pathb-41e8: TX+RX run never applied path-A power (0x18e8 $a1_txrx unchanged)"
         elif [ "$b1_txonly" = "$b2_txonly" ]; then
-            fail "$name quirk-41e8: TX-only run did NOT write 0x41e8 ($b1_txonly) — path-B power missing"
+            fail "$name pathb-41e8: TX-only run did NOT write 0x41e8 ($b1_txonly) — path-B power missing"
         else
-            pass "$name quirk-41e8: TX+RX kept 0x41e8 at table default ($b1_txrx) while path A moved ($a1_txrx->$a2_txrx); TX-only wrote it ($b1_txonly->$b2_txonly)"
+            pass "$name pathb-41e8: path-B ref applied in both modes (TX+RX $b1_txrx->$b2_txrx, TX-only $b1_txonly->$b2_txonly; path A $a1_txrx->$a2_txrx)"
         fi
     fi
 done

@@ -203,6 +203,13 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
     _device.phy_set_bb_reg(0x1c80, 0x3F000000, 0x22);
   }
 
+  /* CCK TX shaping filter (phydm_cck_tx_shaping_filter_8822e): per-channel
+   * 16-tap shaping coefficients + CCK/OFDM TX backoff + scaling, written at
+   * every 2 GHz channel switch (ch14 gets its own tighter set for the Japan
+   * band edge). 8822E only — the 8822C uses a different shaping scheme. */
+  if (is_2g && _variant == ChipVariant::C8822E)
+    cck_tx_shaping_8822e(central);
+
   /* SCO tracking f_c (phydm_sco_trk_fc_setting_8822c): BB 0xc30[11:0]. Keyed
    * on the central channel (shared with fast_retune). */
   _device.phy_set_bb_reg(0xc30, 0xfff, sco_for(central));
@@ -213,10 +220,30 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
   /* MAC-side bandwidth + TX sub-channel (halmac cfg_bw / cfg_pri_ch_idx). */
   set_mac_bw_txsc(bwmode, pri);
 
+  /* Spur elimination (phydm_spur_eliminate_8822e): NBI notch + CSI-mask
+   * setup for the channels whose synthesizer harmonics land in-band
+   * (5760/5280/5600 MHz spurs), and the explicit spur-free default state
+   * everywhere else — run at every switch_channel so no stale NBI/CSI
+   * state survives a channel change. 8822E only (the 8822C table differs). */
+  if (_variant == ChipVariant::C8822E)
+    spur_eliminate_8822e(central, bwmode);
+
   /* phydm_bb_reset_8822c: toggle the BB reset (MAC reg 0x0 BIT16, 1->0->1) to
    * (re)start the receiver after channel/BW config — the kernel does this after
    * every switch_channel; without it the RX engine never runs. */
   bb_reset_toggle();
+
+  /* phydm_igi_toggle_8822{c,e} (register-identical on both variants): force
+   * the BB to send the 3-wire command so the RF hardware re-enters RX mode —
+   * the BB does NOT do this automatically after path/channel/BW
+   * reconfiguration, and without the toggle the RF can be left in a stale
+   * mode after a full switch (intermittent RX deafness / early TX stall).
+   * The kernel runs it after every switch_channel on both dies. */
+  {
+    const uint32_t igi = _device.rtw_read32(0x1d70);
+    _device.rtw_write32(0x1d70, igi - 0x202);
+    _device.rtw_write32(0x1d70, igi);
+  }
 
   /* halrf_ex_dac_fifo_rst — the vendor runs this after EVERY switch_bandwidth
    * ("fix dac fifo error after TXCK setting"): 40/80 MHz change the TX clock,
@@ -236,6 +263,168 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
     DumpCanary();
 }
 
+/* phydm_cck_tx_shaping_filter_8822e: per-channel CCK TX shaping coefficients
+ * + CCK/OFDM TX backoff + TX scaling. ch14 uses the tight Japan-band-edge
+ * set; every other 2G channel the standard one. */
+void RadioManagementJaguar3::cck_tx_shaping_8822e(uint8_t central) {
+  if (central == 14) {
+    _device.phy_set_bb_reg(0x1a20, 0xffff0000, 0x3da0);
+    _device.phy_set_bb_reg(0x1a24, 0xffffffff, 0x4962c931);
+    _device.phy_set_bb_reg(0x1a28, 0x0000ffff, 0x6aa3);
+    _device.phy_set_bb_reg(0x1a98, 0xffff0000, 0xaa7b);
+    _device.phy_set_bb_reg(0x1a9c, 0x0000ffff, 0xf3d7);
+    _device.phy_set_bb_reg(0x1aa0, 0xffffffff, 0x00000000);
+    _device.phy_set_bb_reg(0x1aac, 0xffffffff, 0xfe012577);
+    _device.phy_set_bb_reg(0x1ab0, 0xffffffff, 0x0000ffff);
+    _device.phy_set_bb_reg(0x818, 0xf8000000, 0x1e); /* Tx backoff CCK */
+    _device.phy_set_bb_reg(0x818, 0x07c00000, 0x7);  /* Tx backoff OFDM */
+    _device.phy_set_bb_reg(0x81c, 0x001fc000, 0x8);  /* Tx scaling */
+  } else {
+    _device.phy_set_bb_reg(0x1a20, 0xffff0000, 0x5284);
+    _device.phy_set_bb_reg(0x1a24, 0xffffffff, 0x3e18fec8);
+    _device.phy_set_bb_reg(0x1a28, 0x0000ffff, 0x0a88);
+    _device.phy_set_bb_reg(0x1a98, 0xffff0000, 0xacc4);
+    _device.phy_set_bb_reg(0x1a9c, 0x0000ffff, 0xc8b2);
+    _device.phy_set_bb_reg(0x1aa0, 0xffffffff, 0x00faf0de);
+    _device.phy_set_bb_reg(0x1aac, 0xffffffff, 0x00122344);
+    _device.phy_set_bb_reg(0x1ab0, 0xffffffff, 0x0fffffff);
+    _device.phy_set_bb_reg(0x818, 0xf8000000, 0x1a); /* Tx backoff CCK */
+    _device.phy_set_bb_reg(0x818, 0x07c00000, 0xc);  /* Tx backoff OFDM */
+    _device.phy_set_bb_reg(0x81c, 0x001fc000, 0x4);  /* Tx scaling */
+  }
+}
+
+/* --- phydm spur-elimination helpers (8822E), straight ports ------------- */
+
+/* phydm_set_manual_nbi_8822e */
+void RadioManagementJaguar3::set_manual_nbi_8822e(bool en, uint32_t tone_idx) {
+  _device.phy_set_bb_reg(0x1944, 0x001ff000, en ? tone_idx : 0x0);
+  _device.phy_set_bb_reg(0x4044, 0x001ff000, en ? tone_idx : 0x0);
+  _device.phy_set_bb_reg(0x1940, 1u << 31, en ? 0x1 : 0x0);
+  _device.phy_set_bb_reg(0x4040, 1u << 31, en ? 0x1 : 0x0);
+  _device.phy_set_bb_reg(0x818, 1u << 11, en ? 0x1 : 0x0);
+  _device.phy_set_bb_reg(0x1d3c, 0x78000000, en ? 0xf : 0x0);
+}
+
+/* phydm_set_nbi_wa_para_8822e */
+void RadioManagementJaguar3::set_nbi_wa_para_8822e(bool en,
+                                                   ChannelWidth_t bw) {
+  if (en) {
+    _device.phy_set_bb_reg(0x810, 0xf, 0x7);
+    _device.phy_set_bb_reg(0x810, 0xf0000, 0x7);
+    _device.phy_set_bb_reg(0x88c, 0x30000, 0x3);
+    const uint32_t v = (bw == CHANNEL_WIDTH_40) ? 0x0 : 0x3;
+    _device.phy_set_bb_reg(0x1944, 0x300, v);
+    _device.phy_set_bb_reg(0x4044, 0x300, v);
+  } else {
+    _device.phy_set_bb_reg(0x810, 0xf, 0x0);
+    _device.phy_set_bb_reg(0x810, 0xf0000, 0x0);
+    _device.phy_set_bb_reg(0x88c, 0x30000, 0x2);
+    _device.phy_set_bb_reg(0x1944, 0x300, 0x3);
+    _device.phy_set_bb_reg(0x4044, 0x300, 0x3);
+  }
+}
+
+/* phydm_set_csi_mask_8822e — one tone's CSI weighting into the mask table. */
+void RadioManagementJaguar3::set_csi_mask_8822e(uint32_t tone_idx,
+                                                uint8_t weight) {
+  _device.phy_set_bb_reg(0x1ee8, 0x3, 0x3);                 /* clk on */
+  _device.phy_set_bb_reg(0x1d94, (1u << 31) | (1u << 30), 0x1); /* wr en */
+  _device.phy_set_bb_reg(0x1d94, 0x00ff0000, (tone_idx >> 1) & 0xff);
+  if (tone_idx & 1)
+    _device.phy_set_bb_reg(0x1d94, 0xf0, weight);
+  else
+    _device.phy_set_bb_reg(0x1d94, 0xf, weight);
+  _device.phy_set_bb_reg(0x1ee8, 0x3, 0x0);                 /* clk off */
+}
+
+/* phydm_clean_specific_csi_mask_8822e — zero the 8 tones the spur cases
+ * touch (the kernel's cheap "clean" used on every spur path). */
+void RadioManagementJaguar3::clean_csi_mask_8822e() {
+  static const uint8_t tones[8] = {7, 8, 16, 55, 56, 103, 104, 112};
+  _device.phy_set_bb_reg(0x1ee8, 0x3, 0x3);
+  _device.phy_set_bb_reg(0x1d94, (1u << 31) | (1u << 30), 0x1);
+  for (uint8_t t : tones) {
+    _device.phy_set_bb_reg(0x1d94, 0x00ff0000, t);
+    _device.phy_set_bb_reg(0x1d94, 0x000000ff, 0x0);
+  }
+  _device.phy_set_bb_reg(0x1ee8, 0x3, 0x0);
+}
+
+/* Central-channel/BW combos phydm_spur_eliminate_8822e special-cases —
+ * shared by the spur apply below and the fast_retune decline gate. */
+bool RadioManagementJaguar3::is_spur_combo_8822e(uint8_t ch,
+                                                 ChannelWidth_t bw) {
+  switch (bw) {
+  case CHANNEL_WIDTH_20:
+    return ch == 153 || ch == 161 || ch == 169;
+  case CHANNEL_WIDTH_40:
+    return ch == 151 || ch == 159 || ch == 167 || ch == 54 || ch == 102 ||
+           ch == 118;
+  case CHANNEL_WIDTH_80:
+    return ch == 155 || ch == 171 || ch == 58 || ch == 106 || ch == 122;
+  default:
+    return false;
+  }
+}
+
+/* phydm_spur_eliminate_8822e: per-channel/BW NBI notch + CSI mask + packet-
+ * detection tweak for the channels whose synthesizer harmonics (5760 /
+ * 5280 / 5600 MHz) land in-band; explicit spur-free default otherwise. */
+void RadioManagementJaguar3::spur_eliminate_8822e(uint8_t ch,
+                                                  ChannelWidth_t bw) {
+  /* phydm_set_auto_nbi(false) */
+  _device.phy_set_bb_reg(0x818, 1u << 3, 0x0);
+  _device.phy_set_bb_reg(0x1d3c, 0x78000000, 0x0);
+  /* phydm_csi_mask_enable(true) */
+  _device.phy_set_bb_reg(0xc0c, 1u << 3, 0x1);
+
+  struct Case {
+    uint8_t ch;
+    ChannelWidth_t bw;
+    bool nbi;           /* manual NBI on (5760 MHz spur family) */
+    uint16_t nbi_tone;  /* manual NBI tone index */
+    uint16_t csi_tones[3]; /* CSI tones to weight (0 = unused slot) */
+    uint8_t csi_n;
+    uint8_t weight;     /* CSI weighting value */
+    uint16_t pkt_det;   /* 0xc24[15:0] packet-detection value */
+  };
+  static const Case cases[] = {
+      {153, CHANNEL_WIDTH_20, true, 112, {111, 112, 113}, 3, 0xa, 0x60e0},
+      {161, CHANNEL_WIDTH_20, true, 112, {112, 0, 0}, 1, 0xa, 0x60e0},
+      {169, CHANNEL_WIDTH_20, true, 112, {112, 0, 0}, 1, 0xa, 0x60e0},
+      {151, CHANNEL_WIDTH_40, true, 16, {15, 16, 17}, 3, 0xa, 0x00e0},
+      {159, CHANNEL_WIDTH_40, true, 16, {16, 0, 0}, 1, 0xa, 0x00e0},
+      {167, CHANNEL_WIDTH_40, true, 16, {16, 0, 0}, 1, 0xa, 0x00e0},
+      {155, CHANNEL_WIDTH_80, true, 208, {207, 208, 209}, 3, 0xa, 0xc0e0},
+      {171, CHANNEL_WIDTH_80, true, 208, {208, 0, 0}, 1, 0xa, 0xc0e0},
+      {54, CHANNEL_WIDTH_40, false, 0, {32, 0, 0}, 1, 0xc, 0x00ff},
+      {102, CHANNEL_WIDTH_40, false, 0, {32, 0, 0}, 1, 0xc, 0x00ff},
+      {58, CHANNEL_WIDTH_80, false, 0, {224, 0, 0}, 1, 0xa, 0x00ff},
+      {106, CHANNEL_WIDTH_80, false, 0, {224, 0, 0}, 1, 0xa, 0x00ff},
+      {118, CHANNEL_WIDTH_40, false, 0, {32, 0, 0}, 1, 0xc, 0x00ff},
+      {122, CHANNEL_WIDTH_80, false, 0, {224, 0, 0}, 1, 0xa, 0x00ff},
+  };
+  for (const Case &c : cases) {
+    if (c.ch != ch || c.bw != bw)
+      continue;
+    clean_csi_mask_8822e();
+    set_manual_nbi_8822e(c.nbi, c.nbi_tone);
+    set_nbi_wa_para_8822e(c.nbi, bw);
+    for (uint8_t i = 0; i < c.csi_n; ++i)
+      set_csi_mask_8822e(c.csi_tones[i], c.weight);
+    _device.phy_set_bb_reg(0xc24, 0xffff, c.pkt_det);
+    return;
+  }
+  /* Default (spur-free channel): everything off, mask cleaned, packet
+   * detection at its default. */
+  set_manual_nbi_8822e(false, 0);
+  set_nbi_wa_para_8822e(false, bw);
+  clean_csi_mask_8822e();
+  _device.phy_set_bb_reg(0xc0c, 1u << 3, 0x0); /* csi_mask_enable(false) */
+  _device.phy_set_bb_reg(0xc24, 0xffff, 0x00ff);
+}
+
 void RadioManagementJaguar3::DumpCanary() {
   /* Channel/BW-relevant set: TX DFIR + block enables (0x808), RX DFIR (0x810),
    * AGC bound/tables (0x828/0x18ac/0x41ac), subtune (0x88c), small-BW/RF-BW/
@@ -251,9 +440,7 @@ void RadioManagementJaguar3::DumpCanary() {
       0x1a00, 0x1a14, 0x1a80, 0x1a9c, 0x1abc, 0x1ae8, 0x1aec, 0x1c80,
       0x18ac, 0x41ac, 0x1944, 0x4044,
       /* TXAGC refs (runtime TX-power API): OFDM 0x18e8/0x41e8, CCK
-       * 0x18a0/0x41a0, + the first per-rate diff dword. The regcheck's
-       * TX+RX cell asserts 0x41e8 stays at its table default (the 8822E
-       * RX-desense quirk) while path A moves with the offset. */
+       * 0x18a0/0x41a0, + the first per-rate diff dword. */
       0x18e8, 0x41e8, 0x18a0, 0x41a0, 0x3a00};
   static const uint16_t mac_canary[] = {0x0, 0x24, 0x454, 0x483,
                                         0x55c, 0x638, 0x668};
@@ -463,6 +650,17 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
     return false; /* band change needs RFE/AGC/CCK-RxIQ — full path only */
   if (channel == _last_channel)
     return true; /* no-op hop */
+  /* Spur channels (phydm_spur_eliminate_8822e) carry per-channel NBI/CSI-mask
+   * state that only the full path programs — a lean hop into OR out of one
+   * would leave a stale notch/mask. Decline; the caller falls back to the
+   * full SetMonitorChannel. 8822E only (the spur port is 8822E-gated). */
+  if (_variant == ChipVariant::C8822E) {
+    uint8_t cc, cp, tc, tp;
+    central_and_pri(_last_channel, channel_offset, bwmode, cc, cp);
+    central_and_pri(channel, channel_offset, bwmode, tc, tp);
+    if (is_spur_combo_8822e(cc, bwmode) || is_spur_combo_8822e(tc, bwmode))
+      return false;
+  }
 
   devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j3",
                          channel);
@@ -608,8 +806,7 @@ void RadioManagementJaguar3::set_mac_bw_txsc(ChannelWidth_t bw, uint8_t pri) {
   _device.rtw_write8(0x483, sc);
 }
 
-void RadioManagementJaguar3::set_tx_power_ref(uint8_t idx, bool zero_diffs,
-                                              bool skip_path_b_ofdm_ref) {
+void RadioManagementJaguar3::set_tx_power_ref(uint8_t idx, bool zero_diffs) {
   /* Writes the 0x1c90 TXAGC gate below — the fast path's composed 0x1c90
    * cache would go stale. */
   invalidate_fast_caches();
@@ -628,8 +825,7 @@ void RadioManagementJaguar3::set_tx_power_ref(uint8_t idx, bool zero_diffs,
     _device.phy_set_bb_reg(off, mask, v);
   };
   wr(0x18e8, 0x1fc00, idx);
-  if (!skip_path_b_ofdm_ref)
-    wr(0x41e8, 0x1fc00, idx); /* path B — 8822E TX+RX RX-desense hazard */
+  wr(0x41e8, 0x1fc00, idx);
   wr(0x18a0, 0x7f0000, idx);
   wr(0x41a0, 0x7f0000, idx);
   if (zero_diffs)
@@ -637,10 +833,7 @@ void RadioManagementJaguar3::set_tx_power_ref(uint8_t idx, bool zero_diffs,
       wr(off, 0xffffffff, 0x0);
   _logger->info("Jaguar3: TX power reference set to 0x{:02x} ({}) "
                 "(per-rate diffs {})",
-                idx,
-                skip_path_b_ofdm_ref ? "path A + CCK B; 0x41e8 kept"
-                                     : "both paths",
-                zero_diffs ? "zeroed" : "kept");
+                idx, "both paths", zero_diffs ? "zeroed" : "kept");
 }
 
 /* Map a phy_reg_pg pseudo-address to the four MGN_* rates it encodes (byte i of
@@ -684,8 +877,8 @@ static bool pg_addr_to_rates(uint32_t addr, std::array<uint8_t, 4> &rates) {
 }
 #endif /* DEVOURER_HAVE_JAGUAR3_8822E */
 
-void RadioManagementJaguar3::apply_tx_power_refs_8822e(
-    uint8_t ref_a, uint8_t ref_b, bool skip_path_b_ofdm_ref) {
+void RadioManagementJaguar3::apply_tx_power_refs_8822e(uint8_t ref_a,
+                                                       uint8_t ref_b) {
   invalidate_fast_caches(); /* writes the 0x1c90 TXAGC gate below */
   /* Clamp to the 7-bit ref field — the masked BB write truncates mod 128. */
   if (ref_a > 0x7f)
@@ -697,14 +890,14 @@ void RadioManagementJaguar3::apply_tx_power_refs_8822e(
     _device.phy_set_bb_reg(off, mask, v);
   };
   wr(0x18e8, 0x1fc00, ref_a);   /* path A OFDM/HT/VHT ref */
-  if (!skip_path_b_ofdm_ref)
-    wr(0x41e8, 0x1fc00, ref_b); /* path B — RX-desense hazard, see header */
+  wr(0x41e8, 0x1fc00, ref_b);   /* path B */
   wr(0x18a0, 0x7f0000, ref_a);  /* CCK ref */
   wr(0x41a0, 0x7f0000, ref_b);
 }
 
-void RadioManagementJaguar3::apply_power_by_rate_8822e(
-    uint8_t channel, uint8_t ref_a, uint8_t ref_b, bool skip_path_b_ofdm_ref) {
+void RadioManagementJaguar3::apply_power_by_rate_8822e(uint8_t channel,
+                                                       uint8_t ref_a,
+                                                       uint8_t ref_b) {
   invalidate_fast_caches(); /* writes the 0x1c90 TXAGC gate below */
   /* Clamp to the 7-bit ref fields (masked BB writes truncate mod 128). */
   if (ref_a > 0x7f)
@@ -751,8 +944,7 @@ void RadioManagementJaguar3::apply_power_by_rate_8822e(
     _device.phy_set_bb_reg(off, mask, v);
   };
   wr(0x18e8, 0x1fc00, ref_a);     /* path A OFDM/HT/VHT ref */
-  if (!skip_path_b_ofdm_ref)
-    wr(0x41e8, 0x1fc00, ref_b);   /* path B — RX-desense hazard, see header */
+  wr(0x41e8, 0x1fc00, ref_b);     /* path B */
   wr(0x18a0, 0x7f0000, ref_a);    /* CCK ref (2.4G) */
   wr(0x41a0, 0x7f0000, ref_b);
 

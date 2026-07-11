@@ -49,7 +49,9 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
   Sustained 5 GHz TX needs the **coex runtime thread**
   (`RtlJaguar3Device::coex_runtime_loop`, started in `InitWrite`) — without its
   ~2 s WiFi-only coex re-apply + FW heartbeats, the combo chip's coex firmware
-  silences the antenna.
+  silences the antenna. The rtl8822e's hardware-bisected constraints (DPDT/
+  pin-mux front end, single-path 1SS TX, spur channels, LCK, the 2.4 GHz TX
+  kernel-parity limitation) live in `docs/8822e-quirks.md`.
 
 Naming traps: **RTL8821AU is Jaguar1** (not Jaguar2, despite the Jaguar2
 RTL8821C's similar name); RTL8822**B**U (Jaguar2) ≠ RTL8822**C**U (Jaguar3).
@@ -224,9 +226,7 @@ Knob-specific facts that aren't obvious from the field docs:
 - `DEVOURER_TX_WITH_RX=thread` (concurrent TX+RX on one claimed handle:
   `InitWrite` once, then `StartRxLoop` on a thread) must be set **before**
   `InitWrite` on Jaguar3 — the bring-up keeps the RX filters open; retrofitting
-  RX later is unreliable. On the 8822E, TX+RX mode leaves the path-B OFDM TXAGC
-  reference (0x41e8) at table default — any nonzero value there desenses the
-  EU's RX to near-deaf (hardware-bisected, value-independent). This is the
+  RX later is unreliable. This is the
   single-radio beamforming self-sounding station: pair with
   `DEVOURER_BF_ARM_SOUNDER` / `DEVOURER_TX_NDPA` / `DEVOURER_BF_DETECT_REPORT`
   (`docs/beamforming-self-sounding.md`). Non-`thread` values select a

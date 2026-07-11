@@ -99,8 +99,7 @@ public:
    * set_tx_power_ref) under _reg_mu, serialized against the coex tick's
    * pwr_track (which RMWs the [7:0] thermal field of the SAME 0x18a0/0x41a0
    * dwords — field-disjoint, so thermal compensation and the offset compose).
-   * The 8822E TX+RX 0x41e8 quirk is enforced structurally: every ref write
-   * takes skip_path_b_ofdm_ref from _rx_wanted. A full SetMonitorChannel
+   * A full SetMonitorChannel
    * re-folds the knobs against the new channel group's efuse refs (gated on a
    * knob being active); FastRetune never touches TXAGC. GetThermalStatus
    * reads RF 0x42[6:1] via the calibration impl (efuse baseline on the E,
@@ -255,9 +254,7 @@ private:
   bool _cca_disabled = false;
   void apply_cca_mode_locked(bool disabled);
   /* TX+RX intent (DEVOURER_TX_WITH_RX at InitWrite / an RX-side Init):
-   * consumed as skip_path_b_ofdm_ref by EVERY TXAGC ref write, so no offset
-   * churn can ever touch 0x41e8 while RX is alive (the 8822E RX-desense
-   * quirk is enforced structurally, not by call-site discipline). */
+   * keeps the RX filters open across the TX bring-up. */
   bool _rx_wanted = false;
   /* Cached 8822E per-channel-group efuse base refs (the values InitWrite
    * derived, incl. the 0x4b fallback) so an offset-only step recomputes
@@ -272,6 +269,10 @@ private:
    * change / flat<->efuse transitions); full=false is the light offset step.
    * Caller holds _reg_mu when the coex thread may be running. */
   void apply_tx_power_current(bool full);
+  /* Golden-init replay (DEVOURER_REPLAY_WSEQ, debug.replay_wseq): apply a
+   * captured kernel register-write stream verbatim at the end of InitWrite —
+   * the hardware-diff lever (same as Jaguar2's; found the 8822B RF18 bug). */
+  void apply_replay_wseq();
   /* Runtime TX-mode default (SetTxMode/ClearTxMode). */
   std::optional<devourer::TxMode> _tx_mode_default;
 

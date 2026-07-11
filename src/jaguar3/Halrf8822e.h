@@ -241,6 +241,11 @@ private:
   uint8_t _therm_avg_idx[2] = {0, 0};
   uint8_t _therm_avg_cnt[2] = {0, 0};
   int _last_swing[2] = {0x7fff, 0x7fff}; /* log-on-change sentinel */
+  /* LCK (synthesizer re-lock) thermal baseline — halrf_lck_track_8822e:
+   * re-run AACK+RTK when the averaged thermal drifts >= 4 units from this
+   * base (VCO temperature coefficient); -1 = capture on first tick. */
+  int _lck_base[2] = {-1, -1};
+  void lck_trigger(); /* phy_lc_calibrate_8822e: AACK + RTK, path A (SYN) */
 
   RtlAdapter _device;
   Logger_t _logger;

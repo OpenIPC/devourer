@@ -75,7 +75,7 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8821CU**                 | 1T1R + BT         | —             | —             | —                | rides the 8811CU (8821C) code path. 5/10 MHz capable |
 | **RTL8812CU**                 | 2T2R              | 65            | 60            | 60               | LB-LINK WDN1300H (`0bda:c812`). 5/10 MHz capable |
 | **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`0bda:c82c`). 5/10 MHz capable |
-| **RTL8812EU**                 | 2T2R              | 8             | 51            | 47               | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module. 5/10 MHz capable |
+| **RTL8812EU**                 | 2T2R              | ‡             | 51            | 47               | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module. 5/10 MHz capable. ‡ 2.4 GHz TX airs energy but no receiver decodes it — the vendor kernel driver behaves identically on this module ([quirks](docs/8822e-quirks.md)) |
 | **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked. 5/10 MHz capable |
 | **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
 

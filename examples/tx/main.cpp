@@ -894,6 +894,11 @@ int main(int argc, char **argv) {
     }
     if (const char *seed = std::getenv("DEVOURER_HOP_SEED"))
       hop_schedule.emplace(devourer::HopSchedule::parse_seed(seed));
+    else if (hop_slot_ms > 0)
+      // Slot-mode sequential hopping still goes through a (keyless) schedule so
+      // it emits the sync marker a lockstep RX needs — same channels[slot % n]
+      // order as before, now trackable. Frame-dwell hopping is unchanged.
+      hop_schedule.emplace(devourer::HopSchedule::sequential());
     if (const char *e = std::getenv("DEVOURER_HOP_ROUNDS")) {
       hop_rounds = std::strtol(e, nullptr, 0);
       if (hop_rounds < 0) hop_rounds = 0;

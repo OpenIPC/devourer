@@ -47,6 +47,14 @@ int main() {
     bad = true;
   }
   CHECK(bad, "bad seed rejected");
+  // Sequential (keyless) schedule: plain round-robin, a fixed public
+  // fingerprint distinct from any keyed one, and stateless like the keyed path.
+  HopSchedule seq = HopSchedule::sequential();
+  CHECK(seq.is_sequential() && !a.is_sequential(), "sequential flag");
+  CHECK(seq.fingerprint() == 0x53455131u && a.fingerprint() != 0x53455131u,
+        "sequential fingerprint sentinel");
+  for (uint64_t s = 0; s < 40; ++s)
+    CHECK(seq.channel_index(s, 4) == s % 4, "sequential round-robin");
   devourer::HopSyncMarker m{a.fingerprint(), 123, 456,
                             UINT64_C(0x1020304050607080)},
       out;

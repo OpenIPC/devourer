@@ -1041,14 +1041,18 @@ int main() {
   long hop_rx_slot_ms = 0;
   if (const char *s = std::getenv("DEVOURER_HOP_SLOT_MS"))
     hop_rx_slot_ms = std::strtol(s, nullptr, 0);
-  const bool hop_rx = std::getenv("DEVOURER_HOP_SEED") && hop_rx_slot_ms > 0 &&
-                      !hop_rx_channels.empty();
+  // Lockstep needs the slot clock + a hopset; the seed is optional — with it
+  // the RX tracks the keyed order, without it the public sequential order. Both
+  // ride the same HopSyncMarker.
+  const bool hop_rx = hop_rx_slot_ms > 0 && !hop_rx_channels.empty();
   if (hop_rx && !g_rx_sweep.empty())
     throw std::invalid_argument(
         "lockstep hopping and DEVOURER_RX_SWEEP are mutually exclusive");
   if (hop_rx) {
+    const char *seed = std::getenv("DEVOURER_HOP_SEED");
     g_hop_schedule = std::make_unique<devourer::HopSchedule>(
-        devourer::HopSchedule::parse_seed(std::getenv("DEVOURER_HOP_SEED")));
+        seed ? devourer::HopSchedule(devourer::HopSchedule::parse_seed(seed))
+             : devourer::HopSchedule::sequential());
     g_hop_slot_us = static_cast<uint64_t>(hop_rx_slot_ms) * 1000;
     long acquire_ms = hop_rx_slot_ms * 2;
     if (const char *a = std::getenv("DEVOURER_HOP_ACQUIRE_MS")) {

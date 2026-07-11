@@ -115,6 +115,13 @@ int main(int argc, char **argv) {
   logger->events().configure(stderr);
 
   int interval_ms = 2;
+  // Lockstep sync-marker cadence: emit one marker-only frame every N data
+  // frames in slot-hop mode so a tracking RX keeps its slot lock (a marker only
+  // at each slot boundary is too sparse — a single miss drops the lock). The
+  // caller's FEC PSDUs are never touched; the marker rides its own frame.
+  int sync_every = 4;
+  if (const char *e = std::getenv("DEVOURER_HOP_SYNC_EVERY"))
+    sync_every = std::max(1, std::atoi(e));
   // Sanity cap on a single PSDU body; protects against an upstream framing
   // bug that would otherwise have us allocate gigabytes from a stray length
   // prefix. 4096 covers any realistic legacy-6M probe-request payload.
@@ -280,6 +287,10 @@ int main(int argc, char **argv) {
     }
     if (const char *seed = std::getenv("DEVOURER_HOP_SEED"))
       hop_schedule.emplace(devourer::HopSchedule::parse_seed(seed));
+    else if (hop_slot_ms > 0)
+      // Slot-mode sequential hopping rides the keyless schedule so it still
+      // emits the lockstep sync marker (same channels[slot % n] order).
+      hop_schedule.emplace(devourer::HopSchedule::sequential());
     if (!hop_channels.empty()) {
       std::string list;
       for (size_t i = 0; i < hop_channels.size(); ++i)
@@ -302,6 +313,11 @@ int main(int argc, char **argv) {
   long tx_count = 0;
   const auto hop_start = std::chrono::steady_clock::now();
   uint64_t last_hop_slot = UINT64_MAX;
+  // Per-process epoch for the lockstep sync marker (see below): lets a tracking
+  // RX detect a TX restart and re-anchor its slot clock.
+  const uint32_t hop_epoch = static_cast<uint32_t>(
+      std::chrono::high_resolution_clock::now().time_since_epoch().count());
+  std::vector<uint8_t> sync_buf;
   while (true) {
     uint8_t len_bytes[4];
     {
@@ -349,7 +365,8 @@ int main(int argc, char **argv) {
               : static_cast<uint64_t>(tx_count / hop_dwell);
       int ch = hop_schedule ? hop_schedule->channel(slot, hop_channels)
                             : hop_channels[slot % hop_channels.size()];
-      if (slot != last_hop_slot) {
+      const bool slot_changed = (slot != last_hop_slot);
+      if (slot_changed) {
         auto ev = devourer::Ev(logger->events(), "hop.dwell");
         ev.f("slot", (unsigned long long)slot)
             .f("round", (unsigned long long)(slot / hop_channels.size()))
@@ -366,6 +383,30 @@ int main(int argc, char **argv) {
             .Channel = static_cast<uint8_t>(ch),
             .ChannelOffset = 0,
             .ChannelWidth = CHANNEL_WIDTH_20});
+
+      /* Lockstep sync: emit a marker-only frame at each slot boundary AND every
+       * sync_every data frames, so a tracking RX keeps the TX slot clock locked
+       * (one marker per slot is too sparse to survive a miss). It rides its own
+       * frame — the caller's FEC PSDUs stay byte-for-byte untouched — with the
+       * canonical SA, so the RX's marker matcher sees it. Slot-hop mode only. */
+      if (hop_schedule && hop_slot_ms > 0 &&
+          (slot_changed || tx_count % sync_every == 0)) {
+        const uint64_t slot_us = static_cast<uint64_t>(hop_slot_ms) * 1000;
+        const uint64_t us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - hop_start)
+                .count());
+        devourer::HopSyncMarker marker{hop_schedule->fingerprint(), hop_epoch,
+                                       static_cast<uint32_t>(us % slot_us),
+                                       us / slot_us};
+        auto wire = devourer::HopSyncMarker::encode(marker);
+        sync_buf.clear();
+        sync_buf.insert(sync_buf.end(), kStreamRadiotap.begin(),
+                        kStreamRadiotap.end());
+        sync_buf.insert(sync_buf.end(), dot11.begin(), dot11.end());
+        sync_buf.insert(sync_buf.end(), wire.begin(), wire.end());
+        rtlDevice->send_packet(sync_buf.data(), sync_buf.size());
+      }
     }
 
     tx_buf.clear();
@@ -390,6 +431,12 @@ int main(int argc, char **argv) {
   }
 
   devourer::Ev(logger->events(), "stream.done").f("sent", tx_count);
+  // Destruct the device before tearing down libusb: on Jaguar1 the TX path is
+  // asynchronous, and closing the handle with transfers still in flight reaps
+  // completions against a freed handle (segfault, and the crash leaks the USB
+  // claim so the next run hits "adapter in use"). reset() runs the dtor, which
+  // drains outstanding transfers while the handle is still valid.
+  rtlDevice.reset();
   libusb_release_interface(handle, 0);
   libusb_close(handle);
   libusb_exit(context);

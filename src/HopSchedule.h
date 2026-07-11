@@ -19,6 +19,17 @@ public:
 
   explicit HopSchedule(Key key) : key_(key) {}
 
+  // A public, keyless round-robin (channels[slot % n]) that shares the lockstep
+  // machinery — the "sequential-hop" peer of the keyed schedule. Same slot->
+  // channel API and sync marker, but the order is predictable (which is the
+  // point of the follower-jammer comparison: a reactive jammer can lock onto
+  // sequential but not the keyed permutation).
+  static HopSchedule sequential() {
+    HopSchedule s{Key{}};
+    s.sequential_ = true;
+    return s;
+  }
+
   static Key parse_seed(const char *text) {
     if (!text || !*text)
       throw std::invalid_argument("empty hop seed");
@@ -46,7 +57,11 @@ public:
     return HopSchedule(parse_seed(std::getenv(name)));
   }
 
+  bool is_sequential() const { return sequential_; }
+
   uint32_t fingerprint() const {
+    if (sequential_)
+      return 0x53455131u;   // "SEQ1" — fixed public-schedule id, no key
     static const uint8_t tag[] = {'d', 'e', 'v', 'o', 'u', 'r',
                                   'e', 'r', '-', 'h', 'o', 'p'};
     return static_cast<uint32_t>(siphash24(key_, tag, sizeof(tag)));
@@ -75,6 +90,8 @@ public:
   size_t channel_index(uint64_t slot, size_t n) const {
     if (!n)
       throw std::invalid_argument("empty hopset");
+    if (sequential_)
+      return static_cast<size_t>(slot % n);
     const auto p = permutation(slot / n, n);
     return p[static_cast<size_t>(slot % n)];
   }
@@ -108,6 +125,7 @@ public:
 
 private:
   Key key_;
+  bool sequential_ = false;
   static unsigned hex(char c) {
     return c <= '9' ? c - '0' : (c <= 'F' ? c - 'A' + 10 : c - 'a' + 10);
   }

@@ -1090,7 +1090,9 @@ int main() {
         if (anchor > 0 && now >= anchor) {
           uint64_t slot = static_cast<uint64_t>(
               (now - anchor) / static_cast<long long>(g_hop_slot_us));
-          if (slot != tuned_slot) {
+          /* Phase correction may move the fitted boundary slightly forward.
+           * Never follow that jitter backwards into a slot already visited. */
+          if (tuned_slot == UINT64_MAX || slot > tuned_slot) {
             int ch = g_hop_schedule->channel(slot, hop_rx_channels);
             auto t0 = steady_us();
             dev->FastRetune(static_cast<uint8_t>(ch), true);

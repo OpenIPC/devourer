@@ -54,8 +54,10 @@ Bench (master RTL8812AU, slaves RTL8822CU + RTL8822EU, ch36, 50 ms beacons):
 
 The inter-slave agreement tightens with beacon rate (≈18 µs at 100 ms → ≈5 µs at
 50 ms) as the fits densify and balance. Every generation exposes the per-frame
-`tsfl` a slave needs; the slave role is bench-validated on Jaguar2/3, and the
-master can be any transmitter (`ReadTsf()`, including Jaguar1).
+`tsfl` a slave needs and the slave role is bench-validated on all three
+(Jaguar2/3, and Jaguar1: an 8821AU slave locks at **0.30 µs RMS** to a
+hardware-beacon master); the master can be any transmitter (`ReadTsf()`,
+including Jaguar1).
 
 The ~94 µs absolute bound is the **transport's submit-to-air floor**, not a
 protocol property: measured with an embedded-submit-TSF frame stream and a
@@ -187,7 +189,12 @@ zero at **~1.25 ms RMS steady-state** (gain 0.30) — a 4× improvement over the
 non-converging `send_packet` baseline. The residual is the fine actuator's USB
 read→write jitter (~0.5–1.2 ms per correction, §Microsecond-fine steering); it is
 the floor for a userspace-USB TSF write (over the PCIe transport the same
-actuator's register path is µs-scale — see the 8821CE row below). Harness:
+actuator's register path is µs-scale — see the 8821CE row below). A
+`PinBeaconTbtt`-based UE actuator was **bench-refuted on USB** (equal at steer
+cadence, unstable-to-worse at low cadence with matched loop gain: every pin
+re-rolls the ~1 ms USB placement error, so the noise the fine steer pays per
+correction the pin pays per pin) — the fine steer remains the right USB UE
+actuator, and the µs-class UE path is a PCIe UE. Harness:
 `tests/timesync_ta_demo.sh` with `HWBEACON=1`.
 
 **Steering the TBTT.** The actuator is `AdjustBeaconTiming(microseconds)`, not a

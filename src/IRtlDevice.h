@@ -294,7 +294,12 @@ public:
    * TBTT beacon airs exactly on schedule instead of after a CSMA backoff — the
    * lever that collapses the hardware-beacon downlink residual to sub-µs on a
    * shared channel (the master owns the channel). Also DEVOURER_DIS_CCA at
-   * construction. No-op where unimplemented. */
+   * construction. Implemented on Jaguar2/3; a DELIBERATE no-op on Jaguar1,
+   * whose baseband EDCCA is already disabled by its init table (0x8A4 =
+   * 0x7F7F7F7F) — its hardware-beacon downlink measures ~0.34 µs RMS on a
+   * crowded channel with no MAC-side gate, and porting the J2 register
+   * recipe was bench-refuted (no gain; the 0x524[11] clear conflicts with
+   * the vendor beacon-enable state). */
   virtual void SetCcaMode(bool disabled) { (void)disabled; }
 
   /* Shift the next hardware beacon TBTT by `microseconds` (>0 = later/retard,

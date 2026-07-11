@@ -4,12 +4,13 @@
 // sequence-control field (MPDU bytes 22-23: seq[15:4] must INCREMENT by 1 per
 // beacon — the hardware sequence numbering a kernel AP does via EN_HWSEQ), and
 // the beacon-body timestamp (bytes 24-31, the live hardware TSF, steps ~102400 µs
-// at 100 TU). Bench-confirmed kernel-equivalent on both HalMAC generations:
+// at 100 TU). Bench-confirmed kernel-equivalent on all three generations:
 //   J3 8822C : seq 16,17,18,19,20,21...   ts steps ~102400 us
 //   J2 8812BU: seq 730,731,732,733...     ts steps ~102400 us
-// (A beacon whose seq is FROZEN is a degraded engine — e.g. a J2 beacon left in
-// the post-drop state after an AdjustBeaconTiming tweak, which J2 does not
-// survive; a healthy fresh beacon increments.)
+//   J1 8821AU: seq increments, ts steps; the 8814A pins seq at 0 (kernel rtw88
+//   parity on that chip — judge it by presence/cadence/ts, not seq)
+// (Elsewhere a beacon whose seq is FROZEN is a degraded engine — e.g. a beacon
+// left in the post-re-latch drop state; a healthy fresh beacon increments.)
 //
 // Build: g++ -std=c++20 -O2 -Isrc -Iexamples/common tests/beacon_wire_check.cpp \
 //   examples/common/env_config.cpp build/libdevourer.a \

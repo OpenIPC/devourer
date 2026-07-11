@@ -10,8 +10,9 @@ responses, DHCP/ARP/ICMP, the WPA2 4-way handshake, software CCMP) lives in the
 harness. All bench-validated against the real Linux `rtw88`/`mac80211` stack.
 
 A dense beacon interval (`DEVOURER_BCN_TU=25`) is needed throughout, so a
-supplicant's fast channel-hopping scan catches the AP. The AP adapter must be a
-full-duplex J2/J3 (`StartBeacon` + `StartRxLoop`); the station is a second
+supplicant's fast channel-hopping scan catches the AP. The AP adapter must
+run `StartBeacon` (all generations) plus full-duplex `StartRxLoop` — the AP
+harnesses are bench-validated on J2/J3 adapters; the station is a second
 Realtek adapter bound to the kernel (rtw88 auto-probes a VBUS-cold dongle to a
 `wlp*` interface). `send_packet` must run **off** the RX event thread (queue the
 requester, TX from another thread — libusb returns BUSY from the RX callback).
@@ -21,7 +22,9 @@ requester, TX from another thread — libusb returns BUSY from the RX callback).
 `tests/beacon_wire_check.cpp` checks the on-wire beacon: right frame control
 (0x0080), an 802.11 sequence number that **increments by 1 per beacon** (the
 hardware sequence numbering a kernel AP does via `EN_HWSEQ`), and the live TSF —
-on both HalMAC generations. `tests/beacon_kernel_scan.sh` goes further: a real
+on all three generations (exception: the 8814A airs its stored beacon with the
+sequence pinned at 0, matching the kernel rtw88 driver on the same chip).
+`tests/beacon_kernel_scan.sh` goes further: a real
 station bound to `rtw88` runs `iw scan` and lists devourer, parsing every element:
 
     BSS 57:42:75:05:d6:00   TSF <live>   freq 2437   beacon interval 25 TUs

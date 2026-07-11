@@ -153,8 +153,10 @@ for i, (t, req, app) in enumerate(steers):
     post = [b for b in bcns if t + 500 <= b[0] < t + 4000]
     if not post:
         print(f"steer {i+1} @ {t}: FAIL — no beacons within 4 s after"); ok = False; continue
-    # seq must advance across the steer
-    if pre and post[-1][1] == pre[-1][1]:
+    # seq must advance across the steer — except on the 8814A, whose stored
+    # beacon airs with hardware seq pinned at 0 (kernel rtw88 parity; beacon
+    # presence/cadence is the survival signal there)
+    if pre and post[-1][1] == pre[-1][1] and post[-1][1] != 0:
         print(f"steer {i+1} @ {t}: FAIL — seq frozen at {pre[-1][1]}"); ok = False; continue
     dphase = ""
     if pre:

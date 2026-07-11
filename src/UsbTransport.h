@@ -31,7 +31,8 @@ class UsbTransport final : public IRtlTransport {
 public:
   UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
                libusb_context *ctx = nullptr,
-               std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr);
+               std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr,
+               bool rx_zerocopy = true);
   ~UsbTransport() override;
 
   bool is_usb() const override { return true; }
@@ -93,6 +94,11 @@ private:
    * before the device handle / context go away, and so a soft cap can throttle
    * over-submission. */
   std::atomic<int> _tx_inflight{0};
+
+  /* Allocate the async RX ring from kernel DMA memory (dev_mem_alloc) for a
+   * zerocopy bulk-IN path; falls back to heap buffers per-URB when the alloc is
+   * unsupported. See rx_loop and DeviceConfig::Usb::rx_zerocopy. */
+  bool _rx_zerocopy = true;
 
   /* Exclusive per-adapter USB lock (UsbDeviceLock.h), held for the transport
    * lifetime; released when the device (and thus the transport) dies. */

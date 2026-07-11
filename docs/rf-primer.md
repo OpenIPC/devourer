@@ -145,6 +145,12 @@ rides on is in [`narrowband.md`](narrowband.md).
 
 ![Time distribution — wire PTP to AP TSF to beacons to station](img/timesync_chain.gif)
 
+*Three clocks becoming one, with the Wi-Fi MAC opened up: the AP lane shows the
+silicon path — TSF counter → TBTT comparator → reserved-page beacon getting its
+timestamp written at the antenna — and the station lane shows the arrival latch
+feeding the fit. Watch the tick combs converge and the residual strip go
+red → green.*
+
 Every radio keeps time with its own crystal, and no two crystals agree: a
 typical pair differs by tens of **ppm** (parts per million) — a few
 microseconds of drift every second, milliseconds within minutes. That's

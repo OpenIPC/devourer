@@ -241,6 +241,30 @@ At a realistic discipline cadence (~10 s between corrections against ~40 ppm
 crystal drift and a ~500 µs guard) the cost is ~1 lost beacon per 100. Jaguar3
 needs no re-download — its engine survives the re-latch.
 
+**Steering corrupts the controller's own clock — use `PinBeaconTbtt`.**
+`AdjustBeaconTimingFine` necessarily jumps the reported TSF (the TBTT re-derives
+from a shifted TSF), so a discipline loop whose phase estimate is a fit against
+that TSF (`ref = a·tsf + b`) breaks its own sensor at every steer. Bench-observed
+on the 8821CE AP↔PTP loop: high-authority controllers (PI, large clamped steps)
+chase the corrupted estimate into a limit cycle, and the working ~60 µs
+proportional loop is a **sweet spot, not a floor** — its steers are only small
+enough (≈0.5·e) not to wreck the fit, so more authority makes it worse, and
+`SetXtalCap` can't buy a lower steer cadence (the AFE trim moves only ~10 of the
+~42 ppm crystal offset). The escape is `PinBeaconTbtt(offset_us)`: the same
+shift + re-latch, immediately followed by a TSF write back onto the original
+timeline — a bare TSF write does not move the TBTT, so the steered phase
+survives while the clock the loop reads stays continuous. Bench (8821CE PCIe):
+TSF discontinuity **~10 µs** per correction (vs the full steer magnitude for
+the fine variant — ~500× less fit disturbance), on-air phase pinned within
+~±150 µs of the commanded offset, zero beacons lost. Semantics are **absolute**
+(TBTT fires at `TSF % interval == offset`), so the controller commands the
+target offset directly instead of integrating steps — and a PTP-disciplined
+TSF drags the pinned TBTT with it between corrections. Where `PinBeaconTbtt`
+is unavailable (USB: the restore write costs ~0.5–1 ms, worse than a small
+steer), the controller-side fix is a steering ledger: add the cumulative
+commanded shifts back onto the raw TSF before fitting, so the fit sees a
+continuous virtual clock and full authority is safe again.
+
 Actuator characterization: `tests/beacon_interval_shift.sh <short_TU>` (TU tweak),
 or `FINE_US=<µs> tests/beacon_interval_shift.sh` (µs-fine). Steer *survival* +
 repeated-steer accuracy (incl. a PCIe master via `MASTER_CMD='ssh …'`):

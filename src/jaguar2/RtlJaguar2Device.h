@@ -94,6 +94,10 @@ public:
    * re-arm the latch — one skipped beacon per correction. */
   int32_t AdjustBeaconTiming(int32_t microseconds) override;
   int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
+  /* TSF-preserving absolute TBTT pin (IRtlDevice contract): steer via the
+   * shift + re-latch, then write the TSF back onto its original timeline so
+   * a controller fitting against this port's TSF sees a continuous clock. */
+  int32_t PinBeaconTbtt(int32_t offset_us) override;
   void Stop() override;
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;

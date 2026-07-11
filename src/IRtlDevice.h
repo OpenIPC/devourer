@@ -343,6 +343,32 @@ public:
     return 0;
   }
 
+  /* TSF-PRESERVING µs-fine TBTT actuator: pin the beacon TBTT so it fires at
+   * TSF % interval == offset_us, WITHOUT disturbing the reported TSF.
+   * AdjustBeaconTimingFine necessarily jumps the TSF (the TBTT re-derives from
+   * a shifted TSF), which corrupts any controller whose phase estimate is a
+   * fit against this port's TSF (ref = a·tsf + b — every steer breaks the
+   * slope, and a high-authority loop chases the corrupted estimate into a
+   * limit cycle; bench-observed on the 8821CE AP↔PTP loop). This variant does
+   * the same shift + re-latch, then immediately writes the TSF back onto its
+   * original timeline — a bare TSF write does not move the TBTT (bench-proven),
+   * so the steered TBTT phase survives while the clock the loop reads stays
+   * continuous. The residual TSF discontinuity is one register-write latency:
+   * ~µs over PCIe MMIO, ~0.5–1 ms over USB (so on USB this only pays off for
+   * steers larger than that).
+   *
+   * ABSOLUTE semantics (unlike the incremental AdjustBeaconTimingFine): each
+   * call re-pins the TBTT to the TSF grid, so consecutive calls don't
+   * accumulate, and a PTP-disciplined TSF drags the pinned TBTT with it
+   * between corrections — the fit-free discipline pattern. Requires an active
+   * StartBeacon; returns the applied offset (normalized into the beacon
+   * period), 0 if no active beacon. Jaguar2 (bench: 8821CE PCIe); base is a
+   * no-op. */
+  virtual int32_t PinBeaconTbtt(int32_t offset_us) {
+    (void)offset_us;
+    return 0;
+  }
+
   /* Clean shutdown: halt TRX DMA and power the chip down to a re-enumerable
    * state (mirrors the kernel driver's card-disable on unbind). Call after the
    * RX/TX loop exits and BEFORE releasing/closing the USB interface, so the

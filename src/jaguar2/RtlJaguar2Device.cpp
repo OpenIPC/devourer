@@ -1539,6 +1539,48 @@ int32_t RtlJaguar2Device::AdjustBeaconTimingFine(int32_t microseconds) {
   return microseconds;
 }
 
+int32_t RtlJaguar2Device::PinBeaconTbtt(int32_t offset_us) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_bcn_interval_tu <= 0) return 0;  // no active beacon
+  const int64_t period_us = static_cast<int64_t>(_bcn_interval_tu) * 1024;
+  const int64_t off =
+      ((static_cast<int64_t>(offset_us) % period_us) + period_us) % period_us;
+  /* Same shift + re-latch as AdjustBeaconTimingFine — the TBTT re-derives
+   * from (TSF - off), i.e. it will fire when TSF % period == off — followed
+   * IMMEDIATELY by a TSF restore write: a bare TSF write does not move the
+   * TBTT (bench-proven), so the pinned phase survives while the reported TSF
+   * returns to its original timeline. The residual discontinuity is one
+   * register-write latency (~µs over PCIe MMIO). Keep the off-timeline window
+   * minimal: restore before the reserved-page re-download. */
+  auto read_tsf = [&]() {
+    uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
+    uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
+    if (_device.rtw_read<uint32_t>(0x0564) != hi) {
+      hi = _device.rtw_read<uint32_t>(0x0564);
+      lo = _device.rtw_read<uint32_t>(0x0560);
+    }
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+  };
+  uint64_t nt = read_tsf() - static_cast<uint64_t>(off);
+  uint8_t bc = _device.rtw_read8(0x0550 /* REG_BCN_CTRL */);
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc & ~(1u << 3)));
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(nt));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(nt >> 32));
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc | (1u << 3)));  // re-latch
+  uint64_t back = read_tsf() + static_cast<uint64_t>(off);  // original timeline
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(back));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(back >> 32));
+  /* The J2 engine dropped its bcn-valid latch on the re-latch — re-arm it. */
+  if (!redownload_beacon_locked())
+    return 0;
+  /* The TBTT grid now sits at TSF % period == off (vs the restored TSF) —
+   * record it for the coarse path's phase alignment. */
+  _tbtt_off_us = off;
+  _logger->info("beacon(J2): TBTT pinned to TSF%%interval == {} us "
+                "(TSF-preserving; requested {})", (long long)off, offset_us);
+  return static_cast<int32_t>(off);
+}
+
 void RtlJaguar2Device::SetCcaMode(bool disabled) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   uint32_t v520 = _device.rtw_read<uint32_t>(0x0520);

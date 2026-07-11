@@ -15,7 +15,12 @@
 //   -o build/beacon_steer_check
 // Run: sudo DEVOURER_PID=0x012d DEVOURER_VID=0x2357 DEVOURER_CHANNEL=36 \
 //   build/beacon_steer_check [n_steers] [steer_us] [period_s]
-//   STEER_MODE=coarse selects AdjustBeaconTiming (TU-quantized) instead.
+//   STEER_MODE=coarse selects AdjustBeaconTiming (TU-quantized) instead;
+//   STEER_MODE=pin selects PinBeaconTbtt (TSF-preserving absolute pin —
+//   steer_us is then the absolute TBTT offset vs the TSF grid; successive
+//   steers alternate offset/offset+|steer_us| so the observer sees a step).
+//   TSF_WATCH=1: sample ReadTsf every ~20 ms around each steer and report the
+//   worst TSF-timeline discontinuity (the fit-corruption a controller sees).
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -46,9 +51,12 @@ int main(int argc, char **argv) {
   int n_steers = argc > 1 ? atoi(argv[1]) : 5;
   int steer_us = argc > 2 ? atoi(argv[2]) : -5000;
   int period_s = argc > 3 ? atoi(argv[3]) : 5;
-  const bool coarse = [] {
-    const char *m = std::getenv("STEER_MODE");
-    return m && std::strcmp(m, "coarse") == 0;
+  const char *steer_mode = std::getenv("STEER_MODE");
+  const bool coarse = steer_mode && std::strcmp(steer_mode, "coarse") == 0;
+  const bool pin = steer_mode && std::strcmp(steer_mode, "pin") == 0;
+  const bool tsf_watch = [] {
+    const char *w = std::getenv("TSF_WATCH");
+    return w && *w && std::strcmp(w, "0") != 0;
   }();
   uint8_t ch = 36;
   if (const char *c = std::getenv("DEVOURER_CHANNEL")) ch = (uint8_t)atoi(c);
@@ -108,19 +116,45 @@ int main(int argc, char **argv) {
     return 1;
   }
   printf("BEACON_MS %ld ch=%d interval_tu=%d mode=%s n=%d steer_us=%d period_s=%d\n",
-         now_ms(), ch, interval_tu, coarse ? "coarse" : "fine", n_steers,
-         steer_us, period_s);
+         now_ms(), ch, interval_tu,
+         coarse ? "coarse" : (pin ? "pin" : "fine"), n_steers, steer_us,
+         period_s);
   fflush(stdout);
   std::this_thread::sleep_for(std::chrono::seconds(period_s));
 
   for (int i = 0; i < n_steers; ++i) {
+    /* TSF_WATCH: bracket the steer with a TSF sample train; a controller's
+     * ref = a·tsf + b fit sees exactly these discontinuities. */
+    uint64_t pre_tsf = 0;
+    long long pre_us = 0;
+    if (tsf_watch) {
+      pre_tsf = dev->ReadTsf();
+      pre_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count();
+    }
     long t0 = now_ms();
-    int applied = coarse ? dev->AdjustBeaconTiming(steer_us)
-                         : dev->AdjustBeaconTimingFine(steer_us);
+    int req = steer_us;
+    if (pin && (i & 1))
+      req = steer_us + std::abs(steer_us); /* alternate so the phase steps */
+    int applied = coarse ? dev->AdjustBeaconTiming(req)
+                 : pin   ? dev->PinBeaconTbtt(req)
+                         : dev->AdjustBeaconTimingFine(req);
     printf("STEER_MS %ld n=%d req_us=%d applied_us=%d dur_ms=%ld\n", t0, i + 1,
-           steer_us, applied, now_ms() - t0);
+           req, applied, now_ms() - t0);
+    if (tsf_watch) {
+      uint64_t post_tsf = dev->ReadTsf();
+      long long post_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+      /* Discontinuity = TSF advance minus wall-clock advance across the
+       * steer (host jitter ~tens of µs; the fine steer's jump is the steer
+       * magnitude, the pin's is ~register-write latency). */
+      long long disc = (long long)(post_tsf - pre_tsf) - (post_us - pre_us);
+      printf("TSFJUMP_MS %ld n=%d disc_us=%lld\n", now_ms(), i + 1, disc);
+    }
     fflush(stdout);
-    if (applied == 0) {
+    if (applied == 0 && !(pin && req % (interval_tu * 1024) == 0)) {
       fprintf(stderr, "steer %d refused/failed (applied=0)\n", i + 1);
       return 1;
     }

@@ -32,6 +32,7 @@ public:
   UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
                libusb_context *ctx = nullptr,
                std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr);
+  ~UsbTransport() override;
 
   bool is_usb() const override { return true; }
 
@@ -80,6 +81,18 @@ private:
   std::atomic<uint64_t> _tx_failed{0};
   std::atomic<int> _tx_last_rc{0};
   std::atomic<bool> _tx_last_timeout{false};
+
+  /* Async-TX completions must be reaped by libusb_handle_events or the kernel
+   * URB queue fills, submits start failing, and TX throughput collapses (the
+   * Jaguar1 issue #240: its send path is tx_async and a TX-only session has no
+   * other event pump). We reap in the CALLER's thread — each tx_async drains
+   * completed transfers before submitting the next — rather than a background
+   * pump thread, which would race the caller-owned libusb teardown (an earlier
+   * attempt crashed on a usbi_mutex assertion). _tx_inflight tracks
+   * submitted-but-not-yet-reaped transfers so the destructor can drain them
+   * before the device handle / context go away, and so a soft cap can throttle
+   * over-submission. */
+  std::atomic<int> _tx_inflight{0};
 
   /* Exclusive per-adapter USB lock (UsbDeviceLock.h), held for the transport
    * lifetime; released when the device (and thus the transport) dies. */

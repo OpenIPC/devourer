@@ -8,8 +8,9 @@
 #include <vector>
 
 #include "AckResponder.h"
-#include "RadiotapPeek.h" /* send_packets batch pre-parse */
-#include "TxAggPlan.h"    /* USB TX aggregation URB packing */
+#include "RadiotapPeek.h"   /* send_packets batch pre-parse */
+#include "RadiotapTxFlags.h" /* HT MCS field decoder (LDPC/STBC) */
+#include "TxAggPlan.h"      /* USB TX aggregation URB packing */
 #include "TxReport.h"     /* CCX TX-status report decode + tx.report event */
 
 #include "BeamformingSounder.h" /* generation-neutral BF self-sounding recipe */
@@ -17,6 +18,7 @@
 #include "ChannelFreq.h" /* radiotap CHANNEL freq -> channel (per-packet hop) */
 #include "FrameParserJaguar3.h"
 #include "NhmReader.h"       /* frame-free NHM power histogram (shared) */
+#include "RadiotapTxFlags.h" /* shared HT MCS known/flag decode (LDPC/STBC) */
 #include "RateDefinitions.h" /* MGN_* rate enum (shared across the family) */
 #include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
 #include "ToneMask.h"   /* DEVOURER_RX_CSI_MASK / DEVOURER_RX_NBI knobs */
@@ -1444,18 +1446,22 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
           devourer::freq_to_chan(get_unaligned_le16(it.this_arg));
       break;
     case IEEE80211_RADIOTAP_MCS: {
-      uint8_t mcs_known = it.this_arg[0];
-      uint8_t mcs_flags = it.this_arg[1];
-      if ((mcs_flags & IEEE80211_RADIOTAP_MCS_BW_MASK) ==
-          IEEE80211_RADIOTAP_MCS_BW_40)
+      /* One shared reading of the HT MCS known/flag/index bytes (bw/sgi/mcs +
+       * LDPC/STBC). The J3 path historically read bw/sgi/mcs only and dropped
+       * the FEC/STBC known bits, so an HT frame requesting LDPC/STBC aired as
+       * plain BCC/no-STBC — only VHT frames were honoured. Mirrors the Jaguar2
+       * path (decode_radiotap_mcs_field, RadiotapTxFlags.h); the STBC-cap guard
+       * below still clamps to what the chip can do. */
+      const devourer::RadiotapMcsField m =
+          devourer::decode_radiotap_mcs_field(it.this_arg);
+      if (m.bw40)
         bwidth = CHANNEL_WIDTH_40;
-      sgi = (mcs_flags & 0x04) ? 1 : 0;
-      if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_MCS) {
-        uint8_t idx = it.this_arg[2];
-        if (idx <= 31) {
-          fixed_rate = MGN_MCS0 + idx;
-          rate_from_radiotap = true;
-        }
+      sgi = m.sgi;
+      ldpc = m.ldpc;
+      stbc = m.stbc;
+      if (m.have_mcs) {
+        fixed_rate = MGN_MCS0 + m.mcs;
+        rate_from_radiotap = true;
       }
     } break;
     case IEEE80211_RADIOTAP_VHT: {

@@ -111,16 +111,21 @@ diverge by ~hundreds of µs on a shared channel. In a time-distribution setup th
 master **owns** the channel, so that backoff is pure loss — the master disables
 EDCCA (`SetCcaMode`, on by default here; opt out with `DEVOURER_TSYNC_CSMA=1`)
 and the beacon airs exactly on schedule. `SetCcaMode` is implemented on
-Jaguar2/3; a Jaguar1 hardware-beacon master still defers to CSMA (expect the
-backoff-jitter row below on a busy channel).
+Jaguar2/3 and is a deliberate no-op on Jaguar1: the J1 baseband EDCCA is
+already disabled by its init table (`0x8A4 = 0x7F7F7F7F`, thresholds
+unreachable), and the measured J1 downlink needs no MAC-side gate — see the
+bench row below. (Porting the J2 MAC-register recipe to J1 was bench-refuted:
+no improvement, and its `0x524[11]` clear conflicts with the vendor
+beacon-enable state.)
 
 Bench (HW-beacon master + slave, **crowded** ch6, 100 ms beacons):
 
 | config | downlink residual |
 |--------|-------------------|
 | software stamp | ~94 µs RMS |
-| HW beacon, CSMA on | ~470 µs RMS (backoff jitter) |
+| HW beacon, CSMA on (J2/J3) | ~470 µs RMS (backoff jitter) |
 | HW beacon + no-CSMA (default) | **0.31 µs RMS** (8822C) / 0.39 µs (8812BU) |
+| HW beacon, Jaguar1 (no gate needed) | **0.34–0.40 µs RMS** (8821AU master, 8822CU slave) |
 
 So the master↔slave clocks track to sub-µs on any channel — the offset moves
 only with the crystal drift. `DEVOURER_TSYNC_HWBEACON=1` on both master and

@@ -95,7 +95,11 @@ int main(int argc, char **argv) {
 
   dev->InitWrite(SelectedChannel{ch, 0, CHANNEL_WIDTH_20});
   std::this_thread::sleep_for(std::chrono::seconds(2));
-  dev->SetCcaMode(true);  // beacon airs exactly at TBTT (master owns channel)
+  /* KEEP_CSMA=1: leave carrier-sense deferral on (A/B lever for measuring
+   * SetCcaMode's effect on TBTT punctuality). Default: EDCCA off — the beacon
+   * airs exactly at TBTT, the master owns the channel. */
+  if (const char *k = std::getenv("KEEP_CSMA"); !(k && *k && std::strcmp(k, "0") != 0))
+    dev->SetCcaMode(true);
 
   // Minimal beacon, canonical SA 57:42:75:05:d6:00 (rx.txhit matcher).
   std::vector<uint8_t> f = {

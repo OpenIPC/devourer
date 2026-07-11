@@ -44,7 +44,8 @@ AX, BX, CY, R = 300, 640, 318, 185       # cell centers / floor center / radius
 FLOOR = (28, 168, 892, 468)              # the floor box (cells must fit inside)
 RULER = (44, 512, 876, 566)              # slot ruler box
 NSLOT = 16
-HO_FRAME = 78                            # handover instant (act-3 frame)
+HO_START, HO_END = 68, 86                # soft-handover window (act-3 frames):
+                                         # slots in BOTH cells, uplink duplicated
 
 
 def act_of(fr):
@@ -95,9 +96,9 @@ def main() -> int:
         ("2/3  ICIC OVER THE BACKHAUL", "the scheduler splits the slot grid "
                                         "between cells — orthogonal at the edge "
                                         "(µs guards: shared clock)", CYAN),
-        ("3/3  MAKE-BEFORE-BREAK HANDOVER", "filtered quality crosses (A3: margin+TTT) "
-                                            "-> slots reassigned to B — valid "
-                                            "clock, zero gap", OK),
+        ("3/3  SOFT HANDOVER", "slots in BOTH cells through the edge, uplink "
+                               "duplicated (ms retune/slot) -> collapse onto B "
+                               "— zero gap", OK),
     ]
 
     imgs = []
@@ -119,9 +120,12 @@ def main() -> int:
         if act >= 1:
             px = 150 + ((fr * 37) % (W - 220))
             d.ellipse([px - 3, by + 15, px + 3, by + 21], fill=AMBER)
-        if act == 2 and abs(fr - HO_FRAME) < 3:
-            d.text((BX - 60, by - 2), ">> HO: robot -> B", font=font(11, True),
-                   fill=AMBER)
+        if act == 2 and HO_START <= fr < HO_START + 4:
+            d.text((BX - 130, by - 2), ">> HO: add B (soft, duplicate)",
+                   font=font(11, True), fill=AMBER)
+        if act == 2 and HO_END <= fr < HO_END + 4:
+            d.text((BX - 90, by - 2), ">> HO: drop A -> B only",
+                   font=font(11, True), fill=AMBER)
 
         # --- floor: cells + robot ------------------------------------------------
         d.rectangle(list(FLOOR), outline=GRID)
@@ -136,8 +140,9 @@ def main() -> int:
         else:
             rx = 330 + (620 - 330) * t
         ry = CY + 92
-        served_b = act == 2 and fr >= HO_FRAME
-        rcol = B_COL if served_b else A_COL
+        dual = act == 2 and HO_START <= fr < HO_END
+        served_b = act == 2 and fr >= HO_END
+        rcol = AMBER if dual else (B_COL if served_b else A_COL)
         robot(d, rx, ry, rcol)
         da, db = abs(rx - AX), abs(rx - BX)
         quality_bars(d, rx, ry, da, db)
@@ -148,10 +153,16 @@ def main() -> int:
                 d.line([cx, CY - 40, rx, ry - 22], fill=col, width=1)
             d.text((rx - 34, ry + 26), "collision", font=font(11, True), fill=WARN)
             d.ellipse([rx - 16, ry - 30, rx + 16, ry + 2], outline=WARN)
-        # clean serving link otherwise
+        # clean serving link(s): BOTH during the soft-handover window
         if act >= 1:
-            sx = BX if served_b else AX
-            d.line([sx, CY - 40, rx, ry - 22], fill=rcol, width=1)
+            if dual:
+                d.line([AX, CY - 40, rx, ry - 22], fill=A_COL, width=1)
+                d.line([BX, CY - 40, rx, ry - 22], fill=B_COL, width=1)
+                d.text((rx - 62, ry + 26), "uplink x2 (FastRetune per slot)",
+                       font=font(10, True), fill=AMBER)
+            else:
+                sx = BX if served_b else AX
+                d.line([sx, CY - 40, rx, ry - 22], fill=rcol, width=1)
 
         # --- the network-wide slot ruler ------------------------------------------
         x0, y0, x1, y1 = RULER
@@ -172,12 +183,15 @@ def main() -> int:
                 own_b = (s // 2) % 2 == 1        # pairs alternate A/B
                 col = (18, 66, 40) if own_b else (0, 60, 66)
                 d.rectangle([sx0, y0, sx1, y1], fill=col)
-                # the robot's slots (an A pair before HO, a B pair after)
-                mine = (s in (4, 5)) if not served_b else (s in (6, 7))
+                # the robot's slots: an A pair, a B pair after HO, and BOTH
+                # (duplicated uplink) through the soft-handover window
+                in_a, in_b = s in (4, 5), s in (6, 7)
+                mine = (in_a or in_b) if dual else (in_b if served_b else in_a)
                 if mine:
-                    d.rectangle([sx0, y0, sx1, y1], outline=rcol, width=2)
-                    d.text((sx0 + 4, y1 - 16), "UL" if s % 2 else "DL",
-                           font=font(9), fill=rcol)
+                    oc = (A_COL if in_a else B_COL) if dual else rcol
+                    d.rectangle([sx0, y0, sx1, y1], outline=oc, width=2)
+                    tag = "dup" if dual else ("UL" if s % 2 else "DL")
+                    d.text((sx0 + 4, y1 - 16), tag, font=font(9), fill=oc)
                 if s == now:
                     d.rectangle([sx0, y0, sx1, y1], outline=INK)
         d.text((x0, y1 + 6), "A slots", font=font(10), fill=A_COL)
@@ -185,7 +199,7 @@ def main() -> int:
         # legacy-roam ghost (act 3, after HO): the gap we do NOT take
         if act == 2:
             gx0 = x0 + 8 * sw
-            if fr >= HO_FRAME:
+            if fr >= HO_END:
                 d.rectangle([gx0, y1 + 18, gx0 + 5 * sw, y1 + 28], outline=DIM)
                 d.text((gx0 + 6, y1 + 18), "ordinary Wi-Fi roam: ~100 ms dead",
                        font=font(10), fill=DIM)

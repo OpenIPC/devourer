@@ -4,11 +4,13 @@
 
 *Two AP cells on one wired timebase, a robot driving between them. Act 1: no
 coordination — the cell-edge is a collision zone. Act 2: the backhaul assigns
-orthogonal slots and the edge goes clean. Act 3: the robot crosses cells; the
+orthogonal slots and the edge goes clean. Act 3: the robot crosses cells —
+through the transition it holds slots in **both** (duplicating its uplink
+across the two channels with a ~ms retune between slots: soft handover), the
 scheduler's filtered link-quality estimates cross over (A3-style: margin +
-time-to-trigger, not raw RSSI) and its schedule changes owner between two
-slots — no scan, no re-association, no clock re-acquisition; the ghost bar
-shows the ~100 ms+ hole an ordinary Wi-Fi roam would have punched.*
+time-to-trigger, not raw RSSI), and its schedule collapses onto B — no scan,
+no re-association, no clock re-acquisition; the ghost bar shows the ~100 ms+
+hole an ordinary Wi-Fi roam would have punched.*
 
 The [time-distribution machinery](time-distribution.md) ends with a specific
 capability: **every radio in a facility — wired or wireless — can share one
@@ -100,6 +102,22 @@ What remains of the classic roam cost is security context (whatever key
 material the deployment uses must move or pre-stage — the 802.11r-style
 problem, solvable over the same backhaul) and the ~ms retune when cells are on
 different channels. Both fit inside a single slot guard.
+
+**Soft handover — both cells at once.** The stronger version, and the one
+that's genuinely hard to get anywhere else: during the crossing window the
+scheduler gives the robot slots in *both* cells, and the robot **duplicates**
+its control/video uplink across them — a slot on A's channel, a millisecond
+retune, a slot on B's channel, back — while both APs' copies race over the
+backhaul and the first one wins (dedup by sequence number). Fading that eats
+one path leaves the other; the handover isn't just gap-free, it's
+*redundant* exactly where the link is weakest. Downlink works the same way in
+reverse (both APs transmit the robot's control frames in their own slots).
+This is CDMA-style soft handoff / 5G's PDCP duplication — but where cellular
+needs heavyweight, operator-gated dual-connectivity machinery, here it falls
+out of two primitives already on the bench: slots that mean the same instant
+in every cell (the shared clock) and a channel switch cheap enough to do
+per-slot (the ~ms retune). Standard Wi-Fi can't express it at all: one
+association, one serving AP, full stop.
 
 ## 3. Robots as roaming UEs — the whole picture
 

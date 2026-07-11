@@ -120,8 +120,10 @@ int main(int argc, char **argv) {
   // at each slot boundary is too sparse — a single miss drops the lock). The
   // caller's FEC PSDUs are never touched; the marker rides its own frame.
   int sync_every = 4;
-  if (const char *e = std::getenv("DEVOURER_HOP_SYNC_EVERY"))
-    sync_every = std::max(1, std::atoi(e));
+  if (const char *e = std::getenv("DEVOURER_HOP_SYNC_EVERY")) {
+    sync_every = std::atoi(e);   // avoid std::max — windows.h's max macro
+    if (sync_every < 1) sync_every = 1;
+  }
   // Sanity cap on a single PSDU body; protects against an upstream framing
   // bug that would otherwise have us allocate gigabytes from a stray length
   // prefix. 4096 covers any realistic legacy-6M probe-request payload.

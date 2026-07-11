@@ -85,6 +85,9 @@ public:
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
   int32_t AdjustBeaconTiming(int32_t microseconds) override;
   int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
+  /* TSF-preserving absolute TBTT pin (IRtlDevice contract; the J2 pattern —
+   * no reserved-page re-download needed on J3). */
+  int32_t PinBeaconTbtt(int32_t offset_us) override;
   void Stop() override;
 
   /* Runtime TX-power control (IRtlDevice contract; see src/TxPower.h).

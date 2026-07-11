@@ -53,8 +53,9 @@ Bench (master RTL8812AU, slaves RTL8822CU + RTL8822EU, ch36, 50 ms beacons):
 | inter-slave (inter-UE) agreement | 4.7 µs RMS, mean +1.7 µs |
 
 The inter-slave agreement tightens with beacon rate (≈18 µs at 100 ms → ≈5 µs at
-50 ms) as the fits densify and balance. Slaves must be Jaguar2/3 (per-frame
-`tsfl`); the master can be any transmitter (`ReadTsf()`, including Jaguar1).
+50 ms) as the fits densify and balance. Every generation exposes the per-frame
+`tsfl` a slave needs; the slave role is bench-validated on Jaguar2/3, and the
+master can be any transmitter (`ReadTsf()`, including Jaguar1).
 
 The ~94 µs absolute bound is the **transport's submit-to-air floor**, not a
 protocol property: measured with an embedded-submit-TSF frame stream and a
@@ -79,14 +80,20 @@ beacon's timestamp field at the transmit instant. No `ReadTsf()`, no
 `send_packet`, no software in the timing path. One call suffices; the chip
 beacons indefinitely. Implemented on all three generations: Jaguar2 (8822B/
 8812BU/8821C) and Jaguar3 (8822C/8822E) via the HalMAC reserved-page download,
-and Jaguar1 (8812A/8811A/8821A — bench-proven on the 8821AU) via the
-pre-HalMAC BCNQ-boundary store bracket, byte-matched to a golden usbmon dump
-of the in-tree `rtw88_8821au` beacon download: BCN_VALID (0x20A[0]) W1C →
-CR+1 SW-beacon-DMA on → beacon function off → bulk a **minimal** descriptor
-(LAST_SEG + OFFSET + PKT_SIZE + QSEL_BEACON + rate-FB-limit; OWN/FIRST_SEG/
-BMC/HWSEQ mark a live TX and the store path rejects them) → function on →
-SW-beacon-DMA off, then the port-0 AP enable (MSR=AP, DUAL_TSF_RST BIT0,
-BCN_CTRL 0x18, the 8821A "BCN on port 0" 0x454[5] clear, ResumeTxBeacon).
+and Jaguar1 (8812A/8811A/8821A — bench-proven on the 8812AU and 8821AU) via
+the pre-HalMAC BCNQ-boundary store bracket, byte-matched to a golden usbmon
+dump of the in-tree `rtw88_8821au` beacon download. The J1 sequence is: the
+port-0 AP enable first (MSR=AP, DUAL_TSF_RST BIT0, BCN_CTRL 0x18, the 8821A
+"BCN on port 0" 0x454[5] clear, ResumeTxBeacon), then the store bracket —
+BCN_VALID (0x20A[0]) W1C → CR+1 SW-beacon-DMA on → beacon function off →
+bulk a **minimal** descriptor (LAST_SEG + OFFSET + PKT_SIZE + QSEL_BEACON +
+rate-FB-limit; OWN/FIRST_SEG/BMC/HWSEQ mark a live TX and the store path
+rejects them) → function on → SW-beacon-DMA off — and finally an internal
+`PinBeaconTbtt(0)` **igniter**: the J1 engine does not start airing from the
+download/enable alone; it needs a TSF write with a real value edge inside the
+EN_BCN bracket plus a post-arm re-download (the same-value-rewrite trap — the
+pin shifts by a full extra beacon period so the grid is unchanged but the
+edge is guaranteed).
 The 8814A (bench-proven, own golden dump) differs in three ways: its valid
 latch is 0x204[15] with the head held at the BCNQ boundary during the store
 (pointing the head at page 0 — the firmware-download bracket's shape — stores
@@ -103,7 +110,9 @@ after a variable backoff, so its scheduled-TSF stamp and delayed air time
 diverge by ~hundreds of µs on a shared channel. In a time-distribution setup the
 master **owns** the channel, so that backoff is pure loss — the master disables
 EDCCA (`SetCcaMode`, on by default here; opt out with `DEVOURER_TSYNC_CSMA=1`)
-and the beacon airs exactly on schedule.
+and the beacon airs exactly on schedule. `SetCcaMode` is implemented on
+Jaguar2/3; a Jaguar1 hardware-beacon master still defers to CSMA (expect the
+backoff-jitter row below on a busy channel).
 
 Bench (HW-beacon master + slave, **crowded** ch6, 100 ms beacons):
 
@@ -129,10 +138,12 @@ layout only because the timesync demo needs no more.
 On-wire kernel-equivalence is verifiable with `tests/beacon_wire_check.cpp`: the
 beacon carries the right frame control (0x0080), an 802.11 sequence number that
 **increments by 1 per beacon** (the hardware sequence numbering a kernel AP does
-via `EN_HWSEQ`), and the live hardware TSF — bench-confirmed on both HalMAC
-generations (J3 8822C and J2 8812BU). A frozen sequence number indicates a
-degraded engine (e.g. a J2 beacon left in the post-drop state after an
-`AdjustBeaconTiming` tweak, which J2 does not survive), not a healthy beacon.
+via `EN_HWSEQ`), and the live hardware TSF — bench-confirmed on all three
+generations (J3 8822C, J2 8812BU, J1 8821AU). Exception: the 8814A airs its
+stored beacon with the sequence pinned at 0, matching the kernel rtw88 driver
+on the same chip — judge its health by presence/cadence/timestamp instead. On
+the other dies a frozen sequence number indicates a degraded engine (a beacon
+left in the post-re-latch drop state), not a healthy beacon.
 
 The same hardware beacon is also the foundation for full **infrastructure AP
 mode** — a real Linux station discovers devourer, associates, gets an IP, and
@@ -170,13 +181,17 @@ slot 20 ms. The arrival phase drops from ~6 ms to a bounded oscillation around
 zero at **~1.25 ms RMS steady-state** (gain 0.30) — a 4× improvement over the
 non-converging `send_packet` baseline. The residual is the fine actuator's USB
 read→write jitter (~0.5–1.2 ms per correction, §Microsecond-fine steering); it is
-the floor for a userspace-USB TSF write (a kernel PCIe driver with MMIO would be
-tighter). Harness: `tests/timesync_ta_demo.sh` with `HWBEACON=1`.
+the floor for a userspace-USB TSF write (over the PCIe transport the same
+actuator's register path is µs-scale — see the 8821CE row below). Harness:
+`tests/timesync_ta_demo.sh` with `HWBEACON=1`.
 
 **Steering the TBTT.** The actuator is `AdjustBeaconTiming(microseconds)`, not a
-TSF write: `WriteTsf` moves the reported TSF (and the beacon-body timestamp) but
-NOT the TBTT air-time — a separate per-port timer drives the beacon, so the TBTT
-is deaf to `REG_TSFTR`. A one-shot beacon-interval tweak *does* steer it: running
+TSF write: on Jaguar2/3, `WriteTsf` moves the reported TSF (and the beacon-body
+timestamp) but NOT the TBTT air-time — a separate per-port timer drives the
+beacon, so the TBTT is deaf to `REG_TSFTR`. (Jaguar1 is the opposite
+architecture: its TBTT is hardware-locked to the TSF grid, so a TSF write moves
+both — see the `PinBeaconTbtt` per-generation notes.) A one-shot
+beacon-interval tweak *does* steer the J2/J3 TBTT: running
 one interval at (nominal ± Δ) TU then restoring advances/retards the next TBTT —
 and the cadence thereafter — by Δ TU. Bench-proven to the microsecond on an
 8822C: `AdjustBeaconTiming(-20480)` advanced the TBTT by exactly 20 TU
@@ -214,8 +229,9 @@ the reserved-page beacon download to re-assert the latch — at most one skipped
 beacon per correction. On Jaguar1 the interval tweak is additionally **inert**
 (8821AU: the beacon survives but the phase never moves), so its coarse
 `AdjustBeaconTiming` rides the fine TSF-toggle mechanism, TU-quantized (note it
-then also shifts the reported TSF). Bench (fine steers, observer arrival phase,
-hardware seq consecutive across every steer):
+then also shifts the reported TSF). Bench (fine steers, observer arrival phase;
+hardware seq consecutive across every steer, except the 8814A's pinned-at-0
+seq):
 
 - **8812BU (USB)**: 0–1 beacon lost per steer, ~9 ms per fine steer; the fine
   shift undershoots the request by a systematic ~2–3 ms (USB register latency,
@@ -225,12 +241,12 @@ hardware seq consecutive across every steer):
   −5000 µs request).
 - **8814AU (USB, Jaguar1)**: 0–3 beacons lost per steer (RF-weak bench unit).
   Its TBTT counter free-runs across the EN_BCN toggle (it only pauses while
-  off — a bare TSF shift moves the phase by just the bracket's ~0.8 ms), so
-  the fine steer additionally pulses port-0 `DUAL_TSF_RST`: the grid re-derives
-  **absolutely** from the shifted TSF (`TSF % period`), so each step also
-  cancels accumulated free-run drift — the TBTT is effectively TSF-locked,
-  which is what a disciplined master wants; open-loop single-steer accuracy is
-  ±few ms.
+  off), so the fine steer additionally pulses port-0 `DUAL_TSF_RST` to
+  re-derive the grid from the shifted TSF — but that pulse also **zeroes the
+  reported TSF** (the fine steer rewinds the 8814 clock to ~0 every call), so
+  a controller fitting against the 8814 TSF must not use the fine steer;
+  `PinBeaconTbtt(0)` reconstructs the timeline from the host clock (~1 ms
+  class). Open-loop single-steer accuracy ±few ms.
 - **8821CE (PCIe MMIO)**: 0–1 beacon lost per steer, ~0–1 ms per fine steer;
   fine accuracy **−4842…−5047 µs for a −5000 µs request** (systematic offset
   ~30 µs — the MMIO register path is µs-scale) and coarse −20 TU steers land
@@ -252,16 +268,29 @@ enough (≈0.5·e) not to wreck the fit, so more authority makes it worse, and
 `SetXtalCap` can't buy a lower steer cadence (the AFE trim moves only ~10 of the
 ~42 ppm crystal offset). The escape is `PinBeaconTbtt(offset_us)`: the same
 shift + re-latch, immediately followed by a TSF write back onto the original
-timeline — a bare TSF write does not move the TBTT, so the steered phase
-survives while the clock the loop reads stays continuous. Bench (8821CE PCIe):
+timeline — on the latched J2/J3 engines a bare TSF write does not move the
+TBTT, so the steered phase survives while the clock the loop reads stays
+continuous. Bench (8821CE PCIe):
 TSF discontinuity **~10 µs** per correction (vs the full steer magnitude for
 the fine variant — ~500× less fit disturbance), on-air phase pinned within
-~±150 µs of the commanded offset, zero beacons lost. Semantics are **absolute**
-(TBTT fires at `TSF % interval == offset`), so the controller commands the
-target offset directly instead of integrating steps — and a PTP-disciplined
-TSF drags the pinned TBTT with it between corrections. Where `PinBeaconTbtt`
-is unavailable (USB: the restore write costs ~0.5–1 ms, worse than a small
-steer), the controller-side fix is a steering ledger: add the cumulative
+~±150 µs of the commanded offset, zero beacons lost — and the closed AP↔PTP
+loop holds **~±1 µs** with it (converged from −41 ms, smoothly tracking the
+~11 ppm residual drift; ~60× tighter than the fine-steer proportional sweet
+spot). Semantics are **absolute** (TBTT fires at `TSF % interval == offset`),
+so the controller commands the target offset directly instead of integrating
+steps — and a PTP-disciplined TSF drags the pinned TBTT with it between
+corrections.
+
+Per generation: **Jaguar2** — full pin support (~10 µs disturbance over PCIe
+MMIO; ~0.5–1 ms over USB, the restore-write latency). **Jaguar3** — full pin
+support (USB; ~0.5–1.5 ms restore disturbance, still far below a fine steer's
+full-magnitude jump). **Jaguar1** — offset 0 only: its TBTT is
+**hardware-locked to the TSF grid** (bench on all three dies: a nonzero pin
+never holds, the phase follows the restored TSF), so a J1 master needs no
+TBTT actuator at all — discipline the TSF and the TBTT tracks it in hardware;
+`AdjustBeaconTimingFine` (which moves both together) remains the manual
+lever. Where a pin's ~1 ms USB restore disturbance is worse than a tiny
+steer, the controller-side fix is a steering ledger: add the cumulative
 commanded shifts back onto the raw TSF before fitting, so the fit sees a
 continuous virtual clock and full authority is safe again.
 
@@ -287,10 +316,10 @@ board's Intel I226 (a full IEEE-1588 NIC):
 
 The ~290 ns residual is the TSF's own **1 µs-quantization floor** (uniform
 ±0.5 µs → 289 ns RMS) — once the crystal offset is servoed out, the Wi-Fi MAC
-TSF holds like genuine PTP hardware. Combined with the TBTT steering actuator
-above, this closes the loop: network PTP disciplines the master's TSF, the
-TSF-locked hardware beacon distributes it over the air, and the slaves inherit
-the wired timebase at the sub-µs beacon floor. Validation:
+TSF holds like genuine PTP hardware. Combined with `PinBeaconTbtt` above, this
+closes the loop: network PTP disciplines the master's TSF, the pinned
+(TSF-locked) hardware beacon distributes it over the air at ~±1 µs, and the
+slaves inherit the wired timebase at the sub-µs beacon floor. Validation:
 `tests/pcie_phc/ptp_crosscheck.sh` (the Wi-Fi side must be in monitor mode so
 the MAC/TSF is clocked).
 
@@ -303,7 +332,7 @@ the MAC/TSF is clocked).
 - `DEVOURER_TSYNC_HWBEACON=1` — hardware-timed beacon downlink (StartBeacon) →
   sub-µs; set on both master and slave. On the **UE** (role=ue) it instead
   selects the hardware-beacon uplink fine-steered by `AdjustBeaconTimingFine` —
-  the converging closed loop (Jaguar2/3 UE)
+  the converging closed loop (bench-validated with a J3 UE)
 - `DEVOURER_TSYNC_CSMA=1` — keep CSMA on the HW-beacon master (default: EDCCA
   off so the beacon airs exactly at TBTT — the master owns the channel)
 - `DEVOURER_TSYNC_UPLINK=1` — enable the uplink timing-advance loop (experimental)

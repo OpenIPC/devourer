@@ -238,6 +238,13 @@ public:
    * re-arm the bcn-valid latch. */
   int32_t AdjustBeaconTiming(int32_t microseconds) override;
   int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
+  /* TSF-preserving TBTT arm (IRtlDevice contract, J1 subset): the J1 TBTT is
+   * hardware-locked to the TSF grid (bench: a pinned nonzero offset never
+   * holds — the phase follows the restored TSF), so only offset 0 is
+   * supported (the arm/igniter StartBeacon uses); nonzero refuses. Steering
+   * the J1 TSF steers the TBTT with it in hardware — a disciplined master
+   * needs no actuator here. */
+  int32_t PinBeaconTbtt(int32_t offset_us) override;
 
   /* Runtime RX-chain selection — the adaptive-link spatial-diversity lever
    * (the read/write superset of the DEVOURER_RX_PATHS env knob). Writes the

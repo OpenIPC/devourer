@@ -1679,6 +1679,42 @@ int32_t RtlJaguar3Device::AdjustBeaconTimingFine(int32_t microseconds) {
   return microseconds;
 }
 
+int32_t RtlJaguar3Device::PinBeaconTbtt(int32_t offset_us) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_bcn_interval_tu <= 0) return 0;  // no active beacon
+  const int64_t period_us = static_cast<int64_t>(_bcn_interval_tu) * 1024;
+  const int64_t off =
+      ((static_cast<int64_t>(offset_us) % period_us) + period_us) % period_us;
+  /* TSF-preserving absolute pin (the J2 PinBeaconTbtt pattern; see
+   * RtlJaguar2Device for the discipline-loop rationale): shift + re-latch so
+   * the TBTT re-derives at TSF % period == off, then immediately write the
+   * TSF back onto its original timeline — a bare TSF write does not move the
+   * TBTT, so the pinned phase survives. No reserved-page re-download here:
+   * the J3 engine keeps its bcn-valid latch across the re-latch. */
+  auto read_tsf = [&]() {
+    uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
+    uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
+    if (_device.rtw_read<uint32_t>(0x0564) != hi) {
+      hi = _device.rtw_read<uint32_t>(0x0564);
+      lo = _device.rtw_read<uint32_t>(0x0560);
+    }
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+  };
+  uint64_t nt = read_tsf() - static_cast<uint64_t>(off);
+  uint8_t bc = _device.rtw_read8(0x0550 /* REG_BCN_CTRL */);
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc & ~(1u << 3)));
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(nt));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(nt >> 32));
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc | (1u << 3)));  // re-latch
+  uint64_t back = read_tsf() + static_cast<uint64_t>(off);  // original timeline
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(back));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(back >> 32));
+  _tbtt_off_us = off;
+  _logger->info("beacon(J3): TBTT pinned to TSF%%interval == {} us "
+                "(TSF-preserving; requested {})", (long long)off, offset_us);
+  return static_cast<int32_t>(off);
+}
+
 void RtlJaguar3Device::SetTxMode(const devourer::TxMode &mode) {
   _tx_mode_default = mode;
 }

@@ -67,8 +67,23 @@ the MAC's beacon reserved-page and lets the chip **auto-transmit it at each
 TBTT** — hardware-timed, and the MAC inserts the live 64-bit TSF into the
 beacon's timestamp field at the transmit instant. No `ReadTsf()`, no
 `send_packet`, no software in the timing path. One call suffices; the chip
-beacons indefinitely. Implemented on both HalMAC generations (Jaguar2 8822B/
-8812BU/8821C and Jaguar3 8822C/8822E); Jaguar1 has no reserved-page path.
+beacons indefinitely. Implemented on all three generations: Jaguar2 (8822B/
+8812BU/8821C) and Jaguar3 (8822C/8822E) via the HalMAC reserved-page download,
+and Jaguar1 (8812A/8811A/8821A — bench-proven on the 8821AU) via the
+pre-HalMAC BCNQ-boundary store bracket, byte-matched to a golden usbmon dump
+of the in-tree `rtw88_8821au` beacon download: BCN_VALID (0x20A[0]) W1C →
+CR+1 SW-beacon-DMA on → beacon function off → bulk a **minimal** descriptor
+(LAST_SEG + OFFSET + PKT_SIZE + QSEL_BEACON + rate-FB-limit; OWN/FIRST_SEG/
+BMC/HWSEQ mark a live TX and the store path rejects them) → function on →
+SW-beacon-DMA off, then the port-0 AP enable (MSR=AP, DUAL_TSF_RST BIT0,
+BCN_CTRL 0x18, the 8821A "BCN on port 0" 0x454[5] clear, ResumeTxBeacon).
+The 8814A (bench-proven, own golden dump) differs in three ways: its valid
+latch is 0x204[15] with the head held at the BCNQ boundary during the store
+(pointing the head at page 0 — the firmware-download bracket's shape — stores
+the beacon where the TBTT engine never reads), it needs 0x420[12] + a
+0x454[2:0]=0x05 enable, and its stored beacon airs with the 802.11 sequence
+pinned at 0 (kernel rtw88 parity — seq-based beacon-health checks don't apply
+there).
 
 The slave then reads the *standard 802.11 beacon timestamp* (the master's live
 TSF) instead of a software tag, and fits it against its own arrival `tsfl`.
@@ -180,18 +195,32 @@ resolution is what matters. It also shifts this port's TSF + beacon-body
 timestamp by the same amount, which is the intended UE-advances-its-own-timebase
 behaviour.
 
-**Jaguar2 steer-then-re-download.** The Jaguar2 beacon engine loses its
+**Jaguar1/2 steer-then-re-download.** The Jaguar1 and Jaguar2 beacon engines lose their
 bcn-valid latch on *any* TBTT re-latch — bench-proven on the 8812BU, the beacon
 stops airing after both the interval tweak and the beacon-function toggle — and
 the hardware does not retain the reserved-page bytes to re-arm it. The driver
-does (`StartBeacon` keeps the MPDU), so the J2 actuators steer and then re-run
+does (`StartBeacon` keeps the MPDU), so the J1/J2 actuators steer and then re-run
 the reserved-page beacon download to re-assert the latch — at most one skipped
-beacon per correction. Bench (fine steers, observer arrival phase, hardware seq
-consecutive across every steer):
+beacon per correction. On Jaguar1 the interval tweak is additionally **inert**
+(8821AU: the beacon survives but the phase never moves), so its coarse
+`AdjustBeaconTiming` rides the fine TSF-toggle mechanism, TU-quantized (note it
+then also shifts the reported TSF). Bench (fine steers, observer arrival phase,
+hardware seq consecutive across every steer):
 
 - **8812BU (USB)**: 0–1 beacon lost per steer, ~9 ms per fine steer; the fine
   shift undershoots the request by a systematic ~2–3 ms (USB register latency,
   larger than J3's ~0.5–1.2 ms) that a closed loop absorbs.
+- **8821AU (USB, Jaguar1)**: 0–1 beacon lost per steer, ~8 ms per fine steer,
+  systematic undershoot ~1.6 ms with ±40 µs consistency (−3392…−3472 µs for a
+  −5000 µs request).
+- **8814AU (USB, Jaguar1)**: 0–3 beacons lost per steer (RF-weak bench unit).
+  Its TBTT counter free-runs across the EN_BCN toggle (it only pauses while
+  off — a bare TSF shift moves the phase by just the bracket's ~0.8 ms), so
+  the fine steer additionally pulses port-0 `DUAL_TSF_RST`: the grid re-derives
+  **absolutely** from the shifted TSF (`TSF % period`), so each step also
+  cancels accumulated free-run drift — the TBTT is effectively TSF-locked,
+  which is what a disciplined master wants; open-loop single-steer accuracy is
+  ±few ms.
 - **8821CE (PCIe MMIO)**: 0–1 beacon lost per steer, ~0–1 ms per fine steer;
   fine accuracy **−4842…−5047 µs for a −5000 µs request** (systematic offset
   ~30 µs — the MMIO register path is µs-scale) and coarse −20 TU steers land

@@ -20,7 +20,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 SCAN_IF=${SCAN_IF:-wlp4s0u2u4}
-B_VID=${B_VID:-0x2357}; B_PID=${B_PID:-0x012d}   # devourer beacon adapter (J2/J3, StartBeacon)
+B_VID=${B_VID:-0x2357}; B_PID=${B_PID:-0x012d}   # devourer beacon adapter (StartBeacon, any generation)
 CH=${CH:-6}; FREQ=${FREQ:-2437}; TU=${TU:-25}; SECS=${SECS:-30}
 BSSID=57:42:75:05:d6:00
 

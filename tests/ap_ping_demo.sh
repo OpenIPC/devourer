@@ -5,7 +5,8 @@
 #
 # Needs a second Realtek adapter bound to the kernel as a station (rtw88
 # auto-probes a VBUS-cold dongle -> e.g. wlp4s0u2u4). AP adapter = a DIFFERENT
-# J2/J3 devourer adapter (StartBeacon + full-duplex; 8812BU/8822CU work).
+# devourer adapter running StartBeacon + full-duplex RX (any generation has
+# the beacon; the AP harness is bench-validated on 8812BU/8822CU).
 #
 #   sudo STA_IF=wlp4s0u2u4 AP_VID=0x2357 AP_PID=0x012d tests/ap_ping_demo.sh
 set -uo pipefail

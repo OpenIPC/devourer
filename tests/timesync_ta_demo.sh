@@ -16,8 +16,9 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 SECS=${1:-30}; CH=${2:-36}; SLOT=${3:-20}
 # HWBEACON=1 : the UE airs its uplink from the beacon engine and fine-steers the
-# TBTT (AdjustBeaconTimingFine) — the CONVERGING closed loop. Needs a J3 UE (fine
-# steering) + any full-duplex master (Jaguar1 8812AU works; it needs no steering).
+# TBTT (AdjustBeaconTimingFine — all generations steer now; this harness is
+# bench-validated with a J3 UE) + any full-duplex master (Jaguar1 8812AU works;
+# it needs no steering).
 HWBEACON=${HWBEACON:-0}
 if [ "$HWBEACON" = 1 ]; then
   M_VID=${M_VID:-0x0bda}; M_PID=${M_PID:-0x8812}   # 8812AU full-duplex master

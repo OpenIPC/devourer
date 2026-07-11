@@ -124,8 +124,8 @@ struct AdapterCaps {
    * generations. hw_beacon_txtsf: this adapter, as a transmitter, inserts its
    * live hardware TSF into the beacons it airs at the instant of transmission
    * (a genuine sub-µs TX-egress timestamp a receiver reads via
-   * Packet::TxEgressTsf) — requires the hardware beacon function (StartBeacon),
-   * so Jaguar2/Jaguar3 only. Together they are the primitives for one-way
+   * Packet::TxEgressTsf) — rides the hardware beacon function (StartBeacon);
+   * true on all generations. Together they are the primitives for one-way
    * hardware time distribution (see TsfSync). */
   bool hw_rx_timestamp = false;
   bool hw_beacon_txtsf = false;

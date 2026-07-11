@@ -279,8 +279,10 @@ public:
    * MPDU (a leading radiotap header, if present, is stripped); addr2/addr3 set
    * the port MAC/BSSID. `interval_tu` is the beacon interval in TU (1 TU =
    * 1024 µs). One call suffices — the hardware beacons indefinitely. Implemented
-   * on Jaguar2/3 (HalMAC reserved-page download); returns false where unsupported
-   * (Jaguar1 has no reserved-page path). See docs/time-distribution.md. */
+   * on all three generations (Jaguar2/3: HalMAC reserved-page download;
+   * Jaguar1 incl. the 8814A: the pre-HalMAC BCNQ-boundary store bracket —
+   * note the 8814A's stored beacon airs with the 802.11 sequence pinned at 0,
+   * kernel rtw88 parity). See docs/time-distribution.md. */
   virtual bool StartBeacon(const uint8_t *beacon, size_t len,
                            int interval_tu) {
     (void)beacon; (void)len; (void)interval_tu;
@@ -309,7 +311,10 @@ public:
    * or |microseconds| < 512. Jaguar3 and Jaguar2: the J2 beacon engine loses its
    * bcn-valid latch on any TBTT re-latch (bench-proven), so the J2 path follows
    * the steer with a reserved-page re-download of the retained beacon — one
-   * skipped beacon per correction. Base is a no-op. */
+   * skipped beacon per correction. On Jaguar1 the interval tweak is inert
+   * (bench-proven on the 8821AU), so the TU-quantized shift rides the fine
+   * TSF-toggle mechanism instead — which also moves the reported TSF, unlike
+   * J2/J3. Base is a no-op. */
   virtual int32_t AdjustBeaconTiming(int32_t microseconds) {
     (void)microseconds;
     return 0;
@@ -325,10 +330,14 @@ public:
    * same amount, which is the intended behaviour for a UE advancing its own
    * timebase. The USB read→write latency adds a sub-ms offset (~0.5–1.2 ms) that
    * a closed timing-advance loop absorbs — the *resolution* is microseconds.
-   * Requires an active StartBeacon; returns the applied shift in µs. Jaguar3 and
-   * Jaguar2: the J2 beacon engine drops its bcn-valid latch on the toggle, so the
-   * J2 path re-downloads the retained reserved-page beacon after the re-latch —
-   * one skipped beacon per correction. Base is a no-op. */
+   * Requires an active StartBeacon; returns the applied shift in µs. All three
+   * generations: the J2 and J1 beacon engines drop their bcn-valid latch on the
+   * toggle, so those paths re-download the retained reserved-page beacon after
+   * the re-latch — one skipped beacon per correction. The 8814A additionally
+   * pulses DUAL_TSF_RST (its TBTT counter free-runs across the toggle), which
+   * re-derives the grid ABSOLUTELY from the shifted TSF — each steer also
+   * cancels accumulated drift, so the TBTT ends up TSF-locked. Base is a
+   * no-op. */
   virtual int32_t AdjustBeaconTimingFine(int32_t microseconds) {
     (void)microseconds;
     return 0;

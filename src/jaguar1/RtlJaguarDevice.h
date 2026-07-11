@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <thread>
+#include <vector>
 
 #include "logger.h"
 #include "BbDbgportReader.h"
@@ -223,11 +224,20 @@ public:
   SelectedChannel GetSelectedChannel() override;
   uint64_t ReadTsf() override;
 
-  /* EXPERIMENTAL (idea 6 spike): load a beacon into the beacon queue and enable
-   * the MAC beacon function so the chip auto-transmits it at each TBTT — a
-   * hardware-timed, host-jitter-free TX. Returns false if unsupported.
-   * `interval_tu` is the beacon interval in TU (1024 µs). */
-  bool StartBeacon(const uint8_t* beacon, size_t len, int interval_tu);
+  /* Hardware-timed beacon (IRtlDevice contract): download the beacon MPDU to
+   * the reserved page at the BCNQ boundary (the vendor rtl8812_download_rsvd_page
+   * bracket: CR+1 SW-beacon-DMA, beacon function off, 0x422[6] cleared so the
+   * QSEL-beacon bulk-OUT is stored instead of aired, BCN_VALID 0x20A[0] W1C +
+   * poll) and enable the TBTT engine. All four chips: the 8814A uses its own
+   * valid latch (0x0204[15] with the head held at the BCNQ boundary) and its
+   * stored beacon airs with the hardware sequence pinned at 0 (kernel rtw88
+   * parity). `interval_tu` is the beacon interval in TU (1024 µs). */
+  bool StartBeacon(const uint8_t* beacon, size_t len, int interval_tu) override;
+  /* Beacon-TBTT steering (IRtlDevice contract) — the Jaguar2 steer-then-
+   * re-download pattern: re-download the retained MPDU after the re-latch to
+   * re-arm the bcn-valid latch. */
+  int32_t AdjustBeaconTiming(int32_t microseconds) override;
+  int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
 
   /* Runtime RX-chain selection — the adaptive-link spatial-diversity lever
    * (the read/write superset of the DEVOURER_RX_PATHS env knob). Writes the
@@ -303,6 +313,18 @@ private:
    * the send_packets URB packer. */
   size_t build_tx_block(const uint8_t *packet, size_t length, uint8_t *out,
                         uint8_t pkt_offset);
+
+  /* Beacon retained for the TBTT-steer re-download (AdjustBeaconTiming*),
+   * mirroring RtlJaguar2Device: re-latching the TBTT drops the bcn-valid
+   * latch, so the steer path re-downloads this copy. _bcn_interval_tu = 0
+   * means no active beacon. (No TBTT-grid offset member here: the J1 coarse
+   * steer rides the fine mechanism, which keeps the grid TSF-derived.) */
+  std::vector<uint8_t> _bcn_mpdu;
+  int _bcn_interval_tu = 0;
+  /* Download `mpdu` to the reserved page at the BCNQ boundary via the vendor
+   * rtl8812_download_rsvd_page bracket; polls BCN_VALID (0x20A[0]). Leaves
+   * BCN_CTRL as it found it. */
+  bool download_rsvd_beacon(const uint8_t *mpdu, size_t mpdu_len);
 
   std::array<std::atomic<uint32_t>, 5> _qd_snap{};
   std::thread _qd_thread;

@@ -362,8 +362,16 @@ public:
    * accumulate, and a PTP-disciplined TSF drags the pinned TBTT with it
    * between corrections — the fit-free discipline pattern. Requires an active
    * StartBeacon; returns the applied offset (normalized into the beacon
-   * period), 0 if no active beacon. Jaguar2 (bench: 8821CE PCIe); base is a
-   * no-op. */
+   * period), 0 if no active beacon.
+   *
+   * Per generation (all bench-proven): Jaguar2 — full support, ~10 µs TSF
+   * disturbance over PCIe MMIO (8821CE; the AP↔PTP loop holds ~±1 µs with
+   * it). Jaguar3 — full support over USB (~0.5–1.5 ms restore-write
+   * disturbance; still far below a fine steer's full-magnitude jump).
+   * Jaguar1 — offset 0 only (arm/re-derive): its TBTT is hardware-locked to
+   * the TSF grid, so a nonzero TSF-preserving pin cannot hold (refused); the
+   * flip side is that steering/disciplining the J1 TSF steers the TBTT with
+   * it in hardware, no actuator needed. Base is a no-op. */
   virtual int32_t PinBeaconTbtt(int32_t offset_us) {
     (void)offset_us;
     return 0;

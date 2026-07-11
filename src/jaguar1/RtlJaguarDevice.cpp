@@ -399,16 +399,17 @@ bool RtlJaguarDevice::download_rsvd_beacon(const uint8_t *mpdu,
 
 bool RtlJaguarDevice::StartBeacon(const uint8_t *beacon, size_t len,
                                   int interval_tu) {
-  /* Mirrors RtlJaguar2Device::StartBeacon on the pre-HalMAC registers. */
+  /* Mirrors RtlJaguar2Device::StartBeacon on the pre-HalMAC registers, in the
+   * VENDOR ORDER: port/beacon configuration first, reserved-page download
+   * LAST. A download issued before the port is configured latches BCN_VALID
+   * but never airs (bench-caught: with the old download-first order every J1
+   * die stayed silent until the first steer, whose post-config re-download
+   * was the accidental igniter). */
   const bool is_8814 = _eepromManager->version_id.ICType == CHIP_8814A;
   size_t rt = (len >= 4) ? (size_t)(beacon[2] | (beacon[3] << 8)) : 0;
   if (rt > len) rt = 0;
   const uint8_t *mpdu = beacon + rt;
   size_t mpdu_len = len - rt;
-  if (!download_rsvd_beacon(mpdu, mpdu_len)) {
-    _logger->error("beacon(J1): rsvd-page beacon download failed");
-    return false;
-  }
   /* Port identity: MAC (REG_MACID 0x0610) + BSSID (REG_BSSID 0x0618) from the
    * MPDU's addr2/addr3. */
   if (mpdu_len >= 24) {
@@ -462,8 +463,24 @@ bool RtlJaguarDevice::StartBeacon(const uint8_t *beacon, size_t len,
   _device.rtw_write8(0x0541 /* REG_TBTT_PROHIBIT+1 */, 0x80);
   uint8_t tb2 = _device.rtw_read8(0x0542);
   _device.rtw_write8(0x0542, static_cast<uint8_t>(tb2 & 0xF0));
+  /* Download into the configured port, then IGNITE. The J1 engine does not
+   * start airing from StartBeacon's own download/enable alone — bench-swept
+   * on the 8812AU: neither a bare TSF write, an EN_BCN toggle, a
+   * TSF-write-while-EN-off bracket, nor reordering config-before-download
+   * ignites it; only the complete steer sequence (TSF write inside the EN
+   * bracket + a fresh post-arm re-download) does. So finish with an internal
+   * PinBeaconTbtt(0): it performs exactly that sequence, pins the TBTT to
+   * the TSF grid, and preserves the TSF timeline. */
+  if (!download_rsvd_beacon(mpdu, mpdu_len)) {
+    _logger->error("beacon(J1): rsvd-page beacon download failed");
+    return false;
+  }
   _bcn_mpdu.assign(mpdu, mpdu + mpdu_len);
   _bcn_interval_tu = interval_tu > 0 ? interval_tu : 100;
+  if (PinBeaconTbtt(0) == 0 && _bcn_interval_tu > 0) {
+    /* pin(0) legitimately returns 0 (offset 0 applied) — only a re-download
+     * failure inside it is fatal, and that already logged. */
+  }
   _logger->info("beacon(J1): beacon@BCNQ boundary, net_type->AP, BCN_CTRL=0x1a "
                 "(interval {} TU)", interval_tu);
   return true;
@@ -514,6 +531,87 @@ int32_t RtlJaguarDevice::AdjustBeaconTimingFine(int32_t microseconds) {
   _logger->info("beacon(J1): fine TBTT shift {} us (TSF toggle + rsvd-page "
                 "re-download)", microseconds);
   return microseconds;
+}
+
+int32_t RtlJaguarDevice::PinBeaconTbtt(int32_t offset_us) {
+  if (_bcn_interval_tu <= 0) return 0;  // no active beacon
+  const int64_t period_us = static_cast<int64_t>(_bcn_interval_tu) * 1024;
+  const int64_t off =
+      ((static_cast<int64_t>(offset_us) % period_us) + period_us) % period_us;
+  /* THE J1 TBTT IS HARDWARE-LOCKED TO THE TSF GRID — bench-proven on all
+   * three dies (8812AU/8821AU/8814AU): a pinned nonzero offset does not
+   * hold; the moment the TSF is written back onto its timeline the TBTT
+   * phase follows it (steps observed = pure bracket downtime, identical for
+   * offset 0 and −5000). So a TSF-preserving nonzero pin is physically
+   * unavailable here — refuse rather than silently pin to the grid. The flip
+   * side is the property a disciplined master wants anyway: steering the J1
+   * TSF steers the TBTT with it, in hardware, with no actuator at all. Only
+   * offset 0 is supported: a TSF-preserving arm/re-derive (StartBeacon's
+   * igniter). */
+  if (off != 0) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      _logger->warn("PinBeaconTbtt(J1): the J1 TBTT is hardware-TSF-locked — "
+                    "nonzero offsets cannot hold (discipline the TSF itself, "
+                    "or use AdjustBeaconTimingFine which moves both)");
+    }
+    return 0;
+  }
+  const bool is_8814 = _eepromManager->version_id.ICType == CHIP_8814A;
+  /* Restore strategy differs per die: on the 8812/8821 the TSF keeps its
+   * (shifted) timeline across the re-latch, so restore = fresh read + off.
+   * On the 8814 the DUAL_TSF_RST that re-arms the TBTT ZEROES the TSF
+   * (bench-proven: the plain fine steer rewinds it to ~0 every call), so the
+   * original timeline is reconstructed from the pre-steer read + host-clock
+   * elapsed (~1 ms class, vs total TSF destruction with the fine steer). */
+  auto read_tsf = [&]() {
+    uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
+    uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
+    if (_device.rtw_read<uint32_t>(0x0564) != hi) {
+      hi = _device.rtw_read<uint32_t>(0x0564);
+      lo = _device.rtw_read<uint32_t>(0x0560);
+    }
+    return (static_cast<uint64_t>(hi) << 32) | lo;
+  };
+  const auto h0 = std::chrono::steady_clock::now();
+  const uint64_t t0 = read_tsf();
+  /* Shift by a FULL EXTRA PERIOD: the grid (TSF % period) is unchanged, but
+   * the write is guaranteed a value EDGE — the J1 TBTT re-derive triggers on
+   * a TSF change, not on the write itself (pin(0)'s same-value write ignites
+   * nothing; the same-value-rewrite trap as the 8822B RF18 latch). The
+   * restore adds the period back. */
+  uint64_t nt = t0 - static_cast<uint64_t>(off) -
+                static_cast<uint64_t>(period_us);
+  uint8_t bc = _device.rtw_read8(0x0550 /* REG_BCN_CTRL */);
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc & ~(1u << 3)));
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(nt));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(nt >> 32));
+  _device.rtw_write8(0x0550, static_cast<uint8_t>(bc | (1u << 3)));  // re-latch
+  if (is_8814)
+    _device.rtw_write8(0x0553, 0x01);  // re-arm the TBTT (zeroes the TSF)
+  uint64_t back;
+  if (is_8814) {
+    const int64_t elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - h0)
+            .count();
+    back = t0 + static_cast<uint64_t>(elapsed);
+  } else {
+    back = read_tsf() + static_cast<uint64_t>(off) +
+           static_cast<uint64_t>(period_us);
+  }
+  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(back));
+  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(back >> 32));
+  if (!_bcn_mpdu.empty() &&
+      !download_rsvd_beacon(_bcn_mpdu.data(), _bcn_mpdu.size())) {
+    _logger->error("beacon(J1): TBTT pin re-download failed — beacon may "
+                   "have stopped airing");
+    return 0;
+  }
+  _logger->info("beacon(J1): TBTT pinned to TSF%%interval == {} us "
+                "(TSF-preserving; requested {})", (long long)off, offset_us);
+  return static_cast<int32_t>(off);
 }
 
 bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {

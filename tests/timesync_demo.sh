@@ -6,7 +6,8 @@
 #
 #   MASTER = 8812AU (0x8812)      SLAVE_A = 8822CU (0xc812)
 #                                 SLAVE_B = 8822BU (2357:012d)
-# Slaves must be Jaguar2/3 (per-frame tsfl); the master can be any TX (ReadTsf).
+# Slaves work on every generation (per-frame tsfl; J1 8821AU bench: 0.30 µs RMS
+# lock); the defaults below are the J2/3 pair. Master can be any TX (ReadTsf).
 #
 #   sudo tests/timesync_demo.sh [secs] [channel] [interval_ms]
 set -uo pipefail

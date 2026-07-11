@@ -3,7 +3,7 @@
 devourer talks to a Wi-Fi radio at a very low level — subcarriers, constellations,
 gain control, the transmit and receive chains. If you're new to that machinery,
 the terms in the other docs (per-tone SNR, EVM, CCA, AGC, occupied bandwidth) can
-feel like jargon. This page is a picture book: nine short animations, each
+feel like jargon. This page is a picture book: ten short animations, each
 built in the DEVOURER live-monitor style, that show what the machinery actually
 looks like — from a single subcarrier all the way to a hopping, diversity-combined,
 bandwidth-hopping link. Read it top to bottom and the rest of the docs will click.
@@ -141,6 +141,61 @@ as an independent, always-listening robust link for the critical frames. The
 runnable version is the [`tdma`](narrowband.md) example; the switch machinery it
 rides on is in [`narrowband.md`](narrowband.md).
 
+## 10. One clock for many radios — distributing time
+
+![Time distribution — wire PTP to AP TSF to beacons to station](img/timesync_chain.gif)
+
+Every radio keeps time with its own crystal, and no two crystals agree: a
+typical pair differs by tens of **ppm** (parts per million) — a few
+microseconds of drift every second, milliseconds within minutes. That's
+invisible to ordinary networking, but fatal to anything that needs devices to
+*act at the same instant*: TDMA slots (section 9's "shared clock"!),
+synchronized captures, multi-node measurements. Time synchronization is the
+machinery that makes many free-running clocks behave as one.
+
+The reason it's hard is not the math — it's **timestamping**. To compare two
+clocks you exchange a message and note when it left and when it arrived; any
+jitter in *taking those notes* becomes error you can never remove. Software
+stamps are taken by a CPU juggling interrupts and schedulers, so they wobble by
+hundreds of microseconds. The whole game is getting the **hardware** to take
+the notes at the instant the bits actually cross the wire or leave the antenna.
+
+The chain in the animation is how devourer plays that game, link by link:
+
+- **The wire (PTP, IEEE 1588).** Ethernet solved this years ago: PTP-capable
+  NICs (like the Intel I226) timestamp sync messages *in the PHY*, as the bits
+  hit the cable, and expose their clock as a **PHC** (`/dev/ptpN`). Two such
+  NICs discipline each other to tens of nanoseconds. This is the reference —
+  the "GPS" of the setup, except it arrives over the LAN.
+- **The AP's Wi-Fi clock (the TSF).** Every 802.11 MAC carries a free-running
+  microsecond counter, the **TSF**. devourer exposes it (`ReadTsf`; on the
+  PCIe 8821CE even as a Linux PHC), so `phc2sys` can servo it against the wired
+  reference — it holds to the wire at ~290 ns RMS, which is the TSF's own
+  1 µs-resolution floor. The Wi-Fi chip's clock is now wire-true.
+- **The air (hardware beacons).** How do stations get that time with no wire?
+  The same way they've always found APs: **beacons**. Every beacon carries a
+  64-bit timestamp, and — the crucial hardware trick — the MAC writes the
+  *live TSF into the frame at the moment it leaves the antenna*, and every
+  receiving MAC latches its own TSF at the moment of arrival (`tsfl`). Both
+  notes are taken in silicon; no CPU touches the timing path. A station just
+  listens, fits `master_time = a·my_time + b` over the beacons it hears, and
+  tracks the AP to ~0.3 µs (the grey scatter in the animation is where
+  software-stamped beacons would land instead).
+- **The pin (holding the schedule).** One subtlety closes the loop: the beacon
+  *schedule* (the TBTT) is a separate hardware timer, and servoing the TSF
+  doesn't move it. Steering it naively means jumping the TSF — corrupting the
+  very clock the servo reads. `PinBeaconTbtt` does the re-arm and then puts
+  the TSF back on its timeline (~10 µs of disturbance over PCIe), so the beacon
+  schedule snaps onto the disciplined clock while the clock trace runs
+  unbroken. The on-air beacon grid holds to the wired reference at ~1 µs.
+
+End to end: a station with nothing but a devourer receiver inherits a wired
+PTP timebase, over the air, to a few microseconds — wire (ns) → AP TSF
+(~290 ns) → beacon (~0.3 µs) → held schedule (~1 µs). The full write-up,
+per-chip mechanics, and bench tables are in
+[`time-distribution.md`](time-distribution.md); the closed discipline loop is a
+runnable tool (`tests/pcie_ptp_beacon.cpp`).
+
 ---
 
 ## Where to go next
@@ -157,3 +212,6 @@ With the machinery in hand, the rest reads straight:
   and [`adaptive-link.md`](adaptive-link.md) — the objective they serve.
 - [`narrowband.md`](narrowband.md) — the 5/10 MHz re-clock machinery, the cheap
   bandwidth switch, and the burst-TDMA example from section 9.
+- [`time-distribution.md`](time-distribution.md) — the full time-sync machinery
+  from section 10: per-generation TBTT steering, the PTP bridge, and every
+  bench number behind the animation.

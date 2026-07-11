@@ -302,6 +302,19 @@ timing. Validation: `tests/run_hop_validation.sh`, `tests/hop_parity_check.sh`
 (register parity full-vs-fast). Implementation + per-generation ports:
 `docs/frequency-hopping.md`.
 
+**Keyed FHSS + lockstep RX** (`src/HopSchedule.h`): `DEVOURER_HOP_SLOT_MS`
+selects monotonic wall-clock slots; `DEVOURER_HOP_SEED` (≤32 hex, a 128-bit key)
+replaces the public round-robin with a SipHash-2-4 Fisher-Yates permutation per
+round — stateless (`channel = perm(slot/N)[slot%N]`), so a receiver joins
+without RNG state. Both orders share the lockstep path: in slot mode `txdemo`
+(beacon) and `streamtx` (own frame every `DEVOURER_HOP_SYNC_EVERY`, FEC PSDU
+untouched) emit a sync marker (fingerprint/epoch/slot/phase); `rxdemo` hops in
+lockstep when `DEVOURER_HOP_CHANNELS`+`_SLOT_MS` are set (seed optional →
+keyed/sequential), emitting `hop.rx` acquire/track/retune events. Jammer
+resilience: `tests/run_jammer_resilience.sh` (parked B210 A/B/C/D delivery
+matrix) + `tests/sdr_follower_jammer.py` (full-duplex B210 follower, reactive vs
+predictive). Article + results: `docs/fhss.md`, `docs/jammer-resilience.md`.
+
 `IRtlDevice::FastSetBandwidth(bw)` is the bandwidth analogue — a lean
 same-channel toggle between 20 MHz and 5/10 MHz narrowband (the RF stays in
 20 MHz mode, so only the baseband ADC/DAC re-clock changes: a single `0x8ac`

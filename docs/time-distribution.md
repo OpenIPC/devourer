@@ -67,7 +67,12 @@ RMS** (the residual MAC TX pipeline — the transport stops being the limiter).
 A PCIe master (8821CE) therefore lifts every slave's *absolute* software-path
 lock ~8×; the inter-slave difference and the hardware-beacon path below are
 unaffected (already transport-free). Tool: `tests/pcie_txegress_tx.cpp` +
-`tests/txegress_witness.cpp`.
+`tests/txegress_witness.cpp`. The `timesync` demo drives a PCIe master via
+`DEVOURER_PCIE_BDF` — but note the ~12 µs floor is a *robust-fit* transport
+number: on a busy channel the raw slave lock is deferral-limited regardless of
+transport (radxa bench, crowded ch6: 420 µs RMS — the channel, not the bus),
+and the radxa↔bench RF path only reaches on 2.4 GHz, so prefer the hardware
+beacon below for PCIe masters.
 
 Run it with `tests/timesync_demo.sh` (one master + two slaves; joins the two
 `{"ev":"timesync.lock"}` streams by beacon seq into the inter-UE error).
@@ -329,11 +334,22 @@ board's Intel I226 (a full IEEE-1588 NIC):
 The ~290 ns residual is the TSF's own **1 µs-quantization floor** (uniform
 ±0.5 µs → 289 ns RMS) — once the crystal offset is servoed out, the Wi-Fi MAC
 TSF holds like genuine PTP hardware. Combined with `PinBeaconTbtt` above, this
-closes the loop: network PTP disciplines the master's TSF, the pinned
-(TSF-locked) hardware beacon distributes it over the air at ~±1 µs, and the
-slaves inherit the wired timebase at the sub-µs beacon floor. Validation:
-`tests/pcie_phc/ptp_crosscheck.sh` (the Wi-Fi side must be in monitor mode so
-the MAC/TSF is clocked).
+closes the loop, and the closed loop is a shipped tool:
+`tests/pcie_ptp_beacon.cpp` runs the hardware beacon on the 8821CE and holds
+its TBTT to the I226 PHC (read via `FD_TO_CLOCKID`, no system-clock detour)
+with a full-gain PI on the pin actuator. End-to-end bench, everything running
+concurrently (radxa loop + a USB slave over the air):
+
+| link in the chain | measured |
+|-------------------|----------|
+| radxa TBTT vs the I226 PTP reference | **1.24 µs RMS**, max 5.5 µs (156 pins, ~90 s) |
+| USB slave lock through the live discipline | 13.9 µs RMS (575 beacons, ~0 lost through 160+ pins) |
+
+The slave number carries a caveat: its all-history least-squares fit assumes a
+free-running master, so it *measures the discipline corrections themselves*;
+a tracking filter (PLL-style) at the slave would follow the pinned timebase
+tighter. PHC validation: `tests/pcie_phc/ptp_crosscheck.sh` (the Wi-Fi side
+must be in monitor mode so the MAC/TSF is clocked).
 
 ## Env knobs
 

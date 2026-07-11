@@ -61,6 +61,9 @@
 #include "env_config.h"
 #include "logger.h"
 #include "timesync.h"
+#if defined(DEVOURER_HAVE_PCIE)
+#include "PcieTransport.h"
+#endif
 
 #define USB_VENDOR_ID 0x0bda
 static constexpr uint16_t kRealtekProductIds[] = {
@@ -477,13 +480,31 @@ int main() {
   timesync::Config c = timesync::config_from_env();
   g_hwbeacon = c.hwbeacon;   // slave reads the standard 802.11 beacon timestamp
 
-  libusb_context* ctx = nullptr;
-  std::shared_ptr<devourer::UsbDeviceLock> lock;
-  auto* handle = open_device(logger, &ctx, lock);
-  if (!handle) { if (ctx) libusb_exit(ctx); return 1; }
-
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
+  std::unique_ptr<IRtlDevice> dev;
+  libusb_context* ctx = nullptr;
+  /* DEVOURER_PCIE_BDF=0000:01:00.0 — drive a PCIe adapter (RTL8821CE) through
+   * the vfio transport instead of libusb (DEVOURER_PCIE builds; mirrors the
+   * RX/TX demos). A PCIe master collapses the software-downlink stamp→air
+   * floor from ~93 µs (USB submit path) to ~12 µs (the MAC TX pipeline). */
+  const char* pcie_bdf = std::getenv("DEVOURER_PCIE_BDF");
+#if defined(DEVOURER_HAVE_PCIE)
+  if (pcie_bdf) {
+    auto transport = devourer::PcieTransport::Open(pcie_bdf, logger);
+    if (!transport) return 1;
+    dev = wifi.CreateRtlDevicePcie(std::move(transport), devourer_config_from_env());
+  } else
+#endif
+  {
+    if (pcie_bdf) {
+      logger->error("DEVOURER_PCIE_BDF set but this build has DEVOURER_PCIE=OFF");
+      return 1;
+    }
+    std::shared_ptr<devourer::UsbDeviceLock> lock;
+    auto* handle = open_device(logger, &ctx, lock);
+    if (!handle) { if (ctx) libusb_exit(ctx); return 1; }
+    dev = wifi.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
+  }
   if (!dev) { logger->error("no driver for this chip"); return 1; }
 
   if (c.role == timesync::Role::Ue) run_ue(dev.get(), c);

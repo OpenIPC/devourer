@@ -1051,8 +1051,11 @@ int main() {
         devourer::HopSchedule::parse_seed(std::getenv("DEVOURER_HOP_SEED")));
     g_hop_slot_us = static_cast<uint64_t>(hop_rx_slot_ms) * 1000;
     long acquire_ms = hop_rx_slot_ms * 2;
-    if (const char *a = std::getenv("DEVOURER_HOP_ACQUIRE_MS"))
-      acquire_ms = std::max(1L, std::strtol(a, nullptr, 0));
+    if (const char *a = std::getenv("DEVOURER_HOP_ACQUIRE_MS")) {
+      acquire_ms = std::strtol(a, nullptr, 0);
+      if (acquire_ms < 1)
+        acquire_ms = 1;
+    }
     IRtlDevice *dev = rtlDevice.get();
     SelectedChannel first{static_cast<uint8_t>(hop_rx_channels[0]), ch_offset,
                           width};

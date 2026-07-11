@@ -12,7 +12,10 @@ Acts (cycled by the loop):
                      where the robot sits — is a collision zone
   2  ICIC            the scheduler assigns orthogonal slots over the backhaul;
                      the cell edge goes clean, the robot gets protected slots
-  3  HANDOVER        the robot drives A -> B: per-AP RSSI crosses over, the
+  3  HANDOVER        the robot drives A -> B: the scheduler's FILTERED
+                     link-quality estimates cross over (A3-style: margin +
+                     time-to-trigger, never raw RSSI — fast fading would
+                     ping-pong the edge), then the
                      scheduler moves its slots to B between one slot and the
                      next (make-before-break) — the ghost bar shows the
                      ~100 ms hole an ordinary Wi-Fi roam would punch
@@ -32,13 +35,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from monitor_style import (AMBER, CYAN, DIM, GRID, INK, OK, WARN, chrome, font,
                            new_frame, save_gif)
 
-W, H = 920, 700
+W, H = 920, 640
 ACTS = [(0, 26), (26, 52), (52, 104)]
 TOTAL = ACTS[-1][1]
 GREEN = OK
 A_COL, B_COL = CYAN, GREEN
-AX, BX, CY, R = 300, 640, 300, 185       # cell centers / floor row / radius
-RULER = (44, 500, 876, 560)              # slot ruler box
+AX, BX, CY, R = 300, 640, 318, 185       # cell centers / floor center / radius
+FLOOR = (28, 168, 892, 468)              # the floor box (cells must fit inside)
+RULER = (44, 512, 876, 566)              # slot ruler box
 NSLOT = 16
 HO_FRAME = 78                            # handover instant (act-3 frame)
 
@@ -67,8 +71,9 @@ def robot(d, x, y, col):
     d.ellipse([x - 2, y - 20, x + 2, y - 16], outline=col)
 
 
-def rssi_bars(d, x, y, da, db):
-    """Two mini RSSI bars by distance to each AP."""
+def quality_bars(d, x, y, da, db):
+    """Two mini link-quality bars (the scheduler's FILTERED per-AP estimate —
+    smoothed over many uplinks, not instantaneous RSSI)."""
     for i, (dist, col, tag) in enumerate(((da, A_COL, "A"), (db, B_COL, "B"))):
         s = max(0.08, min(1.0, 1.6 - dist / R))
         bx = x + 16, y - 14 + i * 14
@@ -90,9 +95,9 @@ def main() -> int:
         ("2/3  ICIC OVER THE BACKHAUL", "the scheduler splits the slot grid "
                                         "between cells — orthogonal at the edge "
                                         "(µs guards: shared clock)", CYAN),
-        ("3/3  MAKE-BEFORE-BREAK HANDOVER", "RSSI crosses over -> the scheduler "
-                                            "reassigns the robot's slots to B — "
-                                            "valid clock, zero gap", OK),
+        ("3/3  MAKE-BEFORE-BREAK HANDOVER", "filtered quality crosses (A3: margin+TTT) "
+                                            "-> slots reassigned to B — valid "
+                                            "clock, zero gap", OK),
     ]
 
     imgs = []
@@ -119,7 +124,7 @@ def main() -> int:
                    fill=AMBER)
 
         # --- floor: cells + robot ------------------------------------------------
-        d.rectangle([28, 168, W - 28, 468], outline=GRID)
+        d.rectangle(list(FLOOR), outline=GRID)
         for cx, col in ((AX, A_COL), (BX, B_COL)):
             d.ellipse([cx - R, CY - R + 40, cx + R, CY + R - 40], outline=col)
         ap_glyph(d, AX, CY - 6, A_COL, "AP A", "ch 36")
@@ -135,7 +140,7 @@ def main() -> int:
         rcol = B_COL if served_b else A_COL
         robot(d, rx, ry, rcol)
         da, db = abs(rx - AX), abs(rx - BX)
-        rssi_bars(d, rx, ry, da, db)
+        quality_bars(d, rx, ry, da, db)
 
         # collisions in the overlap (act 1): both cells hit the robot at once
         if act == 0 and fr % 3 == 0:

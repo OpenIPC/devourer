@@ -4,10 +4,11 @@
 
 *Two AP cells on one wired timebase, a robot driving between them. Act 1: no
 coordination — the cell-edge is a collision zone. Act 2: the backhaul assigns
-orthogonal slots and the edge goes clean. Act 3: the robot crosses cells and
-its schedule simply changes owner between two slots — no scan, no
-re-association, no clock re-acquisition; the ghost bar shows the ~100 ms+ hole
-an ordinary Wi-Fi roam would have punched.*
+orthogonal slots and the edge goes clean. Act 3: the robot crosses cells; the
+scheduler's filtered link-quality estimates cross over (A3-style: margin +
+time-to-trigger, not raw RSSI) and its schedule changes owner between two
+slots — no scan, no re-association, no clock re-acquisition; the ghost bar
+shows the ~100 ms+ hole an ordinary Wi-Fi roam would have punched.*
 
 The [time-distribution machinery](time-distribution.md) ends with a specific
 capability: **every radio in a facility — wired or wireless — can share one
@@ -75,11 +76,20 @@ The shared clock dissolves most of that:
   (they are on the same timebase; if cells use different channels, a
   millisecond retune during an idle slot samples a neighbor and returns —
   cheap enough to do continuously).
-- **Network-side decision.** Each AP hardware-timestamps and RSSI-tags every
-  robot uplink it hears — including uplinks addressed to a *neighbor* cell.
-  Those per-AP observations flow over the backhaul, so the network sees the
-  robot's radio horizon better than the robot does, and picks the moment: LTE
-  measurement reports, without asking the client to do anything.
+- **Network-side decision.** Each AP hears every robot uplink in range —
+  including uplinks addressed to a *neighbor* cell — and tags it with
+  per-frame hardware attributes (RSSI, SNR, EVM, per-chain levels). Those
+  observations flow over the backhaul, so the network sees the robot's radio
+  horizon better than the robot does. One caution borrowed straight from
+  cellular practice: **never hand over on raw RSSI** — instantaneous signal
+  level swings ±10–20 dB with fast fading, and a threshold comparison
+  ping-pongs the client exactly at the cell edge. LTE/5G decide on *filtered*
+  measurements with **hysteresis and time-to-trigger** (the A3 event:
+  neighbor better than serving *by a margin*, *sustained for a window*), and
+  the same discipline applies here — the scheduler filters each AP's
+  observations over many uplinks before declaring a crossover, and the richer
+  per-frame attributes (SNR/EVM trend, not just level) make that filter
+  better-informed than any scan-based client roam.
 - **Make-before-break.** The "handover" is then only a schedule update pushed
   over the backhaul: *your slots now belong to AP B (and retune to channel Y)*.
   The robot flips its serving cell between one slot and the next — the

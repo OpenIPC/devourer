@@ -1,12 +1,13 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
-#include <cstdlib>
 #include <climits>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -31,10 +32,11 @@
 #endif
 
 #include "BfReportDetect.h"
-#include "caps_event.h"
 #include "ChannelFreq.h"
+#include "HopSchedule.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
+#include "caps_event.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
@@ -57,30 +59,31 @@
 
 #define USB_VENDOR_ID 0x0bda
 
-/* Known USB product IDs for the Realtek Jaguar family — same set as the RX
- * demo (examples/rx/main.cpp). */
-static constexpr uint16_t kRealtekProductIds[] = {
-    0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
-    0xb812, 0xb82c, /* RTL8822BU (Jaguar2); OEM VIDs via DEVOURER_VID/PID */
-    0xc82c, 0xc82e, 0xc812, /* RTL8822CU/8812CU (Jaguar3 CU) */
-    0x881a, 0x881b, 0x881c, 0xa81a, /* RTL8812EU (Jaguar3 EU; a81a = BL-M8812EU2) */
-    0xe822, 0xa82a, /* RTL8822EU (Jaguar3 EU) */
-};
+  /* Known USB product IDs for the Realtek Jaguar family — same set as the RX
+   * demo (examples/rx/main.cpp). */
+  static constexpr uint16_t kRealtekProductIds[] = {
+      0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
+      0xb812, 0xb82c, /* RTL8822BU (Jaguar2); OEM VIDs via DEVOURER_VID/PID */
+      0xc82c, 0xc82e, 0xc812,         /* RTL8822CU/8812CU (Jaguar3 CU) */
+      0x881a, 0x881b, 0x881c, 0xa81a, /* RTL8812EU (Jaguar3 EU; a81a =
+                                         BL-M8812EU2) */
+      0xe822, 0xa82a,                 /* RTL8822EU (Jaguar3 EU) */
+  };
 
-/* Event sink for the demo's own JSONL emissions (packetProcessor is a free
- * function) — points at the main() Logger's sink, set before InitWrite(). */
-static devourer::EventSink *g_ev = nullptr;
+  /* Event sink for the demo's own JSONL emissions (packetProcessor is a free
+   * function) — points at the main() Logger's sink, set before InitWrite(). */
+  static devourer::EventSink *g_ev = nullptr;
 
-/* Process-start reference for the init.timing events (see src/InitTimer.h).
- * stage=txdemo.first_tx_submit is the end-to-end "ready to TX" mark:
- * exec → first bulk-OUT submitted. */
-static const std::chrono::steady_clock::time_point g_proc_start =
-    std::chrono::steady_clock::now();
-static long long ms_since_start() {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-             std::chrono::steady_clock::now() - g_proc_start)
-      .count();
-}
+  /* Process-start reference for the init.timing events (see src/InitTimer.h).
+   * stage=txdemo.first_tx_submit is the end-to-end "ready to TX" mark:
+   * exec → first bulk-OUT submitted. */
+  static const std::chrono::steady_clock::time_point g_proc_start =
+      std::chrono::steady_clock::now();
+  static long long ms_since_start() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - g_proc_start)
+        .count();
+  }
 
 /* Build a radiotap header carrying CHANNEL (freq) + TX_FLAGS, then append the
  * 802.11 body. The library reads the CHANNEL field and FastRetunes per packet. */
@@ -861,6 +864,8 @@ int main(int argc, char **argv) {
   std::vector<int> hop_channels;
   long hop_dwell = 50;
   long hop_rounds = 0;
+  long hop_slot_ms = 0;
+  std::optional<devourer::HopSchedule> hop_schedule;
   /* 0 = full SetMonitorChannel; 1 = FastRetune (cached RF writes, fastest);
    * 2 = FastRetune without the RF cache (sw_chnl only, for A/B measurement). */
   const int hop_fast =
@@ -879,6 +884,16 @@ int main(int argc, char **argv) {
       hop_dwell = std::strtol(e, nullptr, 0);
       if (hop_dwell < 1) hop_dwell = 1;
     }
+    if (const char *e = std::getenv("DEVOURER_HOP_SLOT_MS")) {
+      hop_slot_ms = std::strtol(e, nullptr, 0);
+      if (hop_slot_ms < 1)
+        throw std::invalid_argument("DEVOURER_HOP_SLOT_MS must be positive");
+      if (std::getenv("DEVOURER_HOP_DWELL_FRAMES"))
+        throw std::invalid_argument(
+            "hop slot and frame dwell are mutually exclusive");
+    }
+    if (const char *seed = std::getenv("DEVOURER_HOP_SEED"))
+      hop_schedule.emplace(devourer::HopSchedule::parse_seed(seed));
     if (const char *e = std::getenv("DEVOURER_HOP_ROUNDS")) {
       hop_rounds = std::strtol(e, nullptr, 0);
       if (hop_rounds < 0) hop_rounds = 0;
@@ -978,6 +993,9 @@ int main(int argc, char **argv) {
   long frames_in_dwell = 0;
   const long total_dwells =
       hop_rounds > 0 ? hop_rounds * static_cast<long>(hop_channels.size()) : 0;
+  const auto hop_start = std::chrono::steady_clock::now();
+  const uint32_t hop_epoch = static_cast<uint32_t>(
+      std::chrono::high_resolution_clock::now().time_since_epoch().count());
 
   long tx_count = 0;
   long consec_fail = 0;
@@ -1102,10 +1120,21 @@ int main(int argc, char **argv) {
     /* Retune at each dwell boundary. The first iteration (frames_in_dwell==0,
      * dwell_no==-1) selects the first hop channel; SetMonitorChannel
      * early-returns if it equals the InitWrite channel. */
-    if (!hop_channels.empty() && frames_in_dwell == 0) {
-      ++dwell_no;
+    uint64_t desired_slot =
+        hop_slot_ms > 0
+            ? static_cast<uint64_t>(
+                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - hop_start)
+                      .count() /
+                  hop_slot_ms)
+            : static_cast<uint64_t>(dwell_no + (frames_in_dwell == 0 ? 1 : 0));
+    if (!hop_channels.empty() &&
+        ((hop_slot_ms > 0 && desired_slot != static_cast<uint64_t>(dwell_no)) ||
+         (hop_slot_ms == 0 && frames_in_dwell == 0))) {
+      dwell_no = static_cast<long>(desired_slot);
       if (total_dwells > 0 && dwell_no >= total_dwells) break;
-      int ch = hop_channels[dwell_no % hop_channels.size()];
+      int ch = hop_schedule ? hop_schedule->channel(desired_slot, hop_channels)
+                            : hop_channels[desired_slot % hop_channels.size()];
       auto sw0 = std::chrono::steady_clock::now();
       const char *mode = nullptr;
       if (hop_radiotap) {
@@ -1137,14 +1166,35 @@ int main(int argc, char **argv) {
       {
         devourer::Ev ev(*g_ev, "hop.dwell");
         ev.f("dwell", dwell_no)
+            .f("slot", (unsigned long long)desired_slot)
             .f("round", dwell_no / static_cast<long>(hop_channels.size()))
             .f("channel", ch)
             .f("frame", tx_count)
             .f("switch_us", switch_us)
             .f("t_ms", ms_since_start());
+        if (hop_schedule)
+          ev.hexf("seed_fp", hop_schedule->fingerprint(), 8);
         if (mode != nullptr)
           ev.f("mode", mode);
       }
+    }
+    if (hop_schedule && hop_slot_ms > 0) {
+      auto old = devourer::HopSyncMarker::encode({});
+      if (tx_buf.size() >= old.size() &&
+          tx_buf[tx_buf.size() - old.size()] == 221 &&
+          tx_buf[tx_buf.size() - old.size() + 5] == 0x48)
+        tx_buf.resize(tx_buf.size() - old.size());
+      const auto now = std::chrono::steady_clock::now();
+      const uint64_t us = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(now - hop_start)
+              .count());
+      devourer::HopSyncMarker marker{
+          hop_schedule->fingerprint(), hop_epoch,
+          static_cast<uint32_t>(us %
+                                (static_cast<uint64_t>(hop_slot_ms) * 1000)),
+          us / (static_cast<uint64_t>(hop_slot_ms) * 1000)};
+      auto wire = devourer::HopSyncMarker::encode(marker);
+      tx_buf.insert(tx_buf.end(), wire.begin(), wire.end());
     }
     if (stbc_toggle) {
       devourer::TxMode m = tx_mode_base;
@@ -1212,7 +1262,8 @@ int main(int argc, char **argv) {
       rc = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
       ++tx_count;
     }
-    if (!hop_channels.empty() && ++frames_in_dwell >= hop_dwell)
+    if (!hop_channels.empty() && hop_slot_ms == 0 &&
+        ++frames_in_dwell >= hop_dwell)
       frames_in_dwell = 0;
     if (tx_count <= 10 || tx_count % 500 == 0) {
       devourer::Ev(*g_ev, "tx.frame").f("n", tx_count).f("rc", rc);

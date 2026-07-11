@@ -8,6 +8,29 @@ channel write, strip the per-hop work down to it, kill the read-modify-write
 penalty) applies to any Realtek generation, so the "Porting to other
 generations" section at the end generalises each trick.
 
+## Keyed FHSS and lockstep receive
+
+Setting `DEVOURER_HOP_SEED` to up to 32 hexadecimal digits replaces the public
+round-robin order with a SipHash-2-4-driven Fisher-Yates permutation for every
+round.  The schedule is a pure function of the 128-bit key and absolute slot:
+every channel occurs exactly once per round and a receiver can join without
+replaying RNG state.  With no seed, the existing sequential order is unchanged.
+
+`DEVOURER_HOP_SLOT_MS=N` selects monotonic wall-time slots instead of
+`DEVOURER_HOP_DWELL_FRAMES`; explicitly setting both is an error.  In keyed
+slot mode, `txdemo` adds a versioned private synchronization IE containing a
+seed fingerprint, process epoch, slot, and in-slot phase.  `streamtx` uses the
+same keyed schedule but deliberately leaves its caller-owned PSDU unchanged.
+
+`rxdemo` enters experimental single-adapter lockstep mode when
+`DEVOURER_HOP_CHANNELS`, `DEVOURER_HOP_SEED`, and `DEVOURER_HOP_SLOT_MS` are
+all present. It parks on the first channel, scans the hopset after
+`DEVOURER_HOP_ACQUIRE_MS` (default two slots), then tracks the transmitted slot
+clock. Three marker-free slots return it to acquisition. `hop.rx` events expose
+state, retune time, phase correction inputs, and first-decode dead time. This
+mode is mutually exclusive with `DEVOURER_RX_SWEEP` and remains hardware-
+experimental; a wideband SDR is still the ground truth for TX validation.
+
 ## Why frequency is not like MCS
 
 devourer already lets a single frame pick its own rate / bandwidth / STBC /

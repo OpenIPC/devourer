@@ -12,10 +12,11 @@
 #include <libusb.h>
 
 #include "BfReportDetect.h"
-#include "caps_event.h"
+#include "HopSchedule.h"
 #include "LinkHealth.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
+#include "caps_event.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
@@ -62,6 +63,19 @@ static RtlJaguarDevice *g_rtl_device = nullptr;
 /* Event sink for the demo's own JSONL emissions (packetProcessor is a free
  * function) — points at the main() Logger's sink, set before Init(). */
 static devourer::EventSink *g_ev = nullptr;
+static std::unique_ptr<devourer::HopSchedule> g_hop_schedule;
+static uint64_t g_hop_slot_us = 0;
+static std::atomic<long long> g_hop_anchor_us{0};
+static std::atomic<long long> g_hop_last_marker_us{0};
+static std::atomic<uint64_t> g_hop_marker_slot{0};
+static std::atomic<uint32_t> g_hop_epoch{0};
+static std::atomic<long long> g_hop_last_retune_us{0};
+static std::atomic<bool> g_hop_decode_pending{false};
+static long long steady_us() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 /* Process-start reference for the init.timing events (see src/InitTimer.h).
  * stage=demo.first_rx_frame is the end-to-end "ready to RX" mark:
@@ -310,6 +324,39 @@ static void packetProcessor(const Packet &packet) {
   }
 
   ++g_rx_count;
+
+  if (g_hop_schedule && packet.Data.size() >= 16 &&
+      std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
+    devourer::HopSyncMarker m;
+    if (devourer::HopSyncMarker::decode(packet.Data.data(), packet.Data.size(),
+                                        m) &&
+        m.fingerprint == g_hop_schedule->fingerprint() &&
+        m.phase_us < g_hop_slot_us) {
+      const long long now = steady_us();
+      const long long observed = now - static_cast<long long>(m.phase_us) -
+                                 static_cast<long long>(m.slot * g_hop_slot_us);
+      long long anchor = g_hop_anchor_us.load();
+      if (!anchor || g_hop_epoch.load() != m.epoch)
+        anchor = observed;
+      else {
+        long long e = observed - anchor;
+        if (e > 2000)
+          e = 2000;
+        if (e < -2000)
+          e = -2000;
+        anchor += e / 4;
+      }
+      g_hop_anchor_us.store(anchor);
+      g_hop_last_marker_us.store(now);
+      g_hop_marker_slot.store(m.slot);
+      g_hop_epoch.store(m.epoch);
+      if (g_hop_decode_pending.exchange(false))
+        devourer::Ev(*g_ev, "hop.rx")
+            .f("state", "decode")
+            .f("slot", (unsigned long long)m.slot)
+            .f("dead_us", now - g_hop_last_retune_us.load());
+    }
+  }
 
   /* Feed the rolling per-frame RSSI/SNR/EVM aggregate for DEVOURER_RX_ENERGY_MS
    * and the sweep's per-dwell frame stats (the frame-driven half of the energy
@@ -987,6 +1034,106 @@ int main() {
     else if (mhz == 10)
       width = CHANNEL_WIDTH_10;
     logger->info("DEVOURER_NB_BW={} — RX bandwidth {} MHz", nb, mhz);
+  }
+
+  const auto hop_rx_channels =
+      devourer::parse_sweep_spec(std::getenv("DEVOURER_HOP_CHANNELS"));
+  long hop_rx_slot_ms = 0;
+  if (const char *s = std::getenv("DEVOURER_HOP_SLOT_MS"))
+    hop_rx_slot_ms = std::strtol(s, nullptr, 0);
+  const bool hop_rx = std::getenv("DEVOURER_HOP_SEED") && hop_rx_slot_ms > 0 &&
+                      !hop_rx_channels.empty();
+  if (hop_rx && !g_rx_sweep.empty())
+    throw std::invalid_argument(
+        "lockstep hopping and DEVOURER_RX_SWEEP are mutually exclusive");
+  if (hop_rx) {
+    g_hop_schedule = std::make_unique<devourer::HopSchedule>(
+        devourer::HopSchedule::parse_seed(std::getenv("DEVOURER_HOP_SEED")));
+    g_hop_slot_us = static_cast<uint64_t>(hop_rx_slot_ms) * 1000;
+    long acquire_ms = hop_rx_slot_ms * 2;
+    if (const char *a = std::getenv("DEVOURER_HOP_ACQUIRE_MS"))
+      acquire_ms = std::max(1L, std::strtol(a, nullptr, 0));
+    IRtlDevice *dev = rtlDevice.get();
+    SelectedChannel first{static_cast<uint8_t>(hop_rx_channels[0]), ch_offset,
+                          width};
+    std::thread rx([dev, first, &logger]() {
+      try {
+        dev->Init(packetProcessor, first);
+      } catch (const std::exception &e) {
+        logger->error("lockstep RX failed: {}", e.what());
+      }
+    });
+    /* Do not race FastRetune against firmware/calibration bring-up. A frame on
+     * the parked channel proves RX is live; a silent link uses the same 10 s
+     * conservative cap as DEVOURER_RX_SWEEP below. */
+    for (int waited = 0;
+         waited < 10000 && !g_devourer_should_stop && g_rx_count == 0;
+         waited += 50)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    size_t scan = 0;
+    uint64_t tuned_slot = UINT64_MAX;
+    bool tracking = false;
+    long long next_scan = steady_us() + acquire_ms * 1000;
+    devourer::Ev(*g_ev, "hop.rx")
+        .f("state", "acquire")
+        .f("channel", hop_rx_channels[0]);
+    while (!g_devourer_should_stop) {
+      const long long now = steady_us(), last = g_hop_last_marker_us.load();
+      if (last && now - last < static_cast<long long>(3 * g_hop_slot_us)) {
+        if (!tracking) {
+          tracking = true;
+          devourer::Ev(*g_ev, "hop.rx")
+              .f("state", "track")
+              .f("epoch", g_hop_epoch.load());
+        }
+        const long long anchor = g_hop_anchor_us.load();
+        if (anchor > 0 && now >= anchor) {
+          uint64_t slot = static_cast<uint64_t>(
+              (now - anchor) / static_cast<long long>(g_hop_slot_us));
+          if (slot != tuned_slot) {
+            int ch = g_hop_schedule->channel(slot, hop_rx_channels);
+            auto t0 = steady_us();
+            dev->FastRetune(static_cast<uint8_t>(ch), true);
+            auto done = steady_us();
+            g_hop_last_retune_us.store(done);
+            g_hop_decode_pending.store(true);
+            tuned_slot = slot;
+            devourer::Ev(*g_ev, "hop.rx")
+                .f("state", "retune")
+                .f("slot", (unsigned long long)slot)
+                .f("channel", ch)
+                .f("retune_us", done - t0);
+          }
+        }
+      } else {
+        if (tracking) {
+          tracking = false;
+          tuned_slot = UINT64_MAX;
+          devourer::Ev(*g_ev, "hop.rx").f("state", "lost");
+          next_scan = now;
+        }
+        if (now >= next_scan) {
+          scan = (scan + 1) % hop_rx_channels.size();
+          int ch = hop_rx_channels[scan];
+          auto t0 = steady_us();
+          dev->FastRetune(static_cast<uint8_t>(ch), true);
+          devourer::Ev(*g_ev, "hop.rx")
+              .f("state", "acquire")
+              .f("channel", ch)
+              .f("retune_us", steady_us() - t0);
+          next_scan = now + acquire_ms * 1000;
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    dev->StopRxLoop();
+    if (rx.joinable())
+      rx.join();
+    dev->Stop();
+    libusb_release_interface(dev_handle, 0);
+    libusb_close(dev_handle);
+    libusb_exit(ctx);
+    return 0;
   }
 
   /* DEVOURER_RX_SWEEP: live spectrum sweep. Run the (blocking) RX bring-up +

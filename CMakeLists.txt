@@ -503,6 +503,10 @@ target_link_libraries(SweepSpecSelftest PRIVATE devourer)
 
 add_test(NAME sweep_spec_math COMMAND SweepSpecSelftest)
 
+add_executable(HopScheduleSelftest tests/hop_schedule_selftest.cpp)
+target_link_libraries(HopScheduleSelftest PRIVATE devourer)
+add_test(NAME hop_schedule_math COMMAND HopScheduleSelftest)
+
 # Headless guard for the TX-power offset quantization (src/TxPower.h) — the
 # qdB->index-step rounding/clamping behind SetTxPowerOffsetQdb, so a rounding
 # regression fails `ctest` instead of only surfacing as a wrong on-air level.

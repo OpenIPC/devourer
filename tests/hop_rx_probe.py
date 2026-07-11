@@ -36,6 +36,37 @@ import time
 
 import numpy as np
 
+def _rotl(x, b): return ((x << b) | (x >> (64-b))) & 0xffffffffffffffff
+def siphash24(key: bytes, msg: bytes) -> int:
+    def rd(p): return int.from_bytes(p, "little")
+    k0,k1=rd(key[:8]),rd(key[8:]); v0=0x736f6d6570736575^k0;v1=0x646f72616e646f6d^k1;v2=0x6c7967656e657261^k0;v3=0x7465646279746573^k1
+    def rnd():
+        nonlocal v0,v1,v2,v3
+        v0=(v0+v1)&0xffffffffffffffff;v1=_rotl(v1,13)^v0;v0=_rotl(v0,32);v2=(v2+v3)&0xffffffffffffffff;v3=_rotl(v3,16)^v2;v0=(v0+v3)&0xffffffffffffffff;v3=_rotl(v3,21)^v0;v2=(v2+v1)&0xffffffffffffffff;v1=_rotl(v1,17)^v2;v2=_rotl(v2,32)
+    end=len(msg)&~7
+    for off in range(0,end,8):
+        m=rd(msg[off:off+8]);v3^=m;rnd();rnd();v0^=m
+    b=len(msg)<<56
+    for i,x in enumerate(msg[end:]): b|=x<<(8*i)
+    v3^=b;rnd();rnd();v0^=b;v2^=0xff
+    for _ in range(4):rnd()
+    return v0^v1^v2^v3
+
+def keyed_sequence(seed: str, channels, rounds: int):
+    s=seed[2:] if seed.lower().startswith("0x") else seed
+    if not 1 <= len(s) <= 32: raise ValueError("seed must be 1..32 hex digits")
+    key=bytes.fromhex(s.zfill(32)); out=[]
+    for r in range(rounds):
+        p=list(range(len(channels))); counter=0
+        for i in range(len(p),1,-1):
+            limit=0xffffffffffffffff-(0xffffffffffffffff%i)
+            while True:
+                x=siphash24(key,b"H"+r.to_bytes(8,"little")+counter.to_bytes(8,"little"));counter+=1
+                if x<limit:break
+            j=x%i;p[i-1],p[j]=p[j],p[i-1]
+        out.extend(channels[i] for i in p)
+    return out
+
 try:
     import uhd
 except ImportError:
@@ -210,8 +241,12 @@ def analyse(args, channels, rate, center, total, overflows) -> int:
         s = slice(w * win_slices, (w + 1) * win_slices)
         wp = pwr[:, s].mean(axis=1)
         wdb = 10.0 * np.log10(wp + eps)
-        ci = int(np.argmax(wp))
-        if wdb[ci] > floor_db[ci] + args.strong_snr_db:
+        # Receiver response and ambient floor differ by channel, especially
+        # near a wide capture's band edge. Compare excess above each channel's
+        # own floor instead of raw watts or the loudest bin wins every dwell.
+        excess_db = wdb - floor_db
+        ci = int(np.argmax(excess_db))
+        if excess_db[ci] > args.strong_snr_db:
             seq.append(channels[ci])
         else:
             seq.append(0)     # idle window
@@ -242,10 +277,18 @@ def analyse(args, channels, rate, center, total, overflows) -> int:
             best = max(best, c)
         return best
 
-    fwd = count_cycles(rle, channels)
-    rev = count_cycles(rle, channels[::-1])
-    full_cycles = max(fwd, rev)
-    direction = "forward" if fwd >= rev else "reversed(spectral-mirror)"
+    if args.seed:
+        expected=keyed_sequence(args.seed,channels,max(args.expect_rounds+4,64))
+        best=0
+        for off in range(len(expected)):
+            n=0
+            while n<len(rle) and off+n<len(expected) and rle[n]==expected[off+n]:n+=1
+            best=max(best,n)
+        full_cycles=best//len(channels);direction="keyed"
+    else:
+        fwd = count_cycles(rle, channels); rev = count_cycles(rle, channels[::-1])
+        full_cycles = max(fwd, rev)
+        direction = "forward" if fwd >= rev else "reversed(spectral-mirror)"
 
     # Proof of hopping: every channel carries the near-field TX, and the
     # dominant channel cycles through the full hop order several times. A floor
@@ -314,6 +357,7 @@ def main() -> int:
                     help="time granularity for the dominant-channel sequence")
     ap.add_argument("--expect-rounds", type=int, default=0,
                     help="expected full hop cycles (0 = just require order+presence)")
+    ap.add_argument("--seed", default="", help="keyed schedule seed (same hex as DEVOURER_HOP_SEED)")
     ap.add_argument("--bin-power-csv", default="",
                     help="write per-channel integrated power (CSV) — the SDR "
                          "ground truth for tests/sounding_map.py --sdr-csv")

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -34,9 +35,10 @@ extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
 
 UsbTransport::UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
                            libusb_context *ctx,
-                           std::shared_ptr<devourer::UsbDeviceLock> usb_lock)
+                           std::shared_ptr<devourer::UsbDeviceLock> usb_lock,
+                           bool rx_zerocopy)
     : _dev_handle{dev_handle}, _ctx{ctx}, _logger{std::move(logger)},
-      _usb_lock{std::move(usb_lock)} {
+      _rx_zerocopy{rx_zerocopy}, _usb_lock{std::move(usb_lock)} {
   libusb_device_descriptor desc{};
   if (libusb_get_device_descriptor(libusb_get_device(_dev_handle), &desc) ==
       LIBUSB_SUCCESS) {
@@ -73,10 +75,32 @@ void UsbTransport::rx_loop(
     const std::function<bool()> &should_stop) {
   AsyncRxShared sh{&on_data, &should_stop};
   std::vector<libusb_transfer *> xfers;
-  std::vector<std::vector<uint8_t>> bufs(n_urbs,
-                                         std::vector<uint8_t>(buf_size));
+  /* Zerocopy RX ring: allocate each URB buffer from kernel DMA memory
+   * (libusb_dev_mem_alloc = USBDEVFS_ALLOC on Linux) so the bulk-IN DMAs a
+   * frame straight into this mmap'd buffer and usbfs skips the copy-to-user on
+   * reap. dev_mem_alloc returns NULL on backends/HCDs that don't support it (or
+   * when disabled) — fall back per-buffer to a heap allocation, the historical
+   * copy-on-reap path. Buffers outlive every in-flight transfer (freed only
+   * after the drain below), so the mmap'd memory is never released under a live
+   * URB. */
+  std::vector<uint8_t *> bufs(n_urbs, nullptr);
+  std::vector<bool> is_devmem(n_urbs, false);
+  int zc = 0;
   for (int i = 0; i < n_urbs; i++) {
+    if (_rx_zerocopy) {
+      bufs[i] = libusb_dev_mem_alloc(_dev_handle, buf_size);
+      if (bufs[i]) {
+        is_devmem[i] = true;
+        ++zc;
+      }
+    }
+    if (!bufs[i])
+      bufs[i] = static_cast<uint8_t *>(malloc(buf_size));
+    if (!bufs[i])
+      continue; /* both allocs failed — skip this URB */
     libusb_transfer *t = libusb_alloc_transfer(0);
+    if (!t)
+      continue; /* buffer freed in the by-kind sweep below */
     /* timeout=0 (infinite): a persistent RX ring — each URB stays posted until
      * a frame arrives (COMPLETED), the queue is torn down (CANCELLED, below),
      * or the device errors. This is the kernel rtw88 RX-URB idiom. A finite
@@ -86,7 +110,7 @@ void UsbTransport::rx_loop(
      * information (RX is healthy; bulk-IN is simply idle) and can bloat a long
      * capture's stderr. The devourer_rx_cb resubmit-on-TIMED_OUT branch is kept
      * as a defensive no-op should a backend still surface a timeout. */
-    libusb_fill_bulk_transfer(t, _dev_handle, _info.bulk_in_ep, bufs[i].data(),
+    libusb_fill_bulk_transfer(t, _dev_handle, _info.bulk_in_ep, bufs[i],
                               buf_size, devourer_rx_cb, &sh, 0);
     if (libusb_submit_transfer(t) == 0) {
       xfers.push_back(t);
@@ -95,7 +119,8 @@ void UsbTransport::rx_loop(
       libusb_free_transfer(t);
     }
   }
-  _logger->info("RX: async queue of {} URBs submitted", sh.active.load());
+  _logger->info("RX: async queue of {} URBs submitted ({} zerocopy DMA, {} heap)",
+                sh.active.load(), zc, n_urbs - zc);
   while (!should_stop() && sh.active > 0) {
     struct timeval tv {0, 100000};
     libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
@@ -108,6 +133,16 @@ void UsbTransport::rx_loop(
   }
   for (auto *t : xfers)
     libusb_free_transfer(t);
+  /* All URBs are drained (sh.active == 0) — no transfer references a buffer, so
+   * releasing the ring is safe. Free each by the way it was allocated. */
+  for (int i = 0; i < n_urbs; i++) {
+    if (!bufs[i])
+      continue;
+    if (is_devmem[i])
+      libusb_dev_mem_free(_dev_handle, bufs[i], buf_size);
+    else
+      free(bufs[i]);
+  }
 }
 
 int UsbTransport::rx_raw(uint8_t *buf, int len, int timeout_ms) {

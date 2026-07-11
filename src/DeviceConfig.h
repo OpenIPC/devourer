@@ -282,6 +282,13 @@ struct DeviceConfig {
     /* env: TMPDIR — directory for the
      * devourer-usb-*.lock files. Empty = "/tmp". */
     std::string lock_dir;
+    /* env: DEVOURER_RX_ZEROCOPY — allocate the async RX ring from kernel DMA
+     * memory (libusb_dev_mem_alloc / USBDEVFS_ALLOC) so incoming frames DMA
+     * straight into the userspace buffer, eliminating the per-URB usbfs copy on
+     * reap. Linux + capable HCD only; the alloc falls back to heap buffers (the
+     * historical copy-on-reap path) when unsupported, so leaving it on is safe.
+     * 1 = on (default), 0 = force the heap path. */
+    bool rx_zerocopy = true;
   } usb;
 
   /* ---- PCIe (DEVOURER_PCIE builds; see src/PcieTransport.h) ------------ */

@@ -171,6 +171,8 @@ devourer::DeviceConfig devourer_config_from_env() {
   /* ---- usb ---- */
   if (const char *e = env_str("TMPDIR"); e && *e)
     cfg.usb.lock_dir = e;
+  if (env_str("DEVOURER_RX_ZEROCOPY")) /* default true; =0 forces the heap path */
+    cfg.usb.rx_zerocopy = env_flag("DEVOURER_RX_ZEROCOPY");
 
   return cfg;
 }

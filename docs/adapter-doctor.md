@@ -39,7 +39,7 @@ build/doctor --bus 3 --port 2.3.3  # topology select (two same-PID adapters)
    traffic counts. Hearing *nothing* is only SUSPECT unless
    `--expect-traffic` vouches for a source on the channel — an
    RF-quiet room is otherwise indistinguishable from a deaf radio
-   (same trap as [startup-time](startup-time.md) benchmarking).
+   (same trap as [performance](performance-tuning.md) benchmarking).
 
 Verdict → exit code: `HEALTHY`=0, `SUSPECT`=1, `FAILING`=2 (3 = tool /
 open error), plus a `doctor.verdict` machine event and per-reason

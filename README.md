@@ -19,7 +19,10 @@ long-range digital video links.
   — including platforms the vendor drivers never supported.
 - **Faster on-air than the kernel driver.** Ready-to-receive and
   ready-to-transmit come up quicker than the vendor `.ko` on every supported
-  chip ([numbers](docs/startup-time.md)).
+  chip, and raw injection skips the kernel networking stack the vendor driver
+  drags every frame through (mac80211 → cfg80211 → qdisc → skb → driver xmit) —
+  so it sustains the same channel occupancy at 3–4× less host CPU, which matters
+  most on an embedded transmitter ([numbers](docs/performance-tuning.md)).
 - **Per-packet control.** Every injected frame carries its own radiotap
   header: rate, bandwidth, guard interval, coding, STBC — even TX power and
   channel — can change frame by frame. That turns one dongle into an
@@ -189,8 +192,9 @@ one `IRtlDevice` interface covers all three generations.
 - [Narrowband](docs/narrowband.md) — 5/10 MHz channels across all three
   generations: the baseband re-clock, the per-chip register machinery, and the
   walls (RF re-latch edges, per-die clock coupling, the 5 MHz/5 GHz CFO limit).
-- [Startup time](docs/startup-time.md) — devourer vs. kernel driver,
-  measured on every supported chip.
+- [Performance](docs/performance-tuning.md) — devourer vs. kernel driver on
+  startup time, on-air throughput, and host CPU (3–4× lower); the TX
+  submission modes and the tuning levers, with the methodology.
 - [Adapter doctor](docs/adapter-doctor.md) — dying-dongle triage: EFUSE
   read-stability, firmware-boot and RX-smoke probes with a
   HEALTHY / SUSPECT / FAILING verdict.

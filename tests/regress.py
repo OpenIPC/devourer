@@ -593,7 +593,7 @@ def usb_port_power_cycle(dut: Dut, settle_s: float = 2.0) -> None:
 
     The `authorized` toggle still leaves the chip warm in the
     startup-time sense (calibration state survives — see
-    docs/startup-time.md "Cold chip vs warm chip"). For genuine
+    docs/performance-tuning.md "Cold chip vs warm chip"). For genuine
     first-plug cold, set REGRESS_VBUS_MAP="<sysfs_id>=<hubloc>:<port>"
     (comma list; e.g. "3-2.2=3-2:2") for DUTs on uhubctl-switchable
     hub ports — those DUTs get a real VBUS off/on instead. NEVER map

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # bench_8812au_row.sh — measure the missing RTL8812AU row of
-# docs/startup-time.md (issue #205) on the KNOWN-GOOD unit at 3-2.2.
+# docs/performance-tuning.md (issue #205) on the KNOWN-GOOD unit at 3-2.2.
 #
 # Table semantics: true cold per rep (real VBUS cycle via REGRESS_VBUS_MAP —
 # per-CELL, so devourer rx, devourer tx and the kernel cell each start from

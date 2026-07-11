@@ -135,7 +135,7 @@ rows are not authoritative for LDPC/STBC — that driver strips those bits),
 semantics: `tests/README.md`.
 
 Startup-time benchmarking: `tests/bench_init.py` (per-stage `init.timing`
-events from `src/InitTimer.h`; methodology + numbers in `docs/startup-time.md`).
+events from `src/InitTimer.h`; methodology + numbers in `docs/performance-tuning.md`).
 On-air TX throughput: measure **Mbps via SDR duty × PHY rate**
 (`tests/bench_onair.py`), never monitor-sniffer frame counts — a sensitive
 receiver decodes weak frames and masks a real drop. Keep a known-good control
@@ -401,3 +401,12 @@ The canonical test beacon (`examples/tx/main.cpp`) uses SA
 `examples/rx/main.cpp` as the `rx.txhit` event matcher and into
 `tests/regress.py` (`CANONICAL_SA`). Change all three together if it ever
 moves.
+
+**TX transfer mode is deliberately per-generation** (`docs/performance-tuning.md`):
+Jaguar1 submits frames asynchronously (`RtlAdapter::send_packet` → `tx_async`,
+caller-thread completion reaping) because its USB2 round-trip is too long for a
+blocking send to saturate the link; Jaguar2/Jaguar3 send synchronously
+(`bulk_send_sync_ep` → `tx_sync`) because their USB3 round-trip lets one
+blocking thread saturate, and sync gives the HalMAC bring-up a clean per-send
+NAK backoff. Don't unify the two onto one mode — either direction regresses
+throughput or bring-up safety.

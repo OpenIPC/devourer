@@ -221,3 +221,6 @@ With the machinery in hand, the rest reads straight:
 - [`time-distribution.md`](time-distribution.md) — the full time-sync machinery
   from section 10: per-generation TBTT steering, the PTP bridge, and every
   bench number behind the animation.
+- [`multi-ap-cellular.md`](multi-ap-cellular.md) — what section 10's shared
+  clock builds at facility scale: coordinated cells, make-before-break
+  handover, roaming robot UEs (with its own animation).

@@ -51,8 +51,11 @@ upstream history.
   kernel-compat/installer changes on top — and the v1.19 line is the one whose
   fwcmd surface includes the TWT-OFDMA + F2P trigger-frame H2C that issue #236
   needs (mainline `rtw89` does not carry it; the 2021 lwfinger v1.15 8852A drop
-  has only basic TWT). Forked for pinning; a `devourer-kbuild` branch gets
-  added only if the regress kernel cells need build patches.
+  has only basic TWT). Forked for pinning; unlike the rtw88-era forks these
+  need **no kbuild patches** — both pinned tips build *and* run (insmod, bind,
+  netdev up) unpatched on kernel 6.18.33 (`tests/kestrel_vendor_ko_smoke.sh`
+  is the functional gate). A `devourer-kbuild` branch gets added only if a
+  future kernel breaks them.
 - **libc0607 `5mhz_bw` for `rtl88x2eu-5mhz`.** The only fork carrying the
   working 5 MHz DAC-clock divider write (`R_0x9b4`) that devourer ported for
   Jaguar3 narrowband. It is the on-air ground-truth for

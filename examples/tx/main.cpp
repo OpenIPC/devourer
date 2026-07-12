@@ -523,6 +523,17 @@ int main(int argc, char **argv) {
   if (const char *p = std::getenv("DEVOURER_TX_PWR"))
     rtlDevice->SetTxPower(static_cast<uint8_t>(std::strtol(p, nullptr, 0)));
 
+  /* DEVOURER_TX_PWR_OFFSET_QDB=N — quarter-dB offset relative to the
+   * efuse-calibrated per-rate/per-path default (SetTxPowerOffsetQdb).
+   * Unlike DEVOURER_TX_PWR (flat: both paths forced to ONE index, per-rate
+   * diffs zeroed) this PRESERVES the per-path trim and by-rate shape —
+   * e.g. -44 on an 8822e shifts both OFDM refs down 11 dB while keeping
+   * the path-A/path-B calibration spread. Recorded now, applied at
+   * bring-up. */
+  if (const char *p = std::getenv("DEVOURER_TX_PWR_OFFSET_QDB"))
+    rtlDevice->SetTxPowerOffsetQdb(
+        static_cast<int>(std::strtol(p, nullptr, 0)));
+
   /* DEVOURER_TX_PKT_OFSET=N — (Jaguar2 8822B/8821C) default per-packet
    * TXPWR_OFSET LUT step written into every TX descriptor: 0=none, 1=-3dB,
    * 2=-7dB, 3=-11dB, 4=+3dB, 5=+6dB. The measurement driver for the descriptor

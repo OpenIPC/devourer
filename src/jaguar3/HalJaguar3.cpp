@@ -262,15 +262,21 @@ void HalJaguar3::config_channel_8822e(uint8_t channel) {
     _device.phy_set_bb_reg(0x81c, 0x001fc000, 0x4); /* Tx scaling */
   }
 
-  /* phydm_config_tx_path_8822e (BB_PATH_AB): OFDM + CCK TX antenna routing. The
-   * phy_reg table leaves 0x820 at its default (0x11111111 = path-A-only on [7:0]);
-   * the vendor runtime overrides it to the AB mapping. Without this the OFDM TX
-   * path is not routed to both antennas — on this module the 5 GHz output collapses
-   * (the antenna for 5 GHz is not on the default path) while 2 GHz still works.
-   *   OFDM 0x820[7:0]=0x33 (AB 2ss/1ss) + 0x1e2c[15:0]=0x0404
+  /* phydm_config_tx_path_8822e: OFDM + CCK TX antenna routing. The phy_reg
+   * table leaves 0x820 at its default (0x11111111 = 2ss/1ss both path-A on
+   * [7:0]); the vendor runtime overrides it. Kernel semantics
+   * (rtw_hal_runtime_trx_path_decision): 2SS rates drive both chains, 1SS
+   * rates (every HT MCS / legacy OFDM frame) drive ONE selected path — a
+   * 1ss-on-both mapping (0x33/0x0404) sums two chains and interacts with
+   * the DPDT pin-mux write in RtlJaguar3Device::InitWrite (MCS0 TX stalls,
+   * MCS7 delivery collapses). At 5 GHz 1SS selects path B: bench
+   * head-to-head on the BL-M8812EU2 it delivers ~2.5x the MCS7 frames of
+   * 1ss-A at ~3 dB better EVM. At 2.4 GHz 0x31 is the kernel's default
+   * (unvalidated on-air here — see docs/8822e-quirks.md, 2.4 GHz TX).
+   *   OFDM 0x820[7:0]=0x31/0x32 (2ss AB, 1ss A@2G / B@5G) + 0x1e2c=0x0400
    *   CCK  0x1a04[31:28]=0xc (AB) */
-  _device.phy_set_bb_reg(0x820, 0xff, 0x33);
-  _device.phy_set_bb_reg(0x1e2c, 0xffff, 0x0404);
+  _device.phy_set_bb_reg(0x820, 0xff, is_2g ? 0x31 : 0x32);
+  _device.phy_set_bb_reg(0x1e2c, 0xffff, 0x0400);
   _device.phy_set_bb_reg(0x1a04, 0xf0000000, 0xc);
 
   /* phydm_tx_triangular_shap_cfg_8822e: CFR + triangular TX shaping (both bands). */
@@ -903,6 +909,15 @@ void HalJaguar3::apply_bb_rf_agc_tables() {
       case 0xffe: std::this_thread::sleep_for(std::chrono::milliseconds(50)); return;
       case 0xfe:  std::this_thread::sleep_for(std::chrono::microseconds(100)); return;
       case 0xffff: std::this_thread::sleep_for(std::chrono::microseconds(1)); return;
+      case 0x0:
+        /* RF reg 0x0 (mode register) can't be written through the direct
+         * window — it silently no-ops (hardware-observed on the 8822e). The
+         * kernel's table load routes it through config_phydm_write_rf_reg,
+         * i.e. the legacy FON write port 0x1808 (A) / 0x4108 (B), addr in
+         * [27:20] (0 here), data in [19:0]. The radio tables DO carry reg-0
+         * entries (0x00010000 / 0x0003001F), so this branch is load-bearing. */
+        _device.rtw_write32(base == 0x4c00 ? 0x4108 : 0x1808, data & RFREG_MASK);
+        return;
       default:
         _device.phy_set_bb_reg(static_cast<uint16_t>(base + ((addr & 0xff) << 2)),
                                RFREG_MASK, data);

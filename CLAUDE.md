@@ -248,6 +248,12 @@ Knob-specific facts that aren't obvious from the field docs:
   `crc_err`/`icv_err` set — the entry point for the fused-FEC salvage layer
   (`docs/fused-fec.md`). Opt-in: a body with a corrupt tail is the worst-case
   input for an IP-stack consumer that didn't ask for it.
+- `DEVOURER_LA_CAPTURE=<trig>/<rate>M/dma0/port:0x880` (rxdemo) — one-shot
+  LA-mode IQ capture into the TX packet buffer (`src/LaCapture.h`): raw
+  complex baseband to a `DVLA` file, offline per-tone H(k) via
+  `tools/la_csi.py`. 8814A/8822B/8821C/8822C/8822E (+ 8821CE PCIe); the
+  8812A/8821A have no LA block. Sample packing, per-chip windows, trigger
+  semantics, validation scripts and wedge risks: `docs/la-capture.md`.
 - `DEVOURER_THERMAL_POLL_MS=N` emits `thermal` events from the RF
   0x42 meter: `raw` is 0..63 thermal units (~1.5–2 °C each, **not** absolute
   °C — hence bucketed status, not a fake temperature), `delta` = raw −

@@ -1,8 +1,10 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -13,12 +15,19 @@
 
 #include "BfReportDetect.h"
 #include "HopSchedule.h"
+#include "LaCapture.h"
 #include "LinkHealth.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
 #include "caps_event.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR2)
+#include "jaguar2/RtlJaguar2Device.h"
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR3)
+#include "jaguar3/RtlJaguar3Device.h"
 #endif
 #include "RtlAdapter.h"
 #include "SignalStop.h"
@@ -154,6 +163,196 @@ static const std::vector<uint32_t> g_csi_selectors = []() -> std::vector<uint32_
   return out;
 }();
 static constexpr int kCsiMaxFrames = 8;
+
+/* DEVOURER_LA_CAPTURE=<trig>[/<rate>M][/dma<N>][/port:0xNNN[.hdr<H>][.bit<B>]]
+ *                     [/edge<0|1>][/t<us>][/all]
+ * One-shot LA-mode (phydm logic-analyzer) IQ capture into the TX packet
+ * buffer, dumped to DEVOURER_LA_OUT (default /tmp/la_capture.bin) as a
+ * 32-byte "DVLA" header + little-endian u64 records (tools/la_decode.py).
+ * <trig>: manual (immediate) | crcok | crcfail | cca (MAC-event ADC
+ * triggers) | bb (BB dbg-port bit, needs /port+.bit) | mac (MAC dbg dump).
+ * <rate>M: 80M 40M 20M 10M 5M 2.5M 1.25M 160M (default 20M).
+ * Runs once from a worker thread after RX is live (+DEVOURER_LA_DELAY_MS,
+ * default 2000, so bring-up/calibration settles); DEVOURER_LA_MAX caps the
+ * readback sample count (readback is 2 control-reads per 8-byte sample —
+ * a full 128 KB window takes tens of seconds on USB2).
+ * Supported: 8814A / 8822B / 8821C(cut B+) / 8822C / 8822E. The 8812A and
+ * 8821A have no LA block (vendor support macro) — a probe there exits with
+ * la.timeout. BRICK RISK: same class as DEVOURER_RX_DUMP_CSI; the module
+ * save/restores every touched register and self-wedges loudly (la.wedged)
+ * if the chip stops responding. Not combinable with DEVOURER_RX_SWEEP /
+ * lockstep hopping (those paths exit before the capture thread starts). */
+static const char *g_la_spec = std::getenv("DEVOURER_LA_CAPTURE");
+static const char *g_la_out = []() {
+  const char *e = std::getenv("DEVOURER_LA_OUT");
+  return (e && *e) ? e : "/tmp/la_capture.bin";
+}();
+static const uint32_t g_la_delay_ms = []() -> uint32_t {
+  const char *e = std::getenv("DEVOURER_LA_DELAY_MS");
+  return (e && *e) ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 2000;
+}();
+static const uint32_t g_la_max = []() -> uint32_t {
+  const char *e = std::getenv("DEVOURER_LA_MAX");
+  return (e && *e) ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0;
+}();
+
+/* Parse the DEVOURER_LA_CAPTURE spec. Returns false (+logs) on a token it
+ * doesn't recognize. */
+static bool parse_la_spec(const char *spec, devourer::LaParams &p) {
+  std::string s = spec;
+  size_t pos = 0;
+  bool first = true;
+  while (pos <= s.size()) {
+    size_t slash = s.find('/', pos);
+    std::string tok = s.substr(
+        pos, slash == std::string::npos ? std::string::npos : slash - pos);
+    if (first) {
+      first = false;
+      if (tok == "manual") {
+        p.trig_mode = devourer::LaTrigMode::AdcMacTrig;
+        p.mac_sig = devourer::LaMacSig::Manual;
+      } else if (tok == "crcok") {
+        p.trig_mode = devourer::LaTrigMode::AdcMacTrig;
+        p.mac_sig = devourer::LaMacSig::CrcOk;
+      } else if (tok == "crcfail") {
+        p.trig_mode = devourer::LaTrigMode::AdcMacTrig;
+        p.mac_sig = devourer::LaMacSig::CrcFail;
+      } else if (tok == "cca") {
+        p.trig_mode = devourer::LaTrigMode::AdcMacTrig;
+        p.mac_sig = devourer::LaMacSig::Cca;
+      } else if (tok == "bb") {
+        p.trig_mode = devourer::LaTrigMode::BbTrig;
+      } else if (tok == "mac") {
+        p.trig_mode = devourer::LaTrigMode::MacDump;
+      } else {
+        return false;
+      }
+    } else if (!tok.empty()) {
+      if (tok.back() == 'M') {
+        static const char *rates[] = {"80M", "40M",  "20M",   "10M",
+                                      "5M",  "2.5M", "1.25M", "160M"};
+        bool hit = false;
+        for (int i = 0; i < 8; i++)
+          if (tok == rates[i]) {
+            p.smp_rate = static_cast<uint8_t>(i);
+            hit = true;
+          }
+        if (!hit)
+          return false;
+      } else if (tok.rfind("dma", 0) == 0) {
+        p.dma_type = static_cast<uint8_t>(std::strtoul(tok.c_str() + 3,
+                                                       nullptr, 0));
+      } else if (tok.rfind("port:", 0) == 0) {
+        /* port:0xNNN[.hdr<H>][.bit<B>] */
+        std::string rest = tok.substr(5);
+        size_t dot;
+        while ((dot = rest.rfind('.')) != std::string::npos) {
+          std::string sub = rest.substr(dot + 1);
+          rest.resize(dot);
+          if (sub.rfind("hdr", 0) == 0)
+            p.hdr_sel = static_cast<uint8_t>(std::strtoul(sub.c_str() + 3,
+                                                          nullptr, 0));
+          else if (sub.rfind("bit", 0) == 0)
+            p.trig_sel = static_cast<uint8_t>(std::strtoul(sub.c_str() + 3,
+                                                           nullptr, 0));
+          else
+            return false;
+        }
+        p.dbg_port = static_cast<uint32_t>(std::strtoul(rest.c_str(),
+                                                        nullptr, 0));
+      } else if (tok.rfind("edge", 0) == 0) {
+        p.edge = static_cast<uint8_t>(std::strtoul(tok.c_str() + 4,
+                                                   nullptr, 0)) & 1;
+      } else if (tok[0] == 't') {
+        p.trigger_time_us = static_cast<uint32_t>(std::strtoul(tok.c_str() + 1,
+                                                               nullptr, 0));
+      } else if (tok == "all") {
+        p.buff_all = true;
+      } else {
+        return false;
+      }
+    }
+    if (slash == std::string::npos)
+      break;
+    pos = slash + 1;
+  }
+  return true;
+}
+
+/* Dispatch la_capture to whichever generation this device is (research
+ * helpers are concrete-type methods, not on IRtlDevice). Returns an
+ * empty function when the generation has no LA support wired yet. */
+static std::function<devourer::LaResult(const devourer::LaParams &)>
+la_runner_for(IRtlDevice *dev) {
+#if defined(DEVOURER_HAVE_JAGUAR1)
+  if (auto *j1 = dynamic_cast<RtlJaguarDevice *>(dev))
+    return [j1](const devourer::LaParams &p) { return j1->la_capture(p); };
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR2)
+  if (auto *j2 = dynamic_cast<RtlJaguar2Device *>(dev))
+    return [j2](const devourer::LaParams &p) { return j2->la_capture(p); };
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR3)
+  if (auto *j3 = dynamic_cast<RtlJaguar3Device *>(dev))
+    return [j3](const devourer::LaParams &p) { return j3->la_capture(p); };
+#endif
+  (void)dev;
+  return {};
+}
+
+/* Run the one-shot capture, dump the buffer, emit la.* events. */
+static void run_la_capture(
+    const std::function<devourer::LaResult(const devourer::LaParams &)> &runner,
+    const devourer::LaParams &p) {
+  const auto t0 = std::chrono::steady_clock::now();
+  devourer::LaResult r = runner(p);
+  const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - t0)
+                           .count();
+  if (r.wedged) {
+    devourer::Ev(*g_ev, "la.wedged");
+    return;
+  }
+  if (r.no_la_block) {
+    devourer::Ev(*g_ev, "la.nosupport").f("ms", ms);
+    return;
+  }
+  if (r.poll_timeout) {
+    devourer::Ev(*g_ev, "la.timeout").f("ms", ms);
+    return;
+  }
+  if (r.ok) {
+    /* 32-byte self-describing header + LE u64 records (tools/la_decode.py). */
+    FILE *f = std::fopen(g_la_out, "wb");
+    if (f) {
+      uint8_t hdr[32] = {'D', 'V', 'L', 'A', 1 /*ver*/};
+      hdr[5] = static_cast<uint8_t>(p.trig_mode);
+      hdr[6] = static_cast<uint8_t>(p.mac_sig);
+      hdr[7] = p.smp_rate;
+      hdr[8] = p.dma_type;
+      hdr[9] = r.round_up ? 1 : 0;
+      const uint32_t n = static_cast<uint32_t>(r.samples.size());
+      std::memcpy(hdr + 12, &n, 4);
+      std::memcpy(hdr + 16, &r.finish_addr, 4);
+      std::memcpy(hdr + 20, &p.trigger_time_us, 4);
+      std::fwrite(hdr, 1, sizeof(hdr), f);
+      std::fwrite(r.samples.data(), 8, r.samples.size(), f);
+      std::fclose(f);
+    }
+    static const int kRateMhz10[] = {800, 400, 200, 100, 50, 25, 12, 1600};
+    devourer::Ev(*g_ev, "la.capture")
+        .f("ok", 1)
+        .f("samples", r.samples.size())
+        .hexf("finish", r.finish_addr, 4)
+        .f("wrap", r.round_up ? 1 : 0)
+        .f("rate_mhz10", kRateMhz10[p.smp_rate & 7])
+        .f("dma", p.dma_type)
+        .f("file", f ? g_la_out : "")
+        .f("ms", ms);
+  } else {
+    devourer::Ev(*g_ev, "la.capture").f("ok", 0).f("ms", ms);
+  }
+}
 
 /* DEVOURER_RX_ENERGY_MS=N: periodic frame-free RX energy / channel-busy
  * telemetry — the read side of DEVOURER_CW_TONE. Each interval emits one
@@ -645,6 +844,37 @@ int main() {
       }
     }
     logger->info("PCIe RX: {} ch={} bw={}", bdf, pch, (int)pwidth);
+    /* DEVOURER_LA_CAPTURE rides the same worker-thread pattern as the USB
+     * default path — the LA module is bus-neutral (RtlAdapter). */
+    std::thread pcie_la_thread;
+    if (g_la_spec && *g_la_spec) {
+      devourer::LaParams la_params;
+      la_params.max_samples = g_la_max;
+      if (!parse_la_spec(g_la_spec, la_params)) {
+        logger->error("DEVOURER_LA_CAPTURE: bad spec '{}'", g_la_spec);
+        return 1;
+      }
+      auto runner = la_runner_for(dev.get());
+      if (!runner) {
+        logger->error("DEVOURER_LA_CAPTURE: no LA support wired for this "
+                      "generation yet");
+        return 1;
+      }
+      logger->info("DEVOURER_LA_CAPTURE='{}' — one-shot capture after RX is "
+                   "live (+{} ms settle) -> {}", g_la_spec, g_la_delay_ms,
+                   g_la_out);
+      pcie_la_thread = std::thread([runner, la_params]() {
+        for (int w = 0; w < 10000 && !g_devourer_should_stop && g_rx_count == 0;
+             w += 50)
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        for (uint32_t s = 0; s < g_la_delay_ms && !g_devourer_should_stop;
+             s += 50)
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (g_devourer_should_stop)
+          return;
+        run_la_capture(runner, la_params);
+      });
+    }
     try {
       dev->Init(packetProcessor,
                 SelectedChannel{.Channel = static_cast<uint8_t>(pch),
@@ -652,8 +882,12 @@ int main() {
                                 .ChannelWidth = pwidth});
     } catch (const std::exception &e) {
       logger->error("PCIe bring-up failed: {}", e.what());
+      if (pcie_la_thread.joinable())
+        pcie_la_thread.join();
       return 1;
     }
+    if (pcie_la_thread.joinable())
+      pcie_la_thread.join();
     dev->Stop();
     return 0;
   }
@@ -1244,6 +1478,41 @@ int main() {
     return 0;
   }
 
+  /* DEVOURER_LA_CAPTURE: one-shot LA-mode IQ capture from a worker thread —
+   * waits for RX to be live (first frame, 10 s cap), then the settle delay,
+   * then runs the blocking arm → poll → readback sequence once. Register
+   * traffic shares libusb with the RX bulk loop like the energy/thermal
+   * pollers. */
+  std::thread la_thread;
+  if (g_la_spec && *g_la_spec) {
+    devourer::LaParams la_params;
+    la_params.max_samples = g_la_max;
+    if (!parse_la_spec(g_la_spec, la_params)) {
+      logger->error("DEVOURER_LA_CAPTURE: bad spec '{}'", g_la_spec);
+      return 1;
+    }
+    auto runner = la_runner_for(rtlDevice.get());
+    if (!runner) {
+      logger->error("DEVOURER_LA_CAPTURE: no LA support wired for this "
+                    "generation yet");
+      return 1;
+    }
+    logger->info("DEVOURER_LA_CAPTURE='{}' — one-shot capture after RX is "
+                 "live (+{} ms settle) -> {}", g_la_spec, g_la_delay_ms,
+                 g_la_out);
+    la_thread = std::thread([runner, la_params]() {
+      for (int w = 0; w < 10000 && !g_devourer_should_stop && g_rx_count == 0;
+           w += 50)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      for (uint32_t s = 0; s < g_la_delay_ms && !g_devourer_should_stop;
+           s += 50)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      if (g_devourer_should_stop)
+        return;
+      run_la_capture(runner, la_params);
+    });
+  }
+
   rtlDevice->Init(packetProcessor, SelectedChannel{
                                        .Channel = static_cast<uint8_t>(channel),
                                        .ChannelOffset = ch_offset,
@@ -1254,6 +1523,8 @@ int main() {
   energy_emitter_stop = true;
   if (energy_emitter.joinable())
     energy_emitter.join();
+  if (la_thread.joinable())
+    la_thread.join();
 
   /* Clean chip de-init before dropping the interface (card-disable PWR_SEQ), so
    * the adapter re-enumerates instead of hanging its USB core. */

@@ -14,6 +14,7 @@
 #include "SelectedChannel.h"
 #include "ChipVariant.h"
 #include "HalJaguar3.h"
+#include "LaCapture.h"
 #include "RadioManagementJaguar3.h"
 
 /* RtlJaguar3Device is the orchestrator for the Realtek "Jaguar3" 802.11ac family
@@ -186,6 +187,14 @@ public:
     return _hal.fw_boot_status();
   }
 
+  /* Research helper: one-shot LA-mode (phydm logic-analyzer) IQ capture into
+   * the TX packet buffer — JGR3 dialect (0x1ce4/0x1cf4 engine, 0x1c3c
+   * dbg-port mux), 128 KB window on both 8822C and 8822E. Serialized on
+   * _reg_mu against the coex runtime tick. Blocking; see LaCapture.h for
+   * the brick-risk caveats and the TX-quiesced contract. */
+  devourer::LaResult la_capture(const devourer::LaParams &p);
+  bool la_capture_wedged() const { return _la && _la->is_wedged(); }
+
   bool should_stop = false;
 
 private:
@@ -204,6 +213,8 @@ private:
   jaguar3::ChipVariant _variant;
   int _xtal_cap = -1; /* current crystal-cap code (SetXtalCap) */
   jaguar3::HalJaguar3 _hal;
+  /* Lazy LA-mode capture helper (la_capture). */
+  std::unique_ptr<devourer::LaCapture> _la;
   jaguar3::RadioManagementJaguar3 _radioManagement;
   SelectedChannel _channel{};
   Action_ParsedRadioPacket _packetProcessor = nullptr;

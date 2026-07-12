@@ -1780,3 +1780,22 @@ uint32_t RtlJaguarDevice::read_bb_dbgport(uint32_t selector) {
 bool RtlJaguarDevice::bb_dbgport_wedged() const {
   return _bb_dbgport && _bb_dbgport->is_wedged();
 }
+
+devourer::LaResult RtlJaguarDevice::la_capture(const devourer::LaParams &p) {
+  if (!_la) {
+    const bool is8814 = _eepromManager->version_id.ICType == CHIP_8814A;
+    devourer::LaRegs regs;
+    if (is8814) {
+      regs = devourer::la_regs_8814a();
+    } else {
+      /* 8812A/8821A are NOT in the vendor's PHYDM_IC_SUPPORT_LA_MODE and
+       * have no buffer-geometry case — this probe uses the 8814A map so a
+       * researcher can confirm the block's absence (expect la.timeout). */
+      regs = devourer::la_regs_8812a_experimental();
+      _logger->warn("la_capture: vendor-unsupported on this die (8812A/8821A "
+                    "lack the LA block) — probe only, expect a poll timeout");
+    }
+    _la = std::make_unique<devourer::LaCapture>(_device, _logger, regs);
+  }
+  return _la->run(p);
+}

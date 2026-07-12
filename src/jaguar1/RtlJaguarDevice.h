@@ -13,6 +13,7 @@
 
 #include "logger.h"
 #include "BbDbgportReader.h"
+#include "LaCapture.h"
 #include "HalModule.h"
 #include "IRtlDevice.h"
 #include "SelectedChannel.h"
@@ -308,6 +309,14 @@ public:
   uint32_t read_bb_dbgport(uint32_t selector);
   bool bb_dbgport_wedged() const;
 
+  /* Research helper: one-shot LA-mode (phydm logic-analyzer) IQ capture
+   * into the TX packet buffer — vendor-supported on the 8814A only
+   * (64 KB window at 0x30000); on 8812A/8821A this is a probe with the
+   * 8814A map (no LA block on those dies — expect poll_timeout). See
+   * LaCapture.h for the brick-risk caveats and the TX-quiesced contract. */
+  devourer::LaResult la_capture(const devourer::LaParams &p);
+  bool la_capture_wedged() const { return _la && _la->is_wedged(); }
+
 private:
   void StartWithMonitorMode(SelectedChannel selectedChannel);
   bool NetDevOpen(SelectedChannel selectedChannel);
@@ -358,6 +367,8 @@ private:
   std::atomic<uint32_t> _therm_snap{0};
 
   std::unique_ptr<devourer::BbDbgportReader> _bb_dbgport;
+  /* Lazy LA-mode capture helper (la_capture). */
+  std::unique_ptr<devourer::LaCapture> _la;
 };
 
 /* Backwards-compatibility alias. External callers using the old name still

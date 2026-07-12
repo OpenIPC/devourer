@@ -1011,6 +1011,26 @@ devourer::EfuseStability RtlJaguar2Device::ProbeEfuseStability(int reads) {
   return st;
 }
 
+devourer::LaResult RtlJaguar2Device::la_capture(const devourer::LaParams &p) {
+  if (!_la) {
+    devourer::LaRegs regs = (_variant == jaguar2::ChipVariant::C8821C)
+                                ? devourer::la_regs_8821c()
+                                : devourer::la_regs_8822b();
+    if (_variant == jaguar2::ChipVariant::C8821C &&
+        _hal.chip_version().cut == 0) {
+      /* Vendor phydm_la_clk_en skips the LA clock on 8821C cut A; without
+       * it the engine may never complete — expect a poll timeout. */
+      regs.needs_la_clk = false;
+      _logger->warn("la_capture: 8821C cut A — LA clock bit unavailable, "
+                    "capture may time out");
+    }
+    _la = std::make_unique<devourer::LaCapture>(_device, _logger, regs);
+  }
+  /* Serialize against the calibration/thermal register windows. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  return _la->run(p);
+}
+
 devourer::ThermalStatus RtlJaguar2Device::GetThermalStatus() {
   devourer::ThermalStatus t;
   if (!_brought_up)

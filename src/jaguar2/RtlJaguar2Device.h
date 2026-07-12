@@ -19,6 +19,7 @@
 #include "HalmacJaguar2Fw.h"
 #include "ChipVariant.h"
 #include "Jaguar2Calibration.h"
+#include "LaCapture.h"
 
 /* RtlJaguar2Device is the orchestrator for the Realtek "Jaguar2" 802.11ac family
  * — RTL8822BU (chip 8822B, 2T2R, USB). It is the Jaguar2 sibling of
@@ -186,6 +187,14 @@ public:
     return _fw.boot_status();
   }
 
+  /* Research helper: one-shot LA-mode (phydm logic-analyzer) IQ capture into
+   * the TX packet buffer — 8822B (128 KB window) / 8821C (32 KB, LA clock
+   * gated off on cut A like the vendor). Lazy-constructs the shared
+   * LaCapture with this variant's register map. Blocking; see LaCapture.h
+   * for the brick-risk caveats and the TX-quiesced contract. */
+  devourer::LaResult la_capture(const devourer::LaParams &p);
+  bool la_capture_wedged() const { return _la && _la->is_wedged(); }
+
 private:
   /* Golden-init replay (DEVOURER_REPLAY_WSEQ) — applied at the end of both
    * Init and InitWrite (see the definition for semantics). */
@@ -210,6 +219,8 @@ private:
   int _xtal_cap = -1; /* current crystal-cap code (SetXtalCap) */
   devourer::CfoTracker _cfo; /* closed-loop CFO tracker (DEVOURER_CFO_TRACK) */
   jaguar2::HalJaguar2 _hal;
+  /* Lazy LA-mode capture helper (la_capture). */
+  std::unique_ptr<devourer::LaCapture> _la;
   jaguar2::HalmacJaguar2MacInit _macinit;
   jaguar2::HalmacJaguar2Fw _fw;
   SelectedChannel _channel{};

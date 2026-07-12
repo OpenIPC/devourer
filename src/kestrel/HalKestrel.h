@@ -102,6 +102,9 @@ private:
   void bb_rmw(uint32_t addr, uint32_t mask, uint32_t val); /* masked BB write */
   uint32_t rf_read(uint8_t path, uint8_t rf_addr);         /* DDV RF read */
   void rf_write(uint8_t path, uint8_t rf_addr, uint32_t val); /* DDV RF write */
+  /* DAV (a-die) RF write via the BB 0x370 serial command (full 20-bit only,
+   * which is all the channel path needs). */
+  void rf_write_dav(uint8_t path, uint8_t rf_addr, uint32_t val);
   void bb_reset_all();
   /* M2a DMAC sub-inits (trxcfg.c). */
   bool dle_init_nic();

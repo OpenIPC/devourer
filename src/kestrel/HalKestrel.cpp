@@ -639,6 +639,27 @@ void HalKestrel::rf_write(uint8_t path, uint8_t rf_addr, uint32_t val) {
   delay_us(1);
 }
 
+void HalKestrel::rf_write_dav(uint8_t path, uint8_t rf_addr, uint32_t val) {
+  /* halbb_write_rf_reg_8852b_a: wait for the SI to idle (0x174c w/r busy),
+   * then post a full-20-bit write command to 0x370 and confirm the readback. */
+  for (int i = 0; i < 500; ++i) {
+    uint32_t st = _device.rtw_read32_wide(0x174c + BB_WIN);
+    if (!((st >> 24) & 0x1) && !((st >> 25) & 0x1))
+      break;
+    delay_us(1);
+  }
+  const uint32_t w = (static_cast<uint32_t>(path & 0x7) << 28) |
+                     (static_cast<uint32_t>(rf_addr & 0xff) << 20) |
+                     (val & 0xfffffu); /* b_msk_en=0 (full mask) */
+  for (int i = 0; i < 500; ++i) {
+    _device.rtw_write32_wide(0x370 + BB_WIN, w);
+    delay_us(5);
+    if (_device.rtw_read32_wide(0x370 + BB_WIN) == w)
+      break;
+  }
+  delay_us(5);
+}
+
 void HalKestrel::bb_reset_all() {
   /* halbb_bb_reset_all_8852b (BB regs over wIndex=1; 0xce40 is MAC/CMAC). */
   bb_rmw(0x2344, 1u << 31, 1); /* PD disable */
@@ -685,7 +706,9 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
   bb_rmw(0x700, 1u << 5, is_2g ? 1 : 0);
   bb_rmw(0x2344, 1u << 31, is_2g ? 0 : 1);
 
-  /* --- RF channel: RF18 setting for path A/B (DDV window) --- */
+  /* --- RF channel: RF18 setting for path A/B. halrf_ch_setting writes RF18
+   * to BOTH the a-die (DAV, serial via 0x370) and d-die (DDV, direct window),
+   * then re-latches via 0xcf. The synth needs the DAV write to lock. --- */
   for (uint8_t path = 0; path < 2; ++path) {
     uint32_t rf18 = rf_read(path, 0x18);
     rf18 &= ~0x3e3ffu;      /* clear [17:16],[9:8],[7:0] */
@@ -693,7 +716,8 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
     if (!is_2g)
       rf18 |= (1u << 16) | (1u << 8); /* 5G */
     rf18 = (rf18 & 0xf0fffu) | (1u << 12);
-    rf_write(path, 0x18, rf18);
+    rf_write_dav(path, 0x18, rf18); /* a-die synth */
+    rf_write(path, 0x18, rf18);     /* d-die */
     rf_write(path, 0xcf, rf_read(path, 0xcf) & ~1u); /* re-latch */
     rf_write(path, 0xcf, rf_read(path, 0xcf) | 1u);
   }

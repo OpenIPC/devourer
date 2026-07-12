@@ -129,6 +129,8 @@ private:
   void ptcl_init();
   void cmac_dma_init();
   void usb_rx_agg_cfg();
+  void coex_mac_init();                    /* LTE/BT coex bring-up */
+  bool write_lte(uint32_t offset, uint32_t val); /* LTE-coex indirect write */
   /* Physical efuse read loop (read_hw_efuse, DDV bank) into `phys`. */
   bool read_phys_efuse(uint8_t *phys, uint32_t size);
   void enable_efuse_pwr_cut();

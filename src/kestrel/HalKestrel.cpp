@@ -774,6 +774,34 @@ void HalKestrel::ptcl_init() {
   _device.rtw_write32(r::R_AX_AMPDU_AGG_LIMIT, a);
 }
 
+bool HalKestrel::write_lte(uint32_t offset, uint32_t val) {
+  /* mac_write_lte_8852b (non-offload path): wait for the LTE interface ready
+   * bit, then post the write via WDATA + CTRL. */
+  for (uint32_t cnt = 1000; cnt != 0; --cnt) {
+    if (_device.rtw_read8(r::R_AX_LTE_CTRL + 3) & (1u << 5))
+      break;
+    delay_us(50);
+    if (cnt == 1) {
+      _logger->error("Kestrel coex: LTE interface not ready");
+      return false;
+    }
+  }
+  _device.rtw_write32(r::R_AX_LTE_WDATA, val);
+  _device.rtw_write32(r::R_AX_LTE_CTRL, r::LTE_WRITE_CMD | offset);
+  return true;
+}
+
+void HalKestrel::coex_mac_init() {
+  /* coex_mac_init_8852b: disable LTE-coex (CTRL + CTRL_2 = 0), then set the
+   * SDIO-ctrl coex bit. On the WiFi+BT combo die the coex block otherwise
+   * arbitrates the shared front end. */
+  write_lte(r::R_AX_LTECOEX_CTRL, 0);
+  uint8_t val = _device.rtw_read8(r::R_AX_SYS_SDIO_CTRL + 3);
+  write_lte(r::R_AX_LTECOEX_CTRL_2, 0);
+  _device.rtw_write8(r::R_AX_SYS_SDIO_CTRL + 3,
+                     static_cast<uint8_t>(val | (1u << 2)));
+}
+
 bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   /* set_enable_bb_rf (hw.c) — release the BB from reset + enable the RF/AFE
    * clocks. Without this the BB is held in reset and silently drops every
@@ -1060,8 +1088,10 @@ bool HalKestrel::trx_cmac_rx_init() {
   ptcl_init();
   cmac_dma_init();
   usb_rx_agg_cfg();
+  /* mac_trx_init tail: coex_mac_init (LTE/BT coex) after dmac+cmac. */
+  coex_mac_init();
   _logger->info("Kestrel TRX: full CMAC init done (sched+addrcam+fltr+cca+nav+"
-                "sr+tmac+trxptcl+rmac+com+ptcl+dma)");
+                "sr+tmac+trxptcl+rmac+com+ptcl+dma+coex)");
   return true;
 }
 

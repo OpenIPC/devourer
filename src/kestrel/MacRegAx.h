@@ -613,6 +613,16 @@ constexpr uint32_t ADDR_CAM_SERCH_RANGE = 0x7f;
 constexpr uint32_t B_AX_ADDR_CAM_EN = 1u << 0;
 constexpr uint32_t B_AX_ADDR_CAM_CLR = 1u << 8;
 
+/* ---- coex_mac_init (coex_8852b.c) — LTE/BT coexistence bring-up on the
+ * WiFi+BT combo die: disable LTE-coex, set the SDIO-ctrl coex bit. ---- */
+constexpr uint16_t R_AX_LTE_CTRL = 0xDAF0;
+constexpr uint16_t R_AX_LTE_WDATA = 0xDAF4;
+constexpr uint32_t R_AX_LTECOEX_CTRL = 0x38;   /* LTE-space indirect offset */
+constexpr uint32_t R_AX_LTECOEX_CTRL_2 = 0x3C; /* LTE-space indirect offset */
+constexpr uint16_t R_AX_SYS_SDIO_CTRL = 0x0070;
+constexpr uint32_t LTE_WRITE_CMD = 0xC00F0000; /* | offset */
+constexpr uint32_t B_AX_LTE_MUX_CTRL_PATH = 1u << 26; /* R_AX_LTE_CTRL+3 bit5 rdy */
+
 /* SET_CLR_WORD(orig, val, FIELD) — replace FIELD bits with val. */
 inline uint32_t set_clr_word(uint32_t orig, uint32_t val, uint32_t msk,
                              uint8_t sh) {

@@ -52,10 +52,28 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
   _rx_wanted = true;
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
   /* Tune the channel/bandwidth (5/10 MHz ChannelWidth re-clocks to narrowband),
-   * then run IQK calibration (it reads RF18 for the tuned channel). */
+   * then run IQK calibration (it reads RF18 for the tuned channel).
+   *
+   * The 8822C's IQK must run with the RF at 20 MHz: the vendor kernel only
+   * ever calibrates at its bring-up bandwidth and carries the coefficients
+   * across `iw set freq ... 80` (usbmon: the 20->80 transition contains no
+   * IQK-engine traffic), and devourer's IQK executed AT 80 MHz loads RxIQC
+   * coefficients that leave the receiver unable to sync ANY frame
+   * (hardware-bisected: SKIP_IQK alone revives 80 MHz RX). Calibrate at
+   * 20 MHz on the target channel, then retune to the requested width. */
+  const bool iqk_at_20 = _variant == jaguar3::ChipVariant::C8822C &&
+                         (channel.ChannelWidth == CHANNEL_WIDTH_40 ||
+                          channel.ChannelWidth == CHANNEL_WIDTH_80);
   _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
-                                      channel.ChannelWidth);
-  _hal.run_iqk(channel);
+                                      iqk_at_20 ? CHANNEL_WIDTH_20
+                                                : channel.ChannelWidth);
+  SelectedChannel iqk_ch = channel;
+  if (iqk_at_20)
+    iqk_ch.ChannelWidth = CHANNEL_WIDTH_20; /* IQK command set follows the RF */
+  _hal.run_iqk(iqk_ch);
+  if (iqk_at_20)
+    _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
+                                        channel.ChannelWidth);
   _hal.enable_rx_path(); /* RF into RX mode (IGI toggle) — must follow channel set */
   _hal.config_rfe(channel.Channel); /* 8822e RFE/PAPE antenna-switch pins */
   _hal.config_channel_8822e(channel.Channel); /* 8822e band TX scaling/backoff + shaping */
@@ -107,6 +125,14 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
     SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
   apply_replay_wseq(); /* DEVOURER_REPLAY_WSEQ — end of both bring-ups,
                         * like Jaguar2's. */
+  if (_cfg.debug.bb_dump) {
+    /* Same MAC+BB end-state dump as InitWrite's, at the end of the RX
+     * bring-up (kernel rtw_proc read_reg diffing). */
+    for (uint32_t a = 0x000; a <= 0x4ffc; a += 0x10)
+      _logger->info("BBDUMP 0x{:04x} 0x{:08x} 0x{:08x} 0x{:08x} 0x{:08x}", a,
+                    _device.rtw_read32(a), _device.rtw_read32(a + 4),
+                    _device.rtw_read32(a + 8), _device.rtw_read32(a + 12));
+  }
   StartRxLoop(std::move(packetProcessor));
 }
 
@@ -463,9 +489,20 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   const bool want_rx = _cfg.rx.enable_with_tx;
   _rx_wanted = want_rx;
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
+  /* 8822C at 40/80 MHz: IQK at 20 MHz, then retune — see Init. */
+  const bool iqk_at_20 = _variant == jaguar3::ChipVariant::C8822C &&
+                         (channel.ChannelWidth == CHANNEL_WIDTH_40 ||
+                          channel.ChannelWidth == CHANNEL_WIDTH_80);
   _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
-                                      channel.ChannelWidth);
-  _hal.run_iqk(channel);
+                                      iqk_at_20 ? CHANNEL_WIDTH_20
+                                                : channel.ChannelWidth);
+  SelectedChannel iqk_ch = channel;
+  if (iqk_at_20)
+    iqk_ch.ChannelWidth = CHANNEL_WIDTH_20; /* IQK command set follows the RF */
+  _hal.run_iqk(iqk_ch);
+  if (iqk_at_20)
+    _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
+                                        channel.ChannelWidth);
   if (want_rx)
     _hal.enable_rx_path(); /* RF into RX mode — same slot as the Init path */
   _hal.dpk_force_bypass_8822e(); /* 8822e rfe 21/22: kernel bypasses DPK (after IQK) */

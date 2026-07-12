@@ -1327,13 +1327,21 @@ def run_encoding_matrix(
     tmpdir: Path,
     kh: KernelHost,
     sniffer_iface: Optional[str] = None,
+    modes: Optional[list[tuple[str, str]]] = None,
 ) -> dict[tuple[str, str, str], CellResult]:
     """For one ordered (TX, RX) pair, iterate every driver-mode × encoding
-    combination. Returns dict keyed by (tx_side, rx_side, encoding_label)."""
+    combination. Returns dict keyed by (tx_side, rx_side, encoding_label).
+
+    `modes` (from --modes) restricts the driver-mode rows — e.g.
+    [("devourer", "devourer")] for LDPC/STBC truth-table runs, where the
+    kernel rows are non-authoritative anyway (the kernel TX path strips
+    those radiotap bits) and just double the runtime."""
     results: dict[tuple[str, str, str], CellResult] = {}
-    total = len(FULL_MATRIX_MODES) * len(ENCODING_COMBOS)
+    run_modes = [m for m in FULL_MATRIX_MODES
+                 if modes is None or (m[0], m[1]) in modes]
+    total = len(run_modes) * len(ENCODING_COMBOS)
     idx = 0
-    for tx_side, rx_side, _label in FULL_MATRIX_MODES:
+    for tx_side, rx_side, _label in run_modes:
         for enc_label, enc in ENCODING_COMBOS:
             idx += 1
             cell_hdr = (
@@ -1385,6 +1393,9 @@ def emit_encoding_markdown(
     out.append(header)
     out.append(sep)
     for tx_side, rx_side, _ in FULL_MATRIX_MODES:
+        # Skip driver-mode rows the run didn't cover (--modes filter).
+        if not any(k[0] == tx_side and k[1] == rx_side for k in results):
+            continue
         row = f"| {tx_side[0]}/{rx_side[0]} |"
         for enc_label, _ in ENCODING_COMBOS:
             r = results.get((tx_side, rx_side, enc_label))
@@ -1482,6 +1493,16 @@ def main():
              "asymmetries like the RTL8821AU LDPC-RX-no limitation.",
     )
     ap.add_argument(
+        "--modes",
+        default="",
+        help="comma list of driver-mode rows to run in --encoding-matrix, "
+             "each as txside:rxside (e.g. 'devourer:devourer' or "
+             "'devourer:devourer,devourer:kernel'). Default: all 4. The "
+             "kernel-TX rows are never authoritative for LDPC/STBC (that "
+             "driver strips those radiotap bits), so truth-table runs want "
+             "--modes devourer:devourer.",
+    )
+    ap.add_argument(
         "--vm-name",
         default=os.environ.get("DEVOURER_VM_NAME", ""),
         help="libvirt domain to run kernel cells in (env: DEVOURER_VM_NAME). "
@@ -1563,11 +1584,24 @@ def main():
         print(f"  RX adapter: {rx_dut.vidpid} ({rx_dut.chipset}) at {rx_dut.sysfs_id}")
         print(f"Kernel host: "
               f"{'VM ' + kh.vm_name + ' (' + kh.ssh_target + ')' if kh.is_remote else 'local'}")
-        n_cells = len(FULL_MATRIX_MODES) * len(ENCODING_COMBOS)
+        modes: Optional[list[tuple[str, str]]] = None
+        if args.modes:
+            valid = {(m[0], m[1]) for m in FULL_MATRIX_MODES}
+            modes = []
+            for tok in args.modes.split(","):
+                parts = tok.strip().split(":")
+                if len(parts) != 2 or (parts[0], parts[1]) not in valid:
+                    sys.stderr.write(
+                        f"--modes: bad entry {tok!r} (want txside:rxside, "
+                        f"sides devourer|kernel)\n")
+                    sys.exit(2)
+                modes.append((parts[0], parts[1]))
+        n_modes = len(modes) if modes is not None else len(FULL_MATRIX_MODES)
+        n_cells = n_modes * len(ENCODING_COMBOS)
         print(f"Channel: {args.channel}   Duration/cell: {args.duration}s   "
               f"Pass threshold: ≥{args.pass_threshold} hits")
         print(f"Total cells: {n_cells} "
-              f"({len(FULL_MATRIX_MODES)} driver modes × "
+              f"({n_modes} driver modes × "
               f"{len(ENCODING_COMBOS)} encoding combos)\n")
 
         kh.release_all_known_duts([tx_dut, rx_dut])
@@ -1580,6 +1614,7 @@ def main():
                 threshold=args.pass_threshold,
                 tmpdir=tmpdir, kh=kh,
                 sniffer_iface=args.sniffer_iface or None,
+                modes=modes,
             )
             print()
             md = emit_encoding_markdown(

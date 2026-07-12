@@ -131,7 +131,9 @@ cells read 0 on every channel (`aircrack-ng/88XXau` doesn't emit host-pushed
 
 Layered modes: `--full-matrix` (every ordered DUT pair × 4 driver combos),
 `--encoding-matrix --tx-pid --rx-pid` (radiotap encoding combos; the kernel-TX
-rows are not authoritative for LDPC/STBC — that driver strips those bits),
+rows are not authoritative for LDPC/STBC — that driver strips those bits —
+so truth-table runs add `--modes devourer:devourer`; per-cell `rx.txhit`
+events carry the decoded `rate`/`ldpc`/`stbc` as proof of what flew),
 `--sniffer-iface IFACE` (3rd-adapter capture, intended for AR9271).
 `--keep-logs` puts per-cell logs at `/tmp/devourer-regress-last/`. Full
 semantics: `tests/README.md`.
@@ -191,6 +193,16 @@ transport / chip-id), TX/RX chain counts, the composed `GetTxCaps` +
 characterized frequency spans, and feature flags (per-packet TX power,
 narrowband, fast retune, per-chain RSSI) — resolved at construction, thread-safe,
 callable pre-`Init`. The demos emit it as the `adapter.caps` JSONL event.
+The `ldpc_rx_ht`/`ldpc_rx_vht`/`ldpc_rx_flag` flags are the bench-derived LDPC
+RX truth table (deliberately NOT the vendor `HAL_DEF_RX_LDPC`, which is
+2013-era interop-advertisement policy — all-false on Jaguar1 while the 8812A
+demonstrably decodes LDPC): every supported chip decodes HT+VHT LDPC except
+the 8821A (VHT-LDPC RX broken — field-reported, HT fine), and the 8814A
+decodes LDPC but reports no per-frame flag (`ldpc_rx_flag=0`,
+`RxAtrib.ldpc` reads 0). LDPC TX is per-packet radiotap-driven on all
+generations (`TxCaps.ldpc_ok`); bench-measured coding gain ≈ +3 dB at the
+10%-delivery crossing, MCS7/20 MHz (`tests/ldpc_waterfall.sh`) — prefer
+`/LDPC` on any link whose RX side can decode it.
 `GetActiveRxPaths()` is the live companion: a best-effort per-chain-RSSI estimate
 of which antennas actually carry signal (needs an RX loop + traffic). The 5 GHz
 synthesizer tunes past the UNII channels (extended range ~5080–6165 MHz, chan up

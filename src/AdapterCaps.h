@@ -111,6 +111,20 @@ struct AdapterCaps {
   BandRange tune_2g4, tune_5g;            /* synthesizer-tunable spans */
   BandRange characterized_2g4, characterized_5g; /* txpwr-table-backed spans */
 
+  /* --- FEC RX (bench-derived truth table — deliberately NOT the vendor
+   * driver's HAL_DEF_RX_LDPC, which is 2013-era interop-advertisement policy:
+   * all-false on Jaguar1 while the 8812A baseband demonstrably decodes LDPC
+   * on-air. The TX side lives in TxCaps.ldpc_ok. HT and VHT are separate
+   * decoder paths in silicon, so the flags split: the RTL8821A field failure
+   * ("PixelPilot can't RX LDPC from Eachine Sphere Link") is VHT-only. --- */
+  bool ldpc_rx_ht = false;  /* baseband decodes LDPC-coded HT PPDUs */
+  bool ldpc_rx_vht = false; /* baseband decodes LDPC-coded VHT PPDUs */
+  /* Per-frame LDPC *reporting*: RxAtrib.ldpc is populated (RX-descriptor bit
+   * on the 8812A die, PHY-status byte7[5] on Jaguar2/3). False on the 8814A —
+   * it decodes LDPC fine but the vendor wired no per-frame indicator (rxdesc
+   * offsets 16/20 unparsed, and the Jaguar1 phy_status_rpt has no ldpc bit). */
+  bool ldpc_rx_flag = false;
+
   /* --- feature flags --- */
   bool per_packet_txpower = false; /* Jaguar2 descriptor TXPWR_OFSET LUT only */
   bool narrowband_ok = false;      /* 5/10 MHz re-clock (Jaguar2/Jaguar3) */

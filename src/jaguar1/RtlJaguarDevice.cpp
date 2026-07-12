@@ -1555,21 +1555,41 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
   devourer::set_standard_freq_ranges(c);
 
   /* Identity from the EFUSE version-id. The die name is refined by the RF-type:
-   * the 8812 die shipped as both the 2T2R 8812AU and the 1T1R 8811AU cut. */
+   * the 8812 die shipped as both the 2T2R 8812AU and the 1T1R 8811AU cut.
+   *
+   * LDPC RX truth per die (bench: encoding-matrix devourer↔devourer cells,
+   * HT-LDPC / HT-LDPC+STBC / VHT-LDPC at full delivery, RX-side ldpc flag
+   * cross-checked where the chip reports one):
+   *  - 8812A (incl. 8811A cut): decodes HT+VHT LDPC, reports the RX-desc bit.
+   *  - 8814A: decodes HT+VHT LDPC but has NO per-frame indicator (vendor
+   *    rxdesc parse leaves offsets 16/20 empty; the Jaguar1 phy-status report
+   *    carries no ldpc bit) — RxAtrib.ldpc reads 0 on LDPC frames.
+   *  - 8821A: VHT-LDPC RX broken in the field (Eachine Sphere Link →
+   *    PixelPilot reports); the HT decoder is a separate silicon path and
+   *    passed a prior HT-LDPC bench cell. */
   switch (_eepromManager->version_id.ICType) {
   case CHIP_8814A:
     c.chip_name = "RTL8814A";
     c.marketing_names = "RTL8814AU";
     c.chip_id = 0x08;
     c.variant = "8814A";
+    c.ldpc_rx_ht = true;
+    c.ldpc_rx_vht = true;
+    c.ldpc_rx_flag = false;
     break;
   case CHIP_8821:
     c.chip_name = "RTL8821A";
     c.marketing_names = "RTL8821AU";
     c.chip_id = 0x05;
     c.variant = "8821A";
+    c.ldpc_rx_ht = true;
+    c.ldpc_rx_vht = false;
+    c.ldpc_rx_flag = true;
     break;
   default: /* CHIP_8812 */
+    c.ldpc_rx_ht = true;
+    c.ldpc_rx_vht = true;
+    c.ldpc_rx_flag = true;
     if (_eepromManager->version_id.RFType == RF_TYPE_1T1R) {
       c.chip_name = "RTL8811A";
       c.marketing_names = "RTL8811AU/RTL8811AR";

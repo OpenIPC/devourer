@@ -740,6 +740,8 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
   const uint32_t bb_4738 = _device.rtw_read32_wide(0x4738 + BB_WIN);
   const uint32_t rf18a = rf_read(0, 0x18);
   const uint32_t rf18b = rf_read(1, 0x18);
+  const uint32_t rf00a = rf_read(0, 0x00); /* RF chip reg (radioa sets it) */
+  _logger->info("Kestrel RX-diag: RF00a=0x{:05x}", rf00a);
   const uint32_t hci_fen = _device.rtw_read32(0x8380);        /* HCI_FUNC_EN */
   const uint8_t rcr = _device.rtw_read8(0xCE00);              /* RCR CH_EN */
   const uint32_t rxstate = _device.rtw_read32(0xCEF0);       /* RX_STATE_MON */

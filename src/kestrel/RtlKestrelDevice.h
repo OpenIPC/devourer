@@ -70,6 +70,10 @@ public:
    * drive the full sequence once M1b+M2 land). Returns false on failure. */
   bool PowerOnAndReadEfuse(kestrel::EfuseInfo &out);
 
+  /* M1b bring-up for kestrelprobe's "fw" stage: power on, read efuse, then
+   * download firmware. Returns false at the first failing step. */
+  bool PowerOnEfuseAndFw(kestrel::EfuseInfo &out);
+
   kestrel::HalKestrel &hal() { return _hal; }
 
 private:

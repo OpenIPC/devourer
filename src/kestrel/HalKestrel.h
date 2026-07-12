@@ -42,6 +42,20 @@ public:
    * Must run after power_on (the efuse block is gated by the power sequence). */
   bool read_efuse(EfuseInfo &out, std::array<uint8_t, 1536> *raw_phys = nullptr);
 
+  /* Firmware download (M1b): hci_func_en + DLE/HFC pre-init + FWDL of the
+   * cut-appropriate NICCE image. Must run after power_on. `cut` is the chip
+   * cut version (from ReadChipInfo / R_AX_SYS_CFG1[15:12]). */
+  bool download_firmware(uint8_t cut);
+
+  /* Chip cut version, read fresh from R_AX_SYS_CFG1[15:12]. */
+  uint8_t read_cut();
+
+  /* Multi-secure-section key index (__mss_index): reads physical efuse
+   * 0x5EC/0x5ED and matches the OTP key tables. Selects which appended
+   * signature the secure firmware image uses. 0 for a stock (uncustomized)
+   * chip. Used by the FWDL security-section handling. */
+  uint8_t read_mss_index();
+
   ChipVariant variant() const { return _variant; }
 
 private:

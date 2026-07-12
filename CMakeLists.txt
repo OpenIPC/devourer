@@ -320,6 +320,7 @@ if(DEVOURER_KESTREL)
         src/kestrel/KestrelUsbIds.h
         src/kestrel/MacRegAx.h
         src/kestrel/HalKestrel.cpp src/kestrel/HalKestrel.h
+        src/kestrel/KestrelFw.cpp src/kestrel/KestrelFw.h
         src/kestrel/RtlKestrelDevice.cpp src/kestrel/RtlKestrelDevice.h)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_KESTREL=1)
 endif()

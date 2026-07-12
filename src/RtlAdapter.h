@@ -114,6 +114,13 @@ public:
   uint8_t first_bulk_out_ep() const {
     return _usb.bulk_out_eps.empty() ? 0x02 : _usb.bulk_out_eps[0];
   }
+  /* Nth discovered bulk-OUT endpoint in descriptor order (0-based), or 0 if
+   * out of range. The Kestrel FWDL/H2C path needs the CH12 endpoint, which the
+   * vendor USB layer maps as BULKOUTID2 = the 3rd bulk-OUT (RtOutPipe[2]). */
+  uint8_t nth_bulk_out_ep(size_t n) const {
+    return n < _usb.bulk_out_eps.size() ? _usb.bulk_out_eps[n] : 0;
+  }
+  size_t bulk_out_ep_count() const { return _usb.bulk_out_eps.size(); }
 
   bool AutoloadFailFlag = false;
   bool EepromOrEfuse = false;

@@ -5,6 +5,7 @@
 #include <thread>
 #include <utility>
 
+#include "KestrelFw.h"
 #include "MacRegAx.h"
 
 namespace kestrel {
@@ -74,8 +75,7 @@ bool HalKestrel::usb_pre_init() {
    * HCI DMA enables. Bulk-out endpoint pause bookkeeping is skipped — the
    * host owns endpoint selection in userspace. */
   set32(r::R_AX_USB_HOST_REQUEST_2, r::B_AX_R_USBIO_MODE);
-  /* R_AX_USB_WLAN0_1: clear USBRX_RST (bit 5) + USBTX_RST (bit 6). */
-  clr32(r::R_AX_USB_WLAN0_1, (1u << 5) | (1u << 6));
+  clr32(r::R_AX_USB_WLAN0_1, r::B_AX_USBRX_RST | r::B_AX_USBTX_RST);
   clr32(r::R_AX_HCI_FUNC_EN, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
   set32(r::R_AX_HCI_FUNC_EN, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
   return true;
@@ -265,6 +265,47 @@ bool HalKestrel::read_phys_efuse(uint8_t *phys, uint32_t size) {
   }
   disable_efuse_pwr_cut();
   return true;
+}
+
+uint8_t HalKestrel::read_cut() {
+  return static_cast<uint8_t>(_device.rtw_read8(r::R_AX_SYS_CFG1 + 1) >> 4);
+}
+
+uint8_t HalKestrel::read_mss_index() {
+  /* __mss_index: read physical efuse 0x5EC (externalPN) + 0x5ED
+   * (customer[3:0], serialNum[6:4]); match the OTP key tables. */
+  enable_efuse_pwr_cut();
+  auto rd = [&](uint16_t off) -> uint8_t {
+    _device.rtw_write32(r::R_AX_EFUSE_CTRL,
+                        (off & r::B_AX_EF_ADDR_MSK) << r::B_AX_EF_ADDR_SH);
+    for (uint32_t cnt = r::EFUSE_WAIT_CNT_PLUS; cnt != 0; --cnt) {
+      uint32_t v = _device.rtw_read32(r::R_AX_EFUSE_CTRL);
+      if (v & r::B_AX_EF_RDY)
+        return static_cast<uint8_t>(v & 0xFF);
+      delay_us(1);
+    }
+    return 0xFF;
+  };
+  uint8_t b1 = rd(0x5EC);
+  uint8_t b2 = rd(0x5ED);
+  disable_efuse_pwr_cut();
+
+  const uint8_t externalPN = static_cast<uint8_t>(0xFF - (b1 & 0xFF));
+  const uint8_t customer = static_cast<uint8_t>(0xF - (b2 & 0xF));
+  const uint8_t serialNum = static_cast<uint8_t>(0x7 - ((b2 >> 4) & 0x7));
+  /* otpkeysinfo.c: externalPN={0,0}, customer={0,1}, serialNum={0,1}. */
+  static const uint8_t kPN[2] = {0x0, 0x0};
+  static const uint8_t kCust[2] = {0x0, 0x1};
+  static const uint8_t kSerial[2] = {0x0, 0x1};
+  for (uint8_t i = 0; i < 2; ++i)
+    if (externalPN == kPN[i] && customer == kCust[i] && serialNum == kSerial[i])
+      return i;
+  return 0;
+}
+
+bool HalKestrel::download_firmware(uint8_t cut) {
+  KestrelFw fw(_device, _logger, _variant);
+  return fw.download_firmware(cut, read_mss_index());
 }
 
 bool HalKestrel::read_efuse(EfuseInfo &out, std::array<uint8_t, 1536> *raw_phys) {

@@ -91,13 +91,16 @@ constexpr uint8_t XTAL_SI_SRAM_CTRL = 0xA1;
 constexpr uint8_t XTAL_SI_XTAL_XMD_2 = 0x24;
 constexpr uint8_t XTAL_SI_XTAL_XMD_4 = 0x26;
 
-/* ---- USB interface pre-init (_usb_8852b.c usb_pre_init_8852b) ---- */
-constexpr uint16_t R_AX_USB_HOST_REQUEST_2 = 0x01A0;
-constexpr uint32_t B_AX_R_USBIO_MODE = 1u << 3;
-constexpr uint16_t R_AX_USB_WLAN0_1 = 0x01A2; /* R_AX_HCI... region */
-constexpr uint16_t R_AX_HCI_FUNC_EN = 0x0098;
-constexpr uint32_t B_AX_HCI_RXDMA_EN = 1u << 0;
-constexpr uint32_t B_AX_HCI_TXDMA_EN = 1u << 1;
+/* ---- USB interface pre-init (_usb_8852b.c usb_pre_init_8852b; addresses
+ * from hci_reg_ax.h, verified against source) ---- */
+constexpr uint16_t R_AX_USB_HOST_REQUEST_2 = 0x1078;
+constexpr uint32_t B_AX_R_USBIO_MODE = 1u << 4;
+constexpr uint16_t R_AX_USB_WLAN0_1 = 0x1174;
+constexpr uint32_t B_AX_USBRX_RST = 1u << 9;
+constexpr uint32_t B_AX_USBTX_RST = 1u << 8;
+constexpr uint16_t R_AX_HCI_FUNC_EN = 0x8380; /* mac_reg_ax.h */
+constexpr uint32_t B_AX_HCI_RXDMA_EN = 1u << 1;
+constexpr uint32_t B_AX_HCI_TXDMA_EN = 1u << 0;
 
 /* ---- poll / efuse timing (pwr.h, hw.h, efuse.h) ---- */
 constexpr uint32_t PWR_POLL_CNT = 2000;
@@ -120,6 +123,156 @@ constexpr uint16_t EFUSE_RF_THERMAL_B_8852B = 0x2D1;
 /* Power-calibration-done marker read during power-on (physical offset). */
 constexpr uint32_t PWR_K_CHK_OFFSET = 0x5E9;
 constexpr uint8_t PWR_K_CHK_VALUE = 0xAA;
+
+/* ---- DMAC / DLE (dle.c, dle_8852b.c, init_8852b.c) ---- */
+constexpr uint16_t R_AX_DMAC_FUNC_EN = 0x8400;
+constexpr uint32_t B_AX_MAC_FUNC_EN = 1u << 30;
+constexpr uint32_t B_AX_DMAC_FUNC_EN = 1u << 29;
+constexpr uint32_t B_AX_DLE_WDE_EN = 1u << 26;
+constexpr uint32_t B_AX_DLE_PLE_EN = 1u << 23;
+constexpr uint32_t B_AX_PKT_BUF_EN = 1u << 22;
+constexpr uint32_t B_AX_DISPATCHER_EN = 1u << 18;
+
+constexpr uint16_t R_AX_WDE_PKTBUF_CFG = 0x8C08;
+constexpr uint16_t R_AX_PLE_PKTBUF_CFG = 0x9008;
+constexpr uint8_t B_AX_WDE_PAGE_SEL_SH = 0;
+constexpr uint32_t B_AX_WDE_PAGE_SEL_MSK = 0x3;
+constexpr uint8_t B_AX_WDE_START_BOUND_SH = 8;
+constexpr uint32_t B_AX_WDE_START_BOUND_MSK = 0x3f;
+constexpr uint8_t B_AX_WDE_FREE_PAGE_NUM_SH = 16;
+constexpr uint32_t B_AX_WDE_FREE_PAGE_NUM_MSK = 0x1fff;
+constexpr uint8_t B_AX_PLE_PAGE_SEL_SH = 0;
+constexpr uint32_t B_AX_PLE_PAGE_SEL_MSK = 0x3;
+constexpr uint8_t B_AX_PLE_START_BOUND_SH = 8;
+constexpr uint32_t B_AX_PLE_START_BOUND_MSK = 0x3f;
+constexpr uint8_t B_AX_PLE_FREE_PAGE_NUM_SH = 16;
+constexpr uint32_t B_AX_PLE_FREE_PAGE_NUM_MSK = 0x1fff;
+constexpr uint8_t S_AX_WDE_PAGE_SEL_64 = 0;
+constexpr uint8_t S_AX_PLE_PAGE_SEL_128 = 1;
+constexpr uint32_t DLE_BOUND_UNIT = 8 * 1024;
+
+/* QTA cfg registers: min in [11:0], max in [23:12]... actually MAX_SIZE_SH=16
+ * (min [11:0], max [27:16], each mask 0xfff). */
+constexpr uint8_t QTA_MIN_SH = 0;
+constexpr uint8_t QTA_MAX_SH = 16;
+constexpr uint32_t QTA_SIZE_MSK = 0xfff;
+constexpr uint16_t R_AX_WDE_QTA0_CFG = 0x8C40; /* hif */
+constexpr uint16_t R_AX_WDE_QTA1_CFG = 0x8C44; /* wcpu */
+constexpr uint16_t R_AX_WDE_QTA3_CFG = 0x8C4C; /* pkt_in */
+constexpr uint16_t R_AX_WDE_QTA4_CFG = 0x8C50; /* cpu_io */
+constexpr uint16_t R_AX_PLE_QTA0_CFG = 0x9040;
+constexpr uint16_t R_AX_PLE_QTA2_CFG = 0x9048; /* c2h */
+constexpr uint16_t R_AX_PLE_QTA3_CFG = 0x904C; /* h2c */
+constexpr uint16_t R_AX_PLE_QTA10_CFG = 0x9068; /* highest PLE QTA */
+
+constexpr uint16_t R_AX_WDE_INI_STATUS = 0x8D00;
+constexpr uint16_t R_AX_PLE_INI_STATUS = 0x9100;
+constexpr uint32_t B_AX_WDE_Q_MGN_INI_RDY = 1u << 1;
+constexpr uint32_t B_AX_WDE_BUF_MGN_INI_RDY = 1u << 0;
+constexpr uint32_t B_AX_PLE_Q_MGN_INI_RDY = 1u << 1;
+constexpr uint32_t B_AX_PLE_BUF_MGN_INI_RDY = 1u << 0;
+constexpr uint32_t DLE_WAIT_CNT = 2000;
+constexpr uint32_t DLE_WAIT_US = 1;
+
+/* DLFW quota values (dle_mem_usb3_8852b DLFW entry; SCC wcpu override = 6). */
+constexpr uint16_t DLFW_WDE_FREE_PAGE = 0;   /* wde_size9 lnk_pge_num */
+constexpr uint16_t DLFW_WDE_UNLNK_PAGE = 1024; /* wde_size9 unlnk_pge_num */
+constexpr uint16_t DLFW_PLE_FREE_PAGE = 64;  /* ple_size8 lnk_pge_num */
+constexpr uint16_t DLFW_WDE_WCPU_MIN = 6;    /* wde_qt25.wcpu (SCC override) */
+constexpr uint16_t DLFW_PLE_C2H = 16;        /* ple_qt13.c2h */
+constexpr uint16_t DLFW_PLE_H2C = 48;        /* ple_qt13.h2c */
+
+/* ---- HFC (hci_fc.c, hci_fc_8852b.c) ---- */
+constexpr uint16_t R_AX_HCI_FC_CTRL = 0x8A00;
+constexpr uint32_t B_AX_HCI_FC_EN = 1u << 0;
+constexpr uint32_t B_AX_HCI_FC_CH12_EN = 1u << 3;
+constexpr uint8_t B_AX_HCI_FC_CH12_FULL_COND_SH = 10;
+constexpr uint32_t B_AX_HCI_FC_CH12_FULL_COND_MSK = 0x3;
+constexpr uint16_t R_AX_CH_PAGE_CTRL = 0x8A04;
+constexpr uint8_t B_AX_PREC_PAGE_CH12_SH = 16;
+constexpr uint32_t B_AX_PREC_PAGE_CH12_MSK = 0x1ff;
+constexpr uint16_t HFC_USB_H2C_PREC_8852B = 32;   /* hfc_preccfg_usb_8852b */
+constexpr uint8_t HFC_FULL_COND_X2 = 1;
+
+/* ---- FWDL (fwdl.c, mac_reg_ax.h) ---- */
+constexpr uint16_t R_AX_SYS_CLK_CTRL = 0x0008;
+constexpr uint32_t B_AX_CPU_CLK_EN = 1u << 14;
+constexpr uint32_t B_AX_APB_WRAP_EN = 1u << 2; /* R_AX_PLATFORM_ENABLE */
+constexpr uint32_t B_AX_WCPU_EN = 1u << 1;     /* R_AX_PLATFORM_ENABLE */
+constexpr uint16_t R_AX_HALT_H2C_CTRL = 0x0160;
+constexpr uint16_t R_AX_HALT_C2H_CTRL = 0x0164;
+constexpr uint16_t R_AX_HALT_H2C = 0x0168;
+constexpr uint16_t R_AX_HALT_C2H = 0x016C;
+constexpr uint16_t R_AX_HISR0 = 0x01A4;
+constexpr uint16_t R_AX_WCPU_FW_CTRL = 0x01E0;
+constexpr uint8_t B_AX_WCPU_FWDL_STS_SH = 5;
+constexpr uint32_t B_AX_WCPU_FWDL_STS_MSK = 0x7;
+constexpr uint32_t B_AX_FWDL_PATH_RDY = 1u << 2;
+constexpr uint32_t B_AX_H2C_PATH_RDY = 1u << 1;
+constexpr uint32_t B_AX_WCPU_FWDL_EN = 1u << 0;
+constexpr uint16_t R_AX_BOOT_REASON = 0x01E6;
+constexpr uint8_t B_AX_BOOT_REASON_SH = 0;
+constexpr uint32_t B_AX_BOOT_REASON_MSK = 0x7;
+constexpr uint16_t R_AX_LDM = 0x01E8;
+constexpr uint16_t R_AX_UDM0 = 0x01F0;
+constexpr uint16_t R_AX_UDM1 = 0x01F4;
+constexpr uint16_t R_AX_BOOT_DBG = 0x83F0; /* MIPS boot-status debug */
+constexpr uint8_t B_AX_BOOT_STATUS_SH = 16;
+/* fw_dl_status enum (fwdl.h). */
+constexpr uint8_t FWDL_INITIAL_STATE = 0;
+constexpr uint8_t FWDL_WCPU_FW_INIT_RDY = 7;
+constexpr uint8_t FWDL_CHECKSUM_FAIL = 2;
+constexpr uint8_t FWDL_SECURITY_FAIL = 3;
+constexpr uint8_t FWDL_CUT_NOT_MATCH = 4;
+constexpr uint32_t FWDL_WAIT_CNT = 400000; /* 1us cadence */
+constexpr uint32_t FWDL_SECTION_PER_PKT_LEN = 2020;
+constexpr uint32_t FWDL_SECTION_CHKSUM_LEN = 8;
+constexpr uint8_t FWDL_SECURITY_SECTION_TYPE = 9;
+constexpr uint32_t FWDL_SECURITY_SIGLEN = 512; /* per-key MSS signature bytes */
+constexpr uint8_t FWDL_TRY_CNT_MIPS = 3;
+constexpr uint8_t AX_BOOT_REASON_PWR_ON = 0;
+
+/* Firmware header/section layout (fwdl.h struct fwhdr_hdr_t / fwhdr_section_t). */
+constexpr uint32_t FWHDR_HDR_LEN = 32;     /* sizeof fwhdr_hdr_t (8 dwords) */
+constexpr uint32_t FWHDR_SECTION_LEN = 16; /* sizeof fwhdr_section_t (4 dw) */
+/* dword6: sec_num [15:8]; dword3: fwhdr_sz [23:16]; dword7: fw_dyn_hdr [16]. */
+constexpr uint8_t FWHDR_SEC_NUM_SH = 8;
+constexpr uint32_t FWHDR_SEC_NUM_MSK = 0xff;
+constexpr uint8_t FWHDR_FWHDR_SZ_SH = 16;
+constexpr uint32_t FWHDR_FWHDR_SZ_MSK = 0xff;
+constexpr uint8_t FWHDR_FW_DYN_HDR_SH = 16;
+constexpr uint32_t FWHDR_FW_DYN_HDR_MSK = 0x1;
+/* section dword1: sec_size [23:0], sectiontype [27:24], checksum [28], redl [29]. */
+constexpr uint8_t SECTION_INFO_SEC_SIZE_SH = 0;
+constexpr uint32_t SECTION_INFO_SEC_SIZE_MSK = 0xffffff;
+constexpr uint8_t SECTION_INFO_SECTIONTYPE_SH = 24;
+constexpr uint32_t SECTION_INFO_SECTIONTYPE_MSK = 0xf;
+constexpr uint32_t SECTION_INFO_CHECKSUM = 1u << 28;
+constexpr uint32_t SECTION_INFO_REDL = 1u << 29;
+
+/* H2C/fwcmd envelope (fwcmd.h, fwcmd_intf.h, type.h, txdesc.h). */
+constexpr uint32_t FWCMD_HDR_LEN = 8;
+constexpr uint32_t WD_BODY_LEN = 24; /* sizeof wd_body_t (6 dwords) */
+constexpr uint8_t FWCMD_TYPE_H2C = 0;
+constexpr uint8_t FWCMD_H2C_CAT_MAC = 0x1;
+constexpr uint8_t FWCMD_H2C_CL_FWDL = 0x3;
+constexpr uint8_t FWCMD_H2C_FUNC_FWHDR_DL = 0x0;
+/* H2C hdr0 fields (fwcmd_intf.h). */
+constexpr uint8_t H2C_HDR_CAT_SH = 0;
+constexpr uint8_t H2C_HDR_CLASS_SH = 2;
+constexpr uint8_t H2C_HDR_FUNC_SH = 8;
+constexpr uint8_t H2C_HDR_DEL_TYPE_SH = 16;
+constexpr uint8_t H2C_HDR_H2C_SEQ_SH = 24;
+/* H2C hdr1 fields. */
+constexpr uint8_t H2C_HDR_TOTAL_LEN_SH = 0;
+/* TX WD (txdesc.h): dword0 CH_DMA [19:16], FWDL_EN [20]; dword2 TXPKTSIZE [15:0]. */
+constexpr uint8_t AX_TXD_CH_DMA_SH = 16;
+constexpr uint32_t AX_TXD_CH_DMA_MSK = 0xf;
+constexpr uint32_t AX_TXD_FWDL_EN = 1u << 20;
+constexpr uint8_t AX_TXD_TXPKTSIZE_SH = 0;
+constexpr uint32_t AX_TXD_TXPKTSIZE_MSK = 0xffff;
+constexpr uint8_t MAC_AX_DMA_H2C = 12; /* CH12 */
+constexpr uint8_t BULKOUTID_H2C = 2;   /* get_bulkout_id_8852b: H2C -> id 2 */
 
 /* SET_CLR_WORD(orig, val, FIELD) — replace FIELD bits with val. */
 inline uint32_t set_clr_word(uint32_t orig, uint32_t val, uint32_t msk,

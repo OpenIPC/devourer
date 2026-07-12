@@ -184,12 +184,18 @@ int main(int argc, char **argv) {
     return power_ok ? 0 : 1;
   }
 
-  /* ---- stage fw (M1b): firmware download ---- [not ported yet] */
-  logger->error("M1b: fw download not ported yet (Kestrel milestone M1b)");
-  devourer::Ev(logger->events(), "kestrel.fw")
-      .f("ok", false)
-      .f("why", "not ported (M1b)");
+  /* ---- stage fw (M1b): firmware download ---- */
+  bool fw_ok = false;
+  try {
+    /* Re-run the whole sequence so the stage is self-contained (power-on is
+     * cheap and idempotent from a clean handle). */
+    fw_ok = dev.PowerOnEfuseAndFw(efuse);
+  } catch (const std::exception &e) {
+    logger->error("M1b: fw download threw: {}", e.what());
+  }
+  logger->info("M1b: fw_ok={}", fw_ok);
+  devourer::Ev(logger->events(), "kestrel.fw").f("ok", fw_ok);
   libusb_close(handle);
   libusb_exit(ctx);
-  return 1;
+  return fw_ok ? 0 : 1;
 }

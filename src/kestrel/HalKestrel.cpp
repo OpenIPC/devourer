@@ -934,23 +934,17 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
    * read-back-able register, to prove whether the fw processes FW_OFLD-class
    * H2C at all. BB 0x4004 read 0xCA014000 after the direct table apply. */
   if (std::getenv("KESTREL_TEST_OFLD")) {
-    std::atomic<bool> stop{false};
-    std::thread drainer([&] {
-      std::vector<uint8_t> b(16384);
-      while (!stop.load())
-        (void)_device.bulk_read_raw(b.data(), static_cast<int>(b.size()), 20);
-    });
-    _fw.ofld_begin();
-    _fw.ofld_write(r::OFLD_SRC_BB, r::OFLD_TYPE_WRITE, 0, 0x4004, 0x12345678,
-                   r::MASKDWORD);
-    _fw.ofld_flush();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    const uint32_t v = _device.rtw_read32_wide(0x4004u + 0x10000u);
-    stop.store(true);
-    drainer.join();
-    _logger->warn("Kestrel DIAG: BB 0x4004 after cmd_ofld (bulk-IN drained) = "
-                  "0x{:08x} (0x12345678 => fw processes cmd_ofld)",
-                  v);
+    /* Test DIRECT a-die RF programming (bypassing the fw cmd_ofld): write a
+     * radio register via the DAV serial command (0x370) and read it back via
+     * the DDV window. If it lands, the radio can be programmed host-side. */
+    const uint32_t r00_before = rf_read(0, 0x00);
+    rf_write_dav(0, 0x00, 0x00030000);
+    const uint32_t r00_dav = rf_read(0, 0x00);
+    rf_write(0, 0x00, 0x00035000); /* DDV direct write */
+    const uint32_t r00_ddv = rf_read(0, 0x00);
+    _logger->warn("Kestrel DIAG: RF00 before=0x{:05x} after-DAV(0x30000)=0x{:05x}"
+                  " after-DDV(0x35000)=0x{:05x}",
+                  r00_before, r00_dav, r00_ddv);
   }
   auto apply_radio = [&](const uint32_t *arr, size_t len, uint8_t path,
                          uint8_t radio_cls) {

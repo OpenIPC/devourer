@@ -333,6 +333,7 @@ constexpr uint8_t BULKOUTID_H2C = 2;   /* get_bulkout_id_8852b: H2C -> id 2 */
 constexpr uint8_t FWCMD_H2C_CAT_OUTSRC = 0x2;
 constexpr uint8_t FWCMD_H2C_CL_FW_OFLD = 0x9;
 constexpr uint8_t FWCMD_H2C_FUNC_CMD_OFLD_REG = 0x11;
+constexpr uint8_t FWCMD_H2C_FUNC_CMD_OFLD_PKT = 0x13;
 /* rtw_mac_src_cmd_ofld (mac_outsrc_def.h). */
 constexpr uint8_t OFLD_SRC_BB = 0;
 constexpr uint8_t OFLD_SRC_RF = 1;

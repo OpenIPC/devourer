@@ -47,6 +47,13 @@ public:
    * cut version (from ReadChipInfo / R_AX_SYS_CFG1[15:12]). */
   bool download_firmware(uint8_t cut);
 
+  /* M2a — the DMAC half of mac_trx_init: re-init the DLE to the NIC-mode (SCC)
+   * quota, station scheduler, MPDU processor, security engine. Must run after
+   * download_firmware. Returns false on the sta-scheduler poll timeout. The
+   * CMAC half (rx_fltr / rmac / cmac_dma) + BB/RF/channel that complete RX
+   * land in later steps. */
+  bool trx_dmac_init();
+
   /* Chip cut version, read fresh from R_AX_SYS_CFG1[15:12]. */
   uint8_t read_cut();
 
@@ -69,6 +76,12 @@ private:
   bool write_xtal_si(uint8_t offset, uint8_t val, uint8_t bitmask);
 
   bool usb_pre_init();
+  /* M2a DMAC sub-inits (trxcfg.c). */
+  bool dle_init_nic();
+  bool sta_sch_init();
+  void mpdu_proc_init();
+  void sec_eng_init();
+  bool chk_dle_rdy(uint16_t status_reg, uint32_t rdy_bits, const char *what);
   /* Physical efuse read loop (read_hw_efuse, DDV bank) into `phys`. */
   bool read_phys_efuse(uint8_t *phys, uint32_t size);
   void enable_efuse_pwr_cut();

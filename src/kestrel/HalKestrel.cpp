@@ -308,6 +308,128 @@ bool HalKestrel::download_firmware(uint8_t cut) {
   return fw.download_firmware(cut, read_mss_index());
 }
 
+bool HalKestrel::chk_dle_rdy(uint16_t status_reg, uint32_t rdy_bits,
+                             const char *what) {
+  for (uint32_t cnt = r::DLE_WAIT_CNT; cnt != 0; --cnt) {
+    if ((_device.rtw_read32(status_reg) & rdy_bits) == rdy_bits)
+      return true;
+    delay_us(r::DLE_WAIT_US);
+  }
+  _logger->error("Kestrel TRX: {} DLE not ready (0x{:04x}=0x{:08x})", what,
+                 status_reg, _device.rtw_read32(status_reg));
+  return false;
+}
+
+bool HalKestrel::dle_init_nic() {
+  /* dle_init(MAC_AX_QTA_SCC) for 8852B USB: wde_size25 / ple_size33 /
+   * wde_qt25 / ple_qt74(min) / ple_qt75(max). Same register recipe as the
+   * DLFW DLE (dle_mix_cfg/quota_cfg/func_en) with the NIC quota. */
+  auto field = [](uint32_t v, uint32_t val, uint32_t msk, uint8_t sh) {
+    return r::set_clr_word(v, val, msk, sh);
+  };
+  clr32(r::R_AX_DMAC_FUNC_EN, r::B_AX_DLE_WDE_EN | r::B_AX_DLE_PLE_EN);
+
+  /* WDE: 64B page, bound 0, free = lnk_pge_num (166). */
+  uint32_t v = _device.rtw_read32(r::R_AX_WDE_PKTBUF_CFG);
+  v = field(v, r::S_AX_WDE_PAGE_SEL_64, r::B_AX_WDE_PAGE_SEL_MSK,
+            r::B_AX_WDE_PAGE_SEL_SH);
+  v = field(v, 0, r::B_AX_WDE_START_BOUND_MSK, r::B_AX_WDE_START_BOUND_SH);
+  v = field(v, r::SCC_WDE_LNK_PAGE, r::B_AX_WDE_FREE_PAGE_NUM_MSK,
+            r::B_AX_WDE_FREE_PAGE_NUM_SH);
+  _device.rtw_write32(r::R_AX_WDE_PKTBUF_CFG, v);
+
+  /* PLE: 128B page, bound = (166+90)*64/8192 = 2, free = 624. */
+  const uint32_t bound =
+      (r::SCC_WDE_LNK_PAGE + r::SCC_WDE_UNLNK_PAGE) * 64u / r::DLE_BOUND_UNIT;
+  v = _device.rtw_read32(r::R_AX_PLE_PKTBUF_CFG);
+  v = field(v, r::S_AX_PLE_PAGE_SEL_128, r::B_AX_PLE_PAGE_SEL_MSK,
+            r::B_AX_PLE_PAGE_SEL_SH);
+  v = field(v, bound, r::B_AX_PLE_START_BOUND_MSK, r::B_AX_PLE_START_BOUND_SH);
+  v = field(v, r::SCC_PLE_LNK_PAGE, r::B_AX_PLE_FREE_PAGE_NUM_MSK,
+            r::B_AX_PLE_FREE_PAGE_NUM_SH);
+  _device.rtw_write32(r::R_AX_PLE_PKTBUF_CFG, v);
+
+  auto qta = [&](uint16_t reg, uint16_t mn, uint16_t mx) {
+    _device.rtw_write32(
+        reg, (static_cast<uint32_t>(mn & r::QTA_SIZE_MSK) << r::QTA_MIN_SH) |
+                 (static_cast<uint32_t>(mx & r::QTA_SIZE_MSK) << r::QTA_MAX_SH));
+  };
+  /* WDE quota (min==max, wde_qt25). */
+  qta(r::R_AX_WDE_QTA0_CFG, r::SCC_WDE_QT_HIF, r::SCC_WDE_QT_HIF);
+  qta(r::R_AX_WDE_QTA1_CFG, r::SCC_WDE_QT_WCPU, r::SCC_WDE_QT_WCPU);
+  qta(r::R_AX_WDE_QTA3_CFG, 0, 0);
+  qta(r::R_AX_WDE_QTA4_CFG, r::SCC_WDE_QT_CPU_IO, r::SCC_WDE_QT_CPU_IO);
+  /* PLE quota Q0..Q10 (min = ple_qt74, max = ple_qt75). */
+  for (int i = 0; i < 11; ++i)
+    qta(static_cast<uint16_t>(r::R_AX_PLE_QTA0_CFG + i * 4), r::SCC_PLE_MIN[i],
+        r::SCC_PLE_MAX[i]);
+
+  set32(r::R_AX_DMAC_FUNC_EN, r::B_AX_DLE_WDE_EN | r::B_AX_DLE_PLE_EN);
+  if (!chk_dle_rdy(r::R_AX_WDE_INI_STATUS,
+                   r::B_AX_WDE_Q_MGN_INI_RDY | r::B_AX_WDE_BUF_MGN_INI_RDY,
+                   "WDE"))
+    return false;
+  if (!chk_dle_rdy(r::R_AX_PLE_INI_STATUS,
+                   r::B_AX_PLE_Q_MGN_INI_RDY | r::B_AX_PLE_BUF_MGN_INI_RDY,
+                   "PLE"))
+    return false;
+  return true;
+}
+
+bool HalKestrel::sta_sch_init() {
+  /* Enable the station scheduler and wait for its warm-init to complete. */
+  set32(r::R_AX_SS_CTRL, r::B_AX_SS_EN);
+  bool done = false;
+  for (uint32_t cnt = r::TRXCFG_WAIT_CNT; cnt != 0; --cnt) {
+    if (_device.rtw_read32(r::R_AX_SS_CTRL) & r::B_AX_SS_INIT_DONE_1) {
+      done = true;
+      break;
+    }
+    delay_us(r::TRXCFG_WAIT_US);
+  }
+  if (!done) {
+    _logger->error("Kestrel TRX: sta-sch init timeout (SS_CTRL=0x{:08x})",
+                   _device.rtw_read32(r::R_AX_SS_CTRL));
+    return false;
+  }
+  set32(r::R_AX_SS_CTRL, r::B_AX_SS_WARM_INIT_FLG);
+  /* HW TRX mode: clear the SW-mode SS2FINFO enable. */
+  clr32(r::R_AX_SS_CTRL, r::B_AX_SS_NONEMPTY_SS2FINFO_EN);
+  return true;
+}
+
+void HalKestrel::mpdu_proc_init() {
+  _device.rtw_write32(r::R_AX_ACTION_FWD0, r::TRXCFG_MPDU_PROC_ACT_FRWD);
+  _device.rtw_write32(r::R_AX_TF_FWD, r::TRXCFG_MPDU_PROC_TF_FRWD);
+  set32(r::R_AX_MPDU_PROC, r::B_AX_APPEND_FCS | r::B_AX_A_ICV_ERR);
+  _device.rtw_write32(r::R_AX_CUT_AMSDU_CTRL, r::TRXCFG_MPDU_PROC_CUT_CTRL);
+}
+
+void HalKestrel::sec_eng_init() {
+  uint32_t v = _device.rtw_read32(r::R_AX_SEC_ENG_CTRL);
+  v |= r::B_AX_CLK_EN_CGCMP | r::B_AX_CLK_EN_WAPI | r::B_AX_CLK_EN_WEP_TKIP;
+  v |= r::B_AX_SEC_TX_ENC | r::B_AX_SEC_RX_DEC;
+  v |= r::B_AX_MC_DEC | r::B_AX_BC_DEC;
+  v |= r::B_AX_BMC_MGNT_DEC | r::B_AX_UC_MGNT_DEC;
+  v &= ~r::B_AX_TX_PARTIAL_MODE; /* 8852B */
+  _device.rtw_write32(r::R_AX_SEC_ENG_CTRL, v);
+}
+
+bool HalKestrel::trx_dmac_init() {
+  if (!dle_init_nic()) /* NIC-mode DLE quota */
+    return false;
+  /* NOTE: the full NIC HFC reprogramming (hfc_init(1,1,1): per-channel +
+   * public page quotas) is not yet ported; the DLFW HFC from firmware
+   * download is left in place. If the sta-scheduler poll below fails on
+   * hardware, the NIC HFC is the missing piece. */
+  if (!sta_sch_init())
+    return false;
+  mpdu_proc_init();
+  sec_eng_init();
+  _logger->info("Kestrel TRX: DMAC init done (NIC DLE + sta-sch + mpdu + sec)");
+  return true;
+}
+
 bool HalKestrel::read_efuse(EfuseInfo &out, std::array<uint8_t, 1536> *raw_phys) {
   std::array<uint8_t, r::WL_EFUSE_PHYS_SIZE_8852B> phys{};
   if (!read_phys_efuse(phys.data(), phys.size()))

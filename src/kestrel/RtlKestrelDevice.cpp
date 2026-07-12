@@ -71,6 +71,16 @@ bool RtlKestrelDevice::PowerOnEfuseAndFw(kestrel::EfuseInfo &out) {
   return _hal.download_firmware(_hal.read_cut());
 }
 
+bool RtlKestrelDevice::PowerOnFwAndTrx(kestrel::EfuseInfo &out) {
+  if (!_hal.power_on())
+    return false;
+  if (!_hal.read_efuse(out))
+    return false;
+  if (!_hal.download_firmware(_hal.read_cut()))
+    return false;
+  return _hal.trx_dmac_init();
+}
+
 void RtlKestrelDevice::not_ported(const char *entry,
                                   const char *milestone) const {
   _logger->error("Kestrel: {} is not ported yet ({})", entry, milestone);

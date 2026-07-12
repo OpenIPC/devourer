@@ -274,6 +274,52 @@ constexpr uint32_t AX_TXD_TXPKTSIZE_MSK = 0xffff;
 constexpr uint8_t MAC_AX_DMA_H2C = 12; /* CH12 */
 constexpr uint8_t BULKOUTID_H2C = 2;   /* get_bulkout_id_8852b: H2C -> id 2 */
 
+/* ---- MAC TRX init (M2a; trxcfg.c, mac_reg_ax.h) ---- */
+constexpr uint32_t TRXCFG_WAIT_CNT = 2000;
+constexpr uint32_t TRXCFG_WAIT_US = 1;
+/* sta_sch_init (station scheduler). */
+constexpr uint16_t R_AX_SS_CTRL = 0x9E10;
+constexpr uint32_t B_AX_SS_EN = 1u << 0;
+constexpr uint32_t B_AX_SS_INIT_DONE_1 = 1u << 31;
+constexpr uint32_t B_AX_SS_WARM_INIT_FLG = 1u << 29;
+constexpr uint32_t B_AX_SS_NONEMPTY_SS2FINFO_EN = 1u << 28;
+/* mpdu_proc_init. */
+constexpr uint16_t R_AX_MPDU_PROC = 0x9C00;
+constexpr uint32_t B_AX_A_ICV_ERR = 1u << 1;
+constexpr uint32_t B_AX_APPEND_FCS = 1u << 0;
+constexpr uint16_t R_AX_ACTION_FWD0 = 0x9C04;
+constexpr uint16_t R_AX_TF_FWD = 0x9C14;
+constexpr uint16_t R_AX_CUT_AMSDU_CTRL = 0x9C40;
+constexpr uint32_t TRXCFG_MPDU_PROC_ACT_FRWD = 0x02A95A95;
+constexpr uint32_t TRXCFG_MPDU_PROC_TF_FRWD = 0x0000AA55;
+constexpr uint32_t TRXCFG_MPDU_PROC_CUT_CTRL = 0x010E05F0;
+/* sec_eng_init. */
+constexpr uint16_t R_AX_SEC_ENG_CTRL = 0x9D00;
+constexpr uint32_t B_AX_TX_PARTIAL_MODE = 1u << 11;
+constexpr uint32_t B_AX_CLK_EN_CGCMP = 1u << 10;
+constexpr uint32_t B_AX_CLK_EN_WAPI = 1u << 9;
+constexpr uint32_t B_AX_CLK_EN_WEP_TKIP = 1u << 8;
+constexpr uint32_t B_AX_BMC_MGNT_DEC = 1u << 5;
+constexpr uint32_t B_AX_UC_MGNT_DEC = 1u << 4;
+constexpr uint32_t B_AX_MC_DEC = 1u << 3;
+constexpr uint32_t B_AX_BC_DEC = 1u << 2;
+constexpr uint32_t B_AX_SEC_RX_DEC = 1u << 1;
+constexpr uint32_t B_AX_SEC_TX_ENC = 1u << 0;
+
+/* NIC-mode SCC DLE quota (dle_mem_usb3_8852b SCC entry; contrast the DLFW
+ * quota above). wde_size25 / ple_size33 / wde_qt25 / ple_qt74(min) /
+ * ple_qt75(max). */
+constexpr uint16_t SCC_WDE_LNK_PAGE = 166;
+constexpr uint16_t SCC_WDE_UNLNK_PAGE = 90;
+constexpr uint16_t SCC_PLE_LNK_PAGE = 624;
+/* wde_qt25: hif/wcpu/pkt_in/cpu_io (min==max). */
+constexpr uint16_t SCC_WDE_QT_HIF = 152;
+constexpr uint16_t SCC_WDE_QT_WCPU = 6;
+constexpr uint16_t SCC_WDE_QT_CPU_IO = 8;
+/* ple_qt74 (min) then ple_qt75 (max), 11 fields Q0..Q10. */
+constexpr uint16_t SCC_PLE_MIN[11] = {286, 0, 16, 48, 13, 13, 178, 0, 32, 14, 8};
+constexpr uint16_t SCC_PLE_MAX[11] = {286, 0, 32, 48, 29, 13, 194, 0, 48, 14, 24};
+
 /* SET_CLR_WORD(orig, val, FIELD) — replace FIELD bits with val. */
 inline uint32_t set_clr_word(uint32_t orig, uint32_t val, uint32_t msk,
                              uint8_t sh) {

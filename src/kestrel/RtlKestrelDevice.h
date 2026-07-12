@@ -74,6 +74,10 @@ public:
    * download firmware. Returns false at the first failing step. */
   bool PowerOnEfuseAndFw(kestrel::EfuseInfo &out);
 
+  /* M2a bring-up for kestrelprobe's "trx" stage: everything in "fw" plus the
+   * DMAC-half MAC TRX init. Returns false at the first failing step. */
+  bool PowerOnFwAndTrx(kestrel::EfuseInfo &out);
+
   kestrel::HalKestrel &hal() { return _hal; }
 
 private:

@@ -297,7 +297,10 @@ bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
                   (static_cast<uint32_t>(func) << r::H2C_HDR_FUNC_SH) |
                   (static_cast<uint32_t>(r::FWCMD_TYPE_H2C) << r::H2C_HDR_DEL_TYPE_SH);
   put_le32(hdr + 0, hdr0);
-  put_le32(hdr + 4, len << r::H2C_HDR_TOTAL_LEN_SH);
+  /* TOTAL_LEN counts the fwcmd header + content (h2cb->len in the vendor
+   * h2c_pkt_set_hdr), NOT just the content — the fw's H2C-queue parser uses it
+   * to find the next packet boundary; an 8-byte-short value desyncs the queue. */
+  put_le32(hdr + 4, data_len << r::H2C_HDR_TOTAL_LEN_SH);
   std::memcpy(hdr + r::FWCMD_HDR_LEN, content, len);
 
   int rc = _device.bulk_send_sync_ep(_ch12_ep, _txbuf.data(), _txbuf.size(), 1000);

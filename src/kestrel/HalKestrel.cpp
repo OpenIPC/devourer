@@ -86,6 +86,45 @@ bool HalKestrel::usb_pre_init() {
   return true;
 }
 
+void HalKestrel::usb_init() {
+  /* usb_init_8852b (intf_init): LFPS filter off, RX bulk size for the link
+   * speed, and — critically — the per-endpoint NUMP (burst count). Without
+   * NUMP a bulk-OUT endpoint accepts a single packet then halts, which is the
+   * "512 then stall" the runtime H2C IO-offload hits on CH12 (ep7). */
+  clr32(r::R_AX_USB3_MAC_NPI_CONFIG_INTF_0, r::B_AX_SSPHY_LFPS_FILTER);
+
+  const uint32_t st = _device.rtw_read32(r::R_AX_USB_STATUS);
+  uint32_t mode;
+  if (st & r::B_AX_R_USB2_SEL)
+    mode = r::MAC_AX_USB3;
+  else if (st & r::B_AX_MODE_HS)
+    mode = r::MAC_AX_USB2;
+  else
+    mode = r::MAC_AX_USB11;
+  const uint8_t bulk = mode == r::MAC_AX_USB3   ? r::USB3_BULKSIZE
+                       : mode == r::MAC_AX_USB2 ? r::USB2_BULKSIZE
+                                                : r::USB11_BULKSIZE;
+  _device.rtw_write8(r::R_AX_RXDMA_SETTING, bulk);
+
+  /* Program NUMP for EP5,6,7,9,10,11,12: select the endpoint index in
+   * USB_ENDPOINT_0[3:0], then write NUMP to USB_ENDPOINT_2+1. */
+  for (uint8_t ep : r::USB_EP_LIST) {
+    uint8_t v = _device.rtw_read8(r::R_AX_USB_ENDPOINT_0);
+    v = static_cast<uint8_t>(r::set_clr_word(v, ep, r::B_AX_EP_IDX_MSK,
+                                             r::B_AX_EP_IDX_SH));
+    _device.rtw_write8(r::R_AX_USB_ENDPOINT_0, v);
+    _device.rtw_write8(r::R_AX_USB_ENDPOINT_2 + 1, r::USB_NUMP);
+  }
+  /* Re-toggle HCI RXDMA|TXDMA (0x8380: 0 -> 3) after the DMAC/DLE/CMAC init —
+   * the vendor kicks the HCI DMA engine here so it starts draining the USB
+   * FIFO into the (re-init'd) DLE queues, incl. CH12/H2C. */
+  clr32(r::R_AX_HCI_FUNC_EN, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
+  set32(r::R_AX_HCI_FUNC_EN, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
+  _logger->info("Kestrel: USB init (mode=USB{}, NUMP set on 7 eps, HCI DMA "
+                "re-kicked)",
+                mode == r::MAC_AX_USB3 ? 3 : mode == r::MAC_AX_USB2 ? 2 : 1);
+}
+
 bool HalKestrel::power_on() {
   if (!_device.is_usb()) {
     _logger->error("Kestrel: only USB power-on is ported (M1)");
@@ -471,8 +510,12 @@ bool HalKestrel::hfc_init_nic() {
                        r::B_AX_HCI_FC_WP_CH811_FULL_COND_SH);
   w(r::R_AX_HCI_FC_CTRL, fc);
 
-  /* set_fc_func_en(1, 1): enable FC + CH12, settle. */
-  set32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
+  /* set_fc_func_en(0, 1): USB uses h2c-only flow control — enable CH12 but
+   * NOT the full FC_EN (the vendor capture ends HCI_FC_CTRL at CH12_EN|
+   * CH12_FULL_COND, bit0 clear). Enabling FC_EN with the TX-channel credits
+   * would gate CH12. */
+  clr32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_EN);
+  set32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_CH12_EN);
   delay_us(10);
   _logger->info("Kestrel TRX: NIC HFC quotas applied (CH12 credits live)");
   return true;
@@ -512,7 +555,11 @@ bool HalKestrel::trx_dmac_init() {
     return false;
   mpdu_proc_init();
   sec_eng_init();
-  _logger->info("Kestrel TRX: DMAC init done (NIC DLE + sta-sch + mpdu + sec)");
+  /* intf_init: runtime USB endpoint NUMP config (arms multi-packet bulk-OUT,
+   * incl. CH12/ep7 for the H2C IO-offload). */
+  usb_init();
+  _logger->info("Kestrel TRX: DMAC init done (NIC DLE + sta-sch + mpdu + sec + "
+                "usb)");
   return true;
 }
 

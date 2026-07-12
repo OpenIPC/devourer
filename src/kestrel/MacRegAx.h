@@ -360,6 +360,29 @@ constexpr uint8_t OUTSRC_CL_RADIO_B = 9;
 constexpr uint32_t RADIO_TO_FW_DATA_SIZE = 500; /* entries per page */
 constexpr uint8_t H2CB_TYPE_LONG_DATA = 2;
 
+/* ---- USB runtime init (usb_init_8852b, _usb.c/_usb_8852b.c): endpoint NUMP
+ * (burst) config. Without it a bulk-OUT endpoint accepts one packet then
+ * halts — the "512 then stall" the H2C IO-offload hits. ---- */
+constexpr uint16_t R_AX_USB_STATUS = 0x11F0;
+constexpr uint32_t B_AX_R_USB2_SEL = 1u << 1;
+constexpr uint32_t B_AX_MODE_HS = 1u << 0;
+constexpr uint16_t R_AX_RXDMA_SETTING = 0x8908;
+constexpr uint8_t USB3_BULKSIZE = 0x0;
+constexpr uint8_t USB2_BULKSIZE = 0x1;
+constexpr uint8_t USB11_BULKSIZE = 0x2;
+constexpr uint16_t R_AX_USB_ENDPOINT_0 = 0x1060;
+constexpr uint32_t B_AX_EP_IDX_MSK = 0xf;
+constexpr uint8_t B_AX_EP_IDX_SH = 0;
+constexpr uint16_t R_AX_USB_ENDPOINT_2 = 0x1068; /* NUMP at +1 = 0x1069 */
+constexpr uint16_t R_AX_USB3_MAC_NPI_CONFIG_INTF_0 = 0x1114;
+constexpr uint32_t B_AX_SSPHY_LFPS_FILTER = 1u << 31;
+constexpr uint8_t USB_NUMP = 0x1;
+/* Endpoints configured with NUMP (EP5,6,7,9,10,11,12). */
+constexpr uint8_t USB_EP_LIST[7] = {0x5, 0x6, 0x7, 0x9, 0xA, 0xB, 0xC};
+constexpr uint32_t MAC_AX_USB3 = 3;
+constexpr uint32_t MAC_AX_USB2 = 2;
+constexpr uint32_t MAC_AX_USB11 = 1;
+
 /* ---- MAC TRX init (M2a; trxcfg.c, mac_reg_ax.h) ---- */
 constexpr uint32_t TRXCFG_WAIT_CNT = 2000;
 constexpr uint32_t TRXCFG_WAIT_US = 1;

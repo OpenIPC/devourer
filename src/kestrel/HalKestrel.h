@@ -99,6 +99,7 @@ private:
   bool write_xtal_si(uint8_t offset, uint8_t val, uint8_t bitmask);
 
   bool usb_pre_init();
+  void usb_init(); /* runtime USB init (endpoint NUMP/burst) — usb_init_8852b */
   /* M3 BB/RF channel helpers (all over the wIndex=1 window). */
   void bb_rmw(uint32_t addr, uint32_t mask, uint32_t val); /* masked BB write */
   uint32_t rf_read(uint8_t path, uint8_t rf_addr);         /* DDV RF read */

@@ -623,6 +623,10 @@ constexpr uint16_t R_AX_SYS_SDIO_CTRL = 0x0070;
 constexpr uint32_t LTE_WRITE_CMD = 0xC00F0000; /* | offset */
 constexpr uint32_t B_AX_LTE_MUX_CTRL_PATH = 1u << 26; /* R_AX_LTE_CTRL+3 bit5 rdy */
 
+/* chip_func_en OCP patch (init.c mac_sys_init). */
+constexpr uint8_t B_AX_OCP_L1_SH = 13;
+constexpr uint32_t B_AX_OCP_L1_MSK = 0x7;
+
 /* SET_CLR_WORD(orig, val, FIELD) — replace FIELD bits with val. */
 inline uint32_t set_clr_word(uint32_t orig, uint32_t val, uint32_t msk,
                              uint8_t sh) {

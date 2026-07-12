@@ -243,6 +243,11 @@ bool HalKestrel::power_on() {
                                (1u << 19) | (1u << 20) | (1u << 21);
   set32(R_AX_CMAC_FUNC_EN, kCmacEn);
 
+  /* chip_func_en (mac_sys_init, init.c): the 8852B OCP patch — set the
+   * SPS_DIG_ON OCP_L1 field to its max (over-current-protection level). */
+  set32(r::R_AX_SPS_DIG_ON_CTRL0,
+        (r::B_AX_OCP_L1_MSK & 0x7u) << r::B_AX_OCP_L1_SH);
+
   /* 0x2D8[7:4] = 1 (EESK pinmux). */
   field32(r::R_AX_EECS_EESK_FUNC_SEL, 0x1, r::B_AX_PINMUX_EESK_FUNC_SEL_MSK,
           r::B_AX_PINMUX_EESK_FUNC_SEL_SH);

@@ -85,6 +85,7 @@ private:
   std::vector<uint8_t> _txbuf; /* reused H2C packet scratch */
   std::vector<uint8_t> _ofld_buf; /* accumulated cmd_ofld batch */
   uint32_t _ofld_cmd_num = 0;     /* commands in the current batch (resets/flush) */
+  uint8_t _h2c_seq = 0;           /* per-H2C sequence counter (runtime H2C) */
 };
 
 } /* namespace kestrel */

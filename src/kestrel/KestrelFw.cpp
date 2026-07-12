@@ -292,10 +292,16 @@ bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
            (data_len & r::AX_TXD_TXPKTSIZE_MSK) << r::AX_TXD_TXPKTSIZE_SH);
 
   uint8_t *hdr = wd + r::WD_BODY_LEN;
+  /* Per-H2C sequence number (fwinfo->h2c_seq, 3-bit). The vendor increments it
+   * per H2C via h2c_pkt_set_hdr; the running fw tracks it for runtime H2C, so a
+   * fixed seq=0 makes it drop all but the first. */
+  const uint8_t seq = _h2c_seq & 0x7;
+  _h2c_seq++;
   uint32_t hdr0 = (static_cast<uint32_t>(cat) << r::H2C_HDR_CAT_SH) |
                   (static_cast<uint32_t>(h2c_class) << r::H2C_HDR_CLASS_SH) |
                   (static_cast<uint32_t>(func) << r::H2C_HDR_FUNC_SH) |
-                  (static_cast<uint32_t>(r::FWCMD_TYPE_H2C) << r::H2C_HDR_DEL_TYPE_SH);
+                  (static_cast<uint32_t>(r::FWCMD_TYPE_H2C) << r::H2C_HDR_DEL_TYPE_SH) |
+                  (static_cast<uint32_t>(seq) << r::H2C_HDR_H2C_SEQ_SH);
   put_le32(hdr + 0, hdr0);
   /* TOTAL_LEN counts the fwcmd header + content (h2cb->len in the vendor
    * h2c_pkt_set_hdr), NOT just the content — the fw's H2C-queue parser uses it

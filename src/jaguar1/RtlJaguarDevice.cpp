@@ -486,6 +486,41 @@ bool RtlJaguarDevice::StartBeacon(const uint8_t *beacon, size_t len,
   return true;
 }
 
+bool RtlJaguarDevice::UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
+  if (_bcn_mpdu.empty()) {
+    _logger->error("beacon(J1): UpdateBeaconPayload without an active beacon");
+    return false;
+  }
+  /* Same buffer contract as StartBeacon: strip a leading radiotap header. */
+  size_t rt = (len >= 4) ? (size_t)(beacon[2] | (beacon[3] << 8)) : 0;
+  if (rt > len) rt = 0;
+  /* A fresh BCNQ-boundary store replaces the TBTT engine's buffer (the same
+   * bracket the steers re-download through); the port stays configured and the
+   * TBTT grid is untouched, so no re-ignite is needed. */
+  if (!download_rsvd_beacon(beacon + rt, len - rt)) {
+    _logger->error("beacon(J1): UpdateBeaconPayload rsvd-page store failed");
+    return false;
+  }
+  _bcn_mpdu.assign(beacon + rt, beacon + len);
+  return true;
+}
+
+bool RtlJaguarDevice::StopBeacon() {
+  if (_bcn_mpdu.empty())
+    return false;
+  /* EN_BCN_FUNCTION off (keep DIS_TSF_UDT), StopTxBeacon (0x422[6] clear —
+   * the ResumeTxBeacon inverse), net_type back to No Link. */
+  _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, 0x10);
+  _device.rtw_write8(0x0422, static_cast<uint8_t>(
+                                 _device.rtw_read8(0x0422) & ~0x40u));
+  uint8_t nt = _device.rtw_read8(0x0102);
+  _device.rtw_write8(0x0102, static_cast<uint8_t>(nt & ~0x03u));
+  _bcn_mpdu.clear();
+  _bcn_interval_tu = 0;
+  _logger->info("beacon(J1): stopped (EN_BCN off, StopTxBeacon, net_type->NoLink)");
+  return true;
+}
+
 int32_t RtlJaguarDevice::AdjustBeaconTiming(int32_t microseconds) {
   int nominal = _bcn_interval_tu;
   if (nominal <= 0) return 0;  // no active beacon

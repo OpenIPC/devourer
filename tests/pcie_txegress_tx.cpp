@@ -8,8 +8,9 @@
 // number is comparable), but opens the 8821CE through PcieTransport / vfio.
 //
 // Build (on a DEVOURER_PCIE=ON tree):
-//   g++ -std=c++20 -O2 -Isrc -Iexamples/tdma tests/pcie_txegress_tx.cpp \
-//     build-pcie/libdevourer.a $(pkg-config --cflags --libs libusb-1.0) \
+//   g++ -std=c++20 -O2 -DDEVOURER_HAVE_PCIE=1 -Isrc -Iexamples/tdma \
+//     tests/pcie_txegress_tx.cpp build-pcie/libdevourer.a \
+//     $(pkg-config --cflags --libs libusb-1.0) \
 //     -lpthread -o build-pcie/pcie_txegress_tx
 // Run: sudo DEVOURER_PCIE_BDF=0000:01:00.0 DEVOURER_CHANNEL=36 \
 //        build-pcie/pcie_txegress_tx [secs]
@@ -50,11 +51,21 @@ int main(int argc, char **argv) {
 
   const auto rt = devourer::build_stream_radiotap(
       devourer::parse_tx_mode_str("6M"));                  // legacy 6M, widely heard
+  auto host_ns = [] {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  };
   uint32_t seq = 0;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(secs);
   while (std::chrono::steady_clock::now() < deadline) {
     uint64_t tsf = dev->ReadTsf();                          // submit-time stamp (TX clock)
-    auto f = tdma::build_frame(rt, tdma::Class::Marker, seq++, 0, tsf);
+    // TD v2: host_ns re-stamped as the LAST thing before send (tag tail bytes),
+    // so the host-clock fit measures the send_packet call itself.
+    auto f = tdma::build_frame(rt, tdma::Class::Marker, seq++, 0, tsf, host_ns());
+    uint64_t hn = host_ns();
+    for (int i = 0; i < 8; ++i)
+      f[f.size() - 8 + i] = (uint8_t)(hn >> (8 * i));
     dev->send_packet(f.data(), f.size());
     std::this_thread::sleep_for(std::chrono::microseconds(gap_us));
   }

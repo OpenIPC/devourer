@@ -85,6 +85,10 @@ public:
   uint64_t ReadTsf() override;
   void WriteTsf(uint64_t tsf) override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+  /* In-place beacon content swap (IRtlDevice contract): a fresh
+   * download_beacon_page; interval/TBTT/port identity untouched. */
+  bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) override;
+  bool StopBeacon() override;
   int32_t AdjustBeaconTiming(int32_t microseconds) override;
   int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
   /* TSF-preserving absolute TBTT pin (IRtlDevice contract; the J2 pattern —

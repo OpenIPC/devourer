@@ -573,6 +573,17 @@ target_link_libraries(AdapterCapsSelftest PRIVATE devourer)
 
 add_test(NAME adapter_caps_derive COMMAND AdapterCapsSelftest)
 
+# Headless guard for the per-UE RX attribution seed (src/cell/UeRxAttribution.h)
+# — TA extraction over the addr2-carrying frame types, the per-TA windowed
+# aggregate folding, drain semantics, and the bounded-table eviction accounting
+# the M1 UeRegistry will build on.
+add_executable(UeRxAttributionSelftest
+    tests/ue_rx_attribution_selftest.cpp
+)
+target_link_libraries(UeRxAttributionSelftest PRIVATE devourer)
+
+add_test(NAME ue_rx_attribution_derive COMMAND UeRxAttributionSelftest)
+
 # Headless guard for the TsfSync one-way time-distribution fit (src/TsfSync.h):
 # skew/offset recovery from beacon {egress, arrival} TSF pairs, clock
 # translation, the local 32-bit TSF wrap, and the Packet::TxEgressTsf pick.

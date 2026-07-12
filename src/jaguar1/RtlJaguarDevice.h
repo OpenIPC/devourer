@@ -234,6 +234,10 @@ public:
    * stored beacon airs with the hardware sequence pinned at 0 (kernel rtw88
    * parity). `interval_tu` is the beacon interval in TU (1024 µs). */
   bool StartBeacon(const uint8_t* beacon, size_t len, int interval_tu) override;
+  /* In-place beacon content swap (IRtlDevice contract): retain the new MPDU +
+   * a fresh BCNQ-boundary store; interval/TBTT/port identity untouched. */
+  bool UpdateBeaconPayload(const uint8_t* beacon, size_t len) override;
+  bool StopBeacon() override;
   /* Beacon-TBTT steering (IRtlDevice contract) — the Jaguar2 steer-then-
    * re-download pattern: re-download the retained MPDU after the re-latch to
    * re-arm the bcn-valid latch. */

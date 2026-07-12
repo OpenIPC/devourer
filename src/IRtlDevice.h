@@ -289,6 +289,31 @@ public:
     return false;
   }
 
+  /* Replace the ACTIVE beacon's content in place — the dynamic-grant delivery
+   * primitive (a scheduled MAC carries its DCI-style grant map in the beacon
+   * body). Same buffer contract as StartBeacon (a leading radiotap header is
+   * stripped; the raw 802.11 MPDU lands in the reserved page); the beacon
+   * interval, TBTT phase and port identity are NOT touched — changing
+   * addr2/addr3 mid-flight is unsupported (the port registers keep the
+   * StartBeacon identity). Requires an active StartBeacon; returns false
+   * otherwise. Rides the same reserved-page re-download the TBTT steers use,
+   * so the cost bound is the steer's: at most one skipped beacon per update
+   * while the valid latch re-arms, and the swap is NOT atomic versus TBTT (a
+   * beacon airing during the download may still carry the previous content).
+   * Measured per-generation skip/latency numbers: docs/beacon-grant.md. */
+  virtual bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
+    (void)beacon; (void)len;
+    return false;
+  }
+
+  /* Stop the hardware beacon: EN_BCN_FUNCTION off + net_type back to No Link.
+   * The chip beacons AUTONOMOUSLY once StartBeacon arms it — killing the host
+   * process does NOT silence it (bench-bitten: a killed probe's beacon kept
+   * airing and contaminated the next test's witness) — so any beaconing
+   * session that ends without a device power-cycle must call this. Idempotent;
+   * returns false when no beacon was active. */
+  virtual bool StopBeacon() { return false; }
+
   /* Disable / restore the MAC EDCCA energy-detect gate (the vendor dis_cca
    * recipe). With EDCCA off the MAC does not defer TX to carrier-sense, so a
    * TBTT beacon airs exactly on schedule instead of after a CSMA backoff — the

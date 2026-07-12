@@ -1732,6 +1732,42 @@ bool RtlJaguar3Device::StartBeacon(const uint8_t *beacon, size_t len,
   return true;
 }
 
+bool RtlJaguar3Device::UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_bcn_interval_tu <= 0) {
+    _logger->error("beacon-tbtt(J3): UpdateBeaconPayload without an active beacon");
+    return false;
+  }
+  /* Same buffer contract as StartBeacon: strip a leading radiotap header. */
+  size_t rt = (len >= 4) ? (size_t)(beacon[2] | (beacon[3] << 8)) : 0;
+  if (rt > len) rt = 0;
+  /* A fresh rsvd-page download replaces the TBTT engine's buffer; the J3
+   * latch is stable across it (no steer-style re-latch), so the enable path,
+   * interval, TBTT phase and port identity are all untouched. */
+  if (!_hal.download_beacon_page(beacon + rt, static_cast<uint32_t>(len - rt))) {
+    _logger->error("beacon-tbtt(J3): UpdateBeaconPayload rsvd-page download failed");
+    return false;
+  }
+  return true;
+}
+
+bool RtlJaguar3Device::StopBeacon() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_bcn_interval_tu <= 0)
+    return false;
+  /* EN_BCN_FUNCTION off (keep DIS_TSF_UDT), beacon-queue download off,
+   * net_type back to No Link — the StartBeacon enables, reversed. */
+  _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 4));
+  uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
+  _device.rtw_write<uint32_t>(0x0420, txq & ~(1u << 22) /* BIT_EN_BCNQ_DL */);
+  uint8_t nt = _device.rtw_read8(0x0102);
+  _device.rtw_write8(0x0102, static_cast<uint8_t>(nt & ~0x03u));
+  _bcn_interval_tu = 0;
+  _logger->info("beacon-tbtt(J3): stopped (EN_BCN off, EN_BCNQ_DL off, "
+                "net_type->NoLink)");
+  return true;
+}
+
 int32_t RtlJaguar3Device::AdjustBeaconTiming(int32_t microseconds) {
   int nominal;
   {

@@ -49,40 +49,51 @@ static const uint8_t kSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
 static constexpr size_t kHdrLen = 24;     // 802.11 header up to the body
 // 'T''D' ver cls seq[4] burst[4] tx_tsf[8]. The 8-byte TX-TSF stamp lets the
 // TSF-sync RX measure the TX↔RX crystal drift (0 when the TX can't read TSF).
+// v2 appends host_ns[8] — the transmitter's steady_clock at the send_packet
+// call, so a witness can fit air-arrival directly against the HOST clock (the
+// quantity a host-side slot scheduler actually controls), uncontaminated by
+// the ReadTsf control-read round-trip. v1 frames stay parseable.
 static constexpr size_t kTagLen = 20;
+static constexpr size_t kTagLenV2 = 28;
 static constexpr size_t kMinData = kHdrLen + kTagLen;
 
 // Build a full TX buffer: [radiotap for this class][802.11 header][TD tag].
+// A nonzero host_ns selects the v2 tag.
 inline std::vector<uint8_t> build_frame(const std::vector<uint8_t>& radiotap,
                                         Class cls, uint32_t seq, uint32_t burst,
-                                        uint64_t tx_tsf = 0) {
+                                        uint64_t tx_tsf = 0,
+                                        uint64_t host_ns = 0) {
   static const uint8_t hdr[kHdrLen] = {
       0x40, 0x00, 0x00, 0x00,                         // FC + duration
       0xff, 0xff, 0xff, 0xff, 0xff, 0xff,             // addr1 broadcast
       0x57, 0x42, 0x75, 0x05, 0xd6, 0x00,             // addr2 = SA
       0x57, 0x42, 0x75, 0x05, 0xd6, 0x00,             // addr3
       0x80, 0x00};                                    // seq ctl
+  const size_t tag_len = host_ns ? kTagLenV2 : kTagLen;
   std::vector<uint8_t> f;
-  f.reserve(radiotap.size() + kHdrLen + kTagLen);
+  f.reserve(radiotap.size() + kHdrLen + tag_len);
   f.insert(f.end(), radiotap.begin(), radiotap.end());
   f.insert(f.end(), hdr, hdr + kHdrLen);
-  uint8_t tag[kTagLen] = {
-      'T', 'D', 1, static_cast<uint8_t>(cls),
+  uint8_t tag[kTagLenV2] = {
+      'T', 'D', static_cast<uint8_t>(host_ns ? 2 : 1), static_cast<uint8_t>(cls),
       static_cast<uint8_t>(seq),        static_cast<uint8_t>(seq >> 8),
       static_cast<uint8_t>(seq >> 16),  static_cast<uint8_t>(seq >> 24),
       static_cast<uint8_t>(burst),      static_cast<uint8_t>(burst >> 8),
       static_cast<uint8_t>(burst >> 16),static_cast<uint8_t>(burst >> 24)};
   for (int i = 0; i < 8; ++i) tag[12 + i] = static_cast<uint8_t>(tx_tsf >> (8 * i));
-  f.insert(f.end(), tag, tag + kTagLen);
+  for (int i = 0; i < 8; ++i) tag[20 + i] = static_cast<uint8_t>(host_ns >> (8 * i));
+  f.insert(f.end(), tag, tag + tag_len);
   return f;
 }
 
 struct Parsed {
   bool ok = false;
+  uint8_t ver = 0;
   Class cls = Class::Bulk;
   uint32_t seq = 0;
   uint32_t burst = 0;
   uint64_t tx_tsf = 0;
+  uint64_t host_ns = 0; // v2 only: TX host steady_clock at send (0 on v1)
 };
 
 // Parse an RX Packet.Data span (802.11 MPDU) into a TD tag, if it is one of ours.
@@ -92,6 +103,7 @@ inline Parsed parse_frame(const uint8_t* data, size_t len) {
   if (std::memcmp(data + 10, kSa, 6) != 0) return p;    // not our SA
   const uint8_t* t = data + kHdrLen;
   if (t[0] != 'T' || t[1] != 'D') return p;
+  p.ver = t[2];
   p.cls = static_cast<Class>(t[3]);
   p.seq = static_cast<uint32_t>(t[4]) | (static_cast<uint32_t>(t[5]) << 8) |
           (static_cast<uint32_t>(t[6]) << 16) | (static_cast<uint32_t>(t[7]) << 24);
@@ -99,6 +111,9 @@ inline Parsed parse_frame(const uint8_t* data, size_t len) {
             (static_cast<uint32_t>(t[10]) << 16) | (static_cast<uint32_t>(t[11]) << 24);
   for (int i = 0; i < 8; ++i)
     p.tx_tsf |= static_cast<uint64_t>(t[12 + i]) << (8 * i);
+  if (p.ver >= 2 && len >= kHdrLen + kTagLenV2)
+    for (int i = 0; i < 8; ++i)
+      p.host_ns |= static_cast<uint64_t>(t[20 + i]) << (8 * i);
   p.ok = true;
   return p;
 }

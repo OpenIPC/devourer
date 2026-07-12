@@ -1342,6 +1342,19 @@ int main(int argc, char **argv) {
     if (th.joinable())
       th.join();
 
+  { /* Final TX-submission tally — the periodic tx.stats above emits only
+     * every 500 frames, so a short run would otherwise never report its true
+     * count (test scripts read the last tx.stats as the frames-sent
+     * denominator). */
+    auto ts = rtlDevice->GetTxStats();
+    devourer::Ev(*g_ev, "tx.stats")
+        .f("submitted", (unsigned long long)ts.submitted)
+        .f("failed", (unsigned long long)ts.failed)
+        .f("was_timeout", ts.last_was_timeout ? 1 : 0)
+        .f("last_rc", ts.last_error_rc)
+        .f("final", 1);
+  }
+
   /* Bounded hop mode (DEVOURER_HOP_ROUNDS>0) reaches here when its rounds
    * complete; the signal and back-off paths also fall through. */
   if (!hop_channels.empty()) {

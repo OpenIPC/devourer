@@ -521,6 +521,12 @@ if(DEVOURER_KESTREL)
     target_include_directories(KestrelRxParseSelftest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME kestrel_rxparse COMMAND KestrelRxParseSelftest)
+
+    add_executable(KestrelPhyTableSelftest tests/kestrel_phytable_selftest.cpp)
+    target_link_libraries(KestrelPhyTableSelftest PRIVATE devourer)
+    target_include_directories(KestrelPhyTableSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME kestrel_phytable COMMAND KestrelPhyTableSelftest)
 endif()
 
 # Headless guard for the burst-TDMA example's pure logic (examples/tdma/tdma.h):

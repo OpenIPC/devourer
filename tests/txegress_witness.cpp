@@ -76,10 +76,11 @@ int main(int argc, char** argv) {
     if (p.RxAtrib.crc_err || p.Data.size() < 32) return;
     // Parse the TD tag (software tx_tsf); accept only frames that carry it.
     tdma::Parsed td = tdma::parse_frame(p.Data.data(), p.Data.size());
-    uint64_t tx_sw = 0, tx_hw = 0;
+    uint64_t tx_sw = 0, tx_hw = 0, tx_host = 0;
     static const uint8_t kSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
     if (td.ok) {
       tx_sw = td.tx_tsf;          // software-mode: the transmitter's ReadTsf()
+      tx_host = td.host_ns;       // TD v2: TX host steady_clock at send (0 on v1)
     } else if (p.Data[0] == 0x80 && std::memcmp(p.Data.data() + 10, kSa, 6) == 0) {
       // hwbeacon-mode standard beacon (our SA): bytes 24-31 = MAC-inserted egress TSF
       for (int i = 0; i < 8; ++i) tx_hw |= (uint64_t)p.Data[24 + i] << (8 * i);
@@ -88,9 +89,9 @@ int main(int argc, char** argv) {
     }
     ++g_n;
     printf("{\"ev\":\"txeg\",\"seq\":%u,\"tx_sw\":%llu,\"tx_hw\":%llu,"
-           "\"rx_tsfl\":%u,\"host_ns\":%lld}\n",
+           "\"tx_host_ns\":%llu,\"rx_tsfl\":%u,\"host_ns\":%lld}\n",
            td.seq, (unsigned long long)tx_sw, (unsigned long long)tx_hw,
-           p.RxAtrib.tsfl, (long long)host_ns());
+           (unsigned long long)tx_host, p.RxAtrib.tsfl, (long long)host_ns());
     fflush(stdout);
   };
 

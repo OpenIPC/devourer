@@ -86,6 +86,10 @@ public:
   uint64_t ReadTsf() override;
   void WriteTsf(uint64_t tsf) override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+  /* In-place beacon content swap (IRtlDevice contract): retain the new MPDU +
+   * ride the steer re-download; interval/TBTT/port identity untouched. */
+  bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) override;
+  bool StopBeacon() override;
   /* Disable/restore the MAC EDCCA gate (BIT_DIS_EDCCA 0x520[15] + EDCCA-mask
    * 0x524[11] — HalMAC-common with J3) so a TBTT beacon airs on schedule. */
   void SetCcaMode(bool disabled) override;

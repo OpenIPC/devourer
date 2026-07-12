@@ -430,6 +430,100 @@ bool HalKestrel::trx_dmac_init() {
   return true;
 }
 
+void HalKestrel::rx_fltr_init() {
+  /* Frame-type filters: forward all mgmt/ctrl/data subtypes to the host
+   * (FWD_TO_HOST for every subtype). */
+  _device.rtw_write32(r::R_AX_MGNT_FLTR, r::RX_FLTR_ALL_TO_HOST);
+  _device.rtw_write32(r::R_AX_CTRL_FLTR, r::RX_FLTR_ALL_TO_HOST);
+  _device.rtw_write32(r::R_AX_DATA_FLTR, r::RX_FLTR_ALL_TO_HOST);
+  /* rx_fltr_init_opt (default sniffer profile): sniffer mode + accept A1
+   * match / broadcast / multicast + uc/bc CAM match. The PLCP-check bits go
+   * to a separate register (R_AX_PLCP_HDR_FLTR) and default enabled — left as
+   * hardware reset. rmac_init later ORs in the RX max-MPDU-len field. */
+  uint32_t opt = r::B_AX_SNIFFER_MODE | r::B_AX_A_A1_MATCH | r::B_AX_A_BC |
+                 r::B_AX_A_MC | r::B_AX_A_UC_CAM_MATCH | r::B_AX_A_BC_CAM_MATCH;
+  _device.rtw_write32(r::R_AX_RX_FLTR_OPT, opt);
+}
+
+void HalKestrel::rmac_init() {
+  /* Response-BA CAM: select SSN source. */
+  _device.rtw_write8(
+      r::R_AX_RESPBA_CAM_CTRL,
+      static_cast<uint8_t>(_device.rtw_read8(r::R_AX_RESPBA_CAM_CTRL) |
+                           r::B_AX_SSN_SEL));
+  /* Deadlock-protection RX timeouts + reset enable. */
+  uint16_t dlk = _device.rtw_read16(r::R_AX_DLK_PROTECT_CTL);
+  dlk = static_cast<uint16_t>(r::set_clr_word(dlk, r::TRXCFG_RMAC_DATA_TO,
+                                              r::B_AX_RX_DLK_DATA_TIME_MSK,
+                                              r::B_AX_RX_DLK_DATA_TIME_SH));
+  dlk = static_cast<uint16_t>(r::set_clr_word(dlk, r::TRXCFG_RMAC_CCA_TO,
+                                              r::B_AX_RX_DLK_CCA_TIME_MSK,
+                                              r::B_AX_RX_DLK_CCA_TIME_SH));
+  dlk |= r::B_AX_RX_DLK_RST_EN;
+  _device.rtw_write16(r::R_AX_DLK_PROTECT_CTL, dlk);
+  /* Receiver channel-enable: 0xF = accept on all sub-channels (the key RX
+   * gate). */
+  _device.rtw_write8(
+      r::R_AX_RCR,
+      static_cast<uint8_t>(r::set_clr_word(_device.rtw_read8(r::R_AX_RCR), 0xF,
+                                           r::B_AX_CH_EN_MSK, r::B_AX_CH_EN_SH)));
+  /* RX interface timeout threshold. */
+  _device.rtw_write32(r::R_AX_RX_TIME_MON,
+                      r::set_clr_word(_device.rtw_read32(r::R_AX_RX_TIME_MON),
+                                      0x30, r::B_AX_INTF_TIMEOUT_THR_MSK,
+                                      r::B_AX_INTF_TIMEOUT_THR_SH));
+  /* RX max MPDU length (field of R_AX_RX_FLTR_OPT). */
+  _device.rtw_write32(
+      r::R_AX_RX_FLTR_OPT,
+      r::set_clr_word(_device.rtw_read32(r::R_AX_RX_FLTR_OPT),
+                      r::RMAC_RX_MPDU_MAX_LEN, r::B_AX_RX_MPDU_MAX_LEN_MSK,
+                      r::B_AX_RX_MPDU_MAX_LEN_SH));
+}
+
+void HalKestrel::cca_ctrl_init() {
+  uint32_t v = _device.rtw_read32(r::R_AX_CCA_CONTROL);
+  v |= r::CCA_CTRL_SET;
+  v &= ~r::CCA_CTRL_CLR;
+  _device.rtw_write32(r::R_AX_CCA_CONTROL, v);
+}
+
+void HalKestrel::cmac_com_init() {
+  /* TX subcarrier value = 0 (non-loopback) for 20/40/80. */
+  uint32_t v = _device.rtw_read32(r::R_AX_TX_SUB_CARRIER_VALUE);
+  v = r::set_clr_word(v, 0, r::B_AX_TXSC_MSK, r::B_AX_TXSC_20M_SH);
+  v = r::set_clr_word(v, 0, r::B_AX_TXSC_MSK, r::B_AX_TXSC_40M_SH);
+  v = r::set_clr_word(v, 0, r::B_AX_TXSC_MSK, r::B_AX_TXSC_80M_SH);
+  _device.rtw_write32(r::R_AX_TX_SUB_CARRIER_VALUE, v);
+  /* Response-rate-selection: enable OFDM + CCK. */
+  _device.rtw_write32(
+      r::R_AX_PTCL_RRSR1,
+      r::set_clr_word(_device.rtw_read32(r::R_AX_PTCL_RRSR1),
+                      r::RRSR_OFDM_CCK_EN, r::B_AX_RRSR_RATE_EN_MSK,
+                      r::B_AX_RRSR_RATE_EN_SH));
+}
+
+void HalKestrel::cmac_dma_init() {
+  /* Clear RX full-mode pointer bits so RX DMA streams. */
+  clr32(r::R_AX_RXDMA_CTRL_0, r::RX_FULL_MODE);
+}
+
+void HalKestrel::usb_rx_agg_cfg() {
+  /* Disable USB RX aggregation for monitor (stream each frame; simplest to
+   * parse). agg_en=0 leaves the RXAGG_0 enable bit clear. */
+  clr32(r::R_AX_RXAGG_0, 1u << 0);
+}
+
+bool HalKestrel::trx_cmac_rx_init() {
+  rx_fltr_init();
+  cca_ctrl_init();
+  rmac_init();
+  cmac_com_init();
+  cmac_dma_init();
+  usb_rx_agg_cfg();
+  _logger->info("Kestrel TRX: CMAC RX init done (fltr + rmac + cca + dma)");
+  return true;
+}
+
 bool HalKestrel::read_efuse(EfuseInfo &out, std::array<uint8_t, 1536> *raw_phys) {
   std::array<uint8_t, r::WL_EFUSE_PHYS_SIZE_8852B> phys{};
   if (!read_phys_efuse(phys.data(), phys.size()))

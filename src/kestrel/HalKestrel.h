@@ -54,6 +54,15 @@ public:
    * land in later steps. */
   bool trx_dmac_init();
 
+  /* M2a — the CMAC half (RX path): promiscuous RX filter, receiver MAC
+   * (RCR channel-enable + DLK timeouts + RX max-len), CCA control, TX
+   * subcarrier / RRSR, RX DMA full-mode clear, and USB RX aggregation. Must
+   * run after trx_dmac_init. The TX/protocol CMAC sub-inits (scheduler EDCA,
+   * NAV, spatial-reuse, tmac, trxptcl, ptcl, addr-cam) are not needed for
+   * monitor RX and are omitted. Actual reception also requires the BB/RF/
+   * channel bring-up (M3). */
+  bool trx_cmac_rx_init();
+
   /* Chip cut version, read fresh from R_AX_SYS_CFG1[15:12]. */
   uint8_t read_cut();
 
@@ -82,6 +91,13 @@ private:
   void mpdu_proc_init();
   void sec_eng_init();
   bool chk_dle_rdy(uint16_t status_reg, uint32_t rdy_bits, const char *what);
+  /* M2a CMAC sub-inits (trxcfg.c / rx_filter.c). */
+  void rx_fltr_init();
+  void rmac_init();
+  void cca_ctrl_init();
+  void cmac_com_init();
+  void cmac_dma_init();
+  void usb_rx_agg_cfg();
   /* Physical efuse read loop (read_hw_efuse, DDV bank) into `phys`. */
   bool read_phys_efuse(uint8_t *phys, uint32_t size);
   void enable_efuse_pwr_cut();

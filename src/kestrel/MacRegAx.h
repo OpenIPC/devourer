@@ -320,6 +320,66 @@ constexpr uint16_t SCC_WDE_QT_CPU_IO = 8;
 constexpr uint16_t SCC_PLE_MIN[11] = {286, 0, 16, 48, 13, 13, 178, 0, 32, 14, 8};
 constexpr uint16_t SCC_PLE_MAX[11] = {286, 0, 32, 48, 29, 13, 194, 0, 48, 14, 24};
 
+/* ---- CMAC RX init (M2a cont.; trxcfg.c / rx_filter.c / mac_reg_ax.h) ---- */
+constexpr uint16_t R_AX_RXDMA_CTRL_0 = 0xC804;
+constexpr uint32_t RX_FULL_MODE = /* RU0/1/2/3 + CSI + RXSTS ptr-full-mode */
+    (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5);
+constexpr uint16_t R_AX_TX_SUB_CARRIER_VALUE = 0xC088;
+constexpr uint8_t B_AX_TXSC_20M_SH = 0;
+constexpr uint8_t B_AX_TXSC_40M_SH = 4;
+constexpr uint8_t B_AX_TXSC_80M_SH = 8;
+constexpr uint32_t B_AX_TXSC_MSK = 0xf;
+constexpr uint16_t R_AX_PTCL_RRSR1 = 0xC090;
+constexpr uint8_t B_AX_RRSR_RATE_EN_SH = 8;
+constexpr uint32_t B_AX_RRSR_RATE_EN_MSK = 0xf;
+constexpr uint8_t RRSR_OFDM_CCK_EN = 3;
+constexpr uint16_t R_AX_CCA_CONTROL = 0xC390;
+/* cca_ctrl_init: bits to set vs clear (verified mac_reg_ax.h). */
+constexpr uint32_t CCA_CTRL_SET =
+    (1u << 30) | (1u << 29) | (1u << 28) | (1u << 24) | /* TB basic_nav/btcca/edcca/p20 */
+    (1u << 21) | (1u << 16) |                           /* SIFS btcca/p20 */
+    (1u << 7) | (1u << 6) | (1u << 5) | (1u << 4) |     /* CTN intra/basic/btcca/edcca */
+    (1u << 3) | (1u << 2) | (1u << 1) | (1u << 0);      /* CTN cca s80/s40/s20/p20 */
+constexpr uint32_t CCA_CTRL_CLR =
+    (1u << 31) | (1u << 27) | (1u << 26) | (1u << 25) | /* TB tx_nav/cca s80/s40/s20 */
+    (1u << 19) | (1u << 18) | (1u << 17) |              /* SIFS cca s80/s40/s20 */
+    (1u << 8) | (1u << 20);                             /* CTN txnav, SIFS edcca */
+constexpr uint16_t R_AX_RCR = 0xCE00;
+constexpr uint8_t B_AX_CH_EN_SH = 0;
+constexpr uint32_t B_AX_CH_EN_MSK = 0xf;
+constexpr uint16_t R_AX_DLK_PROTECT_CTL = 0xCE02;
+constexpr uint8_t B_AX_RX_DLK_DATA_TIME_SH = 4;
+constexpr uint32_t B_AX_RX_DLK_DATA_TIME_MSK = 0xf;
+constexpr uint8_t B_AX_RX_DLK_CCA_TIME_SH = 8;
+constexpr uint32_t B_AX_RX_DLK_CCA_TIME_MSK = 0xff;
+constexpr uint16_t B_AX_RX_DLK_RST_EN = 1u << 1;
+constexpr uint16_t R_AX_RX_FLTR_OPT = 0xCE20;
+constexpr uint32_t B_AX_SNIFFER_MODE = 1u << 0;
+constexpr uint32_t B_AX_A_A1_MATCH = 1u << 1;
+constexpr uint32_t B_AX_A_BC = 1u << 2;
+constexpr uint32_t B_AX_A_MC = 1u << 3;
+constexpr uint32_t B_AX_A_UC_CAM_MATCH = 1u << 4;
+constexpr uint32_t B_AX_A_BC_CAM_MATCH = 1u << 5;
+constexpr uint32_t B_AX_A_CRC32_ERR = 1u << 11;
+constexpr uint8_t B_AX_RX_MPDU_MAX_LEN_SH = 16;
+constexpr uint32_t B_AX_RX_MPDU_MAX_LEN_MSK = 0x3f;
+constexpr uint16_t R_AX_CTRL_FLTR = 0xCE24;
+constexpr uint16_t R_AX_MGNT_FLTR = 0xCE28;
+constexpr uint16_t R_AX_DATA_FLTR = 0xCE2C;
+constexpr uint32_t RX_FLTR_ALL_TO_HOST = 0x55555555; /* 16 subtypes x 2b, FWD_TO_HOST=1 */
+constexpr uint16_t R_AX_RESPBA_CAM_CTRL = 0xCE3C;
+constexpr uint32_t B_AX_SSN_SEL = 1u << 2;
+constexpr uint16_t R_AX_RX_TIME_MON = 0xCEEC;
+constexpr uint8_t B_AX_INTF_TIMEOUT_THR_SH = 16;
+constexpr uint32_t B_AX_INTF_TIMEOUT_THR_MSK = 0x3f;
+constexpr uint16_t TRXCFG_RMAC_DATA_TO = 15;
+constexpr uint16_t TRXCFG_RMAC_CCA_TO = 32;
+/* rx_max_len for band0 = min(c0_rx_qta[=cma0_dma 178], PLD_RLS_MAX_PG[127])
+ * * ple_pg_size[128] / RX_MAX_LEN_UNIT[512] = 127*128/512 = 31. */
+constexpr uint16_t RMAC_RX_MPDU_MAX_LEN = 31;
+/* USB RX aggregation (usb_rx_agg_cfg_8852b). */
+constexpr uint16_t R_AX_RXAGG_0 = 0x8900;
+
 /* SET_CLR_WORD(orig, val, FIELD) — replace FIELD bits with val. */
 inline uint32_t set_clr_word(uint32_t orig, uint32_t val, uint32_t msk,
                              uint8_t sh) {

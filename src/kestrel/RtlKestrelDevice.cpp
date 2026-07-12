@@ -78,7 +78,9 @@ bool RtlKestrelDevice::PowerOnFwAndTrx(kestrel::EfuseInfo &out) {
     return false;
   if (!_hal.download_firmware(_hal.read_cut()))
     return false;
-  return _hal.trx_dmac_init();
+  if (!_hal.trx_dmac_init())
+    return false;
+  return _hal.trx_cmac_rx_init();
 }
 
 void RtlKestrelDevice::not_ported(const char *entry,

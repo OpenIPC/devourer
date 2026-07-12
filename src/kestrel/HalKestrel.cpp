@@ -517,6 +517,21 @@ void HalKestrel::usb_rx_agg_cfg() {
 }
 
 bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
+  /* set_enable_bb_rf (hw.c) — release the BB from reset + enable the RF/AFE
+   * clocks. Without this the BB is held in reset and silently drops every
+   * halbb/halrf register write (readback = 0). All MAC-space (wIndex=0). */
+  set32(r::R_AX_SYS_FUNC_EN, r::B_AX_FEN_BBRSTB | r::B_AX_FEN_BB_GLB_RSTN);
+  field32(r::R_AX_SPS_DIG_ON_CTRL0, 0x1, r::B_AX_REG_ZCDC_H_MSK,
+          r::B_AX_REG_ZCDC_H_SH);
+  /* RDC KS/BB: AFC_AFEDIG write 1 / 0 / 1. */
+  set32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
+  clr32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
+  set32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
+  write_xtal_si(r::XTAL_SI_WL_RFC_S0, 0xC7, 0xFF);
+  write_xtal_si(r::XTAL_SI_WL_RFC_S1, 0xC7, 0xFF);
+  _device.rtw_write8(r::R_AX_PHYREG_SET, r::PHYREG_SET_XYN_CYCLE);
+  _logger->info("Kestrel PHY: BB/RF enabled (out of reset)");
+
   /* --- BB register + gain tables (halbb_cfg_bbcr): direct write32, with the
    * 0xf9..0xfe delay pseudo-addresses and the phy1 (0x100xxxxx) entries
    * skipped for single-PHY. --- */
@@ -688,6 +703,25 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
 
   _logger->info("Kestrel PHY: tuned to ch{} bw20 ({})", channel,
                 is_2g ? "2.4G" : "5G");
+
+  /* Diagnostic readback: confirm the writes landed and where RX stands.
+   * 0x4004 was set to 0xCA014000 by the phy_reg table — a round-trip probe of
+   * whether the wIndex=1 BB window actually reaches the baseband. */
+  const uint32_t bb_4004 = _device.rtw_read32_wide(0x4004 + BB_WIN);
+  _device.rtw_write32_wide(0x4004 + BB_WIN, 0x12345678u);
+  const uint32_t bb_4004_rt = _device.rtw_read32_wide(0x4004 + BB_WIN);
+  _logger->info("Kestrel RX-diag: BB0x4004(table)=0x{:08x} after-write="
+                "0x{:08x} (want CA014000 / 12345678)",
+                bb_4004, bb_4004_rt);
+  const uint32_t bb_4738 = _device.rtw_read32_wide(0x4738 + BB_WIN);
+  const uint32_t rf18a = rf_read(0, 0x18);
+  const uint32_t rf18b = rf_read(1, 0x18);
+  const uint32_t hci_fen = _device.rtw_read32(0x8380);        /* HCI_FUNC_EN */
+  const uint8_t rcr = _device.rtw_read8(0xCE00);              /* RCR CH_EN */
+  const uint32_t rxstate = _device.rtw_read32(0xCEF0);       /* RX_STATE_MON */
+  _logger->info("Kestrel RX-diag: BB0x4738=0x{:08x} RF18a=0x{:05x} "
+                "RF18b=0x{:05x} HCI_FEN=0x{:08x} RCR=0x{:02x} RXstate=0x{:08x}",
+                bb_4738, rf18a, rf18b, hci_fen, rcr, rxstate);
   return true;
 }
 

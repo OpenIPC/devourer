@@ -320,6 +320,21 @@ constexpr uint16_t SCC_WDE_QT_CPU_IO = 8;
 constexpr uint16_t SCC_PLE_MIN[11] = {286, 0, 16, 48, 13, 13, 178, 0, 32, 14, 8};
 constexpr uint16_t SCC_PLE_MAX[11] = {286, 0, 32, 48, 29, 13, 194, 0, 48, 14, 24};
 
+/* ---- BB/RF enable (M3; hw.c set_enable_bb_rf) — releases the BB from reset
+ * so the halbb/halrf register windows actually accept writes. All MAC/system
+ * space (wIndex=0). MUST run before applying the BB/RF tables. ---- */
+constexpr uint16_t R_AX_SYS_FUNC_EN = 0x0002;
+constexpr uint32_t B_AX_FEN_BB_GLB_RSTN = 1u << 1;
+constexpr uint32_t B_AX_FEN_BBRSTB = 1u << 0;
+constexpr uint16_t R_AX_WLRF_CTRL = 0x02F0;
+constexpr uint32_t B_AX_AFC_AFEDIG = 1u << 17;
+constexpr uint8_t B_AX_REG_ZCDC_H_SH = 17;
+constexpr uint32_t B_AX_REG_ZCDC_H_MSK = 0x3;
+constexpr uint16_t R_AX_PHYREG_SET = 0x8040;
+constexpr uint8_t PHYREG_SET_XYN_CYCLE = 0xE;
+constexpr uint8_t XTAL_SI_WL_RFC_S0 = 0x80;
+constexpr uint8_t XTAL_SI_WL_RFC_S1 = 0x81;
+
 /* ---- CMAC RX init (M2a cont.; trxcfg.c / rx_filter.c / mac_reg_ax.h) ---- */
 constexpr uint16_t R_AX_RXDMA_CTRL_0 = 0xC804;
 constexpr uint32_t RX_FULL_MODE = /* RU0/1/2/3 + CSI + RXSTS ptr-full-mode */

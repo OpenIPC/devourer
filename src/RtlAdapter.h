@@ -153,6 +153,13 @@ public:
   uint8_t efuse_OneByteRead(uint16_t addr, uint8_t *data);
   void phy_set_bb_reg(uint16_t regAddr, uint32_t bitMask, uint32_t data);
 
+  /* 32-bit-address register write (see IRtlTransport::write32_wide) — the
+   * halbb/halrf BB window lives at addr + 0x10000 (wIndex=1 over USB), out of
+   * reach of the 16-bit rtw_write path. */
+  bool rtw_write32_wide(uint32_t addr, uint32_t value) {
+    return _transport->write32_wide(addr, value);
+  }
+
   template <typename T> T rtw_read(uint16_t reg_num) {
     if constexpr (sizeof(T) == 1)
       return _transport->read8(reg_num);

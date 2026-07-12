@@ -83,6 +83,12 @@ bool RtlKestrelDevice::PowerOnFwAndTrx(kestrel::EfuseInfo &out) {
   return _hal.trx_cmac_rx_init();
 }
 
+bool RtlKestrelDevice::PowerOnTrxAndPhy(kestrel::EfuseInfo &out) {
+  if (!PowerOnFwAndTrx(out))
+    return false;
+  return _hal.phy_bb_rf_init(out.rfe_type, _hal.read_cut());
+}
+
 void RtlKestrelDevice::not_ported(const char *entry,
                                   const char *milestone) const {
   _logger->error("Kestrel: {} is not ported yet ({})", entry, milestone);

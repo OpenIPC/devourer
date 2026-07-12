@@ -21,7 +21,7 @@ cd "$(dirname "$0")/.."
 
 # First positional arg may be a stage (id|power|fw); default id. Second the ID.
 STAGE="id"
-case "${1:-}" in id|power|fw|trx) STAGE="$1"; shift ;; esac
+case "${1:-}" in id|power|fw|trx|phy) STAGE="$1"; shift ;; esac
 ID="${1:-35bc:0108}"
 VID="${ID%%:*}"
 PID="${ID##*:}"

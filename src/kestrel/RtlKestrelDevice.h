@@ -78,6 +78,10 @@ public:
    * DMAC-half MAC TRX init. Returns false at the first failing step. */
   bool PowerOnFwAndTrx(kestrel::EfuseInfo &out);
 
+  /* M3 bring-up for kestrelprobe's "phy" stage: everything in "trx" plus the
+   * BB + RF table apply. Returns false at the first failing step. */
+  bool PowerOnTrxAndPhy(kestrel::EfuseInfo &out);
+
   kestrel::HalKestrel &hal() { return _hal; }
 
 private:

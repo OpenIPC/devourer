@@ -2,11 +2,14 @@
 
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <thread>
 #include <utility>
 
 #include "KestrelFw.h"
 #include "MacRegAx.h"
+#include "PhyTableLoaderKestrel.h"
+#include "hal8852b_phy.h"
 
 namespace kestrel {
 
@@ -511,6 +514,83 @@ void HalKestrel::usb_rx_agg_cfg() {
   /* Disable USB RX aggregation for monitor (stream each frame; simplest to
    * parse). agg_en=0 leaves the RXAGG_0 enable bit clear. */
   clr32(r::R_AX_RXAGG_0, 1u << 0);
+}
+
+bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
+  /* --- BB register + gain tables (halbb_cfg_bbcr): direct write32, with the
+   * 0xf9..0xfe delay pseudo-addresses and the phy1 (0x100xxxxx) entries
+   * skipped for single-PHY. --- */
+  auto bb_emit = [&](uint32_t addr, uint32_t val) {
+    switch (addr) {
+    case 0xfe:
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      return;
+    case 0xfd:
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      return;
+    case 0xfc:
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      return;
+    case 0xfb:
+      delay_us(50);
+      return;
+    case 0xfa:
+      delay_us(5);
+      return;
+    case 0xf9:
+      delay_us(1);
+      return;
+    default:
+      break;
+    }
+    if ((addr >> 16) == 0x100) /* phy1-only entry, skip on single-PHY */
+      return;
+    /* BB registers live at addr + bb0_cr_offset (0x10000) — wIndex=1 over USB,
+     * clear of the MAC/system space at wIndex=0. */
+    _device.rtw_write32_wide((addr & 0xffff) + 0x10000u, val);
+  };
+  apply_phy_table(array_mp_8852b_phy_reg, array_mp_8852b_phy_reg_len, rfe_type,
+                  cut, bb_emit);
+  _logger->info("Kestrel PHY: BB phy_reg applied ({} words)",
+                array_mp_8852b_phy_reg_len);
+  apply_phy_table(array_mp_8852b_phy_reg_gain, array_mp_8852b_phy_reg_gain_len,
+                  rfe_type, cut, bb_emit);
+  _logger->info("Kestrel PHY: BB gain applied");
+
+  /* --- RF radio-A/B tables: an RF write is a direct BB memory window
+   * (halbb_write_rf_reg_8852b_d): reg 0xe000(A)/0xf000(B) + ((addr&0xff)<<2),
+   * masked to the 20-bit RF width. --- */
+  auto rf_emit = [&](uint32_t base) {
+    return [&, base](uint32_t addr, uint32_t val) {
+      /* delay pseudo-addresses can appear in RF tables too. */
+      if (addr == 0xfe || addr == 0xfd || addr == 0xfc) {
+        long ms = addr == 0xfe ? 50 : addr == 0xfd ? 5 : 1;
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        return;
+      }
+      if (addr == 0xfb || addr == 0xfa || addr == 0xf9) {
+        delay_us(addr == 0xfb ? 50u : addr == 0xfa ? 5u : 1u);
+        return;
+      }
+      const uint32_t direct = base + ((addr & 0xff) << 2);
+      /* RF direct writes also go through the BB window (halbb_set_reg adds
+       * bb0_cr_offset), so +0x10000 / wIndex=1 like BB. Table entries use the
+       * full 20-bit MASKRF, so a plain low-20-bit write matches the vendor RMW
+       * without the (unreliable mid-init) RF-window read-back. */
+      _device.rtw_write32_wide(direct + 0x10000u, val & 0xfffffu);
+      delay_us(1);
+    };
+  };
+  std::function<void(uint32_t, uint32_t)> rf_a = rf_emit(0xe000);
+  std::function<void(uint32_t, uint32_t)> rf_b = rf_emit(0xf000);
+  apply_phy_table(array_mp_8852b_radioa, array_mp_8852b_radioa_len, rfe_type,
+                  cut, rf_a);
+  apply_phy_table(array_mp_8852b_radiob, array_mp_8852b_radiob_len, rfe_type,
+                  cut, rf_b);
+
+  _logger->info("Kestrel PHY: BB+RF tables applied (rfe=0x{:02x} cut={})",
+                rfe_type, cut);
+  return true;
 }
 
 bool HalKestrel::trx_cmac_rx_init() {

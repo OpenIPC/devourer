@@ -63,6 +63,13 @@ public:
    * channel bring-up (M3). */
   bool trx_cmac_rx_init();
 
+  /* M3 — PHY bring-up: apply the halbb BB register + gain tables and the
+   * halrf radio-A/B tables (via PhyTableLoaderKestrel). `rfe_type` / `cut`
+   * select the table variant (from the efuse / chip id). Must run after the
+   * MAC TRX init. This programs the baseband + RF registers; channel tuning
+   * and the RX loop build on it. */
+  bool phy_bb_rf_init(uint8_t rfe_type, uint8_t cut);
+
   /* Chip cut version, read fresh from R_AX_SYS_CFG1[15:12]. */
   uint8_t read_cut();
 

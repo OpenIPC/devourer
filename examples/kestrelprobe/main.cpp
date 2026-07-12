@@ -62,7 +62,7 @@ int main(int argc, char **argv) {
   uint16_t want_vid = 0, want_pid = 0; /* 0 = scan the Kestrel PID table */
   for (int i = 1; i < argc; ++i) {
     const std::string k = argv[i];
-    if (k == "id" || k == "power" || k == "fw" || k == "trx")
+    if (k == "id" || k == "power" || k == "fw" || k == "trx" || k == "phy")
       stage = k;
     else if (k == "--vid" && i + 1 < argc && parse_hex16(argv[++i], want_vid))
       ;
@@ -75,7 +75,8 @@ int main(int argc, char **argv) {
       return 2;
     }
   }
-  const int want = stage == "trx" ? 3 : stage == "fw" ? 2
+  const int want = stage == "phy" ? 4 : stage == "trx" ? 3
+                                    : stage == "fw" ? 2
                                     : stage == "power" ? 1
                                                        : 0;
 
@@ -191,10 +192,11 @@ int main(int argc, char **argv) {
   try {
     /* Re-run the whole sequence so the stage is self-contained (power-on is
      * cheap and idempotent from a clean handle). trx re-runs fw internally. */
-    fw_ok = (want >= 3) ? dev.PowerOnFwAndTrx(efuse)
-                        : dev.PowerOnEfuseAndFw(efuse);
+    fw_ok = (want >= 4)   ? dev.PowerOnTrxAndPhy(efuse)
+            : (want >= 3) ? dev.PowerOnFwAndTrx(efuse)
+                          : dev.PowerOnEfuseAndFw(efuse);
   } catch (const std::exception &e) {
-    logger->error("M1b/M2a: bring-up threw: {}", e.what());
+    logger->error("M1b/M2a/M3: bring-up threw: {}", e.what());
   }
   if (want < 3) {
     logger->info("M1b: fw_ok={}", fw_ok);
@@ -203,10 +205,18 @@ int main(int argc, char **argv) {
     libusb_exit(ctx);
     return fw_ok ? 0 : 1;
   }
+  if (want < 4) {
+    /* ---- stage trx (M2a): DMAC + CMAC MAC TRX init ---- */
+    logger->info("M2a: trx_ok={}", fw_ok);
+    devourer::Ev(logger->events(), "kestrel.trx").f("ok", fw_ok);
+    libusb_close(handle);
+    libusb_exit(ctx);
+    return fw_ok ? 0 : 1;
+  }
 
-  /* ---- stage trx (M2a): DMAC-half MAC TRX init ---- */
-  logger->info("M2a: trx_ok={}", fw_ok);
-  devourer::Ev(logger->events(), "kestrel.trx").f("ok", fw_ok);
+  /* ---- stage phy (M3): BB + RF table apply ---- */
+  logger->info("M3: phy_ok={}", fw_ok);
+  devourer::Ev(logger->events(), "kestrel.phy").f("ok", fw_ok);
   libusb_close(handle);
   libusb_exit(ctx);
   return fw_ok ? 0 : 1;

@@ -62,6 +62,11 @@ public:
   virtual bool write32_wide(uint32_t addr, uint32_t v) {
     return write32(static_cast<uint16_t>(addr), v);
   }
+  /* 32-bit-address register read (the read counterpart of write32_wide;
+   * needed for masked BB read-modify-write and RF-window reads). */
+  virtual uint32_t read32_wide(uint32_t addr) {
+    return read32(static_cast<uint16_t>(addr));
+  }
 
   /* ---- frame plane ---- */
   /* Fire-and-forget data TX (the send_packet hot path). `ep` is the USB

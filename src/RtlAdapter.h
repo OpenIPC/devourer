@@ -159,6 +159,9 @@ public:
   bool rtw_write32_wide(uint32_t addr, uint32_t value) {
     return _transport->write32_wide(addr, value);
   }
+  uint32_t rtw_read32_wide(uint32_t addr) {
+    return _transport->read32_wide(addr);
+  }
 
   template <typename T> T rtw_read(uint16_t reg_num) {
     if constexpr (sizeof(T) == 1)

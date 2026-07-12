@@ -53,6 +53,16 @@ public:
                static_cast<uint16_t>(addr >> 16), (uint8_t *)&v, sizeof(v),
                USB_TIMEOUT) == static_cast<int>(sizeof(v));
   }
+  uint32_t read32_wide(uint32_t addr) override {
+    uint32_t data = 0;
+    if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5,
+                                static_cast<uint16_t>(addr & 0xFFFF),
+                                static_cast<uint16_t>(addr >> 16),
+                                (uint8_t *)&data, sizeof(data),
+                                USB_TIMEOUT) == static_cast<int>(sizeof(data)))
+      return data;
+    return 0xFFFFFFFFu; /* INVALID_RF_DATA-style sentinel on a failed read */
+  }
   bool write_bytes(uint16_t reg, const uint8_t *p, size_t n) override;
 
   bool tx_async(uint8_t ep, uint8_t *buf, size_t len,

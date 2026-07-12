@@ -105,6 +105,86 @@ inline void apply_phy_table(const uint32_t *arr, size_t len, uint32_t rfe_type,
   }
 }
 
+/* Apply a halrf *radio* table (array_mp_8852b_radioa/radiob). The RF tables use
+ * a DIFFERENT conditional encoding from the halbb tables above — transcribed
+ * verbatim from halrf_config_8852b_radio_a_reg (halrf_hwimg_8852b.c): entries
+ * with bit31 set are IF/ELSE_IF/ELSE/END that stash the {rfe,cut} condition
+ * (rfe = v1[23:16], cut = v1[7:0], 0xFF = don't-care); a bit30 entry is the
+ * CHK that commits the match; a plain entry (top bits clear) is a register
+ * write, but only while matched — with a "highest matching cut wins" fallback
+ * (cv_max / latest-match replay) for the else branch. `emit(addr,val)` performs
+ * one RF write. */
+inline void apply_rf_table(const uint32_t *arr, size_t len, uint32_t rfe,
+                           uint32_t cut,
+                           const std::function<void(uint32_t, uint32_t)> &emit) {
+  if (arr == nullptr || len < 2)
+    return;
+  constexpr uint32_t DONT_CARE = 0xff;
+  bool is_matched = true, is_skipped = false, is_rfe_match = false;
+  bool is_cart_match = false, is_else_case = false, is_rfe_ever_match = false;
+  uint32_t cv = 0, cv_max = 0, latest = 0;
+
+  for (size_t i = 0; i + 1 < len; i += 2) {
+    const uint32_t v1 = arr[i];
+    const uint32_t v2 = arr[i + 1];
+    if (v1 & (1u << 31)) {
+      const uint32_t c = v1 >> 28;
+      if (c == 0xb) { /* END */
+        is_matched = true;
+        is_skipped = false;
+      } else { /* IF (0x8) / ELSE_IF (0x9) / ELSE (0xa) [/ 0xf header] */
+        const uint32_t rt = (v1 >> 16) & 0xff;
+        is_rfe_match = (rt == DONT_CARE) ? true : (rt == rfe);
+        const uint32_t ct = v1 & 0xff;
+        if (ct == DONT_CARE) {
+          is_cart_match = true;
+        } else {
+          cv = ct;
+          is_cart_match = (ct == cut);
+        }
+        if (c == 0xa) { /* ELSE */
+          is_else_case = !is_skipped;
+          if (!is_rfe_ever_match)
+            is_matched = !is_skipped;
+        }
+      }
+    } else if (v1 & (1u << 30)) { /* CHK */
+      if (is_skipped) {
+        is_matched = false;
+      } else if (is_rfe_match && is_cart_match) {
+        is_matched = true;
+        is_skipped = true;
+      } else {
+        is_matched = false;
+        is_skipped = false;
+      }
+    } else { /* register write */
+      if (is_matched) {
+        emit(v1, v2);
+        is_rfe_match = false;
+        is_else_case = false;
+        is_rfe_ever_match = false;
+      } else if (is_rfe_match) {
+        if (cv >= cv_max) { /* keep the highest matching cut */
+          cv_max = cv;
+          is_rfe_ever_match = true;
+          latest = static_cast<uint32_t>(i);
+        }
+        is_rfe_match = false;
+      } else if (is_else_case) { /* replay the latest matched block */
+        is_else_case = false;
+        is_rfe_ever_match = false;
+        is_rfe_match = false;
+        size_t j = latest;
+        do {
+          emit(arr[j], arr[j + 1]);
+          j += 2;
+        } while (j + 1 < len && !(arr[j] & 0xC0000000u));
+      }
+    }
+  }
+}
+
 } /* namespace kestrel */
 
 #endif /* KESTREL_PHY_TABLE_LOADER_H */

@@ -598,10 +598,12 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   };
   std::function<void(uint32_t, uint32_t)> rf_a = rf_emit(0xe000);
   std::function<void(uint32_t, uint32_t)> rf_b = rf_emit(0xf000);
-  apply_phy_table(array_mp_8852b_radioa, array_mp_8852b_radioa_len, rfe_type,
-                  cut, rf_a);
-  apply_phy_table(array_mp_8852b_radiob, array_mp_8852b_radiob_len, rfe_type,
-                  cut, rf_b);
+  /* The halrf radio tables use their own conditional walker (apply_rf_table),
+   * NOT the halbb one. */
+  apply_rf_table(array_mp_8852b_radioa, array_mp_8852b_radioa_len, rfe_type,
+                 cut, rf_a);
+  apply_rf_table(array_mp_8852b_radiob, array_mp_8852b_radiob_len, rfe_type,
+                 cut, rf_b);
 
   _logger->info("Kestrel PHY: BB+RF tables applied (rfe=0x{:02x} cut={})",
                 rfe_type, cut);

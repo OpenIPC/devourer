@@ -504,6 +504,115 @@ constexpr uint16_t RMAC_RX_MPDU_MAX_LEN = 31;
 /* USB RX aggregation (usb_rx_agg_cfg_8852b). */
 constexpr uint16_t R_AX_RXAGG_0 = 0x8900;
 
+/* ---- Full CMAC init (trxcfg.c cmac_init: the remaining band-0 sub-inits that
+ * were previously skipped — scheduler / tmac / trxptcl / ptcl / nav /
+ * spatial-reuse / addr-cam). All band-0, 8852B, ASIC path. ---- */
+/* scheduler_init */
+constexpr uint16_t R_AX_PREBKF_CFG_1 = 0xC33C;
+constexpr uint8_t B_AX_SIFS_MACTXEN_T1_SH = 0;
+constexpr uint32_t B_AX_SIFS_MACTXEN_T1_MSK = 0x7f;
+constexpr uint32_t SIFS_MACTXEN_T1_V0 = 0x47;
+constexpr uint16_t R_AX_SCH_EXT_CTRL = 0xC3FC;
+constexpr uint32_t B_AX_PORT_RST_TSF_ADV = 1u << 1;
+constexpr uint16_t R_AX_CCA_CFG_0 = 0xC340;
+constexpr uint32_t B_AX_BTCCA_EN = 1u << 5;
+constexpr uint8_t B_AX_R_SIFS_AGGR_TIME_SH = 24;
+constexpr uint32_t B_AX_R_SIFS_AGGR_TIME_MSK = 0x7f;
+constexpr uint16_t R_AX_PREBKF_CFG_0 = 0xC338;
+constexpr uint8_t B_AX_PREBKF_TIME_SH = 0;
+constexpr uint32_t B_AX_PREBKF_TIME_MSK = 0x1f;
+constexpr uint32_t SCH_PREBKF_16US = 0x10;
+constexpr uint16_t R_AX_EDCA_BCNQ_PARAM = 0xC324;
+constexpr uint8_t B_AX_BE_0_CW_SH = 8;
+constexpr uint32_t B_AX_BE_0_CW_MSK = 0xff;
+constexpr uint8_t B_AX_BE_0_AIFS_SH = 0;
+constexpr uint32_t B_AX_BE_0_AIFS_MSK = 0xff;
+constexpr uint16_t BCN_IFS_25US = 0x19;
+/* tmac_init */
+constexpr uint16_t R_AX_MAC_LOOPBACK = 0xCC20;
+constexpr uint32_t B_AX_MACLBK_EN = 1u << 0;
+constexpr uint16_t R_AX_TCR0 = 0xCA00;
+constexpr uint8_t B_AX_TCR_UDF_THSD_SH = 16;
+constexpr uint32_t B_AX_TCR_UDF_THSD_MSK = 0x7f;
+constexpr uint32_t TCR_UDF_THSD = 0x6;
+constexpr uint16_t R_AX_TXD_FIFO_CTRL = 0xCA1C;
+constexpr uint8_t B_AX_TXDFIFO_HIGH_MCS_THRE_SH = 12;
+constexpr uint32_t B_AX_TXDFIFO_HIGH_MCS_THRE_MSK = 0xf;
+constexpr uint8_t B_AX_TXDFIFO_LOW_MCS_THRE_SH = 8;
+constexpr uint32_t B_AX_TXDFIFO_LOW_MCS_THRE_MSK = 0xf;
+constexpr uint32_t TXDFIFO_HIGH_MCS_THRE = 0x7;
+constexpr uint32_t TXDFIFO_LOW_MCS_THRE = 0x7;
+constexpr uint16_t R_AX_TB_PPDU_CTRL = 0xC60C;
+constexpr uint8_t B_AX_SW_PREFER_AC_SH = 0;
+constexpr uint32_t B_AX_SW_PREFER_AC_MSK = 0x3;
+constexpr uint32_t MAC_AX_CMAC_AC_SEL_BK = 1;
+/* trxptcl_init */
+constexpr uint16_t R_AX_TRXPTCL_RESP_0 = 0xCC04;
+constexpr uint8_t B_AX_WMAC_SPEC_SIFS_CCK_SH = 0;
+constexpr uint32_t B_AX_WMAC_SPEC_SIFS_CCK_MSK = 0xff;
+constexpr uint32_t WMAC_SPEC_SIFS_CCK = 0xA;
+constexpr uint8_t B_AX_WMAC_SPEC_SIFS_OFDM_SH = 8;
+constexpr uint32_t B_AX_WMAC_SPEC_SIFS_OFDM_MSK = 0xff;
+constexpr uint32_t WMAC_SPEC_SIFS_OFDM_52B = 0x11;
+constexpr uint16_t R_AX_RXTRIG_TEST_USER_2 = 0xCCB0;
+constexpr uint32_t B_AX_RXTRIG_FCSCHK_EN = 1u << 20;
+constexpr uint16_t R_AX_TRXPTCL_RRSR_CTL_0 = 0xCC08;
+constexpr uint16_t R_AX_TRXPTCL_RRSR_CTL_1 = 0xCC0C;
+constexpr uint8_t B_AX_WMAC_RESP_RATE_EN_SH = 12;
+constexpr uint32_t B_AX_WMAC_RESP_RATE_EN_MSK = 0xf;
+constexpr uint8_t B_AX_WMAC_RRSB_AX_CCK_SH = 16;
+constexpr uint32_t B_AX_WMAC_RRSB_AX_CCK_MSK = 0xf;
+constexpr uint32_t B_AX_WMAC_RESP_REF_RATE_SEL = 1u << 9;
+constexpr uint32_t WMAC_CCK_EN_1M = 0x1;
+constexpr uint32_t WMAC_RRSR_RATE_LEGACY_EN = 0x1;
+constexpr uint32_t REF2RXRATEANDCCTBL = 0;
+/* ptcl_init */
+constexpr uint16_t R_AX_PTCL_COMMON_SETTING_0 = 0xC600;
+constexpr uint32_t B_AX_CMAC_TX_MODE_0 = 1u << 0;
+constexpr uint32_t B_AX_CMAC_TX_MODE_1 = 1u << 1;
+constexpr uint32_t B_AX_PTCL_TRIGGER_SS_EN_0 = 1u << 2;
+constexpr uint32_t B_AX_PTCL_TRIGGER_SS_EN_1 = 1u << 3;
+constexpr uint32_t B_AX_PTCL_TRIGGER_SS_EN_UL = 1u << 4;
+constexpr uint16_t R_AX_PTCLRPT_FULL_HDL = 0xC660;
+constexpr uint8_t B_AX_SPE_RPT_PATH_SH = 4;
+constexpr uint32_t B_AX_SPE_RPT_PATH_MSK = 0x3;
+constexpr uint32_t FWD_TO_WLCPU = 1;
+constexpr uint16_t R_AX_AGG_BK_0 = 0xC604;
+constexpr uint32_t B_AX_WDBK_CFG = 1u << 2;
+constexpr uint32_t B_AX_EN_RTY_BK = 1u << 1;
+constexpr uint32_t B_AX_EN_RTY_BK_COD = 1u << 0;
+constexpr uint16_t R_AX_AMPDU_AGG_LIMIT = 0xC610;
+constexpr uint8_t B_AX_MAX_AGG_NUM_SH = 0;
+constexpr uint32_t B_AX_MAX_AGG_NUM_MSK = 0xff;
+constexpr uint8_t B_AX_AMPDU_MAX_TIME_SH = 24;
+constexpr uint32_t B_AX_AMPDU_MAX_TIME_MSK = 0xff;
+constexpr uint16_t PTCL_MAX_AGG_NUM = 0x40;
+constexpr uint8_t PTCL_AMPDU_MAX_TIME_8852B = 0x3e; /* hw_info max_agg_txtime_reg */
+/* nav_ctrl_init (mac_two_nav_cfg) */
+constexpr uint16_t R_AX_WMAC_NAV_CTL = 0xCC80;
+constexpr uint32_t B_AX_WMAC_PLCP_UP_NAV_EN = 1u << 17;
+constexpr uint32_t B_AX_WMAC_TF_UP_NAV_EN = 1u << 16;
+constexpr uint8_t B_AX_WMAC_NAV_UPPER_SH = 8;
+constexpr uint32_t B_AX_WMAC_NAV_UPPER_MSK = 0xff;
+constexpr uint32_t B_AX_WMAC_NAV_UPPER_EN = 1u << 26;
+constexpr uint32_t NAV_25MS = 0xC4;
+constexpr uint32_t NAV_UPPER_DEFAULT = 0;
+constexpr uint16_t R_AX_SPECIAL_TX_SETTING = 0xC620;
+constexpr uint32_t B_AX_BMC_NAV_PROTECT = 1u << 26;
+/* spatial_reuse_init */
+constexpr uint16_t R_AX_RX_SR_CTRL = 0xCE4A;
+constexpr uint32_t B_AX_SR_EN = 1u << 0;
+constexpr uint32_t B_AX_SR_CTRL_PLCP_EN = 1u << 1;
+constexpr uint16_t R_AX_BSSID_SRC_CTRL = 0xCE4B;
+constexpr uint32_t B_AX_PLCP_SRC_EN = 1u << 0;
+/* addr_cam_init */
+constexpr uint16_t R_AX_ADDR_CAM_CTRL = 0xCE34;
+constexpr uint8_t B_AX_ADDR_CAM_RANGE_SH = 16;
+constexpr uint32_t B_AX_ADDR_CAM_RANGE_MSK = 0xff;
+constexpr uint32_t ADDR_CAM_SERCH_RANGE = 0x7f;
+constexpr uint32_t B_AX_ADDR_CAM_EN = 1u << 0;
+constexpr uint32_t B_AX_ADDR_CAM_CLR = 1u << 8;
+
 /* SET_CLR_WORD(orig, val, FIELD) — replace FIELD bits with val. */
 inline uint32_t set_clr_word(uint32_t orig, uint32_t val, uint32_t msk,
                              uint8_t sh) {

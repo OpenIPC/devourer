@@ -115,11 +115,18 @@ private:
   void mpdu_proc_init();
   void sec_eng_init();
   bool chk_dle_rdy(uint16_t status_reg, uint32_t rdy_bits, const char *what);
-  /* M2a CMAC sub-inits (trxcfg.c / rx_filter.c). */
+  /* CMAC sub-inits (trxcfg.c / rx_filter.c) — the full band-0 cmac_init. */
+  void scheduler_init();
+  bool addr_cam_init();
   void rx_fltr_init();
+  void nav_ctrl_init();
+  void spatial_reuse_init();
+  void tmac_init();
+  void trxptcl_init();
   void rmac_init();
   void cca_ctrl_init();
   void cmac_com_init();
+  void ptcl_init();
   void cmac_dma_init();
   void usb_rx_agg_cfg();
   /* Physical efuse read loop (read_hw_efuse, DDV bank) into `phys`. */

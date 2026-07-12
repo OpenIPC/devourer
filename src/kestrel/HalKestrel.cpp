@@ -646,6 +646,134 @@ void HalKestrel::usb_rx_agg_cfg() {
   clr32(r::R_AX_RXAGG_0, 1u << 0);
 }
 
+void HalKestrel::scheduler_init() {
+  /* scheduler_init (trxcfg.c) — band0, 8852B. */
+  field32(r::R_AX_PREBKF_CFG_1, r::SIFS_MACTXEN_T1_V0,
+          r::B_AX_SIFS_MACTXEN_T1_MSK, r::B_AX_SIFS_MACTXEN_T1_SH);
+  set32(r::R_AX_SCH_EXT_CTRL, r::B_AX_PORT_RST_TSF_ADV);
+  clr32(r::R_AX_CCA_CFG_0, r::B_AX_BTCCA_EN);
+  /* ASIC env leaves CCA_CFG_0's CCA/EDCCA bits as-is. AP-path pre-backoff +
+   * SIFS-aggregation timing (8852B band0). */
+  field32(r::R_AX_PREBKF_CFG_0, r::SCH_PREBKF_16US, r::B_AX_PREBKF_TIME_MSK,
+          r::B_AX_PREBKF_TIME_SH);
+  field32(r::R_AX_CCA_CFG_0, 0x6a, r::B_AX_R_SIFS_AGGR_TIME_MSK,
+          r::B_AX_R_SIFS_AGGR_TIME_SH);
+  /* Beacon-queue EDCA (path BCN): W16 at BCNQ_PARAM+2 = CW|AIFS. */
+  const uint8_t cw = static_cast<uint8_t>((3u << 4) | 2u); /* ecw_max/min */
+  uint16_t edca = static_cast<uint16_t>(
+      ((cw & r::B_AX_BE_0_CW_MSK) << r::B_AX_BE_0_CW_SH) |
+      ((r::BCN_IFS_25US & r::B_AX_BE_0_AIFS_MSK) << r::B_AX_BE_0_AIFS_SH));
+  _device.rtw_write16(r::R_AX_EDCA_BCNQ_PARAM + 2, edca);
+}
+
+bool HalKestrel::addr_cam_init() {
+  /* addr_cam_init (addr_cam.c) — set search range + enable, then reset (band0)
+   * and poll the CLR bit. */
+  uint32_t v = _device.rtw_read32(r::R_AX_ADDR_CAM_CTRL);
+  v |= (r::ADDR_CAM_SERCH_RANGE & r::B_AX_ADDR_CAM_RANGE_MSK)
+       << r::B_AX_ADDR_CAM_RANGE_SH;
+  v |= r::B_AX_ADDR_CAM_EN | r::B_AX_ADDR_CAM_CLR;
+  _device.rtw_write32(r::R_AX_ADDR_CAM_CTRL, v);
+  for (uint32_t cnt = r::TRXCFG_WAIT_CNT; cnt != 0; --cnt) {
+    if (!(_device.rtw_read16(r::R_AX_ADDR_CAM_CTRL) & r::B_AX_ADDR_CAM_CLR))
+      return true;
+    delay_us(r::TRXCFG_WAIT_US);
+  }
+  _logger->error("Kestrel CMAC: ADDR_CAM reset timeout");
+  return false;
+}
+
+void HalKestrel::nav_ctrl_init() {
+  /* nav_ctrl_init (mac_two_nav_cfg): plcp/tgr update-nav enable, upper=25ms. */
+  uint32_t v = _device.rtw_read32(r::R_AX_WMAC_NAV_CTL);
+  v |= r::B_AX_WMAC_PLCP_UP_NAV_EN | r::B_AX_WMAC_TF_UP_NAV_EN;
+  v = r::set_clr_word(v, r::NAV_25MS, r::B_AX_WMAC_NAV_UPPER_MSK,
+                      r::B_AX_WMAC_NAV_UPPER_SH);
+  if (r::NAV_25MS > r::NAV_UPPER_DEFAULT)
+    v |= r::B_AX_WMAC_NAV_UPPER_EN;
+  _device.rtw_write32(r::R_AX_WMAC_NAV_CTL, v);
+  clr32(r::R_AX_SPECIAL_TX_SETTING, r::B_AX_BMC_NAV_PROTECT); /* bmc_nav=0 */
+}
+
+void HalKestrel::spatial_reuse_init() {
+  /* spatial_reuse_init: SR off, PLCP-source BSSID enable. */
+  uint8_t v = static_cast<uint8_t>(_device.rtw_read8(r::R_AX_RX_SR_CTRL) &
+                                   ~(r::B_AX_SR_EN | r::B_AX_SR_CTRL_PLCP_EN));
+  _device.rtw_write8(r::R_AX_RX_SR_CTRL, v);
+  uint8_t v2 = static_cast<uint8_t>(_device.rtw_read8(r::R_AX_BSSID_SRC_CTRL) |
+                                    r::B_AX_PLCP_SRC_EN);
+  _device.rtw_write8(r::R_AX_BSSID_SRC_CTRL, v2);
+}
+
+void HalKestrel::tmac_init() {
+  /* tmac_init: non-loopback, TX underflow threshold, TXD FIFO MCS thresholds,
+   * SW-preferred AC = BK. */
+  clr32(r::R_AX_MAC_LOOPBACK, r::B_AX_MACLBK_EN);
+  field32(r::R_AX_TCR0, r::TCR_UDF_THSD, r::B_AX_TCR_UDF_THSD_MSK,
+          r::B_AX_TCR_UDF_THSD_SH);
+  uint32_t v = _device.rtw_read32(r::R_AX_TXD_FIFO_CTRL);
+  v = r::set_clr_word(v, r::TXDFIFO_HIGH_MCS_THRE,
+                      r::B_AX_TXDFIFO_HIGH_MCS_THRE_MSK,
+                      r::B_AX_TXDFIFO_HIGH_MCS_THRE_SH);
+  v = r::set_clr_word(v, r::TXDFIFO_LOW_MCS_THRE,
+                      r::B_AX_TXDFIFO_LOW_MCS_THRE_MSK,
+                      r::B_AX_TXDFIFO_LOW_MCS_THRE_SH);
+  _device.rtw_write32(r::R_AX_TXD_FIFO_CTRL, v);
+  field32(r::R_AX_TB_PPDU_CTRL, r::MAC_AX_CMAC_AC_SEL_BK, r::B_AX_SW_PREFER_AC_MSK,
+          r::B_AX_SW_PREFER_AC_SH);
+}
+
+void HalKestrel::trxptcl_init() {
+  /* trxptcl_init: response SIFS (CCK/OFDM), RX-trigger FCS check, and the
+   * response-rate-selection (RRSR): 1M CCK, legacy-rate response enabled. */
+  uint32_t v = _device.rtw_read32(r::R_AX_TRXPTCL_RESP_0);
+  v = r::set_clr_word(v, r::WMAC_SPEC_SIFS_CCK, r::B_AX_WMAC_SPEC_SIFS_CCK_MSK,
+                      r::B_AX_WMAC_SPEC_SIFS_CCK_SH);
+  v = r::set_clr_word(v, r::WMAC_SPEC_SIFS_OFDM_52B,
+                      r::B_AX_WMAC_SPEC_SIFS_OFDM_MSK,
+                      r::B_AX_WMAC_SPEC_SIFS_OFDM_SH);
+  _device.rtw_write32(r::R_AX_TRXPTCL_RESP_0, v);
+  set32(r::R_AX_RXTRIG_TEST_USER_2, r::B_AX_RXTRIG_FCSCHK_EN);
+
+  uint32_t c0 = _device.rtw_read32(r::R_AX_TRXPTCL_RRSR_CTL_0);
+  uint32_t rate_en = (((c0 >> r::B_AX_WMAC_RESP_RATE_EN_SH) &
+                       r::B_AX_WMAC_RESP_RATE_EN_MSK) |
+                      r::WMAC_RRSR_RATE_LEGACY_EN);
+  c0 = r::set_clr_word(c0, rate_en, r::B_AX_WMAC_RESP_RATE_EN_MSK,
+                       r::B_AX_WMAC_RESP_RATE_EN_SH);
+  c0 = r::set_clr_word(c0, r::WMAC_CCK_EN_1M, r::B_AX_WMAC_RRSB_AX_CCK_MSK,
+                       r::B_AX_WMAC_RRSB_AX_CCK_SH);
+  c0 &= ~r::B_AX_WMAC_RESP_REF_RATE_SEL; /* ref_rate_sel = REF2RXRATEANDCCTBL(0) */
+  _device.rtw_write32(r::R_AX_TRXPTCL_RRSR_CTL_0, c0);
+}
+
+void HalKestrel::ptcl_init() {
+  /* ptcl_init (band0, non-SW/HW TX mode): CMAC TX mode on, trigger-SS off;
+   * special-report path -> WLCPU; AMPDU single-BK / agg-retry; agg limits. */
+  uint8_t v = static_cast<uint8_t>(
+      (_device.rtw_read8(r::R_AX_PTCL_COMMON_SETTING_0) |
+       (r::B_AX_CMAC_TX_MODE_0 | r::B_AX_CMAC_TX_MODE_1)) &
+      ~(r::B_AX_PTCL_TRIGGER_SS_EN_0 | r::B_AX_PTCL_TRIGGER_SS_EN_1 |
+        r::B_AX_PTCL_TRIGGER_SS_EN_UL));
+  _device.rtw_write8(r::R_AX_PTCL_COMMON_SETTING_0, v);
+  uint8_t h = static_cast<uint8_t>(
+      r::set_clr_word(_device.rtw_read8(r::R_AX_PTCLRPT_FULL_HDL),
+                      r::FWD_TO_WLCPU, r::B_AX_SPE_RPT_PATH_MSK,
+                      r::B_AX_SPE_RPT_PATH_SH));
+  _device.rtw_write8(r::R_AX_PTCLRPT_FULL_HDL, h);
+
+  uint8_t bk = static_cast<uint8_t>(
+      _device.rtw_read8(r::R_AX_AGG_BK_0) &
+      ~(r::B_AX_WDBK_CFG | r::B_AX_EN_RTY_BK | r::B_AX_EN_RTY_BK_COD));
+  _device.rtw_write8(r::R_AX_AGG_BK_0, bk);
+  uint32_t a = _device.rtw_read32(r::R_AX_AMPDU_AGG_LIMIT);
+  a = r::set_clr_word(a, r::PTCL_MAX_AGG_NUM - 1, r::B_AX_MAX_AGG_NUM_MSK,
+                      r::B_AX_MAX_AGG_NUM_SH);
+  a = r::set_clr_word(a, r::PTCL_AMPDU_MAX_TIME_8852B, r::B_AX_AMPDU_MAX_TIME_MSK,
+                      r::B_AX_AMPDU_MAX_TIME_SH);
+  _device.rtw_write32(r::R_AX_AMPDU_AGG_LIMIT, a);
+}
+
 bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   /* set_enable_bb_rf (hw.c) — release the BB from reset + enable the RF/AFE
    * clocks. Without this the BB is held in reset and silently drops every
@@ -915,13 +1043,25 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
 }
 
 bool HalKestrel::trx_cmac_rx_init() {
+  /* Full band-0 cmac_init (trxcfg.c cmac_init), in vendor order. rst_port_info
+   * and the sec-cam table are host-side software state (no chip registers) and
+   * are omitted; the rest is transcribed verbatim. */
+  scheduler_init();
+  if (!addr_cam_init())
+    return false;
   rx_fltr_init();
   cca_ctrl_init();
+  nav_ctrl_init();
+  spatial_reuse_init();
+  tmac_init();
+  trxptcl_init();
   rmac_init();
   cmac_com_init();
+  ptcl_init();
   cmac_dma_init();
   usb_rx_agg_cfg();
-  _logger->info("Kestrel TRX: CMAC RX init done (fltr + rmac + cca + dma)");
+  _logger->info("Kestrel TRX: full CMAC init done (sched+addrcam+fltr+cca+nav+"
+                "sr+tmac+trxptcl+rmac+com+ptcl+dma)");
   return true;
 }
 

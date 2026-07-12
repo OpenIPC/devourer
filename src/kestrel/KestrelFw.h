@@ -52,6 +52,9 @@ private:
   /* Generic H2C over CH12: [WD 24B][fwcmd_hdr 8B][content]. */
   bool send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
                     const uint8_t *content, uint32_t len);
+  /* Poll + ack the C2H-register mailbox after a cmd_ofld batch (flow control:
+   * the ack releases the fw to return the H2C page). */
+  bool poll_cmd_ofld_result();
 
   /* --- register-op helpers (mirror HalKestrel; kept local to this TU) --- */
   void set32(uint16_t reg, uint32_t bits);

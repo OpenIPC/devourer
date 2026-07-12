@@ -360,12 +360,35 @@ bool KestrelFw::ofld_flush() {
   bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FW_OFLD,
                          r::FWCMD_H2C_FUNC_CMD_OFLD_REG, _ofld_buf.data(),
                          static_cast<uint32_t>(_ofld_buf.size()));
-  /* Give the FW time to replay the batch before the next one (the vendor polls
-   * the cmd-state mutex; a short settle is enough for sequential sync sends). */
-  delay_us(200);
+  /* Flow control: wait for the fw to post the IO-offload result to the C2H
+   * register and ACK it (clear the trigger). The ack releases the fw to return
+   * the H2C page; without it the H2C queue fills after a few batches and the
+   * next bulk-OUT jams (usbmon: 3 batches OK, then a 1s timeout). */
+  if (ok)
+    poll_cmd_ofld_result();
   _ofld_buf.clear();
   _ofld_cmd_num = 0;
   return ok;
+}
+
+bool KestrelFw::poll_cmd_ofld_result() {
+  /* poll_c2hreg + __recv_c2hreg: poll R_AX_C2HREG_CTRL for the TRIGGER bit,
+   * drain data0..3, then clear TRIGGER (the ack). */
+  for (uint32_t cnt = r::CMD_OFLD_POLL_CNT; cnt != 0; --cnt) {
+    if (_device.rtw_read8(r::R_AX_C2HREG_CTRL) & r::B_AX_C2HREG_TRIGGER) {
+      (void)_device.rtw_read32(r::R_AX_C2HREG_DATA0);
+      (void)_device.rtw_read32(r::R_AX_C2HREG_DATA1);
+      (void)_device.rtw_read32(r::R_AX_C2HREG_DATA2);
+      (void)_device.rtw_read32(r::R_AX_C2HREG_DATA3);
+      uint8_t ctrl = _device.rtw_read8(r::R_AX_C2HREG_CTRL);
+      _device.rtw_write8(r::R_AX_C2HREG_CTRL,
+                         static_cast<uint8_t>(ctrl & ~r::B_AX_C2HREG_TRIGGER));
+      return true;
+    }
+    delay_us(r::CMD_OFLD_POLL_US);
+  }
+  _logger->warn("Kestrel H2C: cmd_ofld C2H-result poll timeout");
+  return false;
 }
 
 bool KestrelFw::radio_page_to_fw(uint8_t cls, uint8_t page,

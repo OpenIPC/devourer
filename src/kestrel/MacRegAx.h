@@ -360,6 +360,20 @@ constexpr uint8_t OUTSRC_CL_RADIO_B = 9;
 constexpr uint32_t RADIO_TO_FW_DATA_SIZE = 500; /* entries per page */
 constexpr uint8_t H2CB_TYPE_LONG_DATA = 2;
 
+/* C2H-register mailbox (fwcmd.c __recv_c2hreg) — the flow-control handshake
+ * after each cmd_ofld batch: wait for TRIGGER, read data, CLEAR trigger (ack).
+ * The ack releases the fw to return the H2C page; without it the H2C queue
+ * fills after a few batches and the next bulk-OUT jams. */
+constexpr uint16_t R_AX_C2HREG_DATA0 = 0x8150;
+constexpr uint16_t R_AX_C2HREG_DATA1 = 0x8154;
+constexpr uint16_t R_AX_C2HREG_DATA2 = 0x8158;
+constexpr uint16_t R_AX_C2HREG_DATA3 = 0x815C;
+constexpr uint16_t R_AX_C2HREG_CTRL = 0x8164;
+constexpr uint8_t B_AX_C2HREG_TRIGGER = 1u << 0;
+constexpr uint32_t CMD_OFLD_POLL_CNT = 4000;
+constexpr uint32_t CMD_OFLD_POLL_US = 50;
+constexpr uint8_t FWCMD_C2HREG_FUNC_IO_OFLD_RESULT = 0x9;
+
 /* ---- USB runtime init (usb_init_8852b, _usb.c/_usb_8852b.c): endpoint NUMP
  * (burst) config. Without it a bulk-OUT endpoint accepts one packet then
  * halts — the "512 then stall" the H2C IO-offload hits. ---- */

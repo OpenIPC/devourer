@@ -978,6 +978,13 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
                            : (_hal.efuse_logical_byte(0xB9) & 0x3f);
   c.fastretune_ok = true;
   c.per_packet_txpower = true; /* TX descriptor TXPWR_OFSET LUT — Jaguar2 only */
+  /* LDPC RX: both variants decode HT+VHT LDPC (bench: encoding-matrix
+   * devourer↔devourer cells at full delivery, 8822BU cross-checked reporting
+   * ldpc=1) and report it per-frame from PHY-status byte7[5]
+   * (parse_phy_sts_jgr2). */
+  c.ldpc_rx_ht = true;
+  c.ldpc_rx_vht = true;
+  c.ldpc_rx_flag = true;
   devourer::set_standard_freq_ranges(c);
 
   if (_variant == jaguar2::ChipVariant::C8821C) {

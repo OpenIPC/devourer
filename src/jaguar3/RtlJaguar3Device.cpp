@@ -1179,6 +1179,13 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
   c.hw_beacon_txtsf = true;  /* StartBeacon: MAC inserts the egress TSF into beacons */
   c.xtal_cap_max = 0x7f;   /* 7-bit AFE crystal-cap trim (0x1040) */
   c.xtal_cap_default = 0x20;
+  /* LDPC RX: both variants decode HT+VHT LDPC (bench: encoding-matrix
+   * devourer↔devourer cells at full delivery, 8812CU + 8812EU-paired 8812AU
+   * cross-checked reporting ldpc=1) and report it per-frame from PHY-status
+   * byte7[5] (parse_phy_sts_jgr3). */
+  c.ldpc_rx_ht = true;
+  c.ldpc_rx_vht = true;
+  c.ldpc_rx_flag = true;
   devourer::set_standard_freq_ranges(c);
 
   if (_variant == jaguar3::ChipVariant::C8822E) {

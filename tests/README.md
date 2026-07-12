@@ -268,6 +268,23 @@ sudo python3 tests/regress.py --encoding-matrix \
     --vm-name devourer-testrig --vm-ssh <user>@<VM-IP>
 ```
 
+`--modes` restricts the driver-mode rows to a comma list of `txside:rxside`
+entries — LDPC/STBC truth-table runs want `--modes devourer:devourer`, since
+the kernel-TX rows are never authoritative for those bits (the kernel driver
+strips them; see the caveat below) and the kernel rows double the runtime:
+
+```bash
+sudo python3 tests/regress.py --encoding-matrix --modes devourer:devourer \
+    --tx-pid 0x8812 --rx-pid 0x012d --channel 6 --duration 8
+```
+
+Each devourer-RX cell's `rx.txhit` events carry the received frame's
+`rate`/`bw`/`stbc`/`ldpc` so a pass proves the encoding actually flew (a pass
+with `ldpc:0` means the TX fell back to BCC, not that the RX decoded LDPC).
+Exception: the RTL8814AU reports `ldpc:0` even on LDPC frames it decoded —
+the chip has no per-frame LDPC indicator (`AdapterCaps.ldpc_rx_flag=0`);
+judge its RX by hit count, its TX by the paired 8812AU's flag.
+
 Encoding combos iterated by default — 6 cells per driver mode × 4 driver
 modes = 24 cells total per run:
 
@@ -322,6 +339,28 @@ The `d/k` and `d/d` rows are not affected by the kernel-TX caveat —
 `txdemo` writes the radiotap header directly into the
 chip's bulk-OUT buffer, so the `DEVOURER_TX_*` env vars are ground
 truth for what flies on devourer TX.
+
+### `ldpc_waterfall.sh`: measured LDPC coding gain
+
+Traces delivery-vs-TX-power waterfalls for the same MCS with BCC vs LDPC
+coding and reads the horizontal shift = coding gain in dB. The emitter steps
+a flat TXAGC index per point (`DEVOURER_TX_PWR`, 0.5 dB/step Jaguar1/2,
+0.25 dB Jaguar3); the ground counts canonical-SA FCS-clean frames per
+`rx.energy` window (`DEVOURER_RX_AGG_SA=canon`); PER denominators come from
+the emitter's exact final `tx.stats`.
+
+```bash
+sudo tests/ldpc_waterfall.sh --emit-pid 0x8812 --ground-pid 0x012d \
+    --ground-vid 0x2357 --channel 6 --rate MCS7 --pwr-start 22 --pwr-stop 52
+python3 tests/ldpc_waterfall.py /tmp/devourer-ldpc-waterfall/points.jsonl \
+    --step-qdb 2 --thresholds 0.1,0.5
+```
+
+Sweep the noise-limited rising edge — at high index near-field, both curves
+distort (the BCC MCS7 curve rolls over and dies while LDPC keeps decoding;
+compare curves only on the rising edge). Bench-measured on an 8812AU→8822BU
+pair at MCS7/20 MHz: **+3.0 dB LDPC gain at the 10%-delivery crossing**, and
+in the saturation regime LDPC delivered ~80% where BCC delivered 0–19%.
 
 ## Supported DUTs
 

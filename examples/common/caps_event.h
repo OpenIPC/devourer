@@ -63,6 +63,11 @@ inline void emit_adapter_caps(EventSink &sink, IRtlDevice *dev) {
   band("char_2g4", c.characterized_2g4);
   band("char_5g", c.characterized_5g);
 
+  /* FEC RX truth table (ldpc above is the TX side, TxCaps.ldpc_ok). */
+  ev.f("ldpc_rx_ht", c.ldpc_rx_ht ? 1 : 0)
+      .f("ldpc_rx_vht", c.ldpc_rx_vht ? 1 : 0)
+      .f("ldpc_rx_flag", c.ldpc_rx_flag ? 1 : 0);
+
   ev.f("per_pkt_txpwr", c.per_packet_txpower ? 1 : 0)
       .f("narrowband", c.narrowband_ok ? 1 : 0)
       .f("fastretune", c.fastretune_ok ? 1 : 0)

@@ -56,7 +56,9 @@ long-range digital video links.
   magic inside the library.
 
 New to low-level RF? Start with the [visual RF primer](docs/rf-primer.md) —
-eight short animations that make the rest click.
+eight short animations that make the rest click. Its sibling, the
+[visual driver primer](docs/driver-primer.md), does the same for the silicon
+and vendor-driver vocabulary (firmware, efuse, DMAC/CMAC, halbb/halrf, IQK…).
 
 ## Supported hardware
 
@@ -183,6 +185,9 @@ one `IRtlDevice` interface covers all three generations.
 
 - [Visual RF primer](docs/rf-primer.md) — animated intro to the concepts
   behind everything below.
+- [Visual driver primer](docs/driver-primer.md) — animated intro to the chip
+  and vendor-driver machinery: registers, efuse, firmware, MAC, PHY tables,
+  calibration, coexistence.
 - [Adaptive link](docs/adaptive-link.md) — the energy-minimizing video-link
   controller design, and [its validation](docs/adaptive-link-validation.md).
 - [Fused FEC](docs/fused-fec.md) — the cross-layer error-protection stack:

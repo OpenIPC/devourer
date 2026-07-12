@@ -19,6 +19,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# First positional arg may be a stage (id|power|fw); default id. Second the ID.
+STAGE="id"
+case "${1:-}" in id|power|fw) STAGE="$1"; shift ;; esac
 ID="${1:-35bc:0108}"
 VID="${ID%%:*}"
 PID="${ID##*:}"
@@ -69,15 +72,16 @@ for ifdir in "$DEVDIR":*; do
 done
 
 # Run the probe; require the kestrel.id ok:true event on stdout (JSONL plane).
+EVENT="kestrel.$STAGE"
 set +e
-OUT="$("$PROBE" id --vid "0x$VID" --pid "0x$PID" 2> >(sed 's/^/  /' >&2))"
+OUT="$("$PROBE" "$STAGE" --vid "0x$VID" --pid "0x$PID" 2> >(sed 's/^/  /' >&2))"
 RC=$?
 set -e
 echo "$OUT" | sed 's/^/  /'
-if [ $RC -eq 0 ] && echo "$OUT" | grep -qF '"ev":"kestrel.id"' \
-   && echo "$OUT" | grep -qF '"ok":true'; then
-  echo "PASS: kestrelprobe id on $ID"
+if [ $RC -eq 0 ] && echo "$OUT" | grep -qF "\"ev\":\"$EVENT\"" \
+   && echo "$OUT" | grep -F "\"ev\":\"$EVENT\"" | grep -qF '"ok":true'; then
+  echo "PASS: kestrelprobe $STAGE on $ID"
   exit 0
 fi
-echo "FAIL: kestrelprobe id on $ID (rc=$RC)"
+echo "FAIL: kestrelprobe $STAGE on $ID (rc=$RC)"
 exit 1

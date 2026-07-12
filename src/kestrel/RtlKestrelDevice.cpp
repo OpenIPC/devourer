@@ -34,8 +34,8 @@ const char *die_name(uint8_t die_id) {
 RtlKestrelDevice::RtlKestrelDevice(RtlAdapter device, Logger_t logger,
                                    kestrel::ChipVariant variant,
                                    devourer::DeviceConfig cfg)
-    : _device{std::move(device)}, _logger{std::move(logger)},
-      _variant{variant}, _cfg{std::move(cfg)} {
+    : _device{device}, _logger{logger}, _variant{variant},
+      _cfg{std::move(cfg)}, _hal{device, logger, variant} {
   /* Confirm the PID-selected variant against the on-chip die id (the PID
    * table is authoritative for dispatch; this catches a mislabeled board or a
    * stale table row before any bring-up write happens). */
@@ -55,6 +55,12 @@ kestrel::ChipInfo RtlKestrelDevice::ReadChipInfo() {
   info.die_id = _device.rtw_read8(kRegSysChipInfo);
   info.cut = static_cast<uint8_t>(_device.rtw_read8(kRegSysCfg1Hi) >> 4);
   return info;
+}
+
+bool RtlKestrelDevice::PowerOnAndReadEfuse(kestrel::EfuseInfo &out) {
+  if (!_hal.power_on())
+    return false;
+  return _hal.read_efuse(out);
 }
 
 void RtlKestrelDevice::not_ported(const char *entry,

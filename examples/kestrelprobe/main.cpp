@@ -155,11 +155,40 @@ int main(int argc, char **argv) {
     return id_ok ? 0 : 1;
   }
 
-  /* ---- stage power (M1): mac_ax power-on + efuse ---- [not ported yet] */
-  logger->error("M1: power stage not ported yet (Kestrel milestone M1)");
+  /* ---- stage power (M1a): mac_ax power-on + efuse dump ---- */
+  kestrel::EfuseInfo efuse;
+  bool power_ok = false;
+  try {
+    power_ok = dev.PowerOnAndReadEfuse(efuse);
+  } catch (const std::exception &e) {
+    logger->error("M1a: power/efuse threw: {}", e.what());
+  }
+  char mac[18] = "??:??:??:??:??:??";
+  if (power_ok)
+    snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", efuse.mac[0],
+             efuse.mac[1], efuse.mac[2], efuse.mac[3], efuse.mac[4],
+             efuse.mac[5]);
+  logger->info("M1a: power_ok={} MAC={} xtal=0x{:02x} rfe=0x{:02x} "
+               "thermalA=0x{:02x} thermalB=0x{:02x} autoload={}",
+               power_ok, mac, efuse.xtal_cap, efuse.rfe_type, efuse.thermal_a,
+               efuse.thermal_b, efuse.autoload_ok);
   devourer::Ev(logger->events(), "kestrel.power")
+      .f("ok", power_ok)
+      .f("mac", mac)
+      .hexf("xtal", efuse.xtal_cap, 2)
+      .hexf("rfe", efuse.rfe_type, 2)
+      .f("autoload", efuse.autoload_ok);
+  if (!power_ok || want < 2) {
+    libusb_close(handle);
+    libusb_exit(ctx);
+    return power_ok ? 0 : 1;
+  }
+
+  /* ---- stage fw (M1b): firmware download ---- [not ported yet] */
+  logger->error("M1b: fw download not ported yet (Kestrel milestone M1b)");
+  devourer::Ev(logger->events(), "kestrel.fw")
       .f("ok", false)
-      .f("why", "not ported (M1)");
+      .f("why", "not ported (M1b)");
   libusb_close(handle);
   libusb_exit(ctx);
   return 1;

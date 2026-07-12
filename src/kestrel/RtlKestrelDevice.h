@@ -10,6 +10,7 @@
 #include "SelectedChannel.h"
 
 #include "ChipVariant.h"
+#include "HalKestrel.h"
 
 namespace kestrel {
 
@@ -64,6 +65,13 @@ public:
 
   kestrel::ChipVariant variant() const { return _variant; }
 
+  /* M1a bring-up, exposed for kestrelprobe's "power" stage: power the MAC on
+   * and dump the efuse. Not part of the IRtlDevice contract (Init/InitWrite
+   * drive the full sequence once M1b+M2 land). Returns false on failure. */
+  bool PowerOnAndReadEfuse(kestrel::EfuseInfo &out);
+
+  kestrel::HalKestrel &hal() { return _hal; }
+
 private:
   [[noreturn]] void not_ported(const char *entry, const char *milestone) const;
 
@@ -71,6 +79,7 @@ private:
   Logger_t _logger;
   kestrel::ChipVariant _variant;
   devourer::DeviceConfig _cfg;
+  kestrel::HalKestrel _hal;
   SelectedChannel _channel{};
 };
 

@@ -627,6 +627,13 @@ constexpr uint32_t B_AX_LTE_MUX_CTRL_PATH = 1u << 26; /* R_AX_LTE_CTRL+3 bit5 rd
 constexpr uint8_t B_AX_OCP_L1_SH = 13;
 constexpr uint32_t B_AX_OCP_L1_MSK = 0x7;
 
+/* mac_enable_imr — SER interrupt masks (ser_imr_config + err_imr_ctrl). */
+constexpr uint16_t R_AX_PHYINFO_ERR_IMR = 0xCCFC;
+constexpr uint8_t B_AX_PHYINTF_TIMEOUT_THR_SH = 0;
+constexpr uint32_t B_AX_PHYINTF_TIMEOUT_THR_MSK = 0x3f;
+constexpr uint16_t R_AX_DMAC_ERR_IMR = 0x8520;
+constexpr uint16_t R_AX_CMAC_ERR_IMR = 0xC160;
+
 /* SET_CLR_WORD(orig, val, FIELD) — replace FIELD bits with val. */
 inline uint32_t set_clr_word(uint32_t orig, uint32_t val, uint32_t msk,
                              uint8_t sh) {

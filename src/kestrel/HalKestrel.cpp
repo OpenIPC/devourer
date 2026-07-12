@@ -796,6 +796,60 @@ bool HalKestrel::write_lte(uint32_t offset, uint32_t val) {
   return true;
 }
 
+void HalKestrel::mac_enable_imr() {
+  /* mac_enable_imr(DMAC)+(CMAC0) + mac_err_imr_ctrl(EN): the System-Error-
+   * Recovery interrupt masks (ser_imr_config_8852b auto-gen). Each entry does
+   * reg = (reg & ~msk) | set (the vendor's write_mac_reg_auto_ofld masked-write
+   * semantics; applied here as direct writes). Values are the auto-gen
+   * "clear mask / set value" pairs, verbatim. band0. */
+  struct ImrW {
+    uint16_t reg;
+    uint32_t msk;
+    uint32_t set;
+  };
+  auto apply = [&](const ImrW *t, size_t n) {
+    for (size_t i = 0; i < n; ++i)
+      _device.rtw_write32(t[i].reg,
+                          (_device.rtw_read32(t[i].reg) & ~t[i].msk) | t[i].set);
+  };
+  /* ser_imr_config(DMAC_SEL). */
+  static const ImrW kDmac[] = {
+      {0x9430, 0x3337, 0x3327},          /* WDRLS_ERR_IMR */
+      {0x9D1C, 0x8, 0x8},                /* SEC_DEBUG */
+      {0x9BF4, 0x3e, 0x0},               /* MPDU_TX_ERR_IMR */
+      {0x9CF4, 0xb, 0x0},                /* MPDU_RX_ERR_IMR */
+      {0x9EF0, 0x7, 0x7},                /* STA_SCHEDULER_ERR_IMR */
+      {0x9F1C, 0x30f, 0x101},            /* TXPKTCTL_ERR_IMR_ISR */
+      {0x9F2C, 0x30f, 0x303},            /* TXPKTCTL_ERR_IMR_ISR_B1 */
+      {0x8C38, 0x7f0ff0ff, 0x3f0ff0ff},  /* WDE_ERR_IMR */
+      {0x9038, 0xf0ff0ff, 0xf0ff0df},    /* PLE_ERR_IMR */
+      {0x9A20, 0x1, 0x1},                /* PKTIN_ERR_IMR */
+      {0x8850, 0xff0fffff, 0xcc000161},  /* HOST_DISPATCHER_ERR_IMR */
+      {0x8854, 0x3f07ffff, 0x4000062},   /* CPU_DISPATCHER_ERR_IMR */
+      {0x8858, 0x3f031f1f, 0x0},         /* OTHER_DISPATCHER_ERR_IMR */
+      {0x9840, 0x1111, 0x1111},          /* CPUIO_ERR_IMR */
+      {0x960C, 0x1, 0x1},                /* BBRPT_COM_ERR_IMR_ISR */
+      {0x962C, 0xff, 0x0},               /* BBRPT_CHINFO_ERR_IMR_ISR */
+  };
+  /* ser_imr_config(CMAC_SEL), band0. */
+  static const ImrW kCmac[] = {
+      {0xC800, 0x80c000, 0xc000},        /* DLE_CTRL (cmac_dma_top) */
+      {0xC6C0, 0xff80df01, 0x10800001},  /* PTCL_IMR0 */
+      {0xC3E8, 0x3, 0x1},                /* SCHEDULE_ERR_IMR */
+      {0xCCFC, 0x3f0000, 0x10000},       /* PHYINFO_ERR_IMR */
+      {0xCEF4, 0xff000, 0xe4000},        /* RMAC_ERR_ISR */
+      {0xCCEC, 0x780, 0x780},            /* TMAC_ERR_IMR_ISR */
+  };
+  apply(kDmac, sizeof(kDmac) / sizeof(kDmac[0]));
+  apply(kCmac, sizeof(kCmac) / sizeof(kCmac[0]));
+  /* ser_imr_config_patch(CMAC): phy-intf timeout threshold = max. */
+  field32(r::R_AX_PHYINFO_ERR_IMR, 0x3f, r::B_AX_PHYINTF_TIMEOUT_THR_MSK,
+          r::B_AX_PHYINTF_TIMEOUT_THR_SH);
+  /* mac_err_imr_ctrl(EN): unmask the top-level DMAC + CMAC0 error IMR. */
+  _device.rtw_write32(r::R_AX_DMAC_ERR_IMR, 0xFFFFFFFFu);
+  _device.rtw_write32(r::R_AX_CMAC_ERR_IMR, 0xFFFFFFFFu);
+}
+
 void HalKestrel::coex_mac_init() {
   /* coex_mac_init_8852b: disable LTE-coex (CTRL + CTRL_2 = 0), then set the
    * SDIO-ctrl coex bit. On the WiFi+BT combo die the coex block otherwise
@@ -1093,10 +1147,11 @@ bool HalKestrel::trx_cmac_rx_init() {
   ptcl_init();
   cmac_dma_init();
   usb_rx_agg_cfg();
-  /* mac_trx_init tail: coex_mac_init (LTE/BT coex) after dmac+cmac. */
+  /* mac_trx_init tail: coex_mac_init then the SER error-IMR enables. */
   coex_mac_init();
+  mac_enable_imr();
   _logger->info("Kestrel TRX: full CMAC init done (sched+addrcam+fltr+cca+nav+"
-                "sr+tmac+trxptcl+rmac+com+ptcl+dma+coex)");
+                "sr+tmac+trxptcl+rmac+com+ptcl+dma+coex+imr)");
   return true;
 }
 

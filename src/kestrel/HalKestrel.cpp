@@ -925,81 +925,48 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
    * "radio-to-fw" page cache. The radio tables use the SAME headline/IF/CHK
    * walker as the BB tables (apply_phy_table), not the disabled bit31/bit30
    * variant. --- */
-  if (!_fw.ch12_ready()) {
-    _logger->error("Kestrel PHY: no CH12 endpoint for RF IO-offload");
-    return false;
-  }
-
-  /* DIAG (KESTREL_TEST_OFLD): route ONE BB write through cmd_ofld to a
-   * read-back-able register, to prove whether the fw processes FW_OFLD-class
-   * H2C at all. BB 0x4004 read 0xCA014000 after the direct table apply. */
-  if (std::getenv("KESTREL_TEST_OFLD")) {
-    /* Test DIRECT a-die RF programming (bypassing the fw cmd_ofld): write a
-     * radio register via the DAV serial command (0x370) and read it back via
-     * the DDV window. If it lands, the radio can be programmed host-side. */
-    const uint32_t r00_before = rf_read(0, 0x00);
-    rf_write_dav(0, 0x00, 0x00030000);
-    const uint32_t r00_dav = rf_read(0, 0x00);
-    rf_write(0, 0x00, 0x00035000); /* DDV direct write */
-    const uint32_t r00_ddv = rf_read(0, 0x00);
-    _logger->warn("Kestrel DIAG: RF00 before=0x{:05x} after-DAV(0x30000)=0x{:05x}"
-                  " after-DDV(0x35000)=0x{:05x}",
-                  r00_before, r00_dav, r00_ddv);
-  }
-  auto apply_radio = [&](const uint32_t *arr, size_t len, uint8_t path,
-                         uint8_t radio_cls) {
-    /* Pass 1: per-register RF write via cmd_ofld (the authoritative program of
-     * the a-die serial bus), delays preserved in-order as DELAY_OFLD. Pass 2:
-     * the packed (addr<<20|data) page cache. */
-    std::vector<uint32_t> packed;
-    _fw.ofld_begin();
+  /* Apply a radio table via DIRECT RF register writes (halbb_write_rf_reg_8852b,
+   * the non-fwofld path). Each RF register appears TWICE in the table: once
+   * without BIT(16) (d-die, written through the DDV BB window 0xe000/0xf000) and
+   * once with BIT(16) set (a-die, written through the DAV serial command 0x370).
+   * The dispatch: ad_sel = (addr>>16)&1 -> DAV(a-die serial) if set, else
+   * DDV(d-die window). Writing every entry to the d-die window (as before) left
+   * the a-die radio synthesizer unprogrammed, so RF00 read 0. */
+  auto apply_radio = [&](const uint32_t *arr, size_t len, uint8_t path) {
     auto emit = [&](uint32_t addr, uint32_t val) {
       switch (addr) { /* delay pseudo-addresses */
       case 0xfe:
-        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_DELAY, path, 0, 50000, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
         return;
       case 0xfd:
-        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_DELAY, path, 0, 5000, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
         return;
       case 0xfc:
-        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_DELAY, path, 0, 1000, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
         return;
       case 0xfb:
-        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_DELAY, path, 0, 50, 0);
+        delay_us(50);
         return;
       case 0xfa:
-        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_DELAY, path, 0, 5, 0);
+        delay_us(5);
         return;
       case 0xf9:
-        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_DELAY, path, 0, 1, 0);
+        delay_us(1);
         return;
       default:
         break;
       }
-      /* RF serial write: offset = raw table addr, value = 20-bit data. */
-      _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_WRITE, path,
-                     static_cast<uint16_t>(addr), val & r::MASKRF, r::MASKRF);
-      /* radio-to-fw page cache: skip non-DRFC (< 0x100) and mask to 8 bits. */
-      if (addr >= 0x100)
-        packed.push_back(((addr & 0xff) << 20) | (val & 0xfffffu));
+      if (addr & 0x10000u) /* DAV: a-die serial (0x370) */
+        rf_write_dav(path, static_cast<uint8_t>(addr & 0xff), val & r::MASKRF);
+      else /* DDV: d-die BB window (0xe000/0xf000) */
+        rf_write(path, static_cast<uint8_t>(addr & 0xff), val & r::MASKRF);
     };
     apply_phy_table(arr, len, rfe_type, cut, emit);
-    _fw.ofld_flush();
-    /* Send the accumulated page cache (500 entries per H2C, func = page). */
-    for (uint16_t page = 0, off = 0; off < packed.size(); ++page) {
-      uint16_t n = static_cast<uint16_t>(
-          std::min<size_t>(r::RADIO_TO_FW_DATA_SIZE, packed.size() - off));
-      _fw.radio_page_to_fw(radio_cls, static_cast<uint8_t>(page),
-                           packed.data() + off, n);
-      off += n;
-    }
   };
-  apply_radio(array_mp_8852b_radioa, array_mp_8852b_radioa_len, 0,
-              r::OUTSRC_CL_RADIO_A);
-  apply_radio(array_mp_8852b_radiob, array_mp_8852b_radiob_len, 1,
-              r::OUTSRC_CL_RADIO_B);
+  apply_radio(array_mp_8852b_radioa, array_mp_8852b_radioa_len, 0);
+  apply_radio(array_mp_8852b_radiob, array_mp_8852b_radiob_len, 1);
 
-  _logger->info("Kestrel PHY: BB direct + RF IO-offload tables applied "
+  _logger->info("Kestrel PHY: BB + RF direct tables applied "
                 "(rfe=0x{:02x} cut={})",
                 rfe_type, cut);
   return true;

@@ -511,7 +511,10 @@ bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
     /* phase0: wait H2C path ready. */
     if (!poll_wcpu(r::B_AX_H2C_PATH_RDY, r::B_AX_H2C_PATH_RDY, "H2C_PATH_RDY"))
       goto retry;
-    /* phase1: download the fw header (minus dynamic header) as one H2C. */
+    /* phase1: download the fw header (minus the dynamic header) as one H2C —
+     * fwdl_phase1 is called with (hdr_len - dynamic_hdr_len) in the vendor
+     * (fwdl.c:1685/1746); the dynamic header is host-side cap metadata, not
+     * part of the FWHDR_DL. */
     if (!send_fwdl_packet(fw, hdr_len - dynamic_hdr_len, /*is_header=*/true, 0))
       goto retry;
     if (!poll_wcpu(r::B_AX_FWDL_PATH_RDY, r::B_AX_FWDL_PATH_RDY, "FWDL_PATH_RDY"))

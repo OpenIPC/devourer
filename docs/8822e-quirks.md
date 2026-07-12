@@ -1,5 +1,8 @@
 # RTL8822E (RTL8812EU / RTL8822EU) — definitive quirks
 
+New to the vocabulary used here (DMAC/CMAC, IQK, DIG, coex, efuse…)? The
+[visual driver primer](driver-primer.md) defines all of it with animations.
+
 The rtl8822e family (WiFi-only **RTL8812EU** `0bda:a81a`, BT-combo **RTL8822EU**
 `0bda:e822`, chip-id `0x17`, Jaguar3) as devourer drives it today. Every entry
 states what the chip needs, what devourer does about it, the residual cost if

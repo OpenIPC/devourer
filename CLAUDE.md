@@ -53,9 +53,24 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
   pin-mux front end, single-path 1SS TX, spur channels, LCK, the 2.4 GHz TX
   kernel-parity limitation) live in `docs/8822e-quirks.md`.
 
+- **Kestrel** (`src/kestrel/`, bring-up in progress): the Wi-Fi 6 / 802.11ax
+  generation — RTL8852BU/8832BU (variant C8852B, first target) and
+  RTL8852CU/8832CU (C8852C). Ported from Realtek's "G6 phl" vendor trees
+  (`reference/rtl8852bu`, `reference/rtl8852cu`: mac_ax fw/H2C plane, halbb
+  PHY tables, halrf calibration — none of the 11ac loaders/parsers apply).
+  Dispatched **PID-first** (`kestrel/KestrelUsbIds.h`), not from the 0x00FC
+  byte: on AX silicon that register is R_AX_SYS_CHIPINFO (die-id 0x51/0x52;
+  the 8852A's 0x50 collides with the 8822B cold transient). Milestones:
+  M0 identity (`kestrelprobe id`) works; M1 power-on/FW/efuse, M2 monitor RX,
+  M3 channel/BW/cal, M4 TX are staged next; the capstone is 11ax
+  trigger-based UL + TWT (issue #236 — the v1.19 vendor fwcmd surface exposes
+  TWT-OFDMA + F2P trigger H2Cs that mainline rtw89 lacks). The 8852A-family
+  (RTL8832AU) is deliberately excluded (frozen 2021 v1.15 vendor drop only).
+
 Naming traps: **RTL8821AU is Jaguar1** (not Jaguar2, despite the Jaguar2
-RTL8821C's similar name); RTL8822**B**U (Jaguar2) ≠ RTL8822**C**U (Jaguar3).
-The Kestrel 11ax families are out of scope. Full chip / bench-throughput
+RTL8821C's similar name); RTL8822**B**U (Jaguar2) ≠ RTL8822**C**U (Jaguar3);
+the TP-Link TX50UH is RTL8832**C**U (8852C-family) despite lab lore calling it
+8832AU, while the TX20U **Nano** is RTL8852BU. Full chip / bench-throughput
 table: README **Supported hardware**.
 
 **PCIe** (`DEVOURER_PCIE=ON`, Linux-only, default OFF): the RTL8821CE — the

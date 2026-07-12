@@ -88,8 +88,13 @@ a chip already near the PHY ceiling — it raises *goodput* (delivered payload)
 ~30% at MCS7/20 by amortizing per-frame overhead, which an occupancy metric
 can't show. See [aggregation & hardware ACK](docs/aggregation.md).
 
-Out of scope: the pre-HalMAC PCIe parts (RTL8812AE/8821AE) and the 11ax
-"Kestrel" generation — same branding, different bus or baseband.
+Out of scope: the pre-HalMAC PCIe parts (RTL8812AE/8821AE). The 11ax
+"Kestrel" generation (RTL8852BU / RTL8852CU) is **in bring-up** as a fourth
+HAL (`src/kestrel/`, vendor references `reference/rtl8852bu` +
+`reference/rtl8852cu`): the identity/dispatch layer works
+(`build/kestrelprobe id`); power-on, firmware, RX and TX land milestone by
+milestone. The 8852A-family (e.g. RTL8832AU) stays out of scope — its only
+vendor driver is a frozen 2021 drop.
 
 > Heads up — some Realtek sticks ship in "ZeroCD" mode and first enumerate as
 > a USB flash drive holding a Windows installer (`0bda:1a2b` is the canonical

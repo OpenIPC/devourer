@@ -27,3 +27,11 @@
 	url = https://github.com/libc0607/rtl88x2eu-20230815.git
 	branch = 5mhz_bw
 	shallow = true
+[submodule "reference/rtl8852bu"]
+	path = reference/rtl8852bu
+	url = https://github.com/josephnef/rtl8852bu.git
+	shallow = true
+[submodule "reference/rtl8852cu"]
+	path = reference/rtl8852cu
+	url = https://github.com/josephnef/rtl8852cu.git
+	shallow = true

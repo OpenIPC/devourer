@@ -511,6 +511,18 @@ target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
 
+# Headless guard for the Kestrel (11ax) RX descriptor parser
+# (src/kestrel/FrameParserKestrel.h): rxd field extraction + aggregate walk.
+# On-air decode is hardware-validated once M2a lands. Compiled only when a
+# Kestrel variant is built (the header is under a compiled group).
+if(DEVOURER_KESTREL)
+    add_executable(KestrelRxParseSelftest tests/kestrel_rxparse_selftest.cpp)
+    target_link_libraries(KestrelRxParseSelftest PRIVATE devourer)
+    target_include_directories(KestrelRxParseSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME kestrel_rxparse COMMAND KestrelRxParseSelftest)
+endif()
+
 # Headless guard for the burst-TDMA example's pure logic (examples/tdma/tdma.h):
 # the TsfClock host<->TSF least-squares fit, the frame-tag round-trip, and the
 # schedule phase math. No hardware — the tsf_probe / tsf_tdoa_probe /

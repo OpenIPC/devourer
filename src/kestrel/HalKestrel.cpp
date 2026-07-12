@@ -593,6 +593,104 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   return true;
 }
 
+namespace {
+/* count-trailing-zeros for the RMW field shift. */
+inline uint8_t ctz32(uint32_t m) {
+  uint8_t s = 0;
+  while (m && !(m & 1)) {
+    m >>= 1;
+    ++s;
+  }
+  return s;
+}
+constexpr uint32_t BB_WIN = 0x10000; /* bb0_cr_offset (wIndex=1) */
+} /* namespace */
+
+void HalKestrel::bb_rmw(uint32_t addr, uint32_t mask, uint32_t val) {
+  const uint32_t a = (addr & 0xffff) + BB_WIN;
+  uint32_t v = _device.rtw_read32_wide(a);
+  v = (v & ~mask) | ((val << ctz32(mask)) & mask);
+  _device.rtw_write32_wide(a, v);
+}
+
+uint32_t HalKestrel::rf_read(uint8_t path, uint8_t rf_addr) {
+  const uint32_t base = path == 0 ? 0xe000 : 0xf000;
+  return _device.rtw_read32_wide(base + (rf_addr << 2) + BB_WIN) & 0xfffffu;
+}
+
+void HalKestrel::rf_write(uint8_t path, uint8_t rf_addr, uint32_t val) {
+  const uint32_t base = path == 0 ? 0xe000 : 0xf000;
+  _device.rtw_write32_wide(base + (rf_addr << 2) + BB_WIN, val & 0xfffffu);
+  delay_us(1);
+}
+
+void HalKestrel::bb_reset_all() {
+  /* halbb_bb_reset_all_8852b (BB regs over wIndex=1; 0xce40 is MAC/CMAC). */
+  bb_rmw(0x2344, 1u << 31, 1); /* PD disable */
+  bb_rmw(0xc3c, 1u << 9, 1);
+  bb_rmw(0x1200, 0x7u << 28, 0x7); /* protect SW-SI */
+  bb_rmw(0x3200, 0x7u << 28, 0x7);
+  delay_us(1);
+  uint8_t v = _device.rtw_read8(0xce40); /* stop phy-sts update (MAC space) */
+  _device.rtw_write8(0xce40, static_cast<uint8_t>(v & ~0x1));
+  delay_us(2);
+  bb_rmw(0x704, 1u << 1, 1); /* BB reset toggle */
+  bb_rmw(0x704, 1u << 1, 0);
+  bb_rmw(0x1200, 0x7u << 28, 0x0);
+  bb_rmw(0x3200, 0x7u << 28, 0x0);
+  bb_rmw(0x704, 1u << 1, 1);
+  v = _device.rtw_read8(0xce40); /* start phy-sts update */
+  _device.rtw_write8(0xce40, static_cast<uint8_t>(v | 0x1));
+  bb_rmw(0x2344, 1u << 31, 0); /* PD enable (2.4G) */
+  bb_rmw(0xc3c, 1u << 9, 0);
+}
+
+bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
+  const bool is_2g = channel <= 14;
+
+  /* --- BB ctrl_ch (path A/B mode select) --- */
+  bb_rmw(0x4738, 1u << 17, is_2g ? 1 : 0);
+  bb_rmw(0x4AA4, 1u << 17, is_2g ? 1 : 0);
+
+  /* --- BB ctrl_bw: 20 MHz --- */
+  if (bw == CHANNEL_WIDTH_20) {
+    bb_rmw(0x49C0, 0xC0000000u, 0x0); /* RF_BW [31:30]=0 */
+    bb_rmw(0x49C4, 0x3000u, 0x0);     /* small BW [13:12]=0 */
+    bb_rmw(0x49C4, 0xf00u, 0x0);      /* pri ch [11:8]=0 */
+    bb_rmw(0x12ac, 0xfff000u, 0x333); /* RF mode */
+    bb_rmw(0x32ac, 0xfff000u, 0x333);
+    bb_rmw(0x4738, 0x10000u, 0x1); /* ACI detect [16]=1 */
+    bb_rmw(0x4AA4, 0x10000u, 0x1);
+  } else {
+    _logger->warn("Kestrel set_channel: only 20 MHz ported (bw={})",
+                  static_cast<int>(bw));
+  }
+
+  /* --- CCK enable (2.4G) / disable (5G) --- */
+  bb_rmw(0x700, 1u << 5, is_2g ? 1 : 0);
+  bb_rmw(0x2344, 1u << 31, is_2g ? 0 : 1);
+
+  /* --- RF channel: RF18 setting for path A/B (DDV window) --- */
+  for (uint8_t path = 0; path < 2; ++path) {
+    uint32_t rf18 = rf_read(path, 0x18);
+    rf18 &= ~0x3e3ffu;      /* clear [17:16],[9:8],[7:0] */
+    rf18 |= channel;        /* channel */
+    if (!is_2g)
+      rf18 |= (1u << 16) | (1u << 8); /* 5G */
+    rf18 = (rf18 & 0xf0fffu) | (1u << 12);
+    rf_write(path, 0x18, rf18);
+    rf_write(path, 0xcf, rf_read(path, 0xcf) & ~1u); /* re-latch */
+    rf_write(path, 0xcf, rf_read(path, 0xcf) | 1u);
+  }
+
+  /* --- BB reset --- */
+  bb_reset_all();
+
+  _logger->info("Kestrel PHY: tuned to ch{} bw20 ({})", channel,
+                is_2g ? "2.4G" : "5G");
+  return true;
+}
+
 bool HalKestrel::trx_cmac_rx_init() {
   rx_fltr_init();
   cca_ctrl_init();

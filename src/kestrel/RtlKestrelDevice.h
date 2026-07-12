@@ -54,6 +54,7 @@ public:
             SelectedChannel channel) override;
   void InitWrite(SelectedChannel channel) override;
   void StartRxLoop(Action_ParsedRadioPacket packetProcessor) override;
+  void StopRxLoop() override { _rx_stop = true; }
   void SetMonitorChannel(SelectedChannel channel) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
   SelectedChannel GetSelectedChannel() override { return _channel; }
@@ -84,6 +85,12 @@ public:
 
   kestrel::HalKestrel &hal() { return _hal; }
 
+  /* Full monitor bring-up (power -> efuse -> fw -> MAC TRX -> BB/RF -> channel)
+   * without starting the RX loop. Returns false at the first failing step.
+   * Init() calls this then StartRxLoop; a probe "rx"/"chan" stage can call it
+   * standalone. */
+  bool BringUpMonitor(SelectedChannel channel);
+
 private:
   [[noreturn]] void not_ported(const char *entry, const char *milestone) const;
 
@@ -93,6 +100,8 @@ private:
   devourer::DeviceConfig _cfg;
   kestrel::HalKestrel _hal;
   SelectedChannel _channel{};
+  kestrel::EfuseInfo _efuse{};
+  volatile bool _rx_stop = false;
 };
 
 #endif /* RTL_KESTREL_DEVICE_H */

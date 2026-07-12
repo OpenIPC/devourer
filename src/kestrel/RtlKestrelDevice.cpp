@@ -1,9 +1,13 @@
 #include "RtlKestrelDevice.h"
 
 #include <cstdint>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
+
+#include "FrameParserKestrel.h"
+#include "RxPacket.h"
 
 namespace {
 
@@ -96,25 +100,72 @@ void RtlKestrelDevice::not_ported(const char *entry,
                            " not ported yet (" + milestone + ")");
 }
 
-void RtlKestrelDevice::Init(Action_ParsedRadioPacket /*packetProcessor*/,
-                            SelectedChannel channel) {
+bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
   _channel = channel;
-  not_ported("Init", "M1 power-on/FW + M2 RX");
+  if (!_hal.power_on())
+    return false;
+  if (!_hal.read_efuse(_efuse))
+    return false;
+  if (!_hal.download_firmware(_hal.read_cut()))
+    return false;
+  if (!_hal.trx_dmac_init())
+    return false;
+  if (!_hal.trx_cmac_rx_init())
+    return false;
+  if (!_hal.phy_bb_rf_init(_efuse.rfe_type, _hal.read_cut()))
+    return false;
+  return _hal.set_channel(channel.Channel, channel.ChannelWidth);
+}
+
+void RtlKestrelDevice::Init(Action_ParsedRadioPacket packetProcessor,
+                            SelectedChannel channel) {
+  if (!BringUpMonitor(channel)) {
+    _logger->error("Kestrel: monitor bring-up failed");
+    return;
+  }
+  StartRxLoop(std::move(packetProcessor));
 }
 
 void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
   _channel = channel;
-  not_ported("InitWrite", "M1 power-on/FW + M4 TX");
+  not_ported("InitWrite", "M4 TX");
 }
 
-void RtlKestrelDevice::StartRxLoop(
-    Action_ParsedRadioPacket /*packetProcessor*/) {
-  not_ported("StartRxLoop", "M2 RX");
+void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
+  _rx_stop = false;
+  _logger->info("Kestrel: starting RX loop on ch{}", _channel.Channel);
+  /* Async bulk-IN ring; walk each aggregate with the 11ax rxd parser. */
+  _device.bulk_read_async_loop(
+      16384, 8,
+      [&](const uint8_t *data, int n) {
+        uint32_t off = 0;
+        while (off + 16 <= static_cast<uint32_t>(n)) {
+          kestrel::KestrelRxFrame f;
+          if (!kestrel::parse_rx_8852b(data + off, static_cast<size_t>(n) - off,
+                                       f))
+            break;
+          if (f.rpkt_type == kestrel::RPKT_TYPE_WIFI && packetProcessor) {
+            Packet p{};
+            p.RxAtrib.pkt_len = static_cast<uint16_t>(f.payload_len);
+            p.RxAtrib.crc_err = f.crc_err;
+            p.RxAtrib.icv_err = f.icv_err;
+            p.RxAtrib.data_rate = static_cast<uint8_t>(f.rx_rate);
+            p.RxAtrib.tsfl = f.freerun_cnt;
+            p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.payload),
+                                        f.payload_len);
+            packetProcessor(p);
+          }
+          if (f.next_offset == 0)
+            break;
+          off += f.next_offset;
+        }
+      },
+      _rx_stop);
 }
 
 void RtlKestrelDevice::SetMonitorChannel(SelectedChannel channel) {
   _channel = channel;
-  not_ported("SetMonitorChannel", "M3 channel/BW");
+  _hal.set_channel(channel.Channel, channel.ChannelWidth);
 }
 
 bool RtlKestrelDevice::send_packet(const uint8_t * /*packet*/,

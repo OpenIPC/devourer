@@ -6,6 +6,7 @@
 
 #include "ChipVariant.h"
 #include "RtlAdapter.h"
+#include "SelectedChannel.h" /* ChannelWidth_t */
 #include "logger.h"
 
 namespace kestrel {
@@ -70,6 +71,11 @@ public:
    * and the RX loop build on it. */
   bool phy_bb_rf_init(uint8_t rfe_type, uint8_t cut);
 
+  /* M3 — tune the BB + RF to a monitor channel (2.4/5 GHz, 20 MHz). Ports the
+   * halbb ctrl_ch/ctrl_bw/cck_en/bb_reset + the halrf RF18 channel setting.
+   * Must run after phy_bb_rf_init. */
+  bool set_channel(uint8_t channel, ChannelWidth_t bw);
+
   /* Chip cut version, read fresh from R_AX_SYS_CFG1[15:12]. */
   uint8_t read_cut();
 
@@ -92,6 +98,11 @@ private:
   bool write_xtal_si(uint8_t offset, uint8_t val, uint8_t bitmask);
 
   bool usb_pre_init();
+  /* M3 BB/RF channel helpers (all over the wIndex=1 window). */
+  void bb_rmw(uint32_t addr, uint32_t mask, uint32_t val); /* masked BB write */
+  uint32_t rf_read(uint8_t path, uint8_t rf_addr);         /* DDV RF read */
+  void rf_write(uint8_t path, uint8_t rf_addr, uint32_t val); /* DDV RF write */
+  void bb_reset_all();
   /* M2a DMAC sub-inits (trxcfg.c). */
   bool dle_init_nic();
   bool sta_sch_init();

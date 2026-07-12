@@ -333,9 +333,12 @@ void KestrelFw::ofld_write(uint8_t src, uint8_t type, uint8_t path,
       (static_cast<uint32_t>(path & 0x3) << r::CMD_OFLD_PATH_SH) |
       (static_cast<uint32_t>(_ofld_cmd_num & 0x7f) << r::CMD_OFLD_CMD_NUM_SH) |
       (static_cast<uint32_t>(offset) << r::CMD_OFLD_OFFSET_SH);
-  /* dword1: id (0) | the "base offset" field — the same 16-bit offset for a
-   * BB write, 0 for an RF serial write, 1 for an RF D-die write. */
-  uint32_t off2 = (real_src == r::OFLD_SRC_RF) ? rf_ddie : offset;
+  /* dword1: id (0) | the "base offset" field. add_cmd: for RF serial = 0,
+   * RF D-die = 1; otherwise GET_FIELD(offset, OFFSET) = the HIGH 16 bits of the
+   * offset (0 for a 16-bit BB/MAC addr). */
+  uint32_t off2 = (real_src == r::OFLD_SRC_RF)
+                      ? rf_ddie
+                      : (static_cast<uint32_t>(offset) >> 16);
   uint32_t dw1 = off2 << r::CMD_OFLD_OFFSET_SH;
 
   size_t o = _ofld_buf.size();

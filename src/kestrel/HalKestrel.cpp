@@ -1,6 +1,8 @@
 #include "HalKestrel.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -926,6 +928,29 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   if (!_fw.ch12_ready()) {
     _logger->error("Kestrel PHY: no CH12 endpoint for RF IO-offload");
     return false;
+  }
+
+  /* DIAG (KESTREL_TEST_OFLD): route ONE BB write through cmd_ofld to a
+   * read-back-able register, to prove whether the fw processes FW_OFLD-class
+   * H2C at all. BB 0x4004 read 0xCA014000 after the direct table apply. */
+  if (std::getenv("KESTREL_TEST_OFLD")) {
+    std::atomic<bool> stop{false};
+    std::thread drainer([&] {
+      std::vector<uint8_t> b(16384);
+      while (!stop.load())
+        (void)_device.bulk_read_raw(b.data(), static_cast<int>(b.size()), 20);
+    });
+    _fw.ofld_begin();
+    _fw.ofld_write(r::OFLD_SRC_BB, r::OFLD_TYPE_WRITE, 0, 0x4004, 0x12345678,
+                   r::MASKDWORD);
+    _fw.ofld_flush();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const uint32_t v = _device.rtw_read32_wide(0x4004u + 0x10000u);
+    stop.store(true);
+    drainer.join();
+    _logger->warn("Kestrel DIAG: BB 0x4004 after cmd_ofld (bulk-IN drained) = "
+                  "0x{:08x} (0x12345678 => fw processes cmd_ofld)",
+                  v);
   }
   auto apply_radio = [&](const uint32_t *arr, size_t len, uint8_t path,
                          uint8_t radio_cls) {

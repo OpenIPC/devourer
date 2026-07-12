@@ -78,8 +78,8 @@ on rxdemo and txdemo (TX = the data/MGMT BD rings behind the unchanged
 bottom-up.
 Bind/restore: `tests/pcie_vfio_bind.sh` (driver_override, not new_id — the
 in-tree rtw88 auto-probe race). Validation: `sudo python3
-tests/pcie_rx_smoke.py` on the radxa-x4 (`ssh radxa-x4`, 8821CE at
-0000:01:00.0, IOMMU group 12) — ambient beacons CRC-clean on ch 6 + 36.
+tests/pcie_rx_smoke.py` against a vfio-bound 8821CE (rig specifics: local
+`INVENTORY.md`) — ambient beacons CRC-clean on ch 6 + 36.
 
 ## Build
 
@@ -153,7 +153,8 @@ traps it encodes: the in-tree rtw88 modules auto-probe (and fw-download
 into) every Realtek dongle at each enumeration — `modprobe -r` does NOT
 survive re-enumeration, temp-blacklist instead; and `authorized`-toggle
 "cold" leaves chip state (real VBUS cold via `REGRESS_VBUS_MAP` /
-uhubctl — never on xhci root ports on this rig).
+uhubctl — hub ports with per-port power switching only, not xhci root
+ports).
 
 ## Logging
 
@@ -334,6 +335,42 @@ per-bin energy + frame stats; `tests/sounding_sweep.sh` + `tests/sounding_map.py
 recover a coarse per-bin H(f) — down to 5 MHz bins on Jaguar3
 (`docs/rx-spectrum-sensing.md`).
 
+## Hardware time, beacons, AP mode
+
+`ReadTsf()` reads the 64-bit MAC TSF and every received frame carries the
+MAC-latched `tsfl` RX timestamp — on all generations, µs-grade
+(`docs/time-distribution.md`, measured vs NTP/PTP: `docs/timing-accuracy.md`).
+`StartBeacon` loads a beacon into the MAC's reserved page and the chip
+auto-transmits at each TBTT with the live TSF stamped at the TX instant — the
+sub-µs downlink. The chip beacons **autonomously**: a session that ends
+without a power-cycle must call `StopBeacon()` or the beacon keeps airing.
+`UpdateBeaconPayload` swaps the airing content in place (frame-atomic on air,
+TBTT-quantized latency); `PinBeaconTbtt` steers the TBTT to an absolute TSF
+instant without corrupting the clock (Jaguar1: offset 0 only — its TBTT is
+hardware-locked to the TSF grid); `AdjustBeaconTimingFine` is the µs-fine
+manual lever. Demos: `timesync` (`DEVOURER_TSYNC_ROLE=master|slave|ue` +
+`DEVOURER_TSYNC_*` knobs, incl. the PCIe master + I226-PTP discipline loop)
+and `tdma` (TSF-slotted narrowband↔wide bursts on one channel). The beacon is
+also the seed of AP mode — a real Linux station associates, open or WPA2-PSK
+(`docs/ap-mode.md`); the multi-cell architecture it enables is
+`docs/multi-ap-cellular.md`, and the measured scheduler contracts (submit→air
+guard time, dynamic beacon grants, ACK/TxReport, per-UE RX attribution) are
+`docs/scheduled-mac.md`.
+
+## Aggregation, hardware ACK, TX reports
+
+`SetAmpduMode` enables 802.11 A-MPDU on injected frames: ~+30% *goodput* at
+the PHY ceiling by amortizing per-frame overhead — an occupancy metric can't
+show it, count delivered payload. `SetAckResponder(mac)` arms the hardware
+ACK/BlockAck responder; with a unicast TA on the soliciting frame this closes
+a hardware-ARQ loop (autonomous MAC retransmission until ACK). Per-frame TX
+outcomes surface as `tx.report` events (CCX via C2H) — the TX-side link
+sensor; C2H rides the RX path, so J1/J2 TX-only sessions see none (run
+`DEVOURER_TX_WITH_RX=thread`; J3's coex thread drains C2H regardless).
+`GetRxQuality()` is the device-wide windowed RX sensor;
+`cell::UeRxAttribution` is its per-transmitter (per-UE) counterpart. Docs:
+`docs/aggregation.md`, measured per-generation matrix `docs/scheduled-mac.md`.
+
 ## Architecture
 
 **The caller owns libusb.** `WiFiDriver::CreateRtlDevice` is intentionally
@@ -367,6 +404,9 @@ Generation-agnostic core in `src/` (always compiled; depends on no HAL):
 - `PhyTableLoader` — runtime walker for Realtek's phydm-format register tables
   (`check_positive` + opcode state machine, without pulling in phydm itself).
   Shared by Jaguar1 + Jaguar2; Jaguar3 has its own `PhyTableLoaderJaguar3`.
+- `cell/` — caller-side per-cell helpers built on the device API
+  (`UeRxAttribution`: per-transmitter windowed RX statistics keyed by 802.11
+  TA); the device RX loops are untouched.
 
 Per-generation HALs (each self-contained):
 

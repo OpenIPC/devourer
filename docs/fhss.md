@@ -194,9 +194,9 @@ Two strategies, matched to the order it faces:
 - **predictive** (against sequential): jam the channel the public order says
   comes *next*, which cancels the follower's own latency.
 
-Measured on this rig, the follower's reaction is dominated by the B210 transmit
+Measured, the follower's reaction is dominated by the B210 transmit
 retune at **~3.5 ms** (wideband sensing itself costs ~0.3 ms). That latency is
-the floor on how fast any reactive follower here can move, and it **favours the
+the floor on how fast such a reactive follower can move, and it **favours the
 defender**. The two strategies' chase dynamics diverge sharply: over a 20-second
 run against a 50 ms-slot transmitter, the **reactive** follower issues ~2100
 retunes (constant correction — always a step behind an unpredictable hop) while
@@ -210,7 +210,7 @@ land on a keyed hopper, while a predictive jammer against a sequential hopper is
 limited only by its retune time and holds to much shorter dwells. The gap
 between those two thresholds is exactly what a keyed permutation buys.
 
-## Where it stands, and what is next
+## Where it stands
 
 What works today, on hardware: fast intra-band retune on all three chip
 generations; sequential and keyed slot-hopping driven purely by radiotap and
@@ -223,6 +223,6 @@ the slow full set); per-hop TX power is not re-tuned, so a hopset spanning a wid
 5 GHz range wants a periodic full set to refresh per-rate power; the follower
 experiment uses a 3-channel hopset because a single B210 needs ≥60 MS/s to span
 a 60 MHz hopset in one FFT and trips a UHD tuning assertion at the usual
-61.44 MS/s. And the natural next step — **adaptive hopset exclusion**, dropping a
-persistently-jammed channel from the set so the link stops visiting it at all —
-is future work.
+61.44 MS/s. And the schedule visits every configured channel — there is no
+adaptive exclusion of a persistently-jammed one; the fused-FEC layer absorbs
+those dwells as erasures.

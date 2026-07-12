@@ -70,9 +70,8 @@ unaffected (already transport-free). Tool: `tests/pcie_txegress_tx.cpp` +
 `tests/txegress_witness.cpp`. The `timesync` demo drives a PCIe master via
 `DEVOURER_PCIE_BDF` — but note the ~12 µs floor is a *robust-fit* transport
 number: on a busy channel the raw slave lock is deferral-limited regardless of
-transport (radxa bench, crowded ch6: 420 µs RMS — the channel, not the bus),
-and the radxa↔bench RF path only reaches on 2.4 GHz, so prefer the hardware
-beacon below for PCIe masters.
+transport (measured 420 µs RMS on a crowded ch6 — the channel, not the bus),
+so prefer the hardware beacon below for PCIe masters.
 
 Run it with `tests/timesync_demo.sh` (one master + two slaves; joins the two
 `{"ev":"timesync.lock"}` streams by beacon seq into the inter-UE error).
@@ -338,11 +337,11 @@ closes the loop, and the closed loop is a shipped tool:
 `tests/pcie_ptp_beacon.cpp` runs the hardware beacon on the 8821CE and holds
 its TBTT to the I226 PHC (read via `FD_TO_CLOCKID`, no system-clock detour)
 with a full-gain PI on the pin actuator. End-to-end bench, everything running
-concurrently (radxa loop + a USB slave over the air):
+concurrently (the PCIe discipline loop + a USB slave over the air):
 
 | link in the chain | measured |
 |-------------------|----------|
-| radxa TBTT vs the I226 PTP reference | **1.24 µs RMS**, max 5.5 µs (156 pins, ~90 s) |
+| 8821CE TBTT vs the I226 PTP reference | **1.24 µs RMS**, max 5.5 µs (156 pins, ~90 s) |
 | USB slave lock through the live discipline | 13.9 µs RMS (575 beacons, ~0 lost through 160+ pins) |
 
 The slave number carries a caveat: its all-history least-squares fit assumes a
@@ -353,7 +352,10 @@ must be in monitor mode so the MAC/TSF is clocked).
 
 What this unlocks at the multi-AP level — coordinated scheduling between
 cells, make-before-break handover, robots as roaming UEs — is mapped out in
-[`multi-ap-cellular.md`](multi-ap-cellular.md).
+[`multi-ap-cellular.md`](multi-ap-cellular.md); the four measured
+per-generation contracts a slot scheduler builds on (submit→air guard time,
+dynamic beacon grants, hardware ACK/TxReport, per-UE RX attribution) are in
+[`scheduled-mac.md`](scheduled-mac.md).
 
 ## Env knobs
 

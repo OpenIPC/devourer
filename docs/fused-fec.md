@@ -12,14 +12,14 @@ default, never cooperate:
 1. **PHY-layer FEC** — the convolutional (BCC) or LDPC inner code baked into
    every 802.11 MCS. Its code rate is fixed by the MCS choice. devourer already
    selects it per packet from the radiotap header / `TxMode`
-   (`src/RadiotapBuilder.cpp`, `src/RtlJaguarDevice.cpp`), and the SVC ladder
+   (`src/RadiotapBuilder.cpp`, `src/jaguar1/RtlJaguarDevice.cpp`), and the SVC ladder
    (`examples/svctx/svc_tx.h`) already picks a robust MCS for important
    video layers.
 2. **Application-layer FEC** — a packet-erasure code spread across radio frames
    (Reed-Solomon / RaptorQ / RLC). It recovers whole frames that are *lost*.
 3. **Corrupted-frame retention** — `DEVOURER_RX_KEEP_CORRUPTED` keeps frames
    that fail the 802.11 FCS instead of dropping them
-   (`src/RadioManagementModule.cpp` sets RCR `ACRC32|AICV`; `examples/rx/main.cpp`
+   (`src/jaguar1/RadioManagementModule.cpp` sets RCR `ACRC32|AICV`; `examples/rx/main.cpp`
    surfaces the body with `crc_err`/`icv_err` + per-frame RSSI/EVM/SNR).
 
 **The gap:** a frame that fails the FCS is normally dropped wholesale, so the

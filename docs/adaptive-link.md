@@ -247,9 +247,9 @@ below the point where enhancement is gone.
 - **The command uplink is abstracted.** There is no real RC radio in the repo, so
   uplink loss is simulated to exercise the failsafe and rendezvous; a real uplink
   drops into the same watchdog input.
-- **On-air scalable video is not yet adaptive.** Each temporal layer can already
-  fly at its own modulation on air; the closed loop that retunes the per-layer
-  ladder live is validated in software and is the next on-air integration step.
+- **Live ladder retuning is validated in simulation, not on air.** Each temporal
+  layer already flies at its own modulation on air; the closed loop that retunes
+  the per-layer ladder live runs in the linklab simulation.
 
 ## References
 

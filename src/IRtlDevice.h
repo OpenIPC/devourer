@@ -300,7 +300,7 @@ public:
    * so the cost bound is the steer's: at most one skipped beacon per update
    * while the valid latch re-arms, and the swap is NOT atomic versus TBTT (a
    * beacon airing during the download may still carry the previous content).
-   * Measured per-generation skip/latency numbers: docs/beacon-grant.md. */
+   * Measured per-generation skip/latency numbers: docs/scheduled-mac.md. */
   virtual bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
     (void)beacon; (void)len;
     return false;

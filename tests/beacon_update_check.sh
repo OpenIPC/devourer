@@ -4,7 +4,7 @@
 # grant-map beacon (beacon_update_probe), watch it with a witness on a second
 # adapter, swap the content N times, and run beacon_update_analyze.py — one
 # bcn.verdict JSONL row per generation (skips/update, update→air latency,
-# torn/regression atomicity). Results table: docs/beacon-grant.md.
+# torn/regression atomicity). Results table: docs/scheduled-mac.md.
 #
 #   bash tests/beacon_update_check.sh
 #   CELLS="j2-8812bu:0x2357:0x012d" N_UPDATES=50 bash tests/beacon_update_check.sh

@@ -7,8 +7,8 @@ The rtl8822e family (WiFi-only **RTL8812EU** `0bda:a81a`, BT-combo **RTL8822EU**
 `0bda:e822`, chip-id `0x17`, Jaguar3) as devourer drives it today. Every entry
 states what the chip needs, what devourer does about it, the residual cost if
 any, and the reproducer that proves it. Reference hardware: LB-LINK
-BL-M8812EU2 (`0bda:a81a`, rfe-type 21); the BT-combo part and a second board
-for variance remain untested (see **Untested**).
+BL-M8812EU2 (`0bda:a81a`, rfe-type 21); the BT-combo part and other board
+variants are outside the characterized set (see **Coverage**).
 
 The methodology that closed most of these: vendor-kernel ground truth on the
 same unit (`tests/eu_kernel_mcs_probe.sh`), full MAC+BB end-state diff
@@ -35,8 +35,9 @@ family programs. Three of these must hold, or TX breaks in distinctive ways:
   ONE chain (2SS gets both). The old 1ss-on-both mapping (`0x33`) interacts
   with the DPDT fix — MCS0 TX stalls (bulk NAK wedge) and MCS7 delivery
   collapses. Path B is selected at 5 GHz on measured merit (MCS7 ~2.5× the
-  delivery of 1ss-A at ~3 dB better EVM on this module); the 2.4 GHz choice is
-  the kernel default, unvalidated (see **2.4 GHz TX**).
+  delivery of 1ss-A at ~3 dB better EVM on this module); the 2.4 GHz choice
+  follows the kernel default — on-air comparison is blocked by the 2.4 GHz TX
+  quirk (see **2.4 GHz TX**).
 - **`PAD_CTRL1 0x64[29:28]`**: halmac pre-init sets both; the bring-up's
   FW/coex steps clear bit 29 — re-asserted post-coex.
 
@@ -160,10 +161,12 @@ duty×rate — energy, not decodable throughput.)
   `GetTxPowerCaps().step_measured` stays false; controllers should calibrate
   their own dB-per-step or use ground RSSI.
 
-## Untested
+## Coverage
 
-- **RTL8822EU (`0bda:e822`, BT combo)**: entirely untested — including whether
+Everything above is characterized on one board: the LB-LINK BL-M8812EU2
+(WiFi-only RTL8812EU, rfe 21). Outside that set:
+
+- **RTL8822EU (`0bda:e822`, BT combo)**: uncharacterized — including whether
   it needs more than the WiFi-only coex handling the CU-style combo parts get.
-- **Board variance**: all of the above is one LB-LINK BL-M8812EU2 (rfe 21).
-  rfe 22–24 boards differ in RFE pin mapping and DPK policy; the 2.4 GHz TX
-  verdict especially needs a second board.
+- **Other rfe types**: rfe 22–24 boards differ in RFE pin mapping and DPK
+  policy; the 2.4 GHz TX verdict in particular is single-board evidence.

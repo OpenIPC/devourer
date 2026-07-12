@@ -1072,6 +1072,16 @@ devourer::EfuseStability RtlJaguar3Device::ProbeEfuseStability(int reads) {
   return st;
 }
 
+devourer::LaResult RtlJaguar3Device::la_capture(const devourer::LaParams &p) {
+  if (!_la)
+    _la = std::make_unique<devourer::LaCapture>(_device, _logger,
+                                                devourer::la_regs_jgr3());
+  /* Serialize against the coex runtime tick like every register-touching
+   * entry point. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  return _la->run(p);
+}
+
 devourer::TxPowerState RtlJaguar3Device::GetTxPowerState() {
   devourer::TxPowerState s;
   s.valid = true;

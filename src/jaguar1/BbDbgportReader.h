@@ -1,21 +1,19 @@
 /* BB-dbgport reader — exploration framework for the Realtek "Jaguar" PHY
  * debug port.
  *
- * STATUS: research dead-end as shipped. The transport (write u32 selector
- * to 0x8FC, read u32 result from 0xFA0 via libusb vendor control) works
- * and is wrapped here with the canonical save/restore pattern from
- * upstream's only in-tree user (hal/rtl8814a/rtl8814a_phycfg.c:460-545,
- * `phy_ADC_CLK_8814A`). What's MISSING is the selector that routes the
- * post-FFT per-subcarrier IQ bus to 0xFA0 — that selector lives in
- * Realtek's phydm sources, which are not vendored in this tree. Without
- * it, sweeping selectors gives raw BB internals (clock-domain status,
- * MAC_Active bits, BB busy flags) but not the IQ samples the precoder
- * README ("Tier 4") wants for shape verification.
- *
- * What this file provides is the FRAMEWORK so a researcher with access to
- * a phydm selector catalogue can plug in the right value at runtime and
- * read it back — without recompiling and without rediscovering the
- * save/restore + chip-alive plumbing.
+ * STATUS: single-word peek only. The transport (write u32 selector to
+ * 0x8FC, read u32 result from 0xFA0 via libusb vendor control) works and
+ * is wrapped here with the canonical save/restore pattern from upstream's
+ * only in-tree user (hal/rtl8814a/rtl8814a_phycfg.c:460-545,
+ * `phy_ADC_CLK_8814A`). The phydm selector catalogue IS vendored now
+ * (reference/<chip>/hal/phydm/phydm_debug.c dbg-port routing +
+ * phydm_adc_sampling.c presets, e.g. 0x880/0xa80 = per-path ADC buses,
+ * 0x392 = EVM) — but a one-word-at-a-time peek of a streaming bus is
+ * still not an IQ capture. The productized consumer of the same dbg-port
+ * mux is src/LaCapture.h: LA-mode DMAs the selected bus into the TX
+ * packet buffer as a contiguous sample stream — that's the per-tone-CSI
+ * path (issue #150). This reader remains the lightweight probe for
+ * static/slow BB internals.
  *
  * BRICK RISK
  *   Poking 0x8FC while RX is live can leave demod state machines spinning

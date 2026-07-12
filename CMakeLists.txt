@@ -140,6 +140,10 @@ add_library(devourer
     src/WiFiDriver.cpp
     src/WiFiDriver.h
     src/registry_priv.h
+    # LA-mode (phydm logic-analyzer) IQ capture — one implementation serves
+    # all three generations (LaRegs carries the per-chip parameters).
+    src/LaCapture.cpp
+    src/LaCapture.h
     # phydm check_positive table walker — shared by Jaguar1 and Jaguar2
     # (both use the older addr/value + check_positive table format).
     src/PhyTableLoader.cpp
@@ -624,6 +628,16 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/rx_tone_localize.py --self-test
     )
+
+    # Headless guard for the LA-capture CSI math (tools/la_csi.py): synthetic
+    # L-LTF through a known 2-tap channel + CFO + AWGN must locate, correct,
+    # and recover |H(k)| with correlation > 0.99. Skips (77) without numpy.
+    add_test(
+        NAME la_csi_math
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/la_csi.py --selftest
+    )
+    set_tests_properties(la_csi_math PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # --- selftest aggregate ----------------------------------------------------

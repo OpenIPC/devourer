@@ -16,6 +16,7 @@
 #include "HalJaguar3.h"
 #include "LaCapture.h"
 #include "RadioManagementJaguar3.h"
+#include "PhydmRuntimeJaguar3.h"
 
 /* RtlJaguar3Device is the orchestrator for the Realtek "Jaguar3" 802.11ac family
  * — RTL8822CU, RTL8812EU, RTL8822EU. It is the Jaguar3 sibling of
@@ -215,6 +216,9 @@ private:
   /* Lazy LA-mode capture helper (la_capture). */
   std::unique_ptr<devourer::LaCapture> _la;
   jaguar3::RadioManagementJaguar3 _radioManagement;
+  /* phydm dynamic mechanisms (FA/DIG/CCK-PD/EDCCA), ticked from the coex
+   * thread every ~2 s like the vendor watchdog. */
+  jaguar3::PhydmRuntimeJaguar3 _phydm;
   SelectedChannel _channel{};
   Action_ParsedRadioPacket _packetProcessor = nullptr;
   /* Runtime TX-power knobs (atomic so GetTxPowerState's cached snapshot is

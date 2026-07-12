@@ -41,7 +41,7 @@ RtlJaguar3Device::RtlJaguar3Device(RtlAdapter device, Logger_t logger,
                                    devourer::DeviceConfig cfg)
     : _device{device}, _cfg{std::move(cfg)}, _logger{logger},
       _variant{variant}, _hal{device, logger, variant, _cfg},
-      _radioManagement{device, logger, variant, _cfg} {
+      _radioManagement{device, logger, variant, _cfg}, _phydm{device, logger} {
   _logger->info("RtlJaguar3Device constructed ({})",
                 variant == jaguar3::ChipVariant::C8822E ? "8822E/EU" : "8822C/CU");
 }
@@ -183,6 +183,30 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
       _logger->info("Jaguar3 cfo.track: 0x1040 base read failed — disabled");
     }
   }
+  /* phydm dynamic mechanisms on RX-only sessions: the vendor watchdog's ~2 s
+   * cadence on a dedicated thread (register I/O CANNOT run on this thread —
+   * a sync control transfer from the bulk-IN event thread starves its own
+   * event loop; a separate thread under _reg_mu is the proven pattern, same
+   * as the TX-side coex thread, which owns the tick in TX+RX mode). */
+  std::atomic<bool> phydm_stop{false};
+  std::thread phydm_thread;
+  if (!_coex_thread.joinable()) {
+    phydm_thread = std::thread([this, &phydm_stop] {
+      auto next = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+      while (!phydm_stop && !g_devourer_should_stop) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (std::chrono::steady_clock::now() < next)
+          continue;
+        next += std::chrono::seconds(2);
+        try {
+          std::lock_guard<std::mutex> lk(_reg_mu);
+          _phydm.tick(_channel.Channel, !_cca_disabled);
+        } catch (...) {
+          break; /* chip gone — the RX loop will wind down too */
+        }
+      }
+    });
+  }
   auto cfo_next = std::chrono::steady_clock::now() + std::chrono::seconds(2);
   auto cfo_tick = [&]() {
     if (!_cfg.tuning.cfo_track || !reg1040_ok)
@@ -299,6 +323,9 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
     return _rx_stop || g_devourer_should_stop;
   });
   _rx_loop_active = false;
+  phydm_stop = true;
+  if (phydm_thread.joinable())
+    phydm_thread.join();
 }
 
 /* Coex runtime (port of the rtw88 watchdog's coex path): drain the firmware's
@@ -367,6 +394,10 @@ void RtlJaguar3Device::coex_runtime_loop() {
       std::lock_guard<std::mutex> lk(_reg_mu);
       _hal.coex_run_5g();
       _hal.pwr_track(); /* thermal TX-power compensation (sustains upper 5 GHz) */
+      /* phydm dynamic mechanisms (vendor watchdog parity): FA/CCA window
+       * statistics -> DIG -> CCK-PD -> EDCCA. EDCCA tracking is owned by
+       * SetCcaMode when the EDCCA-disable knob is active. */
+      _phydm.tick(_channel.Channel, !_cca_disabled);
       _hal.fw_update_wl_phy_info();
       _hal.fw_set_pwr_mode_active();
       _hal.fw_coex_query_bt_info();
@@ -883,6 +914,7 @@ void RtlJaguar3Device::SetCcaMode(bool disabled) {
 }
 
 void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
+  _phydm.on_channel_change();
   /* Serialize against the coex thread's housekeeping tick (and any concurrent
    * FastRetune) — channel config is register RMW. Init/InitWrite call the
    * radio-management core directly (no lock needed: the coex thread isn't

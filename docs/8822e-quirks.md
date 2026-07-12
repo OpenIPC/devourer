@@ -84,7 +84,34 @@ was a real failure on the bench:
   `0x4130[29]`) around the RF18 tune — the BB-window write path does not push
   the analog front-end shadow on its own.
 
-## Runtime obligations (the ~2 s coex/housekeeping tick)
+## Runtime obligations (the ~2 s watchdog cadence)
+
+devourer runs the vendor watchdog's monitor-mode dynamic mechanisms
+(`PhydmRuntimeJaguar3`, both Jaguar3 variants) — from the coex thread in
+TX/TX+RX sessions, from a dedicated housekeeping thread in RX-only sessions
+(register I/O must not run on the bulk-IN event thread):
+
+- **FA/CCA window statistics** (read + reset per tick) feeding
+- **DIG**: unlinked IGI stepping by false-alarm level (thresholds
+  2000/4000/5000 per window; DFS channels pin `0x20`), written to `0x1d70`
+  per path. The coverage window floors at `0x1e`, NOT phydm's generic
+  `DIG_MIN_COVERAGE 0x1c`: at IGI `0x1c` the 8822CU's MCS4+/dense-QAM RX
+  decodes nothing (0 of 65k kernel-injected MCS7 frames) while `0x1e` is
+  transparent (65.9k/65k) — hardware-bisected, value-specific, the same
+  class of per-IC "For HW setting" floor exception the kernel carries for
+  other ICs.
+- **CCK packet detection** (type4, 2.4 GHz): CCK-FA moving average drives the
+  PD/CS level ladder in `0x1ac8/0x1acc/0x1ad0`.
+- **EDCCA tracking**: `th_l2h = max(IGI+8, 48)`, `th_h2l = th_l2h − 8` into
+  `0x84c` (matches the kernel end state). `SetCcaMode`'s EDCCA-disable knob
+  suppresses this tracking.
+
+The kernel's remaining watchdog mechanisms self-disable without a link and
+are intentionally absent: CFO tracking (returns unless associated), rate
+adaptation and the beamforming watchdog (no station entries), antenna
+diversity (off on 2T2R).
+
+## Coex / thermal (the same tick)
 
 - **Coex re-apply + FW heartbeats**: without the WiFi-only coex re-apply the
   combo firmware silences the antenna during sustained 5 GHz TX (shared

@@ -270,6 +270,7 @@ if(DEVOURER_JAGUAR3)
         src/jaguar3/HalmacJaguar3MacInit.cpp src/jaguar3/HalmacJaguar3MacInit.h
         src/jaguar3/HalmacJaguar3Regs.h
         src/jaguar3/RadioManagementJaguar3.cpp src/jaguar3/RadioManagementJaguar3.h
+        src/jaguar3/PhydmRuntimeJaguar3.cpp src/jaguar3/PhydmRuntimeJaguar3.h
         src/jaguar3/FrameParserJaguar3.h
         src/jaguar3/PhyTableLoaderJaguar3.cpp src/jaguar3/PhyTableLoaderJaguar3.h
         src/jaguar3/Phy8822cTables.cpp

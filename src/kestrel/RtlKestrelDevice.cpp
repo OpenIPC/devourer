@@ -135,9 +135,17 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   _rx_stop = false;
   _logger->info("Kestrel: starting RX loop on ch{}", _channel.Channel);
   /* Async bulk-IN ring; walk each aggregate with the 11ax rxd parser. */
+  int reads = 0;
   _device.bulk_read_async_loop(
       16384, 8,
       [&](const uint8_t *data, int n) {
+        if (++reads <= 12)
+          _logger->info("Kestrel RX: bulk-IN completion #{} -> {} bytes "
+                        "(rxd0=0x{:08x})",
+                        reads, n,
+                        n >= 4 ? (data[0] | (data[1] << 8) | (data[2] << 16) |
+                                  (data[3] << 24))
+                               : 0);
         uint32_t off = 0;
         while (off + 16 <= static_cast<uint32_t>(n)) {
           kestrel::KestrelRxFrame f;

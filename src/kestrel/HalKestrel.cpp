@@ -1,10 +1,12 @@
 #include "HalKestrel.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <functional>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "KestrelFw.h"
 #include "MacRegAx.h"
@@ -24,7 +26,7 @@ void delay_us(uint32_t us) {
 
 HalKestrel::HalKestrel(RtlAdapter device, Logger_t logger, ChipVariant variant)
     : _device{std::move(device)}, _logger{std::move(logger)},
-      _variant{variant} {}
+      _variant{variant}, _fw{_device, _logger, variant} {}
 
 void HalKestrel::set32(uint16_t reg, uint32_t bits) {
   _device.rtw_write32(reg, _device.rtw_read32(reg) | bits);
@@ -307,8 +309,7 @@ uint8_t HalKestrel::read_mss_index() {
 }
 
 bool HalKestrel::download_firmware(uint8_t cut) {
-  KestrelFw fw(_device, _logger, _variant);
-  return fw.download_firmware(cut, read_mss_index());
+  return _fw.download_firmware(cut, read_mss_index());
 }
 
 bool HalKestrel::chk_dle_rdy(uint16_t status_reg, uint32_t rdy_bits,
@@ -401,6 +402,82 @@ bool HalKestrel::sta_sch_init() {
   return true;
 }
 
+bool HalKestrel::hfc_init_nic() {
+  /* hfc_init(rst=1, en=1, h2c_en=1) for the USB SCC 8852B quotas
+   * (hci_fc.c / hci_fc_8852b.c). The DLFW HFC left only the h2c precharge, so
+   * the runtime channel + public page credits must be programmed before any
+   * IO-offload H2C or CH12 stalls after one page. */
+  auto w = [&](uint16_t reg, uint32_t v) { _device.rtw_write32(reg, v); };
+  auto min_max_grp = [](uint16_t mn, uint16_t mx) {
+    return ((static_cast<uint32_t>(mn) & r::B_AX_ACH_MIN_PG_MSK)
+            << r::B_AX_ACH_MIN_PG_SH) |
+           ((static_cast<uint32_t>(mx) & r::B_AX_ACH_MAX_PG_MSK)
+            << r::B_AX_ACH_MAX_PG_SH);
+    /* grp = grp_0 -> the B_AX_ACH_GRP bit stays clear. */
+  };
+
+  /* set_fc_func_en(0, 0): disable FC + CH12 while reprogramming. */
+  clr32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
+
+  /* Per-channel page ctrl: ACH0-3 + B0MGQ(8) + B0HIQ(9) = {18,152,grp0}. */
+  const uint32_t ch = min_max_grp(r::HFC_NIC_CH_MIN, r::HFC_NIC_CH_MAX);
+  w(r::R_AX_ACH0_PAGE_CTRL, ch);
+  w(r::R_AX_ACH1_PAGE_CTRL, ch);
+  w(r::R_AX_ACH2_PAGE_CTRL, ch);
+  w(r::R_AX_ACH3_PAGE_CTRL, ch);
+  w(r::R_AX_CH8_PAGE_CTRL, ch);
+  w(r::R_AX_CH9_PAGE_CTRL, ch);
+
+  /* Public page ctrl (set_fc_pubpg): group0/group1 + WP threshold. */
+  w(r::R_AX_PUB_PAGE_CTRL1,
+    ((static_cast<uint32_t>(r::HFC_NIC_PUB_G0) & r::B_AX_PUBPG_G0_MSK)
+     << r::B_AX_PUBPG_G0_SH) |
+        ((static_cast<uint32_t>(r::HFC_NIC_PUB_G1) & r::B_AX_PUBPG_G1_MSK)
+         << r::B_AX_PUBPG_G1_SH));
+  w(r::R_AX_WP_PAGE_CTRL2,
+    (static_cast<uint32_t>(r::HFC_NIC_WP_THRD) & r::B_AX_WP_THRD_MSK)
+        << r::B_AX_WP_THRD_SH);
+
+  /* Mix cfg (set_fc_mix_cfg): precharges + public max + full conditions. */
+  w(r::R_AX_CH_PAGE_CTRL,
+    ((static_cast<uint32_t>(r::HFC_NIC_CH011_PREC) & r::B_AX_PREC_PAGE_CH011_MSK)
+     << r::B_AX_PREC_PAGE_CH011_SH) |
+        ((static_cast<uint32_t>(r::HFC_USB_H2C_PREC_8852B) &
+          r::B_AX_PREC_PAGE_CH12_MSK)
+         << r::B_AX_PREC_PAGE_CH12_SH));
+  w(r::R_AX_PUB_PAGE_CTRL2,
+    (static_cast<uint32_t>(r::HFC_NIC_PUB_MAX) & r::B_AX_PUBPG_ALL_MSK)
+        << r::B_AX_PUBPG_ALL_SH);
+  w(r::R_AX_WP_PAGE_CTRL1,
+    ((static_cast<uint32_t>(r::HFC_NIC_WP_CH07_PREC) &
+      r::B_AX_PREC_PAGE_WP_CH07_MSK)
+     << r::B_AX_PREC_PAGE_WP_CH07_SH) |
+        ((static_cast<uint32_t>(r::HFC_NIC_WP_CH811_PREC) &
+          r::B_AX_PREC_PAGE_WP_CH811_MSK)
+         << r::B_AX_PREC_PAGE_WP_CH811_SH));
+  uint32_t fc = _device.rtw_read32(r::R_AX_HCI_FC_CTRL);
+  fc = r::set_clr_word(fc, 0 /* mode SPD */, r::B_AX_HCI_FC_MODE_MSK,
+                       r::B_AX_HCI_FC_MODE_SH);
+  fc = r::set_clr_word(fc, r::HFC_FULL_COND_X2, r::B_AX_HCI_FC_WD_FULL_COND_MSK,
+                       r::B_AX_HCI_FC_WD_FULL_COND_SH);
+  fc = r::set_clr_word(fc, r::HFC_FULL_COND_X2,
+                       r::B_AX_HCI_FC_CH12_FULL_COND_MSK,
+                       r::B_AX_HCI_FC_CH12_FULL_COND_SH);
+  fc = r::set_clr_word(fc, r::HFC_FULL_COND_X2,
+                       r::B_AX_HCI_FC_WP_CH07_FULL_COND_MSK,
+                       r::B_AX_HCI_FC_WP_CH07_FULL_COND_SH);
+  fc = r::set_clr_word(fc, r::HFC_FULL_COND_X2,
+                       r::B_AX_HCI_FC_WP_CH811_FULL_COND_MSK,
+                       r::B_AX_HCI_FC_WP_CH811_FULL_COND_SH);
+  w(r::R_AX_HCI_FC_CTRL, fc);
+
+  /* set_fc_func_en(1, 1): enable FC + CH12, settle. */
+  set32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
+  delay_us(10);
+  _logger->info("Kestrel TRX: NIC HFC quotas applied (CH12 credits live)");
+  return true;
+}
+
 void HalKestrel::mpdu_proc_init() {
   _device.rtw_write32(r::R_AX_ACTION_FWD0, r::TRXCFG_MPDU_PROC_ACT_FRWD);
   _device.rtw_write32(r::R_AX_TF_FWD, r::TRXCFG_MPDU_PROC_TF_FRWD);
@@ -419,12 +496,18 @@ void HalKestrel::sec_eng_init() {
 }
 
 bool HalKestrel::trx_dmac_init() {
+  /* dmac_func_en (dmac_func_en_8852b): the full runtime DMAC engine enable
+   * (MAC/DMAC/MPDU/WD_RLS/WDE/TXPKT/STA_SCH/PLE/PKTBUF/TBL/PKT_IN/CPUIO/
+   * DISPATCHER/BBRPT/SEC/CRPRT/GCKEN = bits 15..31). The power-on left CRPRT
+   * (bit31) clear and this is the runtime re-assert the vendor dmac_init does
+   * before the DLE re-init — without it the post-boot H2C (CH12) DMA path is
+   * not fully live and IO-offload stalls. */
+  constexpr uint32_t kDmacFuncEn = 0xFFFF8000u; /* bits 15..31 */
+  set32(0x8400 /* R_AX_DMAC_FUNC_EN */, kDmacFuncEn);
   if (!dle_init_nic()) /* NIC-mode DLE quota */
     return false;
-  /* NOTE: the full NIC HFC reprogramming (hfc_init(1,1,1): per-channel +
-   * public page quotas) is not yet ported; the DLFW HFC from firmware
-   * download is left in place. If the sta-scheduler poll below fails on
-   * hardware, the NIC HFC is the missing piece. */
+  if (!hfc_init_nic()) /* runtime page/credit quotas (CH12 IO-offload flows) */
+    return false;
   if (!sta_sch_init())
     return false;
   mpdu_proc_init();
@@ -572,40 +655,71 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
                   rfe_type, cut, bb_emit);
   _logger->info("Kestrel PHY: BB gain applied");
 
-  /* --- RF radio-A/B tables: an RF write is a direct BB memory window
-   * (halbb_write_rf_reg_8852b_d): reg 0xe000(A)/0xf000(B) + ((addr&0xff)<<2),
-   * masked to the 20-bit RF width. --- */
-  auto rf_emit = [&](uint32_t base) {
-    return [&, base](uint32_t addr, uint32_t val) {
-      /* delay pseudo-addresses can appear in RF tables too. */
-      if (addr == 0xfe || addr == 0xfd || addr == 0xfc) {
-        long ms = addr == 0xfe ? 50 : addr == 0xfd ? 5 : 1;
-        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+  /* --- RF radio-A/B tables. On USB the radio is NOT reachable by direct
+   * register writes — the vendor programs every RF register through the
+   * firmware IO-offload H2C (halrf_wrf -> RTW_MAC_RF_CMD_OFLD), plus a bulk
+   * "radio-to-fw" page cache. The radio tables use the SAME headline/IF/CHK
+   * walker as the BB tables (apply_phy_table), not the disabled bit31/bit30
+   * variant. --- */
+  if (!_fw.ch12_ready()) {
+    _logger->error("Kestrel PHY: no CH12 endpoint for RF IO-offload");
+    return false;
+  }
+  auto apply_radio = [&](const uint32_t *arr, size_t len, uint8_t path,
+                         uint8_t radio_cls) {
+    /* Pass 1: per-register RF write via cmd_ofld (the authoritative program of
+     * the a-die serial bus), delays preserved in-order as DELAY_OFLD. Pass 2:
+     * the packed (addr<<20|data) page cache. */
+    std::vector<uint32_t> packed;
+    _fw.ofld_begin();
+    auto emit = [&](uint32_t addr, uint32_t val) {
+      switch (addr) { /* delay pseudo-addresses */
+      case 0xfe:
+        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_DELAY, path, 0, 50000, 0);
         return;
-      }
-      if (addr == 0xfb || addr == 0xfa || addr == 0xf9) {
-        delay_us(addr == 0xfb ? 50u : addr == 0xfa ? 5u : 1u);
+      case 0xfd:
+        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_DELAY, path, 0, 5000, 0);
         return;
+      case 0xfc:
+        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_DELAY, path, 0, 1000, 0);
+        return;
+      case 0xfb:
+        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_DELAY, path, 0, 50, 0);
+        return;
+      case 0xfa:
+        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_DELAY, path, 0, 5, 0);
+        return;
+      case 0xf9:
+        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_DELAY, path, 0, 1, 0);
+        return;
+      default:
+        break;
       }
-      const uint32_t direct = base + ((addr & 0xff) << 2);
-      /* RF direct writes also go through the BB window (halbb_set_reg adds
-       * bb0_cr_offset), so +0x10000 / wIndex=1 like BB. Table entries use the
-       * full 20-bit MASKRF, so a plain low-20-bit write matches the vendor RMW
-       * without the (unreliable mid-init) RF-window read-back. */
-      _device.rtw_write32_wide(direct + 0x10000u, val & 0xfffffu);
-      delay_us(1);
+      /* RF serial write: offset = raw table addr, value = 20-bit data. */
+      _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_WRITE, path,
+                     static_cast<uint16_t>(addr), val & r::MASKRF, r::MASKRF);
+      /* radio-to-fw page cache: skip non-DRFC (< 0x100) and mask to 8 bits. */
+      if (addr >= 0x100)
+        packed.push_back(((addr & 0xff) << 20) | (val & 0xfffffu));
     };
+    apply_phy_table(arr, len, rfe_type, cut, emit);
+    _fw.ofld_flush();
+    /* Send the accumulated page cache (500 entries per H2C, func = page). */
+    for (uint16_t page = 0, off = 0; off < packed.size(); ++page) {
+      uint16_t n = static_cast<uint16_t>(
+          std::min<size_t>(r::RADIO_TO_FW_DATA_SIZE, packed.size() - off));
+      _fw.radio_page_to_fw(radio_cls, static_cast<uint8_t>(page),
+                           packed.data() + off, n);
+      off += n;
+    }
   };
-  std::function<void(uint32_t, uint32_t)> rf_a = rf_emit(0xe000);
-  std::function<void(uint32_t, uint32_t)> rf_b = rf_emit(0xf000);
-  /* The halrf radio tables use their own conditional walker (apply_rf_table),
-   * NOT the halbb one. */
-  apply_rf_table(array_mp_8852b_radioa, array_mp_8852b_radioa_len, rfe_type,
-                 cut, rf_a);
-  apply_rf_table(array_mp_8852b_radiob, array_mp_8852b_radiob_len, rfe_type,
-                 cut, rf_b);
+  apply_radio(array_mp_8852b_radioa, array_mp_8852b_radioa_len, 0,
+              r::OUTSRC_CL_RADIO_A);
+  apply_radio(array_mp_8852b_radiob, array_mp_8852b_radiob_len, 1,
+              r::OUTSRC_CL_RADIO_B);
 
-  _logger->info("Kestrel PHY: BB+RF tables applied (rfe=0x{:02x} cut={})",
+  _logger->info("Kestrel PHY: BB direct + RF IO-offload tables applied "
+                "(rfe=0x{:02x} cut={})",
                 rfe_type, cut);
   return true;
 }

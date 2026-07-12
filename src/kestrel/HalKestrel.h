@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "ChipVariant.h"
+#include "KestrelFw.h"
 #include "RtlAdapter.h"
 #include "SelectedChannel.h" /* ChannelWidth_t */
 #include "logger.h"
@@ -108,6 +109,7 @@ private:
   void bb_reset_all();
   /* M2a DMAC sub-inits (trxcfg.c). */
   bool dle_init_nic();
+  bool hfc_init_nic(); /* runtime page/credit quotas so CH12 IO-offload flows */
   bool sta_sch_init();
   void mpdu_proc_init();
   void sec_eng_init();
@@ -127,6 +129,7 @@ private:
   RtlAdapter _device;
   Logger_t _logger;
   ChipVariant _variant;
+  KestrelFw _fw; /* persistent: owns the CH12 H2C transport + IO-offload */
 };
 
 } /* namespace kestrel */

@@ -29,7 +29,30 @@ public:
    * cut mismatch), all logged. */
   bool download_firmware(uint8_t cut, uint8_t mss_idx);
 
+  /* --- Firmware IO-offload (M3) — program BB/RF registers via H2C batches the
+   * firmware replays on-chip. On USB this is the only path that reaches the RF
+   * radio (the vendor issues ZERO direct BB/RF-window writes; see kaeru
+   * kestrel-fwofld). Usage: ofld_begin(); ofld_write(...)*N; ofld_flush().
+   * Commands accumulate and auto-flush at CMD_OFLD_MAX_LEN; the flush sets the
+   * LC bit on the last command so the FW executes the batch. --- */
+  void ofld_begin();
+  void ofld_write(uint8_t src, uint8_t type, uint8_t path, uint16_t offset,
+                  uint32_t value, uint32_t mask);
+  bool ofld_flush();
+
+  /* Send one radio-parameter page as an OUTSRC H2C (halrf radio-to-fw): `cls` =
+   * OUTSRC_CL_RADIO_A/B, `page` = page index (H2C func), `packed` = the
+   * (addr<<20|data) u32 array for this page, `count` entries. */
+  bool radio_page_to_fw(uint8_t cls, uint8_t page, const uint32_t *packed,
+                        uint16_t count);
+
+  bool ch12_ready() const { return _ch12_ep != 0; }
+
 private:
+  /* Generic H2C over CH12: [WD 24B][fwcmd_hdr 8B][content]. */
+  bool send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
+                    const uint8_t *content, uint32_t len);
+
   /* --- register-op helpers (mirror HalKestrel; kept local to this TU) --- */
   void set32(uint16_t reg, uint32_t bits);
   void clr32(uint16_t reg, uint32_t bits);
@@ -57,6 +80,8 @@ private:
   ChipVariant _variant;
   uint8_t _ch12_ep = 0; /* resolved bulk-OUT endpoint for CH12 (BULKOUTID2) */
   std::vector<uint8_t> _txbuf; /* reused H2C packet scratch */
+  std::vector<uint8_t> _ofld_buf; /* accumulated cmd_ofld batch */
+  uint32_t _ofld_cmd_num = 0;     /* commands in the current batch (resets/flush) */
 };
 
 } /* namespace kestrel */

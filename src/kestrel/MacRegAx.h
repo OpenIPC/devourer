@@ -194,6 +194,59 @@ constexpr uint32_t B_AX_PREC_PAGE_CH12_MSK = 0x1ff;
 constexpr uint16_t HFC_USB_H2C_PREC_8852B = 32;   /* hfc_preccfg_usb_8852b */
 constexpr uint8_t HFC_FULL_COND_X2 = 1;
 
+/* ---- NIC-mode HFC (hfc_init(rst,en,h2c_en); usb_scc_8852b quotas) ----
+ * Runtime page/credit programming: without it the FW only has the tiny DLFW
+ * h2c credit and CH12 IO-offload stalls after one 512B page. */
+constexpr uint16_t R_AX_ACH0_PAGE_CTRL = 0x8A10;
+constexpr uint16_t R_AX_ACH1_PAGE_CTRL = 0x8A14;
+constexpr uint16_t R_AX_ACH2_PAGE_CTRL = 0x8A18;
+constexpr uint16_t R_AX_ACH3_PAGE_CTRL = 0x8A1C;
+constexpr uint16_t R_AX_CH8_PAGE_CTRL = 0x8A30; /* B0MGQ */
+constexpr uint16_t R_AX_CH9_PAGE_CTRL = 0x8A34; /* B0HIQ */
+constexpr uint8_t B_AX_ACH_MIN_PG_SH = 0;
+constexpr uint32_t B_AX_ACH_MIN_PG_MSK = 0x1fff;
+constexpr uint8_t B_AX_ACH_MAX_PG_SH = 16;
+constexpr uint32_t B_AX_ACH_MAX_PG_MSK = 0x1fff;
+constexpr uint32_t B_AX_ACH_GRP = 1u << 31;
+constexpr uint16_t R_AX_PUB_PAGE_CTRL1 = 0x8A90;
+constexpr uint8_t B_AX_PUBPG_G0_SH = 0;
+constexpr uint32_t B_AX_PUBPG_G0_MSK = 0x1fff;
+constexpr uint8_t B_AX_PUBPG_G1_SH = 16;
+constexpr uint32_t B_AX_PUBPG_G1_MSK = 0x1fff;
+constexpr uint16_t R_AX_PUB_PAGE_CTRL2 = 0x8A94;
+constexpr uint8_t B_AX_PUBPG_ALL_SH = 0;
+constexpr uint32_t B_AX_PUBPG_ALL_MSK = 0x1fff;
+constexpr uint16_t R_AX_WP_PAGE_CTRL1 = 0x8AA0;
+constexpr uint8_t B_AX_PREC_PAGE_WP_CH07_SH = 0;
+constexpr uint32_t B_AX_PREC_PAGE_WP_CH07_MSK = 0x1ff;
+constexpr uint8_t B_AX_PREC_PAGE_WP_CH811_SH = 16;
+constexpr uint32_t B_AX_PREC_PAGE_WP_CH811_MSK = 0x1ff;
+constexpr uint16_t R_AX_WP_PAGE_CTRL2 = 0x8AA4;
+constexpr uint8_t B_AX_WP_THRD_SH = 0;
+constexpr uint32_t B_AX_WP_THRD_MSK = 0x1fff;
+constexpr uint8_t B_AX_PREC_PAGE_CH011_SH = 0;
+constexpr uint32_t B_AX_PREC_PAGE_CH011_MSK = 0x1ff;
+constexpr uint8_t B_AX_HCI_FC_MODE_SH = 1;
+constexpr uint32_t B_AX_HCI_FC_MODE_MSK = 0x3;
+constexpr uint8_t B_AX_HCI_FC_WD_FULL_COND_SH = 4;
+constexpr uint32_t B_AX_HCI_FC_WD_FULL_COND_MSK = 0x3;
+constexpr uint8_t B_AX_HCI_FC_WP_CH07_FULL_COND_SH = 6;
+constexpr uint32_t B_AX_HCI_FC_WP_CH07_FULL_COND_MSK = 0x3;
+constexpr uint8_t B_AX_HCI_FC_WP_CH811_FULL_COND_SH = 8;
+constexpr uint32_t B_AX_HCI_FC_WP_CH811_FULL_COND_MSK = 0x3;
+/* usb_scc_8852b ch cfg {min,max,grp0}: ACH0-3 + B0MG + B0HI. */
+constexpr uint16_t HFC_NIC_CH_MIN = 18;
+constexpr uint16_t HFC_NIC_CH_MAX = 152;
+/* hfc_pubcfg_usb_scc_8852b. */
+constexpr uint16_t HFC_NIC_PUB_G0 = 152;
+constexpr uint16_t HFC_NIC_PUB_G1 = 0;
+constexpr uint16_t HFC_NIC_PUB_MAX = 152;
+constexpr uint16_t HFC_NIC_WP_THRD = 0;
+/* hfc_preccfg_usb_8852b. */
+constexpr uint16_t HFC_NIC_CH011_PREC = 9;
+constexpr uint16_t HFC_NIC_WP_CH07_PREC = 64;
+constexpr uint16_t HFC_NIC_WP_CH811_PREC = 24;
+
 /* ---- FWDL (fwdl.c, mac_reg_ax.h) ---- */
 constexpr uint16_t R_AX_SYS_CLK_CTRL = 0x0008;
 constexpr uint32_t B_AX_CPU_CLK_EN = 1u << 14;
@@ -273,6 +326,39 @@ constexpr uint8_t AX_TXD_TXPKTSIZE_SH = 0;
 constexpr uint32_t AX_TXD_TXPKTSIZE_MSK = 0xffff;
 constexpr uint8_t MAC_AX_DMA_H2C = 12; /* CH12 */
 constexpr uint8_t BULKOUTID_H2C = 2;   /* get_bulkout_id_8852b: H2C -> id 2 */
+
+/* ---- Firmware IO-offload (fwofld.c, fwcmd_intf.h) — how BB/RF register
+ * tables are actually programmed on USB: batched into H2C commands the FW
+ * replays on-chip (the vendor does ZERO direct BB/RF-window writes). ---- */
+constexpr uint8_t FWCMD_H2C_CAT_OUTSRC = 0x2;
+constexpr uint8_t FWCMD_H2C_CL_FW_OFLD = 0x9;
+constexpr uint8_t FWCMD_H2C_FUNC_CMD_OFLD_REG = 0x11;
+/* rtw_mac_src_cmd_ofld (mac_outsrc_def.h). */
+constexpr uint8_t OFLD_SRC_BB = 0;
+constexpr uint8_t OFLD_SRC_RF = 1;
+constexpr uint8_t OFLD_SRC_MAC = 2;
+constexpr uint8_t OFLD_SRC_RF_DDIE = 3; /* sent as SRC_RF with dword1 offset=1 */
+/* rtw_mac_cmd_type_ofld. */
+constexpr uint8_t OFLD_TYPE_WRITE = 0;
+constexpr uint8_t OFLD_TYPE_COMPARE = 1;
+constexpr uint8_t OFLD_TYPE_DELAY = 2;
+/* fwcmd_cmd_ofld 16-byte command dword0/1 field shifts (fwcmd_intf.h). */
+constexpr uint8_t CMD_OFLD_SRC_SH = 0;
+constexpr uint8_t CMD_OFLD_TYPE_SH = 2;
+constexpr uint32_t CMD_OFLD_LC = 1u << 4;
+constexpr uint8_t CMD_OFLD_PATH_SH = 5;
+constexpr uint8_t CMD_OFLD_CMD_NUM_SH = 8;
+constexpr uint8_t CMD_OFLD_OFFSET_SH = 16;
+constexpr uint32_t CMD_OFLD_OFFSET_MSK = 0xffff;
+constexpr uint32_t CMD_OFLD_SIZE = 16;     /* sizeof(fwcmd_cmd_ofld) */
+constexpr uint32_t CMD_OFLD_MAX_LEN = 2000; /* buffer / max content per H2C */
+constexpr uint32_t MASKDWORD = 0xffffffffu;
+constexpr uint32_t MASKRF = 0x000fffffu; /* 20-bit RF register width */
+/* radio-to-fw (halrf) OUTSRC H2C classes: 8 = radio A, 9 = radio B, func = page. */
+constexpr uint8_t OUTSRC_CL_RADIO_A = 8;
+constexpr uint8_t OUTSRC_CL_RADIO_B = 9;
+constexpr uint32_t RADIO_TO_FW_DATA_SIZE = 500; /* entries per page */
+constexpr uint8_t H2CB_TYPE_LONG_DATA = 2;
 
 /* ---- MAC TRX init (M2a; trxcfg.c, mac_reg_ax.h) ---- */
 constexpr uint32_t TRXCFG_WAIT_CNT = 2000;

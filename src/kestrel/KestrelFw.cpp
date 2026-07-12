@@ -276,6 +276,106 @@ bool KestrelFw::send_fwdl_packet(const uint8_t *payload, uint32_t payload_len,
   return true;
 }
 
+bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
+                             const uint8_t *content, uint32_t len) {
+  /* Packet = [WD 24B][fwcmd_hdr 8B][content]. Same framing as the FWDL header
+   * path but with a caller-supplied cat/class/func and the content inline
+   * (no FWDL_EN). */
+  _txbuf.assign(r::WD_BODY_LEN + r::FWCMD_HDR_LEN + len, 0);
+  uint8_t *wd = _txbuf.data();
+  const uint32_t data_len = r::FWCMD_HDR_LEN + len;
+
+  uint32_t dw0 = static_cast<uint32_t>(r::MAC_AX_DMA_H2C & r::AX_TXD_CH_DMA_MSK)
+                 << r::AX_TXD_CH_DMA_SH;
+  put_le32(wd + 0, dw0);
+  put_le32(wd + 8,
+           (data_len & r::AX_TXD_TXPKTSIZE_MSK) << r::AX_TXD_TXPKTSIZE_SH);
+
+  uint8_t *hdr = wd + r::WD_BODY_LEN;
+  uint32_t hdr0 = (static_cast<uint32_t>(cat) << r::H2C_HDR_CAT_SH) |
+                  (static_cast<uint32_t>(h2c_class) << r::H2C_HDR_CLASS_SH) |
+                  (static_cast<uint32_t>(func) << r::H2C_HDR_FUNC_SH) |
+                  (static_cast<uint32_t>(r::FWCMD_TYPE_H2C) << r::H2C_HDR_DEL_TYPE_SH);
+  put_le32(hdr + 0, hdr0);
+  put_le32(hdr + 4, len << r::H2C_HDR_TOTAL_LEN_SH);
+  std::memcpy(hdr + r::FWCMD_HDR_LEN, content, len);
+
+  int rc = _device.bulk_send_sync_ep(_ch12_ep, _txbuf.data(), _txbuf.size(), 1000);
+  if (rc < 0 || static_cast<size_t>(rc) != _txbuf.size()) {
+    _logger->error("Kestrel H2C: bulk-out to ep 0x{:02x} failed (rc={}, class={}"
+                   " func={})",
+                   _ch12_ep, rc, h2c_class, func);
+    return false;
+  }
+  return true;
+}
+
+void KestrelFw::ofld_begin() {
+  _ofld_buf.clear();
+  _ofld_cmd_num = 0;
+}
+
+void KestrelFw::ofld_write(uint8_t src, uint8_t type, uint8_t path,
+                           uint16_t offset, uint32_t value, uint32_t mask) {
+  /* Auto-flush before this command would overflow the FW's 2000-byte buffer. */
+  if (_ofld_buf.size() + r::CMD_OFLD_SIZE > r::CMD_OFLD_MAX_LEN)
+    ofld_flush();
+
+  const uint8_t rf_ddie = (src == r::OFLD_SRC_RF_DDIE) ? 1 : 0;
+  const uint8_t real_src = (src == r::OFLD_SRC_RF_DDIE) ? r::OFLD_SRC_RF : src;
+
+  uint32_t dw0 =
+      (static_cast<uint32_t>(real_src) << r::CMD_OFLD_SRC_SH) |
+      (static_cast<uint32_t>(type) << r::CMD_OFLD_TYPE_SH) |
+      (static_cast<uint32_t>(path & 0x3) << r::CMD_OFLD_PATH_SH) |
+      (static_cast<uint32_t>(_ofld_cmd_num & 0x7f) << r::CMD_OFLD_CMD_NUM_SH) |
+      (static_cast<uint32_t>(offset) << r::CMD_OFLD_OFFSET_SH);
+  /* dword1: id (0) | the "base offset" field — the same 16-bit offset for a
+   * BB write, 0 for an RF serial write, 1 for an RF D-die write. */
+  uint32_t off2 = (real_src == r::OFLD_SRC_RF) ? rf_ddie : offset;
+  uint32_t dw1 = off2 << r::CMD_OFLD_OFFSET_SH;
+
+  size_t o = _ofld_buf.size();
+  _ofld_buf.resize(o + r::CMD_OFLD_SIZE);
+  uint8_t *p = _ofld_buf.data() + o;
+  put_le32(p + 0, dw0);
+  put_le32(p + 4, dw1);
+  put_le32(p + 8, value);
+  put_le32(p + 12, mask);
+  ++_ofld_cmd_num;
+}
+
+bool KestrelFw::ofld_flush() {
+  if (_ofld_buf.empty())
+    return true;
+  /* Set the LC (last-command) bit on the final command's dword0 so the FW
+   * executes the whole batch (ofld_incompatible_full_cmd / cfgcr_end). */
+  uint8_t *last = _ofld_buf.data() + (_ofld_buf.size() - r::CMD_OFLD_SIZE);
+  uint32_t dw0 = le32(last);
+  put_le32(last, dw0 | r::CMD_OFLD_LC);
+
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FW_OFLD,
+                         r::FWCMD_H2C_FUNC_CMD_OFLD_REG, _ofld_buf.data(),
+                         static_cast<uint32_t>(_ofld_buf.size()));
+  /* Give the FW time to replay the batch before the next one (the vendor polls
+   * the cmd-state mutex; a short settle is enough for sequential sync sends). */
+  delay_us(200);
+  _ofld_buf.clear();
+  _ofld_cmd_num = 0;
+  return ok;
+}
+
+bool KestrelFw::radio_page_to_fw(uint8_t cls, uint8_t page,
+                                 const uint32_t *packed, uint16_t count) {
+  std::vector<uint8_t> buf(static_cast<size_t>(count) * 4);
+  for (uint16_t i = 0; i < count; ++i)
+    put_le32(buf.data() + i * 4, packed[i]);
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_OUTSRC, cls, page, buf.data(),
+                         static_cast<uint32_t>(buf.size()));
+  delay_us(200);
+  return ok;
+}
+
 bool KestrelFw::check_fw_rdy() {
   /* Poll WCPU_FWDL_STS [7:5] until FW_INIT_RDY(7); surface fail codes. */
   for (uint32_t cnt = r::FWDL_WAIT_CNT; cnt != 0; --cnt) {

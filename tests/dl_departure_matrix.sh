@@ -6,7 +6,7 @@
 # tx_tsf (ReadTsf) + host_ns (steady_clock immediately before send_packet); the
 # witness records them with its hardware rx_tsfl, and txegress_analyze.py's
 # host-clock fit turns the residual tail into the per-transport guard contract
-# (one txeg.verdict JSONL line per cell). Results table: docs/dl-departure.md.
+# (one txeg.verdict JSONL line per cell). Results table: docs/scheduled-mac.md.
 #
 #   sudo bash tests/dl_departure_matrix.sh
 #   SECS=60 SLOT_US=1000 sudo bash tests/dl_departure_matrix.sh

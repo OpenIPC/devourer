@@ -1,14 +1,15 @@
 # A visual primer on the driver machinery
 
-The [RF primer](rf-primer.md) shows what the *radio physics* looks like —
-subcarriers, constellations, gain control. This page is its sibling for the
-*silicon and software*: what is actually inside a Realtek Wi-Fi chip, and what the
-vendor driver vocabulary means — firmware, efuse, FWDL, DMAC/CMAC, halbb/halrf,
-LSSI, IQK, H2C, DIG. If you've ever opened a Realtek vendor tree and
-bounced off ten thousand files of alphabet soup, this is the decoder ring. Like the
-RF primer it's a picture book: thirteen short animations in the DEVOURER
-live-monitor style, ordered from the silicon up. Read it top to bottom and both the
-vendor trees and devourer's `src/` will read like prose.
+This page is the decoder ring for the *silicon and software* inside a Realtek
+Wi-Fi chip: what is actually in the package, and what the vendor-driver
+vocabulary means — firmware, efuse, FWDL, DMAC/CMAC, halbb/halrf, LSSI, IQK,
+H2C, DIG. If you've ever opened a Realtek vendor tree and bounced off ten
+thousand files of alphabet soup, start here. Its sibling, the
+[RF primer](rf-primer.md), shows what the *radio physics* looks like —
+subcarriers, constellations, gain control. Like the RF primer this is a
+picture book: thirteen short animations in the DEVOURER live-monitor style,
+ordered from the silicon up. Read it top to bottom and both the vendor trees
+and devourer's `src/` will read like prose.
 
 Everything here is grounded in the vendor reference drivers vendored under
 `reference/` (`rtl8812au` → `rtl88x2bu`/`rtl88x2cu`/`rtl88x2eu`), in Realtek's

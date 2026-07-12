@@ -160,7 +160,7 @@ per-cell stdout/stderr logs end up at `/tmp/devourer-regress-last/`.
 - `--tx-pid 0xNNNN` / `--rx-pid 0xNNNN` — pick specific DUTs (defaults to
   the first two auto-detected)
 - `--no-baseline-abort` — run all 4 cells even if kernel-kernel fails
-  (useful when one chipset has no working kernel driver on this rig)
+  (useful when one chipset has no working kernel driver on the host)
 - `--no-rf-reset` — skip the per-cell USB port-level authorize-cycle.
   Default behaviour is to deauthorize / reauthorize each DUT's USB port
   before every cell, forcing a true chip-power cycle. Required because

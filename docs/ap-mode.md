@@ -1,9 +1,11 @@
 # Infrastructure AP mode — devourer as a Wi-Fi access point
 
-devourer's hardware-beacon path (`StartBeacon`, see `docs/time-distribution.md`)
-is the foundation for acting as a real infrastructure **access point**: a Linux
-station discovers devourer, authenticates, associates, gets an IP, and exchanges
-IP traffic with it — open or WPA2-PSK encrypted. These are experimental example
+devourer's hardware-beacon path (`StartBeacon`, see `docs/time-distribution.md`;
+live content swaps via `UpdateBeaconPayload` are measured in
+[scheduled-mac.md](scheduled-mac.md)) is the foundation for acting as a real
+infrastructure **access point**: a Linux station discovers devourer,
+authenticates, associates, gets an IP, and exchanges IP traffic with it — open
+or WPA2-PSK encrypted. These are experimental example
 harnesses under `tests/`, not a library API — the pieces (beacon, RX callback,
 `send_packet`) are the same ones the demos use; the AP logic (probe/auth/assoc
 responses, DHCP/ARP/ICMP, the WPA2 4-way handshake, software CCMP) lives in the

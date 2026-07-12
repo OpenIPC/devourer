@@ -20,7 +20,7 @@ Two mechanisms, both power problems that masquerade as sensitivity problems:
 ## The tell: EVM, not SNR
 
 The counterintuitive part — and the reason people miss it — is that **SNR can
-look perfectly healthy while the link is saturating.** Measured on this bench,
+look perfectly healthy while the link is saturating.** Measured by
 sweeping an 8812AU's TX power from low to full while a second adapter reported
 per-frame metrics (`tests/saturation_knee_sweep.sh`):
 

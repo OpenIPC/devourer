@@ -1,4 +1,4 @@
-# Jammer resilience (M5)
+# Jammer resilience
 
 How frequency hopping and the fused-FEC link hold up against a narrowband
 jammer, and where a *following* jammer stops being able to keep up. Two
@@ -64,7 +64,7 @@ Two strategies, matched to the TX order:
 - **predictive** (vs a sequential TX): the public round-robin order lets the
   follower jam the channel it expects *next*, cancelling its own latency.
 
-Measured on this rig:
+Measured:
 
 - Full-duplex sense costs ~0.3 ms; the follower's reaction is dominated by the
   B210 TX retune (`set_tx_freq`) at **~3.5 ms**. That retune latency is the floor
@@ -87,7 +87,7 @@ The gap between those two thresholds is what a keyed permutation buys.
 
 ## Notes / limitations
 
-- The follower needs ≥60 MS/s to span a 60 MHz hopset in one FFT. On this B210,
+- The follower needs ≥60 MS/s to span a 60 MHz hopset in one FFT. On a B210,
   61.44/56/50 MS/s trip a UHD tuning assertion (`std::lcm` overflow); 60 MS/s is
   clean, so the follower experiment uses a 3-channel hopset (36/40/44, 40 MHz)
   that fits comfortably.
@@ -95,5 +95,6 @@ The gap between those two thresholds is what a keyed permutation buys.
   streamers per cycle (streamer setup is ~hundreds of ms and rapid RX/TX
   switching corrupts the B200 control channel). Persistent streamers with
   serialized control (send burst → sense → retune, one thread) are stable.
-- M6 (adaptive hopset exclusion — drop a persistently-jammed channel from the
-  set) is follow-up work.
+- The hop schedule visits every configured channel; there is no adaptive
+  exclusion of a persistently-jammed one — the FEC absorbs those dwells (the
+  ~1/N loss in experiment 1).

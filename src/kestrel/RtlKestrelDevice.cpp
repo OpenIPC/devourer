@@ -7,7 +7,9 @@
 #include <utility>
 
 #include "FrameParserKestrel.h"
+#include "RadiotapPeek.h"
 #include "RxPacket.h"
+#include "TxDescKestrel.h"
 
 namespace {
 
@@ -133,8 +135,21 @@ void RtlKestrelDevice::Init(Action_ParsedRadioPacket packetProcessor,
 }
 
 void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
-  _channel = channel;
-  not_ported("InitWrite", "M4 TX");
+  /* TX bring-up = the full monitor bring-up (the CMAC init already stands up
+   * the scheduler/tmac/trxptcl/ptcl TX path) minus the RX loop. Then resolve
+   * the band-0 mgmt bulk-OUT endpoint (BULKOUTID0 = 0th bulk-OUT per
+   * get_bulkout_id_8852b). */
+  if (!BringUpMonitor(channel)) {
+    _logger->error("Kestrel: TX bring-up failed");
+    return;
+  }
+  _tx_mgmt_ep = _device.nth_bulk_out_ep(0);
+  if (_tx_mgmt_ep == 0) {
+    _logger->error("Kestrel: no bulk-OUT endpoint for mgmt TX");
+    return;
+  }
+  _logger->info("Kestrel: TX ready on ch{} — mgmt endpoint 0x{:02x}",
+                channel.Channel, _tx_mgmt_ep);
 }
 
 void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
@@ -182,8 +197,33 @@ void RtlKestrelDevice::SetMonitorChannel(SelectedChannel channel) {
   _hal.set_channel(channel.Channel, channel.ChannelWidth);
 }
 
-bool RtlKestrelDevice::send_packet(const uint8_t * /*packet*/,
-                                   size_t /*length*/) {
-  _logger->error("Kestrel: send_packet is not ported yet (M4 TX)");
-  return false;
+bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
+  if (_tx_mgmt_ep == 0) {
+    _logger->error("Kestrel: send_packet before InitWrite (TX not up)");
+    return false;
+  }
+  /* devourer convention: packet = [radiotap header][802.11 MPDU]. Strip the
+   * radiotap; the AX descriptor carries the TX parameters instead. */
+  const uint16_t rlen = devourer::radiotap_hdr_len(packet, length);
+  if (rlen == 0 || static_cast<size_t>(rlen) >= length) {
+    _logger->error("Kestrel: send_packet bad radiotap (len={}, rtap={})",
+                   length, rlen);
+    return false;
+  }
+  const uint8_t *frame = packet + rlen;
+  const uint32_t flen = static_cast<uint32_t>(length - rlen);
+
+  /* First-light TX: fixed 6M OFDM, MACID 0 (self), no rate fallback. Radiotap-
+   * driven rate/BW selection lands in M5 with the HE rate grammar. */
+  auto buf = kestrel::build_mgnt_txdesc(frame, flen, kestrel::RATE_OFDM6, 0,
+                                        _tx_seq++ & 0xfff);
+  int rc = _device.bulk_send_sync_ep(_tx_mgmt_ep, buf.data(),
+                                     static_cast<int>(buf.size()), 1000);
+  if (rc < 0 || static_cast<size_t>(rc) != buf.size()) {
+    _logger->error("Kestrel: send_packet bulk-OUT ep 0x{:02x} failed (rc={}, "
+                   "wanted {})",
+                   _tx_mgmt_ep, rc, buf.size());
+    return false;
+  }
+  return true;
 }

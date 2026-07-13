@@ -919,94 +919,78 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
                 _device.rtw_read32(r::R_AX_WLRF_CTRL),
                 _device.rtw_read32(r::R_AX_SYS_FUNC_EN));
 
-  /* --- BB register + gain tables (halbb_cfg_bbcr): direct write32, with the
-   * 0xf9..0xfe delay pseudo-addresses and the phy1 (0x100xxxxx) entries
-   * skipped for single-PHY. --- */
+  /* --- BB register + gain + radio tables via FIRMWARE OFFLOAD (cmd_ofld H2C).
+   * On 8852BU USB the host cannot drive the RF SW-SI or the d-die window
+   * directly (golden usbmon capture: the vendor issues ZERO wIndex=1 writes);
+   * all BB+RF programming is offloaded to the on-chip firmware. Each table
+   * write becomes one cmd_ofld command; the emitter auto-flushes at the fw's
+   * 2000-byte batch cap and each flush waits on the C2H IO_OFLD_RESULT. The
+   * 0xf9..0xfe delay pseudo-addresses flush + host-sleep (vendor DELAY_OFLD +
+   * accu_delay), and phy1 (0x100xxxxx) entries are skipped for single-PHY. --- */
+  _fw.ofld_begin();
+  auto ofld_delay = [&](uint32_t us) {
+    _fw.ofld_flush();
+    _fw.ofld_begin();
+    delay_us(us);
+  };
   auto bb_emit = [&](uint32_t addr, uint32_t val) {
     switch (addr) {
-    case 0xfe:
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      return;
-    case 0xfd:
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      return;
-    case 0xfc:
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      return;
-    case 0xfb:
-      delay_us(50);
-      return;
-    case 0xfa:
-      delay_us(5);
-      return;
-    case 0xf9:
-      delay_us(1);
-      return;
-    default:
-      break;
+    case 0xfe: ofld_delay(50000); return;
+    case 0xfd: ofld_delay(5000); return;
+    case 0xfc: ofld_delay(1000); return;
+    case 0xfb: ofld_delay(50); return;
+    case 0xfa: ofld_delay(5); return;
+    case 0xf9: ofld_delay(1); return;
+    default: break;
     }
     if ((addr >> 16) == 0x100) /* phy1-only entry, skip on single-PHY */
       return;
-    /* BB registers live at addr + bb0_cr_offset (0x10000) — wIndex=1 over USB,
-     * clear of the MAC/system space at wIndex=0. */
-    _device.rtw_write32_wide((addr & 0xffff) + 0x10000u, val);
+    _fw.ofld_write(r::OFLD_SRC_BB, r::OFLD_TYPE_WRITE, 0,
+                   static_cast<uint16_t>(addr & 0xffff), val, r::MASKDWORD);
   };
   apply_phy_table(array_mp_8852b_phy_reg, array_mp_8852b_phy_reg_len, rfe_type,
                   cut, bb_emit);
-  _logger->info("Kestrel PHY: BB phy_reg applied ({} words)",
-                array_mp_8852b_phy_reg_len);
   apply_phy_table(array_mp_8852b_phy_reg_gain, array_mp_8852b_phy_reg_gain_len,
                   rfe_type, cut, bb_emit);
-  _logger->info("Kestrel PHY: BB gain applied");
 
-  /* Apply a radio table via DIRECT RF register writes (halbb_write_rf_reg_8852b,
-   * the non-fwofld path). Each RF register appears TWICE in the table: once
-   * without BIT(16) (d-die, written through the DDV BB window 0xe000/0xf000) and
-   * once with BIT(16) set (a-die, written through the DAV serial command 0x370).
-   * The dispatch: ad_sel = (addr>>16)&1 -> DAV(a-die serial) if set, else
-   * DDV(d-die window). Writing every entry to the d-die window (as before) left
-   * the a-die radio synthesizer unprogrammed, so RF00 read 0. */
+  /* halrf_wrf offload dispatch (radio table, each RF reg appears twice): a-die
+   * (no BIT16) -> RF_CMD_OFLD (fw drives the SI); d-die (BIT16) -> a BB write to
+   * the 0xe000/0xf000 window. mask = MASKRF (20-bit full write). */
   auto apply_radio = [&](const uint32_t *arr, size_t len, uint8_t path) {
     auto emit = [&](uint32_t addr, uint32_t val) {
-      switch (addr) { /* delay pseudo-addresses */
-      case 0xfe:
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        return;
-      case 0xfd:
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        return;
-      case 0xfc:
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        return;
-      case 0xfb:
-        delay_us(50);
-        return;
-      case 0xfa:
-        delay_us(5);
-        return;
-      case 0xf9:
-        delay_us(1);
-        return;
-      default:
-        break;
+      switch (addr) {
+      case 0xfe: ofld_delay(50000); return;
+      case 0xfd: ofld_delay(5000); return;
+      case 0xfc: ofld_delay(1000); return;
+      case 0xfb: ofld_delay(50); return;
+      case 0xfa: ofld_delay(5); return;
+      case 0xf9: ofld_delay(1); return;
+      default: break;
       }
-      /* halbb_write_rf_reg_8852b: ad_sel = (addr>>16)&1; ad_sel==DAV(0) -> a-die
-       * serial (0x370), else DDV(1) -> d-die BB window (0xe000/0xf000). Since
-       * enum rtw_dv_sel is {DAV=0, DDV=1}: NO BIT16 -> a-die serial, BIT16 set
-       * -> d-die window. */
-      if (addr & 0x10000u) /* DDV: d-die BB window */
-        rf_write(path, static_cast<uint8_t>(addr & 0xff), val & r::MASKRF);
-      else /* DAV: a-die serial synth (the LO/PLL — must be programmed here) */
-        rf_write_dav(path, static_cast<uint8_t>(addr & 0xff), val & r::MASKRF);
+      if (addr & 0x10000u) {
+        const uint16_t off = static_cast<uint16_t>((path ? 0xf000 : 0xe000) +
+                                                   ((addr & 0xff) << 2));
+        _fw.ofld_write(r::OFLD_SRC_BB, r::OFLD_TYPE_WRITE, 0, off,
+                       val & r::MASKRF, r::MASKRF);
+      } else {
+        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_WRITE, path,
+                       static_cast<uint16_t>(addr & 0xff), val & r::MASKRF,
+                       r::MASKRF);
+      }
     };
     apply_phy_table(arr, len, rfe_type, cut, emit);
   };
   apply_radio(array_mp_8852b_radioa, array_mp_8852b_radioa_len, 0);
   apply_radio(array_mp_8852b_radiob, array_mp_8852b_radiob_len, 1);
+  _fw.ofld_flush();
 
-  _logger->info("Kestrel PHY: BB + RF direct tables applied "
-                "(rfe=0x{:02x} cut={})",
-                rfe_type, cut);
+  /* Decisive readback: BB 0x4004 is host-readable (core BB), and the phy_reg
+   * table sets it to 0xCA014000 — but ONLY via fw-offload now (no direct
+   * writes). If it reads back the table value, the fw processed the batch. */
+  const uint32_t bb4004 = _device.rtw_read32_wide(0x4004u + 0x10000u);
+  _logger->info("Kestrel PHY: BB+RF tables applied via fw-offload "
+                "(rfe=0x{:02x} cut={}) — BB0x4004=0x{:08x} (want CA014000)",
+                rfe_type, cut, bb4004);
   return true;
 }
 

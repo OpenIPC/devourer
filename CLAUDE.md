@@ -60,9 +60,19 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
   PHY tables, halrf calibration — none of the 11ac loaders/parsers apply).
   Dispatched **PID-first** (`kestrel/KestrelUsbIds.h`), not from the 0x00FC
   byte: on AX silicon that register is R_AX_SYS_CHIPINFO (die-id 0x51/0x52;
-  the 8852A's 0x50 collides with the 8822B cold transient). Milestones:
-  M0 identity (`kestrelprobe id`) works; M1 power-on/FW/efuse, M2 monitor RX,
-  M3 channel/BW/cal, M4 TX are staged next; the capstone is 11ax
+  the 8852A's 0x50 collides with the 8822B cold transient). On the RTL8852BU:
+  identity, power-on/FW/efuse, monitor RX, channel/BW (2.4/5 GHz, 20 MHz), and
+  TX are up and SDR-validated on-air on both bands (mgmt injection — the OpenIPC
+  video path via `streamtx`; legacy/HT/VHT/HE rates). TX power is a fixed BB dBm
+  (`halbb_set_txpwr_dbm`, default 20 dBm, `DEVOURER_TX_PWR` override) with a
+  runtime `SetTxPowerOffsetQdb` lever; `ReadTsf` reads the per-port MAC TSF.
+  TX airs with the CMAC EDCCA/CCA gate disabled (`sch_tx_en`) because the
+  RX-DCK/DACK BB calibration is not yet ported and the energy detector otherwise
+  reads a perpetual busy that freezes the CSMA backoff — the intended
+  injection/monitor-link mode; carrier-sense returns with that calibration.
+  Not yet working: the fw's async packet-C2H delivery (blocks the USR_TX_RPT
+  TX-egress timestamp and the rest of the #236 C2H surface), a HW-timed beacon
+  (AX beacon engine), and full RF calibration. The capstone is 11ax
   trigger-based UL + TWT (issue #236 — the v1.19 vendor fwcmd surface exposes
   TWT-OFDMA + F2P trigger H2Cs that mainline rtw89 lacks). The 8852A-family
   (RTL8832AU) is deliberately excluded (frozen 2021 v1.15 vendor drop only).

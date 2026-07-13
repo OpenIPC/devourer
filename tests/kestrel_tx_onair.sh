@@ -13,8 +13,19 @@ cd "$(dirname "$0")/.."
 CH=${1:-6}; DUR=${2:-8}; RATE=${3:-}   # RATE e.g. 6M, 24M, MCS7 (radiotap-driven)
 SA="57:42:75:05:d6:00"
 TX_ID="35bc:0108"      # RTL8852BU (devourer txdemo)
-RX_ID="0bda:8812"      # RTL8812AU (devourer rxdemo witness)
 TX_HUB="3-2.3"; TX_PORT="3"   # uhubctl VBUS map for the 8852BU
+# RX witness = any present 8812AU. That die ships under several PIDs (0x8812,
+# 0xc812, ...); pick whichever is actually enumerated so the witness doesn't
+# "die on setup" just because one specific PID isn't plugged in. Override with
+# RX_ID=0bda:xxxx.
+RX_ID="${RX_ID:-}"
+if [ -z "$RX_ID" ]; then
+  for pid in 8812 c812 0811 a811; do
+    if lsusb -d "0bda:$pid" >/dev/null 2>&1; then RX_ID="0bda:$pid"; break; fi
+  done
+fi
+[ -n "$RX_ID" ] || { echo "FAIL: no 8812AU witness present (tried 0bda:8812/c812/0811/a811)"; exit 2; }
+echo ">> witness adapter: $RX_ID"
 RXLOG="/tmp/kestrel_tx_rx.jsonl"; TXLOG="/tmp/kestrel_tx_tx.log"
 [ -x build/txdemo ] && [ -x build/rxdemo ] || { echo "FAIL: build txdemo+rxdemo"; exit 2; }
 

@@ -1375,11 +1375,13 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
 
   /* Force a fixed BB TX power (halbb_set_txpwr_dbm_8852b). Without it the PHY
    * runs at the phy_reg-table default, which is weak on 5 GHz. Default 20 dBm;
-   * overridable via DEVOURER_TX_PWR (set_default_txpwr_dbm). */
-  set_txpwr_dbm(_txpwr_dbm_q2);
+   * overridable via DEVOURER_TX_PWR (set_default_txpwr_dbm). The runtime offset
+   * (SetTxPowerOffsetQdb) is folded in here so it survives a channel change. */
+  set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
 
-  _logger->info("Kestrel PHY: tuned to ch{} bw20 ({}) — TXpwr={}dBm", channel,
-                is_2g ? "2.4G" : "5G", _txpwr_dbm_q2 / 4);
+  _logger->info("Kestrel PHY: tuned to ch{} bw20 ({}) — TXpwr={}dBm (off={}qdB)",
+                channel, is_2g ? "2.4G" : "5G",
+                (_txpwr_dbm_q2 + _txpwr_offset_qdb) / 4, _txpwr_offset_qdb);
 
   /* Diagnostic readback: confirm the writes landed and where RX stands.
    * 0x4004 was set to 0xCA014000 by the phy_reg table — a round-trip probe of

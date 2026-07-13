@@ -66,6 +66,13 @@ public:
   devourer::TxCaps GetTxCaps() override;
   devourer::AdapterCaps GetAdapterCaps() override;
 
+  /* Runtime TX-power lever (M5): fixed-dBm BB power (halbb_set_txpwr_dbm) with a
+   * quarter-dB offset relative to the DEVOURER_TX_PWR base. Sticky across
+   * SetMonitorChannel. */
+  devourer::TxPowerCaps GetTxPowerCaps() override;
+  int SetTxPowerOffsetQdb(int qdb) override;
+  devourer::TxPowerState GetTxPowerState() override;
+
   /* AX-native identity read (no power-on needed — the identity block is alive
    * as soon as the USB function enumerates). kestrelprobe stage "id" and the
    * constructor's confirmation log both come through here. */

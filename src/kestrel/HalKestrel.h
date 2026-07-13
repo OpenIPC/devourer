@@ -134,6 +134,20 @@ public:
     _txpwr_dbm_q2 = static_cast<int16_t>(dbm * 4);
   }
 
+  /* Runtime power offset (quarter-dB) relative to the base dBm — the adaptive-
+   * link lever. Because the base is already s(9,2) (quarter-dB), the offset adds
+   * directly. Stores the offset (sticky across set_channel) and re-applies the
+   * effective power NOW at the current channel. */
+  void set_txpwr_offset_qdb(int16_t qdb) {
+    _txpwr_offset_qdb = qdb;
+    set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
+  }
+  int16_t txpwr_offset_qdb() const { return _txpwr_offset_qdb; }
+  int16_t txpwr_base_qdb() const { return _txpwr_dbm_q2; }
+  int16_t txpwr_effective_qdb() const {
+    return static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb);
+  }
+
   /* M4/M5 — enable the per-user TX report so the fw emits C2H USR_TX_RPT_INFO
    * with the freerun TX-egress timestamps. Call after the TX bring-up; the
    * reports are received + parsed in the RX loop. */
@@ -260,6 +274,7 @@ private:
   ChipVariant _variant;
   KestrelFw _fw; /* persistent: owns the CH12 H2C transport + IO-offload */
   int16_t _txpwr_dbm_q2 = 20 * 4; /* fixed BB TX power, s(9,2); 20 dBm default */
+  int16_t _txpwr_offset_qdb = 0;  /* runtime offset (quarter-dB), sticky */
 };
 
 } /* namespace kestrel */

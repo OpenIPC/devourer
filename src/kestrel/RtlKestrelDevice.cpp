@@ -305,6 +305,50 @@ devourer::TxCaps RtlKestrelDevice::GetTxCaps() {
                                       /*bw_max_mhz=*/80);
 }
 
+/* Effective BB power is clamped to [0, 23] dBm (=[0, 92] quarter-dB); the
+ * 8852B PA saturates well below the s(9,2) field's nominal +63 dBm ceiling. */
+static constexpr int16_t kKestrelTxMaxQdb = 23 * 4;
+static constexpr int16_t kKestrelTxMinQdb = 0;
+
+devourer::TxPowerCaps RtlKestrelDevice::GetTxPowerCaps() {
+  devourer::TxPowerCaps c;
+  c.supported = true;
+  c.index_max = 0;      /* dBm-target model, not an index */
+  c.step_qdb = 1;       /* s(9,2) resolution = 0.25 dB */
+  c.step_measured = false;
+  const int16_t base = _hal.txpwr_base_qdb();
+  c.offset_min_qdb = static_cast<int16_t>(kKestrelTxMinQdb - base);
+  c.offset_max_qdb = static_cast<int16_t>(kKestrelTxMaxQdb - base);
+  return c;
+}
+
+int RtlKestrelDevice::SetTxPowerOffsetQdb(int qdb) {
+  /* Clamp so the effective power stays in the PA-valid dBm window, then apply
+   * the offset (folded into the base at the current channel). Returns the
+   * APPLIED qdB (may differ from the request after clamping). */
+  const int16_t base = _hal.txpwr_base_qdb();
+  int eff = base + qdb;
+  if (eff < kKestrelTxMinQdb) eff = kKestrelTxMinQdb;
+  if (eff > kKestrelTxMaxQdb) eff = kKestrelTxMaxQdb;
+  const int16_t applied = static_cast<int16_t>(eff - base);
+  _hal.set_txpwr_offset_qdb(applied);
+  _logger->info("Kestrel: SetTxPowerOffsetQdb({}) -> applied {} qdB "
+                "(effective {} dBm)",
+                qdb, applied, eff / 4);
+  return applied;
+}
+
+devourer::TxPowerState RtlKestrelDevice::GetTxPowerState() {
+  devourer::TxPowerState s;
+  s.valid = true;
+  s.flat_index = -1; /* dBm model, no per-rate index */
+  s.offset_qdb = _hal.txpwr_offset_qdb();
+  s.offset_steps = s.offset_qdb; /* 1 step == 1 qdB here */
+  s.saturated_low = _hal.txpwr_effective_qdb() <= kKestrelTxMinQdb;
+  s.saturated_high = _hal.txpwr_effective_qdb() >= kKestrelTxMaxQdb;
+  return s;
+}
+
 devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   devourer::AdapterCaps c;
   c.supported = true;

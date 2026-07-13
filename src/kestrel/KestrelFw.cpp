@@ -309,6 +309,22 @@ bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
   put_le32(hdr + 4, data_len << r::H2C_HDR_TOTAL_LEN_SH);
   std::memcpy(hdr + r::FWCMD_HDR_LEN, content, len);
 
+  /* One-shot hexdump of the first FW_OFLD packet for golden byte-diff vs the
+   * vendor .ko cmd_ofld capture (WD 24B + fwcmd hdr 8B + command dwords). */
+  static bool dumped = false;
+  if (!dumped && h2c_class == r::FWCMD_H2C_CL_FW_OFLD) {
+    dumped = true;
+    std::string hx;
+    const size_t n = std::min<size_t>(_txbuf.size(), 64);
+    char b[4];
+    for (size_t i = 0; i < n; ++i) {
+      std::snprintf(b, sizeof(b), "%02x", _txbuf[i]);
+      hx += b;
+      if ((i & 3) == 3) hx += ' ';
+    }
+    _logger->info("Kestrel cmd_ofld pkt[{}B] first64: {}", _txbuf.size(), hx);
+  }
+
   int rc = _device.bulk_send_sync_ep(_ch12_ep, _txbuf.data(), _txbuf.size(), 1000);
   if (rc < 0 || static_cast<size_t>(rc) != _txbuf.size()) {
     _logger->error("Kestrel H2C: bulk-out to ep 0x{:02x} failed (rc={}, class={}"

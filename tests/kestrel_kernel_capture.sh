@@ -70,7 +70,7 @@ sh -c "cat $MON > $RAW" &
 sleep 0.5
 echo ">> insmod $KO (bring-up starts)"
 insmod "$KO"
-sleep 5
+sleep 15
 pkill -9 -f "cat $MON" 2>/dev/null
 sleep 0.3
 

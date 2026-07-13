@@ -62,8 +62,10 @@ sleep 2
 echo ">> scanning (up to 3 tries)"
 BSS=0
 for i in 1 2 3; do
-  N=$(iw dev "$IFACE" scan 2>/dev/null | grep -c "^BSS ")
+  SCAN=$(iw dev "$IFACE" scan 2>/dev/null)
+  N=$(echo "$SCAN" | grep -c "^BSS ")
   echo "   try $i: $N APs"
+  [ "$N" -gt 0 ] && echo "$SCAN" | grep -E "freq:" | sort | uniq -c | sort -rn | head
   [ "$N" -gt "$BSS" ] && BSS=$N
   [ "$BSS" -gt 0 ] && break
   sleep 3

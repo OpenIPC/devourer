@@ -430,17 +430,19 @@ constexpr uint32_t B_AX_BC_DEC = 1u << 2;
 constexpr uint32_t B_AX_SEC_RX_DEC = 1u << 1;
 constexpr uint32_t B_AX_SEC_TX_ENC = 1u << 0;
 
-/* NIC-mode SCC DLE quota (dle_mem_usb3_8852b SCC entry; contrast the DLFW
- * quota above). wde_size25 / ple_size33 / wde_qt25 / ple_qt74(min) /
- * ple_qt75(max). */
-constexpr uint16_t SCC_WDE_LNK_PAGE = 166;
-constexpr uint16_t SCC_WDE_UNLNK_PAGE = 90;
-constexpr uint16_t SCC_PLE_LNK_PAGE = 624;
+/* NIC-mode SCC DLE quota. get_dle_mem_cfg selects dle_mem_usb3_8852b for the
+ * 8852b in BOTH USB2 and USB3 modes (the usb2_8852b table is defined but never
+ * referenced for this chip), so there is no speed dependence to encode here:
+ * wde_size25 / ple_size33 / wde_qt25 / ple_qt74(min) / ple_qt75(max). */
+constexpr uint16_t SCC_WDE_LNK_PAGE = 166;  /* wde_size25 lnk */
+constexpr uint16_t SCC_WDE_UNLNK_PAGE = 90; /* wde_size25 unlnk */
+constexpr uint16_t SCC_PLE_LNK_PAGE = 624;  /* ple_size33 lnk */
 /* wde_qt25: hif/wcpu/pkt_in/cpu_io (min==max). */
 constexpr uint16_t SCC_WDE_QT_HIF = 152;
 constexpr uint16_t SCC_WDE_QT_WCPU = 6;
 constexpr uint16_t SCC_WDE_QT_CPU_IO = 8;
-/* ple_qt74 (min) then ple_qt75 (max), 11 fields Q0..Q10. */
+/* ple_qt74 (min) then ple_qt75 (max), 11 fields Q0..Q10 (cmac0_tx, cmac1_tx,
+ * c2h, h2c, wcpu, mpdu_proc, cmac0_dma, cmac1_dma, bb_rpt, wd_rel, cpu_io). */
 constexpr uint16_t SCC_PLE_MIN[11] = {286, 0, 16, 48, 13, 13, 178, 0, 32, 14, 8};
 constexpr uint16_t SCC_PLE_MAX[11] = {286, 0, 32, 48, 29, 13, 194, 0, 48, 14, 24};
 

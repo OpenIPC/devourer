@@ -522,7 +522,11 @@ bool HalKestrel::hfc_init_nic() {
           r::B_AX_PREC_PAGE_WP_CH811_MSK)
          << r::B_AX_PREC_PAGE_WP_CH811_SH));
   uint32_t fc = _device.rtw_read32(r::R_AX_HCI_FC_CTRL);
-  fc = r::set_clr_word(fc, 0 /* mode SPD */, r::B_AX_HCI_FC_MODE_MSK,
+  /* MODE = STF (1) for USB — matches the vendor golden capture
+   * (HCI_FC_CTRL = 0x055b: FC_EN=1, MODE=1). An earlier port set MODE=0 +
+   * FC_EN=0 on a wrong assumption; the fw never pulled the bulk cmd_ofld H2C
+   * off CH12 until HCI flow control was actually enabled. */
+  fc = r::set_clr_word(fc, 1 /* MAC_AX_HCIFC_STF */, r::B_AX_HCI_FC_MODE_MSK,
                        r::B_AX_HCI_FC_MODE_SH);
   fc = r::set_clr_word(fc, r::HFC_FULL_COND_X2, r::B_AX_HCI_FC_WD_FULL_COND_MSK,
                        r::B_AX_HCI_FC_WD_FULL_COND_SH);
@@ -537,12 +541,13 @@ bool HalKestrel::hfc_init_nic() {
                        r::B_AX_HCI_FC_WP_CH811_FULL_COND_SH);
   w(r::R_AX_HCI_FC_CTRL, fc);
 
-  /* set_fc_func_en(0, 1): USB uses h2c-only flow control — enable CH12 but
-   * NOT the full FC_EN (the vendor capture ends HCI_FC_CTRL at CH12_EN|
-   * CH12_FULL_COND, bit0 clear). Enabling FC_EN with the TX-channel credits
-   * would gate CH12. */
-  clr32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_EN);
-  set32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_CH12_EN);
+  /* set_fc_func_en(1, 1): enable HCI flow control (FC_EN) AND CH12. The vendor
+   * golden capture (ifup, right before its bulk cmd_ofld) ends HCI_FC_CTRL at
+   * 0x055b = FC_EN|MODE(STF)|CH12_EN|full-conds. Without FC_EN the MAC never
+   * credits a CH12 page for the incoming H2C, so the fw silently drops every
+   * cmd_ofld (bulk-OUT succeeds but BB writes never land, C2H result never
+   * fires). */
+  set32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
   delay_us(10);
   _logger->info("Kestrel TRX: NIC HFC quotas applied (CH12 credits live)");
   return true;
@@ -927,6 +932,22 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
    * 2000-byte batch cap and each flush waits on the C2H IO_OFLD_RESULT. The
    * 0xf9..0xfe delay pseudo-addresses flush + host-sleep (vendor DELAY_OFLD +
    * accu_delay), and phy1 (0x100xxxxx) entries are skipped for single-PHY. --- */
+  /* Drain any firmware C2H waiting on bulk-IN before offloading. The vendor
+   * has RX active during BB/RF init; if the fw's post-boot C2H queue backs up
+   * (no host reads), its main loop can stall and never service incoming H2C. */
+  {
+    std::vector<uint8_t> c2h(2048);
+    int drained = 0, total = 0;
+    for (int i = 0; i < 32; ++i) {
+      int rc = _device.bulk_read_raw(c2h.data(), static_cast<int>(c2h.size()), 20);
+      if (rc <= 0) break;
+      ++drained;
+      total += rc;
+    }
+    _logger->info("Kestrel PHY: drained {} C2H pkts ({} bytes) pre-offload",
+                  drained, total);
+  }
+
   _fw.ofld_begin();
   auto ofld_delay = [&](uint32_t us) {
     _fw.ofld_flush();

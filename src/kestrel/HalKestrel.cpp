@@ -956,10 +956,14 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
       default:
         break;
       }
-      if (addr & 0x10000u) /* DAV: a-die serial (0x370) */
-        rf_write_dav(path, static_cast<uint8_t>(addr & 0xff), val & r::MASKRF);
-      else /* DDV: d-die BB window (0xe000/0xf000) */
+      /* halbb_write_rf_reg_8852b: ad_sel = (addr>>16)&1; ad_sel==DAV(0) -> a-die
+       * serial (0x370), else DDV(1) -> d-die BB window (0xe000/0xf000). Since
+       * enum rtw_dv_sel is {DAV=0, DDV=1}: NO BIT16 -> a-die serial, BIT16 set
+       * -> d-die window. */
+      if (addr & 0x10000u) /* DDV: d-die BB window */
         rf_write(path, static_cast<uint8_t>(addr & 0xff), val & r::MASKRF);
+      else /* DAV: a-die serial synth (the LO/PLL — must be programmed here) */
+        rf_write_dav(path, static_cast<uint8_t>(addr & 0xff), val & r::MASKRF);
     };
     apply_phy_table(arr, len, rfe_type, cut, emit);
   };

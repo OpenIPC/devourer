@@ -888,6 +888,24 @@ void HalKestrel::coex_mac_init() {
                      static_cast<uint8_t>(val | (1u << 2)));
 }
 
+void HalKestrel::enable_bb_rf() {
+  /* set_enable_bb_rf(1) (hw.c set_enable_bb_rf, enable==1 8852B branch) — the
+   * vendor runs this in mac_hal_init immediately after FWDL, before sys_init
+   * and trx_init, so the BB/RF is out of reset when the firmware begins its own
+   * runtime init. All MAC-space (wIndex=0). */
+  set32(r::R_AX_SYS_FUNC_EN, r::B_AX_FEN_BBRSTB | r::B_AX_FEN_BB_GLB_RSTN);
+  field32(r::R_AX_SPS_DIG_ON_CTRL0, 0x1, r::B_AX_REG_ZCDC_H_MSK,
+          r::B_AX_REG_ZCDC_H_SH);
+  /* RDC KS/BB: AFC_AFEDIG write 1 / 0 / 1. */
+  set32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
+  clr32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
+  set32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
+  write_xtal_si(r::XTAL_SI_WL_RFC_S0, 0xC7, 0xFF);
+  write_xtal_si(r::XTAL_SI_WL_RFC_S1, 0xC7, 0xFF);
+  _device.rtw_write8(r::R_AX_PHYREG_SET, r::PHYREG_SET_XYN_CYCLE);
+  _logger->info("Kestrel: set_enable_bb_rf(1) after FWDL (BB/RF out of reset)");
+}
+
 bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   /* set_enable_bb_rf toggle (rtl8852b_halinit.c: enable_bb_rf(0) then (1)) —
    * the vendor pulses a disable before the enable to reset the RFC/AFE clock

@@ -82,6 +82,10 @@ bool RtlKestrelDevice::PowerOnFwAndTrx(kestrel::EfuseInfo &out) {
     return false;
   if (!_hal.download_firmware(_hal.read_cut()))
     return false;
+  /* Vendor mac_hal_init order: FWDL -> set_enable_bb_rf -> sys_init/trx_init.
+   * Enabling BB/RF here (not deferred to phy_bb_rf_init) means the firmware
+   * sees the BB/RF live as it starts its runtime init. */
+  _hal.enable_bb_rf();
   if (!_hal.trx_dmac_init())
     return false;
   return _hal.trx_cmac_rx_init();
@@ -108,6 +112,10 @@ bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
     return false;
   if (!_hal.download_firmware(_hal.read_cut()))
     return false;
+  /* Vendor mac_hal_init order: FWDL -> set_enable_bb_rf -> sys_init/trx_init.
+   * Enabling BB/RF here (not deferred to phy_bb_rf_init) means the firmware
+   * sees the BB/RF live as it starts its runtime init. */
+  _hal.enable_bb_rf();
   if (!_hal.trx_dmac_init())
     return false;
   if (!_hal.trx_cmac_rx_init())

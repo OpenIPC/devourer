@@ -44,6 +44,12 @@ public:
    * Must run after power_on (the efuse block is gated by the power sequence). */
   bool read_efuse(EfuseInfo &out, std::array<uint8_t, 1536> *raw_phys = nullptr);
 
+  /* set_enable_bb_rf(1) (hw.c) — release the BB from reset + enable the RF/AFE
+   * clocks. The vendor calls this in mac_hal_init right after FWDL and BEFORE
+   * sys_init/trx_init, so the BB/RF is live when the firmware starts running.
+   * Must run after download_firmware, before trx_dmac_init. */
+  void enable_bb_rf();
+
   /* Firmware download (M1b): hci_func_en + DLE/HFC pre-init + FWDL of the
    * cut-appropriate NICCE image. Must run after power_on. `cut` is the chip
    * cut version (from ReadChipInfo / R_AX_SYS_CFG1[15:12]). */

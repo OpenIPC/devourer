@@ -113,6 +113,11 @@ public:
    * standalone. */
   bool BringUpMonitor(SelectedChannel channel);
 
+  /* TX-only scheduler enablement (CMAC port + CTN_TXEN); clears the CCA gates,
+   * so it is kept out of BringUpMonitor to leave RX-only CCA on. InitWrite
+   * calls it after the shared bring-up. */
+  void EnableTxScheduler();
+
 private:
   [[noreturn]] void not_ported(const char *entry, const char *milestone) const;
   /* Route a C2H firmware message (RPKT_TYPE_C2H payload). Currently decodes the

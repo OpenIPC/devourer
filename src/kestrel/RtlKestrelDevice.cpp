@@ -162,17 +162,24 @@ bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
   _hal.set_host_rpr();
   if (!_hal.set_channel(channel.Channel, channel.ChannelWidth))
     return false;
+  return true;
+}
+
+/* TX-scheduler enablement — split out of BringUpMonitor because sch_tx_en()
+ * clears the CCA gates (R_AX_CCA_CFG_0 B_AX_CCA_ALL_EN) to unfreeze the CSMA
+ * backoff for injection, and clearing CCA ALSO disables RX energy detection —
+ * a pure-monitor RX loop that ran it went deaf (zero bulk-IN completions on
+ * every band). Only the TX path (InitWrite) needs it; RX-only keeps CCA on.
+ * The proper both-at-once fix (CCA on during TX) is task #11 (RX-DCK/DACK). */
+void RtlKestrelDevice::EnableTxScheduler() {
   /* mac_port_init (mport.c) — enable the CMAC PORT so the transmit engine has a
    * BSS/PTCL context. Without it the CMAC queues frames but never airs them,
    * and the mgmt bulk-OUT stalls at ~103 (the page pool fills with never-
-   * released frames). NO_LINK port-0 is enough for self-sourced injection.
-   * Harmless for the RX path (no beacon armed). */
+   * released frames). NO_LINK port-0 is enough for self-sourced injection. */
   _hal.port_init();
   /* Enable the scheduler contention TX queues (R_AX_CTN_TXEN) so mgmt/data
-   * frames can actually contend for the medium. Without this queued frames
-   * never air and the mgmt bulk-OUT stalls at ~103 (PLE page pool full). */
+   * frames can actually contend for the medium; also clears the CCA TX gates. */
   _hal.sch_tx_en();
-  return true;
 }
 
 void RtlKestrelDevice::Init(Action_ParsedRadioPacket packetProcessor,
@@ -193,6 +200,10 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
     _logger->error("Kestrel: TX bring-up failed");
     return;
   }
+  /* TX-only: enable the CMAC port + scheduler contention queues (this clears
+   * the CCA gates — see EnableTxScheduler). Kept out of BringUpMonitor so the
+   * pure-monitor RX path keeps CCA on and can actually hear frames. */
+  EnableTxScheduler();
   _tx_mgmt_ep = _device.nth_bulk_out_ep(0); /* B0MG -> BULKOUTID0 */
   _tx_data_ep = _device.nth_bulk_out_ep(3); /* ACH0 -> BULKOUTID3 */
   if (_tx_mgmt_ep == 0) {

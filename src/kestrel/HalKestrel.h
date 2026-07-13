@@ -102,6 +102,10 @@ public:
    * bring-up can pinpoint which init step crashes the running fw. */
   uint32_t fw_err_state(const char *where);
 
+  /* Poll HALT_C2H for `ms` with no other bus traffic — detects an async fw
+   * self-crash after boot (vs a write-triggered one). */
+  void fw_err_settle(const char *where, uint32_t ms);
+
   /* Chip cut version, read fresh from R_AX_SYS_CFG1[15:12]. */
   uint8_t read_cut();
 
@@ -110,6 +114,9 @@ public:
    * signature the secure firmware image uses. 0 for a stock (uncustomized)
    * chip. Used by the FWDL security-section handling. */
   uint8_t read_mss_index();
+
+  /* Security-record bit (OTP 0x5ED[7], _security_rec). 0 => secure IC. */
+  uint8_t read_sec_rec();
 
   ChipVariant variant() const { return _variant; }
 

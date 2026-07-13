@@ -85,18 +85,14 @@ bool RtlKestrelDevice::PowerOnFwAndTrx(kestrel::EfuseInfo &out) {
     return false;
   if (!_hal.download_firmware(_hal.read_cut()))
     return false;
-  _hal.fw_err_state("post-FWDL");
   _hal.enable_bb_rf();
   _hal.mac_sys_init();
-  _hal.fw_err_state("post-sys_init");
   if (!_hal.trx_dmac_init())
     return false;
-  _hal.fw_err_state("post-dmac_init(DLE/HFC/usb)");
   if (!_hal.trx_cmac_rx_init())
     return false;
-  _hal.fw_err_state("post-cmac_init");
   _hal.usb_intf_init();
-  _hal.fw_err_state("post-usb_init");
+  _hal.fw_err_state("post-mac-hal-init");
   return _hal.read_efuse(out);
 }
 

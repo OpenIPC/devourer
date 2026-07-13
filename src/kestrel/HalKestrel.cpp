@@ -1038,9 +1038,13 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   apply_phy_table(array_mp_8852b_phy_reg, array_mp_8852b_phy_reg_len, rfe_type,
                   cut, bb_emit);
   _fw.ofld_flush(KestrelFw::OfldFlush::BB); /* bitmap_en(false): 0x1a24 LC */
-  apply_phy_table(array_mp_8852b_phy_reg_gain, array_mp_8852b_phy_reg_gain_len,
-                  rfe_type, cut, bb_emit);
-  _fw.ofld_flush(KestrelFw::OfldFlush::BB);
+  /* NB: array_mp_8852b_phy_reg_gain is NOT a register table — halbb_init_gain_
+   * table -> halbb_cfg_bb_gain_8852b decodes each entry as (cfg_type,band,path)
+   * and stores `data` into the SOFTWARE gain cache (bb_gain_i.lna_gain/
+   * tia_gain), writing zero hardware registers. Emitting it as cmd_ofld BB
+   * writes splats garbage into BB 0x0000.. and faults the fw (HALT_C2H
+   * 0x20000005). The cache only refines runtime AGC/RSSI reporting, so it is
+   * not needed for RX first light; a software gain-cache port is future work. */
 
   /* halrf_wrf offload dispatch (halrf_interface.c:202; each RF reg appears
    * twice in the radio table): BIT(16) set = d-die -> a BB write to the

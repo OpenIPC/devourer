@@ -59,11 +59,12 @@ bool KestrelFw::poll_wcpu(uint32_t mask, uint32_t expect, const char *what) {
 }
 
 bool KestrelFw::hci_func_en() {
-  /* hci_func_en (init.c): for 8852B, set RXDMA|TXDMA on both HCI_FUNC_EN and
-   * the _V1 register. Idempotent with usb_pre_init. */
+  /* hci_func_en (init.c:161): 8852A/8852B/8851B/8852BT take the FIRST branch —
+   * RXDMA|TXDMA on R_AX_HCI_FUNC_EN (0x8380) ONLY. The _V1 register (0x7880) is
+   * the ELSE branch for other chips; on the 8852B it is UNMAPPED (reads back
+   * 0xdeadbeef), and writing there corrupts the HCI state so the running fw
+   * faults on the AHB->HCI bus ~1 ms after boot (HALT_C2H = L2_ERR_AH_HCI). */
   set32(r::R_AX_HCI_FUNC_EN, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
-  constexpr uint16_t R_AX_HCI_FUNC_EN_V1 = 0x7880;
-  set32(R_AX_HCI_FUNC_EN_V1, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
   return true;
 }
 
@@ -380,6 +381,21 @@ void KestrelFw::ofld_append(uint8_t src, uint8_t type, uint8_t path,
 }
 
 bool KestrelFw::ofld_send_batch() {
+  /* Per-batch trace: decode the first + last command's (src,offset) so a fw
+   * SER mid-table can be pinned to a register range. */
+  if (!_ofld_buf.empty()) {
+    auto decode = [&](size_t o) {
+      uint32_t d0 = le32(_ofld_buf.data() + o);
+      uint8_t src = d0 & 0x3;
+      uint16_t off = static_cast<uint16_t>((d0 >> r::CMD_OFLD_OFFSET_SH) & 0xffff);
+      return std::pair<uint8_t, uint16_t>(src, off);
+    };
+    auto [fs, fo] = decode(0);
+    auto [ls, lo] = decode(_ofld_buf.size() - r::CMD_OFLD_SIZE);
+    _logger->debug("Kestrel cmd_ofld batch: {} cmds, first src{}@0x{:04x} "
+                   "last src{}@0x{:04x}",
+                   _ofld_cmd_num, fs, fo, ls, lo);
+  }
   bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FW_OFLD,
                          r::FWCMD_H2C_FUNC_CMD_OFLD_REG, _ofld_buf.data(),
                          static_cast<uint32_t>(_ofld_buf.size()));
@@ -503,6 +519,34 @@ bool KestrelFw::check_fw_rdy() {
   return false;
 }
 
+void KestrelFw::idmem_share_mode_check() {
+  /* idmem_share_mode_check (fwdl.c:280), non-secure branch: force the SEC_CTRL
+   * IDMEM-share field to the AX-MIPS default (0x1). Golden capture:
+   * 0x0C00 -> 0x0001c01f. */
+  uint32_t v = _device.rtw_read32(r::R_AX_SEC_CTRL);
+  uint32_t cur = (v >> r::B_SEC_IDMEM_SIZE_CONFIG_SH) & r::B_SEC_IDMEM_SIZE_CONFIG_MSK;
+  if (cur != r::FWDL_IDMEM_SHARE_DEFAULT_MODE) {
+    v = r::set_clr_word(v, r::FWDL_IDMEM_SHARE_DEFAULT_MODE,
+                        r::B_SEC_IDMEM_SIZE_CONFIG_MSK,
+                        r::B_SEC_IDMEM_SIZE_CONFIG_SH);
+    _device.rtw_write32(r::R_AX_SEC_CTRL, v);
+    _logger->info("Kestrel FWDL: IDMEM share -> default (SEC_CTRL=0x{:08x})", v);
+  }
+}
+
+void KestrelFw::fwdl_patch_fw_delay() {
+  /* fwdl_patch_fw_delay (fwdl.c:1176), non-secure branch: the fw's own CPU-clk
+   * setting is wrong, which makes its secure-checksum delay (and every other
+   * timed HCI access) inaccurate — the running fw then faults on the AHB->HCI
+   * bus (HALT_C2H = L2_ERR_AH_HCI). Fix it by poking the correct clk value into
+   * IDMEM via the indirect-access window. Golden: 0x0C04 -> 0x18e0c3d8, then
+   * 0x40000 (wIndex=4) -> 0x0000000a. */
+  _device.rtw_write32(r::R_AX_FILTER_MODEL_ADDR, r::FW_CPU_CLK_ADDR_8852B);
+  _device.rtw_write32_wide(r::R_AX_INDIR_ACCESS_ENTRY, r::FW_FAKE_CPU_CLK_8852B);
+  _logger->info("Kestrel FWDL: fw CPU-clk patch (IDMEM 0x{:08x}=0x{:x})",
+                r::FW_CPU_CLK_ADDR_8852B, r::FW_FAKE_CPU_CLK_8852B);
+}
+
 bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
   _device.rtw_write32(r::R_AX_UDM1, 0);
   if (len < r::FWHDR_HDR_LEN) {
@@ -582,6 +626,10 @@ bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
     /* phase0: wait H2C path ready. */
     if (!poll_wcpu(r::B_AX_H2C_PATH_RDY, r::B_AX_H2C_PATH_RDY, "H2C_PATH_RDY"))
       goto retry;
+    /* fwdl_patch_fw_delay (fwdl.c:1260): between phase0 and phase1, on a
+     * non-secure IC, patch the fw CPU clock. */
+    if (!_is_sec_ic)
+      fwdl_patch_fw_delay();
     /* phase1: download the fw header (minus the dynamic header) as one H2C —
      * fwdl_phase1 is called with (hdr_len - dynamic_hdr_len) in the vendor
      * (fwdl.c:1685/1746); the dynamic header is host-side cap metadata, not
@@ -639,7 +687,8 @@ bool KestrelFw::fw_pre_init() {
   return hci_func_en() && dmac_pre_init();
 }
 
-bool KestrelFw::download_firmware(uint8_t cut, uint8_t mss_idx) {
+bool KestrelFw::download_firmware(uint8_t cut, uint8_t mss_idx, bool is_sec_ic) {
+  _is_sec_ic = is_sec_ic;
   /* NICCE image, cut-selected: CBV(1) -> u2, CCV+(>=2) -> u3. */
   const uint8_t *fw;
   uint32_t len;

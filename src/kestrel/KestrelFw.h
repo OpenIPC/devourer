@@ -29,9 +29,10 @@ public:
 
   /* The FWDL state machine: WDT config + disable/enable WCPU + download the
    * NICCE image for `cut` + fw-ready poll. `mss_idx` selects the secure-boot
-   * signature (HalKestrel::read_mss_index). Returns false on any poll timeout
-   * or FW error status (checksum/security/cut mismatch), all logged. */
-  bool download_firmware(uint8_t cut, uint8_t mss_idx);
+   * signature (HalKestrel::read_mss_index). `is_sec_ic` (OTP 0x5ED[7]) gates
+   * the non-secure IDMEM + CPU-clock FWDL patch. Returns false on any poll
+   * timeout or FW error status (checksum/security/cut mismatch), all logged. */
+  bool download_firmware(uint8_t cut, uint8_t mss_idx, bool is_sec_ic);
 
   /* --- Firmware IO-offload (M3) — program BB/RF registers via H2C batches the
    * firmware replays on-chip (mac_add_cmd_ofld / halbb_fw_set_reg /
@@ -84,6 +85,10 @@ private:
   bool disable_cpu();
   bool enable_cpu(uint8_t boot_reason);
   bool mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx);
+  /* Non-secure-IC FWDL patches (fwdl.c): SEC_CTRL IDMEM-share to default, and
+   * the fw CPU-clock write via the indirect-access IDMEM window. */
+  void idmem_share_mode_check();
+  void fwdl_patch_fw_delay();
   bool check_fw_rdy();
   /* Build [WD 24B] (+ [fwcmd_hdr 8B] when is_header) + payload and bulk-send
    * to the CH12 endpoint. seq is the H2C sequence counter (header only). */
@@ -99,6 +104,7 @@ private:
   uint32_t _ofld_cmd_num = 0;     /* commands in the current batch (resets/flush) */
   uint32_t _ofld_accu_delay_us = 0; /* DELAY_OFLD host-side wait after send */
   uint8_t _h2c_seq = 0; /* fwinfo->h2c_seq: 8-bit rolling, all runtime H2Cs */
+  bool _is_sec_ic = false; /* OTP 0x5ED[7]: gates the non-secure FWDL patch */
 };
 
 } /* namespace kestrel */

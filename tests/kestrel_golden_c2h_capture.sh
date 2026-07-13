@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 [ "$(id -u)" -eq 0 ] || { echo "FAIL: needs root"; exit 2; }
 DUR=${1:-15}
 TX_ID="35bc:0108"; TX_HUB="3-2.3"; TX_PORT="3"
-BUS=3   # the 8852BU sits on bus 3 (3-2.3.3)
+ BUS=0 # the 8852BU sits on bus 3 (3-2.3.3)
 CAP="/tmp/rtw89_8852bu_golden.mon"
 MONPID=""
 cleanup() {
@@ -34,12 +34,12 @@ sleep 6
 
 echo ">> enable usbmon"
 modprobe usbmon 2>/dev/null || true
-[ -e "/sys/kernel/debug/usb/usbmon/${BUS}u" ] || {
+[ -e "/sys/kernel/debug/usb/usbmon/0u" ] || {
   mount -t debugfs none /sys/kernel/debug 2>/dev/null || true; }
-[ -e "/sys/kernel/debug/usb/usbmon/${BUS}u" ] || { echo "FAIL: no usbmon/${BUS}u"; exit 2; }
+[ -e "/sys/kernel/debug/usb/usbmon/0u" ] || { echo "FAIL: no usbmon/0u"; exit 2; }
 
 echo ">> start capture -> $CAP"
-timeout $((DUR + 5)) cat "/sys/kernel/debug/usb/usbmon/${BUS}u" > "$CAP" &
+timeout $((DUR + 5)) cat "/sys/kernel/debug/usb/usbmon/0u" > "$CAP" &
 MONPID=$!
 sleep 1
 
@@ -54,7 +54,7 @@ d=$(for x in /sys/bus/usb/devices/*; do
 for i in "$d":*; do
   echo "$(basename "$i")" > /sys/bus/usb/drivers/rtw89_8852bu/bind 2>/dev/null || true
 done
-# CAVEAT: usbmon/${BUS}u may need the device to stay on ${BUS} after re-enum;
+# CAVEAT: usbmon/0u may need the device to stay on ${BUS} after re-enum;
 # if the capture is empty, re-check the bus (lsusb) and rfkill state.
 sleep "$DUR"
 

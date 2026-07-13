@@ -53,19 +53,53 @@ inline void apply_phy_table(const uint32_t *arr, size_t len, uint32_t rfe_type,
 
   uint32_t cfg_target = 0;
   if (h_size != 0) {
-    /* Prefer the {rfe match, cut match} headline; the vendor's fuller
-     * fallback ladder (rfe-only / cut-only / don't-care) collapses to this
-     * exact-match plus "first headline" default, which covers the stock
-     * single-variant adapters. */
-    const uint32_t want = ((rfe_type & 0xff) << 16) | (cut & 0xff);
-    size_t h_idx = 0; /* default: first headline */
-    for (size_t i = 0; i < h_size; i += 2) {
-      if ((arr[i] & 0x0fffffff) == want) {
-        h_idx = i >> 1;
-        break;
+    /* Full vendor headline-selection ladder (halrf_sel_headline_8852b /
+     * halbb_sel_headline_8852b — identical): try five cases in order and take
+     * the first that matches. Case 3/4 keep the HIGHEST cut ("cv_max"), which
+     * is why cut=2 on a table whose rfe=1 headlines are only cv∈{0,1} must
+     * land on cv=1 (not the first/cv=0 headline). Getting this wrong applies
+     * the wrong register subset and leaves the a-die radio synth unprogrammed. */
+    constexpr uint32_t DONT_CARE = 0xff;
+    const uint32_t rfe = rfe_type & 0xff;
+    const uint32_t cv = cut & 0xff;
+    size_t h_idx = 0;
+    bool found = false;
+
+    /* [1] {rfe match, cv match} */
+    const uint32_t want1 = (rfe << 16) | cv;
+    for (size_t i = 0; i < h_size && !found; i += 2)
+      if ((arr[i] & 0x0fffffff) == want1) { h_idx = i >> 1; found = true; }
+    /* [2] {rfe match, cv don't-care} */
+    if (!found) {
+      const uint32_t want2 = (rfe << 16) | DONT_CARE;
+      for (size_t i = 0; i < h_size && !found; i += 2)
+        if ((arr[i] & 0x0fffffff) == want2) { h_idx = i >> 1; found = true; }
+    }
+    /* [3] {rfe match, cv max-in-table} */
+    if (!found) {
+      uint32_t cv_max = 0;
+      for (size_t i = 0; i < h_size; i += 2) {
+        const uint32_t rp = (arr[i] & 0x00ff0000) >> 16;
+        const uint32_t cp = arr[i] & 0xff;
+        if (rp == rfe && cp >= cv_max) { cv_max = cp; h_idx = i >> 1; found = true; }
       }
     }
-    cfg_target = arr[h_idx << 1] & 0x0fffffff;
+    /* [4] {rfe don't-care, cv max-in-table} */
+    if (!found) {
+      uint32_t cv_max = 0;
+      for (size_t i = 0; i < h_size; i += 2) {
+        const uint32_t rp = (arr[i] & 0x00ff0000) >> 16;
+        const uint32_t cp = arr[i] & 0xff;
+        if (rp == DONT_CARE && cp >= cv_max) { cv_max = cp; h_idx = i >> 1; found = true; }
+      }
+    }
+    /* [5] no case matched — vendor returns false (skips the table). Mirror
+     * that by leaving cfg_target at a sentinel no CHK can match. */
+    if (!found) {
+      cfg_target = 0xffffffff;
+    } else {
+      cfg_target = arr[h_idx << 1] & 0x0fffffff;
+    }
   }
 
   bool is_matched = true;  /* default flags (halbb_flag_2_default) */

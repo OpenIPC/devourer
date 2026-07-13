@@ -77,6 +77,26 @@ bool HalKestrel::write_xtal_si(uint8_t offset, uint8_t val, uint8_t bitmask) {
   return false;
 }
 
+uint8_t HalKestrel::read_xtal_si(uint8_t offset) {
+  /* mac_read_xtal_si: post a NORMAL_READ command, poll, read the result from
+   * R_AX_WLAN_XTAL_SI_CTRL byte 1. */
+  uint32_t w = 0;
+  w = r::set_clr_word(w, offset, r::B_AX_WL_XTAL_SI_ADDR_MSK,
+                      r::B_AX_WL_XTAL_SI_ADDR_SH);
+  w = r::set_clr_word(w, r::XTAL_SI_NORMAL_READ, r::B_AX_WL_XTAL_SI_MODE_MSK,
+                      r::B_AX_WL_XTAL_SI_MODE_SH);
+  w |= r::B_AX_WL_XTAL_SI_CMD_POLL;
+  _device.rtw_write32(r::R_AX_WLAN_XTAL_SI_CTRL, w);
+  for (uint32_t cnt = r::XTAL_SI_POLLING_CNT; cnt != 0; --cnt) {
+    if ((_device.rtw_read32(r::R_AX_WLAN_XTAL_SI_CTRL) &
+         r::B_AX_WL_XTAL_SI_CMD_POLL) != r::B_AX_WL_XTAL_SI_CMD_POLL)
+      return _device.rtw_read8(r::R_AX_WLAN_XTAL_SI_CTRL + 1);
+    delay_us(r::XTAL_SI_POLLING_DLY_US);
+  }
+  _logger->error("Kestrel: XTAL_SI read timeout (offset 0x{:02x})", offset);
+  return 0;
+}
+
 bool HalKestrel::usb_pre_init() {
   /* usb_pre_init_8852b: enable USB IO mode, clear RX/TX reset, re-toggle the
    * HCI DMA enables. Bulk-out endpoint pause bookkeeping is skipped — the
@@ -864,6 +884,21 @@ void HalKestrel::coex_mac_init() {
 }
 
 bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
+  /* set_enable_bb_rf toggle (rtl8852b_halinit.c: enable_bb_rf(0) then (1)) —
+   * the vendor pulses a disable before the enable to reset the RFC/AFE clock
+   * domain. Disable path: clear AFC_AFEDIG, clear BBRSTB|GLB_RSTN, WL_RFC &=
+   * 0xF8 (drop the clock-enable nibble). */
+  clr32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
+  {
+    uint8_t v8 = _device.rtw_read8(r::R_AX_SYS_FUNC_EN);
+    v8 &= ~static_cast<uint8_t>(r::B_AX_FEN_BBRSTB | r::B_AX_FEN_BB_GLB_RSTN);
+    _device.rtw_write8(r::R_AX_SYS_FUNC_EN, v8);
+  }
+  write_xtal_si(r::XTAL_SI_WL_RFC_S0, read_xtal_si(r::XTAL_SI_WL_RFC_S0) & 0xF8,
+                0xFF);
+  write_xtal_si(r::XTAL_SI_WL_RFC_S1, read_xtal_si(r::XTAL_SI_WL_RFC_S1) & 0xF8,
+                0xFF);
+
   /* set_enable_bb_rf (hw.c) — release the BB from reset + enable the RF/AFE
    * clocks. Without this the BB is held in reset and silently drops every
    * halbb/halrf register write (readback = 0). All MAC-space (wIndex=0). */
@@ -877,7 +912,12 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   write_xtal_si(r::XTAL_SI_WL_RFC_S0, 0xC7, 0xFF);
   write_xtal_si(r::XTAL_SI_WL_RFC_S1, 0xC7, 0xFF);
   _device.rtw_write8(r::R_AX_PHYREG_SET, r::PHYREG_SET_XYN_CYCLE);
-  _logger->info("Kestrel PHY: BB/RF enabled (out of reset)");
+  _logger->info("Kestrel PHY: BB/RF enabled — WL_RFC_S0=0x{:02x} S1=0x{:02x} "
+                "(want C7) WLRF_CTRL=0x{:08x} SYS_FUNC_EN=0x{:08x}",
+                read_xtal_si(r::XTAL_SI_WL_RFC_S0),
+                read_xtal_si(r::XTAL_SI_WL_RFC_S1),
+                _device.rtw_read32(r::R_AX_WLRF_CTRL),
+                _device.rtw_read32(r::R_AX_SYS_FUNC_EN));
 
   /* --- BB register + gain tables (halbb_cfg_bbcr): direct write32, with the
    * 0xf9..0xfe delay pseudo-addresses and the phy1 (0x100xxxxx) entries
@@ -1191,6 +1231,16 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
   _logger->info("Kestrel RX-diag: RF00a(ddv)=0x{:05x} RF18a(dav)=0x{:05x} "
                 "RF00a(dav)=0x{:05x} synthLock(0xc5[15])={}",
                 rf00a, rf18a_dav, rf00a_dav, rf_c5);
+  /* SI/d-die liveness self-test: does the SI command register even hold a
+   * write, and does a d-die window write land? */
+  const uint32_t si_stat = _device.rtw_read32_wide(0x174c + BB_WIN);
+  _device.rtw_write32_wide(0x370 + BB_WIN, 0x0abcde12u); /* a-die cmd reg */
+  const uint32_t si370 = _device.rtw_read32_wide(0x370 + BB_WIN);
+  _device.rtw_write32_wide(0xe000 + (0x00 << 2) + BB_WIN, 0x155aau); /* d-die A[0] */
+  const uint32_t ddv_rt = _device.rtw_read32_wide(0xe000 + (0x00 << 2) + BB_WIN) & 0xfffffu;
+  _logger->info("Kestrel SI-probe: 0x174c(status)=0x{:08x} 0x370(cmd rt)=0x{:08x} "
+                "(wrote abcde12) d-dieA[0] rt=0x{:05x} (wrote 155aa)",
+                si_stat, si370, ddv_rt);
   const uint32_t hci_fen = _device.rtw_read32(0x8380);        /* HCI_FUNC_EN */
   const uint8_t rcr = _device.rtw_read8(0xCE00);              /* RCR CH_EN */
   const uint32_t rxstate = _device.rtw_read32(0xCEF0);       /* RX_STATE_MON */

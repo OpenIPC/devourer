@@ -97,6 +97,8 @@ private:
   bool poll32(uint16_t reg, uint32_t mask, uint32_t expect);
   /* XTAL_SI indirect write: reg[bitmask] <- val (masked). false = timeout. */
   bool write_xtal_si(uint8_t offset, uint8_t val, uint8_t bitmask);
+  /* XTAL_SI indirect read: returns the byte at `offset` (0 on timeout). */
+  uint8_t read_xtal_si(uint8_t offset);
 
   bool usb_pre_init();
   void usb_init(); /* runtime USB init (endpoint NUMP/burst) — usb_init_8852b */

@@ -93,6 +93,9 @@ public:
 
 private:
   [[noreturn]] void not_ported(const char *entry, const char *milestone) const;
+  /* Route a C2H firmware message (RPKT_TYPE_C2H payload). Currently decodes the
+   * USR_TX_RPT_INFO report and emits its freerun TX-egress timestamp. */
+  void handle_c2h(const uint8_t *payload, uint32_t len);
 
   RtlAdapter _device;
   Logger_t _logger;

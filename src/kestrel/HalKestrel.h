@@ -97,6 +97,14 @@ public:
    * Must run after phy_bb_rf_init. */
   bool set_channel(uint8_t channel, ChannelWidth_t bw);
 
+  /* M4/M5 — enable the per-user TX report so the fw emits C2H USR_TX_RPT_INFO
+   * with the freerun TX-egress timestamps. Call after the TX bring-up; the
+   * reports are received + parsed in the RX loop. */
+  bool enable_tx_report(uint8_t mode, uint8_t macid = 0, uint8_t port = 0,
+                        uint32_t period_us = 100000) {
+    return _fw.enable_usr_tx_rpt(mode, macid, port, period_us);
+  }
+
   /* Firmware SER probe: returns the latched mac_ax_err_info code if the fw has
    * posted a halt error (HALT_C2H_CTRL set), else 0. Logs a labeled line so the
    * bring-up can pinpoint which init step crashes the running fw. */

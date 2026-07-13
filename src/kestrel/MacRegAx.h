@@ -360,6 +360,16 @@ constexpr uint8_t FWCMD_H2C_CAT_OUTSRC = 0x2;
 constexpr uint8_t FWCMD_H2C_CL_FW_OFLD = 0x9;
 constexpr uint8_t FWCMD_H2C_FUNC_CMD_OFLD_REG = 0x11;
 constexpr uint8_t FWCMD_H2C_FUNC_CMD_OFLD_PKT = 0x13;
+/* USR_TX_RPT (mac_cfg_usr_tx_rpt): enable the per-user TX report — content
+ * dword0 = MODE[2:0] | RTP_START(bit3), dword1 = MACID[7:0] | BAND(bit10) |
+ * PORT[13:11]. The report returns as C2H USR_TX_RPT_INFO (func 0x7). */
+constexpr uint8_t FWCMD_H2C_FUNC_USR_TX_RPT = 0x12;
+constexpr uint32_t B_H2C_USR_TX_RPT_RTP_START = 1u << 3;
+constexpr uint32_t B_H2C_USR_TX_RPT_BAND = 1u << 10;
+constexpr uint8_t H2C_USR_TX_RPT_PORT_SH = 11;
+constexpr uint8_t FWCMD_C2H_FUNC_USR_TX_RPT_INFO = 0x7;
+constexpr uint8_t USR_TX_RPT_MODE_PERIOD = 1;
+constexpr uint8_t USR_TX_RPT_MODE_LAST_PKT = 2;
 /* rtw_mac_src_cmd_ofld (mac_outsrc_def.h). */
 constexpr uint8_t OFLD_SRC_BB = 0;
 constexpr uint8_t OFLD_SRC_RF = 1;

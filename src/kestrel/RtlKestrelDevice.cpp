@@ -9,8 +9,10 @@
 #include "FrameParserKestrel.h"
 #include "RadiotapPeek.h"
 #include "RateDefinitions.h" /* MGN_* rate enum */
+#include "MacRegAx.h"
 #include "RxPacket.h"
 #include "TxDescKestrel.h"
+#include "TxReportKestrel.h"
 #include "ieee80211_radiotap.h" /* radiotap iterator + field ids */
 
 namespace {
@@ -151,6 +153,9 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
     _logger->error("Kestrel: no bulk-OUT endpoint for mgmt TX");
     return;
   }
+  /* Enable the per-user TX report (freerun TX-egress timestamps). The C2H
+   * reports are decoded in handle_c2h when the RX loop is up (TX_WITH_RX). */
+  _hal.enable_tx_report(kestrel::reg::USR_TX_RPT_MODE_PERIOD, 0, 0);
   _logger->info("Kestrel: TX ready on ch{} — mgmt ep 0x{:02x} data ep 0x{:02x}",
                 channel.Channel, _tx_mgmt_ep, _tx_data_ep);
 }
@@ -186,6 +191,8 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
             p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.payload),
                                         f.payload_len);
             packetProcessor(p);
+          } else if (f.rpkt_type == kestrel::RPKT_TYPE_C2H) {
+            handle_c2h(f.payload, f.payload_len);
           }
           if (f.next_offset == 0)
             break;
@@ -198,6 +205,32 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
 void RtlKestrelDevice::SetMonitorChannel(SelectedChannel channel) {
   _channel = channel;
   _hal.set_channel(channel.Channel, channel.ChannelWidth);
+}
+
+void RtlKestrelDevice::handle_c2h(const uint8_t *payload, uint32_t len) {
+  namespace r = kestrel::reg;
+  if (payload == nullptr || len < 8)
+    return;
+  /* C2H fwcmd header (8B): dword0 = del_type | cat[1:0] | class[7:2] |
+   * func[15:8] | seq (same layout as H2C). Route on class+func. */
+  const uint32_t h0 = payload[0] | (payload[1] << 8) | (payload[2] << 16) |
+                      (static_cast<uint32_t>(payload[3]) << 24);
+  const uint8_t cls = (h0 >> r::H2C_HDR_CLASS_SH) & 0x3f;
+  const uint8_t func = (h0 >> r::H2C_HDR_FUNC_SH) & 0xff;
+  if (cls == r::FWCMD_H2C_CL_FW_OFLD &&
+      func == r::FWCMD_C2H_FUNC_USR_TX_RPT_INFO) {
+    kestrel::KestrelTxReport rpt;
+    if (kestrel::parse_usr_tx_rpt(payload + 8, len - 8, rpt)) {
+      /* freerun_first_out is the HW TX-egress timestamp on the same clock the
+       * RX parser reports (RxAtrib.tsfl) — the scheduled-TX air-departure time
+       * 11ac/Jaguar could not expose. */
+      _logger->info("Kestrel tx.report: macid={} egress_freerun=0x{:08x} "
+                    "(in=0x{:08x} last_out=0x{:08x}) pend[BE/BK/VI/VO]={}/{}/{}/{}",
+                    rpt.macid, rpt.freerun_first_out, rpt.freerun_first_in,
+                    rpt.freerun_last_out, rpt.pending_1k[0], rpt.pending_1k[1],
+                    rpt.pending_1k[2], rpt.pending_1k[3]);
+    }
+  }
 }
 
 bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {

@@ -55,6 +55,13 @@ public:
 
   bool ch12_ready() const { return _ch12_ep != 0; }
 
+  /* Enable the per-user TX report (mac_cfg_usr_tx_rpt): H2C cat=MAC,
+   * class=FW_OFLD, func=USR_TX_RPT. `mode` = mac_ax_usr_tx_rpt_mode (PERIOD /
+   * LAST_PKT), started immediately (RTP_START). The firmware then emits C2H
+   * USR_TX_RPT_INFO reports carrying the freerun TX-egress timestamps. */
+  bool enable_usr_tx_rpt(uint8_t mode, uint8_t macid, uint8_t port,
+                         uint32_t period_us = 100000);
+
 private:
   /* Generic H2C over CH12: [WD 24B][fwcmd_hdr 8B][content]. */
   bool send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,

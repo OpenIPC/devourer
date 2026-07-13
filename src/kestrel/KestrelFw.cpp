@@ -279,6 +279,28 @@ bool KestrelFw::send_fwdl_packet(const uint8_t *payload, uint32_t payload_len,
   return true;
 }
 
+bool KestrelFw::enable_usr_tx_rpt(uint8_t mode, uint8_t macid, uint8_t port,
+                                 uint32_t period_us) {
+  /* fwcmd_usr_tx_rpt content (3 dwords, cmac_tx.c h2c_usr_tx_rpt): dword0 =
+   * MODE[2:0] | RTP_START(bit3), dword1 = MACID[7:0] | BAND(bit10) |
+   * PORT[13:11], dword2 = rpt_period_us. In PERIOD mode the fw emits a C2H
+   * every rpt_period_us — a zero period never fires, so it must be set. */
+  uint8_t content[12] = {0};
+  const uint32_t d0 = (static_cast<uint32_t>(mode) & 0x7) |
+                      r::B_H2C_USR_TX_RPT_RTP_START;
+  const uint32_t d1 = (static_cast<uint32_t>(macid) & 0xff) |
+                      (static_cast<uint32_t>(port & 0x7) << r::H2C_USR_TX_RPT_PORT_SH);
+  put_le32(content + 0, d0);
+  put_le32(content + 4, d1);
+  put_le32(content + 8, period_us);
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FW_OFLD,
+                         r::FWCMD_H2C_FUNC_USR_TX_RPT, content, sizeof(content));
+  _logger->info("Kestrel: USR_TX_RPT enable (mode={} macid={} port={} "
+                "period={}us) -> {}",
+                mode, macid, port, period_us, ok ? "sent" : "FAILED");
+  return ok;
+}
+
 bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
                              const uint8_t *content, uint32_t len) {
   /* Packet = [WD 24B][fwcmd_hdr 8B][content]. Same framing as the FWDL header

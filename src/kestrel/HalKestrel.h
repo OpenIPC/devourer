@@ -86,6 +86,12 @@ public:
    * phy_bb_rf_init, not inside the CMAC init. */
   void enable_ser_imr() { mac_enable_imr(); }
 
+  /* set_host_rpr (hw.c) — program the WD-release / TX-report path so the fw
+   * releases WD/PLE pages after each frame is transmitted (STF mode, AGGNUM=121
+   * + timeout=255). Without it the mgmt bulk-OUT page pool fills and NAKs after
+   * ~103 frames. Vendor order: end of mac_trx_init, after the SER IMR enable. */
+  void set_host_rpr();
+
   /* M3 — PHY bring-up: apply the halbb BB register + gain tables and the
    * halrf radio-A/B tables (via PhyTableLoaderKestrel). `rfe_type` / `cut`
    * select the table variant (from the efuse / chip id). Must run after the

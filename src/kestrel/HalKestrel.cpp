@@ -883,6 +883,25 @@ bool HalKestrel::write_lte(uint32_t offset, uint32_t val) {
   return true;
 }
 
+void HalKestrel::set_host_rpr() {
+  namespace r = kestrel::reg;
+  /* WDRLS_MODE = STF (USB is always store-and-forward). */
+  field32(r::R_AX_WDRLS_CFG, r::MAC_AX_RPR_MODE_STF, r::B_AX_WDRLS_MODE_MSK,
+          r::B_AX_WDRLS_MODE_SH);
+  /* RLSRPT0_CFG0: rpr_cfg_stf has all filters DISabled — clear the filter map
+   * so every TX result generates a release report. */
+  clr32(r::R_AX_RLSRPT0_CFG0, r::B_WDRLS_FLTR_TXOK | r::B_WDRLS_FLTR_RTYLMT |
+                                  r::B_WDRLS_FLTR_LIFTIM | r::B_WDRLS_FLTR_MACID);
+  /* RLSRPT0_CFG1: AGGNUM=121, TO=255. The timeout is the key — it releases the
+   * WD/PLE pages before the (~103-frame) bulk-OUT pool fills. */
+  field32(r::R_AX_RLSRPT0_CFG1, r::RPR_STF_AGG, r::B_AX_RLSRPT0_AGGNUM_MSK,
+          r::B_AX_RLSRPT0_AGGNUM_SH);
+  field32(r::R_AX_RLSRPT0_CFG1, r::RPR_STF_TMR, r::B_AX_RLSRPT0_TO_MSK,
+          r::B_AX_RLSRPT0_TO_SH);
+  _logger->info("Kestrel TRX: host RPR set (STF, agg=121 tmr=255) — TX page "
+                "release enabled");
+}
+
 void HalKestrel::mac_enable_imr() {
   /* mac_enable_imr(DMAC)+(CMAC0) + mac_err_imr_ctrl(EN): the System-Error-
    * Recovery interrupt masks (ser_imr_config_8852b auto-gen). Each entry does

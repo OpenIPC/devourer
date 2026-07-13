@@ -126,6 +126,10 @@ bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
     return false;
   /* Vendor timing: arm the SER error IMR only after the BB/RF tables. */
   _hal.enable_ser_imr();
+  /* set_host_rpr (mac_trx_init tail, after the IMR) — enable the fw's WD/PLE
+   * page-release path so sustained TX doesn't stall when the bulk-OUT page pool
+   * fills after ~103 frames. */
+  _hal.set_host_rpr();
   return _hal.set_channel(channel.Channel, channel.ChannelWidth);
 }
 

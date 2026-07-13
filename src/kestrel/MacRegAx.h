@@ -174,6 +174,29 @@ constexpr uint32_t B_AX_PLE_BUF_MGN_INI_RDY = 1u << 0;
 constexpr uint32_t DLE_WAIT_CNT = 2000;
 constexpr uint32_t DLE_WAIT_US = 1;
 
+/* WD-release / TX-report (set_host_rpr, hw.c:1710) — how the fw releases the
+ * WD/PLE pages after a frame is transmitted. WITHOUT this, RLSRPT0 sits at its
+ * reset default and the fw batches page releases badly, so the mgmt bulk-OUT
+ * pool fills (~103 frames at 210 turbo pages / 2) and NAKs. The STF (USB) cfg:
+ * WDRLS_MODE=STF, clear the RLSRPT0 filter map, AGGNUM=121 + TO=255 (the
+ * timeout is what actually releases pages before the pool caps). */
+constexpr uint16_t R_AX_WDRLS_CFG = 0x9408;
+constexpr uint8_t B_AX_WDRLS_MODE_SH = 0;
+constexpr uint32_t B_AX_WDRLS_MODE_MSK = 0x3;
+constexpr uint16_t R_AX_RLSRPT0_CFG0 = 0x9410;
+constexpr uint32_t B_WDRLS_FLTR_TXOK = 1u << 24;
+constexpr uint32_t B_WDRLS_FLTR_RTYLMT = 1u << 25;
+constexpr uint32_t B_WDRLS_FLTR_LIFTIM = 1u << 26;
+constexpr uint32_t B_WDRLS_FLTR_MACID = 1u << 27;
+constexpr uint16_t R_AX_RLSRPT0_CFG1 = 0x9414;
+constexpr uint8_t B_AX_RLSRPT0_TO_SH = 16;
+constexpr uint32_t B_AX_RLSRPT0_TO_MSK = 0xff;
+constexpr uint8_t B_AX_RLSRPT0_AGGNUM_SH = 0;
+constexpr uint32_t B_AX_RLSRPT0_AGGNUM_MSK = 0xff;
+constexpr uint8_t MAC_AX_RPR_MODE_STF = 1; /* rpr_cfg_stf */
+constexpr uint8_t RPR_STF_AGG = 121;       /* rpr_cfg_stf.agg */
+constexpr uint8_t RPR_STF_TMR = 255;       /* rpr_cfg_stf.tmr */
+
 /* DLFW quota values (dle_mem_usb3_8852b DLFW entry; SCC wcpu override = 6). */
 constexpr uint16_t DLFW_WDE_FREE_PAGE = 0;   /* wde_size9 lnk_pge_num */
 constexpr uint16_t DLFW_WDE_UNLNK_PAGE = 1024; /* wde_size9 unlnk_pge_num */

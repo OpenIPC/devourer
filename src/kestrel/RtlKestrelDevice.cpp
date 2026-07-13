@@ -145,13 +145,14 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
     _logger->error("Kestrel: TX bring-up failed");
     return;
   }
-  _tx_mgmt_ep = _device.nth_bulk_out_ep(0);
+  _tx_mgmt_ep = _device.nth_bulk_out_ep(0); /* B0MG -> BULKOUTID0 */
+  _tx_data_ep = _device.nth_bulk_out_ep(3); /* ACH0 -> BULKOUTID3 */
   if (_tx_mgmt_ep == 0) {
     _logger->error("Kestrel: no bulk-OUT endpoint for mgmt TX");
     return;
   }
-  _logger->info("Kestrel: TX ready on ch{} — mgmt endpoint 0x{:02x}",
-                channel.Channel, _tx_mgmt_ep);
+  _logger->info("Kestrel: TX ready on ch{} — mgmt ep 0x{:02x} data ep 0x{:02x}",
+                channel.Channel, _tx_mgmt_ep, _tx_data_ep);
 }
 
 void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
@@ -261,13 +262,24 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
     }
   }
   tr.rate = kestrel::mgn_to_ax_rate(mgn);
-  auto buf = kestrel::build_mgnt_txdesc(frame, flen, tr, 0, _tx_seq++ & 0xfff);
-  int rc = _device.bulk_send_sync_ep(_tx_mgmt_ep, buf.data(),
+  /* Route by 802.11 frame type: data frames ride the AC0 queue (BULKOUTID3) so
+   * they exercise the data power-by-rate path; mgmt/beacon uses the MG0 queue
+   * (BULKOUTID0). Falls back to the mgmt ep if the data ep was not resolved. */
+  const bool is_data = kestrel::frame_is_data(frame, flen);
+  uint8_t ep = _tx_mgmt_ep;
+  auto buf = is_data && _tx_data_ep
+                 ? kestrel::build_data_txdesc(frame, flen, tr, 0,
+                                              _tx_seq++ & 0xfff)
+                 : kestrel::build_mgnt_txdesc(frame, flen, tr, 0,
+                                              _tx_seq++ & 0xfff);
+  if (is_data && _tx_data_ep)
+    ep = _tx_data_ep;
+  int rc = _device.bulk_send_sync_ep(ep, buf.data(),
                                      static_cast<int>(buf.size()), 1000);
   if (rc < 0 || static_cast<size_t>(rc) != buf.size()) {
     _logger->error("Kestrel: send_packet bulk-OUT ep 0x{:02x} failed (rc={}, "
                    "wanted {})",
-                   _tx_mgmt_ep, rc, buf.size());
+                   ep, rc, buf.size());
     return false;
   }
   return true;

@@ -103,7 +103,8 @@ private:
   kestrel::EfuseInfo _efuse{};
   volatile bool _rx_stop = false;
   uint8_t _tx_mgmt_ep = 0; /* band-0 mgmt bulk-OUT ep (BULKOUTID0), 0=TX not up */
-  uint16_t _tx_seq = 0;    /* rolling 12-bit wifi sequence for injected mgmt */
+  uint8_t _tx_data_ep = 0; /* AC0 data bulk-OUT ep (BULKOUTID3) */
+  uint16_t _tx_seq = 0;    /* rolling 12-bit wifi sequence for injected frames */
 };
 
 #endif /* RTL_KESTREL_DEVICE_H */

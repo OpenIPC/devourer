@@ -130,6 +130,48 @@ inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
   return buf;
 }
 
+constexpr uint8_t MAC_AX_DATA_CH0 = 0; /* AC0 (best-effort) DMA channel */
+
+/* Build the AX data-frame TX descriptor (txdes_proc_data_8852b), best-effort
+ * (TID 0 -> qsel 0, band 0, wmm 0, no security / aggregation / shortcut).
+ * Differs from the mgmt path only in wd_body dword0 CH_DMA=DATA_CH0 and dword2
+ * QSEL=0; the wd_info rate fields are identical. The AC0 queue maps to USB
+ * BULKOUTID3, so the caller sends this to the 4th bulk-OUT endpoint. */
+inline std::vector<uint8_t> build_data_txdesc(const uint8_t *frame,
+                                              uint32_t frame_len,
+                                              const TxRate &r, uint8_t macid,
+                                              uint16_t seq) {
+  std::vector<uint8_t> buf(TXD_MGNT_LEN + frame_len, 0);
+  uint8_t *wd = buf.data();
+  /* dword0: STF_MODE | CH_DMA=DATA_CH0(0) | WDINFO_EN. */
+  txd_put_le32(wd + 0, txd::STF_MODE | txd::WDINFO_EN |
+                           (static_cast<uint32_t>(MAC_AX_DATA_CH0)
+                            << txd::CH_DMA_SH));
+  /* dword1 = shcut_camid = 0 */
+  /* dword2: TXPKTSIZE | QSEL=0 (TID0 AC_BE) | MACID. */
+  txd_put_le32(wd + 8,
+               (static_cast<uint32_t>(frame_len & 0x3fff) << txd::TXPKTSIZE_SH) |
+                   (static_cast<uint32_t>(macid & 0x7f) << txd::MACID_SH));
+  /* dword3: WIFI_SEQ (no ampdu_en). */
+  txd_put_le32(wd + 12, static_cast<uint32_t>(seq & 0xfff) << txd::WIFI_SEQ_SH);
+  /* wd_info dword0: same rate fields as mgmt. */
+  uint8_t *wi = wd + WD_BODY_LEN;
+  txd_put_le32(wi + 0,
+               txd::USERATE_SEL | txd::DISDATAFB |
+                   (static_cast<uint32_t>(r.rate & 0x1ff) << txd::DATARATE_SH) |
+                   (static_cast<uint32_t>(r.bw & 0x3) << txd::DATA_BW_SH) |
+                   (static_cast<uint32_t>(r.gi_ltf & 0x7) << txd::GI_LTF_SH) |
+                   (r.ldpc ? txd::DATA_LDPC : 0) |
+                   (r.stbc ? txd::DATA_STBC : 0));
+  std::memcpy(wd + TXD_MGNT_LEN, frame, frame_len);
+  return buf;
+}
+
+/* 802.11 frame-control type field (frame[0] bits [3:2]): 0=mgmt, 2=data. */
+inline bool frame_is_data(const uint8_t *frame, uint32_t len) {
+  return len >= 1 && ((frame[0] >> 2) & 0x3) == 0x2;
+}
+
 } /* namespace kestrel */
 
 #endif /* KESTREL_TX_DESC_KESTREL_H */

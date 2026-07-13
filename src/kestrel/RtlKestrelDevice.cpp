@@ -349,6 +349,21 @@ devourer::TxPowerState RtlKestrelDevice::GetTxPowerState() {
   return s;
 }
 
+uint64_t RtlKestrelDevice::ReadTsf() {
+  namespace r = kestrel::reg;
+  /* mac_get_tsf (twt.c) band-0 port-0. hi/lo/hi wrap guard against a low-32
+   * rollover between the two reads (the vendor reads hi then lo; the guard is
+   * the same robustness the Jaguar2/3 ReadTsf uses). */
+  uint32_t hi = _device.rtw_read32(r::R_AX_TSFTR_HIGH_P0);
+  uint32_t lo = _device.rtw_read32(r::R_AX_TSFTR_LOW_P0);
+  const uint32_t hi2 = _device.rtw_read32(r::R_AX_TSFTR_HIGH_P0);
+  if (hi2 != hi) {
+    hi = hi2;
+    lo = _device.rtw_read32(r::R_AX_TSFTR_LOW_P0);
+  }
+  return (static_cast<uint64_t>(hi) << 32) | lo;
+}
+
 devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   devourer::AdapterCaps c;
   c.supported = true;

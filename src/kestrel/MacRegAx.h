@@ -203,6 +203,9 @@ constexpr uint8_t RPR_STF_TMR = 255;       /* rpr_cfg_stf.tmr */
  * (mac_reg_ax.h R_AX_PORT_CFG_P0 block). Found via a usbmon golden diff: the
  * in-kernel rtw89_8852bu writes this; devourer never did. */
 constexpr uint16_t R_AX_PORT_CFG_P0 = 0xC400;
+/* Per-port free-running MAC TSF timer (mac_get_tsf, twt.c). Band-0 port-0. */
+constexpr uint16_t R_AX_TSFTR_LOW_P0 = 0xC438;
+constexpr uint16_t R_AX_TSFTR_HIGH_P0 = 0xC43C;
 constexpr uint32_t B_AX_BCNTX_EN_P0 = 1u << 12;   /* TX_SW (beacon TX) */
 constexpr uint8_t B_AX_NET_TYPE_P0_SH = 10;       /* [11:10] */
 constexpr uint32_t B_AX_NET_TYPE_P0_MSK = 0x3;

@@ -73,6 +73,9 @@ public:
   int SetTxPowerOffsetQdb(int qdb) override;
   devourer::TxPowerState GetTxPowerState() override;
 
+  /* 64-bit free-running MAC TSF (band-0 port-0). mac_get_tsf (twt.c). */
+  uint64_t ReadTsf() override;
+
   /* AX-native identity read (no power-on needed — the identity block is alive
    * as soon as the USB function enumerates). kestrelprobe stage "id" and the
    * constructor's confirmation log both come through here. */

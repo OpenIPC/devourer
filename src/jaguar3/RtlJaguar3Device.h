@@ -281,6 +281,12 @@ private:
    * captured kernel register-write stream verbatim at the end of InitWrite —
    * the hardware-diff lever (same as Jaguar2's; found the 8822B RF18 bug). */
   void apply_replay_wseq();
+  /* 8822E eFEM (rfe 21-24) GPIO pin-function routing — kernel-parity port of
+   * _efem_pinmux_config/pinmux_set_func_8822e for RFE_CTRL_3/5/7/8/9/11.
+   * Routes the DPDT antenna transfer switch to the RFE engine (hardware
+   * TX/RX switching) instead of the b5a6df7 static write that deafened RX
+   * path B. Called from InitWrite post-coex; see the call site. */
+  void efem_pinmux_8822e();
   /* Runtime TX-mode default (SetTxMode/ClearTxMode). */
   std::optional<devourer::TxMode> _tx_mode_default;
 

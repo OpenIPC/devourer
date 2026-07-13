@@ -143,11 +143,92 @@ void HalKestrel::usb_init() {
                 mode == r::MAC_AX_USB3 ? 3 : mode == r::MAC_AX_USB2 ? 2 : 1);
 }
 
+bool HalKestrel::power_on_8852c() {
+  namespace r = kestrel::reg;
+  /* mac_set_dut_env_mode: WCPU_FW_CTRL FW_ENV[29:28]=0. */
+  field32(r::R_AX_WCPU_FW_CTRL, 0, r::B_AX_FW_ENV_MSK, r::B_AX_FW_ENV_SH);
+
+  /* mac_pwr_on_usb_8852c (pwr_seq_func_8852c.c:296), transcribed verbatim. */
+  set32(r::R_AX_LDO_AON_CTRL0, r::B_AX_PD_REGU_L);            /* 0x218[16]=1 */
+  clr32(r::R_AX_SYS_PW_CTRL,
+        r::B_AX_AFSM_WLSUS_EN | r::B_AX_AFSM_PCIE_SUS_EN);    /* 0x04[12:11]=0 */
+  set32(r::R_AX_SYS_PW_CTRL, r::B_AX_DIS_WLBT_PDNSUSEN_SOPC); /* 0x04[18]=1 */
+  set32(r::R_AX_WLLPS_CTRL, r::B_AX_DIS_WLBT_LPSEN_LOPC);     /* 0x90[1]=1 */
+  clr32(r::R_AX_SYS_PW_CTRL, r::B_AX_APDM_HPDN);             /* 0x04[15]=0 */
+  clr32(r::R_AX_SYS_PW_CTRL, r::B_AX_APFM_SWLPS);            /* 0x04[10]=0 */
+  field32(r::R_AX_SPS_DIG_ON_CTRL0, 0x7, r::B_AX_OCP_L1_MSK,
+          r::B_AX_OCP_L1_SH);                                /* 0x200[15:13]=7 */
+  if (!poll32(r::R_AX_SYS_PW_CTRL, r::B_AX_RDY_SYSPWR, r::B_AX_RDY_SYSPWR))
+    return false;                                            /* 0x04[17]=1 */
+  set32(r::R_AX_SYS_PW_CTRL, r::B_AX_EN_WLON);    /* 0x04[16]=1 */
+  set32(r::R_AX_SYS_PW_CTRL, r::B_AX_APFN_ONMAC); /* 0x04[8]=1 */
+  if (!poll32(r::R_AX_SYS_PW_CTRL, r::B_AX_APFN_ONMAC, 0))
+    return false;                                /* 0x04[8]=0 */
+
+  /* reset platform twice then leave enabled: 0x88[0] = 1->0->1->0->1 */
+  auto plat = [&](bool en) {
+    uint8_t v = _device.rtw_read8(r::R_AX_PLATFORM_ENABLE);
+    _device.rtw_write8(r::R_AX_PLATFORM_ENABLE,
+                       en ? (v | r::B_AX_PLATFORM_EN)
+                          : static_cast<uint8_t>(v & ~r::B_AX_PLATFORM_EN));
+  };
+  plat(true);
+  plat(false);
+  plat(true);
+  plat(false);
+  plat(true);
+
+  /* CMAC1 power off (the 8852C is a 2-CMAC die; devourer runs CMAC0 only). */
+  clr32(r::R_AX_SYS_ISO_CTRL_EXTEND, r::B_AX_CMAC1_FEN);          /* 0x80[30]=0 */
+  set32(r::R_AX_SYS_ISO_CTRL_EXTEND, r::B_AX_R_SYM_ISO_CMAC12PP); /* 0x80[5]=1 */
+  clr32(r::R_AX_AFE_CTRL1, r::B_AX_WLCMAC1_PC_EN_ALL);            /* 0x24[4:0]=0 */
+
+  /* 0x18[6]=1 then XTAL_SI ANAPAR_WL[6]=1 */
+  set32(r::R_AX_SYS_ADIE_PAD_PWR_CTRL, r::B_AX_SYM_PADPDN_WL_PTA_1P3);
+  if (!write_xtal_si(r::XTAL_SI_ANAPAR_WL, 0x40, 0x40))
+    return false;
+  /* 0x18[5]=1 then XTAL_SI ANAPAR_WL[5]=1 */
+  set32(r::R_AX_SYS_ADIE_PAD_PWR_CTRL, r::B_AX_SYM_PADPDN_WL_RFC_1P3);
+  if (!write_xtal_si(r::XTAL_SI_ANAPAR_WL, 0x20, 0x20))
+    return false;
+  /* ANAPAR_WL [2]=1,[3]=1,[4]=0,[0]=1,[1]=1,[7]=0; XTAL_XMD_2 [6:4]=001
+   * (differs from 8852B's 0); XTAL_XMD_4 [3:0]=0. */
+  if (!write_xtal_si(r::XTAL_SI_ANAPAR_WL, 0x04, 0x04) ||
+      !write_xtal_si(r::XTAL_SI_ANAPAR_WL, 0x08, 0x08) ||
+      !write_xtal_si(r::XTAL_SI_ANAPAR_WL, 0x00, 0x10) ||
+      !write_xtal_si(r::XTAL_SI_ANAPAR_WL, 0x01, 0x01) ||
+      !write_xtal_si(r::XTAL_SI_ANAPAR_WL, 0x02, 0x02) ||
+      !write_xtal_si(r::XTAL_SI_ANAPAR_WL, 0x00, 0x80) ||
+      !write_xtal_si(r::XTAL_SI_XTAL_XMD_2, r::XTAL_SI_XTAL_XMD_2_8852C, 0x70) ||
+      !write_xtal_si(r::XTAL_SI_XTAL_XMD_4, 0x00, 0x0F))
+    return false;
+
+  set32(r::R_AX_PMC_DBG_CTRL2, r::B_AX_SYSON_DIS_PMCR_AX_WRMSK); /* 0xCC[2]=1 */
+  set32(r::R_AX_SYS_ISO_CTRL, r::B_AX_ISO_EB2CORE);             /* 0x00[8]=1 */
+  clr32(r::R_AX_SYS_ISO_CTRL, 1u << 15);                        /* 0x00[15]=0 */
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  clr32(r::R_AX_SYS_ISO_CTRL, 1u << 14);                        /* 0x00[14]=0 */
+  clr32(r::R_AX_PMC_DBG_CTRL2, r::B_AX_SYSON_DIS_PMCR_AX_WRMSK); /* 0xCC[2]=0 */
+
+  /* The 8852C pwr-on tail enables the DMAC (0x8400) + CMAC0 (0xC000) + the
+   * LED1 pinmux — where 8852B defers func-en to mac_sys_init (the later
+   * OR-writes are idempotent). */
+  set32(r::R_AX_DMAC_FUNC_EN, 0xFFFF8000u);
+  set32(r::R_AX_CMAC_FUNC_EN, r::CMAC_FUNC_EN_BITS);
+  field32(r::R_AX_LED1_FUNC_SEL, 0x1, r::B_AX_PINMUX_EESK_FUNC_SEL_V1_MSK,
+          r::B_AX_PINMUX_EESK_FUNC_SEL_V1_SH); /* 0x2DC[27:24]=1 */
+
+  _logger->info("Kestrel: MAC powered on (8852C sequence)");
+  return true;
+}
+
 bool HalKestrel::power_on() {
   if (!_device.is_usb()) {
     _logger->error("Kestrel: only USB power-on is ported (M1)");
     return false;
   }
+  if (_variant == ChipVariant::C8852C)
+    return power_on_8852c();
   /* mac_set_dut_env_mode (init.c:26, the first thing mac_hal_init does):
    * WCPU_FW_CTRL FW_ENV[29:28] = 0 (normal). Golden capture line 1. */
   field32(r::R_AX_WCPU_FW_CTRL, 0, r::B_AX_FW_ENV_MSK, r::B_AX_FW_ENV_SH);

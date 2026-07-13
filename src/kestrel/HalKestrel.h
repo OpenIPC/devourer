@@ -228,6 +228,10 @@ private:
   bool write_xtal_si(uint8_t offset, uint8_t val, uint8_t bitmask);
   /* XTAL_SI indirect read: returns the byte at `offset` (0 on timeout). */
   uint8_t read_xtal_si(uint8_t offset);
+  /* mac_pwr_on_usb_8852c (pwr_seq_func_8852c.c) — the C8852C power-on sequence
+   * (distinct LDO/SPS/CMAC1/XTAL deltas vs 8852B). power_on() dispatches here
+   * for the C8852C variant. */
+  bool power_on_8852c();
 
   bool usb_pre_init();
   void usb_init(); /* runtime USB init (endpoint NUMP/burst) — usb_init_8852b */

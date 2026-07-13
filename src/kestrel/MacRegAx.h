@@ -62,6 +62,19 @@ constexpr uint32_t B_AX_VOL_L1_MSK = 0xf;
 constexpr uint8_t B_AX_VREFPFM_L_SH = 22;
 constexpr uint32_t B_AX_VREFPFM_L_MSK = 0xf;
 
+/* --- RTL8852C power-on deltas (mac_pwr_on_usb_8852c, pwr_seq_func_8852c.c) --- */
+constexpr uint16_t R_AX_LDO_AON_CTRL0 = 0x0218;
+constexpr uint32_t B_AX_PD_REGU_L = 1u << 16;
+constexpr uint16_t R_AX_SYS_ISO_CTRL_EXTEND = 0x0080;
+constexpr uint32_t B_AX_CMAC1_FEN = 1u << 30;
+constexpr uint32_t B_AX_R_SYM_ISO_CMAC12PP = 1u << 5;
+constexpr uint16_t R_AX_AFE_CTRL1 = 0x0024;
+constexpr uint32_t B_AX_WLCMAC1_PC_EN_ALL = 0x1f; /* [4:0] P4..P1 + base */
+constexpr uint16_t R_AX_LED1_FUNC_SEL = 0x02DC;
+constexpr uint8_t B_AX_PINMUX_EESK_FUNC_SEL_V1_SH = 24;
+constexpr uint32_t B_AX_PINMUX_EESK_FUNC_SEL_V1_MSK = 0xf;
+constexpr uint8_t XTAL_SI_XTAL_XMD_2_8852C = 0x10; /* [6:4]=001 (vs 0 on 8852B) */
+
 constexpr uint16_t R_AX_SPS_DIG_OFF_CTRL0 = 0x0400;
 constexpr uint8_t B_AX_C1_L1_SH = 0;
 constexpr uint32_t B_AX_C1_L1_MSK = 0x3;

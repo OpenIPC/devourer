@@ -799,6 +799,9 @@ bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
   };
   std::vector<Sec> secs;
   uint32_t total_mss_bytes = 0; /* trailing signature bytes (not downloaded) */
+  bool keypool_fmt = false;     /* 8852C MSS key-pool (mssc low byte == 0xff) */
+  uint32_t sec_sec_len = 0;     /* real security-section body length */
+  uint32_t kp_raw_offset = 0;   /* MSS key-pool mss_key_raw_offset */
   const uint8_t *bin_ptr = fw + hdr_len;
   const uint8_t *sh = fw + r::FWHDR_HDR_LEN;
   const uint8_t *sec_body = nullptr; /* the security section's downloaded body */
@@ -812,12 +815,39 @@ bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
         (dw1 >> r::SECTION_INFO_SECTIONTYPE_SH) & r::SECTION_INFO_SECTIONTYPE_MSK;
     bool security = (type == r::FWDL_SECURITY_SECTION_TYPE);
     if (security) {
-      sec_len = 2048; /* 8852B workaround: forced length */
-      total_mss_bytes += le32(sh + 8) * r::FWDL_SECURITY_SIGLEN; /* mssc*512 */
+      const uint32_t mssc = le32(sh + 8); /* section dword2 */
       sec_body = bin_ptr;
+      if (_variant == ChipVariant::C8852C && (mssc & 0xff) == 0xff) {
+        /* 8852C MSS key-pool format: keep the real section length; the trailing
+         * mss size is read from the key-pool header after the loop. */
+        keypool_fmt = true;
+        sec_sec_len = sec_len;
+      } else {
+        /* 8852B: forced 2048 body + mssc appended SIGLEN signatures. */
+        sec_len = 2048;
+        sec_sec_len = 2048;
+        total_mss_bytes += mssc * r::FWDL_SECURITY_SIGLEN;
+      }
     }
     secs.push_back({bin_ptr, sec_len, security});
     bin_ptr += sec_len;
+  }
+  /* 8852C: the MSS key-pool (magic "MSSKPOOL") trails the last section; its size
+   * (keypair_num*SIGLEN + mss_key_raw_offset) is the non-downloaded remainder.
+   * get_mss_keypool_index (fwdl.c): hdr dw3 = mss_key_raw_offset, dw5[31:16] =
+   * keypair_num. */
+  if (keypool_fmt) {
+    static const uint8_t kMagic[8] = {'M', 'S', 'S', 'K', 'P', 'O', 'O', 'L'};
+    if (std::memcmp(bin_ptr, kMagic, 8) != 0) {
+      _logger->error("Kestrel FWDL: MSS key-pool magic not found");
+      return false;
+    }
+    kp_raw_offset = le32(bin_ptr + 12);
+    const uint32_t keypair_num = (le32(bin_ptr + 20) >> 16) & 0xffff;
+    total_mss_bytes = keypair_num * r::FWDL_SECURITY_SIGLEN + kp_raw_offset;
+    _logger->info("Kestrel FWDL: MSS key-pool ({} keys, raw_ofst=0x{:x}, "
+                  "mss=0x{:x}, sec_len={})",
+                  keypair_num, kp_raw_offset, total_mss_bytes, sec_sec_len);
   }
   /* Image = header + sections + trailing MSS signatures. */
   if (static_cast<uint32_t>(bin_ptr - fw) + total_mss_bytes != len) {
@@ -833,8 +863,25 @@ bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
   std::vector<uint8_t> sec_patched;
   if (sec_body && total_mss_bytes) {
     constexpr uint32_t kSecConst = 64 + (6 * 32 * 2); /* =448 (SECTION_MAX=6) */
-    const uint8_t *sig = bin_ptr + mss_idx * r::FWDL_SECURITY_SIGLEN;
-    sec_patched.assign(sec_body, sec_body + 2048);
+    const uint8_t *sig;
+    uint32_t body_len;
+    if (keypool_fmt) {
+      /* 8852C: the selected signature is at bin_ptr + mss_key_raw_offset +
+       * idx*SIGLEN. The full remap-table index selection is deferred; idx 0
+       * (the default keyset) suffices for a non-secure IC. */
+      sig = bin_ptr + kp_raw_offset + mss_idx * r::FWDL_SECURITY_SIGLEN;
+      body_len = sec_sec_len;
+    } else {
+      sig = bin_ptr + mss_idx * r::FWDL_SECURITY_SIGLEN;
+      body_len = 2048;
+    }
+    if (body_len < kSecConst + r::FWDL_SECURITY_SIGLEN) {
+      _logger->error("Kestrel FWDL: security section too small for MSS patch "
+                     "(len={}, need {})",
+                     body_len, kSecConst + r::FWDL_SECURITY_SIGLEN);
+      return false;
+    }
+    sec_patched.assign(sec_body, sec_body + body_len);
     std::memcpy(sec_patched.data() + kSecConst, sig, r::FWDL_SECURITY_SIGLEN);
     for (Sec &s : secs)
       if (s.security)

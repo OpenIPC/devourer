@@ -62,6 +62,15 @@ public:
   bool enable_usr_tx_rpt(uint8_t mode, uint8_t macid, uint8_t port,
                          uint32_t period_us = 100000);
 
+  /* mac_fw_role_maintain (role.c): H2C cat=MAC, class=MEDIA_RPT,
+   * func=FWROLE_MAINTAIN — makes the firmware create/track a MACID role. This
+   * is the registration linchpin: without a fw role the per-MACID frame-stat
+   * engine (USR_TX_RPT), the data-frame path, and power-by-rate do not engage
+   * for an injected MACID. `self_role` = mac_ax_self_role, `wifi_role` =
+   * mac_ax_wifi_role, `upd_mode` = mac_ax_upd_mode (CREATE/REMOVE). */
+  bool fw_role_maintain(uint8_t macid, uint8_t self_role, uint8_t wifi_role,
+                        uint8_t upd_mode, uint8_t band, uint8_t port);
+
 private:
   /* Generic H2C over CH12: [WD 24B][fwcmd_hdr 8B][content]. */
   bool send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,

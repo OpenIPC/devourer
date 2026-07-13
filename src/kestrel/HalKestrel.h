@@ -6,6 +6,7 @@
 
 #include "ChipVariant.h"
 #include "KestrelFw.h"
+#include "MacRegAx.h" /* mac_ax role enums */
 #include "RtlAdapter.h"
 #include "SelectedChannel.h" /* ChannelWidth_t */
 #include "logger.h"
@@ -103,6 +104,17 @@ public:
   bool enable_tx_report(uint8_t mode, uint8_t macid = 0, uint8_t port = 0,
                         uint32_t period_us = 100000) {
     return _fw.enable_usr_tx_rpt(mode, macid, port, period_us);
+  }
+
+  /* M6 pseudo-STA — register a station-role MACID with the firmware
+   * (mac_fw_role_maintain, CREATE). This is the linchpin that lets the fw
+   * track the MACID so per-MACID TX features engage (USR_TX_RPT frame-stat,
+   * data-frame path, power-by-rate). Call in InitWrite before enable_tx_report.
+   * addr-cam / default cctl (the rest of _add_role) land as follow-ups. */
+  bool register_sta_role(uint8_t macid = 0, uint8_t band = 0, uint8_t port = 0) {
+    return _fw.fw_role_maintain(macid, reg::MAC_AX_SELF_ROLE_CLIENT,
+                                reg::MAC_AX_WIFI_ROLE_STATION,
+                                reg::MAC_AX_ROLE_CREATE, band, port);
   }
 
   /* Firmware SER probe: returns the latched mac_ax_err_info code if the fw has

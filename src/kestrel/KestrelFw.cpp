@@ -301,6 +301,29 @@ bool KestrelFw::enable_usr_tx_rpt(uint8_t mode, uint8_t macid, uint8_t port,
   return ok;
 }
 
+bool KestrelFw::fw_role_maintain(uint8_t macid, uint8_t self_role,
+                                 uint8_t wifi_role, uint8_t upd_mode,
+                                 uint8_t band, uint8_t port) {
+  /* fwcmd_fwrole_maintain: one dword (role.c mac_fw_role_maintain). */
+  uint8_t content[4] = {0};
+  const uint32_t d0 =
+      (static_cast<uint32_t>(macid) & 0xff) |
+      ((static_cast<uint32_t>(self_role) & 0x3) << r::H2C_FWROLE_SELF_ROLE_SH) |
+      ((static_cast<uint32_t>(upd_mode) & 0x7) << r::H2C_FWROLE_UPD_MODE_SH) |
+      ((static_cast<uint32_t>(wifi_role) & 0xf) << r::H2C_FWROLE_WIFI_ROLE_SH) |
+      ((static_cast<uint32_t>(band) & 0x3) << r::H2C_FWROLE_BAND_SH) |
+      ((static_cast<uint32_t>(port) & 0x7) << r::H2C_FWROLE_PORT_SH);
+  put_le32(content + 0, d0);
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_MEDIA_RPT,
+                         r::FWCMD_H2C_FUNC_FWROLE_MAINTAIN, content,
+                         sizeof(content));
+  _logger->info("Kestrel: fw_role_maintain (macid={} self={} wifi={} upd={} "
+                "band={} port={}) -> {}",
+                macid, self_role, wifi_role, upd_mode, band, port,
+                ok ? "sent" : "FAILED");
+  return ok;
+}
+
 bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
                              const uint8_t *content, uint32_t len) {
   /* Packet = [WD 24B][fwcmd_hdr 8B][content]. Same framing as the FWDL header

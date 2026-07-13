@@ -153,8 +153,12 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
     _logger->error("Kestrel: no bulk-OUT endpoint for mgmt TX");
     return;
   }
-  /* Enable the per-user TX report (freerun TX-egress timestamps). The C2H
-   * reports are decoded in handle_c2h when the RX loop is up (TX_WITH_RX). */
+  /* Register a station-role MACID with the fw (mac_fw_role_maintain, CREATE)
+   * so the per-MACID frame-stat engine tracks our injected frames — the
+   * linchpin for the USR_TX_RPT report firing (and, later, data TX + power-by-
+   * rate). Then enable the per-user TX report (freerun TX-egress timestamps);
+   * the C2H reports are decoded in handle_c2h when the RX loop is up. */
+  _hal.register_sta_role(0, 0, 0);
   _hal.enable_tx_report(kestrel::reg::USR_TX_RPT_MODE_PERIOD, 0, 0);
   _logger->info("Kestrel: TX ready on ch{} — mgmt ep 0x{:02x} data ep 0x{:02x}",
                 channel.Channel, _tx_mgmt_ep, _tx_data_ep);

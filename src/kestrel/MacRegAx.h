@@ -370,6 +370,28 @@ constexpr uint8_t H2C_USR_TX_RPT_PORT_SH = 11;
 constexpr uint8_t FWCMD_C2H_FUNC_USR_TX_RPT_INFO = 0x7;
 constexpr uint8_t USR_TX_RPT_MODE_PERIOD = 1;
 constexpr uint8_t USR_TX_RPT_MODE_LAST_PKT = 2;
+/* FWROLE_MAINTAIN (mac_fw_role_maintain, role.c): the H2C that makes the fw
+ * create/track a MACID role — the linchpin that lets per-MACID features (data
+ * TX, power-by-rate, USR_TX_RPT frame-stat) engage. cat=MAC, class=MEDIA_RPT,
+ * func=FWROLE_MAINTAIN. dword0 = MACID[7:0] | SELF_ROLE[9:8] | UPD_MODE[12:10]
+ * | WIFI_ROLE[16:13] | BAND[18:17] | PORT[21:19]. */
+constexpr uint8_t FWCMD_H2C_CL_MEDIA_RPT = 0x8;
+constexpr uint8_t FWCMD_H2C_FUNC_FWROLE_MAINTAIN = 0x4;
+constexpr uint8_t H2C_FWROLE_SELF_ROLE_SH = 8;  /* mask 0x3 */
+constexpr uint8_t H2C_FWROLE_UPD_MODE_SH = 10;  /* mask 0x7 */
+constexpr uint8_t H2C_FWROLE_WIFI_ROLE_SH = 13; /* mask 0xf */
+constexpr uint8_t H2C_FWROLE_BAND_SH = 17;      /* mask 0x3 */
+constexpr uint8_t H2C_FWROLE_PORT_SH = 19;      /* mask 0x7 */
+/* mac_ax_self_role. */
+constexpr uint8_t MAC_AX_SELF_ROLE_CLIENT = 0;
+constexpr uint8_t MAC_AX_SELF_ROLE_AP = 1;
+/* mac_ax_wifi_role. */
+constexpr uint8_t MAC_AX_WIFI_ROLE_NONE = 0;
+constexpr uint8_t MAC_AX_WIFI_ROLE_STATION = 1;
+constexpr uint8_t MAC_AX_WIFI_ROLE_AP = 2;
+/* mac_ax_upd_mode. */
+constexpr uint8_t MAC_AX_ROLE_CREATE = 0;
+constexpr uint8_t MAC_AX_ROLE_REMOVE = 1;
 /* rtw_mac_src_cmd_ofld (mac_outsrc_def.h). */
 constexpr uint8_t OFLD_SRC_BB = 0;
 constexpr uint8_t OFLD_SRC_RF = 1;

@@ -111,7 +111,8 @@ constexpr uint32_t B_AX_R_USBIO_MODE = 1u << 4;
 constexpr uint16_t R_AX_USB_WLAN0_1 = 0x1174;
 constexpr uint32_t B_AX_USBRX_RST = 1u << 9;
 constexpr uint32_t B_AX_USBTX_RST = 1u << 8;
-constexpr uint16_t R_AX_HCI_FUNC_EN = 0x8380; /* mac_reg_ax.h */
+constexpr uint16_t R_AX_HCI_FUNC_EN = 0x8380;    /* 8852B/MIPS */
+constexpr uint16_t R_AX_HCI_FUNC_EN_V1 = 0x7880; /* 8852C/RISC-V (init.c else) */
 constexpr uint32_t B_AX_HCI_RXDMA_EN = 1u << 1;
 constexpr uint32_t B_AX_HCI_TXDMA_EN = 1u << 0;
 

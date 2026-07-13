@@ -68,8 +68,12 @@ bool KestrelFw::hci_func_en() {
    * RXDMA|TXDMA on R_AX_HCI_FUNC_EN (0x8380) ONLY. The _V1 register (0x7880) is
    * the ELSE branch for other chips; on the 8852B it is UNMAPPED (reads back
    * 0xdeadbeef), and writing there corrupts the HCI state so the running fw
-   * faults on the AHB->HCI bus ~1 ms after boot (HALT_C2H = L2_ERR_AH_HCI). */
-  set32(r::R_AX_HCI_FUNC_EN, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
+   * faults on the AHB->HCI bus ~1 ms after boot (HALT_C2H = L2_ERR_AH_HCI).
+   * The 8852C (RISC-V) is the opposite: it IS the _V1 (0x7880) chip. */
+  const uint16_t reg = (_variant == ChipVariant::C8852C)
+                           ? r::R_AX_HCI_FUNC_EN_V1
+                           : r::R_AX_HCI_FUNC_EN;
+  set32(reg, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
   return true;
 }
 

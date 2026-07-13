@@ -781,8 +781,20 @@ constexpr uint16_t TRXCFG_RMAC_CCA_TO = 32;
 /* rx_max_len for band0 = min(c0_rx_qta[=cma0_dma 178], PLD_RLS_MAX_PG[127])
  * * ple_pg_size[128] / RX_MAX_LEN_UNIT[512] = 127*128/512 = 31. */
 constexpr uint16_t RMAC_RX_MPDU_MAX_LEN = 31;
-/* USB RX aggregation (usb_rx_agg_cfg_8852b). */
+/* USB RX aggregation (rx_agg_cfg_usb_8852b, _usb_8852b.c). The RXAGG engine
+ * is the mechanism that DMAs RX frames to the USB bulk-IN — for USB mode the
+ * vendor ENABLES it (B_AX_RXAGG_EN) with DMA_STORE off and size/timeout
+ * thresholds. NB: the enable bit is BIT(31), not bit 0 (bit 0 is LEN_TH[0]). */
 constexpr uint16_t R_AX_RXAGG_0 = 0x8900;
+constexpr uint32_t B_AX_RXAGG_EN = 1u << 31;
+constexpr uint32_t B_AX_RXAGG_DMA_STORE = 1u << 30;
+constexpr uint32_t B_AX_RXAGG_SW_EN = 1u << 29;
+constexpr uint8_t B_AX_RXAGG_PKTNUM_TH_SH = 16;
+constexpr uint8_t B_AX_RXAGG_TIMEOUT_TH_SH = 8;
+constexpr uint8_t B_AX_RXAGG_LEN_TH_SH = 0;
+/* _usb.h: RXAGGSIZE=0x5 (unit 4k), RXAGGTO=0x20 (timeout), pkt_num=0. */
+constexpr uint8_t RXAGGSIZE = 0x5;
+constexpr uint8_t RXAGGTO = 0x20;
 
 /* ---- Full CMAC init (trxcfg.c cmac_init: the remaining band-0 sub-inits that
  * were previously skipped — scheduler / tmac / trxptcl / ptcl / nav /

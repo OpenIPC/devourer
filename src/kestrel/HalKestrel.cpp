@@ -814,9 +814,18 @@ void HalKestrel::cmac_dma_init() {
 }
 
 void HalKestrel::usb_rx_agg_cfg() {
-  /* Disable USB RX aggregation for monitor (stream each frame; simplest to
-   * parse). agg_en=0 leaves the RXAGG_0 enable bit clear. */
-  clr32(r::R_AX_RXAGG_0, 1u << 0);
+  /* rx_agg_cfg_usb_8852b (MAC_AX_RX_AGG_MODE_USB): the RXAGG engine is what
+   * DMAs RX frames onto the USB bulk-IN, so it MUST be enabled — USB mode is
+   * agg_en=1 with DMA_STORE=0 and the default size/timeout thresholds. (The
+   * old code cleared bit 0, which is LEN_TH[0], NOT the enable bit (BIT31) —
+   * so RXAGG stayed off-by-default and no RX reached the host bulk-IN.) The
+   * 11ax rxd parser already walks multi-frame aggregates via next_offset. */
+  uint32_t v = _device.rtw_read32(r::R_AX_RXAGG_0);
+  v = (v & r::B_AX_RXAGG_SW_EN) | r::B_AX_RXAGG_EN |
+      (static_cast<uint32_t>(r::RXAGGSIZE) << r::B_AX_RXAGG_LEN_TH_SH) |
+      (static_cast<uint32_t>(r::RXAGGTO) << r::B_AX_RXAGG_TIMEOUT_TH_SH) |
+      (0u << r::B_AX_RXAGG_PKTNUM_TH_SH);
+  _device.rtw_write32(r::R_AX_RXAGG_0, v);
 }
 
 void HalKestrel::scheduler_init() {

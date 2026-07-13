@@ -60,6 +60,32 @@ RtlKestrelDevice::RtlKestrelDevice(RtlAdapter device, Logger_t logger,
                   die_name(info.die_id), info.cut);
 }
 
+RtlKestrelDevice::~RtlKestrelDevice() {
+  _rx_stop = true;
+  stop_wp_drain();
+}
+
+void RtlKestrelDevice::start_wp_drain() {
+  if (_wp_drain_thread.joinable())
+    return; /* already draining */
+  _wp_drain_stop = false;
+  _wp_drain_thread = std::thread([this]() {
+    /* Consume the bulk-IN so the fw's TX WP-release reports (rpkt_type=7,
+     * TX_PD_RELEASE_HOST) recycle the transmitted frames' WD/PLE pages. A no-op
+     * callback suffices — completing the bulk-IN URB is what does the recycle. */
+    _device.bulk_read_async_loop(
+        16384, 8, [](const uint8_t *, int) {}, _wp_drain_stop);
+  });
+  _logger->info("Kestrel: WP-release drain started (recycles TX pages)");
+}
+
+void RtlKestrelDevice::stop_wp_drain() {
+  if (!_wp_drain_thread.joinable())
+    return;
+  _wp_drain_stop = true;
+  _wp_drain_thread.join();
+}
+
 kestrel::ChipInfo RtlKestrelDevice::ReadChipInfo() {
   kestrel::ChipInfo info{};
   info.die_id = _device.rtw_read8(kRegSysChipInfo);
@@ -166,9 +192,16 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
   _hal.enable_tx_report(kestrel::reg::USR_TX_RPT_MODE_PERIOD, 0, 0);
   _logger->info("Kestrel: TX ready on ch{} — mgmt ep 0x{:02x} data ep 0x{:02x}",
                 channel.Channel, _tx_mgmt_ep, _tx_data_ep);
+  /* Start draining the bulk-IN so the fw's per-frame WP-release reports recycle
+   * the TX pages (else sustained mgmt TX stalls after ~103 frames). If the
+   * caller later runs StartRxLoop, it takes over the bulk-IN (handoff). */
+  start_wp_drain();
 }
 
 void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
+  /* Take the bulk-IN over from the TX WP-release drain (this loop also consumes
+   * rpkt_type=7 releases) so the two never read the endpoint concurrently. */
+  stop_wp_drain();
   _rx_stop = false;
   _logger->info("Kestrel: starting RX loop on ch{}", _channel.Channel);
   /* Async bulk-IN ring; walk each aggregate with the 11ax rxd parser. */

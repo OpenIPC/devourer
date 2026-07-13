@@ -2,6 +2,7 @@
 #define RTL_KESTREL_DEVICE_H
 
 #include <cstdint>
+#include <thread>
 
 #include "logger.h"
 #include "DeviceConfig.h"
@@ -49,6 +50,7 @@ public:
   RtlKestrelDevice(RtlAdapter device, Logger_t logger,
                    kestrel::ChipVariant variant = kestrel::ChipVariant::C8852B,
                    devourer::DeviceConfig cfg = {});
+  ~RtlKestrelDevice() override;
 
   void Init(Action_ParsedRadioPacket packetProcessor,
             SelectedChannel channel) override;
@@ -110,6 +112,16 @@ private:
   SelectedChannel _channel{};
   kestrel::EfuseInfo _efuse{};
   volatile bool _rx_stop = false;
+  /* WP-release drain (Kestrel STF USB): the fw returns each transmitted frame's
+   * WD/PLE pages as an RX packet (rpkt_type=7, TX_PD_RELEASE_HOST) on the bulk-
+   * IN. A TX-only path must still drain the bulk-IN or the pages never recycle
+   * and the mgmt bulk-OUT stalls after ~103 frames. InitWrite starts this
+   * background drain; StartRxLoop hands the bulk-IN over to itself (which also
+   * drains type-7), so the two never read the endpoint concurrently. */
+  std::thread _wp_drain_thread;
+  volatile bool _wp_drain_stop = true;
+  void start_wp_drain();
+  void stop_wp_drain();
   uint8_t _tx_mgmt_ep = 0; /* band-0 mgmt bulk-OUT ep (BULKOUTID0), 0=TX not up */
   uint8_t _tx_data_ep = 0; /* AC0 data bulk-OUT ep (BULKOUTID3) */
   uint16_t _tx_seq = 0;    /* rolling 12-bit wifi sequence for injected frames */

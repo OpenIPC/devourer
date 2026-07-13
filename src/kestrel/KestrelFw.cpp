@@ -6,7 +6,12 @@
 #include <utility>
 
 #include "MacRegAx.h"
+#if defined(DEVOURER_HAVE_KESTREL_8852B)
 #include "hal8852b_fw.h"
+#endif
+#if defined(DEVOURER_HAVE_KESTREL_8852C)
+#include "hal8852c_fw.h"
+#endif
 
 namespace kestrel {
 
@@ -904,18 +909,43 @@ bool KestrelFw::fw_pre_init() {
 
 bool KestrelFw::download_firmware(uint8_t cut, uint8_t mss_idx, bool is_sec_ic) {
   _is_sec_ic = is_sec_ic;
-  /* NICCE image, cut-selected: CBV(1) -> u2, CCV+(>=2) -> u3. */
-  const uint8_t *fw;
-  uint32_t len;
-  if (cut >= 2) {
-    fw = array_8852b_u3_nicce;
-    len = array_8852b_u3_nicce_len;
-  } else {
-    fw = array_8852b_u2_nicce;
-    len = array_8852b_u2_nicce_len;
+  /* Per-variant, cut-selected fw image. 8852B: NICCE, CBV(1)->u2, CCV+(>=2)->u3.
+   * 8852C: NIC, CAV(1)->u1, CBV+(>=2)->u2. */
+  const uint8_t *fw = nullptr;
+  uint32_t len = 0;
+  const char *img = "none";
+#if defined(DEVOURER_HAVE_KESTREL_8852C)
+  if (_variant == ChipVariant::C8852C) {
+    if (cut >= 2) {
+      fw = array_8852c_u2_nic;
+      len = array_8852c_u2_nic_len;
+      img = "u2_nic";
+    } else {
+      fw = array_8852c_u1_nic;
+      len = array_8852c_u1_nic_len;
+      img = "u1_nic";
+    }
   }
-  _logger->info("Kestrel FWDL: image {} ({} bytes) via ep 0x{:02x}",
-                cut >= 2 ? "u3_nicce" : "u2_nicce", len, _ch12_ep);
+#endif
+#if defined(DEVOURER_HAVE_KESTREL_8852B)
+  if (_variant != ChipVariant::C8852C) {
+    if (cut >= 2) {
+      fw = array_8852b_u3_nicce;
+      len = array_8852b_u3_nicce_len;
+      img = "u3_nicce";
+    } else {
+      fw = array_8852b_u2_nicce;
+      len = array_8852b_u2_nicce_len;
+      img = "u2_nicce";
+    }
+  }
+#endif
+  if (fw == nullptr) {
+    _logger->error("Kestrel FWDL: no firmware image for this variant/build");
+    return false;
+  }
+  _logger->info("Kestrel FWDL: image {} ({} bytes) via ep 0x{:02x}", img, len,
+                _ch12_ep);
 
   /* mac_hal_init WDT block (init.c:470, right before the CPU enable): no
    * WDT wake on USB/PCIE, WDT platform-reset disabled (wdt_plt_rst_en=0).

@@ -337,6 +337,22 @@ constexpr uint32_t AX_TXD_TXPKTSIZE_MSK = 0xffff;
 constexpr uint8_t MAC_AX_DMA_H2C = 12; /* CH12 */
 constexpr uint8_t BULKOUTID_H2C = 2;   /* get_bulkout_id_8852b: H2C -> id 2 */
 
+/* ---- FWDL IDMEM/CPU-clock patch (fwdl.c idmem_share_mode_check +
+ * fwdl_patch_fw_delay). On a NON-secure IC the vendor (a) forces the SEC_CTRL
+ * IDMEM-share field to the AX-MIPS default (0x1) and (b) writes the fw CPU-clk
+ * setting into IDMEM via the indirect-access window so the fw's secure-checksum
+ * delay is accurate — WITHOUT this the running fw mis-times and faults on the
+ * HCI bus (HALT_C2H = L2_ERR_AH_HCI). is_sec_ic from OTP key cell 0x5ED[7]. ---*/
+constexpr uint16_t R_AX_SEC_CTRL = 0x0C00;
+constexpr uint8_t B_SEC_IDMEM_SIZE_CONFIG_SH = 16; /* [17:16] */
+constexpr uint32_t B_SEC_IDMEM_SIZE_CONFIG_MSK = 0x3;
+constexpr uint8_t FWDL_IDMEM_SHARE_DEFAULT_MODE = 0x1; /* AX MIPS */
+constexpr uint16_t R_AX_FILTER_MODEL_ADDR = 0x0C04;
+constexpr uint32_t R_AX_INDIR_ACCESS_ENTRY = 0x40000; /* wide: wIndex=4 */
+constexpr uint32_t FW_CPU_CLK_ADDR_8852B = 0x18E0C3D8;
+constexpr uint32_t FW_FAKE_CPU_CLK_8852B = 0x0000000A;
+constexpr uint16_t OTP_KEY_INFO_CELL_02_ADDR = 0x5ED; /* [7] = security-record */
+
 /* ---- Firmware IO-offload (fwofld.c, fwcmd_intf.h) — how BB/RF register
  * tables are actually programmed on USB: batched into H2C commands the FW
  * replays on-chip (the vendor does ZERO direct BB/RF-window writes). ---- */

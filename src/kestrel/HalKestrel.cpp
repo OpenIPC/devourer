@@ -358,6 +358,21 @@ uint32_t HalKestrel::fw_err_state(const char *where) {
   return err;
 }
 
+void HalKestrel::fw_err_settle(const char *where, uint32_t ms) {
+  /* Poll HALT_C2H_CTRL every 1 ms for `ms`, doing no other bus traffic, to
+   * detect an ASYNC fw self-crash (vs one triggered by a subsequent write). */
+  for (uint32_t i = 0; i < ms; ++i) {
+    if (_device.rtw_read32(r::R_AX_HALT_C2H_CTRL) != 0) {
+      _logger->error("Kestrel FW-SER (async self-crash) at [{}] after {} ms: "
+                     "err=0x{:08x}",
+                     where, i, _device.rtw_read32(r::R_AX_HALT_C2H));
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  _logger->info("Kestrel: fw stable through [{}] ({} ms, no SER)", where, ms);
+}
+
 uint8_t HalKestrel::read_cut() {
   return static_cast<uint8_t>(_device.rtw_read8(r::R_AX_SYS_CFG1 + 1) >> 4);
 }
@@ -396,12 +411,36 @@ uint8_t HalKestrel::read_mss_index() {
 
 bool HalKestrel::download_firmware(uint8_t cut) {
   /* mac_hal_init order (init.c:406-434): hci_func_en -> dmac_pre_init (DLFW
-   * DLE/HFC) -> intf_pre_init (usb_pre_init) -> [chk_sec_rec] -> fwdl. */
+   * DLE/HFC) -> intf_pre_init (usb_pre_init) -> chk_sec_rec -> fwdl. */
   if (!_fw.fw_pre_init())
     return false;
   if (!usb_pre_init())
     return false;
-  return _fw.download_firmware(cut, read_mss_index());
+  /* mac_chk_sec_rec (secure_boot.c:61): is_sec_ic from OTP key cell 0x5ED[7].
+   * _security_rec = bit7; sec_rec==0 => secure IC (is_sec_ic=1). */
+  const bool is_sec_ic = read_sec_rec() == 0;
+  _logger->info("Kestrel: sec-rec {} (is_sec_ic={})",
+                is_sec_ic ? "secure" : "non-secure", is_sec_ic);
+  return _fw.download_firmware(cut, read_mss_index(), is_sec_ic);
+}
+
+uint8_t HalKestrel::read_sec_rec() {
+  /* OTP_KEY_INFO_CELL_02 (efuse 0x5ED) bit 7 -> _security_rec. */
+  enable_efuse_pwr_cut();
+  uint8_t byte_val = 0xFF;
+  _device.rtw_write32(r::R_AX_EFUSE_CTRL,
+                      (r::OTP_KEY_INFO_CELL_02_ADDR & r::B_AX_EF_ADDR_MSK)
+                          << r::B_AX_EF_ADDR_SH);
+  for (uint32_t cnt = r::EFUSE_WAIT_CNT_PLUS; cnt != 0; --cnt) {
+    uint32_t v = _device.rtw_read32(r::R_AX_EFUSE_CTRL);
+    if (v & r::B_AX_EF_RDY) {
+      byte_val = static_cast<uint8_t>(v & 0xFF);
+      break;
+    }
+    delay_us(1);
+  }
+  disable_efuse_pwr_cut();
+  return static_cast<uint8_t>((byte_val & 0x80) >> 7);
 }
 
 bool HalKestrel::chk_dle_rdy(uint16_t status_reg, uint32_t rdy_bits,
@@ -567,13 +606,13 @@ bool HalKestrel::hfc_init_nic() {
                        r::B_AX_HCI_FC_WP_CH811_FULL_COND_SH);
   w(r::R_AX_HCI_FC_CTRL, fc);
 
-  /* set_fc_func_en(1, 1): enable HCI flow control (FC_EN) AND CH12. The vendor
-   * golden capture (ifup, right before its bulk cmd_ofld) ends HCI_FC_CTRL at
-   * 0x055b = FC_EN|MODE(STF)|CH12_EN|full-conds. Without FC_EN the MAC never
-   * credits a CH12 page for the incoming H2C, so the fw silently drops every
-   * cmd_ofld (bulk-OUT succeeds but BB writes never land, C2H result never
-   * fires). */
-  set32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
+  /* set_fc_func_en: enable CH12 credits now, but NOT the master FC_EN. The
+   * vendor keeps HCI_FC_CTRL FC_EN=0 through probe-time dmac/trx init (golden
+   * capture: 0x08040000) and only flips FC_EN=1 at ifup, immediately before
+   * its first bulk cmd_ofld (0x055b). Enabling FC_EN mid-dmac-init — while the
+   * DLE/USB reconfig is still settling — faults the fw's HCI/DMA AHB monitor
+   * (SER err=0x10002010 L2_AH_HCI|L1_DMAC). enable_hci_fc() flips it later. */
+  set32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_CH12_EN);
   delay_us(10);
   _logger->info("Kestrel TRX: NIC HFC quotas applied (CH12 credits live)");
   return true;
@@ -973,6 +1012,13 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
    * 0xf9..0xfe delay pseudo-addresses are HOST-side sleeps in the vendor
    * walkers (halbb_fwcfg_bb_phy_8852b:42, no flush, no fw delay command);
    * phy1 (0x100xxxxx) entries are skipped for single-PHY. --- */
+  /* Flip the master HCI flow-control enable now — the vendor does this at ifup
+   * right before its first bulk cmd_ofld (HCI_FC_CTRL 0x08040000 -> 0x055b), so
+   * FC_EN is only armed once the DMAC/CMAC/USB init has fully settled. This is
+   * what actually credits a CH12 page for the incoming H2C. */
+  set32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_EN);
+  delay_us(10);
+
   _fw.ofld_begin();
   auto bb_emit = [&](uint32_t addr, uint32_t val) {
     switch (addr) {

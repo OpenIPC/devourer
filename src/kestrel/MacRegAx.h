@@ -113,6 +113,24 @@ constexpr uint32_t B_AX_USBRX_RST = 1u << 9;
 constexpr uint32_t B_AX_USBTX_RST = 1u << 8;
 constexpr uint16_t R_AX_HCI_FUNC_EN = 0x8380;    /* 8852B/MIPS */
 constexpr uint16_t R_AX_HCI_FUNC_EN_V1 = 0x7880; /* 8852C/RISC-V (init.c else) */
+
+/* --- 8852C HAXI (Host AXI DMA) USB transport (dmac_func_pre_en_8852c) — the
+ * 8852C routes USB DMA through the HAXI block; without it the H2C/fw transport
+ * (and thus the WCPU boot handshake) never comes up. Absent on the 8852B. --- */
+constexpr uint32_t B_AX_H_AXIDMA_EN = 1u << 14; /* DMAC_FUNC_EN (0x8400) */
+constexpr uint32_t B_AX_AXIDMA_EN = 1u << 3;    /* PLATFORM_ENABLE (0x88) */
+constexpr uint16_t R_AX_HAXI_INIT_CFG1 = 0x1000;
+constexpr uint8_t B_AX_DMA_MODE_SH = 18;
+constexpr uint32_t B_AX_DMA_MODE_MSK = 0x3;
+constexpr uint32_t DMA_MOD_USB = 0x2;
+constexpr uint32_t B_AX_STOP_AXI_MST = 1u << 17;
+constexpr uint32_t B_AX_TXHCI_EN_V1 = 1u << 7;
+constexpr uint32_t B_AX_RXHCI_EN_V1 = 1u << 15;
+constexpr uint16_t R_AX_HAXI_DMA_STOP1 = 0x1010;
+/* ACH0..ACH7 = BIT8..15, CH8=16, CH9=17, CH12=18. */
+constexpr uint32_t HAXI_DMA_STOP1_CHANS = 0x7FF00u;
+constexpr uint16_t R_AX_HAXI_DMA_STOP2 = 0x11C0;
+constexpr uint32_t HAXI_DMA_STOP2_CHANS = 0x3u; /* CH10=0, CH11=1 */
 constexpr uint32_t B_AX_HCI_RXDMA_EN = 1u << 1;
 constexpr uint32_t B_AX_HCI_TXDMA_EN = 1u << 0;
 

@@ -177,9 +177,26 @@ bool KestrelFw::hfc_init_dlfw() {
 }
 
 bool KestrelFw::dmac_pre_init() {
-  /* dmac_func_pre_en (init_8852b.c). */
-  set32(r::R_AX_DMAC_FUNC_EN, r::B_AX_MAC_FUNC_EN | r::B_AX_DMAC_FUNC_EN |
-                                  r::B_AX_DISPATCHER_EN | r::B_AX_PKT_BUF_EN);
+  /* dmac_func_pre_en. The 8852C additionally enables the HAXI (Host AXI DMA)
+   * block — its USB DMA transport — where the 8852B has none. */
+  uint32_t funcen = r::B_AX_MAC_FUNC_EN | r::B_AX_DMAC_FUNC_EN |
+                    r::B_AX_DISPATCHER_EN | r::B_AX_PKT_BUF_EN;
+  if (_variant == ChipVariant::C8852C)
+    funcen |= r::B_AX_H_AXIDMA_EN;
+  set32(r::R_AX_DMAC_FUNC_EN, funcen);
+  if (_variant == ChipVariant::C8852C) {
+    /* dmac_func_pre_en_8852c HAXI setup (init_8852c.c): DMA mode = USB,
+     * un-stop the AXI master + TX/RX HCI, un-stop the DMA channels, enable the
+     * AXIDMA in the platform. */
+    uint32_t v = _device.rtw_read32(r::R_AX_HAXI_INIT_CFG1);
+    v = r::set_clr_word(v, r::DMA_MOD_USB, r::B_AX_DMA_MODE_MSK,
+                        r::B_AX_DMA_MODE_SH);
+    v = (v & ~r::B_AX_STOP_AXI_MST) | r::B_AX_TXHCI_EN_V1 | r::B_AX_RXHCI_EN_V1;
+    _device.rtw_write32(r::R_AX_HAXI_INIT_CFG1, v);
+    clr32(r::R_AX_HAXI_DMA_STOP1, r::HAXI_DMA_STOP1_CHANS);
+    clr32(r::R_AX_HAXI_DMA_STOP2, r::HAXI_DMA_STOP2_CHANS);
+    set32(r::R_AX_PLATFORM_ENABLE, r::B_AX_AXIDMA_EN);
+  }
   if (!dle_init_dlfw())
     return false;
   if (!hfc_init_dlfw())

@@ -9,8 +9,9 @@
 set -u
 cd "$(dirname "$0")/.."
 [ "$(id -u)" -eq 0 ] || { echo "FAIL: needs root"; exit 2; }
-CH=${1:-6}; SECS=${2:-4}
-FREQ=$(( 2407 + CH*5 ))e6   # 2.4 GHz: 2412 + (ch-1)*5 == 2407 + ch*5
+CH=${1:-6}; SECS=${2:-4}; RATE=${3:-6M}
+if [ "$CH" -le 14 ]; then FREQ=$(( 2407 + CH*5 ))e6   # 2.4 GHz
+else FREQ=$(( 5000 + CH*5 ))e6; fi                    # 5 GHz: 5000 + ch*5
 TX_ID="35bc:0108"; TX_HUB="3-2.3"; TX_PORT="3"
 TXLOG="/tmp/kestrel_tx_sdr_tx.log"
 [ -x build/txdemo ] || { echo "FAIL: build txdemo"; exit 2; }
@@ -46,7 +47,7 @@ uhubctl -l "$TX_HUB" -p "$TX_PORT" -a cycle -d 2 >/dev/null 2>&1
 sleep 6
 unbind_kernel "$TX_ID"; sleep 1
 env DEVOURER_VID=0x35bc DEVOURER_PID=0x0108 DEVOURER_CHANNEL=$CH \
-  DEVOURER_TX_GAP_US=0 DEVOURER_LOG_LEVEL=warn DEVOURER_TX_RATE=6M \
+  DEVOURER_TX_GAP_US=0 DEVOURER_LOG_LEVEL=warn DEVOURER_TX_RATE="$RATE" \
   build/txdemo >"$TXLOG" 2>&1 &
 TXPID=$!
 sleep 4

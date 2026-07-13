@@ -952,6 +952,67 @@ void HalKestrel::sch_tx_en() {
                 _device.rtw_read32(r::R_AX_CCA_CFG_0));
 }
 
+bool HalKestrel::start_beacon(const uint8_t *body, uint32_t len,
+                             uint16_t interval_tu, uint8_t bss_color,
+                             uint16_t rate_ax) {
+  namespace r = kestrel::reg;
+  /* 1) Hand the fw the beacon body (BCN_UPD_V1). Single path A (ntx=1, map=0),
+   *    matching the injection cctl. */
+  if (!_fw.fw_send_beacon(body, len, /*macid=*/0, rate_ax, /*ntx_path_en=*/1,
+                          /*path_map_a=*/0))
+    return false;
+
+  /* 2) Reconfigure band-0 port-0 for AP beaconing (mac_port_init AP branch,
+   *    single BSS). NET_TYPE=AP + BCN_PRCT + BCNTX_EN(TX_SW) + port enable, all
+   *    in PORT_CFG_P0; the DTIM/HIQ power-save PCFGs are omitted. */
+  uint32_t p = _device.rtw_read32(r::R_AX_PORT_CFG_P0);
+  p = r::set_clr_word(p, r::MAC_AX_NET_TYPE_AP, r::B_AX_NET_TYPE_P0_MSK,
+                      r::B_AX_NET_TYPE_P0_SH);
+  p |= r::B_AX_TBTT_PROHIB_EN_P0 | r::B_AX_BRK_SETUP_P0; /* BCN_PRCT=1 */
+  p |= r::B_AX_BCNTX_EN_P0;                              /* TX_SW=1 */
+  p |= r::B_AX_PORT_FUNC_EN_P0;                          /* port enable */
+  _device.rtw_write32(r::R_AX_PORT_CFG_P0, p);
+
+  /* 3) Beacon timing (verbatim mac_port_init values). BCN_INTV, BSS_CLR,
+   *    TBTT_AGG, BCN_HOLD_TIME, BCN_MASK_AREA, BCN_ERLY, BCN_SETUP, TBTT_ERLY. */
+  field32(r::R_AX_BCN_SPACE_CFG_P0, interval_tu, r::B_AX_BCN_SPACE_P0_MSK,
+          r::B_AX_BCN_SPACE_P0_SH);
+  field32(r::R_AX_PTCL_BSS_COLOR_0, bss_color, r::B_AX_BSS_COLOR_P0_MSK,
+          r::B_AX_BSS_COLOR_P0_SH);
+  /* 0xC412 (TBTT_AGG) is a 16-bit register — write it at native width so the
+   * adjacent aliased registers are not clobbered. */
+  {
+    uint16_t v = _device.rtw_read16(r::R_AX_TBTT_AGG_P0);
+    v = static_cast<uint16_t>(
+        (v & ~(r::B_AX_TBTT_AGG_NUM_P0_MSK << r::B_AX_TBTT_AGG_NUM_P0_SH)) |
+        ((r::TBTT_AGG_DEF & r::B_AX_TBTT_AGG_NUM_P0_MSK)
+         << r::B_AX_TBTT_AGG_NUM_P0_SH));
+    _device.rtw_write16(r::R_AX_TBTT_AGG_P0, v);
+  }
+  /* TBTT_PROHIB_P0 (0xC404) carries BCN_HOLD_TIME[27:16] and BCN_SETUP[7:0]. */
+  field32(r::R_AX_TBTT_PROHIB_P0, r::BCN_HOLD_DEF, r::B_AX_TBTT_HOLD_P0_MSK,
+          r::B_AX_TBTT_HOLD_P0_SH);
+  field32(r::R_AX_TBTT_PROHIB_P0, r::BCN_SETUP_DEF, r::B_AX_TBTT_SETUP_P0_MSK,
+          r::B_AX_TBTT_SETUP_P0_SH);
+  field32(r::R_AX_BCN_AREA_P0, r::BCN_MASK_DEF, r::B_AX_BCN_MSK_AREA_P0_MSK,
+          r::B_AX_BCN_MSK_AREA_P0_SH);
+  field32(r::R_AX_BCNERLYINT_CFG_P0, r::BCN_ERLY_DEF, r::B_AX_BCNERLY_P0_MSK,
+          r::B_AX_BCNERLY_P0_SH);
+  /* 0xC40E (TBTT_ERLY) is the 16-bit alias of BCNERLYINT_CFG_P0's high half —
+   * write at native 16-bit width. */
+  {
+    uint16_t v = _device.rtw_read16(r::R_AX_TBTTERLYINT_CFG_P0);
+    v = static_cast<uint16_t>(
+        (v & ~(r::B_AX_TBTTERLY_P0_MSK << r::B_AX_TBTTERLY_P0_SH)) |
+        ((r::TBTT_ERLY_DEF & r::B_AX_TBTTERLY_P0_MSK) << r::B_AX_TBTTERLY_P0_SH));
+    _device.rtw_write16(r::R_AX_TBTTERLYINT_CFG_P0, v);
+  }
+  _logger->info("Kestrel: HW beacon armed on port0 (intv={}TU color={} "
+                "PORT_CFG_P0=0x{:08x})",
+                interval_tu, bss_color, p);
+  return true;
+}
+
 void HalKestrel::mac_enable_imr() {
   /* mac_enable_imr(DMAC)+(CMAC0) + mac_err_imr_ctrl(EN): the System-Error-
    * Recovery interrupt masks (ser_imr_config_8852b auto-gen). Each entry does

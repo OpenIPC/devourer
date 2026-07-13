@@ -107,6 +107,15 @@ public:
    * bring-up. */
   void sch_tx_en();
 
+  /* AX beacon engine (mac_send_bcn_h2c + the AP branch of mac_port_init): hand
+   * the fw the beacon body and reconfigure band-0 port-0 for HW-timed AP
+   * beaconing (NET_TYPE=AP, BCN_PRCT, BCNTX_EN, TBTT/BCN timing). The MAC then
+   * airs the beacon every `interval_tu` TU with the live TSF inserted. Single
+   * BSS; the power-save DTIM/HIQ buffering PCFGs are omitted. `rate_ax` = AX
+   * datarate for the beacon (e.g. MAC_AX_OFDM6). */
+  bool start_beacon(const uint8_t *body, uint32_t len, uint16_t interval_tu,
+                    uint8_t bss_color, uint16_t rate_ax);
+
   /* M3 — PHY bring-up: apply the halbb BB register + gain tables and the
    * halrf radio-A/B tables (via PhyTableLoaderKestrel). `rfe_type` / `cut`
    * select the table variant (from the efuse / chip id). Must run after the

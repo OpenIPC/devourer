@@ -446,6 +446,44 @@ bool KestrelFw::fw_upd_cctl_basic(uint8_t macid, uint8_t addr_cam_idx,
   return ok;
 }
 
+bool KestrelFw::fw_send_beacon(const uint8_t *body, uint32_t len, uint8_t macid,
+                              uint16_t rate_ax, uint8_t ntx_path_en,
+                              uint8_t path_map_a) {
+  /* mac_send_bcn_h2c: 9-dword header (fwcmd_bcn_upd_v1) + the beacon body. Only
+   * the fields a basic single-BSS band-0 beacon needs are set; the rest (CSA,
+   * PN, TWT, security) stay zero. */
+  auto sw = [](uint32_t v, uint32_t msk, uint32_t sh) {
+    return (v & msk) << sh;
+  };
+  std::vector<uint8_t> c(r::BCN_UPD_V1_HDR_LEN + len, 0);
+  /* dword0: port=0, mbssid=0, band=0, grp_ie_ofst=0. */
+  put_le32(c.data() + 0, sw(0, r::FWCMD_H2C_BCN_UPD_V1_PORT_MSK,
+                            r::FWCMD_H2C_BCN_UPD_V1_PORT_SH) |
+                             sw(0, r::FWCMD_H2C_BCN_UPD_V1_BAND_MSK,
+                                r::FWCMD_H2C_BCN_UPD_V1_BAND_SH));
+  /* dword1: macid | rate | ECSA_SUPPORT (set unconditionally by the vendor). */
+  put_le32(c.data() + 4,
+           sw(macid, r::FWCMD_H2C_BCN_UPD_V1_MACID_MSK,
+              r::FWCMD_H2C_BCN_UPD_V1_MACID_SH) |
+               sw(rate_ax, r::FWCMD_H2C_BCN_UPD_V1_RATE_MSK,
+                  r::FWCMD_H2C_BCN_UPD_V1_RATE_SH) |
+               r::FWCMD_H2C_BCN_UPD_V1_ECSA_SUPPORT);
+  /* dword2: ntx_path_en | path_map_a (give the beacon an antenna). */
+  put_le32(c.data() + 8,
+           sw(ntx_path_en, r::FWCMD_H2C_BCN_UPD_V1_NTX_PATH_EN_MSK,
+              r::FWCMD_H2C_BCN_UPD_V1_NTX_PATH_EN_SH) |
+               sw(path_map_a, r::FWCMD_H2C_BCN_UPD_V1_PATH_MAP_A_MSK,
+                  r::FWCMD_H2C_BCN_UPD_V1_PATH_MAP_A_SH));
+  /* dwords 3..8 stay 0 (no CSA/PN/TWT). */
+  std::memcpy(c.data() + r::BCN_UPD_V1_HDR_LEN, body, len);
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FR_EXCHG,
+                         r::FWCMD_H2C_FUNC_BCN_UPD_V1, c.data(),
+                         static_cast<uint32_t>(c.size()));
+  _logger->info("Kestrel: send_beacon (macid={} rate=0x{:x} body={}B) -> {}",
+                macid, rate_ax, len, ok ? "sent" : "FAILED");
+  return ok;
+}
+
 bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
                              const uint8_t *content, uint32_t len) {
   /* Packet = [WD 24B][fwcmd_hdr 8B][content]. Same framing as the FWDL header

@@ -76,6 +76,11 @@ public:
   /* 64-bit free-running MAC TSF (band-0 port-0). mac_get_tsf (twt.c). */
   uint64_t ReadTsf() override;
 
+  /* Arm the AX HW beacon engine (mac_send_bcn_h2c + AP port timing). Requires a
+   * prior InitWrite. `beacon` is a full 802.11 beacon; the MAC airs it every
+   * `interval_tu` TU with the live TSF inserted. */
+  bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+
   /* AX-native identity read (no power-on needed — the identity block is alive
    * as soon as the USB function enumerates). kestrelprobe stage "id" and the
    * constructor's confirmation log both come through here. */

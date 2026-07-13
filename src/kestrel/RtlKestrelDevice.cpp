@@ -364,6 +364,22 @@ uint64_t RtlKestrelDevice::ReadTsf() {
   return (static_cast<uint64_t>(hi) << 32) | lo;
 }
 
+bool RtlKestrelDevice::StartBeacon(const uint8_t *beacon, size_t len,
+                                   int interval_tu) {
+  if (_tx_mgmt_ep == 0) {
+    _logger->error("Kestrel: StartBeacon before InitWrite");
+    return false;
+  }
+  if (beacon == nullptr || len == 0) {
+    _logger->error("Kestrel: StartBeacon empty beacon");
+    return false;
+  }
+  const uint16_t iv = interval_tu > 0 ? static_cast<uint16_t>(interval_tu) : 100;
+  /* OFDM 6M beacon (MAC_AX_OFDM6). bss_color 0 (no HE-BSS coloring). */
+  return _hal.start_beacon(beacon, static_cast<uint32_t>(len), iv,
+                           /*bss_color=*/0, kestrel::reg::MAC_AX_OFDM6);
+}
+
 devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   devourer::AdapterCaps c;
   c.supported = true;
@@ -379,9 +395,9 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   c.narrowband_ok = false;      /* 5/10 MHz re-clock not yet ported for Kestrel */
   c.fastretune_ok = false;      /* FastRetune not yet ported for Kestrel */
   c.hw_rx_timestamp = true;     /* rx freerun_cnt -> RxAtrib.tsfl */
-  /* hw_beacon_txtsf needs the AX beacon engine (StartBeacon, M5) — false for
-   * now. Kestrel's host-visible TX-egress timestamp rides USR_TX_RPT instead. */
-  c.hw_beacon_txtsf = false;
+  /* The AX beacon engine (StartBeacon) airs a HW-timed beacon with the live TSF
+   * inserted by the MAC at TX — on-air validated on the 8852BU. */
+  c.hw_beacon_txtsf = true;
   c.xtal_cap_default = _efuse.xtal_cap; /* efuse crystal-cap (no runtime trim wired) */
   devourer::set_standard_freq_ranges(c);
 

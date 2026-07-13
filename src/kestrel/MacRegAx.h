@@ -216,7 +216,63 @@ constexpr uint32_t B_AX_TXBCN_RPT_EN_P0 = 1u << 1;
 constexpr uint32_t B_AX_RXBCN_RPT_EN_P0 = 1u << 0;
 /* mac_ax_net_type. */
 constexpr uint8_t MAC_AX_NET_TYPE_NO_LINK = 0;
+constexpr uint8_t MAC_AX_NET_TYPE_ADHOC = 1;
 constexpr uint8_t MAC_AX_NET_TYPE_INFRA = 2;
+constexpr uint8_t MAC_AX_NET_TYPE_AP = 3;
+
+/* --- AP beacon-engine port timing (mac_port_init AP branch, mport.c). All
+ * band-0 port-0, verified against mac_reg_ax.h. Enables a HW-timed beacon at
+ * TBTT (bcn_interval TU). --- */
+constexpr uint32_t B_AX_TBTT_PROHIB_EN_P0 = 1u << 13; /* PORT_CFG_P0 BCN_PRCT */
+constexpr uint32_t B_AX_BRK_SETUP_P0 = 1u << 16;      /* PORT_CFG_P0 BCN_PRCT */
+constexpr uint16_t R_AX_TBTT_PROHIB_P0 = 0xC404;
+constexpr uint8_t B_AX_TBTT_SETUP_P0_SH = 0; /* BCN_SETUP */
+constexpr uint32_t B_AX_TBTT_SETUP_P0_MSK = 0xff;
+constexpr uint8_t B_AX_TBTT_HOLD_P0_SH = 16; /* BCN_HOLD_TIME */
+constexpr uint32_t B_AX_TBTT_HOLD_P0_MSK = 0xfff;
+constexpr uint16_t R_AX_BCN_AREA_P0 = 0xC408;
+constexpr uint8_t B_AX_BCN_MSK_AREA_P0_SH = 16;
+constexpr uint32_t B_AX_BCN_MSK_AREA_P0_MSK = 0xfff;
+constexpr uint16_t R_AX_BCNERLYINT_CFG_P0 = 0xC40C;
+constexpr uint8_t B_AX_BCNERLY_P0_SH = 0;
+constexpr uint32_t B_AX_BCNERLY_P0_MSK = 0xfff;
+constexpr uint16_t R_AX_TBTTERLYINT_CFG_P0 = 0xC40E;
+constexpr uint8_t B_AX_TBTTERLY_P0_SH = 0;
+constexpr uint32_t B_AX_TBTTERLY_P0_MSK = 0xfff;
+constexpr uint16_t R_AX_TBTT_AGG_P0 = 0xC412;
+constexpr uint8_t B_AX_TBTT_AGG_NUM_P0_SH = 8;
+constexpr uint32_t B_AX_TBTT_AGG_NUM_P0_MSK = 0xff;
+constexpr uint16_t R_AX_BCN_SPACE_CFG_P0 = 0xC414;
+constexpr uint8_t B_AX_BCN_SPACE_P0_SH = 0;
+constexpr uint32_t B_AX_BCN_SPACE_P0_MSK = 0xffff;
+constexpr uint16_t R_AX_PTCL_BSS_COLOR_0 = 0xC6A0;
+constexpr uint8_t B_AX_BSS_COLOR_P0_SH = 0;
+constexpr uint32_t B_AX_BSS_COLOR_P0_MSK = 0x3f;
+/* mport.h beacon-timing defaults. */
+constexpr uint32_t BCN_ERLY_DEF = 160;
+constexpr uint32_t BCN_SETUP_DEF = 4;
+constexpr uint32_t BCN_HOLD_DEF = 400;
+constexpr uint32_t BCN_MASK_DEF = 0;
+constexpr uint32_t TBTT_ERLY_DEF = 5;
+constexpr uint32_t TBTT_AGG_DEF = 1;
+
+/* BCN_UPD_V1 H2C (mac_send_bcn_h2c, beacon.c): CL_FR_EXCHG(5)/FUNC 0xf. Beacon
+ * body follows a 9-dword (36-byte) header. */
+constexpr uint8_t FWCMD_H2C_FUNC_BCN_UPD_V1 = 0xf;
+constexpr uint32_t BCN_UPD_V1_HDR_LEN = 36;
+constexpr uint8_t FWCMD_H2C_BCN_UPD_V1_PORT_SH = 0;      /* dw0 */
+constexpr uint32_t FWCMD_H2C_BCN_UPD_V1_PORT_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_BCN_UPD_V1_BAND_SH = 16;     /* dw0 */
+constexpr uint32_t FWCMD_H2C_BCN_UPD_V1_BAND_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_BCN_UPD_V1_MACID_SH = 0;     /* dw1 */
+constexpr uint32_t FWCMD_H2C_BCN_UPD_V1_MACID_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_BCN_UPD_V1_RATE_SH = 12;     /* dw1 */
+constexpr uint32_t FWCMD_H2C_BCN_UPD_V1_RATE_MSK = 0x1ff;
+constexpr uint32_t FWCMD_H2C_BCN_UPD_V1_ECSA_SUPPORT = 1u << 24; /* dw1 */
+constexpr uint8_t FWCMD_H2C_BCN_UPD_V1_NTX_PATH_EN_SH = 1; /* dw2 */
+constexpr uint32_t FWCMD_H2C_BCN_UPD_V1_NTX_PATH_EN_MSK = 0xf;
+constexpr uint8_t FWCMD_H2C_BCN_UPD_V1_PATH_MAP_A_SH = 5;  /* dw2 */
+constexpr uint32_t FWCMD_H2C_BCN_UPD_V1_PATH_MAP_A_MSK = 0x3;
 
 /* DLFW quota values (dle_mem_usb3_8852b DLFW entry; SCC wcpu override = 6). */
 constexpr uint16_t DLFW_WDE_FREE_PAGE = 0;   /* wde_size9 lnk_pge_num */

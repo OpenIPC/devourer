@@ -88,6 +88,13 @@ public:
   bool fw_upd_cctl_basic(uint8_t macid, uint8_t addr_cam_idx, uint16_t datarate,
                          uint8_t ntx_path_en, uint8_t path_map_a, bool bmc);
 
+  /* mac_send_bcn_h2c (beacon.c): H2C cat=MAC, class=FR_EXCHG, func=BCN_UPD_V1 —
+   * hand the firmware the full 802.11 beacon body; the fw stores it and airs it
+   * hardware-timed at each TBTT (the MAC inserts the live TSF into the beacon
+   * timestamp). 9-dword header (port/band, macid/rate, ntx_path) + body. */
+  bool fw_send_beacon(const uint8_t *body, uint32_t len, uint8_t macid,
+                      uint16_t rate_ax, uint8_t ntx_path_en, uint8_t path_map_a);
+
 private:
   /* Generic H2C over CH12: [WD 24B][fwcmd_hdr 8B][content]. */
   bool send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,

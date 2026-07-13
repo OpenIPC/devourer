@@ -274,6 +274,20 @@ private:
   void ptcl_init();
   void cmac_dma_init();
   void usb_rx_agg_cfg();
+  /* halbb RX gain cache (bb_gain_i, halbb_cfg_bb_gain_8852b): per-band per-path
+   * LNA/TIA gain-error, parsed once from array_mp_8852b_phy_reg_gain and applied
+   * to the band-specific BB registers on every channel set (halbb_set_gain_
+   * error_8852b). Without it the 5 GHz RX front-end runs at wrong gain and hears
+   * nothing (2.4 GHz tolerates the HW defaults; 5 GHz does not). Bands: 0=2.4G,
+   * 1=5G-L(36-64), 2=5G-M(100-144), 3=5G-H(149-177); 2 paths; 7 LNA + 2 TIA. */
+  static constexpr int kGainBandNum = 4;
+  static constexpr int kGainPathNum = 2;
+  int8_t _lna_gain[kGainBandNum][kGainPathNum][7] = {};
+  int8_t _tia_gain[kGainBandNum][kGainPathNum][2] = {};
+  bool _gain_cached = false;
+  static uint8_t gain_band_determine(uint8_t channel);
+  void init_gain_table(uint32_t rfe_type, uint32_t cut); /* populate the cache */
+  void set_gain_error(uint8_t channel); /* apply the cache to BB regs per band */
   void coex_mac_init();                    /* LTE/BT coex bring-up */
   bool write_lte(uint32_t offset, uint32_t val); /* LTE-coex indirect write */
   void mac_enable_imr(); /* DMAC+CMAC0 error-interrupt masks (SER) + err-IMR */

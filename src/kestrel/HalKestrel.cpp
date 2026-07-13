@@ -813,6 +813,94 @@ void HalKestrel::cmac_dma_init() {
   clr32(r::R_AX_RXDMA_CTRL_0, r::RX_FULL_MODE);
 }
 
+/* halbb_gain_band_determine_8852b: map a central channel to the gain-cache band
+ * index. 8852B is 2.4/5 GHz only (no 6G), so 4 bands suffice. */
+uint8_t HalKestrel::gain_band_determine(uint8_t channel) {
+  if (channel <= 14)
+    return 0;                    /* 2.4 GHz */
+  if (channel >= 36 && channel <= 64)
+    return 1;                    /* 5G Low */
+  if (channel >= 100 && channel <= 144)
+    return 2;                    /* 5G Mid */
+  if (channel >= 149 && channel <= 177)
+    return 3;                    /* 5G High */
+  return 1;                      /* default 5G Low (matches vendor) */
+}
+
+/* halbb_init_gain_table -> halbb_cfg_bb_gain_ax_8852b -> halbb_cfg_bb_gain_8852b.
+ * Walk array_mp_8852b_phy_reg_gain with the shared conditional-table walker and,
+ * for each matched entry, decode (cfg_type,band,path,type) from the pseudo-addr
+ * and store the gain bytes into the software cache. This writes ZERO hardware
+ * registers (the addr field is NOT a register address) — the cache is applied
+ * later per channel by set_gain_error. */
+void HalKestrel::init_gain_table(uint32_t rfe_type, uint32_t cut) {
+  auto decode = [&](uint32_t addr, uint32_t data) {
+    /* 0xf9..0xfe are host-delay pseudo-addresses in the vendor walker — no
+     * cache effect. */
+    if (addr >= 0xf9 && addr <= 0xfe)
+      return;
+    const uint8_t cfg_type = (addr >> 24) & 0xff;
+    const uint8_t band = (addr >> 16) & 0xff;
+    const uint8_t path = (addr >> 8) & 0xff;
+    const uint8_t type = addr & 0xff;
+    if (band >= kGainBandNum || path >= kGainPathNum)
+      return;
+    if (cfg_type != 0) /* cfg_type 0 = GAIN ERROR (LNA/TIA); 1 = RPL offset,
+                        * only refines RSSI reporting — skipped. */
+      return;
+    if (type == 0) {
+      for (int i = 0; i < 4; i++)
+        _lna_gain[band][path][i] = static_cast<int8_t>((data >> (8 * i)) & 0xff);
+    } else if (type == 1) {
+      for (int i = 0; i < 3; i++)
+        _lna_gain[band][path][4 + i] =
+            static_cast<int8_t>((data >> (8 * i)) & 0xff);
+    } else if (type == 2) {
+      for (int i = 0; i < 2; i++)
+        _tia_gain[band][path][i] =
+            static_cast<int8_t>((data >> (8 * i)) & 0xff);
+    }
+  };
+  apply_phy_table(array_mp_8852b_phy_reg_gain, array_mp_8852b_phy_reg_gain_len,
+                  rfe_type, cut, decode);
+  _gain_cached = true;
+}
+
+/* halbb_set_gain_error_8852b: write the cached per-band LNA/TIA gain into the
+ * band-specific BB registers (g-regs for 2.4 GHz, a-regs for 5 GHz). Called on
+ * every channel set — this is the RX front-end gain the 5 GHz path needs. */
+void HalKestrel::set_gain_error(uint8_t channel) {
+  if (!_gain_cached)
+    return;
+  const uint8_t band = gain_band_determine(channel);
+  const bool is_2g = (band == 0);
+  /* Register maps (path A/B x 7 LNA / 2 TIA), verbatim from the vendor. */
+  static const uint32_t lna_g[2][7] = {
+      {0x4678, 0x4678, 0x467C, 0x467C, 0x467C, 0x467C, 0x4680},
+      {0x475C, 0x475C, 0x4760, 0x4760, 0x4760, 0x4760, 0x4764}};
+  static const uint32_t lna_a[2][7] = {
+      {0x45DC, 0x45DC, 0x4660, 0x4660, 0x4660, 0x4660, 0x4664},
+      {0x4740, 0x4740, 0x4744, 0x4744, 0x4744, 0x4744, 0x4748}};
+  static const uint32_t lna_mask[7] = {0x00ff0000, 0xff000000, 0x000000ff,
+                                       0x0000ff00, 0x00ff0000, 0xff000000,
+                                       0x000000ff};
+  static const uint32_t tia_g[2][2] = {{0x4680, 0x4680}, {0x4764, 0x4764}};
+  static const uint32_t tia_a[2][2] = {{0x4664, 0x4664}, {0x4748, 0x4748}};
+  static const uint32_t tia_mask[2] = {0x00ff0000, 0xff000000};
+  for (int path = 0; path < kGainPathNum; path++) {
+    for (int i = 0; i < 7; i++) {
+      const uint32_t reg = is_2g ? lna_g[path][i] : lna_a[path][i];
+      bb_rmw(reg, lna_mask[i],
+             static_cast<uint32_t>(_lna_gain[band][path][i]) & 0xff);
+    }
+    for (int i = 0; i < 2; i++) {
+      const uint32_t reg = is_2g ? tia_g[path][i] : tia_a[path][i];
+      bb_rmw(reg, tia_mask[i],
+             static_cast<uint32_t>(_tia_gain[band][path][i]) & 0xff);
+    }
+  }
+}
+
 void HalKestrel::usb_rx_agg_cfg() {
   /* rx_agg_cfg_usb_8852b (MAC_AX_RX_AGG_MODE_USB): the RXAGG engine is what
    * DMAs RX frames onto the USB bulk-IN, so it MUST be enabled — USB mode is
@@ -1258,13 +1346,13 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   apply_phy_table(array_mp_8852b_phy_reg, array_mp_8852b_phy_reg_len, rfe_type,
                   cut, bb_emit);
   _fw.ofld_flush(KestrelFw::OfldFlush::BB); /* bitmap_en(false): 0x1a24 LC */
-  /* NB: array_mp_8852b_phy_reg_gain is NOT a register table — halbb_init_gain_
-   * table -> halbb_cfg_bb_gain_8852b decodes each entry as (cfg_type,band,path)
-   * and stores `data` into the SOFTWARE gain cache (bb_gain_i.lna_gain/
-   * tia_gain), writing zero hardware registers. Emitting it as cmd_ofld BB
-   * writes splats garbage into BB 0x0000.. and faults the fw (HALT_C2H
-   * 0x20000005). The cache only refines runtime AGC/RSSI reporting, so it is
-   * not needed for RX first light; a software gain-cache port is future work. */
+  /* array_mp_8852b_phy_reg_gain is NOT a register table — halbb_init_gain_table
+   * -> halbb_cfg_bb_gain_8852b decodes each entry as (cfg_type,band,path,type)
+   * and stores `data` into the SOFTWARE gain cache (writing zero hardware
+   * registers; emitting it as cmd_ofld faults the fw). Populate the cache here;
+   * set_gain_error applies it to the band-specific BB regs per channel — the
+   * 5 GHz RX front-end is deaf without it. */
+  init_gain_table(rfe_type, cut);
 
   /* halrf_wrf offload dispatch (halrf_interface.c:202; each RF reg appears
    * twice in the radio table): BIT(16) set = d-die -> a BB write to the
@@ -1520,6 +1608,11 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
   /* --- RF channel: full halrf_ctrl_ch_8852b (DAV+DDV x path A/B, with the
    * path-A synthesizer LCK lock). --- */
   rf_ctrl_ch(channel, is_2g);
+
+  /* --- RX gain-error: apply the cached per-band LNA/TIA gain to the BB
+   * front-end (halbb_set_gain_error_8852b). Part of the vendor per-channel BB
+   * setup; required for 5 GHz RX sensitivity. --- */
+  set_gain_error(channel);
 
   /* --- BB reset --- */
   bb_reset_all();

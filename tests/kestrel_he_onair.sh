@@ -48,15 +48,22 @@ for i in "$d":*; do [ -d "$i/net" ]&&BASE="$(ls "$i/net" 2>/dev/null|head -1)"; 
 [ -n "$BASE" ] || { echo "FAIL: no netdev for 8832CU (vendor module didn't bind)"; dmesg|tail -5; exit 2; }
 echo ">> sniffer netdev: $BASE"
 
-# monitor vif on the target channel
-ip link set "$BASE" down 2>/dev/null
-MON="mon0"
-if iw dev "$BASE" interface add "$MON" type monitor 2>/dev/null; then :; else
-  iw dev "$BASE" set type monitor 2>/dev/null && MON="$BASE"
-fi
-ip link set "$MON" up 2>/dev/null || { echo "FAIL: cannot bring up monitor $MON"; exit 2; }
-iw dev "$MON" set channel "$CH" 2>/dev/null || iw dev "$MON" set channel "$CH" HT20 2>/dev/null
-echo ">> monitor $MON up on ch$CH"
+# Convert the BASE iface itself to monitor type: down -> set type monitor -> up
+# -> set channel. This runs the driver's full MAC/PHY + firmware init via the
+# base iface open() AND makes that iface the channel controller. A separate mon0
+# vif over a downed base leaves rtw_cfg80211_monitor_if_open() (a no-op) as the
+# only "open", so the hardware stays uninitialised and the channel-set hardware
+# poll (rtw_set_chbw_cmd) spins forever, wedging the kernel. Requires the driver
+# monitor fixes (reference/rtl8852cu: cfg80211_register_netdevice deadlock + the
+# monitor-RX NULL-deref + CONFIG_WIFI_MONITOR=y). MON is the base iface itself.
+echo ">> setting $BASE to monitor type + channel $CH"
+timeout 8 ip link set "$BASE" down 2>/dev/null
+timeout 12 iw dev "$BASE" set type monitor 2>/dev/null || { echo "FAIL: set type monitor (rebuild driver with the monitor fixes)"; exit 2; }
+timeout 15 ip link set "$BASE" up 2>/dev/null
+sleep 3   # let the 8852c firmware download + hw init settle
+MON="$BASE"
+timeout 12 iw dev "$MON" set channel "$CH" 2>/dev/null || timeout 12 iw dev "$MON" set channel "$CH" HT20 2>/dev/null
+echo ">> monitor $MON up on ch$CH (base $BASE kept up for hw init)"
 
 # capture: SA, radiotap PHY type + data rate, for our canonical SA
 echo ">> tshark capturing on $MON for ${DUR}s"

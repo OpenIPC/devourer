@@ -237,6 +237,48 @@ void RtlKestrelDevice::handle_c2h(const uint8_t *payload, uint32_t len) {
   }
 }
 
+devourer::TxCaps RtlKestrelDevice::GetTxCaps() {
+  /* RTL8852B is 2T2R (halrf_8852b loops path A/B), 20/40/80 MHz. HE MCS via
+   * radiotap lands with the M5 HE grammar; STBC/LDPC/SGI supported. */
+  return devourer::tx_caps_for_chains(2, /*ldpc=*/true, /*sgi=*/true,
+                                      /*bw_max_mhz=*/80);
+}
+
+devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
+  devourer::AdapterCaps c;
+  c.supported = true;
+  c.generation = devourer::ChipGeneration::Kestrel;
+  c.transport = _device.is_usb() ? "usb" : "pcie";
+  c.tx = GetTxCaps();
+  c.txpwr = GetTxPowerCaps();
+  c.tx_chains = 2; /* 8852B/8852C are 2T2R */
+  c.rx_chains = 2;
+  c.per_chain_rssi = true; /* FrameParserKestrel fills per-chain rssi */
+  c.bw_mask = devourer::bw_mask_for_generation(c.generation);
+  c.per_packet_txpower = false; /* AX power is TSSI, not the J2 descriptor LUT */
+  c.narrowband_ok = false;      /* 5/10 MHz re-clock not yet ported for Kestrel */
+  c.fastretune_ok = false;      /* FastRetune not yet ported for Kestrel */
+  c.hw_rx_timestamp = true;     /* rx freerun_cnt -> RxAtrib.tsfl */
+  /* hw_beacon_txtsf needs the AX beacon engine (StartBeacon, M5) — false for
+   * now. Kestrel's host-visible TX-egress timestamp rides USR_TX_RPT instead. */
+  c.hw_beacon_txtsf = false;
+  c.xtal_cap_default = _efuse.xtal_cap; /* efuse crystal-cap (no runtime trim wired) */
+  devourer::set_standard_freq_ranges(c);
+
+  if (_variant == kestrel::ChipVariant::C8852C) {
+    c.chip_name = "RTL8852C";
+    c.marketing_names = "RTL8852CU/RTL8832CU";
+    c.chip_id = 0x52; /* R_AX_SYS_CHIPINFO die-id */
+    c.variant = "C8852C";
+  } else {
+    c.chip_name = "RTL8852B";
+    c.marketing_names = "RTL8852BU/RTL8832BU";
+    c.chip_id = 0x51;
+    c.variant = "C8852B";
+  }
+  return c;
+}
+
 bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
   if (_tx_mgmt_ep == 0) {
     _logger->error("Kestrel: send_packet before InitWrite (TX not up)");

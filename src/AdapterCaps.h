@@ -33,7 +33,13 @@
 
 namespace devourer {
 
-enum class ChipGeneration : uint8_t { Unknown = 0, Jaguar1, Jaguar2, Jaguar3 };
+enum class ChipGeneration : uint8_t {
+  Unknown = 0,
+  Jaguar1,
+  Jaguar2,
+  Jaguar3,
+  Kestrel /* Wi-Fi 6 / 802.11ax (RTL8852BU/8852CU) */
+};
 
 inline const char *generation_name(ChipGeneration g) {
   switch (g) {
@@ -43,6 +49,8 @@ inline const char *generation_name(ChipGeneration g) {
     return "jaguar2";
   case ChipGeneration::Jaguar3:
     return "jaguar3";
+  case ChipGeneration::Kestrel:
+    return "kestrel";
   default:
     return "unknown";
   }
@@ -64,7 +72,9 @@ constexpr uint8_t kBw80 = 1u << 4;
  * only dead enum values). Pure; unit-tested in tests/adapter_caps_selftest.cpp. */
 inline uint8_t bw_mask_for_generation(ChipGeneration g) {
   const uint8_t ac = kBw20 | kBw40 | kBw80;
-  return g == ChipGeneration::Jaguar1 ? ac
+  /* Kestrel (11ax) does 20/40/80; its narrowband re-clock is not yet ported,
+   * so it reports the plain AC set (not the J2/J3 5/10 MHz bits). */
+  return (g == ChipGeneration::Jaguar1 || g == ChipGeneration::Kestrel) ? ac
          : g == ChipGeneration::Unknown ? 0
                                         : (ac | kBw5 | kBw10);
 }

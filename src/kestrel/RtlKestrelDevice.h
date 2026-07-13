@@ -59,6 +59,11 @@ public:
   bool send_packet(const uint8_t *packet, size_t length) override;
   SelectedChannel GetSelectedChannel() override { return _channel; }
 
+  /* Static capability aggregate (resolved from chip identity; thread-safe,
+   * callable pre-Init). The demos emit it as the adapter.caps JSONL event. */
+  devourer::TxCaps GetTxCaps() override;
+  devourer::AdapterCaps GetAdapterCaps() override;
+
   /* AX-native identity read (no power-on needed — the identity block is alive
    * as soon as the USB function enumerates). kestrelprobe stage "id" and the
    * constructor's confirmation log both come through here. */

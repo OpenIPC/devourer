@@ -1028,6 +1028,98 @@ void HalKestrel::rf_write_dav(uint8_t path, uint8_t rf_addr, uint32_t val) {
   delay_us(5);
 }
 
+uint32_t HalKestrel::rf_read_dav(uint8_t path, uint8_t rf_addr) {
+  /* halbb_read_rf_reg_8852b_a: wait SI idle, post the read command to 0x378
+   * (path<<8|addr, 11-bit), wait r_done (0x174c[26]), read the value from
+   * 0x174c. */
+  for (int i = 0; i < 500; ++i) {
+    uint32_t st = _device.rtw_read32_wide(0x174c + BB_WIN);
+    if (!((st >> 24) & 0x1) && !((st >> 25) & 0x1))
+      break;
+    delay_us(1);
+  }
+  const uint32_t r_reg =
+      ((static_cast<uint32_t>(path & 0x7) << 8) | rf_addr) & 0x7ffu;
+  for (int i = 0; i < 500; ++i) {
+    _device.rtw_write32_wide(0x378 + BB_WIN,
+                             (_device.rtw_read32_wide(0x378 + BB_WIN) & ~0x7ffu) |
+                                 r_reg);
+    delay_us(2);
+    if ((_device.rtw_read32_wide(0x378 + BB_WIN) & 0x7ffu) == r_reg)
+      break;
+  }
+  for (int j = 0; j < 500; ++j) {
+    if ((_device.rtw_read32_wide(0x174c + BB_WIN) >> 26) & 0x1)
+      break;
+    delay_us(5);
+  }
+  return _device.rtw_read32_wide(0x174c + BB_WIN) & 0xfffffu;
+}
+
+uint32_t HalKestrel::rf_rrf(uint8_t path, uint32_t addr, uint32_t mask) {
+  const uint8_t a = static_cast<uint8_t>(addr & 0xff);
+  const uint32_t v = (addr & 0x10000u) ? rf_read(path, a) : rf_read_dav(path, a);
+  return (v & mask) >> ctz32(mask);
+}
+
+void HalKestrel::rf_wrf(uint8_t path, uint32_t addr, uint32_t mask,
+                        uint32_t val) {
+  const uint8_t a = static_cast<uint8_t>(addr & 0xff);
+  const bool ddv = (addr & 0x10000u) != 0; /* DDV=d-die window, else a-die */
+  uint32_t w = val & r::MASKRF;
+  if (mask != r::MASKRF) {
+    /* masked RMW: read the current value from the same die, splice the field. */
+    const uint32_t cur = ddv ? rf_read(path, a) : rf_read_dav(path, a);
+    w = (cur & ~mask) | ((val << ctz32(mask)) & mask);
+  }
+  if (ddv)
+    rf_write(path, a, w);
+  else
+    rf_write_dav(path, a, w);
+}
+
+void HalKestrel::rf_ctrl_ch(uint8_t channel, bool is_2g) {
+  /* halrf_ctrl_ch_8852b: ch_setting for DAV (a-die, reg 0x18) then DDV (d-die,
+   * reg 0x10018), each path A + B. DAV path A takes the synth-lock path
+   * (halrf_set_s0_arfc18). */
+  auto ch_setting = [&](uint8_t path, bool is_dav) {
+    const uint32_t reg18 = is_dav ? 0x18u : 0x10018u;
+    uint32_t rf18 = rf_rrf(path, reg18, r::MASKRF);
+    rf18 &= ~0x3e3ffu;   /* [17:16],[9:8],[7:0] */
+    rf18 |= channel;     /* channel */
+    if (!is_2g)
+      rf18 |= (1u << 16) | (1u << 8); /* 5G */
+    rf18 = (rf18 & 0xf0fffu) | (1u << 12);
+    if (path == 1 || !is_dav) {
+      rf_wrf(path, reg18, r::MASKRF, rf18);
+    } else {
+      /* halrf_set_s0_arfc18_8852b: 0xd3[8]=1, write RF18 (a-die), poll the
+       * synth LCK lock (0xb7[8]==0), 0xd3[8]=0. */
+      rf_wrf(0, 0xd3, 1u << 8, 0x1);
+      rf_wrf(0, 0x18, r::MASKRF, rf18);
+      bool locked = false;
+      for (int c = 0; c < 1000; ++c) {
+        if (rf_rrf(0, 0xb7, 1u << 8) == 0) {
+          locked = true;
+          break;
+        }
+        delay_us(1);
+      }
+      if (!locked)
+        _logger->warn("Kestrel RF: synth LCK lock timeout (path A ch{})",
+                      channel);
+      rf_wrf(0, 0xd3, 1u << 8, 0x0);
+    }
+    /* re-latch */
+    rf_wrf(path, 0xcf, 1u << 0, 0x0);
+    rf_wrf(path, 0xcf, 1u << 0, 0x1);
+  };
+  ch_setting(0, true); /* DAV path A (locked) */
+  ch_setting(1, true); /* DAV path B */
+  ch_setting(0, false); /* DDV path A */
+  ch_setting(1, false); /* DDV path B */
+}
+
 void HalKestrel::bb_reset_all() {
   /* halbb_bb_reset_all_8852b (BB regs over wIndex=1; 0xce40 is MAC/CMAC). */
   bb_rmw(0x2344, 1u << 31, 1); /* PD disable */
@@ -1074,21 +1166,9 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
   bb_rmw(0x700, 1u << 5, is_2g ? 1 : 0);
   bb_rmw(0x2344, 1u << 31, is_2g ? 0 : 1);
 
-  /* --- RF channel: RF18 setting for path A/B. halrf_ch_setting writes RF18
-   * to BOTH the a-die (DAV, serial via 0x370) and d-die (DDV, direct window),
-   * then re-latches via 0xcf. The synth needs the DAV write to lock. --- */
-  for (uint8_t path = 0; path < 2; ++path) {
-    uint32_t rf18 = rf_read(path, 0x18);
-    rf18 &= ~0x3e3ffu;      /* clear [17:16],[9:8],[7:0] */
-    rf18 |= channel;        /* channel */
-    if (!is_2g)
-      rf18 |= (1u << 16) | (1u << 8); /* 5G */
-    rf18 = (rf18 & 0xf0fffu) | (1u << 12);
-    rf_write_dav(path, 0x18, rf18); /* a-die synth */
-    rf_write(path, 0x18, rf18);     /* d-die */
-    rf_write(path, 0xcf, rf_read(path, 0xcf) & ~1u); /* re-latch */
-    rf_write(path, 0xcf, rf_read(path, 0xcf) | 1u);
-  }
+  /* --- RF channel: full halrf_ctrl_ch_8852b (DAV+DDV x path A/B, with the
+   * path-A synthesizer LCK lock). --- */
+  rf_ctrl_ch(channel, is_2g);
 
   /* --- BB reset --- */
   bb_reset_all();
@@ -1109,7 +1189,14 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
   const uint32_t rf18a = rf_read(0, 0x18);
   const uint32_t rf18b = rf_read(1, 0x18);
   const uint32_t rf00a = rf_read(0, 0x00); /* RF chip reg (radioa sets it) */
-  _logger->info("Kestrel RX-diag: RF00a=0x{:05x}", rf00a);
+  /* a-die serial reads (the synth): RF18/RF00 via 0x378/0x174c. If these show
+   * the channel-encoded RF18 and a nonzero RF00, the a-die is programmed. */
+  const uint32_t rf18a_dav = rf_read_dav(0, 0x18);
+  const uint32_t rf00a_dav = rf_read_dav(0, 0x00);
+  const uint32_t rf_c5 = rf_rrf(0, 0xc5, 1u << 15); /* synth lock indicator */
+  _logger->info("Kestrel RX-diag: RF00a(ddv)=0x{:05x} RF18a(dav)=0x{:05x} "
+                "RF00a(dav)=0x{:05x} synthLock(0xc5[15])={}",
+                rf00a, rf18a_dav, rf00a_dav, rf_c5);
   const uint32_t hci_fen = _device.rtw_read32(0x8380);        /* HCI_FUNC_EN */
   const uint8_t rcr = _device.rtw_read8(0xCE00);              /* RCR CH_EN */
   const uint32_t rxstate = _device.rtw_read32(0xCEF0);       /* RX_STATE_MON */

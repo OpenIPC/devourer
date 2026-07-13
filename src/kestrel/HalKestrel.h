@@ -107,6 +107,16 @@ private:
   /* DAV (a-die) RF write via the BB 0x370 serial command (full 20-bit only,
    * which is all the channel path needs). */
   void rf_write_dav(uint8_t path, uint8_t rf_addr, uint32_t val);
+  /* DAV (a-die) RF read via the BB 0x378 serial command + 0x174c readback. */
+  uint32_t rf_read_dav(uint8_t path, uint8_t rf_addr);
+  /* halbb_write/read_rf_reg_8852b: dispatch on BIT(16) of addr (DAV=a-die
+   * serial, DDV=d-die window) with a masked RMW; addr is the full RF address
+   * incl. the 0x10000 DDV flag. rf_rrf returns the masked+shifted field. */
+  void rf_wrf(uint8_t path, uint32_t addr, uint32_t mask, uint32_t val);
+  uint32_t rf_rrf(uint8_t path, uint32_t addr, uint32_t mask);
+  /* Full halrf channel setting (halrf_ctrl_ch_8852b): DAV+DDV x path A/B with
+   * the path-A synth lock (halrf_set_s0_arfc18: 0xd3[8]/poll 0xb7[8]). */
+  void rf_ctrl_ch(uint8_t channel, bool is_2g);
   void bb_reset_all();
   /* M2a DMAC sub-inits (trxcfg.c). */
   bool dle_init_nic();

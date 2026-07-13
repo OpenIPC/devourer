@@ -453,14 +453,24 @@ bool KestrelFw::poll_cmd_ofld_result() {
     if (_device.rtw_read8(r::R_AX_C2HREG_CTRL) & r::B_AX_C2HREG_TRIGGER) {
       const uint32_t d0 = _device.rtw_read32(r::R_AX_C2HREG_DATA0);
       const uint32_t d1 = _device.rtw_read32(r::R_AX_C2HREG_DATA1);
-      (void)_device.rtw_read32(r::R_AX_C2HREG_DATA2);
-      (void)_device.rtw_read32(r::R_AX_C2HREG_DATA3);
+      const uint32_t d2 = _device.rtw_read32(r::R_AX_C2HREG_DATA2);
+      const uint32_t d3 = _device.rtw_read32(r::R_AX_C2HREG_DATA3);
       uint8_t ctrl = _device.rtw_read8(r::R_AX_C2HREG_CTRL);
       _device.rtw_write8(r::R_AX_C2HREG_CTRL,
                          static_cast<uint8_t>(ctrl & ~r::B_AX_C2HREG_TRIGGER));
-      _logger->debug("Kestrel H2C: cmd_ofld result c2hreg d0=0x{:08x} "
-                     "d1=0x{:08x}",
-                     d0, d1);
+      /* chk_cmd_ofld_reg: dword0 carries RET[23:16] (0=ok) and the failing
+       * CMD_NUM[31:24]; dword1=offset, dword2=exp val, dword3=read val. A
+       * nonzero RET means the fw REJECTED a command in the batch (e.g. an
+       * unwritable/guarded register) — the batch did not fully apply. */
+      const uint8_t ret = static_cast<uint8_t>((d0 >> 16) & 0xff);
+      const uint8_t cmd_num = static_cast<uint8_t>((d0 >> 24) & 0xff);
+      if (ret != 0) {
+        _logger->warn("Kestrel H2C: cmd_ofld FW REJECT ret={} cmd_num={} "
+                      "offset=0x{:04x} exp=0x{:08x} read=0x{:08x}",
+                      ret, cmd_num, d1 & 0xffff, d2, d3);
+        return false;
+      }
+      _logger->debug("Kestrel H2C: cmd_ofld result ok (d0=0x{:08x})", d0);
       return true;
     }
     delay_us(r::CMD_OFLD_POLL_US);

@@ -26,7 +26,42 @@ constexpr uint8_t WIFI_SEQ_SH = 0;         /* wd_body dword3 [11:0] */
 constexpr uint32_t USERATE_SEL = 1u << 30; /* wd_info dword0 (force f_rate) */
 constexpr uint8_t DATARATE_SH = 16;        /* wd_info dword0 [24:16] */
 constexpr uint32_t DISDATAFB = 1u << 10;   /* wd_info dword0 (no rate FB) */
+constexpr uint32_t DATA_LDPC = 1u << 11;   /* wd_info dword0 */
+constexpr uint32_t DATA_STBC = 1u << 12;   /* wd_info dword0 */
+constexpr uint8_t GI_LTF_SH = 25;          /* wd_info dword0 [27:25] */
+constexpr uint8_t DATA_BW_SH = 28;         /* wd_info dword0 [29:28] */
 } /* namespace txd */
+
+/* Map a devourer MGN_* rate (RateDefinitions.h) to the AX_TXD_DATARATE encoding
+ * (rtw_general_def.h): legacy CCK 0..3 / OFDM 4..11, HT 0x80+mcs (MGN_MCS0 is
+ * already 0x80), VHT 0x100+(nss-1)*16+mcs. HE (0x180) lands in M5. */
+inline uint16_t mgn_to_ax_rate(uint8_t mgn) {
+  switch (mgn) {          /* legacy — MGN_* are rate*2 in 500kbps units */
+  case 0x02: return 0;    /* MGN_1M  -> CCK1  */
+  case 0x04: return 1;    /* MGN_2M  -> CCK2  */
+  case 0x0B: return 2;    /* MGN_5_5M-> CCK5.5*/
+  case 0x16: return 3;    /* MGN_11M -> CCK11 */
+  case 0x0C: return 4;    /* MGN_6M  -> OFDM6 */
+  case 0x12: return 5;    /* MGN_9M  */
+  case 0x18: return 6;    /* MGN_12M */
+  case 0x24: return 7;    /* MGN_18M */
+  case 0x30: return 8;    /* MGN_24M */
+  case 0x48: return 9;    /* MGN_36M */
+  case 0x60: return 10;   /* MGN_48M */
+  case 0x6C: return 11;   /* MGN_54M */
+  default: break;
+  }
+  /* MGN_VHT1SS_MCS0 = MGN_MCS0(0x80) + 32 = 0xA0; 10 MCS per NSS. */
+  constexpr uint8_t MGN_MCS0_V = 0x80, MGN_VHT1SS_MCS0_V = 0xA0;
+  if (mgn >= MGN_VHT1SS_MCS0_V) {
+    unsigned off = mgn - MGN_VHT1SS_MCS0_V;
+    unsigned nss = off / 10, mcs = off % 10;
+    return static_cast<uint16_t>(0x100 + nss * 16 + mcs);
+  }
+  if (mgn >= MGN_MCS0_V)
+    return mgn; /* HT: MGN_MCSn == AX 0x80+n */
+  return 4;     /* fallback 6M OFDM */
+}
 
 constexpr uint8_t MAC_AX_DMA_B0MG = 8;  /* band-0 mgmt DMA channel (CH_DMA) */
 constexpr uint8_t MAC_AX_MG0_SEL = 18;  /* band-0 mgmt qsel */
@@ -50,9 +85,18 @@ inline void txd_put_le32(uint8_t *p, uint32_t v) {
  * (0 = self), `seq` = 12-bit wifi sequence (only used when the WD drives the
  * seq; hw_seq_mode is left 0 so the frame's own seq stands). Returns the
  * [descriptor][frame] buffer for the bulk-OUT. */
+struct TxRate {
+  uint16_t rate = RATE_OFDM6; /* AX_TXD_DATARATE index (see mgn_to_ax_rate) */
+  uint8_t bw = 0;             /* AX_TXD_DATA_BW: 0=20 1=40 2=80 3=160 MHz */
+  uint8_t gi_ltf = 0;         /* AX_TXD_GI_LTF: 0=LGI 1=SGI (HT/VHT) */
+  bool ldpc = false;
+  bool stbc = false;
+};
+
 inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
-                                              uint32_t frame_len, uint16_t rate,
-                                              uint8_t macid, uint16_t seq) {
+                                              uint32_t frame_len,
+                                              const TxRate &r, uint8_t macid,
+                                              uint16_t seq) {
   std::vector<uint8_t> buf(TXD_MGNT_LEN + frame_len, 0);
   uint8_t *wd = buf.data();
 
@@ -70,11 +114,16 @@ inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
   txd_put_le32(wd + 12, static_cast<uint32_t>(seq & 0xfff) << txd::WIFI_SEQ_SH);
   /* dword4,5 = 0 */
 
-  /* wd_info dword0: force the rate (USERATE_SEL) + DATARATE + no fallback. */
+  /* wd_info dword0: force the rate (USERATE_SEL) + DATARATE + BW + GI/LTF +
+   * LDPC/STBC + no fallback. */
   uint8_t *wi = wd + WD_BODY_LEN;
-  txd_put_le32(wi + 0, txd::USERATE_SEL | txd::DISDATAFB |
-                           (static_cast<uint32_t>(rate & 0x1ff)
-                            << txd::DATARATE_SH));
+  txd_put_le32(wi + 0,
+               txd::USERATE_SEL | txd::DISDATAFB |
+                   (static_cast<uint32_t>(r.rate & 0x1ff) << txd::DATARATE_SH) |
+                   (static_cast<uint32_t>(r.bw & 0x3) << txd::DATA_BW_SH) |
+                   (static_cast<uint32_t>(r.gi_ltf & 0x7) << txd::GI_LTF_SH) |
+                   (r.ldpc ? txd::DATA_LDPC : 0) |
+                   (r.stbc ? txd::DATA_STBC : 0));
   /* wd_info dword1..5 = 0 */
 
   std::memcpy(wd + TXD_MGNT_LEN, frame, frame_len);

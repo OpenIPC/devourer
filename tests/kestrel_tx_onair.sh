@@ -10,7 +10,7 @@
 set -u
 cd "$(dirname "$0")/.."
 [ "$(id -u)" -eq 0 ] || { echo "FAIL: needs root"; exit 2; }
-CH=${1:-6}; DUR=${2:-8}
+CH=${1:-6}; DUR=${2:-8}; RATE=${3:-}   # RATE e.g. 6M, 24M, MCS7 (radiotap-driven)
 SA="57:42:75:05:d6:00"
 TX_ID="35bc:0108"      # RTL8852BU (devourer txdemo)
 RX_ID="0bda:8812"      # RTL8812AU (devourer rxdemo witness)
@@ -62,9 +62,10 @@ kill -0 "$RXPID" 2>/dev/null || { echo "FAIL: rxdemo witness died (see $RXLOG)";
 
 # --- TX: 8852BU devourer txdemo, canonical beacon ---
 unbind_kernel "$TX_ID"; sleep 1
-echo ">> devourer txdemo on the 8852BU for ${DUR}s (canonical beacon, 6M)"
-DEVOURER_VID=0x35bc DEVOURER_PID=0x0108 DEVOURER_CHANNEL=$CH \
-  DEVOURER_TX_GAP_US=2000 DEVOURER_LOG_LEVEL=info \
+TX_RATE=${RATE:-6M}
+echo ">> devourer txdemo on the 8852BU for ${DUR}s (canonical beacon, rate=$TX_RATE)"
+env DEVOURER_VID=0x35bc DEVOURER_PID=0x0108 DEVOURER_CHANNEL=$CH \
+  DEVOURER_TX_GAP_US=2000 DEVOURER_LOG_LEVEL=info DEVOURER_TX_RATE="$TX_RATE" \
   build/txdemo >"$TXLOG" 2>&1 &
 TXPID=$!
 sleep "$DUR"
@@ -77,8 +78,12 @@ TX_UP=$(grep -c "TX ready" "$TXLOG" 2>/dev/null || echo 0)
 TX_SENT=$(grep -cE "send_packet|tx\.|sent" "$TXLOG" 2>/dev/null || echo "?")
 HITS=$(grep -c '"ev":"rx.txhit"' "$RXLOG" 2>/dev/null || echo 0)
 echo "=================================================================="
-echo "M4 TX on-air (ch$CH, ${DUR}s):  txdemo TX-ready=$TX_UP"
+echo "M4 TX on-air (ch$CH, ${DUR}s, rate=$TX_RATE):  txdemo TX-ready=$TX_UP"
 echo "  8812AU witness rx.txhit (canonical SA $SA): $HITS"
+# Note: rx.txhit carries no rate field; a non-default rate that still yields
+# hits proves the rate-specific descriptor is valid + radiates. Confirming the
+# exact air rate needs an SDR or a rate-reporting monitor sniffer (no AR9271
+# on this rig).
 if [ "$TX_UP" -lt 1 ]; then
   echo "RESULT: TX bring-up FAILED — see $TXLOG"; tail -5 "$TXLOG"
 elif [ "${HITS:-0}" -gt 0 ]; then

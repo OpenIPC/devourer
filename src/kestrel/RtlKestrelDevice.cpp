@@ -8,8 +8,10 @@
 
 #include "FrameParserKestrel.h"
 #include "RadiotapPeek.h"
+#include "RateDefinitions.h" /* MGN_* rate enum */
 #include "RxPacket.h"
 #include "TxDescKestrel.h"
+#include "ieee80211_radiotap.h" /* radiotap iterator + field ids */
 
 namespace {
 
@@ -213,10 +215,53 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
   const uint8_t *frame = packet + rlen;
   const uint32_t flen = static_cast<uint32_t>(length - rlen);
 
-  /* First-light TX: fixed 6M OFDM, MACID 0 (self), no rate fallback. Radiotap-
-   * driven rate/BW selection lands in M5 with the HE rate grammar. */
-  auto buf = kestrel::build_mgnt_txdesc(frame, flen, kestrel::RATE_OFDM6, 0,
-                                        _tx_seq++ & 0xfff);
+  /* Radiotap-driven rate/BW: read RATE / MCS / VHT fields into a devourer MGN_*
+   * rate + BW + SGI + LDPC/STBC, then map to the AX descriptor encoding. A
+   * rate-less frame stays at 6M OFDM. HE rates land in M5. */
+  uint8_t mgn = MGN_6M;
+  kestrel::TxRate tr{}; /* defaults: 6M, 20MHz, LGI */
+  auto *rth = reinterpret_cast<struct ieee80211_radiotap_header *>(
+      const_cast<uint8_t *>(packet));
+  struct ieee80211_radiotap_iterator it;
+  if (ieee80211_radiotap_iterator_init(&it, rth, rlen, nullptr) == 0) {
+    while (ieee80211_radiotap_iterator_next(&it) == 0) {
+      switch (it.this_arg_index) {
+      case IEEE80211_RADIOTAP_RATE:
+        mgn = *it.this_arg;
+        break;
+      case IEEE80211_RADIOTAP_MCS: {
+        uint8_t flags = it.this_arg[1];
+        if ((flags & IEEE80211_RADIOTAP_MCS_BW_MASK) ==
+            IEEE80211_RADIOTAP_MCS_BW_40)
+          tr.bw = 1;
+        if (flags & 0x04)
+          tr.gi_ltf = 1; /* SGI */
+        if (it.this_arg[0] & IEEE80211_RADIOTAP_MCS_HAVE_MCS)
+          mgn = static_cast<uint8_t>(MGN_MCS0 + it.this_arg[2]);
+      } break;
+      case IEEE80211_RADIOTAP_VHT: {
+        uint8_t known = it.this_arg[0], flags = it.this_arg[2];
+        if ((known & 0x04) && (flags & 0x04))
+          tr.gi_ltf = 1;
+        if ((known & 0x01) && (flags & 0x01))
+          tr.stbc = true;
+        if (known & 0x40) {
+          uint8_t bw = it.this_arg[3] & 0x1f;
+          tr.bw = (bw >= 4) ? 2 : (bw >= 1) ? 1 : 0;
+        }
+        if (it.this_arg[8] & 0x01)
+          tr.ldpc = true;
+        unsigned mcs = (it.this_arg[4] >> 4) & 0xf, nss = it.this_arg[4] & 0xf;
+        if (nss >= 1 && nss <= 4 && mcs <= 9)
+          mgn = static_cast<uint8_t>(MGN_VHT1SS_MCS0 + (nss - 1) * 10 + mcs);
+      } break;
+      default:
+        break;
+      }
+    }
+  }
+  tr.rate = kestrel::mgn_to_ax_rate(mgn);
+  auto buf = kestrel::build_mgnt_txdesc(frame, flen, tr, 0, _tx_seq++ & 0xfff);
   int rc = _device.bulk_send_sync_ep(_tx_mgmt_ep, buf.data(),
                                      static_cast<int>(buf.size()), 1000);
   if (rc < 0 || static_cast<size_t>(rc) != buf.size()) {

@@ -919,12 +919,6 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
                   rfe_type, cut, bb_emit);
   _logger->info("Kestrel PHY: BB gain applied");
 
-  /* --- RF radio-A/B tables. On USB the radio is NOT reachable by direct
-   * register writes — the vendor programs every RF register through the
-   * firmware IO-offload H2C (halrf_wrf -> RTW_MAC_RF_CMD_OFLD), plus a bulk
-   * "radio-to-fw" page cache. The radio tables use the SAME headline/IF/CHK
-   * walker as the BB tables (apply_phy_table), not the disabled bit31/bit30
-   * variant. --- */
   /* Apply a radio table via DIRECT RF register writes (halbb_write_rf_reg_8852b,
    * the non-fwofld path). Each RF register appears TWICE in the table: once
    * without BIT(16) (d-die, written through the DDV BB window 0xe000/0xf000) and

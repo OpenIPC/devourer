@@ -46,7 +46,7 @@ sleep 6
 unbind_kernel "$TX_ID"; sleep 1
 echo ">> devourer txdemo on the 8852BU for ${DUR}s (TX_WITH_RX=thread, ch$CH)"
 env DEVOURER_VID=0x35bc DEVOURER_PID=0x0108 DEVOURER_CHANNEL=$CH \
-  DEVOURER_TX_GAP_US=2000 DEVOURER_LOG_LEVEL=info DEVOURER_TX_RATE=6M \
+  DEVOURER_TX_GAP_US=2000 DEVOURER_LOG_LEVEL=debug DEVOURER_TX_RATE=6M \
   DEVOURER_TX_WITH_RX=thread \
   build/txdemo >"$TXLOG" 2>&1 &
 TXPID=$!
@@ -60,8 +60,18 @@ TX_UP=$(grep -c "TX ready" "$TXLOG" 2>/dev/null); TX_UP=${TX_UP:-0}
 ENA=$(grep -c "USR_TX_RPT enable" "$TXLOG" 2>/dev/null); ENA=${ENA:-0}
 ENA_OK=$(grep -c "USR_TX_RPT enable.*sent" "$TXLOG" 2>/dev/null); ENA_OK=${ENA_OK:-0}
 RPTS=$(grep -c "tx.report" "$TXLOG" 2>/dev/null); RPTS=${RPTS:-0}
+# Diagnostic: count ALL packet-C2H (rpkt_type=10) that reached the host, and
+# show their cat/cls/func — the decisive evidence of whether the fw emits any
+# async packet-C2H at all (independent of the USR_TX_RPT-specific match).
+C2H_ALL=$(grep -c "c2h.rx" "$TXLOG" 2>/dev/null); C2H_ALL=${C2H_ALL:-0}
 echo "=================================================================="
 echo "USR_TX_RPT on-air (ch$CH, ${DUR}s):  txdemo TX-ready=$TX_UP  enable=$ENA (sent=$ENA_OK)"
+echo "  packet-C2H (any) received: $C2H_ALL"
+if [ "$C2H_ALL" -gt 0 ]; then
+  echo "  --- distinct C2H cat/cls/func seen ---"
+  grep -oE "c2h.rx: cat=[0-9]+ cls=0x[0-9a-f]+ func=0x[0-9a-f]+" "$TXLOG" \
+    | sort | uniq -c | head
+fi
 echo "  tx.report C2H reports received: $RPTS"
 if [ "$TX_UP" -lt 1 ]; then
   echo "RESULT: TX bring-up FAILED — see $TXLOG"; tail -6 "$TXLOG"

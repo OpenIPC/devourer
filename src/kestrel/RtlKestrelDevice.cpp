@@ -280,9 +280,17 @@ void RtlKestrelDevice::handle_c2h(const uint8_t *payload, uint32_t len) {
    * func[15:8] | seq (same layout as H2C). Route on class+func. */
   const uint32_t h0 = payload[0] | (payload[1] << 8) | (payload[2] << 16) |
                       (static_cast<uint32_t>(payload[3]) << 24);
+  const uint8_t cat = (h0 >> r::H2C_HDR_CAT_SH) & 0x3;
   const uint8_t cls = (h0 >> r::H2C_HDR_CLASS_SH) & 0x3f;
   const uint8_t func = (h0 >> r::H2C_HDR_FUNC_SH) & 0xff;
-  if (cls == r::FWCMD_H2C_CL_FW_OFLD &&
+  /* Diagnostic: every packet-C2H (rpkt_type=10) that reaches the host — proves
+   * on-hardware whether the fw emits async packet-C2H at all, and its cat/cls/
+   * func, independent of the specific report match below. */
+  _logger->debug("Kestrel c2h.rx: cat={} cls=0x{:02x} func=0x{:02x} len={}",
+                 cat, cls, func, len);
+  /* The C2H class enum differs from H2C: FW_OFLD is 0x1 for C2H (not the H2C
+   * 0x9). USR_TX_RPT_INFO arrives as cat=MAC, class=FW_OFLD(0x1), func=0x7. */
+  if (cls == r::FWCMD_C2H_CL_FW_OFLD &&
       func == r::FWCMD_C2H_FUNC_USR_TX_RPT_INFO) {
     kestrel::KestrelTxReport rpt;
     if (kestrel::parse_usr_tx_rpt(payload + 8, len - 8, rpt)) {

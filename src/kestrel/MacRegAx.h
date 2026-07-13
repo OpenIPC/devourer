@@ -499,6 +499,11 @@ constexpr uint8_t FWCMD_H2C_FUNC_USR_TX_RPT = 0x12;
 constexpr uint32_t B_H2C_USR_TX_RPT_RTP_START = 1u << 3;
 constexpr uint32_t B_H2C_USR_TX_RPT_BAND = 1u << 10;
 constexpr uint8_t H2C_USR_TX_RPT_PORT_SH = 11;
+/* NB: the C2H class enum is a SEPARATE numbering from the H2C class enum —
+ * FW_OFLD is 0x9 for H2C (above) but 0x1 for C2H (fwcmd_intf.h
+ * FWCMD_C2H_CL_FW_OFLD). A received USR_TX_RPT_INFO carries C2H class 0x1;
+ * matching it against the H2C 0x9 silently drops the report. */
+constexpr uint8_t FWCMD_C2H_CL_FW_OFLD = 0x1;
 constexpr uint8_t FWCMD_C2H_FUNC_USR_TX_RPT_INFO = 0x7;
 constexpr uint8_t USR_TX_RPT_MODE_PERIOD = 1;
 constexpr uint8_t USR_TX_RPT_MODE_LAST_PKT = 2;

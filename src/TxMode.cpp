@@ -33,6 +33,18 @@ TxParams tx_mode_to_params(const TxMode& m) {
       p.vht = true;
       break;
     }
+    case TxMode::Mode::HE: {
+      /* HE is Kestrel-only and flows env -> radiotap -> the Kestrel send_packet
+       * HE parser, NOT through TxParams. This branch is only reached if HE is
+       * set via SetTxMode on a non-HE (Jaguar) chip; map to the closest VHT
+       * rate as a best-effort fallback (MCS clamped to VHT's 0..9). */
+      uint8_t nss = m.he_nss < 1 ? 1 : (m.he_nss > 4 ? 4 : m.he_nss);
+      uint8_t mcs = m.he_mcs > 9 ? 9 : m.he_mcs;
+      p.fixed_rate =
+          static_cast<uint8_t>(MGN_VHT1SS_MCS0 + (nss - 1) * 10 + mcs);
+      p.vht = true;
+      break;
+    }
     case TxMode::Mode::Legacy:
     default:
       /* legacy_rate_500kbps already equals the MGN_* OFDM byte value. */

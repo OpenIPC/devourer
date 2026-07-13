@@ -299,6 +299,7 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
    * rate + BW + SGI + LDPC/STBC, then map to the AX descriptor encoding. A
    * rate-less frame stays at 6M OFDM. HE rates land in M5. */
   uint8_t mgn = MGN_6M;
+  bool he = false; /* HE rate set directly on tr.rate (no MGN_HE code) */
   kestrel::TxRate tr{}; /* defaults: 6M, 20MHz, LGI */
   auto *rth = reinterpret_cast<struct ieee80211_radiotap_header *>(
       const_cast<uint8_t *>(packet));
@@ -335,12 +336,49 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
         if (nss >= 1 && nss <= 4 && mcs <= 9)
           mgn = static_cast<uint8_t>(MGN_VHT1SS_MCS0 + (nss - 1) * 10 + mcs);
       } break;
+      case IEEE80211_RADIOTAP_HE: {
+        /* 802.11ax HE: six LE u16 words data1..data6. Read MCS/coding/STBC
+         * (data3), BW+GI+LTF (data5) and NSTS (data6); map to the AX rate
+         * (0x180 | (nss-1)<<4 | mcs) and the 3-bit GI/LTF code. */
+        auto rd16 = [&](int w) -> uint16_t {
+          return static_cast<uint16_t>(it.this_arg[w * 2] |
+                                       (it.this_arg[w * 2 + 1] << 8));
+        };
+        const uint16_t d3 = rd16(2), d5 = rd16(4), d6 = rd16(5);
+        const unsigned mcs =
+            (d3 & IEEE80211_RADIOTAP_HE_DATA3_DATA_MCS) >> 8;
+        unsigned nss = d6 & IEEE80211_RADIOTAP_HE_DATA6_NSTS;
+        if (nss < 1) nss = 1;
+        if (nss > 4) nss = 4;
+        if (mcs <= 11) {
+          tr.rate = static_cast<uint16_t>(0x180 + (nss - 1) * 16 + mcs);
+          he = true;
+        }
+        if (d3 & IEEE80211_RADIOTAP_HE_DATA3_CODING) tr.ldpc = true;
+        if (d3 & IEEE80211_RADIOTAP_HE_DATA3_STBC) tr.stbc = true;
+        const unsigned bw = d5 & IEEE80211_RADIOTAP_HE_DATA5_DATA_BW_RU_ALLOC;
+        tr.bw = static_cast<uint8_t>(bw > 2 ? 2 : bw); /* 0=20 1=40 2=80 */
+        const unsigned gi =
+            (d5 & IEEE80211_RADIOTAP_HE_DATA5_GI) >>
+            IEEE80211_RADIOTAP_HE_DATA5_GI_SHIFT;
+        const unsigned ltf =
+            (d5 & IEEE80211_RADIOTAP_HE_DATA5_LTF_SIZE) >>
+            IEEE80211_RADIOTAP_HE_DATA5_LTF_SIZE_SHIFT;
+        /* radiotap (GI,LTF) -> enum rtw_gi_ltf 3-bit code. GI 0=0.8 1=1.6 2=3.2;
+         * LTF 1=1x 2=2x 3=4x. Defaults to 2xLTF+0.8us (code 3). */
+        uint8_t code = 3;
+        if (ltf == 3) code = (gi == 2) ? 0 : 1;        /* 4x: 3.2->0, 0.8->1 */
+        else if (ltf == 1) code = (gi == 1) ? 4 : 5;   /* 1x: 1.6->4, 0.8->5 */
+        else code = (gi == 1) ? 2 : 3;                 /* 2x: 1.6->2, 0.8->3 */
+        tr.gi_ltf = code;
+      } break;
       default:
         break;
       }
     }
   }
-  tr.rate = kestrel::mgn_to_ax_rate(mgn);
+  if (!he)
+    tr.rate = kestrel::mgn_to_ax_rate(mgn);
   /* Route by 802.11 frame type: data frames ride the AC0 queue (BULKOUTID3) so
    * they exercise the data power-by-rate path; mgmt/beacon uses the MG0 queue
    * (BULKOUTID0). Falls back to the mgmt ep if the data ep was not resolved. */

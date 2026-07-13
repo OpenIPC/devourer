@@ -20,7 +20,7 @@
 namespace devourer {
 
 struct TxMode {
-  enum class Mode { Legacy, HT, VHT };
+  enum class Mode { Legacy, HT, VHT, HE };
   Mode mode = Mode::Legacy;
 
   /* Legacy OFDM rate in 500 kbps units (the radiotap RATE convention, which is
@@ -35,7 +35,15 @@ struct TxMode {
   uint8_t vht_mcs = 0;
   uint8_t vht_nss = 1;
 
-  /* Bandwidth in MHz. Legacy is always 20; HT honours 20/40; VHT 20/40/80. */
+  /* HE per 802.11ax (Kestrel only): mcs 0..11, nss 1..4. `he_gi_ltf` is the
+   * chip's 3-bit GI/LTF code (enum rtw_gi_ltf): 0=4xLTF+3.2us, 1=4xLTF+0.8us,
+   * 2=2xLTF+1.6us, 3=2xLTF+0.8us, 4=1xLTF+1.6us, 5=1xLTF+0.8us. Default 3
+   * (2xLTF + 0.8us, the common HE-SU choice). */
+  uint8_t he_mcs = 0;
+  uint8_t he_nss = 1;
+  uint8_t he_gi_ltf = 3;
+
+  /* Bandwidth in MHz. Legacy is always 20; HT honours 20/40; VHT/HE 20/40/80. */
   uint8_t bw_mhz = 20;
 
   bool sgi = false;

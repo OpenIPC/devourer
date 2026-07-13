@@ -513,6 +513,19 @@ target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
 
+# Headless round-trip guard for the 802.11ax HE TX radiotap path
+# (src/RadiotapBuilder.cpp build_he + the shared Radiotap.c field-23 size entry
+# + src/ieee80211_radiotap.h HE masks): parse an HE spec -> build -> iterate ->
+# decode, mirroring the Kestrel send_packet HE parser. Generation-neutral core.
+add_executable(HeRadiotapSelftest
+    tests/he_radiotap_selftest.cpp
+)
+target_link_libraries(HeRadiotapSelftest PRIVATE devourer)
+target_include_directories(HeRadiotapSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_test(NAME he_radiotap COMMAND HeRadiotapSelftest)
+
 # Headless guard for the Kestrel (11ax) RX descriptor parser
 # (src/kestrel/FrameParserKestrel.h): rxd field extraction + aggregate walk.
 # On-air decode is hardware-validated once M2a lands. Compiled only when a

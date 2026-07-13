@@ -398,10 +398,12 @@ bool KestrelFw::fw_upd_cctl_basic(uint8_t macid, uint8_t addr_cam_idx,
   /* dword0: macid | OP(RMW) */
   put_le32(c + 0, (macid & r::FWCMD_H2C_CCTLINFO_UD_MACID_MSK) |
                       r::FWCMD_H2C_CCTLINFO_UD_OP);
-  /* dword1: datarate | disrtsfb | disdatafb */
+  /* dword1: datarate | disrtsfb | disdatafb | MGQ/ACQ report-enable (so the fw
+   * emits USR_TX_RPT C2H for mgmt + data frames — the #236 egress timestamp). */
   const uint32_t dw1 =
       sw(datarate, r::FWCMD_H2C_CCTRL_DATARATE_MSK, r::FWCMD_H2C_CCTRL_DATARATE_SH) |
-      r::FWCMD_H2C_CCTRL_DISRTSFB | r::FWCMD_H2C_CCTRL_DISDATAFB;
+      r::FWCMD_H2C_CCTRL_DISRTSFB | r::FWCMD_H2C_CCTRL_DISDATAFB |
+      r::FWCMD_H2C_CCTRL_MGQ_RPT_EN | r::FWCMD_H2C_CCTRL_ACQ_RPT_EN;
   put_le32(c + 4, dw1);
   /* dword5: bmc */
   const uint32_t dw5 = bmc ? r::FWCMD_H2C_CCTRL_BMC : 0;
@@ -421,7 +423,8 @@ bool KestrelFw::fw_upd_cctl_basic(uint8_t macid, uint8_t addr_cam_idx,
   put_le32(c + 36 /* dword9 <- dword1 */,
            sw(r::FWCMD_H2C_CCTRL_DATARATE_MSK, r::FWCMD_H2C_CCTRL_DATARATE_MSK,
               r::FWCMD_H2C_CCTRL_DATARATE_SH) |
-               r::FWCMD_H2C_CCTRL_DISRTSFB | r::FWCMD_H2C_CCTRL_DISDATAFB);
+               r::FWCMD_H2C_CCTRL_DISRTSFB | r::FWCMD_H2C_CCTRL_DISDATAFB |
+               r::FWCMD_H2C_CCTRL_MGQ_RPT_EN | r::FWCMD_H2C_CCTRL_ACQ_RPT_EN);
   put_le32(c + 52 /* dword13 <- dword5 */, r::FWCMD_H2C_CCTRL_BMC);
   put_le32(c + 56 /* dword14 <- dword6 */,
            sw(r::FWCMD_H2C_CCTRL_NTX_PATH_EN_MSK,

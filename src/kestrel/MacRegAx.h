@@ -478,6 +478,11 @@ constexpr uint8_t FWCMD_H2C_CCTRL_DATARATE_SH = 0; /* dword1 */
 constexpr uint32_t FWCMD_H2C_CCTRL_DATARATE_MSK = 0x1ff;
 constexpr uint32_t FWCMD_H2C_CCTRL_DISRTSFB = 1u << 25;  /* dword1 */
 constexpr uint32_t FWCMD_H2C_CCTRL_DISDATAFB = 1u << 26; /* dword1 */
+/* Per-queue TX-report enables (dword1). Without the queue's *_rpt_en bit the fw
+ * emits no USR_TX_RPT C2H for frames on that queue — the host-visible TX-egress
+ * timestamp (#236) never fires. mgmt/beacon rides MGQ, data rides ACQ. */
+constexpr uint32_t FWCMD_H2C_CCTRL_ACQ_RPT_EN = 1u << 20; /* dword1 */
+constexpr uint32_t FWCMD_H2C_CCTRL_MGQ_RPT_EN = 1u << 21; /* dword1 */
 constexpr uint32_t FWCMD_H2C_CCTRL_BMC = 1u << 3;        /* dword5 */
 constexpr uint8_t FWCMD_H2C_CCTRL_NTX_PATH_EN_SH = 16;   /* dword6 */
 constexpr uint32_t FWCMD_H2C_CCTRL_NTX_PATH_EN_MSK = 0xf;

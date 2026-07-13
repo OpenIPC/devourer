@@ -1312,6 +1312,14 @@ void HalKestrel::rf_ctrl_ch(uint8_t channel, bool is_2g) {
   ch_setting(1, false); /* DDV path B */
 }
 
+void HalKestrel::set_txpwr_dbm(int16_t dbm_q2) {
+  /* halbb_set_txpwr_dbm_8852b (halbb_8852b_api.c): arm fixed-dBm mode, then
+   * write the s(9,2) target into the 9-bit field. bb_rmw shifts the value into
+   * the masked field. */
+  bb_rmw(0x09a4, 1u << 16, 1);
+  bb_rmw(0x4594, 0x7fc00000u, static_cast<uint32_t>(dbm_q2) & 0x1ffu);
+}
+
 void HalKestrel::bb_reset_all() {
   /* halbb_bb_reset_all_8852b (BB regs over wIndex=1; 0xce40 is MAC/CMAC). */
   bb_rmw(0x2344, 1u << 31, 1); /* PD disable */
@@ -1365,8 +1373,13 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
   /* --- BB reset --- */
   bb_reset_all();
 
-  _logger->info("Kestrel PHY: tuned to ch{} bw20 ({})", channel,
-                is_2g ? "2.4G" : "5G");
+  /* Force a fixed BB TX power (halbb_set_txpwr_dbm_8852b). Without it the PHY
+   * runs at the phy_reg-table default, which is weak on 5 GHz. Default 20 dBm;
+   * overridable via DEVOURER_TX_PWR (set_default_txpwr_dbm). */
+  set_txpwr_dbm(_txpwr_dbm_q2);
+
+  _logger->info("Kestrel PHY: tuned to ch{} bw20 ({}) — TXpwr={}dBm", channel,
+                is_2g ? "2.4G" : "5G", _txpwr_dbm_q2 / 4);
 
   /* Diagnostic readback: confirm the writes landed and where RX stands.
    * 0x4004 was set to 0xCA014000 by the phy_reg table — a round-trip probe of

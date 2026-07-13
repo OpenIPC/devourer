@@ -119,6 +119,21 @@ public:
    * Must run after phy_bb_rf_init. */
   bool set_channel(uint8_t channel, ChannelWidth_t bw);
 
+  /* halbb_set_txpwr_dbm_8852b: force a fixed BB TX power target (overriding the
+   * per-rate/TSSI tables — the pragmatic injection-driver model, like the
+   * Jaguar SetTxPowerIndexOverride). `dbm_q2` is s(9,2): power in 0.25-dB units
+   * (e.g. 20 dBm = 80). Two BB writes: 0x09a4[16]=1 arms fixed-dBm mode, then
+   * 0x4594[30:22]=target. Devourer otherwise sets no TX power at all, leaving it
+   * at the phy_reg-table default (adequate on 2.4 GHz, weak on 5 GHz). */
+  void set_txpwr_dbm(int16_t dbm_q2);
+
+  /* Session default TX power (dBm) applied at every set_channel. Override via
+   * DEVOURER_TX_PWR (interpreted as whole dBm on Kestrel — distinct from the
+   * Jaguar2 TXAGC-index meaning). Default 20 dBm. */
+  void set_default_txpwr_dbm(int dbm) {
+    _txpwr_dbm_q2 = static_cast<int16_t>(dbm * 4);
+  }
+
   /* M4/M5 — enable the per-user TX report so the fw emits C2H USR_TX_RPT_INFO
    * with the freerun TX-egress timestamps. Call after the TX bring-up; the
    * reports are received + parsed in the RX loop. */
@@ -244,6 +259,7 @@ private:
   Logger_t _logger;
   ChipVariant _variant;
   KestrelFw _fw; /* persistent: owns the CH12 H2C transport + IO-offload */
+  int16_t _txpwr_dbm_q2 = 20 * 4; /* fixed BB TX power, s(9,2); 20 dBm default */
 };
 
 } /* namespace kestrel */

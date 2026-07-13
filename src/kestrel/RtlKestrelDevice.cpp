@@ -58,6 +58,10 @@ RtlKestrelDevice::RtlKestrelDevice(RtlAdapter device, Logger_t logger,
   else
     _logger->info("Kestrel: die-id 0x{:02x} ({}), cut {}", info.die_id,
                   die_name(info.die_id), info.cut);
+  /* DEVOURER_TX_PWR on Kestrel = the fixed BB TX power in whole dBm (distinct
+   * from the Jaguar2 TXAGC-index meaning). Applied at every set_channel. */
+  if (_cfg.tx.power_index.has_value())
+    _hal.set_default_txpwr_dbm(*_cfg.tx.power_index);
 }
 
 RtlKestrelDevice::~RtlKestrelDevice() {

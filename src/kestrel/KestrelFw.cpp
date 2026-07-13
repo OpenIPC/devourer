@@ -189,9 +189,14 @@ bool KestrelFw::disable_cpu() {
   clr32(r::R_AX_WCPU_FW_CTRL,
         r::B_AX_WCPU_FWDL_EN | r::B_AX_H2C_PATH_RDY | r::B_AX_FWDL_PATH_RDY);
   clr32(r::R_AX_SYS_CLK_CTRL, r::B_AX_CPU_CLK_EN);
-  /* 8852B needs the APB-wrap reset (resets CPU-local CR incl. WDT). */
-  clr32(r::R_AX_PLATFORM_ENABLE, r::B_AX_APB_WRAP_EN);
-  set32(r::R_AX_PLATFORM_ENABLE, r::B_AX_APB_WRAP_EN);
+  /* APB-wrap reset (resets CPU-local CR incl. WDT) — FWDL_IS_RESET_APB_WRAP is
+   * 8852B/8851B/8852BT ONLY. On the 8852C disabling the WCPU already disables
+   * the WDT, and an extra APB-wrap reset leaves the WCPU bootrom from signalling
+   * H2C_PATH_RDY (the FWDL phase-0 stall), so it must be skipped. */
+  if (_variant != ChipVariant::C8852C) {
+    clr32(r::R_AX_PLATFORM_ENABLE, r::B_AX_APB_WRAP_EN);
+    set32(r::R_AX_PLATFORM_ENABLE, r::B_AX_APB_WRAP_EN);
+  }
   return true;
 }
 

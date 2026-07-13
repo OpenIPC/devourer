@@ -71,6 +71,23 @@ public:
   bool fw_role_maintain(uint8_t macid, uint8_t self_role, uint8_t wifi_role,
                         uint8_t upd_mode, uint8_t band, uint8_t port);
 
+  /* mac_upd_addr_cam (addr_cam.c): H2C cat=MAC, class=ADDR_CAM_UPDATE,
+   * func=ADDRCAM_INFO — programs the address-CAM entry (BSSID+SMA+TMA+macid+
+   * net_type) for `macid`. `self_mac` is the 6-byte transmitter address (our
+   * SA). `net_type` = mac_ax_net_type. `addr_cam_idx`/`bssid_cam_idx` index the
+   * CAM entries (0 for the first/self STA). The frame's SA/BSSID resolve from
+   * this entry; without it the CMAC cannot build the PPDU. */
+  bool fw_upd_addr_cam(uint8_t macid, const uint8_t self_mac[6], uint8_t net_type,
+                       uint8_t addr_cam_idx, uint8_t bssid_cam_idx);
+
+  /* mac_upd_cctl_info (tblupd.c): H2C cat=MAC, class=FR_EXCHG, func=CCTLINFO_UD
+   * — the per-MACID CMAC control table. Sets the default TX rate, the TX
+   * antenna path enable (ntx_path_en — without it a frame has NO antenna and
+   * never airs), the addr-cam index, and disables rate fallback. `bmc` marks a
+   * broadcast/multicast MACID. Read-modify-write (operation=1). */
+  bool fw_upd_cctl_basic(uint8_t macid, uint8_t addr_cam_idx, uint16_t datarate,
+                         uint8_t ntx_path_en, uint8_t path_map_a, bool bmc);
+
 private:
   /* Generic H2C over CH12: [WD 24B][fwcmd_hdr 8B][content]. */
   bool send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,

@@ -324,6 +324,125 @@ bool KestrelFw::fw_role_maintain(uint8_t macid, uint8_t self_role,
   return ok;
 }
 
+bool KestrelFw::fw_upd_addr_cam(uint8_t macid, const uint8_t self_mac[6],
+                                uint8_t net_type, uint8_t addr_cam_idx,
+                                uint8_t bssid_cam_idx) {
+  /* fill_addr_cam_info + fill_bssid_cam_info (addr_cam.c). 15-dword body
+   * (fwcmd_addrcam_info): dword0 rsvd, dword7 rsvd. mask_sel = NO_MSK, so both
+   * hashes are the full-6-byte XOR (default case). len = ADDR_CAM_ENT_LONG_SIZE
+   * (8852B), b_len = BSSID_CAM_ENT_SIZE. bssid = self_mac (self/NO_LINK STA). */
+  uint8_t sma_hash = 0, tma_hash = 0;
+  for (int i = 0; i < 6; i++) {
+    sma_hash ^= self_mac[i];
+    tma_hash ^= self_mac[i];
+  }
+  uint8_t c[60] = {0};
+  auto sw = [](uint32_t v, uint32_t msk, uint32_t sh) {
+    return (v & msk) << sh;
+  };
+  /* dword1: idx / offset / len */
+  put_le32(c + 4, sw(addr_cam_idx, 0xff, 0) | sw(0, 0xff, 8) |
+                      sw(r::ADDR_CAM_ENT_LONG_SIZE, 0xff, 16));
+  /* dword2: valid / net_type / bcn_hit_cond / hit_rule / addr_mask / mask_sel /
+   * sma_hash / tma_hash */
+  put_le32(c + 8, 0x1u /* VALID BIT(0) */ | sw(net_type, 0x3, 1) |
+                      sw(r::MAC_AX_NO_MSK, 0x3, 14) | sw(sma_hash, 0xff, 16) |
+                      sw(tma_hash, 0xff, 24));
+  /* dword3: bssid_cam_idx */
+  put_le32(c + 12, sw(bssid_cam_idx, 0x3f, 0));
+  /* dword4: sma[0..3] */
+  put_le32(c + 16, sw(self_mac[0], 0xff, 0) | sw(self_mac[1], 0xff, 8) |
+                       sw(self_mac[2], 0xff, 16) | sw(self_mac[3], 0xff, 24));
+  /* dword5: sma[4],sma[5],tma[0],tma[1] */
+  put_le32(c + 20, sw(self_mac[4], 0xff, 0) | sw(self_mac[5], 0xff, 8) |
+                       sw(self_mac[0], 0xff, 16) | sw(self_mac[1], 0xff, 24));
+  /* dword6: tma[2..5] */
+  put_le32(c + 24, sw(self_mac[2], 0xff, 0) | sw(self_mac[3], 0xff, 8) |
+                       sw(self_mac[4], 0xff, 16) | sw(self_mac[5], 0xff, 24));
+  /* dword7 rsvd (c+28) */
+  /* dword8: macid / port_int / tsf_sync / tgt_ind / frm_tgt_ind (all 0 here) */
+  put_le32(c + 32, sw(macid, 0xff, 0));
+  /* dword9..11: aid12 / sec — all 0 */
+  /* dword12: bssid cam idx / offset / len */
+  put_le32(c + 48, sw(bssid_cam_idx, 0xff, 0) | sw(0, 0xff, 8) |
+                       sw(r::BSSID_CAM_ENT_SIZE, 0xff, 16));
+  /* dword13: b_valid / b_msk(NO_MSK) / bss_color / bssid[0..1] */
+  put_le32(c + 52, 0x1u /* B_VALID BIT(0) */ | sw(r::MAC_AX_NO_MSK, 0x3f, 2) |
+                       sw(0, 0x3f, 8) | sw(self_mac[0], 0xff, 16) |
+                       sw(self_mac[1], 0xff, 24));
+  /* dword14: bssid[2..5] */
+  put_le32(c + 56, sw(self_mac[2], 0xff, 0) | sw(self_mac[3], 0xff, 8) |
+                       sw(self_mac[4], 0xff, 16) | sw(self_mac[5], 0xff, 24));
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_ADDR_CAM_UPDATE,
+                         r::FWCMD_H2C_FUNC_ADDRCAM_INFO, c, sizeof(c));
+  _logger->info("Kestrel: upd_addr_cam (macid={} net_type={} a_idx={} b_idx={} "
+                "sma={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}) -> {}",
+                macid, net_type, addr_cam_idx, bssid_cam_idx, self_mac[0],
+                self_mac[1], self_mac[2], self_mac[3], self_mac[4], self_mac[5],
+                ok ? "sent" : "FAILED");
+  return ok;
+}
+
+bool KestrelFw::fw_upd_cctl_basic(uint8_t macid, uint8_t addr_cam_idx,
+                                  uint16_t datarate, uint8_t ntx_path_en,
+                                  uint8_t path_map_a, bool bmc) {
+  /* mac_upd_cctl_info (tblupd.c). 17-dword body: dword0 = macid|OP, dwords1-8 =
+   * values, dwords9-16 = masks (read-modify-write, operation=1). We touch only
+   * the fields needed for a basic mgmt-frame TX: datarate + disable-fallback
+   * (dword1), bmc (dword5), ntx_path_en + path_map_a (dword6), addr_cam_index
+   * (dword7); the matching mask dwords are 9/13/14/15. */
+  uint8_t c[68] = {0};
+  auto sw = [](uint32_t v, uint32_t msk, uint32_t sh) {
+    return (v & msk) << sh;
+  };
+  /* dword0: macid | OP(RMW) */
+  put_le32(c + 0, (macid & r::FWCMD_H2C_CCTLINFO_UD_MACID_MSK) |
+                      r::FWCMD_H2C_CCTLINFO_UD_OP);
+  /* dword1: datarate | disrtsfb | disdatafb */
+  const uint32_t dw1 =
+      sw(datarate, r::FWCMD_H2C_CCTRL_DATARATE_MSK, r::FWCMD_H2C_CCTRL_DATARATE_SH) |
+      r::FWCMD_H2C_CCTRL_DISRTSFB | r::FWCMD_H2C_CCTRL_DISDATAFB;
+  put_le32(c + 4, dw1);
+  /* dword5: bmc */
+  const uint32_t dw5 = bmc ? r::FWCMD_H2C_CCTRL_BMC : 0;
+  put_le32(c + 20, dw5);
+  /* dword6: ntx_path_en | path_map_a */
+  const uint32_t dw6 =
+      sw(ntx_path_en, r::FWCMD_H2C_CCTRL_NTX_PATH_EN_MSK,
+         r::FWCMD_H2C_CCTRL_NTX_PATH_EN_SH) |
+      sw(path_map_a, r::FWCMD_H2C_CCTRL_PATH_MAP_A_MSK,
+         r::FWCMD_H2C_CCTRL_PATH_MAP_A_SH);
+  put_le32(c + 24, dw6);
+  /* dword7: addr_cam_index */
+  const uint32_t dw7 = sw(addr_cam_idx, r::FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_MSK,
+                          r::FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_SH);
+  put_le32(c + 28, dw7);
+  /* mask dwords (mirror value dwords): full masks for every field written. */
+  put_le32(c + 36 /* dword9 <- dword1 */,
+           sw(r::FWCMD_H2C_CCTRL_DATARATE_MSK, r::FWCMD_H2C_CCTRL_DATARATE_MSK,
+              r::FWCMD_H2C_CCTRL_DATARATE_SH) |
+               r::FWCMD_H2C_CCTRL_DISRTSFB | r::FWCMD_H2C_CCTRL_DISDATAFB);
+  put_le32(c + 52 /* dword13 <- dword5 */, r::FWCMD_H2C_CCTRL_BMC);
+  put_le32(c + 56 /* dword14 <- dword6 */,
+           sw(r::FWCMD_H2C_CCTRL_NTX_PATH_EN_MSK,
+              r::FWCMD_H2C_CCTRL_NTX_PATH_EN_MSK,
+              r::FWCMD_H2C_CCTRL_NTX_PATH_EN_SH) |
+               sw(r::FWCMD_H2C_CCTRL_PATH_MAP_A_MSK,
+                  r::FWCMD_H2C_CCTRL_PATH_MAP_A_MSK,
+                  r::FWCMD_H2C_CCTRL_PATH_MAP_A_SH));
+  put_le32(c + 60 /* dword15 <- dword7 */,
+           sw(r::FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_MSK,
+              r::FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_MSK,
+              r::FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_SH));
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FR_EXCHG,
+                         r::FWCMD_H2C_FUNC_CCTLINFO_UD, c, sizeof(c));
+  _logger->info("Kestrel: upd_cctl (macid={} a_idx={} rate=0x{:x} ntx=0x{:x} "
+                "map_a={} bmc={}) -> {}",
+                macid, addr_cam_idx, datarate, ntx_path_en, path_map_a, bmc,
+                ok ? "sent" : "FAILED");
+  return ok;
+}
+
 bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
                              const uint8_t *content, uint32_t len) {
   /* Packet = [WD 24B][fwcmd_hdr 8B][content]. Same framing as the FWDL header

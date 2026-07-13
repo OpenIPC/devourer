@@ -197,6 +197,24 @@ constexpr uint8_t MAC_AX_RPR_MODE_STF = 1; /* rpr_cfg_stf */
 constexpr uint8_t RPR_STF_AGG = 121;       /* rpr_cfg_stf.agg */
 constexpr uint8_t RPR_STF_TMR = 255;       /* rpr_cfg_stf.tmr */
 
+/* CMAC port config (mport.c mac_port_init) — the BSS/PTCL TX context. Without
+ * an ENABLED port the CMAC accepts frames into the queue but never airs them
+ * (the mgmt bulk-OUT stalls at ~103). Band-0 port-0 register + bits
+ * (mac_reg_ax.h R_AX_PORT_CFG_P0 block). Found via a usbmon golden diff: the
+ * in-kernel rtw89_8852bu writes this; devourer never did. */
+constexpr uint16_t R_AX_PORT_CFG_P0 = 0xC400;
+constexpr uint32_t B_AX_BCNTX_EN_P0 = 1u << 12;   /* TX_SW (beacon TX) */
+constexpr uint8_t B_AX_NET_TYPE_P0_SH = 10;       /* [11:10] */
+constexpr uint32_t B_AX_NET_TYPE_P0_MSK = 0x3;
+constexpr uint32_t B_AX_RX_BSSID_FIT_EN_P0 = 1u << 4; /* RX_SW */
+constexpr uint32_t B_AX_TSF_UDT_EN_P0 = 1u << 3;      /* RX_SYNC */
+constexpr uint32_t B_AX_PORT_FUNC_EN_P0 = 1u << 2;    /* b_en_l[0] — port enable */
+constexpr uint32_t B_AX_TXBCN_RPT_EN_P0 = 1u << 1;
+constexpr uint32_t B_AX_RXBCN_RPT_EN_P0 = 1u << 0;
+/* mac_ax_net_type. */
+constexpr uint8_t MAC_AX_NET_TYPE_NO_LINK = 0;
+constexpr uint8_t MAC_AX_NET_TYPE_INFRA = 2;
+
 /* DLFW quota values (dle_mem_usb3_8852b DLFW entry; SCC wcpu override = 6). */
 constexpr uint16_t DLFW_WDE_FREE_PAGE = 0;   /* wde_size9 lnk_pge_num */
 constexpr uint16_t DLFW_WDE_UNLNK_PAGE = 1024; /* wde_size9 unlnk_pge_num */
@@ -415,6 +433,59 @@ constexpr uint8_t MAC_AX_WIFI_ROLE_AP = 2;
 /* mac_ax_upd_mode. */
 constexpr uint8_t MAC_AX_ROLE_CREATE = 0;
 constexpr uint8_t MAC_AX_ROLE_REMOVE = 1;
+/* Scheduler contention TX-enable (R_AX_CTN_TXEN, cmac_tx.c set_hw_sch_tx_en).
+ * A per-queue gate: a queue whose bit is 0 never contends for the medium, so
+ * its frames sit in PLE forever (the ~103 mgmt-TX stall). The vendor enables
+ * these via mac_set_hw_value(SCH_TXEN_CFG) when the vif comes up; devourer
+ * never did. Enable the queues our TX uses: BE0..VO0 (data ACs), MGQ + CPUMGQ
+ * (host + cpu mgmt), HGQ (high-priority). */
+constexpr uint16_t R_AX_CTN_TXEN = 0xC348;
+constexpr uint16_t B_AX_CTN_TXEN_BE_0 = 1u << 0;
+constexpr uint16_t B_AX_CTN_TXEN_BK_0 = 1u << 1;
+constexpr uint16_t B_AX_CTN_TXEN_VI_0 = 1u << 2;
+constexpr uint16_t B_AX_CTN_TXEN_VO_0 = 1u << 3;
+constexpr uint16_t B_AX_CTN_TXEN_MGQ = 1u << 8;
+constexpr uint16_t B_AX_CTN_TXEN_CPUMGQ = 1u << 10;
+constexpr uint16_t B_AX_CTN_TXEN_HGQ = 1u << 11;
+
+/* --- Self-STA registration H2Cs (the "rest of _add_role" after fw_role_maintain):
+ * ADDR_CAM update + CMAC control-table (cctl). Without these the CMAC has no
+ * per-MACID BSS/rate/antenna context, so injected frames queue but never air —
+ * the mgmt bulk-OUT stalls at ~103 (the PLE page pool fills). Ported verbatim
+ * from mac_ax addr_cam.c / tblupd.c (fwcmd_intf.h field layouts). */
+
+/* ADDR_CAM: CAT_MAC, CL_ADDR_CAM_UPDATE(6), FUNC_ADDRCAM_INFO(0). 15-dword body. */
+constexpr uint8_t FWCMD_H2C_CL_ADDR_CAM_UPDATE = 0x6;
+constexpr uint8_t FWCMD_H2C_FUNC_ADDRCAM_INFO = 0x0;
+/* CCTL/DCTL: CAT_MAC, CL_FR_EXCHG(5), FUNC CCTLINFO_UD(2)/DCTLINFO_UD(1). */
+constexpr uint8_t FWCMD_H2C_CL_FR_EXCHG = 0x5;
+constexpr uint8_t FWCMD_H2C_FUNC_CCTLINFO_UD = 0x2;
+constexpr uint8_t FWCMD_H2C_FUNC_DCTLINFO_UD = 0x1;
+
+/* addr_cam entry geometry (addr_cam.h): 8852B uses the LONG entry (0x40). */
+constexpr uint8_t ADDR_CAM_ENT_LONG_SIZE = 0x40;
+constexpr uint8_t BSSID_CAM_ENT_SIZE = 0x08;
+/* mac_ax_addr_msk_sel (mac_def.h). */
+constexpr uint8_t MAC_AX_NO_MSK = 0;
+/* mac_ax_data_rate (type.h) — the CCTL default rate. */
+constexpr uint16_t MAC_AX_OFDM6 = 0x4;
+
+/* fwcmd_cctlinfo_ud dword0 (tblupd.c). */
+constexpr uint8_t FWCMD_H2C_CCTLINFO_UD_MACID_MSK = 0x7f;
+constexpr uint32_t FWCMD_H2C_CCTLINFO_UD_OP = 1u << 7;
+/* CCTL field shifts/masks used for a basic mgmt-TX entry (fwcmd_intf.h). */
+constexpr uint8_t FWCMD_H2C_CCTRL_DATARATE_SH = 0; /* dword1 */
+constexpr uint32_t FWCMD_H2C_CCTRL_DATARATE_MSK = 0x1ff;
+constexpr uint32_t FWCMD_H2C_CCTRL_DISRTSFB = 1u << 25;  /* dword1 */
+constexpr uint32_t FWCMD_H2C_CCTRL_DISDATAFB = 1u << 26; /* dword1 */
+constexpr uint32_t FWCMD_H2C_CCTRL_BMC = 1u << 3;        /* dword5 */
+constexpr uint8_t FWCMD_H2C_CCTRL_NTX_PATH_EN_SH = 16;   /* dword6 */
+constexpr uint32_t FWCMD_H2C_CCTRL_NTX_PATH_EN_MSK = 0xf;
+constexpr uint8_t FWCMD_H2C_CCTRL_PATH_MAP_A_SH = 20; /* dword6 */
+constexpr uint32_t FWCMD_H2C_CCTRL_PATH_MAP_A_MSK = 0x3;
+constexpr uint8_t FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_SH = 0; /* dword7 */
+constexpr uint32_t FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_MSK = 0xff;
+
 /* rtw_mac_src_cmd_ofld (mac_outsrc_def.h). */
 constexpr uint8_t OFLD_SRC_BB = 0;
 constexpr uint8_t OFLD_SRC_RF = 1;
@@ -624,6 +695,21 @@ constexpr uint16_t R_AX_SCH_EXT_CTRL = 0xC3FC;
 constexpr uint32_t B_AX_PORT_RST_TSF_ADV = 1u << 1;
 constexpr uint16_t R_AX_CCA_CFG_0 = 0xC340;
 constexpr uint32_t B_AX_BTCCA_EN = 1u << 5;
+/* CCA medium-busy enables (R_AX_CCA_CFG_0 bits 0-4). Cleared for injection TX:
+ * without the RX-DCK/DACK BB calibration the carrier/energy detectors assert a
+ * perpetual busy that freezes the CSMA backoff, so the scheduler never grants a
+ * TX opportunity and injected frames stall in the CMAC MBH queue (~103-frame
+ * mgmt-TX stall). Clearing CCA_EN + the secondary-channel + EDCCA gates lets the
+ * frames air — the intended TX/monitor-link mode; carrier-sense returns once the
+ * BB calibration (M3) is ported. On-air validated: the 8852BU radiates. */
+constexpr uint32_t B_AX_CCA_EN = 1u << 0;
+constexpr uint32_t B_AX_SEC20_EN = 1u << 1;
+constexpr uint32_t B_AX_SEC40_EN = 1u << 2;
+constexpr uint32_t B_AX_SEC80_EN = 1u << 3;
+constexpr uint32_t B_AX_EDCCA_EN = 1u << 4;
+constexpr uint32_t B_AX_CCA_ALL_EN = B_AX_CCA_EN | B_AX_SEC20_EN |
+                                     B_AX_SEC40_EN | B_AX_SEC80_EN |
+                                     B_AX_EDCCA_EN;
 constexpr uint8_t B_AX_R_SIFS_AGGR_TIME_SH = 24;
 constexpr uint32_t B_AX_R_SIFS_AGGR_TIME_MSK = 0x7f;
 constexpr uint16_t R_AX_PREBKF_CFG_0 = 0xC338;

@@ -64,7 +64,7 @@ sleep 6
 # --- RX witness: 8812AU devourer rxdemo ---
 unbind_kernel "$RX_ID"; sleep 1
 echo ">> starting devourer rxdemo witness on the 8812AU (ch$CH)"
-DEVOURER_VID=0x0bda DEVOURER_PID=0x8812 DEVOURER_CHANNEL=$CH \
+DEVOURER_VID=0x${RX_ID%%:*} DEVOURER_PID=0x${RX_ID##*:} DEVOURER_CHANNEL=$CH \
   DEVOURER_EVENTS=stdout DEVOURER_LOG_LEVEL=warn \
   build/rxdemo >"$RXLOG" 2>/dev/null &
 RXPID=$!

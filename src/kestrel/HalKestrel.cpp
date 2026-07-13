@@ -902,6 +902,56 @@ void HalKestrel::set_host_rpr() {
                 "release enabled");
 }
 
+void HalKestrel::port_init() {
+  namespace r = kestrel::reg;
+  /* mac_port_init band-0 port-0 for injection (net_type = NO_LINK). Our injected
+   * mgmt/probe carriers are self-sourced with no BSS, so a context-less NO_LINK
+   * port is sufficient — but the port MUST be FUNC-enabled or the CMAC never
+   * airs the queued frames (that is the ~103-frame stall). Ported from mport.c
+   * mac_port_init: the PCFG_NET_TYPE/TX_SW/TX_RPT/RX_SW/RX_SYNC/RX_RPT writes all
+   * fold to 0 for NO_LINK, and the tail `PORT_CFG_P0 |= b_en_l[0]` is the
+   * enable. (Beacon-timing PCFGs — TBTT/BCN_AREA/DTIM — are for AP beaconing,
+   * not mgmt injection, so they are omitted.) */
+  uint32_t v = _device.rtw_read32(r::R_AX_PORT_CFG_P0);
+  v = r::set_clr_word(v, r::MAC_AX_NET_TYPE_NO_LINK, r::B_AX_NET_TYPE_P0_MSK,
+                      r::B_AX_NET_TYPE_P0_SH);
+  v &= ~(r::B_AX_BCNTX_EN_P0 | r::B_AX_TXBCN_RPT_EN_P0 |
+         r::B_AX_RX_BSSID_FIT_EN_P0 | r::B_AX_TSF_UDT_EN_P0 |
+         r::B_AX_RXBCN_RPT_EN_P0);
+  v |= r::B_AX_PORT_FUNC_EN_P0; /* enable the port */
+  _device.rtw_write32(r::R_AX_PORT_CFG_P0, v);
+  _logger->info("Kestrel TRX: CMAC port0 enabled (NO_LINK) — TX context up "
+                "(PORT_CFG_P0=0x{:08x})",
+                v);
+}
+
+void HalKestrel::sch_tx_en() {
+  namespace r = kestrel::reg;
+  /* set_hw_sch_tx_en (cmac_tx.c) band-0: RMW-enable the scheduler contention
+   * TX queues our TX path uses. A queue whose CTN_TXEN bit is 0 never contends
+   * for the medium, so its frames stay pinned in PLE and the mgmt bulk-OUT
+   * stalls at ~103 as the page pool fills. The vendor sets this via
+   * mac_set_hw_value(SCH_TXEN_CFG) at vif-up; devourer never did. */
+  const uint16_t en = r::B_AX_CTN_TXEN_BE_0 | r::B_AX_CTN_TXEN_BK_0 |
+                      r::B_AX_CTN_TXEN_VI_0 | r::B_AX_CTN_TXEN_VO_0 |
+                      r::B_AX_CTN_TXEN_MGQ | r::B_AX_CTN_TXEN_CPUMGQ |
+                      r::B_AX_CTN_TXEN_HGQ;
+  uint16_t v = _device.rtw_read16(r::R_AX_CTN_TXEN);
+  v |= en;
+  _device.rtw_write16(r::R_AX_CTN_TXEN, v);
+  _logger->info("Kestrel TRX: CTN_TXEN queues enabled (0x{:04x})", v);
+
+  /* Clear the CMAC CCA medium-busy gates (R_AX_CCA_CFG_0 bits 0-4). Without the
+   * RX-DCK/DACK BB calibration (not yet ported) the carrier/energy detectors
+   * report a perpetual busy that freezes the CSMA backoff, so the scheduler
+   * never grants a TX opportunity and injected frames stall in the MBH queue
+   * (~103-frame stall). Disabling the CCA gates lets frames air — the intended
+   * TX/monitor mode; on-air validated (the 8852BU radiates). */
+  clr32(r::R_AX_CCA_CFG_0, r::B_AX_CCA_ALL_EN);
+  _logger->info("Kestrel TRX: CCA TX gates cleared (CCA_CFG_0=0x{:08x})",
+                _device.rtw_read32(r::R_AX_CCA_CFG_0));
+}
+
 void HalKestrel::mac_enable_imr() {
   /* mac_enable_imr(DMAC)+(CMAC0) + mac_err_imr_ctrl(EN): the System-Error-
    * Recovery interrupt masks (ser_imr_config_8852b auto-gen). Each entry does

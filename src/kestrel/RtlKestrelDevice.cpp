@@ -72,7 +72,7 @@ void RtlKestrelDevice::start_wp_drain() {
   _wp_drain_thread = std::thread([this]() {
     /* Consume the bulk-IN so the fw's TX WP-release reports (rpkt_type=7,
      * TX_PD_RELEASE_HOST) recycle the transmitted frames' WD/PLE pages. A no-op
-     * callback suffices — completing the bulk-IN URB is what does the recycle. */
+     * callback suffices — completing each bulk-IN URB does the recycle. */
     _device.bulk_read_async_loop(
         16384, 8, [](const uint8_t *, int) {}, _wp_drain_stop);
   });
@@ -156,7 +156,19 @@ bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
    * page-release path so sustained TX doesn't stall when the bulk-OUT page pool
    * fills after ~103 frames. */
   _hal.set_host_rpr();
-  return _hal.set_channel(channel.Channel, channel.ChannelWidth);
+  if (!_hal.set_channel(channel.Channel, channel.ChannelWidth))
+    return false;
+  /* mac_port_init (mport.c) — enable the CMAC PORT so the transmit engine has a
+   * BSS/PTCL context. Without it the CMAC queues frames but never airs them,
+   * and the mgmt bulk-OUT stalls at ~103 (the page pool fills with never-
+   * released frames). NO_LINK port-0 is enough for self-sourced injection.
+   * Harmless for the RX path (no beacon armed). */
+  _hal.port_init();
+  /* Enable the scheduler contention TX queues (R_AX_CTN_TXEN) so mgmt/data
+   * frames can actually contend for the medium. Without this queued frames
+   * never air and the mgmt bulk-OUT stalls at ~103 (PLE page pool full). */
+  _hal.sch_tx_en();
+  return true;
 }
 
 void RtlKestrelDevice::Init(Action_ParsedRadioPacket packetProcessor,
@@ -189,6 +201,14 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
    * rate). Then enable the per-user TX report (freerun TX-egress timestamps);
    * the C2H reports are decoded in handle_c2h when the RX loop is up. */
   _hal.register_sta_role(0, 0, 0);
+  /* The rest of _add_role: program the ADDR_CAM entry + CMAC control table for
+   * macid 0 (the WD macid our descriptors carry). This is what actually gives
+   * the TX engine an antenna path (cctl ntx_path_en) + BSS/rate context, so
+   * queued frames air and their PLE pages release — without it the mgmt
+   * bulk-OUT stalls deterministically at ~103. SA = the canonical injection
+   * source address (examples/tx/main.cpp beacon SA). */
+  static const uint8_t kInjectSA[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+  _hal.add_self_sta(kInjectSA, /*macid=*/0);
   _hal.enable_tx_report(kestrel::reg::USR_TX_RPT_MODE_PERIOD, 0, 0);
   _logger->info("Kestrel: TX ready on ch{} — mgmt ep 0x{:02x} data ep 0x{:02x}",
                 channel.Channel, _tx_mgmt_ep, _tx_data_ep);

@@ -92,6 +92,21 @@ public:
    * ~103 frames. Vendor order: end of mac_trx_init, after the SER IMR enable. */
   void set_host_rpr();
 
+  /* mac_port_init (mport.c) band-0 port-0, net_type=NO_LINK — enable the CMAC
+   * PORT so the transmit engine has a BSS/PTCL context to air frames from.
+   * ROOT CAUSE of the ~103-frame mgmt-TX stall: without an enabled port the
+   * CMAC accepts frames into the queue but never transmits them (zero TX
+   * completions). Found via a usbmon golden diff vs the in-kernel rtw89 driver
+   * (which writes PORT_CFG_P0; devourer never did). Call at the end of the TX
+   * bring-up, after cmac_init. */
+  void port_init();
+
+  /* set_hw_sch_tx_en (cmac_tx.c): RMW-enable the scheduler contention TX queues
+   * (R_AX_CTN_TXEN). A queue whose bit is 0 never wins a TX opportunity, so its
+   * frames stall in PLE — the ~103-frame mgmt-TX stall. Call in the TX
+   * bring-up. */
+  void sch_tx_en();
+
   /* M3 — PHY bring-up: apply the halbb BB register + gain tables and the
    * halrf radio-A/B tables (via PhyTableLoaderKestrel). `rfe_type` / `cut`
    * select the table variant (from the efuse / chip id). Must run after the
@@ -121,6 +136,24 @@ public:
     return _fw.fw_role_maintain(macid, reg::MAC_AX_SELF_ROLE_CLIENT,
                                 reg::MAC_AX_WIFI_ROLE_STATION,
                                 reg::MAC_AX_ROLE_CREATE, band, port);
+  }
+
+  /* The "rest of _add_role" (role.c) after fw_role_maintain: program the
+   * hardware ADDR_CAM entry + the CMAC control table for `macid` so the TX
+   * engine has a resolvable BSS/rate/antenna context. Without this the CMAC
+   * queues injected frames but never airs them (the mgmt bulk-OUT stalls at
+   * ~103 as the PLE page pool fills). `self_mac` is the injected frames' SA.
+   * 8852B is single-path: ntx_path_en=1 (RF_PATH_A), path_map_a=0 (from
+   * halbb_cfg_cmac_tx_ant_8852b). Default rate OFDM6, broadcast (bmc). */
+  bool add_self_sta(const uint8_t self_mac[6], uint8_t macid = 0,
+                    uint8_t net_type = reg::MAC_AX_NET_TYPE_NO_LINK) {
+    bool ok = _fw.fw_upd_addr_cam(macid, self_mac, net_type, /*addr_cam_idx=*/0,
+                                  /*bssid_cam_idx=*/0);
+    ok = _fw.fw_upd_cctl_basic(macid, /*addr_cam_idx=*/0, reg::MAC_AX_OFDM6,
+                               /*ntx_path_en=*/1, /*path_map_a=*/0,
+                               /*bmc=*/true) &&
+         ok;
+    return ok;
   }
 
   /* Firmware SER probe: returns the latched mac_ax_err_info code if the fw has

@@ -109,10 +109,9 @@ bool HalKestrel::usb_pre_init() {
 }
 
 void HalKestrel::usb_init() {
-  /* usb_init_8852b (intf_init): LFPS filter off, RX bulk size for the link
-   * speed, and — critically — the per-endpoint NUMP (burst count). Without
-   * NUMP a bulk-OUT endpoint accepts a single packet then halts, which is the
-   * "512 then stall" the runtime H2C IO-offload hits on CH12 (ep7). */
+  /* usb_init_8852b (_usb_8852b.c:203, the mac_hal_init intf_init step — runs
+   * AFTER trx_init + feat_init): LFPS filter off, RX bulk size for the link
+   * speed, and the per-endpoint NUMP (burst count) for EP5,6,7,9,10,11,12. */
   clr32(r::R_AX_USB3_MAC_NPI_CONFIG_INTF_0, r::B_AX_SSPHY_LFPS_FILTER);
 
   const uint32_t st = _device.rtw_read32(r::R_AX_USB_STATUS);
@@ -137,13 +136,10 @@ void HalKestrel::usb_init() {
     _device.rtw_write8(r::R_AX_USB_ENDPOINT_0, v);
     _device.rtw_write8(r::R_AX_USB_ENDPOINT_2 + 1, r::USB_NUMP);
   }
-  /* Re-toggle HCI RXDMA|TXDMA (0x8380: 0 -> 3) after the DMAC/DLE/CMAC init —
-   * the vendor kicks the HCI DMA engine here so it starts draining the USB
-   * FIFO into the (re-init'd) DLE queues, incl. CH12/H2C. */
-  clr32(r::R_AX_HCI_FUNC_EN, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
-  set32(r::R_AX_HCI_FUNC_EN, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
-  _logger->info("Kestrel: USB init (mode=USB{}, NUMP set on 7 eps, HCI DMA "
-                "re-kicked)",
+  /* NB: the vendor usb_init_8852b does NOT re-kick HCI RXDMA/TXDMA here —
+   * that toggle is usb_pre_init's (pre-FWDL). Golden capture: no 0x8380
+   * write after FWDL. */
+  _logger->info("Kestrel: USB init (mode=USB{}, NUMP set on 7 eps)",
                 mode == r::MAC_AX_USB3 ? 3 : mode == r::MAC_AX_USB2 ? 2 : 1);
 }
 
@@ -152,8 +148,11 @@ bool HalKestrel::power_on() {
     _logger->error("Kestrel: only USB power-on is ported (M1)");
     return false;
   }
-  if (!usb_pre_init())
-    return false;
+  /* mac_set_dut_env_mode (init.c:26, the first thing mac_hal_init does):
+   * WCPU_FW_CTRL FW_ENV[29:28] = 0 (normal). Golden capture line 1. */
+  field32(r::R_AX_WCPU_FW_CTRL, 0, r::B_AX_FW_ENV_MSK, r::B_AX_FW_ENV_SH);
+  /* NB: usb_pre_init (intf_pre_init) runs AFTER power-on + dmac_pre_init in
+   * the vendor mac_hal_init (init.c:421) — see download_firmware. */
 
   /* mac_pwr_on_usb_8852b, transcribed verbatim (pwr_seq_func_8852b.c:419). */
   clr32(r::R_AX_SYS_PW_CTRL,
@@ -249,26 +248,16 @@ bool HalKestrel::power_on() {
             r::B_AX_VREFPFM_L_SH);
   }
 
-  /* Enable DMAC (0x8400) + CMAC (0xC000) function blocks — the vendor pwr-on
-   * leaves these set (mac_sys_init re-asserts them). The full bit masks match
-   * pwr_seq_func_8852b.c. */
+  /* Enable DMAC (0x8400) + CMAC (0xC000) function blocks — the pwr-seq tail
+   * (pwr_seq_func_8852b.c:369-405): DMAC = bits 15..30 (no CRPRT yet — that
+   * is mac_sys_init's dmac_func_en), CMAC = CMAC_EN|TXEN|RXEN|
+   * FORCE_CMACREG_GCKEN|PHYINTF|DMA|PTCLTOP|SCHEDULER|TMAC|RMAC =
+   * 0x7000803F. Golden capture: 0x8400=0x7fff8000, 0xC000=0x7000803f. */
   constexpr uint16_t R_AX_DMAC_FUNC_EN = 0x8400;
-  constexpr uint32_t kDmacEn =
-      (1u << 30) | (1u << 29) | (1u << 28) | (1u << 27) | (1u << 26) |
-      (1u << 25) | (1u << 24) | (1u << 23) | (1u << 22) | (1u << 21) |
-      (1u << 20) | (1u << 19) | (1u << 18) | (1u << 17) | (1u << 16) |
-      (1u << 15); /* MAC_FUNC..DMACREG_GCKEN, verbatim mask */
+  constexpr uint32_t kDmacEn = 0x7FFF8000u; /* bits 15..30 */
   set32(R_AX_DMAC_FUNC_EN, kDmacEn);
-  constexpr uint16_t R_AX_CMAC_FUNC_EN = 0xC000;
-  constexpr uint32_t kCmacEn = (1u << 0) | (1u << 5) | (1u << 6) | (1u << 15) |
-                               (1u << 16) | (1u << 17) | (1u << 18) |
-                               (1u << 19) | (1u << 20) | (1u << 21);
-  set32(R_AX_CMAC_FUNC_EN, kCmacEn);
-
-  /* chip_func_en (mac_sys_init, init.c): the 8852B OCP patch — set the
-   * SPS_DIG_ON OCP_L1 field to its max (over-current-protection level). */
-  set32(r::R_AX_SPS_DIG_ON_CTRL0,
-        (r::B_AX_OCP_L1_MSK & 0x7u) << r::B_AX_OCP_L1_SH);
+  constexpr uint32_t kCmacEn = 0x7000803Fu;
+  set32(r::R_AX_CMAC_FUNC_EN, kCmacEn);
 
   /* 0x2D8[7:4] = 1 (EESK pinmux). */
   field32(r::R_AX_EECS_EESK_FUNC_SEL, 0x1, r::B_AX_PINMUX_EESK_FUNC_SEL_MSK,
@@ -276,6 +265,26 @@ bool HalKestrel::power_on() {
 
   _logger->info("Kestrel: MAC powered on (pwr-K=0x{:02x})", pwr_k);
   return true;
+}
+
+void HalKestrel::mac_sys_init() {
+  /* mac_sys_init (init.c:309): dmac_func_en + cmac_func_en + chip_func_en,
+   * run after FWDL + set_enable_bb_rf, before trx_init. All RMW-OR. */
+  /* dmac_func_en_8852b (init_8852b.c:1043): the full runtime DMAC enable —
+   * MAC_FUNC|DMAC_FUNC|MPDU_PROC|WD_RLS|DLE_WDE|TXPKT_CTRL|STA_SCH|DLE_PLE|
+   * PKT_BUF|DMAC_TBL|PKT_IN|DLE_CPUIO|DISPATCHER|BBRPT|MAC_SEC|DMAC_CRPRT|
+   * DMACREG_GCKEN = bits 15..31. Golden capture: 0x8400 -> 0xffff8000. */
+  set32(r::R_AX_DMAC_FUNC_EN, 0xFFFF8000u);
+  /* cmac_func_en(band0, EN) (init.c:219): clock enables on CK_EN first, then
+   * the block enables on CMAC_FUNC_EN. Golden: 0xC004 -> 0xffffffff,
+   * 0xC000 -> 0xf000803f. */
+  set32(r::R_AX_CK_EN, r::CMAC_CK_EN_BITS);
+  set32(r::R_AX_CMAC_FUNC_EN, r::CMAC_FUNC_EN_BITS);
+  /* chip_func_en -> chip_func_en_8852b: the OCP patch — SPS_DIG_ON OCP_L1
+   * field to max (over-current-protection level). */
+  set32(r::R_AX_SPS_DIG_ON_CTRL0,
+        (r::B_AX_OCP_L1_MSK & 0x7u) << r::B_AX_OCP_L1_SH);
+  _logger->info("Kestrel: mac_sys_init (DMAC+CMAC func/clk en, OCP)");
 }
 
 void HalKestrel::enable_efuse_pwr_cut() {
@@ -338,6 +347,17 @@ bool HalKestrel::read_phys_efuse(uint8_t *phys, uint32_t size) {
   return true;
 }
 
+uint32_t HalKestrel::fw_err_state(const char *where) {
+  const uint32_t ctrl = _device.rtw_read32(r::R_AX_HALT_C2H_CTRL);
+  if (ctrl == 0)
+    return 0;
+  const uint32_t err = _device.rtw_read32(r::R_AX_HALT_C2H);
+  _logger->error("Kestrel FW-SER at [{}]: HALT_C2H_CTRL=0x{:08x} err=0x{:08x} "
+                 "(0x2010=L2_AH_HCI 0x1000=L1_DMAC 0x2000=L2_AH_DMA)",
+                 where, ctrl, err);
+  return err;
+}
+
 uint8_t HalKestrel::read_cut() {
   return static_cast<uint8_t>(_device.rtw_read8(r::R_AX_SYS_CFG1 + 1) >> 4);
 }
@@ -375,6 +395,12 @@ uint8_t HalKestrel::read_mss_index() {
 }
 
 bool HalKestrel::download_firmware(uint8_t cut) {
+  /* mac_hal_init order (init.c:406-434): hci_func_en -> dmac_pre_init (DLFW
+   * DLE/HFC) -> intf_pre_init (usb_pre_init) -> [chk_sec_rec] -> fwdl. */
+  if (!_fw.fw_pre_init())
+    return false;
+  if (!usb_pre_init())
+    return false;
   return _fw.download_firmware(cut, read_mss_index());
 }
 
@@ -568,17 +594,15 @@ void HalKestrel::sec_eng_init() {
   v |= r::B_AX_BMC_MGNT_DEC | r::B_AX_UC_MGNT_DEC;
   v &= ~r::B_AX_TX_PARTIAL_MODE; /* 8852B */
   _device.rtw_write32(r::R_AX_SEC_ENG_CTRL, v);
+  /* MIC/ICV append (security_cam.c:1002). Golden: 0x9D04 -> ...|0x3. */
+  set32(r::R_AX_SEC_MPDU_PROC, r::B_AX_APPEND_ICV | r::B_AX_APPEND_MIC);
 }
 
 bool HalKestrel::trx_dmac_init() {
-  /* dmac_func_en (dmac_func_en_8852b): the full runtime DMAC engine enable
-   * (MAC/DMAC/MPDU/WD_RLS/WDE/TXPKT/STA_SCH/PLE/PKTBUF/TBL/PKT_IN/CPUIO/
-   * DISPATCHER/BBRPT/SEC/CRPRT/GCKEN = bits 15..31). The power-on left CRPRT
-   * (bit31) clear and this is the runtime re-assert the vendor dmac_init does
-   * before the DLE re-init — without it the post-boot H2C (CH12) DMA path is
-   * not fully live and IO-offload stalls. */
-  constexpr uint32_t kDmacFuncEn = 0xFFFF8000u; /* bits 15..31 */
-  set32(0x8400 /* R_AX_DMAC_FUNC_EN */, kDmacFuncEn);
+  /* dmac_init (trxcfg.c:929): dle_init(NIC quota) -> [preload: no-op on
+   * 8852B/USB] -> hfc_init -> sta_sch_init -> mpdu_proc_init -> sec_eng_init.
+   * The DMAC/CMAC function enables live in mac_sys_init (vendor order);
+   * intf_init (usb_init) runs after trx + feat init, not here. */
   if (!dle_init_nic()) /* NIC-mode DLE quota */
     return false;
   if (!hfc_init_nic()) /* runtime page/credit quotas (CH12 IO-offload flows) */
@@ -587,11 +611,8 @@ bool HalKestrel::trx_dmac_init() {
     return false;
   mpdu_proc_init();
   sec_eng_init();
-  /* intf_init: runtime USB endpoint NUMP config (arms multi-packet bulk-OUT,
-   * incl. CH12/ep7 for the H2C IO-offload). */
-  usb_init();
-  _logger->info("Kestrel TRX: DMAC init done (NIC DLE + sta-sch + mpdu + sec + "
-                "usb)");
+  _logger->info("Kestrel TRX: DMAC init done (NIC DLE + HFC + sta-sch + mpdu "
+                "+ sec)");
   return true;
 }
 
@@ -942,44 +963,25 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
                 _device.rtw_read32(r::R_AX_WLRF_CTRL),
                 _device.rtw_read32(r::R_AX_SYS_FUNC_EN));
 
-  /* --- BB register + gain + radio tables via FIRMWARE OFFLOAD (cmd_ofld H2C).
-   * On 8852BU USB the host cannot drive the RF SW-SI or the d-die window
-   * directly (golden usbmon capture: the vendor issues ZERO wIndex=1 writes);
-   * all BB+RF programming is offloaded to the on-chip firmware. Each table
-   * write becomes one cmd_ofld command; the emitter auto-flushes at the fw's
-   * 2000-byte batch cap and each flush waits on the C2H IO_OFLD_RESULT. The
-   * 0xf9..0xfe delay pseudo-addresses flush + host-sleep (vendor DELAY_OFLD +
-   * accu_delay), and phy1 (0x100xxxxx) entries are skipped for single-PHY. --- */
-  /* Drain any firmware C2H waiting on bulk-IN before offloading. The vendor
-   * has RX active during BB/RF init; if the fw's post-boot C2H queue backs up
-   * (no host reads), its main loop can stall and never service incoming H2C. */
-  {
-    std::vector<uint8_t> c2h(2048);
-    int drained = 0, total = 0;
-    for (int i = 0; i < 32; ++i) {
-      int rc = _device.bulk_read_raw(c2h.data(), static_cast<int>(c2h.size()), 20);
-      if (rc <= 0) break;
-      ++drained;
-      total += rc;
-    }
-    _logger->info("Kestrel PHY: drained {} C2H pkts ({} bytes) pre-offload",
-                  drained, total);
-  }
-
+  /* --- BB register + gain + radio tables via FIRMWARE OFFLOAD (cmd_ofld H2C),
+   * the vendor's io_ofld path for USB (halbb_fw_set_reg / halrf_wrf ->
+   * mac_add_cmd_ofld). Each table write is one 16-byte cmd_ofld command; a
+   * full 2000-byte buffer auto-flushes with LC forced on its last command
+   * (ofld_incompatible_full_cmd), and each SECTION ends with the vendor's LC
+   * sentinel flush: halbb = a dummy BB write to 0x1a24, halrf = a 1 us
+   * DELAY_OFLD (halbb_fwofld_bitmap_en / halrf_write_fwofld_trigger). The
+   * 0xf9..0xfe delay pseudo-addresses are HOST-side sleeps in the vendor
+   * walkers (halbb_fwcfg_bb_phy_8852b:42, no flush, no fw delay command);
+   * phy1 (0x100xxxxx) entries are skipped for single-PHY. --- */
   _fw.ofld_begin();
-  auto ofld_delay = [&](uint32_t us) {
-    _fw.ofld_flush();
-    _fw.ofld_begin();
-    delay_us(us);
-  };
   auto bb_emit = [&](uint32_t addr, uint32_t val) {
     switch (addr) {
-    case 0xfe: ofld_delay(50000); return;
-    case 0xfd: ofld_delay(5000); return;
-    case 0xfc: ofld_delay(1000); return;
-    case 0xfb: ofld_delay(50); return;
-    case 0xfa: ofld_delay(5); return;
-    case 0xf9: ofld_delay(1); return;
+    case 0xfe: delay_us(50000); return;
+    case 0xfd: delay_us(5000); return;
+    case 0xfc: delay_us(1000); return;
+    case 0xfb: delay_us(50); return;
+    case 0xfa: delay_us(5); return;
+    case 0xf9: delay_us(1); return;
     default: break;
     }
     if ((addr >> 16) == 0x100) /* phy1-only entry, skip on single-PHY */
@@ -989,23 +991,34 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   };
   apply_phy_table(array_mp_8852b_phy_reg, array_mp_8852b_phy_reg_len, rfe_type,
                   cut, bb_emit);
+  _fw.ofld_flush(KestrelFw::OfldFlush::BB); /* bitmap_en(false): 0x1a24 LC */
   apply_phy_table(array_mp_8852b_phy_reg_gain, array_mp_8852b_phy_reg_gain_len,
                   rfe_type, cut, bb_emit);
+  _fw.ofld_flush(KestrelFw::OfldFlush::BB);
 
-  /* halrf_wrf offload dispatch (radio table, each RF reg appears twice): a-die
-   * (no BIT16) -> RF_CMD_OFLD (fw drives the SI); d-die (BIT16) -> a BB write to
-   * the 0xe000/0xf000 window. mask = MASKRF (20-bit full write). */
+  /* halrf_wrf offload dispatch (halrf_interface.c:202; each RF reg appears
+   * twice in the radio table): BIT(16) set = d-die -> a BB write to the
+   * 0xe000/0xf000 window; clear = a-die -> RF_CMD_OFLD (fw drives the SI).
+   * mask = MASKRF (20-bit full write). Each radio table ends with the halrf
+   * trigger (1 us DELAY_OFLD, lc=1) and its radio-page H2C to the fw
+   * (halrf_config_8852b_write_radio_a/b_reg_to_fw). */
+  std::vector<uint32_t> radio_page;
   auto apply_radio = [&](const uint32_t *arr, size_t len, uint8_t path) {
+    radio_page.clear();
     auto emit = [&](uint32_t addr, uint32_t val) {
       switch (addr) {
-      case 0xfe: ofld_delay(50000); return;
-      case 0xfd: ofld_delay(5000); return;
-      case 0xfc: ofld_delay(1000); return;
-      case 0xfb: ofld_delay(50); return;
-      case 0xfa: ofld_delay(5); return;
-      case 0xf9: ofld_delay(1); return;
+      case 0xfe: delay_us(50000); return;
+      case 0xfd: delay_us(5000); return;
+      case 0xfc: delay_us(1000); return;
+      case 0xfb: delay_us(50); return;
+      case 0xfa: delay_us(5); return;
+      case 0xf9: delay_us(1); return;
       default: break;
       }
+      /* store_radio_reg (halrf_hwimg_8852b.c:157): page entries are the DRFC
+       * (d-die, addr >= 0x100) writes only, packed (addr&0xff)<<20 | data. */
+      if (addr >= 0x100)
+        radio_page.push_back(((addr & 0xff) << 20) | (val & r::MASKRF));
       if (addr & 0x10000u) {
         const uint16_t off = static_cast<uint16_t>((path ? 0xf000 : 0xe000) +
                                                    ((addr & 0xff) << 2));
@@ -1018,10 +1031,13 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
       }
     };
     apply_phy_table(arr, len, rfe_type, cut, emit);
+    _fw.ofld_flush(KestrelFw::OfldFlush::RF); /* halrf trigger */
+    _fw.radio_page_to_fw(path == 0 ? r::OUTSRC_CL_RADIO_A : r::OUTSRC_CL_RADIO_B,
+                         0, radio_page.data(),
+                         static_cast<uint16_t>(radio_page.size()));
   };
   apply_radio(array_mp_8852b_radioa, array_mp_8852b_radioa_len, 0);
   apply_radio(array_mp_8852b_radiob, array_mp_8852b_radiob_len, 1);
-  _fw.ofld_flush();
 
   /* Decisive readback: BB 0x4004 is host-readable (core BB), and the phy_reg
    * table sets it to 0xCA014000 — but ONLY via fw-offload now (no direct
@@ -1291,11 +1307,14 @@ bool HalKestrel::trx_cmac_rx_init() {
   ptcl_init();
   cmac_dma_init();
   usb_rx_agg_cfg();
-  /* mac_trx_init tail: coex_mac_init then the SER error-IMR enables. */
+  /* mac_trx_init tail: coex_mac_init. The SER error-IMR enable
+   * (mac_enable_imr) is deliberately deferred to AFTER the BB/RF tables — the
+   * vendor golden capture writes 0x8520/0xC160=0xffffffff only after the first
+   * BB cmd_ofld batches, so the fw error handler isn't armed against a pending
+   * HCI/DMA condition while the BB is still unconfigured. */
   coex_mac_init();
-  mac_enable_imr();
   _logger->info("Kestrel TRX: full CMAC init done (sched+addrcam+fltr+cca+nav+"
-                "sr+tmac+trxptcl+rmac+com+ptcl+dma+coex+imr)");
+                "sr+tmac+trxptcl+rmac+com+ptcl+dma+coex)");
   return true;
 }
 

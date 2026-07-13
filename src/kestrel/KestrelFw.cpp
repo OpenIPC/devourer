@@ -249,7 +249,9 @@ bool KestrelFw::send_fwdl_packet(const uint8_t *payload, uint32_t payload_len,
 
   uint8_t *after = wd + r::WD_BODY_LEN;
   if (is_header) {
-    /* fwcmd_hdr (8B): hdr0 = cat|class|func|type|seq; hdr1 = total_len. */
+    /* fwcmd_hdr (8B): hdr0 = cat|class|func|type|seq; hdr1 = total_len.
+     * TOTAL_LEN counts the fwcmd header + payload (h2cb->len) — the vendor's
+     * FWDL-header packet on the wire carries 0x58 = 80B header + 8. */
     uint32_t hdr0 =
         (static_cast<uint32_t>(r::FWCMD_H2C_CAT_MAC) << r::H2C_HDR_CAT_SH) |
         (static_cast<uint32_t>(r::FWCMD_H2C_CL_FWDL) << r::H2C_HDR_CLASS_SH) |
@@ -257,7 +259,7 @@ bool KestrelFw::send_fwdl_packet(const uint8_t *payload, uint32_t payload_len,
         (static_cast<uint32_t>(r::FWCMD_TYPE_H2C) << r::H2C_HDR_DEL_TYPE_SH) |
         (static_cast<uint32_t>(seq) << r::H2C_HDR_H2C_SEQ_SH);
     put_le32(after + 0, hdr0);
-    put_le32(after + 4, payload_len << r::H2C_HDR_TOTAL_LEN_SH);
+    put_le32(after + 4, data_len << r::H2C_HDR_TOTAL_LEN_SH);
     std::memcpy(after + r::FWCMD_HDR_LEN, payload, payload_len);
   } else {
     std::memcpy(after, payload, payload_len);
@@ -292,10 +294,11 @@ bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
            (data_len & r::AX_TXD_TXPKTSIZE_MSK) << r::AX_TXD_TXPKTSIZE_SH);
 
   uint8_t *hdr = wd + r::WD_BODY_LEN;
-  /* Per-H2C sequence number (fwinfo->h2c_seq, 3-bit). The vendor increments it
-   * per H2C via h2c_pkt_set_hdr; the running fw tracks it for runtime H2C, so a
-   * fixed seq=0 makes it drop all but the first. */
-  const uint8_t seq = _h2c_seq & 0x7;
+  /* Per-H2C sequence number (fwinfo->h2c_seq): 8-bit rolling counter
+   * (H2C_HDR_H2C_SEQ [31:24], msk 0xff), incremented per runtime H2C across
+   * ALL classes (h2c_pkt_set_hdr). The golden capture counts 0,1,2,... from
+   * the first runtime H2C. */
+  const uint8_t seq = _h2c_seq;
   _h2c_seq++;
   uint32_t hdr0 = (static_cast<uint32_t>(cat) << r::H2C_HDR_CAT_SH) |
                   (static_cast<uint32_t>(h2c_class) << r::H2C_HDR_CLASS_SH) |
@@ -338,26 +341,27 @@ bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
 void KestrelFw::ofld_begin() {
   _ofld_buf.clear();
   _ofld_cmd_num = 0;
+  _ofld_accu_delay_us = 0;
 }
 
-void KestrelFw::ofld_write(uint8_t src, uint8_t type, uint8_t path,
-                           uint16_t offset, uint32_t value, uint32_t mask) {
-  /* Auto-flush before this command would overflow the FW's 2000-byte buffer. */
-  if (_ofld_buf.size() + r::CMD_OFLD_SIZE > r::CMD_OFLD_MAX_LEN)
-    ofld_flush();
-
+void KestrelFw::ofld_append(uint8_t src, uint8_t type, uint8_t path,
+                            uint16_t offset, uint32_t value, uint32_t mask,
+                            bool lc) {
+  /* add_cmd (fwofld.c:609): one 16-byte fwcmd_cmd_ofld. RF_DDIE is sent as
+   * SRC_RF with dword1 base-offset = 1. */
   const uint8_t rf_ddie = (src == r::OFLD_SRC_RF_DDIE) ? 1 : 0;
   const uint8_t real_src = (src == r::OFLD_SRC_RF_DDIE) ? r::OFLD_SRC_RF : src;
 
   uint32_t dw0 =
       (static_cast<uint32_t>(real_src) << r::CMD_OFLD_SRC_SH) |
       (static_cast<uint32_t>(type) << r::CMD_OFLD_TYPE_SH) |
+      (lc ? r::CMD_OFLD_LC : 0) |
       (static_cast<uint32_t>(path & 0x3) << r::CMD_OFLD_PATH_SH) |
       (static_cast<uint32_t>(_ofld_cmd_num & 0x7f) << r::CMD_OFLD_CMD_NUM_SH) |
       (static_cast<uint32_t>(offset) << r::CMD_OFLD_OFFSET_SH);
-  /* dword1: id (0) | the "base offset" field. add_cmd: for RF serial = 0,
-   * RF D-die = 1; otherwise GET_FIELD(offset, OFFSET) = the HIGH 16 bits of the
-   * offset (0 for a 16-bit BB/MAC addr). */
+  /* dword1: id (0) | the "base offset" field at the same sh16: RF serial = 0,
+   * RF D-die = 1; otherwise GET_FIELD(offset, OFFSET) = the high 16 offset
+   * bits (0 for a 16-bit BB/MAC addr). */
   uint32_t off2 = (real_src == r::OFLD_SRC_RF)
                       ? rf_ddie
                       : (static_cast<uint32_t>(offset) >> 16);
@@ -371,29 +375,59 @@ void KestrelFw::ofld_write(uint8_t src, uint8_t type, uint8_t path,
   put_le32(p + 8, value);
   put_le32(p + 12, mask);
   ++_ofld_cmd_num;
+  if (type == r::OFLD_TYPE_DELAY)
+    _ofld_accu_delay_us += value;
 }
 
-bool KestrelFw::ofld_flush() {
-  if (_ofld_buf.empty())
-    return true;
-  /* Set the LC (last-command) bit on the final command's dword0 so the FW
-   * executes the whole batch (ofld_incompatible_full_cmd / cfgcr_end). */
-  uint8_t *last = _ofld_buf.data() + (_ofld_buf.size() - r::CMD_OFLD_SIZE);
-  uint32_t dw0 = le32(last);
-  put_le32(last, dw0 | r::CMD_OFLD_LC);
-
+bool KestrelFw::ofld_send_batch() {
   bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FW_OFLD,
                          r::FWCMD_H2C_FUNC_CMD_OFLD_REG, _ofld_buf.data(),
                          static_cast<uint32_t>(_ofld_buf.size()));
-  /* Flow control: wait for the fw to post the IO-offload result to the C2H
-   * register and ACK it (clear the trigger). The ack releases the fw to return
-   * the H2C page; without it the H2C queue fills after a few batches and the
-   * next bulk-OUT jams (usbmon: 3 batches OK, then a 1s timeout). */
-  if (ok)
+  /* proc_cmd_ofld: send -> host-sleep the accumulated DELAY_OFLD time ->
+   * chk_cmd_ofld (c2hreg poll while RX is down). The result ack releases the
+   * fw to return the H2C page; without it the pool leaks dry and CH12 jams. */
+  if (ok) {
+    if (_ofld_accu_delay_us)
+      delay_us(_ofld_accu_delay_us);
     poll_cmd_ofld_result();
+  }
   _ofld_buf.clear();
   _ofld_cmd_num = 0;
+  _ofld_accu_delay_us = 0;
   return ok;
+}
+
+void KestrelFw::ofld_write(uint8_t src, uint8_t type, uint8_t path,
+                           uint16_t offset, uint32_t value, uint32_t mask) {
+  /* ofld_incompatible_full_cmd (fwofld.c:1026): when the 2000-byte buffer is
+   * full, force LC on the LAST buffered command and send — then buffer the
+   * new command into a fresh batch. */
+  if (_ofld_buf.size() + r::CMD_OFLD_SIZE > r::CMD_OFLD_MAX_LEN) {
+    uint8_t *last = _ofld_buf.data() + (_ofld_buf.size() - r::CMD_OFLD_SIZE);
+    put_le32(last, le32(last) | r::CMD_OFLD_LC);
+    ofld_send_batch();
+  }
+  ofld_append(src, type, path, offset, value, mask, /*lc=*/false);
+}
+
+bool KestrelFw::ofld_flush(OfldFlush style) {
+  /* Section-end flush: append the vendor's harmless LC sentinel — halbb ends
+   * with a BB write to 0x1a24 (mask 0xff, val 0) (halbb_fwofld.c:93); halrf
+   * ends with a 1 us DELAY_OFLD (halrf_write_fwofld_trigger). Sent even when
+   * the buffer is empty (vendor emits the sentinel unconditionally). */
+  if (_ofld_buf.size() + r::CMD_OFLD_SIZE > r::CMD_OFLD_MAX_LEN) {
+    uint8_t *last = _ofld_buf.data() + (_ofld_buf.size() - r::CMD_OFLD_SIZE);
+    put_le32(last, le32(last) | r::CMD_OFLD_LC);
+    if (!ofld_send_batch())
+      return false;
+  }
+  if (style == OfldFlush::BB)
+    ofld_append(r::OFLD_SRC_BB, r::OFLD_TYPE_WRITE, 0, r::BB_OFLD_FLUSH_ADDR,
+                0, r::BB_OFLD_FLUSH_MASK, /*lc=*/true);
+  else
+    ofld_append(r::OFLD_SRC_BB /* cmd = {0}: src stays 0 */, r::OFLD_TYPE_DELAY,
+                0, 0, /*value=*/1, 0, /*lc=*/true);
+  return ofld_send_batch();
 }
 
 bool KestrelFw::poll_cmd_ofld_result() {
@@ -401,18 +435,33 @@ bool KestrelFw::poll_cmd_ofld_result() {
    * drain data0..3, then clear TRIGGER (the ack). */
   for (uint32_t cnt = r::CMD_OFLD_POLL_CNT; cnt != 0; --cnt) {
     if (_device.rtw_read8(r::R_AX_C2HREG_CTRL) & r::B_AX_C2HREG_TRIGGER) {
-      (void)_device.rtw_read32(r::R_AX_C2HREG_DATA0);
-      (void)_device.rtw_read32(r::R_AX_C2HREG_DATA1);
+      const uint32_t d0 = _device.rtw_read32(r::R_AX_C2HREG_DATA0);
+      const uint32_t d1 = _device.rtw_read32(r::R_AX_C2HREG_DATA1);
       (void)_device.rtw_read32(r::R_AX_C2HREG_DATA2);
       (void)_device.rtw_read32(r::R_AX_C2HREG_DATA3);
       uint8_t ctrl = _device.rtw_read8(r::R_AX_C2HREG_CTRL);
       _device.rtw_write8(r::R_AX_C2HREG_CTRL,
                          static_cast<uint8_t>(ctrl & ~r::B_AX_C2HREG_TRIGGER));
+      _logger->debug("Kestrel H2C: cmd_ofld result c2hreg d0=0x{:08x} "
+                     "d1=0x{:08x}",
+                     d0, d1);
       return true;
     }
     delay_us(r::CMD_OFLD_POLL_US);
   }
-  _logger->warn("Kestrel H2C: cmd_ofld C2H-result poll timeout");
+  /* Distinguish "fw ignores the batch" from "fw crashed/SER". The SER error is
+   * only valid when HALT_C2H_CTRL is set (mac_get_err_status gates on it);
+   * HALT_C2H then carries the mac_ax_err_info code (0x2010 = L2_ERR_AH_HCI,
+   * 0x1000 = L1_ERR_DMAC, ...). */
+  const uint32_t ctrl = _device.rtw_read32(r::R_AX_HALT_C2H_CTRL);
+  const uint32_t err = _device.rtw_read32(r::R_AX_HALT_C2H);
+  _logger->warn("Kestrel H2C: cmd_ofld C2H-result poll timeout — "
+                "HALT_C2H_CTRL=0x{:08x} HALT_C2H=0x{:08x}{} UDM0=0x{:08x} "
+                "WCPU=0x{:08x} BOOT_DBG=0x{:08x}",
+                ctrl, err, ctrl ? " (SER latched)" : " (stale)",
+                _device.rtw_read32(r::R_AX_UDM0),
+                _device.rtw_read32(r::R_AX_WCPU_FW_CTRL),
+                _device.rtw_read32(r::R_AX_BOOT_DBG));
   return false;
 }
 
@@ -577,16 +626,20 @@ bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
   return false;
 }
 
-bool KestrelFw::download_firmware(uint8_t cut, uint8_t mss_idx) {
+bool KestrelFw::fw_pre_init() {
+  /* mac_hal_init pre-FWDL: hci_func_en (init.c:406) + dmac_pre_init (DLFW
+   * DLE/HFC, init.c:414). The caller runs usb_pre_init (intf_pre_init) after
+   * this, then download_firmware — vendor order. */
   if (_ch12_ep == 0) {
     _logger->error("Kestrel FWDL: no CH12 bulk-OUT endpoint (need >=3 bulk-out; "
                    "found {})",
                    _device.bulk_out_ep_count());
     return false;
   }
-  if (!hci_func_en() || !dmac_pre_init())
-    return false;
+  return hci_func_en() && dmac_pre_init();
+}
 
+bool KestrelFw::download_firmware(uint8_t cut, uint8_t mss_idx) {
   /* NICCE image, cut-selected: CBV(1) -> u2, CCV+(>=2) -> u3. */
   const uint8_t *fw;
   uint32_t len;
@@ -599,6 +652,12 @@ bool KestrelFw::download_firmware(uint8_t cut, uint8_t mss_idx) {
   }
   _logger->info("Kestrel FWDL: image {} ({} bytes) via ep 0x{:02x}",
                 cut >= 2 ? "u3_nicce" : "u2_nicce", len, _ch12_ep);
+
+  /* mac_hal_init WDT block (init.c:470, right before the CPU enable): no
+   * WDT wake on USB/PCIE, WDT platform-reset disabled (wdt_plt_rst_en=0).
+   * Golden capture: 0x0170 -> 0x00000000, 0x01e0 keeps bit16 clear. */
+  clr32(r::R_AX_SYS_CFG5, r::B_AX_WDT_WAKE_PCIE_EN | r::B_AX_WDT_WAKE_USB_EN);
+  clr32(r::R_AX_WCPU_FW_CTRL, r::B_AX_WDT_PLT_RST_EN);
 
   if (!disable_cpu())
     return false;

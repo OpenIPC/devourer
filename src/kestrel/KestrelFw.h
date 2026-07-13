@@ -22,23 +22,29 @@ class KestrelFw {
 public:
   KestrelFw(RtlAdapter device, Logger_t logger, ChipVariant variant);
 
-  /* Full M1b sequence: hci_func_en + dmac_pre_init (DLE/HFC for DLFW) +
-   * disable/enable WCPU + download the NICCE image for `cut` + fw-ready poll.
-   * `mss_idx` selects the secure-boot signature (HalKestrel::read_mss_index).
-   * Returns false on any poll timeout or FW error status (checksum/security/
-   * cut mismatch), all logged. */
+  /* mac_hal_init pre-FWDL half: hci_func_en + dmac_pre_init (DLE/HFC for
+   * DLFW). The caller then runs usb_pre_init (intf_pre_init, vendor order)
+   * before download_firmware. */
+  bool fw_pre_init();
+
+  /* The FWDL state machine: WDT config + disable/enable WCPU + download the
+   * NICCE image for `cut` + fw-ready poll. `mss_idx` selects the secure-boot
+   * signature (HalKestrel::read_mss_index). Returns false on any poll timeout
+   * or FW error status (checksum/security/cut mismatch), all logged. */
   bool download_firmware(uint8_t cut, uint8_t mss_idx);
 
   /* --- Firmware IO-offload (M3) — program BB/RF registers via H2C batches the
-   * firmware replays on-chip. On USB this is the only path that reaches the RF
-   * radio (the vendor issues ZERO direct BB/RF-window writes; see kaeru
-   * kestrel-fwofld). Usage: ofld_begin(); ofld_write(...)*N; ofld_flush().
-   * Commands accumulate and auto-flush at CMD_OFLD_MAX_LEN; the flush sets the
-   * LC bit on the last command so the FW executes the batch. --- */
+   * firmware replays on-chip (mac_add_cmd_ofld / halbb_fw_set_reg /
+   * halrf_wrf). Usage: ofld_begin(); ofld_write(...)*N; ofld_flush(style).
+   * Commands accumulate; a batch auto-flushes when full (LC forced on the last
+   * buffered command — ofld_incompatible_full_cmd). Section ends flush with a
+   * harmless LC sentinel: halbb appends a BB write to 0x1a24 (mask 0xff val 0),
+   * halrf appends a DELAY_OFLD of 1 us (halrf_write_fwofld_trigger). --- */
+  enum class OfldFlush { BB, RF };
   void ofld_begin();
   void ofld_write(uint8_t src, uint8_t type, uint8_t path, uint16_t offset,
                   uint32_t value, uint32_t mask);
-  bool ofld_flush();
+  bool ofld_flush(OfldFlush style = OfldFlush::BB);
 
   /* Send one radio-parameter page as an OUTSRC H2C (halrf radio-to-fw): `cls` =
    * OUTSRC_CL_RADIO_A/B, `page` = page index (H2C func), `packed` = the
@@ -55,6 +61,12 @@ private:
   /* Poll + ack the C2H-register mailbox after a cmd_ofld batch (flow control:
    * the ack releases the fw to return the H2C page). */
   bool poll_cmd_ofld_result();
+  /* Append one 16-byte cmd_ofld command to the batch buffer (no flush). */
+  void ofld_append(uint8_t src, uint8_t type, uint8_t path, uint16_t offset,
+                   uint32_t value, uint32_t mask, bool lc);
+  /* Send the accumulated batch (proc_cmd_ofld): LC must already be set on the
+   * last command. Sends, sleeps accu-delay, polls the c2hreg result. */
+  bool ofld_send_batch();
 
   /* --- register-op helpers (mirror HalKestrel; kept local to this TU) --- */
   void set32(uint16_t reg, uint32_t bits);
@@ -85,7 +97,8 @@ private:
   std::vector<uint8_t> _txbuf; /* reused H2C packet scratch */
   std::vector<uint8_t> _ofld_buf; /* accumulated cmd_ofld batch */
   uint32_t _ofld_cmd_num = 0;     /* commands in the current batch (resets/flush) */
-  uint8_t _h2c_seq = 0;           /* per-H2C sequence counter (runtime H2C) */
+  uint32_t _ofld_accu_delay_us = 0; /* DELAY_OFLD host-side wait after send */
+  uint8_t _h2c_seq = 0; /* fwinfo->h2c_seq: 8-bit rolling, all runtime H2Cs */
 };
 
 } /* namespace kestrel */

@@ -55,6 +55,15 @@ public:
    * cut version (from ReadChipInfo / R_AX_SYS_CFG1[15:12]). */
   bool download_firmware(uint8_t cut);
 
+  /* mac_sys_init (init.c:309): DMAC func-en (incl. CRPRT), CMAC clock + func
+   * enables (CK_EN then CMAC_FUNC_EN), chip_func_en OCP patch. Vendor order:
+   * FWDL -> set_enable_bb_rf -> THIS -> trx init. */
+  void mac_sys_init();
+
+  /* intf_init (usb_init_8852b): LFPS filter, RX bulk size, per-endpoint NUMP.
+   * Vendor order: runs AFTER trx init (+ feat_init, host-side no-op). */
+  void usb_intf_init() { usb_init(); }
+
   /* M2a — the DMAC half of mac_trx_init: re-init the DLE to the NIC-mode (SCC)
    * quota, station scheduler, MPDU processor, security engine. Must run after
    * download_firmware. Returns false on the sta-scheduler poll timeout. The
@@ -71,6 +80,11 @@ public:
    * channel bring-up (M3). */
   bool trx_cmac_rx_init();
 
+  /* SER error-interrupt-mask enable (mac_enable_imr + mac_err_imr_ctrl). The
+   * vendor arms this only after the first BB cmd_ofld batches — call it after
+   * phy_bb_rf_init, not inside the CMAC init. */
+  void enable_ser_imr() { mac_enable_imr(); }
+
   /* M3 — PHY bring-up: apply the halbb BB register + gain tables and the
    * halrf radio-A/B tables (via PhyTableLoaderKestrel). `rfe_type` / `cut`
    * select the table variant (from the efuse / chip id). Must run after the
@@ -82,6 +96,11 @@ public:
    * halbb ctrl_ch/ctrl_bw/cck_en/bb_reset + the halrf RF18 channel setting.
    * Must run after phy_bb_rf_init. */
   bool set_channel(uint8_t channel, ChannelWidth_t bw);
+
+  /* Firmware SER probe: returns the latched mac_ax_err_info code if the fw has
+   * posted a halt error (HALT_C2H_CTRL set), else 0. Logs a labeled line so the
+   * bring-up can pinpoint which init step crashes the running fw. */
+  uint32_t fw_err_state(const char *where);
 
   /* Chip cut version, read fresh from R_AX_SYS_CFG1[15:12]. */
   uint8_t read_cut();

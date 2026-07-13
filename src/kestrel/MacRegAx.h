@@ -234,13 +234,14 @@ constexpr uint8_t B_AX_HCI_FC_WP_CH07_FULL_COND_SH = 6;
 constexpr uint32_t B_AX_HCI_FC_WP_CH07_FULL_COND_MSK = 0x3;
 constexpr uint8_t B_AX_HCI_FC_WP_CH811_FULL_COND_SH = 8;
 constexpr uint32_t B_AX_HCI_FC_WP_CH811_FULL_COND_MSK = 0x3;
-/* usb_scc_8852b ch cfg {min,max,grp0}: ACH0-3 + B0MG + B0HI. */
+/* hfc_chcfg_usb_scc_turbo_8852b {min,max,grp0}: ACH0-3 + B0MG + B0HI
+ * (hci_fc.c:1073 — the TURBO family, matching the SCC_TURBO DLE quota). */
 constexpr uint16_t HFC_NIC_CH_MIN = 18;
-constexpr uint16_t HFC_NIC_CH_MAX = 152;
-/* hfc_pubcfg_usb_scc_8852b. */
-constexpr uint16_t HFC_NIC_PUB_G0 = 152;
+constexpr uint16_t HFC_NIC_CH_MAX = 210;
+/* hfc_pubcfg_usb_scc_turbo_8852b (hci_fc.c:1199). */
+constexpr uint16_t HFC_NIC_PUB_G0 = 210;
 constexpr uint16_t HFC_NIC_PUB_G1 = 0;
-constexpr uint16_t HFC_NIC_PUB_MAX = 152;
+constexpr uint16_t HFC_NIC_PUB_MAX = 210;
 constexpr uint16_t HFC_NIC_WP_THRD = 0;
 /* hfc_preccfg_usb_8852b. */
 constexpr uint16_t HFC_NIC_CH011_PREC = 9;
@@ -263,6 +264,15 @@ constexpr uint32_t B_AX_WCPU_FWDL_STS_MSK = 0x7;
 constexpr uint32_t B_AX_FWDL_PATH_RDY = 1u << 2;
 constexpr uint32_t B_AX_H2C_PATH_RDY = 1u << 1;
 constexpr uint32_t B_AX_WCPU_FWDL_EN = 1u << 0;
+/* mac_set_dut_env_mode (init.c:26): WCPU_FW_CTRL[29:28] = env (0 = normal). */
+constexpr uint8_t B_AX_FW_ENV_SH = 28;
+constexpr uint32_t B_AX_FW_ENV_MSK = 0x3;
+/* WDT block right before mac_enable_cpu (mac_hal_init): clear the WDT-wake
+ * enables, clear WDT_PLT_RST_EN (fwdl_info->wdt_plt_rst_en == 0). */
+constexpr uint32_t B_AX_WDT_PLT_RST_EN = 1u << 16; /* WCPU_FW_CTRL */
+constexpr uint16_t R_AX_SYS_CFG5 = 0x0170;
+constexpr uint32_t B_AX_WDT_WAKE_PCIE_EN = 1u << 10;
+constexpr uint32_t B_AX_WDT_WAKE_USB_EN = 1u << 9;
 constexpr uint16_t R_AX_BOOT_REASON = 0x01E6;
 constexpr uint8_t B_AX_BOOT_REASON_SH = 0;
 constexpr uint32_t B_AX_BOOT_REASON_MSK = 0x7;
@@ -353,6 +363,11 @@ constexpr uint8_t CMD_OFLD_OFFSET_SH = 16;
 constexpr uint32_t CMD_OFLD_OFFSET_MSK = 0xffff;
 constexpr uint32_t CMD_OFLD_SIZE = 16;     /* sizeof(fwcmd_cmd_ofld) */
 constexpr uint32_t CMD_OFLD_MAX_LEN = 2000; /* buffer / max content per H2C */
+/* halbb flushes every fwofld batch by appending a dummy LC-flagged BB write to
+ * 0x1a24 with mask 0xff, value 0 (halbb_fwofld.c:93 halbb_fwofld_bitmap_en) —
+ * the LC command is the trailing sentinel, never a real table entry. */
+constexpr uint16_t BB_OFLD_FLUSH_ADDR = 0x1a24;
+constexpr uint32_t BB_OFLD_FLUSH_MASK = 0xff;
 constexpr uint32_t MASKDWORD = 0xffffffffu;
 constexpr uint32_t MASKRF = 0x000fffffu; /* 20-bit RF register width */
 /* radio-to-fw (halrf) OUTSRC H2C classes: 8 = radio A, 9 = radio B, func = page. */
@@ -418,6 +433,9 @@ constexpr uint32_t TRXCFG_MPDU_PROC_ACT_FRWD = 0x02A95A95;
 constexpr uint32_t TRXCFG_MPDU_PROC_TF_FRWD = 0x0000AA55;
 constexpr uint32_t TRXCFG_MPDU_PROC_CUT_CTRL = 0x010E05F0;
 /* sec_eng_init. */
+constexpr uint16_t R_AX_SEC_MPDU_PROC = 0x9D04; /* |= APPEND_ICV|APPEND_MIC */
+constexpr uint32_t B_AX_APPEND_ICV = 1u << 1;
+constexpr uint32_t B_AX_APPEND_MIC = 1u << 0;
 constexpr uint16_t R_AX_SEC_ENG_CTRL = 0x9D00;
 constexpr uint32_t B_AX_TX_PARTIAL_MODE = 1u << 11;
 constexpr uint32_t B_AX_CLK_EN_CGCMP = 1u << 10;
@@ -430,21 +448,23 @@ constexpr uint32_t B_AX_BC_DEC = 1u << 2;
 constexpr uint32_t B_AX_SEC_RX_DEC = 1u << 1;
 constexpr uint32_t B_AX_SEC_TX_ENC = 1u << 0;
 
-/* NIC-mode SCC DLE quota. get_dle_mem_cfg selects dle_mem_usb3_8852b for the
- * 8852b in BOTH USB2 and USB3 modes (the usb2_8852b table is defined but never
- * referenced for this chip), so there is no speed dependence to encode here:
- * wde_size25 / ple_size33 / wde_qt25 / ple_qt74(min) / ple_qt75(max). */
-constexpr uint16_t SCC_WDE_LNK_PAGE = 166;  /* wde_size25 lnk */
-constexpr uint16_t SCC_WDE_UNLNK_PAGE = 90; /* wde_size25 unlnk */
-constexpr uint16_t SCC_PLE_LNK_PAGE = 624;  /* ple_size33 lnk */
-/* wde_qt25: hif/wcpu/pkt_in/cpu_io (min==max). */
-constexpr uint16_t SCC_WDE_QT_HIF = 152;
+/* NIC-mode DLE quota: the 8852BU USB hal runs qta_mode = MAC_AX_QTA_SCC_TURBO
+ * (rtl8852bu_halinit.c:33, quota_turbo default) and this rig enumerates USB2
+ * HS, so the live table is the dle_mem_usb2_8852b SCC_TURBO row:
+ * wde_size30 / ple_size31 / wde_qt30 / ple_qt27(min) / ple_qt28(max) —
+ * confirmed against the vendor golden capture register values. */
+constexpr uint16_t SCC_WDE_LNK_PAGE = 224;  /* wde_size30 lnk (dle.c:221) */
+constexpr uint16_t SCC_WDE_UNLNK_PAGE = 32; /* wde_size30 unlnk */
+constexpr uint16_t SCC_PLE_LNK_PAGE = 1392; /* ple_size31 lnk (dle.c:475) */
+/* wde_qt30: hif/wcpu/pkt_in/cpu_io (min==max) (dle.c:838). */
+constexpr uint16_t SCC_WDE_QT_HIF = 210;
 constexpr uint16_t SCC_WDE_QT_WCPU = 6;
 constexpr uint16_t SCC_WDE_QT_CPU_IO = 8;
-/* ple_qt74 (min) then ple_qt75 (max), 11 fields Q0..Q10 (cmac0_tx, cmac1_tx,
- * c2h, h2c, wcpu, mpdu_proc, cmac0_dma, cmac1_dma, bb_rpt, wd_rel, cpu_io). */
-constexpr uint16_t SCC_PLE_MIN[11] = {286, 0, 16, 48, 13, 13, 178, 0, 32, 14, 8};
-constexpr uint16_t SCC_PLE_MAX[11] = {286, 0, 32, 48, 29, 13, 194, 0, 48, 14, 24};
+/* ple_qt27 (min, dle.c:1352) then ple_qt28 (max, dle.c:1369), 11 fields
+ * Q0..Q10 (cmac0_tx, cmac1_tx, c2h, h2c, wcpu, mpdu_proc, cmac0_dma,
+ * cmac1_dma, bb_rpt, wd_rel, cpu_io). */
+constexpr uint16_t SCC_PLE_MIN[11] = {1040, 0, 16, 48, 13, 13, 178, 0, 32, 14, 8};
+constexpr uint16_t SCC_PLE_MAX[11] = {1040, 0, 32, 48, 43, 13, 208, 0, 62, 14, 24};
 
 /* ---- BB/RF enable (M3; hw.c set_enable_bb_rf) — releases the BB from reset
  * so the halbb/halrf register windows actually accept writes. All MAC/system
@@ -643,6 +663,18 @@ constexpr uint32_t B_AX_LTE_MUX_CTRL_PATH = 1u << 26; /* R_AX_LTE_CTRL+3 bit5 rd
 /* chip_func_en OCP patch (init.c mac_sys_init). */
 constexpr uint8_t B_AX_OCP_L1_SH = 13;
 constexpr uint32_t B_AX_OCP_L1_MSK = 0x7;
+
+/* mac_sys_init cmac_func_en (init.c:219): CK_EN (0xC004) gets the clock
+ * enables FIRST, then CMAC_FUNC_EN (0xC000) the block enables — both RMW-OR,
+ * band 0. Bits from mac_reg_ax.h:8161-8181. */
+constexpr uint16_t R_AX_CK_EN = 0xC004;
+constexpr uint32_t CMAC_CK_EN_BITS = /* CMAC|PHYINTF|CMAC_DMA|PTCLTOP|SCH|TMAC|RMAC CKEN */
+    (1u << 30) | (1u << 5) | (1u << 4) | (1u << 3) | (1u << 2) | (1u << 1) |
+    (1u << 0);
+constexpr uint16_t R_AX_CMAC_FUNC_EN = 0xC000;
+constexpr uint32_t CMAC_FUNC_EN_BITS = /* CRPRT|CMAC_EN|TXEN|RXEN|PHYINTF|DMA|PTCLTOP|SCH|TMAC|RMAC */
+    (1u << 31) | (1u << 30) | (1u << 29) | (1u << 28) | (1u << 5) |
+    (1u << 4) | (1u << 3) | (1u << 2) | (1u << 1) | (1u << 0);
 
 /* mac_enable_imr — SER interrupt masks (ser_imr_config + err_imr_ctrl). */
 constexpr uint16_t R_AX_PHYINFO_ERR_IMR = 0xCCFC;

@@ -68,27 +68,36 @@ bool RtlKestrelDevice::PowerOnAndReadEfuse(kestrel::EfuseInfo &out) {
 }
 
 bool RtlKestrelDevice::PowerOnEfuseAndFw(kestrel::EfuseInfo &out) {
+  /* Vendor order: efuse is processed AFTER the MAC hal init
+   * (rtl8852b_halinit.c:556) — FWDL first, then the efuse dump. */
   if (!_hal.power_on())
-    return false;
-  if (!_hal.read_efuse(out))
-    return false;
-  return _hal.download_firmware(_hal.read_cut());
-}
-
-bool RtlKestrelDevice::PowerOnFwAndTrx(kestrel::EfuseInfo &out) {
-  if (!_hal.power_on())
-    return false;
-  if (!_hal.read_efuse(out))
     return false;
   if (!_hal.download_firmware(_hal.read_cut()))
     return false;
-  /* Vendor mac_hal_init order: FWDL -> set_enable_bb_rf -> sys_init/trx_init.
-   * Enabling BB/RF here (not deferred to phy_bb_rf_init) means the firmware
-   * sees the BB/RF live as it starts its runtime init. */
+  return _hal.read_efuse(out);
+}
+
+bool RtlKestrelDevice::PowerOnFwAndTrx(kestrel::EfuseInfo &out) {
+  /* mac_hal_init order (init.c:336): pwr -> [pre-init+FWDL inside
+   * download_firmware] -> set_enable_bb_rf -> sys_init -> trx_init ->
+   * feat_init (host-side no-op) -> intf_init (usb) -> [efuse after]. */
+  if (!_hal.power_on())
+    return false;
+  if (!_hal.download_firmware(_hal.read_cut()))
+    return false;
+  _hal.fw_err_state("post-FWDL");
   _hal.enable_bb_rf();
+  _hal.mac_sys_init();
+  _hal.fw_err_state("post-sys_init");
   if (!_hal.trx_dmac_init())
     return false;
-  return _hal.trx_cmac_rx_init();
+  _hal.fw_err_state("post-dmac_init(DLE/HFC/usb)");
+  if (!_hal.trx_cmac_rx_init())
+    return false;
+  _hal.fw_err_state("post-cmac_init");
+  _hal.usb_intf_init();
+  _hal.fw_err_state("post-usb_init");
+  return _hal.read_efuse(out);
 }
 
 bool RtlKestrelDevice::PowerOnTrxAndPhy(kestrel::EfuseInfo &out) {
@@ -106,22 +115,15 @@ void RtlKestrelDevice::not_ported(const char *entry,
 
 bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
   _channel = channel;
-  if (!_hal.power_on())
-    return false;
-  if (!_hal.read_efuse(_efuse))
-    return false;
-  if (!_hal.download_firmware(_hal.read_cut()))
-    return false;
-  /* Vendor mac_hal_init order: FWDL -> set_enable_bb_rf -> sys_init/trx_init.
-   * Enabling BB/RF here (not deferred to phy_bb_rf_init) means the firmware
-   * sees the BB/RF live as it starts its runtime init. */
-  _hal.enable_bb_rf();
-  if (!_hal.trx_dmac_init())
-    return false;
-  if (!_hal.trx_cmac_rx_init())
+  /* hal_start_8852b order (rtl8852b_halinit.c:508): mac_hal_init [pwr ->
+   * FWDL -> enable_bb_rf -> sys_init -> trx_init -> intf_init] -> efuse ->
+   * BB/RF tables -> channel. */
+  if (!PowerOnFwAndTrx(_efuse))
     return false;
   if (!_hal.phy_bb_rf_init(_efuse.rfe_type, _hal.read_cut()))
     return false;
+  /* Vendor timing: arm the SER error IMR only after the BB/RF tables. */
+  _hal.enable_ser_imr();
   return _hal.set_channel(channel.Channel, channel.ChannelWidth);
 }
 

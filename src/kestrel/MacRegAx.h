@@ -817,6 +817,24 @@ constexpr uint16_t SCC_WDE_QT_CPU_IO = 8;
 constexpr uint16_t SCC_PLE_MIN[11] = {1040, 0, 16, 48, 13, 13, 178, 0, 32, 14, 8};
 constexpr uint16_t SCC_PLE_MAX[11] = {1040, 0, 32, 48, 43, 13, 208, 0, 62, 14, 24};
 
+/* 8852C USB3 SCC (NIC-mode) DLE quota — dle_mem_usb3_8852c: wde_size17/
+ * ple_size17/wde_qt16/ple_qt42(min)/ple_qt43(max). Differs substantially from
+ * the 8852B and — critically — carries a tx_rpt (PLE Q11) quota (16/41) that
+ * the 8852B set omits. Without a tx_rpt PLE reserve the fw cannot store a TX
+ * completion report, so an injected frame never releases its WD/PLE pages
+ * (no rpkt_type=4/7) and the mgmt bulk-OUT ~103/203-stalls. 12 fields
+ * Q0..Q11 (…cpu_io, tx_rpt). */
+constexpr uint16_t SCC_WDE_LNK_PAGE_8852C = 512;
+constexpr uint16_t SCC_WDE_UNLNK_PAGE_8852C = 0;
+constexpr uint16_t SCC_PLE_LNK_PAGE_8852C = 3312;
+constexpr uint16_t SCC_WDE_QT_HIF_8852C = 412;
+constexpr uint16_t SCC_WDE_QT_WCPU_8852C = 60;
+constexpr uint16_t SCC_WDE_QT_CPU_IO_8852C = 40;
+constexpr uint16_t SCC_PLE_MIN_8852C[12] = {1068, 0, 16, 48, 120, 13,
+                                            178,  0, 16, 38, 8,   16};
+constexpr uint16_t SCC_PLE_MAX_8852C[12] = {2859, 0, 32, 48, 145, 13,
+                                            178,  0, 16, 38, 8,   41};
+
 /* ---- BB/RF enable (M3; hw.c set_enable_bb_rf) — releases the BB from reset
  * so the halbb/halrf register windows actually accept writes. All MAC/system
  * space (wIndex=0). MUST run before applying the BB/RF tables. ---- */

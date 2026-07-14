@@ -573,25 +573,38 @@ bool HalKestrel::dle_init_nic() {
   auto field = [](uint32_t v, uint32_t val, uint32_t msk, uint8_t sh) {
     return r::set_clr_word(v, val, msk, sh);
   };
+  /* 8852C USB3 SCC (NIC) DLE quota — different sizes + a tx_rpt (Q11) reserve
+   * the 8852B set omits; without it the fw can't store a TX completion report
+   * and injected frames never release (the ~203-frame TX stall). */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint16_t wde_lnk = c ? r::SCC_WDE_LNK_PAGE_8852C : r::SCC_WDE_LNK_PAGE;
+  const uint16_t wde_unlnk =
+      c ? r::SCC_WDE_UNLNK_PAGE_8852C : r::SCC_WDE_UNLNK_PAGE;
+  const uint16_t ple_lnk = c ? r::SCC_PLE_LNK_PAGE_8852C : r::SCC_PLE_LNK_PAGE;
+  const uint16_t wde_hif = c ? r::SCC_WDE_QT_HIF_8852C : r::SCC_WDE_QT_HIF;
+  const uint16_t wde_wcpu = c ? r::SCC_WDE_QT_WCPU_8852C : r::SCC_WDE_QT_WCPU;
+  const uint16_t wde_cpuio = c ? r::SCC_WDE_QT_CPU_IO_8852C : r::SCC_WDE_QT_CPU_IO;
+  const uint16_t *ple_min = c ? r::SCC_PLE_MIN_8852C : r::SCC_PLE_MIN;
+  const uint16_t *ple_max = c ? r::SCC_PLE_MAX_8852C : r::SCC_PLE_MAX;
+  const int ple_qn = c ? 12 : 11; /* 8852C writes through Q11 (tx_rpt) */
   clr32(r::R_AX_DMAC_FUNC_EN, r::B_AX_DLE_WDE_EN | r::B_AX_DLE_PLE_EN);
 
-  /* WDE: 64B page, bound 0, free = lnk_pge_num (166). */
+  /* WDE: 64B page, bound 0, free = lnk_pge_num. */
   uint32_t v = _device.rtw_read32(r::R_AX_WDE_PKTBUF_CFG);
   v = field(v, r::S_AX_WDE_PAGE_SEL_64, r::B_AX_WDE_PAGE_SEL_MSK,
             r::B_AX_WDE_PAGE_SEL_SH);
   v = field(v, 0, r::B_AX_WDE_START_BOUND_MSK, r::B_AX_WDE_START_BOUND_SH);
-  v = field(v, r::SCC_WDE_LNK_PAGE, r::B_AX_WDE_FREE_PAGE_NUM_MSK,
+  v = field(v, wde_lnk, r::B_AX_WDE_FREE_PAGE_NUM_MSK,
             r::B_AX_WDE_FREE_PAGE_NUM_SH);
   _device.rtw_write32(r::R_AX_WDE_PKTBUF_CFG, v);
 
-  /* PLE: 128B page, bound = (166+90)*64/8192 = 2, free = 624. */
-  const uint32_t bound =
-      (r::SCC_WDE_LNK_PAGE + r::SCC_WDE_UNLNK_PAGE) * 64u / r::DLE_BOUND_UNIT;
+  /* PLE: 128B page, bound = (wde_lnk+unlnk)*64/8192, free = ple_lnk. */
+  const uint32_t bound = (wde_lnk + wde_unlnk) * 64u / r::DLE_BOUND_UNIT;
   v = _device.rtw_read32(r::R_AX_PLE_PKTBUF_CFG);
   v = field(v, r::S_AX_PLE_PAGE_SEL_128, r::B_AX_PLE_PAGE_SEL_MSK,
             r::B_AX_PLE_PAGE_SEL_SH);
   v = field(v, bound, r::B_AX_PLE_START_BOUND_MSK, r::B_AX_PLE_START_BOUND_SH);
-  v = field(v, r::SCC_PLE_LNK_PAGE, r::B_AX_PLE_FREE_PAGE_NUM_MSK,
+  v = field(v, ple_lnk, r::B_AX_PLE_FREE_PAGE_NUM_MSK,
             r::B_AX_PLE_FREE_PAGE_NUM_SH);
   _device.rtw_write32(r::R_AX_PLE_PKTBUF_CFG, v);
 
@@ -600,15 +613,15 @@ bool HalKestrel::dle_init_nic() {
         reg, (static_cast<uint32_t>(mn & r::QTA_SIZE_MSK) << r::QTA_MIN_SH) |
                  (static_cast<uint32_t>(mx & r::QTA_SIZE_MSK) << r::QTA_MAX_SH));
   };
-  /* WDE quota (min==max, wde_qt25). */
-  qta(r::R_AX_WDE_QTA0_CFG, r::SCC_WDE_QT_HIF, r::SCC_WDE_QT_HIF);
-  qta(r::R_AX_WDE_QTA1_CFG, r::SCC_WDE_QT_WCPU, r::SCC_WDE_QT_WCPU);
+  /* WDE quota (min==max). */
+  qta(r::R_AX_WDE_QTA0_CFG, wde_hif, wde_hif);
+  qta(r::R_AX_WDE_QTA1_CFG, wde_wcpu, wde_wcpu);
   qta(r::R_AX_WDE_QTA3_CFG, 0, 0);
-  qta(r::R_AX_WDE_QTA4_CFG, r::SCC_WDE_QT_CPU_IO, r::SCC_WDE_QT_CPU_IO);
-  /* PLE quota Q0..Q10 (min = ple_qt74, max = ple_qt75). */
-  for (int i = 0; i < 11; ++i)
-    qta(static_cast<uint16_t>(r::R_AX_PLE_QTA0_CFG + i * 4), r::SCC_PLE_MIN[i],
-        r::SCC_PLE_MAX[i]);
+  qta(r::R_AX_WDE_QTA4_CFG, wde_cpuio, wde_cpuio);
+  /* PLE quota Q0..Q10 (8852B) or Q0..Q11 (8852C, incl. tx_rpt). */
+  for (int i = 0; i < ple_qn; ++i)
+    qta(static_cast<uint16_t>(r::R_AX_PLE_QTA0_CFG + i * 4), ple_min[i],
+        ple_max[i]);
 
   set32(r::R_AX_DMAC_FUNC_EN, r::B_AX_DLE_WDE_EN | r::B_AX_DLE_PLE_EN);
   if (!chk_dle_rdy(r::R_AX_WDE_INI_STATUS,

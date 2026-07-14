@@ -1446,8 +1446,21 @@ void HalKestrel::enable_bb_rf() {
   set32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
   clr32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
   set32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
+  if (_variant == ChipVariant::C8852C) {
+    /* 8852C-only (hw.c is_chip_id(8852C)): RX ADC power (AFE LDO) + xtal
+     * ANAPAR block the 8852B recipe lacks. "for ADC PWR setting". */
+    uint32_t vldo = _device.rtw_read32(r::R_AX_AFE_OFF_CTRL1);
+    vldo &= ~r::LDO2PW_LDO_VSEL;
+    vldo |= (0x1u << r::B_AX_S0_LDO_VSEL_F_SH) |
+            (0x1u << r::B_AX_S1_LDO_VSEL_F_SH);
+    _device.rtw_write32(r::R_AX_AFE_OFF_CTRL1, vldo);
+    write_xtal_si(r::XTAL_SI_XTAL0, 0x7, 0xFF);
+    write_xtal_si(r::XTAL_SI_ANAPAR_WL, 0x6c, 0xFF);
+  }
   write_xtal_si(r::XTAL_SI_WL_RFC_S0, 0xC7, 0xFF);
   write_xtal_si(r::XTAL_SI_WL_RFC_S1, 0xC7, 0xFF);
+  if (_variant == ChipVariant::C8852C)
+    write_xtal_si(r::XTAL_SI_XTAL3, 0xd, 0xFF);
   _device.rtw_write8(r::R_AX_PHYREG_SET, r::PHYREG_SET_XYN_CYCLE);
   _logger->info("Kestrel: set_enable_bb_rf(1) after FWDL (BB/RF out of reset)");
 }
@@ -1478,8 +1491,21 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   set32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
   clr32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
   set32(r::R_AX_WLRF_CTRL, r::B_AX_AFC_AFEDIG);
+  if (_variant == ChipVariant::C8852C) {
+    /* 8852C-only (hw.c is_chip_id(8852C)): RX ADC power (AFE LDO) + xtal
+     * ANAPAR block the 8852B recipe lacks. "for ADC PWR setting". */
+    uint32_t vldo = _device.rtw_read32(r::R_AX_AFE_OFF_CTRL1);
+    vldo &= ~r::LDO2PW_LDO_VSEL;
+    vldo |= (0x1u << r::B_AX_S0_LDO_VSEL_F_SH) |
+            (0x1u << r::B_AX_S1_LDO_VSEL_F_SH);
+    _device.rtw_write32(r::R_AX_AFE_OFF_CTRL1, vldo);
+    write_xtal_si(r::XTAL_SI_XTAL0, 0x7, 0xFF);
+    write_xtal_si(r::XTAL_SI_ANAPAR_WL, 0x6c, 0xFF);
+  }
   write_xtal_si(r::XTAL_SI_WL_RFC_S0, 0xC7, 0xFF);
   write_xtal_si(r::XTAL_SI_WL_RFC_S1, 0xC7, 0xFF);
+  if (_variant == ChipVariant::C8852C)
+    write_xtal_si(r::XTAL_SI_XTAL3, 0xd, 0xFF);
   _device.rtw_write8(r::R_AX_PHYREG_SET, r::PHYREG_SET_XYN_CYCLE);
   _logger->info("Kestrel PHY: BB/RF enabled — WL_RFC_S0=0x{:02x} S1=0x{:02x} "
                 "(want C7) WLRF_CTRL=0x{:08x} SYS_FUNC_EN=0x{:08x}",

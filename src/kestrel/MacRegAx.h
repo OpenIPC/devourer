@@ -849,6 +849,14 @@ constexpr uint16_t R_AX_PHYREG_SET = 0x8040;
 constexpr uint8_t PHYREG_SET_XYN_CYCLE = 0xE;
 constexpr uint8_t XTAL_SI_WL_RFC_S0 = 0x80;
 constexpr uint8_t XTAL_SI_WL_RFC_S1 = 0x81;
+/* 8852C set_enable_bb_rf (hw.c) ADC/AFE + xtal block: XTAL0=0x7, ANAPAR=0x6c,
+ * XTAL3=0xd; AFE LDO for ADC power. */
+constexpr uint8_t XTAL_SI_XTAL0 = 0x0;
+constexpr uint8_t XTAL_SI_XTAL3 = 0x3;
+constexpr uint16_t R_AX_AFE_OFF_CTRL1 = 0x0444;
+constexpr uint32_t LDO2PW_LDO_VSEL = 0x3600000;
+constexpr uint8_t B_AX_S0_LDO_VSEL_F_SH = 21; /* [22:21] */
+constexpr uint8_t B_AX_S1_LDO_VSEL_F_SH = 24; /* [25:24] */
 
 /* ---- CMAC RX init (M2a cont.; trxcfg.c / rx_filter.c / mac_reg_ax.h) ---- */
 constexpr uint16_t R_AX_RXDMA_CTRL_0 = 0xC804;

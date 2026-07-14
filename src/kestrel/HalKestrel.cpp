@@ -1619,6 +1619,15 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
       center = static_cast<uint8_t>(channel + 2);
       pri_ch = 1;
     }
+  } else if (bw == CHANNEL_WIDTH_80) {
+    /* 80 MHz is 5 GHz-only; the block is fixed by the channel plan, so the
+     * primary's position (pri_ch 1..4) and the block center are derived from
+     * the channel number alone (offset is not needed). Blocks align on the
+     * 36 + 16k grid: {36,40,44,48}->center 42, {52..64}->58, {100..112}->106,
+     * {149..161}->155, ... block_start = ch - ((ch-36)/4 % 4)*4. */
+    const int bs = channel - (((channel - 36) / 4) % 4) * 4;
+    center = static_cast<uint8_t>(bs + 6);
+    pri_ch = static_cast<uint8_t>((channel - bs) / 4 + 1);
   }
 
   /* --- BB ctrl_ch (path A/B mode select) --- */
@@ -1641,8 +1650,15 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
     bb_rmw(0x12ac, 0xfff000u, 0x333);            /* RF mode */
     bb_rmw(0x32ac, 0xfff000u, 0x333);
     bb_rmw(0x237c, 1u << 0, pri_ch == 1 ? 1 : 0); /* CCK primary sub-channel */
+  } else if (bw == CHANNEL_WIDTH_80) {
+    bb_rmw(0x49C0, 0xC0000000u, 0x2); /* RF_BW [31:30]=2 (80) */
+    bb_rmw(0x49C4, 0x3000u, 0x0);     /* small BW [13:12]=0 */
+    bb_rmw(0x49C4, 0xf00u, pri_ch);   /* pri ch [11:8] (1..4) */
+    bb_rmw(0x12ac, 0xfff000u, 0xaaa); /* RF mode (base 8852B 80 MHz) */
+    bb_rmw(0x32ac, 0xfff000u, 0xaaa);
+    /* No CCK primary (0x237c) at 80 MHz — 5 GHz-only, no CCK. */
   } else {
-    _logger->warn("Kestrel set_channel: bw={} not ported (20/40 only)",
+    _logger->warn("Kestrel set_channel: bw={} not ported (20/40/80 only)",
                   static_cast<int>(bw));
   }
 
@@ -1672,7 +1688,8 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
    * (SetTxPowerOffsetQdb) is folded in here so it survives a channel change. */
   set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
 
-  const int bw_mhz = bw == CHANNEL_WIDTH_40 ? 40 : 20;
+  const int bw_mhz =
+      bw == CHANNEL_WIDTH_80 ? 80 : (bw == CHANNEL_WIDTH_40 ? 40 : 20);
   _logger->info("Kestrel PHY: tuned to ch{} (center {}) bw{} ({}) — "
                 "TXpwr={}dBm (off={}qdB)",
                 channel, center, bw_mhz, is_2g ? "2.4G" : "5G",

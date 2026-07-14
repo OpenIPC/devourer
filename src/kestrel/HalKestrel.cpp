@@ -1010,12 +1010,18 @@ void HalKestrel::usb_rx_agg_cfg() {
    * old code cleared bit 0, which is LEN_TH[0], NOT the enable bit (BIT31) —
    * so RXAGG stayed off-by-default and no RX reached the host bulk-IN.) The
    * 11ax rxd parser already walks multi-frame aggregates via next_offset. */
-  uint32_t v = _device.rtw_read32(r::R_AX_RXAGG_0);
+  const bool c8852c = (_variant == ChipVariant::C8852C);
+  const uint16_t rxagg0 = c8852c ? r::R_AX_RXAGG_0_V1 : r::R_AX_RXAGG_0;
+  /* pkt_num field: the vendor writes the field MSK (0xff) when the driver
+   * default is 0 (usb_rx_agg_cfg_8852c) — golden 8852C value 0x80ff2010. The
+   * 8852B path keeps 0 (unchanged, on-air-validated). */
+  const uint32_t pktnum = c8852c ? r::B_AX_RXAGG_PKTNUM_TH_MSK : 0u;
+  uint32_t v = _device.rtw_read32(rxagg0);
   v = (v & r::B_AX_RXAGG_SW_EN) | r::B_AX_RXAGG_EN |
       (static_cast<uint32_t>(r::RXAGGSIZE) << r::B_AX_RXAGG_LEN_TH_SH) |
       (static_cast<uint32_t>(r::RXAGGTO) << r::B_AX_RXAGG_TIMEOUT_TH_SH) |
-      (0u << r::B_AX_RXAGG_PKTNUM_TH_SH);
-  _device.rtw_write32(r::R_AX_RXAGG_0, v);
+      (pktnum << r::B_AX_RXAGG_PKTNUM_TH_SH);
+  _device.rtw_write32(rxagg0, v);
 }
 
 void HalKestrel::scheduler_init() {

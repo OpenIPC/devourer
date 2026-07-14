@@ -887,10 +887,16 @@ constexpr uint16_t RMAC_RX_MPDU_MAX_LEN = 31;
  * vendor ENABLES it (B_AX_RXAGG_EN) with DMA_STORE off and size/timeout
  * thresholds. NB: the enable bit is BIT(31), not bit 0 (bit 0 is LEN_TH[0]). */
 constexpr uint16_t R_AX_RXAGG_0 = 0x8900;
+/* 8852C USB RXAGG engine is the _V1 register (usb_rx_agg_cfg_8852c); same bit
+ * layout. Enabling RXAGG on the 8852B address leaves the 8852C's engine off, so
+ * WiFi frames never aggregate onto the bulk-IN (only C2H, via a separate path)
+ * and monitor RX is deaf on both bands. */
+constexpr uint16_t R_AX_RXAGG_0_V1 = 0x6000;
 constexpr uint32_t B_AX_RXAGG_EN = 1u << 31;
 constexpr uint32_t B_AX_RXAGG_DMA_STORE = 1u << 30;
 constexpr uint32_t B_AX_RXAGG_SW_EN = 1u << 29;
 constexpr uint8_t B_AX_RXAGG_PKTNUM_TH_SH = 16;
+constexpr uint32_t B_AX_RXAGG_PKTNUM_TH_MSK = 0xff;
 constexpr uint8_t B_AX_RXAGG_TIMEOUT_TH_SH = 8;
 constexpr uint8_t B_AX_RXAGG_LEN_TH_SH = 0;
 /* _usb.h: RXAGGSIZE=0x5 (unit 4k), RXAGGTO=0x20 (timeout), pkt_num=0. */

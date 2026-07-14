@@ -126,7 +126,10 @@ public:
   /* M3 — tune the BB + RF to a monitor channel (2.4/5 GHz, 20 MHz). Ports the
    * halbb ctrl_ch/ctrl_bw/cck_en/bb_reset + the halrf RF18 channel setting.
    * Must run after phy_bb_rf_init. */
-  bool set_channel(uint8_t channel, ChannelWidth_t bw);
+  /* `offset` = SelectedChannel.ChannelOffset (HAL_PRIME_CHNL_OFFSET: 1=primary
+   * lower / secondary above, 2=primary upper / secondary below); ignored for
+   * 20 MHz. For 40 MHz the RF tunes to the block center = primary +/- 2. */
+  bool set_channel(uint8_t channel, ChannelWidth_t bw, uint8_t offset = 0);
 
   /* halbb_set_txpwr_dbm_8852b: force a fixed BB TX power target (overriding the
    * per-rate/TSSI tables — the pragmatic injection-driver model, like the
@@ -255,6 +258,10 @@ private:
   /* Full halrf channel setting (halrf_ctrl_ch_8852b): DAV+DDV x path A/B with
    * the path-A synth lock (halrf_set_s0_arfc18: 0xd3[8]/poll 0xb7[8]). */
   void rf_ctrl_ch(uint8_t channel, bool is_2g);
+  /* halrf_bw_setting_8852b: set the RF18 bandwidth bits [11:10] (DAV+DDV x
+   * path A/B): 40 MHz=BIT11, 80 MHz=BIT10, 20/5/10=both. Called after
+   * rf_ctrl_ch on a bandwidth change. */
+  void rf_ctrl_bw(ChannelWidth_t bw);
   void bb_reset_all();
   /* M2a DMAC sub-inits (trxcfg.c). */
   bool dle_init_nic();

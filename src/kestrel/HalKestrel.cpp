@@ -1551,6 +1551,28 @@ void HalKestrel::rf_ctrl_ch(uint8_t channel, bool is_2g) {
   ch_setting(1, false); /* DDV path B */
 }
 
+void HalKestrel::rf_ctrl_bw(ChannelWidth_t bw) {
+  /* halrf_bw_setting_8852b: RF18 [11:10] bandwidth bits, DAV (0x18) + DDV
+   * (0x10018) x path A/B. 40 MHz=BIT11, 80 MHz=BIT10, 20/5/10=both. */
+  auto bw_set = [&](uint8_t path, bool is_dav) {
+    const uint32_t reg18 = is_dav ? 0x18u : 0x10018u;
+    uint32_t v = rf_rrf(path, reg18, r::MASKRF);
+    v &= ~((1u << 11) | (1u << 10));
+    if (bw == CHANNEL_WIDTH_40)
+      v |= (1u << 11);
+    else if (bw == CHANNEL_WIDTH_80)
+      v |= (1u << 10);
+    else
+      v |= (1u << 11) | (1u << 10); /* 20/5/10 */
+    v = (v & 0xf0fffu) | (1u << 12);
+    rf_wrf(path, reg18, r::MASKRF, v);
+  };
+  bw_set(0, true);  /* DAV path A */
+  bw_set(1, true);  /* DAV path B */
+  bw_set(0, false); /* DDV path A */
+  bw_set(1, false); /* DDV path B */
+}
+
 void HalKestrel::set_txpwr_dbm(int16_t dbm_q2) {
   /* halbb_set_txpwr_dbm_8852b (halbb_8852b_api.c): arm fixed-dBm mode, then
    * write the s(9,2) target into the 9-bit field. bb_rmw shifts the value into
@@ -1580,14 +1602,30 @@ void HalKestrel::bb_reset_all() {
   bb_rmw(0xc3c, 1u << 9, 0);
 }
 
-bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
+bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
+                             uint8_t offset) {
   const bool is_2g = channel <= 14;
+  /* The RF synth tunes to the bandwidth-block CENTER; `channel` is the primary
+   * 20. For 40 MHz: offset UPPER(2) => primary is the upper 20 (center = ch-2,
+   * pri_ch=2); otherwise LOWER (center = ch+2, pri_ch=1). `pri_ch` is the BB
+   * primary-sub index (0x49C4[11:8]); 20 MHz uses 0. */
+  uint8_t center = channel;
+  uint8_t pri_ch = 0;
+  if (bw == CHANNEL_WIDTH_40) {
+    if (offset == 2) {
+      center = static_cast<uint8_t>(channel - 2);
+      pri_ch = 2;
+    } else {
+      center = static_cast<uint8_t>(channel + 2);
+      pri_ch = 1;
+    }
+  }
 
   /* --- BB ctrl_ch (path A/B mode select) --- */
   bb_rmw(0x4738, 1u << 17, is_2g ? 1 : 0);
   bb_rmw(0x4AA4, 1u << 17, is_2g ? 1 : 0);
 
-  /* --- BB ctrl_bw: 20 MHz --- */
+  /* --- BB ctrl_bw (halbb_ctrl_bw_8852b) --- */
   if (bw == CHANNEL_WIDTH_20) {
     bb_rmw(0x49C0, 0xC0000000u, 0x0); /* RF_BW [31:30]=0 */
     bb_rmw(0x49C4, 0x3000u, 0x0);     /* small BW [13:12]=0 */
@@ -1596,8 +1634,15 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
     bb_rmw(0x32ac, 0xfff000u, 0x333);
     bb_rmw(0x4738, 0x10000u, 0x1); /* ACI detect [16]=1 */
     bb_rmw(0x4AA4, 0x10000u, 0x1);
+  } else if (bw == CHANNEL_WIDTH_40) {
+    bb_rmw(0x49C0, 0xC0000000u, 0x1);            /* RF_BW [31:30]=1 (40) */
+    bb_rmw(0x49C4, 0x3000u, 0x0);                /* small BW [13:12]=0 */
+    bb_rmw(0x49C4, 0xf00u, pri_ch);              /* pri ch [11:8] */
+    bb_rmw(0x12ac, 0xfff000u, 0x333);            /* RF mode */
+    bb_rmw(0x32ac, 0xfff000u, 0x333);
+    bb_rmw(0x237c, 1u << 0, pri_ch == 1 ? 1 : 0); /* CCK primary sub-channel */
   } else {
-    _logger->warn("Kestrel set_channel: only 20 MHz ported (bw={})",
+    _logger->warn("Kestrel set_channel: bw={} not ported (20/40 only)",
                   static_cast<int>(bw));
   }
 
@@ -1606,13 +1651,17 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
   bb_rmw(0x2344, 1u << 31, is_2g ? 0 : 1);
 
   /* --- RF channel: full halrf_ctrl_ch_8852b (DAV+DDV x path A/B, with the
-   * path-A synthesizer LCK lock). --- */
-  rf_ctrl_ch(channel, is_2g);
+   * path-A synthesizer LCK lock). Tunes to the block CENTER. --- */
+  rf_ctrl_ch(center, is_2g);
+
+  /* --- RF bandwidth (halrf_bw_setting_8852b: RF18 [11:10]) --- */
+  if (bw != CHANNEL_WIDTH_20)
+    rf_ctrl_bw(bw);
 
   /* --- RX gain-error: apply the cached per-band LNA/TIA gain to the BB
    * front-end (halbb_set_gain_error_8852b). Part of the vendor per-channel BB
-   * setup; required for 5 GHz RX sensitivity. --- */
-  set_gain_error(channel);
+   * setup; required for 5 GHz RX sensitivity. Uses the block center. --- */
+  set_gain_error(center);
 
   /* --- BB reset --- */
   bb_reset_all();
@@ -1623,8 +1672,10 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw) {
    * (SetTxPowerOffsetQdb) is folded in here so it survives a channel change. */
   set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
 
-  _logger->info("Kestrel PHY: tuned to ch{} bw20 ({}) — TXpwr={}dBm (off={}qdB)",
-                channel, is_2g ? "2.4G" : "5G",
+  const int bw_mhz = bw == CHANNEL_WIDTH_40 ? 40 : 20;
+  _logger->info("Kestrel PHY: tuned to ch{} (center {}) bw{} ({}) — "
+                "TXpwr={}dBm (off={}qdB)",
+                channel, center, bw_mhz, is_2g ? "2.4G" : "5G",
                 (_txpwr_dbm_q2 + _txpwr_offset_qdb) / 4, _txpwr_offset_qdb);
 
   /* Diagnostic readback: confirm the writes landed and where RX stands.

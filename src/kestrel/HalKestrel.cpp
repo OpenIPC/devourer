@@ -2816,6 +2816,9 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
                            : bw == CHANNEL_WIDTH_40 ? 1
                                                     : 0;
     iqk_8852c(iqk_band, iqk_bw, center);
+    /* RFK order: IQK -> TSSI -> DPK. TSSI not ported (keeps the working
+     * fixed-dBm TX power); DPK is additive + self-disabling on cal fail. */
+    dpk_8852c(iqk_band, iqk_bw, center);
   }
 
   /* --- BB reset --- */

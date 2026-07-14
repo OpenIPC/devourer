@@ -1257,12 +1257,13 @@ void HalKestrel::sch_tx_en() {
       _device.rtw_read32(r::R_AX_CTN_DRV_TXEN) | r::B_AX_CTN_DRV_TXEN_ALL);
   _logger->info("Kestrel TRX: CTN_TXEN=0x{:04x} + CTN_DRV_TXEN enabled", v);
 
-  /* Clear the CMAC CCA medium-busy gates (R_AX_CCA_CFG_0 bits 0-4). Without the
-   * RX-DCK/DACK BB calibration (not yet ported) the carrier/energy detectors
-   * report a perpetual busy that freezes the CSMA backoff, so the scheduler
-   * never grants a TX opportunity and injected frames stall in the MBH queue
-   * (~103-frame stall). Disabling the CCA gates lets frames air — the intended
-   * TX/monitor mode; on-air validated (the 8852BU radiates). */
+  /* Clear the CMAC CCA medium-busy gates (R_AX_CCA_CFG_0 bits 0-4). The
+   * carrier/energy detectors report a perpetual busy that freezes the CSMA
+   * backoff, so the scheduler never grants a TX opportunity and injected frames
+   * stall in the MBH queue (~103-frame stall). DACK/RX-DCK/ADDCK are applied,
+   * but carrier-sense TX needs the deeper RF cal (IQK/DPK) that isn't ported;
+   * disabling the gates lets frames air — the intended TX/monitor mode, on-air
+   * validated (both the 8852BU and 8832CU radiate). */
   if (_cca_on) {
     /* Experimental (DEVOURER_KESTREL_CCA_ON): leave the CCA gates ENABLED for a
      * carrier-sense TX test. NB: measured NOT sufficient on its own — TX still

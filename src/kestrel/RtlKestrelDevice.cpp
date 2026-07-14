@@ -284,7 +284,7 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
             p.RxAtrib.pkt_len = static_cast<uint16_t>(f.payload_len);
             p.RxAtrib.crc_err = f.crc_err;
             p.RxAtrib.icv_err = f.icv_err;
-            p.RxAtrib.data_rate = static_cast<uint8_t>(f.rx_rate);
+            p.RxAtrib.data_rate = f.rx_rate; /* 9-bit AX code (HE >= 0x180) */
             p.RxAtrib.tsfl = f.freerun_cnt;
             p.RxAtrib.rssi[0] = _last_rssi[0];
             p.RxAtrib.rssi[1] = _last_rssi[1];

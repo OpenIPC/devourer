@@ -310,6 +310,26 @@ private:
   void dack(); /* DAC-side MSBK + DADCK auto-cal (halrf_dack_8852b s0/s1) */
   uint16_t _addck_d[2][2] = {}; /* [path][ic/qc] ADC DC-offset backup */
 
+  /* 8852C-specific DACK/ADDCK (halrf_dack_8852c.c). The 8852b-derived sequence
+   * above times out on the 8852C (different ADC-DC-cal registers), desensing
+   * its RX; dac_cal() dispatches here for C8852C. Extra backup state the 8852C
+   * reload path needs: DAC-side MSBK / DADCK / biasK per path/index. */
+  void dac_cal_8852c();
+  void drck_8852c();
+  void dack_manual_off_8852c();
+  void addck_ori_8852c();
+  void addck_reload_8852c();
+  void adc_cfg_8852c(ChannelWidth_t bw, uint8_t path);
+  void txck_force_8852c(uint8_t path, bool force, uint8_t ck);
+  void rxck_force_8852c(uint8_t path, bool force, uint8_t ck);
+  void dack_reset_8852c(uint8_t path);
+  void dack_backup_8852c(uint8_t path);
+  void dack_reload_8852c(uint8_t path);
+  void dack_8852c();
+  uint8_t _msbk_d[2][2][16] = {}; /* [path][ic/qc][bit] DAC MSBK backup */
+  uint8_t _dadck_d[2][2] = {};    /* [path][ic/qc] DAC DC-offset backup */
+  uint16_t _biask_d[2][2] = {};   /* [path][ic/qc] DAC bias-K backup */
+
 public:
   void bb_reset_all();
   /* M2a DMAC sub-inits (trxcfg.c). */

@@ -24,6 +24,11 @@ constexpr uint8_t QSEL_SH = 17;            /* wd_body dword2 [22:17] */
 constexpr uint8_t MACID_SH = 24;           /* wd_body dword2 [30:24] */
 constexpr uint8_t WIFI_SEQ_SH = 0;         /* wd_body dword3 [11:0] */
 constexpr uint32_t USERATE_SEL = 1u << 30; /* wd_info dword0 (force f_rate) */
+/* 8852C wd_body_t_v1: the rate word (USERATE_SEL/BW/GI/DATARATE) moved OUT of
+ * wd_info dword0 into wd_body dword7 (offset 28), and USERATE_SEL is BIT(31)
+ * there (AX_TXD_USERATE_SEL_V1) — LDPC/STBC/DISDATAFB stay in wd_info dword0. */
+constexpr uint32_t USERATE_SEL_V1 = 1u << 31; /* wd_body dword7 (force f_rate) */
+constexpr uint8_t WD_BODY_DWORD7_OFF = 28;    /* rate word in the V1 wd_body */
 constexpr uint8_t DATARATE_SH = 16;        /* wd_info dword0 [24:16] */
 constexpr uint32_t DISDATAFB = 1u << 10;   /* wd_info dword0 (no rate FB) */
 constexpr uint32_t DATA_LDPC = 1u << 11;   /* wd_info dword0 */
@@ -94,6 +99,29 @@ struct TxRate {
   bool stbc = false;
 };
 
+/* Write the forced-rate fields into the descriptor. On the 8852B (24-byte
+ * wd_body) the whole rate word plus LDPC/STBC/DISDATAFB packs into wd_info
+ * dword0 (at wd+wd_body_len). On the 8852C (32-byte wd_body_t_v1) the vendor
+ * txdes_proc_*_8852c splits it: USERATE_SEL_V1(BIT31)|DATA_BW|GI_LTF|DATARATE go
+ * in wd_body dword7 (offset 28), while DISDATAFB|LDPC|STBC stay in wd_info
+ * dword0 (offset 32). Writing the rate to the wrong dword leaves f_rate/
+ * userate_sel=0, so with no CCTL/macid entry the scheduler can't resolve a rate
+ * and the frame never leaves the WDE (bulk-OUT NAKs once the FIFO fills). */
+inline void put_txdesc_rate(uint8_t *wd, uint32_t wd_body_len, const TxRate &r) {
+  const uint32_t rate_word =
+      (static_cast<uint32_t>(r.rate & 0x1ff) << txd::DATARATE_SH) |
+      (static_cast<uint32_t>(r.bw & 0x3) << txd::DATA_BW_SH) |
+      (static_cast<uint32_t>(r.gi_ltf & 0x7) << txd::GI_LTF_SH);
+  const uint32_t fb_word = txd::DISDATAFB | (r.ldpc ? txd::DATA_LDPC : 0) |
+                           (r.stbc ? txd::DATA_STBC : 0);
+  if (wd_body_len == WD_BODY_LEN_V1) {
+    txd_put_le32(wd + txd::WD_BODY_DWORD7_OFF, txd::USERATE_SEL_V1 | rate_word);
+    txd_put_le32(wd + wd_body_len, fb_word); /* wd_info dword0 */
+  } else {
+    txd_put_le32(wd + wd_body_len, txd::USERATE_SEL | rate_word | fb_word);
+  }
+}
+
 inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
                                               uint32_t frame_len,
                                               const TxRate &r, uint8_t macid,
@@ -121,17 +149,11 @@ inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
   txd_put_le32(wd + 12, static_cast<uint32_t>(seq & 0xfff) << txd::WIFI_SEQ_SH);
   /* dword4,5 (+ v1 dword6,7) = 0 */
 
-  /* wd_info dword0: force the rate (USERATE_SEL) + DATARATE + BW + GI/LTF +
-   * LDPC/STBC + no fallback. */
-  uint8_t *wi = wd + wd_body_len;
-  txd_put_le32(wi + 0,
-               txd::USERATE_SEL | txd::DISDATAFB |
-                   (static_cast<uint32_t>(r.rate & 0x1ff) << txd::DATARATE_SH) |
-                   (static_cast<uint32_t>(r.bw & 0x3) << txd::DATA_BW_SH) |
-                   (static_cast<uint32_t>(r.gi_ltf & 0x7) << txd::GI_LTF_SH) |
-                   (r.ldpc ? txd::DATA_LDPC : 0) |
-                   (r.stbc ? txd::DATA_STBC : 0));
-  /* wd_info dword1..5 = 0 */
+  /* Rate fields: force the rate (USERATE_SEL) + DATARATE + BW + GI/LTF +
+   * LDPC/STBC + no fallback. On the 8852B (24-byte wd_body) these all live in
+   * wd_info dword0; on the 8852C (32-byte wd_body_t_v1) the rate word moved to
+   * wd_body dword7 and only LDPC/STBC/DISDATAFB stay in wd_info dword0. */
+  put_txdesc_rate(wd, wd_body_len, r);
 
   std::memcpy(wd + txd_len, frame, frame_len);
   return buf;
@@ -163,15 +185,8 @@ inline std::vector<uint8_t> build_data_txdesc(const uint8_t *frame,
                    (static_cast<uint32_t>(macid & 0x7f) << txd::MACID_SH));
   /* dword3: WIFI_SEQ (no ampdu_en). */
   txd_put_le32(wd + 12, static_cast<uint32_t>(seq & 0xfff) << txd::WIFI_SEQ_SH);
-  /* wd_info dword0: same rate fields as mgmt. */
-  uint8_t *wi = wd + wd_body_len;
-  txd_put_le32(wi + 0,
-               txd::USERATE_SEL | txd::DISDATAFB |
-                   (static_cast<uint32_t>(r.rate & 0x1ff) << txd::DATARATE_SH) |
-                   (static_cast<uint32_t>(r.bw & 0x3) << txd::DATA_BW_SH) |
-                   (static_cast<uint32_t>(r.gi_ltf & 0x7) << txd::GI_LTF_SH) |
-                   (r.ldpc ? txd::DATA_LDPC : 0) |
-                   (r.stbc ? txd::DATA_STBC : 0));
+  /* Rate fields: same split as mgmt (V1 -> wd_body dword7, else wd_info d0). */
+  put_txdesc_rate(wd, wd_body_len, r);
   std::memcpy(wd + txd_len, frame, frame_len);
   return buf;
 }

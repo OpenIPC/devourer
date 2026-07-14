@@ -123,6 +123,14 @@ public:
    * and the RX loop build on it. */
   bool phy_bb_rf_init(uint8_t rfe_type, uint8_t cut);
 
+  /* halbb_ctrl_tx_path_tmac_8852c (halbb_8852c_api.c): program the 0xD800..
+   * 0xD82C "path-com" IFFT-routing block that connects the BB IFFT output to
+   * the TX chain under T-MAC control. The 8852B has no equivalent (it selects
+   * the TX antenna per-STA via the CMAC antenna model in the TXWD/cctl), so
+   * the 8852B-derived bring-up omits it entirely — without it the 8852C RF
+   * synth locks but nothing radiates. RF_PATH_A, single-PHY (dbcc off). */
+  void ctrl_tx_path_tmac_8852c();
+
   /* M3 — tune the BB + RF to a monitor channel (2.4/5 GHz, 20 MHz). Ports the
    * halbb ctrl_ch/ctrl_bw/cck_en/bb_reset + the halrf RF18 channel setting.
    * Must run after phy_bb_rf_init. */

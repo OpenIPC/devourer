@@ -1575,7 +1575,45 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   _logger->info("Kestrel PHY: BB+RF tables applied via fw-offload "
                 "(rfe=0x{:02x} cut={}) — BB0x4004=0x{:08x} (want CA014000)",
                 rfe_type, cut, bb4004);
+
+  /* 8852C only: connect the BB IFFT output to the TX chain (T-MAC path-com).
+   * The 8852B path routes TX per-STA via the CMAC antenna model and so has no
+   * analogue; the 8852C needs this explicit routing block or the TX chain is
+   * silent even though the RF synth locks. Part of the vendor trx-init. */
+  if (_variant == ChipVariant::C8852C)
+    ctrl_tx_path_tmac_8852c();
+
   return true;
+}
+
+void HalKestrel::ctrl_tx_path_tmac_8852c() {
+  /* halbb_ctrl_tx_path_tmac_8852c, RF_PATH_A / single-PHY (dbcc off).
+   * The 0xDC00.. and 0xD800.. registers are CMAC band-0 power-region MAC
+   * registers (mac_write_pwr_reg: band-0 -> direct MAC_REG_W32 at the raw
+   * offset, region R_AX_PWR_RATE_CTRL 0xD200..0xFFFF), so they take a plain
+   * rtw_write32. 0x09a4 / 0x58dc are BB-window registers (bb_rmw). */
+
+  /* powermap clear: 0xDC00..0xDC28 (11 dwords). */
+  for (uint16_t off = 0; off <= 4 * 10; off += 4)
+    _device.rtw_write32(0xDC00 + off, 0x0);
+
+  /* 0x9a4[4:2] tx path_en / path_map_{a,b} source = 0 (T-MAC TX). */
+  bb_rmw(0x09a4, 0x1c, 0x0);
+
+  /* path-com CRs, RF_PATH_A: path_a enable, path_a connect ifft0. */
+  static const uint32_t path_com[][2] = {
+      {0xD800, 0x08889880}, {0xD804, 0x13111111}, {0xD808, 0x01209313},
+      {0xD80C, 0x49249249}, {0xD810, 0x1C9C9C49}, {0xD814, 0x39393939},
+      {0xD818, 0x39393939}, {0xD81C, 0x39393939}, {0xD820, 0x00003939},
+      {0xD824, 0x00000000}, {0xD828, 0xE0000000}, {0xD82C, 0x00000000}};
+  for (const auto &e : path_com)
+    _device.rtw_write32(static_cast<uint16_t>(e[0]), e[1]);
+
+  /* TSSI reset (path A): 0x58dc[31:30] = 1 then 3. */
+  bb_rmw(0x58dc, 0xC0000000u, 0x1);
+  bb_rmw(0x58dc, 0xC0000000u, 0x3);
+
+  _logger->info("Kestrel PHY(8852C): T-MAC TX path-com routed (RF_PATH_A)");
 }
 
 namespace {

@@ -203,6 +203,7 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
   /* TX-only: enable the CMAC port + scheduler contention queues (this clears
    * the CCA gates — see EnableTxScheduler). Kept out of BringUpMonitor so the
    * pure-monitor RX path keeps CCA on and can actually hear frames. */
+  _hal.set_cca_on(_cfg.debug.kestrel_cca_on);
   EnableTxScheduler();
   _tx_mgmt_ep = _device.nth_bulk_out_ep(0); /* B0MG -> BULKOUTID0 */
   _tx_data_ep = _device.nth_bulk_out_ep(3); /* ACH0 -> BULKOUTID3 */

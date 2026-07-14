@@ -262,6 +262,10 @@ private:
    * path A/B): 40 MHz=BIT11, 80 MHz=BIT10, 20/5/10=both. Called after
    * rf_ctrl_ch on a bandwidth change. */
   void rf_ctrl_bw(ChannelWidth_t bw);
+  /* halrf_rx_dck_8852b (RFC path): per-path RX DC-offset calibration. Corrects
+   * the RX DC term the CCA/EDCCA energy detector otherwise reads as a perpetual
+   * medium-busy. Run after the channel is tuned. */
+  void rx_dck();
   void bb_reset_all();
   /* M2a DMAC sub-inits (trxcfg.c). */
   bool dle_init_nic();
@@ -312,6 +316,10 @@ private:
   KestrelFw _fw; /* persistent: owns the CH12 H2C transport + IO-offload */
   int16_t _txpwr_dbm_q2 = 20 * 4; /* fixed BB TX power, s(9,2); 20 dBm default */
   int16_t _txpwr_offset_qdb = 0;  /* runtime offset (quarter-dB), sticky */
+  bool _cca_on = false; /* DEVOURER_KESTREL_CCA_ON: keep CCA gates on (test) */
+
+public:
+  void set_cca_on(bool on) { _cca_on = on; }
 };
 
 } /* namespace kestrel */

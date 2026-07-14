@@ -1125,6 +1125,16 @@ void HalKestrel::sch_tx_en() {
    * never grants a TX opportunity and injected frames stall in the MBH queue
    * (~103-frame stall). Disabling the CCA gates lets frames air — the intended
    * TX/monitor mode; on-air validated (the 8852BU radiates). */
+  if (_cca_on) {
+    /* Experimental (DEVOURER_KESTREL_CCA_ON): leave the CCA gates ENABLED to
+     * test whether the ported RX-DCK calibration fixed the perpetual-busy so
+     * carrier-sense TX works. If frames still air, RX-DCK is sufficient; if TX
+     * stalls, DACK is also needed. */
+    _logger->info("Kestrel TRX: CCA gates LEFT ON (CCA_CFG_0=0x{:08x}) — "
+                  "carrier-sense TX test",
+                  _device.rtw_read32(r::R_AX_CCA_CFG_0));
+    return;
+  }
   clr32(r::R_AX_CCA_CFG_0, r::B_AX_CCA_ALL_EN);
   _logger->info("Kestrel TRX: CCA TX gates cleared (CCA_CFG_0=0x{:08x})",
                 _device.rtw_read32(r::R_AX_CCA_CFG_0));
@@ -1573,6 +1583,28 @@ void HalKestrel::rf_ctrl_bw(ChannelWidth_t bw) {
   bw_set(1, false); /* DDV path B */
 }
 
+void HalKestrel::rx_dck() {
+  /* halrf_rx_dck_8852b, RFC (non-AFE) path, no TSSI (devourer isn't in TSSI
+   * mode). Per RF path: save 0x5 + the 0x92[1] dck_tune, force RF_RX mode, run
+   * the RFC-based DC calibration (0x93[3:0]=0 = source from RFC, then an edge on
+   * 0x92[0]) with a 600 us settle, then restore. MASKRFMODE=0xf0000, RF_RX=0x3.
+   * All a-die (DAV) RF registers. */
+  for (uint8_t path = 0; path < 2; path++) {
+    const uint32_t rf_reg5 = rf_rrf(path, 0x5, r::MASKRF);
+    const uint32_t dck_tune = rf_rrf(path, 0x92, 1u << 1);
+    rf_wrf(path, 0x5, 1u << 0, 0x0);
+    rf_wrf(path, 0x92, 1u << 1, 0x0);
+    rf_wrf(path, 0x00, 0xf0000u, 0x3); /* MASKRFMODE = RF_RX */
+    rf_wrf(path, 0x93, 0xfu, 0x0);     /* DC source: from RFC */
+    rf_wrf(path, 0x92, 1u << 0, 0x0);  /* trigger edge */
+    rf_wrf(path, 0x92, 1u << 0, 0x1);
+    delay_us(600); /* settle (vendor: 30 x 20 us) */
+    rf_wrf(path, 0x92, 1u << 1, dck_tune); /* restore */
+    rf_wrf(path, 0x5, r::MASKRF, rf_reg5);
+  }
+  _logger->info("Kestrel RF: RX-DCK done (both paths)");
+}
+
 void HalKestrel::set_txpwr_dbm(int16_t dbm_q2) {
   /* halbb_set_txpwr_dbm_8852b (halbb_8852b_api.c): arm fixed-dBm mode, then
    * write the s(9,2) target into the 9-bit field. bb_rmw shifts the value into
@@ -1690,6 +1722,10 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
    * front-end (halbb_set_gain_error_8852b). Part of the vendor per-channel BB
    * setup; required for 5 GHz RX sensitivity. Uses the block center. --- */
   set_gain_error(center);
+
+  /* --- RX DC-offset calibration (halrf_rx_dck_8852b) — corrects the RX DC term
+   * the CCA energy detector otherwise reads as perpetual busy. --- */
+  rx_dck();
 
   /* --- BB reset --- */
   bb_reset_all();

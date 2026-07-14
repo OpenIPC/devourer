@@ -742,6 +742,14 @@ constexpr uint8_t B_AX_EP_IDX_SH = 0;
 constexpr uint16_t R_AX_USB_ENDPOINT_2 = 0x1068; /* NUMP at +1 = 0x1069 */
 constexpr uint16_t R_AX_USB3_MAC_NPI_CONFIG_INTF_0 = 0x1114;
 constexpr uint32_t B_AX_SSPHY_LFPS_FILTER = 1u << 31;
+/* 8852C runtime usb_init (usb_init_8852c) targets the _V1 USB register bank —
+ * endpoint index/NUMP, mode status, LFPS filter. Same bit layout. Programming
+ * NUMP on the 8852B endpoint registers leaves the 8852C's per-EP burst count
+ * unset so its H2C (EP7) bulk-out stalls after FWDL. */
+constexpr uint16_t R_AX_USB_STATUS_V1 = 0x51F0;
+constexpr uint16_t R_AX_USB_ENDPOINT_0_V1 = 0x5060;
+constexpr uint16_t R_AX_USB_ENDPOINT_2_V1 = 0x5068; /* NUMP at +1 = 0x5069 */
+constexpr uint16_t R_AX_USB3_MAC_NPI_CONFIG_INTF_0_V1 = 0x5114;
 constexpr uint8_t USB_NUMP = 0x1;
 /* Endpoints configured with NUMP (EP5,6,7,9,10,11,12). */
 constexpr uint8_t USB_EP_LIST[7] = {0x5, 0x6, 0x7, 0x9, 0xA, 0xB, 0xC};

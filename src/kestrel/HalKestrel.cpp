@@ -120,9 +120,17 @@ void HalKestrel::usb_init() {
   /* usb_init_8852b (_usb_8852b.c:203, the mac_hal_init intf_init step — runs
    * AFTER trx_init + feat_init): LFPS filter off, RX bulk size for the link
    * speed, and the per-endpoint NUMP (burst count) for EP5,6,7,9,10,11,12. */
-  clr32(r::R_AX_USB3_MAC_NPI_CONFIG_INTF_0, r::B_AX_SSPHY_LFPS_FILTER);
+  /* The 8852C runtime USB config is the _V1 register bank (usb_init_8852c);
+   * same bit layout, different offsets. */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint16_t npi = c ? r::R_AX_USB3_MAC_NPI_CONFIG_INTF_0_V1
+                         : r::R_AX_USB3_MAC_NPI_CONFIG_INTF_0;
+  const uint16_t status = c ? r::R_AX_USB_STATUS_V1 : r::R_AX_USB_STATUS;
+  const uint16_t ep0 = c ? r::R_AX_USB_ENDPOINT_0_V1 : r::R_AX_USB_ENDPOINT_0;
+  const uint16_t ep2 = c ? r::R_AX_USB_ENDPOINT_2_V1 : r::R_AX_USB_ENDPOINT_2;
+  clr32(npi, r::B_AX_SSPHY_LFPS_FILTER);
 
-  const uint32_t st = _device.rtw_read32(r::R_AX_USB_STATUS);
+  const uint32_t st = _device.rtw_read32(status);
   uint32_t mode;
   if (st & r::B_AX_R_USB2_SEL)
     mode = r::MAC_AX_USB3;
@@ -138,11 +146,11 @@ void HalKestrel::usb_init() {
   /* Program NUMP for EP5,6,7,9,10,11,12: select the endpoint index in
    * USB_ENDPOINT_0[3:0], then write NUMP to USB_ENDPOINT_2+1. */
   for (uint8_t ep : r::USB_EP_LIST) {
-    uint8_t v = _device.rtw_read8(r::R_AX_USB_ENDPOINT_0);
+    uint8_t v = _device.rtw_read8(ep0);
     v = static_cast<uint8_t>(r::set_clr_word(v, ep, r::B_AX_EP_IDX_MSK,
                                              r::B_AX_EP_IDX_SH));
-    _device.rtw_write8(r::R_AX_USB_ENDPOINT_0, v);
-    _device.rtw_write8(r::R_AX_USB_ENDPOINT_2 + 1, r::USB_NUMP);
+    _device.rtw_write8(ep0, v);
+    _device.rtw_write8(ep2 + 1, r::USB_NUMP);
   }
   /* NB: the vendor usb_init_8852b does NOT re-kick HCI RXDMA/TXDMA here —
    * that toggle is usb_pre_init's (pre-FWDL). Golden capture: no 0x8380

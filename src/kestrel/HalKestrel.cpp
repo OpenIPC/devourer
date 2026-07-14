@@ -1672,7 +1672,8 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   if (_variant == ChipVariant::C8852C) {
     ctrl_tx_path_tmac_8852c();
     ctrl_rx_path_8852c(); /* enable the RX chains (0x4978 rx_path_en) */
-    bb_dm_init_8852c();   /* halbb DM init (RX AGC/DIG/EDCCA/CFO/env) */
+    /* bb_dm_init_8852c() STRIPPED (hand-transcribed halbb DM — error source +
+     * RX-halt bisect). The extracted BB tables set the DIG/AGC defaults. */
   }
 
   return true;
@@ -2809,19 +2810,15 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
   if (bw != CHANNEL_WIDTH_20)
     rf_ctrl_bw(bw);
 
-  /* --- RX gain-error: apply the cached per-band LNA/TIA gain to the BB
-   * front-end (halbb_set_gain_error_8852b). Part of the vendor per-channel BB
-   * setup; required for 5 GHz RX sensitivity. Uses the block center. --- */
-  set_gain_error(center);
-
-  /* --- RPL (received-power-level) compensation (halbb_set_rxsc_rpl_comp_8852b):
-   * apply the cached per-band RPL offsets so the reported RX RSSI is accurate.
-   * --- */
-  set_rxsc_rpl_comp(center);
-
-  /* --- RX DC-offset calibration (halrf_rx_dck_8852b) — corrects the RX DC term
-   * the CCA energy detector otherwise reads as perpetual busy. --- */
-  rx_dck();
+  /* Hand-transcribed per-channel cal/PHY refinement (halbb gain-error/RPL +
+   * halrf RX-DCK). STRIP for the C8852C (error-source removal + RX-halt
+   * bisect): rely on the extracted phy_reg/gain tables instead. Kept for the
+   * 8852BU (its RX works). */
+  if (_variant != ChipVariant::C8852C) {
+    set_gain_error(center);
+    set_rxsc_rpl_comp(center);
+    rx_dck();
+  }
 
   /* --- BB reset --- */
   bb_reset_all();

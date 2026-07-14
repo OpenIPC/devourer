@@ -262,8 +262,8 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   _device.bulk_read_async_loop(
       32768, 8,
       [&](const uint8_t *data, int n) {
-        if (++reads <= 12)
-          _logger->info("Kestrel RX: bulk-IN completion #{} -> {} bytes "
+        if (++reads <= 12 || reads % 200 == 0)
+          _logger->info("Kestrel RX: bulk-IN total={} (last {} bytes) "
                         "(rxd0=0x{:08x})",
                         reads, n,
                         n >= 4 ? (data[0] | (data[1] << 8) | (data[2] << 16) |

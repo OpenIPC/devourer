@@ -490,6 +490,17 @@ constexpr uint16_t OTP_KEY_INFO_CELL_02_ADDR = 0x5ED; /* [7] = security-record *
  * replays on-chip (the vendor does ZERO direct BB/RF-window writes). ---- */
 constexpr uint8_t FWCMD_H2C_CAT_OUTSRC = 0x2;
 constexpr uint8_t FWCMD_H2C_CL_FW_OFLD = 0x9;
+/* FW log config (mac_fw_log_cfg): cat=MAC, class=FW_INFO(0x0), func=LOG_CFG(0x0).
+ * content dword0 = level[7:0] | output-path[15:8], dword1 = comp bitmap,
+ * dword2 = comp_ext. output=MAC_AX_FL_LV_C2H(BIT1) routes the fw log to
+ * packet-C2H (rpkt_type=10, C2H class FW_INFO(0x0) func C2H_LOG(0x2)) — the
+ * decisive probe of whether async packet-C2H reaches the host at all. */
+constexpr uint8_t FWCMD_H2C_CL_FW_INFO = 0x0;
+constexpr uint8_t FWCMD_H2C_FUNC_LOG_CFG = 0x0;
+constexpr uint8_t MAC_AX_FL_LV_TR = 5;   /* verbose (trace) level */
+constexpr uint8_t MAC_AX_FL_LV_C2H = 0x2; /* BIT(1): route log to C2H packets */
+constexpr uint8_t FWCMD_C2H_CL_FW_INFO = 0x0;
+constexpr uint8_t FWCMD_C2H_FUNC_C2H_LOG = 0x02;
 constexpr uint8_t FWCMD_H2C_FUNC_CMD_OFLD_REG = 0x11;
 constexpr uint8_t FWCMD_H2C_FUNC_CMD_OFLD_PKT = 0x13;
 /* USR_TX_RPT (mac_cfg_usr_tx_rpt): enable the per-user TX report — content

@@ -310,6 +310,25 @@ bool KestrelFw::send_fwdl_packet(const uint8_t *payload, uint32_t payload_len,
   return true;
 }
 
+bool KestrelFw::enable_fw_log_c2h() {
+  /* mac_fw_log_cfg (dbg_cmd.c): cat=MAC, class=FW_INFO, func=LOG_CFG. Route the
+   * fw log to C2H packets (output=C2H) at trace level with all components
+   * enabled — a decisive probe of whether async packet-C2H (rpkt_type=10)
+   * reaches the host. dword0 = level[7:0] | path[15:8], dword1 = comp,
+   * dword2 = comp_ext. */
+  uint8_t content[12] = {0};
+  const uint32_t d0 = static_cast<uint32_t>(r::MAC_AX_FL_LV_TR) |
+                      (static_cast<uint32_t>(r::MAC_AX_FL_LV_C2H) << 8);
+  put_le32(content + 0, d0);
+  put_le32(content + 4, 0xffffffffu);  /* comp: all components */
+  put_le32(content + 8, 0xffffffffu);  /* comp_ext */
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FW_INFO,
+                         r::FWCMD_H2C_FUNC_LOG_CFG, content, sizeof(content));
+  _logger->info("Kestrel: FW-log->C2H enable (lv=TR out=C2H comp=all) -> {}",
+                ok ? "sent" : "FAILED");
+  return ok;
+}
+
 bool KestrelFw::enable_usr_tx_rpt(uint8_t mode, uint8_t macid, uint8_t port,
                                  uint32_t period_us) {
   /* fwcmd_usr_tx_rpt content (3 dwords, cmac_tx.c h2c_usr_tx_rpt): dword0 =

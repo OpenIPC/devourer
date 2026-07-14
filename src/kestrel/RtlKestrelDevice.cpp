@@ -225,6 +225,10 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
   static const uint8_t kInjectSA[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
   _hal.add_self_sta(kInjectSA, /*macid=*/0);
   _hal.enable_tx_report(kestrel::reg::USR_TX_RPT_MODE_PERIOD, 0, 0);
+  /* Diagnostic (DEVOURER_KESTREL_FWLOG): route the fw log to C2H packets to
+   * probe whether async packet-C2H reaches the host at all (task #12/#236). */
+  if (_cfg.debug.kestrel_fw_log)
+    _hal.enable_fw_log_c2h();
   _logger->info("Kestrel: TX ready on ch{} — mgmt ep 0x{:02x} data ep 0x{:02x}",
                 channel.Channel, _tx_mgmt_ep, _tx_data_ep);
   /* Start draining the bulk-IN so the fw's per-frame WP-release reports recycle

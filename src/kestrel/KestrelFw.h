@@ -62,6 +62,12 @@ public:
   bool enable_usr_tx_rpt(uint8_t mode, uint8_t macid, uint8_t port,
                          uint32_t period_us = 100000);
 
+  /* Route the firmware log to C2H packets (mac_fw_log_cfg, class=FW_INFO
+   * func=LOG_CFG, output=C2H). Diagnostic: a decisive probe of whether async
+   * packet-C2H (rpkt_type=10) reaches the host at all — if fw-log C2H arrives,
+   * packet-C2H delivery works and USR_TX_RPT is a fw-side gating quirk. */
+  bool enable_fw_log_c2h();
+
   /* mac_fw_role_maintain (role.c): H2C cat=MAC, class=MEDIA_RPT,
    * func=FWROLE_MAINTAIN — makes the firmware create/track a MACID role. This
    * is the registration linchpin: without a fw role the per-MACID frame-stat

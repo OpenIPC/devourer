@@ -165,6 +165,9 @@ public:
     return _fw.enable_usr_tx_rpt(mode, macid, port, period_us);
   }
 
+  /* Diagnostic: route the fw log to C2H packets (probe packet-C2H delivery). */
+  bool enable_fw_log_c2h() { return _fw.enable_fw_log_c2h(); }
+
   /* M6 pseudo-STA — register a station-role MACID with the firmware
    * (mac_fw_role_maintain, CREATE). This is the linchpin that lets the fw
    * track the MACID so per-MACID TX features engage (USR_TX_RPT frame-stat,

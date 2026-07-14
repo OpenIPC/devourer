@@ -287,6 +287,7 @@ private:
   void drck();
   void addck();
   void addck_reload();
+  void dack(); /* DAC-side MSBK + DADCK auto-cal (halrf_dack_8852b s0/s1) */
   uint16_t _addck_d[2][2] = {}; /* [path][ic/qc] ADC DC-offset backup */
 
 public:

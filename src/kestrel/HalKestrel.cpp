@@ -1739,6 +1739,65 @@ void HalKestrel::addck_reload() {
   }
 }
 
+void HalKestrel::dack() {
+  /* halrf_dack_8852b_s0/s1: DAC-side MSBK (multi-stage-bit) + DADCK calibration,
+   * per path. Auto-mode: the hardware runs the cal and applies the corrections
+   * (0xc004[0]/0xc104[0] = auto-on); the optional result backup (for reload-
+   * without-remeasure) is skipped. Reduces DAC DC / carrier leakage. */
+  struct P {
+    uint32_t a0, b8, d8, dc, c04, c24, c0c, c2c, msbk1, msbk2, dadck1, dadck2;
+  };
+  const P p[2] = {
+      {0x12a0, 0x12b8, 0xc0d8, 0xc0dc, 0xc004, 0xc024, 0xc00c, 0xc02c, 0xc040,
+       0xc064, 0xc05c, 0xc080},
+      {0x32a0, 0x32b8, 0xc1d8, 0xc1dc, 0xc104, 0xc124, 0xc10c, 0xc12c, 0xc140,
+       0xc164, 0xc15c, 0xc180}};
+  for (int i = 0; i < 2; i++) {
+    const P &r = p[i];
+    bb_rmw(r.a0, 1u << 15, 1);
+    bb_rmw(r.a0, 0x7000, 3);
+    bb_rmw(r.b8, 1u << 30, 1);
+    bb_rmw(0x030c, 1u << 28, 1);
+    bb_rmw(0x032c, 0x80000000, 0);
+    delay_us(100);
+    bb_rmw(r.d8, 1u << 16, 1);
+    bb_rmw(r.dc, (1u << 27) | (1u << 26), 3);
+    bb_rmw(r.c04, 1u << 30, 0);
+    bb_rmw(r.c24, 1u << 30, 0);
+    bb_rmw(r.c04, 0x3ff00000, 0x30);
+    bb_rmw(r.c04, (1u << 31) | (1u << 30), 0);
+    bb_rmw(r.c04, 1u << 17, 1);
+    bb_rmw(r.c24, 1u << 17, 1);
+    bb_rmw(r.c0c, 1u << 2, 0);
+    bb_rmw(r.c2c, 1u << 2, 0);
+    bb_rmw(r.c04, 1u << 0, 1); /* MSBK auto on */
+    bb_rmw(r.c24, 1u << 0, 1);
+    delay_us(1);
+    int c = 0;
+    for (; c < 10000 &&
+           (bb_read(r.msbk1, 1u << 31) == 0 || bb_read(r.msbk2, 1u << 31) == 0);
+         c++)
+      delay_us(1);
+    if (c >= 10000)
+      _logger->warn("Kestrel DACK: S{} MSBK timeout", i);
+    bb_rmw(r.c0c, 1u << 2, 1); /* DADCK trigger */
+    bb_rmw(r.c2c, 1u << 2, 1);
+    c = 0;
+    for (; c < 10000 &&
+           (bb_read(r.dadck1, 1u << 2) == 0 || bb_read(r.dadck2, 1u << 2) == 0);
+         c++)
+      delay_us(1);
+    if (c >= 10000)
+      _logger->warn("Kestrel DACK: S{} DADCK timeout", i);
+    bb_rmw(r.c04, 1u << 0, 0); /* auto off */
+    bb_rmw(r.c24, 1u << 0, 0);
+    bb_rmw(r.d8, 1u << 16, 0);
+    bb_rmw(r.a0, 1u << 15, 0);
+    bb_rmw(r.a0, 0x7000, 7);
+    bb_rmw(r.b8, 1u << 30, 0);
+  }
+}
+
 void HalKestrel::dac_cal() {
   /* halrf_dac_cal_8852b — ADC/ADDCK subset (DAC-side MSBK/biask not ported).
    * Save the RF registers the cal disturbs so operational radio state survives
@@ -1758,6 +1817,7 @@ void HalKestrel::dac_cal() {
   addck_reload();
   rf_wrf(0, 0x1, r::MASKRF, 0x0);
   rf_wrf(1, 0x1, r::MASKRF, 0x0);
+  dack(); /* DAC-side MSBK + DADCK (both paths) */
   /* restore operational RF state */
   rf_wrf(0, 0x0, r::MASKRF, rf0a);
   rf_wrf(1, 0x0, r::MASKRF, rf0b);
@@ -1765,8 +1825,8 @@ void HalKestrel::dac_cal() {
   rf_wrf(1, 0x1, r::MASKRF, rf1b);
   rf_wrf(0, 0x5, r::MASKRF, rf5a);
   rf_wrf(1, 0x5, r::MASKRF, rf5b);
-  _logger->info("Kestrel RF: DACK/ADDCK done (S0 ic=0x{:x} qc=0x{:x}, "
-                "S1 ic=0x{:x} qc=0x{:x})",
+  _logger->info("Kestrel RF: DACK done (ADDCK S0 ic=0x{:x} qc=0x{:x}, S1 ic=0x{:x}"
+                " qc=0x{:x}; MSBK+DADCK both paths)",
                 _addck_d[0][0], _addck_d[0][1], _addck_d[1][0], _addck_d[1][1]);
 }
 

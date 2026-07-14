@@ -584,9 +584,26 @@ bool HalKestrel::dle_init_nic() {
   const uint16_t wde_hif = c ? r::SCC_WDE_QT_HIF_8852C : r::SCC_WDE_QT_HIF;
   const uint16_t wde_wcpu = c ? r::SCC_WDE_QT_WCPU_8852C : r::SCC_WDE_QT_WCPU;
   const uint16_t wde_cpuio = c ? r::SCC_WDE_QT_CPU_IO_8852C : r::SCC_WDE_QT_CPU_IO;
-  const uint16_t *ple_min = c ? r::SCC_PLE_MIN_8852C : r::SCC_PLE_MIN;
-  const uint16_t *ple_max = c ? r::SCC_PLE_MAX_8852C : r::SCC_PLE_MAX;
+  /* The 8852C has a DEDICATED USB2 DLE quota (dle.c selects dle_mem_usb2_8852c
+   * vs dle_mem_usb3_8852c by get_usb_mode). On a USB2 8832CU the USB3 quota
+   * caps the RX-DMA PLE pool and wedges RX (burst-then-idle). Detect the live
+   * mode the same way usb_init does (USB_STATUS_V1: R_USB2_SEL=SuperSpeed,
+   * else MODE_HS=USB2). */
+  bool usb2 = false;
+  if (c) {
+    const uint32_t st = _device.rtw_read32(r::R_AX_USB_STATUS_V1);
+    usb2 = !(st & r::B_AX_R_USB2_SEL) && (st & r::B_AX_MODE_HS);
+  }
+  const uint16_t *ple_min = !c ? r::SCC_PLE_MIN
+                          : usb2 ? r::SCC_PLE_MIN_8852C_USB2
+                                 : r::SCC_PLE_MIN_8852C;
+  const uint16_t *ple_max = !c ? r::SCC_PLE_MAX
+                          : usb2 ? r::SCC_PLE_MAX_8852C_USB2
+                                 : r::SCC_PLE_MAX_8852C;
   const int ple_qn = c ? 12 : 11; /* 8852C writes through Q11 (tx_rpt) */
+  if (c)
+    _logger->info("Kestrel DLE: 8852C SCC quota = {} (RX-DMA Q6 max {})",
+                  usb2 ? "USB2" : "USB3", usb2 ? 1646 : 178);
   clr32(r::R_AX_DMAC_FUNC_EN, r::B_AX_DLE_WDE_EN | r::B_AX_DLE_PLE_EN);
 
   /* WDE: 64B page, bound 0, free = lnk_pge_num. */
@@ -2822,43 +2839,26 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
                 channel, center, bw_mhz, is_2g ? "2.4G" : "5G",
                 (_txpwr_dbm_q2 + _txpwr_offset_qdb) / 4, _txpwr_offset_qdb);
 
-  /* Diagnostic readback: confirm the writes landed and where RX stands.
-   * 0x4004 was set to 0xCA014000 by the phy_reg table — a round-trip probe of
-   * whether the wIndex=1 BB window actually reaches the baseband. */
+  /* Read-only RX diagnostics. (The earlier version wrote test patterns to BB
+   * 0x4004, a-die 0x370 and d-die 0xe000 and never restored them — a debug
+   * probe that CORRUPTED live BB/RF state at the end of every set_channel, a
+   * prime burst-then-idle suspect. Removed: only read now.) */
   const uint32_t bb_4004 = _device.rtw_read32_wide(0x4004 + BB_WIN);
-  _device.rtw_write32_wide(0x4004 + BB_WIN, 0x12345678u);
-  const uint32_t bb_4004_rt = _device.rtw_read32_wide(0x4004 + BB_WIN);
-  _logger->info("Kestrel RX-diag: BB0x4004(table)=0x{:08x} after-write="
-                "0x{:08x} (want CA014000 / 12345678)",
-                bb_4004, bb_4004_rt);
   const uint32_t bb_4738 = _device.rtw_read32_wide(0x4738 + BB_WIN);
   const uint32_t rf18a = rf_read(0, 0x18);
   const uint32_t rf18b = rf_read(1, 0x18);
-  const uint32_t rf00a = rf_read(0, 0x00); /* RF chip reg (radioa sets it) */
-  /* a-die serial reads (the synth): RF18/RF00 via 0x378/0x174c. If these show
-   * the channel-encoded RF18 and a nonzero RF00, the a-die is programmed. */
-  const uint32_t rf18a_dav = rf_read_dav(0, 0x18);
+  const uint32_t rf00a = rf_read(0, 0x00);
   const uint32_t rf00a_dav = rf_read_dav(0, 0x00);
   const uint32_t rf_c5 = rf_rrf(0, 0xc5, 1u << 15); /* synth lock indicator */
-  _logger->info("Kestrel RX-diag: RF00a(ddv)=0x{:05x} RF18a(dav)=0x{:05x} "
-                "RF00a(dav)=0x{:05x} synthLock(0xc5[15])={}",
-                rf00a, rf18a_dav, rf00a_dav, rf_c5);
-  /* SI/d-die liveness self-test: does the SI command register even hold a
-   * write, and does a d-die window write land? */
-  const uint32_t si_stat = _device.rtw_read32_wide(0x174c + BB_WIN);
-  _device.rtw_write32_wide(0x370 + BB_WIN, 0x0abcde12u); /* a-die cmd reg */
-  const uint32_t si370 = _device.rtw_read32_wide(0x370 + BB_WIN);
-  _device.rtw_write32_wide(0xe000 + (0x00 << 2) + BB_WIN, 0x155aau); /* d-die A[0] */
-  const uint32_t ddv_rt = _device.rtw_read32_wide(0xe000 + (0x00 << 2) + BB_WIN) & 0xfffffu;
-  _logger->info("Kestrel SI-probe: 0x174c(status)=0x{:08x} 0x370(cmd rt)=0x{:08x} "
-                "(wrote abcde12) d-dieA[0] rt=0x{:05x} (wrote 155aa)",
-                si_stat, si370, ddv_rt);
-  const uint32_t hci_fen = _device.rtw_read32(0x8380);        /* HCI_FUNC_EN */
-  const uint8_t rcr = _device.rtw_read8(0xCE00);              /* RCR CH_EN */
-  const uint32_t rxstate = _device.rtw_read32(0xCEF0);       /* RX_STATE_MON */
-  _logger->info("Kestrel RX-diag: BB0x4738=0x{:08x} RF18a=0x{:05x} "
-                "RF18b=0x{:05x} HCI_FEN=0x{:08x} RCR=0x{:02x} RXstate=0x{:08x}",
-                bb_4738, rf18a, rf18b, hci_fen, rcr, rxstate);
+  const uint32_t hci_fen = _device.rtw_read32(0x8380);
+  const uint8_t rcr = _device.rtw_read8(0xCE00);
+  const uint32_t rxstate = _device.rtw_read32(0xCEF0);
+  _logger->info("Kestrel RX-diag: BB0x4004=0x{:08x} (want CA014000) "
+                "BB0x4738=0x{:08x} RF18a=0x{:05x} RF18b=0x{:05x} RF00a(dav)="
+                "0x{:05x} synthLock={} HCI_FEN=0x{:08x} RCR=0x{:02x} "
+                "RXstate=0x{:08x}",
+                bb_4004, bb_4738, rf18a, rf18b, rf00a_dav, rf_c5, hci_fen, rcr,
+                rxstate);
   return true;
 }
 

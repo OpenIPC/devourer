@@ -830,10 +830,22 @@ constexpr uint16_t SCC_PLE_LNK_PAGE_8852C = 3312;
 constexpr uint16_t SCC_WDE_QT_HIF_8852C = 412;
 constexpr uint16_t SCC_WDE_QT_WCPU_8852C = 60;
 constexpr uint16_t SCC_WDE_QT_CPU_IO_8852C = 40;
+/* SCC PLE quota — USB3 (dle_mem_usb3_8852c: ple_qt42 min / ple_qt43 max). */
 constexpr uint16_t SCC_PLE_MIN_8852C[12] = {1068, 0, 16, 48, 120, 13,
                                             178,  0, 16, 38, 8,   16};
 constexpr uint16_t SCC_PLE_MAX_8852C[12] = {2859, 0, 32, 48, 145, 13,
                                             178,  0, 16, 38, 8,   41};
+/* SCC PLE quota — USB2 (dle_mem_usb2_8852c: ple_qt78 min / ple_qt79 max). The
+ * 8852C has a DEDICATED USB2 DLE config (unlike the 8852B, which only has
+ * USB3): on the slower USB2 drain the CMAC0-DMA RX queue (Q6) needs a far
+ * larger ceiling — 390/1646 vs the USB3 178/178 — plus a bigger BB-RPT/physts
+ * (Q8) 32/1288 vs 16/16. Selected by the live USB mode in dle_init_nic; using
+ * the USB3 quota on a USB2 8832CU caps the RX-DMA pool and wedges RX after the
+ * init buffer fills (burst-then-idle). WDE quota + page sizes are identical. */
+constexpr uint16_t SCC_PLE_MIN_8852C_USB2[12] = {1482, 0, 16, 48, 13, 13,
+                                                 390,  0, 32, 38, 8,  16};
+constexpr uint16_t SCC_PLE_MAX_8852C_USB2[12] = {1482, 0,    32,   48, 1269, 13,
+                                                 1646, 0, 1288, 38,  120, 1272};
 
 /* ---- BB/RF enable (M3; hw.c set_enable_bb_rf) — releases the BB from reset
  * so the halbb/halrf register windows actually accept writes. All MAC/system

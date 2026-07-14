@@ -1657,8 +1657,20 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
     bb_rmw(0x12ac, 0xfff000u, 0xaaa); /* RF mode (base 8852B 80 MHz) */
     bb_rmw(0x32ac, 0xfff000u, 0xaaa);
     /* No CCK primary (0x237c) at 80 MHz — 5 GHz-only, no CCK. */
+  } else if (bw == CHANNEL_WIDTH_5 || bw == CHANNEL_WIDTH_10) {
+    /* Narrowband (halbb_ctrl_bw_8852b 5/10 MHz): the RF stays in 20 MHz mode
+     * (rf_ctrl_bw sets RF18[11:10]=both, below); only the BB "small BW" field
+     * re-clocks the ADC/DAC decimation. RF_BW=0, small-BW [13:12]=1(5)/2(10),
+     * pri ch=0, RF mode 0x333, ACI-detect OFF. Same center channel. */
+    bb_rmw(0x49C0, 0xC0000000u, 0x0);                        /* RF_BW=0 */
+    bb_rmw(0x49C4, 0x3000u, bw == CHANNEL_WIDTH_5 ? 0x1 : 0x2); /* small BW */
+    bb_rmw(0x49C4, 0xf00u, 0x0);                             /* pri ch=0 */
+    bb_rmw(0x12ac, 0xfff000u, 0x333);                        /* RF mode */
+    bb_rmw(0x32ac, 0xfff000u, 0x333);
+    bb_rmw(0x4738, 0x10000u, 0x0);                           /* ACI detect off */
+    bb_rmw(0x4AA4, 0x10000u, 0x0);
   } else {
-    _logger->warn("Kestrel set_channel: bw={} not ported (20/40/80 only)",
+    _logger->warn("Kestrel set_channel: bw={} not ported (20/40/80/5/10 only)",
                   static_cast<int>(bw));
   }
 
@@ -1688,8 +1700,11 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
    * (SetTxPowerOffsetQdb) is folded in here so it survives a channel change. */
   set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
 
-  const int bw_mhz =
-      bw == CHANNEL_WIDTH_80 ? 80 : (bw == CHANNEL_WIDTH_40 ? 40 : 20);
+  const int bw_mhz = bw == CHANNEL_WIDTH_80   ? 80
+                     : bw == CHANNEL_WIDTH_40 ? 40
+                     : bw == CHANNEL_WIDTH_5  ? 5
+                     : bw == CHANNEL_WIDTH_10 ? 10
+                                             : 20;
   _logger->info("Kestrel PHY: tuned to ch{} (center {}) bw{} ({}) — "
                 "TXpwr={}dBm (off={}qdB)",
                 channel, center, bw_mhz, is_2g ? "2.4G" : "5G",

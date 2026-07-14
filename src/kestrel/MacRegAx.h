@@ -314,6 +314,18 @@ constexpr uint16_t DLFW_WDE_WCPU_MIN = 6;    /* wde_qt25.wcpu (SCC override) */
 constexpr uint16_t DLFW_PLE_C2H = 16;        /* ple_qt13.c2h */
 constexpr uint16_t DLFW_PLE_H2C = 48;        /* ple_qt13.h2c */
 
+/* 8852C DLFW quota (dle_mem_usb*_8852c DLFW: wde_size18/ple_size18/wde_qt17/
+ * ple_qt44 min/ple_qt45 max). The RISC-V bootrom will not raise H2C_PATH_RDY
+ * with the 8852B quotas — its H2C PLE reserve is far larger (256 vs 48) and its
+ * WDE holds no wcpu pages. USB DLFW HFC H2C pre-cost stays 32 (hfc_preccfg_usb_
+ * 8852c), so only these DLE values diverge. */
+constexpr uint16_t DLFW_WDE_UNLNK_PAGE_8852C = 2048; /* wde_size18 unlnk */
+constexpr uint16_t DLFW_PLE_FREE_PAGE_8852C = 2544;  /* ple_size18 lnk */
+constexpr uint16_t DLFW_WDE_WCPU_MIN_8852C = 0;      /* wde_qt17.wcpu */
+constexpr uint16_t DLFW_PLE_C2H_MIN_8852C = 16;      /* ple_qt44.c2h */
+constexpr uint16_t DLFW_PLE_C2H_MAX_8852C = 32;      /* ple_qt45.c2h */
+constexpr uint16_t DLFW_PLE_H2C_8852C = 256;         /* ple_qt44/45.h2c */
+
 /* ---- HFC (hci_fc.c, hci_fc_8852b.c) ---- */
 constexpr uint16_t R_AX_HCI_FC_CTRL = 0x8A00;
 constexpr uint32_t B_AX_HCI_FC_EN = 1u << 0;
@@ -391,6 +403,9 @@ constexpr uint16_t R_AX_HALT_H2C = 0x0168;
 constexpr uint16_t R_AX_HALT_C2H = 0x016C;
 constexpr uint16_t R_AX_HISR0 = 0x01A4;
 constexpr uint16_t R_AX_WCPU_FW_CTRL = 0x01E0;
+/* RISC-V (8852C) bootrom debug: [31:16]=boot_status (fwdl-step code),
+ * [15:0]=secureboot_status. The MIPS R_AX_BOOT_DBG is 0x83F0. */
+constexpr uint16_t R_AX_BOOT_DBG_V1 = 0x78F0;
 constexpr uint8_t B_AX_WCPU_FWDL_STS_SH = 5;
 constexpr uint32_t B_AX_WCPU_FWDL_STS_MSK = 0x7;
 constexpr uint32_t B_AX_FWDL_PATH_RDY = 1u << 2;

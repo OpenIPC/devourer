@@ -90,8 +90,20 @@ bool KestrelFw::chk_dle_rdy(uint16_t status_reg, uint32_t rdy_bits,
 }
 
 bool KestrelFw::dle_init_dlfw() {
-  /* dle_init(MAC_AX_QTA_DLFW) for 8852B USB: config wde_size9/ple_size8,
-   * wde_qt4(wcpu=6 SCC override)/ple_qt13(c2h=16,h2c=48). */
+  /* dle_init(MAC_AX_QTA_DLFW). 8852B USB: wde_size9/ple_size8, wde_qt4(wcpu=6
+   * SCC override)/ple_qt13(c2h=16,h2c=48). 8852C USB (RISC-V): wde_size18/
+   * ple_size18, wde_qt17(all 0)/ple_qt44,45(c2h 16/32, h2c 256) — the RISC-V
+   * bootrom needs the larger H2C reserve to raise H2C_PATH_RDY. */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint16_t wde_unlnk =
+      c ? r::DLFW_WDE_UNLNK_PAGE_8852C : r::DLFW_WDE_UNLNK_PAGE;
+  const uint16_t ple_free =
+      c ? r::DLFW_PLE_FREE_PAGE_8852C : r::DLFW_PLE_FREE_PAGE;
+  const uint16_t wde_wcpu =
+      c ? r::DLFW_WDE_WCPU_MIN_8852C : r::DLFW_WDE_WCPU_MIN;
+  const uint16_t ple_c2h_min = c ? r::DLFW_PLE_C2H_MIN_8852C : r::DLFW_PLE_C2H;
+  const uint16_t ple_c2h_max = c ? r::DLFW_PLE_C2H_MAX_8852C : r::DLFW_PLE_C2H;
+  const uint16_t ple_h2c = c ? r::DLFW_PLE_H2C_8852C : r::DLFW_PLE_H2C;
   auto field = [](uint32_t v, uint32_t val, uint32_t msk, uint8_t sh) {
     return r::set_clr_word(v, val, msk, sh);
   };
@@ -109,14 +121,15 @@ bool KestrelFw::dle_init_dlfw() {
   _device.rtw_write32(r::R_AX_WDE_PKTBUF_CFG, v);
 
   /* PLE 128B page, bound = (lnk+unlnk)*pge_size/DLE_BOUND_UNIT of the WDE
-   * region = (0+1024)*64/8192 = 8; free=lnk_pge_num(64). */
+   * region = (0+1024)*64/8192 = 8 (8852B) or (0+2048)*64/8192 = 16 (8852C);
+   * free=lnk_pge_num (64 8852B / 2544 8852C). */
   const uint32_t bound =
-      (r::DLFW_WDE_FREE_PAGE + r::DLFW_WDE_UNLNK_PAGE) * 64u / r::DLE_BOUND_UNIT;
+      (r::DLFW_WDE_FREE_PAGE + wde_unlnk) * 64u / r::DLE_BOUND_UNIT;
   v = _device.rtw_read32(r::R_AX_PLE_PKTBUF_CFG);
   v = field(v, r::S_AX_PLE_PAGE_SEL_128, r::B_AX_PLE_PAGE_SEL_MSK,
             r::B_AX_PLE_PAGE_SEL_SH);
   v = field(v, bound, r::B_AX_PLE_START_BOUND_MSK, r::B_AX_PLE_START_BOUND_SH);
-  v = field(v, r::DLFW_PLE_FREE_PAGE, r::B_AX_PLE_FREE_PAGE_NUM_MSK,
+  v = field(v, ple_free, r::B_AX_PLE_FREE_PAGE_NUM_MSK,
             r::B_AX_PLE_FREE_PAGE_NUM_SH);
   _device.rtw_write32(r::R_AX_PLE_PKTBUF_CFG, v);
 
@@ -126,17 +139,18 @@ bool KestrelFw::dle_init_dlfw() {
         reg, (static_cast<uint32_t>(mn & r::QTA_SIZE_MSK) << r::QTA_MIN_SH) |
                  (static_cast<uint32_t>(mx & r::QTA_SIZE_MSK) << r::QTA_MAX_SH));
   };
-  qta(r::R_AX_WDE_QTA0_CFG, 0, 0);                     /* hif */
-  qta(r::R_AX_WDE_QTA1_CFG, r::DLFW_WDE_WCPU_MIN, 0);  /* wcpu=6 */
-  qta(r::R_AX_WDE_QTA3_CFG, 0, 0);                     /* pkt_in */
-  qta(r::R_AX_WDE_QTA4_CFG, 0, 0);                     /* cpu_io */
-  /* PLE QTA0..QTA10: only c2h(Q2)=16 and h2c(Q3)=48 are nonzero. */
+  qta(r::R_AX_WDE_QTA0_CFG, 0, 0);                /* hif */
+  qta(r::R_AX_WDE_QTA1_CFG, wde_wcpu, wde_wcpu);  /* wcpu (6 8852B / 0 8852C) */
+  qta(r::R_AX_WDE_QTA3_CFG, 0, 0);                /* pkt_in */
+  qta(r::R_AX_WDE_QTA4_CFG, 0, 0);                /* cpu_io */
+  /* PLE QTA0..QTA10: only c2h(Q2) and h2c(Q3) are nonzero. c2h min/max differ
+   * on the 8852C (16/32); h2c is min==max on both. */
   for (uint16_t reg = r::R_AX_PLE_QTA0_CFG; reg <= r::R_AX_PLE_QTA10_CFG;
        reg += 4) {
     if (reg == r::R_AX_PLE_QTA2_CFG)
-      qta(reg, r::DLFW_PLE_C2H, r::DLFW_PLE_C2H);
+      qta(reg, ple_c2h_min, ple_c2h_max);
     else if (reg == r::R_AX_PLE_QTA3_CFG)
-      qta(reg, r::DLFW_PLE_H2C, r::DLFW_PLE_H2C);
+      qta(reg, ple_h2c, ple_h2c);
     else
       qta(reg, 0, 0);
   }
@@ -936,8 +950,20 @@ bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
   /* Retry loop (FWDL_TRY_CNT = 3 for AX MIPS). */
   for (uint8_t attempt = 0; attempt < r::FWDL_TRY_CNT_MIPS; ++attempt) {
     /* phase0: wait H2C path ready. */
-    if (!poll_wcpu(r::B_AX_H2C_PATH_RDY, r::B_AX_H2C_PATH_RDY, "H2C_PATH_RDY"))
+    if (!poll_wcpu(r::B_AX_H2C_PATH_RDY, r::B_AX_H2C_PATH_RDY, "H2C_PATH_RDY")) {
+      if (_variant == ChipVariant::C8852C) {
+        /* RISC-V bootrom debug: BOOT_DBG_V1[31:16]=boot_status (a fwdl-step
+         * code, e.g. 7="DLFW START", 0x26="OS START DONE"), [15:0]=secureboot.
+         * A stall here with boot_status advancing past DLFW START means the
+         * bootrom self-booted its ROM fw instead of raising H2C_PATH_RDY —
+         * the open 8852C USB-FWDL gap (needs a vendor .ko usbmon golden diff). */
+        uint32_t bd = _device.rtw_read32(r::R_AX_BOOT_DBG_V1);
+        _logger->error("Kestrel FWDL: 8852C boot stalled — BOOT_DBG_V1=0x{:08x} "
+                       "(boot_status=0x{:x} secureboot=0x{:x})",
+                       bd, (bd >> 16) & 0xffff, bd & 0xffff);
+      }
       goto retry;
+    }
     /* fwdl_patch_fw_delay (fwdl.c:1260): between phase0 and phase1, on a
      * non-secure IC, patch the fw CPU clock. */
     if (!_is_sec_ic)

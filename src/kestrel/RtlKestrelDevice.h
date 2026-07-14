@@ -85,6 +85,11 @@ public:
   /* 64-bit free-running MAC TSF (band-0 port-0). mac_get_tsf (twt.c). */
   uint64_t ReadTsf() override;
 
+  /* Lean intra-band 20 MHz retune (frequency hopping) — RF channel only, skips
+   * the BB bandwidth config + RX-DCK. Falls back to SetMonitorChannel on a band
+   * change or a non-20 MHz width. */
+  void FastRetune(uint8_t channel, bool cache_rf = true) override;
+
   /* Chip thermal-meter snapshot (halrf_get_thermal_8852b, RF path-A 0x42) with
    * the efuse baseline. Control-thread only (does an RF read). */
   devourer::ThermalStatus GetThermalStatus() override;

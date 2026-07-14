@@ -131,6 +131,12 @@ public:
    * 20 MHz. For 40 MHz the RF tunes to the block center = primary +/- 2. */
   bool set_channel(uint8_t channel, ChannelWidth_t bw, uint8_t offset = 0);
 
+  /* Lean intra-band, same-bandwidth retune (frequency hopping): RF channel
+   * switch + band-specific gain/RPL re-apply + BB reset, skipping the BB
+   * bandwidth config and the per-channel RX-DCK (the slow ~1.2 ms part). Caller
+   * must ensure same band + same width (20 MHz). */
+  void fast_retune(uint8_t channel);
+
   /* halbb_set_txpwr_dbm_8852b: force a fixed BB TX power target (overriding the
    * per-rate/TSSI tables — the pragmatic injection-driver model, like the
    * Jaguar SetTxPowerIndexOverride). `dbm_q2` is s(9,2): power in 0.25-dB units

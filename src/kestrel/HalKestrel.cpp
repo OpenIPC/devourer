@@ -1869,6 +1869,21 @@ void HalKestrel::set_txpwr_dbm(int16_t dbm_q2) {
   bb_rmw(0x4594, 0x7fc00000u, static_cast<uint32_t>(dbm_q2) & 0x1ffu);
 }
 
+void HalKestrel::fast_retune(uint8_t channel) {
+  /* Lean same-band, 20 MHz retune: only the RF synth channel changes. Re-apply
+   * the band-specific gain/RPL (the 5 GHz sub-band may shift, e.g. 5G-L->5G-H)
+   * and the fixed TX power, then a BB reset — but skip the BB bandwidth config
+   * (unchanged) and the per-channel RX-DCK (the slow ~1.2 ms cal; the RX DC term
+   * is stable within a band). ~a few ms vs ~90 ms for the full set_channel. */
+  const bool is_2g = channel <= 14;
+  rf_ctrl_ch(channel, is_2g);
+  set_gain_error(channel);
+  set_rxsc_rpl_comp(channel);
+  bb_reset_all();
+  set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
+  _logger->debug("Kestrel FastRetune: ch{} ({})", channel, is_2g ? "2.4G" : "5G");
+}
+
 void HalKestrel::bb_reset_all() {
   /* halbb_bb_reset_all_8852b (BB regs over wIndex=1; 0xce40 is MAC/CMAC). */
   bb_rmw(0x2344, 1u << 31, 1); /* PD disable */

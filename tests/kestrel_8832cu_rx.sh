@@ -28,7 +28,9 @@ fails=0
 cell() { # $1 = channel
   local ch="$1" out=/tmp/kestrel_8832rx.jsonl log=/tmp/kestrel_8832rx.log
   echo ">> ch$ch"
-  uhubctl -l "$TX_HUB" -p "$TX_PORT" -a cycle -d 2 >/dev/null 2>&1; sleep 6
+  # 8 s settle: the 8832CU can be slow to re-enumerate after a VBUS cold cycle;
+  # a shorter wait intermittently misses it ("not on bus").
+  uhubctl -l "$TX_HUB" -p "$TX_PORT" -a cycle -d 2 >/dev/null 2>&1; sleep 8
   sysdir >/dev/null || { echo "   FAIL: $VID:$PID not on bus"; fails=$((fails+1)); return; }
   unbind; sleep 1
   # -k 3: rxdemo's USB RX thread can ignore a plain TERM; SIGKILL 3 s later.

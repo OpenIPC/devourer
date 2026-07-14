@@ -293,6 +293,12 @@ private:
    * the RX DC term the CCA/EDCCA energy detector otherwise reads as a perpetual
    * medium-busy. Run after the channel is tuned. */
   void rx_dck();
+  /* halrf_rx_dck_8852c: the 8852C RX-DCK differs from the 8852b (polls 0x93[5]
+   * for done instead of a fixed delay, + an is_auto_res 0x8f[11:9] step);
+   * rx_dck() dispatches here for C8852C. */
+  void rx_dck_8852c();
+  void set_rx_dck_8852c(uint8_t path);
+  void rx_dck_toggle_8852c(uint8_t path);
 
 public:
   /* halrf_dac_cal_8852b (ADC/ADDCK subset): DRCK + ADC DC-offset calibration —

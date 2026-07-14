@@ -2271,7 +2271,56 @@ uint8_t HalKestrel::read_thermal(uint8_t path) {
   return static_cast<uint8_t>(rf_rrf(path, 0x42, 0x7e));
 }
 
+void HalKestrel::rx_dck_toggle_8852c(uint8_t path) {
+  /* halrf_rx_dck_toggle_8852c: edge 0x92[0], poll 0x93[5] done (<=500x2us). */
+  rf_wrf(path, 0x92, 1u << 0, 0x0);
+  rf_wrf(path, 0x92, 1u << 0, 0x1);
+  int cnt = 0;
+  for (; cnt < 500 && rf_rrf(path, 0x93, 1u << 5) == 0; cnt++)
+    delay_us(2);
+  rf_wrf(path, 0x92, 1u << 0, 0x0);
+}
+
+void HalKestrel::set_rx_dck_8852c(uint8_t path) {
+  /* halrf_set_rx_dck_8852c: DC source from RFC (0x93[3:0]=0), toggle, then the
+   * is_auto_res step (default true): read the resolution 0x92[7:5]; if >1, load
+   * it into 0x8f[11:9], re-toggle, and restore 0x8f[11:9]=1. */
+  rf_wrf(path, 0x93, 0xfu, 0x0);
+  rx_dck_toggle_8852c(path);
+  const uint32_t res = rf_rrf(path, 0x92, 0xe0u); /* [7:5] */
+  if (res > 1) {
+    rf_wrf(path, 0x8f, 0xe00u, res); /* [11:9] */
+    rx_dck_toggle_8852c(path);
+    rf_wrf(path, 0x8f, 0xe00u, 0x1);
+  }
+}
+
+void HalKestrel::rx_dck_8852c() {
+  /* halrf_rx_dck_8852c, RFC (non-AFE) path, non-MP, no TSSI, dbcc off
+   * (kpath=RF_AB). Per path: save 0x5 (+ 0x0 when 0x5[0]=0), force RF_RX, run
+   * the poll-based DC calibration, restore. The rfe>=50 rek-check retry loop is
+   * a reliability refinement (not ported); the core single-pass cal runs. */
+  for (uint8_t path = 0; path < 2; path++) {
+    const uint32_t rf_5 = rf_rrf(path, 0x5, r::MASKRF);
+    uint32_t rf_0 = 0;
+    if ((rf_5 & 0x1) == 0)
+      rf_0 = rf_rrf(path, 0x0, r::MASKRF);
+    rf_wrf(path, 0x5, 1u << 0, 0x0);
+    rf_wrf(path, 0x00, 0xf0000u, 0x3); /* MASKRFMODE = RF_RX */
+    rf_wrf(path, 0x00, 1u << 1, 0x0);  /* dbcc_en = 0 */
+    set_rx_dck_8852c(path);
+    rf_wrf(path, 0x5, r::MASKRF, rf_5); /* restore */
+    if ((rf_5 & 0x1) == 0)
+      rf_wrf(path, 0x0, r::MASKRF, rf_0);
+  }
+  _logger->info("Kestrel RF(8852C): RX-DCK done (both paths)");
+}
+
 void HalKestrel::rx_dck() {
+  if (_variant == ChipVariant::C8852C) {
+    rx_dck_8852c(); /* the 8852b RX-DCK uses different regs on the 8852C */
+    return;
+  }
   /* halrf_rx_dck_8852b, RFC (non-AFE) path, no TSSI (devourer isn't in TSSI
    * mode). Per RF path: save 0x5 + the 0x92[1] dck_tune, force RF_RX mode, run
    * the RFC-based DC calibration (0x93[3:0]=0 = source from RFC, then an edge on

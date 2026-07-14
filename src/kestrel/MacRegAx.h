@@ -924,9 +924,17 @@ constexpr uint8_t B_AX_RXAGG_PKTNUM_TH_SH = 16;
 constexpr uint32_t B_AX_RXAGG_PKTNUM_TH_MSK = 0xff;
 constexpr uint8_t B_AX_RXAGG_TIMEOUT_TH_SH = 8;
 constexpr uint8_t B_AX_RXAGG_LEN_TH_SH = 0;
-/* _usb.h: RXAGGSIZE=0x5 (unit 4k), RXAGGTO=0x20 (timeout), pkt_num=0. */
+/* _usb.h: RXAGGSIZE=0x5, RXAGGTO=0x20 (timeout), pkt_num=0. */
 constexpr uint8_t RXAGGSIZE = 0x5;
 constexpr uint8_t RXAGGTO = 0x20;
+/* usb_rx_agg_cfg_8852c (_usb_8852c.c:345): LEN_TH = RXAGGSIZE*COMPAT_RX_AGG_UNIT
+ * (=4), plus it writes R_AX_RXAGG_1_V1 to neutralise the small-packet
+ * aggregation (SML_PKTNUM_TH=max, SML_PKT_SIZE=0, LEN_TH_HIGH=0). devourer
+ * omitted both, so small RX frames are held and WIFI RX stalls after the
+ * initial burst. */
+constexpr uint8_t COMPAT_RX_AGG_UNIT = 4;
+constexpr uint16_t R_AX_RXAGG_1_V1 = 0x6004;
+constexpr uint32_t RXAGG_1_V1_DISABLE_SML = 0x1f; /* SML_PKTNUM_TH_MSK[4:0] */
 
 /* ---- Full CMAC init (trxcfg.c cmac_init: the remaining band-0 sub-inits that
  * were previously skipped — scheduler / tmac / trxptcl / ptcl / nav /

@@ -255,10 +255,12 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   stop_wp_drain();
   _rx_stop = false;
   _logger->info("Kestrel: starting RX loop on ch{}", _channel.Channel);
-  /* Async bulk-IN ring; walk each aggregate with the 11ax rxd parser. */
+  /* Async bulk-IN ring; walk each aggregate with the 11ax rxd parser. The
+   * buffer must hold a full RXAGG aggregate (the 8852C LEN_TH is ~20 KB), or
+   * large aggregates overflow/truncate and RX delivery stalls. */
   int reads = 0;
   _device.bulk_read_async_loop(
-      16384, 8,
+      32768, 8,
       [&](const uint8_t *data, int n) {
         if (++reads <= 12)
           _logger->info("Kestrel RX: bulk-IN completion #{} -> {} bytes "

@@ -1039,12 +1039,17 @@ void HalKestrel::usb_rx_agg_cfg() {
    * default is 0 (usb_rx_agg_cfg_8852c) — golden 8852C value 0x80ff2010. The
    * 8852B path keeps 0 (unchanged, on-air-validated). */
   const uint32_t pktnum = c8852c ? r::B_AX_RXAGG_PKTNUM_TH_MSK : 0u;
+  const uint32_t len_th =
+      c8852c ? static_cast<uint32_t>(r::RXAGGSIZE) * r::COMPAT_RX_AGG_UNIT
+             : static_cast<uint32_t>(r::RXAGGSIZE);
   uint32_t v = _device.rtw_read32(rxagg0);
   v = (v & r::B_AX_RXAGG_SW_EN) | r::B_AX_RXAGG_EN |
-      (static_cast<uint32_t>(r::RXAGGSIZE) << r::B_AX_RXAGG_LEN_TH_SH) |
+      (len_th << r::B_AX_RXAGG_LEN_TH_SH) |
       (static_cast<uint32_t>(r::RXAGGTO) << r::B_AX_RXAGG_TIMEOUT_TH_SH) |
       (pktnum << r::B_AX_RXAGG_PKTNUM_TH_SH);
   _device.rtw_write32(rxagg0, v);
+  if (c8852c) /* neutralise the small-packet aggregation (hw fn unused). */
+    _device.rtw_write32(r::R_AX_RXAGG_1_V1, r::RXAGG_1_V1_DISABLE_SML);
 }
 
 void HalKestrel::scheduler_init() {

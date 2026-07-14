@@ -236,6 +236,13 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
     _hal.enable_fw_log_c2h();
   _logger->info("Kestrel: TX ready on ch{} — mgmt ep 0x{:02x} data ep 0x{:02x}",
                 channel.Channel, _tx_mgmt_ep, _tx_data_ep);
+  /* One-shot thermal snapshot at bring-up (RF 0x42 meter vs efuse baseline) —
+   * the PA-heating baseline for the TX-heavy link. */
+  {
+    const auto t = GetThermalStatus();
+    _logger->info("Kestrel thermal: raw={} baseline={} delta={}", t.raw,
+                  t.valid ? t.baseline : 0xFF, t.valid ? t.delta : 0);
+  }
   /* Start draining the bulk-IN so the fw's per-frame WP-release reports recycle
    * the TX pages (else sustained mgmt TX stalls after ~103 frames). If the
    * caller later runs StartRxLoop, it takes over the bulk-IN (handoff). */
@@ -296,6 +303,16 @@ void RtlKestrelDevice::SetTxMode(const devourer::TxMode &mode) {
   _tx_mode_default = mode;
 }
 void RtlKestrelDevice::ClearTxMode() { _tx_mode_default.reset(); }
+
+devourer::ThermalStatus RtlKestrelDevice::GetThermalStatus() {
+  devourer::ThermalStatus s;
+  s.raw = _hal.read_thermal(/*path=*/0); /* RF path A */
+  s.baseline = _efuse.thermal_a;
+  s.valid = (s.baseline != 0xFF);
+  if (s.valid)
+    s.delta = static_cast<int>(s.raw) - static_cast<int>(s.baseline);
+  return s;
+}
 
 void RtlKestrelDevice::handle_c2h(const uint8_t *payload, uint32_t len) {
   namespace r = kestrel::reg;

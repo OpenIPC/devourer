@@ -85,6 +85,10 @@ public:
   /* 64-bit free-running MAC TSF (band-0 port-0). mac_get_tsf (twt.c). */
   uint64_t ReadTsf() override;
 
+  /* Chip thermal-meter snapshot (halrf_get_thermal_8852b, RF path-A 0x42) with
+   * the efuse baseline. Control-thread only (does an RF read). */
+  devourer::ThermalStatus GetThermalStatus() override;
+
   /* Arm the AX HW beacon engine (mac_send_bcn_h2c + AP port timing). Requires a
    * prior InitWrite. `beacon` is a full 802.11 beacon; the MAC airs it every
    * `interval_tu` TU with the live TSF inserted. */

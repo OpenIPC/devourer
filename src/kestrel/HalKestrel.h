@@ -168,6 +168,12 @@ public:
     return _fw.enable_usr_tx_rpt(mode, macid, port, period_us);
   }
 
+  /* halrf_get_thermal_8852b: read the per-path RF thermal meter (RF 0x42): pulse
+   * the trigger bit (BIT19: 1-0-1), settle 200 us, return the 6-bit value
+   * [6:1] (0..63 thermal units, ~1.5-2 C each; not absolute deg C). Control-
+   * thread only (does RF writes). */
+  uint8_t read_thermal(uint8_t path);
+
   /* Diagnostic: route the fw log to C2H packets (probe packet-C2H delivery). */
   bool enable_fw_log_c2h() { return _fw.enable_fw_log_c2h(); }
 

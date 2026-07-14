@@ -1770,6 +1770,15 @@ void HalKestrel::dac_cal() {
                 _addck_d[0][0], _addck_d[0][1], _addck_d[1][0], _addck_d[1][1]);
 }
 
+uint8_t HalKestrel::read_thermal(uint8_t path) {
+  /* halrf_get_thermal_8852b: pulse RF 0x42[19] (1-0-1), settle, read [6:1]. */
+  rf_wrf(path, 0x42, 1u << 19, 0x1);
+  rf_wrf(path, 0x42, 1u << 19, 0x0);
+  rf_wrf(path, 0x42, 1u << 19, 0x1);
+  delay_us(200);
+  return static_cast<uint8_t>(rf_rrf(path, 0x42, 0x7e));
+}
+
 void HalKestrel::rx_dck() {
   /* halrf_rx_dck_8852b, RFC (non-AFE) path, no TSSI (devourer isn't in TSSI
    * mode). Per RF path: save 0x5 + the 0x92[1] dck_tune, force RF_RX mode, run

@@ -7,13 +7,10 @@ Mirror of tools/extract_8852b_phy.py for the Kestrel C8852C variant. Same
 and the same phydm-style IF/ELSE/END/CHK conditional opcodes walked at runtime
 by src/kestrel/PhyTableLoaderKestrel — only the DATA is copied here.
 
-Tables (the minimum for RX/TX bring-up + calibration, matching the 8852B set):
+Tables (the minimum for RX/TX bring-up, matching the 8852B set):
   phy_reg        BB core registers          (halbb_hwimg_raw_data_8852c.h)
   phy_reg_gain   BB RX gain table           (halbb_hwimg_raw_data_8852c.h)
   radioa/radiob  RF path-A/B registers      (halrf_hwimg_raw_data_8852c.h)
-  nctl_reg       IQK/DPK/GapK cal-engine    (halrf_hwimg_nctl_raw_data_8852c.h)
-                 microcode loaded into the 0x8000 NCTL block before the RF
-                 calibrations run — required for IQK/DPK/TSSI to function.
 
 Input:  reference/rtl8852cu/phl/hal_g6/phy/{bb/halbb_8852c,rf/halrf_8852c}/...
 Output: hal/hal8852c_phy.{c,h}   (committed)
@@ -36,7 +33,6 @@ TABLES = {
     "array_mp_8852c_phy_reg_gain": f"{BB}/halbb_hwimg_raw_data_8852c.h",
     "array_mp_8852c_radioa": f"{RF}/halrf_hwimg_raw_data_8852c.h",
     "array_mp_8852c_radiob": f"{RF}/halrf_hwimg_raw_data_8852c.h",
-    "array_mp_8852c_nctl_reg": f"{RF}/halrf_hwimg_nctl_raw_data_8852c.h",
 }
 OUT_C = "hal/hal8852c_phy.c"
 OUT_H = "hal/hal8852c_phy.h"

@@ -1656,7 +1656,6 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
     ctrl_tx_path_tmac_8852c();
     ctrl_rx_path_8852c(); /* enable the RX chains (0x4978 rx_path_en) */
     bb_dm_init_8852c();   /* halbb DM init (RX AGC/DIG/EDCCA/CFO/env) */
-    config_nctl_reg_8852c(); /* load the IQK/DPK cal-engine microcode */
   }
 
   return true;
@@ -2806,17 +2805,6 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
   /* --- RX DC-offset calibration (halrf_rx_dck_8852b) — corrects the RX DC term
    * the CCA energy detector otherwise reads as perpetual busy. --- */
   rx_dck();
-
-  /* --- IQK (halrf_iqk_8852c): TX/RX I/Q imbalance calibration, per channel.
-   * Drives the NCTL cal-engine loaded by config_nctl_reg_8852c(). 8852C only;
-   * band/bw fold to the RF's 20 MHz mode for 5/10 narrowband. --- */
-  if (_variant == ChipVariant::C8852C) {
-    const uint8_t iqk_band = is_2g ? 0 : 1; /* BAND_ON_24G / BAND_ON_5G */
-    const uint8_t iqk_bw = bw == CHANNEL_WIDTH_80   ? 2
-                           : bw == CHANNEL_WIDTH_40 ? 1
-                                                    : 0;
-    iqk_8852c(iqk_band, iqk_bw, center);
-  }
 
   /* --- BB reset --- */
   bb_reset_all();

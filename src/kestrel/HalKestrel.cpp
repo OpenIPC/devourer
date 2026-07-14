@@ -646,47 +646,66 @@ bool HalKestrel::hfc_init_nic() {
             << r::B_AX_ACH_MAX_PG_SH);
     /* grp = grp_0 -> the B_AX_ACH_GRP bit stays clear. */
   };
+  /* The 8852C runtime HFC uses the _V1 register bank + its own USB SCC quotas
+   * (larger page budget than the 8852B). Same field layout, so only addresses
+   * and page counts diverge. */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint16_t fc_ctrl = c ? r::R_AX_HCI_FC_CTRL_V1_NIC : r::R_AX_HCI_FC_CTRL;
+  const uint16_t page_ctrl = c ? r::R_AX_CH_PAGE_CTRL_V1 : r::R_AX_CH_PAGE_CTRL;
+  const uint16_t ach0 = c ? r::R_AX_ACH0_PAGE_CTRL_V1 : r::R_AX_ACH0_PAGE_CTRL;
+  const uint16_t ach1 = c ? r::R_AX_ACH1_PAGE_CTRL_V1 : r::R_AX_ACH1_PAGE_CTRL;
+  const uint16_t ach2 = c ? r::R_AX_ACH2_PAGE_CTRL_V1 : r::R_AX_ACH2_PAGE_CTRL;
+  const uint16_t ach3 = c ? r::R_AX_ACH3_PAGE_CTRL_V1 : r::R_AX_ACH3_PAGE_CTRL;
+  const uint16_t ch8 = c ? r::R_AX_CH8_PAGE_CTRL_V1 : r::R_AX_CH8_PAGE_CTRL;
+  const uint16_t ch9 = c ? r::R_AX_CH9_PAGE_CTRL_V1 : r::R_AX_CH9_PAGE_CTRL;
+  const uint16_t pub1 = c ? r::R_AX_PUB_PAGE_CTRL1_V1 : r::R_AX_PUB_PAGE_CTRL1;
+  const uint16_t pub2 = c ? r::R_AX_PUB_PAGE_CTRL2_V1 : r::R_AX_PUB_PAGE_CTRL2;
+  const uint16_t wp1 = c ? r::R_AX_WP_PAGE_CTRL1_V1 : r::R_AX_WP_PAGE_CTRL1;
+  const uint16_t wp2 = c ? r::R_AX_WP_PAGE_CTRL2_V1 : r::R_AX_WP_PAGE_CTRL2;
+  const uint16_t ch_min = c ? r::HFC_NIC_CH_MIN_8852C : r::HFC_NIC_CH_MIN;
+  const uint16_t ch_max = c ? r::HFC_NIC_CH_MAX_8852C : r::HFC_NIC_CH_MAX;
+  const uint16_t pub_g0 = c ? r::HFC_NIC_PUB_G0_8852C : r::HFC_NIC_PUB_G0;
+  const uint16_t pub_max = c ? r::HFC_NIC_PUB_MAX_8852C : r::HFC_NIC_PUB_MAX;
+  const uint16_t wp07 = c ? r::HFC_NIC_WP_CH07_PREC_8852C : r::HFC_NIC_WP_CH07_PREC;
+  const uint16_t wp811 =
+      c ? r::HFC_NIC_WP_CH811_PREC_8852C : r::HFC_NIC_WP_CH811_PREC;
 
   /* set_fc_func_en(0, 0): disable FC + CH12 while reprogramming. */
-  clr32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
+  clr32(fc_ctrl, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
 
-  /* Per-channel page ctrl: ACH0-3 + B0MGQ(8) + B0HIQ(9) = {18,152,grp0}. */
-  const uint32_t ch = min_max_grp(r::HFC_NIC_CH_MIN, r::HFC_NIC_CH_MAX);
-  w(r::R_AX_ACH0_PAGE_CTRL, ch);
-  w(r::R_AX_ACH1_PAGE_CTRL, ch);
-  w(r::R_AX_ACH2_PAGE_CTRL, ch);
-  w(r::R_AX_ACH3_PAGE_CTRL, ch);
-  w(r::R_AX_CH8_PAGE_CTRL, ch);
-  w(r::R_AX_CH9_PAGE_CTRL, ch);
+  /* Per-channel page ctrl: ACH0-3 + B0MGQ(8) + B0HIQ(9) = {min,max,grp0}. */
+  const uint32_t ch = min_max_grp(ch_min, ch_max);
+  w(ach0, ch);
+  w(ach1, ch);
+  w(ach2, ch);
+  w(ach3, ch);
+  w(ch8, ch);
+  w(ch9, ch);
 
   /* Public page ctrl (set_fc_pubpg): group0/group1 + WP threshold. */
-  w(r::R_AX_PUB_PAGE_CTRL1,
-    ((static_cast<uint32_t>(r::HFC_NIC_PUB_G0) & r::B_AX_PUBPG_G0_MSK)
+  w(pub1,
+    ((static_cast<uint32_t>(pub_g0) & r::B_AX_PUBPG_G0_MSK)
      << r::B_AX_PUBPG_G0_SH) |
         ((static_cast<uint32_t>(r::HFC_NIC_PUB_G1) & r::B_AX_PUBPG_G1_MSK)
          << r::B_AX_PUBPG_G1_SH));
-  w(r::R_AX_WP_PAGE_CTRL2,
-    (static_cast<uint32_t>(r::HFC_NIC_WP_THRD) & r::B_AX_WP_THRD_MSK)
-        << r::B_AX_WP_THRD_SH);
+  w(wp2, (static_cast<uint32_t>(r::HFC_NIC_WP_THRD) & r::B_AX_WP_THRD_MSK)
+             << r::B_AX_WP_THRD_SH);
 
   /* Mix cfg (set_fc_mix_cfg): precharges + public max + full conditions. */
-  w(r::R_AX_CH_PAGE_CTRL,
+  w(page_ctrl,
     ((static_cast<uint32_t>(r::HFC_NIC_CH011_PREC) & r::B_AX_PREC_PAGE_CH011_MSK)
      << r::B_AX_PREC_PAGE_CH011_SH) |
         ((static_cast<uint32_t>(r::HFC_USB_H2C_PREC_8852B) &
           r::B_AX_PREC_PAGE_CH12_MSK)
          << r::B_AX_PREC_PAGE_CH12_SH));
-  w(r::R_AX_PUB_PAGE_CTRL2,
-    (static_cast<uint32_t>(r::HFC_NIC_PUB_MAX) & r::B_AX_PUBPG_ALL_MSK)
-        << r::B_AX_PUBPG_ALL_SH);
-  w(r::R_AX_WP_PAGE_CTRL1,
-    ((static_cast<uint32_t>(r::HFC_NIC_WP_CH07_PREC) &
-      r::B_AX_PREC_PAGE_WP_CH07_MSK)
+  w(pub2, (static_cast<uint32_t>(pub_max) & r::B_AX_PUBPG_ALL_MSK)
+              << r::B_AX_PUBPG_ALL_SH);
+  w(wp1,
+    ((static_cast<uint32_t>(wp07) & r::B_AX_PREC_PAGE_WP_CH07_MSK)
      << r::B_AX_PREC_PAGE_WP_CH07_SH) |
-        ((static_cast<uint32_t>(r::HFC_NIC_WP_CH811_PREC) &
-          r::B_AX_PREC_PAGE_WP_CH811_MSK)
+        ((static_cast<uint32_t>(wp811) & r::B_AX_PREC_PAGE_WP_CH811_MSK)
          << r::B_AX_PREC_PAGE_WP_CH811_SH));
-  uint32_t fc = _device.rtw_read32(r::R_AX_HCI_FC_CTRL);
+  uint32_t fc = _device.rtw_read32(fc_ctrl);
   /* MODE = STF (1) for USB — matches the vendor golden capture
    * (HCI_FC_CTRL = 0x055b: FC_EN=1, MODE=1). An earlier port set MODE=0 +
    * FC_EN=0 on a wrong assumption; the fw never pulled the bulk cmd_ofld H2C
@@ -704,7 +723,7 @@ bool HalKestrel::hfc_init_nic() {
   fc = r::set_clr_word(fc, r::HFC_FULL_COND_X2,
                        r::B_AX_HCI_FC_WP_CH811_FULL_COND_MSK,
                        r::B_AX_HCI_FC_WP_CH811_FULL_COND_SH);
-  w(r::R_AX_HCI_FC_CTRL, fc);
+  w(fc_ctrl, fc);
 
   /* set_fc_func_en: enable CH12 credits now, but NOT the master FC_EN. The
    * vendor keeps HCI_FC_CTRL FC_EN=0 through probe-time dmac/trx init (golden
@@ -712,7 +731,7 @@ bool HalKestrel::hfc_init_nic() {
    * its first bulk cmd_ofld (0x055b). Enabling FC_EN mid-dmac-init — while the
    * DLE/USB reconfig is still settling — faults the fw's HCI/DMA AHB monitor
    * (SER err=0x10002010 L2_AH_HCI|L1_DMAC). enable_hci_fc() flips it later. */
-  set32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_CH12_EN);
+  set32(fc_ctrl, r::B_AX_HCI_FC_CH12_EN);
   delay_us(10);
   _logger->info("Kestrel TRX: NIC HFC quotas applied (CH12 credits live)");
   return true;
@@ -1409,8 +1428,11 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   /* Flip the master HCI flow-control enable now — the vendor does this at ifup
    * right before its first bulk cmd_ofld (HCI_FC_CTRL 0x08040000 -> 0x055b), so
    * FC_EN is only armed once the DMAC/CMAC/USB init has fully settled. This is
-   * what actually credits a CH12 page for the incoming H2C. */
-  set32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_EN);
+   * what actually credits a CH12 page for the incoming H2C. The 8852C flow
+   * control is the _V1 register. */
+  set32(_variant == ChipVariant::C8852C ? r::R_AX_HCI_FC_CTRL_V1_NIC
+                                        : r::R_AX_HCI_FC_CTRL,
+        r::B_AX_HCI_FC_EN);
   delay_us(10);
 
   _fw.ofld_begin();

@@ -419,6 +419,30 @@ constexpr uint16_t HFC_NIC_CH011_PREC = 9;
 constexpr uint16_t HFC_NIC_WP_CH07_PREC = 64;
 constexpr uint16_t HFC_NIC_WP_CH811_PREC = 24;
 
+/* 8852C runtime (NIC) HFC lives in the _V1 register bank (mirrors the 8852B
+ * 0x8A.. block at 0x17..) with the same field layout. The runtime CH12 credit
+ * programming must target it or the 8852C's H2C (CH12) bulk-out gets no credits
+ * and every post-FWDL cmd_ofld/IO H2C times out (rc=-7). */
+constexpr uint16_t R_AX_HCI_FC_CTRL_V1_NIC = 0x1700; /* == R_AX_HCI_FC_CTRL_V1 */
+constexpr uint16_t R_AX_ACH0_PAGE_CTRL_V1 = 0x1710;
+constexpr uint16_t R_AX_ACH1_PAGE_CTRL_V1 = 0x1714;
+constexpr uint16_t R_AX_ACH2_PAGE_CTRL_V1 = 0x1718;
+constexpr uint16_t R_AX_ACH3_PAGE_CTRL_V1 = 0x171C;
+constexpr uint16_t R_AX_CH8_PAGE_CTRL_V1 = 0x1730;
+constexpr uint16_t R_AX_CH9_PAGE_CTRL_V1 = 0x1734;
+constexpr uint16_t R_AX_PUB_PAGE_CTRL1_V1 = 0x1790;
+constexpr uint16_t R_AX_PUB_PAGE_CTRL2_V1 = 0x1794;
+constexpr uint16_t R_AX_WP_PAGE_CTRL1_V1 = 0x17A0;
+constexpr uint16_t R_AX_WP_PAGE_CTRL2_V1 = 0x17A4;
+/* 8852C USB SCC HFC quotas: hfc_chcfg_usb_scc_8852c {24,412}, hfc_pubcfg_usb_
+ * scc_8852c {412,0,412,0}, hfc_preccfg_usb_8852c (CH011=9,H2C=32,WP07/811=148). */
+constexpr uint16_t HFC_NIC_CH_MIN_8852C = 24;
+constexpr uint16_t HFC_NIC_CH_MAX_8852C = 412;
+constexpr uint16_t HFC_NIC_PUB_G0_8852C = 412;
+constexpr uint16_t HFC_NIC_PUB_MAX_8852C = 412;
+constexpr uint16_t HFC_NIC_WP_CH07_PREC_8852C = 148;
+constexpr uint16_t HFC_NIC_WP_CH811_PREC_8852C = 148;
+
 /* ---- FWDL (fwdl.c, mac_reg_ax.h) ---- */
 constexpr uint16_t R_AX_SYS_CLK_CTRL = 0x0008;
 constexpr uint32_t B_AX_CPU_CLK_EN = 1u << 14;

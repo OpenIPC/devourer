@@ -629,6 +629,13 @@ constexpr uint8_t MAC_AX_ROLE_REMOVE = 1;
  * never did. Enable the queues our TX uses: BE0..VO0 (data ACs), MGQ + CPUMGQ
  * (host + cpu mgmt), HGQ (high-priority). */
 constexpr uint16_t R_AX_CTN_TXEN = 0xC348;
+/* Driver-side contention TX enable (band-0). CTN_TXEN gates the HW queues;
+ * CTN_DRV_TXEN gates driver-injected frames into contention. The 8852C powers
+ * up with it cleared, so injected frames never win a TX opportunity, never
+ * complete, and the PLE pool fills (~103-frame stall, no rpkt_type=7 release).
+ * Vendor set_hw_sch_tx_en sets it to 0x0003ffff at ifup. */
+constexpr uint16_t R_AX_CTN_DRV_TXEN = 0xC398;
+constexpr uint32_t B_AX_CTN_DRV_TXEN_ALL = 0x0003ffff;
 constexpr uint16_t B_AX_CTN_TXEN_BE_0 = 1u << 0;
 constexpr uint16_t B_AX_CTN_TXEN_BK_0 = 1u << 1;
 constexpr uint16_t B_AX_CTN_TXEN_VI_0 = 1u << 2;

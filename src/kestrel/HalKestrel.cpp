@@ -1235,7 +1235,14 @@ void HalKestrel::sch_tx_en() {
   uint16_t v = _device.rtw_read16(r::R_AX_CTN_TXEN);
   v |= en;
   _device.rtw_write16(r::R_AX_CTN_TXEN, v);
-  _logger->info("Kestrel TRX: CTN_TXEN queues enabled (0x{:04x})", v);
+  /* Driver-side TX contention enable — the 8852C resets it cleared, so injected
+   * frames never win a TX grant (no completion, PLE stalls). Vendor sets
+   * 0x0003ffff at ifup. Set it for every variant (a no-op where the reset
+   * default already has it). */
+  _device.rtw_write32(
+      r::R_AX_CTN_DRV_TXEN,
+      _device.rtw_read32(r::R_AX_CTN_DRV_TXEN) | r::B_AX_CTN_DRV_TXEN_ALL);
+  _logger->info("Kestrel TRX: CTN_TXEN=0x{:04x} + CTN_DRV_TXEN enabled", v);
 
   /* Clear the CMAC CCA medium-busy gates (R_AX_CCA_CFG_0 bits 0-4). Without the
    * RX-DCK/DACK BB calibration (not yet ported) the carrier/energy detectors

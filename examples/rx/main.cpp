@@ -1011,8 +1011,7 @@ int main() {
    * still suppresses the reset for a warm pickup (firmware already running).
    * See src/UsbOpen.h. */
   std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
-  rc = devourer::claim_interface_then_reset(
-      dev_handle, 0, logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr,
+  rc = devourer::claim_interface_then_reset(dev_handle, devourer::find_wifi_interface(dev_handle), logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr,
       usb_lock);
   devourer::Ev(*g_ev, "init.timing")
       .f("stage", "demo.usb_reset")

@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
   auto* h = libusb_open_device_with_vid_pid(ctx, vid, pid);
   if (!h) { fprintf(stderr, "open %04x:%04x failed\n", vid, pid); return 1; }
   std::shared_ptr<devourer::UsbDeviceLock> lock;
-  if (devourer::claim_interface_then_reset(h, 0, logger, true, lock) != 0)
+  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lock) != 0)
     return 1;
   WiFiDriver wifi(logger);
   auto dev = wifi.CreateRtlDevice(h, ctx, lock, devourer_config_from_env());

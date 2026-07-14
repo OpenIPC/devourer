@@ -93,8 +93,7 @@ static libusb_device_handle* open_device(
   }
   if (!h && pid != 0) h = libusb_open_device_with_vid_pid(*ctx, vid, pid);
   if (!h) { logger->error("no device {:04x}:{:04x}", vid, pid); return nullptr; }
-  if (devourer::claim_interface_then_reset(
-          h, 0, logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr, lock) != 0) {
+  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr, lock) != 0) {
     logger->error("claim failed (busy?)");
     return nullptr;
   }

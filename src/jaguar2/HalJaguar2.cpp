@@ -2286,6 +2286,9 @@ void HalJaguar2::enable_rx() {
   _device.rtw_write16(0x0100, 0x06FF);
   /* Promiscuous RX for monitor: the vendor monitor RCR (hal_com.c:
    * RCR_AAP|APM|AM|AB|APWRMGT|APP_PHYST_RXFF|APP_MIC|APP_ICV = 0x7000002F)
+   * plus APP_FCS (BIT31) = 0xF000002F. Jaguar1 already uses RCR_APPFCS and
+   * Jaguar3 has BIT31 in RCR 0xF410400F; this parity makes Packet::Data carry
+   * the trailing FCS on every Realtek generation.
    * WITHOUT the legacy "accept" trio at bits 11/12/13. On this MAC generation
    * those are NOT the Jaguar1 ADF/ACF/AMF accept bits — rtw88 reg.h names
    * BIT(11) BIT_TA_BCN (TA-gated beacon accept) and BIT(12)

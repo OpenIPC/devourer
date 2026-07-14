@@ -12,6 +12,13 @@ namespace devourer {
 
 class UsbDeviceLock;
 
+/* Return the vendor Wi-Fi interface that owns bulk IN and OUT endpoints. This
+ * must run before claim_interface_then_reset(): composite RTL8822BU adapters
+ * expose Bluetooth on interfaces 0/1 and Wi-Fi on interface 2. Fall back to
+ * interface 0 for legacy single-interface adapters whose descriptor does not
+ * identify a vendor bulk interface. */
+int find_wifi_interface(libusb_device_handle *handle);
+
 /* Prepare an already-opened USB handle for use with the OS-friendly ordering —
  * *lock and claim before reset*:
  *

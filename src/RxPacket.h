@@ -79,6 +79,8 @@ struct rx_pkt_attrib
 struct Packet
 {
     rx_pkt_attrib RxAtrib;
+    /* Full 802.11 frame including the trailing FCS. Every Realtek RX parser
+     * follows this contract */
     std::span<uint8_t> Data;
 
     /* The transmitter's hardware TX-egress TSF, when the frame carries one.

@@ -273,13 +273,21 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
           if (!kestrel::parse_rx_8852b(data + off, static_cast<size_t>(n) - off,
                                        f))
             break;
-          if (f.rpkt_type == kestrel::RPKT_TYPE_WIFI && packetProcessor) {
+          if (f.rpkt_type == kestrel::RPKT_TYPE_PPDU && f.payload_len >= 6) {
+            /* physts header (halbb physts_hdr_info): byte3 = rssi_avg_td, byte4+
+             * = per-path rssi_td, all U(8,1) (RSSI% = dBm+110 = raw>>1). Cache
+             * for the following WIFI frame(s). */
+            _last_rssi[0] = static_cast<uint8_t>(f.payload[4] >> 1);
+            _last_rssi[1] = static_cast<uint8_t>(f.payload[5] >> 1);
+          } else if (f.rpkt_type == kestrel::RPKT_TYPE_WIFI && packetProcessor) {
             Packet p{};
             p.RxAtrib.pkt_len = static_cast<uint16_t>(f.payload_len);
             p.RxAtrib.crc_err = f.crc_err;
             p.RxAtrib.icv_err = f.icv_err;
             p.RxAtrib.data_rate = static_cast<uint8_t>(f.rx_rate);
             p.RxAtrib.tsfl = f.freerun_cnt;
+            p.RxAtrib.rssi[0] = _last_rssi[0];
+            p.RxAtrib.rssi[1] = _last_rssi[1];
             p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.payload),
                                         f.payload_len);
             packetProcessor(p);
@@ -468,7 +476,7 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   c.txpwr = GetTxPowerCaps();
   c.tx_chains = 2; /* 8852B/8852C are 2T2R */
   c.rx_chains = 2;
-  c.per_chain_rssi = true; /* FrameParserKestrel fills per-chain rssi */
+  c.per_chain_rssi = true; /* per-path RSSI from the PPDU-status physts header */
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   c.per_packet_txpower = false; /* AX power is TSSI, not the J2 descriptor LUT */
   c.narrowband_ok = true; /* 5/10 MHz BB small-BW (SDR-validated); FastSetBandwidth toggle */

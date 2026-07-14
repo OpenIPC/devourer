@@ -168,6 +168,9 @@ private:
   uint8_t _tx_data_ep = 0; /* AC0 data bulk-OUT ep (BULKOUTID3) */
   uint16_t _tx_seq = 0;    /* rolling 12-bit wifi sequence for injected frames */
   std::optional<devourer::TxMode> _tx_mode_default; /* SetTxMode default */
+  /* Per-chain RSSI (RSSI% = dBm+110) cached from the last PPDU-status physts
+   * header, attached to the following WIFI frame(s) in the aggregate. */
+  uint8_t _last_rssi[2] = {0, 0};
 };
 
 #endif /* RTL_KESTREL_DEVICE_H */

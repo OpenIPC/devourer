@@ -98,13 +98,21 @@ uint8_t HalKestrel::read_xtal_si(uint8_t offset) {
 }
 
 bool HalKestrel::usb_pre_init() {
-  /* usb_pre_init_8852b: enable USB IO mode, clear RX/TX reset, re-toggle the
-   * HCI DMA enables. Bulk-out endpoint pause bookkeeping is skipped — the
-   * host owns endpoint selection in userspace. */
-  set32(r::R_AX_USB_HOST_REQUEST_2, r::B_AX_R_USBIO_MODE);
-  clr32(r::R_AX_USB_WLAN0_1, r::B_AX_USBRX_RST | r::B_AX_USBTX_RST);
-  clr32(r::R_AX_HCI_FUNC_EN, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
-  set32(r::R_AX_HCI_FUNC_EN, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
+  /* usb_pre_init_8852{b,c}: enable USB IO mode, clear RX/TX reset, re-toggle the
+   * HCI DMA enables. Bulk-out endpoint pause bookkeeping is skipped — the host
+   * owns endpoint selection in userspace. The 8852C (RISC-V) addresses the _V1
+   * USB register bank (0x5078/0x5174/0x7880) where the 8852B uses
+   * 0x1078/0x1174/0x8380; hitting the wrong bank leaves the 8852C USB TRX path
+   * in reset so the RISC-V bootrom never raises H2C_PATH_RDY. */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint16_t host_req =
+      c ? r::R_AX_USB_HOST_REQUEST_2_V1 : r::R_AX_USB_HOST_REQUEST_2;
+  const uint16_t wlan0_1 = c ? r::R_AX_USB_WLAN0_1_V1 : r::R_AX_USB_WLAN0_1;
+  const uint16_t hci_en = c ? r::R_AX_HCI_FUNC_EN_V1 : r::R_AX_HCI_FUNC_EN;
+  set32(host_req, r::B_AX_R_USBIO_MODE);
+  clr32(wlan0_1, r::B_AX_USBRX_RST | r::B_AX_USBTX_RST);
+  clr32(hci_en, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
+  set32(hci_en, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
   return true;
 }
 

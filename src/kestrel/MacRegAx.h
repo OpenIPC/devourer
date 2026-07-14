@@ -111,6 +111,13 @@ constexpr uint32_t B_AX_R_USBIO_MODE = 1u << 4;
 constexpr uint16_t R_AX_USB_WLAN0_1 = 0x1174;
 constexpr uint32_t B_AX_USBRX_RST = 1u << 9;
 constexpr uint32_t B_AX_USBTX_RST = 1u << 8;
+/* 8852C USB (_V1 register space, hci_reg_ax.h): usb_pre_init_8852c writes these
+ * instead of the 8852B addresses above. Same bit positions, different offsets.
+ * Without them the 8852C USB TRX path stays in reset and the RISC-V bootrom
+ * never raises H2C_PATH_RDY (it self-boots its ROM fw). B_AX_R_USBIO_MODE /
+ * USBRX_RST / USBTX_RST bit numbers are shared with the 8852B (BIT4/9/8). */
+constexpr uint16_t R_AX_USB_HOST_REQUEST_2_V1 = 0x5078;
+constexpr uint16_t R_AX_USB_WLAN0_1_V1 = 0x5174;
 constexpr uint16_t R_AX_HCI_FUNC_EN = 0x8380;    /* 8852B/MIPS */
 constexpr uint16_t R_AX_HCI_FUNC_EN_V1 = 0x7880; /* 8852C/RISC-V (init.c else) */
 

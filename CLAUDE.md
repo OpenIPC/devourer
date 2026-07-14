@@ -81,8 +81,19 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
   the CSMA backoff — the intended injection/monitor-link mode; carrier-sense
   returns with that calibration. Not yet working: full RF calibration
   (RX-DCK/DACK/IQK/DPK/TSSI), and the fw's USR_TX_RPT TX-egress-timestamp C2H
-  (gated on a full BSS association, not just the registered NO_LINK role). The
-  capstone is 11ax trigger-based UL + TWT (issue #236 — the v1.19 vendor fwcmd
+  (gated on a full BSS association, not just the registered NO_LINK role).
+  On the **RTL8832CU (C8852C**, the RISC-V die, die-id 0x52): identity,
+  power-on, full FWDL, the 8852C halbb/halrf PHY tables, and **monitor RX**
+  (decodes ambient frames, 2.4/5 GHz) are up. Almost every 8852C divergence from
+  the 8852B is a **`_V1` register-bank** move (USB/HFC/RXAGG/HCI at 0x5xxx/0x1700/
+  0x6000/0x7880 vs the 8852B 0x1xxx/0x8Axx/0x8900/0x8380) plus a different
+  descriptor: FWDL/H2C use a 16-byte `rxd_short_t` (not the 24-byte WD body), and
+  data/mgmt TX uses the 32-byte `wd_body_t_v1` (not 24). The CBV-cut die loads the
+  `u2_nic` fw image (CAV→u1). TX composes + schedules correctly but **does not yet
+  radiate**: the RF synth locks and the BB configures, yet neither injection nor
+  the HW beacon engine puts energy on air (SDR-confirmed) and frames never
+  complete — a BB/RF-TX-chain gap (not the MAC scheduler, which is fully set up).
+  The capstone is 11ax trigger-based UL + TWT (issue #236 — the v1.19 vendor fwcmd
   surface exposes TWT-OFDMA + F2P trigger H2Cs that mainline rtw89 lacks). The
   8852A-family (RTL8832AU) is deliberately excluded (frozen 2021 v1.15 vendor
   drop only).

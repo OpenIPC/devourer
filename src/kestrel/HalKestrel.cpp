@@ -778,6 +778,14 @@ void HalKestrel::sec_eng_init() {
   _device.rtw_write32(r::R_AX_SEC_ENG_CTRL, v);
   /* MIC/ICV append (security_cam.c:1002). Golden: 0x9D04 -> ...|0x3. */
   set32(r::R_AX_SEC_MPDU_PROC, r::B_AX_APPEND_ICV | r::B_AX_APPEND_MIC);
+  if (_variant == ChipVariant::C8852C) {
+    /* 8852C-only (security_cam.c is_chip_id(8852C)): default RX drv-info block
+     * size + the sec-engine TX-timeout selector. */
+    field32(r::R_AX_RCR, r::DRVINFO_PATCH_SIZE, r::B_AX_DRV_INFO_SIZE_MSK,
+            r::B_AX_DRV_INFO_SIZE_SH);
+    field32(r::R_AX_SEC_DEBUG1, r::B_AX_TX_TO, r::B_AX_TX_TIMEOUT_SEL_MSK,
+            r::B_AX_TX_TIMEOUT_SEL_SH);
+  }
 }
 
 bool HalKestrel::trx_dmac_init() {
@@ -1076,17 +1084,23 @@ void HalKestrel::usb_rx_agg_cfg() {
 }
 
 void HalKestrel::scheduler_init() {
-  /* scheduler_init (trxcfg.c) — band0, 8852B. */
-  field32(r::R_AX_PREBKF_CFG_1, r::SIFS_MACTXEN_T1_V0,
+  /* scheduler_init (trxcfg.c) — band0. SIFS_MACTXEN_T1 is V2 (0x3E) on the
+   * 8852C vs V0 (0x47) on the 8852B; the 8852C does NOT write
+   * B_AX_PORT_RST_TSF_ADV (8852B/51B/BT-only branch); SIFS_AGGR uses the wider
+   * _V1 [31:24] field on the 8852C. */
+  const bool c = (_variant == ChipVariant::C8852C);
+  field32(r::R_AX_PREBKF_CFG_1, c ? r::SIFS_MACTXEN_T1_V2 : r::SIFS_MACTXEN_T1_V0,
           r::B_AX_SIFS_MACTXEN_T1_MSK, r::B_AX_SIFS_MACTXEN_T1_SH);
-  set32(r::R_AX_SCH_EXT_CTRL, r::B_AX_PORT_RST_TSF_ADV);
+  if (!c)
+    set32(r::R_AX_SCH_EXT_CTRL, r::B_AX_PORT_RST_TSF_ADV);
   clr32(r::R_AX_CCA_CFG_0, r::B_AX_BTCCA_EN);
   /* ASIC env leaves CCA_CFG_0's CCA/EDCCA bits as-is. AP-path pre-backoff +
-   * SIFS-aggregation timing (8852B band0). */
+   * SIFS-aggregation timing (band0). */
   field32(r::R_AX_PREBKF_CFG_0, r::SCH_PREBKF_16US, r::B_AX_PREBKF_TIME_MSK,
           r::B_AX_PREBKF_TIME_SH);
-  field32(r::R_AX_CCA_CFG_0, 0x6a, r::B_AX_R_SIFS_AGGR_TIME_MSK,
-          r::B_AX_R_SIFS_AGGR_TIME_SH);
+  field32(r::R_AX_CCA_CFG_0, 0x6a,
+          c ? r::B_AX_R_SIFS_AGGR_TIME_V1_MSK : r::B_AX_R_SIFS_AGGR_TIME_MSK,
+          c ? r::B_AX_R_SIFS_AGGR_TIME_V1_SH : r::B_AX_R_SIFS_AGGR_TIME_SH);
   /* Beacon-queue EDCA (path BCN): W16 at BCNQ_PARAM+2 = CW|AIFS. */
   const uint8_t cw = static_cast<uint8_t>((3u << 4) | 2u); /* ecw_max/min */
   uint16_t edca = static_cast<uint16_t>(
@@ -1158,7 +1172,10 @@ void HalKestrel::trxptcl_init() {
   uint32_t v = _device.rtw_read32(r::R_AX_TRXPTCL_RESP_0);
   v = r::set_clr_word(v, r::WMAC_SPEC_SIFS_CCK, r::B_AX_WMAC_SPEC_SIFS_CCK_MSK,
                       r::B_AX_WMAC_SPEC_SIFS_CCK_SH);
-  v = r::set_clr_word(v, r::WMAC_SPEC_SIFS_OFDM_52B,
+  v = r::set_clr_word(v,
+                      _variant == ChipVariant::C8852C
+                          ? r::WMAC_SPEC_SIFS_OFDM_52C
+                          : r::WMAC_SPEC_SIFS_OFDM_52B,
                       r::B_AX_WMAC_SPEC_SIFS_OFDM_MSK,
                       r::B_AX_WMAC_SPEC_SIFS_OFDM_SH);
   _device.rtw_write32(r::R_AX_TRXPTCL_RESP_0, v);

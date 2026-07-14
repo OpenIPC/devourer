@@ -895,6 +895,20 @@ constexpr uint32_t B_AX_CH_EN_V1_MSK = 0xff;
  * vendors compute VHT SIG-B CRC). */
 constexpr uint16_t R_AX_PLCP_HDR_FLTR = 0xCE04;
 constexpr uint32_t B_AX_VHT_SU_SIGB_CRC_CHK = 1u << 4;
+/* R_AX_RCR drv-info size (8852C sec_eng_init: DRVINFO_PATCH_SIZE=0x5). */
+constexpr uint8_t B_AX_DRV_INFO_SIZE_SH = 8;
+constexpr uint32_t B_AX_DRV_INFO_SIZE_MSK = 0x7;
+constexpr uint32_t DRVINFO_PATCH_SIZE = 0x5;
+/* 8852C sec_eng_init: SEC_DEBUG1 tx-timeout select. */
+constexpr uint16_t R_AX_SEC_DEBUG1 = 0x9D1C;
+constexpr uint8_t B_AX_TX_TIMEOUT_SEL_SH = 30;
+constexpr uint32_t B_AX_TX_TIMEOUT_SEL_MSK = 0x3;
+constexpr uint32_t B_AX_TX_TO = 0x2;
+/* 8852C scheduler/trxptcl timing constants. */
+constexpr uint32_t SIFS_MACTXEN_T1_V2 = 0x3E;      /* vs V0=0x47 */
+constexpr uint32_t WMAC_SPEC_SIFS_OFDM_52C = 0x11; /* vs _52B */
+constexpr uint8_t B_AX_R_SIFS_AGGR_TIME_V1_SH = 24;
+constexpr uint32_t B_AX_R_SIFS_AGGR_TIME_V1_MSK = 0xff; /* vs 0x7f */
 constexpr uint16_t R_AX_DLK_PROTECT_CTL = 0xCE02;
 constexpr uint8_t B_AX_RX_DLK_DATA_TIME_SH = 4;
 constexpr uint32_t B_AX_RX_DLK_DATA_TIME_MSK = 0xf;

@@ -871,7 +871,16 @@ void HalKestrel::cmac_com_init() {
 }
 
 void HalKestrel::cmac_dma_init() {
-  /* Clear RX full-mode pointer bits so RX DMA streams. */
+  /* cmac_dma_init (trxcfg.c:762): clear the RX ptr-full-mode bits so RX DMA
+   * streams. This is an is_chip_id(8852A/8852B/8851B/8852BT) branch — 0xC804 is
+   * the 8852B RXDMA_CTRL_0 (RU/CSI ptr-full bits [5:0]). On the 8852C the vendor
+   * early-returns (touches nothing): 0xC804 is a different _V1 register there,
+   * and the RX-data full-mode/reserve-depth lives at R_AX_RX_CTRL0 (0xC808) and
+   * must stay at reset. Writing 0xC804 on the 8852C perturbs the RXDMA full/
+   * reserve logic -> RX streams an init burst then wedges (C2H, on a separate
+   * PLE queue, keeps flowing). So skip it entirely for the 8852C. */
+  if (_variant == ChipVariant::C8852C)
+    return; /* vendor early-returns on 8852C (0xC804 is a _V1 register there) */
   clr32(r::R_AX_RXDMA_CTRL_0, r::RX_FULL_MODE);
 }
 

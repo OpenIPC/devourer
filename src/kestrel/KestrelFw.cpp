@@ -930,6 +930,9 @@ bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
         total_mss_bytes += mssc * r::FWDL_SECURITY_SIGLEN;
       }
     }
+    const uint32_t dladdr = le32(sh + 0); /* section dword0 = dl dest addr */
+    _logger->info("Kestrel FWDL: section {} type={} len={} dladdr=0x{:08x}", i,
+                  type, sec_len, dladdr);
     secs.push_back({bin_ptr, sec_len, security});
     bin_ptr += sec_len;
   }
@@ -1070,13 +1073,15 @@ bool KestrelFw::fw_pre_init() {
 bool KestrelFw::download_firmware(uint8_t cut, uint8_t mss_idx, bool is_sec_ic) {
   _is_sec_ic = is_sec_ic;
   /* Per-variant, cut-selected fw image. 8852B: NICCE, CBV(1)->u2, CCV+(>=2)->u3.
-   * 8852C: NIC, CAV(1)->u1, CBV+(>=2)->u2. */
+   * 8852C: NIC, CAV(0)->u1_nic, CBV(1+)->u2_nic (fwdl.h INTERNAL_FW_CONTENT_
+   * 8852C_{CAV,CBV}_NIC; FWDL_CAV=0/FWDL_CBV=1). Loading u1 on a CBV die downloads
+   * a mismatched image and the fw hangs in post-download HW init. */
   const uint8_t *fw = nullptr;
   uint32_t len = 0;
   const char *img = "none";
 #if defined(DEVOURER_HAVE_KESTREL_8852C)
   if (_variant == ChipVariant::C8852C) {
-    if (cut >= 2) {
+    if (cut >= 1) {
       fw = array_8852c_u2_nic;
       len = array_8852c_u2_nic_len;
       img = "u2_nic";

@@ -1126,10 +1126,11 @@ void HalKestrel::sch_tx_en() {
    * (~103-frame stall). Disabling the CCA gates lets frames air — the intended
    * TX/monitor mode; on-air validated (the 8852BU radiates). */
   if (_cca_on) {
-    /* Experimental (DEVOURER_KESTREL_CCA_ON): leave the CCA gates ENABLED to
-     * test whether the ported RX-DCK calibration fixed the perpetual-busy so
-     * carrier-sense TX works. If frames still air, RX-DCK is sufficient; if TX
-     * stalls, DACK is also needed. */
+    /* Experimental (DEVOURER_KESTREL_CCA_ON): leave the CCA gates ENABLED for a
+     * carrier-sense TX test. NB: measured NOT sufficient on its own — TX still
+     * 103-stalls even with RX-DCK + ADDCK + the EDCCA level threshold seeded to
+     * -62 dBm; carrier-sense TX needs deeper RF/BB config (IQK/DPK or a CCA
+     * state-machine bring-up). */
     _logger->info("Kestrel TRX: CCA gates LEFT ON (CCA_CFG_0=0x{:08x}) — "
                   "carrier-sense TX test",
                   _device.rtw_read32(r::R_AX_CCA_CFG_0));

@@ -14,6 +14,9 @@
 #include "MacRegAx.h"
 #include "PhyTableLoaderKestrel.h"
 #include "hal8852b_phy.h"
+#if defined(DEVOURER_HAVE_KESTREL_8852C)
+#include "hal8852c_phy.h"
+#endif
 
 namespace kestrel {
 
@@ -911,8 +914,15 @@ void HalKestrel::init_gain_table(uint32_t rfe_type, uint32_t cut) {
             static_cast<int8_t>((data >> (8 * i)) & 0xff);
     }
   };
-  apply_phy_table(array_mp_8852b_phy_reg_gain, array_mp_8852b_phy_reg_gain_len,
-                  rfe_type, cut, decode);
+  const uint32_t *gain = array_mp_8852b_phy_reg_gain;
+  uint32_t gain_len = array_mp_8852b_phy_reg_gain_len;
+#if defined(DEVOURER_HAVE_KESTREL_8852C)
+  if (_variant == ChipVariant::C8852C) {
+    gain = array_mp_8852c_phy_reg_gain;
+    gain_len = array_mp_8852c_phy_reg_gain_len;
+  }
+#endif
+  apply_phy_table(gain, gain_len, rfe_type, cut, decode);
   _gain_cached = true;
 }
 
@@ -1465,8 +1475,27 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
     _fw.ofld_write(r::OFLD_SRC_BB, r::OFLD_TYPE_WRITE, 0,
                    static_cast<uint16_t>(addr & 0xffff), val, r::MASKDWORD);
   };
-  apply_phy_table(array_mp_8852b_phy_reg, array_mp_8852b_phy_reg_len, rfe_type,
-                  cut, bb_emit);
+  /* Chip-specific BB/RF tables — the 8832CU is a different die; applying the
+   * 8852B phy_reg/radio tables leaves its RF/BB mis-tuned so the RX front-end is
+   * deaf on both bands (BB0x4004 still reads the table value since it is a
+   * common core-BB register, masking the mismatch). */
+  const uint32_t *phy_reg = array_mp_8852b_phy_reg;
+  uint32_t phy_reg_len = array_mp_8852b_phy_reg_len;
+  const uint32_t *radioa = array_mp_8852b_radioa;
+  uint32_t radioa_len = array_mp_8852b_radioa_len;
+  const uint32_t *radiob = array_mp_8852b_radiob;
+  uint32_t radiob_len = array_mp_8852b_radiob_len;
+#if defined(DEVOURER_HAVE_KESTREL_8852C)
+  if (_variant == ChipVariant::C8852C) {
+    phy_reg = array_mp_8852c_phy_reg;
+    phy_reg_len = array_mp_8852c_phy_reg_len;
+    radioa = array_mp_8852c_radioa;
+    radioa_len = array_mp_8852c_radioa_len;
+    radiob = array_mp_8852c_radiob;
+    radiob_len = array_mp_8852c_radiob_len;
+  }
+#endif
+  apply_phy_table(phy_reg, phy_reg_len, rfe_type, cut, bb_emit);
   _fw.ofld_flush(KestrelFw::OfldFlush::BB); /* bitmap_en(false): 0x1a24 LC */
   /* array_mp_8852b_phy_reg_gain is NOT a register table — halbb_init_gain_table
    * -> halbb_cfg_bb_gain_8852b decodes each entry as (cfg_type,band,path,type)
@@ -1516,8 +1545,8 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
                          0, radio_page.data(),
                          static_cast<uint16_t>(radio_page.size()));
   };
-  apply_radio(array_mp_8852b_radioa, array_mp_8852b_radioa_len, 0);
-  apply_radio(array_mp_8852b_radiob, array_mp_8852b_radiob_len, 1);
+  apply_radio(radioa, radioa_len, 0);
+  apply_radio(radiob, radiob_len, 1);
 
   /* Decisive readback: BB 0x4004 is host-readable (core BB), and the phy_reg
    * table sets it to 0xCA014000 — but ONLY via fw-offload now (no direct

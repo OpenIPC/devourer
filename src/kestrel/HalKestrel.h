@@ -131,6 +131,13 @@ public:
    * synth locks but nothing radiates. RF_PATH_A, single-PHY (dbcc off). */
   void ctrl_tx_path_tmac_8852c();
 
+  /* halbb_dm_init_per_phy (halbb_init.c) — the BB dynamic-mechanism init the
+   * 8852B-derived bring-up never ran (RX AGC/DIG/physts/EDCCA/env-monitor left
+   * unconfigured -> the 8832CU RX near-deafness). Ported verbatim for the
+   * 8852C (single-PHY HW_PHY_0, non-MP, non-DBCC, cr_type=BB_AP2); run after
+   * the BB/RF tables. */
+  void bb_dm_init_8852c();
+
   /* M3 — tune the BB + RF to a monitor channel (2.4/5 GHz, 20 MHz). Ports the
    * halbb ctrl_ch/ctrl_bw/cck_en/bb_reset + the halrf RF18 channel setting.
    * Must run after phy_bb_rf_init. */

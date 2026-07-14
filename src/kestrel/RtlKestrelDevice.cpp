@@ -154,6 +154,10 @@ bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
     return false;
   if (!_hal.phy_bb_rf_init(_efuse.rfe_type, _hal.read_cut()))
     return false;
+  /* halrf RFK: DAC/ADC DC-offset calibration (halrf_dac_cal_8852b, ADDCK subset)
+   * — once after the BB/RF tables, before the channel set. Removes the ADC DC
+   * term the CCA energy detector reads as busy. */
+  _hal.dac_cal();
   /* Vendor timing: arm the SER error IMR only after the BB/RF tables. */
   _hal.enable_ser_imr();
   /* set_host_rpr (mac_trx_init tail, after the IMR) — enable the fw's WD/PLE

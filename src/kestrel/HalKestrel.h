@@ -243,6 +243,7 @@ private:
   void usb_init(); /* runtime USB init (endpoint NUMP/burst) — usb_init_8852b */
   /* M3 BB/RF channel helpers (all over the wIndex=1 window). */
   void bb_rmw(uint32_t addr, uint32_t mask, uint32_t val); /* masked BB write */
+  uint32_t bb_read(uint32_t addr, uint32_t mask); /* masked+shifted BB read */
   uint32_t rf_read(uint8_t path, uint8_t rf_addr);         /* DDV RF read */
   void rf_write(uint8_t path, uint8_t rf_addr, uint32_t val); /* DDV RF write */
   /* DAV (a-die) RF write via the BB 0x370 serial command (full 20-bit only,
@@ -266,6 +267,23 @@ private:
    * the RX DC term the CCA/EDCCA energy detector otherwise reads as a perpetual
    * medium-busy. Run after the channel is tuned. */
   void rx_dck();
+
+public:
+  /* halrf_dac_cal_8852b (ADC/ADDCK subset): DRCK + ADC DC-offset calibration —
+   * removes the ADC DC term the CCA energy detector reads as busy. Run once at
+   * init (after the BB/RF tables). RF 0x0/0x1/0x5 are saved/restored so the
+   * operational radio state survives the cal. */
+  void dac_cal();
+
+private:
+  void afe_init();
+  void dack_reset();
+  void drck();
+  void addck();
+  void addck_reload();
+  uint16_t _addck_d[2][2] = {}; /* [path][ic/qc] ADC DC-offset backup */
+
+public:
   void bb_reset_all();
   /* M2a DMAC sub-inits (trxcfg.c). */
   bool dle_init_nic();

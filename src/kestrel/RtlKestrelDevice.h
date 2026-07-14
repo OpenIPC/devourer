@@ -2,7 +2,10 @@
 #define RTL_KESTREL_DEVICE_H
 
 #include <cstdint>
+#include <optional>
 #include <thread>
+
+#include "TxMode.h"
 
 #include "logger.h"
 #include "DeviceConfig.h"
@@ -72,6 +75,12 @@ public:
   devourer::TxPowerCaps GetTxPowerCaps() override;
   int SetTxPowerOffsetQdb(int qdb) override;
   devourer::TxPowerState GetTxPowerState() override;
+
+  /* Runtime TX-mode default (DEVOURER_TX_RATE): rate/BW/GI/LDPC/STBC applied to
+   * a rate-less frame (e.g. the demo beacon). A per-packet radiotap rate always
+   * wins. Mirrors the Jaguar behaviour so DEVOURER_TX_RATE works uniformly. */
+  void SetTxMode(const devourer::TxMode &mode) override;
+  void ClearTxMode() override;
 
   /* 64-bit free-running MAC TSF (band-0 port-0). mac_get_tsf (twt.c). */
   uint64_t ReadTsf() override;
@@ -145,6 +154,7 @@ private:
   uint8_t _tx_mgmt_ep = 0; /* band-0 mgmt bulk-OUT ep (BULKOUTID0), 0=TX not up */
   uint8_t _tx_data_ep = 0; /* AC0 data bulk-OUT ep (BULKOUTID3) */
   uint16_t _tx_seq = 0;    /* rolling 12-bit wifi sequence for injected frames */
+  std::optional<devourer::TxMode> _tx_mode_default; /* SetTxMode default */
 };
 
 #endif /* RTL_KESTREL_DEVICE_H */

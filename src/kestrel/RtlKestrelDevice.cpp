@@ -287,6 +287,11 @@ void RtlKestrelDevice::SetMonitorChannel(SelectedChannel channel) {
   _hal.set_channel(channel.Channel, channel.ChannelWidth, channel.ChannelOffset);
 }
 
+void RtlKestrelDevice::SetTxMode(const devourer::TxMode &mode) {
+  _tx_mode_default = mode;
+}
+void RtlKestrelDevice::ClearTxMode() { _tx_mode_default.reset(); }
+
 void RtlKestrelDevice::handle_c2h(const uint8_t *payload, uint32_t len) {
   namespace r = kestrel::reg;
   if (payload == nullptr || len < 8)
@@ -459,6 +464,8 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
    * rate-less frame stays at 6M OFDM. HE rates land in M5. */
   uint8_t mgn = MGN_6M;
   bool he = false; /* HE rate set directly on tr.rate (no MGN_HE code) */
+  bool rate_from_radiotap = false; /* a per-packet radiotap rate overrides the
+                                    * SetTxMode default */
   kestrel::TxRate tr{}; /* defaults: 6M, 20MHz, LGI */
   auto *rth = reinterpret_cast<struct ieee80211_radiotap_header *>(
       const_cast<uint8_t *>(packet));
@@ -468,8 +475,10 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
       switch (it.this_arg_index) {
       case IEEE80211_RADIOTAP_RATE:
         mgn = *it.this_arg;
+        rate_from_radiotap = true;
         break;
       case IEEE80211_RADIOTAP_MCS: {
+        rate_from_radiotap = true;
         uint8_t flags = it.this_arg[1];
         if ((flags & IEEE80211_RADIOTAP_MCS_BW_MASK) ==
             IEEE80211_RADIOTAP_MCS_BW_40)
@@ -480,6 +489,7 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
           mgn = static_cast<uint8_t>(MGN_MCS0 + it.this_arg[2]);
       } break;
       case IEEE80211_RADIOTAP_VHT: {
+        rate_from_radiotap = true;
         uint8_t known = it.this_arg[0], flags = it.this_arg[2];
         if ((known & 0x04) && (flags & 0x04))
           tr.gi_ltf = 1;
@@ -496,6 +506,7 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
           mgn = static_cast<uint8_t>(MGN_VHT1SS_MCS0 + (nss - 1) * 10 + mcs);
       } break;
       case IEEE80211_RADIOTAP_HE: {
+        rate_from_radiotap = true;
         /* 802.11ax HE: six LE u16 words data1..data6. Read MCS/coding/STBC
          * (data3), BW+GI+LTF (data5) and NSTS (data6); map to the AX rate
          * (0x180 | (nss-1)<<4 | mcs) and the 3-bit GI/LTF code. */
@@ -535,6 +546,21 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
         break;
       }
     }
+  }
+  /* No per-packet radiotap rate -> apply the SetTxMode default (DEVOURER_TX_RATE)
+   * so a rate-less frame (the demo beacon) airs at the requested rate/BW rather
+   * than the 6M/20MHz fallback. Mirrors the Jaguar path. HE-via-SetTxMode is not
+   * expressed here (HE rides the radiotap-HE path); legacy/HT/VHT + BW apply. */
+  if (!rate_from_radiotap && !he && _tx_mode_default.has_value()) {
+    const devourer::TxParams tp =
+        devourer::tx_mode_to_params(*_tx_mode_default);
+    mgn = tp.fixed_rate;
+    tr.bw = tp.bwidth == CHANNEL_WIDTH_40   ? 1
+            : tp.bwidth == CHANNEL_WIDTH_80 ? 2
+                                            : 0; /* narrowband -> DATA_BW 20 */
+    tr.gi_ltf = tp.sgi ? 1 : 0;
+    tr.ldpc = tp.ldpc;
+    tr.stbc = tp.stbc;
   }
   if (!he)
     tr.rate = kestrel::mgn_to_ax_rate(mgn);

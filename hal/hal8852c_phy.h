@@ -13,6 +13,8 @@ extern const u32 array_mp_8852c_radioa[];
 extern const u32 array_mp_8852c_radioa_len;
 extern const u32 array_mp_8852c_radiob[];
 extern const u32 array_mp_8852c_radiob_len;
+extern const u32 array_mp_8852c_nctl_reg[];
+extern const u32 array_mp_8852c_nctl_reg_len;
 #ifdef __cplusplus
 }
 #endif

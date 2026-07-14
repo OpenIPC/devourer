@@ -876,7 +876,17 @@ constexpr uint32_t CCA_CTRL_CLR =
     (1u << 8) | (1u << 20);                             /* CTN txnav, SIFS edcca */
 constexpr uint16_t R_AX_RCR = 0xCE00;
 constexpr uint8_t B_AX_CH_EN_SH = 0;
-constexpr uint32_t B_AX_CH_EN_MSK = 0xf;
+constexpr uint32_t B_AX_CH_EN_MSK = 0xf; /* 8852B RCR channel-enable [3:0] */
+/* 8852C rmac_init uses B_AX_CH_EN_V1 ([7:0], mask 0xff) — a WIDER field than the
+ * 8852B [3:0]. The single-CMAC 8852C enables only channel 0 (=0x1, the vendor's
+ * live monitor value); writing 0xF into [3:0] enables channels 1-3 that don't
+ * exist and wedges RX. */
+constexpr uint8_t B_AX_CH_EN_V1_SH = 0;
+constexpr uint32_t B_AX_CH_EN_V1_MSK = 0xff;
+/* R_AX_PLCP_HDR_FLTR (0xCE04): rmac_init clears VHT_SU_SIGB_CRC_CHK (not all
+ * vendors compute VHT SIG-B CRC). */
+constexpr uint16_t R_AX_PLCP_HDR_FLTR = 0xCE04;
+constexpr uint32_t B_AX_VHT_SU_SIGB_CRC_CHK = 1u << 4;
 constexpr uint16_t R_AX_DLK_PROTECT_CTL = 0xCE02;
 constexpr uint8_t B_AX_RX_DLK_DATA_TIME_SH = 4;
 constexpr uint32_t B_AX_RX_DLK_DATA_TIME_MSK = 0xf;

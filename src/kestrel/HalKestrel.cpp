@@ -829,12 +829,21 @@ void HalKestrel::rmac_init() {
                                               r::B_AX_RX_DLK_CCA_TIME_SH));
   dlk |= r::B_AX_RX_DLK_RST_EN;
   _device.rtw_write16(r::R_AX_DLK_PROTECT_CTL, dlk);
-  /* Receiver channel-enable: 0xF = accept on all sub-channels (the key RX
-   * gate). */
-  _device.rtw_write8(
-      r::R_AX_RCR,
-      static_cast<uint8_t>(r::set_clr_word(_device.rtw_read8(r::R_AX_RCR), 0xF,
-                                           r::B_AX_CH_EN_MSK, r::B_AX_CH_EN_SH)));
+  /* Receiver channel-enable (the key RX gate). The 8852C uses B_AX_CH_EN_V1
+   * ([7:0]) and — as a single-CMAC part in normal RX mode — enables only
+   * channel 0 (0x1, matching the working vendor's live RCR); the 8852B uses
+   * B_AX_CH_EN ([3:0]) = 0xF. */
+  if (_variant == ChipVariant::C8852C)
+    _device.rtw_write8(
+        r::R_AX_RCR,
+        static_cast<uint8_t>(r::set_clr_word(_device.rtw_read8(r::R_AX_RCR), 0x1,
+                                             r::B_AX_CH_EN_V1_MSK,
+                                             r::B_AX_CH_EN_V1_SH)));
+  else
+    _device.rtw_write8(
+        r::R_AX_RCR,
+        static_cast<uint8_t>(r::set_clr_word(_device.rtw_read8(r::R_AX_RCR), 0xF,
+                                             r::B_AX_CH_EN_MSK, r::B_AX_CH_EN_SH)));
   /* RX interface timeout threshold. */
   _device.rtw_write32(r::R_AX_RX_TIME_MON,
                       r::set_clr_word(_device.rtw_read32(r::R_AX_RX_TIME_MON),
@@ -846,6 +855,11 @@ void HalKestrel::rmac_init() {
       r::set_clr_word(_device.rtw_read32(r::R_AX_RX_FLTR_OPT),
                       r::RMAC_RX_MPDU_MAX_LEN, r::B_AX_RX_MPDU_MAX_LEN_MSK,
                       r::B_AX_RX_MPDU_MAX_LEN_SH));
+  /* Not all vendors compute VHT SIG-B's CRC — clear the check (rmac_init tail). */
+  _device.rtw_write8(
+      r::R_AX_PLCP_HDR_FLTR,
+      static_cast<uint8_t>(_device.rtw_read8(r::R_AX_PLCP_HDR_FLTR) &
+                           ~r::B_AX_VHT_SU_SIGB_CRC_CHK));
 }
 
 void HalKestrel::cca_ctrl_init() {

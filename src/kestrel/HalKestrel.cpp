@@ -2859,6 +2859,15 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
                 "RXstate=0x{:08x}",
                 bb_4004, bb_4738, rf18a, rf18b, rf00a_dav, rf_c5, hci_fen, rcr,
                 rxstate);
+  if (_variant == ChipVariant::C8852C) {
+    /* EP4 (RX bulk-IN) pause state — a set EP4_RX_PAUSE means MACUSBRXHANG
+     * (usb_get_rx_state_8852c). R_AX_USB_ENDPOINT_3_V1[14]=RX_PAUSE,
+     * [23]=PAUSE_STATE. */
+    const uint32_t ep3 = _device.rtw_read32(0x506C);
+    _logger->info("Kestrel EP-diag: 0x506C=0x{:08x} EP4_RX_PAUSE[14]={} "
+                  "EP4_PAUSE_STATE[23]={}",
+                  ep3, (ep3 >> 14) & 1, (ep3 >> 23) & 1);
+  }
   return true;
 }
 

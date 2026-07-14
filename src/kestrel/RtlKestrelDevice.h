@@ -90,6 +90,10 @@ public:
    * change or a non-20 MHz width. */
   void FastRetune(uint8_t channel, bool cache_rf = true) override;
 
+  /* Lean same-channel 20 <-> 5/10 MHz narrowband toggle (BB small-BW field
+   * only). Falls back to SetMonitorChannel for 40/80 MHz. */
+  void FastSetBandwidth(ChannelWidth_t bw) override;
+
   /* Chip thermal-meter snapshot (halrf_get_thermal_8852b, RF path-A 0x42) with
    * the efuse baseline. Control-thread only (does an RF read). */
   devourer::ThermalStatus GetThermalStatus() override;

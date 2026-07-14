@@ -314,6 +314,20 @@ void RtlKestrelDevice::FastRetune(uint8_t channel, bool /*cache_rf*/) {
   _channel.Channel = channel;
 }
 
+void RtlKestrelDevice::FastSetBandwidth(ChannelWidth_t bw) {
+  /* Lean path only for the 20 <-> 5/10 MHz narrowband toggle (BB small-BW
+   * field, same channel); 40/80 MHz change the center + RF bw so take the full
+   * SetMonitorChannel. */
+  if (bw != CHANNEL_WIDTH_20 && bw != CHANNEL_WIDTH_5 && bw != CHANNEL_WIDTH_10) {
+    SelectedChannel c = _channel;
+    c.ChannelWidth = bw;
+    SetMonitorChannel(c);
+    return;
+  }
+  _hal.fast_set_bw(bw);
+  _channel.ChannelWidth = bw;
+}
+
 void RtlKestrelDevice::SetTxMode(const devourer::TxMode &mode) {
   _tx_mode_default = mode;
 }
@@ -457,7 +471,7 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   c.per_chain_rssi = true; /* FrameParserKestrel fills per-chain rssi */
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   c.per_packet_txpower = false; /* AX power is TSSI, not the J2 descriptor LUT */
-  c.narrowband_ok = false;      /* 5/10 MHz re-clock not yet ported for Kestrel */
+  c.narrowband_ok = true; /* 5/10 MHz BB small-BW (SDR-validated); FastSetBandwidth toggle */
   c.fastretune_ok = true; /* lean intra-band 20 MHz retune (FastRetune) */
   c.hw_rx_timestamp = true;     /* rx freerun_cnt -> RxAtrib.tsfl */
   /* The AX beacon engine (StartBeacon) airs a HW-timed beacon with the live TSF

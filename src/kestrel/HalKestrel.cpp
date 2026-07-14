@@ -1884,6 +1884,24 @@ void HalKestrel::fast_retune(uint8_t channel) {
   _logger->debug("Kestrel FastRetune: ch{} ({})", channel, is_2g ? "2.4G" : "5G");
 }
 
+void HalKestrel::fast_set_bw(ChannelWidth_t bw) {
+  /* Lean 20 <-> 5/10 MHz toggle (same channel). Only the BB small-BW field
+   * (0x49C4[13:12]) + ACI-detect (0x4738/0x4AA4[16]) differ between 20 MHz and
+   * narrowband; RF_BW stays 0 and RF18[11:10] stays "both" for all of 20/5/10,
+   * so no RF re-tune or gain re-apply is needed. */
+  const uint32_t smallbw = bw == CHANNEL_WIDTH_5    ? 0x1
+                           : bw == CHANNEL_WIDTH_10 ? 0x2
+                                                    : 0x0;      /* 20 MHz */
+  const uint32_t aci = bw == CHANNEL_WIDTH_20 ? 0x1 : 0x0;      /* off for NB */
+  bb_rmw(0x49C0, 0xC0000000u, 0x0); /* RF_BW = 0 */
+  bb_rmw(0x49C4, 0x3000u, smallbw);
+  bb_rmw(0x4738, 0x10000u, aci);
+  bb_rmw(0x4AA4, 0x10000u, aci);
+  bb_reset_all();
+  const int mhz = bw == CHANNEL_WIDTH_5 ? 5 : bw == CHANNEL_WIDTH_10 ? 10 : 20;
+  _logger->debug("Kestrel FastSetBandwidth: {} MHz", mhz);
+}
+
 void HalKestrel::bb_reset_all() {
   /* halbb_bb_reset_all_8852b (BB regs over wIndex=1; 0xce40 is MAC/CMAC). */
   bb_rmw(0x2344, 1u << 31, 1); /* PD disable */

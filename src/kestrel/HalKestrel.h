@@ -137,6 +137,12 @@ public:
    * must ensure same band + same width (20 MHz). */
   void fast_retune(uint8_t channel);
 
+  /* Lean same-channel 20 <-> 5/10 MHz narrowband toggle: only the BB small-BW
+   * field + ACI-detect change (the RF stays in 20 MHz mode for all of 20/5/10,
+   * so no RF re-tune, no gain/channel re-apply). ~a BB write + reset vs the full
+   * set_channel. Caller must pass 20/5/10 only. */
+  void fast_set_bw(ChannelWidth_t bw);
+
   /* halbb_set_txpwr_dbm_8852b: force a fixed BB TX power target (overriding the
    * per-rate/TSSI tables — the pragmatic injection-driver model, like the
    * Jaguar SetTxPowerIndexOverride). `dbm_q2` is s(9,2): power in 0.25-dB units

@@ -65,7 +65,8 @@ inline uint16_t mgn_to_ax_rate(uint8_t mgn) {
 
 constexpr uint8_t MAC_AX_DMA_B0MG = 8;  /* band-0 mgmt DMA channel (CH_DMA) */
 constexpr uint8_t MAC_AX_MG0_SEL = 18;  /* band-0 mgmt qsel */
-constexpr uint32_t WD_BODY_LEN = 24;
+constexpr uint32_t WD_BODY_LEN = 24;    /* wd_body_t (8852B) */
+constexpr uint32_t WD_BODY_LEN_V1 = 32; /* wd_body_t_v1 (8852C data/mgmt TX) */
 constexpr uint32_t WD_INFO_LEN = 24;
 constexpr uint32_t TXD_MGNT_LEN = WD_BODY_LEN + WD_INFO_LEN; /* 48 */
 
@@ -96,8 +97,14 @@ struct TxRate {
 inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
                                               uint32_t frame_len,
                                               const TxRate &r, uint8_t macid,
-                                              uint16_t seq) {
-  std::vector<uint8_t> buf(TXD_MGNT_LEN + frame_len, 0);
+                                              uint16_t seq,
+                                              uint32_t wd_body_len = WD_BODY_LEN) {
+  /* The 8852C data/mgmt TX descriptor is the 32-byte wd_body_t_v1 (dwords 6/7
+   * added, dword0-5 field layout identical); the 8852B is the 24-byte wd_body_t.
+   * A short WD desyncs the MAC TX parser and the frame never airs (buffer still
+   * drains). wd_info + frame follow the WD body. */
+  const uint32_t txd_len = wd_body_len + WD_INFO_LEN;
+  std::vector<uint8_t> buf(txd_len + frame_len, 0);
   uint8_t *wd = buf.data();
 
   /* wd_body dword0: STF_MODE | CH_DMA=B0MG | WDINFO_EN (usb_pkt_ofst=0). */
@@ -112,11 +119,11 @@ inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
                    (static_cast<uint32_t>(macid & 0x7f) << txd::MACID_SH));
   /* wd_body dword3: WIFI_SEQ (sw_seq). */
   txd_put_le32(wd + 12, static_cast<uint32_t>(seq & 0xfff) << txd::WIFI_SEQ_SH);
-  /* dword4,5 = 0 */
+  /* dword4,5 (+ v1 dword6,7) = 0 */
 
   /* wd_info dword0: force the rate (USERATE_SEL) + DATARATE + BW + GI/LTF +
    * LDPC/STBC + no fallback. */
-  uint8_t *wi = wd + WD_BODY_LEN;
+  uint8_t *wi = wd + wd_body_len;
   txd_put_le32(wi + 0,
                txd::USERATE_SEL | txd::DISDATAFB |
                    (static_cast<uint32_t>(r.rate & 0x1ff) << txd::DATARATE_SH) |
@@ -126,7 +133,7 @@ inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
                    (r.stbc ? txd::DATA_STBC : 0));
   /* wd_info dword1..5 = 0 */
 
-  std::memcpy(wd + TXD_MGNT_LEN, frame, frame_len);
+  std::memcpy(wd + txd_len, frame, frame_len);
   return buf;
 }
 
@@ -140,8 +147,10 @@ constexpr uint8_t MAC_AX_DATA_CH0 = 0; /* AC0 (best-effort) DMA channel */
 inline std::vector<uint8_t> build_data_txdesc(const uint8_t *frame,
                                               uint32_t frame_len,
                                               const TxRate &r, uint8_t macid,
-                                              uint16_t seq) {
-  std::vector<uint8_t> buf(TXD_MGNT_LEN + frame_len, 0);
+                                              uint16_t seq,
+                                              uint32_t wd_body_len = WD_BODY_LEN) {
+  const uint32_t txd_len = wd_body_len + WD_INFO_LEN;
+  std::vector<uint8_t> buf(txd_len + frame_len, 0);
   uint8_t *wd = buf.data();
   /* dword0: STF_MODE | CH_DMA=DATA_CH0(0) | WDINFO_EN. */
   txd_put_le32(wd + 0, txd::STF_MODE | txd::WDINFO_EN |
@@ -155,7 +164,7 @@ inline std::vector<uint8_t> build_data_txdesc(const uint8_t *frame,
   /* dword3: WIFI_SEQ (no ampdu_en). */
   txd_put_le32(wd + 12, static_cast<uint32_t>(seq & 0xfff) << txd::WIFI_SEQ_SH);
   /* wd_info dword0: same rate fields as mgmt. */
-  uint8_t *wi = wd + WD_BODY_LEN;
+  uint8_t *wi = wd + wd_body_len;
   txd_put_le32(wi + 0,
                txd::USERATE_SEL | txd::DISDATAFB |
                    (static_cast<uint32_t>(r.rate & 0x1ff) << txd::DATARATE_SH) |
@@ -163,7 +172,7 @@ inline std::vector<uint8_t> build_data_txdesc(const uint8_t *frame,
                    (static_cast<uint32_t>(r.gi_ltf & 0x7) << txd::GI_LTF_SH) |
                    (r.ldpc ? txd::DATA_LDPC : 0) |
                    (r.stbc ? txd::DATA_STBC : 0));
-  std::memcpy(wd + TXD_MGNT_LEN, frame, frame_len);
+  std::memcpy(wd + txd_len, frame, frame_len);
   return buf;
 }
 

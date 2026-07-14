@@ -628,11 +628,16 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
    * (BULKOUTID0). Falls back to the mgmt ep if the data ep was not resolved. */
   const bool is_data = kestrel::frame_is_data(frame, flen);
   uint8_t ep = _tx_mgmt_ep;
+  /* The 8852C data/mgmt TX descriptor is the 32-byte wd_body_t_v1; the 8852B is
+   * the 24-byte wd_body_t. */
+  const uint32_t wd_len = (_variant == kestrel::ChipVariant::C8852C)
+                              ? kestrel::WD_BODY_LEN_V1
+                              : kestrel::WD_BODY_LEN;
   auto buf = is_data && _tx_data_ep
                  ? kestrel::build_data_txdesc(frame, flen, tr, 0,
-                                              _tx_seq++ & 0xfff)
+                                              _tx_seq++ & 0xfff, wd_len)
                  : kestrel::build_mgnt_txdesc(frame, flen, tr, 0,
-                                              _tx_seq++ & 0xfff);
+                                              _tx_seq++ & 0xfff, wd_len);
   if (is_data && _tx_data_ep)
     ep = _tx_data_ep;
   int rc = _device.bulk_send_sync_ep(ep, buf.data(),

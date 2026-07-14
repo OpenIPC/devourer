@@ -316,10 +316,21 @@ public:
   static constexpr int kGainPathNum = 2;
   int8_t _lna_gain[kGainBandNum][kGainPathNum][7] = {};
   int8_t _tia_gain[kGainBandNum][kGainPathNum][2] = {};
+  /* RPL (received-power-level) offset cache (halbb_cfg_bb_rpl_ofst, cfg_type 1)
+   * — per-band/path/RXSC-subchannel offsets used in the BB RX RSSI/RPL
+   * computation, applied to BB 0x49b0/b4/b8 per channel by set_rxsc_rpl_comp.
+   * Corrects the reported RSSI accuracy. 20 MHz = 1 value; 40 MHz = 9 RXSC
+   * (0 + 1..8); 80 MHz = 13 RXSC. */
+  int8_t _rpl_ofst_20[kGainBandNum][kGainPathNum] = {};
+  int8_t _rpl_ofst_40[kGainBandNum][kGainPathNum][9] = {};
+  int8_t _rpl_ofst_80[kGainBandNum][kGainPathNum][13] = {};
   bool _gain_cached = false;
   static uint8_t gain_band_determine(uint8_t channel);
   void init_gain_table(uint32_t rfe_type, uint32_t cut); /* populate the cache */
   void set_gain_error(uint8_t channel); /* apply the cache to BB regs per band */
+  void cfg_rpl_ofst(uint8_t band, uint8_t path, uint8_t bw, uint8_t rxsc_start,
+                    uint32_t data);           /* decode a cfg_type-1 RPL entry */
+  void set_rxsc_rpl_comp(uint8_t channel); /* apply RPL offsets to BB per band */
   void coex_mac_init();                    /* LTE/BT coex bring-up */
   bool write_lte(uint32_t offset, uint32_t val); /* LTE-coex indirect write */
   void mac_enable_imr(); /* DMAC+CMAC0 error-interrupt masks (SER) + err-IMR */

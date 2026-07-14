@@ -845,8 +845,12 @@ void HalKestrel::init_gain_table(uint32_t rfe_type, uint32_t cut) {
     const uint8_t type = addr & 0xff;
     if (band >= kGainBandNum || path >= kGainPathNum)
       return;
-    if (cfg_type != 0) /* cfg_type 0 = GAIN ERROR (LNA/TIA); 1 = RPL offset,
-                        * only refines RSSI reporting — skipped. */
+    if (cfg_type == 1) {
+      /* RPL offset: the low byte encodes bw[7:4] | rxsc_start[3:0]. */
+      cfg_rpl_ofst(band, path, (type & 0xf0) >> 4, type & 0xf, data);
+      return;
+    }
+    if (cfg_type != 0) /* only 0 (gain error) + 1 (RPL) are used. */
       return;
     if (type == 0) {
       for (int i = 0; i < 4; i++)
@@ -899,6 +903,58 @@ void HalKestrel::set_gain_error(uint8_t channel) {
              static_cast<uint32_t>(_tia_gain[band][path][i]) & 0xff);
     }
   }
+}
+
+void HalKestrel::cfg_rpl_ofst(uint8_t band, uint8_t path, uint8_t bw,
+                              uint8_t rxsc_start, uint32_t data) {
+  /* halbb_cfg_bb_rpl_ofst (8852B: 20/40/80 MHz). RXSC start indices: FULL=0,
+   * 20=1, 40=9. 40 MHz packs 2 sub-channels, 80 MHz packs 4 (rxsc 20) or 2
+   * (rxsc 40). */
+  auto s8 = [&](int i) { return static_cast<int8_t>((data >> (8 * i)) & 0xff); };
+  if (bw == 0) { /* 20 MHz */
+    _rpl_ofst_20[band][path] = s8(0);
+  } else if (bw == 1) { /* 40 MHz */
+    if (rxsc_start == 0)
+      _rpl_ofst_40[band][path][0] = s8(0);
+    else if (rxsc_start == 1)
+      for (int i = 0; i < 2; i++)
+        _rpl_ofst_40[band][path][1 + i] = s8(i);
+  } else if (bw == 2) { /* 80 MHz */
+    if (rxsc_start == 0)
+      _rpl_ofst_80[band][path][0] = s8(0);
+    else if (rxsc_start == 1)
+      for (int i = 0; i < 4; i++)
+        _rpl_ofst_80[band][path][1 + i] = s8(i);
+    else if (rxsc_start == 9)
+      for (int i = 0; i < 2; i++)
+        _rpl_ofst_80[band][path][9 + i] = s8(i);
+  }
+}
+
+void HalKestrel::set_rxsc_rpl_comp(uint8_t channel) {
+  /* halbb_set_rxsc_rpl_comp_8852b: average the two paths' RPL offsets per
+   * BW/RXSC, pack into 3 words, write BB 0x49b0/b4/b8 (+ 0x4a00/04/08 mirror).
+   * Feeds the BB RX RSSI/RPL computation. */
+  if (!_gain_cached)
+    return;
+  const uint8_t b = gain_band_determine(channel);
+  auto avg2 = [](int8_t a, int8_t c) -> uint32_t {
+    return static_cast<uint32_t>(static_cast<int8_t>((a + c) >> 1)) & 0xff;
+  };
+  const uint32_t rpl20 = avg2(_rpl_ofst_20[b][0], _rpl_ofst_20[b][1]);
+  auto a40 = [&](int i) { return avg2(_rpl_ofst_40[b][0][i], _rpl_ofst_40[b][1][i]); };
+  auto a80 = [&](int i) { return avg2(_rpl_ofst_80[b][0][i], _rpl_ofst_80[b][1][i]); };
+  const uint32_t v1 = (rpl20 << 8) | (a40(0) << 16) | (a40(1) << 24);
+  const uint32_t v2 =
+      a40(2) | (a80(0) << 8) | (a80(1) << 16) | (a80(10) << 24);
+  const uint32_t v3 =
+      a80(2) | (a80(3) << 8) | (a80(4) << 16) | (a80(9) << 24);
+  bb_rmw(0x49b0, 0xffffff00, v1 >> 8);
+  bb_rmw(0x4a00, 0xffffff00, v1 >> 8);
+  bb_rmw(0x49b4, r::MASKDWORD, v2);
+  bb_rmw(0x4a04, r::MASKDWORD, v2);
+  bb_rmw(0x49b8, r::MASKDWORD, v3);
+  bb_rmw(0x4a08, r::MASKDWORD, v3);
 }
 
 void HalKestrel::usb_rx_agg_cfg() {
@@ -1853,6 +1909,11 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
    * front-end (halbb_set_gain_error_8852b). Part of the vendor per-channel BB
    * setup; required for 5 GHz RX sensitivity. Uses the block center. --- */
   set_gain_error(center);
+
+  /* --- RPL (received-power-level) compensation (halbb_set_rxsc_rpl_comp_8852b):
+   * apply the cached per-band RPL offsets so the reported RX RSSI is accurate.
+   * --- */
+  set_rxsc_rpl_comp(center);
 
   /* --- RX DC-offset calibration (halrf_rx_dck_8852b) — corrects the RX DC term
    * the CCA energy detector otherwise reads as perpetual busy. --- */

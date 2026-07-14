@@ -143,10 +143,13 @@ bool KestrelFw::dle_init_dlfw() {
   qta(r::R_AX_WDE_QTA1_CFG, wde_wcpu, wde_wcpu);  /* wcpu (6 8852B / 0 8852C) */
   qta(r::R_AX_WDE_QTA3_CFG, 0, 0);                /* pkt_in */
   qta(r::R_AX_WDE_QTA4_CFG, 0, 0);                /* cpu_io */
-  /* PLE QTA0..QTA10: only c2h(Q2) and h2c(Q3) are nonzero. c2h min/max differ
-   * on the 8852C (16/32); h2c is min==max on both. */
-  for (uint16_t reg = r::R_AX_PLE_QTA0_CFG; reg <= r::R_AX_PLE_QTA10_CFG;
-       reg += 4) {
+  /* PLE QTA: only c2h(Q2) and h2c(Q3) are nonzero. c2h min/max differ on the
+   * 8852C (16/32); h2c is min==max on both. The 8852C's ple_quota_cfg writes
+   * through QTA11 (the 8852B stops at QTA10) — leaving QTA11 at its reset value
+   * mis-sizes the PLE allocation. */
+  const uint16_t ple_qta_last =
+      c ? r::R_AX_PLE_QTA11_CFG : r::R_AX_PLE_QTA10_CFG;
+  for (uint16_t reg = r::R_AX_PLE_QTA0_CFG; reg <= ple_qta_last; reg += 4) {
     if (reg == r::R_AX_PLE_QTA2_CFG)
       qta(reg, ple_c2h_min, ple_c2h_max);
     else if (reg == r::R_AX_PLE_QTA3_CFG)
@@ -171,22 +174,28 @@ bool KestrelFw::dle_init_dlfw() {
 bool KestrelFw::hfc_init_dlfw() {
   /* hfc_init(rst=1, en=0, h2c_en=1): reset is software-only (no register
    * writes for the h2c-only path); then set_fc_func_en(0,0), set_fc_h2c,
-   * set_fc_func_en(0,1). */
+   * set_fc_func_en(0,1). The 8852C H2C flow control lives in the _V1 bank
+   * (0x1700/0x1704) with the same bit layout; the 8852B uses 0x8A00/0x8A04.
+   * On the 8852C, configuring the wrong bank leaves the H2C (CH12) path
+   * unconfigured so the RISC-V bootrom never raises H2C_PATH_RDY. */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint16_t fc_ctrl = c ? r::R_AX_HCI_FC_CTRL_V1 : r::R_AX_HCI_FC_CTRL;
+  const uint16_t page_ctrl = c ? r::R_AX_CH_PAGE_CTRL_V1 : r::R_AX_CH_PAGE_CTRL;
   /* set_fc_func_en(0, 0): clear FC_EN + CH12_EN. */
-  clr32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
+  clr32(fc_ctrl, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
   /* set_fc_h2c: CH_PAGE_CTRL = h2c_prec<<16; HCI_FC_CTRL CH12_FULL_COND=X2. */
   _device.rtw_write32(
-      r::R_AX_CH_PAGE_CTRL,
+      page_ctrl,
       (static_cast<uint32_t>(r::HFC_USB_H2C_PREC_8852B & r::B_AX_PREC_PAGE_CH12_MSK)
        << r::B_AX_PREC_PAGE_CH12_SH));
   _device.rtw_write32(
-      r::R_AX_HCI_FC_CTRL,
-      r::set_clr_word(_device.rtw_read32(r::R_AX_HCI_FC_CTRL),
-                      r::HFC_FULL_COND_X2, r::B_AX_HCI_FC_CH12_FULL_COND_MSK,
+      fc_ctrl,
+      r::set_clr_word(_device.rtw_read32(fc_ctrl), r::HFC_FULL_COND_X2,
+                      r::B_AX_HCI_FC_CH12_FULL_COND_MSK,
                       r::B_AX_HCI_FC_CH12_FULL_COND_SH));
   /* set_fc_func_en(0, 1): clear FC_EN, set CH12_EN. */
-  clr32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_EN);
-  set32(r::R_AX_HCI_FC_CTRL, r::B_AX_HCI_FC_CH12_EN);
+  clr32(fc_ctrl, r::B_AX_HCI_FC_EN);
+  set32(fc_ctrl, r::B_AX_HCI_FC_CH12_EN);
   return true;
 }
 
@@ -281,19 +290,35 @@ bool KestrelFw::send_fwdl_packet(const uint8_t *payload, uint32_t payload_len,
    * the WD: fwcmd_hdr + payload for the header, or payload for a section. */
   const uint32_t data_len =
       is_header ? (r::FWCMD_HDR_LEN + payload_len) : payload_len;
-  _txbuf.assign(r::WD_BODY_LEN + data_len, 0);
+  /* 8852C (RISC-V) prepends a 16-byte rxd_short_t descriptor; the 8852B a
+   * 24-byte WD body. */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint32_t desc_len = c ? r::RXD_SHORT_LEN : r::WD_BODY_LEN;
+  _txbuf.assign(desc_len + data_len, 0);
   uint8_t *wd = _txbuf.data();
 
-  /* WD body dword0: CH_DMA = H2C(12); FWDL_EN for section packets. */
-  uint32_t dw0 = static_cast<uint32_t>(r::MAC_AX_DMA_H2C & r::AX_TXD_CH_DMA_MSK)
-                 << r::AX_TXD_CH_DMA_SH;
-  if (!is_header)
-    dw0 |= r::AX_TXD_FWDL_EN;
-  put_le32(wd + 0, dw0);
-  put_le32(wd + 8, (data_len & r::AX_TXD_TXPKTSIZE_MSK) << r::AX_TXD_TXPKTSIZE_SH);
-  /* dword1,3,4,5 already zero. */
+  if (c) {
+    /* rxd_short_t dword0 = RPKT_LEN(data_len) | RPKT_TYPE(H2C hdr / FWDL data);
+     * dwords 1-3 zero (txdes_proc_h2c_fwdl_8852c). */
+    const uint8_t rpkt_type =
+        is_header ? r::RXD_S_RPKT_TYPE_H2C : r::RXD_S_RPKT_TYPE_FWDL;
+    put_le32(wd + 0,
+             ((data_len & r::AX_RXD_RPKT_LEN_MSK) << r::AX_RXD_RPKT_LEN_SH) |
+                 ((static_cast<uint32_t>(rpkt_type) & r::AX_RXD_RPKT_TYPE_MSK)
+                  << r::AX_RXD_RPKT_TYPE_SH));
+  } else {
+    /* WD body dword0: CH_DMA = H2C(12); FWDL_EN for section packets. */
+    uint32_t dw0 = static_cast<uint32_t>(r::MAC_AX_DMA_H2C & r::AX_TXD_CH_DMA_MSK)
+                   << r::AX_TXD_CH_DMA_SH;
+    if (!is_header)
+      dw0 |= r::AX_TXD_FWDL_EN;
+    put_le32(wd + 0, dw0);
+    put_le32(wd + 8,
+             (data_len & r::AX_TXD_TXPKTSIZE_MSK) << r::AX_TXD_TXPKTSIZE_SH);
+    /* dword1,3,4,5 already zero. */
+  }
 
-  uint8_t *after = wd + r::WD_BODY_LEN;
+  uint8_t *after = wd + desc_len;
   if (is_header) {
     /* fwcmd_hdr (8B): hdr0 = cat|class|func|type|seq; hdr1 = total_len.
      * TOTAL_LEN counts the fwcmd header + payload (h2cb->len) — the vendor's
@@ -793,23 +818,35 @@ bool KestrelFw::check_fw_rdy() {
     }
     delay_us(1);
   }
-  _logger->error("Kestrel FWDL: fw-ready poll timeout (boot_dbg=0x{:08x})",
-                 _device.rtw_read32(r::R_AX_BOOT_DBG));
+  const uint8_t final_sts = static_cast<uint8_t>(
+      (_device.rtw_read8(r::R_AX_WCPU_FW_CTRL) >> r::B_AX_WCPU_FWDL_STS_SH) &
+      r::B_AX_WCPU_FWDL_STS_MSK);
+  const uint32_t bdbg = _device.rtw_read32(
+      _variant == ChipVariant::C8852C ? r::R_AX_BOOT_DBG_V1 : r::R_AX_BOOT_DBG);
+  _logger->error("Kestrel FWDL: fw-ready poll timeout (sts={} boot_dbg=0x{:08x} "
+                 "boot_status=0x{:x} WCPU=0x{:08x})",
+                 final_sts, bdbg, (bdbg >> 16) & 0xffff,
+                 _device.rtw_read32(r::R_AX_WCPU_FW_CTRL));
   return false;
 }
 
 void KestrelFw::idmem_share_mode_check() {
   /* idmem_share_mode_check (fwdl.c:280), non-secure branch: force the SEC_CTRL
-   * IDMEM-share field to the AX-MIPS default (0x1). Golden capture:
-   * 0x0C00 -> 0x0001c01f. */
+   * IDMEM-share field to the chip default. FWDL_IDMEM_SHARE_DEFAULT_MODE is
+   * (AX-MIPS ? 0x1 : 0x0), so the RISC-V 8852C needs 0x0 — leaving the MIPS 0x1
+   * mis-sizes the fw's IDMEM and it hangs during post-download HW init. Golden
+   * capture (8852B): 0x0C00 -> 0x0001c01f. */
+  const uint8_t mode = (_variant == ChipVariant::C8852C)
+                           ? r::FWDL_IDMEM_SHARE_DEFAULT_MODE_8852C
+                           : r::FWDL_IDMEM_SHARE_DEFAULT_MODE;
   uint32_t v = _device.rtw_read32(r::R_AX_SEC_CTRL);
   uint32_t cur = (v >> r::B_SEC_IDMEM_SIZE_CONFIG_SH) & r::B_SEC_IDMEM_SIZE_CONFIG_MSK;
-  if (cur != r::FWDL_IDMEM_SHARE_DEFAULT_MODE) {
-    v = r::set_clr_word(v, r::FWDL_IDMEM_SHARE_DEFAULT_MODE,
-                        r::B_SEC_IDMEM_SIZE_CONFIG_MSK,
+  if (cur != mode) {
+    v = r::set_clr_word(v, mode, r::B_SEC_IDMEM_SIZE_CONFIG_MSK,
                         r::B_SEC_IDMEM_SIZE_CONFIG_SH);
     _device.rtw_write32(r::R_AX_SEC_CTRL, v);
-    _logger->info("Kestrel FWDL: IDMEM share -> default (SEC_CTRL=0x{:08x})", v);
+    _logger->info("Kestrel FWDL: IDMEM share -> 0x{:x} (SEC_CTRL=0x{:08x})", mode,
+                  v);
   }
 }
 
@@ -820,10 +857,15 @@ void KestrelFw::fwdl_patch_fw_delay() {
    * bus (HALT_C2H = L2_ERR_AH_HCI). Fix it by poking the correct clk value into
    * IDMEM via the indirect-access window. Golden: 0x0C04 -> 0x18e0c3d8, then
    * 0x40000 (wIndex=4) -> 0x0000000a. */
-  _device.rtw_write32(r::R_AX_FILTER_MODEL_ADDR, r::FW_CPU_CLK_ADDR_8852B);
-  _device.rtw_write32_wide(r::R_AX_INDIR_ACCESS_ENTRY, r::FW_FAKE_CPU_CLK_8852B);
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint32_t clk_addr =
+      c ? r::FW_CPU_CLK_ADDR_8852C : r::FW_CPU_CLK_ADDR_8852B;
+  const uint32_t clk_val =
+      c ? r::FW_FAKE_CPU_CLK_8852C : r::FW_FAKE_CPU_CLK_8852B;
+  _device.rtw_write32(r::R_AX_FILTER_MODEL_ADDR, clk_addr);
+  _device.rtw_write32_wide(r::R_AX_INDIR_ACCESS_ENTRY, clk_val);
   _logger->info("Kestrel FWDL: fw CPU-clk patch (IDMEM 0x{:08x}=0x{:x})",
-                r::FW_CPU_CLK_ADDR_8852B, r::FW_FAKE_CPU_CLK_8852B);
+                clk_addr, clk_val);
 }
 
 bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
@@ -1073,6 +1115,11 @@ bool KestrelFw::download_firmware(uint8_t cut, uint8_t mss_idx, bool is_sec_ic) 
 
   if (!disable_cpu())
     return false;
+  /* idmem_share_mode_check (mac_enable_fw, fwdl.c:2295): between disable_cpu and
+   * enable_cpu, set the SEC_CTRL IDMEM-share field to the chip default. The
+   * 8852C needs 0x0; skipping it (or using the MIPS 0x1) hangs the fw's
+   * post-download HW init. */
+  idmem_share_mode_check();
   if (!enable_cpu(r::AX_BOOT_REASON_PWR_ON))
     return false;
   return mac_fwdl(fw, len, mss_idx);

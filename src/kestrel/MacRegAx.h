@@ -33,6 +33,17 @@ constexpr uint32_t B_AX_AFSM_WLSUS_EN = 1u << 11;
 constexpr uint32_t B_AX_APFM_SWLPS = 1u << 10;
 constexpr uint32_t B_AX_APFN_ONMAC = 1u << 8;
 constexpr uint32_t B_AX_DIS_WLBT_PDNSUSEN_SOPC = 1u << 18;
+/* mac_pwr_switch BOOT_MODE-exit preamble (pwr.c:300): the RISC-V 8852C
+ * enumerates in a special boot mode; if GPIO_MUXCFG[19] is set, the driver must
+ * clear it (+ AUTO_WLPON, APFN_ONMAC, R_DIS_PRST) before the power sequence, or
+ * the WCPU bootrom auto-boots its ROM fw instead of entering the FWDL H2C-wait
+ * (it never raises H2C_PATH_RDY). */
+constexpr uint16_t R_AX_RSV_CTRL = 0x001C;
+constexpr uint32_t B_AX_R_DIS_PRST = 1u << 6;
+constexpr uint16_t R_AX_GPIO_MUXCFG = 0x0040;
+constexpr uint32_t B_AX_BOOT_MODE = 1u << 19;
+constexpr uint16_t R_AX_SYS_STATUS1 = 0x00F4;
+constexpr uint32_t B_AX_AUTO_WLPON = 1u << 10;
 
 constexpr uint16_t R_AX_SYS_ADIE_PAD_PWR_CTRL = 0x0018;
 constexpr uint32_t B_AX_SYM_PADPDN_WL_PTA_1P3 = 1u << 6;
@@ -202,7 +213,8 @@ constexpr uint16_t R_AX_WDE_QTA4_CFG = 0x8C50; /* cpu_io */
 constexpr uint16_t R_AX_PLE_QTA0_CFG = 0x9040;
 constexpr uint16_t R_AX_PLE_QTA2_CFG = 0x9048; /* c2h */
 constexpr uint16_t R_AX_PLE_QTA3_CFG = 0x904C; /* h2c */
-constexpr uint16_t R_AX_PLE_QTA10_CFG = 0x9068; /* highest PLE QTA */
+constexpr uint16_t R_AX_PLE_QTA10_CFG = 0x9068; /* highest PLE QTA (8852B) */
+constexpr uint16_t R_AX_PLE_QTA11_CFG = 0x906C; /* 8852C writes through QTA11 */
 
 constexpr uint16_t R_AX_WDE_INI_STATUS = 0x8D00;
 constexpr uint16_t R_AX_PLE_INI_STATUS = 0x9100;
@@ -344,6 +356,14 @@ constexpr uint8_t B_AX_PREC_PAGE_CH12_SH = 16;
 constexpr uint32_t B_AX_PREC_PAGE_CH12_MSK = 0x1ff;
 constexpr uint16_t HFC_USB_H2C_PREC_8852B = 32;   /* hfc_preccfg_usb_8852b */
 constexpr uint8_t HFC_FULL_COND_X2 = 1;
+/* 8852C HFC flow-control lives in the _V1 register bank (same bit layout as the
+ * 8852B FC_CTRL/CH_PAGE_CTRL). hfc_init_dlfw must target these on the 8852C —
+ * configuring the H2C (CH12) flow control on the 8852B addresses leaves the
+ * 8852C's H2C path unconfigured so the RISC-V bootrom never raises
+ * H2C_PATH_RDY (golden usbmon diff: vendor writes 0x1700/0x1704, not
+ * 0x8A00/0x8A04). */
+constexpr uint16_t R_AX_HCI_FC_CTRL_V1 = 0x1700;
+constexpr uint16_t R_AX_CH_PAGE_CTRL_V1 = 0x1704;
 
 /* ---- NIC-mode HFC (hfc_init(rst,en,h2c_en); usb_scc_8852b quotas) ----
  * Runtime page/credit programming: without it the FW only has the tiny DLFW
@@ -469,7 +489,17 @@ constexpr uint32_t SECTION_INFO_REDL = 1u << 29;
 
 /* H2C/fwcmd envelope (fwcmd.h, fwcmd_intf.h, type.h, txdesc.h). */
 constexpr uint32_t FWCMD_HDR_LEN = 8;
-constexpr uint32_t WD_BODY_LEN = 24; /* sizeof wd_body_t (6 dwords) */
+constexpr uint32_t WD_BODY_LEN = 24; /* sizeof wd_body_t (6 dwords), 8852B */
+/* 8852C FWDL/H2C descriptor: a 16-byte rxd_short_t (mac_txdesc_len_8852c returns
+ * RXD_SHORT_LEN for H2C/FWDL), NOT the 24-byte WD body. dword0 packs the packet
+ * length + rpkt_type; dwords 1-3 are zero (txdes_proc_h2c_fwdl_8852c). */
+constexpr uint32_t RXD_SHORT_LEN = 16;
+constexpr uint8_t AX_RXD_RPKT_LEN_SH = 0;
+constexpr uint32_t AX_RXD_RPKT_LEN_MSK = 0x3fff;
+constexpr uint8_t AX_RXD_RPKT_TYPE_SH = 24;
+constexpr uint32_t AX_RXD_RPKT_TYPE_MSK = 0xf;
+constexpr uint8_t RXD_S_RPKT_TYPE_H2C = 13;  /* FWDL header (fwcmd) */
+constexpr uint8_t RXD_S_RPKT_TYPE_FWDL = 14; /* FWDL section data */
 constexpr uint8_t FWCMD_TYPE_H2C = 0;
 constexpr uint8_t FWCMD_H2C_CAT_MAC = 0x1;
 constexpr uint8_t FWCMD_H2C_CL_FWDL = 0x3;
@@ -500,11 +530,17 @@ constexpr uint8_t BULKOUTID_H2C = 2;   /* get_bulkout_id_8852b: H2C -> id 2 */
 constexpr uint16_t R_AX_SEC_CTRL = 0x0C00;
 constexpr uint8_t B_SEC_IDMEM_SIZE_CONFIG_SH = 16; /* [17:16] */
 constexpr uint32_t B_SEC_IDMEM_SIZE_CONFIG_MSK = 0x3;
-constexpr uint8_t FWDL_IDMEM_SHARE_DEFAULT_MODE = 0x1; /* AX MIPS */
+constexpr uint8_t FWDL_IDMEM_SHARE_DEFAULT_MODE = 0x1;       /* AX MIPS (8852B) */
+constexpr uint8_t FWDL_IDMEM_SHARE_DEFAULT_MODE_8852C = 0x0; /* AX RISC-V */
 constexpr uint16_t R_AX_FILTER_MODEL_ADDR = 0x0C04;
 constexpr uint32_t R_AX_INDIR_ACCESS_ENTRY = 0x40000; /* wide: wIndex=4 */
 constexpr uint32_t FW_CPU_CLK_ADDR_8852B = 0x18E0C3D8;
 constexpr uint32_t FW_FAKE_CPU_CLK_8852B = 0x0000000A;
+/* 8852C fw CPU-clk patch IDMEM address/value (fwdl_patch_fw_delay). Patching
+ * the 8852B address leaves the 8852C fw's clock wrong so it faults during its
+ * post-download HW init (hangs at "INIT HW POSTDL", STS=6). */
+constexpr uint32_t FW_CPU_CLK_ADDR_8852C = 0x2020FD40;
+constexpr uint32_t FW_FAKE_CPU_CLK_8852C = 0x0000003C;
 constexpr uint16_t OTP_KEY_INFO_CELL_02_ADDR = 0x5ED; /* [7] = security-record */
 
 /* ---- Firmware IO-offload (fwofld.c, fwcmd_intf.h) — how BB/RF register

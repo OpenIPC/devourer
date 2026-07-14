@@ -156,6 +156,17 @@ bool HalKestrel::power_on_8852c() {
   /* mac_set_dut_env_mode: WCPU_FW_CTRL FW_ENV[29:28]=0. */
   field32(r::R_AX_WCPU_FW_CTRL, 0, r::B_AX_FW_ENV_MSK, r::B_AX_FW_ENV_SH);
 
+  /* mac_pwr_switch BOOT_MODE-exit preamble (pwr.c:300): the RISC-V 8852C powers
+   * up in a special boot mode. Until it is cleared, the WCPU bootrom auto-boots
+   * its ROM fw and never enters the FWDL H2C-wait (H2C_PATH_RDY stays low). The
+   * 8852B does not set BOOT_MODE, so the guard makes this a no-op there. */
+  if (_device.rtw_read32(r::R_AX_GPIO_MUXCFG) & r::B_AX_BOOT_MODE) {
+    clr32(r::R_AX_SYS_PW_CTRL, r::B_AX_APFN_ONMAC);
+    clr32(r::R_AX_SYS_STATUS1, r::B_AX_AUTO_WLPON);
+    clr32(r::R_AX_GPIO_MUXCFG, r::B_AX_BOOT_MODE);
+    clr32(r::R_AX_RSV_CTRL, r::B_AX_R_DIS_PRST);
+  }
+
   /* mac_pwr_on_usb_8852c (pwr_seq_func_8852c.c:296), transcribed verbatim. */
   set32(r::R_AX_LDO_AON_CTRL0, r::B_AX_PD_REGU_L);            /* 0x218[16]=1 */
   clr32(r::R_AX_SYS_PW_CTRL,

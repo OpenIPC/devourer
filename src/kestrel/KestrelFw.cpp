@@ -575,20 +575,33 @@ bool KestrelFw::fw_send_beacon(const uint8_t *body, uint32_t len, uint8_t macid,
 
 bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
                              const uint8_t *content, uint32_t len) {
-  /* Packet = [WD 24B][fwcmd_hdr 8B][content]. Same framing as the FWDL header
-   * path but with a caller-supplied cat/class/func and the content inline
-   * (no FWDL_EN). */
-  _txbuf.assign(r::WD_BODY_LEN + r::FWCMD_HDR_LEN + len, 0);
-  uint8_t *wd = _txbuf.data();
+  /* Packet = [descriptor][fwcmd_hdr 8B][content]. Same framing as the FWDL
+   * header path but with a caller-supplied cat/class/func and the content inline
+   * (no FWDL_EN). The descriptor is the 8852C's 16-byte rxd_short_t
+   * (RPKT_LEN | RPKT_TYPE=H2C) or the 8852B's 24-byte WD body — the runtime H2C
+   * path must match the FWDL descriptor per chip, or the 8852C's H2C queue can't
+   * frame the packet and CH12 never drains (EP7 bulk-out NAK/timeout). */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint32_t desc_len = c ? r::RXD_SHORT_LEN : r::WD_BODY_LEN;
   const uint32_t data_len = r::FWCMD_HDR_LEN + len;
+  _txbuf.assign(desc_len + data_len, 0);
+  uint8_t *wd = _txbuf.data();
 
-  uint32_t dw0 = static_cast<uint32_t>(r::MAC_AX_DMA_H2C & r::AX_TXD_CH_DMA_MSK)
-                 << r::AX_TXD_CH_DMA_SH;
-  put_le32(wd + 0, dw0);
-  put_le32(wd + 8,
-           (data_len & r::AX_TXD_TXPKTSIZE_MSK) << r::AX_TXD_TXPKTSIZE_SH);
+  if (c) {
+    put_le32(wd + 0,
+             ((data_len & r::AX_RXD_RPKT_LEN_MSK) << r::AX_RXD_RPKT_LEN_SH) |
+                 ((static_cast<uint32_t>(r::RXD_S_RPKT_TYPE_H2C) &
+                   r::AX_RXD_RPKT_TYPE_MSK)
+                  << r::AX_RXD_RPKT_TYPE_SH));
+  } else {
+    uint32_t dw0 = static_cast<uint32_t>(r::MAC_AX_DMA_H2C & r::AX_TXD_CH_DMA_MSK)
+                   << r::AX_TXD_CH_DMA_SH;
+    put_le32(wd + 0, dw0);
+    put_le32(wd + 8,
+             (data_len & r::AX_TXD_TXPKTSIZE_MSK) << r::AX_TXD_TXPKTSIZE_SH);
+  }
 
-  uint8_t *hdr = wd + r::WD_BODY_LEN;
+  uint8_t *hdr = wd + desc_len;
   /* Per-H2C sequence number (fwinfo->h2c_seq): 8-bit rolling counter
    * (H2C_HDR_H2C_SEQ [31:24], msk 0xff), incremented per runtime H2C across
    * ALL classes (h2c_pkt_set_hdr). The golden capture counts 0,1,2,... from

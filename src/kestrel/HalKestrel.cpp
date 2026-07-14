@@ -1588,7 +1588,8 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
    * silent even though the RF synth locks. Part of the vendor trx-init. */
   if (_variant == ChipVariant::C8852C) {
     ctrl_tx_path_tmac_8852c();
-    bb_dm_init_8852c(); /* halbb DM init (RX AGC/DIG/EDCCA/CFO/env) */
+    ctrl_rx_path_8852c(); /* enable the RX chains (0x4978 rx_path_en) */
+    bb_dm_init_8852c();   /* halbb DM init (RX AGC/DIG/EDCCA/CFO/env) */
   }
 
   return true;
@@ -1622,6 +1623,35 @@ void HalKestrel::ctrl_tx_path_tmac_8852c() {
   bb_rmw(0x58dc, 0xC0000000u, 0x3);
 
   _logger->info("Kestrel PHY(8852C): T-MAC TX path-com routed (RF_PATH_A)");
+}
+
+void HalKestrel::ctrl_rx_path_8852c() {
+  /* halbb_ctrl_rx_path_8852c (halbb_8852c_api.c), non-DBCC, RF_PATH_AB (both RX
+   * chains for the monitor). The 0x4978 rx_path_en is the enable devourer never
+   * wrote -> the 8852C RX front end stayed disabled (near-deaf). */
+  bb_rmw(0x4978, 0xf, 0x0); /* clear first (8852C/D) */
+  bb_rmw(0x4978, 0xf, 0x3); /* rx_path_en = AB */
+  /* 1RCCA */
+  bb_rmw(0x4974, 0x3C000u, 0x3);
+  bb_rmw(0x4974, 0x3C0000u, 0x3);
+  /* Rx HT nss_limit / mcs_limit */
+  bb_rmw(0xd18, (1u << 9) | (1u << 8), 1);
+  bb_rmw(0xd18, (1u << 22) | (1u << 21), 1);
+  /* Rx HE n_user_max / tb_max_nss (HE_N_USER_MAX_8852C = 8) */
+  bb_rmw(0xd80, 0x3fc0u, 8);
+  bb_rmw(0xd80, (1u << 16) | (1u << 15) | (1u << 14), 1);
+  bb_rmw(0xd80, (1u << 25) | (1u << 24) | (1u << 23), 1);
+  /* TSSI reset (both paths) */
+  bb_rmw(0x58dc, 0xC0000000u, 0x1);
+  bb_rmw(0x58dc, 0xC0000000u, 0x3);
+  bb_rmw(0x78dc, 0xC0000000u, 0x1);
+  bb_rmw(0x78dc, 0xC0000000u, 0x3);
+  /* BB reset (both paths) */
+  bb_rmw(0x5818, 1u << 30, 0x1);
+  bb_rmw(0x7818, 1u << 30, 0x1);
+  bb_rmw(0x5818, 1u << 30, 0x0);
+  bb_rmw(0x7818, 1u << 30, 0x0);
+  _logger->info("Kestrel PHY(8852C): RX path enabled (RF_PATH_AB, 0x4978=0x3)");
 }
 
 /* ======================= 8852C halbb DM init =============================

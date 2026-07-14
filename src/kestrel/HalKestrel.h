@@ -131,6 +131,12 @@ public:
    * synth locks but nothing radiates. RF_PATH_A, single-PHY (dbcc off). */
   void ctrl_tx_path_tmac_8852c();
 
+  /* halbb_ctrl_rx_path_8852c (halbb_8852c_api.c): enable the RX chain(s) —
+   * 0x4978 rx_path_en, 1RCCA, Rx nss/user limits, TSSI/BB reset. Never ported
+   * (only the TX path-com was), so 0x4978[3:0] stayed 0 and the 8852C RX front
+   * end was disabled -> near-deaf. RF_PATH_AB (both chains, monitor). */
+  void ctrl_rx_path_8852c();
+
   /* halbb_dm_init_per_phy (halbb_init.c) — the BB dynamic-mechanism init the
    * 8852B-derived bring-up never ran (RX AGC/DIG/physts/EDCCA/env-monitor left
    * unconfigured -> the 8832CU RX near-deafness). Ported verbatim for the

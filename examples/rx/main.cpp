@@ -576,7 +576,9 @@ static void packetProcessor(const Packet &packet) {
   if (g_rx_count <= 10 || g_rx_count % 100 == 0) {
     devourer::Ev(*g_ev, "rx.pkt")
         .f("n", g_rx_count)
-        .f("len", packet.Data.size());
+        .f("len", packet.Data.size())
+        .f("rate", packet.RxAtrib.data_rate)
+        .f("rssi", packet.RxAtrib.rssi[0]);
   }
   /* DEVOURER_RX_DUMP_ALL=1: emit an `rx.corrupt` event for EVERY frame
    * regardless of SA, with chip-flag bits and phy-soft metrics.

@@ -61,21 +61,31 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
   Dispatched **PID-first** (`kestrel/KestrelUsbIds.h`), not from the 0x00FC
   byte: on AX silicon that register is R_AX_SYS_CHIPINFO (die-id 0x51/0x52;
   the 8852A's 0x50 collides with the 8822B cold transient). On the RTL8852BU:
-  identity, power-on/FW/efuse, monitor RX, channel/BW (2.4/5 GHz, 20 MHz), and
-  TX are up and SDR-validated on-air on both bands (mgmt injection — the OpenIPC
-  video path via `streamtx`; legacy/HT/VHT/HE rates). TX power is a fixed BB dBm
-  (`halbb_set_txpwr_dbm`, default 20 dBm, `DEVOURER_TX_PWR` override) with a
-  runtime `SetTxPowerOffsetQdb` lever; `ReadTsf` reads the per-port MAC TSF.
-  TX airs with the CMAC EDCCA/CCA gate disabled (`sch_tx_en`) because the
-  RX-DCK/DACK BB calibration is not yet ported and the energy detector otherwise
-  reads a perpetual busy that freezes the CSMA backoff — the intended
-  injection/monitor-link mode; carrier-sense returns with that calibration.
-  Not yet working: the fw's async packet-C2H delivery (blocks the USR_TX_RPT
-  TX-egress timestamp and the rest of the #236 C2H surface), a HW-timed beacon
-  (AX beacon engine), and full RF calibration. The capstone is 11ax
-  trigger-based UL + TWT (issue #236 — the v1.19 vendor fwcmd surface exposes
-  TWT-OFDMA + F2P trigger H2Cs that mainline rtw89 lacks). The 8852A-family
-  (RTL8832AU) is deliberately excluded (frozen 2021 v1.15 vendor drop only).
+  identity, power-on/FW/efuse, monitor RX (both bands, ambient-beacon
+  decode — the RX front-end needs the halbb per-band LNA/TIA gain-error cache,
+  without which 5 GHz is deaf), TX (mgmt injection — the OpenIPC video path via
+  `streamtx`; legacy/HT/VHT/HE rates), and channel/BW across **5/10/20/40/80
+  MHz** on 2.4/5 GHz are up and on-air-validated (RX decode + B210 SDR for
+  narrowband occupied bandwidth). 40 MHz tunes to the block center (primary
+  ±2); 80 MHz derives center/pri_ch from the channel plan; 5/10 MHz narrowband
+  is the BB "small BW" field with the RF left in 20 MHz mode (no ADC re-clock,
+  unlike Jaguar). RX bulk-IN delivery requires the USB RXAGG engine enabled
+  (`B_AX_RXAGG_EN`). TX power is a fixed BB dBm (`halbb_set_txpwr_dbm`, default
+  20 dBm, `DEVOURER_TX_PWR` override) with a runtime `SetTxPowerOffsetQdb`
+  lever; `ReadTsf` reads the per-port MAC TSF; `StartBeacon` drives the AX HW
+  beacon engine. Async packet-C2H (bulk-IN rpkt_type=10) delivery works —
+  routed by `handle_c2h` on the C2H class/func — so the #236 C2H surface
+  (TWT/F2P reports) is reachable. TX airs with the CMAC EDCCA/CCA gate disabled
+  (`sch_tx_en`, TX path only) because the RX-DCK/DACK BB calibration is not yet
+  ported and the energy detector otherwise reads a perpetual busy that freezes
+  the CSMA backoff — the intended injection/monitor-link mode; carrier-sense
+  returns with that calibration. Not yet working: full RF calibration
+  (RX-DCK/DACK/IQK/DPK/TSSI), and the fw's USR_TX_RPT TX-egress-timestamp C2H
+  (gated on a full BSS association, not just the registered NO_LINK role). The
+  capstone is 11ax trigger-based UL + TWT (issue #236 — the v1.19 vendor fwcmd
+  surface exposes TWT-OFDMA + F2P trigger H2Cs that mainline rtw89 lacks). The
+  8852A-family (RTL8832AU) is deliberately excluded (frozen 2021 v1.15 vendor
+  drop only).
 
 Naming traps: **RTL8821AU is Jaguar1** (not Jaguar2, despite the Jaguar2
 RTL8821C's similar name); RTL8822**B**U (Jaguar2) ≠ RTL8822**C**U (Jaguar3);

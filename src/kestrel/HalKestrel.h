@@ -411,15 +411,15 @@ public:
   /* Vendored halbb-G6 8852C RX bring-up (hal/halbb/g6/kestrel_halbb_glue).
    * The static callbacks route the vendor C's register/OS plane to this device
    * (dev cookie = the HalKestrel*). */
-  void halbb8852c_bringup(uint8_t cut, uint8_t rfe_type);
-  void halbb8852c_set_gain(uint8_t channel, uint8_t band_type);
+  void vnd_bb_bringup(uint8_t cut, uint8_t rfe_type);
+  void vnd_bb_set_gain(uint8_t channel, uint8_t band_type);
   /* Full vendor per-channel BB config (halbb_ctrl_bw_ch_8852c): replaces the
    * hand-rolled BB channel-switch. bw = devourer ChannelWidth_t. */
-  void halbb8852c_ctrl_bw_ch(uint8_t pri_ch, uint8_t center, ChannelWidth_t bw,
+  void vnd_bb_ctrl_bw_ch(uint8_t pri_ch, uint8_t center, ChannelWidth_t bw,
                              uint8_t band_type);
   /* Vendored T-MAC TX path-com routing (halbb_ctrl_tx_path_tmac_8852c) —
    * replaces the hand-transcribed ctrl_tx_path_tmac_8852c. */
-  void halbb8852c_ctrl_tx_path();
+  void vnd_bb_ctrl_tx_path();
   ::kestrel_halbb_ctx *_halbb_ctx = nullptr;
   void *_halbb_bridge = nullptr; /* heap kestrel_halbb_bridge, outlives ctx */
   static unsigned int halbb_r32(void *dev, unsigned int addr);
@@ -427,6 +427,10 @@ public:
   static unsigned int halbb_rpwr(void *dev, unsigned int addr);
   static void halbb_wpwr(void *dev, unsigned int addr, unsigned int val);
   static void halbb_delay(void *dev, unsigned int us);
+  /* XTAL-SI plane (bridge read_xsi/write_xsi) -> the xtal_si helpers. */
+  static unsigned char halbb_read_xsi(void *dev, unsigned char offset);
+  static void halbb_write_xsi(void *dev, unsigned char offset,
+                              unsigned char val);
   /* RF-register plane callbacks (shared bridge) -> 3-wire rf_rrf/rf_wrf. */
   static unsigned int halbb_rrf(void *dev, unsigned int path, unsigned int addr,
                                 unsigned int mask);
@@ -442,14 +446,14 @@ public:
 #if defined(DEVOURER_KESTREL_HALRF)
   /* Vendored halrf-G6 8852C RF calibrations (hal/halrf/g6). Share the
    * halbb bridge (its RF-reg callbacks). */
-  void halrf8852c_dac_cal();
-  void halrf8852c_rx_dck();
+  void vnd_rf_dac_cal();
+  void vnd_rf_rx_dck();
   /* Set the halrf channel + run IQK (per-channel). band 0=2.4G,1=5G. */
-  void halrf8852c_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw);
+  void vnd_rf_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw);
   /* Vendored RF channel/band/bw tune + synth relock (halrf_ctl_band_ch_bw_8852c
    * + halrf_lck_8852c) — the correct 8852C RF tune for all bands incl. 6 GHz,
    * replacing the hand-rolled rf_ctrl_ch/rf_ctrl_bw on the C8852C. */
-  void halrf8852c_ctl_band_ch_bw(uint8_t band_type, uint8_t center,
+  void vnd_rf_tune(uint8_t band_type, uint8_t center,
                                  ChannelWidth_t bw);
   struct kestrel_halrf_ctx *_halrf_ctx = nullptr;
   bool _halrf_rfk_inited = false; /* NCTL engine loaded (one-time, lazy) */

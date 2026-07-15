@@ -13,6 +13,13 @@
 extern "C" {
 #endif
 
+/* Which Kestrel chip the glue drives — selects ic_type/chip_id for the
+ * vendored cores' own runtime dispatch. */
+enum kestrel_chip {
+  KESTREL_CHIP_8852B = 0,
+  KESTREL_CHIP_8852C = 1,
+};
+
 /* Opaque device cookie (a devourer RtlKestrelDevice* on the C++ side). */
 struct kestrel_halbb_bridge {
   void *dev; /* passed back to every callback */
@@ -35,6 +42,11 @@ struct kestrel_halbb_bridge {
                         unsigned int size);
   /* diagnostic sink (BB_DBG/BB_WARNING) — may be NULL for no-op. */
   void (*logline)(void *dev, const char *msg);
+  /* XTAL-SI plane (rtw_hal_mac_get/set_xsi): the 8852B's a-die SI reset
+   * (halrf_arfc_si_reset_8852b, on the halrf_dm_init RFK prologue) needs it.
+   * NULL-able: the shim falls back to a no-op (fine for the 8852C paths). */
+  unsigned char (*read_xsi)(void *dev, unsigned char offset);
+  void (*write_xsi)(void *dev, unsigned char offset, unsigned char val);
   /* The live struct bb_info* (set by kestrel_halbb_create). The shim's
    * halrf->halbb cross-plane calls (rtw_hal_bb_backup_info / restore /
    * tx_mode_switch — hal_api_bb.c in the vendor) resolve the bb instance

@@ -381,14 +381,8 @@ static inline enum rtw_hal_status rtw_hal_bb_ctrl_rx_cca(void *h, u8 cca_en,
 #define rtw_hal_bb_cfg_rx_path(...)                (0)
 #define rtw_hal_bb_set_power(...)                  (0)
 #define rtw_hal_bb_set_pmac_packet_tx(...)         (0)
-#define rtw_hal_mac_set_xsi(...)                   (0)
-/* get_xsi mirrors set_xsi. NB: inert xsi is fine for the 8852C paths devourer
- * drives, but the 8852B's a-die SI reset (halrf_arfc_si_reset_8852b, called
- * from halrf_si_reset on the halrf_dm_init RFK prologue) needs the real
- * XTAL-SI plane — the glue routes both through the bridge's xsi callbacks
- * into HalKestrel's xtal_si helpers; these macros are only the fallback when
- * the bridge callback is absent. */
-#define rtw_hal_mac_get_xsi(...)                   (0)
+/* XTAL-SI (rtw_hal_mac_get/set_xsi): real inlines further down, after the
+ * bridge accessor is defined (see the register-plane section). */
 #define rtw_hal_mac_set_gpio_func(...)             (0)
 #define rtw_hal_btc_wl_rfk_ntfy(...)               (0)
 #define rtw_hal_txpwr_lmt_store_from_external(...)     (0)
@@ -551,6 +545,28 @@ static inline void hal_write16(struct rtw_hal_com_t *h, u32 addr, u16 val) {
   u32 v = hal_read32(h, base);
   v = (v & ~(0xffffu << sh)) | ((u32)val << sh);
   hal_write32(h, base, v);
+}
+
+/* XTAL-SI plane: the 8852B's a-die SI reset (halrf_arfc_si_reset_8852b,
+ * called from halrf_si_reset on the halrf_dm_init RFK prologue) does real
+ * get/set pairs — route them through the bridge's xsi callbacks (HalKestrel's
+ * xtal_si helpers). NULL callbacks degrade to a no-op, which is fine for the
+ * 8852C paths (its si_reset dispatch has no 8852C case). */
+static inline u32 rtw_hal_mac_set_xsi(struct rtw_hal_com_t *h, u8 offset,
+                                      u8 val) {
+  struct kestrel_halbb_bridge *b = halcom_to_drvpriv(h);
+  if (b && b->write_xsi)
+    b->write_xsi(b->dev, offset, val);
+  return 0;
+}
+static inline u32 rtw_hal_mac_get_xsi(struct rtw_hal_com_t *h, u8 offset,
+                                      u8 *val) {
+  struct kestrel_halbb_bridge *b = halcom_to_drvpriv(h);
+  if (b && b->read_xsi && val)
+    *val = b->read_xsi(b->dev, offset);
+  else if (val)
+    *val = 0;
+  return 0;
 }
 
 /* ---- halrf -> halbb cross-plane calls (vendor hal_api_bb.c) -------------

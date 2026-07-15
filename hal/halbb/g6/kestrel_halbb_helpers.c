@@ -29,6 +29,22 @@ void halbb_fwofld_bitmap_en(struct bb_info *bb, bool en, enum fw_ofld_type app) 
   (void)bb; (void)en; (void)app;
 }
 
+/* The halbb_ctrl_bw_ch dispatcher's 8852B case branches on
+ * halbb_check_fw_ofld (false above), so this fwofld variant is never called —
+ * the symbol just has to link (halbb_8852b_fwofld_api.c is not vendored). */
+bool halbb_fwofld_ctrl_bw_ch_8852b(struct bb_info *bb, u8 pri_ch, u8 central_ch,
+                                   enum channel_width bw, enum band_type band,
+                                   enum phl_phy_idx phy_idx) {
+  (void)bb; (void)pri_ch; (void)central_ch; (void)bw; (void)band; (void)phy_idx;
+  return false;
+}
+
+/* DV/PXP (design-verification platform) debug print toggle (halbb_dv_dbg.c,
+ * not vendored) — a log-gate only. */
+void halbb_dv_pxp_print_en(struct bb_info *bb, bool en) {
+  (void)bb; (void)en;
+}
+
 /* Spur suppression (halbb_spur_suppress.c, not vendored): channel-specific NBI
  * /CSI notch, not RX-hearing-critical — no-op (no spur notch). */
 void halbb_csi_tone_idx(struct bb_info *bb, u8 central_ch, enum channel_width bw,

@@ -1,5 +1,5 @@
-/* C glue: owns an rf_info and drives the vendored halrf-G6 8852C RF cals.
- * Compiled as C behind the shared shim. See the header. */
+/* C glue: owns an rf_info and drives the vendored halrf-G6 RF cals for both
+ * Kestrel chips. Compiled as C behind the shared shim. See the header. */
 #include "halrf_precomp.h"      /* full rf_info + halrf types + cal functions */
 #include "kestrel_halrf_glue.h"
 
@@ -10,6 +10,7 @@ struct kestrel_halrf_ctx {
 };
 
 struct kestrel_halrf_ctx *kestrel_halrf_create(struct kestrel_halbb_bridge *br,
+                                               enum kestrel_chip chip,
                                                unsigned char cut,
                                                unsigned char rfe_type) {
   struct kestrel_halrf_ctx *c =
@@ -20,23 +21,24 @@ struct kestrel_halrf_ctx *kestrel_halrf_create(struct kestrel_halbb_bridge *br,
 
   c->hal.drv_priv = br;          /* -> kestrel_halbb_bridge (BB + RF planes) */
   c->hal.cv = cut;
-  c->hal.chip_id = CHIP_WIFI6_8852C; /* halrf_cmn_info_self_init keys on this */
+  /* halrf_cmn_info_self_init keys on chip_id: it derives rf->ic_type and
+   * wires the per-chip rfk ops + backup-register tables (rf_iqk_ops,
+   * rfk_iqk_info, backup_*_reg) the per-channel cals dereference. */
+  c->hal.chip_id =
+      chip == KESTREL_CHIP_8852B ? CHIP_WIFI6_8852B : CHIP_WIFI6_8852C;
   c->phl.dev_cap.rfe_type = rfe_type;
 
   c->rf.hal_com = &c->hal;
   c->rf.phl_com = &c->phl;
-  c->rf.ic_type = RF_RTL8852C;
-  /* Register the 8852C RFK ops + backup-register tables (rf->rfk_iqk_info,
-   * rf_iqk_ops, backup_*_reg) that the per-channel cals (IQK) dereference.
-   * halrf_cmn_info_self_init derives ic_type from hal_com->chip_id (set above),
-   * then wires rfk_iqk_info = &rf_iqk_hwspec_8852c. Verified: IQK no longer
-   * null-derefs. DACK/RX-DCK don't need it (direct _8852c entries). */
+  c->rf.ic_type = chip == KESTREL_CHIP_8852B ? RF_RTL8852B : RF_RTL8852C;
   halrf_cmn_info_self_init(&c->rf);
-  /* Enable the one-shot cals (LCK/RCK/DACK/RXDCK/IQK/DPK/TSSI setup) but CLEAR
-   * the ongoing TX-power-TRACKING servos: devourer runs a fixed BB dBm
-   * (halbb_set_txpwr_dbm), so halrf_tssi_enable's closed-loop servo (gated on
-   * HAL_RF_TX_PWR_TRACK) would fight it and pull TX power down (measured:
-   * duty 74%->47%). Keep TSSI's static BB power-ctrl setup, drop the trackers. */
+  /* Enable the one-shot cals (LCK/RCK/DACK/RXDCK/IQK) but CLEAR the ongoing
+   * TX-power-TRACKING servos and the TSSI/DPK family: devourer runs a fixed
+   * BB dBm (halbb_set_txpwr_dbm), and the servos fight it. EVM-settled on the
+   * 8832CU (MCS7 data via streamtx, 8822CU monitor, matched RSSI ~78):
+   * TSSI+DPK enabled pulled on-air duty 74% -> 43% and medEVM -70 -> -59 —
+   * they degrade TX under the fixed-power model, so the gate is permanent
+   * until a TSSI-referenced power model exists. */
   c->rf.support_ability = 0xffffffffu &
       ~(HAL_RF_TX_PWR_TRACK | HAL_RF_TSSI_TRK | HAL_RF_DPK_TRACK |
         HAL_RF_RXDCK_TRACK);
@@ -50,13 +52,16 @@ void kestrel_halrf_rfk_init(struct kestrel_halrf_ctx *ctx) {
   if (!ctx)
     return;
   struct rf_info *rf = &ctx->rf;
-  /* Mirror the halrf_dm_init cal prologue that must run before the per-channel
-   * IQK/TSSI/DPK. Loads array_mp_8852c_nctl_reg into the one-shot NCTL micro-
+  /* Mirror the halrf_dm_init cal prologue that must run before the per-
+   * channel IQK. Loads the per-chip NCTL microcode into the one-shot cal
    * engine (signals 0x55 @ 0xbff8 on cal completion), resets the per-cal RFK
-   * sub-state, then the synth/filter cals (LCK/RCK) the per-channel cals depend
-   * on and the efuse trim/TSSI data TSSI consumes. */
+   * sub-state, runs the HW/SW SI reset (real a-die work on the 8852B via the
+   * bridge XSI plane; the dispatcher has no 8852C case), then the synth/
+   * filter cals (LCK/RCK) the per-channel cals depend on and the efuse
+   * trim/TSSI data. */
   halrf_config_nctl_reg(rf);
   halrf_rfk_self_init(rf);
+  halrf_si_reset(rf);
   halrf_lck_trigger(rf);
   halrf_rck_trigger(rf, HW_PHY_0);
   /* Thermal / PA-bias / TSSI trim from efuse (kfree subsystem) — this is what
@@ -65,22 +70,34 @@ void kestrel_halrf_rfk_init(struct kestrel_halrf_ctx *ctx) {
    * devourer deliberately omits (fixed-dBm txpwr, no regulatory enforcement)
    * and whose absence does not affect the TSSI calibration's operation. */
   halrf_get_efuse_trim(rf, HW_PHY_0);
-  /* Load the TSSI DE (differential-error) power targets from efuse — now that
-   * the efuse_get_info bridge is wired, this populates tssi_info->tssi_efuse[]
-   * so halrf_do_tssi's set_efuse_to_de writes real corrections (without it the
-   * TSSI-referenced BB power path reads a 0 DE -> TX power collapses). The
-   * mac_ax pwr-limit tail of halrf_tssi_get_efuse_EX is skipped by calling the
-   * per-chip loader directly. */
-  halrf_tssi_get_efuse_8852c(rf, HW_PHY_0);
+  /* Load the TSSI DE (differential-error) power targets from efuse — with the
+   * efuse_get_info bridge wired this populates tssi_info->tssi_efuse[] so a
+   * TSSI-referenced consumer reads real corrections. The mac_ax pwr-limit
+   * tail of halrf_tssi_get_efuse_EX is skipped by calling the per-chip loader
+   * directly. */
+  if (rf->ic_type == RF_RTL8852B)
+    halrf_tssi_get_efuse_8852b(rf, HW_PHY_0);
+  else
+    halrf_tssi_get_efuse_8852c(rf, HW_PHY_0);
 }
 
 void kestrel_halrf_dac_cal(struct kestrel_halrf_ctx *ctx, unsigned char force) {
-  if (ctx)
+  if (!ctx)
+    return;
+  /* Direct per-chip calls (the halrf_dack_trigger wrapper adds chlk_map/
+   * rfk-ops gates that can silently skip the cal at bring-up). */
+  if (ctx->rf.ic_type == RF_RTL8852B)
+    halrf_dac_cal_8852b(&ctx->rf, force ? true : false);
+  else
     halrf_dac_cal_8852c(&ctx->rf, force ? true : false);
 }
 
 void kestrel_halrf_rx_dck(struct kestrel_halrf_ctx *ctx) {
-  if (ctx)
+  if (!ctx)
+    return;
+  if (ctx->rf.ic_type == RF_RTL8852B)
+    halrf_rx_dck_8852b(&ctx->rf, HW_PHY_0, false);
+  else
     halrf_rx_dck_8852c(&ctx->rf, HW_PHY_0, false);
 }
 
@@ -98,13 +115,23 @@ void kestrel_halrf_set_ch(struct kestrel_halrf_ctx *ctx, unsigned char center_ch
 void kestrel_halrf_ctl_band_ch_bw(struct kestrel_halrf_ctx *ctx,
                                   unsigned char band, unsigned char central_ch,
                                   unsigned char bw) {
-  if (ctx)
+  if (!ctx)
+    return;
+  if (ctx->rf.ic_type == RF_RTL8852B) {
+    /* The core generics dispatch to halrf_ctrl_ch_8852b / halrf_ctrl_bw_8852b
+     * (halrf_ctl_band_ch_bw has no 8852B case); the 8852B's synth lock rides
+     * inside its ctrl_ch (s0_arfc18 relock priming). */
+    halrf_ctl_ch(&ctx->rf, HW_PHY_0, central_ch, (enum band_type)band);
+    halrf_ctl_bw(&ctx->rf, HW_PHY_0, (enum channel_width)bw);
+  } else {
     halrf_ctl_band_ch_bw_8852c(&ctx->rf, HW_PHY_0, (enum band_type)band,
                                central_ch, (enum channel_width)bw);
+  }
 }
 
 void kestrel_halrf_lck(struct kestrel_halrf_ctx *ctx) {
-  if (ctx)
+  /* 8852C-only synth relock; the 8852B locks inside its ctrl_ch. */
+  if (ctx && ctx->rf.ic_type == RF_RTL8852C)
     halrf_lck_8852c(&ctx->rf);
 }
 
@@ -126,27 +153,16 @@ int kestrel_halrf_efuse_get_info(struct kestrel_halrf_ctx *ctx,
                                  unsigned char autoload) {
   if (!ctx || !efuse_map)
     return 0;
-  return halrf_get_efuse_info_8852c(&ctx->rf, efuse_map,
+  bool ok;
+  if (ctx->rf.ic_type == RF_RTL8852B)
+    ok = halrf_get_efuse_info_8852b(&ctx->rf, efuse_map,
                                     (enum rtw_efuse_info)id, value, size,
-                                    autoload)
-             ? 1
-             : 0;
-}
-
-void kestrel_halrf_tssi(struct kestrel_halrf_ctx *ctx) {
-  if (ctx)
-    /* hwtx_en=false: skip the TSSI alignment-K (_halrf_tssi_alimentk), which
-     * TXes and re-trims TXAGC toward a TSSI target — unwanted under fixed dBm.
-     * Runs the static TSSI BB power-ctrl setup only. */
-    halrf_do_tssi_8852c(&ctx->rf, HW_PHY_0, false);
-}
-
-void kestrel_halrf_dpk(struct kestrel_halrf_ctx *ctx) {
-  if (ctx)
-    /* Call the raw cal directly, not halrf_dpk_trigger — the wrapper
-     * early-returns on !(rf->support_ability & HAL_RF_DPK), which the glue
-     * doesn't populate (mirrors how kestrel_halrf_iqk calls halrf_iqk). */
-    halrf_dpk_8852c(&ctx->rf, HW_PHY_0, true);
+                                    autoload);
+  else
+    ok = halrf_get_efuse_info_8852c(&ctx->rf, efuse_map,
+                                    (enum rtw_efuse_info)id, value, size,
+                                    autoload);
+  return ok ? 1 : 0;
 }
 
 void kestrel_halrf_destroy(struct kestrel_halrf_ctx *ctx) {

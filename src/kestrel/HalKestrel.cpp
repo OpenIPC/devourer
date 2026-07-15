@@ -2832,18 +2832,21 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
   /* --- RF channel + bandwidth + synth relock. Tunes to the block CENTER. --- */
   _cur_band_type = band_type; /* for a later same-band FastRetune */
 #if defined(DEVOURER_KESTREL_HALRF_8852C)
-  if (_variant == ChipVariant::C8852C && band_type == 2) {
-    /* 6 GHz: the vendored halrf_ctl_band_ch_bw_8852c (RF18 band/ch/bw, DAV+DDV,
-     * path-B CAV WA) + halrf_lck_8852c (the 0x0/0x5-primed synth relock). The
-     * hand-rolled rf_ctrl_ch omits the relock priming, so its 6 GHz VCO never
-     * locks (synthLock=0). With the vendored path the 6G synth locks
-     * (synthLock=1). Kept 6G-only: the vendored relock regresses the 2.4/5 GHz
-     * lock on this die, while the hand-rolled path locks 2.4/5 GHz reliably. */
+  if (_variant == ChipVariant::C8852C) {
+    /* Vendored RF channel tune for ALL bands: halrf_ctl_band_ch_bw_8852c (RF18
+     * band/ch/bw for DAV+DDV both paths + the path-B CAV WA) then
+     * halrf_lck_8852c (the 0x0[mode]=3 / 0x5=0-primed 0xd3-hold synth relock).
+     * Replaces the hand-rolled rf_ctrl_ch/rf_ctrl_bw. The relock priming is what
+     * the 6 GHz VCO additionally needs to lock, and it locks 2.4/5 GHz just as
+     * well — bus-pinned validated: 5G 72 frames, 6G TX->RX + throughput, 5G
+     * narrowband 85 frames, 2.4G CCK beacons decoded. One vendored path serves
+     * 2.4/5/6 GHz. (The earlier "regresses 2.4/5 GHz" reading was the two-adapter
+     * bus-ambiguity artifact, not the tune.) */
     halrf8852c_ctl_band_ch_bw(band_type, center, bw);
   } else
 #endif
   {
-    /* 2.4/5 GHz: halrf_ctrl_ch_8852b (DAV+DDV x path A/B, path-A synth LCK). */
+    /* 8852B: halrf_ctrl_ch_8852b (DAV+DDV x path A/B, path-A synth LCK). */
     rf_ctrl_ch(center, band_type);
     /* halrf_bw_setting_8852b: RF18 [11:10]. */
     if (bw != CHANNEL_WIDTH_20)

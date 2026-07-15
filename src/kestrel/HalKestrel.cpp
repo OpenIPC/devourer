@@ -1862,13 +1862,14 @@ void HalKestrel::halrf8852c_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw)
   /* TSSI (TX-power servo) then DPK (TX-PA predistortion) — the vendor
    * per-channel RFK order is IQK -> TSSI -> DPK (halrf.c chl_rfk). Both use the
    * same NCTL one-shot engine loaded in rfk_init. */
-  /* TSSI/DPK remain gated OFF pending an EVM measurement. The efuse-DE wiring
-   * is in place (loaded in rfk_init) and verified reading correctly, but this
-   * chip's efuse TSSI DE is ~0 (thermal reads real: 0x1b), so loading it does
-   * NOT change the power path — TSSI+DPK still drop ch36 duty 74%->43%. That
-   * drop is the TSSI-referenced power mode (0x5800..0x5818) + DPK backing the PA
-   * off, which duty cannot judge as correct-linearization vs misconfig. Needs a
-   * 2-adapter TX-EVM read (tests/kestrel_8832cu_evm.sh) before shipping.
+  /* TSSI/DPK stay GATED OFF — EVM-settled. A/B on the 8832CU (MCS7 data via
+   * streamtx, 8822CU monitor, matched RSSI ~78; tests/kestrel_8832cu_evm_stream.sh):
+   *   fixed-dBm  medEVM -70 (~-35 dB)  -- clean
+   *   TSSI+DPK   medEVM -59 (~-29.5 dB) -- ~5.5 dB DIRTIER
+   * They degrade both power (duty 74%->43%) AND EVM. Without the full vendor
+   * TSSI-servo/coex power context, DPK linearizes around a mismatched reference
+   * and adds distortion. The wired glue (kestrel_halrf_tssi/dpk) + efuse-DE path
+   * are kept for a future full-power-subsystem port, but not run.
    * kestrel_halrf_tssi(_halrf_ctx); kestrel_halrf_dpk(_halrf_ctx); */
   _logger->info("Kestrel RF(8852C): IQK+LCK/RCK/efuse-trim (TSSI/DPK EVM-gated) (ch{} band{})",
                 center, band);

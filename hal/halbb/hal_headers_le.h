@@ -271,13 +271,9 @@ static inline enum rtw_hal_status rtw_hal_rf_syn_config(void *h,
   return RTW_HAL_STATUS_SUCCESS;
 }
 
-/* Efuse read — return FAILURE so RX gain-K falls back to table defaults (the
- * efuse RX-gain-K trim is a sensitivity refinement, not a hearing gate; the
- * 8852B first-light RX ran without it). Route to real efuse later. */
-static inline enum rtw_hal_status rtw_hal_efuse_get_info(void *h,
-    enum rtw_efuse_info info, void *value, u8 size) {
-  (void)h; (void)info; (void)value; (void)size; return RTW_HAL_STATUS_FAILURE;
-}
+/* rtw_hal_efuse_get_info is defined below, after rtw_hal_com_t + the bridge
+ * accessor — it routes to the efuse_get_info bridge callback (devourer parses
+ * the logical efuse via the vendored halrf_get_efuse_info_8852c map). */
 
 /* Memory helpers (vendor _os_mem_*). Byte loop — no libc dependency in the
  * shim-compiled vendor C. */
@@ -474,6 +470,19 @@ static inline u8 rtw_hal_write_rf_reg(struct rtw_hal_com_t *h, enum rf_path path
   struct kestrel_halbb_bridge *b = halcom_to_drvpriv(h);
   if (b->write_rf) b->write_rf(b->dev, (unsigned)path, addr, mask, data);
   return 1;
+}
+
+/* Efuse logical-field read -> efuse_get_info bridge callback. devourer holds
+ * the parsed logical efuse map + runs the vendored halrf_get_efuse_info_8852c
+ * against it. Returns FAILURE when unwired (halbb-only builds / no efuse) so
+ * callers fall back to table defaults. */
+static inline enum rtw_hal_status rtw_hal_efuse_get_info(void *h,
+    enum rtw_efuse_info info, void *value, u8 size) {
+  struct kestrel_halbb_bridge *b = halcom_to_drvpriv((struct rtw_hal_com_t *)h);
+  if (b && b->efuse_get_info &&
+      b->efuse_get_info(b->dev, (unsigned)info, value, size))
+    return RTW_HAL_STATUS_SUCCESS;
+  return RTW_HAL_STATUS_FAILURE;
 }
 
 

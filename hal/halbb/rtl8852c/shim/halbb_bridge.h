@@ -28,6 +28,11 @@ struct kestrel_halbb_bridge {
   void (*write_rf)(void *dev, unsigned int path, unsigned int addr,
                    unsigned int mask, unsigned int val);
   void (*delay_us)(void *dev, unsigned int us);
+  /* Logical-efuse field read: devourer parses `id` (enum rtw_efuse_info) out of
+   * its efuse shadow via the vendored 8852c map, writes `size` bytes to value.
+   * Returns nonzero on success. NULL on halbb-only / no-efuse builds. */
+  int (*efuse_get_info)(void *dev, unsigned int id, void *value,
+                        unsigned int size);
   /* diagnostic sink (BB_DBG/BB_WARNING) — may be NULL for no-op. */
   void (*logline)(void *dev, const char *msg);
 };

@@ -65,6 +65,13 @@ void kestrel_halrf_rfk_init(struct kestrel_halrf_ctx *ctx) {
    * devourer deliberately omits (fixed-dBm txpwr, no regulatory enforcement)
    * and whose absence does not affect the TSSI calibration's operation. */
   halrf_get_efuse_trim(rf, HW_PHY_0);
+  /* Load the TSSI DE (differential-error) power targets from efuse — now that
+   * the efuse_get_info bridge is wired, this populates tssi_info->tssi_efuse[]
+   * so halrf_do_tssi's set_efuse_to_de writes real corrections (without it the
+   * TSSI-referenced BB power path reads a 0 DE -> TX power collapses). The
+   * mac_ax pwr-limit tail of halrf_tssi_get_efuse_EX is skipped by calling the
+   * per-chip loader directly. */
+  halrf_tssi_get_efuse_8852c(rf, HW_PHY_0);
 }
 
 void kestrel_halrf_dac_cal(struct kestrel_halrf_ctx *ctx, unsigned char force) {
@@ -91,6 +98,19 @@ void kestrel_halrf_set_ch(struct kestrel_halrf_ctx *ctx, unsigned char center_ch
 void kestrel_halrf_iqk(struct kestrel_halrf_ctx *ctx) {
   if (ctx)
     halrf_iqk(&ctx->rf, HW_PHY_0, true);
+}
+
+int kestrel_halrf_efuse_get_info(struct kestrel_halrf_ctx *ctx,
+                                 unsigned char *efuse_map, unsigned int id,
+                                 void *value, unsigned int size,
+                                 unsigned char autoload) {
+  if (!ctx || !efuse_map)
+    return 0;
+  return halrf_get_efuse_info_8852c(&ctx->rf, efuse_map,
+                                    (enum rtw_efuse_info)id, value, size,
+                                    autoload)
+             ? 1
+             : 0;
 }
 
 void kestrel_halrf_tssi(struct kestrel_halrf_ctx *ctx) {

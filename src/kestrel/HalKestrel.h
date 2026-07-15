@@ -431,6 +431,12 @@ public:
                                 unsigned int mask);
   static void halbb_wrf(void *dev, unsigned int path, unsigned int addr,
                         unsigned int mask, unsigned int val);
+  /* Logical-efuse field read callback -> vendored halrf_get_efuse_info_8852c
+   * against the parsed efuse shadow. Feeds the halrf TSSI-DE + thermal reads. */
+  static int halbb_efuse_get_info(void *dev, unsigned int id, void *value,
+                                  unsigned int size);
+  std::array<uint8_t, 2048> _efuse_log_map{}; /* parsed logical efuse shadow */
+  bool _efuse_valid = false;                  /* autoload OK + map populated */
 #endif
 #if defined(DEVOURER_KESTREL_HALRF_8852C)
   /* Vendored halrf-G6 8852C RF calibrations (hal/halrf/rtl8852c). Share the

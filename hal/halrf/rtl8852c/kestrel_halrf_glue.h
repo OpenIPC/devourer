@@ -29,6 +29,17 @@ void kestrel_halrf_destroy(struct kestrel_halrf_ctx *ctx);
  * timeout). Call once after create(), before the per-channel cals. */
 void kestrel_halrf_rfk_init(struct kestrel_halrf_ctx *ctx);
 
+/* Parse one logical-efuse field via the vendored 8852c map
+ * (halrf_get_efuse_info_8852c). efuse_map = devourer's parsed logical efuse
+ * (>=0x600 bytes); id = enum rtw_efuse_info; autoload!=0 reads efuse (0 =
+ * defaults). Writes `size` bytes to value; returns nonzero on success. Wired to
+ * the shim's rtw_hal_efuse_get_info via the efuse_get_info bridge callback so
+ * the halrf TSSI-DE + thermal-trim efuse reads resolve. */
+int kestrel_halrf_efuse_get_info(struct kestrel_halrf_ctx *ctx,
+                                 unsigned char *efuse_map, unsigned int id,
+                                 void *value, unsigned int size,
+                                 unsigned char autoload);
+
 /* DAC calibration (halrf_dac_cal_8852c). force!=0 re-runs even if done. */
 void kestrel_halrf_dac_cal(struct kestrel_halrf_ctx *ctx, unsigned char force);
 

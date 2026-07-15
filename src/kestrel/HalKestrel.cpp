@@ -1787,6 +1787,16 @@ void HalKestrel::halbb_wrf(void *dev, unsigned int path, unsigned int addr,
   static_cast<HalKestrel *>(dev)->rf_wrf(static_cast<uint8_t>(path), addr, mask,
                                          val);
 }
+#if defined(DEVOURER_KESTREL_HALRF_8852C)
+int HalKestrel::halbb_efuse_get_info(void *dev, unsigned int id, void *value,
+                                     unsigned int size) {
+  auto *h = static_cast<HalKestrel *>(dev);
+  if (!h->_efuse_valid || !h->_halrf_ctx)
+    return 0; /* -> shim returns FAILURE -> caller uses table defaults */
+  return kestrel_halrf_efuse_get_info(h->_halrf_ctx, h->_efuse_log_map.data(),
+                                      id, value, size, /*autoload=*/1);
+}
+#endif
 
 void HalKestrel::halbb8852c_bringup(uint8_t cut, uint8_t rfe_type) {
   if (!_halbb_bridge) {
@@ -1799,11 +1809,20 @@ void HalKestrel::halbb8852c_bringup(uint8_t cut, uint8_t rfe_type) {
     br->read_rf = &HalKestrel::halbb_rrf;
     br->write_rf = &HalKestrel::halbb_wrf;
     br->delay_us = &HalKestrel::halbb_delay;
+#if defined(DEVOURER_KESTREL_HALRF_8852C)
+    br->efuse_get_info = &HalKestrel::halbb_efuse_get_info;
+#endif
     br->logline = nullptr;
     _halbb_bridge = br;
     _halbb_ctx = kestrel_halbb_create(br, cut, rfe_type);
 #if defined(DEVOURER_KESTREL_HALRF_8852C)
     _halrf_ctx = kestrel_halrf_create(br, cut, rfe_type); /* shares the bridge */
+    /* Read + cache the efuse shadow now so the halrf cals' efuse reads (TSSI
+     * DE targets, thermal trim) resolve through the efuse_get_info callback. */
+    if (!_efuse_valid) {
+      EfuseInfo ei;
+      read_efuse(ei); /* populates _efuse_log_map + _efuse_valid */
+    }
 #endif
   }
   kestrel_halbb_rx_bringup(_halbb_ctx);
@@ -1843,17 +1862,15 @@ void HalKestrel::halrf8852c_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw)
   /* TSSI (TX-power servo) then DPK (TX-PA predistortion) — the vendor
    * per-channel RFK order is IQK -> TSSI -> DPK (halrf.c chl_rfk). Both use the
    * same NCTL one-shot engine loaded in rfk_init. */
-  /* TSSI + DPK are wired (kestrel_halrf_tssi/dpk) and converge, but are gated
-   * OFF here: hardware-measured, they degrade TX power (ch36 SDR duty 74% ->
-   * 57% TSSI-only -> 29% +DPK). Root cause: halrf_do_tssi_8852c reprograms the
-   * BB TX-power-control block (0x5800..0x5818) to derive power from TSSI DE/
-   * slope tables, which devourer never populates (it runs a fixed BB dBm via
-   * halbb_set_txpwr_dbm — no TSSI power subsystem). DPK then linearizes around
-   * that low reference. Enabling them needs devourer to adopt the TSSI-based
-   * TX-power path (efuse DE/slope targets from the mac_ax power subsystem) — a
-   * power-architecture change, not a cal fix. IQK/DACK/RX-DCK are power-
-   * independent and clean. */
-  _logger->info("Kestrel RF(8852C): IQK+LCK/RCK/trim (TSSI/DPK gated off) (ch{} band{})",
+  /* TSSI/DPK remain gated OFF pending an EVM measurement. The efuse-DE wiring
+   * is in place (loaded in rfk_init) and verified reading correctly, but this
+   * chip's efuse TSSI DE is ~0 (thermal reads real: 0x1b), so loading it does
+   * NOT change the power path — TSSI+DPK still drop ch36 duty 74%->43%. That
+   * drop is the TSSI-referenced power mode (0x5800..0x5818) + DPK backing the PA
+   * off, which duty cannot judge as correct-linearization vs misconfig. Needs a
+   * 2-adapter TX-EVM read (tests/kestrel_8832cu_evm.sh) before shipping.
+   * kestrel_halrf_tssi(_halrf_ctx); kestrel_halrf_dpk(_halrf_ctx); */
+  _logger->info("Kestrel RF(8852C): IQK+LCK/RCK/efuse-trim (TSSI/DPK EVM-gated) (ch{} band{})",
                 center, band);
 }
 #endif
@@ -2958,6 +2975,13 @@ bool HalKestrel::read_efuse(EfuseInfo &out, std::array<uint8_t, 1536> *raw_phys)
     all_00 &= (b == 0x00);
   }
   out.autoload_ok = !all_ff && !all_00;
+#if defined(DEVOURER_KESTREL_HALRF_8852C)
+  /* Cache the parsed logical map as the halrf efuse shadow (the efuse_get_info
+   * bridge reads TSSI-DE / thermal fields from it via the vendored 8852c map). */
+  static_assert(r::WL_EFUSE_LOG_MAP_SIZE_8852B == 2048, "efuse shadow size");
+  std::copy(log.begin(), log.end(), _efuse_log_map.begin());
+  _efuse_valid = out.autoload_ok;
+#endif
   return true;
 }
 

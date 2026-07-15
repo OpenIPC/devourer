@@ -1575,13 +1575,13 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   delay_us(10);
 
 #if defined(DEVOURER_KESTREL_HALBB) && defined(DEVOURER_KESTREL_HALRF)
-  if (_variant == ChipVariant::C8852C) {
-    /* Vendored table ownership: halbb_init_reg applies the BB phy_reg table +
-     * loads the gain table + the efuse RX gain offsets, halrf_config_radio
-     * applies radio B then A (vendor order) and sends the radio-page H2Cs
-     * through the bridge send_h2c into the mac_ax encoder — the vendor's own
-     * loaders walking the vendored hwimg arrays, replacing the C++ walker +
-     * cmd_ofld batching for this chip. */
+  {
+    /* Vendored table ownership (both chips): halbb_init_reg applies the BB
+     * phy_reg table + loads the gain table + the efuse RX gain offsets,
+     * halrf_config_radio applies radio B then A (vendor order) and sends the
+     * radio-page H2Cs through the bridge send_h2c into the mac_ax encoder —
+     * the vendor's own loaders walking the vendored hwimg arrays, replacing
+     * the C++ walker + cmd_ofld batching. */
     ensure_vnd_ctx(cut, rfe_type);
     if (!kestrel_halbb_init_reg(_halbb_ctx))
       _logger->warn("Kestrel PHY: vendored halbb_init_reg reported failure");
@@ -1594,7 +1594,8 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
     /* Vendored halbb bring-up: LNAON/TRSW/PAPE gpio routing + RX chains (the
      * gain cache came from init_reg), then the T-MAC TX path-com routing
      * (halbb_ctrl_tx_path_tmac_8852c) that connects the BB IFFT output to the
-     * TX chain — without it the RF synth locks but nothing radiates. */
+     * TX chain on the 8852C — without it its RF synth locks but nothing
+     * radiates (glue no-op on the 8852B: per-STA CMAC antenna model). */
     vnd_bb_bringup(cut, rfe_type);
     vnd_bb_ctrl_tx_path();
     return true;
@@ -2299,15 +2300,16 @@ void HalKestrel::dack() {
 }
 
 void HalKestrel::dac_cal() {
-  if (_variant == ChipVariant::C8852C) {
 #if defined(DEVOURER_KESTREL_HALRF)
-    /* Vendored halrf DACK + RX-DCK (replaces the hand-rolled dac_cal_8852c /
-     * rx_dck_8852c). Run once at bring-up for the monitor channel. */
-    vnd_rf_dac_cal();
-    vnd_rf_rx_dck();
-#else
-    dac_cal_8852c(); /* the 8852b sequence times out on the 8852C */
+  /* Vendored halrf DACK + RX-DCK for both chips (the full vendor cal —
+   * MSBK/DADCK/biasK included on the 8852B, which the hand-rolled ADDCK
+   * subset lacked). Run once at bring-up for the monitor channel. */
+  vnd_rf_dac_cal();
+  vnd_rf_rx_dck();
+  return;
 #endif
+  if (_variant == ChipVariant::C8852C) {
+    dac_cal_8852c(); /* the 8852b sequence times out on the 8852C */
     return;
   }
   /* halrf_dac_cal_8852b — ADC/ADDCK subset (DAC-side MSBK/biask not ported).
@@ -2724,21 +2726,20 @@ void HalKestrel::fast_retune(uint8_t channel) {
    * can't be re-derived from the channel number). */
   const uint8_t band_type = _cur_band_type;
 #if defined(DEVOURER_KESTREL_HALRF) && defined(DEVOURER_KESTREL_HALBB)
-  if (_variant == ChipVariant::C8852C) {
-    /* Route through the vendored path, matching set_channel: the hand-rolled
-     * rf_ctrl_ch cannot lock the 6 GHz VCO (see 73279d7), so a 6 GHz FastRetune
-     * would silently fail; and set_gain_error applies the hand-rolled gain cache
-     * that the vendored per-channel BB config supersedes. Lean vendored retune =
-     * RF synth (ctl_band_ch_bw + lck) + the per-band gain-error only. */
-    vnd_rf_tune(band_type, channel, CHANNEL_WIDTH_20);
-    vnd_bb_set_gain(channel, band_type);
-  } else
-#endif
+  /* Route through the vendored path, matching set_channel (both chips): the
+   * hand-rolled rf_ctrl_ch cannot lock the 6 GHz VCO (see 73279d7), and
+   * set_gain_error applies the hand-rolled gain cache the vendored per-channel
+   * BB config supersedes. Lean vendored retune = RF synth tune + the per-band
+   * gain-error only. */
+  vnd_rf_tune(band_type, channel, CHANNEL_WIDTH_20);
+  vnd_bb_set_gain(channel, band_type);
+#else
   {
     rf_ctrl_ch(channel, band_type);
     set_gain_error(channel);
     set_rxsc_rpl_comp(channel);
   }
+#endif
   bb_reset_all();
   set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
   _logger->debug("Kestrel FastRetune: ch{} ({})", channel,
@@ -2848,60 +2849,6 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
                     "MHz for 6 GHz TX.");
   }
 
-  /* --- BB ctrl_ch + ctrl_bw (hand-rolled halbb_ctrl_ch/bw_8852b). For the
-   * C8852C this is superseded by the vendored halbb_ctrl_bw_ch_8852c below
-   * (full per-channel BB config incl. mode-sel/RF_BW/RXBB/ADC/CCK), so it runs
-   * only for the 8852B here. --- */
-  if (_variant != ChipVariant::C8852C) {
-  /* BB ctrl_ch (path A/B mode select) */
-  bb_rmw(0x4738, 1u << 17, is_2g ? 1 : 0);
-  bb_rmw(0x4AA4, 1u << 17, is_2g ? 1 : 0);
-
-  /* BB ctrl_bw (halbb_ctrl_bw_8852b) */
-  if (bw == CHANNEL_WIDTH_20) {
-    bb_rmw(0x49C0, 0xC0000000u, 0x0); /* RF_BW [31:30]=0 */
-    bb_rmw(0x49C4, 0x3000u, 0x0);     /* small BW [13:12]=0 */
-    bb_rmw(0x49C4, 0xf00u, 0x0);      /* pri ch [11:8]=0 */
-    bb_rmw(0x12ac, 0xfff000u, 0x333); /* RF mode */
-    bb_rmw(0x32ac, 0xfff000u, 0x333);
-    bb_rmw(0x4738, 0x10000u, 0x1); /* ACI detect [16]=1 */
-    bb_rmw(0x4AA4, 0x10000u, 0x1);
-  } else if (bw == CHANNEL_WIDTH_40) {
-    bb_rmw(0x49C0, 0xC0000000u, 0x1);            /* RF_BW [31:30]=1 (40) */
-    bb_rmw(0x49C4, 0x3000u, 0x0);                /* small BW [13:12]=0 */
-    bb_rmw(0x49C4, 0xf00u, pri_ch);              /* pri ch [11:8] */
-    bb_rmw(0x12ac, 0xfff000u, 0x333);            /* RF mode */
-    bb_rmw(0x32ac, 0xfff000u, 0x333);
-    bb_rmw(0x237c, 1u << 0, pri_ch == 1 ? 1 : 0); /* CCK primary sub-channel */
-  } else if (bw == CHANNEL_WIDTH_80) {
-    bb_rmw(0x49C0, 0xC0000000u, 0x2); /* RF_BW [31:30]=2 (80) */
-    bb_rmw(0x49C4, 0x3000u, 0x0);     /* small BW [13:12]=0 */
-    bb_rmw(0x49C4, 0xf00u, pri_ch);   /* pri ch [11:8] (1..4) */
-    bb_rmw(0x12ac, 0xfff000u, 0xaaa); /* RF mode (base 8852B 80 MHz) */
-    bb_rmw(0x32ac, 0xfff000u, 0xaaa);
-    /* No CCK primary (0x237c) at 80 MHz — 5 GHz-only, no CCK. */
-  } else if (bw == CHANNEL_WIDTH_5 || bw == CHANNEL_WIDTH_10) {
-    /* Narrowband (halbb_ctrl_bw_8852b 5/10 MHz): the RF stays in 20 MHz mode
-     * (rf_ctrl_bw sets RF18[11:10]=both, below); only the BB "small BW" field
-     * re-clocks the ADC/DAC decimation. RF_BW=0, small-BW [13:12]=1(5)/2(10),
-     * pri ch=0, RF mode 0x333, ACI-detect OFF. Same center channel. */
-    bb_rmw(0x49C0, 0xC0000000u, 0x0);                        /* RF_BW=0 */
-    bb_rmw(0x49C4, 0x3000u, bw == CHANNEL_WIDTH_5 ? 0x1 : 0x2); /* small BW */
-    bb_rmw(0x49C4, 0xf00u, 0x0);                             /* pri ch=0 */
-    bb_rmw(0x12ac, 0xfff000u, 0x333);                        /* RF mode */
-    bb_rmw(0x32ac, 0xfff000u, 0x333);
-    bb_rmw(0x4738, 0x10000u, 0x0);                           /* ACI detect off */
-    bb_rmw(0x4AA4, 0x10000u, 0x0);
-  } else {
-    _logger->warn("Kestrel set_channel: bw={} not ported (20/40/80/5/10 only)",
-                  static_cast<int>(bw));
-  }
-
-  /* CCK enable(2.4G)/disable(5G) — 8852B only; the C8852C gets CCK-en from
-   * halbb_ctrl_cck_en inside halbb_ctrl_bw_ch_8852c. */
-  bb_rmw(0x700, 1u << 5, is_2g ? 1 : 0);
-  bb_rmw(0x2344, 1u << 31, is_2g ? 0 : 1);
-  } /* end 8852B-only hand-rolled ctrl_ch/ctrl_bw/CCK */
 
   if (_variant == ChipVariant::C8852C) {
     /* DIG PD lower-bound disable (halbb_dig_init_io_en -> dyn_pd_th, set_en=0):
@@ -2915,19 +2862,15 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
   /* --- RF channel + bandwidth + synth relock. Tunes to the block CENTER. --- */
   _cur_band_type = band_type; /* for a later same-band FastRetune */
 #if defined(DEVOURER_KESTREL_HALRF)
-  if (_variant == ChipVariant::C8852C) {
-    /* Vendored RF channel tune for ALL bands: halrf_ctl_band_ch_bw_8852c (RF18
-     * band/ch/bw for DAV+DDV both paths + the path-B CAV WA) then
-     * halrf_lck_8852c (the 0x0[mode]=3 / 0x5=0-primed 0xd3-hold synth relock).
-     * Replaces the hand-rolled rf_ctrl_ch/rf_ctrl_bw. The relock priming is what
-     * the 6 GHz VCO additionally needs to lock, and it locks 2.4/5 GHz just as
-     * well — bus-pinned validated: 5G 72 frames, 6G TX->RX + throughput, 5G
-     * narrowband 85 frames, 2.4G CCK beacons decoded. One vendored path serves
-     * 2.4/5/6 GHz. (The earlier "regresses 2.4/5 GHz" reading was the two-adapter
-     * bus-ambiguity artifact, not the tune.) */
-    vnd_rf_tune(band_type, center, bw);
-  } else
-#endif
+  /* Vendored RF tune, both chips. 8852C: halrf_ctl_band_ch_bw_8852c (RF18
+   * band/ch/bw for DAV+DDV both paths + the path-B CAV WA) then
+   * halrf_lck_8852c — the relock priming the 6 GHz VCO needs, and it locks
+   * 2.4/5 GHz just as well (bus-pinned validated: 5G 72 frames, 6G TX->RX +
+   * throughput, 5G narrowband 85 frames, 2.4G CCK beacons decoded). 8852B:
+   * the core's halrf_ctl_ch + halrf_ctl_bw generics (synth lock rides inside
+   * halrf_ctrl_ch_8852b). */
+  vnd_rf_tune(band_type, center, bw);
+#else
   {
     /* 8852B: halrf_ctrl_ch_8852b (DAV+DDV x path A/B, path-A synth LCK). */
     rf_ctrl_ch(center, band_type);
@@ -2935,30 +2878,28 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
     if (bw != CHANNEL_WIDTH_20)
       rf_ctrl_bw(bw);
   }
+#endif
 
-  /* Hand-transcribed per-channel cal/PHY refinement (halbb gain-error/RPL +
-   * halrf RX-DCK). STRIP for the C8852C (error-source removal + RX-halt
-   * bisect): rely on the extracted phy_reg/gain tables instead. Kept for the
-   * 8852BU (its RX works). */
+#if defined(DEVOURER_KESTREL_HALBB)
+  /* Full vendor per-channel BB config (halbb_ctrl_bw_ch -> per-chip backend),
+   * both chips: per-band gain-error, hidden/normal efuse RX gain, band
+   * mode-sel, SCO comp, BW/RXBB/ADC, CCK enable — replacing devourer's
+   * hand-rolled BB channel-switch and gain/RPL re-apply. */
+  vnd_bb_ctrl_bw_ch(pri_ch, center, bw, band_type);
+#if defined(DEVOURER_KESTREL_HALRF)
+  /* Vendored halrf IQK, both chips. The 0xbff8 one-shot-done poll depends on
+   * the NCTL micro-engine, which vnd_rf_iqk loads lazily on first call
+   * (kestrel_halrf_rfk_init — also LCK/RCK, the SI reset and the efuse trim).
+   * Per-channel RX-DCK is not re-run here (the bring-up dac_cal covers it —
+   * the shape validated on the 8852C; the RX DC term is stable per band). */
+  vnd_rf_iqk(center, band_type, bw);
+#endif
+#else
+  /* No vendored halbb built: hand-rolled per-channel refinement (8852B). */
   if (_variant != ChipVariant::C8852C) {
     set_gain_error(center);
     set_rxsc_rpl_comp(center);
     rx_dck();
-  }
-#if defined(DEVOURER_KESTREL_HALBB)
-  else {
-    /* Full vendor per-channel BB config (halbb_ctrl_bw_ch_8852c): per-band
-     * gain-error, hidden/normal efuse RX gain, band mode-sel (0x4738/0x4aa4),
-     * SCO comp, BW/RXBB/ADC, CCK enable — replacing devourer's hand-rolled BB
-     * channel-switch. band_type 0=2.4G, 1=5G. */
-    vnd_bb_ctrl_bw_ch(pri_ch, center, bw, band_type);
-#if defined(DEVOURER_KESTREL_HALRF)
-    /* Vendored halrf IQK. The 0xbff8 one-shot-done poll depends on the NCTL
-     * micro-engine, which vnd_rf_iqk now loads lazily on first call
-     * (kestrel_halrf_rfk_init) — the piece halrf_dm_init runs before any cal,
-     * previously missing (IQK spun to a ~25 s timeout). */
-    vnd_rf_iqk(center, band_type, bw);
-#endif
   }
 #endif
 

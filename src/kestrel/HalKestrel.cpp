@@ -2649,11 +2649,16 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
     pri_ch = static_cast<uint8_t>((channel - bs) / 4 + 1);
   }
 
-  /* --- BB ctrl_ch (path A/B mode select) --- */
+  /* --- BB ctrl_ch + ctrl_bw (hand-rolled halbb_ctrl_ch/bw_8852b). For the
+   * C8852C this is superseded by the vendored halbb_ctrl_bw_ch_8852c below
+   * (full per-channel BB config incl. mode-sel/RF_BW/RXBB/ADC/CCK), so it runs
+   * only for the 8852B here. --- */
+  if (_variant != ChipVariant::C8852C) {
+  /* BB ctrl_ch (path A/B mode select) */
   bb_rmw(0x4738, 1u << 17, is_2g ? 1 : 0);
   bb_rmw(0x4AA4, 1u << 17, is_2g ? 1 : 0);
 
-  /* --- BB ctrl_bw (halbb_ctrl_bw_8852b) --- */
+  /* BB ctrl_bw (halbb_ctrl_bw_8852b) */
   if (bw == CHANNEL_WIDTH_20) {
     bb_rmw(0x49C0, 0xC0000000u, 0x0); /* RF_BW [31:30]=0 */
     bb_rmw(0x49C4, 0x3000u, 0x0);     /* small BW [13:12]=0 */
@@ -2693,30 +2698,20 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
                   static_cast<int>(bw));
   }
 
-  /* 8852C ctrl_bw RX tail (halbb_ctrl_bw_8852c): the 8852b bw block above does
-   * not configure the 8852C RX ADC for the operating bandwidth, and the DACK
-   * leaves the ADC in 80 MHz mode — so a 20/40 MHz channel runs a mismatched
-   * ADC clock + stale AGC-restart threshold, desensing RX. Apply the per-path
-   * adc_cfg + the r_Rx_BW40_2xFFT_en bits for the active bw. */
+  /* CCK enable(2.4G)/disable(5G) — 8852B only; the C8852C gets CCK-en from
+   * halbb_ctrl_cck_en inside halbb_ctrl_bw_ch_8852c. */
+  bb_rmw(0x700, 1u << 5, is_2g ? 1 : 0);
+  bb_rmw(0x2344, 1u << 31, is_2g ? 0 : 1);
+  } /* end 8852B-only hand-rolled ctrl_ch/ctrl_bw/CCK */
+
   if (_variant == ChipVariant::C8852C) {
-    const uint32_t two_fft = (bw == CHANNEL_WIDTH_40) ? 1u : 0u;
-    bb_rmw(0x4e30, 1u << 26, two_fft);
-    bb_rmw(0x4424, 1u << 2, two_fft);
-    adc_cfg_8852c(bw, 0);
-    adc_cfg_8852c(bw, 1);
-    /* DIG init (halbb_dig_init_io_en -> halbb_dyn_pd_th_*(IGI_NOLINK, set_en=0)):
-     * disable the packet-detection lower bound so the no-link/monitor receiver
-     * runs at maximum sensitivity. The 8852b-derived bring-up skips DIG, so on
-     * the 8852C these sit at the BB-table default (enabled = insensitive),
-     * desensing RX. OFDM 0x481C[29]=0 + CCK 0x4b74[30]=0
-     * (halbb_set_pd_lower_bound_8852c / _cck_8852c, bound==0 branch). */
+    /* DIG PD lower-bound disable (halbb_dig_init_io_en -> dyn_pd_th, set_en=0):
+     * the no-link/monitor receiver runs at max sensitivity. NOT covered by
+     * halbb_ctrl_bw_ch_8852c (it's a dig_init step), so applied here. OFDM
+     * 0x481C[29]=0 + CCK 0x4b74[30]=0. */
     bb_rmw(0x481C, 1u << 29, 0x0);
     bb_rmw(0x4b74, 1u << 30, 0x0);
   }
-
-  /* --- CCK enable (2.4G) / disable (5G) --- */
-  bb_rmw(0x700, 1u << 5, is_2g ? 1 : 0);
-  bb_rmw(0x2344, 1u << 31, is_2g ? 0 : 1);
 
   /* --- RF channel: full halrf_ctrl_ch_8852b (DAV+DDV x path A/B, with the
    * path-A synthesizer LCK lock). Tunes to the block CENTER. --- */

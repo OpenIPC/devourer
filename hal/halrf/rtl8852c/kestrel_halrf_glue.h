@@ -44,6 +44,15 @@ void kestrel_halrf_set_ch(struct kestrel_halrf_ctx *ctx, unsigned char center_ch
 /* IQ imbalance calibration (halrf_iqk), HW_PHY_0, forced. Per-channel. */
 void kestrel_halrf_iqk(struct kestrel_halrf_ctx *ctx);
 
+/* TSSI (halrf_do_tssi_8852c), HW_PHY_0, hwtx_en=true. Per-channel TX-power
+ * servo setup. Vendor runs it between IQK and DPK. */
+void kestrel_halrf_tssi(struct kestrel_halrf_ctx *ctx);
+
+/* Digital pre-distortion (halrf_dpk_8852c), HW_PHY_0, forced. Per-channel;
+ * shapes the TX-PA predistortion. Call after IQK (and set_ch). Depends on the
+ * NCTL one-shot engine (kestrel_halrf_rfk_init) like IQK. */
+void kestrel_halrf_dpk(struct kestrel_halrf_ctx *ctx);
+
 #ifdef __cplusplus
 }
 #endif

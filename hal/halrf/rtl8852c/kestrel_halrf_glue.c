@@ -32,6 +32,14 @@ struct kestrel_halrf_ctx *kestrel_halrf_create(struct kestrel_halbb_bridge *br,
    * then wires rfk_iqk_info = &rf_iqk_hwspec_8852c. Verified: IQK no longer
    * null-derefs. DACK/RX-DCK don't need it (direct _8852c entries). */
   halrf_cmn_info_self_init(&c->rf);
+  /* Enable the one-shot cals (LCK/RCK/DACK/RXDCK/IQK/DPK/TSSI setup) but CLEAR
+   * the ongoing TX-power-TRACKING servos: devourer runs a fixed BB dBm
+   * (halbb_set_txpwr_dbm), so halrf_tssi_enable's closed-loop servo (gated on
+   * HAL_RF_TX_PWR_TRACK) would fight it and pull TX power down (measured:
+   * duty 74%->47%). Keep TSSI's static BB power-ctrl setup, drop the trackers. */
+  c->rf.support_ability = 0xffffffffu &
+      ~(HAL_RF_TX_PWR_TRACK | HAL_RF_TSSI_TRK | HAL_RF_DPK_TRACK |
+        HAL_RF_RXDCK_TRACK);
   return c;
 }
 
@@ -41,11 +49,22 @@ void halrf_rfk_self_init(struct rf_info *rf);
 void kestrel_halrf_rfk_init(struct kestrel_halrf_ctx *ctx) {
   if (!ctx)
     return;
-  /* Loads array_mp_8852c_nctl_reg into the one-shot NCTL micro-engine (the
-   * sequencer that signals 0x55 @ 0xbff8 when a cal one-shot completes) and
-   * resets the per-cal RFK sub-state. Mirrors the halrf_dm_init prologue. */
-  halrf_config_nctl_reg(&ctx->rf);
-  halrf_rfk_self_init(&ctx->rf);
+  struct rf_info *rf = &ctx->rf;
+  /* Mirror the halrf_dm_init cal prologue that must run before the per-channel
+   * IQK/TSSI/DPK. Loads array_mp_8852c_nctl_reg into the one-shot NCTL micro-
+   * engine (signals 0x55 @ 0xbff8 on cal completion), resets the per-cal RFK
+   * sub-state, then the synth/filter cals (LCK/RCK) the per-channel cals depend
+   * on and the efuse trim/TSSI data TSSI consumes. */
+  halrf_config_nctl_reg(rf);
+  halrf_rfk_self_init(rf);
+  halrf_lck_trigger(rf);
+  halrf_rck_trigger(rf, HW_PHY_0);
+  /* Thermal / PA-bias / TSSI trim from efuse (kfree subsystem) — this is what
+   * TSSI's accuracy depends on. NOT halrf_tssi_get_efuse_ex: that loads the
+   * regulatory TX-power-LIMIT switch (mac_ax pwr-limit ops), a subsystem
+   * devourer deliberately omits (fixed-dBm txpwr, no regulatory enforcement)
+   * and whose absence does not affect the TSSI calibration's operation. */
+  halrf_get_efuse_trim(rf, HW_PHY_0);
 }
 
 void kestrel_halrf_dac_cal(struct kestrel_halrf_ctx *ctx, unsigned char force) {
@@ -72,6 +91,22 @@ void kestrel_halrf_set_ch(struct kestrel_halrf_ctx *ctx, unsigned char center_ch
 void kestrel_halrf_iqk(struct kestrel_halrf_ctx *ctx) {
   if (ctx)
     halrf_iqk(&ctx->rf, HW_PHY_0, true);
+}
+
+void kestrel_halrf_tssi(struct kestrel_halrf_ctx *ctx) {
+  if (ctx)
+    /* hwtx_en=false: skip the TSSI alignment-K (_halrf_tssi_alimentk), which
+     * TXes and re-trims TXAGC toward a TSSI target — unwanted under fixed dBm.
+     * Runs the static TSSI BB power-ctrl setup only. */
+    halrf_do_tssi_8852c(&ctx->rf, HW_PHY_0, false);
+}
+
+void kestrel_halrf_dpk(struct kestrel_halrf_ctx *ctx) {
+  if (ctx)
+    /* Call the raw cal directly, not halrf_dpk_trigger — the wrapper
+     * early-returns on !(rf->support_ability & HAL_RF_DPK), which the glue
+     * doesn't populate (mirrors how kestrel_halrf_iqk calls halrf_iqk). */
+    halrf_dpk_8852c(&ctx->rf, HW_PHY_0, true);
 }
 
 void kestrel_halrf_destroy(struct kestrel_halrf_ctx *ctx) {

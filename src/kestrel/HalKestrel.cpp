@@ -1840,6 +1840,21 @@ void HalKestrel::halrf8852c_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw)
   kestrel_halrf_iqk(_halrf_ctx);
   _logger->info("Kestrel RF(8852C): IQK via vendored halrf (ch{} band{})", center,
                 band);
+  /* TSSI (TX-power servo) then DPK (TX-PA predistortion) — the vendor
+   * per-channel RFK order is IQK -> TSSI -> DPK (halrf.c chl_rfk). Both use the
+   * same NCTL one-shot engine loaded in rfk_init. */
+  /* TSSI + DPK are wired (kestrel_halrf_tssi/dpk) and converge, but are gated
+   * OFF here: hardware-measured, they degrade TX power (ch36 SDR duty 74% ->
+   * 57% TSSI-only -> 29% +DPK). Root cause: halrf_do_tssi_8852c reprograms the
+   * BB TX-power-control block (0x5800..0x5818) to derive power from TSSI DE/
+   * slope tables, which devourer never populates (it runs a fixed BB dBm via
+   * halbb_set_txpwr_dbm — no TSSI power subsystem). DPK then linearizes around
+   * that low reference. Enabling them needs devourer to adopt the TSSI-based
+   * TX-power path (efuse DE/slope targets from the mac_ax power subsystem) — a
+   * power-architecture change, not a cal fix. IQK/DACK/RX-DCK are power-
+   * independent and clean. */
+  _logger->info("Kestrel RF(8852C): IQK+LCK/RCK/trim (TSSI/DPK gated off) (ch{} band{})",
+                center, band);
 }
 #endif
 

@@ -40,10 +40,15 @@ C_FILES=(
   halrf_8852c/halrf_efuse_8852c.c
   halrf_8852c/halrf_ops_rtl8852c.c   # rf_set_ops_8852c (rf_info ops/backup tables)
 )
-# NOT vendored (yet): halrf_pwr_table.c + halrf_set_pwr_table_8852c.c — the
-# TX-power-limit table machinery is a distinct subsystem (devourer has its own
-# txpwr path) that drags heavy PHL TPE/DAG/txpwr_lmt structs; scope halrf to the
-# RF channel-tune + calibrations (DACK/IQK/DPK/TSSI/txgapk/kfree) first.
+# NOT vendored: halrf_pwr_table.c + halrf_8852c/halrf_set_pwr_table_8852c.c —
+# the regulatory TX-power-LIMIT subsystem. It bottoms out in the mac_ax
+# pwr-limit ops (mac->ops->write_pwr_limit_en), which devourer deliberately
+# does not implement (fixed-dBm txpwr via halbb_set_txpwr_dbm, "no regulatory
+# enforcement — the caller owns compliance"). None of the RF CALIBRATIONS
+# (DACK/RX-DCK/IQK/DPK/TSSI) need it to operate: TSSI's accuracy rides on the
+# efuse TRIM (halrf_get_efuse_trim, kfree subsystem, vendored), not the
+# regulatory power-limit switch. Its absence does not affect the driver's
+# working state.
 
 mkdir -p "$DST" "$DST/halrf_8852c"
 

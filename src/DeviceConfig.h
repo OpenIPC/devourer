@@ -55,6 +55,16 @@ enum class Fwdl8814Path : uint8_t {
   Rtw88,         /* legacy rtw88-mimic sequence (A/B fallback) */
 };
 
+/* 8822E DPDT antenna-transfer-switch routing (board A/B). */
+enum class Dpdt8822eMode : uint8_t {
+  EfemPinmux, /* kernel _efem_pinmux_config port — DPDT under HW TX/RX
+                 control, both RX chains live (default) */
+  Legacy,     /* improvised b5a6df7 static write: 0x4c[24] set, [22] clear
+                 (TX-favoring, RX chain B antenna-less) */
+  Bit24,      /* 0x4c[24] only (halmac WL_DPDT_SEL bit alone) */
+  Skip,       /* leave the DPDT/pin-mux untouched */
+};
+
 struct DeviceConfig {
   /* ---- RX ------------------------------------------------------------- */
   struct Rx {
@@ -227,6 +237,11 @@ struct DeviceConfig {
      * site; out-of-range values are ignored). */
     Fwdl8814Path fwdl_8814 = Fwdl8814Path::KernelBracket;
     std::optional<uint32_t> fwdl_8814_chunk;
+    /* env: DEVOURER_DPDT_MODE=efem|legacy|bit24|skip — 8822E DPDT
+     * antenna-transfer-switch routing for board A/B. Default (efem) ports the
+     * kernel eFEM pin-mux so the DPDT follows TX/RX in hardware (both RX chains
+     * live); the others are the pre-fix static routes. See docs/8822e-quirks.md. */
+    Dpdt8822eMode dpdt_8822e = Dpdt8822eMode::EfemPinmux;
   } tuning;
 
   /* ---- Diagnostics output --------------------------------------------- */

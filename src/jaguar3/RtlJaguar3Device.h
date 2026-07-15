@@ -285,8 +285,16 @@ private:
    * _efem_pinmux_config/pinmux_set_func_8822e for RFE_CTRL_3/5/7/8/9/11.
    * Routes the DPDT antenna transfer switch to the RFE engine (hardware
    * TX/RX switching) instead of the b5a6df7 static write that deafened RX
-   * path B. Called from InitWrite post-coex; see the call site. */
+   * path B. Applied by apply_dpdt_route_8822e(). */
   void efem_pinmux_8822e();
+  /* 8822E DPDT antenna-transfer-switch routing — mode dispatch
+   * (_cfg.tuning.dpdt_8822e: efem/legacy/bit24/skip) + the PAD_CTRL1[29:28]
+   * post-coex re-assert. No-op on non-8822E. MUST run after
+   * coex_wlan_only_init (coex GPIO_MUXCFG writes would mask the RFE routing).
+   * Called from BOTH Init (RX bring-up) and InitWrite (TX bring-up) so RX-only
+   * sessions get chain B too — the kernel routes it in rtl8822e_init_misc,
+   * which runs in both directions. */
+  void apply_dpdt_route_8822e();
   /* Runtime TX-mode default (SetTxMode/ClearTxMode). */
   std::optional<devourer::TxMode> _tx_mode_default;
 

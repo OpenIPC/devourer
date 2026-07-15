@@ -78,6 +78,11 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
   _hal.config_rfe(channel.Channel); /* 8822e RFE/PAPE antenna-switch pins */
   _hal.config_channel_8822e(channel.Channel); /* 8822e band TX scaling/backoff + shaping */
   _hal.coex_wlan_only_init(); /* lock antenna to WLAN (disable BT/LTE coex) */
+  /* 8822E DPDT/eFEM pin-mux — post-coex, so an RX-only session also gets both
+   * receive chains (GPIO13 -> RFE engine). Kernel parity: _efem_pinmux_config
+   * runs in rtl8822e_init_misc in both directions. See InitWrite for the TX
+   * bring-up's copy of this call. No-op on non-8822E. */
+  apply_dpdt_route_8822e();
   _brought_up = true;
 
   /* DEVOURER_XTAL_CAP — crystal-cap trim (issue #217, narrowband CFO lever). */
@@ -566,8 +571,61 @@ void RtlJaguar3Device::efem_pinmux_8822e() {
       _device.rtw_write8(x.off, v);
     }
   }
-  _logger->warn("Jaguar3(8822e): eFEM pin-mux applied (RFE_CTRL 3/5/7/8/9/11 "
+  _logger->info("Jaguar3(8822e): eFEM pin-mux applied (RFE_CTRL 3/5/7/8/9/11 "
                 "-> RFE engine; DPDT under hardware TX/RX control)");
+}
+
+/* 8822E DPDT antenna-transfer-switch routing — mode dispatch + PAD_CTRL1
+ * post-coex re-assert. Called from BOTH Init (RX) and InitWrite (TX), each
+ * time right after coex_wlan_only_init: coex sets GPIO_MUXCFG BT-PTA bits that
+ * would mask the RFE routing, so this MUST follow it. Kernel parity — the
+ * vendor runs _efem_pinmux_config from rtl8822e_init_misc in both directions.
+ *
+ * The eFEM (default) path replaces the improvised b5a6df7 DPDT write, which
+ * took two 0x4c bits in isolation (set [24], clear [22]) and parked the DPDT
+ * transfer switch in a static TX-favoring position: TX MCS4+ worked, but RX
+ * path B lost its antenna on every 8812EU (chain-B pwdb pinned ~10 / -99 dBm
+ * — invisible to total-frame validation, chain A masks it). The full pinmux
+ * routes GPIO13 to the RFE engine's RFE_CTRL_9 (WL_DPDT_SEL) so the switch
+ * follows TX/RX in hardware: PA on TX, BOTH LNAs on RX. Gated on rfe_type
+ * 21..24 like the kernel (as config_rfe already does); non-eFEM boards keep
+ * the reset-default pins.
+ * DEVOURER_DPDT_MODE knob for A/B: efem (default) | legacy (b5a6df7 write) |
+ * bit24 ([24] only) | skip. */
+void RtlJaguar3Device::apply_dpdt_route_8822e() {
+  if (_variant != jaguar3::ChipVariant::C8822E)
+    return;
+  const devourer::Dpdt8822eMode dpdt_mode = _cfg.tuning.dpdt_8822e;
+  const uint8_t rfe = _hal.rfe_type();
+  if (dpdt_mode == devourer::Dpdt8822eMode::EfemPinmux) {
+    if (rfe >= 21 && rfe <= 24)
+      efem_pinmux_8822e();
+    else
+      _logger->warn("Jaguar3(8822e): eFEM pin-mux SKIPPED — rfe_type={} "
+                    "not in 21..24",
+                    rfe);
+  } else if (dpdt_mode != devourer::Dpdt8822eMode::Skip) {
+    const uint32_t v4c = _device.rtw_read<uint32_t>(0x4c);
+    if (dpdt_mode == devourer::Dpdt8822eMode::Bit24)
+      _device.rtw_write<uint32_t>(0x4c, v4c | 0x01000000u);
+    else
+      _device.rtw_write<uint32_t>(0x4c, (v4c & ~0x00400000u) | 0x01000000u);
+    _logger->warn("Jaguar3(8822e): DPDT legacy write mode={} "
+                  "(0x4c was 0x{:08x})",
+                  dpdt_mode == devourer::Dpdt8822eMode::Bit24 ? "bit24"
+                                                            : "legacy",
+                  v4c);
+  } else {
+    _logger->warn("Jaguar3(8822e): DPDT/eFEM pin-mux SKIPPED");
+  }
+  if (dpdt_mode != devourer::Dpdt8822eMode::Skip) {
+    /* PAD_CTRL1[29:28] route the WL PAPE/antenna pads. MacInit sets both
+     * (halmac pre-init), but the FW/coex bring-up steps clear bit29 —
+     * re-assert post-coex (bench-validated cold-TX fix). */
+    const uint32_t v64 = _device.rtw_read<uint32_t>(0x0064);
+    if ((v64 & 0x30000000u) != 0x30000000u)
+      _device.rtw_write<uint32_t>(0x0064, v64 | 0x30000000u);
+  }
 }
 
 /* Golden-init replay — same file format as Jaguar2's ("%x %u %llx" = addr
@@ -791,48 +849,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * TX-power state (flat override / offset) only sticks when applied after
    * them. The coex thread's ~2 s ticks do not rewrite the refs. */
   apply_tx_power_current(/*full=*/true);
-  if (_variant == jaguar3::ChipVariant::C8822E) {
-    /* eFEM GPIO pin-function routing (rfe 21-24) — port of the kernel's
-     * _efem_pinmux_config (rtl8822e_halinit.c) → halmac
-     * pinmux_set_func_8822e for RFE_CTRL_3/5/7/8/9/11. Replaces the
-     * improvised b5a6df7 DPDT write, which took two 0x4c bits in isolation
-     * (set [24], clear [22]) and thereby parked the DPDT antenna transfer
-     * switch in a static TX-favoring position: TX MCS4+ worked, but RX
-     * path B lost its antenna on every 8812EU (bench 2026-07-14: chain-B
-     * pwdb pinned ~10 / -99 dBm — invisible to total-frame validation,
-     * chain A masks it). The full pinmux routes GPIO13 to the RFE engine's
-     * RFE_CTRL_9 (WL_DPDT_SEL) so the switch follows TX/RX like the
-     * kernel: PA on TX, BOTH LNAs on RX. Runs post-coex (coex GPIO_MUXCFG
-     * writes would mask it — same ordering lesson as the pre-coex RFE
-     * block above).
-     * DEVOURER_DPDT_MODE knob for A/B: efem (default) | legacy (b5a6df7
-     * write) | bit24 ([24] only) | skip. */
-    const char *dpdt_env = std::getenv("DEVOURER_DPDT_MODE");
-    std::string dpdt_mode = dpdt_env ? dpdt_env : "efem";
-    if (std::getenv("DEVOURER_SKIP_DPDT") != nullptr)
-      dpdt_mode = "skip";
-    if (dpdt_mode == "efem") {
-      efem_pinmux_8822e();
-    } else if (dpdt_mode != "skip") {
-      const uint32_t v4c = _device.rtw_read<uint32_t>(0x4c);
-      if (dpdt_mode == "bit24")
-        _device.rtw_write<uint32_t>(0x4c, v4c | 0x01000000u);
-      else
-        _device.rtw_write<uint32_t>(0x4c, (v4c & ~0x00400000u) | 0x01000000u);
-      _logger->warn("Jaguar3(8822e): DPDT legacy write mode={} "
-                    "(0x4c was 0x{:08x})", dpdt_mode, v4c);
-    } else {
-      _logger->warn("Jaguar3(8822e): DPDT/eFEM pin-mux SKIPPED");
-    }
-    if (dpdt_mode != "skip") {
-      /* PAD_CTRL1[29:28] route the WL PAPE/antenna pads. MacInit sets both
-       * (halmac pre-init), but the FW/coex bring-up steps clear bit29 —
-       * re-assert post-coex (bench-validated cold-TX fix). */
-      const uint32_t v64 = _device.rtw_read<uint32_t>(0x0064);
-      if ((v64 & 0x30000000u) != 0x30000000u)
-        _device.rtw_write<uint32_t>(0x0064, v64 | 0x30000000u);
-    }
-  }
+  apply_dpdt_route_8822e(); /* 8822E DPDT/eFEM pin-mux (post-coex) */
   apply_replay_wseq(); /* DEVOURER_REPLAY_WSEQ golden-init replay (debug) */
   if (_cfg.debug.bb_dump) {
     /* Full MAC+BB dump (0x000..0x4ffc — MAC plane, then BB incl. the RF

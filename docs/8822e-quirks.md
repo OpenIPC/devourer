@@ -38,8 +38,11 @@ family programs. Three of these must hold, or TX breaks in distinctive ways:
   total-frame-count validation because chain A carries the stream (bench
   2026-07-14, per-chain RSSI A/B: static write = TX 9.9M MCS7 / RX-B dead;
   `[24]`-only = RX-B alive / TX airs nothing; eFEM pin-mux = TX 9.7M MCS7
-  AND RX A/B −70/−77 dBm concurrently). Legacy behavior remains selectable
-  via `DEVOURER_DPDT_MODE=legacy|bit24|skip` for board A/B. NB `0x204c` is a
+  AND RX A/B −70/−77 dBm concurrently). The eFEM pin-mux is gated on
+  `rfe_type` 21–24 (kernel parity with `_efem_pinmux_config` / `config_rfe`);
+  other boards keep the reset-default pins. Legacy behavior remains selectable
+  via `DEVOURER_DPDT_MODE=efem|legacy|bit24|skip` (default `efem`) for board
+  A/B. NB `0x204c` is a
   readable mirror of `0x4c` — end-state diffs surface it at either address.
 - **OFDM 1SS TX path must be single-path** (`0x820[7:0]`: `0x32` = 1ss-B at
   5 GHz, `0x31` at 2.4 GHz; `0x1e2c=0x0400`): kernel semantics give 1SS frames

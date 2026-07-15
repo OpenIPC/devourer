@@ -2669,9 +2669,22 @@ void HalKestrel::fast_retune(uint8_t channel) {
   /* Same-band retune: reuse the band established by the last set_channel (6 GHz
    * can't be re-derived from the channel number). */
   const uint8_t band_type = _cur_band_type;
-  rf_ctrl_ch(channel, band_type);
-  set_gain_error(channel);
-  set_rxsc_rpl_comp(channel);
+#if defined(DEVOURER_KESTREL_HALRF_8852C) && defined(DEVOURER_KESTREL_HALBB_8852C)
+  if (_variant == ChipVariant::C8852C) {
+    /* Route through the vendored path, matching set_channel: the hand-rolled
+     * rf_ctrl_ch cannot lock the 6 GHz VCO (see 73279d7), so a 6 GHz FastRetune
+     * would silently fail; and set_gain_error applies the hand-rolled gain cache
+     * that the vendored per-channel BB config supersedes. Lean vendored retune =
+     * RF synth (ctl_band_ch_bw + lck) + the per-band gain-error only. */
+    halrf8852c_ctl_band_ch_bw(band_type, channel, CHANNEL_WIDTH_20);
+    halbb8852c_set_gain(channel, band_type);
+  } else
+#endif
+  {
+    rf_ctrl_ch(channel, band_type);
+    set_gain_error(channel);
+    set_rxsc_rpl_comp(channel);
+  }
   bb_reset_all();
   set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
   _logger->debug("Kestrel FastRetune: ch{} ({})", channel,

@@ -391,7 +391,8 @@ if(DEVOURER_KESTREL_8852C)
             "${CMAKE_CURRENT_SOURCE_DIR}/hal/halrf/rtl8852c/vendor/halrf_8852c/*.c")
         add_library(kestrel_halrf_8852c OBJECT
             ${KESTREL_HALRF_C}
-            hal/halrf/rtl8852c/kestrel_halrf_glue.c)
+            hal/halrf/rtl8852c/kestrel_halrf_glue.c
+            hal/halrf/rtl8852c/kestrel_halrf_helpers.c)
         set_target_properties(kestrel_halrf_8852c PROPERTIES C_STANDARD 99
             POSITION_INDEPENDENT_CODE ON)
         target_include_directories(kestrel_halrf_8852c PRIVATE

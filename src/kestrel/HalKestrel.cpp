@@ -1824,6 +1824,23 @@ void HalKestrel::halrf8852c_rx_dck() {
     _logger->info("Kestrel RF(8852C): RX-DCK via vendored halrf");
   }
 }
+void HalKestrel::halrf8852c_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw) {
+  if (!_halrf_ctx)
+    return;
+  uint8_t hbw = bw == CHANNEL_WIDTH_5    ? 6
+                : bw == CHANNEL_WIDTH_10 ? 7
+                                         : static_cast<uint8_t>(bw);
+  if (!_halrf_rfk_inited) {
+    /* Load the NCTL one-shot micro-engine (+ reset RFK sub-state) before the
+     * first IQK — its 0xbff8 one-shot-done poll depends on that microcode. */
+    kestrel_halrf_rfk_init(_halrf_ctx);
+    _halrf_rfk_inited = true;
+  }
+  kestrel_halrf_set_ch(_halrf_ctx, center, band, hbw);
+  kestrel_halrf_iqk(_halrf_ctx);
+  _logger->info("Kestrel RF(8852C): IQK via vendored halrf (ch{} band{})", center,
+                band);
+}
 #endif
 
 void HalKestrel::halbb8852c_set_gain(uint8_t channel, uint8_t band_type) {
@@ -2781,6 +2798,13 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
      * SCO comp, BW/RXBB/ADC, CCK enable — replacing devourer's hand-rolled BB
      * channel-switch. band_type 0=2.4G, 1=5G. */
     halbb8852c_ctrl_bw_ch(pri_ch, center, bw, is_2g ? 0 : 1);
+#if defined(DEVOURER_KESTREL_HALRF_8852C)
+    /* Vendored halrf IQK. The 0xbff8 one-shot-done poll depends on the NCTL
+     * micro-engine, which halrf8852c_iqk now loads lazily on first call
+     * (kestrel_halrf_rfk_init) — the piece halrf_dm_init runs before any cal,
+     * previously missing (IQK spun to a ~25 s timeout). */
+    halrf8852c_iqk(center, is_2g ? 0 : 1, bw);
+#endif
   }
 #endif
 

@@ -27,7 +27,6 @@ C_FILES=(
   halrf_init.c
   halrf_hw_cfg.c
   halrf_iqk.c
-  halrf_pwr_table.c
   halrf_8852c/halrf_8852c.c
   halrf_8852c/halrf_8852c_api.c
   halrf_8852c/halrf_reg_cfg_8852c.c
@@ -39,6 +38,7 @@ C_FILES=(
   halrf_8852c/halrf_txgapk_8852c.c
   halrf_8852c/halrf_kfree_8852c.c
   halrf_8852c/halrf_efuse_8852c.c
+  halrf_8852c/halrf_ops_rtl8852c.c   # rf_set_ops_8852c (rf_info ops/backup tables)
 )
 # NOT vendored (yet): halrf_pwr_table.c + halrf_set_pwr_table_8852c.c — the
 # TX-power-limit table machinery is a distinct subsystem (devourer has its own

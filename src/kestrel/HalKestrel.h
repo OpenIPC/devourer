@@ -437,7 +437,10 @@ public:
    * halbb bridge (its RF-reg callbacks). */
   void halrf8852c_dac_cal();
   void halrf8852c_rx_dck();
+  /* Set the halrf channel + run IQK (per-channel). band 0=2.4G,1=5G. */
+  void halrf8852c_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw);
   struct kestrel_halrf_ctx *_halrf_ctx = nullptr;
+  bool _halrf_rfk_inited = false; /* NCTL engine loaded (one-time, lazy) */
 #endif
 
 public:

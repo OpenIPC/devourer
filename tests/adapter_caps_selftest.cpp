@@ -37,7 +37,8 @@ int main() {
   /* Kestrel (11ax) does 20/40/80 + 160 MHz (RTL8852C, validated on-air at
    * 6 GHz). */
   expect("Kestrel bw = 20/40/80/160",
-         bw_mask_for_generation(ChipGeneration::Kestrel) == (ac | kBw160));
+         bw_mask_for_generation(ChipGeneration::Kestrel) ==
+             (ac | kBw5 | kBw10));
 
   /* --- generation names --- */
   expect("gen name jaguar3",

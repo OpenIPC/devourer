@@ -2832,6 +2832,13 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
     center = static_cast<uint8_t>(bs + 6);
     pri_ch = static_cast<uint8_t>((channel - bs) / 4 + 1);
   } else if (bw == CHANNEL_WIDTH_160) {
+    if (_variant != ChipVariant::C8852C) {
+      /* The 8852B die tops out at 80 MHz (rtl8852b_halinit.c bw_sup has no
+       * BW_CAP_160M); its GetTxCaps/bw_mask do not advertise 160. */
+      _logger->warn("Kestrel set_channel: 160 MHz is 8852C-only (this die "
+                    "tops at 80 MHz)");
+      return false;
+    }
     /* 160 MHz spans 8 20-MHz sub-channels; same grid-origin idea as 80 MHz but
      * modulo 8. block_start = ch - ((ch-o)/4 % 8)*4; center = bs+14 (middle of
      * bs..bs+28); pri_ch 1..8. 5 GHz: {36..64}->center 50; 6 GHz: {1..29}->15. */

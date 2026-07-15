@@ -73,10 +73,10 @@ constexpr uint8_t kBw160 = 1u << 5;
  * only dead enum values). Pure; unit-tested in tests/adapter_caps_selftest.cpp. */
 inline uint8_t bw_mask_for_generation(ChipGeneration g) {
   const uint8_t ac = kBw20 | kBw40 | kBw80;
-  /* Kestrel (11ax) additionally does 160 MHz (RTL8852C, vendored
-   * halbb_ctrl_bw_ch/RF tune — validated on-air at 6 GHz). */
-  if (g == ChipGeneration::Kestrel)
-    return ac | kBw160;
+  /* Kestrel (11ax): 5/10 MHz is the BB small-BW field on both dies (vendor
+   * bw_sup declares BW_CAP_5M|10M); 160 MHz is 8852C-only (rtl8852c_halinit.c
+   * bw_sup has BW_CAP_160M, rtl8852b_halinit.c tops at 80) and is OR'd in by
+   * the device layer per variant. */
   return g == ChipGeneration::Jaguar1  ? ac
          : g == ChipGeneration::Unknown ? 0
                                         : (ac | kBw5 | kBw10);

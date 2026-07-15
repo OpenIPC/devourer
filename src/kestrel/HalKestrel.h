@@ -12,6 +12,7 @@
 #include "logger.h"
 
 struct kestrel_halbb_ctx; /* opaque C handle (hal/halbb/rtl8852c) */
+struct kestrel_halrf_ctx; /* opaque C handle (hal/halrf/rtl8852c) */
 
 namespace kestrel {
 
@@ -425,6 +426,18 @@ public:
   static unsigned int halbb_rpwr(void *dev, unsigned int addr);
   static void halbb_wpwr(void *dev, unsigned int addr, unsigned int val);
   static void halbb_delay(void *dev, unsigned int us);
+  /* RF-register plane callbacks (shared bridge) -> 3-wire rf_rrf/rf_wrf. */
+  static unsigned int halbb_rrf(void *dev, unsigned int path, unsigned int addr,
+                                unsigned int mask);
+  static void halbb_wrf(void *dev, unsigned int path, unsigned int addr,
+                        unsigned int mask, unsigned int val);
+#endif
+#if defined(DEVOURER_KESTREL_HALRF_8852C)
+  /* Vendored halrf-G6 8852C RF calibrations (hal/halrf/rtl8852c). Share the
+   * halbb bridge (its RF-reg callbacks). */
+  void halrf8852c_dac_cal();
+  void halrf8852c_rx_dck();
+  struct kestrel_halrf_ctx *_halrf_ctx = nullptr;
 #endif
 
 public:

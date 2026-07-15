@@ -43,6 +43,9 @@ typedef u8 boolean;
 #ifndef BIT
 #define BIT(x) (1u << (x))
 #endif
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#endif
 /* BIT0..BIT31 come from the vendored rtw_general_def.h / hal_general_def.h. */
 
 /* OS glue types the vendor structs embed (halbb_timer_list etc.). We never run
@@ -68,8 +71,28 @@ enum phl_phy_idx { HW_PHY_0, HW_PHY_1, HW_PHY_MAX };
  * cmd_notify sink is inert on our RX path). */
 enum phl_msg_evt_id {
   PHL_MSG_EVT_ID_NONE = 0, MSG_EVT_NOTIFY_BB, MSG_EVT_SCAN_START,
-  MSG_EVT_P2P_SCAN_START
+  MSG_EVT_P2P_SCAN_START, MSG_EVT_SCAN_END, MSG_EVT_SWCH_START,
+  MSG_EVT_CONNECT_END, MSG_EVT_DISCONNECT_END, MSG_EVT_MCC_START,
+  MSG_EVT_MCC_STOP, MSG_EVT_HAL_INIT_OK, MSG_EVT_TPE_INFO_UPDATE,
+  MSG_EVT_SET_PWR_LIMIT_LOW, MSG_EVT_SET_PWR_LIMIT_STD,
+  MSG_EVT_SET_PWR_LIMIT_VLOW, MSG_EVT_DBG_RX_DUMP, MSG_EVT_DBG_TX_DUMP
 };
+enum phl_pwr_ctrl { ALL_TIME_CTRL = 0, GNT_TIME_CTRL, PWR_CTRL_MAX };
+
+/* ---- PHL enums the vendored halrf references (verbatim values) ---------- */
+enum phl_pwr_table { PWR_BY_RATE = BIT0, PWR_LIMIT = BIT1, PWR_LIMIT_RU = BIT2 };
+/* rtw_hci_type comes from the vendored rtw_general_def.h. */
+enum phl_module_id { PHL_MDL_ID_NONE = 0 }; /* field type only */
+enum rfk_tri_type {
+  RFK_TYPE_FORCE_NOT_DO = 0, RFK_TYPE_FORCE_DO, RFK_TYPE_SCAN_CHG_CH,
+  RFK_TYPE_SCAN_BK_OP, RFK_TYPE_DBCC_EN, RFK_TYPE_DBCC_DIS, RFK_TYPE_CONNECT,
+  RFK_TYPE_DISCONNECT, RFK_TYPE_WK_2G, RFK_TYPE_WK_5G, RFK_TYPE_WK_6G,
+  RFK_TYPE_CHL_RFK, RFK_TYPE_ECSA, RFK_TYPE_PLATFORM_INIT, RFK_TYPE_MAX
+};
+/* SER (system-error-recovery) reason + MAC GPIO id: field/arg types only. */
+enum rtw_hal_ser_rsn { HAL_SER_RSN_RFK = 0 };
+enum rtw_mac_gpio_func { RTW_MAC_GPIO_WL_RFE_CTRL = 0 };
+#define H2CB_TYPE_DATA 1
 enum role_type { PHL_RTYPE_NONE = 0 };
 
 /* CFO/RSSI per-STA stats + EDCCA cap (verbatim field sets the vendor accesses). */
@@ -122,7 +145,7 @@ struct rtw_chan_def {
 
 enum rtw_drv_mode {
   RTW_DRV_MODE_NORMAL = 0, RTW_DRV_MODE_EQC = 1, RTW_DRV_MODE_HIGH_THERMAL = 2,
-  RTW_DRV_MODE_SNIFFER = 3
+  RTW_DRV_MODE_SNIFFER = 3, RTW_DRV_MODE_MP = 4
 };
 enum tx_pause_rson {
   PAUSE_RSON_NOR_SCAN, PAUSE_RSON_UNSPEC_BY_MACID, PAUSE_RSON_RFK,
@@ -132,6 +155,7 @@ enum tx_pause_rson {
 
 struct dev_cap_t {
   u8 rfe_type; bool dbcc_sup; u8 xcap; u8 nb_config; u8 antdiv_sup; u8 io_ofld;
+  u32 rfk_cap;
   struct rtw_edcca_cap_t edcca_cap;
 };
 struct rtw_phy_cap_t { u8 tx_path_num, rx_path_num; };
@@ -152,15 +176,34 @@ struct rtw_para_info_t {
   u32 *para_data;
   bool loaded;
 };
+/* Same shape as rtw_para_info_t (+ pwrlmt tail) — only read by gc'd-out
+ * halrf_init_reg; reproduce enough to compile. */
+struct rtw_para_pwrlmt_info_t {
+  enum rtw_para_src para_src;
+  char para_path[256];
+  char *hal_phy_folder;
+  char postfix[33];
+  u8 *ext_para_file_buf;
+  u32 ext_para_file_buf_len;
+  u32 para_data_len;
+  u32 *para_data;
+  bool loaded;
+};
 struct phy_sw_cap_t {
   struct rtw_para_info_t bb_phy_reg_info;
   struct rtw_para_info_t bb_phy_reg_gain_info;
+  struct rtw_para_info_t rf_radio_a_info, rf_radio_b_info;
+  struct rtw_para_info_t rf_txpwr_byrate_info, rf_txpwrtrack_info;
+  struct rtw_para_pwrlmt_info_t rf_txpwrlmt_info, rf_txpwrlmt_ru_info;
+  struct rtw_para_pwrlmt_info_t rf_txpwrlmt_6g_info, rf_txpwrlmt_ru_6g_info;
 };
 struct rtw_phl_com_t {
   struct dev_cap_t dev_cap;
   struct rtw_phy_cap_t phy_cap[MAX_BAND_NUM]; /* [band].tx_path_num (inert cmac) */
   struct phy_sw_cap_t phy_sw_cap[2];
   enum rtw_drv_mode drv_mode;
+  enum rtw_hci_type hci_type;
+  struct { u32 id; } id; /* customer/chip id (cid=[15:8], iid=[7:0]) */
   u8 edcca_mode;
 };
 /* Per-STA info — only touched by inert per-STA CMAC/BF/stat helpers on RX. */
@@ -185,9 +228,13 @@ struct rtw_hal_mac_ax_cctl_info {
       antsel_a, antsel_b, antsel_c, antsel_d, doppler_ctrl, txpwr_tolerence;
 };
 
+/* halrf-provided types/functions: when the vendored halrf is compiled
+ * (KESTREL_HALRF_PRESENT), the real ones from halrf headers win; for the
+ * halbb-only build these shim stubs stand in. */
+#ifndef KESTREL_HALRF_PRESENT
 /* External-FEM presence (verbatim halrf_outsrc_def.h). elna_* drives the
- * is_efem gpio/gain branch — the factory can override; default (all zero =
- * non-EFEM) matches the compact USB dongles we target. */
+ * is_efem gpio/gain branch; default (all zero = non-EFEM) matches the compact
+ * USB dongles we target. */
 struct halrf_fem_info { u8 elna_2g, elna_5g, elna_6g, epa_2g, epa_5g, epa_6g; };
 static inline struct halrf_fem_info rtw_hal_rf_efem_info(void *h) {
   struct halrf_fem_info f = {0, 0, 0, 0, 0, 0}; (void)h; return f;
@@ -198,6 +245,19 @@ static inline u32 rtw_hal_rf_tssi_scan_ch(void *h, enum phl_phy_idx p,
                                           enum rf_path rp) {
   (void)h; (void)p; (void)rp; return 0;
 }
+#endif /* KESTREL_HALRF_PRESENT */
+
+/* Atomics (RF write-race guard in halrf_wrf) — single-threaded here, inert. */
+static inline int _os_atomic_inc_return(void *drv, void *a) {
+  (void)drv; (void)a; return 1;
+}
+static inline void _os_atomic_dec(void *drv, void *a) { (void)drv; (void)a; }
+
+/* PHL array-sizing constants the halrf pwr-table structs use (verbatim). */
+#define RTK_DAG_5G_SUB_BAND_CNT 4
+#define RTK_DAG_6G_SUB_BAND_CNT 6
+#define MAX_TPE_TX_PWR_CNT      8
+#define MAX_TPE_ELE_CNT         4
 
 enum phl_rf_mode {
   RF_MODE_NORMAL = 0, RF_MODE_SHUTDOWN = 1, RF_MODE_STANDBY = 2,
@@ -289,6 +349,41 @@ static inline void _os_mem_free(void *drv, void *p, u32 sz) {
 }
 #define hal_mem_alloc(h, sz)      _os_mem_alloc(halcom_to_drvpriv(h), sz)
 #define hal_mem_free(h, p, sz)    _os_mem_free(halcom_to_drvpriv(h), p, sz)
+#define hal_mem_set(h, d, v, n)   _os_mem_set(halcom_to_drvpriv(h), d, v, n)
+#define hal_mem_cpy(h, d, s, n)   _os_mem_cpy(halcom_to_drvpriv(h), d, s, n)
+/* Monotonic microsecond stamp (cal timing) — stub returns 0 (no timing). */
+static inline u32 _os_get_cur_time_us(void) { return 0; }
+#define hal_mutex_lock(h, m)   do { (void)(h); (void)(m); } while (0)
+#define hal_mutex_unlock(h, m) do { (void)(h); (void)(m); } while (0)
+
+/* SER control + RX-CCA gate + assorted MAC/BB/BTC/txpwr entries the vendored
+ * halrf calls — all inert on devourer's monitor path (void* hal_com to satisfy
+ * strict pointer checks; the RF cals never gate on their result). */
+static inline enum rtw_hal_status rtw_hal_mac_ctrl_ser(void *h,
+    enum rtw_hal_ser_rsn rsn, u8 en) {
+  (void)h; (void)rsn; (void)en; return RTW_HAL_STATUS_SUCCESS;
+}
+static inline enum rtw_hal_status rtw_hal_bb_ctrl_rx_cca(void *h, u8 cca_en,
+    enum phl_phy_idx phy_idx) {
+  (void)h; (void)cca_en; (void)phy_idx; return RTW_HAL_STATUS_SUCCESS;
+}
+/* Inert (arity varies across call sites) — variadic macros: void-context calls
+ * see (0) as a discarded expression; value-context calls see 0. */
+#define rtw_hal_bb_adc_cfg(...)                    (0)
+#define rtw_hal_bb_bb_reset_cmn(...)               (0)
+#define rtw_hal_bb_gpio_setting(...)               (0)
+#define rtw_hal_mac_set_xsi(...)                   (0)
+#define rtw_hal_mac_set_gpio_func(...)             (0)
+#define rtw_hal_btc_wl_rfk_ntfy(...)               (0)
+#define rtw_hal_txpwr_lmt_store_from_external(...)     (0)
+#define rtw_hal_txpwr_lmt_ru_store_from_external(...)  (0)
+#define rtw_hal_txpwr_by_rate_store_from_external(...) (0)
+#ifndef cpu_to_le32
+#define cpu_to_le32(x) (x) /* little-endian target */
+#endif
+#define hal_mutex_init(h, m)   do { (void)(h); (void)(m); } while (0)
+#define hal_mutex_deinit(h, m) do { (void)(h); (void)(m); } while (0)
+#define PHL_INFO(...)          do { } while (0)
 
 
 /* Large PHL structs embedded by value but never read on the monitor-RX bring-up
@@ -336,6 +431,7 @@ struct rtw_hal_com_t {
   struct dev_cap_t dev_hw_cap;          /* hw capability (mirror of dev_cap) */
   u8   scanofld_en;
   u8   assoc_sta_cnt;
+  u32  aid;
   struct hal_mu_score_tbl bb_mu_score_tbl;
   struct rtw_hw_band band[MAX_BAND_NUM]; /* band[0].cur_chandef read by 8852c api */
 };
@@ -364,6 +460,20 @@ static inline u32 rtw_hal_mac_get_pwr_reg(struct rtw_hal_com_t *h, u8 band,
 static inline u32 rtw_hal_mac_send_h2c(struct rtw_hal_com_t *h,
                                        struct rtw_g6_h2c_hdr *hdr, u32 *pv) {
   (void)h; (void)hdr; (void)pv; return 0;
+}
+
+/* RF-register plane (3-wire LSSI) -> bridge read_rf/write_rf. Used by halrf
+ * (halrf_wrf). NULL callbacks (halbb-only builds) return 0 / no-op. */
+static inline u32 rtw_hal_read_rf_reg(struct rtw_hal_com_t *h, enum rf_path path,
+                                      u32 addr, u32 mask) {
+  struct kestrel_halbb_bridge *b = halcom_to_drvpriv(h);
+  return b->read_rf ? b->read_rf(b->dev, (unsigned)path, addr, mask) : 0;
+}
+static inline u8 rtw_hal_write_rf_reg(struct rtw_hal_com_t *h, enum rf_path path,
+                                      u32 addr, u32 mask, u32 data) {
+  struct kestrel_halbb_bridge *b = halcom_to_drvpriv(h);
+  if (b->write_rf) b->write_rf(b->dev, (unsigned)path, addr, mask, data);
+  return 1;
 }
 
 

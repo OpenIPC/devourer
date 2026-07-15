@@ -381,6 +381,35 @@ if(DEVOURER_KESTREL_8852C)
         target_include_directories(devourer PRIVATE hal/halbb/rtl8852c)
         target_compile_definitions(devourer PUBLIC DEVOURER_KESTREL_HALBB_8852C=1)
         target_link_options(devourer INTERFACE -Wl,--gc-sections)
+
+        # Vendored halrf-G6 8852C RF calibrations (DACK / RX-DCK), compiled
+        # VERBATIM behind the SAME shim (hal/halrf/hal_headers_le.h just reuses
+        # the halbb one + the bridge's RF-register plane). Vendored by
+        # tools/vendor_halrf_8852c.sh; driven via kestrel_halrf_glue.h.
+        file(GLOB KESTREL_HALRF_C
+            "${CMAKE_CURRENT_SOURCE_DIR}/hal/halrf/rtl8852c/vendor/*.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/hal/halrf/rtl8852c/vendor/halrf_8852c/*.c")
+        add_library(kestrel_halrf_8852c OBJECT
+            ${KESTREL_HALRF_C}
+            hal/halrf/rtl8852c/kestrel_halrf_glue.c)
+        set_target_properties(kestrel_halrf_8852c PROPERTIES C_STANDARD 99
+            POSITION_INDEPENDENT_CODE ON)
+        target_include_directories(kestrel_halrf_8852c PRIVATE
+            hal/halrf hal/halbb hal/halbb/rtl8852c
+            hal/halrf/rtl8852c/vendor hal/halrf/rtl8852c/vendor/halrf_8852c
+            hal/halbb/rtl8852c/vendor hal/halbb/rtl8852c/vendor/halbb_8852c)
+        target_compile_definitions(kestrel_halrf_8852c PRIVATE
+            CONFIG_RTL8852C=1 RF_8852C_SUPPORT=1 PLATFOM_IS_LITTLE_ENDIAN=1
+            KESTREL_HALRF_PRESENT=1
+            # radioa/radiob raw_data arrays duplicate the extract-generated
+            # hal8852c_phy.c globals — rename to avoid a link clash.
+            array_mp_8852c_radioa=kestrel_halrf_radioa
+            array_mp_8852c_radiob=kestrel_halrf_radiob)
+        target_compile_options(kestrel_halrf_8852c PRIVATE
+            -w -ffunction-sections -fdata-sections)
+        target_sources(devourer PRIVATE $<TARGET_OBJECTS:kestrel_halrf_8852c>)
+        target_include_directories(devourer PRIVATE hal/halrf/rtl8852c)
+        target_compile_definitions(devourer PUBLIC DEVOURER_KESTREL_HALRF_8852C=1)
     endif()
 endif()
 

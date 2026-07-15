@@ -20,6 +20,9 @@
 #if defined(DEVOURER_KESTREL_HALBB_8852C)
 #include "kestrel_halbb_glue.h" /* vendored halbb-G6 8852C RX bring-up (C) */
 #endif
+#if defined(DEVOURER_KESTREL_HALRF_8852C)
+#include "kestrel_halrf_glue.h" /* vendored halrf-G6 8852C RF cals (C) */
+#endif
 
 namespace kestrel {
 
@@ -1774,6 +1777,16 @@ void HalKestrel::halbb_delay(void *dev, unsigned int us) {
   (void)dev;
   delay_us(us);
 }
+unsigned int HalKestrel::halbb_rrf(void *dev, unsigned int path,
+                                   unsigned int addr, unsigned int mask) {
+  return static_cast<HalKestrel *>(dev)->rf_rrf(static_cast<uint8_t>(path), addr,
+                                                mask);
+}
+void HalKestrel::halbb_wrf(void *dev, unsigned int path, unsigned int addr,
+                           unsigned int mask, unsigned int val) {
+  static_cast<HalKestrel *>(dev)->rf_wrf(static_cast<uint8_t>(path), addr, mask,
+                                         val);
+}
 
 void HalKestrel::halbb8852c_bringup(uint8_t cut, uint8_t rfe_type) {
   if (!_halbb_bridge) {
@@ -1783,15 +1796,35 @@ void HalKestrel::halbb8852c_bringup(uint8_t cut, uint8_t rfe_type) {
     br->write32 = &HalKestrel::halbb_w32;
     br->read_pwr = &HalKestrel::halbb_rpwr;
     br->write_pwr = &HalKestrel::halbb_wpwr;
+    br->read_rf = &HalKestrel::halbb_rrf;
+    br->write_rf = &HalKestrel::halbb_wrf;
     br->delay_us = &HalKestrel::halbb_delay;
     br->logline = nullptr;
     _halbb_bridge = br;
     _halbb_ctx = kestrel_halbb_create(br, cut, rfe_type);
+#if defined(DEVOURER_KESTREL_HALRF_8852C)
+    _halrf_ctx = kestrel_halrf_create(br, cut, rfe_type); /* shares the bridge */
+#endif
   }
   kestrel_halbb_rx_bringup(_halbb_ctx);
   _logger->info("Kestrel PHY(8852C): halbb-G6 RX bring-up applied (vendored "
                 "gpio/rx-path/gain-cache, rfe={} cut={})", rfe_type, cut);
 }
+
+#if defined(DEVOURER_KESTREL_HALRF_8852C)
+void HalKestrel::halrf8852c_dac_cal() {
+  if (_halrf_ctx) {
+    kestrel_halrf_dac_cal(_halrf_ctx, 1);
+    _logger->info("Kestrel RF(8852C): DACK via vendored halrf");
+  }
+}
+void HalKestrel::halrf8852c_rx_dck() {
+  if (_halrf_ctx) {
+    kestrel_halrf_rx_dck(_halrf_ctx);
+    _logger->info("Kestrel RF(8852C): RX-DCK via vendored halrf");
+  }
+}
+#endif
 
 void HalKestrel::halbb8852c_set_gain(uint8_t channel, uint8_t band_type) {
   if (_halbb_ctx)
@@ -1812,6 +1845,10 @@ void HalKestrel::halbb8852c_ctrl_bw_ch(uint8_t pri_ch, uint8_t center,
 #endif /* DEVOURER_KESTREL_HALBB_8852C */
 
 HalKestrel::~HalKestrel() {
+#if defined(DEVOURER_KESTREL_HALRF_8852C)
+  if (_halrf_ctx)
+    kestrel_halrf_destroy(_halrf_ctx);
+#endif
 #if defined(DEVOURER_KESTREL_HALBB_8852C)
   if (_halbb_ctx)
     kestrel_halbb_destroy(_halbb_ctx);
@@ -2145,7 +2182,14 @@ void HalKestrel::dack() {
 
 void HalKestrel::dac_cal() {
   if (_variant == ChipVariant::C8852C) {
+#if defined(DEVOURER_KESTREL_HALRF_8852C)
+    /* Vendored halrf DACK + RX-DCK (replaces the hand-rolled dac_cal_8852c /
+     * rx_dck_8852c). Run once at bring-up for the monitor channel. */
+    halrf8852c_dac_cal();
+    halrf8852c_rx_dck();
+#else
     dac_cal_8852c(); /* the 8852b sequence times out on the 8852C */
+#endif
     return;
   }
   /* halrf_dac_cal_8852b — ADC/ADDCK subset (DAC-side MSBK/biask not ported).

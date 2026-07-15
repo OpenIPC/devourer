@@ -21,6 +21,12 @@ struct kestrel_halbb_bridge {
   /* MAC power-register plane (rtw_hal_mac_*_pwr_reg): field/shift write. */
   unsigned int (*read_pwr)(void *dev, unsigned int addr);
   void (*write_pwr)(void *dev, unsigned int addr, unsigned int val);
+  /* RF-register plane (rtw_hal_*_rf_reg): 3-wire LSSI, masked field read/write
+   * per RF path. May be NULL when only the BB plane is used (halbb). */
+  unsigned int (*read_rf)(void *dev, unsigned int path, unsigned int addr,
+                          unsigned int mask);
+  void (*write_rf)(void *dev, unsigned int path, unsigned int addr,
+                   unsigned int mask, unsigned int val);
   void (*delay_us)(void *dev, unsigned int us);
   /* diagnostic sink (BB_DBG/BB_WARNING) — may be NULL for no-op. */
   void (*logline)(void *dev, const char *msg);

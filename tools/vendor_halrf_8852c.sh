@@ -27,6 +27,7 @@ C_FILES=(
   halrf_init.c
   halrf_hw_cfg.c
   halrf_iqk.c
+  halrf_pmac.c             # halrf_set_pmac_tx (PMAC cal-tone injector; TSSI/IQK hooks)
   halrf_8852c/halrf_8852c.c
   halrf_8852c/halrf_8852c_api.c
   halrf_8852c/halrf_reg_cfg_8852c.c

@@ -1,7 +1,7 @@
-/* halbb-G6 8852C shim bridge — the register/OS plane the vendored halbb C
+/* halbb-G6 shim bridge — the register/OS plane the vendored halbb/halrf C
  * bottoms out in, routed to devourer's RtlAdapter. C ABI, shared by the shim'd
  * vendor C and devourer's C++ (RtlKestrelDevice owns the bridge instance and
- * installs the callbacks). See hal/halbb/g6/shim/ and tools/vendor_halbb_8852c.sh.
+ * installs the callbacks). See hal/halbb/g6/shim/ and tools/vendor_halbb_*.sh.
  *
  * The vendor code calls hal_write32(bb->hal_com, addr, val) etc.; hal_com's
  * drv_priv points at a kestrel_halbb_bridge whose fn pointers reach the device.
@@ -35,6 +35,11 @@ struct kestrel_halbb_bridge {
                         unsigned int size);
   /* diagnostic sink (BB_DBG/BB_WARNING) — may be NULL for no-op. */
   void (*logline)(void *dev, const char *msg);
+  /* The live struct bb_info* (set by kestrel_halbb_create). The shim's
+   * halrf->halbb cross-plane calls (rtw_hal_bb_backup_info / restore /
+   * tx_mode_switch — hal_api_bb.c in the vendor) resolve the bb instance
+   * through here, since the halrf ctx owns a different rtw_hal_com_t. */
+  void *bb_info;
 };
 
 #ifdef __cplusplus

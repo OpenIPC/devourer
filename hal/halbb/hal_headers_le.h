@@ -99,7 +99,11 @@ enum role_type { PHL_RTYPE_NONE = 0 };
 struct rtw_cfo_info {
   s32 cfo_tail; s32 pre_cfo_avg; s32 cfo_avg; u16 cfo_cnt; u32 tp;
 };
-struct rtw_rssi_info { s16 snr_ma; }; /* only .snr_ma read (inert per-STA path) */
+struct rtw_rssi_info {
+  s16 snr_ma;             /* read by inert per-STA paths */
+  u16 rssi_ma_path[4];    /* per-path RSSI MA (8852b btg check; inert — no
+                           * phl_sta_info entries are ever registered) */
+};
 struct rtw_edcca_cap_t {
   u8 edcca_adap_th_2g, edcca_adap_th_5g, edcca_cbp_th_6g, edcca_carrier_sense_th;
 };
@@ -199,6 +203,7 @@ struct phy_sw_cap_t {
 };
 struct rtw_phl_com_t {
   struct dev_cap_t dev_cap;
+  struct dev_cap_t dev_sw_cap; /* MP-mode rfe_type source (8852b halrf api) */
   struct rtw_phy_cap_t phy_cap[MAX_BAND_NUM]; /* [band].tx_path_num (inert cmac) */
   struct phy_sw_cap_t phy_sw_cap[2];
   enum rtw_drv_mode drv_mode;
@@ -368,7 +373,22 @@ static inline enum rtw_hal_status rtw_hal_bb_ctrl_rx_cca(void *h, u8 cca_en,
 #define rtw_hal_bb_adc_cfg(...)                    (0)
 #define rtw_hal_bb_bb_reset_cmn(...)               (0)
 #define rtw_hal_bb_gpio_setting(...)               (0)
+/* PMAC test-TX surface (halrf_pmac.c's halrf_set_pmac_tx & co.) — reachable
+ * only from the gated hwtx/MP flows (TSSI alignment-K runs with hwtx_en=false;
+ * DPK/GAPK trackers are masked in support_ability), so the BB side is inert. */
+#define rtw_hal_bb_set_plcp_tx(...)                (0)
+#define rtw_hal_bb_cfg_tx_path(...)                (0)
+#define rtw_hal_bb_cfg_rx_path(...)                (0)
+#define rtw_hal_bb_set_power(...)                  (0)
+#define rtw_hal_bb_set_pmac_packet_tx(...)         (0)
 #define rtw_hal_mac_set_xsi(...)                   (0)
+/* get_xsi mirrors set_xsi. NB: inert xsi is fine for the 8852C paths devourer
+ * drives, but the 8852B's a-die SI reset (halrf_arfc_si_reset_8852b, called
+ * from halrf_si_reset on the halrf_dm_init RFK prologue) needs the real
+ * XTAL-SI plane — the glue routes both through the bridge's xsi callbacks
+ * into HalKestrel's xtal_si helpers; these macros are only the fallback when
+ * the bridge callback is absent. */
+#define rtw_hal_mac_get_xsi(...)                   (0)
 #define rtw_hal_mac_set_gpio_func(...)             (0)
 #define rtw_hal_btc_wl_rfk_ntfy(...)               (0)
 #define rtw_hal_txpwr_lmt_store_from_external(...)     (0)
@@ -419,6 +439,21 @@ struct rtw_hw_band {
 /* MAC tx-path map cfg (bitfield) — passed to the inert tx_path_map_cfg helper. */
 struct hal_txmap_cfg { u32 macid:8, n_tx_en:4, map_a:2, map_b:2, map_c:2, map_d:2; };
 
+/* Per-PHY antenna/stream capability (hal_def.h struct phy_hw_cap_t, verbatim
+ * minus the RTW_WKARD_BTC_RFETYPE-gated field — that workaround is not
+ * defined in these builds). Read/adjusted by halrf_rfe_ant_num_chk_8852b;
+ * zero-initialized here, so its 1T1R/1T2R special-casing stays a no-op. */
+struct phy_hw_cap_t {
+  u8 tx_num;
+  u8 rx_num;
+  u8 tx_path_num;
+  u8 rx_path_num;
+  u8 proto_sup;
+  u16 hw_rts_time_th;
+  u16 hw_rts_len_th;
+  u32 txagg_num;
+};
+
 struct rtw_hal_com_t {
   void *drv_priv;      /* -> struct kestrel_halbb_bridge */
   u8   cv;             /* chip cut version */
@@ -430,6 +465,7 @@ struct rtw_hal_com_t {
   u32  aid;
   struct hal_mu_score_tbl bb_mu_score_tbl;
   struct rtw_hw_band band[MAX_BAND_NUM]; /* band[0].cur_chandef read by 8852c api */
+  struct phy_hw_cap_t phy_hw_cap[MAX_BAND_NUM]; /* halrf_rfe_ant_num_chk_8852b */
 };
 
 #define halcom_to_drvpriv(_hcom) ((struct kestrel_halbb_bridge *)((_hcom)->drv_priv))
@@ -500,6 +536,53 @@ static inline u16 hal_read16(struct rtw_hal_com_t *h, u32 addr) {
 }
 static inline u8 hal_read8(struct rtw_hal_com_t *h, u32 addr) {
   return (u8)(hal_read32(h, addr & ~0x3u) >> ((addr & 0x3u) * 8));
+}
+/* Sub-word writes as aligned read-modify-write over the bridge's 32-bit
+ * plane (the bridge exposes one width; the touched registers are plain
+ * config words). */
+static inline void hal_write8(struct rtw_hal_com_t *h, u32 addr, u8 val) {
+  const u32 base = addr & ~0x3u, sh = (addr & 0x3u) * 8;
+  u32 v = hal_read32(h, base);
+  v = (v & ~(0xffu << sh)) | ((u32)val << sh);
+  hal_write32(h, base, v);
+}
+static inline void hal_write16(struct rtw_hal_com_t *h, u32 addr, u16 val) {
+  const u32 base = addr & ~0x3u, sh = (addr & 0x3u) * 8;
+  u32 v = hal_read32(h, base);
+  v = (v & ~(0xffffu << sh)) | ((u32)val << sh);
+  hal_write32(h, base, v);
+}
+
+/* ---- halrf -> halbb cross-plane calls (vendor hal_api_bb.c) -------------
+ * Both planes are compiled together here, so these route straight into the
+ * vendored halbb (halbb_pmac_setting.c) through the bridge's bb_info instead
+ * of the vendor's hal_info_t indirection. Faithful to hal_api_bb.c: mode 0 =
+ * halbb_set_tmac_tx; mode 1 (pmac) is a no-op there too. */
+struct bb_info;
+void halbb_set_tmac_tx(struct bb_info *bb, enum phl_phy_idx phy_idx);
+void halbb_backup_info(struct bb_info *bb, enum phl_phy_idx phy_idx);
+void halbb_restore_info(struct bb_info *bb, enum phl_phy_idx phy_idx);
+static inline enum rtw_hal_status
+rtw_hal_bb_tx_mode_switch(struct rtw_hal_com_t *h, enum phl_phy_idx phy_idx,
+                          u8 mode) {
+  struct kestrel_halbb_bridge *b = halcom_to_drvpriv(h);
+  if (mode == 0 && b && b->bb_info)
+    halbb_set_tmac_tx((struct bb_info *)b->bb_info, phy_idx);
+  return RTW_HAL_STATUS_SUCCESS;
+}
+static inline enum rtw_hal_status
+rtw_hal_bb_backup_info(struct rtw_hal_com_t *h, u8 phy_idx) {
+  struct kestrel_halbb_bridge *b = halcom_to_drvpriv(h);
+  if (b && b->bb_info)
+    halbb_backup_info((struct bb_info *)b->bb_info, (enum phl_phy_idx)phy_idx);
+  return RTW_HAL_STATUS_SUCCESS;
+}
+static inline enum rtw_hal_status
+rtw_hal_bb_restore_info(struct rtw_hal_com_t *h, u8 phy_idx) {
+  struct kestrel_halbb_bridge *b = halcom_to_drvpriv(h);
+  if (b && b->bb_info)
+    halbb_restore_info((struct bb_info *)b->bb_info, (enum phl_phy_idx)phy_idx);
+  return RTW_HAL_STATUS_SUCCESS;
 }
 
 /* ---- OS primitives ------------------------------------------------------ */

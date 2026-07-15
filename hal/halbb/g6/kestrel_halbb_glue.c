@@ -26,6 +26,7 @@ struct kestrel_halbb_ctx *kestrel_halbb_create(struct kestrel_halbb_bridge *br,
   c->bb.hal_com = &c->hal;
   c->bb.phl_com = &c->phl;
   c->bb.bb_cmn_hooker = &c->cmn;
+  br->bb_info = &c->bb; /* halrf's cross-plane rtw_hal_bb_* calls (shim) */
   c->bb.bb_phy_idx = HW_PHY_0;
   c->bb.ic_type = BB_RTL8852C;
   c->bb.ic_sub_type = BB_IC_SUB_TYPE_8852C_8852C;

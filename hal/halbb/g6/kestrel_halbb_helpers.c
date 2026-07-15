@@ -22,6 +22,13 @@ bool halbb_fw_set_reg_cmn(struct bb_info *bb, u32 addr, u32 mask, u32 val,
   return false;
 }
 
+/* halbb_pmac_setting.c brackets set_tmac_tx/restore_info with this fwofld
+ * batching toggle — with io_ofld off it only flips bb_cmn_hooker state the
+ * direct register path never reads. */
+void halbb_fwofld_bitmap_en(struct bb_info *bb, bool en, enum fw_ofld_type app) {
+  (void)bb; (void)en; (void)app;
+}
+
 /* Spur suppression (halbb_spur_suppress.c, not vendored): channel-specific NBI
  * /CSI notch, not RX-hearing-critical — no-op (no spur notch). */
 void halbb_csi_tone_idx(struct bb_info *bb, u8 central_ch, enum channel_width bw,

@@ -43,6 +43,7 @@ C_FILES=(
   halbb_ch_info.c
   halbb_hw_cfg.c           # halbb_sel_headline, halbb_cfg_bb_rpl_ofst
   halbb_math_lib.c         # bit helpers (halbb_cal_bit_shift drives every reg write)
+  halbb_pmac_setting.c     # halbb_backup/restore_info + set_tmac_tx (halrf cal hooks)
 )
 # NOT vendored: halbb_fwofld.c — with FW-OFLD off its 3 referenced functions
 # (check_fw_ofld/fw_delay/fw_set_reg) are disabled-path stubs, provided by

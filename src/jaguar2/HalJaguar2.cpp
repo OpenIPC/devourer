@@ -2286,6 +2286,9 @@ void HalJaguar2::enable_rx() {
   _device.rtw_write16(0x0100, 0x06FF);
   /* Promiscuous RX for monitor: the vendor monitor RCR (hal_com.c:
    * RCR_AAP|APM|AM|AB|APWRMGT|APP_PHYST_RXFF|APP_MIC|APP_ICV = 0x7000002F)
+   * plus APP_FCS (BIT31) = 0xF000002F. Jaguar1 already uses RCR_APPFCS and
+   * Jaguar3 has BIT31 in RCR 0xF410400F; this parity makes Packet::Data carry
+   * the trailing FCS on every Realtek generation.
    * WITHOUT the legacy "accept" trio at bits 11/12/13. On this MAC generation
    * those are NOT the Jaguar1 ADF/ACF/AMF accept bits — rtw88 reg.h names
    * BIT(11) BIT_TA_BCN (TA-gated beacon accept) and BIT(12)
@@ -2298,7 +2301,7 @@ void HalJaguar2::enable_rx() {
    * (rtw88's own default RCR never sets them). Injected canonical-SA beacons
    * passed even WITH the bits set, which is how regress.py stayed green while
    * every real AP's beacons were silently dropped. */
-  uint32_t rcr = 0x7000002Fu;
+  uint32_t rcr = 0xF000002Fu;
   /* 8821C: drop APP_PHYST_RXFF (BIT28). The 8821C appends a 32-byte PHY-status
    * block before each RX frame in the RXFF, but its RX descriptor reports
    * drv_info_size=0 (unlike the 8822B, which counts it) — so the shared parser

@@ -57,8 +57,7 @@ int main(int argc, char **argv) {
   if (!h) { fprintf(stderr, "open %04x:%04x failed\n", vid, pid); return 1; }
 
   std::shared_ptr<devourer::UsbDeviceLock> lock;
-  if (devourer::claim_interface_then_reset(
-          h, 0, logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr, lock) != 0) {
+  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr, lock) != 0) {
     fprintf(stderr, "claim failed (adapter busy?)\n");
     return 1;
   }

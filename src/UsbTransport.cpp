@@ -8,6 +8,7 @@
 
 #include "Event.h"
 #include "UsbDeviceLock.h"
+#include "UsbOpen.h"
 
 namespace devourer {
 
@@ -46,6 +47,11 @@ UsbTransport::UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
     _info.pid = desc.idProduct;
     _logger->info("USB device {:04x}:{:04x}", _info.vid, _info.pid);
   }
+  // Endpoint addresses are not stable across Realtek USB variants. In
+  // particular, RTL8822BU/"RTL8812BU" is composite: interfaces 0 and 1 are
+  // Bluetooth, while Wi-Fi uses interface 2 with bulk IN endpoint 0x84 rather
+  // than the 0x81 used by RTL8812AU. Discovering the active bulk interface is
+  // therefore required before firmware download, RX, or TX can work.
   discover_endpoints();
   _info.valid = true;
 }
@@ -189,16 +195,26 @@ void UsbTransport::discover_endpoints() {
       continue;
     }
 
-    if (!config->bNumInterfaces) {
-      continue;
+    // Do not assume config->interface[0]. Composite adapters expose Bluetooth
+    // first; reuse the interface selected before the caller claimed the device.
+    const libusb_interface_descriptor *interface_desc = nullptr;
+    const int wifi_interface = find_wifi_interface(_dev_handle);
+    for (uint8_t interface_index = 0;
+         interface_index < config->bNumInterfaces && interface_desc == nullptr;
+         interface_index++) {
+      const libusb_interface *interface = &config->interface[interface_index];
+      if (interface->num_altsetting == 0)
+        continue;
+      const libusb_interface_descriptor *candidate = &interface->altsetting[0];
+      if (candidate->bInterfaceNumber == wifi_interface)
+        interface_desc = candidate;
     }
-    const libusb_interface *interface = &config->interface[0];
 
-    if (!interface->altsetting) {
+    if (interface_desc == nullptr) {
+      libusb_free_config_descriptor(config);
       continue;
     }
-    const libusb_interface_descriptor *interface_desc =
-        &interface->altsetting[0];
+    _logger->info("selected USB interface {}", interface_desc->bInterfaceNumber);
 
     bool found_bulk_in = false;
     for (uint8_t j = 0; j < interface_desc->bNumEndpoints; j++) {

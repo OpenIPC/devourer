@@ -81,7 +81,7 @@ int main() {
     return 1;
   }
   std::shared_ptr<devourer::UsbDeviceLock> lk;
-  if (devourer::claim_interface_then_reset(h, 0, lg, true, lk) != 0) return 1;
+  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), lg, true, lk) != 0) return 1;
   RtlAdapter a(h, lg, ctx, lk, {});
   report("USB ctrl-xfer", a);
   return 0;

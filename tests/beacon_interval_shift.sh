@@ -77,7 +77,7 @@ int main(int argc,char**argv){
   auto*h=libusb_open_device_with_vid_pid(ctx,vid,pid);
   if(!h){fprintf(stderr,"master open fail\n");return 1;}
   std::shared_ptr<devourer::UsbDeviceLock> lk;
-  if(devourer::claim_interface_then_reset(h,0,logger,true,lk)!=0)return 1;
+  if(devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h),logger,true,lk)!=0)return 1;
   WiFiDriver wifi(logger);
   auto dev=wifi.CreateRtlDevice(h,ctx,lk,devourer_config_from_env());
   if(!dev)return 1;
@@ -135,7 +135,7 @@ int main(){
   auto*h=libusb_open_device_with_vid_pid(ctx,vid,pid);
   if(!h){fprintf(stderr,"obs open fail\n");return 1;}
   std::shared_ptr<devourer::UsbDeviceLock> lk;
-  if(devourer::claim_interface_then_reset(h,0,logger,true,lk)!=0)return 1;
+  if(devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h),logger,true,lk)!=0)return 1;
   WiFiDriver wifi(logger);
   auto dev=wifi.CreateRtlDevice(h,ctx,lk,devourer_config_from_env());
   if(!dev)return 1;

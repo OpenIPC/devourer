@@ -348,7 +348,8 @@ static bool open_adapter(Adapter &a, uint16_t vid, uint16_t pid,
                   vid, pid);
     return false;
   }
-  int rc = devourer::claim_interface_then_reset(a.handle, 0, logger, true, a.lock);
+  int rc = devourer::claim_interface_then_reset(
+      a.handle, devourer::find_wifi_interface(a.handle), logger, true, a.lock);
   if (rc != 0)
     return false;
   WiFiDriver driver(logger);

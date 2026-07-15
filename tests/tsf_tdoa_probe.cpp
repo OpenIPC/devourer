@@ -70,7 +70,7 @@ static libusb_device_handle* open_pid(libusb_context* ctx, uint16_t vid,
                                        std::shared_ptr<devourer::UsbDeviceLock>& lk) {
   auto* h = libusb_open_device_with_vid_pid(ctx, vid, pid);
   if (!h) { fprintf(stderr, "open %04x:%04x failed\n", vid, pid); return nullptr; }
-  if (devourer::claim_interface_then_reset(h, 0, lg, true, lk) != 0) {
+  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), lg, true, lk) != 0) {
     fprintf(stderr, "claim %04x:%04x failed\n", vid, pid); return nullptr;
   }
   return h;

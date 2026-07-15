@@ -12,6 +12,61 @@
 
 namespace devourer {
 
+int find_wifi_interface(libusb_device_handle *handle) {
+  if (handle == nullptr)
+    return 0;
+
+  libusb_device *device = libusb_get_device(handle);
+  libusb_device_descriptor device_descriptor{};
+  if (libusb_get_device_descriptor(device, &device_descriptor) != LIBUSB_SUCCESS)
+    return 0;
+
+  for (uint8_t config_index = 0;
+       config_index < device_descriptor.bNumConfigurations; ++config_index) {
+    libusb_config_descriptor *config = nullptr;
+    if (libusb_get_config_descriptor(device, config_index, &config) !=
+        LIBUSB_SUCCESS)
+      continue;
+
+    for (uint8_t interface_index = 0;
+         interface_index < config->bNumInterfaces; ++interface_index) {
+      const libusb_interface *interface = &config->interface[interface_index];
+      if (interface->num_altsetting == 0)
+        continue;
+
+      /* libusb uses altsetting 0 unless a caller explicitly selects another.
+       * Match that active layout rather than discovering endpoints that are not
+       * live on the wire. */
+      const libusb_interface_descriptor *candidate = &interface->altsetting[0];
+      if (candidate->bInterfaceClass != LIBUSB_CLASS_VENDOR_SPEC)
+        continue;
+
+      bool has_bulk_in = false;
+      bool has_bulk_out = false;
+      for (uint8_t endpoint_index = 0;
+           endpoint_index < candidate->bNumEndpoints; ++endpoint_index) {
+        const libusb_endpoint_descriptor *endpoint =
+            &candidate->endpoint[endpoint_index];
+        if ((endpoint->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) !=
+            LIBUSB_TRANSFER_TYPE_BULK)
+          continue;
+        if (endpoint->bEndpointAddress & LIBUSB_ENDPOINT_IN)
+          has_bulk_in = true;
+        else
+          has_bulk_out = true;
+      }
+      if (has_bulk_in && has_bulk_out) {
+        const int interface_number = candidate->bInterfaceNumber;
+        libusb_free_config_descriptor(config);
+        return interface_number;
+      }
+    }
+    libusb_free_config_descriptor(config);
+  }
+
+  return 0;
+}
+
 int claim_interface_then_reset(libusb_device_handle *handle, int iface,
                                const Logger_t &logger, bool do_reset,
                                std::shared_ptr<UsbDeviceLock> &out_lock,

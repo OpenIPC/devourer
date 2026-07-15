@@ -195,8 +195,7 @@ int main(int argc, char **argv) {
    * guard — a second devourer on this adapter gets BUSY here and bails before
    * the reset, so it can't re-enumerate the adapter out from under the owner. */
   std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
-  rc = devourer::claim_interface_then_reset(
-      handle, 0, logger,
+  rc = devourer::claim_interface_then_reset(handle, devourer::find_wifi_interface(handle), logger,
       termux_fd == 0 && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
   if (rc != 0) {
     libusb_close(handle);

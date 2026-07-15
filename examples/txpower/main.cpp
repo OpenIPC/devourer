@@ -208,7 +208,7 @@ int main(int argc, char **argv) {
   }
 
   std::shared_ptr<devourer::UsbDeviceLock> lock;
-  if (devourer::claim_interface_then_reset(handle, 0, logger, true, lock) !=
+  if (devourer::claim_interface_then_reset(handle, devourer::find_wifi_interface(handle), logger, true, lock) !=
       0) {
     libusb_close(handle);
     libusb_exit(ctx);

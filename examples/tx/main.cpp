@@ -316,8 +316,7 @@ int main(int argc, char **argv) {
      * bail here before the reset, so it can't re-enumerate the adapter out from
      * under the owner. Reset skipped in termux_mode (forked child shares the
      * fd) and for DEVOURER_SKIP_RESET (warm pickup). */
-    rc = devourer::claim_interface_then_reset(
-        handle, 0, logger,
+    rc = devourer::claim_interface_then_reset(handle, devourer::find_wifi_interface(handle), logger,
         !termux_mode && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
     devourer::Ev(*g_ev, "init.timing")
         .f("stage", "txdemo.usb_reset")

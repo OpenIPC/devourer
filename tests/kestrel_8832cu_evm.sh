@@ -8,13 +8,14 @@
 #
 #   sudo tests/kestrel_8832cu_evm.sh <label> [channel] [rate]
 # Appends "<label> <n> <medEVM> <p10> <p90> <medRSSI>" to /tmp/kestrel-evm/summary.
+# TX_ID=35bc:0108 selects the 8852BU as the DUT instead (same monitor/method).
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT=/tmp/kestrel-evm; mkdir -p "$OUT"
 LABEL=${1:?need a label, e.g. dpk-on}
 CH=${2:-36}; RATE=${3:-MCS7}
-MON_ID="0bda:8812"        # 8812AU monitor (well-validated EVM reporter)
-TX_ID="35bc:0101"         # 8832CU DUT
+MON_ID="0bda:8812"          # 8812AU monitor (well-validated EVM reporter)
+TX_ID="${TX_ID:-35bc:0101}" # DUT (default 8832CU; env-overridable)
 GLOG="$OUT/ground-$LABEL.log"
 
 sysdir_for() {
@@ -60,7 +61,7 @@ sleep 10   # monitor settle
 # it -> AGC can't lock -> 0 decode). Overridable via env TXPWR (default 6 dBm).
 TXPWR=${TXPWR:-6}
 t0=$(date +%s.%N)
-env DEVOURER_VID=0x35bc DEVOURER_PID=0x0101 DEVOURER_CHANNEL="$CH" \
+env DEVOURER_VID=0x${TX_ID%%:*} DEVOURER_PID=0x${TX_ID##*:} DEVOURER_CHANNEL="$CH" \
     DEVOURER_TX_RATE="$RATE" DEVOURER_TX_GAP_US=1500 DEVOURER_TX_PWR="$TXPWR" \
     DEVOURER_LOG_LEVEL=warn \
     timeout 16 "$ROOT/build/txdemo" >/dev/null 2>"$OUT/tx-$LABEL.err" &

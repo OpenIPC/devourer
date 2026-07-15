@@ -64,10 +64,15 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
   identity, power-on/FW/efuse, monitor RX (both bands, ambient-beacon
   decode — the RX front-end needs the halbb per-band LNA/TIA gain-error cache,
   without which 5 GHz is deaf), TX (mgmt injection — the OpenIPC video path via
-  `streamtx`; legacy/HT/VHT/HE rates), and channel/BW across **5/10/20/40/80
+  `streamtx`; legacy/HT/VHT/HE rates), and channel/BW across **5/10/20/40/80/160
   MHz** on 2.4/5 GHz are up and on-air-validated (RX decode + B210 SDR for
-  narrowband occupied bandwidth). 40 MHz tunes to the block center (primary
-  ±2); 80 MHz derives center/pri_ch from the channel plan; 5/10 MHz narrowband
+  narrowband occupied bandwidth; 160 MHz SDR ~66.6 Mbps MCS7 at 5 GHz). 40 MHz
+  tunes to the block center (primary ±2); 80/160 MHz derive center/pri_ch from
+  the channel plan (160 = an 8-wide block, center = block_start+14). **6 GHz TX
+  tops out at 80 MHz**: the 6G 160 MHz TX does not radiate on the C8852C (the RF
+  synth locks and RX-160 works, but the 6G+160 TX-enable path is un-ported —
+  B210-confirmed 0% duty vs 45% at 6G-80 / 40% at 5G-160; a MAC TXAGC-max /
+  RF-TX-path gap, not a chip limit — the vendor drives it). 5/10 MHz narrowband
   is the BB "small BW" field with the RF left in 20 MHz mode (no ADC re-clock,
   unlike Jaguar). RX bulk-IN delivery requires the USB RXAGG engine enabled
   (`B_AX_RXAGG_EN`). TX power is a fixed BB dBm (`halbb_set_txpwr_dbm`, default

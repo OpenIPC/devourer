@@ -17,6 +17,9 @@
 #if defined(DEVOURER_HAVE_KESTREL_8852C)
 #include "hal8852c_phy.h"
 #endif
+#if defined(DEVOURER_KESTREL_HALBB_8852C)
+#include "kestrel_halbb_glue.h" /* vendored halbb-G6 8852C RX bring-up (C) */
+#endif
 
 namespace kestrel {
 
@@ -1671,9 +1674,14 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
    * silent even though the RF synth locks. Part of the vendor trx-init. */
   if (_variant == ChipVariant::C8852C) {
     ctrl_tx_path_tmac_8852c();
-    ctrl_rx_path_8852c(); /* enable the RX chains (0x4978 rx_path_en) */
-    /* bb_dm_init_8852c() STRIPPED (hand-transcribed halbb DM — error source +
-     * RX-halt bisect). The extracted BB tables set the DIG/AGC defaults. */
+#if defined(DEVOURER_KESTREL_HALBB_8852C)
+    /* Vendored halbb-G6 RX bring-up: loads the gain-table cache, runs the
+     * LNAON/TRSW/PAPE RF-front-end gpio routing, and enables the RX chains —
+     * the real Realtek C, not a hand-transcribed subset. */
+    halbb8852c_bringup(cut, rfe_type);
+#else
+    ctrl_rx_path_8852c(); /* fallback: RX-path enable only (0x4978) */
+#endif
   }
 
   return true;
@@ -1738,169 +1746,77 @@ void HalKestrel::ctrl_rx_path_8852c() {
   _logger->info("Kestrel PHY(8852C): RX path enabled (RF_PATH_AB, 0x4978=0x3)");
 }
 
-/* ======================= 8852C halbb DM init =============================
- * halbb_dm_init_per_phy (halbb_init.c) register writes, ported verbatim for the
- * 8852C: single PHY (HW_PHY_0), non-MP, non-DBCC, cr_type=BB_AP2, so every cr->
- * address resolves from the *_A2 macros in halbb_cr_info_8852c.h. The
- * 8852B-derived bring-up ran none of this, leaving the RX AGC/DIG/EDCCA/CFO/
- * env-monitor unconfigured. BB registers -> bb_rmw (BB window, absolute mask);
- * the 0xDxxx power-region regs -> field32 (MAC power-reg plane, field+shift).
- * A HW_PHY_1 pwr-reg write with dbcc off is a vendor no-op and is omitted. */
-void HalKestrel::bb_dm_init_8852c() {
-  namespace r = kestrel::reg;
-  /* Writes are ordered as halbb_dm_init_per_phy (halbb_init.c) calls them.
-   * Functions that write no hardware register on the 8852C (get_efuse, mlo,
-   * pause, supportability, cmn_rpt, bb_wrap[BE-only], statistics_reset, la,
-   * dfs, ra, ul_tb, pwr_ctrl, rua, antdiv[non-antdiv adapter], pathdiv, mccdm,
-   * plcp, sniffer, dv_pxp, auto_debug, cck_rpl_ofst[no-8852C-case]) are omitted. */
+#if defined(DEVOURER_KESTREL_HALBB_8852C)
+/* ---- Vendored halbb-G6 8852C RX bring-up bridge -------------------------- *
+ * Realtek's own halbb C (hal/halbb/rtl8852c) drives the RX front-end verbatim:
+ * gain-table cache load, LNAON/TRSW/PAPE gpio routing, RX-path enable, per-band
+ * gain-error. Its register/OS plane is routed back here — BB regs through the
+ * wide (wIndex=1) window like bb_rmw; power-region regs through the plain MAC
+ * plane like field32. The dev cookie is this HalKestrel. This replaces the
+ * hand-transcribed C++ bb_dm_init_8852c the RX-halt bisect had stripped. */
+unsigned int HalKestrel::halbb_r32(void *dev, unsigned int addr) {
+  auto *h = static_cast<HalKestrel *>(dev);
+  return h->_device.rtw_read32_wide((addr & 0xffffu) + 0x10000u);
+}
+void HalKestrel::halbb_w32(void *dev, unsigned int addr, unsigned int val) {
+  auto *h = static_cast<HalKestrel *>(dev);
+  h->_device.rtw_write32_wide((addr & 0xffffu) + 0x10000u, val);
+}
+unsigned int HalKestrel::halbb_rpwr(void *dev, unsigned int addr) {
+  return static_cast<HalKestrel *>(dev)->_device.rtw_read32(
+      static_cast<uint16_t>(addr));
+}
+void HalKestrel::halbb_wpwr(void *dev, unsigned int addr, unsigned int val) {
+  static_cast<HalKestrel *>(dev)->_device.rtw_write32(
+      static_cast<uint16_t>(addr), val);
+}
+void HalKestrel::halbb_delay(void *dev, unsigned int us) {
+  (void)dev;
+  delay_us(us);
+}
 
-  /* 1. halbb_ic_hw_setting_init_8852c (halbb_8852c.c:234). */
-  bb_rmw(0x0a10, 1u << 0, 1); /* dbcc_80p80 evm_rpt_en */
-  bb_rmw(0x2a10, 1u << 0, 1);
-  field32(0xd240, 0x1d8, 0x1ff, 9); /* CBV: min UL txpwr -10dBm [17:9] */
-  field32(0xd290, 0x0, 0xff, 0);    /* CBV: UL txpwr comp 0dB [7:0] */
-
-  /* 2. halbb_gpio_setting_init_8852c (halbb_8852c_api.c:2274) — RF-front-end
-   * module GPIO: TRSW antenna switch + LNAON external LNA + PAPE routing, both
-   * paths. Never run by the 8852B-derived bring-up -> RX antenna/LNA path
-   * unrouted (the near-deafness). */
-  for (uint32_t base : {0x5800u, 0x7800u}) {
-    bb_rmw(base | 0x68, 0x2u, 1);     /* r_tx_ant_sel */
-    bb_rmw(base | 0x68, 0x4u, 0);
-    bb_rmw(base | 0x68, 0xE0u, 0);    /* -> TRSW look-up-table */
-    bb_rmw(base | 0x80, r::MASKDWORD, 0x77777777);
-    bb_rmw(base | 0x84, r::MASKDWORD, 0x77777777);
-    bb_rmw(base | 0x94, 1u << 24, 1); /* TRSW from rfm_TRSW */
+void HalKestrel::halbb8852c_bringup(uint8_t cut, uint8_t rfe_type) {
+  if (!_halbb_bridge) {
+    auto *br = new kestrel_halbb_bridge{};
+    br->dev = this;
+    br->read32 = &HalKestrel::halbb_r32;
+    br->write32 = &HalKestrel::halbb_w32;
+    br->read_pwr = &HalKestrel::halbb_rpwr;
+    br->write_pwr = &HalKestrel::halbb_wpwr;
+    br->delay_us = &HalKestrel::halbb_delay;
+    br->logline = nullptr;
+    _halbb_bridge = br;
+    _halbb_ctx = kestrel_halbb_create(br, cut, rfe_type);
   }
-  bb_rmw(0x334, r::MASKDWORD, 0xFFFFFFFF); /* output mode[31:0] */
-  bb_rmw(0x338, r::MASKDWORD, 0x0);        /* non dbg_gpio mode */
-  bb_rmw(0x33C, r::MASKDWORD, 0x0);        /* path_sel[15:0] */
-  bb_rmw(0x340, r::MASKDWORD, 0x0);        /* path_sel[31:16] */
-  /* TRSW look-up table (halbb_gpio_trsw_table_8852c), both paths, fields [31:16]. */
-  for (uint32_t cr : {0x5868u, 0x7868u}) {
-    bb_rmw(cr, 0x00030000u, 1);
-    bb_rmw(cr, 0x000C0000u, 2);
-    bb_rmw(cr, 0x00300000u, 2);
-    bb_rmw(cr, 0x00C00000u, 2);
-    bb_rmw(cr, 0x03000000u, 1);
-    bb_rmw(cr, 0x0C000000u, 2);
-    bb_rmw(cr, 0x30000000u, 2);
-    bb_rmw(cr, 0xC0000000u, 2);
-  }
-  /* RFM output values (halbb_gpio_rfm_8852c): PAPE=[7:0], TRSW=[15:8],
-   * LNAON=[23:16]; rfe_type not 63/64 so LNAON=0x8. */
-  for (uint32_t cr : {0x5894u, 0x7894u}) {
-    bb_rmw(cr, 0x000000FFu, 0x4); /* PAPE_RFM */
-    bb_rmw(cr, 0x0000FF00u, 0x6); /* TRSW_RFM */
-    bb_rmw(cr, 0x00FF0000u, 0x8); /* LNAON_RFM */
-  }
+  kestrel_halbb_rx_bringup(_halbb_ctx);
+  _logger->info("Kestrel PHY(8852C): halbb-G6 RX bring-up applied (vendored "
+                "gpio/rx-path/gain-cache, rfe={} cut={})", rfe_type, cut);
+}
 
-  /* 6. halbb_physts_parsing_init_io_en (halbb_physts.c:3208). CR base
-   * PHY_STS_BITMAP_SEARCH_FAIL_A2 = 0x073C; per-IE-page bitmaps RMW the reset
-   * default. brk_fail + the modified pages only (unmodified pages RMW to
-   * themselves = no-op). page->addr uses the (>=10 -> page--) remap. */
-  bb_rmw(0x0738, 0xCu, 0x3);      /* brk_fail_rpt_en */
-  bb_rmw(0x0754, 1u << 13, 1);    /* page6 HE_MU  |= IE13_DL_MU_DEF */
-  bb_rmw(0x0758, 1u << 13, 1);    /* page7 VHT_MU |= IE13_DL_MU_DEF */
-  bb_rmw(0x0764, 1u << 9, 1);     /* page11 CCK_PKT |= IE09 */
-  bb_rmw(0x0764, 1u << 1, 1);     /* page11 CCK_PKT |= IE01_CMN_OFDM */
-  for (uint32_t a : {0x0768u, 0x076Cu, 0x0770u, 0x0774u, 0x0778u}) {
-    bb_rmw(a, 0xF0u, 0x3);        /* pages12-16: ext-path A|B ([7:4]=valid_path) */
-    bb_rmw(a, 1u << 9, 1);        /* |= IE09 */
-  }
+void HalKestrel::halbb8852c_set_gain(uint8_t channel, uint8_t band_type) {
+  if (_halbb_ctx)
+    kestrel_halbb_set_gain(_halbb_ctx, channel, band_type);
+}
 
-  /* 8. halbb_dbg_setting_init -> halbb_bb_dbg_port_clock_en(false) (dbg.c:168). */
-  bb_rmw(0x20F4, 1u << 24, 0);
-  bb_rmw(0x20F8, 1u << 31, 0);
+void HalKestrel::halbb8852c_ctrl_bw_ch(uint8_t pri_ch, uint8_t center,
+                                       ChannelWidth_t bw, uint8_t band_type) {
+  if (!_halbb_ctx)
+    return;
+  /* devourer ChannelWidth_t -> halbb enum channel_width (differ for 5/10 MHz:
+   * devourer 5=5,10=6; halbb 5=6,10=7). */
+  uint8_t hbw = bw == CHANNEL_WIDTH_5    ? 6
+                : bw == CHANNEL_WIDTH_10 ? 7
+                                         : static_cast<uint8_t>(bw);
+  kestrel_halbb_ctrl_bw_ch(_halbb_ctx, pri_ch, center, hbw, band_type);
+}
+#endif /* DEVOURER_KESTREL_HALBB_8852C */
 
-  /* 9. halbb_txdiff_tbl_init (halbb_pwr_ctrl.c:730) — TX power-diff table (MAC
-   * pwr-reg plane, full dword). 12 MCS rows x 4 dwords @0xD56C, then 48 zeros
-   * @0xD62C (CCK/legacy). */
-  static const uint32_t kTxDiff[48] = {
-      0x00000000, 0x00000000, 0x00000000, 0x00000000, /* MCS0 */
-      0x00011111, 0x00011111, 0x00011111, 0x00011111, /* MCS1 */
-      0x00022211, 0x00022222, 0x00022222, 0x00022222, /* MCS2 */
-      0x00022211, 0x00033333, 0x00033333, 0x00033333, /* MCS3 */
-      0x00022211, 0x00044433, 0x00044444, 0x00044444, /* MCS4 */
-      0x00021111, 0x00043332, 0x00055554, 0x00055555, /* MCS5 */
-      0x00022222, 0x00044433, 0x00066655, 0x00066666, /* MCS6 */
-      0x00033321, 0x00054443, 0x00076655, 0x00077777, /* MCS7 */
-      0x00032111, 0x00044444, 0x00066655, 0x00088877, /* MCS8 */
-      0x00022221, 0x00055443, 0x00076655, 0x00088877, /* MCS9 */
-      0x00022111, 0x00044333, 0x00066665, 0x00088777, /* MCS10 */
-      0x00022211, 0x00044433, 0x00077654, 0x00088777}; /* MCS11 */
-  for (int i = 0; i < 48; i++)
-    _device.rtw_write32(static_cast<uint16_t>(0xD56C + i * 4), kTxDiff[i]);
-  for (int i = 0; i < 48; i++)
-    _device.rtw_write32(static_cast<uint16_t>(0xD62C + i * 4), 0x0);
-
-  /* 10. halbb_spatial_reuse_init -> set_pwr_ref(SR_TXPWR_REF=21) (spatial_reuse.c:49). */
-  field32(0xD23C, 0x15, 0x7F, 0);
-
-  /* 11. halbb_macid_ctrl_init (halbb_pwr_ctrl.c:692) — clear 11 per-macid pwr CRs. */
-  for (int i = 0; i < 11; i++)
-    _device.rtw_write32(static_cast<uint16_t>(0xD36C + i * 4), 0x0);
-
-  /* 13. halbb_statistics_init (halbb_statistics.c:310) — rate/mcs/nss/hdr-type
-   * counters, all sub-fields of 0x0900 (RMW). */
-  bb_rmw(0x0900, 0x0000000Fu, 0xB);   /* cnt rate = 6M spec */
-  bb_rmw(0x0900, 0x000007F0u, 0);     /* HT MCS0 */
-  bb_rmw(0x0900, 0x00007800u, 0);     /* VHT MCS0 */
-  bb_rmw(0x0900, 0x00180000u, 0);     /* VHT NSS1 */
-  bb_rmw(0x0900, 0x00078000u, 0);     /* HE MCS0 */
-  bb_rmw(0x0900, 0x00600000u, 0);     /* HE NSS1 */
-  bb_rmw(0x0900, 0x1F800000u, 0x08);  /* MAC hdr type = beacon */
-
-  /* 15. halbb_psd_init -> halbb_psd_para_setting (halbb_psd.c:124), all @0x422C. */
-  bb_rmw(0x422C, 0x18000u, 1);   /* n_dft (512-pt) */
-  bb_rmw(0x422C, 0x1800u, 2);    /* iq_sel */
-  bb_rmw(0x422C, 0x6000u, 3);    /* l_avg */
-  bb_rmw(0x422C, 0x60000u, 0);   /* in_path_sel */
-  bb_rmw(0x422C, 0x180000u, 3);  /* in_source_sel */
-
-  /* 16. halbb_edcca_init (halbb_edcca.c:1113). */
-  bb_rmw(0x0C70, 0x03F00000u, 0x29); /* r_collision_t2r_state */
-
-  /* 18. halbb_dig_init -> cfg_bbcr(igi=28): dyn PD-th. OFDM bound>102 ->
-   * disable lower bound; CCK bound=103. (8852A-only set_igi_cr not run.) */
-  bb_rmw(0x481C, 1u << 29, 0);        /* OFDM PD lower-bound disable */
-  bb_rmw(0x4b64, 0xff000000u, 0x99); /* CCK PD bound = -103 (s8) [31:24] */
-  bb_rmw(0x4b64, 0x00ff0000u, 0x7f); /* [23:16] = 0x7f */
-  bb_rmw(0x4b74, 1u << 30, 1);       /* CCK PD manual-en */
-
-  /* 19. halbb_cfo_trk_init -> halbb_digital_cfo_comp_init (halbb_cfo_trk.c:171). */
-  bb_rmw(0x4494, 1u << 29, 1);    /* cfo_comp_seg0_vld */
-  bb_rmw(0x4490, 0x0F000000u, 8); /* cfo_wgting */
-  field32(0xd248, 0x0, 0x7, 0);   /* 8852C comp-by-DCFO = 0 (pwr-reg plane) */
-
-  /* 22. halbb_env_mntr_init (halbb_env_mntr.c:3895). */
-  bb_rmw(0x0C00, 0x1u, 1);         /* ccx_en */
-  bb_rmw(0x0C00, 0x2u, 0);         /* ccx_trig_opt */
-  bb_rmw(0x0C00, 0x70u, 0);        /* ccx_edcca_opt */
-  bb_rmw(0x4448, 0xE0000000u, 4);  /* ccx source sel (dccl, full BW) */
-  bb_rmw(0x0C00, 0x1000u, 1);      /* clm_en */
-  bb_rmw(0x0C08, 0x40000u, 1);     /* nhm_en */
-  bb_rmw(0x0C14, 0x30000u, 1);     /* nhm pwdb method */
-  bb_rmw(0x0C28, 0x1000u, 1);      /* ifs collect en */
-  bb_rmw(0x0C2C, 0x8000u, 1);      /* ifs t1 en */
-  bb_rmw(0x0C30, 0x8000u, 1);      /* ifs t2 en */
-  bb_rmw(0x0C34, 0x8000u, 1);      /* ifs t3 en */
-  bb_rmw(0x0C38, 0x8000u, 1);      /* ifs t4 en */
-  bb_rmw(0x0C18, 0x1u, 1);         /* fahm_en */
-  bb_rmw(0x0C18, 0x2u, 1);         /* fahm_en_ofdm */
-  bb_rmw(0x0C18, 0x4u, 1);         /* fahm_en_cck */
-  bb_rmw(0x0C1C, 0x70u, 1);        /* fahm pwdb sel */
-  bb_rmw(0x0C28, 0x100u, 1);       /* fahm dis-count-each-mpdu */
-  bb_rmw(0x0C04, 0x40000u, 1);     /* clm edcca en */
-
-  /* 24. halbb_ch_info_init -> halbb_cfg_ch_info_cr (halbb_ch_info.c:490). */
-  bb_rmw(0x025C, 0xFCu, 0x3A);        /* ch_info_en (src/cmprs/grp_num) */
-  bb_rmw(0x0260, r::MASKDWORD, 0x303); /* ele_bitmap */
-  bb_rmw(0x2000, 0x4000u, 1);         /* ch_info_type = MIMO_CH */
-  bb_rmw(0x2008, 0x6000000u, 0);      /* seg_len */
-
-  _logger->info("Kestrel PHY(8852C): halbb DM init applied "
-                "(gpio/physts/dig/edcca/cfo/env/statistics/psd/chinfo)");
+HalKestrel::~HalKestrel() {
+#if defined(DEVOURER_KESTREL_HALBB_8852C)
+  if (_halbb_ctx)
+    kestrel_halbb_destroy(_halbb_ctx);
+  delete static_cast<kestrel_halbb_bridge *>(_halbb_bridge);
+#endif
 }
 
 namespace {
@@ -2819,6 +2735,15 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
     set_rxsc_rpl_comp(center);
     rx_dck();
   }
+#if defined(DEVOURER_KESTREL_HALBB_8852C)
+  else {
+    /* Full vendor per-channel BB config (halbb_ctrl_bw_ch_8852c): per-band
+     * gain-error, hidden/normal efuse RX gain, band mode-sel (0x4738/0x4aa4),
+     * SCO comp, BW/RXBB/ADC, CCK enable — replacing devourer's hand-rolled BB
+     * channel-switch. band_type 0=2.4G, 1=5G. */
+    halbb8852c_ctrl_bw_ch(pri_ch, center, bw, is_2g ? 0 : 1);
+  }
+#endif
 
   /* --- BB reset --- */
   bb_reset_all();

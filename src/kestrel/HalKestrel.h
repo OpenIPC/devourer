@@ -11,6 +11,8 @@
 #include "SelectedChannel.h" /* ChannelWidth_t */
 #include "logger.h"
 
+struct kestrel_halbb_ctx; /* opaque C handle (hal/halbb/rtl8852c) */
+
 namespace kestrel {
 
 /* Parsed logical-efuse contents devourer consumes (see MacRegAx.h for the
@@ -135,14 +137,7 @@ public:
    * 0x4978 rx_path_en, 1RCCA, Rx nss/user limits, TSSI/BB reset. Never ported
    * (only the TX path-com was), so 0x4978[3:0] stayed 0 and the 8852C RX front
    * end was disabled -> near-deaf. RF_PATH_AB (both chains, monitor). */
-  void ctrl_rx_path_8852c();
-
-  /* halbb_dm_init_per_phy (halbb_init.c) — the BB dynamic-mechanism init the
-   * 8852B-derived bring-up never ran (RX AGC/DIG/physts/EDCCA/env-monitor left
-   * unconfigured -> the 8832CU RX near-deafness). Ported verbatim for the
-   * 8852C (single-PHY HW_PHY_0, non-MP, non-DBCC, cr_type=BB_AP2); run after
-   * the BB/RF tables. */
-  void bb_dm_init_8852c();
+  void ctrl_rx_path_8852c(); /* fallback when the vendored halbb isn't built */
 
   /* M3 — tune the BB + RF to a monitor channel (2.4/5 GHz, 20 MHz). Ports the
    * halbb ctrl_ch/ctrl_bw/cck_en/bb_reset + the halrf RF18 channel setting.
@@ -413,7 +408,27 @@ public:
   int16_t _txpwr_offset_qdb = 0;  /* runtime offset (quarter-dB), sticky */
   bool _cca_on = false; /* DEVOURER_KESTREL_CCA_ON: keep CCA gates on (test) */
 
+#if defined(DEVOURER_KESTREL_HALBB_8852C)
+  /* Vendored halbb-G6 8852C RX bring-up (hal/halbb/rtl8852c/kestrel_halbb_glue).
+   * The static callbacks route the vendor C's register/OS plane to this device
+   * (dev cookie = the HalKestrel*). */
+  void halbb8852c_bringup(uint8_t cut, uint8_t rfe_type);
+  void halbb8852c_set_gain(uint8_t channel, uint8_t band_type);
+  /* Full vendor per-channel BB config (halbb_ctrl_bw_ch_8852c): replaces the
+   * hand-rolled BB channel-switch. bw = devourer ChannelWidth_t. */
+  void halbb8852c_ctrl_bw_ch(uint8_t pri_ch, uint8_t center, ChannelWidth_t bw,
+                             uint8_t band_type);
+  ::kestrel_halbb_ctx *_halbb_ctx = nullptr;
+  void *_halbb_bridge = nullptr; /* heap kestrel_halbb_bridge, outlives ctx */
+  static unsigned int halbb_r32(void *dev, unsigned int addr);
+  static void halbb_w32(void *dev, unsigned int addr, unsigned int val);
+  static unsigned int halbb_rpwr(void *dev, unsigned int addr);
+  static void halbb_wpwr(void *dev, unsigned int addr, unsigned int val);
+  static void halbb_delay(void *dev, unsigned int us);
+#endif
+
 public:
+  ~HalKestrel();
   void set_cca_on(bool on) { _cca_on = on; }
 };
 

@@ -1617,8 +1617,11 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
    * and stores `data` into the SOFTWARE gain cache (writing zero hardware
    * registers; emitting it as cmd_ofld faults the fw). Populate the cache here;
    * set_gain_error applies it to the band-specific BB regs per channel — the
-   * 5 GHz RX front-end is deaf without it. */
-  init_gain_table(rfe_type, cut);
+   * 5 GHz RX front-end is deaf without it. 8852B only: on the C8852C the vendored
+   * halbb (kestrel_halbb_rx_bringup's halbb_cfg_bb_gain + ctrl_bw_ch/set_gain)
+   * owns the gain cache (bb_gain_i), so this hand-rolled cache goes unread. */
+  if (_variant != ChipVariant::C8852C)
+    init_gain_table(rfe_type, cut);
 
   /* halrf_wrf offload dispatch (halrf_interface.c:202; each RF reg appears
    * twice in the radio table): BIT(16) set = d-die -> a BB write to the

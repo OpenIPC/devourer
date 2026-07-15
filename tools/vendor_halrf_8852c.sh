@@ -11,7 +11,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$REPO/reference/rtl8852cu/phl/hal_g6/phy/rf"
-DST="$REPO/hal/halrf/rtl8852c/vendor"
+DST="$REPO/hal/halrf/g6/vendor"
 
 if [[ ! -d "$SRC" ]]; then
   echo "missing $SRC -> git submodule update --init reference/rtl8852cu" >&2
@@ -63,4 +63,4 @@ for f in "${C_FILES[@]}"; do
 done
 
 echo "vendored $(ls "$DST"/*.c "$DST"/halrf_8852c/*.c | wc -l) .c + $(ls "$DST"/*.h "$DST"/halrf_8852c/*.h | wc -l) .h into $DST"
-echo "done. review 'git status hal/halrf/rtl8852c/vendor' + the shim hal/halrf/hal_headers_le.h"
+echo "done. review 'git status hal/halrf/g6/vendor' + the shim hal/halrf/hal_headers_le.h"

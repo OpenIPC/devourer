@@ -1,6 +1,6 @@
 /* C/C++ boundary for the vendored halrf-G6 8852C RF calibrations.
  *
- * Mirrors hal/halbb/rtl8852c/kestrel_halbb_glue.h: the vendored halrf C owns the
+ * Mirrors hal/halbb/g6/kestrel_halbb_glue.h: the vendored halrf C owns the
  * full struct rf_info and the RF cal functions; this exposes an opaque handle so
  * devourer's C++ can drive them without including any halrf header. Register/RF
  * access is routed back through the SAME kestrel_halbb_bridge (its read_rf /
@@ -9,7 +9,7 @@
 #ifndef KESTREL_HALRF_GLUE_H
 #define KESTREL_HALRF_GLUE_H
 
-#include "../../halbb/rtl8852c/shim/halbb_bridge.h"
+#include "../../halbb/g6/shim/halbb_bridge.h"
 
 #ifdef __cplusplus
 extern "C" {

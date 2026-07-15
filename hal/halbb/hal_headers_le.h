@@ -1,6 +1,6 @@
 /* SHIM replacement for the vendor phl/hal_g6/hal_headers_le.h.
  *
- * The vendored halbb-G6 8852C source (hal/halbb/rtl8852c/vendor/, copied
+ * The vendored halbb-G6 8852C source (hal/halbb/g6/vendor/, copied
  * verbatim by tools/vendor_halbb_8852c.sh) reaches this file via its own
  * `#include "../../hal_headers_le.h"`. The real header pulls in the entire
  * PHL/HAL/MAC/BTC type universe; we replace it with the minimal surface the RX
@@ -16,7 +16,7 @@
 #include <stddef.h>
 #include <stdarg.h>
 #include <stdlib.h>
-#include "rtl8852c/shim/halbb_bridge.h"
+#include "g6/shim/halbb_bridge.h"
 
 /* ---- base scalar types (vendor phl_types.h spellings) ------------------- */
 #define u8  unsigned char
@@ -61,7 +61,7 @@ enum phl_phy_idx { HW_PHY_0, HW_PHY_1, HW_PHY_MAX };
 /* Vendored verbatim (pure enums/defines, no includes, no structs): rf_path,
  * band_type, channel_width, chan_offset, wlan_mode, rtw_gi_ltf, rtw_data_rate,
  * rtw_ac, rtw_rate_mode, ... — the whole general enum set at correct values. */
-#include "rtl8852c/shim/rtw_general_def.h"
+#include "g6/shim/rtw_general_def.h"
 
 /* ---- PHL sizing constants (must match vendor for array layout) ---------- */
 #define PHL_MAX_STA_NUM     128
@@ -109,7 +109,7 @@ enum phl_band_idx { HW_BAND_0 = 0, HW_BAND_1, HW_BAND_MAX };
 
 /* Vendored verbatim (pure enums/defines, no includes): rtw_cv (CAV/CBV/..),
  * rtw_dv_sel (DAV/DDV), rtw_efuse_info (EFUSE_INFO_*), rtw_chip_id, n_rf_entity. */
-#include "rtl8852c/shim/hal_general_def.h"
+#include "g6/shim/hal_general_def.h"
 
 /* MP-mode predicates — always false on the monitor-RX path (normal, not MP).
  * void* params so any phl_com pointer type passes cleanly. */

@@ -348,23 +348,23 @@ if(DEVOURER_KESTREL_8852C)
     # RX-path enable / per-band gain-error) compiled VERBATIM behind a thin shim
     # (hal/halbb/hal_headers_le.h) + a C glue layer, instead of hand-transcribed
     # C++. Vendored by tools/vendor_halbb_8852c.sh; driven via
-    # hal/halbb/rtl8852c/kestrel_halbb_glue.h. GNU/Clang only (the vendor C is
+    # hal/halbb/g6/kestrel_halbb_glue.h. GNU/Clang only (the vendor C is
     # POSIX/GCC-flavored); -ffunction-sections + --gc-sections drop the unused
     # halbb functions (and their refs into non-vendored modules).
     if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         file(GLOB KESTREL_HALBB_C
-            "${CMAKE_CURRENT_SOURCE_DIR}/hal/halbb/rtl8852c/vendor/*.c"
-            "${CMAKE_CURRENT_SOURCE_DIR}/hal/halbb/rtl8852c/vendor/halbb_8852c/*.c")
-        add_library(kestrel_halbb_8852c OBJECT
+            "${CMAKE_CURRENT_SOURCE_DIR}/hal/halbb/g6/vendor/*.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/hal/halbb/g6/vendor/halbb_8852c/*.c")
+        add_library(kestrel_halbb OBJECT
             ${KESTREL_HALBB_C}
-            hal/halbb/rtl8852c/kestrel_halbb_glue.c
-            hal/halbb/rtl8852c/kestrel_halbb_helpers.c)
-        set_target_properties(kestrel_halbb_8852c PROPERTIES C_STANDARD 99
+            hal/halbb/g6/kestrel_halbb_glue.c
+            hal/halbb/g6/kestrel_halbb_helpers.c)
+        set_target_properties(kestrel_halbb PROPERTIES C_STANDARD 99
             POSITION_INDEPENDENT_CODE ON)
-        target_include_directories(kestrel_halbb_8852c PRIVATE
-            hal/halbb hal/halbb/rtl8852c
-            hal/halbb/rtl8852c/vendor hal/halbb/rtl8852c/vendor/halbb_8852c)
-        target_compile_definitions(kestrel_halbb_8852c PRIVATE
+        target_include_directories(kestrel_halbb PRIVATE
+            hal/halbb hal/halbb/g6
+            hal/halbb/g6/vendor hal/halbb/g6/vendor/halbb_8852c)
+        target_compile_definitions(kestrel_halbb PRIVATE
             CONFIG_RTL8852C=1 BB_8852C_SUPPORT=1 HALBB_DBCC_SUPPORT=0
             HALBB_FW_OFLD_SUPPORT=0 HALBB_DBG_TRACE_SUPPORT=0
             PLATFOM_IS_LITTLE_ENDIAN=1
@@ -374,12 +374,12 @@ if(DEVOURER_KESTREL_8852C)
             # multiple-definition clash at link.
             array_mp_8852c_phy_reg=kestrel_halbb_phy_reg
             array_mp_8852c_phy_reg_gain=kestrel_halbb_phy_reg_gain)
-        target_compile_options(kestrel_halbb_8852c PRIVATE
+        target_compile_options(kestrel_halbb PRIVATE
             -w -ffunction-sections -fdata-sections)
-        target_sources(devourer PRIVATE $<TARGET_OBJECTS:kestrel_halbb_8852c>)
+        target_sources(devourer PRIVATE $<TARGET_OBJECTS:kestrel_halbb>)
         # C++ side includes only kestrel_halbb_glue.h (opaque handle + bridge).
-        target_include_directories(devourer PRIVATE hal/halbb/rtl8852c)
-        target_compile_definitions(devourer PUBLIC DEVOURER_KESTREL_HALBB_8852C=1)
+        target_include_directories(devourer PRIVATE hal/halbb/g6)
+        target_compile_definitions(devourer PUBLIC DEVOURER_KESTREL_HALBB=1)
         target_link_options(devourer INTERFACE -Wl,--gc-sections)
 
         # Vendored halrf-G6 8852C RF calibrations (DACK / RX-DCK), compiled
@@ -387,30 +387,30 @@ if(DEVOURER_KESTREL_8852C)
         # the halbb one + the bridge's RF-register plane). Vendored by
         # tools/vendor_halrf_8852c.sh; driven via kestrel_halrf_glue.h.
         file(GLOB KESTREL_HALRF_C
-            "${CMAKE_CURRENT_SOURCE_DIR}/hal/halrf/rtl8852c/vendor/*.c"
-            "${CMAKE_CURRENT_SOURCE_DIR}/hal/halrf/rtl8852c/vendor/halrf_8852c/*.c")
-        add_library(kestrel_halrf_8852c OBJECT
+            "${CMAKE_CURRENT_SOURCE_DIR}/hal/halrf/g6/vendor/*.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/hal/halrf/g6/vendor/halrf_8852c/*.c")
+        add_library(kestrel_halrf OBJECT
             ${KESTREL_HALRF_C}
-            hal/halrf/rtl8852c/kestrel_halrf_glue.c
-            hal/halrf/rtl8852c/kestrel_halrf_helpers.c)
-        set_target_properties(kestrel_halrf_8852c PROPERTIES C_STANDARD 99
+            hal/halrf/g6/kestrel_halrf_glue.c
+            hal/halrf/g6/kestrel_halrf_helpers.c)
+        set_target_properties(kestrel_halrf PROPERTIES C_STANDARD 99
             POSITION_INDEPENDENT_CODE ON)
-        target_include_directories(kestrel_halrf_8852c PRIVATE
-            hal/halrf hal/halbb hal/halbb/rtl8852c
-            hal/halrf/rtl8852c/vendor hal/halrf/rtl8852c/vendor/halrf_8852c
-            hal/halbb/rtl8852c/vendor hal/halbb/rtl8852c/vendor/halbb_8852c)
-        target_compile_definitions(kestrel_halrf_8852c PRIVATE
+        target_include_directories(kestrel_halrf PRIVATE
+            hal/halrf hal/halbb hal/halbb/g6
+            hal/halrf/g6/vendor hal/halrf/g6/vendor/halrf_8852c
+            hal/halbb/g6/vendor hal/halbb/g6/vendor/halbb_8852c)
+        target_compile_definitions(kestrel_halrf PRIVATE
             CONFIG_RTL8852C=1 RF_8852C_SUPPORT=1 PLATFOM_IS_LITTLE_ENDIAN=1
             KESTREL_HALRF_PRESENT=1
             # radioa/radiob raw_data arrays duplicate the extract-generated
             # hal8852c_phy.c globals — rename to avoid a link clash.
             array_mp_8852c_radioa=kestrel_halrf_radioa
             array_mp_8852c_radiob=kestrel_halrf_radiob)
-        target_compile_options(kestrel_halrf_8852c PRIVATE
+        target_compile_options(kestrel_halrf PRIVATE
             -w -ffunction-sections -fdata-sections)
-        target_sources(devourer PRIVATE $<TARGET_OBJECTS:kestrel_halrf_8852c>)
-        target_include_directories(devourer PRIVATE hal/halrf/rtl8852c)
-        target_compile_definitions(devourer PUBLIC DEVOURER_KESTREL_HALRF_8852C=1)
+        target_sources(devourer PRIVATE $<TARGET_OBJECTS:kestrel_halrf>)
+        target_include_directories(devourer PRIVATE hal/halrf/g6)
+        target_compile_definitions(devourer PUBLIC DEVOURER_KESTREL_HALRF=1)
     endif()
 endif()
 

@@ -11,8 +11,8 @@
 #include "SelectedChannel.h" /* ChannelWidth_t */
 #include "logger.h"
 
-struct kestrel_halbb_ctx; /* opaque C handle (hal/halbb/rtl8852c) */
-struct kestrel_halrf_ctx; /* opaque C handle (hal/halrf/rtl8852c) */
+struct kestrel_halbb_ctx; /* opaque C handle (hal/halbb/g6) */
+struct kestrel_halrf_ctx; /* opaque C handle (hal/halrf/g6) */
 
 namespace kestrel {
 
@@ -407,8 +407,8 @@ public:
   int16_t _txpwr_offset_qdb = 0;  /* runtime offset (quarter-dB), sticky */
   bool _cca_on = false; /* DEVOURER_KESTREL_CCA_ON: keep CCA gates on (test) */
 
-#if defined(DEVOURER_KESTREL_HALBB_8852C)
-  /* Vendored halbb-G6 8852C RX bring-up (hal/halbb/rtl8852c/kestrel_halbb_glue).
+#if defined(DEVOURER_KESTREL_HALBB)
+  /* Vendored halbb-G6 8852C RX bring-up (hal/halbb/g6/kestrel_halbb_glue).
    * The static callbacks route the vendor C's register/OS plane to this device
    * (dev cookie = the HalKestrel*). */
   void halbb8852c_bringup(uint8_t cut, uint8_t rfe_type);
@@ -439,8 +439,8 @@ public:
   std::array<uint8_t, 2048> _efuse_log_map{}; /* parsed logical efuse shadow */
   bool _efuse_valid = false;                  /* autoload OK + map populated */
 #endif
-#if defined(DEVOURER_KESTREL_HALRF_8852C)
-  /* Vendored halrf-G6 8852C RF calibrations (hal/halrf/rtl8852c). Share the
+#if defined(DEVOURER_KESTREL_HALRF)
+  /* Vendored halrf-G6 8852C RF calibrations (hal/halrf/g6). Share the
    * halbb bridge (its RF-reg callbacks). */
   void halrf8852c_dac_cal();
   void halrf8852c_rx_dck();

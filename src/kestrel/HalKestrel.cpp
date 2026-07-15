@@ -17,10 +17,10 @@
 #if defined(DEVOURER_HAVE_KESTREL_8852C)
 #include "hal8852c_phy.h"
 #endif
-#if defined(DEVOURER_KESTREL_HALBB_8852C)
+#if defined(DEVOURER_KESTREL_HALBB)
 #include "kestrel_halbb_glue.h" /* vendored halbb-G6 8852C RX bring-up (C) */
 #endif
-#if defined(DEVOURER_KESTREL_HALRF_8852C)
+#if defined(DEVOURER_KESTREL_HALRF)
 #include "kestrel_halrf_glue.h" /* vendored halrf-G6 8852C RF cals (C) */
 #endif
 
@@ -1679,7 +1679,7 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
    * analogue; the 8852C needs this explicit routing block or the TX chain is
    * silent even though the RF synth locks. Part of the vendor trx-init. */
   if (_variant == ChipVariant::C8852C) {
-#if defined(DEVOURER_KESTREL_HALBB_8852C)
+#if defined(DEVOURER_KESTREL_HALBB)
     /* Vendored halbb-G6 RX bring-up: loads the gain-table cache, runs the
      * LNAON/TRSW/PAPE RF-front-end gpio routing, and enables the RX chains —
      * the real Realtek C, not a hand-transcribed subset. Then the vendored
@@ -1756,9 +1756,9 @@ void HalKestrel::ctrl_rx_path_8852c() {
   _logger->info("Kestrel PHY(8852C): RX path enabled (RF_PATH_AB, 0x4978=0x3)");
 }
 
-#if defined(DEVOURER_KESTREL_HALBB_8852C)
+#if defined(DEVOURER_KESTREL_HALBB)
 /* ---- Vendored halbb-G6 8852C RX bring-up bridge -------------------------- *
- * Realtek's own halbb C (hal/halbb/rtl8852c) drives the RX front-end verbatim:
+ * Realtek's own halbb C (hal/halbb/g6) drives the RX front-end verbatim:
  * gain-table cache load, LNAON/TRSW/PAPE gpio routing, RX-path enable, per-band
  * gain-error. Its register/OS plane is routed back here — BB regs through the
  * wide (wIndex=1) window like bb_rmw; power-region regs through the plain MAC
@@ -1794,7 +1794,7 @@ void HalKestrel::halbb_wrf(void *dev, unsigned int path, unsigned int addr,
   static_cast<HalKestrel *>(dev)->rf_wrf(static_cast<uint8_t>(path), addr, mask,
                                          val);
 }
-#if defined(DEVOURER_KESTREL_HALRF_8852C)
+#if defined(DEVOURER_KESTREL_HALRF)
 int HalKestrel::halbb_efuse_get_info(void *dev, unsigned int id, void *value,
                                      unsigned int size) {
   auto *h = static_cast<HalKestrel *>(dev);
@@ -1816,13 +1816,13 @@ void HalKestrel::halbb8852c_bringup(uint8_t cut, uint8_t rfe_type) {
     br->read_rf = &HalKestrel::halbb_rrf;
     br->write_rf = &HalKestrel::halbb_wrf;
     br->delay_us = &HalKestrel::halbb_delay;
-#if defined(DEVOURER_KESTREL_HALRF_8852C)
+#if defined(DEVOURER_KESTREL_HALRF)
     br->efuse_get_info = &HalKestrel::halbb_efuse_get_info;
 #endif
     br->logline = nullptr;
     _halbb_bridge = br;
     _halbb_ctx = kestrel_halbb_create(br, cut, rfe_type);
-#if defined(DEVOURER_KESTREL_HALRF_8852C)
+#if defined(DEVOURER_KESTREL_HALRF)
     _halrf_ctx = kestrel_halrf_create(br, cut, rfe_type); /* shares the bridge */
     /* Read + cache the efuse shadow now so the halrf cals' efuse reads (TSSI
      * DE targets, thermal trim) resolve through the efuse_get_info callback. */
@@ -1837,7 +1837,7 @@ void HalKestrel::halbb8852c_bringup(uint8_t cut, uint8_t rfe_type) {
                 "gpio/rx-path/gain-cache, rfe={} cut={})", rfe_type, cut);
 }
 
-#if defined(DEVOURER_KESTREL_HALRF_8852C)
+#if defined(DEVOURER_KESTREL_HALRF)
 void HalKestrel::halrf8852c_dac_cal() {
   if (_halrf_ctx) {
     kestrel_halrf_dac_cal(_halrf_ctx, 1);
@@ -1927,14 +1927,14 @@ void HalKestrel::halbb8852c_ctrl_bw_ch(uint8_t pri_ch, uint8_t center,
                                          : static_cast<uint8_t>(bw);
   kestrel_halbb_ctrl_bw_ch(_halbb_ctx, pri_ch, center, hbw, band_type);
 }
-#endif /* DEVOURER_KESTREL_HALBB_8852C */
+#endif /* DEVOURER_KESTREL_HALBB */
 
 HalKestrel::~HalKestrel() {
-#if defined(DEVOURER_KESTREL_HALRF_8852C)
+#if defined(DEVOURER_KESTREL_HALRF)
   if (_halrf_ctx)
     kestrel_halrf_destroy(_halrf_ctx);
 #endif
-#if defined(DEVOURER_KESTREL_HALBB_8852C)
+#if defined(DEVOURER_KESTREL_HALBB)
   if (_halbb_ctx)
     kestrel_halbb_destroy(_halbb_ctx);
   delete static_cast<kestrel_halbb_bridge *>(_halbb_bridge);
@@ -2270,7 +2270,7 @@ void HalKestrel::dack() {
 
 void HalKestrel::dac_cal() {
   if (_variant == ChipVariant::C8852C) {
-#if defined(DEVOURER_KESTREL_HALRF_8852C)
+#if defined(DEVOURER_KESTREL_HALRF)
     /* Vendored halrf DACK + RX-DCK (replaces the hand-rolled dac_cal_8852c /
      * rx_dck_8852c). Run once at bring-up for the monitor channel. */
     halrf8852c_dac_cal();
@@ -2693,7 +2693,7 @@ void HalKestrel::fast_retune(uint8_t channel) {
   /* Same-band retune: reuse the band established by the last set_channel (6 GHz
    * can't be re-derived from the channel number). */
   const uint8_t band_type = _cur_band_type;
-#if defined(DEVOURER_KESTREL_HALRF_8852C) && defined(DEVOURER_KESTREL_HALBB_8852C)
+#if defined(DEVOURER_KESTREL_HALRF) && defined(DEVOURER_KESTREL_HALBB)
   if (_variant == ChipVariant::C8852C) {
     /* Route through the vendored path, matching set_channel: the hand-rolled
      * rf_ctrl_ch cannot lock the 6 GHz VCO (see 73279d7), so a 6 GHz FastRetune
@@ -2884,7 +2884,7 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
 
   /* --- RF channel + bandwidth + synth relock. Tunes to the block CENTER. --- */
   _cur_band_type = band_type; /* for a later same-band FastRetune */
-#if defined(DEVOURER_KESTREL_HALRF_8852C)
+#if defined(DEVOURER_KESTREL_HALRF)
   if (_variant == ChipVariant::C8852C) {
     /* Vendored RF channel tune for ALL bands: halrf_ctl_band_ch_bw_8852c (RF18
      * band/ch/bw for DAV+DDV both paths + the path-B CAV WA) then
@@ -2915,14 +2915,14 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
     set_rxsc_rpl_comp(center);
     rx_dck();
   }
-#if defined(DEVOURER_KESTREL_HALBB_8852C)
+#if defined(DEVOURER_KESTREL_HALBB)
   else {
     /* Full vendor per-channel BB config (halbb_ctrl_bw_ch_8852c): per-band
      * gain-error, hidden/normal efuse RX gain, band mode-sel (0x4738/0x4aa4),
      * SCO comp, BW/RXBB/ADC, CCK enable — replacing devourer's hand-rolled BB
      * channel-switch. band_type 0=2.4G, 1=5G. */
     halbb8852c_ctrl_bw_ch(pri_ch, center, bw, band_type);
-#if defined(DEVOURER_KESTREL_HALRF_8852C)
+#if defined(DEVOURER_KESTREL_HALRF)
     /* Vendored halrf IQK. The 0xbff8 one-shot-done poll depends on the NCTL
      * micro-engine, which halrf8852c_iqk now loads lazily on first call
      * (kestrel_halrf_rfk_init) — the piece halrf_dm_init runs before any cal,
@@ -3038,7 +3038,7 @@ bool HalKestrel::read_efuse(EfuseInfo &out, std::array<uint8_t, 1536> *raw_phys)
     all_00 &= (b == 0x00);
   }
   out.autoload_ok = !all_ff && !all_00;
-#if defined(DEVOURER_KESTREL_HALRF_8852C)
+#if defined(DEVOURER_KESTREL_HALRF)
   /* Cache the parsed logical map as the halrf efuse shadow (the efuse_get_info
    * bridge reads TSSI-DE / thermal fields from it via the vendored 8852c map). */
   static_assert(r::WL_EFUSE_LOG_MAP_SIZE_8852B == 2048, "efuse shadow size");

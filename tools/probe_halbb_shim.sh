@@ -5,10 +5,10 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-V="$REPO/hal/halbb/rtl8852c/vendor"
+V="$REPO/hal/halbb/g6/vendor"
 INCS=(
   -I"$REPO/hal/halbb"              # shim hal_headers_le.h (../../ from vendor/)
-  -I"$REPO/hal/halbb/rtl8852c"     # shim/ bridge
+  -I"$REPO/hal/halbb/g6"     # shim/ bridge
   -I"$V"                           # vendor bb-level headers
   -I"$V/halbb_8852c"               # vendor 8852c headers
 )

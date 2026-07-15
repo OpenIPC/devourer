@@ -34,10 +34,10 @@ int main() {
              (ac | kBw5 | kBw10));
   expect("Unknown bw = 0",
          bw_mask_for_generation(ChipGeneration::Unknown) == 0);
-  /* Kestrel (11ax) does 20/40/80 but has no ported narrowband yet, so it
-   * reports the plain AC set (not the J2/J3 5/10 MHz bits). */
-  expect("Kestrel bw = 20/40/80 (no narrowband)",
-         bw_mask_for_generation(ChipGeneration::Kestrel) == ac);
+  /* Kestrel (11ax) does 20/40/80 + 160 MHz (RTL8852C, validated on-air at
+   * 6 GHz). */
+  expect("Kestrel bw = 20/40/80/160",
+         bw_mask_for_generation(ChipGeneration::Kestrel) == (ac | kBw160));
 
   /* --- generation names --- */
   expect("gen name jaguar3",

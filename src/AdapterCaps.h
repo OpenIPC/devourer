@@ -64,6 +64,7 @@ constexpr uint8_t kBw10 = 1u << 1;
 constexpr uint8_t kBw20 = 1u << 2;
 constexpr uint8_t kBw40 = 1u << 3;
 constexpr uint8_t kBw80 = 1u << 4;
+constexpr uint8_t kBw160 = 1u << 5;
 
 /* J1 does 20/40/80; J2 and J3 add the 5/10 MHz narrowband re-clock (J2 packs
  * the ADC/DAC clock word into 0x8ac, J3 into 0x9b0/0x9b4 — same RF-stays-20MHz
@@ -72,9 +73,11 @@ constexpr uint8_t kBw80 = 1u << 4;
  * only dead enum values). Pure; unit-tested in tests/adapter_caps_selftest.cpp. */
 inline uint8_t bw_mask_for_generation(ChipGeneration g) {
   const uint8_t ac = kBw20 | kBw40 | kBw80;
-  /* Kestrel (11ax) does 20/40/80; its narrowband re-clock is not yet ported,
-   * so it reports the plain AC set (not the J2/J3 5/10 MHz bits). */
-  return (g == ChipGeneration::Jaguar1 || g == ChipGeneration::Kestrel) ? ac
+  /* Kestrel (11ax) additionally does 160 MHz (RTL8852C, vendored
+   * halbb_ctrl_bw_ch/RF tune — validated on-air at 6 GHz). */
+  if (g == ChipGeneration::Kestrel)
+    return ac | kBw160;
+  return g == ChipGeneration::Jaguar1  ? ac
          : g == ChipGeneration::Unknown ? 0
                                         : (ac | kBw5 | kBw10);
 }

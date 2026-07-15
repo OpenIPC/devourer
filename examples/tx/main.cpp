@@ -499,9 +499,10 @@ int main(int argc, char **argv) {
   uint8_t init_offset = 0;
   if (const char *e = std::getenv("DEVOURER_HOP_BW")) {
     int mhz = std::atoi(e);
-    init_width = mhz == 80 ? CHANNEL_WIDTH_80
-               : mhz == 40 ? CHANNEL_WIDTH_40
-                           : CHANNEL_WIDTH_20;
+    init_width = mhz == 160 ? CHANNEL_WIDTH_160
+               : mhz == 80  ? CHANNEL_WIDTH_80
+               : mhz == 40  ? CHANNEL_WIDTH_40
+                            : CHANNEL_WIDTH_20;
     if (init_width != CHANNEL_WIDTH_20)
       init_offset = 1; /* HT40+ by default */
     if (const char *o = std::getenv("DEVOURER_HOP_OFFSET"))

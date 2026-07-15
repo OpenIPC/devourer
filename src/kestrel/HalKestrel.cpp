@@ -2790,6 +2790,14 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
     const int bs = channel - (((channel - o) / 4) % 4) * 4;
     center = static_cast<uint8_t>(bs + 6);
     pri_ch = static_cast<uint8_t>((channel - bs) / 4 + 1);
+  } else if (bw == CHANNEL_WIDTH_160) {
+    /* 160 MHz spans 8 20-MHz sub-channels; same grid-origin idea as 80 MHz but
+     * modulo 8. block_start = ch - ((ch-o)/4 % 8)*4; center = bs+14 (middle of
+     * bs..bs+28); pri_ch 1..8. 5 GHz: {36..64}->center 50; 6 GHz: {1..29}->15. */
+    const int o = (band_type == 2) ? 1 : 36;
+    const int bs = channel - (((channel - o) / 4) % 8) * 4;
+    center = static_cast<uint8_t>(bs + 14);
+    pri_ch = static_cast<uint8_t>((channel - bs) / 4 + 1);
   }
 
   /* --- BB ctrl_ch + ctrl_bw (hand-rolled halbb_ctrl_ch/bw_8852b). For the
@@ -2915,11 +2923,12 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
    * (SetTxPowerOffsetQdb) is folded in here so it survives a channel change. */
   set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
 
-  const int bw_mhz = bw == CHANNEL_WIDTH_80   ? 80
-                     : bw == CHANNEL_WIDTH_40 ? 40
-                     : bw == CHANNEL_WIDTH_5  ? 5
-                     : bw == CHANNEL_WIDTH_10 ? 10
-                                             : 20;
+  const int bw_mhz = bw == CHANNEL_WIDTH_160  ? 160
+                     : bw == CHANNEL_WIDTH_80  ? 80
+                     : bw == CHANNEL_WIDTH_40  ? 40
+                     : bw == CHANNEL_WIDTH_5   ? 5
+                     : bw == CHANNEL_WIDTH_10  ? 10
+                                              : 20;
   _logger->info("Kestrel PHY: tuned to ch{} (center {}) bw{} ({}) — "
                 "TXpwr={}dBm (off={}qdB)",
                 channel, center, bw_mhz, is_2g ? "2.4G" : "5G",

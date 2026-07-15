@@ -838,8 +838,8 @@ int main() {
     uint8_t poff = 0;
     if (const char *bw_env = std::getenv("DEVOURER_BW")) {
       int bw = std::atoi(bw_env);
-      if (bw == 40 || bw == 80) {
-        pwidth = (bw == 40) ? CHANNEL_WIDTH_40 : CHANNEL_WIDTH_80;
+      if (bw == 40 || bw == 80 || bw == 160) {
+        pwidth = bw == 40 ? CHANNEL_WIDTH_40 : bw == 80 ? CHANNEL_WIDTH_80 : CHANNEL_WIDTH_160;
         poff = 1;
         if (const char *off_env = std::getenv("DEVOURER_CHOFFSET"))
           poff = static_cast<uint8_t>(std::atoi(off_env));
@@ -1254,8 +1254,8 @@ int main() {
   uint8_t ch_offset = 0;
   if (const char *bw_env = std::getenv("DEVOURER_BW")) {
     int bw = std::atoi(bw_env);
-    if (bw == 40 || bw == 80) {
-      width = (bw == 40) ? CHANNEL_WIDTH_40 : CHANNEL_WIDTH_80;
+    if (bw == 40 || bw == 80 || bw == 160) {
+      width = bw == 40 ? CHANNEL_WIDTH_40 : bw == 80 ? CHANNEL_WIDTH_80 : CHANNEL_WIDTH_160;
       ch_offset = 1; // default: secondary channel above the primary
       if (const char *off_env = std::getenv("DEVOURER_CHOFFSET"))
         ch_offset = static_cast<uint8_t>(std::atoi(off_env));

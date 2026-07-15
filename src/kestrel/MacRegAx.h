@@ -6,7 +6,7 @@
 /* Register + bitfield constants for the Kestrel (Wi-Fi 6 / G6 "phl") MAC,
  * transcribed from the vendor tree reference/rtl8852bu
  * (phl/hal_g6/mac/mac_reg_ax.h). Only the subset the Kestrel bring-up touches
- * is mirrored here; extend as later milestones need more. Values are verbatim
+ * is mirrored here; extend as new features need more. Values are verbatim
  * from the vendor headers (file:line noted at each block).
  *
  * NB: this is the AX register map — a different address space from the 11ac
@@ -251,8 +251,8 @@ constexpr uint8_t RPR_STF_TMR = 255;       /* rpr_cfg_stf.tmr */
 /* CMAC port config (mport.c mac_port_init) — the BSS/PTCL TX context. Without
  * an ENABLED port the CMAC accepts frames into the queue but never airs them
  * (the mgmt bulk-OUT stalls at ~103). Band-0 port-0 register + bits
- * (mac_reg_ax.h R_AX_PORT_CFG_P0 block). Found via a usbmon golden diff: the
- * in-kernel rtw89_8852bu writes this; devourer never did. */
+ * (mac_reg_ax.h R_AX_PORT_CFG_P0 block); the port-enable bit is what
+ * mac_port_init (mport.c) sets to gate the transmit engine. */
 constexpr uint16_t R_AX_PORT_CFG_P0 = 0xC400;
 /* Per-port free-running MAC TSF timer (mac_get_tsf, twt.c). Band-0 port-0. */
 constexpr uint16_t R_AX_TSFTR_LOW_P0 = 0xC438;
@@ -360,8 +360,8 @@ constexpr uint8_t HFC_FULL_COND_X2 = 1;
  * 8852B FC_CTRL/CH_PAGE_CTRL). hfc_init_dlfw must target these on the 8852C —
  * configuring the H2C (CH12) flow control on the 8852B addresses leaves the
  * 8852C's H2C path unconfigured so the RISC-V bootrom never raises
- * H2C_PATH_RDY (golden usbmon diff: vendor writes 0x1700/0x1704, not
- * 0x8A00/0x8A04). */
+ * H2C_PATH_RDY — the 8852C hfc ops target the _V1 bank at 0x1700/0x1704,
+ * not 0x8A00/0x8A04 (hci_fc_8852c.c). */
 constexpr uint16_t R_AX_HCI_FC_CTRL_V1 = 0x1700;
 constexpr uint16_t R_AX_CH_PAGE_CTRL_V1 = 0x1704;
 
@@ -802,8 +802,8 @@ constexpr uint32_t B_AX_SEC_TX_ENC = 1u << 0;
 /* NIC-mode DLE quota: the 8852BU USB hal runs qta_mode = MAC_AX_QTA_SCC_TURBO
  * (rtl8852bu_halinit.c:33, quota_turbo default) and this rig enumerates USB2
  * HS, so the live table is the dle_mem_usb2_8852b SCC_TURBO row:
- * wde_size30 / ple_size31 / wde_qt30 / ple_qt27(min) / ple_qt28(max) —
- * confirmed against the vendor golden capture register values. */
+ * wde_size30 / ple_size31 / wde_qt30 / ple_qt27(min) / ple_qt28(max),
+ * constants below sourced row-by-row from dle.c. */
 constexpr uint16_t SCC_WDE_LNK_PAGE = 224;  /* wde_size30 lnk (dle.c:221) */
 constexpr uint16_t SCC_WDE_UNLNK_PAGE = 32; /* wde_size30 unlnk */
 constexpr uint16_t SCC_PLE_LNK_PAGE = 1392; /* ple_size31 lnk (dle.c:475) */
@@ -847,7 +847,7 @@ constexpr uint16_t SCC_PLE_MIN_8852C_USB2[12] = {1482, 0, 16, 48, 13, 13,
 constexpr uint16_t SCC_PLE_MAX_8852C_USB2[12] = {1482, 0,    32,   48, 1269, 13,
                                                  1646, 0, 1288, 38,  120, 1272};
 
-/* ---- BB/RF enable (M3; hw.c set_enable_bb_rf) — releases the BB from reset
+/* ---- BB/RF enable (hw.c set_enable_bb_rf) — releases the BB from reset
  * so the halbb/halrf register windows actually accept writes. All MAC/system
  * space (wIndex=0). MUST run before applying the BB/RF tables. ---- */
 constexpr uint16_t R_AX_SYS_FUNC_EN = 0x0002;
@@ -997,8 +997,8 @@ constexpr uint32_t B_AX_BTCCA_EN = 1u << 5;
  * perpetual busy that freezes the CSMA backoff, so the scheduler never grants a
  * TX opportunity and injected frames stall in the CMAC MBH queue (~103-frame
  * mgmt-TX stall). Clearing CCA_EN + the secondary-channel + EDCCA gates lets the
- * frames air — the intended TX/monitor-link mode; carrier-sense returns once the
- * BB calibration (M3) is ported. On-air validated: the 8852BU radiates. */
+ * frames air — the intended TX/monitor-link mode; carrier-sense returns with
+ * the energy-detector calibration. On-air validated: the 8852BU radiates. */
 constexpr uint32_t B_AX_CCA_EN = 1u << 0;
 constexpr uint32_t B_AX_SEC20_EN = 1u << 1;
 constexpr uint32_t B_AX_SEC40_EN = 1u << 2;

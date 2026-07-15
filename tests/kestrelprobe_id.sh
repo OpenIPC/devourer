@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kestrelprobe_id.sh — Kestrel M0 hardware validation: the identity layer.
+# kestrelprobe_id.sh — Kestrel hardware validation: the identity layer.
 #
 # Finds a Kestrel adapter (default: the TX20U Nano RTL8852BU, 35bc:0108),
 # detaches the in-kernel rtw89 driver from its interfaces for the duration

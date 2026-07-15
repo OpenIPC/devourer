@@ -6,7 +6,7 @@
 # the in-kernel rtw89 binding.
 #
 # These .ko are the kernel cells for the Kestrel regress rows and the usbmon
-# golden reference for the M1 bring-up diff — a broken vendor build here has
+# ground truth for the bring-up — a broken vendor build here has
 # historically cost days on other chip families, hence a hard functional gate.
 #
 # Usage: sudo tests/kestrel_vendor_ko_smoke.sh [bu|cu|both]   (default: both)

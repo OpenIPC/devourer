@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kestrel_txpwr_sweep.sh — M4 TX-power validation for the RTL8852BU.
+# kestrel_txpwr_sweep.sh — TX-power validation for the RTL8852BU.
 # Sweeps devourer's flat TX-power override (DEVOURER_TX_PWR -> the CMAC
 # power-by-rate/limit tables at 0xD2C0/0xD2EC/0xD33C) and measures the received
 # power slope on an independent devourer ground station (RTL8812AU rxdemo,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kestrel_tx_onair.sh — M4 TX first-light on-air validation.
+# kestrel_tx_onair.sh — TX injection on-air validation.
 # devourer TX on the RTL8852BU (35bc:0108, txdemo, InitWrite + canonical beacon
 # SA 57:42:75:05:d6:00) -> devourer RX witness on the RTL8812AU (0bda:8812,
 # rxdemo, counts rx.txhit on that SA). Mirror of kestrel_inject_sanity.sh with
@@ -89,7 +89,7 @@ TX_UP=$(grep -c "TX ready" "$TXLOG" 2>/dev/null || echo 0)
 TX_SENT=$(grep -cE "send_packet|tx\.|sent" "$TXLOG" 2>/dev/null || echo "?")
 HITS=$(grep -c '"ev":"rx.txhit"' "$RXLOG" 2>/dev/null || echo 0)
 echo "=================================================================="
-echo "M4 TX on-air (ch$CH, ${DUR}s, rate=$TX_RATE):  txdemo TX-ready=$TX_UP"
+echo "TX on-air (ch$CH, ${DUR}s, rate=$TX_RATE):  txdemo TX-ready=$TX_UP"
 echo "  8812AU witness rx.txhit (canonical SA $SA): $HITS"
 # Note: rx.txhit carries no rate field; a non-default rate that still yields
 # hits proves the rate-specific descriptor is valid + radiates. Confirming the
@@ -98,7 +98,7 @@ echo "  8812AU witness rx.txhit (canonical SA $SA): $HITS"
 if [ "$TX_UP" -lt 1 ]; then
   echo "RESULT: TX bring-up FAILED — see $TXLOG"; tail -5 "$TXLOG"
 elif [ "${HITS:-0}" -gt 0 ]; then
-  echo "RESULT: PASS — the 8852BU radiates devourer-pushed frames (M4 TX first light)."
+  echo "RESULT: PASS — the 8852BU radiates devourer-pushed frames."
 else
   echo "RESULT: TX came up but ZERO frames witnessed — descriptor/endpoint/rate needs work."
   echo "  --- txdemo tail ---"; tail -8 "$TXLOG"

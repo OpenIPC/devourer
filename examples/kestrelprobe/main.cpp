@@ -1,15 +1,17 @@
 /* kestrelprobe — staged bring-up driver for the Kestrel (Wi-Fi 6 / 802.11ax,
- * RTL8852BU / RTL8852CU) milestones, the USB sibling of pcieprobe. Validates
- * the layers one at a time, bottom-up:
+ * RTL8852BU / RTL8852CU), the USB sibling of pcieprobe. Validates the layers
+ * one at a time, bottom-up:
  *
- *   id     (M0) USB open + PID-table variant + AX-native identity: the die-id
- *               at R_AX_SYS_CHIPINFO (0x00FC) must match the PID-selected
- *               variant (0x51 = 8852B, 0x52 = 8852C); cut version from
- *               R_AX_SYS_CFG1[15:12].
- *   power  (M1) + mac_ax power-on sequence + efuse logical map.  [not ported]
- *   fw     (M1) + firmware download (NICCE image) + fw-ready poll. [not ported]
+ *   id     USB open + PID-table variant + AX-native identity: the die-id
+ *          at R_AX_SYS_CHIPINFO (0x00FC) must match the PID-selected
+ *          variant (0x51 = 8852B, 0x52 = 8852C); cut version from
+ *          R_AX_SYS_CFG1[15:12].
+ *   power  + mac_ax power-on sequence + efuse logical map.
+ *   fw     + firmware download (cut-selected image) + fw-ready poll.
+ *   trx    + MAC TRX init (DMAC half).
+ *   phy    + BB/RF bring-up (tables, gain, RX path).
  *
- * Usage: sudo kestrelprobe [id|power|fw] [--vid 0xNNNN] [--pid 0xNNNN]
+ * Usage: sudo kestrelprobe [id|power|fw|trx|phy] [--vid 0xNNNN] [--pid 0xNNNN]
  * Default stage: id. Without --vid/--pid the open loop scans the Kestrel PID
  * table (kestrel/KestrelUsbIds.h). Two cold-plug traps: the TX20U Nano first
  * enumerates as a ZeroCD disk (0bda:1a2b) until usb_modeswitch flips it to
@@ -17,8 +19,8 @@
  * every enumeration — temp-blacklist it (modprobe -r does not survive a
  * re-enumeration; see docs/adapter-doctor.md).
  *
- * Events (stdout JSONL): kestrel.id / kestrel.power / kestrel.fw with
- * ok:true|false — exit code 0 only if the requested stage passed. */
+ * Events (stdout JSONL): kestrel.<stage> with ok:true|false — exit code 0
+ * only if the requested stage passed. */
 #if defined(__ANDROID__) || defined(_MSC_VER) || defined(__APPLE__)
 #include <libusb.h>
 #else

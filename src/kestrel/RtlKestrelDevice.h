@@ -39,15 +39,12 @@ struct ChipInfo {
  * Jaguar (11ac) generations so the demos and WiFiDriver factory treat all
  * four uniformly.
  *
- * Bring-up is ported from the vendor trees reference/rtl8852bu (v1.19.21) and
- * reference/rtl8852cu (v1.19.22): mac_ax power-on / firmware download / TRX
- * init, halbb PHY tables, halrf calibration. Milestone status:
- *   M0 (this skeleton): identity — PID dispatch + die-id/cut confirmation.
- *   M1: power-on, FW download (NICCE image), efuse.       [not yet ported]
- *   M2: MAC TRX init, monitor RX, 11ax frame parser.      [not yet ported]
- *   M3: channel/BW via halbb, calibration minimum set.    [not yet ported]
- *   M4: TX (mac_ax TXWD), TSSI power-by-rate.             [not yet ported]
- * Unported entry points throw std::runtime_error naming the milestone. */
+ * Ported from the vendor trees reference/rtl8852bu (v1.19.21) and
+ * reference/rtl8852cu (v1.19.22). The layer split: the mac_ax plane (identity,
+ * power-on, firmware download, efuse, MAC TRX init, H2C/C2H, descriptors) is
+ * hand-ported C++ here + HalKestrel/KestrelFw; the halbb PHY and halrf
+ * calibration planes are the vendor C compiled verbatim (hal/halbb, hal/halrf)
+ * behind the kestrel glue. */
 class RtlKestrelDevice : public IRtlDevice {
 public:
   RtlKestrelDevice(RtlAdapter device, Logger_t logger,
@@ -69,7 +66,7 @@ public:
   devourer::TxCaps GetTxCaps() override;
   devourer::AdapterCaps GetAdapterCaps() override;
 
-  /* Runtime TX-power lever (M5): fixed-dBm BB power (halbb_set_txpwr_dbm) with a
+  /* Runtime TX-power lever: fixed-dBm BB power (halbb_set_txpwr_dbm) with a
    * quarter-dB offset relative to the DEVOURER_TX_PWR base. Sticky across
    * SetMonitorChannel. */
   devourer::TxPowerCaps GetTxPowerCaps() override;
@@ -110,21 +107,21 @@ public:
 
   kestrel::ChipVariant variant() const { return _variant; }
 
-  /* M1a bring-up, exposed for kestrelprobe's "power" stage: power the MAC on
-   * and dump the efuse. Not part of the IRtlDevice contract (Init/InitWrite
-   * drive the full sequence once M1b+M2 land). Returns false on failure. */
+  /* Staged bring-up, exposed for kestrelprobe's "power" stage: power the MAC
+   * on and dump the efuse. Not part of the IRtlDevice contract (Init/InitWrite
+   * drive the full sequence). Returns false on failure. */
   bool PowerOnAndReadEfuse(kestrel::EfuseInfo &out);
 
-  /* M1b bring-up for kestrelprobe's "fw" stage: power on, read efuse, then
-   * download firmware. Returns false at the first failing step. */
+  /* kestrelprobe "fw" stage: power on, read efuse, then download firmware.
+   * Returns false at the first failing step. */
   bool PowerOnEfuseAndFw(kestrel::EfuseInfo &out);
 
-  /* M2a bring-up for kestrelprobe's "trx" stage: everything in "fw" plus the
-   * DMAC-half MAC TRX init. Returns false at the first failing step. */
+  /* kestrelprobe "trx" stage: everything in "fw" plus the DMAC-half MAC TRX
+   * init. Returns false at the first failing step. */
   bool PowerOnFwAndTrx(kestrel::EfuseInfo &out);
 
-  /* M3 bring-up for kestrelprobe's "phy" stage: everything in "trx" plus the
-   * BB + RF table apply. Returns false at the first failing step. */
+  /* kestrelprobe "phy" stage: everything in "trx" plus the BB + RF table
+   * apply. Returns false at the first failing step. */
   bool PowerOnTrxAndPhy(kestrel::EfuseInfo &out);
 
   kestrel::HalKestrel &hal() { return _hal; }
@@ -141,7 +138,6 @@ public:
   void EnableTxScheduler();
 
 private:
-  [[noreturn]] void not_ported(const char *entry, const char *milestone) const;
   /* Route a C2H firmware message (RPKT_TYPE_C2H payload). Currently decodes the
    * USR_TX_RPT_INFO report and emits its freerun TX-egress timestamp. */
   void handle_c2h(const uint8_t *payload, uint32_t len);

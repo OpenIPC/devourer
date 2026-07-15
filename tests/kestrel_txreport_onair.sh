@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kestrel_txreport_onair.sh — M4/#236 USR_TX_RPT on-air validation.
+# kestrel_txreport_onair.sh — USR_TX_RPT (#236) on-air validation.
 # Runs devourer txdemo on the RTL8852BU (35bc:0108) with TX_WITH_RX=thread so
 # the RX loop is up to receive C2H, TXing the canonical beacon. The firmware's
 # per-user TX report (FWCMD_H2C_FUNC_USR_TX_RPT, PERIOD mode) is enabled in
@@ -83,6 +83,6 @@ elif [ "${RPTS:-0}" -gt 0 ]; then
 else
   echo "RESULT: enable sent OK but ZERO reports fired."
   echo "  Likely: PERIOD report accounts only registered-role MACIDs; monitor"
-  echo "  injection (macid 0, no addr-cam/role) isn't tracked. Needs M6 STA ctx."
+  echo "  injection (macid 0, no addr-cam/role) isn't tracked; needs a full BSS STA role."
   echo "  --- txdemo tail ---"; tail -8 "$TXLOG"
 fi

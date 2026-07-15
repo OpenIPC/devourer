@@ -8,7 +8,7 @@
  * reference/rtl8852bu phl/hal_g6/mac/rxdesc.h + type.h (rxd_short_t 16B /
  * rxd_long_t 32B) and the 8852bu RX-meta parse. Self-contained + header-only so
  * it unit-tests without hardware; the RtlKestrelDevice RX loop walks the
- * bulk-IN aggregate with it once M2a (MAC RX bring-up) lands.
+ * bulk-IN aggregate with it.
  *
  * A bulk-IN transfer is an aggregate of sub-packets, each:
  *   [rxd (16 or 32 B)] [drv_info (drv_info_size*8 B)] [shift pad] [payload]

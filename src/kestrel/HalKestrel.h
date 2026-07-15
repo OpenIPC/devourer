@@ -30,16 +30,16 @@ struct EfuseInfo {
 /* HalKestrel owns the low-level MAC bring-up for the Kestrel (G6) generation:
  * register-op helpers (poll, xtal_si, efuse), the USB power-on sequence, and
  * the physical→logical efuse dump. Ported from reference/rtl8852bu mac_ax
- * (pwr_seq_func_8852b.c, hw.c, efuse.c, _usb_8852b.c). Milestone M1a. The
- * firmware-download layer (M1b) and TRX init (M2) build on top of this. */
+ * (pwr_seq_func_8852b.c, hw.c, efuse.c, _usb_8852b.c). The firmware-download
+ * layer (KestrelFw) and TRX init build on top of this. */
 class HalKestrel {
 public:
   HalKestrel(RtlAdapter device, Logger_t logger, ChipVariant variant);
 
   /* USB power-on: usb_pre_init + mac_pwr_on_usb_8852b. Leaves the MAC powered
    * (DMAC/CMAC func-enabled) and ready for firmware download. Returns false on
-   * a poll timeout (chip wedged — needs a VBUS cold). 8852C shares the 8852B
-   * recipe for M1; a variant divergence hook lands if bring-up proves it. */
+   * a poll timeout (chip wedged — needs a VBUS cold). The 8852C diverges via
+   * power_on_8852c (LDO/SPS/CMAC1/XTAL deltas); the rest is shared. */
   bool power_on();
 
   /* Dump the physical WiFi efuse (register read loop) and parse it to the
@@ -54,7 +54,7 @@ public:
    * Must run after download_firmware, before trx_dmac_init. */
   void enable_bb_rf();
 
-  /* Firmware download (M1b): hci_func_en + DLE/HFC pre-init + FWDL of the
+  /* Firmware download: hci_func_en + DLE/HFC pre-init + FWDL of the
    * cut-appropriate NICCE image. Must run after power_on. `cut` is the chip
    * cut version (from ReadChipInfo / R_AX_SYS_CFG1[15:12]). */
   bool download_firmware(uint8_t cut);
@@ -68,20 +68,16 @@ public:
    * Vendor order: runs AFTER trx init (+ feat_init, host-side no-op). */
   void usb_intf_init() { usb_init(); }
 
-  /* M2a — the DMAC half of mac_trx_init: re-init the DLE to the NIC-mode (SCC)
+  /* The DMAC half of mac_trx_init: re-init the DLE to the NIC-mode (SCC)
    * quota, station scheduler, MPDU processor, security engine. Must run after
-   * download_firmware. Returns false on the sta-scheduler poll timeout. The
-   * CMAC half (rx_fltr / rmac / cmac_dma) + BB/RF/channel that complete RX
-   * land in later steps. */
+   * download_firmware. Returns false on the sta-scheduler poll timeout. */
   bool trx_dmac_init();
 
-  /* M2a — the CMAC half (RX path): promiscuous RX filter, receiver MAC
+  /* The CMAC half of mac_trx_init (RX path): promiscuous RX filter, receiver MAC
    * (RCR channel-enable + DLK timeouts + RX max-len), CCA control, TX
    * subcarrier / RRSR, RX DMA full-mode clear, and USB RX aggregation. Must
-   * run after trx_dmac_init. The TX/protocol CMAC sub-inits (scheduler EDCA,
-   * NAV, spatial-reuse, tmac, trxptcl, ptcl, addr-cam) are not needed for
-   * monitor RX and are omitted. Actual reception also requires the BB/RF/
-   * channel bring-up (M3). */
+   * run after trx_dmac_init. Actual reception also requires the BB/RF/channel
+   * bring-up (phy_bb_rf_init + set_channel). */
   bool trx_cmac_rx_init();
 
   /* SER error-interrupt-mask enable (mac_enable_imr + mac_err_imr_ctrl). The
@@ -99,9 +95,9 @@ public:
    * PORT so the transmit engine has a BSS/PTCL context to air frames from.
    * ROOT CAUSE of the ~103-frame mgmt-TX stall: without an enabled port the
    * CMAC accepts frames into the queue but never transmits them (zero TX
-   * completions). Found via a usbmon golden diff vs the in-kernel rtw89 driver
-   * (which writes PORT_CFG_P0; devourer never did). Call at the end of the TX
-   * bring-up, after cmac_init. */
+   * completions) — PORT_CFG_P0's port-enable gates the transmit engine
+   * (mac_port_init, mport.c). Call at the end of the TX bring-up, after
+   * cmac_init. */
   void port_init();
 
   /* set_hw_sch_tx_en (cmac_tx.c): RMW-enable the scheduler contention TX queues
@@ -119,7 +115,7 @@ public:
   bool start_beacon(const uint8_t *body, uint32_t len, uint16_t interval_tu,
                     uint8_t bss_color, uint16_t rate_ax);
 
-  /* M3 — PHY bring-up: apply the halbb BB register + gain tables and the
+  /* PHY bring-up: apply the halbb BB register + gain tables and the
    * halrf radio-A/B tables (via PhyTableLoaderKestrel). `rfe_type` / `cut`
    * select the table variant (from the efuse / chip id). Must run after the
    * MAC TRX init. This programs the baseband + RF registers; channel tuning
@@ -140,7 +136,7 @@ public:
    * end was disabled -> near-deaf. RF_PATH_AB (both chains, monitor). */
   void ctrl_rx_path_8852c(); /* fallback when the vendored halbb isn't built */
 
-  /* M3 — tune the BB + RF to a monitor channel (2.4/5 GHz, 20 MHz). Ports the
+  /* Tune the BB + RF to a monitor channel. Ports the
    * halbb ctrl_ch/ctrl_bw/cck_en/bb_reset + the halrf RF18 channel setting.
    * Must run after phy_bb_rf_init. */
   /* `offset` = SelectedChannel.ChannelOffset (HAL_PRIME_CHNL_OFFSET: 1=primary
@@ -190,7 +186,7 @@ public:
     return static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb);
   }
 
-  /* M4/M5 — enable the per-user TX report so the fw emits C2H USR_TX_RPT_INFO
+  /* Enable the per-user TX report so the fw emits C2H USR_TX_RPT_INFO
    * with the freerun TX-egress timestamps. Call after the TX bring-up; the
    * reports are received + parsed in the RX loop. */
   bool enable_tx_report(uint8_t mode, uint8_t macid = 0, uint8_t port = 0,
@@ -207,7 +203,7 @@ public:
   /* Diagnostic: route the fw log to C2H packets (probe packet-C2H delivery). */
   bool enable_fw_log_c2h() { return _fw.enable_fw_log_c2h(); }
 
-  /* M6 pseudo-STA — register a station-role MACID with the firmware
+  /* Pseudo-STA — register a station-role MACID with the firmware
    * (mac_fw_role_maintain, CREATE). This is the linchpin that lets the fw
    * track the MACID so per-MACID TX features engage (USR_TX_RPT frame-stat,
    * data-frame path, power-by-rate). Call in InitWrite before enable_tx_report.
@@ -277,7 +273,7 @@ private:
 
   bool usb_pre_init();
   void usb_init(); /* runtime USB init (endpoint NUMP/burst) — usb_init_8852b */
-  /* M3 BB/RF channel helpers (all over the wIndex=1 window). */
+  /* BB/RF channel helpers (all over the wIndex=1 window). */
   void bb_rmw(uint32_t addr, uint32_t mask, uint32_t val); /* masked BB write */
   uint32_t bb_read(uint32_t addr, uint32_t mask); /* masked+shifted BB read */
   uint32_t rf_read(uint8_t path, uint8_t rf_addr);         /* DDV RF read */
@@ -349,7 +345,7 @@ private:
 
 public:
   void bb_reset_all();
-  /* M2a DMAC sub-inits (trxcfg.c). */
+  /* DMAC sub-inits (trxcfg.c). */
   bool dle_init_nic();
   bool hfc_init_nic(); /* runtime page/credit quotas so CH12 IO-offload flows */
   bool sta_sch_init();

@@ -11,7 +11,7 @@
 
 namespace kestrel {
 
-/* KestrelFw owns the firmware-download layer (milestone M1b), ported from
+/* KestrelFw owns the firmware-download layer, ported from
  * reference/rtl8852bu mac_ax: the DMAC/DLE/HFC pre-init that stands up the H2C
  * (CH12) transport, then the three-phase FWDL state machine (header H2C ->
  * section chunks -> WCPU boot poll). Runs after HalKestrel::power_on.
@@ -34,7 +34,7 @@ public:
    * timeout or FW error status (checksum/security/cut mismatch), all logged. */
   bool download_firmware(uint8_t cut, uint8_t mss_idx, bool is_sec_ic);
 
-  /* --- Firmware IO-offload (M3) — program BB/RF registers via H2C batches the
+  /* --- Firmware IO-offload — program BB/RF registers via H2C batches the
    * firmware replays on-chip (mac_add_cmd_ofld / halbb_fw_set_reg /
    * halrf_wrf). Usage: ofld_begin(); ofld_write(...)*N; ofld_flush(style).
    * Commands accumulate; a batch auto-flushes when full (LC forced on the last

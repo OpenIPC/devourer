@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kestrel_he_onair.sh — M5 HE-rate on-air validation with an AX sniffer.
+# kestrel_he_onair.sh — HE-rate on-air validation with an AX sniffer.
 # devourer txdemo transmits an 802.11ax HE PPDU on the RTL8852BU (35bc:0108,
 # DEVOURER_TX_RATE=HE<N>SS_MCS<M>), and the second AX adapter — the RTL8832CU
 # (35bc:0101) under the vendor 8852cu.ko in monitor mode — decodes it. tshark
@@ -90,7 +90,7 @@ TX_UP=$(grep -c "TX ready" "$TXLOG" 2>/dev/null); TX_UP=${TX_UP:-0}
 FRAMES=$(grep -c "$SA" "$CAP" 2>/dev/null); FRAMES=${FRAMES:-0}
 HE_FRAMES=$(awk -F'\t' '$2==11{n++} END{print n+0}' "$CAP" 2>/dev/null)
 echo "=================================================================="
-echo "M5 HE on-air (ch$CH rate=$RATE ${DUR}s):  txdemo TX-ready=$TX_UP"
+echo "HE on-air (ch$CH rate=$RATE ${DUR}s):  txdemo TX-ready=$TX_UP"
 echo "  sniffer frames from $SA: $FRAMES   of which 11ax(phy=11): $HE_FRAMES"
 echo "  --- sample decoded rows (sa / phy / rate / he-mcs) ---"; head -4 "$CAP" 2>/dev/null
 if [ "$TX_UP" -lt 1 ]; then

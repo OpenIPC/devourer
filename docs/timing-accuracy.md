@@ -2,7 +2,7 @@
 
 A common question: how does devourer's hardware-TSF time distribution
 (`docs/time-distribution.md`) compare with running NTP or PTP over the same
-Wi-Fi? Below are **measured** numbers from a two-node bench (this rig), the
+Wi-Fi? Below are **measured** numbers from a two-node bench, the
 methodology, and the honest caveats. Reproduce the transport half with the
 `reglat` microbench; the NTP half with `chronyd -Q` as described.
 

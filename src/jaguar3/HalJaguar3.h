@@ -120,6 +120,11 @@ public:
    * RX works. No-op for 8822C. Call after the channel is tuned. */
   void config_rfe(uint8_t channel);
 
+  /* Resolved efuse RFE type (8822E; 0/0xff already folded to the rfe-21
+   * default in rtw_hal_init). The eFEM pin-mux gate keys on this, like the
+   * kernel's _efem_pinmux_config (rfe 21..24). */
+  uint8_t rfe_type() const { return _phy_ctx.rfe_type; }
+
   /* 8822E channel-finalize TX writes the shared (8822c-derived) set_channel_bwmode
    * omits: the band-specific OFDM Tx backoff / Tx scaling (5 GHz 0x818/0x81c) and
    * the TX triangular-shaping / CFR (0xa74/0x80c/0x81c/0x8a0) from

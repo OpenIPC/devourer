@@ -65,7 +65,10 @@ best-effort decode). Jaguar3 TX-only sessions get reports via the coex thread's
 C2H drain; TX+RX sessions via the RX loop.
 
 This is the TX-side link sensor: retry counts feed adaptive rate/power the way
-RSSI/EVM feed the RX side.
+RSSI/EVM feed the RX side. The measured per-generation contract — which
+generations close the hardware-ACK loop as soliciting TX, and the report
+coverage a reliability layer can count on — is in
+[scheduled-mac.md](scheduled-mac.md).
 
 ## A-MPDU (`SetAmpduMode`)
 

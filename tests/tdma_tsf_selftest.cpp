@@ -73,6 +73,29 @@ int main() {
     std::vector<uint8_t> junk(60, 0x00);      // wrong SA / no TD magic
     CHECK(!tdma::parse_frame(junk.data(), junk.size()).ok, "foreign frame rejected");
     CHECK(!tdma::parse_frame(rt.data(), 8).ok, "short buffer rejected");
+
+    // v2 tag: host_ns round-trips; v1 frames parse with host_ns = 0.
+    {
+      const uint64_t txtsf = 0x1122334455667788ULL;
+      const uint64_t hns = 0xfedcba9876543210ULL;
+      auto v2 = tdma::build_frame(rt, tdma::Class::Marker, 7, 3, txtsf, hns);
+      CHECK(v2.size() == rt.size() + tdma::kHdrLen + tdma::kTagLenV2,
+            "v2 frame is 8 bytes longer");
+      auto p2 = tdma::parse_frame(v2.data() + rt.size(), v2.size() - rt.size());
+      CHECK(p2.ok && p2.ver == 2, "v2 parses with ver=2");
+      CHECK(p2.tx_tsf == txtsf, "v2 tx_tsf round-trips");
+      CHECK(p2.host_ns == hns, "v2 host_ns round-trips");
+      auto v1 = tdma::build_frame(rt, tdma::Class::Marker, 7, 3, txtsf);
+      auto p1 = tdma::parse_frame(v1.data() + rt.size(), v1.size() - rt.size());
+      CHECK(p1.ok && p1.ver == 1 && p1.host_ns == 0,
+            "v1 parses with ver=1, host_ns=0");
+      // A truncated v2 (ver byte says 2 but only 20 tag bytes) must not read
+      // past the buffer — host_ns stays 0.
+      auto trunc = v2;
+      trunc.resize(rt.size() + tdma::kHdrLen + tdma::kTagLen);
+      auto pt = tdma::parse_frame(trunc.data() + rt.size(), trunc.size() - rt.size());
+      CHECK(pt.ok && pt.host_ns == 0, "truncated v2 parses safely, host_ns=0");
+    }
   }
 
   // --- 3. schedule phase math -----------------------------------------------

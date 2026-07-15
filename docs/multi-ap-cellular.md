@@ -26,8 +26,11 @@ LTE deployment, minus the licensed spectrum and the basestation price tag.
 
 This page is the conceptual map of what those ingredients build. Everything
 below is *architecture riding on proven primitives*: the per-link mechanics all
-have bench numbers in the linked docs; the multi-cell coordination itself is
-application-layer software — no new silicon tricks required.
+have bench numbers in the linked docs — the scheduler-facing ones (submit→air
+guard time, dynamic beacon grants, hardware ACK/TxReport, per-UE RX
+attribution) are collected in [scheduled-mac.md](scheduled-mac.md); the
+multi-cell coordination itself is application-layer software — no new silicon
+tricks required.
 
 ## 1. Coordinated scheduling — ICIC over your existing Ethernet
 

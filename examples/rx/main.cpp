@@ -409,13 +409,19 @@ struct RxAgg {
   int32_t rssi_sum = 0, rssi_max = -128, snr_sum = 0, snr_min = 127;
   int32_t evm_sum = 0;
   uint32_t evm_n = 0;
-  void add(int rssi, int snr, int evm) {
+  /* Per-encoding split — what an adaptive controller compares live (BCC vs
+   * LDPC delivery on the same link). Counts what the chip *reports*: on the
+   * 8814A ldpc reads 0 even on LDPC frames (AdapterCaps.ldpc_rx_flag). */
+  uint32_t n_ldpc = 0, n_stbc = 0;
+  void add(int rssi, int snr, int evm, bool ldpc = false, bool stbc = false) {
     ++n;
     rssi_sum += rssi;
     if (rssi > rssi_max) rssi_max = rssi;
     snr_sum += snr;
     if (snr < snr_min) snr_min = snr;
     if (evm != 0) { evm_sum += evm; ++evm_n; }
+    if (ldpc) ++n_ldpc;
+    if (stbc) ++n_stbc;
   }
 };
 static RxAgg g_rxagg;
@@ -564,7 +570,8 @@ static void packetProcessor(const Packet &packet) {
   if ((g_rx_energy_ms > 0 || !g_rx_sweep.empty()) && agg_sa_match(packet)) {
     std::lock_guard<std::mutex> lk(g_rxagg_mu);
     g_rxagg.add(packet.RxAtrib.rssi[0], packet.RxAtrib.snr[0],
-                packet.RxAtrib.evm[0]);
+                packet.RxAtrib.evm[0], packet.RxAtrib.ldpc != 0,
+                packet.RxAtrib.stbc != 0);
   }
 
   if (g_rx_count == 1) {
@@ -624,13 +631,21 @@ static void packetProcessor(const Packet &packet) {
       static int hits = 0;
       ++hits;
       if (hits <= 10 || hits % 100 == 0) {
+        /* rate/bw/ldpc/stbc mirror the rx.frame fields: for encoding-matrix
+         * runs the txhit event alone must prove what encoding was decoded
+         * (a pass with ldpc=0 means the TX fell back to BCC, not that the
+         * RX decoded LDPC). */
         devourer::Ev(*g_ev, "rx.txhit")
             .f("hits", hits)
             .f("total_rx", g_rx_count)
             .f("len", packet.Data.size())
             .f("seq", packet.RxAtrib.seq_num)
             .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
-            .f("ppdu", packet.RxAtrib.ppdu_cnt);
+            .f("ppdu", packet.RxAtrib.ppdu_cnt)
+            .f("rate", packet.RxAtrib.data_rate)
+            .f("bw", packet.RxAtrib.bw)
+            .f("stbc", packet.RxAtrib.stbc)
+            .f("ldpc", packet.RxAtrib.ldpc);
       }
 #if defined(DEVOURER_HAVE_JAGUAR1)
       /* F2: BB-dbgport sweep on the first kCsiMaxFrames canonical-SA frames.
@@ -998,8 +1013,7 @@ int main() {
    * still suppresses the reset for a warm pickup (firmware already running).
    * See src/UsbOpen.h. */
   std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
-  rc = devourer::claim_interface_then_reset(
-      dev_handle, 0, logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr,
+  rc = devourer::claim_interface_then_reset(dev_handle, devourer::find_wifi_interface(dev_handle), logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr,
       usb_lock);
   devourer::Ev(*g_ev, "init.timing")
       .f("stage", "demo.usb_reset")
@@ -1140,6 +1154,8 @@ int main() {
           else
             ev.f("igi", nullptr);
           ev.f("frames", agg.n)
+              .f("frames_ldpc", agg.n_ldpc)
+              .f("frames_stbc", agg.n_stbc)
               .f("rssi_mean", rssi_mean)
               .f("rssi_max", agg.n ? agg.rssi_max : 0)
               .f("snr_mean", snr_mean)
@@ -1460,6 +1476,8 @@ int main() {
           ev.f("igi", nullptr);
         ev.f("retune_us", retune_us)
             .f("frames", agg.n)
+            .f("frames_ldpc", agg.n_ldpc)
+            .f("frames_stbc", agg.n_stbc)
             .f("rssi_mean", rssi_mean)
             .f("rssi_max", agg.n ? agg.rssi_max : 0)
             .f("snr_mean", snr_mean)

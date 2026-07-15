@@ -625,6 +625,11 @@ if(DEVOURER_KESTREL)
     add_test(NAME kestrel_txreport COMMAND KestrelTxReportSelftest)
 endif()
 
+add_executable(RadiotapTxFlagsSelftest tests/radiotap_txflags_selftest.cpp)
+target_compile_features(RadiotapTxFlagsSelftest PRIVATE cxx_std_20)
+target_link_libraries(RadiotapTxFlagsSelftest PRIVATE devourer)
+add_test(NAME radiotap_txflags COMMAND RadiotapTxFlagsSelftest)
+
 # Headless guard for the burst-TDMA example's pure logic (examples/tdma/tdma.h):
 # the TsfClock host<->TSF least-squares fit, the frame-tag round-trip, and the
 # schedule phase math. No hardware — the tsf_probe / tsf_tdoa_probe /
@@ -738,6 +743,17 @@ add_executable(AdapterCapsSelftest
 target_link_libraries(AdapterCapsSelftest PRIVATE devourer)
 
 add_test(NAME adapter_caps_derive COMMAND AdapterCapsSelftest)
+
+# Headless guard for the per-UE RX attribution seed (src/cell/UeRxAttribution.h)
+# — TA extraction over the addr2-carrying frame types, the per-TA windowed
+# aggregate folding, drain semantics, and the bounded-table eviction accounting
+# the M1 UeRegistry will build on.
+add_executable(UeRxAttributionSelftest
+    tests/ue_rx_attribution_selftest.cpp
+)
+target_link_libraries(UeRxAttributionSelftest PRIVATE devourer)
+
+add_test(NAME ue_rx_attribution_derive COMMAND UeRxAttributionSelftest)
 
 # Headless guard for the TsfSync one-way time-distribution fit (src/TsfSync.h):
 # skew/offset recovery from beacon {egress, arrival} TSF pairs, clock

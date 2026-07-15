@@ -140,6 +140,17 @@ def main() -> int:
     # mis-read as a per-chip 5 GHz deficit.
     if not args.skip_rail_check:
         rc = subprocess.run(["bash", str(HERE / "rail_check.sh")])
+        if rc.returncode == 2:
+            # rail_check's ground arbitration: the control airs strongly (the
+            # ground hears it) but the B210 reads low — the SDR itself is in
+            # its degraded-read mode, so EVERY duty number this session is
+            # unreliable. Abort rather than emit a garbage table.
+            print("\n" + "!" * 70)
+            print("!! SDR DEGRADED — the B210's readings can't be trusted this session")
+            print("!! (the ground hears the control at strong RSSI while the SDR reads")
+            print("!! low). Reset/reseat the B210 or power-cycle its port, then re-run.")
+            print("!" * 70 + "\n")
+            return 2
         if rc.returncode != 0:
             print("\n" + "!" * 70)
             print("!! RAIL SAG DETECTED — 5 GHz duty numbers below are NOT trustworthy.")

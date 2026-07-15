@@ -83,6 +83,12 @@ struct rx_pkt_attrib
 struct Packet
 {
     rx_pkt_attrib RxAtrib;
+    /* Full 802.11 frame including the trailing FCS. Every Realtek RX parser
+     * follows this contract; consumers remove the FCS at their protocol
+     * boundary rather than making the frame length chip-specific. Retaining it
+     * also lets DEVOURER_RX_KEEP_CORRUPTED and fused-FEC salvage inspect a
+     * failed frame, while tools/bf_report_decode.py trims the trailing four
+     * bytes when decoding beamforming reports. */
     std::span<uint8_t> Data;
 
     /* The transmitter's hardware TX-egress TSF, when the frame carries one.

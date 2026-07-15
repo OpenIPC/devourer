@@ -37,8 +37,7 @@ airtime / chip TX, not the USB transport.
   `sudo ./dkms-install.sh`). It is the wfb-ng injection-tuned driver. Set
   `rtw_tx_pwr_idx_override` 30–45 (≤63; higher needs active cooling). The
   in-tree rtw88 driver's monitor injection is much slower (~6 Mbps) — use svpcom
-  for wfb-ng. It builds on modern host kernels (6.18 here) as well as the pinned
-  5.15.
+  for wfb-ng. It builds on modern host kernels as well as the pinned 5.15.
 - **Throughput levers** (`/etc/wifibroadcast.cfg`, or `wfb_tx -M/-B/-G/-S/-L`):
   - `mcs_index` — the primary lever (MCS1 ≈ 7 Mbps → MCS5–7 + 40 MHz ≈ 36–52 Mbps).
   - `bandwidth = 40` — ~doubles capacity.
@@ -58,8 +57,8 @@ undercounts a fast transmitter. `tests/sdr_duty.py` measures the fraction of tim
 the (clean) channel's received power is above the idle noise floor = the
 transmitter's airtime occupancy (duty cycle), which has no such ceiling:
 `on_air_Mbps ≈ duty × PHY_rate(MCS, BW, GI)`. Calibrate the idle noise floor once
-(`--noise-db`, ≈ −62 dB here) — a percentile auto-floor mis-reads once the channel
-is ~saturated because the low tail becomes signal.
+(`--noise-db`; ≈ −62 dB is a typical quiet-bench value) — a percentile auto-floor
+mis-reads once the channel is ~saturated because the low tail becomes signal.
 
 ## Reproduce
 
@@ -73,5 +72,6 @@ git clone https://github.com/svpcom/wfb-ng && cd wfb-ng && make
 sudo python3 tests/sdr_duty.py --freq 5745e6 --secs 4 --mcs 7 --bw 20 --noise-db -62
 ```
 
-Hardware here: RTL8812AU `0bda:8812`, USRP B210 `2500:0020`, libvirt VM
-`devourer-testrig` (kernel 5.15) for the passthrough comparison.
+Measured with an RTL8812AU (`0bda:8812`) and a USRP B210; the bare-metal-vs-VM
+comparison ran the same driver inside a libvirt VM (kernel 5.15) over qemu-xhci
+USB passthrough.

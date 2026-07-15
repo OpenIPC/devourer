@@ -56,7 +56,9 @@ long-range digital video links.
   magic inside the library.
 
 New to low-level RF? Start with the [visual RF primer](docs/rf-primer.md) —
-eight short animations that make the rest click.
+eight short animations that make the rest click. Its sibling, the
+[visual driver primer](docs/driver-primer.md), does the same for the silicon
+and vendor-driver vocabulary (firmware, efuse, DMAC/CMAC, halbb/halrf, IQK…).
 
 ## Supported hardware
 
@@ -68,9 +70,9 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8812AU**                 | 2T2R              | 56            | 52            | 52               | —                | [CHANEVE CHW50L](https://www.aliexpress.com/item/4000762461362.html) (`0bda:8812`). 5/10 MHz capable |
 | **RTL8811AU**                 | 1T1R              | —             | —             | —                | —                | 1T1R cut of 8812 silicon; rides the 8812 code path. Not benchmarked. 5/10 MHz capable |
 | **RTL8814AU**                 | 4T4R, 3-SS max    | 65            | †(32)         | †(32)            | —                | `0bda:8813`; tested on COMFAST CF-938AC and CF-960AC — antenna builds differ in realised [RX diversity](docs/measuring-spatial-diversity.md). 5/10 MHz capable |
-| **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | —                | TP-Link Archer T2U Plus (`2357:0120`) |
+| **RTL8821AU**                 | 1T1R + BT         | 54            | 32            | 28               | —                | TP-Link Archer T2U Plus (`2357:0120`) |
 | **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | —                | TP-Link Archer T3U (`2357:012d`). 5/10 MHz capable |
-| **RTL8812BU**                 | 1T1R + BT         | —             | —             | —                | —                | 1T1R cut of 8822B silicon; rides the 8822BU code path. Not benchmarked |
+| **RTL8812BU**                 | 1T1R + BT         | —             | —             | —                | —                | 1T1R cut of 8822B silicon; rides the 8822BU code path. Not benchmarked. 5/10 MHz capable |
 | **RTL8811CU**                 | 1T1R + BT         | 36            | 29            | 28               | —                | COMFAST CF-811AC (`0bda:c811`). 5/10 MHz capable |
 | **RTL8821CU**                 | 1T1R + BT         | —             | —             | —                | —                | rides the 8811CU (8821C) code path. 5/10 MHz capable |
 | **RTL8812CU**                 | 2T2R              | 65            | 60            | 60               | —                | LB-LINK WDN1300H (`0bda:c812`). 5/10 MHz capable |
@@ -144,7 +146,11 @@ the `env:` tags in [`src/DeviceConfig.h`](src/DeviceConfig.h).
 | `streamtx` / `duplex` | stdin-driven TX / full-duplex packet link |
 | `svctx` | per-video-layer rate ladders (unequal error protection) |
 | `txpower` | runtime TX-power API walkthrough |
+| `tdma` | TSF-slotted burst TDMA (narrowband ↔ wide on one channel) |
+| `timesync` | over-the-air clock distribution (master / slave / UE roles) |
 | `sense` | Wi-Fi motion sensing from beamforming reports |
+| `doctor` | adapter-health triage → HEALTHY / SUSPECT / FAILING |
+| `pcieprobe` | PCIe transport bring-up validation, layer by layer |
 | `precoder` | OFDM subcarrier shaping proof-of-concept |
 
 All chips compile in by default; per-chip CMake options (`DEVOURER_JAGUAR1`,
@@ -190,27 +196,46 @@ one `IRtlDevice` interface covers all three generations.
 
 ## Going deeper
 
+**Primers** — start here:
+
 - [Visual RF primer](docs/rf-primer.md) — animated intro to the concepts
   behind everything below.
+- [Visual driver primer](docs/driver-primer.md) — animated intro to the chip
+  and vendor-driver machinery: registers, efuse, firmware, MAC, PHY tables,
+  calibration, coexistence.
+
+**Link engineering:**
+
 - [Adaptive link](docs/adaptive-link.md) — the energy-minimizing video-link
-  controller design, and [its validation](docs/adaptive-link-validation.md).
+  controller design, [its validation](docs/adaptive-link-validation.md), and
+  the [building blocks](docs/adaptive-link-building-blocks.md): what each knob
+  (power, rate, bandwidth, hopping) measurably buys.
 - [Fused FEC](docs/fused-fec.md) — the cross-layer error-protection stack:
   per-layer PHY rates, corrupt-frame salvage, outer erasure code.
+- [Aggregation & hardware ACK](docs/aggregation.md) — USB TX aggregation,
+  per-frame CCX TX-status reports, 802.11 A-MPDU (`SetAmpduMode`, +30% on-air
+  goodput), and the hardware ACK/BlockAck responder for reliable-unicast links.
+- [wfb-ng tuning](docs/wfb-ng-tuning.md) — the most efficient wfb-ng
+  configuration, and the SDR-measured devourer-vs-wfb-ng TX comparison.
+
+**Spectrum agility:**
+
 - [Frequency hopping](docs/frequency-hopping.md) — how per-packet hopping
   works and what it costs on each chip.
+- [FHSS](docs/fhss.md) — the anti-jam design article: keyed SipHash hop
+  schedules, slot-locked lockstep RX, and
+  [jammer resilience](docs/jammer-resilience.md) — measured delivery against
+  parked and following jammers, and where a follower breaks.
 - [Narrowband](docs/narrowband.md) — 5/10 MHz channels across all three
   generations: the baseband re-clock, the per-chip register machinery, and the
   walls (RF re-latch edges, per-die clock coupling, the 5 MHz/5 GHz CFO limit).
-- [Performance](docs/performance-tuning.md) — devourer vs. kernel driver on
-  startup time, on-air throughput, and host CPU (3–4× lower); the TX
-  submission modes and the tuning levers, with the methodology.
-- [Adapter doctor](docs/adapter-doctor.md) — dying-dongle triage: EFUSE
-  read-stability, firmware-boot and RX-smoke probes with a
-  HEALTHY / SUSPECT / FAILING verdict.
-- [Spectrum sensing](docs/rx-spectrum-sensing.md),
-  [spatial diversity](docs/measuring-spatial-diversity.md),
-  [bench testing near-field](docs/bench-testing-near-field.md) — measurement
-  guides for the built-in radio instrumentation.
+- [Spectrum sensing](docs/rx-spectrum-sensing.md) — RX energy sweeps down to
+  5 MHz bins: a coarse per-bin H(f) from the dongle itself.
+- [Pseudo preamble puncturing](docs/pseudo-preamble-puncturing.md) — how close
+  per-tone RX masks/notches get to using a wide channel with a dirty slice.
+
+**Timing & coordination:**
+
 - [Time distribution](docs/time-distribution.md) — LTE-eNB-style over-the-air
   clock distribution off the hardware beacon TSF: sub-µs downlink, TSF adoption,
   µs-fine TBTT steering and a converging closed-loop uplink timing advance.
@@ -220,9 +245,36 @@ one `IRtlDevice` interface covers all three generations.
 - [AP mode](docs/ap-mode.md) — devourer as an infrastructure access point a real
   Linux station associates with: beacon → probe/auth/assoc → DHCP/ARP/ICMP → ping,
   open or WPA2-PSK (4-way handshake + software CCMP), validated against rtw88.
-- [Aggregation & hardware ACK](docs/aggregation.md) — USB TX aggregation,
-  per-frame CCX TX-status reports, 802.11 A-MPDU (`SetAmpduMode`, +30% on-air
-  goodput), and the hardware ACK/BlockAck responder for reliable-unicast links.
+- [Scheduled MAC](docs/scheduled-mac.md) — four measured contracts under a slot
+  scheduler: submit→air guard time, dynamic beacon grants, hardware ACK/TxReport,
+  per-UE RX attribution.
+- [Multi-AP cellular](docs/multi-ap-cellular.md) — what the shared clock
+  enables: coordinated cells, make-before-break handover, roaming robot UEs.
+
+**Measurement & instrumentation:**
+
+- [LA-mode IQ capture](docs/la-capture.md) — raw complex baseband into the TX
+  packet buffer; per-tone H(k)/CSI offline, from the dongle alone.
+- [Spatial diversity](docs/measuring-spatial-diversity.md),
+  [bench testing near-field](docs/bench-testing-near-field.md) — measurement
+  guides for the built-in radio instrumentation.
+- [Beamforming self-sounding](docs/beamforming-self-sounding.md) — per-subcarrier
+  CSI from two adapters via the VHT sounding exchange; and its sibling
+  [victim sensing](docs/beamforming-victim-sensing.md) — motion sensing from
+  captured beamforming reports.
+- [Adapter doctor](docs/adapter-doctor.md) — dying-dongle triage: EFUSE
+  read-stability, firmware-boot and RX-smoke probes with a
+  HEALTHY / SUSPECT / FAILING verdict.
+- [Performance](docs/performance-tuning.md) — devourer vs. kernel driver on
+  startup time, on-air throughput, and host CPU (3–4× lower); the TX
+  submission modes and the tuning levers, with the methodology.
+
+**Chip specifics & internals:**
+
+- [8822E quirks](docs/8822e-quirks.md) — the RTL8812EU/8822EU definitive
+  quirks list: what the chip needs, what devourer does, the reproducers.
+- [Logging](docs/logging.md) — the two-plane output schema: JSONL machine
+  events on stdout, human diagnostics on stderr.
 
 ## Testing
 

@@ -7,6 +7,7 @@
 #include "RadioManagementModule.h"
 #include "AckResponder.h" /* hardware ACK responder recipe */
 #include "RadiotapPeek.h" /* send_packets batch pre-parse */
+#include "RadiotapTxFlags.h" /* shared HT MCS known/flag decode (LDPC/STBC) */
 #include "SignalStop.h"
 #include "ToneMask.h"
 #include "TxAggPlan.h" /* USB TX aggregation URB packing */
@@ -486,6 +487,41 @@ bool RtlJaguarDevice::StartBeacon(const uint8_t *beacon, size_t len,
   return true;
 }
 
+bool RtlJaguarDevice::UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
+  if (_bcn_mpdu.empty()) {
+    _logger->error("beacon(J1): UpdateBeaconPayload without an active beacon");
+    return false;
+  }
+  /* Same buffer contract as StartBeacon: strip a leading radiotap header. */
+  size_t rt = (len >= 4) ? (size_t)(beacon[2] | (beacon[3] << 8)) : 0;
+  if (rt > len) rt = 0;
+  /* A fresh BCNQ-boundary store replaces the TBTT engine's buffer (the same
+   * bracket the steers re-download through); the port stays configured and the
+   * TBTT grid is untouched, so no re-ignite is needed. */
+  if (!download_rsvd_beacon(beacon + rt, len - rt)) {
+    _logger->error("beacon(J1): UpdateBeaconPayload rsvd-page store failed");
+    return false;
+  }
+  _bcn_mpdu.assign(beacon + rt, beacon + len);
+  return true;
+}
+
+bool RtlJaguarDevice::StopBeacon() {
+  if (_bcn_mpdu.empty())
+    return false;
+  /* EN_BCN_FUNCTION off (keep DIS_TSF_UDT), StopTxBeacon (0x422[6] clear —
+   * the ResumeTxBeacon inverse), net_type back to No Link. */
+  _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, 0x10);
+  _device.rtw_write8(0x0422, static_cast<uint8_t>(
+                                 _device.rtw_read8(0x0422) & ~0x40u));
+  uint8_t nt = _device.rtw_read8(0x0102);
+  _device.rtw_write8(0x0102, static_cast<uint8_t>(nt & ~0x03u));
+  _bcn_mpdu.clear();
+  _bcn_interval_tu = 0;
+  _logger->info("beacon(J1): stopped (EN_BCN off, StopTxBeacon, net_type->NoLink)");
+  return true;
+}
+
 int32_t RtlJaguarDevice::AdjustBeaconTiming(int32_t microseconds) {
   int nominal = _bcn_interval_tu;
   if (nominal <= 0) return 0;  // no active beacon
@@ -848,48 +884,22 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
       break;
 
     case IEEE80211_RADIOTAP_MCS: {
-      u8 mcs_known = iterator.this_arg[0];
-      u8 mcs_flags = iterator.this_arg[1];
-
-      uint8_t mcs_bw_field = mcs_flags & IEEE80211_RADIOTAP_MCS_BW_MASK;
-      if (mcs_bw_field == IEEE80211_RADIOTAP_MCS_BW_40) {
+      /* One shared reading of the HT MCS known/flag/index bytes — bw/sgi/mcs
+       * plus FEC=LDPC and the STBC stream count (RadiotapTxFlags.h, the same
+       * decode the Jaguar2/3 paths use, so the three copies can't diverge).
+       * The radiotap is authoritative for per-packet rate; the SetTxMode
+       * default applies after this loop only when no rate is present.
+       * bwidth starts at 20 MHz, so the BW_20/20L/20U codes need no branch. */
+      const devourer::RadiotapMcsField m =
+          devourer::decode_radiotap_mcs_field(iterator.this_arg);
+      if (m.bw40)
         bwidth = CHANNEL_WIDTH_40;
-      } else if (mcs_bw_field == IEEE80211_RADIOTAP_MCS_BW_20 ||
-                 mcs_bw_field == IEEE80211_RADIOTAP_MCS_BW_20L ||
-                 mcs_bw_field == IEEE80211_RADIOTAP_MCS_BW_20U) {
-        bwidth = CHANNEL_WIDTH_20;
-      }
-
-      if (mcs_flags & 0x04) {
-        sgi = 1;
-      } else {
-        sgi = 0;
-      }
-
-      /* STBC (radiotap MCS known bit5 / flags bits5-6) and FEC=LDPC (known bit4 /
-       * flags bit4). The HT branch previously read neither, so an HT frame tagged
-       * STBC/LDPC in radiotap silently transmitted as BCC SISO -- only the VHT
-       * branch honoured them. Reading them here lets txdemo emit a real
-       * HT STBC / HT LDPC frame (needed as a chip reference for the gr-ieee802-11
-       * fork's modern-format TX). */
-      if (mcs_known & 0x20) {
-        stbc = (mcs_flags >> 5) & 0x3;
-      }
-      if ((mcs_known & 0x10) && (mcs_flags & 0x10)) {
-        ldpc = 1;
-      }
-
-      /* The radiotap is authoritative for per-packet rate: honour the HT MCS
-       * index from byte 2 unconditionally. (Previously gated behind the
-       * DEVOURER_TX_HT_MCS env var, so a valid HT radiotap silently fell back
-       * to 1M CCK — now replaced by the programmatic SetTxMode default, applied
-       * after this loop only when no rate is present in the radiotap.) */
-      if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_MCS) {
-        uint8_t mcs_index = iterator.this_arg[2];
-        if (mcs_index <= 31) {
-          fixed_rate = MGN_MCS0 + mcs_index;
-          rate_from_radiotap = true;
-        }
+      sgi = m.sgi;
+      ldpc = m.ldpc;
+      stbc = m.stbc;
+      if (m.have_mcs) {
+        fixed_rate = MGN_MCS0 + m.mcs;
+        rate_from_radiotap = true;
       }
     } break;
 
@@ -1520,21 +1530,41 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
   devourer::set_standard_freq_ranges(c);
 
   /* Identity from the EFUSE version-id. The die name is refined by the RF-type:
-   * the 8812 die shipped as both the 2T2R 8812AU and the 1T1R 8811AU cut. */
+   * the 8812 die shipped as both the 2T2R 8812AU and the 1T1R 8811AU cut.
+   *
+   * LDPC RX truth per die (bench: encoding-matrix devourer↔devourer cells,
+   * HT-LDPC / HT-LDPC+STBC / VHT-LDPC at full delivery, RX-side ldpc flag
+   * cross-checked where the chip reports one):
+   *  - 8812A (incl. 8811A cut): decodes HT+VHT LDPC, reports the RX-desc bit.
+   *  - 8814A: decodes HT+VHT LDPC but has NO per-frame indicator (vendor
+   *    rxdesc parse leaves offsets 16/20 empty; the Jaguar1 phy-status report
+   *    carries no ldpc bit) — RxAtrib.ldpc reads 0 on LDPC frames.
+   *  - 8821A: VHT-LDPC RX broken in the field (Eachine Sphere Link →
+   *    PixelPilot reports); the HT decoder is a separate silicon path and
+   *    passed a prior HT-LDPC bench cell. */
   switch (_eepromManager->version_id.ICType) {
   case CHIP_8814A:
     c.chip_name = "RTL8814A";
     c.marketing_names = "RTL8814AU";
     c.chip_id = 0x08;
     c.variant = "8814A";
+    c.ldpc_rx_ht = true;
+    c.ldpc_rx_vht = true;
+    c.ldpc_rx_flag = false;
     break;
   case CHIP_8821:
     c.chip_name = "RTL8821A";
     c.marketing_names = "RTL8821AU";
     c.chip_id = 0x05;
     c.variant = "8821A";
+    c.ldpc_rx_ht = true;
+    c.ldpc_rx_vht = false;
+    c.ldpc_rx_flag = true;
     break;
   default: /* CHIP_8812 */
+    c.ldpc_rx_ht = true;
+    c.ldpc_rx_vht = true;
+    c.ldpc_rx_flag = true;
     if (_eepromManager->version_id.RFType == RF_TYPE_1T1R) {
       c.chip_name = "RTL8811A";
       c.marketing_names = "RTL8811AU/RTL8811AR";

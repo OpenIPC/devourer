@@ -132,8 +132,8 @@ on rxdemo and txdemo (TX = the data/MGMT BD rings behind the unchanged
 bottom-up.
 Bind/restore: `tests/pcie_vfio_bind.sh` (driver_override, not new_id — the
 in-tree rtw88 auto-probe race). Validation: `sudo python3
-tests/pcie_rx_smoke.py` on the radxa-x4 (`ssh radxa-x4`, 8821CE at
-0000:01:00.0, IOMMU group 12) — ambient beacons CRC-clean on ch 6 + 36.
+tests/pcie_rx_smoke.py` against a vfio-bound 8821CE (rig specifics: local
+`INVENTORY.md`) — ambient beacons CRC-clean on ch 6 + 36.
 
 ## Build
 
@@ -185,7 +185,9 @@ cells read 0 on every channel (`aircrack-ng/88XXau` doesn't emit host-pushed
 
 Layered modes: `--full-matrix` (every ordered DUT pair × 4 driver combos),
 `--encoding-matrix --tx-pid --rx-pid` (radiotap encoding combos; the kernel-TX
-rows are not authoritative for LDPC/STBC — that driver strips those bits),
+rows are not authoritative for LDPC/STBC — that driver strips those bits —
+so truth-table runs add `--modes devourer:devourer`; per-cell `rx.txhit`
+events carry the decoded `rate`/`ldpc`/`stbc` as proof of what flew),
 `--sniffer-iface IFACE` (3rd-adapter capture, intended for AR9271).
 `--keep-logs` puts per-cell logs at `/tmp/devourer-regress-last/`. Full
 semantics: `tests/README.md`.
@@ -207,7 +209,8 @@ traps it encodes: the in-tree rtw88 modules auto-probe (and fw-download
 into) every Realtek dongle at each enumeration — `modprobe -r` does NOT
 survive re-enumeration, temp-blacklist instead; and `authorized`-toggle
 "cold" leaves chip state (real VBUS cold via `REGRESS_VBUS_MAP` /
-uhubctl — never on xhci root ports on this rig).
+uhubctl — hub ports with per-port power switching only, not xhci root
+ports).
 
 ## Logging
 
@@ -244,6 +247,16 @@ transport / chip-id), TX/RX chain counts, the composed `GetTxCaps` +
 characterized frequency spans, and feature flags (per-packet TX power,
 narrowband, fast retune, per-chain RSSI) — resolved at construction, thread-safe,
 callable pre-`Init`. The demos emit it as the `adapter.caps` JSONL event.
+The `ldpc_rx_ht`/`ldpc_rx_vht`/`ldpc_rx_flag` flags are the bench-derived LDPC
+RX truth table (deliberately NOT the vendor `HAL_DEF_RX_LDPC`, which is
+2013-era interop-advertisement policy — all-false on Jaguar1 while the 8812A
+demonstrably decodes LDPC): every supported chip decodes HT+VHT LDPC except
+the 8821A (VHT-LDPC RX broken — field-reported, HT fine), and the 8814A
+decodes LDPC but reports no per-frame flag (`ldpc_rx_flag=0`,
+`RxAtrib.ldpc` reads 0). LDPC TX is per-packet radiotap-driven on all
+generations (`TxCaps.ldpc_ok`); bench-measured coding gain ≈ +3 dB at the
+10%-delivery crossing, MCS7/20 MHz (`tests/ldpc_waterfall.sh`) — prefer
+`/LDPC` on any link whose RX side can decode it.
 `GetActiveRxPaths()` is the live companion: a best-effort per-chain-RSSI estimate
 of which antennas actually carry signal (needs an RX loop + traffic). The 5 GHz
 synthesizer tunes past the UNII channels (extended range ~5080–6165 MHz, chan up
@@ -388,6 +401,42 @@ per-bin energy + frame stats; `tests/sounding_sweep.sh` + `tests/sounding_map.py
 recover a coarse per-bin H(f) — down to 5 MHz bins on Jaguar3
 (`docs/rx-spectrum-sensing.md`).
 
+## Hardware time, beacons, AP mode
+
+`ReadTsf()` reads the 64-bit MAC TSF and every received frame carries the
+MAC-latched `tsfl` RX timestamp — on all generations, µs-grade
+(`docs/time-distribution.md`, measured vs NTP/PTP: `docs/timing-accuracy.md`).
+`StartBeacon` loads a beacon into the MAC's reserved page and the chip
+auto-transmits at each TBTT with the live TSF stamped at the TX instant — the
+sub-µs downlink. The chip beacons **autonomously**: a session that ends
+without a power-cycle must call `StopBeacon()` or the beacon keeps airing.
+`UpdateBeaconPayload` swaps the airing content in place (frame-atomic on air,
+TBTT-quantized latency); `PinBeaconTbtt` steers the TBTT to an absolute TSF
+instant without corrupting the clock (Jaguar1: offset 0 only — its TBTT is
+hardware-locked to the TSF grid); `AdjustBeaconTimingFine` is the µs-fine
+manual lever. Demos: `timesync` (`DEVOURER_TSYNC_ROLE=master|slave|ue` +
+`DEVOURER_TSYNC_*` knobs, incl. the PCIe master + I226-PTP discipline loop)
+and `tdma` (TSF-slotted narrowband↔wide bursts on one channel). The beacon is
+also the seed of AP mode — a real Linux station associates, open or WPA2-PSK
+(`docs/ap-mode.md`); the multi-cell architecture it enables is
+`docs/multi-ap-cellular.md`, and the measured scheduler contracts (submit→air
+guard time, dynamic beacon grants, ACK/TxReport, per-UE RX attribution) are
+`docs/scheduled-mac.md`.
+
+## Aggregation, hardware ACK, TX reports
+
+`SetAmpduMode` enables 802.11 A-MPDU on injected frames: ~+30% *goodput* at
+the PHY ceiling by amortizing per-frame overhead — an occupancy metric can't
+show it, count delivered payload. `SetAckResponder(mac)` arms the hardware
+ACK/BlockAck responder; with a unicast TA on the soliciting frame this closes
+a hardware-ARQ loop (autonomous MAC retransmission until ACK). Per-frame TX
+outcomes surface as `tx.report` events (CCX via C2H) — the TX-side link
+sensor; C2H rides the RX path, so J1/J2 TX-only sessions see none (run
+`DEVOURER_TX_WITH_RX=thread`; J3's coex thread drains C2H regardless).
+`GetRxQuality()` is the device-wide windowed RX sensor;
+`cell::UeRxAttribution` is its per-transmitter (per-UE) counterpart. Docs:
+`docs/aggregation.md`, measured per-generation matrix `docs/scheduled-mac.md`.
+
 ## Architecture
 
 **The caller owns libusb.** `WiFiDriver::CreateRtlDevice` is intentionally
@@ -421,6 +470,9 @@ Generation-agnostic core in `src/` (always compiled; depends on no HAL):
 - `PhyTableLoader` — runtime walker for Realtek's phydm-format register tables
   (`check_positive` + opcode state machine, without pulling in phydm itself).
   Shared by Jaguar1 + Jaguar2; Jaguar3 has its own `PhyTableLoaderJaguar3`.
+- `cell/` — caller-side per-cell helpers built on the device API
+  (`UeRxAttribution`: per-transmitter windowed RX statistics keyed by 802.11
+  TA); the device RX loops are untouched.
 
 Per-generation HALs (each self-contained):
 

@@ -15,6 +15,7 @@
 
 #include "AckResponder.h"
 #include "RadiotapPeek.h"
+#include "RadiotapTxFlags.h" /* HT MCS field decoder (LDPC/STBC) */
 #include "TxAggPlan.h"
 #include "TxReport.h"
 
@@ -978,6 +979,13 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
                            : (_hal.efuse_logical_byte(0xB9) & 0x3f);
   c.fastretune_ok = true;
   c.per_packet_txpower = true; /* TX descriptor TXPWR_OFSET LUT — Jaguar2 only */
+  /* LDPC RX: both variants decode HT+VHT LDPC (bench: encoding-matrix
+   * devourer↔devourer cells at full delivery, 8822BU cross-checked reporting
+   * ldpc=1) and report it per-frame from PHY-status byte7[5]
+   * (parse_phy_sts_jgr2). */
+  c.ldpc_rx_ht = true;
+  c.ldpc_rx_vht = true;
+  c.ldpc_rx_flag = true;
   devourer::set_standard_freq_ranges(c);
 
   if (_variant == jaguar2::ChipVariant::C8821C) {
@@ -1214,17 +1222,16 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
       radiotap_pkt_pwr_db = static_cast<int8_t>(*it.this_arg);
       break;
     case IEEE80211_RADIOTAP_MCS: {
-      uint8_t mcs_flags = it.this_arg[1];
-      if ((mcs_flags & IEEE80211_RADIOTAP_MCS_BW_MASK) ==
-          IEEE80211_RADIOTAP_MCS_BW_40)
+      const devourer::RadiotapMcsField m =
+          devourer::decode_radiotap_mcs_field(it.this_arg);
+      if (m.bw40)
         bwidth = CHANNEL_WIDTH_40;
-      sgi = (mcs_flags & 0x04) ? 1 : 0;
-      if (it.this_arg[0] & IEEE80211_RADIOTAP_MCS_HAVE_MCS) {
-        uint8_t idx = it.this_arg[2];
-        if (idx <= 31) {
-          fixed_rate = MGN_MCS0 + idx;
-          rate_from_radiotap = true;
-        }
+      sgi = m.sgi;
+      ldpc = m.ldpc;
+      stbc = m.stbc;
+      if (m.have_mcs) {
+        fixed_rate = MGN_MCS0 + m.mcs;
+        rate_from_radiotap = true;
       }
     } break;
     case IEEE80211_RADIOTAP_VHT: {
@@ -1447,6 +1454,39 @@ bool RtlJaguar2Device::StartBeacon(const uint8_t *beacon, size_t len,
  * "re-latch, then re-download": the TBTT re-derives from the steered timebase
  * and the fresh download re-asserts the valid latch (its poll is the success
  * signal). Costs one skipped beacon per correction. Caller holds _reg_mu. */
+bool RtlJaguar2Device::UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_bcn_mpdu.empty()) {
+    _logger->error("beacon(J2): UpdateBeaconPayload without an active beacon");
+    return false;
+  }
+  /* Same buffer contract as StartBeacon: strip a leading radiotap header. */
+  size_t rt = (len >= 4) ? (size_t)(beacon[2] | (beacon[3] << 8)) : 0;
+  if (rt > len) rt = 0;
+  _bcn_mpdu.assign(beacon + rt, beacon + len);
+  /* The steer re-download path, with new content: the fresh rsvd-page store
+   * replaces the TBTT engine's buffer and re-arms the valid latch (its poll is
+   * the success signal). Interval/TBTT/port identity untouched. */
+  return redownload_beacon_locked();
+}
+
+bool RtlJaguar2Device::StopBeacon() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_bcn_mpdu.empty())
+    return false;
+  /* EN_BCN_FUNCTION off (keep DIS_TSF_UDT), beacon-queue download off,
+   * net_type back to No Link — the StartBeacon enables, reversed. */
+  _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 4));
+  uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
+  _device.rtw_write<uint32_t>(0x0420, txq & ~(1u << 22) /* BIT_EN_BCNQ_DL */);
+  uint8_t nt = _device.rtw_read8(0x0102);
+  _device.rtw_write8(0x0102, static_cast<uint8_t>(nt & ~0x03u));
+  _bcn_mpdu.clear();
+  _bcn_interval_tu = 0;
+  _logger->info("beacon(J2): stopped (EN_BCN off, EN_BCNQ_DL off, net_type->NoLink)");
+  return true;
+}
+
 bool RtlJaguar2Device::redownload_beacon_locked() {
   if (_bcn_mpdu.empty())
     return false;

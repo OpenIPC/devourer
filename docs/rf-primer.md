@@ -208,6 +208,10 @@ runnable tool (`tests/pcie_ptp_beacon.cpp`).
 
 With the machinery in hand, the rest reads straight:
 
+- [`driver-primer.md`](driver-primer.md) — this primer's sibling: the same
+  picture-book treatment for the *silicon and driver* machinery (registers,
+  efuse, firmware, MAC, PHY tables, calibration) that implements all of the
+  above.
 - [`rx-spectrum-sensing.md`](rx-spectrum-sensing.md) — reading energy, noise, and
   interference off that channel comb, frame-free (includes the animated NHM
   monitor).

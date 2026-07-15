@@ -139,6 +139,16 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.tuning.fwdl_8814 = devourer::Fwdl8814Path::Rtw88;
   if (env_long("DEVOURER_8814_FWDL_CHUNK", &v))
     cfg.tuning.fwdl_8814_chunk = static_cast<uint32_t>(v);
+  if (const char *e = env_str("DEVOURER_DPDT_MODE")) {
+    if (str_ieq(e, "legacy"))
+      cfg.tuning.dpdt_8822e = devourer::Dpdt8822eMode::Legacy;
+    else if (str_ieq(e, "bit24"))
+      cfg.tuning.dpdt_8822e = devourer::Dpdt8822eMode::Bit24;
+    else if (str_ieq(e, "skip"))
+      cfg.tuning.dpdt_8822e = devourer::Dpdt8822eMode::Skip;
+    else
+      cfg.tuning.dpdt_8822e = devourer::Dpdt8822eMode::EfemPinmux;
+  }
 
   /* ---- debug ---- */
   cfg.debug.dump_canary = env_flag("DEVOURER_DUMP_CANARY");

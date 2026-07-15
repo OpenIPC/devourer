@@ -99,36 +99,35 @@ than equivalent static noise** — the core prediction of the simulation:
 (0.82 → 0.09 at gain 52) — fades punch through the controller's fixed margin even
 when the average looks acceptable.
 
-This is a clean **relative** confirmation. It is **not** an absolute SLA test: on
-this bench the static baseline never reaches 0.99 (it tops out ≈ 0.89), because
-the adapters sit inches apart with tens of dB of margin, so the interferer is
-never in the "link holds at 0.99, then fades break it" regime. The residual loss
+This is a clean **relative** confirmation. It is **not** an absolute SLA test:
+on a near-field bench the static baseline never reaches 0.99 (it tops out
+≈ 0.89), because the adapters sit inches apart with tens of dB of margin, so
+the interferer is never in the "link holds at 0.99, then fades break it" regime. The residual loss
 is real end-to-end loss (on-air + processing), now measured honestly.
 
-## Open questions (need hardware not currently available)
+## What this validation does not cover
 
-1. **Absolute SLA-break, and the fade-margin go/no-go.** The relative fade
-   penalty is confirmed; the absolute "baseline holds 0.99 → fading breaks it"
-   test — and the decision to enable the fade margin by default — needs a channel
-   that can be parked at ~0.99 and stressed in a controlled way. The bench can't
-   reach that over the air. **An attenuator rig is the unblock** (see below). With
-   it, the test is: at a fixed setpoint where static holds ~0.99, sweep fading and
-   compare `fade_margin_k` off vs on.
+1. **The absolute SLA-break point, and the fade-margin go/no-go.** The relative
+   fade penalty is confirmed; the absolute "baseline holds 0.99 → fading breaks
+   it" regime needs a channel that can be parked at ~0.99 and stressed in a
+   controlled way — an over-the-air bench cannot hold that setpoint, so it
+   requires the conducted (attenuator) setup below. With that rig, the test is:
+   at a fixed setpoint where static holds ~0.99, sweep fading and compare
+   `fade_margin_k` off vs on.
 
-2. **Calibrate a real build.** linklab's RF-chain model and this repo's energy
-   model are nominal. `tests/calibrate_energy.py` (thermal + SDR power sweeps) and
-   `tests/calibrate_link.py` (interferer sweeps) fit them to a specific build;
-   `linklab`'s `calib/fit.py` + `export.py` then produce a devourer
-   `energy_calib.json`. This needs the sweeps run on hardware to anchor the
-   absolute energy numbers (relative savings hold without it).
+2. **Absolute energy numbers.** linklab's RF-chain model and this repo's energy
+   model are nominal. `tests/calibrate_energy.py` (thermal + SDR power sweeps)
+   and `tests/calibrate_link.py` (interferer sweeps) fit them to a specific
+   build; `linklab`'s `calib/fit.py` + `export.py` then produce a devourer
+   `energy_calib.json`. Until those sweeps anchor a given build, the energy
+   savings are relative figures (the relative shape holds regardless).
 
-3. **On-air adaptive SVC.** The per-temporal-layer ladder flies at fixed MCS today
-   (`svctx`, `tests/svc_uep_onair.sh`); retuning the per-layer ladder and shed
-   set live from the ground controller is validated in simulation (linklab) but
-   not yet on air.
+3. **Live on-air ladder retuning.** The per-temporal-layer ladder flies at fixed
+   MCS on air (`svctx`, `tests/svc_uep_onair.sh`); retuning the ladder and shed
+   set live from the ground controller is validated in simulation (linklab).
 
-4. **Real RC uplink.** The rendezvous/failsafe watchdog input is abstracted; a
-   real command-radio uplink wires into it directly.
+4. **A real RC uplink.** The rendezvous/failsafe watchdog input is abstracted;
+   a real command-radio uplink wires into it directly.
 
 ### What the attenuator rig looks like
 

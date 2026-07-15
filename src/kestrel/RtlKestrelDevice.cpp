@@ -10,6 +10,7 @@
 #include "RadiotapPeek.h"
 #include "RateDefinitions.h" /* MGN_* rate enum */
 #include "MacRegAx.h"
+#include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
 #include "RxPacket.h"
 #include "TxDescKestrel.h"
 #include "TxReportKestrel.h"
@@ -78,7 +79,8 @@ void RtlKestrelDevice::start_wp_drain() {
      * TX_PD_RELEASE_HOST) recycle the transmitted frames' WD/PLE pages. A no-op
      * callback suffices — completing each bulk-IN URB does the recycle. */
     _device.bulk_read_async_loop(
-        16384, 8, [](const uint8_t *, int) {}, _wp_drain_stop);
+        16384, 8, [](const uint8_t *, int) {},
+        [this]() -> bool { return _wp_drain_stop || g_devourer_should_stop; });
   });
   _logger->info("Kestrel: WP-release drain started (recycles TX pages)");
 }
@@ -301,7 +303,10 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
           off += f.next_offset;
         }
       },
-      _rx_stop);
+      /* Stop on StopRxLoop() or the demos' SIGINT/SIGTERM flag — the same
+       * signal-flag pattern every generation's RX loop honours (without it the
+       * harness's `timeout` SIGTERM never unblocks the loop). */
+      [this]() -> bool { return _rx_stop || g_devourer_should_stop; });
 }
 
 void RtlKestrelDevice::SetMonitorChannel(SelectedChannel channel) {

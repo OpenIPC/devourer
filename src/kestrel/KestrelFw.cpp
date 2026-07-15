@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "MacRegAx.h"
+#include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
 #if defined(DEVOURER_HAVE_KESTREL_8852B)
 #include "hal8852b_fw.h"
 #endif
@@ -1007,6 +1008,10 @@ bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
 
   /* Retry loop (FWDL_TRY_CNT = 3 for AX MIPS). */
   for (uint8_t attempt = 0; attempt < r::FWDL_TRY_CNT_MIPS; ++attempt) {
+    /* Each attempt is seconds of register polling — honour the demos'
+     * SIGINT/SIGTERM flag between attempts like the RX loop does. */
+    if (g_devourer_should_stop)
+      return false;
     /* phase0: wait H2C path ready. */
     if (!poll_wcpu(r::B_AX_H2C_PATH_RDY, r::B_AX_H2C_PATH_RDY, "H2C_PATH_RDY")) {
       if (_variant == ChipVariant::C8852C) {

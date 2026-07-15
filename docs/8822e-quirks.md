@@ -22,14 +22,28 @@ The chip's RFE control lines (DPDT antenna transfer switch, PA-enable, pad
 routing) ride MAC GPIO/LED pin-mux registers that the halmac "Config PIN Mux"
 family programs. Three of these must hold, or TX breaks in distinctive ways:
 
-- **`REG_LED_CFG 0x4c[24]` = `BIT_DPDT_WLBT_SEL`** (with `[22]` clear): routes
-  the DPDT switch to WL control. Without it, every PPDU faster than ~26 Mbps
-  PHY (HT MCS4+, legacy 48M/54M) airs at full duty as garbage no receiver can
-  even sync to, while MCS0–3 / ≤24M leak through at a degraded EVM floor
-  (~−30 dB vs kernel-parity −50s). Power/calibration/payload-invariant —
-  bench-bisected to this single register. Written post-coex in `InitWrite`
-  (the FW H2C steps run earlier). NB `0x204c` is a readable mirror of `0x4c`
-  — end-state diffs surface it at either address.
+- **The DPDT transfer switch must be under HARDWARE TX/RX control — via the
+  full eFEM GPIO pin-mux, not a static route.** The kernel's
+  `_efem_pinmux_config` (rfe 21–24) claims GPIO2/3/4/13/14/EECS for the RFE
+  engine (`RFE_CTRL_3/5/7/8/9/11`, halmac `pinmux_set_func_8822e`); GPIO13
+  becomes `WL_DPDT_SEL` driven by RFE_CTRL_9, so the antenna transfer switch
+  follows the TX/RX state — PA on TX, both LNAs on RX. Devourer ports this as
+  `RtlJaguar3Device::efem_pinmux_8822e()` (post-coex; coex GPIO_MUXCFG writes
+  would mask it). An earlier static approximation — set `0x4c[24]`
+  (`BIT_DPDT_WLBT_SEL`), clear `[22]` — fixed TX (without WL DPDT ownership,
+  every PPDU faster than ~26 Mbps PHY airs as garbage, and MCS0–3 leak
+  through at a ~−30 dB EVM floor) but parked the switch TX-favoring: **RX
+  path B lost its antenna on every 8812EU** — chain-B pwdb pinned at the
+  noise floor (~10 raw / −99 dBm) regardless of antenna, invisible to
+  total-frame-count validation because chain A carries the stream (bench
+  2026-07-14, per-chain RSSI A/B: static write = TX 9.9M MCS7 / RX-B dead;
+  `[24]`-only = RX-B alive / TX airs nothing; eFEM pin-mux = TX 9.7M MCS7
+  AND RX A/B −70/−77 dBm concurrently). The eFEM pin-mux is gated on
+  `rfe_type` 21–24 (kernel parity with `_efem_pinmux_config` / `config_rfe`);
+  other boards keep the reset-default pins. Legacy behavior remains selectable
+  via `DEVOURER_DPDT_MODE=efem|legacy|bit24|skip` (default `efem`) for board
+  A/B. NB `0x204c` is a
+  readable mirror of `0x4c` — end-state diffs surface it at either address.
 - **OFDM 1SS TX path must be single-path** (`0x820[7:0]`: `0x32` = 1ss-B at
   5 GHz, `0x31` at 2.4 GHz; `0x1e2c=0x0400`): kernel semantics give 1SS frames
   ONE chain (2SS gets both). The old 1ss-on-both mapping (`0x33`) interacts
@@ -49,11 +63,15 @@ at ch36 — MCS0/MCS4/MCS7/54M ≈ 5k frames / 12 s at EVM −26/−32/−48/−
 
 Path-B OFDM TXAGC (`0x41e8`) is written unconditionally in every mode,
 including TX+RX. (An earlier structural skip existed because any nonzero write
-appeared to near-deafen the EU's RX; that desense was a downstream artifact of
-the DPDT/pin-mux mis-config above and does not reproduce on the fixed driver:
-`tests/eu_41e8_desense_recheck.sh`, −2% = noise.) Full-duplex proof with
-path-B power applied: `tests/eu_fullduplex_pathb_check.sh` — 24k RX frames
-and 14.3k clean MCS7 at the ground simultaneously.
+appeared to near-deafen the EU's RX. The register is exonerated — a direct A/B
+with per-chain RSSI shows no RX effect from the write — but the historical
+observation was pointing at something real: the static DPDT route disconnects
+RX path B's antenna outright (see the pin-mux section above), and every
+recheck counted TOTAL frames, which chain A dominates —
+`tests/eu_41e8_desense_recheck.sh`'s −2% "noise" verdict and the 24k-frame
+full-duplex proof (`tests/eu_fullduplex_pathb_check.sh`) were both blind to a
+dead chain B. Per-chain RSSI is the only honest RX-health metric on a 2T2R
+part.) Full-duplex holds under the eFEM pin-mux with path-B power applied.
 
 `DEVOURER_TX_WITH_RX=thread` must still be set **before** `InitWrite`
 (bring-up keeps the RX filters open; retrofitting RX later is unreliable).

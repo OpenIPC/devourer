@@ -78,6 +78,11 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
   _hal.config_rfe(channel.Channel); /* 8822e RFE/PAPE antenna-switch pins */
   _hal.config_channel_8822e(channel.Channel); /* 8822e band TX scaling/backoff + shaping */
   _hal.coex_wlan_only_init(); /* lock antenna to WLAN (disable BT/LTE coex) */
+  /* 8822E DPDT/eFEM pin-mux — post-coex, so an RX-only session also gets both
+   * receive chains (GPIO13 -> RFE engine). Kernel parity: _efem_pinmux_config
+   * runs in rtl8822e_init_misc in both directions. See InitWrite for the TX
+   * bring-up's copy of this call. No-op on non-8822E. */
+  apply_dpdt_route_8822e();
   _brought_up = true;
 
   /* DEVOURER_XTAL_CAP — crystal-cap trim (issue #217, narrowband CFO lever). */
@@ -434,6 +439,195 @@ void RtlJaguar3Device::coex_runtime_loop() {
   }
 }
 
+namespace {
+
+/* --- 8822E eFEM GPIO pin-function tables --------------------------------
+ * Transcribed from halmac_gpio_8822e.c PINMUX_LIST_GPIO{2,3,4,13,14}_8822E /
+ * PINMUX_LIST_EECS_8822E, truncated at the target function. halmac's
+ * pinmux_switch_8822e walks a pin's priority list top-down: every claim
+ * ABOVE the target is disabled (field := ~val & msk), the target itself is
+ * enabled (field := val & msk), and the walk stops — entries below the
+ * target are never touched. Byte-register RMW throughout. */
+struct EfemEnt {
+  uint8_t off; /* MAC byte register */
+  uint8_t msk;
+  uint8_t val; /* the claim's ENABLE value; disable writes ~val & msk */
+};
+struct EfemFix { uint8_t off; uint8_t bit; bool set; };
+struct EfemFunc {
+  const char *name;
+  const EfemEnt *ents;
+  size_t n_ents;        /* last entry is the target */
+  const EfemFix *fixes; /* post-switch WL/BT ownership fixups */
+  size_t n_fixes;
+};
+
+constexpr uint8_t B0 = 0x01, B1 = 0x02, B2 = 0x04, B3 = 0x08, B4 = 0x10,
+                  B5 = 0x20, B6 = 0x40, B7 = 0x80;
+
+/* RFE_CTRL_3 = GPIO3 -> WL_LNAON_SEL */
+constexpr EfemEnt kEntsRfe3[] = {
+    {0x66, B2, B2},      /* BT_GPIO3 */
+    {0x4F, B6, B6},      /* BT_ANT_SW_3 */
+    {0x41, B1, 0},       /* WL_PRI (BT_PTA) */
+    {0x41, B2, B2},      /* BT_PRI (WL_PTA) */
+    {0x40, B1 | B0, B0}, /* WLMAC_DBG */
+    {0x40, B1 | B0, B1}, /* WLPHY_DBG */
+    {0x40, B1 | B0, B1 | B0}, /* BT_DBG */
+    {0x4F, B2, B2},      /* SW LNAON_SEL */
+    {0x42, B0, B0},      /* BT_RFE_CTRL_5 (BT_LNAON_SEL) */
+    {0x42, B0, B0},      /* RFE_CTRL_3 (WL_LNAON_SEL) — target */
+};
+constexpr EfemFix kFixRfe3[] = {{0x43, B7, false}, {0x67, B4, true}};
+
+/* RFE_CTRL_5 = GPIO14 -> WLPHY_RFE_CTRL2GPIO */
+constexpr EfemEnt kEntsRfe5[] = {
+    {0x4E, B6, B6}, /* UART_WAKE (GPIO13_14_WL_CTRL_EN) */
+    {0x4F, B6, B6}, /* BT_ANT_SW_1 */
+    {0x40, B2, B2}, /* RFE_CTRL_5_4_5 — target */
+};
+constexpr EfemFix kFixRfe5[] = {{0x3F, B2, true}};
+
+/* RFE_CTRL_7 = EECS pad -> WLPHY_RFE_CTRL2GPIO_2 */
+constexpr EfemEnt kEntsRfe7[] = {
+    {0x67, B1, B1}, /* BT_GPIO17 */
+    {0x40, B3, B3}, /* RFE_CTRL_7 — target */
+};
+
+/* RFE_CTRL_8 = GPIO4 -> WL_DPDT_SEL */
+constexpr EfemEnt kEntsRfe8[] = {
+    {0x66, B4, B4},      /* BT_SPI_D0 */
+    {0x42, B3, B3},      /* WL_SPI_D0 */
+    {0x67, B0, B0},      /* BT_JTAG_TRST */
+    {0x65, B7, B7},      /* WL_JTAG_TRST */
+    {0x73, B3, B3},      /* DBG_GNT_WL */
+    {0x40, B1 | B0, B0}, /* WLMAC_DBG */
+    {0x40, B1 | B0, B1}, /* WLPHY_DBG */
+    {0x40, B1 | B0, B1 | B0}, /* BT_DBG */
+    {0x4E, B7, B7},      /* ANT_SWB (SW_DPDT_SEL) */
+    {0x42, B1, B1},      /* BT_RFE_CTRL_0 (BT_DPDT_SEL) */
+    {0x42, B1, B1},      /* WL_RFE_CTRL_8 (WL_DPDT_SEL) — target */
+};
+constexpr EfemFix kFixRfe8[] = {{0x43, B2, true}, {0x4F, B0, true}};
+
+/* RFE_CTRL_9 = GPIO13 -> WL_DPDT_SEL — the DPDT transfer switch itself. */
+constexpr EfemEnt kEntsRfe9[] = {
+    {0x4E, B6, B6}, /* BT_WAKE (GPIO13_14_WL_CTRL_EN — 0x4c[22]) */
+    {0x4F, B6, B6}, /* BT_ANT_SW_0 */
+    {0x4E, B7, B7}, /* ANT_SW_GPIO13 (SW_DPDT_SEL) */
+    {0x42, B1, B1}, /* BT_RFE_CTRL_1 (BT_DPDT_SEL) */
+    {0x42, B1, B1}, /* WL_RFE_CTRL_9 (WL_DPDT_SEL) — target */
+};
+constexpr EfemFix kFixRfe9[] = {
+    {0x43, B3, false}, {0x43, B4, true}, {0x4F, B0, true}};
+
+/* RFE_CTRL_11 = GPIO2 -> WLPHY_RFE_CTRL2GPIO */
+constexpr EfemEnt kEntsRfe11[] = {
+    {0x66, B2, B2},      /* BT_GPIO2 */
+    {0x4F, B6, B6},      /* BT_ANT_SW_2 */
+    {0x41, B1, 0},       /* WL_STATE (BT_PTA) */
+    {0x41, B2, B2},      /* BT_STATE (WL_PTA) */
+    {0x40, B1 | B0, B0}, /* WLMAC_DBG */
+    {0x40, B1 | B0, B1}, /* WLPHY_DBG */
+    {0x40, B1 | B0, B1 | B0}, /* BT_DBG */
+    {0x40, B2, B2},      /* RFE_CTRL_11_4_5 — target */
+};
+constexpr EfemFix kFixRfe11[] = {{0x3F, B0, false}};
+
+/* Kernel order: rtw_halmac_rfe_ctrl_cfg(28..33) = RFE_CTRL_3,5,7,8,9,11. */
+constexpr EfemFunc kEfemFuncs[] = {
+    {"RFE_CTRL_3/GPIO3", kEntsRfe3, std::size(kEntsRfe3), kFixRfe3,
+     std::size(kFixRfe3)},
+    {"RFE_CTRL_5/GPIO14", kEntsRfe5, std::size(kEntsRfe5), kFixRfe5,
+     std::size(kFixRfe5)},
+    {"RFE_CTRL_7/EECS", kEntsRfe7, std::size(kEntsRfe7), nullptr, 0},
+    {"RFE_CTRL_8/GPIO4", kEntsRfe8, std::size(kEntsRfe8), kFixRfe8,
+     std::size(kFixRfe8)},
+    {"RFE_CTRL_9/GPIO13", kEntsRfe9, std::size(kEntsRfe9), kFixRfe9,
+     std::size(kFixRfe9)},
+    {"RFE_CTRL_11/GPIO2", kEntsRfe11, std::size(kEntsRfe11), kFixRfe11,
+     std::size(kFixRfe11)},
+};
+
+} /* namespace */
+
+void RtlJaguar3Device::efem_pinmux_8822e() {
+  for (const EfemFunc &f : kEfemFuncs) {
+    for (size_t i = 0; i < f.n_ents; ++i) {
+      const EfemEnt &e = f.ents[i];
+      uint8_t v = _device.rtw_read8(e.off);
+      v &= static_cast<uint8_t>(~e.msk);
+      if (i + 1 == f.n_ents)
+        v |= static_cast<uint8_t>(e.val & e.msk); /* enable the target */
+      else
+        v |= static_cast<uint8_t>(~e.val & e.msk); /* disable the claim */
+      _device.rtw_write8(e.off, v);
+    }
+    for (size_t i = 0; i < f.n_fixes; ++i) {
+      const EfemFix &x = f.fixes[i];
+      uint8_t v = _device.rtw_read8(x.off);
+      v = x.set ? static_cast<uint8_t>(v | x.bit)
+                : static_cast<uint8_t>(v & ~x.bit);
+      _device.rtw_write8(x.off, v);
+    }
+  }
+  _logger->info("Jaguar3(8822e): eFEM pin-mux applied (RFE_CTRL 3/5/7/8/9/11 "
+                "-> RFE engine; DPDT under hardware TX/RX control)");
+}
+
+/* 8822E DPDT antenna-transfer-switch routing — mode dispatch + PAD_CTRL1
+ * post-coex re-assert. Called from BOTH Init (RX) and InitWrite (TX), each
+ * time right after coex_wlan_only_init: coex sets GPIO_MUXCFG BT-PTA bits that
+ * would mask the RFE routing, so this MUST follow it. Kernel parity — the
+ * vendor runs _efem_pinmux_config from rtl8822e_init_misc in both directions.
+ *
+ * The eFEM (default) path replaces the improvised b5a6df7 DPDT write, which
+ * took two 0x4c bits in isolation (set [24], clear [22]) and parked the DPDT
+ * transfer switch in a static TX-favoring position: TX MCS4+ worked, but RX
+ * path B lost its antenna on every 8812EU (chain-B pwdb pinned ~10 / -99 dBm
+ * — invisible to total-frame validation, chain A masks it). The full pinmux
+ * routes GPIO13 to the RFE engine's RFE_CTRL_9 (WL_DPDT_SEL) so the switch
+ * follows TX/RX in hardware: PA on TX, BOTH LNAs on RX. Gated on rfe_type
+ * 21..24 like the kernel (as config_rfe already does); non-eFEM boards keep
+ * the reset-default pins.
+ * DEVOURER_DPDT_MODE knob for A/B: efem (default) | legacy (b5a6df7 write) |
+ * bit24 ([24] only) | skip. */
+void RtlJaguar3Device::apply_dpdt_route_8822e() {
+  if (_variant != jaguar3::ChipVariant::C8822E)
+    return;
+  const devourer::Dpdt8822eMode dpdt_mode = _cfg.tuning.dpdt_8822e;
+  const uint8_t rfe = _hal.rfe_type();
+  if (dpdt_mode == devourer::Dpdt8822eMode::EfemPinmux) {
+    if (rfe >= 21 && rfe <= 24)
+      efem_pinmux_8822e();
+    else
+      _logger->warn("Jaguar3(8822e): eFEM pin-mux SKIPPED — rfe_type={} "
+                    "not in 21..24",
+                    rfe);
+  } else if (dpdt_mode != devourer::Dpdt8822eMode::Skip) {
+    const uint32_t v4c = _device.rtw_read<uint32_t>(0x4c);
+    if (dpdt_mode == devourer::Dpdt8822eMode::Bit24)
+      _device.rtw_write<uint32_t>(0x4c, v4c | 0x01000000u);
+    else
+      _device.rtw_write<uint32_t>(0x4c, (v4c & ~0x00400000u) | 0x01000000u);
+    _logger->warn("Jaguar3(8822e): DPDT legacy write mode={} "
+                  "(0x4c was 0x{:08x})",
+                  dpdt_mode == devourer::Dpdt8822eMode::Bit24 ? "bit24"
+                                                            : "legacy",
+                  v4c);
+  } else {
+    _logger->warn("Jaguar3(8822e): DPDT/eFEM pin-mux SKIPPED");
+  }
+  if (dpdt_mode != devourer::Dpdt8822eMode::Skip) {
+    /* PAD_CTRL1[29:28] route the WL PAPE/antenna pads. MacInit sets both
+     * (halmac pre-init), but the FW/coex bring-up steps clear bit29 —
+     * re-assert post-coex (bench-validated cold-TX fix). */
+    const uint32_t v64 = _device.rtw_read<uint32_t>(0x0064);
+    if ((v64 & 0x30000000u) != 0x30000000u)
+      _device.rtw_write<uint32_t>(0x0064, v64 | 0x30000000u);
+  }
+}
+
 /* Golden-init replay — same file format as Jaguar2's ("%x %u %llx" = addr
  * width value per line, tests/decode_wseq.py output). */
 void RtlJaguar3Device::apply_replay_wseq() {
@@ -655,28 +849,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * TX-power state (flat override / offset) only sticks when applied after
    * them. The coex thread's ~2 s ticks do not rewrite the refs. */
   apply_tx_power_current(/*full=*/true);
-  if (_variant == jaguar3::ChipVariant::C8822E) {
-    /* halmac "Config PIN Mux" (halmac_gpio_8822e.c HALMAC_WL_DPDT_SEL —
-     * REG_LED_CFG+3 |= BIT(0)): route the DPDT antenna transfer switch to WL
-     * control — 0x4c[24] = DPDT_WLBT_SEL set, [22] = GPIO13_14_WL_CTRL_EN
-     * clear. With the switch mis-routed the chip still transmits at full
-     * duty, but everything faster than ~26 Mbps PHY (HT MCS4+, legacy
-     * 48M/54M) airs a PPDU no receiver can sync to, and the surviving low
-     * rates run ~20 dB above the kernel's TX EVM. Must be written after the
-     * FW H2C steps above; interacts with the single-path 1SS TX mapping
-     * (HalJaguar3::config_channel_8822e) — with 1SS duplicated onto both
-     * chains this write wedges MCS0 TX, so the two ship together. */
-    const uint32_t v4c = _device.rtw_read<uint32_t>(0x4c);
-    _device.rtw_write<uint32_t>(0x4c, (v4c & ~0x00400000u) | 0x01000000u);
-    /* Same pin-mux family: PAD_CTRL1[29:28] route the WL PAPE/antenna pads.
-     * MacInit sets both (halmac pre-init), but the FW/coex bring-up steps
-     * clear bit29 — re-assert post-coex. */
-    const uint32_t v64 = _device.rtw_read<uint32_t>(0x0064);
-    if ((v64 & 0x30000000u) != 0x30000000u)
-      _device.rtw_write<uint32_t>(0x0064, v64 | 0x30000000u);
-    _logger->info("Jaguar3(8822e): DPDT/pad pin-mux applied (0x4c[24], "
-                  "0x64[29:28])");
-  }
+  apply_dpdt_route_8822e(); /* 8822E DPDT/eFEM pin-mux (post-coex) */
   apply_replay_wseq(); /* DEVOURER_REPLAY_WSEQ golden-init replay (debug) */
   if (_cfg.debug.bb_dump) {
     /* Full MAC+BB dump (0x000..0x4ffc — MAC plane, then BB incl. the RF

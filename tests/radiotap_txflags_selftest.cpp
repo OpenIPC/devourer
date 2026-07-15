@@ -70,6 +70,28 @@ int main() {
   CHECK_EQ(f.ldpc, 0);
   CHECK_EQ(f.stbc, 0);
 
+  /* Raw 3-byte MCS field (bypasses the builder): BW code 20U (not 40 MHz),
+   * STBC stream count 2, FEC known + LDPC, GI not short, MCS 5. Pins the
+   * decoder's bit positions independently of what build_stream_radiotap can
+   * emit. */
+  {
+    const uint8_t raw[3] = {
+        /* known */ IEEE80211_RADIOTAP_MCS_HAVE_BW |
+            IEEE80211_RADIOTAP_MCS_HAVE_MCS | IEEE80211_RADIOTAP_MCS_HAVE_FEC |
+            IEEE80211_RADIOTAP_MCS_HAVE_STBC,
+        /* flags */ IEEE80211_RADIOTAP_MCS_BW_20U |
+            IEEE80211_RADIOTAP_MCS_FEC_LDPC |
+            (2 << IEEE80211_RADIOTAP_MCS_STBC_SHIFT),
+        /* index */ 5};
+    const auto g = devourer::decode_radiotap_mcs_field(raw);
+    CHECK_EQ(g.have_mcs, 1);
+    CHECK_EQ(g.mcs, 5);
+    CHECK_EQ(g.bw40, 0);
+    CHECK_EQ(g.sgi, 0);
+    CHECK_EQ(g.ldpc, 1);
+    CHECK_EQ(g.stbc, 2);
+  }
+
   /* VHT wire contract: pin the byte positions the device parsers read
    * (known bit0 = STBC, arg[2] bit0 = STBC flag, arg[8] bit0 = LDPC). */
   m = devourer::TxMode{};

@@ -7,6 +7,7 @@
 #include "RadioManagementModule.h"
 #include "AckResponder.h" /* hardware ACK responder recipe */
 #include "RadiotapPeek.h" /* send_packets batch pre-parse */
+#include "RadiotapTxFlags.h" /* shared HT MCS known/flag decode (LDPC/STBC) */
 #include "SignalStop.h"
 #include "ToneMask.h"
 #include "TxAggPlan.h" /* USB TX aggregation URB packing */
@@ -883,48 +884,22 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
       break;
 
     case IEEE80211_RADIOTAP_MCS: {
-      u8 mcs_known = iterator.this_arg[0];
-      u8 mcs_flags = iterator.this_arg[1];
-
-      uint8_t mcs_bw_field = mcs_flags & IEEE80211_RADIOTAP_MCS_BW_MASK;
-      if (mcs_bw_field == IEEE80211_RADIOTAP_MCS_BW_40) {
+      /* One shared reading of the HT MCS known/flag/index bytes — bw/sgi/mcs
+       * plus FEC=LDPC and the STBC stream count (RadiotapTxFlags.h, the same
+       * decode the Jaguar2/3 paths use, so the three copies can't diverge).
+       * The radiotap is authoritative for per-packet rate; the SetTxMode
+       * default applies after this loop only when no rate is present.
+       * bwidth starts at 20 MHz, so the BW_20/20L/20U codes need no branch. */
+      const devourer::RadiotapMcsField m =
+          devourer::decode_radiotap_mcs_field(iterator.this_arg);
+      if (m.bw40)
         bwidth = CHANNEL_WIDTH_40;
-      } else if (mcs_bw_field == IEEE80211_RADIOTAP_MCS_BW_20 ||
-                 mcs_bw_field == IEEE80211_RADIOTAP_MCS_BW_20L ||
-                 mcs_bw_field == IEEE80211_RADIOTAP_MCS_BW_20U) {
-        bwidth = CHANNEL_WIDTH_20;
-      }
-
-      if (mcs_flags & 0x04) {
-        sgi = 1;
-      } else {
-        sgi = 0;
-      }
-
-      /* STBC (radiotap MCS known bit5 / flags bits5-6) and FEC=LDPC (known bit4 /
-       * flags bit4). The HT branch previously read neither, so an HT frame tagged
-       * STBC/LDPC in radiotap silently transmitted as BCC SISO -- only the VHT
-       * branch honoured them. Reading them here lets txdemo emit a real
-       * HT STBC / HT LDPC frame (needed as a chip reference for the gr-ieee802-11
-       * fork's modern-format TX). */
-      if (mcs_known & 0x20) {
-        stbc = (mcs_flags >> 5) & 0x3;
-      }
-      if ((mcs_known & 0x10) && (mcs_flags & 0x10)) {
-        ldpc = 1;
-      }
-
-      /* The radiotap is authoritative for per-packet rate: honour the HT MCS
-       * index from byte 2 unconditionally. (Previously gated behind the
-       * DEVOURER_TX_HT_MCS env var, so a valid HT radiotap silently fell back
-       * to 1M CCK — now replaced by the programmatic SetTxMode default, applied
-       * after this loop only when no rate is present in the radiotap.) */
-      if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_MCS) {
-        uint8_t mcs_index = iterator.this_arg[2];
-        if (mcs_index <= 31) {
-          fixed_rate = MGN_MCS0 + mcs_index;
-          rate_from_radiotap = true;
-        }
+      sgi = m.sgi;
+      ldpc = m.ldpc;
+      stbc = m.stbc;
+      if (m.have_mcs) {
+        fixed_rate = MGN_MCS0 + m.mcs;
+        rate_from_radiotap = true;
       }
     } break;
 

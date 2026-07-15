@@ -46,6 +46,12 @@ void kestrel_halbb_ctrl_bw_ch(struct kestrel_halbb_ctx *ctx, unsigned char pri_c
                               unsigned char central_ch, unsigned char bw,
                               unsigned char band_type);
 
+/* T-MAC TX path-com routing (halbb_ctrl_tx_path_tmac_8852c): the 0xD800..0xD820
+ * path-com block (per-cut, via the MAC pwr-reg plane) + the 0x9a4 path enable +
+ * both-path TSSI reset. Connects the BB IFFT output to the TX chain — replaces
+ * devourer's hand-transcribed ctrl_tx_path_tmac_8852c. Single-PHY, RF_PATH_A. */
+void kestrel_halbb_ctrl_tx_path(struct kestrel_halbb_ctx *ctx);
+
 #ifdef __cplusplus
 }
 #endif

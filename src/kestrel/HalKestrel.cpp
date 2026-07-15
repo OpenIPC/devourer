@@ -1676,14 +1676,18 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
    * analogue; the 8852C needs this explicit routing block or the TX chain is
    * silent even though the RF synth locks. Part of the vendor trx-init. */
   if (_variant == ChipVariant::C8852C) {
-    ctrl_tx_path_tmac_8852c();
 #if defined(DEVOURER_KESTREL_HALBB_8852C)
     /* Vendored halbb-G6 RX bring-up: loads the gain-table cache, runs the
      * LNAON/TRSW/PAPE RF-front-end gpio routing, and enables the RX chains —
-     * the real Realtek C, not a hand-transcribed subset. */
+     * the real Realtek C, not a hand-transcribed subset. Then the vendored
+     * T-MAC TX path-com routing (halbb_ctrl_tx_path_tmac_8852c: per-cut 0xD800
+     * block + both-path TSSI reset), replacing the hand-transcribed
+     * ctrl_tx_path_tmac_8852c. Both need the bb_info ctx, so run after create. */
     halbb8852c_bringup(cut, rfe_type);
+    halbb8852c_ctrl_tx_path();
 #else
-    ctrl_rx_path_8852c(); /* fallback: RX-path enable only (0x4978) */
+    ctrl_tx_path_tmac_8852c(); /* fallback: hand-transcribed T-MAC TX path */
+    ctrl_rx_path_8852c();      /* fallback: RX-path enable only (0x4978) */
 #endif
   }
 
@@ -1890,6 +1894,13 @@ void HalKestrel::halrf8852c_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw)
 void HalKestrel::halbb8852c_set_gain(uint8_t channel, uint8_t band_type) {
   if (_halbb_ctx)
     kestrel_halbb_set_gain(_halbb_ctx, channel, band_type);
+}
+
+void HalKestrel::halbb8852c_ctrl_tx_path() {
+  if (_halbb_ctx) {
+    kestrel_halbb_ctrl_tx_path(_halbb_ctx);
+    _logger->info("Kestrel PHY(8852C): T-MAC TX path-com routed (vendored)");
+  }
 }
 
 void HalKestrel::halbb8852c_ctrl_bw_ch(uint8_t pri_ch, uint8_t center,

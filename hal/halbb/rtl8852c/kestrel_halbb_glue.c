@@ -67,6 +67,11 @@ void kestrel_halbb_ctrl_bw_ch(struct kestrel_halbb_ctx *ctx, unsigned char pri_c
                          (enum band_type)band_type, HW_PHY_0);
 }
 
+void kestrel_halbb_ctrl_tx_path(struct kestrel_halbb_ctx *ctx) {
+  if (ctx)
+    halbb_ctrl_tx_path_tmac_8852c(&ctx->bb, RF_PATH_A, false);
+}
+
 void kestrel_halbb_destroy(struct kestrel_halbb_ctx *ctx) {
   if (ctx)
     free(ctx);

@@ -421,6 +421,9 @@ public:
    * hand-rolled BB channel-switch. bw = devourer ChannelWidth_t. */
   void halbb8852c_ctrl_bw_ch(uint8_t pri_ch, uint8_t center, ChannelWidth_t bw,
                              uint8_t band_type);
+  /* Vendored T-MAC TX path-com routing (halbb_ctrl_tx_path_tmac_8852c) —
+   * replaces the hand-transcribed ctrl_tx_path_tmac_8852c. */
+  void halbb8852c_ctrl_tx_path();
   ::kestrel_halbb_ctx *_halbb_ctx = nullptr;
   void *_halbb_bridge = nullptr; /* heap kestrel_halbb_bridge, outlives ctx */
   static unsigned int halbb_r32(void *dev, unsigned int addr);

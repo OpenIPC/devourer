@@ -140,12 +140,6 @@ bool RtlKestrelDevice::PowerOnTrxAndPhy(kestrel::EfuseInfo &out) {
   return _hal.phy_bb_rf_init(out.rfe_type, _hal.read_cut());
 }
 
-void RtlKestrelDevice::not_ported(const char *entry,
-                                  const char *milestone) const {
-  _logger->error("Kestrel: {} is not ported yet ({})", entry, milestone);
-  throw std::runtime_error(std::string("Kestrel ") + entry +
-                           " not ported yet (" + milestone + ")");
-}
 
 bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
   _channel = channel;
@@ -176,7 +170,8 @@ bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
  * backoff for injection, and clearing CCA ALSO disables RX energy detection —
  * a pure-monitor RX loop that ran it went deaf (zero bulk-IN completions on
  * every band). Only the TX path (InitWrite) needs it; RX-only keeps CCA on.
- * The proper both-at-once fix (CCA on during TX) is task #11 (RX-DCK/DACK). */
+ * Carrier-sense TX (CCA on during TX) returns with the RX-DCK/DACK-backed
+ * energy-detector calibration. */
 void RtlKestrelDevice::EnableTxScheduler() {
   /* mac_port_init (mport.c) — enable the CMAC PORT so the transmit engine has a
    * BSS/PTCL context. Without it the CMAC queues frames but never airs them,
@@ -260,17 +255,9 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   /* Async bulk-IN ring; walk each aggregate with the 11ax rxd parser. The
    * buffer must hold a full RXAGG aggregate (the 8852C LEN_TH is ~20 KB), or
    * large aggregates overflow/truncate and RX delivery stalls. */
-  int reads = 0;
   _device.bulk_read_async_loop(
       32768, 8,
       [&](const uint8_t *data, int n) {
-        if (++reads <= 12 || reads % 200 == 0)
-          _logger->info("Kestrel RX: bulk-IN total={} (last {} bytes) "
-                        "(rxd0=0x{:08x})",
-                        reads, n,
-                        n >= 4 ? (data[0] | (data[1] << 8) | (data[2] << 16) |
-                                  (data[3] << 24))
-                               : 0);
         uint32_t off = 0;
         while (off + 16 <= static_cast<uint32_t>(n)) {
           kestrel::KestrelRxFrame f;

@@ -604,9 +604,9 @@ bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
 
   uint8_t *hdr = wd + desc_len;
   /* Per-H2C sequence number (fwinfo->h2c_seq): 8-bit rolling counter
-   * (H2C_HDR_H2C_SEQ [31:24], msk 0xff), incremented per runtime H2C across
-   * ALL classes (h2c_pkt_set_hdr). The golden capture counts 0,1,2,... from
-   * the first runtime H2C. */
+   * (H2C_HDR_H2C_SEQ [31:24], msk 0xff), stamped into every runtime H2C
+   * across ALL classes (h2c_pkt_set_hdr, fwcmd.c) and incremented per H2C
+   * (h2c_end_flow) — 0,1,2,... from the first runtime H2C. */
   const uint8_t seq = _h2c_seq;
   _h2c_seq++;
   uint32_t hdr0 = (static_cast<uint32_t>(cat) << r::H2C_HDR_CAT_SH) |
@@ -620,22 +620,6 @@ bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
    * to find the next packet boundary; an 8-byte-short value desyncs the queue. */
   put_le32(hdr + 4, data_len << r::H2C_HDR_TOTAL_LEN_SH);
   std::memcpy(hdr + r::FWCMD_HDR_LEN, content, len);
-
-  /* One-shot hexdump of the first FW_OFLD packet for golden byte-diff vs the
-   * vendor .ko cmd_ofld capture (WD 24B + fwcmd hdr 8B + command dwords). */
-  static bool dumped = false;
-  if (!dumped && h2c_class == r::FWCMD_H2C_CL_FW_OFLD) {
-    dumped = true;
-    std::string hx;
-    const size_t n = std::min<size_t>(_txbuf.size(), 64);
-    char b[4];
-    for (size_t i = 0; i < n; ++i) {
-      std::snprintf(b, sizeof(b), "%02x", _txbuf[i]);
-      hx += b;
-      if ((i & 3) == 3) hx += ' ';
-    }
-    _logger->info("Kestrel cmd_ofld pkt[{}B] first64: {}", _txbuf.size(), hx);
-  }
 
   int rc = _device.bulk_send_sync_ep(_ch12_ep, _txbuf.data(), _txbuf.size(), 1000);
   if (rc < 0 || static_cast<size_t>(rc) != _txbuf.size()) {
@@ -846,10 +830,10 @@ bool KestrelFw::check_fw_rdy() {
 
 void KestrelFw::idmem_share_mode_check() {
   /* idmem_share_mode_check (fwdl.c:280), non-secure branch: force the SEC_CTRL
-   * IDMEM-share field to the chip default. FWDL_IDMEM_SHARE_DEFAULT_MODE is
-   * (AX-MIPS ? 0x1 : 0x0), so the RISC-V 8852C needs 0x0 — leaving the MIPS 0x1
-   * mis-sizes the fw's IDMEM and it hangs during post-download HW init. Golden
-   * capture (8852B): 0x0C00 -> 0x0001c01f. */
+   * IDMEM-share field to the chip default (idmem_share_mode_check,
+   * fwdl.c:296). FWDL_IDMEM_SHARE_DEFAULT_MODE is (AX-MIPS ? 0x1 : 0x0), so
+   * the RISC-V 8852C needs 0x0 — leaving the MIPS 0x1 mis-sizes the fw's
+   * IDMEM and it hangs during post-download HW init. */
   const uint8_t mode = (_variant == ChipVariant::C8852C)
                            ? r::FWDL_IDMEM_SHARE_DEFAULT_MODE_8852C
                            : r::FWDL_IDMEM_SHARE_DEFAULT_MODE;
@@ -868,9 +852,9 @@ void KestrelFw::fwdl_patch_fw_delay() {
   /* fwdl_patch_fw_delay (fwdl.c:1176), non-secure branch: the fw's own CPU-clk
    * setting is wrong, which makes its secure-checksum delay (and every other
    * timed HCI access) inaccurate — the running fw then faults on the AHB->HCI
-   * bus (HALT_C2H = L2_ERR_AH_HCI). Fix it by poking the correct clk value into
-   * IDMEM via the indirect-access window. Golden: 0x0C04 -> 0x18e0c3d8, then
-   * 0x40000 (wIndex=4) -> 0x0000000a. */
+   * bus (HALT_C2H = L2_ERR_AH_HCI). Fix it by poking the correct clk value
+   * (fw_fake_cpu_clk) into the fw_cpu_clk_addr IDMEM slot via the
+   * FILTER_MODEL_ADDR indirect-access window (fwdl.c:1197-1228). */
   const bool c = (_variant == ChipVariant::C8852C);
   const uint32_t clk_addr =
       c ? r::FW_CPU_CLK_ADDR_8852C : r::FW_CPU_CLK_ADDR_8852B;
@@ -1017,9 +1001,9 @@ bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
       if (_variant == ChipVariant::C8852C) {
         /* RISC-V bootrom debug: BOOT_DBG_V1[31:16]=boot_status (a fwdl-step
          * code, e.g. 7="DLFW START", 0x26="OS START DONE"), [15:0]=secureboot.
-         * A stall here with boot_status advancing past DLFW START means the
-         * bootrom self-booted its ROM fw instead of raising H2C_PATH_RDY —
-         * the open 8852C USB-FWDL gap (needs a vendor .ko usbmon golden diff). */
+         * boot_status advancing past DLFW START without H2C_PATH_RDY means
+         * the bootrom self-booted its ROM fw — historically a wrong fw-image
+         * pick for the die cut (the CBV die takes the u2 image). */
         uint32_t bd = _device.rtw_read32(r::R_AX_BOOT_DBG_V1);
         _logger->error("Kestrel FWDL: 8852C boot stalled — BOOT_DBG_V1=0x{:08x} "
                        "(boot_status=0x{:x} secureboot=0x{:x})",
@@ -1131,8 +1115,8 @@ bool KestrelFw::download_firmware(uint8_t cut, uint8_t mss_idx, bool is_sec_ic) 
                 _ch12_ep);
 
   /* mac_hal_init WDT block (init.c:470, right before the CPU enable): no
-   * WDT wake on USB/PCIE, WDT platform-reset disabled (wdt_plt_rst_en=0).
-   * Golden capture: 0x0170 -> 0x00000000, 0x01e0 keeps bit16 clear. */
+   * WDT wake on USB/PCIE (SYS_CFG5), WDT platform-reset disabled
+   * (WCPU_FW_CTRL wdt_plt_rst_en=0). */
   clr32(r::R_AX_SYS_CFG5, r::B_AX_WDT_WAKE_PCIE_EN | r::B_AX_WDT_WAKE_USB_EN);
   clr32(r::R_AX_WCPU_FW_CTRL, r::B_AX_WDT_PLT_RST_EN);
 

@@ -161,9 +161,9 @@ void HalKestrel::usb_init() {
     _device.rtw_write8(ep0, v);
     _device.rtw_write8(ep2 + 1, r::USB_NUMP);
   }
-  /* NB: the vendor usb_init_8852b does NOT re-kick HCI RXDMA/TXDMA here —
-   * that toggle is usb_pre_init's (pre-FWDL). Golden capture: no 0x8380
-   * write after FWDL. */
+  /* NB: the vendor usb_init_8852b (_usb_8852b.c) does NOT re-kick HCI
+   * RXDMA/TXDMA here — that toggle is usb_pre_init's (pre-FWDL,
+   * _usb_8852b.c:173); nothing rewrites HCI_FUNC_EN after FWDL. */
   _logger->info("Kestrel: USB init (mode=USB{}, NUMP set on 7 eps)",
                 mode == r::MAC_AX_USB3 ? 3 : mode == r::MAC_AX_USB2 ? 2 : 1);
 }
@@ -266,7 +266,7 @@ bool HalKestrel::power_on() {
   if (_variant == ChipVariant::C8852C)
     return power_on_8852c();
   /* mac_set_dut_env_mode (init.c:26, the first thing mac_hal_init does):
-   * WCPU_FW_CTRL FW_ENV[29:28] = 0 (normal). Golden capture line 1. */
+   * WCPU_FW_CTRL FW_ENV[29:28] = 0 (normal DUT mode). */
   field32(r::R_AX_WCPU_FW_CTRL, 0, r::B_AX_FW_ENV_MSK, r::B_AX_FW_ENV_SH);
   /* NB: usb_pre_init (intf_pre_init) runs AFTER power-on + dmac_pre_init in
    * the vendor mac_hal_init (init.c:421) — see download_firmware. */
@@ -369,7 +369,7 @@ bool HalKestrel::power_on() {
    * (pwr_seq_func_8852b.c:369-405): DMAC = bits 15..30 (no CRPRT yet — that
    * is mac_sys_init's dmac_func_en), CMAC = CMAC_EN|TXEN|RXEN|
    * FORCE_CMACREG_GCKEN|PHYINTF|DMA|PTCLTOP|SCHEDULER|TMAC|RMAC =
-   * 0x7000803F. Golden capture: 0x8400=0x7fff8000, 0xC000=0x7000803f. */
+   * 0x7000803F (pwr_seq_func_8852b.c:369-405). */
   constexpr uint16_t R_AX_DMAC_FUNC_EN = 0x8400;
   constexpr uint32_t kDmacEn = 0x7FFF8000u; /* bits 15..30 */
   set32(R_AX_DMAC_FUNC_EN, kDmacEn);
@@ -390,11 +390,10 @@ void HalKestrel::mac_sys_init() {
   /* dmac_func_en_8852b (init_8852b.c:1043): the full runtime DMAC enable —
    * MAC_FUNC|DMAC_FUNC|MPDU_PROC|WD_RLS|DLE_WDE|TXPKT_CTRL|STA_SCH|DLE_PLE|
    * PKT_BUF|DMAC_TBL|PKT_IN|DLE_CPUIO|DISPATCHER|BBRPT|MAC_SEC|DMAC_CRPRT|
-   * DMACREG_GCKEN = bits 15..31. Golden capture: 0x8400 -> 0xffff8000. */
+   * DMACREG_GCKEN = bits 15..31 (dmac_func_en_8852b, init_8852b.c). */
   set32(r::R_AX_DMAC_FUNC_EN, 0xFFFF8000u);
   /* cmac_func_en(band0, EN) (init.c:219): clock enables on CK_EN first, then
-   * the block enables on CMAC_FUNC_EN. Golden: 0xC004 -> 0xffffffff,
-   * 0xC000 -> 0xf000803f. */
+   * the block enables on CMAC_FUNC_EN (cmac_func_en_8852b, init_8852b.c). */
   set32(r::R_AX_CK_EN, r::CMAC_CK_EN_BITS);
   set32(r::R_AX_CMAC_FUNC_EN, r::CMAC_FUNC_EN_BITS);
   /* chip_func_en -> chip_func_en_8852b: the OCP patch — SPS_DIG_ON OCP_L1
@@ -753,10 +752,10 @@ bool HalKestrel::hfc_init_nic() {
         ((static_cast<uint32_t>(wp811) & r::B_AX_PREC_PAGE_WP_CH811_MSK)
          << r::B_AX_PREC_PAGE_WP_CH811_SH));
   uint32_t fc = _device.rtw_read32(fc_ctrl);
-  /* MODE = STF (1) for USB — matches the vendor golden capture
-   * (HCI_FC_CTRL = 0x055b: FC_EN=1, MODE=1). An earlier port set MODE=0 +
-   * FC_EN=0 on a wrong assumption; the fw never pulled the bulk cmd_ofld H2C
-   * off CH12 until HCI flow control was actually enabled. */
+  /* MODE = STF (1) for USB — the hfc_init USB branch selects store-and-
+   * forward flow control (hci_fc.c). An earlier port set MODE=0 + FC_EN=0 on
+   * a wrong assumption; the fw never pulled the bulk cmd_ofld H2C off CH12
+   * until HCI flow control was actually enabled. */
   fc = r::set_clr_word(fc, 1 /* MAC_AX_HCIFC_STF */, r::B_AX_HCI_FC_MODE_MSK,
                        r::B_AX_HCI_FC_MODE_SH);
   fc = r::set_clr_word(fc, r::HFC_FULL_COND_X2, r::B_AX_HCI_FC_WD_FULL_COND_MSK,
@@ -773,10 +772,11 @@ bool HalKestrel::hfc_init_nic() {
   w(fc_ctrl, fc);
 
   /* set_fc_func_en: enable CH12 credits now, but NOT the master FC_EN. The
-   * vendor keeps HCI_FC_CTRL FC_EN=0 through probe-time dmac/trx init (golden
-   * capture: 0x08040000) and only flips FC_EN=1 at ifup, immediately before
-   * its first bulk cmd_ofld (0x055b). Enabling FC_EN mid-dmac-init — while the
-   * DLE/USB reconfig is still settling — faults the fw's HCI/DMA AHB monitor
+   * vendor keeps HCI_FC_CTRL FC_EN=0 through probe-time dmac/trx init
+   * (hfc_init clears it on entry, hci_fc.c) and only flips FC_EN=1 at ifup,
+   * immediately before its first bulk cmd_ofld. Enabling FC_EN mid-dmac-init
+   * — while the DLE/USB reconfig is still settling — faults the fw's HCI/DMA
+   * AHB monitor
    * (SER err=0x10002010 L2_AH_HCI|L1_DMAC). enable_hci_fc() flips it later. */
   set32(fc_ctrl, r::B_AX_HCI_FC_CH12_EN);
   delay_us(10);
@@ -799,7 +799,7 @@ void HalKestrel::sec_eng_init() {
   v |= r::B_AX_BMC_MGNT_DEC | r::B_AX_UC_MGNT_DEC;
   v &= ~r::B_AX_TX_PARTIAL_MODE; /* 8852B */
   _device.rtw_write32(r::R_AX_SEC_ENG_CTRL, v);
-  /* MIC/ICV append (security_cam.c:1002). Golden: 0x9D04 -> ...|0x3. */
+  /* MIC/ICV append (security_cam.c:1002): SEC_MPDU_PROC |= APPEND_ICV|MIC. */
   set32(r::R_AX_SEC_MPDU_PROC, r::B_AX_APPEND_ICV | r::B_AX_APPEND_MIC);
   if (_variant == ChipVariant::C8852C) {
     /* 8852C-only (security_cam.c is_chip_id(8852C)): default RX drv-info block
@@ -1089,9 +1089,9 @@ void HalKestrel::usb_rx_agg_cfg() {
    * 11ax rxd parser already walks multi-frame aggregates via next_offset. */
   const bool c8852c = (_variant == ChipVariant::C8852C);
   const uint16_t rxagg0 = c8852c ? r::R_AX_RXAGG_0_V1 : r::R_AX_RXAGG_0;
-  /* pkt_num field: the vendor writes the field MSK (0xff) when the driver
-   * default is 0 (usb_rx_agg_cfg_8852c) — golden 8852C value 0x80ff2010. The
-   * 8852B path keeps 0 (unchanged, on-air-validated). */
+  /* pkt_num field: the 8852C writes the field MSK (0xff) when the driver
+   * default is 0 (usb_rx_agg_cfg_8852c, _usb_8852c.c:382). The 8852B path
+   * keeps 0 (unchanged, on-air-validated). */
   const uint32_t pktnum = c8852c ? r::B_AX_RXAGG_PKTNUM_TH_MSK : 0u;
   const uint32_t len_th =
       c8852c ? static_cast<uint32_t>(r::RXAGGSIZE) * r::COMPAT_RX_AGG_UNIT
@@ -2952,35 +2952,6 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
                 channel, center, bw_mhz, is_2g ? "2.4G" : "5G",
                 (_txpwr_dbm_q2 + _txpwr_offset_qdb) / 4, _txpwr_offset_qdb);
 
-  /* Read-only RX diagnostics. (The earlier version wrote test patterns to BB
-   * 0x4004, a-die 0x370 and d-die 0xe000 and never restored them — a debug
-   * probe that CORRUPTED live BB/RF state at the end of every set_channel, a
-   * prime burst-then-idle suspect. Removed: only read now.) */
-  const uint32_t bb_4004 = _device.rtw_read32_wide(0x4004 + BB_WIN);
-  const uint32_t bb_4738 = _device.rtw_read32_wide(0x4738 + BB_WIN);
-  const uint32_t rf18a = rf_read(0, 0x18);
-  const uint32_t rf18b = rf_read(1, 0x18);
-  const uint32_t rf00a = rf_read(0, 0x00);
-  const uint32_t rf00a_dav = rf_read_dav(0, 0x00);
-  const uint32_t rf_c5 = rf_rrf(0, 0xc5, 1u << 15); /* synth lock indicator */
-  const uint32_t hci_fen = _device.rtw_read32(0x8380);
-  const uint8_t rcr = _device.rtw_read8(0xCE00);
-  const uint32_t rxstate = _device.rtw_read32(0xCEF0);
-  _logger->info("Kestrel RX-diag: BB0x4004=0x{:08x} (want CA014000) "
-                "BB0x4738=0x{:08x} RF18a=0x{:05x} RF18b=0x{:05x} RF00a(dav)="
-                "0x{:05x} synthLock={} HCI_FEN=0x{:08x} RCR=0x{:02x} "
-                "RXstate=0x{:08x}",
-                bb_4004, bb_4738, rf18a, rf18b, rf00a_dav, rf_c5, hci_fen, rcr,
-                rxstate);
-  if (_variant == ChipVariant::C8852C) {
-    /* EP4 (RX bulk-IN) pause state — a set EP4_RX_PAUSE means MACUSBRXHANG
-     * (usb_get_rx_state_8852c). R_AX_USB_ENDPOINT_3_V1[14]=RX_PAUSE,
-     * [23]=PAUSE_STATE. */
-    const uint32_t ep3 = _device.rtw_read32(0x506C);
-    _logger->info("Kestrel EP-diag: 0x506C=0x{:08x} EP4_RX_PAUSE[14]={} "
-                  "EP4_PAUSE_STATE[23]={}",
-                  ep3, (ep3 >> 14) & 1, (ep3 >> 23) & 1);
-  }
   return true;
 }
 
@@ -3003,10 +2974,9 @@ bool HalKestrel::trx_cmac_rx_init() {
   cmac_dma_init();
   usb_rx_agg_cfg();
   /* mac_trx_init tail: coex_mac_init. The SER error-IMR enable
-   * (mac_enable_imr) is deliberately deferred to AFTER the BB/RF tables — the
-   * vendor golden capture writes 0x8520/0xC160=0xffffffff only after the first
-   * BB cmd_ofld batches, so the fw error handler isn't armed against a pending
-   * HCI/DMA condition while the BB is still unconfigured. */
+   * (mac_enable_imr) is deliberately deferred to AFTER the BB/RF tables, so
+   * the fw error handler isn't armed against a pending HCI/DMA condition
+   * while the BB is still unconfigured. */
   coex_mac_init();
   _logger->info("Kestrel TRX: full CMAC init done (sched+addrcam+fltr+cca+nav+"
                 "sr+tmac+trxptcl+rmac+com+ptcl+dma+coex)");

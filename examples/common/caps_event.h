@@ -20,13 +20,14 @@ inline void emit_adapter_caps(EventSink &sink, IRtlDevice *dev) {
   const AdapterCaps c = dev->GetAdapterCaps();
 
   /* Supported channel widths as an MHz int array (kBw* -> MHz). */
-  int bw[5];
+  int bw[6];
   int nbw = 0;
   if (c.bw_mask & kBw5) bw[nbw++] = 5;
   if (c.bw_mask & kBw10) bw[nbw++] = 10;
   if (c.bw_mask & kBw20) bw[nbw++] = 20;
   if (c.bw_mask & kBw40) bw[nbw++] = 40;
   if (c.bw_mask & kBw80) bw[nbw++] = 80;
+  if (c.bw_mask & kBw160) bw[nbw++] = 160;
 
   Ev ev(sink, "adapter.caps");
   ev.f("supported", c.supported ? 1 : 0)

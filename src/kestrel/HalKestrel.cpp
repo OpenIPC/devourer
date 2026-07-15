@@ -1859,6 +1859,16 @@ void HalKestrel::halrf8852c_ctl_band_ch_bw(uint8_t band_type, uint8_t center,
                                          : static_cast<uint8_t>(bw);
   kestrel_halrf_ctl_band_ch_bw(_halrf_ctx, band_type, center, hbw);
   kestrel_halrf_lck(_halrf_ctx); /* relock the synth (6 GHz VCO needs this) */
+  /* True synth-lock ground truth (RF 0xb7[8]=LCK-done, 0=locked; RF18 readback)
+   * — the BB 0xc5[15] "synthLock" is unreliable. Logged per tune so 6 GHz 160
+   * lock can be distinguished from a downstream RX/test issue. */
+  const uint32_t rf18a = kestrel_halrf_read_rf(_halrf_ctx, 0, 0x18);
+  const uint32_t rf18b = kestrel_halrf_read_rf(_halrf_ctx, 1, 0x18);
+  const uint32_t lckA = kestrel_halrf_read_rf(_halrf_ctx, 0, 0xb7) & (1u << 8);
+  const uint32_t lckB = kestrel_halrf_read_rf(_halrf_ctx, 1, 0xb7) & (1u << 8);
+  _logger->info("Kestrel RF(8852C): band{} ch{} bw{} RF18a=0x{:05x} RF18b=0x{:05x} "
+                "lckA={} lckB={} (lck 0=locked)",
+                band_type, center, hbw, rf18a, rf18b, lckA ? 1 : 0, lckB ? 1 : 0);
 }
 
 void HalKestrel::halrf8852c_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw) {
@@ -2798,6 +2808,14 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
     const int bs = channel - (((channel - o) / 4) % 8) * 4;
     center = static_cast<uint8_t>(bs + 14);
     pri_ch = static_cast<uint8_t>((channel - bs) / 4 + 1);
+    /* 6 GHz 160 MHz TX does not radiate on the C8852C: the RF synth locks
+     * (RF18 6G+160, LCK 0xb7[8]=0) and RX-160 works, but the 6G+160 TX-enable
+     * path is un-ported — SDR-confirmed 0% duty vs 45% at 6G-80 / 40% at
+     * 5G-160. RX/monitor at 6G-160 is fine; only host-pushed TX is silent. */
+    if (band_type == 2)
+      _logger->warn("Kestrel: 6 GHz 160 MHz TX does not radiate on this chip "
+                    "(RF locks, RX ok; 6G+160 TX-enable un-ported). Use <=80 "
+                    "MHz for 6 GHz TX.");
   }
 
   /* --- BB ctrl_ch + ctrl_bw (hand-rolled halbb_ctrl_ch/bw_8852b). For the

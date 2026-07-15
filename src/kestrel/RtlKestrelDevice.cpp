@@ -388,10 +388,14 @@ void RtlKestrelDevice::handle_c2h(const uint8_t *payload, uint32_t len) {
 }
 
 devourer::TxCaps RtlKestrelDevice::GetTxCaps() {
-  /* RTL8852B is 2T2R (halrf_8852b loops path A/B), 20/40/80 MHz. HE MCS via
-   * radiotap lands with the M5 HE grammar; STBC/LDPC/SGI supported. */
+  /* RTL8852B/C are 2T2R (halrf loops path A/B). HE MCS via radiotap lands with
+   * the M5 HE grammar; STBC/LDPC/SGI supported. Max TX bandwidth is 160 MHz —
+   * on-air-validated at 5 GHz (SDR ~66.6 Mbps MCS7/160). NOTE: 6 GHz 160 MHz TX
+   * does not radiate on the C8852C (SDR-confirmed 0% duty vs 45% at 6G-80 /
+   * 40% at 5G-160); the RF synth locks but the 6G+160 TX-enable path is an
+   * un-ported gap — 6 GHz tops out at 80 MHz for TX in practice. */
   return devourer::tx_caps_for_chains(2, /*ldpc=*/true, /*sgi=*/true,
-                                      /*bw_max_mhz=*/80);
+                                      /*bw_max_mhz=*/160);
 }
 
 /* Effective BB power is clamped to [0, 23] dBm (=[0, 92] quarter-dB); the

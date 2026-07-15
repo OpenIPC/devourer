@@ -108,6 +108,13 @@ void kestrel_halrf_lck(struct kestrel_halrf_ctx *ctx) {
     halrf_lck_8852c(&ctx->rf);
 }
 
+unsigned int kestrel_halrf_read_rf(struct kestrel_halrf_ctx *ctx,
+                                   unsigned char path, unsigned int addr) {
+  if (!ctx)
+    return 0;
+  return halrf_rrf(&ctx->rf, path, addr, MASKRF);
+}
+
 void kestrel_halrf_iqk(struct kestrel_halrf_ctx *ctx) {
   if (ctx)
     halrf_iqk(&ctx->rf, HW_PHY_0, true);

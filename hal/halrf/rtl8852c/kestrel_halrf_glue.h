@@ -66,6 +66,13 @@ void kestrel_halrf_ctl_band_ch_bw(struct kestrel_halrf_ctx *ctx,
  * not lock (0xc5[15]=0). */
 void kestrel_halrf_lck(struct kestrel_halrf_ctx *ctx);
 
+/* Diagnostic: read a 20-bit RF register (halrf_rrf, MASKRF) on the given path
+ * via the vendored RF plane. Used to read the true synth-lock state after a
+ * tune — RF 0xb7[8] (LCK-done, 0=locked) and the RF18 readback — which the
+ * unreliable BB 0xc5[15] "synthLock" bit does not reflect. */
+unsigned int kestrel_halrf_read_rf(struct kestrel_halrf_ctx *ctx,
+                                   unsigned char path, unsigned int addr);
+
 /* IQ imbalance calibration (halrf_iqk), HW_PHY_0, forced. Per-channel. */
 void kestrel_halrf_iqk(struct kestrel_halrf_ctx *ctx);
 

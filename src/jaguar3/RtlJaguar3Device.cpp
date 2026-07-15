@@ -18,7 +18,6 @@
 #include "ChannelFreq.h" /* radiotap CHANNEL freq -> channel (per-packet hop) */
 #include "FrameParserJaguar3.h"
 #include "NhmReader.h"       /* frame-free NHM power histogram (shared) */
-#include "RadiotapTxFlags.h" /* shared HT MCS known/flag decode (LDPC/STBC) */
 #include "RateDefinitions.h" /* MGN_* rate enum (shared across the family) */
 #include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
 #include "ToneMask.h"   /* DEVOURER_RX_CSI_MASK / DEVOURER_RX_NBI knobs */

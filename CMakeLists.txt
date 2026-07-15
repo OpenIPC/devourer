@@ -459,6 +459,11 @@ target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
 
+add_executable(RadiotapTxFlagsSelftest tests/radiotap_txflags_selftest.cpp)
+target_compile_features(RadiotapTxFlagsSelftest PRIVATE cxx_std_20)
+target_link_libraries(RadiotapTxFlagsSelftest PRIVATE devourer)
+add_test(NAME radiotap_txflags COMMAND RadiotapTxFlagsSelftest)
+
 # Headless guard for the burst-TDMA example's pure logic (examples/tdma/tdma.h):
 # the TsfClock host<->TSF least-squares fit, the frame-tag round-trip, and the
 # schedule phase math. No hardware — the tsf_probe / tsf_tdoa_probe /

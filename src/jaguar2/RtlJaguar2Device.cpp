@@ -15,6 +15,7 @@
 
 #include "AckResponder.h"
 #include "RadiotapPeek.h"
+#include "RadiotapTxFlags.h" /* HT MCS field decoder (LDPC/STBC) */
 #include "TxAggPlan.h"
 #include "TxReport.h"
 
@@ -1221,17 +1222,16 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
       radiotap_pkt_pwr_db = static_cast<int8_t>(*it.this_arg);
       break;
     case IEEE80211_RADIOTAP_MCS: {
-      uint8_t mcs_flags = it.this_arg[1];
-      if ((mcs_flags & IEEE80211_RADIOTAP_MCS_BW_MASK) ==
-          IEEE80211_RADIOTAP_MCS_BW_40)
+      const devourer::RadiotapMcsField m =
+          devourer::decode_radiotap_mcs_field(it.this_arg);
+      if (m.bw40)
         bwidth = CHANNEL_WIDTH_40;
-      sgi = (mcs_flags & 0x04) ? 1 : 0;
-      if (it.this_arg[0] & IEEE80211_RADIOTAP_MCS_HAVE_MCS) {
-        uint8_t idx = it.this_arg[2];
-        if (idx <= 31) {
-          fixed_rate = MGN_MCS0 + idx;
-          rate_from_radiotap = true;
-        }
+      sgi = m.sgi;
+      ldpc = m.ldpc;
+      stbc = m.stbc;
+      if (m.have_mcs) {
+        fixed_rate = MGN_MCS0 + m.mcs;
+        rate_from_radiotap = true;
       }
     } break;
     case IEEE80211_RADIOTAP_VHT: {

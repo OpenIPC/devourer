@@ -40,21 +40,30 @@ struct kestrel_halbb_ctx *kestrel_halbb_create(struct kestrel_halbb_bridge *br,
   }
   c->bb.rx_path = RF_PATH_AB;
   c->bb.bb0_cr_offset = 0;       /* bridge adds the BB window (wIndex=1) */
+  /* halbb_init_cr_default guards on this flag; it asserts exactly the wiring
+   * done above (hal_com/phl_com/bb_cmn_hooker present). */
+  c->bb.bb_cmn_info_init_ready = true;
   br->bb_info = &c->bb; /* halrf's cross-plane rtw_hal_bb_* calls (shim) */
   return c;
+}
+
+/* Apply the built-in BB register table + load the gain table + the efuse RX
+ * gain offsets — the vendor's own loader flow (halbb_init_reg ->
+ * halbb_init_cr_default + halbb_init_gain_table + halbb_get_efuse_ofst_init),
+ * walking the vendored hwimg arrays with the vendor's check-positive engine.
+ * Returns nonzero on success. */
+int kestrel_halbb_init_reg(struct kestrel_halbb_ctx *ctx) {
+  if (!ctx)
+    return 0;
+  return halbb_init_reg(&ctx->bb) ? 1 : 0;
 }
 
 void kestrel_halbb_rx_bringup(struct kestrel_halbb_ctx *ctx) {
   if (!ctx)
     return;
   struct bb_info *bb = &ctx->bb;
-  /* Populate bb_gain_i from the built-in gain raw data (per-chip loader —
-   * the halbb_cfg_bb_gain dispatcher's 8852C case adds a set_gain_cr_init
-   * the validated bring-up doesn't run, so call the loaders directly). */
-  if (bb->ic_type == BB_RTL8852B)
-    halbb_cfg_bb_gain_ax_8852b(bb, false, 0, 0);
-  else
-    halbb_cfg_bb_gain_ax_8852c(bb, false, 0, 0);
+  /* The gain cache (bb_gain_i) is populated by kestrel_halbb_init_reg's
+   * halbb_init_gain_table; this entry owns the front-end routing + chains. */
   /* LNAON / TRSW / PAPE RF-front-end routing (the both-bands deafness fix on
    * the 8852C). Vendor core dispatcher — per-chip via ic_type. */
   halbb_gpio_setting_init(bb);

@@ -36,10 +36,14 @@ struct kestrel_halbb_ctx *kestrel_halbb_create(struct kestrel_halbb_bridge *br,
                                                unsigned char rfe_type);
 void kestrel_halbb_destroy(struct kestrel_halbb_ctx *ctx);
 
-/* One-shot RX bring-up: load the built-in gain table into the cache
- * (halbb_cfg_bb_gain_ax_<chip>), run the LNAON/TRSW/PAPE RF-front-end gpio
- * routing (halbb_gpio_setting_init), then enable the RX chains
- * (halbb_ctrl_rx_path). */
+/* Apply the built-in BB register table + gain table + efuse RX gain offsets
+ * via the vendor's own loader flow (halbb_init_reg). Returns nonzero on
+ * success. Run after the MAC's enable_bb_rf, before rx_bringup. */
+int kestrel_halbb_init_reg(struct kestrel_halbb_ctx *ctx);
+
+/* One-shot RX bring-up: the LNAON/TRSW/PAPE RF-front-end gpio routing
+ * (halbb_gpio_setting_init), then enable the RX chains (halbb_ctrl_rx_path).
+ * The gain cache is loaded by kestrel_halbb_init_reg. */
 void kestrel_halbb_rx_bringup(struct kestrel_halbb_ctx *ctx);
 
 /* Per-channel: apply the cached per-band LNA/TIA gain-error

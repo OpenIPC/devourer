@@ -81,6 +81,17 @@ void kestrel_halrf_rfk_init(struct kestrel_halrf_ctx *ctx) {
     halrf_tssi_get_efuse_8852c(rf, HW_PHY_0);
 }
 
+/* Apply the built-in radio A/B register tables via the vendor's own loader
+ * (halrf_config_radio: per-chip walk with the check-positive engine; each
+ * a-die write rides the bridge RF plane, d-die the BB window) and send the
+ * accumulated radio pages to the fw (classes 8/9 through the bridge
+ * send_h2c). Returns nonzero on success. */
+int kestrel_halrf_config_radio(struct kestrel_halrf_ctx *ctx) {
+  if (!ctx)
+    return 0;
+  return halrf_config_radio(&ctx->rf, HW_PHY_0) ? 1 : 0;
+}
+
 void kestrel_halrf_dac_cal(struct kestrel_halrf_ctx *ctx, unsigned char force) {
   if (!ctx)
     return;

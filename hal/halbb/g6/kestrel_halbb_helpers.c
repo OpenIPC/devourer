@@ -45,6 +45,26 @@ void halbb_dv_pxp_print_en(struct bb_info *bb, bool en) {
   (void)bb; (void)en;
 }
 
+/* TPU / TSSI-ctrl MAC CR init (halbb_pwr_ctrl.c, not vendored) — the vendor's
+ * TX-power-unit plane. Devourer's hand-ported fixed-dBm TXAGC owns the MAC
+ * power CRs (set_txpwr_dbm, applied at every set_channel), so the vendor
+ * init stays a no-op here; the pwr_ctrl TU would come in with a
+ * TSSI-referenced power model. */
+void halbb_tpu_mac_cr_init(struct bb_info *bb, enum phl_phy_idx phy_idx) {
+  (void)bb; (void)phy_idx;
+}
+void halbb_tssi_ctrl_mac_cr_init(struct bb_info *bb, enum phl_phy_idx phy_idx) {
+  (void)bb; (void)phy_idx;
+}
+
+/* fwofld variants behind halbb_check_fw_ofld (false above) — link-only. */
+bool halbb_fwcfg_bb_phy_8852b(struct bb_info *bb, u32 addr, u32 data,
+                              enum phl_phy_idx phy_idx) {
+  (void)bb; (void)addr; (void)data; (void)phy_idx;
+  return false;
+}
+void halbb_fwofld_set_gain_cr_init_8852c(struct bb_info *bb) { (void)bb; }
+
 /* Spur suppression (halbb_spur_suppress.c, not vendored): channel-specific NBI
  * /CSI notch, not RX-hearing-critical — no-op (no spur notch). */
 void halbb_csi_tone_idx(struct bb_info *bb, u8 central_ch, enum channel_width bw,

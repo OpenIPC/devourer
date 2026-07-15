@@ -483,9 +483,16 @@ static inline u32 rtw_hal_mac_get_pwr_reg(struct rtw_hal_com_t *h, u8 band,
   struct kestrel_halbb_bridge *b = halcom_to_drvpriv(h);
   (void)band; if (val) *val = b->read_pwr ? b->read_pwr(b->dev, off) : 0; return 0;
 }
+/* fwcmd H2C -> bridge send_h2c (halrf_fill_h2c_cmd bottoms out here). The C++
+ * side forwards only the radio-page classes; a NULL callback reports success
+ * without sending (the pre-table-ownership behaviour). */
 static inline u32 rtw_hal_mac_send_h2c(struct rtw_hal_com_t *h,
                                        struct rtw_g6_h2c_hdr *hdr, u32 *pv) {
-  (void)h; (void)hdr; (void)pv; return 0;
+  struct kestrel_halbb_bridge *b = halcom_to_drvpriv(h);
+  if (b && b->send_h2c && hdr)
+    return (u32)b->send_h2c(b->dev, hdr->h2c_class, hdr->h2c_func, pv,
+                            hdr->content_len);
+  return 0;
 }
 
 /* RF-register plane (3-wire LSSI) -> bridge read_rf/write_rf. Used by halrf

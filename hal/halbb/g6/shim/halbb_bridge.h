@@ -47,6 +47,14 @@ struct kestrel_halbb_bridge {
    * NULL-able: the shim falls back to a no-op (fine for the 8852C paths). */
   unsigned char (*read_xsi)(void *dev, unsigned char offset);
   void (*write_xsi)(void *dev, unsigned char offset, unsigned char val);
+  /* fwcmd H2C plane (rtw_hal_mac_send_h2c): `data` = content dwords,
+   * `len_bytes` = content length. The C++ side forwards ONLY the OUTSRC
+   * radio-page classes (8 = radio A, 9 = radio B, func = page#) into its
+   * mac_ax H2C encoder — every other halrf H2C stays inert, matching the
+   * validated bring-up. Returns 0 on success (and for ignored classes).
+   * NULL-able: the shim then reports success without sending. */
+  int (*send_h2c)(void *dev, unsigned char h2c_class, unsigned char h2c_func,
+                  const unsigned int *data, unsigned short len_bytes);
   /* The live struct bb_info* (set by kestrel_halbb_create). The shim's
    * halrf->halbb cross-plane calls (rtw_hal_bb_backup_info / restore /
    * tx_mode_switch — hal_api_bb.c in the vendor) resolve the bb instance

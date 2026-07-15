@@ -1574,6 +1574,33 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
         r::B_AX_HCI_FC_EN);
   delay_us(10);
 
+#if defined(DEVOURER_KESTREL_HALBB) && defined(DEVOURER_KESTREL_HALRF)
+  if (_variant == ChipVariant::C8852C) {
+    /* Vendored table ownership: halbb_init_reg applies the BB phy_reg table +
+     * loads the gain table + the efuse RX gain offsets, halrf_config_radio
+     * applies radio B then A (vendor order) and sends the radio-page H2Cs
+     * through the bridge send_h2c into the mac_ax encoder — the vendor's own
+     * loaders walking the vendored hwimg arrays, replacing the C++ walker +
+     * cmd_ofld batching for this chip. */
+    ensure_vnd_ctx(cut, rfe_type);
+    if (!kestrel_halbb_init_reg(_halbb_ctx))
+      _logger->warn("Kestrel PHY: vendored halbb_init_reg reported failure");
+    if (!kestrel_halrf_config_radio(_halrf_ctx))
+      _logger->warn("Kestrel PHY: vendored halrf_config_radio reported failure");
+    const uint32_t bb4004v = _device.rtw_read32_wide(0x4004u + 0x10000u);
+    _logger->info("Kestrel PHY: BB+RF tables applied via vendored loaders "
+                  "(rfe=0x{:02x} cut={}) — BB0x4004=0x{:08x} (want CA014000)",
+                  rfe_type, cut, bb4004v);
+    /* Vendored halbb bring-up: LNAON/TRSW/PAPE gpio routing + RX chains (the
+     * gain cache came from init_reg), then the T-MAC TX path-com routing
+     * (halbb_ctrl_tx_path_tmac_8852c) that connects the BB IFFT output to the
+     * TX chain — without it the RF synth locks but nothing radiates. */
+    vnd_bb_bringup(cut, rfe_type);
+    vnd_bb_ctrl_tx_path();
+    return true;
+  }
+#endif
+
   _fw.ofld_begin();
   auto bb_emit = [&](uint32_t addr, uint32_t val) {
     switch (addr) {
@@ -1673,26 +1700,6 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
   _logger->info("Kestrel PHY: BB+RF tables applied via fw-offload "
                 "(rfe=0x{:02x} cut={}) — BB0x4004=0x{:08x} (want CA014000)",
                 rfe_type, cut, bb4004);
-
-  /* 8852C only: connect the BB IFFT output to the TX chain (T-MAC path-com).
-   * The 8852B path routes TX per-STA via the CMAC antenna model and so has no
-   * analogue; the 8852C needs this explicit routing block or the TX chain is
-   * silent even though the RF synth locks. Part of the vendor trx-init. */
-  if (_variant == ChipVariant::C8852C) {
-#if defined(DEVOURER_KESTREL_HALBB)
-    /* Vendored halbb-G6 RX bring-up: loads the gain-table cache, runs the
-     * LNAON/TRSW/PAPE RF-front-end gpio routing, and enables the RX chains —
-     * the real Realtek C, not a hand-transcribed subset. Then the vendored
-     * T-MAC TX path-com routing (halbb_ctrl_tx_path_tmac_8852c: per-cut 0xD800
-     * block + both-path TSSI reset), replacing the hand-transcribed
-     * ctrl_tx_path_tmac_8852c. Both need the bb_info ctx, so run after create. */
-    vnd_bb_bringup(cut, rfe_type);
-    vnd_bb_ctrl_tx_path();
-#else
-    ctrl_tx_path_tmac_8852c(); /* fallback: hand-transcribed T-MAC TX path */
-    ctrl_rx_path_8852c();      /* fallback: RX-path enable only (0x4978) */
-#endif
-  }
 
   return true;
 }
@@ -1796,6 +1803,20 @@ void HalKestrel::halbb_write_xsi(void *dev, unsigned char offset,
                                  unsigned char val) {
   static_cast<HalKestrel *>(dev)->write_xtal_si(offset, val, 0xff);
 }
+int HalKestrel::halbb_send_h2c(void *dev, unsigned char h2c_class,
+                               unsigned char h2c_func, const unsigned int *data,
+                               unsigned short len_bytes) {
+  auto *self = static_cast<HalKestrel *>(dev);
+  /* Forward ONLY the OUTSRC radio-page classes (halrf_config_*_radio_to_fw:
+   * class 8 = radio A, 9 = radio B, func = page#) into the mac_ax H2C
+   * encoder. Every other halrf H2C (IQK/DPK offload chatter) stays inert —
+   * the validated bring-up runs those cals host-driven. */
+  if (h2c_class != r::OUTSRC_CL_RADIO_A && h2c_class != r::OUTSRC_CL_RADIO_B)
+    return 0;
+  const bool ok = self->_fw.radio_page_to_fw(
+      h2c_class, h2c_func, data, static_cast<uint16_t>(len_bytes / 4));
+  return ok ? 0 : -1;
+}
 void HalKestrel::halbb_wrf(void *dev, unsigned int path, unsigned int addr,
                            unsigned int mask, unsigned int val) {
   static_cast<HalKestrel *>(dev)->rf_wrf(static_cast<uint8_t>(path), addr, mask,
@@ -1812,42 +1833,48 @@ int HalKestrel::halbb_efuse_get_info(void *dev, unsigned int id, void *value,
 }
 #endif
 
-void HalKestrel::vnd_bb_bringup(uint8_t cut, uint8_t rfe_type) {
-  if (!_halbb_bridge) {
-    auto *br = new kestrel_halbb_bridge{};
-    br->dev = this;
-    br->read32 = &HalKestrel::halbb_r32;
-    br->write32 = &HalKestrel::halbb_w32;
-    br->read_pwr = &HalKestrel::halbb_rpwr;
-    br->write_pwr = &HalKestrel::halbb_wpwr;
-    br->read_rf = &HalKestrel::halbb_rrf;
-    br->write_rf = &HalKestrel::halbb_wrf;
-    br->delay_us = &HalKestrel::halbb_delay;
+void HalKestrel::ensure_vnd_ctx(uint8_t cut, uint8_t rfe_type) {
+  if (_halbb_bridge)
+    return;
+  auto *br = new kestrel_halbb_bridge{};
+  br->dev = this;
+  br->read32 = &HalKestrel::halbb_r32;
+  br->write32 = &HalKestrel::halbb_w32;
+  br->read_pwr = &HalKestrel::halbb_rpwr;
+  br->write_pwr = &HalKestrel::halbb_wpwr;
+  br->read_rf = &HalKestrel::halbb_rrf;
+  br->write_rf = &HalKestrel::halbb_wrf;
+  br->delay_us = &HalKestrel::halbb_delay;
 #if defined(DEVOURER_KESTREL_HALRF)
-    br->efuse_get_info = &HalKestrel::halbb_efuse_get_info;
+  br->efuse_get_info = &HalKestrel::halbb_efuse_get_info;
 #endif
-    br->logline = nullptr;
-    /* XTAL-SI plane — the 8852B's a-die SI reset (halrf_si_reset on the RFK
-     * prologue) does real get/set pairs through here. */
-    br->read_xsi = &HalKestrel::halbb_read_xsi;
-    br->write_xsi = &HalKestrel::halbb_write_xsi;
-    _halbb_bridge = br;
-    const kestrel_chip chip = _variant == ChipVariant::C8852C
-                                  ? KESTREL_CHIP_8852C
-                                  : KESTREL_CHIP_8852B;
-    _halbb_ctx = kestrel_halbb_create(br, chip, cut, rfe_type);
+  br->logline = nullptr;
+  /* XTAL-SI plane — the 8852B's a-die SI reset (halrf_si_reset on the RFK
+   * prologue) does real get/set pairs through here. */
+  br->read_xsi = &HalKestrel::halbb_read_xsi;
+  br->write_xsi = &HalKestrel::halbb_write_xsi;
+  /* fwcmd plane — the radio-page H2Cs the vendored table loader emits. */
+  br->send_h2c = &HalKestrel::halbb_send_h2c;
+  _halbb_bridge = br;
+  const kestrel_chip chip = _variant == ChipVariant::C8852C
+                                ? KESTREL_CHIP_8852C
+                                : KESTREL_CHIP_8852B;
+  _halbb_ctx = kestrel_halbb_create(br, chip, cut, rfe_type);
 #if defined(DEVOURER_KESTREL_HALRF)
-    _halrf_ctx = kestrel_halrf_create(br, chip, cut, rfe_type); /* shares the bridge */
-    /* Read + cache the efuse shadow now so the halrf cals' efuse reads (TSSI
-     * DE targets, thermal trim) resolve through the efuse_get_info callback. */
-    if (!_efuse_valid) {
-      EfuseInfo ei;
-      read_efuse(ei); /* populates _efuse_log_map + _efuse_valid */
-    }
-#endif
+  _halrf_ctx = kestrel_halrf_create(br, chip, cut, rfe_type); /* shares the bridge */
+  /* Read + cache the efuse shadow now so the halrf cals' efuse reads (TSSI
+   * DE targets, thermal trim) resolve through the efuse_get_info callback. */
+  if (!_efuse_valid) {
+    EfuseInfo ei;
+    read_efuse(ei); /* populates _efuse_log_map + _efuse_valid */
   }
+#endif
+}
+
+void HalKestrel::vnd_bb_bringup(uint8_t cut, uint8_t rfe_type) {
+  ensure_vnd_ctx(cut, rfe_type);
   kestrel_halbb_rx_bringup(_halbb_ctx);
-  _logger->info("Kestrel PHY: halbb-G6 bring-up applied (vendored gain-cache/"
+  _logger->info("Kestrel PHY: halbb-G6 bring-up applied (vendored "
                 "gpio/rx-path, rfe={} cut={})", rfe_type, cut);
 }
 

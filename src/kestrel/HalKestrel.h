@@ -411,6 +411,8 @@ public:
   /* Vendored halbb-G6 8852C RX bring-up (hal/halbb/g6/kestrel_halbb_glue).
    * The static callbacks route the vendor C's register/OS plane to this device
    * (dev cookie = the HalKestrel*). */
+  /* Build the bridge + halbb/halrf ctxs once (idempotent). */
+  void ensure_vnd_ctx(uint8_t cut, uint8_t rfe_type);
   void vnd_bb_bringup(uint8_t cut, uint8_t rfe_type);
   void vnd_bb_set_gain(uint8_t channel, uint8_t band_type);
   /* Full vendor per-channel BB config (halbb_ctrl_bw_ch_8852c): replaces the
@@ -427,6 +429,11 @@ public:
   static unsigned int halbb_rpwr(void *dev, unsigned int addr);
   static void halbb_wpwr(void *dev, unsigned int addr, unsigned int val);
   static void halbb_delay(void *dev, unsigned int us);
+  /* fwcmd H2C plane (bridge send_h2c): forwards ONLY the OUTSRC radio-page
+   * classes into KestrelFw's encoder; other halrf H2Cs stay inert. */
+  static int halbb_send_h2c(void *dev, unsigned char h2c_class,
+                            unsigned char h2c_func, const unsigned int *data,
+                            unsigned short len_bytes);
   /* XTAL-SI plane (bridge read_xsi/write_xsi) -> the xtal_si helpers. */
   static unsigned char halbb_read_xsi(void *dev, unsigned char offset);
   static void halbb_write_xsi(void *dev, unsigned char offset,

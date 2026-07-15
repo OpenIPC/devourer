@@ -49,6 +49,12 @@ int kestrel_halrf_efuse_get_info(struct kestrel_halrf_ctx *ctx,
                                  void *value, unsigned int size,
                                  unsigned char autoload);
 
+/* Apply the built-in radio A/B tables via the vendor loader
+ * (halrf_config_radio) + send the radio pages to the fw (bridge send_h2c,
+ * classes 8/9). Returns nonzero on success. Run after
+ * kestrel_halbb_init_reg. */
+int kestrel_halrf_config_radio(struct kestrel_halrf_ctx *ctx);
+
 /* DAC calibration (halrf_dac_cal_<chip>). force!=0 re-runs even if done. */
 void kestrel_halrf_dac_cal(struct kestrel_halrf_ctx *ctx, unsigned char force);
 

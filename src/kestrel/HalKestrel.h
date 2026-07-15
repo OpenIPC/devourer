@@ -146,7 +146,8 @@ public:
   /* `offset` = SelectedChannel.ChannelOffset (HAL_PRIME_CHNL_OFFSET: 1=primary
    * lower / secondary above, 2=primary upper / secondary below); ignored for
    * 20 MHz. For 40 MHz the RF tunes to the block center = primary +/- 2. */
-  bool set_channel(uint8_t channel, ChannelWidth_t bw, uint8_t offset = 0);
+  bool set_channel(uint8_t channel, ChannelWidth_t bw, uint8_t offset = 0,
+                   uint8_t band = 0);
 
   /* Lean intra-band, same-bandwidth retune (frequency hopping): RF channel
    * switch + band-specific gain/RPL re-apply + BB reset, skipping the BB
@@ -293,7 +294,8 @@ private:
   uint32_t rf_rrf(uint8_t path, uint32_t addr, uint32_t mask);
   /* Full halrf channel setting (halrf_ctrl_ch_8852b): DAV+DDV x path A/B with
    * the path-A synth lock (halrf_set_s0_arfc18: 0xd3[8]/poll 0xb7[8]). */
-  void rf_ctrl_ch(uint8_t channel, bool is_2g);
+  void rf_ctrl_ch(uint8_t channel, uint8_t band_type); /* 0=2.4G 1=5G 2=6G */
+  uint8_t _cur_band_type = 1; /* band of the last set_channel (for FastRetune) */
   /* halrf_bw_setting_8852b: set the RF18 bandwidth bits [11:10] (DAV+DDV x
    * path A/B): 40 MHz=BIT11, 80 MHz=BIT10, 20/5/10=both. Called after
    * rf_ctrl_ch on a bandwidth change. */
@@ -445,6 +447,11 @@ public:
   void halrf8852c_rx_dck();
   /* Set the halrf channel + run IQK (per-channel). band 0=2.4G,1=5G. */
   void halrf8852c_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw);
+  /* Vendored RF channel/band/bw tune + synth relock (halrf_ctl_band_ch_bw_8852c
+   * + halrf_lck_8852c) — the correct 8852C RF tune for all bands incl. 6 GHz,
+   * replacing the hand-rolled rf_ctrl_ch/rf_ctrl_bw on the C8852C. */
+  void halrf8852c_ctl_band_ch_bw(uint8_t band_type, uint8_t center,
+                                 ChannelWidth_t bw);
   struct kestrel_halrf_ctx *_halrf_ctx = nullptr;
   bool _halrf_rfk_inited = false; /* NCTL engine loaded (one-time, lazy) */
 #endif

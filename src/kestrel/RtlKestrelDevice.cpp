@@ -164,7 +164,7 @@ bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
    * page-release path so sustained TX doesn't stall when the bulk-OUT page pool
    * fills after ~103 frames. */
   _hal.set_host_rpr();
-  if (!_hal.set_channel(channel.Channel, channel.ChannelWidth, channel.ChannelOffset))
+  if (!_hal.set_channel(channel.Channel, channel.ChannelWidth, channel.ChannelOffset, channel.Band))
     return false;
   return true;
 }
@@ -306,7 +306,7 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
 
 void RtlKestrelDevice::SetMonitorChannel(SelectedChannel channel) {
   _channel = channel;
-  _hal.set_channel(channel.Channel, channel.ChannelWidth, channel.ChannelOffset);
+  _hal.set_channel(channel.Channel, channel.ChannelWidth, channel.ChannelOffset, channel.Band);
 }
 
 void RtlKestrelDevice::FastRetune(uint8_t channel, bool /*cache_rf*/) {

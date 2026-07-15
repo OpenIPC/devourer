@@ -95,6 +95,19 @@ void kestrel_halrf_set_ch(struct kestrel_halrf_ctx *ctx, unsigned char center_ch
   cd->bw = (enum channel_width)bw;
 }
 
+void kestrel_halrf_ctl_band_ch_bw(struct kestrel_halrf_ctx *ctx,
+                                  unsigned char band, unsigned char central_ch,
+                                  unsigned char bw) {
+  if (ctx)
+    halrf_ctl_band_ch_bw_8852c(&ctx->rf, HW_PHY_0, (enum band_type)band,
+                               central_ch, (enum channel_width)bw);
+}
+
+void kestrel_halrf_lck(struct kestrel_halrf_ctx *ctx) {
+  if (ctx)
+    halrf_lck_8852c(&ctx->rf);
+}
+
 void kestrel_halrf_iqk(struct kestrel_halrf_ctx *ctx) {
   if (ctx)
     halrf_iqk(&ctx->rf, HW_PHY_0, true);

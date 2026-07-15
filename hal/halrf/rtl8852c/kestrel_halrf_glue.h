@@ -52,6 +52,20 @@ void kestrel_halrf_rx_dck(struct kestrel_halrf_ctx *ctx);
 void kestrel_halrf_set_ch(struct kestrel_halrf_ctx *ctx, unsigned char center_ch,
                           unsigned char band, unsigned char bw);
 
+/* Vendored RF channel/band/bw tune (halrf_ctl_band_ch_bw_8852c): writes RF18
+ * (DAV+DDV, both paths) for band(0=2.4/1=5/2=6G)+central_ch+bw, incl. the
+ * path-B CAV workaround. Replaces the hand-rolled rf_ctrl_ch/rf_ctrl_bw — needed
+ * for 6 GHz. Follow with kestrel_halrf_lck to relock the synth. */
+void kestrel_halrf_ctl_band_ch_bw(struct kestrel_halrf_ctx *ctx,
+                                  unsigned char band, unsigned char central_ch,
+                                  unsigned char bw);
+
+/* Synth relock (halrf_lck_8852c): sets RF 0x0[mode]=3 + 0x5=0 on both paths,
+ * runs the 0xd3-hold set_ch_lck on the current RF18, restores. This is the
+ * step the hand-rolled rf_ctrl_ch omits, without which the 6 GHz VCO/PLL does
+ * not lock (0xc5[15]=0). */
+void kestrel_halrf_lck(struct kestrel_halrf_ctx *ctx);
+
 /* IQ imbalance calibration (halrf_iqk), HW_PHY_0, forced. Per-channel. */
 void kestrel_halrf_iqk(struct kestrel_halrf_ctx *ctx);
 

@@ -1515,10 +1515,16 @@ int main() {
     });
   }
 
+  /* DEVOURER_BAND=6 selects the 6 GHz band (WiFi 6E, RTL8852C tri-band) — a 6G
+   * channel number collides with a 5G one, so the band must be explicit. */
+  uint8_t rx_band = 0;
+  if (const char *b = std::getenv("DEVOURER_BAND"))
+    rx_band = static_cast<uint8_t>(std::atoi(b));
   rtlDevice->Init(packetProcessor, SelectedChannel{
                                        .Channel = static_cast<uint8_t>(channel),
                                        .ChannelOffset = ch_offset,
                                        .ChannelWidth = width,
+                                       .Band = rx_band,
                                    });
 
   /* Stop the energy telemetry thread before de-init (it reads chip registers). */

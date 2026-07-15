@@ -1843,6 +1843,17 @@ void HalKestrel::halrf8852c_rx_dck() {
     _logger->info("Kestrel RF(8852C): RX-DCK via vendored halrf");
   }
 }
+void HalKestrel::halrf8852c_ctl_band_ch_bw(uint8_t band_type, uint8_t center,
+                                           ChannelWidth_t bw) {
+  if (!_halrf_ctx)
+    return;
+  uint8_t hbw = bw == CHANNEL_WIDTH_5    ? 6
+                : bw == CHANNEL_WIDTH_10 ? 7
+                                         : static_cast<uint8_t>(bw);
+  kestrel_halrf_ctl_band_ch_bw(_halrf_ctx, band_type, center, hbw);
+  kestrel_halrf_lck(_halrf_ctx); /* relock the synth (6 GHz VCO needs this) */
+}
+
 void HalKestrel::halrf8852c_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw) {
   if (!_halrf_ctx)
     return;
@@ -2008,17 +2019,20 @@ void HalKestrel::rf_wrf(uint8_t path, uint32_t addr, uint32_t mask,
     rf_write_dav(path, a, w);
 }
 
-void HalKestrel::rf_ctrl_ch(uint8_t channel, bool is_2g) {
-  /* halrf_ctrl_ch_8852b: ch_setting for DAV (a-die, reg 0x18) then DDV (d-die,
-   * reg 0x10018), each path A + B. DAV path A takes the synth-lock path
-   * (halrf_set_s0_arfc18). */
+void HalKestrel::rf_ctrl_ch(uint8_t channel, uint8_t band_type) {
+  /* halrf_ctrl_ch_8852b/8852c: ch_setting for DAV (a-die, reg 0x18) then DDV
+   * (d-die, reg 0x10018), each path A + B. DAV path A takes the synth-lock path
+   * (halrf_set_s0_arfc18). RF18 band bits (halrf_8852c switch): 2.4G = channel
+   * only, 5G = BIT16|BIT8, 6G = BIT17|BIT16. */
   auto ch_setting = [&](uint8_t path, bool is_dav) {
     const uint32_t reg18 = is_dav ? 0x18u : 0x10018u;
     uint32_t rf18 = rf_rrf(path, reg18, r::MASKRF);
     rf18 &= ~0x3e3ffu;   /* [17:16],[9:8],[7:0] */
     rf18 |= channel;     /* channel */
-    if (!is_2g)
+    if (band_type == 1)
       rf18 |= (1u << 16) | (1u << 8); /* 5G */
+    else if (band_type == 2)
+      rf18 |= (1u << 17) | (1u << 16); /* 6G */
     rf18 = (rf18 & 0xf0fffu) | (1u << 12);
     if (path == 1 || !is_dav) {
       rf_wrf(path, reg18, r::MASKRF, rf18);
@@ -2652,13 +2666,16 @@ void HalKestrel::fast_retune(uint8_t channel) {
    * and the fixed TX power, then a BB reset — but skip the BB bandwidth config
    * (unchanged) and the per-channel RX-DCK (the slow ~1.2 ms cal; the RX DC term
    * is stable within a band). ~a few ms vs ~90 ms for the full set_channel. */
-  const bool is_2g = channel <= 14;
-  rf_ctrl_ch(channel, is_2g);
+  /* Same-band retune: reuse the band established by the last set_channel (6 GHz
+   * can't be re-derived from the channel number). */
+  const uint8_t band_type = _cur_band_type;
+  rf_ctrl_ch(channel, band_type);
   set_gain_error(channel);
   set_rxsc_rpl_comp(channel);
   bb_reset_all();
   set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
-  _logger->debug("Kestrel FastRetune: ch{} ({})", channel, is_2g ? "2.4G" : "5G");
+  _logger->debug("Kestrel FastRetune: ch{} ({})", channel,
+                 band_type == 0 ? "2.4G" : band_type == 2 ? "6G" : "5G");
 }
 
 void HalKestrel::fast_set_bw(ChannelWidth_t bw) {
@@ -2716,8 +2733,11 @@ void HalKestrel::bb_reset_all() {
 }
 
 bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
-                             uint8_t offset) {
-  const bool is_2g = channel <= 14;
+                             uint8_t offset, uint8_t band) {
+  /* band: 0 = auto (2.4 GHz if ch<=14 else 5 GHz), 6 = 6 GHz. band_type is the
+   * vendor enum band_type (BAND_ON_24G=0 / BAND_ON_5G=1 / BAND_ON_6G=2). */
+  const uint8_t band_type = (band == 6) ? 2 : (channel <= 14 ? 0 : 1);
+  const bool is_2g = (band_type == 0);
   /* The RF synth tunes to the bandwidth-block CENTER; `channel` is the primary
    * 20. For 40 MHz: offset UPPER(2) => primary is the upper 20 (center = ch-2,
    * pri_ch=2); otherwise LOWER (center = ch+2, pri_ch=1). `pri_ch` is the BB
@@ -2733,12 +2753,14 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
       pri_ch = 1;
     }
   } else if (bw == CHANNEL_WIDTH_80) {
-    /* 80 MHz is 5 GHz-only; the block is fixed by the channel plan, so the
-     * primary's position (pri_ch 1..4) and the block center are derived from
-     * the channel number alone (offset is not needed). Blocks align on the
-     * 36 + 16k grid: {36,40,44,48}->center 42, {52..64}->58, {100..112}->106,
-     * {149..161}->155, ... block_start = ch - ((ch-36)/4 % 4)*4. */
-    const int bs = channel - (((channel - 36) / 4) % 4) * 4;
+    /* 80 MHz block is fixed by the channel plan: the primary's position
+     * (pri_ch 1..4) and the block center derive from the channel number. The
+     * grid origin differs by band — 5 GHz aligns on the 36 + 16k grid
+     * ({36..48}->center 42, ...); 6 GHz aligns on the 1 + 16k grid
+     * ({1..13}->center 7, {17..29}->23, ...). block_start = ch - ((ch-o)/4 %
+     * 4)*4, o = grid origin. */
+    const int o = (band_type == 2) ? 1 : 36;
+    const int bs = channel - (((channel - o) / 4) % 4) * 4;
     center = static_cast<uint8_t>(bs + 6);
     pri_ch = static_cast<uint8_t>((channel - bs) / 4 + 1);
   }
@@ -2807,13 +2829,26 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
     bb_rmw(0x4b74, 1u << 30, 0x0);
   }
 
-  /* --- RF channel: full halrf_ctrl_ch_8852b (DAV+DDV x path A/B, with the
-   * path-A synthesizer LCK lock). Tunes to the block CENTER. --- */
-  rf_ctrl_ch(center, is_2g);
-
-  /* --- RF bandwidth (halrf_bw_setting_8852b: RF18 [11:10]) --- */
-  if (bw != CHANNEL_WIDTH_20)
-    rf_ctrl_bw(bw);
+  /* --- RF channel + bandwidth + synth relock. Tunes to the block CENTER. --- */
+  _cur_band_type = band_type; /* for a later same-band FastRetune */
+#if defined(DEVOURER_KESTREL_HALRF_8852C)
+  if (_variant == ChipVariant::C8852C && band_type == 2) {
+    /* 6 GHz: the vendored halrf_ctl_band_ch_bw_8852c (RF18 band/ch/bw, DAV+DDV,
+     * path-B CAV WA) + halrf_lck_8852c (the 0x0/0x5-primed synth relock). The
+     * hand-rolled rf_ctrl_ch omits the relock priming, so its 6 GHz VCO never
+     * locks (synthLock=0). With the vendored path the 6G synth locks
+     * (synthLock=1). Kept 6G-only: the vendored relock regresses the 2.4/5 GHz
+     * lock on this die, while the hand-rolled path locks 2.4/5 GHz reliably. */
+    halrf8852c_ctl_band_ch_bw(band_type, center, bw);
+  } else
+#endif
+  {
+    /* 2.4/5 GHz: halrf_ctrl_ch_8852b (DAV+DDV x path A/B, path-A synth LCK). */
+    rf_ctrl_ch(center, band_type);
+    /* halrf_bw_setting_8852b: RF18 [11:10]. */
+    if (bw != CHANNEL_WIDTH_20)
+      rf_ctrl_bw(bw);
+  }
 
   /* Hand-transcribed per-channel cal/PHY refinement (halbb gain-error/RPL +
    * halrf RX-DCK). STRIP for the C8852C (error-source removal + RX-halt
@@ -2830,13 +2865,13 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
      * gain-error, hidden/normal efuse RX gain, band mode-sel (0x4738/0x4aa4),
      * SCO comp, BW/RXBB/ADC, CCK enable — replacing devourer's hand-rolled BB
      * channel-switch. band_type 0=2.4G, 1=5G. */
-    halbb8852c_ctrl_bw_ch(pri_ch, center, bw, is_2g ? 0 : 1);
+    halbb8852c_ctrl_bw_ch(pri_ch, center, bw, band_type);
 #if defined(DEVOURER_KESTREL_HALRF_8852C)
     /* Vendored halrf IQK. The 0xbff8 one-shot-done poll depends on the NCTL
      * micro-engine, which halrf8852c_iqk now loads lazily on first call
      * (kestrel_halrf_rfk_init) — the piece halrf_dm_init runs before any cal,
      * previously missing (IQK spun to a ~25 s timeout). */
-    halrf8852c_iqk(center, is_2g ? 0 : 1, bw);
+    halrf8852c_iqk(center, band_type, bw);
 #endif
   }
 #endif

@@ -2,8 +2,8 @@
 # kestrel_8832cu_6g160_txrx.sh — on-air 6 GHz *160 MHz* TX+RX across two 8832CU
 # adapters (both 35bc:0101, by USB bus). Same A/B method as the 20 MHz test, but
 # both ends tune 6 GHz ch1 at 160 MHz (RF synth center ch15 = 6025 MHz). The RF
-# synth locks here (RF 0xb7[8]=0, verified by kestrel_6g160_lck_probe.sh); this
-# confirms the tune reaches the air. TX width = DEVOURER_HOP_BW; RX = DEVOURER_BW.
+# synth locks here (RF 0xb7[8]=0 on this tune); this confirms the tune reaches
+# the air. TX width = DEVOURER_HOP_BW; RX = DEVOURER_BW.
 # 6M legacy rides the primary 20; the 160 MHz occupied bandwidth itself is
 # SDR-proven at 5 GHz (B210 tops out below the 6 GHz 160 block center).
 #   sudo tests/kestrel_8832cu_6g160_txrx.sh   (RX=bus3, TX=bus9, ch1/160)

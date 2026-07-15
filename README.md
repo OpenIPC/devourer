@@ -63,21 +63,22 @@ eight short animations that make the rest click.
 Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 20 MHz) per band:
 
-| Part                          | RF / streams      | 2.4 GHz (ch6) | UNII-1 (ch36) | UNII-2/3 (ch149) | Notes                                       |
-| ----------------------------- | ----------------- | ------------- | ------------- | ---------------- | ------------------------------------------- |
-| **RTL8812AU**                 | 2T2R              | 56            | 52            | 52               | [CHANEVE CHW50L](https://www.aliexpress.com/item/4000762461362.html) (`0bda:8812`). 5/10 MHz capable |
-| **RTL8811AU**                 | 1T1R              | —             | —             | —                | 1T1R cut of 8812 silicon; rides the 8812 code path. Not benchmarked. 5/10 MHz capable |
-| **RTL8814AU**                 | 4T4R, 3-SS max    | 65            | †(32)         | †(32)            | `0bda:8813`; tested on COMFAST CF-938AC and CF-960AC — antenna builds differ in realised [RX diversity](docs/measuring-spatial-diversity.md). 5/10 MHz capable |
-| **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | TP-Link Archer T2U Plus (`2357:0120`) |
-| **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | TP-Link Archer T3U (`2357:012d`). 5/10 MHz capable |
-| **RTL8812BU**                 | 1T1R + BT         | —             | —             | —                | 1T1R cut of 8822B silicon; rides the 8822BU code path. Not benchmarked |
-| **RTL8811CU**                 | 1T1R + BT         | 36            | 29            | 28               | COMFAST CF-811AC (`0bda:c811`). 5/10 MHz capable |
-| **RTL8821CU**                 | 1T1R + BT         | —             | —             | —                | rides the 8811CU (8821C) code path. 5/10 MHz capable |
-| **RTL8812CU**                 | 2T2R              | 65            | 60            | 60               | LB-LINK WDN1300H (`0bda:c812`). 5/10 MHz capable |
-| **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked (`0bda:c82c`). 5/10 MHz capable |
-| **RTL8812EU**                 | 2T2R              | ‡             | 51            | 47               | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module. 5/10 MHz capable. ‡ 2.4 GHz TX airs energy but no receiver decodes it — the vendor kernel driver behaves identically on this module ([quirks](docs/8822e-quirks.md)) |
-| **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | not benchmarked. 5/10 MHz capable |
-| **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
+| Part                          | RF / streams      | 2.4 GHz (ch6) | UNII-1 (ch36) | UNII-2/3 (ch149) | 6 GHz (ch5) | Notes                                       |
+| ----------------------------- | ----------------- | ------------- | ------------- | ---------------- | ---------------- | ------------------------------------------- |
+| **RTL8812AU**                 | 2T2R              | 56            | 52            | 52               | —                | [CHANEVE CHW50L](https://www.aliexpress.com/item/4000762461362.html) (`0bda:8812`). 5/10 MHz capable |
+| **RTL8811AU**                 | 1T1R              | —             | —             | —                | —                | 1T1R cut of 8812 silicon; rides the 8812 code path. Not benchmarked. 5/10 MHz capable |
+| **RTL8814AU**                 | 4T4R, 3-SS max    | 65            | †(32)         | †(32)            | —                | `0bda:8813`; tested on COMFAST CF-938AC and CF-960AC — antenna builds differ in realised [RX diversity](docs/measuring-spatial-diversity.md). 5/10 MHz capable |
+| **RTL8821AU**                 | 1T1R AC + BT      | 54            | 32            | 28               | —                | TP-Link Archer T2U Plus (`2357:0120`) |
+| **RTL8822BU**                 | 2T2R + BT         | 52            | 50            | 49               | —                | TP-Link Archer T3U (`2357:012d`). 5/10 MHz capable |
+| **RTL8812BU**                 | 1T1R + BT         | —             | —             | —                | —                | 1T1R cut of 8822B silicon; rides the 8822BU code path. Not benchmarked |
+| **RTL8811CU**                 | 1T1R + BT         | 36            | 29            | 28               | —                | COMFAST CF-811AC (`0bda:c811`). 5/10 MHz capable |
+| **RTL8821CU**                 | 1T1R + BT         | —             | —             | —                | —                | rides the 8811CU (8821C) code path. 5/10 MHz capable |
+| **RTL8812CU**                 | 2T2R              | 65            | 60            | 60               | —                | LB-LINK WDN1300H (`0bda:c812`). 5/10 MHz capable |
+| **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | —                | not benchmarked (`0bda:c82c`). 5/10 MHz capable |
+| **RTL8812EU**                 | 2T2R              | ‡             | 51            | 47               | —                | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module. 5/10 MHz capable. ‡ 2.4 GHz TX airs energy but no receiver decodes it — the vendor kernel driver behaves identically on this module ([quirks](docs/8822e-quirks.md)) |
+| **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | —                | not benchmarked. 5/10 MHz capable |
+| **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
+| **RTL8832CU** (11ax)          | 2T2R + BT         | 40            | 33            | 32               | 32          | TP-Link Archer TX50UH (`35bc:0101`); Wi-Fi 6E tri-band, first 8852C 6 GHz. Host-push injection over USB 2.0 (~50% duty ceiling); [6G TX+RX validated](tests/kestrel_8832cu_6g_txrx.sh) |
 
 `†` = works on-air but the reading varies run-to-run (bracketed = best clean
 reading).
@@ -89,11 +90,13 @@ a chip already near the PHY ceiling — it raises *goodput* (delivered payload)
 can't show. See [aggregation & hardware ACK](docs/aggregation.md).
 
 Out of scope: the pre-HalMAC PCIe parts (RTL8812AE/8821AE). The 11ax
-"Kestrel" generation (RTL8852BU / RTL8852CU) is **in bring-up** as a fourth
-HAL (`src/kestrel/`, vendor references `reference/rtl8852bu` +
-`reference/rtl8852cu`): the identity/dispatch layer works
-(`build/kestrelprobe id`); power-on, firmware, RX and TX land milestone by
-milestone. The 8852A-family (e.g. RTL8832AU) stays out of scope — its only
+"Kestrel" generation (RTL8852BU / RTL8852CU, a fourth HAL under `src/kestrel/`,
+vendor references `reference/rtl8852bu` + `reference/rtl8852cu`) has RX, TX, and
+channel/bandwidth (5/10/20/40/80 MHz) on-air validated — and the tri-band
+**RTL8832CU** adds 6 GHz (WiFi 6E), benchmarked above at ~5 GHz-parity
+throughput. RF calibration (DACK/RX-DCK/IQK ported verbatim from the vendor
+tree; TSSI/DPK measured to degrade TX in the fixed-power model, so gated) is the
+active frontier. The 8852A-family (e.g. RTL8832AU) stays out of scope — its only
 vendor driver is a frozen 2021 drop.
 
 > Heads up — some Realtek sticks ship in "ZeroCD" mode and first enumerate as

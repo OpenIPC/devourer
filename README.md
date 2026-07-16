@@ -1,13 +1,14 @@
 # devourer
 
-**The Realtek 11ac driver that simply devours its competitors.**
+**The Realtek Wi-Fi driver that simply devours its competitors.**
 
-Devourer is a userspace Wi-Fi driver for Realtek's 802.11ac USB adapters —
+Devourer is a userspace Wi-Fi driver for Realtek's 802.11ac and 802.11ax
+USB adapters —
 the cheap, everywhere-available dongles that power most long-range FPV video
 links. It talks to the chip directly over libusb: no kernel module, no DKMS
 tree to patch every time your kernel updates, no root filesystem to taint.
 Build one static library, link it, and you have raw monitor-mode RX and
-packet injection on three generations of Realtek silicon, from a single API.
+packet injection on four generations of Realtek silicon, from a single API.
 
 It is the [OpenIPC](https://openipc.org) project's driver of choice for
 long-range digital video links.
@@ -36,7 +37,7 @@ long-range digital video links.
   vendor never gave narrowband — half/quarter the bandwidth, more range from
   the same power ([how](docs/narrowband.md)).
 - **Hardware time, for coordinating radios.** Every received frame is stamped
-  with the chip's microsecond MAC clock (TSF) on all three generations, and the
+  with the chip's microsecond MAC clock (TSF) on every generation, and the
   64-bit timer reads back directly — the primitive multi-radio setups need.
   Independent receivers correlate their clocks to sub-microsecond, and a
   time-division burst schedule locks to a transmitter ~25× tighter than the host
@@ -80,8 +81,8 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8812EU**                 | 2T2R              | ‡             | 51            | 47               | —                | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module. 5/10 MHz capable. ‡ 2.4 GHz TX airs energy but no receiver decodes it — the vendor kernel driver behaves identically on this module ([quirks](docs/8822e-quirks.md)) |
 | **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | —                | not benchmarked. 5/10 MHz capable |
 | **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
-| **RTL8852BU** (11ax)          | 2T2R + BT         | 43            | 36            | 33               | —          | TP-Link Archer TX20U Nano (`35bc:0108`); Wi-Fi 6, dual-band (no 6 GHz). 5/10 MHz capable |
-| **RTL8832CU** (11ax)          | 2T2R + BT         | 40            | 33            | 32               | 32          | TP-Link Archer TX50UH (`35bc:0101`); Wi-Fi 6E tri-band, first 8852C 6 GHz. 5/10 and 160 MHz capable. Host-push injection over USB 2.0 (~50% duty ceiling); [6G TX+RX validated](tests/kestrel_8832cu_6g_txrx.sh) |
+| **RTL8852BU** (11ax)          | 2T2R + BT         | 43            | 36            | 33               | —          | TP-Link Archer TX20U Nano (`35bc:0108`); Wi-Fi 6, dual-band. 5/10 MHz capable |
+| **RTL8832CU** (11ax)          | 2T2R + BT         | 40            | 33            | 32               | 32          | TP-Link Archer TX50UH (`35bc:0101`); Wi-Fi 6E tri-band (2.4/5/6 GHz). 5/10 and 160 MHz capable. Host-push injection over USB 2.0 (~50% duty ceiling); [6G TX+RX validated](tests/kestrel_8832cu_6g_txrx.sh) |
 
 `†` = works on-air but the reading varies run-to-run (bracketed = best clean
 reading).
@@ -194,7 +195,7 @@ auto dev = driver.CreateRtlDevice(handle, ctx, lock, cfg);
 Anything that changes mid-session is a runtime setter on the device:
 `SetTxMode`, `SetTxPowerOffsetQdb`, `SetRxPathMask`, `FastRetune`, ...
 The device class is chosen automatically from the chip behind the handle;
-one `IRtlDevice` interface covers all three generations.
+one `IRtlDevice` interface covers all four generations.
 
 ## Going deeper
 

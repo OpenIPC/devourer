@@ -4,14 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Userspace re-implementation of Realtek's RTL88xxAU Wi-Fi driver — speaks to the
-chip directly via libusb instead of a kernel module. Static library `devourer`
+Userspace re-implementation of Realtek's USB Wi-Fi drivers (11ac RTL88xx and
+11ax RTL8852 families) — speaks to the chip directly via libusb instead of a
+kernel module. Static library `devourer`
 (CMake target) + example executables under `examples/` (`rxdemo` and `txdemo`
 are the canonical RX/TX demos). Used by the OpenIPC project for long-range
 video links.
 
-Three chip generations, each behind its own self-contained HAL, dispatched at
-construction from the `SYS_CFG2` chip-id (see **Architecture**):
+Four chip generations, each behind its own self-contained HAL, dispatched at
+construction from the `SYS_CFG2` chip-id (Kestrel: PID-first — see
+**Architecture**):
 
 - **Jaguar1** (`src/jaguar1/`): RTL8812AU (2T2R reference), RTL8811AU (1T1R cut,
   rides the 8812 path), RTL8814AU (4T4R RF / 3-SS baseband — host-pushed TX

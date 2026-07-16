@@ -53,6 +53,20 @@ public:
   virtual bool write16(uint16_t reg, uint16_t v) = 0;
   virtual bool write32(uint16_t reg, uint32_t v) = 0;
   virtual bool write_bytes(uint16_t reg, const uint8_t *p, size_t n) = 0;
+  /* 32-bit *address* register write. Realtek splits the register address as
+   * (wIndex << 16) | wValue over USB, so addresses >= 0x10000 (the halbb/halrf
+   * BB register window at addr + 0x10000) need the high half in wIndex — the
+   * plain 16-bit write forces wIndex=0 and would corrupt the MAC/system space.
+   * The default forwards to the 16-bit path (correct for addr < 0x10000); the
+   * USB transport overrides it to carry the full address. */
+  virtual bool write32_wide(uint32_t addr, uint32_t v) {
+    return write32(static_cast<uint16_t>(addr), v);
+  }
+  /* 32-bit-address register read (the read counterpart of write32_wide;
+   * needed for masked BB read-modify-write and RF-window reads). */
+  virtual uint32_t read32_wide(uint32_t addr) {
+    return read32(static_cast<uint16_t>(addr));
+  }
 
   /* ---- frame plane ---- */
   /* Fire-and-forget data TX (the send_packet hot path). `ep` is the USB

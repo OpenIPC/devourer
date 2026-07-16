@@ -127,7 +127,7 @@ enum MGN_RATE {
  * Entries for undefined indices (e.g. 18) are set to {0,0}.
  */
 
-static const struct radiotap_align_size rtap_namespace_sizes[23] = {
+static const struct radiotap_align_size rtap_namespace_sizes[24] = {
     /*  0: IEEE80211_RADIOTAP_TSFT */       { 8, 8 },
     /*  1: IEEE80211_RADIOTAP_FLAGS */      { 1, 1 },
     /*  2: IEEE80211_RADIOTAP_RATE */       { 1, 1 },
@@ -151,6 +151,7 @@ static const struct radiotap_align_size rtap_namespace_sizes[23] = {
     /* 20: IEEE80211_RADIOTAP_AMPDU_STATUS */ { 4, 8 },
     /* 21: IEEE80211_RADIOTAP_VHT */          { 2, 12 },
     /* 22: IEEE80211_RADIOTAP_TIMESTAMP */    { 8, 12 },
+    /* 23: IEEE80211_RADIOTAP_HE */           { 2, 12 },
 };
 
 static const struct ieee80211_radiotap_namespace radiotap_ns = {

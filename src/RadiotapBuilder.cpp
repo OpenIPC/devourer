@@ -1,5 +1,7 @@
 #include "RadiotapBuilder.h"
 
+#include "ieee80211_radiotap.h" /* HE field masks */
+
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -17,6 +19,7 @@ constexpr uint32_t kPresentRate     = 1u << 2;
 constexpr uint32_t kPresentTxFlags  = 1u << 15;
 constexpr uint32_t kPresentMcs      = 1u << 19;
 constexpr uint32_t kPresentVht      = 1u << 21;
+constexpr uint32_t kPresentHe       = 1u << 23;
 
 constexpr uint16_t kTxFlagsNoAck = 0x0008;
 
@@ -119,6 +122,69 @@ std::vector<uint8_t> build_vht(const TxMode& cfg) {
   return r;
 }
 
+/* Map the chip's 3-bit GI/LTF code (enum rtw_gi_ltf) to the radiotap HE
+ * (GI, LTF-size) pair for emission. GI: 0=0.8us 1=1.6us 2=3.2us; LTF: 1=1x
+ * 2=2x 3=4x. Inverse of the Kestrel send_packet HE parser. */
+void he_giltf_to_radiotap(uint8_t gi_ltf, uint8_t* gi, uint8_t* ltf) {
+  switch (gi_ltf) {
+    case 0: *gi = 2; *ltf = 3; break; /* 4xLTF + 3.2us */
+    case 1: *gi = 0; *ltf = 3; break; /* 4xLTF + 0.8us */
+    case 2: *gi = 1; *ltf = 2; break; /* 2xLTF + 1.6us */
+    case 4: *gi = 1; *ltf = 1; break; /* 1xLTF + 1.6us */
+    case 5: *gi = 0; *ltf = 1; break; /* 1xLTF + 0.8us */
+    case 3:
+    default: *gi = 0; *ltf = 2; break; /* 2xLTF + 0.8us (HE-SU default) */
+  }
+}
+
+std::vector<uint8_t> build_he(const TxMode& cfg) {
+  /* 22-byte HE radiotap: header(8) + TX_FLAGS(2) + HE info(12, data1..data6).
+   * The Kestrel send_packet HE parser reads MCS/coding/STBC (data3), BW+GI+LTF
+   * (data5) and NSTS (data6) and maps them to the AX descriptor rate. */
+  uint8_t bw_code; /* HE DATA5 BW_RU_ALLOC: 0=20 1=40 2=80 3=160 */
+  switch (cfg.bw_mhz) {
+    case 40:  bw_code = 1; break;
+    case 80:  bw_code = 2; break;
+    case 160: bw_code = 3; break;
+    default:  bw_code = 0; break;
+  }
+  uint8_t gi = 0, ltf = 2;
+  he_giltf_to_radiotap(cfg.he_gi_ltf, &gi, &ltf);
+
+  const uint16_t data1 =
+      IEEE80211_RADIOTAP_HE_DATA1_DATA_MCS_KNOWN |
+      IEEE80211_RADIOTAP_HE_DATA1_CODING_KNOWN |
+      IEEE80211_RADIOTAP_HE_DATA1_STBC_KNOWN |
+      IEEE80211_RADIOTAP_HE_DATA1_BW_RU_ALLOC_KNOWN; /* FORMAT=SU(0) */
+  const uint16_t data2 = IEEE80211_RADIOTAP_HE_DATA2_GI_KNOWN |
+                         IEEE80211_RADIOTAP_HE_DATA2_NUM_LTF_SYMS_KNOWN;
+  uint16_t data3 =
+      static_cast<uint16_t>((cfg.he_mcs & 0x0f) << 8) & /* DATA_MCS bits 8..11 */
+      IEEE80211_RADIOTAP_HE_DATA3_DATA_MCS;
+  if (cfg.ldpc) data3 |= IEEE80211_RADIOTAP_HE_DATA3_CODING;
+  if (cfg.stbc) data3 |= IEEE80211_RADIOTAP_HE_DATA3_STBC;
+  const uint16_t data5 = static_cast<uint16_t>(
+      (bw_code & 0x0f) |
+      ((gi & 0x3) << IEEE80211_RADIOTAP_HE_DATA5_GI_SHIFT) |
+      ((ltf & 0x3) << IEEE80211_RADIOTAP_HE_DATA5_LTF_SIZE_SHIFT));
+  const uint16_t data6 = static_cast<uint16_t>(cfg.he_nss & 0x0f); /* NSTS */
+
+  std::vector<uint8_t> r;
+  r.reserve(22);
+  emit_u8(r, kRadiotapVersion);
+  emit_u8(r, 0);
+  emit_u16_le(r, 22);
+  emit_u32_le(r, kPresentTxFlags | kPresentHe);
+  emit_u16_le(r, kTxFlagsNoAck);
+  emit_u16_le(r, data1);
+  emit_u16_le(r, data2);
+  emit_u16_le(r, data3);
+  emit_u16_le(r, 0);      /* data4 */
+  emit_u16_le(r, data5);
+  emit_u16_le(r, data6);
+  return r;
+}
+
 std::string to_upper_stripped(const char* raw) {
   std::string s;
   for (const char* p = raw; *p; ++p) {
@@ -192,6 +258,26 @@ bool parse_rate_token(const std::string& s, TxMode* cfg) {
       }
     }
   }
+
+  /* HE (802.11ax, Kestrel): HE<NSS>SS_MCS<MCS>, NSS 1..4, MCS 0..11. */
+  if (s.rfind("HE", 0) == 0) {
+    unsigned nss;
+    if (parse_uint(s, 2, &nss) && nss >= 1 && nss <= 4) {
+      size_t after_nss = 2;
+      while (after_nss < s.size() && s[after_nss] >= '0' && s[after_nss] <= '9')
+        ++after_nss;
+      const std::string tail = "SS_MCS";
+      if (s.compare(after_nss, tail.size(), tail) == 0) {
+        unsigned mcs;
+        if (parse_uint(s, after_nss + tail.size(), &mcs) && mcs <= 11) {
+          cfg->mode = TxMode::Mode::HE;
+          cfg->he_nss = static_cast<uint8_t>(nss);
+          cfg->he_mcs = static_cast<uint8_t>(mcs);
+          return true;
+        }
+      }
+    }
+  }
   return false;
 }
 
@@ -201,6 +287,7 @@ std::vector<uint8_t> build_stream_radiotap(const TxMode& cfg) {
   switch (cfg.mode) {
     case TxMode::Mode::HT:  return build_ht(cfg);
     case TxMode::Mode::VHT: return build_vht(cfg);
+    case TxMode::Mode::HE:  return build_he(cfg);
     case TxMode::Mode::Legacy:
     default:                return build_legacy(cfg);
   }

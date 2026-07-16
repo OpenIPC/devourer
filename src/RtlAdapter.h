@@ -114,6 +114,13 @@ public:
   uint8_t first_bulk_out_ep() const {
     return _usb.bulk_out_eps.empty() ? 0x02 : _usb.bulk_out_eps[0];
   }
+  /* Nth discovered bulk-OUT endpoint in descriptor order (0-based), or 0 if
+   * out of range. The Kestrel FWDL/H2C path needs the CH12 endpoint, which the
+   * vendor USB layer maps as BULKOUTID2 = the 3rd bulk-OUT (RtOutPipe[2]). */
+  uint8_t nth_bulk_out_ep(size_t n) const {
+    return n < _usb.bulk_out_eps.size() ? _usb.bulk_out_eps[n] : 0;
+  }
+  size_t bulk_out_ep_count() const { return _usb.bulk_out_eps.size(); }
 
   bool AutoloadFailFlag = false;
   bool EepromOrEfuse = false;
@@ -145,6 +152,16 @@ public:
 
   uint8_t efuse_OneByteRead(uint16_t addr, uint8_t *data);
   void phy_set_bb_reg(uint16_t regAddr, uint32_t bitMask, uint32_t data);
+
+  /* 32-bit-address register write (see IRtlTransport::write32_wide) — the
+   * halbb/halrf BB window lives at addr + 0x10000 (wIndex=1 over USB), out of
+   * reach of the 16-bit rtw_write path. */
+  bool rtw_write32_wide(uint32_t addr, uint32_t value) {
+    return _transport->write32_wide(addr, value);
+  }
+  uint32_t rtw_read32_wide(uint32_t addr) {
+    return _transport->read32_wide(addr);
+  }
 
   template <typename T> T rtw_read(uint16_t reg_num) {
     if constexpr (sizeof(T) == 1)

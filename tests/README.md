@@ -401,3 +401,33 @@ to add new chipsets — the rest of the script is chipset-agnostic.
   the full story — chip behaviour can differ per band. Run 2.4GHz
   (`--channel 6`) plus at least one 5GHz channel (`--channel 36` /
   `--channel 100`) before calling a configuration good.
+
+## Kestrel (RTL8852BU / RTL8832CU) suite
+
+The 11ax generation has its own `kestrel_*` on-air scripts (regress.py covers
+it as a DUT too, but these exercise Kestrel-specific surfaces). All expect the
+adapters cold (`uhubctl` VBUS-cycle; the in-tree rtw89 modules must be
+temp-blacklisted — they auto-probe and warm-initialize the chip at every
+enumeration, masking cold-boot behavior):
+
+- `kestrel_rx_smoke.sh` — ambient monitor-RX decode per channel (VBUS-cycles
+  first).
+- `kestrel_tx_sdr.sh`, `kestrel_narrowband_sdr.sh`, `kestrel_streamtx_sdr.sh`
+  — B210 SDR duty / occupied-bandwidth measurements of the TX path.
+- `kestrel_tx_onair.sh`, `kestrel_inject_sanity.sh`, `kestrel_bw_rx.sh` —
+  two-adapter TX→RX decode, per-bandwidth.
+- `kestrel_he_onair.sh`, `kestrel_two_radio_he.sh` — HE-rate on-air witness
+  (the two-radio variant needs no vendor kernel module).
+- `kestrel_beacon_onair.sh`, `kestrel_txreport_onair.sh` — MAC-plane canaries
+  (HW beacon engine, TX-report C2H).
+- `kestrel_8832cu_*` — the 8832CU family: `rx`, `tx_sdr`, `tx_matrix`
+  (rate×bw duty matrix), `evm`/`evm_stream` (8812AU-monitor TX-EVM; `TX_ID`
+  env retargets the DUT), `6g_txrx` (6 GHz TX+RX), `6g160_txrx` (the
+  documented 6G-160 TX limitation witness), `ab`/`kernel_rx_ab` (vendor-ko
+  A/B ground truth).
+- `kestrel_vendor_ko_smoke.sh`, `kestrel_vendor_rx_check.sh`,
+  `kestrel_env_calibrate.sh` — kernel-driver ground-truth harnesses.
+- `kestrel_txpwr_sweep.sh` — TXAGC dBm sweep vs SDR duty.
+- `kestrel_fwlog_c2h_probe.sh` — exercises the `debug.kestrel_fw_log` knob.
+- Selftests (`ctest`): `kestrel_rxparse_selftest.cpp`,
+  `kestrel_txreport_selftest.cpp`.

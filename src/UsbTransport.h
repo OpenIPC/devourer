@@ -43,6 +43,26 @@ public:
   bool write8(uint16_t reg, uint8_t v) override { return ctrl_write(reg, v); }
   bool write16(uint16_t reg, uint16_t v) override { return ctrl_write(reg, v); }
   bool write32(uint16_t reg, uint32_t v) override { return ctrl_write(reg, v); }
+  bool write32_wide(uint32_t addr, uint32_t v) override {
+    /* Realtek USB register addressing: wValue = addr[15:0], wIndex =
+     * addr[31:16]. Lets the BB/RF window (addr + 0x10000) reach wIndex=1
+     * instead of colliding with the MAC/system space at wIndex=0. */
+    return libusb_control_transfer(
+               _dev_handle, REALTEK_USB_VENQT_WRITE, 5,
+               static_cast<uint16_t>(addr & 0xFFFF),
+               static_cast<uint16_t>(addr >> 16), (uint8_t *)&v, sizeof(v),
+               USB_TIMEOUT) == static_cast<int>(sizeof(v));
+  }
+  uint32_t read32_wide(uint32_t addr) override {
+    uint32_t data = 0;
+    if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5,
+                                static_cast<uint16_t>(addr & 0xFFFF),
+                                static_cast<uint16_t>(addr >> 16),
+                                (uint8_t *)&data, sizeof(data),
+                                USB_TIMEOUT) == static_cast<int>(sizeof(data)))
+      return data;
+    return 0xFFFFFFFFu; /* INVALID_RF_DATA-style sentinel on a failed read */
+  }
   bool write_bytes(uint16_t reg, const uint8_t *p, size_t n) override;
 
   bool tx_async(uint8_t ep, uint8_t *buf, size_t len,

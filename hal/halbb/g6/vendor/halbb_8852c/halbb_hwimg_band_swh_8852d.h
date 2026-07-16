@@ -1,0 +1,116 @@
+/******************************************************************************
+ *
+ * Copyright(c) 2007 - 2020  Realtek Corporation.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+ * more details.
+ *
+ * The full GNU General Public License is included in this distribution in the
+ * file called LICENSE.
+ *
+ * Contact Information:
+ * wlanfae <wlanfae@realtek.com>
+ * Realtek Corporation, No. 2, Innovation Road II, Hsinchu Science Park,
+ * Hsinchu 300, Taiwan.
+ *
+ * Larry Finger <Larry.Finger@lwfinger.net>
+ *
+ *****************************************************************************/
+
+/*Image2HeaderVersion: R3 2.0.2.0*/
+#ifndef _HALBB_HWIMG_BAND_SWH_8852d_H
+#define _HALBB_HWIMG_BAND_SWH_8852d_H
+
+#ifdef HALBB_BAND_SWH_CR_SEQ_SUPPORT
+
+const u32 array_mp_8852d_band_swh[] = {
+	0x8100724, 0x00111200,
+	0x81046AC, 0x60423537,
+	0x81046BC, 0x5107C252,
+	0x8104720, 0x3FFFFD63,
+	0x8104724, 0xB58D11FF,
+	0x8104730, 0xE0399201,
+	0x8104738, 0x8325C500,
+	0x8104798, 0x000001D3,
+	0x81047C8, 0x56767578,
+	0x810481C, 0x576DF814,
+	0x810484C, 0x0000CA62,
+	0x81048D4, 0x576DF814,
+	0x8104A60, 0x60423537,
+	0x8104A70, 0x5107C252,
+	0x8104A74, 0x3FFFFD63,
+	0x8104A78, 0xB58D11FF,
+	0x8104A9C, 0xE0399201,
+	0x8104AA4, 0x8325C500,
+	0x8104BE4, 0xBAAC8000,
+	0x8104CA8, 0xBAAC8000,
+	0x8104D2C, 0x0008C0C1,
+	0x8104D34, 0x7BB167AB,
+	0x81058B0, 0x00000800,
+	0x8105A24, 0x00050000,
+	0x8105A44, 0x00000005,
+	0x8105A60, 0x00050000,
+	0x8105AB0, 0x00050005,
+	0x8105AB4, 0x00050005,
+	0x8105AB8, 0x00050005,
+	0x8105ABC, 0x00050005,
+	0x8105AC0, 0x00000005,
+	0x81078B0, 0x00000800,
+	0x8107A24, 0x00050000,
+	0x8107A44, 0x00000005,
+	0x8107A60, 0x00050000,
+	0x8107AB0, 0x00050005,
+	0x8107AB4, 0x00050005,
+	0x8107AB8, 0x00050005,
+	0x8107ABC, 0x00050005,
+	0x8107AC0, 0x00000005,
+	0x8600724, 0x01100100,
+	0x86046AC, 0xA0423537,
+	0x86046BC, 0x510FC252,
+	0x8604720, 0x7FFFFD63,
+	0x8604724, 0x758D11FF,
+	0x8604730, 0xE0389201,
+	0x8604738, 0x8F25C500,
+	0x8604798, 0x000000D3,
+	0x86047C8, 0x55757478,
+	0x860481C, 0x5765F814,
+	0x860484C, 0x00008A62,
+	0x86048D4, 0x576BF814,
+	0x8604A60, 0xA0423537,
+	0x8604A70, 0x510FC252,
+	0x8604A74, 0x7FFFFD63,
+	0x8604A78, 0x758D11FF,
+	0x8604A9C, 0xE0389201,
+	0x8604AA4, 0x8F25C500,
+	0x8604BE4, 0xD5640000,
+	0x8604CA8, 0xD5640000,
+	0x8604D2C, 0x0008C8C1,
+	0x8604D34, 0x7BB1579A,
+	0x86058B0, 0x00000000,
+	0x8605A24, 0x00000000,
+	0x8605A44, 0x00000000,
+	0x8605A60, 0x00000000,
+	0x8605AB0, 0x00000000,
+	0x8605AB4, 0x00000000,
+	0x8605AB8, 0x00000000,
+	0x8605ABC, 0x00000000,
+	0x8605AC0, 0x00000000,
+	0x86078B0, 0x00000000,
+	0x8607A24, 0x00000000,
+	0x8607A44, 0x00000000,
+	0x8607A60, 0x00000000,
+	0x8607AB0, 0x00000000,
+	0x8607AB4, 0x00000000,
+	0x8607AB8, 0x00000000,
+	0x8607ABC, 0x00000000,
+	0x8607AC0, 0x00000000
+};
+#endif
+
+#endif	/* _HALBB_HWIMG_BAND_SWH_8852d_H */

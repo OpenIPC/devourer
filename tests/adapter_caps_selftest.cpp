@@ -34,11 +34,19 @@ int main() {
              (ac | kBw5 | kBw10));
   expect("Unknown bw = 0",
          bw_mask_for_generation(ChipGeneration::Unknown) == 0);
+  /* Kestrel (11ax) does 20/40/80 + 160 MHz (RTL8852C, validated on-air at
+   * 6 GHz). */
+  expect("Kestrel bw = 20/40/80/160",
+         bw_mask_for_generation(ChipGeneration::Kestrel) ==
+             (ac | kBw5 | kBw10));
 
   /* --- generation names --- */
   expect("gen name jaguar3",
          std::string_view(generation_name(ChipGeneration::Jaguar3)) ==
              "jaguar3");
+  expect("gen name kestrel",
+         std::string_view(generation_name(ChipGeneration::Kestrel)) ==
+             "kestrel");
   expect("gen name unknown",
          std::string_view(generation_name(ChipGeneration::Unknown)) ==
              "unknown");

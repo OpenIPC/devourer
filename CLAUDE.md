@@ -4,14 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Userspace re-implementation of Realtek's RTL88xxAU Wi-Fi driver — speaks to the
-chip directly via libusb instead of a kernel module. Static library `devourer`
+Userspace re-implementation of Realtek's USB Wi-Fi drivers (11ac RTL88xx and
+11ax RTL8852 families) — speaks to the chip directly via libusb instead of a
+kernel module. Static library `devourer`
 (CMake target) + example executables under `examples/` (`rxdemo` and `txdemo`
 are the canonical RX/TX demos). Used by the OpenIPC project for long-range
 video links.
 
-Three chip generations, each behind its own self-contained HAL, dispatched at
-construction from the `SYS_CFG2` chip-id (see **Architecture**):
+Four chip generations, each behind its own self-contained HAL, dispatched at
+construction from the `SYS_CFG2` chip-id (Kestrel: PID-first — see
+**Architecture**):
 
 - **Jaguar1** (`src/jaguar1/`): RTL8812AU (2T2R reference), RTL8811AU (1T1R cut,
   rides the 8812 path), RTL8814AU (4T4R RF / 3-SS baseband — host-pushed TX
@@ -53,9 +55,85 @@ construction from the `SYS_CFG2` chip-id (see **Architecture**):
   pin-mux front end, single-path 1SS TX, spur channels, LCK, the 2.4 GHz TX
   kernel-parity limitation) live in `docs/8822e-quirks.md`.
 
+- **Kestrel** (`src/kestrel/`): the Wi-Fi 6 / 802.11ax generation —
+  RTL8852BU/8832BU (variant C8852B) and RTL8852CU/8832CU (C8852C), one HAL
+  serving both dies on all platforms (MSVC included). Two-plane architecture:
+  the **mac_ax plane** (power-on / FWDL / efuse / MAC TRX / H2C-C2H / USB /
+  descriptors) is hand-ported C++ from Realtek's "G6 phl" vendor trees
+  (`reference/rtl8852bu`, `reference/rtl8852cu` — none of the 11ac
+  loaders/parsers apply), while the **BB/RF plane is Realtek's halbb/halrf C
+  compiled VERBATIM** for both chips: one chip-agnostic core + per-chip
+  backends under `hal/halbb/g6/` + `hal/halrf/g6/` (`vendor/` = untouched
+  vendor files; `shim/` + `hal_headers_le.h` = the minimal PHL surface they
+  compile against; `kestrel_halbb_glue.c` / `kestrel_halrf_glue.c` = the C
+  entry points devourer drives; `tools/vendor_hal{bb,rf}_*.sh` re-vendor).
+  The vendored loaders own the BB/RF/gain tables (`halbb_init_reg`,
+  `halrf_config_radio` — radio pages reach the fw via the bridge `send_h2c`
+  into the mac_ax H2C encoder), the per-channel BB config
+  (`halbb_ctrl_bw_ch`), the RF tune (`halrf_ctl_ch/bw` on the B,
+  `halrf_ctl_band_ch_bw_8852c` on the C), and the cals: DACK + RX-DCK both
+  dies (wrapped in an RF 0x0/0x1/0x5 save/restore on the B — the vendor
+  relies on later TRX flow to rewrite them), IQK on the 8852C only. The RFK
+  prologue (NCTL microcode / a-die SI reset / LCK / RCK / efuse trim + TSSI
+  DE) runs at `phy_bb_rf_init` in the vendor's `halrf_dm_init` position —
+  that position is load-bearing: run after the tune, the SI reset deafens the
+  radio both ways. **Evidence-gated cals**: TSSI/DPK (both dies, via
+  `support_ability`) and IQK on the 8852B degrade TX under the fixed-dBm
+  power model — gates fall with a TSSI-referenced power model.
+  Dispatched **PID-first** (`kestrel/KestrelUsbIds.h`), not from the 0x00FC
+  byte: on AX silicon that register is R_AX_SYS_CHIPINFO (die-id 0x51/0x52;
+  the 8852A's 0x50 collides with the 8822B cold transient). Cold-boot facts
+  (mac_ax plane, both dies): a USB chip from real cold reads
+  WLMAC_PWR_STE=MAC_ON (its AFSM auto-powers to enumerate) and power_on must
+  force the MAC off first (`pwr.c` prologue) or the bootrom never raises
+  H2C_PATH_RDY; `B_AX_ENBT` must be set before any LTE-space access (arms the
+  LTE indirect interface) and the GNT arbitration is SW-forced to WiFi
+  (`mac_cfg_gnt_8852b` stance) — a kernel driver pre-initializing the chip
+  masks all of this, so blacklist rtw89 when testing.
+  On-air-validated: monitor RX (both dies, 2.4/5 GHz; the RX front-end needs
+  the halbb per-band LNA/TIA gain-error cache, without which 5 GHz is deaf),
+  TX (mgmt injection — the OpenIPC video path via `streamtx`;
+  legacy/HT/VHT/HE rates), channel/BW **5/10/20/40/80 MHz on both dies +
+  160 MHz on the 8852C** (the 8852B die has no 160 MHz — vendor bw_sup;
+  caps report accordingly). 40 MHz tunes to the block center (primary ±2);
+  80/160 MHz derive center/pri_ch from the channel plan (160 = an 8-wide
+  block, center = block_start+14). **6 GHz TX tops out at 80 MHz**: the 6G
+  160 MHz TX does not radiate on the C8852C (the RF synth locks and RX-160
+  works, but the 6G+160 TX-enable path is un-ported — B210-confirmed 0% duty
+  vs 45% at 6G-80 / 40% at 5G-160; a MAC TXAGC-max / RF-TX-path gap, not a
+  chip limit — the vendor drives it). 5/10 MHz narrowband is the BB "small
+  BW" field with the RF left in 20 MHz mode (no ADC re-clock, unlike Jaguar).
+  RX bulk-IN delivery requires the USB RXAGG engine enabled
+  (`B_AX_RXAGG_EN`). TX power is a fixed BB dBm (`halbb_set_txpwr_dbm`,
+  default 20 dBm, `DEVOURER_TX_PWR` override) with a runtime
+  `SetTxPowerOffsetQdb` lever; `ReadTsf` reads the per-port MAC TSF;
+  `StartBeacon` drives the AX HW beacon engine. Async packet-C2H (bulk-IN
+  rpkt_type=10) delivery works — routed by `handle_c2h` on the C2H
+  class/func — so the #236 C2H surface (TWT/F2P reports) is reachable. TX
+  airs with the CMAC EDCCA/CCA gate disabled (`sch_tx_en`, TX path only) —
+  the intended injection/monitor-link mode. Not working: the fw's USR_TX_RPT
+  TX-egress-timestamp C2H (gated on a full BSS association, not just the
+  registered NO_LINK role).
+  Almost every 8852C divergence from the 8852B is a **`_V1` register-bank**
+  move (USB/HFC/RXAGG/HCI at 0x5xxx/0x1700/0x6000/0x7880 vs the 8852B
+  0x1xxx/0x8Axx/0x8900/0x8380) plus a different descriptor: FWDL/H2C use a
+  16-byte `rxd_short_t` (not the 24-byte WD body), and data/mgmt TX uses the
+  32-byte `wd_body_t_v1` (not 24). The CBV-cut die loads the `u2_nic` fw
+  image (CAV→u1). Two 8852C-specific TX pieces the 8852B path lacks: the BB
+  IFFT→TX-chain routing (`halbb_ctrl_tx_path_tmac_8852c`, the 0xD800..0xD82C
+  "path-com" block the 8852B replaces with its per-STA CMAC antenna model),
+  and the V1 descriptor's rate word — `USERATE_SEL`/BW/GI/DATARATE live in
+  wd_body dword7, not wd_info dword0 as on the 8852B (mis-placing it left
+  `f_rate=0` so the scheduler stalled and the bulk-OUT NAKed).
+  The capstone is 11ax trigger-based UL + TWT (issue #236 — the v1.19 vendor
+  fwcmd surface exposes TWT-OFDMA + F2P trigger H2Cs that mainline rtw89
+  lacks). The 8852A-family (RTL8832AU) is deliberately excluded (frozen 2021
+  v1.15 vendor drop only).
+
 Naming traps: **RTL8821AU is Jaguar1** (not Jaguar2, despite the Jaguar2
-RTL8821C's similar name); RTL8822**B**U (Jaguar2) ≠ RTL8822**C**U (Jaguar3).
-The Kestrel 11ax families are out of scope. Full chip / bench-throughput
+RTL8821C's similar name); RTL8822**B**U (Jaguar2) ≠ RTL8822**C**U (Jaguar3);
+the TP-Link TX50UH is RTL8832**C**U (8852C-family) despite lab lore calling it
+8832AU, while the TX20U **Nano** is RTL8852BU. Full chip / bench-throughput
 table: README **Supported hardware**.
 
 **PCIe** (`DEVOURER_PCIE=ON`, Linux-only, default OFF): the RTL8821CE — the

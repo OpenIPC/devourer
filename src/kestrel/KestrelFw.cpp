@@ -1,0 +1,983 @@
+#include "KestrelFw.h"
+
+#include <chrono>
+#include <cstring>
+#include <thread>
+#include <utility>
+
+#include "MacRegAx.h"
+#include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
+#if defined(DEVOURER_HAVE_KESTREL_8852B)
+#include "hal8852b_fw.h"
+#endif
+#if defined(DEVOURER_HAVE_KESTREL_8852C)
+#include "hal8852c_fw.h"
+#endif
+
+namespace kestrel {
+
+namespace {
+namespace r = kestrel::reg;
+
+void delay_us(uint32_t us) {
+  std::this_thread::sleep_for(std::chrono::microseconds(us));
+}
+
+uint32_t le32(const uint8_t *p) {
+  return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+         (static_cast<uint32_t>(p[2]) << 16) |
+         (static_cast<uint32_t>(p[3]) << 24);
+}
+
+void put_le32(uint8_t *p, uint32_t v) {
+  p[0] = v & 0xFF;
+  p[1] = (v >> 8) & 0xFF;
+  p[2] = (v >> 16) & 0xFF;
+  p[3] = (v >> 24) & 0xFF;
+}
+
+} /* namespace */
+
+KestrelFw::KestrelFw(RtlAdapter device, Logger_t logger, ChipVariant variant)
+    : _device{std::move(device)}, _logger{std::move(logger)},
+      _variant{variant} {
+  /* CH12 (H2C/FWDL) endpoint = BULKOUTID2 = the 3rd bulk-OUT in descriptor
+   * order (vendor RtOutPipe[2]); on the 8852BU that is 0x07. */
+  _ch12_ep = _device.nth_bulk_out_ep(r::BULKOUTID_H2C);
+}
+
+void KestrelFw::set32(uint16_t reg, uint32_t bits) {
+  _device.rtw_write32(reg, _device.rtw_read32(reg) | bits);
+}
+void KestrelFw::clr32(uint16_t reg, uint32_t bits) {
+  _device.rtw_write32(reg, _device.rtw_read32(reg) & ~bits);
+}
+
+bool KestrelFw::poll_wcpu(uint32_t mask, uint32_t expect, const char *what) {
+  for (uint32_t cnt = r::FWDL_WAIT_CNT; cnt != 0; --cnt) {
+    if ((_device.rtw_read32(r::R_AX_WCPU_FW_CTRL) & mask) == expect)
+      return true;
+    delay_us(1);
+  }
+  _logger->error("Kestrel FWDL: {} timeout (WCPU_FW_CTRL=0x{:08x})", what,
+                 _device.rtw_read32(r::R_AX_WCPU_FW_CTRL));
+  return false;
+}
+
+bool KestrelFw::hci_func_en() {
+  /* hci_func_en (init.c:161): 8852A/8852B/8851B/8852BT take the FIRST branch —
+   * RXDMA|TXDMA on R_AX_HCI_FUNC_EN (0x8380) ONLY. The _V1 register (0x7880) is
+   * the ELSE branch for other chips; on the 8852B it is UNMAPPED (reads back
+   * 0xdeadbeef), and writing there corrupts the HCI state so the running fw
+   * faults on the AHB->HCI bus ~1 ms after boot (HALT_C2H = L2_ERR_AH_HCI).
+   * The 8852C (RISC-V) is the opposite: it IS the _V1 (0x7880) chip. */
+  const uint16_t reg = (_variant == ChipVariant::C8852C)
+                           ? r::R_AX_HCI_FUNC_EN_V1
+                           : r::R_AX_HCI_FUNC_EN;
+  set32(reg, r::B_AX_HCI_RXDMA_EN | r::B_AX_HCI_TXDMA_EN);
+  return true;
+}
+
+bool KestrelFw::chk_dle_rdy(uint16_t status_reg, uint32_t rdy_bits,
+                            const char *what) {
+  for (uint32_t cnt = r::DLE_WAIT_CNT; cnt != 0; --cnt) {
+    if ((_device.rtw_read32(status_reg) & rdy_bits) == rdy_bits)
+      return true;
+    delay_us(r::DLE_WAIT_US);
+  }
+  _logger->error("Kestrel FWDL: {} not ready (0x{:04x}=0x{:08x})", what,
+                 status_reg, _device.rtw_read32(status_reg));
+  return false;
+}
+
+bool KestrelFw::dle_init_dlfw() {
+  /* dle_init(MAC_AX_QTA_DLFW). 8852B USB: wde_size9/ple_size8, wde_qt4(wcpu=6
+   * SCC override)/ple_qt13(c2h=16,h2c=48). 8852C USB (RISC-V): wde_size18/
+   * ple_size18, wde_qt17(all 0)/ple_qt44,45(c2h 16/32, h2c 256) — the RISC-V
+   * bootrom needs the larger H2C reserve to raise H2C_PATH_RDY. */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint16_t wde_unlnk =
+      c ? r::DLFW_WDE_UNLNK_PAGE_8852C : r::DLFW_WDE_UNLNK_PAGE;
+  const uint16_t ple_free =
+      c ? r::DLFW_PLE_FREE_PAGE_8852C : r::DLFW_PLE_FREE_PAGE;
+  const uint16_t wde_wcpu =
+      c ? r::DLFW_WDE_WCPU_MIN_8852C : r::DLFW_WDE_WCPU_MIN;
+  const uint16_t ple_c2h_min = c ? r::DLFW_PLE_C2H_MIN_8852C : r::DLFW_PLE_C2H;
+  const uint16_t ple_c2h_max = c ? r::DLFW_PLE_C2H_MAX_8852C : r::DLFW_PLE_C2H;
+  const uint16_t ple_h2c = c ? r::DLFW_PLE_H2C_8852C : r::DLFW_PLE_H2C;
+  auto field = [](uint32_t v, uint32_t val, uint32_t msk, uint8_t sh) {
+    return r::set_clr_word(v, val, msk, sh);
+  };
+
+  /* dle_func_en(DIS). */
+  clr32(r::R_AX_DMAC_FUNC_EN, r::B_AX_DLE_WDE_EN | r::B_AX_DLE_PLE_EN);
+
+  /* dle_mix_cfg: WDE 64B page, bound 0, free=lnk_pge_num(0). */
+  uint32_t v = _device.rtw_read32(r::R_AX_WDE_PKTBUF_CFG);
+  v = field(v, r::S_AX_WDE_PAGE_SEL_64, r::B_AX_WDE_PAGE_SEL_MSK,
+            r::B_AX_WDE_PAGE_SEL_SH);
+  v = field(v, 0, r::B_AX_WDE_START_BOUND_MSK, r::B_AX_WDE_START_BOUND_SH);
+  v = field(v, r::DLFW_WDE_FREE_PAGE, r::B_AX_WDE_FREE_PAGE_NUM_MSK,
+            r::B_AX_WDE_FREE_PAGE_NUM_SH);
+  _device.rtw_write32(r::R_AX_WDE_PKTBUF_CFG, v);
+
+  /* PLE 128B page, bound = (lnk+unlnk)*pge_size/DLE_BOUND_UNIT of the WDE
+   * region = (0+1024)*64/8192 = 8 (8852B) or (0+2048)*64/8192 = 16 (8852C);
+   * free=lnk_pge_num (64 8852B / 2544 8852C). */
+  const uint32_t bound =
+      (r::DLFW_WDE_FREE_PAGE + wde_unlnk) * 64u / r::DLE_BOUND_UNIT;
+  v = _device.rtw_read32(r::R_AX_PLE_PKTBUF_CFG);
+  v = field(v, r::S_AX_PLE_PAGE_SEL_128, r::B_AX_PLE_PAGE_SEL_MSK,
+            r::B_AX_PLE_PAGE_SEL_SH);
+  v = field(v, bound, r::B_AX_PLE_START_BOUND_MSK, r::B_AX_PLE_START_BOUND_SH);
+  v = field(v, ple_free, r::B_AX_PLE_FREE_PAGE_NUM_MSK,
+            r::B_AX_PLE_FREE_PAGE_NUM_SH);
+  _device.rtw_write32(r::R_AX_PLE_PKTBUF_CFG, v);
+
+  /* quota cfg: min in [11:0], max in [27:16]. */
+  auto qta = [&](uint16_t reg, uint16_t mn, uint16_t mx) {
+    _device.rtw_write32(
+        reg, (static_cast<uint32_t>(mn & r::QTA_SIZE_MSK) << r::QTA_MIN_SH) |
+                 (static_cast<uint32_t>(mx & r::QTA_SIZE_MSK) << r::QTA_MAX_SH));
+  };
+  qta(r::R_AX_WDE_QTA0_CFG, 0, 0);                /* hif */
+  qta(r::R_AX_WDE_QTA1_CFG, wde_wcpu, wde_wcpu);  /* wcpu (6 8852B / 0 8852C) */
+  qta(r::R_AX_WDE_QTA3_CFG, 0, 0);                /* pkt_in */
+  qta(r::R_AX_WDE_QTA4_CFG, 0, 0);                /* cpu_io */
+  /* PLE QTA: only c2h(Q2) and h2c(Q3) are nonzero. c2h min/max differ on the
+   * 8852C (16/32); h2c is min==max on both. The 8852C's ple_quota_cfg writes
+   * through QTA11 (the 8852B stops at QTA10) — leaving QTA11 at its reset value
+   * mis-sizes the PLE allocation. */
+  const uint16_t ple_qta_last =
+      c ? r::R_AX_PLE_QTA11_CFG : r::R_AX_PLE_QTA10_CFG;
+  for (uint16_t reg = r::R_AX_PLE_QTA0_CFG; reg <= ple_qta_last; reg += 4) {
+    if (reg == r::R_AX_PLE_QTA2_CFG)
+      qta(reg, ple_c2h_min, ple_c2h_max);
+    else if (reg == r::R_AX_PLE_QTA3_CFG)
+      qta(reg, ple_h2c, ple_h2c);
+    else
+      qta(reg, 0, 0);
+  }
+
+  /* dle_func_en(EN) + ready polls. */
+  set32(r::R_AX_DMAC_FUNC_EN, r::B_AX_DLE_WDE_EN | r::B_AX_DLE_PLE_EN);
+  if (!chk_dle_rdy(r::R_AX_WDE_INI_STATUS,
+                   r::B_AX_WDE_Q_MGN_INI_RDY | r::B_AX_WDE_BUF_MGN_INI_RDY,
+                   "WDE"))
+    return false;
+  if (!chk_dle_rdy(r::R_AX_PLE_INI_STATUS,
+                   r::B_AX_PLE_Q_MGN_INI_RDY | r::B_AX_PLE_BUF_MGN_INI_RDY,
+                   "PLE"))
+    return false;
+  return true;
+}
+
+bool KestrelFw::hfc_init_dlfw() {
+  /* hfc_init(rst=1, en=0, h2c_en=1): reset is software-only (no register
+   * writes for the h2c-only path); then set_fc_func_en(0,0), set_fc_h2c,
+   * set_fc_func_en(0,1). The 8852C H2C flow control lives in the _V1 bank
+   * (0x1700/0x1704) with the same bit layout; the 8852B uses 0x8A00/0x8A04.
+   * On the 8852C, configuring the wrong bank leaves the H2C (CH12) path
+   * unconfigured so the RISC-V bootrom never raises H2C_PATH_RDY. */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint16_t fc_ctrl = c ? r::R_AX_HCI_FC_CTRL_V1 : r::R_AX_HCI_FC_CTRL;
+  const uint16_t page_ctrl = c ? r::R_AX_CH_PAGE_CTRL_V1 : r::R_AX_CH_PAGE_CTRL;
+  /* set_fc_func_en(0, 0): clear FC_EN + CH12_EN. */
+  clr32(fc_ctrl, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
+  /* set_fc_h2c: CH_PAGE_CTRL = h2c_prec<<16; HCI_FC_CTRL CH12_FULL_COND=X2. */
+  _device.rtw_write32(
+      page_ctrl,
+      (static_cast<uint32_t>(r::HFC_USB_H2C_PREC_8852B & r::B_AX_PREC_PAGE_CH12_MSK)
+       << r::B_AX_PREC_PAGE_CH12_SH));
+  _device.rtw_write32(
+      fc_ctrl,
+      r::set_clr_word(_device.rtw_read32(fc_ctrl), r::HFC_FULL_COND_X2,
+                      r::B_AX_HCI_FC_CH12_FULL_COND_MSK,
+                      r::B_AX_HCI_FC_CH12_FULL_COND_SH));
+  /* set_fc_func_en(0, 1): clear FC_EN, set CH12_EN. */
+  clr32(fc_ctrl, r::B_AX_HCI_FC_EN);
+  set32(fc_ctrl, r::B_AX_HCI_FC_CH12_EN);
+  return true;
+}
+
+bool KestrelFw::dmac_pre_init() {
+  /* dmac_func_pre_en. The 8852C additionally enables the HAXI (Host AXI DMA)
+   * block — its USB DMA transport — where the 8852B has none. */
+  uint32_t funcen = r::B_AX_MAC_FUNC_EN | r::B_AX_DMAC_FUNC_EN |
+                    r::B_AX_DISPATCHER_EN | r::B_AX_PKT_BUF_EN;
+  if (_variant == ChipVariant::C8852C)
+    funcen |= r::B_AX_H_AXIDMA_EN;
+  set32(r::R_AX_DMAC_FUNC_EN, funcen);
+  if (_variant == ChipVariant::C8852C) {
+    /* dmac_func_pre_en_8852c HAXI setup (init_8852c.c): DMA mode = USB,
+     * un-stop the AXI master + TX/RX HCI, un-stop the DMA channels, enable the
+     * AXIDMA in the platform. */
+    uint32_t v = _device.rtw_read32(r::R_AX_HAXI_INIT_CFG1);
+    v = r::set_clr_word(v, r::DMA_MOD_USB, r::B_AX_DMA_MODE_MSK,
+                        r::B_AX_DMA_MODE_SH);
+    v = (v & ~r::B_AX_STOP_AXI_MST) | r::B_AX_TXHCI_EN_V1 | r::B_AX_RXHCI_EN_V1;
+    _device.rtw_write32(r::R_AX_HAXI_INIT_CFG1, v);
+    clr32(r::R_AX_HAXI_DMA_STOP1, r::HAXI_DMA_STOP1_CHANS);
+    clr32(r::R_AX_HAXI_DMA_STOP2, r::HAXI_DMA_STOP2_CHANS);
+    set32(r::R_AX_PLATFORM_ENABLE, r::B_AX_AXIDMA_EN);
+  }
+  if (!dle_init_dlfw())
+    return false;
+  if (!hfc_init_dlfw())
+    return false;
+  return true;
+}
+
+bool KestrelFw::disable_cpu() {
+  /* mac_disable_cpu. */
+  clr32(r::R_AX_PLATFORM_ENABLE, r::B_AX_WCPU_EN);
+  clr32(r::R_AX_WCPU_FW_CTRL,
+        r::B_AX_WCPU_FWDL_EN | r::B_AX_H2C_PATH_RDY | r::B_AX_FWDL_PATH_RDY);
+  clr32(r::R_AX_SYS_CLK_CTRL, r::B_AX_CPU_CLK_EN);
+  /* APB-wrap reset (resets CPU-local CR incl. WDT) — FWDL_IS_RESET_APB_WRAP is
+   * 8852B/8851B/8852BT ONLY. On the 8852C disabling the WCPU already disables
+   * the WDT, and an extra APB-wrap reset leaves the WCPU bootrom from signalling
+   * H2C_PATH_RDY (the FWDL phase-0 stall), so it must be skipped. */
+  if (_variant != ChipVariant::C8852C) {
+    clr32(r::R_AX_PLATFORM_ENABLE, r::B_AX_APB_WRAP_EN);
+    set32(r::R_AX_PLATFORM_ENABLE, r::B_AX_APB_WRAP_EN);
+  }
+  return true;
+}
+
+bool KestrelFw::enable_cpu(uint8_t boot_reason) {
+  /* mac_enable_cpu(boot_reason, dlfw=1). */
+  if (_device.rtw_read32(r::R_AX_PLATFORM_ENABLE) & r::B_AX_WCPU_EN) {
+    _logger->error("Kestrel FWDL: WCPU already enabled");
+    return false;
+  }
+  _device.rtw_write32(r::R_AX_LDM, 0);      /* trim FW debug log */
+  (void)_device.rtw_read32(r::R_AX_UDM0);
+  /* clear SER status */
+  _device.rtw_write32(r::R_AX_HALT_H2C_CTRL, 0);
+  _device.rtw_write32(r::R_AX_HALT_C2H_CTRL, 0);
+  _device.rtw_write32(r::R_AX_HALT_H2C, 0);
+  _device.rtw_write32(r::R_AX_HALT_C2H, 0);
+  /* write-1-clear HISR0 */
+  _device.rtw_write32(r::R_AX_HISR0, _device.rtw_read32(r::R_AX_HISR0));
+  set32(r::R_AX_SYS_CLK_CTRL, r::B_AX_CPU_CLK_EN);
+
+  uint32_t v = _device.rtw_read32(r::R_AX_WCPU_FW_CTRL);
+  v &= ~(r::B_AX_WCPU_FWDL_EN | r::B_AX_H2C_PATH_RDY | r::B_AX_FWDL_PATH_RDY);
+  v = r::set_clr_word(v, r::FWDL_INITIAL_STATE, r::B_AX_WCPU_FWDL_STS_MSK,
+                      r::B_AX_WCPU_FWDL_STS_SH);
+  v |= r::B_AX_WCPU_FWDL_EN; /* dlfw=1 */
+  _device.rtw_write32(r::R_AX_WCPU_FW_CTRL, v);
+
+  uint16_t v16 = _device.rtw_read16(r::R_AX_BOOT_REASON);
+  v16 = static_cast<uint16_t>(r::set_clr_word(v16, boot_reason,
+                                              r::B_AX_BOOT_REASON_MSK,
+                                              r::B_AX_BOOT_REASON_SH));
+  _device.rtw_write16(r::R_AX_BOOT_REASON, v16);
+
+  /* fwdl_precheck: on 8852B/MIPS/USB the CH12 index check is skipped; the PLE
+   * queue-empty check (dle_dfi_qempty) is a defensive guard that always holds
+   * on a fresh cold power-on (nothing queued yet), so it is intentionally
+   * omitted here — see docs; if a warm re-init path is added it must return. */
+
+  set32(r::R_AX_PLATFORM_ENABLE, r::B_AX_WCPU_EN);
+  return true;
+}
+
+bool KestrelFw::send_fwdl_packet(const uint8_t *payload, uint32_t payload_len,
+                                 bool is_header, uint8_t seq) {
+  /* Packet = [WD body 24B] (+ [fwcmd_hdr 8B] for the header) + payload.
+   * data_len (what the WD TXPKTSIZE and H2C total-len count) = the bytes after
+   * the WD: fwcmd_hdr + payload for the header, or payload for a section. */
+  const uint32_t data_len =
+      is_header ? (r::FWCMD_HDR_LEN + payload_len) : payload_len;
+  /* 8852C (RISC-V) prepends a 16-byte rxd_short_t descriptor; the 8852B a
+   * 24-byte WD body. */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint32_t desc_len = c ? r::RXD_SHORT_LEN : r::WD_BODY_LEN;
+  _txbuf.assign(desc_len + data_len, 0);
+  uint8_t *wd = _txbuf.data();
+
+  if (c) {
+    /* rxd_short_t dword0 = RPKT_LEN(data_len) | RPKT_TYPE(H2C hdr / FWDL data);
+     * dwords 1-3 zero (txdes_proc_h2c_fwdl_8852c). */
+    const uint8_t rpkt_type =
+        is_header ? r::RXD_S_RPKT_TYPE_H2C : r::RXD_S_RPKT_TYPE_FWDL;
+    put_le32(wd + 0,
+             ((data_len & r::AX_RXD_RPKT_LEN_MSK) << r::AX_RXD_RPKT_LEN_SH) |
+                 ((static_cast<uint32_t>(rpkt_type) & r::AX_RXD_RPKT_TYPE_MSK)
+                  << r::AX_RXD_RPKT_TYPE_SH));
+  } else {
+    /* WD body dword0: CH_DMA = H2C(12); FWDL_EN for section packets. */
+    uint32_t dw0 = static_cast<uint32_t>(r::MAC_AX_DMA_H2C & r::AX_TXD_CH_DMA_MSK)
+                   << r::AX_TXD_CH_DMA_SH;
+    if (!is_header)
+      dw0 |= r::AX_TXD_FWDL_EN;
+    put_le32(wd + 0, dw0);
+    put_le32(wd + 8,
+             (data_len & r::AX_TXD_TXPKTSIZE_MSK) << r::AX_TXD_TXPKTSIZE_SH);
+    /* dword1,3,4,5 already zero. */
+  }
+
+  uint8_t *after = wd + desc_len;
+  if (is_header) {
+    /* fwcmd_hdr (8B): hdr0 = cat|class|func|type|seq; hdr1 = total_len.
+     * TOTAL_LEN counts the fwcmd header + payload (h2cb->len) — the vendor's
+     * FWDL-header packet on the wire carries 0x58 = 80B header + 8. */
+    uint32_t hdr0 =
+        (static_cast<uint32_t>(r::FWCMD_H2C_CAT_MAC) << r::H2C_HDR_CAT_SH) |
+        (static_cast<uint32_t>(r::FWCMD_H2C_CL_FWDL) << r::H2C_HDR_CLASS_SH) |
+        (static_cast<uint32_t>(r::FWCMD_H2C_FUNC_FWHDR_DL) << r::H2C_HDR_FUNC_SH) |
+        (static_cast<uint32_t>(r::FWCMD_TYPE_H2C) << r::H2C_HDR_DEL_TYPE_SH) |
+        (static_cast<uint32_t>(seq) << r::H2C_HDR_H2C_SEQ_SH);
+    put_le32(after + 0, hdr0);
+    put_le32(after + 4, data_len << r::H2C_HDR_TOTAL_LEN_SH);
+    std::memcpy(after + r::FWCMD_HDR_LEN, payload, payload_len);
+  } else {
+    std::memcpy(after, payload, payload_len);
+  }
+
+  /* tx_sync returns bytes-transferred on success (>=0), negative libusb rc on
+   * error. */
+  int rc = _device.bulk_send_sync_ep(_ch12_ep, _txbuf.data(),
+                                     _txbuf.size(), 1000);
+  if (rc < 0 || static_cast<size_t>(rc) != _txbuf.size()) {
+    _logger->error("Kestrel FWDL: bulk-out to ep 0x{:02x} failed (rc={}, "
+                   "wanted {})",
+                   _ch12_ep, rc, _txbuf.size());
+    return false;
+  }
+  return true;
+}
+
+bool KestrelFw::enable_fw_log_c2h() {
+  /* mac_fw_log_cfg (dbg_cmd.c): cat=MAC, class=FW_INFO, func=LOG_CFG. Route the
+   * fw log to C2H packets (output=C2H) at trace level with all components
+   * enabled — a decisive probe of whether async packet-C2H (rpkt_type=10)
+   * reaches the host. dword0 = level[7:0] | path[15:8], dword1 = comp,
+   * dword2 = comp_ext. */
+  uint8_t content[12] = {0};
+  const uint32_t d0 = static_cast<uint32_t>(r::MAC_AX_FL_LV_TR) |
+                      (static_cast<uint32_t>(r::MAC_AX_FL_LV_C2H) << 8);
+  put_le32(content + 0, d0);
+  put_le32(content + 4, 0xffffffffu);  /* comp: all components */
+  put_le32(content + 8, 0xffffffffu);  /* comp_ext */
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FW_INFO,
+                         r::FWCMD_H2C_FUNC_LOG_CFG, content, sizeof(content));
+  _logger->info("Kestrel: FW-log->C2H enable (lv=TR out=C2H comp=all) -> {}",
+                ok ? "sent" : "FAILED");
+  return ok;
+}
+
+bool KestrelFw::enable_usr_tx_rpt(uint8_t mode, uint8_t macid, uint8_t port,
+                                 uint32_t period_us) {
+  /* fwcmd_usr_tx_rpt content (3 dwords, cmac_tx.c h2c_usr_tx_rpt): dword0 =
+   * MODE[2:0] | RTP_START(bit3), dword1 = MACID[7:0] | BAND(bit10) |
+   * PORT[13:11], dword2 = rpt_period_us. In PERIOD mode the fw emits a C2H
+   * every rpt_period_us — a zero period never fires, so it must be set. */
+  uint8_t content[12] = {0};
+  const uint32_t d0 = (static_cast<uint32_t>(mode) & 0x7) |
+                      r::B_H2C_USR_TX_RPT_RTP_START;
+  const uint32_t d1 = (static_cast<uint32_t>(macid) & 0xff) |
+                      (static_cast<uint32_t>(port & 0x7) << r::H2C_USR_TX_RPT_PORT_SH);
+  put_le32(content + 0, d0);
+  put_le32(content + 4, d1);
+  put_le32(content + 8, period_us);
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FW_OFLD,
+                         r::FWCMD_H2C_FUNC_USR_TX_RPT, content, sizeof(content));
+  _logger->info("Kestrel: USR_TX_RPT enable (mode={} macid={} port={} "
+                "period={}us) -> {}",
+                mode, macid, port, period_us, ok ? "sent" : "FAILED");
+  return ok;
+}
+
+bool KestrelFw::fw_role_maintain(uint8_t macid, uint8_t self_role,
+                                 uint8_t wifi_role, uint8_t upd_mode,
+                                 uint8_t band, uint8_t port) {
+  /* fwcmd_fwrole_maintain: one dword (role.c mac_fw_role_maintain). */
+  uint8_t content[4] = {0};
+  const uint32_t d0 =
+      (static_cast<uint32_t>(macid) & 0xff) |
+      ((static_cast<uint32_t>(self_role) & 0x3) << r::H2C_FWROLE_SELF_ROLE_SH) |
+      ((static_cast<uint32_t>(upd_mode) & 0x7) << r::H2C_FWROLE_UPD_MODE_SH) |
+      ((static_cast<uint32_t>(wifi_role) & 0xf) << r::H2C_FWROLE_WIFI_ROLE_SH) |
+      ((static_cast<uint32_t>(band) & 0x3) << r::H2C_FWROLE_BAND_SH) |
+      ((static_cast<uint32_t>(port) & 0x7) << r::H2C_FWROLE_PORT_SH);
+  put_le32(content + 0, d0);
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_MEDIA_RPT,
+                         r::FWCMD_H2C_FUNC_FWROLE_MAINTAIN, content,
+                         sizeof(content));
+  _logger->info("Kestrel: fw_role_maintain (macid={} self={} wifi={} upd={} "
+                "band={} port={}) -> {}",
+                macid, self_role, wifi_role, upd_mode, band, port,
+                ok ? "sent" : "FAILED");
+  return ok;
+}
+
+bool KestrelFw::fw_upd_addr_cam(uint8_t macid, const uint8_t self_mac[6],
+                                uint8_t net_type, uint8_t addr_cam_idx,
+                                uint8_t bssid_cam_idx) {
+  /* fill_addr_cam_info + fill_bssid_cam_info (addr_cam.c). 15-dword body
+   * (fwcmd_addrcam_info): dword0 rsvd, dword7 rsvd. mask_sel = NO_MSK, so both
+   * hashes are the full-6-byte XOR (default case). len = ADDR_CAM_ENT_LONG_SIZE
+   * (8852B), b_len = BSSID_CAM_ENT_SIZE. bssid = self_mac (self/NO_LINK STA). */
+  uint8_t sma_hash = 0, tma_hash = 0;
+  for (int i = 0; i < 6; i++) {
+    sma_hash ^= self_mac[i];
+    tma_hash ^= self_mac[i];
+  }
+  uint8_t c[60] = {0};
+  auto sw = [](uint32_t v, uint32_t msk, uint32_t sh) {
+    return (v & msk) << sh;
+  };
+  /* dword1: idx / offset / len */
+  put_le32(c + 4, sw(addr_cam_idx, 0xff, 0) | sw(0, 0xff, 8) |
+                      sw(r::ADDR_CAM_ENT_LONG_SIZE, 0xff, 16));
+  /* dword2: valid / net_type / bcn_hit_cond / hit_rule / addr_mask / mask_sel /
+   * sma_hash / tma_hash */
+  put_le32(c + 8, 0x1u /* VALID BIT(0) */ | sw(net_type, 0x3, 1) |
+                      sw(r::MAC_AX_NO_MSK, 0x3, 14) | sw(sma_hash, 0xff, 16) |
+                      sw(tma_hash, 0xff, 24));
+  /* dword3: bssid_cam_idx */
+  put_le32(c + 12, sw(bssid_cam_idx, 0x3f, 0));
+  /* dword4: sma[0..3] */
+  put_le32(c + 16, sw(self_mac[0], 0xff, 0) | sw(self_mac[1], 0xff, 8) |
+                       sw(self_mac[2], 0xff, 16) | sw(self_mac[3], 0xff, 24));
+  /* dword5: sma[4],sma[5],tma[0],tma[1] */
+  put_le32(c + 20, sw(self_mac[4], 0xff, 0) | sw(self_mac[5], 0xff, 8) |
+                       sw(self_mac[0], 0xff, 16) | sw(self_mac[1], 0xff, 24));
+  /* dword6: tma[2..5] */
+  put_le32(c + 24, sw(self_mac[2], 0xff, 0) | sw(self_mac[3], 0xff, 8) |
+                       sw(self_mac[4], 0xff, 16) | sw(self_mac[5], 0xff, 24));
+  /* dword7 rsvd (c+28) */
+  /* dword8: macid / port_int / tsf_sync / tgt_ind / frm_tgt_ind (all 0 here) */
+  put_le32(c + 32, sw(macid, 0xff, 0));
+  /* dword9..11: aid12 / sec — all 0 */
+  /* dword12: bssid cam idx / offset / len */
+  put_le32(c + 48, sw(bssid_cam_idx, 0xff, 0) | sw(0, 0xff, 8) |
+                       sw(r::BSSID_CAM_ENT_SIZE, 0xff, 16));
+  /* dword13: b_valid / b_msk(NO_MSK) / bss_color / bssid[0..1] */
+  put_le32(c + 52, 0x1u /* B_VALID BIT(0) */ | sw(r::MAC_AX_NO_MSK, 0x3f, 2) |
+                       sw(0, 0x3f, 8) | sw(self_mac[0], 0xff, 16) |
+                       sw(self_mac[1], 0xff, 24));
+  /* dword14: bssid[2..5] */
+  put_le32(c + 56, sw(self_mac[2], 0xff, 0) | sw(self_mac[3], 0xff, 8) |
+                       sw(self_mac[4], 0xff, 16) | sw(self_mac[5], 0xff, 24));
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_ADDR_CAM_UPDATE,
+                         r::FWCMD_H2C_FUNC_ADDRCAM_INFO, c, sizeof(c));
+  _logger->info("Kestrel: upd_addr_cam (macid={} net_type={} a_idx={} b_idx={} "
+                "sma={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}) -> {}",
+                macid, net_type, addr_cam_idx, bssid_cam_idx, self_mac[0],
+                self_mac[1], self_mac[2], self_mac[3], self_mac[4], self_mac[5],
+                ok ? "sent" : "FAILED");
+  return ok;
+}
+
+bool KestrelFw::fw_upd_cctl_basic(uint8_t macid, uint8_t addr_cam_idx,
+                                  uint16_t datarate, uint8_t ntx_path_en,
+                                  uint8_t path_map_a, bool bmc) {
+  /* mac_upd_cctl_info (tblupd.c). 17-dword body: dword0 = macid|OP, dwords1-8 =
+   * values, dwords9-16 = masks (read-modify-write, operation=1). We touch only
+   * the fields needed for a basic mgmt-frame TX: datarate + disable-fallback
+   * (dword1), bmc (dword5), ntx_path_en + path_map_a (dword6), addr_cam_index
+   * (dword7); the matching mask dwords are 9/13/14/15. */
+  uint8_t c[68] = {0};
+  auto sw = [](uint32_t v, uint32_t msk, uint32_t sh) {
+    return (v & msk) << sh;
+  };
+  /* dword0: macid | OP(RMW) */
+  put_le32(c + 0, (macid & r::FWCMD_H2C_CCTLINFO_UD_MACID_MSK) |
+                      r::FWCMD_H2C_CCTLINFO_UD_OP);
+  /* dword1: datarate | disrtsfb | disdatafb | MGQ/ACQ report-enable (so the fw
+   * emits USR_TX_RPT C2H for mgmt + data frames — the #236 egress timestamp). */
+  const uint32_t dw1 =
+      sw(datarate, r::FWCMD_H2C_CCTRL_DATARATE_MSK, r::FWCMD_H2C_CCTRL_DATARATE_SH) |
+      r::FWCMD_H2C_CCTRL_DISRTSFB | r::FWCMD_H2C_CCTRL_DISDATAFB |
+      r::FWCMD_H2C_CCTRL_MGQ_RPT_EN | r::FWCMD_H2C_CCTRL_ACQ_RPT_EN;
+  put_le32(c + 4, dw1);
+  /* dword5: bmc */
+  const uint32_t dw5 = bmc ? r::FWCMD_H2C_CCTRL_BMC : 0;
+  put_le32(c + 20, dw5);
+  /* dword6: ntx_path_en | path_map_a */
+  const uint32_t dw6 =
+      sw(ntx_path_en, r::FWCMD_H2C_CCTRL_NTX_PATH_EN_MSK,
+         r::FWCMD_H2C_CCTRL_NTX_PATH_EN_SH) |
+      sw(path_map_a, r::FWCMD_H2C_CCTRL_PATH_MAP_A_MSK,
+         r::FWCMD_H2C_CCTRL_PATH_MAP_A_SH);
+  put_le32(c + 24, dw6);
+  /* dword7: addr_cam_index */
+  const uint32_t dw7 = sw(addr_cam_idx, r::FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_MSK,
+                          r::FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_SH);
+  put_le32(c + 28, dw7);
+  /* mask dwords (mirror value dwords): full masks for every field written. */
+  put_le32(c + 36 /* dword9 <- dword1 */,
+           sw(r::FWCMD_H2C_CCTRL_DATARATE_MSK, r::FWCMD_H2C_CCTRL_DATARATE_MSK,
+              r::FWCMD_H2C_CCTRL_DATARATE_SH) |
+               r::FWCMD_H2C_CCTRL_DISRTSFB | r::FWCMD_H2C_CCTRL_DISDATAFB |
+               r::FWCMD_H2C_CCTRL_MGQ_RPT_EN | r::FWCMD_H2C_CCTRL_ACQ_RPT_EN);
+  put_le32(c + 52 /* dword13 <- dword5 */, r::FWCMD_H2C_CCTRL_BMC);
+  put_le32(c + 56 /* dword14 <- dword6 */,
+           sw(r::FWCMD_H2C_CCTRL_NTX_PATH_EN_MSK,
+              r::FWCMD_H2C_CCTRL_NTX_PATH_EN_MSK,
+              r::FWCMD_H2C_CCTRL_NTX_PATH_EN_SH) |
+               sw(r::FWCMD_H2C_CCTRL_PATH_MAP_A_MSK,
+                  r::FWCMD_H2C_CCTRL_PATH_MAP_A_MSK,
+                  r::FWCMD_H2C_CCTRL_PATH_MAP_A_SH));
+  put_le32(c + 60 /* dword15 <- dword7 */,
+           sw(r::FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_MSK,
+              r::FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_MSK,
+              r::FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_SH));
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FR_EXCHG,
+                         r::FWCMD_H2C_FUNC_CCTLINFO_UD, c, sizeof(c));
+  _logger->info("Kestrel: upd_cctl (macid={} a_idx={} rate=0x{:x} ntx=0x{:x} "
+                "map_a={} bmc={}) -> {}",
+                macid, addr_cam_idx, datarate, ntx_path_en, path_map_a, bmc,
+                ok ? "sent" : "FAILED");
+  return ok;
+}
+
+bool KestrelFw::fw_send_beacon(const uint8_t *body, uint32_t len, uint8_t macid,
+                              uint16_t rate_ax, uint8_t ntx_path_en,
+                              uint8_t path_map_a) {
+  /* mac_send_bcn_h2c: 9-dword header (fwcmd_bcn_upd_v1) + the beacon body. Only
+   * the fields a basic single-BSS band-0 beacon needs are set; the rest (CSA,
+   * PN, TWT, security) stay zero. */
+  auto sw = [](uint32_t v, uint32_t msk, uint32_t sh) {
+    return (v & msk) << sh;
+  };
+  std::vector<uint8_t> c(r::BCN_UPD_V1_HDR_LEN + len, 0);
+  /* dword0: port=0, mbssid=0, band=0, grp_ie_ofst=0. */
+  put_le32(c.data() + 0, sw(0, r::FWCMD_H2C_BCN_UPD_V1_PORT_MSK,
+                            r::FWCMD_H2C_BCN_UPD_V1_PORT_SH) |
+                             sw(0, r::FWCMD_H2C_BCN_UPD_V1_BAND_MSK,
+                                r::FWCMD_H2C_BCN_UPD_V1_BAND_SH));
+  /* dword1: macid | rate | ECSA_SUPPORT (set unconditionally by the vendor). */
+  put_le32(c.data() + 4,
+           sw(macid, r::FWCMD_H2C_BCN_UPD_V1_MACID_MSK,
+              r::FWCMD_H2C_BCN_UPD_V1_MACID_SH) |
+               sw(rate_ax, r::FWCMD_H2C_BCN_UPD_V1_RATE_MSK,
+                  r::FWCMD_H2C_BCN_UPD_V1_RATE_SH) |
+               r::FWCMD_H2C_BCN_UPD_V1_ECSA_SUPPORT);
+  /* dword2: ntx_path_en | path_map_a (give the beacon an antenna). */
+  put_le32(c.data() + 8,
+           sw(ntx_path_en, r::FWCMD_H2C_BCN_UPD_V1_NTX_PATH_EN_MSK,
+              r::FWCMD_H2C_BCN_UPD_V1_NTX_PATH_EN_SH) |
+               sw(path_map_a, r::FWCMD_H2C_BCN_UPD_V1_PATH_MAP_A_MSK,
+                  r::FWCMD_H2C_BCN_UPD_V1_PATH_MAP_A_SH));
+  /* dwords 3..8 stay 0 (no CSA/PN/TWT). */
+  std::memcpy(c.data() + r::BCN_UPD_V1_HDR_LEN, body, len);
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FR_EXCHG,
+                         r::FWCMD_H2C_FUNC_BCN_UPD_V1, c.data(),
+                         static_cast<uint32_t>(c.size()));
+  _logger->info("Kestrel: send_beacon (macid={} rate=0x{:x} body={}B) -> {}",
+                macid, rate_ax, len, ok ? "sent" : "FAILED");
+  return ok;
+}
+
+bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
+                             const uint8_t *content, uint32_t len) {
+  /* Packet = [descriptor][fwcmd_hdr 8B][content]. Same framing as the FWDL
+   * header path but with a caller-supplied cat/class/func and the content inline
+   * (no FWDL_EN). The descriptor is the 8852C's 16-byte rxd_short_t
+   * (RPKT_LEN | RPKT_TYPE=H2C) or the 8852B's 24-byte WD body — the runtime H2C
+   * path must match the FWDL descriptor per chip, or the 8852C's H2C queue can't
+   * frame the packet and CH12 never drains (EP7 bulk-out NAK/timeout). */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint32_t desc_len = c ? r::RXD_SHORT_LEN : r::WD_BODY_LEN;
+  const uint32_t data_len = r::FWCMD_HDR_LEN + len;
+  _txbuf.assign(desc_len + data_len, 0);
+  uint8_t *wd = _txbuf.data();
+
+  if (c) {
+    put_le32(wd + 0,
+             ((data_len & r::AX_RXD_RPKT_LEN_MSK) << r::AX_RXD_RPKT_LEN_SH) |
+                 ((static_cast<uint32_t>(r::RXD_S_RPKT_TYPE_H2C) &
+                   r::AX_RXD_RPKT_TYPE_MSK)
+                  << r::AX_RXD_RPKT_TYPE_SH));
+  } else {
+    uint32_t dw0 = static_cast<uint32_t>(r::MAC_AX_DMA_H2C & r::AX_TXD_CH_DMA_MSK)
+                   << r::AX_TXD_CH_DMA_SH;
+    put_le32(wd + 0, dw0);
+    put_le32(wd + 8,
+             (data_len & r::AX_TXD_TXPKTSIZE_MSK) << r::AX_TXD_TXPKTSIZE_SH);
+  }
+
+  uint8_t *hdr = wd + desc_len;
+  /* Per-H2C sequence number (fwinfo->h2c_seq): 8-bit rolling counter
+   * (H2C_HDR_H2C_SEQ [31:24], msk 0xff), stamped into every runtime H2C
+   * across ALL classes (h2c_pkt_set_hdr, fwcmd.c) and incremented per H2C
+   * (h2c_end_flow) — 0,1,2,... from the first runtime H2C. */
+  const uint8_t seq = _h2c_seq;
+  _h2c_seq++;
+  uint32_t hdr0 = (static_cast<uint32_t>(cat) << r::H2C_HDR_CAT_SH) |
+                  (static_cast<uint32_t>(h2c_class) << r::H2C_HDR_CLASS_SH) |
+                  (static_cast<uint32_t>(func) << r::H2C_HDR_FUNC_SH) |
+                  (static_cast<uint32_t>(r::FWCMD_TYPE_H2C) << r::H2C_HDR_DEL_TYPE_SH) |
+                  (static_cast<uint32_t>(seq) << r::H2C_HDR_H2C_SEQ_SH);
+  put_le32(hdr + 0, hdr0);
+  /* TOTAL_LEN counts the fwcmd header + content (h2cb->len in the vendor
+   * h2c_pkt_set_hdr), NOT just the content — the fw's H2C-queue parser uses it
+   * to find the next packet boundary; an 8-byte-short value desyncs the queue. */
+  put_le32(hdr + 4, data_len << r::H2C_HDR_TOTAL_LEN_SH);
+  std::memcpy(hdr + r::FWCMD_HDR_LEN, content, len);
+
+  int rc = _device.bulk_send_sync_ep(_ch12_ep, _txbuf.data(), _txbuf.size(), 1000);
+  if (rc < 0 || static_cast<size_t>(rc) != _txbuf.size()) {
+    _logger->error("Kestrel H2C: bulk-out to ep 0x{:02x} failed (rc={}, class={}"
+                   " func={})",
+                   _ch12_ep, rc, h2c_class, func);
+    return false;
+  }
+  return true;
+}
+
+bool KestrelFw::radio_page_to_fw(uint8_t cls, uint8_t page,
+                                 const uint32_t *packed, uint16_t count) {
+  std::vector<uint8_t> buf(static_cast<size_t>(count) * 4);
+  for (uint16_t i = 0; i < count; ++i)
+    put_le32(buf.data() + i * 4, packed[i]);
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_OUTSRC, cls, page, buf.data(),
+                         static_cast<uint32_t>(buf.size()));
+  delay_us(200);
+  return ok;
+}
+
+bool KestrelFw::check_fw_rdy() {
+  /* Poll WCPU_FWDL_STS [7:5] until FW_INIT_RDY(7); surface fail codes. */
+  for (uint32_t cnt = r::FWDL_WAIT_CNT; cnt != 0; --cnt) {
+    uint8_t sts = static_cast<uint8_t>(
+        (_device.rtw_read8(r::R_AX_WCPU_FW_CTRL) >> r::B_AX_WCPU_FWDL_STS_SH) &
+        r::B_AX_WCPU_FWDL_STS_MSK);
+    if (sts == r::FWDL_WCPU_FW_INIT_RDY)
+      return true;
+    if (sts == r::FWDL_CHECKSUM_FAIL) {
+      _logger->error("Kestrel FWDL: checksum fail");
+      return false;
+    }
+    if (sts == r::FWDL_SECURITY_FAIL) {
+      _logger->error("Kestrel FWDL: security fail");
+      return false;
+    }
+    if (sts == r::FWDL_CUT_NOT_MATCH) {
+      _logger->error("Kestrel FWDL: cut mismatch (wrong FW image)");
+      return false;
+    }
+    delay_us(1);
+  }
+  const uint8_t final_sts = static_cast<uint8_t>(
+      (_device.rtw_read8(r::R_AX_WCPU_FW_CTRL) >> r::B_AX_WCPU_FWDL_STS_SH) &
+      r::B_AX_WCPU_FWDL_STS_MSK);
+  const uint32_t bdbg = _device.rtw_read32(
+      _variant == ChipVariant::C8852C ? r::R_AX_BOOT_DBG_V1 : r::R_AX_BOOT_DBG);
+  _logger->error("Kestrel FWDL: fw-ready poll timeout (sts={} boot_dbg=0x{:08x} "
+                 "boot_status=0x{:x} WCPU=0x{:08x})",
+                 final_sts, bdbg, (bdbg >> 16) & 0xffff,
+                 _device.rtw_read32(r::R_AX_WCPU_FW_CTRL));
+  return false;
+}
+
+void KestrelFw::idmem_share_mode_check() {
+  /* idmem_share_mode_check (fwdl.c:280), non-secure branch: force the SEC_CTRL
+   * IDMEM-share field to the chip default (idmem_share_mode_check,
+   * fwdl.c:296). FWDL_IDMEM_SHARE_DEFAULT_MODE is (AX-MIPS ? 0x1 : 0x0), so
+   * the RISC-V 8852C needs 0x0 — leaving the MIPS 0x1 mis-sizes the fw's
+   * IDMEM and it hangs during post-download HW init. */
+  const uint8_t mode = (_variant == ChipVariant::C8852C)
+                           ? r::FWDL_IDMEM_SHARE_DEFAULT_MODE_8852C
+                           : r::FWDL_IDMEM_SHARE_DEFAULT_MODE;
+  uint32_t v = _device.rtw_read32(r::R_AX_SEC_CTRL);
+  uint32_t cur = (v >> r::B_SEC_IDMEM_SIZE_CONFIG_SH) & r::B_SEC_IDMEM_SIZE_CONFIG_MSK;
+  if (cur != mode) {
+    v = r::set_clr_word(v, mode, r::B_SEC_IDMEM_SIZE_CONFIG_MSK,
+                        r::B_SEC_IDMEM_SIZE_CONFIG_SH);
+    _device.rtw_write32(r::R_AX_SEC_CTRL, v);
+    _logger->info("Kestrel FWDL: IDMEM share -> 0x{:x} (SEC_CTRL=0x{:08x})", mode,
+                  v);
+  }
+}
+
+void KestrelFw::fwdl_patch_fw_delay() {
+  /* fwdl_patch_fw_delay (fwdl.c:1176), non-secure branch: the fw's own CPU-clk
+   * setting is wrong, which makes its secure-checksum delay (and every other
+   * timed HCI access) inaccurate — the running fw then faults on the AHB->HCI
+   * bus (HALT_C2H = L2_ERR_AH_HCI). Fix it by poking the correct clk value
+   * (fw_fake_cpu_clk) into the fw_cpu_clk_addr IDMEM slot via the
+   * FILTER_MODEL_ADDR indirect-access window (fwdl.c:1197-1228). */
+  const bool c = (_variant == ChipVariant::C8852C);
+  const uint32_t clk_addr =
+      c ? r::FW_CPU_CLK_ADDR_8852C : r::FW_CPU_CLK_ADDR_8852B;
+  const uint32_t clk_val =
+      c ? r::FW_FAKE_CPU_CLK_8852C : r::FW_FAKE_CPU_CLK_8852B;
+  _device.rtw_write32(r::R_AX_FILTER_MODEL_ADDR, clk_addr);
+  _device.rtw_write32_wide(r::R_AX_INDIR_ACCESS_ENTRY, clk_val);
+  _logger->info("Kestrel FWDL: fw CPU-clk patch (IDMEM 0x{:08x}=0x{:x})",
+                clk_addr, clk_val);
+}
+
+bool KestrelFw::mac_fwdl(const uint8_t *fw, uint32_t len, uint8_t mss_idx) {
+  _device.rtw_write32(r::R_AX_UDM1, 0);
+  if (len < r::FWHDR_HDR_LEN) {
+    _logger->error("Kestrel FWDL: fw too short ({})", len);
+    return false;
+  }
+
+  /* Parse the fw header (fwhdr_hdr_parser). */
+  const uint32_t sec_num =
+      (le32(fw + 24) >> r::FWHDR_SEC_NUM_SH) & r::FWHDR_SEC_NUM_MSK; /* dword6 */
+  const uint32_t hdr_len =
+      (le32(fw + 12) >> r::FWHDR_FWHDR_SZ_SH) & r::FWHDR_FWHDR_SZ_MSK; /* dw3 */
+  const uint32_t dyn_hdr_en =
+      (le32(fw + 28) >> r::FWHDR_FW_DYN_HDR_SH) & r::FWHDR_FW_DYN_HDR_MSK; /*dw7*/
+  const uint32_t dynamic_hdr_len =
+      dyn_hdr_en ? (hdr_len - (r::FWHDR_HDR_LEN + sec_num * r::FWHDR_SECTION_LEN))
+                 : 0;
+  _logger->info("Kestrel FWDL: sec_num={} hdr_len={} dyn={} mss_idx={}",
+                sec_num, hdr_len, dyn_hdr_en, mss_idx);
+
+  /* Parse section headers. Each section's payload follows the full header
+   * block contiguously (bin_ptr starts at fw + hdr_len). A type-9 security
+   * section with mssc>0 carries mssc appended SIGLEN signatures at the tail of
+   * the image (outside the sections); the selected one is patched into the
+   * security-section body before download (fwhdr_parser MSS handling). */
+  struct Sec {
+    const uint8_t *addr;
+    uint32_t len;
+    bool security;
+  };
+  std::vector<Sec> secs;
+  uint32_t total_mss_bytes = 0; /* trailing signature bytes (not downloaded) */
+  bool keypool_fmt = false;     /* 8852C MSS key-pool (mssc low byte == 0xff) */
+  uint32_t sec_sec_len = 0;     /* real security-section body length */
+  uint32_t kp_raw_offset = 0;   /* MSS key-pool mss_key_raw_offset */
+  const uint8_t *bin_ptr = fw + hdr_len;
+  const uint8_t *sh = fw + r::FWHDR_HDR_LEN;
+  const uint8_t *sec_body = nullptr; /* the security section's downloaded body */
+  for (uint32_t i = 0; i < sec_num; ++i, sh += r::FWHDR_SECTION_LEN) {
+    uint32_t dw1 = le32(sh + 4);
+    uint32_t sec_len =
+        (dw1 >> r::SECTION_INFO_SEC_SIZE_SH) & r::SECTION_INFO_SEC_SIZE_MSK;
+    if (dw1 & r::SECTION_INFO_CHECKSUM)
+      sec_len += r::FWDL_SECTION_CHKSUM_LEN;
+    uint8_t type =
+        (dw1 >> r::SECTION_INFO_SECTIONTYPE_SH) & r::SECTION_INFO_SECTIONTYPE_MSK;
+    bool security = (type == r::FWDL_SECURITY_SECTION_TYPE);
+    if (security) {
+      const uint32_t mssc = le32(sh + 8); /* section dword2 */
+      sec_body = bin_ptr;
+      if (_variant == ChipVariant::C8852C && (mssc & 0xff) == 0xff) {
+        /* 8852C MSS key-pool format: keep the real section length; the trailing
+         * mss size is read from the key-pool header after the loop. */
+        keypool_fmt = true;
+        sec_sec_len = sec_len;
+      } else {
+        /* 8852B: forced 2048 body + mssc appended SIGLEN signatures. */
+        sec_len = 2048;
+        sec_sec_len = 2048;
+        total_mss_bytes += mssc * r::FWDL_SECURITY_SIGLEN;
+      }
+    }
+    const uint32_t dladdr = le32(sh + 0); /* section dword0 = dl dest addr */
+    _logger->info("Kestrel FWDL: section {} type={} len={} dladdr=0x{:08x}", i,
+                  type, sec_len, dladdr);
+    secs.push_back({bin_ptr, sec_len, security});
+    bin_ptr += sec_len;
+  }
+  /* 8852C: the MSS key-pool (magic "MSSKPOOL") trails the last section; its size
+   * (keypair_num*SIGLEN + mss_key_raw_offset) is the non-downloaded remainder.
+   * get_mss_keypool_index (fwdl.c): hdr dw3 = mss_key_raw_offset, dw5[31:16] =
+   * keypair_num. */
+  if (keypool_fmt) {
+    static const uint8_t kMagic[8] = {'M', 'S', 'S', 'K', 'P', 'O', 'O', 'L'};
+    if (std::memcmp(bin_ptr, kMagic, 8) != 0) {
+      _logger->error("Kestrel FWDL: MSS key-pool magic not found");
+      return false;
+    }
+    kp_raw_offset = le32(bin_ptr + 12);
+    const uint32_t keypair_num = (le32(bin_ptr + 20) >> 16) & 0xffff;
+    total_mss_bytes = keypair_num * r::FWDL_SECURITY_SIGLEN + kp_raw_offset;
+    _logger->info("Kestrel FWDL: MSS key-pool ({} keys, raw_ofst=0x{:x}, "
+                  "mss=0x{:x}, sec_len={})",
+                  keypair_num, kp_raw_offset, total_mss_bytes, sec_sec_len);
+  }
+  /* Image = header + sections + trailing MSS signatures. */
+  if (static_cast<uint32_t>(bin_ptr - fw) + total_mss_bytes != len) {
+    _logger->error("Kestrel FWDL: sections 0x{:x} + mss 0x{:x} != image 0x{:x}",
+                   static_cast<uint32_t>(bin_ptr - fw), total_mss_bytes, len);
+    return false;
+  }
+
+  /* Patch the selected MSS signature into a mutable copy of the security
+   * section body. The trailing signatures start at bin_ptr (right after the
+   * last section); the selected one is at +mss_idx*SIGLEN. It is copied to
+   * offset FWDL_SECURITY_SECTION_CONSTANT within the section body. */
+  std::vector<uint8_t> sec_patched;
+  if (sec_body && total_mss_bytes) {
+    constexpr uint32_t kSecConst = 64 + (6 * 32 * 2); /* =448 (SECTION_MAX=6) */
+    const uint8_t *sig;
+    uint32_t body_len;
+    if (keypool_fmt) {
+      /* 8852C: the selected signature is at bin_ptr + mss_key_raw_offset +
+       * idx*SIGLEN. The full remap-table index selection is deferred; idx 0
+       * (the default keyset) suffices for a non-secure IC. */
+      sig = bin_ptr + kp_raw_offset + mss_idx * r::FWDL_SECURITY_SIGLEN;
+      body_len = sec_sec_len;
+    } else {
+      sig = bin_ptr + mss_idx * r::FWDL_SECURITY_SIGLEN;
+      body_len = 2048;
+    }
+    if (body_len < kSecConst + r::FWDL_SECURITY_SIGLEN) {
+      _logger->error("Kestrel FWDL: security section too small for MSS patch "
+                     "(len={}, need {})",
+                     body_len, kSecConst + r::FWDL_SECURITY_SIGLEN);
+      return false;
+    }
+    sec_patched.assign(sec_body, sec_body + body_len);
+    std::memcpy(sec_patched.data() + kSecConst, sig, r::FWDL_SECURITY_SIGLEN);
+    for (Sec &s : secs)
+      if (s.security)
+        s.addr = sec_patched.data();
+  }
+
+  /* Retry loop (FWDL_TRY_CNT = 3 for AX MIPS). */
+  for (uint8_t attempt = 0; attempt < r::FWDL_TRY_CNT_MIPS; ++attempt) {
+    /* Each attempt is seconds of register polling — honour the demos'
+     * SIGINT/SIGTERM flag between attempts like the RX loop does. */
+    if (g_devourer_should_stop)
+      return false;
+    /* phase0: wait H2C path ready. */
+    if (!poll_wcpu(r::B_AX_H2C_PATH_RDY, r::B_AX_H2C_PATH_RDY, "H2C_PATH_RDY")) {
+      if (_variant == ChipVariant::C8852C) {
+        /* RISC-V bootrom debug: BOOT_DBG_V1[31:16]=boot_status (a fwdl-step
+         * code, e.g. 7="DLFW START", 0x26="OS START DONE"), [15:0]=secureboot.
+         * boot_status advancing past DLFW START without H2C_PATH_RDY means
+         * the bootrom self-booted its ROM fw — historically a wrong fw-image
+         * pick for the die cut (the CBV die takes the u2 image). */
+        uint32_t bd = _device.rtw_read32(r::R_AX_BOOT_DBG_V1);
+        _logger->error("Kestrel FWDL: 8852C boot stalled — BOOT_DBG_V1=0x{:08x} "
+                       "(boot_status=0x{:x} secureboot=0x{:x})",
+                       bd, (bd >> 16) & 0xffff, bd & 0xffff);
+      }
+      goto retry;
+    }
+    /* fwdl_patch_fw_delay (fwdl.c:1260): between phase0 and phase1, on a
+     * non-secure IC, patch the fw CPU clock. */
+    if (!_is_sec_ic)
+      fwdl_patch_fw_delay();
+    /* phase1: download the fw header (minus the dynamic header) as one H2C —
+     * fwdl_phase1 is called with (hdr_len - dynamic_hdr_len) in the vendor
+     * (fwdl.c:1685/1746); the dynamic header is host-side cap metadata, not
+     * part of the FWHDR_DL. */
+    if (!send_fwdl_packet(fw, hdr_len - dynamic_hdr_len, /*is_header=*/true, 0))
+      goto retry;
+    if (!poll_wcpu(r::B_AX_FWDL_PATH_RDY, r::B_AX_FWDL_PATH_RDY, "FWDL_PATH_RDY"))
+      goto retry;
+    _device.rtw_write32(r::R_AX_HALT_H2C_CTRL, 0);
+    _device.rtw_write32(r::R_AX_HALT_C2H_CTRL, 0);
+    /* phase2: download each section in <=2020-byte chunks. */
+    {
+      bool ok = true;
+      for (const Sec &s : secs) {
+        uint32_t off = 0;
+        while (off < s.len && ok) {
+          uint32_t chunk = s.len - off;
+          if (chunk > r::FWDL_SECTION_PER_PKT_LEN)
+            chunk = r::FWDL_SECTION_PER_PKT_LEN;
+          ok = send_fwdl_packet(s.addr + off, chunk, /*is_header=*/false, 0);
+          off += chunk;
+        }
+        if (!ok)
+          break;
+      }
+      if (!ok)
+        goto retry;
+    }
+    if (!check_fw_rdy())
+      goto retry;
+    _logger->info("Kestrel FWDL: firmware booted (attempt {})", attempt + 1);
+    return true;
+  retry:
+    _logger->warn("Kestrel FWDL: attempt {} failed", attempt + 1);
+    if (attempt + 1 < r::FWDL_TRY_CNT_MIPS) {
+      disable_cpu();
+      if (!enable_cpu(r::AX_BOOT_REASON_PWR_ON))
+        return false;
+    }
+  }
+  _logger->error("Kestrel FWDL: exhausted {} attempts", r::FWDL_TRY_CNT_MIPS);
+  return false;
+}
+
+bool KestrelFw::fw_pre_init() {
+  /* mac_hal_init pre-FWDL: hci_func_en (init.c:406) + dmac_pre_init (DLFW
+   * DLE/HFC, init.c:414). The caller runs usb_pre_init (intf_pre_init) after
+   * this, then download_firmware — vendor order. */
+  if (_ch12_ep == 0) {
+    _logger->error("Kestrel FWDL: no CH12 bulk-OUT endpoint (need >=3 bulk-out; "
+                   "found {})",
+                   _device.bulk_out_ep_count());
+    return false;
+  }
+  return hci_func_en() && dmac_pre_init();
+}
+
+bool KestrelFw::download_firmware(uint8_t cut, uint8_t mss_idx, bool is_sec_ic) {
+  _is_sec_ic = is_sec_ic;
+  /* Per-variant, cut-selected fw image. 8852B: NICCE, CBV(1)->u2, CCV+(>=2)->u3.
+   * 8852C: NIC, CAV(0)->u1_nic, CBV(1+)->u2_nic (fwdl.h INTERNAL_FW_CONTENT_
+   * 8852C_{CAV,CBV}_NIC; FWDL_CAV=0/FWDL_CBV=1). Loading u1 on a CBV die downloads
+   * a mismatched image and the fw hangs in post-download HW init. */
+  const uint8_t *fw = nullptr;
+  uint32_t len = 0;
+  const char *img = "none";
+#if defined(DEVOURER_HAVE_KESTREL_8852C)
+  if (_variant == ChipVariant::C8852C) {
+    if (cut >= 1) {
+      fw = array_8852c_u2_nic;
+      len = array_8852c_u2_nic_len;
+      img = "u2_nic";
+    } else {
+      fw = array_8852c_u1_nic;
+      len = array_8852c_u1_nic_len;
+      img = "u1_nic";
+    }
+  }
+#endif
+#if defined(DEVOURER_HAVE_KESTREL_8852B)
+  if (_variant != ChipVariant::C8852C) {
+    if (cut >= 2) {
+      fw = array_8852b_u3_nicce;
+      len = array_8852b_u3_nicce_len;
+      img = "u3_nicce";
+    } else {
+      fw = array_8852b_u2_nicce;
+      len = array_8852b_u2_nicce_len;
+      img = "u2_nicce";
+    }
+  }
+#endif
+  if (fw == nullptr) {
+    _logger->error("Kestrel FWDL: no firmware image for this variant/build");
+    return false;
+  }
+  _logger->info("Kestrel FWDL: image {} ({} bytes) via ep 0x{:02x}", img, len,
+                _ch12_ep);
+
+  /* mac_hal_init WDT block (init.c:470, right before the CPU enable): no
+   * WDT wake on USB/PCIE (SYS_CFG5), WDT platform-reset disabled
+   * (WCPU_FW_CTRL wdt_plt_rst_en=0). */
+  clr32(r::R_AX_SYS_CFG5, r::B_AX_WDT_WAKE_PCIE_EN | r::B_AX_WDT_WAKE_USB_EN);
+  clr32(r::R_AX_WCPU_FW_CTRL, r::B_AX_WDT_PLT_RST_EN);
+
+  if (!disable_cpu())
+    return false;
+  /* idmem_share_mode_check (mac_enable_fw, fwdl.c:2295): between disable_cpu and
+   * enable_cpu, set the SEC_CTRL IDMEM-share field to the chip default. The
+   * 8852C needs 0x0; skipping it (or using the MIPS 0x1) hangs the fw's
+   * post-download HW init. */
+  idmem_share_mode_check();
+  if (!enable_cpu(r::AX_BOOT_REASON_PWR_ON))
+    return false;
+  return mac_fwdl(fw, len, mss_idx);
+}
+
+} /* namespace kestrel */

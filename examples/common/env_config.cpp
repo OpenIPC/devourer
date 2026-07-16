@@ -156,6 +156,8 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.debug.efuse_dump = env_flag("DEVOURER_EFUSE_DUMP");
   cfg.debug.log_writes = env_flag("DEVOURER_LOG_WRITES");
   cfg.debug.log_txpwr = env_flag("DEVOURER_LOG_TXPWR");
+  cfg.debug.kestrel_fw_log = env_flag("DEVOURER_KESTREL_FWLOG");
+  cfg.debug.kestrel_cca_on = env_flag("DEVOURER_KESTREL_CCA_ON");
   if (const char *e = env_str("DEVOURER_REPLAY_WSEQ"))
     cfg.debug.replay_wseq = e;
   if (env_long("DEVOURER_TX_QSEL", &v))

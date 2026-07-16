@@ -290,6 +290,14 @@ struct DeviceConfig {
      * for a BlockAck no monitor-mode receiver sends — rty=0 airs each
      * aggregate exactly once (the broadcast/no-ack flavor). */
     std::optional<uint8_t> tx_ampdu_rty;
+    /* env: DEVOURER_KESTREL_FWLOG — Kestrel diagnostic: route the firmware log
+     * to C2H packets in InitWrite (mac_fw_log_cfg output=C2H). A decisive probe
+     * of whether async packet-C2H (rpkt_type=10) reaches the host at all. */
+    bool kestrel_fw_log = false;
+    /* env: DEVOURER_KESTREL_CCA_ON — Kestrel experiment: leave the CMAC CCA
+     * medium-busy gates enabled (carrier-sense TX) instead of clearing them,
+     * to test whether the ported RX-DCK calibration fixed the perpetual-busy. */
+    bool kestrel_cca_on = false;
   } debug;
 
   /* ---- USB / process environment -------------------------------------- */

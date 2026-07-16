@@ -22,6 +22,10 @@
 #if defined(DEVOURER_HAVE_JAGUAR3)
 #include "jaguar3/RtlJaguar3Device.h"
 #endif
+#if defined(DEVOURER_HAVE_KESTREL)
+#include "kestrel/RtlKestrelDevice.h"
+#endif
+#include "kestrel/KestrelUsbIds.h" /* header-only PID table, always compiled */
 
 namespace {
 
@@ -50,7 +54,12 @@ uint8_t read_chip_id(libusb_device_handle *dev_handle) {
  * demo's post-libusb_reset path), with a transient 0x50 for a brief window
  * right after a cold VBUS power-cycle before the chip settles. Accept both.
  * Neither collides with the Jaguar1 (0x04/05/08/09) or Jaguar3 (0x13/0x17)
- * ids. (SYS_CFG1's low bytes are volatile, so 0xFC is the dispatch signal.) */
+ * ids. (SYS_CFG1's low bytes are volatile, so 0xFC is the dispatch signal.)
+ * CAVEAT: on Kestrel (11ax) silicon 0x00FC is R_AX_SYS_CHIPINFO, and the
+ * 8852A die-id is 0x50 — indistinguishable from the 8822B cold transient by
+ * this byte alone. Kestrel PIDs are therefore gated before this read; an
+ * out-of-scope 8852A (PID not in the Kestrel table) falls through here and
+ * fails at the Jaguar2 DLFW rather than being detected. */
 constexpr uint8_t kChipId8822B = 0x0a;
 constexpr uint8_t kChipId8822B_cold = 0x50;
 bool is_8822b_chip_id(uint8_t id) {
@@ -106,6 +115,54 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
       usb_lock = std::move(lock);
       break;
     }
+  }
+
+  /* Kestrel (Wi-Fi 6 / 802.11ax, RTL8852B/8852C) gates on the USB VID:PID
+   * BEFORE the SYS_CFG2 read: on AX silicon 0x00FC is R_AX_SYS_CHIPINFO (the
+   * D-die id), not the 11ac chip-id — and the 8852A die-id (0x50) collides
+   * with the 8822B cold-boot transient accepted below, so the register byte
+   * alone cannot dispatch this generation. The Kestrel PID set (vendor
+   * usb_intf.c id tables, see kestrel/KestrelUsbIds.h) is disjoint from every
+   * 11ac PID devourer handles, which makes the PID gate authoritative here
+   * while SYS_CFG2 stays authoritative for the 11ac families (the RTL8812EU /
+   * RTL8812AU PID collision rationale below is untouched). The die-id is read
+   * back inside the HAL as confirmation. */
+  uint16_t vid = 0;
+  if (dev != nullptr) {
+    libusb_device_descriptor desc{};
+    if (libusb_get_device_descriptor(dev, &desc) == 0)
+      vid = desc.idVendor;
+  }
+  if (auto kvariant = kestrel::variant_for_usb_id(vid, pid)) {
+#if defined(DEVOURER_HAVE_KESTREL)
+    const bool is_8852b = *kvariant == kestrel::ChipVariant::C8852B;
+#if !defined(DEVOURER_HAVE_KESTREL_8852B)
+    if (is_8852b) {
+      _logger->error("RTL8852B ({:04x}:{:04x}) detected but 8852B support not "
+                     "compiled in (DEVOURER_KESTREL_8852B=OFF)",
+                     vid, pid);
+      return nullptr;
+    }
+#endif
+#if !defined(DEVOURER_HAVE_KESTREL_8852C)
+    if (!is_8852b) {
+      _logger->error("RTL8852C ({:04x}:{:04x}) detected but 8852C support not "
+                     "compiled in (DEVOURER_KESTREL_8852C=OFF)",
+                     vid, pid);
+      return nullptr;
+    }
+#endif
+    _logger->info("Creating RtlKestrelDevice {} ({:04x}:{:04x})",
+                  is_8852b ? "C8852B" : "C8852C", vid, pid);
+    return std::make_unique<RtlKestrelDevice>(
+        RtlAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger, *kvariant,
+        cfg);
+#else
+    _logger->error("Kestrel chip ({:04x}:{:04x}) detected but Kestrel support "
+                   "not compiled in (DEVOURER_KESTREL_8852B/_8852C=OFF)",
+                   vid, pid);
+    return nullptr;
+#endif
   }
 
   uint8_t chip_id = read_chip_id(dev_handle);

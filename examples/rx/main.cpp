@@ -583,7 +583,9 @@ static void packetProcessor(const Packet &packet) {
   if (g_rx_count <= 10 || g_rx_count % 100 == 0) {
     devourer::Ev(*g_ev, "rx.pkt")
         .f("n", g_rx_count)
-        .f("len", packet.Data.size());
+        .f("len", packet.Data.size())
+        .f("rate", packet.RxAtrib.data_rate)
+        .f("rssi", packet.RxAtrib.rssi[0]);
   }
   /* DEVOURER_RX_DUMP_ALL=1: emit an `rx.corrupt` event for EVERY frame
    * regardless of SA, with chip-flag bits and phy-soft metrics.
@@ -851,8 +853,8 @@ int main() {
     uint8_t poff = 0;
     if (const char *bw_env = std::getenv("DEVOURER_BW")) {
       int bw = std::atoi(bw_env);
-      if (bw == 40 || bw == 80) {
-        pwidth = (bw == 40) ? CHANNEL_WIDTH_40 : CHANNEL_WIDTH_80;
+      if (bw == 40 || bw == 80 || bw == 160) {
+        pwidth = bw == 40 ? CHANNEL_WIDTH_40 : bw == 80 ? CHANNEL_WIDTH_80 : CHANNEL_WIDTH_160;
         poff = 1;
         if (const char *off_env = std::getenv("DEVOURER_CHOFFSET"))
           poff = static_cast<uint8_t>(std::atoi(off_env));
@@ -1268,8 +1270,8 @@ int main() {
   uint8_t ch_offset = 0;
   if (const char *bw_env = std::getenv("DEVOURER_BW")) {
     int bw = std::atoi(bw_env);
-    if (bw == 40 || bw == 80) {
-      width = (bw == 40) ? CHANNEL_WIDTH_40 : CHANNEL_WIDTH_80;
+    if (bw == 40 || bw == 80 || bw == 160) {
+      width = bw == 40 ? CHANNEL_WIDTH_40 : bw == 80 ? CHANNEL_WIDTH_80 : CHANNEL_WIDTH_160;
       ch_offset = 1; // default: secondary channel above the primary
       if (const char *off_env = std::getenv("DEVOURER_CHOFFSET"))
         ch_offset = static_cast<uint8_t>(std::atoi(off_env));
@@ -1531,10 +1533,16 @@ int main() {
     });
   }
 
+  /* DEVOURER_BAND=6 selects the 6 GHz band (WiFi 6E, RTL8852C tri-band) — a 6G
+   * channel number collides with a 5G one, so the band must be explicit. */
+  uint8_t rx_band = 0;
+  if (const char *b = std::getenv("DEVOURER_BAND"))
+    rx_band = static_cast<uint8_t>(std::atoi(b));
   rtlDevice->Init(packetProcessor, SelectedChannel{
                                        .Channel = static_cast<uint8_t>(channel),
                                        .ChannelOffset = ch_offset,
                                        .ChannelWidth = width,
+                                       .Band = rx_band,
                                    });
 
   /* Stop the energy telemetry thread before de-init (it reads chip registers). */

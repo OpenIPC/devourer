@@ -498,9 +498,10 @@ int main(int argc, char **argv) {
   uint8_t init_offset = 0;
   if (const char *e = std::getenv("DEVOURER_HOP_BW")) {
     int mhz = std::atoi(e);
-    init_width = mhz == 80 ? CHANNEL_WIDTH_80
-               : mhz == 40 ? CHANNEL_WIDTH_40
-                           : CHANNEL_WIDTH_20;
+    init_width = mhz == 160 ? CHANNEL_WIDTH_160
+               : mhz == 80  ? CHANNEL_WIDTH_80
+               : mhz == 40  ? CHANNEL_WIDTH_40
+                            : CHANNEL_WIDTH_20;
     if (init_width != CHANNEL_WIDTH_20)
       init_offset = 1; /* HT40+ by default */
     if (const char *o = std::getenv("DEVOURER_HOP_OFFSET"))
@@ -573,10 +574,16 @@ int main(int argc, char **argv) {
     }
   }
 
+  /* DEVOURER_BAND=6 -> 6 GHz (WiFi 6E, RTL8852C tri-band); band can't be
+   * inferred from the channel number (6G/5G channel numbers collide). */
+  uint8_t tx_band = 0;
+  if (const char *b = std::getenv("DEVOURER_BAND"))
+    tx_band = static_cast<uint8_t>(std::atoi(b));
   rtlDevice->InitWrite(SelectedChannel{
       .Channel = static_cast<uint8_t>(channel),
       .ChannelOffset = init_offset,
-      .ChannelWidth = init_width});
+      .ChannelWidth = init_width,
+      .Band = tx_band});
 
   write_sentinel(0xBEEF, "post-init/pre-TX");
   devourer::Ev(*g_ev, "init.timing")

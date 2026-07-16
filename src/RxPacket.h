@@ -42,7 +42,11 @@ struct rx_pkt_attrib
      * the chip's TSF against its own wall clock. Populated by
      * FrameParser; surfaced through examples/rx/main.cpp's rx.frame event. */
     uint32_t tsfl;
-    uint8_t data_rate;
+    /* AX/VHT datarate code is 9-bit (HT 0x80+, VHT 0x100+, HE 0x180+), so a
+     * uint8_t truncates the format bits — VHT2SS+ and every HE rate collapse
+     * onto an HT/legacy code. Kept 16-bit so the reported RX rate is truthful
+     * (needed to identify HE frames when a Kestrel acts as an HE monitor). */
+    uint16_t data_rate;
     uint8_t bw;
     uint8_t stbc;
     uint8_t ldpc;

@@ -17,11 +17,15 @@
 #             band => post-switch state still rate_diffs=1 with the same
 #             mcs7-ofdm delta (the table survives a full SetMonitorChannel
 #             re-fold, not just an offset-only step).
-#   override  same diffs, then --flat 40 (SetTxPowerIndexOverride forces a
-#             flat index and zeroes the diffs in hardware) followed by
-#             --flat -1 (clears the override) in a second invocation =>
-#             final state rate_diffs=1 with the delta intact (the override
-#             clear's full re-apply re-walks the caller table, per
+#   override  same diffs, then one process sequences a flat pulse via
+#             --flat-pulse 40 (SetTxPowerIndexOverride(40), dump state,
+#             SetTxPowerIndexOverride(-1), dump state again) => mid-pulse
+#             state reports rate_diffs=1 (a table is configured) but
+#             mcs7_index == ofdm_index (the honest flat truth — the override
+#             zeroes the chip's per-rate diffs, and GetTxPowerState must not
+#             paper over that), while the post-clear state reports
+#             rate_diffs=1 with the delta intact (the override clear's full
+#             re-apply re-walks the caller table, per
 #             RtlJaguar3Device::apply_tx_power_current's full-apply path).
 #
 # Only the 8822E (RTL8812EU/RTL8822EU, PID 0xa81a) implements
@@ -144,50 +148,78 @@ else
     fi
 fi
 
-# -- (d) override set-then-clear: diffs survive the flat-override round trip -
-# main.cpp's code order is always --flat's SetTxPowerIndexOverride BEFORE
-# --rate-diffs' SetTxPowerRateDiffs, regardless of argv order — and there is
-# no flag to re-assert --flat a second time (40, then -1) within one process,
-# so the set/clear round trip needs two invocations. Both must re-issue
-# --rate-diffs (a fresh device open starts with _rate_diffs unset; state
-# does not persist across process exit) so each run's OWN internal sequence
-# is what's under test:
+# -- (d) override set-then-clear: sequenced in ONE process via --flat-pulse --
+# main.cpp applies --rate-diffs' SetTxPowerRateDiffs first, then (since
+# --flat-pulse's block sits right after it, before the offset ramp) pulses
+# SetTxPowerIndexOverride(N) and prints state, then clears it back to -1 and
+# prints state again. One invocation now sequences set -> flat -> clear, so
+# this is a real within-process persistence proof instead of two independent
+# process re-opens (each of which just re-applies the diffs from scratch).
 #
-#   run 1: --flat 40 (applied first) then --rate-diffs D (applied second)
-#          SetTxPowerIndexOverride(40) flattens+zeroes the hw diffs, THEN
-#          SetTxPowerRateDiffs(D) re-walks the table on top of the flat
-#          override -> checks rate_diffs=1, delta intact with the override
-#          still active.
-#   run 2: --flat -1 (applied first) then --rate-diffs D (applied second)
-#          SetTxPowerIndexOverride(-1) clears any override (a no-op on a
-#          freshly-opened device that was never overridden in THIS process,
-#          but exercises the same idx<0 / full-re-apply branch), THEN
-#          SetTxPowerRateDiffs(D) walks the table via the override-clear's
-#          full-apply path (RtlJaguar3Device::apply_tx_power_current's
-#          idx<0 branch) -> checks rate_diffs=1, delta intact.
+# The run emits 4 txpwr.state events total (baseline, post-diffs, mid-pulse,
+# post-clear); we read the LAST THREE:
 #
-# Together the two runs bracket the override lever (set / clear) around a
-# live diff table and confirm GetTxPowerState reports rate_diffs=1 with the
-# same mcs7-ofdm delta on both sides.
-for flat_val in 40 -1; do
-    lbl="flat$flat_val"; lbl="${lbl/-/neg}"
-    ov_log="$OUT/$tag-override-$lbl.log"
-    run_step_demo "$ov_log" --vid "$VID" --pid "$PID" --channel "$CH_A" \
-        --rate-diffs "$DIFFS" --flat "$flat_val"
-    ov_rd="$(state_field_last "$ov_log" rate_diffs)"
-    ov_ofdm="$(state_field_last "$ov_log" ofdm)"
-    ov_mcs7="$(state_field_last "$ov_log" mcs7)"
-    if [ -z "$ov_ofdm" ] || [ "$ov_ofdm" = "-1" ]; then
-        fail "$name override(--flat $flat_val): no post-diff state readback"
-        continue
-    fi
-    want_mcs7="$((ov_ofdm - 16))"
-    if [ "$ov_rd" = "1" ] && [ "$ov_mcs7" = "$want_mcs7" ]; then
-        pass "$name override(--flat $flat_val): rate_diffs=1, mcs7-ofdm=-16 intact (ofdm=$ov_ofdm mcs7=$ov_mcs7)"
+#   post-diffs (3rd-from-last): rate_diffs=1, mcs7-ofdm=-16 — the table just
+#     landed (same assertion as check (b), confirms the pulse starts clean).
+#   mid-pulse (2nd-from-last): rate_diffs=1 (a table is still CONFIGURED) BUT
+#     mcs7-ofdm=0 (mcs7 == ofdm == the flat index, 40) — the honest flat
+#     truth: apply_tx_power_current's flat branch zeroed the chip's per-rate
+#     diffs, and GetTxPowerState must report that chip truth rather than
+#     ref+diff during the override (this is the Issue 1 fix under test: a
+#     stale fix would still show mcs7-ofdm=-16 here even though the hardware
+#     has no per-rate spread).
+#   post-clear (last): rate_diffs=1, mcs7-ofdm=-16 restored — clearing the
+#     override drove apply_tx_power_current's full-apply path, which re-walks
+#     the still-configured caller table. This is the actual override-clear
+#     persistence proof check (d) is named for.
+ov_log="$OUT/$tag-override-pulse.log"
+run_step_demo "$ov_log" --vid "$VID" --pid "$PID" --channel "$CH_A" \
+    --rate-diffs "$DIFFS" --flat-pulse 40
+
+n_states="$(grep -cF '"ev":"txpwr.state"' "$ov_log")"
+if [ "$n_states" -lt 3 ]; then
+    fail "$name override(flat-pulse): only $n_states txpwr.state events (want >=3)"
+else
+    post_diffs_idx=$((n_states - 2))
+    mid_pulse_idx=$((n_states - 1))
+    post_clear_idx=$n_states
+
+    pd_rd="$(state_field "$ov_log" "$post_diffs_idx" rate_diffs)"
+    pd_ofdm="$(state_field "$ov_log" "$post_diffs_idx" ofdm)"
+    pd_mcs7="$(state_field "$ov_log" "$post_diffs_idx" mcs7)"
+    mp_rd="$(state_field "$ov_log" "$mid_pulse_idx" rate_diffs)"
+    mp_ofdm="$(state_field "$ov_log" "$mid_pulse_idx" ofdm)"
+    mp_mcs7="$(state_field "$ov_log" "$mid_pulse_idx" mcs7)"
+    pc_rd="$(state_field "$ov_log" "$post_clear_idx" rate_diffs)"
+    pc_ofdm="$(state_field "$ov_log" "$post_clear_idx" ofdm)"
+    pc_mcs7="$(state_field "$ov_log" "$post_clear_idx" mcs7)"
+
+    if [ -z "$pd_ofdm" ] || [ -z "$mp_ofdm" ] || [ -z "$pc_ofdm" ]; then
+        fail "$name override(flat-pulse): missing state field(s) in last 3 events"
     else
-        fail "$name override(--flat $flat_val): rate_diffs=$ov_rd ofdm=$ov_ofdm mcs7=$ov_mcs7 (want rate_diffs=1, mcs7=$want_mcs7)"
+        pd_want_mcs7=$((pd_ofdm - 16))
+        pc_want_mcs7=$((pc_ofdm - 16))
+        ok=1
+        if [ "$pd_rd" = "1" ] && [ "$pd_mcs7" = "$pd_want_mcs7" ]; then
+            pass "$name override(flat-pulse) post-diffs: rate_diffs=1, mcs7-ofdm=-16 (ofdm=$pd_ofdm mcs7=$pd_mcs7)"
+        else
+            fail "$name override(flat-pulse) post-diffs: rate_diffs=$pd_rd ofdm=$pd_ofdm mcs7=$pd_mcs7 (want rate_diffs=1, mcs7=$pd_want_mcs7)"
+            ok=0
+        fi
+        if [ "$mp_rd" = "1" ] && [ "$mp_ofdm" = "40" ] && [ "$mp_mcs7" = "40" ]; then
+            pass "$name override(flat-pulse) mid-pulse: rate_diffs=1 (configured) but mcs7=ofdm=40 (honest flat truth)"
+        else
+            fail "$name override(flat-pulse) mid-pulse: rate_diffs=$mp_rd ofdm=$mp_ofdm mcs7=$mp_mcs7 (want rate_diffs=1, ofdm=40, mcs7=40)"
+            ok=0
+        fi
+        if [ "$pc_rd" = "1" ] && [ "$pc_mcs7" = "$pc_want_mcs7" ]; then
+            pass "$name override(flat-pulse) post-clear: rate_diffs=1, mcs7-ofdm=-16 restored (ofdm=$pc_ofdm mcs7=$pc_mcs7)"
+        else
+            fail "$name override(flat-pulse) post-clear: rate_diffs=$pc_rd ofdm=$pc_ofdm mcs7=$pc_mcs7 (want rate_diffs=1, mcs7=$pc_want_mcs7)"
+            ok=0
+        fi
     fi
-done
+fi
 
 echo
 echo "== txpwr-rate-diffs regcheck: PASS=$PASS FAIL=$FAIL SKIP=$SKIP =="

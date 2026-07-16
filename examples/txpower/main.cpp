@@ -19,6 +19,12 @@
  *   --step-ms N                 dwell per step, ms (default 500)
  *   --rate-diffs I,I,...,I      10 comma-separated qdB per rate
  *                               (cck,legacy,m0..m7) or 'clear' to nullopt
+ *   --flat-pulse N               after --rate-diffs: force flat index N, dump
+ *                               state, then clear the override (-1) and dump
+ *                               state again — proves a flat override
+ *                               temporarily flattens the chip's per-rate
+ *                               table and the configured diffs come back once
+ *                               the override clears, all in one process
  *   --switch-channel N          after the ramp: SetMonitorChannel(N) and re-dump
  *                               state — proves the offset is sticky across a
  *                               full channel set (and re-folds against the new
@@ -88,6 +94,8 @@ struct Args {
   int retune = -1;
   bool thermal = false;
   std::string rate_diffs;
+  int flat_pulse = 0;
+  bool have_flat_pulse = false;
 };
 
 bool parse_int(const char *s, int &out) {
@@ -134,7 +142,9 @@ bool parse_args(int argc, char **argv, Args &a) {
       if (i + 1 >= argc)
         return false;
       a.rate_diffs = argv[++i];
-    } else {
+    } else if (k == "--flat-pulse" && next(a.flat_pulse))
+      a.have_flat_pulse = true;
+    else {
       std::fprintf(stderr, "devourer [W] unknown/incomplete arg: %s\n",
                    k.c_str());
       return false;
@@ -292,6 +302,15 @@ int main(int argc, char **argv) {
       const bool ok = dev->SetTxPowerRateDiffs(d);
       logger->info("rate-diffs -> {}", ok ? "applied" : "unsupported");
     }
+    print_state(dev.get(), a.thermal);
+  }
+
+  if (a.have_flat_pulse) {
+    dev->SetTxPowerIndexOverride(a.flat_pulse);
+    logger->info("flat pulse -> {}", a.flat_pulse);
+    print_state(dev.get(), a.thermal);
+    dev->SetTxPowerIndexOverride(-1);
+    logger->info("flat pulse cleared");
     print_state(dev.get(), a.thermal);
   }
 

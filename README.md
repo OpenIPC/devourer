@@ -81,10 +81,10 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8812EU**                 | 2T2R              | ‡             | 51            | 47               | —                | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module. 5/10 MHz capable. ‡ 2.4 GHz TX airs energy but no receiver decodes it — the vendor kernel driver behaves identically on this module ([quirks](docs/8822e-quirks.md)) |
 | **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | —                | not benchmarked. 5/10 MHz capable |
 | **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
-| **RTL8852BU** (11ax)          | 2T2R + BT         | 43            | 36            | 33               | —          | TP-Link Archer TX20U Nano (`35bc:0108`); Wi-Fi 6, dual-band. 5/10 MHz capable |
-| **RTL8832BU** (11ax)          | 2T2R              | —             | —             | —                | —          | Wi-Fi-only SKU of the 8852B die; rides the 8852BU code path. Not benchmarked. 5/10 MHz capable |
-| **RTL8832CU** (11ax)          | 2T2R + BT         | 40            | 33            | 32               | 32          | TP-Link Archer TX50UH (`35bc:0101`); Wi-Fi 6E tri-band (2.4/5/6 GHz). 5/10 and 160 MHz capable. Host-push injection over USB 2.0 (~50% duty ceiling); [6G TX+RX validated](tests/kestrel_8832cu_6g_txrx.sh) |
-| **RTL8852CU** (11ax)          | 2T2R + BT         | —             | —             | —                | —          | "8852" branding of the same 8852C die; rides the 8832CU code path. Not benchmarked. 5/10 and 160 MHz capable |
+| **RTL8852BU** (11ax)          | 2T2R + BT         | 43            | 36            | 33               | —          | TP-Link Archer TX20U Nano (`35bc:0108`); Wi-Fi 6, dual-band. 5/10 MHz capable; HE ER SU + DCM extended range |
+| **RTL8832BU** (11ax)          | 2T2R              | —             | —             | —                | —          | Wi-Fi-only SKU of the 8852B die; rides the 8852BU code path. Not benchmarked. 5/10 MHz capable; HE ER SU + DCM extended range |
+| **RTL8832CU** (11ax)          | 2T2R + BT         | 40            | 33            | 32               | 32          | TP-Link Archer TX50UH (`35bc:0101`); Wi-Fi 6E tri-band (2.4/5/6 GHz). 5/10 and 160 MHz capable; HE ER SU + DCM extended range. Host-push injection over USB 2.0 (~50% duty ceiling); [6G TX+RX validated](tests/kestrel_8832cu_6g_txrx.sh) |
+| **RTL8852CU** (11ax)          | 2T2R + BT         | —             | —             | —                | —          | "8852" branding of the same 8852C die; rides the 8832CU code path. Not benchmarked. 5/10 and 160 MHz capable; HE ER SU + DCM extended range |
 
 `†` = works on-air but the reading varies run-to-run (bracketed = best clean
 reading).

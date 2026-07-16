@@ -72,6 +72,7 @@ inline void emit_adapter_caps(EventSink &sink, IRtlDevice *dev) {
   ev.f("per_pkt_txpwr", c.per_packet_txpower ? 1 : 0)
       .f("narrowband", c.narrowband_ok ? 1 : 0)
       .f("fastretune", c.fastretune_ok ? 1 : 0)
+      .f("he_er_su", c.he_er_su_ok ? 1 : 0)
       .f("per_chain_rssi", c.per_chain_rssi ? 1 : 0)
       .f("hw_rx_tsf", c.hw_rx_timestamp ? 1 : 0)
       .f("hw_beacon_txtsf", c.hw_beacon_txtsf ? 1 : 0)

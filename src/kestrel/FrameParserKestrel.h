@@ -11,10 +11,18 @@
  * bulk-IN aggregate with it.
  *
  * A bulk-IN transfer is an aggregate of sub-packets, each:
- *   [rxd (16 or 32 B)] [drv_info (drv_info_size*8 B)] [shift pad] [payload]
+ *   [rxd (16 or 32 B)] [drv_info] [shift*2 pad] [mac_info (4 B)?] [payload]
  * where payload is `rpkt_len` bytes; the next sub-packet starts 8-byte aligned.
  * rpkt_type routes the payload: WIFI (802.11 frame), PPDU (per-frame PHY
- * status), CH_INFO, or C2H (firmware message). */
+ * status), CH_INFO, or C2H (firmware message).
+ *
+ * The payload offset is the vendor hal_trx_{8852b,8852c}.c formula:
+ *   rxd_len + shift*2 + drv_info_size*DRV_INFO_UNIT
+ *          + (mac_info_vld && rpkt_type != PPDU_STATUS ? 4 : 0)
+ * with DRV_INFO_UNIT the one per-die divergence: 8 bytes on the 8852B,
+ * **16 on the 8852C** (RX_DESC_DRV_INFO_UNIT_8852{B,C}). Walking the C's
+ * aggregate with the B's unit lands the payload pointer inside the drv_info
+ * block — frames "decode" with the right lengths but zeroed-looking bodies. */
 
 namespace kestrel {
 
@@ -28,7 +36,7 @@ struct KestrelRxFrame {
   const uint8_t *payload = nullptr; /* start of the sub-packet body */
   uint32_t payload_len = 0;         /* rpkt_len */
   uint8_t rpkt_type = 0;            /* RPKT_TYPE_* */
-  uint16_t drvinfo_size = 0;       /* bytes (drv_info_size field * 8) */
+  uint16_t drvinfo_size = 0;       /* bytes (field * per-die drv_info_unit) */
   uint8_t shift = 0;
   bool long_rxd = false;
   bool mac_info_vld = false;
@@ -38,6 +46,7 @@ struct KestrelRxFrame {
   uint16_t rx_rate = 0; /* 9-bit datarate code (legacy/HT/VHT/HE) */
   uint8_t gi_ltf = 0;
   uint8_t bw = 0;       /* 0=20 1=40 2=80 */
+  uint8_t ppdu_type = 0xf; /* RX_DESC_PPDU_T_*: 7=HE_SU 8=HE_ERSU (15=unknown) */
   uint8_t ppdu_cnt = 0;
   uint32_t freerun_cnt = 0; /* free-running counter (TSF-ish) */
   uint32_t next_offset = 0; /* offset of the next sub-packet in the aggregate */
@@ -55,9 +64,10 @@ inline uint32_t rd_le32(const uint8_t *p) {
  * when the buffer is too short or the descriptor is malformed (caller stops
  * walking the aggregate). On success `out.next_offset` is where the next
  * sub-packet begins. For non-WIFI rpkt_type the payload is the raw report/C2H
- * bytes; the caller routes on `out.rpkt_type`. */
+ * bytes; the caller routes on `out.rpkt_type`. `drv_info_unit` is the per-die
+ * drv_info granularity: 8 (8852B, default) or 16 (8852C). */
 inline bool parse_rx_8852b(const uint8_t *buf, size_t buflen,
-                           KestrelRxFrame &out) {
+                           KestrelRxFrame &out, uint16_t drv_info_unit = 8) {
   if (buf == nullptr || buflen < 16)
     return false;
 
@@ -66,13 +76,14 @@ inline bool parse_rx_8852b(const uint8_t *buf, size_t buflen,
   out.shift = static_cast<uint8_t>((d0 >> 14) & 0x3);
   out.mac_info_vld = (d0 & (1u << 23)) != 0;
   out.rpkt_type = static_cast<uint8_t>((d0 >> 24) & 0xf);
-  out.drvinfo_size = static_cast<uint16_t>(((d0 >> 28) & 0x7) * 8);
+  out.drvinfo_size = static_cast<uint16_t>(((d0 >> 28) & 0x7) * drv_info_unit);
   out.long_rxd = (d0 & (1u << 31)) != 0;
   const uint32_t rxd_len = out.long_rxd ? 32u : 16u;
   if (buflen < rxd_len)
     return false;
 
   const uint32_t d1 = detail::rd_le32(buf + 4);
+  out.ppdu_type = static_cast<uint8_t>(d1 & 0xf); /* RX_DESC_PPDU_T_* */
   out.ppdu_cnt = static_cast<uint8_t>((d1 >> 4) & 0x7);
   out.rx_rate = static_cast<uint16_t>((d1 >> 16) & 0x1ff);
   out.gi_ltf = static_cast<uint8_t>((d1 >> 25) & 0x7);
@@ -85,7 +96,11 @@ inline bool parse_rx_8852b(const uint8_t *buf, size_t buflen,
   out.crc_err = (d3 & (1u << 9)) != 0;
   out.icv_err = (d3 & (1u << 10)) != 0;
 
-  const uint32_t frame_off = rxd_len + out.drvinfo_size + out.shift;
+  /* Vendor formula: shift is in 2-byte units, and a valid mac_info block
+   * (4 B) precedes the payload on everything except PPDU-status packets. */
+  const uint32_t frame_off =
+      rxd_len + out.drvinfo_size + out.shift * 2u +
+      ((out.mac_info_vld && out.rpkt_type != RPKT_TYPE_PPDU) ? 4u : 0u);
   const uint64_t end =
       static_cast<uint64_t>(frame_off) + out.payload_len;
   if (out.payload_len == 0 || end > buflen)

@@ -30,11 +30,17 @@ constexpr uint32_t USERATE_SEL = 1u << 30; /* wd_info dword0 (force f_rate) */
 constexpr uint32_t USERATE_SEL_V1 = 1u << 31; /* wd_body dword7 (force f_rate) */
 constexpr uint8_t WD_BODY_DWORD7_OFF = 28;    /* rate word in the V1 wd_body */
 constexpr uint8_t DATARATE_SH = 16;        /* wd_info dword0 [24:16] */
+constexpr uint32_t DATA_BW_ER = 1u << 8;   /* wd_info dword0 (ER 106-tone RU) */
 constexpr uint32_t DISDATAFB = 1u << 10;   /* wd_info dword0 (no rate FB) */
 constexpr uint32_t DATA_LDPC = 1u << 11;   /* wd_info dword0 */
 constexpr uint32_t DATA_STBC = 1u << 12;   /* wd_info dword0 */
+constexpr uint32_t DATA_DCM = 1u << 14;    /* wd_info dword0 (8852B; V1 moved it) */
+constexpr uint32_t DATA_ER = 1u << 15;     /* wd_info dword0 (HE ER SU format) */
 constexpr uint8_t GI_LTF_SH = 25;          /* wd_info dword0 [27:25] */
 constexpr uint8_t DATA_BW_SH = 28;         /* wd_info dword0 [29:28] */
+/* 8852C wd_body_t_v1 dword7: DCM rides the rate word (AX_TXD_DATA_DCM_V1);
+ * DATA_ER/DATA_BW_ER stay in wd_info dword0 at the same bits as the 8852B. */
+constexpr uint32_t DATA_DCM_V1 = 1u << 30; /* wd_body dword7 (8852C) */
 } /* namespace txd */
 
 /* Map a devourer MGN_* rate (RateDefinitions.h) to the AX_TXD_DATARATE encoding
@@ -97,6 +103,14 @@ struct TxRate {
   uint8_t gi_ltf = 0;         /* AX_TXD_GI_LTF: 0=LGI 1=SGI (HT/VHT) */
   bool ldpc = false;
   bool stbc = false;
+  /* HE ER SU (extended range, HE rates only): `er` selects the ER SU PPDU
+   * format (242-tone RU, MCS0-2, NSS1, 20 MHz); `er_106` additionally selects
+   * the 106-tone upper-bandwidth variant (MCS0 only, ~3 dB more margin) —
+   * only meaningful with er=true. `dcm` = dual-carrier modulation (MCS 0/1/3/4,
+   * excludes STBC), stacks with either ER flavour or plain HE SU. */
+  bool er = false;
+  bool er_106 = false;
+  bool dcm = false;
 };
 
 /* Write the forced-rate fields into the descriptor. On the 8852B (24-byte
@@ -112,13 +126,21 @@ inline void put_txdesc_rate(uint8_t *wd, uint32_t wd_body_len, const TxRate &r) 
       (static_cast<uint32_t>(r.rate & 0x1ff) << txd::DATARATE_SH) |
       (static_cast<uint32_t>(r.bw & 0x3) << txd::DATA_BW_SH) |
       (static_cast<uint32_t>(r.gi_ltf & 0x7) << txd::GI_LTF_SH);
+  /* ER SU + the 106-tone variant live in wd_info dword0 on both layouts;
+   * DCM is the one that moved (wd_info dword0 BIT14 on the 8852B, wd_body
+   * dword7 BIT30 on the 8852C V1 — vendor AX_TXD_DATA_DCM_V1). */
   const uint32_t fb_word = txd::DISDATAFB | (r.ldpc ? txd::DATA_LDPC : 0) |
-                           (r.stbc ? txd::DATA_STBC : 0);
+                           (r.stbc ? txd::DATA_STBC : 0) |
+                           (r.er ? txd::DATA_ER : 0) |
+                           (r.er && r.er_106 ? txd::DATA_BW_ER : 0);
   if (wd_body_len == WD_BODY_LEN_V1) {
-    txd_put_le32(wd + txd::WD_BODY_DWORD7_OFF, txd::USERATE_SEL_V1 | rate_word);
+    txd_put_le32(wd + txd::WD_BODY_DWORD7_OFF,
+                 txd::USERATE_SEL_V1 | rate_word |
+                     (r.dcm ? txd::DATA_DCM_V1 : 0));
     txd_put_le32(wd + wd_body_len, fb_word); /* wd_info dword0 */
   } else {
-    txd_put_le32(wd + wd_body_len, txd::USERATE_SEL | rate_word | fb_word);
+    txd_put_le32(wd + wd_body_len, txd::USERATE_SEL | rate_word | fb_word |
+                                       (r.dcm ? txd::DATA_DCM : 0));
   }
 }
 

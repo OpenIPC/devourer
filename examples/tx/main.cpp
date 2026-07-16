@@ -270,9 +270,15 @@ int main(int argc, char **argv) {
                        port_env ? port_env : "(any)");
       }
       if (list != nullptr) libusb_free_device_list(list, 1);
-      if (handle == NULL)
+      /* Topology selection is strict: falling through to the VID:PID loop
+       * here would silently open a DIFFERENT adapter sharing the id (the
+       * exact ambiguity DEVOURER_USB_BUS exists to resolve) — fail instead. */
+      if (handle == NULL) {
         logger->error("DEVOURER_USB_BUS={} PORT={} matched no device", want_bus,
                       port_env ? port_env : "(any)");
+        libusb_exit(context);
+        return 1;
+      }
     }
 
     for (uint16_t pid : kRealtekProductIds) {

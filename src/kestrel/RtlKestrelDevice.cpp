@@ -255,14 +255,19 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   /* Async bulk-IN ring; walk each aggregate with the 11ax rxd parser. The
    * buffer must hold a full RXAGG aggregate (the 8852C LEN_TH is ~20 KB), or
    * large aggregates overflow/truncate and RX delivery stalls. */
+  /* Per-die drv_info granularity (vendor RX_DESC_DRV_INFO_UNIT_8852{B,C}):
+   * 8 bytes on the 8852B, 16 on the 8852C — the one RX-descriptor layout
+   * divergence between the dies. */
+  const uint16_t drv_info_unit =
+      _variant == kestrel::ChipVariant::C8852C ? 16 : 8;
   _device.bulk_read_async_loop(
       32768, 8,
-      [&](const uint8_t *data, int n) {
+      [&, drv_info_unit](const uint8_t *data, int n) {
         uint32_t off = 0;
         while (off + 16 <= static_cast<uint32_t>(n)) {
           kestrel::KestrelRxFrame f;
           if (!kestrel::parse_rx_8852b(data + off, static_cast<size_t>(n) - off,
-                                       f))
+                                       f, drv_info_unit))
             break;
           if (f.rpkt_type == kestrel::RPKT_TYPE_PPDU && f.payload_len >= 6) {
             /* physts header (halbb physts_hdr_info): byte3 = rssi_avg_td, byte4+
@@ -276,6 +281,9 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
             p.RxAtrib.crc_err = f.crc_err;
             p.RxAtrib.icv_err = f.icv_err;
             p.RxAtrib.data_rate = f.rx_rate; /* 9-bit AX code (HE >= 0x180) */
+            p.RxAtrib.bw = f.bw;
+            p.RxAtrib.ppdu_type = f.ppdu_type; /* 7=HE_SU 8=HE_ERSU */
+            p.RxAtrib.ppdu_cnt = f.ppdu_cnt;
             p.RxAtrib.tsfl = f.freerun_cnt;
             p.RxAtrib.rssi[0] = _last_rssi[0];
             p.RxAtrib.rssi[1] = _last_rssi[1];
@@ -483,6 +491,9 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   c.per_packet_txpower = false; /* AX power is TSSI, not the J2 descriptor LUT */
   c.narrowband_ok = true; /* 5/10 MHz BB small-BW (SDR-validated); FastSetBandwidth toggle */
   c.fastretune_ok = true; /* lean intra-band 20 MHz retune (FastRetune) */
+  /* HE ER SU + DCM: both dies (AX_TXD_DATA_ER/_BW_ER/_DCM in the TX WD; RX
+   * classifies via the descriptor ppdu_type nibble). */
+  c.he_er_su_ok = true;
   c.hw_rx_timestamp = true;     /* rx freerun_cnt -> RxAtrib.tsfl */
   /* The AX beacon engine (StartBeacon) airs a HW-timed beacon with the live TSF
    * inserted by the MAC at TX — on-air validated on the 8852BU. */
@@ -575,20 +586,54 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
           return static_cast<uint16_t>(it.this_arg[w * 2] |
                                        (it.this_arg[w * 2 + 1] << 8));
         };
-        const uint16_t d3 = rd16(2), d5 = rd16(4), d6 = rd16(5);
-        const unsigned mcs =
-            (d3 & IEEE80211_RADIOTAP_HE_DATA3_DATA_MCS) >> 8;
+        const uint16_t d1 = rd16(0), d3 = rd16(2), d5 = rd16(4), d6 = rd16(5);
+        unsigned mcs = (d3 & IEEE80211_RADIOTAP_HE_DATA3_DATA_MCS) >> 8;
         unsigned nss = d6 & IEEE80211_RADIOTAP_HE_DATA6_NSTS;
         if (nss < 1) nss = 1;
         if (nss > 4) nss = 4;
-        if (mcs <= 11) {
-          tr.rate = static_cast<uint16_t>(0x180 + (nss - 1) * 16 + mcs);
-          he = true;
-        }
         if (d3 & IEEE80211_RADIOTAP_HE_DATA3_CODING) tr.ldpc = true;
         if (d3 & IEEE80211_RADIOTAP_HE_DATA3_STBC) tr.stbc = true;
         const unsigned bw = d5 & IEEE80211_RADIOTAP_HE_DATA5_DATA_BW_RU_ALLOC;
         tr.bw = static_cast<uint8_t>(bw > 2 ? 2 : bw); /* 0=20 1=40 2=80 */
+        /* HE ER SU (extended range): FORMAT=EXT_SU selects the ER SU PPDU
+         * (AX_TXD_DATA_ER); a BW_RU_ALLOC of 106-tone picks the upper-bandwidth
+         * ER variant (AX_TXD_DATA_BW_ER). DCM (data3 bit 12) stacks on SU or
+         * ER SU. Out-of-spec combos are clamped with one W line rather than
+         * handed to the MAC — an unresolvable rate word stalls the scheduler
+         * and NAKs the bulk-OUT. */
+        if ((d1 & IEEE80211_RADIOTAP_HE_DATA1_FORMAT_MASK) ==
+            IEEE80211_RADIOTAP_HE_DATA1_FORMAT_EXT_SU) {
+          tr.er = true;
+          tr.er_106 = (bw == IEEE80211_RADIOTAP_HE_DATA5_RU_106);
+          tr.bw = 0; /* ER SU is a 20 MHz-only format */
+          const unsigned mcs_max = tr.er_106 ? 0 : 2; /* 242-tone: MCS0-2 */
+          if (nss > 1 || mcs > mcs_max) {
+            _logger->warn("Kestrel HE ER SU clamp: nss {}->1 mcs {}->{} ({}-tone)",
+                          nss, mcs, mcs > mcs_max ? mcs_max : mcs,
+                          tr.er_106 ? 106 : 242);
+            nss = 1;
+            if (mcs > mcs_max)
+              mcs = mcs_max;
+          }
+        }
+        if (d3 & IEEE80211_RADIOTAP_HE_DATA3_DATA_DCM) {
+          /* DCM pairs with MCS 0/1/3/4 (0/1 under ER SU) and excludes STBC. */
+          const bool dcm_mcs_ok =
+              tr.er ? (mcs <= 1) : (mcs <= 1 || mcs == 3 || mcs == 4);
+          if (!dcm_mcs_ok) {
+            _logger->warn("Kestrel HE DCM dropped: mcs {} not DCM-capable", mcs);
+          } else {
+            tr.dcm = true;
+            if (tr.stbc) {
+              _logger->warn("Kestrel HE DCM excludes STBC: dropping STBC");
+              tr.stbc = false;
+            }
+          }
+        }
+        if (mcs <= 11) {
+          tr.rate = static_cast<uint16_t>(0x180 + (nss - 1) * 16 + mcs);
+          he = true;
+        }
         const unsigned gi =
             (d5 & IEEE80211_RADIOTAP_HE_DATA5_GI) >>
             IEEE80211_RADIOTAP_HE_DATA5_GI_SHIFT;
@@ -610,18 +655,46 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
   }
   /* No per-packet radiotap rate -> apply the SetTxMode default (DEVOURER_TX_RATE)
    * so a rate-less frame (the demo beacon) airs at the requested rate/BW rather
-   * than the 6M/20MHz fallback. Mirrors the Jaguar path. HE-via-SetTxMode is not
-   * expressed here (HE rides the radiotap-HE path); legacy/HT/VHT + BW apply. */
+   * than the 6M/20MHz fallback. Mirrors the Jaguar path. */
   if (!rate_from_radiotap && !he && _tx_mode_default.has_value()) {
-    const devourer::TxParams tp =
-        devourer::tx_mode_to_params(*_tx_mode_default);
-    mgn = tp.fixed_rate;
-    tr.bw = tp.bwidth == CHANNEL_WIDTH_40   ? 1
-            : tp.bwidth == CHANNEL_WIDTH_80 ? 2
-                                            : 0; /* narrowband -> DATA_BW 20 */
-    tr.gi_ltf = tp.sgi ? 1 : 0;
-    tr.ldpc = tp.ldpc;
-    tr.stbc = tp.stbc;
+    const devourer::TxMode &m = *_tx_mode_default;
+    if (m.mode == devourer::TxMode::Mode::HE) {
+      /* HE expressed natively (tx_mode_to_params has no HE mapping — it would
+       * silently fall back to VHT and the frame would air as a VHT_SU PPDU,
+       * bench-caught via the RX ppdu_type nibble). ER/DCM limits were already
+       * clamped at parse time; a programmatic SetTxMode is clamped here the
+       * same way. */
+      unsigned nss = m.he_nss < 1 ? 1 : (m.he_nss > 4 ? 4 : m.he_nss);
+      unsigned mcs = m.he_mcs <= 11 ? m.he_mcs : 0;
+      tr.bw = m.bw_mhz >= 160 ? 3 : m.bw_mhz >= 80 ? 2 : m.bw_mhz >= 40 ? 1 : 0;
+      tr.gi_ltf = m.he_gi_ltf & 0x7;
+      tr.ldpc = m.ldpc;
+      tr.stbc = m.stbc;
+      if (m.he_er) {
+        tr.er = true;
+        tr.er_106 = (m.he_er == 2);
+        tr.bw = 0;
+        nss = 1;
+        const unsigned mcs_max = tr.er_106 ? 0 : 2;
+        if (mcs > mcs_max)
+          mcs = mcs_max;
+      }
+      if (m.he_dcm && (mcs <= 1 || (!m.he_er && (mcs == 3 || mcs == 4)))) {
+        tr.dcm = true;
+        tr.stbc = false; /* DCM excludes STBC */
+      }
+      tr.rate = static_cast<uint16_t>(0x180 + (nss - 1) * 16 + mcs);
+      he = true;
+    } else {
+      const devourer::TxParams tp = devourer::tx_mode_to_params(m);
+      mgn = tp.fixed_rate;
+      tr.bw = tp.bwidth == CHANNEL_WIDTH_40   ? 1
+              : tp.bwidth == CHANNEL_WIDTH_80 ? 2
+                                              : 0; /* narrowband -> DATA_BW 20 */
+      tr.gi_ltf = tp.sgi ? 1 : 0;
+      tr.ldpc = tp.ldpc;
+      tr.stbc = tp.stbc;
+    }
   }
   if (!he)
     tr.rate = kestrel::mgn_to_ax_rate(mgn);

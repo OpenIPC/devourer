@@ -34,13 +34,14 @@ static void put_le32(std::vector<uint8_t> &b, size_t off, uint32_t v) {
 static void put_desc(std::vector<uint8_t> &b, size_t off, uint32_t rpkt_len,
                      uint8_t shift, bool mac_info_vld, uint8_t rpkt_type,
                      uint8_t drv_info_sz3, bool long_rxd, uint16_t rate,
-                     uint8_t bw, bool crc, bool icv) {
+                     uint8_t bw, bool crc, bool icv, uint8_t ppdu_type = 0xf) {
   uint32_t d0 = (rpkt_len & 0x3fff) | (uint32_t(shift & 0x3) << 14) |
                 (mac_info_vld ? (1u << 23) : 0) |
                 (uint32_t(rpkt_type & 0xf) << 24) |
                 (uint32_t(drv_info_sz3 & 0x7) << 28) |
                 (long_rxd ? (1u << 31) : 0);
-  uint32_t d1 = (uint32_t(rate & 0x1ff) << 16) | (uint32_t(bw & 0x3) << 30);
+  uint32_t d1 = uint32_t(ppdu_type & 0xf) | (uint32_t(rate & 0x1ff) << 16) |
+                (uint32_t(bw & 0x3) << 30);
   uint32_t d3 = (crc ? (1u << 9) : 0) | (icv ? (1u << 10) : 0);
   put_le32(b, off + 0, d0);
   put_le32(b, off + 4, d1);
@@ -65,13 +66,17 @@ int main() {
     CHECK(f.next_offset == ((16 + 100 + 7) & ~7u)); /* = 120 */
   }
 
-  /* --- long descriptor + drvinfo(2*8=16) + shift(2), CRC error flagged --- */
+  /* --- long descriptor + drvinfo(2*8=16) + shift(2 -> 4 B) + mac_info(4 B),
+   *     CRC error flagged. Payload offset follows the vendor
+   *     hal_trx_8852b.c formula: rxd + drvinfo + shift*2 + 4 (mac_info_vld
+   *     on a non-PPDU-status packet). --- */
   {
     const uint32_t len = 40;
-    std::vector<uint8_t> b(32 + 16 + 2 + len, 0);
+    const uint32_t off = 32 + 16 + 2 * 2 + 4;
+    std::vector<uint8_t> b(off + len, 0);
     put_desc(b, 0, len, /*shift=*/2, /*macvld=*/true, RPKT_TYPE_WIFI,
              /*drv3=*/2, /*long=*/true, /*rate=*/0x100, /*bw=*/2, /*crc=*/true,
-             /*icv=*/false);
+             /*icv=*/false, /*ppdu_type=*/8 /* RX_DESC_PPDU_T_HE_ERSU */);
     KestrelRxFrame f;
     CHECK(parse_rx_8852b(b.data(), b.size(), f));
     CHECK(f.long_rxd && f.drvinfo_size == 16 && f.shift == 2);
@@ -79,9 +84,26 @@ int main() {
     CHECK(f.crc_err && !f.icv_err);
     CHECK(f.rx_rate == 0x100); /* 9-bit HE rate code */
     CHECK(f.bw == 2);          /* 80 MHz */
-    CHECK(f.payload == b.data() + 32 + 16 + 2);
+    CHECK(f.ppdu_type == 8);   /* dword1[3:0] -> HE_ERSU classification */
+    CHECK(f.payload == b.data() + off);
     CHECK(f.payload_len == len);
-    CHECK(f.next_offset == ((32 + 16 + 2 + len + 7) & ~7u));
+    CHECK(f.next_offset == ((off + len + 7) & ~7u));
+  }
+
+  /* --- 8852C drv_info unit is 16 bytes (RX_DESC_DRV_INFO_UNIT_8852C), and
+   *     PPDU-status packets get NO mac_info offset even with mac_info_vld ---
+   */
+  {
+    const uint32_t len = 24;
+    const uint32_t off = 16 + 2 * 16; /* short rxd + drvinfo 2*16, no +4 */
+    std::vector<uint8_t> b(off + len, 0);
+    put_desc(b, 0, len, /*shift=*/0, /*macvld=*/true, RPKT_TYPE_PPDU,
+             /*drv3=*/2, /*long=*/false, /*rate=*/0, /*bw=*/0, false, false);
+    KestrelRxFrame f;
+    CHECK(parse_rx_8852b(b.data(), b.size(), f, /*drv_info_unit=*/16));
+    CHECK(f.drvinfo_size == 32);
+    CHECK(f.payload == b.data() + off);
+    CHECK(f.next_offset == ((off + len + 7) & ~7u));
   }
 
   /* --- C2H sub-packet is routed by rpkt_type, not treated as a frame --- */

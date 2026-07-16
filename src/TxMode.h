@@ -43,6 +43,13 @@ struct TxMode {
   uint8_t he_nss = 1;
   uint8_t he_gi_ltf = 3;
 
+  /* HE ER SU (extended range, Kestrel only): 0 = off (normal HE SU),
+   * 1 = ER 242-tone RU (MCS 0-2, NSS 1, 20 MHz), 2 = ER 106-tone RU (MCS 0
+   * only, ~3 dB more margin). `he_dcm` = dual-carrier modulation (MCS 0/1/3/4;
+   * 0/1 under ER; excludes STBC), stacks with either ER flavour or plain SU. */
+  uint8_t he_er = 0;
+  bool he_dcm = false;
+
   /* Bandwidth in MHz. Legacy is always 20; HT honours 20/40; VHT/HE 20/40/80. */
   uint8_t bw_mhz = 20;
 

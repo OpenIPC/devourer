@@ -77,7 +77,7 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | ev | emitter | fields |
 |---|---|---|
 | `init.timing` | L (`src/InitTimer.h`) + demos | stage ("scope.stage", e.g. "demo.first_rx_frame", "txdemo.first_tx_submit"), ms |
-| `adapter.caps` | RX, TX, doctor, txpower (`examples/common/caps_event.h`) | supported, chip, names, chip_id "0x..", gen, variant, transport, tx_chains, rx_chains, n_ss, stbc, ldpc, sgi, bw_max, bw[] (MHz), txpwr_max, txpwr_step_qdb, txpwr_step_measured, txpwr_min_qdb, txpwr_max_qdb, tune_2g4[]\|null, tune_5g[]\|null, char_2g4[]\|null, char_5g[]\|null, ldpc_rx_ht, ldpc_rx_vht, ldpc_rx_flag, per_pkt_txpwr, narrowband, fastretune, per_chain_rssi |
+| `adapter.caps` | RX, TX, doctor, txpower (`examples/common/caps_event.h`) | supported, chip, names, chip_id "0x..", gen, variant, transport, tx_chains, rx_chains, n_ss, stbc, ldpc, sgi, bw_max, bw[] (MHz), txpwr_max, txpwr_step_qdb, txpwr_step_measured, txpwr_min_qdb, txpwr_max_qdb, tune_2g4[]\|null, tune_5g[]\|null, char_2g4[]\|null, char_5g[]\|null, ldpc_rx_ht, ldpc_rx_vht, ldpc_rx_flag, per_pkt_txpwr, narrowband, fastretune, he_er_su, per_chain_rssi |
 | `debug.wreg` | L (`DEVOURER_LOG_WRITES`) | addr "0x0nnn", width, val "0x…" |
 | `hop.prof` | L (`DEVOURER_HOP_PROF`) | gen, ch, `<stage>_us`…, total_us |
 | `tx.fail` | L (send failure; regress.py keys on it) | {status, actual_len, timeout} or {rc, timeout} |
@@ -89,7 +89,7 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | `rx.frame` | RX (`DEVOURER_STREAM_OUT`), duplex | rate, len, crc, icv, rssi[2], evm[2], snr[2], seq, tsfl, bw, stbc, ldpc, sgi, paggr, ppdu, fc1 (FC flags byte; bit3 = 802.11 RETRY), body hex; `tx_tsf` (sender's hardware egress TSF) on beacons/probe-responses only |
 | `rx.body` | RX (`DEVOURER_DUMP_BODY`) | rate, rssi[2], evm[2], snr[2], crc, len, body hex |
 | `rx.corrupt` | RX (`DEVOURER_RX_DUMP_ALL`) | len, crc, icv, rate, bw, stbc, ldpc, sgi, rssi[2], evm[2], snr[2] |
-| `rx.txhit` | RX, TX | hits, total_rx, len, seq, paggr, ppdu, rate, bw, stbc, ldpc — canonical-SA (57:42:75:05:d6:00) matcher; rate/ldpc prove what encoding was decoded (8814A reports ldpc=0 always — no HW indicator) |
+| `rx.txhit` | RX, TX | hits, total_rx, len, seq, paggr, ppdu, rate, bw, stbc, ldpc, ppdu_type — canonical-SA (57:42:75:05:d6:00) matcher; rate/ldpc prove what encoding was decoded (8814A reports ldpc=0 always — no HW indicator); ppdu_type is the AX RXD format nibble (7=HE_SU, 8=HE_ERSU; 255 on pre-AX chips) |
 | `rx.count` | TX (its RX thread) | total, len |
 | `rx.path` | RX (`DEVOURER_RX_ALLPATHS`) | seq, rssi[4], snr[4], evm[4] |
 | `rx.path_mask` | L (toggle spec) | t, mask "0xNN" |

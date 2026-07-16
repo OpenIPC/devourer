@@ -413,7 +413,11 @@ if(DEVOURER_KESTREL)
     # C++ side includes only kestrel_halbb_glue.h (opaque handle + bridge).
     target_include_directories(devourer PRIVATE hal/halbb/g6)
     target_compile_definitions(devourer PUBLIC DEVOURER_KESTREL_HALBB=1)
-    if(NOT MSVC)
+    # Strip unreferenced vendored sections at link. ld64 (macOS) spells it
+    # -dead_strip; MSVC's /OPT:REF is implied in Release via /Gy.
+    if(APPLE)
+        target_link_options(devourer INTERFACE -Wl,-dead_strip)
+    elseif(NOT MSVC)
         target_link_options(devourer INTERFACE -Wl,--gc-sections)
     endif()
 

@@ -2224,7 +2224,7 @@ void HalKestrel::rf_ctrl_bw(ChannelWidth_t bw) {
 
 /* Masked BB read (wIndex=1 window), value shifted down to the mask's LSB. */
 static inline uint32_t mask_shift(uint32_t v, uint32_t mask) {
-  return (v & mask) >> __builtin_ctz(mask);
+  return (v & mask) >> ctz32(mask);
 }
 uint32_t HalKestrel::bb_read(uint32_t addr, uint32_t mask) {
   return mask_shift(_device.rtw_read32_wide((addr & 0xffff) + BB_WIN), mask);

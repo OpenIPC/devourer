@@ -12,3 +12,11 @@ s8 halrf_get_power_limit(struct rf_info *rf, enum phl_phy_idx phy, u8 path,
   (void)ch;
   return 40 * 4; /* ~40 dBm in the s(,2) unit — unused (DPK not run) */
 }
+
+/* halrf_init.c's halrf_init/halrf_dm_init reference the debug command parser
+ * and dbg-defaults init (halrf_dbg_cmd.c / halrf_dbg.c, not vendored). Neither
+ * entry point is called — devourer drives halrf through the glue exports — but
+ * linkers that resolve archive members before dead-stripping (MinGW ld, MSVC)
+ * still demand the symbols. Link-only no-ops. */
+void halrf_cmd_parser_init(struct rf_info *rf) { (void)rf; }
+void halrf_dbg_setting_init(struct rf_info *rf) { (void)rf; }

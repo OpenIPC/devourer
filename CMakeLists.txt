@@ -444,9 +444,9 @@ if(DEVOURER_PCIE)
     target_link_libraries(pcieprobe PUBLIC devourer)
 endif()
 
-# kestrelprobe — staged USB bring-up driver for the Kestrel (RTL8852B/C)
-# milestones, the pcieprobe sibling: AX identity (die-id/cut) -> power-on +
-# EFUSE -> firmware download. Validates each layer before the demos use it.
+# kestrelprobe — staged USB bring-up prober for the Kestrel (RTL8852B/C):
+# AX identity (die-id/cut) -> power-on + EFUSE -> firmware download, the
+# pcieprobe sibling. Validates each layer before the demos use it.
 if(DEVOURER_KESTREL)
     add_executable(kestrelprobe
         examples/kestrelprobe/main.cpp

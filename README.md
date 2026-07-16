@@ -81,7 +81,7 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | —                | not benchmarked. 5/10 MHz capable |
 | **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
 | **RTL8852BU** (11ax)          | 2T2R + BT         | 43            | 36            | 33               | —          | TP-Link Archer TX20U Nano (`35bc:0108`); Wi-Fi 6, dual-band (no 6 GHz). 5/10 MHz capable |
-| **RTL8832CU** (11ax)          | 2T2R + BT         | 40            | 33            | 32               | 32          | TP-Link Archer TX50UH (`35bc:0101`); Wi-Fi 6E tri-band, first 8852C 6 GHz. Host-push injection over USB 2.0 (~50% duty ceiling); [6G TX+RX validated](tests/kestrel_8832cu_6g_txrx.sh) |
+| **RTL8832CU** (11ax)          | 2T2R + BT         | 40            | 33            | 32               | 32          | TP-Link Archer TX50UH (`35bc:0101`); Wi-Fi 6E tri-band, first 8852C 6 GHz. 5/10 and 160 MHz capable. Host-push injection over USB 2.0 (~50% duty ceiling); [6G TX+RX validated](tests/kestrel_8832cu_6g_txrx.sh) |
 
 `†` = works on-air but the reading varies run-to-run (bracketed = best clean
 reading).
@@ -95,12 +95,14 @@ can't show. See [aggregation & hardware ACK](docs/aggregation.md).
 Out of scope: the pre-HalMAC PCIe parts (RTL8812AE/8821AE). The 11ax
 "Kestrel" generation (RTL8852BU / RTL8852CU, a fourth HAL under `src/kestrel/`,
 vendor references `reference/rtl8852bu` + `reference/rtl8852cu`) has RX, TX, and
-channel/bandwidth (5/10/20/40/80 MHz) on-air validated — and the tri-band
-**RTL8832CU** adds 6 GHz (WiFi 6E), benchmarked above at ~5 GHz-parity
-throughput. RF calibration (DACK/RX-DCK/IQK ported verbatim from the vendor
-tree; TSSI/DPK measured to degrade TX in the fixed-power model, so gated) is the
-active frontier. The 8852A-family (e.g. RTL8832AU) stays out of scope — its only
-vendor driver is a frozen 2021 drop.
+channel/bandwidth (5/10/20/40/80 MHz on both dies, 160 MHz on the 8852C)
+on-air validated — and the tri-band **RTL8832CU** adds 6 GHz (WiFi 6E),
+benchmarked above at ~5 GHz-parity throughput. The BB/RF plane is Realtek's own
+halbb/halrf C compiled verbatim (register tables, per-channel config, DACK/
+RX-DCK, plus IQK on the 8852C); TSSI/DPK on both dies and IQK on the 8852B are
+gated off with on-air evidence — they degrade TX under the fixed-power model.
+The 8852A-family (e.g. RTL8832AU) stays out of scope — its only vendor driver
+is a frozen 2021 drop.
 
 > Heads up — some Realtek sticks ship in "ZeroCD" mode and first enumerate as
 > a USB flash drive holding a Windows installer (`0bda:1a2b` is the canonical

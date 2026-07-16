@@ -137,12 +137,12 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  /* ---- stage id (M0): register plane only, no power, no DMA ---- */
+  /* ---- stage id: register plane only, no power, no DMA ---- */
   RtlKestrelDevice dev(RtlAdapter(handle, logger, ctx, lock, {}), logger,
                        variant);
   const kestrel::ChipInfo info = dev.ReadChipInfo();
   const bool id_ok = info.matches(variant);
-  logger->info("M0: {:04x}:{:04x} -> {} | die-id=0x{:02x} (want 0x{:02x}) "
+  logger->info("id: {:04x}:{:04x} -> {} | die-id=0x{:02x} (want 0x{:02x}) "
                "cut={}",
                vid, pid, variant_name(variant), info.die_id,
                variant == kestrel::ChipVariant::C8852B ? 0x51 : 0x52,
@@ -160,20 +160,20 @@ int main(int argc, char **argv) {
     return id_ok ? 0 : 1;
   }
 
-  /* ---- stage power (M1a): mac_ax power-on + efuse dump ---- */
+  /* ---- stage power: mac_ax power-on + efuse dump ---- */
   kestrel::EfuseInfo efuse;
   bool power_ok = false;
   try {
     power_ok = dev.PowerOnAndReadEfuse(efuse);
   } catch (const std::exception &e) {
-    logger->error("M1a: power/efuse threw: {}", e.what());
+    logger->error("power: power/efuse threw: {}", e.what());
   }
   char mac[18] = "??:??:??:??:??:??";
   if (power_ok)
     snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", efuse.mac[0],
              efuse.mac[1], efuse.mac[2], efuse.mac[3], efuse.mac[4],
              efuse.mac[5]);
-  logger->info("M1a: power_ok={} MAC={} xtal=0x{:02x} rfe=0x{:02x} "
+  logger->info("power: power_ok={} MAC={} xtal=0x{:02x} rfe=0x{:02x} "
                "thermalA=0x{:02x} thermalB=0x{:02x} autoload={}",
                power_ok, mac, efuse.xtal_cap, efuse.rfe_type, efuse.thermal_a,
                efuse.thermal_b, efuse.autoload_ok);
@@ -189,7 +189,7 @@ int main(int argc, char **argv) {
     return power_ok ? 0 : 1;
   }
 
-  /* ---- stage fw (M1b): firmware download ---- */
+  /* ---- stage fw: firmware download ---- */
   bool fw_ok = false;
   try {
     /* Re-run the whole sequence so the stage is self-contained (power-on is
@@ -198,26 +198,26 @@ int main(int argc, char **argv) {
             : (want >= 3) ? dev.PowerOnFwAndTrx(efuse)
                           : dev.PowerOnEfuseAndFw(efuse);
   } catch (const std::exception &e) {
-    logger->error("M1b/M2a/M3: bring-up threw: {}", e.what());
+    logger->error("fw/trx/phy: bring-up threw: {}", e.what());
   }
   if (want < 3) {
-    logger->info("M1b: fw_ok={}", fw_ok);
+    logger->info("fw: fw_ok={}", fw_ok);
     devourer::Ev(logger->events(), "kestrel.fw").f("ok", fw_ok);
     libusb_close(handle);
     libusb_exit(ctx);
     return fw_ok ? 0 : 1;
   }
   if (want < 4) {
-    /* ---- stage trx (M2a): DMAC + CMAC MAC TRX init ---- */
-    logger->info("M2a: trx_ok={}", fw_ok);
+    /* ---- stage trx: DMAC + CMAC MAC TRX init ---- */
+    logger->info("trx: trx_ok={}", fw_ok);
     devourer::Ev(logger->events(), "kestrel.trx").f("ok", fw_ok);
     libusb_close(handle);
     libusb_exit(ctx);
     return fw_ok ? 0 : 1;
   }
 
-  /* ---- stage phy (M3): BB + RF table apply ---- */
-  logger->info("M3: phy_ok={}", fw_ok);
+  /* ---- stage phy: BB + RF table apply ---- */
+  logger->info("phy: phy_ok={}", fw_ok);
   devourer::Ev(logger->events(), "kestrel.phy").f("ok", fw_ok);
   libusb_close(handle);
   libusb_exit(ctx);

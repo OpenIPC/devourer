@@ -7,6 +7,7 @@
 #include "logger.h"
 
 struct libusb_device_handle;
+struct libusb_context;
 
 namespace devourer {
 
@@ -49,6 +50,27 @@ int claim_interface_then_reset(libusb_device_handle *handle, int iface,
                                const Logger_t &logger, bool do_reset,
                                std::shared_ptr<UsbDeviceLock> &out_lock,
                                const std::string &lock_dir = {});
+
+/* claim_interface_then_reset plus transparent recovery from the reset
+ * re-enumeration: on some chips (Kestrel 35bc:xxxx) libusb_reset_device on a
+ * warm adapter drops the firmware back to ROM and the device re-enumerates —
+ * the handle goes stale (LIBUSB_ERROR_NOT_FOUND) and, on the way through ROM,
+ * the dongle can transiently surface as its ZeroCD id (0bda:1a2b DISK). This
+ * wrapper closes the stale handle, waits (bounded) for the SAME physical
+ * device — bus + port path — to come back under its original VID:PID, then
+ * re-opens and re-claims WITHOUT a second reset: the re-enumeration itself
+ * reloaded the firmware, so its state is fresh. `handle` is replaced in place
+ * on that path (the old handle is closed); `iface` is re-resolved on the new
+ * handle via find_wifi_interface(). All other outcomes are exactly
+ * claim_interface_then_reset() — including NOT_FOUND when `do_reset` is
+ * false, which then can only be a claim failure, not a re-enumeration. `ctx`
+ * must be the context `handle` was opened on. */
+int claim_interface_reset_reopen(libusb_context *ctx,
+                                 libusb_device_handle *&handle,
+                                 const Logger_t &logger, bool do_reset,
+                                 std::shared_ptr<UsbDeviceLock> &out_lock,
+                                 const std::string &lock_dir = {},
+                                 unsigned reopen_timeout_ms = 30000);
 
 } // namespace devourer
 

@@ -116,6 +116,35 @@ int main() {
     CHECK(f.payload_len == 24);
   }
 
+  /* --- issue #294 regression: an aggregate led by a PPDU-status sub-packet
+   *     carrying drv_info, walked with the 8852C's 16-byte unit. With the
+   *     8852B unit (8) the PPDU packet's next_offset lands mid-drv_info, the
+   *     next parse reads garbage, and the trailing WIFI frame is lost — a
+   *     green bring-up that delivers no frames (bimodal by whether the fw
+   *     attaches phy status that session). --- */
+  {
+    std::vector<uint8_t> b;
+    const uint32_t ppdu_len = 32, ppdu_off = 16 + 2 * 16; /* drv3=2, unit 16 */
+    const uint32_t frame0 = ((ppdu_off + ppdu_len + 7) & ~7u);
+    b.resize(frame0 + 16 + 60, 0);
+    put_desc(b, 0, ppdu_len, 0, /*macvld=*/true, RPKT_TYPE_PPDU,
+             /*drv3=*/2, false, 0, 0, false, false);
+    put_desc(b, frame0, 60, 0, false, RPKT_TYPE_WIFI, 0, false, 0x180, 0,
+             false, false, /*ppdu_type=*/7);
+    uint32_t off = 0;
+    int wifi = 0;
+    while (off + 16 <= b.size()) {
+      KestrelRxFrame f;
+      if (!parse_rx_8852b(b.data() + off, b.size() - off, f,
+                          /*drv_info_unit=*/16))
+        break;
+      if (f.rpkt_type == RPKT_TYPE_WIFI)
+        ++wifi;
+      off += f.next_offset;
+    }
+    CHECK(wifi == 1); /* the WIFI frame behind the PPDU status is reached */
+  }
+
   /* --- walk an aggregate of two WIFI frames via next_offset --- */
   {
     std::vector<uint8_t> b;

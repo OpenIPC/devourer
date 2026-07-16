@@ -955,27 +955,45 @@ int main() {
   if (const char *bus_env = std::getenv("DEVOURER_USB_BUS")) {
     const auto want_bus = static_cast<uint8_t>(std::strtoul(bus_env, nullptr, 0));
     const char *port_env = std::getenv("DEVOURER_USB_PORT");
-    libusb_device **list = nullptr;
-    ssize_t n = libusb_get_device_list(ctx, &list);
-    for (ssize_t i = 0; i < n && dev_handle == NULL; ++i) {
-      libusb_device_descriptor dd{};
-      if (libusb_get_device_descriptor(list[i], &dd) != 0) continue;
-      if (dd.idVendor != target_vid) continue;
-      if (target_pid != 0 && dd.idProduct != target_pid) continue;
-      if (libusb_get_bus_number(list[i]) != want_bus) continue;
-      if (port_env != nullptr) {
-        uint8_t ports[8];
-        int pc = libusb_get_port_numbers(list[i], ports, sizeof(ports));
-        std::string path;
-        for (int p = 0; p < pc; ++p)
-          path += (path.empty() ? "" : ".") + std::to_string(ports[p]);
-        if (path != port_env) continue;
+    /* A named socket is EXPECTED to hold the device — but the previous
+     * session's close/kill leaves the chip re-enumerating (firmware reload
+     * through ROM, sometimes via the ZeroCD id) for several seconds. Poll
+     * bounded instead of failing on the first empty scan. */
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    bool waited = false;
+    do {
+      libusb_device **list = nullptr;
+      ssize_t n = libusb_get_device_list(ctx, &list);
+      for (ssize_t i = 0; i < n && dev_handle == NULL; ++i) {
+        libusb_device_descriptor dd{};
+        if (libusb_get_device_descriptor(list[i], &dd) != 0) continue;
+        if (dd.idVendor != target_vid) continue;
+        if (target_pid != 0 && dd.idProduct != target_pid) continue;
+        if (libusb_get_bus_number(list[i]) != want_bus) continue;
+        if (port_env != nullptr) {
+          uint8_t ports[8];
+          int pc = libusb_get_port_numbers(list[i], ports, sizeof(ports));
+          std::string path;
+          for (int p = 0; p < pc; ++p)
+            path += (path.empty() ? "" : ".") + std::to_string(ports[p]);
+          if (path != port_env) continue;
+        }
+        if (libusb_open(list[i], &dev_handle) == 0)
+          logger->info("Opened device {:04x}:{:04x} on bus {} port {}",
+                       dd.idVendor, dd.idProduct, want_bus,
+                       port_env ? port_env : "(any)");
       }
-      if (libusb_open(list[i], &dev_handle) == 0)
-        logger->info("Opened device {:04x}:{:04x} on bus {} port {}", dd.idVendor,
-                     dd.idProduct, want_bus, port_env ? port_env : "(any)");
-    }
-    if (list != nullptr) libusb_free_device_list(list, 1);
+      if (list != nullptr) libusb_free_device_list(list, 1);
+      if (dev_handle != NULL) break;
+      if (!waited) {
+        logger->warn("DEVOURER_USB_BUS={} PORT={} matched no device — waiting "
+                     "for it to (re-)enumerate",
+                     want_bus, port_env ? port_env : "(any)");
+        waited = true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    } while (std::chrono::steady_clock::now() < deadline);
     /* Topology selection is strict: falling through to the VID:PID loop here
      * would silently open a DIFFERENT adapter sharing the id (the exact
      * ambiguity DEVOURER_USB_BUS exists to resolve) — fail instead. */
@@ -1022,15 +1040,19 @@ int main() {
    * still suppresses the reset for a warm pickup (firmware already running).
    * See src/UsbOpen.h. */
   std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
-  rc = devourer::claim_interface_then_reset(dev_handle, devourer::find_wifi_interface(dev_handle), logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr,
-      usb_lock);
+  /* Reopen variant: recovers in place when the reset re-enumerates the device
+   * (a warm Kestrel drops its firmware back to ROM on reset — the handle goes
+   * stale and the dongle may pass through its ZeroCD id before returning). */
+  rc = devourer::claim_interface_reset_reopen(ctx, dev_handle, logger,
+      std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
   devourer::Ev(*g_ev, "init.timing")
       .f("stage", "demo.usb_reset")
       .f("ms", ms_since_start());
   if (rc != 0) {
     /* BUSY => another process owns the adapter; any other error => open failed.
      * Either way, exit cleanly rather than asserting. */
-    libusb_close(dev_handle);
+    if (dev_handle != nullptr)
+      libusb_close(dev_handle);
     libusb_exit(ctx);
     return 1;
   }

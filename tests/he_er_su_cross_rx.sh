@@ -18,11 +18,12 @@
 #   sudo tests/he_er_su_cross_rx.sh \
 #       35bc:0101@3:2.3.2 35bc:0101@3:2.3.1               # 8852C -> 8852C
 #
-# Kestrel RX bring-up is bimodal on this bench: a repeatedly soft-re-inited
-# DUT comes up deaf (0 frames incl. ambient) until a real VBUS cold — a
-# pre-existing bring-up trait, not an ER SU property. Zero-hit cells are
-# therefore retried once after a VBUS cold-cycle of the RX DUT when
-# REGRESS_VBUS_MAP maps it (format "VID:PID=hub,port;...", uhubctl hubs).
+# Belt-and-braces: a zero-hit cell is retried once after a VBUS cold-cycle of
+# the RX DUT when REGRESS_VBUS_MAP maps it (format "VID:PID=hub,port;...",
+# uhubctl hubs; full-spec "VID:PID@BUS:PORT=hub,port" keys win for same-id
+# pairs). Kept as a guard against DUT-level flakiness even though the
+# historical deaf-bring-up causes (RX-descriptor walk break, USB-reset
+# firmware drop) are fixed in the library.
 #
 # Usage: sudo tests/he_er_su_cross_rx.sh [TX_VID:PID] [RX_VID:PID] [DUR] [CH]
 set -u

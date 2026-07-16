@@ -97,6 +97,22 @@ inline int txpkt_pwr_db_for_step(uint8_t step) {
   return step < 6 ? db[step] : 0;
 }
 
+/* Caller-supplied per-rate TXAGC diffs (signed qdB vs the reference anchor).
+ * v1 consumer: mabur's wall-equalized ladder — each rate parked a uniform
+ * margin below its measured PA-compression wall. Programmed by
+ * IRtlDevice::SetTxPowerRateDiffs; 8822E-only in v1. On the 8822E one qdB
+ * equals one TXAGC index step (step_qdb = 1), so values are used verbatim
+ * as index diffs. */
+struct TxRateDiffsQdb {
+  int8_t cck = 0;                      /* CCK 1..11M rows */
+  int8_t legacy = 0;                   /* OFDM 6..54M — control frames */
+  int8_t mcs[8] = {0, 0, 0, 0, 0, 0, 0, 0}; /* HT MCS0..7 */
+};
+
+/* Pack four signed per-rate diffs into one 0x3a00-table word: byte j =
+ * (diff_j & 0x7f), the 8822E's 7-bit two's-complement diff field. */
+uint32_t pack_rate_diff_word(int8_t d0, int8_t d1, int8_t d2, int8_t d3);
+
 } // namespace devourer
 
 #endif /* DEVOURER_TX_POWER_H */

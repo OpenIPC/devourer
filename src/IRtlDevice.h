@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 
 #include "AdapterCaps.h"
 #include "AmpduMode.h"
@@ -138,6 +139,17 @@ public:
    * baseline. The primary knob — SetTxPower forwards here; a generation
    * without the API wired ignores it (caps.supported=false). */
   virtual void SetTxPowerIndexOverride(int idx) { (void)idx; }
+
+  /* Program caller-supplied per-rate TXAGC diffs (signed qdB vs the
+   * reference anchor) in place of the chip's default by-rate table.
+   * std::nullopt clears back to the default. Applies live; persists across
+   * SetMonitorChannel / FastRetune and override-set/clear (Runtime TX power
+   * family contract). Returns false where unsupported (everything except
+   * the 8822E in v1). */
+  virtual bool SetTxPowerRateDiffs(const std::optional<devourer::TxRateDiffsQdb>& diffs) {
+    (void)diffs;
+    return false;
+  }
 
   /* Re-program the TX-power registers from the current knob state at the
    * CURRENT channel — the hook tests use to force a re-apply without moving

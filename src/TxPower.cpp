@@ -26,4 +26,12 @@ int quantize_offset_qdb(int qdb, const TxPowerCaps &caps, int *steps_out) {
   return steps * step;
 }
 
+uint32_t pack_rate_diff_word(int8_t d0, int8_t d1, int8_t d2, int8_t d3) {
+  const uint32_t b0 = static_cast<uint32_t>(d0) & 0x7fu;
+  const uint32_t b1 = static_cast<uint32_t>(d1) & 0x7fu;
+  const uint32_t b2 = static_cast<uint32_t>(d2) & 0x7fu;
+  const uint32_t b3 = static_cast<uint32_t>(d3) & 0x7fu;
+  return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
 } // namespace devourer

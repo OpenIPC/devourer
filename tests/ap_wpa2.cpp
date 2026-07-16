@@ -90,7 +90,13 @@ static std::vector<uint8_t> mgmt_hdr(uint8_t fc, const uint8_t* sta) {
 static void append_ies(std::vector<uint8_t>& m, bool ssid) {
   if (ssid) { m.insert(m.end(), {0x00,(uint8_t)strlen(kSsid)});
     m.insert(m.end(), kSsid, kSsid+strlen(kSsid)); }
-  m.insert(m.end(), {0x01,0x08,0x82,0x84,0x8b,0x96,0x24,0x30,0x48,0x6c});
+  // Band-correct Supported Rates: CCK+OFDM on 2.4 GHz, OFDM-only on 5 GHz. CCK
+  // basic rates (1/2/5.5/11) do not exist on 5 GHz — advertising them makes a
+  // 5 GHz station skip the BSS ("rate sets do not match"), so no association.
+  if (g_chan <= 14)
+    m.insert(m.end(), {0x01,0x08,0x82,0x84,0x8b,0x96,0x24,0x30,0x48,0x6c});
+  else
+    m.insert(m.end(), {0x01,0x08,0x8c,0x12,0x98,0x24,0xb0,0x48,0x60,0x6c});
   m.insert(m.end(), {0x03,0x01,g_chan});
   m.insert(m.end(), kRsn, kRsn+sizeof(kRsn));           // RSN IE -> advertise WPA2
 }

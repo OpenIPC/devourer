@@ -107,7 +107,11 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first — see
   (`B_AX_RXAGG_EN`). TX power is a fixed BB dBm (`halbb_set_txpwr_dbm`,
   default 20 dBm, `DEVOURER_TX_PWR` override) with a runtime
   `SetTxPowerOffsetQdb` lever; `ReadTsf` reads the per-port MAC TSF;
-  `StartBeacon` drives the AX HW beacon engine. Async packet-C2H (bulk-IN
+  `StartBeacon` drives the AX HW beacon engine. **HE ER SU + DCM extended
+  range** (both dies): per-packet via radiotap-HE FORMAT=EXT_SU or
+  `DEVOURER_TX_RATE=.../ER[/DCM]`; RX classifies the format in
+  `RxAtrib.ppdu_type` (7=HE_SU, 8=HE_ERSU) — `docs/he-extended-range.md`.
+  Async packet-C2H (bulk-IN
   rpkt_type=10) delivery works — routed by `handle_c2h` on the C2H
   class/func — so the #236 C2H surface (TWT/F2P reports) is reachable. TX
   airs with the CMAC EDCCA/CCA gate disabled (`sch_tx_en`, TX path only) —
@@ -117,8 +121,11 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first — see
   Almost every 8852C divergence from the 8852B is a **`_V1` register-bank**
   move (USB/HFC/RXAGG/HCI at 0x5xxx/0x1700/0x6000/0x7880 vs the 8852B
   0x1xxx/0x8Axx/0x8900/0x8380) plus a different descriptor: FWDL/H2C use a
-  16-byte `rxd_short_t` (not the 24-byte WD body), and data/mgmt TX uses the
-  32-byte `wd_body_t_v1` (not 24). The CBV-cut die loads the `u2_nic` fw
+  16-byte `rxd_short_t` (not the 24-byte WD body), data/mgmt TX uses the
+  32-byte `wd_body_t_v1` (not 24), and the RX-descriptor drv_info unit is
+  16 bytes (not 8 — `FrameParserKestrel.h`; with the B's unit the C
+  "receives" frames with correct lengths but unreadable bodies, i.e. looks
+  deaf to any SA-matching harness). The CBV-cut die loads the `u2_nic` fw
   image (CAV→u1). Two 8852C-specific TX pieces the 8852B path lacks: the BB
   IFFT→TX-chain routing (`halbb_ctrl_tx_path_tmac_8852c`, the 0xD800..0xD82C
   "path-com" block the 8852B replaces with its per-STA CMAC antenna model),
@@ -300,11 +307,14 @@ are parsed in each demo's own code. The ones needed daily:
   `DEVOURER_USB_PORT=a.b.c` select by USB topology when two adapters share
   VID:PID **and** serial.
 - `DEVOURER_CHANNEL=N` — monitor channel.
-- `DEVOURER_TX_RATE=<rate>[/<bw>][/SGI][/LDPC][/STBC]` — TX mode for rate-less
-  frames (`MCS7/40/SGI`, `VHT2SS_MCS3/80/LDPC`, `1M`...). Unset = 6M legacy.
-  CCK rates are 2.4 GHz-only; `1M` buys ~9 dB link budget over `6M`. The
-  library itself is radiotap-driven — a frame carrying its own rate radiotap
-  overrides the mode per-packet. Programmatic: `SetTxMode` / `ClearTxMode`.
+- `DEVOURER_TX_RATE=<rate>[/<bw>][/SGI][/LDPC][/STBC][/ER|/ER106][/DCM]` — TX
+  mode for rate-less frames (`MCS7/40/SGI`, `VHT2SS_MCS3/80/LDPC`, `1M`...).
+  Unset = 6M legacy. CCK rates are 2.4 GHz-only; `1M` buys ~9 dB link budget
+  over `6M`. `/ER`, `/ER106`, `/DCM` are HE-only (Kestrel): the HE ER SU
+  extended-range PPDU + dual-carrier modulation (`docs/he-extended-range.md`).
+  The library itself is radiotap-driven — a frame carrying its own rate
+  radiotap overrides the mode per-packet (ER SU = radiotap-HE FORMAT=EXT_SU).
+  Programmatic: `SetTxMode` / `ClearTxMode`.
 - `DEVOURER_SKIP_RESET=1` — skip `libusb_reset_device` before claim (only
   helps when firmware state is intact).
 - `DEVOURER_TX_GAP_US=N` — txdemo inter-frame gap (default 2000, ~500 fps;

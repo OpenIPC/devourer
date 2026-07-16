@@ -24,6 +24,8 @@ struct HeDecoded {
   bool ldpc = false, stbc = false;
   unsigned gi = 0, ltf = 0;
   uint16_t ax_rate = 0;
+  unsigned format = 0; /* data1 FORMAT: 0=SU 1=EXT_SU (ER SU) */
+  bool dcm = false;
 };
 
 static HeDecoded decode_he(const std::vector<uint8_t> &rt) {
@@ -39,7 +41,9 @@ static HeDecoded decode_he(const std::vector<uint8_t> &rt) {
     auto rd16 = [&](int w) -> uint16_t {
       return (uint16_t)(it.this_arg[w * 2] | (it.this_arg[w * 2 + 1] << 8));
     };
-    const uint16_t d3 = rd16(2), d5 = rd16(4), d6 = rd16(5);
+    const uint16_t d1 = rd16(0), d3 = rd16(2), d5 = rd16(4), d6 = rd16(5);
+    d.format = d1 & IEEE80211_RADIOTAP_HE_DATA1_FORMAT_MASK;
+    d.dcm = (d3 & IEEE80211_RADIOTAP_HE_DATA3_DATA_DCM) != 0;
     d.mcs = (d3 & IEEE80211_RADIOTAP_HE_DATA3_DATA_MCS) >> 8;
     d.nss = d6 & IEEE80211_RADIOTAP_HE_DATA6_NSTS;
     d.ldpc = (d3 & IEEE80211_RADIOTAP_HE_DATA3_CODING) != 0;
@@ -97,6 +101,53 @@ int main() {
   {
     TxMode m = parse_tx_mode_str("HE1SS_MCS12");
     expect("HE MCS12 rejected -> legacy fallback", m.mode == TxMode::Mode::Legacy);
+  }
+
+  /* HE ER SU (extended range): /ER -> FORMAT=EXT_SU + 242-tone RU code,
+   * 20 MHz forced; /DCM sets the data3 DCM bit. */
+  {
+    TxMode m = parse_tx_mode_str("HE1SS_MCS2/ER/DCM");
+    expect("ER parsed he_er=1 (242-tone)", m.he_er == 1);
+    /* DCM under ER pairs with MCS 0/1 only -> MCS2+DCM drops the DCM. */
+    expect("ER MCS2 keeps mcs", m.he_mcs == 2);
+    expect("ER MCS2 DCM dropped (not DCM-capable)", !m.he_dcm);
+    TxMode m01 = parse_tx_mode_str("HE1SS_MCS1/ER/DCM");
+    expect("ER MCS1 DCM kept", m01.he_dcm);
+    HeDecoded d = decode_he(build_stream_radiotap(m01));
+    expect("ER field present", d.found);
+    expect("ER format EXT_SU", d.format == IEEE80211_RADIOTAP_HE_DATA1_FORMAT_EXT_SU);
+    expect("ER 242-tone RU code", d.bw == IEEE80211_RADIOTAP_HE_DATA5_RU_242);
+    expect("ER DCM bit set", d.dcm);
+    expect("ER AX rate 0x181 (1SS MCS1)", d.ax_rate == 0x181);
+  }
+
+  /* ER 106-tone: /ER106 -> MCS clamped to 0, RU code 106; ER clamps NSS/BW. */
+  {
+    TxMode m = parse_tx_mode_str("HE2SS_MCS5/ER106/80");
+    expect("ER106 parsed he_er=2", m.he_er == 2);
+    expect("ER106 clamps mcs -> 0", m.he_mcs == 0);
+    expect("ER106 clamps nss -> 1", m.he_nss == 1);
+    expect("ER106 forces 20 MHz", m.bw_mhz == 20);
+    HeDecoded d = decode_he(build_stream_radiotap(m));
+    expect("ER106 format EXT_SU", d.format == IEEE80211_RADIOTAP_HE_DATA1_FORMAT_EXT_SU);
+    expect("ER106 106-tone RU code", d.bw == IEEE80211_RADIOTAP_HE_DATA5_RU_106);
+    expect("ER106 AX rate 0x180 (1SS MCS0)", d.ax_rate == 0x180);
+  }
+
+  /* DCM excludes STBC (spec): STBC is dropped, DCM kept. */
+  {
+    TxMode m = parse_tx_mode_str("HE1SS_MCS0/DCM/STBC");
+    expect("DCM+STBC: dcm kept", m.he_dcm);
+    expect("DCM+STBC: stbc dropped", !m.stbc);
+    expect("plain DCM leaves format SU",
+           decode_he(build_stream_radiotap(m)).format == 0);
+  }
+
+  /* ER/DCM are HE-only modifiers: ignored (with a warning) on other modes. */
+  {
+    TxMode m = parse_tx_mode_str("MCS7/ER");
+    expect("MCS7/ER stays HT", m.mode == TxMode::Mode::HT);
+    expect("MCS7/ER: er ignored", m.he_er == 0);
   }
 
   if (g_fail) {

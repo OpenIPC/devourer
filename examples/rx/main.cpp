@@ -645,7 +645,10 @@ static void packetProcessor(const Packet &packet) {
             .f("rate", packet.RxAtrib.data_rate)
             .f("bw", packet.RxAtrib.bw)
             .f("stbc", packet.RxAtrib.stbc)
-            .f("ldpc", packet.RxAtrib.ldpc);
+            .f("ldpc", packet.RxAtrib.ldpc)
+            /* AX PPDU-format nibble (Kestrel; 255 = pre-AX no field): 7=HE_SU
+             * 8=HE_ERSU — the on-air proof of an ER SU TX. */
+            .f("ppdu_type", packet.RxAtrib.ppdu_type);
       }
 #if defined(DEVOURER_HAVE_JAGUAR1)
       /* F2: BB-dbgport sweep on the first kCsiMaxFrames canonical-SA frames.
@@ -973,9 +976,15 @@ int main() {
                      dd.idProduct, want_bus, port_env ? port_env : "(any)");
     }
     if (list != nullptr) libusb_free_device_list(list, 1);
-    if (dev_handle == NULL)
+    /* Topology selection is strict: falling through to the VID:PID loop here
+     * would silently open a DIFFERENT adapter sharing the id (the exact
+     * ambiguity DEVOURER_USB_BUS exists to resolve) — fail instead. */
+    if (dev_handle == NULL) {
       logger->error("DEVOURER_USB_BUS={} PORT={} matched no device", want_bus,
                     port_env ? port_env : "(any)");
+      libusb_exit(ctx);
+      return 1;
+    }
   }
 
   for (uint16_t pid : kRealtekProductIds) {

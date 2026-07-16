@@ -77,6 +77,12 @@ struct rx_pkt_attrib
      * only an aggregate's first subframe carries a PHY status). */
     bool paggr = false;
     uint8_t ppdu_cnt = 0;
+    /* RX PPDU format classification (AX RX-descriptor dword1[3:0], Kestrel
+     * only): 0/1=CCK 2=OFDM 3=HT 5/6=VHT 7=HE_SU 8=HE_ERSU 9=HE_MU 10=HE_TB.
+     * The proof a received frame really was the HE ER SU extended-range
+     * format. 0xff on pre-AX generations (their descriptors carry no such
+     * field). */
+    uint8_t ppdu_type = 0xff;
     RX_PACKET_TYPE pkt_rpt_type;
 };
 

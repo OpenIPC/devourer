@@ -145,6 +145,12 @@ struct AdapterCaps {
                                     * 0x3f on Jaguar1/2, 0x7f on Jaguar3) */
   uint8_t xtal_cap_default = 0;    /* efuse/default crystal-cap code */
   bool fastretune_ok = false;      /* lean FastRetune override exists */
+  /* HE ER SU (802.11ax extended range, Kestrel only): TX airs the ER SU PPDU
+   * per-packet via radiotap-HE FORMAT=EXT_SU (242-tone RU MCS0-2; 106-tone RU
+   * MCS0 via a BW_RU_ALLOC of 106) plus HE DCM, and RX classifies the format
+   * in RxAtrib.ppdu_type (7=HE_SU, 8=HE_ERSU). Pre-AX generations have no ER
+   * equivalent. */
+  bool he_er_su_ok = false;
   bool per_chain_rssi = false;     /* frame parser fills per-chain rssi (>=2ch) */
   /* Hardware timing. hw_rx_timestamp: every received frame is stamped with the
    * MAC's microsecond TSF at receive (RxPacket.RxAtrib.tsfl) — true on all

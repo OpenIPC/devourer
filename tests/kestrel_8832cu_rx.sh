@@ -47,7 +47,8 @@ cell() { # $1 = channel
     || { echo "   FAIL"; fails=$((fails+1)); }
 }
 
-for ch in "${@:-36 6}"; do cell "$ch"; done
+chans=("$@"); [ ${#chans[@]} -eq 0 ] && chans=(36 6)
+for ch in "${chans[@]}"; do cell "$ch"; done
 echo "=================================================================="
 [ "$fails" -eq 0 ] && echo "RESULT: PASS — 8832CU FWDL + monitor RX decode" \
   || { echo "RESULT: FAIL — $fails cell(s)"; exit 1; }

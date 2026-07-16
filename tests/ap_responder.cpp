@@ -124,11 +124,21 @@ static std::vector<uint8_t> build_dhcp_reply(const uint8_t* sta, const uint8_t* 
   return build_data(sta, 0x0800, pl.data(), (int)pl.size());
 }
 
+// Supported Rates IE, band-correct: CCK+OFDM on 2.4 GHz, OFDM-only on 5 GHz.
+// CCK basic rates (1/2/5.5/11) do not exist on 5 GHz — advertising them makes a
+// 5 GHz station skip the BSS with "rate sets do not match" (silent, only in
+// wpa_supplicant -d), so no association on any 5 GHz channel.
+static void append_rates(std::vector<uint8_t>& m) {
+  if (g_chan <= 14)  // 2.4 GHz: 1*,2*,5.5*,11*,18,24,36,54
+    m.insert(m.end(), {0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c});
+  else               // 5 GHz: 6*,9,12*,18,24*,36,48,54 (basic = high bit set)
+    m.insert(m.end(), {0x01, 0x08, 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c});
+}
 // Common: [SSID + rates + DS] IE tail for probe/assoc responses.
 static void append_ies(std::vector<uint8_t>& m, bool with_ssid) {
   if (with_ssid) { const char* s = "devourerAP";
     m.insert(m.end(), {0x00, 0x0a}); m.insert(m.end(), s, s + 10); }
-  m.insert(m.end(), {0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c});
+  append_rates(m);
   m.insert(m.end(), {0x03, 0x01, g_chan});
 }
 static void enqueue(std::vector<uint8_t> mpdu) {
@@ -260,7 +270,7 @@ int main(int argc, char** argv) {
       0x00,0x00, 0,0,0,0,0,0,0,0, 0x64,0x00, 0x01,0x00};
   { const char* s = "devourerAP"; bcn.insert(bcn.end(), {0x00,0x0a});
     bcn.insert(bcn.end(), s, s + 10);
-    bcn.insert(bcn.end(), {0x01,0x08,0x82,0x84,0x8b,0x96,0x24,0x30,0x48,0x6c});
+    append_rates(bcn);
     bcn.insert(bcn.end(), {0x03,0x01,g_chan}); }
   int bcn_tu = 100;
   if (const char* iv = std::getenv("DEVOURER_BCN_TU")) bcn_tu = atoi(iv);

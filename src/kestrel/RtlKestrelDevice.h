@@ -57,6 +57,15 @@ public:
   void InitWrite(SelectedChannel channel) override;
   void StartRxLoop(Action_ParsedRadioPacket packetProcessor) override;
   void StopRxLoop() override { _rx_stop = true; }
+  /* Join the WP-release drain thread (started by InitWrite) before the caller
+   * tears libusb down — a thread still inside libusb_handle_events when
+   * libusb_exit runs trips libusb's usbi_mutex_destroy assertion (SIGABRT at
+   * demo shutdown). The destructor joins too, but the demos destroy the
+   * device object after libusb_exit, so Stop() is the ordered join point. */
+  void Stop() override {
+    _rx_stop = true;
+    stop_wp_drain();
+  }
   void SetMonitorChannel(SelectedChannel channel) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
   SelectedChannel GetSelectedChannel() override { return _channel; }

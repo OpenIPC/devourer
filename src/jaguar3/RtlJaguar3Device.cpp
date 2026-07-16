@@ -1590,10 +1590,26 @@ devourer::TxPowerState RtlJaguar3Device::GetTxPowerState() {
      * coherent snapshot vs the coex tick. */
     std::lock_guard<std::mutex> lk(_reg_mu);
     const uint32_t ofdm = (_device.rtw_read32(0x18e8) >> 10) & 0x7f;
-    s.ofdm_index = static_cast<int16_t>(ofdm);
-    s.mcs7_index = static_cast<int16_t>(ofdm);
-    s.cck_index =
-        static_cast<int16_t>((_device.rtw_read32(0x18a0) >> 16) & 0x7f);
+    const uint32_t cck =
+        (_device.rtw_read32(0x18a0) >> 16) & 0x7f;
+    if (_rate_diffs) {
+      /* A custom per-rate diff table is live (8822E SetTxPowerRateDiffs):
+       * the shared reference alone is no longer the effective index for any
+       * rate, so report ref + diff[rate] instead of the artifact where
+       * cck/ofdm/mcs7 all read equal to the reference. Clamp to the 7-bit
+       * TXAGC index range the same way the apply path does. */
+      auto clamp127 = [](int v) {
+        return static_cast<int16_t>(v < 0 ? 0 : (v > 127 ? 127 : v));
+      };
+      s.ofdm_index = clamp127(static_cast<int>(ofdm) + _rate_diffs->legacy);
+      s.mcs7_index = clamp127(static_cast<int>(ofdm) + _rate_diffs->mcs[7]);
+      s.cck_index = clamp127(static_cast<int>(cck) + _rate_diffs->cck);
+      s.rate_diffs_custom = true;
+    } else {
+      s.ofdm_index = static_cast<int16_t>(ofdm);
+      s.mcs7_index = static_cast<int16_t>(ofdm);
+      s.cck_index = static_cast<int16_t>(cck);
+    }
     s.hw_readback = true;
   }
   return s;

@@ -159,7 +159,8 @@ void print_state(IRtlDevice *dev, bool with_thermal) {
       .f("cck", s.cck_index)
       .f("ofdm", s.ofdm_index)
       .f("mcs7", s.mcs7_index)
-      .f("rb", s.hw_readback ? 1 : 0);
+      .f("rb", s.hw_readback ? 1 : 0)
+      .f("rate_diffs", s.rate_diffs_custom ? 1 : 0);
   if (with_thermal) {
     const devourer::ThermalStatus t = dev->GetThermalStatus();
     devourer::Ev ev(*g_ev, "thermal");

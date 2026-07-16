@@ -62,6 +62,8 @@ struct TxPowerState {
   int16_t ofdm_index = -1;
   int16_t mcs7_index = -1;
   bool hw_readback = false;
+  bool rate_diffs_custom = false; /* caller-supplied per-rate diff table
+                                    * active (SetTxPowerRateDiffs) */
 };
 
 /* Quantize a quarter-dB offset request to a family's step size: round to

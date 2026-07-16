@@ -2,10 +2,10 @@
  *
  * Opens one adapter, brings it up for TX, prints the family's TxPowerCaps,
  * then walks the requested knob sequence — a quarter-dB offset ramp
- * (SetTxPowerOffsetQdb), a flat index (SetTxPowerIndexOverride), or both —
- * echoing the applied qdB and a TxPowerState snapshot after every step. This
- * is the shape of an adaptive-link controller's power leg: set, read back,
- * observe saturation, react.
+ * (SetTxPowerOffsetQdb), a flat index (SetTxPowerIndexOverride), per-rate
+ * diffs (SetTxPowerRateDiffs), or both — echoing the applied qdB and a
+ * TxPowerState snapshot after every step. This is the shape of an adaptive-link
+ * controller's power leg: set, read back, observe saturation, react.
  *
  * Pure CLI configuration (no environment variables — the API is the point):
  *
@@ -17,6 +17,8 @@
  *   --offset-stop Q             offset ramp stop, qdB (default = start)
  *   --step-qdb Q                ramp increment, qdB (default 4 = 1 dB)
  *   --step-ms N                 dwell per step, ms (default 500)
+ *   --rate-diffs I,I,...,I      10 comma-separated qdB per rate
+ *                               (cck,legacy,m0..m7) or 'clear' to nullopt
  *   --switch-channel N          after the ramp: SetMonitorChannel(N) and re-dump
  *                               state — proves the offset is sticky across a
  *                               full channel set (and re-folds against the new
@@ -30,7 +32,7 @@
  *
  *   {"ev":"txpwr.caps","supported":1,"max":63,"step_qdb":2,...}
  *   {"ev":"txpwr.state","flat":-1,"offset_qdb":-24,"steps":-12,"satlo":0,
- *    "sathi":0,"cck":28,"ofdm":34,"mcs7":30,"rb":1}
+ *    "sathi":0,"cck":28,"ofdm":34,"mcs7":30,"rb":1,"rate_diffs":0}
  */
 #ifdef _WIN32
 #define NOMINMAX
@@ -47,6 +49,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -84,6 +87,7 @@ struct Args {
   int switch_channel = -1;
   int retune = -1;
   bool thermal = false;
+  std::string rate_diffs;
 };
 
 bool parse_int(const char *s, int &out) {
@@ -126,7 +130,11 @@ bool parse_args(int argc, char **argv, Args &a) {
       ;
     else if (k == "--thermal")
       a.thermal = true;
-    else {
+    else if (k == "--rate-diffs") {
+      if (i + 1 >= argc)
+        return false;
+      a.rate_diffs = argv[++i];
+    } else {
       std::fprintf(stderr, "devourer [W] unknown/incomplete arg: %s\n",
                    k.c_str());
       return false;
@@ -255,6 +263,35 @@ int main(int argc, char **argv) {
   if (a.flat >= -1) {
     dev->SetTxPowerIndexOverride(a.flat);
     logger->info("flat index override -> {}", a.flat);
+    print_state(dev.get(), a.thermal);
+  }
+
+  if (!a.rate_diffs.empty()) {
+    if (a.rate_diffs == "clear") {
+      const bool ok = dev->SetTxPowerRateDiffs(std::nullopt);
+      logger->info("rate-diffs clear -> {}", ok ? "ok" : "unsupported");
+    } else {
+      devourer::TxRateDiffsQdb d;
+      int v[10] = {0};
+      int n = 0;
+      const char* p = a.rate_diffs.c_str();
+      char* end = nullptr;
+      while (n < 10) {
+        v[n++] = static_cast<int>(std::strtol(p, &end, 10));
+        if (*end != ',') break;
+        p = end + 1;
+      }
+      if (n != 10 || *end != '\0') {
+        std::fprintf(stderr, "devourer [E] --rate-diffs wants 10 comma ints "
+                             "(cck,legacy,m0..m7) or 'clear'\n");
+        return 2;
+      }
+      d.cck = static_cast<int8_t>(v[0]);
+      d.legacy = static_cast<int8_t>(v[1]);
+      for (int i2 = 0; i2 < 8; ++i2) d.mcs[i2] = static_cast<int8_t>(v[2 + i2]);
+      const bool ok = dev->SetTxPowerRateDiffs(d);
+      logger->info("rate-diffs -> {}", ok ? "applied" : "unsupported");
+    }
     print_state(dev.get(), a.thermal);
   }
 

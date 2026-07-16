@@ -1,6 +1,7 @@
 #include "UsbOpen.h"
 
 #include "UsbDeviceLock.h"
+#include "kestrel/KestrelUsbIds.h"
 
 #if defined(__ANDROID__) || defined(_MSC_VER) || defined(__APPLE__)
 #include <libusb.h>
@@ -8,7 +9,10 @@
 #include <libusb-1.0/libusb.h>
 #endif
 
+#include <chrono>
+#include <cstring>
 #include <string>
+#include <thread>
 
 namespace devourer {
 
@@ -122,6 +126,22 @@ int claim_interface_then_reset(libusb_device_handle *handle, int iface,
     return rc;
   }
 
+  /* Kestrel (11ax) adapters never want the USB reset: their power-on sequence
+   * forces the MAC off from any retained state (the real cleaner), while a
+   * USB reset on running/half-torn firmware drops the chip back to its ROM —
+   * a stale-handle re-enumeration that can land in the dead ZeroCD DISK id
+   * (0bda:1a2b). Bench-measured: KILLed-session churn is 6/6 clean without
+   * the reset vs ZeroCD roulette with it (issue #294). */
+  if (do_reset) {
+    libusb_device_descriptor dd{};
+    if (libusb_get_device_descriptor(dev, &dd) == 0 &&
+        kestrel::variant_for_usb_id(dd.idVendor, dd.idProduct).has_value()) {
+      logger->info("Kestrel adapter: skipping USB reset (power-on owns state "
+                   "cleanup; a reset drops running firmware into ROM/ZeroCD)");
+      do_reset = false;
+    }
+  }
+
   if (do_reset) {
     /* We hold the lock and the interface, so this re-enumeration can't disturb
      * anyone else. If the reset invalidates the handle, report it; otherwise
@@ -142,6 +162,78 @@ int claim_interface_then_reset(libusb_device_handle *handle, int iface,
 
   out_lock = std::move(lock);
   return 0;
+}
+
+int claim_interface_reset_reopen(libusb_context *ctx,
+                                 libusb_device_handle *&handle,
+                                 const Logger_t &logger, bool do_reset,
+                                 std::shared_ptr<UsbDeviceLock> &out_lock,
+                                 const std::string &lock_dir,
+                                 unsigned reopen_timeout_ms) {
+  if (handle == nullptr)
+    return LIBUSB_ERROR_NO_DEVICE;
+
+  /* Record the physical identity BEFORE the reset can invalidate the handle:
+   * bus number + port path name the socket; VID:PID names the device we wait
+   * for (a mid-re-enumeration ZeroCD id at the same port is NOT a match). */
+  libusb_device *dev = libusb_get_device(handle);
+  const uint8_t bus = libusb_get_bus_number(dev);
+  uint8_t ports[8] = {};
+  const int nports = libusb_get_port_numbers(dev, ports, sizeof(ports));
+  libusb_device_descriptor dd{};
+  libusb_get_device_descriptor(dev, &dd);
+
+  int rc = claim_interface_then_reset(handle, find_wifi_interface(handle),
+                                      logger, do_reset, out_lock, lock_dir);
+  if (rc != LIBUSB_ERROR_NOT_FOUND)
+    return rc;
+
+  /* The reset re-enumerated the device (firmware reload through ROM). Close
+   * the stale handle and wait for the same bus+port to come back under the
+   * original VID:PID, then claim WITHOUT another reset — resetting again
+   * would just drop the freshly loaded firmware once more. */
+  libusb_close(handle);
+  handle = nullptr;
+  logger->warn("USB reset re-enumerated the device — waiting for it to "
+               "return on bus {} (up to {} ms)",
+               bus, reopen_timeout_ms);
+
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(reopen_timeout_ms);
+  while (std::chrono::steady_clock::now() < deadline) {
+    libusb_device **list = nullptr;
+    const ssize_t n = libusb_get_device_list(ctx, &list);
+    for (ssize_t i = 0; i < n && handle == nullptr; ++i) {
+      if (libusb_get_bus_number(list[i]) != bus)
+        continue;
+      uint8_t p[8] = {};
+      const int np = libusb_get_port_numbers(list[i], p, sizeof(p));
+      if (np != nports || memcmp(p, ports, static_cast<size_t>(np)) != 0)
+        continue;
+      libusb_device_descriptor d{};
+      if (libusb_get_device_descriptor(list[i], &d) != 0)
+        continue;
+      if (d.idVendor != dd.idVendor || d.idProduct != dd.idProduct)
+        continue; /* ZeroCD / transient ROM id — keep waiting */
+      if (libusb_open(list[i], &handle) != 0)
+        handle = nullptr;
+    }
+    if (list != nullptr)
+      libusb_free_device_list(list, 1);
+    if (handle != nullptr)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  }
+  if (handle == nullptr) {
+    logger->error("device did not re-enumerate as {:04x}:{:04x} within {} ms",
+                  dd.idVendor, dd.idProduct, reopen_timeout_ms);
+    return LIBUSB_ERROR_NOT_FOUND;
+  }
+  logger->info("re-opened {:04x}:{:04x} after reset re-enumeration",
+               dd.idVendor, dd.idProduct);
+  return claim_interface_then_reset(handle, find_wifi_interface(handle),
+                                    logger, /*do_reset=*/false, out_lock,
+                                    lock_dir);
 }
 
 } // namespace devourer

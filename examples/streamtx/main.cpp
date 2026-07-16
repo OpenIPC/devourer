@@ -195,10 +195,13 @@ int main(int argc, char **argv) {
    * guard — a second devourer on this adapter gets BUSY here and bails before
    * the reset, so it can't re-enumerate the adapter out from under the owner. */
   std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
-  rc = devourer::claim_interface_then_reset(handle, devourer::find_wifi_interface(handle), logger,
+  /* Reopen variant: recovers in place when the reset re-enumerates the
+   * device (warm Kestrel firmware-drop through ROM / ZeroCD). */
+  rc = devourer::claim_interface_reset_reopen(context, handle, logger,
       termux_fd == 0 && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
   if (rc != 0) {
-    libusb_close(handle);
+    if (handle != nullptr)
+      libusb_close(handle);
     libusb_exit(context);
     return 1;
   }

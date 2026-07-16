@@ -316,7 +316,11 @@ are parsed in each demo's own code. The ones needed daily:
   radiotap overrides the mode per-packet (ER SU = radiotap-HE FORMAT=EXT_SU).
   Programmatic: `SetTxMode` / `ClearTxMode`.
 - `DEVOURER_SKIP_RESET=1` — skip `libusb_reset_device` before claim (only
-  helps when firmware state is intact).
+  helps when firmware state is intact). Kestrel adapters skip the reset
+  unconditionally (`claim_interface_then_reset` guard): their `power_on`
+  forces the MAC off from any retained state, while a USB reset on running
+  firmware drops the chip to ROM — a stale-handle re-enumeration that can
+  land in the dead ZeroCD DISK id (`0bda:1a2b`).
 - `DEVOURER_TX_GAP_US=N` — txdemo inter-frame gap (default 2000, ~500 fps;
   `0` = max duty for heating experiments).
 - `DEVOURER_USB_DEBUG=1` — libusb DEBUG log level (~7 MB / 15 s, has filled

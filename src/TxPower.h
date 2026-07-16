@@ -62,8 +62,17 @@ struct TxPowerState {
   int16_t ofdm_index = -1;
   int16_t mcs7_index = -1;
   bool hw_readback = false;
-  bool rate_diffs_custom = false; /* caller-supplied per-rate diff table
-                                    * active (SetTxPowerRateDiffs) */
+  bool rate_diffs_custom = false; /* A caller-supplied per-rate diff table is
+                                    * CONFIGURED (SetTxPowerRateDiffs), not
+                                    * necessarily live on the chip right now:
+                                    * a flat override (flat_index >= 0)
+                                    * temporarily flattens the chip's per-rate
+                                    * table to zero diffs, and re-applies the
+                                    * configured table once the override
+                                    * clears. The cck/ofdm/mcs7_index summary
+                                    * fields always report chip truth for the
+                                    * current moment (flat during an override,
+                                    * ref+diff otherwise). */
 };
 
 /* Quantize a quarter-dB offset request to a family's step size: round to

@@ -1,28 +1,15 @@
 #include "HalKestrel.h"
 
 #include <algorithm>
-#include <cstdlib>
-#include <atomic>
 #include <chrono>
 #include <cstring>
-#include <functional>
 #include <thread>
 #include <utility>
-#include <vector>
 
 #include "KestrelFw.h"
 #include "MacRegAx.h"
-#include "PhyTableLoaderKestrel.h"
-#include "hal8852b_phy.h"
-#if defined(DEVOURER_HAVE_KESTREL_8852C)
-#include "hal8852c_phy.h"
-#endif
-#if defined(DEVOURER_KESTREL_HALBB)
-#include "kestrel_halbb_glue.h" /* vendored halbb-G6 8852C RX bring-up (C) */
-#endif
-#if defined(DEVOURER_KESTREL_HALRF)
-#include "kestrel_halrf_glue.h" /* vendored halrf-G6 8852C RF cals (C) */
-#endif
+#include "kestrel_halbb_glue.h" /* vendored halbb-G6 BB bring-up (C) */
+#include "kestrel_halrf_glue.h" /* vendored halrf-G6 RF cals (C) */
 
 namespace kestrel {
 
@@ -959,157 +946,6 @@ void HalKestrel::cmac_dma_init() {
   clr32(r::R_AX_RXDMA_CTRL_0, r::RX_FULL_MODE);
 }
 
-/* halbb_gain_band_determine_8852b: map a central channel to the gain-cache band
- * index. 8852B is 2.4/5 GHz only (no 6G), so 4 bands suffice. */
-uint8_t HalKestrel::gain_band_determine(uint8_t channel) {
-  if (channel <= 14)
-    return 0;                    /* 2.4 GHz */
-  if (channel >= 36 && channel <= 64)
-    return 1;                    /* 5G Low */
-  if (channel >= 100 && channel <= 144)
-    return 2;                    /* 5G Mid */
-  if (channel >= 149 && channel <= 177)
-    return 3;                    /* 5G High */
-  return 1;                      /* default 5G Low (matches vendor) */
-}
-
-/* halbb_init_gain_table -> halbb_cfg_bb_gain_ax_8852b -> halbb_cfg_bb_gain_8852b.
- * Walk array_mp_8852b_phy_reg_gain with the shared conditional-table walker and,
- * for each matched entry, decode (cfg_type,band,path,type) from the pseudo-addr
- * and store the gain bytes into the software cache. This writes ZERO hardware
- * registers (the addr field is NOT a register address) — the cache is applied
- * later per channel by set_gain_error. */
-void HalKestrel::init_gain_table(uint32_t rfe_type, uint32_t cut) {
-  auto decode = [&](uint32_t addr, uint32_t data) {
-    /* 0xf9..0xfe are host-delay pseudo-addresses in the vendor walker — no
-     * cache effect. */
-    if (addr >= 0xf9 && addr <= 0xfe)
-      return;
-    const uint8_t cfg_type = (addr >> 24) & 0xff;
-    const uint8_t band = (addr >> 16) & 0xff;
-    const uint8_t path = (addr >> 8) & 0xff;
-    const uint8_t type = addr & 0xff;
-    if (band >= kGainBandNum || path >= kGainPathNum)
-      return;
-    if (cfg_type == 1) {
-      /* RPL offset: the low byte encodes bw[7:4] | rxsc_start[3:0]. */
-      cfg_rpl_ofst(band, path, (type & 0xf0) >> 4, type & 0xf, data);
-      return;
-    }
-    if (cfg_type != 0) /* only 0 (gain error) + 1 (RPL) are used. */
-      return;
-    if (type == 0) {
-      for (int i = 0; i < 4; i++)
-        _lna_gain[band][path][i] = static_cast<int8_t>((data >> (8 * i)) & 0xff);
-    } else if (type == 1) {
-      for (int i = 0; i < 3; i++)
-        _lna_gain[band][path][4 + i] =
-            static_cast<int8_t>((data >> (8 * i)) & 0xff);
-    } else if (type == 2) {
-      for (int i = 0; i < 2; i++)
-        _tia_gain[band][path][i] =
-            static_cast<int8_t>((data >> (8 * i)) & 0xff);
-    }
-  };
-  const uint32_t *gain = array_mp_8852b_phy_reg_gain;
-  uint32_t gain_len = array_mp_8852b_phy_reg_gain_len;
-#if defined(DEVOURER_HAVE_KESTREL_8852C)
-  if (_variant == ChipVariant::C8852C) {
-    gain = array_mp_8852c_phy_reg_gain;
-    gain_len = array_mp_8852c_phy_reg_gain_len;
-  }
-#endif
-  apply_phy_table(gain, gain_len, rfe_type, cut, decode);
-  _gain_cached = true;
-}
-
-/* halbb_set_gain_error_8852b: write the cached per-band LNA/TIA gain into the
- * band-specific BB registers (g-regs for 2.4 GHz, a-regs for 5 GHz). Called on
- * every channel set — this is the RX front-end gain the 5 GHz path needs. */
-void HalKestrel::set_gain_error(uint8_t channel) {
-  if (!_gain_cached)
-    return;
-  const uint8_t band = gain_band_determine(channel);
-  const bool is_2g = (band == 0);
-  /* Register maps (path A/B x 7 LNA / 2 TIA), verbatim from the vendor. */
-  static const uint32_t lna_g[2][7] = {
-      {0x4678, 0x4678, 0x467C, 0x467C, 0x467C, 0x467C, 0x4680},
-      {0x475C, 0x475C, 0x4760, 0x4760, 0x4760, 0x4760, 0x4764}};
-  static const uint32_t lna_a[2][7] = {
-      {0x45DC, 0x45DC, 0x4660, 0x4660, 0x4660, 0x4660, 0x4664},
-      {0x4740, 0x4740, 0x4744, 0x4744, 0x4744, 0x4744, 0x4748}};
-  static const uint32_t lna_mask[7] = {0x00ff0000, 0xff000000, 0x000000ff,
-                                       0x0000ff00, 0x00ff0000, 0xff000000,
-                                       0x000000ff};
-  static const uint32_t tia_g[2][2] = {{0x4680, 0x4680}, {0x4764, 0x4764}};
-  static const uint32_t tia_a[2][2] = {{0x4664, 0x4664}, {0x4748, 0x4748}};
-  static const uint32_t tia_mask[2] = {0x00ff0000, 0xff000000};
-  for (int path = 0; path < kGainPathNum; path++) {
-    for (int i = 0; i < 7; i++) {
-      const uint32_t reg = is_2g ? lna_g[path][i] : lna_a[path][i];
-      bb_rmw(reg, lna_mask[i],
-             static_cast<uint32_t>(_lna_gain[band][path][i]) & 0xff);
-    }
-    for (int i = 0; i < 2; i++) {
-      const uint32_t reg = is_2g ? tia_g[path][i] : tia_a[path][i];
-      bb_rmw(reg, tia_mask[i],
-             static_cast<uint32_t>(_tia_gain[band][path][i]) & 0xff);
-    }
-  }
-}
-
-void HalKestrel::cfg_rpl_ofst(uint8_t band, uint8_t path, uint8_t bw,
-                              uint8_t rxsc_start, uint32_t data) {
-  /* halbb_cfg_bb_rpl_ofst (8852B: 20/40/80 MHz). RXSC start indices: FULL=0,
-   * 20=1, 40=9. 40 MHz packs 2 sub-channels, 80 MHz packs 4 (rxsc 20) or 2
-   * (rxsc 40). */
-  auto s8 = [&](int i) { return static_cast<int8_t>((data >> (8 * i)) & 0xff); };
-  if (bw == 0) { /* 20 MHz */
-    _rpl_ofst_20[band][path] = s8(0);
-  } else if (bw == 1) { /* 40 MHz */
-    if (rxsc_start == 0)
-      _rpl_ofst_40[band][path][0] = s8(0);
-    else if (rxsc_start == 1)
-      for (int i = 0; i < 2; i++)
-        _rpl_ofst_40[band][path][1 + i] = s8(i);
-  } else if (bw == 2) { /* 80 MHz */
-    if (rxsc_start == 0)
-      _rpl_ofst_80[band][path][0] = s8(0);
-    else if (rxsc_start == 1)
-      for (int i = 0; i < 4; i++)
-        _rpl_ofst_80[band][path][1 + i] = s8(i);
-    else if (rxsc_start == 9)
-      for (int i = 0; i < 2; i++)
-        _rpl_ofst_80[band][path][9 + i] = s8(i);
-  }
-}
-
-void HalKestrel::set_rxsc_rpl_comp(uint8_t channel) {
-  /* halbb_set_rxsc_rpl_comp_8852b: average the two paths' RPL offsets per
-   * BW/RXSC, pack into 3 words, write BB 0x49b0/b4/b8 (+ 0x4a00/04/08 mirror).
-   * Feeds the BB RX RSSI/RPL computation. */
-  if (!_gain_cached)
-    return;
-  const uint8_t b = gain_band_determine(channel);
-  auto avg2 = [](int8_t a, int8_t c) -> uint32_t {
-    return static_cast<uint32_t>(static_cast<int8_t>((a + c) >> 1)) & 0xff;
-  };
-  const uint32_t rpl20 = avg2(_rpl_ofst_20[b][0], _rpl_ofst_20[b][1]);
-  auto a40 = [&](int i) { return avg2(_rpl_ofst_40[b][0][i], _rpl_ofst_40[b][1][i]); };
-  auto a80 = [&](int i) { return avg2(_rpl_ofst_80[b][0][i], _rpl_ofst_80[b][1][i]); };
-  const uint32_t v1 = (rpl20 << 8) | (a40(0) << 16) | (a40(1) << 24);
-  const uint32_t v2 =
-      a40(2) | (a80(0) << 8) | (a80(1) << 16) | (a80(10) << 24);
-  const uint32_t v3 =
-      a80(2) | (a80(3) << 8) | (a80(4) << 16) | (a80(9) << 24);
-  bb_rmw(0x49b0, 0xffffff00, v1 >> 8);
-  bb_rmw(0x4a00, 0xffffff00, v1 >> 8);
-  bb_rmw(0x49b4, r::MASKDWORD, v2);
-  bb_rmw(0x4a04, r::MASKDWORD, v2);
-  bb_rmw(0x49b8, r::MASKDWORD, v3);
-  bb_rmw(0x4a08, r::MASKDWORD, v3);
-}
-
 void HalKestrel::usb_rx_agg_cfg() {
   /* rx_agg_cfg_usb_8852b (MAC_AX_RX_AGG_MODE_USB): the RXAGG engine is what
    * DMAs RX frames onto the USB bulk-IN, so it MUST be enabled — USB mode is
@@ -1618,16 +1454,6 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
                 _device.rtw_read32(r::R_AX_WLRF_CTRL),
                 _device.rtw_read32(r::R_AX_SYS_FUNC_EN));
 
-  /* --- BB register + gain + radio tables via FIRMWARE OFFLOAD (cmd_ofld H2C),
-   * the vendor's io_ofld path for USB (halbb_fw_set_reg / halrf_wrf ->
-   * mac_add_cmd_ofld). Each table write is one 16-byte cmd_ofld command; a
-   * full 2000-byte buffer auto-flushes with LC forced on its last command
-   * (ofld_incompatible_full_cmd), and each SECTION ends with the vendor's LC
-   * sentinel flush: halbb = a dummy BB write to 0x1a24, halrf = a 1 us
-   * DELAY_OFLD (halbb_fwofld_bitmap_en / halrf_write_fwofld_trigger). The
-   * 0xf9..0xfe delay pseudo-addresses are HOST-side sleeps in the vendor
-   * walkers (halbb_fwcfg_bb_phy_8852b:42, no flush, no fw delay command);
-   * phy1 (0x100xxxxx) entries are skipped for single-PHY. --- */
   /* Flip the master HCI flow-control enable now — the vendor does this at ifup
    * right before its first bulk cmd_ofld (HCI_FC_CTRL 0x08040000 -> 0x055b), so
    * FC_EN is only armed once the DMAC/CMAC/USB init has fully settled. This is
@@ -1638,216 +1464,49 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
         r::B_AX_HCI_FC_EN);
   delay_us(10);
 
-#if defined(DEVOURER_KESTREL_HALBB) && defined(DEVOURER_KESTREL_HALRF)
-  {
-    /* Vendored table ownership (both chips): halbb_init_reg applies the BB
-     * phy_reg table + loads the gain table + the efuse RX gain offsets,
-     * halrf_config_radio applies radio B then A (vendor order) and sends the
-     * radio-page H2Cs through the bridge send_h2c into the mac_ax encoder —
-     * the vendor's own loaders walking the vendored hwimg arrays, replacing
-     * the C++ walker + cmd_ofld batching. */
-    ensure_vnd_ctx(cut, rfe_type);
-    if (!kestrel_halbb_init_reg(_halbb_ctx))
-      _logger->warn("Kestrel PHY: vendored halbb_init_reg reported failure");
-    if (!kestrel_halrf_config_radio(_halrf_ctx))
-      _logger->warn("Kestrel PHY: vendored halrf_config_radio reported failure");
-    const uint32_t bb4004v = _device.rtw_read32_wide(0x4004u + 0x10000u);
-    _logger->info("Kestrel PHY: BB+RF tables applied via vendored loaders "
-                  "(rfe=0x{:02x} cut={}) — BB0x4004=0x{:08x} (want CA014000)",
-                  rfe_type, cut, bb4004v);
-    /* Vendored halbb bring-up: LNAON/TRSW/PAPE gpio routing + RX chains (the
-     * gain cache came from init_reg), then the T-MAC TX path-com routing
-     * (halbb_ctrl_tx_path_tmac_8852c) that connects the BB IFFT output to the
-     * TX chain on the 8852C — without it its RF synth locks but nothing
-     * radiates (glue no-op on the 8852B: per-STA CMAC antenna model). */
-    vnd_bb_bringup(cut, rfe_type);
-    vnd_bb_ctrl_tx_path();
-    /* RFK prologue in the vendor's halrf_dm_init position (rtl8852b_halinit.c
-     * runs rtw_hal_rf_dm_init right after the table apply, BEFORE any channel
-     * work): NCTL microcode, RFK sub-state reset, the a-die/d-die SI reset,
-     * LCK/RCK synth-filter cals, efuse trim + TSSI DE. Position is load-
-     * bearing — run lazily after the first tune/BB channel config, the SI
-     * reset tears down live a-die state and the radio goes deaf both ways
-     * (bisected on the 8852B: rfk_init-after-tune = 0 ambient decodes,
-     * dm_init position = decodes normally). */
-    if (_halrf_ctx && !_halrf_rfk_inited) {
-      kestrel_halrf_rfk_init(_halrf_ctx);
-      _halrf_rfk_inited = true;
-    }
-    return true;
-  }
-#endif
-
-  _fw.ofld_begin();
-  auto bb_emit = [&](uint32_t addr, uint32_t val) {
-    switch (addr) {
-    case 0xfe: delay_us(50000); return;
-    case 0xfd: delay_us(5000); return;
-    case 0xfc: delay_us(1000); return;
-    case 0xfb: delay_us(50); return;
-    case 0xfa: delay_us(5); return;
-    case 0xf9: delay_us(1); return;
-    default: break;
-    }
-    if ((addr >> 16) == 0x100) /* phy1-only entry, skip on single-PHY */
-      return;
-    _fw.ofld_write(r::OFLD_SRC_BB, r::OFLD_TYPE_WRITE, 0,
-                   static_cast<uint16_t>(addr & 0xffff), val, r::MASKDWORD);
-  };
-  /* Chip-specific BB/RF tables — the 8832CU is a different die; applying the
-   * 8852B phy_reg/radio tables leaves its RF/BB mis-tuned so the RX front-end is
-   * deaf on both bands (BB0x4004 still reads the table value since it is a
-   * common core-BB register, masking the mismatch). */
-  const uint32_t *phy_reg = array_mp_8852b_phy_reg;
-  uint32_t phy_reg_len = array_mp_8852b_phy_reg_len;
-  const uint32_t *radioa = array_mp_8852b_radioa;
-  uint32_t radioa_len = array_mp_8852b_radioa_len;
-  const uint32_t *radiob = array_mp_8852b_radiob;
-  uint32_t radiob_len = array_mp_8852b_radiob_len;
-#if defined(DEVOURER_HAVE_KESTREL_8852C)
-  if (_variant == ChipVariant::C8852C) {
-    phy_reg = array_mp_8852c_phy_reg;
-    phy_reg_len = array_mp_8852c_phy_reg_len;
-    radioa = array_mp_8852c_radioa;
-    radioa_len = array_mp_8852c_radioa_len;
-    radiob = array_mp_8852c_radiob;
-    radiob_len = array_mp_8852c_radiob_len;
-  }
-#endif
-  apply_phy_table(phy_reg, phy_reg_len, rfe_type, cut, bb_emit);
-  _fw.ofld_flush(KestrelFw::OfldFlush::BB); /* bitmap_en(false): 0x1a24 LC */
-  /* array_mp_8852b_phy_reg_gain is NOT a register table — halbb_init_gain_table
-   * -> halbb_cfg_bb_gain_8852b decodes each entry as (cfg_type,band,path,type)
-   * and stores `data` into the SOFTWARE gain cache (writing zero hardware
-   * registers; emitting it as cmd_ofld faults the fw). Populate the cache here;
-   * set_gain_error applies it to the band-specific BB regs per channel — the
-   * 5 GHz RX front-end is deaf without it. 8852B only: on the C8852C the vendored
-   * halbb (kestrel_halbb_rx_bringup's halbb_cfg_bb_gain + ctrl_bw_ch/set_gain)
-   * owns the gain cache (bb_gain_i), so this hand-rolled cache goes unread. */
-  if (_variant != ChipVariant::C8852C)
-    init_gain_table(rfe_type, cut);
-
-  /* halrf_wrf offload dispatch (halrf_interface.c:202; each RF reg appears
-   * twice in the radio table): BIT(16) set = d-die -> a BB write to the
-   * 0xe000/0xf000 window; clear = a-die -> RF_CMD_OFLD (fw drives the SI).
-   * mask = MASKRF (20-bit full write). Each radio table ends with the halrf
-   * trigger (1 us DELAY_OFLD, lc=1) and its radio-page H2C to the fw
-   * (halrf_config_8852b_write_radio_a/b_reg_to_fw). */
-  std::vector<uint32_t> radio_page;
-  auto apply_radio = [&](const uint32_t *arr, size_t len, uint8_t path) {
-    radio_page.clear();
-    auto emit = [&](uint32_t addr, uint32_t val) {
-      switch (addr) {
-      case 0xfe: delay_us(50000); return;
-      case 0xfd: delay_us(5000); return;
-      case 0xfc: delay_us(1000); return;
-      case 0xfb: delay_us(50); return;
-      case 0xfa: delay_us(5); return;
-      case 0xf9: delay_us(1); return;
-      default: break;
-      }
-      /* store_radio_reg (halrf_hwimg_8852b.c:157): page entries are the DRFC
-       * (d-die, addr >= 0x100) writes only, packed (addr&0xff)<<20 | data. */
-      if (addr >= 0x100)
-        radio_page.push_back(((addr & 0xff) << 20) | (val & r::MASKRF));
-      if (addr & 0x10000u) {
-        const uint16_t off = static_cast<uint16_t>((path ? 0xf000 : 0xe000) +
-                                                   ((addr & 0xff) << 2));
-        _fw.ofld_write(r::OFLD_SRC_BB, r::OFLD_TYPE_WRITE, 0, off,
-                       val & r::MASKRF, r::MASKRF);
-      } else {
-        _fw.ofld_write(r::OFLD_SRC_RF, r::OFLD_TYPE_WRITE, path,
-                       static_cast<uint16_t>(addr & 0xff), val & r::MASKRF,
-                       r::MASKRF);
-      }
-    };
-    apply_phy_table(arr, len, rfe_type, cut, emit);
-    _fw.ofld_flush(KestrelFw::OfldFlush::RF); /* halrf trigger */
-    _fw.radio_page_to_fw(path == 0 ? r::OUTSRC_CL_RADIO_A : r::OUTSRC_CL_RADIO_B,
-                         0, radio_page.data(),
-                         static_cast<uint16_t>(radio_page.size()));
-  };
-  apply_radio(radioa, radioa_len, 0);
-  apply_radio(radiob, radiob_len, 1);
-
-  /* Decisive readback: BB 0x4004 is host-readable (core BB), and the phy_reg
-   * table sets it to 0xCA014000 — but ONLY via fw-offload now (no direct
-   * writes). If it reads back the table value, the fw processed the batch. */
-  const uint32_t bb4004 = _device.rtw_read32_wide(0x4004u + 0x10000u);
-  _logger->info("Kestrel PHY: BB+RF tables applied via fw-offload "
+  /* Vendored table ownership (both chips): halbb_init_reg applies the BB
+   * phy_reg table + loads the gain table + the efuse RX gain offsets,
+   * halrf_config_radio applies radio B then A (vendor order) and sends the
+   * radio-page H2Cs through the bridge send_h2c into the mac_ax encoder —
+   * the vendor's own loaders walking the vendored hwimg arrays, replacing
+   * the C++ walker + cmd_ofld batching. */
+  ensure_vnd_ctx(cut, rfe_type);
+  if (!kestrel_halbb_init_reg(_halbb_ctx))
+    _logger->warn("Kestrel PHY: vendored halbb_init_reg reported failure");
+  if (!kestrel_halrf_config_radio(_halrf_ctx))
+    _logger->warn("Kestrel PHY: vendored halrf_config_radio reported failure");
+  const uint32_t bb4004v = _device.rtw_read32_wide(0x4004u + 0x10000u);
+  _logger->info("Kestrel PHY: BB+RF tables applied via vendored loaders "
                 "(rfe=0x{:02x} cut={}) — BB0x4004=0x{:08x} (want CA014000)",
-                rfe_type, cut, bb4004);
-
+                rfe_type, cut, bb4004v);
+  /* Vendored halbb bring-up: LNAON/TRSW/PAPE gpio routing + RX chains (the
+   * gain cache came from init_reg), then the T-MAC TX path-com routing
+   * (halbb_ctrl_tx_path_tmac_8852c) that connects the BB IFFT output to the
+   * TX chain on the 8852C — without it its RF synth locks but nothing
+   * radiates (glue no-op on the 8852B: per-STA CMAC antenna model). */
+  vnd_bb_bringup(cut, rfe_type);
+  vnd_bb_ctrl_tx_path();
+  /* RFK prologue in the vendor's halrf_dm_init position (rtl8852b_halinit.c
+   * runs rtw_hal_rf_dm_init right after the table apply, BEFORE any channel
+   * work): NCTL microcode, RFK sub-state reset, the a-die/d-die SI reset,
+   * LCK/RCK synth-filter cals, efuse trim + TSSI DE. Position is load-
+   * bearing — run lazily after the first tune/BB channel config, the SI
+   * reset tears down live a-die state and the radio goes deaf both ways
+   * (bisected on the 8852B: rfk_init-after-tune = 0 ambient decodes,
+   * dm_init position = decodes normally). */
+  if (_halrf_ctx && !_halrf_rfk_inited) {
+    kestrel_halrf_rfk_init(_halrf_ctx);
+    _halrf_rfk_inited = true;
+  }
   return true;
 }
 
-void HalKestrel::ctrl_tx_path_tmac_8852c() {
-  /* halbb_ctrl_tx_path_tmac_8852c, RF_PATH_A / single-PHY (dbcc off).
-   * The 0xDC00.. and 0xD800.. registers are CMAC band-0 power-region MAC
-   * registers (mac_write_pwr_reg: band-0 -> direct MAC_REG_W32 at the raw
-   * offset, region R_AX_PWR_RATE_CTRL 0xD200..0xFFFF), so they take a plain
-   * rtw_write32. 0x09a4 / 0x58dc are BB-window registers (bb_rmw). */
-
-  /* powermap clear: 0xDC00..0xDC28 (11 dwords). */
-  for (uint16_t off = 0; off <= 4 * 10; off += 4)
-    _device.rtw_write32(0xDC00 + off, 0x0);
-
-  /* 0x9a4[4:2] tx path_en / path_map_{a,b} source = 0 (T-MAC TX). */
-  bb_rmw(0x09a4, 0x1c, 0x0);
-
-  /* path-com CRs, RF_PATH_A: path_a enable, path_a connect ifft0. */
-  static const uint32_t path_com[][2] = {
-      {0xD800, 0x08889880}, {0xD804, 0x13111111}, {0xD808, 0x01209313},
-      {0xD80C, 0x49249249}, {0xD810, 0x1C9C9C49}, {0xD814, 0x39393939},
-      {0xD818, 0x39393939}, {0xD81C, 0x39393939}, {0xD820, 0x00003939},
-      {0xD824, 0x00000000}, {0xD828, 0xE0000000}, {0xD82C, 0x00000000}};
-  for (const auto &e : path_com)
-    _device.rtw_write32(static_cast<uint16_t>(e[0]), e[1]);
-
-  /* TSSI reset (path A): 0x58dc[31:30] = 1 then 3. */
-  bb_rmw(0x58dc, 0xC0000000u, 0x1);
-  bb_rmw(0x58dc, 0xC0000000u, 0x3);
-
-  _logger->info("Kestrel PHY(8852C): T-MAC TX path-com routed (RF_PATH_A)");
-}
-
-void HalKestrel::ctrl_rx_path_8852c() {
-  /* halbb_ctrl_rx_path_8852c (halbb_8852c_api.c), non-DBCC, RF_PATH_AB (both RX
-   * chains for the monitor). The 0x4978 rx_path_en is the enable devourer never
-   * wrote -> the 8852C RX front end stayed disabled (near-deaf). */
-  bb_rmw(0x4978, 0xf, 0x0); /* clear first (8852C/D) */
-  bb_rmw(0x4978, 0xf, 0x3); /* rx_path_en = AB */
-  /* 1RCCA */
-  bb_rmw(0x4974, 0x3C000u, 0x3);
-  bb_rmw(0x4974, 0x3C0000u, 0x3);
-  /* Rx HT nss_limit / mcs_limit */
-  bb_rmw(0xd18, (1u << 9) | (1u << 8), 1);
-  bb_rmw(0xd18, (1u << 22) | (1u << 21), 1);
-  /* Rx HE n_user_max / tb_max_nss (HE_N_USER_MAX_8852C = 8) */
-  bb_rmw(0xd80, 0x3fc0u, 8);
-  bb_rmw(0xd80, (1u << 16) | (1u << 15) | (1u << 14), 1);
-  bb_rmw(0xd80, (1u << 25) | (1u << 24) | (1u << 23), 1);
-  /* TSSI reset (both paths) */
-  bb_rmw(0x58dc, 0xC0000000u, 0x1);
-  bb_rmw(0x58dc, 0xC0000000u, 0x3);
-  bb_rmw(0x78dc, 0xC0000000u, 0x1);
-  bb_rmw(0x78dc, 0xC0000000u, 0x3);
-  /* BB reset (both paths) */
-  bb_rmw(0x5818, 1u << 30, 0x1);
-  bb_rmw(0x7818, 1u << 30, 0x1);
-  bb_rmw(0x5818, 1u << 30, 0x0);
-  bb_rmw(0x7818, 1u << 30, 0x0);
-  _logger->info("Kestrel PHY(8852C): RX path enabled (RF_PATH_AB, 0x4978=0x3)");
-}
-
-#if defined(DEVOURER_KESTREL_HALBB)
 /* ---- Vendored halbb-G6 8852C RX bring-up bridge -------------------------- *
  * Realtek's own halbb C (hal/halbb/g6) drives the RX front-end verbatim:
  * gain-table cache load, LNAON/TRSW/PAPE gpio routing, RX-path enable, per-band
  * gain-error. Its register/OS plane is routed back here — BB regs through the
  * wide (wIndex=1) window like bb_rmw; power-region regs through the plain MAC
- * plane like field32. The dev cookie is this HalKestrel. This replaces the
- * hand-transcribed C++ bb_dm_init_8852c the RX-halt bisect had stripped. */
+ * plane like field32. The dev cookie is this HalKestrel. */
 unsigned int HalKestrel::halbb_r32(void *dev, unsigned int addr) {
   auto *h = static_cast<HalKestrel *>(dev);
   return h->_device.rtw_read32_wide((addr & 0xffffu) + 0x10000u);
@@ -1899,7 +1558,6 @@ void HalKestrel::halbb_wrf(void *dev, unsigned int path, unsigned int addr,
   static_cast<HalKestrel *>(dev)->rf_wrf(static_cast<uint8_t>(path), addr, mask,
                                          val);
 }
-#if defined(DEVOURER_KESTREL_HALRF)
 int HalKestrel::halbb_efuse_get_info(void *dev, unsigned int id, void *value,
                                      unsigned int size) {
   auto *h = static_cast<HalKestrel *>(dev);
@@ -1908,7 +1566,6 @@ int HalKestrel::halbb_efuse_get_info(void *dev, unsigned int id, void *value,
   return kestrel_halrf_efuse_get_info(h->_halrf_ctx, h->_efuse_log_map.data(),
                                       id, value, size, /*autoload=*/1);
 }
-#endif
 
 void HalKestrel::ensure_vnd_ctx(uint8_t cut, uint8_t rfe_type) {
   if (_halbb_bridge)
@@ -1922,9 +1579,7 @@ void HalKestrel::ensure_vnd_ctx(uint8_t cut, uint8_t rfe_type) {
   br->read_rf = &HalKestrel::halbb_rrf;
   br->write_rf = &HalKestrel::halbb_wrf;
   br->delay_us = &HalKestrel::halbb_delay;
-#if defined(DEVOURER_KESTREL_HALRF)
   br->efuse_get_info = &HalKestrel::halbb_efuse_get_info;
-#endif
   br->logline = nullptr;
   /* XTAL-SI plane — the 8852B's a-die SI reset (halrf_si_reset on the RFK
    * prologue) does real get/set pairs through here. */
@@ -1937,7 +1592,6 @@ void HalKestrel::ensure_vnd_ctx(uint8_t cut, uint8_t rfe_type) {
                                 ? KESTREL_CHIP_8852C
                                 : KESTREL_CHIP_8852B;
   _halbb_ctx = kestrel_halbb_create(br, chip, cut, rfe_type);
-#if defined(DEVOURER_KESTREL_HALRF)
   _halrf_ctx = kestrel_halrf_create(br, chip, cut, rfe_type); /* shares the bridge */
   /* Read + cache the efuse shadow now so the halrf cals' efuse reads (TSSI
    * DE targets, thermal trim) resolve through the efuse_get_info callback. */
@@ -1945,7 +1599,6 @@ void HalKestrel::ensure_vnd_ctx(uint8_t cut, uint8_t rfe_type) {
     EfuseInfo ei;
     read_efuse(ei); /* populates _efuse_log_map + _efuse_valid */
   }
-#endif
 }
 
 void HalKestrel::vnd_bb_bringup(uint8_t cut, uint8_t rfe_type) {
@@ -1955,7 +1608,6 @@ void HalKestrel::vnd_bb_bringup(uint8_t cut, uint8_t rfe_type) {
                 "gpio/rx-path, rfe={} cut={})", rfe_type, cut);
 }
 
-#if defined(DEVOURER_KESTREL_HALRF)
 void HalKestrel::vnd_rf_dac_cal() {
   if (_halrf_ctx) {
     kestrel_halrf_dac_cal(_halrf_ctx, 1);
@@ -2014,7 +1666,6 @@ void HalKestrel::vnd_rf_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw) {
    * support_ability (EVM-settled there: they degrade TX under the fixed-dBm
    * power model). */
 }
-#endif
 
 void HalKestrel::vnd_bb_set_gain(uint8_t channel, uint8_t band_type) {
   if (_halbb_ctx)
@@ -2039,18 +1690,13 @@ void HalKestrel::vnd_bb_ctrl_bw_ch(uint8_t pri_ch, uint8_t center,
                                          : static_cast<uint8_t>(bw);
   kestrel_halbb_ctrl_bw_ch(_halbb_ctx, pri_ch, center, hbw, band_type);
 }
-#endif /* DEVOURER_KESTREL_HALBB */
 
 HalKestrel::~HalKestrel() {
-#if defined(DEVOURER_KESTREL_HALRF)
   if (_halrf_ctx)
     kestrel_halrf_destroy(_halrf_ctx);
-#endif
-#if defined(DEVOURER_KESTREL_HALBB)
   if (_halbb_ctx)
     kestrel_halbb_destroy(_halbb_ctx);
   delete static_cast<kestrel_halbb_bridge *>(_halbb_bridge);
-#endif
 }
 
 namespace {
@@ -2155,73 +1801,6 @@ void HalKestrel::rf_wrf(uint8_t path, uint32_t addr, uint32_t mask,
     rf_write_dav(path, a, w);
 }
 
-void HalKestrel::rf_ctrl_ch(uint8_t channel, uint8_t band_type) {
-  /* halrf_ctrl_ch_8852b/8852c: ch_setting for DAV (a-die, reg 0x18) then DDV
-   * (d-die, reg 0x10018), each path A + B. DAV path A takes the synth-lock path
-   * (halrf_set_s0_arfc18). RF18 band bits (halrf_8852c switch): 2.4G = channel
-   * only, 5G = BIT16|BIT8, 6G = BIT17|BIT16. */
-  auto ch_setting = [&](uint8_t path, bool is_dav) {
-    const uint32_t reg18 = is_dav ? 0x18u : 0x10018u;
-    uint32_t rf18 = rf_rrf(path, reg18, r::MASKRF);
-    rf18 &= ~0x3e3ffu;   /* [17:16],[9:8],[7:0] */
-    rf18 |= channel;     /* channel */
-    if (band_type == 1)
-      rf18 |= (1u << 16) | (1u << 8); /* 5G */
-    else if (band_type == 2)
-      rf18 |= (1u << 17) | (1u << 16); /* 6G */
-    rf18 = (rf18 & 0xf0fffu) | (1u << 12);
-    if (path == 1 || !is_dav) {
-      rf_wrf(path, reg18, r::MASKRF, rf18);
-    } else {
-      /* halrf_set_s0_arfc18_8852b: 0xd3[8]=1, write RF18 (a-die), poll the
-       * synth LCK lock (0xb7[8]==0), 0xd3[8]=0. */
-      rf_wrf(0, 0xd3, 1u << 8, 0x1);
-      rf_wrf(0, 0x18, r::MASKRF, rf18);
-      bool locked = false;
-      for (int c = 0; c < 1000; ++c) {
-        if (rf_rrf(0, 0xb7, 1u << 8) == 0) {
-          locked = true;
-          break;
-        }
-        delay_us(1);
-      }
-      if (!locked)
-        _logger->warn("Kestrel RF: synth LCK lock timeout (path A ch{})",
-                      channel);
-      rf_wrf(0, 0xd3, 1u << 8, 0x0);
-    }
-    /* re-latch */
-    rf_wrf(path, 0xcf, 1u << 0, 0x0);
-    rf_wrf(path, 0xcf, 1u << 0, 0x1);
-  };
-  ch_setting(0, true); /* DAV path A (locked) */
-  ch_setting(1, true); /* DAV path B */
-  ch_setting(0, false); /* DDV path A */
-  ch_setting(1, false); /* DDV path B */
-}
-
-void HalKestrel::rf_ctrl_bw(ChannelWidth_t bw) {
-  /* halrf_bw_setting_8852b: RF18 [11:10] bandwidth bits, DAV (0x18) + DDV
-   * (0x10018) x path A/B. 40 MHz=BIT11, 80 MHz=BIT10, 20/5/10=both. */
-  auto bw_set = [&](uint8_t path, bool is_dav) {
-    const uint32_t reg18 = is_dav ? 0x18u : 0x10018u;
-    uint32_t v = rf_rrf(path, reg18, r::MASKRF);
-    v &= ~((1u << 11) | (1u << 10));
-    if (bw == CHANNEL_WIDTH_40)
-      v |= (1u << 11);
-    else if (bw == CHANNEL_WIDTH_80)
-      v |= (1u << 10);
-    else
-      v |= (1u << 11) | (1u << 10); /* 20/5/10 */
-    v = (v & 0xf0fffu) | (1u << 12);
-    rf_wrf(path, reg18, r::MASKRF, v);
-  };
-  bw_set(0, true);  /* DAV path A */
-  bw_set(1, true);  /* DAV path B */
-  bw_set(0, false); /* DDV path A */
-  bw_set(1, false); /* DDV path B */
-}
-
 /* Masked BB read (wIndex=1 window), value shifted down to the mask's LSB. */
 static inline uint32_t mask_shift(uint32_t v, uint32_t mask) {
   return (v & mask) >> ctz32(mask);
@@ -2230,168 +1809,16 @@ uint32_t HalKestrel::bb_read(uint32_t addr, uint32_t mask) {
   return mask_shift(_device.rtw_read32_wide((addr & 0xffff) + BB_WIN), mask);
 }
 
-void HalKestrel::afe_init() {
-  /* halrf_afe_init_8852b */
-  _device.rtw_write32(0x8040, 0xf); /* halrf_wmac32 (MAC) */
-  bb_rmw(0xc0d4, r::MASKDWORD, 0x4486888c);
-  bb_rmw(0xc0d8, r::MASKDWORD, 0xc6ba10e0);
-  bb_rmw(0xc0dc, r::MASKDWORD, 0x30c52868);
-  bb_rmw(0xc0e0, r::MASKDWORD, 0x05008128);
-  bb_rmw(0xc0e4, r::MASKDWORD, 0x0000272b);
-  bb_rmw(0xc1d4, r::MASKDWORD, 0x4486888c);
-  bb_rmw(0xc1d8, r::MASKDWORD, 0xc6ba10e0);
-  bb_rmw(0xc1dc, r::MASKDWORD, 0x30c52868);
-  bb_rmw(0xc1e0, r::MASKDWORD, 0x05008128);
-  bb_rmw(0xc1e4, r::MASKDWORD, 0x0000272b);
-}
-
-void HalKestrel::dack_reset() {
-  /* halrf_dack_reset_8852b: toggle BIT17 on each ADDCK/DADCK block. */
-  for (uint32_t reg : {0xc000u, 0xc020u, 0xc100u, 0xc120u}) {
-    bb_rmw(reg, 1u << 17, 0x0);
-    bb_rmw(reg, 1u << 17, 0x1);
-  }
-}
-
-void HalKestrel::drck() {
-  /* halrf_drck_8852b: D-die RCK. Trigger 0xc0cc[6], poll 0xc0d0[3], then the
-   * manual RCK writeback for LPS. */
-  bb_rmw(0xc0cc, 1u << 6, 0x1);
-  for (int c = 0; c < 10000 && bb_read(0xc0d0, 1u << 3) == 0; c++)
-    delay_us(1);
-  bb_rmw(0xc0cc, 1u << 6, 0x0);
-  bb_rmw(0xc094, 1u << 9, 0x1);
-  delay_us(1);
-  bb_rmw(0xc094, 1u << 9, 0x0);
-  const uint32_t rck_d = bb_read(0xc0d0, 0xf8000);
-  bb_rmw(0xc0cc, 1u << 9, 0x0); /* RCK_SEL=0 */
-  bb_rmw(0xc0cc, 0x1f, rck_d);
-}
-
-void HalKestrel::addck() {
-  /* halrf_addck_8852b: ADC DC-offset calibration, per path. check_addc is
-   * debug-only (skipped). */
-  struct Path {
-    uint32_t b8, d4, f4, fc;
-  };
-  const Path p[2] = {{0x12b8, 0xc0d4, 0xc0f4, 0xc0fc},
-                     {0x32b8, 0xc1d4, 0xc1f4, 0xc1fc}};
-  bb_rmw(0xc0f4, 0x30, 0x0); /* manual off (both) */
-  bb_rmw(0xc1f4, 0x30, 0x0);
-  for (int i = 0; i < 2; i++) {
-    bb_rmw(p[i].b8, 1u << 30, 0x1); /* ADC & clk enable */
-    bb_rmw(0x032c, 1u << 30, 0x0);
-    bb_rmw(0x032c, 1u << 22, 0x0); /* reset calibration */
-    bb_rmw(0x032c, 1u << 22, 0x1);
-    bb_rmw(0x030c, 0x0f000000, 0xf);
-    delay_us(100);
-    bb_rmw(0x032c, 1u << 16, 0x0); /* ADC input short */
-    bb_rmw(p[i].d4, 1u << 1, 0x1);
-    bb_rmw(0x030c, 0x0f000000, 0x3); /* release ADC reset */
-    bb_rmw(p[i].f4, 1u << 11, 0x1);  /* trigger DC-offset cal */
-    bb_rmw(p[i].f4, 1u << 11, 0x0);
-    delay_us(1);
-    bb_rmw(p[i].f4, 0x300, 0x1); /* check-done select */
-    int c = 0;
-    for (; c < 10000 && bb_read(p[i].fc, 1u << 0) == 0; c++)
-      delay_us(1);
-    if (c >= 10000)
-      _logger->warn("Kestrel ADDCK: S{} timeout", i);
-    /* restore */
-    bb_rmw(p[i].d4, 1u << 1, 0x0);
-    bb_rmw(0x032c, 1u << 16, 0x1);
-    bb_rmw(0x030c, 0x0f000000, 0xc);
-    bb_rmw(0x032c, 1u << 30, 0x1);
-    /* backup the measured offsets */
-    bb_rmw(p[i].f4, 0x300, 0x0);
-    _addck_d[i][0] = static_cast<uint16_t>(bb_read(p[i].fc, 0xffc00));
-    _addck_d[i][1] = static_cast<uint16_t>(bb_read(p[i].fc, 0x003ff));
-    bb_rmw(p[i].b8, 1u << 30, 0x0);
-  }
-}
-
-void HalKestrel::addck_reload() {
-  /* halrf_addck_reload_8852b: apply the measured ADC DC offsets. */
-  const uint32_t f0[2] = {0xc0f0, 0xc1f0}, f4[2] = {0xc0f4, 0xc1f4};
-  for (int i = 0; i < 2; i++) {
-    bb_rmw(f0[i], 0x3ff0000, _addck_d[i][0]);
-    bb_rmw(f4[i], 0xf, static_cast<uint32_t>(_addck_d[i][1]) >> 6);
-    bb_rmw(f0[i], 0xfc000000, static_cast<uint32_t>(_addck_d[i][1]) & 0x3f);
-    bb_rmw(f4[i], 0x30, 0x3); /* manual */
-  }
-}
-
-void HalKestrel::dack() {
-  /* halrf_dack_8852b_s0/s1: DAC-side MSBK (multi-stage-bit) + DADCK calibration,
-   * per path. Auto-mode: the hardware runs the cal and applies the corrections
-   * (0xc004[0]/0xc104[0] = auto-on); the optional result backup (for reload-
-   * without-remeasure) is skipped. Reduces DAC DC / carrier leakage. */
-  struct P {
-    uint32_t a0, b8, d8, dc, c04, c24, c0c, c2c, msbk1, msbk2, dadck1, dadck2;
-  };
-  const P p[2] = {
-      {0x12a0, 0x12b8, 0xc0d8, 0xc0dc, 0xc004, 0xc024, 0xc00c, 0xc02c, 0xc040,
-       0xc064, 0xc05c, 0xc080},
-      {0x32a0, 0x32b8, 0xc1d8, 0xc1dc, 0xc104, 0xc124, 0xc10c, 0xc12c, 0xc140,
-       0xc164, 0xc15c, 0xc180}};
-  for (int i = 0; i < 2; i++) {
-    const P &r = p[i];
-    bb_rmw(r.a0, 1u << 15, 1);
-    bb_rmw(r.a0, 0x7000, 3);
-    bb_rmw(r.b8, 1u << 30, 1);
-    bb_rmw(0x030c, 1u << 28, 1);
-    bb_rmw(0x032c, 0x80000000, 0);
-    delay_us(100);
-    bb_rmw(r.d8, 1u << 16, 1);
-    bb_rmw(r.dc, (1u << 27) | (1u << 26), 3);
-    bb_rmw(r.c04, 1u << 30, 0);
-    bb_rmw(r.c24, 1u << 30, 0);
-    bb_rmw(r.c04, 0x3ff00000, 0x30);
-    bb_rmw(r.c04, (1u << 31) | (1u << 30), 0);
-    bb_rmw(r.c04, 1u << 17, 1);
-    bb_rmw(r.c24, 1u << 17, 1);
-    bb_rmw(r.c0c, 1u << 2, 0);
-    bb_rmw(r.c2c, 1u << 2, 0);
-    bb_rmw(r.c04, 1u << 0, 1); /* MSBK auto on */
-    bb_rmw(r.c24, 1u << 0, 1);
-    delay_us(1);
-    int c = 0;
-    for (; c < 10000 &&
-           (bb_read(r.msbk1, 1u << 31) == 0 || bb_read(r.msbk2, 1u << 31) == 0);
-         c++)
-      delay_us(1);
-    if (c >= 10000)
-      _logger->warn("Kestrel DACK: S{} MSBK timeout", i);
-    bb_rmw(r.c0c, 1u << 2, 1); /* DADCK trigger */
-    bb_rmw(r.c2c, 1u << 2, 1);
-    c = 0;
-    for (; c < 10000 &&
-           (bb_read(r.dadck1, 1u << 2) == 0 || bb_read(r.dadck2, 1u << 2) == 0);
-         c++)
-      delay_us(1);
-    if (c >= 10000)
-      _logger->warn("Kestrel DACK: S{} DADCK timeout", i);
-    bb_rmw(r.c04, 1u << 0, 0); /* auto off */
-    bb_rmw(r.c24, 1u << 0, 0);
-    bb_rmw(r.d8, 1u << 16, 0);
-    bb_rmw(r.a0, 1u << 15, 0);
-    bb_rmw(r.a0, 0x7000, 7);
-    bb_rmw(r.b8, 1u << 30, 0);
-  }
-}
-
 void HalKestrel::dac_cal() {
-#if defined(DEVOURER_KESTREL_HALRF)
-  /* Vendored halrf DACK + RX-DCK for both chips (the full vendor cal —
-   * MSBK/DADCK/biasK included on the 8852B, which the hand-rolled ADDCK
-   * subset lacked). Run once at bring-up for the monitor channel.
+  /* Vendored halrf DACK + RX-DCK for both chips (the full vendor cal,
+   * MSBK/DADCK/biasK included). Run once at bring-up for the monitor channel.
    *
    * 8852B: the vendor cal drives RF 0x0 (mode) / 0x1 / 0x5 and relies on the
    * vendor driver's later TRX/channel flow to rewrite them; devourer's
    * set_channel does not, so a bare cal leaves the RF parked in cal mode and
    * the radio deaf both ways. Save/restore operational RF state around the
-   * cal chain, exactly as the hand-ported cal did. The 8852C path is
-   * on-air-validated bare — leave its register stream untouched. */
+   * cal chain. The 8852C path is on-air-validated bare — leave its register
+   * stream untouched. */
   if (_variant != ChipVariant::C8852C) {
     const uint32_t rf0a = rf_rrf(0, 0x0, r::MASKRF),
                    rf0b = rf_rrf(1, 0x0, r::MASKRF);
@@ -2411,326 +1838,6 @@ void HalKestrel::dac_cal() {
   }
   vnd_rf_dac_cal();
   vnd_rf_rx_dck();
-  return;
-#endif
-  if (_variant == ChipVariant::C8852C) {
-    dac_cal_8852c(); /* the 8852b sequence times out on the 8852C */
-    return;
-  }
-  /* halrf_dac_cal_8852b — ADC/ADDCK subset (DAC-side MSBK/biask not ported).
-   * Save the RF registers the cal disturbs so operational radio state survives
-   * (the vendor relies on later steps to rewrite 0x0/0x1; devourer's channel
-   * set does not). */
-  const uint32_t rf0a = rf_rrf(0, 0x0, r::MASKRF), rf0b = rf_rrf(1, 0x0, r::MASKRF);
-  const uint32_t rf1a = rf_rrf(0, 0x1, r::MASKRF), rf1b = rf_rrf(1, 0x1, r::MASKRF);
-  const uint32_t rf5a = rf_rrf(0, 0x5, r::MASKRF), rf5b = rf_rrf(1, 0x5, r::MASKRF);
-  afe_init();
-  dack_reset();
-  drck();
-  rf_wrf(0, 0x5, r::MASKRF, 0x0);
-  rf_wrf(1, 0x5, r::MASKRF, 0x0);
-  rf_wrf(0, 0x0, r::MASKRF, 0x337e1);
-  rf_wrf(1, 0x0, r::MASKRF, 0x337e1);
-  addck();
-  addck_reload();
-  rf_wrf(0, 0x1, r::MASKRF, 0x0);
-  rf_wrf(1, 0x1, r::MASKRF, 0x0);
-  dack(); /* DAC-side MSBK + DADCK (both paths) */
-  /* restore operational RF state */
-  rf_wrf(0, 0x0, r::MASKRF, rf0a);
-  rf_wrf(1, 0x0, r::MASKRF, rf0b);
-  rf_wrf(0, 0x1, r::MASKRF, rf1a);
-  rf_wrf(1, 0x1, r::MASKRF, rf1b);
-  rf_wrf(0, 0x5, r::MASKRF, rf5a);
-  rf_wrf(1, 0x5, r::MASKRF, rf5b);
-  _logger->info("Kestrel RF: DACK done (ADDCK S0 ic=0x{:x} qc=0x{:x}, S1 ic=0x{:x}"
-                " qc=0x{:x}; MSBK+DADCK both paths)",
-                _addck_d[0][0], _addck_d[0][1], _addck_d[1][0], _addck_d[1][1]);
-}
-
-/* ======================= 8852C DACK / ADDCK =============================
- * Ported verbatim from reference/rtl8852cu halrf_8852c/halrf_dack_8852c.c +
- * halrf_8852c_api.c. The 8852b-derived cal above uses different ADC-DC-cal
- * registers and times out on the 8852C, desensing its RX. halrf_wreg/rreg map
- * to bb_rmw/bb_read (BB window); halrf_wrf/rrf to rf_wrf/rf_rrf; halrf_w32 to a
- * full-dword BB write. Clock codes: ADC_960M=2, DAC_160M=3, DAC_960M=7. */
-
-void HalKestrel::txck_force_8852c(uint8_t path, bool force, uint8_t ck) {
-  const uint32_t reg = 0x12a0u | (static_cast<uint32_t>(path) << 13);
-  bb_rmw(reg, 1u << 15, 0x0);
-  if (!force)
-    return;
-  bb_rmw(reg, 0x7000, ck);
-  bb_rmw(reg, 1u << 15, 0x1);
-}
-
-void HalKestrel::rxck_force_8852c(uint8_t path, bool force, uint8_t ck) {
-  const uint32_t reg = 0x12a0u | (static_cast<uint32_t>(path) << 13);
-  bb_rmw(reg, 1u << 19, 0x0);
-  if (!force)
-    return;
-  bb_rmw(reg, 0x70000, ck);
-  bb_rmw(reg, 1u << 19, 0x1);
-  /* halrf_rxck_force_8852c: ck -> ADC bandwidth (ADC_960M=2 -> 80 MHz). */
-  ChannelWidth_t bw = CHANNEL_WIDTH_80;
-  if (ck == 1) /* ADC_480M */
-    bw = CHANNEL_WIDTH_40;
-  else if (ck == 3) /* ADC_1920M */
-    bw = CHANNEL_WIDTH_160;
-  adc_cfg_8852c(bw, path);
-}
-
-void HalKestrel::adc_cfg_8852c(ChannelWidth_t bw, uint8_t path) {
-  /* halbb_adc_cfg_8852c (halbb_8852c_api.c). is_efem=false (external-FEM only
-   * affects the 20/40 adc_rst_cycle branch). */
-  const uint32_t idac2 = path ? 0xC1D4 : 0xC0D4;
-  const uint32_t adc_op5_bw_sel = path ? 0xC1D8 : 0xC0D8;
-  const uint32_t rck_offset = path ? 0xC1C4 : 0xC0C4;
-  const uint32_t rck_reset_count = path ? 0xC1E8 : 0xC0E8;
-  const uint32_t wbadc_sel = path ? 0xC1E4 : 0xC0E4;
-  const uint32_t rx_adc_clk = path ? 0x32A0 : 0x12A0;
-  const uint32_t decim_filter = path ? 0xC1EC : 0xC0EC;
-  const uint32_t adc_rst_cycle = decim_filter;
-  const uint32_t upd_clk_adc = path ? 0x766C : 0x566C;
-  const uint32_t agc_restart_th_ib_l = path ? 0x4CAC : 0x4BE8;
-  const uint32_t agc_restart_th_ib_bw = path ? 0x4CA8 : 0x4BE4;
-
-  bb_rmw(idac2, 0x780, 0x8);
-  bb_rmw(rck_reset_count, 0xFFFF0000, 0x9);
-  bb_rmw(wbadc_sel, 0x30, 0x2);
-  bb_rmw(rx_adc_clk, 0xFF800000, 0x49);
-  bb_rmw(decim_filter, 0x6000, 0x0);
-
-  if (bw == CHANNEL_WIDTH_80) {
-    bb_rmw(idac2, 0x7800, 0x2); /* idac2_1 */
-    bb_rmw(idac2, 0xC000000, 0x2); /* adc_sample_td */
-    bb_rmw(adc_op5_bw_sel, 0x1E0, 0x8);
-    bb_rmw(rck_offset, 0x3E0000, 0x0);
-    bb_rmw(adc_rst_cycle, 0xFF0000, 0x3);
-    bb_rmw(upd_clk_adc, (1u << 17) | (1u << 16), 1);
-    bb_rmw(agc_restart_th_ib_l, 0xf, bb_read(agc_restart_th_ib_bw, 0x78000000));
-  } else if (bw == CHANNEL_WIDTH_160) {
-    bb_rmw(idac2, 0x7800, 0x0);
-    bb_rmw(idac2, 0xC000000, 0x2);
-    bb_rmw(adc_op5_bw_sel, 0x1E0, 0x4);
-    bb_rmw(rck_offset, 0x3E0000, 0x6);
-    bb_rmw(adc_rst_cycle, 0xFF0000, 0x3);
-    bb_rmw(upd_clk_adc, (1u << 17) | (1u << 16), 2);
-  } else { /* 5/10/20/40: ADC clk 80M, WB ADC 160M */
-    bb_rmw(idac2, 0x7800, 0x2);
-    bb_rmw(idac2, 0xC000000, 0x3);
-    bb_rmw(adc_op5_bw_sel, 0x1E0, 0xf);
-    bb_rmw(rck_offset, 0x3E0000, 0x0);
-    bb_rmw(upd_clk_adc, (1u << 17) | (1u << 16), 0);
-    bb_rmw(adc_rst_cycle, 0xFF0000, 0x3); /* is_efem=false */
-    if (bw == CHANNEL_WIDTH_40)
-      bb_rmw(agc_restart_th_ib_l, 0xf, bb_read(agc_restart_th_ib_bw, 0x7800000));
-    else
-      bb_rmw(agc_restart_th_ib_l, 0xf, bb_read(agc_restart_th_ib_bw, 0x780000));
-  }
-}
-
-void HalKestrel::dack_reset_8852c(uint8_t path) {
-  const uint32_t reg = path ? 0xc100 : 0xc000;
-  bb_rmw(reg, 1u << 17, 0x0);
-  bb_rmw(reg, 1u << 17, 0x1);
-}
-
-void HalKestrel::drck_8852c() {
-  /* halrf_drck_8852c: Ddie RCK. Trigger 0xc0c4[6], poll 0xc0c8[3], pulse
-   * 0xc094[9], then the manual RCK writeback for LPS (rck_d from 0xc0c8[14:10]
-   * into 0xc0c4[4:0], RCK_SEL 0xc0c4[9]=0). */
-  bb_rmw(0xc0c4, 1u << 6, 0x1);
-  for (int c = 0; c < 10000 && bb_read(0xc0c8, 1u << 3) == 0; c++)
-    delay_us(1);
-  bb_rmw(0xc0c4, 1u << 6, 0x0);
-  bb_rmw(0xc094, 1u << 9, 0x1);
-  delay_us(1);
-  bb_rmw(0xc094, 1u << 9, 0x0);
-  const uint32_t rck_d = bb_read(0xc0c8, 0x7c00);
-  bb_rmw(0xc0c4, 1u << 9, 0x0); /* RCK_SEL=0 */
-  bb_rmw(0xc0c4, 0x1f, rck_d);
-}
-
-void HalKestrel::dack_manual_off_8852c() {
-  /* halrf_dack_manual_off_8852c. */
-  bb_rmw(0xc0f8, 0x30000000, 0x0);
-  bb_rmw(0xc1f8, 0x30000000, 0x0);
-  for (uint32_t reg : {0xc210u, 0xc224u, 0xc238u, 0xc24cu})
-    bb_rmw(reg, 1u << 0, 0x0);
-}
-
-void HalKestrel::addck_ori_8852c() {
-  /* halrf_addck_ori_8852c: ADC DC-offset cal (the ORI variant dac_cal uses).
-   * Per path: reset cal (0x032c[22]), short the ADC input (0x032c[16]=0,
-   * 0xcXd4[4]=1), trigger (0xcXf4[11]), poll done (0xcXfc[0]), restore, and
-   * back up the measured offsets from 0xcXfc into _addck_d. */
-  struct P {
-    uint32_t b8, d4, f4, fc;
-  };
-  const P p[2] = {{0x12b8, 0xc0d4, 0xc0f4, 0xc0fc},
-                  {0x32b8, 0xc1d4, 0xc1f4, 0xc1fc}};
-  bb_rmw(0xc0f4, 0x30, 0x0); /* manual off (both) */
-  bb_rmw(0xc1f4, 0x30, 0x0);
-  for (int i = 0; i < 2; i++) {
-    bb_rmw(p[i].b8, 1u << 30, 0x1); /* ADC & clk enable */
-    bb_rmw(0x032c, 1u << 30, 0x0);
-    bb_rmw(0x032c, 1u << 22, 0x0); /* reset calibration */
-    bb_rmw(0x032c, 1u << 22, 0x1);
-    bb_rmw(0x030c, 0x0f000000, 0xf);
-    delay_us(100);
-    bb_rmw(0x032c, 1u << 16, 0x0); /* ADC input short */
-    bb_rmw(p[i].d4, 1u << 4, 0x1);
-    bb_rmw(0x030c, 0x0f000000, 0x3); /* release ADC reset */
-    bb_rmw(p[i].f4, 1u << 11, 0x1);  /* trigger DC-offset cal */
-    bb_rmw(p[i].f4, 1u << 11, 0x0);
-    delay_us(1);
-    bb_rmw(p[i].f4, 0x300, 0x1); /* check-done select */
-    int c = 0;
-    for (; c < 10000 && bb_read(p[i].fc, 1u << 0) == 0; c++)
-      delay_us(1);
-    if (c >= 10000)
-      _logger->warn("Kestrel ADDCK(8852C): S{} timeout", i);
-    /* restore */
-    bb_rmw(p[i].d4, 1u << 4, 0x0);
-    bb_rmw(0x032c, 1u << 16, 0x1);
-    bb_rmw(0x030c, 0x0f000000, 0xc);
-    bb_rmw(0x032c, 1u << 30, 0x1);
-    /* backup the measured offsets */
-    bb_rmw(p[i].f4, 0x300, 0x0);
-    _addck_d[i][0] = static_cast<uint16_t>(bb_read(p[i].fc, 0xffc00));
-    _addck_d[i][1] = static_cast<uint16_t>(bb_read(p[i].fc, 0x003ff));
-    bb_rmw(p[i].b8, 1u << 30, 0x0);
-  }
-}
-
-void HalKestrel::addck_reload_8852c() {
-  /* halrf_addck_reload_8852c: apply the measured ADC DC offsets (0xcXf8). */
-  const uint32_t f8[2] = {0xc0f8, 0xc1f8};
-  for (int i = 0; i < 2; i++) {
-    bb_rmw(f8[i], 0x0ffc0000, _addck_d[i][0]);
-    bb_rmw(f8[i], 0x0003ff00, _addck_d[i][1]);
-    bb_rmw(f8[i], 0x30000000, 0x3); /* manual */
-  }
-}
-
-void HalKestrel::dack_backup_8852c(uint8_t path) {
-  /* halrf_dack_backup_s0/s1_8852c: read back MSBK / biasK / DADCK per path. */
-  bb_rmw(path ? 0x32b8 : 0x12b8, 1u << 30, 0x1);
-  const uint32_t k0 = path ? 0xc100 : 0xc000; /* ic index reg */
-  const uint32_t k1 = path ? 0xc120 : 0xc020; /* qc index reg */
-  const uint32_t m0 = path ? 0xc15c : 0xc05c; /* ic msbk read */
-  const uint32_t m1 = path ? 0xc180 : 0xc080; /* qc msbk read */
-  for (uint8_t i = 0; i < 0x10; i++) {
-    bb_rmw(k0, 0x1e, i);
-    _msbk_d[path][0][i] = static_cast<uint8_t>(bb_read(m0, 0xff000000));
-    bb_rmw(k1, 0x1e, i);
-    _msbk_d[path][1][i] = static_cast<uint8_t>(bb_read(m1, 0xff000000));
-  }
-  _biask_d[path][0] = static_cast<uint16_t>(bb_read(path ? 0xc148 : 0xc048, 0xffc));
-  _biask_d[path][1] = static_cast<uint16_t>(bb_read(path ? 0xc16c : 0xc06c, 0xffc));
-  _dadck_d[path][0] = static_cast<uint8_t>(bb_read(path ? 0xc160 : 0xc060, 0xff000000));
-  _dadck_d[path][1] = static_cast<uint8_t>(bb_read(path ? 0xc184 : 0xc084, 0xff000000));
-}
-
-void HalKestrel::dack_reload_8852c(uint8_t path) {
-  /* halrf_dack_reload_by_path_8852c for index 0 and 1: write the backed-up
-   * MSBK/DADCK/biasK into the 0xc200-block reg table + enable "result from
-   * reg". temp_offset = (index?0x14:0) + (path?0x28:0). */
-  const uint32_t path_off = path ? 0x28 : 0;
-  for (uint8_t index = 0; index < 2; index++) {
-    const uint32_t off = (index ? 0x14 : 0) + path_off;
-    bb_rmw(0xc004, 1u << 17, 0x1);
-    bb_rmw(0xc024, 1u << 17, 0x1);
-    bb_rmw(0xc104, 1u << 17, 0x1);
-    bb_rmw(0xc124, 1u << 17, 0x1);
-    auto pack = [&](int base) {
-      uint32_t t = 0;
-      for (int i = 0; i < 4; i++)
-        t |= static_cast<uint32_t>(_msbk_d[path][index][base + i]) << (i * 8);
-      return t;
-    };
-    bb_rmw(0xc200 + off, r::MASKDWORD, pack(12)); /* msbk 15..12 */
-    bb_rmw(0xc204 + off, r::MASKDWORD, pack(8));  /* msbk 11..8 */
-    bb_rmw(0xc208 + off, r::MASKDWORD, pack(4));  /* msbk 7..4 */
-    bb_rmw(0xc20c + off, r::MASKDWORD, pack(0));  /* msbk 3..0 */
-    const uint32_t dadck_biask =
-        (static_cast<uint32_t>(_biask_d[path][index]) << 22) |
-        (static_cast<uint32_t>(_dadck_d[path][index]) << 14);
-    bb_rmw(0xc210 + off, r::MASKDWORD, dadck_biask);
-    bb_rmw(0xc210 + off, 1u << 0, 0x1); /* enable DACK result from reg */
-  }
-}
-
-void HalKestrel::dack_8852c() {
-  /* halrf_dack_8852c s0/s1: DAC-side MSBK + DADCK. Force 160 MHz DAC clk for
-   * the cal, enable DACK (0xcX04[0]), poll the four done bits, restore 960 MHz,
-   * back up + reload the result table. */
-  struct S {
-    uint8_t path;
-    uint32_t b8, c04, c24, done_a, done_b, done_c, done_d;
-  };
-  const S s[2] = {{0, 0x12b8, 0xc004, 0xc024, 0xc040, 0xc064, 0xc05c, 0xc080},
-                  {1, 0x32b8, 0xc104, 0xc124, 0xc140, 0xc164, 0xc15c, 0xc180}};
-  for (const S &c : s) {
-    txck_force_8852c(c.path, true, 3 /* DAC_160M */);
-    bb_rmw(c.b8, 1u << 30, 0x1);
-    bb_rmw(0x030c, 1u << 28, 0x1);
-    bb_rmw(0x032c, 0x80000000, 0x0);
-    delay_us(100);
-    bb_rmw(c.c04, 0xfff00000, 0x30);
-    bb_rmw(c.c24, 0xfff00000, 0x30);
-    dack_reset_8852c(c.path);
-    bb_rmw(c.c04, 1u << 0, 0x1); /* enable DACK */
-    delay_us(1);
-    int n = 0;
-    for (; n < 10000 &&
-           (bb_read(c.done_a, 1u << 31) == 0 || bb_read(c.done_b, 1u << 31) == 0 ||
-            bb_read(c.done_c, 1u << 2) == 0 || bb_read(c.done_d, 1u << 2) == 0);
-         n++)
-      delay_us(1);
-    if (n >= 10000)
-      _logger->warn("Kestrel DACK(8852C): S{} MSBK/DADCK timeout", c.path);
-    bb_rmw(c.c04, 1u << 0, 0x0); /* disable DACK */
-    txck_force_8852c(c.path, false, 7 /* DAC_960M */);
-    dack_backup_8852c(c.path);
-    dack_reload_8852c(c.path);
-    bb_rmw(c.b8, 1u << 30, 0x0);
-  }
-}
-
-void HalKestrel::dac_cal_8852c() {
-  /* halrf_dac_cal_8852c orchestration. RF 0x0/0x1/0x5 saved/restored so the
-   * operational radio state survives the cal (devourer-side, as for 8852b). */
-  const uint32_t rf0a = rf_rrf(0, 0x0, r::MASKRF), rf0b = rf_rrf(1, 0x0, r::MASKRF);
-  const uint32_t rf1a = rf_rrf(0, 0x1, r::MASKRF), rf1b = rf_rrf(1, 0x1, r::MASKRF);
-  const uint32_t rf5a = rf_rrf(0, 0x5, r::MASKRF), rf5b = rf_rrf(1, 0x5, r::MASKRF);
-  /* halrf_afe_init_8852c is a no-op (body #if0'd). */
-  drck_8852c();
-  dack_manual_off_8852c();
-  rf_wrf(0, 0x5, r::MASKRF, 0x0);
-  rf_wrf(1, 0x5, r::MASKRF, 0x0);
-  rf_wrf(0, 0x0, r::MASKRF, 0x337e1);
-  rf_wrf(1, 0x0, r::MASKRF, 0x337e1);
-  rxck_force_8852c(0, true, 2 /* ADC_960M */);
-  rxck_force_8852c(1, true, 2);
-  addck_ori_8852c();
-  rxck_force_8852c(0, false, 2);
-  rxck_force_8852c(1, false, 2);
-  addck_reload_8852c();
-  rf_wrf(0, 0x1, r::MASKRF, 0x0);
-  rf_wrf(1, 0x1, r::MASKRF, 0x0);
-  dack_8852c();
-  /* restore operational RF state */
-  rf_wrf(0, 0x0, r::MASKRF, rf0a);
-  rf_wrf(1, 0x0, r::MASKRF, rf0b);
-  rf_wrf(0, 0x1, r::MASKRF, rf1a);
-  rf_wrf(1, 0x1, r::MASKRF, rf1b);
-  rf_wrf(0, 0x5, r::MASKRF, rf5a);
-  rf_wrf(1, 0x5, r::MASKRF, rf5b);
-  _logger->info("Kestrel RF(8852C): DACK done (ADDCK S0 ic=0x{:x} qc=0x{:x}, "
-                "S1 ic=0x{:x} qc=0x{:x}; MSBK+DADCK+biasK both paths)",
-                _addck_d[0][0], _addck_d[0][1], _addck_d[1][0], _addck_d[1][1]);
 }
 
 uint8_t HalKestrel::read_thermal(uint8_t path) {
@@ -2740,77 +1847,6 @@ uint8_t HalKestrel::read_thermal(uint8_t path) {
   rf_wrf(path, 0x42, 1u << 19, 0x1);
   delay_us(200);
   return static_cast<uint8_t>(rf_rrf(path, 0x42, 0x7e));
-}
-
-void HalKestrel::rx_dck_toggle_8852c(uint8_t path) {
-  /* halrf_rx_dck_toggle_8852c: edge 0x92[0], poll 0x93[5] done (<=500x2us). */
-  rf_wrf(path, 0x92, 1u << 0, 0x0);
-  rf_wrf(path, 0x92, 1u << 0, 0x1);
-  int cnt = 0;
-  for (; cnt < 500 && rf_rrf(path, 0x93, 1u << 5) == 0; cnt++)
-    delay_us(2);
-  rf_wrf(path, 0x92, 1u << 0, 0x0);
-}
-
-void HalKestrel::set_rx_dck_8852c(uint8_t path) {
-  /* halrf_set_rx_dck_8852c: DC source from RFC (0x93[3:0]=0), toggle, then the
-   * is_auto_res step (default true): read the resolution 0x92[7:5]; if >1, load
-   * it into 0x8f[11:9], re-toggle, and restore 0x8f[11:9]=1. */
-  rf_wrf(path, 0x93, 0xfu, 0x0);
-  rx_dck_toggle_8852c(path);
-  const uint32_t res = rf_rrf(path, 0x92, 0xe0u); /* [7:5] */
-  if (res > 1) {
-    rf_wrf(path, 0x8f, 0xe00u, res); /* [11:9] */
-    rx_dck_toggle_8852c(path);
-    rf_wrf(path, 0x8f, 0xe00u, 0x1);
-  }
-}
-
-void HalKestrel::rx_dck_8852c() {
-  /* halrf_rx_dck_8852c, RFC (non-AFE) path, non-MP, no TSSI, dbcc off
-   * (kpath=RF_AB). Per path: save 0x5 (+ 0x0 when 0x5[0]=0), force RF_RX, run
-   * the poll-based DC calibration, restore. The rfe>=50 rek-check retry loop is
-   * a reliability refinement (not ported); the core single-pass cal runs. */
-  for (uint8_t path = 0; path < 2; path++) {
-    const uint32_t rf_5 = rf_rrf(path, 0x5, r::MASKRF);
-    uint32_t rf_0 = 0;
-    if ((rf_5 & 0x1) == 0)
-      rf_0 = rf_rrf(path, 0x0, r::MASKRF);
-    rf_wrf(path, 0x5, 1u << 0, 0x0);
-    rf_wrf(path, 0x00, 0xf0000u, 0x3); /* MASKRFMODE = RF_RX */
-    rf_wrf(path, 0x00, 1u << 1, 0x0);  /* dbcc_en = 0 */
-    set_rx_dck_8852c(path);
-    rf_wrf(path, 0x5, r::MASKRF, rf_5); /* restore */
-    if ((rf_5 & 0x1) == 0)
-      rf_wrf(path, 0x0, r::MASKRF, rf_0);
-  }
-  _logger->info("Kestrel RF(8852C): RX-DCK done (both paths)");
-}
-
-void HalKestrel::rx_dck() {
-  if (_variant == ChipVariant::C8852C) {
-    rx_dck_8852c(); /* the 8852b RX-DCK uses different regs on the 8852C */
-    return;
-  }
-  /* halrf_rx_dck_8852b, RFC (non-AFE) path, no TSSI (devourer isn't in TSSI
-   * mode). Per RF path: save 0x5 + the 0x92[1] dck_tune, force RF_RX mode, run
-   * the RFC-based DC calibration (0x93[3:0]=0 = source from RFC, then an edge on
-   * 0x92[0]) with a 600 us settle, then restore. MASKRFMODE=0xf0000, RF_RX=0x3.
-   * All a-die (DAV) RF registers. */
-  for (uint8_t path = 0; path < 2; path++) {
-    const uint32_t rf_reg5 = rf_rrf(path, 0x5, r::MASKRF);
-    const uint32_t dck_tune = rf_rrf(path, 0x92, 1u << 1);
-    rf_wrf(path, 0x5, 1u << 0, 0x0);
-    rf_wrf(path, 0x92, 1u << 1, 0x0);
-    rf_wrf(path, 0x00, 0xf0000u, 0x3); /* MASKRFMODE = RF_RX */
-    rf_wrf(path, 0x93, 0xfu, 0x0);     /* DC source: from RFC */
-    rf_wrf(path, 0x92, 1u << 0, 0x0);  /* trigger edge */
-    rf_wrf(path, 0x92, 1u << 0, 0x1);
-    delay_us(600); /* settle (vendor: 30 x 20 us) */
-    rf_wrf(path, 0x92, 1u << 1, dck_tune); /* restore */
-    rf_wrf(path, 0x5, r::MASKRF, rf_reg5);
-  }
-  _logger->info("Kestrel RF: RX-DCK done (both paths)");
 }
 
 void HalKestrel::set_txpwr_dbm(int16_t dbm_q2) {
@@ -2830,21 +1866,10 @@ void HalKestrel::fast_retune(uint8_t channel) {
   /* Same-band retune: reuse the band established by the last set_channel (6 GHz
    * can't be re-derived from the channel number). */
   const uint8_t band_type = _cur_band_type;
-#if defined(DEVOURER_KESTREL_HALRF) && defined(DEVOURER_KESTREL_HALBB)
-  /* Route through the vendored path, matching set_channel (both chips): the
-   * hand-rolled rf_ctrl_ch cannot lock the 6 GHz VCO (see 73279d7), and
-   * set_gain_error applies the hand-rolled gain cache the vendored per-channel
-   * BB config supersedes. Lean vendored retune = RF synth tune + the per-band
-   * gain-error only. */
+  /* Vendored path, matching set_channel (both chips). Lean vendored retune =
+   * RF synth tune + the per-band gain-error only. */
   vnd_rf_tune(band_type, channel, CHANNEL_WIDTH_20);
   vnd_bb_set_gain(channel, band_type);
-#else
-  {
-    rf_ctrl_ch(channel, band_type);
-    set_gain_error(channel);
-    set_rxsc_rpl_comp(channel);
-  }
-#endif
   bb_reset_all();
   set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
   _logger->debug("Kestrel FastRetune: ch{} ({})", channel,
@@ -2973,7 +1998,6 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
 
   /* --- RF channel + bandwidth + synth relock. Tunes to the block CENTER. --- */
   _cur_band_type = band_type; /* for a later same-band FastRetune */
-#if defined(DEVOURER_KESTREL_HALRF)
   /* Vendored RF tune, both chips. 8852C: halrf_ctl_band_ch_bw_8852c (RF18
    * band/ch/bw for DAV+DDV both paths + the path-B CAV WA) then
    * halrf_lck_8852c — the relock priming the 6 GHz VCO needs, and it locks
@@ -2982,38 +2006,17 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
    * the core's halrf_ctl_ch + halrf_ctl_bw generics (synth lock rides inside
    * halrf_ctrl_ch_8852b). */
   vnd_rf_tune(band_type, center, bw);
-#else
-  {
-    /* 8852B: halrf_ctrl_ch_8852b (DAV+DDV x path A/B, path-A synth LCK). */
-    rf_ctrl_ch(center, band_type);
-    /* halrf_bw_setting_8852b: RF18 [11:10]. */
-    if (bw != CHANNEL_WIDTH_20)
-      rf_ctrl_bw(bw);
-  }
-#endif
 
-#if defined(DEVOURER_KESTREL_HALBB)
   /* Full vendor per-channel BB config (halbb_ctrl_bw_ch -> per-chip backend),
    * both chips: per-band gain-error, hidden/normal efuse RX gain, band
-   * mode-sel, SCO comp, BW/RXBB/ADC, CCK enable — replacing devourer's
-   * hand-rolled BB channel-switch and gain/RPL re-apply. */
+   * mode-sel, SCO comp, BW/RXBB/ADC, CCK enable. */
   vnd_bb_ctrl_bw_ch(pri_ch, center, bw, band_type);
-#if defined(DEVOURER_KESTREL_HALRF)
   /* Vendored halrf IQK, both chips. The 0xbff8 one-shot-done poll depends on
    * the NCTL micro-engine, which vnd_rf_iqk loads lazily on first call
    * (kestrel_halrf_rfk_init — also LCK/RCK, the SI reset and the efuse trim).
    * Per-channel RX-DCK is not re-run here (the bring-up dac_cal covers it —
    * the shape validated on the 8852C; the RX DC term is stable per band). */
   vnd_rf_iqk(center, band_type, bw);
-#endif
-#else
-  /* No vendored halbb built: hand-rolled per-channel refinement (8852B). */
-  if (_variant != ChipVariant::C8852C) {
-    set_gain_error(center);
-    set_rxsc_rpl_comp(center);
-    rx_dck();
-  }
-#endif
 
   /* --- BB reset --- */
   bb_reset_all();
@@ -3121,13 +2124,11 @@ bool HalKestrel::read_efuse(EfuseInfo &out, std::array<uint8_t, 1536> *raw_phys)
     all_00 &= (b == 0x00);
   }
   out.autoload_ok = !all_ff && !all_00;
-#if defined(DEVOURER_KESTREL_HALRF)
   /* Cache the parsed logical map as the halrf efuse shadow (the efuse_get_info
    * bridge reads TSSI-DE / thermal fields from it via the vendored 8852c map). */
   static_assert(r::WL_EFUSE_LOG_MAP_SIZE_8852B == 2048, "efuse shadow size");
   std::copy(log.begin(), log.end(), _efuse_log_map.begin());
   _efuse_valid = out.autoload_ok;
-#endif
   return true;
 }
 

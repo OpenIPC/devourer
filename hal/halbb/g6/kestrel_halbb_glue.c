@@ -78,15 +78,19 @@ void kestrel_halbb_set_gain(struct kestrel_halbb_ctx *ctx, unsigned char central
     return;
   struct bb_info *bb = &ctx->bb;
   if (bb->ic_type == BB_RTL8852B) {
+#ifdef BB_8852B_SUPPORT
     /* The 8852B loader applies both paths in one call (no efem arg). */
     halbb_set_gain_error_8852b(bb, central_ch, (enum band_type)band_type);
+#endif
   } else {
+#ifdef BB_8852C_SUPPORT
     /* is_efem=false (compact USB dongle, no external LNA). Vendor skips 2.4G
      * gain-error internally. */
     halbb_set_gain_error_8852c(bb, central_ch, (enum band_type)band_type,
                                false, RF_PATH_A);
     halbb_set_gain_error_8852c(bb, central_ch, (enum band_type)band_type,
                                false, RF_PATH_B);
+#endif
   }
 }
 
@@ -106,8 +110,12 @@ void kestrel_halbb_ctrl_bw_ch(struct kestrel_halbb_ctx *ctx, unsigned char pri_c
 void kestrel_halbb_ctrl_tx_path(struct kestrel_halbb_ctx *ctx) {
   /* 8852C-only: the 8852B routes TX antennas per-STA via the CMAC antenna
    * model (TXWD/cctl), there is no path-com block to program. */
+#ifdef BB_8852C_SUPPORT
   if (ctx && ctx->bb.ic_type == BB_RTL8852C)
     halbb_ctrl_tx_path_tmac_8852c(&ctx->bb, RF_PATH_A, false);
+#else
+  (void)ctx;
+#endif
 }
 
 void kestrel_halbb_destroy(struct kestrel_halbb_ctx *ctx) {

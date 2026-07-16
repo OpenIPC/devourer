@@ -34,19 +34,6 @@ public:
    * timeout or FW error status (checksum/security/cut mismatch), all logged. */
   bool download_firmware(uint8_t cut, uint8_t mss_idx, bool is_sec_ic);
 
-  /* --- Firmware IO-offload — program BB/RF registers via H2C batches the
-   * firmware replays on-chip (mac_add_cmd_ofld / halbb_fw_set_reg /
-   * halrf_wrf). Usage: ofld_begin(); ofld_write(...)*N; ofld_flush(style).
-   * Commands accumulate; a batch auto-flushes when full (LC forced on the last
-   * buffered command — ofld_incompatible_full_cmd). Section ends flush with a
-   * harmless LC sentinel: halbb appends a BB write to 0x1a24 (mask 0xff val 0),
-   * halrf appends a DELAY_OFLD of 1 us (halrf_write_fwofld_trigger). --- */
-  enum class OfldFlush { BB, RF };
-  void ofld_begin();
-  void ofld_write(uint8_t src, uint8_t type, uint8_t path, uint16_t offset,
-                  uint32_t value, uint32_t mask);
-  bool ofld_flush(OfldFlush style = OfldFlush::BB);
-
   /* Send one radio-parameter page as an OUTSRC H2C (halrf radio-to-fw): `cls` =
    * OUTSRC_CL_RADIO_A/B, `page` = page index (H2C func), `packed` = the
    * (addr<<20|data) u32 array for this page, `count` entries. */
@@ -105,15 +92,6 @@ private:
   /* Generic H2C over CH12: [WD 24B][fwcmd_hdr 8B][content]. */
   bool send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
                     const uint8_t *content, uint32_t len);
-  /* Poll + ack the C2H-register mailbox after a cmd_ofld batch (flow control:
-   * the ack releases the fw to return the H2C page). */
-  bool poll_cmd_ofld_result();
-  /* Append one 16-byte cmd_ofld command to the batch buffer (no flush). */
-  void ofld_append(uint8_t src, uint8_t type, uint8_t path, uint16_t offset,
-                   uint32_t value, uint32_t mask, bool lc);
-  /* Send the accumulated batch (proc_cmd_ofld): LC must already be set on the
-   * last command. Sends, sleeps accu-delay, polls the c2hreg result. */
-  bool ofld_send_batch();
 
   /* --- register-op helpers (mirror HalKestrel; kept local to this TU) --- */
   void set32(uint16_t reg, uint32_t bits);
@@ -146,9 +124,6 @@ private:
   ChipVariant _variant;
   uint8_t _ch12_ep = 0; /* resolved bulk-OUT endpoint for CH12 (BULKOUTID2) */
   std::vector<uint8_t> _txbuf; /* reused H2C packet scratch */
-  std::vector<uint8_t> _ofld_buf; /* accumulated cmd_ofld batch */
-  uint32_t _ofld_cmd_num = 0;     /* commands in the current batch (resets/flush) */
-  uint32_t _ofld_accu_delay_us = 0; /* DELAY_OFLD host-side wait after send */
   uint8_t _h2c_seq = 0; /* fwinfo->h2c_seq: 8-bit rolling, all runtime H2Cs */
   bool _is_sec_ic = false; /* OTP 0x5ED[7]: gates the non-secure FWDL patch */
 };

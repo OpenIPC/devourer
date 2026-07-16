@@ -150,7 +150,7 @@ bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
     return false;
   if (!_hal.phy_bb_rf_init(_efuse.rfe_type, _hal.read_cut()))
     return false;
-  /* halrf RFK: DAC/ADC DC-offset calibration (halrf_dac_cal_8852b, ADDCK subset)
+  /* halrf RFK: DAC/ADC DC-offset calibration (vendored halrf DACK + RX-DCK)
    * — once after the BB/RF tables, before the channel set. Removes the ADC DC
    * term the CCA energy detector reads as busy. */
   _hal.dac_cal();

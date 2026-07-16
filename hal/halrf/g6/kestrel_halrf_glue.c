@@ -75,10 +75,15 @@ void kestrel_halrf_rfk_init(struct kestrel_halrf_ctx *ctx) {
    * TSSI-referenced consumer reads real corrections. The mac_ax pwr-limit
    * tail of halrf_tssi_get_efuse_EX is skipped by calling the per-chip loader
    * directly. */
-  if (rf->ic_type == RF_RTL8852B)
+  if (rf->ic_type == RF_RTL8852B) {
+#ifdef RF_8852B_SUPPORT
     halrf_tssi_get_efuse_8852b(rf, HW_PHY_0);
-  else
+#endif
+  } else {
+#ifdef RF_8852C_SUPPORT
     halrf_tssi_get_efuse_8852c(rf, HW_PHY_0);
+#endif
+  }
 }
 
 /* Apply the built-in radio A/B register tables via the vendor's own loader
@@ -97,19 +102,29 @@ void kestrel_halrf_dac_cal(struct kestrel_halrf_ctx *ctx, unsigned char force) {
     return;
   /* Direct per-chip calls (the halrf_dack_trigger wrapper adds chlk_map/
    * rfk-ops gates that can silently skip the cal at bring-up). */
-  if (ctx->rf.ic_type == RF_RTL8852B)
+  if (ctx->rf.ic_type == RF_RTL8852B) {
+#ifdef RF_8852B_SUPPORT
     halrf_dac_cal_8852b(&ctx->rf, force ? true : false);
-  else
+#endif
+  } else {
+#ifdef RF_8852C_SUPPORT
     halrf_dac_cal_8852c(&ctx->rf, force ? true : false);
+#endif
+  }
 }
 
 void kestrel_halrf_rx_dck(struct kestrel_halrf_ctx *ctx) {
   if (!ctx)
     return;
-  if (ctx->rf.ic_type == RF_RTL8852B)
+  if (ctx->rf.ic_type == RF_RTL8852B) {
+#ifdef RF_8852B_SUPPORT
     halrf_rx_dck_8852b(&ctx->rf, HW_PHY_0, false);
-  else
+#endif
+  } else {
+#ifdef RF_8852C_SUPPORT
     halrf_rx_dck_8852c(&ctx->rf, HW_PHY_0, false);
+#endif
+  }
 }
 
 void kestrel_halrf_set_ch(struct kestrel_halrf_ctx *ctx, unsigned char center_ch,
@@ -135,15 +150,21 @@ void kestrel_halrf_ctl_band_ch_bw(struct kestrel_halrf_ctx *ctx,
     halrf_ctl_ch(&ctx->rf, HW_PHY_0, central_ch, (enum band_type)band);
     halrf_ctl_bw(&ctx->rf, HW_PHY_0, (enum channel_width)bw);
   } else {
+#ifdef RF_8852C_SUPPORT
     halrf_ctl_band_ch_bw_8852c(&ctx->rf, HW_PHY_0, (enum band_type)band,
                                central_ch, (enum channel_width)bw);
+#endif
   }
 }
 
 void kestrel_halrf_lck(struct kestrel_halrf_ctx *ctx) {
   /* 8852C-only synth relock; the 8852B locks inside its ctrl_ch. */
+#ifdef RF_8852C_SUPPORT
   if (ctx && ctx->rf.ic_type == RF_RTL8852C)
     halrf_lck_8852c(&ctx->rf);
+#else
+  (void)ctx;
+#endif
 }
 
 unsigned int kestrel_halrf_read_rf(struct kestrel_halrf_ctx *ctx,
@@ -164,15 +185,20 @@ int kestrel_halrf_efuse_get_info(struct kestrel_halrf_ctx *ctx,
                                  unsigned char autoload) {
   if (!ctx || !efuse_map)
     return 0;
-  bool ok;
-  if (ctx->rf.ic_type == RF_RTL8852B)
+  bool ok = false;
+  if (ctx->rf.ic_type == RF_RTL8852B) {
+#ifdef RF_8852B_SUPPORT
     ok = halrf_get_efuse_info_8852b(&ctx->rf, efuse_map,
                                     (enum rtw_efuse_info)id, value, size,
                                     autoload);
-  else
+#endif
+  } else {
+#ifdef RF_8852C_SUPPORT
     ok = halrf_get_efuse_info_8852c(&ctx->rf, efuse_map,
                                     (enum rtw_efuse_info)id, value, size,
                                     autoload);
+#endif
+  }
   return ok ? 1 : 0;
 }
 

@@ -116,25 +116,12 @@ public:
                     uint8_t bss_color, uint16_t rate_ax);
 
   /* PHY bring-up: apply the halbb BB register + gain tables and the
-   * halrf radio-A/B tables (via PhyTableLoaderKestrel). `rfe_type` / `cut`
+   * halrf radio-A/B tables (via the vendored halbb/halrf loaders). `rfe_type`
+   * / `cut`
    * select the table variant (from the efuse / chip id). Must run after the
    * MAC TRX init. This programs the baseband + RF registers; channel tuning
    * and the RX loop build on it. */
   bool phy_bb_rf_init(uint8_t rfe_type, uint8_t cut);
-
-  /* halbb_ctrl_tx_path_tmac_8852c (halbb_8852c_api.c): program the 0xD800..
-   * 0xD82C "path-com" IFFT-routing block that connects the BB IFFT output to
-   * the TX chain under T-MAC control. The 8852B has no equivalent (it selects
-   * the TX antenna per-STA via the CMAC antenna model in the TXWD/cctl), so
-   * the 8852B-derived bring-up omits it entirely — without it the 8852C RF
-   * synth locks but nothing radiates. RF_PATH_A, single-PHY (dbcc off). */
-  void ctrl_tx_path_tmac_8852c();
-
-  /* halbb_ctrl_rx_path_8852c (halbb_8852c_api.c): enable the RX chain(s) —
-   * 0x4978 rx_path_en, 1RCCA, Rx nss/user limits, TSSI/BB reset. Never ported
-   * (only the TX path-com was), so 0x4978[3:0] stayed 0 and the 8852C RX front
-   * end was disabled -> near-deaf. RF_PATH_AB (both chains, monitor). */
-  void ctrl_rx_path_8852c(); /* fallback when the vendored halbb isn't built */
 
   /* Tune the BB + RF to a monitor channel. Ports the
    * halbb ctrl_ch/ctrl_bw/cck_en/bb_reset + the halrf RF18 channel setting.
@@ -288,62 +275,16 @@ private:
    * incl. the 0x10000 DDV flag. rf_rrf returns the masked+shifted field. */
   void rf_wrf(uint8_t path, uint32_t addr, uint32_t mask, uint32_t val);
   uint32_t rf_rrf(uint8_t path, uint32_t addr, uint32_t mask);
-  /* Full halrf channel setting (halrf_ctrl_ch_8852b): DAV+DDV x path A/B with
-   * the path-A synth lock (halrf_set_s0_arfc18: 0xd3[8]/poll 0xb7[8]). */
-  void rf_ctrl_ch(uint8_t channel, uint8_t band_type); /* 0=2.4G 1=5G 2=6G */
   uint8_t _cur_band_type = 1; /* band of the last set_channel (for FastRetune) */
-  /* halrf_bw_setting_8852b: set the RF18 bandwidth bits [11:10] (DAV+DDV x
-   * path A/B): 40 MHz=BIT11, 80 MHz=BIT10, 20/5/10=both. Called after
-   * rf_ctrl_ch on a bandwidth change. */
-  void rf_ctrl_bw(ChannelWidth_t bw);
-  /* halrf_rx_dck_8852b (RFC path): per-path RX DC-offset calibration. Corrects
-   * the RX DC term the CCA/EDCCA energy detector otherwise reads as a perpetual
-   * medium-busy. Run after the channel is tuned. */
-  void rx_dck();
-  /* halrf_rx_dck_8852c: the 8852C RX-DCK differs from the 8852b (polls 0x93[5]
-   * for done instead of a fixed delay, + an is_auto_res 0x8f[11:9] step);
-   * rx_dck() dispatches here for C8852C. */
-  void rx_dck_8852c();
-  void set_rx_dck_8852c(uint8_t path);
-  void rx_dck_toggle_8852c(uint8_t path);
 
 public:
-  /* halrf_dac_cal_8852b (ADC/ADDCK subset): DRCK + ADC DC-offset calibration —
-   * removes the ADC DC term the CCA energy detector reads as busy. Run once at
-   * init (after the BB/RF tables). RF 0x0/0x1/0x5 are saved/restored so the
-   * operational radio state survives the cal. */
+  /* RF calibration at bring-up: the vendored halrf DACK + RX-DCK (both chips;
+   * MSBK/DADCK/biasK included). On the 8852B the RF 0x0/0x1/0x5 registers are
+   * saved/restored around the cal so the operational radio state survives
+   * (the vendor's later TRX/channel flow rewrites them; devourer's does not).
+   * Removes the ADC/DAC DC terms the CCA energy detector reads as busy. */
   void dac_cal();
 
-private:
-  void afe_init();
-  void dack_reset();
-  void drck();
-  void addck();
-  void addck_reload();
-  void dack(); /* DAC-side MSBK + DADCK auto-cal (halrf_dack_8852b s0/s1) */
-  uint16_t _addck_d[2][2] = {}; /* [path][ic/qc] ADC DC-offset backup */
-
-  /* 8852C-specific DACK/ADDCK (halrf_dack_8852c.c). The 8852b-derived sequence
-   * above times out on the 8852C (different ADC-DC-cal registers), desensing
-   * its RX; dac_cal() dispatches here for C8852C. Extra backup state the 8852C
-   * reload path needs: DAC-side MSBK / DADCK / biasK per path/index. */
-  void dac_cal_8852c();
-  void drck_8852c();
-  void dack_manual_off_8852c();
-  void addck_ori_8852c();
-  void addck_reload_8852c();
-  void adc_cfg_8852c(ChannelWidth_t bw, uint8_t path);
-  void txck_force_8852c(uint8_t path, bool force, uint8_t ck);
-  void rxck_force_8852c(uint8_t path, bool force, uint8_t ck);
-  void dack_reset_8852c(uint8_t path);
-  void dack_backup_8852c(uint8_t path);
-  void dack_reload_8852c(uint8_t path);
-  void dack_8852c();
-  uint8_t _msbk_d[2][2][16] = {}; /* [path][ic/qc][bit] DAC MSBK backup */
-  uint8_t _dadck_d[2][2] = {};    /* [path][ic/qc] DAC DC-offset backup */
-  uint16_t _biask_d[2][2] = {};   /* [path][ic/qc] DAC bias-K backup */
-
-public:
   void bb_reset_all();
   /* DMAC sub-inits (trxcfg.c). */
   bool dle_init_nic();
@@ -366,31 +307,6 @@ public:
   void ptcl_init();
   void cmac_dma_init();
   void usb_rx_agg_cfg();
-  /* halbb RX gain cache (bb_gain_i, halbb_cfg_bb_gain_8852b): per-band per-path
-   * LNA/TIA gain-error, parsed once from array_mp_8852b_phy_reg_gain and applied
-   * to the band-specific BB registers on every channel set (halbb_set_gain_
-   * error_8852b). Without it the 5 GHz RX front-end runs at wrong gain and hears
-   * nothing (2.4 GHz tolerates the HW defaults; 5 GHz does not). Bands: 0=2.4G,
-   * 1=5G-L(36-64), 2=5G-M(100-144), 3=5G-H(149-177); 2 paths; 7 LNA + 2 TIA. */
-  static constexpr int kGainBandNum = 4;
-  static constexpr int kGainPathNum = 2;
-  int8_t _lna_gain[kGainBandNum][kGainPathNum][7] = {};
-  int8_t _tia_gain[kGainBandNum][kGainPathNum][2] = {};
-  /* RPL (received-power-level) offset cache (halbb_cfg_bb_rpl_ofst, cfg_type 1)
-   * — per-band/path/RXSC-subchannel offsets used in the BB RX RSSI/RPL
-   * computation, applied to BB 0x49b0/b4/b8 per channel by set_rxsc_rpl_comp.
-   * Corrects the reported RSSI accuracy. 20 MHz = 1 value; 40 MHz = 9 RXSC
-   * (0 + 1..8); 80 MHz = 13 RXSC. */
-  int8_t _rpl_ofst_20[kGainBandNum][kGainPathNum] = {};
-  int8_t _rpl_ofst_40[kGainBandNum][kGainPathNum][9] = {};
-  int8_t _rpl_ofst_80[kGainBandNum][kGainPathNum][13] = {};
-  bool _gain_cached = false;
-  static uint8_t gain_band_determine(uint8_t channel);
-  void init_gain_table(uint32_t rfe_type, uint32_t cut); /* populate the cache */
-  void set_gain_error(uint8_t channel); /* apply the cache to BB regs per band */
-  void cfg_rpl_ofst(uint8_t band, uint8_t path, uint8_t bw, uint8_t rxsc_start,
-                    uint32_t data);           /* decode a cfg_type-1 RPL entry */
-  void set_rxsc_rpl_comp(uint8_t channel); /* apply RPL offsets to BB per band */
   void coex_mac_init();                    /* LTE/BT coex bring-up */
   bool write_lte(uint32_t offset, uint32_t val); /* LTE-coex indirect write */
   void mac_enable_imr(); /* DMAC+CMAC0 error-interrupt masks (SER) + err-IMR */
@@ -407,7 +323,6 @@ public:
   int16_t _txpwr_offset_qdb = 0;  /* runtime offset (quarter-dB), sticky */
   bool _cca_on = false; /* DEVOURER_KESTREL_CCA_ON: keep CCA gates on (test) */
 
-#if defined(DEVOURER_KESTREL_HALBB)
   /* Vendored halbb-G6 8852C RX bring-up (hal/halbb/g6/kestrel_halbb_glue).
    * The static callbacks route the vendor C's register/OS plane to this device
    * (dev cookie = the HalKestrel*). */
@@ -415,12 +330,13 @@ public:
   void ensure_vnd_ctx(uint8_t cut, uint8_t rfe_type);
   void vnd_bb_bringup(uint8_t cut, uint8_t rfe_type);
   void vnd_bb_set_gain(uint8_t channel, uint8_t band_type);
-  /* Full vendor per-channel BB config (halbb_ctrl_bw_ch_8852c): replaces the
-   * hand-rolled BB channel-switch. bw = devourer ChannelWidth_t. */
+  /* Full vendor per-channel BB config (halbb_ctrl_bw_ch -> per-chip
+   * backend). bw = devourer ChannelWidth_t. */
   void vnd_bb_ctrl_bw_ch(uint8_t pri_ch, uint8_t center, ChannelWidth_t bw,
                              uint8_t band_type);
-  /* Vendored T-MAC TX path-com routing (halbb_ctrl_tx_path_tmac_8852c) —
-   * replaces the hand-transcribed ctrl_tx_path_tmac_8852c. */
+  /* Vendored T-MAC TX path-com routing (halbb_ctrl_tx_path_tmac_8852c):
+   * connects the BB IFFT output to the TX chain on the 8852C (glue no-op on
+   * the 8852B, which selects the TX antenna per-STA via the CMAC model). */
   void vnd_bb_ctrl_tx_path();
   ::kestrel_halbb_ctx *_halbb_ctx = nullptr;
   void *_halbb_bridge = nullptr; /* heap kestrel_halbb_bridge, outlives ctx */
@@ -449,8 +365,6 @@ public:
                                   unsigned int size);
   std::array<uint8_t, 2048> _efuse_log_map{}; /* parsed logical efuse shadow */
   bool _efuse_valid = false;                  /* autoload OK + map populated */
-#endif
-#if defined(DEVOURER_KESTREL_HALRF)
   /* Vendored halrf-G6 8852C RF calibrations (hal/halrf/g6). Share the
    * halbb bridge (its RF-reg callbacks). */
   void vnd_rf_dac_cal();
@@ -458,13 +372,11 @@ public:
   /* Set the halrf channel + run IQK (per-channel). band 0=2.4G,1=5G. */
   void vnd_rf_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw);
   /* Vendored RF channel/band/bw tune + synth relock (halrf_ctl_band_ch_bw_8852c
-   * + halrf_lck_8852c) — the correct 8852C RF tune for all bands incl. 6 GHz,
-   * replacing the hand-rolled rf_ctrl_ch/rf_ctrl_bw on the C8852C. */
+   * + halrf_lck_8852c) — the correct RF tune for all bands incl. 6 GHz. */
   void vnd_rf_tune(uint8_t band_type, uint8_t center,
                                  ChannelWidth_t bw);
   struct kestrel_halrf_ctx *_halrf_ctx = nullptr;
   bool _halrf_rfk_inited = false; /* NCTL engine loaded (one-time, lazy) */
-#endif
 
 public:
   ~HalKestrel();

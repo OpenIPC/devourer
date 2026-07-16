@@ -31,8 +31,19 @@ constexpr uint32_t B_AX_APDM_HPDN = 1u << 15;
 constexpr uint32_t B_AX_AFSM_PCIE_SUS_EN = 1u << 12;
 constexpr uint32_t B_AX_AFSM_WLSUS_EN = 1u << 11;
 constexpr uint32_t B_AX_APFM_SWLPS = 1u << 10;
+constexpr uint32_t B_AX_APFM_OFFMAC = 1u << 9;
 constexpr uint32_t B_AX_APFN_ONMAC = 1u << 8;
 constexpr uint32_t B_AX_DIS_WLBT_PDNSUSEN_SOPC = 1u << 18;
+/* mac_pwr_switch on-entry (pwr.c:314): the WLMAC power-FSM state. A USB chip
+ * from real cold reads non-OFF here (its AFSM auto-powers to enumerate), and
+ * the vendor forces the MAC off (EN_WLON + APFM_OFFMAC poll) before running
+ * the power-on sequence — without it the WCPU bootrom comes up FWDL_RDY but
+ * never raises H2C_PATH_RDY. */
+constexpr uint16_t R_AX_IC_PWR_STATE = 0x03F0;
+constexpr uint8_t B_AX_WLMAC_PWR_STE_SH = 8;
+constexpr uint32_t B_AX_WLMAC_PWR_STE_MSK = 0x3;
+constexpr uint32_t MAC_AX_MAC_OFF = 0;
+constexpr uint32_t B_AX_CMAC_CLK_SEL = 1u << 21; /* R_AX_AFE_CTRL1 */
 /* mac_pwr_switch BOOT_MODE-exit preamble (pwr.c:300): the RISC-V 8852C
  * enumerates in a special boot mode; if GPIO_MUXCFG[19] is set, the driver must
  * clear it (+ AUTO_WLPON, APFN_ONMAC, R_DIS_PRST) before the power sequence, or
@@ -1111,6 +1122,38 @@ constexpr uint16_t R_AX_LTE_WDATA = 0xDAF4;
 constexpr uint32_t R_AX_LTECOEX_CTRL = 0x38;   /* LTE-space indirect offset */
 constexpr uint32_t R_AX_LTECOEX_CTRL_2 = 0x3C; /* LTE-space indirect offset */
 constexpr uint16_t R_AX_SYS_SDIO_CTRL = 0x0070;
+/* BT/LTE-coex block enable — mac_coex_init_8852b (coex_8852b.c:154). Arms the
+ * LTE indirect interface (write_lte's ready bit) from real cold. */
+constexpr uint32_t B_AX_ENBT = 1u << 5; /* R_AX_GPIO_MUXCFG */
+/* LTE-space GNT arbitration (mac_cfg_gnt_8852b; offsets are LTE-space, ridden
+ * through write_lte). SW_CTRL pins the mux, SW_VAL is the pinned level. */
+constexpr uint32_t R_AX_LTE_SW_CFG_1 = 0x0038; /* == R_AX_LTECOEX_CTRL */
+constexpr uint32_t B_AX_GNT_BT_RFC_S1_SW_VAL = 1u << 31;
+constexpr uint32_t B_AX_GNT_BT_RFC_S1_SW_CTRL = 1u << 30;
+constexpr uint32_t B_AX_GNT_WL_RFC_S1_SW_VAL = 1u << 29;
+constexpr uint32_t B_AX_GNT_WL_RFC_S1_SW_CTRL = 1u << 28;
+constexpr uint32_t B_AX_GNT_BT_BB_S1_SW_VAL = 1u << 27;
+constexpr uint32_t B_AX_GNT_BT_BB_S1_SW_CTRL = 1u << 26;
+constexpr uint32_t B_AX_GNT_WL_BB_S1_SW_VAL = 1u << 25;
+constexpr uint32_t B_AX_GNT_WL_BB_S1_SW_CTRL = 1u << 24;
+constexpr uint32_t B_AX_GNT_BT_RFC_S0_SW_VAL = 1u << 15;
+constexpr uint32_t B_AX_GNT_BT_RFC_S0_SW_CTRL = 1u << 14;
+constexpr uint32_t B_AX_GNT_WL_RFC_S0_SW_VAL = 1u << 13;
+constexpr uint32_t B_AX_GNT_WL_RFC_S0_SW_CTRL = 1u << 12;
+constexpr uint32_t B_AX_GNT_BT_BB_S0_SW_VAL = 1u << 11;
+constexpr uint32_t B_AX_GNT_BT_BB_S0_SW_CTRL = 1u << 10;
+constexpr uint32_t B_AX_GNT_WL_BB_S0_SW_VAL = 1u << 9;
+constexpr uint32_t B_AX_GNT_WL_BB_S0_SW_CTRL = 1u << 8;
+constexpr uint32_t R_AX_LTE_SW_CFG_2 = 0x003C; /* == R_AX_LTECOEX_CTRL_2 */
+constexpr uint32_t B_AX_WL_RX_CTRL = 1u << 8;
+constexpr uint32_t B_AX_GNT_WL_RX_SW_VAL = 1u << 7;
+constexpr uint32_t B_AX_GNT_WL_RX_SW_CTRL = 1u << 6;
+constexpr uint32_t B_AX_GNT_WL_TX_SW_VAL = 1u << 5;
+constexpr uint32_t B_AX_GNT_WL_TX_SW_CTRL = 1u << 4;
+constexpr uint32_t B_AX_GNT_BT_RX_SW_VAL = 1u << 3;
+constexpr uint32_t B_AX_GNT_BT_RX_SW_CTRL = 1u << 2;
+constexpr uint32_t B_AX_GNT_BT_TX_SW_VAL = 1u << 1;
+constexpr uint32_t B_AX_GNT_BT_TX_SW_CTRL = 1u << 0;
 constexpr uint32_t LTE_WRITE_CMD = 0xC00F0000; /* | offset */
 constexpr uint32_t B_AX_LTE_MUX_CTRL_PATH = 1u << 26; /* R_AX_LTE_CTRL+3 bit5 rdy */
 

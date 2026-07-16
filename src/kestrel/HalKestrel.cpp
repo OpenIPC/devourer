@@ -170,21 +170,9 @@ void HalKestrel::usb_init() {
 
 bool HalKestrel::power_on_8852c() {
   namespace r = kestrel::reg;
-  /* mac_set_dut_env_mode: WCPU_FW_CTRL FW_ENV[29:28]=0. */
-  field32(r::R_AX_WCPU_FW_CTRL, 0, r::B_AX_FW_ENV_MSK, r::B_AX_FW_ENV_SH);
-
-  /* mac_pwr_switch BOOT_MODE-exit preamble (pwr.c:300): the RISC-V 8852C powers
-   * up in a special boot mode. Until it is cleared, the WCPU bootrom auto-boots
-   * its ROM fw and never enters the FWDL H2C-wait (H2C_PATH_RDY stays low). The
-   * 8852B does not set BOOT_MODE, so the guard makes this a no-op there. */
-  if (_device.rtw_read32(r::R_AX_GPIO_MUXCFG) & r::B_AX_BOOT_MODE) {
-    clr32(r::R_AX_SYS_PW_CTRL, r::B_AX_APFN_ONMAC);
-    clr32(r::R_AX_SYS_STATUS1, r::B_AX_AUTO_WLPON);
-    clr32(r::R_AX_GPIO_MUXCFG, r::B_AX_BOOT_MODE);
-    clr32(r::R_AX_RSV_CTRL, r::B_AX_R_DIS_PRST);
-  }
-
-  /* mac_pwr_on_usb_8852c (pwr_seq_func_8852c.c:296), transcribed verbatim. */
+  /* mac_pwr_on_usb_8852c (pwr_seq_func_8852c.c:296), transcribed verbatim.
+   * The chip-generic mac_pwr_switch prologue (env mode, BOOT_MODE exit,
+   * force-off of a half-on MAC) runs in power_on() before the dispatch. */
   set32(r::R_AX_LDO_AON_CTRL0, r::B_AX_PD_REGU_L);            /* 0x218[16]=1 */
   clr32(r::R_AX_SYS_PW_CTRL,
         r::B_AX_AFSM_WLSUS_EN | r::B_AX_AFSM_PCIE_SUS_EN);    /* 0x04[12:11]=0 */
@@ -260,16 +248,58 @@ bool HalKestrel::power_on_8852c() {
 
 bool HalKestrel::power_on() {
   if (!_device.is_usb()) {
-    _logger->error("Kestrel: only USB power-on is ported (M1)");
+    _logger->error("Kestrel: only USB power-on is ported");
     return false;
   }
-  if (_variant == ChipVariant::C8852C)
-    return power_on_8852c();
   /* mac_set_dut_env_mode (init.c:26, the first thing mac_hal_init does):
    * WCPU_FW_CTRL FW_ENV[29:28] = 0 (normal DUT mode). */
   field32(r::R_AX_WCPU_FW_CTRL, 0, r::B_AX_FW_ENV_MSK, r::B_AX_FW_ENV_SH);
   /* NB: usb_pre_init (intf_pre_init) runs AFTER power-on + dmac_pre_init in
    * the vendor mac_hal_init (init.c:421) — see download_firmware. */
+
+  /* mac_pwr_switch(on=1) chip-generic prologue (pwr.c:300..405), both dies.
+   *
+   * BOOT_MODE exit (pwr.c:300): the RISC-V 8852C enumerates in a special boot
+   * mode; until GPIO_MUXCFG[19] is cleared the WCPU bootrom auto-boots its ROM
+   * fw and never enters the FWDL H2C-wait. The 8852B does not set BOOT_MODE,
+   * so the guard makes this a no-op there. */
+  if (_device.rtw_read32(r::R_AX_GPIO_MUXCFG) & r::B_AX_BOOT_MODE) {
+    clr32(r::R_AX_SYS_PW_CTRL, r::B_AX_APFN_ONMAC);
+    clr32(r::R_AX_SYS_STATUS1, r::B_AX_AUTO_WLPON);
+    clr32(r::R_AX_GPIO_MUXCFG, r::B_AX_BOOT_MODE);
+    clr32(r::R_AX_RSV_CTRL, r::B_AX_R_DIS_PRST);
+  }
+  /* mac_pwr_sps_ana_setting (pwr.c:461) writes SPS_ANA_ON_CTRL2 only for the
+   * 8852B RFE type 0x05 modules; not ported (no such module characterized). */
+
+  /* Half-on force-off (pwr.c:314,349): a USB chip from real cold reads
+   * WLMAC_PWR_STE != MAC_OFF (its power FSM auto-runs to enumerate), and the
+   * on-sequence must not be applied over that half-on state — the WCPU bootrom
+   * would come up FWDL_RDY yet never raise H2C_PATH_RDY (8852B), or fault into
+   * SER right after boot. Force the MAC off first via APFM_OFFMAC. (A kernel
+   * driver pre-initializing the chip masks this — the FSM then parks in a
+   * state the on-sequence tolerates.) */
+  const uint32_t pwr_ste = (_device.rtw_read32(r::R_AX_IC_PWR_STATE) >>
+                            r::B_AX_WLMAC_PWR_STE_SH) &
+                           r::B_AX_WLMAC_PWR_STE_MSK;
+  if (pwr_ste != r::MAC_AX_MAC_OFF) {
+    _logger->info("Kestrel: MAC half-on from cold (pwr_ste={}) — forcing off",
+                  pwr_ste);
+    set32(r::R_AX_SYS_PW_CTRL, r::B_AX_EN_WLON);     /* 0x04[16]=1 */
+    set32(r::R_AX_SYS_PW_CTRL, r::B_AX_APFM_OFFMAC); /* 0x04[9]=1 */
+    if (!poll32(r::R_AX_SYS_PW_CTRL, r::B_AX_APFM_OFFMAC, 0))
+      return false; /* poll 0x04[9]=0 */
+    clr32(r::R_AX_SYS_PW_CTRL, r::B_AX_EN_WLON);
+    clr32(r::R_AX_SYS_PW_CTRL, r::B_AX_APFM_SWLPS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    /* 8852A/8852B/8851B/8852BT only (pwr.c:380): CMAC clock source back to
+     * default before the on-sequence. */
+    if (_variant != ChipVariant::C8852C)
+      clr32(r::R_AX_AFE_CTRL1, r::B_AX_CMAC_CLK_SEL);
+  }
+
+  if (_variant == ChipVariant::C8852C)
+    return power_on_8852c();
 
   /* mac_pwr_on_usb_8852b, transcribed verbatim (pwr_seq_func_8852b.c:419). */
   clr32(r::R_AX_SYS_PW_CTRL,
@@ -1464,6 +1494,17 @@ void HalKestrel::mac_enable_imr() {
 }
 
 void HalKestrel::coex_mac_init() {
+  /* mac_coex_init_8852b prologue (coex_8852b.c:154): B_AX_ENBT arms the BT/
+   * LTE-coex block — from a real cold boot the LTE indirect interface never
+   * reports ready until it is set, so every write_lte below would time out
+   * ("LTE interface not ready") and the GNT arbitration would stay at its
+   * cold default, gating the WL RF off both ways (deaf RX + silent TX with a
+   * green init). A kernel driver pre-initializing the chip masked this. */
+  if (_variant != ChipVariant::C8852C) {
+    uint8_t mux = _device.rtw_read8(r::R_AX_GPIO_MUXCFG);
+    _device.rtw_write8(r::R_AX_GPIO_MUXCFG,
+                       static_cast<uint8_t>(mux | r::B_AX_ENBT));
+  }
   /* coex_mac_init_8852b: disable LTE-coex (CTRL + CTRL_2 = 0), then set the
    * SDIO-ctrl coex bit. On the WiFi+BT combo die the coex block otherwise
    * arbitrates the shared front end. */
@@ -1472,6 +1513,29 @@ void HalKestrel::coex_mac_init() {
   write_lte(r::R_AX_LTECOEX_CTRL_2, 0);
   _device.rtw_write8(r::R_AX_SYS_SDIO_CTRL + 3,
                      static_cast<uint8_t>(val | (1u << 2)));
+  /* mac_cfg_gnt_8852b with the WiFi-only stance (gnt_wl=1 sw-forced, gnt_bt=0
+   * sw-forced, both bands): devourer runs no BT traffic, so the PTA arbiter is
+   * pinned to WL — the same standing config the Jaguar3 coex thread re-applies
+   * (there the coex fw silences the antenna without it; here the cold-default
+   * GNT does). LTE_SW_CFG_1 = WL RFC+BB S0/S1 VAL|CTRL + BT RFC+BB S0/S1 CTRL
+   * (val 0); LTE_SW_CFG_2 = WL TX/RX VAL|CTRL + BT TX/RX CTRL (val 0), WL_RX_
+   * CTRL preserved. 8852B-only: the 8852C's cold-default GNT is WL-open and
+   * its validated register stream stays untouched. */
+  if (_variant != ChipVariant::C8852C) {
+    write_lte(r::R_AX_LTE_SW_CFG_1,
+              r::B_AX_GNT_WL_RFC_S0_SW_VAL | r::B_AX_GNT_WL_RFC_S0_SW_CTRL |
+                  r::B_AX_GNT_WL_BB_S0_SW_VAL | r::B_AX_GNT_WL_BB_S0_SW_CTRL |
+                  r::B_AX_GNT_BT_RFC_S0_SW_CTRL | r::B_AX_GNT_BT_BB_S0_SW_CTRL |
+                  r::B_AX_GNT_WL_RFC_S1_SW_VAL | r::B_AX_GNT_WL_RFC_S1_SW_CTRL |
+                  r::B_AX_GNT_WL_BB_S1_SW_VAL | r::B_AX_GNT_WL_BB_S1_SW_CTRL |
+                  r::B_AX_GNT_BT_RFC_S1_SW_CTRL | r::B_AX_GNT_BT_BB_S1_SW_CTRL);
+    /* (WL_RX_CTRL is preserved-if-set in the vendor; the CTRL_2=0 write above
+     * just cleared it, so it folds to 0 here.) */
+    write_lte(r::R_AX_LTE_SW_CFG_2,
+              r::B_AX_GNT_WL_RX_SW_VAL | r::B_AX_GNT_WL_RX_SW_CTRL |
+                  r::B_AX_GNT_WL_TX_SW_VAL | r::B_AX_GNT_WL_TX_SW_CTRL |
+                  r::B_AX_GNT_BT_RX_SW_CTRL | r::B_AX_GNT_BT_TX_SW_CTRL);
+  }
 }
 
 void HalKestrel::enable_bb_rf() {
@@ -1598,6 +1662,18 @@ bool HalKestrel::phy_bb_rf_init(uint8_t rfe_type, uint8_t cut) {
      * radiates (glue no-op on the 8852B: per-STA CMAC antenna model). */
     vnd_bb_bringup(cut, rfe_type);
     vnd_bb_ctrl_tx_path();
+    /* RFK prologue in the vendor's halrf_dm_init position (rtl8852b_halinit.c
+     * runs rtw_hal_rf_dm_init right after the table apply, BEFORE any channel
+     * work): NCTL microcode, RFK sub-state reset, the a-die/d-die SI reset,
+     * LCK/RCK synth-filter cals, efuse trim + TSSI DE. Position is load-
+     * bearing — run lazily after the first tune/BB channel config, the SI
+     * reset tears down live a-die state and the radio goes deaf both ways
+     * (bisected on the 8852B: rfk_init-after-tune = 0 ambient decodes,
+     * dm_init position = decodes normally). */
+    if (_halrf_ctx && !_halrf_rfk_inited) {
+      kestrel_halrf_rfk_init(_halrf_ctx);
+      _halrf_rfk_inited = true;
+    }
     return true;
   }
 #endif
@@ -1919,14 +1995,19 @@ void HalKestrel::vnd_rf_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw) {
   uint8_t hbw = bw == CHANNEL_WIDTH_5    ? 6
                 : bw == CHANNEL_WIDTH_10 ? 7
                                          : static_cast<uint8_t>(bw);
-  if (!_halrf_rfk_inited) {
-    /* Load the NCTL one-shot micro-engine (+ reset RFK sub-state) before the
-     * first IQK — its 0xbff8 one-shot-done poll depends on that microcode. */
-    kestrel_halrf_rfk_init(_halrf_ctx);
-    _halrf_rfk_inited = true;
-  }
+  /* The RFK prologue (NCTL microcode the 0xbff8 one-shot-done poll depends on,
+   * SI reset, LCK/RCK, efuse trim) ran at phy_bb_rf_init — the vendor's
+   * halrf_dm_init position. Running it here instead (after the tune/BB channel
+   * config) deafens the radio: see phy_bb_rf_init. */
   kestrel_halrf_set_ch(_halrf_ctx, center, band, hbw);
-  kestrel_halrf_iqk(_halrf_ctx);
+  /* IQK is 8852C-only, the same evidence-gated stance as TSSI/DPK: on the
+   * 8852B the vendored per-channel IQK collapses on-air delivery under the
+   * fixed-dBm power model (paired A/B on a 5 GHz MCS0 flood, 8812AU monitor,
+   * fixed geometry: IQK-on 10/1 decodes vs IQK-off 100/37 across two cold
+   * pairs — repeatable ~10-30x). The 8852C validated on-air WITH IQK, so its
+   * path is unchanged. Gate falls with a TSSI-referenced power model. */
+  if (_variant == ChipVariant::C8852C)
+    kestrel_halrf_iqk(_halrf_ctx);
   _logger->info("Kestrel RF: IQK via vendored halrf (ch{} band{})", center,
                 band);
   /* The TSSI/DPK trackers are permanently masked in the glue's
@@ -1941,7 +2022,7 @@ void HalKestrel::vnd_bb_set_gain(uint8_t channel, uint8_t band_type) {
 }
 
 void HalKestrel::vnd_bb_ctrl_tx_path() {
-  if (_halbb_ctx) {
+  if (_halbb_ctx && _variant == ChipVariant::C8852C) {
     kestrel_halbb_ctrl_tx_path(_halbb_ctx);
     _logger->info("Kestrel PHY: T-MAC TX path-com routed (vendored, 8852C)");
   }
@@ -2303,7 +2384,31 @@ void HalKestrel::dac_cal() {
 #if defined(DEVOURER_KESTREL_HALRF)
   /* Vendored halrf DACK + RX-DCK for both chips (the full vendor cal —
    * MSBK/DADCK/biasK included on the 8852B, which the hand-rolled ADDCK
-   * subset lacked). Run once at bring-up for the monitor channel. */
+   * subset lacked). Run once at bring-up for the monitor channel.
+   *
+   * 8852B: the vendor cal drives RF 0x0 (mode) / 0x1 / 0x5 and relies on the
+   * vendor driver's later TRX/channel flow to rewrite them; devourer's
+   * set_channel does not, so a bare cal leaves the RF parked in cal mode and
+   * the radio deaf both ways. Save/restore operational RF state around the
+   * cal chain, exactly as the hand-ported cal did. The 8852C path is
+   * on-air-validated bare — leave its register stream untouched. */
+  if (_variant != ChipVariant::C8852C) {
+    const uint32_t rf0a = rf_rrf(0, 0x0, r::MASKRF),
+                   rf0b = rf_rrf(1, 0x0, r::MASKRF);
+    const uint32_t rf1a = rf_rrf(0, 0x1, r::MASKRF),
+                   rf1b = rf_rrf(1, 0x1, r::MASKRF);
+    const uint32_t rf5a = rf_rrf(0, 0x5, r::MASKRF),
+                   rf5b = rf_rrf(1, 0x5, r::MASKRF);
+    vnd_rf_dac_cal();
+    vnd_rf_rx_dck();
+    rf_wrf(0, 0x0, r::MASKRF, rf0a);
+    rf_wrf(1, 0x0, r::MASKRF, rf0b);
+    rf_wrf(0, 0x1, r::MASKRF, rf1a);
+    rf_wrf(1, 0x1, r::MASKRF, rf1b);
+    rf_wrf(0, 0x5, r::MASKRF, rf5a);
+    rf_wrf(1, 0x5, r::MASKRF, rf5b);
+    return;
+  }
   vnd_rf_dac_cal();
   vnd_rf_rx_dck();
   return;

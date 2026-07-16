@@ -392,9 +392,13 @@ if(DEVOURER_KESTREL)
         hal/halbb hal/halbb/g6
         hal/halbb/g6/vendor
         hal/halbb/g6/vendor/halbb_8852b hal/halbb/g6/vendor/halbb_8852c)
+    # HALBB_DBCC_SUPPORT / HALBB_FW_OFLD_SUPPORT / HALBB_DBG_TRACE_SUPPORT are
+    # #ifdef-tested in the vendor code, so being OFF means staying UNDEFINED —
+    # a `=0` define still compiles the feature branches in (with fw-offload
+    # compiled in, the 8852B BBCR writer routes every table write through the
+    # fwofld wrapper and applies nothing).
     target_compile_definitions(kestrel_halbb PRIVATE
-        ${_kestrel_halbb_defs} HALBB_DBCC_SUPPORT=0
-        HALBB_FW_OFLD_SUPPORT=0 HALBB_DBG_TRACE_SUPPORT=0
+        ${_kestrel_halbb_defs}
         PLATFOM_IS_LITTLE_ENDIAN=1
         # The vendored halbb_hwimg raw_data arrays duplicate the
         # extract-generated hal8852{b,c}_phy.c globals (same data, used only

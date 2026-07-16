@@ -62,8 +62,9 @@ int claim_interface_then_reset(libusb_device_handle *handle, int iface,
  * reloaded the firmware, so its state is fresh. `handle` is replaced in place
  * on that path (the old handle is closed); `iface` is re-resolved on the new
  * handle via find_wifi_interface(). All other outcomes are exactly
- * claim_interface_then_reset(). `ctx` must be the context `handle` was opened
- * on. */
+ * claim_interface_then_reset() — including NOT_FOUND when `do_reset` is
+ * false, which then can only be a claim failure, not a re-enumeration. `ctx`
+ * must be the context `handle` was opened on. */
 int claim_interface_reset_reopen(libusb_context *ctx,
                                  libusb_device_handle *&handle,
                                  const Logger_t &logger, bool do_reset,

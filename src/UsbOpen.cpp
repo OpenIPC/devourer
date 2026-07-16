@@ -185,7 +185,11 @@ int claim_interface_reset_reopen(libusb_context *ctx,
 
   int rc = claim_interface_then_reset(handle, find_wifi_interface(handle),
                                       logger, do_reset, out_lock, lock_dir);
-  if (rc != LIBUSB_ERROR_NOT_FOUND)
+  /* Recovery is only meaningful when we could have reset: with do_reset=false
+   * a NOT_FOUND is a claim failure (interface absent), not a re-enumeration —
+   * closing the handle and polling for a comeback would just burn the timeout
+   * (and on Termux would orphan a wrapped fd device-list scans can't find). */
+  if (rc != LIBUSB_ERROR_NOT_FOUND || !do_reset)
     return rc;
 
   /* The reset re-enumerated the device (firmware reload through ROM). Close

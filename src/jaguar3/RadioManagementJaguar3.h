@@ -8,6 +8,7 @@
 #include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "ChipVariant.h"
+#include "TxPower.h" /* devourer::TxRateDiffsQdb */
 
 namespace jaguar3 {
 
@@ -118,6 +119,14 @@ public:
    * the 7-bit field here — the BB masked write truncates mod 128, so an
    * unclamped over-range ref would wrap to near-zero TX silently. */
   void apply_tx_power_refs_8822e(uint8_t ref_a, uint8_t ref_b);
+
+  /* Like apply_power_by_rate_8822e, but the per-rate diff table comes from
+   * the caller instead of phy_reg_pg: refs on both paths, then diff words
+   * for CCK (0x3a00 word 0), legacy OFDM 6..54M and HT MCS0..7 rows. VHT
+   * rows are zeroed (HT-only consumer in v1). qdB == index steps on this
+   * family (step_qdb = 1). */
+  void apply_rate_diffs_8822e(uint8_t ref_a, uint8_t ref_b,
+                              const devourer::TxRateDiffsQdb& diffs);
 
 private:
   /* 8822E channel-switch helpers (straight phydm ports, 8822E-gated):

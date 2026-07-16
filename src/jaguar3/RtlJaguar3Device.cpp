@@ -1288,8 +1288,13 @@ void RtlJaguar3Device::apply_tx_power_current(bool full) {
     const uint8_t rb = clamp127(static_cast<int>(_pwr_ref_b) + off);
     if (full || _diffs_zeroed) {
       /* Full apply: refs + the per-rate diff walk (also the path back from
-       * flat semantics, which zeroed the diffs). */
-      _radioManagement.apply_power_by_rate_8822e(_channel.Channel, ra, rb);
+       * flat semantics, which zeroed the diffs). Route through the
+       * caller-supplied diff table when SetTxPowerRateDiffs has one set;
+       * otherwise the default phy_reg_pg walk. */
+      if (_rate_diffs)
+        _radioManagement.apply_rate_diffs_8822e(ra, rb, *_rate_diffs);
+      else
+        _radioManagement.apply_power_by_rate_8822e(_channel.Channel, ra, rb);
       _diffs_zeroed = false;
     } else {
       _radioManagement.apply_tx_power_refs_8822e(ra, rb);
@@ -1357,6 +1362,23 @@ void RtlJaguar3Device::SetTxPowerIndexOverride(int idx) {
      * override zeroed the 8822E per-rate diffs). */
     apply_tx_power_current(/*full=*/idx < 0);
   }
+}
+
+bool RtlJaguar3Device::SetTxPowerRateDiffs(
+    const std::optional<devourer::TxRateDiffsQdb> &diffs) {
+  if (_variant != jaguar3::ChipVariant::C8822E) {
+    _logger->warn("SetTxPowerRateDiffs: 8822E-only in v1");
+    return false;
+  }
+  if (_cw_active) {
+    _logger->warn("SetTxPowerRateDiffs refused: CW tone active");
+    return false;
+  }
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  _rate_diffs = diffs;
+  if (_brought_up)
+    apply_tx_power_current(/*full=*/true); /* re-walk the table now */
+  return true;
 }
 
 bool RtlJaguar3Device::ReApplyTxPower() {

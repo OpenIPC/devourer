@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 #include "ChipVariant.h"
@@ -179,6 +180,12 @@ private:
   uint8_t _ch12_ep = 0; /* resolved bulk-OUT endpoint for CH12 (BULKOUTID2) */
   std::vector<uint8_t> _txbuf; /* reused H2C packet scratch */
   uint8_t _h2c_seq = 0; /* fwinfo->h2c_seq: 8-bit rolling, all runtime H2Cs */
+  /* Serializes send_h2c_cmd: it mutates the shared _txbuf scratch + _h2c_seq
+   * counter and issues one bulk-OUT, and the firmware's H2C-queue parser expects
+   * whole packets in sequence. Concurrent callers (e.g. an H2C issued from the
+   * RX/C2H thread while the control thread issues another) would otherwise
+   * corrupt the scratch buffer and desync the sequence. */
+  std::mutex _h2c_mu;
   bool _is_sec_ic = false; /* OTP 0x5ED[7]: gates the non-secure FWDL patch */
 };
 

@@ -1,24 +1,24 @@
 #pragma once
 
-/* Sounding — the 802.11ax HE sounding (NDPA -> NDP -> BFRP) session knobs.
+/* Sounding — the 802.11ax HE sounding (NDPA -> NDP -> BFRP) command surface.
  *
- * This is the *production* trigger-airing path on the RTL8852 client firmware:
- * the fw builds and airs the NDPA/NDP/BFRP frames from a single H2C
- * (CL_SOUND / SET_SND_PARA, content-in-H2C, no pkt_ofld) and arms RX for the
- * beamforming-report HE TB PPDU. A BFRP (Beamforming Report Poll) is an
- * 802.11ax Trigger-frame variant, so it solicits a genuine hardware-scheduled,
- * contention-free UL transmission (the STA's compressed beamforming report,
- * sent as an HE TB PPDU at trigger+SIFS).
+ * A BFRP (Beamforming Report Poll) is an 802.11ax Trigger-frame variant, so the
+ * sounding sequence is the firmware's own use of the Trigger primitive: the H2C
+ * (CL_SOUND / SET_SND_PARA, content-in-H2C, no pkt_ofld) hands the fw the whole
+ * NDPA/NDP/BFRP descriptor set for it to build and air.
  *
- * Unlike the F2P_TEST command (an MP/hardware-verification entry with no
- * shipped-fw handler), sounding is a normal client feature. These aggregates
- * are devourer-native; the Kestrel HAL maps them onto the vendor
- * mac_ax_fwcmd_snd via the SchedEncode.h encoder. The raw 72-/98-dword vendor
- * struct never surfaces here.
+ * On-air status (measured, both dies): the shipped client NIC firmware ACCEPTS
+ * SET_SND_PARA (no SER) but does NOT air the sequence — the fw-command sounding-
+ * transmit engine is present only in the vendor's AP-firmware image, and the
+ * NIC-firmware host-NDPA path is unwired in the vendor tree. So, like the
+ * F2P_TEST command, this is a byte-exact command surface the shipped fw does not
+ * act on. The path that actually puts a Trigger on the air on this firmware is
+ * host-injection (IRtlDevice::SendTrigger, src/TriggerTwt.h). See
+ * docs/he-trigger-ul.md.
  *
- * The plane split mirrors the rest of the AX MAC surface: the AP (this driver)
- * owns the sounding schedule and the fw airs the frames; the STA MAC fires its
- * TB-PPDU report at trigger+SIFS in hardware. */
+ * These aggregates are devourer-native; the Kestrel HAL maps them onto the
+ * vendor mac_ax_fwcmd_snd via the SchedEncode.h encoder. The raw 72-/98-dword
+ * vendor struct never surfaces here. */
 
 #include <array>
 #include <cstdint>

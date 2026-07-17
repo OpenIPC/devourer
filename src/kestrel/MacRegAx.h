@@ -953,13 +953,13 @@ constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_MCS_MSK = 0xf;
 
 /* ===================================================================
  * HE sounding (mac_set_snd_para / build_snd_h2c): CL_SOUND / FUNC_SET_SND_PARA.
- * This is the *production* trigger-airing path — the fw builds and airs the
- * NDPA -> NDP -> BFRP sequence from the H2C content (content-in-H2C, no
- * pkt_ofld) and arms RX for the beamforming-report HE TB PPDU. A BFRP
- * (Beamforming Report Poll) is an 802.11ax Trigger-frame variant, so this
- * solicits a genuine hardware-scheduled, contention-free UL transmission.
- * Unlike F2P_TEST (MP-only, no shipped-fw handler), the sounding cmd is a
- * normal client feature (CONFIG_PHL_BEAMFORM). Field layout verbatim from
+ * Hands the fw the NDPA -> NDP -> BFRP descriptor set (content-in-H2C, no
+ * pkt_ofld) to build and air, arming RX for the beamforming-report HE TB PPDU.
+ * A BFRP (Beamforming Report Poll) is an 802.11ax Trigger-frame variant.
+ * Measured: the shipped client NIC fw accepts this H2C but does NOT air the
+ * sequence (the fw sounding-transmit engine is AP-firmware-only) — like
+ * F2P_TEST, a byte-exact command surface the shipped fw does not act on. Field
+ * layout verbatim from
  * fw_ax/inc_hdr/fwcmd_intf.h (the SET_SND_PARA_* block) and the packing order
  * from mac_ax/sounding.c build_snd_h2c. The per-index vendor macros (STA0..7,
  * U0..3, WD0..4) are bit-identical, so each repeating structure collapses to

@@ -124,13 +124,15 @@ public:
    * Triggers autonomously at the configured interval. */
   bool ul_fixinfo(const devourer::UlOfdmaConfig &cfg);
 
-  /* mac_set_snd_para (class=CL_SOUND, func=SET_SND_PARA v0 / _V1 0xD): the
-   * *production* trigger-airing path. The fw builds and airs the NDPA -> NDP ->
-   * BFRP sequence from this H2C content and arms RX for the beamforming-report
-   * HE TB PPDU. A BFRP is an 802.11ax Trigger-frame variant, so this solicits a
-   * genuine hardware-scheduled UL transmission — unlike f2p_trigger (the MP-only
-   * F2P_TEST entry the shipped client fw has no handler for). 8852B lays out the
-   * v0 (72-dword) content, the 8852C the v1 (98-dword), selected by _variant. */
+  /* mac_set_snd_para (class=CL_SOUND, func=SET_SND_PARA v0 / _V1 0xD): the HE
+   * sounding command — hands the fw the NDPA -> NDP -> BFRP descriptor set to
+   * build and air. A BFRP is an 802.11ax Trigger-frame variant. Measured (both
+   * dies): the shipped client NIC fw ACCEPTS this H2C (no SER) but does NOT air
+   * the sequence — the fw-command sounding-transmit engine is AP-firmware-only,
+   * so like f2p_trigger this is a byte-exact command surface the shipped fw does
+   * not act on (host-injection via SendTrigger is what airs a Trigger on this
+   * firmware). 8852B lays out the v0 (72-dword) content, the 8852C the v1
+   * (98-dword), selected by _variant. */
   bool set_snd_para(const devourer::SoundingConfig &cfg);
 
   /* mac_set_csi_para_cctl (mac_upd_cctl_info with the CSI/bf dword): program the

@@ -285,12 +285,13 @@ public:
     return false;
   }
 
-  /* Drive one HE sounding: the fw builds and airs the NDPA -> NDP -> BFRP
-   * sequence (a BFRP is an 802.11ax Trigger-frame variant) and receives the
-   * beamformee's report as a hardware-scheduled HE TB PPDU
-   * (RxAtrib.ppdu_type == 10) — the production contention-free UL primitive.
-   * This is the trigger-airing path the shipped client fw actually runs (unlike
-   * SendTrigger's F2P command). Returns false where unsupported. */
+  /* Drive one HE sounding: hand the fw the NDPA -> NDP -> BFRP descriptor set (a
+   * BFRP is an 802.11ax Trigger-frame variant) to build and air, soliciting the
+   * beamformee's report as a hardware-scheduled HE TB PPDU (RxAtrib.ppdu_type ==
+   * 10). Measured: the shipped client NIC firmware accepts the H2C but does not
+   * air the sequence (the fw sounding-transmit engine is AP-firmware-only) — the
+   * path that actually airs a Trigger on this firmware is host-injection
+   * (SendTrigger). Returns false where unsupported. See docs/he-trigger-ul.md. */
   virtual bool StartSounding(const devourer::SoundingConfig & /*cfg*/) {
     return false;
   }

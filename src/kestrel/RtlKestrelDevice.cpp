@@ -515,13 +515,20 @@ bool RtlKestrelDevice::SendTrigger(const devourer::TriggerConfig &cfg) {
   /* F2P_TEST is an MP-only fw entry the shipped client fw silently drops (it
    * airs nothing). The default path host-builds a raw 802.11ax Basic Trigger and
    * injects it through the proven mgmt TX path — the same path StartBeacon-less
-   * send_packet uses to actually put frames on the air. RA = broadcast (a Basic
-   * Trigger addresses its users by AID12 in the User Info, so an associated STA
-   * matches on its AID regardless of the broadcast RA); TA = our injection SA. */
+   * send_packet uses to actually put frames on the air. RA = broadcast unless
+   * cfg.ra is set (a Basic Trigger addresses its users by AID12, so an
+   * associated STA matches on its AID). TA MUST be the AP's BSSID — a station
+   * rejects a Trigger whose TA is not the AP it associated to — so use cfg.ta;
+   * fall back to the injection SA only when the caller left it unset. */
   if (!_cfg.debug.kestrel_trigger_f2p) {
     static const uint8_t kBcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-    uint8_t frame[2 + 2 + 6 + 6 + 8 + 8 * 5]; /* FC+dur+RA+TA+common+8 users */
-    size_t flen = devourer::build_basic_trigger(cfg, kBcast, kInjectSA, frame,
+    const bool have_ta = cfg.ta != std::array<uint8_t, 6>{};
+    const bool have_ra = cfg.ra != std::array<uint8_t, 6>{};
+    const uint8_t *ta = have_ta ? cfg.ta.data() : kInjectSA;
+    const uint8_t *ra = have_ra ? cfg.ra.data() : kBcast;
+    /* FC+dur+RA+TA+common + 8 users x 6B (Basic) + pad marker(2) + padding(4). */
+    uint8_t frame[2 + 2 + 6 + 6 + 8 + 8 * 6 + 2 + 4];
+    size_t flen = devourer::build_basic_trigger(cfg, ra, ta, frame,
                                                  sizeof(frame));
     if (flen == 0) {
       _logger->error("Kestrel: SendTrigger build_basic_trigger failed");

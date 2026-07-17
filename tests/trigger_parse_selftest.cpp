@@ -40,6 +40,7 @@ int main() {
   cfg.gi_ltf = 1;
   cfg.num_he_ltf = 2;
   cfg.ap_tx_power = 21;
+  cfg.ul_length = 0x1F4;
   cfg.n_users = 2;
   cfg.users[0].aid12 = 1;
   cfg.users[0].ru_alloc = he_ru_alloc(106, 0); /* 53 */
@@ -58,12 +59,14 @@ int main() {
 
   std::vector<uint8_t> buf(64, 0);
   size_t n = build_basic_trigger(cfg, ra, ta, buf.data(), buf.size());
-  CHECK(n == 24 + 2 * 5); /* fixed header + 2 user infos */
+  /* header(24) + 2 Basic user infos (6B each) + Padding (2B marker + 4B). */
+  CHECK(n == 24 + 2 * 6 + 2 + 4);
   CHECK(buf[0] == 0x24);  /* FC: control / trigger */
 
   TriggerInfo info;
   CHECK(parse_trigger(buf.data(), n, info));
   CHECK(info.trigger_type == 0); /* Basic */
+  CHECK(info.ul_length == 0x1F4);
   CHECK(info.ul_bw == 0);
   CHECK(info.gi_ltf == 1);
   CHECK(info.num_he_ltf == 2);

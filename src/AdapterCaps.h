@@ -169,10 +169,11 @@ struct AdapterCaps {
    * trigger/TWT firmware surface. */
   bool trigger_ul_ok = false;
   bool twt_ok = false;
-  /* sounding_ok: the adapter can air an HE sounding sequence (NDPA -> NDP ->
-   * BFRP) and receive the beamformee's report as a hardware-scheduled HE TB
-   * PPDU — the production trigger-airing path (StartSounding / RegisterBeamformee).
-   * This is what the shipped client fw actually runs, vs the MP-only F2P path. */
+  /* sounding_ok: the adapter exposes the HE sounding command surface (NDPA ->
+   * NDP -> BFRP via StartSounding / RegisterBeamformee). NB the shipped client
+   * NIC firmware accepts SET_SND_PARA but does not air the sequence (the fw
+   * sounding-transmit engine is AP-firmware-only, like the MP-only F2P path);
+   * host-injected SendTrigger is what puts a Trigger on the air. */
   bool sounding_ok = false;
 };
 

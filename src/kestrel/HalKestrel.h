@@ -300,9 +300,11 @@ public:
   }
 
   /* ---- HE sounding (mac_init_snd_mer/_mee + mac_set_snd_para) ----
-   * The production trigger-airing path: arm the BB/MAC sounding engine, register
-   * the beamformee, then drive a sounding that airs NDPA -> NDP -> BFRP and
-   * receives the report HE TB PPDU. Band 0 only. */
+   * The HE sounding command surface: arm the BB/MAC sounding engine, register
+   * the beamformee, then drive a sounding intended to air NDPA -> NDP -> BFRP
+   * and receive the report HE TB PPDU. Band 0 only. NB the shipped client NIC
+   * firmware accepts the SET_SND_PARA H2C but does not air the sequence (the fw
+   * sounding-transmit engine is AP-firmware-only); see docs/he-trigger-ul.md. */
 
   /* mac_init_snd_mer + mac_init_snd_mee: arm the beamformer CSI-parse offsets +
    * the beamformee response/CSI options so the AP can send NDPA/BFRP and parse

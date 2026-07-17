@@ -52,6 +52,12 @@ struct TriggerConfig {
   uint8_t gi_ltf = 0;        /* HE GI+LTF combo (0 = 1x/1.6us short) */
   uint8_t num_he_ltf = 1;    /* HE-LTF symbol count (0..7) */
   uint8_t ap_tx_power = 20;  /* AP TX power field, 0..63 (Common Info) */
+  /* UL Length (Common Info B4-B15): the L-SIG Length the solicited TB PPDU
+   * carries — a station computes its TB-PPDU duration from it, so a Basic
+   * Trigger with UL Length 0 elicits NO response. 0x1F4 (~a few-hundred-us TB
+   * PPDU, enough for a QoS-Null even with no buffered data) is a safe default;
+   * tune to the granted RU/MCS/duration for a data grant. */
+  uint16_t ul_length = 0x1F4;
   uint8_t pri20_bitmap = 0x1; /* primary-20 punctured-channel bitmap */
   uint16_t trig_rate = 0;    /* the trigger frame's OWN legacy-PPDU TX rate
                               * (AX 9-bit rate code; 0 = lowest OFDM). Trigger
@@ -59,6 +65,13 @@ struct TriggerConfig {
   uint8_t mode = 0;          /* fw f2p "mode" (2-bit) — undocumented, swept in
                               * kestrelprobe (runtime discovery) */
   uint8_t frexch_type = 0;   /* fw frame-exchange type (6-bit) — undocumented */
+  /* Transmitter Address of the aired Trigger (host-injection path). A station
+   * only answers a Trigger whose TA equals the BSSID it associated to, so this
+   * MUST be the AP's own address; all-zero falls back to the injection SA. */
+  std::array<uint8_t, 6> ta{};
+  /* Receiver Address. Zero = broadcast (a Basic Trigger addresses its users by
+   * AID12, so broadcast RA is standard); set to a STA MAC to unicast. */
+  std::array<uint8_t, 6> ra{};
   std::array<TrigUser, 8> users{}; /* up to 4 on the 8852B (v0), 8 on the 8852C
                                     * (v1); n_users above the die max is clamped */
   uint8_t n_users = 1;
@@ -200,8 +213,13 @@ inline size_t build_basic_trigger(const TriggerConfig &cfg,
                                   const uint8_t ra[6], const uint8_t ta[6],
                                   uint8_t *out, size_t cap) {
   const uint8_t nuser = cfg.n_users == 0 ? 1 : cfg.n_users;
+  /* Basic-Trigger User Info is 6 bytes (5 common + 1 Trigger Dependent). A
+   * Padding field (a User Info with AID12=4095 then 0xFF octets) marks the end
+   * of the list and gives the responder preparation time. */
+  const size_t kPad = 4;
   const size_t need = 2 /*FC*/ + 2 /*dur*/ + 6 /*RA*/ + 6 /*TA*/ + 8 /*common*/ +
-                      static_cast<size_t>(nuser) * 5 /*user info*/;
+                      static_cast<size_t>(nuser) * 6 /*user info*/ +
+                      2 /*pad marker*/ + kPad /*padding*/;
   if (out == nullptr || cap < need)
     return 0;
   size_t o = 0;
@@ -217,6 +235,7 @@ inline size_t build_basic_trigger(const TriggerConfig &cfg,
    * UL Length[15:4], More TF[16], CS Required[17], UL BW[19:18], GI/LTF[21:20],
    * MU-MIMO LTF[22], Num HE-LTF[25:23], ... AP TX Power[33:28]. */
   uint64_t common = 0;
+  common |= (static_cast<uint64_t>(cfg.ul_length) & 0xfff) << 4;
   common |= (static_cast<uint64_t>(cfg.ul_bw) & 0x3) << 18;
   common |= (static_cast<uint64_t>(cfg.gi_ltf) & 0x3) << 20;
   common |= (static_cast<uint64_t>(cfg.num_he_ltf) & 0x7) << 23;
@@ -238,7 +257,16 @@ inline size_t build_basic_trigger(const TriggerConfig &cfg,
     ui |= (static_cast<uint64_t>(he_tgt_rssi_enc(tu.tgt_rssi_dbm)) & 0x7f) << 32;
     for (int i = 0; i < 5; ++i)
       out[o++] = static_cast<uint8_t>((ui >> (8 * i)) & 0xff);
+    /* Trigger Dependent User Info (Basic Trigger): MPDU MU Spacing Factor[1:0],
+     * TID Aggregation Limit[4:2], reserved[5], Preferred AC[7:6]. */
+    out[o++] = static_cast<uint8_t>((tu.pref_ac & 0x3) << 6);
   }
+  /* Padding: a User Info whose AID12 = 4095 marks the end of the user list,
+   * then 0xFF octets give the responder time to prepare its TB PPDU. */
+  out[o++] = 0xff;
+  out[o++] = 0x0f; /* AID12 = 0xFFF (4095) in the low 12 bits */
+  for (size_t i = 0; i < kPad; ++i)
+    out[o++] = 0xff;
   return o;
 }
 

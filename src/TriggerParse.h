@@ -71,13 +71,15 @@ inline bool parse_trigger(const uint8_t *frame, size_t len, TriggerInfo &out) {
   out.gi_ltf = static_cast<uint8_t>((common >> 20) & 0x3);
   out.num_he_ltf = static_cast<uint8_t>((common >> 23) & 0x7);
   out.ap_tx_power = static_cast<uint8_t>((common >> 28) & 0x3f);
-  /* User Info fields (5 bytes each) until the frame ends. A capture that still
-   * carries the 4-byte FCS leaves a <5-byte tail, which the loop simply drops;
-   * a Padding field (all-ones AID12) would too, but Basic Triggers from this
-   * driver carry no padding. */
+  /* User Info fields until the frame ends. Each is 5 common bytes + a
+   * Trigger-Dependent User Info whose size is set by the trigger type (Basic=1
+   * byte, per 802.11ax). A Padding field (AID12 == 4095) or a sub-6-byte tail
+   * (a capture's trailing FCS) ends the list. */
+  const size_t tdep = out.trigger_type == 0 ? 1 : 0; /* Basic Trigger: 1 byte */
+  const size_t ustride = 5 + tdep;
   size_t o = 24;
   out.n_users = 0;
-  while (o + 5 <= len && out.n_users < 8) {
+  while (o + ustride <= len && out.n_users < 8) {
     uint64_t ui = 0;
     for (int i = 0; i < 5; ++i)
       ui |= static_cast<uint64_t>(frame[o + i]) << (8 * i);
@@ -97,7 +99,7 @@ inline bool parse_trigger(const uint8_t *frame, size_t len, TriggerInfo &out) {
     u.tgt_rssi_dbm =
         (rssi7 >= 91) ? 0 : static_cast<int8_t>(static_cast<int>(rssi7) - 110);
     out.n_users++;
-    o += 5;
+    o += ustride;
   }
   return out.n_users > 0;
 }

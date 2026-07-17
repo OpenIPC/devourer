@@ -125,9 +125,10 @@ public:
   bool RegisterPeerSta(const uint8_t peer_mac[6], uint8_t macid,
                        uint8_t addr_cam_idx) override;
 
-  /* HE sounding (the production trigger-airing path): register an associated
-   * beamformee, then air an NDPA -> NDP -> BFRP sequence and receive the report
-   * HE TB PPDU. */
+  /* HE sounding command surface: register an associated beamformee, then drive a
+   * sounding intended to air NDPA -> NDP -> BFRP and receive the report HE TB
+   * PPDU. NB the shipped client NIC fw accepts SET_SND_PARA but does not air it
+   * (AP-firmware-only transmit engine); see docs/he-trigger-ul.md. */
   bool RegisterBeamformee(const uint8_t peer_mac[6], uint8_t macid,
                           uint8_t addr_cam_idx,
                           const devourer::StaBfCaps &bf) override;

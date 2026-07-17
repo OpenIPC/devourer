@@ -1,6 +1,7 @@
 #ifndef KESTREL_MAC_REG_AX_H
 #define KESTREL_MAC_REG_AX_H
 
+#include <cstddef>
 #include <cstdint>
 
 /* Register + bitfield constants for the Kestrel (Wi-Fi 6 / G6 "phl") MAC,
@@ -697,6 +698,510 @@ constexpr uint8_t FWCMD_H2C_CCTRL_PATH_MAP_A_SH = 20; /* dword6 */
 constexpr uint32_t FWCMD_H2C_CCTRL_PATH_MAP_A_MSK = 0x3;
 constexpr uint8_t FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_SH = 0; /* dword7 */
 constexpr uint32_t FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_MSK = 0xff;
+/* CCTL dword8 (value) / dword16 (mask): CSI / beamformee params. Programmed so
+ * a BFRP to this macid solicits a decodable HE compressed-beamforming report
+ * (csi_para_en=1 makes the HW use these per-STA values; csi_txbf_en stays 0 per
+ * the vendor BB HW-bug note). */
+constexpr uint8_t FWCMD_H2C_CCTRL_NC_SH = 0;
+constexpr uint32_t FWCMD_H2C_CCTRL_NC_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_CCTRL_NR_SH = 3;
+constexpr uint32_t FWCMD_H2C_CCTRL_NR_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_CCTRL_NG_SH = 6;
+constexpr uint32_t FWCMD_H2C_CCTRL_NG_MSK = 0x3;
+constexpr uint8_t FWCMD_H2C_CCTRL_CB_SH = 8;
+constexpr uint32_t FWCMD_H2C_CCTRL_CB_MSK = 0x3;
+constexpr uint8_t FWCMD_H2C_CCTRL_CS_SH = 10;
+constexpr uint32_t FWCMD_H2C_CCTRL_CS_MSK = 0x3;
+constexpr uint32_t FWCMD_H2C_CCTRL_CSI_TXBF_EN = 1u << 12;
+constexpr uint32_t FWCMD_H2C_CCTRL_CSI_STBC_EN = 1u << 13;
+constexpr uint32_t FWCMD_H2C_CCTRL_CSI_LDPC_EN = 1u << 14;
+constexpr uint32_t FWCMD_H2C_CCTRL_CSI_PARA_EN = 1u << 15;
+constexpr uint8_t FWCMD_H2C_CCTRL_CSI_FIX_RATE_SH = 16;
+constexpr uint32_t FWCMD_H2C_CCTRL_CSI_FIX_RATE_MSK = 0x1ff;
+constexpr uint8_t FWCMD_H2C_CCTRL_CSI_GI_LTF_SH = 25;
+constexpr uint32_t FWCMD_H2C_CCTRL_CSI_GI_LTF_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_CCTRL_CSI_BW_SH = 30;
+constexpr uint32_t FWCMD_H2C_CCTRL_CSI_BW_MSK = 0x3;
+
+/* ===================================================================
+ * 802.11ax trigger-based UL + TWT — F2P trigger, TWT, and UL_FIXINFO H2C/C2H
+ * field layouts. All values verbatim from the vendor tree:
+ * F2P = mac_ax/fwcmd_intf_f2p.h, TWT = fw_ax/inc_hdr/fwcmd_intf.h +
+ * mac_ax/fwcmd.h, UL_FIXINFO = fw_ax/inc_hdr/fwcmd_intf.h. The encoders that
+ * consume these live in kestrel/KestrelFwSched.cpp.
+ * =================================================================== */
+
+/* ---- F2P trigger (mac_f2p_test_cmd): CL_FR_EXCHG / FUNC_F2P_TEST ----
+ * The 8852B airs a v0 (4-user, 236-byte fwcmd_test_para) frame; the 8852C a v1
+ * (8-user, 288-byte fwcmd_test_para_v1). Both share these bit layouts; only the
+ * user count + tf_wd dword offset differ (handled in the encoder). */
+constexpr uint8_t FWCMD_H2C_FUNC_F2P_TEST = 0x3;
+constexpr std::size_t F2P_V0_CONTENT_LEN = 236; /* sizeof(fwcmd_test_para) */
+constexpr std::size_t F2P_V1_CONTENT_LEN = 288; /* sizeof(fwcmd_test_para_v1) */
+/* dword0 — trigger-frame packet common. */
+constexpr uint8_t FWCMD_F2PTEST_ULBW_SH = 0;
+constexpr uint32_t FWCMD_F2PTEST_ULBW_MSK = 0x3;
+constexpr uint8_t FWCMD_F2PTEST_GILTF_SH = 2;
+constexpr uint32_t FWCMD_F2PTEST_GILTF_MSK = 0x3;
+constexpr uint8_t FWCMD_F2PTEST_NUMLTF_SH = 4;
+constexpr uint32_t FWCMD_F2PTEST_NUMLTF_MSK = 0x7;
+constexpr uint8_t FWCMD_F2PTEST_ULSTBC_SH = 7;
+constexpr uint32_t FWCMD_F2PTEST_ULSTBC_MSK = 0x1;
+constexpr uint8_t FWCMD_F2PTEST_DPLR_SH = 8;
+constexpr uint32_t FWCMD_F2PTEST_DPLR_MSK = 0x1;
+constexpr uint8_t FWCMD_F2PTEST_TXPWR_SH = 9;
+constexpr uint32_t FWCMD_F2PTEST_TXPWR_MSK = 0x3f;
+constexpr uint8_t FWCMD_F2PTEST_USERNUM_SH = 16;
+constexpr uint32_t FWCMD_F2PTEST_USERNUM_MSK = 0xf;
+constexpr uint8_t FWCMD_F2PTEST_PKTNUM_SH = 20;
+constexpr uint32_t FWCMD_F2PTEST_PKTNUM_MSK = 0xf;
+constexpr uint8_t FWCMD_F2PTEST_BITMAP_SH = 24;
+constexpr uint32_t FWCMD_F2PTEST_BITMAP_MSK = 0xff;
+/* per-user dword A — aid12 / ul_mcs / macid / ru_pos. */
+constexpr uint8_t FWCMD_F2PTEST_AID12_SH = 0;
+constexpr uint32_t FWCMD_F2PTEST_AID12_MSK = 0xfff;
+constexpr uint8_t FWCMD_F2PTEST_ULMCS_SH = 12;
+constexpr uint32_t FWCMD_F2PTEST_ULMCS_MSK = 0xf;
+constexpr uint8_t FWCMD_F2PTEST_MACID_SH = 16;
+constexpr uint32_t FWCMD_F2PTEST_MACID_MSK = 0xff;
+constexpr uint8_t FWCMD_F2PTEST_RUPOS_SH = 24;
+constexpr uint32_t FWCMD_F2PTEST_RUPOS_MSK = 0xff;
+/* per-user dword B — ul_fec / ul_dcm / ss_alloc / ul_tgt_rssi. */
+constexpr uint8_t FWCMD_F2PTEST_ULFEC_SH = 0;
+constexpr uint32_t FWCMD_F2PTEST_ULFEC_MSK = 0x1;
+constexpr uint8_t FWCMD_F2PTEST_ULDCM_SH = 1;
+constexpr uint32_t FWCMD_F2PTEST_ULDCM_MSK = 0x1;
+constexpr uint8_t FWCMD_F2PTEST_SS_ALLOC_SH = 2;
+constexpr uint32_t FWCMD_F2PTEST_SS_ALLOC_MSK = 0x3f;
+constexpr uint8_t FWCMD_F2PTEST_UL_TGTRSSI_SH = 8;
+constexpr uint32_t FWCMD_F2PTEST_UL_TGTRSSI_MSK = 0x7f;
+/* dep-user pref_AC (packed one-per-byte). */
+constexpr uint8_t FWCMD_F2PTEST_PREF_AC_SH = 0;
+constexpr uint32_t FWCMD_F2PTEST_PREF_AC_MSK = 0x3;
+/* tf_wd dword — trigger frame's own TX rate + mode/frexch/sigb_len. */
+constexpr uint8_t FWCMD_F2PTEST_DATARATE_SH = 0;
+constexpr uint32_t FWCMD_F2PTEST_DATARATE_MSK = 0x1ff;
+constexpr uint8_t FWCMD_F2PTEST_MULPORT_SH = 9;
+constexpr uint32_t FWCMD_F2PTEST_MULPORT_MSK = 0x7;
+constexpr uint8_t FWCMD_F2PTEST_PWR_OFSET_SH = 12;
+constexpr uint32_t FWCMD_F2PTEST_PWR_OFSET_MSK = 0x7;
+constexpr uint8_t FWCMD_F2PTEST_MODE_SH = 16;
+constexpr uint32_t FWCMD_F2PTEST_MODE_MSK = 0x3;
+constexpr uint8_t FWCMD_F2PTEST_TYPE_SH = 18;
+constexpr uint32_t FWCMD_F2PTEST_TYPE_MSK = 0x3f;
+constexpr uint8_t FWCMD_F2PTEST_SIGB_LEN_SH = 24;
+constexpr uint32_t FWCMD_F2PTEST_SIGB_LEN_MSK = 0xff;
+/* f2p_wd — the TX descriptor for the trigger frame the fw builds+airs (v0
+ * dword14, v1 dword20 = tf_wd dword + 4). A single complete frame on the mgmt
+ * queue needs fs=ls=1, total_number=1, a valid cmd_qsel, and a non-zero
+ * length; a zeroed WD (length 0) makes the fw build nothing. */
+constexpr uint8_t F2P_WD_CMD_QSEL_SH = 0;
+constexpr uint32_t F2P_WD_CMD_QSEL_MSK = 0x3f;
+constexpr uint32_t F2P_WD_LS = 1u << 10;
+constexpr uint32_t F2P_WD_FS = 1u << 11;
+constexpr uint8_t F2P_WD_TOTAL_NUMBER_SH = 12;
+constexpr uint32_t F2P_WD_TOTAL_NUMBER_MSK = 0xf;
+constexpr uint8_t F2P_WD_SEQ_SH = 16;
+constexpr uint32_t F2P_WD_SEQ_MSK = 0xff;
+constexpr uint8_t F2P_WD_LENGTH_SH = 24;
+constexpr uint32_t F2P_WD_LENGTH_MSK = 0xff;
+constexpr uint8_t MAC_AX_MG0_SEL = 18; /* band-0 management TX queue (type.h) */
+/* v0: byte offsets of the tf_wd dword (dword13) and user block. */
+constexpr std::size_t F2P_V0_TFWD_OFF = 40;  /* dword13 */
+constexpr std::size_t F2P_V0_DEPUSER_OFF = 36; /* byte9..12 */
+constexpr uint8_t F2P_V0_MAX_USERS = 4;
+/* v1: tf_wd is dword19; dep-user pref_AC bytes at dword17_0..18_3 (68..75). */
+constexpr std::size_t F2P_V1_TFWD_OFF = 76;  /* dword19 */
+constexpr std::size_t F2P_V1_DEPUSER_OFF = 68; /* dword17_0 */
+constexpr uint8_t F2P_V1_MAX_USERS = 8;
+
+/* ---- TWT (mac_twt_*): CL_TWT ---- */
+constexpr uint8_t FWCMD_H2C_CL_TWT = 0x4;
+constexpr uint8_t FWCMD_H2C_FUNC_TWT_ANNOUNCE_UPD = 0x0;
+constexpr uint8_t FWCMD_H2C_FUNC_TWTINFO_UPD = 0x1;
+constexpr uint8_t FWCMD_H2C_FUNC_TWT_STANSP_UPD = 0x2;
+constexpr uint8_t FWCMD_H2C_FUNC_TWT_OFDMA_INFO_UPD = 0x3;
+/* twtinfo_upd dword0. */
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_NEGOTYPE_SH = 0;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_NEGOTYPE_MSK = 0x3;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_TRIGGER = 1u << 2;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_FLOWTYPE = 1u << 3;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_IMPT = 1u << 4;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_WAKEDURUNIT = 1u << 5;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_RSPPM = 1u << 6;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_FLOWID_SH = 7;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_FLOWID_MSK = 0x7;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_PROT = 1u << 10;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_ACT_SH = 11;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_ACT_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_ID_SH = 14;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_ID_MSK = 0x7;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_BAND = 1u << 17;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_PORT_SH = 18;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_PORT_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_TWT_TYPE_SH = 21;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_TWT_TYPE_MSK = 0x7;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_NIC_ROLE = 1u << 25;
+/* twtinfo_upd dword1. */
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_WAKE_MAN_SH = 0;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_WAKE_MAN_MSK = 0xffff;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_WAKE_EXP_SH = 16;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_WAKE_EXP_MSK = 0x1f;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_DUR_SH = 24;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_DUR_MSK = 0xff;
+/* twt_stansp_upd (act) dword0. */
+constexpr uint8_t FWCMD_H2C_TWT_STANSP_UPD_MACID_SH = 0;
+constexpr uint32_t FWCMD_H2C_TWT_STANSP_UPD_MACID_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_TWT_STANSP_UPD_ID_SH = 8;
+constexpr uint32_t FWCMD_H2C_TWT_STANSP_UPD_ID_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_TWT_STANSP_UPD_ACT_SH = 11;
+constexpr uint32_t FWCMD_H2C_TWT_STANSP_UPD_ACT_MSK = 0xf;
+/* twt_announce_upd dword0. */
+constexpr uint8_t FWCMD_H2C_TWT_ANNOUNCE_UPD_MACID_SH = 0;
+constexpr uint32_t FWCMD_H2C_TWT_ANNOUNCE_UPD_MACID_MSK = 0xff;
+/* twt_ofdma_info_upd (fw func 0x03, non-canonical: mac_ax/fwcmd.h). */
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_OPTION_SH = 0;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_OPTION_MSK = 0x3;
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_TWT_ID_SH = 2;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_TWT_ID_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_MAX_TF_RETRY_SH = 5;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_MAX_TF_RETRY_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_MAX_DL_RETRY_SH = 13;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_MAX_DL_RETRY_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_ROUND_NUM_SH = 21;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_ROUND_NUM_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_PREFERRED_AC_SH = 29;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_PREFERRED_AC_MSK = 0x3;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_HTC_BSR_CTRL_EN = 1u << 31;
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_ROUND_INTERVAL_SH = 0;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_ROUND_INTERVAL_MSK = 0xffff;
+/* TWT C2H (CL_TWT=0x2 on the C2H side). */
+constexpr uint8_t FWCMD_C2H_CL_TWT = 0x2;
+constexpr uint8_t FWCMD_C2H_FUNC_WAIT_ANNOUNCE = 0x0;
+constexpr uint8_t FWCMD_C2H_FUNC_TWT_NOTIFY_EVT = 0x2;
+
+/* ---- UL_FIXINFO (mac_upd_ul_fixinfo): CL_FR_EXCHG / FUNC_TBLUD, table
+ * CLASS_UL_FIXINFO — the production UL-OFDMA scheduler table. 27-dword content
+ * (5 header + 4 sta-pairs + 2 ulrua + 16 per-RU entries) for 8 RU slots. ---- */
+constexpr uint8_t FWCMD_H2C_FUNC_TBLUD = 0x0;
+constexpr uint8_t CLASS_UL_FIXINFO = 7;
+constexpr uint8_t UL_FIXINFO_MAX_RU_NUM = 8;
+/* tbl_hdr dword0. */
+constexpr uint32_t FWCMD_H2C_TBLUD_R_W = 1u << 0;
+constexpr uint8_t FWCMD_H2C_TBLUD_MACID_GROUP_SH = 1;
+constexpr uint32_t FWCMD_H2C_TBLUD_MACID_GROUP_MSK = 0x7f;
+constexpr uint8_t FWCMD_H2C_TBLUD_OFFSET_SH = 8;
+constexpr uint32_t FWCMD_H2C_TBLUD_OFFSET_MSK = 0x1f;
+constexpr uint8_t FWCMD_H2C_TBLUD_LENGTH_SH = 13;
+constexpr uint32_t FWCMD_H2C_TBLUD_LENGTH_MSK = 0x3ff;
+constexpr uint32_t FWCMD_H2C_TBLUD_TYPE = 1u << 23;
+constexpr uint8_t FWCMD_H2C_TBLUD_TABLE_CLASS_SH = 24;
+constexpr uint32_t FWCMD_H2C_TBLUD_TABLE_CLASS_MSK = 0xff;
+/* cfg dword1. */
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_CFG_MODE_SH = 0;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_CFG_MODE_MSK = 0x3;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_CFG_INTERVAL_SH = 2;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_CFG_INTERVAL_MSK = 0x3f;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_CFG_BSR_THOLD_SH = 8;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_CFG_BSR_THOLD_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_CFG_STOREMODE_SH = 16;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_CFG_STOREMODE_MSK = 0x3;
+/* ulinfo dword2 (tf_type / gi_ltf) + dword3 (data_rate / apep_len / istwt). */
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULINFO_TF_TYPE_SH = 16;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULINFO_TF_TYPE_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULINFO_GI_LTF_SH = 29;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULINFO_GI_LTF_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULINFO_DATART_SH = 0;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULINFO_DATART_MSK = 0x1ff;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULINFO_APEPLEN_SH = 16;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULINFO_APEPLEN_MSK = 0xfff;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULINFO_ISTWT = 1u << 30;
+/* ulinfo dword4 (multiport_id). */
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULINFO_MULTIPORT_SH = 0;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULINFO_MULTIPORT_MSK = 0x7;
+/* sta_info pair (2 STAs per dword). */
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_STA_INFO_MACID_0_SH = 0;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_STA_INFO_MACID_0_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_STA_INFO_PREF_AC_0_SH = 8;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_STA_INFO_PREF_AC_0_MSK = 0x3;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_STA_INFO_MACID_1_SH = 16;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_STA_INFO_MACID_1_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_STA_INFO_PREF_AC_1_SH = 24;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_STA_INFO_PREF_AC_1_MSK = 0x3;
+/* ulrua header (ppdu_bw / sta_num). */
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULRUA_PPDU_BW_SH = 1;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULRUA_PPDU_BW_MSK = 0x3;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULRUA_GI_LTF_SH = 3;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULRUA_GI_LTF_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULRUA_STANUM_SH = 11;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULRUA_STANUM_MSK = 0xf;
+/* per-RU entry dword A (tgt_rssi / mac_id / ru_pos) + dword B (bsr / ss / mcs). */
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_TGT_RSSI_SH = 1;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_TGT_RSSI_MSK = 0x7f;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_MAC_ID_SH = 8;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_MAC_ID_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_RU_POS_SH = 16;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_RU_POS_MSK = 0xff;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_CODE = 1u << 24;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_BSRLEN_SH = 0;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_BSRLEN_MSK = 0x7fff;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_DCM = 1u << 16;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_SS_SH = 17;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_SS_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_MCS_SH = 20;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_MCS_MSK = 0xf;
+
+/* ===================================================================
+ * HE sounding (mac_set_snd_para / build_snd_h2c): CL_SOUND / FUNC_SET_SND_PARA.
+ * This is the *production* trigger-airing path — the fw builds and airs the
+ * NDPA -> NDP -> BFRP sequence from the H2C content (content-in-H2C, no
+ * pkt_ofld) and arms RX for the beamforming-report HE TB PPDU. A BFRP
+ * (Beamforming Report Poll) is an 802.11ax Trigger-frame variant, so this
+ * solicits a genuine hardware-scheduled, contention-free UL transmission.
+ * Unlike F2P_TEST (MP-only, no shipped-fw handler), the sounding cmd is a
+ * normal client feature (CONFIG_PHL_BEAMFORM). Field layout verbatim from
+ * fw_ax/inc_hdr/fwcmd_intf.h (the SET_SND_PARA_* block) and the packing order
+ * from mac_ax/sounding.c build_snd_h2c. The per-index vendor macros (STA0..7,
+ * U0..3, WD0..4) are bit-identical, so each repeating structure collapses to
+ * one field set here; the encoder places it in the right dword per index.
+ * =================================================================== */
+constexpr uint8_t FWCMD_H2C_CL_SOUND = 0xB;
+constexpr uint8_t FWCMD_H2C_FUNC_SET_SND_PARA = 0x0;    /* 8852B (v0) */
+constexpr uint8_t FWCMD_H2C_FUNC_SET_SND_PARA_V1 = 0xD; /* 8852C (v1) */
+constexpr std::size_t SND_PARA_V0_LEN = 288; /* sizeof(fwcmd_set_snd_para): 72 dw */
+constexpr std::size_t SND_PARA_V1_LEN = 392; /* sizeof(fwcmd_set_snd_para_v1): 98 dw */
+/* mac_ax frame-exchange types (sounding.h). AX_MU_BFRP1 = the HE MU case that
+ * airs NDPA(wd0) -> NDP(wd1) -> BFRP-Trigger(wd2) and solicits a TB PPDU. */
+constexpr uint8_t FRAME_EXCHANGE_SND_AX_SU = 35;
+constexpr uint8_t FRAME_EXCHANGE_SND_AX_MU_BFRP1 = 36;
+constexpr uint8_t FRAME_EXCHANGE_SND_AX_MU_BFRP2 = 37;
+constexpr uint8_t FRAME_EXCHANGE_SND_N_SU = 38;
+/* snd_pkt_sel values the fw uses to pick which frame a WD drives. */
+constexpr uint8_t SND_PKT_SEL_NDPA = 1;
+constexpr uint8_t SND_PKT_SEL_NDP = 3;
+constexpr uint8_t SND_PKT_SEL_BFRP_LAST = 5;
+/* dword0. */
+constexpr uint8_t SND_FREXCH_TYPE_SH = 0;
+constexpr uint32_t SND_FREXCH_TYPE_MSK = 0x3f;
+constexpr uint8_t SND_MODE_SH = 6;
+constexpr uint32_t SND_MODE_MSK = 0x3;
+constexpr uint8_t SND_BFRP0_USER_NUM_SH = 8;
+constexpr uint32_t SND_BFRP0_USER_NUM_MSK = 0x7;
+constexpr uint8_t SND_BFRP1_USER_NUM_SH = 11;
+constexpr uint32_t SND_BFRP1_USER_NUM_MSK = 0x7;
+/* byte-slot packing (the vendor MACID0..3 macros): 4 bytes per dword, LSB
+ * first. Reused verbatim for macid[], addr1/2/3 of NDPA/BFRP headers. */
+constexpr uint8_t SND_BYTE0_SH = 0;
+constexpr uint8_t SND_BYTE1_SH = 8;
+constexpr uint8_t SND_BYTE2_SH = 16;
+constexpr uint8_t SND_BYTE3_SH = 24;
+constexpr uint32_t SND_BYTE_MSK = 0xff;
+/* NDPA header (dword3, dword7, dword9). frame_ctl/dur/dialog/seq. */
+constexpr uint8_t SND_NDPA_FRAME_CTRL_SH = 0;
+constexpr uint32_t SND_NDPA_FRAME_CTRL_MSK = 0xffff;
+constexpr uint8_t SND_NDPA_DURATION_SH = 16;
+constexpr uint32_t SND_NDPA_DURATION_MSK = 0xffff;
+constexpr uint32_t SND_NDPA_SND_DLG_HE = 1u << 0;
+constexpr uint8_t SND_NDPA_SND_DLG_DIALOG_SH = 1;
+constexpr uint32_t SND_NDPA_SND_DLG_DIALOG_MSK = 0x3f;
+constexpr uint8_t SND_HT_SEQ_CONTROL_SH = 16;
+constexpr uint32_t SND_HT_SEQ_CONTROL_MSK = 0xffff;
+/* NDPA VHT STA-info (2 per dword: STA0/2 low @0, STA1/3 high @16). */
+constexpr uint8_t SND_VHT_STA_AID12_LO_SH = 0;
+constexpr uint8_t SND_VHT_STA_AID12_HI_SH = 16;
+constexpr uint32_t SND_VHT_STA_AID12_MSK = 0xfff;
+constexpr uint32_t SND_VHT_STA_FB_TYPE_LO = 1u << 12;
+constexpr uint32_t SND_VHT_STA_FB_TYPE_HI = 1u << 28;
+constexpr uint8_t SND_VHT_STA_NC_LO_SH = 13;
+constexpr uint8_t SND_VHT_STA_NC_HI_SH = 29;
+constexpr uint32_t SND_VHT_STA_NC_MSK = 0x7;
+/* NDPA HE STA-info (one per dword, STA0..7). */
+constexpr uint8_t SND_HE_STA_AID11_SH = 0;
+constexpr uint32_t SND_HE_STA_AID11_MSK = 0x7ff;
+constexpr uint8_t SND_HE_STA_BW_SH = 11;
+constexpr uint32_t SND_HE_STA_BW_MSK = 0x3fff;
+constexpr uint8_t SND_HE_STA_FB_NG_SH = 25;
+constexpr uint32_t SND_HE_STA_FB_NG_MSK = 0x3;
+constexpr uint32_t SND_HE_STA_DISAMBIGUATION = 1u << 27;
+constexpr uint32_t SND_HE_STA_CB = 1u << 28;
+constexpr uint8_t SND_HE_STA_NC_SH = 29;
+constexpr uint32_t SND_HE_STA_NC_MSK = 0x7;
+/* BFRP header frame_ctl/duration (dword20/24/28; addr via byte slots). */
+constexpr uint8_t SND_BFRP_FRAME_CTL_SH = 0;
+constexpr uint32_t SND_BFRP_FRAME_CTL_MSK = 0xffff;
+constexpr uint8_t SND_BFRP_DURATION_SH = 16;
+constexpr uint32_t SND_BFRP_DURATION_MSK = 0xffff;
+/* HE BFRP Common Info dword A (the Trigger frame common info). */
+constexpr uint8_t SND_HE_BFRP_TRIGGER_INFO_SH = 0;
+constexpr uint32_t SND_HE_BFRP_TRIGGER_INFO_MSK = 0xf;
+constexpr uint8_t SND_HE_BFRP_UL_LENGTH_SH = 4;
+constexpr uint32_t SND_HE_BFRP_UL_LENGTH_MSK = 0xfff;
+constexpr uint32_t SND_HE_BFRP_MORE_TF = 1u << 16;
+constexpr uint32_t SND_HE_BFRP_CS_REQUIRED = 1u << 17;
+constexpr uint8_t SND_HE_BFRP_UL_BW_SH = 18;
+constexpr uint32_t SND_HE_BFRP_UL_BW_MSK = 0x3;
+constexpr uint8_t SND_HE_BFRP_GI_LTF_SH = 20;
+constexpr uint32_t SND_HE_BFRP_GI_LTF_MSK = 0x3;
+constexpr uint32_t SND_HE_BFRP_MU_MIMO_LTF_MODE = 1u << 22;
+constexpr uint8_t SND_HE_BFRP_NUM_OF_HE_LTF_SH = 23;
+constexpr uint32_t SND_HE_BFRP_NUM_OF_HE_LTF_MSK = 0x7;
+constexpr uint8_t SND_HE_BFRP_UL_PKTEXT_SH = 26;
+constexpr uint32_t SND_HE_BFRP_UL_PKTEXT_MSK = 0x7;
+constexpr uint32_t SND_HE_BFRP_UL_STBC = 1u << 29;
+constexpr uint32_t SND_HE_BFRP_LDPC_EXTRA_SYMBOL = 1u << 30;
+constexpr uint32_t SND_HE_BFRP_DOPPLER = 1u << 31;
+/* HE BFRP Common Info dword B. */
+constexpr uint8_t SND_HE_BFRP_AP_TX_POWER_SH = 0;
+constexpr uint32_t SND_HE_BFRP_AP_TX_POWER_MSK = 0x3f;
+constexpr uint8_t SND_HE_BFRP_UL_SPATIAL_REUSE_SH = 6;
+constexpr uint32_t SND_HE_BFRP_UL_SPATIAL_REUSE_MSK = 0xffff;
+/* HE BFRP per-user dword A/B (User Info of the Trigger frame). */
+constexpr uint8_t SND_HE_BFRP_U_AID12_SH = 0;
+constexpr uint32_t SND_HE_BFRP_U_AID12_MSK = 0xfff;
+constexpr uint8_t SND_HE_BFRP_U_RU_POS_SH = 12;
+constexpr uint32_t SND_HE_BFRP_U_RU_POS_MSK = 0xff;
+constexpr uint32_t SND_HE_BFRP_U_UL_FEC_CODE = 1u << 20;
+constexpr uint8_t SND_HE_BFRP_U_UL_MCS_SH = 21;
+constexpr uint32_t SND_HE_BFRP_U_UL_MCS_MSK = 0xf;
+constexpr uint32_t SND_HE_BFRP_U_UL_DCM = 1u << 25;
+constexpr uint8_t SND_HE_BFRP_U_SS_ALLOC_SH = 26;
+constexpr uint32_t SND_HE_BFRP_U_SS_ALLOC_MSK = 0x3f;
+constexpr uint8_t SND_HE_BFRP_U_FB_REXMIT_SH = 0;
+constexpr uint32_t SND_HE_BFRP_U_FB_REXMIT_MSK = 0xff;
+constexpr uint8_t SND_HE_BFRP_U_UL_TGT_RSSI_SH = 8;
+constexpr uint32_t SND_HE_BFRP_U_UL_TGT_RSSI_MSK = 0x7f;
+/* VHT BFRP retransmission bitmap (dword52: BFRP0@0, BFRP1@8, BFRP2@16). */
+constexpr uint8_t SND_VHT_BFRP0_FB_REXMIT_SH = 0;
+constexpr uint8_t SND_VHT_BFRP1_FB_REXMIT_SH = 8;
+constexpr uint8_t SND_VHT_BFRP2_FB_REXMIT_SH = 16;
+constexpr uint32_t SND_VHT_BFRP_FB_REXMIT_MSK = 0xff;
+/* WD dword A/B/C (one per WD entry, WD0..4; 3 dwords each). */
+constexpr uint8_t SND_WD_TXPKTSIZE_SH = 0;
+constexpr uint32_t SND_WD_TXPKTSIZE_MSK = 0xffff;
+constexpr uint8_t SND_WD_NDPA_DURATION_SH = 16;
+constexpr uint32_t SND_WD_NDPA_DURATION_MSK = 0xffff;
+constexpr uint8_t SND_WD_DATARATE_SH = 0;
+constexpr uint32_t SND_WD_DATARATE_MSK = 0x1ff;
+constexpr uint8_t SND_WD_MACID_SH = 9;
+constexpr uint32_t SND_WD_MACID_MSK = 0x7f;
+constexpr uint32_t SND_WD_FORCE_TXOP = 1u << 16;
+constexpr uint8_t SND_WD_DATA_BW_SH = 17;
+constexpr uint32_t SND_WD_DATA_BW_MSK = 0x3;
+constexpr uint8_t SND_WD_GI_LTF_SH = 19;
+constexpr uint32_t SND_WD_GI_LTF_MSK = 0x7;
+constexpr uint32_t SND_WD_DATA_ER = 1u << 22;
+constexpr uint32_t SND_WD_DATA_DCM = 1u << 23;
+constexpr uint32_t SND_WD_DATA_STBC = 1u << 24;
+constexpr uint32_t SND_WD_DATA_LDPC = 1u << 25;
+constexpr uint32_t SND_WD_DATA_BW_ER = 1u << 26;
+constexpr uint32_t SND_WD_MULTIPORT_ID = 1u << 27;
+constexpr uint8_t SND_WD_MBSSID_SH = 28;
+constexpr uint32_t SND_WD_MBSSID_MSK = 0xf;
+constexpr uint8_t SND_WD_SIGNALING_TA_PKT_SC_SH = 0;
+constexpr uint32_t SND_WD_SIGNALING_TA_PKT_SC_MSK = 0xf;
+constexpr uint8_t SND_WD_SW_DEFINE_SH = 4;
+constexpr uint32_t SND_WD_SW_DEFINE_MSK = 0xf;
+constexpr uint8_t SND_WD_TXPWR_OFSET_TYPE_SH = 8;
+constexpr uint32_t SND_WD_TXPWR_OFSET_TYPE_MSK = 0x7;
+constexpr uint8_t SND_WD_LIFETIME_SEL_SH = 11;
+constexpr uint32_t SND_WD_LIFETIME_SEL_MSK = 0x7;
+constexpr uint32_t SND_WD_STF_MODE = 1u << 14;
+constexpr uint32_t SND_WD_DISDATAFB = 1u << 15;
+constexpr uint32_t SND_WD_DATA_TXCNT_LMT_SEL = 1u << 16;
+constexpr uint8_t SND_WD_DATA_TXCNT_LMT_SH = 17;
+constexpr uint32_t SND_WD_DATA_TXCNT_LMT_MSK = 0x3f;
+constexpr uint32_t SND_WD_SIFS_TX = 1u << 23;
+constexpr uint8_t SND_WD_SND_PKT_SEL_SH = 24;
+constexpr uint32_t SND_WD_SND_PKT_SEL_MSK = 0x7;
+constexpr uint8_t SND_WD_NDPA_SH = 27;
+constexpr uint32_t SND_WD_NDPA_MSK = 0x3;
+/* F2P (BFRP) sub-content dword (dword68/69). */
+constexpr uint8_t SND_F2P_CSI_LEN_BFRP_SH = 0;
+constexpr uint32_t SND_F2P_CSI_LEN_BFRP_MSK = 0xfff;
+constexpr uint8_t SND_F2P_TB_T_PE_BFRP_SH = 12;
+constexpr uint32_t SND_F2P_TB_T_PE_BFRP_MSK = 0x3;
+constexpr uint8_t SND_F2P_TRI_PAD_BFRP_SH = 14;
+constexpr uint32_t SND_F2P_TRI_PAD_BFRP_MSK = 0x3;
+constexpr uint32_t SND_F2P_UL_CQI_RPT_TRI_BFRP = 1u << 16;
+constexpr uint8_t SND_F2P_RF_GAIN_IDX_BFRP_SH = 17;
+constexpr uint32_t SND_F2P_RF_GAIN_IDX_BFRP_MSK = 0x3ff;
+constexpr uint32_t SND_F2P_FIX_GAIN_EN_BFRP = 1u << 27;
+/* SFP (F2P period) dword70/71. */
+constexpr uint8_t SND_SFP_F2P_TYPE_SH = 0;
+constexpr uint32_t SND_SFP_F2P_TYPE_MSK = 0xff;
+constexpr uint8_t SND_SFP_F2P_INDEX_SH = 8;
+constexpr uint32_t SND_SFP_F2P_INDEX_MSK = 0xff;
+constexpr uint8_t SND_SFP_F2P_PERIOD_SH = 16;
+constexpr uint32_t SND_SFP_F2P_PERIOD_MSK = 0xffff;
+constexpr uint8_t SND_SFP_F2P_UPDCNT_SH = 0;
+constexpr uint32_t SND_SFP_F2P_UPDCNT_MSK = 0xff;
+constexpr uint8_t SND_SFP_CR_IDX_SH = 8;
+constexpr uint32_t SND_SFP_CR_IDX_MSK = 0x3fffff;
+constexpr uint32_t SND_SFP_SOUNDING_EN = 1u << 31;
+/* NDPA/BFRP frame-control constants (802.11 control frames). NDPA =
+ * type1/subtype5 (0x54), BFRP Trigger = type1/subtype2 (0x24). */
+constexpr uint16_t SND_FC_NDPA = 0x0054;
+constexpr uint16_t SND_FC_TRIGGER = 0x0024;
+/* HE Trigger Type subfield: 1 = Beamforming Report Poll (BFRP). */
+constexpr uint8_t SND_TRIGGER_TYPE_BFRP = 1;
+/* sfp.f2p_type (mac_ax_snd_f2p_type, sounding.h): ONCE = one-shot sounding;
+ * ADD = fw-autonomous periodic sounding (requires f2p_period != 0 +
+ * sounding_en) so a single H2C arms repeated soundings instead of flooding the
+ * CH12 H2C queue; DEL removes a periodic entry. */
+constexpr uint8_t SNDF2P_ONCE = 0;
+constexpr uint8_t SNDF2P_ADD = 1;
+constexpr uint8_t SNDF2P_DEL = 2;
+
+/* ---- Sounding hardware init (mac_init_snd_mee/_mer) + per-STA beamformee
+ * registration. Registers are band-0; band-1 adds the _C1 offset (unused here,
+ * we are band 0). Values verbatim from mac_ax/sounding.c + mac_reg_ax.h. ---- */
+constexpr uint16_t R_AX_BFMER_CTRL_0 = 0xCD78;
+constexpr uint32_t B_AX_BFMER_NDP_BFEN = 1u << 2;
+constexpr uint8_t B_AX_BFMER_HT_CSI_OFFSET_SH = 16;
+constexpr uint8_t B_AX_BFMER_VHT_CSI_OFFSET_SH = 8;
+constexpr uint8_t B_AX_BFMER_HE_CSI_OFFSET_SH = 24;
+constexpr uint8_t HT_PAYLOAD_OFFSET = 0x10;
+constexpr uint8_t VHT_PAYLOAD_OFFSET = 0xd;
+constexpr uint8_t HE_PAYLOAD_OFFSET = 0xf;
+constexpr uint16_t R_AX_BFMEE_RESP_OPTION = 0xCD80;
+constexpr uint32_t B_AX_BFMEE_HT_NDPA_EN = 1u << 0;
+constexpr uint32_t B_AX_BFMEE_VHT_NDPA_EN = 1u << 1;
+constexpr uint32_t B_AX_BFMEE_HE_NDPA_EN = 1u << 2;
+constexpr uint8_t B_AX_BFMEE_NDP_RX_STANDBY_TIMER_SH = 24;
+constexpr uint32_t B_AX_BFMEE_NDP_RX_STANDBY_TIMER_MSK = 0xff;
+/* The vendor _patch_snd_ple_modify / _patch_snd_mu_err set BOTH the NDP and
+ * BFRP report-wait standby timers to 0 so a sounding does not hold a hardware
+ * slot waiting for a report — without this the fw's sounding pipeline backs up
+ * after ~7 pending soundings (no report returns) and the CH12 H2C queue wedges
+ * (rc=-7). PATCH_{NDP,BFRP}_RX_STANDBY_TIMER = 0x0 (sounding.h). */
+constexpr uint8_t NDP_RX_STANDBY_TIMER = 0x0;
+constexpr uint8_t B_AX_BFMEE_BFRP_RX_STANDBY_TIMER_SH = 20;
+constexpr uint32_t B_AX_BFMEE_BFRP_RX_STANDBY_TIMER_MSK = 0xf;
+constexpr uint8_t BFRP_RX_STANDBY_TIMER = 0x0;
+constexpr uint16_t R_AX_TRXPTCL_RESP_CSI_CTRL_0 = 0xCD88;
+constexpr uint32_t B_AX_BFMEE_BFPARAM_SEL = 1u << 28;
+constexpr uint32_t B_AX_BFMEE_USE_NSTS = 1u << 22;
+constexpr uint32_t B_AX_BFMEE_CSI_GID_SEL = 1u << 20;
+constexpr uint32_t B_AX_BFMEE_CSI_FORCE_RETE_EN = 1u << 17;
+constexpr uint16_t R_AX_TRXPTCL_RESP_CSI_RRSC = 0xCD8C;
+constexpr uint32_t CSI_RRSC_BMAP = 0x29292911; /* OFDM 6/12/24 for HT/VHT/HE CSI */
+constexpr uint16_t R_AX_CSIRPT_OPTION = 0xCE64;
+constexpr uint32_t B_AX_CSIPRT_VHTSU_AID_EN = 1u << 24;
+constexpr uint32_t B_AX_CSIPRT_HESU_AID_EN = 1u << 25;
+constexpr uint32_t B_AX_CSIRPT_EMPTY_APPZERO = 1u << 1; /* _patch_csi_append_zero clears */
+/* Per-STA sounding-status + CSI-buffer maps (mac_set_snd_sts_index /
+ * mac_set_csi_buffer_index). SND_SH/CSI_SH step the register per index. */
+constexpr uint16_t R_AX_BFMER_ASSOCIATED_SU0 = 0xCD00;
+constexpr uint32_t B_AX_MER_SU_BFMEE0_EN = 1u << 8;
+constexpr uint16_t SND_STS_SH = 0x2; /* per snd-sts index (SND_SH) */
+constexpr uint16_t R_AX_TRXPTCL_ERROR_INDICA_MASK = 0xCCBC; /* 8852C CSI unmask */
+constexpr uint32_t B_AX_RMAC_CSI = 1u << 7;
+constexpr uint16_t R_AX_BFMER_CSI_BUFF_IDX0 = 0xCD2C;
+constexpr uint16_t CSI_BUFF_SH = 0x4; /* per csi-buffer id (CSI_SH) */
+constexpr uint8_t B_AX_MER_CSI_BUFF_IDX_SH = 8; /* buffer_idx << 8 */
+constexpr uint32_t B_AX_MER_CSI_BUFF_IDX_MSK = 0xfff;
+constexpr uint32_t B_AX_MER_CSI_BUFF_MACID_MSK = 0xff; /* macid in [7:0] */
+constexpr uint8_t SOUNDING_STS_MAX_IDX = 0x15;
 
 /* rtw_mac_src_cmd_ofld (mac_outsrc_def.h). */
 constexpr uint8_t OFLD_SRC_BB = 0;

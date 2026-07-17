@@ -219,6 +219,174 @@ public:
     return ok;
   }
 
+  /* Register the self MACID as an ACCESS POINT role (self_role=AP,
+   * wifi_role=AP, net_type=AP), not a client. The fw's AP-side machinery — the
+   * beacon engine AND the UL-OFDMA trigger scheduler — keys off the fw role;
+   * with a CLIENT role the fw ignores AP-side scheduling even though the port
+   * NET_TYPE register is set to AP for beaconing (role.c requires net_type=AP
+   * to pair with an AP self_role). The vendor constraint (role.c): for an AP
+   * self_role the SMA and TMA must equal the BSSID, so `bssid` is used for all
+   * three in the ADDR_CAM entry. Call in place of register_sta_role +
+   * add_self_sta when the device acts as an AP. */
+  bool register_ap_role(const uint8_t bssid[6], uint8_t macid = 0,
+                        uint8_t band = 0, uint8_t port = 0) {
+    bool ok = _fw.fw_role_maintain(macid, reg::MAC_AX_SELF_ROLE_AP,
+                                   reg::MAC_AX_WIFI_ROLE_AP,
+                                   reg::MAC_AX_ROLE_CREATE, band, port);
+    ok = _fw.fw_upd_addr_cam(macid, bssid, reg::MAC_AX_NET_TYPE_AP,
+                             /*addr_cam_idx=*/0, /*bssid_cam_idx=*/0) &&
+         ok;
+    ok = _fw.fw_upd_cctl_basic(macid, /*addr_cam_idx=*/0, reg::MAC_AX_OFDM6,
+                               /*ntx_path_en=*/1, /*path_map_a=*/0,
+                               /*bmc=*/false) &&
+         ok;
+    return ok;
+  }
+
+  /* Register an associated peer STA (an AP-mode client we schedule UL for):
+   * the same role + ADDR_CAM + CMAC-control chain as add_self_sta but for a
+   * distinct macid and net_type=AP, so the fw tracks the peer and a Trigger's
+   * per-user grant scores against its macid. `peer_mac` is the peer's address
+   * (the trigger's RA / the grant's target); `addr_cam_idx` must be unique per
+   * peer. The 802.11 AID the grant uses is carried per-frame in the trigger
+   * (TriggerConfig user aid12), independent of this CAM entry. */
+  bool register_peer_sta(const uint8_t peer_mac[6], uint8_t macid,
+                         uint8_t addr_cam_idx,
+                         uint8_t net_type = reg::MAC_AX_NET_TYPE_AP) {
+    bool ok = _fw.fw_role_maintain(macid, reg::MAC_AX_SELF_ROLE_CLIENT,
+                                   reg::MAC_AX_WIFI_ROLE_STATION,
+                                   reg::MAC_AX_ROLE_CREATE, /*band=*/0,
+                                   /*port=*/0);
+    ok = _fw.fw_upd_addr_cam(macid, peer_mac, net_type, addr_cam_idx,
+                             /*bssid_cam_idx=*/0) &&
+         ok;
+    ok = _fw.fw_upd_cctl_basic(macid, addr_cam_idx, reg::MAC_AX_OFDM6,
+                               /*ntx_path_en=*/1, /*path_map_a=*/0,
+                               /*bmc=*/false) &&
+         ok;
+    return ok;
+  }
+
+  /* ---- 802.11ax scheduled-UL levers (KestrelFwSched.cpp encoders) ---- */
+
+  /* Fire one HE Basic Trigger (UL-OFDMA grant) via the F2P command. */
+  bool send_trigger(const devourer::TriggerConfig &cfg) {
+    return _fw.f2p_trigger(cfg);
+  }
+
+  /* Create (act=ADD) / modify (act=MOD) a TWT agreement. mac_ax_twt_act_tp:
+   * ADD=0, DEL=1, MOD=2. */
+  bool configure_twt(const devourer::TwtConfig &cfg) {
+    return _fw.twt_info_upd(cfg, /*act=ADD*/ 0);
+  }
+  bool teardown_twt(const devourer::TwtConfig &cfg) {
+    return _fw.twt_info_upd(cfg, /*act=DEL*/ 1);
+  }
+  /* Bind / unbind a STA macid to a TWT config (add/del/terminate/suspend/
+   * resume — see TwtStaAct::action). */
+  bool twt_bind_sta(const devourer::TwtStaAct &act) { return _fw.twt_act(act); }
+  bool twt_announce(uint8_t macid) { return _fw.twt_announce(macid); }
+
+  /* TWT-OFDMA autonomous trigger cadence (fw func 0x03 — may be absent from the
+   * shipped fw; the caller falls back to configure_ul_ofdma). */
+  bool configure_twt_ofdma(const devourer::TwtOfdmaConfig &cfg) {
+    return _fw.twt_ofdma_info_upd(cfg);
+  }
+
+  /* Program the production UL-OFDMA scheduler table (mode=tf_periodic makes the
+   * fw air Triggers autonomously). */
+  bool configure_ul_ofdma(const devourer::UlOfdmaConfig &cfg) {
+    return _fw.ul_fixinfo(cfg);
+  }
+
+  /* ---- HE sounding (mac_init_snd_mer/_mee + mac_set_snd_para) ----
+   * The production trigger-airing path: arm the BB/MAC sounding engine, register
+   * the beamformee, then drive a sounding that airs NDPA -> NDP -> BFRP and
+   * receives the report HE TB PPDU. Band 0 only. */
+
+  /* mac_init_snd_mer + mac_init_snd_mee: arm the beamformer CSI-parse offsets +
+   * the beamformee response/CSI options so the AP can send NDPA/BFRP and parse
+   * the returned compressed-beamforming report. Idempotent register writes;
+   * call once in InitWrite (after phy_bb_rf_init). */
+  bool init_sounding() {
+    namespace k = kestrel::reg;
+    /* mer: BFMER_CTRL_0 = NDP_BFEN | HT/VHT/HE CSI payload offsets. */
+    _device.rtw_write32(
+        k::R_AX_BFMER_CTRL_0,
+        k::B_AX_BFMER_NDP_BFEN |
+            (static_cast<uint32_t>(k::HT_PAYLOAD_OFFSET)
+             << k::B_AX_BFMER_HT_CSI_OFFSET_SH) |
+            (static_cast<uint32_t>(k::VHT_PAYLOAD_OFFSET)
+             << k::B_AX_BFMER_VHT_CSI_OFFSET_SH) |
+            (static_cast<uint32_t>(k::HE_PAYLOAD_OFFSET)
+             << k::B_AX_BFMER_HE_CSI_OFFSET_SH));
+    /* mee: CSI rate set. */
+    _device.rtw_write32(k::R_AX_TRXPTCL_RESP_CSI_RRSC, k::CSI_RRSC_BMAP);
+    /* 8852C: unmask the RMAC CSI error indication (else the fw drops the
+     * incoming report as an error). */
+    if (_variant == ChipVariant::C8852C)
+      clr32(k::R_AX_TRXPTCL_ERROR_INDICA_MASK, k::B_AX_RMAC_CSI);
+    /* RESP_OPTION: NDPA response enable + zero the NDP/BFRP report-wait standby
+     * timers (the _patch_snd_ple_modify / _patch_snd_mu_err patches). Zeroing
+     * both is load-bearing: otherwise the fw holds a hardware slot per sounding
+     * waiting for a report that never returns, and the sounding pipeline backs
+     * up after ~7 pending soundings, wedging the CH12 H2C queue (rc=-7). */
+    field32(k::R_AX_BFMEE_RESP_OPTION, k::NDP_RX_STANDBY_TIMER,
+            k::B_AX_BFMEE_NDP_RX_STANDBY_TIMER_MSK,
+            k::B_AX_BFMEE_NDP_RX_STANDBY_TIMER_SH);
+    field32(k::R_AX_BFMEE_RESP_OPTION, k::BFRP_RX_STANDBY_TIMER,
+            k::B_AX_BFMEE_BFRP_RX_STANDBY_TIMER_MSK,
+            k::B_AX_BFMEE_BFRP_RX_STANDBY_TIMER_SH);
+    set32(k::R_AX_BFMEE_RESP_OPTION, k::B_AX_BFMEE_HT_NDPA_EN |
+                                         k::B_AX_BFMEE_VHT_NDPA_EN |
+                                         k::B_AX_BFMEE_HE_NDPA_EN);
+    /* CSI_CTRL_0: use the per-STA CCTL bf params (BFPARAM_SEL) + NSTS/GID/force. */
+    set32(k::R_AX_TRXPTCL_RESP_CSI_CTRL_0,
+          k::B_AX_BFMEE_BFPARAM_SEL | k::B_AX_BFMEE_USE_NSTS |
+              k::B_AX_BFMEE_CSI_GID_SEL | k::B_AX_BFMEE_CSI_FORCE_RETE_EN);
+    /* CSIRPT_OPTION: match the report by AID (VHT-SU + HE-SU) + clear the
+     * empty-report append-zero (the _patch_csi_append_zero patch). */
+    set32(k::R_AX_CSIRPT_OPTION,
+          k::B_AX_CSIPRT_VHTSU_AID_EN | k::B_AX_CSIPRT_HESU_AID_EN);
+    clr32(k::R_AX_CSIRPT_OPTION, k::B_AX_CSIRPT_EMPTY_APPZERO);
+    _logger->info("Kestrel: init_sounding ({}) done",
+                  _variant == ChipVariant::C8852C ? "8852C" : "8852B");
+    return true;
+  }
+
+  /* Register `macid` as a beamformee to sound: program the per-STA CSI/bf CCTL
+   * fields (nc/nr/ng/cb/cs + csi_para_en) and map the sounding-status + CSI
+   * buffer index registers to the macid. `snd_idx`/`csi_buf` are the hw
+   * resource slots (0 for the first beamformee). */
+  bool register_beamformee(uint8_t macid, uint8_t addr_cam_idx,
+                           const devourer::StaBfCaps &bf, uint8_t snd_idx = 0,
+                           uint16_t csi_buf = 0) {
+    namespace k = kestrel::reg;
+    bool ok = _fw.fw_upd_cctl_bf(macid, addr_cam_idx, bf);
+    /* snd-status index -> macid (R_AX_BFMER_ASSOCIATED_SU0 + SND_SH*idx). */
+    _device.rtw_write32(
+        static_cast<uint16_t>(k::R_AX_BFMER_ASSOCIATED_SU0 +
+                              k::SND_STS_SH * snd_idx),
+        k::B_AX_MER_SU_BFMEE0_EN | macid);
+    /* CSI buffer index -> macid (R_AX_BFMER_CSI_BUFF_IDX0 + CSI_SH*buf). */
+    _device.rtw_write32(
+        static_cast<uint16_t>(k::R_AX_BFMER_CSI_BUFF_IDX0 +
+                              k::CSI_BUFF_SH * csi_buf),
+        ((static_cast<uint32_t>(csi_buf) & k::B_AX_MER_CSI_BUFF_IDX_MSK)
+         << k::B_AX_MER_CSI_BUFF_IDX_SH) |
+            (macid & k::B_AX_MER_CSI_BUFF_MACID_MSK));
+    _logger->info("Kestrel: register_beamformee (macid={} a_idx={} snd_idx={} "
+                  "csi_buf={}) -> {}",
+                  macid, addr_cam_idx, snd_idx, csi_buf, ok ? "ok" : "FAILED");
+    return ok;
+  }
+
+  /* Drive one HE sounding (mac_set_snd_para): the fw airs NDPA -> NDP -> BFRP
+   * and receives the beamformee's report HE TB PPDU. */
+  bool start_sounding(const devourer::SoundingConfig &cfg) {
+    return _fw.set_snd_para(cfg);
+  }
+
   /* Firmware SER probe: returns the latched mac_ax_err_info code if the fw has
    * posted a halt error (HALT_C2H_CTRL set), else 0. Logs a labeled line so the
    * bring-up can pinpoint which init step crashes the running fw. */

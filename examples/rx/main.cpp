@@ -19,6 +19,7 @@
 #include "LinkHealth.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
+#include "TriggerParse.h"
 #include "caps_event.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
@@ -529,6 +530,29 @@ static void packetProcessor(const Packet &packet) {
   }
 
   ++g_rx_count;
+
+  /* HE Trigger frame (802.11 control, FC=0x24) — aired in a legacy PPDU, so
+   * even an 11ac witness captures the bytes. Decode + surface it as rx.trigger
+   * so a monitor validates what an AX AP's F2P / UL_FIXINFO scheduler airs
+   * (fields vs the commanded config) and resolves the fw RU/mode encoding. */
+  if (devourer::is_trigger_frame(packet.Data.data(), packet.Data.size())) {
+    devourer::TriggerInfo ti;
+    if (devourer::parse_trigger(packet.Data.data(), packet.Data.size(), ti)) {
+      auto ev = devourer::Ev(*g_ev, "rx.trigger");
+      ev.f("ttype", ti.trigger_type)
+          .f("ul_bw", ti.ul_bw)
+          .f("gi_ltf", ti.gi_ltf)
+          .f("nltf", ti.num_he_ltf)
+          .f("ap_pwr", ti.ap_tx_power)
+          .f("users", ti.n_users);
+      if (ti.n_users > 0)
+        ev.f("u0_aid", ti.users[0].aid12)
+            .f("u0_ru", ti.users[0].ru_alloc)
+            .f("u0_mcs", ti.users[0].mcs)
+            .f("u0_ss", ti.users[0].ss);
+    }
+    return; /* a trigger is not a data/mgmt frame — nothing else to match */
+  }
 
   if (g_hop_schedule && packet.Data.size() >= 16 &&
       std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {

@@ -298,6 +298,13 @@ struct DeviceConfig {
      * medium-busy gates enabled (carrier-sense TX) instead of clearing them,
      * to test whether the ported RX-DCK calibration fixed the perpetual-busy. */
     bool kestrel_cca_on = false;
+    /* env: DEVOURER_KESTREL_TRIGGER_F2P — force SendTrigger down the fw F2P_TEST
+     * command instead of host-injecting the raw Basic Trigger through the mgmt
+     * TX path. F2P is an MP-only entry the shipped client fw silently drops (it
+     * airs nothing on-air), so the default (false) host-injects a real Basic
+     * Trigger frame that actually leaves the antenna. Set true only to reproduce
+     * the F2P no-op for comparison. */
+    bool kestrel_trigger_f2p = false;
   } debug;
 
   /* ---- USB / process environment -------------------------------------- */

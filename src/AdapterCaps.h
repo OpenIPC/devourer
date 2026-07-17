@@ -162,6 +162,19 @@ struct AdapterCaps {
    * hardware time distribution (see TsfSync). */
   bool hw_rx_timestamp = false;
   bool hw_beacon_txtsf = false;
+  /* 802.11ax scheduled UL (Kestrel/RTL8852 only). trigger_ul_ok: the adapter
+   * can air an HE Trigger frame (UL-OFDMA grant) and program the fw UL-OFDMA
+   * scheduler (SendTrigger / ConfigureUlOfdma). twt_ok: the fw exposes the TWT
+   * agreement surface (ConfigureTwt / TwtBindSta). Pre-AX generations have no
+   * trigger/TWT firmware surface. */
+  bool trigger_ul_ok = false;
+  bool twt_ok = false;
+  /* sounding_ok: the adapter exposes the HE sounding command surface (NDPA ->
+   * NDP -> BFRP via StartSounding / RegisterBeamformee). NB the shipped client
+   * NIC firmware accepts SET_SND_PARA but does not air the sequence (the fw
+   * sounding-transmit engine is AP-firmware-only, like the MP-only F2P path);
+   * host-injected SendTrigger is what puts a Trigger on the air. */
+  bool sounding_ok = false;
 };
 
 inline void set_standard_freq_ranges(AdapterCaps &c) {

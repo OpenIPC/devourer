@@ -8,6 +8,8 @@
 
 #include "ChipVariant.h"
 #include "RtlAdapter.h"
+#include "Sounding.h"
+#include "TriggerTwt.h"
 #include "logger.h"
 
 namespace kestrel {
@@ -88,6 +90,58 @@ public:
    * timestamp). 9-dword header (port/band, macid/rate, ntx_path) + body. */
   bool fw_send_beacon(const uint8_t *body, uint32_t len, uint8_t macid,
                       uint16_t rate_ax, uint8_t ntx_path_en, uint8_t path_map_a);
+
+  /* ---- 802.11ax trigger-based UL + TWT ----
+   * The encoders below are implemented in KestrelFwSched.cpp (a second TU of
+   * this class) to keep this file focused on FWDL/bring-up. They all funnel
+   * through send_h2c_cmd, so the per-die descriptor + rolling seq are shared. */
+
+  /* mac_f2p_test_cmd: H2C cat=MAC, class=FR_EXCHG, func=F2P_TEST — makes the fw
+   * build and air one HE Trigger frame (UL-OFDMA grant) as a frame exchange.
+   * The 8852B lays out the v0 (4-user, 236B) content, the 8852C the v1 (8-user,
+   * 288B) — selected by _variant. Only the trigger-frame parameters are set;
+   * the DL-burst / SIG-B dwords stay zero for a plain UL Basic Trigger. */
+  bool f2p_trigger(const devourer::TriggerConfig &cfg);
+
+  /* mac_twt_info_upd (class=TWT, func=TWTINFO_UPD): create/modify a TWT
+   * agreement (wake window, interval, absolute target-wake TSF). */
+  bool twt_info_upd(const devourer::TwtConfig &cfg, uint8_t act);
+
+  /* mac_twt_act (class=TWT, func=TWT_STANSP_UPD): bind/unbind a STA macid to a
+   * TWT config (add/del/terminate/suspend/resume). */
+  bool twt_act(const devourer::TwtStaAct &act);
+
+  /* mac_twt_staanno (class=TWT, func=TWT_ANNOUNCE_UPD): tell the fw to send a
+   * TWT announce to a macid (AP-side). */
+  bool twt_announce(uint8_t macid);
+
+  /* mac_twt_ofdma_info_upd (class=TWT, func=0x03): the fw-autonomous trigger
+   * cadence inside a TWT SP. func 0x03 is non-canonical (may be absent from the
+   * shipped fw) — the caller treats a fw-ignore as "fall back to ul_fixinfo". */
+  bool twt_ofdma_info_upd(const devourer::TwtOfdmaConfig &cfg);
+
+  /* mac_upd_ul_fixinfo (class=FR_EXCHG, func=TBLUD, table CLASS_UL_FIXINFO):
+   * the production UL-OFDMA scheduler table. mode=tf_periodic makes the fw air
+   * Triggers autonomously at the configured interval. */
+  bool ul_fixinfo(const devourer::UlOfdmaConfig &cfg);
+
+  /* mac_set_snd_para (class=CL_SOUND, func=SET_SND_PARA v0 / _V1 0xD): the HE
+   * sounding command — hands the fw the NDPA -> NDP -> BFRP descriptor set to
+   * build and air. A BFRP is an 802.11ax Trigger-frame variant. Measured (both
+   * dies): the shipped client NIC fw ACCEPTS this H2C (no SER) but does NOT air
+   * the sequence — the fw-command sounding-transmit engine is AP-firmware-only,
+   * so like f2p_trigger this is a byte-exact command surface the shipped fw does
+   * not act on (host-injection via SendTrigger is what airs a Trigger on this
+   * firmware). 8852B lays out the v0 (72-dword) content, the 8852C the v1
+   * (98-dword), selected by _variant. */
+  bool set_snd_para(const devourer::SoundingConfig &cfg);
+
+  /* mac_set_csi_para_cctl (mac_upd_cctl_info with the CSI/bf dword): program the
+   * per-macid CSI/beamformee params (nc/nr/ng/cb/cs + csi_para_en) so a BFRP to
+   * this STA solicits a decodable compressed-beamforming report. csi_txbf_en is
+   * forced 0 (vendor BB HW-bug note). */
+  bool fw_upd_cctl_bf(uint8_t macid, uint8_t addr_cam_idx,
+                      const devourer::StaBfCaps &bf);
 
 private:
   /* Generic H2C over CH12: [WD 24B][fwcmd_hdr 8B][content]. */

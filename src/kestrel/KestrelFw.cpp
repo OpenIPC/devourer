@@ -5,6 +5,7 @@
 #include <thread>
 #include <utility>
 
+#include "KestrelLe.h"
 #include "MacRegAx.h"
 #include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
 #if defined(DEVOURER_HAVE_KESTREL_8852B)
@@ -23,18 +24,11 @@ void delay_us(uint32_t us) {
   std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
 
-uint32_t le32(const uint8_t *p) {
-  return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
-         (static_cast<uint32_t>(p[2]) << 16) |
-         (static_cast<uint32_t>(p[3]) << 24);
-}
-
-void put_le32(uint8_t *p, uint32_t v) {
-  p[0] = v & 0xFF;
-  p[1] = (v >> 8) & 0xFF;
-  p[2] = (v >> 16) & 0xFF;
-  p[3] = (v >> 24) & 0xFF;
-}
+/* le32 / put_le32 now live in KestrelLe.h (shared with KestrelFwSched.cpp);
+ * pull them into this anonymous namespace so existing unqualified uses below
+ * resolve unchanged. */
+using kestrel::le32;
+using kestrel::put_le32;
 
 } /* namespace */
 

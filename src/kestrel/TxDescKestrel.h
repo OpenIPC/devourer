@@ -41,6 +41,9 @@ constexpr uint8_t DATA_BW_SH = 28;         /* wd_info dword0 [29:28] */
 /* 8852C wd_body_t_v1 dword7: DCM rides the rate word (AX_TXD_DATA_DCM_V1);
  * DATA_ER/DATA_BW_ER stay in wd_info dword0 at the same bits as the 8852B. */
 constexpr uint32_t DATA_DCM_V1 = 1u << 30; /* wd_body dword7 (8852C) */
+constexpr uint32_t BMC = 1u << 11;         /* wd_info dword1: broadcast/multicast
+                                            * — group-addressed, no ACK expected,
+                                            * so the fw must not retry it */
 } /* namespace txd */
 
 /* Map a devourer MGN_* rate (RateDefinitions.h) to the AX_TXD_DATARATE encoding
@@ -170,6 +173,13 @@ inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
   /* wd_body dword3: WIFI_SEQ (sw_seq). */
   txd_put_le32(wd + 12, static_cast<uint32_t>(seq & 0xfff) << txd::WIFI_SEQ_SH);
   /* dword4,5 (+ v1 dword6,7) = 0 */
+
+  /* wd_info dword1: mark a group-addressed frame (RA bit0 set — e.g. an injected
+   * broadcast Trigger) as BMC. Without it the fw treats the unacked broadcast as
+   * a failed unicast and retransmits it to the retry limit (~45x the airtime).
+   * The 802.11 RA (addr1) is at frame offset 4 (after FC + Duration). */
+  if (frame_len >= 5 && (frame[4] & 0x01))
+    txd_put_le32(wd + wd_body_len + 4, txd::BMC);
 
   /* Rate fields: force the rate (USERATE_SEL) + DATARATE + BW + GI/LTF +
    * LDPC/STBC + no fallback. On the 8852B (24-byte wd_body) these all live in

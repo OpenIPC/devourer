@@ -109,6 +109,31 @@ public:
    * `interval_tu` TU with the live TSF inserted. */
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
 
+  /* 802.11ax scheduled UL: air an HE Basic Trigger (UL-OFDMA grant), program
+   * TWT agreements + STA binds, and the fw-autonomous trigger cadence
+   * (TWT-OFDMA or the UL_FIXINFO table). Require a prior InitWrite. */
+  bool SendTrigger(const devourer::TriggerConfig &cfg) override;
+  bool ConfigureTwt(const devourer::TwtConfig &cfg) override;
+  bool TeardownTwt(const devourer::TwtConfig &cfg) override;
+  bool TwtBindSta(const devourer::TwtStaAct &act) override;
+  bool ConfigureTwtOfdma(const devourer::TwtOfdmaConfig &cfg) override;
+  bool ConfigureUlOfdma(const devourer::UlOfdmaConfig &cfg) override;
+
+  /* Register an associated peer STA (macid/addr-cam) so a Trigger's per-user
+   * grant scores against it — the AP-side companion to SendTrigger for the
+   * end-to-end UL path. */
+  bool RegisterPeerSta(const uint8_t peer_mac[6], uint8_t macid,
+                       uint8_t addr_cam_idx) override;
+
+  /* HE sounding command surface: register an associated beamformee, then drive a
+   * sounding intended to air NDPA -> NDP -> BFRP and receive the report HE TB
+   * PPDU. NB the shipped client NIC fw accepts SET_SND_PARA but does not air it
+   * (AP-firmware-only transmit engine); see docs/he-trigger-ul.md. */
+  bool RegisterBeamformee(const uint8_t peer_mac[6], uint8_t macid,
+                          uint8_t addr_cam_idx,
+                          const devourer::StaBfCaps &bf) override;
+  bool StartSounding(const devourer::SoundingConfig &cfg) override;
+
   /* AX-native identity read (no power-on needed — the identity block is alive
    * as soon as the USB function enumerates). kestrelprobe stage "id" and the
    * constructor's confirmation log both come through here. */

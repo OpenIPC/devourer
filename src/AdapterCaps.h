@@ -162,6 +162,13 @@ struct AdapterCaps {
    * hardware time distribution (see TsfSync). */
   bool hw_rx_timestamp = false;
   bool hw_beacon_txtsf = false;
+  /* 802.11ax scheduled UL (Kestrel/RTL8852 only). trigger_ul_ok: the adapter
+   * can air an HE Trigger frame (UL-OFDMA grant) and program the fw UL-OFDMA
+   * scheduler (SendTrigger / ConfigureUlOfdma). twt_ok: the fw exposes the TWT
+   * agreement surface (ConfigureTwt / TwtBindSta). Pre-AX generations have no
+   * trigger/TWT firmware surface. */
+  bool trigger_ul_ok = false;
+  bool twt_ok = false;
 };
 
 inline void set_standard_freq_ranges(AdapterCaps &c) {

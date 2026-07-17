@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "FrameParserKestrel.h"
+#include "KestrelLe.h"
 #include "RadiotapPeek.h"
 #include "RateDefinitions.h" /* MGN_* rate enum */
 #include "MacRegAx.h"
@@ -384,6 +385,26 @@ void RtlKestrelDevice::handle_c2h(const uint8_t *payload, uint32_t len) {
                     rpt.freerun_last_out, rpt.pending_1k[0], rpt.pending_1k[1],
                     rpt.pending_1k[2], rpt.pending_1k[3]);
     }
+  } else if (cls == r::FWCMD_C2H_CL_TWT) {
+    /* TWT C2H (content after the 8-byte fwcmd header). WAIT_ANNOUNCE: dword0 =
+     * wait_case[3:0] | macid0[15:8] | macid1[23:16] | macid2[31:24].
+     * TWT_NOTIFY_EVT: dword0 = type[7:0] | twt_id[10:8]; dword1/2 = TSF lo/hi —
+     * the TSF-stamped notify instant (cross-check against ReadTsf). */
+    const uint8_t *c = payload + 8;
+    const uint32_t clen = len - 8;
+    if (func == r::FWCMD_C2H_FUNC_WAIT_ANNOUNCE && clen >= 4) {
+      const uint32_t d0 = kestrel::le32(c);
+      _logger->info("Kestrel twt.wait_anno: wait_case={} macid0={} macid1={} "
+                    "macid2={}",
+                    d0 & 0xf, (d0 >> 8) & 0xff, (d0 >> 16) & 0xff,
+                    (d0 >> 24) & 0xff);
+    } else if (func == r::FWCMD_C2H_FUNC_TWT_NOTIFY_EVT && clen >= 12) {
+      const uint32_t d0 = kestrel::le32(c);
+      const uint64_t tsf = static_cast<uint64_t>(kestrel::le32(c + 4)) |
+                           (static_cast<uint64_t>(kestrel::le32(c + 8)) << 32);
+      _logger->info("Kestrel twt.notify: type={} twt_id={} tsf=0x{:016x}",
+                    d0 & 0xff, (d0 >> 8) & 0x7, tsf);
+    }
   }
 }
 
@@ -475,6 +496,61 @@ bool RtlKestrelDevice::StartBeacon(const uint8_t *beacon, size_t len,
                            /*bss_color=*/0, kestrel::reg::MAC_AX_OFDM6);
 }
 
+bool RtlKestrelDevice::SendTrigger(const devourer::TriggerConfig &cfg) {
+  if (_tx_mgmt_ep == 0) {
+    _logger->error("Kestrel: SendTrigger before InitWrite");
+    return false;
+  }
+  return _hal.send_trigger(cfg);
+}
+
+bool RtlKestrelDevice::ConfigureTwt(const devourer::TwtConfig &cfg) {
+  if (_tx_mgmt_ep == 0) {
+    _logger->error("Kestrel: ConfigureTwt before InitWrite");
+    return false;
+  }
+  return _hal.configure_twt(cfg);
+}
+
+bool RtlKestrelDevice::TeardownTwt(const devourer::TwtConfig &cfg) {
+  if (_tx_mgmt_ep == 0)
+    return false;
+  return _hal.teardown_twt(cfg);
+}
+
+bool RtlKestrelDevice::TwtBindSta(const devourer::TwtStaAct &act) {
+  if (_tx_mgmt_ep == 0) {
+    _logger->error("Kestrel: TwtBindSta before InitWrite");
+    return false;
+  }
+  return _hal.twt_bind_sta(act);
+}
+
+bool RtlKestrelDevice::ConfigureTwtOfdma(const devourer::TwtOfdmaConfig &cfg) {
+  if (_tx_mgmt_ep == 0) {
+    _logger->error("Kestrel: ConfigureTwtOfdma before InitWrite");
+    return false;
+  }
+  return _hal.configure_twt_ofdma(cfg);
+}
+
+bool RtlKestrelDevice::ConfigureUlOfdma(const devourer::UlOfdmaConfig &cfg) {
+  if (_tx_mgmt_ep == 0) {
+    _logger->error("Kestrel: ConfigureUlOfdma before InitWrite");
+    return false;
+  }
+  return _hal.configure_ul_ofdma(cfg);
+}
+
+bool RtlKestrelDevice::RegisterPeerSta(const uint8_t peer_mac[6], uint8_t macid,
+                                       uint8_t addr_cam_idx) {
+  if (_tx_mgmt_ep == 0) {
+    _logger->error("Kestrel: RegisterPeerSta before InitWrite");
+    return false;
+  }
+  return _hal.register_peer_sta(peer_mac, macid, addr_cam_idx);
+}
+
 devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   devourer::AdapterCaps c;
   c.supported = true;
@@ -494,6 +570,10 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   /* HE ER SU + DCM: both dies (AX_TXD_DATA_ER/_BW_ER/_DCM in the TX WD; RX
    * classifies via the descriptor ppdu_type nibble). */
   c.he_er_su_ok = true;
+  /* 802.11ax scheduled UL: HE Trigger (F2P) + UL_FIXINFO scheduler + the TWT
+   * agreement surface — the fw command surface both dies expose. */
+  c.trigger_ul_ok = true;
+  c.twt_ok = true;
   c.hw_rx_timestamp = true;     /* rx freerun_cnt -> RxAtrib.tsfl */
   /* The AX beacon engine (StartBeacon) airs a HW-timed beacon with the live TSF
    * inserted by the MAC at TX — on-air validated on the 8852BU. */

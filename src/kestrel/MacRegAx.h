@@ -1,6 +1,7 @@
 #ifndef KESTREL_MAC_REG_AX_H
 #define KESTREL_MAC_REG_AX_H
 
+#include <cstddef>
 #include <cstdint>
 
 /* Register + bitfield constants for the Kestrel (Wi-Fi 6 / G6 "phl") MAC,
@@ -697,6 +698,234 @@ constexpr uint8_t FWCMD_H2C_CCTRL_PATH_MAP_A_SH = 20; /* dword6 */
 constexpr uint32_t FWCMD_H2C_CCTRL_PATH_MAP_A_MSK = 0x3;
 constexpr uint8_t FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_SH = 0; /* dword7 */
 constexpr uint32_t FWCMD_H2C_CCTRL_ADDR_CAM_INDEX_MSK = 0xff;
+
+/* ===================================================================
+ * 802.11ax trigger-based UL + TWT — F2P trigger, TWT, and UL_FIXINFO H2C/C2H
+ * field layouts. All values verbatim from the vendor tree:
+ * F2P = mac_ax/fwcmd_intf_f2p.h, TWT = fw_ax/inc_hdr/fwcmd_intf.h +
+ * mac_ax/fwcmd.h, UL_FIXINFO = fw_ax/inc_hdr/fwcmd_intf.h. The encoders that
+ * consume these live in kestrel/KestrelFwSched.cpp.
+ * =================================================================== */
+
+/* ---- F2P trigger (mac_f2p_test_cmd): CL_FR_EXCHG / FUNC_F2P_TEST ----
+ * The 8852B airs a v0 (4-user, 236-byte fwcmd_test_para) frame; the 8852C a v1
+ * (8-user, 288-byte fwcmd_test_para_v1). Both share these bit layouts; only the
+ * user count + tf_wd dword offset differ (handled in the encoder). */
+constexpr uint8_t FWCMD_H2C_FUNC_F2P_TEST = 0x3;
+constexpr std::size_t F2P_V0_CONTENT_LEN = 236; /* sizeof(fwcmd_test_para) */
+constexpr std::size_t F2P_V1_CONTENT_LEN = 288; /* sizeof(fwcmd_test_para_v1) */
+/* dword0 — trigger-frame packet common. */
+constexpr uint8_t FWCMD_F2PTEST_ULBW_SH = 0;
+constexpr uint32_t FWCMD_F2PTEST_ULBW_MSK = 0x3;
+constexpr uint8_t FWCMD_F2PTEST_GILTF_SH = 2;
+constexpr uint32_t FWCMD_F2PTEST_GILTF_MSK = 0x3;
+constexpr uint8_t FWCMD_F2PTEST_NUMLTF_SH = 4;
+constexpr uint32_t FWCMD_F2PTEST_NUMLTF_MSK = 0x7;
+constexpr uint8_t FWCMD_F2PTEST_ULSTBC_SH = 7;
+constexpr uint32_t FWCMD_F2PTEST_ULSTBC_MSK = 0x1;
+constexpr uint8_t FWCMD_F2PTEST_DPLR_SH = 8;
+constexpr uint32_t FWCMD_F2PTEST_DPLR_MSK = 0x1;
+constexpr uint8_t FWCMD_F2PTEST_TXPWR_SH = 9;
+constexpr uint32_t FWCMD_F2PTEST_TXPWR_MSK = 0x3f;
+constexpr uint8_t FWCMD_F2PTEST_USERNUM_SH = 16;
+constexpr uint32_t FWCMD_F2PTEST_USERNUM_MSK = 0xf;
+constexpr uint8_t FWCMD_F2PTEST_PKTNUM_SH = 20;
+constexpr uint32_t FWCMD_F2PTEST_PKTNUM_MSK = 0xf;
+constexpr uint8_t FWCMD_F2PTEST_BITMAP_SH = 24;
+constexpr uint32_t FWCMD_F2PTEST_BITMAP_MSK = 0xff;
+/* per-user dword A — aid12 / ul_mcs / macid / ru_pos. */
+constexpr uint8_t FWCMD_F2PTEST_AID12_SH = 0;
+constexpr uint32_t FWCMD_F2PTEST_AID12_MSK = 0xfff;
+constexpr uint8_t FWCMD_F2PTEST_ULMCS_SH = 12;
+constexpr uint32_t FWCMD_F2PTEST_ULMCS_MSK = 0xf;
+constexpr uint8_t FWCMD_F2PTEST_MACID_SH = 16;
+constexpr uint32_t FWCMD_F2PTEST_MACID_MSK = 0xff;
+constexpr uint8_t FWCMD_F2PTEST_RUPOS_SH = 24;
+constexpr uint32_t FWCMD_F2PTEST_RUPOS_MSK = 0xff;
+/* per-user dword B — ul_fec / ul_dcm / ss_alloc / ul_tgt_rssi. */
+constexpr uint8_t FWCMD_F2PTEST_ULFEC_SH = 0;
+constexpr uint32_t FWCMD_F2PTEST_ULFEC_MSK = 0x1;
+constexpr uint8_t FWCMD_F2PTEST_ULDCM_SH = 1;
+constexpr uint32_t FWCMD_F2PTEST_ULDCM_MSK = 0x1;
+constexpr uint8_t FWCMD_F2PTEST_SS_ALLOC_SH = 2;
+constexpr uint32_t FWCMD_F2PTEST_SS_ALLOC_MSK = 0x3f;
+constexpr uint8_t FWCMD_F2PTEST_UL_TGTRSSI_SH = 8;
+constexpr uint32_t FWCMD_F2PTEST_UL_TGTRSSI_MSK = 0x7f;
+/* dep-user pref_AC (packed one-per-byte). */
+constexpr uint8_t FWCMD_F2PTEST_PREF_AC_SH = 0;
+constexpr uint32_t FWCMD_F2PTEST_PREF_AC_MSK = 0x3;
+/* tf_wd dword — trigger frame's own TX rate + mode/frexch/sigb_len. */
+constexpr uint8_t FWCMD_F2PTEST_DATARATE_SH = 0;
+constexpr uint32_t FWCMD_F2PTEST_DATARATE_MSK = 0x1ff;
+constexpr uint8_t FWCMD_F2PTEST_MULPORT_SH = 9;
+constexpr uint32_t FWCMD_F2PTEST_MULPORT_MSK = 0x7;
+constexpr uint8_t FWCMD_F2PTEST_PWR_OFSET_SH = 12;
+constexpr uint32_t FWCMD_F2PTEST_PWR_OFSET_MSK = 0x7;
+constexpr uint8_t FWCMD_F2PTEST_MODE_SH = 16;
+constexpr uint32_t FWCMD_F2PTEST_MODE_MSK = 0x3;
+constexpr uint8_t FWCMD_F2PTEST_TYPE_SH = 18;
+constexpr uint32_t FWCMD_F2PTEST_TYPE_MSK = 0x3f;
+constexpr uint8_t FWCMD_F2PTEST_SIGB_LEN_SH = 24;
+constexpr uint32_t FWCMD_F2PTEST_SIGB_LEN_MSK = 0xff;
+/* f2p_wd — the TX descriptor for the trigger frame the fw builds+airs (v0
+ * dword14, v1 dword20 = tf_wd dword + 4). A single complete frame on the mgmt
+ * queue needs fs=ls=1, total_number=1, a valid cmd_qsel, and a non-zero
+ * length; a zeroed WD (length 0) makes the fw build nothing. */
+constexpr uint8_t F2P_WD_CMD_QSEL_SH = 0;
+constexpr uint32_t F2P_WD_CMD_QSEL_MSK = 0x3f;
+constexpr uint32_t F2P_WD_LS = 1u << 10;
+constexpr uint32_t F2P_WD_FS = 1u << 11;
+constexpr uint8_t F2P_WD_TOTAL_NUMBER_SH = 12;
+constexpr uint32_t F2P_WD_TOTAL_NUMBER_MSK = 0xf;
+constexpr uint8_t F2P_WD_SEQ_SH = 16;
+constexpr uint32_t F2P_WD_SEQ_MSK = 0xff;
+constexpr uint8_t F2P_WD_LENGTH_SH = 24;
+constexpr uint32_t F2P_WD_LENGTH_MSK = 0xff;
+constexpr uint8_t MAC_AX_MG0_SEL = 18; /* band-0 management TX queue (type.h) */
+/* v0: byte offsets of the tf_wd dword (dword13) and user block. */
+constexpr std::size_t F2P_V0_TFWD_OFF = 40;  /* dword13 */
+constexpr std::size_t F2P_V0_DEPUSER_OFF = 36; /* byte9..12 */
+constexpr uint8_t F2P_V0_MAX_USERS = 4;
+/* v1: tf_wd is dword19; dep-user pref_AC bytes at dword17_0..18_3 (68..75). */
+constexpr std::size_t F2P_V1_TFWD_OFF = 76;  /* dword19 */
+constexpr std::size_t F2P_V1_DEPUSER_OFF = 68; /* dword17_0 */
+constexpr uint8_t F2P_V1_MAX_USERS = 8;
+
+/* ---- TWT (mac_twt_*): CL_TWT ---- */
+constexpr uint8_t FWCMD_H2C_CL_TWT = 0x4;
+constexpr uint8_t FWCMD_H2C_FUNC_TWT_ANNOUNCE_UPD = 0x0;
+constexpr uint8_t FWCMD_H2C_FUNC_TWTINFO_UPD = 0x1;
+constexpr uint8_t FWCMD_H2C_FUNC_TWT_STANSP_UPD = 0x2;
+constexpr uint8_t FWCMD_H2C_FUNC_TWT_OFDMA_INFO_UPD = 0x3;
+/* twtinfo_upd dword0. */
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_NEGOTYPE_SH = 0;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_NEGOTYPE_MSK = 0x3;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_TRIGGER = 1u << 2;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_FLOWTYPE = 1u << 3;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_IMPT = 1u << 4;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_WAKEDURUNIT = 1u << 5;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_RSPPM = 1u << 6;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_FLOWID_SH = 7;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_FLOWID_MSK = 0x7;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_PROT = 1u << 10;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_ACT_SH = 11;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_ACT_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_ID_SH = 14;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_ID_MSK = 0x7;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_BAND = 1u << 17;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_PORT_SH = 18;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_PORT_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_TWT_TYPE_SH = 21;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_TWT_TYPE_MSK = 0x7;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_NIC_ROLE = 1u << 25;
+/* twtinfo_upd dword1. */
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_WAKE_MAN_SH = 0;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_WAKE_MAN_MSK = 0xffff;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_WAKE_EXP_SH = 16;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_WAKE_EXP_MSK = 0x1f;
+constexpr uint8_t FWCMD_H2C_TWTINFO_UPD_DUR_SH = 24;
+constexpr uint32_t FWCMD_H2C_TWTINFO_UPD_DUR_MSK = 0xff;
+/* twt_stansp_upd (act) dword0. */
+constexpr uint8_t FWCMD_H2C_TWT_STANSP_UPD_MACID_SH = 0;
+constexpr uint32_t FWCMD_H2C_TWT_STANSP_UPD_MACID_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_TWT_STANSP_UPD_ID_SH = 8;
+constexpr uint32_t FWCMD_H2C_TWT_STANSP_UPD_ID_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_TWT_STANSP_UPD_ACT_SH = 11;
+constexpr uint32_t FWCMD_H2C_TWT_STANSP_UPD_ACT_MSK = 0xf;
+/* twt_announce_upd dword0. */
+constexpr uint8_t FWCMD_H2C_TWT_ANNOUNCE_UPD_MACID_SH = 0;
+constexpr uint32_t FWCMD_H2C_TWT_ANNOUNCE_UPD_MACID_MSK = 0xff;
+/* twt_ofdma_info_upd (fw func 0x03, non-canonical: mac_ax/fwcmd.h). */
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_OPTION_SH = 0;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_OPTION_MSK = 0x3;
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_TWT_ID_SH = 2;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_TWT_ID_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_MAX_TF_RETRY_SH = 5;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_MAX_TF_RETRY_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_MAX_DL_RETRY_SH = 13;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_MAX_DL_RETRY_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_ROUND_NUM_SH = 21;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_ROUND_NUM_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_PREFERRED_AC_SH = 29;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_PREFERRED_AC_MSK = 0x3;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_HTC_BSR_CTRL_EN = 1u << 31;
+constexpr uint8_t FWCMD_H2C_TWT_OFDMA_ROUND_INTERVAL_SH = 0;
+constexpr uint32_t FWCMD_H2C_TWT_OFDMA_ROUND_INTERVAL_MSK = 0xffff;
+/* TWT C2H (CL_TWT=0x2 on the C2H side). */
+constexpr uint8_t FWCMD_C2H_CL_TWT = 0x2;
+constexpr uint8_t FWCMD_C2H_FUNC_WAIT_ANNOUNCE = 0x0;
+constexpr uint8_t FWCMD_C2H_FUNC_TWT_NOTIFY_EVT = 0x2;
+
+/* ---- UL_FIXINFO (mac_upd_ul_fixinfo): CL_FR_EXCHG / FUNC_TBLUD, table
+ * CLASS_UL_FIXINFO — the production UL-OFDMA scheduler table. 27-dword content
+ * (5 header + 4 sta-pairs + 2 ulrua + 16 per-RU entries) for 8 RU slots. ---- */
+constexpr uint8_t FWCMD_H2C_FUNC_TBLUD = 0x0;
+constexpr uint8_t CLASS_UL_FIXINFO = 7;
+constexpr uint8_t UL_FIXINFO_MAX_RU_NUM = 8;
+/* tbl_hdr dword0. */
+constexpr uint32_t FWCMD_H2C_TBLUD_R_W = 1u << 0;
+constexpr uint8_t FWCMD_H2C_TBLUD_MACID_GROUP_SH = 1;
+constexpr uint32_t FWCMD_H2C_TBLUD_MACID_GROUP_MSK = 0x7f;
+constexpr uint8_t FWCMD_H2C_TBLUD_OFFSET_SH = 8;
+constexpr uint32_t FWCMD_H2C_TBLUD_OFFSET_MSK = 0x1f;
+constexpr uint8_t FWCMD_H2C_TBLUD_LENGTH_SH = 13;
+constexpr uint32_t FWCMD_H2C_TBLUD_LENGTH_MSK = 0x3ff;
+constexpr uint32_t FWCMD_H2C_TBLUD_TYPE = 1u << 23;
+constexpr uint8_t FWCMD_H2C_TBLUD_TABLE_CLASS_SH = 24;
+constexpr uint32_t FWCMD_H2C_TBLUD_TABLE_CLASS_MSK = 0xff;
+/* cfg dword1. */
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_CFG_MODE_SH = 0;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_CFG_MODE_MSK = 0x3;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_CFG_INTERVAL_SH = 2;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_CFG_INTERVAL_MSK = 0x3f;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_CFG_BSR_THOLD_SH = 8;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_CFG_BSR_THOLD_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_CFG_STOREMODE_SH = 16;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_CFG_STOREMODE_MSK = 0x3;
+/* ulinfo dword2 (tf_type / gi_ltf) + dword3 (data_rate / apep_len / istwt). */
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULINFO_TF_TYPE_SH = 16;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULINFO_TF_TYPE_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULINFO_GI_LTF_SH = 29;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULINFO_GI_LTF_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULINFO_DATART_SH = 0;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULINFO_DATART_MSK = 0x1ff;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULINFO_APEPLEN_SH = 16;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULINFO_APEPLEN_MSK = 0xfff;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULINFO_ISTWT = 1u << 30;
+/* ulinfo dword4 (multiport_id). */
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULINFO_MULTIPORT_SH = 0;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULINFO_MULTIPORT_MSK = 0x7;
+/* sta_info pair (2 STAs per dword). */
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_STA_INFO_MACID_0_SH = 0;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_STA_INFO_MACID_0_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_STA_INFO_PREF_AC_0_SH = 8;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_STA_INFO_PREF_AC_0_MSK = 0x3;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_STA_INFO_MACID_1_SH = 16;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_STA_INFO_MACID_1_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_STA_INFO_PREF_AC_1_SH = 24;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_STA_INFO_PREF_AC_1_MSK = 0x3;
+/* ulrua header (ppdu_bw / sta_num). */
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULRUA_PPDU_BW_SH = 1;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULRUA_PPDU_BW_MSK = 0x3;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULRUA_GI_LTF_SH = 3;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULRUA_GI_LTF_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_ULRUA_STANUM_SH = 11;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_ULRUA_STANUM_MSK = 0xf;
+/* per-RU entry dword A (tgt_rssi / mac_id / ru_pos) + dword B (bsr / ss / mcs). */
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_TGT_RSSI_SH = 1;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_TGT_RSSI_MSK = 0x7f;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_MAC_ID_SH = 8;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_MAC_ID_MSK = 0xff;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_RU_POS_SH = 16;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_RU_POS_MSK = 0xff;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_CODE = 1u << 24;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_BSRLEN_SH = 0;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_BSRLEN_MSK = 0x7fff;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_DCM = 1u << 16;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_SS_SH = 17;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_SS_MSK = 0x7;
+constexpr uint8_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_MCS_SH = 20;
+constexpr uint32_t FWCMD_H2C_UL_FIXINFO_UL_RUA_STA_ENT_MCS_MSK = 0xf;
 
 /* rtw_mac_src_cmd_ofld (mac_outsrc_def.h). */
 constexpr uint8_t OFLD_SRC_BB = 0;

@@ -321,6 +321,8 @@ if(DEVOURER_KESTREL)
         src/kestrel/MacRegAx.h
         src/kestrel/HalKestrel.cpp src/kestrel/HalKestrel.h
         src/kestrel/KestrelFw.cpp src/kestrel/KestrelFw.h
+        src/kestrel/KestrelFwSched.cpp
+        src/kestrel/KestrelLe.h
         src/kestrel/RtlKestrelDevice.cpp src/kestrel/RtlKestrelDevice.h)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_KESTREL=1)
 endif()
@@ -619,6 +621,17 @@ target_include_directories(HeRadiotapSelftest PRIVATE
 
 add_test(NAME he_radiotap COMMAND HeRadiotapSelftest)
 
+# Headless round-trip guard for the 802.11ax Trigger frame path (src/TriggerTwt.h
+# build_basic_trigger + he_ru_alloc, src/TriggerParse.h parse_trigger): build ->
+# parse a Basic Trigger, RU-allocation golden vectors. Generation-neutral (the
+# fw F2P encoders are guarded separately below); the on-air half (witness decode
+# of an fw-aired trigger) is tier-A validation.
+add_executable(TriggerParseSelftest tests/trigger_parse_selftest.cpp)
+target_compile_features(TriggerParseSelftest PRIVATE cxx_std_20)
+target_include_directories(TriggerParseSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME trigger_parse COMMAND TriggerParseSelftest)
+
 # Headless guard for the Kestrel (11ax) RX descriptor parser
 # (src/kestrel/FrameParserKestrel.h): rxd field extraction + aggregate walk
 # (on-air decode is hardware-validated out-of-band). Compiled only when a
@@ -635,6 +648,15 @@ if(DEVOURER_KESTREL)
     target_include_directories(KestrelTxReportSelftest PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
     add_test(NAME kestrel_txreport COMMAND KestrelTxReportSelftest)
+
+    # Golden-bytes guard for the trigger-UL + TWT H2C content encoders
+    # (src/kestrel/SchedEncode.h): each config's emitted LE dwords vs the
+    # hand-computed vendor SET_WORD layout (F2P v0/v1, TWT, UL_FIXINFO).
+    add_executable(KestrelSchedSelftest tests/kestrel_sched_selftest.cpp)
+    target_compile_features(KestrelSchedSelftest PRIVATE cxx_std_20)
+    target_include_directories(KestrelSchedSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    add_test(NAME kestrel_sched COMMAND KestrelSchedSelftest)
 endif()
 
 add_executable(RadiotapTxFlagsSelftest tests/radiotap_txflags_selftest.cpp)

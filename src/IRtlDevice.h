@@ -13,6 +13,7 @@
 #include "RxSense.h"
 #include "SelectedChannel.h"
 #include "ThermalStatus.h"
+#include "TriggerTwt.h"
 #include "TxCaps.h"
 #include "TxMode.h"
 #include "TxPower.h"
@@ -229,6 +230,49 @@ public:
   }
   virtual void ClearAmpduMode() {}
   virtual devourer::AmpduMode GetAmpduMode() { return {}; }
+
+  /* 802.11ax trigger-based UL + TWT (src/TriggerTwt.h) — the standards-native
+   * scheduled, contention-free UL access. Kestrel (RTL8852) only: the AP airs
+   * an HE Trigger frame that grants each STA a resource unit and a start time
+   * (SIFS after the trigger), and the STA MAC fires its UL-OFDMA TX at that
+   * instant in hardware. Every method returns false where unsupported (the
+   * Jaguar generations have no HE trigger/TWT firmware surface). */
+
+  /* Air one HE Basic Trigger (UL-OFDMA grant) via the firmware F2P command. */
+  virtual bool SendTrigger(const devourer::TriggerConfig & /*cfg*/) {
+    return false;
+  }
+
+  /* Create/modify a TWT agreement (wake window, interval, absolute target-wake
+   * TSF); TeardownTwt deletes it. The AP owns the timetable. */
+  virtual bool ConfigureTwt(const devourer::TwtConfig & /*cfg*/) { return false; }
+  virtual bool TeardownTwt(const devourer::TwtConfig & /*cfg*/) { return false; }
+  /* Bind/unbind a STA (macid) to a TWT config (add/del/terminate/...). */
+  virtual bool TwtBindSta(const devourer::TwtStaAct & /*act*/) { return false; }
+
+  /* Program the fw-autonomous trigger cadence inside a TWT service period
+   * (TWT-OFDMA). Returns false where the fw lacks the (non-canonical) command —
+   * ConfigureUlOfdma is the canonical fallback. */
+  virtual bool ConfigureTwtOfdma(const devourer::TwtOfdmaConfig & /*cfg*/) {
+    return false;
+  }
+
+  /* Program the production UL-OFDMA scheduler table (UL_FIXINFO). With
+   * mode=tf_periodic the fw airs Triggers autonomously at the configured
+   * interval — the transport-independent scheduled-UL primitive. */
+  virtual bool ConfigureUlOfdma(const devourer::UlOfdmaConfig & /*cfg*/) {
+    return false;
+  }
+
+  /* Register an associated peer STA (a scheduled-UL client): its macid + ADDR_CAM
+   * so a Trigger's per-user grant scores against it. `peer_mac` is the STA's
+   * address, `addr_cam_idx` must be unique per peer. The AP-side companion to
+   * SendTrigger/ConfigureUlOfdma for the end-to-end UL path. Returns false where
+   * unsupported. */
+  virtual bool RegisterPeerSta(const uint8_t /*peer_mac*/[6], uint8_t /*macid*/,
+                               uint8_t /*addr_cam_idx*/) {
+    return false;
+  }
 
   /* Batch TX: submit `count` frames (each buffer = radiotap header + 802.11
    * MPDU, the send_packet contract) in one call. With USB TX aggregation

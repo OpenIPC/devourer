@@ -219,6 +219,86 @@ public:
     return ok;
   }
 
+  /* Register the self MACID as an ACCESS POINT role (self_role=AP,
+   * wifi_role=AP, net_type=AP), not a client. The fw's AP-side machinery — the
+   * beacon engine AND the UL-OFDMA trigger scheduler — keys off the fw role;
+   * with a CLIENT role the fw ignores AP-side scheduling even though the port
+   * NET_TYPE register is set to AP for beaconing (role.c requires net_type=AP
+   * to pair with an AP self_role). The vendor constraint (role.c): for an AP
+   * self_role the SMA and TMA must equal the BSSID, so `bssid` is used for all
+   * three in the ADDR_CAM entry. Call in place of register_sta_role +
+   * add_self_sta when the device acts as an AP. */
+  bool register_ap_role(const uint8_t bssid[6], uint8_t macid = 0,
+                        uint8_t band = 0, uint8_t port = 0) {
+    bool ok = _fw.fw_role_maintain(macid, reg::MAC_AX_SELF_ROLE_AP,
+                                   reg::MAC_AX_WIFI_ROLE_AP,
+                                   reg::MAC_AX_ROLE_CREATE, band, port);
+    ok = _fw.fw_upd_addr_cam(macid, bssid, reg::MAC_AX_NET_TYPE_AP,
+                             /*addr_cam_idx=*/0, /*bssid_cam_idx=*/0) &&
+         ok;
+    ok = _fw.fw_upd_cctl_basic(macid, /*addr_cam_idx=*/0, reg::MAC_AX_OFDM6,
+                               /*ntx_path_en=*/1, /*path_map_a=*/0,
+                               /*bmc=*/false) &&
+         ok;
+    return ok;
+  }
+
+  /* Register an associated peer STA (an AP-mode client we schedule UL for):
+   * the same role + ADDR_CAM + CMAC-control chain as add_self_sta but for a
+   * distinct macid and net_type=AP, so the fw tracks the peer and a Trigger's
+   * per-user grant scores against its macid. `peer_mac` is the peer's address
+   * (the trigger's RA / the grant's target); `addr_cam_idx` must be unique per
+   * peer. The 802.11 AID the grant uses is carried per-frame in the trigger
+   * (TriggerConfig user aid12), independent of this CAM entry. */
+  bool register_peer_sta(const uint8_t peer_mac[6], uint8_t macid,
+                         uint8_t addr_cam_idx,
+                         uint8_t net_type = reg::MAC_AX_NET_TYPE_AP) {
+    bool ok = _fw.fw_role_maintain(macid, reg::MAC_AX_SELF_ROLE_CLIENT,
+                                   reg::MAC_AX_WIFI_ROLE_STATION,
+                                   reg::MAC_AX_ROLE_CREATE, /*band=*/0,
+                                   /*port=*/0);
+    ok = _fw.fw_upd_addr_cam(macid, peer_mac, net_type, addr_cam_idx,
+                             /*bssid_cam_idx=*/0) &&
+         ok;
+    ok = _fw.fw_upd_cctl_basic(macid, addr_cam_idx, reg::MAC_AX_OFDM6,
+                               /*ntx_path_en=*/1, /*path_map_a=*/0,
+                               /*bmc=*/false) &&
+         ok;
+    return ok;
+  }
+
+  /* ---- 802.11ax scheduled-UL levers (KestrelFwSched.cpp encoders) ---- */
+
+  /* Fire one HE Basic Trigger (UL-OFDMA grant) via the F2P command. */
+  bool send_trigger(const devourer::TriggerConfig &cfg) {
+    return _fw.f2p_trigger(cfg);
+  }
+
+  /* Create (act=ADD) / modify (act=MOD) a TWT agreement. mac_ax_twt_act_tp:
+   * ADD=0, DEL=1, MOD=2. */
+  bool configure_twt(const devourer::TwtConfig &cfg) {
+    return _fw.twt_info_upd(cfg, /*act=ADD*/ 0);
+  }
+  bool teardown_twt(const devourer::TwtConfig &cfg) {
+    return _fw.twt_info_upd(cfg, /*act=DEL*/ 1);
+  }
+  /* Bind / unbind a STA macid to a TWT config (add/del/terminate/suspend/
+   * resume — see TwtStaAct::action). */
+  bool twt_bind_sta(const devourer::TwtStaAct &act) { return _fw.twt_act(act); }
+  bool twt_announce(uint8_t macid) { return _fw.twt_announce(macid); }
+
+  /* TWT-OFDMA autonomous trigger cadence (fw func 0x03 — may be absent from the
+   * shipped fw; the caller falls back to configure_ul_ofdma). */
+  bool configure_twt_ofdma(const devourer::TwtOfdmaConfig &cfg) {
+    return _fw.twt_ofdma_info_upd(cfg);
+  }
+
+  /* Program the production UL-OFDMA scheduler table (mode=tf_periodic makes the
+   * fw air Triggers autonomously). */
+  bool configure_ul_ofdma(const devourer::UlOfdmaConfig &cfg) {
+    return _fw.ul_fixinfo(cfg);
+  }
+
   /* Firmware SER probe: returns the latched mac_ax_err_info code if the fw has
    * posted a halt error (HALT_C2H_CTRL set), else 0. Logs a labeled line so the
    * bring-up can pinpoint which init step crashes the running fw. */

@@ -125,8 +125,8 @@ TX/TX+RX sessions, from a dedicated housekeeping thread in RX-only sessions
 - **CCK packet detection** (type4, 2.4 GHz): CCK-FA moving average drives the
   PD/CS level ladder in `0x1ac8/0x1acc/0x1ad0`.
 - **EDCCA tracking**: `th_l2h = max(IGI+8, 48)`, `th_h2l = th_l2h − 8` into
-  `0x84c` (matches the kernel end state). `SetCcaMode`'s EDCCA-disable knob
-  suppresses this tracking.
+  `0x84c` (matches the kernel end state). `SetCcaMode`'s carrier-sense-disable
+  knob (primary CCA + EDCCA) suppresses this tracking.
 
 The kernel's remaining watchdog mechanisms self-disable without a link and
 are intentionally absent: CFO tracking (returns unless associated), rate

@@ -207,6 +207,12 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   }
   _brought_up = true;
 
+  /* DEVOURER_DIS_CCA — disable the MAC carrier-sense gate at bring-up (as
+   * Jaguar3 does) so injected/beacon TX punches through a busy channel instead
+   * of deferring. Runtime equivalent: SetCcaMode. */
+  if (_cfg.tuning.disable_cca)
+    SetCcaMode(true);
+
   /* DEVOURER_XTAL_CAP — apply the crystal-cap trim once the AFE is up
    * (issue #217, the narrowband CFO lever). */
   if (_cfg.tuning.xtal_cap)
@@ -1649,14 +1655,18 @@ int32_t RtlJaguar2Device::PinBeaconTbtt(int32_t offset_us) {
 
 void RtlJaguar2Device::SetCcaMode(bool disabled) {
   std::lock_guard<std::mutex> lk(_reg_mu);
+  /* Both MAC carrier-sense bits in REG_TX_PTCL_CTRL: primary CCA 0x520[14] +
+   * EDCCA [15], plus EDCCA_MSK_COUNTDOWN 0x524[11]. The primary-CCA bit is the
+   * one that stops TX deferring to a co-channel transmitter (issue #199); 0x520
+   * is the same HalMAC layout as the on-air-validated Jaguar3. */
   uint32_t v520 = _device.rtw_read<uint32_t>(0x0520);
   uint32_t v524 = _device.rtw_read<uint32_t>(0x0524);
-  if (disabled) { v520 |= (1u << 15); v524 &= ~(1u << 11); }
-  else          { v520 &= ~(1u << 15); v524 |= (1u << 11); }
+  if (disabled) { v520 |= (1u << 15) | (1u << 14); v524 &= ~(1u << 11); }
+  else          { v520 &= ~((1u << 15) | (1u << 14)); v524 |= (1u << 11); }
   _device.rtw_write<uint32_t>(0x0520, v520);
   _device.rtw_write<uint32_t>(0x0524, v524);
-  _logger->info("Jaguar2: MAC EDCCA {}", disabled ? "DISABLED (dis_cca)"
-                                                  : "enabled (default)");
+  _logger->info("Jaguar2: MAC carrier-sense {}",
+                disabled ? "DISABLED (dis_cca: CCA+EDCCA)" : "enabled (default)");
 }
 
 uint64_t RtlJaguar2Device::ReadTsf() {

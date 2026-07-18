@@ -1,29 +1,25 @@
 #!/usr/bin/env bash
-# MEASURE-FIRST gate for the dis_cca / EDCCA-disable knob (SetCcaMode,
+# RX-SIDE measurement for the dis_cca / carrier-sense-disable knob (SetCcaMode,
 # DEVOURER_DIS_CCA). The OpenIPC-FPV community reports dis_cca "doubles range /
-# removes stuttering" on the rtl88x2eu. devourer injects in monitor mode, which
-# already bypasses the MAC CSMA/CCA backoff on the *TX* side — so any real
-# benefit must be RX-side: EDCCA muting the receiver (or forcing it to hold off)
-# when in-band energy crosses the energy-detect threshold. dis_cca removes that
-# gate, so the RX should keep demodulating the wanted frames through interference
-# that would otherwise pin CCA busy.
+# removes stuttering" on the rtl88x2eu. This script tests the RX-decode side: can
+# the receiver keep demodulating wanted frames through interference that would
+# otherwise pin CCA busy? The TX-side (whether injection defers to a busy channel)
+# is a separate, stronger effect — see tests/dis_cca_tx_onair.sh.
 #
 # The test: ONE 8822EU DUT, ONE swept B210 AWGN interferer, ONE marginal beacon.
 # A/B is DEVOURER_DIS_CCA off vs on at each noise gain. delivery = the final
 # rx.txhit event's hits (canonical-SA beacons decoded); we also log median IGI +
 # OFDM false-alarm from the rx.energy events.
 #
-# MEASURED RESULT (8822EU, 5-point AWGN sweep 46..76 dB): NULL. The MAC
-# EDCCA-disable (DEVOURER_DIS_CCA=1) leaves delivery within 1% at every noise
-# gain (33700 vs 33400 hits, ratio 0.99; IGI pinned, FA identical). The full
-# vendor recipe (incl. the BB 0x1d58 OFDM-CCA-off write) instead DEAFENS the RX
-# (~6800 -> ~10 hits), so it is not implemented. Mechanism: EDCCA gates TX
-# deferral, not RX decode, and devourer injects in monitor mode — which already
-# bypasses the CSMA/EDCCA backoff the community's "range" benefit comes from.
-# So SetCcaMode is NOT promoted to IRtlDevice; the J3 knob + this harness are
-# kept for anyone re-measuring on a real (non-monitor) link. This bench can't
-# bury the wanted beacon under B210 AWGN (near-field front-end limit), so the
-# null is "no effect in the testable regime" + the mechanism above.
+# MEASURED RESULT (8822EU, 5-point AWGN sweep 46..76 dB): NULL on RX decode. The
+# knob leaves delivery within 1% at every noise gain (33700 vs 33400 hits, ratio
+# 0.99; IGI pinned, FA identical). The full vendor recipe (incl. the BB 0x1d58
+# OFDM-CCA-off write) instead DEAFENS the RX (~6800 -> ~10 hits), so it is not
+# implemented. The knob gates TX deferral, not RX decode — so no RX effect is
+# expected here, and the real benefit is on the TX path (dis_cca_tx_onair.sh
+# measured ~1.5-2.2x inject-rate recovery under a co-channel transmitter). This
+# bench also can't bury the wanted beacon under B210 AWGN (near-field front-end
+# limit), so the RX null is "no effect in the testable regime".
 #
 # Usage: sudo -v && tests/dis_cca_onair.sh
 set -u

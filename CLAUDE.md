@@ -355,6 +355,17 @@ Knob-specific facts that aren't obvious from the field docs:
   `crc_err`/`icv_err` set — the entry point for the fused-FEC salvage layer
   (`docs/fused-fec.md`). Opt-in: a body with a corrupt tail is the worst-case
   input for an IP-stack consumer that didn't ask for it.
+- `DEVOURER_DIS_CCA=1` (Jaguar2/3, runtime `SetCcaMode`) disables the MAC
+  carrier-sense gate — **both** primary CCA (`0x520[14]`) and EDCCA (`[15]`) —
+  so injected/beacon TX stops deferring to a busy channel. The primary-CCA bit
+  is the one that matters: monitor injection is not CCA-free, it defers ~40–60%
+  to a co-channel 802.11 transmitter, and clearing `[14]` recovers ~1.5–2.2×
+  (on-air 8822EU/8812CU, `tests/dis_cca_tx_onair.sh`); the energy bit `[15]`
+  alone is null against a decodable preamble. **On by default on the streamtx
+  FPV downlink** (the link owns the channel — CSMA backoff only stutters it);
+  `DEVOURER_DIS_CCA=0` forces standard carrier-sense back. Does NOT apply the
+  vendor BB CCA-off writes (they deafen the RX). RX-decode side is a separate
+  null (`tests/dis_cca_onair.sh`).
 - `DEVOURER_LA_CAPTURE=<trig>/<rate>M/dma0/port:0x880` (rxdemo) — one-shot
   LA-mode IQ capture into the TX packet buffer (`src/LaCapture.h`): raw
   complex baseband to a `DVLA` file, offline per-tone H(k) via

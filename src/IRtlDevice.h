@@ -380,17 +380,23 @@ public:
    * returns false when no beacon was active. */
   virtual bool StopBeacon() { return false; }
 
-  /* Disable / restore the MAC EDCCA energy-detect gate (the vendor dis_cca
-   * recipe). With EDCCA off the MAC does not defer TX to carrier-sense, so a
-   * TBTT beacon airs exactly on schedule instead of after a CSMA backoff — the
-   * lever that collapses the hardware-beacon downlink residual to sub-µs on a
-   * shared channel (the master owns the channel). Also DEVOURER_DIS_CCA at
-   * construction. Implemented on Jaguar2/3; a DELIBERATE no-op on Jaguar1,
-   * whose baseband EDCCA is already disabled by its init table (0x8A4 =
-   * 0x7F7F7F7F) — its hardware-beacon downlink measures ~0.34 µs RMS on a
-   * crowded channel with no MAC-side gate, and porting the J2 register
-   * recipe was bench-refuted (no gain; the 0x524[11] clear conflicts with
-   * the vendor beacon-enable state). */
+  /* Disable / restore the MAC carrier-sense gate that defers TX — both primary
+   * CCA (0x520[14], carrier-sense of a decodable preamble) and EDCCA (0x520[15],
+   * energy detect). With it off the MAC does not defer TX to a busy channel, so
+   * injected/beacon TX punches through co-channel traffic instead of backing off:
+   * a TBTT beacon airs exactly on schedule (the sub-µs hardware-beacon downlink,
+   * master-owns-the-channel), and host-injected data holds its rate through a
+   * co-channel transmitter. Measured on-air (Jaguar3, 8822EU/8812CU): monitor
+   * injection otherwise defers ~40-60% to a co-channel 802.11 flooder; clearing
+   * the gate recovers ~1.5-2.2x, back to ~90% of the unimpeded rate
+   * (tests/dis_cca_tx_onair.sh, issue #199). The energy bit [15] alone is null
+   * against a decodable preamble — the primary-CCA bit [14] is what recovers the
+   * inject path. This is the MAC-gate only; the vendor's BB CCA-off writes are
+   * NOT applied (they deafen the RX). Also DEVOURER_DIS_CCA at construction.
+   * Implemented on Jaguar2/3; a DELIBERATE no-op on Jaguar1, whose baseband EDCCA
+   * is already disabled by its init table (0x8A4 = 0x7F7F7F7F) and whose
+   * hardware-beacon downlink measures ~0.34 µs RMS on a crowded channel with no
+   * MAC-side gate. */
   virtual void SetCcaMode(bool disabled) { (void)disabled; }
 
   /* Shift the next hardware beacon TBTT by `microseconds` (>0 = later/retard,

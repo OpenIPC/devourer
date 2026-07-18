@@ -199,8 +199,10 @@ struct DeviceConfig {
      * MIX_MODE swing compensation (0xc94/0xe94 TXAGC + 0xc1c/0xe1c BB scale)
      * so on-air power holds flat as the PA heats over a sustained TX link. */
     bool thermal_track = true;
-    /* env: DEVOURER_DIS_CCA — Jaguar3 EDCCA-disable at bring-up (before the
-     * coex thread starts). Runtime equivalent: SetCcaMode. */
+    /* env: DEVOURER_DIS_CCA — Jaguar2/3 MAC carrier-sense disable at bring-up
+     * (primary CCA 0x520[14] + EDCCA [15]): injected/beacon TX stops deferring to
+     * a busy channel and punches through co-channel traffic. Runtime equivalent:
+     * SetCcaMode. Default-on on the streamtx FPV downlink (issue #199). */
     bool disable_cca = false;
     /* env: DEVOURER_TXPKT_STEP_QDB — Jaguar3 per-packet power-bank step size
      * in quarter-dB: the dB weight of one 0x1e70 offset-index step

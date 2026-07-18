@@ -1,5 +1,6 @@
 #include "RadioManagementModule.h"
 #include "Hal8812PhyReg.h"
+#include "Hal8812a_TxPwrTrack.h" /* kTxScalingTableJaguar — fast swing lever */
 #include "InitTimer.h"
 #include "registry_priv.h"
 
@@ -75,6 +76,58 @@ void RadioManagementModule::InitPwrTrack() { _pwrTrk.Init(); }
 
 void RadioManagementModule::TickPwrTrack() {
   _pwrTrk.TickThermalMeter(current_band_type, _currentChannel);
+}
+
+int RadioManagementModule::FastSwingOffsetSteps(int steps, bool apply_now) {
+  /* Clamp to the usable swing travel relative to a 0 dB base: table floor
+   * -24 steps (-12 dB), vendor thermal cap +4 steps (+2 dB). */
+  if (steps < -24)
+    steps = -24;
+  if (steps > 4)
+    steps = 4;
+  _fast_swing_steps = steps;
+  if (_eepromManager->version_id.ICType == CHIP_8812) {
+    /* 8812A: fold into the thermal tracker so its per-channel-set tick
+     * composes with the offset instead of overwriting it. (Records-only
+     * pre-Init — the tracker applies once initialised.) */
+    _pwrTrk.SetUserOffsetSteps(steps);
+  } else if (apply_now) {
+    apply_fast_swing_direct();
+  }
+  return steps;
+}
+
+void RadioManagementModule::apply_fast_swing_direct() {
+  /* Direct BB-swing write for the chips without a power tracker (8821A 1T1R,
+   * 8814A 4T4R). Per active path: capture the pre-offset base index once
+   * (nearest kTxScalingTableJaguar match of the live [31:21] value; no match
+   * -> 24 = 0 dB), then write table[clamp(base + steps)]. If the live value
+   * is neither our last write nor matched by the cached base's code, an
+   * external writer (phy_SetBBSwingByBand_*) replaced the swing base — the
+   * base is re-captured from the live value so the offset never compounds. */
+  static const uint16_t regs[4] = {rA_TxScale_Jaguar, rB_TxScale_Jaguar,
+                                   0x181c, 0x1a1c};
+  const int npaths =
+      _eepromManager->numTotalRfPath > 4 ? 4 : _eepromManager->numTotalRfPath;
+  auto nearest_idx = [](uint32_t code) -> uint8_t {
+    for (int i = 0; i < kTxScaleTableSize; i++)
+      if (code == kTxScalingTableJaguar[i])
+        return static_cast<uint8_t>(i);
+    return 24; /* unknown code -> treat as 0 dB base */
+  };
+  for (int p = 0; p < npaths; p++) {
+    const uint32_t cur = phy_query_bb_reg(regs[p], 0xFFE00000u);
+    if (_swing_base_idx[p] == 0xFF || cur != _swing_last_written[p])
+      _swing_base_idx[p] = nearest_idx(cur);
+    int idx = static_cast<int>(_swing_base_idx[p]) + _fast_swing_steps;
+    if (idx < 0)
+      idx = 0;
+    if (idx > 28) /* +2.0 dB — vendor thermal cap (EVM/DAC headroom) */
+      idx = 28;
+    const uint32_t code = kTxScalingTableJaguar[idx];
+    _device.phy_set_bb_reg(regs[p], 0xFFE00000u, code);
+    _swing_last_written[p] = code;
+  }
 }
 
 ThermalStatus RadioManagementModule::ReadThermalStatus() {
@@ -591,6 +644,16 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
   if (!_fast_skip_heavy &&
       _eepromManager->version_id.ICType == CHIP_8812) {
     _pwrTrk.TickThermalMeter(current_band_type, _currentChannel);
+  }
+
+  /* Fast BB-swing offset (FastSwingOffsetSteps) is sticky across channel
+   * sets on the non-tracker chips too: a band switch rewrites the TxScale
+   * base (phy_SetBBSwingByBand_*), so re-apply — the direct-write leg
+   * detects the external write and re-captures its base. (On the 8812A the
+   * offset rides the pwrtrk tick above.) */
+  if (!_fast_skip_heavy && _fast_swing_steps != 0 &&
+      _eepromManager->version_id.ICType != CHIP_8812) {
+    apply_fast_swing_direct();
   }
 
   /* Kernel cross-validation oracle: when debug.dump_canary is set

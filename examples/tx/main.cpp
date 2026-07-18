@@ -36,6 +36,7 @@
 #include "HopSchedule.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
+#include "TxPower.h" /* txpkt_pwr_db_for_step — DEVOURER_TX_PKT_OFSET fan-out */
 #include "caps_event.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
@@ -560,14 +561,51 @@ int main(int argc, char **argv) {
     rtlDevice->SetTxPowerOffsetQdb(
         static_cast<int>(std::strtol(p, nullptr, 0)));
 
-  /* DEVOURER_TX_PKT_OFSET=N — (Jaguar2 8822B/8821C) default per-packet
-   * TXPWR_OFSET LUT step written into every TX descriptor: 0=none, 1=-3dB,
-   * 2=-7dB, 3=-11dB, 4=+3dB, 5=+6dB. The measurement driver for the descriptor
-   * per-packet power lever (tests/txpkt_pwr_ofset_onair.sh). */
-#if defined(DEVOURER_HAVE_JAGUAR2)
+  /* DEVOURER_TX_PKT_OFSET=N — default per-packet TX-power LUT step written
+   * into every TX descriptor: 0=none, 1=-3dB, 2=-7dB, 3=-11dB, 4=+3dB,
+   * 5=+6dB. One env var, three families: Jaguar2 8822B/8821C
+   * (descriptor TXPWR_OFSET, on-air-confirmed), Jaguar1 8814A (dword5
+   * [30:28], same LUT), and Jaguar3 8822C/8822E (the step's nominal dB is
+   * mapped onto a programmable 0x1e70 offset bank). The measurement driver
+   * for tests/txpkt_pwr_ofset_onair.sh. */
   if (const char *p = std::getenv("DEVOURER_TX_PKT_OFSET")) {
+    const uint8_t step = static_cast<uint8_t>(std::strtol(p, nullptr, 0));
+#if defined(DEVOURER_HAVE_JAGUAR2)
     if (jag2)
-      jag2->SetTxPacketPowerStep(static_cast<uint8_t>(std::strtol(p, nullptr, 0)));
+      jag2->SetTxPacketPowerStep(step);
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR1)
+    if (jag)
+      jag->SetTxPacketPowerStep(step);
+#endif
+#if defined(DEVOURER_HAVE_JAGUAR3)
+    if (jag3)
+      jag3->SetTxPacketPowerOffsetQdb(4 *
+                                      devourer::txpkt_pwr_db_for_step(step));
+#endif
+    (void)step;
+  }
+
+  /* DEVOURER_TX_PKT_PWR_QDB=N — Jaguar3-only fine-grained per-packet power
+   * default in quarter-dB (the bank mechanism is continuous, unlike the LUT
+   * families). Overrides DEVOURER_TX_PKT_OFSET's mapped value when both are
+   * set. */
+#if defined(DEVOURER_HAVE_JAGUAR3)
+  if (const char *p = std::getenv("DEVOURER_TX_PKT_PWR_QDB")) {
+    if (jag3)
+      jag3->SetTxPacketPowerOffsetQdb(
+          static_cast<int>(std::strtol(p, nullptr, 0)));
+  }
+#endif
+
+  /* DEVOURER_TX_FAST_PWR_QDB=N — Jaguar1 fast global BB-swing power offset
+   * (FastSetTxPowerOffsetQdb): 0.5 dB steps, -12..+2 dB, 1-4 BB writes.
+   * Per-burst, NOT per-packet — the compensating lever for the 8812A/8821A,
+   * whose descriptors have no per-frame power field. */
+#if defined(DEVOURER_HAVE_JAGUAR1)
+  if (const char *p = std::getenv("DEVOURER_TX_FAST_PWR_QDB")) {
+    if (jag)
+      jag->FastSetTxPowerOffsetQdb(static_cast<int>(std::strtol(p, nullptr, 0)));
   }
 #endif
 

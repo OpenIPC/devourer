@@ -978,7 +978,13 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
                            ? 0x20
                            : (_hal.efuse_logical_byte(0xB9) & 0x3f);
   c.fastretune_ok = true;
-  c.per_packet_txpower = true; /* TX descriptor TXPWR_OFSET LUT — Jaguar2 only */
+  /* TX descriptor TXPWR_OFSET LUT — on-air-confirmed: the RSSI sweep tracks
+   * the vendor 0/-3/-7/-11/+3/+6 dB rungs (tests/txpkt_pwr_ofset_onair.sh). */
+  c.per_packet_txpower = true;
+  c.per_pkt_txpwr_steps = 6;
+  c.per_pkt_txpwr_min_qdb = -44; /* -11 dB LUT floor */
+  c.per_pkt_txpwr_max_qdb = 24;  /* +6 dB LUT top */
+  c.per_pkt_txpwr_measured = true;
   /* LDPC RX: both variants decode HT+VHT LDPC (bench: encoding-matrix
    * devourer↔devourer cells at full delivery, 8822BU cross-checked reporting
    * ldpc=1) and report it per-frame from PHY-status byte7[5]

@@ -13,7 +13,12 @@ namespace {
 /* RF direct-write window bases (path A / path B) — identical to 8822c. */
 constexpr uint16_t RF_WIN[2] = {0x3c00, 0x4c00};
 
-/* IQK MAC/BB/RF register backup tables (halrf_iqk_8822e.c _phy_iq_calibrate). */
+/* IQK MAC/BB/RF register backup tables (halrf_iqk_8822e.c _phy_iq_calibrate).
+ * NB: kBackupBbReg includes 0x1e70 FULL-DWORD — its [31:16] are the
+ * per-packet TX-power offset banks (TxPktPwrBanks.h). Save/restore is benign
+ * today because IQK/TXGAPK run at bring-up only (before banks are
+ * programmed); a future RUNTIME re-cal restoring a stale 0x1e70 must
+ * re-apply the banks after. */
 constexpr uint16_t kBackupMacReg[4] = {0x520, 0x1c, 0xec, 0x70};
 constexpr uint16_t kBackupBbReg[21] = {
     0x0820, 0x0824, 0x1c38, 0x1c68, 0x1d60, 0x180c, 0x410c, 0x1c3c, 0x1a14,

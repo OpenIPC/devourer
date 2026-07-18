@@ -70,6 +70,33 @@ struct TxPowerState {
  * lands in *steps_out when non-null. Returns 0 for unsupported caps. */
 int quantize_offset_qdb(int qdb, const TxPowerCaps &caps, int *steps_out);
 
+/* Per-packet TX-power LUT quantizer, shared by the families whose TX
+ * descriptor carries the 3-bit hardware TXPWR_OFSET LUT (Jaguar2 8822B/8821C
+ * at txdesc+0x14[30:28]; 8814A same position via its own descriptor macro).
+ * The field is discrete — {0, -3, -7, -11, +3, +6} dB — so an adaptive
+ * link's continuous request lands on the closest rung. Pure; unit-tested in
+ * tests/txpkt_pwr_selftest.cpp. */
+inline uint8_t txpkt_pwr_step_for_db(int db) {
+  static const struct { int db; uint8_t step; } lut[] = {
+      {0, 0}, {-3, 1}, {-7, 2}, {-11, 3}, {3, 4}, {6, 5}};
+  uint8_t best = 0;
+  int best_err = 1 << 30;
+  for (const auto &e : lut) {
+    int err = db > e.db ? db - e.db : e.db - db;
+    if (err < best_err) {
+      best_err = err;
+      best = e.step;
+    }
+  }
+  return best;
+}
+
+/* Inverse: the nominal dB of a LUT step (for readback / logging). */
+inline int txpkt_pwr_db_for_step(uint8_t step) {
+  static const int db[] = {0, -3, -7, -11, 3, 6};
+  return step < 6 ? db[step] : 0;
+}
+
 } // namespace devourer
 
 #endif /* DEVOURER_TX_POWER_H */

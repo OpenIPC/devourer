@@ -119,7 +119,11 @@ void Halrf8822c::nctl() {
   }
 }
 
-/* _iqk_backup_mac_bb_8822c / _iqk_backup_rf_8822c */
+/* _iqk_backup_mac_bb_8822c / _iqk_backup_rf_8822c.
+ * NB: the list includes 0x1e70 FULL-DWORD — its [31:16] are the per-packet
+ * TX-power offset banks (TxPktPwrBanks.h). Save/restore is benign today
+ * because IQK runs at bring-up only (before banks are programmed); a future
+ * RUNTIME re-cal restoring a stale 0x1e70 must re-apply the banks after. */
 void Halrf8822c::backup_mac_bb(uint32_t *mac, uint32_t *bb) {
   static const uint16_t macreg[MAC_REG_NUM_8822C] = {0x520, 0x1c, 0x70};
   static const uint16_t bbreg[BB_REG_NUM_8822C] = {

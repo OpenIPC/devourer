@@ -44,6 +44,15 @@ int main() {
     std::printf("FAIL: db_for_step(2) != -7\n");
   }
 
+  /* The quantizer is hoisted to src/TxPower.h (shared with the 8814A path);
+   * the jaguar2:: spellings above are forwarding aliases. Guard the direct
+   * devourer:: symbols too. */
+  if (devourer::txpkt_pwr_step_for_db(-7) != 2 ||
+      devourer::txpkt_pwr_db_for_step(5) != 6) {
+    ++g_fail;
+    std::printf("FAIL: devourer:: hoisted quantizer diverges\n");
+  }
+
   if (g_fail) {
     std::printf("%d failure(s)\n", g_fail);
     return 1;

@@ -70,6 +70,11 @@ inline void emit_adapter_caps(EventSink &sink, IRtlDevice *dev) {
       .f("ldpc_rx_flag", c.ldpc_rx_flag ? 1 : 0);
 
   ev.f("per_pkt_txpwr", c.per_packet_txpower ? 1 : 0)
+      .f("per_pkt_txpwr_steps", c.per_pkt_txpwr_steps)
+      .f("per_pkt_txpwr_step_qdb", c.per_pkt_txpwr_step_qdb)
+      .f("per_pkt_txpwr_min_qdb", c.per_pkt_txpwr_min_qdb)
+      .f("per_pkt_txpwr_max_qdb", c.per_pkt_txpwr_max_qdb)
+      .f("per_pkt_txpwr_measured", c.per_pkt_txpwr_measured ? 1 : 0)
       .f("narrowband", c.narrowband_ok ? 1 : 0)
       .f("fastretune", c.fastretune_ok ? 1 : 0)
       .f("he_er_su", c.he_er_su_ok ? 1 : 0)

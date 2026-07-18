@@ -133,6 +133,15 @@ class RadioManagementModule {
 #if defined(DEVOURER_HAVE_8814)
   Iqk8814a _iqk8814;
 #endif
+  /* Fast BB-swing offset state (FastSwingOffsetSteps). The direct-write leg
+   * (8821A/8814A) tracks, per path, the pre-offset base swing index and the
+   * last table code IT wrote — a mismatch on the next apply means someone
+   * else rewrote the register (band-switch swing base), so the base is
+   * re-captured from the current value instead of compounding the offset. */
+  int _fast_swing_steps = 0;
+  uint8_t _swing_base_idx[4] = {0xFF, 0xFF, 0xFF, 0xFF}; /* 0xFF = uncaptured */
+  uint32_t _swing_last_written[4] = {0, 0, 0, 0};
+  void apply_fast_swing_direct();
 
 public:
   RadioManagementModule(RtlAdapter device,
@@ -226,6 +235,23 @@ public:
    * SetTxPowerOffsetSteps() value to the TXAGC registers mid-session (used by
    * the thermal-vs-gain ramp and SetTxPowerOffsetQdb). */
   void ApplyTxPower() { PHY_SetTxPowerLevel8812(_currentChannel); }
+
+  /* Fast global TX-power offset via the BB-swing TxScale digital scaler
+   * (0xc1c/0xe1c[31:21], + 0x181c/0x1a1c paths C/D on the 8814A) — the lean
+   * lever behind RtlJaguarDevice::FastSetTxPowerOffsetQdb:
+   * 1-4 register writes, rate-independent, ~0.5 dB per step, vs the 30-50+
+   * write per-rate TXAGC rewrite of ApplyTxPower. On the 8812A the offset is
+   * folded into the thermal power-tracking loop (PowerTracking8812a) so the
+   * per-channel-set tick composes with it instead of overwriting it; on
+   * 8821A/8814A (no tracker) it is written directly, re-applied after every
+   * channel-set, with the per-path pre-offset base re-captured whenever an
+   * external write is detected (the band-switch swing-base case). Returns
+   * the applied steps after clamping to [-24, +4] (-12..+2 dB — the positive
+   * bound is the vendor thermal cap; digital swing above 0 dB eats DAC
+   * headroom / EVM). apply_now=false records only (pre-bring-up: the value
+   * is folded by the first channel-set / pwrtrk tick instead of writing an
+   * unconfigured BB). */
+  int FastSwingOffsetSteps(int steps, bool apply_now = true);
 
 private:
   void rtw_hal_set_msr(uint8_t net_type);

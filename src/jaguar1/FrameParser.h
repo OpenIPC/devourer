@@ -93,6 +93,15 @@
 #define SET_TX_DESC_RTS_SHORT_8812(__pTxDesc, __Value) SET_BITS_TO_LE_4BYTE(__pTxDesc + 20, 12, 1, __Value)
 #define SET_TX_DESC_RTS_SC_8812(__pTxDesc, __Value) SET_BITS_TO_LE_4BYTE(__pTxDesc + 20, 13, 4, __Value)
 #define SET_TX_DESC_TX_ANT_8812(__pTxDesc, __Value) SET_BITS_TO_LE_4BYTE(__pTxDesc + 20, 24, 4, __Value)
+/* Per-packet TX-power offset — 8814A ONLY (rtl8814a_xmit.h TX_POWER_OFFSET,
+ * dword5 [30:28]). Same position/width as the 8822B's working TXPWR_OFSET
+ * hardware LUT (halmac guards the 3-bit macro with HALMAC_8814A_SUPPORT
+ * alongside 8822B/8821C), so the LUT semantics are expected to match:
+ * 0=none 1=-3 2=-7 3=-11 4=+3 5=+6 dB (devourer::txpkt_pwr_step_for_db).
+ * NEVER write on 8812/8821: their dword5 has no such field ([30:28]
+ * undefined; [27:24] is TX_ANT). Vendor-defined but vendor-unused — on-air
+ * status tracked in AdapterCaps. */
+#define SET_TX_DESC_TX_POWER_OFFSET_8814A(__pTxDesc, __Value) SET_BITS_TO_LE_4BYTE(__pTxDesc + 20, 28, 3, __Value)
 
 /* Dword 6 */
 #define SET_TX_DESC_SW_DEFINE_8812(__pTxDesc, __Value) SET_BITS_TO_LE_4BYTE(__pTxDesc + 24, 0, 12, __Value)

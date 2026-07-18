@@ -113,6 +113,10 @@ devourer::DeviceConfig devourer_config_from_env() {
   if (const char *e = env_str("DEVOURER_THERMAL_TRACK"))
     cfg.tuning.thermal_track = std::strcmp(e, "0") != 0;
   cfg.tuning.disable_cca = env_flag("DEVOURER_DIS_CCA");
+  /* Jaguar3 per-packet power-bank step size (qdB per 0x1e70 offset-index
+   * step; default 4 = 1 dB) — bench slope-calibration override. */
+  if (env_long("DEVOURER_TXPKT_STEP_QDB", &v) && v > 0)
+    cfg.tuning.txpkt_step_qdb = static_cast<int>(v);
   if (env_long("DEVOURER_RFE", &v))
     cfg.tuning.rfe_type = static_cast<uint8_t>(v);
   if (env_long("DEVOURER_NB_DAC", &v))

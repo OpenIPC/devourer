@@ -219,7 +219,8 @@ static void test_desc_8822c() {
   std::memset(blk, 0, sizeof(blk));
   jaguar3::fill_data_tx_desc_8822c(blk, 1500, 7, 9, 0, false, false, 0,
                                    /*bmc=*/false, /*ndpa=*/false,
-                                   /*data_sc=*/0, /*pkt_offset=*/1);
+                                   /*data_sc=*/0, /*pwr_ofset_type=*/0,
+                                   /*pkt_offset=*/1);
   CHECK((blk[0x07] & 0x1f) == 1, "8822c: pkt_offset field=%u want 1",
         blk[0x07] & 0x1f);
   const uint16_t ck_pad0 = static_cast<uint16_t>(blk[0x1C] | (blk[0x1D] << 8));

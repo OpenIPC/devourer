@@ -1,23 +1,37 @@
 #!/usr/bin/env bash
-# MEASURE the Jaguar2 per-packet TX-descriptor power lever (TXPWR_OFSET). Does
-# setting the 3-bit descriptor field actually move on-air power standalone (no
-# phydm dynamic-txpwr enable), and by the vendor LUT (0=none, 1=-3, 2=-7, 3=-11,
-# 4=+3, 5=+6 dB)? Measure-first, before wiring the radiotap per-packet path.
+# MEASURE the per-packet TX-descriptor power lever on-air. Does
+# the DUT's per-frame power mechanism actually move radiated power, and by the
+# nominal dB the sweep requests? Family mechanisms behind the ONE env knob
+# (DEVOURER_TX_PKT_OFSET, examples/tx fan-out):
+#   Jaguar2 8822B/8821C — descriptor TXPWR_OFSET 3-bit hardware LUT
+#     (0=none 1=-3 2=-7 3=-11 4=+3 5=+6 dB). The original, on-air-confirmed.
+#   Jaguar1 8814A       — dword5 [30:28] descriptor field, same LUT expected.
+#   Jaguar3 8822C/8822E — TXPWR_OFSET_TYPE bank selector; the step's nominal
+#     dB is programmed into a 0x1e70 offset bank (TxPktPwrBanks.h) — slope
+#     calibratable via DEVOURER_TXPKT_STEP_QDB (passed through when set).
 #
-# TX = 8822BU (the descriptor field is Jaguar2) at a FIXED rate/power, stepping
-# DEVOURER_TX_PKT_OFSET; ground = a second devourer part reporting per-frame
-# RSSI (the same chip-RSSI sensor the TX-power slope work uses, since the B210
-# front end limits on near-field frames). If the field works, ground RSSI
-# tracks the LUT: step 4 (+3) up ~3 dB, step 5 (+6) up ~6 dB, step 1/2/3
-# (-3/-7/-11) down, all vs step 0.
+# TX = the DUT at a FIXED rate/power, stepping DEVOURER_TX_PKT_OFSET; ground =
+# a second devourer part reporting per-frame RSSI (the same chip-RSSI sensor
+# the TX-power slope work uses, since the B210 front end limits on near-field
+# frames). If the lever works, ground RSSI tracks the nominal dB per step.
 #
 # Usage: sudo -v && tests/txpkt_pwr_ofset_onair.sh [ground_pid]
+#   TX_PID/TX_VID          DUT identity (default 8822BU T3U 2357:012d)
+#   TX_BUS/TX_PORT         USB topology pin when VID:PID is ambiguous (8814A)
+#   GROUND_PID/GROUND_VID  RSSI sensor identity (default 8812CU 0bda:c812)
+#   CH                     channel (default 36; 8822E DUTs are 5 GHz-only TX)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${TXPKT_OUT:-/tmp/devourer-txpkt-ofset}"
 CH="${CH:-36}"
-TX_PID=0x012d TX_VID=0x2357          # 8822BU (T3U) — has TXPWR_OFSET
+TX_PID="${TX_PID:-0x012d}" TX_VID="${TX_VID:-0x2357}"
+TX_BUS="${TX_BUS:-}" TX_PORT="${TX_PORT:-}"
 GROUND_PID="${1:-0xc812}" GROUND_VID="${GROUND_VID:-0x0bda}"
+# Extra env for the TX cells (topology pin + J3 slope override when set).
+TX_EXTRA=()
+[ -n "$TX_BUS" ] && TX_EXTRA+=("DEVOURER_USB_BUS=$TX_BUS")
+[ -n "$TX_PORT" ] && TX_EXTRA+=("DEVOURER_USB_PORT=$TX_PORT")
+[ -n "${DEVOURER_TXPKT_STEP_QDB:-}" ] && TX_EXTRA+=("DEVOURER_TXPKT_STEP_QDB=$DEVOURER_TXPKT_STEP_QDB")
 # LUT steps to sweep, paired with their nominal dB (for the assertion).
 STEPS="0 4 5 1 2 3"
 declare -A DB=( [0]=0 [4]=3 [5]=6 [1]=-3 [2]=-7 [3]=-11 )
@@ -26,7 +40,7 @@ mkdir -p "$OUT"
 cleanup() { pkill -x txdemo 2>/dev/null||true; pkill -x rxdemo 2>/dev/null||true; true; }
 trap cleanup EXIT INT TERM
 plugged() { lsusb -d "$(printf '%04x:%04x' "$2" "$1")" >/dev/null 2>&1; }
-plugged "$TX_PID" "$TX_VID" || { echo "SKIP: 8822BU (TX) not plugged"; exit 0; }
+plugged "$TX_PID" "$TX_VID" || { echo "SKIP: TX DUT $TX_VID:$TX_PID not plugged"; exit 0; }
 plugged "$GROUND_PID" "$GROUND_VID" || { echo "SKIP: ground $GROUND_PID not plugged"; exit 0; }
 
 echo "== building =="
@@ -48,7 +62,7 @@ for step in $STEPS; do
     # Fixed rate MCS3, fixed base power, only the per-packet offset varies.
     sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_VID="$TX_VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_TX_RATE=MCS3 DEVOURER_TX_PWR=40 DEVOURER_TX_PKT_OFSET="$step" \
-        DEVOURER_TX_GAP_US=1500 \
+        DEVOURER_TX_GAP_US=1500 "${TX_EXTRA[@]}" \
         timeout 12 "$ROOT/build/txdemo" >/dev/null 2>&1 || true
     t1="$(date +%s.%N)"
     echo "$step ${DB[$step]} $t0 $t1" >>"$OUT/cells.txt"
@@ -72,7 +86,7 @@ for pair in "0:0" "6:6" "-11:-11"; do
     t0="$(date +%s.%N)"
     sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_VID="$TX_VID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_TX_RATE=MCS3 DEVOURER_TX_PWR=40 DEVOURER_TX_PKT_PWR_DB="$db" \
-        DEVOURER_TX_GAP_US=1500 \
+        DEVOURER_TX_GAP_US=1500 "${TX_EXTRA[@]}" \
         timeout 12 "$ROOT/build/txdemo" >/dev/null 2>&1 || true
     t1="$(date +%s.%N)"
     echo "r$db $db $t0 $t1" >>"$OUT/cells.txt"

@@ -385,13 +385,27 @@ write-only, so their `GetTxPowerState` reports the software shadow
 (`hw_readback=false`). `txpower` (examples/txpower/) is the reference
 consumer; register-level validation: `tests/txpwr_offset_regcheck.sh`.
 
-**Per-packet TX power is Jaguar2-only**: the 8822B/8821C TX descriptor's
-`TXPWR_OFSET` field is a hardware LUT (0/-3/-7/-11/+3/+6 dB) applied per-frame
-at zero USB cost — `send_packet` quantizes a radiotap `DBM_TX_POWER` delta to
-it (`jaguar2::txpkt_pwr_step_for_db`), and
-`RtlJaguar2Device::SetTxPacketPowerStep` sets a session default. The 8812AU
-has no such field (its per-packet power *is* per-rate selection via radiotap);
-Jaguar3's `TXPWR_OFSET_TYPE` is measured inert.
+**Per-packet TX power** (a radiotap `DBM_TX_POWER` dB-delta per frame, zero
+USB cost once armed; see the `per_pkt_txpwr_*` caps): **Jaguar2** — the
+8822B/8821C descriptor `TXPWR_OFSET` hardware LUT (0/-3/-7/-11/+3/+6 dB),
+session default `SetTxPacketPowerStep`. **Jaguar3** — the descriptor
+`TXPWR_OFSET_TYPE` is a bank *selector*: types 2/3 pick two programmable
+7-bit-signed power-index offsets in BB `0x1e70[31:16]` (~1 dB/step,
+`DEVOURER_TXPKT_STEP_QDB` recalibrates), LRU-managed by
+`SetTxPacketPowerOffsetQdb` (`src/jaguar3/TxPktPwrBanks.h`) — the banks
+reset *disabled* at BB-table load, so the descriptor field alone is inert
+until programmed (types 0/1 = per-STA BB-RAM by descriptor MACID, left as
+the 0 dB baseline). On-air-validated on 8822CU + 8822EU, sticky across
+`SetMonitorChannel`/`FastRetune`; the E compresses deep cuts (≈−6 dB floor,
+same TSSI reshape as its offset slope). **8814A** — the same 3-bit LUT field
+at the 8822B position (dword5 [30:28]), `SetTxPacketPowerStep` on
+`RtlJaguarDevice`. **8812AU/8821AU** — no descriptor field exists (per-rate
+selection via radiotap is their only per-packet lever); the compensating
+fast lever is `FastSetTxPowerOffsetQdb` (BB-swing TxScale `0xc1c/0xe1c`:
+global per-burst, 1–4 writes, 0.5 dB steps, −12..+2 dB, folded through the
+8812A thermal tracker; on-air-validated on the 8812AU). Sweep harnesses:
+`tests/txpkt_pwr_ofset_onair.sh` (TX_PID/TX_VID select the DUT),
+`tests/txpkt_fastswing_onair.sh`, `tests/txpkt_hop_persist.sh`.
 
 Per-packet unequal error protection: `svctx` classifies stdin HEVC NALs by
 temporal layer and injects each at its ladder's rate

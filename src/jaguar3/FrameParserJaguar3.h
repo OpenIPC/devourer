@@ -47,6 +47,20 @@ constexpr size_t RXDESC_SIZE_8822C = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_DATA_BW_8822C(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 5, 2, v)
 #define SET_TX_DESC_DATA_LDPC_8822C(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 7, 1, v)
 #define SET_TX_DESC_DATA_STBC_8822C(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x14, 8, 2, v)
+/* Per-packet TX-power offset BANK SELECTOR (halmac TXPWR_OFSET_TYPE,
+ * txdesc+0x14[29:28]). Unlike the 8822B's 3-bit dB LUT at the same offset,
+ * this 2-bit field selects which pre-programmed power-index offset the BB
+ * adds for this frame: 0/1 = per-STA BB-RAM tx_pwr_offset0/1[MACID] (0x1e84
+ * protocol), 2 = global 0x1e70[22:16] (en [23]), 3 = global 0x1e70[30:24]
+ * (en [31]) — vendor phydm.h bb_ram block. The banks reset to disabled at
+ * BB-table load (0x1E70 = 0x00001000), so the field is a no-op until
+ * RtlJaguar3Device programs them (src/jaguar3/TxPktPwrBanks.h). STRICTLY 2
+ * bits: 0x14[30] is ANTSEL_EN_V1 on this generation — writing a 3-bit
+ * 8822B-style value here would silently enable antenna-select (measured as
+ * a non-monotonic on-air wiggle). NB: types 0/1 are per-STA by the descriptor
+ * MACID (0x01 in devourer's inject path) — devourer's bank policy uses the
+ * global types 2/3 and keeps type 0 as the untouched 0 dB baseline. */
+#define SET_TX_DESC_TXPWR_OFSET_TYPE_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x14, 28, 2, v)
 #define SET_TX_DESC_DISQSELSEQ_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x00, 31, 1, v)
 #define SET_TX_DESC_G_ID_8822C(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x08, 24, 6, v)
 /* Per-frame TX-status report request (halmac SPE_RPT): the fw answers this
@@ -118,6 +132,7 @@ inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
                                     bool short_gi, bool ldpc, uint8_t stbc,
                                     bool bmc = false, bool ndpa = false,
                                     uint8_t data_sc = 0,
+                                    uint8_t pwr_ofset_type = 0,
                                     uint8_t pkt_offset = 0) {
   SET_TX_DESC_TXPKTSIZE_8822C(d, pkt_size);
   SET_TX_DESC_OFFSET_8822C(d, static_cast<uint32_t>(TXDESC_SIZE_8822C));
@@ -151,6 +166,10 @@ inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
   SET_TX_DESC_DATA_SHORT_8822C(d, short_gi ? 1 : 0);
   SET_TX_DESC_DATA_LDPC_8822C(d, ldpc ? 1 : 0);
   SET_TX_DESC_DATA_STBC_8822C(d, stbc & 0x3);
+  /* Per-packet power-offset bank (0 = baseline, byte-identical to the prior
+   * descriptor). Inside the checksummed span (0x14) — before the checksum. */
+  if (pwr_ofset_type)
+    SET_TX_DESC_TXPWR_OFSET_TYPE_8822C(d, pwr_ofset_type & 0x3);
   SET_TX_DESC_EN_HWSEQ_8822C(d, 1);
   /* USB-agg boundary shim: pkt_offset × 8 bytes of pad between this descriptor
    * and its frame (halmac PKT_OFFSET, unit 8 B). 0 = none (byte-identical).

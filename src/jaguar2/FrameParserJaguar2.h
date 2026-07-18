@@ -7,6 +7,7 @@
 
 #include "basic_types.h"
 #include "TxDescBits.h"
+#include "TxPower.h"
 #include "RxPacket.h"
 
 /* Jaguar2 (RTL8822B) TX/RX descriptor layout. 8822B is a HalMAC 88xx chip, so
@@ -114,30 +115,12 @@ inline void cal_txdesc_chksum_8822b(uint8_t *txdesc) {
 
 /* Fill an 8822B data/monitor-inject TX descriptor (48 bytes, zeroed by caller)
  * and finalise its checksum. Mirrors the Jaguar3 inject field choices. */
-/* Quantize a requested per-packet power delta (dB) to the nearest hardware
- * TXPWR_OFSET LUT step. The field is discrete — {0, -3, -7, -11, +3, +6} dB —
- * so an adaptive link's continuous request lands on the closest rung. Pure;
- * unit-tested in tests/txpkt_pwr_selftest.cpp. */
-inline uint8_t txpkt_pwr_step_for_db(int db) {
-  static const struct { int db; uint8_t step; } lut[] = {
-      {0, 0}, {-3, 1}, {-7, 2}, {-11, 3}, {3, 4}, {6, 5}};
-  uint8_t best = 0;
-  int best_err = 1 << 30;
-  for (const auto &e : lut) {
-    int err = db > e.db ? db - e.db : e.db - db;
-    if (err < best_err) {
-      best_err = err;
-      best = e.step;
-    }
-  }
-  return best;
-}
-
-/* Inverse: the nominal dB of a LUT step (for readback / logging). */
-inline int txpkt_pwr_db_for_step(uint8_t step) {
-  static const int db[] = {0, -3, -7, -11, 3, 6};
-  return step < 6 ? db[step] : 0;
-}
+/* The per-packet TXPWR_OFSET LUT quantizer lives in src/TxPower.h
+ * (devourer::txpkt_pwr_step_for_db) — the 8814A shares the same 3-bit LUT, so
+ * the pure functions are generation-neutral. Forwarding aliases keep the
+ * original jaguar2:: spellings compiling. */
+using devourer::txpkt_pwr_step_for_db;
+using devourer::txpkt_pwr_db_for_step;
 
 inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
                                     uint8_t rate_hw, uint8_t rate_id, uint8_t bw,

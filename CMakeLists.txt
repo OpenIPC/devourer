@@ -811,6 +811,18 @@ if(DEVOURER_JAGUAR2_8822B OR DEVOURER_JAGUAR2_8821C)
     add_test(NAME txpkt_pwr_quant COMMAND TxPktPwrSelftest)
 endif()
 
+# Headless guard for the Jaguar3 per-packet power-bank planner (the
+# TxPktPwrBanks.h LRU/encode policy) + the descriptor bit positions of
+# TXPWR_OFSET_TYPE (8822C, incl. the bit30 ANTSEL_EN_V1 hazard) and the 8814A
+# TX_POWER_OFFSET. The planner header is HAL-agnostic; the descriptor parts
+# self-gate on the DEVOURER_HAVE_JAGUAR1/3 defines the library exports.
+add_executable(TxPktBankSelftest
+    tests/txpkt_bank_selftest.cpp
+)
+target_link_libraries(TxPktBankSelftest PRIVATE devourer)
+target_include_directories(TxPktBankSelftest PRIVATE src)
+add_test(NAME txpkt_bank_policy COMMAND TxPktBankSelftest)
+
 # Headless guard for the USB TX-aggregation URB packing (src/TxAggPlan.h) —
 # block alignment, the never-a-bulk-multiple boundary shim, the OQT
 # descs-per-bulk guard, the frame/byte caps — plus the HalMAC descriptor agg

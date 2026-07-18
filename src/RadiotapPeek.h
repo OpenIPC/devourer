@@ -7,6 +7,7 @@
  * flushes the pending URB) before handing the frame to the generation's
  * builder. Generation-neutral; the full parse stays in each HAL. */
 
+#include <climits> /* INT_MIN — "field absent" sentinel */
 #include <cstddef>
 #include <cstdint>
 
@@ -52,6 +53,27 @@ inline int radiotap_peek_channel(const uint8_t *packet, size_t length) {
     }
   }
   return 0;
+}
+
+/* Peek the radiotap DBM_TX_POWER field (signed per-packet power delta, dB).
+ * Returns INT_MIN when absent — the same "no per-packet power" sentinel the
+ * generations' send_packet parsers use. Lets a batch packer group frames by
+ * requested power, so a power-bank reprogram (Jaguar3) lands between URBs,
+ * never mid-URB. */
+inline int radiotap_peek_dbm_tx_power(const uint8_t *packet, size_t length) {
+  const uint16_t rlen = radiotap_hdr_len(packet, length);
+  if (rlen == 0)
+    return INT_MIN;
+  auto *hdr = reinterpret_cast<struct ieee80211_radiotap_header *>(
+      const_cast<uint8_t *>(packet));
+  struct ieee80211_radiotap_iterator it;
+  if (ieee80211_radiotap_iterator_init(&it, hdr, rlen, nullptr) != 0)
+    return INT_MIN;
+  while (ieee80211_radiotap_iterator_next(&it) == 0) {
+    if (it.this_arg_index == IEEE80211_RADIOTAP_DBM_TX_POWER)
+      return *reinterpret_cast<const int8_t *>(it.this_arg);
+  }
+  return INT_MIN;
 }
 
 } /* namespace devourer */

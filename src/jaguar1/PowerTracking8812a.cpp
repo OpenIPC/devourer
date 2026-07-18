@@ -68,6 +68,13 @@ void PowerTracking8812a::Init() {
       unsigned(_defaultOfdmIndex), unsigned(swing_idx),
       unsigned(_eepromManager->GetEepromThermalMeter()),
       unsigned(_txPowerTrackControl));
+
+  /* A fast user offset recorded before bring-up (FastSetTxPowerOffsetQdb)
+   * applies now: the tick path can't be relied on for it — it early-returns
+   * on blank-EFUSE units (_txPowerTrackControl false) and on zero thermal
+   * delta. */
+  if (_userOfsSteps != 0)
+    ApplySwingToBb();
 }
 
 void PowerTracking8812a::ClearState() {
@@ -169,11 +176,29 @@ void PowerTracking8812a::ApplySwingToBb() {
       idx_to_write = final_ofdm_swing_index;
     }
 
+    /* Fast user offset (FastSetTxPowerOffsetQdb): folded AFTER the thermal
+     * clamp so `_userOfsSteps == 0` is byte-identical to the pre-lever
+     * behaviour, bounded at kUserBoostLimit (+2 dB) upward / table floor
+     * (-12 dB) downward. */
+    if (_userOfsSteps != 0) {
+      idx_to_write += _userOfsSteps;
+      if (idx_to_write > kUserBoostLimit)
+        idx_to_write = kUserBoostLimit;
+      if (idx_to_write < 0)
+        idx_to_write = 0;
+    }
+
     uint32_t bb_addr =
         (p == 0) ? rA_TxScale_Jaguar : rB_TxScale_Jaguar;
     _device.phy_set_bb_reg(bb_addr, 0xFFE00000u,
                            kTxScalingTableJaguar[idx_to_write]);
   }
+}
+
+void PowerTracking8812a::SetUserOffsetSteps(int steps) {
+  _userOfsSteps = steps;
+  if (_initialised)
+    ApplySwingToBb(); /* immediate: 2 BB writes, thermal state untouched */
 }
 
 void PowerTracking8812a::TickThermalMeter(BandType band, uint8_t channel) {

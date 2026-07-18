@@ -202,6 +202,13 @@ struct DeviceConfig {
     /* env: DEVOURER_DIS_CCA — Jaguar3 EDCCA-disable at bring-up (before the
      * coex thread starts). Runtime equivalent: SetCcaMode. */
     bool disable_cca = false;
+    /* env: DEVOURER_TXPKT_STEP_QDB — Jaguar3 per-packet power-bank step size
+     * in quarter-dB: the dB weight of one 0x1e70 offset-index step
+     * (SetTxPacketPowerOffsetQdb / radiotap DBM_TX_POWER).
+     * Default 4 (= 1 dB), the vendor-stated step for the 22C class ("each
+     * tx_pwr_ofst step will be 1dB", phydm.h bb_ram block); override for
+     * bench slope calibration (tests/txpkt_pwr_ofset_onair.sh). */
+    int txpkt_step_qdb = 4;
     /* env: DEVOURER_RFE — Jaguar2 RFE type override (antenna/LNA switch
      * variant; unset = efuse, blank efuse falls back per vendor). */
     std::optional<uint8_t> rfe_type;

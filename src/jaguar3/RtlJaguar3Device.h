@@ -17,6 +17,7 @@
 #include "LaCapture.h"
 #include "RadioManagementJaguar3.h"
 #include "PhydmRuntimeJaguar3.h"
+#include "TxPktPwrBanks.h"
 
 /* RtlJaguar3Device is the orchestrator for the Realtek "Jaguar3" 802.11ac family
  * — RTL8822CU, RTL8812EU, RTL8822EU. It is the Jaguar3 sibling of
@@ -113,6 +114,20 @@ public:
   int SetTxPowerOffsetQdb(int qdb) override;
   void SetTxPowerIndexOverride(int idx) override;
   bool ReApplyTxPower() override;
+  /* Per-packet TX-power offset — session default. Programs a
+   * hardware offset BANK (global 0x1e70 reg0/reg1, see TxPktPwrBanks.h) and
+   * stamps its 2-bit selector into every TX descriptor's TXPWR_OFSET_TYPE, so
+   * the per-frame power trim costs zero USB transfers once a bank holds the
+   * value. A radiotap DBM_TX_POWER field overrides per packet (dB delta vs
+   * the calibrated table, the Jaguar2 convention); up to two distinct
+   * non-zero offsets are held in banks concurrently — a third evicts the
+   * least-recently-used one (one masked 0x1e70 write). Offsets quantize to
+   * cfg.tuning.txpkt_step_qdb (default 4 qdB = 1 dB — the vendor-stated bank
+   * step; bench-pinned by tests/txpkt_pwr_ofset_onair.sh). Returns the
+   * applied qdB after quantize/clamp. 0 clears the default (type-0 baseline).
+   * Composes additively with SetTxPowerOffsetQdb (which moves the TXAGC
+   * references themselves). */
+  int SetTxPacketPowerOffsetQdb(int qdb);
   int SetXtalCap(int cap) override;
   int GetXtalCap() override { return _xtal_cap; }
   devourer::TxPowerState GetTxPowerState() override;
@@ -234,6 +249,26 @@ private:
   /* Rotating SW_DEFINE tag stamped when tx.report is on — the CCX report
    * echoes its low byte, correlating reports to frames (src/TxReport.h). */
   std::atomic<uint16_t> _tx_rpt_tag{0};
+  /* Per-packet TX-power banks (SetTxPacketPowerOffsetQdb / radiotap
+   * DBM_TX_POWER). _txpkt_banks is the allocation policy,
+   * mutated under _reg_mu; _txpkt_img mirrors its committed 0x1e70[31:16]
+   * image so the TX hot path resolves an already-programmed offset to its
+   * bank type from ONE relaxed atomic load (a miss takes _reg_mu and
+   * reprograms). _txpkt_dflt_* is the session default stamped on frames
+   * without a radiotap DBM_TX_POWER field. */
+  jaguar3::TxPktPwrBankPlanner _txpkt_banks;
+  std::atomic<uint16_t> _txpkt_img{0};
+  std::atomic<int> _txpkt_dflt_idx{0};
+  std::atomic<uint8_t> _txpkt_dflt_type{0};
+  bool _txpkt_ram_cleared = false; /* one-time macid-1 BB-RAM clear done */
+  /* Resolve a power-index offset to a descriptor type: lock-free on a bank
+   * hit / zero; takes _reg_mu and programs 0x1e70 on a miss. */
+  uint8_t txpkt_type_for_idx(int idx);
+  /* Program 0x1e70[31:16] from the planner image + the one-time defensive
+   * macid-1 RAM clear. Caller holds _reg_mu (or pre-coex bring-up). */
+  void apply_txpkt_banks_locked();
+  /* Requested-dB -> bank power-index steps (cfg.tuning.txpkt_step_qdb). */
+  int txpkt_idx_for_qdb(int qdb) const;
   /* A-MPDU TX mode (SetAmpduMode). Read lock-free in the TX descriptor path
    * (same pattern as the TX-mode default); a control write during TX is the
    * caller's to sequence and at worst tears one frame's mode benignly. */

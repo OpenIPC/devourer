@@ -1,6 +1,7 @@
 #include "RtlJaguar3Device.h"
 
 #include <algorithm>
+#include <climits> /* INT_MIN — "no radiotap DBM_TX_POWER" sentinel */
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -850,6 +851,15 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * TX-power state (flat override / offset) only sticks when applied after
    * them. The coex thread's ~2 s ticks do not rewrite the refs. */
   apply_tx_power_current(/*full=*/true);
+  /* Per-packet power banks: the BB init table reset 0x1e70 (0x00001000, all
+   * banks disabled) and may have cleared the per-STA RAM — re-sync the
+   * hardware to the planner state (a pre-bring-up SetTxPacketPowerOffsetQdb
+   * or a re-init with banks in use). Pre-coex-thread, so no _reg_mu needed. */
+  _txpkt_ram_cleared = false;
+  if (_txpkt_banks.active())
+    apply_txpkt_banks_locked();
+  else
+    _txpkt_img.store(0, std::memory_order_relaxed);
   apply_dpdt_route_8822e(); /* 8822E DPDT/eFEM pin-mux (post-coex) */
   apply_replay_wseq(); /* DEVOURER_REPLAY_WSEQ golden-init replay (debug) */
   if (_cfg.debug.bb_dump) {
@@ -1146,6 +1156,11 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
    * re-assert the disable if it was armed. */
   if (_brought_up && _cca_disabled)
     apply_cca_mode_locked(true);
+  /* Per-packet power banks are sticky too (the lever contract): the channel
+   * set doesn't touch 0x1e70[31:16] today, but a cheap RMW re-assert keeps
+   * the contract robust against future channel-path changes. */
+  if (_brought_up && _txpkt_banks.active())
+    apply_txpkt_banks_locked();
 }
 
 void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
@@ -1317,6 +1332,86 @@ bool RtlJaguar3Device::ReApplyTxPower() {
   return true;
 }
 
+/* --- Per-packet TX-power banks (see TxPktPwrBanks.h) --- */
+
+int RtlJaguar3Device::txpkt_idx_for_qdb(int qdb) const {
+  /* Round to the nearest bank step (ties away from zero), like
+   * quantize_offset_qdb. Step from cfg (default 4 qdB = 1 dB — the vendor's
+   * "each tx_pwr_ofst step will be 1dB" for the 22C class; the on-air slope
+   * run pins it per variant). */
+  const int step = _cfg.tuning.txpkt_step_qdb > 0 ? _cfg.tuning.txpkt_step_qdb : 4;
+  const int num = qdb >= 0 ? qdb * 2 + step : qdb * 2 - step;
+  return num / (2 * step);
+}
+
+void RtlJaguar3Device::apply_txpkt_banks_locked() {
+  if (!_txpkt_ram_cleared) {
+    /* One-time defensive clear of the macid-1 per-STA BB-RAM offsets (types
+     * 0/1): descriptor MACID is 0x01, and stale RAM content (a prior driver /
+     * killed session) would silently offset every type-0 "baseline" frame.
+     * Vendor 0x1e84 write protocol (phydm_wt_ram_pwr / phydm_rst_ram_pwr):
+     * all offset+en+hwigi fields zero, macid[29:24], write_en(30); then a
+     * read_en(31) pulse latches; then release. */
+    _device.rtw_write<uint32_t>(0x1e84, ((1u & 0x3f) << 24) | (1u << 30));
+    _device.rtw_write<uint32_t>(0x1e84, 0x80000000u);
+    _device.rtw_write<uint32_t>(0x1e84, 0x00000000u);
+    _txpkt_ram_cleared = true;
+  }
+  /* Both global banks live in one dword: 0x1e70[23:16] = en|idx (type 2),
+   * [31:24] = en|idx (type 3). Offsets are 7-bit two's-complement power-index
+   * steps. Plain BB RMW — the 0x1c90[15] gate applies to TXAGC-table writes
+   * only (vendor programs 0x1e70 with a bare odm_set_bb_reg). */
+  const uint16_t img = _txpkt_banks.reg16();
+  _device.phy_set_bb_reg(0x1e70, 0xFFFF0000u, img);
+  _txpkt_img.store(img, std::memory_order_relaxed);
+}
+
+uint8_t RtlJaguar3Device::txpkt_type_for_idx(int idx) {
+  idx = jaguar3::TxPktPwrBankPlanner::clamp_idx(idx);
+  if (idx == 0)
+    return 0;
+  /* Lock-free hit check against the committed 0x1e70 image (one relaxed
+   * load): the common case for a UEP stream cycling 1-2 offset levels. */
+  const uint16_t img = _txpkt_img.load(std::memory_order_relaxed);
+  const uint8_t want =
+      static_cast<uint8_t>(0x80 | (static_cast<uint8_t>(idx) & 0x7f));
+  if ((img & 0xff) == want)
+    return 2;
+  if ((img >> 8) == want)
+    return 3;
+  /* Miss: allocate/evict a bank and program it. Serialized on _reg_mu against
+   * the coex tick and channel retunes; unconditional re-apply also heals a
+   * stale mirror (e.g. a pre-bring-up recorded default). */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  const auto plan = _txpkt_banks.request(idx);
+  apply_txpkt_banks_locked();
+  return plan.type;
+}
+
+int RtlJaguar3Device::SetTxPacketPowerOffsetQdb(int qdb) {
+  const int step = _cfg.tuning.txpkt_step_qdb > 0 ? _cfg.tuning.txpkt_step_qdb : 4;
+  const int idx =
+      jaguar3::TxPktPwrBankPlanner::clamp_idx(txpkt_idx_for_qdb(qdb));
+  uint8_t type = 0;
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    if (idx != 0) {
+      const auto plan = _txpkt_banks.request(idx);
+      type = plan.type;
+      if (_brought_up)
+        apply_txpkt_banks_locked();
+    }
+  }
+  _txpkt_dflt_idx.store(idx, std::memory_order_relaxed);
+  _txpkt_dflt_type.store(type, std::memory_order_relaxed);
+  const int applied = idx * step;
+  _logger->info("per-packet TX-power default: {} qdB requested -> {} qdB "
+                "(bank idx {}, type {}){}",
+                qdb, applied, idx, type,
+                _brought_up ? "" : " (recorded; applies at bring-up)");
+  return applied;
+}
+
 devourer::TxCaps RtlJaguar3Device::GetTxCaps() {
   return devourer::tx_caps_for_chains(2); /* 8822C/8822E are 2T2R */
 }
@@ -1346,6 +1441,27 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
   c.tx_chains = 2; /* 8822C/8822E are 2T2R */
   c.rx_chains = 2;
   c.per_chain_rssi = true;
+  /* Per-packet TX power: the TXPWR_OFSET_TYPE bank selector + programmable
+   * 0x1e70 offset banks (SetTxPacketPowerOffsetQdb / radiotap DBM_TX_POWER;
+   * TxPktPwrBanks.h). Continuous in step_qdb units, ±63/-64 index travel, 2
+   * concurrent non-zero levels. On-air-measured on BOTH variants
+   * (tests/txpkt_pwr_ofset_onair.sh, ch36 MCS3, chip-RSSI ground): 8822CU
+   * 5/5 LUT-mapped steps + 2/2 radiotap cells sign-correct (+6 nominal ->
+   * +4..+6 raw, -11 -> -13..-14); 8822EU 5/5 + 2/2 (+6 -> +8 raw; deep cuts
+   * compress: -7 and -11 both land ~-6 raw — its TSSI/kfree transfer, same
+   * caveat as its SetTxPowerOffsetQdb slope). Banks survive
+   * SetMonitorChannel + FastRetune (tests/txpkt_hop_persist.sh: +6 dB held
+   * across 36<->40 hops). */
+  {
+    const int step =
+        _cfg.tuning.txpkt_step_qdb > 0 ? _cfg.tuning.txpkt_step_qdb : 4;
+    c.per_packet_txpower = true;
+    c.per_pkt_txpwr_steps = 0; /* continuous (bank-programmable) */
+    c.per_pkt_txpwr_step_qdb = static_cast<uint8_t>(step);
+    c.per_pkt_txpwr_min_qdb = static_cast<int16_t>(-64 * step);
+    c.per_pkt_txpwr_max_qdb = static_cast<int16_t>(63 * step);
+    c.per_pkt_txpwr_measured = true;
+  }
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   c.fastretune_ok = true;
   c.narrowband_ok = true; /* 5/10 MHz baseband re-clock — Jaguar3 only */
@@ -1503,9 +1619,13 @@ size_t RtlJaguar3Device::send_packets(const TxPacketView *pkts, size_t count) {
     /* Collect the contiguous run for ONE URB: well-formed frames staying on
      * one channel. A frame whose radiotap CHANNEL differs ends the run — the
      * pending URB airs on the old channel, and the retune happens inside
-     * build_tx_block when that frame leads the next URB. */
+     * build_tx_block when that frame leads the next URB. Same rule for a
+     * differing radiotap DBM_TX_POWER: a first-seen power value can reprogram
+     * an offset bank (0x1e70), which must land between URBs — an already-
+     * packed frame would otherwise air at the new bank value. */
     std::vector<size_t> lens;
     int run_chan = 0; /* 0 = no per-packet CHANNEL seen yet (current channel) */
+    int run_pwr = INT_MIN; /* INT_MIN = session-default power */
     for (size_t i = done; i < count && lens.size() < lim.max_frames; ++i) {
       const uint16_t rlen =
           devourer::radiotap_hdr_len(pkts[i].data, pkts[i].len);
@@ -1516,11 +1636,16 @@ size_t RtlJaguar3Device::send_packets(const TxPacketView *pkts, size_t count) {
       }
       const int want =
           devourer::radiotap_peek_channel(pkts[i].data, pkts[i].len);
-      if (lens.empty())
+      const int want_pwr =
+          devourer::radiotap_peek_dbm_tx_power(pkts[i].data, pkts[i].len);
+      if (lens.empty()) {
         run_chan = want;
-      else if (want > 0 &&
-               want != (run_chan > 0 ? run_chan : _channel.Channel))
+        run_pwr = want_pwr;
+      } else if ((want > 0 &&
+                  want != (run_chan > 0 ? run_chan : _channel.Channel)) ||
+                 want_pwr != run_pwr) {
         break;
+      }
       lens.push_back(pkts[i].len - rlen);
     }
     if (lens.empty())
@@ -1595,6 +1720,10 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   bool rate_from_radiotap = false; /* did the frame's radiotap carry a rate? */
   /* Per-packet hop target from a radiotap CHANNEL field (0 = none present). */
   int radiotap_channel = 0;
+  /* Per-packet TX-power delta from a radiotap DBM_TX_POWER field (dB vs the
+   * calibrated table, the Jaguar2 convention). INT_MIN = not present -> the
+   * SetTxPacketPowerOffsetQdb session default applies. */
+  int radiotap_pkt_pwr_db = INT_MIN;
 
   auto *rtap_hdr = reinterpret_cast<struct ieee80211_radiotap_header *>(
       const_cast<uint8_t *>(packet));
@@ -1616,6 +1745,11 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
        * the RATE/MCS/VHT fields). Same contract as the Jaguar1 path. */
       radiotap_channel =
           devourer::freq_to_chan(get_unaligned_le16(it.this_arg));
+      break;
+    case IEEE80211_RADIOTAP_DBM_TX_POWER:
+      /* Signed dB delta for THIS frame, resolved to a power-offset bank
+       * below (txpkt_type_for_idx). Mirrors the Jaguar2 per-packet path. */
+      radiotap_pkt_pwr_db = *reinterpret_cast<const int8_t *>(it.this_arg);
       break;
     case IEEE80211_RADIOTAP_MCS: {
       /* One shared reading of the HT MCS known/flag/index bytes (bw/sgi/mcs +
@@ -1737,9 +1871,16 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
    * STBC frame the chip can't do. */
   if (stbc && !GetTxCaps().stbc_ok)
     stbc = 0;
+  /* Per-packet TX-power bank selector: radiotap DBM_TX_POWER wins per frame
+   * (resolved to a bank, programming 0x1e70 on a first-seen value), else the
+   * SetTxPacketPowerOffsetQdb session default (pre-resolved, lock-free). */
+  uint8_t pwr_type = _txpkt_dflt_type.load(std::memory_order_relaxed);
+  if (radiotap_pkt_pwr_db != INT_MIN)
+    pwr_type = txpkt_type_for_idx(txpkt_idx_for_qdb(radiotap_pkt_pwr_db * 4));
   jaguar3::fill_data_tx_desc_8822c(
       out, static_cast<uint16_t>(frame_len), MRateToHwRate(fixed_rate), rate_id,
-      bw_desc, sgi != 0, ldpc != 0, stbc, bmc, ndpa, data_sc, pkt_offset);
+      bw_desc, sgi != 0, ldpc != 0, stbc, bmc, ndpa, data_sc, pwr_type,
+      pkt_offset);
   if (_cfg.tx.report) {
     /* DEVOURER_TX_REPORT: SPE_RPT asks the fw for a per-frame CCX TX report;
      * the report echoes SW_DEFINE's low byte, so stamp a rotating tag for

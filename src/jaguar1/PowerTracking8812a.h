@@ -78,6 +78,17 @@ public:
    * tx_agc change (`odm_clear_txpowertracking_state`). */
   void ClearState();
 
+  /* Fast global TX-power offset in BB-swing steps (0.5 dB each) — the
+   * 8812A leg of RtlJaguarDevice::FastSetTxPowerOffsetQdb.
+   * Folded into ApplySwingToBb AFTER the thermal clamp, so it composes
+   * with (and survives) every thermal tick / channel-set instead of being
+   * overwritten by it. Applies immediately when the tracker is
+   * initialised. Positive travel is bounded at swing index 28 (+2.0 dB —
+   * the vendor thermal upper bound; digital swing above 0 dB eats DAC
+   * headroom and degrades EVM on high-PAPR OFDM). */
+  void SetUserOffsetSteps(int steps);
+  int UserOffsetSteps() const { return _userOfsSteps; }
+
 private:
   RtlAdapter _device;
   std::shared_ptr<EepromManager> _eepromManager;
@@ -91,6 +102,9 @@ private:
 
   bool _txPowerTrackControl = true;
   bool _initialised = false;
+  /* Fast user swing offset (SetUserOffsetSteps), folded post-thermal-clamp. */
+  int _userOfsSteps = 0;
+  static constexpr int kUserBoostLimit = 28; /* +2.0 dB — vendor thermal cap */
 
   uint8_t _defaultOfdmIndex = 24; /* 0 dB; reseeded by Init() */
 

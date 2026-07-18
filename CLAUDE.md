@@ -106,7 +106,9 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first — see
   RX bulk-IN delivery requires the USB RXAGG engine enabled
   (`B_AX_RXAGG_EN`). TX power is a fixed BB dBm (`halbb_set_txpwr_dbm`,
   default 20 dBm, `DEVOURER_TX_PWR` override) with a runtime
-  `SetTxPowerOffsetQdb` lever; `ReadTsf` reads the per-port MAC TSF;
+  `SetTxPowerOffsetQdb` lever and per-packet radiotap `DBM_TX_POWER`
+  (fixed-dBm rewrite between frames — see **Per-packet TX power** under
+  Configuration); `ReadTsf` reads the per-port MAC TSF;
   `StartBeacon` drives the AX HW beacon engine. **HE ER SU + DCM extended
   range** (both dies): per-packet via radiotap-HE FORMAT=EXT_SU or
   `DEVOURER_TX_RATE=.../ER[/DCM]`; RX classifies the format in
@@ -399,13 +401,21 @@ the 0 dB baseline). On-air-validated on 8822CU + 8822EU, sticky across
 `SetMonitorChannel`/`FastRetune`; the E compresses deep cuts (≈−6 dB floor,
 same TSSI reshape as its offset slope). **8814A** — the same 3-bit LUT field
 at the 8822B position (dword5 [30:28]), `SetTxPacketPowerStep` on
-`RtlJaguarDevice`. **8812AU/8821AU** — no descriptor field exists (per-rate
+`RtlJaguarDevice`. **Kestrel** — no WD-descriptor field; `send_packet`
+honours the radiotap delta by rewriting the fixed-dBm BB target between
+frames (2 BB RMWs on value change, free while constant; 0.25 dB steps,
+clamped to the 0..23 dBm PA window around the `DEVOURER_TX_PWR` base —
+whole dBm on this family; global, so a HW beacon airing between frames
+follows the last-written level; a field-less frame restores the
+`SetTxPowerOffsetQdb` session offset). **8812AU/8821AU** — no descriptor
+field exists (per-rate
 selection via radiotap is their only per-packet lever); the compensating
 fast lever is `FastSetTxPowerOffsetQdb` (BB-swing TxScale `0xc1c/0xe1c`:
 global per-burst, 1–4 writes, 0.5 dB steps, −12..+2 dB, folded through the
 8812A thermal tracker; on-air-validated on the 8812AU). Sweep harnesses:
-`tests/txpkt_pwr_ofset_onair.sh` (TX_PID/TX_VID select the DUT),
-`tests/txpkt_fastswing_onair.sh`, `tests/txpkt_hop_persist.sh`.
+`tests/txpkt_pwr_ofset_onair.sh` (TX_PID/TX_VID select the DUT; Kestrel
+DUTs need `TX_PWR=14`-style dBm bases), `tests/txpkt_fastswing_onair.sh`,
+`tests/txpkt_hop_persist.sh`.
 
 Per-packet unequal error protection: `svctx` classifies stdin HEVC NALs by
 temporal layer and injects each at its ladder's rate

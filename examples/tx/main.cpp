@@ -563,11 +563,13 @@ int main(int argc, char **argv) {
 
   /* DEVOURER_TX_PKT_OFSET=N — default per-packet TX-power LUT step written
    * into every TX descriptor: 0=none, 1=-3dB, 2=-7dB, 3=-11dB, 4=+3dB,
-   * 5=+6dB. One env var, three families: Jaguar2 8822B/8821C
+   * 5=+6dB. One env var, four families: Jaguar2 8822B/8821C
    * (descriptor TXPWR_OFSET, on-air-confirmed), Jaguar1 8814A (dword5
-   * [30:28], same LUT), and Jaguar3 8822C/8822E (the step's nominal dB is
-   * mapped onto a programmable 0x1e70 offset bank). The measurement driver
-   * for tests/txpkt_pwr_ofset_onair.sh. */
+   * [30:28], same LUT), Jaguar3 8822C/8822E (the step's nominal dB is
+   * mapped onto a programmable 0x1e70 offset bank), and Kestrel 8852B/8852C
+   * (no descriptor field — the nominal dB rides the session fixed-dBm
+   * offset, which a radiotap DBM_TX_POWER still overrides per frame). The
+   * measurement driver for tests/txpkt_pwr_ofset_onair.sh. */
   if (const char *p = std::getenv("DEVOURER_TX_PKT_OFSET")) {
     const uint8_t step = static_cast<uint8_t>(std::strtol(p, nullptr, 0));
 #if defined(DEVOURER_HAVE_JAGUAR2)
@@ -583,6 +585,10 @@ int main(int argc, char **argv) {
       jag3->SetTxPacketPowerOffsetQdb(4 *
                                       devourer::txpkt_pwr_db_for_step(step));
 #endif
+    if (rtlDevice->GetAdapterCaps().generation ==
+        devourer::ChipGeneration::Kestrel)
+      rtlDevice->SetTxPowerOffsetQdb(4 *
+                                     devourer::txpkt_pwr_db_for_step(step));
     (void)step;
   }
 

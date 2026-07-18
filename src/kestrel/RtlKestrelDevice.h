@@ -78,7 +78,9 @@ public:
 
   /* Runtime TX-power lever: fixed-dBm BB power (halbb_set_txpwr_dbm) with a
    * quarter-dB offset relative to the DEVOURER_TX_PWR base. Sticky across
-   * SetMonitorChannel. */
+   * SetMonitorChannel. Per-packet: a radiotap DBM_TX_POWER dB-delta on a
+   * frame overrides this for that frame via a fixed-dBm rewrite in
+   * send_packet (2 BB RMWs on value change, free while constant). */
   devourer::TxPowerCaps GetTxPowerCaps() override;
   int SetTxPowerOffsetQdb(int qdb) override;
   devourer::TxPowerState GetTxPowerState() override;
@@ -199,6 +201,9 @@ private:
   uint8_t _tx_data_ep = 0; /* AC0 data bulk-OUT ep (BULKOUTID3) */
   uint16_t _tx_seq = 0;    /* rolling 12-bit wifi sequence for injected frames */
   std::optional<devourer::TxMode> _tx_mode_default; /* SetTxMode default */
+  int16_t _sess_pwr_qdb = 0; /* offset applied by SetTxPowerOffsetQdb — the
+                              * restore target for frames without a radiotap
+                              * DBM_TX_POWER field */
   /* Per-chain RSSI (RSSI% = dBm+110) cached from the last PPDU-status physts
    * header, attached to the following WIFI frame(s) in the aggregate. */
   uint8_t _last_rssi[2] = {0, 0};

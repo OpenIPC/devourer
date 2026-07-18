@@ -139,25 +139,29 @@ struct AdapterCaps {
   bool ldpc_rx_flag = false;
 
   /* --- feature flags --- */
-  /* Per-packet TX power: the TX descriptor carries a per-frame
-   * power trim, driven by radiotap DBM_TX_POWER (dB delta vs the calibrated
-   * table) or a session default. Two hardware shapes:
+  /* Per-packet TX power: a per-frame power trim driven by radiotap
+   * DBM_TX_POWER (dB delta vs the calibrated table / session base) or a
+   * session default. Three hardware shapes:
    *   - Jaguar2 (8822B/8821C) + 8814A: a fixed 6-rung LUT in the descriptor
    *     ({0,-3,-7,-11,+3,+6} dB) — per_pkt_txpwr_steps = 6, step_qdb = 0.
    *   - Jaguar3 (8822C/8822E): a 2-bit bank selector; the banks are
    *     programmable 7-bit signed offsets (0x1e70) in per_pkt_txpwr_step_qdb
    *     units (nominally 4 = 1 dB), 2 concurrent non-zero levels —
    *     per_pkt_txpwr_steps = 0 (continuous), min/max give the travel.
-   * per_pkt_txpwr_measured stays false until the family's descriptor path
-   * has been proven to move on-air power (tests/txpkt_pwr_ofset_onair.sh) —
-   * the honest flag for the vendor-defined-but-unvalidated 8814A/Jaguar3
-   * fields. */
+   *   - Kestrel (8852B/8852C): no descriptor field; the fixed-dBm BB target
+   *     is rewritten between frames on value change (2 RMWs, free while
+   *     constant; global, so HW beacons follow) — per_pkt_txpwr_steps = 0,
+   *     step_qdb = 1 (0.25 dB).
+   * per_pkt_txpwr_measured stays false until the family's path has been
+   * proven to move on-air power (tests/txpkt_pwr_ofset_onair.sh) — the
+   * honest flag for a vendor-defined-but-unvalidated field (the 8814A
+   * today). */
   bool per_packet_txpower = false;
   uint8_t per_pkt_txpwr_steps = 0;    /* 6 = LUT rungs; 0 = continuous qdb */
   uint8_t per_pkt_txpwr_step_qdb = 0; /* Jaguar3 bank step (qdB); 0 for LUT */
   int16_t per_pkt_txpwr_min_qdb = 0;  /* most negative per-packet trim */
   int16_t per_pkt_txpwr_max_qdb = 0;  /* most positive per-packet trim */
-  bool per_pkt_txpwr_measured = false; /* on-air-confirmed (J2 today) */
+  bool per_pkt_txpwr_measured = false; /* on-air-confirmed for this family */
   bool narrowband_ok = false;      /* 5/10 MHz re-clock (Jaguar2/Jaguar3) */
   uint8_t xtal_cap_max = 0;        /* crystal-cap trim range top (0 = no trim;
                                     * 0x3f on Jaguar1/2, 0x7f on Jaguar3) */

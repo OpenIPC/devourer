@@ -1,5 +1,6 @@
 #include "RtlKestrelDevice.h"
 
+#include <climits> /* INT_MIN = "no radiotap DBM_TX_POWER" sentinel */
 #include <cstdint>
 #include <span>
 #include <stdexcept>
@@ -458,6 +459,8 @@ int RtlKestrelDevice::SetTxPowerOffsetQdb(int qdb) {
   if (eff < kKestrelTxMinQdb) eff = kKestrelTxMinQdb;
   if (eff > kKestrelTxMaxQdb) eff = kKestrelTxMaxQdb;
   const int16_t applied = static_cast<int16_t>(eff - base);
+  _sess_pwr_qdb = applied; /* restore target for frames without a radiotap
+                            * DBM_TX_POWER field (see send_packet) */
   _hal.set_txpwr_offset_qdb(applied);
   _logger->info("Kestrel: SetTxPowerOffsetQdb({}) -> applied {} qdB "
                 "(effective {} dBm)",
@@ -630,7 +633,24 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   if (_variant == kestrel::ChipVariant::C8852C)
     c.bw_mask |= devourer::kBw160; /* 8852C-only (vendor bw_sup BW_CAP_160M) */
-  c.per_packet_txpower = false; /* AX power is TSSI, not the J2 descriptor LUT */
+  /* Per-packet TX power: no WD-descriptor field exists on AX — a radiotap
+   * DBM_TX_POWER dB-delta is honoured per frame by rewriting the fixed-dBm BB
+   * target between frames (2 RMWs on value change, free while constant;
+   * global, so a HW beacon airing between frames follows). Continuous
+   * quarter-dB, clamped to the [0, 23] dBm PA window around the session
+   * base. */
+  c.per_packet_txpower = true;
+  c.per_pkt_txpwr_steps = 0; /* continuous qdB, not a LUT */
+  c.per_pkt_txpwr_step_qdb = 1;
+  {
+    const int16_t base = _hal.txpwr_base_qdb();
+    c.per_pkt_txpwr_min_qdb = static_cast<int16_t>(kKestrelTxMinQdb - base);
+    c.per_pkt_txpwr_max_qdb = static_cast<int16_t>(kKestrelTxMaxQdb - base);
+  }
+  c.per_pkt_txpwr_measured = true; /* on-air: both dies, LUT-mapped session
+                                    * sweep 5/5 + radiotap cells 2/2
+                                    * (tests/txpkt_pwr_ofset_onair.sh, ch36,
+                                    * 14 dBm base, chip-RSSI ground) */
   c.narrowband_ok = true; /* 5/10 MHz BB small-BW (SDR-validated); FastSetBandwidth toggle */
   c.fastretune_ok = true; /* lean intra-band 20 MHz retune (FastRetune) */
   /* HE ER SU + DCM: both dies (AX_TXD_DATA_ER/_BW_ER/_DCM in the TX WD; RX
@@ -687,6 +707,8 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
   bool he = false; /* HE rate set directly on tr.rate (no MGN_HE code) */
   bool rate_from_radiotap = false; /* a per-packet radiotap rate overrides the
                                     * SetTxMode default */
+  int pkt_pwr_db = INT_MIN; /* radiotap DBM_TX_POWER dB-delta vs the session
+                             * base; INT_MIN = field absent (session offset) */
   kestrel::TxRate tr{}; /* defaults: 6M, 20MHz, LGI */
   auto *rth = reinterpret_cast<struct ieee80211_radiotap_header *>(
       const_cast<uint8_t *>(packet));
@@ -697,6 +719,11 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
       case IEEE80211_RADIOTAP_RATE:
         mgn = *it.this_arg;
         rate_from_radiotap = true;
+        break;
+      case IEEE80211_RADIOTAP_DBM_TX_POWER:
+        /* Per-packet TX power: a signed dB delta vs the session base, applied
+         * as a fixed-dBm BB rewrite before this frame airs (see below). */
+        pkt_pwr_db = *reinterpret_cast<const int8_t *>(it.this_arg);
         break;
       case IEEE80211_RADIOTAP_MCS: {
         rate_from_radiotap = true;
@@ -847,6 +874,24 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
   }
   if (!he)
     tr.rate = kestrel::mgn_to_ax_rate(mgn);
+  /* Per-packet TX power: the AX WD descriptor has no power field, but the
+   * fixed-dBm BB target is a 2-RMW rewrite — reprogram it between frames when
+   * the requested level changes (free while it stays constant), and restore
+   * the session offset for a frame without the field. Global, like the J1
+   * BB-swing lever: a HW beacon airing between frames follows the last-written
+   * level. Clamped to the same PA-valid window as SetTxPowerOffsetQdb. */
+  {
+    int16_t target = _sess_pwr_qdb;
+    if (pkt_pwr_db != INT_MIN) {
+      const int16_t base = _hal.txpwr_base_qdb();
+      int eff = base + pkt_pwr_db * 4;
+      if (eff < kKestrelTxMinQdb) eff = kKestrelTxMinQdb;
+      if (eff > kKestrelTxMaxQdb) eff = kKestrelTxMaxQdb;
+      target = static_cast<int16_t>(eff - base);
+    }
+    if (target != _hal.txpwr_offset_qdb())
+      _hal.set_txpwr_offset_qdb(target);
+  }
   /* Route by 802.11 frame type: data frames ride the AC0 queue (BULKOUTID3) so
    * they exercise the data power-by-rate path; mgmt/beacon uses the MG0 queue
    * (BULKOUTID0). Falls back to the mgmt ep if the data ep was not resolved. */

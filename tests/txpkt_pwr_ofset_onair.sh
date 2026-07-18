@@ -20,10 +20,14 @@
 #   TX_BUS/TX_PORT         USB topology pin when VID:PID is ambiguous (8814A)
 #   GROUND_PID/GROUND_VID  RSSI sensor identity (default 8812CU 0bda:c812)
 #   CH                     channel (default 36; 8822E DUTs are 5 GHz-only TX)
+#   TX_PWR                 DUT base power (default 40 = TXAGC index on the
+#                          Jaguar families; Kestrel reads it as whole dBm,
+#                          clamped 0..23 — use TX_PWR=14 for offset headroom)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${TXPKT_OUT:-/tmp/devourer-txpkt-ofset}"
 CH="${CH:-36}"
+TX_PWR="${TX_PWR:-40}"
 TX_PID="${TX_PID:-0x012d}" TX_VID="${TX_VID:-0x2357}"
 TX_BUS="${TX_BUS:-}" TX_PORT="${TX_PORT:-}"
 GROUND_PID="${1:-0xc812}" GROUND_VID="${GROUND_VID:-0x0bda}"
@@ -61,7 +65,7 @@ for step in $STEPS; do
     t0="$(date +%s.%N)"
     # Fixed rate MCS3, fixed base power, only the per-packet offset varies.
     sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_VID="$TX_VID" DEVOURER_CHANNEL="$CH" \
-        DEVOURER_TX_RATE=MCS3 DEVOURER_TX_PWR=40 DEVOURER_TX_PKT_OFSET="$step" \
+        DEVOURER_TX_RATE=MCS3 DEVOURER_TX_PWR="$TX_PWR" DEVOURER_TX_PKT_OFSET="$step" \
         DEVOURER_TX_GAP_US=1500 "${TX_EXTRA[@]}" \
         timeout 12 "$ROOT/build/txdemo" >/dev/null 2>&1 || true
     t1="$(date +%s.%N)"
@@ -85,7 +89,7 @@ for pair in "0:0" "6:6" "-11:-11"; do
     db="${pair%%:*}"
     t0="$(date +%s.%N)"
     sudo -n env DEVOURER_PID="$TX_PID" DEVOURER_VID="$TX_VID" DEVOURER_CHANNEL="$CH" \
-        DEVOURER_TX_RATE=MCS3 DEVOURER_TX_PWR=40 DEVOURER_TX_PKT_PWR_DB="$db" \
+        DEVOURER_TX_RATE=MCS3 DEVOURER_TX_PWR="$TX_PWR" DEVOURER_TX_PKT_PWR_DB="$db" \
         DEVOURER_TX_GAP_US=1500 "${TX_EXTRA[@]}" \
         timeout 12 "$ROOT/build/txdemo" >/dev/null 2>&1 || true
     t1="$(date +%s.%N)"

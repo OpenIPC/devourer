@@ -94,9 +94,9 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | `rx.path` | RX (`DEVOURER_RX_ALLPATHS`) | seq, rssi[4], snr[4], evm[4] |
 | `rx.path_mask` | L (toggle spec) | t, mask "0xNN" |
 | `rx.scrambler` | RX (`DEVOURER_DUMP_SCRAMBLER`) | seed "0xNN", rate, hits, len |
-| `rx.energy` | RX (`DEVOURER_RX_ENERGY_MS` / sweep) | t, [ch], cca_ofdm\|null, cca_cck\|null, fa_ofdm\|null, fa_cck\|null, igi\|null, [retune_us], frames, frames_ldpc, frames_stbc, rssi_mean, rssi_max, snr_mean, snr_min, evm_mean |
+| `rx.energy` | RX (`DEVOURER_RX_ENERGY_MS` / sweep) | t, [ch], cca_ofdm\|null, cca_cck\|null, fa_ofdm\|null, fa_cck\|null, igi\|null, abs_noise_floor_dbm\|null, [retune_us], frames, frames_ldpc, frames_stbc, rssi_mean, rssi_max, snr_mean, snr_min, evm_mean |
 | `rx.nhm` | RX | [ch], peak, busy, dur, hist[12] |
-| `rx.quality` | RX (`DEVOURER_RXQUALITY`) | verdict, frames, rssi_mean_dbm, rssi_max_dbm, snr_mean_db, snr_min_db, evm_db\|null, noise_floor_dbm\|null, igi |
+| `rx.quality` | RX (`DEVOURER_RXQUALITY`) | verdict, frames, rssi_mean_dbm, rssi_max_dbm, snr_mean_db, snr_min_db, evm_db\|null, noise_floor_dbm\|null, abs_noise_floor_dbm\|null, igi |
 | `adapter.rxpaths` | RX (`DEVOURER_RXQUALITY`) | active_mask "0xNN", n_active, n_chains, frames, rssi_dbm[] — GetActiveRxPaths live per-chain activity (the caps rx_chains companion) |
 | `link.health` | RX (`DEVOURER_LINKHEALTH`) | verdict, rssi_dbm, snr_db, evm_db\|null, frames, fa_ofdm\|null, igi\|null, [igi_floor], [igi_ceil], cause, fix |
 | `fw.c2h` | RX, duplex (`DEVOURER_TX_STATUS`) | len, bytes hex |

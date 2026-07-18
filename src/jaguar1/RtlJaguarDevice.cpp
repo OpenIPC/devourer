@@ -4,6 +4,7 @@
 #include "EepromManager.h"
 #include "Hal8812PhyReg.h"
 #include "NhmReader.h"
+#include "NoiseFloorMath.h" /* active idle-noise-floor sign/pwdb helpers (#202) */
 #include "RadioManagementModule.h"
 #include "AckResponder.h" /* hardware ACK responder recipe */
 #include "RadiotapPeek.h" /* send_packets batch pre-parse */
@@ -299,7 +300,73 @@ RxEnergy RtlJaguarDevice::GetRxEnergy() {
         _device.phy_set_bb_reg(a, m, v);
       },
       e);
+
+  /* Active absolute floor (#202): the debug-port measurement wedges live RX, so
+   * it is NOT re-run here — GetRxEnergy just surfaces the RX-idle CAL taken at
+   * bring-up (measure_idle_noise_floor). Left invalid on the 8814A / when off. */
+  if (_cfg.rx.abs_noise_floor) {
+    e.abs_noise_floor_dbm = _abs_noise_floor;
+    e.valid_noise_floor = _abs_nf_valid;
+  }
   return e;
+}
+
+/* Vendor odm_inband_noise_monitor_ac (8812/8821 active-sampling path). MUST run
+ * RX-idle: the clock-stop (0x8B4[6]) + BB/PMAC/CCK resets collide with a live
+ * bulk-IN RX DMA (#202). Reads the path-A RX I/Q off debug port 0x0FA0, forms
+ * pwdb = 10*log10(I^2+Q^2), averages VALID_CNT idle samples in [-27,0) dB, and
+ * offsets to dBm: noise = avg + 12(ADC backoff) + 0x1C(IGI ref) - 110 - 3. */
+void RtlJaguarDevice::measure_idle_noise_floor() {
+  auto bbset = [this](uint16_t a, uint32_t m, uint32_t v) {
+    _device.phy_set_bb_reg(a, m, v);
+  };
+  const uint8_t igi_save =
+      static_cast<uint8_t>(_device.rtw_read8(0x0C50) & 0x7f);
+  int sum = 0, valid = 0, invalid = 0;
+  while (valid < 5 && invalid < 10) {
+    bbset(0x0C50, 0x7f, 0x1C);        /* fix IGI = 0x1C */
+    bbset(0x08B4, 1u << 6, 1);        /* stop CK320 & CK88 */
+    bbset(0x08FC, 0xFFFFFFFF, 0x200); /* debug port -> RX I/Q buffer (path A) */
+    const uint32_t v =
+        _radioManagement->phy_query_bb_reg_public(0x0FA0, 0xFFFFFFFF);
+    const bool pd = (v >> 31) & 1u;
+    int rxi = static_cast<int>((v & 0xFFC00) >> 10); /* [19:10] */
+    int rxq = static_cast<int>(v & 0x3FF);           /* [9:0] */
+    bool have = false;
+    int pwdb = 0;
+    if (!pd || rxi != 0x200) { /* not in packet-detect / Tx state */
+      rxi = devourer::nf::sign_conversion(rxi, 10);
+      rxq = devourer::nf::sign_conversion(rxq, 10);
+      pwdb = devourer::nf::pwdb_conversion(rxi * rxi + rxq * rxq, 20, 18);
+      have = true;
+    }
+    bbset(0x08B4, 1u << 6, 0); /* restart clocks */
+    _device.rtw_write8(0x0002, _device.rtw_read8(0x0002) & ~1u); /* BB reset */
+    _device.rtw_write8(0x0002, _device.rtw_read8(0x0002) | 1u);
+    _device.rtw_write8(0x0B03, _device.rtw_read8(0x0B03) & ~1u); /* PMAC reset */
+    _device.rtw_write8(0x0B03, _device.rtw_read8(0x0B03) | 1u);
+    if (_device.rtw_read8(0x080B) & (1u << 4)) { /* CCK reset (if enabled) */
+      _device.rtw_write8(0x080B, _device.rtw_read8(0x080B) & ~(1u << 4));
+      _device.rtw_write8(0x080B, _device.rtw_read8(0x080B) | (1u << 4));
+    }
+    if (have && pwdb < 0 && pwdb >= -27) {
+      sum += pwdb;
+      ++valid;
+    } else {
+      ++invalid;
+    }
+  }
+  bbset(0x0C50, 0x7f, igi_save); /* restore IGI */
+  if (valid > 0) {
+    const int noise = sum / valid + 12 + 0x1C - 110 - 3;
+    _abs_noise_floor = static_cast<int8_t>(noise);
+    _abs_nf_valid = true;
+    _logger->info("Jaguar1: idle noise floor = {} dBm ({}/5 samples)", noise,
+                  valid);
+  } else {
+    _abs_nf_valid = false;
+    _logger->warn("Jaguar1: idle noise-floor CAL got no valid samples");
+  }
 }
 
 SelectedChannel RtlJaguarDevice::GetSelectedChannel() { return _channel; }
@@ -1210,6 +1277,13 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
                   "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   }
+
+  /* DEVOURER_RX_NOISE_FLOOR — measure the absolute idle floor RX-idle here,
+   * before StartRxLoop starts the bulk-IN DMA (the active-sampling path wedges a
+   * live RX). 8812A/8821A only; the 8814A uses a different vendor path (#202). */
+  if (_cfg.rx.abs_noise_floor &&
+      _eepromManager->version_id.ICType != CHIP_8814A)
+    measure_idle_noise_floor();
 
   StartRxLoop(std::move(packetProcessor));
 }

@@ -869,6 +869,58 @@ RxEnergy RtlJaguar2Device::GetRxEnergy() {
         _device.phy_set_bb_reg(a, m, v);
       },
       e);
+
+  /* DEVOURER_RX_NOISE_FLOOR — active/frame-free absolute floor (#202). The
+   * vendor phydm_idle_noise_measure_ac: the BB maintains an idle-time power
+   * report at 0x0FF0 (path-A [7:0], path-B [15:8], sval = byte>>1); freeze it
+   * (0x9E4[30]=1) for a clean read, then noise = -110 + IGI(0xC50/0xE50) + mean.
+   * Wedge-free: no clock-stop and no BB/PMAC/CCK reset (unlike the 8812A/8821A
+   * debug-port path), so it runs safely under live RX. Serialized on _reg_mu.
+   *
+   * BEST-EFFORT on the tested 8812BU (1x1 8822B cut): the report is only rarely
+   * populated in devourer's monitor bring-up — most reads return the 0x80/0x00
+   * "no idle sample" sentinels. Investigated (issue #202): there is no vendor
+   * enable step for it (the report is HW-automatic and the vendor runs the
+   * measurement from a full associated init, not monitor mode); the sentinel
+   * rate is channel-independent, oversampling barely helps, and pausing DIG
+   * (fixing IGI) makes it worse. So this oversamples and GUARDS: 0x80/0x00 bytes
+   * are dropped and >=3 live samples in a plausible band are required, else
+   * valid_noise_floor stays false (never a fake dBm) — accuracy over valid-rate.
+   * When it does read, it cross-matches the Jaguar1 floor within a few dB on the
+   * same channel. A 2T2R 8822BU or a fuller init may populate it reliably. */
+  if (_cfg.rx.abs_noise_floor) {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    const int paths = _hal.chip_version().rf_2t2r ? 2 : 1;
+    int sum[2] = {0, 0}, cnt[2] = {0, 0};
+    bool any_nonzero = false;
+    for (int s = 0; s < 48; ++s) {
+      _device.phy_set_bb_reg(0x09E4, 1u << 30, 1); /* freeze idle-power report */
+      const uint32_t tmp = _device.rtw_read<uint32_t>(0x0FF0);
+      _device.phy_set_bb_reg(0x09E4, 1u << 30, 0); /* resume 5-us updates */
+      for (int p = 0; p < paths; ++p) {
+        const uint8_t byte = (tmp >> (8 * p)) & 0xff;
+        if (byte == 0x80 || byte == 0x00) /* "no idle sample" sentinels */
+          continue;
+        any_nonzero = true;
+        sum[p] += static_cast<int8_t>(byte) >> 1;
+        ++cnt[p];
+      }
+    }
+    const bool ok = any_nonzero && cnt[0] >= 3 && (paths == 1 || cnt[1] >= 3);
+    if (ok) {
+      int noise = -110 + (_device.rtw_read8(0x0C50) & 0x7f) + sum[0] / cnt[0];
+      if (paths == 2)
+        noise = (noise + (-110 + (_device.rtw_read8(0x0E50) & 0x7f) +
+                          sum[1] / cnt[1])) /
+                2;
+      if (noise <= -70 && noise >= -105) { /* plausible idle-floor band; a read
+                                              outside it is interference or a bad
+                                              report sample, not the idle floor */
+        e.abs_noise_floor_dbm = static_cast<int8_t>(noise);
+        e.valid_noise_floor = true;
+      }
+    }
+  }
   return e;
 }
 

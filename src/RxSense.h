@@ -40,6 +40,15 @@ struct RxEnergy {
   bool valid_nhm = false;
   uint8_t nhm[12] = {};
   uint16_t nhm_duration = 0;
+
+  /* Active/frame-free ABSOLUTE noise floor (dBm) — the vendor idle-noise
+   * monitor, distinct from the passive rssi-snr floor in RxQuality. Heavy
+   * (~10 ms of USB round-trips), so it is only filled when the caller opted in
+   * (DEVOURER_RX_NOISE_FLOOR). Jaguar2 fills it live (HW idle-noise report,
+   * wedge-free); Jaguar1 8812A/8821A fill it from an RX-idle CAL measurement;
+   * Jaguar3 and others leave it invalid (no vendor path). Issue #202. */
+  bool valid_noise_floor = false;
+  int8_t abs_noise_floor_dbm = 0;
 };
 
 #endif /* RX_SENSE_H */

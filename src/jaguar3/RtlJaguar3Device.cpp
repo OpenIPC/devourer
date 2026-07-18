@@ -1096,6 +1096,12 @@ RxEnergy RtlJaguar3Device::GetRxEnergy() {
   _device.phy_set_bb_reg(0x1eb4, 1u << 25, 0x1);
   _device.phy_set_bb_reg(0x1eb4, 1u << 25, 0x0);
   _device.phy_set_bb_reg(0x1d2c, 1u << 31, 0x1);
+
+  /* No active absolute noise floor on Jaguar3 (#202): the vendor 8822C driver
+   * has no idle-noise path (phydm_noisemonitor.c dispatches the report only to
+   * 8822B/8821C and returns 0 for the 8822C), so e.valid_noise_floor stays
+   * false. The passive rssi-snr floor (RxQuality.noise_floor_dbm) is J3's only
+   * floor. */
   return e;
 }
 

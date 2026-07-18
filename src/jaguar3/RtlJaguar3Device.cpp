@@ -1099,26 +1099,35 @@ RxEnergy RtlJaguar3Device::GetRxEnergy() {
   return e;
 }
 
-/* Disable / restore the MAC EDCCA energy-detect gate (the vendor dis_cca proc's
- * MAC half: BIT_DIS_EDCCA 0x520[15] + BIT_EDCCA_MSK_COUNTDOWN 0x524[11]). Caller
- * holds _reg_mu.
+/* Disable / restore the MAC carrier-sense gate that defers TX. Two 0x520 bits:
+ * BIT_DIS_CCA 0x520[14] (primary carrier-sense of a decodable preamble) and
+ * BIT_DIS_EDCCA 0x520[15] (energy detect), plus BIT_EDCCA_MSK_COUNTDOWN
+ * 0x524[11]. Caller holds _reg_mu.
  *
- * The vendor recipe ALSO writes three BB registers (0x1a9c[20], 0x1a14[9:8],
- * 0x1d58[0xff8]); those are deliberately NOT done here. 0x1d58[0xff8]=0x1ff is
- * the OFDM-CCA-off write (the CW-tone path uses it to stop OFDM detection for a
- * bare carrier), so applying it makes the RX deaf to OFDM — MEASURED: the full
- * recipe dropped 8822EU delivery from ~6800 to ~10 frames. The MAC EDCCA bit is
- * the only part that's safe to touch on a live RX. See docs / the help-wanted
- * issue for the measured null and why (EDCCA gates TX deferral, which devourer's
- * monitor inject already bypasses). */
+ * The primary-CCA bit [14] is the one that matters for the host-injected data
+ * path: monitor injection is NOT CCA-free — it defers to a co-channel 802.11
+ * transmitter and drops ~40% of its submit rate (on-air, 8822EU, co-channel
+ * flooder vs a far-channel USB-contention control; tests/dis_cca_tx_onair.sh).
+ * Clearing [14] removes that deferral (~1.5x recovery, back to ~90% of the
+ * unimpeded rate) so injected/beacon TX punches through a busy channel — the
+ * "keep transmitting through interference" lever the OpenIPC-FPV community wants
+ * (issue #199). The energy bit [15] alone is null against a decodable preamble;
+ * it is kept because it also relaxes deferral to non-802.11 in-band energy.
+ *
+ * The vendor dis_cca recipe ALSO writes three BB registers (0x1a9c[20],
+ * 0x1a14[9:8], 0x1d58[0xff8]); those are deliberately NOT done here.
+ * 0x1d58[0xff8]=0x1ff is the OFDM-CCA-off write (the CW-tone path uses it to stop
+ * OFDM detection for a bare carrier), so applying it makes the RX deaf to OFDM —
+ * MEASURED: the full recipe dropped 8822EU delivery from ~6800 to ~10 frames.
+ * These MAC 0x520/0x524 bits gate TX only and are safe on a live RX. */
 void RtlJaguar3Device::apply_cca_mode_locked(bool disabled) {
   uint32_t v520 = _device.rtw_read<uint32_t>(0x0520);
   uint32_t v524 = _device.rtw_read<uint32_t>(0x0524);
   if (disabled) {
-    v520 |= (1u << 15);
+    v520 |= (1u << 15) | (1u << 14);   /* DIS_EDCCA (energy) + DIS_CCA (carrier-sense) */
     v524 &= ~(1u << 11);
   } else {
-    v520 &= ~(1u << 15);
+    v520 &= ~((1u << 15) | (1u << 14));
     v524 |= (1u << 11);
   }
   _device.rtw_write<uint32_t>(0x0520, v520);
@@ -1130,8 +1139,8 @@ void RtlJaguar3Device::SetCcaMode(bool disabled) {
   _cca_disabled = disabled;
   if (_brought_up)
     apply_cca_mode_locked(disabled);
-  _logger->info("Jaguar3: MAC EDCCA {}", disabled ? "DISABLED (dis_cca)"
-                                                   : "enabled (default)");
+  _logger->info("Jaguar3: MAC carrier-sense {}",
+                disabled ? "DISABLED (dis_cca: CCA+EDCCA)" : "enabled (default)");
 }
 
 void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {

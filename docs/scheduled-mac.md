@@ -58,10 +58,11 @@ measured p99.9 between ~0.8 ms and ~3.2 ms across runs on the same channel.
    the bulk of frames within tens of µs of nominal (floor RMS 11–26 µs; p90
    ≤ 64 µs). PCIe is the tightest (11 µs) but the USB floors are the same
    order — transport choice does not gate slot design at ≥ ms slot sizes.
-2. **The tail is channel deferral, and it does not go away.** Even at 5 GHz on
-   a mostly-idle channel, ~1% of frames air 0.1–2.4 ms late (ambient beacons +
-   CSMA — `SetCcaMode` relaxes energy-CCA, not preamble deferral). p99.9 sits
-   at ~1–3 ms on every transport.
+2. **The tail is channel deferral under default carrier-sense.** Even at 5 GHz
+   on a mostly-idle channel, ~1% of frames air 0.1–2.4 ms late with CSMA on
+   (ambient beacons + carrier-sense backoff; `SetCcaMode` disables the MAC
+   carrier-sense gate — primary CCA + EDCCA — the lever that lets injected TX
+   punch through this deferral). p99.9 sits at ~1–3 ms on every transport.
 3. **Go/no-go: fine (sub-ms) DL slots are REFUTED on all transports** for a
    p99.9-grade deadline on a real channel. The design consequence is a
    **submission-ahead scheduler** — submit a slot's frame `guard_us` before

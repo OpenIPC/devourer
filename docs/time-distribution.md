@@ -115,9 +115,10 @@ The last limit is CSMA: a TBTT beacon still defers to carrier-sense and airs
 after a variable backoff, so its scheduled-TSF stamp and delayed air time
 diverge by ~hundreds of µs on a shared channel. In a time-distribution setup the
 master **owns** the channel, so that backoff is pure loss — the master disables
-EDCCA (`SetCcaMode`, on by default here; opt out with `DEVOURER_TSYNC_CSMA=1`)
-and the beacon airs exactly on schedule. `SetCcaMode` is implemented on
-Jaguar2/3 and is a deliberate no-op on Jaguar1: the J1 baseband EDCCA is
+the MAC carrier-sense gate (`SetCcaMode`: primary CCA + EDCCA, on by default
+here; opt out with `DEVOURER_TSYNC_CSMA=1`) and the beacon airs exactly on
+schedule. `SetCcaMode` is implemented on Jaguar2/3 and is a deliberate no-op on
+Jaguar1: the J1 baseband EDCCA is
 already disabled by its init table (`0x8A4 = 0x7F7F7F7F`, thresholds
 unreachable), and the measured J1 downlink needs no MAC-side gate — see the
 bench row below. (Porting the J2 MAC-register recipe to J1 was bench-refuted:

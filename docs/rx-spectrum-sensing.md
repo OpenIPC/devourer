@@ -34,6 +34,40 @@ interference localisation is possible through a different mechanism entirely —
 the self-sounding beamforming report (see `docs/beamforming-self-sounding.md`),
 whose per-tone SNR / V-angle variance localises an interferer to ~1 MHz.
 
+## Noise floor — passive vs active (absolute dBm)
+
+Two noise floors are exposed on `GetRxQuality()`:
+
+- **Passive** (`noise_floor_dbm`, always on) — the per-frame `rssi_dbm − snr_db`,
+  averaged over the window. It updates only when a wanted frame arrives, but that
+  is exactly the self-jamming signal (raising TX power on a near-field link drops
+  SNR while RSSI holds, so this rises). Works on every generation.
+- **Active / frame-free absolute** (`abs_noise_floor_dbm`, opt-in
+  `DEVOURER_RX_NOISE_FLOOR`) — the vendor idle-noise monitor, a true idle-channel
+  floor measured with **no wanted signal** (site survey, channel selection). It
+  adds ~10 ms of USB round-trips, so it is off by default. The vendor active
+  measurement can **wedge a live RX**, so devourer only ever runs it RX-idle:
+  - **Jaguar1 (8812A/8821A)** — the debug-port sampling path (fix IGI, stop
+    CK320/CK88, read the RX I/Q at `0x0FA0`, `pwdb = 10·log10(I²+Q²)`, average
+    5 idle samples) stops clocks and resets BB/PMAC/CCK, which wedges concurrent
+    bulk-IN DMA. devourer runs it **once at bring-up, before `StartRxLoop`** —
+    RX-idle by construction, wedge-free — and caches the value; on-air 0/6 wedged
+    runs vs the live-poll's 2/6. Re-measure by re-`Init`. The 8814A is excluded
+    (different vendor path).
+  - **Jaguar2 (8822B/8821C)** — the HW idle-noise report at `0x0FF0` (freeze
+    `0x9E4[30]`, `noise = −110 + IGI + report`) has no clock-stop, so it is read
+    live. It is only intermittently populated in monitor bring-up (it reads the
+    `0x80`/`0x00` sentinels between idle gaps), so it returns a value on some
+    reads and null on others — poll until valid. When valid it cross-matches the
+    Jaguar1 floor within a few dB on the same channel.
+  - **Jaguar3 (8822C/8822E)** — no vendor idle-noise path (the report dispatch
+    excludes the 8822C), so `abs_noise_floor_dbm` is always null; the passive
+    floor is J3's only floor.
+
+  Validation: `tests/rx_noise_floor_active_onair.sh` (anti-wedge + sanity /
+  cross-chip agreement — a B210 injected-noise sweep isn't used because the bench
+  SDR is too weakly coupled to move the RTL floor above the measurement variance).
+
 ## `DEVOURER_RX_ENERGY_MS` — the energy sensor
 
 `rxdemo` with `DEVOURER_RX_ENERGY_MS=N` emits one `rx.energy`

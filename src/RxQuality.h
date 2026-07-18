@@ -51,6 +51,14 @@ struct RxQuality {
   double noise_floor_dbm = 0.0;
   bool nf_valid = false;
 
+  /* Active/frame-free ABSOLUTE noise floor (dBm) — the companion to the passive
+   * floor above: the vendor idle-noise monitor, measured with no wanted signal
+   * (site survey / channel selection). Present only when the caller opted in
+   * (DEVOURER_RX_NOISE_FLOOR) and the generation supports it (Jaguar2 live,
+   * Jaguar1 8812A/8821A RX-idle CAL; false elsewhere). Issue #202. */
+  int8_t abs_noise_floor_dbm = 0;
+  bool abs_nf_valid = false;
+
   /* Frame-free energy (from GetRxEnergy — GetRxQuality subsumes it). */
   bool energy_valid = false;
   uint32_t fa_ofdm = 0;
@@ -174,6 +182,8 @@ inline RxQuality build_rx_quality(const RxQualitySnapshot &s, const RxEnergy &e,
   q.evm_mean_db = s.evm_mean_raw / 2.0;
   q.noise_floor_dbm = s.nf_mean_dbm;
   q.nf_valid = s.nf_valid;
+  q.abs_noise_floor_dbm = e.abs_noise_floor_dbm; /* active floor rides RxEnergy */
+  q.abs_nf_valid = e.valid_noise_floor;
   q.energy_valid = e.valid_fa;
   q.fa_ofdm = e.fa_ofdm;
   q.cca_ofdm = e.cca_ofdm;

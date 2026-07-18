@@ -56,6 +56,7 @@ devourer::DeviceConfig devourer_config_from_env() {
   if (env_long("DEVOURER_RX_URBS", &v))
     cfg.rx.urbs = static_cast<int>(v);
   cfg.rx.phy_status_8821c = !env_flag("DEVOURER_8821C_NO_PHYST");
+  cfg.rx.abs_noise_floor = env_flag("DEVOURER_RX_NOISE_FLOOR");
   if (env_long("DEVOURER_IGI", &v))
     cfg.rx.igi = static_cast<uint8_t>(v & 0x7f);
   if (const char *e = env_str("DEVOURER_ACK_RESPONDER"))

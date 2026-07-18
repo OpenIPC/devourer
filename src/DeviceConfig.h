@@ -96,6 +96,13 @@ struct DeviceConfig {
      * PHY-status to RX frames (per-frame RSSI/SNR/EVM). Disable only for the
      * leanest possible RX path. */
     bool phy_status_8821c = true;
+    /* env: DEVOURER_RX_NOISE_FLOOR — opt-in active/frame-free ABSOLUTE noise
+     * floor (dBm) in GetRxEnergy/GetRxQuality (RxEnergy.abs_noise_floor_dbm).
+     * OFF by default: the vendor idle-noise measurement adds ~10 ms of USB
+     * round-trips. Jaguar2 measures it live (wedge-free HW idle-noise report);
+     * Jaguar1 8812A/8821A measure it RX-idle (a CAL bracket); Jaguar3 and others
+     * leave it invalid (no vendor path). Issue #202. */
+    bool abs_noise_floor = false;
     /* env: DEVOURER_IGI — Jaguar2 fixed initial-gain index override, 7 bits
      * (unset = 0x40, the FA-rate-validated default). */
     std::optional<uint8_t> igi;

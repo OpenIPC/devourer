@@ -68,6 +68,7 @@ public:
   }
   void SetMonitorChannel(SelectedChannel channel) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
+  devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override { return _channel; }
 
   /* Static capability aggregate (resolved from chip identity; thread-safe,

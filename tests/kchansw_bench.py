@@ -167,11 +167,12 @@ class Child:
     """Popen wrapper: stdout consumed by a stamping reader thread."""
 
     def __init__(self, name, argv, out_path, env=None, stamp=True,
-                 stderr_path=None):
+                 stderr_path=None, append=False):
         self.name = name
         self.lines = 0
+        self.frame_lines = 0  # oracle rx.frame decode counter
         self._stamp = stamp
-        self._out = open(out_path, "w")
+        self._out = open(out_path, "a" if append else "w")
         self._err = open(stderr_path, "w") if stderr_path else subprocess.DEVNULL
         self.proc = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=self._err,
@@ -194,6 +195,8 @@ class Child:
             else:
                 self._out.write(line + "\n")
             self.lines += 1
+            if '"ev":"rx.frame"' in line:
+                self.frame_lines += 1
         self._out.flush()
 
     def alive(self) -> bool:
@@ -233,11 +236,12 @@ def spawn_oracle(role, dut, channel, agg_sa, out_dir) -> Child:
     return c
 
 
-def spawn_injector(iface, out_dir, hz, size=96) -> Child:
+def spawn_injector(iface, out_dir, hz, size=96, append=False) -> Child:
     return Child("inject", [sys.executable, str(INJECT), "--iface", iface,
                             "--hz", str(hz), "--size", str(size)],
                  os.path.join(out_dir, "inject.jsonl"), stamp=False,
-                 stderr_path=os.path.join(out_dir, "inject.stderr"))
+                 stderr_path=os.path.join(out_dir, "inject.stderr"),
+                 append=append)
 
 
 class WpaAp:
@@ -371,17 +375,47 @@ class Session:
         return open(os.path.join(d, "control.jsonl"), "w")
 
 
-def oracle_rate_gate(oracle: Child, min_lines=50, timeout=20.0) -> bool:
-    """Liveness: the oracle must be decoding (stamped lines flowing)."""
-    start_lines = oracle.lines
+def oracle_rate_gate(oracle: Child, min_frames=50, timeout=20.0) -> bool:
+    """Liveness: the oracle must be DECODING (rx.frame lines, not just init
+    chatter — the smoke run showed the loose any-line gate passing on a
+    channel the oracle could barely hear)."""
+    start = oracle.frame_lines
     end = time.monotonic() + timeout
     while time.monotonic() < end:
-        if oracle.lines - start_lines >= min_lines:
+        if oracle.frame_lines - start >= min_frames:
             return True
         if not oracle.alive():
             return False
         time.sleep(0.5)
-    return oracle.lines - start_lines >= min_lines
+    return oracle.frame_lines - start >= min_frames
+
+
+def recover_dut(s: "Session", ch: int, ht: str = "", start: str = "rebind"):
+    """Recovery ladder after a DUT wedge/USB drop (the smoke run lost the
+    netdev to a full USB disconnect after ~25 switch cycles): re-probe →
+    module reload → authorized/VBUS power-cycle. Returns (iface, rung) or
+    (None, 'exhausted'). The chip usually re-enumerates by itself; the
+    rungs differ in how much driver state they rebuild."""
+    mod = s.driver["module"]
+    ladder = ("rebind", "module-reload", "power-cycle")
+    for action in ladder[ladder.index(start):]:
+        try:
+            if action == "module-reload" and s.driver_key != "vendor":
+                run(["modprobe", "-r", mod], timeout=30)
+                run(["modprobe", mod], timeout=60)
+            elif action == "power-cycle":
+                regress.usb_port_power_cycle(s.dut, settle_s=3.0)
+                if s.driver_key != "vendor":
+                    run(["modprobe", mod], timeout=60)
+            regress.attach_to_host_kernel(s.dut)
+            iface = dut_iface(s.dut, timeout=20)
+            unmanage(iface)
+            set_monitor(iface, ch, ht)
+            log(f"recover_dut: '{action}' worked → {iface}")
+            return iface, action
+        except Exception as e:  # noqa: BLE001 — every rung may legitimately fail
+            log(f"recover_dut: {action} failed: {e}")
+    return None, "exhausted"
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +441,7 @@ def run_set_channel(s: Session, cfg: Cfg, iface: str, uninstrumented=False):
         if trace_ctx:
             trace_ctx.__enter__()
         total = cfg.warmup + cfg.switches
+        last_prog = -1
         for i in range(total):
             frm, to = ((cfg.from_ch, cfg.to_ch) if i % 2 == 0
                        else (cfg.to_ch, cfg.from_ch))
@@ -430,15 +465,52 @@ def run_set_channel(s: Session, cfg: Cfg, iface: str, uninstrumented=False):
             if r.returncode != 0:
                 log(f"{cfg.name} i={i}: iw rc={r.returncode} "
                     f"{r.stderr.strip()[:80]}")
+                if "No such device" in r.stderr or "(-19)" in r.stderr:
+                    # USB drop mid-config (seen in smoke): recover, respawn
+                    # the injector (its socket died with the old ifindex),
+                    # and mark everything after as post-recovery.
+                    ctl.write(json.dumps({"ev": "kchansw.wedge", "i": i,
+                                          "mono_ns": time.monotonic_ns(),
+                                          "kind": "usb-drop"}) + "\n")
+                    inj.stop()
+                    iface2, rung = recover_dut(s, to, cfg.ht)
+                    ctl.write(json.dumps({"ev": "kchansw.recovered", "i": i,
+                                          "rung": rung,
+                                          "ok": iface2 is not None}) + "\n")
+                    if iface2 is None:
+                        log(f"{cfg.name}: recovery exhausted — aborting")
+                        break
+                    iface = iface2
+                    inj = spawn_injector(iface, d, cfg.inject_hz, append=True)
             time.sleep(cfg.dwell_ms / 1e3)
-            if i % 50 == 49:
+            if i % 25 == 24:
                 ctl.flush()
                 if not (inj.alive() and oa.alive() and ob.alive()):
                     log(f"{cfg.name}: child died (inj={inj.alive()} "
                         f"oa={oa.alive()} ob={ob.alive()}) — aborting config")
                     break
-                if iface_channel(iface) is None:
-                    log(f"{cfg.name}: iw info unresponsive — possible wedge")
+                prog = oa.frame_lines + ob.frame_lines
+                if prog == last_prog:
+                    # Injector alive and erroring 0, yet neither oracle
+                    # decodes anything new: the silent-TX wedge (probed on
+                    # this rig — dmesg stays clean; module reload clears it).
+                    log(f"{cfg.name} i={i}: silent-TX stall — recovering")
+                    ctl.write(json.dumps({"ev": "kchansw.wedge", "i": i,
+                                          "mono_ns": time.monotonic_ns(),
+                                          "kind": "silent-tx"}) + "\n")
+                    inj.stop()
+                    cur_ch = to
+                    iface2, rung = recover_dut(s, cur_ch, cfg.ht,
+                                               start="module-reload")
+                    ctl.write(json.dumps({"ev": "kchansw.recovered", "i": i,
+                                          "rung": rung,
+                                          "ok": iface2 is not None}) + "\n")
+                    if iface2 is None:
+                        log(f"{cfg.name}: recovery exhausted — aborting")
+                        break
+                    iface = iface2
+                    inj = spawn_injector(iface, d, cfg.inject_hz, append=True)
+                last_prog = oa.frame_lines + ob.frame_lines
     finally:
         if trace_ctx:
             trace_ctx.__exit__(None, None, None)
@@ -453,7 +525,7 @@ def run_set_channel(s: Session, cfg: Cfg, iface: str, uninstrumented=False):
         ctl.close()
         s.dmesg_dump(d)
     log(f"{cfg.name}: done ({cfg.warmup}+{cfg.switches} switches)")
-    return per_switch_wall
+    return per_switch_wall, iface
 
 
 def run_csa(s: Session, cfg: Cfg, iface: str):
@@ -870,10 +942,10 @@ def cmd_smoke(s: Session):
     write_manifest(s)
     cfg_i = Cfg(name="smoke-instrumented", prim="set_channel",
                 from_ch=36, to_ch=40, switches=20, warmup=2)
-    w_inst = run_set_channel(s, cfg_i, iface)
+    w_inst, iface = run_set_channel(s, cfg_i, iface)
     cfg_u = Cfg(name="smoke-bare", prim="set_channel",
                 from_ch=36, to_ch=40, switches=20, warmup=2)
-    w_bare = run_set_channel(s, cfg_u, iface, uninstrumented=True)
+    w_bare, iface = run_set_channel(s, cfg_u, iface, uninstrumented=True)
     import statistics
     med_i = statistics.median(w_inst) / 1e6 if w_inst else 0
     med_b = statistics.median(w_bare) / 1e6 if w_bare else 0
@@ -888,7 +960,9 @@ def cmd_smoke(s: Session):
 
 def phase_a_configs(a) -> list:
     return [
-        Cfg("a-set-36-40", "set_channel", 36, 40, a.switches),
+        # Headline endurance config: directions alternate, so ×2 yields the
+        # issue's ≥1000 switches in EACH direction.
+        Cfg("a-set-36-40", "set_channel", 36, 40, 2 * a.switches),
         Cfg("a-set-1-6", "set_channel", 1, 6, a.switches_aux),
         Cfg("a-set-ht40-36-44", "set_channel", 36, 44, a.switches_aux,
             ht="HT40+"),
@@ -917,7 +991,7 @@ def run_phase(s: Session, configs, only: str):
             f"×{cfg.switches}) ===")
         try:
             if cfg.prim == "set_channel":
-                run_set_channel(s, cfg, iface)
+                _, iface = run_set_channel(s, cfg, iface)
             elif cfg.prim == "csa":
                 run_csa(s, cfg, iface)
                 set_managed_idle(iface)
@@ -975,7 +1049,9 @@ def main() -> int:
     ap.add_argument("--primitive", default="all",
                     help="filter configs by primitive/name substring")
     ap.add_argument("--dut-pid", default="2357:012d")
-    ap.add_argument("--oracle-a-pid", default="0bda:8812")
+    ap.add_argument("--oracle-a-pid", default="2357:0120",
+                help="8821AU: on this rig the 8812AU position "
+                     "decodes <10%% of near-field injector frames")
     ap.add_argument("--oracle-b-pid", default="0bda:c812")
     ap.add_argument("--helper-pid", default="2357:0120",
                     help="helper AP adapter for the MCC attempt (8821AU)")
@@ -1033,6 +1109,12 @@ def main() -> int:
             run_mcc_attempt(s, iface, args.helper_pid)
     elif args.cmd == "phase-c":
         cmd_phase_c(s, args)
+    # Hand the artifacts to the invoking user so the (non-root) analyzer can
+    # write summaries next to them.
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        subprocess.run(["chown", "-R", f"{sudo_user}:", str(s.out_root)],
+                       capture_output=True)
     return 0
 
 

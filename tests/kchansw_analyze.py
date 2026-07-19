@@ -66,6 +66,8 @@ _MARKER_RE = re.compile(
 def parse_trace(path):
     """Yield dicts {ts_ns, pid, name, detail} plus markers {..., marker:{}}."""
     events = []
+    if not os.path.exists(path):  # uninstrumented config (smoke A/B bare leg)
+        return events
     with open(path, "r", errors="replace") as f:
         for line in f:
             m = _TRACE_RE.match(line)
@@ -226,7 +228,7 @@ CSV_COLS = [
     "qstop_ns", "qwake_ns", "ready_ns", "expired_ns", "notify_ns",
     "last_src_air_ns", "first_dst_air_ns", "first_back_air_ns", "dead_ns",
     "src_last_ctr", "dst_first_ctr", "gap_frames", "dup", "inj_errs",
-    "ok", "fail_reason",
+    "ok", "fail_reason", "post_recovery",
 ]
 
 
@@ -253,9 +255,13 @@ def _last(events, name, before=None):
     return out
 
 
-def extract_switches(meta, trace, frames_by_ch, fits_by_ch, inject):
+def extract_switches(meta, trace, frames_by_ch, fits_by_ch, inject,
+                     wedge_is=()):
     """Per-switch records for one config. frames_by_ch maps channel →
-    (frames sorted by fitted host time, fit)."""
+    (frames sorted by fitted host time, fit). wedge_is: switch indices at
+    which a wedge/recovery happened — rows from the first onwards are
+    flagged post_recovery."""
+    first_wedge = min(wedge_is) if wedge_is else None
     rdev_entry_name = meta.get("rdev_entry", "rdev_set_monitor_channel")
     probe_map = meta.get("probe_map", {})
     drv_p = probe_map.get("drv")
@@ -283,6 +289,8 @@ def extract_switches(meta, trace, frames_by_ch, fits_by_ch, inject):
             "direction": f"{mkm['from']}>{mkm['to']}",
             "t_req_ns": mkm["mono_ns"],
             "ok": 1, "fail_reason": "",
+            "post_recovery": 1 if (first_wedge is not None
+                                   and mkm["i"] >= first_wedge) else 0,
         })
 
         entry = _first(win, rdev_entry_name)
@@ -440,6 +448,9 @@ def summarize(rows):
         out[cfg] = {
             "switches": len(rws),
             "ok": len(ok),
+            "wedges": sum(1 for r in rws if r.get("post_recovery"))
+                      and len({r["i"] for r in rws if r.get("post_recovery")})
+                      or 0,
             "failures": {
                 r["fail_reason"]: sum(1 for x in rws
                                       if x["fail_reason"] == r["fail_reason"])
@@ -510,6 +521,8 @@ def analyze_run(run_dir):
             meta = json.load(f)
         trace = parse_trace(os.path.join(d, "trace.txt"))
         inject = load_jsonl(os.path.join(d, "inject.jsonl"))
+        wedge_is = [r["i"] for r in load_jsonl(os.path.join(d, "control.jsonl"))
+                    if r.get("ev") == "kchansw.wedge"]
         frames_by_ch = {}
         for role in ("a", "b"):
             ch = str(meta.get(f"oracle_{role}_ch", ""))
@@ -525,7 +538,8 @@ def analyze_run(run_dir):
             if fit.get("ok"):
                 frames.sort(key=lambda fr: fitted_ns(fit, fr))
                 frames_by_ch[ch] = (frames, fit)
-        rows = extract_switches(meta, trace, frames_by_ch, fits, inject)
+        rows = extract_switches(meta, trace, frames_by_ch, fits, inject,
+                                wedge_is)
         # fit_bad configs keep trace columns but lose oracle-derived ones.
         all_rows.extend(rows)
     return all_rows, fits

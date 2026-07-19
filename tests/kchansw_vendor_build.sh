@@ -1,24 +1,28 @@
 #!/usr/bin/env bash
-# kchansw_vendor_build.sh — build reference/rtl88x2bu with the firmware-offload
-# paths compiled IN (CONFIG_TDLS=y → TDLS ch-sw offload H2C 0x1C;
-# CONFIG_MCC_MODE=y → the MCC/FCS H2C family 0x10/0x11/0x18/0x19), then
-# insmod it on the host for the kchansw phase-b measurements and restore the
-# in-tree rtw88 binding afterwards.
+# kchansw_vendor_build.sh — build reference/rtl88x2bu with a firmware-offload
+# path compiled IN, insmod it on the host for the kchansw phase-b
+# measurements, and restore the in-tree rtw88 binding afterwards.
+#
+# The two offload paths are MUTUALLY EXCLUSIVE builds — include/drv_conf.h
+# hard-errors on TDLS+MCC together, and MCC additionally requires
+# CONCURRENT_MODE on and BT_COEXIST off:
+#
+#   VARIANT=tdls (default)  CONFIG_TDLS=y → TDLS ch-sw offload H2C 0x1C
+#                           (autoconf.h auto-enables CONFIG_TDLS_CH_SW,
+#                           runtime-gated on rtw_wifi_spec=1)
+#   VARIANT=mcc             CONFIG_MCC_MODE=y CONFIG_BT_COEXIST=n
+#                           + -DCONFIG_CONCURRENT_MODE → MCC/FCS H2C family
+#                           0x10/0x11/0x18/0x19 + two-vif support
 #
 # The module is never installed — insmod from the submodule build dir only.
-# TDLS channel-switch is runtime-gated on rtw_wifi_spec=1 (core/rtw_tdls.c),
-# so the load passes that module param.
 #
 # Usage (root):
-#   tests/kchansw_vendor_build.sh build      # compile only (unattended-safe)
+#   [VARIANT=tdls|mcc] tests/kchansw_vendor_build.sh build   # unattended-safe
 #   tests/kchansw_vendor_build.sh load       # unbind rtw88, insmod, show iface
 #   tests/kchansw_vendor_build.sh restore    # rmmod, rebind rtw88
 #   tests/kchansw_vendor_build.sh status
 #
 # Env:
-#   MCC_CONCURRENT=1   add -DCONFIG_CONCURRENT_MODE (two-vif MCC attempt;
-#                      a bigger departure from the tested config — build it
-#                      only when the plain build is green)
 #   DUT_VIDPID=2357:012d   the adapter the vendor module should own
 
 set -euo pipefail
@@ -58,26 +62,32 @@ iface_for_devdir() {
 do_build() {
   [ -f "$DRVDIR/Makefile" ] || {
     echo "FAIL: $DRVDIR missing — git submodule update --init"; exit 1; }
-  local extra=()
-  if [ "${MCC_CONCURRENT:-0}" = "1" ]; then
-    extra+=("USER_EXTRA_CFLAGS=-DCONFIG_CONCURRENT_MODE")
-    echo "== building with CONFIG_TDLS=y CONFIG_MCC_MODE=y +CONCURRENT_MODE =="
-  else
-    echo "== building with CONFIG_TDLS=y CONFIG_MCC_MODE=y =="
-  fi
+  local variant="${VARIANT:-tdls}" flags=() want_sym
+  case "$variant" in
+    tdls)
+      flags=(CONFIG_TDLS=y)
+      want_sym=rtw_hal_ch_sw_oper_offload ;;
+    mcc)
+      flags=(CONFIG_MCC_MODE=y CONFIG_BT_COEXIST=n
+             "USER_EXTRA_CFLAGS=-DCONFIG_CONCURRENT_MODE")
+      want_sym=rtw_hal_mcc_change_scan_flag ;;
+    *) echo "FAIL: VARIANT must be tdls or mcc"; exit 2 ;;
+  esac
+  echo "== building VARIANT=$variant: ${flags[*]} =="
   make -C "$DRVDIR" clean >/dev/null 2>&1 || true
-  if ! make -C "$DRVDIR" CONFIG_TDLS=y CONFIG_MCC_MODE=y "${extra[@]}" \
-       -j"$(nproc)" 2>"$DRVDIR/build.err"; then
-    echo "FAIL: vendor build broke — last errors:"
-    tail -30 "$DRVDIR/build.err" | sed 's/^/    /'
+  if ! make -C "$DRVDIR" "${flags[@]}" -j"$(nproc)" 2>"$DRVDIR/build.err"; then
+    echo "FAIL: vendor build broke — errors:"
+    grep -E 'error:' "$DRVDIR/build.err" | sort -u | head -15 | sed 's/^/    /'
+    tail -8 "$DRVDIR/build.err" | sed 's/^/    /'
     exit 1
   fi
-  echo "PASS: built $KO ($(du -h "$KO" | cut -f1)) for $(uname -r)"
-  # Prove the offload symbols actually made it in.
-  local syms
-  syms="$(nm "$KO" 2>/dev/null | grep -cE \
-    'rtw_hal_ch_sw_oper_offload|rtw_hal_mcc_change_scan_flag' || true)"
-  echo "  offload symbols present: $syms/2 (ch_sw_oper_offload + hal_mcc)"
+  echo "PASS: built $KO ($(du -h "$KO" | cut -f1)) for $(uname -r), VARIANT=$variant"
+  # Prove the offload symbol actually made it in.
+  if nm "$KO" 2>/dev/null | grep -q "$want_sym"; then
+    echo "  offload symbol present: $want_sym"
+  else
+    echo "  WARNING: $want_sym not in $KO symbol table"
+  fi
 }
 
 do_load() {

@@ -115,6 +115,17 @@ def _write(path: str, val: str) -> None:
         f.write(val)
 
 
+def _append(path: str, line: str) -> None:
+    """Append one line to a tracefs control file. Python's text-mode "a"
+    lseeks to EOF at open, which tracefs rejects with EINVAL — use a raw
+    O_APPEND fd like the shell's >> does."""
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+    try:
+        os.write(fd, line.encode())
+    finally:
+        os.close(fd)
+
+
 def kallsyms_present(symbols: list) -> dict:
     """Which of `symbols` exist in /proc/kallsyms (exact-match, text syms)."""
     want = set(symbols)
@@ -155,8 +166,7 @@ def force_clean() -> None:
             stale.append(name)
     for name in stale:
         try:
-            with open(kev, "a") as f:
-                f.write(f"-:{name}\n")
+            _append(kev, f"-:{name}\n")
         except OSError as e:
             sys.stderr.write(f"kchansw_trace: force_clean -:{name}: {e}\n")
 
@@ -235,12 +245,22 @@ class TraceSession:
                 _write(path, "0")
             except OSError:
                 pass
-        for name in self._registered_probes:
+        if self._registered_probes:
+            # Disarm the group before removal — removing a still-enabled
+            # kretprobe returns EBUSY.
             try:
-                with open(_p("kprobe_events"), "a") as f:
-                    f.write(f"-:{name}\n")
-            except OSError as e:
-                sys.stderr.write(f"kchansw_trace: remove {name}: {e}\n")
+                _write(_p("events", "kchansw", "enable"), "0")
+            except OSError:
+                pass
+        for name in self._registered_probes:
+            for attempt in (0.0, 0.2, 0.5):
+                time.sleep(attempt)
+                try:
+                    _append(_p("kprobe_events"), f"-:{name}\n")
+                    break
+                except OSError as e:
+                    if attempt == 0.5:
+                        sys.stderr.write(f"kchansw_trace: remove {name}: {e}\n")
         for key, path in (("clock", "trace_clock"),
                           ("buffer_size_kb", "buffer_size_kb"),
                           ("tracing_on", "tracing_on")):
@@ -272,12 +292,10 @@ class TraceSession:
                 self.inventory["kprobes"][name] = f"symbol-absent: {sym}"
                 continue
             try:
-                with open(_p("kprobe_events"), "a") as f:
-                    f.write(f"p:kchansw/{name} {sym}\n")
+                _append(_p("kprobe_events"), f"p:kchansw/{name} {sym}\n")
                 self._registered_probes.append(f"kchansw/{name}")
                 if want_ret:
-                    with open(_p("kprobe_events"), "a") as f:
-                        f.write(f"r:kchansw/{name}_ret {sym}\n")
+                    _append(_p("kprobe_events"), f"r:kchansw/{name}_ret {sym}\n")
                     self._registered_probes.append(f"kchansw/{name}_ret")
                 self.inventory["kprobes"][name] = "ok"
             except OSError as e:

@@ -476,6 +476,51 @@ per-bin energy + frame stats; `tests/sounding_sweep.sh` + `tests/sounding_map.py
 recover a coarse per-bin H(f) — down to 5 MHz bins on Jaguar3
 (`docs/rx-spectrum-sensing.md`).
 
+## Adaptive channel migration
+
+Slow, evidence-driven whole-link channel moves — the deliberate complement to
+per-slot FHSS. Pure caller-side logic under `src/chanmig/` (namespace
+`devourer::chanmig`, header-mostly, each ctest-covered; the library reads no
+env, the demos map it). Five composable layers:
+
+- **Scout** (`chanscout`): a second adapter passively surveys a candidate plan
+  (`DEVOURER_SCOUT_PLAN`) while the primary RX stays on the video channel,
+  emitting versioned `survey.dwell` records with a counter-hygiene discard
+  barrier (the FA/CCA counters are delta-on-read). Measures only; retunes
+  nothing but itself. Grid-legality validation, **no regulatory DB** — the
+  caller owns compliance.
+- **Scoring** (`ChannelScore`, `DEVOURER_SCOUT_ADVISE`): a pure two-leg
+  recommendation engine — the primary receiver's *delivery* is authoritative on
+  the active channel (scout energy there is confounded by wanted video), the
+  scout's occupancy on candidates — emitting explainable
+  `channel.recommend`/`hold` with an evidence generation + policy hash.
+- **Protocol** (`examples/chanmig --role ground|drone`): an authenticated
+  ground-proposes/drone-commits migration with a SipHash-MAC'd wire codec
+  (`MigWire.h`), pure `MigProposer`/`MigResponder` state machines, and random
+  per-boot epochs (no persisted in-flight state). Two rules make every
+  failure-matrix row converge without split-brain: the drone arms activation
+  only after the ground echoes its nonce, and the ground follows the drone's
+  authoritative STATUS rather than declaring success unilaterally. Control
+  frames are their own canonical-SA 802.11 frames — video PSDUs are never
+  touched.
+- **Automation** (`MigGate`, `DEVOURER_MIG_MODE=off|advisory|manual|automatic`,
+  default advisory): a pure, deterministic gate that proposes only under a
+  conservative conjunction, hedged with cooldown / residency / per-channel
+  backoff / move-cap / probation and an operator kill switch.
+- **Drone-side validation** (`#280`): variant A (legality/caps checks — the
+  product default) is free; the variant-B pre-commit probe (`DEVOURER_MIG_PROBE`)
+  is opt-in research (real outage cost), variant C is the gate's probation.
+
+The whole thing is validated headless (`chanmig_wire_kat`,
+`chanmig_proto_matrix` — a 14-row failure matrix + drop-every-message sweep,
+`chan_score_policy`, `chanmig_gate_policy`, `chanmig_clock_math`) and on-air
+(`tests/chanmig_endurance.sh` ≥1,000 cycles, `tests/chanscout_stress.sh`
+≥10,000 retunes, `tests/chanmig_soak.sh` ≥1 h scout-impact A/B). Docs:
+`docs/adaptive-channel-migration.md`, `docs/channel-migration-protocol.md`,
+`docs/channel-migration-validation.md`. Near-field bench note: two adapters
+~30 cm apart saturate the RX front end at full power (`link.health` SATURATED),
+so migration tests reduce TX power (`DEVOURER_TX_PWR=12`).
+
 ## Hardware time, beacons, AP mode
 
 `ReadTsf()` reads the 64-bit MAC TSF and every received frame carries the

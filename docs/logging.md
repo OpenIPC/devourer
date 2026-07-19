@@ -94,7 +94,7 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | `rx.path` | RX (`DEVOURER_RX_ALLPATHS`) | seq, rssi[4], snr[4], evm[4] |
 | `rx.path_mask` | L (toggle spec) | t, mask "0xNN" |
 | `rx.scrambler` | RX (`DEVOURER_DUMP_SCRAMBLER`) | seed "0xNN", rate, hits, len |
-| `rx.energy` | RX (`DEVOURER_RX_ENERGY_MS` / sweep) | t, [ch], cca_ofdm\|null, cca_cck\|null, fa_ofdm\|null, fa_cck\|null, igi\|null, abs_noise_floor_dbm\|null, [retune_us], frames, frames_ldpc, frames_stbc, rssi_mean, rssi_max, snr_mean, snr_min, evm_mean |
+| `rx.energy` | RX (`DEVOURER_RX_ENERGY_MS` / sweep) | t, [ch], cca_ofdm\|null, cca_cck\|null, fa_ofdm\|null, fa_cck\|null, igi\|null, abs_noise_floor_dbm\|null, [retune_us], frames, frames_ldpc, frames_stbc, crc_err, icv_err, rssi_mean, rssi_max, snr_mean, snr_min, evm_mean — crc/icv nonzero only under `DEVOURER_RX_KEEP_CORRUPTED` (the parser drops failed frames otherwise) |
 | `rx.nhm` | RX | [ch], peak, busy, dur, hist[12] |
 | `rx.quality` | RX (`DEVOURER_RXQUALITY`) | verdict, frames, rssi_mean_dbm, rssi_max_dbm, snr_mean_db, snr_min_db, evm_db\|null, noise_floor_dbm\|null, abs_noise_floor_dbm\|null, igi |
 | `adapter.rxpaths` | RX (`DEVOURER_RXQUALITY`) | active_mask "0xNN", n_active, n_chains, frames, rssi_dbm[] — GetActiveRxPaths live per-chain activity (the caps rx_chains companion) |
@@ -127,6 +127,32 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 |---|---|---|
 | `hop.dwell` | TX, duplex | dwell, round, channel, frame, switch_us, t_ms, [mode] |
 | `hop.done` | TX, duplex | frames, dwells |
+
+### Channel migration (chanscout — docs/adaptive-channel-migration.md)
+| ev | emitter | fields |
+|---|---|---|
+| `scout.id` | chanscout | t, role, usb_id "vvvv:pppp", bus, port, usb_speed, chip, gen, scout_id "0x…" (calibration-domain key), [note] |
+| `scout.plan` | chanscout | t, v, plan "0x…" (immutable plan hash), epoch_unix_ms (one realtime sample for offline stream alignment), dwell_ms, settle_ms, backup_ms, bg_ms, fullwidth_ms, max_age_ms, n_candidates, spec |
+| `scout.cand` | chanscout | i, chan (canonical "band:primary/width[u\|l]"), center_mhz, backup, no_ir, dfs, bins[] |
+| `survey.dwell` | chanscout (`src/chanmig/SurveyJsonl.h` owns the schema) | v, seq, chan, round, plan "0x…", start_ms, end_ms, retune_us, settle_ms, observe_ms, cca_ofdm\|null, cca_cck, fa_ofdm, fa_cck, igi\|null, nhm_busy\|null, nhm_peak, nhm_dur, nhm[12], frames, rssi_mean, rssi_max, snr_mean, snr_min, evm_mean\|null, dvr_frames, dvr_air_us, oth_air_us (canonical-SA vs foreign decoded-airtime split), flags (validity bitmask), scout_id "0x…", agen |
+| `scout.health` | chanscout | t, state (ok\|degraded\|wedged\|fatal), reason (retune_fail\|energy_read_fail\|rx_stalled\|usb_congested\|thermal\|stale_survey\|plan_error), detail — emitted on state transitions only |
+| `channel.recommend` | chanscout (`DEVOURER_SCOUT_ADVISE`) | t, v, gen "0x…", plan "0x…", policy "0x…", from, to, reason (RecommendBetterCandidate), active_verdict, active_domain, impaired_windows, score, conf, occ, rounds, obs_ms, text — advisory only, retunes nothing |
+| `channel.hold` | chanscout (`DEVOURER_SCOUT_ADVISE`) | same envelope as recommend (no to/score), reason (HoldActiveHealthy\|HoldImpairmentNotPersistent\|HoldImpairmentNotChannel\|HoldBroadDegradation\|HoldCooldown\|HoldPrimaryTelemetryStale\|HoldNoQualifiedCandidate\|HoldImprovementMargin\|HoldScoutUnhealthy), text = the counterfactual |
+| `channel.ranking` | chanscout (`DEVOURER_SCOUT_ADVISE`) | t, gen "0x…", n, c0..cN ("chan q=<0\|1> score occ rej") — the full per-candidate ranking, so a dashboard renders the counterfactual from the log alone |
+| `channel.reject` | chanscout (`DEVOURER_SCOUT_ADVISE`) | t, gen "0x…", chan, reason (Rej*), occ, age_ms, rounds |
+| `migrate.id` | chanmig | t, role (ground\|drone), chip, source, link "0x…", epoch "0x…" |
+| `migrate.state` | chanmig | t, role, code (MigState value) — one per state transition |
+| `migrate.retune` | chanmig | t, role, chan — a retune executed at activation / follow / recovery |
+| `migrate.op` | chanmig (ground) | t, cmd — an operator command echoed for audit (stdin is local) |
+| `migrate.status` | chanmig (ground) | t, state, chan, clock_ready, resid_p99_us — on the `status` operator command |
+| `migrate.done` | chanmig | t, role, code (0=confirmed on new, 1=held/rolled-back to old, 2=rescue) |
+| `migrate.gate_notify` | chanmig | t, role, result (0=confirmed, 1=rolledback) — for the #279 automation gate |
+| `migrate.drop` | chanmig (`DEVOURER_MIG_DROP`/`_DROP_RX`) | dir (tx\|rx), type — a deterministic fault-injection drop |
+| `migrate.gate` | chanmig (ground, `DEVOURER_MIG_MODE`) | t, mode, verdict (0=hold,1=propose,2=abort,3=rollback), reason (GATE reason string) — the #279 automation gate decision |
+| `migrate.shadow` | chanmig (`DEVOURER_MIG_SHADOW`) | t, to, gen — a gate Propose recorded but NOT actuated (shadow-actuation ladder rung) |
+| `migrate.probe` | chanmig (drone, `DEVOURER_MIG_PROBE`) | t, busy, valid — a variant-B pre-commit probe's measured destination occupancy |
+| `migrate.validation` | chanmig (ground) | t, chan, method (0=checks,1=probe,2=probation,3=scout), result (0=accept,1=veto,2=unknown), reason, nhm_busy, valid — the drone's TargetValidation, reporting-only |
+| `migrate.disagree` | chanmig (ground) | t, chan, ground_view, drone_view — the drone vetoed a target the ground's scout called clean (asymmetric-interference diagnostic) |
 
 ### Beamforming / CSI
 | ev | emitter | fields |

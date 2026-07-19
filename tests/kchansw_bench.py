@@ -153,6 +153,13 @@ def iface_channel(iface: str):
     return int(m.group(1)) if m else None
 
 
+def iface_alive(iface: str) -> bool:
+    """The netdev still answers nl80211 (a managed-idle iface legitimately
+    reports no channel — don't confuse that with a wedge)."""
+    r = run(["iw", "dev", iface, "info"], timeout=4)
+    return r.returncode == 0 and "Interface" in r.stdout
+
+
 def unmanage(iface: str) -> None:
     """Keep NetworkManager (if any) off the bench interface."""
     if shutil.which("nmcli"):
@@ -320,6 +327,15 @@ class Session:
         self.out_root = Path(args.out)
         self.out_root.mkdir(parents=True, exist_ok=True)
         self.dut = find_dut(args.dut_pid)
+        self.dut_vidpid = args.dut_pid
+        # Controller BDF for the deepest recovery rung (bus_recover).
+        try:
+            bus = self.dut.sysfs_id.split("-")[0]
+            self.dut_ctrl_bdf = re.search(
+                r"(\d{4}:[0-9a-f]{2}:[0-9a-f]{2}\.\d)",
+                os.path.realpath(f"/sys/bus/usb/devices/usb{bus}")).group(1)
+        except (OSError, AttributeError):
+            self.dut_ctrl_bdf = ""
         self.oracle_a_dut = find_dut(args.oracle_a_pid)
         self.oracle_b_dut = find_dut(args.oracle_b_pid)
         self.dmesg_since = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -390,21 +406,90 @@ def oracle_rate_gate(oracle: Child, min_frames=50, timeout=20.0) -> bool:
     return oracle.frame_lines - start >= min_frames
 
 
+def _port_disable_path(sysfs_id: str) -> str:
+    """sysfs per-port power node for a device id: '10-2' (root port) →
+    usb10/10-0:1.0/usb10-port2/disable; '3-2.3.4.3' (nested hub) →
+    3-2.3.4/3-2.3.4:1.0/3-2.3.4-port3/disable."""
+    bus, _, chain = sysfs_id.partition("-")
+    if "." not in chain:
+        return (f"/sys/bus/usb/devices/usb{bus}/{bus}-0:1.0/"
+                f"usb{bus}-port{chain}/disable")
+    parent, _, port = chain.rpartition(".")
+    pdev = f"{bus}-{parent}"
+    return (f"/sys/bus/usb/devices/{pdev}/{pdev}:1.0/"
+            f"{pdev}-port{port}/disable")
+
+
+def bus_recover(s: "Session") -> bool:
+    """Deepest rung: the device fell off the bus or its xHCI hung.
+    (Observed live: rtw88 churn wedged a T3U so hard its uPD720201 host
+    controller failed re-probe with -110, and only a PCI bus reset +
+    D3hot→D0 bounce + rescan, then a long per-port power-off, brought the
+    chip back — on the USB2 companion bus.) Try: 12 s per-port power-off at
+    the last-known port; if the controller's buses are gone, PCI-revive the
+    controller first."""
+    bdf = s.dut_ctrl_bdf
+    bus = s.dut.sysfs_id.split("-")[0]
+    if bdf and not os.path.isdir(f"/sys/bus/usb/devices/usb{bus}"):
+        log(f"bus_recover: usb{bus} gone — PCI reviving {bdf}")
+        for cmd in ([f"echo 1 > /sys/bus/pci/devices/{bdf}/reset"],
+                    [f"setpci -s {bdf} CAP_PM+4.b=03"],
+                    [f"setpci -s {bdf} CAP_PM+4.b=00"],
+                    [f"echo 1 > /sys/bus/pci/devices/{bdf}/remove"],
+                    ["echo 1 > /sys/bus/pci/rescan"]):
+            subprocess.run(["sh", "-c", cmd[0]], capture_output=True)
+            time.sleep(2)
+        time.sleep(6)
+    p = _port_disable_path(s.dut.sysfs_id)
+    if os.path.exists(p):
+        try:
+            with open(p, "w") as f:
+                f.write("1")
+            time.sleep(12)
+            with open(p, "w") as f:
+                f.write("0")
+            time.sleep(8)
+        except OSError as e:
+            log(f"bus_recover: port cycle {p}: {e}")
+    # The device may return on a different bus (SS↔HS companion switch) —
+    # rediscover by VID:PID before any sysfs writes.
+    end = time.monotonic() + 25
+    while time.monotonic() < end:
+        try:
+            s.dut = find_dut(s.dut_vidpid)
+            return True
+        except SystemExit:
+            time.sleep(2)
+    return False
+
+
 def recover_dut(s: "Session", ch: int, ht: str = "", start: str = "rebind"):
-    """Recovery ladder after a DUT wedge/USB drop (the smoke run lost the
-    netdev to a full USB disconnect after ~25 switch cycles): re-probe →
-    module reload → authorized/VBUS power-cycle. Returns (iface, rung) or
-    (None, 'exhausted'). The chip usually re-enumerates by itself; the
-    rungs differ in how much driver state they rebuild."""
+    """Recovery ladder after a DUT wedge/USB drop (all four rungs proven
+    necessary live on this rig): re-probe → module reload →
+    authorized/VBUS power-cycle → bus/controller revive. Returns
+    (iface, rung) or (None, 'exhausted'). Every rung rediscovers the
+    device by VID:PID first — wedge recoveries can move it across buses."""
     mod = s.driver["module"]
-    ladder = ("rebind", "module-reload", "power-cycle")
+    ladder = ("rebind", "module-reload", "power-cycle", "bus-recover")
     for action in ladder[ladder.index(start):]:
         try:
+            try:
+                s.dut = find_dut(s.dut_vidpid)
+            except SystemExit:
+                if action != "bus-recover":
+                    log(f"recover_dut: {action}: device off the bus — "
+                        f"escalating")
+                    continue
             if action == "module-reload" and s.driver_key != "vendor":
                 run(["modprobe", "-r", mod], timeout=30)
                 run(["modprobe", mod], timeout=60)
             elif action == "power-cycle":
                 regress.usb_port_power_cycle(s.dut, settle_s=3.0)
+                if s.driver_key != "vendor":
+                    run(["modprobe", mod], timeout=60)
+            elif action == "bus-recover":
+                if not bus_recover(s):
+                    continue
                 if s.driver_key != "vendor":
                     run(["modprobe", mod], timeout=60)
             regress.attach_to_host_kernel(s.dut)
@@ -989,6 +1074,15 @@ def run_phase(s: Session, configs, only: str):
             continue
         log(f"=== {cfg.name} ({cfg.prim} {cfg.from_ch}↔{cfg.to_ch} "
             f"×{cfg.switches}) ===")
+        # A config can end with the DUT wedged (heavy-TX runs do, every
+        # 100-200 switches) — verify and recover before the next bring-up.
+        if not iface_alive(iface):
+            log("inter-config: DUT unresponsive — recovering")
+            iface2, rung = recover_dut(s, cfg.from_ch, start="module-reload")
+            if iface2 is None:
+                log("inter-config recovery exhausted — stopping phase")
+                break
+            iface = iface2
         try:
             if cfg.prim == "set_channel":
                 _, iface = run_set_channel(s, cfg, iface)

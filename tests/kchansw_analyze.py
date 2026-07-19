@@ -445,6 +445,10 @@ def summarize(rows):
         total = [r["first_dst_air_ns"] - r["t_req_ns"] for r in ok
                  if r["first_dst_air_ns"] != ""]
         d = _dist(dead)
+        # ROC-specific: request→grant, granted dwell, expiry→back-on-base RF.
+        roc_grant = span("rdev_entry_ns", "ready_ns")
+        roc_dwell = span("ready_ns", "expired_ns")
+        roc_return = span("expired_ns", "first_back_air_ns")
         out[cfg] = {
             "switches": len(rws),
             "ok": len(ok),
@@ -463,6 +467,9 @@ def summarize(rows):
             "queue_stopped": _dist(span("qstop_ns", "qwake_ns")),
             "dead_air": d,
             "total_req_to_air": _dist(total),
+            "roc_grant": _dist(roc_grant),
+            "roc_dwell": _dist(roc_dwell),
+            "roc_return": _dist(roc_return),
             "gap_frames_total": sum(r["gap_frames"] for r in ok
                                     if r["gap_frames"] != ""),
             "dup_total": sum(r["dup"] for r in ok if r["dup"] != ""),

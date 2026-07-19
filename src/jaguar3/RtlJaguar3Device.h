@@ -28,7 +28,7 @@
  * power-on, firmware download, MAC/BB/RF config, IQK and DACK drive RX,
  * channel/bandwidth (incl. 5/10 MHz narrowband) and on-air TX. send_packet is
  * on-air; sustained continuous TX is kept alive by the coex runtime thread
- * (coex_runtime_loop) — see CLAUDE.md. */
+ * (coex_runtime_loop) — see src/jaguar3/CLAUDE.md. */
 class RtlJaguar3Device : public IRtlDevice {
 public:
   RtlJaguar3Device(RtlAdapter device, Logger_t logger,

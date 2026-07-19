@@ -1920,18 +1920,26 @@ void HalKestrel::bb_reset_all() {
   bb_rmw(0x3200, 0x7u << 28, 0x0);
   bb_rmw(0x704, 1u << 1, 1);
   if (_variant == ChipVariant::C8852C) {
-    /* cfg_phy_rpt (phy_rpt.c) for the 8852C, matching the working vendor
-     * driver's R_AX_PPDU_STAT (0xCE40) = 0x0B00020F: RPT_EN(0) | APP_MAC_INFO(1)
-     * | APP_RX_CNT(2) | APP_PLCP_HDR(3) | DMA_MODE(9, the is_chip_id(8852C)
-     * bit) | the PPDU filter HAS_A1M/CRC_OK/DMA_OK (24/25/27). Devourer's
-     * byte-OR only sets RPT_EN; without the filter bits no PPDU gets a status
-     * report, so the 8852C emits zero physts (rate/RSSI read 0). Also forward
-     * PPDU-status to the host, not the WLCPU (R_AX_HW_RPT_FWD 0x9C18[1:0]=1). */
+    /* cfg_phy_rpt (phy_rpt.c) for the 8852C R_AX_PPDU_STAT (0xCE40) =
+     * 0x0B000201: RPT_EN(0) | DMA_MODE(9, the is_chip_id(8852C) bit) | the PPDU
+     * report filter HAS_A1M/CRC_OK/DMA_OK (24/25/27). Devourer's byte-OR only
+     * sets RPT_EN; without the filter bits no PPDU gets a status report, so the
+     * 8852C emits zero physts.
+     *   NB the vendor's value ALSO sets APP_MAC_INFO(1)/APP_RX_CNT(2)/
+     * APP_PLCP_HDR(3), which PREPEND those blocks to the report and push the
+     * physts_hdr_info out of place (devourer parses the physts, not the appended
+     * MAC info) — with them set, the report reads as an invalid/empty physts
+     * (is_valid=0). Clearing them makes the report the bare physts, bit-identical
+     * to the 8852B (is_valid + rssi_avg_td + IE_01), which the RPKT_TYPE_PPDU
+     * handler + the halbb measurement bring-up (kestrel_halbb_rx_bringup 8852C
+     * branch) turn into a working per-frame RSSI/SNR passive floor.
+     * Also forward PPDU-status to the host, not the WLCPU (R_AX_HW_RPT_FWD
+     * 0x9C18[1:0]=1). */
     const uint32_t pre = _device.rtw_read32(0xce40);
-    _device.rtw_write32(0xce40, 0x0B00020Fu);
+    _device.rtw_write32(0xce40, 0x0B000201u);
     _device.rtw_write32(0x9C18,
                         (_device.rtw_read32(0x9C18) & ~0x3u) | 0x1u);
-    _logger->info("Kestrel PPDU_STAT(8852C): 0xCE40 0x{:08x} -> 0x0B00020F", pre);
+    _logger->info("Kestrel PPDU_STAT(8852C): 0xCE40 0x{:08x} -> 0x0B000201", pre);
   } else {
     v = _device.rtw_read8(0xce40); /* start phy-sts update */
     _device.rtw_write8(0xce40, static_cast<uint8_t>(v | 0x1));

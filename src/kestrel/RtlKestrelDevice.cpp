@@ -372,16 +372,19 @@ RxEnergy RtlKestrelDevice::GetRxEnergy() {
    * env-monitor. Frame-free, BB-driven, no clock-stop -> no wedge.
    * ~mntr_time (100 ms) of control-thread wait; opt-in. Guard to a plausible
    * idle-floor band so a not-ready/garbage report never emits a fake dBm.
-   * C8852B only: the NHM triggers on the C8852C but its nhm_pwr reads ~23 dB
-   * high (on-air ch36 the NHM reads -70 dBm while the passive floor and the
-   * 8852B NHM both read -93). The offset is in the NHM's raw HW gain reference,
-   * not the SW path (halbb_env_mntr treats the 8852C identically to the 8852B)
-   * and not the front-end gain (the physts RSSI is correct — the passive floor
-   * cross-matches the 8852B NHM within ~1 dB). The vendor has no 8852C NHM
-   * offset; it is a deeper RF-cal reference. The C8852C's absolute floor is met
-   * by the passive rssi-snr floor (GetRxQuality), so the frame-free NHM stays
-   * 8852B-only rather than emit the wrong -70. */
-  if (_cfg.rx.abs_noise_floor && _variant == kestrel::ChipVariant::C8852B) {
+   *
+   * The C8852C NHM is band-limited to 2.4 GHz. On-air it reads correctly there
+   * (cross-matches its passive floor within ~2 dB, stable), but on 5 GHz the
+   * AGC drifts ~1.5 s after a channel tune and LOCKS the NHM ~24 dB high (a
+   * bimodal gain-state lock, not a fixed offset the halbb SW path handles — it
+   * treats the 8852C identically to the 8852B, and the physts RSSI is correct;
+   * only a full set_channel re-tune resets it, and RX traffic re-drives it). So
+   * the 8852C emits the NHM on 2.4 GHz and falls back to the passive rssi-snr
+   * floor (GetRxQuality) on 5 GHz. The C8852B NHM is correct on both bands. */
+  const bool nhm_supported =
+      _variant == kestrel::ChipVariant::C8852B ||
+      (_variant == kestrel::ChipVariant::C8852C && _channel.Channel <= 14);
+  if (_cfg.rx.abs_noise_floor && nhm_supported) {
     int8_t nf = 0;
     if (_hal.nhm_noise_floor(nf) && nf <= -60 && nf >= -105) {
       e.abs_noise_floor_dbm = nf;

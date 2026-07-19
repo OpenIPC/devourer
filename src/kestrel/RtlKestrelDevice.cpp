@@ -298,11 +298,11 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
              * (byte0 [4:0] == 1) before trusting the offset: avg_snr is IE byte 8
              * [5:0] in dB. Store as raw = dB*2 (the RxQualityAccumulator
              * convention snr_db = raw/2). 0 when IE_01 absent (e.g. CCK).
-             * On-air-validated on the C8852B (passive floor cross-matches the NHM
-             * floor within ~1 dB). The C8852C physts layout differs (16-byte
-             * drv_info); IE_01 is not at this offset there, so snr stays 0 and the
-             * passive floor is null on the C — a follow-up (RSSI/LinkHealth still
-             * populate). */
+             * On-air-validated on BOTH dies (passive floor cross-matches the
+             * NHM floor within ~1 dB): the C8852C physts is bit-identical to the
+             * C8852B once its measurement engine is brought up (the 8852C branch
+             * in kestrel_halbb_rx_bringup + the R_AX_PPDU_STAT no-APP-prepend
+             * config in bb_reset_all) — same header, same IE_01 offset. */
             _last_snr = 0;
             if (f.payload_len >= 8 + 9 && (f.payload[8] & 0x1f) == 1)
               _last_snr = static_cast<uint8_t>((f.payload[16] & 0x3f) * 2);
@@ -372,10 +372,15 @@ RxEnergy RtlKestrelDevice::GetRxEnergy() {
    * env-monitor. Frame-free, BB-driven, no clock-stop -> no wedge.
    * ~mntr_time (100 ms) of control-thread wait; opt-in. Guard to a plausible
    * idle-floor band so a not-ready/garbage report never emits a fake dBm.
-   * C8852B only: the NHM triggers on the C8852C but its nhm_pwr reads ~25 dB
-   * high (an 8852C-specific scaling/reference not yet resolved — on-air, idle
-   * ch149 reads -68 dBm vs the 8852B's -93), so it stays null on the C rather
-   * than emit a wrong value. 8852C is a follow-up. */
+   * C8852B only: the NHM triggers on the C8852C but its nhm_pwr reads ~23 dB
+   * high (on-air ch36 the NHM reads -70 dBm while the passive floor and the
+   * 8852B NHM both read -93). The offset is in the NHM's raw HW gain reference,
+   * not the SW path (halbb_env_mntr treats the 8852C identically to the 8852B)
+   * and not the front-end gain (the physts RSSI is correct — the passive floor
+   * cross-matches the 8852B NHM within ~1 dB). The vendor has no 8852C NHM
+   * offset; it is a deeper RF-cal reference. The C8852C's absolute floor is met
+   * by the passive rssi-snr floor (GetRxQuality), so the frame-free NHM stays
+   * 8852B-only rather than emit the wrong -70. */
   if (_cfg.rx.abs_noise_floor && _variant == kestrel::ChipVariant::C8852B) {
     int8_t nf = 0;
     if (_hal.nhm_noise_floor(nf) && nf <= -60 && nf >= -105) {

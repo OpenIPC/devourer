@@ -74,6 +74,21 @@ void kestrel_halbb_rx_bringup(struct kestrel_halbb_ctx *ctx) {
   /* Enable both RX chains (rx_path_en). Vendor core dispatcher; its 8852C
    * case passes hal_com->dbcc_en (0 here) — same as the direct call did. */
   halbb_ctrl_rx_path(bb, RF_PATH_AB, HW_PHY_0);
+
+  /* 8852C physts MEASUREMENT bring-up. Devourer's minimal halbb bring-up runs
+   * only halbb_init_reg (BB table) + this, skipping the vendor's
+   * halbb_dm_init_per_phy measurement inits. On the 8852B the physts engine
+   * fills reports anyway (its table covers it); on the 8852C the reports arrive
+   * EMPTY (is_valid=0) without these — halbb_ic_hw_setting_init_8852c sets the
+   * BB evm/measurement report-enable (0xa10[0]), and the physts CR map + IE
+   * bitmap must be programmed for the engine to snapshot RSSI/SNR/EVM. */
+#ifdef BB_8852C_SUPPORT
+  if (bb->ic_type == BB_RTL8852C) {
+    halbb_ic_hw_setting_init_8852c(bb); /* 0xa10[0] evm/measurement rpt-en */
+    halbb_cr_cfg_physts_init(bb);
+    halbb_physts_parsing_init(bb);
+  }
+#endif
 }
 
 void kestrel_halbb_set_gain(struct kestrel_halbb_ctx *ctx, unsigned char central_ch,

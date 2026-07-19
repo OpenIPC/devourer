@@ -137,7 +137,9 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first — see
   The capstone is 11ax trigger-based UL + TWT (issue #236 — the v1.19 vendor
   fwcmd surface exposes TWT-OFDMA + F2P trigger H2Cs that mainline rtw89
   lacks). The 8852A-family (RTL8832AU) is deliberately excluded (frozen 2021
-  v1.15 vendor drop only).
+  v1.15 vendor drop only). The C8852C's behavioural quirks beyond the `_V1`
+  bank moves (the frame-free NHM absolute floor is 2.4 GHz-only — the firmware
+  DIG biases the 5 GHz idle-noise measurement) live in `docs/8852c-quirks.md`.
 
 Naming traps: **RTL8821AU is Jaguar1** (not Jaguar2, despite the Jaguar2
 RTL8821C's similar name); RTL8822**B**U (Jaguar2) ≠ RTL8822**C**U (Jaguar3);

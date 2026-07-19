@@ -27,8 +27,8 @@ option(DEVOURER_JAGUAR3_8822C "RTL8812CU / 8822CU (Jaguar3, rtl8822c)"          
 option(DEVOURER_JAGUAR3_8822E "RTL8812EU / 8822EU (Jaguar3, rtl8822e)"          ON)
 # Kestrel — the Wi-Fi 6 / 802.11ax generation (Realtek "G6 phl" architecture,
 # vendor trees reference/rtl8852bu + reference/rtl8852cu): monitor RX, TX
-# injection and channel/BW on-air validated on both chips (see src/kestrel/
-# and the CLAUDE.md Kestrel section).
+# injection and channel/BW on-air validated on both chips (see
+# src/kestrel/CLAUDE.md).
 option(DEVOURER_KESTREL_8852B "RTL8852BU / 8832BU (Kestrel 11ax, G6)"           ON)
 option(DEVOURER_KESTREL_8852C "RTL8852CU / 8832CU (Kestrel 11ax, G6)"           ON)
 # PCIe transport (vfio-pci). Linux-only. The transport implements the HalMAC-

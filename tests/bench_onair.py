@@ -133,7 +133,7 @@ def main() -> int:
         present = {c: v for c, v in present.items() if c.upper() in want}
     print(f"# chips: {', '.join(present)}  | MCS{args.mcs}/{args.bw}MHz/{args.size}B\n")
 
-    # Pre-flight rail-sag guard (CLAUDE.md defence #1): the bus-powered hub rail
+    # Pre-flight rail-sag guard: the bus-powered hub rail
     # can brown out the 5 GHz PA, collapsing on-air power while 2.4 GHz still
     # works — making every 5 GHz number untrustworthy. Check the known-good
     # control adapter first so a sagging rail is flagged loudly instead of

@@ -7,9 +7,9 @@ The Kestrel **C8852C** die (WiFi-6 / 802.11ax, `35bc:0101` on the reference
 adapters, die-id `0x52`) as devourer drives it today. Each entry states what the
 chip does, what devourer does about it, the residual cost if any, and the
 reproducer that proves it. The 8852C shares one HAL with the C8852B; most of its
-divergences are the `_V1` register-bank moves called out in the top-level
-`CLAUDE.md`. This file is for the behavioural quirks that aren't a simple bank
-remap.
+divergences are the `_V1` register-bank moves called out in
+`src/kestrel/CLAUDE.md`. This file is for the behavioural quirks that aren't a
+simple bank remap.
 
 ## The frame-free NHM absolute noise floor is 2.4 GHz-only (firmware DIG)
 

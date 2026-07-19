@@ -101,7 +101,7 @@ struct DeviceConfig {
      * OFF by default: the vendor idle-noise measurement adds ~10 ms of USB
      * round-trips. Jaguar2 measures it live (wedge-free HW idle-noise report);
      * Jaguar1 8812A/8821A measure it RX-idle (a CAL bracket); Jaguar3 and others
-     * leave it invalid (no vendor path). Issue #202. */
+     * leave it invalid (no vendor path). */
     bool abs_noise_floor = false;
     /* env: DEVOURER_IGI — Jaguar2 fixed initial-gain index override, 7 bits
      * (unset = 0x40, the FA-rate-validated default). */
@@ -209,7 +209,7 @@ struct DeviceConfig {
     /* env: DEVOURER_DIS_CCA — Jaguar2/3 MAC carrier-sense disable at bring-up
      * (primary CCA 0x520[14] + EDCCA [15]): injected/beacon TX stops deferring to
      * a busy channel and punches through co-channel traffic. Runtime equivalent:
-     * SetCcaMode. Default-on on the streamtx FPV downlink (issue #199). */
+     * SetCcaMode. Default-on on the streamtx FPV downlink. */
     bool disable_cca = false;
     /* env: DEVOURER_TXPKT_STEP_QDB — Jaguar3 per-packet power-bank step size
      * in quarter-dB: the dB weight of one 0x1e70 offset-index step

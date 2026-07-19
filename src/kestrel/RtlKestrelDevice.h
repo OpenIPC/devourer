@@ -11,6 +11,7 @@
 #include "DeviceConfig.h"
 #include "IRtlDevice.h"
 #include "RtlAdapter.h"
+#include "RxQuality.h" /* RxQualityAccumulator + build_rx_quality */
 #include "SelectedChannel.h"
 
 #include "ChipVariant.h"
@@ -67,6 +68,11 @@ public:
     stop_wp_drain();
   }
   void SetMonitorChannel(SelectedChannel channel) override;
+  /* Disable / restore the MAC carrier-sense gate (R_AX_CCA_CFG_0 all-CCA-EN:
+   * primary + sec20/40/80 + EDCCA). Injection is already CCA-off by default here
+   * (EnableTxScheduler clears these gates), so this is a runtime toggle, not the
+   * co-channel-deferral fix it is on Jaguar. */
+  void SetCcaMode(bool disabled) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override { return _channel; }
@@ -106,6 +112,14 @@ public:
   /* Chip thermal-meter snapshot (halrf_get_thermal_8852b, RF path-A 0x42) with
    * the efuse baseline. Control-thread only (does an RF read). */
   devourer::ThermalStatus GetThermalStatus() override;
+
+  /* Frame-free RX energy snapshot. On Kestrel this carries only the active
+   * absolute noise floor (halbb NHM env-monitor) when DEVOURER_RX_NOISE_FLOOR is
+   * set — there is no phydm FA/CCA/IGI DIG monitor on this generation. */
+  RxEnergy GetRxEnergy() override;
+  /* Windowed RX link-quality: the passive rssi-snr floor + LinkHealth verdict
+   * (fed per frame via _rxq) fused with the active NHM floor from GetRxEnergy. */
+  devourer::RxQuality GetRxQuality() override;
 
   /* Arm the AX HW beacon engine (mac_send_bcn_h2c + AP port timing). Requires a
    * prior InitWrite. `beacon` is a full 802.11 beacon; the MAC airs it every
@@ -207,6 +221,12 @@ private:
   /* Per-chain RSSI (RSSI% = dBm+110) cached from the last PPDU-status physts
    * header, attached to the following WIFI frame(s) in the aggregate. */
   uint8_t _last_rssi[2] = {0, 0};
+  /* Per-frame SNR (raw U(8,1) = dB*2), cached from the physts header alongside
+   * RSSI for the passive noise floor (rssi_dbm - snr_db). 0 = unknown. */
+  uint8_t _last_snr = 0;
+  /* Windowed RX link-quality accumulator (passive noise floor + LinkHealth),
+   * fed per decoded frame from the RX loop; drained by GetRxQuality. */
+  devourer::RxQualityAccumulator _rxq;
 };
 
 #endif /* RTL_KESTREL_DEVICE_H */

@@ -389,14 +389,16 @@ public:
    * co-channel transmitter. Measured on-air (Jaguar3, 8822EU/8812CU): monitor
    * injection otherwise defers ~40-60% to a co-channel 802.11 flooder; clearing
    * the gate recovers ~1.5-2.2x, back to ~90% of the unimpeded rate
-   * (tests/dis_cca_tx_onair.sh, issue #199). The energy bit [15] alone is null
+   * (tests/dis_cca_tx_onair.sh). The energy bit [15] alone is null
    * against a decodable preamble — the primary-CCA bit [14] is what recovers the
    * inject path. This is the MAC-gate only; the vendor's BB CCA-off writes are
    * NOT applied (they deafen the RX). Also DEVOURER_DIS_CCA at construction.
-   * Implemented on Jaguar2/3; a DELIBERATE no-op on Jaguar1, whose baseband EDCCA
-   * is already disabled by its init table (0x8A4 = 0x7F7F7F7F) and whose
-   * hardware-beacon downlink measures ~0.34 µs RMS on a crowded channel with no
-   * MAC-side gate. */
+   * Implemented on Jaguar2/3 and Kestrel (the AX R_AX_CCA_CFG_0 all-CCA-EN field —
+   * on Kestrel injection is already CCA-off by default via sch_tx_en, so this is a
+   * runtime toggle rather than the deferral fix it is on Jaguar); a DELIBERATE
+   * no-op on Jaguar1, whose baseband EDCCA is already disabled by its init table
+   * (0x8A4 = 0x7F7F7F7F) and whose hardware-beacon downlink measures ~0.34 µs RMS
+   * on a crowded channel with no MAC-side gate. */
   virtual void SetCcaMode(bool disabled) { (void)disabled; }
 
   /* Shift the next hardware beacon TBTT by `microseconds` (>0 = later/retard,

@@ -870,7 +870,7 @@ RxEnergy RtlJaguar2Device::GetRxEnergy() {
       },
       e);
 
-  /* DEVOURER_RX_NOISE_FLOOR — active/frame-free absolute floor (#202). The
+  /* DEVOURER_RX_NOISE_FLOOR — active/frame-free absolute floor. The
    * vendor phydm_idle_noise_measure_ac: the BB maintains an idle-time power
    * report at 0x0FF0 (path-A [7:0], path-B [15:8], sval = byte>>1); freeze it
    * (0x9E4[30]=1) for a clean read, then noise = -110 + IGI(0xC50/0xE50) + mean.
@@ -879,7 +879,7 @@ RxEnergy RtlJaguar2Device::GetRxEnergy() {
    *
    * BEST-EFFORT on the tested 8812BU (1x1 8822B cut): the report is only rarely
    * populated in devourer's monitor bring-up — most reads return the 0x80/0x00
-   * "no idle sample" sentinels. Investigated (issue #202): there is no vendor
+   * "no idle sample" sentinels. Investigated: there is no vendor
    * enable step for it (the report is HW-automatic and the vendor runs the
    * measurement from a full associated init, not monitor mode); the sentinel
    * rate is channel-independent, oversampling barely helps, and pausing DIG
@@ -1709,7 +1709,7 @@ void RtlJaguar2Device::SetCcaMode(bool disabled) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   /* Both MAC carrier-sense bits in REG_TX_PTCL_CTRL: primary CCA 0x520[14] +
    * EDCCA [15], plus EDCCA_MSK_COUNTDOWN 0x524[11]. The primary-CCA bit is the
-   * one that stops TX deferring to a co-channel transmitter (issue #199); 0x520
+   * one that stops TX deferring to a co-channel transmitter; 0x520
    * is the same HalMAC layout as the on-air-validated Jaguar3. */
   uint32_t v520 = _device.rtw_read<uint32_t>(0x0520);
   uint32_t v524 = _device.rtw_read<uint32_t>(0x0524);

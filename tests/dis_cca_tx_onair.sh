@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # TX-SIDE test for the dis_cca / carrier-sense-disable knob (SetCcaMode,
-# DEVOURER_DIS_CCA) — the experiment issue #199 asks for. The sibling
+# DEVOURER_DIS_CCA) — the TX-side experiment. The sibling
 # tests/dis_cca_onair.sh measured a NULL, but it ran the DUT as an RX (decoding a
 # beacon through B210 AWGN) and never exercised the TX side. Carrier sense gates TX
 # *deferral*, not RX decode, so the real test drives the DUT as a TX injector and

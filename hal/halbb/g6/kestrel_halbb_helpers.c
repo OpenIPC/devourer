@@ -220,3 +220,12 @@ void halbb_tssi_ctrl_set_bandedge_cfg(struct bb_info *bb,
                                       enum tssi_bandedge_cfg bandedge_cfg) {
   (void)bb; (void)phy_idx; (void)bandedge_cfg;
 }
+
+/* BE (11BE / WiFi7) primary-sub-band helper referenced by halbb_env_mntr.c's
+ * EDCCA-opt path only in its 11BE branch - dead code on the AX Kestrel ICs
+ * (halbb_api_be.c is not vendored). A link-only stub, never called at runtime. */
+u8 halbb_get_prim_sb(struct bb_info *bb, u8 central_ch, u8 pri_ch,
+                     enum channel_width bw) {
+  (void)bb; (void)central_ch; (void)pri_ch; (void)bw;
+  return 0;
+}

@@ -1,7 +1,7 @@
 /* Verbatim ports of the two phydm_math_lib helpers the active idle-noise-floor
  * measurement needs (reference/rtl8812au/hal/phydm/phydm_math_lib.c). Kept in a
  * standalone header so the per-generation noise-floor code and a selftest share
- * one copy. See docs/rx-spectrum-sensing.md and issue #202.
+ * one copy. See docs/rx-spectrum-sensing.md.
  *
  * These drive the Jaguar1 (8812A/8821A) active-sampling path: the 0x0FA0 debug
  * port packs rx I/Q as 10-bit signed (sign_conversion), and the per-sample power

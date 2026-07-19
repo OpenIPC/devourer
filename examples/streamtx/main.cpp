@@ -210,7 +210,7 @@ int main(int argc, char **argv) {
   auto stream_cfg = devourer_config_from_env();
   /* FPV downlink default: disable the MAC carrier-sense gate so the video TX
    * punches through co-channel traffic instead of deferring — on-air ~1.5-2.2x
-   * inject-rate recovery under a co-channel transmitter (issue #199, SetCcaMode /
+   * inject-rate recovery under a co-channel transmitter (SetCcaMode /
    * DEVOURER_DIS_CCA). The link owns the channel, so CSMA back-off only stutters
    * it. Explicit DEVOURER_DIS_CCA=0 still forces standard carrier-sense back on. */
   if (std::getenv("DEVOURER_DIS_CCA") == nullptr)

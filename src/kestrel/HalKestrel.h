@@ -508,6 +508,10 @@ public:
    * connects the BB IFFT output to the TX chain on the 8852C (glue no-op on
    * the 8852B, which selects the TX antenna per-STA via the CMAC model). */
   void vnd_bb_ctrl_tx_path();
+  /* Active/frame-free NHM absolute noise floor: one-shot halbb env-monitor.
+   * Returns true + fills `dbm` on a valid reading, false otherwise (report not
+   * ready / no halbb ctx). */
+  bool nhm_noise_floor(int8_t &dbm, uint16_t mntr_time_ms = 100);
   ::kestrel_halbb_ctx *_halbb_ctx = nullptr;
   void *_halbb_bridge = nullptr; /* heap kestrel_halbb_bridge, outlives ctx */
   static unsigned int halbb_r32(void *dev, unsigned int addr);

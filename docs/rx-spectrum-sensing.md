@@ -63,6 +63,15 @@ Two noise floors are exposed on `GetRxQuality()`:
   - **Jaguar3 (8822C/8822E)** — no vendor idle-noise path (the report dispatch
     excludes the 8822C), so `abs_noise_floor_dbm` is always null; the passive
     floor is J3's only floor.
+  - **Kestrel (8852B/8852C, Wi-Fi 6)** — the cleanest source: Realtek's halbb
+    **NHM env-monitor** (`halbb_env_mntr_trigger`/`result` → `nhm_pwr − 110`), a
+    proper frame-free BB measurement with no clock-stop → no wedge. On-air the
+    **8852B reads a correct idle floor (−93 dBm, cross-matches the passive floor
+    within ~1 dB)**; the 8852C triggers but its `nhm_pwr` reads ~25 dB high (an
+    8852C scaling difference, unresolved) so it stays null there. Kestrel also
+    gets the passive floor + LinkHealth (per-frame RSSI from the physts header +
+    SNR from IE_01) on the 8852B; the 8852C physts layout differs (SNR unparsed →
+    passive floor null there). Both 8852C gaps are follow-ups.
 
   Validation: `tests/rx_noise_floor_active_onair.sh` (anti-wedge + sanity /
   cross-chip agreement — a B210 injected-noise sweep isn't used because the bench

@@ -4,7 +4,7 @@
 #include "EepromManager.h"
 #include "Hal8812PhyReg.h"
 #include "NhmReader.h"
-#include "NoiseFloorMath.h" /* active idle-noise-floor sign/pwdb helpers (#202) */
+#include "NoiseFloorMath.h" /* active idle-noise-floor sign/pwdb helpers */
 #include "RadioManagementModule.h"
 #include "AckResponder.h" /* hardware ACK responder recipe */
 #include "RadiotapPeek.h" /* send_packets batch pre-parse */
@@ -301,7 +301,7 @@ RxEnergy RtlJaguarDevice::GetRxEnergy() {
       },
       e);
 
-  /* Active absolute floor (#202): the debug-port measurement wedges live RX, so
+  /* Active absolute floor: the debug-port measurement wedges live RX, so
    * it is NOT re-run here — GetRxEnergy just surfaces the RX-idle CAL taken at
    * bring-up (measure_idle_noise_floor). Left invalid on the 8814A / when off. */
   if (_cfg.rx.abs_noise_floor) {
@@ -313,7 +313,7 @@ RxEnergy RtlJaguarDevice::GetRxEnergy() {
 
 /* Vendor odm_inband_noise_monitor_ac (8812/8821 active-sampling path). MUST run
  * RX-idle: the clock-stop (0x8B4[6]) + BB/PMAC/CCK resets collide with a live
- * bulk-IN RX DMA (#202). Reads the path-A RX I/Q off debug port 0x0FA0, forms
+ * bulk-IN RX DMA. Reads the path-A RX I/Q off debug port 0x0FA0, forms
  * pwdb = 10*log10(I^2+Q^2), averages VALID_CNT idle samples in [-27,0) dB, and
  * offsets to dBm: noise = avg + 12(ADC backoff) + 0x1C(IGI ref) - 110 - 3. */
 void RtlJaguarDevice::measure_idle_noise_floor() {
@@ -1280,7 +1280,7 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
 
   /* DEVOURER_RX_NOISE_FLOOR — measure the absolute idle floor RX-idle here,
    * before StartRxLoop starts the bulk-IN DMA (the active-sampling path wedges a
-   * live RX). 8812A/8821A only; the 8814A uses a different vendor path (#202). */
+   * live RX). 8812A/8821A only; the 8814A uses a different vendor path. */
   if (_cfg.rx.abs_noise_floor &&
       _eepromManager->version_id.ICType != CHIP_8814A)
     measure_idle_noise_floor();

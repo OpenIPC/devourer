@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # On-air validation for the ACTIVE (frame-free) absolute noise floor
-# (DEVOURER_RX_NOISE_FLOOR, RxQuality.abs_noise_floor_dbm) — issue #202.
+# (DEVOURER_RX_NOISE_FLOOR, RxQuality.abs_noise_floor_dbm).
 #
-# The #202 blocker was that the vendor active measurement WEDGES live RX (the
+# The blocker was that the vendor active measurement WEDGES live RX (the
 # 8812AU live-poll delivered 0 frames on 2 of 6 runs). devourer measures it
 # RX-idle instead:
 #   - Jaguar1 (8812A/8821A): the debug-port active-sampling path (clock-stop +
@@ -15,11 +15,11 @@
 #     reads and null on others; poll until valid. When valid it cross-matches the
 #     Jaguar1 floor on the same channel.
 #   - Jaguar3 (8822C/8822E): no vendor idle-noise path -> always null (the
-#     passive rssi-snr floor #201 is its only floor).
+#     passive rssi-snr floor is its only floor).
 #
 # Two checks (a monotonic-vs-injected-noise sweep is NOT included: the bench B210
 # is too weakly coupled to the RTL front ends to move the floor above the
-# measurement variance — the same near-field limit noted in #199/#201):
+# measurement variance — the same near-field limit the passive-floor bench hit):
 #   (A) ANTI-WEDGE (the acceptance gate) — with the knob ON, a live RX keeps
 #       delivering frames across N runs (0 wedges), vs the issue's 2/6.
 #   (B) SANITY + CROSS-CHIP — the reported floor sits in a plausible band and the
@@ -79,7 +79,7 @@ for r in $(seq 1 "$RUNS"); do
   printf "  run %d (knob ON): %s frames\n" "$r" "$f"
   [ "${f:-0}" -le 0 ] && zeros=$((zeros + 1)); sleep 1
 done
-echo "  => $zeros/$RUNS wedged (0-frame) runs  [issue #202 live-poll: 2/6]"
+echo "  => $zeros/$RUNS wedged (0-frame) runs  [live-poll baseline: 2/6]"
 [ "$zeros" -eq 0 ] && echo "  PASS: wedge-free" || echo "  FAIL: CAL wedged RX"
 
 echo

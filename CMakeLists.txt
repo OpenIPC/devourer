@@ -146,6 +146,23 @@ add_library(devourer
     src/LinkHealth.cpp
     src/LinkHealth.h
     src/RxQuality.h
+    src/chanmig/ChannelScore.cpp
+    src/chanmig/ChannelScore.h
+    src/chanmig/MigGate.cpp
+    src/chanmig/MigGate.h
+    src/chanmig/ChannelDef.h
+    src/chanmig/ActiveLink.h
+    src/chanmig/EvidenceStore.h
+    src/chanmig/ScanPlan.h
+    src/chanmig/SurveyRecord.h
+    src/chanmig/SurveyJsonl.h
+    src/chanmig/JsonlLite.h
+    src/chanmig/MigTypes.h
+    src/chanmig/MigWire.h
+    src/chanmig/MigConfig.h
+    src/chanmig/MigClock.h
+    src/chanmig/MigProposer.h
+    src/chanmig/MigResponder.h
     src/IRtlDevice.h
     src/SignalStop.cpp
     src/SignalStop.h
@@ -465,6 +482,7 @@ target_link_libraries(reglat PUBLIC devourer PRIVATE PkgConfig::libusb)
 add_executable(rxdemo
     examples/rx/main.cpp
     examples/common/env_config.cpp
+    examples/common/usb_select.cpp
 )
 target_link_libraries(rxdemo PUBLIC devourer)
 target_include_directories(rxdemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
@@ -572,6 +590,30 @@ target_include_directories(sense PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/co
 # enumerate and init green but read stochastic EFUSE garbage / never boot the
 # MCU (the #205 failure mode). Pure CLI; exit code carries the verdict. See
 # docs/adapter-doctor.md.
+# chanmig — the coordinated channel-migration endpoint (ground proposes /
+# drone commits). Duplex RX+TX on one adapter, the pure Mig* state machines
+# driving an authenticated control protocol over own 802.11 frames.
+add_executable(chanmig
+    examples/chanmig/main.cpp
+    examples/common/env_config.cpp
+    examples/common/usb_select.cpp
+)
+target_link_libraries(chanmig PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(chanmig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+
+# chanscout — the passive second-adapter ground spectrum scout (adaptive
+# channel migration): plan-driven candidate dwells with counter-hygiene
+# discard barriers, emitting versioned survey.dwell / scout.health JSONL
+# while a separate primary receiver owns the video channel. Pure logic in
+# src/chanmig/ (selftested); this binary is the device I/O shell.
+add_executable(chanscout
+    examples/chanscout/main.cpp
+    examples/common/env_config.cpp
+    examples/common/usb_select.cpp
+)
+target_link_libraries(chanscout PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(chanscout PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+
 add_executable(doctor
     examples/doctor/main.cpp
 )
@@ -854,6 +896,68 @@ add_executable(BfReportDecodeSelftest
 target_link_libraries(BfReportDecodeSelftest PRIVATE devourer)
 
 add_test(NAME bf_report_decode COMMAND BfReportDecodeSelftest)
+
+# Headless guards for the adaptive-channel-migration data model (src/chanmig/):
+# ChannelDef grid legality + the scan-plan grammar; the pure dwell scheduler
+# (coverage, revisit priority, starvation, round advancement); and the
+# evidence-store fold path (counter wrap, staleness, width coverage, mixed
+# calibration domains) + the survey.dwell JSONL round-trip + the JsonlLite
+# event-line scanner. A regression here surfaces as a silently-wrong channel
+# ranking on-air, so it fails `ctest` instead.
+add_executable(ChanDefSelftest tests/chan_def_selftest.cpp)
+target_link_libraries(ChanDefSelftest PRIVATE devourer)
+add_test(NAME chan_def_grid COMMAND ChanDefSelftest)
+
+add_executable(ScanPlanSelftest tests/scan_plan_selftest.cpp)
+target_link_libraries(ScanPlanSelftest PRIVATE devourer)
+add_test(NAME scan_plan_policy COMMAND ScanPlanSelftest)
+
+add_executable(SurveyAggSelftest tests/survey_agg_selftest.cpp)
+target_link_libraries(SurveyAggSelftest PRIVATE devourer)
+add_test(NAME survey_aggregate COMMAND SurveyAggSelftest)
+
+# The #277 gate: the RecommendEngine's two-leg policy over the issue's ten
+# offline scenarios (recommend / hold-healthy / weak!=congestion / saturation
+# / broad-degradation / overlap ordering / burst no-flap / stale / cooldown /
+# scout-down) plus age/cooldown/tie-break/generation/policy-hash edges.
+add_executable(ChanScoreSelftest tests/chan_score_selftest.cpp)
+target_link_libraries(ChanScoreSelftest PRIVATE devourer)
+add_test(NAME chan_score_policy COMMAND ChanScoreSelftest)
+
+# The #278 wire gate: known-answer bytes + MAC for every migration message,
+# the tamper/truncation sweeps, header rejects, the 96-byte bound, and the
+# ReplayWindow epoch/generation/nonce rules — so the authenticated control
+# protocol's encoding and key derivation can never silently drift.
+add_executable(ChanMigWireSelftest tests/chanmig_wire_selftest.cpp)
+target_link_libraries(ChanMigWireSelftest PRIVATE devourer)
+add_test(NAME chanmig_wire_kat COMMAND ChanMigWireSelftest)
+
+# The #278 convergence gate: the proposer + responder pure state machines
+# coupled through a drop/duplicate/reorder/delay LinkSim, driving the failure
+# matrix — every row must converge both endpoints to a shared channel in
+# {source,target,rescue}, never a lasting split-brain.
+add_executable(ChanMigProtoSelftest tests/chanmig_proto_selftest.cpp)
+target_link_libraries(ChanMigProtoSelftest PRIVATE devourer)
+add_test(NAME chanmig_proto_matrix COMMAND ChanMigProtoSelftest)
+
+# PeerClock: skew recovery + residual-percentile-derived activation guard.
+add_executable(ChanMigClockSelftest tests/chanmig_clock_selftest.cpp)
+target_link_libraries(ChanMigClockSelftest PRIVATE devourer)
+add_test(NAME chanmig_clock_math COMMAND ChanMigClockSelftest)
+
+# The #279 gate: the conservative autonomous-migration policy over the issue's
+# 13-scenario matrix (interferer appears/persists/leaves, burst, herding, rank
+# alternation, all-degrade, out-of-range, saturation, scout-stall, recover-
+# pre-commit, dest-occupied, cap-exhaustion) + mode/operator overrides + the
+# determinism guarantee (every scenario decided twice, identically).
+add_executable(ChanMigGateSelftest tests/chanmig_gate_selftest.cpp)
+target_link_libraries(ChanMigGateSelftest PRIVATE devourer)
+add_test(NAME chanmig_gate_policy COMMAND ChanMigGateSelftest)
+
+# ChanMigReplay: replay a recorded gate-input trace through the SHIPPING
+# MigGate policy (no re-implementation), for the #279 shadow / metrics runs.
+add_executable(ChanMigReplay tests/chanmig_replay_main.cpp)
+target_link_libraries(ChanMigReplay PRIVATE devourer)
 
 # Headless guard for the per-tone interference localizer's detection +
 # frequency-mapping math (tests/rx_tone_localize.py). Pure Python, no hardware:

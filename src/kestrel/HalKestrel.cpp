@@ -1691,6 +1691,16 @@ void HalKestrel::vnd_bb_ctrl_bw_ch(uint8_t pri_ch, uint8_t center,
   kestrel_halbb_ctrl_bw_ch(_halbb_ctx, pri_ch, center, hbw, band_type);
 }
 
+bool HalKestrel::nhm_noise_floor(int8_t &dbm, uint16_t mntr_time_ms) {
+  if (!_halbb_ctx)
+    return false;
+  signed char v = 0;
+  if (!kestrel_halbb_env_mntr_nhm(_halbb_ctx, mntr_time_ms, &v))
+    return false;
+  dbm = static_cast<int8_t>(v);
+  return true;
+}
+
 HalKestrel::~HalKestrel() {
   if (_halrf_ctx)
     kestrel_halrf_destroy(_halrf_ctx);

@@ -46,7 +46,7 @@ struct RxEnergy {
    * (~10 ms of USB round-trips), so it is only filled when the caller opted in
    * (DEVOURER_RX_NOISE_FLOOR). Jaguar2 fills it live (HW idle-noise report,
    * wedge-free); Jaguar1 8812A/8821A fill it from an RX-idle CAL measurement;
-   * Jaguar3 and others leave it invalid (no vendor path). Issue #202. */
+   * Jaguar3 and others leave it invalid (no vendor path). */
   bool valid_noise_floor = false;
   int8_t abs_noise_floor_dbm = 0;
 };

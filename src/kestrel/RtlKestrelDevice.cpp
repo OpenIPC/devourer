@@ -214,6 +214,10 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
    * pure-monitor RX path keeps CCA on and can actually hear frames. */
   _hal.set_cca_on(_cfg.debug.kestrel_cca_on);
   EnableTxScheduler();
+  /* DEVOURER_DIS_CCA: EnableTxScheduler already cleared the CCA gates for TX;
+   * this just re-asserts it explicitly (idempotent) when the knob is set. */
+  if (_cfg.tuning.disable_cca)
+    SetCcaMode(true);
   _tx_mgmt_ep = _device.nth_bulk_out_ep(0); /* B0MG -> BULKOUTID0 */
   _tx_data_ep = _device.nth_bulk_out_ep(3); /* ACH0 -> BULKOUTID3 */
   if (_tx_mgmt_ep == 0) {
@@ -288,6 +292,20 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
              * for the following WIFI frame(s). */
             _last_rssi[0] = static_cast<uint8_t>(f.payload[4] >> 1);
             _last_rssi[1] = static_cast<uint8_t>(f.payload[5] >> 1);
+            /* Per-frame SNR for the passive floor: the 8-byte header is followed
+             * by the IEs; IE_01 (OFDM/HE info, physts_ie_1_info) is
+             * the first for a decodable OFDM/HE PPDU. Self-validate on its ie_hdr
+             * (byte0 [4:0] == 1) before trusting the offset: avg_snr is IE byte 8
+             * [5:0] in dB. Store as raw = dB*2 (the RxQualityAccumulator
+             * convention snr_db = raw/2). 0 when IE_01 absent (e.g. CCK).
+             * On-air-validated on the C8852B (passive floor cross-matches the NHM
+             * floor within ~1 dB). The C8852C physts layout differs (16-byte
+             * drv_info); IE_01 is not at this offset there, so snr stays 0 and the
+             * passive floor is null on the C — a follow-up (RSSI/LinkHealth still
+             * populate). */
+            _last_snr = 0;
+            if (f.payload_len >= 8 + 9 && (f.payload[8] & 0x1f) == 1)
+              _last_snr = static_cast<uint8_t>((f.payload[16] & 0x3f) * 2);
           } else if (f.rpkt_type == kestrel::RPKT_TYPE_WIFI && packetProcessor) {
             Packet p{};
             p.RxAtrib.pkt_len = static_cast<uint16_t>(f.payload_len);
@@ -300,6 +318,12 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
             p.RxAtrib.tsfl = f.freerun_cnt;
             p.RxAtrib.rssi[0] = _last_rssi[0];
             p.RxAtrib.rssi[1] = _last_rssi[1];
+            p.RxAtrib.snr[0] = _last_snr;
+            /* Feed the windowed RX-quality aggregate (passive rssi-snr floor +
+             * LinkHealth). rssi_raw = dBm+110 (== _last_rssi), snr_raw = dB*2;
+             * a frame with no IE_01 SNR (snr=0) still counts toward RSSI. */
+            if (_last_rssi[0] > 0)
+              _rxq.add(_last_rssi[0], _last_snr, 0);
             p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.payload),
                                         f.payload_len);
             packetProcessor(p);
@@ -320,6 +344,52 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
 void RtlKestrelDevice::SetMonitorChannel(SelectedChannel channel) {
   _channel = channel;
   _hal.set_channel(channel.Channel, channel.ChannelWidth, channel.ChannelOffset, channel.Band);
+}
+
+void RtlKestrelDevice::SetCcaMode(bool disabled) {
+  /* RMW the MAC carrier-sense gate: R_AX_CCA_CFG_0 B_AX_CCA_ALL_EN = primary CCA
+   * + sec20/40/80 + EDCCA (bits 0-4). Same field EnableTxScheduler clears for TX
+   * injection, so this composes with it (last writer wins). Only 0xC340 — NOT the
+   * 0xC390 per-phase EDCCA machinery (the Jaguar3 lesson: deeper CCA writes deafen
+   * RX; B_AX_CCA_ALL_EN already covers EDCCA via bit 4). No lock: Kestrel is
+   * lock-free on registers (the RX/WP-drain thread only touches the bulk-IN ep).
+   * The TX default is already CCA-off; carrier-sense TX needs the un-ported
+   * IQK/DPK cal to fully engage (see HalKestrel::sch_tx_en). */
+  namespace r = kestrel::reg;
+  uint32_t v = _device.rtw_read32(r::R_AX_CCA_CFG_0);
+  if (disabled)
+    v &= ~r::B_AX_CCA_ALL_EN;
+  else
+    v |= r::B_AX_CCA_ALL_EN;
+  _device.rtw_write32(r::R_AX_CCA_CFG_0, v);
+  _logger->info("Kestrel: MAC carrier-sense {} (CCA_CFG_0=0x{:08x})",
+                disabled ? "DISABLED (dis_cca)" : "enabled", v);
+}
+
+RxEnergy RtlKestrelDevice::GetRxEnergy() {
+  RxEnergy e; /* no phydm FA/CCA/IGI DIG monitor on Kestrel */
+  /* DEVOURER_RX_NOISE_FLOOR — active/frame-free absolute floor via the halbb NHM
+   * env-monitor. Frame-free, BB-driven, no clock-stop -> no wedge.
+   * ~mntr_time (100 ms) of control-thread wait; opt-in. Guard to a plausible
+   * idle-floor band so a not-ready/garbage report never emits a fake dBm.
+   * C8852B only: the NHM triggers on the C8852C but its nhm_pwr reads ~25 dB
+   * high (an 8852C-specific scaling/reference not yet resolved — on-air, idle
+   * ch149 reads -68 dBm vs the 8852B's -93), so it stays null on the C rather
+   * than emit a wrong value. 8852C is a follow-up. */
+  if (_cfg.rx.abs_noise_floor && _variant == kestrel::ChipVariant::C8852B) {
+    int8_t nf = 0;
+    if (_hal.nhm_noise_floor(nf) && nf <= -60 && nf >= -105) {
+      e.abs_noise_floor_dbm = nf;
+      e.valid_noise_floor = true;
+    }
+  }
+  return e;
+}
+
+devourer::RxQuality RtlKestrelDevice::GetRxQuality() {
+  /* Fuse the per-frame aggregate (passive rssi-snr floor + LinkHealth, fed by
+   * the RX loop via _rxq) with the active NHM floor from GetRxEnergy. */
+  return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy());
 }
 
 void RtlKestrelDevice::FastRetune(uint8_t channel, bool /*cache_rf*/) {

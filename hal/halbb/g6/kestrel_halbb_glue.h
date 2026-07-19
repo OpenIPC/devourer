@@ -67,6 +67,16 @@ void kestrel_halbb_ctrl_bw_ch(struct kestrel_halbb_ctx *ctx, unsigned char pri_c
  * model, so this is a no-op there. Single-PHY, RF_PATH_A. */
 void kestrel_halbb_ctrl_tx_path(struct kestrel_halbb_ctx *ctx);
 
+/* One-shot active/frame-free NHM absolute noise floor. Runs a manual IEEE-11k
+ * NHM measurement over `mntr_time_ms` (0 -> 100) and returns the
+ * idle in-band power as signed dBm (nhm_pwr - 110). Frame-free, BB-driven, no
+ * clock-stop -> no RX wedge. Lazily runs halbb_cr_cfg_env_mntr_init +
+ * halbb_env_mntr_init on first call (the RX bring-up path does not). Returns 1
+ * on a valid reading (fills *nhm_pwr_dbm), 0 on timeout/failure. */
+int kestrel_halbb_env_mntr_nhm(struct kestrel_halbb_ctx *ctx,
+                               unsigned short mntr_time_ms,
+                               signed char *nhm_pwr_dbm);
+
 #ifdef __cplusplus
 }
 #endif

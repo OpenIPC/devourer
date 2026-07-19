@@ -289,7 +289,7 @@ public:
   void SetRxPathMask(uint8_t mask);
   int GetRxPathMask();
 
-  /* Active idle-noise-floor CAL (#202, 8812A/8821A only). The vendor
+  /* Active idle-noise-floor CAL (8812A/8821A only). The vendor
    * odm_inband_noise_monitor_ac debug-port path stops CK320/CK88 and resets
    * BB/PMAC/CCK, which wedges a live bulk-IN RX DMA — so it MUST run RX-idle.
    * Called at bring-up (before StartRxLoop); result cached and surfaced via

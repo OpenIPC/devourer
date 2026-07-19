@@ -1208,7 +1208,7 @@ int main() {
             ev.f("igi", e.igi);
           else
             ev.f("igi", nullptr);
-          if (e.valid_noise_floor) /* active absolute floor, #202 (opt-in) */
+          if (e.valid_noise_floor) /* active absolute floor (opt-in) */
             ev.f("abs_noise_floor_dbm", e.abs_noise_floor_dbm);
           else
             ev.f("abs_noise_floor_dbm", nullptr);
@@ -1294,7 +1294,7 @@ int main() {
             ev.f("noise_floor_dbm", nullptr);
           /* Active/frame-free absolute floor (DEVOURER_RX_NOISE_FLOOR): the
            * companion to the passive floor above. Null unless opted-in AND the
-           * generation supports it (Jaguar2 live / Jaguar1 8812A CAL). #202. */
+           * generation supports it (Jaguar2 live / Jaguar1 8812A CAL). */
           if (q.abs_nf_valid)
             ev.f("abs_noise_floor_dbm", q.abs_noise_floor_dbm);
           else

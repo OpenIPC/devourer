@@ -9,6 +9,7 @@ struct kestrel_halbb_ctx {
   struct rtw_hal_com_t hal;
   struct rtw_phl_com_t phl;
   struct bb_cmn_info cmn;
+  int env_mntr_ready; /* lazy halbb_env_mntr init done */
 };
 
 struct kestrel_halbb_ctx *kestrel_halbb_create(struct kestrel_halbb_bridge *br,
@@ -39,6 +40,9 @@ struct kestrel_halbb_ctx *kestrel_halbb_create(struct kestrel_halbb_bridge *br,
     c->hal.chip_id = CHIP_WIFI6_8852C;
   }
   c->bb.rx_path = RF_PATH_AB;
+  c->bb.cr_type = BB_CLIENT;     /* USB client CR bank; without it the env-monitor
+                                  * CR-init switch falls through and the NHM
+                                  * ready-bit address stays 0 (report never rdy) */
   c->bb.bb0_cr_offset = 0;       /* bridge adds the BB window (wIndex=1) */
   /* halbb_init_cr_default guards on this flag; it asserts exactly the wiring
    * done above (hal_com/phl_com/bb_cmn_hooker present). */
@@ -116,6 +120,59 @@ void kestrel_halbb_ctrl_tx_path(struct kestrel_halbb_ctx *ctx) {
 #else
   (void)ctx;
 #endif
+}
+
+/* One-shot active/frame-free NHM absolute noise floor. See the header. */
+int kestrel_halbb_env_mntr_nhm(struct kestrel_halbb_ctx *ctx,
+                               unsigned short mntr_time_ms,
+                               signed char *nhm_pwr_dbm) {
+  struct bb_info *bb;
+  struct ccx_para_info para;
+  struct env_trig_rpt trig;
+  struct env_mntr_rpt rpt;
+  void *drv;
+  u16 mtime;
+  int i;
+
+  if (!ctx || !nhm_pwr_dbm)
+    return 0;
+  bb = &ctx->bb;
+  drv = bb->hal_com->drv_priv;
+  mtime = mntr_time_ms ? mntr_time_ms : 100;
+
+  /* Lazy env-monitor init: the RX bring-up flow (kestrel_halbb_init_reg) only
+   * runs halbb_init_reg, so the NHM CR addresses (incl. nhm_rdy) and the ccx/nhm
+   * state are still zero. Run the two vendor inits once before the first
+   * trigger. */
+  if (!ctx->env_mntr_ready) {
+    halbb_cr_cfg_env_mntr_init(bb);
+    halbb_env_mntr_init(bb);
+    ctx->env_mntr_ready = 1;
+  }
+
+  /* One-shot NHM in the vendor's IEEE-11k idle-noise mode. A zeroed para gives
+   * nhm_incld_cca=NHM_EXCLUDE_CCA + nav/rssi gating DISABLED (all enum 0). */
+  _os_mem_set(0, &para, 0, sizeof(para));
+  para.rac_lv = RAC_LV_4;      /* debug priority: always wins the racing arbiter */
+  para.mntr_time = mtime;      /* ms; drives ccx_period (must be nonzero) */
+  para.nhm_app = NHM_DBG_11K;  /* 802.11k noise-floor thresholds */
+
+  if (!(halbb_env_mntr_trigger(bb, &para, &trig, HW_PHY_0) & NHM_SUCCESS))
+    return 0;
+
+  /* The measurement runs mntr_time in HW; wait the window, then poll the ready
+   * bit (halbb_env_mntr_result returns NHM_SUCCESS once nhm_rdy is set). */
+  _os_delay_ms(drv, mtime);
+  for (i = 0; i < 8; ++i) {
+    _os_mem_set(0, &rpt, 0, sizeof(rpt));
+    if ((halbb_env_mntr_result(bb, &rpt, HW_PHY_0) & NHM_SUCCESS) &&
+        rpt.nhm_pwr != ENV_MNTR_FAIL_BYTE) {
+      *nhm_pwr_dbm = (signed char)((int)rpt.nhm_pwr - 110); /* 110+x dBm */
+      return 1;
+    }
+    _os_delay_ms(drv, 3);
+  }
+  return 0;
 }
 
 void kestrel_halbb_destroy(struct kestrel_halbb_ctx *ctx) {

@@ -610,7 +610,7 @@ add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
 
 # Headless guard for the active idle-noise-floor math (src/NoiseFloorMath.h): the
 # phydm sign/pwdb helpers the Jaguar1 0x0FA0 debug-port measurement uses. Pure
-# math, header-only (issue #202).
+# math, header-only.
 add_executable(NoiseFloorMathSelftest tests/noise_floor_math_selftest.cpp)
 target_include_directories(NoiseFloorMathSelftest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)

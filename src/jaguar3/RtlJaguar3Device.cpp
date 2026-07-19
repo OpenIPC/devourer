@@ -1097,7 +1097,7 @@ RxEnergy RtlJaguar3Device::GetRxEnergy() {
   _device.phy_set_bb_reg(0x1eb4, 1u << 25, 0x0);
   _device.phy_set_bb_reg(0x1d2c, 1u << 31, 0x1);
 
-  /* No active absolute noise floor on Jaguar3 (#202): the vendor 8822C driver
+  /* No active absolute noise floor on Jaguar3: the vendor 8822C driver
    * has no idle-noise path (phydm_noisemonitor.c dispatches the report only to
    * 8822B/8821C and returns 0 for the 8822C), so e.valid_noise_floor stays
    * false. The passive rssi-snr floor (RxQuality.noise_floor_dbm) is J3's only
@@ -1116,8 +1116,8 @@ RxEnergy RtlJaguar3Device::GetRxEnergy() {
  * flooder vs a far-channel USB-contention control; tests/dis_cca_tx_onair.sh).
  * Clearing [14] removes that deferral (~1.5x recovery, back to ~90% of the
  * unimpeded rate) so injected/beacon TX punches through a busy channel — the
- * "keep transmitting through interference" lever the OpenIPC-FPV community wants
- * (issue #199). The energy bit [15] alone is null against a decodable preamble;
+ * "keep transmitting through interference" lever the OpenIPC-FPV community wants.
+ * The energy bit [15] alone is null against a decodable preamble;
  * it is kept because it also relaxes deferral to non-802.11 in-band energy.
  *
  * The vendor dis_cca recipe ALSO writes three BB registers (0x1a9c[20],

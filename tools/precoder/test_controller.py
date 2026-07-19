@@ -217,3 +217,164 @@ def test_primary_dirty_fires_only_when_narrowest_rung_bad_too():
     # too few samples -> no verdict change
     c.report_rung_delivery({20: (0.0, 2)}, now_ms=200)
     assert not c.primary_dirty
+
+
+# --------------------------------------------------------------------------- #
+# Adjacent-MCS probe evidence: the gate/block on the model
+# --------------------------------------------------------------------------- #
+def _stat(lcb, ucb, attempts, delivery=None):
+    from score import ProbeStat
+    return ProbeStat(delivery=lcb if delivery is None else delivery,
+                     successes=int(attempts * (delivery or lcb)),
+                     attempts=attempts, lcb=lcb, ucb=ucb, age_ms=50.0)
+
+
+_SHARED_LINK = lm.LinkModel(trials=400)   # shared p_deliver cache across cases
+
+
+def _fast_ctrl(**kw):
+    return Controller(_SHARED_LINK, em.load_calibration(), ControllerConfig(**kw))
+
+
+def _settle_pl(c, calib, pl, t0, ticks=8, txagc=32, dt=200):
+    """Drive at a constant path loss with honest feedback (reported SNR follows
+    the applied TXAGC), keeping the time base continuous across phases."""
+    op = None
+    for i in range(ticks):
+        op = c.update(pl + calib.gain_db(txagc), txagc, now_ms=t0 + i * dt)
+        if op is not None:
+            txagc = op.txagc
+    return op, t0 + ticks * dt, txagc
+
+
+def test_required_frame_delivery_mirrors_sim_interframe():
+    """The gate's raw-frame requirement is the exact inverse of the plain
+    (no-SBI) FEC math the link rows were built from: at the requirement the
+    binomial block delivery crosses the target."""
+    import math as m
+    import fec_ab_sim
+    c = _fast_ctrl(target=0.99, allow_shed=False)
+    # generation geometry 12x10: heavy FEC needs 6/12 clean frames, light 11/12
+    req_heavy = c._required_frame_delivery(1.00)
+    req_light = c._required_frame_delivery(0.10)
+    assert 0.70 < req_heavy < 0.85
+    assert 0.97 < req_light < 1.0
+    assert req_heavy < c._required_frame_delivery(0.50) < \
+        c._required_frame_delivery(0.25) < req_light
+
+    def tail(p, k):
+        return sum(m.comb(12, i) * p ** i * (1 - p) ** (12 - i)
+                   for i in range(k, 13))
+    assert tail(req_heavy, 6) >= 0.99 > tail(req_heavy - 0.02, 6)
+    assert tail(req_light, 11) >= 0.99 > tail(req_light - 0.005, 11)
+    # cross-check against sim_interframe itself (whole-frame erasures)
+    rng = random.Random(7)
+    ch = {"corrupt_rate": 1.0 - (req_heavy + 0.04), "n_sub": 10,
+          "survivor_hist": {0: 1}}
+    d_hi, _ = fec_ab_sim.sim_interframe(ch, 1.00, 12, 3000, rng, sbi=False)
+    ch["corrupt_rate"] = 1.0 - (req_heavy - 0.06)
+    d_lo, _ = fec_ab_sim.sim_interframe(ch, 1.00, 12, 3000, rng, sbi=False)
+    assert d_hi > 0.98 and d_lo < 0.98
+
+
+def test_mcs_probe_disabled_is_behaviourally_unchanged():
+    """Default config (mcs_probe_enabled=False): identical trajectory to a
+    plain controller — the opt-in gate never changes shipped behaviour."""
+    calib = em.load_calibration()
+    seq = [10 + i * 1.2 for i in range(25)]              # climb through promotions
+    a = _drive_pl(_ctrl(target=0.99, allow_shed=False), seq, calib)
+    b = _drive_pl(_ctrl(target=0.99, allow_shed=False, mcs_probe_enabled=False),
+                  seq, calib)
+    assert (a.mcs, a.overhead, a.txagc) == (b.mcs, b.overhead, b.txagc)
+
+
+def test_mcs_block_vacates_candidate_and_recovers():
+    """A candidate whose probe UPPER bound cannot reach even the heaviest
+    overhead's requirement is blocked from candidacy for the hold, then
+    re-admitted; the lowest rate is never blocked (it is the fallback)."""
+    calib = em.load_calibration()
+    kw = dict(target=0.99, allow_shed=False, improve_frac=0.0,
+              mcs_probe_block_hold_ms=5000)
+    ref, _, _ = _settle_pl(_fast_ctrl(**kw), calib, pl=0.0, t0=0)
+    assert ref.mcs > 0                                    # the unblocked optimum
+    c = _fast_ctrl(**kw)
+    c.report_mcs_delivery({ref.mcs: _stat(0.0, 0.2, 12), 0: _stat(0.0, 0.2, 12)},
+                          now_ms=0)
+    assert 0 not in c._mcs_block                          # floor never blocked
+    early, _, _ = _settle_pl(c, calib, pl=0.0, t0=100, ticks=4)
+    assert early.mcs != ref.mcs                           # vacated while held
+    # after the hold expires the block no longer bars the pick (a cold pick —
+    # displacing an INCUMBENT additionally rides the normal e_bit hysteresis)
+    c3 = _fast_ctrl(**kw)
+    c3.report_mcs_delivery({ref.mcs: _stat(0.0, 0.2, 12)}, now_ms=0)
+    late, _, _ = _settle_pl(c3, calib, pl=0.0, t0=6000)
+    assert late.mcs == ref.mcs
+    # too few samples -> no block
+    c2 = _fast_ctrl(**kw)
+    c2.report_mcs_delivery({ref.mcs: _stat(0.0, 0.2, 4)}, now_ms=0)
+    ok, _, _ = _settle_pl(c2, calib, pl=0.0, t0=100)
+    assert ok.mcs == ref.mcs
+
+
+def test_up_gate_requires_probe_lcb_then_trims_overhead():
+    """With probing on, a faster row is entered only on probe evidence — and
+    since the raw requirement rises steeply as overhead falls, the promote
+    path is two-step: mcs+1 at the admissible (heavier) overhead first, then
+    the ungated same-MCS overhead trim."""
+    calib = em.load_calibration()
+    kw = dict(target=0.99, allow_shed=False, mcs_probe_enabled=True,
+              improve_frac=0.0, mcs_set=(3, 4), overhead_set=(0.10, 0.25, 0.50))
+    c = _fast_ctrl(**kw)
+    # weak: MCS4 unreachable even at max power -> settles on the floor rate
+    op0, t, txagc = _settle_pl(c, calib, pl=-3.5, t0=0)
+    assert op0.mcs == 3
+    # strong link, NO probe evidence: the model alone may not promote
+    opA, t, txagc = _settle_pl(c, calib, pl=25.0, t0=t, ticks=12, txagc=txagc)
+    assert opA.mcs == 3
+    # evidence for MCS4 whose LCB clears ov=0.50 (req~0.88) but not ov=0.25
+    # (req~0.96): only the heavier-FEC row is admissible on the entry tick
+    c.report_mcs_delivery({4: _stat(0.93, 1.0, 40)}, now_ms=t)
+    opB, t, txagc = _settle_pl(c, calib, pl=25.0, t0=t, ticks=1, txagc=txagc)
+    assert opB.mcs == 4 and opB.overhead == 0.50
+    # the same-MCS overhead trim is ungated: it follows on the next ticks
+    opC, t, _ = _settle_pl(c, calib, pl=25.0, t0=t, ticks=4, txagc=txagc)
+    assert opC.mcs == 4 and opC.overhead < 0.50
+
+
+def test_measured_active_collapse_escapes_model_belief():
+    """A row the model wrongly believes in (here: cold-picked on an optimistic
+    bias) is escaped by MEASURED active-row delivery: after the persistence
+    guard the row is blocked, cur_ok fails despite the model, and the
+    fast-down commits a row the model alone would never have left for. A
+    non-persistent condemnation (one burst-flooded report) does not trip."""
+    from controller import apply_model_bias
+    calib = em.load_calibration()
+    c = _fast_ctrl(target=0.99, allow_shed=False, mcs_probe_enabled=True,
+                   improve_frac=0.0)
+    apply_model_bias(c, {5: -10.0})
+    op, t, txagc = _settle_pl(c, calib, pl=0.0, t0=0)
+    assert op.mcs == 5                    # the cold pick lands on the lie
+    bad = {5: _stat(0.0, 0.3, 40)}        # measured: the active row is dead
+    # burst guard: an interrupted condemnation never trips
+    c.report_mcs_delivery(bad, now_ms=t)
+    c.report_mcs_delivery({}, now_ms=t + 100)
+    c.report_mcs_delivery(bad, now_ms=t + 200)
+    op2 = c.update(0.0 + calib.gain_db(txagc), txagc, now_ms=t + 300)
+    assert op2.mcs == 5
+    # persistent condemnation: trips, blocks, escapes
+    for i in range(3):
+        c.report_mcs_delivery(bad, now_ms=t + 400 + i * 100)
+    esc, _, _ = _settle_pl(c, calib, pl=0.0, t0=t + 800, ticks=2, txagc=txagc)
+    assert esc.mcs != 5
+    assert c._mcs_blocked(5)              # the lie cannot be re-picked
+
+
+def test_fast_down_is_ungated():
+    """Escaping a failing point never waits for probe samples: on !cur_ok the
+    model's candidate commits with zero evidence even with probing enabled."""
+    calib = em.load_calibration()
+    c = _fast_ctrl(target=0.99, allow_shed=False, mcs_probe_enabled=True)
+    op0, t, txagc = _settle_pl(c, calib, pl=20.0, t0=0)
+    assert op0.mcs > 0
+    drop, _, _ = _settle_pl(c, calib, pl=-15.0, t0=t, ticks=6, txagc=txagc)
+    assert drop is not None and drop.mcs < op0.mcs        # downgraded immediately

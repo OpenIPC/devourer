@@ -53,3 +53,20 @@ def iter_events(lines, ev=None):
         obj = parse_event(line, ev)
         if obj is not None:
             yield obj
+
+
+def desc_rate_to_mcs(code):
+    """rx.frame's `rate` (the chip's DESC_RATE index) -> ("ht"|"vht", mcs).
+
+    Returns None for legacy/CCK and for multi-SS VHT: the consumers (the
+    adaptive link's rate-verified probe attribution) fly 1SS, and an
+    unclassifiable rate must read as "no rate evidence", never as a match.
+    HT keeps the full 0..31 index range so a multi-SS HT frame maps outside
+    a 1SS mcs_set and is ignored naturally."""
+    if code is None:
+        return None
+    if 12 <= code <= 43:                  # DESC_RATEMCS0..MCS31
+        return ("ht", code - 12)
+    if 44 <= code <= 53:                  # DESC_RATEVHTSS1MCS0..9
+        return ("vht", code - 44)
+    return None

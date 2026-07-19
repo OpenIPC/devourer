@@ -88,6 +88,47 @@ def probe_bw(seq: int, bw_set) -> int | None:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# MCS probe schedule — same protocol-invariant shape as probe_bw: both ends
+# derive each seq's role from the seq alone, so measuring the delivery of the
+# ADJACENT rates needs no wire fields. Slot 4 of each 64-seq cycle flies the
+# next rate ABOVE the selected MCS, slot 20 the next BELOW (adjacent within the
+# config-agreed mcs_set); everything else rides the commanded rate. 2/64 ≈ 3%
+# duty. The slots are disjoint from the bandwidth-probe slots ({0,8,16} mod 32)
+# so every probe observation has exactly one changed variable, and the period
+# divides 4096 so the 12-bit app-seq wrap is phase-safe.
+#
+# PROTOCOL INVARIANT (versioned): period, slots, mcs_set and the selected-MCS
+# derivation (the commanded profile) must be identical on VTX and VRX — like
+# bw_set and PROFILE_TABLE_VERSION. The VRX additionally rate-verifies received
+# probes and epoch-gates gap attribution (score.McsProbeWindow), so a one-sided
+# enablement degrades to inert stats rather than mis-evidence.
+# --------------------------------------------------------------------------- #
+MCS_PROBE_PERIOD = 64
+_MCS_PROBE_SLOTS = (4, 20)      # (up, down)
+MCS_PROBE_SCHED_VER = 1
+
+
+def probe_mcs(seq: int, selected_mcs: int, mcs_set,
+              period: int = MCS_PROBE_PERIOD,
+              slots=_MCS_PROBE_SLOTS) -> int | None:
+    """Candidate MCS this video seq must fly at as a rate probe, else None.
+
+    Returns the adjacent-in-`mcs_set` rate above (slot `slots[0]`) or below
+    (slot `slots[1]`) `selected_mcs`; None off-slot, at the set boundaries, or
+    when `selected_mcs` is not in the set (nothing adjacent is well-defined)."""
+    rates = sorted(mcs_set)
+    if selected_mcs not in rates:
+        return None
+    i = rates.index(selected_mcs)
+    slot = seq % period
+    if slot == slots[0]:
+        return rates[i + 1] if i + 1 < len(rates) else None
+    if slot == slots[1]:
+        return rates[i - 1] if i > 0 else None
+    return None
+
+
 def _crc(buf: bytes) -> int:
     return fec_subblock.crc16_ccitt(buf)
 

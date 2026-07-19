@@ -10,6 +10,8 @@ insight: score the link the decoder sees).
 
 from __future__ import annotations
 
+import math
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -146,4 +148,192 @@ class RungWindow:
         for bw, h in self._hist.items():
             if h:
                 out[bw] = (sum(h) / len(h), len(h))
+        return out
+
+
+# One-sided normal quantiles for the Wilson bounds (each bound is used as its
+# own one-sided test: promote on the LOWER bound, block on the UPPER).
+_Z_ONE_SIDED = {0.90: 1.2816, 0.95: 1.6449, 0.99: 2.3263}
+
+
+def wilson_bounds(successes: int, n: int, z: float) -> tuple[float, float]:
+    """Wilson-score interval for a binomial proportion — (lcb, ucb).
+
+    Unlike the bare mean, the bounds stay honest at small n: a perfect record
+    caps at lcb = n/(n+z²), so "0 failures in 12" cannot read as proof of 99%
+    delivery. (0, n) -> (0, 1) when there is no evidence at all."""
+    if n <= 0:
+        return 0.0, 1.0
+    ph = successes / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = ph + z2 / (2 * n)
+    half = z * math.sqrt(ph * (1.0 - ph) / n + z2 / (4.0 * n * n))
+    return (max(0.0, (center - half) / denom),
+            min(1.0, (center + half) / denom))
+
+
+@dataclass(frozen=True)
+class ProbeStat:
+    """Per-candidate-MCS probe evidence: raw FCS-clean frame delivery with
+    Wilson confidence bounds and the staleness of the newest sample."""
+    delivery: float
+    successes: int
+    attempts: int
+    lcb: float
+    ucb: float
+    age_ms: float
+
+
+class McsProbeWindow:
+    """Per-MCS raw delivery from the scheduled rate probes AND the active row.
+
+    The rc_proto.probe_mcs schedule names which seqs fly the adjacent rates, so
+    like RungWindow no wire fields are needed — but rate evidence is regime-
+    dependent (the candidates move with the commanded profile), so attribution
+    is guarded three ways where RungWindow needs none:
+
+      * successes are RATE-VERIFIED: a received probe-slot seq counts only when
+        the PHY-decoded (mode, mcs) matches the expected candidate — a frame
+        that demonstrably flew elsewhere (command lag, suppressed probe, spec
+        parse fallback) is ignored, never mis-credited;
+      * gap losses are EPOCH-GATED: attributed only while a non-probe frame has
+        confirmed the VTX is flying the commanded rate (and a mismatch
+        un-confirms), so losses around a profile transition or a failsafe
+        overlap are dropped rather than blamed on the wrong candidate;
+      * crc_err frames never advance the gap walk and never attribute BY SEQ —
+        their body is untrusted bits — but their PHY-decoded rate is from the
+        descriptor (pre-FCS), so a corrupt frame at the selected or an
+        adjacent-candidate rate IS a rate-verified failure of that rate and is
+        pushed seq-free. This is what keeps the evidence flowing in the
+        crc-flooded regimes where escape speed matters most; the same lost
+        frame may additionally be counted by the next clean frame's gap walk,
+        an accepted over-weighting of visible corruption in the conservative
+        direction.
+
+    The SELECTED row is attributed by the same rules from every non-probe seq
+    (bandwidth-probe slots excluded when `bw_set` is given — those fly the
+    selected rate at another bandwidth, so their loss is bandwidth evidence,
+    not rate evidence). That makes the active row's measured delivery free —
+    the main stream is its probe — and it is what lets the controller escape
+    an operating point its model wrongly believes in: SNR-blind failure
+    (interference, a miscalibrated row) shows up here when no model does.
+
+    set_selected() (any commanded (mode, mcs, bw) change) resets the window —
+    evidence from another operating context must not authorize a promotion.
+    Thread-safe: add_seq runs on the RX reader thread while stats()/
+    set_selected() run on the control loop.
+    """
+
+    def __init__(self, mcs_set, mode: str = "ht", samples_per_mcs: int = 64,
+                 max_age_ms: float = 8000.0, confidence: float = 0.90,
+                 period: int | None = None, slots=None, bw_set=None):
+        import rc_proto as _rp
+        self._rp = _rp
+        self.mcs_set = tuple(sorted(mcs_set))
+        self._period = period if period is not None else _rp.MCS_PROBE_PERIOD
+        self._slots = tuple(slots) if slots is not None else _rp._MCS_PROBE_SLOTS
+        self._bw_set = tuple(sorted(bw_set)) if bw_set else None
+        self._maxlen = samples_per_mcs
+        self.max_age_ms = max_age_ms
+        self._z = _Z_ONE_SIDED.get(round(confidence, 2), 1.2816)
+        self._hist: dict[int, deque] = {}     # mcs -> deque[(t_ms, ok)]
+        self._mode = mode
+        self._selected: int | None = None
+        self._epoch_confirmed = False
+        self._last_seq: int | None = None
+        self._lock = threading.Lock()
+
+    def _probe(self, seq: int) -> int | None:
+        return self._rp.probe_mcs(seq, self._selected, self.mcs_set,
+                                  self._period, self._slots)
+
+    def _slot_mcs(self, seq: int) -> int | None:
+        """The MCS this seq is scheduled to fly, or None for a seq that is no
+        rate evidence at all (a bandwidth-probe slot)."""
+        cand = self._probe(seq)
+        if cand is not None:
+            return cand
+        if self._bw_set is not None and \
+                self._rp.probe_bw(seq, self._bw_set) is not None:
+            return None
+        return self._selected
+
+    def _tracked(self) -> tuple:
+        """The rates evidence is currently collected for: the selected row and
+        its adjacent-in-set candidates."""
+        rates = self.mcs_set
+        if self._selected not in rates:
+            return (self._selected,)
+        i = rates.index(self._selected)
+        out = [self._selected]
+        if i + 1 < len(rates):
+            out.append(rates[i + 1])
+        if i > 0:
+            out.append(rates[i - 1])
+        return tuple(out)
+
+    def set_selected(self, mode: str, mcs: int, now_ms: float) -> None:
+        """Commanded operating point changed: blank the window (new epoch)."""
+        with self._lock:
+            self._mode = mode
+            self._selected = mcs
+            self._hist.clear()
+            self._epoch_confirmed = False
+            self._last_seq = None
+
+    def _push(self, mcs: int, now_ms: float, ok: bool) -> None:
+        h = self._hist.get(mcs)
+        if h is None:
+            h = self._hist[mcs] = deque(maxlen=self._maxlen)
+        h.append((now_ms, ok))
+
+    def add_seq(self, seq: int, now_ms: float, rate: tuple | None = None,
+                crc_err: bool = False) -> None:
+        """One received video seq. `rate` is the PHY-decoded (mode, mcs) of the
+        frame (devourer_events.desc_rate_to_mcs), or None when unavailable —
+        rate-less frames are dropped (fail-inert: no admission, no blocking)."""
+        with self._lock:
+            if self._selected is None:
+                return
+            if crc_err:
+                # the descriptor rate survives body corruption: a corrupt
+                # frame at a rate we track is that rate's measured failure
+                if rate is not None and rate[0] == self._mode and \
+                        rate[1] in self._tracked():
+                    self._push(rate[1], now_ms, False)
+                return
+            if self._last_seq is not None and self._epoch_confirmed:
+                gap = (seq - self._last_seq) % 4096
+                # walk the missing seqs (bounded like RungWindow: a monster gap
+                # is a link outage, not per-candidate information)
+                for d in range(1, min(gap, 128)):
+                    m = self._slot_mcs((self._last_seq + d) % 4096)
+                    if m is not None:
+                        self._push(m, now_ms, False)
+            cand = self._probe(seq)
+            if cand is None:
+                if rate is not None:
+                    self._epoch_confirmed = (rate == (self._mode, self._selected))
+                    if self._epoch_confirmed and self._slot_mcs(seq) is not None:
+                        self._push(self._selected, now_ms, True)
+            elif rate is not None and rate == (self._mode, cand):
+                self._push(cand, now_ms, True)
+            self._last_seq = seq
+
+    def stats(self, now_ms: float) -> dict[int, ProbeStat]:
+        """mcs -> ProbeStat for candidates with any fresh samples."""
+        out = {}
+        with self._lock:
+            for mcs, h in self._hist.items():
+                while h and h[0][0] < now_ms - self.max_age_ms:
+                    h.popleft()
+                if not h:
+                    continue
+                n = len(h)
+                s = sum(1 for _, ok in h if ok)
+                lcb, ucb = wilson_bounds(s, n, self._z)
+                out[mcs] = ProbeStat(delivery=s / n, successes=s, attempts=n,
+                                     lcb=lcb, ucb=ucb,
+                                     age_ms=now_ms - h[-1][0])
         return out

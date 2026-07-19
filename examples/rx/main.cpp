@@ -466,6 +466,15 @@ static const bool g_agg_sa_parsed = []() {
   }
   return false;
 }();
+/* DEVOURER_RX_AGG_SA also re-gates the per-frame rx.frame stream in
+ * packetProcessor: env unset keeps the historic canonical-SA-only stream;
+ * "canon"/mac narrows it to that SA; "any" widens it to every frame. A
+ * separate presence flag because "any" parses to no filter (above) yet must
+ * widen the stream gate, while unset must not. */
+static const bool g_agg_sa_env = []() {
+  const char *e = std::getenv("DEVOURER_RX_AGG_SA");
+  return e != nullptr && *e != '\0';
+}();
 static bool agg_sa_match(const Packet &packet) {
   if (!g_agg_sa_filter)
     return true;
@@ -660,7 +669,27 @@ static void packetProcessor(const Packet &packet) {
    * one adapter while txdemo runs against another on the same
    * channel, each hit confirms an injected frame made it over the air. */
   if (packet.Data.size() >= 16) {
-    if (std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
+    const bool sa_canon =
+        std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0;
+    /* DEVOURER_STREAM_OUT=1: print every stream-SA frame's body (uncapped)
+     * for the stream RX driver (tools/precoder/stream_rx.py) to decode. Tag
+     * is distinct so the regular dump_body capture stays uncluttered. The
+     * stream's SA gate follows DEVOURER_RX_AGG_SA when set — an oracle
+     * watching a foreign transmitter (e.g. a kernel-driver DUT's own MAC)
+     * selects it there — and stays canonical-SA-only when unset. */
+    static const bool stream_out =
+        std::getenv("DEVOURER_STREAM_OUT") != nullptr;
+    const bool stream_sa = g_agg_sa_env ? agg_sa_match(packet) : sa_canon;
+    /* DEVOURER_RX_KEEP_CORRUPTED=1: surface the body even when the chip
+     * flagged CRC/ICV error. Default is to filter them out for the byte-
+     * stream consumer (stream_rx.py), since a body with a wrong tail is
+     * the byte-mode parser's worst-case input. The flag is the entry
+     * point for the corruption_analysis.py tool — by-design opt-in so
+     * accidental enablement doesn't cause IP-stack misery. */
+    static const bool keep_corrupted =
+        std::getenv("DEVOURER_RX_KEEP_CORRUPTED") != nullptr;
+    const bool corrupted = packet.RxAtrib.crc_err || packet.RxAtrib.icv_err;
+    if (sa_canon) {
       static int hits = 0;
       ++hits;
       if (hits <= 10 || hits % 100 == 0) {
@@ -726,20 +755,6 @@ static void packetProcessor(const Packet &packet) {
        * 6M OFDM and that its shaped PSDU bytes round-tripped intact — the
        * two-adapter, no-SDR verification. First few hits only. */
       static const bool dump_body = std::getenv("DEVOURER_DUMP_BODY") != nullptr;
-      /* DEVOURER_STREAM_OUT=1: like DEVOURER_DUMP_BODY but uncapped — print
-       * every canonical-SA frame's body for the stream RX driver
-       * (tools/precoder/stream_rx.py) to decode. Tag is distinct so the
-       * regular dump_body capture stays uncluttered. */
-      static const bool stream_out = std::getenv("DEVOURER_STREAM_OUT") != nullptr;
-      /* DEVOURER_RX_KEEP_CORRUPTED=1: surface the body even when the chip
-       * flagged CRC/ICV error. Default is to filter them out for the byte-
-       * stream consumer (stream_rx.py), since a body with a wrong tail is
-       * the byte-mode parser's worst-case input. The flag is the entry
-       * point for the corruption_analysis.py tool — by-design opt-in so
-       * accidental enablement doesn't cause IP-stack misery. */
-      static const bool keep_corrupted =
-          std::getenv("DEVOURER_RX_KEEP_CORRUPTED") != nullptr;
-      const bool corrupted = packet.RxAtrib.crc_err || packet.RxAtrib.icv_err;
       /* DEVOURER_RX_ALLPATHS=1: emit all four RX chains (A,B,C,D) of per-stream
        * RSSI / SNR / EVM on a distinct `rx.path` event. Opt-in and separate so
        * the canonical two-path `rx.frame`/`rx.body` events stay untouched.
@@ -762,60 +777,6 @@ static void packetProcessor(const Packet &packet) {
             .arr("snr", snr, 4)
             .arr("evm", evm, 4);
       }
-      if (stream_out && (!corrupted || keep_corrupted)) {
-        /* Per-stream phy soft metrics (RSSI / EVM / SNR for paths A,B; on
-         * 8814AU paths C,D would also be non-zero but we surface only A,B
-         * here to stay aligned with rx.body's fields). These are
-         * link-quality measurements at the PHY before decoding — same
-         * source as the Tier-2 diagnostics — so a consumer like
-         * corruption_analysis.py can correlate BER with link quality on a
-         * per-frame basis instead of relying on aggregated statistics. */
-        /* seq + tsfl: chip-side sequence number (12-bit u16) and TSF low
-         * (full 32-bit u32). Consumers can dedup by seq and measure
-         * one-way latency by diffing TSF against the host clock. Optional
-         * fields — pre-#84 regex consumers tolerate them via the same
-         * pass-through pattern. */
-        /* Decoded PHY descriptor fields (bw/stbc/ldpc/sgi) alongside the rate
-         * index: these let an SDR-as-TX completeness harness assert that the
-         * frame devourer received carries the bandwidth / STBC / FEC / guard
-         * interval the transmitter encoded. Valid on 8812/8821; on 8814AU the
-         * RX descriptor doesn't expose these at this offset (FrameParser.cpp),
-         * so they read as the chip's defaults there. */
-        const int rssi[2] = {packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1]};
-        const int evm[2] = {packet.RxAtrib.evm[0], packet.RxAtrib.evm[1]};
-        const int snr[2] = {packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]};
-        const size_t body_len =
-            packet.Data.size() > 24 ? packet.Data.size() - 24 : 0;
-        auto ev = devourer::Ev(*g_ev, "rx.frame");
-        ev.f("rate", packet.RxAtrib.data_rate)
-            .f("len", packet.Data.size())
-            .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
-            .f("icv", packet.RxAtrib.icv_err ? 1 : 0)
-            .arr("rssi", rssi, 2)
-            .arr("evm", evm, 2)
-            .arr("snr", snr, 2)
-            .f("seq", packet.RxAtrib.seq_num)
-            .f("tsfl", packet.RxAtrib.tsfl)
-            .f("bw", packet.RxAtrib.bw)
-            .f("stbc", packet.RxAtrib.stbc)
-            .f("ldpc", packet.RxAtrib.ldpc)
-            .f("sgi", packet.RxAtrib.sgi)
-            /* A-MPDU RX markers (src/RxPacket.h): paggr = inside an
-             * aggregate; ppdu = the halmac 2-bit received-PPDU counter
-             * (frames sharing a value shared one PPDU). */
-            .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
-            .f("ppdu", packet.RxAtrib.ppdu_cnt)
-            /* FC flags byte (frame byte 1): bit3 = the 802.11 RETRY flag —
-             * distinguishes hardware retransmissions (e.g. an A-MPDU
-             * re-aired for want of a BlockAck) from first airings. */
-            .f("fc1", packet.Data.size() > 1 ? packet.Data[1] : 0);
-        /* tx_tsf: the sender's hardware TX-egress TSF (beacons / probe responses
-         * only). Pair with tsfl — the local hardware RX timestamp above — for
-         * one-way hardware time sync with no host-clock jitter on either end. */
-        if (auto tx = packet.TxEgressTsf())
-          ev.f("tx_tsf", (unsigned long long)*tx);
-        ev.hex("body", packet.Data.data() + 24, body_len);
-      }
       if (dump_body && hits <= 5) {
         /* Tier-2 health diagnostics alongside the byte mirror: rate (0x04 =
          * 6M OFDM), per-stream RSSI/EVM/SNR (link quality — content-blind),
@@ -835,6 +796,63 @@ static void packetProcessor(const Packet &packet) {
             .f("len", packet.Data.size())
             .hex("body", packet.Data.data() + 24, body_len);
       }
+    }
+    if (stream_out && stream_sa && (!corrupted || keep_corrupted)) {
+      /* Per-stream phy soft metrics (RSSI / EVM / SNR for paths A,B; on
+       * 8814AU paths C,D would also be non-zero but we surface only A,B
+       * here to stay aligned with rx.body's fields). These are
+       * link-quality measurements at the PHY before decoding — same
+       * source as the Tier-2 diagnostics — so a consumer like
+       * corruption_analysis.py can correlate BER with link quality on a
+       * per-frame basis instead of relying on aggregated statistics. */
+      /* seq + tsfl: chip-side sequence number (12-bit u16) and TSF low
+       * (full 32-bit u32). Consumers can dedup by seq and measure
+       * one-way latency by diffing TSF against the host clock. Optional
+       * fields — pre-#84 regex consumers tolerate them via the same
+       * pass-through pattern. */
+      /* Decoded PHY descriptor fields (bw/stbc/ldpc/sgi) alongside the rate
+       * index: these let an SDR-as-TX completeness harness assert that the
+       * frame devourer received carries the bandwidth / STBC / FEC / guard
+       * interval the transmitter encoded. Valid on 8812/8821; on 8814AU the
+       * RX descriptor doesn't expose these at this offset (FrameParser.cpp),
+       * so they read as the chip's defaults there. */
+      const int rssi[2] = {packet.RxAtrib.rssi[0], packet.RxAtrib.rssi[1]};
+      const int evm[2] = {packet.RxAtrib.evm[0], packet.RxAtrib.evm[1]};
+      const int snr[2] = {packet.RxAtrib.snr[0], packet.RxAtrib.snr[1]};
+      const size_t body_len =
+          packet.Data.size() > 24 ? packet.Data.size() - 24 : 0;
+      auto ev = devourer::Ev(*g_ev, "rx.frame");
+      ev.f("rate", packet.RxAtrib.data_rate)
+          .f("len", packet.Data.size())
+          .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
+          .f("icv", packet.RxAtrib.icv_err ? 1 : 0)
+          .arr("rssi", rssi, 2)
+          .arr("evm", evm, 2)
+          .arr("snr", snr, 2)
+          .f("seq", packet.RxAtrib.seq_num)
+          .f("tsfl", packet.RxAtrib.tsfl)
+          .f("bw", packet.RxAtrib.bw)
+          .f("stbc", packet.RxAtrib.stbc)
+          .f("ldpc", packet.RxAtrib.ldpc)
+          .f("sgi", packet.RxAtrib.sgi)
+          /* A-MPDU RX markers (src/RxPacket.h): paggr = inside an
+           * aggregate; ppdu = the halmac 2-bit received-PPDU counter
+           * (frames sharing a value shared one PPDU). */
+          .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
+          .f("ppdu", packet.RxAtrib.ppdu_cnt)
+          /* FC flags byte (frame byte 1): bit3 = the 802.11 RETRY flag —
+           * distinguishes hardware retransmissions (e.g. an A-MPDU
+           * re-aired for want of a BlockAck) from first airings. */
+          .f("fc1", packet.Data.size() > 1 ? packet.Data[1] : 0);
+      /* sa: the transmitter address the stream gate matched on — lets a
+       * multi-source consumer attribute frames when the gate is "any". */
+      ev.hex("sa", packet.Data.data() + 10, 6);
+      /* tx_tsf: the sender's hardware TX-egress TSF (beacons / probe responses
+       * only). Pair with tsfl — the local hardware RX timestamp above — for
+       * one-way hardware time sync with no host-clock jitter on either end. */
+      if (auto tx = packet.TxEgressTsf())
+        ev.f("tx_tsf", (unsigned long long)*tx);
+      ev.hex("body", packet.Data.data() + 24, body_len);
     }
   }
 }

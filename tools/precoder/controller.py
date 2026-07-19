@@ -19,6 +19,7 @@ graceful UEP staircase.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import energy_model as em
@@ -74,6 +75,39 @@ class ControllerConfig:
     rung_block_delta: float = 0.15
     rung_block_hold_ms: int = 5000
     rung_min_samples: int = 8
+    # Live adjacent-MCS probes (OPT-IN, default OFF -> behaviour unchanged):
+    # report_mcs_delivery() feeds measured candidate delivery (score.
+    # McsProbeWindow.stats()) and the evidence corrects the MODEL, it does not
+    # replace it. While the current point still works, a row with mcs ABOVE the
+    # current one is admissible only when its probe LOWER confidence bound
+    # clears the raw frame-delivery its FEC needs; a candidate whose UPPER
+    # bound cannot reach even the heaviest overhead's requirement is blocked
+    # outright for a hold. Emergency downgrades keep trusting the model — never
+    # wait for probes to escape a failing point. The raw-delivery requirement
+    # rises steeply as overhead falls (ov=0.10 needs ~0.99 per-frame), and a
+    # Wilson lower bound caps at n/(n+z^2), so the only promote path is
+    # mcs+1 at mid/heavy overhead first, then the ungated same-MCS overhead
+    # trim — measured caution, by construction. Sample-rate dependence: one
+    # up-probe per 64 frames, so min_samples=12 inside max_age needs sustained
+    # >=~100 fps injection traffic; thresholds are sized for the streaming
+    # (~250+ fps) use, not the selftest tick rate.
+    mcs_probe_enabled: bool = False
+    mcs_probe_min_samples: int = 12
+    mcs_probe_window_samples: int = 64
+    mcs_probe_max_age_ms: int = 8000
+    mcs_probe_block_hold_ms: int = 5000
+    mcs_probe_confidence: float = 0.90
+    mcs_probe_margin: float = 0.0
+    # The ACTIVE row's measured delivery (its samples are the main stream, so
+    # they arrive at full frame rate) may condemn the operating point the
+    # model still believes in — the SNR-blind failure modes (interference, a
+    # miscalibrated row the cold pick landed on) show up only here. Tripping
+    # is deliberately slower than a candidate block: the active evidence must
+    # stay condemned for this many CONSECUTIVE feedback reports, so a burst
+    # that briefly floods the fast-filling window rides through while a
+    # persistent lie cannot. Candidates need no such guard — their samples
+    # accrue at probe duty, so min_samples already spans seconds.
+    mcs_probe_active_trip_ticks: int = 3
 
 
 class Controller:
@@ -95,6 +129,10 @@ class Controller:
         self._rung_block: dict[int, float] = {}   # bw -> blocked-until (ms)
         self._now_ms: float = -1 << 60            # last update() time, for _best
         self.primary_dirty = False                # all rungs bad incl. narrowest
+        self._mcs_block: dict[int, float] = {}    # mcs -> blocked-until (ms)
+        self._mcs_stats: dict = {}                # mcs -> score.ProbeStat
+        self._frame_req_cache: dict[float, float] = {}
+        self._active_trip = 0                     # consecutive condemned reports
 
     # --- estimation -------------------------------------------------------- #
     def _path_loss(self, reported_snr: float, reported_txagc: int) -> float:
@@ -126,10 +164,97 @@ class Controller:
                                   self.cfg.rung_block_delta
                                   for d in usable.values()))
 
-    def _best(self, path_loss: float, margin: float) -> OpPoint | None:
+    # --- adjacent-MCS probe evidence ---------------------------------------- #
+    def _mcs_blocked(self, mcs: int) -> bool:
+        until = self._mcs_block.get(mcs)
+        return until is not None and self._now_ms < until
+
+    def _required_frame_delivery(self, overhead: float) -> float:
+        """Raw FCS-clean frame delivery this overhead's FEC needs to hit the
+        block-delivery target — the exact inverse of the plain (no-SBI) branch
+        of fec_ab_sim.sim_interframe, on the same generation geometry the link
+        rows were built from. Conservative on purpose: SBI salvage only makes
+        the real requirement laxer."""
+        key = round(overhead, 3)
+        if key in self._frame_req_cache:
+            return self._frame_req_cache[key]
+        import link_model as _lm
+        frames = getattr(self.link, "frames_per_gen", 12)
+        n_sub = getattr(self.link, "n_sub", _lm.N_SUB)
+        total = frames * n_sub
+        src = max(1, min(total, round(total / (1.0 + overhead))))
+        if src >= total:                 # no room for parity: unattainable
+            self._frame_req_cache[key] = req = 1.01
+            return req
+        k_frames = math.ceil(src / n_sub)
+
+        def block_ok(p: float) -> float:
+            return sum(math.comb(frames, i) * p ** i * (1 - p) ** (frames - i)
+                       for i in range(k_frames, frames + 1))
+
+        lo, hi = 0.0, 1.0
+        for _ in range(40):              # bisect the smallest clearing p
+            mid = (lo + hi) / 2
+            if block_ok(mid) >= self.cfg.target:
+                hi = mid
+            else:
+                lo = mid
+        self._frame_req_cache[key] = hi
+        return hi
+
+    def report_mcs_delivery(self, stats: dict, now_ms: float) -> None:
+        """Feed per-MCS measured delivery (mcs -> score.ProbeStat: the adjacent
+        candidates from the probe schedule plus the ACTIVE row from the main
+        stream). An MCS whose UPPER confidence bound falls short of even the
+        heaviest overhead's raw frame-delivery requirement cannot meet the SLA
+        at any FEC — block it for a hold. The lowest rate is never blocked: it
+        is the fallback. Candidates block on first sufficient evidence; the
+        active row must stay condemned for `mcs_probe_active_trip_ticks`
+        consecutive reports (its full-rate window fills in fractions of a
+        second, so a single interference burst would otherwise read as a dead
+        rate). A tripped active row makes cur_ok fail on the next decide (the
+        measured fast-down the model cannot veto) and the block keeps _best
+        from re-picking the row the model still believes in."""
+        self._mcs_stats = dict(stats)
+        req = self._required_frame_delivery(max(self.cfg.overhead_set))
+        lowest = min(self.cfg.mcs_set)
+        active = self.cur.mcs if self.cur is not None else None
+        active_bad = False
+        for mcs, st in stats.items():
+            if mcs == lowest:
+                continue
+            if st.attempts >= self.cfg.mcs_probe_min_samples and st.ucb < req:
+                if mcs == active:
+                    active_bad = True
+                    if self._active_trip + 1 < self.cfg.mcs_probe_active_trip_ticks:
+                        continue
+                self._mcs_block[mcs] = now_ms + self.cfg.mcs_probe_block_hold_ms
+        self._active_trip = self._active_trip + 1 if active_bad else 0
+
+    def _mcs_gate_ok(self, r) -> bool:
+        """Probe gate for one row (only rows ABOVE the current MCS): admissible
+        when fresh probe evidence's LOWER bound clears the row's raw
+        frame-delivery requirement. Probes fly at the commanded bandwidth, so
+        evidence does not transfer to another bw — those rows wait for the
+        stepwise path (bw move at same MCS, then MCS with fresh evidence)."""
+        if not self.cfg.mcs_probe_enabled or self.cur is None \
+                or r.mcs <= self.cur.mcs:
+            return True
+        if r.bw != self.cur.bw:
+            return False
+        st = self._mcs_stats.get(r.mcs)
+        if st is None or st.attempts < self.cfg.mcs_probe_min_samples:
+            return False
+        return st.lcb >= (self._required_frame_delivery(r.overhead)
+                          + self.cfg.mcs_probe_margin)
+
+    def _best(self, path_loss: float, margin: float,
+              gate_up: bool = False) -> OpPoint | None:
         best = None
         for r in self.rows:
-            if self._rung_blocked(r.bw):
+            if self._rung_blocked(r.bw) or self._mcs_blocked(r.mcs):
+                continue
+            if gate_up and not self._mcs_gate_ok(r):
                 continue
             op = resolve(r, path_loss, self.calib, self.link,
                          self.cfg.payload_bytes, self.cfg.src_bitrate_bps, margin)
@@ -176,11 +301,18 @@ class Controller:
                               self.cur.snr_req), path_loss, self.calib, self.link,
                               self.cfg.payload_bytes, self.cfg.src_bitrate_bps, 0.0)
             cur_ok = (cur_now is not None and cur_now.p_deliver >= self.cfg.target
-                      and not self._rung_blocked(self.cur.bw))
+                      and not self._rung_blocked(self.cur.bw)
+                      and not self._mcs_blocked(self.cur.mcs))
             if cur_ok:
                 self.cur = cur_now            # refresh txagc/e_bit at new path loss
 
-        cand = self._best(path_loss, self.cfg.margin_db)   # candidate with hysteresis
+        # Candidate with hysteresis. The probe gate rides only while the current
+        # point still works — an emergency downgrade must take the model's word
+        # (waiting for probe samples to escape a failing point would be
+        # backwards), and the cold start (cur None) is model-trusted: a bad
+        # first pick self-corrects through the existing fast-down, after which
+        # the probes prevent re-entry.
+        cand = self._best(path_loss, self.cfg.margin_db, gate_up=cur_ok)
 
         if cand is None:
             # nothing clears even with margin: keep current if it still works,
@@ -224,10 +356,29 @@ class Controller:
             self.cur = self._failsafe_point()
         return self.cur
 
+    def reset_operating_point(self) -> None:
+        """Forget the committed point — the next update makes a fresh,
+        model-trusted pick — while KEEPING the measured MCS blocks: a
+        reacquisition cold pick must not walk straight back into a row whose
+        measured delivery just condemned it. The VRX calls this when it loses
+        the video entirely (an operating point it cannot hear is not worth
+        keeping, and its own estimator is starved of the evidence to fix it)."""
+        self.cur = None
+        self.shed = False
+        self._active_trip = 0
+
     def _failsafe_point(self) -> OpPoint:
         return MAX_RANGE
 
     def _commit(self, op: OpPoint, now_ms: float) -> OpPoint:
+        # Probe evidence is bound to the (mode, bw) it was measured in — a
+        # committed move to another context invalidates blocks and stats (the
+        # VRX-side window resets itself on the same transition).
+        if self.cur is None or (op.mode, op.bw) != (self.cur.mode, self.cur.bw):
+            self._mcs_block.clear()
+            self._mcs_stats = {}
+        if self.cur is None or op.mcs != self.cur.mcs:
+            self._active_trip = 0
         self.cur = op
         self._last_change_ms = now_ms
         return op
@@ -255,6 +406,41 @@ class Controller:
             self.calib)
         return OpPoint(op.mode, op.mcs, op.bw, op.sgi, new_txagc, op.overhead,
                        op.snr_req, eb, pdel)
+
+
+class BiasedLink:
+    """A link model whose per-MCS belief is shifted by `bias_db` dB (NEGATIVE =
+    the model believes the rate works at that much less SNR than it does).
+    The bias runs through BOTH faces of the model — `snr_required` (row
+    thresholds) and `p_deliver` (the SLA check in resolve/cur_ok) — because a
+    real miscalibration is a wrong belief, not just a wrong table entry: with
+    only the rows shifted, resolve()'s own p_deliver veto would silently
+    un-bias the controller."""
+
+    def __init__(self, base, bias_db: dict[int, float]):
+        self.base = base
+        self.bias = {int(m): float(db) for m, db in bias_db.items()}
+        self.frames_per_gen = getattr(base, "frames_per_gen", 12)
+
+    def p_deliver(self, snr_db, mcs, overhead, sbi=True):
+        return self.base.p_deliver(snr_db - self.bias.get(mcs, 0.0), mcs,
+                                   overhead, sbi)
+
+    def snr_required(self, mcs, overhead, target, sbi=True, **kw):
+        return (self.base.snr_required(mcs, overhead, target, sbi=sbi, **kw)
+                + self.bias.get(mcs, 0.0))
+
+
+def apply_model_bias(ctrl: Controller, bias_db: dict[int, float]) -> None:
+    """Deliberately miscalibrate a controller's model per MCS (dB; negative =
+    optimistic) and rebuild its rows from the biased belief. The lever the
+    probe A/B harnesses measure against — the probes' whole job is to catch
+    exactly this."""
+    ctrl.link = BiasedLink(ctrl.link, bias_db)
+    ctrl.rows = build_link_rows(ctrl.link, ctrl.cfg.target, ctrl.cfg.mcs_set,
+                                ctrl.cfg.overhead_set, ctrl.cfg.bw,
+                                sbi=ctrl.cfg.sbi, bw_set=ctrl.cfg.bw_set,
+                                mode=ctrl.cfg.mode)
 
 
 # --------------------------------------------------------------------------- #

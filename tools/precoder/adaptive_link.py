@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import rc_proto as rp
 import rendezvous as rz
 from controller import Controller, ControllerConfig
-from score import ScoreWindow, ScoreConfig, RungWindow
+from score import ScoreWindow, ScoreConfig, RungWindow, McsProbeWindow
 import op_table
 
 
@@ -47,6 +47,14 @@ def ladder_spec(mode: str, mcs: int, bw: int) -> str:
 def op_to_ladder(op) -> str:
     """Map a controller OpPoint to a DEVOURER_SVC_LADDER spec."""
     return ladder_spec(getattr(op, "mode", "ht"), op.mcs, op.bw)
+
+
+def rate_spec(mode: str, mcs: int, bw: int) -> str:
+    """One rate as a SET_RATE / DEVOURER_TX_RATE spec string. The /bw suffix is
+    always explicit so a probe frame and its restore pin the commanded
+    bandwidth rather than inheriting whatever the session last flew."""
+    name = "VHT1SS_MCS" if mode == "vht" else "MCS"
+    return f"{name}{mcs}/{bw}"
 
 
 def overhead_to_16ths(ov: float) -> int:
@@ -72,24 +80,50 @@ class AdaptiveVrx:
         # embedding app turns into a coordinated channel move.
         bw_set = self.ctrl.cfg.bw_set
         self.rungs = RungWindow(bw_set) if bw_set else None
+        # Adjacent-MCS probe evidence (opt-in): the selected rate follows the
+        # controller's committed op, so the window resets itself on every
+        # commanded (mode, mcs, bw) transition — see _track_selected().
+        cfg = self.ctrl.cfg
+        self.mcs_win = McsProbeWindow(
+            cfg.mcs_set, mode=cfg.mode,
+            samples_per_mcs=cfg.mcs_probe_window_samples,
+            max_age_ms=cfg.mcs_probe_max_age_ms,
+            confidence=cfg.mcs_probe_confidence,
+            bw_set=cfg.bw_set) if cfg.mcs_probe_enabled else None
+        self._sel_key: tuple | None = None
         self.rz = rz.VrxRendezvous(rz.VrxConfig(vtx_id=vtx_id, op_channel=op_channel))
         self.feedback_period_ms = feedback_period_ms
         self._last_fb_ms = -1 << 60
         self._seq = 0
         self.cur_op = op_table.MAX_RANGE
         self._cur_txagc = 32
+        self._video_lost = False
 
     @property
     def primary_dirty(self) -> bool:
         return self.ctrl.primary_dirty
 
     def on_video(self, rssi: float, snr: float, crc_err: bool, seq: int,
-                 now_ms: float, residual_loss: float | None = None) -> None:
+                 now_ms: float, residual_loss: float | None = None,
+                 rate: tuple | None = None) -> None:
+        """`rate` is the frame's PHY-decoded (mode, mcs) when the event stream
+        carries it (devourer_events.desc_rate_to_mcs) — the probe attribution
+        is rate-verified, so without it the MCS window stays fail-inert."""
         self.win.add_frame(rssi, snr, crc_err, seq, now_ms / 1000.0)
         if self.rungs is not None:
             self.rungs.add_seq(seq)
+        if self.mcs_win is not None:
+            self.mcs_win.add_seq(seq, now_ms, rate=rate, crc_err=crc_err)
         self.rz.feed_video(now_ms)
         self._residual = residual_loss
+
+    def _track_selected(self, now_ms: float) -> None:
+        op = self.cur_op
+        key = (getattr(op, "mode", "ht"), op.mcs, op.bw)
+        if key != self._sel_key:
+            self._sel_key = key
+            if self.mcs_win is not None:
+                self.mcs_win.set_selected(key[0], key[1], now_ms)
 
     def on_disc_ack(self, buf: bytes, now_ms: float) -> None:
         ack = rp.parse_disc_ack(buf)
@@ -100,20 +134,36 @@ class AdaptiveVrx:
         """Return a frame to TX back to the VTX (RCF or DISC), or None."""
         act = self.rz.tick(now_ms)
         if act == rz.A_BEACON:
+            # Video gone entirely: an operating point we cannot hear is not
+            # worth keeping, and with zero frames the estimator can never
+            # condemn it — the frozen-command deadlock. Take the max-range
+            # stance (the dual of the VTX's RC-loss failsafe; RCFs stopping is
+            # what lets the VTX failsafe fire) and re-pick fresh on
+            # reacquisition; measured MCS blocks survive the reset so the new
+            # cold pick avoids the rows the evidence just condemned.
+            if not self._video_lost:
+                self._video_lost = True
+                self.cur_op = op_table.MAX_RANGE
+                self.ctrl.reset_operating_point()
+                self._track_selected(now_ms)
             return rp.pack_disc(self.rz.beacon())
         if act != rz.A_TX_FEEDBACK:
             return None
+        self._video_lost = False
         if now_ms - self._last_fb_ms < self.feedback_period_ms:
             return None
         self._last_fb_ms = now_ms
         if self.rungs is not None:
             self.ctrl.report_rung_delivery(self.rungs.stats(), now_ms)
+        if self.mcs_win is not None:
+            self.ctrl.report_mcs_delivery(self.mcs_win.stats(now_ms), now_ms)
         snr = self.win.snr_estimate()
         if snr is not None:
             op = self.ctrl.update(snr, self._cur_txagc, now_ms)
             if op is not None:
                 self.cur_op = op
                 self._cur_txagc = op.txagc
+        self._track_selected(now_ms)
         self._seq = (self._seq + 1) & 0xFFFF
         # profile carries the GS-chosen operating point — mode/MCS/bw packed by
         # the shared v2 encoding; the VTX builds its SVC ladder from it
@@ -137,13 +187,20 @@ class TxState:
     overhead: float = 0.25
     ladder: str = "CRIT=MCS1/20;T0=MCS2/20;T1=MCS4/20;T2=MCS5/20"
     failsafe: bool = False
+    # The commanded base rate as fields (kept in lockstep with `ladder`): the
+    # live SET_RATE plumbing and the MCS-probe schedule derive from these
+    # rather than re-parsing the ladder string.
+    mode: str = "ht"
+    mcs: int = 1
+    bw: int = 20
 
 
 class AdaptiveVtx:
     def __init__(self, vtx_id: int, vtx_cfg: rz.VtxConfig | None = None,
                  failsafe_txagc: int = 63, failsafe_overhead: float = 1.0,
                  failsafe_ladder: str | None = None,
-                 bw_set: tuple | None = None):
+                 bw_set: tuple | None = None,
+                 mcs_probe: bool = False, mcs_set: tuple = tuple(range(8))):
         self.vtx_id = vtx_id
         self.rz = rz.VtxRendezvous(vtx_cfg or rz.VtxConfig(vtx_id=vtx_id))
         self.state = TxState()
@@ -154,6 +211,13 @@ class AdaptiveVtx:
         # Bandwidth-probe rungs — must match the VRX controller's bw_set (a
         # config invariant, like the profile-table version). None = no probing.
         self.bw_set = tuple(sorted(bw_set)) if bw_set else None
+        # Adjacent-MCS probing — mcs_set is the same config invariant as
+        # bw_set; the schedule itself (rc_proto.probe_mcs) is versioned.
+        self.mcs_probe = mcs_probe
+        self.mcs_set = tuple(sorted(mcs_set))
+        self.probe_counters: dict[int, int] = {}     # candidate mcs -> attempts
+        self._last_act: str | None = None
+        self._up_suspended = False
 
     def probe_bw_for_seq(self, seq: int) -> int | None:
         """Rung this video seq must fly at as a bandwidth probe (the shared
@@ -163,6 +227,33 @@ class AdaptiveVtx:
         if self.bw_set is None or self.state.failsafe:
             return None
         return rp.probe_bw(seq, self.bw_set)
+
+    def suspend_upward_probes(self, suspended: bool) -> None:
+        """Hook for the embedding app's back-off signals (thermal, congestion,
+        delivery collapse): an up-probe is speculative airtime the link may not
+        afford, a down-probe stays useful (it tells 'drop MCS' apart from 'all
+        rates failing')."""
+        self._up_suspended = bool(suspended)
+
+    def probe_mcs_for_seq(self, seq: int, protected: bool = False) -> int | None:
+        """Candidate MCS this video seq must fly at as a rate probe (shared
+        schedule, commanded bandwidth/power/FEC untouched), else None -> the
+        commanded rate. `protected` marks a frame whose loss is not disposable
+        (control, base-layer critical, IDR): it never carries an UP-probe —
+        losing it to a speculative faster rate would damage exactly the traffic
+        the SLA protects. Down-probes are more robust than the operating point
+        and stay allowed. Probing pauses entirely outside the steady TX-video
+        state (failsafe/listen/discovery): those regimes fly reach-first."""
+        if not self.mcs_probe or self.state.failsafe \
+                or self._last_act != rz.A_TX_VIDEO:
+            return None
+        cand = rp.probe_mcs(seq, self.state.mcs, self.mcs_set)
+        if cand is None:
+            return None
+        if cand > self.state.mcs and (protected or self._up_suspended):
+            return None
+        self.probe_counters[cand] = self.probe_counters.get(cand, 0) + 1
+        return cand
 
     def on_rc_frame(self, buf: bytes, now_ms: float) -> bytes | None:
         """Process an inbound control frame. Applies an RCF (updates TxState) or
@@ -181,6 +272,7 @@ class AdaptiveVtx:
             # (mode/MCS/bw, shared v2 encoding + shared ladder builder).
             mode, m, bw = rp.decode_profile(r.profile)
             self.state.ladder = ladder_spec(mode, m, bw)
+            self.state.mode, self.state.mcs, self.state.bw = mode, m, bw
             return None
         if t == rp.T_DISC:
             d = rp.parse_disc(buf)
@@ -194,10 +286,12 @@ class AdaptiveVtx:
         """Advance the failsafe/discovery SM; clamp TxState to failsafe when lost.
         Returns the rendezvous action (tx_video / failsafe / listen / idle)."""
         act = self.rz.tick(now_ms)
+        self._last_act = act
         if act == rz.A_FAILSAFE:
             self.state = TxState(txagc=self.failsafe_txagc,
                                  overhead=self.failsafe_overhead,
-                                 ladder=self.failsafe_ladder, failsafe=True)
+                                 ladder=self.failsafe_ladder, failsafe=True,
+                                 mode="ht", mcs=0, bw=20)   # match failsafe_ladder
         return act
 
     def apply_ladder_from_op(self, op) -> None:
@@ -256,7 +350,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
-from devourer_events import parse_event  # noqa: E402
+from devourer_events import parse_event, desc_rate_to_mcs  # noqa: E402
 
 
 def ctl_frame(op: int, payload: bytes = b"") -> bytes:
@@ -272,16 +366,30 @@ def psdu_frame(body: bytes) -> bytes:
 SET_PWR, SET_RATE, SET_CHAN = 1, 2, 3
 
 
+def _parse_mcs_bias(spec: str) -> dict[int, float]:
+    """'4:-6,5:-8' -> {4: -6.0, 5: -8.0} (per-MCS model snr_req shift, dB)."""
+    out = {}
+    for part in spec.split(","):
+        m, db = part.split(":")
+        out[int(m)] = float(db)
+    return out
+
+
 def _now_ms() -> float:
     import time
     return time.monotonic() * 1000.0
 
 
-def run_vrx(proc, link, calib, vtx_id, channel, feedback_period_ms=100):
+def run_vrx(proc, link, calib, vtx_id, channel, feedback_period_ms=100,
+            mcs_probe=False, mcs_bias=None):
     """Read the VTX's video frames, score, run the controller, TX feedback."""
     vrx = AdaptiveVrx(link, calib, vtx_id,
-                      ctrl_cfg=ControllerConfig(target=0.99, allow_shed=False),
+                      ctrl_cfg=ControllerConfig(target=0.99, allow_shed=False,
+                                                mcs_probe_enabled=mcs_probe),
                       op_channel=channel, feedback_period_ms=feedback_period_ms)
+    if mcs_bias:
+        from controller import apply_model_bias
+        apply_model_bias(vrx.ctrl, mcs_bias)
     import threading
 
     def reader():
@@ -300,7 +408,8 @@ def run_vrx(proc, link, calib, vtx_id, channel, feedback_period_ms=100):
             # frame incl. retries, so it over-counts loss — see score.seq_gap_loss.)
             seq = (int.from_bytes(body[:2], "little") & 0xFFF
                    if len(body) >= 2 else ev["seq"])
-            vrx.on_video(rssi, snr, ev["crc"] != 0, seq, _now_ms())
+            vrx.on_video(rssi, snr, ev["crc"] != 0, seq, _now_ms(),
+                         rate=desc_rate_to_mcs(ev.get("rate")))
     threading.Thread(target=reader, daemon=True).start()
     import time
     last_log = 0.0
@@ -313,19 +422,42 @@ def run_vrx(proc, link, calib, vtx_id, channel, feedback_period_ms=100):
         if now - last_log > 1000:                # 1 Hz trajectory log (to stderr)
             last_log = now
             op = vrx.cur_op
+            # per-candidate probe evidence: attempts@lcb — a silent line here
+            # with probing on means the rate feed is dead, not the probes good
+            probes = ""
+            if vrx.mcs_win is not None:
+                st = vrx.mcs_win.stats(now)
+                probes = " probe[" + ",".join(
+                    f"MCS{m}:{s.attempts}@{s.lcb:.2f}"
+                    for m, s in sorted(st.items())) + "]"
             sys.stderr.write(
                 f"<adaptive-vrx>state={vrx.rz.state} snr={vrx.win.snr_estimate()} "
                 f"score={vrx.win.score()} deliv={1.0 - vrx.win.seq_gap_loss():.3f} "
                 f"-> MCS{op.mcs} ov{op.overhead} "
-                f"txagc{op.txagc} frames={vrx.win.n()}\n")
+                f"txagc{op.txagc} frames={vrx.win.n()}{probes}\n")
             sys.stderr.flush()
         time.sleep(0.01)
 
 
-def run_vtx(proc, vtx_id, video_path, channel):
-    """Stream video; apply inbound RCF/DISC to the live knobs via control ops."""
-    vtx = AdaptiveVtx(vtx_id)
+def run_vtx(proc, vtx_id, video_path, channel, mcs_probe=False):
+    """Stream video; apply inbound RCF/DISC to the live knobs via control ops.
+
+    All stdin writers share one lock, and each logical action goes down the
+    pipe as ONE composed write: duplex's TX thread consumes stdin strictly in
+    order, so a probe's SET_RATE / PSDU / SET_RATE-restore triple applies
+    exactly to its frame — and the reader thread can't interleave a fresher
+    commanded rate into the middle of it."""
+    vtx = AdaptiveVtx(vtx_id, mcs_probe=mcs_probe)
     import threading
+    wlock = threading.Lock()
+
+    def _write(buf: bytes) -> None:
+        with wlock:
+            proc.stdin.write(buf)
+            proc.stdin.flush()
+
+    def _cmd_rate() -> bytes:
+        return rate_spec(vtx.state.mode, vtx.state.mcs, vtx.state.bw).encode()
 
     def reader():
         for line in proc.stdout:
@@ -336,14 +468,16 @@ def run_vtx(proc, vtx_id, video_path, channel):
             t = rp.frame_type(body)
             if t not in (rp.T_RCF, rp.T_DISC):
                 continue
-            ack = vtx.on_rc_frame(body, _now_ms())
-            if ack is not None:                      # DISC_ACK to TX
-                proc.stdin.write(psdu_frame(ack)); proc.stdin.flush()
-            if t == rp.T_RCF:                        # apply the new operating point
-                proc.stdin.write(ctl_frame(SET_PWR, bytes([vtx.state.txagc])))
-                base = f"MCS{vtx.state.ladder.split('CRIT=MCS')[1].split('/')[0]}"
-                proc.stdin.write(ctl_frame(SET_RATE, base.encode()))
-                proc.stdin.flush()
+            with wlock:                              # state + pipe change together
+                ack = vtx.on_rc_frame(body, _now_ms())
+                out = b""
+                if ack is not None:                  # DISC_ACK to TX
+                    out += psdu_frame(ack)
+                if t == rp.T_RCF:                    # apply the new operating point
+                    out += ctl_frame(SET_PWR, bytes([vtx.state.txagc]))
+                    out += ctl_frame(SET_RATE, _cmd_rate())
+                if out:
+                    proc.stdin.write(out); proc.stdin.flush()
     threading.Thread(target=reader, daemon=True).start()
 
     import sys
@@ -362,25 +496,36 @@ def run_vtx(proc, vtx_id, video_path, channel):
             want = (vtx.rz.cfg.discovery_channel if vtx.rz.state == rz.DISCOVERY
                     else vtx.rz.op_channel if vtx.rz.state == rz.RC_OK else cur_chan)
             if want != cur_chan:
-                proc.stdin.write(ctl_frame(SET_CHAN, bytes([want, 0, 0])))  # 20 MHz
-                proc.stdin.flush()
+                _write(ctl_frame(SET_CHAN, bytes([want, 0, 0])))  # 20 MHz
                 cur_chan = want
             prev_state = vtx.rz.state
         if act == rz.A_FAILSAFE:
-            proc.stdin.write(ctl_frame(SET_PWR, bytes([vtx.state.txagc])))
-            proc.stdin.flush()
+            _write(ctl_frame(SET_PWR, bytes([vtx.state.txagc])))
         if vid is not None and act in (rz.A_TX_VIDEO, rz.A_FAILSAFE):
             chunk = vid.read(1022)               # room for the 2-byte app-seq header
             if not chunk:
                 vid.seek(0); chunk = vid.read(1022)
-            proc.stdin.write(psdu_frame(app_seq.to_bytes(2, "little") + chunk))
-            proc.stdin.flush()
+            psdu = psdu_frame(app_seq.to_bytes(2, "little") + chunk)
+            with wlock:
+                # The synthetic stream has no protected frame classes; an
+                # embedding app passes protected=True for control/IDR bodies.
+                cand = vtx.probe_mcs_for_seq(app_seq)
+                if cand is not None:
+                    probe = rate_spec(vtx.state.mode, cand, vtx.state.bw)
+                    buf = (ctl_frame(SET_RATE, probe.encode()) + psdu
+                           + ctl_frame(SET_RATE, _cmd_rate()))
+                else:
+                    buf = psdu
+                proc.stdin.write(buf)
+                proc.stdin.flush()
             app_seq = (app_seq + 1) & 0xFFF
         if now - last_log > 1000:
             last_log = now
+            probes = (f" probes={dict(sorted(vtx.probe_counters.items()))}"
+                      if vtx.mcs_probe else "")
             sys.stderr.write(f"<adaptive-vtx>state={vtx.rz.state} txagc={vtx.state.txagc} "
                              f"ov={vtx.state.overhead} ladder={vtx.state.ladder} "
-                             f"failsafe={vtx.state.failsafe}\n")
+                             f"failsafe={vtx.state.failsafe}{probes}\n")
             sys.stderr.flush()
         time.sleep(0.002)
 
@@ -404,6 +549,17 @@ def main():
     ap.add_argument("--feedback-ms", type=int, default=100,
                     help="VRX RCF feedback period (ms). Higher = fewer half-duplex "
                          "RX-blind windows on the ground (diagnostic knob)")
+    ap.add_argument("--mcs-probe", action="store_true",
+                    help="adjacent-MCS probing: the VTX flies the scheduled "
+                         "probe seqs on the neighbour rates, the VRX gates "
+                         "promotions on the measured candidate delivery. Must "
+                         "be set on BOTH roles (schedule = protocol invariant)")
+    ap.add_argument("--mcs-bias", type=_parse_mcs_bias, default=None,
+                    metavar="M:DB,...",
+                    help="VRX-only: shift the model's per-MCS snr_req (e.g. "
+                         "'4:-6,5:-8'; negative = model optimistic) — the "
+                         "deliberate miscalibration the probe A/B measures "
+                         "against")
     a = ap.parse_args()
 
     if a.role == "selftest":
@@ -419,9 +575,10 @@ def main():
     calib = em.load_calibration(a.energy_calib)
     if a.role == "vrx":
         run_vrx(proc, link, calib, a.vtx_id, a.channel,
-                feedback_period_ms=a.feedback_ms)
+                feedback_period_ms=a.feedback_ms,
+                mcs_probe=a.mcs_probe, mcs_bias=a.mcs_bias)
     else:
-        run_vtx(proc, a.vtx_id, a.video, a.channel)
+        run_vtx(proc, a.vtx_id, a.video, a.channel, mcs_probe=a.mcs_probe)
 
 
 if __name__ == "__main__":

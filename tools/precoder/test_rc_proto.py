@@ -103,3 +103,38 @@ def test_probe_schedule_is_shared_and_low_duty():
     assert probes == 30
     # two-rung set only uses two slots
     assert rp.probe_bw(16, (20, 40)) is None
+
+
+def test_mcs_probe_schedule_adjacent_and_boundaries():
+    mcs_set = tuple(range(8))
+    # slot 4 = the next rate above, slot 20 = the next below
+    assert rp.probe_mcs(4, 4, mcs_set) == 5
+    assert rp.probe_mcs(20, 4, mcs_set) == 3
+    assert rp.probe_mcs(5, 4, mcs_set) is None          # off-slot
+    assert rp.probe_mcs(4 + 64, 4, mcs_set) == 5        # periodic
+    # boundaries of the set: nothing adjacent -> None
+    assert rp.probe_mcs(4, 7, mcs_set) is None          # no rate above top
+    assert rp.probe_mcs(20, 0, mcs_set) is None         # no rate below bottom
+    # adjacency is within the SET, not selected±1 (sparse sets probe neighbours)
+    sparse = (0, 2, 4, 6, 7)
+    assert rp.probe_mcs(4, 4, sparse) == 6
+    assert rp.probe_mcs(20, 4, sparse) == 2
+    # selected not in the set: no well-defined neighbour -> never probe
+    assert rp.probe_mcs(4, 3, sparse) is None
+    assert rp.probe_mcs(20, 3, sparse) is None
+
+
+def test_mcs_probe_schedule_disjoint_duty_and_wrap():
+    bw_set = (20, 40, 80)
+    mcs_set = tuple(range(8))
+    # disjoint from the bandwidth-probe slots over the whole 12-bit seq space:
+    # every probe observation has exactly one changed variable
+    for s in range(4096):
+        assert not (rp.probe_bw(s, bw_set) is not None
+                    and rp.probe_mcs(s, 4, mcs_set) is not None)
+    # duty: 2 probes (one up, one down) per 64 seqs
+    probes = sum(1 for s in range(640) if rp.probe_mcs(s, 4, mcs_set) is not None)
+    assert probes == 20
+    # the period divides 4096, so the wrap is phase-safe: seq 4 and 4+4096k agree
+    assert 4096 % rp.MCS_PROBE_PERIOD == 0
+    assert rp.probe_mcs(4, 4, mcs_set) == rp.probe_mcs((4 + 4096) % 4096, 4, mcs_set)

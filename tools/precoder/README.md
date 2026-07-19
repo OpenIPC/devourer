@@ -90,6 +90,49 @@ OpenIPC's `alink` and other adaptive systems — is documented in
 `rc_proto.py`, `score.py`, `rendezvous.py`, `adaptive_link.py`) and the offline
 energy headline (`tests/sim_loop.py`) all live alongside this suite.
 
+### Live adjacent-MCS probes (opt-in)
+
+`--mcs-probe` (both roles) turns on measured candidate PER: ~3% of video seqs
+fly the rates adjacent to the commanded MCS (`rc_proto.probe_mcs`, slots 4/20
+of each 64-seq cycle — disjoint from the bandwidth-probe slots, so every probe
+changes exactly one variable). Schedule + `mcs_set` + the commanded profile are
+a VTX↔VRX **protocol invariant** (versioned: `rc_proto.MCS_PROBE_SCHED_VER`),
+like `bw_set`. The VRX attributes received/gap-lost probe seqs per candidate
+(`score.McsProbeWindow` — successes are rate-verified against the frame's
+PHY-decoded rate, losses are epoch-gated across profile transitions, crc_err
+bodies are never trusted for a seq) and the controller uses Wilson confidence
+bounds on the evidence (`Controller.report_mcs_delivery`): while the current
+point still works, a row above the current MCS is admissible only when its
+lower bound clears the raw frame delivery its FEC needs
+(`mcs_probe_min_samples` fresh samples within `mcs_probe_max_age_ms`), and a
+candidate whose upper bound cannot reach even the heaviest overhead's
+requirement is blocked for `mcs_probe_block_hold_ms`. The ACTIVE row is
+measured too — every non-probe seq attributes to it (bandwidth-probe slots
+excluded), so its evidence arrives at full frame rate and can condemn an
+operating point the model still believes in (interference and miscalibration
+are SNR-blind): after `mcs_probe_active_trip_ticks` consecutive condemned
+reports (the persistence guard that lets bursts ride through) the row is
+blocked, `cur_ok` fails despite the model, and the fast-down escapes — which
+is what makes the deliberately model-trusted cold pick safe: a cold pick that
+lands on a lie is measured out within seconds and the surviving block keeps
+it from being re-picked. Total video silence takes the symmetric stance: the
+VRX resets to MAX_RANGE and forgets the committed point (measured blocks
+survive), so an operating point it cannot even hear is never commanded
+indefinitely. Two consequences to know: the raw-delivery
+requirement rises steeply as overhead falls, so promotions land at mid/heavy
+FEC first and the (ungated) same-MCS overhead trim follows; and probes fly at
+the incumbent's TXAGC, so a promotion needs the faster rate to already work at
+the current power — with probing on, upward moves are rarer and evidence-paced.
+Up-probes never ride protected frames (`probe_mcs_for_seq(..., protected=True)`)
+nor failsafe/listen/discovery states, and `suspend_upward_probes()` is the
+thermal/congestion back-off hook. A/B evidence: `mcs_probe_ab_sim.py`
+(model-vs-truth miscalibration across static/triangle/fade/burst — the
+model-only arm promotes into an optimistically-biased row and stays, the probe
+arm holds the SLA) and `tests/mcs_probe_onair.sh` (paired on-air cells; the
+`--mcs-bias` flag fabricates the model optimism on the VRX). Off by default:
+`mcs_probe_enabled=False` is behaviourally identical to the pre-probe
+controller.
+
 ## End-to-end recipe
 
 ```sh

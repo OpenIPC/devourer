@@ -66,7 +66,7 @@ DRIVER_SETS = {
               "probes": kchansw_trace.RTW88_PROBES,
               "probe_map": {"drv": "kc_drv_set_channel",
                             "chip": "kc_chip_set_channel", "h2c": "kc_h2c"}},
-    "vendor": {"module": "88x2bu",
+    "vendor": {"module": "88x2bu_ohd",
                "probes": kchansw_trace.VENDOR_PROBES,
                "probe_map": {"drv": "kc_drv_set_channel",
                              "chip": "kc_chip_set_channel", "h2c": "kc_h2c"}},
@@ -1094,9 +1094,9 @@ def main() -> int:
         run_cold(s, args.cold_trials)
     elif args.cmd == "phase-b":
         # Module must already be inserted by kchansw_vendor_build.sh.
-        if run(["sh", "-c", "lsmod | grep -q '^88x2bu'"]).returncode != 0:
-            sys.stderr.write("phase-b: vendor module 88x2bu not loaded — run "
-                             "tests/kchansw_vendor_build.sh first\n")
+        if run(["sh", "-c", "lsmod | grep -q '^88x2bu_ohd'"]).returncode != 0:
+            sys.stderr.write("phase-b: vendor module 88x2bu_ohd not loaded — "
+                             "run tests/kchansw_vendor_build.sh load first\n")
             return 2
         configs = [
             Cfg("b-set-36-40", "set_channel", 36, 40, args.switches),

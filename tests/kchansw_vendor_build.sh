@@ -33,7 +33,7 @@ DUT_VIDPID="${DUT_VIDPID:-2357:012d}"
 VID="${DUT_VIDPID%%:*}"
 PID="${DUT_VIDPID##*:}"
 DRVDIR="reference/rtl88x2bu"
-KO="$DRVDIR/88x2bu.ko"
+KO="$DRVDIR/88x2bu_ohd.ko"  # the OpenHD fork renames the module
 INTREE_MOD="rtw88_8822bu"
 
 need_root() { [ "$(id -u)" -eq 0 ] || { echo "FAIL: needs root"; exit 2; }; }
@@ -120,7 +120,7 @@ do_load() {
 
 do_restore() {
   need_root
-  rmmod 88x2bu 2>/dev/null && echo "  rmmod 88x2bu" || true
+  rmmod 88x2bu_ohd 2>/dev/null && echo "  rmmod 88x2bu" || true
   modprobe "$INTREE_MOD" 2>/dev/null || true
   local devdir
   if devdir="$(find_devdir)"; then
@@ -133,7 +133,7 @@ do_restore() {
 }
 
 do_status() {
-  lsmod | grep -E '^88x2bu|^rtw88_8822bu' || echo "  neither module loaded"
+  lsmod | grep -E '^88x2bu_ohd|^rtw88_8822bu' || echo "  neither module loaded"
   local devdir
   if devdir="$(find_devdir)"; then
     local drv="none"

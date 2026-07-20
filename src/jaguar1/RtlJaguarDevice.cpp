@@ -1362,6 +1362,16 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   int rx_urbs = _cfg.rx.urbs.value_or(8);
   if (rx_urbs < 1)
     rx_urbs = 1;
+  /* 16 KB per URB, NOT more: some MediaTek Android xhci hosts never complete
+   * a bulk-IN read larger than 16 KB — LIBUSB_ERROR_TIMEOUT forever, zero RX
+   * (OpenIPC/PixelPilot#6). floppyhammer's #19 fixed this with 16 KB reads +
+   * the ≤16 KB rxagg_usb_size caps (RtlAdapter.cpp); the #213 transport split
+   * kept the rxagg half but regressed the read size to 32 KB. Free on healthy
+   * hosts: aggregates are capped ≤16 KB, so a 32 KB URB never filled past
+   * 16 KB anyway — each aggregate ends its URB via short packet. */
+  int rx_urb_bytes = _cfg.rx.urb_bytes.value_or(16 * 1024);
+  if (rx_urb_bytes < 4096)
+    rx_urb_bytes = 4096;
 
   /* Closed-loop CFO tracking on the receiver (#217): tick the controller on a
    * ~2 s cadence from the RX loop, mirroring Jaguar2/3. The crystal-cap field
@@ -1437,7 +1447,7 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
       _packetProcessor(p);
     }
   };
-  _device.bulk_read_async_loop(32 * 1024, rx_urbs, on_data, [this]() -> bool {
+  _device.bulk_read_async_loop(rx_urb_bytes, rx_urbs, on_data, [this]() -> bool {
     return should_stop || g_devourer_should_stop;
   });
 

@@ -143,6 +143,21 @@ does much — the structural win above is already the dominant effect:
   structurally-correct, low-risk path (and a base to develop further), not a
   measured CPU win at these rates.
 
+- **RX URB size** (`rx.urb_bytes` / `DEVOURER_RX_URB_BYTES`, default 16 KB on
+  the 11ac generations) is a compatibility constraint, not a throughput lever.
+  Some MediaTek Android xhci/usbfs stacks never complete a bulk-IN read larger
+  than 16 KB — `LIBUSB_ERROR_TIMEOUT` forever, zero RX with a green init
+  (OpenIPC/PixelPilot#6; fixed by floppyhammer's 16 KB reads in #19, regressed
+  to 32 KB by the #213 transport split, restored since). Bigger URBs buy
+  nothing on healthy hosts either: the device-side RX aggregation thresholds
+  (Jaguar1 `rxagg_usb_size` 0x3/0x1, Jaguar2/3 halmac agg page-th 0x03) cap
+  every aggregate at ≤16 KB, so each aggregate ends its URB via short packet
+  and a 32 KB buffer never filled past 16 KB anyway. If you raise the URB
+  size, raise the aggregation thresholds with it — but never let an aggregate
+  exceed the URB size, or a block spans two URBs and the RND8/next_offset
+  parse walk breaks. Kestrel keeps its own 32 KB ring (8852C RXAGG LEN_TH is
+  ~20 KB) and does not consume this knob.
+
 The honest summary: devourer's CPU advantage is the kernel stack it *doesn't*
 run, and that is already captured by the raw-injection design. There is no
 large additional CPU lever to pull on the 8812A on top of it.

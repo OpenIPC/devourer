@@ -432,8 +432,13 @@ void HalmacJaguar3MacInit::init_usb_cfg() {
    * RX-DMA engine does not flush received frames into the bulk-IN endpoint unless
    * aggregation is enabled (the 8822C does by default), so without this the EU
    * delivers zero RX bytes (usbmon: bulk-IN URBs complete empty) even with the RF
-   * in RX mode. Matches the kernel's values: 0x280=size0x5|timeout0x20<<8,
-   * 0x10C[2] BIT_RXDMA_AGG_EN, 0x283 USB-mode (bit7 clear). */
+   * in RX mode. Kernel values: 0x280=size0x5|timeout0x20<<8, 0x10C[2]
+   * BIT_RXDMA_AGG_EN, 0x283 USB-mode (bit7 clear). We deliberately diverge on
+   * the size: 0x03 (4 KB pages -> ≤12 KB aggregates) instead of the kernel's
+   * 0x05 (20 KB), because the RX ring posts 16 KB URBs (MediaTek Android
+   * hosts can't complete larger bulk-IN reads — OpenIPC/PixelPilot#6,
+   * DeviceConfig::Rx::urb_bytes) and an aggregate must never span two URBs or
+   * the next_offset walk breaks. Mirrors floppyhammer's Jaguar1 fix (#19). */
   constexpr uint16_t kTxdmaPqMap = 0x010C;
   constexpr uint16_t kRxdmaAggPgTh = 0x0280;
   uint8_t dma_usb_agg = _device.rtw_read8(kRxdmaAggPgTh + 3);
@@ -445,7 +450,7 @@ void HalmacJaguar3MacInit::init_usb_cfg() {
   _device.rtw_write8(kTxdmaPqMap, agg_enable);
   _device.rtw_write8(kRxdmaAggPgTh + 3, dma_usb_agg);
   _device.rtw_write16(kRxdmaAggPgTh,
-                      static_cast<uint16_t>(0x05 | (0x20 << 8))); /* size|timeout */
+                      static_cast<uint16_t>(0x03 | (0x20 << 8))); /* size|timeout */
 
   _logger->info("Jaguar3: init_usb_cfg (RXDMA_MODE=0x{:02x}, RX-agg EN) — RX DMA to bulk-IN",
                 v);

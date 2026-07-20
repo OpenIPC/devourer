@@ -52,7 +52,7 @@ public:
                    ChannelWidth_t bwmode, bool cache_rf);
 
   /* Firmware fast-path enabler (H2C 0x1D SINGLE_CHANNELSWITCH_V2 — protocol
-   * + bench: docs/kernel-channel-switch-offload.md). The sender is injected
+   * + bench: docs/experiments/kernel-channel-switch-offload.md). The sender is injected
    * by the device layer so the H2C rides HalJaguar3's HMEBOX box counter —
    * shared with the coex runtime thread's H2Cs and serialized by the same
    * _reg_mu that serializes FastRetune against the coex tick. Unset =

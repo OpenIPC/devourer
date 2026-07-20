@@ -5,11 +5,11 @@
 // ONE admitted data-frame opportunity — "dwell-1". The channel switch at each
 // slot boundary is the on-chip firmware switch when DEVOURER_FASTRETUNE_FW is
 // set (Jaguar2 8822B / Jaguar3 8822C/8822E; H2C 0x1D — see
-// docs/kernel-channel-switch-offload.md); otherwise the software FastRetune,
+// docs/experiments/kernel-channel-switch-offload.md); otherwise the software FastRetune,
 // so the two are a controlled A/B.
 //
 // This is the caller-side answer to the rejected MCC/FCS scheduler
-// (docs/mcc-fcs-investigation.md): the library already switches channels in
+// (docs/experiments/mcc-fcs-investigation.md): the library already switches channels in
 // ~1 ms and hops per-packet from a radiotap CHANNEL field. What a real hopping
 // DATA plane needs on top of that is bounded admission — one frame per slot,
 // placed inside a window that guarantees it finishes airing before the slot

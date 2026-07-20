@@ -357,7 +357,7 @@ the two tie (~2.3 ms — that die's RF settle dominates) but the fw path is
 band boundary** (~2–2.6 ms measured, vs the ~90 ms full-path fallback the sw
 fast path needs) — mixed-band FHSS plans become practical. Protocol, bench
 method and full distributions:
-[kernel-channel-switch-offload.md](kernel-channel-switch-offload.md).
+[kernel-channel-switch-offload.md](experiments/kernel-channel-switch-offload.md).
 
 Two techniques carried the newer generations to the table above, beyond the
 original tricks:

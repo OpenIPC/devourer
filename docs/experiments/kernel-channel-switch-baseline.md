@@ -7,7 +7,7 @@ against. Companion harness: `tests/kchansw_bench.py` (orchestrator),
 `tests/kchansw_trace.py` (ftrace session), `tests/kchansw_inject.py`
 (tagged-frame injector), `tests/kchansw_analyze.py` (offline analysis +
 gate verdicts). Devourer's own numbers for the same operation:
-[fhss.md](fhss.md) — FastRetune 0.55–2.5 ms per generation.
+[fhss.md](../fhss.md) — FastRetune 0.55–2.5 ms per generation.
 
 ## Method
 

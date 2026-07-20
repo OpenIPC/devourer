@@ -228,11 +228,11 @@ one `IRtlDevice` interface covers all four generations.
 - [Frequency hopping](docs/frequency-hopping.md) — how per-packet hopping
   works and what it costs on each chip, including the 8822B/C/E firmware
   channel-switch fast path (`DEVOURER_FASTRETUNE_FW`).
-- [Kernel channel-switch baseline](docs/kernel-channel-switch-baseline.md) +
-  [firmware offload](docs/kernel-channel-switch-offload.md) +
-  [MCC/FCS](docs/mcc-fcs-investigation.md) +
-  [dwell-1 A/B injection](docs/dwell1-ab-injection.md) +
-  [N-channel hopping](docs/n-channel-hopping.md) — how the standard
+- [Kernel channel-switch baseline](docs/experiments/kernel-channel-switch-baseline.md) +
+  [firmware offload](docs/experiments/kernel-channel-switch-offload.md) +
+  [MCC/FCS](docs/experiments/mcc-fcs-investigation.md) +
+  [dwell-1 A/B injection](docs/experiments/dwell1-ab-injection.md) +
+  [N-channel hopping](docs/experiments/n-channel-hopping.md) — how the standard
   Linux/Realtek drivers retune measured against devourer, where the chip
   firmware's own H2C 0x1D switch beats them, and a two-context per-slot data
   plane with zero wrong-channel over 100 k slots.

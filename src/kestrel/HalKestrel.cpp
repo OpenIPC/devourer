@@ -1621,7 +1621,7 @@ void HalKestrel::vnd_rf_rx_dck() {
   }
 }
 void HalKestrel::vnd_rf_tune(uint8_t band_type, uint8_t center,
-                                           ChannelWidth_t bw) {
+                                           ChannelWidth_t bw, bool diag) {
   if (!_halrf_ctx)
     return;
   uint8_t hbw = bw == CHANNEL_WIDTH_5    ? 6
@@ -1630,8 +1630,12 @@ void HalKestrel::vnd_rf_tune(uint8_t band_type, uint8_t center,
   kestrel_halrf_ctl_band_ch_bw(_halrf_ctx, band_type, center, hbw);
   kestrel_halrf_lck(_halrf_ctx); /* relock the synth (6 GHz VCO needs this) */
   /* True synth-lock ground truth (RF 0xb7[8]=LCK-done, 0=locked; RF18 readback)
-   * — the BB 0xc5[15] "synthLock" is unreliable. Logged per tune so 6 GHz 160
-   * lock can be distinguished from a downstream RX/test issue. */
+   * — the BB 0xc5[15] "synthLock" is unreliable. Four RF reads + a log line, so
+   * skipped on the FastRetune hot path (diag=false): the lock diagnostic is a
+   * full-set bring-up aid, not a per-hop need, and the reads are ~4 USB
+   * round-trips on this chip's EP0. */
+  if (!diag)
+    return;
   const uint32_t rf18a = kestrel_halrf_read_rf(_halrf_ctx, 0, 0x18);
   const uint32_t rf18b = kestrel_halrf_read_rf(_halrf_ctx, 1, 0x18);
   const uint32_t lckA = kestrel_halrf_read_rf(_halrf_ctx, 0, 0xb7) & (1u << 8);
@@ -1665,6 +1669,89 @@ void HalKestrel::vnd_rf_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw) {
   /* The TSSI/DPK trackers are permanently masked in the glue's
    * support_ability (EVM-settled there: they degrade TX under the fixed-dBm
    * power model). */
+}
+
+void HalKestrel::fast_lck_check_8852b() {
+  /* halrf_lck_check_8852b: poll RF 0xb7[8]=0 (LCK done), and if the SYN lock
+   * bit RF 0xc5[15]=0 run the MMD reset + a RF18 re-set — the physical-lock
+   * verify + recovery. Reads 0xb7/0xc5 (irreducible). */
+  int c = 0;
+  for (; c < 1000; ++c) {
+    if (rf_rrf(0, 0xb7, 1u << 8) == 0)
+      break;
+    delay_us(1);
+  }
+  if (c == 1000) {
+    _logger->warn("Kestrel fast retune: LCK timeout");
+    return;
+  }
+  if (rf_rrf(0, 0xc5, 1u << 15) == 0) { /* MMD reset */
+    rf_wrf(0, 0xd5, 1u << 8, 0x1);
+    rf_wrf(0, 0xd5, 1u << 6, 0x0);
+    rf_wrf(0, 0xd5, 1u << 6, 0x1);
+    rf_wrf(0, 0xd5, 1u << 8, 0x0);
+  }
+  for (int i = 0; i < 10; ++i)
+    delay_us(1);
+  if (rf_rrf(0, 0xc5, 1u << 15) == 0) { /* re-set RF 0x18 */
+    rf_wrf(0, 0xd3, 1u << 8, 0x1);
+    const uint32_t t = rf_rrf(0, 0x18, r::MASKRF);
+    rf_wrf(0, 0x18, r::MASKRF, t);
+    rf_wrf(0, 0xd3, 1u << 8, 0x0);
+  }
+}
+
+bool HalKestrel::fast_rf_channel_8852b(uint8_t channel) {
+  if (_variant != ChipVariant::C8852B || !_halbb_ctx)
+    return false; /* 8852C uses the vendored ctl_band_ch_bw */
+  /* Prime the touched dwords once per epoch (compose cache — one read each).
+   * Invalidated by every full set_channel. */
+  if (!_kfr_primed) {
+    _kfr_rf18_dav = rf_rrf(0, 0x18, r::MASKRF);    /* a-die (DAV) */
+    _kfr_rf18_ddv = rf_rrf(0, 0x10018, r::MASKRF); /* d-die (DDV) */
+    _kfr_cf_a = rf_rrf(0, 0xcf, r::MASKRF);
+    _kfr_cf_b = rf_rrf(1, 0xcf, r::MASKRF);
+    _kfr_primed = true;
+  }
+  /* halrf_ch_setting_8852b RF18 compose: channel [7:0], 5G bits [16]/[8],
+   * BIT(12); the rest rides along from the cached dword (write-only). */
+  auto compose = [&](uint32_t base) {
+    uint32_t v = (base & ~0x3e3ffu) | channel;
+    if (channel > 14)
+      v |= (1u << 16) | (1u << 8);
+    return (v & 0xf0fffu) | (1u << 12);
+  };
+  const uint32_t rf18_dav = compose(_kfr_rf18_dav);
+  const uint32_t rf18_ddv = compose(_kfr_rf18_ddv);
+  _kfr_rf18_dav = rf18_dav; /* refresh cache to what we wrote */
+  _kfr_rf18_ddv = rf18_ddv;
+  auto cf_toggle = [&](uint8_t path, uint32_t cf) {
+    rf_wrf(path, 0xcf, r::MASKRF, cf & ~1u);
+    rf_wrf(path, 0xcf, r::MASKRF, cf | 1u);
+  };
+  /* (1) path-A DAV = the synth relock (halrf_set_ch_8852b): hold RF 0xb1[8:6],
+   * set_s0_arfc18 (RF 0xd3[8] hold + RF18 write + LCK poll), restore, check. */
+  const uint32_t b1 = rf_rrf(0, 0xb1, r::MASKRF);
+  rf_wrf(0, 0xb1, 0x1c0, 0x1);
+  rf_wrf(0, 0xd3, 1u << 8, 0x1);
+  rf_wrf(0, 0x18, r::MASKRF, rf18_dav);
+  for (int c = 0; c < 1000; ++c) {
+    if (rf_rrf(0, 0xb7, 1u << 8) == 0)
+      break;
+    delay_us(1);
+  }
+  rf_wrf(0, 0xd3, 1u << 8, 0x0);
+  rf_wrf(0, 0xb1, r::MASKRF, b1);
+  fast_lck_check_8852b();
+  cf_toggle(0, _kfr_cf_a);
+  /* (2) path-B DAV, (3) path-A DDV, (4) path-B DDV: plain full-mask writes. */
+  rf_wrf(1, 0x18, r::MASKRF, rf18_dav);
+  cf_toggle(1, _kfr_cf_b);
+  rf_wrf(0, 0x10018, r::MASKRF, rf18_ddv);
+  cf_toggle(0, _kfr_cf_a);
+  rf_wrf(1, 0x10018, r::MASKRF, rf18_ddv);
+  cf_toggle(1, _kfr_cf_b);
+  return true;
 }
 
 void HalKestrel::vnd_bb_set_gain(uint8_t channel, uint8_t band_type) {
@@ -1876,10 +1963,21 @@ void HalKestrel::fast_retune(uint8_t channel) {
   /* Same-band retune: reuse the band established by the last set_channel (6 GHz
    * can't be re-derived from the channel number). */
   const uint8_t band_type = _cur_band_type;
-  /* Vendored path, matching set_channel (both chips). Lean vendored retune =
-   * RF synth tune + the per-band gain-error only. */
-  vnd_rf_tune(band_type, channel, CHANNEL_WIDTH_20);
-  vnd_bb_set_gain(channel, band_type);
+  /* Compose-cache write-only RF channel set (8852B): eliminates the vendored
+   * ctl_ch's per-hop RF18/0xcf reads. Falls back to the vendored tune on the
+   * 8852C or a cold cache; the synth-lock diagnostic reads are skipped either
+   * way (diag=false — see vnd_rf_tune). */
+  if (!fast_rf_channel_8852b(channel))
+    vnd_rf_tune(band_type, channel, CHANNEL_WIDTH_20, /*diag=*/false);
+  /* The halbb gain-error table is keyed by band + 5 GHz sub-band, not by the
+   * exact channel — re-apply it only when the sub-band bucket moves (a hop
+   * within one bucket, e.g. 36->44, needs no gain rewrite). A full
+   * set_channel invalidates the bucket. */
+  const int gb = gain_bucket(channel, band_type);
+  if (gb != _last_gain_bucket) {
+    vnd_bb_set_gain(channel, band_type);
+    _last_gain_bucket = gb;
+  }
   bb_reset_all();
   set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
   _logger->debug("Kestrel FastRetune: ch{} ({})", channel,
@@ -2056,7 +2154,24 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
                 channel, center, bw_mhz, is_2g ? "2.4G" : "5G",
                 (_txpwr_dbm_q2 + _txpwr_offset_qdb) / 4, _txpwr_offset_qdb);
 
+  /* The full BB config just applied this bucket's gain-error, so a same-bucket
+   * fast hop can skip the gain rewrite; the full RF tune moved RF18/0xcf, so
+   * the fast-channel compose cache must re-prime. */
+  _last_gain_bucket = gain_bucket(channel, band_type);
+  _kfr_primed = false;
   return true;
+}
+
+int HalKestrel::gain_bucket(uint8_t channel, uint8_t band_type) {
+  if (band_type == 0)
+    return 0; /* 2.4 GHz */
+  if (band_type == 2)
+    return 4; /* 6 GHz (single bucket here) */
+  if (channel <= 64)
+    return 1; /* 5G-L */
+  if (channel <= 144)
+    return 2; /* 5G-M */
+  return 3;   /* 5G-H */
 }
 
 bool HalKestrel::trx_cmac_rx_init() {

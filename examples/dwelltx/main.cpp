@@ -286,6 +286,11 @@ int main() {
       .f("admitted", admitted_ct)
       .f("dropped_late", dropped_late_ct)
       .f("empty", empty_ct);
+  /* Release the device (its handle + any worker threads — e.g. the Kestrel
+   * planes) BEFORE libusb_exit; otherwise libusb tears down under a live
+   * handle and asserts in its mutex teardown. */
+  dev.reset();
+  usb_lock.reset();
   libusb_exit(ctx);
   return 0;
 }

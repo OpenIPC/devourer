@@ -148,8 +148,8 @@ int main() {
       pos = c + 1;
     }
   }
-  if (chans.size() != 2) {
-    logger->error("DEVOURER_DWELL_CHANNELS must name exactly two channels (A,B)");
+  if (chans.size() < 2) {
+    logger->error("DEVOURER_DWELL_CHANNELS must name at least two channels");
     libusb_exit(ctx);
     return 2;
   }
@@ -178,8 +178,8 @@ int main() {
   const uint32_t seed_fp = sched->fingerprint();
 
   devourer::Ev(ev, "dwell.start")
-      .f("chA", chans[0])
-      .f("chB", chans[1])
+      .arr("channels", chans.data(), chans.size())
+      .f("n", (long long)chans.size())
       .f("slot_ms", slot_ms)
       .f("settle_us", settle_us)
       .f("guard_us", guard_us)
@@ -213,7 +213,8 @@ int main() {
         ++empty_ct; // previous slot aired nothing (shouldn't happen w/ budget)
       cur_slot = slot;
       admitted = false;
-      const size_t idx = sched->channel_index(static_cast<uint64_t>(slot), 2);
+      const size_t idx =
+          sched->channel_index(static_cast<uint64_t>(slot), chans.size());
       const int ch = chans[idx];
       const auto sw0 = clock_t_::now();
       dev->FastRetune(static_cast<uint8_t>(ch), /*cache_rf=*/hop_fast != 2);
@@ -251,7 +252,8 @@ int main() {
         continue;
       }
       // --- admit exactly one frame, tagged by the marker's slot --------------
-      const size_t idx = sched->channel_index(static_cast<uint64_t>(slot), 2);
+      const size_t idx =
+          sched->channel_index(static_cast<uint64_t>(slot), chans.size());
       buf.assign(radiotap.begin(), radiotap.end());
       buf.insert(buf.end(), dot11.begin(), dot11.end());
       devourer::HopSyncMarker m{seed_fp, epoch, static_cast<uint32_t>(t % slot_us),

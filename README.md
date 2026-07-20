@@ -231,7 +231,8 @@ one `IRtlDevice` interface covers all four generations.
 - [Kernel channel-switch baseline](docs/kernel-channel-switch-baseline.md) +
   [firmware offload](docs/kernel-channel-switch-offload.md) +
   [MCC/FCS](docs/mcc-fcs-investigation.md) +
-  [dwell-1 A/B injection](docs/dwell1-ab-injection.md) — how the standard
+  [dwell-1 A/B injection](docs/dwell1-ab-injection.md) +
+  [N-channel hopping](docs/n-channel-hopping.md) — how the standard
   Linux/Realtek drivers retune measured against devourer, where the chip
   firmware's own H2C 0x1D switch beats them, and a two-context per-slot data
   plane with zero wrong-channel over 100 k slots.

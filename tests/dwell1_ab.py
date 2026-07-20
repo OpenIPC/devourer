@@ -78,64 +78,122 @@ def _iter_frames(path):
             continue
         epoch = struct.unpack_from("<I", m, 11)[0]
         slot = struct.unpack_from("<Q", m, 15)[0]
+        rssi = ev.get("rssi")
         yield {
             "host_mono_ns": int(host),
             "tsfl_us": int(ev.get("tsfl", 0)),
             "slot": slot,
             "epoch": epoch,
+            # path-A RSSI for leakage-robust attribution (own channel is the
+            # strongest decode; an adjacent oracle hears a leaked copy weaker).
+            "rssi": (rssi[0] if isinstance(rssi, list) and rssi else None),
         }
 
 
-def analyze(out_dir, chans, seq=True):
-    """Attribute every decoded marker to its slot/channel and score the
-    dwell-1 contract. seq=True => public sequential schedule (slot % 2)."""
+def expected_channel_fn(chans, seed):
+    """slot -> expected channel. Sequential = chans[slot % n]; keyed reuses
+    the verified C++ HopSchedule port in tests/hop_rx_probe.py so the Python
+    attribution matches the on-air order bit-for-bit."""
+    n = len(chans)
+    if not seed:
+        return lambda slot: chans[slot % n]
+    cache = {}   # round -> channel order
+
+    def f(slot):
+        rnd = slot // n
+        if rnd not in cache:
+            cache[rnd] = _keyed_round(seed, chans, rnd)
+        return cache[rnd][slot % n]
+    return f
+
+
+def _keyed_round(seed, chans, rnd):
+    """The channel order for one keyed round (matches HopSchedule::permutation
+    with round=rnd) — a thin wrapper over hop_rx_probe's siphash24."""
+    import hop_rx_probe as hp
+    s = seed[2:] if seed.lower().startswith("0x") else seed
+    key = bytes.fromhex(s.zfill(32))
+    p = list(range(len(chans)))
+    counter = 0
+    for i in range(len(p), 1, -1):
+        limit = 0xffffffffffffffff - (0xffffffffffffffff % i)
+        while True:
+            x = hp.siphash24(key, b"H" + rnd.to_bytes(8, "little")
+                             + counter.to_bytes(8, "little"))
+            counter += 1
+            if x < limit:
+                break
+        j = x % i
+        p[i - 1], p[j] = p[j], p[i - 1]
+    return [chans[i] for i in p]
+
+
+def analyze(out_dir, chans, seed=""):
+    """Attribute every decoded marker to its slot's channel and score the
+    dwell-1 contract for an arbitrary N-channel schedule. Attribution is
+    leakage-robust: a slot is attributed to the oracle that decoded it with
+    the highest RSSI (own channel dominates; an adjacent oracle hears only a
+    weaker leaked copy), and wrong-channel = that oracle's channel !=
+    expected."""
     with open(os.path.join(out_dir, "meta.json")) as f:
         meta = json.load(f)
+    seed = seed or meta.get("seed", "")
+    expected_ch = expected_channel_fn(chans, seed)
     tx = _load_tx(out_dir)
     admitted_slots = {r["slot"] for r in tx if r["ev"] == "dwell.tx"}
     dropped_slots = {r["slot"] for r in tx if r["ev"] == "dwell.drop"}
 
-    # Per-oracle: which slots it decoded, with counts (dup detection).
+    # Per (role, channel): slot -> list of decodes. One oracle per channel.
     per = {}
-    fits = {}
-    for role, ch in (("a", chans[0]), ("b", chans[1])):
-        frames = list(_iter_frames(os.path.join(out_dir, f"oracle_{role}.jsonl")))
-        # tsfl fit for timing (best-effort; attribution doesn't need it).
-        uf = ka.unwrap_tsfl([{**fr, "ctr": fr["slot"]} for fr in frames])
-        fit = ka.fit_tsfl(uf)
-        fits[role] = fit
+    dup = 0
+    for role, ch in zip(_roles(len(chans)), chans):
+        path = os.path.join(out_dir, f"oracle_{role}.jsonl")
+        if not os.path.exists(path):
+            continue
         counts = {}
-        for fr in frames:
+        for fr in _iter_frames(path):
             counts.setdefault(fr["slot"], []).append(fr)
-        per[(role, ch)] = counts
-
-    def expected_ch(slot):
-        return chans[slot % 2] if seq else None
-
-    wrong = []          # frames decoded on the wrong channel
-    dup = 0             # same slot decoded >1x on the same oracle (re-air)
-    correct_slots = set()
-    for (role, ch), counts in per.items():
         for slot, frs in counts.items():
             if len(frs) > 1:
                 dup += len(frs) - 1
-            if expected_ch(slot) == ch:
-                correct_slots.add(slot)
-            else:
-                wrong.append({"slot": slot, "decoded_on": ch,
-                              "expected": expected_ch(slot)})
+        per[(role, ch)] = counts
+
+    # Best-RSSI attribution per slot across all oracles.
+    best = {}  # slot -> (rssi, decoded_ch)
+    for (role, ch), counts in per.items():
+        for slot, frs in counts.items():
+            r = max((f["rssi"] for f in frs if f["rssi"] is not None),
+                    default=-999)
+            if slot not in best or r > best[slot][0]:
+                best[slot] = (r, ch)
+
+    correct_slots, wrong = set(), []
+    for slot, (r, ch) in best.items():
+        if ch == expected_ch(slot):
+            correct_slots.add(slot)
+        else:
+            wrong.append({"slot": slot, "decoded_on": ch,
+                          "expected": expected_ch(slot), "rssi": r})
 
     n_admitted = len(admitted_slots)
     delivered = len(admitted_slots & correct_slots)
+    slot_ms = meta.get("slot_ms", 20)
+    payload = meta.get("airtime_bytes", 96)
+    wall_s = n_admitted * slot_ms / 1e3
     result = {
+        "n_channels": len(chans),
+        "channels": chans,
+        "keyed": bool(seed),
         "slots_admitted": n_admitted,
         "slots_dropped_late": len(dropped_slots),
         "delivered_correct_channel": delivered,
         "delivery_frac": (delivered / n_admitted) if n_admitted else None,
         "wrong_channel": len(wrong),
         "duplicate_reair": dup,
+        "goodput_kbps": (delivered * payload * 8 / wall_s / 1e3)
+                        if wall_s else None,
         "fw": meta.get("fw"),
-        "slot_ms": meta.get("slot_ms"),
+        "slot_ms": slot_ms,
     }
     # Host-side switch cost + admission placement from the tx event stream.
     sw = np.array([r["switch_us"] for r in tx if r["ev"] == "dwell.slot"
@@ -177,6 +235,10 @@ def _load_tx(out_dir):
     return rows
 
 
+def _roles(n):
+    return [chr(ord("a") + i) for i in range(n)]
+
+
 def spawn_dwelltx(dut, chans, a, out_dir):
     regress.detach_from_host_kernel(dut)
     env = dict(os.environ)
@@ -184,11 +246,17 @@ def spawn_dwelltx(dut, chans, a, out_dir):
         "DEVOURER_VID": f"0x{dut.vid}", "DEVOURER_PID": f"0x{dut.pid}",
         "DEVOURER_EVENTS": "stdout", "DEVOURER_LOG_LEVEL": "warn",
         "DEVOURER_FASTRETUNE_FW": str(a.fw),
-        "DEVOURER_DWELL_CHANNELS": f"{chans[0]},{chans[1]}",
+        "DEVOURER_DWELL_CHANNELS": ",".join(str(c) for c in chans),
         "DEVOURER_DWELL_SLOT_MS": str(a.slot_ms),
         "DEVOURER_DWELL_SLOTS": str(a.slots + 20),  # +warmup
         "DEVOURER_HOP_FAST": str(a.hop_fast),
     })
+    if a.seed:
+        env["DEVOURER_HOP_SEED"] = a.seed
+    if a.tx_pwr:
+        # Near-field oracles saturate (strong RSSI, poor EVM -> CRC fail) at
+        # full power; a modest flat index restores clean decodes on all N.
+        env["DEVOURER_TX_PWR"] = str(a.tx_pwr)
     if a.late_us:
         env["DEVOURER_DWELL_LATE_US"] = str(a.late_us)
     if a.settle_us:
@@ -203,27 +271,32 @@ def cmd_run(a):
     out = a.out
     os.makedirs(out, exist_ok=True)
     chans = [int(c) for c in a.channels.split(",")]
+    pids = [p for p in a.oracle_pids.split(",") if p]
+    if len(pids) < len(chans):
+        raise SystemExit(f"need one --oracle-pids entry per channel: "
+                         f"{len(chans)} channels, {len(pids)} oracle pids")
     dut = kb.find_dut(a.dut_pid)
-    oa = kb.spawn_oracle("a", kb.find_dut(a.oracle_a_pid), chans[0], "canon", out)
-    ob = kb.spawn_oracle("b", kb.find_dut(a.oracle_b_pid), chans[1], "canon", out)
+    oracles = []
+    for role, ch, pid in zip(_roles(len(chans)), chans, pids):
+        oracles.append(kb.spawn_oracle(role, kb.find_dut(pid), ch, "canon", out))
     with open(os.path.join(out, "meta.json"), "w") as f:
         json.dump({"chans": chans, "slot_ms": a.slot_ms, "slots": a.slots,
-                   "fw": a.fw, "late_us": a.late_us}, f)
+                   "fw": a.fw, "late_us": a.late_us, "seed": a.seed}, f)
     tx = spawn_dwelltx(dut, chans, a, out)
     kb.log(f"dwell1 run: {chans} slot={a.slot_ms}ms slots={a.slots} "
-           f"fw={a.fw} late_us={a.late_us}")
+           f"fw={a.fw} seed={a.seed or '-'} late_us={a.late_us}")
     budget = (a.slots + 30) * (a.slot_ms / 1e3) + 30
     end = time.monotonic() + budget
     while time.monotonic() < end and tx.alive():
         time.sleep(2)
     tx.stop()
-    oa.stop()
-    ob.stop()
+    for o in oracles:
+        o.stop()
     if os.environ.get("SUDO_USER"):
         import subprocess
         subprocess.run(["chown", "-R", f"{os.environ['SUDO_USER']}:", out],
                        capture_output=True)
-    res = analyze(out, chans)
+    res = analyze(out, chans, a.seed)
     print(json.dumps(res, indent=2))
     with open(os.path.join(out, "summary.json"), "w") as f:
         json.dump(res, f, indent=2)
@@ -244,9 +317,15 @@ def main():
                     help="post-switch admission delay; fw switch needs "
                          "~4000 (its RF completes async after FastRetune "
                          "returns), sw switch is fine at the demo default")
+    ap.add_argument("--seed", default="",
+                    help="keyed hop schedule (hex); empty = public sequential")
+    ap.add_argument("--tx-pwr", type=int, default=0,
+                    help="flat DUT TXAGC index; ~10 avoids near-field oracle "
+                         "saturation on this rig (0 = calibrated default)")
     ap.add_argument("--dut-pid", default="2357:012d")
-    ap.add_argument("--oracle-a-pid", default="0bda:8812")
-    ap.add_argument("--oracle-b-pid", default="0bda:c812")
+    ap.add_argument("--oracle-pids", default="2357:0120,0bda:c812",
+                    help="comma-separated VID:PID, one oracle per channel in "
+                         "--channels order")
     a = ap.parse_args()
     if a.cmd == "run":
         if os.geteuid() != 0:
@@ -255,8 +334,8 @@ def main():
         regress._install_cleanup_handlers()
         return cmd_run(a)
     if a.cmd == "analyze":
-        print(json.dumps(analyze(a.out, [int(c) for c in a.channels.split(",")]),
-                         indent=2))
+        print(json.dumps(analyze(a.out, [int(c) for c in a.channels.split(",")],
+                                 a.seed), indent=2))
     return 0
 
 

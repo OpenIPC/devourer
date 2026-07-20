@@ -41,13 +41,14 @@ def ch_to_freq(ch):
     return 5000 + 5 * ch if ch > 14 else 2407 + 5 * ch
 
 
-def set_monitor(iface, ch):
+def set_monitor(iface, ch, ht=""):
     run(["ip", "link", "set", iface, "down"])
     r = run(["iw", "dev", iface, "set", "type", "monitor"])
     if r.returncode != 0:
         raise RuntimeError(f"set type monitor: {r.stderr.strip()}")
     run(["ip", "link", "set", iface, "up"])
-    r = run(["iw", "dev", iface, "set", "channel", str(ch)])
+    r = run(["iw", "dev", iface, "set", "channel", str(ch)]
+            + ([ht] if ht else []))
     if r.returncode != 0:
         raise RuntimeError(f"set channel {ch}: {r.stderr.strip()}")
 
@@ -71,8 +72,8 @@ def loop_set_channel(a, ctl, ts):
                   f"from={frm} to={to} mono={t_req}")
         ctl.write(json.dumps({"ev": "kchansw.req", "i": i, "from": frm,
                               "to": to, "mono_ns": t_req}) + "\n")
-        r = run(["iw", "dev", a.iface, "set", "channel", str(to)],
-                timeout=10)
+        r = run(["iw", "dev", a.iface, "set", "channel", str(to)]
+                + ([a.ht] if a.ht else []), timeout=10)
         t_done = time.monotonic_ns()
         ctl.write(json.dumps({"ev": "kchansw.done", "i": i,
                               "mono_ns": t_done, "rc": r.returncode,
@@ -127,6 +128,7 @@ def main():
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--dwell-ms", type=int, default=150)
     ap.add_argument("--roc-ms", type=int, default=20)
+    ap.add_argument("--ht", default="", help="HT40+/HT40- on both endpoints")
     ap.add_argument("--hz", type=float, default=2000.0)
     ap.add_argument("--roc-monitor-vif", type=int, default=1,
                     help="0 = trace-only ROC: do NOT add the second monitor "
@@ -145,7 +147,7 @@ def main():
 
     roc_mon = None
     if a.prim == "set-channel":
-        set_monitor(a.iface, a.from_ch)
+        set_monitor(a.iface, a.from_ch, a.ht)
         inj_iface = a.iface
     else:
         # ROC needs a managed iface; a second monitor vif carries the

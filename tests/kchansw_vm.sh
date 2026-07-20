@@ -20,7 +20,9 @@
 #   tests/kchansw_vm.sh status
 #
 # Env: VM_NAME (devourer-testrig), VM_USER (invoking user), DUT_VIDPID
-# (2357:012d), USB3_PORT_DISABLE (usb10-port2 — empty to skip the USB2 pin).
+# (2357:012d), USB3_PORT_DISABLE (usb10-port2 — empty to skip the USB2 pin),
+# VM_MODPARAMS (extra insmod params, e.g. rtw_ch_switch_offload=1 to route
+# every set-channel through the 8822B fw offload H2C 0x1D).
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -90,7 +92,7 @@ vm_load() {
   vssh "sudo rmmod 88x2bu_ohd 2>/dev/null; sudo rmmod 8812bu 2>/dev/null; \
         ko=\$(ls -t $VM_DIR/rtl88x2bu/*.ko | head -1); \
         sudo modprobe cfg80211 && \
-        sudo insmod \$ko rtw_wifi_spec=1 && \
+        sudo insmod \$ko rtw_wifi_spec=1 ${VM_MODPARAMS:-} && \
         for i in \$(seq 1 20); do \
           w=\$(ls /sys/class/net | grep -v -e lo -e enp | head -1); \
           [ -n \"\$w\" ] && { echo NETDEV=\$w; exit 0; }; sleep 0.5; \

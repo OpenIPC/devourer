@@ -91,6 +91,10 @@ VENDOR_PROBES = [
     ("kc_chip_set_channel", "phy_SwChnlAndSetBwMode8822B", True),
     ("kc_h2c", "rtw_hal_fill_h2c_cmd", True),
     ("kc_tdls_ch_sw_offload", "rtw_hal_ch_sw_oper_offload", True),
+    # The 8822B's actual fw switch (H2C 0x1D SINGLE_CHANNELSWITCH_V2,
+    # armed by rtw_ch_switch_offload=1): entry→return brackets the H2C
+    # submit + the C2H CUR_CHANNEL completion wait (sctx timeout 10 ms).
+    ("kc_fw_ch_sw", "rtw_hal_switch_chnl_and_set_bw_offload", True),
 ]
 RTW89_PROBES = [
     ("kc_drv_set_channel", "rtw89_set_channel", True),

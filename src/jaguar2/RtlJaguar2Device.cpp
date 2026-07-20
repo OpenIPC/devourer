@@ -562,7 +562,14 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
       off += f.next_offset;
     }
   };
-  _device.bulk_read_async_loop(32 * 1024, 8, on_data, [this]() -> bool {
+  /* ≤16 KB per URB — some MediaTek Android xhci hosts never complete larger
+   * bulk-IN reads (OpenIPC/PixelPilot#6; see DeviceConfig::Rx::urb_bytes).
+   * Paired with the ≤16 KB agg threshold in HalmacJaguar2MacInit::init_usb_cfg
+   * so an aggregate never spans two URBs and breaks the next_offset walk. */
+  int rx_urb_bytes = _cfg.rx.urb_bytes.value_or(16 * 1024);
+  if (rx_urb_bytes < 4096)
+    rx_urb_bytes = 4096;
+  _device.bulk_read_async_loop(rx_urb_bytes, 8, on_data, [this]() -> bool {
     return _rx_stop || g_devourer_should_stop;
   });
   stop_dig();

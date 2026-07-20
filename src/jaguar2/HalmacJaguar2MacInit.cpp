@@ -684,8 +684,13 @@ void HalmacJaguar2MacInit::init_usb_cfg() {
   _device.rtw_write8(REG_TXDMA_PQ_MAP, agg_enable);
   _device.rtw_write8(kRxdmaAggPgTh + 3, dma_usb_agg);
   const uint8_t ss = (_device.rtw_read8(REG_SYS_CFG2 + 3) == 0x20);
+  /* Agg page threshold 0x03 (4 KB pages -> ≤12 KB aggregates), down from the
+   * halmac default 0x05 (20 KB): the RX ring posts 16 KB URBs (MediaTek
+   * Android hosts can't complete larger bulk-IN reads — OpenIPC/PixelPilot#6,
+   * DeviceConfig::Rx::urb_bytes) and an aggregate must never span two URBs or
+   * the next_offset walk breaks. Mirrors floppyhammer's Jaguar1 fix (#19). */
   _device.rtw_write16(kRxdmaAggPgTh,
-                      static_cast<uint16_t>(0x05 | ((ss ? 0x0A : 0x20) << 8)));
+                      static_cast<uint16_t>(0x03 | ((ss ? 0x0A : 0x20) << 8)));
   _logger->info("Jaguar2: init_usb_cfg (RXDMA_MODE=0x{:02x}, RX-agg EN)", v);
 }
 

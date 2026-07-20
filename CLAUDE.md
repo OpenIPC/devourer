@@ -487,6 +487,15 @@ generators, never the output files.
   only helps when firmware state is intact.
 - **The chip retains state across soft re-init** — cold-bisect hardware
   problems with a VBUS power-cycle, not a re-run.
+- **MediaTek Android hosts cap bulk-IN reads at 16 KB**: some MTK xhci/usbfs
+  stacks (Dimensity 810, Helio G99, MT6765) never complete a larger bulk-IN
+  transfer — `LIBUSB_ERROR_TIMEOUT` forever, zero RX with a green init
+  (OpenIPC/PixelPilot#6). The 11ac RX rings therefore post 16 KB URBs paired
+  with ≤16 KB device-side aggregation caps (`DeviceConfig::Rx::urb_bytes`,
+  `DEVOURER_RX_URB_BYTES`); raise both together or MTK hosts go silent, and
+  never let an aggregate exceed the URB size or the parse walk breaks.
+  Kestrel is exempt (8852C RXAGG LEN_TH ~20 KB needs its 32 KB ring) and
+  unvalidated on MTK hosts.
 
 ## TX path
 

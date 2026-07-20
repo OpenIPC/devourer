@@ -230,9 +230,11 @@ one `IRtlDevice` interface covers all four generations.
   channel-switch fast path (`DEVOURER_FASTRETUNE_FW`).
 - [Kernel channel-switch baseline](docs/kernel-channel-switch-baseline.md) +
   [firmware offload](docs/kernel-channel-switch-offload.md) +
-  [MCC/FCS](docs/mcc-fcs-investigation.md) — how the standard Linux/Realtek
-  drivers retune measured against devourer, and where the chip firmware's own
-  H2C 0x1D switch beats them.
+  [MCC/FCS](docs/mcc-fcs-investigation.md) +
+  [dwell-1 A/B injection](docs/dwell1-ab-injection.md) — how the standard
+  Linux/Realtek drivers retune measured against devourer, where the chip
+  firmware's own H2C 0x1D switch beats them, and a two-context per-slot data
+  plane with zero wrong-channel over 100 k slots.
 - [FHSS](docs/fhss.md) — the anti-jam design article: keyed SipHash hop
   schedules, slot-locked lockstep RX, and
   [jammer resilience](docs/jammer-resilience.md) — measured delivery against

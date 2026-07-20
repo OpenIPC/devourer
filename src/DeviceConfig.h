@@ -218,8 +218,8 @@ struct DeviceConfig {
     bool thermal_track = true;
     /* env: DEVOURER_FASTRETUNE_FW — FastRetune firmware fast path (H2C 0x1D
      * SINGLE_CHANNELSWITCH_V2, the switch the vendor drivers gate behind
-     * rtw_ch_switch_offload) on the 8822B (Jaguar2) and 8822C/8822E
-     * (Jaguar3): 0 = off (software compose path), 1 = firmware switch for
+     * rtw_ch_switch_offload) on the Jaguar2 dies (8822B, 8821C) and the
+     * Jaguar3 dies (8822C, 8822E): 0 = off (software compose path), 1 = firmware switch for
      * intra-band 20/40 MHz hops, 2 = additionally accept cross-band hops
      * (the firmware reprograms the band block; TXAGC baseline stays the
      * bring-up band's — active power knobs re-fold). Bench + protocol:

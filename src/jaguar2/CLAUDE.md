@@ -34,8 +34,10 @@ Jaguar1 (shared `PhyTableLoader`).
   RF18-edge bug.
 - The TXAGC block is write-only, so `GetTxPowerState` reports the software
   shadow (`hw_readback=false`).
-- **8822B firmware channel switch** (H2C 0x1D `SINGLE_CHANNELSWITCH_V2`,
-  `fw_channel_switch` + the `fastretune_fw` knob): the fw executes the whole
+- **Firmware channel switch** (H2C 0x1D `SINGLE_CHANNELSWITCH_V2`,
+  `fw_channel_switch` + the `fastretune_fw` knob; both Jaguar2 dies — the
+  path is variant-generic, 8822B on-air-validated, 8821C code-covered
+  pending hardware): the fw executes the whole
   retune in ~1–2 ms and reports C2H `CUR_CHANNEL`. Never poll RF18 *during*
   the switch — the PI reads contend with the firmware's RF-bus writes and
   triple the on-air dark time; confirm the previous switch at the next hop

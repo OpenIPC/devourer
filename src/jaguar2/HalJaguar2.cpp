@@ -1336,12 +1336,16 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
     return true; /* no-op hop */
 
   /* Firmware fast path (DEVOURER_FASTRETUNE_FW): hand the whole retune to
-   * the 8822B firmware via H2C 0x1D instead of the composed register
-   * sequence below. Mode 2 additionally accepts band changes — the firmware
-   * reprograms the band block itself (bench-measured ~2 ms cross-band,
-   * docs/kernel-channel-switch-offload.md) — which the software path cannot.
-   * 20/40 MHz only (the 80 MHz primary-idx pairing stays on the sw path). */
-  if (_cfg.tuning.fastretune_fw > 0 && _variant == ChipVariant::C8822B &&
+   * the firmware via H2C 0x1D instead of the composed register sequence
+   * below. Both Jaguar2 dies expose it — the H2C submit (HMEBOX) and the
+   * RF18-channel confirm are variant-generic, and the vendor 8821C firmware
+   * carries the same SINGLE_CHANNELSWITCH_V2 offload as the 8822B's
+   * (on-air-validated) one. Mode 2 additionally accepts band changes — the
+   * firmware reprograms the band block itself (bench-measured ~2 ms
+   * cross-band, docs/kernel-channel-switch-offload.md) — which the software
+   * path cannot. 20/40 MHz only (the 80 MHz primary-idx pairing stays on the
+   * sw path). */
+  if (_cfg.tuning.fastretune_fw > 0 &&
       (!band_change || _cfg.tuning.fastretune_fw >= 2) &&
       (bw == 0 /*20*/ || bw == 1 /*40*/)) {
     devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j2fw",

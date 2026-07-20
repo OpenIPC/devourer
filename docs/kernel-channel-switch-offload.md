@@ -105,9 +105,9 @@ Reading:
 
 ## The devourer port (`DEVOURER_FASTRETUNE_FW`)
 
-Devourer ships the offload as a `FastRetune` fast path
-(`HalJaguar2::fw_channel_switch` on the 8822B;
-`RadioManagementJaguar3::fast_retune`'s fw block on the 8822C/8822E): the
+Devourer ships the offload as a `FastRetune` fast path across both Jaguar2
+dies (`HalJaguar2::fw_channel_switch`) and both Jaguar3 dies
+(`RadioManagementJaguar3::fast_retune`'s fw block): the
 H2C rides the classic HMEBOX mailboxes devourer already drives, and
 completion is
 **fire-and-confirm-later** — polling RF18 during the switch measurably
@@ -144,9 +144,18 @@ because the 8822C's RF settle dominates its dark time whichever engine
 sequences it; the fw win there is the per-hop host cost (~0.6 ms H2C
 submit vs ~1.9 ms of composed USB writes). Cross-band 36↔6 through the
 firmware: **2.63 ms median** (n=379, p99 11.0) versus the ~90 ms full
-path. Hopping-RX decode identical fw vs sw. The 8822E shares the code
-path (not yet on-air-validated — no E-die on the rig this session); its
-spur channels conservatively decline the fast path, fw included.
+path. Hopping-RX decode identical fw vs sw. The 8822E (RTL8822EU) runs the
+same code path and is on-air-validated too: 36↔40 fw **1.92 ms median**
+(n=797, p99 5.16), in line with the 8822C; its spur channels
+conservatively decline the fast path, fw included.
+
+**Chip coverage.** The fw fast path covers both Jaguar2 dies (8822B, 8821C)
+and both Jaguar3 dies (8822C, 8822E). On-air-validated: 8822B, 8822C,
+8822E. The 8821C shares the variant-generic H2C submit and RF18-channel
+confirm and the vendor 8821C firmware carries the same
+`SINGLE_CHANNELSWITCH_V2` offload, but no 8821C part was on the rig, so its
+fw path is code-covered pending a hardware pass. Jaguar1 has no such
+firmware switch; Kestrel (rtw89) is a separate architecture.
 
 ## Go/no-go for the series
 

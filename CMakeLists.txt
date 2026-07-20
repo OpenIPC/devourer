@@ -494,6 +494,17 @@ add_executable(txdemo
 target_link_libraries(txdemo PUBLIC devourer PRIVATE PkgConfig::libusb)
 target_include_directories(txdemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
+# dwell-1 A/B injection over the firmware channel switch (issue #272 data
+# plane): one admitted data-frame opportunity per wall-clock slot, with
+# bounded admission so a frame for context A can never air on B.
+add_executable(dwelltx
+    examples/dwelltx/main.cpp
+    examples/common/env_config.cpp
+    examples/common/usb_select.cpp
+)
+target_link_libraries(dwelltx PUBLIC devourer PRIVATE PkgConfig::libusb)
+target_include_directories(dwelltx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+
 # Pre-modulator subcarrier PoC: transmits PSDU bytes shaped by
 # tools/precoder/encode_subcarriers.py so chosen OFDM data subcarriers carry
 # chosen bits. Single-stream BPSK / HT MCS0 / BCC on 8812/8821/8811.

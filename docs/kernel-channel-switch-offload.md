@@ -164,5 +164,8 @@ already has (H2C submit, C2H over the RX path). Adopting it as a
 Caveats to carry into the port: verify per-rate TX power after fw
 switches (`PWR_IDX_UPDATE_EN` semantics), and the C2H completion must be
 drained — TX-only sessions need `DEVOURER_TX_WITH_RX=thread` or a poll.
-For experiment 3, MCC/FCS remains the scheduler-grade candidate (dwell
-schedules, two contexts); 0x1D is the retune primitive underneath it.
+MCC/FCS — the two-context firmware time-share — was examined next and
+rejected as a hopping primitive: its schedule is coarse (TU-quantized
+slots, fixed ~102 ms period, two contexts, non-groupable pairs only) and
+the fast switch underneath it is this same H2C 0x1D. See
+[mcc-fcs-investigation.md](mcc-fcs-investigation.md).

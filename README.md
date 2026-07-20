@@ -226,7 +226,13 @@ one `IRtlDevice` interface covers all four generations.
 **Spectrum agility:**
 
 - [Frequency hopping](docs/frequency-hopping.md) — how per-packet hopping
-  works and what it costs on each chip.
+  works and what it costs on each chip, including the 8822B/C/E firmware
+  channel-switch fast path (`DEVOURER_FASTRETUNE_FW`).
+- [Kernel channel-switch baseline](docs/kernel-channel-switch-baseline.md) +
+  [firmware offload](docs/kernel-channel-switch-offload.md) +
+  [MCC/FCS](docs/mcc-fcs-investigation.md) — how the standard Linux/Realtek
+  drivers retune measured against devourer, and where the chip firmware's own
+  H2C 0x1D switch beats them.
 - [FHSS](docs/fhss.md) — the anti-jam design article: keyed SipHash hop
   schedules, slot-locked lockstep RX, and
   [jammer resilience](docs/jammer-resilience.md) — measured delivery against

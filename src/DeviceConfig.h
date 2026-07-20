@@ -236,15 +236,16 @@ struct DeviceConfig {
      * hop returns before the synth settles — the caller honours a ~1.5 ms
      * settle before TX (the demos' admission window). 8852B only. */
     int kestrel_fastretune_ofld = 1;
-    /* env: DEVOURER_FW_TABLE_OFLD — Jaguar2/3 init-time firmware register
+    /* env: DEVOURER_FW_TABLE_OFLD — Jaguar2 init-time firmware register
      * IO-offload (HalMAC cfg_param): route the static BB/AGC/RF phy-table write
      * stream through one FW_OFFLOAD/CFG_PARAM H2C per ~160-command batch that
-     * the firmware replays on-chip, collapsing the ~5700–9200 per-init USB
-     * register control transfers into a handful of bulk transfers (init is
-     * register-write-bound: ~1.4 s on the 8822E, seconds on USB2). Bit flags:
-     * 1 = BB + AGC tables, 2 = also the RF radio tables (RF_W, routed through
-     * the firmware's RF write path). 0 = off (direct writes, byte-identical to
-     * before). Default 0 — init is higher blast-radius than a hop. */
+     * the firmware replays on-chip, collapsing the per-init USB register control
+     * transfers into a handful of bulk transfers. Bit flags: 1 = BB + AGC
+     * tables, 2 = also the RF radio tables (RF_W, routed through the firmware's
+     * RF write path). 0 = off (direct writes, byte-identical to before). Default
+     * 0 — init is higher blast-radius than a hop. Jaguar3 (8822C/E) is a
+     * follow-up: the fw replays cfg_param but lazily, and its rsvd-page download
+     * stalls per batch. */
     int fw_table_offload = 0;
     /* env: DEVOURER_DIS_CCA — Jaguar2/3 MAC carrier-sense disable at bring-up
      * (primary CCA 0x520[14] + EDCCA [15]): injected/beacon TX stops deferring to

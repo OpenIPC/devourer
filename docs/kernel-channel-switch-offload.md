@@ -105,9 +105,11 @@ Reading:
 
 ## The devourer port (`DEVOURER_FASTRETUNE_FW`)
 
-The offload is now a `FastRetune` fast path in the Jaguar2 HAL
-(`HalJaguar2::fw_channel_switch`, 8822B only): the H2C rides the classic
-HMEBOX mailboxes devourer already drives, and completion is
+Devourer ships the offload as a `FastRetune` fast path
+(`HalJaguar2::fw_channel_switch` on the 8822B;
+`RadioManagementJaguar3::fast_retune`'s fw block on the 8822C/8822E): the
+H2C rides the classic HMEBOX mailboxes devourer already drives, and
+completion is
 **fire-and-confirm-later** — polling RF18 during the switch measurably
 *stretched* it (the PI reads contend with the firmware's RF-bus writes;
 on-air dead time tripled), and the vendor's C2H wait needs an RX drain a

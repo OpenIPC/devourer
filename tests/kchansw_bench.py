@@ -1067,7 +1067,8 @@ def run_vm_config(s: Session, vm: VmDut, cfg: Cfg, vm_iface: str):
         f"--to-ch {cfg.to_ch} --switches {cfg.switches} "
         f"--warmup {cfg.warmup} --dwell-ms {cfg.dwell_ms} "
         f"--roc-ms {cfg.roc_ms} --hz {cfg.inject_hz:.0f} "
-        f"--roc-monitor-vif 0 --out {vm_out}",
+        + (f"--ht {cfg.ht} " if cfg.ht else "")
+        + f"--roc-monitor-vif 0 --out {vm_out}",
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         bufsize=1)
     threading.Thread(
@@ -1238,11 +1239,22 @@ def cmd_phase_b_vm(s: Session, a):
     write_manifest(s)
     vm_iface = vm.iface()
     log(f"phase-b-vm: VM kernel {r.stdout.strip()}, DUT iface {vm_iface}")
-    configs = [
-        Cfg("b-set-36-40", "set_channel", 36, 40, a.switches),
-        Cfg("b-roc-36-40", "roc", 36, 40, a.switches_aux,
-            rdev_entry="rdev_remain_on_channel"),
-    ]
+    if a.pairs:
+        # "36:40,1:6,36:44+HT40+" — set-channel only; the first pair gets
+        # the full --switches count, the rest --switches-aux.
+        configs = []
+        for k, spec in enumerate(a.pairs.split(",")):
+            chans, _, ht = spec.partition("+")
+            frm, to = (int(c) for c in chans.split(":"))
+            n = a.switches if k == 0 else a.switches_aux
+            configs.append(Cfg(f"b-set-{frm}-{to}{'-' + ht if ht else ''}",
+                               "set_channel", frm, to, n, ht=ht))
+    else:
+        configs = [
+            Cfg("b-set-36-40", "set_channel", 36, 40, a.switches),
+            Cfg("b-roc-36-40", "roc", 36, 40, a.switches_aux,
+                rdev_entry="rdev_remain_on_channel"),
+        ]
     for cfg in configs:
         if a.primitive not in ("all",) and a.primitive not in cfg.name \
                 and a.primitive != cfg.prim:
@@ -1464,6 +1476,10 @@ def main() -> int:
                                     "phase-b", "phase-b-vm", "phase-c"])
     ap.add_argument("--vm-ssh", default="",
                     help="user@ip of the prepared VM (phase-b-vm)")
+    ap.add_argument("--pairs", default="",
+                    help="phase-b-vm set-channel pair list, e.g. "
+                         "'36:40,1:6,36:44+HT40+' (overrides the default "
+                         "set+roc config list)")
     ap.add_argument("--primitive", default="all",
                     help="filter configs by primitive/name substring")
     ap.add_argument("--dut-pid", default="2357:012d")

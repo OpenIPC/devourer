@@ -44,6 +44,11 @@ RtlJaguar3Device::RtlJaguar3Device(RtlAdapter device, Logger_t logger,
     : _device{device}, _cfg{std::move(cfg)}, _logger{logger},
       _variant{variant}, _hal{device, logger, variant, _cfg},
       _radioManagement{device, logger, variant, _cfg}, _phydm{device, logger} {
+  /* fastretune_fw: the fw-switch H2C must ride the HAL's HMEBOX box counter
+   * (the coex runtime thread sends its H2Cs through the same one; both
+   * callers serialize on _reg_mu). */
+  _radioManagement.set_h2c_sender(
+      [this](uint32_t msg, uint32_t ext) { _hal.send_h2c_raw(msg, ext); });
   _logger->info("RtlJaguar3Device constructed ({})",
                 variant == jaguar3::ChipVariant::C8822E ? "8822E/EU" : "8822C/CU");
 }
@@ -1182,9 +1187,17 @@ void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   if (channel == _channel.Channel)
     return;
+  const bool band_change = (_channel.Channel <= 14) != (channel <= 14);
   if (_radioManagement.fast_retune(channel, _channel.ChannelOffset,
                                    _channel.ChannelWidth, cache_rf)) {
     _channel.Channel = channel;
+    /* Only the fw fast path (DEVOURER_FASTRETUNE_FW=2) accepts a band
+     * change; the firmware retunes the chip but power folding is host-side —
+     * re-fold active knobs against the new band's tables (the same gating
+     * SetMonitorChannel applies). */
+    if (band_change && _brought_up &&
+        (_tx_pwr_offset_steps != 0 || _tx_pwr_override >= 0))
+      apply_tx_power_current(/*full=*/true);
     return;
   }
   /* Fast path declined (band change / never tuned) — full channel set at the

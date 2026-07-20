@@ -133,6 +133,19 @@ across 400 consecutive band changes (no silent-TX). Hopping RX is
 unaffected: identical decode counts over identical hop-RX runs with the
 path on and off.
 
+**Jaguar3** wires the same H2C in both vendor drivers
+(`rtl8822c/e_phy.c`), and the port covers it through the same knob (the
+H2C rides `HalJaguar3`'s HMEBOX counter, shared with the coex thread's
+H2Cs under the same lock). On the 8822C (8812CU, same rig/oracles):
+36↔40 fw 2.28 ms med / p99 5.94 versus sw 2.40 / 5.19 — a tie on air,
+because the 8822C's RF settle dominates its dark time whichever engine
+sequences it; the fw win there is the per-hop host cost (~0.6 ms H2C
+submit vs ~1.9 ms of composed USB writes). Cross-band 36↔6 through the
+firmware: **2.63 ms median** (n=379, p99 11.0) versus the ~90 ms full
+path. Hopping-RX decode identical fw vs sw. The 8822E shares the code
+path (not yet on-air-validated — no E-die on the rig this session); its
+spur channels conservatively decline the fast path, fw included.
+
 ## Go/no-go for the series
 
 **Go — and the port target is devourer, not the kernel.** The offload is

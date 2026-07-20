@@ -2,6 +2,7 @@
 #define RADIO_MANAGEMENT_8822C_H
 
 #include <cstdint>
+#include <functional>
 
 #include "logger.h"
 #include "RtlAdapter.h"
@@ -49,6 +50,16 @@ public:
    * the full set_channel_bwmode. */
   bool fast_retune(uint8_t channel, uint8_t channel_offset,
                    ChannelWidth_t bwmode, bool cache_rf);
+
+  /* Firmware fast-path enabler (H2C 0x1D SINGLE_CHANNELSWITCH_V2 — protocol
+   * + bench: docs/kernel-channel-switch-offload.md). The sender is injected
+   * by the device layer so the H2C rides HalJaguar3's HMEBOX box counter —
+   * shared with the coex runtime thread's H2Cs and serialized by the same
+   * _reg_mu that serializes FastRetune against the coex tick. Unset =
+   * fastretune_fw is inert on this radio. */
+  void set_h2c_sender(std::function<void(uint32_t, uint32_t)> fn) {
+    _send_h2c = std::move(fn);
+  }
 
   /* Channel/BW register-canary dump for tests/hop_parity_check.sh — the same
    * grep format as the Jaguar1 DumpCanary (BB/MAC/RF[A|B] ADDR = VALUE inside
@@ -195,6 +206,13 @@ private:
   uint32_t _cw_c30 = 0, _cw_808 = 0;
   uint32_t _cw_rfwin_a = 0, _cw_rfwin_b = 0; /* 0x3c60/0x4c60 full dwords */
   void invalidate_fast_caches();
+
+  /* fw fast-path state (fastretune_fw): the pending central channel of a
+   * fire-and-confirm-later H2C 0x1D switch, corroborated at the next hop by
+   * one RF-window read (fw_switch_confirm). */
+  std::function<void(uint32_t, uint32_t)> _send_h2c;
+  uint8_t _fw_sw_pending = 0;
+  bool fw_switch_confirm();
   /* BW-keyed RXBB state, re-asserted on the first fast hop of each epoch:
    * the init-time halrf calibration rewrites it after the channel set
    * (hardware-observed on the 8812EU — IQK clears the 40 MHz TX_CCK_IND bit

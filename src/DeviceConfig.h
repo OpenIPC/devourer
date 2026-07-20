@@ -92,6 +92,16 @@ struct DeviceConfig {
     /* env: DEVOURER_RX_URBS — Jaguar1 async bulk-IN URB queue depth
      * (default 8, clamped to >= 1). */
     std::optional<int> urbs;
+    /* env: DEVOURER_RX_URB_BYTES — per-URB bulk-IN buffer size on the 11ac
+     * generations (default 16384, clamped to >= 4096). Keep it at 16 KB unless
+     * you also raise the device-side RX aggregation thresholds: some MediaTek
+     * Android xhci hosts never complete a bulk-IN read larger than 16 KB
+     * (LIBUSB_ERROR_TIMEOUT forever, zero RX — OpenIPC/PixelPilot#6, fixed by
+     * #19, regressed by the #213 transport split), and the device-side
+     * aggregation caps (J1 0x3/4KB-pages, J2/J3 0x3) mean a bigger URB never
+     * fills past 16 KB anyway. Kestrel ignores this knob: the 8852C RXAGG
+     * LEN_TH is ~20 KB and its ring must hold a full aggregate (32 KB). */
+    std::optional<int> urb_bytes;
     /* env: DEVOURER_8821C_NO_PHYST (inverted) — 8821C: prepend the 32-byte
      * PHY-status to RX frames (per-frame RSSI/SNR/EVM). Disable only for the
      * leanest possible RX path. */

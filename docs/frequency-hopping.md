@@ -333,9 +333,9 @@ every generation overrides it with a lean path built from the tricks above:
 |-----|-----------|---------------|----------------------|-------------|--------------|
 | RTL8812AU (Jaguar1) | ~277 ms | **~1.6 ms** | — | ~0.8 ms | 2 |
 | RTL8822BU (Jaguar2) | ~65 ms | **~2.5 ms** | ~2.6 ms | ~1.0 ms | 2 |
-| RTL8821CU (Jaguar2) | ~30 ms | **~0.55 ms** | — | ~0.5 ms | 1 |
+| RTL8821CU (Jaguar2) | ~30 ms | **~0.55 ms** | code-covered, no HW | ~0.5 ms | 1 |
 | RTL8822CU (Jaguar3) | ~12 ms | **~1.9 ms** | **~0.8 ms** | ~0.21 ms | 9 |
-| RTL8812EU (Jaguar3) | ~12 ms | **~2.4 ms** | (same path, unvalidated) | ~0.27 ms | 9 |
+| RTL8812EU (Jaguar3) | ~12 ms | **~2.4 ms** | **~0.8 ms** (8822E) | ~0.27 ms | 9 |
 
 (Median `hop.dwell` switch_us over a 1/6/11 hop set; per-stage numbers from
 `DEVOURER_HOP_PROF=1`. Every hop microsecond is USB round-trips: one register

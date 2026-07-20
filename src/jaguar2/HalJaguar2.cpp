@@ -827,6 +827,7 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _last_rf_be = -1;
   _last_df18 = -1;
   _last_cck_key = -1;
+  _fw_sw_pending = 0; /* the full set supersedes any in-flight fw switch */
 
   /* Extended-synth channels (below-band 15..35 / above 177, freq =
    * 5000 + 5*ch up to ch 253): the RF tunes them, but the power tables and
@@ -1270,15 +1271,113 @@ bool HalJaguar2::fast_set_bandwidth(uint8_t bw) {
   return true;
 }
 
+void HalJaguar2::send_h2c_raw(uint32_t msg, uint32_t msg_ext) {
+  const uint8_t box = _h2c_box & 0x3;
+  const uint16_t box_reg = static_cast<uint16_t>(0x1d0 + box * 4);
+  const uint16_t box_ex_reg = static_cast<uint16_t>(0x1f0 + box * 4);
+  for (int i = 0; i < 30; ++i) { /* mirrors the vendor's 100 µs × N poll */
+    if (((_device.rtw_read8(0x1cc) >> box) & 0x1) == 0)
+      break;
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+  _device.rtw_write32(box_ex_reg, msg_ext); /* ext first, msg triggers */
+  _device.rtw_write32(box_reg, msg);
+  _h2c_box = static_cast<uint8_t>((_h2c_box + 1) & 0x3);
+}
+
+bool HalJaguar2::fw_channel_switch(uint8_t central, uint8_t pri_ch_idx,
+                                   uint8_t bw) {
+  /* Payload (hal_com_h2c.h SET_H2CCMD_SINGLE_CH_SWITCH_V2_*): b0 = central
+   * channel, b1[3:0] = primary-ch idx, b1[7:4] = bw, b2[1] = IQK_UPDATE_EN
+   * (the vendor sets IQK only — PWR_IDX_UPDATE stays 0, so the firmware does
+   * not touch TXAGC and the software power shadow stays truthful).
+   *
+   * Fire-and-confirm-later: the submit returns immediately — polling RF18
+   * here measurably STRETCHES the switch (the PI reads contend with the
+   * firmware's own RF-bus writes; on-air dead time tripled vs the deferred
+   * scheme), and the vendor's C2H completion needs a live RX drain devourer
+   * can't assume. The *previous* switch is corroborated at the next hop via
+   * fw_switch_confirm(), by which point a dwell has passed. */
+  const uint32_t msg = 0x1du | (static_cast<uint32_t>(central) << 8) |
+                       (static_cast<uint32_t>((pri_ch_idx & 0xf) |
+                                              ((bw & 0xf) << 4))
+                        << 16) |
+                       (0x02u << 24);
+  send_h2c_raw(msg, 0);
+  _fw_sw_pending = central;
+  /* The firmware rewrites RF18 (and band/AGC state) under the sw caches. */
+  _cw_primed = false;
+  return true;
+}
+
+bool HalJaguar2::fw_switch_confirm() {
+  if (!_fw_sw_pending)
+    return true;
+  const uint8_t want = _fw_sw_pending;
+  _fw_sw_pending = 0;
+  const uint32_t rf18 = rf_read(0, 0x18);
+  if ((rf18 & 0xff) == want) {
+    _rf18_cache = rf18; /* doubles as the compose-cache RF18 re-prime */
+    return true;
+  }
+  _logger->warn("Jaguar2: fw channel switch to central {} never landed "
+                "(RF18=0x{:05x}) — resyncing via the full path",
+                want, rf18);
+  return false;
+}
+
 bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
                              uint8_t primary_ch_idx, bool cache_rf) {
   if (_last_tuned_ch == 0)
     return false; /* never tuned — unknown band, cold BW/band state */
   const bool cur_2g = _last_tuned_ch <= 14;
-  if (cur_2g != (channel <= 14))
-    return false; /* band change needs RFE pins / band block — full path only */
+  const bool band_change = cur_2g != (channel <= 14);
   if (channel == _last_tuned_ch)
     return true; /* no-op hop */
+
+  /* Firmware fast path (DEVOURER_FASTRETUNE_FW): hand the whole retune to
+   * the 8822B firmware via H2C 0x1D instead of the composed register
+   * sequence below. Mode 2 additionally accepts band changes — the firmware
+   * reprograms the band block itself (bench-measured ~2 ms cross-band,
+   * docs/kernel-channel-switch-offload.md) — which the software path cannot.
+   * 20/40 MHz only (the 80 MHz primary-idx pairing stays on the sw path). */
+  if (_cfg.tuning.fastretune_fw > 0 && _variant == ChipVariant::C8822B &&
+      (!band_change || _cfg.tuning.fastretune_fw >= 2) &&
+      (bw == 0 /*20*/ || bw == 1 /*40*/)) {
+    devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j2fw",
+                           channel);
+    /* Corroborate the PREVIOUS fw switch before issuing the next (a dwell
+     * has passed — one cheap RF18 read). A miss falls through to the full
+     * path so software state and hardware resync. */
+    if (!fw_switch_confirm())
+      return false;
+    prof.mark("confirm");
+    const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
+    /* get_pri_ch_id encoding: 20 MHz -> 0; 40 MHz upper -> 1, lower -> 2. */
+    uint8_t pri = 0;
+    if (bw == 1)
+      pri = (primary_ch_idx == 2 /*HAL_PRIME_CHNL_OFFSET_UPPER*/) ? 1 : 2;
+    fw_channel_switch(cch, pri, bw);
+    prof.mark("fw");
+    if (band_change) {
+      /* The firmware rewrote the band-keyed state under the sw caches —
+       * invalidate them all; the next sw hop re-primes. */
+      _last_agc_bucket = -1;
+      _last_fc = 0xffffffff;
+      _last_rf_be = -1;
+      _last_df18 = -1;
+      _last_cck_key = -1;
+    }
+    _last_tuned_ch = channel;
+    DVR_DEBUG(_logger, "Jaguar2: fw fast retune -> ch {} (central {})",
+              channel, cch);
+    /* No canary here: the switch is still executing in firmware — a dump
+     * would read mid-transition state (and disturb the RF bus). */
+    return true;
+  }
+
+  if (band_change)
+    return false; /* band change needs RFE pins / band block — full path only */
 
   devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j2",
                          channel);

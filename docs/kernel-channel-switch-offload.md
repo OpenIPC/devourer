@@ -103,6 +103,36 @@ Reading:
   RF-evidenced fw switches across four configurations, every one decoded
   on the commanded channel, none returned to base autonomously.
 
+## The devourer port (`DEVOURER_FASTRETUNE_FW`)
+
+The offload is now a `FastRetune` fast path in the Jaguar2 HAL
+(`HalJaguar2::fw_channel_switch`, 8822B only): the H2C rides the classic
+HMEBOX mailboxes devourer already drives, and completion is
+**fire-and-confirm-later** — polling RF18 during the switch measurably
+*stretched* it (the PI reads contend with the firmware's RF-bus writes;
+on-air dead time tripled), and the vendor's C2H wait needs an RX drain a
+TX-only session doesn't have. Instead the next hop corroborates the
+previous switch with one RF18 read (which doubles as the compose-cache
+re-prime); a miss resyncs through the full path. `DEVOURER_FASTRETUNE_FW=1`
+enables it for intra-band 20/40 MHz hops, `=2` also hands **cross-band**
+hops to the firmware (band block reprogrammed by fw; active TX-power knobs
+re-fold host-side).
+
+Same rig, same oracles, same segmentation as the arms above (n≥399 each):
+
+| devourer arm (dead air) | med | p90 | p99 | max |
+|---|---|---|---|---|
+| `FastRetune` software path, 36↔40 | 2.75 ms | 3.59 | 5.44 | 7.10 |
+| fw path (`=1`), 36↔40 | **1.44 ms** | 2.72 | 5.05 | 9.05 |
+| fw path (`=2`), 36↔6 cross-band | **1.86 ms** | 5.95 | 10.76 | 18.23 |
+
+The fw path halves the median dark time and turns the cross-band hop from
+a ~90 ms full-path event into ~2 ms — with none of the vendor driver's
+2 s stalls (1499 devourer fw switches, max 18 ms), and sustained TX
+across 400 consecutive band changes (no silent-TX). Hopping RX is
+unaffected: identical decode counts over identical hop-RX runs with the
+path on and off.
+
 ## Go/no-go for the series
 
 **Go — and the port target is devourer, not the kernel.** The offload is

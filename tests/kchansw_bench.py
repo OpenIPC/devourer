@@ -77,8 +77,15 @@ DRIVER_SETS = {
 }
 
 
+_LOG_FILE = None
+
+
 def log(msg: str) -> None:
-    sys.stderr.write(f"[kchansw {time.strftime('%H:%M:%S')}] {msg}\n")
+    line = f"[kchansw {time.strftime('%H:%M:%S')}] {msg}\n"
+    sys.stderr.write(line)
+    if _LOG_FILE:
+        _LOG_FILE.write(line)
+        _LOG_FILE.flush()
 
 
 def ch_to_freq(ch: int) -> int:
@@ -252,25 +259,28 @@ def spawn_injector(iface, out_dir, hz, size=96, append=False) -> Child:
 
 
 class WpaAp:
-    """wpa_supplicant AP-mode (mode=2) on the DUT — the no-hostapd CSA path."""
+    """hostapd AP on the DUT. (wpa_supplicant AP-mode was tried first and
+    its CHAN_SWITCH returns FAIL before any nl80211 call reaches cfg80211 —
+    zero rdev_channel_switch events in the trace — so hostapd is the CSA
+    path; that refusal is itself a capability-matrix row.)"""
 
     def __init__(self, iface, freq, out_dir, beacon_int=100):
         self.iface = iface
-        self.ctrl = os.path.join(out_dir, "wpa")
-        conf = os.path.join(out_dir, "wpa_ap.conf")
+        self.ctrl = os.path.join(out_dir, "hostapd")
+        conf = os.path.join(out_dir, "hostapd.conf")
+        ch = (freq - 5000) // 5 if freq >= 5000 else (freq - 2407) // 5
         with open(conf, "w") as f:
-            f.write(f"ctrl_interface=DIR={self.ctrl}\n"
-                    "country=US\n"
-                    "network={\n"
-                    '    ssid="kchansw-bench"\n'
-                    "    mode=2\n"
-                    f"    frequency={freq}\n"
-                    "    key_mgmt=NONE\n"
-                    f"    beacon_int={beacon_int}\n"
-                    "}\n")
+            f.write(f"interface={iface}\n"
+                    f"ctrl_interface={self.ctrl}\n"
+                    "driver=nl80211\n"
+                    "ssid=kchansw-bench\n"
+                    f"hw_mode={'a' if freq >= 5000 else 'g'}\n"
+                    f"channel={ch}\n"
+                    f"beacon_int={beacon_int}\n"
+                    "country_code=US\n"
+                    "auth_algs=1\n")
         set_managed_idle(iface)
-        self.child = Child("wpa", ["wpa_supplicant", "-Dnl80211",
-                                   "-i", iface, "-c", conf],
+        self.child = Child("hostapd", ["hostapd", conf],
                            os.path.join(out_dir, "wpa.log"), stamp=False,
                            stderr_path=os.path.join(out_dir, "wpa.stderr"))
 
@@ -286,9 +296,8 @@ class WpaAp:
         return False
 
     def chan_switch(self, count, freq):
-        return run(["wpa_cli", "-p", os.path.join(self.ctrl),
-                    "-i", self.iface, "chan_switch", str(count), str(freq)],
-                   timeout=8)
+        return run(["hostapd_cli", "-p", self.ctrl, "-i", self.iface,
+                    "chan_switch", str(count), str(freq)], timeout=8)
 
     def stop(self):
         self.child.stop()
@@ -349,6 +358,8 @@ class Session:
             if r.returncode != 0:
                 raise SystemExit(f"modprobe {mod}: {r.stderr.strip()}")
         regress.attach_to_host_kernel(self.dut)
+        dut_iface(self.dut)
+        time.sleep(2.5)          # let udev finish the wlan0→wlxMAC rename
         iface = dut_iface(self.dut)
         unmanage(iface)
         run(["rfkill", "unblock", "wifi"], timeout=6)
@@ -631,11 +642,13 @@ def run_csa(s: Session, cfg: Cfg, iface: str):
             log(f"{cfg.name}: wpa_supplicant AP failed to start — "
                 f"CSA row = blocked (see wpa.log)")
             return
-        if not oracle_rate_gate(oa, min_lines=10, timeout=15):
+        if not oracle_rate_gate(oa, min_frames=10, timeout=15):
             log(f"{cfg.name}: oracle_a hears no beacons yet — continuing")
         with kchansw_trace.TraceSession(d, kprobes=s.driver["probes"]) as ts:
             total = cfg.warmup + cfg.switches
             cur = cfg.from_ch
+            consec_fail = 0
+            any_ok = False
             for i in range(total):
                 to = cfg.to_ch if cur == cfg.from_ch else cfg.from_ch
                 t_req = time.monotonic_ns()
@@ -663,6 +676,26 @@ def run_csa(s: Session, cfg: Cfg, iface: str):
                 if not moved:
                     log(f"{cfg.name} i={i}: CSA did not complete "
                         f"({(r.stdout + r.stderr).strip()[:80]})")
+                    consec_fail += 1
+                    if consec_fail >= 3 and not any_ok:
+                        # The driver refuses CSA outright (observed on
+                        # rtw88: hostapd "CSA is not supported" — the wiphy
+                        # never advertises AP_CSA, nothing reaches
+                        # cfg80211). Record the classification and stop
+                        # burning 5 s per attempt.
+                        ctl.write(json.dumps({
+                            "ev": "kchansw.capability", "prim": "csa",
+                            "status": "policy-rejected",
+                            "detail": "AP up + beaconing, but chan_switch "
+                                      "refused pre-nl80211 (no AP_CSA drv "
+                                      "flag); 0 rdev_channel_switch events",
+                        }) + "\n")
+                        log(f"{cfg.name}: CSA refused by stack — recording "
+                            f"capability row, aborting config")
+                        break
+                else:
+                    consec_fail = 0
+                    any_ok = True
                 cur = to if moved else cur
                 time.sleep(0.3)
                 if i % 50 == 49:
@@ -949,6 +982,293 @@ def run_mcc_attempt(s: Session, iface: str, helper_pid: str):
 
 
 # ---------------------------------------------------------------------------
+# Phase B in the VM. Kprobing the vendor module on the host deadlocked the
+# host kernel outright (ssh dead, dmesg blocked, power cycle to recover) —
+# twice — so the DUT + trace session live inside the pinned-kernel VM
+# (tests/kchansw_vm.sh prepare) and the oracles stay on the host. The
+# VM-side files carry VM CLOCK_MONOTONIC; a min-RTT midpoint estimator
+# measures the VM→host offset and the analyzer shifts them into the host
+# timeline (VM-internal spans are differences, i.e. shift-invariant).
+# ---------------------------------------------------------------------------
+
+class VmDut:
+    SSH_OPTS = ["-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=8"]
+    # The bench runs under sudo; offer the invoking user's key.
+    _sudo_user = os.environ.get("SUDO_USER")
+    if _sudo_user:
+        for _k in ("id_ed25519", "id_rsa"):
+            _key = os.path.expanduser(f"~{_sudo_user}/.ssh/{_k}")
+            if os.path.exists(_key):
+                SSH_OPTS += ["-i", _key]
+                break
+
+    def __init__(self, dest: str):
+        self.dest = dest
+
+    def ssh(self, cmd: str, timeout=30):
+        return run(["ssh", *self.SSH_OPTS, self.dest, cmd], timeout=timeout)
+
+    def popen(self, cmd: str, **kw):
+        return subprocess.Popen(["ssh", *self.SSH_OPTS, self.dest, cmd],
+                                **kw)
+
+    def clock_shift_ns(self, rounds=25):
+        """host_mono ≈ vm_mono + shift, from the min-RTT midpoint sample."""
+        p = self.popen(
+            "python3 -u -c 'import sys,time\n"
+            "for _ in sys.stdin: print(time.monotonic_ns(), flush=True)'",
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+            bufsize=1)
+        best = None
+        try:
+            for _ in range(rounds):
+                t0 = time.monotonic_ns()
+                p.stdin.write("x\n")
+                p.stdin.flush()
+                line = p.stdout.readline()
+                t1 = time.monotonic_ns()
+                if not line.strip():
+                    raise RuntimeError("clock_shift_ns: ssh pipe died "
+                                       "(VM wedged?)")
+                vm_ns = int(line.strip())
+                rtt = t1 - t0
+                if best is None or rtt < best[1]:
+                    best = ((t0 + t1) // 2 - vm_ns, rtt)
+        finally:
+            p.kill()
+        if best is None:
+            raise RuntimeError("clock_shift_ns: no samples")
+        return best
+
+    def iface(self) -> str:
+        r = self.ssh("ls /sys/class/net | grep -v -e lo -e '^en' | head -1")
+        name = r.stdout.strip()
+        if r.returncode != 0 or not name:
+            raise SystemExit("phase-b-vm: no wlan netdev in the VM — "
+                             "run tests/kchansw_vm.sh prepare first")
+        return name
+
+
+def run_vm_config(s: Session, vm: VmDut, cfg: Cfg, vm_iface: str):
+    d = s.cfg_dir(cfg)
+    oa = spawn_oracle("a", s.oracle_a_dut, cfg.from_ch, "canon", d)
+    ob = spawn_oracle("b", s.oracle_b_dut, cfg.to_ch, "canon", d)
+    shift0, rtt0 = vm.clock_shift_ns()
+    log(f"{cfg.name}: vm clock shift {shift0 / 1e6:.3f} ms "
+        f"(min-RTT {rtt0 / 1e6:.2f} ms)")
+    vm_out = f"/tmp/kchansw-vm/{cfg.name}"
+    vm.ssh(f"sudo rm -rf {vm_out}")
+    prim = "set-channel" if cfg.prim == "set_channel" else "roc"
+    p = vm.popen(
+        f"sudo python3 /opt/kchansw/kchansw_vm_dut.py {prim} "
+        f"--cfg {cfg.name} --iface {vm_iface} --from-ch {cfg.from_ch} "
+        f"--to-ch {cfg.to_ch} --switches {cfg.switches} "
+        f"--warmup {cfg.warmup} --dwell-ms {cfg.dwell_ms} "
+        f"--roc-ms {cfg.roc_ms} --hz {cfg.inject_hz:.0f} "
+        f"--roc-monitor-vif 0 --out {vm_out}",
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        bufsize=1)
+    threading.Thread(
+        target=lambda: [log(f"[vm] {ln.rstrip()}") for ln in p.stderr],
+        daemon=True).start()
+    if prim == "set-channel":
+        oracle_rate_gate(oa)  # runs inside the vm_dut settle window
+    budget = (cfg.warmup + cfg.switches) * (cfg.dwell_ms / 1e3 + 0.8) + 180
+    try:
+        rc = p.wait(timeout=budget)
+    except subprocess.TimeoutExpired:
+        log(f"{cfg.name}: vm_dut overran {budget:.0f}s — killing "
+            f"(VM wedged? `virsh reset` and re-prepare)")
+        p.kill()
+        rc = -9
+    shift1 = None
+    try:
+        shift1, _ = vm.clock_shift_ns()
+        if abs(shift1 - shift0) > 5_000_000:
+            log(f"{cfg.name}: VM clock drifted "
+                f"{(shift1 - shift0) / 1e6:.2f} ms over the config")
+    except (RuntimeError, subprocess.TimeoutExpired, OSError):
+        log(f"{cfg.name}: post-run clock probe failed (VM dead?)")
+    pull = subprocess.run(
+        ["ssh", *vm.SSH_OPTS, vm.dest, f"sudo tar -C {vm_out} -c ."],
+        capture_output=True)
+    if pull.returncode == 0 and pull.stdout:
+        subprocess.run(["tar", "-C", d, "-x"], input=pull.stdout,
+                       capture_output=True)
+    else:
+        log(f"{cfg.name}: artifact pull FAILED "
+            f"({pull.stderr.decode()[:100]})")
+    extra = {"vm": True, "vm_ssh_rtt_ns": rtt0, "vm_dut_rc": rc,
+             "vm_clock_shift_ns": ((shift0 + shift1) // 2
+                                   if shift1 is not None else shift0),
+             "vm_clock_shift_start_ns": shift0,
+             "vm_clock_shift_end_ns": shift1}
+    res_path = os.path.join(d, "vmdut_result.json")
+    if cfg.prim == "roc" and os.path.exists(res_path):
+        with open(res_path) as f:
+            have_mon = json.load(f).get("roc_monitor_vif", False)
+        cfg.need_rf = have_mon
+        extra["monitor_vif"] = have_mon
+        extra["roc_ms"] = cfg.roc_ms
+    s.write_meta(cfg, d, cfg.from_ch, cfg.to_ch, extra)
+    oa.stop()
+    ob.stop()
+    log(f"{cfg.name}: done (vm rc={rc})")
+    return rc == 0
+
+
+def run_mcc_attempt_vm(s: Session, vm: VmDut, vm_iface: str,
+                       helper_pid: str):
+    """The host run_mcc_attempt with the DUT leg driven over ssh. The
+    helper AP (8821AU + hostapd) stays on the host; association is over
+    the air, the /proc mcc knobs live in the VM."""
+    d = str(s.out_root / "mcc")
+    os.makedirs(d, exist_ok=True)
+    result = {"prim": "mcc", "status": "attempted", "venue": "vm",
+              "steps": []}
+
+    def finish():
+        with open(os.path.join(d, "mcc_result.json"), "w") as f:
+            json.dump(result, f, indent=2)
+
+    def step(name, ok, detail=""):
+        result["steps"].append({"step": name, "ok": ok, "detail": detail})
+        log(f"mcc: {name}: {'ok' if ok else 'FAILED'} {detail}")
+        finish()  # persist per step — a VM kernel wedge loses nothing
+        return ok
+
+    _real_ssh = vm.ssh
+
+    def _safe_ssh(cmd, timeout=30):
+        # A wedged VM leaves ssh hanging; convert that into a failed step
+        # instead of an unhandled TimeoutExpired.
+        try:
+            return _real_ssh(cmd, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess([], 124, "",
+                                               "ssh timeout (VM wedged?)")
+    vm.ssh = _safe_ssh
+
+    try:
+        helper = find_dut(helper_pid)
+    except SystemExit:
+        result["status"] = "blocked-hardware-absent"
+        step("helper adapter", False, f"{helper_pid} not plugged")
+        finish()
+        return
+    run(["modprobe", "rtw88_8821au"], timeout=30)
+    regress.attach_to_host_kernel(helper)
+    try:
+        dut_iface(helper)
+        time.sleep(2.5)          # let udev finish the wlan0→wlxMAC rename
+        h_iface = dut_iface(helper)
+    except RuntimeError as e:
+        step("helper iface", False, str(e))
+        result["status"] = "blocked-helper-bringup"
+        finish()
+        return
+    unmanage(h_iface)
+    ap = WpaAp(h_iface, ch_to_freq(36), d)
+    ok = step("helper AP beaconing on 36", ap.wait_beaconing())
+    if ok:
+        # Open BSS — iw's own open-system connect avoids needing
+        # wpa_supplicant inside the VM.
+        vm.ssh(f"sudo ip link set {vm_iface} down; "
+               f"sudo iw dev {vm_iface} set type managed; "
+               f"sudo ip link set {vm_iface} up; "
+               f"sudo iw dev {vm_iface} connect kchansw-bench")
+        assoc = False
+        end = time.monotonic() + 30
+        while time.monotonic() < end:
+            r = vm.ssh(f"iw dev {vm_iface} link")
+            if "Connected to" in r.stdout:
+                assoc = True
+                break
+            time.sleep(1)
+        ok = step("DUT STA associated to helper", assoc)
+    if ok:
+        # CONCURRENT_MODE builds auto-create the second vif at insmod.
+        r = vm.ssh(f"ls /sys/class/net | grep -v -e lo -e '^en' "
+                   f"| grep -v '^{vm_iface}$' | head -1")
+        second = r.stdout.strip()
+        if not second:
+            r = vm.ssh(f"sudo iw dev {vm_iface} interface add kcap0 "
+                       f"type managed")
+            second = "kcap0" if r.returncode == 0 else ""
+        ok = step("second vif", bool(second), second or
+                  r.stderr.strip()[:100])
+    if ok:
+        r = vm.ssh(f"ls /proc/net/*/{vm_iface}/mcc/mcc_* 2>/dev/null")
+        knobs = r.stdout.split()
+        ok = step("mcc proc knobs present", bool(knobs), str(knobs[:3]))
+        if ok:
+            base = os.path.dirname(knobs[0])
+            r = vm.ssh(f"echo 1 | sudo tee {base}/mcc_enable")
+            step("mcc_enable=1", r.returncode == 0, r.stderr.strip()[:80])
+            for k in ("mcc_info", "mcc_policy_table"):
+                r = vm.ssh(f"sudo cat {base}/{k} 2>/dev/null")
+                if r.stdout:
+                    result[k] = r.stdout[:4000]
+    if not ok:
+        result["status"] = "blocked-see-steps"
+    finish()
+    vm.ssh(f"sudo pkill wpa_supplicant; sudo iw dev kcap0 del 2>/dev/null; "
+           f"true")
+    ap.stop()
+    s.dmesg_dump(d)
+
+
+def cmd_phase_b_vm(s: Session, a):
+    if not a.vm_ssh:
+        raise SystemExit("phase-b-vm: --vm-ssh user@ip required "
+                         "(tests/kchansw_vm.sh status shows the IP)")
+    vm = VmDut(a.vm_ssh)
+    r = vm.ssh("lsmod | grep -qE '^(88x2bu_ohd|8812bu)' && uname -r")
+    if r.returncode != 0:
+        raise SystemExit("phase-b-vm: vendor module not loaded in the VM — "
+                         "run tests/kchansw_vm.sh prepare first")
+    with open(s.out_root / "vm_manifest.json", "w") as f:
+        json.dump({"vm_uname": r.stdout.strip(),
+                   "vm_ssh": a.vm_ssh,
+                   "vm_modinfo": vm.ssh(
+                       "modinfo /opt/kchansw/rtl88x2bu/88x2bu_ohd.ko "
+                       "| head -8").stdout}, f, indent=2)
+    write_manifest(s)
+    vm_iface = vm.iface()
+    log(f"phase-b-vm: VM kernel {r.stdout.strip()}, DUT iface {vm_iface}")
+    configs = [
+        Cfg("b-set-36-40", "set_channel", 36, 40, a.switches),
+        Cfg("b-roc-36-40", "roc", 36, 40, a.switches_aux,
+            rdev_entry="rdev_remain_on_channel"),
+    ]
+    for cfg in configs:
+        if a.primitive not in ("all",) and a.primitive not in cfg.name \
+                and a.primitive != cfg.prim:
+            continue
+        if not run_vm_config(s, vm, cfg, vm_iface):
+            log(f"{cfg.name}: vm run reported failure — continuing")
+        if not iface_alive_vm(vm, vm_iface):
+            log("phase-b-vm: VM DUT iface dead — stopping")
+            return
+    if a.primitive in ("all", "mcc"):
+        log("phase-b-vm: rebuilding VARIANT=mcc in VM for the MCC attempt")
+        r = subprocess.run(["tests/kchansw_vm.sh", "mcc"], cwd=str(REPO),
+                           capture_output=True, text=True, timeout=900)
+        if r.returncode != 0:
+            log(f"mcc variant build/load failed: {r.stdout[-200:]} "
+                f"{r.stderr[-200:]}")
+            return
+        run_mcc_attempt_vm(s, vm, vm.iface(), a.helper_pid)
+
+
+def iface_alive_vm(vm: VmDut, iface: str) -> bool:
+    r = vm.ssh(f"iw dev {iface} info")
+    return r.returncode == 0 and "Interface" in r.stdout
+
+
+# ---------------------------------------------------------------------------
 # Manifest, inventory, smoke.
 # ---------------------------------------------------------------------------
 
@@ -1094,7 +1414,9 @@ def run_phase(s: Session, configs, only: str):
             elif cfg.prim == "scan":
                 run_scan(s, cfg, iface)
         except Exception as e:
+            import traceback
             log(f"{cfg.name}: EXCEPTION {e!r} — continuing with next config")
+            log(traceback.format_exc())
     log(f"phase done → analyze with: tests/.venv/bin/python "
         f"tests/kchansw_analyze.py {s.out_root}")
 
@@ -1139,7 +1461,9 @@ def cmd_phase_c(s: Session, a):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("cmd", choices=["inventory", "smoke", "phase-a", "cold",
-                                    "phase-b", "phase-c"])
+                                    "phase-b", "phase-b-vm", "phase-c"])
+    ap.add_argument("--vm-ssh", default="",
+                    help="user@ip of the prepared VM (phase-b-vm)")
     ap.add_argument("--primitive", default="all",
                     help="filter configs by primitive/name substring")
     ap.add_argument("--dut-pid", default="2357:012d")
@@ -1167,11 +1491,13 @@ def main() -> int:
                    f"{args.cmd}"
 
     regress._install_cleanup_handlers()
-    driver_key = {"phase-b": "vendor", "phase-c": "rtw89"}.get(args.cmd,
-                                                               "rtw88")
+    driver_key = {"phase-b": "vendor", "phase-b-vm": "vendor",
+                  "phase-c": "rtw89"}.get(args.cmd, "rtw88")
     if args.cmd == "phase-c":
         args.dut_pid = "35bc:0108"
     s = Session(args, driver_key)
+    global _LOG_FILE
+    _LOG_FILE = open(s.out_root / "bench.log", "a")
     log(f"out dir: {s.out_root}  driver: {driver_key}  DUT: {s.dut.vidpid} "
         f"({s.dut.chipset})")
 
@@ -1187,6 +1513,14 @@ def main() -> int:
         set_monitor(iface, 36)
         run_cold(s, args.cold_trials)
     elif args.cmd == "phase-b":
+        # Kprobing the vendor module on the host deadlocked the host kernel
+        # (power cycle to recover) — twice. Use phase-b-vm.
+        if os.environ.get("KCHANSW_HOST_VENDOR_OK") != "1":
+            sys.stderr.write(
+                "phase-b (host insmod) hangs the whole machine — use "
+                "phase-b-vm (tests/kchansw_vm.sh prepare). Set "
+                "KCHANSW_HOST_VENDOR_OK=1 to override.\n")
+            return 2
         # Module must already be inserted by kchansw_vendor_build.sh.
         if run(["sh", "-c", "lsmod | grep -q '^88x2bu_ohd'"]).returncode != 0:
             sys.stderr.write("phase-b: vendor module 88x2bu_ohd not loaded — "
@@ -1201,6 +1535,8 @@ def main() -> int:
         if args.primitive in ("all", "mcc"):
             iface = dut_iface(s.dut)
             run_mcc_attempt(s, iface, args.helper_pid)
+    elif args.cmd == "phase-b-vm":
+        cmd_phase_b_vm(s, args)
     elif args.cmd == "phase-c":
         cmd_phase_c(s, args)
     # Hand the artifacts to the invoking user so the (non-root) analyzer can

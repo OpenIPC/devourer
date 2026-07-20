@@ -528,6 +528,19 @@ def analyze_run(run_dir):
             meta = json.load(f)
         trace = parse_trace(os.path.join(d, "trace.txt"))
         inject = load_jsonl(os.path.join(d, "inject.jsonl"))
+        # VM-hosted DUT (phase-b-vm): trace/control/inject carry the VM's
+        # CLOCK_MONOTONIC; meta records the measured VM→host offset so the
+        # oracle (host-clock) windows line up. VM-internal spans (host-cmd,
+        # driver, h2c) are differences and thus shift-invariant.
+        shift = int(meta.get("vm_clock_shift_ns", 0))
+        if shift:
+            for ev in trace:
+                ev["ts_ns"] += shift
+                if ev.get("marker"):
+                    ev["marker"]["mono_ns"] += shift
+            for rec in inject:
+                if "mono_ns" in rec:
+                    rec["mono_ns"] += shift
         wedge_is = [r["i"] for r in load_jsonl(os.path.join(d, "control.jsonl"))
                     if r.get("ev") == "kchansw.wedge"]
         frames_by_ch = {}

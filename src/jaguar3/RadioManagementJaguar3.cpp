@@ -638,6 +638,27 @@ void RadioManagementJaguar3::invalidate_fast_caches() {
   _last_agc_key = -1;
   _rxbb_asserted = false;
   _cw_primed = false;
+  _fw_sw_pending = 0; /* a full set supersedes any in-flight fw switch */
+}
+
+bool RadioManagementJaguar3::fw_switch_confirm() {
+  if (!_fw_sw_pending)
+    return true;
+  const uint8_t want = _fw_sw_pending;
+  _fw_sw_pending = 0;
+  /* One RF-window read (path A RF18 mirror) — a dwell has passed since the
+   * H2C, so a live firmware has long since landed the channel field. The
+   * landed dword re-primes the window half of the compose cache. */
+  const uint32_t win_a =
+      _device.rtw_read32(static_cast<uint16_t>(0x3c00 + (0x18 << 2)));
+  if ((win_a & 0xffu) == want) {
+    _cw_rfwin_a = win_a;
+    return true;
+  }
+  _logger->warn("Jaguar3: fw channel switch to central {} never landed "
+                "(RF18 win=0x{:08x}) — resyncing via the full path",
+                want, win_a);
+  return false;
 }
 
 bool RadioManagementJaguar3::fast_retune(uint8_t channel,
@@ -646,14 +667,15 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
   if (_last_channel == 0)
     return false; /* never tuned — unknown band, cold BW/band state */
   const bool cur_2g = _last_channel <= 14;
-  if (cur_2g != (channel <= 14))
-    return false; /* band change needs RFE/AGC/CCK-RxIQ — full path only */
+  const bool band_change = cur_2g != (channel <= 14);
   if (channel == _last_channel)
     return true; /* no-op hop */
   /* Spur channels (phydm_spur_eliminate_8822e) carry per-channel NBI/CSI-mask
    * state that only the full path programs — a lean hop into OR out of one
    * would leave a stale notch/mask. Decline; the caller falls back to the
-   * full SetMonitorChannel. 8822E only (the spur port is 8822E-gated). */
+   * full SetMonitorChannel. 8822E only (the spur port is 8822E-gated).
+   * Applies to the fw path too: whether the 8822E firmware programs its own
+   * notch on these channels is uncharacterized — stay conservative. */
   if (_variant == ChipVariant::C8822E) {
     uint8_t cc, cp, tc, tp;
     central_and_pri(_last_channel, channel_offset, bwmode, cc, cp);
@@ -661,6 +683,45 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
     if (is_spur_combo_8822e(cc, bwmode) || is_spur_combo_8822e(tc, bwmode))
       return false;
   }
+
+  /* Firmware fast path (DEVOURER_FASTRETUNE_FW): the same H2C 0x1D
+   * SINGLE_CHANNELSWITCH_V2 the 8822B port uses — both Jaguar3 dies wire it
+   * in their vendor drivers (rtl8822c/e_phy.c switch_chnl_and_set_bw_by_fw).
+   * Fire-and-confirm-later (see the Jaguar2 port: polling RF during the
+   * switch contends with the firmware's RF-bus writes); mode 2 additionally
+   * hands over band changes. 20/40 MHz only. */
+  if (_cfg.tuning.fastretune_fw > 0 && _send_h2c &&
+      (!band_change || _cfg.tuning.fastretune_fw >= 2) &&
+      (bwmode == CHANNEL_WIDTH_20 || bwmode == CHANNEL_WIDTH_40)) {
+    devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j3fw",
+                           channel);
+    if (!fw_switch_confirm())
+      return false; /* previous fw switch never landed — full-path resync */
+    prof.mark("confirm");
+    uint8_t central, pri;
+    central_and_pri(channel, channel_offset, bwmode, central, pri);
+    const uint8_t bw_code = (bwmode == CHANNEL_WIDTH_40) ? 1 : 0;
+    const uint32_t msg =
+        0x1du | (static_cast<uint32_t>(central) << 8) |
+        (static_cast<uint32_t>((pri & 0xf) | (bw_code << 4)) << 16) |
+        (0x02u << 24); /* IQK_UPDATE_EN; PWR_IDX_UPDATE stays 0 */
+    _send_h2c(msg, 0);
+    prof.mark("fw");
+    _fw_sw_pending = central;
+    _cw_primed = false; /* the fw rewrites RF18 under the compose cache */
+    if (band_change) {
+      _last_sco = 0xffffffff;
+      _last_dfir = 0xffffffff;
+      _last_agc_key = -1;
+    }
+    _last_channel = channel;
+    DVR_DEBUG(_logger, "Jaguar3: fw fast retune -> ch {} (central {})",
+              channel, central);
+    return true;
+  }
+
+  if (band_change)
+    return false; /* band change needs RFE/AGC/CCK-RxIQ — full path only */
 
   devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j3",
                          channel);

@@ -23,6 +23,13 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   dividers (vs the `0x8ac` block the Jaguar1/2 chips share). 80 MHz works,
   incl. a 40-in-80 frame via TX-descriptor DATA_SC. See `docs/narrowband.md`.
 - halrf calibration: DACK/IQK/TXGAPK/thermal tracking.
+- **Firmware channel switch** (H2C 0x1D via `fastretune_fw`, both dies): the
+  fw-switch H2C must ride `HalJaguar3::send_h2c_raw`'s HMEBOX box counter —
+  the coex runtime thread shares it (both callers hold `_reg_mu`); a second
+  counter would corrupt the mailbox rotation. On the 8822C the fw and sw
+  fast paths tie on-air (~2.3 ms — RF settle dominates); the fw win is ~3×
+  lower per-hop host/USB cost, plus ~2.6 ms cross-band. 8822E spur channels
+  decline every fast path, fw included.
 - `DEVOURER_TX_WITH_RX=thread` must be set **before** `InitWrite` — the
   bring-up keeps the RX filters open; retrofitting RX later is unreliable.
 - The rtl8822e's hardware-bisected constraints (DPDT/pin-mux front end,

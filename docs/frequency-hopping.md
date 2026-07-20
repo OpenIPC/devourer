@@ -329,13 +329,13 @@ constants once); every subsequent same-band hop is ~1.5 ms.
 point (default = the full `SetMonitorChannel` at the current width/offset), and
 every generation overrides it with a lean path built from the tricks above:
 
-| DUT | full path | fast (cached) | USB op cost | fast ops/hop |
-|-----|-----------|---------------|-------------|--------------|
-| RTL8812AU (Jaguar1) | ~277 ms | **~1.6 ms** | ~0.8 ms | 2 |
-| RTL8822BU (Jaguar2) | ~65 ms | **~2.5 ms** | ~1.0 ms | 2 |
-| RTL8821CU (Jaguar2) | ~30 ms | **~0.55 ms** | ~0.5 ms | 1 |
-| RTL8822CU (Jaguar3) | ~12 ms | **~1.9 ms** | ~0.21 ms | 9 |
-| RTL8812EU (Jaguar3) | ~12 ms | **~2.4 ms** | ~0.27 ms | 9 |
+| DUT | full path | fast (cached) | fast (fw, host cost) | USB op cost | fast ops/hop |
+|-----|-----------|---------------|----------------------|-------------|--------------|
+| RTL8812AU (Jaguar1) | ~277 ms | **~1.6 ms** | — | ~0.8 ms | 2 |
+| RTL8822BU (Jaguar2) | ~65 ms | **~2.5 ms** | ~2.6 ms | ~1.0 ms | 2 |
+| RTL8821CU (Jaguar2) | ~30 ms | **~0.55 ms** | — | ~0.5 ms | 1 |
+| RTL8822CU (Jaguar3) | ~12 ms | **~1.9 ms** | **~0.8 ms** | ~0.21 ms | 9 |
+| RTL8812EU (Jaguar3) | ~12 ms | **~2.4 ms** | (same path, unvalidated) | ~0.27 ms | 9 |
 
 (Median `hop.dwell` switch_us over a 1/6/11 hop set; per-stage numbers from
 `DEVOURER_HOP_PROF=1`. Every hop microsecond is USB round-trips: one register
@@ -344,6 +344,20 @@ of the chip's EP0 handling — it varies 5× across the family — so the only c
 lever is op count. FHSS-soak-validated: 12,000 (8822CU) and 9,000 (8822BU)
 consecutive dwell-1 per-packet hops, zero bulk-OUT failures; a kickless hopping
 receiver holds a constant catch rate over ~850 retunes.)
+
+**The firmware fast path** (`DEVOURER_FASTRETUNE_FW`, 8822B + 8822C/8822E):
+instead of the composed register sequence, one H2C 0x1D hands the whole
+retune to the chip firmware, fire-and-confirm-later (the previous hop is
+corroborated by a single RF18 read at the next one). Host cost above is the
+H2C submit + confirm; the number that matters — **on-air dead time** — is
+measured separately with the channel-switch oracles: on the 8822B the fw
+path nearly halves it (1.44 ms median vs the sw path's 2.75), on the 8822C
+the two tie (~2.3 ms — that die's RF settle dominates) but the fw path is
+~3× cheaper on the bus. Mode `=2` extends the hop set **across the 2.4/5 GHz
+band boundary** (~2–2.6 ms measured, vs the ~90 ms full-path fallback the sw
+fast path needs) — mixed-band FHSS plans become practical. Protocol, bench
+method and full distributions:
+[kernel-channel-switch-offload.md](kernel-channel-switch-offload.md).
 
 Two techniques carried the newer generations to the table above, beyond the
 original tricks:

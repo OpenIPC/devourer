@@ -229,8 +229,8 @@ hopping primitive.
 ### TDLS / MCC offload paths
 
 TDLS channel-switch offload stays **blocked-hardware-absent** end-to-end
-(needs two associated STAs under an AP), but the target is now fully
-named from source + build evidence: `rtw_hal_ch_sw_oper_offload`
+(needs two associated STAs under an AP), but the target is fully named
+from source + build evidence: `rtw_hal_ch_sw_oper_offload`
 (`hal/hal_com.c`) composes **H2C 0x1C `CHNL_SWITCH_OPER_OFFLOAD`**, built
 and runtime-armed in the measured module. The MCC attempt got further
 than expected (capability matrix): everything up to `mcc_enable=1` works;

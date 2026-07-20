@@ -546,9 +546,28 @@ public:
   /* Set the halrf channel + run IQK (per-channel). band 0=2.4G,1=5G. */
   void vnd_rf_iqk(uint8_t center, uint8_t band, ChannelWidth_t bw);
   /* Vendored RF channel/band/bw tune + synth relock (halrf_ctl_band_ch_bw_8852c
-   * + halrf_lck_8852c) — the correct RF tune for all bands incl. 6 GHz. */
+   * + halrf_lck_8852c) — the correct RF tune for all bands incl. 6 GHz.
+   * diag=false skips the 4-read synth-lock diagnostic (FastRetune hot path). */
   void vnd_rf_tune(uint8_t band_type, uint8_t center,
-                                 ChannelWidth_t bw);
+                                 ChannelWidth_t bw, bool diag = true);
+  /* band + 5 GHz sub-band bucket for the gain-error cache (0=2.4G, 1=5G-L
+   * 36-64, 2=5G-M 100-144, 3=5G-H 149+, 4=6G) — a hop within one bucket needs
+   * no gain rewrite. */
+  static int gain_bucket(uint8_t channel, uint8_t band_type);
+  int _last_gain_bucket = -1; /* invalidated by every full set_channel */
+
+  /* Compose-cache write-only RF channel set for a same-band 20 MHz fast hop
+   * (8852B): the vendored halrf_ctrl_ch reads RF18 (×4, DAV/DDV × path) and
+   * RMW-toggles RF 0xcf (×8) every hop; this primes those dwords once per
+   * epoch and thereafter composes the channel bits in memory and writes whole
+   * dwords — only the synth-lock poll (RF 0xb7[8]) still reads (irreducible).
+   * Returns false (caller falls back to vnd_rf_tune) on the 8852C or a cold
+   * cache. Invalidated by every full set_channel. */
+  bool fast_rf_channel_8852b(uint8_t channel);
+  void fast_lck_check_8852b(); /* halrf_lck_check_8852b (synth-lock verify) */
+  bool _kfr_primed = false;
+  uint32_t _kfr_rf18_dav = 0, _kfr_rf18_ddv = 0; /* per-window RF18 base */
+  uint32_t _kfr_cf_a = 0, _kfr_cf_b = 0;         /* RF 0xcf full value/path */
   struct kestrel_halrf_ctx *_halrf_ctx = nullptr;
   bool _halrf_rfk_inited = false; /* NCTL engine loaded (one-time, lazy) */
 

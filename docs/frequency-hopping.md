@@ -336,6 +336,24 @@ every generation overrides it with a lean path built from the tricks above:
 | RTL8821CU (Jaguar2) | ~30 ms | **~0.55 ms** | code-covered, no HW | ~0.5 ms | 1 |
 | RTL8822CU (Jaguar3) | ~12 ms | **~1.9 ms** | **~0.8 ms** | ~0.21 ms | 9 |
 | RTL8812EU (Jaguar3) | ~12 ms | **~2.4 ms** | **~0.8 ms** (8822E) | ~0.27 ms | 9 |
+| RTL8852BU (Kestrel/AX) | ~90 ms | **~25 ms** | — | ~1–2 ms | ~8 |
+
+The Kestrel (rtw89/AX) hop is still slower than the 11ac chips, but the same
+compose-cache recipe applies. The vendored halrf channel setting does an RF18
+read-modify-write + a 0xcf re-latch four times (path A/B × DAV/DDV), plus a
+synth PLL relock on the path-A DAV write. `fast_rf_channel_8852b` primes the
+RF18/0xcf dwords once per epoch and thereafter composes the channel bits and
+writes whole dwords — eliminating ~12 per-hop reads — while keeping the
+load-bearing synth relock + LCK poll (which read RF 0xb7/0xc5 to verify the
+physical lock, and cannot be cached away). With the per-sub-band gain cache and
+the synth-lock diagnostic gated off the hot path, that takes the hop from
+~44 ms to **~25 ms** (soak: 1500 hops, zero LCK timeouts, 97 % delivery). The
+irreducible floor is the synth relock/settle plus the a-die serial-interface
+writes — the reads are gone. There is still no firmware channel-switch H2C on this
+architecture (`SCAN_OFFLOAD` and MCC are the only rtw89 channel primitives). A
+Kestrel dwell-1 slot is ~50 ms (vs ~20 ms on the 8822B) — the N-channel data
+plane runs on AX (validated: 3-channel dwell-1, zero wrong-channel), at a
+coarser but usable hop rate.
 
 (Median `hop.dwell` switch_us over a 1/6/11 hop set; per-stage numbers from
 `DEVOURER_HOP_PROF=1`. Every hop microsecond is USB round-trips: one register

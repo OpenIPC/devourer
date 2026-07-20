@@ -117,6 +117,8 @@ add_library(devourer
     hal/basic_types.h
     hal/hal_com_reg.h
     src/ieee80211_radiotap.h
+    src/HalmacCfgParam.cpp
+    src/HalmacCfgParam.h
     src/ParsedRadioPacket.cpp
     src/Radiotap.c
     src/RadiotapBuilder.cpp

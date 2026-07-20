@@ -47,8 +47,9 @@ public:
    * dl_rsvd_page_88xx == send_fw_page). The FW requires its reserved-page set
    * before it enables the MAC TX scheduler; without it RX works but TX frames
    * never leave the MAC. */
-  bool download_rsvd_page(uint16_t pg_addr, const uint8_t *buf, uint32_t size) {
-    return send_fw_page(pg_addr, buf, size, /*beacon_desc=*/true);
+  bool download_rsvd_page(uint16_t pg_addr, const uint8_t *buf, uint32_t size,
+                          bool beacon_desc = true) {
+    return send_fw_page(pg_addr, buf, size, beacon_desc);
   }
 
 private:

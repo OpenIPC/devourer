@@ -225,6 +225,17 @@ struct DeviceConfig {
      * bring-up band's — active power knobs re-fold). Bench + protocol:
      * docs/experiments/kernel-channel-switch-offload.md. */
     int fastretune_fw = 0;
+    /* env: DEVOURER_KFR_OFLD — Kestrel FastRetune firmware IO-offload (mac_ax
+     * fwofld.c): batch the whole same-sub-band hop (RF18/0xcf channel set + BB
+     * reset + fixed TX power) into ONE FW_OFLD/CMD_OFLD_REG H2C the on-chip fw
+     * replays, collapsing ~20 USB register round-trips into one bulk-OUT
+     * (~9 ms -> ~0.15 ms host-side). Default 1 (on); 0 forces the direct
+     * write-only path (self-paces the ~1.5 ms RF synth settle instead of
+     * returning before it). No rtw89 firmware channel-switch H2C exists, so
+     * this offloads the raw register writes, not a fw switch primitive. The
+     * hop returns before the synth settles — the caller honours a ~1.5 ms
+     * settle before TX (the demos' admission window). 8852B only. */
+    int kestrel_fastretune_ofld = 1;
     /* env: DEVOURER_DIS_CCA — Jaguar2/3 MAC carrier-sense disable at bring-up
      * (primary CCA 0x520[14] + EDCCA [15]): injected/beacon TX stops deferring to
      * a busy channel and punches through co-channel traffic. Runtime equivalent:

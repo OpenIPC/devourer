@@ -155,7 +155,11 @@ int main() {
   }
   const long slot_ms = env_long("DEVOURER_DWELL_SLOT_MS", 20);
   const long total_slots = env_long("DEVOURER_DWELL_SLOTS", 0);
-  const long settle_us = env_long("DEVOURER_DWELL_SETTLE_US", 500);
+  // Post-switch settle before admitting a frame. On the Kestrel 8852B the
+  // default IO-offload hop returns before the ~1.5 ms RF synth settle (the host
+  // no longer self-paces it via slow register writes), so the window must
+  // cover that floor or a frame airs mid-retune. 2 ms is safe on every chip.
+  const long settle_us = env_long("DEVOURER_DWELL_SETTLE_US", 2000);
   const long guard_us = env_long("DEVOURER_DWELL_GUARD_US", 1000);
   const long airtime_us = env_long("DEVOURER_DWELL_AIRTIME_US", 300);
   const long late_us = env_long("DEVOURER_DWELL_LATE_US", 0);

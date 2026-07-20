@@ -86,6 +86,18 @@ between them on its own timer — a slot boundary is not a per-slot host H2C, so
 the switch itself is at least as fast as the ~1 ms on-chip RF retune measured
 in experiment 2 (which uses the same switch engine).
 
+**This is shared code, not one chip's quirk.** The same `hal_mcc.c` engine
+and this exact policy table (fixed 100 TU period, 20/80/36/30 TU splits) ship
+across every 11ac generation — Jaguar1 (8812/8814/8821A), Jaguar2 (8822B,
+8821C) and Jaguar3 (8822C, 8822E); the 8822E differs only by 3 TU of guard
+time, which shortens nothing meaningful. So the structural verdict below
+holds for the whole 11ac family by shared source, not just the measured
+8822B. The runtime `mcc_duration` knob moves the split *within* the 100 TU
+period; no chip and no runtime path reaches a sub-TU dwell or a shorter
+period. Kestrel (8852B/C) has no `hal_mcc.c` at all — its multi-channel
+support rides rtw89's `chanctx`, a separate, P2P-driven path that is equally
+off the hopping track.
+
 ## What was reached on hardware
 
 Measured on the RTL8822BU (T3U) with the MCC-variant vendor build
@@ -124,7 +136,10 @@ running, it is structurally a two-channel time-share:
   no dwell-1, no agile per-packet hopping (the decision gate's requirement);
 - exactly two contexts — no arbitrary-N channel set;
 - restricted to non-groupable channel pairs;
-- gated behind a full dual-interface association (P2P GO/GC in practice).
+- gated behind a full dual-interface association (P2P GO/GC in practice);
+- identical by shared `hal_mcc.c` across all four 11ac chips, and a
+  separate but equally P2P-driven `chanctx` path on Kestrel — no generation
+  offers a finer schedule.
 
 The only element with hopping value is the slot-boundary RF switch, and that
 is the **H2C 0x1D firmware channel switch** already isolated in experiment 2

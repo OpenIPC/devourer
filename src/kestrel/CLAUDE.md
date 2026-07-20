@@ -112,6 +112,32 @@ here (H2C 0x1D is 11ac HalMAC; rtw89 has only `SCAN_OFFLOAD` + MCC). The
 dwell-1 / N-channel data plane (`examples/dwelltx`) runs on Kestrel at ~30 ms
 slots (soak: 2000 hops, zero wrong-channel, ~97 % delivery).
 
+### Firmware IO-offload hop (`DEVOURER_KFR_OFLD`, default on)
+
+`fast_retune_ofld_8852b` ships the *entire* same-sub-band hop — the six RF18/
+0xcf channel-set writes, `halbb_bb_reset_all_8852b`, and the fixed-dBm TX-power
+target — as ONE `FW_OFLD`/`CMD_OFLD_REG` H2C (mac_ax `fwofld.c`) the on-chip
+firmware replays locally. `KestrelFw::reg_write_ofld` packs the 16-byte
+`fwcmd_cmd_ofld` command buffer (src RF a-die / BB / MAC, `WRITE`/`DELAY`
+types, LC on the last, `cmd_num` running); the firmware applies each masked
+write as `(reg & ~mask) | ((val << ctz(mask)) & mask)` — so BB/MAC entries
+carry the **raw** field value (pre-shifting double-shifts and mis-tunes),
+while RF writes use the full `MASKRF` (shift 0). This collapses ~20 per-hop USB
+register round-trips into a single bulk-OUT: host-side hop cost **~9.3 ms →
+~0.15 ms (~45×)**, zero wrong-channel over a 6000-hop soak.
+
+The offload does not speed up the RF synth — it only frees the host. The
+direct path's ~5 ms of `bb_reset` USB round-trips incidentally covered the VCO
+settle; collapsing them to ~0.15 ms exposes the true **~1.5 ms synth-settle
+floor** (below it, a frame airs mid-retune → wrong-channel; ≥1.5 ms is clean,
+`DEVOURER_DWELL_SETTLE_US` on the demo). Net time-to-usable-channel ~1.7 ms
+(~5.5×), with the host free to prep the next frame / service RX during the
+settle. The hop returns before the synth settles, so this changes the
+`FastRetune` timing contract — the caller honours the settle (the demos'
+admission window). Default on; `DEVOURER_KFR_OFLD=0` forces the self-pacing
+direct path (for A/B or a suspect chip). A bucket crossing (verified synth
+relock) and the 8852C fall through to the direct steps.
+
 ## TX power
 
 A fixed BB dBm (`halbb_set_txpwr_dbm`, default 20 dBm, `DEVOURER_TX_PWR`

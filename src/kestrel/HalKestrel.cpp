@@ -1744,9 +1744,12 @@ bool HalKestrel::fast_rf_channel_8852b(uint8_t channel, bool relock) {
     rf_wrf(0, 0xd3, 1u << 8, 0x0);
     rf_wrf(0, 0xb1, r::MASKRF, b1);
     fast_lck_check_8852b();
-  } else {
-    rf_wrf(0, 0x18, r::MASKRF, rf18_dav);
+    cf_toggle(0, _kfr_cf_a);
+    rf_wrf(1, 0x18, r::MASKRF, rf18_dav);
+    cf_toggle(1, _kfr_cf_b);
+    return true;
   }
+  rf_wrf(0, 0x18, r::MASKRF, rf18_dav);
   cf_toggle(0, _kfr_cf_a);
   /* path-B DAV. The DDV (d-die, 0x10018) window is not populated on the
    * single-die 8852B — skipping it costs no channel accuracy (soak-confirmed)
@@ -1754,6 +1757,84 @@ bool HalKestrel::fast_rf_channel_8852b(uint8_t channel, bool relock) {
   rf_wrf(1, 0x18, r::MASKRF, rf18_dav);
   cf_toggle(1, _kfr_cf_b);
   return true;
+}
+
+namespace {
+/* count-trailing-zeros for the RMW field shift. */
+inline uint8_t ctz32(uint32_t m) {
+  uint8_t s = 0;
+  while (m && !(m & 1)) {
+    m >>= 1;
+    ++s;
+  }
+  return s;
+}
+} // namespace
+
+bool HalKestrel::fast_retune_ofld_8852b(uint8_t channel) {
+  if (_variant != ChipVariant::C8852B || !_halbb_ctx)
+    return false;
+  /* Prime the a-die RF18/0xcf dwords once per epoch — the only reads on this
+   * path; everything after is composed write-only and shipped as one H2C. */
+  if (!_kfr_primed) {
+    _kfr_rf18_dav = rf_rrf(0, 0x18, r::MASKRF);
+    _kfr_cf_a = rf_rrf(0, 0xcf, r::MASKRF);
+    _kfr_cf_b = rf_rrf(1, 0xcf, r::MASKRF);
+    _kfr_primed = true;
+  }
+  uint32_t rf18_dav = (_kfr_rf18_dav & ~0x3e3ffu) | channel;
+  if (channel > 14)
+    rf18_dav |= (1u << 16) | (1u << 8);
+  rf18_dav = (rf18_dav & 0xf0fffu) | (1u << 12);
+  _kfr_rf18_dav = rf18_dav;
+
+  using O = KestrelFw::OfldWrite;
+  const uint8_t RF = 1, BB = 0, MAC = 2, DLY = 2;
+  /* The fw applies a masked write as (reg & ~mask) | ((val << ctz(mask)) &
+   * mask) — it does the field shift itself (matching halbb_fw_set_reg, which
+   * forwards the RAW field value). So pass the unshifted field value, NOT
+   * pre-positioned. (RF writes use the full MASKRF, shift 0, so they are
+   * identical either way.) */
+  auto bb = [](uint16_t off, uint32_t msk, uint32_t val) {
+    return O{BB, 0, off, val, msk, 0};
+  };
+  const int16_t dbm_q2 = static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb);
+  /* One batch = the whole same-sub-band hop the fw replays locally:
+   *  - RF18 (path A/B, a-die) + 0xcf clear/set latch toggle (channel set),
+   *  - halbb_bb_reset_all_8852b (BB RMWs the fw applies under mask on-chip; the
+   *    1/2 us settles become DELAY ops; 0xce40 phy-sts stop/start is a MAC RMW),
+   *  - halbb_set_txpwr_dbm_8852b (fixed-dBm arm + s(9,2) target).
+   * DDV (d-die 0x10018) is unpopulated on the single-die 8852B, so path-B is
+   * a-die too. This is the 8852B-only non-relock path; a sub-band crossing
+   * keeps the direct synth-relock (verified lock) path. */
+  const O cmds[] = {
+      {RF, 0, 0x18, rf18_dav, r::MASKRF, 0},
+      {RF, 0, 0xcf, _kfr_cf_a & ~1u, r::MASKRF, 0},
+      {RF, 0, 0xcf, _kfr_cf_a | 1u, r::MASKRF, 0},
+      {RF, 1, 0x18, rf18_dav, r::MASKRF, 0},
+      {RF, 1, 0xcf, _kfr_cf_b & ~1u, r::MASKRF, 0},
+      {RF, 1, 0xcf, _kfr_cf_b | 1u, r::MASKRF, 0},
+      /* bb_reset_all (8852B) */
+      bb(0x2344, 1u << 31, 1),
+      bb(0xc3c, 1u << 9, 1),
+      bb(0x1200, 0x7u << 28, 0x7),
+      bb(0x3200, 0x7u << 28, 0x7),
+      {0, 0, 0, 1, 0, DLY}, /* delay 1us */
+      {MAC, 0, 0xce40, 0u, 0x1u, 0}, /* stop phy-sts (clear bit0) */
+      {0, 0, 0, 2, 0, DLY}, /* delay 2us */
+      bb(0x704, 1u << 1, 1),
+      bb(0x704, 1u << 1, 0),
+      bb(0x1200, 0x7u << 28, 0x0),
+      bb(0x3200, 0x7u << 28, 0x0),
+      bb(0x704, 1u << 1, 1),
+      {MAC, 0, 0xce40, 0x1u, 0x1u, 0}, /* start phy-sts (set bit0) */
+      bb(0x2344, 1u << 31, 0),
+      bb(0xc3c, 1u << 9, 0),
+      /* set_txpwr_dbm */
+      bb(0x09a4, 1u << 16, 1),
+      bb(0x4594, 0x7fc00000u, static_cast<uint32_t>(dbm_q2) & 0x1ffu),
+  };
+  return _fw.reg_write_ofld(cmds, sizeof(cmds) / sizeof(cmds[0]));
 }
 
 void HalKestrel::vnd_bb_set_gain(uint8_t channel, uint8_t band_type) {
@@ -1799,15 +1880,6 @@ HalKestrel::~HalKestrel() {
 }
 
 namespace {
-/* count-trailing-zeros for the RMW field shift. */
-inline uint8_t ctz32(uint32_t m) {
-  uint8_t s = 0;
-  while (m && !(m & 1)) {
-    m >>= 1;
-    ++s;
-  }
-  return s;
-}
 constexpr uint32_t BB_WIN = 0x10000; /* bb0_cr_offset (wIndex=1) */
 } /* namespace */
 
@@ -1976,6 +2048,19 @@ void HalKestrel::fast_retune(uint8_t channel) {
    * ctl_ch's per-hop RF18/0xcf reads and, within a sub-band, the ~13 ms synth
    * LCK poll. Falls back to the vendored tune on the 8852C or a cold cache;
    * the synth-lock diagnostic reads are skipped either way (diag=false). */
+  using kfr_clock = std::chrono::steady_clock;
+  auto t0 = kfr_clock::now();
+  /* Fully-offloaded same-sub-band hop: the whole RF+bb_reset+txpwr write burst
+   * ships as ONE FW_OFLD H2C the fw replays on-chip, collapsing ~20 USB
+   * register round-trips into a single bulk-OUT. Only the 8852B non-relock
+   * path; a bucket crossing (or the 8852C) falls through to the direct steps. */
+  if (_kfr_ofld && !bucket_changed && fast_retune_ofld_8852b(channel)) {
+    _logger->debug("Kestrel FastRetune: ch{} (offloaded) {}us", channel,
+                   std::chrono::duration_cast<std::chrono::microseconds>(
+                       kfr_clock::now() - t0)
+                       .count());
+    return;
+  }
   if (!fast_rf_channel_8852b(channel, /*relock=*/bucket_changed))
     vnd_rf_tune(band_type, channel, CHANNEL_WIDTH_20, /*diag=*/false);
   if (bucket_changed) {
@@ -1984,8 +2069,11 @@ void HalKestrel::fast_retune(uint8_t channel) {
   }
   bb_reset_all();
   set_txpwr_dbm(static_cast<int16_t>(_txpwr_dbm_q2 + _txpwr_offset_qdb));
-  _logger->debug("Kestrel FastRetune: ch{} ({})", channel,
-                 band_type == 0 ? "2.4G" : band_type == 2 ? "6G" : "5G");
+  _logger->debug("Kestrel FastRetune: ch{} ({}) {}us", channel,
+                 band_type == 0 ? "2.4G" : band_type == 2 ? "6G" : "5G",
+                 std::chrono::duration_cast<std::chrono::microseconds>(
+                     kfr_clock::now() - t0)
+                     .count());
 }
 
 void HalKestrel::fast_set_bw(ChannelWidth_t bw) {

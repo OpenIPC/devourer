@@ -564,16 +564,22 @@ public:
    * Returns false (caller falls back to vnd_rf_tune) on the 8852C or a cold
    * cache. Invalidated by every full set_channel. */
   bool fast_rf_channel_8852b(uint8_t channel, bool relock);
+  /* Whole same-sub-band hop (RF18/0xcf + bb_reset + fixed TX power) as ONE
+   * FW_OFLD H2C the fw replays on-chip — collapses the ~20 per-hop USB
+   * register round-trips into a single bulk-OUT. 8852B, non-relock only. */
+  bool fast_retune_ofld_8852b(uint8_t channel);
   void fast_lck_check_8852b(); /* halrf_lck_check_8852b (synth-lock verify) */
   bool _kfr_primed = false;
   uint32_t _kfr_rf18_dav = 0;            /* a-die RF18 compose base */
   uint32_t _kfr_cf_a = 0, _kfr_cf_b = 0; /* RF 0xcf full value/path */
+  bool _kfr_ofld = false; /* batch the same-band hop writes via fw IO-offload */
   struct kestrel_halrf_ctx *_halrf_ctx = nullptr;
   bool _halrf_rfk_inited = false; /* NCTL engine loaded (one-time, lazy) */
 
 public:
   ~HalKestrel();
   void set_cca_on(bool on) { _cca_on = on; }
+  void set_kfr_ofld(bool on) { _kfr_ofld = on; }
 };
 
 } /* namespace kestrel */

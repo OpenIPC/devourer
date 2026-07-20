@@ -251,6 +251,8 @@ def spawn_dwelltx(dut, chans, a, out_dir):
         "DEVOURER_DWELL_SLOTS": str(a.slots + 20),  # +warmup
         "DEVOURER_HOP_FAST": str(a.hop_fast),
     })
+    if a.kfr_ofld:
+        env["DEVOURER_KFR_OFLD"] = str(a.kfr_ofld)
     if a.seed:
         env["DEVOURER_HOP_SEED"] = a.seed
     if a.tx_pwr:
@@ -312,6 +314,8 @@ def main():
     ap.add_argument("--slots", type=int, default=5000)
     ap.add_argument("--fw", type=int, default=1)
     ap.add_argument("--hop-fast", type=int, default=1)
+    ap.add_argument("--kfr-ofld", type=int, default=0,
+                    help="Kestrel FastRetune fw IO-offload (DEVOURER_KFR_OFLD)")
     ap.add_argument("--late-us", type=int, default=0)
     ap.add_argument("--settle-us", type=int, default=0,
                     help="post-switch admission delay; fw switch needs "

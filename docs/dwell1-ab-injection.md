@@ -134,3 +134,6 @@ occasionally airs before the switch fully settles — recoverable by a slightly
 larger settle at a small duty cost), and bidirectional/ACK turnaround, which
 this experiment deferred to keep the admission contract unidirectional and
 clean.
+
+The A/B contract here generalises to arbitrary N channels with no per-channel
+penalty — [N-channel hopping](n-channel-hopping.md).

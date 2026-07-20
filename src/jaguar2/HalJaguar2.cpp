@@ -1342,7 +1342,7 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
    * carries the same SINGLE_CHANNELSWITCH_V2 offload as the 8822B's
    * (on-air-validated) one. Mode 2 additionally accepts band changes — the
    * firmware reprograms the band block itself (bench-measured ~2 ms
-   * cross-band, docs/kernel-channel-switch-offload.md) — which the software
+   * cross-band, docs/experiments/kernel-channel-switch-offload.md) — which the software
    * path cannot. 20/40 MHz only (the 80 MHz primary-idx pairing stays on the
    * sw path). */
   if (_cfg.tuning.fastretune_fw > 0 &&

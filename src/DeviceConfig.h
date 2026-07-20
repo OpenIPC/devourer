@@ -223,7 +223,7 @@ struct DeviceConfig {
      * intra-band 20/40 MHz hops, 2 = additionally accept cross-band hops
      * (the firmware reprograms the band block; TXAGC baseline stays the
      * bring-up band's — active power knobs re-fold). Bench + protocol:
-     * docs/kernel-channel-switch-offload.md. */
+     * docs/experiments/kernel-channel-switch-offload.md. */
     int fastretune_fw = 0;
     /* env: DEVOURER_DIS_CCA — Jaguar2/3 MAC carrier-sense disable at bring-up
      * (primary CCA 0x520[14] + EDCCA [15]): injected/beacon TX stops deferring to

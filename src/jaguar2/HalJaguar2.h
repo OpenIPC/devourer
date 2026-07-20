@@ -184,7 +184,7 @@ public:
    * (central ch, primary-ch idx, bw, IQK_UPDATE_EN), the switch the vendor
    * driver runs behind its rtw_ch_switch_offload=1 module parameter. The
    * 8822B firmware executes the whole RF/BB retune (~1 ms on-air dark time,
-   * bench: docs/kernel-channel-switch-offload.md) and reports C2H
+   * bench: docs/experiments/kernel-channel-switch-offload.md) and reports C2H
    * CUR_CHANNEL; devourer corroborates by polling the RF18 channel field
    * instead, so TX-only sessions need no C2H drain — and the confirm read
    * doubles as the compose-cache re-prime. Returns false when the readback

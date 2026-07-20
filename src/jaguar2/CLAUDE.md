@@ -34,6 +34,14 @@ Jaguar1 (shared `PhyTableLoader`).
   RF18-edge bug.
 - The TXAGC block is write-only, so `GetTxPowerState` reports the software
   shadow (`hw_readback=false`).
+- **8822B firmware channel switch** (H2C 0x1D `SINGLE_CHANNELSWITCH_V2`,
+  `fw_channel_switch` + the `fastretune_fw` knob): the fw executes the whole
+  retune in ~1–2 ms and reports C2H `CUR_CHANNEL`. Never poll RF18 *during*
+  the switch — the PI reads contend with the firmware's RF-bus writes and
+  triple the on-air dark time; confirm the previous switch at the next hop
+  instead (`fw_switch_confirm`). Classic 8-byte H2Cs ride the HMEBOX
+  mailboxes (0x1d0/0x1f0 + 0x1cc busy bits), distinct from MacInit's 32-byte
+  h2c-pkt queue.
 
 ## Per-packet TX power
 

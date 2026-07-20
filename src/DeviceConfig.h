@@ -206,6 +206,14 @@ struct DeviceConfig {
      * MIX_MODE swing compensation (0xc94/0xe94 TXAGC + 0xc1c/0xe1c BB scale)
      * so on-air power holds flat as the PA heats over a sustained TX link. */
     bool thermal_track = true;
+    /* env: DEVOURER_FASTRETUNE_FW — Jaguar2 8822B FastRetune firmware fast
+     * path (H2C 0x1D SINGLE_CHANNELSWITCH_V2, the switch the vendor driver
+     * gates behind rtw_ch_switch_offload): 0 = off (software compose path),
+     * 1 = firmware switch for intra-band 20/40 MHz hops, 2 = additionally
+     * accept cross-band hops (the firmware reprograms the band block; TXAGC
+     * baseline stays the bring-up band's — active power knobs re-fold).
+     * Bench + protocol: docs/kernel-channel-switch-offload.md. */
+    int fastretune_fw = 0;
     /* env: DEVOURER_DIS_CCA — Jaguar2/3 MAC carrier-sense disable at bring-up
      * (primary CCA 0x520[14] + EDCCA [15]): injected/beacon TX stops deferring to
      * a busy channel and punches through co-channel traffic. Runtime equivalent:

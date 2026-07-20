@@ -813,9 +813,17 @@ void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
     return;
   /* Serialize against the thermal-track tick's RF-window read. */
   std::lock_guard<std::mutex> lk(_reg_mu);
+  const bool band_change = (_channel.Channel <= 14) != (channel <= 14);
   if (_hal.fast_retune(channel, static_cast<uint8_t>(_channel.ChannelWidth),
                        _channel.ChannelOffset, cache_rf)) {
     _channel.Channel = channel;
+    /* Only the fw fast path (DEVOURER_FASTRETUNE_FW=2) accepts a band
+     * change; the firmware retunes the chip but TXAGC folding is host-side —
+     * re-fold active power knobs against the new band's table (the same
+     * gating SetMonitorChannel applies). */
+    if (band_change && _brought_up &&
+        (_tx_pwr_offset_steps != 0 || _tx_pwr_override >= 0))
+      apply_tx_power_current();
     return;
   }
   /* Fast path declined (band change / never tuned) — full channel set at the

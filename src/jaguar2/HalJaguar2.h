@@ -175,6 +175,28 @@ public:
   bool fast_retune(uint8_t channel, uint8_t bw, uint8_t primary_ch_idx,
                    bool cache_rf);
 
+  /* Classic 8-byte H2C over the HMEBOX mailboxes (msg at 0x1d0+box*4, ext at
+   * 0x1f0+box*4, REG_HMETFR 0x1cc busy bits) — the rtw_halmac_send_h2c wire,
+   * distinct from the 32-byte h2c-pkt queue MacInit uses. */
+  void send_h2c_raw(uint32_t msg, uint32_t msg_ext);
+
+  /* Firmware-offloaded channel switch — H2C 0x1D SINGLE_CHANNELSWITCH_V2
+   * (central ch, primary-ch idx, bw, IQK_UPDATE_EN), the switch the vendor
+   * driver runs behind its rtw_ch_switch_offload=1 module parameter. The
+   * 8822B firmware executes the whole RF/BB retune (~1 ms on-air dark time,
+   * bench: docs/kernel-channel-switch-offload.md) and reports C2H
+   * CUR_CHANNEL; devourer corroborates by polling the RF18 channel field
+   * instead, so TX-only sessions need no C2H drain — and the confirm read
+   * doubles as the compose-cache re-prime. Returns false when the readback
+   * never lands (caller falls back to the software path). 8822B only. */
+  bool fw_channel_switch(uint8_t central, uint8_t pri_ch_idx, uint8_t bw);
+
+  /* Corroborate the last fw_channel_switch on hardware (one RF18 read; a
+   * dwell has passed by the time this is called from the next hop). False =
+   * the firmware never landed the switch — caller resyncs via the full
+   * path. */
+  bool fw_switch_confirm();
+
   /* Channel/BW register-canary dump for tests/hop_parity_check.sh — the same
    * grep format as the Jaguar1/Jaguar3 DumpCanary. Emitted by both the full
    * and fast channel paths when DEVOURER_DUMP_CANARY is set. Live registers
@@ -301,6 +323,8 @@ private:
   int _last_df18 = -1;   /* 8822B ch144 RF 0xdf[18] state */
   int _last_cck_key = -1; /* 2G spur (8822B) / CCK-filter (8821C) key: ch14? */
   bool _warned_uncharacterized = false; /* one-shot extended-channel warning */
+  uint8_t _h2c_box = 0; /* round-robin HMEBOX index for send_h2c_raw */
+  uint8_t _fw_sw_pending = 0; /* central ch of an unconfirmed fw switch */
 
   /* fast_set_bandwidth cache: the values a full set_channel_bw computes for the
    * current channel, so a same-channel 20<->5/10 toggle can replay the

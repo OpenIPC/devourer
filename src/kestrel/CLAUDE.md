@@ -81,25 +81,36 @@ C2H (gated on a full BSS association, not just the registered NO_LINK role).
 
 `HalKestrel::fast_retune` is the lean same-band 20 MHz hop: RF channel set +
 a per-sub-band gain re-apply + a BB reset + fixed TX power — skipping the BB
-bandwidth config and the ~1.2 ms RX-DCK. ~25 ms/hop (vs ~2 ms on the 8822B).
-The channel set is `fast_rf_channel_8852b`, a **compose-cache write-only**
-port of the vendored `halrf_ctrl_ch_8852b` (the same recipe as the 11ac
-retunes): the vendored path reads RF18 ×4 (path A/B × DAV 0x18 / DDV 0x10018)
-and RMW-toggles RF 0xcf ×8 every hop; the lean path primes those dwords once
-per epoch (`_kfr_*`, invalidated by every full `set_channel`) and thereafter
-composes the channel bits and writes whole dwords, cutting ~12 reads. The
-path-A DAV synth relock (`halrf_set_s0_arfc18`: RF 0xd3[8] hold + RF18 write +
-RF 0xb7[8] LCK poll) and `fast_lck_check_8852b` (RF 0xc5[15] verify + MMD-reset
-fallback) are kept verbatim — **load-bearing, skipping the relock deafens the
-radio**, and the LCK poll reads the physical lock state (irreducible floor,
-plus the a-die SI writes). Two more cuts: the synth-lock *diagnostic* reads are
-gated off the hot path (`vnd_rf_tune(..., diag=false)`), and the gain-error is
-re-applied only when the 5 GHz sub-band bucket moves (`gain_bucket` /
-`_last_gain_bucket`). 8852C keeps the vendored `ctl_band_ch_bw` tune
+bandwidth config and the ~1.2 ms RX-DCK. **~9 ms/hop same-sub-band, ~13 ms
+cross-sub-band** (vs ~2 ms on the 8822B, ~44 ms unoptimized). The channel set
+is `fast_rf_channel_8852b`, a **compose-cache write-only** port of the vendored
+`halrf_ctrl_ch_8852b`. Three cuts (all on-air + soak validated):
+
+- **Compose-cache**: the vendored path reads RF18 ×4 (path A/B × DAV 0x18 / DDV
+  0x10018) and RMW-toggles RF 0xcf ×8 every hop; the lean path primes those
+  dwords once per epoch (`_kfr_*`, invalidated by every full `set_channel`) and
+  writes whole dwords — ~12 reads gone.
+- **No DDV writes**: the d-die 0x10018 window is unpopulated on the single-die
+  8852B; skipping it costs no channel accuracy (soak-confirmed).
+- **Relock only on a sub-band bucket change** (`fast_rf_channel_8852b(...,
+  relock)`, `bucket_changed = gain_bucket != _last_gain_bucket`). A
+  same-sub-band hop moves the synth little and it settles during the caller's
+  admission window, so the ~13 ms path-A LCK poll is pure blocking — a plain
+  RF18 write holds channel accuracy (soak: 2000 hops, zero wrong-channel,
+  ~97 % delivery). The full `halrf_set_s0_arfc18` relock (RF 0xd3[8] hold +
+  RF18 write + RF 0xb7[8] LCK poll) + `fast_lck_check_8852b` (RF 0xc5[15]
+  verify + MMD-reset lock recovery) is kept for a sub-band crossing — a bigger
+  VCO jump, and the only path with the recovery. NOTE: the relock guarantees a
+  verified lock, so a `SetMonitorChannel` (full path) always runs it; the fast
+  hop trades that guarantee for latency within a sub-band, empirically safe.
+
+The synth-lock *diagnostic* reads are gated off the hot path
+(`vnd_rf_tune(..., diag=false)`), and the gain-error re-applies only on a
+bucket move. 8852C keeps the vendored `ctl_band_ch_bw` tune
 (`fast_rf_channel_8852b` returns false). No firmware channel-switch H2C exists
 here (H2C 0x1D is 11ac HalMAC; rtw89 has only `SCAN_OFFLOAD` + MCC). The
-dwell-1 / N-channel data plane (`examples/dwelltx`) runs on Kestrel at ~50 ms
-slots (soak: 1500 hops, zero LCK timeouts, zero wrong-channel, 97 % delivery).
+dwell-1 / N-channel data plane (`examples/dwelltx`) runs on Kestrel at ~30 ms
+slots (soak: 2000 hops, zero wrong-channel, ~97 % delivery).
 
 ## TX power
 

@@ -563,11 +563,11 @@ public:
    * dwords — only the synth-lock poll (RF 0xb7[8]) still reads (irreducible).
    * Returns false (caller falls back to vnd_rf_tune) on the 8852C or a cold
    * cache. Invalidated by every full set_channel. */
-  bool fast_rf_channel_8852b(uint8_t channel);
+  bool fast_rf_channel_8852b(uint8_t channel, bool relock);
   void fast_lck_check_8852b(); /* halrf_lck_check_8852b (synth-lock verify) */
   bool _kfr_primed = false;
-  uint32_t _kfr_rf18_dav = 0, _kfr_rf18_ddv = 0; /* per-window RF18 base */
-  uint32_t _kfr_cf_a = 0, _kfr_cf_b = 0;         /* RF 0xcf full value/path */
+  uint32_t _kfr_rf18_dav = 0;            /* a-die RF18 compose base */
+  uint32_t _kfr_cf_a = 0, _kfr_cf_b = 0; /* RF 0xcf full value/path */
   struct kestrel_halrf_ctx *_halrf_ctx = nullptr;
   bool _halrf_rfk_inited = false; /* NCTL engine loaded (one-time, lazy) */
 

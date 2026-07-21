@@ -1075,7 +1075,7 @@ void RadioManagementJaguar3::apply_rate_diffs_8822e(
       /* OFDM 24/36/48/54M:  */ {MGN_24M, d.legacy, d.legacy, d.legacy, d.legacy},
       /* HT MCS0..3:         */ {MGN_MCS0, d.mcs[0], d.mcs[1], d.mcs[2], d.mcs[3]},
       /* HT MCS4..7:         */ {MGN_MCS4, d.mcs[4], d.mcs[5], d.mcs[6], d.mcs[7]},
-      /* HT MCS8..11 (zeroed, 2SS — not in v1's caller-supplied set): */
+      /* HT MCS8..11 (zeroed, 2SS — not in the caller-supplied set): */
       {MGN_MCS8, 0, 0, 0, 0},
       /* HT MCS12..15 (zeroed, 2SS):    */ {MGN_MCS12, 0, 0, 0, 0},
       /* VHT1SS MCS0..3 (zeroed):       */ {MGN_VHT1SS_MCS0, 0, 0, 0, 0},

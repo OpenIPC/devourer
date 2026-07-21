@@ -109,15 +109,16 @@ inline int txpkt_pwr_db_for_step(uint8_t step) {
 }
 
 /* Caller-supplied per-rate TXAGC diffs (signed qdB vs the reference anchor).
- * v1 consumer: mabur's wall-equalized ladder — each rate parked a uniform
- * margin below its measured PA-compression wall. Programmed by
- * IRtlDevice::SetTxPowerRateDiffs; 8822E-only in v1. On the 8822E one qdB
- * equals one TXAGC index step (step_qdb = 1), so values are used verbatim
- * as index diffs. */
+ * Motivating consumer: a wall-equalized rate ladder — each rate parked a
+ * uniform margin below its measured PA-compression wall. Programmed by
+ * IRtlDevice::SetTxPowerRateDiffs; 8822E-only. On the 8822E one qdB equals one
+ * TXAGC index step (step_qdb = 1), so values are used verbatim as index diffs.
+ * The hardware diff field is 7-bit two's-complement, so the usable range is
+ * [-64, 63]; SetTxPowerRateDiffs clamps to it before storing. */
 struct TxRateDiffsQdb {
-  int8_t cck = 0;                      /* CCK 1..11M rows */
-  int8_t legacy = 0;                   /* OFDM 6..54M — control frames */
-  int8_t mcs[8] = {0, 0, 0, 0, 0, 0, 0, 0}; /* HT MCS0..7 */
+  int8_t cck = 0;                      /* CCK 1..11M rows; [-64, 63] qdB */
+  int8_t legacy = 0;                   /* OFDM 6..54M control frames; [-64, 63] */
+  int8_t mcs[8] = {0, 0, 0, 0, 0, 0, 0, 0}; /* HT MCS0..7; [-64, 63] each */
 };
 
 /* Pack four signed per-rate diffs into one 0x3a00-table word: byte j =

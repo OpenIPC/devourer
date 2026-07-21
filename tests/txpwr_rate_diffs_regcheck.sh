@@ -29,7 +29,7 @@
 #             RtlJaguar3Device::apply_tx_power_current's full-apply path).
 #
 # Only the 8822E (RTL8812EU/RTL8822EU, PID 0xa81a) implements
-# SetTxPowerRateDiffs in v1 (RtlJaguar3Device::SetTxPowerRateDiffs returns
+# SetTxPowerRateDiffs (RtlJaguar3Device::SetTxPowerRateDiffs returns
 # false off that variant) — this script targets that DUT only and SKIPs
 # cleanly when it isn't plugged in.
 #
@@ -53,7 +53,7 @@ trap cleanup EXIT INT TERM
 echo "== building =="
 cmake --build "$ROOT/build" -j --target txpower >/dev/null || exit 1
 
-# DUT: only the 8822E implements SetTxPowerRateDiffs in v1. CH_A/CH_B are
+# DUT: only the 8822E implements SetTxPowerRateDiffs. CH_A/CH_B are
 # same-band channels in different efuse channel groups (same pair the offset
 # regcheck uses for its 8822E sticky cell), so the sticky check proves the
 # table survives a full channel-group re-fold, not just an offset step.
@@ -165,9 +165,7 @@ fi
 #     mcs7-ofdm=0 (mcs7 == ofdm == the flat index, 40) — the honest flat
 #     truth: apply_tx_power_current's flat branch zeroed the chip's per-rate
 #     diffs, and GetTxPowerState must report that chip truth rather than
-#     ref+diff during the override (this is the Issue 1 fix under test: a
-#     stale fix would still show mcs7-ofdm=-16 here even though the hardware
-#     has no per-rate spread).
+#     ref+diff during the override.
 #   post-clear (last): rate_diffs=1, mcs7-ofdm=-16 restored — clearing the
 #     override drove apply_tx_power_current's full-apply path, which re-walks
 #     the still-configured caller table. This is the actual override-clear
@@ -199,24 +197,20 @@ else
     else
         pd_want_mcs7=$((pd_ofdm - 16))
         pc_want_mcs7=$((pc_ofdm - 16))
-        ok=1
         if [ "$pd_rd" = "1" ] && [ "$pd_mcs7" = "$pd_want_mcs7" ]; then
             pass "$name override(flat-pulse) post-diffs: rate_diffs=1, mcs7-ofdm=-16 (ofdm=$pd_ofdm mcs7=$pd_mcs7)"
         else
             fail "$name override(flat-pulse) post-diffs: rate_diffs=$pd_rd ofdm=$pd_ofdm mcs7=$pd_mcs7 (want rate_diffs=1, mcs7=$pd_want_mcs7)"
-            ok=0
         fi
         if [ "$mp_rd" = "1" ] && [ "$mp_ofdm" = "40" ] && [ "$mp_mcs7" = "40" ]; then
             pass "$name override(flat-pulse) mid-pulse: rate_diffs=1 (configured) but mcs7=ofdm=40 (honest flat truth)"
         else
             fail "$name override(flat-pulse) mid-pulse: rate_diffs=$mp_rd ofdm=$mp_ofdm mcs7=$mp_mcs7 (want rate_diffs=1, ofdm=40, mcs7=40)"
-            ok=0
         fi
         if [ "$pc_rd" = "1" ] && [ "$pc_mcs7" = "$pc_want_mcs7" ]; then
             pass "$name override(flat-pulse) post-clear: rate_diffs=1, mcs7-ofdm=-16 restored (ofdm=$pc_ofdm mcs7=$pc_mcs7)"
         else
             fail "$name override(flat-pulse) post-clear: rate_diffs=$pc_rd ofdm=$pc_ofdm mcs7=$pc_mcs7 (want rate_diffs=1, mcs7=$pc_want_mcs7)"
-            ok=0
         fi
     fi
 fi

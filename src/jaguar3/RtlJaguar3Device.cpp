@@ -1367,15 +1367,30 @@ void RtlJaguar3Device::SetTxPowerIndexOverride(int idx) {
 bool RtlJaguar3Device::SetTxPowerRateDiffs(
     const std::optional<devourer::TxRateDiffsQdb> &diffs) {
   if (_variant != jaguar3::ChipVariant::C8822E) {
-    _logger->warn("SetTxPowerRateDiffs: 8822E-only in v1");
+    _logger->warn("SetTxPowerRateDiffs: 8822E-only");
     return false;
   }
   if (_cw_active) {
     _logger->warn("SetTxPowerRateDiffs refused: CW tone active");
     return false;
   }
+  /* Clamp to the 7-bit two's-complement diff field's usable range [-64, 63]
+   * before storing. pack_rate_diff_word masks with & 0x7f, which would alias
+   * the sign of an over-range int8_t: a caller asking for -100 (a big cut)
+   * would land +28 (a power boost). Same guard the ref path applies against
+   * its own over-range wrap. */
+  std::optional<devourer::TxRateDiffsQdb> clamped = diffs;
+  if (clamped) {
+    auto cl = [](int8_t v) -> int8_t {
+      return v < -64 ? -64 : (v > 63 ? 63 : v);
+    };
+    clamped->cck = cl(clamped->cck);
+    clamped->legacy = cl(clamped->legacy);
+    for (int i = 0; i < 8; ++i)
+      clamped->mcs[i] = cl(clamped->mcs[i]);
+  }
   std::lock_guard<std::mutex> lk(_reg_mu);
-  _rate_diffs = diffs;
+  _rate_diffs = clamped;
   if (_brought_up)
     apply_tx_power_current(/*full=*/true); /* re-walk the table now */
   return true;
@@ -1583,12 +1598,18 @@ devourer::TxPowerState RtlJaguar3Device::GetTxPowerState() {
   s.offset_qdb = s.offset_steps; /* 1 qdB per step on Jaguar3 */
   s.saturated_low = _txpwr_sat_low;
   s.saturated_high = _txpwr_sat_high;
+  /* Under _reg_mu for a coherent snapshot vs the coex tick, and so the
+   * non-atomic _rate_diffs read below is race-free. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* rate_diffs_custom means "a table is configured" — knowable regardless of
+   * bring-up / CW state, so it's reported here rather than inside the readback
+   * block (a pre-bring-up or mid-CW snapshot with a table set must still see
+   * it flagged). */
+  s.rate_diffs_custom = _rate_diffs.has_value();
   if (_brought_up && !_cw_active) {
     /* Reference readback (the Jaguar3 TXAGC refs ARE readable): OFDM ref
      * 0x18e8[16:10]; MCS7 is the per-rate diff table's zero anchor, so it
-     * equals the OFDM ref; CCK ref 0x18a0[22:16]. Under _reg_mu for a
-     * coherent snapshot vs the coex tick. */
-    std::lock_guard<std::mutex> lk(_reg_mu);
+     * equals the OFDM ref; CCK ref 0x18a0[22:16]. */
     const uint32_t ofdm = (_device.rtw_read32(0x18e8) >> 10) & 0x7f;
     const uint32_t cck =
         (_device.rtw_read32(0x18a0) >> 16) & 0x7f;
@@ -1614,7 +1635,6 @@ devourer::TxPowerState RtlJaguar3Device::GetTxPowerState() {
       s.mcs7_index = static_cast<int16_t>(ofdm);
       s.cck_index = static_cast<int16_t>(cck);
     }
-    s.rate_diffs_custom = _rate_diffs.has_value();
     s.hw_readback = true;
   }
   return s;

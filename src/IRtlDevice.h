@@ -145,7 +145,7 @@ public:
    * std::nullopt clears back to the default. Applies live; persists across
    * SetMonitorChannel / FastRetune and override-set/clear (Runtime TX power
    * family contract). Returns false where unsupported (everything except
-   * the 8822E in v1). */
+   * the 8822E). */
   virtual bool SetTxPowerRateDiffs(const std::optional<devourer::TxRateDiffsQdb>& diffs) {
     (void)diffs;
     return false;

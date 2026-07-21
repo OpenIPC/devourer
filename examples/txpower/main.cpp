@@ -19,7 +19,7 @@
  *   --step-ms N                 dwell per step, ms (default 500)
  *   --rate-diffs I,I,...,I      10 comma-separated qdB per rate
  *                               (cck,legacy,m0..m7) or 'clear' to nullopt
- *   --flat-pulse N               after --rate-diffs: force flat index N, dump
+ *   --flat-pulse N              after --rate-diffs: force flat index N, dump
  *                               state, then clear the override (-1) and dump
  *                               state again — proves a flat override
  *                               temporarily flattens the chip's per-rate
@@ -93,7 +93,9 @@ struct Args {
   int switch_channel = -1;
   int retune = -1;
   bool thermal = false;
-  std::string rate_diffs;
+  bool have_rate_diffs = false;
+  bool rate_diffs_clear = false;
+  devourer::TxRateDiffsQdb rate_diffs;
   int flat_pulse = 0;
   bool have_flat_pulse = false;
 };
@@ -141,7 +143,44 @@ bool parse_args(int argc, char **argv, Args &a) {
     else if (k == "--rate-diffs") {
       if (i + 1 >= argc)
         return false;
-      a.rate_diffs = argv[++i];
+      const std::string val = argv[++i];
+      a.have_rate_diffs = true;
+      if (val == "clear") {
+        a.rate_diffs_clear = true;
+      } else {
+        /* Parse and range-check the 10 ints here so a typo fails before the
+         * chip is ever brought up (every other flag validates in parse_args).
+         * Range is the library's [-64, 63] — a bare strtol->int8_t cast would
+         * silently truncate (200 -> -56), so reject out-of-range with a real
+         * error rather than clamp-and-surprise. */
+        int v[10] = {0};
+        int n = 0;
+        const char *p = val.c_str();
+        char *end = nullptr;
+        while (n < 10) {
+          v[n++] = static_cast<int>(std::strtol(p, &end, 10));
+          if (*end != ',')
+            break;
+          p = end + 1;
+        }
+        if (n != 10 || *end != '\0') {
+          std::fprintf(stderr, "devourer [E] --rate-diffs wants 10 comma ints "
+                               "(cck,legacy,m0..m7) or 'clear'\n");
+          return false;
+        }
+        for (int j = 0; j < 10; ++j) {
+          if (v[j] < -64 || v[j] > 63) {
+            std::fprintf(stderr, "devourer [E] --rate-diffs value %d out of "
+                                 "range [-64, 63]\n",
+                         v[j]);
+            return false;
+          }
+        }
+        a.rate_diffs.cck = static_cast<int8_t>(v[0]);
+        a.rate_diffs.legacy = static_cast<int8_t>(v[1]);
+        for (int j = 0; j < 8; ++j)
+          a.rate_diffs.mcs[j] = static_cast<int8_t>(v[2 + j]);
+      }
     } else if (k == "--flat-pulse" && next(a.flat_pulse))
       a.have_flat_pulse = true;
     else {
@@ -276,30 +315,12 @@ int main(int argc, char **argv) {
     print_state(dev.get(), a.thermal);
   }
 
-  if (!a.rate_diffs.empty()) {
-    if (a.rate_diffs == "clear") {
+  if (a.have_rate_diffs) {
+    if (a.rate_diffs_clear) {
       const bool ok = dev->SetTxPowerRateDiffs(std::nullopt);
       logger->info("rate-diffs clear -> {}", ok ? "ok" : "unsupported");
     } else {
-      devourer::TxRateDiffsQdb d;
-      int v[10] = {0};
-      int n = 0;
-      const char* p = a.rate_diffs.c_str();
-      char* end = nullptr;
-      while (n < 10) {
-        v[n++] = static_cast<int>(std::strtol(p, &end, 10));
-        if (*end != ',') break;
-        p = end + 1;
-      }
-      if (n != 10 || *end != '\0') {
-        std::fprintf(stderr, "devourer [E] --rate-diffs wants 10 comma ints "
-                             "(cck,legacy,m0..m7) or 'clear'\n");
-        return 2;
-      }
-      d.cck = static_cast<int8_t>(v[0]);
-      d.legacy = static_cast<int8_t>(v[1]);
-      for (int i2 = 0; i2 < 8; ++i2) d.mcs[i2] = static_cast<int8_t>(v[2 + i2]);
-      const bool ok = dev->SetTxPowerRateDiffs(d);
+      const bool ok = dev->SetTxPowerRateDiffs(a.rate_diffs);
       logger->info("rate-diffs -> {}", ok ? "applied" : "unsupported");
     }
     print_state(dev.get(), a.thermal);

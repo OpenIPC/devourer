@@ -129,8 +129,40 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
     _macinit.send_fw_general_info(rfe, r2t2r, _hal.chip_version().cut, pkg);
   }
 
-  _hal.apply_bb_rf_agc_tables(rfe);
-  _logger->info("RtlJaguar2Device: PHY tables applied");
+  /* Optional firmware register IO-offload of the static BB/AGC/RF phy tables
+   * (DEVOURER_FW_TABLE_OFLD): batch the write stream through HalMAC cfg_param so
+   * the fw replays it on-chip — collapses the ~5700–9200 per-init USB register
+   * transfers into a handful of bulk transfers. Falls back to a direct re-apply
+   * (idempotent) if the transport errors. */
+  const int ofld = _cfg.tuning.fw_table_offload;
+  if (ofld && _device.is_usb()) {
+    devourer::HalmacCfgParam::Transport tp;
+    tp.dl_rsvd_page = [this](uint16_t pg, const uint8_t *b, uint32_t l) {
+      return _fw.download_rsvd_page(pg, b, l, /*beacon_desc=*/false);
+    };
+    tp.send_h2c_pkt = [this](const uint8_t pkt[32]) {
+      return _macinit.h2c_pkt(pkt);
+    };
+    tp.next_seq = [this]() { return _macinit.next_h2c_seq(); };
+    tp.settle = [this]() { _macinit.wait_h2c_drained(); };
+    tp.verify_read = [this](uint16_t a) { return _device.rtw_read32(a); };
+    tp.cfg_pg_addr = _macinit.cfg_param_page();
+    tp.cfg_loc = _macinit.cfg_param_loc();
+    devourer::HalmacCfgParam cfg(tp, _logger);
+    _hal.apply_bb_rf_agc_tables(rfe, &cfg, /*offload_rf=*/(ofld & 2) != 0);
+    if (!cfg.ok()) {
+      _logger->warn("RtlJaguar2Device: fw table offload failed — re-applying "
+                    "tables direct");
+      _hal.apply_bb_rf_agc_tables(rfe);
+    } else {
+      _logger->info("RtlJaguar2Device: PHY tables applied via fw offload "
+                    "({} commands)",
+                    cfg.total());
+    }
+  } else {
+    _hal.apply_bb_rf_agc_tables(rfe);
+    _logger->info("RtlJaguar2Device: PHY tables applied");
+  }
 
   /* halrf kfree init: read the PPG efuse trims and apply the PA-bias RF LUT
    * correction (write-only LUT state — the 0x3f sequence visible in the

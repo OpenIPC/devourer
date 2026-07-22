@@ -67,6 +67,9 @@ RtlKestrelDevice::RtlKestrelDevice(RtlAdapter device, Logger_t logger,
   else
     _logger->info("Kestrel: die-id 0x{:02x} ({}), cut {}", info.die_id,
                   die_name(info.die_id), info.cut);
+  /* FastRetune firmware IO-offload (8852B same-sub-band hop). Armed here so it
+   * covers every bring-up path; a no-op on the 8852C / relock path. */
+  _hal.set_kfr_ofld(_cfg.tuning.kestrel_fastretune_ofld != 0);
   /* DEVOURER_TX_PWR on Kestrel = the fixed BB TX power in whole dBm (distinct
    * from the Jaguar2 TXAGC-index meaning). Applied at every set_channel. */
   if (_cfg.tx.power_index.has_value())

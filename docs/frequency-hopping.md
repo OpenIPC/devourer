@@ -333,9 +333,51 @@ every generation overrides it with a lean path built from the tricks above:
 |-----|-----------|---------------|----------------------|-------------|--------------|
 | RTL8812AU (Jaguar1) | ~277 ms | **~1.6 ms** | — | ~0.8 ms | 2 |
 | RTL8822BU (Jaguar2) | ~65 ms | **~2.5 ms** | ~2.6 ms | ~1.0 ms | 2 |
-| RTL8821CU (Jaguar2) | ~30 ms | **~0.55 ms** | — | ~0.5 ms | 1 |
+| RTL8821CU (Jaguar2) | ~30 ms | **~0.55 ms** | code-covered, no HW | ~0.5 ms | 1 |
 | RTL8822CU (Jaguar3) | ~12 ms | **~1.9 ms** | **~0.8 ms** | ~0.21 ms | 9 |
-| RTL8812EU (Jaguar3) | ~12 ms | **~2.4 ms** | (same path, unvalidated) | ~0.27 ms | 9 |
+| RTL8812EU (Jaguar3) | ~12 ms | **~2.4 ms** | **~0.8 ms** (8822E) | ~0.27 ms | 9 |
+| RTL8852BU (Kestrel/AX) | ~90 ms | **~9 ms** | **~0.15 ms** (1 H2C) | ~1–2 ms | ~4 |
+
+The Kestrel (rtw89/AX) hop needed the most work to reach 11ac-ish territory,
+but the same techniques applied. The vendored halrf channel setting does an
+RF18 read-modify-write + a 0xcf re-latch four times (path A/B × DAV/DDV), plus
+a synth PLL relock on the path-A DAV write. Three cuts, each validated on air:
+- **Compose-cache** (`fast_rf_channel_8852b`, a write-only port of
+  `halrf_ctrl_ch_8852b`) primes the RF18/0xcf dwords once per epoch and writes
+  whole dwords thereafter — ~12 per-hop reads gone (~44 → ~25 ms).
+- **Drop the DDV writes** — the d-die `0x10018` window is not populated on the
+  single-die 8852B, so its two SI writes + two 0xcf toggles cost no channel
+  accuracy (soak-confirmed).
+- **Relock only on a sub-band crossing** — for a same-sub-band hop the synth
+  moves little and settles during the caller's admission window, so the ~13 ms
+  LCK poll (the profiler's ~60 % of the hop) is pure blocking; a plain RF18
+  write holds channel accuracy (soak: 2000 hops, zero wrong-channel, ~97 %
+  delivery). The full relock + LCK verify (the only path with the MMD-reset
+  lock recovery) is kept for a sub-band crossing — a bigger VCO jump.
+
+Same-sub-band hops land at **~9 ms**, cross-sub-band ~13 ms — both zero
+wrong-channel. There is still no firmware channel-switch H2C on this
+architecture (`SCAN_OFFLOAD` and MCC are the only rtw89 channel primitives). A
+Kestrel dwell-1 slot is ~30 ms (approaching the 8822B's ~20 ms) — the
+N-channel data plane runs on AX at a usable hop rate.
+
+There is, however, a firmware *register* IO-offload (`DEVOURER_KFR_OFLD`,
+default on, 8852B). rtw89 has no channel-switch primitive, but its mac_ax firmware
+does expose a generic register-write offload (`FW_OFLD`/`CMD_OFLD_REG`): a
+buffer of masked write commands the on-chip CPU replays locally. The whole
+same-sub-band hop — the RF18/0xcf channel-set writes, the BB reset, and the
+fixed-dBm power target — packs into ONE H2C, so ~20 per-hop USB register
+round-trips collapse into a single bulk-OUT. The host-side hop cost drops from
+~9 ms to **~0.15 ms**. The catch is honest and instructive: the offload frees
+the *host*, not the *radio*. The direct path's ~5 ms of BB-reset round-trips
+were incidentally covering the RF synth's settle; removing them exposes a
+**~1.5 ms VCO settle floor** below which a frame airs mid-retune. So the
+caller must honour a ~1.5 ms settle before it TXes on the new channel — the
+time-to-usable-channel is ~1.7 ms (still ~5×), but the host is free to prepare
+the next frame or service RX during the settle instead of blocking on EP0. This
+changes the `FastRetune` timing contract (it returns before the channel is
+usable); the hop demos' admission window already honours the settle, and
+`DEVOURER_KFR_OFLD=0` restores the self-pacing direct path.
 
 (Median `hop.dwell` switch_us over a 1/6/11 hop set; per-stage numbers from
 `DEVOURER_HOP_PROF=1`. Every hop microsecond is USB round-trips: one register
@@ -357,7 +399,7 @@ the two tie (~2.3 ms — that die's RF settle dominates) but the fw path is
 band boundary** (~2–2.6 ms measured, vs the ~90 ms full-path fallback the sw
 fast path needs) — mixed-band FHSS plans become practical. Protocol, bench
 method and full distributions:
-[kernel-channel-switch-offload.md](kernel-channel-switch-offload.md).
+[kernel-channel-switch-offload.md](experiments/kernel-channel-switch-offload.md).
 
 Two techniques carried the newer generations to the table above, beyond the
 original tricks:

@@ -218,13 +218,35 @@ struct DeviceConfig {
     bool thermal_track = true;
     /* env: DEVOURER_FASTRETUNE_FW — FastRetune firmware fast path (H2C 0x1D
      * SINGLE_CHANNELSWITCH_V2, the switch the vendor drivers gate behind
-     * rtw_ch_switch_offload) on the 8822B (Jaguar2) and 8822C/8822E
-     * (Jaguar3): 0 = off (software compose path), 1 = firmware switch for
+     * rtw_ch_switch_offload) on the Jaguar2 dies (8822B, 8821C) and the
+     * Jaguar3 dies (8822C, 8822E): 0 = off (software compose path), 1 = firmware switch for
      * intra-band 20/40 MHz hops, 2 = additionally accept cross-band hops
      * (the firmware reprograms the band block; TXAGC baseline stays the
      * bring-up band's — active power knobs re-fold). Bench + protocol:
-     * docs/kernel-channel-switch-offload.md. */
+     * docs/experiments/kernel-channel-switch-offload.md. */
     int fastretune_fw = 0;
+    /* env: DEVOURER_KFR_OFLD — Kestrel FastRetune firmware IO-offload (mac_ax
+     * fwofld.c): batch the whole same-sub-band hop (RF18/0xcf channel set + BB
+     * reset + fixed TX power) into ONE FW_OFLD/CMD_OFLD_REG H2C the on-chip fw
+     * replays, collapsing ~20 USB register round-trips into one bulk-OUT
+     * (~9 ms -> ~0.15 ms host-side). Default 1 (on); 0 forces the direct
+     * write-only path (self-paces the ~1.5 ms RF synth settle instead of
+     * returning before it). No rtw89 firmware channel-switch H2C exists, so
+     * this offloads the raw register writes, not a fw switch primitive. The
+     * hop returns before the synth settles — the caller honours a ~1.5 ms
+     * settle before TX (the demos' admission window). 8852B only. */
+    int kestrel_fastretune_ofld = 1;
+    /* env: DEVOURER_FW_TABLE_OFLD — Jaguar2 init-time firmware register
+     * IO-offload (HalMAC cfg_param): route the static BB/AGC/RF phy-table write
+     * stream through one FW_OFFLOAD/CFG_PARAM H2C per ~160-command batch that
+     * the firmware replays on-chip, collapsing the per-init USB register control
+     * transfers into a handful of bulk transfers. Bit flags: 1 = BB + AGC
+     * tables, 2 = also the RF radio tables (RF_W, routed through the firmware's
+     * RF write path). 0 = off (direct writes, byte-identical to before). Default
+     * 0 — init is higher blast-radius than a hop. Jaguar3 (8822C/E) is a
+     * follow-up: the fw replays cfg_param but lazily, and its rsvd-page download
+     * stalls per batch. */
+    int fw_table_offload = 0;
     /* env: DEVOURER_DIS_CCA — Jaguar2/3 MAC carrier-sense disable at bring-up
      * (primary CCA 0x520[14] + EDCCA [15]): injected/beacon TX stops deferring to
      * a busy channel and punches through co-channel traffic. Runtime equivalent:

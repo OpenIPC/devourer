@@ -568,6 +568,39 @@ bool KestrelFw::fw_send_beacon(const uint8_t *body, uint32_t len, uint8_t macid,
   return ok;
 }
 
+bool KestrelFw::reg_write_ofld(const OfldWrite *cmds, size_t n) {
+  /* Build the fwofld.c command buffer verbatim: N contiguous 16-byte
+   * fwcmd_cmd_ofld entries, cmd_num running 0..N-1, LC on the last, then send
+   * it as ONE FW_OFLD/CMD_OFLD_REG H2C. The fw replays the write-list on-chip.
+   * v0 layout: dword0 = src|type|lc|path|cmd_num|offset, dword1 = id|base_offset
+   * (0 a-die / 1 d-die for RF, else offset[31:16]), dword2 = value,
+   * dword3 = mask. type is fixed WRITE (masked RMW on-chip). */
+  if (n == 0 || n > 0x7f)
+    return false;
+  std::vector<uint8_t> buf(n * 16, 0);
+  for (size_t i = 0; i < n; i++) {
+    const OfldWrite &c = cmds[i];
+    const uint32_t base = (c.src == 3) ? 1u   /* RF d-die */
+                          : (c.src == 1) ? 0u /* RF a-die */
+                                         : ((uint32_t)c.offset >> 16) & 0xffff;
+    const uint32_t d0 =
+        ((uint32_t)(c.src & 0x3)) |
+        ((uint32_t)(c.type & 0x3) << 2) /* WRITE=0 / DELAY=2 */ |
+        ((i + 1 == n) ? (1u << 4) : 0u) /* LC on last */ |
+        ((uint32_t)(c.path & 0x3) << 5) |
+        ((uint32_t)(i & 0x7f) << 8) /* cmd_num */ |
+        ((uint32_t)(c.offset & 0xffff) << 16);
+    const uint32_t d1 = (0u & 0xffff) /* id */ | (base << 16);
+    put_le32(buf.data() + i * 16 + 0, d0);
+    put_le32(buf.data() + i * 16 + 4, d1);
+    put_le32(buf.data() + i * 16 + 8, c.value);
+    put_le32(buf.data() + i * 16 + 12, c.mask);
+  }
+  return send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_FW_OFLD,
+                      r::FWCMD_H2C_FUNC_CMD_OFLD_REG, buf.data(),
+                      static_cast<uint32_t>(buf.size()));
+}
+
 bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
                              const uint8_t *content, uint32_t len) {
   /* Serialize: this mutates the shared _txbuf scratch + the _h2c_seq counter and

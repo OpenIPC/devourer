@@ -5,11 +5,11 @@
 // ONE admitted data-frame opportunity — "dwell-1". The channel switch at each
 // slot boundary is the on-chip firmware switch when DEVOURER_FASTRETUNE_FW is
 // set (Jaguar2 8822B / Jaguar3 8822C/8822E; H2C 0x1D — see
-// docs/kernel-channel-switch-offload.md); otherwise the software FastRetune,
+// docs/experiments/kernel-channel-switch-offload.md); otherwise the software FastRetune,
 // so the two are a controlled A/B.
 //
 // This is the caller-side answer to the rejected MCC/FCS scheduler
-// (docs/mcc-fcs-investigation.md): the library already switches channels in
+// (docs/experiments/mcc-fcs-investigation.md): the library already switches channels in
 // ~1 ms and hops per-packet from a radiotap CHANNEL field. What a real hopping
 // DATA plane needs on top of that is bounded admission — one frame per slot,
 // placed inside a window that guarantees it finishes airing before the slot
@@ -155,7 +155,11 @@ int main() {
   }
   const long slot_ms = env_long("DEVOURER_DWELL_SLOT_MS", 20);
   const long total_slots = env_long("DEVOURER_DWELL_SLOTS", 0);
-  const long settle_us = env_long("DEVOURER_DWELL_SETTLE_US", 500);
+  // Post-switch settle before admitting a frame. On the Kestrel 8852B the
+  // default IO-offload hop returns before the ~1.5 ms RF synth settle (the host
+  // no longer self-paces it via slow register writes), so the window must
+  // cover that floor or a frame airs mid-retune. 2 ms is safe on every chip.
+  const long settle_us = env_long("DEVOURER_DWELL_SETTLE_US", 2000);
   const long guard_us = env_long("DEVOURER_DWELL_GUARD_US", 1000);
   const long airtime_us = env_long("DEVOURER_DWELL_AIRTIME_US", 300);
   const long late_us = env_long("DEVOURER_DWELL_LATE_US", 0);
@@ -286,6 +290,11 @@ int main() {
       .f("admitted", admitted_ct)
       .f("dropped_late", dropped_late_ct)
       .f("empty", empty_ct);
+  /* Release the device (its handle + any worker threads — e.g. the Kestrel
+   * planes) BEFORE libusb_exit; otherwise libusb tears down under a live
+   * handle and asserts in its mutex teardown. */
+  dev.reset();
+  usb_lock.reset();
   libusb_exit(ctx);
   return 0;
 }

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "HalmacCfgParam.h"
 #include "logger.h"
 #include "RtlAdapter.h"
 #include "RxSense.h"
@@ -114,7 +115,9 @@ public:
    * block disable/enable (config_phydm_parameter_init_8822b PRE/POST). Mirrors
    * rtl8822b_phy.c: PRE -> init_bb_reg -> init_rf_reg -> POST. rfe_type selects
    * the conditional table blocks. */
-  void apply_bb_rf_agc_tables(uint8_t rfe_type);
+  void apply_bb_rf_agc_tables(uint8_t rfe_type,
+                              devourer::HalmacCfgParam *cfg = nullptr,
+                              bool offload_rf = false);
 
   /* Set RF channel + bandwidth (config_phydm_switch_channel_8822b +
    * config_phydm_switch_bandwidth_8822b): RF18 tune, band AGC/fc/CCK-filter,
@@ -184,7 +187,7 @@ public:
    * (central ch, primary-ch idx, bw, IQK_UPDATE_EN), the switch the vendor
    * driver runs behind its rtw_ch_switch_offload=1 module parameter. The
    * 8822B firmware executes the whole RF/BB retune (~1 ms on-air dark time,
-   * bench: docs/kernel-channel-switch-offload.md) and reports C2H
+   * bench: docs/experiments/kernel-channel-switch-offload.md) and reports C2H
    * CUR_CHANNEL; devourer corroborates by polling the RF18 channel field
    * instead, so TX-only sessions need no C2H drain — and the confirm read
    * doubles as the compose-cache re-prime. Returns false when the readback

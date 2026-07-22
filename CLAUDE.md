@@ -328,12 +328,12 @@ temporal layer and injects each at its ladder's rate
 `IRtlDevice::FastRetune(channel)` — lean intra-band, same-bandwidth retune on
 every generation (RF channel switch only, write-only from a compose cache);
 falls back to full `SetMonitorChannel` on a band change. FHSS-grade: ~0.5–2.5 ms
-per hop depending on chip. On the 8822B and 8822C/8822E,
-`DEVOURER_FASTRETUNE_FW=1` hands the hop to the chip firmware instead (H2C
-0x1D, fire-and-confirm-later): ~1.4 ms dead air on the 8822B (a tie on-air on
-the 8822C, but ~3× cheaper host-side), and `=2` extends it to **cross-band**
-hops (~2–2.6 ms vs the ~90 ms full path) — protocol + bench:
-`docs/kernel-channel-switch-offload.md`. `send_packet` honours a radiotap `CHANNEL` field, so
+per hop depending on chip. On the Jaguar2 dies (8822B, 8821C) and Jaguar3
+(8822C, 8822E), `DEVOURER_FASTRETUNE_FW=1` hands the hop to the chip firmware
+instead (H2C 0x1D, fire-and-confirm-later): ~1.4 ms dead air on the 8822B (a
+tie on-air on the 8822C/8822E, but ~3× cheaper host-side), and `=2` extends it
+to **cross-band** hops (~2–2.6 ms vs the ~90 ms full path) — protocol + bench:
+`docs/experiments/kernel-channel-switch-offload.md`. `send_packet` honours a radiotap `CHANNEL` field, so
 hopping is per-packet and radiotap-driven like rate. Demos hop via
 `DEVOURER_HOP_CHANNELS` (SweepSpec grammar: `1,6,11`, `36-48/4`, `5170-5250/5`
 MHz) + `DEVOURER_HOP_DWELL_FRAMES` / `_ROUNDS` / `_FAST` / `_RADIOTAP` /

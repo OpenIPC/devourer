@@ -143,6 +143,23 @@ public:
   bool fw_upd_cctl_bf(uint8_t macid, uint8_t addr_cam_idx,
                       const devourer::StaBfCaps &bf);
 
+  /* Firmware register IO-offload (mac_ax fwofld.c): batch a write-list into one
+   * FW_OFLD H2C (func CMD_OFLD_REG) that the on-chip fw replays locally, so N
+   * register writes cost ONE USB round-trip instead of N. Each entry is a
+   * masked write; src selects the target space (RF a-die/d-die, BB, MAC), path
+   * the RF chain. The last command carries the LC (list-complete) bit. Used by
+   * the FastRetune hot path to collapse the per-hop RF18/0xcf write burst.
+   * Fire-and-forget: the C2H IO_OFLD_RESULT is not awaited (write-only batch).*/
+  struct OfldWrite {
+    uint8_t src;      /* RTW_MAC_{RF=1, RF_DDIE=3, BB=0, MAC=2}_CMD_OFLD */
+    uint8_t path;     /* RF path (0=A, 1=B); 0 for BB/MAC */
+    uint16_t offset;  /* register / RF address */
+    uint32_t value;   /* pre-shifted into the mask field (DELAY: microseconds) */
+    uint32_t mask;
+    uint8_t type = 0; /* RTW_MAC_{WRITE=0, DELAY=2}_OFLD */
+  };
+  bool reg_write_ofld(const OfldWrite *cmds, size_t n);
+
 private:
   /* Generic H2C over CH12: [WD 24B][fwcmd_hdr 8B][content]. */
   bool send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,

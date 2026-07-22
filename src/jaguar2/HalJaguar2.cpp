@@ -399,7 +399,9 @@ void HalJaguar2::rf_write(uint8_t path, uint32_t addr, uint32_t value) {
   std::this_thread::sleep_for(std::chrono::microseconds(1));
 }
 
-void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type) {
+void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type,
+                                        devourer::HalmacCfgParam *cfg,
+                                        bool offload_rf) {
   JaguarPhyContext ctx{};
   ctx.cut_version = _ver.cut;
   ctx.support_interface = 0x02; /* ODM_ITRF_USB */
@@ -418,25 +420,56 @@ void HalJaguar2::apply_bb_rf_agc_tables(uint8_t rfe_type) {
    * init_rf_reg (radioa, radiob) -> POST. */
   phydm_pre_post_setting(/*post=*/false);
 
-  auto bb = [this](uint32_t a, uint32_t v) { bb_write(a, v); };
+  /* BB/AGC sink: batch through the firmware register offload when armed; a
+   * delay pseudo-address (0xf9..0xfe) forces a flush then runs the host delay,
+   * and once the offload transport errors we fall back to a direct write. */
+  auto bb = [this, cfg](uint32_t a, uint32_t v) {
+    if (cfg && cfg->ok()) {
+      if (a >= 0xf9 && a <= 0xfe) {
+        cfg->flush();
+        bb_write(a, v);
+        return;
+      }
+      cfg->bb_write(static_cast<uint16_t>(a), v);
+      return;
+    }
+    bb_write(a, v);
+  };
   const auto phy_reg = _tables->phy_reg();
   const auto agc_tab = _tables->agc_tab();
-  _logger->info("Jaguar2: applying BB phy_reg ({} words) + agc_tab ({} words)",
-                phy_reg.len, agc_tab.len);
+  _logger->info("Jaguar2: applying BB phy_reg ({} words) + agc_tab ({} words){}",
+                phy_reg.len, agc_tab.len, cfg ? " [fw-offload]" : "");
   PhyTableLoader::Load(phy_reg.data, phy_reg.len, ctx, bb);
   PhyTableLoader::Load(agc_tab.data, agc_tab.len, ctx, bb);
+  if (cfg)
+    cfg->flush(); /* land all BB/AGC before the RF walk starts */
 
+  auto rf = [this, cfg, offload_rf](uint8_t path, uint32_t a, uint32_t v) {
+    if (offload_rf && cfg && cfg->ok()) {
+      if (a == 0xfe || a == 0xffe) {
+        cfg->flush();
+        rf_write(path, a, v);
+        return;
+      }
+      cfg->rf_write(path, static_cast<uint8_t>(a & 0xff), v);
+      return;
+    }
+    rf_write(path, a, v);
+  };
   const auto radioa = _tables->radioa();
   const auto radiob = _tables->radiob();
-  _logger->info("Jaguar2: applying RF radioa ({} words) + radiob ({} words)",
-                radioa.len, radiob.len);
+  _logger->info("Jaguar2: applying RF radioa ({} words) + radiob ({} words){}",
+                radioa.len, radiob.len,
+                (cfg && offload_rf) ? " [fw-offload]" : "");
   PhyTableLoader::Load(radioa.data, radioa.len, ctx,
-                       [this](uint32_t a, uint32_t v) { rf_write(0, a, v); });
+                       [&rf](uint32_t a, uint32_t v) { rf(0, a, v); });
   /* 1T1R chips (8821C) supply no radiob table (path A only) — skip the path-B
    * RF walk rather than feed the loader a null table. */
   if (radiob.len)
     PhyTableLoader::Load(radiob.data, radiob.len, ctx,
-                         [this](uint32_t a, uint32_t v) { rf_write(1, a, v); });
+                         [&rf](uint32_t a, uint32_t v) { rf(1, a, v); });
+  if (cfg)
+    cfg->flush(); /* drain any RF batch (and the BB remainder on !offload_rf) */
 
   phydm_pre_post_setting(/*post=*/true);
 
@@ -1336,12 +1369,16 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
     return true; /* no-op hop */
 
   /* Firmware fast path (DEVOURER_FASTRETUNE_FW): hand the whole retune to
-   * the 8822B firmware via H2C 0x1D instead of the composed register
-   * sequence below. Mode 2 additionally accepts band changes — the firmware
-   * reprograms the band block itself (bench-measured ~2 ms cross-band,
-   * docs/kernel-channel-switch-offload.md) — which the software path cannot.
-   * 20/40 MHz only (the 80 MHz primary-idx pairing stays on the sw path). */
-  if (_cfg.tuning.fastretune_fw > 0 && _variant == ChipVariant::C8822B &&
+   * the firmware via H2C 0x1D instead of the composed register sequence
+   * below. Both Jaguar2 dies expose it — the H2C submit (HMEBOX) and the
+   * RF18-channel confirm are variant-generic, and the vendor 8821C firmware
+   * carries the same SINGLE_CHANNELSWITCH_V2 offload as the 8822B's
+   * (on-air-validated) one. Mode 2 additionally accepts band changes — the
+   * firmware reprograms the band block itself (bench-measured ~2 ms
+   * cross-band, docs/experiments/kernel-channel-switch-offload.md) — which the software
+   * path cannot. 20/40 MHz only (the 80 MHz primary-idx pairing stays on the
+   * sw path). */
+  if (_cfg.tuning.fastretune_fw > 0 &&
       (!band_change || _cfg.tuning.fastretune_fw >= 2) &&
       (bw == 0 /*20*/ || bw == 1 /*40*/)) {
     devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j2fw",

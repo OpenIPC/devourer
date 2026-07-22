@@ -77,6 +77,67 @@ Async packet-C2H (bulk-IN rpkt_type=10) delivery works — routed by
 reports) is reachable. Not working: the fw's USR_TX_RPT TX-egress-timestamp
 C2H (gated on a full BSS association, not just the registered NO_LINK role).
 
+## FastRetune (frequency hopping)
+
+`HalKestrel::fast_retune` is the lean same-band 20 MHz hop: RF channel set +
+a per-sub-band gain re-apply + a BB reset + fixed TX power — skipping the BB
+bandwidth config and the ~1.2 ms RX-DCK. **~9 ms/hop same-sub-band, ~13 ms
+cross-sub-band** (vs ~2 ms on the 8822B, ~44 ms unoptimized). The channel set
+is `fast_rf_channel_8852b`, a **compose-cache write-only** port of the vendored
+`halrf_ctrl_ch_8852b`. Three cuts (all on-air + soak validated):
+
+- **Compose-cache**: the vendored path reads RF18 ×4 (path A/B × DAV 0x18 / DDV
+  0x10018) and RMW-toggles RF 0xcf ×8 every hop; the lean path primes those
+  dwords once per epoch (`_kfr_*`, invalidated by every full `set_channel`) and
+  writes whole dwords — ~12 reads gone.
+- **No DDV writes**: the d-die 0x10018 window is unpopulated on the single-die
+  8852B; skipping it costs no channel accuracy (soak-confirmed).
+- **Relock only on a sub-band bucket change** (`fast_rf_channel_8852b(...,
+  relock)`, `bucket_changed = gain_bucket != _last_gain_bucket`). A
+  same-sub-band hop moves the synth little and it settles during the caller's
+  admission window, so the ~13 ms path-A LCK poll is pure blocking — a plain
+  RF18 write holds channel accuracy (soak: 2000 hops, zero wrong-channel,
+  ~97 % delivery). The full `halrf_set_s0_arfc18` relock (RF 0xd3[8] hold +
+  RF18 write + RF 0xb7[8] LCK poll) + `fast_lck_check_8852b` (RF 0xc5[15]
+  verify + MMD-reset lock recovery) is kept for a sub-band crossing — a bigger
+  VCO jump, and the only path with the recovery. NOTE: the relock guarantees a
+  verified lock, so a `SetMonitorChannel` (full path) always runs it; the fast
+  hop trades that guarantee for latency within a sub-band, empirically safe.
+
+The synth-lock *diagnostic* reads are gated off the hot path
+(`vnd_rf_tune(..., diag=false)`), and the gain-error re-applies only on a
+bucket move. 8852C keeps the vendored `ctl_band_ch_bw` tune
+(`fast_rf_channel_8852b` returns false). No firmware channel-switch H2C exists
+here (H2C 0x1D is 11ac HalMAC; rtw89 has only `SCAN_OFFLOAD` + MCC). The
+dwell-1 / N-channel data plane (`examples/dwelltx`) runs on Kestrel at ~30 ms
+slots (soak: 2000 hops, zero wrong-channel, ~97 % delivery).
+
+### Firmware IO-offload hop (`DEVOURER_KFR_OFLD`, default on)
+
+`fast_retune_ofld_8852b` ships the *entire* same-sub-band hop — the six RF18/
+0xcf channel-set writes, `halbb_bb_reset_all_8852b`, and the fixed-dBm TX-power
+target — as ONE `FW_OFLD`/`CMD_OFLD_REG` H2C (mac_ax `fwofld.c`) the on-chip
+firmware replays locally. `KestrelFw::reg_write_ofld` packs the 16-byte
+`fwcmd_cmd_ofld` command buffer (src RF a-die / BB / MAC, `WRITE`/`DELAY`
+types, LC on the last, `cmd_num` running); the firmware applies each masked
+write as `(reg & ~mask) | ((val << ctz(mask)) & mask)` — so BB/MAC entries
+carry the **raw** field value (pre-shifting double-shifts and mis-tunes),
+while RF writes use the full `MASKRF` (shift 0). This collapses ~20 per-hop USB
+register round-trips into a single bulk-OUT: host-side hop cost **~9.3 ms →
+~0.15 ms (~45×)**, zero wrong-channel over a 6000-hop soak.
+
+The offload does not speed up the RF synth — it only frees the host. The
+direct path's ~5 ms of `bb_reset` USB round-trips incidentally covered the VCO
+settle; collapsing them to ~0.15 ms exposes the true **~1.5 ms synth-settle
+floor** (below it, a frame airs mid-retune → wrong-channel; ≥1.5 ms is clean,
+`DEVOURER_DWELL_SETTLE_US` on the demo). Net time-to-usable-channel ~1.7 ms
+(~5.5×), with the host free to prep the next frame / service RX during the
+settle. The hop returns before the synth settles, so this changes the
+`FastRetune` timing contract — the caller honours the settle (the demos'
+admission window). Default on; `DEVOURER_KFR_OFLD=0` forces the self-pacing
+direct path (for A/B or a suspect chip). A bucket crossing (verified synth
+relock) and the 8852C fall through to the direct steps.
+
 ## TX power
 
 A fixed BB dBm (`halbb_set_txpwr_dbm`, default 20 dBm, `DEVOURER_TX_PWR`

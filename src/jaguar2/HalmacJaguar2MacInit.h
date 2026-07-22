@@ -74,6 +74,21 @@ public:
   bool send_fw_general_info(uint8_t rfe_type, bool r2t2r, uint8_t cut_ver,
                             uint8_t package_type);
 
+  /* Runtime H2C-packet transport for the firmware register IO-offload
+   * (HalmacCfgParam cfg_param trigger): send a 32-byte FW_OFFLOAD packet on the
+   * H2C queue and hand out the next rolling sequence number. Shares the queue +
+   * seq counter with send_fw_general_info (same H2C stream). */
+  bool h2c_pkt(const uint8_t pkt[32]) { return send_h2c_pkt(pkt); }
+  uint8_t next_h2c_seq() { return _h2c_seq++; }
+  /* Block until the firmware has drained the H2C queue (HEAD == READ_ADDR),
+   * i.e. the last trigger was consumed — so the extra-info page is reusable. */
+  void wait_h2c_drained(uint32_t timeout_ms = 20);
+  /* Reserved H2C-extra-info page (absolute TX-FIFO page) that holds the
+   * cfg_param command buffer, and its LOC (page offset from the rsvd boundary)
+   * for the CFG_PARAM trigger. Valid after init_trx_cfg(). */
+  uint16_t cfg_param_page() const;
+  uint16_t cfg_param_loc() const;
+
 private:
   bool priority_queue_cfg();
   void init_h2c();

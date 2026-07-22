@@ -1288,8 +1288,13 @@ void RtlJaguar3Device::apply_tx_power_current(bool full) {
     const uint8_t rb = clamp127(static_cast<int>(_pwr_ref_b) + off);
     if (full || _diffs_zeroed) {
       /* Full apply: refs + the per-rate diff walk (also the path back from
-       * flat semantics, which zeroed the diffs). */
-      _radioManagement.apply_power_by_rate_8822e(_channel.Channel, ra, rb);
+       * flat semantics, which zeroed the diffs). Route through the
+       * caller-supplied diff table when SetTxPowerRateDiffs has one set;
+       * otherwise the default phy_reg_pg walk. */
+      if (_rate_diffs)
+        _radioManagement.apply_rate_diffs_8822e(ra, rb, *_rate_diffs);
+      else
+        _radioManagement.apply_power_by_rate_8822e(_channel.Channel, ra, rb);
       _diffs_zeroed = false;
     } else {
       _radioManagement.apply_tx_power_refs_8822e(ra, rb);
@@ -1357,6 +1362,38 @@ void RtlJaguar3Device::SetTxPowerIndexOverride(int idx) {
      * override zeroed the 8822E per-rate diffs). */
     apply_tx_power_current(/*full=*/idx < 0);
   }
+}
+
+bool RtlJaguar3Device::SetTxPowerRateDiffs(
+    const std::optional<devourer::TxRateDiffsQdb> &diffs) {
+  if (_variant != jaguar3::ChipVariant::C8822E) {
+    _logger->warn("SetTxPowerRateDiffs: 8822E-only");
+    return false;
+  }
+  if (_cw_active) {
+    _logger->warn("SetTxPowerRateDiffs refused: CW tone active");
+    return false;
+  }
+  /* Clamp to the 7-bit two's-complement diff field's usable range [-64, 63]
+   * before storing. pack_rate_diff_word masks with & 0x7f, which would alias
+   * the sign of an over-range int8_t: a caller asking for -100 (a big cut)
+   * would land +28 (a power boost). Same guard the ref path applies against
+   * its own over-range wrap. */
+  std::optional<devourer::TxRateDiffsQdb> clamped = diffs;
+  if (clamped) {
+    auto cl = [](int8_t v) -> int8_t {
+      return v < -64 ? -64 : (v > 63 ? 63 : v);
+    };
+    clamped->cck = cl(clamped->cck);
+    clamped->legacy = cl(clamped->legacy);
+    for (int i = 0; i < 8; ++i)
+      clamped->mcs[i] = cl(clamped->mcs[i]);
+  }
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  _rate_diffs = clamped;
+  if (_brought_up)
+    apply_tx_power_current(/*full=*/true); /* re-walk the table now */
+  return true;
 }
 
 bool RtlJaguar3Device::ReApplyTxPower() {
@@ -1561,17 +1598,43 @@ devourer::TxPowerState RtlJaguar3Device::GetTxPowerState() {
   s.offset_qdb = s.offset_steps; /* 1 qdB per step on Jaguar3 */
   s.saturated_low = _txpwr_sat_low;
   s.saturated_high = _txpwr_sat_high;
+  /* Under _reg_mu for a coherent snapshot vs the coex tick, and so the
+   * non-atomic _rate_diffs read below is race-free. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* rate_diffs_custom means "a table is configured" — knowable regardless of
+   * bring-up / CW state, so it's reported here rather than inside the readback
+   * block (a pre-bring-up or mid-CW snapshot with a table set must still see
+   * it flagged). */
+  s.rate_diffs_custom = _rate_diffs.has_value();
   if (_brought_up && !_cw_active) {
     /* Reference readback (the Jaguar3 TXAGC refs ARE readable): OFDM ref
      * 0x18e8[16:10]; MCS7 is the per-rate diff table's zero anchor, so it
-     * equals the OFDM ref; CCK ref 0x18a0[22:16]. Under _reg_mu for a
-     * coherent snapshot vs the coex tick. */
-    std::lock_guard<std::mutex> lk(_reg_mu);
+     * equals the OFDM ref; CCK ref 0x18a0[22:16]. */
     const uint32_t ofdm = (_device.rtw_read32(0x18e8) >> 10) & 0x7f;
-    s.ofdm_index = static_cast<int16_t>(ofdm);
-    s.mcs7_index = static_cast<int16_t>(ofdm);
-    s.cck_index =
-        static_cast<int16_t>((_device.rtw_read32(0x18a0) >> 16) & 0x7f);
+    const uint32_t cck =
+        (_device.rtw_read32(0x18a0) >> 16) & 0x7f;
+    if (_rate_diffs && s.flat_index < 0) {
+      /* A custom per-rate diff table is live (8822E SetTxPowerRateDiffs) and
+       * no flat override is overriding it on the chip: the shared reference
+       * alone is no longer the effective index for any rate, so report
+       * ref + diff[rate] instead of the artifact where cck/ofdm/mcs7 all read
+       * equal to the reference. Clamp to the 7-bit TXAGC index range the same
+       * way the apply path does. */
+      auto clamp127 = [](int v) {
+        return static_cast<int16_t>(v < 0 ? 0 : (v > 127 ? 127 : v));
+      };
+      s.ofdm_index = clamp127(static_cast<int>(ofdm) + _rate_diffs->legacy);
+      s.mcs7_index = clamp127(static_cast<int>(ofdm) + _rate_diffs->mcs[7]);
+      s.cck_index = clamp127(static_cast<int>(cck) + _rate_diffs->cck);
+    } else {
+      /* Either no custom table configured, or a flat override is currently
+       * live: apply_tx_power_current's flat branch zeroes the chip's
+       * per-rate diffs while flat >= 0, so the registers already read the
+       * honest flat truth here — fall through to the plain summary. */
+      s.ofdm_index = static_cast<int16_t>(ofdm);
+      s.mcs7_index = static_cast<int16_t>(ofdm);
+      s.cck_index = static_cast<int16_t>(cck);
+    }
     s.hw_readback = true;
   }
   return s;

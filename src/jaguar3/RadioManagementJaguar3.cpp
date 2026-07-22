@@ -1039,6 +1039,72 @@ void RadioManagementJaguar3::apply_power_by_rate_8822e(uint8_t channel,
 #endif
 }
 
+void RadioManagementJaguar3::apply_rate_diffs_8822e(
+    uint8_t ref_a, uint8_t ref_b, const devourer::TxRateDiffsQdb &d) {
+  invalidate_fast_caches(); /* writes the 0x1c90 TXAGC gate below */
+  /* Clamp to the 7-bit ref fields (masked BB writes truncate mod 128). */
+  if (ref_a > 0x7f)
+    ref_a = 0x7f;
+  if (ref_b > 0x7f)
+    ref_b = 0x7f;
+#if defined(DEVOURER_HAVE_JAGUAR3_8822E)
+  auto wr = [this](uint16_t off, uint32_t mask, uint32_t v) {
+    _device.phy_set_bb_reg(0x1c90, 1u << 15, 0); /* txagc write enable */
+    _device.phy_set_bb_reg(off, mask, v);
+  };
+  wr(0x18e8, 0x1fc00, ref_a);   /* path A OFDM/HT/VHT ref */
+  wr(0x41e8, 0x1fc00, ref_b);   /* path B */
+  wr(0x18a0, 0x7f0000, ref_a);  /* CCK ref (2.4G) */
+  wr(0x41a0, 0x7f0000, ref_b);
+
+  /* Diff rows, addressed exactly like apply_power_by_rate_8822e's pass 2:
+   * addr = 0x3a00 + (hw_rate & 0xfc), hw_rate = MRateToHwRate(first rate of
+   * the 4-rate group) — same helper/constants as pg_addr_to_rates's callers,
+   * so the addressing is byte-identical to the proven pg walk. Rows beyond
+   * the caller-controlled set (HT MCS8..15, all VHT) are written as explicit
+   * zero words for deterministic table state, covering the full range the
+   * pg walk can touch (0x3a00..0x3a3c) plus the rest of the 32-dword table
+   * up to 0x3a7c (matching set_tx_power_ref's zero range). */
+  struct Row {
+    uint8_t first_rate;
+    int8_t d0, d1, d2, d3;
+  };
+  const Row rows[] = {
+      /* CCK 1/2/5.5/11M:    */ {MGN_1M, d.cck, d.cck, d.cck, d.cck},
+      /* OFDM 6/9/12/18M:    */ {MGN_6M, d.legacy, d.legacy, d.legacy, d.legacy},
+      /* OFDM 24/36/48/54M:  */ {MGN_24M, d.legacy, d.legacy, d.legacy, d.legacy},
+      /* HT MCS0..3:         */ {MGN_MCS0, d.mcs[0], d.mcs[1], d.mcs[2], d.mcs[3]},
+      /* HT MCS4..7:         */ {MGN_MCS4, d.mcs[4], d.mcs[5], d.mcs[6], d.mcs[7]},
+      /* HT MCS8..11 (zeroed, 2SS — not in the caller-supplied set): */
+      {MGN_MCS8, 0, 0, 0, 0},
+      /* HT MCS12..15 (zeroed, 2SS):    */ {MGN_MCS12, 0, 0, 0, 0},
+      /* VHT1SS MCS0..3 (zeroed):       */ {MGN_VHT1SS_MCS0, 0, 0, 0, 0},
+      /* VHT1SS MCS4..7 (zeroed):       */ {MGN_VHT1SS_MCS4, 0, 0, 0, 0},
+      /* VHT1SS MCS8..9+VHT2SS0..1 (zeroed): */ {MGN_VHT1SS_MCS8, 0, 0, 0, 0},
+      /* VHT2SS MCS2..5 (zeroed):       */ {MGN_VHT2SS_MCS2, 0, 0, 0, 0},
+      /* VHT2SS MCS6..9 (zeroed):       */ {MGN_VHT2SS_MCS6, 0, 0, 0, 0},
+  };
+  for (const Row &r : rows) {
+    const uint8_t hw = MRateToHwRate(r.first_rate);
+    const uint16_t addr = static_cast<uint16_t>(0x3a00 + (hw & 0xfc));
+    wr(addr, 0xffffffff,
+       devourer::pack_rate_diff_word(r.d0, r.d1, r.d2, r.d3));
+  }
+  /* set_tx_power_ref's zero range runs to 0x3a7c; the pg walk (and the rows
+   * above) only reach 0x3a3c (VHT2SS MCS6..9, the top of an 8822E's 2SS
+   * table). Zero the remainder explicitly too, for the same deterministic-
+   * state reason. */
+  for (uint16_t off = 0x3a40; off <= 0x3a7c; off += 4)
+    wr(off, 0xffffffff, 0x0);
+
+  _logger->info("Jaguar3: custom per-rate diffs applied (cck {} legacy {} "
+                "mcs0 {} mcs7 {}, ref A=0x{:02x} B=0x{:02x})",
+                d.cck, d.legacy, d.mcs[0], d.mcs[7], ref_a, ref_b);
+#else
+  (void)d;
+#endif
+}
+
 void RadioManagementJaguar3::set_bandwidth_dividers(ChannelWidth_t bwmode) {
   /* Writes 0x808 (8822e shaping) + the BB-reset word — stale-proof the fast
    * path's composed caches. */

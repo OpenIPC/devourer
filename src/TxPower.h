@@ -62,6 +62,17 @@ struct TxPowerState {
   int16_t ofdm_index = -1;
   int16_t mcs7_index = -1;
   bool hw_readback = false;
+  bool rate_diffs_custom = false; /* A caller-supplied per-rate diff table is
+                                    * CONFIGURED (SetTxPowerRateDiffs), not
+                                    * necessarily live on the chip right now:
+                                    * a flat override (flat_index >= 0)
+                                    * temporarily flattens the chip's per-rate
+                                    * table to zero diffs, and re-applies the
+                                    * configured table once the override
+                                    * clears. The cck/ofdm/mcs7_index summary
+                                    * fields always report chip truth for the
+                                    * current moment (flat during an override,
+                                    * ref+diff otherwise). */
 };
 
 /* Quantize a quarter-dB offset request to a family's step size: round to
@@ -96,6 +107,23 @@ inline int txpkt_pwr_db_for_step(uint8_t step) {
   static const int db[] = {0, -3, -7, -11, 3, 6};
   return step < 6 ? db[step] : 0;
 }
+
+/* Caller-supplied per-rate TXAGC diffs (signed qdB vs the reference anchor).
+ * Motivating consumer: a wall-equalized rate ladder — each rate parked a
+ * uniform margin below its measured PA-compression wall. Programmed by
+ * IRtlDevice::SetTxPowerRateDiffs; 8822E-only. On the 8822E one qdB equals one
+ * TXAGC index step (step_qdb = 1), so values are used verbatim as index diffs.
+ * The hardware diff field is 7-bit two's-complement, so the usable range is
+ * [-64, 63]; SetTxPowerRateDiffs clamps to it before storing. */
+struct TxRateDiffsQdb {
+  int8_t cck = 0;                      /* CCK 1..11M rows; [-64, 63] qdB */
+  int8_t legacy = 0;                   /* OFDM 6..54M control frames; [-64, 63] */
+  int8_t mcs[8] = {0, 0, 0, 0, 0, 0, 0, 0}; /* HT MCS0..7; [-64, 63] each */
+};
+
+/* Pack four signed per-rate diffs into one 0x3a00-table word: byte j =
+ * (diff_j & 0x7f), the 8822E's 7-bit two's-complement diff field. */
+uint32_t pack_rate_diff_word(int8_t d0, int8_t d1, int8_t d2, int8_t d3);
 
 } // namespace devourer
 

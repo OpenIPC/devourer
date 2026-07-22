@@ -791,6 +791,16 @@ target_link_libraries(TxPowerQuantSelftest PRIVATE devourer)
 
 add_test(NAME txpower_quant_math COMMAND TxPowerQuantSelftest)
 
+# Headless guard for the per-rate TX-power diff packing (src/TxPower.h) — the
+# pack_rate_diff_word helper used to format 0x3a00-table entries, so a packing
+# regression fails `ctest` instead of only surfacing as wrong per-rate TXAGC.
+add_executable(RateDiffsSelftest
+    tests/rate_diffs_selftest.cpp
+)
+target_link_libraries(RateDiffsSelftest PRIVATE devourer)
+
+add_test(NAME rate_diffs COMMAND RateDiffsSelftest)
+
 # Headless guard for the link-health classifier (src/LinkHealth.h) — the
 # sensor-tuple -> verdict mapping behind <devourer-linkhealth>, with cases
 # drawn from real on-air data (the saturation-knee + AWGN-interference sweeps).

@@ -289,10 +289,21 @@ the rails; flags in `GetTxPowerState`); `SetTxPowerIndexOverride(idx)`
 forces/clears a flat index. Both apply live and stick across
 `SetMonitorChannel` (re-folded on the new channel) and `FastRetune` (never
 rewrites TXAGC). `GetTxPowerCaps` reports the family step: 0.5 dB Jaguar1/2,
-0.25 dB Jaguar3. Write-only TXAGC hardware (Jaguar2, the 8814A's packed port)
-reports the software shadow (`hw_readback=false`). `txpower`
-(examples/txpower/) is the reference consumer; register-level validation:
-`tests/txpwr_offset_regcheck.sh`.
+0.25 dB Jaguar3. The Jaguar2 TXAGC block and the 8814A's packed port are
+write-only, so their `GetTxPowerState` reports the software shadow
+(`hw_readback=false`). `SetTxPowerRateDiffs(optional<TxRateDiffsQdb>)` is the
+8822E-only third knob: a caller-supplied per-rate diff table (cck, legacy,
+mcs0..7, signed qdB) that replaces the default `phy_reg_pg` per-rate walk,
+folded on top of whichever reference (efuse table or flat override) is
+active. It sticks across `SetMonitorChannel`, `FastRetune`, and an
+override set/clear round trip (`SetTxPowerIndexOverride`'s clear path does a
+full re-apply that re-walks the caller table); `std::nullopt` restores the
+default walk, and every other generation's `SetTxPowerRateDiffs` just
+returns `false`. `txpower` (examples/txpower/) is the reference consumer —
+`--rate-diffs cck,legacy,m0..m7|clear` for this knob, `--offset-start`/
+`--offset-stop` and `--flat` for the other two; register-level validation:
+`tests/txpwr_offset_regcheck.sh` (offset/override) and
+`tests/txpwr_rate_diffs_regcheck.sh` (diff table).
 
 **Per-packet TX power** (a radiotap `DBM_TX_POWER` dB-delta per frame, zero
 USB cost once armed; see the `per_pkt_txpwr_*` caps): Jaguar2 and the 8814A

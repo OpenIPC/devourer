@@ -2,10 +2,10 @@
  *
  * Opens one adapter, brings it up for TX, prints the family's TxPowerCaps,
  * then walks the requested knob sequence — a quarter-dB offset ramp
- * (SetTxPowerOffsetQdb), a flat index (SetTxPowerIndexOverride), or both —
- * echoing the applied qdB and a TxPowerState snapshot after every step. This
- * is the shape of an adaptive-link controller's power leg: set, read back,
- * observe saturation, react.
+ * (SetTxPowerOffsetQdb), a flat index (SetTxPowerIndexOverride), per-rate
+ * diffs (SetTxPowerRateDiffs), or both — echoing the applied qdB and a
+ * TxPowerState snapshot after every step. This is the shape of an adaptive-link
+ * controller's power leg: set, read back, observe saturation, react.
  *
  * Pure CLI configuration (no environment variables — the API is the point):
  *
@@ -17,6 +17,14 @@
  *   --offset-stop Q             offset ramp stop, qdB (default = start)
  *   --step-qdb Q                ramp increment, qdB (default 4 = 1 dB)
  *   --step-ms N                 dwell per step, ms (default 500)
+ *   --rate-diffs I,I,...,I      10 comma-separated qdB per rate
+ *                               (cck,legacy,m0..m7) or 'clear' to nullopt
+ *   --flat-pulse N              after --rate-diffs: force flat index N, dump
+ *                               state, then clear the override (-1) and dump
+ *                               state again — proves a flat override
+ *                               temporarily flattens the chip's per-rate
+ *                               table and the configured diffs come back once
+ *                               the override clears, all in one process
  *   --switch-channel N          after the ramp: SetMonitorChannel(N) and re-dump
  *                               state — proves the offset is sticky across a
  *                               full channel set (and re-folds against the new
@@ -30,7 +38,7 @@
  *
  *   {"ev":"txpwr.caps","supported":1,"max":63,"step_qdb":2,...}
  *   {"ev":"txpwr.state","flat":-1,"offset_qdb":-24,"steps":-12,"satlo":0,
- *    "sathi":0,"cck":28,"ofdm":34,"mcs7":30,"rb":1}
+ *    "sathi":0,"cck":28,"ofdm":34,"mcs7":30,"rb":1,"rate_diffs":0}
  */
 #ifdef _WIN32
 #define NOMINMAX
@@ -47,6 +55,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -84,6 +93,11 @@ struct Args {
   int switch_channel = -1;
   int retune = -1;
   bool thermal = false;
+  bool have_rate_diffs = false;
+  bool rate_diffs_clear = false;
+  devourer::TxRateDiffsQdb rate_diffs;
+  int flat_pulse = 0;
+  bool have_flat_pulse = false;
 };
 
 bool parse_int(const char *s, int &out) {
@@ -126,6 +140,49 @@ bool parse_args(int argc, char **argv, Args &a) {
       ;
     else if (k == "--thermal")
       a.thermal = true;
+    else if (k == "--rate-diffs") {
+      if (i + 1 >= argc)
+        return false;
+      const std::string val = argv[++i];
+      a.have_rate_diffs = true;
+      if (val == "clear") {
+        a.rate_diffs_clear = true;
+      } else {
+        /* Parse and range-check the 10 ints here so a typo fails before the
+         * chip is ever brought up (every other flag validates in parse_args).
+         * Range is the library's [-64, 63] — a bare strtol->int8_t cast would
+         * silently truncate (200 -> -56), so reject out-of-range with a real
+         * error rather than clamp-and-surprise. */
+        int v[10] = {0};
+        int n = 0;
+        const char *p = val.c_str();
+        char *end = nullptr;
+        while (n < 10) {
+          v[n++] = static_cast<int>(std::strtol(p, &end, 10));
+          if (*end != ',')
+            break;
+          p = end + 1;
+        }
+        if (n != 10 || *end != '\0') {
+          std::fprintf(stderr, "devourer [E] --rate-diffs wants 10 comma ints "
+                               "(cck,legacy,m0..m7) or 'clear'\n");
+          return false;
+        }
+        for (int j = 0; j < 10; ++j) {
+          if (v[j] < -64 || v[j] > 63) {
+            std::fprintf(stderr, "devourer [E] --rate-diffs value %d out of "
+                                 "range [-64, 63]\n",
+                         v[j]);
+            return false;
+          }
+        }
+        a.rate_diffs.cck = static_cast<int8_t>(v[0]);
+        a.rate_diffs.legacy = static_cast<int8_t>(v[1]);
+        for (int j = 0; j < 8; ++j)
+          a.rate_diffs.mcs[j] = static_cast<int8_t>(v[2 + j]);
+      }
+    } else if (k == "--flat-pulse" && next(a.flat_pulse))
+      a.have_flat_pulse = true;
     else {
       std::fprintf(stderr, "devourer [W] unknown/incomplete arg: %s\n",
                    k.c_str());
@@ -159,7 +216,8 @@ void print_state(IRtlDevice *dev, bool with_thermal) {
       .f("cck", s.cck_index)
       .f("ofdm", s.ofdm_index)
       .f("mcs7", s.mcs7_index)
-      .f("rb", s.hw_readback ? 1 : 0);
+      .f("rb", s.hw_readback ? 1 : 0)
+      .f("rate_diffs", s.rate_diffs_custom ? 1 : 0);
   if (with_thermal) {
     const devourer::ThermalStatus t = dev->GetThermalStatus();
     devourer::Ev ev(*g_ev, "thermal");
@@ -254,6 +312,26 @@ int main(int argc, char **argv) {
   if (a.flat >= -1) {
     dev->SetTxPowerIndexOverride(a.flat);
     logger->info("flat index override -> {}", a.flat);
+    print_state(dev.get(), a.thermal);
+  }
+
+  if (a.have_rate_diffs) {
+    if (a.rate_diffs_clear) {
+      const bool ok = dev->SetTxPowerRateDiffs(std::nullopt);
+      logger->info("rate-diffs clear -> {}", ok ? "ok" : "unsupported");
+    } else {
+      const bool ok = dev->SetTxPowerRateDiffs(a.rate_diffs);
+      logger->info("rate-diffs -> {}", ok ? "applied" : "unsupported");
+    }
+    print_state(dev.get(), a.thermal);
+  }
+
+  if (a.have_flat_pulse) {
+    dev->SetTxPowerIndexOverride(a.flat_pulse);
+    logger->info("flat pulse -> {}", a.flat_pulse);
+    print_state(dev.get(), a.thermal);
+    dev->SetTxPowerIndexOverride(-1);
+    logger->info("flat pulse cleared");
     print_state(dev.get(), a.thermal);
   }
 

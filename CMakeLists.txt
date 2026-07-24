@@ -193,6 +193,12 @@ endif()
 # Link devourer with libusb as found via pkg-config.
 target_link_libraries(devourer PUBLIC PkgConfig::libusb)
 
+# Android (Termux / NDK): the diagnostics plane routes to logcat via
+# __android_log_write (src/logger.h), which lives in the system `log` library.
+if(ANDROID)
+    target_link_libraries(devourer PUBLIC log)
+endif()
+
 target_include_directories(devourer PUBLIC hal)
 target_include_directories(devourer PUBLIC hal/phydm/rtl8814a)
 target_include_directories(devourer PUBLIC hal/phydm/rtl8822c)

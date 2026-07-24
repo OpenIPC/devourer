@@ -484,6 +484,42 @@ static bool agg_sa_match(const Packet &packet) {
          std::memcmp(packet.Data.data() + 10, g_agg_sa, 6) == 0;
 }
 
+/* DEVOURER_RX_SINK_SPIN_US: busy-spin this many microseconds at the top of
+ * every delivered frame in packetProcessor, modelling the inline consumer cost
+ * (in PixelPilot: wfb-ng FEC+AES+UDP, ~20-50 us/frame) that in the async ring
+ * delays the URB resubmit. packetProcessor runs once per aggregated MPDU, so
+ * this is a per-subframe cost — the same granularity the real consumer pays.
+ * 0/unset = off. */
+static const long g_rx_sink_spin_us = []() {
+  const char *e = std::getenv("DEVOURER_RX_SINK_SPIN_US");
+  return e ? std::strtol(e, nullptr, 0) : 0L;
+}();
+
+/* DEVOURER_RX_SINK_STALL_MS / _EVERY: a PERIODIC consumer stall — every _EVERY
+ * frames, busy-spin _MS milliseconds — modelling an occasional hiccup (GC pause,
+ * scheduler preemption of the consumer) on a consumer that otherwise keeps up.
+ * This is the regime where moving the consumer off the pump thread (spsc-fat)
+ * matters: async/reorder consume on the pump, so a stall drains the ring and
+ * drops frames; spsc-fat keeps the pump re-arming and queues the backlog. */
+static const long g_rx_stall_ms = []() {
+  const char *e = std::getenv("DEVOURER_RX_SINK_STALL_MS");
+  return e ? std::strtol(e, nullptr, 0) : 0L;
+}();
+static const long g_rx_stall_every = []() {
+  const char *e = std::getenv("DEVOURER_RX_SINK_STALL_EVERY");
+  return e ? std::strtol(e, nullptr, 0) : 100L;
+}();
+
+/* DEVOURER_RX_PCTR: emit a lean rx.seq event (payload counter + tsfl + crc +
+ * aggregate markers) per SA-matched frame — the ground-truth per-frame delivery
+ * sequence for the RX-ring loss study. Deliberately lean (no body hex) so the
+ * emit cost does not itself perturb the pump thread it measures. The counter is
+ * the u32 txdemo stamps at the QoS-Data body start (MPDU offset 26). */
+static const bool g_rx_pctr = []() {
+  const char *e = std::getenv("DEVOURER_RX_PCTR");
+  return e != nullptr && std::strcmp(e, "0") != 0;
+}();
+
 /* Emit the frame-free NHM power histogram (IRtlDevice::GetRxEnergy fills it) as
  * a distinct rx.nhm event so it never disturbs the rx.energy
  * fields its consumers key on. `peak` = the fullest bucket (0 = quiet
@@ -547,6 +583,26 @@ static void packetProcessor(const Packet &packet) {
   }
 
   ++g_rx_count;
+
+  /* Model the inline consumer cost that delays URB resubmit in the async ring
+   * (DEVOURER_RX_SINK_SPIN_US). This runs on the libusb pump thread — the very
+   * thread whose resubmit latency the rx.ring telemetry measures — so it
+   * reproduces the burst-starvation mechanism on a host with headroom to
+   * spare. */
+  if (g_rx_sink_spin_us > 0) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::microseconds(g_rx_sink_spin_us);
+    while (std::chrono::steady_clock::now() < deadline) {
+      /* busy-wait: a sleep would yield the pump thread and defeat the model */
+    }
+  }
+  if (g_rx_stall_ms > 0 && (g_rx_count % g_rx_stall_every) == 0) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(g_rx_stall_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+      /* periodic consumer hiccup */
+    }
+  }
 
   /* HE Trigger frame (802.11 control, FC=0x24) — aired in a legacy PPDU, so
    * even an 11ac witness captures the bytes. Decode + surface it as rx.trigger
@@ -614,6 +670,32 @@ static void packetProcessor(const Packet &packet) {
                 packet.RxAtrib.evm[0], packet.RxAtrib.ldpc != 0,
                 packet.RxAtrib.stbc != 0, packet.RxAtrib.crc_err,
                 packet.RxAtrib.icv_err);
+  }
+
+  /* rx.seq — the ground-truth per-frame delivery sequence for the RX-ring loss
+   * study. pctr is the u32 txdemo stamps at the QoS-Data body start (MPDU
+   * offset 26); tsfl is the chip RX timestamp; paggr/ppdu are the aggregate
+   * structure the host-vs-RF loss discriminator keys on (a host FIFO overflow
+   * drops a whole aggregate; an RF loss drops individual frames). The SA gate
+   * follows DEVOURER_RX_AGG_SA when set, else the canonical txdemo SA. */
+  if (g_rx_pctr && packet.Data.size() >= 30) {
+    const bool seq_sa =
+        g_agg_sa_env
+            ? agg_sa_match(packet)
+            : (packet.Data.size() >= 16 &&
+               std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0);
+    if (seq_sa) {
+      uint32_t pctr;
+      std::memcpy(&pctr, packet.Data.data() + 26, 4);
+      devourer::Ev(*g_ev, "rx.seq")
+          .t() /* host monotonic ms — correlates a pctr gap with an rx.ring dip */
+          .f("pctr", (unsigned long long)pctr)
+          .f("tsfl", packet.RxAtrib.tsfl)
+          .f("seq", packet.RxAtrib.seq_num)
+          .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
+          .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
+          .f("ppdu", packet.RxAtrib.ppdu_cnt);
+    }
   }
 
   if (g_rx_count == 1) {
@@ -857,9 +939,16 @@ static void packetProcessor(const Packet &packet) {
   }
 }
 
-int main() {
+int main(int argc, char **argv) {
   libusb_context *ctx;
   int rc;
+
+  /* Termux/Android: argv[1] = numeric USB fd handed to us by the app that holds
+   * the USB-host permission (libusb can't enumerate /dev/bus/usb under an
+   * untrusted_app SELinux domain, so we wrap the pre-opened fd instead). Mirrors
+   * the TX demo. fd==0 -> normal VID/PID open on Linux/macOS. */
+  const long termux_fd = (argc >= 2) ? std::strtol(argv[1], nullptr, 0) : 0;
+  const bool termux_mode = (termux_fd > 0);
 
   auto logger = std::make_shared<Logger>();
   apply_logging_env(*logger); /* DEVOURER_LOG_LEVEL / DEVOURER_EVENTS / ... */
@@ -964,6 +1053,15 @@ int main() {
   }
 #endif /* DEVOURER_HAVE_PCIE */
 
+  if (termux_mode) {
+    logger->info("Termux/Android mode: wrapping USB fd {}", termux_fd);
+    /* Both options are global (ctx==NULL) and must precede libusb_init: skip the
+     * device-discovery scan entirely, and take the weak-authority path that
+     * tolerates the app-sandboxed usbfs fd. */
+    libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
+    libusb_set_option(NULL, LIBUSB_OPTION_WEAK_AUTHORITY);
+  }
+
   rc = libusb_init(&ctx);
   if (rc < 0) {
     return rc;
@@ -980,11 +1078,22 @@ int main() {
                         ? LIBUSB_LOG_LEVEL_DEBUG
                         : LIBUSB_LOG_LEVEL_WARNING);
 
-  /* DEVOURER_PID / DEVOURER_VID / DEVOURER_USB_BUS / DEVOURER_USB_PORT device
-   * selection — shared with the other multi-adapter demos (usb_select.h). */
-  libusb_device_handle *dev_handle = open_selected_usb(
-      ctx, logger, kRealtekProductIds,
-      sizeof(kRealtekProductIds) / sizeof(kRealtekProductIds[0]));
+  libusb_device_handle *dev_handle = nullptr;
+  if (termux_mode) {
+    rc = libusb_wrap_sys_device(ctx, (intptr_t)termux_fd, &dev_handle);
+    if (rc != 0 || dev_handle == nullptr) {
+      logger->error("libusb_wrap_sys_device(fd={}) failed: {} ({})", termux_fd,
+                    libusb_error_name(rc), rc);
+      libusb_exit(ctx);
+      return 1;
+    }
+  } else {
+    /* DEVOURER_PID / DEVOURER_VID / DEVOURER_USB_BUS / DEVOURER_USB_PORT device
+     * selection — shared with the other multi-adapter demos (usb_select.h). */
+    dev_handle = open_selected_usb(
+        ctx, logger, kRealtekProductIds,
+        sizeof(kRealtekProductIds) / sizeof(kRealtekProductIds[0]));
+  }
   if (dev_handle == NULL) {
     libusb_exit(ctx);
     return 1;
@@ -1003,8 +1112,10 @@ int main() {
   /* Reopen variant: recovers in place when the reset re-enumerates the device
    * (a warm Kestrel drops its firmware back to ROM on reset — the handle goes
    * stale and the dongle may pass through its ZeroCD id before returning). */
+  /* Reset skipped in termux_mode: a wrapped app-owned fd can't be re-enumerated
+   * (a USB reset would orphan the handle the device-list scan can't re-find). */
   rc = devourer::claim_interface_reset_reopen(ctx, dev_handle, logger,
-      std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
+      !termux_mode && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
   devourer::Ev(*g_ev, "init.timing")
       .f("stage", "demo.usb_reset")
       .f("ms", ms_since_start());

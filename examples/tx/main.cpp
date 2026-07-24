@@ -900,6 +900,26 @@ int main(int argc, char **argv) {
     tx_gap_set = true;
   }
 
+  /* Keyframe-burst emulation for the RX-ring loss study: send flat-out for
+   * DEVOURER_TX_BURST_ON_MS, then idle for DEVOURER_TX_BURST_OFF_MS, repeat.
+   * This reproduces the bursty arrival a video keyframe imposes on the receiver
+   * — the load pattern that starves the async RX ring — instead of the steady
+   * cadence tx_gap/tx_interval produce. When on_ms > 0 it overrides the gap. */
+  long burst_on_ms = 0, burst_off_ms = 0;
+  if (const char *e = std::getenv("DEVOURER_TX_BURST_ON_MS")) {
+    burst_on_ms = std::strtol(e, nullptr, 0);
+    if (burst_on_ms < 0) burst_on_ms = 0;
+  }
+  if (const char *e = std::getenv("DEVOURER_TX_BURST_OFF_MS")) {
+    burst_off_ms = std::strtol(e, nullptr, 0);
+    if (burst_off_ms < 0) burst_off_ms = 0;
+  }
+  const bool burst_mode = burst_on_ms > 0 && burst_off_ms > 0;
+  auto burst_cycle_start = std::chrono::steady_clock::now();
+  if (burst_mode)
+    logger->info("DEVOURER_TX_BURST — keyframe emulation {} ms on / {} ms off",
+                 burst_on_ms, burst_off_ms);
+
   /* DEVOURER_TX_BATCH=N: drive the send_packets batch API in groups of N
    * frames per call — the USB TX aggregation bench mode. Pair with
    * DEVOURER_TX_USB_AGG (library knob) to actually pack the group into shared
@@ -1405,7 +1425,31 @@ int main(int argc, char **argv) {
                     consec_fail);
       break;
     }
-    if (tx_gap_set) {
+    bool burst_off_window = false;
+    if (burst_mode) {
+      /* Keyframe-burst pacing: send at the normal inter-frame rate during the
+       * ON window, idle during OFF. A single sleep spans the remainder of the
+       * OFF window, then the cycle restarts — reproducing the bursty arrival
+       * that starves the RX ring. (ON keeps the tx_gap rate rather than going
+       * gap-0: a flat-out flood wedges the Jaguar1 async TX path, and a high
+       * finite rate already over-subscribes a slow RX consumer.) */
+      const auto now = std::chrono::steady_clock::now();
+      const long long in_cycle_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              now - burst_cycle_start)
+              .count();
+      if (in_cycle_ms >= burst_on_ms) {
+        burst_off_window = true;
+        const long long total = burst_on_ms + burst_off_ms;
+        if (in_cycle_ms < total)
+          std::this_thread::sleep_for(
+              std::chrono::milliseconds(total - in_cycle_ms));
+        burst_cycle_start = std::chrono::steady_clock::now();
+      }
+    }
+    if (burst_off_window) {
+      /* idled above for the OFF window — no additional inter-frame gap. */
+    } else if (tx_gap_set) {
       /* explicit gap wins: >0 sleeps, 0 = no inter-frame sleep (max flood) */
       if (tx_gap_us > 0)
         std::this_thread::sleep_for(std::chrono::microseconds(tx_gap_us));

@@ -32,7 +32,8 @@ public:
   UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
                libusb_context *ctx = nullptr,
                std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr,
-               bool rx_zerocopy = true);
+               bool rx_zerocopy = true, RxMode rx_mode = RxMode::Async,
+               int pool_spare = 0, int ring_ms = 0);
   ~UsbTransport() override;
 
   bool is_usb() const override { return true; }
@@ -119,6 +120,18 @@ private:
    * zerocopy bulk-IN path; falls back to heap buffers per-URB when the alloc is
    * unsupported. See rx_loop and DeviceConfig::Usb::rx_zerocopy. */
   bool _rx_zerocopy = true;
+
+  /* RX-ring servicing strategy + buffer-pool depth + diagnostic telemetry
+   * cadence, from DeviceConfig::Rx. rx_loop reads these; the defaults preserve
+   * the historic inline async ring with no extra buffers and no telemetry. */
+  RxMode _rx_mode = RxMode::Async;
+  int _pool_spare = 0;
+  int _ring_ms = 0;
+
+  /* rx_loop helpers for the servicing strategies dispatched off _rx_mode. */
+  void rx_loop_sync(int buf_size,
+                    const std::function<void(const uint8_t *, int)> &on_data,
+                    const std::function<bool()> &should_stop);
 
   /* Exclusive per-adapter USB lock (UsbDeviceLock.h), held for the transport
    * lifetime; released when the device (and thus the transport) dies. */

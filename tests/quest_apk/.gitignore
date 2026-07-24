@@ -1,0 +1,5 @@
+# Build artifacts placed here by build_apk.sh (native payloads copied/compiled
+# from the arm64 rxdemo bundle + NDK). Never checked in.
+lib/
+build/
+*.apk

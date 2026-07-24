@@ -21,7 +21,8 @@ RtlAdapter::RtlAdapter(libusb_device_handle *dev_handle, Logger_t logger,
                        std::shared_ptr<devourer::UsbDeviceLock> usb_lock,
                        const devourer::DeviceConfig &cfg)
     : _transport{std::make_shared<devourer::UsbTransport>(
-          dev_handle, logger, ctx, std::move(usb_lock), cfg.usb.rx_zerocopy)},
+          dev_handle, logger, ctx, std::move(usb_lock), cfg.usb.rx_zerocopy,
+          cfg.rx.rx_mode, cfg.rx.pool_spare, cfg.rx.ring_ms.value_or(0))},
       _logger{std::move(logger)} {
   init_from_transport(cfg);
 }

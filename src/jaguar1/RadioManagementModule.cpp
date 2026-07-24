@@ -593,6 +593,22 @@ void RadioManagementModule::PHY_HandleSwChnlAndSetBW8812(
     _currentCenterFrequencyIndex = CenterFrequencyIndex1;
   }
 
+#if defined(__ANDROID__)
+  // APFPV addition: verify actual bandwidth/channel by reading the RF
+  // synthesizer and BW registers back. _lastRfCh feeds rf_wedged() (0xea =
+  // the RF synth locked up and won't tune to any channel until a USB port
+  // reset) -- only meaningful after a tune on Android, where this readback
+  // runs (matches the pre-rebuild WiFiDriver's placement/behavior).
+  {
+    uint32_t bb834 = phy_query_bb_reg(0x0834, 0x00000003);
+    uint32_t rf_ch = phy_query_rf_reg(RfPath::RF_PATH_A, 0x18, 0x000000FF);
+    _lastRfCh = rf_ch;
+    __android_log_print(ANDROID_LOG_INFO, "apfpv-scan",
+        "RF VERIFY: primary=%d bw=%d | BB834[1:0]=%d RF_CH=0x%x",
+        (int)ChannelNum, (int)ChnlWidth, (int)bb834, (unsigned)rf_ch);
+  }
+#endif
+
   /* Switch workitem or set timer to do switch channel or setbandwidth operation
    */
   phy_SwChnlAndSetBwMode8812();
@@ -681,7 +697,13 @@ void RadioManagementModule::phy_SwChnlAndSetBwMode8812() {
    * `HalModule::rtl8812au_hal_init` → `ArmIQKOnNextChannelSet`.
    * Optional override: `DEVOURER_FORCE_IQK=1` runs IQK on every
    * channel-set (used for canary-diff workflow against kernel). */
-  if ((_needIQK || _tuning.force_iqk) && !_tuning.disable_iqk) {
+  // APFPV addition: _scanMode suppresses IQK during a scan sweep (fast
+  // unsettled retunes across channels/bands wedge the RF synth if IQK runs
+  // mid-sweep -- RF_CH reads back 0xea and stays wedged for the rest of the
+  // sweep). Listening for beacons needs no TX calibration; IQK still runs
+  // once the sweep settles on the real operating channel (setScanMode(false)
+  // before that final arm).
+  if ((_needIQK || _tuning.force_iqk) && !_tuning.disable_iqk && !_scanMode) {
     if (_eepromManager->version_id.ICType == CHIP_8812) {
       _iqk.Calibrate(_currentChannel, current_band_type,
                      /*is_recovery=*/false);

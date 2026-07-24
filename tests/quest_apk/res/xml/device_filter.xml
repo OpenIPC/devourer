@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- RTL8812AU: vendor 0x0bda=3034, product 0x8812=34834 (decimal in the
+         attribute values). Matching this triggers the no-dialog auto-grant. -->
+    <usb-device vendor-id="3034" product-id="34834" />
+</resources>

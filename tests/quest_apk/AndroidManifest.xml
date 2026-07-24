@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.openipc.rxq"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-feature android:name="android.hardware.usb.host" />
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="28" />
+
+    <application
+        android:label="RXQ"
+        android:extractNativeLibs="true"
+        android:allowBackup="false">
+
+        <!-- singleTop so re-launch with new env extras reuses the task and
+             hits onNewIntent rather than stacking activities. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <!-- Launcher entry (manual start / am start). -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- The PixelPilot mechanism: attaching a matching USB device
+                 auto-grants this app permission to it and launches us with
+                 EXTRA_DEVICE set — no permission dialog. -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
+        </activity>
+    </application>
+</manifest>

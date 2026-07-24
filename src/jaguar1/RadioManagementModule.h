@@ -73,6 +73,11 @@ class RadioManagementModule {
   bool _warned_uncharacterized = false; /* one-shot extended-channel warning */
   ChannelWidth_t _currentChannelBw;
   uint8_t _currentChannel;
+  // APFPV additions -- see rf_wedged()/setScanMode() below for what these
+  // gate. No upstream equivalent (no scan-mode/RF-wedge-recovery concept
+  // there); ported member state from the pre-rebuild WiFiDriver.
+  uint32_t _lastRfCh = 0;
+  bool _scanMode = false;
   BandType current_band_type;
   bool _swChannel = false;
   bool _channelBwInitialized = false;
@@ -184,6 +189,22 @@ public:
   // upstream's own _InitWMACSetting_8812A() uses, logic unchanged from the
   // pre-rebuild WiFiDriver.
   void SetStationRxFilter();
+  /* The channel the radio is currently tuned to (set by set_channel_bwmode).
+   * Used by StationMode to pick a band-correct mgmt TX rate: 5 GHz (ch>14)
+   * has no CCK, so auth/assoc must go at OFDM, like the kernel. */
+  uint8_t current_channel() const { return _currentChannel; }
+  /* True when the RF synthesizer is wedged (RF 0x18 low byte reads 0xea after
+   * a tune) -- it won't lock to any channel until a USB port reset.
+   * NOTE: _lastRfCh is declared but not yet wired up to an actual RF-0x18
+   * verify-read inside set_channel_bwmode -- that integration is still
+   * pending, so this always reads as "not wedged" until it's connected. */
+  bool rf_wedged() const { return (_lastRfCh & 0xFF) == 0xea; }
+  /* Suppress IQK during the scan sweep (fast unsettled retunes wedge the RF
+   * synth if IQK runs mid-sweep). Set true around the channel-hop loop,
+   * false before arming the real operating channel.
+   * NOTE: _scanMode is declared but not yet wired up to skip IQK inside
+   * set_channel_bwmode -- that integration is still pending. */
+  void setScanMode(bool s) { _scanMode = s; }
   void set_channel_bwmode(uint8_t channel, uint8_t channel_offset,
                           ChannelWidth_t bwmode);
   /* Lean frequency-hop retune. Runs ONLY the RF channel switch (phy_SwChnl),

@@ -207,6 +207,35 @@ target_include_directories(devourer PUBLIC hal/phydm/rtl8822b)
 target_include_directories(devourer PUBLIC hal/phydm/rtl8821c)
 target_include_directories(devourer PUBLIC src)
 
+# ---------------------------------------------------------------------------
+#  APFPV additions -- station-mode WPA2/CCMP + the APFPV IP/FPV/session layer,
+#  ported onto upstream's rebuilt tree. Only WPA2Supplicant/Dot11Frames/
+#  Wpa2Crypto/crypto/*/ApfpvDhcp/LqFeedback/Wpa2Authenticator so far (zero
+#  driver-layer dependency, confirmed by direct #include inspection); RxDeframe
+#  and ApfpvStation come later once their driver-layer API updates land.
+# ---------------------------------------------------------------------------
+add_library(apfpv
+    src/apfpv/Wpa2Supplicant.cpp     src/apfpv/Wpa2Supplicant.h
+    src/apfpv/Dot11Frames.cpp        src/apfpv/Dot11Frames.h
+    src/apfpv/Wpa2Crypto.cpp         src/apfpv/Wpa2Crypto.h
+    src/apfpv/crypto/AesCcm.cpp      src/apfpv/crypto/AesCcm.h
+    src/apfpv/crypto/AesCmac.cpp     src/apfpv/crypto/AesCmac.h
+    src/apfpv/crypto/Sha1Hmac.cpp    src/apfpv/crypto/Sha1Hmac.h
+    src/ApfpvDhcp.cpp                src/ApfpvDhcp.h
+    src/LqFeedback.cpp               src/LqFeedback.h
+    src/Wpa2Authenticator.cpp        src/Wpa2Authenticator.h)
+target_compile_features(apfpv PUBLIC cxx_std_20)
+target_include_directories(apfpv PUBLIC src src/apfpv src/apfpv/crypto)
+if(WIN32)
+    target_link_libraries(apfpv PUBLIC ws2_32 bcrypt)
+endif()
+# Host (non-Android) builds: Wpa2Supplicant.cpp etc. call __android_log_print
+# unconditionally (ported as-is from WiFiDriver) -- same compat shim already
+# proven there, reused verbatim rather than reinvented.
+if(NOT ANDROID)
+    target_include_directories(apfpv PUBLIC src/apfpv/compat)
+endif()
+
 # --- per-chip source groups (see options above) ---
 if(DEVOURER_JAGUAR1)
     target_sources(devourer PRIVATE

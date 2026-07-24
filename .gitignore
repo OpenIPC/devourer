@@ -13,3 +13,4 @@ tests/chipid_probe
 # Local lab notes / Claude Code state (never commit)
 INVENTORY.md
 .claude/
+build-upstream/

@@ -174,6 +174,16 @@ public:
   void ArmIQKOnNextChannelSet() { _needIQK = true; }
   void hw_var_rcr_config(uint32_t rcr);
   void SetMonitorMode();
+  // APFPV addition: kernel-exact infrastructure-station RCR (the A-MPDU
+  // fix -- RCR_AAP/promiscuous bypasses the HW auto-Block-Ack engine for
+  // aggregates, causing an ADDBA/DELBA/single-frame-fallback ~25Mbps
+  // ceiling; APM+CBSSID_DATA routes through the real station RX path so
+  // the chip auto-BAs aggregates -> full-rate delivery). No upstream
+  // equivalent exists (no client-association station-mode flow there at
+  // all) -- built on the same hw_var_rcr_config()/rtw_write16() primitives
+  // upstream's own _InitWMACSetting_8812A() uses, logic unchanged from the
+  // pre-rebuild WiFiDriver.
+  void SetStationRxFilter();
   void set_channel_bwmode(uint8_t channel, uint8_t channel_offset,
                           ChannelWidth_t bwmode);
   /* Lean frequency-hop retune. Runs ONLY the RF channel switch (phy_SwChnl),

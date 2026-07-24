@@ -2979,3 +2979,86 @@ void RadioManagementModule::PHY_TxPowerTrainingByPath_8812(RfPath rfPath) {
 
   _device.phy_set_bb_reg(writeOffset, 0xffffff, writeData);
 }
+
+// ---------------------------------------------------------------------------
+// APFPV addition -- see the header comment above SetStationRxFilter's
+// declaration. Ported verbatim from the pre-rebuild WiFiDriver; only
+// hw_var_rcr_config()/rtw_write16()/rtw_read32()/rtw_read8() call sites are
+// this class's own (upstream already uses the same primitives internally).
+// ---------------------------------------------------------------------------
+void RadioManagementModule::SetStationRxFilter() {
+  // Kernel-exact station RCR (the A-MPDU fix). The kernel's usb_halinit.c
+  // station RCR is APM | AM | AB | CBSSID_DATA | CBSSID_BCN | HTC_LOC_CTRL |
+  // AMF | ... and explicitly does NOT set RCR_AAP. RCR_AAP (promiscuous
+  // "accept all unicast") puts the MAC in a monitor-style path that BYPASSES
+  // the infrastructure-station RX state machine -- including HW auto-Block-
+  // Ack generation for A-MPDU. With AAP the chip ACKs single frames
+  // (FORCEACK) but never auto-BAs aggregates, so the AP sends ADDBA, gets no
+  // BA, and tears the session down with DELBA -> single-frame fallback ->
+  // ~25 Mbps ceiling. CBSSID_DATA (match REG_BSSID, set to the AP) + APM
+  // (match our MAC) is the real station path that triggers auto-BA ->
+  // A-MPDU -> 65Mbps. DEVOURER_RCR_AAP=1 restores the old promiscuous
+  // behavior for A/B comparison. DEVOURER_RCR_WINDOWS enables the Windows
+  // RCR (FORCEACK=0, needs FWOffload) for A/B comparison.
+  uint32_t rcr;
+  if (std::getenv("DEVOURER_RCR_WINDOWS")) {
+    rcr = 0x3f6b00f4;  // Windows RCR (FORCEACK=0, needs FWOffload)
+  } else if (std::getenv("DEVOURER_RCR_AAP")) {
+    rcr = RCR_AAP | RCR_APM | RCR_AM | RCR_AB | RCR_APWRMGT |
+          RCR_ADF | RCR_ACF | RCR_AMF | RCR_APP_PHYST_RXFF | RCR_APPFCS | FORCEACK;
+  } else {
+    rcr = RCR_APM | RCR_AM | RCR_AB | RCR_CBSSID_DATA | RCR_CBSSID_BCN |
+          RCR_HTC_LOC_CTRL | RCR_AMF | RCR_APP_PHYST_RXFF | RCR_APPFCS | FORCEACK |
+          // RCR_VHT_DACK (BIT26): response type for a VHT SINGLE-MPDU data
+          // packet -- 1 = reply with a normal ACK, 0 = reply with a
+          // BlockAck. The kernel sets 1 (its RCR=0xce6000f4); with 0 our HW
+          // answered the AP's single VHT MPDUs with a compressed BlockAck
+          // instead of the ACK the AP expects -> the AP saw no ack ->
+          // retransmitted each frame to the retry limit, the measured
+          // retransmit storm that collapsed paced throughput.
+          RCR_VHT_DACK;
+    // RCR_APP_MIC (BIT30) + RCR_APP_ICV (BIT29) -- the MAC retains the CCMP
+    // MIC/ICV at the bottom of each RX frame. Only needed when HW decrypt is
+    // on (RxDeframe's HW-decrypt path strips CCMP-hdr(8)+MIC(8)=16 bytes,
+    // which is only correct if the HW kept the MIC -- without this the -16
+    // eats 8 bytes of real payload off every frame -> corrupt NALUs -> black
+    // screen). Default off (the proven SW-CCMP path). DEVOURER_RCR_APP or
+    // DEVOURER_HW_DECRYPT opts in.
+    bool rcrApp = std::getenv("DEVOURER_RCR_APP") != nullptr
+               || std::getenv("DEVOURER_HW_DECRYPT") != nullptr;
+#if defined(__ANDROID__)
+    if (!rcrApp) {
+        char v[PROP_VALUE_MAX] = {0};
+        if (__system_property_get("debug.pixelpilot.rcrapp", v) > 0 && v[0] != '0') rcrApp = true;
+        char h[PROP_VALUE_MAX] = {0};
+        if (__system_property_get("debug.pixelpilot.hwdec", h) > 0 && h[0] != '0') rcrApp = true;
+    }
+#endif
+    if (rcrApp) rcr |= (1u << 30) | (1u << 29);
+  }
+  hw_var_rcr_config(rcr);
+  // TEST 2 (DEVOURER_T2_KFLT): match the kernel's RX filter exactly. The
+  // kernel leaves RXFLTMAP0 at chip default and sets RXFLTMAP1 = BIT8|BIT10
+  // (BAR + PS-Poll, not the BA subtype). Default keeps our permissive filter.
+  if (std::getenv("DEVOURER_T2_KFLT")) {
+    _device.rtw_write16(REG_RXFLTMAP2, 0xFFFF);
+    _device.rtw_write16(REG_RXFLTMAP1, BIT8 | BIT10);  // kernel: BAR + PS-Poll only
+  } else {
+    // RXFLTMAP0: accept ALL management frame subtypes (auth, assoc, action, etc.)
+    _device.rtw_write16(REG_RXFLTMAP0, 0xFFFF);
+    _device.rtw_write16(REG_RXFLTMAP2, 0xFFFF);   // keep accepting all data-frame subtypes
+    // RXFLTMAP1: accept BAR (subtype 8) + BA (subtype 9) + PS-Poll (subtype 10).
+    _device.rtw_write16(REG_RXFLTMAP1, BIT8 | BIT9 | BIT10);
+  }
+  // Read REG_RCR back to prove the filter stuck.
+  uint32_t rb = _device.rtw_read32(REG_RCR);
+  _logger->info("[SetStationRxFilter] RCR set=0x{:08x} readback=0x{:08x} AAP={} FORCEACK={}",
+                rcr, rb, (rb & RCR_AAP) ? 1 : 0, (rb & FORCEACK) ? 1 : 0);
+#if defined(__ANDROID__)
+  // Mirror to logcat (apfpv-scan) -- the spdlog _logger doesn't reach logcat.
+  uint8_t m[6]; for (int i=0;i<6;i++) m[i]=_device.rtw_read8(0x0610+i);
+  __android_log_print(4, "apfpv-scan",
+    "[StationRxFilter] RCR=0x%08x AAP=%d FORCEACK=%d MACID=%02x:%02x:%02x:%02x:%02x:%02x",
+    rb, (rb&RCR_AAP)?1:0, (rb&FORCEACK)?1:0, m[0],m[1],m[2],m[3],m[4],m[5]);
+#endif
+}

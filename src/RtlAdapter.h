@@ -16,6 +16,7 @@
  * (Historically this class WAS the USB transport; the old `RtlUsbAdapter`
  * name remains as a deprecated alias in RtlUsbAdapter.h.) */
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -130,6 +131,27 @@ public:
   uint8_t rxagg_usb_timeout = 0;
 
   bool send_packet(uint8_t *packet, size_t length);
+  // APFPV addition: ApfpvStation flips this true on entering Streaming so
+  // sendStationFrameSync's per-TX ACK-drain diagnostic is skipped
+  // (send_packet already blocks on the actual bulk write; the drain poll
+  // during connect matters for diagnosing a silent chip, but during
+  // streaming it costs ~6ms/call at ~90-100 calls/s -> ~560ms/s of blocking
+  // that starves RX -> decode/render stutters). shared_ptr: survives
+  // RtlAdapter value-copies (it's a copyable value type).
+  std::shared_ptr<std::atomic<bool>> _txFastPath =
+      std::make_shared<std::atomic<bool>>(false);
+  void setTxFastPath(bool b) { if (_txFastPath) _txFastPath->store(b); }
+  // APFPV addition: station TX with the proven default behavior (concurrent
+  // IN/OUT, no RX pause -- matches the kernel USB core; validated to reach
+  // Associating[PASS] on WSL-vhci, the worst-case transport) plus an
+  // ACK-driven completion check via TXPKT_EMPTY (skipped once _txFastPath is
+  // set). The pre-rebuild version also had a legacy DEVOURER_TX_USE_PAUSE
+  // fallback that paused/resumed the async-RX worker around the TX; that
+  // worker doesn't exist in this form anymore (RX ownership moved to
+  // whoever calls bulk_read_async_loop -- see RtlJaguarDevice::StartRxLoop/
+  // StopRxLoop) and that branch was already described as legacy/non-default,
+  // so it's dropped rather than force-fit onto a different architecture.
+  bool sendStationFrameSync(uint8_t *data, size_t len);
   /* Synchronous TX that blocks until completion or timeout. Returns bytes
    * submitted, or negative on error. */
   int bulk_send_sync(uint8_t *packet, size_t length, int timeout_ms) {

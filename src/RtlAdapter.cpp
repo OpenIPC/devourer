@@ -356,3 +356,50 @@ void RtlAdapter::enableHwSec() {
   if (const char* e = std::getenv("DEVOURER_SECCFG")) v = (uint16_t)strtol(e, nullptr, 0);
   rtw_write16(0x0680, v);
 }
+
+bool RtlAdapter::sendStationFrameSync(uint8_t *data, size_t len) {
+  // Recover a possibly-halted/stalled TX EP before EACH station TX. OFF by
+  // default -- it was the root cause of on-air silence (PROVEN on native
+  // Windows against a real AP's own hostapd RX log: WITH clear_halt the
+  // auth never reached the AP; WITHOUT it the connect reached Handshaking).
+  // Opt-in via DEVOURER_TX_HALT_CLR for the WSL/vhci "FailTx wedge" case only.
+  if (std::getenv("DEVOURER_TX_HALT_CLR")) {
+    uint8_t ep = 0x02;
+    if (const char *e = std::getenv("DEVOURER_TX_EP")) ep = (uint8_t)std::strtoul(e, nullptr, 0);
+    else if (bulk_out_ep_count() > 0) ep = first_bulk_out_ep();
+    bulk_clear_halt(ep);
+  }
+  // Concurrent IN/OUT exactly like the kernel USB core -- do NOT cancel the
+  // RX loop, so the AP's auth/assoc reply (arriving ~1ms after our TX) is
+  // caught on the still-live RX. The per-TX clear_halt above (opt-in) is
+  // what keeps the OUT from wedging behind pending INs on transports that
+  // need it. Validated: reaches Associating[PASS] on WSL-vhci, the
+  // worst-case transport.
+  bool ok = send_packet(data, len);
+  // ACK-DRIVEN (kernel-style) instead of a blind sleep: watch the chip
+  // confirm the frame left the TX FIFO via REG_TXPKT_EMPTY (0x041A). Logs
+  // the drain so a silent run is diagnosable. Fire-and-forget once
+  // streaming (_txFastPath): the drain poll is a connect-time diagnostic
+  // that costs ~6ms/call; during streaming it's called ~90-100x/s -> would
+  // starve RX -> decode/render stutters. send_packet already blocked on the
+  // real bulk write, so the frame is on the chip; just return.
+  if (_txFastPath && _txFastPath->load()) {
+    return ok;
+  }
+  if (!std::getenv("DEVOURER_TX_BLIND")) {
+    uint16_t e0 = 0, e = 0;
+    e0 = rtw_read16(0x041A);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+    int settled = 0;
+    e = e0;
+    do {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      uint16_t cur = rtw_read16(0x041A);
+      if (cur == e) { if (++settled >= 3) break; } else { settled = 0; e = cur; }
+    } while (std::chrono::steady_clock::now() < deadline);
+    _logger->info("STA-TX ack: TXPKT_EMPTY 0x41a {:#06x}->settled {:#06x}", e0, e);
+    return ok;
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  return ok;
+}

@@ -38,6 +38,8 @@ public:
 
   bool is_usb() const override { return true; }
 
+  int reset() override { return libusb_reset_device(_dev_handle); }
+
   uint8_t read8(uint16_t reg) override { return ctrl_read<uint8_t>(reg); }
   uint16_t read16(uint16_t reg) override { return ctrl_read<uint16_t>(reg); }
   uint32_t read32(uint16_t reg) override { return ctrl_read<uint32_t>(reg); }

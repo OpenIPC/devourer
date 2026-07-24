@@ -9,6 +9,8 @@
 #include "RtlAdapter.h"
 
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <thread>
 #include <utility>
 
@@ -269,4 +271,88 @@ void RtlAdapter::PHY_SetBBReg8812(uint16_t regAddr, uint32_t bitMask,
   rtw_write32(regAddr, data);
 
   /* RTW_INFO("BBW MASK=0x%x Addr[0x%x]=0x%x\n", BitMask, RegAddr, Data); */
+}
+
+// ---------------------------------------------------------------------------
+// APFPV additions, ported from the pre-rebuild RtlUsbAdapter (upstream's own
+// RtlAdapter never needed these -- no station-mode client flow exists
+// upstream). Logic unchanged; re-hosted onto this class's own
+// rtw_read<T>/rtw_write<T> primitives (identical template signatures).
+// ---------------------------------------------------------------------------
+bool RtlAdapter::fillH2CCmd(uint8_t elementID, uint32_t cmdLen,
+                            const uint8_t *cmdBuffer) {
+  if (cmdLen > 0 && !cmdBuffer) return false;
+  if (cmdLen > 7) return false;  // 3 primary + 4 ext
+  uint8_t box = _lastH2CBox % 4;
+  // Wait until this box has been read by the FW (REG_HMETFR bit(box) == 0).
+  for (int i = 0; i < 100; ++i) {
+    uint8_t st = rtw_read8(REG_HMETFR);
+    if ((st & (1u << box)) == 0) break;
+    std::this_thread::sleep_for(1ms);
+  }
+  uint32_t h2c_cmd = 0, h2c_cmd_ex = 0;
+  uint8_t *pc = reinterpret_cast<uint8_t *>(&h2c_cmd);
+  pc[0] = elementID;
+  if (cmdLen <= 3) {
+    if (cmdLen) std::memcpy(pc + 1, cmdBuffer, cmdLen);
+  } else {
+    std::memcpy(pc + 1, cmdBuffer, 3);
+    std::memcpy(&h2c_cmd_ex, cmdBuffer + 3, cmdLen - 3);
+  }
+  bool ok = true;
+  ok &= rtw_write32((uint16_t)(REG_HMEBOX_EXT_0 + box * 4), h2c_cmd_ex);
+  ok &= rtw_write32((uint16_t)(REG_HMEBOX_0     + box * 4), h2c_cmd);
+  _lastH2CBox = (uint8_t)((box + 1) % 4);
+  return ok;
+}
+
+bool RtlAdapter::sendH2CPacket(const uint8_t h2c[32]) {
+  static const uint16_t s_boxRegs[4]   = { REG_HMEBOX_0,     REG_HMEBOX_1,
+                                            REG_HMEBOX_2,     REG_HMEBOX_3 };
+  static const uint16_t s_boxExRegs[4] = { REG_HMEBOX_EXT_0, REG_HMEBOX_EXT_1,
+                                            REG_HMEBOX_EXT_2, REG_HMEBOX_EXT_3 };
+  for (int box = 0; box < 4; box++) {
+    for (int retry = 0; retry < 100; retry++) {
+      uint8_t st = rtw_read8(REG_HMETFR);
+      if ((st & (1u << box)) == 0) break;
+      std::this_thread::sleep_for(1ms);
+    }
+    uint32_t w0 = (uint32_t)h2c[box*8+0] | ((uint32_t)h2c[box*8+1]<<8) |
+                  ((uint32_t)h2c[box*8+2]<<16) | ((uint32_t)h2c[box*8+3]<<24);
+    uint32_t w1 = (uint32_t)h2c[box*8+4] | ((uint32_t)h2c[box*8+5]<<8) |
+                  ((uint32_t)h2c[box*8+6]<<16) | ((uint32_t)h2c[box*8+7]<<24);
+    rtw_write32(s_boxExRegs[box], w1);
+    rtw_write32(s_boxRegs[box],   w0);
+  }
+  return true;
+}
+
+void RtlAdapter::setSecCamKey(uint8_t entry, const uint8_t mac[6], uint8_t keyid,
+                              const uint8_t key[16]) {
+  const uint16_t kCamWriteReg = 0x0674, kCamCmdReg = 0x0670;
+  const uint32_t kCamPoll = 0x80000000u, kCamWr = 0x00010000u;
+  const uint8_t  kAes = 4;
+  const uint8_t base = (uint8_t)(entry * 8);
+  uint32_t dw[8] = {0};
+  dw[0] = (uint32_t)keyid | ((uint32_t)kAes << 2) | 0x8000u
+        | ((uint32_t)mac[0] << 16) | ((uint32_t)mac[1] << 24);
+  dw[1] = (uint32_t)mac[2] | ((uint32_t)mac[3] << 8)
+        | ((uint32_t)mac[4] << 16) | ((uint32_t)mac[5] << 24);
+  for (int i = 0; i < 4; i++)
+    dw[2 + i] = (uint32_t)key[i*4] | ((uint32_t)key[i*4+1] << 8)
+              | ((uint32_t)key[i*4+2] << 16) | ((uint32_t)key[i*4+3] << 24);
+  for (int a = 0; a < 8; a++) {
+    rtw_write32(kCamWriteReg, dw[a]);
+    rtw_write32(kCamCmdReg, kCamPoll | kCamWr | (uint32_t)(base + a));
+    for (int p = 0; p < 50; p++) { if ((rtw_read32(kCamCmdReg) & kCamPoll) == 0) break; }
+  }
+}
+
+void RtlAdapter::enableHwSec() {
+  // REG_SECCFG (0x0680): SCR_CHK_KEYID(BIT8)|SCR_RxDecEnable(BIT3)|SCR_TxEncEnable(BIT2).
+  // GROUND TRUTH from the LIVE kernel mac_reg_dump while connected = 0x010c.
+  // DEVOURER_SECCFG=0xNNNN overrides for A/B testing.
+  uint16_t v = 0x010c;
+  if (const char* e = std::getenv("DEVOURER_SECCFG")) v = (uint16_t)strtol(e, nullptr, 0);
+  rtw_write16(0x0680, v);
 }

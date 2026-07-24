@@ -45,6 +45,14 @@ public:
 
   virtual bool is_usb() const = 0;
 
+  /* APFPV addition: a prior process (AP mode, or a station run killed
+   * mid-connect) can leave the chip's USB engine / TX path in a state a
+   * firmware re-download does NOT clear -- seen as bulk-OUT TX timeouts.
+   * Default no-op (e.g. PCIe has no equivalent concept); UsbTransport
+   * overrides with a real libusb_reset_device. Returns a libusb error code
+   * (or -1 if unsupported by this transport). */
+  virtual int reset() { return -1; }
+
   /* ---- register plane ---- */
   virtual uint8_t read8(uint16_t reg) = 0;
   virtual uint16_t read16(uint16_t reg) = 0;

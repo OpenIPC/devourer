@@ -198,7 +198,19 @@ public:
   void _8051Reset8812();
   void ReadEFuseByte(uint16_t _offset, uint8_t *pbuf);
 
+  // --- APFPV additions: ported from the pre-rebuild RtlUsbAdapter, adapted
+  // to this class's rtw_read<T>/rtw_write<T>/WriteBytes primitives (same
+  // template signatures as before -- no logic changes, just re-hosted). ---
+  bool fillH2CCmd(uint8_t elementID, uint32_t cmdLen, const uint8_t *cmdBuffer);
+  bool sendH2CPacket(const uint8_t h2c[32]);
+  void setSecCamKey(uint8_t entry, const uint8_t mac[6], uint8_t keyid,
+                     const uint8_t key[16]);
+  void enableHwSec();
+  int reset_device() { return _transport->reset(); }
+
 private:
+  uint8_t _lastH2CBox = 0;   // round-robins across the H2C mailboxes (REG_HMEBOX_0..3)
+
   void init_from_transport(const devourer::DeviceConfig &cfg);
   void PHY_SetBBReg8812(uint16_t regAddr, uint32_t bitMask,
                         uint32_t dataOriginal);

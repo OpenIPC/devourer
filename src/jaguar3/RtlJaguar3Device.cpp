@@ -1813,6 +1813,7 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
 
   uint8_t fixed_rate = MGN_1M;
   uint8_t sgi = 0, ldpc = 0, stbc = 0;
+  uint16_t tx_flags = 0;
   ChannelWidth_t bwidth = CHANNEL_WIDTH_20;
   bool vht = (radiotap_length != 0x0d);
   bool rate_from_radiotap = false; /* did the frame's radiotap carry a rate? */
@@ -1836,6 +1837,9 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
     case IEEE80211_RADIOTAP_RATE:
       fixed_rate = *it.this_arg;
       rate_from_radiotap = true;
+      break;
+    case IEEE80211_RADIOTAP_TX_FLAGS:
+      tx_flags = get_unaligned_le16(it.this_arg);
       break;
     case IEEE80211_RADIOTAP_CHANNEL:
       /* 2 x __le16: frequency (MHz), then flags. Frequency is authoritative
@@ -1964,6 +1968,9 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
    * the kernel's descriptor for group-addressed frames. */
   const uint8_t *dot11 = packet + radiotap_length;
   bool bmc = frame_len >= 6 && (dot11[4] & 0x01);
+  uint16_t seqnum = 0;
+  if (frame_len >= 24)
+    seqnum = (get_unaligned_le16(dot11 + 22) >> 4) & 0x0fff;
   /* STBC guard (IRtlDevice contract) — 8822C/8822E are 2T2R so this never
    * fires today, but keeps the invariant uniform across families: never air an
    * STBC frame the chip can't do. */
@@ -1975,10 +1982,14 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   uint8_t pwr_type = _txpkt_dflt_type.load(std::memory_order_relaxed);
   if (radiotap_pkt_pwr_db != INT_MIN)
     pwr_type = txpkt_type_for_idx(txpkt_idx_for_qdb(radiotap_pkt_pwr_db * 4));
+  /* SVPcom monitor injection maps RADIOTAP_F_TX_NOACK to no MAC retry.
+   * wfb-ng sets this for raw-link packets, avoiding a repeated TX burst. */
+  constexpr uint16_t kRadiotapTxNoAck = 0x0008;
+  const bool retry = (tx_flags & kRadiotapTxNoAck) == 0;
   jaguar3::fill_data_tx_desc_8822c(
       out, static_cast<uint16_t>(frame_len), MRateToHwRate(fixed_rate), rate_id,
       bw_desc, sgi != 0, ldpc != 0, stbc, bmc, ndpa, data_sc, pwr_type,
-      pkt_offset);
+      pkt_offset, retry, seqnum);
   if (_cfg.tx.report) {
     /* DEVOURER_TX_REPORT: SPE_RPT asks the fw for a per-frame CCX TX report;
      * the report echoes SW_DEFINE's low byte, so stamp a rotating tag for

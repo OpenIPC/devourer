@@ -73,7 +73,32 @@ public:
   };
   FaCnt LastFaCnt() const;
 
+  // ---------------------------------------------------------------------
+  // APFPV additions -- the close-range DIG-saturation fix. Upstream's
+  // DigTick is "always !is_linked since devourer doesn't track link state"
+  // (its own comment) -- correct for wfb-ng's monitor-mode-only use, but
+  // APFPV's station-mode path needs the DIG floor to track live RSSI once
+  // connected, or a close-range/strong signal storms the FA counter and the
+  // front-end goes deaf (RXPKT_NUM=0, no data). Static: DigTick is called
+  // from a shared watchdog tick path regardless of which station instance
+  // is live, matching the pre-rebuild WiFiDriver's own static design.
+  // Validated on real hardware: this exact fix (RSSI-derived floor + a
+  // strong-signal ceiling pin) took close-range connect from failing
+  // outright to a stable ~1-3m/SNR25-40 sweet spot.
+  // ---------------------------------------------------------------------
+  static void SetLinkRssi(int rssi_dbm);
+  static void SetUnlinked();
+  static int  RssiDbm();   // last RX RSSI in dBm (-128 if never set)
+  // Firmware-RA uplink rate feedback: payload[0] bit7=SGI, [6:0]=rate index,
+  // payload[1]=macid. FrameParser calls OnUplinkRate on the matching C2H
+  // report; 0xff means "none yet".
+  static void    OnUplinkRate(uint8_t rate_idx);
+  static uint8_t UplinkRate();
+
 private:
+  static std::atomic<bool> _s_linked;
+  static std::atomic<int>  _s_rssiDbm;
+  static std::atomic<int>  _s_uplinkRate;
   void ThreadLoop();
   /* Port of `phydm_fa_cnt_statistics_ac` (phydm_dig.c:1421). Reads
    * OFDM/CCK FA + CCA + CRC32 counters from page-F BB registers. */

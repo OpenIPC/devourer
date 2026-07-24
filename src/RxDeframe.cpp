@@ -4,7 +4,7 @@
 // ============================================================================
 #include "RxDeframe.h"
 #include "ApfpvStation.h"
-#include "PhydmWatchdog.h"
+#include "jaguar1/PhydmWatchdog.h"
 #include <cstring>
 #include <cstdio>
 #include <chrono>

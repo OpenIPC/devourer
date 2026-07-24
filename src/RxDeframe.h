@@ -3,7 +3,7 @@
 #include <array>
 #include <map>
 #include <functional>
-#include "FrameParser.h"
+#include "jaguar1/FrameParser.h"
 #include "Wpa2Supplicant.h"
 #include "LqFeedback.h"
 namespace apfpv {

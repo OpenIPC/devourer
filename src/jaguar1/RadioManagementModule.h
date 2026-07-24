@@ -194,17 +194,22 @@ public:
    * has no CCK, so auth/assoc must go at OFDM, like the kernel. */
   uint8_t current_channel() const { return _currentChannel; }
   /* True when the RF synthesizer is wedged (RF 0x18 low byte reads 0xea after
-   * a tune) -- it won't lock to any channel until a USB port reset.
-   * NOTE: _lastRfCh is declared but not yet wired up to an actual RF-0x18
-   * verify-read inside set_channel_bwmode -- that integration is still
-   * pending, so this always reads as "not wedged" until it's connected. */
+   * a tune) -- it won't lock to any channel until a USB port reset. _lastRfCh
+   * is refreshed by the RF-0x18 verify-read inside PHY_HandleSwChnlAndSetBW8812
+   * (Android only, matching the pre-rebuild WiFiDriver's placement) -- reads as
+   * "not wedged" on non-Android builds, where that readback doesn't run. */
   bool rf_wedged() const { return (_lastRfCh & 0xFF) == 0xea; }
   /* Suppress IQK during the scan sweep (fast unsettled retunes wedge the RF
    * synth if IQK runs mid-sweep). Set true around the channel-hop loop,
-   * false before arming the real operating channel.
-   * NOTE: _scanMode is declared but not yet wired up to skip IQK inside
-   * set_channel_bwmode -- that integration is still pending. */
+   * false before arming the real operating channel. Wired into the IQK
+   * trigger inside PHY_HandleSwChnlAndSetBW8812. */
   void setScanMode(bool s) { _scanMode = s; }
+  /* Primary-channel offset (LOWER/UPPER of the 40 MHz center) for a given
+   * 20 MHz primary. Required for 40 MHz HT: without it _cur40MhzPrimeSc stays
+   * DONT_CARE and the VHT/HT subcarrier mapping is undefined ("SCMapping:
+   * DONOT CARE Mode Setting" in the vendor log) -- RX of the AP's primary-
+   * channel frames comes back garbage. */
+  uint8_t prime_offset_40mhz(uint8_t channel) const;
   void set_channel_bwmode(uint8_t channel, uint8_t channel_offset,
                           ChannelWidth_t bwmode);
   /* Lean frequency-hop retune. Runs ONLY the RF channel switch (phy_SwChnl),

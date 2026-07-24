@@ -229,6 +229,19 @@ public:
                      const uint8_t key[16]);
   void enableHwSec();
   int reset_device() { return _transport->reset(); }
+  // Pre-rebuild RtlUsbAdapter paused/resumed the caller's own async-URB-submission pump
+  // (an `_rxQuiesce` flag the RX event-pump thread checked) around register-I/O-heavy
+  // calibration (StationMode::arm's IQK retry), so a synchronous control transfer wasn't
+  // stuck behind that thread's libusb_handle_events polling. Post-rebuild, RX ownership
+  // moved OUT of RtlAdapter entirely -- it's now IRtlDevice::StartRxLoop, a blocking loop
+  // run on the CALLER's own thread (see ApfpvStation::_rxThread), and libusb's threading
+  // model already lets a synchronous transfer on one thread proceed correctly while
+  // another thread is inside libusb_handle_events (it waits on its own transfer's
+  // completion rather than double-polling). So there is no in-adapter pump left to pause;
+  // these are genuine no-ops kept only so call sites written against the old contract
+  // (StationMode::arm's cal-guard) still compile unchanged.
+  void pauseAsyncRx() {}
+  void resumeAsyncRx() {}
 
 private:
   uint8_t _lastH2CBox = 0;   // round-robins across the H2C mailboxes (REG_HMEBOX_0..3)

@@ -9,23 +9,23 @@
 #include "StationMode.h"
 #include "Wpa2Supplicant.h"
 #include "Wpa2Authenticator.h"
-#include "hal_com_reg.h"     // MSR / REG_BSSID / REG_RCR / RCR_* / FORCEACK for AP-mode HW config
+#include "hal_com_reg.h"     // RCR / RCR_* / MSR -- station-mode RX-filter diagnostics + tuning
 #include "Wpa2Crypto.h"
 #include "ApfpvDhcp.h"
 #include "RxDeframe.h"
 #include "StationTxDesc.h"
 #include "Dot11Frames.h"
-#include "FrameParser.h"
+#include "jaguar1/FrameParser.h"
 #include "ScanProbe.h"
 #include "LqFeedback.h"
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
 #endif
-#include "PhydmWatchdog.h"
+#include "jaguar1/PhydmWatchdog.h"
 #include "RtlUsbAdapter.h"
-#include "RtlJaguarDevice.h"
+#include "jaguar1/RtlJaguarDevice.h"
 #include "SelectedChannel.h"
-#include "RadioManagementModule.h"
+#include "jaguar1/RadioManagementModule.h"
 #include <algorithm>
 #include <cstring>
 #if defined(__ANDROID__)
@@ -66,6 +66,18 @@ static int baRespBufSizeOverride() {
     }
 #endif
     return 0;
+}
+// Upstream's RtlJaguarDevice::StartRxLoop (~= the old RtlJaguarDevice::Init) is a BLOCKING
+// read loop -- it never returns until StopRxLoop() flips should_stop. Every RX-owning
+// call site below therefore runs it on its own std::thread (_rxThread) rather than inline,
+// same as the pre-rebuild StartMonitorAsyncRx/StopAsyncRx contract this replaces. Join-safe:
+// tolerates being called from the thread being joined (detach instead -- avoids the EINVAL/
+// SIGABRT a self-join throws, seen on replug when JNI teardown races the app's disconnect)
+// and an already-reaped thread.
+static void safeJoinThread(std::thread& t) {
+    if (!t.joinable()) return;
+    if (t.get_id() == std::this_thread::get_id()) { t.detach(); return; }
+    try { t.join(); } catch (...) { if (t.joinable()) { try { t.detach(); } catch (...) {} } }
 }
 } // namespace
 // Platform-agnostic: <android/log.h> is the NDK header on Android and the
@@ -122,8 +134,9 @@ void ApfpvStation::startBeaconCal(const std::string& ssid, int channel, int txIn
     auto* rtl = reinterpret_cast<RtlJaguarDevice*>(_rtl);
     auto* dev = reinterpret_cast<RtlUsbAdapter*>(_dev);
     try {
-        rtl->Init([](const Packet&){}, legalApfpvChannel(channel, 20));   // tune + bring up
-        rtl->SetTxPower((uint8_t)std::max(0, std::min(63, txIndex)));
+        rtl->StopRxLoop(); safeJoinThread(_rxThread);   // no RX needed for a TX-only beacon
+        rtl->InitWrite(legalApfpvChannel(channel, 20));   // tune + bring up (no RX loop)
+        rtl->SetTxPowerIndexOverride(std::max(0, std::min(63, txIndex)));
     } catch (...) { return; }
     // **TX-RADIATION FIX.** The init/channel-set IQK (Iqk8812a::ConfigureMac) pauses
     // all 6 TX queues (REG_TXPAUSE 0x522 = 0x3f) for calibration. The beacon/monitor
@@ -163,14 +176,17 @@ void ApfpvStation::stopBeaconCal() {
 
 // ---- AP MODE (SoftAP) -------------------------------------------------------
 void ApfpvStation::apSend(const std::vector<uint8_t>& mpdu, bool eapol) {
-    auto* dev = reinterpret_cast<RtlUsbAdapter*>(_dev);
-    if (!dev || mpdu.empty()) return;
+    if (mpdu.empty()) return;
     std::vector<uint8_t> frame(40 + mpdu.size(), 0);
     std::memcpy(frame.data()+40, mpdu.data(), mpdu.size());
     FillStationTxDesc(frame.data(), (uint16_t)mpdu.size(), 40, 0,
                       eapol ? StationFrameKind::EapolData : StationFrameKind::Mgmt, 0, 0x04);
-    dev->rtw_write8(0x0522, 0x00);
-    try { dev->send_packet(frame.data(), frame.size()); } catch (...) {}
+    // Queue rather than send_packet inline: apSend is called from apOnRx, which runs on
+    // _rxThread (inside IRtlDevice::StartRxLoop's callback) -- send_packet from that thread
+    // returns BUSY (docs/ap-mode.md: "send_packet must run off the RX event thread"). The
+    // AP TX-pump thread (started in startAp) drains this queue from its own thread instead.
+    std::lock_guard<std::mutex> lk(_apTxMtx);
+    if (_apTxQ.size() < 128) _apTxQ.push_back(std::move(frame));
 }
 
 void ApfpvStation::apTrack(const Mac& sta, uint8_t rssiRaw, int state) {
@@ -228,25 +244,35 @@ void ApfpvStation::apOnRx(const uint8_t* f, size_t len, uint8_t rssiRaw) {
     }
 }
 
-// ⚠️⚠️ WORK IN PROGRESS — NOT a usable SoftAP yet. The dongle beacons (open/WPA2), tracks
-// clients + RSSI, and the full WPA2 Authenticator (Wpa2Authenticator) is implemented + crypto
-// self-tested. BUT a client cannot complete association: that needs the 8812 AP/master-mode HW
-// bring-up (HW beacon queue + TSF + per-station ACK/MACID registration), which the userspace
-// monitor path doesn't provide. Setting MSR=AP even stops the injected beacon from radiating
-// (HW expects beacons from its own queue). Station mode is the production path; do NOT expose
-// AP mode until the AP-mode HW driver path is ported. Kept here as in-progress scaffolding.
-void ApfpvStation::startAp(const std::string& ssid, int channel, const std::string& password, bool forceHwBeacon) {
+// ⚠️ WORK IN PROGRESS — status UNTESTED against real hardware post-rebuild. The dongle beacons
+// (open/WPA2), tracks clients + RSSI, and the full WPA2 Authenticator (Wpa2Authenticator) is
+// implemented + crypto self-tested. Previously blocked on "the 8812 AP/master-mode HW bring-up"
+// (HW beacon queue + TSF + per-station ACK), which the old software-beacon-loop + manual register
+// pokes never actually reached correctly. Upstream's rebuild adds exactly that HW bring-up as a
+// library primitive (IRtlDevice::StartBeacon/StopBeacon) -- bench-proven against a real Linux
+// station in docs/ap-mode.md (probe/auth/assoc at retry=0, the ACK engine armed by StartBeacon
+// itself programming REG_MACID/net_type=AP; tests/ap_wpa2.cpp shows the same WPA2 4-way + ARP/
+// ICMP/DHCP responder shape this class already has). Wired onto that here: no more manual
+// MSR/RCR/beacon-timing register writes, no more a software poll-loop re-sending the beacon MPDU
+// every 100ms -- StartBeacon's hardware TBTT engine airs it. Real-hardware association is
+// untested (this session ported the wiring; it did not have hardware to validate the retry=0
+// claim end-to-end for OUR beacon/IE shape). Still not exposed via JNI/the app.
+void ApfpvStation::startAp(const std::string& ssid, int channel, const std::string& password) {
     stopAp(); stopBeaconCal(); disconnect();
     if (!_rtl || !_dev) return;
     auto* rtl = reinterpret_cast<RtlJaguarDevice*>(_rtl);
     auto* dev = reinterpret_cast<RtlUsbAdapter*>(_dev);
     _apWpa2 = !password.empty(); _apChannel = channel; _apSsid = ssid;
     { std::lock_guard<std::mutex> lk(_apMtx); _apStaList.clear(); }
+    { std::lock_guard<std::mutex> lk(_apTxMtx); _apTxQ.clear(); }
     _apAuth.reset();
 
     Mac self{};                          // self MAC = BSSID (synthesize if unprogrammed)
     for (int i = 0; i < 6; ++i) self[i] = dev->rtw_read8(0x0610 + i);
     bool bad = true; for (int i=0;i<6;i++) if (self[i]!=0 && self[i]!=0xFF) bad=false;
+    // docs/ap-mode.md: the BSSID MUST be unicast (I/G bit clear) -- a multicast SA makes a real
+    // station silently drop its own auth before it hits the air. 0x02 (locally-administered,
+    // unicast) is the bench-proven prefix.
     if (bad) { const uint8_t m[6]={0x02,0x11,0x22,0x33,0x44,0x55}; for(int i=0;i<6;i++) self[i]=m[i]; }
     _apSelf = self;
 
@@ -260,56 +286,44 @@ void ApfpvStation::startAp(const std::string& ssid, int channel, const std::stri
 
     try {
         SelectedChannel sc = legalApfpvChannel(channel, 20);
-        rtl->Init([](const Packet&){}, sc);          // device bring-up (firmware/PHY/channel)
-        rtl->SetTxPower(40);
-        rtl->StopAsyncRx();                           // then the PUMPED async RX (host event loop
-        rtl->StartMonitorAsyncRx(                     // drives the URBs) so apOnRx actually fires —
-            [this](const Packet& p){ apOnRx(p.Data.data(), p.Data.size(), p.RxAtrib.rssi[0]); }, sc);
+        rtl->InitWrite(sc);                           // device bring-up (firmware/PHY/channel), no RX yet
+        rtl->SetTxPowerIndexOverride(40);
+        rtl->StopRxLoop(); safeJoinThread(_rxThread);    // clean slate before arming the AP RX thread
+        _rxThread = std::thread([this, rtl]() {        // full-duplex RX (docs/ap-mode.md) so apOnRx
+            try {                                       // actually fires (client mgmt/data RX)
+                rtl->StartRxLoop([this](const Packet& p){
+                    apOnRx(p.Data.data(), p.Data.size(), p.RxAtrib.rssi[0]);
+                });
+            } catch (...) {}
+        });
     } catch (...) { return; }
-    dev->rtw_write8(0x0522, 0x00);
-    // Full AP/master HW bring-up (opt-in via DEVOURER_AP_HWACK). The Jaguar1 (8812AU) path — the
-    // one PR #227 upstream marks "unsupported" — is the SOFTWARE-BEACON mode: MSR=AP + ENSWBCN
-    // (REG_CR bit8) makes the MAC transmit a host-injected beacon at TBTT and auto-ACK clients.
-    // The beacon MUST be queued to the BEACON queue (QSEL 0x10, StationFrameKind::Beacon) — the
-    // mgmt queue (0x12) is not radiated once MSR=AP, which is exactly why the old default died.
-    // Register map from aircrack rtl8812au include/hal_com_reg.h (verified addresses/bits).
-    const bool hwAp = forceHwBeacon || std::getenv("DEVOURER_AP_HWACK") != nullptr;
-    if (hwAp) {
-        for (int i = 0; i < 4; ++i) dev->rtw_write8(REG_MACID + i, self[i]);
-        dev->rtw_write16(REG_MACID + 4, (uint16_t)(self[4] | (self[5] << 8)));
-        for (int i = 0; i < 4; ++i) dev->rtw_write8(REG_BSSID + i, self[i]);
-        dev->rtw_write16(REG_BSSID + 4, (uint16_t)(self[4] | (self[5] << 8)));
-        dev->rtw_write8(MSR, (uint8_t)((dev->rtw_read8(MSR) & 0x0C) | 0x03));  // MSR = AP (MSR_AP)
-        dev->rtw_write32(REG_RCR, RCR_APM | RCR_AM | RCR_AB | RCR_ADF | RCR_ACF |
-                                  RCR_APP_ICV | RCR_AMF | RCR_HTC_LOC_CTRL | RCR_APP_MIC |
-                                  RCR_APP_PHYST_RXFF | RCR_APPFCS | FORCEACK);
-        // ---- Beacon-related registers (hal_com_reg.h) --------------------------------------
-        dev->rtw_write8 (0x0553, 0x01);           // REG_DUAL_TSF_RST: pulse-reset the TSF timer
-        dev->rtw_write16(0x0554, 100);            // REG_BCN_INTERVAL = 100 TU
-        dev->rtw_write16(0x0510, 0x660F);         // REG_BCNTCFG (standard)
-        dev->rtw_write8 (0x0558, 0x05);           // REG_DRVERLYINT (driver early int, ~5 TU)
-        dev->rtw_write8 (0x0559, 0x02);           // REG_BCNDMATIM  (beacon DMA time)
-        dev->rtw_write8 (0x055A, 0x02);           // REG_ATIMWND    (ATIM window, 2 TU)
-        // ENSWBCN = BIT8 of REG_CR(0x0100) => set BIT0 of 0x0101. Enables SW-beacon TX at TBTT.
-        dev->rtw_write8 (0x0101, (uint8_t)(dev->rtw_read8(0x0101) | 0x01));
-        // REG_BCN_CTRL(0x0550): EN_BCN_FUNCTION(0x08)|EN_TXBCN_RPT(0x04)|DIS_BCNQ_SUB(0x02).
-        // DIS_TSF_UDT left CLEAR so the AP's own TSF free-runs (it owns the BSS clock).
-        dev->rtw_write8 (0x0550, 0x0E);
-        SCANLOG("AP HW-beacon armed: MSR=AP ENSWBCN=1 BCN_CTRL=0x0e interval=100TU (Jaguar1 SW-beacon path)");
-    }
+    dev->rtw_write8(0x0522, 0x00);   // release TX-queue pause left by InitWrite's IQK/cal
 
+    // StartBeacon (IRtlDevice) does the FULL vendor AP bring-up in the correct order (port
+    // identity from the beacon's own addr2/addr3, MSR->AP, beacon-DMA/ATIM/TSF timing, the
+    // DUAL_TSF_RST arm pulse, BCN_CTRL) and downloads the beacon to the hardware TBTT engine's
+    // reserved page -- replacing BOTH the old manual register-poke block AND the old software
+    // 100ms send_packet poll loop. beacon interval must match BuildBeacon's own hardcoded
+    // fixed-header value (100 TU) or the advertised vs. actual timing would mismatch.
     auto beacon = BuildBeacon(self, ssid, (uint8_t)channel, _apWpa2);
+    bool bok = false;
+    try { bok = rtl->StartBeacon(beacon.data(), beacon.size(), 100); } catch (...) {}
+    SCANLOG("AP StartBeacon: %s", bok ? "OK" : "FAILED");
+
+    // AP TX-pump: apSend() (probe/auth/assoc responses, EAPOL, encrypted data) queues into
+    // _apTxQ instead of calling send_packet inline from apOnRx, which runs on _rxThread inside
+    // StartRxLoop's callback -- send_packet from there returns BUSY (docs/ap-mode.md). Drain
+    // the queue from this separate thread instead, same division of labour as tests/ap_wpa2.cpp.
     _apRun.store(true); _beaconRun.store(true);
-    _beaconThread = std::thread([this, dev, beacon, hwAp]() {
-        std::vector<uint8_t> frame(40 + beacon.size(), 0);
-        std::memcpy(frame.data()+40, beacon.data(), beacon.size());
-        // In HW-AP mode queue to the BEACON queue (QSEL 0x10); else the legacy visible-beacon path.
-        FillStationTxDesc(frame.data(), (uint16_t)beacon.size(), 40, 0,
-                          hwAp ? StationFrameKind::Beacon : StationFrameKind::BroadcastMgmt, 0, 0x04);
+    _beaconThread = std::thread([this, dev]() {
         while (_beaconRun.load()) {
-            dev->rtw_write8(0x0522, 0x00);
-            try { dev->send_packet(frame.data(), frame.size()); } catch (...) {}
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::vector<std::vector<uint8_t>> batch;
+            { std::lock_guard<std::mutex> lk(_apTxMtx); batch.swap(_apTxQ); }
+            for (auto& frame : batch) {
+                dev->rtw_write8(0x0522, 0x00);
+                try { dev->send_packet(frame.data(), frame.size()); } catch (...) {}
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     });
     SCANLOG("AP up: ssid=\"%s\" ch=%d %s bssid=%02x:%02x:%02x:%02x:%02x:%02x", ssid.c_str(), channel,
@@ -324,19 +338,13 @@ void ApfpvStation::stopAp() {
     // physical replug. Joining here guarantees no TX is in flight before we tear the HW down.
     _beaconRun.store(false);
     if (_beaconThread.joinable()) { try { _beaconThread.join(); } catch (...) {} }
-    // Tear down the AP HW-beacon state so the MAC stops auto-transmitting from the beacon queue
-    // (ENSWBCN + REG_BCN_CTRL) and drop out of master mode. Leaving these set keeps the TX engine
-    // busy → wedge. Best-effort (device may already be gone); registers per hal_com_reg.h.
-    if (_dev) {
-        auto* dev = reinterpret_cast<RtlUsbAdapter*>(_dev);
-        try {
-            dev->rtw_write8(0x0550, 0x00);                                        // REG_BCN_CTRL: beacon func OFF
-            dev->rtw_write8(0x0101, (uint8_t)(dev->rtw_read8(0x0101) & ~0x01));   // clear ENSWBCN (REG_CR bit8)
-            dev->rtw_write8(MSR, (uint8_t)(dev->rtw_read8(MSR) & 0x0C));          // MSR -> NoLink
-        } catch (...) {}
-    }
+    { std::lock_guard<std::mutex> lk(_apTxMtx); _apTxQ.clear(); }
+    // StopBeacon (IRtlDevice) tears down exactly what StartBeacon armed: EN_BCN_FUNCTION off,
+    // StopTxBeacon, net_type -> No Link. Best-effort (device may already be gone).
+    if (_rtl) { try { reinterpret_cast<RtlJaguarDevice*>(_rtl)->StopBeacon(); } catch (...) {} }
     stopBeaconCal();
-    if (_rtl) { try { reinterpret_cast<RtlJaguarDevice*>(_rtl)->StopAsyncRx(); } catch (...) {} }  // else hangs on exit
+    if (_rtl) { try { reinterpret_cast<RtlJaguarDevice*>(_rtl)->StopRxLoop(); } catch (...) {} }  // else hangs on exit
+    safeJoinThread(_rxThread);
     _apAuth.reset();
 }
 
@@ -764,23 +772,16 @@ bool ApfpvStation::runConnectChain() {
         ChannelWidth_t initBw = CHANNEL_WIDTH_20;
         uint8_t initOff = 0;
         SelectedChannel initSel{ .Channel=initCh, .ChannelOffset=initOff, .ChannelWidth=initBw };
-        if (std::getenv("DEVOURER_SYNC_IO")) {
-            // LEGACY blocking sync RX loop (monopolises libusb -> async TX can't
-            // run; kept only for A/B). Spawn on its own thread.
-            rtl->should_stop = true;
-            if (_rxThread.joinable()) _rxThread.join();
-            rtl->should_stop = false;
-            _rxThread = std::thread([rtl, dispatch, initSel]() {
-                try { rtl->Init(dispatch, initSel); } catch (...) {}
-            });
-        } else {
-            // KERNEL-STYLE async RX: N bulk-IN URBs kept in flight, delivered from
-            // the caller's libusb_handle_events loop. No blocking read, so the
-            // async TX (send_packet) completes -> station auth/assoc actually
-            // radiates. Restart cleanly on each (re)connect.
-            rtl->StopAsyncRx();
-            try { rtl->StartMonitorAsyncRx(dispatch, initSel); } catch (...) {}
-        }
+        // RtlJaguarDevice::Init (bring-up + StartRxLoop) is a BLOCKING read loop on this
+        // driver base -- the pre-rebuild split between a "legacy sync" thread and a
+        // "kernel-style async URB pool" pumped by the caller no longer applies (there is
+        // no non-blocking RX submission left to pump); both collapsed to the same shape:
+        // run Init on its own thread, TX (sendStationFrameSync) proceeds concurrently on
+        // this one exactly as the old async path required.
+        rtl->StopRxLoop(); safeJoinThread(_rxThread);
+        _rxThread = std::thread([rtl, dispatch, initSel]() {
+            try { rtl->Init(dispatch, initSel); } catch (...) {}
+        });
         // wait until the RX loop is live (device brought up) or a short timeout
         using namespace std::chrono;
         auto t0 = steady_clock::now();
@@ -805,14 +806,20 @@ bool ApfpvStation::runConnectChain() {
             for (int attempt = 1; attempt <= maxTries && rm.rf_wedged(); ++attempt) {
                 SCANLOG("RF WEDGED (RF_CH=0xea) after bring-up -> USB port reset attempt %d/%d",
                         attempt, maxTries);
-                rtl->StopAsyncRx();
+                rtl->StopRxLoop(); safeJoinThread(_rxThread);
                 std::this_thread::sleep_for(milliseconds(50));
                 int rc = dev.reset_device();   // libusb_reset_device / USBDEVFS_RESET
                 SCANLOG("USB reset_device() rc=%d (0=ok; <0 = libusb err, fd likely re-enumerated)", rc);
                 std::this_thread::sleep_for(milliseconds(300));  // let the chip re-appear
                 _rxPhase.store(0); _rxReady.store(false);
-                try { rtl->StartMonitorAsyncRx(dispatch, initSel); }   // full re-init on the reset chip
-                catch (...) { SCANLOG("re-init after USB reset threw (fd invalid?) — bailing"); break; }
+                // Init runs on _rxThread (blocking loop); a spawn failure (bad_alloc, etc) is the
+                // only thing that can throw here -- the RX loop's own errors surface via _rxReady
+                // timing out below, same as the first bring-up above.
+                try {
+                    _rxThread = std::thread([rtl, dispatch, initSel]() {
+                        try { rtl->Init(dispatch, initSel); } catch (...) {}
+                    });
+                } catch (...) { SCANLOG("re-init after USB reset threw -- bailing"); break; }
                 auto tr = steady_clock::now();
                 while (!_rxReady.load() && steady_clock::now() - tr < seconds(4))
                     std::this_thread::sleep_for(milliseconds(50));
@@ -829,7 +836,7 @@ bool ApfpvStation::runConnectChain() {
         // auth-req keyed the PA at unset/zero power = on-air silence. Set a solid
         // index now so the frame actually radiates. (Java applies the legal-EIRP
         // clamp via nativeStaSetTxPower; 40 here is the txdemo working value.)
-        try { rtl->SetTxPower(40); SCANLOG("station TX power set to idx 40"); }
+        try { rtl->SetTxPowerIndexOverride(40); SCANLOG("station TX power set to idx 40"); }
         catch (...) { SCANLOG("station SetTxPower threw"); }
     }
 
@@ -1676,21 +1683,15 @@ void ApfpvStation::supervisorLoop() {
 void ApfpvStation::disconnect() {
     _run.store(false);
     PhydmWatchdog::SetUnlinked();   // restore monitor-mode DIG bounds (wfb-ng coexistence)
-    // Join-safe: NEVER join the current thread (-> EINVAL "Invalid argument" -> uncaught
-    // std::system_error -> SIGABRT, seen on replug when the JNI re-init teardown disconnect
-    // races/repeats the Java stopAdapters disconnect), and tolerate an already-reaped thread.
-    auto safeJoin = [](std::thread& t) {
-        if (!t.joinable()) return;
-        if (t.get_id() == std::this_thread::get_id()) { t.detach(); return; }
-        try { t.join(); } catch (...) { if (t.joinable()) { try { t.detach(); } catch (...) {} } }
-    };
-    safeJoin(_supervisor);
-    // Stop the RX: async URB pool (default) + legacy sync read thread.
+    // safeJoinThread is join-safe: NEVER joins the current thread (-> EINVAL "Invalid
+    // argument" -> uncaught std::system_error -> SIGABRT, seen on replug when the JNI
+    // re-init teardown disconnect races/repeats the Java stopAdapters disconnect), and
+    // tolerates an already-reaped thread.
+    safeJoinThread(_supervisor);
     if (_rtl) {
-        reinterpret_cast<RtlJaguarDevice*>(_rtl)->should_stop = true;
-        reinterpret_cast<RtlJaguarDevice*>(_rtl)->StopAsyncRx();
+        reinterpret_cast<RtlJaguarDevice*>(_rtl)->StopRxLoop();
     }
-    safeJoin(_rxThread);
+    safeJoinThread(_rxThread);
     set(State::Idle);
 }
 
@@ -1748,8 +1749,16 @@ void ApfpvStation::scanAll(int perChannelMs, bool includeDfs, const OnApFn& onAp
         // hiccup — catch per-channel so a single failure doesn't abort the app;
         // skip the bad channel and keep sweeping.
         try {
-            if (!inited) { rtl->Init(collector, sc); inited = true; }     // bring-up + monitor RX
-            else { rm.set_channel_bwmode((uint8_t)ch, 0, CHANNEL_WIDTH_20); } // actually retunes
+            if (!inited) {
+                // Init (bring-up + StartRxLoop) blocks for as long as RX runs, so it owns
+                // _rxThread for the whole sweep; this (scanAll's) thread just retunes +
+                // sleeps per channel below, same division of labour as runConnectChain.
+                rtl->StopRxLoop(); safeJoinThread(_rxThread);
+                _rxThread = std::thread([rtl, collector, sc]() {
+                    try { rtl->Init(collector, sc); } catch (...) {}
+                });
+                inited = true;
+            } else { rm.set_channel_bwmode((uint8_t)ch, 0, CHANNEL_WIDTH_20); } // actually retunes
         } catch (...) { continue; }
         std::this_thread::sleep_for(std::chrono::milliseconds(perChannelMs));
     }
@@ -1758,8 +1767,11 @@ void ApfpvStation::scanAll(int perChannelMs, bool includeDfs, const OnApFn& onAp
     // read thread can't re-enter the collector after onAp's lifetime ends.
     { std::lock_guard<std::mutex> lk(_scanMtx); _onScanAp = nullptr; }
     SCANLOG("scanAll done: %d RX pkts, %d beacons, %zu SSIDs", _scanPkts.load(), _scanBeacons.load(), _scanSeen.size());
+    // Rest on `last` with no RX loop running (InitWrite = bring-up only, returns immediately) —
+    // the next caller (typically connect()) brings RX up fresh on whatever channel it needs.
+    rtl->StopRxLoop(); safeJoinThread(_rxThread);
     try {
-        rtl->Init([](const Packet&){}, SelectedChannel{ .Channel=(uint8_t)last,
+        rtl->InitWrite(SelectedChannel{ .Channel=(uint8_t)last,
                   .ChannelOffset=0, .ChannelWidth=CHANNEL_WIDTH_20 });
     } catch (...) {}
     set(State::Idle);

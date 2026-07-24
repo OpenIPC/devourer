@@ -104,13 +104,13 @@ public:
     void stopBeaconCal();
 
     // ---- AP MODE (SoftAP) — ⚠️ NOT READY / WORK IN PROGRESS ----------------
-    // ⚠️ DO NOT EXPOSE via JNI or call from the app. AP mode beacons (open/WPA2) + tracks client
-    // RSSI + has a full WPA2 Authenticator, BUT a client CANNOT complete association (needs the
-    // 8812 AP/master HW bring-up: HW beacon queue + TSF + per-station ACK) and the path wedges the
-    // USB on exit. Kept as in-progress scaffolding only; see the banner on startAp() in the .cpp.
-    // forceHwBeacon=true enables the Jaguar1 HW software-beacon path (ENSWBCN + MSR=AP + per-STA
-    // ACK) without the DEVOURER_AP_HWACK env var — needed on Android where env vars aren't settable.
-    void startAp(const std::string& ssid, int channel, const std::string& password = "", bool forceHwBeacon = false);
+    // ⚠️ DO NOT EXPOSE via JNI or call from the app yet. Beacons (open/WPA2), tracks client
+    // RSSI, and runs the full WPA2 Authenticator; association completion is UNTESTED on real
+    // hardware post-rebuild. Now rides upstream's real HW AP primitives (IRtlDevice::StartBeacon/
+    // StopBeacon, bench-proven against a real Linux station in docs/ap-mode.md) instead of the
+    // pre-rebuild manual register pokes + a software beacon-TX poll loop — see the banner on
+    // startAp() in the .cpp. Kept as in-progress scaffolding only.
+    void startAp(const std::string& ssid, int channel, const std::string& password = "");
     void stopAp();
     struct ApStation { Mac mac; int rssiDbm; int state; };  // state 4=assoc, 7=authenticated
     std::vector<ApStation> apStations();
@@ -185,8 +185,13 @@ private:
     // VRX EIRP-calibration beacon injector
     std::atomic<bool> _beaconRun{false};
     std::thread _beaconThread;
-    // AP mode (SoftAP): beacon thread reuses _beaconRun/_beaconThread; RX drives the handshake.
+    // AP mode (SoftAP): _beaconThread is repurposed as the AP TX-pump (drains _apTxQ) since the
+    // actual beacon now airs from hardware (StartBeacon's TBTT engine, not a software poll loop).
+    // send_packet must run OFF the RX event thread (docs/ap-mode.md) -- apSend() queues here
+    // instead of calling send_packet inline from apOnRx (which runs on _rxThread).
     std::atomic<bool> _apRun{false};
+    std::mutex _apTxMtx;
+    std::vector<std::vector<uint8_t>> _apTxQ;
     Mac _apSelf{};
     bool _apWpa2 = false; int _apChannel = 0; std::string _apSsid;
     std::array<uint8_t,32> _apPmk{}; std::array<uint8_t,16> _apGtk{};

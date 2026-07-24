@@ -254,6 +254,16 @@ static uint8_t rtw_get_center_ch(uint8_t channel, ChannelWidth_t chnl_bw,
   return center_ch;
 }
 
+uint8_t RadioManagementModule::prime_offset_40mhz(uint8_t channel) const {
+  // Primary below the center => LOWER; above the center => UPPER.
+  // Matches WFB working 40MHz rule: ch44 center=46, primary(44)<center => LOWER.
+  // (The offset naming is about PRIMARY position relative to center, not secondary.)
+  int center = get_40mhz_center_channel(channel);
+  if (center > channel) return HAL_PRIME_CHNL_OFFSET_LOWER;   // primary below center
+  if (center < channel) return HAL_PRIME_CHNL_OFFSET_UPPER;   // primary above center
+  return HAL_PRIME_CHNL_OFFSET_DONT_CARE;
+}
+
 void RadioManagementModule::set_channel_bwmode(uint8_t channel,
                                                uint8_t channel_offset,
                                                ChannelWidth_t bwmode) {

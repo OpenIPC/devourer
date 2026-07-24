@@ -179,6 +179,36 @@ void PhydmWatchdog::ResetFaCountersAc() {
 
 PhydmWatchdog::FaCnt PhydmWatchdog::LastFaCnt() const { return _lastFaCnt; }
 
+// ---------------------------------------------------------------------
+// APFPV additions -- static link-state feedback (see header for the why).
+// ---------------------------------------------------------------------
+std::atomic<bool> PhydmWatchdog::_s_linked{false};
+std::atomic<int> PhydmWatchdog::_s_rssiDbm{-128};
+std::atomic<int> PhydmWatchdog::_s_uplinkRate{-1};
+
+void PhydmWatchdog::SetLinkRssi(int rssi_dbm) {
+  _s_rssiDbm.store(rssi_dbm, std::memory_order_relaxed);
+  _s_linked.store(true, std::memory_order_relaxed);
+}
+
+void PhydmWatchdog::SetUnlinked() {
+  _s_linked.store(false, std::memory_order_relaxed);
+  _s_uplinkRate.store(-1, std::memory_order_relaxed);
+}
+
+int PhydmWatchdog::RssiDbm() {
+  return _s_rssiDbm.load(std::memory_order_relaxed);
+}
+
+void PhydmWatchdog::OnUplinkRate(uint8_t rate_idx) {
+  _s_uplinkRate.store((int)rate_idx, std::memory_order_relaxed);
+}
+
+uint8_t PhydmWatchdog::UplinkRate() {
+  int r = _s_uplinkRate.load(std::memory_order_relaxed);
+  return r < 0 ? 0xff : static_cast<uint8_t>(r);
+}
+
 void PhydmWatchdog::DigInit() {
   /* Port of `phydm_dig_init` (phydm_dig.c:726). Reads current
    * BB 0xc50 byte 0 as the initial IGI value. Bounds match the
@@ -216,11 +246,45 @@ void PhydmWatchdog::DigTick(uint32_t fa_cnt) {
   constexpr uint8_t kStepDown = 2; /* fa < kFaTh0 */
 
   /* Refresh bounds from abs_boundary_decision + dym_boundary_decision
-   * each tick (cheap, makes the !is_linked behaviour explicit). */
-  _dm_dig_max = 0x26;
-  _dm_dig_min = 0x1c;
-  _rx_gain_range_max = _dig_max_of_min;
-  _rx_gain_range_min = _dm_dig_min;
+   * each tick. Two regimes:
+   *
+   *   monitor (!is_linked, wfb-ng): coverage bounds — dm_dig_max=0x26,
+   *   floor=0x1c, ceiling=dig_max_of_min(0x2a). Keeps gain high for
+   *   long-range sensitivity at the cost of false alarms.
+   *
+   *   connected (is_linked, station): phydm connected bounds —
+   *   dm_dig_max=0x3e, dm_dig_min=0x20, and the dynamic floor tracks
+   *   RSSI: rx_gain_range_min = clamp(rssi_dBm+100, 0x20, 0x3e). The
+   *   floor-clamp below then snaps cur_ig straight to that operating
+   *   point (e.g. -45 dBm → 0x37), matching the kernel 88XXau driver
+   *   and avoiding the strong-signal over-gain that storms the FA
+   *   counter and makes the AP rate-cap us. */
+  if (_s_linked.load(std::memory_order_relaxed)) {
+    _dm_dig_max = 0x3e;
+    _dm_dig_min = 0x20;
+    int rssi_val = _s_rssiDbm.load(std::memory_order_relaxed) + 100;
+    if (rssi_val < _dm_dig_min) rssi_val = _dm_dig_min;
+    // Cap the RSSI-derived IGI FLOOR at the kernel's strong-signal operating point (~0x37). The
+    // dBm+100 map overshoots for a point-blank signal (-20 dBm -> 0x50 -> clamps to the 0x3e max),
+    // which forces the front-end DEAF (RXPKT_NUM=0, no data, DHCP/SSH fail) even though the kernel
+    // runs ~0x37 fine. Capping the FLOOR at 0x38 keeps enough desensitization to kill the close-
+    // range saturation FA storm while still hearing the AP. Ceiling stays 0x3e so a genuine FA
+    // storm can still walk higher; a clean strong signal settles at ~0x38.
+    constexpr int kStrongFloorCap = 0x38;
+    bool strongCapped = (rssi_val > kStrongFloorCap);
+    if (strongCapped) rssi_val = kStrongFloorCap;
+    _rx_gain_range_min = static_cast<uint8_t>(rssi_val);
+    // For a STRONG signal, PIN the ceiling to the operating point too. Otherwise the FA-driven walk
+    // climbs IGI above the floor (0x38 -> 0x3c -> 0x3e) chasing a spurious close-range false-alarm
+    // count and goes DEAF (RXPKT_NUM=0) — even though 0x38 receives fine (DHCP/assoc succeed there).
+    // Weaker signals keep the full [floor,0x3e] range so the walk can still adapt to real FA.
+    _rx_gain_range_max = strongCapped ? static_cast<uint8_t>(kStrongFloorCap) : _dm_dig_max;
+  } else {
+    _dm_dig_max = 0x26;
+    _dm_dig_min = 0x1c;
+    _rx_gain_range_max = _dig_max_of_min;
+    _rx_gain_range_min = _dm_dig_min;
+  }
 
   uint8_t new_igi = _cur_ig_value;
   if (fa_cnt > kFaTh2) {

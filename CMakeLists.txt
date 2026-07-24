@@ -221,6 +221,7 @@ add_library(apfpv
     src/apfpv/crypto/AesCcm.cpp      src/apfpv/crypto/AesCcm.h
     src/apfpv/crypto/AesCmac.cpp     src/apfpv/crypto/AesCmac.h
     src/apfpv/crypto/Sha1Hmac.cpp    src/apfpv/crypto/Sha1Hmac.h
+    src/apfpv/ScanProbe.cpp          src/apfpv/ScanProbe.h
     src/ApfpvDhcp.cpp                src/ApfpvDhcp.h
     src/LqFeedback.cpp               src/LqFeedback.h
     src/Wpa2Authenticator.cpp        src/Wpa2Authenticator.h)
@@ -228,6 +229,20 @@ target_compile_features(apfpv PUBLIC cxx_std_20)
 target_include_directories(apfpv PUBLIC src src/apfpv src/apfpv/crypto)
 if(WIN32)
     target_link_libraries(apfpv PUBLIC ws2_32 bcrypt)
+endif()
+
+# ApfpvStation/RxDeframe DO need the driver layer (RtlAdapter/RtlJaguarDevice/
+# RadioManagementModule) -- separate target so `apfpv` itself stays
+# driver-independent (it's also used as-is on hosts with no libusb at all).
+add_library(apfpv_station
+    src/ApfpvStation.cpp     src/ApfpvStation.h
+    src/RxDeframe.cpp        src/RxDeframe.h
+    src/apfpv/StationMode.cpp src/apfpv/StationMode.h
+    src/apfpv/StationTxDesc.cpp src/apfpv/StationTxDesc.h)
+target_link_libraries(apfpv_station PUBLIC apfpv devourer)
+target_compile_features(apfpv_station PUBLIC cxx_std_20)
+if(NOT ANDROID)
+    target_include_directories(apfpv_station PUBLIC src/apfpv/compat)
 endif()
 # Host (non-Android) builds: Wpa2Supplicant.cpp etc. call __android_log_print
 # unconditionally (ported as-is from WiFiDriver) -- same compat shim already

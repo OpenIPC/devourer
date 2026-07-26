@@ -165,6 +165,12 @@ add_library(devourer
     src/chanmig/MigClock.h
     src/chanmig/MigProposer.h
     src/chanmig/MigResponder.h
+    src/hopset/HopsetState.h
+    src/hopset/HopsetTypes.h
+    src/hopset/HopsetWire.h
+    src/hopset/HopsetAuthority.h
+    src/hopset/HopsetFollower.h
+    src/hopset/HopsetEvents.h
     src/IRtlDevice.h
     src/SignalStop.cpp
     src/SignalStop.h
@@ -786,6 +792,27 @@ add_test(NAME sweep_spec_math COMMAND SweepSpecSelftest)
 add_executable(HopScheduleSelftest tests/hop_schedule_selftest.cpp)
 target_link_libraries(HopScheduleSelftest PRIVATE devourer)
 add_test(NAME hop_schedule_math COMMAND HopScheduleSelftest)
+
+# Adaptive-hopset gates (src/hopset/): schedule derivation KATs + exact-once
+# masked coverage + stateless direct join; wire codec known-answer bytes, MAC
+# tamper/truncation sweeps, and replay rules; the authority/follower pure
+# machines through a lossy LinkSim failure matrix; and the process-level
+# synchronized-activation / missed-commit-recovery run.
+add_executable(HopsetScheduleSelftest tests/hopset_schedule_selftest.cpp)
+target_link_libraries(HopsetScheduleSelftest PRIVATE devourer)
+add_test(NAME hopset_schedule_math COMMAND HopsetScheduleSelftest)
+
+add_executable(HopsetWireSelftest tests/hopset_wire_selftest.cpp)
+target_link_libraries(HopsetWireSelftest PRIVATE devourer)
+add_test(NAME hopset_wire_kat COMMAND HopsetWireSelftest)
+
+add_executable(HopsetProtoSelftest tests/hopset_proto_selftest.cpp)
+target_link_libraries(HopsetProtoSelftest PRIVATE devourer)
+add_test(NAME hopset_proto_matrix COMMAND HopsetProtoSelftest)
+
+add_executable(HopsetActivationSelftest tests/hopset_activation_selftest.cpp)
+target_link_libraries(HopsetActivationSelftest PRIVATE devourer)
+add_test(NAME hopset_activation_sync COMMAND HopsetActivationSelftest)
 
 # Headless guard for the TX-power offset quantization (src/TxPower.h) — the
 # qdB->index-step rounding/clamping behind SetTxPowerOffsetQdb, so a rounding

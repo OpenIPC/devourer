@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -15,6 +16,9 @@
 
 #include "BfReportDetect.h"
 #include "HopSchedule.h"
+#include "hopset/HopsetEvents.h"
+#include "hopset/HopsetFollower.h"
+#include "hopset/HopsetWire.h"
 #include "LaCapture.h"
 #include "LinkHealth.h"
 #include "RxPacket.h"
@@ -82,10 +86,43 @@ static std::atomic<uint64_t> g_hop_marker_slot{0};
 static std::atomic<uint32_t> g_hop_epoch{0};
 static std::atomic<long long> g_hop_last_retune_us{0};
 static std::atomic<bool> g_hop_decode_pending{false};
+/* Adaptive hopset (DEVOURER_HOP_ADAPTIVE=1): the RX is a HopsetFollower.
+ * packetProcessor (RX thread) feeds it decoded v2 markers + authenticated
+ * control frames; the lockstep loop (main thread) ticks it and asks the
+ * AdaptiveScheduleView for the slot channel — one mutex covers the machine
+ * and the view. */
+static std::mutex g_hopset_mu;
+static std::unique_ptr<devourer::hopset::HopsetKeys> g_hopset_keys;
+static std::unique_ptr<devourer::hopset::HopsetFollower> g_hopset_fol;
+static std::unique_ptr<devourer::hopset::AdaptiveScheduleView> g_hopset_view;
+static std::atomic<uint64_t> g_hopset_now_slot{0};
 static long long steady_us() {
   return std::chrono::duration_cast<std::chrono::microseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
+}
+
+/* Execute the follower's actions (caller holds g_hopset_mu). Proposals
+ * (SendControl) need the RX->TX feedback transport — that policy is out of
+ * scope here, and the demo never calls propose(), so none arise. */
+static void hopset_route(
+    const std::vector<devourer::hopset::HopsetAction> &acts) {
+  for (const auto &a : acts) {
+    if (a.kind == devourer::hopset::HopsetAction::Activate)
+      g_hopset_view->set_state(a.state);
+    else if (a.kind == devourer::hopset::HopsetAction::Event)
+      devourer::hopset::emit_action(*g_ev, a, "rx", g_hopset_now_slot.load());
+  }
+}
+
+/* Best-effort current absolute slot from the fitted marker anchor. */
+static uint64_t hopset_slot_now() {
+  const long long anchor = g_hop_anchor_us.load();
+  const long long now = steady_us();
+  if (anchor > 0 && now > anchor && g_hop_slot_us)
+    return static_cast<uint64_t>((now - anchor) /
+                                 static_cast<long long>(g_hop_slot_us));
+  return g_hop_marker_slot.load();
 }
 
 /* Process-start reference for the init.timing events (see src/InitTimer.h).
@@ -629,10 +666,28 @@ static void packetProcessor(const Packet &packet) {
 
   if (g_hop_schedule && packet.Data.size() >= 16 &&
       std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
+    /* Adaptive mode rides the v2 marker (v1 layout + generation/mask_fp);
+     * fixed mode stays on v1 — each decoder rejects the other version. */
     devourer::HopSyncMarker m;
-    if (devourer::HopSyncMarker::decode(packet.Data.data(), packet.Data.size(),
-                                        m) &&
-        m.fingerprint == g_hop_schedule->fingerprint() &&
+    bool have = false;
+    uint32_t mk_gen = 0, mk_maskfp = 0;
+    if (g_hopset_fol) {
+      devourer::hopset::HopSyncMarkerV2 m2;
+      if (devourer::hopset::HopSyncMarkerV2::decode(packet.Data.data(),
+                                                    packet.Data.size(), m2)) {
+        m.fingerprint = m2.fingerprint;
+        m.epoch = m2.epoch;
+        m.slot = m2.slot;
+        m.phase_us = m2.phase_us;
+        mk_gen = m2.generation;
+        mk_maskfp = m2.mask_fp;
+        have = true;
+      }
+    } else {
+      have = devourer::HopSyncMarker::decode(packet.Data.data(),
+                                             packet.Data.size(), m);
+    }
+    if (have && m.fingerprint == g_hop_schedule->fingerprint() &&
         m.phase_us < g_hop_slot_us) {
       const long long now = steady_us();
       const long long observed = now - static_cast<long long>(m.phase_us) -
@@ -657,6 +712,45 @@ static void packetProcessor(const Packet &packet) {
             .f("state", "decode")
             .f("slot", (unsigned long long)m.slot)
             .f("dead_us", now - g_hop_last_retune_us.load());
+      if (g_hopset_fol) {
+        /* missed-transition tripwire: does the advertised (generation,
+         * mask fingerprint) match a state we hold (current or pending)? */
+        std::lock_guard<std::mutex> lk(g_hopset_mu);
+        const auto &cs = g_hopset_fol->state();
+        bool matches =
+            mk_gen == cs.generation &&
+            mk_maskfp == devourer::hopset::mask_fp(
+                             *g_hopset_keys, cs.generation, cs.active_mask);
+        if (!matches && g_hopset_fol->has_pending()) {
+          const auto &ps = g_hopset_fol->pending();
+          matches =
+              mk_gen == ps.generation &&
+              mk_maskfp == devourer::hopset::mask_fp(
+                               *g_hopset_keys, ps.generation, ps.active_mask);
+        }
+        hopset_route(g_hopset_fol->on_marker(mk_gen, matches, m.slot));
+      }
+    }
+  }
+
+  /* Authenticated hopset control frames (probe-req header + HopsetWire bytes,
+   * canonical SA): commits and the authority's status beacon — the follower's
+   * adoption/recovery inputs. */
+  if (g_hopset_fol && packet.Data.size() > 24 + 16 &&
+      packet.Data[0] == 0x40 &&
+      std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
+    devourer::hopset::HopsetMsg hm;
+    if (devourer::hopset::hopset_decode(packet.Data.data() + 24,
+                                        packet.Data.size() - 24,
+                                        *g_hopset_keys, 0, hm) ==
+        devourer::hopset::HopsetReason::None) {
+      const uint64_t slot = hopset_slot_now();
+      std::lock_guard<std::mutex> lk(g_hopset_mu);
+      g_hopset_now_slot.store(slot);
+      if (hm.type == devourer::hopset::HT_COMMIT)
+        hopset_route(g_hopset_fol->on_commit(hm, slot));
+      else if (hm.type == devourer::hopset::HT_STATUS)
+        hopset_route(g_hopset_fol->on_status(hm, slot));
     }
   }
 
@@ -1420,6 +1514,29 @@ int main(int argc, char **argv) {
     g_hop_schedule = std::make_unique<devourer::HopSchedule>(
         seed ? devourer::HopSchedule(devourer::HopSchedule::parse_seed(seed))
              : devourer::HopSchedule::sequential());
+    if (std::getenv("DEVOURER_HOP_ADAPTIVE")) {
+      /* Adaptive follower — needs the keyed schedule (control MAC derives
+       * from the same seed) and a <=64-channel base. */
+      if (!seed)
+        throw std::invalid_argument(
+            "DEVOURER_HOP_ADAPTIVE needs DEVOURER_HOP_SEED");
+      if (hop_rx_channels.size() > devourer::hopset::kMaxBaseChannels)
+        throw std::invalid_argument("adaptive hopset caps the base at 64");
+      g_hopset_keys = std::make_unique<devourer::hopset::HopsetKeys>(
+          devourer::hopset::HopsetKeys::derive(
+              devourer::HopSchedule::parse_seed(seed)));
+      devourer::hopset::HopsetParams hp;
+      hp.n_base = hop_rx_channels.size();
+      std::vector<uint32_t> chlist(hop_rx_channels.begin(),
+                                   hop_rx_channels.end());
+      hp.base_fp = devourer::hopset::hopset_fp(*g_hopset_keys, chlist.data(),
+                                               chlist.size());
+      g_hopset_fol = std::make_unique<devourer::hopset::HopsetFollower>(
+          hp, static_cast<uint32_t>(std::random_device{}()));
+      g_hopset_view = std::make_unique<devourer::hopset::AdaptiveScheduleView>(
+          *g_hop_schedule, *g_hopset_keys, hop_rx_channels.size());
+      g_hopset_view->set_state(g_hopset_fol->state());
+    }
     g_hop_slot_us = static_cast<uint64_t>(hop_rx_slot_ms) * 1000;
     long acquire_ms = hop_rx_slot_ms * 2;
     if (const char *a = std::getenv("DEVOURER_HOP_ACQUIRE_MS")) {
@@ -1453,7 +1570,19 @@ int main(int argc, char **argv) {
         .f("channel", hop_rx_channels[0]);
     while (!g_devourer_should_stop) {
       const long long now = steady_us(), last = g_hop_last_marker_us.load();
-      if (last && now - last < static_cast<long long>(3 * g_hop_slot_us)) {
+      bool hopset_recovering = false;
+      if (g_hopset_fol) {
+        /* follower heartbeat: pending activation at the slot boundary; a
+         * Recovering follower falls back to the base-hopset acquire scan
+         * below until an authenticated commit/status re-syncs it */
+        std::lock_guard<std::mutex> lk(g_hopset_mu);
+        g_hopset_now_slot.store(hopset_slot_now());
+        hopset_route(g_hopset_fol->on_tick(g_hopset_now_slot.load()));
+        hopset_recovering = g_hopset_fol->fsm() ==
+                            devourer::hopset::HopsetFollower::State::Recovering;
+      }
+      if (!hopset_recovering && last &&
+          now - last < static_cast<long long>(3 * g_hop_slot_us)) {
         if (!tracking) {
           tracking = true;
           devourer::Ev(*g_ev, "hop.rx")
@@ -1467,7 +1596,13 @@ int main(int argc, char **argv) {
           /* Phase correction may move the fitted boundary slightly forward.
            * Never follow that jitter backwards into a slot already visited. */
           if (tuned_slot == UINT64_MAX || slot > tuned_slot) {
-            int ch = g_hop_schedule->channel(slot, hop_rx_channels);
+            int ch;
+            if (g_hopset_view) {
+              std::lock_guard<std::mutex> lk(g_hopset_mu);
+              ch = hop_rx_channels[g_hopset_view->channel_index(slot)];
+            } else {
+              ch = g_hop_schedule->channel(slot, hop_rx_channels);
+            }
             auto t0 = steady_us();
             dev->FastRetune(static_cast<uint8_t>(ch), true);
             auto done = steady_us();

@@ -210,6 +210,94 @@ land on a keyed hopper, while a predictive jammer against a sequential hopper is
 limited only by its retune time and holds to much shorter dwells. The gap
 between those two thresholds is exactly what a keyed permutation buys.
 
+## Adaptive hopset: authenticated state and commit protocol
+
+The fixed schedule visits every configured channel; a persistently-jammed one
+costs 1/N of every FEC block forever. The adaptive layer (`src/hopset/`) is the
+deterministic state model and authenticated control protocol that lets both
+ends *exclude* channels — it deliberately does not decide which channel is bad
+(that observation policy is a separate stage; today the lever is a scripted
+commit).
+
+### State model
+
+The configured base hopset is **immutable**; every adaptive state names its
+active channels by stable base-hopset bit positions:
+
+```
+HopsetState { epoch, generation, active_mask, activate_round, activate_slot }
+```
+
+Generation 0 is defined as the legacy fixed schedule (full mask, raw master
+key) — byte-identical to non-adaptive operation, pinned by KAT. From
+generation 1 on, each round's permutation derives from `(schedule subkey,
+generation, round, active_mask)`: SipHash words tagged `'A'` drive the same
+rejection-sampled Fisher–Yates over the popcount-of-mask active positions,
+mapped back through the mask to base indices. Including the generation in the
+word means a mask change produces a *fresh* keyed order — not a filtered form
+of the old permutation a follower-jammer could have partially learned. The
+lookup stays a pure function of (keys, committed state, absolute slot), so a
+receiver still joins mid-generation with no RNG state
+(`hopset/HopsetState.h`, `AdaptiveScheduleView`).
+
+Two keys derive from `DEVOURER_HOP_SEED` with explicit domain separation
+(`devourer-hopset-s*/c*`): the schedule subkey orders the hops, the control
+key MACs the protocol. A schedule fingerprint is **not** authentication; the
+`base_fp`/`mask_fp` fields are config-mismatch tripwires, the SipHash-2-4 MAC
+is the auth. Sequential (keyless) mode therefore cannot be adaptive — the
+demos reject the combination.
+
+### Protocol
+
+Three versioned, MAC'd messages (`hopset/HopsetWire.h`, byte layouts pinned in
+`hopset_wire_kat`): **HopsetProposal** (RX → TX: proposed mask, observation
+count, reason bitmap, nonce), **HopsetCommit** (TX → RX, broadcast: the new
+generation/mask and the activation instant as both a round index and an
+absolute slot), **HopsetStatus** (the authority's periodic beacon: current
+generation/mask/round + activation anchor; doubles as the proposal-rejection
+answer via a nonce echo).
+
+The TX is the schedule authority (`HopsetAuthority`): a receiver proposes,
+the transmitter validates policy — mask legality against the base, a
+configurable minimum-diversity floor, monotonic generations, an activation
+lead of at least 8 rounds — then repeatedly broadcasts an identical commit
+until the named slot arrives, and both sides swap state exactly there
+(`HopsetFollower`). Rejections carry a reason code; every transition emits a
+`hopset.*` JSONL event (propose / commit / activate / reject / gen_mismatch /
+recover).
+
+Anti-replay is structural, the chanmig recipe: epochs are random per process
+start and never persisted (a restart orphans every in-flight generation for
+free), generations are monotonic within an authority epoch with a ceiling
+whose recovery is a fresh epoch, proposals are remembered by (epoch, nonce),
+and a commit's absolute activation slot must sit inside the follower's window.
+
+### Recovery
+
+Acquisition always scans the immutable base hopset, so a receiver that missed
+a transition can always hear frames on the channels the reduced set still
+uses. In adaptive mode the sync marker is v2 — the v1 layout plus the live
+(generation, mask fingerprint), each version rejecting the other — so one
+decoded marker exposes a missed transition; the follower drops to the acquire
+scan and re-synchronizes from the authority's repeated commit or its status
+beacon, which carry the full mask and activation anchor. The
+missed-every-commit path, the synchronized activation, and the failure matrix
+(lost / duplicated / reordered / forged / replayed frames, both restarts,
+rollover, invalid masks, window violations) are ctest gates:
+`hopset_schedule_math`, `hopset_wire_kat`, `hopset_proto_matrix`,
+`hopset_activation_sync`.
+
+### Driving it
+
+`DEVOURER_HOP_ADAPTIVE=1` on `txdemo`/`rxdemo` (with a keyed seed and
+`DEVOURER_HOP_SLOT_MS`) arms authority and follower;
+`DEVOURER_HOP_ADAPTIVE_SCRIPT="slot:mask,..."` feeds scripted
+authority-originated commits (`0x1b` = drop bits 2 and 5-of-8, etc.) until the
+receiver-driven exclusion policy exists. `streamtx` emits the v2 marker at
+generation 0 so an adaptive receiver tracks it. Control frames ride their own
+small 802.11 frames — caller FEC payload bytes are never touched. On-air run:
+`tests/hopset_adaptive_onair.sh`.
+
 ## Where it stands
 
 What works today, on hardware: fast intra-band retune on all three chip
@@ -223,6 +311,7 @@ the slow full set); per-hop TX power is not re-tuned, so a hopset spanning a wid
 5 GHz range wants a periodic full set to refresh per-rate power; the follower
 experiment uses a 3-channel hopset because a single B210 needs ≥60 MS/s to span
 a 60 MHz hopset in one FFT and trips a UHD tuning assertion at the usual
-61.44 MS/s. And the schedule visits every configured channel — there is no
-adaptive exclusion of a persistently-jammed one; the fused-FEC layer absorbs
-those dwells as erasures.
+61.44 MS/s. And while the adaptive-hopset protocol can exclude a channel by
+authenticated commit, nothing yet *decides* to — the receiver-driven
+observation policy is unimplemented, so an unattended link still visits every
+configured channel and the fused-FEC layer absorbs jammed dwells as erasures.

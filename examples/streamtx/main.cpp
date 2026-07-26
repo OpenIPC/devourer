@@ -68,6 +68,7 @@
 #endif
 
 #include "HopSchedule.h"
+#include "hopset/HopsetWire.h"
 #include "RadiotapBuilder.h"
 #include "RtlAdapter.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
@@ -267,6 +268,8 @@ int main(int argc, char **argv) {
   std::vector<int> hop_channels;
   long hop_dwell = 1;
   long hop_slot_ms = 0;
+  bool hop_adaptive = false;
+  uint32_t hop_adaptive_maskfp = 0;
   std::optional<devourer::HopSchedule> hop_schedule;
   const int hop_fast = std::getenv("DEVOURER_HOP_FAST")
                            ? std::atoi(std::getenv("DEVOURER_HOP_FAST"))
@@ -303,6 +306,21 @@ int main(int argc, char **argv) {
       // Slot-mode sequential hopping rides the keyless schedule so it still
       // emits the lockstep sync marker (same channels[slot % n] order).
       hop_schedule.emplace(devourer::HopSchedule::sequential());
+    if (std::getenv("DEVOURER_HOP_ADAPTIVE")) {
+      /* Adaptive-follower compatibility: emit the v2 sync marker (v1 fields
+       * + generation/mask fingerprint) so an adaptive rxdemo tracks this
+       * stream. streamtx itself stays at generation 0 (full mask) — the
+       * commit authority (and its script lever) is txdemo's. */
+      if (!std::getenv("DEVOURER_HOP_SEED") || hop_slot_ms <= 0)
+        throw std::invalid_argument("DEVOURER_HOP_ADAPTIVE needs "
+                                    "DEVOURER_HOP_SEED and "
+                                    "DEVOURER_HOP_SLOT_MS");
+      hop_adaptive = true;
+      const auto keys = devourer::hopset::HopsetKeys::derive(
+          devourer::HopSchedule::parse_seed(std::getenv("DEVOURER_HOP_SEED")));
+      hop_adaptive_maskfp = devourer::hopset::mask_fp(
+          keys, 0, devourer::hopset::full_mask(hop_channels.size()));
+    }
     if (!hop_channels.empty()) {
       std::string list;
       for (size_t i = 0; i < hop_channels.size(); ++i)
@@ -408,15 +426,28 @@ int main(int argc, char **argv) {
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - hop_start)
                 .count());
-        devourer::HopSyncMarker marker{hop_schedule->fingerprint(), hop_epoch,
-                                       static_cast<uint32_t>(us % slot_us),
-                                       us / slot_us};
-        auto wire = devourer::HopSyncMarker::encode(marker);
         sync_buf.clear();
         sync_buf.insert(sync_buf.end(), kStreamRadiotap.begin(),
                         kStreamRadiotap.end());
         sync_buf.insert(sync_buf.end(), dot11.begin(), dot11.end());
-        sync_buf.insert(sync_buf.end(), wire.begin(), wire.end());
+        if (hop_adaptive) {
+          devourer::hopset::HopSyncMarkerV2 marker;
+          marker.fingerprint = hop_schedule->fingerprint();
+          marker.epoch = hop_epoch;
+          marker.phase_us = static_cast<uint32_t>(us % slot_us);
+          marker.slot = us / slot_us;
+          marker.generation = 0;
+          marker.mask_fp = hop_adaptive_maskfp;
+          auto wire = devourer::hopset::HopSyncMarkerV2::encode(marker);
+          sync_buf.insert(sync_buf.end(), wire.begin(), wire.end());
+        } else {
+          devourer::HopSyncMarker marker{hop_schedule->fingerprint(),
+                                         hop_epoch,
+                                         static_cast<uint32_t>(us % slot_us),
+                                         us / slot_us};
+          auto wire = devourer::HopSyncMarker::encode(marker);
+          sync_buf.insert(sync_buf.end(), wire.begin(), wire.end());
+        }
         rtlDevice->send_packet(sync_buf.data(), sync_buf.size());
       }
     }

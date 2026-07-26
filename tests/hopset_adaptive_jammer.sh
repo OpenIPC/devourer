@@ -30,15 +30,20 @@ HERE="$ROOT/tests"
 
 MODE="${MODE:-parked}"
 VID="${VID:-0x0bda}"
-# The transmitter is the 8812CU because this hopset is 2.4 GHz and the 8812EU
-# is a 5 GHz-only PA part — its 2.4 GHz front end is not the instrument to
-# sense with. Measured here against a narrowband interferer that destroys
-# delivery on one channel: the 8812CU separates jammed from clean by roughly
-# five to one, receiving or transmitting, while the 8812EU on 2.4 GHz shows no
-# separation in either role. That is a statement about this band on this part,
-# not about the die — on 5 GHz the 8812EU is the one with the front end.
-TX_PID="${TX_PID:-0xc812}"      # RTL8812CU (Jaguar3) — the die that can sense
-RX_PID="${RX_PID:-0xa81a}"      # RTL8812EU (Jaguar3)
+# The two endpoints need not be the same vendor id: an OEM-rebadged part (the
+# 8812BU ships as TP-Link 2357:012d) enumerates outside Realtek's own space.
+TX_VID="${TX_VID:-$VID}"
+# Both endpoints must be able to work this band, and on 2.4 GHz that rules the
+# 8812EU out of BOTH roles: it is a 5 GHz-only PA part, so it cannot get a
+# proposal out as the receiver (its proposals simply time out) and its 2.4 GHz
+# front end shows no jammed-versus-clean separation as the sensing transmitter.
+# Measured here against a narrowband interferer that destroys delivery on one
+# channel, the 8812CU separates by roughly five to one whether receiving or
+# transmitting. None of that is a statement about the 8812EU die — on 5 GHz it
+# is the part with the front end; it is the wrong part for THIS band.
+TX_PID="${TX_PID:-0xc812}"      # RTL8812CU (Jaguar3) — senses and transmits
+RX_VID="${RX_VID:-0x2357}"      # TP-Link OEM vendor id
+RX_PID="${RX_PID:-0x012d}"      # RTL8812BU (Jaguar2) — 2.4 GHz capable both ways
 # Four ADJACENT BUT NON-OVERLAPPING 2.4 GHz channels: 1/5/9/13 sit on 2412,
 # 2432, 2452, 2472 — 20 MHz apart, so their passbands abut without overlapping.
 # The interferer has to degrade ONE hopset member and leave the rest healthy;
@@ -58,9 +63,10 @@ SLOT_MS="${SLOT_MS:-50}"
 SEED="${SEED:-a5a5c3c3f00d1234deadbeef00c0ffee}"
 PROBE_ROUNDS="${PROBE_ROUNDS:-4}"
 # Bench setpoint, measured with the 5 MHz narrowband interferer and the roles
-# above (8812CU transmitting, 8812EU receiving): 80 dB puts the jammed channel
-# at 0.19 delivery — under the 0.30 exclusion floor — and leaves every other
-# hopset member at 1.00.
+# above (8812CU transmitting, 8812BU receiving): 88 dB puts the jammed channel
+# at 0.22 delivery — under the 0.30 exclusion floor — and leaves every other
+# hopset member at 1.00. The sweep that found it: 50 dB gave 0.885, 65 gave
+# 0.708, 78 gave 0.312.
 #
 # The setpoint is specific to the geometry, not just the gain. With the roles
 # reversed the same profile appeared at 50 dB, and at 65 dB it splattered
@@ -68,7 +74,7 @@ PROBE_ROUNDS="${PROBE_ROUNDS:-4}"
 # than a channel fault and the policy correctly refuses to act on it. Swap the
 # adapters or move an antenna and this needs re-deriving: NO_JAM=1 for a
 # sanity run, then a short sweep reading the per-channel table.
-JAM_GAIN="${JAM_GAIN:-80}"
+JAM_GAIN="${JAM_GAIN:-88}"
 # UHD device selection. Empty = let tests/uhd_select.py resolve it (env, then
 # the untracked tests/.uhd_args, then the only device present — and a hard
 # error rather than a coin flip when a bench has more than one radio).
@@ -94,8 +100,8 @@ RESTORE_S="${RESTORE_S:-70}"
 OUT="${OUT:-/tmp/devourer-hopset-jammer}"
 
 plugged() { lsusb -d "$(printf '%04x:%04x' "$1" "$2")" >/dev/null 2>&1; }
-plugged "$VID" "$TX_PID" || { echo "SKIP: TX $VID:$TX_PID not plugged"; exit 77; }
-plugged "$VID" "$RX_PID" || { echo "SKIP: RX $VID:$RX_PID not plugged"; exit 77; }
+plugged "$TX_VID" "$TX_PID" || { echo "SKIP: TX $TX_VID:$TX_PID not plugged"; exit 77; }
+plugged "$RX_VID" "$RX_PID" || { echo "SKIP: RX $RX_VID:$RX_PID not plugged"; exit 77; }
 SDR_SEL="$(python3 "$HERE/uhd_select.py" ${SDR_ARGS:+"$SDR_ARGS"} 2>/dev/null)" || {
     python3 "$HERE/uhd_select.py" ${SDR_ARGS:+"$SDR_ARGS"} >&2
     exit 1; }
@@ -161,7 +167,7 @@ start_tx() { # logfile
         DEVOURER_TX_SENSE_EVERY="$SENSE_EVERY"
         DEVOURER_TX_SENSE_NHM="$SENSE_NHM"
         DEVOURER_HOP_FUSION="$FUSION")
-    sudo env "${COMMON[@]}" "${pwr[@]}" "${sense[@]}" DEVOURER_VID="$VID" \
+    sudo env "${COMMON[@]}" "${pwr[@]}" "${sense[@]}" DEVOURER_VID="$TX_VID" \
         DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="${CHANNELS%%,*}" \
         DEVOURER_HOP_FAST=1 DEVOURER_TX_WITH_RX=thread \
         "$ROOT/build/txdemo" >"$1" 2>&1 &
@@ -170,7 +176,7 @@ start_rx() { # logfile, policy(0|1)
     local pol=()
     [ "$2" = "1" ] && pol=(DEVOURER_HOP_POLICY=1 DEVOURER_HOP_POLICY_EVENTS=2)
     [ "$MODE" = "failsafe" ] && pol+=(DEVOURER_HOP_MUTE=1)
-    sudo env "${COMMON[@]}" "${pol[@]}" DEVOURER_VID="$VID" \
+    sudo env "${COMMON[@]}" "${pol[@]}" DEVOURER_VID="$RX_VID" \
         DEVOURER_PID="$RX_PID" "$ROOT/build/rxdemo" >"$1" 2>&1 &
 }
 

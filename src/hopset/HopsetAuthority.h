@@ -201,7 +201,15 @@ public:
         push_commit(out, now_slot);
       }
     }
-    if (now_slot - last_status_slot_ >= p_.status_interval_slots) {
+    /* Jitter the beacon so it cannot alias with a scanning follower. A fixed
+     * interval is commensurate with the follower's fixed scan step, so the
+     * beacon keeps arriving at the same point in its scan cycle — landing on
+     * the same channel every time, which is either always right or, as often,
+     * always wrong. A follower that never coincides never recovers, and it
+     * looks like bad luck rather than arithmetic. Deterministic and pure: the
+     * spread comes from the slot number itself, not a clock or an RNG. */
+    if (now_slot - last_status_slot_ >=
+        p_.status_interval_slots + (now_slot % 7)) {
       last_status_slot_ = now_slot;
       HopsetAction a{};
       a.kind = HopsetAction::SendControl;

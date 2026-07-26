@@ -66,6 +66,18 @@ public:
     const HopsetReason mr = mask_reason(m.active_mask);
     if (mr != HopsetReason::None)
       return reject(out, m, mr, now_slot);
+    /* Structural limits the authority enforces on its own account: a
+     * follower is the decision-maker but not trusted with the shape of the
+     * change. One channel per update, a floor on how often updates may
+     * happen — a buggy or hostile proposer cannot walk the link down in one
+     * step or by flooding. Locally-originated changes (start_change) are
+     * exempt: they are the operator's own lever. */
+    if (p_.max_mask_delta &&
+        popcount64(m.active_mask ^ cur_.active_mask) > p_.max_mask_delta)
+      return reject(out, m, HopsetReason::MaskDelta, now_slot);
+    if (p_.min_update_gap_rounds && have_activation_ &&
+        round_of(now_slot) - last_activation_round_ < p_.min_update_gap_rounds)
+      return reject(out, m, HopsetReason::Cooldown, now_slot);
     replays_.remember(m.rx_epoch, m.rx_nonce);
     pend_echo_epoch_ = m.rx_epoch;
     pend_echo_nonce_ = m.rx_nonce;
@@ -111,6 +123,8 @@ public:
       if (now_slot >= pend_.activate_slot) {
         cur_ = pend_;
         committing_ = false;
+        last_activation_round_ = round_of(now_slot);
+        have_activation_ = true;
         HopsetAction act{};
         act.kind = HopsetAction::Activate;
         act.state = cur_;
@@ -148,6 +162,10 @@ private:
     if (mask & ~full_mask(p_.n_base))
       return HopsetReason::BadMask;
     if (popcount64(mask) < p_.min_active)
+      return HopsetReason::LowDiversity;
+    if (p_.max_excluded_frac_pct < 100 &&
+        popcount64(full_mask(p_.n_base) & ~mask) * 100 >
+            p_.max_excluded_frac_pct * p_.n_base)
       return HopsetReason::LowDiversity;
     if (mask == cur_.active_mask && cur_.generation != 0)
       return HopsetReason::NoChange;
@@ -236,6 +254,8 @@ private:
   uint32_t pend_echo_epoch_ = 0, pend_echo_nonce_ = 0;
   uint64_t last_commit_slot_ = 0;
   uint64_t last_status_slot_ = 0;
+  uint64_t last_activation_round_ = 0;
+  bool have_activation_ = false;
   ProposalReplayRing replays_;
 };
 

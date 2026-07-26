@@ -21,6 +21,12 @@ Run:  .venv/bin/python bf_ndpa_probe.py --freq 5500e6 --rate 10e6 --duration 10
 """
 from __future__ import annotations
 
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import argparse
 import sys
 
@@ -42,7 +48,9 @@ def main() -> int:
     ap.add_argument("--rate", type=float, default=10e6)
     ap.add_argument("--gain", type=float, default=40.0)
     ap.add_argument("--antenna", default="RX2")
-    ap.add_argument("--args", default="", help="UHD device args")
+    ap.add_argument("--args", default=uhd_select.device_args(None, allow_ambiguous=True),
+        help="UHD device args, e.g. serial=XXXXXXX (default: $DEVOURER_UHD_ARGS "
+             "or tests/.uhd_args)")
     ap.add_argument("--duration", type=float, default=10.0)
     ap.add_argument("--thresh-db", type=float, default=12.0,
                     help="burst threshold above per-chunk median floor (dB)")
@@ -50,7 +58,7 @@ def main() -> int:
                     help="gap window (us) classifying a burst pair")
     args = ap.parse_args()
 
-    usrp = uhd.usrp.MultiUSRP(args.args)
+    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args(args.args))
     usrp.set_rx_rate(args.rate)
     usrp.set_rx_freq(uhd.types.TuneRequest(args.freq))
     usrp.set_rx_gain(args.gain)

@@ -170,6 +170,7 @@ add_library(devourer
     src/hopset/HopsetWire.h
     src/hopset/HopsetAuthority.h
     src/hopset/HopsetFollower.h
+    src/hopset/HopsetPolicy.h
     src/hopset/HopsetEvents.h
     src/IRtlDevice.h
     src/SignalStop.cpp
@@ -813,6 +814,22 @@ add_test(NAME hopset_proto_matrix COMMAND HopsetProtoSelftest)
 add_executable(HopsetActivationSelftest tests/hopset_activation_selftest.cpp)
 target_link_libraries(HopsetActivationSelftest PRIVATE devourer)
 add_test(NAME hopset_activation_sync COMMAND HopsetActivationSelftest)
+
+# Receiver-driven exclusion gates: keyed recovery-probe placement (KATs +
+# one-probe-per-window + inertness), the pure exclusion/restoration policy
+# over its threshold / hysteresis / anti-herding matrix, and the end-to-end
+# policy -> proposal -> commit -> activation -> probe -> restoration arc.
+add_executable(HopsetProbeSelftest tests/hopset_probe_selftest.cpp)
+target_link_libraries(HopsetProbeSelftest PRIVATE devourer)
+add_test(NAME hopset_probe_placement COMMAND HopsetProbeSelftest)
+
+add_executable(HopsetPolicySelftest tests/hopset_policy_selftest.cpp)
+target_link_libraries(HopsetPolicySelftest PRIVATE devourer)
+add_test(NAME hopset_policy_matrix COMMAND HopsetPolicySelftest)
+
+add_executable(HopsetAdaptiveE2eSelftest tests/hopset_adaptive_e2e_selftest.cpp)
+target_link_libraries(HopsetAdaptiveE2eSelftest PRIVATE devourer)
+add_test(NAME hopset_adaptive_e2e COMMAND HopsetAdaptiveE2eSelftest)
 
 # Headless guard for the TX-power offset quantization (src/TxPower.h) — the
 # qdB->index-step rounding/clamping behind SetTxPowerOffsetQdb, so a rounding

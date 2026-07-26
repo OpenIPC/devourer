@@ -124,14 +124,14 @@ int main() {
   /* --- row 1: clean run — propose, commit, synchronized activation --- */
   {
     Sim s(0x1000, 0x2000);
-    s.propose(0b00110111, 0xA1);
+    s.propose(0b11110111, 0xA1);
     CHECK(s.auth.committing(), "clean: authority commits");
     s.tick(200);
     CHECK(s.auth_activations == 1 && s.fol_activations == 1,
           "clean: both activate exactly once");
     CHECK(s.auth_act_slot == s.fol_act_slot, "clean: same activation slot");
     CHECK(s.converged() && s.fol_state.generation == 1 &&
-              s.fol_state.active_mask == 0b00110111,
+              s.fol_state.active_mask == 0b11110111,
           "clean: identical committed state");
     CHECK(s.fol_state.activate_slot >= 8 * 8,
           "clean: >= 8 rounds of lead honored");
@@ -148,7 +148,7 @@ int main() {
       }
       return true;
     };
-    s.propose(0b00001111, 0xA2);
+    s.propose(0b11101111, 0xA2);
     s.tick(300);
     CHECK(dropped == 2 && s.converged() && s.fol_state.generation == 1,
           "lost proposals: retry converges");
@@ -165,7 +165,7 @@ int main() {
       }
       return true;
     };
-    s.propose(0b11110000, 0xA3);
+    s.propose(0b01111111, 0xA3);
     s.tick(300);
     CHECK(commits_dropped == 3 && s.converged() &&
               s.fol_activations == 1 && s.auth_activations == 1 &&
@@ -176,7 +176,7 @@ int main() {
   /* --- row 4: duplicated commit — a repeat is idempotent --- */
   {
     Sim s(0x1000, 0x2000);
-    s.propose(0b00111100, 0xA4);
+    s.propose(0b11111110, 0xA4);
     s.tick(2); /* several repeated commits already flow; all must be inert
                   duplicates on the follower */
     s.tick(300);
@@ -187,7 +187,7 @@ int main() {
   /* --- row 5: replayed proposal after completion — rejected --- */
   {
     Sim s(0x1000, 0x2000);
-    s.propose(0b00110111, 0xA5);
+    s.propose(0b11110111, 0xA5);
     s.tick(200);
     CHECK(s.converged() && s.fol_state.generation == 1, "replay setup");
     /* attacker replays the same authenticated proposal bytes */
@@ -196,7 +196,7 @@ int main() {
     replay.link_id = s.p.link_id;
     replay.rx_epoch = 0x2000;
     replay.rx_nonce = 0xA5;
-    replay.active_mask = 0b00110111;
+    replay.active_mask = 0b11110111;
     replay.base_fp = s.p.base_fp;
     s.last_reject = HopsetReason::None;
     s.route(std::vector<HopsetAction>{}, false); /* no-op */
@@ -235,7 +235,7 @@ int main() {
   {
     Sim s(0x1000, 0x2000);
     /* run a legitimate change so the follower tracks epoch 0x1000 gen 1 */
-    s.propose(0b00110111, 0xA7);
+    s.propose(0b11110111, 0xA7);
     s.tick(200);
     CHECK(s.fol_state.generation == 1, "stale-epoch setup");
     /* replay: an authenticated commit from a previous authority boot (other
@@ -273,7 +273,7 @@ int main() {
     s.deliver = [&](int, const HopsetMsg &m) {
       return m.type == HT_PROPOSAL; /* only proposals get through */
     };
-    s.propose(0b00110111, 0xA8);
+    s.propose(0b11110111, 0xA8);
     CHECK(s.auth.committing(), "restart setup: authority armed");
     /* authority restarts: new machine, new random epoch, gen 0. The old
      * in-flight generation is orphaned for free (nothing persisted); the
@@ -293,7 +293,7 @@ int main() {
   /* --- row 9: RX restart — a fresh follower joins at nonzero gen --- */
   {
     Sim s(0x1000, 0x2000);
-    s.propose(0b01011010, 0xA9);
+    s.propose(0b11011111, 0xA9);
     s.tick(200);
     CHECK(s.fol_state.generation == 1, "RX restart setup");
     /* follower restarts with a new epoch and no state */
@@ -302,7 +302,7 @@ int main() {
     CHECK(s.fol.state().generation == 0, "fresh follower at gen 0");
     s.tick(2 * s.p.status_interval_slots + 2);
     CHECK(s.fol.state().generation == 1 &&
-              s.fol.state().active_mask == 0b01011010 &&
+              s.fol.state().active_mask == 0b11011111 &&
               s.fol.state().activate_slot == s.auth.state().activate_slot,
           "RX restart: rejoins at the live nonzero generation");
   }
@@ -363,7 +363,7 @@ int main() {
   {
     Sim s(0x1000, 0x2000);
     s.deliver = [](int, const HopsetMsg &) { return false; }; /* black hole */
-    s.propose(0b00111100, 0xB3);
+    s.propose(0b11111110, 0xB3);
     s.tick(200);
     CHECK(s.last_reject == HopsetReason::Timeout &&
               s.fol.fsm() == HopsetFollower::State::Synced,
@@ -374,13 +374,58 @@ int main() {
   /* --- row 14: NoChange — re-proposing the active mask --- */
   {
     Sim s(0x1000, 0x2000);
-    s.propose(0b00110111, 0xB4);
+    s.propose(0b11110111, 0xB4);
     s.tick(200);
     CHECK(s.fol_state.generation == 1, "nochange setup");
     s.last_reject = HopsetReason::None;
-    s.propose(0b00110111, 0xB5);
+    s.propose(0b11110111, 0xB5);
     CHECK(s.last_reject == HopsetReason::NoChange && !s.auth.committing(),
           "same-mask proposal rejected as no-change");
+  }
+
+  /* --- row 15: the authority's structural limits on a proposal. A follower
+   * decides WHICH channel to drop, but not how much of the schedule may
+   * change at once or how fast updates may come — a buggy or hostile
+   * proposer must not be able to walk the link down. --- */
+  {
+    Sim s(0x1000, 0x2000);
+    s.propose(0b11000111, 0xD1); /* three channels at once */
+    CHECK(s.last_reject == HopsetReason::MaskDelta && !s.auth.committing(),
+          "multi-channel proposal rejected");
+    /* the same shape from the operator's own lever is allowed */
+    Sim s2(0x1000, 0x2000);
+    s2.route(s2.auth.start_change(0b11000111, s2.slot), true);
+    CHECK(s2.auth.committing(), "start_change is exempt from the delta limit");
+    s2.tick(200);
+    CHECK(s2.converged() && s2.fol_state.active_mask == 0b11000111,
+          "operator-driven multi-channel change still converges");
+  }
+  {
+    /* a second proposal too soon after an activation is refused */
+    Sim s(0x1000, 0x2000);
+    s.propose(0b11110111, 0xD2);
+    s.tick(200);
+    CHECK(s.fol_state.generation == 1, "cooldown setup activated");
+    s.last_reject = HopsetReason::None;
+    auto acts = s.auth.on_proposal(
+        [&] {
+          HopsetMsg m;
+          m.type = HT_PROPOSAL;
+          m.link_id = s.p.link_id;
+          m.rx_epoch = 0x2000;
+          m.rx_nonce = 0xD3;
+          m.active_mask = 0b11110011;
+          m.base_fp = s.p.base_fp;
+          return m;
+        }(),
+        s.auth.state().activate_slot + 2);
+    bool cooled = false;
+    for (auto &a : acts)
+      if (a.kind == HopsetAction::Event && a.event == HopsetEvent::Reject &&
+          a.reason == HopsetReason::Cooldown)
+        cooled = true;
+    CHECK(cooled && !s.auth.committing(),
+          "proposal inside the update gap rejected as cooldown");
   }
 
   /* --- drop-every-message sweep: for each control-message index in the
@@ -389,14 +434,14 @@ int main() {
   {
     /* count messages in a clean run first */
     Sim probe(0x1000, 0x2000);
-    probe.propose(0b00101101, 0xC0);
+    probe.propose(0b11101111, 0xC0);
     probe.tick(400);
     const int total = probe.msg_index;
     CHECK(total > 4, "sweep probe saw a full exchange");
     for (int drop = 0; drop < total; ++drop) {
       Sim s(0x1000, 0x2000);
       s.deliver = [&](int idx, const HopsetMsg &) { return idx != drop; };
-      s.propose(0b00101101, 0xC0);
+      s.propose(0b11101111, 0xC0);
       s.tick(800);
       if (!(s.converged() && s.fol.state().generation >= 1)) {
         std::fprintf(stderr, "sweep: drop=%d diverged\n", drop);

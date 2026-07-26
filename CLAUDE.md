@@ -366,9 +366,27 @@ the legacy fixed schedule byte-for-byte; gen ≥ 1 re-keys the permutation from
 the v2 sync marker advertises (generation, mask fp) so a follower that missed
 the commits recovers from the status beacon. Demos:
 `DEVOURER_HOP_ADAPTIVE=1` (keyed slot mode only) +
-`DEVOURER_HOP_ADAPTIVE_SCRIPT="slot:mask,..."` (txdemo authority lever until
-the exclusion policy exists); `hopset.*` events; on-air run
-`tests/hopset_adaptive_onair.sh`. Wire/state-machine doc: `docs/fhss.md`.
+`DEVOURER_HOP_ADAPTIVE_SCRIPT="slot:mask,..."` (an operator lever, exempt from
+the one-channel-per-update limit; `DEVOURER_HOP_MIN_ACTIVE` lowers the
+authority floor for protocol tests).
+
+`DEVOURER_HOP_POLICY=1` adds the **receiver-driven exclusion policy**
+(`src/hopset/HopsetPolicy.h`, pure): per-dwell delivery evidence (delivery is
+authoritative — energy/link verdicts only classify) drives conservative
+exclude/restore decisions — ≥8 scored rounds, one channel per update, <30%
+delivery for 5 visits *with* a healthy alternative, hard `max(3, configured)`
+active floor, ≥10 rounds between updates (a *refused* proposal spends the
+budget too, so bouncing proposals can't flood control), nothing under broad
+degradation, excluded-fraction cap. Proposals air from rxdemo's own claimed
+handle; txdemo hears them under `DEVOURER_TX_WITH_RX=thread`, and the authority
+enforces its own shape limits (`max_mask_delta`, `min_update_gap_rounds`).
+Excluded channels are revisited by **keyed recovery probes**
+(`DEVOURER_HOP_PROBE_ROUNDS`, default 8, must match both ends): every P rounds
+one data slot is replaced, round/position/channel all keyed so recovery isn't a
+periodic target; sync/control only, never caller FEC payload. `hopset.*` events
+(incl. `hopset.decision`, `hopset.probe`); on-air runs
+`tests/hopset_adaptive_onair.sh` (protocol) and `tests/hopset_adaptive_jammer.sh`
+(`MODE=parked|herding`, B210 interferer). Doc: `docs/fhss.md`.
 
 `IRtlDevice::FastSetBandwidth(bw)` is the bandwidth analogue — a lean
 same-channel toggle between 20 MHz and 5/10 MHz narrowband (baseband re-clock

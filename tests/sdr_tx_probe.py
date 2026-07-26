@@ -18,6 +18,13 @@ is the one test script outside the uv-managed Python subtree.
   python3 tests/sdr_tx_probe.py --freq 5180e6 --label baseline
   python3 tests/sdr_tx_probe.py --freq 5180e6 --label tx --json /tmp/tx.json
 """
+
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import argparse
 import json
 import sys
@@ -27,7 +34,7 @@ import uhd
 
 
 def measure(freq, rate, gain, nsamps, median=False):
-    usrp = uhd.usrp.MultiUSRP("")
+    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args())
     # recv_num_samps tunes, sets rate+gain, streams, and returns a complex64
     # array shaped (channels, nsamps). One channel (RX A).
     samps = usrp.recv_num_samps(int(nsamps), float(freq), float(rate), [0], float(gain))

@@ -16,6 +16,13 @@ inject_beacon at the same config — higher duty = more on air.
   sudo python3 sdr_duty.py --freq 5745e6 --secs 4 --mcs 7 --bw 20
 """
 from __future__ import annotations
+
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import argparse, math, sys, time
 import numpy as np
 
@@ -58,7 +65,7 @@ def main() -> int:
                          "channel and pass it here.")
     args = ap.parse_args()
 
-    usrp = uhd.usrp.MultiUSRP("")
+    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args())
     usrp.set_rx_rate(args.rate)
     usrp.set_rx_freq(uhd.types.TuneRequest(args.freq))
     usrp.set_rx_gain(args.gain)

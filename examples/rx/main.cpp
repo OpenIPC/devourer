@@ -18,8 +18,10 @@
 #include "HopSchedule.h"
 #include "hopset/HopsetEvents.h"
 #include "hopset/HopsetFollower.h"
+#include "hopset/HopsetPolicy.h"
 #include "hopset/HopsetWire.h"
 #include "LaCapture.h"
+#include "RadiotapBuilder.h"
 #include "LinkHealth.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
@@ -96,22 +98,79 @@ static std::unique_ptr<devourer::hopset::HopsetKeys> g_hopset_keys;
 static std::unique_ptr<devourer::hopset::HopsetFollower> g_hopset_fol;
 static std::unique_ptr<devourer::hopset::AdaptiveScheduleView> g_hopset_view;
 static std::atomic<uint64_t> g_hopset_now_slot{0};
+/* Receiver-driven exclusion (DEVOURER_HOP_POLICY=1): the policy scores every
+ * closed dwell and proposes mask changes; proposals leave over the air on
+ * this same claimed handle (one bring-up, RX loop + occasional control TX),
+ * which is the reserved low-rate feedback opportunity. */
+static std::unique_ptr<devourer::hopset::HopsetPolicy> g_hopset_policy;
+static IRtlDevice *g_hopset_dev = nullptr;
+static bool g_hopset_verbose_events = false;
+/* Per-dwell frame accounting, written lock-free from the RX worker and read
+ * by the hop loop when the slot closes. */
+static std::atomic<uint64_t> g_slot_acc_slot{UINT64_MAX};
+static std::atomic<uint32_t> g_slot_acc_frames{0}, g_slot_acc_crc{0};
+static std::atomic<int> g_slot_acc_rssi{0}, g_slot_acc_snr{0},
+    g_slot_acc_evm{0};
+static std::atomic<uint32_t> g_slot_dead_us{0};
 static long long steady_us() {
   return std::chrono::duration_cast<std::chrono::microseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
       .count();
 }
 
-/* Execute the follower's actions (caller holds g_hopset_mu). Proposals
- * (SendControl) need the RX->TX feedback transport — that policy is out of
- * scope here, and the demo never calls propose(), so none arise. */
+/* Which schedule round an absolute slot falls in, under the state the view
+ * currently holds (round length is the active-channel count). */
+static uint64_t hopset_round_of(
+    const devourer::hopset::AdaptiveScheduleView &v, uint64_t slot,
+    size_t n_base) {
+  const auto &st = v.state();
+  const size_t k =
+      st.generation == 0 ? n_base : devourer::hopset::popcount64(st.active_mask);
+  return k && slot >= st.activate_slot ? (slot - st.activate_slot) / k : 0;
+}
+
+/* Air one authenticated control frame: robust 6M radiotap + a broadcast
+ * probe-request header (canonical SA) + the HopsetWire bytes. The caller's
+ * payload stream is never touched — control rides its own MPDU. */
+static void hopset_send(const devourer::hopset::HopsetMsg &m) {
+  if (!g_hopset_dev || !g_hopset_keys)
+    return;
+  static const uint8_t sa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+  std::vector<uint8_t> frame =
+      devourer::build_stream_radiotap(devourer::parse_tx_mode_str("6M"));
+  uint8_t hdr[24] = {0x40, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff,
+                     0xff};
+  std::memcpy(hdr + 10, sa, 6);
+  std::memcpy(hdr + 16, sa, 6);
+  hdr[22] = 0x90;
+  hdr[23] = 0x00;
+  frame.insert(frame.end(), hdr, hdr + 24);
+  const auto body = devourer::hopset::hopset_encode(m, *g_hopset_keys);
+  frame.insert(frame.end(), body.begin(), body.end());
+  g_hopset_dev->send_packet(frame.data(), frame.size());
+}
+
+/* Execute the follower's actions (caller holds g_hopset_mu). */
 static void hopset_route(
     const std::vector<devourer::hopset::HopsetAction> &acts) {
   for (const auto &a : acts) {
-    if (a.kind == devourer::hopset::HopsetAction::Activate)
+    if (a.kind == devourer::hopset::HopsetAction::Activate) {
       g_hopset_view->set_state(a.state);
-    else if (a.kind == devourer::hopset::HopsetAction::Event)
+      if (g_hopset_policy)
+        g_hopset_policy->on_activation(a.state.active_mask,
+                                       g_hopset_now_slot.load());
+    } else if (a.kind == devourer::hopset::HopsetAction::SendControl) {
+      hopset_send(a.msg);
+    } else if (a.kind == devourer::hopset::HopsetAction::Event) {
+      /* a rejected or timed-out proposal releases the policy's latch — the
+       * pure machine only reports the outcome, the host owns the handshake */
+      if (g_hopset_policy &&
+          a.event == devourer::hopset::HopsetEvent::Reject)
+        g_hopset_policy->clear_outstanding(hopset_round_of(
+            *g_hopset_view, g_hopset_now_slot.load(),
+            g_hopset_view->base_size()));
       devourer::hopset::emit_action(*g_ev, a, "rx", g_hopset_now_slot.load());
+    }
   }
 }
 
@@ -707,11 +766,15 @@ static void packetProcessor(const Packet &packet) {
       g_hop_last_marker_us.store(now);
       g_hop_marker_slot.store(m.slot);
       g_hop_epoch.store(m.epoch);
-      if (g_hop_decode_pending.exchange(false))
+      if (g_hop_decode_pending.exchange(false)) {
+        const long long dead = now - g_hop_last_retune_us.load();
+        g_slot_dead_us.store(
+            static_cast<uint32_t>(dead > 0 && dead < 1000000 ? dead : 0));
         devourer::Ev(*g_ev, "hop.rx")
             .f("state", "decode")
             .f("slot", (unsigned long long)m.slot)
-            .f("dead_us", now - g_hop_last_retune_us.load());
+            .f("dead_us", dead);
+      }
       if (g_hopset_fol) {
         /* missed-transition tripwire: does the advertised (generation,
          * mask fingerprint) match a state we hold (current or pending)? */
@@ -752,6 +815,20 @@ static void packetProcessor(const Packet &packet) {
       else if (hm.type == devourer::hopset::HT_STATUS)
         hopset_route(g_hopset_fol->on_status(hm, slot));
     }
+  }
+
+  /* Per-dwell delivery accounting for the exclusion policy: count this
+   * transmitter's frames (and the corrupt ones, when the RX surfaces them)
+   * against the slot the hop loop is currently parked on. Lock-free — the
+   * loop drains it when the dwell closes. */
+  if (g_hopset_policy && packet.Data.size() >= 16 &&
+      std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
+    g_slot_acc_frames.fetch_add(1);
+    if (packet.RxAtrib.crc_err || packet.RxAtrib.icv_err)
+      g_slot_acc_crc.fetch_add(1);
+    g_slot_acc_rssi.fetch_add(packet.RxAtrib.rssi[0]);
+    g_slot_acc_snr.fetch_add(packet.RxAtrib.snr[0]);
+    g_slot_acc_evm.fetch_add(packet.RxAtrib.evm[0]);
   }
 
   /* Feed the rolling per-frame RSSI/SNR/EVM aggregate for DEVOURER_RX_ENERGY_MS
@@ -1531,11 +1608,54 @@ int main(int argc, char **argv) {
                                    hop_rx_channels.end());
       hp.base_fp = devourer::hopset::hopset_fp(*g_hopset_keys, chlist.data(),
                                                chlist.size());
+      /* Keyed recovery probes: every N rounds one data opportunity is spent
+       * on an excluded channel so it can prove it recovered. Shared config —
+       * the transmitter derives the same placement from the same seed. */
+      unsigned probe_rounds = 8;
+      if (const char *pr = std::getenv("DEVOURER_HOP_PROBE_ROUNDS"))
+        probe_rounds = static_cast<unsigned>(std::strtoul(pr, nullptr, 0));
+      /* Receiver-driven exclusion. Without it the follower still tracks
+       * commits, it just never proposes one. */
+      if (std::getenv("DEVOURER_HOP_POLICY")) {
+        devourer::hopset::HopsetPolicyConfig pc;
+        auto envu = [](const char *n, uint32_t &dst) {
+          if (const char *e = std::getenv(n))
+            dst = static_cast<uint32_t>(std::strtoul(e, nullptr, 0));
+        };
+        auto envd = [](const char *n, double &dst) {
+          if (const char *e = std::getenv(n))
+            dst = std::strtod(e, nullptr);
+        };
+        envu("DEVOURER_HOP_POLICY_MIN_ROUNDS", pc.min_obs_rounds);
+        envu("DEVOURER_HOP_POLICY_IMPAIRED_ROUNDS", pc.impaired_rounds);
+        envd("DEVOURER_HOP_POLICY_EXCLUDE_DELIVERY", pc.exclude_delivery);
+        envd("DEVOURER_HOP_POLICY_HEALTHY_DELIVERY", pc.healthy_delivery);
+        envu("DEVOURER_HOP_POLICY_MIN_ACTIVE", pc.min_active);
+        envd("DEVOURER_HOP_POLICY_RESTORE_DELIVERY", pc.restore_delivery);
+        envu("DEVOURER_HOP_POLICY_RESTORE_PROBES", pc.restore_probes);
+        if (const char *e = std::getenv("DEVOURER_HOP_POLICY_COOLDOWN_ROUNDS"))
+          pc.update_cooldown_rounds = std::strtoull(e, nullptr, 0);
+        /* the hard floor is max(3, configured) — the policy applies it, the
+         * authority enforces its own copy */
+        if (pc.min_active < 3)
+          pc.min_active = 3;
+        if (hp.min_active < pc.min_active)
+          hp.min_active = pc.min_active;
+        g_hopset_policy = std::make_unique<devourer::hopset::HopsetPolicy>(
+            pc, hop_rx_channels.size());
+        if (const char *v = std::getenv("DEVOURER_HOP_POLICY_EVENTS"))
+          g_hopset_verbose_events = std::atoi(v) >= 2;
+        logger->info("DEVOURER_HOP_POLICY — receiver-driven exclusion armed "
+                     "(min_active={}, probe every {} rounds, policy 0x{:08x})",
+                     pc.min_active, probe_rounds, pc.policy_hash());
+      }
       g_hopset_fol = std::make_unique<devourer::hopset::HopsetFollower>(
           hp, static_cast<uint32_t>(std::random_device{}()));
       g_hopset_view = std::make_unique<devourer::hopset::AdaptiveScheduleView>(
           *g_hop_schedule, *g_hopset_keys, hop_rx_channels.size());
       g_hopset_view->set_state(g_hopset_fol->state());
+      g_hopset_view->set_probe_period(probe_rounds);
+      g_hopset_dev = rtlDevice.get();
     }
     g_hop_slot_us = static_cast<uint64_t>(hop_rx_slot_ms) * 1000;
     long acquire_ms = hop_rx_slot_ms * 2;
@@ -1596,10 +1716,62 @@ int main(int argc, char **argv) {
           /* Phase correction may move the fitted boundary slightly forward.
            * Never follow that jitter backwards into a slot already visited. */
           if (tuned_slot == UINT64_MAX || slot > tuned_slot) {
+            /* Close out the dwell we are leaving before retuning: whether
+             * the transmitter's marker arrived is this channel's score for
+             * the round, and the frame counters refine it into a ratio. */
+            if (g_hopset_policy && tuned_slot != UINT64_MAX) {
+              const bool decoded = !g_hop_decode_pending.load();
+              const uint32_t frames = g_slot_acc_frames.exchange(0);
+              const uint32_t crc = g_slot_acc_crc.exchange(0);
+              const int rssi_sum = g_slot_acc_rssi.exchange(0);
+              const int snr_sum = g_slot_acc_snr.exchange(0);
+              const int evm_sum = g_slot_acc_evm.exchange(0);
+              std::lock_guard<std::mutex> lk(g_hopset_mu);
+              const auto closed = g_hopset_view->slot_info(tuned_slot);
+              devourer::hopset::SlotObservation o;
+              o.slot = tuned_slot;
+              o.round = hopset_round_of(*g_hopset_view, tuned_slot,
+                                        hop_rx_channels.size());
+              o.base_index = static_cast<uint32_t>(closed.base_index);
+              o.is_probe = closed.is_probe;
+              o.decoded = decoded;
+              o.frames = frames;
+              o.crc_errs = crc;
+              o.dead_us = g_slot_dead_us.exchange(0);
+              if (frames) {
+                o.rssi = rssi_sum / static_cast<int>(frames);
+                o.snr = snr_sum / static_cast<int>(frames);
+                o.evm = evm_sum / static_cast<int>(frames);
+              }
+              g_hopset_policy->ingest(o);
+              if (closed.is_probe)
+                devourer::hopset::emit_probe(
+                    *g_ev, "rx", tuned_slot, o.round, o.base_index,
+                    hop_rx_channels[closed.base_index], decoded, frames);
+              /* A round just closed: let the policy speak, and if it wants a
+               * change, send the proposal now — right after the boundary is
+               * the reserved low-rate control opportunity. */
+              const uint64_t r_now = hopset_round_of(*g_hopset_view, slot,
+                                                     hop_rx_channels.size());
+              if (r_now != o.round) {
+                auto d = g_hopset_policy->decide(r_now);
+                if (d.kind != devourer::hopset::HopsetDecision::Kind::Hold ||
+                    g_hopset_verbose_events)
+                  devourer::hopset::emit_decision(*g_ev, d, slot, r_now,
+                                                  g_hopset_verbose_events);
+                if (d.kind != devourer::hopset::HopsetDecision::Kind::Hold)
+                  hopset_route(g_hopset_fol->propose(
+                      d.proposed_mask, d.observation_count, d.reason_bitmap,
+                      static_cast<uint32_t>(std::random_device{}()), slot));
+              }
+            }
             int ch;
+            bool probe = false;
             if (g_hopset_view) {
               std::lock_guard<std::mutex> lk(g_hopset_mu);
-              ch = hop_rx_channels[g_hopset_view->channel_index(slot)];
+              const auto si = g_hopset_view->slot_info(slot);
+              ch = hop_rx_channels[si.base_index];
+              probe = si.is_probe;
             } else {
               ch = g_hop_schedule->channel(slot, hop_rx_channels);
             }
@@ -1608,12 +1780,19 @@ int main(int argc, char **argv) {
             auto done = steady_us();
             g_hop_last_retune_us.store(done);
             g_hop_decode_pending.store(true);
+            g_slot_acc_frames.store(0);
+            g_slot_acc_crc.store(0);
+            g_slot_acc_rssi.store(0);
+            g_slot_acc_snr.store(0);
+            g_slot_acc_evm.store(0);
             tuned_slot = slot;
-            devourer::Ev(*g_ev, "hop.rx")
-                .f("state", "retune")
+            devourer::Ev ev(*g_ev, "hop.rx");
+            ev.f("state", "retune")
                 .f("slot", (unsigned long long)slot)
                 .f("channel", ch)
                 .f("retune_us", done - t0);
+            if (probe)
+              ev.f("probe", true);
           }
         }
       } else {

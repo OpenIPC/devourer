@@ -130,6 +130,49 @@ static std::vector<uint8_t> build_frame_with_pkt_pwr(int8_t db,
   return f;
 }
 
+/* Adaptive hopset (DEVOURER_HOP_ADAPTIVE=1): this side is the schedule
+ * authority. File-scope because packetProcessor — a free function running on
+ * the RX thread under DEVOURER_TX_WITH_RX=thread — is where follower
+ * proposals arrive; the mutex covers the machine and the view together. */
+static std::mutex g_hopset_mu;
+static std::optional<devourer::hopset::HopsetKeys> g_hopset_keys;
+static std::optional<devourer::hopset::HopsetAuthority> g_hopset_auth;
+static std::optional<devourer::hopset::AdaptiveScheduleView> g_hopset_view;
+static IRtlDevice *g_hopset_dev = nullptr;
+static std::atomic<uint64_t> g_hopset_tick_slot{0};
+
+/* Execute the authority's actions (caller holds g_hopset_mu). Commit and
+ * status frames air as their own small MPDUs beside the payload stream, so
+ * caller payload bytes are never touched. */
+static void hopset_route(
+    const std::vector<devourer::hopset::HopsetAction> &acts) {
+  for (const auto &a : acts) {
+    if (a.kind == devourer::hopset::HopsetAction::Activate) {
+      g_hopset_view->set_state(a.state);
+    } else if (a.kind == devourer::hopset::HopsetAction::SendControl) {
+      /* robust 6M radiotap + broadcast probe-req header + the authenticated
+       * HopsetWire bytes */
+      std::vector<uint8_t> frame =
+          devourer::build_stream_radiotap(devourer::parse_tx_mode_str("6M"));
+      static const uint8_t sa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+      uint8_t hdr[24] = {0x40, 0x00, 0x00, 0x00, 0xff, 0xff,
+                         0xff, 0xff, 0xff, 0xff};
+      std::memcpy(hdr + 10, sa, 6);
+      std::memcpy(hdr + 16, sa, 6);
+      hdr[22] = 0x90;
+      hdr[23] = 0x00;
+      frame.insert(frame.end(), hdr, hdr + 24);
+      const auto body = devourer::hopset::hopset_encode(a.msg, *g_hopset_keys);
+      frame.insert(frame.end(), body.begin(), body.end());
+      if (g_hopset_dev)
+        g_hopset_dev->send_packet(frame.data(), frame.size());
+    } else if (a.kind == devourer::hopset::HopsetAction::Event) {
+      devourer::hopset::emit_action(*g_ev, a, "tx",
+                                    g_hopset_tick_slot.load());
+    }
+  }
+}
+
 static int g_rx_count = 0;
 static void packetProcessor(const Packet &packet) {
   /* C2H packets are chip-side status (one per TX during concurrent TX+RX on
@@ -161,6 +204,23 @@ static void packetProcessor(const Packet &packet) {
           .f("hits", hits)
           .f("total_rx", g_rx_count)
           .f("len", packet.Data.size());
+    }
+  }
+  /* The receiver's feedback opportunity: an authenticated exclusion or
+   * restoration proposal. The authority validates it against its own
+   * structural limits and answers with a commit (or a status carrying the
+   * rejection reason) — the receiver decides which channel, never how much
+   * of the schedule may change at once. */
+  if (g_hopset_auth && packet.Data.size() > 24 + 16 &&
+      packet.Data[0] == 0x40) {
+    devourer::hopset::HopsetMsg hm;
+    if (devourer::hopset::hopset_decode(packet.Data.data() + 24,
+                                        packet.Data.size() - 24,
+                                        *g_hopset_keys, 0, hm) ==
+            devourer::hopset::HopsetReason::None &&
+        hm.type == devourer::hopset::HT_PROPOSAL) {
+      std::lock_guard<std::mutex> lk(g_hopset_mu);
+      hopset_route(g_hopset_auth->on_proposal(hm, g_hopset_tick_slot.load()));
     }
   }
 }
@@ -1135,26 +1195,37 @@ int main(int argc, char **argv) {
    * (mask = hex bitmap over base-hopset positions) driving authority-
    * originated commits. Commit/status frames air as their own small 802.11
    * frames next to the payload stream — caller payload bytes are untouched. */
-  std::optional<devourer::hopset::HopsetKeys> hopset_keys;
-  std::optional<devourer::hopset::HopsetAuthority> hopset_auth;
-  std::optional<devourer::hopset::AdaptiveScheduleView> hopset_view;
   std::vector<std::pair<uint64_t, uint64_t>> hopset_script;
   size_t hopset_script_next = 0;
-  uint64_t hopset_tick_slot = 0;
   bool hopset_ticked = false;
+  bool hop_probe_slot = false;
   if (hop_adaptive) {
-    hopset_keys = devourer::hopset::HopsetKeys::derive(
+    g_hopset_keys = devourer::hopset::HopsetKeys::derive(
         devourer::HopSchedule::parse_seed(std::getenv("DEVOURER_HOP_SEED")));
     devourer::hopset::HopsetParams hp;
     hp.n_base = hop_channels.size();
     std::vector<uint32_t> chlist(hop_channels.begin(), hop_channels.end());
-    hp.base_fp = devourer::hopset::hopset_fp(*hopset_keys, chlist.data(),
+    hp.base_fp = devourer::hopset::hopset_fp(*g_hopset_keys, chlist.data(),
                                              chlist.size());
-    hopset_auth.emplace(hp, static_cast<uint32_t>(std::random_device{}()));
-    hopset_view.emplace(*hop_schedule, *hopset_keys, hop_channels.size());
+    /* The authority's own diversity floor. The receiver's policy applies a
+     * hard max(3, configured) to anything it proposes; this copy is what
+     * stops a buggy or hostile proposal, and an operator driving the
+     * scripted lever on a small base hopset can lower it deliberately. */
+    hp.min_active = 3;
+    if (const char *ma = std::getenv("DEVOURER_HOP_MIN_ACTIVE"))
+      hp.min_active = static_cast<unsigned>(std::strtoul(ma, nullptr, 0));
+    if (hp.min_active < 2)
+      hp.min_active = 2;
+    g_hopset_auth.emplace(hp, static_cast<uint32_t>(std::random_device{}()));
+    g_hopset_view.emplace(*hop_schedule, *g_hopset_keys, hop_channels.size());
     /* view and authority must agree from slot 0 (gen 0 = full mask) so the
      * marker's mask fingerprint matches a fresh follower's initial state */
-    hopset_view->set_state(hopset_auth->state());
+    g_hopset_view->set_state(g_hopset_auth->state());
+    unsigned probe_rounds = 8;
+    if (const char *pr = std::getenv("DEVOURER_HOP_PROBE_ROUNDS"))
+      probe_rounds = static_cast<unsigned>(std::strtoul(pr, nullptr, 0));
+    g_hopset_view->set_probe_period(probe_rounds);
+    g_hopset_dev = rtlDevice.get();
     if (const char *sc = std::getenv("DEVOURER_HOP_ADAPTIVE_SCRIPT")) {
       for (const char *p = sc; *p;) {
         char *end = nullptr;
@@ -1168,34 +1239,6 @@ int main(int argc, char **argv) {
       }
     }
   }
-  auto hopset_route =
-      [&](const std::vector<devourer::hopset::HopsetAction> &acts) {
-        for (const auto &a : acts) {
-          if (a.kind == devourer::hopset::HopsetAction::Activate) {
-            hopset_view->set_state(a.state);
-          } else if (a.kind == devourer::hopset::HopsetAction::SendControl) {
-            /* robust 6M radiotap + broadcast probe-req header + the
-             * authenticated HopsetWire bytes (the chanmig frame shape) */
-            std::vector<uint8_t> frame = devourer::build_stream_radiotap(
-                devourer::parse_tx_mode_str("6M"));
-            static const uint8_t sa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
-            uint8_t hdr[24] = {0x40, 0x00, 0x00, 0x00, 0xff, 0xff,
-                               0xff, 0xff, 0xff, 0xff};
-            std::memcpy(hdr + 10, sa, 6);
-            std::memcpy(hdr + 16, sa, 6);
-            hdr[22] = 0x90;
-            hdr[23] = 0x00;
-            frame.insert(frame.end(), hdr, hdr + 24);
-            const auto body =
-                devourer::hopset::hopset_encode(a.msg, *hopset_keys);
-            frame.insert(frame.end(), body.begin(), body.end());
-            rtlDevice->send_packet(frame.data(), frame.size());
-          } else if (a.kind == devourer::hopset::HopsetAction::Event) {
-            devourer::hopset::emit_action(*g_ev, a, "tx", hopset_tick_slot);
-          }
-        }
-      };
-
   long tx_count = 0;
   long consec_fail = 0;
   /* If the TX path isn't enabled the chip NAKs every bulk-OUT; hammering a
@@ -1327,29 +1370,48 @@ int main(int argc, char **argv) {
                       .count() /
                   hop_slot_ms)
             : static_cast<uint64_t>(dwell_no + (frames_in_dwell == 0 ? 1 : 0));
-    if (hopset_auth && (!hopset_ticked || desired_slot != hopset_tick_slot)) {
+    if (g_hopset_auth && (!hopset_ticked ||
+                          desired_slot != g_hopset_tick_slot.load())) {
       /* once per slot: scripted commits due at this slot, then the authority
        * heartbeat (commit repetition, activation swap, status beacon) */
-      hopset_tick_slot = desired_slot;
+      g_hopset_tick_slot.store(desired_slot);
       hopset_ticked = true;
+      std::lock_guard<std::mutex> lk(g_hopset_mu);
       while (hopset_script_next < hopset_script.size() &&
              desired_slot >= hopset_script[hopset_script_next].first) {
-        hopset_route(hopset_auth->start_change(
+        hopset_route(g_hopset_auth->start_change(
             hopset_script[hopset_script_next].second, desired_slot));
         ++hopset_script_next;
       }
-      hopset_route(hopset_auth->on_tick(desired_slot));
+      hopset_route(g_hopset_auth->on_tick(desired_slot));
     }
     if (!hop_channels.empty() &&
         ((hop_slot_ms > 0 && desired_slot != static_cast<uint64_t>(dwell_no)) ||
          (hop_slot_ms == 0 && frames_in_dwell == 0))) {
       dwell_no = static_cast<long>(desired_slot);
       if (total_dwells > 0 && dwell_no >= total_dwells) break;
-      int ch = hopset_view
-                   ? hop_channels[hopset_view->channel_index(desired_slot)]
-               : hop_schedule
-                   ? hop_schedule->channel(desired_slot, hop_channels)
-                   : hop_channels[desired_slot % hop_channels.size()];
+      int ch;
+      if (g_hopset_view) {
+        std::lock_guard<std::mutex> lk(g_hopset_mu);
+        const auto si = g_hopset_view->slot_info(desired_slot);
+        ch = hop_channels[si.base_index];
+        /* A keyed recovery probe: this dwell airs on an excluded channel so
+         * the receiver can see whether it came back. Only sync/control goes
+         * out — the payload stream stays on the active set. */
+        hop_probe_slot = si.is_probe;
+        if (si.is_probe)
+          devourer::hopset::emit_probe(
+              *g_ev, "tx", desired_slot,
+              (desired_slot - g_hopset_view->state().activate_slot) /
+                  (g_hopset_view->active_count()
+                       ? g_hopset_view->active_count()
+                       : 1),
+              static_cast<uint32_t>(si.base_index), ch, true, 0);
+      } else {
+        hop_probe_slot = false;
+        ch = hop_schedule ? hop_schedule->channel(desired_slot, hop_channels)
+                          : hop_channels[desired_slot % hop_channels.size()];
+      }
       auto sw0 = std::chrono::steady_clock::now();
       const char *mode = nullptr;
       if (hop_radiotap) {
@@ -1391,6 +1453,12 @@ int main(int argc, char **argv) {
           ev.hexf("seed_fp", hop_schedule->fingerprint(), 8);
         if (mode != nullptr)
           ev.f("mode", mode);
+        /* On a probe dwell the beacon this demo airs IS the small known
+         * probe body — it carries the sync marker and nothing else. A demo
+         * streaming caller payload would suppress that payload here instead;
+         * probes must never spend FEC shards on an excluded channel. */
+        if (hop_probe_slot)
+          ev.f("probe", true);
       }
     }
     if (hop_schedule && hop_slot_ms > 0) {
@@ -1416,10 +1484,11 @@ int main(int argc, char **argv) {
         marker.epoch = hop_epoch;
         marker.phase_us = phase;
         marker.slot = slot;
-        marker.generation = hopset_view->state().generation;
+        std::lock_guard<std::mutex> lk(g_hopset_mu);
+        marker.generation = g_hopset_view->state().generation;
         marker.mask_fp = devourer::hopset::mask_fp(
-            *hopset_keys, hopset_view->state().generation,
-            hopset_view->state().active_mask);
+            *g_hopset_keys, g_hopset_view->state().generation,
+            g_hopset_view->state().active_mask);
         auto wire = devourer::hopset::HopSyncMarkerV2::encode(marker);
         tx_buf.insert(tx_buf.end(), wire.begin(), wire.end());
       } else {

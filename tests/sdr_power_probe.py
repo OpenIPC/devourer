@@ -22,6 +22,12 @@ Run standalone to sanity-check the SDR:
 """
 from __future__ import annotations
 
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import argparse
 import math
 import sys
@@ -46,7 +52,9 @@ def main() -> int:
     ap.add_argument("--rate", type=float, default=4e6, help="sample rate (Hz)")
     ap.add_argument("--gain", type=float, default=40.0, help="RX gain (dB)")
     ap.add_argument("--antenna", default="RX2", help="RX antenna port")
-    ap.add_argument("--args", default="", help="UHD device args (e.g. type=b200)")
+    ap.add_argument("--args", default=uhd_select.device_args(None, allow_ambiguous=True),
+        help="UHD device args, e.g. serial=XXXXXXX (default: $DEVOURER_UHD_ARGS "
+             "or tests/.uhd_args)")
     ap.add_argument("--window", type=int, default=0,
                     help="samples per power reading (0 = ~rate/20, ~50ms)")
     ap.add_argument("--duration", type=float, default=0.0,
@@ -63,7 +71,7 @@ def main() -> int:
 
     window = args.window if args.window > 0 else max(1024, int(args.rate / 20))
 
-    usrp = uhd.usrp.MultiUSRP(args.args)
+    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args(args.args))
     usrp.set_rx_rate(args.rate)
     usrp.set_rx_freq(uhd.types.TuneRequest(args.freq))
     usrp.set_rx_gain(args.gain)

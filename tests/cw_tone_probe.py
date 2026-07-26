@@ -25,6 +25,12 @@ orchestrator (cw_tone_sdr.sh) can aggregate the sweep. Example:
 """
 from __future__ import annotations
 
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import argparse
 import json
 import sys
@@ -44,7 +50,7 @@ except ImportError:
 
 
 def _open(args) -> "uhd.usrp.MultiUSRP":
-    usrp = uhd.usrp.MultiUSRP(args.args)
+    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args(args.args))
     usrp.set_rx_rate(args.rate)
     usrp.set_rx_freq(uhd.types.TuneRequest(args.freq))
     usrp.set_rx_gain(args.gain)
@@ -136,7 +142,9 @@ def main() -> int:
     ap.add_argument("--rate", type=float, default=10e6, help="sample rate (Hz)")
     ap.add_argument("--gain", type=float, default=40.0, help="RX gain (dB)")
     ap.add_argument("--antenna", default="RX2", help="RX antenna port")
-    ap.add_argument("--args", default="", help="UHD device args (e.g. type=b200)")
+    ap.add_argument("--args", default=uhd_select.device_args(None, allow_ambiguous=True),
+        help="UHD device args, e.g. serial=XXXXXXX (default: $DEVOURER_UHD_ARGS "
+             "or tests/.uhd_args)")
     ap.add_argument("--nfft", type=int, default=8192, help="FFT / PSD resolution")
     ap.add_argument("--secs", type=float, default=0.2, help="capture length (s)")
     ap.add_argument("--guard-khz", type=float, default=500.0,

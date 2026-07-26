@@ -14,6 +14,12 @@ Uncalibrated relative dBFS, like sdr_power_probe.py. Pair with a fixed geometry.
 """
 from __future__ import annotations
 
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import argparse
 import sys
 
@@ -28,7 +34,7 @@ except ImportError:
 
 
 def capture(freq, rate, gain, antenna, dev_args, nsamp):
-    usrp = uhd.usrp.MultiUSRP(dev_args)
+    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args(dev_args))
     usrp.set_rx_rate(rate)
     usrp.set_rx_freq(uhd.types.TuneRequest(freq))
     usrp.set_rx_gain(gain)
@@ -80,7 +86,9 @@ def main() -> int:
     ap.add_argument("--rate", type=float, default=25e6)
     ap.add_argument("--gain", type=float, default=40.0)
     ap.add_argument("--antenna", default="RX2")
-    ap.add_argument("--args", default="type=b200")
+    ap.add_argument("--args", default=uhd_select.device_args(None, allow_ambiguous=True),
+        help="UHD device args, e.g. serial=XXXXXXX (default: $DEVOURER_UHD_ARGS "
+             "or tests/.uhd_args)")
     ap.add_argument("--duration", type=float, default=1.5)
     ap.add_argument("--label", default="")
     ap.add_argument("--dump", default=None,

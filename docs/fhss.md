@@ -287,16 +287,71 @@ rollover, invalid masks, window violations) are ctest gates:
 `hopset_schedule_math`, `hopset_wire_kat`, `hopset_proto_matrix`,
 `hopset_activation_sync`.
 
+### Deciding: receiver-driven exclusion
+
+The receiver decides which channel to drop, because its delivery measurement
+describes the endpoint that actually has to decode — a transmitter's own view
+of the channel is not evidence that the video arrived. Each closed dwell is
+scored (did the marker arrive, how many frames, how many failed FCS, RSSI/SNR/
+EVM, retune-to-first-decode latency) and folded into a per-channel window
+(`src/hopset/HopsetPolicy.h`). Delivery is authoritative; the energy metrics
+and link verdicts only *classify* an impairment — interference, weak signal,
+lost synchronization — into explanation bits. A quiet channel with a dead link
+and a noisy channel that still delivers are opposite decisions, so a channel is
+never excluded on energy alone.
+
+The shipped policy is deliberately timid, because an adaptive exclusion loop is
+an attack surface: anyone who can make channels look bad can otherwise herd the
+link onto one channel and then jam it. So: at least 8 scored rounds before any
+decision; exactly one channel per update; exclusion only after delivery stays
+under 30 % for 5 consecutive visits *while another channel is still healthy*;
+a hard floor of `max(3, configured)` active channels; at least 10 rounds
+between updates (a refused proposal spends that budget too, so a receiver whose
+proposals keep bouncing cannot flood the control channel); nothing excluded
+when most of the band degrades together; and a cap on the excluded fraction.
+The transmitter enforces its own copy of the shape limits — one channel per
+update, the update gap, the diversity floor — because the receiver decides
+*which* channel, never *how much* of the schedule may move at once.
+
+Restoration is the other half: an excluded channel cannot prove it recovered
+unless something goes back and looks. Every `P` rounds one data opportunity is
+replaced by a **keyed recovery probe** on an excluded channel — which round of
+the window, which position in it, and which excluded channel are all keyed
+draws, so recovery does not create a public periodic target for an adversary to
+sit on. Only sync/control rides a probe dwell, never caller FEC payload. Three
+consecutive probes above 70 % delivery restore the channel.
+
 ### Driving it
 
 `DEVOURER_HOP_ADAPTIVE=1` on `txdemo`/`rxdemo` (with a keyed seed and
 `DEVOURER_HOP_SLOT_MS`) arms authority and follower;
-`DEVOURER_HOP_ADAPTIVE_SCRIPT="slot:mask,..."` feeds scripted
-authority-originated commits (`0x1b` = drop bits 2 and 5-of-8, etc.) until the
-receiver-driven exclusion policy exists. `streamtx` emits the v2 marker at
-generation 0 so an adaptive receiver tracks it. Control frames ride their own
-small 802.11 frames — caller FEC payload bytes are never touched. On-air run:
-`tests/hopset_adaptive_onair.sh`.
+`DEVOURER_HOP_POLICY=1` adds the receiver-driven policy (and
+`DEVOURER_HOP_POLICY_EVENTS=2` its per-channel evidence);
+`DEVOURER_HOP_PROBE_ROUNDS` is the probe period (default 8, 0 = off) and must
+match on both ends, like the seed. `DEVOURER_HOP_ADAPTIVE_SCRIPT="slot:mask,..."`
+is the operator's own lever for scripted authority-originated commits, exempt
+from the one-channel-per-update limit; `DEVOURER_HOP_MIN_ACTIVE` lowers the
+authority's floor for protocol tests on a small base hopset (the policy's
+`max(3, ...)` is not lowerable). The proposal travels on the receiver's own
+claimed handle — one bring-up, RX loop plus an occasional control frame — and
+the transmitter listens for it under `DEVOURER_TX_WITH_RX=thread`. `streamtx`
+emits the v2 marker at generation 0 so an adaptive receiver tracks it. Control
+frames ride their own small 802.11 frames — caller FEC payload bytes are never
+touched.
+
+On-air: `tests/hopset_adaptive_onair.sh` (protocol), and
+`tests/hopset_adaptive_jammer.sh` for the decision loop against a real B210
+interferer — `MODE=parked` (exclude, improve, restore once the jammer leaves)
+and `MODE=herding` (the jammer moves onto a newly-active channel after every
+exclusion). Measured on a 4-channel 2.4 GHz base with a narrowband interferer
+parked on one member: delivery 0.72 → 0.83 with the jammed channel excluded and
+probe-driven restoration after the interferer stopped; under herding, the
+active set held at the floor of 3 with committed exclusion depth 1 and no
+collapse. Two rig notes that cost a session: a flat TXAGC index chosen to back
+5 GHz off can put 2.4 GHz below the receiver's sensitivity and look exactly
+like a dead link, and an interferer loud enough to splatter across the whole
+band is broad degradation, not a channel fault — the policy correctly refuses
+to act on it.
 
 ## Where it stands
 
@@ -311,7 +366,9 @@ the slow full set); per-hop TX power is not re-tuned, so a hopset spanning a wid
 5 GHz range wants a periodic full set to refresh per-rate power; the follower
 experiment uses a 3-channel hopset because a single B210 needs ≥60 MS/s to span
 a 60 MHz hopset in one FFT and trips a UHD tuning assertion at the usual
-61.44 MS/s. And while the adaptive-hopset protocol can exclude a channel by
-authenticated commit, nothing yet *decides* to — the receiver-driven
-observation policy is unimplemented, so an unattended link still visits every
-configured channel and the fused-FEC layer absorbs jammed dwells as erasures.
+61.44 MS/s. Adaptive exclusion is receiver-driven and opt-in: with the policy
+off the schedule visits every configured channel and the fused-FEC layer
+absorbs jammed dwells as erasures, and with it on the transmitter never senses
+for itself — it acts only on an authenticated proposal from the endpoint that
+has to decode. A herding jammer cannot be out-run, only survived: the floor
+keeps the link diverse rather than winning the exchange.

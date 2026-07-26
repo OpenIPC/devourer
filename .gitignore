@@ -13,3 +13,7 @@ tests/chipid_probe
 # Local lab notes / Claude Code state (never commit)
 INVENTORY.md
 .claude/
+
+# Bench-local UHD radio selection (tests/uhd_select.py) — serials are
+# per-bench, never committed.
+tests/.uhd_args

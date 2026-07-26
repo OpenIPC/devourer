@@ -99,6 +99,25 @@ probe on kernels 6.15+ (`failed to download firmware`, `error -22`), but
 - `iw`, `tcpdump`, `ip` on PATH
 - Passwordless `sudo`, or run directly as root
 
+### Choosing the SDR (benches with more than one radio)
+
+Every UHD tool here (`sdr_duty.py`, `sdr_interferer.py`, `hop_rx_probe.py`,
+`sdr_follower_jammer.py`, …) resolves its radio through `uhd_select.py`:
+an explicit `--args`, else `DEVOURER_UHD_ARGS`, else the untracked
+`tests/.uhd_args`, else the only device present. With two or more radios and
+no selection it **fails with the serial list** rather than picking one — B210
+variants share USB id `2500:0020`, so a silent pick means half your runs
+measure the wrong antenna and nothing in the log says so.
+
+Set it once per bench. Use the file, not the variable: nearly every harness
+invokes its SDR tool through `sudo`, which scrubs the environment.
+
+```sh
+uhd_find_devices                          # read off the serials
+echo serial=XXXXXXX > tests/.uhd_args     # survives sudo; gitignored
+python3 tests/uhd_select.py               # prints what would be opened
+```
+
 ### For local mode
 
 - Kernel driver(s) installed and `modprobe`-able for your DUTs (rtw88 or

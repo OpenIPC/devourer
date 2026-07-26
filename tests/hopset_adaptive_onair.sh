@@ -59,9 +59,13 @@ cmake --build "$ROOT/build" -j --target txdemo rxdemo >/dev/null || exit 1
 unbind "$TX_PID"; unbind "$RX_PID"
 mkdir -p "$OUT"; rm -f "$OUT"/*.log
 
+# This is a protocol test (commit -> activate -> recover), not a policy test:
+# it drives the operator's scripted lever on a 3-channel base, so the
+# authority's diversity floor is lowered to the protocol minimum. The
+# receiver-driven policy's own max(3, configured) floor is not involved.
 COMMON=(DEVOURER_HOP_CHANNELS="$CHANNELS" DEVOURER_HOP_SLOT_MS="$SLOT_MS"
         DEVOURER_HOP_SEED="$SEED" DEVOURER_HOP_ADAPTIVE=1
-        DEVOURER_LOG_LEVEL=info)
+        DEVOURER_HOP_MIN_ACTIVE=2 DEVOURER_LOG_LEVEL=info)
 
 echo "== phase A: follower tracks the scripted transition =="
 sudo env "${COMMON[@]}" DEVOURER_VID="$VID" DEVOURER_PID="$RX_PID" \

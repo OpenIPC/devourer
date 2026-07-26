@@ -8,6 +8,12 @@
 # lockstep, and delivery on the remaining set must improve. Killing the
 # jammer must then let the keyed recovery probes restore the channel.
 #
+#   MODE=sense    parked, with transmitter sensing armed under the default
+#                 fusion mode: the receiver is right and the transmitter must
+#                 not contradict it (the #264 result must be reproduced)
+#   MODE=failsafe the receiver's uplink is muted, so nothing adapts under its
+#                 authority; the transmitter must carry the link on its own
+#                 evidence and the receiver must follow without split-brain
 #   MODE=parked   (default) exclude -> improve -> restore after the jam ends
 #   MODE=herding  the jammer moves onto a newly-active channel after every
 #                 exclusion; the diversity floor must hold and the link must
@@ -56,6 +62,20 @@ JAM_GAIN="${JAM_GAIN:-50}"
 # error rather than a coin flip when a bench has more than one radio).
 SDR_ARGS="${SDR_ARGS-}"
 TX_PWR="${TX_PWR-}"              # flat TXAGC index; empty = efuse default
+SENSE="${SENSE:-0}"              # DEVOURER_TX_SENSE
+FUSION="${FUSION:-veto}"         # rx | veto | either | failsafe
+SENSE_WINDOW_US="${SENSE_WINDOW_US:-4000}"
+SENSE_POSTBURST_US="${SENSE_POSTBURST_US:-0}"
+SENSE_EVERY="${SENSE_EVERY:-4}"
+# The false-alarm/CCA counters count PACKET DETECTIONS — they fire on 802.11
+# preambles, not on band-limited noise. Measured here: with a 50 dB AWGN
+# interferer parked on a channel the receiver cannot decode at all, the
+# transmitter's CCA and FA read exactly zero on that channel and IGI barely
+# leaves its floor. NHM is a power histogram rather than an event counter, so
+# it is the instrument that actually sees this interferer — at the cost of a
+# ~3 ms armed window per read.
+SENSE_NHM="${SENSE_NHM:-0}"
+SENSE_FLOOR="${SENSE_FLOOR:-0.80}"   # absolute delivery floor for MODE=sense
 BASELINE_S="${BASELINE_S:-25}"
 ADAPT_S="${ADAPT_S:-70}"
 RESTORE_S="${RESTORE_S:-70}"
@@ -121,9 +141,15 @@ start_tx() { # logfile
     # TX_PWR="" leaves the efuse-calibrated default alone. A flat TXAGC index
     # is per-band on these dies — an index that merely backs 5 GHz off can put
     # 2.4 GHz below the receiver's sensitivity and look like a dead rig.
-    local pwr=()
+    local pwr=() sense=()
     [ -n "$TX_PWR" ] && pwr=(DEVOURER_TX_PWR="$TX_PWR")
-    sudo env "${COMMON[@]}" "${pwr[@]}" DEVOURER_VID="$VID" \
+    [ "$SENSE" = "1" ] && sense=(DEVOURER_TX_SENSE=1
+        DEVOURER_TX_SENSE_WINDOW_US="$SENSE_WINDOW_US"
+        DEVOURER_TX_SENSE_POSTBURST_US="$SENSE_POSTBURST_US"
+        DEVOURER_TX_SENSE_EVERY="$SENSE_EVERY"
+        DEVOURER_TX_SENSE_NHM="$SENSE_NHM"
+        DEVOURER_HOP_FUSION="$FUSION")
+    sudo env "${COMMON[@]}" "${pwr[@]}" "${sense[@]}" DEVOURER_VID="$VID" \
         DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="${CHANNELS%%,*}" \
         DEVOURER_HOP_FAST=1 DEVOURER_TX_WITH_RX=thread \
         "$ROOT/build/txdemo" >"$1" 2>&1 &
@@ -131,6 +157,7 @@ start_tx() { # logfile
 start_rx() { # logfile, policy(0|1)
     local pol=()
     [ "$2" = "1" ] && pol=(DEVOURER_HOP_POLICY=1 DEVOURER_HOP_POLICY_EVENTS=2)
+    [ "$MODE" = "failsafe" ] && pol+=(DEVOURER_HOP_MUTE=1)
     sudo env "${COMMON[@]}" "${pol[@]}" DEVOURER_VID="$VID" \
         DEVOURER_PID="$RX_PID" "$ROOT/build/rxdemo" >"$1" 2>&1 &
 }
@@ -213,7 +240,7 @@ else
 fi
 ADAPT_DELIV=$(delivery "$OUT/rx_adapt.log")
 
-if [ "$MODE" = "parked" ]; then
+if [ "$MODE" = "parked" ] || [ "$MODE" = "sense" ]; then
     echo "== phase C: jammer off — probes must restore the channel, ${RESTORE_S}s =="
     kill_jammer
     : > "$OUT/rx_restore_mark"
@@ -257,7 +284,7 @@ require "$OUT/rx_adapt.log" '"ev":"hop.rx","state":"track"' "lockstep held"
 # first exclusion lands, and targeting wherever it went is the correct answer.
 target=$(grep -F '"kind":"exclude"' "$OUT/rx_adapt.log" | head -1 |
          sed -n 's/.*"target":\([0-9]*\).*/\1/p')
-if [ "$MODE" = "parked" ]; then
+if [ "$MODE" = "parked" ] || [ "$MODE" = "sense" ]; then
     if [ "${target:-x}" = "${jam_idx:-y}" ]; then
         echo "PASS: excluded the jammed channel (base index $jam_idx)"
     else
@@ -279,7 +306,68 @@ else
     echo "FAIL: active set fell to $minactive"; fails=$((fails+1))
 fi
 
-if [ "$MODE" = "parked" ]; then
+if [ "$MODE" = "sense" ]; then
+    # Sensing must actually have run: a silent no-op would pass the
+    # non-regression trivially and prove nothing.
+    require "$OUT/tx_adapt.log" '"ev":"hopset.sense"' "TX sensing emitted samples"
+    n_pre=$(grep -c '"phase":"pre"' "$OUT/tx_adapt.log" 2>/dev/null || echo 0)
+    [ "${n_pre:-0}" -ge 20 ] &&
+        echo "PASS: $n_pre pre-burst samples taken" ||
+        { echo "FAIL: only ${n_pre:-0} pre-burst samples"; fails=$((fails+1)); }
+    # THE acceptance criterion. The interferer is real and on a hopset member,
+    # so the receiver is right; the transmitter must not contradict it.
+    if grep -F '"ev":"hopset.decision"' "$OUT/tx_adapt.log" 2>/dev/null |
+       grep -qE '"kind":"(delay|hold)".*"veto":"tx_'; then
+        echo "FAIL: the transmitter vetoed the receiver's correct exclusion"
+        grep -F '"veto":"tx_' "$OUT/tx_adapt.log" | head -2
+        fails=$((fails+1))
+    else
+        echo "PASS: no veto of the receiver-driven decision"
+    fi
+    # An absolute floor, not the loose a>b: sensing overhead that ate the gain
+    # would still satisfy "improved".
+    awk -v a="$ADAPT_DELIV" -v f="$SENSE_FLOOR" 'BEGIN { exit !(a >= f) }' &&
+        echo "PASS: delivery $ADAPT_DELIV clears the regression floor $SENSE_FLOOR" ||
+        { echo "FAIL: sensing regressed delivery ($ADAPT_DELIV < $SENSE_FLOOR)"
+          fails=$((fails+1)); }
+    require "$OUT/rx_adapt.log" '"ev":"hopset.probe"' "keyed probes aired"
+elif [ "$MODE" = "failsafe" ]; then
+    # The receiver hears everything and answers nothing, so its authority is
+    # unusable and the transmitter must carry the link on its own evidence.
+    require "$OUT/tx_adapt.log" '"origin":"failsafe"' "TX originated under outage"
+    require "$OUT/tx_adapt.log" '"ev":"hopset.commit"' "authority committed it"
+    t=$(grep -F '"origin":"failsafe"' "$OUT/tx_adapt.log" 2>/dev/null |
+        grep -F '"kind":"exclude"' | head -1 |
+        sed -n 's/.*"target":\([0-9]*\).*/\1/p')
+    [ "${t:-x}" = "${jam_idx:-y}" ] &&
+        echo "PASS: failsafe excluded the jammed channel (base index $jam_idx)" ||
+        { echo "FAIL: failsafe excluded '${t:-none}', jammed is '$jam_idx'"
+          fails=$((fails+1)); }
+    # The definitive split-brain check: a split brain IS two endpoints holding
+    # different (generation, mask), so compare the sets directly.
+    gm() { grep -F '"ev":"hopset.activate"' "$1" 2>/dev/null |
+           sed -n 's/.*"gen":\([0-9]*\).*"mask":"\([0-9a-fx]*\)".*/\1 \2/p' |
+           sort -u; }
+    if [ -n "$(gm "$OUT/tx_adapt.log")" ] &&
+       diff <(gm "$OUT/tx_adapt.log") <(gm "$OUT/rx_adapt.log") >/dev/null; then
+        echo "PASS: receiver activated exactly the transmitter's generations"
+    else
+        echo "FAIL: generation/mask sets differ between the endpoints"
+        echo "   tx: $(gm "$OUT/tx_adapt.log" | tr '\n' ' ')"
+        echo "   rx: $(gm "$OUT/rx_adapt.log" | tr '\n' ' ')"
+        fails=$((fails+1))
+    fi
+    # Every committed change moved exactly one channel: the autonomous path is
+    # bound by the same structural limits a proposal is.
+    if gm "$OUT/tx_adapt.log" | awk '{print $2}' |
+       awk 'NR>1{d=xor(strtonum(p),strtonum($0)); n=0; while(d){n+=d%2;d=int(d/2)}
+                 if(n!=1){bad=1}} {p=$0} END{exit bad?1:0}'; then
+        echo "PASS: one channel per autonomous update"
+    else
+        echo "FAIL: an autonomous update moved more than one channel"
+        fails=$((fails+1))
+    fi
+elif [ "$MODE" = "parked" ]; then
     awk -v b="$BASE_DELIV" -v a="$ADAPT_DELIV" 'BEGIN { exit !(a > b) }' &&
         echo "PASS: delivery improved ($BASE_DELIV -> $ADAPT_DELIV)" ||
         { echo "FAIL: delivery did not improve ($BASE_DELIV -> $ADAPT_DELIV)"

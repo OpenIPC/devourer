@@ -30,8 +30,15 @@ HERE="$ROOT/tests"
 
 MODE="${MODE:-parked}"
 VID="${VID:-0x0bda}"
-TX_PID="${TX_PID:-0xa81a}"      # RTL8812EU (Jaguar3)
-RX_PID="${RX_PID:-0xc812}"      # RTL8812CU (Jaguar3)
+# The transmitter is the 8812CU because this hopset is 2.4 GHz and the 8812EU
+# is a 5 GHz-only PA part — its 2.4 GHz front end is not the instrument to
+# sense with. Measured here against a narrowband interferer that destroys
+# delivery on one channel: the 8812CU separates jammed from clean by roughly
+# five to one, receiving or transmitting, while the 8812EU on 2.4 GHz shows no
+# separation in either role. That is a statement about this band on this part,
+# not about the die — on 5 GHz the 8812EU is the one with the front end.
+TX_PID="${TX_PID:-0xc812}"      # RTL8812CU (Jaguar3) — the die that can sense
+RX_PID="${RX_PID:-0xa81a}"      # RTL8812EU (Jaguar3)
 # Four ADJACENT BUT NON-OVERLAPPING 2.4 GHz channels: 1/5/9/13 sit on 2412,
 # 2432, 2452, 2472 — 20 MHz apart, so their passbands abut without overlapping.
 # The interferer has to degrade ONE hopset member and leave the rest healthy;
@@ -50,13 +57,18 @@ NO_JAM="${NO_JAM:-0}"             # 1 = rig sanity run, no interferer at all
 SLOT_MS="${SLOT_MS:-50}"
 SEED="${SEED:-a5a5c3c3f00d1234deadbeef00c0ffee}"
 PROBE_ROUNDS="${PROBE_ROUNDS:-4}"
-# Bench setpoint, measured on this rig with the 5 MHz narrowband interferer:
-# 50 dB puts the jammed channel at 0.00 delivery and leaves every other hopset
-# member at 1.00. At 65 dB it splatters (0.09 / 0.24 / 0.61 across the set),
-# which is broad degradation, not a channel fault — the policy refuses to act
-# on it, correctly. Re-calibrate with NO_JAM=1 then a short gain sweep if the
-# antennas move.
-JAM_GAIN="${JAM_GAIN:-50}"
+# Bench setpoint, measured with the 5 MHz narrowband interferer and the roles
+# above (8812CU transmitting, 8812EU receiving): 80 dB puts the jammed channel
+# at 0.19 delivery — under the 0.30 exclusion floor — and leaves every other
+# hopset member at 1.00.
+#
+# The setpoint is specific to the geometry, not just the gain. With the roles
+# reversed the same profile appeared at 50 dB, and at 65 dB it splattered
+# across the whole set (0.09 / 0.24 / 0.61), which is broad degradation rather
+# than a channel fault and the policy correctly refuses to act on it. Swap the
+# adapters or move an antenna and this needs re-deriving: NO_JAM=1 for a
+# sanity run, then a short sweep reading the per-channel table.
+JAM_GAIN="${JAM_GAIN:-80}"
 # UHD device selection. Empty = let tests/uhd_select.py resolve it (env, then
 # the untracked tests/.uhd_args, then the only device present — and a hard
 # error rather than a coin flip when a bench has more than one radio).
@@ -269,11 +281,15 @@ if [ "$NO_JAM" = "1" ]; then
         echo "== RIG BAD: link does not deliver without an interferer =="
     exit 0
 fi
-require "$OUT/rx_adapt.log" '"ev":"hopset.decision","t"' "policy emitted decisions"
-if grep -F '"ev":"hopset.decision"' "$OUT/rx_adapt.log" | grep -qF '"kind":"exclude"'; then
-    echo "PASS: receiver proposed an exclusion"
+if [ "$MODE" = "failsafe" ]; then
+    echo "NOTE: receiver is muted in this mode — it decides nothing by design"
 else
-    echo "FAIL: receiver proposed an exclusion"; fails=$((fails+1))
+    require "$OUT/rx_adapt.log" '"ev":"hopset.decision","t"' "policy emitted decisions"
+    if grep -F '"ev":"hopset.decision"' "$OUT/rx_adapt.log" | grep -qF '"kind":"exclude"'; then
+        echo "PASS: receiver proposed an exclusion"
+    else
+        echo "FAIL: receiver proposed an exclusion"; fails=$((fails+1))
+    fi
 fi
 require "$OUT/tx_adapt.log" '"ev":"hopset.commit"' "authority committed it"
 require "$OUT/rx_adapt.log" '"ev":"hopset.activate"' "receiver activated it"
@@ -345,9 +361,13 @@ elif [ "$MODE" = "failsafe" ]; then
           fails=$((fails+1)); }
     # The definitive split-brain check: a split brain IS two endpoints holding
     # different (generation, mask), so compare the sets directly.
+    # Generation 0 is where both sides START, so only the receiver ever logs an
+    # "activation" for it — adopting the authority's status beacon is a no-op
+    # state change. Comparing that against the transmitter, which never
+    # activates into its own initial state, is noise rather than split-brain.
     gm() { grep -F '"ev":"hopset.activate"' "$1" 2>/dev/null |
            sed -n 's/.*"gen":\([0-9]*\).*"mask":"\([0-9a-fx]*\)".*/\1 \2/p' |
-           sort -u; }
+           awk '$1 > 0' | sort -u; }
     if [ -n "$(gm "$OUT/tx_adapt.log")" ] &&
        diff <(gm "$OUT/tx_adapt.log") <(gm "$OUT/rx_adapt.log") >/dev/null; then
         echo "PASS: receiver activated exactly the transmitter's generations"

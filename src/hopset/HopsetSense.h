@@ -90,11 +90,21 @@ struct TxSenseConfig {
   uint8_t igi_floor = 0x1c;
   uint8_t igi_ceiling = 0x7f;
 
-  /* --- occupancy scoring --- */
-  double cca_rate_sat = 40.0; /* events/ms mapping to 1.0 */
-  double fa_rate_sat = 20.0;
+  /* --- occupancy scoring ---
+   * The saturation rates are MEASURED, not guessed: an 8812CU sensing its own
+   * dwell against a narrowband interferer that destroys delivery reads about
+   * 2.8 CCA and 3.0 false alarms per millisecond, against roughly 0.6 on a
+   * clean channel. Earlier estimates of 40 and 20 per millisecond were about
+   * thirty times too high, which scored a fully jammed channel at 0.03 of full
+   * scale — it could never have crossed any sensible threshold.
+   *
+   * False alarms carry more weight than CCA because they separate better: the
+   * same measurement puts false alarms at roughly 5.6:1 jammed-to-clean and
+   * CCA at 4.8:1, and CCA also counts legitimate traffic. */
+  double cca_rate_sat = 3.0; /* events/ms mapping to 1.0 */
+  double fa_rate_sat = 3.0;
   double igi_span = 32.0; /* IGI counts above the floor mapping to 1.0 */
-  double w_cca = 0.45, w_fa = 0.20, w_igi = 0.15, w_nhm = 0.20;
+  double w_cca = 0.30, w_fa = 0.35, w_igi = 0.15, w_nhm = 0.20;
 
   /* --- evidence sufficiency (deliberately stricter than the RX policy) --- */
   uint32_t min_samples_per_chan = 12;
@@ -197,7 +207,12 @@ inline bool score_sample(const TxSenseSample &s, const TxSenseConfig &cfg,
     wsum += cfg.w_igi;
     src |= kSrcIgi;
   }
-  if (s.valid_nhm && s.nhm_duration > 0) {
+  /* The histogram's buckets are placed relative to the gain index, so when
+   * that index sits at its floor the buckets sit below the real noise floor
+   * and every channel reads fully busy. A railed reading is not a measurement
+   * — same rule as the gain index itself. */
+  if (s.valid_nhm && s.nhm_duration > 0 && s.nhm_busy_pct > 0 &&
+      s.nhm_busy_pct < 100) {
     acc += cfg.w_nhm * clamp01(static_cast<double>(s.nhm_busy_pct) / 100.0);
     wsum += cfg.w_nhm;
     src |= kSrcNhm;

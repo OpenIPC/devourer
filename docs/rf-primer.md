@@ -271,9 +271,9 @@ per-chip mechanics, and bench tables are in
 [`time-distribution.md`](time-distribution.md); the closed discipline loop is a
 runnable tool (`tests/pcie_ptp_beacon.cpp`).
 
-## 11. Many stations in one channel — OFDMA and the scheduled uplink
+## 11. Many stations in one channel — OFDMA and the Trigger frame
 
-![802.11ax trigger-based uplink](img/he_ofdma_trigger.gif)
+![802.11ax Trigger frames — built, aired, read back](img/he_ofdma_trigger.gif)
 
 Everything so far has assumed one transmitter at a time: stations contend, one
 wins, it gets the whole channel for the length of its frame. 802.11ax breaks
@@ -291,19 +291,25 @@ Wi-Fi disappears. This is the standard's road to cellular-style scheduled
 access, and it's why a Wi-Fi 6 radio is interesting for a coordinated link and
 not just a faster one.
 
-What a userspace driver can do with that, today, is the honest half of the
-picture. devourer builds and transmits real Trigger frames on the Kestrel
-generation, and an independent monitor decodes them with the exact commanded
-parameters — identifier, resource unit, MCS, spatial streams, AP power. What
-does *not* follow is the answer. The reply is hardware-timed: the MAC has to
-arm a receive window at trigger + SIFS, and it only does that for a Trigger the
-*firmware* scheduled. A frame injected from the host rides the ordinary
-transmit path, so the station gets a perfectly valid Trigger and no timing cue
-to reply to it. The shipped client firmware accepts the scheduling commands —
-trigger scheduler, TWT, sounding — and does not execute them; that half lives
-in AP firmware nobody ships for these parts. Correct frame on the air, someone
-else's schedule: exactly the boundary worth knowing before you plan around it.
-Details and the API in [`he-trigger-ul.md`](he-trigger-ul.md).
+The animation is what that machinery looks like from this side of it. You write
+a grant table — who, which resource unit, what MCS, how many spatial streams,
+what receive power to aim for — devourer builds the Trigger frame around it and
+transmits it on the Kestrel generation, and an independent monitor pulls every
+one of those parameters back off the air unchanged. Command in, frame out,
+parameters verified: that round trip is what makes the adapter useful as an
+**instrument** for 11ax work. You can put an arbitrary, exactly-specified
+Trigger on the air and watch what other equipment does with it — which is
+otherwise gear you rent.
+
+One boundary comes with it. The *reply* is hardware-timed: the receiving MAC
+has to arm a receive window at trigger + SIFS, and it only does that for a
+Trigger its own firmware scheduled. Frames injected from the host ride the
+ordinary transmit path, so a station gets a perfectly valid Trigger and no
+timing cue to answer it — and the shipped client firmware accepts the
+scheduling commands (trigger scheduler, TWT, sounding) without executing them.
+Generating the schedule is available; owning it needs firmware these parts
+don't carry. [`he-trigger-ul.md`](he-trigger-ul.md) has the API and the full
+account of which paths close.
 
 ## 12. Reaching further — extended range and dual-carrier modulation
 

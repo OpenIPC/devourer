@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Animated 802.11ax trigger-based uplink — 'the AP says who talks, and where',
-in the DEVOURER live-monitor style.
+"""Animated 802.11ax Trigger frames — 'built, aired, read back', in the DEVOURER
+live-monitor style.
 
     tools/he_ofdma_trigger_gif.py -o docs/img/he_ofdma_trigger.gif
 
-Two lanes sharing one time axis. The top lane is the standard: an AP sends a
-Trigger frame naming, per station, a resource unit and an MCS; exactly one SIFS
-later those stations answer simultaneously, each inside its own slice of the
-channel's subcarriers. The bottom lane is what a userspace driver on shipped
-client firmware actually achieves: the Trigger goes out and decodes with the
-exact commanded parameters — and nothing answers, because a host-injected frame
-does not arm the MAC's SIFS-scheduled receive window, so the station never gets
-its hardware timing cue.
+What devourer does with 802.11ax uplink scheduling, exactly: it composes a
+Trigger frame from a per-user grant table — who, which resource unit, what MCS,
+how many spatial streams, what receive power to aim for — puts it on the air,
+and an independent monitor decodes it back with every commanded parameter
+intact. That round trip is the validated capability, and it makes the adapter a
+usable instrument for 11ax work: arbitrary, exactly-specified Trigger frames on
+demand.
 
-That gap is the teaching content, not a footnote: it is the line between putting
-a correct frame on the air and owning the hardware schedule. Needs Pillow.
+Three columns, because that is what the measurement is: what was asked for, what
+the frame actually looks like, and what came back off the air. The footer states
+the boundary in one line — the frame is exact, but the hardware-timed reply
+belongs to firmware these client parts do not ship — without spending half the
+canvas miming it. Needs Pillow.
 """
 from __future__ import annotations
 
@@ -26,153 +28,145 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from monitor_style import (AMBER, CYAN, DIM, GRID, INK, OK, WARN, chrome, font,
                            new_frame, save_gif)
 
-RUS = ["52-tone", "52-tone", "52-tone", "52-tone"]
-GRANTS = [("UE-A", "MCS4"), ("UE-B", "MCS2"), ("UE-C", "MCS6"), (None, None)]
+# who, AID, which resource unit, MCS, spatial streams, target RSSI
+USERS = [
+    ("UE-A", 1, "52-tone #1", "MCS4", 1, -60),
+    ("UE-B", 2, "52-tone #2", "MCS2", 1, -62),
+    ("UE-C", 3, "52-tone #3", "MCS6", 1, -58),
+]
+FIELDS = [
+    ("frame control", "0x24 — Trigger", AMBER),
+    ("duration", "", DIM),
+    ("RA", "broadcast", DIM),
+    ("TA", "our MAC", DIM),
+    ("common info", "BW · GI/LTF · AP power", CYAN),
+    ("user info", "UE-A · RU · MCS · NSS · RSSI", CYAN),
+    ("user info", "UE-B · RU · MCS · NSS · RSSI", CYAN),
+    ("user info", "UE-C · RU · MCS · NSS · RSSI", CYAN),
+    ("FCS", "", DIM),
+]
 
-T_TRIG = (0.02, 0.34)    # the Trigger frame, full bandwidth, legacy OFDM
-T_SIFS = (0.34, 0.42)    # the fixed ~16 us the standard allows for the answer
-T_RESP = (0.42, 0.86)    # the trigger-based PPDU, or the silence where it isn't
+P1, P2, P3 = 10, 30, 50      # compose / assemble + air / decode
+
+
+def check(d, x, y, col):
+    d.line([x, y + 5, x + 4, y + 9], fill=col, width=2)
+    d.line([x + 4, y + 9, x + 11, y], fill=col, width=2)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-o", "--out", default="he_ofdma_trigger.gif")
-    ap.add_argument("--frames", type=int, default=52)
-    ap.add_argument("--hold", type=int, default=18)
+    ap.add_argument("--hold", type=int, default=20)
     ap.add_argument("--ms", type=int, default=110)
     args = ap.parse_args()
 
-    nR = len(RUS)
-    padL, padT = 96, 96
-    gw, rh = 600, 25
-    laneH = nR * rh
-    gapH = 54
-    panelW = 236
-    W = padL + gw + 24 + panelW
-    H = padT + 20 + laneH + gapH + 20 + laneH + 60
-    yA = padT + 20
-    yB = yA + laneH + gapH + 20
-
-    def xt(f):
-        return padL + f * gw
-
-    def blk(d, y0, t0, t1, col, cut, label=None, dashed=False):
-        """One time-frequency block, revealed only left of the playhead."""
-        x0, x1 = xt(t0), min(xt(t1), cut)
-        if x1 <= x0:
-            return
-        if dashed:
-            d.rectangle([x0, y0 + 3, x1, y0 + rh - 3], outline=col)
-            step = 7
-            hx = x0 + 3
-            while hx < x1 - 2:
-                d.line([hx, y0 + rh / 2, min(hx + 3, x1 - 2), y0 + rh / 2], fill=col)
-                hx += step
-        else:
-            d.rectangle([x0 + 1, y0 + 3, x1, y0 + rh - 3], fill=col)
-        if label and x1 - x0 > 46:
-            d.text((x0 + 7, y0 + rh / 2 - 7), label, font=font(11),
-                   fill=(8, 11, 18) if not dashed else col)
+    padT = 106
+    ax, aw = 46, 252
+    bx, bw = 330, 300
+    cx, cw = 672, 268
+    W = cx + cw + 34
+    H = 476
 
     imgs = []
-    for fi in range(args.frames + args.hold):
-        prog = min(1.0, (fi + 1) / args.frames)
-        cut = xt(prog)
+    for fi in range(P3 + args.hold):
+        n_cmd = max(0, min(len(USERS) + 1, (fi * (len(USERS) + 1)) // P1))
+        n_fld = 0 if fi < P1 else min(len(FIELDS),
+                                      ((fi - P1) * len(FIELDS)) // (P2 - P1))
+        n_dec = 0 if fi < P2 else min(len(USERS) + 1,
+                                      ((fi - P2) * (len(USERS) + 1)) // (P3 - P2))
+        aired = fi >= P2
         img, d = new_frame(W, H)
-        chrome(d, W, H, "802.11ax — TRIGGER-BASED UPLINK",
-               "one 20 MHz channel, 242 subcarriers, sliced into resource units "
-               "— the AP grants each station one slice and an MCS", fi)
+        chrome(d, W, H, "802.11ax TRIGGER FRAMES — BUILT, AIRED, READ BACK",
+               "arbitrary per-user grants composed on the host, transmitted, "
+               "and decoded off the air unchanged", fi)
 
-        for lane, (y, title, tcol) in enumerate((
-                (yA, "THE STANDARD — a compliant station answers at trigger + SIFS", OK),
-                (yB, "HOST-INJECTED, SHIPPED CLIENT FIRMWARE — what actually airs", AMBER))):
-            d.text((padL, y - 17), title, font=font(11), fill=tcol)
-            d.rectangle([padL, y, padL + gw, y + laneH], outline=(0, 70, 80))
-            for i, ru in enumerate(RUS):
-                ry = y + i * rh
-                d.line([padL, ry, padL + gw, ry], fill=GRID)
-                if lane == 0:
-                    d.text((padL - 74, ry + rh / 2 - 7), ru, font=font(10), fill=DIM)
+        def col_head(x, w, text, colr):
+            d.text((x, padT - 26), text, font=font(12), fill=colr)
+            d.line([x, padT - 8, x + w, padT - 8], fill=(0, 70, 80))
 
-            # the Trigger itself — full bandwidth, so it spans every RU row
-            x0, x1 = xt(T_TRIG[0]), min(xt(T_TRIG[1]), cut)
-            if x1 > x0:
-                d.rectangle([x0 + 1, y + 3, x1, y + laneH - 3], fill=(120, 100, 32))
-                if x1 - x0 > 90:
-                    d.text((x0 + 10, y + laneH / 2 - 14), "AP TRIGGER",
-                           font=font(12, True), fill=(8, 11, 18))
-                    d.text((x0 + 10, y + laneH / 2 + 2),
-                           "who / which RU / what MCS", font=font(10),
-                           fill=(8, 11, 18))
+        # ---- what was asked for --------------------------------------------
+        col_head(ax, aw, "COMMANDED — the grant table", CYAN)
+        y = padT + 4
+        if n_cmd > 0:
+            d.text((ax, y), "AP TX power", font=font(11), fill=DIM)
+            d.text((ax + 148, y), "20 dBm", font=font(11, True), fill=INK)
+        y += 26
+        for i, (who, aid, ru, mcs, nss, rssi) in enumerate(USERS):
+            if i + 1 >= n_cmd:
+                break
+            d.rectangle([ax, y, ax + aw, y + 52], outline=(0, 60, 72))
+            d.text((ax + 8, y + 6), who, font=font(12, True), fill=CYAN)
+            d.text((ax + 62, y + 8), f"AID {aid}", font=font(10), fill=DIM)
+            d.text((ax + 8, y + 24), f"RU {ru}", font=font(10), fill=INK)
+            d.text((ax + 8, y + 37), f"{mcs} · NSS {nss} · target {rssi} dBm",
+                   font=font(10), fill=INK)
+            y += 58
 
-            # the SIFS the answer is owed
-            if cut > xt(T_SIFS[0]):
-                sx = xt((T_SIFS[0] + T_SIFS[1]) / 2)
-                yy = y
-                while yy < y + laneH:
-                    d.line([sx, yy, sx, yy + 4], fill=DIM)
-                    yy += 8
-                if lane == 0:
-                    d.text((sx - 16, y + laneH + 4), "SIFS", font=font(10), fill=DIM)
-
-            # the response — or the silence where the standard puts one
-            for i, (who, mcs) in enumerate(GRANTS):
-                ry = y + i * rh
-                if who is None:   # a slice the AP granted to nobody this round
-                    if lane == 0 and cut > xt(T_RESP[0] + 0.06):
-                        d.text((xt(T_RESP[0]) + 7, ry + rh / 2 - 7), "ungranted",
-                               font=font(10), fill=(70, 84, 104))
-                    continue
-                if lane == 0:
-                    blk(d, ry, T_RESP[0], T_RESP[1], CYAN, cut, f"{who}  {mcs}")
-                else:
-                    blk(d, ry, T_RESP[0], T_RESP[1], (70, 84, 104), cut,
-                        None, dashed=True)
-            if lane == 0 and cut > xt(T_RESP[0] + 0.06):
-                d.text((xt(T_RESP[0]) + 6, y + laneH + 4),
-                       "all three at once — one PPDU, three talkers",
+        # ---- the frame that carries it -------------------------------------
+        col_head(bx, bw, "THE FRAME ON AIR", OK if aired else AMBER)
+        y = padT + 4
+        for i, (name, note, colr) in enumerate(FIELDS):
+            if i >= n_fld:
+                break
+            d.rectangle([bx, y, bx + bw, y + 20], outline=(0, 60, 72),
+                        fill=(16, 22, 30) if colr is DIM else None)
+            d.text((bx + 8, y + 3), name, font=font(10), fill=colr)
+            if note:
+                d.text((bx + 106, y + 3), note, font=font(10), fill=DIM)
+            y += 23
+        if n_fld >= len(FIELDS):
+            y += 6
+            d.text((bx, y), "the channel's slices, as granted", font=font(10),
+                   fill=DIM)
+            y += 16
+            slot = bw / 4
+            for i in range(4):
+                sx = bx + i * slot
+                on = i < len(USERS)
+                d.rectangle([sx + 1, y, sx + slot - 2, y + 26],
+                            fill=CYAN if on else (24, 30, 40))
+                d.text((sx + 10, y + 7), USERS[i][0] if on else "—",
+                       font=font(11, True), fill=(8, 11, 18) if on else DIM)
+            y += 34
+            if aired:
+                d.text((bx, y), "transmitted on the ordinary management path",
                        font=font(10), fill=OK)
-            if lane == 1 and cut > xt(T_RESP[0] + 0.06):
-                d.text((xt(T_RESP[0]) + 6, y + laneH + 4),
-                       "no TB PPDU — the SIFS receive window was never armed",
-                       font=font(10), fill=WARN)
 
-        # the playhead
-        if prog < 1.0:
-            d.line([cut, yA - 6, cut, yB + laneH + 6], fill=(60, 90, 110))
+        # ---- what came back --------------------------------------------------
+        col_head(cx, cw, "DECODED — independent monitor", OK if n_dec else DIM)
+        y = padT + 4
+        if n_dec > 0:
+            d.text((cx, y), "AP TX power", font=font(11), fill=DIM)
+            d.text((cx + 130, y), "20 dBm", font=font(11, True), fill=INK)
+            check(d, cx + 214, y + 1, OK)
+        y += 26
+        for i, (who, aid, ru, mcs, nss, rssi) in enumerate(USERS):
+            if i + 1 >= n_dec:
+                break
+            d.rectangle([cx, y, cx + cw, y + 52], outline=(0, 60, 72))
+            d.text((cx + 8, y + 6), who, font=font(12, True), fill=OK)
+            d.text((cx + 62, y + 8), f"AID {aid}", font=font(10), fill=DIM)
+            d.text((cx + 8, y + 24), f"RU {ru}", font=font(10), fill=INK)
+            d.text((cx + 8, y + 37), f"{mcs} · NSS {nss} · target {rssi} dBm",
+                   font=font(10), fill=INK)
+            check(d, cx + cw - 26, y + 20, OK)
+            y += 58
 
-        # readout
-        x0 = padL + gw + 22
-        d.text((x0, padT - 2), "LIVE READOUT", font=font(12), fill=CYAN)
-        y = padT + 24
+        if n_dec > len(USERS):
+            d.rectangle([cx, y + 6, cx + cw, y + 38], outline=OK, width=2)
+            d.ellipse([cx + 10, y + 16, cx + 20, y + 26], fill=OK)
+            d.text((cx + 30, y + 12), "EVERY PARAMETER MATCHES",
+                   font=font(12, True), fill=OK)
 
-        def line(lbl, val, c=INK):
-            nonlocal y
-            d.text((x0, y), lbl, font=font(11), fill=DIM)
-            d.text((x0 + 104, y - 3), val, font=font(14, True), fill=c)
-            y += 28
-
-        aired = prog > T_TRIG[1]
-        answered = prog > T_RESP[0] + 0.06
-        line("trigger", "ON AIR" if aired else "…", OK if aired else DIM)
-        line("decoded as", "EXACT" if aired else "…", OK if aired else DIM)
-        line("granted", "3 users" if aired else "…", INK if aired else DIM)
-        line("TB PPDU", "NONE" if answered else "…", WARN if answered else DIM)
-        y += 4
-
-        if not aired:
-            cap = ("802.11ax moves uplink", "scheduling into the MAC.",
-                   "the AP names who talks,", "in which RU, at what MCS.")
-        elif not answered:
-            cap = ("the frame airs on the", "ordinary management path,",
-                   "so any monitor decodes", "it — AID, RU, MCS, NSS", "all exact.")
-        else:
-            cap = ("but the answer is", "hardware-timed. injecting",
-                   "the trigger from the host", "never arms the MAC's SIFS",
-                   "receive window, so no", "station is cued to reply.")
-        for ln in cap:
-            d.text((x0, y), ln, font=font(11), fill=INK)
-            y += 15
+        # ---- the one line that keeps it honest -------------------------------
+        if n_dec > len(USERS):
+            d.line([ax, H - 54, W - 34, H - 54], fill=(0, 55, 66))
+            d.text((ax, H - 44), "the frame is exact. the hardware-timed reply "
+                   "is not ours to schedule — only a firmware-scheduled trigger "
+                   "arms the receiving", font=font(10), fill=DIM)
+            d.text((ax, H - 30), "MAC's SIFS window, and the shipped client "
+                   "firmware does not air one.", font=font(10), fill=DIM)
 
         imgs.append(img)
 

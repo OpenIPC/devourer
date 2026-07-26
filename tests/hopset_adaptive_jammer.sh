@@ -14,6 +14,10 @@
 #   MODE=failsafe the receiver's uplink is muted, so nothing adapts under its
 #                 authority; the transmitter must carry the link on its own
 #                 evidence and the receiver must follow without split-brain
+#   MODE=prepost  a REACTIVE follower jammer with both sense windows armed in
+#                 one run: it keys up only after it hears us, so it should be
+#                 invisible before a burst and visible after one
+#   MODE=overhead what the quiet windows cost, sensing off versus on
 #   MODE=parked   (default) exclude -> improve -> restore after the jam ends
 #   MODE=herding  the jammer moves onto a newly-active channel after every
 #                 exclusion; the diversity floor must hold and the link must
@@ -97,6 +101,7 @@ SENSE_FLOOR="${SENSE_FLOOR:-0.80}"   # absolute delivery floor for MODE=sense
 BASELINE_S="${BASELINE_S:-25}"
 ADAPT_S="${ADAPT_S:-70}"
 RESTORE_S="${RESTORE_S:-70}"
+OVH_S="${OVH_S:-30}"
 OUT="${OUT:-/tmp/devourer-hopset-jammer}"
 
 plugged() { lsusb -d "$(printf '%04x:%04x' "$1" "$2")" >/dev/null 2>&1; }
@@ -120,7 +125,15 @@ unbind() {
     done
 }
 
-kill_jammer() { sudo pkill -f "sdr_interferer.py" 2>/dev/null || true; }
+fails=0
+require() { # file, needle, label
+    if grep -qF "$2" "$1"; then echo "PASS: $3"; else echo "FAIL: $3"; fails=$((fails+1)); fi
+}
+
+kill_jammer() {
+    sudo pkill -f "sdr_interferer.py" 2>/dev/null || true
+    sudo pkill -f "sdr_follower_jammer.py" 2>/dev/null || true
+}
 cleanup() {
     kill_jammer
     sudo pkill -INT -x txdemo 2>/dev/null || true
@@ -214,6 +227,91 @@ per_channel() { # logfile
         }' "$1" 2>/dev/null || true
 }
 
+# --- modes that do not use the parked interferer at all ---
+if [ "$MODE" = "prepost" ]; then
+    # Both windows armed in ONE run, not two runs of one window each: a
+    # following jammer's behaviour depends on its own detection of each burst,
+    # so across two runs its variance would be indistinguishable from the
+    # effect being measured. In one run the two phases sample the same dwells.
+    echo "== reactive follower jammer (it chases whatever it hears) =="
+    sudo "$PY" "$HERE/sdr_follower_jammer.py" ${SDR_SEL:+--args "$SDR_SEL"} \
+        --channels "$CHANNELS" --tx-gain "$JAM_GAIN" \
+        --secs "$((ADAPT_S + 10))" --log "$OUT/follow.jsonl" \
+        >>"$OUT/jammer.log" 2>&1 &
+    sleep 4
+    start_rx "$OUT/rx_prepost.log" 0
+    sleep 2
+    SENSE=1 SENSE_EVERY=1 start_tx "$OUT/tx_prepost.log"
+    sleep "$ADAPT_S"
+    sudo pkill -INT -x txdemo 2>/dev/null || true
+    sudo pkill -INT -x rxdemo 2>/dev/null || true
+    kill_jammer
+    sleep 2
+    echo "== verdicts (logs: $OUT) =="
+    mean_occ() { grep -F "\"phase\":\"$2\"" "$1" 2>/dev/null |
+        grep -oE '"occ":[0-9.]+' | cut -d: -f2 |
+        awk '{n++; s+=$1} END { printf "%.4f", (n ? s/n : 0) }'; }
+    count_ph() { grep -cF "\"phase\":\"$2\"" "$1" 2>/dev/null || echo 0; }
+    pre_m=$(mean_occ "$OUT/tx_prepost.log" pre)
+    post_m=$(mean_occ "$OUT/tx_prepost.log" post)
+    retunes=$(grep -c '"ev": "follow.jam"' "$OUT/follow.jsonl" 2>/dev/null || echo 0)
+    echo "   follower retunes seen: $retunes"
+    echo "   pre-burst  n=$(count_ph "$OUT/tx_prepost.log" pre)  mean occupancy $pre_m"
+    echo "   post-burst n=$(count_ph "$OUT/tx_prepost.log" post)  mean occupancy $post_m"
+    require "$OUT/tx_prepost.log" '"phase":"pre"'  "pre-burst samples taken"
+    require "$OUT/tx_prepost.log" '"phase":"post"' "post-burst samples taken"
+    [ "${retunes:-0}" -gt 0 ] && echo "PASS: the follower was actually chasing" ||
+        { echo "FAIL: the follower never retuned — nothing was measured"
+          fails=$((fails+1)); }
+    # Not a pass/fail: whether post exceeds pre depends on whether this jammer
+    # LOCKS ON after detecting us or merely sweeps. A sweeper is on our channel
+    # the same fraction of the time in both windows, so the two read alike, and
+    # that is a fact about the adversary rather than about the sensor.
+    awk -v a="$post_m" -v b="$pre_m" 'BEGIN { exit !(a > b * 1.2) }' &&
+        echo "NOTE: post-burst clearly exceeds pre-burst ($pre_m -> $post_m) — this jammer locks on" ||
+        echo "NOTE: post-burst does not exceed pre-burst ($pre_m -> $post_m) — this jammer sweeps rather than locking on, so both windows see it equally"
+    [ "$fails" -eq 0 ] && echo "== ALL PASS ==" || echo "== $fails FAILURES =="
+    exit "$fails"
+fi
+
+if [ "$MODE" = "overhead" ]; then
+    # A clean channel on purpose: an interferer adds carrier-sense deferral
+    # variance that has nothing to do with what the quiet windows cost.
+    NO_JAM=1
+    run_ovh() { # label, sense
+        start_rx "$OUT/rx_ovh_$1.log" 0
+        sleep 2
+        SENSE="$2" start_tx "$OUT/tx_ovh_$1.log"
+        sleep "$OVH_S"
+        sudo pkill -INT -x txdemo 2>/dev/null || true
+        sudo pkill -INT -x rxdemo 2>/dev/null || true
+        sleep 2
+    }
+    fps() { grep -F '"ev":"tx.stats"' "$1" 2>/dev/null | tail -1 |
+            sed -n 's/.*"submitted":\([0-9]*\).*/\1/p' |
+            awk -v t="$OVH_S" '{printf "%.1f", $1/t}'; }
+    echo "== overhead: sensing off =="; run_ovh off 0
+    echo "== overhead: sensing on  =="; run_ovh on 1
+    echo "== verdicts (logs: $OUT) =="
+    f_off=$(fps "$OUT/tx_ovh_off.log"); f_on=$(fps "$OUT/tx_ovh_on.log")
+    # What the windows themselves claim to have cost, from their own stamps.
+    acct=$(grep -F '"ev":"hopset.sense"' "$OUT/tx_ovh_on.log" 2>/dev/null |
+        grep -oE '"(window_us|settle_us|read_us)":[0-9]+' | cut -d: -f2 |
+        awk -v t="$OVH_S" '{s+=$1} END{printf "%.1f", 100*s/(t*1e6)}')
+    meas=$(awk -v a="$f_off" -v b="$f_on" 'BEGIN{printf "%.1f", (a>0)?100*(1-b/a):0}')
+    echo "   frames/s   off=$f_off  on=$f_on"
+    echo "   overhead   measured ${meas}%   accounted ${acct}%"
+    awk -v m="$meas" -v b="${OVH_BOUND:-25}" 'BEGIN { exit !(m <= b) }' &&
+        echo "PASS: measured overhead ${meas}% within the ${OVH_BOUND:-25}% bound" ||
+        { echo "FAIL: overhead ${meas}% exceeds ${OVH_BOUND:-25}%"; fails=$((fails+1)); }
+    # A large disagreement means something is being paid that nothing recorded.
+    awk -v m="$meas" -v a="$acct" 'BEGIN { d=m-a; if (d<0) d=-d; exit !(d <= 8) }' &&
+        echo "PASS: measured and accounted agree within 8 points" ||
+        echo "NOTE: measured ${meas}% vs accounted ${acct}% — unrecorded cost worth chasing"
+    [ "$fails" -eq 0 ] && echo "== ALL PASS ==" || echo "== $fails FAILURES =="
+    exit "$fails"
+fi
+
 echo "== jammer parked on ch$JAM_CHANNEL (gain $JAM_GAIN) =="
 start_jammer "$JAM_CHANNEL"
 
@@ -269,10 +367,6 @@ sudo pkill -INT -x txdemo 2>/dev/null || true
 sleep 2
 
 echo "== verdicts (logs: $OUT) =="
-fails=0
-require() { # file, needle, label
-    if grep -qF "$2" "$1"; then echo "PASS: $3"; else echo "FAIL: $3"; fails=$((fails+1)); fi
-}
 jam_idx=$(awk -v c="$JAM_CHANNEL" -F, '{for(i=1;i<=NF;i++) if($i==c) print i-1}' <<<"$CHANNELS")
 
 echo "   baseline delivery=$BASE_DELIV   adaptive delivery=$ADAPT_DELIV"

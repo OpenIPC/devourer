@@ -384,9 +384,27 @@ Excluded channels are revisited by **keyed recovery probes**
 (`DEVOURER_HOP_PROBE_ROUNDS`, default 8, must match both ends): every P rounds
 one data slot is replaced, round/position/channel all keyed so recovery isn't a
 periodic target; sync/control only, never caller FEC payload. `hopset.*` events
-(incl. `hopset.decision`, `hopset.probe`); on-air runs
+(incl. `hopset.decision`, `hopset.probe`).
+
+**TX sensing + endpoint fusion** (`DEVOURER_TX_SENSE=1`; `src/hopset/HopsetSense.h`
++ `HopsetFusion.h`, both pure): the transmitter opens quiet windows
+(retune → settle → discard barrier → window → read; `_WINDOW_US` / `_POSTBURST_US`
+/ `_SETTLE_US` / `_EVERY` / `_NHM`) and scores occupancy from CCA/FA/IGI/NHM.
+Refuses to arm beside `DEVOURER_TX_THREADS>1`, under a ~1.5 ms window, or while
+committing (a commit inside the window is self-jamming that would feed the
+veto). Saturation constants are **measured** (~3 events/ms = fully jammed, ~0.6
+clean); a railed IGI or NHM contributes nothing.
+`DEVOURER_HOP_FUSION=rx|veto|either|failsafe` — the veto may only argue "this
+move leaves ME worse off" (broad TX degradation → delay; every survivor worse →
+reject), never "I disagree about your target": that signature IS the hidden-node
+case where the RX is right. Autonomous changes go through
+`start_local_change` (structural limits apply; the scripted lever stays exempt);
+`DEVOURER_HOP_MUTE=1` on rxdemo injects a one-way outage. On-air:
 `tests/hopset_adaptive_onair.sh` (protocol) and `tests/hopset_adaptive_jammer.sh`
-(`MODE=parked|herding`, B210 interferer). Doc: `docs/fhss.md`.
+(`MODE=parked|herding|sense|failsafe|prepost|overhead`, B210 interferer);
+`tests/tx_sense_probe.sh` checks the telemetry is live at all. **Pick adapters by
+band** — a 5 GHz-only PA part senses nothing and cannot answer on 2.4 GHz.
+Sensing costs ~8% of frames (25 ms window, 1-in-2 dwells). Doc: `docs/fhss.md`.
 
 `IRtlDevice::FastSetBandwidth(bw)` is the bandwidth analogue — a lean
 same-channel toggle between 20 MHz and 5/10 MHz narrowband (baseband re-clock

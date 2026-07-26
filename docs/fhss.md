@@ -321,6 +321,88 @@ draws, so recovery does not create a public periodic target for an adversary to
 sit on. Only sync/control rides a probe dwell, never caller FEC payload. Three
 consecutive probes above 70 % delivery restore the channel.
 
+### The transmitter's own view, and who wins when they disagree
+
+The receiver decides because it measures the endpoint that must decode. But
+when the return channel dies, nothing decides at all — so the transmitter also
+senses, both as a supplement and as a failsafe. It never gets its own schedule:
+every autonomous change travels through the same authenticated commit as a
+receiver-driven one.
+
+A radio cannot transmit and listen on one channel at once, so the only honest
+local observation is a window in which it deliberately does not send. Each
+armed dwell runs retune, settle, a discard-barrier read that resets the
+counters, a quiet window, then the measurement read — and only then the
+payload. An optional second window near the end of the dwell listens on the
+channel just hammered, which is the only way to see an emitter that keys up
+*because* of us rather than before us. Windows are measured, never assumed: the
+counters keep counting through the read's own bus round trips.
+
+Three situations make the transmitter refuse to sense rather than sense badly.
+It will not arm alongside the auxiliary flood threads, which send from their
+own threads and return on submit rather than on air, so a "gated" window would
+still contain unknown self-transmission and read as interference. It will not
+arm when the window would fall below about a millisecond and a half, where the
+delta is mostly counter quantisation. And it skips any dwell with a commit in
+flight, because a commit landing inside our own quiet window is self-jamming
+that would then feed the veto.
+
+**Whose measurement wins.** The tempting design is to let the transmitter veto
+a proposal it disagrees with. That is wrong, and wrong in exactly the case this
+exists to serve: a hidden interferer beside the receiver produces precisely
+that signature — delivery collapses while the transmitter, elsewhere, hears
+nothing — so the veto would fire most confidently when the transmitter's
+reading is cleanest. Its confidence is anti-correlated with its correctness.
+
+So the transmitter has no standing to contradict the receiver *about the
+target*. It may answer one question only: does this move leave the transmitter
+worse off, where it sits? Two grounds qualify. A uniformly dirty band means it
+cannot attribute anything to a channel, so it asks for another look — a delay,
+not a refusal, and one that does not spend the receiver's update budget. Every
+surviving channel being markedly worse than the target means the move is a
+cul-de-sac, which is a fact only the transmitter possesses. Both are
+unanimity-gated, and an unmeasured escape route is not a road it may declare
+closed. Disagreement itself is surfaced on every decision and never averaged
+in: the applied mask is always one endpoint's proposal verbatim.
+
+Four fusion policies select how much say it has — `rx` (observes only),
+`veto` (the default), `either`, and `failsafe`, where the transmitter may
+originate only after the return channel has been silent for a configured
+number of rounds. Because a receiver with nothing to propose is otherwise
+indistinguishable from a deaf one, a receiver running the exclusion policy also
+sends a periodic status of its own; that status carries its committed
+generation and mask, so a split brain can be seen rather than inferred.
+
+Autonomous changes go through their own authority entry point that applies the
+same one-channel-per-update and update-gap limits a follower proposal gets.
+The operator's scripted lever stays exempt — but a machine reacting to its own
+local evidence is precisely the actor those limits exist to bound.
+
+### What the sensor can and cannot see
+
+The occupancy scale is measured, not assumed. On this bench a narrowband
+interferer that destroys delivery on one channel reads about 2.8 CCA and 3.0
+false alarms per millisecond at the transmitter, against roughly 0.6 on a clean
+channel — a five-to-one separation. False alarms are weighted above CCA because
+they separate better and CCA also counts legitimate traffic. A railed reading
+contributes nothing: the gain index at its floor is not a measurement, and
+because the power histogram's buckets are placed relative to that index, a
+floored index rails the histogram at fully-busy on every channel as a
+consequence rather than as an observation.
+
+Two limits are worth stating plainly. The instrument is the front end, so a
+part is only useful on the band it was built for — a 5 GHz-only PA part shows
+no jammed-versus-clean separation at 2.4 GHz and cannot get a proposal out
+there either. And the pre-versus-post distinction only pays against an emitter
+that *locks on* after detecting a burst; measured against a follower sweeping
+every few milliseconds — far shorter than a dwell — both windows read alike,
+which is a fact about that adversary rather than about the sensor.
+
+Sensing costs what it stops sending. Measured with a 25 ms window on one dwell
+in two of a 200 ms slot: 7.7 % fewer frames per second, against 8.8 % predicted
+by summing the windows' own stamps. The two agreeing is the check that nothing
+unrecorded is being paid.
+
 ### Driving it
 
 `DEVOURER_HOP_ADAPTIVE=1` on `txdemo`/`rxdemo` (with a keyed seed and
@@ -338,6 +420,13 @@ the transmitter listens for it under `DEVOURER_TX_WITH_RX=thread`. `streamtx`
 emits the v2 marker at generation 0 so an adaptive receiver tracks it. Control
 frames ride their own small 802.11 frames — caller FEC payload bytes are never
 touched.
+
+Transmitter sensing is `DEVOURER_TX_SENSE=1` on top of adaptive mode, with
+`_WINDOW_US` / `_POSTBURST_US` / `_SETTLE_US` / `_EVERY` / `_NHM` shaping the
+windows and `DEVOURER_HOP_FUSION=rx|veto|either|failsafe` choosing how much say
+it has; `DEVOURER_HOP_MUTE=1` on the receiver is the fault-injection lever that
+produces a genuine one-way outage. All of it is inert unset, so the
+receiver-driven behaviour is exactly what it was.
 
 On-air: `tests/hopset_adaptive_onair.sh` (protocol), and
 `tests/hopset_adaptive_jammer.sh` for the decision loop against a real B210

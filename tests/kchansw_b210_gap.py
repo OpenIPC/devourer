@@ -20,6 +20,12 @@ Usage:  tests/.venv/bin/python tests/kchansw_b210_gap.py \
             --freq 5200e6 --rate 8e6 --secs 20 --out /tmp/b210_gap.json
 """
 
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import argparse
 import json
 import sys
@@ -29,7 +35,7 @@ import numpy as np
 
 def capture(freq, rate, secs, gain):
     import uhd
-    usrp = uhd.usrp.MultiUSRP("type=b200")
+    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args("type=b200"))
     usrp.set_rx_rate(rate)
     usrp.set_rx_freq(uhd.libpyuhd.types.tune_request(freq))
     usrp.set_rx_gain(gain)

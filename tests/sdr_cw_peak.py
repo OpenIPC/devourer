@@ -5,6 +5,13 @@ xtal_cfo_sweep.sh). Parabolic-interpolated for sub-bin resolution. USRP B210.
 
   python3 tests/sdr_cw_peak.py 5220e6
 """
+
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import sys
 import numpy as np
 import uhd
@@ -14,7 +21,7 @@ rate = 46.08e6
 gain = 50
 n = int(8e5)
 
-u = uhd.usrp.MultiUSRP()
+u = uhd.usrp.MultiUSRP(uhd_select.device_args())
 s = u.recv_num_samps(n, freq, rate, [0], gain)[0]
 s = s - np.mean(s)  # drop the DC/LO-leakage bin so it can't win the argmax
 

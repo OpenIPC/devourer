@@ -28,6 +28,12 @@ retune_us). Run under sudo (UHD).
 """
 from __future__ import annotations
 
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import argparse
 import json
 import signal
@@ -45,7 +51,9 @@ def chan_to_freq(ch: int) -> float:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--args", default="", help="UHD device args")
+    ap.add_argument("--args", default=uhd_select.device_args(None, allow_ambiguous=True),
+        help="UHD device args, e.g. serial=XXXXXXX (default: $DEVOURER_UHD_ARGS "
+             "or tests/.uhd_args)")
     ap.add_argument("--channels", default="36,40,44,48")
     ap.add_argument("--center", type=float, default=0.0,
                     help="RX sense center Hz (0 = hopset midpoint)")
@@ -83,7 +91,7 @@ def main(argv=None) -> int:
                 f"span the hopset\n")
             return 2
 
-    u = uhd.usrp.MultiUSRP(args.args)
+    u = uhd.usrp.MultiUSRP(uhd_select.device_args(args.args))
     u.set_rx_rate(args.rate)
     u.set_tx_rate(args.jam_rate)
     u.set_rx_gain(args.rx_gain)

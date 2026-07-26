@@ -39,6 +39,12 @@ catch tone-mapping / spectral-inversion errors end to end.
         --notch=-21,-20,-19,7,8,9
 """
 
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import argparse
 import json
 import os
@@ -58,7 +64,7 @@ def chan_to_freq(ch):
 
 def do_capture(args):
     import uhd
-    usrp = uhd.usrp.MultiUSRP(args.args)
+    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args(args.args))
     rate = 20e6
     usrp.set_rx_rate(rate)
     usrp.set_rx_freq(uhd.types.TuneRequest(chan_to_freq(args.channel)))
@@ -173,7 +179,7 @@ def do_txltf(args):
     # Long precomputed buffer (~40 bursts / 4.6 ms per send) — per-burst
     # send calls underrun the B210 from python and nothing airs.
     frame = np.tile(one, 40).astype(np.complex64)
-    usrp = uhd.usrp.MultiUSRP(args.args)
+    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args(args.args))
     rate = 20e6
     usrp.set_tx_rate(rate)
     usrp.set_tx_freq(uhd.types.TuneRequest(chan_to_freq(args.channel)))
@@ -258,7 +264,9 @@ def main():
     c.add_argument("--channel", type=int, default=6)
     c.add_argument("--secs", type=float, default=0.5)
     c.add_argument("--gain", type=float, default=50)
-    c.add_argument("--args", default="")
+    c.add_argument("--args", default=uhd_select.device_args(None, allow_ambiguous=True),
+        help="UHD device args, e.g. serial=XXXXXXX (default: $DEVOURER_UHD_ARGS "
+             "or tests/.uhd_args)")
     c.add_argument("--out", required=True)
     m = sub.add_parser("compare")
     m.add_argument("--sdr", required=True, help="complex64 file (capture)")
@@ -272,7 +280,9 @@ def main():
     t.add_argument("--secs", type=float, default=40)
     t.add_argument("--gain", type=float, default=60)
     t.add_argument("--amplitude", type=float, default=0.5)
-    t.add_argument("--args", default="")
+    t.add_argument("--args", default=uhd_select.device_args(None, allow_ambiguous=True),
+        help="UHD device args, e.g. serial=XXXXXXX (default: $DEVOURER_UHD_ARGS "
+             "or tests/.uhd_args)")
     n = sub.add_parser("check-notch")
     n.add_argument("--chip", required=True)
     n.add_argument("--notch", required=True)

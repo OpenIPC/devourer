@@ -51,10 +51,10 @@ PROBE_ROUNDS="${PROBE_ROUNDS:-4}"
 # on it, correctly. Re-calibrate with NO_JAM=1 then a short gain sweep if the
 # antennas move.
 JAM_GAIN="${JAM_GAIN:-50}"
-# UHD device args. This bench has two B210-class radios (a TinySDR "MyB210"
-# and the LibreSDR B220-mini); an unpinned MultiUSRP("") picks whichever it
-# enumerates first, so the jammer is pinned by serial for reproducibility.
-SDR_ARGS="${SDR_ARGS:-serial=REHZ9ZB}"
+# UHD device selection. Empty = let tests/uhd_select.py resolve it (env, then
+# the untracked tests/.uhd_args, then the only device present — and a hard
+# error rather than a coin flip when a bench has more than one radio).
+SDR_ARGS="${SDR_ARGS-}"
 TX_PWR="${TX_PWR-}"              # flat TXAGC index; empty = efuse default
 BASELINE_S="${BASELINE_S:-25}"
 ADAPT_S="${ADAPT_S:-70}"
@@ -64,8 +64,11 @@ OUT="${OUT:-/tmp/devourer-hopset-jammer}"
 plugged() { lsusb -d "$(printf '%04x:%04x' "$1" "$2")" >/dev/null 2>&1; }
 plugged "$VID" "$TX_PID" || { echo "SKIP: TX $VID:$TX_PID not plugged"; exit 77; }
 plugged "$VID" "$RX_PID" || { echo "SKIP: RX $VID:$RX_PID not plugged"; exit 77; }
-uhd_find_devices --args "$SDR_ARGS" >/dev/null 2>&1 || {
-    echo "SKIP: no UHD device matching '$SDR_ARGS'"; exit 77; }
+SDR_SEL="$(python3 "$HERE/uhd_select.py" ${SDR_ARGS:+"$SDR_ARGS"} 2>/dev/null)" || {
+    python3 "$HERE/uhd_select.py" ${SDR_ARGS:+"$SDR_ARGS"} >&2
+    exit 1; }
+uhd_find_devices ${SDR_SEL:+--args "$SDR_SEL"} >/dev/null 2>&1 || {
+    echo "SKIP: no UHD device matching '${SDR_SEL:-any}'"; exit 77; }
 
 # In-tree rtw88/rtw89 auto-probe the dongles; temp-unbind any they hold.
 unbind() {
@@ -104,7 +107,7 @@ PY="$HERE/.venv/bin/python"
 start_jammer() { # channel
     [ "$NO_JAM" = "1" ] && return 0
     kill_jammer
-    sudo "$PY" "$HERE/sdr_interferer.py" --args "$SDR_ARGS" \
+    sudo "$PY" "$HERE/sdr_interferer.py" ${SDR_SEL:+--args "$SDR_SEL"} \
         --channel "$1" --tx-gain "$JAM_GAIN" --rate "$JAM_RATE" \
         >>"$OUT/jammer.log" 2>&1 &
     sleep 2

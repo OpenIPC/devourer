@@ -10,6 +10,13 @@ burst against the expected airtime (issue #238 MCS4+ bisect).
   sudo python3 tests/sdr_burst_len.py --freq 5180e6 --secs 4
 """
 from __future__ import annotations
+
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import argparse, sys
 import numpy as np
 
@@ -30,7 +37,7 @@ def main() -> int:
                     help="burst threshold above noise floor")
     a = ap.parse_args()
 
-    usrp = uhd.usrp.MultiUSRP("")
+    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args())
     usrp.set_rx_rate(a.rate)
     usrp.set_rx_freq(uhd.types.TuneRequest(a.freq))
     usrp.set_rx_gain(a.gain)

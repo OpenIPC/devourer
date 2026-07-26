@@ -23,6 +23,12 @@ corrupted. Use only on a bench you control.
 """
 from __future__ import annotations
 
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import argparse
 import signal
 import sys
@@ -40,7 +46,9 @@ def chan_to_freq(channel: int) -> float:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--args", default="", help="UHD device args (e.g. type=b200)")
+    ap.add_argument("--args", default=uhd_select.device_args(None, allow_ambiguous=True),
+        help="UHD device args, e.g. serial=XXXXXXX (default: $DEVOURER_UHD_ARGS "
+             "or tests/.uhd_args)")
     ap.add_argument("--channel", type=int, default=None,
                     help="Wi-Fi channel (sets --freq); 2.4 GHz 1-14 / 5 GHz 36+")
     ap.add_argument("--freq", type=float, default=None, help="center freq Hz")
@@ -78,7 +86,7 @@ def main(argv=None) -> int:
                          "must be importable (system uhd, as in sdr_power_probe.py)\n")
         return 2
 
-    usrp = uhd.usrp.MultiUSRP(args.args)
+    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args(args.args))
     usrp.set_tx_rate(args.rate)
     usrp.set_tx_freq(uhd.types.TuneRequest(args.freq))
     usrp.set_tx_gain(args.tx_gain)

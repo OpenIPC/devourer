@@ -35,6 +35,12 @@ dwell no longer sinks the whole match.
 """
 from __future__ import annotations
 
+# Which radio to open — see tests/uhd_select.py (a bench with two B210s
+# makes an unpinned MultiUSRP("") a coin flip).
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import uhd_select  # noqa: E402
+
 import argparse
 import os
 import sys
@@ -167,7 +173,7 @@ def capture(args, channels) -> tuple[float, float, int, int]:
         def __init__(self):
             gr.top_block.__init__(self, "hop_capture")
             self.src = gruhd.usrp_source(
-                args.args,
+                uhd_select.device_args(args.args),
                 gruhd.stream_args(cpu_format="fc32", channels=[0]))
             self.src.set_samp_rate(args.rate)
             self.src.set_center_freq(args.center, 0)
@@ -488,7 +494,8 @@ def main() -> int:
                     help="sample rate (Hz); must span all channels")
     ap.add_argument("--gain", type=float, default=45.0, help="RX gain (dB)")
     ap.add_argument("--antenna", default="RX2", help="RX antenna port")
-    ap.add_argument("--args", default="", help="UHD device args (e.g. type=b200)")
+    ap.add_argument("--args", default=uhd_select.device_args(None, allow_ambiguous=True),
+        help="UHD device args, e.g. serial=XXXXXXX (default: $DEVOURER_UHD_ARGS)")
     ap.add_argument("--duration", type=float, default=6.0, help="capture seconds")
     ap.add_argument("--raw", default="/tmp/devourer-hop-iq.fc32",
                     help="raw fc32 capture path")

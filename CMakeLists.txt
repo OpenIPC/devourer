@@ -171,6 +171,8 @@ add_library(devourer
     src/hopset/HopsetAuthority.h
     src/hopset/HopsetFollower.h
     src/hopset/HopsetPolicy.h
+    src/hopset/HopsetSense.h
+    src/hopset/HopsetFusion.h
     src/hopset/HopsetEvents.h
     src/IRtlDevice.h
     src/SignalStop.cpp
@@ -830,6 +832,18 @@ add_test(NAME hopset_policy_matrix COMMAND HopsetPolicySelftest)
 add_executable(HopsetAdaptiveE2eSelftest tests/hopset_adaptive_e2e_selftest.cpp)
 target_link_libraries(HopsetAdaptiveE2eSelftest PRIVATE devourer)
 add_test(NAME hopset_adaptive_e2e COMMAND HopsetAdaptiveE2eSelftest)
+
+# Transmitter-side sensing gates: the evidence classifier (admission, the
+# stricter thresholds, sensor-absent and pre/post separation, anti-herding
+# floors) and the endpoint-fusion policy (the veto's scope, failsafe gating,
+# mode precedence, conflict surfacing).
+add_executable(HopsetSenseSelftest tests/hopset_sense_selftest.cpp)
+target_link_libraries(HopsetSenseSelftest PRIVATE devourer)
+add_test(NAME hopset_sense_matrix COMMAND HopsetSenseSelftest)
+
+add_executable(HopsetFusionSelftest tests/hopset_fusion_selftest.cpp)
+target_link_libraries(HopsetFusionSelftest PRIVATE devourer)
+add_test(NAME hopset_fusion_policy COMMAND HopsetFusionSelftest)
 
 # Headless guard for the TX-power offset quantization (src/TxPower.h) — the
 # qdB->index-step rounding/clamping behind SetTxPowerOffsetQdb, so a rounding

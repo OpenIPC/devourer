@@ -44,6 +44,31 @@ enum HopsetReasonBit : uint32_t {
   RB_SYNC_LOSS = 1u << 6,           /* nothing decoded at all on the visit */
   RB_PROBE_RECOVERY = 1u << 7,      /* probes cleared the restoration bar */
   RB_PROBE_EVIDENCE = 1u << 8,      /* decision used keyed-probe observations */
+
+  /* Bits 9..23 belong to the transmitter-side sensing and fusion layers
+   * (hopset/HopsetSense.h, hopset/HopsetFusion.h). They ride the same
+   * reason_bitmap the proposal wire already carries, so adding them costs no
+   * wire change and no marker version — and because the origin field encodes
+   * "receiver" as zero, every proposal produced before those layers existed
+   * still decodes with the right origin. */
+  RB_ORIGIN_SHIFT = 9,
+  RB_ORIGIN_MASK = 3u << 9, /* DecisionOrigin: 0=rx 1=tx 2=fused 3=failsafe */
+
+  RB_TX_CCA_HIGH = 1u << 11,
+  RB_TX_NHM_BUSY = 1u << 12,
+  RB_TX_IGI_ELEVATED = 1u << 13,
+  RB_TX_POST_BURST = 1u << 14, /* post-burst evidence — a reactive emitter */
+  RB_TX_PRE_BURST = 1u << 15,
+
+  RB_TX_CLEANER_ALT = 1u << 16,
+  RB_TX_PERSISTENT = 1u << 17,
+  RB_TX_SENSOR_ABSENT = 1u << 18,
+  RB_TX_IGI_RAILED = 1u << 19,
+
+  RB_FUSE_TX_DISAGREES = 1u << 20, /* endpoints differ; NOT itself a veto */
+  RB_FUSE_VETO_BROAD = 1u << 21,
+  RB_FUSE_VETO_REMAIN = 1u << 22,
+  RB_TX_REEXAMINED = 1u << 23, /* restoring a TX-originated exclusion */
 };
 
 /* Why a decide() returned Hold — every path names exactly one. */

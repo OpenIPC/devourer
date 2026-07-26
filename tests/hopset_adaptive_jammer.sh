@@ -356,7 +356,12 @@ else
 fi
 ADAPT_DELIV=$(delivery "$OUT/rx_adapt.log")
 
-if [ "$MODE" = "parked" ] || [ "$MODE" = "sense" ]; then
+if [ "$MODE" = "parked" ] || [ "$MODE" = "sense" ] || [ "$MODE" = "failsafe" ]; then
+    # The failsafe needs this phase as much as the receiver-driven modes do:
+    # an autonomous exclusion that can never be undone is a link that shrinks
+    # permanently the first time something transient sits on a channel. With
+    # the receiver still mute, the only evidence that can bring the channel
+    # back is the transmitter's own keyed probes.
     echo "== phase C: jammer off — probes must restore the channel, ${RESTORE_S}s =="
     kill_jammer
     : > "$OUT/rx_restore_mark"
@@ -477,6 +482,28 @@ elif [ "$MODE" = "failsafe" ]; then
         echo "   rx: $(gm "$OUT/rx_adapt.log" | tr '\n' ' ')"
         fails=$((fails+1))
     fi
+    # An autonomous exclusion must be undoable by the transmitter's own
+    # evidence, or the link ratchets down permanently. With the receiver still
+    # mute through phase C, a restore here can only have come from the keyed
+    # probes the transmitter aired on the excluded channel.
+    require "$OUT/tx_adapt.log" '"ev":"hopset.probe"' "TX aired keyed probes"
+    if grep -F '"origin":"failsafe"' "$OUT/tx_adapt.log" 2>/dev/null |
+       grep -qF '"kind":"restore"'; then
+        echo "PASS: the transmitter restored the channel from its own probes"
+    else
+        echo "FAIL: no autonomous restore after the jammer stopped"
+        fails=$((fails+1))
+    fi
+    # ...and the receiver has to have followed that too.
+    last_rx=$(grep -F '"ev":"hopset.activate"' "$OUT/rx_adapt.log" 2>/dev/null |
+              tail -1 | sed -n 's/.*"mask":"0x\([0-9a-f]*\)".*/\1/p')
+    nch=$(( $(tr -cd ',' <<<"$CHANNELS" | wc -c) + 1 ))
+    full=$(printf '%x' $(( (1 << nch) - 1 )))
+    [ "${last_rx:-x}" = "$full" ] &&
+        echo "PASS: receiver ended on the full hopset again (0x$full)" ||
+        { echo "FAIL: receiver ended on 0x${last_rx:-none}, expected 0x$full"
+          fails=$((fails+1)); }
+
     # Every committed change moved exactly one channel: the autonomous path is
     # bound by the same structural limits a proposal is.
     if gm "$OUT/tx_adapt.log" | awk '{print $2}' |

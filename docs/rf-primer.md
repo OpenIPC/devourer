@@ -3,7 +3,7 @@
 devourer talks to a Wi-Fi radio at a very low level — subcarriers, constellations,
 gain control, the transmit and receive chains. If you're new to that machinery,
 the terms in the other docs (per-tone SNR, EVM, CCA, AGC, occupied bandwidth) can
-feel like jargon. This page is a picture book: ten short animations, each
+feel like jargon. This page is a picture book: twelve short animations, each
 built in the DEVOURER live-monitor style, that show what the machinery actually
 looks like — from a single subcarrier all the way to a hopping, diversity-combined,
 bandwidth-hopping link. Read it top to bottom and the rest of the docs will click.
@@ -119,6 +119,55 @@ one channel then only clips the occasional hop that lands on it — every other 
 escapes. Done per-packet (`DEVOURER_HOP_*`), hopping doubles as a
 frequency-diversity interleaver for the outer FEC: losses are spread thin across
 frequencies instead of wiping out a run of packets on one.
+
+![Adaptive hopset — the jammed channel stops being scheduled](img/hopset_adapt.gif)
+
+Bounding the damage is not the same as avoiding it. Most interference is
+*furniture* — a fixed AP, a neighbouring video link, a microwave, a radar. It
+isn't trying to win; it's just sitting there, and it will still be sitting there
+in an hour. A hop set that keeps visiting its channel keeps paying for it, every
+round, forever. The **receiver** is the endpoint that has to decode, so its
+per-channel delivery is the authoritative evidence (energy
+readings only *classify* an impairment; a quiet channel with a dead link and a
+noisy one that still delivers are opposite decisions). It **proposes**; it never
+acts. The transmitter owns the schedule, and answers with an authenticated commit
+naming a **future** slot, repeated until that slot arrives — so both ends swap
+schedules together and a lost frame can't split them apart. Because the hop order
+is **keyed**, dropping a channel re-keys the permutation rather than leaving a
+readable gap in a pattern. And exclusion is not a ratchet: keyed **probes** go
+back and look — the round, the position and the channel all derived from the key,
+so recovery isn't itself a periodic target — and a channel that recovered comes
+back. Measured against a narrowband interferer parked on one member of a
+four-channel set: delivery 0.72 → 0.83, with the channel restored on its own once
+the interferer stopped.
+
+![Anti-herding — the schedule refuses to shrink past its floor](img/hopset_herding.gif)
+
+Now take the furniture away and put something *adversarial* there instead, and
+the picture above stops being the story — the one that replaces it ends with the
+link still bleeding, and that ending is the point. Two measurements say why.
+Against a **blind** parked jammer, a keyed hop order and a plainly sequential one
+deliver identically — secrecy buys nothing against something that isn't looking;
+it only earns its keep against an adversary that *reacts*. And against a jammer that
+**follows** — moving onto a still-active channel after every exclusion — the link
+does not get better. It gets *walked down*. And notice that every one of those
+exclusion requests is individually correct: the receiver really is losing that
+channel, and dropping it really would help, for about a dozen dwells. Granted
+without limit, that reasonable-looking sequence ends with the link parked on one
+frequency of the attacker's choosing, which is exactly where an adversary wants
+it. So an adaptive exclusion loop is itself an attack surface, and the shipped
+one is built timid on purpose: one channel per update, a mandatory gap between
+updates (a *refused* proposal spends it too, so bouncing proposals can't flood
+the control path), nothing acted on when the whole band degrades together, and a
+hard **floor** on how many channels stay active. When that floor is reached the
+next proposal is refused, however well-evidenced it is, and the link spends the
+rest of the flight bleeding across the channels it has left rather than being
+herded onto one. On the four-channel bench set the floor binds after a single
+exclusion, and that's the measured result: exclusion depth one, active set held
+at three, no collapse. It is a pass rather than a win, and the difference matters
+— the advantage here isn't that the link learns, it's that it learns without
+becoming teachable by an adversary. The protocol, the policy and the numbers are
+in [`fhss.md`](fhss.md).
 
 ## 9. Trading robustness for throughput in time — bandwidth TDMA
 

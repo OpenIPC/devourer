@@ -46,6 +46,7 @@ enum class HopsetReason : uint8_t {
   Timeout,
   MaskDelta,
   Cooldown,
+  TxVeto,
 };
 
 inline const char *hopset_reason_name(HopsetReason r) {
@@ -70,6 +71,7 @@ inline const char *hopset_reason_name(HopsetReason r) {
   case HopsetReason::Timeout: return "timeout";
   case HopsetReason::MaskDelta: return "mask_delta";
   case HopsetReason::Cooldown: return "cooldown";
+  case HopsetReason::TxVeto: return "tx_veto";
   }
   return "?";
 }
@@ -156,6 +158,11 @@ struct HopsetParams {
   uint64_t max_lead_slots = 4096;     /* upper activation window bound */
   uint64_t commit_repeat_slots = 4;   /* re-broadcast cadence until active */
   uint64_t status_interval_slots = 64;
+  /* How often the follower announces itself when it has nothing to
+   * propose. Without it a healthy, quiet receiver is indistinguishable
+   * from a dead uplink, and a transmitter failsafe keyed on silence
+   * would fire on a link that is working perfectly. */
+  uint64_t follower_status_slots = 64;
   unsigned proposal_retries = 8;
   uint64_t proposal_backoff_slots = 16;
   /* Structural limits the authority enforces on follower proposals (a

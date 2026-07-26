@@ -29,9 +29,13 @@ long-range digital video links.
   channel — can change frame by frame. That turns one dongle into an
   adaptive-link engine: unequal error protection for video layers, live
   power control, per-packet frequency hopping.
-- **Frequency hopping at FHSS speed.** A channel hop costs ~0.5–2.5 ms
-  depending on chip — fast enough to hop on every packet
-  ([how](docs/frequency-hopping.md)).
+- **Frequency hopping at FHSS speed, and a hopset that adapts.** A channel hop
+  costs ~0.5–2.5 ms depending on chip — fast enough to hop on every packet
+  ([how](docs/frequency-hopping.md)) — in a keyed order an observer cannot
+  predict. The link also learns: a channel that stops delivering is dropped
+  from the schedule by authenticated agreement between the two ends, and
+  revisited later by keyed probes in case it recovers
+  ([how](docs/fhss.md)).
 - **Narrowband modes the kernel can't do.** 5 and 10 MHz channels on every
   supported generation — including the decade-old RTL8812AU and RTL8814AU the
   vendor never gave narrowband — half/quarter the bandwidth, more range from
@@ -239,7 +243,12 @@ one `IRtlDevice` interface covers all four generations.
 - [FHSS](docs/fhss.md) — the anti-jam design article: keyed SipHash hop
   schedules, slot-locked lockstep RX, and
   [jammer resilience](docs/jammer-resilience.md) — measured delivery against
-  parked and following jammers, and where a follower breaks.
+  parked and following jammers, and where a follower breaks. It carries on
+  into the adaptive half: how the two ends agree on a change to the hopset
+  without either trusting the other, why the endpoint that must decode is the
+  one that decides, why a transmitter may argue only that a move leaves *it*
+  worse off rather than that it disagrees, and what stops an adversary who can
+  make channels look bad from herding the link onto one it then jams.
 - [Narrowband](docs/narrowband.md) — 5/10 MHz channels across all three
   generations: the baseband re-clock, the per-chip register machinery, and the
   walls (RF re-latch edges, per-die clock coupling, the 5 MHz/5 GHz CFO limit).

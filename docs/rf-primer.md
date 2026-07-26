@@ -147,21 +147,27 @@ Now take the furniture away and put something *adversarial* there instead, and
 the picture above stops being the story — the one that replaces it ends with the
 link still bleeding, and that ending is the point. Two measurements say why.
 Against a **blind** parked jammer, a keyed hop order and a plainly sequential one
-deliver identically — secrecy buys nothing against something that isn't looking; it only
-earns its keep against an adversary that *reacts*. And against a jammer that
-**follows**, moving onto a newly-active channel after every exclusion, the link
-does not get better: it excludes once, gets followed, and then *refuses to
-exclude again*, settling on its minimum active set and taking the hits. That is
-the honest result, and it is a pass — because an adaptive exclusion loop is
-itself an attack surface. Anyone who can make a channel *look* bad can otherwise
-steer the schedule, one obliging exclusion at a time, until the link is parked on
-a single frequency of the attacker's choosing. So the loop is built timid on
-purpose: one channel per update, a mandatory gap between updates (a *refused*
-proposal spends it too, so bouncing proposals can't flood the control path),
-nothing acted on when the whole band degrades together, and a hard floor on how
-many channels stay active. The advantage isn't that the link learns — it's that
-it learns without becoming teachable by an adversary. The protocol, the policy
-and the numbers are in [`fhss.md`](fhss.md).
+deliver identically — secrecy buys nothing against something that isn't looking;
+it only earns its keep against an adversary that *reacts*. And against a jammer that
+**follows** — moving onto a still-active channel after every exclusion — the link
+does not get better. It gets *walked down*. And notice that every one of those
+exclusion requests is individually correct: the receiver really is losing that
+channel, and dropping it really would help, for about a dozen dwells. Granted
+without limit, that reasonable-looking sequence ends with the link parked on one
+frequency of the attacker's choosing, which is exactly where an adversary wants
+it. So an adaptive exclusion loop is itself an attack surface, and the shipped
+one is built timid on purpose: one channel per update, a mandatory gap between
+updates (a *refused* proposal spends it too, so bouncing proposals can't flood
+the control path), nothing acted on when the whole band degrades together, and a
+hard **floor** on how many channels stay active. When that floor is reached the
+next proposal is refused, however well-evidenced it is, and the link spends the
+rest of the flight bleeding across the channels it has left rather than being
+herded onto one. On the four-channel bench set the floor binds after a single
+exclusion, and that's the measured result: exclusion depth one, active set held
+at three, no collapse. It is a pass rather than a win, and the difference matters
+— the advantage here isn't that the link learns, it's that it learns without
+becoming teachable by an adversary. The protocol, the policy and the numbers are
+in [`fhss.md`](fhss.md).
 
 ## 9. Trading robustness for throughput in time — bandwidth TDMA
 

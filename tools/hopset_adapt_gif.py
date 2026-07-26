@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """Animated adaptive hopset — 'the band heals', in the DEVOURER live-monitor
-style. The companion to hop_pattern_gif.py: same channel set, same parked
-interferer, but run long enough to show what the link does about it.
+style. The stationary half of a pair: hopset_herding_gif.py draws the same eight
+channels and the same opening act, and ends the other way.
 
     tools/hopset_adapt_gif.py -o docs/img/hopset_adapt.gif
 
-Same time-frequency view, except the time axis is fixed and fills in left to
-right, so the final frame holds the whole story. Three acts: the hops that land
-on the interferer's channel are clipped and the receiver scores them; the
-transmitter — the schedule authority — issues an authenticated commit naming a
-future slot, and both ends swap there; afterwards that channel is no longer
-scheduled, except for the occasional keyed probe that goes back to see whether
-it recovered.
+The hop set and the interferer's channel are the ones from hop_pattern.gif, so
+the three figures of the section read as one story. A stationary occupant sits
+on ch 52: the receiver scores the dwells it
+loses and asks for the channel to be dropped, the transmitter commits the new
+schedule at a named future slot, and the channel stops being visited. Then the
+occupant goes away — and nothing would ever know, except that keyed recovery
+probes go back and look anyway. Three clean probes and the channel is back in
+the set.
 
-Deliberately scoped to a *stationary* occupant — a fixed AP, another link, a
-microwave — which is what most interference is, and the only case where
-exclusion is an unambiguous win. An interferer that follows the exclusions is a
-different story with a different ending (the link holds at its diversity floor
-rather than improving); that one belongs in the prose, not in a picture that
-would read as a victory. Needs Pillow.
+Deliberately scoped to a *stationary* occupant, which is what most interference
+is (a fixed AP, another link, a microwave) and the only case where exclusion is
+an unambiguous win. An interferer that follows the exclusions has a different
+ending; that is the companion figure, not this one. Needs Pillow.
 """
 from __future__ import annotations
 
@@ -31,28 +30,26 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from monitor_style import (AMBER, CYAN, DIM, GRID, INK, OK, WARN, chrome, font,
                            new_frame, save_gif)
 
-CHANS = [36, 40, 44, 48, 52, 56, 60, 64]   # the same 5 GHz hop set
-JAM = 52                                    # interferer parks here
-JAM_CI = CHANS.index(JAM)
+CHANS = [36, 40, 44, 48, 52, 56, 60, 64]   # the hop set of the section's first figure
+JAM = 4                    # the occupant sits on ch 52, where it sat there too
 
-NT = 44          # dwell cells on the fixed time axis
-COMMIT_T = 18    # the committed activation slot
-COMMIT_HOLD = 6  # frames the commit caption stays up
-PROBE_T = 36     # a keyed recovery probe revisits the excluded channel
+NT = 64
+COMMIT_T = 16              # ch 52 excluded here
+STOP_T = 30                # the occupant goes away
+PROBES = (36, 44, 52)      # keyed recovery probes revisit the excluded channel
+RESTORE_T = 58             # three clean probes, and it is back in the set
 
 
 def schedule(rnd):
-    """Keyed-looking draw over the active set, re-keyed at the activation
-    slot: before it every channel is a candidate, after it the excluded one is
-    only ever reached by the probe."""
     sched, last = [], -1
     for t in range(NT):
-        if t == PROBE_T:
-            sched.append(JAM_CI)
-            last = JAM_CI
+        if t in PROBES:
+            sched.append(JAM)
+            last = JAM
             continue
+        excluded = COMMIT_T <= t < RESTORE_T
         pool = [c for c in range(len(CHANS))
-                if c != last and (t < COMMIT_T or c != JAM_CI)]
+                if c != last and not (excluded and c == JAM)]
         c = rnd.choice(pool)
         sched.append(c)
         last = c
@@ -62,22 +59,20 @@ def schedule(rnd):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-o", "--out", default="hopset_adapt.gif")
-    ap.add_argument("--hold", type=int, default=16, help="frames on the full picture")
+    ap.add_argument("--hold", type=int, default=16)
     ap.add_argument("--ms", type=int, default=110)
     args = ap.parse_args()
 
-    rnd = random.Random(0x265)
-    sched = schedule(rnd)
-    # make the learning act unmistakable: seed a few extra hits on the jammed row
-    for t in (2, 7, 13):
-        if sched[t] != JAM_CI and sched[t - 1] != JAM_CI and sched[t + 1] != JAM_CI:
-            sched[t] = JAM_CI
+    sched = schedule(random.Random(0x265))
+    for t in (3, 9):   # make the opening act unmistakable
+        if sched[t - 1] != JAM and sched[t + 1] != JAM:
+            sched[t] = JAM
 
     nC = len(CHANS)
     padL, padT, padB = 60, 96, 62
-    cellw, gh = 14.0, 300
+    cellw, gh = 11.0, 300
     gw = int(NT * cellw)
-    panelW = 214
+    panelW = 230
     W = padL + gw + 24 + panelW
     H = padT + gh + padB
     cellh = gh / nC
@@ -85,13 +80,18 @@ def main() -> int:
     def cell_xy(ti, ci):
         return padL + ti * cellw, padT + (nC - 1 - ci) * cellh
 
-    jam_y = cell_xy(0, JAM_CI)[1]
-    commit_x = padL + COMMIT_T * cellw
+    def tx(t):
+        return padL + t * cellw
+
+    jam_y = cell_xy(0, JAM)[1]
 
     imgs = []
     for fi in range(NT + args.hold):
         cursor = min(fi, NT - 1)
-        adapted = cursor >= COMMIT_T
+        seen = min(cursor + 1, NT)
+        excluded = cursor >= COMMIT_T
+        stopped = cursor >= STOP_T
+        restored = cursor >= RESTORE_T
         img, d = new_frame(W, H)
         chrome(d, W, H, "ADAPTIVE HOPSET",
                "a stationary occupant on ch 52 — the receiver scores what it "
@@ -99,83 +99,93 @@ def main() -> int:
                "visited", fi)
 
         d.rectangle([padL, padT, padL + gw, padT + gh], outline=(0, 70, 80))
-
-        # channel axis; the interferer's row is tinted until it goes dark
         for ci, ch in enumerate(CHANS):
             _, y = cell_xy(0, ci)
             d.text((padL - 34, y + cellh / 2 - 7), f"{ch}", font=font(11),
-                   fill=WARN if ch == JAM else DIM)
-            if ch == JAM:
-                d.rectangle([padL, y, padL + gw, y + cellh], fill=(40, 12, 12))
+                   fill=WARN if (ci == JAM and not stopped) else DIM)
             d.line([padL, y, padL + gw, y], fill=GRID)
 
-        # the excluded span of that row goes dark + hatched as time passes it
-        if adapted:
-            xr = padL + min(cursor + 1, NT) * cellw
-            d.rectangle([commit_x, jam_y, xr, jam_y + cellh], fill=(16, 19, 26))
-            hx = commit_x + 6
+        # the occupant's span, and the excluded span laid over it
+        d.rectangle([padL, jam_y, tx(min(seen, STOP_T)), jam_y + cellh],
+                    fill=(40, 12, 12))
+        if excluded:
+            xr = tx(min(seen, RESTORE_T))
+            d.rectangle([tx(COMMIT_T), jam_y, xr, jam_y + cellh], fill=(16, 19, 26))
+            hx = tx(COMMIT_T) + 6
             while hx < xr:
-                d.line([hx, jam_y + 5, hx - 6, jam_y + cellh - 5], fill=(30, 38, 50))
+                d.line([hx, jam_y + 6, hx - 6, jam_y + cellh - 6], fill=(30, 38, 50))
                 hx += 12
             if cursor > COMMIT_T + 5:
-                tx, ty = commit_x + 16, jam_y + cellh / 2 - 7
-                d.rectangle([tx - 5, ty - 3, tx + 92, ty + 15], fill=(16, 19, 26))
-                d.text((tx, ty), "not scheduled", font=font(11), fill=DIM)
+                lx, ly = tx(COMMIT_T) + 16, jam_y + cellh / 2 - 7
+                d.rectangle([lx - 5, ly - 3, lx + 92, ly + 15], fill=(16, 19, 26))
+                d.text((lx, ly), "not scheduled", font=font(11), fill=DIM)
 
-        # the revealed hop trace
-        clipped = 0
-        for ti in range(cursor + 1):
+        # the trace
+        lost = 0
+        for ti in range(seen):
             ci = sched[ti]
             x, y = cell_xy(ti, ci)
-            probe = ti == PROBE_T
-            hit = ci == JAM_CI and not probe
+            probe = ti in PROBES
+            hit = ci == JAM and ti < STOP_T and not probe
             if hit:
-                clipped += 1
-            col = AMBER if probe else (WARN if hit else CYAN)
+                lost += 1
             fade = 0.45 + 0.55 * (ti / max(1, cursor)) if ti < cursor else 1.0
-            d.rectangle([x + 2, y + 4, x + cellw - 2, y + cellh - 4],
+            col = AMBER if probe else (WARN if hit else CYAN)
+            d.rectangle([x + 2, y + 8, x + cellw - 2, y + cellh - 8],
                         fill=tuple(int(c * fade) for c in col))
-            if hit:  # struck through — this dwell was lost
-                d.line([x + 2, y + 4, x + cellw - 2, y + cellh - 4], fill=INK)
-                d.line([x + 2, y + cellh - 4, x + cellw - 2, y + 4], fill=INK)
+            if hit:
+                d.line([x + 2, y + 8, x + cellw - 2, y + cellh - 8], fill=INK)
+                d.line([x + 2, y + cellh - 8, x + cellw - 2, y + 8], fill=INK)
             if probe:  # has to read against the hatched, excluded row
-                d.rectangle([x + 1, y + 3, x + cellw - 1, y + cellh - 3],
+                d.rectangle([x + 1, y + 7, x + cellw - 1, y + cellh - 7],
                             outline=AMBER, width=2)
+                d.line([x + cellw / 2, y + cellh - 6, x + cellw / 2,
+                        padT + gh + 4], fill=(90, 78, 30))
             if ti == cursor and fi < NT:
-                d.rectangle([x + 1, y + 3, x + cellw - 1, y + cellh - 3],
+                d.rectangle([x + 1, y + 7, x + cellw - 1, y + cellh - 7],
                             outline=INK, width=2)
             if ti:
                 x0, y0 = cell_xy(ti - 1, sched[ti - 1])
                 d.line([x0 + cellw / 2, y0 + cellh / 2,
                         x + cellw / 2, y + cellh / 2], fill=(30, 44, 60))
 
-        # the activation boundary — both ends swap exactly here
-        if adapted:
-            d.line([commit_x, padT, commit_x, padT + gh], fill=AMBER, width=2)
-            d.text((commit_x - 46, 76), "commit → activate", font=font(11),
-                   fill=AMBER)
-        if cursor >= PROBE_T:
-            px = padL + PROBE_T * cellw
-            d.line([px + cellw / 2, 90, px + cellw / 2, jam_y - 2], fill=(90, 78, 30))
-            d.text((px - 24, 76), "keyed probe", font=font(11), fill=AMBER)
+        # the moments, marked on the axis
+        if excluded:
+            d.line([tx(COMMIT_T), padT, tx(COMMIT_T), padT + gh], fill=AMBER, width=2)
+            d.text((tx(COMMIT_T) - 30, 76), "exclude ch 52", font=font(11), fill=AMBER)
+        if stopped:
+            mx = tx(STOP_T)
+            yy = padT
+            while yy < padT + gh:
+                d.line([mx, yy, mx, yy + 5], fill=DIM)
+                yy += 10
+            d.text((mx - 34, 76), "occupant stops", font=font(11), fill=DIM)
+        if restored:
+            d.line([tx(RESTORE_T), padT, tx(RESTORE_T), padT + gh], fill=OK, width=2)
+            d.text((tx(RESTORE_T) - 52, 76), "ch 52 restored", font=font(11), fill=OK)
 
         d.text((padL, padT + gh + 8), "time →   (each cell = one dwell)",
                font=font(11), fill=DIM)
+        if cursor >= PROBES[0]:
+            d.text((tx(PROBES[0]) - 12, padT + gh + 8), "↑ keyed recovery probes",
+                   font=font(11), fill=AMBER)
 
-        # act brackets under the axis
         by = padT + gh + 30
 
         def bracket(t0, t1, label, col):
-            x0, x1 = padL + t0 * cellw, padL + t1 * cellw
+            x0, x1 = tx(t0), tx(t1)
             d.line([x0, by, x1, by], fill=col)
             d.line([x0, by - 4, x0, by], fill=col)
             d.line([x1, by - 4, x1, by], fill=col)
             d.text(((x0 + x1) / 2 - 3.2 * len(label), by + 5), label,
                    font=font(11), fill=col)
 
-        bracket(0, COMMIT_T, "LEARNING", WARN if not adapted else DIM)
-        if adapted:
-            bracket(COMMIT_T, min(cursor + 1, NT), "ADAPTED", OK)
+        bracket(0, COMMIT_T, "JAMMED", WARN if not excluded else DIM)
+        if excluded:
+            bracket(COMMIT_T, min(seen, RESTORE_T), "ADAPTED",
+                    OK if not restored else DIM)
+        if restored:
+            bracket(RESTORE_T, seen, "WHOLE AGAIN", OK)
 
         # readout
         x0 = padL + gw + 22
@@ -185,37 +195,45 @@ def main() -> int:
         def line(lbl, val, c=INK):
             nonlocal y
             d.text((x0, y), lbl, font=font(11), fill=DIM)
-            d.text((x0 + 96, y - 3), val, font=font(15, True), fill=c)
+            d.text((x0 + 100, y - 3), val, font=font(15, True), fill=c)
             y += 30
 
-        mask = "".join("0" if (adapted and ci == JAM_CI) else "1"
-                       for ci in range(nC))
-        line("generation", "2" if adapted else "1", AMBER if adapted else INK)
-        line("hop set", mask, OK if adapted else INK)
-        line("active", f"{nC - 1 if adapted else nC}/{nC}", INK)
-        line("floor", "3", DIM)
-        line("dwells lost", f"{clipped}", WARN if clipped else OK)
+        gen = 3 if restored else (2 if excluded else 1)
+        out = excluded and not restored
+        mask = "".join("0" if (out and ci == JAM) else "1" for ci in range(nC))
+        done = sum(1 for p in PROBES if cursor >= p)
+        line("generation", f"{gen}", AMBER if excluded else INK)
+        line("hop set", mask, OK)
+        line("active", f"{nC - 1 if out else nC}/{nC}", AMBER if out else OK)
+        line("probes", f"{done}/{len(PROBES)}" if excluded else "—",
+             AMBER if 0 < done < len(PROBES) else (OK if done else DIM))
+        line("dwells lost", f"{lost}", WARN if lost else OK)
 
-        if not adapted:
-            st, sc = "LEARNING", WARN
-        elif cursor < COMMIT_T + COMMIT_HOLD:
-            st, sc = "COMMITTED", AMBER
-        else:
+        if restored:
+            st, sc = "RESTORED", OK
+        elif stopped:
+            st, sc = "PROBING", AMBER
+        elif excluded:
             st, sc = "ADAPTED", OK
-        d.rectangle([x0, y, x0 + 190, y + 30], outline=sc, width=2)
+        else:
+            st, sc = "LEARNING", WARN
+        d.rectangle([x0, y, x0 + 200, y + 30], outline=sc, width=2)
         d.ellipse([x0 + 8, y + 10, x0 + 18, y + 20], fill=sc)
         d.text((x0 + 28, y + 6), st, font=font(14, True), fill=sc)
         y += 44
 
         if st == "LEARNING":
-            cap = ("the receiver scores every", "dwell it decodes and asks",
-                   "for ch 52 to be dropped —", "it proposes, it never acts.")
-        elif st == "COMMITTED":
-            cap = ("the transmitter owns the", "schedule: a signed commit",
-                   "names a future slot, so", "both ends swap together.")
+            cap = ("ch 52 keeps losing", "dwells — the receiver",
+                   "asks for it to go.")
+        elif st == "ADAPTED":
+            cap = ("ch 52 is out, committed", "at a named slot so both",
+                   "ends swap together.")
+        elif st == "PROBING":
+            cap = ("the occupant left, and", "nothing would ever know —",
+                   "so keyed probes go back", "and look anyway.")
         else:
-            cap = ("ch 52 is no longer", "scheduled — and a keyed",
-                   "probe still revisits it,", "so exclusion can be undone.")
+            cap = ("three clean probes and", "ch 52 is back in the set.",
+                   "exclusion is evidence,", "not a one-way ratchet.")
         for ln in cap:
             d.text((x0, y), ln, font=font(11), fill=INK)
             y += 15

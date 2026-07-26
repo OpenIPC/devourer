@@ -16,8 +16,11 @@ long-range digital video links.
 ## Why devourer
 
 - **No kernel driver, no driver hell.** Everything runs in your process via
-  libusb. The same code works on Linux, macOS, Windows, and Android (Termux)
-  — including platforms the vendor drivers never supported.
+  libusb — on Linux, macOS, Windows and Android alike, including platforms the
+  vendor drivers never supported. On Android that means no root and no custom
+  kernel: [PixelPilot](https://github.com/OpenIPC/PixelPilot) uses devourer as
+  the receive path of an FPV ground station running on an ordinary phone, with
+  the adapter opened straight from the USB permission the app is granted.
 - **Faster on-air than the kernel driver.** Ready-to-receive and
   ready-to-transmit come up quicker than the vendor `.ko` on every supported
   chip, and raw injection skips the kernel networking stack the vendor driver
@@ -36,6 +39,20 @@ long-range digital video links.
   from the schedule by authenticated agreement between the two ends, and
   revisited later by keyed probes in case it recovers
   ([how](docs/fhss.md)).
+- **Wi-Fi 6, on the same API.** The 802.11ax parts (RTL8852BU/8852CU) run one
+  HAL over both dies, with HE injection, 160 MHz on the 8852C and 6 GHz on the
+  8832CU. Including the standard's long-range corner — **HE ER SU + DCM**, worth
+  roughly 8–10 dB stacked, and the only extended-range lever that works against
+  *someone else's* 802.11ax gear ([how](docs/he-extended-range.md)). Trigger
+  frames air correctly for scheduled-uplink work, though the hardware-timed
+  response needs AP firmware these parts don't ship
+  ([what closes, what doesn't](docs/he-trigger-ul.md)).
+- **A link that changes channel on evidence, not on a timer.** Beside per-slot
+  hopping there's the slow lever: a second adapter surveys candidates while the
+  video keeps flowing, delivery on the live channel decides when a move is
+  worth it, and the two ends migrate under an authenticated
+  ground-proposes/drone-commits protocol that cannot split-brain
+  ([how](docs/adaptive-channel-migration.md)).
 - **Narrowband modes the kernel can't do.** 5 and 10 MHz channels on every
   supported generation — including the decade-old RTL8812AU and RTL8814AU the
   vendor never gave narrowband — half/quarter the bandwidth, more range from
@@ -61,7 +78,7 @@ long-range digital video links.
   magic inside the library.
 
 New to low-level RF? Start with the [visual RF primer](docs/rf-primer.md) —
-eight short animations that make the rest click. Its sibling, the
+fifteen short animations that make the rest click. Its sibling, the
 [visual driver primer](docs/driver-primer.md), does the same for the silicon
 and vendor-driver vocabulary (firmware, efuse, DMAC/CMAC, halbb/halrf, IQK…).
 
@@ -156,6 +173,9 @@ the `env:` tags in [`src/DeviceConfig.h`](src/DeviceConfig.h).
 | `svctx` | per-video-layer rate ladders (unequal error protection) |
 | `txpower` | runtime TX-power API walkthrough |
 | `tdma` | TSF-slotted burst TDMA (narrowband ↔ wide on one channel) |
+| `chanmig` / `chanscout` | evidence-driven channel migration: the protocol, and the survey adapter that feeds it |
+| `dwelltx` | dwell-1 hopping data plane on the standard Linux driver |
+| `kestrelprobe` | Wi-Fi 6 (RTL8852B/C) bring-up probe, layer by layer |
 | `timesync` | over-the-air clock distribution (master / slave / UE roles) |
 | `sense` | Wi-Fi motion sensing from beamforming reports |
 | `doctor` | adapter-health triage → HEALTHY / SUSPECT / FAILING |
@@ -164,9 +184,12 @@ the `env:` tags in [`src/DeviceConfig.h`](src/DeviceConfig.h).
 
 All chips compile in by default; per-chip CMake options (`DEVOURER_JAGUAR1`,
 `DEVOURER_8814`, `DEVOURER_JAGUAR2_8822B`, `DEVOURER_JAGUAR2_8821C`,
-`DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`) drop unneeded firmware
-and tables — an 8812AU-only `rxdemo` is ~1.0 MB versus ~2.6 MB with
-everything on.
+`DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`, `DEVOURER_KESTREL_8852B`,
+`DEVOURER_KESTREL_8852C`) drop unneeded firmware and tables — an 8812AU-only
+`rxdemo` is ~1.6 MB against ~6.3 MB with everything on, and dropping just the
+two Wi-Fi 6 dies takes it to ~4.2 MB (their verbatim-vendored halbb/halrf plane
+is the single largest contributor). `DEVOURER_PCIE` (default OFF, Linux-only)
+adds the vfio-pci transport for the RTL8821CE.
 
 ## Using the library
 
@@ -205,13 +228,35 @@ one `IRtlDevice` interface covers all four generations.
 
 ## Going deeper
 
-**Primers** — start here:
+**Start here.** There is a lot below; this is the order that works. Read the
+[visual RF primer](docs/rf-primer.md) first — fifteen animations covering the
+concepts every other doc assumes (subcarriers, EVM, AGC, hopping, OFDMA,
+extended range). Then pick the one thing you came for: building a video link →
+[adaptive link](docs/adaptive-link.md); surviving interference →
+[FHSS](docs/fhss.md); getting more range →
+[narrowband](docs/narrowband.md); coordinating several radios →
+[time distribution](docs/time-distribution.md); making the driver itself do
+something new → [visual driver primer](docs/driver-primer.md), then
+[logging](docs/logging.md) for the event schema every test script reads. If a
+chip is misbehaving, skip to [adapter doctor](docs/adapter-doctor.md) and the
+per-chip quirks notes at the bottom.
+
+**Primers:**
 
 - [Visual RF primer](docs/rf-primer.md) — animated intro to the concepts
   behind everything below.
 - [Visual driver primer](docs/driver-primer.md) — animated intro to the chip
   and vendor-driver machinery: registers, efuse, firmware, MAC, PHY tables,
-  calibration, coexistence.
+  calibration, coexistence, firmware offload.
+
+**Wi-Fi 6 (802.11ax):**
+
+- [HE extended range](docs/he-extended-range.md) — the ER SU / DCM range
+  ladder, what each rung buys and costs, and the on-air matrix across both
+  dies.
+- [HE trigger-based uplink](docs/he-trigger-ul.md) — Trigger frames, resource
+  units, TWT and sounding: the API, and an honest account of which paths the
+  shipped client firmware executes and which it silently drops.
 
 **Link engineering:**
 
@@ -249,6 +294,14 @@ one `IRtlDevice` interface covers all four generations.
   one that decides, why a transmitter may argue only that a move leaves *it*
   worse off rather than that it disagrees, and what stops an adversary who can
   make channels look bad from herding the link onto one it then jams.
+- [Adaptive channel migration](docs/adaptive-channel-migration.md) — the slow
+  counterpart to hopping: a scout adapter surveying candidates while the video
+  keeps flowing, a scoring engine where the receiver's delivery is
+  authoritative, and a gate that only moves a working link on evidence. The
+  [wire protocol](docs/channel-migration-protocol.md) is the authenticated
+  ground-proposes/drone-commits exchange, and
+  [its validation](docs/channel-migration-validation.md) is the failure matrix
+  every row of which converges without split-brain.
 - [Narrowband](docs/narrowband.md) — 5/10 MHz channels across all three
   generations: the baseband re-clock, the per-chip register machinery, and the
   walls (RF re-latch edges, per-die clock coupling, the 5 MHz/5 GHz CFO limit).
@@ -296,6 +349,8 @@ one `IRtlDevice` interface covers all four generations.
 
 - [8822E quirks](docs/8822e-quirks.md) — the RTL8812EU/8822EU definitive
   quirks list: what the chip needs, what devourer does, the reproducers.
+- [8852C quirks](docs/8852c-quirks.md) — the same for the Wi-Fi 6 die,
+  including which sensing facilities are 2.4 GHz-only and why.
 - [Logging](docs/logging.md) — the two-plane output schema: JSONL machine
   events on stdout, human diagnostics on stderr.
 

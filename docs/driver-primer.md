@@ -7,7 +7,7 @@ H2C, DIG. If you've ever opened a Realtek vendor tree and bounced off ten
 thousand files of alphabet soup, start here. Its sibling, the
 [RF primer](rf-primer.md), shows what the *radio physics* looks like —
 subcarriers, constellations, gain control. Like the RF primer this is a
-picture book: thirteen short animations in the DEVOURER live-monitor style,
+picture book: fourteen short animations in the DEVOURER live-monitor style,
 ordered from the silicon up. Read it top to bottom and both the vendor trees
 and devourer's `src/` will read like prose.
 
@@ -352,7 +352,40 @@ receiver, so the chips run an external handshake bus and another arbitration
 table (`mac_ax/coex.c` carries the mailbox). Different radios, same shape: shared
 spectrum, negotiated time slices.
 
-## 14. Reading a vendor tree
+## 14. Offload — when the host stops driving
+
+![Firmware IO-offload — who walks the registers](img/fw_offload.gif)
+
+Section 6 introduced H2C as a *message* pipe. It is also a *speed* technique,
+and this is the one that turns a slow operation into a fast one without any new
+silicon.
+
+Take a channel switch. Stripped to essentials it is a short list of register
+writes — the synthesizer command, a baseband reset, the power target. Done the
+ordinary way, each of those writes is a USB vendor-control transfer, and the
+host pays a full bus round-trip per write while the radio waits. The registers
+are cheap; the **bus** is what costs. So the fast path stops sending the writes
+one at a time and instead sends the *list*: one H2C carrying the whole
+write-list, replayed by the on-chip CPU locally, with nothing crossing the bus
+in between. On the 8822B the vendor firmware has a dedicated command for
+exactly this (H2C 0x1D), and the same shape appears again as a general
+masked-write buffer on Wi-Fi 6 — and again at init time, where the long
+bring-up register tables ride the same mechanism.
+
+The measured effect, for one channel switch: a full re-initialisation costs
+~65 ms, a host-driven fast retune ~2.5 ms, and the firmware command 1.03 ms of
+median dead air. On Kestrel the host-side cost of a hop collapses from ~9 ms to
+~0.15 ms as twenty round-trips become one bulk-OUT.
+
+And then the honest part, which is the reason this section exists at all:
+**offload frees the host, not the radio.** The synthesizer still has to settle,
+and that floor — about 1.5 ms on Kestrel — does not care who wrote the
+registers. Time-to-usable improves from ~5 ms to ~1.7 ms, not to zero. Offload
+buys back exactly the portion of the dead time that was the bus's fault, and
+not one microsecond more. Whenever a mechanism looks like it deleted a cost,
+check which part of the cost it was actually holding.
+
+## 15. Reading a vendor tree
 
 Now the payoff — the same concepts, found in each generation's source layout.
 The architecture visibly evolves: a per-chip monolith, then a monolith with an
@@ -459,6 +492,12 @@ find each in the vendor trees and in devourer.
 - [`narrowband.md`](narrowband.md) and
   [`frequency-hopping.md`](frequency-hopping.md) — what devourer builds on top of
   §10's channel machinery.
+- [`experiments/kernel-channel-switch-offload.md`](experiments/kernel-channel-switch-offload.md)
+  — §14's offload isolated and benchmarked against the kernel driver, and
+  [`experiments/mcc-fcs-investigation.md`](experiments/mcc-fcs-investigation.md)
+  for the neighbouring firmware feature that was measured and *rejected*.
+- [`8852c-quirks.md`](8852c-quirks.md) — the same density as the 8822E notes,
+  for the Wi-Fi 6 die.
 - [`la-capture.md`](la-capture.md) — using a BB debug block to capture raw IQ:
   §2's register plane pointed at §1's signal path.
 - [`performance-tuning.md`](performance-tuning.md) — where the URB plumbing of §2

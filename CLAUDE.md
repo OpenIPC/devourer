@@ -90,11 +90,14 @@ before running `tools/extract_*.py` or the hardware-testing kernel cells.
 
 Per-chip options, all default ON: `DEVOURER_JAGUAR1`, `DEVOURER_8814` (requires
 JAGUAR1), `DEVOURER_JAGUAR2_8822B`, `DEVOURER_JAGUAR2_8821C`,
-`DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`. `DEVOURER_PCIE` (default
+`DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`, `DEVOURER_KESTREL_8852B`,
+`DEVOURER_KESTREL_8852C`. `DEVOURER_PCIE` (default
 OFF, Linux-only, requires JAGUAR2_8821C) adds the vfio-pci transport +
 `pcieprobe`; OFF builds are byte-identical to before it existed. Turning groups off drops
-their firmware blobs + PHY tables (an 8812AU-only `rxdemo` is ~1.0 MB vs
-~2.6 MB). Configure fails on no-chip-selected or 8814-without-JAGUAR1. Each
+their firmware blobs + PHY tables (an 8812AU-only `rxdemo` is ~1.6 MB vs
+~6.3 MB all-on; ~4.2 MB with only the two Kestrel dies dropped — their
+verbatim-vendored halbb/halrf plane dominates). Configure fails on
+no-chip-selected or 8814-without-JAGUAR1. Each
 group exports a PUBLIC `DEVOURER_HAVE_*` define; sites referencing a dropped
 group sit behind `#if defined(DEVOURER_HAVE_*)`, and the factory returns
 `nullptr` (logs) for a chip whose support isn't built.

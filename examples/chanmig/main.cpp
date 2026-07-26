@@ -380,14 +380,14 @@ static void drone_do(const std::vector<cm::MigAction> &acts) {
         {
           std::lock_guard<std::mutex> lk(g_dev_mu);
           if (g_dev) {
-            (void)g_dev->GetRxEnergy(); /* reset the delta counters */
+            (void)g_dev->GetRxEnergy(false); /* reset the delta counters */
           }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(dwell_ms));
         {
           std::lock_guard<std::mutex> lk(g_dev_mu);
           if (g_dev) {
-            RxEnergy e = g_dev->GetRxEnergy();
+            RxEnergy e = g_dev->GetRxEnergy(true);
             if (e.valid_nhm) {
               uint32_t total = 0;
               for (int k = 0; k < 12; k++)

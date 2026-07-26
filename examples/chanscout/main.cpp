@@ -495,7 +495,7 @@ int main() {
      * frames that raced in from the previous channel. */
     if (!nap_ms(cfg.settle_ms))
       d.flags |= cm::kFlagTruncated;
-    (void)devp->GetRxEnergy();
+    (void)devp->GetRxEnergy(/*with_nhm=*/false);
     {
       std::lock_guard<std::mutex> lk(g_agg_mu);
       g_agg = ScoutAgg{};
@@ -505,7 +505,7 @@ int main() {
     if (!nap_ms(cfg.dwell_ms))
       d.flags |= cm::kFlagTruncated;
 
-    RxEnergy e = devp->GetRxEnergy();
+    RxEnergy e = devp->GetRxEnergy(/*with_nhm=*/true);
     ScoutAgg agg;
     {
       std::lock_guard<std::mutex> lk(g_agg_mu);

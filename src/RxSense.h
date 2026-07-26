@@ -19,7 +19,14 @@
  * FA/CCA counts are the DELTA since the previous GetRxEnergy() call (each read
  * resets the hardware counters), so a strong in-band carrier shows up as a jump
  * in cca_ofdm / fa_ofdm and a rise in igi. Every field carries a valid_* flag
- * because the facilities differ by chip generation. */
+ * because the facilities differ by chip generation.
+ *
+ * The read splits into two very different costs, which is why the caller picks
+ * (`GetRxEnergy(bool with_nhm)`): the scalars below are a handful of register
+ * reads, while the NHM histogram arms a ~2 ms measurement window and then polls
+ * a ready bit at 1 ms granularity. Anything sampling at a sub-second cadence —
+ * or throwing the read away to reset the counters before an observation
+ * window — wants with_nhm=false. */
 struct RxEnergy {
   /* phydm false-alarm + CCA counters (delta since the previous read). */
   bool valid_fa = false;
@@ -36,7 +43,8 @@ struct RxEnergy {
 
   /* NHM in-band power histogram: 12 IGI-referenced power buckets and the
    * measurement duration. A frame-free power distribution (fuller than the
-   * scalar FA counts). Only populated when GetRxEnergy() triggered an NHM. */
+   * scalar FA counts). Only populated when the caller asked for it
+   * (GetRxEnergy(with_nhm=true)). */
   bool valid_nhm = false;
   uint8_t nhm[12] = {};
   uint16_t nhm_duration = 0;

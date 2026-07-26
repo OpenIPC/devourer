@@ -116,7 +116,7 @@ public:
   /* Frame-free RX energy snapshot. On Kestrel this carries only the active
    * absolute noise floor (halbb NHM env-monitor) when DEVOURER_RX_NOISE_FLOOR is
    * set — there is no phydm FA/CCA/IGI DIG monitor on this generation. */
-  RxEnergy GetRxEnergy() override;
+  RxEnergy GetRxEnergy(bool with_nhm) override;
   /* Windowed RX link-quality: the passive rssi-snr floor + LinkHealth verdict
    * (fed per frame via _rxq) fused with the active NHM floor from GetRxEnergy. */
   devourer::RxQuality GetRxQuality() override;

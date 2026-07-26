@@ -270,7 +270,7 @@ void RtlJaguarDevice::StopContinuousTx() {
  * (0xC50), then resets the counters (phydm_false_alarm_counter_reg_reset AC:
  * 0x9a4[17], 0xa2c[15], 0xb58[0]) so the next call sees only the delta. Same
  * register set PhydmWatchdog::ReadFaCountersAc uses. */
-RxEnergy RtlJaguarDevice::GetRxEnergy() {
+RxEnergy RtlJaguarDevice::GetRxEnergy(bool with_nhm) {
   RxEnergy e;
   auto bb = [this](uint16_t addr) {
     return _radioManagement->phy_query_bb_reg_public(addr, 0xFFFFFFFF);
@@ -292,8 +292,11 @@ RxEnergy RtlJaguarDevice::GetRxEnergy() {
   _device.phy_set_bb_reg(0x0B58, 1u << 0, 1);
   _device.phy_set_bb_reg(0x0B58, 1u << 0, 0);
 
-  /* NHM 12-bucket power histogram (frame-free, 11AC register map). */
-  devourer::read_nhm(
+  /* NHM 12-bucket power histogram (frame-free, 11AC register map). Skipped
+   * when the caller did not ask: it arms a ~2 ms window and polls at 1 ms
+   * granularity, which dwarfs the register reads above. */
+  if (with_nhm)
+    devourer::read_nhm(
       devourer::nhm_regs_11ac(), e.igi,
       [this](uint16_t a) { return _device.rtw_read<uint32_t>(a); },
       [this](uint16_t a, uint32_t m, uint32_t v) {

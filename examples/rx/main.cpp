@@ -1397,7 +1397,7 @@ int main(int argc, char **argv) {
       };
       nap(g_rx_energy_ms); /* let bring-up finish before the first read */
       while (!energy_emitter_stop.load()) {
-        RxEnergy e = dev->GetRxEnergy();
+        RxEnergy e = dev->GetRxEnergy(true);
         RxAgg agg;
         {
           std::lock_guard<std::mutex> lk(g_rxagg_mu);
@@ -1876,7 +1876,7 @@ int main(int argc, char **argv) {
       for (uint32_t s = 0; s < g_rx_sweep_dwell_ms && !g_devourer_should_stop;
            s += 50)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      RxEnergy e = dev->GetRxEnergy();
+      RxEnergy e = dev->GetRxEnergy(true);
       RxAgg agg;
       {
         std::lock_guard<std::mutex> lk(g_rxagg_mu);

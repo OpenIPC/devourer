@@ -171,12 +171,12 @@ public:
   /* Frame-free RX energy snapshot (see RxSense.h) — the FA/CCA/IGI values
    * dig_step samples over its ~100 ms window, plus a fresh NHM power histogram.
    * The read side of the CW tone. */
-  RxEnergy GetRxEnergy() override;
+  RxEnergy GetRxEnergy(bool with_nhm) override;
 
   /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — subsumes
    * GetRxEnergy. Fed per decoded frame in the RX loop via _rxq. */
   devourer::RxQuality GetRxQuality() override {
-    return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy());
+    return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy(true));
   }
 
   /* Adapter-health probes (see src/AdapterHealth.h). EFUSE probe re-reads the

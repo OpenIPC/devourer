@@ -1065,7 +1065,7 @@ void RtlJaguar3Device::StopContinuousTx() {
  * channel-busy signal (a CW tone spikes OFDM CCA); OFDM FA is the vendor sum of
  * the sub-counters. Read-then-reset for a per-call delta; serialized on _reg_mu
  * so it does not race the coex thread's register access. */
-RxEnergy RtlJaguar3Device::GetRxEnergy() {
+RxEnergy RtlJaguar3Device::GetRxEnergy(bool with_nhm) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   RxEnergy e;
   auto rd = [this](uint16_t addr) { return _device.rtw_read<uint32_t>(addr); };
@@ -1090,7 +1090,8 @@ RxEnergy RtlJaguar3Device::GetRxEnergy() {
    * ~2 ms measurement window before the FA-counter reset below (0x1eb4[25] also
    * clears BB HW counters). Holds _reg_mu across the short wait — tolerable at
    * the emitter's >=100 ms cadence vs the coex thread's ~2 s tick. */
-  devourer::read_nhm(
+  if (with_nhm)
+    devourer::read_nhm(
       devourer::nhm_regs_jgr3(), e.igi, rd,
       [this](uint16_t a, uint32_t m, uint32_t v) {
         _device.phy_set_bb_reg(a, m, v);

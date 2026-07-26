@@ -102,6 +102,22 @@ tx_probe() { # channel, label, [inter-frame gap us]
     sleep 2
 }
 
+tx_probe_long() { # channel, label
+    sudo env DEVOURER_VID="$VID" DEVOURER_PID="$TX_PID" \
+        DEVOURER_TX_GAP_US=2000 \
+        DEVOURER_CHANNEL="$1" DEVOURER_HOP_CHANNELS="$1" \
+        DEVOURER_HOP_SLOT_MS=1200 DEVOURER_HOP_SEED=c0ffee00c0ffee00 \
+        DEVOURER_HOP_ADAPTIVE=1 DEVOURER_HOP_MIN_ACTIVE=1 \
+        DEVOURER_TX_SENSE=1 DEVOURER_TX_SENSE_EVERY=1 \
+        DEVOURER_TX_SENSE_WINDOW_US=300000 \
+        DEVOURER_TX_SENSE_MAX_FRAC_PCT=60 \
+        DEVOURER_TX_WITH_RX=thread \
+        "$ROOT/build/txdemo" >"$OUT/tx_$2.log" 2>&1 &
+    sleep "$SECS"
+    sudo pkill -INT -x txdemo 2>/dev/null || true
+    sleep 2
+}
+
 # distinct values seen for a field — one value across a whole run means the
 # counter never moved
 spread() { # file, field
@@ -116,6 +132,23 @@ report() { # file, label
     for f in fa_ofdm cca_ofdm igi nhm_busy; do
         printf '      %-9s %s\n' "$f" "$(spread "$1" "$f")"
     done
+}
+
+# Counts are meaningless without the window they span, and the two sessions
+# use very different windows. Normalise to events per millisecond so a 500 ms
+# receive read and a 20 ms transmit window can be compared at all.
+rate() { # file, field, fallback window in us
+    grep -oE "\"($2|window_us)\":[0-9]+" "$1" 2>/dev/null |
+    awk -F: -v fb="$3" -v f="$2" '
+        $1 ~ /window_us/ { w = $2; next }
+        { n++; s += $2; ww += (w ? w : fb); w = 0 }
+        END { if (!n || !ww) { print "-"; exit }
+              printf "%.3f/ms over %d reads", s / (ww / 1000.0), n }'
+}
+
+rates() { # file, label, fallback window us
+    printf '      %-14s cca %-22s fa %s\n' "$2" \
+        "$(rate "$1" cca_ofdm "$3")" "$(rate "$1" fa_ofdm "$3")"
 }
 
 echo "== interferer on ch$JAM_CHANNEL (gain $JAM_GAIN, ${JAM_RATE} narrowband) =="
@@ -140,6 +173,20 @@ report "$OUT/tx_clean.log" "ch$CLEAN_CHANNEL (clean)"
 echo "== TX session, near-silent (one frame every 200 ms) =="
 tx_probe "$JAM_CHANNEL" "quiet" 200000
 report "$OUT/tx_quiet.log" "ch$JAM_CHANNEL (jammed, near-silent TX)"
+
+# A long transmit window, so the counts are thick enough to mean something and
+# the rate is directly comparable with the receive session above.
+echo "== TX session, long window (300 ms of listening per dwell) =="
+SLOT_MS_LONG=1200 tx_probe_long "$JAM_CHANNEL" "longjam"
+tx_probe_long "$CLEAN_CHANNEL" "longclean"
+report "$OUT/tx_longjam.log"   "ch$JAM_CHANNEL (jammed, 300 ms window)"
+report "$OUT/tx_longclean.log" "ch$CLEAN_CHANNEL (clean, 300 ms window)"
+
+echo "== events per millisecond (the only cross-session comparison) =="
+rates "$OUT/rx_jam.log"       "RX ch$JAM_CHANNEL jam"   500000
+rates "$OUT/rx_clean.log"     "RX ch$CLEAN_CHANNEL clean" 500000
+rates "$OUT/tx_longjam.log"   "TX ch$JAM_CHANNEL jam"   300000
+rates "$OUT/tx_longclean.log" "TX ch$CLEAN_CHANNEL clean" 300000
 
 kill_jammer
 echo

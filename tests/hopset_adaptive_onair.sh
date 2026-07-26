@@ -18,8 +18,13 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 VID="${VID:-0x0bda}"
-TX_PID="${TX_PID:-0xa81a}"     # RTL8812EU (Jaguar3)
-RX_PID="${RX_PID:-0xc812}"     # RTL8812CU (Jaguar3)
+# The transmitter must actually reach the receiver on this band, and the
+# 8812EU is a 5 GHz-only PA part — on 2.4 GHz it transmits without one, which
+# is enough for a follower already tracking but leaves a FRESH follower, that
+# has to catch a single status beacon while scanning, missing it more often
+# than not. The 8812CU has the front end for this band in both directions.
+TX_PID="${TX_PID:-0xc812}"     # RTL8812CU (Jaguar3)
+RX_PID="${RX_PID:-0xa81a}"     # RTL8812EU (Jaguar3) — receive only here
 CHANNELS="${CHANNELS:-1,6,11}" # base hopset (2.4 GHz — every DUT reaches it)
 SLOT_MS="${SLOT_MS:-50}"
 SEED="${SEED:-c0ffeef00dc0ffeef00dc0ffeef00d01}"

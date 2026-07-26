@@ -96,6 +96,10 @@ struct Sim {
             route(fol.on_status(r, slot), false);
         } else if (r.type == HT_PROPOSAL) {
           route(auth.on_proposal(r, slot), true);
+        } else if (r.type == HT_STATUS && r.role == 0) {
+          /* the follower's heartbeat: nothing to adopt, but it is proof the
+           * return channel is alive, and recording that is the host's job */
+          auth.note_feedback(slot);
         }
       }
     }
@@ -426,6 +430,90 @@ int main() {
         cooled = true;
     CHECK(cooled && !s.auth.committing(),
           "proposal inside the update gap rejected as cooldown");
+  }
+
+  /* --- row 16: the autonomous local-change path. A change the transmitter
+   * decides for itself is NOT the operator's lever: it must obey the same
+   * structural limits a follower proposal does, because a machine reacting
+   * to its own local evidence is exactly the actor those limits bound. --- */
+  {
+    Sim s(0x1000, 0x2000);
+    /* one channel at a time */
+    auto acts = s.auth.start_local_change(0b11000111, s.slot);
+    bool refused = false;
+    for (auto &a : acts)
+      if (a.kind == HopsetAction::Event && a.event == HopsetEvent::Reject &&
+          a.reason == HopsetReason::MaskDelta)
+        refused = true;
+    CHECK(refused && !s.auth.committing(),
+          "an autonomous multi-channel change is refused");
+    /* the same shape from the operator's lever is still allowed */
+    CHECK(!s.auth.start_change(0b11000111, s.slot).empty() &&
+              s.auth.committing(),
+          "the operator's lever remains exempt");
+  }
+  {
+    Sim s(0x1000, 0x2000);
+    s.route(s.auth.start_local_change(0b11110111, s.slot), true);
+    CHECK(s.auth.committing(), "an autonomous single-channel change commits");
+    s.tick(200);
+    CHECK(s.converged() && s.fol_state.active_mask == 0b11110111,
+          "the follower adopts an autonomously-originated change");
+    /* and the update gap applies to the next one */
+    auto acts = s.auth.start_local_change(0b11110011,
+                                          s.auth.state().activate_slot + 2);
+    bool cooled = false;
+    for (auto &a : acts)
+      if (a.kind == HopsetAction::Event && a.event == HopsetEvent::Reject &&
+          a.reason == HopsetReason::Cooldown)
+        cooled = true;
+    CHECK(cooled, "the autonomous path honours the update gap");
+  }
+
+  /* --- row 17: feedback liveness. A receiver that is simply content sends
+   * no proposals; its heartbeat is what keeps the transmitter from mistaking
+   * contentment for deafness. --- */
+  {
+    /* the heartbeat is opt-in: a receiver running the exclusion policy turns
+     * it on, a pure follower stays silent so every slot is spent listening */
+    HopsetParams hp = params();
+    hp.follower_status_slots = 64;
+    Sim s(0x1000, 0x2000);
+    s.fol = HopsetFollower(hp, 0x2000);
+    CHECK(s.auth.feedback_age_rounds(s.slot) ==
+              HopsetAuthority::kNoFeedbackAge,
+          "never having heard the peer reads as maximally stale");
+    s.tick(400);
+    CHECK(s.auth.have_feedback(),
+          "the follower's heartbeat reached the authority");
+    const uint64_t age = s.auth.feedback_age_rounds(s.slot);
+    CHECK(age != HopsetAuthority::kNoFeedbackAge &&
+              age * s.p.n_base <= 2 * hp.follower_status_slots + s.p.n_base,
+          "the age tracks the heartbeat cadence");
+    /* a rejected proposal still proves the return channel works */
+    Sim t(0x1000, 0x2000);
+    t.propose(0b100000000, 0xE1); /* structurally invalid: BadMask */
+    CHECK(t.last_reject == HopsetReason::BadMask, "the proposal was refused");
+    CHECK(t.auth.have_feedback(),
+          "a refused proposal still counts as liveness");
+  }
+
+  /* --- row 18: an explicit rejection releases the follower immediately
+   * rather than making it wait out its retries --- */
+  {
+    Sim s(0x1000, 0x2000);
+    s.propose(0b11110111, 0xE2);
+    CHECK(s.auth.committing(), "veto setup");
+    Sim t(0x1000, 0x2000);
+    HopsetMsg m;
+    m.type = HT_PROPOSAL;
+    m.link_id = t.p.link_id;
+    m.rx_epoch = 0x2000;
+    m.rx_nonce = 0xE3;
+    m.active_mask = 0b11110111;
+    m.base_fp = t.p.base_fp;
+    t.route(t.auth.reject_proposal(m, HopsetReason::TxVeto, t.slot), true);
+    CHECK(!t.auth.committing(), "a refused proposal commits nothing");
   }
 
   /* --- drop-every-message sweep: for each control-message index in the

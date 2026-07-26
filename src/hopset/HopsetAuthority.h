@@ -47,6 +47,12 @@ public:
   std::vector<HopsetAction> on_proposal(const HopsetMsg &m,
                                         uint64_t now_slot) {
     std::vector<HopsetAction> out;
+    /* Liveness, stamped before any validation branch: this message was
+     * MAC-verified by the host, so whatever we go on to think of its
+     * contents, the return channel demonstrably works. A proposer whose
+     * proposals keep bouncing off Busy or Cooldown is manifestly present, and
+     * counting that as silence would arm the failsafe against a live peer. */
+    note_feedback(now_slot);
     if (m.base_fp != p_.base_fp)
       return reject(out, m, HopsetReason::BadBaseFp, now_slot);
     if (replays_.contains(m.rx_epoch, m.rx_nonce)) {
@@ -90,8 +96,64 @@ public:
     return out;
   }
 
-  /* A locally-originated change (scripted commits, or a TX-side exclusion
-   * policy once one exists). rx_epoch_echo stays 0 on the wire. */
+  /* Liveness from any other authenticated frame the peer sent (its status
+   * heartbeat). The host calls this; the authority itself only sees
+   * proposals. */
+  void note_feedback(uint64_t now_slot) {
+    last_feedback_round_ = round_of(now_slot);
+    have_feedback_ = true;
+  }
+  bool have_feedback() const { return have_feedback_; }
+  /* Rounds since the peer was last heard, or kNoFeedbackAge if never. Note
+   * the round numbering rebases at each activation, so this reads low just
+   * after one — which is harmless, since an activation implies the exchange
+   * that produced it was recent. */
+  static constexpr uint64_t kNoFeedbackAge = ~uint64_t(0);
+  uint64_t feedback_age_rounds(uint64_t now_slot) const {
+    if (!have_feedback_)
+      return kNoFeedbackAge;
+    const uint64_t r = round_of(now_slot);
+    return r > last_feedback_round_ ? r - last_feedback_round_ : 0;
+  }
+
+  /* A change the transmitter decided for itself, from its own sensing. This
+   * is NOT start_change: that one is the operator's lever and is deliberately
+   * exempt from the structural limits. A machine reacting to local evidence
+   * is exactly the actor those limits exist to bound — an adversary who can
+   * make a channel look bad at the transmitter would otherwise have a freer
+   * hand than one who fools the receiver. */
+  std::vector<HopsetAction> start_local_change(uint64_t mask,
+                                               uint64_t now_slot,
+                                               uint32_t reason_bitmap = 0) {
+    std::vector<HopsetAction> out;
+    if (committing_)
+      return local_reject(out, HopsetReason::Busy);
+    const HopsetReason mr = mask_reason(mask);
+    if (mr != HopsetReason::None)
+      return local_reject(out, mr);
+    if (p_.max_mask_delta &&
+        popcount64(mask ^ cur_.active_mask) > p_.max_mask_delta)
+      return local_reject(out, HopsetReason::MaskDelta);
+    if (p_.min_update_gap_rounds && have_activation_ &&
+        round_of(now_slot) - last_activation_round_ < p_.min_update_gap_rounds)
+      return local_reject(out, HopsetReason::Cooldown);
+    pend_echo_epoch_ = pend_echo_nonce_ = 0;
+    pend_reasons_ = reason_bitmap;
+    start_commit(out, mask, 0, now_slot);
+    return out;
+  }
+
+  /* Refuse a proposal the host's fusion layer objected to, so the follower
+   * learns why immediately instead of waiting out its retries. */
+  std::vector<HopsetAction> reject_proposal(const HopsetMsg &m,
+                                            HopsetReason reason,
+                                            uint64_t now_slot) {
+    std::vector<HopsetAction> out;
+    return reject(out, m, reason, now_slot);
+  }
+
+  /* A locally-originated change (scripted commits — the operator's lever,
+   * exempt from the structural limits by design). rx_epoch_echo stays 0. */
   std::vector<HopsetAction> start_change(uint64_t mask, uint64_t now_slot) {
     std::vector<HopsetAction> out;
     if (committing_) {
@@ -112,6 +174,7 @@ public:
       return out;
     }
     pend_echo_epoch_ = pend_echo_nonce_ = 0;
+    pend_reasons_ = 0;
     start_commit(out, mask, 0, now_slot);
     return out;
   }
@@ -138,7 +201,15 @@ public:
         push_commit(out, now_slot);
       }
     }
-    if (now_slot - last_status_slot_ >= p_.status_interval_slots) {
+    /* Jitter the beacon so it cannot alias with a scanning follower. A fixed
+     * interval is commensurate with the follower's fixed scan step, so the
+     * beacon keeps arriving at the same point in its scan cycle — landing on
+     * the same channel every time, which is either always right or, as often,
+     * always wrong. A follower that never coincides never recovers, and it
+     * looks like bad luck rather than arithmetic. Deterministic and pure: the
+     * spread comes from the slot number itself, not a clock or an RNG. */
+    if (now_slot - last_status_slot_ >=
+        p_.status_interval_slots + (now_slot % 7)) {
       last_status_slot_ = now_slot;
       HopsetAction a{};
       a.kind = HopsetAction::SendControl;
@@ -212,7 +283,18 @@ private:
     m.activate_slot = pend_.activate_slot;
     m.current_round = round_of(now_slot);
     m.rx_nonce_echo = pend_echo_nonce_;
+    m.reason_bitmap = pend_reasons_;
     out.push_back(a);
+  }
+
+  std::vector<HopsetAction> &local_reject(std::vector<HopsetAction> &out,
+                                          HopsetReason r) {
+    HopsetAction ev{};
+    ev.kind = HopsetAction::Event;
+    ev.event = HopsetEvent::Reject;
+    ev.reason = r;
+    out.push_back(ev);
+    return out;
   }
 
   HopsetMsg status_msg(uint64_t now_slot, HopsetReason reason) const {
@@ -252,10 +334,13 @@ private:
   HopsetState pend_{};
   bool committing_ = false;
   uint32_t pend_echo_epoch_ = 0, pend_echo_nonce_ = 0;
+  uint32_t pend_reasons_ = 0;
   uint64_t last_commit_slot_ = 0;
   uint64_t last_status_slot_ = 0;
   uint64_t last_activation_round_ = 0;
   bool have_activation_ = false;
+  uint64_t last_feedback_round_ = 0;
+  bool have_feedback_ = false;
   ProposalReplayRing replays_;
 };
 

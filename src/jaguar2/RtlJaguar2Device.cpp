@@ -902,14 +902,17 @@ int RtlJaguar2Device::SetXtalCap(int cap) {
   return c;
 }
 
-RxEnergy RtlJaguar2Device::GetRxEnergy() {
+RxEnergy RtlJaguar2Device::GetRxEnergy(bool with_nhm) {
   /* Scalar FA/CCA/IGI come from the DIG thread's cached snapshot (no USB);
    * append a fresh NHM power histogram (11AC register map). NHM's registers
    * (0x994/0x990/0x998.. + 0xfa8/0xfb4) don't overlap the DIG thread's
    * (0xc50 IGI + FA counters), so the concurrent read is race-free enough for
    * this diagnostic. */
   RxEnergy e = _hal.last_energy();
-  devourer::read_nhm(
+  /* The scalars above are a cached snapshot (no IO); the NHM below is the
+   * expensive part, so it is the caller's choice. */
+  if (with_nhm)
+    devourer::read_nhm(
       devourer::nhm_regs_11ac(), e.igi,
       [this](uint16_t a) { return _device.rtw_read<uint32_t>(a); },
       [this](uint16_t a, uint32_t m, uint32_t v) {

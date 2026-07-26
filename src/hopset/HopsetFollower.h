@@ -223,6 +223,40 @@ public:
       a.msg = prop_;
       out.push_back(a);
     }
+    /* Announce ourselves even with nothing to propose. A receiver that is
+     * simply content sends no proposals, which from the transmitter's side
+     * looks exactly like a receiver that has gone deaf — and a transmitter
+     * failsafe keyed on that silence would fire on a perfectly good link.
+     * The status also carries our committed generation and mask, so the
+     * transmitter can see a split-brain rather than infer one. */
+    /* The receiver's slot clock is FITTED from received markers, so unlike
+     * the authority's it can jump backwards when the fit is re-anchored
+     * during acquisition. An unsigned difference would underflow there and
+     * fire the heartbeat on every tick — the receiver would spend its air
+     * time transmitting instead of listening, and never re-acquire. Re-anchor
+     * on a backwards jump instead of announcing. And say nothing at all while
+     * recovering: there is no useful state to report, and transmitting is the
+     * opposite of what re-acquisition needs. */
+    if (!have_status_anchor_ || now_slot < last_status_slot_) {
+      have_status_anchor_ = true;
+      last_status_slot_ = now_slot;
+    } else if (p_.follower_status_slots && st_ != State::Recovering &&
+               now_slot - last_status_slot_ >= p_.follower_status_slots) {
+      last_status_slot_ = now_slot;
+      HopsetAction a{};
+      a.kind = HopsetAction::SendControl;
+      HopsetMsg &m = a.msg;
+      m.type = HT_STATUS;
+      m.link_id = p_.link_id;
+      m.role = 0; /* follower */
+      m.sender_epoch = epoch_;
+      m.generation = cur_.generation;
+      m.active_mask = cur_.active_mask;
+      m.base_fp = p_.base_fp;
+      m.activate_slot = cur_.activate_slot;
+      m.reason = static_cast<uint8_t>(HopsetReason::None);
+      out.push_back(a);
+    }
     return out;
   }
 
@@ -280,6 +314,8 @@ private:
   HopsetMsg prop_{};
   unsigned tries_ = 0;
   uint64_t last_prop_slot_ = 0;
+  uint64_t last_status_slot_ = 0;
+  bool have_status_anchor_ = false;
   bool have_auth_ = false;
   uint32_t auth_epoch_ = 0;
   uint32_t last_mismatch_gen_ = 0;

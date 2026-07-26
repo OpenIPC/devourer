@@ -199,12 +199,12 @@ public:
    * IGI noise-floor (0xC50), then resets the counters so the next call is a
    * fresh delta. The read side of the CW tone. NB: if DEVOURER_PHYDM_WATCHDOG is
    * also running it shares/steals these counters. */
-  RxEnergy GetRxEnergy() override;
+  RxEnergy GetRxEnergy(bool with_nhm) override;
 
   /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — subsumes
    * GetRxEnergy. Fed per decoded frame in the RX loop via _rxq. */
   devourer::RxQuality GetRxQuality() override {
-    return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy());
+    return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy(true));
   }
 
   /* Adapter-health probes (see src/AdapterHealth.h). The EFUSE probe re-runs

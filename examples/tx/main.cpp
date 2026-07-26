@@ -38,6 +38,8 @@
 #include "HopSchedule.h"
 #include "hopset/HopsetAuthority.h"
 #include "hopset/HopsetEvents.h"
+#include "hopset/HopsetFusion.h"
+#include "hopset/HopsetSense.h"
 #include "hopset/HopsetWire.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
@@ -140,6 +142,14 @@ static std::optional<devourer::hopset::HopsetAuthority> g_hopset_auth;
 static std::optional<devourer::hopset::AdaptiveScheduleView> g_hopset_view;
 static IRtlDevice *g_hopset_dev = nullptr;
 static std::atomic<uint64_t> g_hopset_tick_slot{0};
+/* Quiet-window sensing (DEVOURER_TX_SENSE=1) and the fusion layer that decides
+ * whether this side's own evidence may act on the schedule. */
+static std::optional<devourer::hopset::HopsetSensor> g_hopset_sensor;
+static devourer::hopset::FusionConfig g_hopset_fusion;
+static uint64_t g_hopset_tx_originated = 0;
+static size_t g_hopset_pending_bit = SIZE_MAX;
+static bool g_hopset_pending_restore = false;
+static uint32_t g_hopset_delays = 0;
 
 /* Execute the authority's actions (caller holds g_hopset_mu). Commit and
  * status frames air as their own small MPDUs beside the payload stream, so
@@ -149,6 +159,18 @@ static void hopset_route(
   for (const auto &a : acts) {
     if (a.kind == devourer::hopset::HopsetAction::Activate) {
       g_hopset_view->set_state(a.state);
+      if (g_hopset_sensor)
+        g_hopset_sensor->on_activation(a.state.active_mask,
+                                       g_hopset_auth->round_of(
+                                           g_hopset_tick_slot.load()));
+      if (g_hopset_pending_bit != SIZE_MAX) {
+        const uint64_t b = uint64_t(1) << g_hopset_pending_bit;
+        if (g_hopset_pending_restore)
+          g_hopset_tx_originated &= ~b;
+        else
+          g_hopset_tx_originated |= b;
+        g_hopset_pending_bit = SIZE_MAX;
+      }
     } else if (a.kind == devourer::hopset::HopsetAction::SendControl) {
       /* robust 6M radiotap + broadcast probe-req header + the authenticated
        * HopsetWire bytes */
@@ -171,6 +193,79 @@ static void hopset_route(
                                     g_hopset_tick_slot.load());
     }
   }
+}
+
+/* Take one quiet-window observation on the channel we are dwelling on.
+ *
+ * The discipline is chanscout's, with one hazard chanscout does not have: on
+ * this side the PREVIOUS dwell's own transmissions also raced through these
+ * counters, so the settle must outlast both the retune and the last queued
+ * frame draining. The barrier read resets the deltas; everything after it
+ * belongs to this channel and this window alone.
+ *
+ * window_us is measured, not nominal — the hardware keeps counting during the
+ * read's own bus round-trips, so excluding that time would inflate the rate. */
+static bool hopset_sense_window(IRtlDevice *dev, uint32_t settle_us,
+                                uint32_t window_us, bool with_nhm,
+                                devourer::hopset::SensePhase phase,
+                                uint64_t slot, uint64_t round,
+                                uint32_t base_index, bool probe, int channel,
+                                uint32_t generation) {
+  if (!dev || !g_hopset_sensor)
+    return false;
+  const auto t_settle0 = std::chrono::steady_clock::now();
+  if (settle_us)
+    std::this_thread::sleep_for(std::chrono::microseconds(settle_us));
+  (void)dev->GetRxEnergy(/*with_nhm=*/false); /* DISCARD BARRIER */
+  const auto t_w0 = std::chrono::steady_clock::now();
+  std::this_thread::sleep_for(std::chrono::microseconds(window_us));
+  const auto t_r0 = std::chrono::steady_clock::now();
+  const RxEnergy e = dev->GetRxEnergy(with_nhm);
+  const auto t_r1 = std::chrono::steady_clock::now();
+  auto us = [](auto a, auto b) {
+    return static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
+  };
+
+  devourer::hopset::TxSenseSample x;
+  x.slot = slot;
+  x.round = round;
+  x.base_index = base_index;
+  x.phase = phase;
+  x.probe = probe;
+  x.window_us = us(t_w0, t_r1);
+  x.valid_fa = e.valid_fa;
+  x.fa_ofdm = e.fa_ofdm;
+  x.fa_cck = e.fa_cck;
+  x.cca_ofdm = e.cca_ofdm;
+  x.cca_cck = e.cca_cck;
+  x.valid_igi = e.valid_igi;
+  x.igi = e.igi;
+  if (e.valid_nhm) {
+    uint32_t total = 0;
+    for (int i = 0; i < 12; ++i)
+      total += e.nhm[i];
+    x.valid_nhm = total > 0;
+    x.nhm_busy_pct =
+        total ? static_cast<uint8_t>(100u * (total - e.nhm[0]) / total) : 0;
+    x.nhm_duration = e.nhm_duration;
+  } else {
+    x.flags |= devourer::hopset::kTsNhmMissing;
+  }
+  if (!e.valid_fa && !e.valid_igi && !x.valid_nhm)
+    x.flags |= devourer::hopset::kTsReadFailed;
+
+  devourer::hopset::SenseScore sc;
+  const bool scored =
+      devourer::hopset::score_sample(x, g_hopset_sensor->config(), sc);
+  {
+    std::lock_guard<std::mutex> lk(g_hopset_mu);
+    g_hopset_sensor->ingest(x);
+  }
+  devourer::hopset::emit_sense(*g_ev, x, channel, generation,
+                               us(t_settle0, t_w0), us(t_r0, t_r1),
+                               sc.occupancy, scored);
+  return true;
 }
 
 static int g_rx_count = 0;
@@ -218,9 +313,62 @@ static void packetProcessor(const Packet &packet) {
                                         packet.Data.size() - 24,
                                         *g_hopset_keys, 0, hm) ==
             devourer::hopset::HopsetReason::None &&
-        hm.type == devourer::hopset::HT_PROPOSAL) {
+        (hm.type == devourer::hopset::HT_PROPOSAL ||
+         (hm.type == devourer::hopset::HT_STATUS && hm.role == 0))) {
       std::lock_guard<std::mutex> lk(g_hopset_mu);
-      hopset_route(g_hopset_auth->on_proposal(hm, g_hopset_tick_slot.load()));
+      const uint64_t now = g_hopset_tick_slot.load();
+      if (hm.type == devourer::hopset::HT_STATUS) {
+        /* The receiver's heartbeat. It has nothing to propose, which is
+         * exactly why it matters: without it a content receiver is
+         * indistinguishable from a deaf one, and the failsafe below would
+         * fire on a link that is working. */
+        g_hopset_auth->note_feedback(now);
+      } else if (g_hopset_sensor &&
+                 g_hopset_fusion.mode !=
+                     devourer::hopset::FusionMode::RxAuthoritative) {
+        /* Let this side's own evidence object — but only ever on the grounds
+         * that the move leaves US worse off, never that we disagree about the
+         * receiver's target. See HopsetFusion.h. */
+        devourer::hopset::HopsetDecision rx;
+        rx.kind = devourer::hopset::HopsetDecision::Kind::ProposeExclude;
+        rx.proposed_mask = hm.active_mask;
+        rx.reason_bitmap = hm.reason_bitmap;
+        rx.chans.resize(g_hopset_view->base_size());
+        const uint64_t cur = g_hopset_auth->state().generation
+                                 ? g_hopset_auth->state().active_mask
+                                 : devourer::hopset::full_mask(
+                                       g_hopset_view->base_size());
+        const uint64_t gone = cur & ~hm.active_mask;
+        for (size_t i = 0; i < g_hopset_view->base_size(); ++i)
+          if (gone & (uint64_t(1) << i))
+            rx.target_index = i;
+        auto cand = g_hopset_sensor->evaluate(g_hopset_auth->round_of(now));
+        devourer::hopset::FusionInput in;
+        in.rx = &rx;
+        in.tx = &cand;
+        in.active_mask = cur;
+        in.feedback_age_rounds = g_hopset_auth->feedback_age_rounds(now);
+        in.now_round = g_hopset_auth->round_of(now);
+        in.consecutive_delays = g_hopset_delays;
+        const auto f = devourer::hopset::fuse(g_hopset_fusion, in);
+        g_hopset_sensor->clear_outstanding(g_hopset_auth->round_of(now));
+        if (f.veto == devourer::hopset::FusionVeto::BroadTxDegradation ||
+            f.veto == devourer::hopset::FusionVeto::RemainingWorse) {
+          ++g_hopset_delays;
+          devourer::hopset::emit_fusion(
+              *g_ev, f, now, in.now_round,
+              devourer::hopset::fusion_mode_name(g_hopset_fusion.mode));
+          /* Answer, always: a silently dropped proposal leaves the receiver
+           * latched until its retries run out. */
+          hopset_route(g_hopset_auth->reject_proposal(
+              hm, devourer::hopset::HopsetReason::TxVeto, now));
+        } else {
+          g_hopset_delays = 0;
+          hopset_route(g_hopset_auth->on_proposal(hm, now));
+        }
+      } else {
+        hopset_route(g_hopset_auth->on_proposal(hm, now));
+      }
     }
   }
 }
@@ -1038,6 +1186,12 @@ int main(int argc, char **argv) {
   long hop_rounds = 0;
   long hop_slot_ms = 0;
   bool hop_adaptive = false;
+  bool tx_sense = false, tx_sense_nhm = false;
+  uint32_t tx_sense_settle_us = 3000, tx_sense_window_us = 4000;
+  uint32_t tx_sense_post_us = 0, tx_sense_every = 4;
+  uint32_t tx_sense_max_frac_pct = 30;
+  devourer::hopset::FusionMode hop_fusion_mode =
+      devourer::hopset::FusionMode::RxPlusTxVeto;
   std::optional<devourer::HopSchedule> hop_schedule;
   /* 0 = full SetMonitorChannel; 1 = FastRetune (cached RF writes, fastest);
    * 2 = FastRetune without the RF cache (sw_chnl only, for A/B measurement). */
@@ -1088,6 +1242,32 @@ int main(int argc, char **argv) {
       if (hop_channels.size() > devourer::hopset::kMaxBaseChannels)
         throw std::invalid_argument("adaptive hopset caps the base at 64");
       hop_adaptive = true;
+      if (const char *fm = std::getenv("DEVOURER_HOP_FUSION"))
+        if (!devourer::hopset::parse_fusion_mode(fm, hop_fusion_mode))
+          throw std::invalid_argument(
+              "DEVOURER_HOP_FUSION must be rx|veto|either|failsafe");
+    }
+    if (std::getenv("DEVOURER_TX_SENSE")) {
+      /* Quiet-window sensing: the chip cannot transmit and listen on one
+       * channel at once, so the only honest local observation is a window in
+       * which we deliberately do not send. */
+      if (!hop_adaptive)
+        throw std::invalid_argument(
+            "DEVOURER_TX_SENSE needs DEVOURER_HOP_ADAPTIVE");
+      tx_sense = true;
+      auto envu = [](const char *n, uint32_t &dst) {
+        if (const char *e = std::getenv(n))
+          dst = static_cast<uint32_t>(std::strtoul(e, nullptr, 0));
+      };
+      envu("DEVOURER_TX_SENSE_SETTLE_US", tx_sense_settle_us);
+      envu("DEVOURER_TX_SENSE_WINDOW_US", tx_sense_window_us);
+      envu("DEVOURER_TX_SENSE_POSTBURST_US", tx_sense_post_us);
+      envu("DEVOURER_TX_SENSE_EVERY", tx_sense_every);
+      envu("DEVOURER_TX_SENSE_MAX_FRAC_PCT", tx_sense_max_frac_pct);
+      if (std::getenv("DEVOURER_TX_SENSE_NHM"))
+        tx_sense_nhm = std::atoi(std::getenv("DEVOURER_TX_SENSE_NHM")) != 0;
+      if (tx_sense_every < 1)
+        tx_sense_every = 1;
     }
     std::string list;
     for (size_t i = 0; i < hop_channels.size(); ++i)
@@ -1199,6 +1379,10 @@ int main(int argc, char **argv) {
   size_t hopset_script_next = 0;
   bool hopset_ticked = false;
   bool hop_probe_slot = false;
+  size_t hop_last_base_index = 0;
+  bool hopset_fb_alive = false;
+  uint64_t hopset_feedback_since = 0;
+  bool sense_armed = false, sense_post_done = false;
   if (hop_adaptive) {
     g_hopset_keys = devourer::hopset::HopsetKeys::derive(
         devourer::HopSchedule::parse_seed(std::getenv("DEVOURER_HOP_SEED")));
@@ -1226,6 +1410,52 @@ int main(int argc, char **argv) {
       probe_rounds = static_cast<unsigned>(std::strtoul(pr, nullptr, 0));
     g_hopset_view->set_probe_period(probe_rounds);
     g_hopset_dev = rtlDevice.get();
+    g_hopset_fusion.mode = hop_fusion_mode;
+    if (tx_sense) {
+      /* The aux flood threads send from their own threads and `send_packets`
+       * returns on submit, not on air — so a "gated" quiet window would still
+       * contain an unknown number of our own frames and read as interference.
+       * A silently wrong measurement feeding an exclusion is worse than no
+       * measurement, so refuse rather than half-gate. */
+      if (tx_threads > 1) {
+        logger->error("DEVOURER_TX_SENSE is incompatible with "
+                      "DEVOURER_TX_THREADS>1 — sensing not armed");
+        tx_sense = false;
+      } else {
+        const uint64_t slot_us = static_cast<uint64_t>(hop_slot_ms) * 1000;
+        const uint64_t budget = slot_us * tx_sense_max_frac_pct / 100;
+        uint64_t want = tx_sense_settle_us + tx_sense_window_us +
+                        tx_sense_post_us + 2000 /* two reads */;
+        if (want > budget && want) {
+          const double k = static_cast<double>(budget) / double(want);
+          tx_sense_settle_us = uint32_t(tx_sense_settle_us * k);
+          tx_sense_window_us = uint32_t(tx_sense_window_us * k);
+          tx_sense_post_us = uint32_t(tx_sense_post_us * k);
+          logger->warn("TX sensing scaled to {}% of a {} ms slot "
+                       "(settle {} us, window {} us, post {} us)",
+                       tx_sense_max_frac_pct, hop_slot_ms, tx_sense_settle_us,
+                       tx_sense_window_us, tx_sense_post_us);
+        }
+        /* Below roughly a millisecond and a half the delta is dominated by
+         * counter quantization and the read's own latency, so the rate the
+         * classifier normalizes to is noise. Refuse instead. */
+        if (tx_sense_window_us < 1500) {
+          logger->error("slot too short for a usable sense window "
+                        "({} us) — sensing not armed", tx_sense_window_us);
+          tx_sense = false;
+        }
+      }
+      if (tx_sense) {
+        g_hopset_sensor.emplace(devourer::hopset::TxSenseConfig{},
+                                hop_channels.size());
+        logger->info("DEVOURER_TX_SENSE — quiet-window sensing armed "
+                     "(settle {} us, window {} us, post {} us, 1-in-{} dwells,"
+                     " nhm={}, fusion={})",
+                     tx_sense_settle_us, tx_sense_window_us, tx_sense_post_us,
+                     tx_sense_every, tx_sense_nhm ? 1 : 0,
+                     devourer::hopset::fusion_mode_name(hop_fusion_mode));
+      }
+    }
     if (const char *sc = std::getenv("DEVOURER_HOP_ADAPTIVE_SCRIPT")) {
       for (const char *p = sc; *p;) {
         char *end = nullptr;
@@ -1384,6 +1614,51 @@ int main(int argc, char **argv) {
         ++hopset_script_next;
       }
       hopset_route(g_hopset_auth->on_tick(desired_slot));
+      /* This side's own decision point. Ordered after on_tick so a commit
+       * already in flight makes the local change return Busy rather than
+       * racing the activation swap. */
+      if (g_hopset_sensor) {
+        const uint64_t round = g_hopset_auth->round_of(desired_slot);
+        const uint64_t age = g_hopset_auth->feedback_age_rounds(desired_slot);
+        if (age <= g_hopset_fusion.feedback_timeout_rounds &&
+            age != devourer::hopset::kNoFeedback && !hopset_fb_alive) {
+          hopset_fb_alive = true;
+          hopset_feedback_since = round; /* the uplink just came back */
+        } else if (age > g_hopset_fusion.feedback_timeout_rounds) {
+          hopset_fb_alive = false;
+        }
+        auto cand = g_hopset_sensor->evaluate(round);
+        devourer::hopset::FusionInput in;
+        in.tx = &cand;
+        in.active_mask = g_hopset_auth->state().generation
+                             ? g_hopset_auth->state().active_mask
+                             : devourer::hopset::full_mask(hop_channels.size());
+        in.feedback_age_rounds = age;
+        in.now_round = round;
+        in.tx_originated_mask = g_hopset_tx_originated;
+        in.feedback_fresh_since_round = hopset_feedback_since;
+        const auto f = devourer::hopset::fuse(g_hopset_fusion, in);
+        if (f.action == devourer::hopset::FusedAction::Exclude ||
+            f.action == devourer::hopset::FusedAction::Restore) {
+          devourer::hopset::emit_fusion(
+              *g_ev, f, desired_slot, round,
+              devourer::hopset::fusion_mode_name(g_hopset_fusion.mode));
+          g_hopset_pending_bit = f.target_index;
+          g_hopset_pending_restore =
+              f.action == devourer::hopset::FusedAction::Restore;
+          hopset_route(g_hopset_auth->start_local_change(f.mask, desired_slot,
+                                                         f.reason_bitmap));
+          if (!g_hopset_auth->committing()) {
+            /* refused by the authority's own structural limits — a refused
+             * attempt still spends the budget */
+            g_hopset_sensor->clear_outstanding(round);
+            g_hopset_pending_bit = SIZE_MAX;
+          }
+        } else if (cand.kind !=
+                   devourer::hopset::TxSenseCandidate::Kind::None) {
+          g_hopset_sensor->clear_outstanding(round);
+        }
+      }
     }
     if (!hop_channels.empty() &&
         ((hop_slot_ms > 0 && desired_slot != static_cast<uint64_t>(dwell_no)) ||
@@ -1399,6 +1674,7 @@ int main(int argc, char **argv) {
          * the receiver can see whether it came back. Only sync/control goes
          * out — the payload stream stays on the active set. */
         hop_probe_slot = si.is_probe;
+        hop_last_base_index = si.base_index;
         if (si.is_probe)
           devourer::hopset::emit_probe(
               *g_ev, "tx", desired_slot,
@@ -1409,6 +1685,7 @@ int main(int argc, char **argv) {
               static_cast<uint32_t>(si.base_index), ch, true, 0);
       } else {
         hop_probe_slot = false;
+        hop_last_base_index = 0;
         ch = hop_schedule ? hop_schedule->channel(desired_slot, hop_channels)
                           : hop_channels[desired_slot % hop_channels.size()];
       }
@@ -1459,6 +1736,71 @@ int main(int argc, char **argv) {
          * probes must never spend FEC shards on an excluded channel. */
         if (hop_probe_slot)
           ev.f("probe", true);
+      }
+      /* A probe dwell is the cheapest sensing opportunity there is — the
+       * payload is already suppressed and the channel is one we excluded —
+       * so it is always sensed, divisor or not. */
+      sense_armed = tx_sense && (hop_probe_slot ||
+                                 (dwell_no % long(tx_sense_every)) == 0);
+      sense_post_done = false;
+      if (sense_armed) {
+        bool committing = false;
+        uint64_t round = 0;
+        uint32_t gen = 0;
+        {
+          std::lock_guard<std::mutex> lk(g_hopset_mu);
+          committing = g_hopset_auth->committing();
+          round = g_hopset_auth->round_of(desired_slot);
+          gen = g_hopset_view->state().generation;
+        }
+        /* Never sense while a commit is in flight: the commit frame would
+         * land inside our own quiet window and we would read our own
+         * transmission as interference — a self-jamming false positive that
+         * then feeds the veto. Repetition matters more than one sample. */
+        if (committing) {
+          sense_armed = false;
+        } else {
+          hopset_sense_window(rtlDevice.get(), tx_sense_settle_us,
+                              tx_sense_window_us, tx_sense_nhm,
+                              devourer::hopset::SensePhase::PreBurst,
+                              desired_slot, round,
+                              static_cast<uint32_t>(hop_last_base_index),
+                              hop_probe_slot, ch, gen);
+        }
+      }
+    }
+    /* Post-burst window: stop transmitting shortly before the slot ends and
+     * listen on the channel we have just been hammering. A reactive emitter
+     * keys up only after it detects us, so it is invisible to the pre-burst
+     * window and plain here — this is the pre-vs-post comparison the measured
+     * follower reaction floor motivates. The `continue` IS the window: it
+     * suppresses the rest of this dwell's payload. */
+    if (sense_armed && tx_sense_post_us > 0 && !sense_post_done &&
+        hop_slot_ms > 0) {
+      const uint64_t slot_us = static_cast<uint64_t>(hop_slot_ms) * 1000;
+      const uint64_t phase_us = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - hop_start)
+              .count() %
+          slot_us);
+      const uint64_t guard = tx_sense_post_us + 2000;
+      if (slot_us > guard && phase_us >= slot_us - guard) {
+        uint64_t round = 0;
+        uint32_t gen = 0;
+        {
+          std::lock_guard<std::mutex> lk(g_hopset_mu);
+          round = g_hopset_auth->round_of(desired_slot);
+          gen = g_hopset_view->state().generation;
+        }
+        sense_post_done = true;
+        hopset_sense_window(rtlDevice.get(), 0, tx_sense_post_us,
+                            tx_sense_nhm,
+                            devourer::hopset::SensePhase::PostBurst,
+                            desired_slot, round,
+                            static_cast<uint32_t>(hop_last_base_index),
+                            hop_probe_slot,
+                            hop_channels[hop_last_base_index], gen);
+        continue;
       }
     }
     if (hop_schedule && hop_slot_ms > 0) {

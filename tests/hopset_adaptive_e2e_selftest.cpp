@@ -8,6 +8,8 @@
  * must hold under a herding jammer that moves after every exclusion. */
 #include "hopset/HopsetAuthority.h"
 #include "hopset/HopsetFollower.h"
+#include "hopset/HopsetFusion.h"
+#include "hopset/HopsetSense.h"
 #include "hopset/HopsetPolicy.h"
 #include "hopset/HopsetState.h"
 #include "hopset/HopsetWire.h"
@@ -42,11 +44,19 @@ struct Sim {
   HopsetAuthority auth;
   HopsetFollower fol;
   HopsetPolicy policy;
+  HopsetSensor sensor;
+  FusionConfig fcfg;
   AdaptiveScheduleView vt, vr;
 
   uint64_t slot = 0;
   int jammed = -1;         /* base index the interferer sits on, -1 = clean */
   bool drop_proposals = false, drop_commits = false;
+  bool tx_senses = false;      /* feed the transmitter's own sensor */
+  bool tx_can_see = true;      /* false = the interferer is hidden from TX */
+  uint64_t tx_originated = 0;  /* bits excluded on the transmitter's account */
+  static constexpr size_t kNoBit = 64;
+  size_t tx_pending_bit = kNoBit;
+  int failsafe_activations = 0;
   int proposals_sent = 0, commits_sent = 0;
   int activations_tx = 0, activations_rx = 0;
   int probes_seen = 0, probes_on_jammed = 0;
@@ -62,7 +72,8 @@ struct Sim {
             "0f1e2d3c4b5a69788796a5b4c3d2e1f0"))),
         params(mk_params()), pcfg(mk_policy()),
         auth(params, 0xA11CE), fol(params, 0xB0B),
-        policy(pcfg, kBase), vt(base_tx, keys, kBase), vr(base_rx, keys, kBase) {
+        policy(pcfg, kBase), sensor(TxSenseConfig{}, kBase),
+        vt(base_tx, keys, kBase), vr(base_rx, keys, kBase) {
     vt.set_state(auth.state());
     vr.set_state(fol.state());
     vt.set_probe_period(kProbeRounds);
@@ -99,6 +110,18 @@ struct Sim {
             tx_masks.push_back(a.state.active_mask);
           }
           vt.set_state(a.state);
+          sensor.on_activation(a.state.active_mask, auth.round_of(slot));
+          /* remember which bits the transmitter took on its own account, so
+           * the fusion layer can hand them back once the receiver is heard
+           * from again */
+          if (tx_pending_bit != kNoBit) {
+            const uint64_t b = uint64_t(1) << tx_pending_bit;
+            if (a.state.active_mask & b)
+              tx_originated &= ~b; /* it was a restore */
+            else
+              tx_originated |= b;
+            tx_pending_bit = kNoBit;
+          }
         } else {
           if (a.state.active_mask != vr.state().active_mask) {
             ++activations_rx;
@@ -142,6 +165,8 @@ struct Sim {
         }
       } else if (r.type == HT_PROPOSAL) {
         route(auth.on_proposal(r, slot), true);
+      } else if (r.type == HT_STATUS && r.role == 0) {
+        auth.note_feedback(slot); /* the receiver's heartbeat */
       }
     }
   }
@@ -178,6 +203,23 @@ struct Sim {
         ++probes_on_jammed;
     }
 
+    if (tx_senses) {
+      /* the transmitter senses the channel it is dwelling on */
+      TxSenseSample x;
+      x.slot = slot;
+      x.round = round_rx();
+      x.base_index = static_cast<uint32_t>(ti.base_index);
+      x.phase = SensePhase::PostBurst;
+      x.window_us = 4000;
+      x.probe = ti.is_probe;
+      x.valid_fa = true;
+      const bool hot =
+          tx_can_see && static_cast<int>(ti.base_index) == jammed;
+      x.cca_ofdm = hot ? 340 : 8;
+      x.fa_ofdm = hot ? 170 : 4;
+      sensor.ingest(x);
+    }
+
     const uint64_t r_before = round_rx();
     route(auth.on_tick(slot), true);
     route(fol.on_tick(slot), false);
@@ -189,6 +231,30 @@ struct Sim {
                           d.reason_bitmap,
                           0xC0DE0000u + static_cast<uint32_t>(slot), slot),
               false);
+      if (tx_senses) {
+        const uint64_t ar = auth.round_of(slot);
+        auto cand = sensor.evaluate(ar);
+        FusionInput in;
+        in.tx = &cand;
+        in.active_mask = auth.state().generation ? auth.state().active_mask
+                                                 : full_mask(kBase);
+        in.feedback_age_rounds = auth.feedback_age_rounds(slot);
+        in.now_round = ar;
+        in.tx_originated_mask = tx_originated;
+        auto f = fuse(fcfg, in);
+        if (f.action == FusedAction::Exclude ||
+            f.action == FusedAction::Restore) {
+          const int before = activations_tx;
+          tx_pending_bit = f.target_index;
+          route(auth.start_local_change(f.mask, slot, f.reason_bitmap), true);
+          if (activations_tx == before && !auth.committing())
+            sensor.clear_outstanding(ar); /* the authority refused it */
+          if (f.origin == DecisionOrigin::Failsafe)
+            ++failsafe_activations;
+        } else if (cand.kind != TxSenseCandidate::Kind::None) {
+          sensor.clear_outstanding(ar); /* fusion declined to act on it */
+        }
+      }
     }
   }
 
@@ -295,6 +361,67 @@ int main() {
     CHECK((s.vr.state().active_mask & (uint64_t(1) << 3)) == 0,
           "the right channel was still excluded");
     CHECK(s.tx_masks == s.rx_masks, "no split-brain through the losses");
+  }
+
+  /* --- a genuine one-way outage: the receiver can still HEAR the
+   * transmitter, it just cannot answer. Nothing adapts under the receiver's
+   * authority because its proposals never arrive, so the transmitter must
+   * eventually act on its own evidence — and the receiver must follow the
+   * resulting commits without ever holding a different generation. --- */
+  {
+    Sim s;
+    s.jammed = 3;
+    s.tx_senses = true;
+    s.fcfg.mode = FusionMode::TxFailsafe;
+    s.drop_proposals = true; /* the uplink is down; the downlink is fine */
+    s.run(4000);
+    CHECK(s.failsafe_activations > 0,
+          "the transmitter originated once the uplink went quiet");
+    CHECK(s.vt.state().generation >= 1, "an autonomous exclusion committed");
+    CHECK((s.vt.state().active_mask & (uint64_t(1) << 3)) == 0,
+          "it excluded the channel its own sensing condemned");
+    CHECK(s.converged(), "the receiver followed, holding the same schedule");
+    CHECK(s.tx_masks == s.rx_masks, "no split-brain through the outage");
+    /* every committed change moved exactly one channel: the autonomous path
+     * is bound by the same structural limits a proposal is */
+    for (size_t i = 1; i < s.tx_masks.size(); ++i)
+      CHECK(popcount64(s.tx_masks[i] ^ s.tx_masks[i - 1]) == 1,
+            "one channel per autonomous update");
+    CHECK(popcount64(s.vt.state().active_mask) >= 3,
+          "the diversity floor held");
+  }
+
+  /* --- with the uplink alive the transmitter defers, even in failsafe mode,
+   * and even though its own sensing can see the interferer perfectly well --- */
+  {
+    Sim s;
+    s.jammed = 3;
+    s.tx_senses = true;
+    s.fcfg.mode = FusionMode::TxFailsafe;
+    s.run(4000);
+    CHECK(s.failsafe_activations == 0,
+          "a live receiver keeps the transmitter from originating");
+    CHECK(s.vr.state().generation >= 1 &&
+              (s.vr.state().active_mask & (uint64_t(1) << 3)) == 0,
+          "the receiver did the deciding");
+    CHECK(s.converged() && s.tx_masks == s.rx_masks, "still one schedule");
+  }
+
+  /* --- the default mode must not disturb the receiver-driven result, even
+   * when the transmitter cannot see the interferer at all (the hidden node,
+   * which is the shape of the parked-jammer bench test) --- */
+  {
+    Sim s;
+    s.jammed = 3;
+    s.tx_senses = true;
+    s.tx_can_see = false; /* the interferer is invisible at the transmitter */
+    s.fcfg.mode = FusionMode::RxPlusTxVeto;
+    s.run(2000);
+    CHECK(s.vr.state().generation >= 1 &&
+              (s.vr.state().active_mask & (uint64_t(1) << 3)) == 0,
+          "the receiver's exclusion went through unimpeded");
+    CHECK(s.failsafe_activations == 0, "the transmitter originated nothing");
+    CHECK(s.converged() && s.tx_masks == s.rx_masks, "one schedule");
   }
 
   /* --- herding: the jammer follows every exclusion; the floor must hold --- */

@@ -46,6 +46,7 @@ enum class HopsetReason : uint8_t {
   Timeout,
   MaskDelta,
   Cooldown,
+  TxVeto,
 };
 
 inline const char *hopset_reason_name(HopsetReason r) {
@@ -70,6 +71,7 @@ inline const char *hopset_reason_name(HopsetReason r) {
   case HopsetReason::Timeout: return "timeout";
   case HopsetReason::MaskDelta: return "mask_delta";
   case HopsetReason::Cooldown: return "cooldown";
+  case HopsetReason::TxVeto: return "tx_veto";
   }
   return "?";
 }
@@ -155,7 +157,26 @@ struct HopsetParams {
   uint64_t lead_rounds = 8;           /* min commit->activation lead */
   uint64_t max_lead_slots = 4096;     /* upper activation window bound */
   uint64_t commit_repeat_slots = 4;   /* re-broadcast cadence until active */
-  uint64_t status_interval_slots = 64;
+  /* The status beacon is the ONLY way home for a follower that missed the
+   * commits: it is scanning the base hopset and cannot ask for anything. So
+   * the cadence sets the recovery latency, and it has to be dense enough that
+   * a scanning receiver — which is only on the transmitter's channel a
+   * fraction of the time — actually coincides with one. Measured on a
+   * 3-channel base: at 64 slots a fresh follower missed every beacon in an
+   * 18 s window often enough to matter. A 58-byte frame at 6M is ~100 us of
+   * air, so density is nearly free and latency is not. */
+  uint64_t status_interval_slots = 24;
+  /* How often the follower announces itself when it has nothing to propose.
+   * Without it a healthy, quiet receiver is indistinguishable from a dead
+   * uplink, and a transmitter failsafe keyed on silence would fire on a link
+   * that is working perfectly.
+   *
+   * Off by default, and deliberately so: a lockstep receiver's whole job is
+   * to be listening inside tightly-scheduled slots, and every frame it airs
+   * is a slot it cannot hear. Only a receiver that is already a talker — one
+   * running the exclusion policy, which transmits proposals anyway — should
+   * pay that price, and only it has ambiguous silence worth resolving. */
+  uint64_t follower_status_slots = 0;
   unsigned proposal_retries = 8;
   uint64_t proposal_backoff_slots = 16;
   /* Structural limits the authority enforces on follower proposals (a

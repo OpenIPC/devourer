@@ -517,10 +517,17 @@ public:
   /* Frame-free RX energy / channel-busy snapshot (see RxSense.h) — the read side
    * of the DEVOURER_CW_TONE emitter, used for spectrum-sensing / interferer
    * detection. Reads the chip's phydm false-alarm + CCA counters, DIG/IGI, and
-   * (optionally) the NHM power histogram. FA/CCA counts are the delta since the
+   * (when asked) the NHM power histogram. FA/CCA counts are the delta since the
    * previous call. Default returns an all-invalid snapshot; each generation
-   * overrides with a real reader. */
-  virtual RxEnergy GetRxEnergy() { return {}; }
+   * overrides with a real reader.
+   *
+   * `with_nhm` is a cost decision, not a preference: the NHM read arms a ~2 ms
+   * measurement window and then polls a ready bit at 1 ms granularity
+   * (src/NhmReader.h), so it dominates the call — the scalar FA/CCA/IGI path is
+   * a handful of register reads. Pass false for the throwaway read that resets
+   * the delta counters before an observation window, and for any caller
+   * sampling faster than a few times a second. */
+  virtual RxEnergy GetRxEnergy(bool with_nhm) { (void)with_nhm; return {}; }
 
   /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — the
    * runtime feed a closed-loop adaptive-link controller reads instead of

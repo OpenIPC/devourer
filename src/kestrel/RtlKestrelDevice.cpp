@@ -369,7 +369,7 @@ void RtlKestrelDevice::SetCcaMode(bool disabled) {
                 disabled ? "DISABLED (dis_cca)" : "enabled", v);
 }
 
-RxEnergy RtlKestrelDevice::GetRxEnergy() {
+RxEnergy RtlKestrelDevice::GetRxEnergy(bool with_nhm) {
   RxEnergy e; /* no phydm FA/CCA/IGI DIG monitor on Kestrel */
   /* DEVOURER_RX_NOISE_FLOOR — active/frame-free absolute floor via the halbb NHM
    * env-monitor. Frame-free, BB-driven, no clock-stop -> no wedge.
@@ -387,7 +387,7 @@ RxEnergy RtlKestrelDevice::GetRxEnergy() {
   const bool nhm_supported =
       _variant == kestrel::ChipVariant::C8852B ||
       (_variant == kestrel::ChipVariant::C8852C && _channel.Channel <= 14);
-  if (_cfg.rx.abs_noise_floor && nhm_supported) {
+  if (with_nhm && _cfg.rx.abs_noise_floor && nhm_supported) {
     int8_t nf = 0;
     if (_hal.nhm_noise_floor(nf) && nf <= -60 && nf >= -105) {
       e.abs_noise_floor_dbm = nf;
@@ -400,7 +400,7 @@ RxEnergy RtlKestrelDevice::GetRxEnergy() {
 devourer::RxQuality RtlKestrelDevice::GetRxQuality() {
   /* Fuse the per-frame aggregate (passive rssi-snr floor + LinkHealth, fed by
    * the RX loop via _rxq) with the active NHM floor from GetRxEnergy. */
-  return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy());
+  return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy(true));
 }
 
 void RtlKestrelDevice::FastRetune(uint8_t channel, bool /*cache_rf*/) {

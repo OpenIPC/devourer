@@ -356,6 +356,20 @@ resilience: `tests/run_jammer_resilience.sh` + `tests/sdr_follower_jammer.py`
 (B210 follower, reactive vs predictive). Article + results: `docs/fhss.md`,
 `docs/jammer-resilience.md`.
 
+**Adaptive hopset** (`src/hopset/`, header-only, ctest-gated): the immutable
+base hopset carries a per-generation `active_mask`; TX is the schedule
+authority (RX proposes, TX commits an absolute future activation slot,
+repeated until it arrives) over SipHash-MAC'd Proposal/Commit/Status frames
+with schedule/control keys domain-separated from `DEVOURER_HOP_SEED`. Gen 0 ≡
+the legacy fixed schedule byte-for-byte; gen ≥ 1 re-keys the permutation from
+(subkey, generation, round, mask). Acquisition always scans the base hopset;
+the v2 sync marker advertises (generation, mask fp) so a follower that missed
+the commits recovers from the status beacon. Demos:
+`DEVOURER_HOP_ADAPTIVE=1` (keyed slot mode only) +
+`DEVOURER_HOP_ADAPTIVE_SCRIPT="slot:mask,..."` (txdemo authority lever until
+the exclusion policy exists); `hopset.*` events; on-air run
+`tests/hopset_adaptive_onair.sh`. Wire/state-machine doc: `docs/fhss.md`.
+
 `IRtlDevice::FastSetBandwidth(bw)` is the bandwidth analogue — a lean
 same-channel toggle between 20 MHz and 5/10 MHz narrowband (baseband re-clock
 only; ~0.18 ms on the 8812AU vs ~90 ms for the full `SetMonitorChannel`);

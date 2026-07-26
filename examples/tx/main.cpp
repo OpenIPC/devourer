@@ -8,8 +8,10 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <random>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(_MSC_VER)
@@ -34,6 +36,9 @@
 #include "BfReportDetect.h"
 #include "ChannelFreq.h"
 #include "HopSchedule.h"
+#include "hopset/HopsetAuthority.h"
+#include "hopset/HopsetEvents.h"
+#include "hopset/HopsetWire.h"
 #include "RxPacket.h"
 #include "SweepSpec.h"
 #include "TxPower.h" /* txpkt_pwr_db_for_step — DEVOURER_TX_PKT_OFSET fan-out */
@@ -972,6 +977,7 @@ int main(int argc, char **argv) {
   long hop_dwell = 50;
   long hop_rounds = 0;
   long hop_slot_ms = 0;
+  bool hop_adaptive = false;
   std::optional<devourer::HopSchedule> hop_schedule;
   /* 0 = full SetMonitorChannel; 1 = FastRetune (cached RF writes, fastest);
    * 2 = FastRetune without the RF cache (sw_chnl only, for A/B measurement). */
@@ -1009,6 +1015,19 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("DEVOURER_HOP_ROUNDS")) {
       hop_rounds = std::strtol(e, nullptr, 0);
       if (hop_rounds < 0) hop_rounds = 0;
+    }
+    if (std::getenv("DEVOURER_HOP_ADAPTIVE")) {
+      /* Adaptive hopset mode: this side is the schedule authority. Needs the
+       * keyed schedule (the control MAC derives from the same seed — a
+       * sequential schedule has no key, so no authentication) and slot mode
+       * (activation is an absolute-slot instant). */
+      if (!std::getenv("DEVOURER_HOP_SEED") || hop_slot_ms <= 0)
+        throw std::invalid_argument("DEVOURER_HOP_ADAPTIVE needs "
+                                    "DEVOURER_HOP_SEED and "
+                                    "DEVOURER_HOP_SLOT_MS");
+      if (hop_channels.size() > devourer::hopset::kMaxBaseChannels)
+        throw std::invalid_argument("adaptive hopset caps the base at 64");
+      hop_adaptive = true;
     }
     std::string list;
     for (size_t i = 0; i < hop_channels.size(); ++i)
@@ -1108,6 +1127,74 @@ int main(int argc, char **argv) {
   const auto hop_start = std::chrono::steady_clock::now();
   const uint32_t hop_epoch = static_cast<uint32_t>(
       std::chrono::high_resolution_clock::now().time_since_epoch().count());
+
+  /* Adaptive hopset (DEVOURER_HOP_ADAPTIVE=1): this side is the schedule
+   * authority. The exclusion policy will feed it follower proposals; until
+   * then the
+   * test lever is DEVOURER_HOP_ADAPTIVE_SCRIPT="slot:mask,slot:mask,..."
+   * (mask = hex bitmap over base-hopset positions) driving authority-
+   * originated commits. Commit/status frames air as their own small 802.11
+   * frames next to the payload stream — caller payload bytes are untouched. */
+  std::optional<devourer::hopset::HopsetKeys> hopset_keys;
+  std::optional<devourer::hopset::HopsetAuthority> hopset_auth;
+  std::optional<devourer::hopset::AdaptiveScheduleView> hopset_view;
+  std::vector<std::pair<uint64_t, uint64_t>> hopset_script;
+  size_t hopset_script_next = 0;
+  uint64_t hopset_tick_slot = 0;
+  bool hopset_ticked = false;
+  if (hop_adaptive) {
+    hopset_keys = devourer::hopset::HopsetKeys::derive(
+        devourer::HopSchedule::parse_seed(std::getenv("DEVOURER_HOP_SEED")));
+    devourer::hopset::HopsetParams hp;
+    hp.n_base = hop_channels.size();
+    std::vector<uint32_t> chlist(hop_channels.begin(), hop_channels.end());
+    hp.base_fp = devourer::hopset::hopset_fp(*hopset_keys, chlist.data(),
+                                             chlist.size());
+    hopset_auth.emplace(hp, static_cast<uint32_t>(std::random_device{}()));
+    hopset_view.emplace(*hop_schedule, *hopset_keys, hop_channels.size());
+    /* view and authority must agree from slot 0 (gen 0 = full mask) so the
+     * marker's mask fingerprint matches a fresh follower's initial state */
+    hopset_view->set_state(hopset_auth->state());
+    if (const char *sc = std::getenv("DEVOURER_HOP_ADAPTIVE_SCRIPT")) {
+      for (const char *p = sc; *p;) {
+        char *end = nullptr;
+        const uint64_t at = std::strtoull(p, &end, 0);
+        if (!end || *end != ':')
+          throw std::invalid_argument(
+              "DEVOURER_HOP_ADAPTIVE_SCRIPT is slot:mask[,slot:mask...]");
+        const uint64_t mask = std::strtoull(end + 1, &end, 0);
+        hopset_script.emplace_back(at, mask);
+        p = *end == ',' ? end + 1 : end;
+      }
+    }
+  }
+  auto hopset_route =
+      [&](const std::vector<devourer::hopset::HopsetAction> &acts) {
+        for (const auto &a : acts) {
+          if (a.kind == devourer::hopset::HopsetAction::Activate) {
+            hopset_view->set_state(a.state);
+          } else if (a.kind == devourer::hopset::HopsetAction::SendControl) {
+            /* robust 6M radiotap + broadcast probe-req header + the
+             * authenticated HopsetWire bytes (the chanmig frame shape) */
+            std::vector<uint8_t> frame = devourer::build_stream_radiotap(
+                devourer::parse_tx_mode_str("6M"));
+            static const uint8_t sa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+            uint8_t hdr[24] = {0x40, 0x00, 0x00, 0x00, 0xff, 0xff,
+                               0xff, 0xff, 0xff, 0xff};
+            std::memcpy(hdr + 10, sa, 6);
+            std::memcpy(hdr + 16, sa, 6);
+            hdr[22] = 0x90;
+            hdr[23] = 0x00;
+            frame.insert(frame.end(), hdr, hdr + 24);
+            const auto body =
+                devourer::hopset::hopset_encode(a.msg, *hopset_keys);
+            frame.insert(frame.end(), body.begin(), body.end());
+            rtlDevice->send_packet(frame.data(), frame.size());
+          } else if (a.kind == devourer::hopset::HopsetAction::Event) {
+            devourer::hopset::emit_action(*g_ev, a, "tx", hopset_tick_slot);
+          }
+        }
+      };
 
   long tx_count = 0;
   long consec_fail = 0;
@@ -1240,13 +1327,29 @@ int main(int argc, char **argv) {
                       .count() /
                   hop_slot_ms)
             : static_cast<uint64_t>(dwell_no + (frames_in_dwell == 0 ? 1 : 0));
+    if (hopset_auth && (!hopset_ticked || desired_slot != hopset_tick_slot)) {
+      /* once per slot: scripted commits due at this slot, then the authority
+       * heartbeat (commit repetition, activation swap, status beacon) */
+      hopset_tick_slot = desired_slot;
+      hopset_ticked = true;
+      while (hopset_script_next < hopset_script.size() &&
+             desired_slot >= hopset_script[hopset_script_next].first) {
+        hopset_route(hopset_auth->start_change(
+            hopset_script[hopset_script_next].second, desired_slot));
+        ++hopset_script_next;
+      }
+      hopset_route(hopset_auth->on_tick(desired_slot));
+    }
     if (!hop_channels.empty() &&
         ((hop_slot_ms > 0 && desired_slot != static_cast<uint64_t>(dwell_no)) ||
          (hop_slot_ms == 0 && frames_in_dwell == 0))) {
       dwell_no = static_cast<long>(desired_slot);
       if (total_dwells > 0 && dwell_no >= total_dwells) break;
-      int ch = hop_schedule ? hop_schedule->channel(desired_slot, hop_channels)
-                            : hop_channels[desired_slot % hop_channels.size()];
+      int ch = hopset_view
+                   ? hop_channels[hopset_view->channel_index(desired_slot)]
+               : hop_schedule
+                   ? hop_schedule->channel(desired_slot, hop_channels)
+                   : hop_channels[desired_slot % hop_channels.size()];
       auto sw0 = std::chrono::steady_clock::now();
       const char *mode = nullptr;
       if (hop_radiotap) {
@@ -1291,22 +1394,40 @@ int main(int argc, char **argv) {
       }
     }
     if (hop_schedule && hop_slot_ms > 0) {
-      auto old = devourer::HopSyncMarker::encode({});
-      if (tx_buf.size() >= old.size() &&
-          tx_buf[tx_buf.size() - old.size()] == 221 &&
-          tx_buf[tx_buf.size() - old.size() + 5] == 0x48)
-        tx_buf.resize(tx_buf.size() - old.size());
+      /* strip the previous frame's marker (either version — one run emits
+       * only one, but the size differs) before appending the fresh one */
+      const size_t msz = hop_adaptive ? devourer::hopset::HopSyncMarkerV2::kSize
+                                      : devourer::HopSyncMarker::kSize;
+      if (tx_buf.size() >= msz && tx_buf[tx_buf.size() - msz] == 221 &&
+          tx_buf[tx_buf.size() - msz + 5] == 0x48)
+        tx_buf.resize(tx_buf.size() - msz);
       const auto now = std::chrono::steady_clock::now();
       const uint64_t us = static_cast<uint64_t>(
           std::chrono::duration_cast<std::chrono::microseconds>(now - hop_start)
               .count());
-      devourer::HopSyncMarker marker{
-          hop_schedule->fingerprint(), hop_epoch,
-          static_cast<uint32_t>(us %
-                                (static_cast<uint64_t>(hop_slot_ms) * 1000)),
-          us / (static_cast<uint64_t>(hop_slot_ms) * 1000)};
-      auto wire = devourer::HopSyncMarker::encode(marker);
-      tx_buf.insert(tx_buf.end(), wire.begin(), wire.end());
+      const uint32_t phase = static_cast<uint32_t>(
+          us % (static_cast<uint64_t>(hop_slot_ms) * 1000));
+      const uint64_t slot = us / (static_cast<uint64_t>(hop_slot_ms) * 1000);
+      if (hop_adaptive) {
+        /* v2: the v1 fields + the LIVE (generation, mask fingerprint), so a
+         * follower detects a missed transition from the hot path alone */
+        devourer::hopset::HopSyncMarkerV2 marker;
+        marker.fingerprint = hop_schedule->fingerprint();
+        marker.epoch = hop_epoch;
+        marker.phase_us = phase;
+        marker.slot = slot;
+        marker.generation = hopset_view->state().generation;
+        marker.mask_fp = devourer::hopset::mask_fp(
+            *hopset_keys, hopset_view->state().generation,
+            hopset_view->state().active_mask);
+        auto wire = devourer::hopset::HopSyncMarkerV2::encode(marker);
+        tx_buf.insert(tx_buf.end(), wire.begin(), wire.end());
+      } else {
+        devourer::HopSyncMarker marker{hop_schedule->fingerprint(), hop_epoch,
+                                       phase, slot};
+        auto wire = devourer::HopSyncMarker::encode(marker);
+        tx_buf.insert(tx_buf.end(), wire.begin(), wire.end());
+      }
     }
     if (stbc_toggle) {
       devourer::TxMode m = tx_mode_base;

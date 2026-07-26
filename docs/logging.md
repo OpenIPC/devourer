@@ -129,6 +129,13 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 |---|---|---|
 | `hop.dwell` | TX, duplex | dwell, round, channel, frame, switch_us, t_ms, [mode] |
 | `hop.done` | TX, duplex | frames, dwells |
+| `hop.rx` | RX (lockstep, `DEVOURER_HOP_CHANNELS`+`_SLOT_MS`) | state (acquire\|track\|retune\|decode\|lost) + per-state fields: channel, slot, epoch, retune_us, dead_us |
+| `hopset.propose` | TX/RX (`DEVOURER_HOP_ADAPTIVE`) | t, v, role (tx\|rx), slot, gen, mask "0x…", obs, reasons "0x…" |
+| `hopset.commit` | TX/RX (`DEVOURER_HOP_ADAPTIVE`) | t, v, role, slot, gen, mask "0x…", activate_round, activate_slot — TX = commit issued, RX = commit adopted as pending |
+| `hopset.activate` | TX/RX (`DEVOURER_HOP_ADAPTIVE`) | same fields — the committed state swapped in at the boundary |
+| `hopset.reject` | TX/RX (`DEVOURER_HOP_ADAPTIVE`) | t, v, role, slot, reason (`hopset_reason_name`: bad_mac…timeout) |
+| `hopset.gen_mismatch` | RX (`DEVOURER_HOP_ADAPTIVE`) | t, v, role, slot, seen_gen, cur_gen, cur_mask "0x…" — a v2 marker advertised a state we don't hold |
+| `hopset.recover` | RX (`DEVOURER_HOP_ADAPTIVE`) | commit/activate fields — re-synchronized from an authenticated commit/status after a missed transition |
 
 ### Channel migration (chanscout — docs/adaptive-channel-migration.md)
 | ev | emitter | fields |

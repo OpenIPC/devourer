@@ -122,9 +122,11 @@ frequencies instead of wiping out a run of packets on one.
 
 ![Adaptive hopset — the jammed channel stops being scheduled](img/hopset_adapt.gif)
 
-Bounding the damage is not the same as avoiding it. A parked interferer doesn't
-move, so a hop set that keeps visiting its channel keeps paying for it, every
-round, forever — and the link can stop. The **receiver** is the endpoint that has
+Bounding the damage is not the same as avoiding it. Most interference is
+*furniture* — a fixed AP, a neighbouring video link, a microwave, a radar. It
+isn't trying to win; it's just sitting there, and it will still be sitting there
+in an hour. A hop set that keeps visiting its channel keeps paying for it, every
+round, forever. The **receiver** is the endpoint that has
 to decode, so its per-channel delivery is the authoritative evidence (energy
 readings only *classify* an impairment; a quiet channel with a dead link and a
 noisy one that still delivers are opposite decisions). It **proposes**; it never
@@ -132,15 +134,30 @@ acts. The transmitter owns the schedule, and answers with an authenticated commi
 naming a **future** slot, repeated until that slot arrives — so both ends swap
 schedules together and a lost frame can't split them apart. Because the hop order
 is **keyed**, dropping a channel re-keys the permutation rather than leaving a
-readable gap in a pattern. Two properties keep this from becoming its own
-weakness: exclusion is not a ratchet — keyed **probes** go back and look, with the
-round, the position and the channel all derived from the key, so recovery isn't
-itself a periodic target — and the schedule never shrinks below a hard floor of
-active channels, so nobody can herd the link down onto one predictable frequency
-by jamming it there. Measured against a narrowband interferer parked on one member
-of a four-channel set: delivery 0.72 → 0.83, with the channel restored on its own
-once the interferer stopped. The protocol and the numbers are in
-[`fhss.md`](fhss.md).
+readable gap in a pattern. And exclusion is not a ratchet: keyed **probes** go
+back and look — the round, the position and the channel all derived from the key,
+so recovery isn't itself a periodic target — and a channel that recovered comes
+back. Measured against a narrowband interferer parked on one member of a
+four-channel set: delivery 0.72 → 0.83, with the channel restored on its own once
+the interferer stopped.
+
+Now take the furniture away and put something *adversarial* there instead, and
+the picture above stops being the story. Two measurements say why. Against a
+**blind** parked jammer, a keyed hop order and a plainly sequential one deliver
+identically — secrecy buys nothing against something that isn't looking; it only
+earns its keep against an adversary that *reacts*. And against a jammer that
+**follows**, moving onto a newly-active channel after every exclusion, the link
+does not get better: it settles at its minimum active set and stays there. That
+is the honest result, and it is a pass — because an adaptive exclusion loop is
+itself an attack surface. Anyone who can make a channel *look* bad can otherwise
+steer the schedule, one obliging exclusion at a time, until the link is parked on
+a single frequency of the attacker's choosing. So the loop is built timid on
+purpose: one channel per update, a mandatory gap between updates (a *refused*
+proposal spends it too, so bouncing proposals can't flood the control path),
+nothing acted on when the whole band degrades together, and a hard floor on how
+many channels stay active. The advantage isn't that the link learns — it's that
+it learns without becoming teachable by an adversary. The protocol, the policy
+and the numbers are in [`fhss.md`](fhss.md).
 
 ## 9. Trading robustness for throughput in time — bandwidth TDMA
 

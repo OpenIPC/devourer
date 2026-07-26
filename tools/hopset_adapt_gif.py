@@ -11,7 +11,14 @@ on the interferer's channel are clipped and the receiver scores them; the
 transmitter — the schedule authority — issues an authenticated commit naming a
 future slot, and both ends swap there; afterwards that channel is no longer
 scheduled, except for the occasional keyed probe that goes back to see whether
-it recovered. Needs Pillow.
+it recovered.
+
+Deliberately scoped to a *stationary* occupant — a fixed AP, another link, a
+microwave — which is what most interference is, and the only case where
+exclusion is an unambiguous win. An interferer that follows the exclusions is a
+different story with a different ending (the link holds at its diversity floor
+rather than improving); that one belongs in the prose, not in a picture that
+would read as a victory. Needs Pillow.
 """
 from __future__ import annotations
 
@@ -87,8 +94,9 @@ def main() -> int:
         adapted = cursor >= COMMIT_T
         img, d = new_frame(W, H)
         chrome(d, W, H, "ADAPTIVE HOPSET",
-               "the receiver scores what it decodes; the transmitter commits "
-               "the new schedule — the jammed channel stops being visited", fi)
+               "a stationary occupant on ch 52 — the receiver scores what it "
+               "decodes, the transmitter commits, the channel stops being "
+               "visited", fi)
 
         d.rectangle([padL, padT, padL + gw, padT + gh], outline=(0, 70, 80))
 

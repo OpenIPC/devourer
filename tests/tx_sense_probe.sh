@@ -87,8 +87,9 @@ rx_probe() { # channel, label
 }
 
 # --- TX session: the quiet-window path the adaptive transmitter uses ---
-tx_probe() { # channel, label
+tx_probe() { # channel, label, [inter-frame gap us]
     sudo env DEVOURER_VID="$VID" DEVOURER_PID="$TX_PID" \
+        DEVOURER_TX_GAP_US="${3:-2000}" \
         DEVOURER_CHANNEL="$1" DEVOURER_HOP_CHANNELS="$1" \
         DEVOURER_HOP_SLOT_MS=200 DEVOURER_HOP_SEED=c0ffee00c0ffee00 \
         DEVOURER_HOP_ADAPTIVE=1 DEVOURER_HOP_MIN_ACTIVE=1 \
@@ -131,6 +132,14 @@ tx_probe "$JAM_CHANNEL" "jam"
 tx_probe "$CLEAN_CHANNEL" "clean"
 report "$OUT/tx_jam.log"   "ch$JAM_CHANNEL (jammed)"
 report "$OUT/tx_clean.log" "ch$CLEAN_CHANNEL (clean)"
+
+# Same transmit-oriented bring-up, but almost never actually transmitting.
+# This separates "the radio is busy sending" from "this bring-up path does not
+# run the receive-side counter machinery at all" — only the second would
+# survive here.
+echo "== TX session, near-silent (one frame every 200 ms) =="
+tx_probe "$JAM_CHANNEL" "quiet" 200000
+report "$OUT/tx_quiet.log" "ch$JAM_CHANNEL (jammed, near-silent TX)"
 
 kill_jammer
 echo

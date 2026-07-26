@@ -474,7 +474,12 @@ int main() {
    * no proposals; its heartbeat is what keeps the transmitter from mistaking
    * contentment for deafness. --- */
   {
+    /* the heartbeat is opt-in: a receiver running the exclusion policy turns
+     * it on, a pure follower stays silent so every slot is spent listening */
+    HopsetParams hp = params();
+    hp.follower_status_slots = 64;
     Sim s(0x1000, 0x2000);
+    s.fol = HopsetFollower(hp, 0x2000);
     CHECK(s.auth.feedback_age_rounds(s.slot) ==
               HopsetAuthority::kNoFeedbackAge,
           "never having heard the peer reads as maximally stale");
@@ -483,7 +488,7 @@ int main() {
           "the follower's heartbeat reached the authority");
     const uint64_t age = s.auth.feedback_age_rounds(s.slot);
     CHECK(age != HopsetAuthority::kNoFeedbackAge &&
-              age * s.p.n_base <= 2 * s.p.follower_status_slots + s.p.n_base,
+              age * s.p.n_base <= 2 * hp.follower_status_slots + s.p.n_base,
           "the age tracks the heartbeat cadence");
     /* a rejected proposal still proves the return channel works */
     Sim t(0x1000, 0x2000);

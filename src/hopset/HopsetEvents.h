@@ -6,7 +6,9 @@
 #define DEVOURER_HOPSET_HOPSET_EVENTS_H
 
 #include "Event.h"
+#include "hopset/HopsetFusion.h"
 #include "hopset/HopsetPolicy.h"
+#include "hopset/HopsetSense.h"
 #include "hopset/HopsetTypes.h"
 
 namespace devourer {
@@ -75,6 +77,80 @@ inline void emit_decision(EventSink &sink, const HopsetDecision &d,
                   d.chans[i].impaired_run);
     ev.f(key, buf);
   }
+}
+
+/* One transmitter quiet-window observation. Raw deltas AND the window they
+ * span, because the classifier normalizes them itself and a pre-divided rate
+ * loses the low end; `rate` is a convenience for log-scraping harnesses. */
+inline void emit_sense(EventSink &sink, const TxSenseSample &s,
+                       int channel, uint32_t generation, uint32_t settle_us,
+                       uint32_t read_us, double occupancy, bool scored) {
+  Ev ev(sink, "hopset.sense");
+  ev.t().f("v", 1).f("role", "tx")
+      .f("slot", (unsigned long long)s.slot)
+      .f("round", (unsigned long long)s.round)
+      .f("gen", (unsigned long long)generation)
+      .f("base_idx", (unsigned long long)s.base_index)
+      .f("ch", channel)
+      .f("phase", s.phase == SensePhase::PostBurst ? "post" : "pre")
+      .f("probe", s.probe)
+      .f("window_us", (unsigned long long)s.window_us)
+      .f("settle_us", (unsigned long long)settle_us)
+      .f("read_us", (unsigned long long)read_us);
+  ev.f("valid_fa", s.valid_fa);
+  if (s.valid_fa) {
+    ev.f("cca_ofdm", (unsigned long long)s.cca_ofdm)
+        .f("cca_cck", (unsigned long long)s.cca_cck)
+        .f("fa_ofdm", (unsigned long long)s.fa_ofdm)
+        .f("fa_cck", (unsigned long long)s.fa_cck);
+    const double ms = s.window_us ? s.window_us / 1000.0 : 1.0;
+    ev.f("cca_rate", (s.cca_ofdm + s.cca_cck) / ms)
+        .f("fa_rate", (s.fa_ofdm + s.fa_cck) / ms);
+  }
+  ev.f("valid_igi", s.valid_igi);
+  if (s.valid_igi)
+    ev.f("igi", (unsigned long long)s.igi);
+  ev.f("valid_nhm", s.valid_nhm);
+  if (s.valid_nhm)
+    ev.f("nhm_busy", (unsigned long long)s.nhm_busy_pct)
+        .f("nhm_dur", (unsigned long long)s.nhm_duration);
+  ev.hexf("flags", s.flags, 0).f("scored", scored);
+  if (scored)
+    ev.f("occ", occupancy);
+}
+
+/* One fused verdict. Both endpoints' views are on the line so a log reader can
+ * see the argument, not just the conclusion — the whole point of surfacing a
+ * disagreement rather than averaging it. */
+inline void emit_fusion(EventSink &sink, const FusedDecision &d, uint64_t slot,
+                        uint64_t round, const char *mode) {
+  Ev ev(sink, "hopset.decision");
+  ev.t().f("v", 1).f("role", "tx")
+      .f("slot", (unsigned long long)slot)
+      .f("round", (unsigned long long)round)
+      .f("mode", mode)
+      .f("origin", decision_origin_name(d.origin))
+      .f("kind", fused_action_name(d.action));
+  if (d.action == FusedAction::Hold || d.action == FusedAction::Delay)
+    ev.f("hold", fusion_hold_name(d.hold));
+  if (d.action != FusedAction::Hold && d.action != FusedAction::Delay)
+    ev.hexf("mask", d.mask, 0);
+  ev.f("target", (unsigned long long)d.target_index)
+      .hexf("reasons", d.reason_bitmap, 0)
+      .f("veto", fusion_veto_name(d.veto))
+      .f("rx_wanted", d.rx_wanted_exclude)
+      .f("tx_wanted", d.tx_wanted_exclude)
+      .f("disagree", d.endpoints_disagree_on_target)
+      .f("tx_valid", d.tx_evidence_valid);
+  if (d.tx_evidence_valid)
+    ev.f("tx_target_occ", d.tx_target_occupancy)
+        .f("tx_band_min", d.tx_band_min_occupancy)
+        .f("tx_band_max", d.tx_band_max_occupancy);
+  if (d.feedback_age_rounds == kNoFeedback)
+    ev.f("fb_age", "never");
+  else
+    ev.f("fb_age", (unsigned long long)d.feedback_age_rounds);
+  ev.hexf("fusion", d.fusion_hash, 8);
 }
 
 /* One keyed recovery-probe dwell: the transmitter logs that it aired on the

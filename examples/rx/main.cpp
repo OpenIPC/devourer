@@ -132,8 +132,15 @@ static uint64_t hopset_round_of(
 /* Air one authenticated control frame: robust 6M radiotap + a broadcast
  * probe-request header (canonical SA) + the HopsetWire bytes. The caller's
  * payload stream is never touched — control rides its own MPDU. */
+/* Fault-injection lever: with the uplink muted this side still decodes and
+ * follows everything, it simply cannot answer. That is a genuine one-way
+ * outage — the shape the transmitter's failsafe exists for — and it cannot be
+ * produced by merely disabling the policy, because a receiver with nothing to
+ * propose still announces itself. */
+static bool g_hopset_mute = false;
+
 static void hopset_send(const devourer::hopset::HopsetMsg &m) {
-  if (!g_hopset_dev || !g_hopset_keys)
+  if (!g_hopset_dev || !g_hopset_keys || g_hopset_mute)
     return;
   static const uint8_t sa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
   std::vector<uint8_t> frame =
@@ -150,6 +157,13 @@ static void hopset_send(const devourer::hopset::HopsetMsg &m) {
   g_hopset_dev->send_packet(frame.data(), frame.size());
 }
 
+/* Frames the follower wants aired, queued under g_hopset_mu and sent after it
+ * is released. send_packet is synchronous on the USB3 generations, so sending
+ * inside the lock would stall the RX worker — which needs the same lock for
+ * every decoded marker — for the whole bus round trip. That starves the
+ * lockstep loop precisely when it can least afford it. */
+static std::vector<devourer::hopset::HopsetMsg> g_hopset_outbox;
+
 /* Execute the follower's actions (caller holds g_hopset_mu). */
 static void hopset_route(
     const std::vector<devourer::hopset::HopsetAction> &acts) {
@@ -160,7 +174,7 @@ static void hopset_route(
         g_hopset_policy->on_activation(a.state.active_mask,
                                        g_hopset_now_slot.load());
     } else if (a.kind == devourer::hopset::HopsetAction::SendControl) {
-      hopset_send(a.msg);
+      g_hopset_outbox.push_back(a.msg);
     } else if (a.kind == devourer::hopset::HopsetAction::Event) {
       /* a rejected or timed-out proposal releases the policy's latch — the
        * pure machine only reports the outcome, the host owns the handshake */
@@ -173,6 +187,19 @@ static void hopset_route(
     }
   }
 }
+
+/* Air whatever the follower queued. Must be called with g_hopset_mu NOT
+ * held. */
+static void hopset_flush() {
+  std::vector<devourer::hopset::HopsetMsg> pending;
+  {
+    std::lock_guard<std::mutex> lk(g_hopset_mu);
+    pending.swap(g_hopset_outbox);
+  }
+  for (const auto &m : pending)
+    hopset_send(m);
+}
+
 
 /* Best-effort current absolute slot from the fitted marker anchor. */
 static uint64_t hopset_slot_now() {
@@ -793,6 +820,7 @@ static void packetProcessor(const Packet &packet) {
         }
         hopset_route(g_hopset_fol->on_marker(mk_gen, matches, m.slot));
       }
+      hopset_flush();
     }
   }
 
@@ -815,6 +843,7 @@ static void packetProcessor(const Packet &packet) {
       else if (hm.type == devourer::hopset::HT_STATUS)
         hopset_route(g_hopset_fol->on_status(hm, slot));
     }
+    hopset_flush();
   }
 
   /* Per-dwell delivery accounting for the exclusion policy: count this
@@ -1604,6 +1633,13 @@ int main(int argc, char **argv) {
               devourer::HopSchedule::parse_seed(seed)));
       devourer::hopset::HopsetParams hp;
       hp.n_base = hop_rx_channels.size();
+      /* Announce ourselves only when we are a participant that would speak
+       * anyway (the policy proposes); a pure follower stays silent so every
+       * slot it owns is spent listening. */
+      if (std::getenv("DEVOURER_HOP_POLICY"))
+        hp.follower_status_slots = 64;
+      if (const char *hb = std::getenv("DEVOURER_HOP_STATUS_SLOTS"))
+        hp.follower_status_slots = std::strtoull(hb, nullptr, 0);
       std::vector<uint32_t> chlist(hop_rx_channels.begin(),
                                    hop_rx_channels.end());
       hp.base_fp = devourer::hopset::hopset_fp(*g_hopset_keys, chlist.data(),
@@ -1656,6 +1692,11 @@ int main(int argc, char **argv) {
       g_hopset_view->set_state(g_hopset_fol->state());
       g_hopset_view->set_probe_period(probe_rounds);
       g_hopset_dev = rtlDevice.get();
+      if (std::getenv("DEVOURER_HOP_MUTE")) {
+        g_hopset_mute = true;
+        logger->warn("DEVOURER_HOP_MUTE — uplink muted: this side follows but "
+                     "never answers");
+      }
     }
     g_hop_slot_us = static_cast<uint64_t>(hop_rx_slot_ms) * 1000;
     long acquire_ms = hop_rx_slot_ms * 2;
@@ -1701,6 +1742,7 @@ int main(int argc, char **argv) {
         hopset_recovering = g_hopset_fol->fsm() ==
                             devourer::hopset::HopsetFollower::State::Recovering;
       }
+      hopset_flush();
       if (!hopset_recovering && last &&
           now - last < static_cast<long long>(3 * g_hop_slot_us)) {
         if (!tracking) {
@@ -1765,6 +1807,7 @@ int main(int argc, char **argv) {
                       static_cast<uint32_t>(std::random_device{}()), slot));
               }
             }
+            hopset_flush();
             int ch;
             bool probe = false;
             if (g_hopset_view) {

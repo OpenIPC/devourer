@@ -44,6 +44,8 @@ enum class HopsetReason : uint8_t {
   Busy,
   NonceMismatch,
   Timeout,
+  MaskDelta,
+  Cooldown,
 };
 
 inline const char *hopset_reason_name(HopsetReason r) {
@@ -66,6 +68,8 @@ inline const char *hopset_reason_name(HopsetReason r) {
   case HopsetReason::Busy: return "busy";
   case HopsetReason::NonceMismatch: return "nonce_mismatch";
   case HopsetReason::Timeout: return "timeout";
+  case HopsetReason::MaskDelta: return "mask_delta";
+  case HopsetReason::Cooldown: return "cooldown";
   }
   return "?";
 }
@@ -154,6 +158,11 @@ struct HopsetParams {
   uint64_t status_interval_slots = 64;
   unsigned proposal_retries = 8;
   uint64_t proposal_backoff_slots = 16;
+  /* Structural limits the authority enforces on follower proposals (a
+   * locally-originated start_change is exempt). 0 disables a check. */
+  unsigned max_mask_delta = 1;         /* channels changed per update */
+  uint64_t min_update_gap_rounds = 10; /* rounds between accepted updates */
+  unsigned max_excluded_frac_pct = 50; /* cap on excluded/base */
 };
 
 } /* namespace hopset */

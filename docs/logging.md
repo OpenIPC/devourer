@@ -136,6 +136,8 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | `hopset.reject` | TX/RX (`DEVOURER_HOP_ADAPTIVE`) | t, v, role, slot, reason (`hopset_reason_name`: bad_mac…timeout) |
 | `hopset.gen_mismatch` | RX (`DEVOURER_HOP_ADAPTIVE`) | t, v, role, slot, seen_gen, cur_gen, cur_mask "0x…" — a v2 marker advertised a state we don't hold |
 | `hopset.recover` | RX (`DEVOURER_HOP_ADAPTIVE`) | commit/activate fields — re-synchronized from an authenticated commit/status after a missed transition |
+| `hopset.decision` | RX (`DEVOURER_HOP_POLICY`) | t, v, role, slot, round, kind (hold\|exclude\|restore), obs, policy "0x…" (config hash), then either hold (`hopset_hold_name`: insufficient_rounds\|cooldown\|proposal_outstanding\|no_impairment\|not_persistent\|broad_degradation\|no_healthy_alternative\|min_active_floor\|max_excluded_frac\|probe_hysteresis_pending) or mask "0x…" + reasons "0x…" (bit0 delivery_floor, 1 persistent, 2 healthy_alt, 3 crc_dominant, 4 energy_interference, 5 weak_signal, 6 sync_loss, 7 probe_recovery, 8 probe_evidence) + target; `DEVOURER_HOP_POLICY_EVENTS=2` adds holds and per-channel c0..cN ("on\|off d=<delivery> p=<probe delivery> v=<visits> imp=<impaired run>") |
+| `hopset.probe` | TX/RX (`DEVOURER_HOP_PROBE_ROUNDS`) | t, v, role, slot, round, base_idx, ch, delivered, frames — one keyed recovery-probe dwell on an excluded channel |
 
 ### Channel migration (chanscout — docs/adaptive-channel-migration.md)
 | ev | emitter | fields |

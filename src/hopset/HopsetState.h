@@ -195,6 +195,46 @@ public:
     return base_channels[channel_index(slot)];
   }
 
+  /* --- keyed recovery probes ---------------------------------------------
+   * An excluded channel cannot prove recovery unless deliberately revisited.
+   * With a probe period P (shared config, like the seed), every P rounds ONE
+   * data opportunity is replaced by a probe dwell on an excluded channel.
+   * Which round of the P-window, which position within that round, and which
+   * excluded channel are all keyed draws ('P'-tagged words per window), so
+   * recovery never creates a public periodic target. Inert whenever the
+   * period is 0, the mask is full, or the state is generation 0 — slot_info
+   * then degenerates to {channel_index(slot), false} and every fixed-hop /
+   * no-exclusion behavior is untouched. */
+  struct SlotInfo {
+    size_t base_index;
+    bool is_probe;
+  };
+
+  void set_probe_period(unsigned rounds) { probe_period_ = rounds; }
+  unsigned probe_period() const { return probe_period_; }
+
+  SlotInfo slot_info(uint64_t slot) const {
+    if (probe_period_ == 0 || st_.generation == 0)
+      return {channel_index(slot), false};
+    const uint64_t excluded = full_mask(n_) & ~st_.active_mask;
+    const size_t x = popcount64(excluded);
+    if (!x)
+      return {channel_index(slot), false};
+    const size_t k = popcount64(st_.active_mask);
+    const uint64_t rel = slot - st_.activate_slot;
+    const uint64_t round = rel / k, pos = rel % k;
+    const uint64_t window = round / probe_period_;
+    uint64_t counter = 0;
+    const uint64_t probe_round = probe_draw(window, counter, probe_period_);
+    if (round % probe_period_ != probe_round)
+      return {channel_index(slot), false};
+    const uint64_t probe_pos = probe_draw(window, counter, k);
+    if (pos != probe_pos)
+      return {channel_index(slot), false};
+    const uint64_t pick = probe_draw(window, counter, x);
+    return {nth_set_bit(excluded, static_cast<size_t>(pick)), true};
+  }
+
   /* The gen>=1 permutation: the same rejection-sampled Fisher-Yates as
    * HopSchedule::permutation, driven by words bound to (generation, mask,
    * round) under the schedule subkey. Per-generation rounds start at 0 at
@@ -234,10 +274,37 @@ private:
     return HopSchedule::siphash24(keys_.sched, msg, sizeof(msg));
   }
 
+  /* 'P'-tagged word for probe placement — same 29-byte shape, keyed by the
+   * probe window so all draws of one window share a counter stream. */
+  uint64_t probe_word(uint64_t window, uint64_t counter) const {
+    uint8_t msg[29] = {'P'};
+    for (int i = 0; i < 4; ++i)
+      msg[1 + i] = static_cast<uint8_t>(st_.generation >> (8 * i));
+    for (int i = 0; i < 8; ++i) {
+      msg[5 + i] = static_cast<uint8_t>(st_.active_mask >> (8 * i));
+      msg[13 + i] = static_cast<uint8_t>(window >> (8 * i));
+      msg[21 + i] = static_cast<uint8_t>(counter >> (8 * i));
+    }
+    return HopSchedule::siphash24(keys_.sched, msg, sizeof(msg));
+  }
+
+  /* Unbiased uniform draw in [0, bound) — the permutation()'s rejection-
+   * sampling idiom, advancing the caller's counter. */
+  uint64_t probe_draw(uint64_t window, uint64_t &counter,
+                      uint64_t bound) const {
+    const uint64_t limit = UINT64_MAX - (UINT64_MAX % bound);
+    uint64_t r;
+    do {
+      r = probe_word(window, counter++);
+    } while (r >= limit);
+    return r % bound;
+  }
+
   const HopSchedule *base_;
   HopsetKeys keys_;
   HopsetState st_{};
   size_t n_;
+  unsigned probe_period_ = 0;
 };
 
 } /* namespace hopset */

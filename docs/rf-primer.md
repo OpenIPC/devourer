@@ -3,7 +3,7 @@
 devourer talks to a Wi-Fi radio at a very low level — subcarriers, constellations,
 gain control, the transmit and receive chains. If you're new to that machinery,
 the terms in the other docs (per-tone SNR, EVM, CCA, AGC, occupied bandwidth) can
-feel like jargon. This page is a picture book: ten short animations, each
+feel like jargon. This page is a picture book: eleven short animations, each
 built in the DEVOURER live-monitor style, that show what the machinery actually
 looks like — from a single subcarrier all the way to a hopping, diversity-combined,
 bandwidth-hopping link. Read it top to bottom and the rest of the docs will click.
@@ -119,6 +119,28 @@ one channel then only clips the occasional hop that lands on it — every other 
 escapes. Done per-packet (`DEVOURER_HOP_*`), hopping doubles as a
 frequency-diversity interleaver for the outer FEC: losses are spread thin across
 frequencies instead of wiping out a run of packets on one.
+
+![Adaptive hopset — the jammed channel stops being scheduled](img/hopset_adapt.gif)
+
+Bounding the damage is not the same as avoiding it. A parked interferer doesn't
+move, so a hop set that keeps visiting its channel keeps paying for it, every
+round, forever — and the link can stop. The **receiver** is the endpoint that has
+to decode, so its per-channel delivery is the authoritative evidence (energy
+readings only *classify* an impairment; a quiet channel with a dead link and a
+noisy one that still delivers are opposite decisions). It **proposes**; it never
+acts. The transmitter owns the schedule, and answers with an authenticated commit
+naming a **future** slot, repeated until that slot arrives — so both ends swap
+schedules together and a lost frame can't split them apart. Because the hop order
+is **keyed**, dropping a channel re-keys the permutation rather than leaving a
+readable gap in a pattern. Two properties keep this from becoming its own
+weakness: exclusion is not a ratchet — keyed **probes** go back and look, with the
+round, the position and the channel all derived from the key, so recovery isn't
+itself a periodic target — and the schedule never shrinks below a hard floor of
+active channels, so nobody can herd the link down onto one predictable frequency
+by jamming it there. Measured against a narrowband interferer parked on one member
+of a four-channel set: delivery 0.72 → 0.83, with the channel restored on its own
+once the interferer stopped. The protocol and the numbers are in
+[`fhss.md`](fhss.md).
 
 ## 9. Trading robustness for throughput in time — bandwidth TDMA
 

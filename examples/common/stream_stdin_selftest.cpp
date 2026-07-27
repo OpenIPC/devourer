@@ -183,6 +183,41 @@ static int do_states() {
     const int rc = check_state(c.what, c.bytes, c.max, c.want, c.want_len);
     if (rc) return rc;
   }
+
+  /* The duplex demo escapes to a control TLV on the length's top bit, and
+   * bounds that body at 256 rather than at its PSDU maximum — so it reads the
+   * length, masks it, and only then reads the body. That composition is the
+   * reason read_length and read_body are public at all, and nothing else
+   * covers it: a record whose length has the top bit set must arrive
+   * verbatim, and must not be mistaken for an oversize PSDU. */
+  {
+    std::vector<uint8_t> bytes(4);
+    const uint32_t escaped = 0x80000000u | 3u;
+    put_u32_le(bytes.data(), escaped);
+    const std::vector<uint8_t> want = {0x01, 0x1A, 0x0D};
+    bytes.insert(bytes.end(), want.begin(), want.end());
+    std::FILE *f = std::tmpfile();
+    if (!f) {
+      std::fprintf(stderr, "stream_stdin_selftest: tmpfile() failed\n");
+      return 7;
+    }
+    std::fwrite(bytes.data(), 1, bytes.size(), f);
+    std::rewind(f);
+    uint32_t len = 0;
+    std::vector<uint8_t> body;
+    const bool ok =
+        stream_stdin::read_length(f, len) == stream_stdin::ReadResult::Ok &&
+        (len & 0x80000000u) != 0 &&
+        stream_stdin::read_body(f, body, len & 0x7fffffffu) ==
+            stream_stdin::ReadResult::Ok &&
+        body == want;
+    std::fclose(f);
+    if (!ok) {
+      std::fprintf(stderr, "stream_stdin_selftest: FAIL — the control-opcode "
+                           "escape (top length bit) did not round-trip\n");
+      return 7;
+    }
+  }
   std::fprintf(stdout, "stream_stdin_selftest: %zu record states OK\n",
                cases.size());
   return 0;

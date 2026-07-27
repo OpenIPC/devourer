@@ -106,6 +106,53 @@ if(DEVOURER_PCIE)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# Sanitizers. Off by default; the value applies to the library, the examples
+# and the selftests alike, so `ctest` and an on-hardware demo run share one
+# instrumented build. The vendored halbb/halrf C is exempted from UBSan below
+# (unaligned loads / signed shifts are pervasive in Realtek's sources and are
+# not ours to fix).
+#   cmake -S . -B build-asan -DDEVOURER_SANITIZE=address+undefined
+# ---------------------------------------------------------------------------
+set(DEVOURER_SANITIZE "" CACHE STRING
+    "Sanitizer build: address, address+undefined, thread (empty = off)")
+set_property(CACHE DEVOURER_SANITIZE PROPERTY STRINGS
+    "" address address+undefined thread)
+if(NOT DEVOURER_SANITIZE STREQUAL "")
+    if(MSVC)
+        # MSVC ships AddressSanitizer only — no UBSan, no TSan, no LSan.
+        # Degrade loudly rather than silently building something weaker than
+        # the caller asked for.
+        if(NOT DEVOURER_SANITIZE STREQUAL "address")
+            message(FATAL_ERROR
+                "DEVOURER_SANITIZE=${DEVOURER_SANITIZE} is unsupported on MSVC — "
+                "it implements /fsanitize=address only. Use "
+                "-DDEVOURER_SANITIZE=address, or build with GCC/Clang for "
+                "undefined/thread.")
+        endif()
+        add_compile_options(/fsanitize=address)
+        # ASan is incompatible with the runtime checks and with incremental
+        # linking; both are on by default in Debug.
+        add_compile_options($<$<CONFIG:Debug>:/Oy->)
+        add_link_options(/INCREMENTAL:NO)
+    else()
+        if(DEVOURER_SANITIZE STREQUAL "address")
+            set(_devourer_san "address")
+        elseif(DEVOURER_SANITIZE STREQUAL "address+undefined")
+            set(_devourer_san "address,undefined")
+        elseif(DEVOURER_SANITIZE STREQUAL "thread")
+            set(_devourer_san "thread")
+        else()
+            message(FATAL_ERROR
+                "DEVOURER_SANITIZE=${DEVOURER_SANITIZE} — must be one of "
+                "address, address+undefined, thread (or empty).")
+        endif()
+        add_compile_options(-fsanitize=${_devourer_san} -fno-omit-frame-pointer -g)
+        add_link_options(-fsanitize=${_devourer_san})
+    endif()
+    message(STATUS "devourer: sanitizer build (${DEVOURER_SANITIZE})")
+endif()
+
 # Find pkg-config and then use it to locate libusb.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(libusb REQUIRED IMPORTED_TARGET libusb-1.0)
@@ -393,6 +440,13 @@ if(DEVOURER_KESTREL)
         set(_kestrel_vendor_cflags /W0 /Gy)
     else()
         set(_kestrel_vendor_cflags -w -ffunction-sections -fdata-sections)
+        # Realtek's sources are full of unaligned loads, signed shifts and
+        # out-of-range enum stores. They are vendored verbatim (edit the
+        # extractors, never these files), so UBSan on them reports noise we
+        # would never act on and drowns the findings from our own code.
+        if(DEVOURER_SANITIZE MATCHES "undefined")
+            list(APPEND _kestrel_vendor_cflags -fno-sanitize=undefined)
+        endif()
     endif()
 
     file(GLOB KESTREL_HALBB_C "${CMAKE_CURRENT_SOURCE_DIR}/hal/halbb/g6/vendor/*.c")
@@ -488,6 +542,8 @@ if(DEVOURER_KESTREL)
         examples/kestrelprobe/main.cpp
     )
     target_link_libraries(kestrelprobe PUBLIC devourer PRIVATE PkgConfig::libusb)
+    # DeviceSession.h (shared teardown-order holder) lives in examples/common/.
+    target_include_directories(kestrelprobe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 endif()
 
 # reglat — register round-trip latency microbench (USB ctrl-xfer vs PCIe MMIO).
@@ -677,6 +733,17 @@ add_executable(ToneMaskSelftest
 target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
+
+# Headless guard for the TX quiesce seam (IRtlTransport::quiesce_tx via
+# RtlAdapter): the explicit "stop TX and wait it out" call every device makes
+# before anything is released. UsbTransport's cancel/drain is validated on
+# hardware under ASan — the test header says what it does and does not cover.
+add_executable(TxQuiesceSelftest
+    tests/tx_quiesce_selftest.cpp
+)
+target_link_libraries(TxQuiesceSelftest PRIVATE devourer PkgConfig::libusb)
+
+add_test(NAME tx_quiesce_seam COMMAND TxQuiesceSelftest)
 
 # Headless guard for the active idle-noise-floor math (src/NoiseFloorMath.h): the
 # phydm sign/pwdb helpers the Jaguar1 0x0FA0 debug-port measurement uses. Pure

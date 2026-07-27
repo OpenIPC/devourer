@@ -59,6 +59,7 @@
 #include <string>
 #include <thread>
 
+#include "DeviceSession.h"
 #include "SignalStop.h"
 #include "ThermalStatus.h"
 #include "TxPower.h"
@@ -242,11 +243,17 @@ int main(int argc, char **argv) {
   g_ev = &logger->events();
   install_devourer_signal_handlers();
 
+  /* Owns the teardown order (device -> interface -> handle -> context; see
+   * DeviceSession.h). Each early return from here on unwinds whatever has been
+   * adopted so far. */
+  devourer::DeviceSession session{logger};
+
   libusb_context *ctx = nullptr;
   if (libusb_init(&ctx) < 0) {
     logger->error("libusb_init failed");
     return 1;
   }
+  session.adopt_context(ctx);
   libusb_device_handle *handle = nullptr;
   if (a.pid >= 0) {
     handle = libusb_open_device_with_vid_pid(ctx, a.vid,
@@ -261,29 +268,33 @@ int main(int argc, char **argv) {
   if (!handle) {
     logger->error("no adapter found ({:04x}:{})", a.vid,
                   a.pid >= 0 ? "requested pid" : "any Realtek pid");
-    libusb_exit(ctx);
     return 1;
   }
 
   std::shared_ptr<devourer::UsbDeviceLock> lock;
   if (devourer::claim_interface_then_reset(handle, devourer::find_wifi_interface(handle), logger, true, lock) !=
       0) {
-    libusb_close(handle);
-    libusb_exit(ctx);
+    /* The claim failed, so nothing owns the handle yet — hand it to the
+     * session purely so the unwind closes it. */
+    session.adopt_handle(handle);
     return 1;
   }
+  session.adopt_handle(handle);
+  session.adopt_lock(lock);
 
   WiFiDriver driver(logger);
-  std::unique_ptr<IRtlDevice> dev =
+  std::unique_ptr<IRtlDevice> owned_device =
       driver.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
-  if (!dev) {
+  if (!owned_device) {
     logger->error("CreateRtlDevice failed (chip support not built?)");
-    libusb_close(handle);
-    libusb_exit(ctx);
     return 1;
   }
+  /* The session owns the device from here: it is what guarantees the device
+   * (and its in-flight TX) dies before libusb does. */
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice *const dev = session.device();
 
-  devourer::emit_adapter_caps(*g_ev, dev.get());
+  devourer::emit_adapter_caps(*g_ev, dev);
 
   const devourer::TxPowerCaps caps = dev->GetTxPowerCaps();
   devourer::Ev(*g_ev, "txpwr.caps")
@@ -296,8 +307,6 @@ int main(int argc, char **argv) {
   if (!caps.supported) {
     logger->error("TX-power API not wired for this family yet");
     dev->Stop();
-    libusb_close(handle);
-    libusb_exit(ctx);
     return 3;
   }
 
@@ -307,12 +316,12 @@ int main(int argc, char **argv) {
   logger->info("brought up on ch{} bw{}", a.channel, a.bw);
 
   /* Baseline state before any knob moves (the offset=0 parity reference). */
-  print_state(dev.get(), a.thermal);
+  print_state(dev, a.thermal);
 
   if (a.flat >= -1) {
     dev->SetTxPowerIndexOverride(a.flat);
     logger->info("flat index override -> {}", a.flat);
-    print_state(dev.get(), a.thermal);
+    print_state(dev, a.thermal);
   }
 
   if (a.have_rate_diffs) {
@@ -323,16 +332,16 @@ int main(int argc, char **argv) {
       const bool ok = dev->SetTxPowerRateDiffs(a.rate_diffs);
       logger->info("rate-diffs -> {}", ok ? "applied" : "unsupported");
     }
-    print_state(dev.get(), a.thermal);
+    print_state(dev, a.thermal);
   }
 
   if (a.have_flat_pulse) {
     dev->SetTxPowerIndexOverride(a.flat_pulse);
     logger->info("flat pulse -> {}", a.flat_pulse);
-    print_state(dev.get(), a.thermal);
+    print_state(dev, a.thermal);
     dev->SetTxPowerIndexOverride(-1);
     logger->info("flat pulse cleared");
-    print_state(dev.get(), a.thermal);
+    print_state(dev, a.thermal);
   }
 
   if (a.have_ramp) {
@@ -344,7 +353,7 @@ int main(int argc, char **argv) {
          q += inc) {
       const int applied = dev->SetTxPowerOffsetQdb(q);
       devourer::Ev(*g_ev, "txpwr.offset").f("requested", q).f("applied", applied);
-      print_state(dev.get(), a.thermal);
+      print_state(dev, a.thermal);
       std::this_thread::sleep_for(std::chrono::milliseconds(a.step_ms));
     }
   }
@@ -356,18 +365,17 @@ int main(int argc, char **argv) {
                         .ChannelWidth = bw_enum(a.bw)});
     logger->info("SetMonitorChannel -> ch{} (offset must re-fold)",
                  a.switch_channel);
-    print_state(dev.get(), a.thermal);
+    print_state(dev, a.thermal);
   }
 
   if (a.retune > 0 && !g_devourer_should_stop) {
     dev->FastRetune(static_cast<uint8_t>(a.retune));
     logger->info("FastRetune -> ch{} (TXAGC registers must be untouched)",
                  a.retune);
-    print_state(dev.get(), a.thermal);
+    print_state(dev, a.thermal);
   }
 
   dev->Stop();
-  libusb_close(handle);
-  libusb_exit(ctx);
+  session.close();
   return 0;
 }

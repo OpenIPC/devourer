@@ -1804,7 +1804,14 @@ bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {
   return true;
 }
 
+void RtlJaguarDevice::Stop() { _device.quiesce_tx(); }
+
 RtlJaguarDevice::~RtlJaguarDevice() {
+  /* First, before any member starts unwinding: the async bulk-OUT URBs point
+   * at transport-owned memory and complete on whichever thread pumps libusb,
+   * so nothing may be released while they are still live. Idempotent, so the
+   * usual Stop()-then-destroy path pays nothing here. */
+  _device.quiesce_tx();
   /* Safety net: if a CW tone is still armed (caller forgot StopCwTone), restore
    * the chip before teardown so it isn't left radiating a bare carrier. */
   StopCwTone();

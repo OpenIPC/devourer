@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "BfReportDecode.h"
+#include "DeviceSession.h"
 #include "RadiotapBuilder.h"
 #include "RxPacket.h"
 #include "SignalStop.h"
@@ -328,34 +329,50 @@ static void run_display(Sensor &sensor) {
 }
 
 /* ------------------------------------------------------------ USB helpers --- */
+/* Each adapter owns its whole stack — device, interface, handle and its own
+ * libusb context — through one DeviceSession, so the two of them unwind
+ * independently and each in the required order (see DeviceSession.h). */
 struct Adapter {
-  libusb_context *ctx = nullptr;
-  libusb_device_handle *handle = nullptr;
-  std::shared_ptr<devourer::UsbDeviceLock> lock;
-  std::unique_ptr<IRtlDevice> dev;
+  explicit Adapter(const Logger_t &logger) : session(logger) {}
+  devourer::DeviceSession session;
+
+  libusb_device_handle *handle() const { return session.handle(); }
+  IRtlDevice *dev() const { return session.device(); }
 };
 
 /* Open one adapter by VID:PID on its own libusb context, claim + reset, and build
  * the device (not yet brought up). Returns false (logged) on failure. */
 static bool open_adapter(Adapter &a, uint16_t vid, uint16_t pid,
                          const Logger_t &logger) {
-  if (libusb_init(&a.ctx) < 0)
+  libusb_context *ctx = nullptr;
+  if (libusb_init(&ctx) < 0)
     return false;
-  a.handle = libusb_open_device_with_vid_pid(a.ctx, vid, pid);
-  if (!a.handle) {
+  a.session.adopt_context(ctx);
+  libusb_device_handle *handle = libusb_open_device_with_vid_pid(ctx, vid, pid);
+  if (!handle) {
     logger->error("could not open {:04x}:{:04x} — is it plugged in? (a prior "
                   "hang can drop an adapter off the bus; unplug/replug it)",
                   vid, pid);
     return false;
   }
+  std::shared_ptr<devourer::UsbDeviceLock> lock;
   int rc = devourer::claim_interface_then_reset(
-      a.handle, devourer::find_wifi_interface(a.handle), logger, true, a.lock);
-  if (rc != 0)
+      handle, devourer::find_wifi_interface(handle), logger, true, lock);
+  if (rc != 0) {
+    /* The claim failed, so nothing owns the handle yet — hand it to the
+     * session purely so the unwind closes it. */
+    a.session.adopt_handle(handle);
     return false;
+  }
+  a.session.adopt_handle(handle);
+  a.session.adopt_lock(lock);
   WiFiDriver driver(logger);
-  a.dev = driver.CreateRtlDevice(a.handle, a.ctx, a.lock,
-                                 devourer_config_from_env());
-  return a.dev != nullptr;
+  auto owned_device =
+      driver.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
+  if (!owned_device)
+    return false;
+  a.session.adopt_device(std::move(owned_device));
+  return true;
 }
 
 static bool read_mac(libusb_device_handle *h, uint8_t mac[6]) {
@@ -371,22 +388,26 @@ static bool read_mac(libusb_device_handle *h, uint8_t mac[6]) {
 static int run_active(uint16_t snd_vid, uint16_t snd_pid, uint16_t bfe_vid,
                       uint16_t bfe_pid, int channel, const Logger_t &logger,
                       Sensor &sensor) {
+  /* Both adapters are declared before any thread below, so every thread is
+   * joined before the session that owns the handle it touches is unwound. */
+  Adapter bfe{logger}, snd{logger};
+
   /* Beamformee first: arm it (env, read at Init), bring it up on a thread. */
   set_env("DEVOURER_BF_ARM_BFEE", "57:42:75:05:d6:00");
   set_env("DEVOURER_BF_ARM_BFEE_MU", "1");
-  Adapter bfe;
   if (!open_adapter(bfe, bfe_vid, bfe_pid, logger)) {
     logger->error("active: failed to open beamformee {:04x}", bfe_pid);
     return 1;
   }
   std::thread bfe_thread([&bfe, channel]() {
-    bfe.dev->Init([](const Packet &) {}, /* responds in hardware; RX ignored */
-                  SelectedChannel{.Channel = (uint8_t)channel, .ChannelOffset = 0,
-                                  .ChannelWidth = CHANNEL_WIDTH_20});
+    bfe.dev()->Init([](const Packet &) {}, /* responds in hardware; RX ignored */
+                    SelectedChannel{.Channel = (uint8_t)channel,
+                                    .ChannelOffset = 0,
+                                    .ChannelWidth = CHANNEL_WIDTH_20});
   });
   std::this_thread::sleep_for(std::chrono::milliseconds(1500)); /* bring-up + MAC */
   uint8_t bfe_mac[6];
-  if (!read_mac(bfe.handle, bfe_mac)) {
+  if (!read_mac(bfe.handle(), bfe_mac)) {
     logger->error("active: could not read beamformee MAC (REG_MACID)");
     g_devourer_should_stop = true;
     bfe_thread.join();
@@ -401,22 +422,21 @@ static int run_active(uint16_t snd_vid, uint16_t snd_pid, uint16_t bfe_vid,
    * keeps its RX filters open for the self-capture (no-op on Jaguar1/2). */
   set_env("DEVOURER_BF_ARM_SOUNDER", "1");
   set_env("DEVOURER_TX_WITH_RX", "thread");
-  Adapter snd;
   if (!open_adapter(snd, snd_vid, snd_pid, logger)) {
     logger->error("active: failed to open sounder {:04x}", snd_pid);
     g_devourer_should_stop = true;
     bfe_thread.join();
     return 1;
   }
-  snd.dev->InitWrite(SelectedChannel{.Channel = (uint8_t)channel,
+  snd.dev()->InitWrite(SelectedChannel{.Channel = (uint8_t)channel,
                                      .ChannelOffset = 0,
                                      .ChannelWidth = CHANNEL_WIDTH_20});
-  snd.dev->SetTxMode(devourer::parse_tx_mode_str("VHT2SS_MCS0"));
+  snd.dev()->SetTxMode(devourer::parse_tx_mode_str("VHT2SS_MCS0"));
   set_env("DEVOURER_TX_NDPA", "1"); /* send_packet marks the NDPA descriptor */
 
   /* Self-capture the returned reports on the sounder's RX loop. */
   std::thread snd_rx([&snd, &sensor]() {
-    snd.dev->StartRxLoop(
+    snd.dev()->StartRxLoop(
         [&sensor](const Packet &p) { sensor.feed(p.Data.data(), p.Data.size()); });
   });
   std::thread disp(run_display, std::ref(sensor));
@@ -441,7 +461,7 @@ static int run_active(uint16_t snd_vid, uint16_t snd_pid, uint16_t bfe_vid,
   auto last_adv = clk::now();
   bool stalled = false;
   while (!g_devourer_should_stop) {
-    if (!snd.dev->send_packet(ndpa.data(), ndpa.size()))
+    if (!snd.dev()->send_packet(ndpa.data(), ndpa.size()))
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     std::this_thread::sleep_for(std::chrono::milliseconds(3));
     long t = sensor.snapshot().total;
@@ -466,13 +486,13 @@ static int run_active(uint16_t snd_vid, uint16_t snd_pid, uint16_t bfe_vid,
     std::this_thread::sleep_for(std::chrono::seconds(4));
     std::_Exit(0);
   }).detach();
-  snd.dev->StopRxLoop();
-  bfe.dev->StopRxLoop();
+  snd.dev()->StopRxLoop();
+  bfe.dev()->StopRxLoop();
   disp.join();
   snd_rx.join();
   bfe_thread.join();
-  snd.dev->Stop();
-  bfe.dev->Stop();
+  snd.dev()->Stop();
+  bfe.dev()->Stop();
   return stalled ? 2 : 0;
 }
 

@@ -15,6 +15,7 @@
 #include <libusb.h>
 
 #include "BfReportDetect.h"
+#include "DeviceSession.h"
 #include "HopSchedule.h"
 #include "hopset/HopsetEvents.h"
 #include "hopset/HopsetFollower.h"
@@ -1159,6 +1160,12 @@ int main(int argc, char **argv) {
    * `timeout` SIGTERM killed us mid-RX, leaving the chip's USB core hung. */
   install_devourer_signal_handlers();
 
+  /* Owns the teardown order (device -> interface -> handle -> context; see
+   * DeviceSession.h). Declared before every thread below, so the threads are
+   * joined before the adapter is released. Each early return from here on
+   * unwinds whatever has been adopted so far. */
+  devourer::DeviceSession session{logger};
+
 #if defined(DEVOURER_HAVE_PCIE)
   /* DEVOURER_PCIE_BDF=0000:01:00.0 — drive a PCIe adapter (RTL8821CE) through
    * the vfio transport instead of libusb. The device must be bound to vfio-pci
@@ -1179,16 +1186,20 @@ int main(int argc, char **argv) {
         .f("stage", "demo.open_device")
         .f("ms", ms_since_start());
     WiFiDriver wifi_driver(logger);
-    auto dev = wifi_driver.CreateRtlDevicePcie(std::move(transport),
-                                               devourer_config_from_env());
-    if (!dev) {
+    auto owned_device = wifi_driver.CreateRtlDevicePcie(
+        std::move(transport), devourer_config_from_env());
+    if (!owned_device) {
       logger->error("No driver for this PCIe chip in this build — exiting");
       return 1;
     }
+    /* The session owns the device from here: it is what guarantees the device
+     * (and its in-flight TX) dies before the transport behind it. */
+    session.adopt_device(std::move(owned_device));
+    IRtlDevice *const dev = session.device();
     devourer::Ev(*g_ev, "init.timing")
         .f("stage", "demo.create_device")
         .f("ms", ms_since_start());
-    devourer::emit_adapter_caps(*g_ev, dev.get());
+    devourer::emit_adapter_caps(*g_ev, dev);
     int pch = 36;
     if (const char *ch_env = std::getenv("DEVOURER_CHANNEL"))
       pch = std::atoi(ch_env);
@@ -1214,7 +1225,7 @@ int main(int argc, char **argv) {
         logger->error("DEVOURER_LA_CAPTURE: bad spec '{}'", g_la_spec);
         return 1;
       }
-      auto runner = la_runner_for(dev.get());
+      auto runner = la_runner_for(dev);
       if (!runner) {
         logger->error("DEVOURER_LA_CAPTURE: no LA support wired for this "
                       "generation yet");
@@ -1266,6 +1277,7 @@ int main(int argc, char **argv) {
   if (rc < 0) {
     return rc;
   }
+  session.adopt_context(ctx);
 
   /* libusb log level: WARNING by default. DEBUG is opt-in via
    * DEVOURER_USB_DEBUG=1 — it emits ~7 MB per 15s run (has filled /tmp and
@@ -1284,7 +1296,6 @@ int main(int argc, char **argv) {
     if (rc != 0 || dev_handle == nullptr) {
       logger->error("libusb_wrap_sys_device(fd={}) failed: {} ({})", termux_fd,
                     libusb_error_name(rc), rc);
-      libusb_exit(ctx);
       return 1;
     }
   } else {
@@ -1295,7 +1306,6 @@ int main(int argc, char **argv) {
         sizeof(kRealtekProductIds) / sizeof(kRealtekProductIds[0]));
   }
   if (dev_handle == NULL) {
-    libusb_exit(ctx);
     return 1;
   }
 
@@ -1321,32 +1331,38 @@ int main(int argc, char **argv) {
       .f("ms", ms_since_start());
   if (rc != 0) {
     /* BUSY => another process owns the adapter; any other error => open failed.
-     * Either way, exit cleanly rather than asserting. */
-    if (dev_handle != nullptr)
-      libusb_close(dev_handle);
-    libusb_exit(ctx);
+     * Either way, exit cleanly rather than asserting. The claim failed, so
+     * nothing owns the handle yet — hand it to the session purely so the
+     * unwind closes it. */
+    session.adopt_handle(dev_handle);
     return 1;
   }
+  session.adopt_handle(dev_handle);
+  session.adopt_lock(usb_lock);
 
   WiFiDriver wifi_driver(logger);
-  auto rtlDevice = wifi_driver.CreateRtlDevice(dev_handle, ctx, usb_lock,
-                                               devourer_config_from_env());
-  if (!rtlDevice) {
+  auto owned_device = wifi_driver.CreateRtlDevice(dev_handle, ctx, usb_lock,
+                                                  devourer_config_from_env());
+  if (!owned_device) {
     /* The factory returns null when the plugged chip's generation wasn't
      * compiled in (per-chip CMake options); it already logged which. */
     logger->error("No driver for this chip in this build — exiting");
     return 1;
   }
+  /* The session owns the device from here: it is what guarantees the device
+   * (and its in-flight TX) dies before libusb does. */
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice *const rtlDevice = session.device();
   devourer::Ev(*g_ev, "init.timing")
       .f("stage", "demo.create_device")
       .f("ms", ms_since_start());
-  devourer::emit_adapter_caps(*g_ev, rtlDevice.get());
+  devourer::emit_adapter_caps(*g_ev, rtlDevice);
   /* The BB-debug-port / queue-depth / thermal research helpers are Jaguar1-only,
    * so they live on RtlJaguarDevice rather than the IRtlDevice interface. The
    * whole block compiles out when Jaguar1 support isn't built; when it is, the
    * dynamic_cast yields nullptr for a Jaguar3 device, disabling them cleanly. */
 #if defined(DEVOURER_HAVE_JAGUAR1)
-  g_rtl_device = dynamic_cast<RtlJaguarDevice *>(rtlDevice.get());
+  g_rtl_device = dynamic_cast<RtlJaguarDevice *>(rtlDevice);
   std::atomic<bool> qd_emitter_stop{false};
   std::thread qd_emitter;
   if (g_qd_poll_ms > 0 && g_rtl_device != nullptr) {
@@ -1418,7 +1434,7 @@ int main(int argc, char **argv) {
   if (g_rx_energy_ms > 0) {
     logger->info("DEVOURER_RX_ENERGY_MS={} — starting RX energy telemetry",
                  g_rx_energy_ms);
-    IRtlDevice *dev = rtlDevice.get();
+    IRtlDevice *dev = rtlDevice;
     energy_emitter = std::thread([&energy_emitter_stop, dev]() {
       auto nap = [&](uint32_t ms) {
         for (uint32_t s = 0; s < ms && !energy_emitter_stop.load(); s += 50)
@@ -1691,7 +1707,7 @@ int main(int argc, char **argv) {
           *g_hop_schedule, *g_hopset_keys, hop_rx_channels.size());
       g_hopset_view->set_state(g_hopset_fol->state());
       g_hopset_view->set_probe_period(probe_rounds);
-      g_hopset_dev = rtlDevice.get();
+      g_hopset_dev = rtlDevice;
       if (std::getenv("DEVOURER_HOP_MUTE")) {
         g_hopset_mute = true;
         logger->warn("DEVOURER_HOP_MUTE — uplink muted: this side follows but "
@@ -1705,7 +1721,7 @@ int main(int argc, char **argv) {
       if (acquire_ms < 1)
         acquire_ms = 1;
     }
-    IRtlDevice *dev = rtlDevice.get();
+    IRtlDevice *dev = rtlDevice;
     SelectedChannel first{static_cast<uint8_t>(hop_rx_channels[0]), ch_offset,
                           width};
     std::thread rx([dev, first, &logger]() {
@@ -1863,9 +1879,7 @@ int main(int argc, char **argv) {
     if (rx.joinable())
       rx.join();
     dev->Stop();
-    libusb_release_interface(dev_handle, 0);
-    libusb_close(dev_handle);
-    libusb_exit(ctx);
+    session.close();
     return 0;
   }
 
@@ -1875,7 +1889,7 @@ int main(int argc, char **argv) {
   if (!g_rx_sweep.empty()) {
     logger->info("DEVOURER_RX_SWEEP: {} bins, dwell {} ms — live spectrum map",
                  g_rx_sweep.size(), g_rx_sweep_dwell_ms);
-    IRtlDevice *dev = rtlDevice.get();
+    IRtlDevice *dev = rtlDevice;
     SelectedChannel first{static_cast<uint8_t>(g_rx_sweep[0]), ch_offset, width};
     std::thread rx([dev, first, &logger]() {
       try {
@@ -1964,11 +1978,7 @@ int main(int argc, char **argv) {
     if (rx.joinable())
       rx.join();
     dev->Stop();
-    rc = libusb_release_interface(dev_handle, 0);
-    if (rc != 0)
-      logger->info("libusb_release_interface rc={}", rc);
-    libusb_close(dev_handle);
-    libusb_exit(ctx);
+    session.close();
     return 0;
   }
 
@@ -1985,7 +1995,7 @@ int main(int argc, char **argv) {
       logger->error("DEVOURER_LA_CAPTURE: bad spec '{}'", g_la_spec);
       return 1;
     }
-    auto runner = la_runner_for(rtlDevice.get());
+    auto runner = la_runner_for(rtlDevice);
     if (!runner) {
       logger->error("DEVOURER_LA_CAPTURE: no LA support wired for this "
                     "generation yet");
@@ -2030,12 +2040,10 @@ int main(int argc, char **argv) {
    * the adapter re-enumerates instead of hanging its USB core. */
   rtlDevice->Stop();
 
-  rc = libusb_release_interface(dev_handle, 0);
-  assert(rc == 0);
-
-  libusb_close(dev_handle);
-
-  libusb_exit(ctx);
+  /* Device, then interface, handle and context (DeviceSession.h). Explicit
+   * only because the process has nothing left to do here — the destructor
+   * does exactly the same on every other exit path. */
+  session.close();
 
   return 0;
 }

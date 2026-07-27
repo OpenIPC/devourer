@@ -200,6 +200,34 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure
 
+  # Sanitized build of the whole tree (library + demos + selftests) with the
+  # headless suite run under ASan/UBSan. Leak detection is off here: the
+  # selftests are pure computation and never open a device, so the only
+  # allocations still live at exit would come from libusb in demo code this
+  # job never runs — leak triage belongs to the on-hardware runs.
+  build-sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependency libraries
+        run: sudo apt install libusb-1.0-0-dev
+
+      - name: Configure (ASan + UBSan)
+        run: >
+          cmake -B build-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DDEVOURER_SANITIZE=address+undefined -S ${{ github.workspace }}
+
+      - name: Build (ASan + UBSan)
+        run: cmake --build build-asan -j
+
+      - name: Test (ASan + UBSan)
+        working-directory: build-asan
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --output-on-failure
+
   # Invalid option combinations must fail at configure time, not silently
   # produce a broken binary.
   reject-bad-configs:

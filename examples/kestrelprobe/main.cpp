@@ -35,6 +35,7 @@
 #include <string>
 #include <thread>
 
+#include "DeviceSession.h"
 #include "Event.h"
 #include "RtlAdapter.h"
 #include "SignalStop.h" /* g_devourer_should_stop — SIGINT/SIGTERM flag */
@@ -96,11 +97,19 @@ int main(int argc, char **argv) {
 
   auto logger = std::make_shared<Logger>();
 
+  /* Owns the teardown order (interface -> handle -> context; see
+   * DeviceSession.h). The RtlKestrelDevice below is a stack local declared
+   * after this, so it is destroyed first — the device-before-libusb half of
+   * the invariant falls out of declaration order. Each early return from here
+   * on unwinds whatever has been adopted so far. */
+  devourer::DeviceSession session{logger};
+
   libusb_context *ctx = nullptr;
   if (libusb_init(&ctx) < 0) {
     logger->error("libusb_init failed");
     return 1;
   }
+  session.adopt_context(ctx);
 
   libusb_device_handle *handle = nullptr;
   kestrel::ChipVariant variant = kestrel::ChipVariant::C8852B;
@@ -111,7 +120,6 @@ int main(int argc, char **argv) {
       logger->error("{:04x}:{:04x} is not in the Kestrel PID table "
                     "(kestrel/KestrelUsbIds.h)",
                     want_vid, want_pid);
-      libusb_exit(ctx);
       return 2;
     }
     handle = libusb_open_device_with_vid_pid(ctx, want_vid, want_pid);
@@ -137,17 +145,21 @@ int main(int argc, char **argv) {
     devourer::Ev(logger->events(), "kestrel.id")
         .f("ok", false)
         .f("why", "open");
-    libusb_exit(ctx);
     return 1;
   }
 
   std::shared_ptr<devourer::UsbDeviceLock> lock;
   if (devourer::claim_interface_then_reset(handle, 0, logger, true, lock) !=
       0) {
-    libusb_close(handle);
-    libusb_exit(ctx);
+    /* The claim failed, so nothing owns the handle yet — hand it to the
+     * session purely so the unwind closes it. */
+    session.adopt_handle(handle, 0);
     return 1;
   }
+  /* This probe claims interface 0 explicitly (above), so the release must
+   * name it rather than re-resolving. */
+  session.adopt_handle(handle, 0);
+  session.adopt_lock(lock);
 
   /* ---- stage id: register plane only, no power, no DMA ---- */
   RtlKestrelDevice dev(RtlAdapter(handle, logger, ctx, lock, {}), logger,
@@ -167,8 +179,6 @@ int main(int argc, char **argv) {
       .hexf("die_id", info.die_id, 2)
       .f("cut", info.cut);
   if (!id_ok || want < 1) {
-    libusb_close(handle);
-    libusb_exit(ctx);
     return id_ok ? 0 : 1;
   }
 
@@ -196,8 +206,6 @@ int main(int argc, char **argv) {
       .hexf("rfe", efuse.rfe_type, 2)
       .f("autoload", efuse.autoload_ok);
   if (!power_ok || want < 2) {
-    libusb_close(handle);
-    libusb_exit(ctx);
     return power_ok ? 0 : 1;
   }
 
@@ -224,16 +232,12 @@ int main(int argc, char **argv) {
   if (want < 3) {
     logger->info("fw: fw_ok={}", fw_ok);
     devourer::Ev(logger->events(), "kestrel.fw").f("ok", fw_ok);
-    libusb_close(handle);
-    libusb_exit(ctx);
     return fw_ok ? 0 : 1;
   }
   if (want < 4) {
     /* ---- stage trx: DMAC + CMAC MAC TRX init ---- */
     logger->info("trx: trx_ok={}", fw_ok);
     devourer::Ev(logger->events(), "kestrel.trx").f("ok", fw_ok);
-    libusb_close(handle);
-    libusb_exit(ctx);
     return fw_ok ? 0 : 1;
   }
 
@@ -241,8 +245,6 @@ int main(int argc, char **argv) {
     /* ---- stage phy: BB + RF table apply ---- */
     logger->info("phy: phy_ok={}", fw_ok);
     devourer::Ev(logger->events(), "kestrel.phy").f("ok", fw_ok);
-    libusb_close(handle);
-    libusb_exit(ctx);
     return fw_ok ? 0 : 1;
   }
 
@@ -321,8 +323,6 @@ int main(int argc, char **argv) {
           .f("mode", "ul_fixinfo")
           .f("chan", chan);
       dev.Stop();
-      libusb_close(handle);
-      libusb_exit(ctx);
       return ulok ? 0 : 1;
     }
 
@@ -340,11 +340,10 @@ int main(int argc, char **argv) {
         .f("count", count)
         .f("mode", cfg.mode)
         .f("chan", chan);
-    /* InitWrite started the WP-drain thread — join it before libusb_exit or a
-     * thread still inside libusb trips usbi_mutex_destroy (SIGABRT). */
+    /* InitWrite started the WP-drain thread — join it before the session
+     * unwinds libusb, or a thread still inside libusb trips
+     * usbi_mutex_destroy (SIGABRT). */
     dev.Stop();
-    libusb_close(handle);
-    libusb_exit(ctx);
     return ok ? 0 : 1;
   }
 
@@ -376,7 +375,5 @@ int main(int argc, char **argv) {
       .f("ofdma_cmd", ofdma_ok)
       .f("chan", chan);
   dev.Stop(); /* join the WP-drain thread before libusb teardown (see trig) */
-  libusb_close(handle);
-  libusb_exit(ctx);
   return twt_ok ? 0 : 1;
 }

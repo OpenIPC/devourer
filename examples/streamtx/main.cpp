@@ -67,6 +67,7 @@
   #include <libusb-1.0/libusb.h>
 #endif
 
+#include "DeviceSession.h"
 #include "HopSchedule.h"
 #include "hopset/HopsetWire.h"
 #include "RadiotapBuilder.h"
@@ -151,11 +152,18 @@ int main(int argc, char **argv) {
   libusb_device_handle *handle = nullptr;
   int rc;
 
+  /* Owns the teardown order (device -> interface -> handle -> context; see
+   * DeviceSession.h). Declared before every thread below, so the threads are
+   * joined before the adapter is released. Each early return from here on
+   * unwinds whatever has been adopted so far. */
+  devourer::DeviceSession session{logger};
+
   if (termux_fd > 0) {
     logger->info("Termux mode: wrapping fd {}", termux_fd);
     libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
     libusb_set_option(NULL, LIBUSB_OPTION_WEAK_AUTHORITY);
     libusb_init(&context);
+    session.adopt_context(context);
     rc = libusb_wrap_sys_device(context, (intptr_t)termux_fd, &handle);
     if (rc < 0) {
       logger->error("libusb_wrap_sys_device: {}", rc);
@@ -164,6 +172,7 @@ int main(int argc, char **argv) {
   } else {
     rc = libusb_init(&context);
     if (rc < 0) return rc;
+    session.adopt_context(context);
 
     uint16_t target_pid = 0;
     if (const char *pid_env = std::getenv("DEVOURER_PID")) {
@@ -187,7 +196,6 @@ int main(int argc, char **argv) {
     }
     if (handle == NULL) {
       logger->error("No supported device found under VID {:04x}", target_vid);
-      libusb_exit(context);
       return 1;
     }
   }
@@ -201,11 +209,13 @@ int main(int argc, char **argv) {
   rc = devourer::claim_interface_reset_reopen(context, handle, logger,
       termux_fd == 0 && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
   if (rc != 0) {
-    if (handle != nullptr)
-      libusb_close(handle);
-    libusb_exit(context);
+    /* The claim failed, so nothing owns the handle yet — hand it to the
+     * session purely so the unwind closes it. */
+    session.adopt_handle(handle);
     return 1;
   }
+  session.adopt_handle(handle);
+  session.adopt_lock(usb_lock);
 
   WiFiDriver wifi_driver{logger};
   auto stream_cfg = devourer_config_from_env();
@@ -216,13 +226,17 @@ int main(int argc, char **argv) {
    * it. Explicit DEVOURER_DIS_CCA=0 still forces standard carrier-sense back on. */
   if (std::getenv("DEVOURER_DIS_CCA") == nullptr)
     stream_cfg.tuning.disable_cca = true;
-  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
-                                               stream_cfg);
+  auto owned_device = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+                                                  stream_cfg);
+  /* The session owns the device from here: it is what guarantees the device
+   * (and its in-flight TX) dies before libusb does. */
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice *const rtlDevice = session.device();
   /* Jaguar1-only research features (TXAGC override, fast-retune hopping) aren't
    * on the IRtlDevice contract — downcast for them; jag is null on Jaguar3, and
    * the downcast plus its call sites compile out when Jaguar1 isn't built. */
 #if defined(DEVOURER_HAVE_JAGUAR1)
-  RtlJaguarDevice *jag = dynamic_cast<RtlJaguarDevice *>(rtlDevice.get());
+  RtlJaguarDevice *jag = dynamic_cast<RtlJaguarDevice *>(rtlDevice);
 #endif
 
   int channel = 6;
@@ -474,14 +488,9 @@ int main(int argc, char **argv) {
   }
 
   devourer::Ev(logger->events(), "stream.done").f("sent", tx_count);
-  // Destruct the device before tearing down libusb: on Jaguar1 the TX path is
-  // asynchronous, and closing the handle with transfers still in flight reaps
-  // completions against a freed handle (segfault, and the crash leaks the USB
-  // claim so the next run hits "adapter in use"). reset() runs the dtor, which
-  // drains outstanding transfers while the handle is still valid.
-  rtlDevice.reset();
-  libusb_release_interface(handle, 0);
-  libusb_close(handle);
-  libusb_exit(context);
+  /* Device, then interface, handle and context (DeviceSession.h). Explicit
+   * only because the process has nothing left to do here — the destructor
+   * does exactly the same on every other exit path. */
+  session.close();
   return 0;
 }

@@ -61,6 +61,7 @@
 #endif
 
 #include "ChannelFreq.h"
+#include "DeviceSession.h"
 #include "Event.h"
 #include "HopSchedule.h"
 #include "RadiotapBuilder.h"
@@ -106,32 +107,41 @@ int main() {
   apply_logging_env(*logger);
   auto &ev = logger->events();
 
+  // Owns the teardown order (device -> interface -> handle -> context; see
+  // DeviceSession.h).
+  devourer::DeviceSession session{logger};
+
   libusb_context *ctx = nullptr;
   if (libusb_init(&ctx) < 0)
     return 1;
+  session.adopt_context(ctx);
   static const uint16_t kDefaultPids[] = {0x8812, 0xb812, 0xc811, 0xc820,
                                           0xc82c, 0x8814, 0xb82c};
   libusb_device_handle *handle = open_selected_usb(
       ctx, logger, kDefaultPids, sizeof(kDefaultPids) / sizeof(kDefaultPids[0]));
-  if (!handle) {
-    libusb_exit(ctx);
+  if (!handle)
     return 1;
-  }
   std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
   if (devourer::claim_interface_reset_reopen(
           ctx, handle, logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr,
           usb_lock) != 0) {
-    libusb_exit(ctx);
+    // The claim failed, so nothing owns the handle yet — hand it to the
+    // session purely so the unwind closes it.
+    session.adopt_handle(handle);
     return 1;
   }
+  session.adopt_handle(handle);
+  session.adopt_lock(usb_lock);
 
   WiFiDriver driver{logger};
   auto cfg = devourer_config_from_env(); // honors DEVOURER_FASTRETUNE_FW
-  auto dev = driver.CreateRtlDevice(handle, nullptr, usb_lock, cfg);
-  if (!dev) {
-    libusb_exit(ctx);
+  auto owned_device = driver.CreateRtlDevice(handle, nullptr, usb_lock, cfg);
+  if (!owned_device)
     return 1;
-  }
+  // The session owns the device from here: it is what guarantees the device
+  // (and its in-flight TX) dies before libusb does.
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice *const dev = session.device();
 
   // --- schedule + admission parameters ---------------------------------------
   std::vector<int> chans;
@@ -150,7 +160,6 @@ int main() {
   }
   if (chans.size() < 2) {
     logger->error("DEVOURER_DWELL_CHANNELS must name at least two channels");
-    libusb_exit(ctx);
     return 2;
   }
   const long slot_ms = env_long("DEVOURER_DWELL_SLOT_MS", 20);
@@ -290,11 +299,9 @@ int main() {
       .f("admitted", admitted_ct)
       .f("dropped_late", dropped_late_ct)
       .f("empty", empty_ct);
-  /* Release the device (its handle + any worker threads — e.g. the Kestrel
-   * planes) BEFORE libusb_exit; otherwise libusb tears down under a live
-   * handle and asserts in its mutex teardown. */
-  dev.reset();
-  usb_lock.reset();
-  libusb_exit(ctx);
+  /* Device, then interface, handle and context (DeviceSession.h). Explicit
+   * only because the process has nothing left to do here — the destructor
+   * does exactly the same on every other exit path. */
+  session.close();
   return 0;
 }

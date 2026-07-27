@@ -89,6 +89,13 @@ public:
     return -1;
   }
   virtual void clear_halt(uint8_t ep) { (void)ep; }
+  /* Stop the TX engine and return only once nothing is in flight: cancel every
+   * outstanding transfer, reap the completions, and refuse further sends. The
+   * caller-owned bus context (libusb here) must still be alive, so this has to
+   * run BEFORE any of it is torn down — which is exactly why it is an explicit
+   * call and not destructor work. Idempotent. Default no-op: a transport whose
+   * TX is synchronous has nothing outstanding by construction. */
+  virtual void quiesce_tx() {}
 
   /* ---- lifecycle / info ---- */
   /* Pre-power-on HCI programming, re-run per bring-up attempt (rtw88's

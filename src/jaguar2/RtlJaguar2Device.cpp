@@ -40,6 +40,10 @@ RtlJaguar2Device::RtlJaguar2Device(RtlAdapter device, Logger_t logger,
       _macinit{device, logger, variant}, _fw{device, logger, variant} {}
 
 RtlJaguar2Device::~RtlJaguar2Device() {
+  /* Inert on this generation (its send path is synchronous), but the invariant
+   * belongs to every device: nothing gets released while a transfer the
+   * transport still owns is outstanding. */
+  _device.quiesce_tx();
   /* Safety net: restore the chip if a CW tone is still armed. */
   StopCwTone();
   stop_pwrtrack();

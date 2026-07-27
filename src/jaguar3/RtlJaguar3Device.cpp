@@ -381,6 +381,10 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
  * (exception path / caller that drops the device) — a joinable std::thread in
  * the destructor would otherwise std::terminate. Idempotent with Stop(). */
 RtlJaguar3Device::~RtlJaguar3Device() {
+  /* Inert on this generation (its send path is synchronous), but the invariant
+   * belongs to every device: nothing gets released while a transfer the
+   * transport still owns is outstanding. */
+  _device.quiesce_tx();
   /* Safety net: restore the chip if a CW tone is still armed (before the coex
    * thread is joined — StopCwTone serializes on _reg_mu with it). */
   StopCwTone();

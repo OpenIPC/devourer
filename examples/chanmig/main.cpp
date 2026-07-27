@@ -34,6 +34,7 @@
 #include <thread>
 #include <vector>
 
+#include "DeviceSession.h"
 #include "RadiotapBuilder.h"
 #include "RxPacket.h"
 #include "SignalStop.h"
@@ -455,6 +456,11 @@ int main(int argc, char **argv) {
   g_ev = &logger->events();
   install_devourer_signal_handlers();
 
+  /* Owns the teardown order (device -> interface -> handle -> context; see
+   * DeviceSession.h). Declared before every thread below, so the threads are
+   * joined before the adapter is released. */
+  devourer::DeviceSession session{logger};
+
   std::string role;
   for (int i = 1; i + 1 < argc; i++)
     if (std::strcmp(argv[i], "--role") == 0)
@@ -508,23 +514,25 @@ int main(int argc, char **argv) {
   libusb_context *ctx = nullptr;
   if (libusb_init(&ctx) < 0)
     return 1;
+  session.adopt_context(ctx);
   static constexpr uint16_t kPids[] = {0x8812, 0xc812, 0xa81a, 0x881a,
                                        0xc82c, 0xe822, 0x8813};
   UsbPick pick;
   libusb_device_handle *handle = open_selected_usb(
       ctx, logger, kPids, sizeof(kPids) / sizeof(kPids[0]), &pick);
-  if (!handle) {
-    libusb_exit(ctx);
+  if (!handle)
     return 1;
-  }
   std::shared_ptr<devourer::UsbDeviceLock> lock;
   if (devourer::claim_interface_reset_reopen(
           ctx, handle, logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr,
           lock) != 0) {
-    libusb_close(handle);
-    libusb_exit(ctx);
+    /* The claim failed, so nothing owns the handle yet — hand it to the
+     * session purely so the unwind closes it. */
+    session.adopt_handle(handle);
     return 1;
   }
+  session.adopt_handle(handle);
+  session.adopt_lock(lock);
   /* Jaguar3 needs the RX filters opened at bring-up for reliable duplex. */
 #ifdef _WIN32
   _putenv_s("DEVOURER_TX_WITH_RX", "thread");
@@ -532,12 +540,17 @@ int main(int argc, char **argv) {
   ::setenv("DEVOURER_TX_WITH_RX", "thread", 1);
 #endif
   WiFiDriver driver(logger);
-  auto dev = driver.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
-  if (!dev) {
+  auto owned_device =
+      driver.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
+  if (!owned_device) {
     logger->error("no driver for this chip");
     return 1;
   }
-  g_dev = dev.get();
+  /* The session owns the device from here: it is what guarantees the device
+   * (and its in-flight TX) dies before libusb does. */
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice *const dev = session.device();
+  g_dev = dev;
 
   Ev(*g_ev, "migrate.id").t().f("role", role.c_str())
       .f("chip", pick.pid).f("source", source.str().c_str())
@@ -726,8 +739,6 @@ int main(int argc, char **argv) {
     g_dev = nullptr;
   }
   dev->Stop();
-  libusb_release_interface(handle, 0);
-  libusb_close(handle);
-  libusb_exit(ctx);
+  session.close();
   return 0;
 }

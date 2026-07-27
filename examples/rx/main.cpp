@@ -156,6 +156,19 @@ static void hopset_send(const devourer::hopset::HopsetMsg &m) {
   const auto body = devourer::hopset::hopset_encode(m, *g_hopset_keys);
   frame.insert(frame.end(), body.begin(), body.end());
   g_hopset_dev->send_packet(frame.data(), frame.size());
+  /* Every control frame this side airs is a slot it is NOT listening in — the
+   * receiver is half duplex like everything else. One event per FRAME is what
+   * makes that cost measurable rather than assumed: proposals retry and the
+   * status beacon repeats, so counting decisions would undercount airtime. */
+  devourer::Ev(*g_ev, "hopset.ctl")
+      .f("v", 1)
+      .f("role", "rx")
+      .f("type", m.type == devourer::hopset::HT_PROPOSAL   ? "proposal"
+                 : m.type == devourer::hopset::HT_COMMIT   ? "commit"
+                                                           : "status")
+      .f("gen", (unsigned long long)m.generation)
+      .f("bytes", (unsigned long long)frame.size())
+      .f("slot", (unsigned long long)g_hopset_now_slot.load());
 }
 
 /* Frames the follower wants aired, queued under g_hopset_mu and sent after it
@@ -751,7 +764,14 @@ static void packetProcessor(const Packet &packet) {
     return; /* a trigger is not a data/mgmt frame — nothing else to match */
   }
 
+  /* The sync marker's only integrity is the frame FCS — it is a plain vendor
+   * IE, unlike the authenticated control frames. So a frame the chip flagged
+   * must never reach it: under DEVOURER_RX_KEEP_CORRUPTED (which the salvage
+   * path needs, and which the FPV link runs with) a corrupted marker whose
+   * seed fingerprint happened to survive was decoded as a genuine generation
+   * change, and the follower dropped lockstep on it. */
   if (g_hop_schedule && packet.Data.size() >= 16 &&
+      !packet.RxAtrib.crc_err && !packet.RxAtrib.icv_err &&
       std::memcmp(packet.Data.data() + 10, kTxSa, 6) == 0) {
     /* Adaptive mode rides the v2 marker (v1 layout + generation/mask_fp);
      * fixed mode stays on v1 — each decoder rejects the other version. */

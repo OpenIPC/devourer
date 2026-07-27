@@ -184,6 +184,18 @@ struct HopsetParams {
   unsigned max_mask_delta = 1;         /* channels changed per update */
   uint64_t min_update_gap_rounds = 10; /* rounds between accepted updates */
   unsigned max_excluded_frac_pct = 50; /* cap on excluded/base */
+  /* How long after an activation a marker advertising the generation we just
+   * left is read as a frame still in flight rather than as a disagreement.
+   *
+   * Both endpoints swap at the same absolute slot, but a frame composed on one
+   * side of that boundary is decoded on the other: the marker is stamped when
+   * the frame is assembled and the frame then queues through the bus. Measured
+   * on air, treating that one frame as a mismatch cost 46 seconds — the
+   * follower dropped lockstep at the exact instant the exclusion took effect,
+   * which is the worst moment to start scanning for a way back. The relaxation
+   * is self-healing: an authority that really has not moved keeps advertising
+   * the old generation, and past the grace the mismatch stands. */
+  uint64_t stale_marker_slots = 2;
 };
 
 } /* namespace hopset */

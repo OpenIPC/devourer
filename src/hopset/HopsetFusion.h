@@ -313,8 +313,14 @@ inline FusedDecision fuse(const FusionConfig &cfg, const FusionInput &in) {
   d.tx_evidence_valid = tx.chans_with_evidence > 0;
   d.tx_band_min_occupancy = tx.band_min_occ;
   d.tx_band_max_occupancy = tx.band_max_occ;
+  /* Whichever endpoint named a target, report OUR occupancy on it — when the
+   * receiver named one that is the number the veto turns on, and when only
+   * this side did it is the number a reader needs to judge a disagreement the
+   * mode forbids acting on. */
   if (d.rx_wanted_exclude && detail::tx_has(tx, rx.target_index))
     d.tx_target_occupancy = detail::tx_occ(tx, rx.target_index);
+  else if (d.tx_wanted_exclude && detail::tx_has(tx, tx.target_index))
+    d.tx_target_occupancy = detail::tx_occ(tx, tx.target_index);
   d.endpoints_disagree_on_target =
       (d.rx_wanted_exclude != d.tx_wanted_exclude) ||
       (d.rx_wanted_exclude && d.tx_wanted_exclude &&
@@ -407,6 +413,10 @@ inline FusedDecision fuse(const FusionConfig &cfg, const FusionInput &in) {
     d.hold = FusionHold::RxHeld;
     return d;
   }
+
+  /* Held or not, the record names what this side wanted: an unacted-upon
+   * disagreement still has to be legible after the fact. */
+  d.target_index = tx.target_index;
 
   DecisionOrigin origin = DecisionOrigin::Tx;
   switch (cfg.mode) {

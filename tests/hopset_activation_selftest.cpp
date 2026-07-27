@@ -195,5 +195,70 @@ int main() {
             "post-recovery channel sequence identical");
   }
 
+  /* ------- (c) the marker that crossed the activation boundary ----------
+   * Both endpoints swap at the same absolute slot, but a frame stamped just
+   * before it is decoded just after. Measured on air, reading that one frame
+   * as a disagreement cost 46 seconds of re-acquisition at the exact instant
+   * an exclusion took effect. It must be ignored — and only for as long as it
+   * can plausibly still be in flight. */
+  {
+    HopsetAuthority auth(p, 0xC0DE);
+    HopsetFollower fol(p, 0xF00D);
+    uint32_t mismatches = 0;
+    auto count = [&](const std::vector<HopsetAction> &acts) {
+      for (const auto &a : acts)
+        if (a.kind == HopsetAction::Event &&
+            a.event == HopsetEvent::GenMismatch)
+          ++mismatches;
+    };
+    HopsetMsg commit{};
+    for (const auto &a : auth.start_change(0x3FE, 100))
+      if (a.kind == HopsetAction::SendControl)
+        commit = a.msg;
+    count(fol.on_commit(commit, 100));
+    const uint64_t act_slot = commit.activate_slot;
+    for (uint64_t s = 100; s <= act_slot + 1; ++s) {
+      auth.on_tick(s);
+      count(fol.on_tick(s));
+    }
+    CHECK(fol.state().generation == 1, "follower reached generation 1");
+
+    /* the straggler: a generation-0 marker STAMPED just before the swap,
+     * decoded after it — the signature measured on air */
+    count(fol.on_marker(0, /*fp_matches=*/false, act_slot - 1));
+    CHECK(mismatches == 0,
+          "a marker stamped before the swap is not a disagreement");
+    count(fol.on_marker(0, false, act_slot + 1));
+    CHECK(mismatches == 0, "nor is one inside the grace");
+    CHECK(fol.fsm() == HopsetFollower::State::Synced,
+          "lockstep survives the straggler");
+
+    /* ...but an authority that genuinely never moved keeps saying so, and
+     * past the grace that is exactly what a mismatch is for */
+    count(fol.on_marker(0, false, act_slot + p.stale_marker_slots + 1));
+    CHECK(mismatches == 1, "a persistent old generation still mismatches");
+    CHECK(fol.fsm() == HopsetFollower::State::Recovering,
+          "and still drives recovery");
+
+    /* The grace measures against the activation anchor, so an authority that
+     * announces an activation far in the future must not be able to stretch
+     * it over every marker the follower will ever see — that would silently
+     * disable the tripwire rather than trip it. The status path bounds the
+     * activation window exactly as the commit path does. */
+    HopsetMsg far{};
+    far.type = HT_STATUS;
+    far.role = 1;
+    far.base_fp = p.base_fp;
+    far.link_id = p.link_id;
+    far.sender_epoch = 0xC0DE;
+    far.generation = 9;
+    far.active_mask = 0x3FE;
+    far.activate_slot = act_slot + p.max_lead_slots + 1000;
+    const uint64_t before = fol.state().generation;
+    fol.on_status(far, act_slot + 2);
+    CHECK(fol.state().generation == before,
+          "a status announcing an out-of-window activation is refused");
+  }
+
   return fails ? 1 : 0;
 }

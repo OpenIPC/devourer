@@ -114,9 +114,32 @@ inline void emit_sense(EventSink &sink, const TxSenseSample &s,
   if (s.valid_nhm)
     ev.f("nhm_busy", (unsigned long long)s.nhm_busy_pct)
         .f("nhm_dur", (unsigned long long)s.nhm_duration);
+  if (s.injected)
+    ev.f("inject", 1);
   ev.hexf("flags", s.flags, 0).f("scored", scored);
   if (scored)
     ev.f("occ", occupancy);
+}
+
+/* Why this side's sensor proposed nothing. Held is not the same as blind, and
+ * neither is the same as content: without this, a sensor sitting on a floor,
+ * a sensor with no evidence and a sensor that is not running all produce the
+ * same silence. Rate-limited by the caller to the shape of the answer. */
+inline void emit_sense_eval(EventSink &sink, const TxSenseCandidate &c,
+                            uint64_t slot, uint64_t round) {
+  Ev(sink, "hopset.sense_eval")
+      .t()
+      .f("v", 1)
+      .f("role", "tx")
+      .f("slot", (unsigned long long)slot)
+      .f("round", (unsigned long long)round)
+      .f("hold", tx_sense_hold_name(c.hold))
+      .f("chans", (unsigned long long)c.chans_with_evidence)
+      .f("samples", (unsigned long long)c.sample_count)
+      .f("band_min", c.band_min_occ)
+      .f("band_max", c.band_max_occ)
+      .f("broad", c.broad_occupancy)
+      .f("flat", c.flat_band);
 }
 
 /* One fused verdict. Both endpoints' views are on the line so a log reader can

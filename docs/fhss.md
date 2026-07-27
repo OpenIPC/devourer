@@ -378,6 +378,64 @@ same one-channel-per-update and update-gap limits a follower proposal gets.
 The operator's scripted lever stays exempt — but a machine reacting to its own
 local evidence is precisely the actor those limits exist to bound.
 
+### Measuring it in payload, not in markers
+
+The receiver's policy scores dwells: a dwell counts as delivered when a sync
+marker arrived before the next retune. That is the right quantity for the
+policy — it is what the policy acts on — but it is the wrong one for judging
+whether adaptation helps, and the two disagree by a lot. A marker is one small
+frame at a robust rate, so a channel can decode markers while delivering
+payload badly; and a dwell that decoded one marker out of twenty frames scores
+1.0.
+
+So the jammer harness runs the real thing: RS-coded, sub-block-framed bodies
+from `tools/precoder` fed to the transmitter, decoded by the same salvage path
+the video link uses, reported next to the proxy. Measured on the 4-channel
+2.4 GHz base with a narrowband interferer parked on one member (25 s fixed,
+70 s adaptive, both windows opened only once the receiver was tracking):
+
+| measure | fixed keyed hopset | with the jammed channel excluded |
+|---|---|---|
+| marker proxy (dwells) | 0.762 | 0.946 |
+| FEC delivery (packets) | 0.861 | 0.927 |
+| recovered packets/s | 1001 | 986 |
+
+A repeat run of the same cells read 0.760 → 0.944 and 0.872 → 0.922, so the
+spread is under a point and the gap between the two measures is not noise: the
+proxy claims roughly three times the improvement the payload sees, and the
+delivered *rate* does not improve at all. Both facts have the same cause: on a
+CSMA link the transmitter defers to the interferer rather than transmitting
+into it, so a fixed hopset spends fewer frames on the jammed channel than its
+dwell share suggests, and the outer code already absorbs what it does spend.
+What exclusion buys here is margin — the erasure burst stops arriving at the
+decoder — not throughput. On a link with carrier sense disabled, where the
+transmitter really does spend a quarter of its frames into the jammer, the
+ratio and the rate would move together.
+
+Two failure modes only the payload measurement can see, both of which cost a
+bench session to find. A receiver that loses slot lock keeps scoring ~1.0 on
+the dwells it is present for, so the proxy reports a healthy link through an
+outage — the FEC figure and the fraction of the window actually tracked are
+what expose it. And a measurement window that opens at process start is mostly
+chip bring-up and acquisition: one 70 s phase read 0.30 FEC delivery whose
+settled part ran at 0.90.
+
+Two protocol details follow directly from that instrument, and both matter on
+any link running the salvage path:
+
+- The sync marker is a plain vendor IE whose only integrity is the frame FCS,
+  so a frame the chip flagged must never reach it. With corrupt frames surfaced
+  — which sub-block salvage requires — a corrupted marker whose seed
+  fingerprint happened to survive reads as a genuine generation change, and the
+  follower drops lockstep on a frame it should have discarded.
+- Both endpoints swap generation at the same absolute slot, but a marker
+  stamped just before that boundary is decoded just after it. It carries the
+  old generation truthfully, so the follower judges staleness by the slot the
+  marker was *stamped* in, not by when it arrived. Treating one such frame as
+  disagreement costs a full re-acquisition at the exact instant an exclusion
+  takes effect — measured at 46 s, because a scanning follower coincides with
+  the authority's status beacon only occasionally.
+
 ### What the sensor can and cannot see
 
 The occupancy scale is measured, not assumed. On this bench a narrowband
@@ -401,7 +459,52 @@ which is a fact about that adversary rather than about the sensor.
 Sensing costs what it stops sending. Measured with a 25 ms window on one dwell
 in two of a 200 ms slot: 7.7 % fewer frames per second, against 8.8 % predicted
 by summing the windows' own stamps. The two agreeing is the check that nothing
-unrecorded is being paid.
+unrecorded is being paid. Re-measured with both windows armed on the parked
+bench: 393.8 → 363.8 frames/s, 7.6 % measured against 8.1 % accounted.
+
+In payload terms that cost is a *rate*, not a ratio. Across the adaptation the
+sensing run aired 367 bodies/s against 399 without sensing — the same ~8 % —
+while FEC delivery was 0.937 against 0.930, i.e. unchanged. Sensing buys the
+veto and the failsafe with throughput, and takes nothing from the delivery of
+what it does send.
+
+### Who decides, measured four ways
+
+The same parked interferer under each fusion policy, one exclusion available,
+60 s per row and 180 s for the failsafe (it may not act until the feedback
+timeout has expired *and* its own observation window has filled — a shorter row
+measures the un-adapted link under the failsafe's name). Post-burst sensing is
+armed on every row so the throughput column compares policies rather than
+windows:
+
+| fusion | marker | FEC delivery | frames/s | exclusions |
+|---|---|---|---|---|
+| `rx` | 0.912 | 0.940 | 451 | 1 |
+| `veto` | 0.921 | 0.932 | 457 | 1 |
+| `either` | 0.922 | 0.932 | 471 | 1 |
+| `failsafe` (receiver muted) | 0.908 | 0.932 | 453 | 1 |
+
+The four agree within the run-to-run spread, and that is the result: when the
+receiver is right, the fusion mode decides *who may act*, not what happens.
+The failsafe reaches the same place with no uplink at all, only later.
+
+### What the receiver's own uplink costs it
+
+The receiver is half duplex, so every frame it airs is a slot it cannot hear —
+and a heartbeat that transmits in the slots it needs for listening is a bug
+this feature has had before. Three cells with no interferer at all, differing
+only in whether the receiver talks: policy off, policy on with the uplink muted
+(it decides and airs nothing), policy on and live. Muted-versus-live is the
+comparison that isolates the transport, because both cells make the same
+decisions.
+
+Measured over 60 s cells: 19 control frames per minute — one status per 64
+slots — costing under 5 ms of air per minute, and FEC delivery of 0.910 muted
+against 0.943 live, i.e. no measurable cost at all against a cell-to-cell
+spread of ±3.6 points. All three cells held lockstep for the whole window. The
+cadence is therefore not the limiting factor and does not need tightening; what
+does cost is losing lock, which is worth tens of seconds and is why the two
+marker rules above exist.
 
 ### Driving it
 
@@ -428,19 +531,60 @@ it has; `DEVOURER_HOP_MUTE=1` on the receiver is the fault-injection lever that
 produces a genuine one-way outage. All of it is inert unset, so the
 receiver-driven behaviour is exactly what it was.
 
+Note that the classifier will not propose anything of its own without
+post-burst evidence, so any run in which the transmitter must originate — the
+failsafe, or any test of its opinion — has to arm `_POSTBURST_US`. Without it
+the transmitter observes and holds, which looks identical to a transmitter that
+is not sensing at all unless the hold reason is read.
+
+`DEVOURER_TX_SENSE_INJECT="<idx>:<occ>[,...]"` (with an optional `*:<occ>`
+default) replaces the transmitter's per-channel view with fabricated occupancy,
+bypassing the hardware read but keeping the windows' timing so the duty cycle
+is unchanged. It is a test lever in the same spirit as
+`DEVOURER_HOP_ADAPTIVE_SCRIPT` and `DEVOURER_HOP_MUTE`, and it exists because
+the two endpoint-disagreement cases cannot otherwise be built: on a bench the
+adapters sit inches apart, and any interferer strong enough to degrade one is
+equally audible at the other. Injected evidence earns no more authority than
+measured evidence — the floors, the hysteresis and the cleaner-alternative rule
+all still apply to it.
+
+`DEVOURER_TX_STDIN=1` makes `txdemo` carry caller payload from stdin in the
+`<u32_le len><PSDU>` framing `streamtx` reads, which is what lets FEC delivery
+be measured across an adaptation: the authority, the sensing windows and the
+recovery probes all live in that demo, so the payload has to come to them.
+Probe dwells consume no body — the shard is not spent on an excluded channel
+and not thrown away either.
+
 On-air: `tests/hopset_adaptive_onair.sh` (protocol), and
 `tests/hopset_adaptive_jammer.sh` for the decision loop against a real B210
-interferer — `MODE=parked` (exclude, improve, restore once the jammer leaves)
-and `MODE=herding` (the jammer moves onto a newly-active channel after every
-exclusion). Measured on a 4-channel 2.4 GHz base with a narrowband interferer
-parked on one member: delivery 0.72 → 0.83 with the jammed channel excluded and
-probe-driven restoration after the interferer stopped; under herding, the
-active set held at the floor of 3 with committed exclusion depth 1 and no
-collapse. Two rig notes that cost a session: a flat TXAGC index chosen to back
+interferer. `MODE=parked` is exclude → improve → restore once the jammer
+leaves; `MODE=sense` repeats it with the transmitter's own evidence armed and
+asserts it does not contradict a correct receiver; `MODE=herding` moves the
+jammer onto a newly-active channel after every exclusion, and with
+`FUSION=failsafe MUTE=1` it does so against *transmitter*-originated exclusions,
+which is where the anti-herding limits carry the whole load. `MODE=fusionmatrix`
+and `MODE=policycost` produce the two tables above. `MODE=hidden` and
+`MODE=mirror` are the two disagreement scenarios, built with the injection
+lever.
+
+Measured on a 4-channel 2.4 GHz base with a narrowband interferer parked on one
+member: the jammed channel excluded and probe-restored after the interferer
+stopped, with delivery and FEC delivery as tabulated above. Under herding, with
+the transmitter deciding alone, the active set held at the floor of 3, every
+committed update moved exactly one channel, exclusion depth stayed at 1 and
+delivery did not collapse (0.840 → 0.841) — the interferer is tracked, not
+out-run. In the hidden-node row the receiver's exclusion passed unvetoed and
+the applied mask was bit-identical to its proposal, with the disagreement
+recorded rather than acted on; in the mirror row a transmitter told a healthy
+channel was filthy spent nothing, and said so on the record.
+
+Three rig notes that each cost a session: a flat TXAGC index chosen to back
 5 GHz off can put 2.4 GHz below the receiver's sensitivity and look exactly
-like a dead link, and an interferer loud enough to splatter across the whole
-band is broad degradation, not a channel fault — the policy correctly refuses
-to act on it.
+like a dead link; an interferer loud enough to splatter across the whole band
+is broad degradation, not a channel fault, and the policy correctly refuses to
+act on it; and a cell that starts before the previous one's demos have released
+their adapters measures nothing at all, because the advisory per-adapter lock
+is held until the chip has been de-initialised.
 
 ## Where it stands
 
@@ -457,7 +601,16 @@ experiment uses a 3-channel hopset because a single B210 needs ≥60 MS/s to spa
 a 60 MHz hopset in one FFT and trips a UHD tuning assertion at the usual
 61.44 MS/s. Adaptive exclusion is receiver-driven and opt-in: with the policy
 off the schedule visits every configured channel and the fused-FEC layer
-absorbs jammed dwells as erasures, and with it on the transmitter never senses
-for itself — it acts only on an authenticated proposal from the endpoint that
-has to decode. A herding jammer cannot be out-run, only survived: the floor
-keeps the link diverse rather than winning the exchange.
+absorbs jammed dwells as erasures, and with it on the transmitter senses for
+itself only when asked to. A herding jammer cannot be out-run, only survived:
+the floor keeps the link diverse rather than winning the exchange.
+
+And the effect is smaller in payload than the dwell proxy suggests. Against a
+parked narrowband interferer the outer code already carries a fixed hopset
+through its jammed dwells, and carrier sense keeps the transmitter from
+spending many frames there in the first place, so exclusion improves the
+delivered ratio by a few points and the delivered *rate* not at all. The two
+disagreement scenarios that decide whether the veto is safe are demonstrated
+with fabricated transmitter evidence, not with a real hidden node: a bench
+where the adapters sit inches apart cannot produce one, and that limit is a
+property of the bench rather than of the design.

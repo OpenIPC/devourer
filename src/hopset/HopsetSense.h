@@ -47,6 +47,7 @@ enum TxSenseFlag : uint16_t {
   kTsBarrierMissed = 1u << 3, /* taken without the discard barrier */
   kTsTruncated = 1u << 4,
   kTsNhmMissing = 1u << 5,
+  kTsInjected = 1u << 6, /* synthetic evidence, no hardware behind it */
 };
 
 /* One quiet-window observation. The counters are deltas spanning exactly
@@ -71,6 +72,16 @@ struct TxSenseSample {
   uint8_t nhm_busy_pct = 0; /* 100*(total-bucket0)/total, host-derived */
   uint16_t nhm_duration = 0;
 
+  /* Synthetic evidence. A caller that sets this hands the scorer an occupancy
+   * directly instead of counters, and every stage downstream — ring depth,
+   * dirty-run hysteresis, the cleaner-alternative rule, the floors — treats it
+   * exactly like a measured one. It exists so the two endpoint-disagreement
+   * scenarios can be built on a bench where both adapters hear the same
+   * interferer: the only way to give the transmitter a view that genuinely
+   * differs from the receiver's is to construct it. */
+  bool injected = false;
+  double injected_occupancy = 0.0;
+
   uint16_t flags = 0;
 };
 
@@ -81,6 +92,7 @@ enum TxSenseSource : uint8_t {
   kSrcFa = 1u << 1,
   kSrcIgi = 1u << 2,
   kSrcNhm = 1u << 3,
+  kSrcInjected = 1u << 4,
 };
 
 struct TxSenseConfig {
@@ -184,6 +196,16 @@ inline bool score_sample(const TxSenseSample &s, const TxSenseConfig &cfg,
   const double win_ms = static_cast<double>(s.window_us) / 1000.0;
   if (win_ms <= 0.0)
     return false;
+  /* Synthetic evidence is returned verbatim: the four-source weighting exists
+   * to turn counters into an occupancy, and here the occupancy is what the
+   * caller handed us. Back-solving it through the weights would make the
+   * lever approximate, and an approximate lever proves nothing. */
+  if (s.injected) {
+    const double v = s.injected_occupancy;
+    out.occupancy = v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v);
+    out.sources = kSrcInjected;
+    return true;
+  }
   double acc = 0.0, wsum = 0.0;
   uint8_t src = 0;
   auto clamp01 = [](double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); };

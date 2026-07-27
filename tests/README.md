@@ -99,6 +99,33 @@ probe on kernels 6.15+ (`failed to download firmware`, `error -22`), but
 - `iw`, `tcpdump`, `ip` on PATH
 - Passwordless `sudo`, or run directly as root
 
+### Adaptive-hopset validation (`hopset_adaptive_jammer.sh`)
+
+Three radios — a transmitting authority, a lockstep receiver running the
+exclusion policy, and a B210 interferer. `MODE` selects the scenario
+(`parked`, `sense`, `failsafe`, `herding`, `hidden`, `mirror`, `fusionmatrix`,
+`policycost`, `prepost`, `overhead`); the mode arms whatever it needs, so
+`MODE=sense` really does sense and `MODE=fusionmatrix` gives every row the same
+sensing windows.
+
+Two things about how it measures, because both changed what the numbers said:
+
+- Every mode reports **FEC delivery** — real RS-coded bodies from
+  `tools/precoder` through `DEVOURER_TX_STDIN`, decoded by the salvage path —
+  beside the marker-derived dwell proxy. `tests/fec_metrics.py` owns that
+  arithmetic and is shared with `jammer_resilience.py`; it also prints the
+  fraction of the window the receiver held lockstep, which is the number that
+  catches a receiver scoring 1.0 on the half of a window it was present for.
+- A measurement window opens only once the receiver reports tracking, and
+  closes against the transmitter's own body count at both instants. A window
+  that opens at process start is mostly chip bring-up and acquisition: one
+  70 s phase read 0.30 FEC delivery whose settled part ran at 0.90.
+
+`FEC=0` falls back to the proxy alone. The payload is generated once per size
+and cached in `/tmp`; it must outlast the longest phase, since looping it would
+re-use the outer code's block ids and the decoder would merge two passes into
+one block.
+
 ### Choosing the SDR (benches with more than one radio)
 
 Every UHD tool here (`sdr_duty.py`, `sdr_interferer.py`, `hop_rx_probe.py`,

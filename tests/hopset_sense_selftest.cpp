@@ -77,6 +77,39 @@ uint64_t feed_both(HopsetSensor &s, uint64_t mask, size_t n, uint64_t from,
   return r;
 }
 
+/* The synthetic-evidence lever: the same sample with the occupancy handed in
+ * directly instead of derived from counters. */
+TxSenseSample mk_inj(uint32_t idx, uint64_t round, double occ, SensePhase phase,
+                     bool probe = false) {
+  TxSenseSample s;
+  s.base_index = idx;
+  s.round = round;
+  s.slot = round * 16 + idx;
+  s.phase = phase;
+  s.window_us = kWin;
+  s.probe = probe;
+  s.injected = true;
+  s.injected_occupancy = occ;
+  s.flags |= kTsInjected;
+  return s;
+}
+
+uint64_t feed_both_inj(HopsetSensor &s, uint64_t mask, size_t n, uint64_t from,
+                       uint32_t rounds, int dirty_index, double dirty,
+                       double clean) {
+  uint64_t r = from;
+  for (uint32_t i = 0; i < rounds; ++i, ++r)
+    for (size_t c = 0; c < n; ++c) {
+      if (!(mask & (uint64_t(1) << c)))
+        continue;
+      const double o =
+          (dirty_index >= 0 && c == size_t(dirty_index)) ? dirty : clean;
+      s.ingest(mk_inj(uint32_t(c), r, o, SensePhase::PreBurst));
+      s.ingest(mk_inj(uint32_t(c), r, o, SensePhase::PostBurst));
+    }
+  return r;
+}
+
 } // namespace
 
 int main() {
@@ -482,6 +515,81 @@ int main() {
     }
     CHECK(popcount64(mask) == 3 && excluded == 3,
           "herding converges to the floor and stops");
+  }
+
+  /* --- synthetic evidence ---
+   * The lever exists so a bench where both endpoints hear the same interferer
+   * can still build a genuine disagreement. It must therefore be exact (an
+   * approximate view proves nothing about the veto) and it must not be a way
+   * around the floors: a fabricated occupancy earns no more authority than a
+   * measured one. */
+  {
+    SenseScore sc;
+    /* Counters present AND injection set: the injection wins outright, so a
+     * caller cannot half-inject and wonder which reading it got. */
+    TxSenseSample s = mk(0, 0, 0.90, SensePhase::PostBurst);
+    s.injected = true;
+    s.injected_occupancy = 0.05;
+    CHECK(score_sample(s, def, sc), "injected sample scores");
+    CHECK(sc.occupancy == 0.05, "injected occupancy is returned verbatim");
+    CHECK(sc.sources == kSrcInjected, "injected evidence names itself");
+    s.injected_occupancy = 4.0;
+    score_sample(s, def, sc);
+    CHECK(sc.occupancy == 1.0, "injected occupancy clamps high");
+    s.injected_occupancy = -1.0;
+    score_sample(s, def, sc);
+    CHECK(sc.occupancy == 0.0, "injected occupancy clamps low");
+    /* Inert when unset: the counter path is untouched. */
+    TxSenseSample plain = mk(0, 0, 0.90, SensePhase::PostBurst);
+    SenseScore pc;
+    CHECK(score_sample(plain, def, pc) && pc.sources == (kSrcCca | kSrcFa),
+          "an uninjected sample still scores from its counters");
+  }
+  {
+    /* An injected stream reaches the same verdict as a measured one of equal
+     * occupancy — the hidden-node rig's premise. */
+    HopsetSensor inj(def, 6), meas(def, 6);
+    feed_both_inj(inj, full_mask(6), 6, 0, 40, 2, 0.85, 0.10);
+    feed_both(meas, full_mask(6), 6, 0, 40, 2, 0.85, 0.10);
+    const auto di = inj.evaluate(40), dm = meas.evaluate(40);
+    CHECK(di.kind == TxSenseCandidate::Kind::ProposeExclude &&
+              di.target_index == 2,
+          "injected dirt drives the exclusion candidate");
+    CHECK(di.kind == dm.kind && di.target_index == dm.target_index &&
+              di.proposed_mask == dm.proposed_mask,
+          "injected and measured evidence classify alike");
+  }
+  {
+    /* A fabricated view of a uniformly dirty band is still broad degradation,
+     * not a licence to spend channels. */
+    HopsetSensor s(def, 6);
+    feed_both_inj(s, full_mask(6), 6, 0, 40, -1, 0.0, 0.85);
+    const auto d = s.evaluate(40);
+    CHECK(d.kind == TxSenseCandidate::Kind::None,
+          "injected broad dirt proposes nothing");
+    CHECK(d.hold == TxSenseHold::BroadOccupancy ||
+              d.hold == TxSenseHold::FlatBand,
+          "injected broad dirt is held on the band's geometry");
+  }
+  {
+    /* And the diversity floor holds against it too. */
+    HopsetSensor s(def, 6);
+    uint64_t mask = full_mask(6), r = 0;
+    for (int round = 0; round < 8; ++round) {
+      int victim = -1;
+      for (size_t i = 0; i < 6; ++i)
+        if ((mask & (uint64_t(1) << i)) && victim < 0)
+          victim = int(i);
+      r = feed_both_inj(s, mask, 6, r, 45, victim, 0.85, 0.10);
+      const auto d = s.evaluate(r);
+      if (d.kind == TxSenseCandidate::Kind::ProposeExclude) {
+        mask = d.proposed_mask;
+        s.on_activation(mask, r);
+      } else {
+        s.clear_outstanding(r);
+      }
+      CHECK(popcount64(mask) >= 3, "injection never breaches the floor");
+    }
   }
 
   /* --- determinism --- */

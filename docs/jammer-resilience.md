@@ -95,6 +95,13 @@ The gap between those two thresholds is what a keyed permutation buys.
   streamers per cycle (streamer setup is ~hundreds of ms and rapid RX/TX
   switching corrupts the B200 control channel). Persistent streamers with
   serialized control (send burst → sense → retune, one thread) are stable.
-- The hop schedule visits every configured channel; there is no adaptive
-  exclusion of a persistently-jammed one — the FEC absorbs those dwells (the
-  ~1/N loss in experiment 1).
+- These two experiments use a fixed schedule that visits every configured
+  channel, and the FEC absorbs the jammed dwells (the ~1/N loss in experiment
+  1). Dropping a persistently-jammed channel from the schedule is the adaptive
+  hopset, measured on this same metric in `docs/fhss.md`: against a parked
+  interferer it moves FEC delivery from 0.861 to 0.927 and the delivered packet
+  rate not at all. The outer code was already carrying the fixed schedule
+  through those dwells, and carrier sense was already keeping the transmitter
+  from spending many frames in them — so exclusion buys margin, not throughput,
+  and against a jammer that follows every exclusion it buys diversity rather
+  than delivery.

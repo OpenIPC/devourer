@@ -129,7 +129,6 @@ public:
   /* The authority's status beacon (also carries proposal rejections). */
   std::vector<HopsetAction> on_status(const HopsetMsg &m, uint64_t now_slot) {
     std::vector<HopsetAction> out;
-    (void)now_slot;
     if (m.role != 1)
       return out; /* peer-follower chatter — not authority state */
     if (m.base_fp != p_.base_fp)
@@ -148,6 +147,14 @@ public:
     if (!mask_valid(m.active_mask, p_.n_base, p_.min_active) &&
         m.generation != 0)
       return drop(out, HopsetReason::BadMask);
+    /* The same activation-window bound a commit gets. The status path adopts
+     * outright, and its anchor is what the in-flight-marker grace measures
+     * against — an activation slot far in the future would stretch that grace
+     * over every marker the follower will ever decode and silently disable
+     * the only hot-path mismatch tripwire. */
+    if (m.activate_slot > now_slot &&
+        m.activate_slot - now_slot > p_.max_lead_slots)
+      return drop(out, HopsetReason::ActivationWindow);
     const bool same_epoch = have_auth_ && m.sender_epoch == auth_epoch_;
     if (same_epoch && m.generation < cur_.generation)
       return drop(out, HopsetReason::ReplayGen);
@@ -174,16 +181,28 @@ public:
 
   /* Hot-path check from a decoded v2 sync marker. fp_matches: host-computed
    * "the marker's (generation, mask_fp) equals mask_fp(keys, gen, mask) of
-   * the state we hold for that generation" (current or pending). */
+   * the state we hold for that generation" (current or pending).
+   * marker_slot is the slot the MARKER was stamped in — the transmitter's
+   * clock at composition, not the local clock at decode, which is what makes
+   * a boundary-crossing frame recognizable as one. */
   std::vector<HopsetAction> on_marker(uint32_t marker_gen, bool fp_matches,
-                                      uint64_t now_slot) {
+                                      uint64_t marker_slot) {
     std::vector<HopsetAction> out;
-    (void)now_slot;
     const bool known = (marker_gen == cur_.generation ||
                         (st_ == State::Pending &&
                          marker_gen == pend_.generation)) &&
                        fp_matches;
     if (known)
+      return out;
+    /* A marker carrying the generation we just left, STAMPED at or before the
+     * activation slot, is a frame that crossed the boundary in flight — the
+     * transmitter was telling the truth when it composed it. Acting on it
+     * drops lockstep at the one moment the link can least afford it (see
+     * HopsetParams::stale_marker_slots). A transmitter that really has not
+     * moved keeps stamping fresh slots, so it clears the grace within
+     * milliseconds and the mismatch stands. */
+    if (have_prev_ && marker_gen == prev_generation_ &&
+        marker_slot < activated_slot_ + p_.stale_marker_slots)
       return out;
     if (st_ == State::Recovering && marker_gen == last_mismatch_gen_)
       return out; /* already recovering from this one — don't spam */
@@ -269,6 +288,11 @@ private:
   }
 
   void activate(std::vector<HopsetAction> &out) {
+    /* Remember what we just left, and when: a marker stamped with the old
+     * generation can still be in flight across the boundary. */
+    prev_generation_ = cur_.generation;
+    have_prev_ = true;
+    activated_slot_ = pend_.activate_slot;
     cur_ = pend_;
     st_ = State::Synced;
     HopsetAction act{};
@@ -319,6 +343,11 @@ private:
   bool have_auth_ = false;
   uint32_t auth_epoch_ = 0;
   uint32_t last_mismatch_gen_ = 0;
+  /* The generation we left at the last activation, and where that was, for
+   * the in-flight-marker grace. */
+  uint32_t prev_generation_ = 0;
+  uint64_t activated_slot_ = 0;
+  bool have_prev_ = false;
 };
 
 } /* namespace hopset */

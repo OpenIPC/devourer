@@ -404,6 +404,18 @@ quiesce must still return, and a `tx.quiesce_timeout` event in the log says it
 never drained. `BUILD=<dir>` points at another tree, which is how a fix is
 shown to fix something rather than asserted to.
 
+### `kestrel_prich_onair.sh`: Kestrel per-channel BB programming
+
+Counts delivered frames across the configurations that the vendored
+`halbb_ctrl_bw_ch` treats differently — 2.4 GHz CCK (its SCO threshold tables),
+20 MHz OFDM as the control, and RX at 40/80 MHz (the primary sub-band index).
+`KESTREL_TX=1` swaps the roles to check the transmit side, and `REF_ONLY=1`
+takes the Kestrel out of the path entirely, which is the first thing to run
+when a wide-bandwidth cell scores zero — the emitter's own channel width comes
+from `DEVOURER_HOP_BW`, not from the `/40` in `DEVOURER_TX_RATE` (that only
+fills the descriptor field), and getting that wrong zeroes a cell for reasons
+that have nothing to do with the DUT.
+
 ## Supported DUTs
 
 Listed in `SUPPORTED_DUTS` at the top of `regress.py`. Extend the dict

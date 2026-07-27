@@ -55,9 +55,15 @@ the halbb per-band LNA/TIA gain-error cache, without which 5 GHz is deaf), TX
 (mgmt injection — the OpenIPC video path via `streamtx`; legacy/HT/VHT/HE
 rates), channel/BW **5/10/20/40/80 MHz on both dies + 160 MHz on the 8852C**
 (the 8852B die has no 160 MHz — vendor bw_sup; caps report accordingly).
-40 MHz tunes to the block center (primary ±2); 80/160 MHz derive
-center/pri_ch from the channel plan (160 = an 8-wide block, center =
-block_start+14). **6 GHz TX tops out at 80 MHz**: the 6G 160 MHz TX does not
+40 MHz tunes to the block center (primary ±2); 80/160 MHz derive the center
+from the channel plan (160 = an 8-wide block, center = block_start+14).
+`halbb_ctrl_bw_ch`'s `pri_ch` argument is the primary **channel number**, not a
+sub-band index (vendor phl passes `rtw_chan_def::chan` through unchanged): the
+vendor derives the 0x4978[11:8] sub-band index from `pri_ch` vs `central_ch`,
+indexes the 2.4 GHz CCK SCO threshold tables with `pri_ch - 1`, and places the
+NBI spur notch from it. All three are RX-side — feeding it an index costs CCK
+reception and all >20 MHz reception while TX is unaffected, so an SDR duty
+check cannot see it (`tests/kestrel_prich_onair.sh`). **6 GHz TX tops out at 80 MHz**: the 6G 160 MHz TX does not
 radiate on the C8852C (the RF synth locks and RX-160 works, but the 6G+160
 TX-enable path is un-ported — B210-confirmed 0% duty vs 45% at 6G-80 / 40% at
 5G-160; a MAC TXAGC-max / RF-TX-path gap, not a chip limit — the vendor

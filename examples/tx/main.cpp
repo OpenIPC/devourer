@@ -1999,40 +1999,32 @@ int main(int argc, char **argv) {
       if (hop_probe_slot) {
         tx_buf.assign(stdin_hdr.begin(), stdin_hdr.end());
       } else {
-        uint8_t len_bytes[4];
-        auto r = stream_stdin::read_exact(stdin, len_bytes, sizeof(len_bytes));
-        if (r == stream_stdin::ReadResult::Eof) {
+        uint32_t len = 0;
+        const auto r =
+            stream_stdin::read_record(stdin, stdin_body, stdin_max, &len);
+        switch (r) {
+        case stream_stdin::RecordResult::Ok:
+          /* Progress, not just a final tally: a harness that scores one phase
+           * of a longer session needs the body count AT the phase boundary,
+           * and the process is still running then. */
+          if (++stdin_bodies % 100 == 0)
+            devourer::Ev(*g_ev, "tx.stdin")
+                .f("bodies", (unsigned long long)stdin_bodies)
+                .f("final", 0);
+          break;
+        case stream_stdin::RecordResult::Eof:
           stdin_done = true;
-        } else if (r != stream_stdin::ReadResult::Ok) {
-          logger->error("DEVOURER_TX_STDIN — truncated length prefix after {} "
-                        "bodies", stdin_bodies);
+          break;
+        case stream_stdin::RecordResult::BadLength:
+          logger->error("DEVOURER_TX_STDIN — body length {} out of range "
+                        "(max {})", len, stdin_max);
           stdin_done = stdin_truncated = true;
-        } else {
-          const uint32_t len = static_cast<uint32_t>(len_bytes[0]) |
-                               (static_cast<uint32_t>(len_bytes[1]) << 8) |
-                               (static_cast<uint32_t>(len_bytes[2]) << 16) |
-                               (static_cast<uint32_t>(len_bytes[3]) << 24);
-          if (!len || len > stdin_max) {
-            logger->error("DEVOURER_TX_STDIN — body length {} out of range "
-                          "(max {})", len, stdin_max);
-            stdin_done = stdin_truncated = true;
-          } else {
-            stdin_body.resize(len);
-            if (stream_stdin::read_exact(stdin, stdin_body.data(), len) !=
-                stream_stdin::ReadResult::Ok) {
-              logger->error("DEVOURER_TX_STDIN — truncated body ({} bytes) "
-                            "after {} bodies", len, stdin_bodies);
-              stdin_done = stdin_truncated = true;
-            } else {
-              /* Progress, not just a final tally: a harness that scores one
-               * phase of a longer session needs the body count AT the phase
-               * boundary, and the process is still running then. */
-              if (++stdin_bodies % 100 == 0)
-                devourer::Ev(*g_ev, "tx.stdin")
-                    .f("bodies", (unsigned long long)stdin_bodies)
-                    .f("final", 0);
-            }
-          }
+          break;
+        default: /* Short, EofMidBody — a shard the producer never finished */
+          logger->error("DEVOURER_TX_STDIN — truncated record ({} bytes) after "
+                        "{} bodies", len, stdin_bodies);
+          stdin_done = stdin_truncated = true;
+          break;
         }
         if (stdin_done)
           break; /* out of the TX loop, into the ordinary teardown */

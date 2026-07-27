@@ -206,14 +206,12 @@ int main(int argc, char** argv) {
   // Read all length-prefixed NALs up front.
   std::vector<std::vector<uint8_t>> nals;
   while (true) {
-    uint8_t lb[4];
-    if (stream_stdin::read_exact(stdin, lb, 4) != stream_stdin::ReadResult::Ok)
-      break;
-    uint32_t len = lb[0] | (lb[1] << 8) | (lb[2] << 16) | ((uint32_t)lb[3] << 24);
-    if (len == 0 || len > 200000) break;
-    std::vector<uint8_t> nal(len);
-    if (stream_stdin::read_exact(stdin, nal.data(), len) !=
-        stream_stdin::ReadResult::Ok)
+    std::vector<uint8_t> nal;
+    /* Any incomplete record ends the read-ahead: this loop drains a whole clip
+     * before transmitting anything, so a truncated tail is simply where the
+     * clip stops. */
+    if (stream_stdin::read_record(stdin, nal, 200000) !=
+        stream_stdin::RecordResult::Ok)
       break;
     nals.push_back(std::move(nal));
   }

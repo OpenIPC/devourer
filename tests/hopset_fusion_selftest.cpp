@@ -144,6 +144,16 @@ int main() {
           "local noise alone never excludes while delivery is fine");
     CHECK(d.tx_wanted_exclude && !d.rx_wanted_exclude,
           "the transmitter's opinion is recorded");
+    /* The on-air mirror test reads this record and nothing else, so the record
+     * has to name the channel and the occupancy that were argued about — a
+     * held decision that says only "held" is indistinguishable from a sensor
+     * that never fired. */
+    CHECK(d.endpoints_disagree_on_target &&
+              (d.reason_bitmap & RB_FUSE_TX_DISAGREES),
+          "the disagreement is surfaced on the held path too");
+    CHECK(d.target_index == 2, "the held record names the tx's own target");
+    CHECK(d.tx_evidence_valid && d.tx_target_occupancy > 0.8,
+          "the held record carries the occupancy that drove it");
   }
 
   /* --- ground (a): a uniformly DIRTY band delays, it does not refuse --- */

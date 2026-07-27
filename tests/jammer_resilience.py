@@ -47,29 +47,11 @@ sys.path.insert(0, os.path.join(_ROOT, "tools", "precoder"))
 sys.path.insert(0, _HERE)
 
 
+from fec_metrics import build_payload, fec_counts, parse_fec_report  # noqa: E402
+
+
 def chan_to_freq(ch: int) -> float:
     return (2407 + 5 * ch) * 1e6 if ch <= 14 else (5000 + 5 * ch) * 1e6
-
-
-def build_payload(nbytes: int) -> bytes:
-    # Deterministic (fixed-seed) payload so P and the run are reproducible.
-    import numpy as np
-    return np.random.default_rng(0xC0FFEE).integers(
-        0, 256, size=nbytes, dtype=np.uint8).tobytes()
-
-
-def fec_counts(payload: bytes) -> tuple[int, int]:
-    """(P source packets, B bodies/frames) for the default fused-FEC config
-    (must match fused_fec_tx.py defaults: k=8, symbol=64, overhead=0.5,
-    blocks=4, rs). P via a real encode so the decoder's packet count matches."""
-    from stream_fec import FecConfig
-    from fused_fec_link import FusedFecSender, FusedFecReceiver
-    cfg = FecConfig(k=8, symbol_size=64, overhead=0.5, scheme="rs")
-    snd = FusedFecSender(cfg, 4, crc_bytes=2)
-    bodies = snd.add_bytes(payload) + snd.flush()
-    rcv = FusedFecReceiver(cfg, 4, crc_bytes=2)
-    pk = sum(len(rcv.add_frame(b, False)) for b in bodies)  # clean-loopback P
-    return pk, len(bodies)
 
 
 class Proc:
@@ -92,25 +74,6 @@ class Proc:
                 os.killpg(os.getpgid(self.p.pid), signal.SIGKILL)
             except ProcessLookupError:
                 pass
-
-
-def parse_fec_report(stderr_text: str) -> dict:
-    """Pull the counters out of fused_fec_rx.py's stderr report."""
-    out = {"frames_seen": 0, "frames_corrupt": 0,
-           "base_packets": 0, "sbi_packets": 0}
-    for line in stderr_text.splitlines():
-        for key, tok in (("frames_seen", "frames="),
-                         ("frames_corrupt", "corrupt=")):
-            if tok in line:
-                try:
-                    out[key] = int(line.split(tok)[1].split()[0])
-                except (IndexError, ValueError):
-                    pass
-        if "baseline blocks=" in line and "pkts=" in line:
-            out["base_packets"] = int(line.split("pkts=")[1].split()[0])
-        if line.strip().startswith("fused_fec_rx: sbi") and "pkts=" in line:
-            out["sbi_packets"] = int(line.split("pkts=")[1].split()[0])
-    return out
 
 
 def hop_env(mode: str, args, static_channel: int) -> tuple[dict, dict, int]:

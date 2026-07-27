@@ -414,12 +414,29 @@ move leaves ME worse off" (broad TX degradation → delay; every survivor worse 
 reject), never "I disagree about your target": that signature IS the hidden-node
 case where the RX is right. Autonomous changes go through
 `start_local_change` (structural limits apply; the scripted lever stays exempt);
-`DEVOURER_HOP_MUTE=1` on rxdemo injects a one-way outage. On-air:
-`tests/hopset_adaptive_onair.sh` (protocol) and `tests/hopset_adaptive_jammer.sh`
-(`MODE=parked|herding|sense|failsafe|prepost|overhead`, B210 interferer);
-`tests/tx_sense_probe.sh` checks the telemetry is live at all. **Pick adapters by
-band** — a 5 GHz-only PA part senses nothing and cannot answer on 2.4 GHz.
-Sensing costs ~8% of frames (25 ms window, 1-in-2 dwells). Doc: `docs/fhss.md`.
+`DEVOURER_HOP_MUTE=1` on rxdemo injects a one-way outage. Two test levers (not
+production knobs): `DEVOURER_TX_SENSE_INJECT="<idx>:<occ>[,*:<occ>]"` fabricates
+the TX's per-channel view (bypasses the hardware read, keeps the window timing)
+— the only way to build the hidden-node case and its mirror on a bench where
+both adapters hear the same interferer; `DEVOURER_TX_STDIN=1` makes txdemo carry
+caller PSDU bodies from stdin (`streamtx` framing) so FEC delivery can be
+measured across an adaptation. The classifier needs `_POSTBURST_US` armed before
+it proposes anything of its own — without it the TX observes and holds, which
+looks like a TX that is not sensing.
+
+On-air: `tests/hopset_adaptive_onair.sh` (protocol) and
+`tests/hopset_adaptive_jammer.sh` (B210 interferer;
+`MODE=parked|herding|sense|failsafe|hidden|mirror|fusionmatrix|policycost|prepost|overhead`,
+every mode reporting FEC delivery beside the marker proxy over a window that
+opens only once the RX is tracking); `tests/tx_sense_probe.sh` checks the
+telemetry is live at all. **Pick adapters by band** — a 5 GHz-only PA part
+senses nothing and cannot answer on 2.4 GHz. Sensing costs ~8% of frames (25 ms
+window, 1-in-2 dwells) — a throughput cost, not a delivery-ratio one (FEC
+delivery is unchanged). **The marker proxy
+overstates adaptation**: against a parked jammer it reads 0.762 → 0.946 where
+payload reads 0.861 → 0.927 and the delivered packet rate does not move —
+carrier sense already keeps the TX out of the jammed dwells. Doc:
+`docs/fhss.md`.
 
 `IRtlDevice::FastSetBandwidth(bw)` is the bandwidth analogue — a lean
 same-channel toggle between 20 MHz and 5/10 MHz narrowband (baseband re-clock

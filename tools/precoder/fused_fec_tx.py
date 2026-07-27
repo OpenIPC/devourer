@@ -71,4 +71,27 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        rc = main()
+        # Flush INSIDE the guard: a body small enough to still be sitting in
+        # stdout's buffer would otherwise raise during interpreter shutdown,
+        # outside any handler, and exit 120 with the traceback this exists to
+        # avoid.
+        sys.stdout.buffer.flush()
+        sys.stdout.flush()
+        raise SystemExit(rc)
+    except BrokenPipeError:
+        # The radio downstream stopped — a harness ending a phase, or a demo
+        # exiting on EOF. An ordinary end of run rather than a crash, so no
+        # traceback; but not success either, so a caller looping this script
+        # over a fixed payload has something to break on. stderr is flushed
+        # first because os._exit skips that, and the summary line there is what
+        # the harness logs.
+        sys.stderr.flush()
+        # Point stdout at nowhere so interpreter shutdown has nothing left to
+        # fail on, rather than closing a pipe that raises again.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        os._exit(3)

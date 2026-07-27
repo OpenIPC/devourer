@@ -43,6 +43,7 @@
 #include "hopset/HopsetSense.h"
 #include "hopset/HopsetWire.h"
 #include "RxPacket.h"
+#include "stream_stdin.h"
 #include "SweepSpec.h"
 #include "TxPower.h" /* txpkt_pwr_db_for_step — DEVOURER_TX_PKT_OFSET fan-out */
 #include "caps_event.h"
@@ -152,6 +153,15 @@ static size_t g_hopset_pending_bit = SIZE_MAX;
 static bool g_hopset_pending_restore = false;
 static uint32_t g_hopset_delays = 0;
 
+/* DEVOURER_TX_SENSE_INJECT — synthetic per-channel occupancy for this side's
+ * sensor. A TEST LEVER, in the same spirit as DEVOURER_HOP_ADAPTIVE_SCRIPT and
+ * DEVOURER_HOP_MUTE, not a production knob: it exists because the two
+ * endpoint-disagreement scenarios cannot be built on a bench where the
+ * adapters sit inches apart and any interferer strong enough to degrade one is
+ * equally audible at the other. Indexed by base-hopset position; negative
+ * means "read the hardware for this one". */
+static std::vector<double> g_sense_inject;
+
 /* Execute the authority's actions (caller holds g_hopset_mu). Commit and
  * status frames air as their own small MPDUs beside the payload stream, so
  * caller payload bytes are never touched. */
@@ -214,14 +224,21 @@ static bool hopset_sense_window(IRtlDevice *dev, uint32_t settle_us,
                                 uint32_t generation) {
   if (!dev || !g_hopset_sensor)
     return false;
+  /* An injected channel skips the hardware entirely — on a part whose front
+   * end is blind on this band the counters would be a fiction anyway — but it
+   * still spends the settle and the window, so the slot budget and the
+   * duty-cycle cost of sensing are exactly what an un-injected run pays. */
+  const double inject =
+      base_index < g_sense_inject.size() ? g_sense_inject[base_index] : -1.0;
   const auto t_settle0 = std::chrono::steady_clock::now();
   if (settle_us)
     std::this_thread::sleep_for(std::chrono::microseconds(settle_us));
-  (void)dev->GetRxEnergy(/*with_nhm=*/false); /* DISCARD BARRIER */
+  if (inject < 0.0)
+    (void)dev->GetRxEnergy(/*with_nhm=*/false); /* DISCARD BARRIER */
   const auto t_w0 = std::chrono::steady_clock::now();
   std::this_thread::sleep_for(std::chrono::microseconds(window_us));
   const auto t_r0 = std::chrono::steady_clock::now();
-  const RxEnergy e = dev->GetRxEnergy(with_nhm);
+  const RxEnergy e = inject < 0.0 ? dev->GetRxEnergy(with_nhm) : RxEnergy{};
   const auto t_r1 = std::chrono::steady_clock::now();
   auto us = [](auto a, auto b) {
     return static_cast<uint32_t>(
@@ -235,6 +252,22 @@ static bool hopset_sense_window(IRtlDevice *dev, uint32_t settle_us,
   x.phase = phase;
   x.probe = probe;
   x.window_us = us(t_w0, t_r1);
+  if (inject >= 0.0) {
+    x.injected = true;
+    x.injected_occupancy = inject;
+    x.flags |= devourer::hopset::kTsInjected;
+    devourer::hopset::SenseScore isc;
+    const bool iscored =
+        devourer::hopset::score_sample(x, g_hopset_sensor->config(), isc);
+    {
+      std::lock_guard<std::mutex> lk(g_hopset_mu);
+      g_hopset_sensor->ingest(x);
+    }
+    devourer::hopset::emit_sense(*g_ev, x, channel, generation,
+                                 us(t_settle0, t_w0), 0, isc.occupancy,
+                                 iscored);
+    return true;
+  }
   x.valid_fa = e.valid_fa;
   x.fa_ofdm = e.fa_ofdm;
   x.fa_cck = e.fa_cck;
@@ -365,6 +398,14 @@ static void packetProcessor(const Packet &packet) {
               hm, devourer::hopset::HopsetReason::TxVeto, now));
         } else {
           g_hopset_delays = 0;
+          /* Record the pass-through as deliberately as the veto. When this
+           * side saw a clean band and let a proposal through anyway — the
+           * hidden node — the only evidence that it HAD a view and declined
+           * to argue is this event; without it, a blind sensor and a
+           * disciplined one look identical in the log. */
+          devourer::hopset::emit_fusion(
+              *g_ev, f, now, in.now_round,
+              devourer::hopset::fusion_mode_name(g_hopset_fusion.mode));
           hopset_route(g_hopset_auth->on_proposal(hm, now));
         }
       } else {
@@ -1096,6 +1137,55 @@ int main(int argc, char **argv) {
                  "the beacon", ra_env);
   }
 
+  /* DEVOURER_TX_STDIN=1 — carry caller payload instead of the demo body, in
+   * the same <u32_le len><PSDU body> framing streamtx reads (and
+   * tools/precoder/fused_fec_tx.py writes). This is what lets the adaptive
+   * hopset be measured in FEC delivery rather than in sync markers: the
+   * schedule authority, the sensing windows and the recovery probes all live
+   * in THIS demo, so the payload has to come to them.
+   *
+   * The header is frozen here, after every frame-shape knob has run, and each
+   * frame is rebuilt from it. That keeps the marker append below at its
+   * invariant — the marker is the trailing element of the frame — with no
+   * chance of last frame's body surviving into this one. */
+  const bool stdin_src = std::getenv("DEVOURER_TX_STDIN") != nullptr;
+  std::vector<uint8_t> stdin_hdr, stdin_body;
+  size_t stdin_max = 4096;
+  long stdin_bodies = 0;
+  bool stdin_done = false, stdin_truncated = false;
+  if (stdin_src) {
+    /* Each of these either writes into the caller's body or replays one, and
+     * a silently duplicated FEC shard is worse to a decoder than a lost one. */
+    struct { const char *env; const char *why; bool count; } kBad[] = {
+        {"DEVOURER_TX_BATCH", "replays one body N times", true},
+        {"DEVOURER_TX_THREADS", "aux senders loop a stale body", true},
+        {"DEVOURER_TX_QOS_DATA", "its counter stamp overwrites body[0..3]", false},
+        {"DEVOURER_TX_NDPA_RA", "a control frame carries no payload", false},
+        {"DEVOURER_TX_PAYLOAD_BYTES", "the body length is the caller's", false},
+        {"DEVOURER_HOP_RADIOTAP", "it rebuilds the frame inside the loop", false},
+        {"DEVOURER_CONT_TX", "an idle carrier has no per-frame path", false},
+    };
+    for (const auto &b : kBad) {
+      const char *v = std::getenv(b.env);
+      if (!v || (b.count && std::strtol(v, nullptr, 0) <= 1))
+        continue;
+      logger->error("DEVOURER_TX_STDIN with {} — {}", b.env, b.why);
+      return 1;
+    }
+    const size_t demo_body = sizeof(beacon_frame) - 34; /* radiotap + 802.11 */
+    if (tx_buf.size() <= demo_body) {
+      logger->error("DEVOURER_TX_STDIN — unexpected frame shape");
+      return 1;
+    }
+    stdin_hdr.assign(tx_buf.begin(), tx_buf.end() - demo_body);
+    if (const char *e = std::getenv("DEVOURER_TX_STDIN_MAX"))
+      stdin_max = static_cast<size_t>(std::strtoul(e, nullptr, 0));
+    stream_stdin::set_stdin_binary();
+    logger->info("DEVOURER_TX_STDIN — {}-byte header + caller PSDU bodies from "
+                 "stdin; stdin paces the link (DEVOURER_TX_GAP_US adds on top)",
+                 stdin_hdr.size());
+  }
+
   /* Thermal monitoring — read inline on the TX (owning) thread, so no
    * background thread shares the libusb handle (no USB contention). Cadence is
    * derived from DEVOURER_THERMAL_POLL_MS over the ~2 ms/packet loop; 0 =
@@ -1280,6 +1370,45 @@ int main(int argc, char **argv) {
       envu("DEVOURER_TX_SENSE_MAX_FRAC_PCT", tx_sense_max_frac_pct);
       if (std::getenv("DEVOURER_TX_SENSE_NHM"))
         tx_sense_nhm = std::atoi(std::getenv("DEVOURER_TX_SENSE_NHM")) != 0;
+      /* DEVOURER_TX_SENSE_INJECT="<idx>:<occ>[,...]" with an optional
+       * "*:<occ>" default for the positions not named. An index left
+       * un-injected reads the hardware as usual, so a run can mix the two. */
+      if (const char *sp = std::getenv("DEVOURER_TX_SENSE_INJECT")) {
+        g_sense_inject.assign(hop_channels.size(), -1.0);
+        std::string s(sp), tok;
+        std::stringstream ss(s);
+        while (std::getline(ss, tok, ',')) {
+          const auto colon = tok.find(':');
+          if (colon == std::string::npos)
+            throw std::invalid_argument(
+                "DEVOURER_TX_SENSE_INJECT wants <idx|*>:<occupancy> entries");
+          const std::string key = tok.substr(0, colon);
+          const double occ = std::strtod(tok.c_str() + colon + 1, nullptr);
+          if (occ < 0.0 || occ > 1.0)
+            throw std::invalid_argument(
+                "DEVOURER_TX_SENSE_INJECT occupancy must be in [0,1]");
+          if (key == "*") {
+            for (auto &v : g_sense_inject)
+              if (v < 0.0)
+                v = occ;
+          } else {
+            const long idx = std::strtol(key.c_str(), nullptr, 0);
+            if (idx < 0 || size_t(idx) >= g_sense_inject.size())
+              throw std::invalid_argument(
+                  "DEVOURER_TX_SENSE_INJECT index outside the base hopset");
+            g_sense_inject[size_t(idx)] = occ;
+          }
+        }
+        std::string shown;
+        for (size_t i = 0; i < g_sense_inject.size(); ++i)
+          shown += (i ? "," : "") +
+                   (g_sense_inject[i] < 0.0
+                        ? std::string("hw")
+                        : std::to_string(g_sense_inject[i]).substr(0, 4));
+        logger->warn("DEVOURER_TX_SENSE_INJECT — synthetic sensing evidence "
+                     "[{}]: this run's transmitter view is fabricated, not "
+                     "measured", shown);
+      }
       if (tx_sense_every < 1)
         tx_sense_every = 1;
     }
@@ -1670,7 +1799,48 @@ int main(int argc, char **argv) {
           }
         } else if (cand.kind !=
                    devourer::hopset::TxSenseCandidate::Kind::None) {
+          /* This side wanted to act and the fusion layer held it — under the
+           * default mode, because this side does not originate. That is the
+           * mirror of the hidden node: the transmitter sees something the
+           * receiver's delivery does not corroborate, and the right answer is
+           * to spend nothing. Say so anyway: a disagreement that leaves no
+           * trace is indistinguishable from a sensor that never fired.
+           * Rate-limited to the shape of the argument, not its repetition. */
+          static size_t last_target = SIZE_MAX;
+          static uint32_t last_hold = 0xffffffffu;
+          static uint64_t last_round = 0;
+          const uint32_t hold_now = static_cast<uint32_t>(f.hold);
+          /* Round numbering REBASES at each activation, so the elapsed test
+           * has to tolerate going backwards — an unsigned difference would
+           * wrap and leave the limiter permanently open from the first
+           * commit onwards, flooding the log at exactly the moment it most
+           * needs to be readable. */
+          const bool stale = round < last_round || round - last_round >= 60;
+          if (f.target_index != last_target || hold_now != last_hold || stale) {
+            last_target = f.target_index;
+            last_hold = hold_now;
+            last_round = round;
+            devourer::hopset::emit_fusion(
+                *g_ev, f, desired_slot, round,
+                devourer::hopset::fusion_mode_name(g_hopset_fusion.mode));
+          }
           g_hopset_sensor->clear_outstanding(round);
+        } else {
+          /* Nothing proposed. Say why, at the shape of the answer rather than
+           * its repetition: a sensor held on a floor, a sensor with no
+           * evidence and a sensor that is not running are otherwise the same
+           * silence, and telling them apart on air took a whole bench
+           * session. */
+          static uint32_t last_eval_hold = 0xffffffffu;
+          static uint64_t last_eval_round = 0;
+          const uint32_t h = static_cast<uint32_t>(cand.hold);
+          /* Same rebase hazard as the fused-decision limiter above. */
+          if (h != last_eval_hold || round < last_eval_round ||
+              round - last_eval_round >= 120) {
+            last_eval_hold = h;
+            last_eval_round = round;
+            devourer::hopset::emit_sense_eval(*g_ev, cand, desired_slot, round);
+          }
         }
       }
     }
@@ -1817,12 +1987,73 @@ int main(int argc, char **argv) {
         continue;
       }
     }
+    /* Caller payload for this frame. Placed after the post-burst window's
+     * `continue` (that dwell airs nothing, so it must consume nothing) and
+     * before the marker append, which owns the tail of the frame.
+     *
+     * A probe dwell reads no body at all: the shard is not spent on an
+     * excluded channel, and it is not thrown away either — it is simply still
+     * there for the next data dwell. The probe still airs its header and
+     * marker, which is what makes it a probe. */
+    if (stdin_src && !stdin_done) {
+      if (hop_probe_slot) {
+        tx_buf.assign(stdin_hdr.begin(), stdin_hdr.end());
+      } else {
+        uint8_t len_bytes[4];
+        auto r = stream_stdin::read_exact(stdin, len_bytes, sizeof(len_bytes));
+        if (r == stream_stdin::ReadResult::Eof) {
+          stdin_done = true;
+        } else if (r != stream_stdin::ReadResult::Ok) {
+          logger->error("DEVOURER_TX_STDIN — truncated length prefix after {} "
+                        "bodies", stdin_bodies);
+          stdin_done = stdin_truncated = true;
+        } else {
+          const uint32_t len = static_cast<uint32_t>(len_bytes[0]) |
+                               (static_cast<uint32_t>(len_bytes[1]) << 8) |
+                               (static_cast<uint32_t>(len_bytes[2]) << 16) |
+                               (static_cast<uint32_t>(len_bytes[3]) << 24);
+          if (!len || len > stdin_max) {
+            logger->error("DEVOURER_TX_STDIN — body length {} out of range "
+                          "(max {})", len, stdin_max);
+            stdin_done = stdin_truncated = true;
+          } else {
+            stdin_body.resize(len);
+            if (stream_stdin::read_exact(stdin, stdin_body.data(), len) !=
+                stream_stdin::ReadResult::Ok) {
+              logger->error("DEVOURER_TX_STDIN — truncated body ({} bytes) "
+                            "after {} bodies", len, stdin_bodies);
+              stdin_done = stdin_truncated = true;
+            } else {
+              /* Progress, not just a final tally: a harness that scores one
+               * phase of a longer session needs the body count AT the phase
+               * boundary, and the process is still running then. */
+              if (++stdin_bodies % 100 == 0)
+                devourer::Ev(*g_ev, "tx.stdin")
+                    .f("bodies", (unsigned long long)stdin_bodies)
+                    .f("final", 0);
+            }
+          }
+        }
+        if (stdin_done)
+          break; /* out of the TX loop, into the ordinary teardown */
+        tx_buf.assign(stdin_hdr.begin(), stdin_hdr.end());
+        tx_buf.insert(tx_buf.end(), stdin_body.begin(), stdin_body.end());
+      }
+    }
     if (hop_schedule && hop_slot_ms > 0) {
       /* strip the previous frame's marker (either version — one run emits
-       * only one, but the size differs) before appending the fresh one */
+       * only one, but the size differs) before appending the fresh one.
+       *
+       * NOT in stdin mode: there the frame was just rebuilt from the frozen
+       * header plus a fresh body, so no marker can be present — and the test
+       * is only two bytes deep, so on caller payload (RS symbols, uniformly
+       * random) it matches about one frame in 65536 and would silently chop
+       * 37 bytes off that shard. At 450 frames a second that is a corrupted
+       * body every couple of minutes, arriving with a valid FCS. */
       const size_t msz = hop_adaptive ? devourer::hopset::HopSyncMarkerV2::kSize
                                       : devourer::HopSyncMarker::kSize;
-      if (tx_buf.size() >= msz && tx_buf[tx_buf.size() - msz] == 221 &&
+      if (!stdin_src && tx_buf.size() >= msz &&
+          tx_buf[tx_buf.size() - msz] == 221 &&
           tx_buf[tx_buf.size() - msz + 5] == 0x48)
         tx_buf.resize(tx_buf.size() - msz);
       const auto now = std::chrono::steady_clock::now();
@@ -2021,6 +2252,19 @@ int main(int argc, char **argv) {
         .f("final", 1);
   }
 
+  /* Shard accounting: what the producer handed us versus what the chip was
+   * asked to air. A harness that reads only the receiver's side cannot tell a
+   * body that never left from one that did not arrive. */
+  if (stdin_src) {
+    devourer::Ev(*g_ev, "tx.stdin")
+        .f("bodies", (unsigned long long)stdin_bodies)
+        .f("truncated", stdin_truncated ? 1 : 0)
+        .f("eof", stdin_done && !stdin_truncated ? 1 : 0)
+        .f("final", 1);
+    logger->info("DEVOURER_TX_STDIN — {} caller bodies aired{}", stdin_bodies,
+                 stdin_truncated ? " (input truncated)" : "");
+  }
+
   /* Bounded hop mode (DEVOURER_HOP_ROUNDS>0) reaches here when its rounds
    * complete; the signal and back-off paths also fall through. */
   if (!hop_channels.empty()) {
@@ -2066,5 +2310,7 @@ int main(int argc, char **argv) {
    * only because the process has nothing left to do here — the destructor
    * does exactly the same on every other exit path. */
   session.close();
-  return 0;
+  /* A truncated caller stream is a producer fault, and a harness that scored
+   * the run as if it had ended cleanly would be scoring a short measurement. */
+  return stdin_truncated ? 2 : 0;
 }

@@ -36,6 +36,28 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   single-path 1SS TX, spur channels, LCK, the 2.4 GHz TX kernel-parity
   limitation) live in `docs/8822e-quirks.md`.
 
+## TX power
+
+Both dies drive the SAME TXAGC block (`set_tx_power_ref` is the port of
+`rtw8822c_set_write_tx_power_ref`): per-path references at
+`0x18e8`/`0x41e8[16:10]` (OFDM/HT/VHT) and `0x18a0`/`0x41a0[22:16]` (CCK),
+plus a per-rate DIFF table at `0x3a00 + (hw_rate & 0xfc)` — 4 rates per dword,
+7-bit two's-complement, so `[-64, 63]`. Every TXAGC write must be preceded by
+clearing the `0x1c90[15]` gate. The diff table is offset-invariant (an offset
+shifts the reference; the shape rides on top), so a runtime offset step is ~8
+register writes instead of 8 + 32.
+
+The one real divergence is the *default shape*: the **E** derives per-path
+references from the efuse power-by-rate table and walks `phy_reg_pg` for the
+diffs; the **C** uses a flat `JAGUAR3_TXPWR_REF_BASE_8822C` on both paths with
+no calibrated shape underneath. A caller table (`SetTxPowerRateDiffs`) replaces
+that shape on either die. Note the 2SS consequence on the 2T2R C: the caller
+struct describes the 1SS ladder only, so MCS8..15 stay at the reference while
+MCS0..7 carries the caller's shape.
+
+`GetTxPowerState` reads the references back from the chip (`hw_readback=true`),
+but the diff half is the software copy — `0x3a00` is not read back.
+
 ## Per-packet TX power
 
 The descriptor `TXPWR_OFSET_TYPE` is a bank *selector*: types 2/3 pick two

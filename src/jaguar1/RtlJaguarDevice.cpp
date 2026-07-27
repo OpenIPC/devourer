@@ -1537,6 +1537,16 @@ devourer::TxPowerCaps RtlJaguarDevice::GetTxPowerCaps() {
       _eepromManager->version_id.ICType != CHIP_8821;
   caps.offset_min_qdb = -126;
   caps.offset_max_qdb = 126;
+  /* Per-rate indices are computed in software and written per rate (the
+   * 8812A/8821A register fanout, the 8814A packed port), so a caller table
+   * replaces the EFUSE walk at no per-frame cost — at the family's 0.5 dB
+   * resolution, not the caller's qdB. */
+  caps.rate_diffs = true;
+  caps.rate_diffs_hw_table = true;
+  /* On-air (tests/txpwr_rate_diffs_onair.sh, MCS0-only -32 qdB trim against a
+   * ground-station RSSI reference): 8812AU -8.0 dB, 8814AU -8.0 dB, 8821AU
+   * -7.0 dB at 2.4 GHz vs -8.0 nominal, with 6M unmoved in every case. */
+  caps.rate_diffs_measured = true;
   return caps;
 }
 
@@ -1567,6 +1577,39 @@ void RtlJaguarDevice::SetTxPowerIndexOverride(int idx) {
   _radioManagement->SetTxPowerOverride(idx < 0 ? -1 : (idx > 63 ? 63 : idx));
   if (_brought_up)
     _radioManagement->ApplyTxPower();
+}
+
+bool RtlJaguarDevice::SetTxPowerRateDiffs(
+    const std::optional<devourer::TxRateDiffsQdb> &diffs) {
+  if (_cw_active) {
+    _logger->warn("SetTxPowerRateDiffs refused: CW tone active");
+    return false;
+  }
+  if (diffs && !_eepromManager->TxPowerInfoLoaded)
+    _logger->warn("SetTxPowerRateDiffs: EFUSE per-rate table not loaded — the "
+                  "caller shape anchors on the flat pre-EFUSE fallback, not a "
+                  "calibrated reference");
+  if (diffs && _eepromManager->version_id.ICType == CHIP_8821)
+    _logger->warn("SetTxPowerRateDiffs: the 8821A's 5 GHz chain ignores BB "
+                  "TXAGC (registers move, on-air power does not) — the shape "
+                  "is 2.4 GHz-only on this part");
+  _radioManagement->SetTxPowerRateDiffs(diffs);
+  if (diffs)
+    /* Report the APPLIED values: this family quantizes to 0.5 dB, so an odd
+     * qdB rounds and a table measured on a 0.25 dB part will not replay
+     * verbatim here. */
+    _logger->info("TX-power per-rate diffs set (cck {} legacy {} mcs0 {} "
+                  "mcs7 {} qdB -> {} {} {} {} index steps)",
+                  diffs->cck, diffs->legacy, diffs->mcs[0], diffs->mcs[7],
+                  devourer::rate_diff_steps(diffs->cck, 2),
+                  devourer::rate_diff_steps(diffs->legacy, 2),
+                  devourer::rate_diff_steps(diffs->mcs[0], 2),
+                  devourer::rate_diff_steps(diffs->mcs[7], 2));
+  else
+    _logger->info("TX-power per-rate diffs cleared (EFUSE walk restored)");
+  if (_brought_up)
+    _radioManagement->ApplyTxPower();
+  return true;
 }
 
 bool RtlJaguarDevice::ReApplyTxPower() {
@@ -1768,6 +1811,7 @@ devourer::TxPowerState RtlJaguarDevice::GetTxPowerState() {
         0, static_cast<uint8_t>(MGN_MCS7), 0);
     s.hw_readback = false;
   }
+  s.rate_diffs_custom = _radioManagement->HasTxPowerRateDiffs();
   return s;
 }
 

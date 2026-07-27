@@ -938,8 +938,8 @@ static bool pg_addr_to_rates(uint32_t addr, std::array<uint8_t, 4> &rates) {
 }
 #endif /* DEVOURER_HAVE_JAGUAR3_8822E */
 
-void RadioManagementJaguar3::apply_tx_power_refs_8822e(uint8_t ref_a,
-                                                       uint8_t ref_b) {
+void RadioManagementJaguar3::apply_tx_power_refs(uint8_t ref_a,
+                                                 uint8_t ref_b) {
   invalidate_fast_caches(); /* writes the 0x1c90 TXAGC gate below */
   /* Clamp to the 7-bit ref field — the masked BB write truncates mod 128. */
   if (ref_a > 0x7f)
@@ -1039,7 +1039,7 @@ void RadioManagementJaguar3::apply_power_by_rate_8822e(uint8_t channel,
 #endif
 }
 
-void RadioManagementJaguar3::apply_rate_diffs_8822e(
+void RadioManagementJaguar3::apply_rate_diffs(
     uint8_t ref_a, uint8_t ref_b, const devourer::TxRateDiffsQdb &d) {
   invalidate_fast_caches(); /* writes the 0x1c90 TXAGC gate below */
   /* Clamp to the 7-bit ref fields (masked BB writes truncate mod 128). */
@@ -1047,7 +1047,6 @@ void RadioManagementJaguar3::apply_rate_diffs_8822e(
     ref_a = 0x7f;
   if (ref_b > 0x7f)
     ref_b = 0x7f;
-#if defined(DEVOURER_HAVE_JAGUAR3_8822E)
   auto wr = [this](uint16_t off, uint32_t mask, uint32_t v) {
     _device.phy_set_bb_reg(0x1c90, 1u << 15, 0); /* txagc write enable */
     _device.phy_set_bb_reg(off, mask, v);
@@ -1064,7 +1063,11 @@ void RadioManagementJaguar3::apply_rate_diffs_8822e(
    * the caller-controlled set (HT MCS8..15, all VHT) are written as explicit
    * zero words for deterministic table state, covering the full range the
    * pg walk can touch (0x3a00..0x3a3c) plus the rest of the 32-dword table
-   * up to 0x3a7c (matching set_tx_power_ref's zero range). */
+   * up to 0x3a7c (matching set_tx_power_ref's zero range). A zero word puts
+   * those rows AT the reference: on the 1SS-TX 8822E they are unreachable
+   * anyway, but the 2T2R 8822C really can air MCS8..15, and they stay at the
+   * reference while MCS0..7 carries the caller's shape — the caller table is
+   * the shape, and it describes the 1SS ladder only. */
   struct Row {
     uint8_t first_rate;
     int8_t d0, d1, d2, d3;
@@ -1100,9 +1103,6 @@ void RadioManagementJaguar3::apply_rate_diffs_8822e(
   _logger->info("Jaguar3: custom per-rate diffs applied (cck {} legacy {} "
                 "mcs0 {} mcs7 {}, ref A=0x{:02x} B=0x{:02x})",
                 d.cck, d.legacy, d.mcs[0], d.mcs[7], ref_a, ref_b);
-#else
-  (void)d;
-#endif
 }
 
 void RadioManagementJaguar3::set_bandwidth_dividers(ChannelWidth_t bwmode) {

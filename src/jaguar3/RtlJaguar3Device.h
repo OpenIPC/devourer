@@ -101,7 +101,7 @@ public:
    * Jaguar3 caps: 7-bit TXAGC reference, 0.25 dB (1 qdB) per step. The offset
    * shifts the per-path reference anchor (0x18e8/0x41e8 OFDM, 0x18a0/0x41a0
    * CCK) — the 0x3a00 per-rate diff table is offset-invariant, so a live step
-   * is ~8 gated register writes (apply_tx_power_refs_8822e / a diffs-kept
+   * is ~8 gated register writes (apply_tx_power_refs / a diffs-kept
    * set_tx_power_ref) under _reg_mu, serialized against the coex tick's
    * pwr_track (which RMWs the [7:0] thermal field of the SAME 0x18a0/0x41a0
    * dwords — field-disjoint, so thermal compensation and the offset compose).
@@ -307,11 +307,13 @@ private:
   uint8_t _pwr_ref_a = 0, _pwr_ref_b = 0;
   bool _pwr_ref_valid = false;
   /* True while the 0x3a00 per-rate diff table is zeroed (flat semantics /
-   * 8822C default) — repeated flat steps then skip the 32-dword re-zero. */
+   * 8822C default shape) — repeated flat steps then skip the 32-dword
+   * re-zero. */
   bool _diffs_zeroed = false;
   /* Caller-supplied per-rate TXAGC diffs (SetTxPowerRateDiffs), in place of
-   * phy_reg_pg's table when set. 8822E-only; std::nullopt = default table.
-   * Read/written under _reg_mu once brought up. */
+   * the die's default shape (the 8822E's phy_reg_pg table, the 8822C's flat
+   * reference). std::nullopt = that default. Read/written under _reg_mu once
+   * brought up. */
   std::optional<devourer::TxRateDiffsQdb> _rate_diffs;
   /* Re-program TXAGC from the current knob state. full=true re-derives the
    * 8822E efuse refs + rewrites the per-rate diff table (bring-up / channel

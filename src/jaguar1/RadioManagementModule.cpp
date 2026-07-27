@@ -2264,6 +2264,17 @@ void RadioManagementModule::PHY_SetTxPowerLevel8812(uint8_t Channel) {
    * the flags whenever the offset/override pushes any rate onto a 6-bit rail. */
   txpwr_sat_low_ = false;
   txpwr_sat_high_ = false;
+  /* With a caller per-rate table armed, warm the per-path anchor cache once
+   * for this pass — otherwise every one of the ~50 rates per path would repeat
+   * the EFUSE lookup. Gated so the default walk issues no extra lookups and
+   * stays byte-identical (the canary diff is the check). A flat override wins
+   * over the table, so it needs no anchor. */
+  txpwr_anchor_valid_ = false;
+  if (txpwr_diffs_set_ && txpwr_override_ < 0) {
+    for (uint8_t p = 0; p < _eepromManager->numTotalRfPath && p < 4; p++)
+      txpwr_anchor_[p] = TxPowerAnchorForPath(p);
+    txpwr_anchor_valid_ = true;
+  }
   for (uint8_t path = 0; (uint8_t)path < _eepromManager->numTotalRfPath;
        path++) {
     phy_set_tx_power_level_by_path(Channel, (RfPath)path);
@@ -2412,6 +2423,30 @@ void RadioManagementModule::PHY_SetTxPowerIndexByRateArray(
   }
 }
 
+void RadioManagementModule::SetTxPowerRateDiffs(
+    const std::optional<devourer::TxRateDiffsQdb> &d) {
+  const auto clamped = devourer::clamp_rate_diffs(d);
+  if (!clamped) {
+    txpwr_diffs_set_ = false;
+    return;
+  }
+  txpwr_diff_qdb_[0].store(clamped->cck, std::memory_order_relaxed);
+  txpwr_diff_qdb_[1].store(clamped->legacy, std::memory_order_relaxed);
+  for (int i = 0; i < 8; ++i)
+    txpwr_diff_qdb_[2 + i].store(clamped->mcs[i], std::memory_order_relaxed);
+  txpwr_diffs_set_.store(true, std::memory_order_release);
+}
+
+int RadioManagementModule::TxPowerAnchorForPath(uint8_t path) {
+  if (txpwr_anchor_valid_ && path < 4)
+    return txpwr_anchor_[path];
+  if (!_eepromManager->TxPowerInfoLoaded)
+    return power; /* same pre-EFUSE fallback the per-rate walk uses */
+  return _eepromManager->GetTxPowerIndexBase(
+      path, static_cast<uint8_t>(MGN_MCS7), /*ntx_idx=*/0,
+      static_cast<uint8_t>(_currentChannelBw), _currentChannel);
+}
+
 uint8_t RadioManagementModule::ComputeTxPowerIndex(uint8_t path, uint8_t rate,
                                                    uint8_t ntx_idx) {
   int idx;
@@ -2419,6 +2454,19 @@ uint8_t RadioManagementModule::ComputeTxPowerIndex(uint8_t path, uint8_t rate,
     /* Experiment override: force every rate to the same TXAGC index,
      * bypassing the EFUSE per-rate table. */
     idx = txpwr_override_;
+  } else if (txpwr_diffs_set_) {
+    /* Caller table REPLACES the calibrated shape: every rate sits at the
+     * MCS7/1SS anchor plus its own diff, quantized to this family's 0.5 dB
+     * step. Rates the table does not describe (MCS8+, VHT, 2SS+) resolve to a
+     * diff of 0 and therefore land on the anchor. */
+    devourer::TxRateDiffsQdb t;
+    t.cck = txpwr_diff_qdb_[0].load(std::memory_order_relaxed);
+    t.legacy = txpwr_diff_qdb_[1].load(std::memory_order_relaxed);
+    for (int i = 0; i < 8; ++i)
+      t.mcs[i] = txpwr_diff_qdb_[2 + i].load(std::memory_order_relaxed);
+    idx = TxPowerAnchorForPath(path) +
+          devourer::rate_diff_steps(devourer::rate_diff_qdb_for_rate(rate, t),
+                                    2);
   } else if (_eepromManager->TxPowerInfoLoaded) {
     idx = _eepromManager->GetTxPowerIndexBase(
         path, rate, ntx_idx, static_cast<uint8_t>(_currentChannelBw),

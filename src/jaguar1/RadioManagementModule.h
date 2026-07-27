@@ -3,9 +3,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "EepromManager.h"
+#include "TxPower.h"
 #include "Iqk8812a.h"
 #if defined(DEVOURER_HAVE_8814)
 #include "Iqk8814a.h"
@@ -128,6 +130,21 @@ class RadioManagementModule {
   std::atomic<int> txpwr_offset_steps_{0};
   std::atomic<bool> txpwr_sat_low_{false};
   std::atomic<bool> txpwr_sat_high_{false};
+  /* Caller-supplied per-rate shape (SetTxPowerRateDiffs), held as a flat array
+   * in the TxRateDiffsQdb field order (cck, legacy, mcs0..7) rather than the
+   * struct: ComputeTxPowerIndex reads the ONE entry its rate needs with a
+   * relaxed load, so the per-rate walk stays lock-free — this class holds no
+   * lock in this area and a table swap can only ever split between rates.
+   * When set it REPLACES the EFUSE per-rate walk: every rate sits at the
+   * MCS7/1SS anchor plus its own diff. */
+  std::atomic<bool> txpwr_diffs_set_{false};
+  std::atomic<int8_t> txpwr_diff_qdb_[10]{};
+  /* Per-apply cache of that anchor, one per RF path, filled at the top of
+   * PHY_SetTxPowerLevel8812 so a 4-path 8814A walk costs 4 EFUSE lookups
+   * instead of one per (path, rate). Invalid outside a pass — see
+   * TxPowerAnchorForPath, which computes live when the cache is cold. */
+  int txpwr_anchor_[4] = {0, 0, 0, 0};
+  bool txpwr_anchor_valid_ = false;
   PowerTracking8812a _pwrTrk;
   Iqk8812a _iqk;
 #if defined(DEVOURER_HAVE_8814)
@@ -219,6 +236,11 @@ public:
   void SetTxPowerOffsetSteps(int steps) { txpwr_offset_steps_ = steps; }
   int GetTxPowerOffsetSteps() const { return txpwr_offset_steps_; }
   int GetTxPowerOverride() const { return txpwr_override_; }
+  /* Caller-supplied per-rate shape (see txpwr_diff_qdb_). std::nullopt clears
+   * it, restoring the EFUSE per-rate walk. Takes effect on the next
+   * channel-set, or immediately via ApplyTxPower(). */
+  void SetTxPowerRateDiffs(const std::optional<devourer::TxRateDiffsQdb> &d);
+  bool HasTxPowerRateDiffs() const { return txpwr_diffs_set_; }
   bool TxPowerSaturatedLow() const { return txpwr_sat_low_; }
   bool TxPowerSaturatedHigh() const { return txpwr_sat_high_; }
   /* Effective per-rate TXAGC index for the current channel/BW: the flat
@@ -229,6 +251,11 @@ public:
    * device layer can build the software-shadow TxPowerState on the 8814A,
    * whose packed TXAGC port (0x1998) is write-only. */
   uint8_t ComputeTxPowerIndex(uint8_t path, uint8_t rate, uint8_t ntx_idx);
+  /* The anchor a caller diff table is relative to: the EFUSE index of the
+   * section reference rate (HT MCS7, 1SS) at the current channel and
+   * bandwidth. Reads the per-apply cache when it is warm and computes live
+   * otherwise, so a shadow read outside an apply pass is still correct. */
+  int TxPowerAnchorForPath(uint8_t path);
   /* Re-run the per-rate TXAGC writes for the current channel WITHOUT a channel
    * switch. set_channel_bwmode early-returns when the channel/bw is unchanged,
    * so this is the only way to push a freshly-set SetTxPowerOverride() /

@@ -124,6 +124,12 @@ public:
   int SetXtalCap(int cap) override;
   int GetXtalCap() override { return _xtal_cap; }
   devourer::TxPowerState GetTxPowerState() override;
+  /* Caller-supplied per-rate power shape (src/TxPower.h): replaces the efuse
+   * per-rate walk, anchored on the HT MCS7 section index and quantized to this
+   * family's 0.5 dB step. Sticky across SetMonitorChannel / FastRetune and a
+   * flat-override round trip; std::nullopt restores the calibrated walk. */
+  bool SetTxPowerRateDiffs(
+      const std::optional<devourer::TxRateDiffsQdb> &diffs) override;
   devourer::ThermalStatus GetThermalStatus() override;
   /* Per-chip TX caps (IRtlDevice): the 8821C is 1T1R (no STBC), the 8822B
    * 2T2R. send_packet drops an STBC request the variant can't honour. */
@@ -234,6 +240,12 @@ private:
    * override -1 = efuse per-rate baseline; offset in 0.5 dB index steps. */
   std::atomic<int> _tx_pwr_override{-1};
   std::atomic<int> _tx_pwr_offset_steps{0};
+  /* Caller-supplied per-rate diff table (SetTxPowerRateDiffs) in place of the
+   * efuse per-rate walk; std::nullopt = that walk. Read/written under _reg_mu
+   * like every other apply input. `_rate_diffs_on` mirrors its presence for
+   * GetTxPowerState, which reports a lock-free snapshot. */
+  std::optional<devourer::TxRateDiffsQdb> _rate_diffs;
+  std::atomic<bool> _rate_diffs_on{false};
   /* Default per-packet TXPWR_OFSET LUT step (0 = none) — see SetTxPacketPowerStep. */
   std::atomic<uint8_t> _tx_pkt_pwr_step{0};
   /* Rotating SW_DEFINE tag stamped when tx.report is on — the CCX report

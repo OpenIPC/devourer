@@ -18,7 +18,10 @@
  *   --step-qdb Q                ramp increment, qdB (default 4 = 1 dB)
  *   --step-ms N                 dwell per step, ms (default 500)
  *   --rate-diffs I,I,...,I      10 comma-separated qdB per rate
- *                               (cck,legacy,m0..m7) or 'clear' to nullopt
+ *                               (cck,legacy,m0..m7) or 'clear' to nullopt.
+ *                               Honoured where txpwr.caps reports
+ *                               rate_diffs=1; rate_diffs_hw=0 marks the
+ *                               software send-time fold (Kestrel)
  *   --flat-pulse N              after --rate-diffs: force flat index N, dump
  *                               state, then clear the override (-1) and dump
  *                               state again — proves a flat override
@@ -303,7 +306,10 @@ int main(int argc, char **argv) {
       .f("step_qdb", caps.step_qdb)
       .f("step_measured", caps.step_measured ? 1 : 0)
       .f("min_qdb", caps.offset_min_qdb)
-      .f("max_qdb", caps.offset_max_qdb);
+      .f("max_qdb", caps.offset_max_qdb)
+      .f("rate_diffs", caps.rate_diffs ? 1 : 0)
+      .f("rate_diffs_hw", caps.rate_diffs_hw_table ? 1 : 0)
+      .f("rate_diffs_measured", caps.rate_diffs_measured ? 1 : 0);
   if (!caps.supported) {
     logger->error("TX-power API not wired for this family yet");
     dev->Stop();

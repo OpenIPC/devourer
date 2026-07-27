@@ -1,9 +1,11 @@
 #include "UsbTransport.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -258,16 +260,20 @@ UsbTransport::UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
 }
 
 UsbTransport::~UsbTransport() {
-  /* Drain any async-TX completions still in flight so their transfers are
-   * freed (transfer_callback runs here, on THIS thread) before the device
-   * handle / context are torn down. We reap in the caller's thread, never a
-   * background pump, so there is no thread racing the caller-owned
-   * libusb_exit. A bounded loop so a genuinely dead endpoint can't hang
-   * teardown. */
-  for (int i = 0; i < 50 && _tx_inflight.load() > 0; ++i) {
-    struct timeval tv {0, 20000};
-    libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
-  }
+  /* Backstop only. The device's Stop()/destructor quiesces TX while every
+   * owner is alive, which is the path that makes teardown safe; reaching the
+   * transport destructor with transfers still in flight means the caller tore
+   * libusb down first, and by then _ctx may already be freed — pumping it is
+   * the SIGSEGV this diagnostic exists to name. The transport is shared_ptr-
+   * owned, so it is not guaranteed the device drops the last reference; hence
+   * the drain attempt stays. */
+  if (!_tx_shutdown.load(std::memory_order_acquire) &&
+      _tx_inflight.load(std::memory_order_acquire) > 0)
+    _logger->error("USB transport destroyed with TX in flight — the owner "
+                   "should quiesce (IRtlDevice::Stop) and release the device "
+                   "BEFORE libusb_close/libusb_exit; see the teardown order in "
+                   "examples/common/DeviceSession.h");
+  quiesce_tx();
 }
 
 bool UsbTransport::write_bytes(uint16_t reg_num, const uint8_t *ptr, size_t n) {
@@ -646,20 +652,81 @@ void UsbTransport::transfer_callback(struct libusb_transfer *transfer) {
      * clear_halt storm — now that completions are actually reaped. */
     if (transfer->status == LIBUSB_TRANSFER_STALL)
       self->_tx_wedged.store(true, std::memory_order_relaxed);
-    self->_tx_failed.fetch_add(1, std::memory_order_relaxed);
-    self->_tx_last_rc.store(-transfer->status, std::memory_order_relaxed);
-    self->_tx_last_timeout.store(
-        transfer->status == LIBUSB_TRANSFER_TIMED_OUT,
-        std::memory_order_relaxed);
-    self->_logger->error("Failed to send packet, status: {}, actual length: {}",
-                         transfer->status, transfer->actual_length);
-    devourer::Ev(self->_logger->events(), "tx.fail")
-        .f("status", (long long)transfer->status)
-        .f("actual_len", transfer->actual_length)
-        .f("timeout", transfer->status == LIBUSB_TRANSFER_TIMED_OUT);
+    /* A CANCELLED completion is quiesce_tx doing its job, not a failure —
+     * counting it would show phantom drops at the end of every session. */
+    if (transfer->status != LIBUSB_TRANSFER_CANCELLED) {
+      self->_tx_failed.fetch_add(1, std::memory_order_relaxed);
+      self->_tx_last_rc.store(-transfer->status, std::memory_order_relaxed);
+      self->_tx_last_timeout.store(
+          transfer->status == LIBUSB_TRANSFER_TIMED_OUT,
+          std::memory_order_relaxed);
+      self->_logger->error(
+          "Failed to send packet, status: {}, actual length: {}",
+          transfer->status, transfer->actual_length);
+      devourer::Ev(self->_logger->events(), "tx.fail")
+          .f("status", (long long)transfer->status)
+          .f("actual_len", transfer->actual_length)
+          .f("timeout", transfer->status == LIBUSB_TRANSFER_TIMED_OUT);
+    }
   }
-  self->_tx_inflight.fetch_sub(1, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lk(self->_tx_mu);
+    auto &live = self->_tx_live;
+    auto it = std::find(live.begin(), live.end(), transfer);
+    if (it != live.end())
+      live.erase(it);
+  }
+  /* The payload is transport-owned (allocated in tx_async) — free it with the
+   * allocator that made it, never libusb's LIBUSB_TRANSFER_FREE_BUFFER: on
+   * Windows a separately-linked libusb frees onto a different CRT heap. */
+  std::free(transfer->buffer);
   libusb_free_transfer(transfer);
+  /* Last, so a quiesce_tx loop that sees _tx_inflight == 0 knows every buffer
+   * and transfer is already freed and nothing more will touch this object. */
+  self->_tx_inflight.fetch_sub(1, std::memory_order_release);
+}
+
+/* Cancel + drain, called while the caller's libusb context is still alive.
+ * See IRtlTransport::quiesce_tx for the contract. */
+void UsbTransport::quiesce_tx() {
+  if (_tx_shutdown.exchange(true, std::memory_order_acq_rel))
+    return; /* already quiesced (Stop() then the destructor) */
+
+  /* Snapshot, then cancel outside the lock — libusb_cancel_transfer can
+   * complete the transfer inline, re-entering transfer_callback, which takes
+   * the same mutex. Cancellation is asynchronous: SUCCESS means "unlink
+   * submitted", so the drain below is what actually establishes quiescence.
+   * NOT_FOUND means the transfer already completed — its callback owns the
+   * bookkeeping, so there is nothing to do here. */
+  std::vector<libusb_transfer *> pending;
+  {
+    std::lock_guard<std::mutex> lk(_tx_mu);
+    pending = _tx_live;
+  }
+  for (auto *t : pending)
+    libusb_cancel_transfer(t);
+
+  /* Drain. Generous deadline: an unlink normally retires in microseconds (or
+   * instantly with NO_DEVICE once the adapter is unplugged), and hanging
+   * teardown forever is worse than reporting the anomaly. */
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (_tx_inflight.load(std::memory_order_acquire) > 0 &&
+         std::chrono::steady_clock::now() < deadline) {
+    struct timeval tv {0, 20000};
+    if (libusb_handle_events_timeout_completed(_ctx, &tv, nullptr) != 0)
+      break; /* context is gone or broken — nothing left to reap with */
+  }
+
+  const int residual = _tx_inflight.load(std::memory_order_acquire);
+  if (residual > 0) {
+    /* Proceeding means libusb_close will run with live transfers, which is
+     * undefined behaviour — so say so loudly rather than fail silently. */
+    _logger->error("TX quiesce timed out with {} transfer(s) still in flight — "
+                   "the USB close that follows is unsafe",
+                   residual);
+    devourer::Ev(_logger->events(), "tx.quiesce_timeout").f("inflight", residual);
+  }
 }
 
 bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
@@ -673,6 +740,11 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
    * fail, and TX collapses (issue #240). If the in-flight depth is already high
    * (a fast caller outrunning the air), block briefly to reap — bounded
    * backpressure that also caps latency. */
+  /* Refused before the pump below, so a late send can't re-enter libusb after
+   * teardown has begun. Counts as neither submitted nor failed: a frame handed
+   * to us after we were told to stop is not a drop. */
+  if (_tx_shutdown.load(std::memory_order_acquire))
+    return false;
   {
     struct timeval zero {0, 0};
     libusb_handle_events_timeout_completed(_ctx, &zero, nullptr);
@@ -691,6 +763,19 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
     _logger->error("Failed to allocate transfer");
     return false;
   }
+
+  /* The URB outlives this call by definition (that is what "async" buys), so
+   * it cannot reference the caller's buffer: every caller so far builds its
+   * frame in a local that dies on return. Copy into a transport-owned block,
+   * freed in transfer_callback. One memcpy per frame is far below the
+   * libusb_alloc_transfer above it and the kernel's own copy at submit. */
+  auto *payload = static_cast<uint8_t *>(std::malloc(length));
+  if (!payload) {
+    _logger->error("Failed to allocate TX payload ({} bytes)", length);
+    libusb_free_transfer(transfer);
+    return false;
+  }
+  std::memcpy(payload, packet, length);
 
   /* Recover a bulk-OUT that a prior async TX wedged (TIMED_OUT / stall). Only
    * the first send used to clear_halt; a mid-stream stall (e.g. hardware NDP
@@ -745,7 +830,7 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
    * Over-submission is bounded by the in-flight soft cap above, not by
    * dropping frames on a timer. `timeout_ms` is kept for the sync path. */
   (void)timeout_ms;
-  libusb_fill_bulk_transfer(transfer, _dev_handle, tx_ep, packet, length,
+  libusb_fill_bulk_transfer(transfer, _dev_handle, tx_ep, payload, length,
                             &UsbTransport::transfer_callback, (void *)this,
                             /*timeout=*/0);
   /* Upstream OOT (rtl8814a/usb/rtl8814au_xmit.c) sets URB_ZERO_PACKET on
@@ -758,12 +843,27 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
   /* Count the submission here; async completion (incl. TIMED_OUT) is counted
    * in transfer_callback, a submit error just below. */
   _tx_submitted.fetch_add(1, std::memory_order_relaxed);
+  /* Register and count BEFORE submitting: the completion can be delivered from
+   * another thread's pump the instant the URB is queued, and it must find its
+   * own entry to remove. */
+  {
+    std::lock_guard<std::mutex> lk(_tx_mu);
+    _tx_live.push_back(transfer);
+  }
+  _tx_inflight.fetch_add(1, std::memory_order_relaxed);
   int rc = libusb_submit_transfer(transfer);
   if (rc == LIBUSB_SUCCESS) {
-    _tx_inflight.fetch_add(1, std::memory_order_relaxed);
     DVR_DEBUG(_logger, "Packet sent successfully, length: {}", length);
     return true;
   }
+  /* Never submitted, so no callback will run — undo the bookkeeping here. */
+  {
+    std::lock_guard<std::mutex> lk(_tx_mu);
+    auto it = std::find(_tx_live.begin(), _tx_live.end(), transfer);
+    if (it != _tx_live.end())
+      _tx_live.erase(it);
+  }
+  _tx_inflight.fetch_sub(1, std::memory_order_relaxed);
   _tx_failed.fetch_add(1, std::memory_order_relaxed);
   _tx_last_rc.store(rc, std::memory_order_relaxed);
   _tx_last_timeout.store(rc == LIBUSB_ERROR_TIMEOUT, std::memory_order_relaxed);
@@ -771,6 +871,7 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
   devourer::Ev(_logger->events(), "tx.fail")
       .f("rc", rc)
       .f("timeout", rc == LIBUSB_ERROR_TIMEOUT);
+  std::free(payload);
   libusb_free_transfer(transfer);
   return false;
 }

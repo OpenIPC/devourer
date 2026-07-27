@@ -59,6 +59,7 @@
   #include <libusb-1.0/libusb.h>
 #endif
 
+#include "DeviceSession.h"
 #include "RadiotapBuilder.h"
 #include "RtlAdapter.h"
 #include "UsbOpen.h"
@@ -123,15 +124,21 @@ int main(int argc, char** argv) {
   libusb_context* context = nullptr;
   libusb_device_handle* handle = nullptr;
   int rc;
+  /* Owns the teardown order (device -> interface -> handle -> context; see
+   * DeviceSession.h). Each early return from here on unwinds whatever has
+   * been adopted so far. */
+  devourer::DeviceSession session{logger};
   if (termux_fd > 0) {
     libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
     libusb_set_option(NULL, LIBUSB_OPTION_WEAK_AUTHORITY);
     libusb_init(&context);
+    session.adopt_context(context);
     rc = libusb_wrap_sys_device(context, (intptr_t)termux_fd, &handle);
     if (rc < 0) { logger->error("wrap_sys_device: {}", rc); return 1; }
   } else {
     rc = libusb_init(&context);
     if (rc < 0) return rc;
+    session.adopt_context(context);
     uint16_t target_pid = 0;
     if (const char* p = std::getenv("DEVOURER_PID"))
       target_pid = static_cast<uint16_t>(std::strtoul(p, nullptr, 0));
@@ -145,24 +152,32 @@ int main(int argc, char** argv) {
     }
     if (handle == NULL && target_pid != 0)
       handle = libusb_open_device_with_vid_pid(context, target_vid, target_pid);
-    if (handle == NULL) { logger->error("No supported device"); libusb_exit(context); return 1; }
+    if (handle == NULL) { logger->error("No supported device"); return 1; }
   }
 
   /* Claim-before-reset (see src/UsbOpen.h): the exclusive claim is the primary
    * guard — a second devourer on this adapter gets BUSY here and bails before
    * the reset, so it can't re-enumerate the adapter out from under the owner. */
   std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
-  rc = devourer::claim_interface_then_reset(handle, devourer::find_wifi_interface(handle), logger,
+  const int wifi_iface = devourer::find_wifi_interface(handle);
+  rc = devourer::claim_interface_then_reset(handle, wifi_iface, logger,
       termux_fd == 0 && std::getenv("DEVOURER_SKIP_RESET") == nullptr, usb_lock);
   if (rc != 0) {
-    libusb_close(handle);
-    libusb_exit(context);
+    /* The claim failed, so nothing owns the handle yet — hand it to the
+     * session purely so the unwind closes it. */
+    session.adopt_handle(handle, wifi_iface);
     return 1;
   }
+  session.adopt_handle(handle, wifi_iface);
+  session.adopt_lock(usb_lock);
 
   WiFiDriver wifi_driver{logger};
-  auto rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
-                                               devourer_config_from_env());
+  auto owned_device = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+                                                  devourer_config_from_env());
+  /* The session owns the device from here: it is what guarantees the device
+   * (and its in-flight TX) dies before libusb does. */
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice *const rtlDevice = session.device();
 
   int channel = 6;
   if (const char* ch = std::getenv("DEVOURER_CHANNEL")) channel = std::atoi(ch);
@@ -241,5 +256,9 @@ int main(int argc, char** argv) {
       }
     }
   }
+  /* Device, then interface, handle and context (DeviceSession.h). Explicit
+   * only because the process has nothing left to do here — the destructor
+   * does exactly the same on every other exit path. */
+  session.close();
   return 0;
 }

@@ -53,6 +53,7 @@
   #include <libusb-1.0/libusb.h>
 #endif
 
+#include "DeviceSession.h"
 #include "RadiotapBuilder.h"
 #include "RxPacket.h"
 #include "SignalStop.h"
@@ -476,11 +477,17 @@ int main() {
   apply_logging_env(*logger);
   install_devourer_signal_handlers();
 
+  // Owns the teardown order (device -> interface -> handle -> context; see
+  // DeviceSession.h): the role loops below only return once their RX thread is
+  // joined, so the adapter is released with nothing in flight. On the PCIe
+  // path there is no handle to adopt — the transport dies with the device.
+  devourer::DeviceSession session{logger};
+
   timesync::Config c = timesync::config_from_env();
   g_hwbeacon = c.hwbeacon;   // slave reads the standard 802.11 beacon timestamp
 
   WiFiDriver wifi(logger);
-  std::unique_ptr<IRtlDevice> dev;
+  std::unique_ptr<IRtlDevice> owned_device;
   libusb_context* ctx = nullptr;
   /* DEVOURER_PCIE_BDF=0000:01:00.0 — drive a PCIe adapter (RTL8821CE) through
    * the vfio transport instead of libusb (DEVOURER_PCIE builds; mirrors the
@@ -491,7 +498,8 @@ int main() {
   if (pcie_bdf) {
     auto transport = devourer::PcieTransport::Open(pcie_bdf, logger);
     if (!transport) return 1;
-    dev = wifi.CreateRtlDevicePcie(std::move(transport), devourer_config_from_env());
+    owned_device =
+        wifi.CreateRtlDevicePcie(std::move(transport), devourer_config_from_env());
   } else
 #endif
   {
@@ -501,14 +509,23 @@ int main() {
     }
     std::shared_ptr<devourer::UsbDeviceLock> lock;
     auto* handle = open_device(logger, &ctx, lock);
-    if (!handle) { if (ctx) libusb_exit(ctx); return 1; }
-    dev = wifi.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
+    session.adopt_context(ctx);
+    if (!handle) return 1;
+    session.adopt_handle(handle, devourer::find_wifi_interface(handle));
+    session.adopt_lock(lock);
+    owned_device =
+        wifi.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
   }
-  if (!dev) { logger->error("no driver for this chip"); return 1; }
+  if (!owned_device) { logger->error("no driver for this chip"); return 1; }
+  // The session owns the device from here: it is what guarantees the device
+  // (and its in-flight TX) dies before libusb does.
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice* const dev = session.device();
 
-  if (c.role == timesync::Role::Ue) run_ue(dev.get(), c);
-  else if (c.role == timesync::Role::Master && c.uplink) run_master_ta(dev.get(), c);
-  else if (c.role == timesync::Role::Master) run_master(dev.get(), c);
-  else run_slave(dev.get(), c);
+  if (c.role == timesync::Role::Ue) run_ue(dev, c);
+  else if (c.role == timesync::Role::Master && c.uplink) run_master_ta(dev, c);
+  else if (c.role == timesync::Role::Master) run_master(dev, c);
+  else run_slave(dev, c);
+  session.close();
   return 0;
 }

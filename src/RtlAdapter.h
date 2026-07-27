@@ -141,6 +141,11 @@ public:
   }
   void bulk_clear_halt(uint8_t ep) { _transport->clear_halt(ep); }
 
+  /* Stop TX and wait out everything already submitted (IRtlTransport::
+   * quiesce_tx). Must run while the caller's bus context is still alive —
+   * the device Stop()/destructor does it, so callers rarely need this. */
+  void quiesce_tx() { _transport->quiesce_tx(); }
+
   /* Snapshot of the TX submission counters (see TxStats.h). */
   devourer::TxStats GetTxStats() const { return _transport->tx_stats(); }
 

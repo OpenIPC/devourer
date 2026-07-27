@@ -35,6 +35,7 @@
 
 #include "BfReportDetect.h"
 #include "ChannelFreq.h"
+#include "DeviceSession.h"
 #include "HopSchedule.h"
 #include "hopset/HopsetAuthority.h"
 #include "hopset/HopsetEvents.h"
@@ -411,6 +412,12 @@ int main(int argc, char **argv) {
    * harness's `timeout` doesn't leave the adapter's USB core hung. */
   install_devourer_signal_handlers();
 
+  /* Owns the teardown order (device -> interface -> handle -> context; see
+   * DeviceSession.h). Declared before every thread below, so the threads are
+   * joined before the adapter is released. Each early return from here on
+   * unwinds whatever has been adopted so far. */
+  devourer::DeviceSession session{logger};
+
   /* Two modes:
    *  1. Termux/Android: argv[1] = numeric USB fd (wrapped via
    *     libusb_wrap_sys_device).
@@ -430,15 +437,18 @@ int main(int argc, char **argv) {
     rc = libusb_init(&context);
     if (rc < 0)
       return rc;
+    session.adopt_context(context);
   } else if (termux_mode) {
     logger->info("Termux mode: wrapping fd {}", fd);
     libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY);
     libusb_set_option(NULL, LIBUSB_OPTION_WEAK_AUTHORITY);
     rc = libusb_init(&context);
+    session.adopt_context(context);
     rc = libusb_wrap_sys_device(context, (intptr_t)fd, &handle);
   } else {
     rc = libusb_init(&context);
     if (rc < 0) return rc;
+    session.adopt_context(context);
 
     const char *pid_env = std::getenv("DEVOURER_PID");
     uint16_t target_pid = 0;
@@ -507,7 +517,6 @@ int main(int argc, char **argv) {
       if (handle == NULL) {
         logger->error("DEVOURER_USB_BUS={} PORT={} matched no device", want_bus,
                       port_env ? port_env : "(any)");
-        libusb_exit(context);
         return 1;
       }
     }
@@ -532,7 +541,6 @@ int main(int argc, char **argv) {
     }
     if (handle == NULL) {
       logger->error("No supported device found under VID {:04x}", target_vid);
-      libusb_exit(context);
       return 1;
     }
   }
@@ -561,11 +569,13 @@ int main(int argc, char **argv) {
         .f("stage", "txdemo.usb_reset")
         .f("ms", ms_since_start());
     if (rc != 0) {
-      if (handle != nullptr)
-        libusb_close(handle);
-      libusb_exit(context);
+      /* The claim failed, so nothing owns the handle yet — hand it to the
+       * session purely so the unwind closes it. */
+      session.adopt_handle(handle);
       return 1;
     }
+    session.adopt_handle(handle);
+    session.adopt_lock(usb_lock);
   }
 
   /* USB-wire sentinel writes — gated behind DEVOURER_USB_SENTINEL=1. Used by
@@ -674,7 +684,7 @@ int main(int argc, char **argv) {
   }
 
   WiFiDriver wifi_driver{logger};
-  std::unique_ptr<IRtlDevice> rtlDevice;
+  std::unique_ptr<IRtlDevice> owned_device;
 #if defined(DEVOURER_HAVE_PCIE)
   if (pcie_bdf) {
     auto transport = devourer::PcieTransport::Open(pcie_bdf, logger);
@@ -683,8 +693,8 @@ int main(int argc, char **argv) {
     devourer::Ev(*g_ev, "init.timing")
         .f("stage", "txdemo.open_device")
         .f("ms", ms_since_start());
-    rtlDevice = wifi_driver.CreateRtlDevicePcie(std::move(transport),
-                                                devourer_config_from_env());
+    owned_device = wifi_driver.CreateRtlDevicePcie(std::move(transport),
+                                                   devourer_config_from_env());
   } else
 #endif
   {
@@ -692,19 +702,23 @@ int main(int argc, char **argv) {
       logger->error("DEVOURER_PCIE_BDF set but this build has DEVOURER_PCIE=OFF");
       return 1;
     }
-    rtlDevice = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
-                                            devourer_config_from_env());
+    owned_device = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+                                               devourer_config_from_env());
   }
-  if (!rtlDevice) {
+  if (!owned_device) {
     /* Factory returns null when this chip's generation wasn't compiled in
      * (per-chip CMake options); it already logged which. */
     logger->error("No driver for this chip in this build — exiting");
     return 1;
   }
+  /* The session owns the device from here: it is what guarantees the device
+   * (and its in-flight TX) dies before libusb does. */
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice *const rtlDevice = session.device();
   devourer::Ev(*g_ev, "init.timing")
       .f("stage", "txdemo.create_device")
       .f("ms", ms_since_start());
-  devourer::emit_adapter_caps(*g_ev, rtlDevice.get());
+  devourer::emit_adapter_caps(*g_ev, rtlDevice);
 
   /* Jaguar1-only research features (TX-mode default, fast-retune hopping,
    * thermal telemetry, TXAGC override, BB-reg probe) are not part of the
@@ -712,15 +726,15 @@ int main(int argc, char **argv) {
    * where those call sites are skipped, and compiled out entirely when Jaguar1
    * support isn't built. */
 #if defined(DEVOURER_HAVE_JAGUAR1)
-  RtlJaguarDevice *jag = dynamic_cast<RtlJaguarDevice *>(rtlDevice.get());
+  RtlJaguarDevice *jag = dynamic_cast<RtlJaguarDevice *>(rtlDevice);
 #endif
   /* Jaguar2 (8822BU) downcast — used only for the CW single-tone idle-hold. */
 #if defined(DEVOURER_HAVE_JAGUAR2)
-  RtlJaguar2Device *jag2 = dynamic_cast<RtlJaguar2Device *>(rtlDevice.get());
+  RtlJaguar2Device *jag2 = dynamic_cast<RtlJaguar2Device *>(rtlDevice);
 #endif
   /* Jaguar3 (8822C/E) downcast — used only for the CW single-tone idle-hold. */
 #if defined(DEVOURER_HAVE_JAGUAR3)
-  RtlJaguar3Device *jag3 = dynamic_cast<RtlJaguar3Device *>(rtlDevice.get());
+  RtlJaguar3Device *jag3 = dynamic_cast<RtlJaguar3Device *>(rtlDevice);
 #endif
 
   int channel = 161;
@@ -1409,7 +1423,7 @@ int main(int argc, char **argv) {
     if (const char *pr = std::getenv("DEVOURER_HOP_PROBE_ROUNDS"))
       probe_rounds = static_cast<unsigned>(std::strtoul(pr, nullptr, 0));
     g_hopset_view->set_probe_period(probe_rounds);
-    g_hopset_dev = rtlDevice.get();
+    g_hopset_dev = rtlDevice;
     g_hopset_fusion.mode = hop_fusion_mode;
     if (tx_sense) {
       /* The aux flood threads send from their own threads and `send_packets`
@@ -1760,7 +1774,7 @@ int main(int argc, char **argv) {
         if (committing) {
           sense_armed = false;
         } else {
-          hopset_sense_window(rtlDevice.get(), tx_sense_settle_us,
+          hopset_sense_window(rtlDevice, tx_sense_settle_us,
                               tx_sense_window_us, tx_sense_nhm,
                               devourer::hopset::SensePhase::PreBurst,
                               desired_slot, round,
@@ -1793,7 +1807,7 @@ int main(int argc, char **argv) {
           gen = g_hopset_view->state().generation;
         }
         sense_post_done = true;
-        hopset_sense_window(rtlDevice.get(), 0, tx_sense_post_us,
+        hopset_sense_window(rtlDevice, 0, tx_sense_post_us,
                             tx_sense_nhm,
                             devourer::hopset::SensePhase::PostBurst,
                             desired_slot, round,
@@ -2043,19 +2057,14 @@ int main(int argc, char **argv) {
   if (usb_thread.joinable())
     usb_thread.join();
 
-  /* Clean chip de-init before releasing the interface (card-disable PWR_SEQ), so
-   * the adapter re-enumerates instead of hanging its USB core. */
+  /* Clean chip de-init before releasing the interface: card-disable PWR_SEQ on
+   * the HalMAC families, TX quiesce on Jaguar1 — so the adapter re-enumerates
+   * instead of hanging its USB core. */
   rtlDevice->Stop();
 
-  /* Tolerant teardown: if the chip already dropped off the bus (e.g. a TX-path
-   * wedge), release_interface returns an error — log it, don't assert/abort.
-   * PCIe runs have no USB handle; the transport tears down with the device. */
-  if (handle != nullptr) {
-    rc = libusb_release_interface(handle, 0);
-    if (rc != 0)
-      logger->info("libusb_release_interface rc={} (device already gone?)", rc);
-    libusb_close(handle);
-  }
-  libusb_exit(context);
+  /* Device, then interface, handle and context (DeviceSession.h). Explicit
+   * only because the process has nothing left to do here — the destructor
+   * does exactly the same on every other exit path. */
+  session.close();
   return 0;
 }

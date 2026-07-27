@@ -77,6 +77,10 @@ RtlKestrelDevice::RtlKestrelDevice(RtlAdapter device, Logger_t logger,
 }
 
 RtlKestrelDevice::~RtlKestrelDevice() {
+  /* Inert on this generation (its send path is synchronous), but the invariant
+   * belongs to every device: nothing gets released while a transfer the
+   * transport still owns is outstanding. */
+  _device.quiesce_tx();
   _rx_stop = true;
   stop_wp_drain();
 }

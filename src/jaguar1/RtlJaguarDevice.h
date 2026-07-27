@@ -95,6 +95,12 @@ public:
    * once, then runs this on its own std::thread next to the TX loop. */
   void StartRxLoop(Action_ParsedRadioPacket packetProcessor) override;
   void StopRxLoop() override { should_stop = true; }
+  /* Jaguar1's send path is the only asynchronous one in the tree, so its
+   * Stop() is TX quiesce and nothing else: cancel and reap the outstanding
+   * bulk-OUT URBs while the caller's libusb context is still up. Deliberately
+   * NOT a card-disable power sequence — this family has never run one, and
+   * adding it here would be an unvalidated change of on-the-wire behaviour. */
+  void Stop() override;
   void SetMonitorChannel(SelectedChannel channel) override;
   /* Lean frequency-hop retune: switches the RF channel only, skipping the
    * per-rate TX-power loop, bandwidth post-set, and thermal pwrtrk tick that

@@ -65,6 +65,7 @@
 
 #include "AdapterHealth.h"
 #include "caps_event.h"
+#include "DeviceSession.h"
 #include "RxPacket.h"
 #include "SignalStop.h"
 #include "UsbOpen.h"
@@ -178,11 +179,18 @@ int main(int argc, char **argv) {
   auto logger = std::make_shared<Logger>();
   install_devourer_signal_handlers();
 
+  /* Owns the teardown order (device -> interface -> handle -> context; see
+   * DeviceSession.h). Declared before the RX-smoke thread below, so it is
+   * joined before the adapter is released. Each early return from here on
+   * unwinds whatever has been adopted so far. */
+  devourer::DeviceSession session{logger};
+
   libusb_context *ctx = nullptr;
   if (libusb_init(&ctx) < 0) {
     logger->error("libusb_init failed");
     return 3;
   }
+  session.adopt_context(ctx);
   libusb_device_handle *handle = nullptr;
   if (a.bus >= 0) {
     handle = open_by_topology(ctx, a, logger);
@@ -198,17 +206,19 @@ int main(int argc, char **argv) {
   }
   if (!handle) {
     logger->error("no adapter found (vid {:04x})", a.vid);
-    libusb_exit(ctx);
     return 3;
   }
 
   std::shared_ptr<devourer::UsbDeviceLock> lock;
   if (devourer::claim_interface_then_reset(handle, devourer::find_wifi_interface(handle), logger, true, lock) !=
       0) {
-    libusb_close(handle);
-    libusb_exit(ctx);
+    /* The claim failed, so nothing owns the handle yet — hand it to the
+     * session purely so the unwind closes it. */
+    session.adopt_handle(handle);
     return 3;
   }
+  session.adopt_handle(handle);
+  session.adopt_lock(lock);
 
   /* keep_corrupted so the RX smoke can report the corrupt-frame count too
    * (informational only); enable_with_tx so Jaguar3's InitWrite keeps the RX
@@ -218,16 +228,18 @@ int main(int argc, char **argv) {
   cfg.rx.enable_with_tx = true;
 
   WiFiDriver driver(logger);
-  std::unique_ptr<IRtlDevice> dev =
+  std::unique_ptr<IRtlDevice> owned_device =
       driver.CreateRtlDevice(handle, ctx, lock, cfg);
-  if (!dev) {
+  if (!owned_device) {
     logger->error("CreateRtlDevice failed (chip support not built?)");
-    libusb_close(handle);
-    libusb_exit(ctx);
     return 3;
   }
+  /* The session owns the device from here: it is what guarantees the device
+   * (and its in-flight TX) dies before libusb does. */
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice *const dev = session.device();
 
-  devourer::emit_adapter_caps(logger->events(), dev.get());
+  devourer::emit_adapter_caps(logger->events(), dev);
 
   devourer::AdapterHealthInput in;
 
@@ -337,8 +349,7 @@ int main(int argc, char **argv) {
       .f("init", in.init_completed ? 1 : 0);
 
   dev->Stop();
-  libusb_close(handle);
-  libusb_exit(ctx);
+  session.close();
   switch (v) {
   case devourer::AdapterVerdict::Healthy:
     return 0;

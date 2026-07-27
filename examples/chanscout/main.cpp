@@ -43,6 +43,7 @@
 #include <thread>
 #include <vector>
 
+#include "DeviceSession.h"
 #include "RxPacket.h"
 #include "SignalStop.h"
 #include "UsbOpen.h"
@@ -172,6 +173,11 @@ int main() {
   g_ev = &logger->events();
   install_devourer_signal_handlers();
 
+  /* Owns the teardown order (device -> interface -> handle -> context; see
+   * DeviceSession.h). Declared before the RX thread below, so it is joined
+   * before the adapter is released. */
+  devourer::DeviceSession session{logger};
+
   /* --- plan --- */
   const char *plan_env = std::getenv("DEVOURER_SCOUT_PLAN");
   cm::ScanPlanConfig cfg;
@@ -236,6 +242,7 @@ int main() {
   int rc = libusb_init(&ctx);
   if (rc < 0)
     return rc;
+  session.adopt_context(ctx);
   libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL,
                     std::getenv("DEVOURER_USB_DEBUG") ? LIBUSB_LOG_LEVEL_DEBUG
                                                       : LIBUSB_LOG_LEVEL_WARNING);
@@ -250,29 +257,33 @@ int main() {
   UsbPick pick;
   libusb_device_handle *handle = open_selected_usb(
       ctx, logger, kPids, sizeof(kPids) / sizeof(kPids[0]), &pick);
-  if (handle == nullptr) {
-    libusb_exit(ctx);
+  if (handle == nullptr)
     return 1;
-  }
   std::shared_ptr<devourer::UsbDeviceLock> usb_lock;
   rc = devourer::claim_interface_reset_reopen(
       ctx, handle, logger, std::getenv("DEVOURER_SKIP_RESET") == nullptr,
       usb_lock);
   if (rc != 0) {
-    if (handle != nullptr)
-      libusb_close(handle);
-    libusb_exit(ctx);
+    /* The claim failed, so nothing owns the handle yet — hand it to the
+     * session purely so the unwind closes it. */
+    session.adopt_handle(handle);
     return 1;
   }
+  session.adopt_handle(handle);
+  session.adopt_lock(usb_lock);
 
   WiFiDriver driver(logger);
-  auto dev = driver.CreateRtlDevice(handle, ctx, usb_lock,
-                                    devourer_config_from_env());
-  if (!dev) {
+  auto owned_device = driver.CreateRtlDevice(handle, ctx, usb_lock,
+                                             devourer_config_from_env());
+  if (!owned_device) {
     logger->error("No driver for this chip in this build — exiting");
     return 1;
   }
-  devourer::emit_adapter_caps(*g_ev, dev.get());
+  /* The session owns the device from here: it is what guarantees the device
+   * (and its in-flight TX) dies before libusb does. */
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice *const dev = session.device();
+  devourer::emit_adapter_caps(*g_ev, dev);
   const devourer::AdapterCaps caps = dev->GetAdapterCaps();
 
   /* Stable scout identity = the physical binding + silicon (FNV-1a). This is
@@ -349,7 +360,7 @@ int main() {
   cm::ScanScheduler sched(cfg);
 
   /* --- RX loop on a worker thread (rxdemo sweep pattern) --- */
-  IRtlDevice *devp = dev.get();
+  IRtlDevice *devp = dev;
   const cm::ScanScheduler::DwellPlan first = sched.next(steady_ms());
   std::thread rx([devp, first, &logger]() {
     try {
@@ -671,8 +682,6 @@ int main() {
   if (rx.joinable())
     rx.join();
   devp->Stop();
-  libusb_release_interface(handle, 0);
-  libusb_close(handle);
-  libusb_exit(ctx);
+  session.close();
   return sched.consecutive_failures() >= 15 ? 3 : 0;
 }

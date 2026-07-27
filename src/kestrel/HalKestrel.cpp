@@ -2145,30 +2145,26 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
   const uint8_t band_type = (band == 6) ? 2 : (channel <= 14 ? 0 : 1);
   const bool is_2g = (band_type == 0);
   /* The RF synth tunes to the bandwidth-block CENTER; `channel` is the primary
-   * 20. For 40 MHz: offset UPPER(2) => primary is the upper 20 (center = ch-2,
-   * pri_ch=2); otherwise LOWER (center = ch+2, pri_ch=1). `pri_ch` is the BB
-   * primary-sub index (0x49C4[11:8]); 20 MHz uses 0. */
+   * 20, and it is also what halbb wants as its `pri_ch`: the primary CHANNEL
+   * NUMBER, not a sub-band index (vendor phl hands it rtw_chan_def::chan
+   * unchanged). halbb_ctrl_bw_ch derives the 0x4978[11:8] sub-band index
+   * itself by comparing pri_ch against central_ch, indexes the 2.4 GHz CCK SCO
+   * threshold tables with pri_ch-1, and places the NBI spur notch from it — so
+   * passing an index here reads those tables out of bounds at 20 MHz (index
+   * -1) and mis-derives the sub-band everywhere else.
+   * For 40 MHz: offset UPPER(2) => the primary is the upper 20 (center =
+   * ch-2); otherwise LOWER (center = ch+2). */
   uint8_t center = channel;
-  uint8_t pri_ch = 0;
   if (bw == CHANNEL_WIDTH_40) {
-    if (offset == 2) {
-      center = static_cast<uint8_t>(channel - 2);
-      pri_ch = 2;
-    } else {
-      center = static_cast<uint8_t>(channel + 2);
-      pri_ch = 1;
-    }
+    center = static_cast<uint8_t>(offset == 2 ? channel - 2 : channel + 2);
   } else if (bw == CHANNEL_WIDTH_80) {
-    /* 80 MHz block is fixed by the channel plan: the primary's position
-     * (pri_ch 1..4) and the block center derive from the channel number. The
-     * grid origin differs by band — 5 GHz aligns on the 36 + 16k grid
-     * ({36..48}->center 42, ...); 6 GHz aligns on the 1 + 16k grid
-     * ({1..13}->center 7, {17..29}->23, ...). block_start = ch - ((ch-o)/4 %
-     * 4)*4, o = grid origin. */
+    /* The 80 MHz block is fixed by the channel plan. The grid origin differs
+     * by band — 5 GHz aligns on the 36 + 16k grid ({36..48}->center 42, ...);
+     * 6 GHz aligns on the 1 + 16k grid ({1..13}->center 7, {17..29}->23, ...).
+     * block_start = ch - ((ch-o)/4 % 4)*4, o = grid origin. */
     const int o = (band_type == 2) ? 1 : 36;
     const int bs = channel - (((channel - o) / 4) % 4) * 4;
     center = static_cast<uint8_t>(bs + 6);
-    pri_ch = static_cast<uint8_t>((channel - bs) / 4 + 1);
   } else if (bw == CHANNEL_WIDTH_160) {
     if (_variant != ChipVariant::C8852C) {
       /* The 8852B die tops out at 80 MHz (rtl8852b_halinit.c bw_sup has no
@@ -2179,11 +2175,10 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
     }
     /* 160 MHz spans 8 20-MHz sub-channels; same grid-origin idea as 80 MHz but
      * modulo 8. block_start = ch - ((ch-o)/4 % 8)*4; center = bs+14 (middle of
-     * bs..bs+28); pri_ch 1..8. 5 GHz: {36..64}->center 50; 6 GHz: {1..29}->15. */
+     * bs..bs+28). 5 GHz: {36..64}->center 50; 6 GHz: {1..29}->15. */
     const int o = (band_type == 2) ? 1 : 36;
     const int bs = channel - (((channel - o) / 4) % 8) * 4;
     center = static_cast<uint8_t>(bs + 14);
-    pri_ch = static_cast<uint8_t>((channel - bs) / 4 + 1);
     /* 6 GHz 160 MHz TX does not radiate on the C8852C: the RF synth locks
      * (RF18 6G+160, LCK 0xb7[8]=0) and RX-160 works, but the 6G+160 TX-enable
      * path is un-ported — SDR-confirmed 0% duty vs 45% at 6G-80 / 40% at
@@ -2218,7 +2213,7 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
   /* Full vendor per-channel BB config (halbb_ctrl_bw_ch -> per-chip backend),
    * both chips: per-band gain-error, hidden/normal efuse RX gain, band
    * mode-sel, SCO comp, BW/RXBB/ADC, CCK enable. */
-  vnd_bb_ctrl_bw_ch(pri_ch, center, bw, band_type);
+  vnd_bb_ctrl_bw_ch(channel, center, bw, band_type);
   /* Vendored halrf IQK, both chips. The 0xbff8 one-shot-done poll depends on
    * the NCTL micro-engine, which vnd_rf_iqk loads lazily on first call
    * (kestrel_halrf_rfk_init — also LCK/RCK, the SI reset and the efuse trim).

@@ -102,9 +102,21 @@ group exports a PUBLIC `DEVOURER_HAVE_*` define; sites referencing a dropped
 group sit behind `#if defined(DEVOURER_HAVE_*)`, and the factory returns
 `nullptr` (logs) for a chip whose support isn't built.
 
+`DEVOURER_SANITIZE=address|address+undefined|thread` (default off) builds the
+library, demos and selftests instrumented; the vendored halbb/halrf C is
+exempted from UBSan (Realtek's sources are full of unaligned loads and signed
+shifts — noise we would never act on). MSVC has AddressSanitizer only and
+rejects the other values rather than silently degrading. The demos are worth
+running under it on hardware, not just `ctest`: the lifetime bugs it finds
+(teardown, in-flight URBs) need a real device —
+`tests/tx_teardown_asan.sh` (max-duty TX killed mid-flight, incl. a real
+VBUS-cut wedge) and `tests/teardown_gen_sanity.sh` (every plugged generation
+init + teardown).
+
 CI (`.github/workflows/cmake-multi-platform.yml`): GCC/Clang/MSVC ×
 Ubuntu/macOS/Windows matrix, a `build-mingw` job, a `build-configs` matrix over
-each per-chip subset, and `reject-bad-configs` for the invalid option combos.
+each per-chip subset, `build-sanitizers` (ASan+UBSan `ctest`), and
+`reject-bad-configs` for the invalid option combos.
 `ctest` runs in every job (headless selftests — math guards + the
 `stream_stdin_binary` framing round-trip). Hardware testing is out-of-band.
 
@@ -508,6 +520,16 @@ thin — `libusb_init`, device open, kernel-driver detach, and
 to the factory. `examples/rx/main.cpp` is the canonical boilerplate;
 `devourer::claim_interface_then_reset` (src/UsbOpen.h) is the recommended
 open path (advisory per-adapter lock before reset).
+
+Owning libusb means owning the **teardown order**: destroy the `IRtlDevice`
+first, then release the interface, close the handle, and only then
+`libusb_exit`. The device is what quiesces TX (`IRtlDevice::Stop`, and the
+destructor as a backstop: Jaguar1's async bulk-OUT URBs must be cancelled and
+reaped while the context still exists), so tearing libusb down first is a
+crash, not a leak — and only under enough TX load to keep URBs outstanding at
+exit. `examples/common/DeviceSession.h` is the demos' RAII holder for exactly
+that order; the transport logs a diagnostic naming this if it is destroyed
+with TX still in flight.
 
 **Chip identity is resolved at construction** from the `SYS_CFG2` chip-id +
 USB PID. `CreateRtlDevice` returns an `IRtlDevice` (`Init` = bring-up + RX

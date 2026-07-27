@@ -40,6 +40,7 @@ static inline void sleep_us(long us) {
   std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
 
+#include "DeviceSession.h"
 #include "RadiotapBuilder.h"
 #include "RxPacket.h"
 #include "SignalStop.h"
@@ -301,19 +302,33 @@ int main() {
   apply_logging_env(*logger);
   install_devourer_signal_handlers();
 
+  // Owns the teardown order (device -> interface -> handle -> context; see
+  // DeviceSession.h): the role loops below only return once their RX thread is
+  // joined, so the adapter is released with nothing in flight.
+  devourer::DeviceSession session{logger};
+
   tdma::Config c = tdma::config_from_env();
   g_tsf_mode = (c.role == tdma::Role::RxSync && c.sync == tdma::Sync::Tsf);
 
   libusb_context* ctx = nullptr;
   std::shared_ptr<devourer::UsbDeviceLock> lock;
   auto* handle = open_device(logger, &ctx, lock);
-  if (!handle) { if (ctx) libusb_exit(ctx); return 1; }
+  session.adopt_context(ctx);
+  if (!handle) return 1;
+  session.adopt_handle(handle, devourer::find_wifi_interface(handle));
+  session.adopt_lock(lock);
 
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
-  if (!dev) { logger->error("no driver for this chip"); return 1; }
+  auto owned_device =
+      wifi.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
+  if (!owned_device) { logger->error("no driver for this chip"); return 1; }
+  // The session owns the device from here: it is what guarantees the device
+  // (and its in-flight TX) dies before libusb does.
+  session.adopt_device(std::move(owned_device));
+  IRtlDevice* const dev = session.device();
 
-  if (c.role == tdma::Role::Tx) run_tx(dev.get(), c);
-  else run_rx(dev.get(), c);
+  if (c.role == tdma::Role::Tx) run_tx(dev, c);
+  else run_rx(dev, c);
+  session.close();
   return 0;
 }

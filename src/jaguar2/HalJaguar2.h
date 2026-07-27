@@ -9,6 +9,7 @@
 #include "logger.h"
 #include "RtlAdapter.h"
 #include "RxSense.h"
+#include "TxPower.h"
 #include "ChipVariant.h"
 #include "Jaguar2PhyTables.h"
 
@@ -73,9 +74,16 @@ public:
    * `offset_steps` is the runtime TX-power offset (TXAGC index steps, 0.5 dB
    * each) behind IRtlDevice::SetTxPowerOffsetQdb: folded AFTER the min() with
    * the regulatory table, clamped only at the 6-bit rails (the saturation
-   * flags below record rail hits — reset per apply). */
+   * flags below record rail hits — reset per apply).
+   *
+   * A non-null `diffs` (IRtlDevice::SetTxPowerRateDiffs) REPLACES the
+   * calibrated per-rate shape: every rate is written at the section reference
+   * rate's index (HT MCS7 1SS, the anchor) plus the caller's own diff for that
+   * rate, quantized to this family's 0.5 dB step. Null keeps the calibrated
+   * walk, byte-for-byte. */
   void apply_tx_power(uint8_t channel, uint8_t bw = 0, uint8_t rfe_type = 0,
-                      int offset_steps = 0);
+                      int offset_steps = 0,
+                      const devourer::TxRateDiffsQdb *diffs = nullptr);
 
   /* Rail-hit flags from the last apply_tx_power/flat-compose (see
    * apply_tx_power). Atomic so a state snapshot may read them cross-thread. */
@@ -364,6 +372,29 @@ private:
   void coex_wlan_only_8821c(bool is_5g);
   /* _phy_lc_calibrate_8821c: RF-firmware LCK (RF 0xcc/0xc4), no poll. */
   void do_lck_8821c();
+
+  /* Write one path's TXAGC block from a caller-supplied per-rate table
+   * (SetTxPowerRateDiffs) instead of the calibrated walk. `anchor` is the
+   * section reference rate's index BEFORE the runtime offset and before the
+   * 6-bit rail clamp — clamping it first would rebuild the shape off a
+   * saturated base. Per rate:
+   *
+   *     idx = clamp(anchor + rate_diff_steps(diff, 2) + offset_steps, 0, 63)
+   *
+   * hw_rate -> (dword, byte) inside 0x1d00 + path*0x80, 4 rates per dword:
+   *   0x00..0x03 CCK 1/2/5.5/11M      -> +0x00
+   *   0x04..0x0b OFDM 6..54M          -> +0x04, +0x08
+   *   0x0c..0x13 HT MCS0..7 (1SS)     -> +0x0c, +0x10  (MCS7 = +0x10 byte 3)
+   *   0x14..0x1b HT MCS8..15 (2SS)    -> +0x14, +0x18  } at the anchor: the
+   *   0x2c..0x3f VHT1SS/2SS MCS0..9   -> +0x2c..+0x3c  } table is the 1SS ladder
+   *
+   * Rows the table does not describe are written explicitly at the anchor
+   * rather than left alone — the previous apply left a calibrated (per-section
+   * distinct) value there. `path_base` 0x1d00 also refreshes the path-A
+   * representative shadow, so both callers get txagc_shadow right for free. */
+  void write_txagc_diffs(uint16_t path_base, int anchor,
+                         const devourer::TxRateDiffsQdb &d, int offset_steps,
+                         bool skip_cck, bool two_ss);
 
   RtlAdapter _device;
   devourer::DeviceConfig _cfg; /* dump_canary / efuse_dump / hop_prof /

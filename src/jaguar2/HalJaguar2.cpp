@@ -15,6 +15,7 @@
 #include "ChannelFreq.h" /* chan_to_freq for the spur-notch center */
 #include "HopProf.h" /* DEVOURER_HOP_PROF fast-retune stage timing */
 #include "PhyTableLoader.h"
+#include "RateDefinitions.h" /* MGN_* rates for the per-rate TXAGC diff walk */
 #include "ToneMask.h" /* NBI notch + CSI mask appliers (spur calibration) */
 
 namespace jaguar2 {
@@ -2060,8 +2061,64 @@ void HalJaguar2::read_thermal(uint8_t &raw, uint8_t &baseline) {
   baseline = _efuse_map[0xBA]; /* EEPROM_THERMAL_METER_8822B/_8821C */
 }
 
+void HalJaguar2::write_txagc_diffs(uint16_t path_base, int anchor,
+                                   const devourer::TxRateDiffsQdb &d,
+                                   int offset_steps, bool skip_cck,
+                                   bool two_ss) {
+  auto idx_for = [&](uint8_t mgn_rate) -> uint32_t {
+    int v = anchor +
+            devourer::rate_diff_steps(
+                devourer::rate_diff_qdb_for_rate(mgn_rate, d), 2) +
+            offset_steps;
+    if (v < 0) { v = 0; _txpwr_sat_low = true; }
+    if (v > 63) { v = 63; _txpwr_sat_high = true; }
+    return static_cast<uint32_t>(v);
+  };
+  /* One dword = the four consecutive hw_rates it covers, low byte first. */
+  auto wr4 = [&](uint16_t off, uint8_t r0, uint8_t r1, uint8_t r2, uint8_t r3) {
+    const uint32_t v = idx_for(r0) | (idx_for(r1) << 8) | (idx_for(r2) << 16) |
+                       (idx_for(r3) << 24);
+    _device.rtw_write32(static_cast<uint16_t>(path_base + off), v);
+  };
+  /* Rates outside the caller's set resolve to a diff of 0 in idx_for, so the
+   * anchor rows below need no special-casing — MGN_MCS8 and the VHT rates all
+   * land at the anchor by the same path. */
+  if (!skip_cck)
+    wr4(0x00, MGN_1M, MGN_2M, MGN_5_5M, MGN_11M);
+  wr4(0x04, MGN_6M, MGN_9M, MGN_12M, MGN_18M);
+  wr4(0x08, MGN_24M, MGN_36M, MGN_48M, MGN_54M);
+  wr4(0x0c, MGN_MCS0, MGN_MCS1, MGN_MCS2, MGN_MCS3);
+  wr4(0x10, MGN_MCS4, MGN_MCS5, MGN_MCS6, MGN_MCS7);
+  if (two_ss) {
+    wr4(0x14, MGN_MCS8, MGN_MCS9, MGN_MCS10, MGN_MCS11);
+    wr4(0x18, MGN_MCS12, MGN_MCS13, MGN_MCS14, MGN_MCS15);
+  }
+  /* VHT1SS MCS0..9 then VHT2SS MCS0..9; dword 0x34 straddles the two
+   * sections (bytes 0-1 = 1SS MCS8/9, 2-3 = 2SS MCS0/1), same layout the
+   * calibrated walk uses. All at the anchor. */
+  wr4(0x2c, MGN_VHT1SS_MCS0, MGN_VHT1SS_MCS1, MGN_VHT1SS_MCS2, MGN_VHT1SS_MCS3);
+  wr4(0x30, MGN_VHT1SS_MCS4, MGN_VHT1SS_MCS5, MGN_VHT1SS_MCS6, MGN_VHT1SS_MCS7);
+  wr4(0x34, MGN_VHT1SS_MCS8, MGN_VHT1SS_MCS9, MGN_VHT2SS_MCS0, MGN_VHT2SS_MCS1);
+  if (two_ss) {
+    wr4(0x38, MGN_VHT2SS_MCS2, MGN_VHT2SS_MCS3, MGN_VHT2SS_MCS4,
+        MGN_VHT2SS_MCS5);
+    wr4(0x3c, MGN_VHT2SS_MCS6, MGN_VHT2SS_MCS7, MGN_VHT2SS_MCS8,
+        MGN_VHT2SS_MCS9);
+  }
+  if (path_base == 0x1d00) { /* representative shadow — the block is write-only */
+    _txagc_shadow_cck = skip_cck ? -1 : static_cast<int>(idx_for(MGN_1M));
+    _txagc_shadow_ofdm = static_cast<int>(idx_for(MGN_6M));
+    _txagc_shadow_mcs7 = static_cast<int>(idx_for(MGN_MCS7));
+    _logger->info("Jaguar2: custom per-rate TXAGC (anchor {} offset {}): "
+                  "CCK={} OFDM={} MCS7={}",
+                  anchor, offset_steps, _txagc_shadow_cck.load(),
+                  _txagc_shadow_ofdm.load(), _txagc_shadow_mcs7.load());
+  }
+}
+
 void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type,
-                                int offset_steps) {
+                                int offset_steps,
+                                const devourer::TxRateDiffsQdb *diffs) {
   /* Port of phy_get_pg_txpwr_idx (hal_com_phycfg.c) + the 4-byte TXAGC write
    * (config_phydm_write_txagc_8822b): TXAGC[rate] = pg-base(rate-section) +
    * per-Nss diff, clamped to the txpwr_lmt regulatory limit, written to 0x1d00
@@ -2160,35 +2217,57 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type,
        * wsec computes for hw_rate 0x00 (CCK 1M) / 0x04 (OFDM 6M) / 0x13
        * (MCS7) — byte 0 of the section's first dword resp. byte 3 of the HT
        * section's second dword. */
-      auto sec_idx = [&](int base, int rs, int lm, uint32_t dw, int b) -> int {
+      auto sec_idx_raw = [&](int base, int rs, int lm, uint32_t dw,
+                             int b) -> int {
         int byr = static_cast<int>((dw >> (b * 8)) & 0xff);
         int rt = byr < lm ? byr : lm;
-        int idx = base + (rt - rs) + offset_steps;
+        return base + (rt - rs);
+      };
+      auto sec_idx = [&](int base, int rs, int lm, uint32_t dw, int b) -> int {
+        int idx = sec_idx_raw(base, rs, lm, dw, b) + offset_steps;
         return idx < 0 ? 0 : (idx > 63 ? 63 : idx);
       };
-      if (!g5c) {
-        const uint32_t cck[] = {0x32343638};
-        const uint32_t ofdm[] = {0x36363636, 0x28303234};
-        const uint32_t ht[] = {0x34363636, 0x26283032};
-        const uint32_t vht[] = {0x34363636, 0x26283032, 0x22222224};
-        wsec(0x00, cck_base, 50, lmtc(0), cck, 1);
-        wsec(0x04, ofdm_base, 40, lmtc(1), ofdm, 2);
-        wsec(0x0c, ht_base, 38, lmtc(2), ht, 2);
-        wsec(0x2c, ht_base, 38, lmtc(2), vht, 3); /* VHT1SS: HT base/lmt */
-        _txagc_shadow_cck = sec_idx(cck_base, 50, lmtc(0), cck[0], 0);
-        _txagc_shadow_ofdm = sec_idx(ofdm_base, 40, lmtc(1), ofdm[0], 0);
-        _txagc_shadow_mcs7 = sec_idx(ht_base, 38, lmtc(2), ht[1], 3);
-      } else {
-        const uint32_t ofdm[] = {0x34343434, 0x26283032};
-        const uint32_t ht[] = {0x32343434, 0x24262830};
-        const uint32_t vht[] = {0x32343434, 0x24262830, 0x20202022};
-        wsec(0x04, ofdm_base, 38, lmtc(1), ofdm, 2);
-        wsec(0x0c, ht_base, 36, lmtc(2), ht, 2);
-        wsec(0x2c, ht_base, 36, lmtc(2), vht, 3);
-        _txagc_shadow_cck = -1; /* no CCK at 5G */
-        _txagc_shadow_ofdm = sec_idx(ofdm_base, 38, lmtc(1), ofdm[0], 0);
-        _txagc_shadow_mcs7 = sec_idx(ht_base, 36, lmtc(2), ht[1], 3);
+      /* by_rate dwords + section reference rates, per band. */
+      const uint32_t cck[] = {0x32343638};
+      const uint32_t ofdm[] = {g5c ? 0x34343434u : 0x36363636u,
+                               g5c ? 0x26283032u : 0x28303234u};
+      const uint32_t ht[] = {g5c ? 0x32343434u : 0x34363636u,
+                             g5c ? 0x24262830u : 0x26283032u};
+      const uint32_t vht[] = {ht[0], ht[1], g5c ? 0x20202022u : 0x22222224u};
+      const int rs_cck = 50;
+      const int rs_ofdm = g5c ? 38 : 40;
+      const int rs_ht = g5c ? 36 : 38;
+      /* A caller table replaces the by_rate shape wholesale: the anchor is the
+       * section reference rate (HT MCS7 = byte 3 of the HT section's second
+       * dword) taken pre-offset and pre-rail, and every rate is written from
+       * it. The per-rate regulatory min() goes with the shape it belonged to —
+       * the anchor is still lmt-clamped, but a caller diff may push a rate
+       * above the worldwide-min table, the same operator's call the offset and
+       * flat-override knobs already make. */
+      if (diffs) {
+        const int anchor = sec_idx_raw(ht_base, rs_ht, lmtc(2), ht[1], 3);
+        write_txagc_diffs(0x1d00, anchor, *diffs, offset_steps,
+                          /*skip_cck=*/g5c, /*two_ss=*/false);
+        _logger->info("Jaguar2/8821C: custom per-rate TXAGC ch{} {} anchor={} "
+                      "(ht_base={} rs={} lmt_ht={})",
+                      channel, g5c ? "5G" : "2.4G", anchor, ht_base, rs_ht,
+                      lmtc(2));
+        return;
       }
+      if (!g5c) {
+        wsec(0x00, cck_base, rs_cck, lmtc(0), cck, 1);
+        wsec(0x04, ofdm_base, rs_ofdm, lmtc(1), ofdm, 2);
+        wsec(0x0c, ht_base, rs_ht, lmtc(2), ht, 2);
+        wsec(0x2c, ht_base, rs_ht, lmtc(2), vht, 3); /* VHT1SS: HT base/lmt */
+        _txagc_shadow_cck = sec_idx(cck_base, rs_cck, lmtc(0), cck[0], 0);
+      } else {
+        wsec(0x04, ofdm_base, rs_ofdm, lmtc(1), ofdm, 2);
+        wsec(0x0c, ht_base, rs_ht, lmtc(2), ht, 2);
+        wsec(0x2c, ht_base, rs_ht, lmtc(2), vht, 3);
+        _txagc_shadow_cck = -1; /* no CCK at 5G */
+      }
+      _txagc_shadow_ofdm = sec_idx(ofdm_base, rs_ofdm, lmtc(1), ofdm[0], 0);
+      _txagc_shadow_mcs7 = sec_idx(ht_base, rs_ht, lmtc(2), ht[1], 3);
       _logger->info("Jaguar2/8821C: per-rate TXAGC (vendor formula) ch{} {} "
                     "cck_base={} ofdm_base={} ht_base={} lmt cck/ofdm/ht={}/{}/{}",
                     channel, g5c ? "5G" : "2.4G", cck_base, ofdm_base, ht_base,
@@ -2280,7 +2359,12 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type,
     const uint8_t cck_base = g5 ? 0 : map[blk + cck_group];
     const uint8_t bw40_base = g5 ? map[blk + group] : map[blk + 6 + group];
     if (bw40_base == 0xFF || (!g5 && cck_base == 0xFF)) {
-      if (offset_steps != 0)
+      if (diffs)
+        _logger->warn("Jaguar2: per-rate diff table has no EFUSE baseline to "
+                      "anchor on path {} (unprogrammed) — TXAGC left at "
+                      "BB-table default, the caller's shape is NOT applied",
+                      path);
+      else if (offset_steps != 0)
         _logger->warn("Jaguar2: TX-power offset has no EFUSE baseline to fold "
                       "into on path {} (unprogrammed) — TXAGC left at BB-table "
                       "default", path);
@@ -2302,6 +2386,24 @@ void HalJaguar2::apply_tx_power(uint8_t channel, uint8_t bw, uint8_t rfe_type,
      * BW80_Diff is a further refinement; the base is a close conservative value.) */
     const int ht_diff0 = (bw == 0) ? bw20_diff0 : 0;
     const int ht_diff1 = (bw == 0) ? bw20_diff1 : 0;
+
+    /* A caller table replaces the calibrated shape on this path: anchor on the
+     * HT 1SS section (the reference rate) pre-offset and pre-rail, then every
+     * rate from it. Computed before the clamp_lmt block below so the unused
+     * cck/ofdm/ht indices never set a bogus saturation flag. */
+    if (diffs) {
+      int anchor = bw40_base + ht_diff0;
+      if (anchor > lmt_ht)
+        anchor = lmt_ht;
+      write_txagc_diffs(static_cast<uint16_t>(0x1d00 + path * 0x80), anchor,
+                        *diffs, offset_steps, /*skip_cck=*/g5,
+                        /*two_ss=*/npath == 2);
+      _logger->info("Jaguar2: custom per-rate TXAGC path {} ch{} {} anchor={} "
+                    "(bw40_base={} lmt_ht={})",
+                    path, channel, g5 ? "5G" : "2G", anchor, bw40_base, lmt_ht);
+      continue;
+    }
+
     const uint8_t cck_idx = clamp_lmt(cck_base, lmt_cck);
     const uint8_t ofdm_idx = clamp_lmt(bw40_base + ofdm_diff0, lmt_ofdm);
     const uint8_t ht1_idx = clamp_lmt(bw40_base + ht_diff0, lmt_ht);

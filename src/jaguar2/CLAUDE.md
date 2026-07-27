@@ -45,6 +45,26 @@ Jaguar1 (shared `PhyTableLoader`).
   mailboxes (0x1d0/0x1f0 + 0x1cc busy bits), distinct from MacInit's 32-byte
   h2c-pkt queue.
 
+## TX power
+
+Per-rate indices are computed in software and written 4 rates per dword into
+`0x1d00` (path A) / `0x1d80` (path B). Two shapes feed that block: the 8821C's
+programmed-efuse vendor formula (`base + (min(by_rate, lmt) - rs)`) and the
+shared efuse walk both variants use otherwise.
+
+A caller table (`SetTxPowerRateDiffs`) replaces either shape via
+`write_txagc_diffs`, anchored on the HT 1SS section index taken **pre-offset
+and pre-rail** — clamping the anchor first would rebuild the shape off a
+saturated base. Resolution is the family's 0.5 dB step. Rows the table does not
+describe (MCS8-15, VHT) are written explicitly AT the anchor rather than left
+alone, because the previous apply left per-section-distinct values there. On an
+unprogrammed EFUSE there is no baseline to anchor on: that path warns loudly
+and leaves TXAGC at the BB-table default rather than silently flattening.
+
+`SetMonitorChannel` and a cross-band `FastRetune` re-apply only when a knob is
+active — the table counts as one, or a channel change would silently revert to
+the calibrated shape.
+
 ## Per-packet TX power
 
 The 8822B/8821C descriptor `TXPWR_OFSET` is a hardware LUT

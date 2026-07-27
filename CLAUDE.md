@@ -307,18 +307,29 @@ rewrites TXAGC). `GetTxPowerCaps` reports the family step: 0.5 dB Jaguar1/2,
 0.25 dB Jaguar3. The Jaguar2 TXAGC block and the 8814A's packed port are
 write-only, so their `GetTxPowerState` reports the software shadow
 (`hw_readback=false`). `SetTxPowerRateDiffs(optional<TxRateDiffsQdb>)` is the
-8822E-only third knob: a caller-supplied per-rate diff table (cck, legacy,
-mcs0..7, signed qdB) that replaces the default `phy_reg_pg` per-rate walk,
-folded on top of whichever reference (efuse table or flat override) is
-active. It sticks across `SetMonitorChannel`, `FastRetune`, and an
-override set/clear round trip (`SetTxPowerIndexOverride`'s clear path does a
-full re-apply that re-walks the caller table); `std::nullopt` restores the
-default walk, and every other generation's `SetTxPowerRateDiffs` just
-returns `false`. `txpower` (examples/txpower/) is the reference consumer —
-`--rate-diffs cck,legacy,m0..m7|clear` for this knob, `--offset-start`/
-`--offset-stop` and `--flat` for the other two; register-level validation:
-`tests/txpwr_offset_regcheck.sh` (offset/override) and
-`tests/txpwr_rate_diffs_regcheck.sh` (diff table).
+third knob, on every generation (check `GetTxPowerCaps().rate_diffs`): a
+caller-supplied per-rate table (cck, legacy, mcs0..7, signed qdB) that
+**replaces** the chip's calibrated per-rate shape — every rate's level =
+**anchor** + its diff (quantized to the family step) + the runtime offset,
+clamped to the hardware rail, where the anchor is the level the chip's own
+default walk produces for HT MCS7. So a zero table is a no-op at MCS7 and
+flattens every other rate onto it; rates the struct doesn't describe (MCS8+,
+VHT/HE, 2SS+) sit at the anchor. Diffs are not regulatory-clamped — the same
+operator's call the other two knobs make. It sticks across
+`SetMonitorChannel`, `FastRetune`, and an override set/clear round trip
+(the clear path re-walks the caller table); `std::nullopt` restores the
+calibrated shape. **Kestrel is the one software fold**
+(`rate_diffs_hw_table=false`): with no per-rate TXAGC table under its
+fixed-dBm model the diff for the frame's own rate goes into the BB target at
+send time, so a fixed-rate stream costs one extra write and a rate ladder
+pays one per change — and a hardware-timed beacon airing between host frames
+inherits the last frame's level. `txpower` (examples/txpower/) is the
+reference consumer — `--rate-diffs cck,legacy,m0..m7|clear` for this knob,
+`--offset-start`/`--offset-stop` and `--flat` for the other two; `txdemo`
+maps it as `DEVOURER_TX_RATE_DIFFS`. Validation: `tests/txpwr_offset_regcheck.sh`
+(offset/override), `tests/txpwr_rate_diffs_regcheck.sh` (diff table registers /
+shadow — state management, NOT radiated power on a write-only family) and
+`tests/txpwr_rate_diffs_onair.sh` (the antenna, per rate).
 
 **Per-packet TX power** (a radiotap `DBM_TX_POWER` dB-delta per frame, zero
 USB cost once armed; see the `per_pkt_txpwr_*` caps): Jaguar2 and the 8814A

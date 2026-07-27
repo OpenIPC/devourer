@@ -37,6 +37,25 @@ methods), `RadioManagementModule` (channel/BW/TX power, up to 4 RF paths),
   8814A decodes LDPC but reports no per-frame flag (`ldpc_rx_flag=0`,
   `RxAtrib.ldpc` reads 0).
 
+## TX power
+
+Every per-rate index funnels through one composer, `ComputeTxPowerIndex(path,
+rate, ntx)` — flat override, else the caller per-rate table, else the EFUSE
+walk — then `+ txpwr_offset_steps_`, clamped to the 6-bit rail. The register
+write is per rate on both ports (the 8812A/8821A `0xc20..0xc4c` fanout, the
+8814A packed `0x1998`), so a caller table (`SetTxPowerRateDiffs`) needs no
+write-path change and is sticky by construction: every channel-set re-runs the
+same walk.
+
+Its **anchor** is `GetTxPowerIndexBase(path, MGN_MCS7, 1SS, bw, ch)` — the
+EFUSE index of the section reference rate at the current channel and
+bandwidth, cached once per apply pass (4 lookups on a 4-path 8814A instead of
+one per rate). Resolution is the family's 0.5 dB step, so an odd qdB rounds.
+
+`FastSetTxPowerOffsetQdb` drives the BB-swing TxScale words, a global scaler
+DOWNSTREAM of the per-rate TXAGC table: it composes with a caller table but is
+rate-independent, so neither can implement the other.
+
 ## Per-packet TX power
 
 - **8814A**: the 3-bit descriptor `TXPWR_OFSET` LUT at the 8822B position

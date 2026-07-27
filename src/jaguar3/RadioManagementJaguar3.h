@@ -110,23 +110,23 @@ public:
    * path-B base, e.g. 0x4b/0x54 at ch36). */
   void apply_power_by_rate_8822e(uint8_t channel, uint8_t ref_a, uint8_t ref_b);
 
-  /* Light TX-power step (8822e): just the gated reference writes of
-   * apply_power_by_rate_8822e — 0x18e8/0x41e8[16:10] (OFDM per path),
-   * 0x18a0/0x41a0[22:16] (CCK) — WITHOUT the 0x3a00 per-rate diff walk. The
-   * diff table is offset-invariant (an offset shifts the reference anchor;
-   * the calibrated per-rate shape rides on top), so a runtime offset step is
-   * ~8 register ops instead of the full by-rate apply. Refs are clamped to
-   * the 7-bit field here — the BB masked write truncates mod 128, so an
-   * unclamped over-range ref would wrap to near-zero TX silently. */
-  void apply_tx_power_refs_8822e(uint8_t ref_a, uint8_t ref_b);
+  /* Light TX-power step: just the gated reference writes —
+   * 0x18e8/0x41e8[16:10] (OFDM per path), 0x18a0/0x41a0[22:16] (CCK) —
+   * WITHOUT the 0x3a00 per-rate diff walk. The diff table is offset-invariant
+   * (an offset shifts the reference anchor; the per-rate shape rides on top),
+   * so a runtime offset step is ~8 register ops instead of a full apply. Refs
+   * are clamped to the 7-bit field here — the BB masked write truncates mod
+   * 128, so an unclamped over-range ref would wrap to near-zero TX silently.
+   * The block is the one both dies share (set_tx_power_ref's registers). */
+  void apply_tx_power_refs(uint8_t ref_a, uint8_t ref_b);
 
-  /* Like apply_power_by_rate_8822e, but the per-rate diff table comes from
-   * the caller instead of phy_reg_pg: refs on both paths, then diff words
-   * for CCK (0x3a00 word 0), legacy OFDM 6..54M and HT MCS0..7 rows. VHT
-   * rows are zeroed (HT-only caller set). qdB == index steps on this
-   * family (step_qdb = 1). */
-  void apply_rate_diffs_8822e(uint8_t ref_a, uint8_t ref_b,
-                              const devourer::TxRateDiffsQdb& diffs);
+  /* Refs plus a caller-supplied per-rate diff table (SetTxPowerRateDiffs)
+   * instead of a calibrated shape: diff words for CCK (0x3a00 word 0), legacy
+   * OFDM 6..54M and HT MCS0..7 rows, everything else zeroed (= at the
+   * reference). Drives the same registers on both dies. qdB == index steps on
+   * this family (step_qdb = 1), so the caller's values are used verbatim. */
+  void apply_rate_diffs(uint8_t ref_a, uint8_t ref_b,
+                        const devourer::TxRateDiffsQdb& diffs);
 
 private:
   /* 8822E channel-switch helpers (straight phydm ports, 8822E-gated):

@@ -1297,12 +1297,12 @@ void RtlJaguar3Device::apply_tx_power_current(bool full) {
        * caller-supplied diff table when SetTxPowerRateDiffs has one set;
        * otherwise the default phy_reg_pg walk. */
       if (_rate_diffs)
-        _radioManagement.apply_rate_diffs_8822e(ra, rb, *_rate_diffs);
+        _radioManagement.apply_rate_diffs(ra, rb, *_rate_diffs);
       else
         _radioManagement.apply_power_by_rate_8822e(_channel.Channel, ra, rb);
       _diffs_zeroed = false;
     } else {
-      _radioManagement.apply_tx_power_refs_8822e(ra, rb);
+      _radioManagement.apply_tx_power_refs(ra, rb);
     }
     return;
   }
@@ -1310,9 +1310,20 @@ void RtlJaguar3Device::apply_tx_power_current(bool full) {
   /* 8822c (CU): preserve the flat reference the demo used to impose (40) so
    * the SDR-validated CU TX power is unchanged. The CU's efuse-calibrated
    * per-rate default is a follow-up; the offset shifts this reference. */
-  _radioManagement.set_tx_power_ref(
-      clamp127(static_cast<int>(JAGUAR3_TXPWR_REF_BASE_8822C) + off),
-      /*zero_diffs=*/!_diffs_zeroed);
+  const uint8_t rc = clamp127(static_cast<int>(JAGUAR3_TXPWR_REF_BASE_8822C) + off);
+  if (_rate_diffs) {
+    /* A caller table shapes the CU through the same TXAGC block the EU uses
+     * (set_tx_power_ref is the rtw8822c routine): the flat reference becomes
+     * the MCS7 anchor and the caller's qdB land in the 0x3a00 diff table. */
+    if (full || _diffs_zeroed) {
+      _radioManagement.apply_rate_diffs(rc, rc, *_rate_diffs);
+      _diffs_zeroed = false;
+    } else {
+      _radioManagement.apply_tx_power_refs(rc, rc);
+    }
+    return;
+  }
+  _radioManagement.set_tx_power_ref(rc, /*zero_diffs=*/!_diffs_zeroed);
   _diffs_zeroed = true;
 }
 
@@ -1331,6 +1342,16 @@ devourer::TxPowerCaps RtlJaguar3Device::GetTxPowerCaps() {
   caps.step_measured = _variant == jaguar3::ChipVariant::C8822C;
   caps.offset_min_qdb = -127;
   caps.offset_max_qdb = 127;
+  /* Both dies drive the same TXAGC reference + 0x3a00 per-rate diff block. */
+  caps.rate_diffs = true;
+  caps.rate_diffs_hw_table = true;
+  /* On-air (tests/txpwr_rate_diffs_onair.sh): the 8822CU reads -8.0 dB for a
+   * -32 qdB MCS0 trim (implied 0.25 dB/idx — the nominal step; the offset
+   * knob's 6-point fit gave 0.325, and one A/B point does not arbitrate
+   * between them). The 8822EU moves -9.0 dB but its ref->power transfer is
+   * TSSI-reshaped and non-linear, so its cell asserts sign only and the
+   * measured flag stays false there, exactly as step_measured does. */
+  caps.rate_diffs_measured = _variant == jaguar3::ChipVariant::C8822C;
   return caps;
 }
 
@@ -1371,10 +1392,6 @@ void RtlJaguar3Device::SetTxPowerIndexOverride(int idx) {
 
 bool RtlJaguar3Device::SetTxPowerRateDiffs(
     const std::optional<devourer::TxRateDiffsQdb> &diffs) {
-  if (_variant != jaguar3::ChipVariant::C8822E) {
-    _logger->warn("SetTxPowerRateDiffs: 8822E-only");
-    return false;
-  }
   if (_cw_active) {
     _logger->warn("SetTxPowerRateDiffs refused: CW tone active");
     return false;
@@ -1384,16 +1401,7 @@ bool RtlJaguar3Device::SetTxPowerRateDiffs(
    * the sign of an over-range int8_t: a caller asking for -100 (a big cut)
    * would land +28 (a power boost). Same guard the ref path applies against
    * its own over-range wrap. */
-  std::optional<devourer::TxRateDiffsQdb> clamped = diffs;
-  if (clamped) {
-    auto cl = [](int8_t v) -> int8_t {
-      return v < -64 ? -64 : (v > 63 ? 63 : v);
-    };
-    clamped->cck = cl(clamped->cck);
-    clamped->legacy = cl(clamped->legacy);
-    for (int i = 0; i < 8; ++i)
-      clamped->mcs[i] = cl(clamped->mcs[i]);
-  }
+  const auto clamped = devourer::clamp_rate_diffs(diffs);
   std::lock_guard<std::mutex> lk(_reg_mu);
   _rate_diffs = clamped;
   if (_brought_up)
@@ -1619,7 +1627,7 @@ devourer::TxPowerState RtlJaguar3Device::GetTxPowerState() {
     const uint32_t cck =
         (_device.rtw_read32(0x18a0) >> 16) & 0x7f;
     if (_rate_diffs && s.flat_index < 0) {
-      /* A custom per-rate diff table is live (8822E SetTxPowerRateDiffs) and
+      /* A custom per-rate diff table is live (SetTxPowerRateDiffs) and
        * no flat override is overriding it on the chip: the shared reference
        * alone is no longer the effective index for any rate, so report
        * ref + diff[rate] instead of the artifact where cck/ofdm/mcs7 all read

@@ -829,6 +829,47 @@ int main(int argc, char **argv) {
     rtlDevice->SetTxPowerOffsetQdb(
         static_cast<int>(std::strtol(p, nullptr, 0)));
 
+  /* DEVOURER_TX_RATE_DIFFS=cck,legacy,m0,...,m7 — ten signed qdB replacing the
+   * chip's calibrated per-rate shape (SetTxPowerRateDiffs, src/TxPower.h):
+   * every rate sits at the HT MCS7 anchor plus its own diff. The range lever
+   * for a fixed-rate link — boost CCK / low-MCS, trim high-MCS for PA
+   * headroom — independent of the descriptor rate. Composes with
+   * DEVOURER_TX_PWR_OFFSET_QDB above; unset leaves the calibrated shape.
+   * Quantized to the family step (0.25 dB Jaguar3/Kestrel, 0.5 dB
+   * Jaguar1/Jaguar2), so an odd qdB rounds. */
+  if (const char *p = std::getenv("DEVOURER_TX_RATE_DIFFS")) {
+    devourer::TxRateDiffsQdb d;
+    int v[10] = {0};
+    int n = 0;
+    const char *cur = p;
+    char *end = nullptr;
+    while (n < 10) {
+      v[n++] = static_cast<int>(std::strtol(cur, &end, 10));
+      if (*end != ',')
+        break;
+      cur = end + 1;
+    }
+    bool in_range = true;
+    for (int j = 0; j < n; ++j)
+      if (v[j] < -64 || v[j] > 63)
+        in_range = false; /* the int8_t cast below would wrap the sign */
+    if (n != 10 || (end && *end != '\0')) {
+      logger->error("DEVOURER_TX_RATE_DIFFS wants 10 comma-separated qdB "
+                    "(cck,legacy,m0..m7) — ignoring '{}'", p);
+    } else if (!in_range) {
+      logger->error("DEVOURER_TX_RATE_DIFFS values must be in [-64, 63] qdB "
+                    "— ignoring '{}'", p);
+    } else {
+      d.cck = static_cast<int8_t>(v[0]);
+      d.legacy = static_cast<int8_t>(v[1]);
+      for (int j = 0; j < 8; ++j)
+        d.mcs[j] = static_cast<int8_t>(v[2 + j]);
+      if (!rtlDevice->SetTxPowerRateDiffs(d))
+        logger->warn("DEVOURER_TX_RATE_DIFFS: per-rate diffs unsupported on "
+                     "this chip");
+    }
+  }
+
   /* DEVOURER_TX_PKT_OFSET=N — default per-packet TX-power LUT step written
    * into every TX descriptor: 0=none, 1=-3dB, 2=-7dB, 3=-11dB, 4=+3dB,
    * 5=+6dB. One env var, four families: Jaguar2 8822B/8821C

@@ -138,6 +138,12 @@ public:
   devourer::TxPowerCaps GetTxPowerCaps() override;
   int SetTxPowerOffsetQdb(int qdb) override;
   void SetTxPowerIndexOverride(int idx) override;
+  /* Caller-supplied per-rate power shape (src/TxPower.h): replaces the EFUSE
+   * per-rate walk, anchored on the HT MCS7 index and quantized to this
+   * family's 0.5 dB step. Carried by the same per-rate walk every channel-set
+   * runs, so it is sticky by construction; std::nullopt restores the walk. */
+  bool SetTxPowerRateDiffs(
+      const std::optional<devourer::TxRateDiffsQdb> &diffs) override;
   bool ReApplyTxPower() override;
   /* Per-packet TX-power offset default — 8814A ONLY (its dword5 [30:28]
    * descriptor LUT at the 8822B TXPWR_OFSET position: 0=none 1=-3 2=-7

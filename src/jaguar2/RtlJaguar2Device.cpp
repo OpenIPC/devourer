@@ -316,7 +316,8 @@ void RtlJaguar2Device::apply_tx_power_current() {
     return;
   }
   _hal.apply_tx_power(static_cast<uint8_t>(_channel.Channel),
-                      static_cast<uint8_t>(_channel.ChannelWidth), _rfe, off);
+                      static_cast<uint8_t>(_channel.ChannelWidth), _rfe, off,
+                      _rate_diffs ? &*_rate_diffs : nullptr);
 }
 
 void RtlJaguar2Device::apply_replay_wseq() {
@@ -846,8 +847,11 @@ void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
    * efuse group so the offset stays relative to the calibrated table (TXAGC
    * registers are not per-channel — a cross-group move would otherwise keep
    * the old group's absolute level). Gated on a knob being active so the
-   * legacy no-knob path stays byte-identical to the pure tune above. */
-  if (_brought_up && (_tx_pwr_offset_steps != 0 || _tx_pwr_override >= 0))
+   * legacy no-knob path stays byte-identical to the pure tune above. A caller
+   * per-rate table is one of those knobs: without it here, a channel change
+   * would silently revert to the calibrated shape. */
+  if (_brought_up && (_tx_pwr_offset_steps != 0 || _tx_pwr_override >= 0 ||
+                      _rate_diffs_on))
     apply_tx_power_current();
 }
 
@@ -865,7 +869,7 @@ void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
      * re-fold active power knobs against the new band's table (the same
      * gating SetMonitorChannel applies). */
     if (band_change && _brought_up &&
-        (_tx_pwr_offset_steps != 0 || _tx_pwr_override >= 0))
+        (_tx_pwr_offset_steps != 0 || _tx_pwr_override >= 0 || _rate_diffs_on))
       apply_tx_power_current();
     return;
   }
@@ -988,6 +992,14 @@ devourer::TxPowerCaps RtlJaguar2Device::GetTxPowerCaps() {
   caps.step_measured = true;
   caps.offset_min_qdb = -126;
   caps.offset_max_qdb = 126;
+  /* Per-rate indices are computed in software and written to the 0x1d00/0x1d80
+   * TXAGC block, so a caller table replaces the efuse walk at no per-frame
+   * cost — but at the family's 0.5 dB resolution, not the caller's qdB. */
+  caps.rate_diffs = true;
+  caps.rate_diffs_hw_table = true;
+  /* On-air (tests/txpwr_rate_diffs_onair.sh): 8822BU -9.0 dB for a -32 qdB
+   * MCS0 trim vs -8.0 nominal, 6M unmoved. */
+  caps.rate_diffs_measured = true;
   return caps;
 }
 
@@ -1024,6 +1036,34 @@ void RtlJaguar2Device::SetTxPowerIndexOverride(int idx) {
     apply_tx_power_current();
 }
 
+bool RtlJaguar2Device::SetTxPowerRateDiffs(
+    const std::optional<devourer::TxRateDiffsQdb> &diffs) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_cw_active) {
+    _logger->warn("SetTxPowerRateDiffs refused: CW tone active");
+    return false;
+  }
+  _rate_diffs = devourer::clamp_rate_diffs(diffs);
+  _rate_diffs_on = _rate_diffs.has_value();
+  if (_rate_diffs)
+    /* Report the APPLIED values: this family quantizes to 0.5 dB, so an odd
+     * qdB rounds and a table measured on a 0.25 dB part will not replay
+     * verbatim here. */
+    _logger->info("TX-power per-rate diffs set (cck {} legacy {} mcs0 {} "
+                  "mcs7 {} qdB -> {} {} {} {} index steps)",
+                  _rate_diffs->cck, _rate_diffs->legacy, _rate_diffs->mcs[0],
+                  _rate_diffs->mcs[7],
+                  devourer::rate_diff_steps(_rate_diffs->cck, 2),
+                  devourer::rate_diff_steps(_rate_diffs->legacy, 2),
+                  devourer::rate_diff_steps(_rate_diffs->mcs[0], 2),
+                  devourer::rate_diff_steps(_rate_diffs->mcs[7], 2));
+  else
+    _logger->info("TX-power per-rate diffs cleared (efuse walk restored)");
+  if (_brought_up)
+    apply_tx_power_current();
+  return true;
+}
+
 bool RtlJaguar2Device::ReApplyTxPower() {
   std::lock_guard<std::mutex> lk(_reg_mu);
   if (!_brought_up || _cw_active)
@@ -1049,6 +1089,7 @@ devourer::TxPowerState RtlJaguar2Device::GetTxPowerState() {
   s.ofdm_index = static_cast<int16_t>(ofdm);
   s.mcs7_index = static_cast<int16_t>(mcs7);
   s.hw_readback = false;
+  s.rate_diffs_custom = _rate_diffs_on.load();
   return s;
 }
 

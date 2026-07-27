@@ -532,6 +532,11 @@ devourer::TxPowerCaps RtlKestrelDevice::GetTxPowerCaps() {
   const int16_t base = _hal.txpwr_base_qdb();
   c.offset_min_qdb = static_cast<int16_t>(kKestrelTxMinQdb - base);
   c.offset_max_qdb = static_cast<int16_t>(kKestrelTxMaxQdb - base);
+  c.rate_diffs = true;
+  c.rate_diffs_hw_table = false; /* software send-time fold, not a TXAGC table */
+  /* On-air (tests/txpwr_rate_diffs_onair.sh): 8852BU -7.0 dB, 8832CU -8.0 dB
+   * for a -32 qdB MCS0 trim vs -8.0 nominal, 6M unmoved on both dies. */
+  c.rate_diffs_measured = true;
   return c;
 }
 
@@ -553,6 +558,46 @@ int RtlKestrelDevice::SetTxPowerOffsetQdb(int qdb) {
   return applied;
 }
 
+bool RtlKestrelDevice::SetTxPowerRateDiffs(
+    const std::optional<devourer::TxRateDiffsQdb> &diffs) {
+  /* No per-rate TXAGC table exists under the fixed-dBm BB model, so the table
+   * is stored here and folded into the target per frame from the frame's own
+   * rate (send_packet). One qdB is one step on this family, so the caller's
+   * values are used verbatim. Publishing the entries before the enable flag
+   * means send_packet never reads a half-written table. */
+  const auto clamped = devourer::clamp_rate_diffs(diffs);
+  if (!clamped) {
+    _rate_diffs_on.store(false, std::memory_order_release);
+    _logger->info("Kestrel: per-rate TX-power diffs cleared");
+    return true;
+  }
+  _rate_diff_qdb[0].store(clamped->cck, std::memory_order_relaxed);
+  _rate_diff_qdb[1].store(clamped->legacy, std::memory_order_relaxed);
+  for (int i = 0; i < 8; ++i)
+    _rate_diff_qdb[2 + i].store(clamped->mcs[i], std::memory_order_relaxed);
+  _rate_diffs_on.store(true, std::memory_order_release);
+  _logger->info("Kestrel: per-rate TX-power diffs set (cck {} legacy {} "
+                "mcs0 {} mcs7 {} qdB, folded per frame into the fixed-dBm "
+                "target)",
+                clamped->cck, clamped->legacy, clamped->mcs[0],
+                clamped->mcs[7]);
+  return true;
+}
+
+/* The caller diff (qdB) for one MGN_* rate, or 0 when no table is configured.
+ * HE and VHT rates carry no diff by contract — the table describes the CCK,
+ * legacy and 1SS-HT ladder only. */
+int RtlKestrelDevice::rate_diff_qdb_for(uint8_t mgn_rate) const {
+  if (!_rate_diffs_on.load(std::memory_order_acquire))
+    return 0;
+  devourer::TxRateDiffsQdb d;
+  d.cck = _rate_diff_qdb[0].load(std::memory_order_relaxed);
+  d.legacy = _rate_diff_qdb[1].load(std::memory_order_relaxed);
+  for (int i = 0; i < 8; ++i)
+    d.mcs[i] = _rate_diff_qdb[2 + i].load(std::memory_order_relaxed);
+  return devourer::rate_diff_qdb_for_rate(mgn_rate, d);
+}
+
 devourer::TxPowerState RtlKestrelDevice::GetTxPowerState() {
   devourer::TxPowerState s;
   s.valid = true;
@@ -561,6 +606,7 @@ devourer::TxPowerState RtlKestrelDevice::GetTxPowerState() {
   s.offset_steps = s.offset_qdb; /* 1 step == 1 qdB here */
   s.saturated_low = _hal.txpwr_effective_qdb() <= kKestrelTxMinQdb;
   s.saturated_high = _hal.txpwr_effective_qdb() >= kKestrelTxMaxQdb;
+  s.rate_diffs_custom = _rate_diffs_on.load(std::memory_order_acquire);
   return s;
 }
 
@@ -964,16 +1010,24 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
    * the requested level changes (free while it stays constant), and restore
    * the session offset for a frame without the field. Global, like the J1
    * BB-swing lever: a HW beacon airing between frames follows the last-written
-   * level. Clamped to the same PA-valid window as SetTxPowerOffsetQdb. */
+   * level. Clamped to the same PA-valid window as SetTxPowerOffsetQdb.
+   *
+   * A SetTxPowerRateDiffs table rides the same rewrite: this family has no
+   * per-rate TXAGC table, so the diff for THIS frame's rate is what shapes it.
+   * A fixed-rate stream therefore still writes once and then costs nothing; an
+   * alternating-rate stream pays the rewrite at each change. A radiotap
+   * DBM_TX_POWER field is an absolute per-frame level and still wins outright,
+   * so a caller can steer a single frame out of the table's shape. */
   {
-    int16_t target = _sess_pwr_qdb;
-    if (pkt_pwr_db != INT_MIN) {
-      const int16_t base = _hal.txpwr_base_qdb();
-      int eff = base + pkt_pwr_db * 4;
-      if (eff < kKestrelTxMinQdb) eff = kKestrelTxMinQdb;
-      if (eff > kKestrelTxMaxQdb) eff = kKestrelTxMaxQdb;
-      target = static_cast<int16_t>(eff - base);
-    }
+    const int16_t base = _hal.txpwr_base_qdb();
+    int eff;
+    if (pkt_pwr_db != INT_MIN)
+      eff = base + pkt_pwr_db * 4;
+    else
+      eff = base + _sess_pwr_qdb + (he ? 0 : rate_diff_qdb_for(mgn));
+    if (eff < kKestrelTxMinQdb) eff = kKestrelTxMinQdb;
+    if (eff > kKestrelTxMaxQdb) eff = kKestrelTxMaxQdb;
+    const int16_t target = static_cast<int16_t>(eff - base);
     if (target != _hal.txpwr_offset_qdb())
       _hal.set_txpwr_offset_qdb(target);
   }

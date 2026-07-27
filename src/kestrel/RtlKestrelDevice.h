@@ -1,6 +1,7 @@
 #ifndef RTL_KESTREL_DEVICE_H
 #define RTL_KESTREL_DEVICE_H
 
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <thread>
@@ -90,6 +91,15 @@ public:
   devourer::TxPowerCaps GetTxPowerCaps() override;
   int SetTxPowerOffsetQdb(int qdb) override;
   devourer::TxPowerState GetTxPowerState() override;
+
+  /* Caller-supplied per-rate power shape (src/TxPower.h). This family has no
+   * per-rate TXAGC table, so the diff for the frame's own rate folds into the
+   * fixed-dBm target inside send_packet — see the two consequences documented
+   * on _rate_diff_qdb below. */
+  bool SetTxPowerRateDiffs(
+      const std::optional<devourer::TxRateDiffsQdb> &diffs) override;
+  /* The configured diff (qdB) for one MGN_* rate, 0 when no table is set. */
+  int rate_diff_qdb_for(uint8_t mgn_rate) const;
 
   /* Runtime TX-mode default (DEVOURER_TX_RATE): rate/BW/GI/LDPC/STBC applied to
    * a rate-less frame (e.g. the demo beacon). A per-packet radiotap rate always
@@ -218,6 +228,18 @@ private:
   int16_t _sess_pwr_qdb = 0; /* offset applied by SetTxPowerOffsetQdb — the
                               * restore target for frames without a radiotap
                               * DBM_TX_POWER field */
+  /* SetTxPowerRateDiffs, as a flat array in the TxRateDiffsQdb field order
+   * (cck, legacy, mcs0..7) rather than the struct, so send_packet can read the
+   * single entry its frame's rate needs with a relaxed atomic load: no lock
+   * lands on the TX hot path, and a table swapped mid-stream can only ever
+   * split BETWEEN frames, never within one. Two consequences of folding in
+   * software rather than in a per-rate hardware table, both real:
+   *   - the BB target is global, so a hardware-timed beacon airing between two
+   *     host frames inherits the last frame's rate diff, not its own rate's;
+   *   - a stream that alternates rates pays 2 BB register writes per change
+   *     (a fixed-rate stream pays once and then nothing). */
+  std::atomic<bool> _rate_diffs_on{false};
+  std::atomic<int8_t> _rate_diff_qdb[10]{};
   /* Per-chain RSSI (RSSI% = dBm+110) cached from the last PPDU-status physts
    * header, attached to the following WIFI frame(s) in the aggregate. */
   uint8_t _last_rssi[2] = {0, 0};

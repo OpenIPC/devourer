@@ -363,33 +363,22 @@ int main(int argc, char **argv) {
       std::chrono::high_resolution_clock::now().time_since_epoch().count());
   std::vector<uint8_t> sync_buf;
   while (true) {
-    uint8_t len_bytes[4];
+    std::vector<uint8_t> psdu;
+    uint32_t len = 0;
     {
-      auto r = stream_stdin::read_exact(stdin, len_bytes, sizeof(len_bytes));
-      if (r == stream_stdin::ReadResult::Eof) break;  // clean stdin close
-      if (r == stream_stdin::ReadResult::Short) {
-        logger->error("short read on stdin len-prefix; record truncated");
-        std::exit(2);
-      }
-    }
-    uint32_t len = static_cast<uint32_t>(len_bytes[0])
-                 | (static_cast<uint32_t>(len_bytes[1]) << 8)
-                 | (static_cast<uint32_t>(len_bytes[2]) << 16)
-                 | (static_cast<uint32_t>(len_bytes[3]) << 24);
-    if (len == 0 || len > max_psdu) {
-      logger->error("PSDU length {} out of range (max {}); stopping", len,
-                    max_psdu);
-      break;
-    }
-    std::vector<uint8_t> psdu(len);
-    {
-      auto r = stream_stdin::read_exact(stdin, psdu.data(), len);
-      if (r == stream_stdin::ReadResult::Eof) {
+      const auto r = stream_stdin::read_record(stdin, psdu, max_psdu, &len);
+      if (r == stream_stdin::RecordResult::Eof) break;  // clean stdin close
+      if (r == stream_stdin::RecordResult::EofMidBody) {
         logger->warn("EOF mid-PSDU (expected {} bytes)", len);
         break;
       }
-      if (r == stream_stdin::ReadResult::Short) {
-        logger->error("short read mid-PSDU (expected {} bytes); record "
+      if (r == stream_stdin::RecordResult::BadLength) {
+        logger->error("PSDU length {} out of range (max {}); stopping", len,
+                      max_psdu);
+        break;
+      }
+      if (r != stream_stdin::RecordResult::Ok) {
+        logger->error("short read on stdin (expected {} bytes); record "
                       "truncated", len);
         std::exit(2);
       }

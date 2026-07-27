@@ -196,25 +196,23 @@ static void tx_thread(TxArgs args) {
   long tx_count = 0;
 
   while (!args.should_stop->load()) {
-    uint8_t len_bytes[4];
-    if (stream_stdin::read_exact(stdin, len_bytes, sizeof(len_bytes)) !=
-        stream_stdin::ReadResult::Ok) {
+    // This demo reads the length itself rather than using read_record: its top
+    // bit escapes to a control TLV with its own, much smaller bound, so the
+    // length has to be inspected before the body may be read.
+    uint32_t len = 0;
+    if (stream_stdin::read_length(stdin, len) != stream_stdin::ReadResult::Ok) {
       // Clean EOF or short read — TX side done. RX keeps running.
       devourer::Ev(*g_ev, "stream.eof").f("tx_count", tx_count);
       break;
     }
-    uint32_t len = static_cast<uint32_t>(len_bytes[0])
-                 | (static_cast<uint32_t>(len_bytes[1]) << 8)
-                 | (static_cast<uint32_t>(len_bytes[2]) << 16)
-                 | (static_cast<uint32_t>(len_bytes[3]) << 24);
 
     // Control-opcode escape: top bit set -> the body is a control TLV (the
     // adaptive link's live knobs), not a PSDU. <op:u8><payload...>.
     if (len & 0x80000000u) {
       uint32_t clen = len & 0x7fffffffu;
       if (clen == 0 || clen > 256) break;
-      std::vector<uint8_t> ctl(clen);
-      if (stream_stdin::read_exact(stdin, ctl.data(), clen) !=
+      std::vector<uint8_t> ctl;
+      if (stream_stdin::read_body(stdin, ctl, clen) !=
           stream_stdin::ReadResult::Ok)
         break;
       uint8_t op = ctl[0];
@@ -241,8 +239,8 @@ static void tx_thread(TxArgs args) {
                          args.max_psdu);
       break;
     }
-    std::vector<uint8_t> psdu(len);
-    if (stream_stdin::read_exact(stdin, psdu.data(), len) !=
+    std::vector<uint8_t> psdu;
+    if (stream_stdin::read_body(stdin, psdu, len) !=
         stream_stdin::ReadResult::Ok) {
       /* EOF mid-PSDU: `bytes` = the expected PSDU length that was cut short. */
       devourer::Ev(*g_ev, "stream.eof").f("tx_count", tx_count).f("bytes", len);

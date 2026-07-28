@@ -462,6 +462,31 @@ substitute the in-tree `rtw88` for the vendor driver: it accepts frames on a
 monitor netdev and reports them injected while airing nothing decodable, which
 reads as a kernel-side failure at every rate.
 
+### `ground_station_qualify.sh`: is your receiver fit to measure this rate?
+
+Run before trusting any delivery number, and before believing any story about a
+transmitter. Sweeps the rate ladder on the ground station and refuses the pairing
+(exit 1) when the test rate is off the flat part of the curve.
+
+```bash
+sudo REGRESS_VBUS_MAP="0bda:8812=3-2.3.4,3;0bda:8813=4-2.3,2" \
+     GND_VID=0x0bda GND_PID=0x8813 tests/ground_station_qualify.sh MCS7/20
+```
+
+A receiver sitting on its cliff at the test rate measures **itself**, not the
+transmitter, and swings between fine and zero on a few dB of ambient while the
+robust rates stay pinned — indistinguishable from a transmitter that degrades and
+recovers. Same TX, same channel, minutes apart:
+
+| ground | MCS3 | MCS4 | MCS5 | MCS6 | MCS7 |
+| --- | --- | --- | --- | --- | --- |
+| Archer T3U (8822BU, **internal** antennas) | 97.8 | 98.3 | 79.1 | 49.0 | **2.9** |
+| RTL8814AU (two **external** antennas) | 80.6 | 80.2 | 80.8 | 80.6 | **80.4** |
+
+Both adapters are healthy. Prefer external-antenna adapters as ground stations
+for high-MCS work, and cross-check against a second independent receiver
+(`rx_vendor_ab.sh` runs the vendor driver on the *receive* side).
+
 ### Warm-session TX degradation: four harnesses, and start with the first
 
 **`probe_repeatability.sh` — run this before believing any delivery

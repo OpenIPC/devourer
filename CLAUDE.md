@@ -612,6 +612,18 @@ generators, never the output files.
   only helps when firmware state is intact.
 - **The chip retains state across soft re-init** — cold-bisect hardware
   problems with a VBUS power-cycle, not a re-run.
+- **Qualify the ground station before believing a delivery number.** Delivery is
+  a property of a *link*; a receiver whose modulation cliff sits at the rate
+  under test measures itself, not the transmitter, and swings between "fine" and
+  "zero" on a few dB of ambient while the robust rates stay pinned — which looks
+  exactly like a transmitter that degrades and recovers. Same TX, same channel,
+  minutes apart: a TP-Link Archer T3U (8822BU, **internal** antennas) ran
+  MCS3 97.8 / MCS4 98.3 / MCS5 79.1 / MCS6 49.0 / **MCS7 2.9**, while an
+  RTL8814AU (two **external** antennas) was flat at ~80% across the same ladder.
+  Both healthy — one just has less margin. `tests/ground_station_qualify.sh`
+  sweeps the ladder and refuses the pairing (exit 1) when the test rate is off
+  the flat part. Prefer external-antenna adapters as ground stations for
+  high-MCS work, and cross-check with a second, independent receiver.
 - **A single delivery probe is worth ±3 points, so small effects are not
   findings.** Ten identical back-to-back MCS7/20 probes on an 8812AU (nothing
   changed between them) gave sd 1.8 and a 5.7-point spread; the MCS1 control

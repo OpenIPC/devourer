@@ -514,8 +514,11 @@ MAC-latched `tsfl` RX timestamp — on all generations, µs-grade
 (`docs/time-distribution.md`, measured vs NTP/PTP: `docs/timing-accuracy.md`).
 `StartBeacon` loads a beacon into the MAC's reserved page and the chip
 auto-transmits at each TBTT with the live TSF stamped at the TX instant — the
-sub-µs downlink. The chip beacons **autonomously**: a session that ends
-without a power-cycle must call `StopBeacon()` or the beacon keeps airing.
+sub-µs downlink. The chip beacons **autonomously**, so `StopBeacon()` is what
+stops it mid-session; a session that ends via `Stop()` or destruction powers the
+chip down and takes the beacon with it (Jaguar1/Jaguar3 — Jaguar2 has no
+teardown power-down yet, so there it keeps airing until the adapter is
+re-enumerated).
 `UpdateBeaconPayload` swaps the airing content in place (frame-atomic on air,
 TBTT-quantized latency); `PinBeaconTbtt` steers the TBTT to an absolute TSF
 instant without corrupting the clock (Jaguar1: offset 0 only — its TBTT is
@@ -608,14 +611,18 @@ generators, never the output files.
   After detaching a kernel driver, expect a cold re-init; `DEVOURER_SKIP_RESET`
   only helps when firmware state is intact.
 - **The chip retains state across soft re-init** — cold-bisect hardware
-  problems with a VBUS power-cycle, not a re-run. This is not only a bring-up
-  concern: **high-order constellation TX degrades across warm re-inits**. After
-  a run of back-to-back sessions an 8812AU delivered 0% at MCS7 (64-QAM) while
-  16-QAM and below still worked, and a VBUS cycle restored it to 58% at the
-  same channel, power and gap. Nothing logs an error, RSSI and EVM look
-  healthy, and the result is indistinguishable from a link too weak to carry
-  the rate — so any rate-ceiling measurement must cold-cycle per cell or it
-  measures accumulated chip state. An `authorized` toggle does not clear it.
+  problems with a VBUS power-cycle, not a re-run.
+- **Chip temperature silently caps the usable modulation.** A hot 8812AU loses
+  the dense constellations first while the robust rates carry on: measured on
+  ch6/20 MHz, thermal meter 43 → 53 costs MCS7 (64-QAM) ~83% → ~71% delivery
+  with RSSI *flat*, i.e. no power is lost, only signal quality. Nothing logs an
+  error and the signature is indistinguishable from a link too weak to carry
+  the rate. Any rate-ceiling measurement must therefore control temperature —
+  VBUS-cycle per cell, and read the `thermal` event
+  (`DEVOURER_THERMAL_POLL_MS`) beside the delivery number.
+  `tests/warm_tx_degradation_repro.sh` is the reference method. Removing power
+  is what cools the part: on a chip left in ACT, 120 s of idle bought 4 thermal
+  units where a 12 s VBUS cycle bought 9.
 - **MediaTek Android hosts cap bulk-IN reads at 16 KB**: some MTK xhci/usbfs
   stacks (Dimensity 810, Helio G99, MT6765) never complete a larger bulk-IN
   transfer — `LIBUSB_ERROR_TIMEOUT` forever, zero RX with a green init

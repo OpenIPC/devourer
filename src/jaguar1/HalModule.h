@@ -67,10 +67,20 @@ public:
             Logger_t logger, const devourer::DeviceConfig &cfg = {});
   bool rtw_hal_init(SelectedChannel selectedChannel);
   const devourer::FwBootStatus &GetFwBootStatus() const { return _fwBoot; }
+  /* Halt TRX and run the chip's card-disable power sequence, leaving it powered
+   * down but re-enumerable — the counterpart to rtw_hal_init, and what every
+   * other generation already does (HalJaguar2::power_off,
+   * HalJaguar3::rtw_hal_deinit). Without it a Jaguar1 chip stays in ACT with
+   * the RF front end live for as long as the adapter is plugged in, long after
+   * the session that brought it up has exited. Best-effort: a chip that has
+   * already left the bus makes these writes fail, which is fine. */
+  void rtw_hal_deinit();
 
 private:
   bool rtl8812au_hal_init(uint8_t init_channel);
   bool InitPowerOn();
+  /* Card-disable power sequence (ACT -> CARDEMU -> PDN) for the current die. */
+  bool PowerOff();
   bool InitLLTTable8812A(uint8_t txpktbuf_bndy);
   bool _LLTWrite_8812A(uint32_t address, uint32_t data);
   void _InitHardwareDropIncorrectBulkOut_8812A();

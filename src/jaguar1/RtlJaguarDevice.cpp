@@ -1856,7 +1856,25 @@ bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {
   return true;
 }
 
-void RtlJaguarDevice::Stop() { _device.quiesce_tx(); }
+/* Clean shutdown — see IRtlDevice::Stop. Quiesce TX first so the de-init writes
+ * are not racing frames the transport still owns, then power the chip down.
+ *
+ * The power-down is the point: without it a Jaguar1 chip stays in ACT with its
+ * RF front end live for as long as the adapter is plugged in, heating across
+ * back-to-back sessions until the dense constellations stop decoding while the
+ * robust rates carry on. It also means a beacon loaded into the MAC's reserved
+ * page stops airing when the session ends instead of transmitting forever.
+ *
+ * Best-effort: a chip that already dropped off the bus makes the writes fail,
+ * which is fine on a teardown path. */
+void RtlJaguarDevice::Stop() {
+  _device.quiesce_tx();
+  try {
+    _halModule.rtw_hal_deinit();
+  } catch (...) {
+    _logger->info("Jaguar1: Stop() de-init writes failed (chip already gone?)");
+  }
+}
 
 RtlJaguarDevice::~RtlJaguarDevice() {
   /* First, before any member starts unwinding: the async bulk-OUT URBs point
@@ -1878,6 +1896,14 @@ RtlJaguarDevice::~RtlJaguarDevice() {
   _rxmask_stop.store(true);
   if (_rxmask_thread.joinable()) {
     _rxmask_thread.join();
+  }
+  /* Backstop for a caller that destroys without Stop(): power the chip down so
+   * it is not left in ACT heating itself indefinitely. After the thread joins,
+   * so nothing is still touching the chip. Harmless if Stop() already ran. */
+  try {
+    _halModule.rtw_hal_deinit();
+  } catch (...) {
+    /* Teardown path — a chip that already left the bus is not an error. */
   }
 }
 

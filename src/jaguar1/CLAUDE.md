@@ -37,6 +37,22 @@ methods), `RadioManagementModule` (channel/BW/TX power, up to 4 RF paths),
   8814A decodes LDPC but reports no per-frame flag (`ldpc_rx_flag=0`,
   `RxAtrib.ldpc` reads 0).
 
+## Teardown
+
+`RtlJaguarDevice::Stop()` and the destructor run `HalModule::rtw_hal_deinit()`:
+halt the MAC engines (`REG_CR`, `REG_RCR`), then the die's card-disable power
+sequence via the existing `HalPwrSeqCmdParsing` (`rtl8812_card_disable_flow` /
+`rtl8814A_` / `rtl8821A_`, dispatched exactly like `InitPowerOn` dispatches the
+enable flows). Both call sites are best-effort — a chip already off the bus
+makes the writes fail, which is fine on a teardown path.
+
+This is not tidiness. Left in ACT the chip keeps its RF front end live and never
+cools, and a hot die loses the dense constellations while the robust rates carry
+on — thermal 43 → 53 costs MCS7 ~12 points of delivery at flat RSSI
+(`docs/warm-tx-degradation.md`). It also means an autonomously-airing beacon
+stops when the session ends. `PowerOff()` clears `_macPwrCtrlOn` so a re-init on
+the same `HalModule` still runs the power-on sequence.
+
 ## TX power
 
 Every per-rate index funnels through one composer, `ComputeTxPowerIndex(path,

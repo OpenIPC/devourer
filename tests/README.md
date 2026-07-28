@@ -462,6 +462,62 @@ substitute the in-tree `rtw88` for the vendor driver: it accepts frames on a
 monitor netdev and reports them injected while airing nothing decodable, which
 reads as a kernel-side failure at every rate.
 
+### `ground_station_qualify.sh`: is your receiver fit to measure this rate?
+
+Run before trusting any delivery number, and before believing any story about a
+transmitter. Sweeps the rate ladder on the ground station and refuses the pairing
+(exit 1) when the test rate is off the flat part of the curve.
+
+```bash
+sudo REGRESS_VBUS_MAP="0bda:8812=3-2.3.4,3;0bda:8813=4-2.3,2" \
+     GND_VID=0x0bda GND_PID=0x8813 tests/ground_station_qualify.sh MCS7/20
+```
+
+A receiver sitting on its cliff at the test rate measures **itself**, not the
+transmitter, and swings between fine and zero on a few dB of ambient while the
+robust rates stay pinned — indistinguishable from a transmitter that degrades and
+recovers. Same TX, same channel, minutes apart:
+
+| ground | MCS3 | MCS4 | MCS5 | MCS6 | MCS7 |
+| --- | --- | --- | --- | --- | --- |
+| Archer T3U (8822BU, **internal** antennas) | 97.8 | 98.3 | 79.1 | 49.0 | **2.9** |
+| RTL8814AU (two **external** antennas) | 80.6 | 80.2 | 80.8 | 80.6 | **80.4** |
+
+Both adapters are healthy. Prefer external-antenna adapters as ground stations
+for high-MCS work, and cross-check against a second independent receiver
+(`rx_vendor_ab.sh` runs the vendor driver on the *receive* side).
+
+### Warm-session TX degradation: four harnesses, and start with the first
+
+**`probe_repeatability.sh` — run this before believing any delivery
+difference.** N identical back-to-back probes with nothing changed between them,
+reporting the spread. On an 8812AU a single MCS7/20 probe has sd 1.8 and a
+5.7-point range (the MCS1 control: 98.0 ± 0.2), so **effects under ~4 points are
+not detectable one-shot**. Several plausible-looking decay curves in this
+investigation turned out to sit inside that band.
+
+```bash
+sudo REGRESS_VBUS_MAP="0bda:8812=3-2.3.4,3;2357:012d=10,2" \
+     tests/probe_repeatability.sh
+```
+
+`warm_tx_degradation_repro.sh` holds one ground receiver up for a whole run,
+then alternates probes with warm devourer sessions, recording delivery at a test
+and a control rate alongside the chip thermal meter and the receiver's RSSI/EVM.
+Two controls close it: an idle with no power cycle, and a VBUS cycle.
+`WARM_PWR=63 WARM_GAP=0` turns the warm sessions into max-power/max-duty
+heating.
+
+`thermal_offtime_sweep.sh` and `thermal_causation_probe.sh` exist to separate
+*cooling* from *state reset*, which no ordinary power-cycle experiment can do —
+the first varies only how long the chip stays powered down, the second measures
+delivery inside a single uninterrupted session where nothing but temperature can
+move. Both currently argue **against** a thermal explanation; the mechanism is
+open. Results and what did not survive testing: `docs/warm-tx-degradation.md`.
+
+Reading any of them: falling delivery with **flat RSSI** is signal quality;
+falling RSSI would be a transmitter losing power, a different bug.
+
 ### `tx_teardown_asan.sh` / `teardown_gen_sanity.sh`: lifetime bugs on real hardware
 
 A sanitizer only sees what runs, and the interesting lifetime bugs live in the

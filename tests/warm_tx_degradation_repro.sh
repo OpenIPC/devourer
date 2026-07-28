@@ -67,14 +67,25 @@ cold_cycle() { # $1=vid $2=pid
 }
 
 # One devourer TX session at $1, measured against the standing ground receiver.
-# Echoes "delivered/sent".
+# Echoes "delivered/sent thermal_raw rssi evm".
+#
+# The three extra channels are what separate the candidate mechanisms, and the
+# whole point of running this before changing any library code:
+#   thermal_raw  the chip's own RF 0x42 meter. The adapter is never powered
+#                down between sessions, so it never cools; a monotonic rise
+#                that falls after a VBUS cycle means heat, not latched state.
+#   rssi         falling RSSI means the transmitter is losing POWER; RSSI flat
+#                while the high rates die means it is losing signal QUALITY
+#                (EVM / phase noise) at unchanged power. Different fixes.
+#   evm          the receiver's own quality estimate, as a cross-check on rssi.
 probe() {
-  local rate=$1 tag=$2
-  local off0 off1 sent delivered
+  local rate="$1" tag="$2"
+  local off0 off1 sent delivered stats
   off0=$(stat -c%s "$RXLOG")
   sudo env DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" \
     DEVOURER_CHANNEL="$CH" DEVOURER_TX_RATE="$rate" \
-    DEVOURER_TX_GAP_US=2000 DEVOURER_LOG_LEVEL=warn \
+    DEVOURER_TX_GAP_US=2000 DEVOURER_THERMAL_POLL_MS="${THERM_MS:-1000}" \
+    DEVOURER_LOG_LEVEL=warn \
     timeout --signal=TERM $((SECS + 12)) "$TXDEMO" \
     > "$OUT/tx_$tag.jsonl" 2>"$OUT/tx_$tag.err" &
   local p=$!
@@ -83,21 +94,38 @@ probe() {
   sleep 1
   off1=$(stat -c%s "$RXLOG")
   sent=$(grep -o '"submitted":[0-9]*' "$OUT/tx_$tag.jsonl" | tail -1 | cut -d: -f2)
-  delivered=$(python3 - "$RXLOG" "$off0" "$off1" <<'EOF'
+  # Last thermal reading of the session — the warmest point, i.e. the one that
+  # would matter if heat is the mechanism.
+  local therm
+  therm=$(grep -o '"raw":[0-9]*' "$OUT/tx_$tag.jsonl" | tail -1 | cut -d: -f2)
+  stats=$(python3 - "$RXLOG" "$off0" "$off1" <<'EOF'
 import sys
 sys.path.insert(0, "tests")
 from devourer_events import parse_event
 f = open(sys.argv[1], "rb"); f.seek(int(sys.argv[2]))
 blob = f.read(int(sys.argv[3]) - int(sys.argv[2])).decode(errors="replace")
-n = 0
+frames = 0
+rssi, evm = [], []
 for line in blob.splitlines():
     ev = parse_event(line, "rx.energy")
-    if ev:
-        n += int(ev.get("frames") or 0)
-print(n)
+    if not ev:
+        continue
+    n = int(ev.get("frames") or 0)
+    frames += n
+    # Average only over windows that actually carried frames — an empty window
+    # reports rssi/evm as 0 and would drag the mean toward zero.
+    if n:
+        if ev.get("rssi_mean"):
+            rssi.append(ev["rssi_mean"])
+        if ev.get("evm_mean"):
+            evm.append(ev["evm_mean"])
+mean = lambda a: (sum(a) / len(a)) if a else 0
+print("%d %.0f %.0f" % (frames, mean(rssi), mean(evm)))
 EOF
 )
-  printf '%s/%s' "${delivered:-0}" "${sent:-0}"
+  read -r delivered rssi evm <<<"$stats"
+  printf '%s/%s %s %s %s' "${delivered:-0}" "${sent:-0}" "${therm:-0}" \
+      "${rssi:-0}" "${evm:-0}"
 }
 
 # A warm session: full devourer bring-up + TX + teardown, no power cycle. This
@@ -117,17 +145,23 @@ warm_session() {
   sleep 1
 }
 
-report() { # $1=label $2=test-result $3=control-result
-  local pct
+# $1=label, $2/$3 = probe output for the test and control rate
+# ("delivered/sent thermal rssi evm").
+report() {
+  local label="$1" t="$2" c="$3"
+  local t_ds t_therm t_rssi t_evm c_ds
+  read -r t_ds t_therm t_rssi t_evm <<<"$t"
+  read -r c_ds _ _ _ <<<"$c"
+  local pct cpct
   pct=$(python3 -c "
-d,s='$2'.split('/')
+d,s='$t_ds'.split('/')
 print('%.1f%%' % (100*int(d)/int(s)) if int(s) else 'n/a')")
-  local cpct
   cpct=$(python3 -c "
-d,s='$3'.split('/')
+d,s='$c_ds'.split('/')
 print('%.1f%%' % (100*int(d)/int(s)) if int(s) else 'n/a')")
-  printf '  %-34s %s %-9s   %s %-9s\n' "$1" "$RATE" "$pct" "$CTRL_RATE" "$cpct"
-  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$OUT/results.tsv"
+  printf '  %-32s %-8s %-8s  therm=%-3s rssi=%-3s evm=%s\n' \
+      "$label" "$pct" "$cpct" "$t_therm" "$t_rssi" "$t_evm"
+  printf '%s\t%s\t%s\n' "$label" "$t" "$c" >> "$OUT/results.tsv"
 }
 
 echo "warm-session TX degradation repro"
@@ -143,7 +177,7 @@ RXPID=$!
 sleep 9
 kill -0 "$RXPID" 2>/dev/null || { echo "ground RX died" >&2; exit 1; }
 
-printf '  %-34s %-14s   %s\n' "stage" "test rate" "control rate"
+printf '  %-32s %-8s %-8s  %s\n' "stage" "$RATE" "$CTRL_RATE" "chip/link sensors"
 cold_cycle "$DUT_VID" "$DUT_PID" || exit 1
 report "cold baseline" "$(probe "$RATE" cold)" "$(probe "$CTRL_RATE" cold_ctrl)"
 

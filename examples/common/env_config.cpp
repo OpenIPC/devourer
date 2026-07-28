@@ -124,6 +124,9 @@ devourer::DeviceConfig devourer_config_from_env() {
   }
 
   /* ---- tuning ---- */
+  /* Defaults ON, so this reads the negation: only an explicit 0 disables it. */
+  if (const char *e = env_str("DEVOURER_TEARDOWN_POWER_DOWN"))
+    cfg.tuning.teardown_power_down = (std::atoi(e) != 0);
   cfg.tuning.skip_iqk = env_flag("DEVOURER_SKIP_IQK");
   cfg.tuning.force_iqk = env_flag("DEVOURER_FORCE_IQK");
   cfg.tuning.disable_iqk = env_flag("DEVOURER_DISABLE_IQK");

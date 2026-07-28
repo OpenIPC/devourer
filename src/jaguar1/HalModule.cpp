@@ -660,6 +660,58 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
   return true;
 }
 
+void HalModule::rtw_hal_deinit() {
+  _logger->info("Jaguar1: clean de-init (stop TRX + card-disable)");
+  /* Halt the MAC engines before pulling power out from under them, so the
+   * sequence isn't racing DMA that is still moving frames. Mirrors
+   * HalJaguar3::rtw_hal_deinit. */
+  _device.rtw_write16(REG_CR, 0x0000); /* clear MACTXEN/MACRXEN */
+  _device.rtw_write32(REG_RCR, 0x00000000); /* drop all RX — stop FIFO fill */
+  PowerOff();
+}
+
+bool HalModule::PowerOff() {
+  /* Same three-way dispatch as InitPowerOn — the ACT->CARDEMU->PDN sequence is
+   * as silicon-specific as the enable one. These tables have been carried in
+   * hal/Hal88*PwrSeq.c since the port began with nothing calling them. */
+  WLAN_PWR_CFG *disable_flow;
+  switch (_eepromManager->version_id.ICType) {
+#if defined(DEVOURER_HAVE_8814)
+  case CHIP_8814A:
+    disable_flow = rtl8814A_card_disable_flow;
+    break;
+#endif
+  case CHIP_8821:
+    disable_flow = rtl8821A_card_disable_flow;
+    break;
+  default:
+    disable_flow = rtl8812_card_disable_flow;
+    break;
+  }
+  const bool ok = HalPwrSeqCmdParsing(disable_flow);
+  if (!ok) {
+    _logger->warn("PowerOff: card-disable flow did not complete");
+  }
+  /* Read back the state the sequence is supposed to have produced, rather than
+   * trusting its return value. The only polling step is the MAC-off wait in
+   * ACT->CARDEMU, so a sequence can "succeed" while the chip sits somewhere
+   * unintended — and a power-down that silently does nothing would make this
+   * whole teardown path inert. 0x0005 should show WL-suspend (BIT3) set and the
+   * MAC-off bit (BIT1) clear; REG_CR should read back with the MAC engines
+   * gone. Logged, not asserted: the next session's init already logs the same
+   * two registers, so the pair brackets the power state across a teardown. */
+  const uint8_t pwr_after = _device.rtw_read8(REG_SYS_CLKR + 1);
+  const uint16_t cr_after = _device.rtw_read16(REG_CR);
+  _logger->info("PowerOff: card-disable applied — 0x0005=0x{:02X} "
+                "REG_CR 0x100=0x{:04X} (seq {})",
+                pwr_after, cr_after, ok ? "ok" : "INCOMPLETE");
+  /* Either way the chip is no longer in the state InitPowerOn's early-out
+   * assumes, so clear the latch — otherwise a re-init on this same HalModule
+   * would skip the power-on sequence and bring up a half-powered chip. */
+  _macPwrCtrlOn = false;
+  return ok;
+}
+
 bool HalModule::InitPowerOn() {
   if (_macPwrCtrlOn) {
     return true;

@@ -514,8 +514,11 @@ MAC-latched `tsfl` RX timestamp — on all generations, µs-grade
 (`docs/time-distribution.md`, measured vs NTP/PTP: `docs/timing-accuracy.md`).
 `StartBeacon` loads a beacon into the MAC's reserved page and the chip
 auto-transmits at each TBTT with the live TSF stamped at the TX instant — the
-sub-µs downlink. The chip beacons **autonomously**: a session that ends
-without a power-cycle must call `StopBeacon()` or the beacon keeps airing.
+sub-µs downlink. The chip beacons **autonomously**, so `StopBeacon()` is what
+stops it mid-session; a session that ends via `Stop()` or destruction powers the
+chip down and takes the beacon with it (Jaguar1/Jaguar3 — Jaguar2 has no
+teardown power-down yet, so there it keeps airing until the adapter is
+re-enumerated).
 `UpdateBeaconPayload` swaps the airing content in place (frame-atomic on air,
 TBTT-quantized latency); `PinBeaconTbtt` steers the TBTT to an absolute TSF
 instant without corrupting the clock (Jaguar1: offset 0 only — its TBTT is
@@ -608,14 +611,35 @@ generators, never the output files.
   After detaching a kernel driver, expect a cold re-init; `DEVOURER_SKIP_RESET`
   only helps when firmware state is intact.
 - **The chip retains state across soft re-init** — cold-bisect hardware
-  problems with a VBUS power-cycle, not a re-run. This is not only a bring-up
-  concern: **high-order constellation TX degrades across warm re-inits**. After
-  a run of back-to-back sessions an 8812AU delivered 0% at MCS7 (64-QAM) while
-  16-QAM and below still worked, and a VBUS cycle restored it to 58% at the
-  same channel, power and gap. Nothing logs an error, RSSI and EVM look
-  healthy, and the result is indistinguishable from a link too weak to carry
-  the rate — so any rate-ceiling measurement must cold-cycle per cell or it
-  measures accumulated chip state. An `authorized` toggle does not clear it.
+  problems with a VBUS power-cycle, not a re-run.
+- **Qualify the ground station before believing a delivery number.** Delivery is
+  a property of a *link*; a receiver whose modulation cliff sits at the rate
+  under test measures itself, not the transmitter, and swings between "fine" and
+  "zero" on a few dB of ambient while the robust rates stay pinned — which looks
+  exactly like a transmitter that degrades and recovers. Same TX, same channel,
+  minutes apart: a TP-Link Archer T3U (8822BU, **internal** antennas) ran
+  MCS3 97.8 / MCS4 98.3 / MCS5 79.1 / MCS6 49.0 / **MCS7 2.9**, while an
+  RTL8814AU (two **external** antennas) was flat at ~80% across the same ladder.
+  Both healthy — one just has less margin. `tests/ground_station_qualify.sh`
+  sweeps the ladder and refuses the pairing (exit 1) when the test rate is off
+  the flat part. Prefer external-antenna adapters as ground stations for
+  high-MCS work, and cross-check with a second, independent receiver.
+- **A single delivery probe is worth ±3 points, so small effects are not
+  findings.** Ten identical back-to-back MCS7/20 probes on an 8812AU (nothing
+  changed between them) gave sd 1.8 and a 5.7-point spread; the MCS1 control
+  over the same run held 98.0 ± 0.2. Anything under ~4 points needs repetition
+  before it means anything — several plausible-looking "decay curves" have
+  turned out to sit inside that band. `tests/probe_repeatability.sh` measures
+  the floor for a given pair; run it before believing a delivery difference.
+- **Do not attribute a rate ceiling to chip temperature without varying
+  temperature independently.** Delivery does correlate with the `thermal` meter
+  within a probe sequence, and that correlation is a trap: a sweep varying
+  *only* the power-off duration (identical reset every arm) found delivery
+  scattered 63–83% with no relation to off-time or temperature, and inside a
+  single uninterrupted session the meter stays pinned while delivery drifts.
+  Read the `thermal` event (`DEVOURER_THERMAL_POLL_MS`) beside a rate-ceiling
+  number by all means, but a power cycle changes chip state *and* temperature
+  together, so it can never separate them (`docs/warm-tx-degradation.md`).
 - **MediaTek Android hosts cap bulk-IN reads at 16 KB**: some MTK xhci/usbfs
   stacks (Dimensity 810, Helio G99, MT6765) never complete a larger bulk-IN
   transfer — `LIBUSB_ERROR_TIMEOUT` forever, zero RX with a green init

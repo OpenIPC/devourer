@@ -327,6 +327,17 @@ struct DeviceConfig {
      * kernel eFEM pin-mux so the DPDT follows TX/RX in hardware (both RX chains
      * live); the others are the pre-fix static routes. See docs/8822e-quirks.md. */
     Dpdt8822eMode dpdt_8822e = Dpdt8822eMode::EfemPinmux;
+
+    /* env: DEVOURER_TEARDOWN_POWER_DOWN=0|1 — Jaguar1: run the die's
+     * card-disable power sequence at Stop()/destruction (default on), instead
+     * of leaving the chip in ACT with its RF front end live indefinitely.
+     *
+     * Turning it OFF is what a post-mortem needs: a powered-down chip answers
+     * every register read with the CARDEMU fill (0xEA...), so the state a
+     * session left behind is only inspectable (examples/chipstate) while the
+     * chip is still up. It is also the A/B lever for measuring what the
+     * power-down is actually worth. */
+    bool teardown_power_down = true;
   } tuning;
 
   /* ---- Diagnostics output --------------------------------------------- */

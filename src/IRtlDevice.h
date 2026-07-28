@@ -559,6 +559,22 @@ public:
    * Init/InitWrite). On Jaguar1 a failed FW boot does not abort bring-up —
    * this is the only place the failure is visible to a caller. */
   virtual devourer::FwBootStatus GetFwBootStatus() { return {}; }
+
+  /* Dump the chip's canary register set (BB / MAC / per-path RF) to the
+   * diagnostic plane. Reads only — no writes, no calibration, no bring-up.
+   *
+   * The point is that it is callable on a device that has NOT been Init'ed, so
+   * a chip left in whatever state a previous session abandoned it in can be
+   * inspected AS IT IS. Every other path into this driver reconfigures the chip
+   * on the way in, which destroys exactly the evidence a state bug leaves
+   * behind. Pair it with an open that skips libusb_reset_device
+   * (claim_interface_then_reset's `do_reset=false`) — a USB reset re-runs the
+   * chip's own boot and is just as destructive.
+   *
+   * Output format matches DEVOURER_DUMP_CANARY, so two dumps diff directly with
+   * tests/canary_diff.py. Reading a powered-down chip yields garbage or throws;
+   * interpreting that is the caller's job. No-op where unsupported (default). */
+  virtual void DumpChipState() {}
 };
 
 #endif /* IRTL_DEVICE_H */

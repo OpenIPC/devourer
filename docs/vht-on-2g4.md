@@ -12,7 +12,24 @@ Nothing gates this. Rate resolution never reads the band, so a VHT rate on a
 channel 6, or a radiotap VHT field on a per-packet basis. The receiver must be
 able to decode it; a standards-only 802.11n station sees nothing at all.
 
-## Read this first: cold-cycle or measure nothing
+## Read this first: qualify the receiver, or measure the receiver
+
+Delivery is a property of a *link*. A ground station whose modulation cliff sits
+at the rate under test reports its own limits, not the transmitter's — and it
+swings between "fine" and "zero" on a few dB of ambient while the robust rates
+stay pinned. Two RTL8822BU adapters, identical silicon and identical code, same
+transmitter and channel, differing only in antennas:
+
+| ground (both 8822BU) | MCS1 | MCS4 | MCS5 | MCS6 | MCS7 |
+| --- | --- | --- | --- | --- | --- |
+| TP-Link Archer T3U — **internal** antennas | 98.1 | 97.1 | 79.1 | 49.0 | **2.9** |
+| Comfast CF-924AC V2 — **two external** | 95.8 | 95.8 | 95.7 | 94.4 | **95.9** |
+
+Run `tests/ground_station_qualify.sh` before trusting any number here; it refuses
+the pairing when the test rate is off the flat part of the ladder. Every figure
+below was taken through a qualified receiver.
+
+## Cold-cycle too
 
 **High-order constellation TX degrades across warm re-inits.** After a run of
 back-to-back devourer sessions on the same adapter, 64-QAM and up stop decoding
@@ -47,16 +64,25 @@ frames, and every sampled `rx.txhit` decoded back to a rate so the receiver
 confirms *which* modulation arrived. A frame commanded as VHT that decodes as
 HT is a fallback, not a pass.
 
+Measured from an RTL8812AU into a qualified CF-924AC (external antennas):
+
+| rate | delivery | modulation verified |
+| --- | --- | --- |
+| VHT 1SS MCS8 — **256-QAM** | **77.1%** | 37/37 decoded as `vht1ss_mcs8` |
+| VHT 2SS MCS0 | 95.3% | 54/54 |
+| VHT 2SS MCS4 | 90.8% | 43/43 |
+| VHT 2SS MCS7 | 15.5% | 7/7 |
+| VHT 2SS MCS8 — 256-QAM, 2 streams | 0.6% | not reached |
+
 | Transmitter | Generation | Peer | Confirmed on 2.4 GHz |
 | --- | --- | --- | --- |
-| RTL8812AU | Jaguar1 | RTL8822BU | VHT 1SS up to **MCS8 (256-QAM)**; HT MCS7 |
+| RTL8812AU | Jaguar1 | CF-924AC (8822BU) | VHT 1SS to **MCS8 (256-QAM)**, 2SS to MCS7 |
 | RTL8822BU | Jaguar2 | RTL8814AU | VHT 1SS MCS0, 2SS MCS0 |
 | RTL8812CU | Jaguar3 | RTL8814AU | VHT 1SS MCS0, MCS4 |
 
 `AdapterCaps::vht_2g4_ok` records the VHT format as a transmit claim for those
-three dies. 256-QAM specifically is confirmed on the 8812A only — the other two
-were measured before the cold-cycle requirement was understood, so their
-ceiling is a floor on what they can do, not a limit.
+three dies. The Jaguar2/Jaguar3 rows are floors, not limits — they were measured
+through an unqualified receiver and have not been re-run.
 
 **VHT MCS9 is not a legal rate at 20 MHz for 1 or 2 spatial streams.** Asking
 for `VHT1SS_MCS9/20` gets an MCS8 PPDU: the run delivered 311 frames and every
@@ -93,15 +119,16 @@ Two traps that harness encodes, each of which produced a wrong answer first:
 
 ## What is still not measured
 
-- **2 spatial streams above MCS2.** Every 2SS rate above the low ladder reads
-  zero on this bench even cold, on both directions tried. Two dongles in near
-  field give the two streams too little spatial decorrelation; this is a rig
-  property and is not evidence about the chip.
+- **256-QAM on 2 spatial streams** (`VHT2SS_MCS8`) reads 0.6% where 2SS MCS7
+  reaches 15.5% — the ladder is rolling off, so this is the link running out of
+  margin rather than anything specific to the mode. It is the one genuine
+  remaining gap to the 2×2 headline.
 - **40 MHz, hence the headline 400 Mbps rate.** `rxdemo` with
   `DEVOURER_BW=40` delivers zero on both Jaguar1 and Jaguar2 — including for a
   20 MHz transmitter on the primary channel, at either primary-channel offset,
-  in both role directions. Re-tested after the cold-cycle fix and unchanged, so
-  it is a real receiver-side gap, not warm state. Note the existing 40 MHz TX
+  in both role directions, and including the most robust 40 MHz rate (MCS0/40).
+  Re-tested on a **qualified** receiver and still zero, so this is a real
+  receiver-side gap and not a margin artifact. Note the existing 40 MHz TX
   validation (`tests/jaguar2_tx_bw40.sh`) uses a *kernel* sniffer, so the
   devourer 40 MHz receive path may never have been exercised.
 - **Link asymmetry.** 8812AU → 8822BU reaches MCS7 at 68%; the reverse

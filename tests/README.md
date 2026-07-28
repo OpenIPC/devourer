@@ -462,24 +462,36 @@ substitute the in-tree `rtw88` for the vendor driver: it accepts frames on a
 monitor netdev and reports them injected while airing nothing decodable, which
 reads as a kernel-side failure at every rate.
 
-### `warm_tx_degradation_repro.sh`: chip temperature vs usable modulation
+### Warm-session TX degradation: four harnesses, and start with the first
 
-Holds one ground receiver up for a whole run so the reference never moves, then
-alternates probes with warm devourer sessions, recording delivery at a test rate
-and a robust control rate alongside the chip's thermal meter and the receiver's
-RSSI/EVM. Two controls close it: an idle with no power cycle, and a VBUS cycle.
+**`probe_repeatability.sh` — run this before believing any delivery
+difference.** N identical back-to-back probes with nothing changed between them,
+reporting the spread. On an 8812AU a single MCS7/20 probe has sd 1.8 and a
+5.7-point range (the MCS1 control: 98.0 ± 0.2), so **effects under ~4 points are
+not detectable one-shot**. Several plausible-looking decay curves in this
+investigation turned out to sit inside that band.
 
 ```bash
 sudo REGRESS_VBUS_MAP="0bda:8812=3-2.3.4,3;2357:012d=10,2" \
-     tests/warm_tx_degradation_repro.sh
-# WARM_PWR=63 WARM_GAP=0 makes the warm sessions max-power/max-duty heating
+     tests/probe_repeatability.sh
 ```
 
-Reading it: falling delivery with **flat RSSI and rising thermal** is heat (a
-hot die loses the dense constellations first); falling delivery with **falling
-RSSI** would be a transmitter losing power, a different bug. Measured on an
-8812AU, thermal 43 → 53 costs MCS7 ~12 points at unchanged RSSI. Full results
-and the fix: `docs/warm-tx-degradation.md`.
+`warm_tx_degradation_repro.sh` holds one ground receiver up for a whole run,
+then alternates probes with warm devourer sessions, recording delivery at a test
+and a control rate alongside the chip thermal meter and the receiver's RSSI/EVM.
+Two controls close it: an idle with no power cycle, and a VBUS cycle.
+`WARM_PWR=63 WARM_GAP=0` turns the warm sessions into max-power/max-duty
+heating.
+
+`thermal_offtime_sweep.sh` and `thermal_causation_probe.sh` exist to separate
+*cooling* from *state reset*, which no ordinary power-cycle experiment can do —
+the first varies only how long the chip stays powered down, the second measures
+delivery inside a single uninterrupted session where nothing but temperature can
+move. Both currently argue **against** a thermal explanation; the mechanism is
+open. Results and what did not survive testing: `docs/warm-tx-degradation.md`.
+
+Reading any of them: falling delivery with **flat RSSI** is signal quality;
+falling RSSI would be a transmitter losing power, a different bug.
 
 ### `tx_teardown_asan.sh` / `teardown_gen_sanity.sh`: lifetime bugs on real hardware
 

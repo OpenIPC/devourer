@@ -612,17 +612,23 @@ generators, never the output files.
   only helps when firmware state is intact.
 - **The chip retains state across soft re-init** — cold-bisect hardware
   problems with a VBUS power-cycle, not a re-run.
-- **Chip temperature silently caps the usable modulation.** A hot 8812AU loses
-  the dense constellations first while the robust rates carry on: measured on
-  ch6/20 MHz, thermal meter 43 → 53 costs MCS7 (64-QAM) ~83% → ~71% delivery
-  with RSSI *flat*, i.e. no power is lost, only signal quality. Nothing logs an
-  error and the signature is indistinguishable from a link too weak to carry
-  the rate. Any rate-ceiling measurement must therefore control temperature —
-  VBUS-cycle per cell, and read the `thermal` event
-  (`DEVOURER_THERMAL_POLL_MS`) beside the delivery number.
-  `tests/warm_tx_degradation_repro.sh` is the reference method. Removing power
-  is what cools the part: on a chip left in ACT, 120 s of idle bought 4 thermal
-  units where a 12 s VBUS cycle bought 9.
+- **A single delivery probe is worth ±3 points, so small effects are not
+  findings.** Ten identical back-to-back MCS7/20 probes on an 8812AU (nothing
+  changed between them) gave sd 1.8 and a 5.7-point spread; the MCS1 control
+  over the same run held 98.0 ± 0.2. Anything under ~4 points needs repetition
+  before it means anything — several plausible-looking "decay curves" have
+  turned out to sit inside that band. `tests/probe_repeatability.sh` measures
+  the floor for a given pair; run it before believing a delivery difference.
+- **A hot 8812AU tends to lose the dense constellations while the robust rates
+  carry on**, and it is easy to over-read. Delivery does correlate with the
+  `thermal` meter within one probe sequence (39 → 45 costing MCS7 ~5 points,
+  control flat) — but a sweep that varied *only* cooling time, by powering the
+  chip down for 5–120 s before an otherwise identical probe, found delivery
+  scattered 63–83% with no relation to either off-time or temperature. So heat
+  is a real correlate and not a demonstrated cause. Read the `thermal` event
+  (`DEVOURER_THERMAL_POLL_MS`) beside any rate-ceiling number, VBUS-cycle per
+  cell, and repeat the cell — do not attribute a difference to temperature
+  without varying temperature independently.
 - **MediaTek Android hosts cap bulk-IN reads at 16 KB**: some MTK xhci/usbfs
   stacks (Dimensity 810, Helio G99, MT6765) never complete a larger bulk-IN
   transfer — `LIBUSB_ERROR_TIMEOUT` forever, zero RX with a green init

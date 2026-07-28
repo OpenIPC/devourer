@@ -46,12 +46,16 @@ sequence via the existing `HalPwrSeqCmdParsing` (`rtl8812_card_disable_flow` /
 enable flows). Both call sites are best-effort — a chip already off the bus
 makes the writes fail, which is fine on a teardown path.
 
-This is not tidiness. Left in ACT the chip keeps its RF front end live and never
-cools, and a hot die loses the dense constellations while the robust rates carry
-on — thermal 43 → 53 costs MCS7 ~12 points of delivery at flat RSSI
-(`docs/warm-tx-degradation.md`). It also means an autonomously-airing beacon
-stops when the session ends. `PowerOff()` clears `_macPwrCtrlOn` so a re-init on
-the same `HalModule` still runs the power-on sequence.
+This is not tidiness. Left in ACT the chip keeps its RF front end live
+indefinitely after the owning process exits — it never powers down and never
+cools. Measured consequence: after a run of sessions, a 60 s idle recovered MCS7
+delivery from 73.0% to 85.8% only once the teardown power-down existed; before
+it, idling recovered nothing. *Why* removing power helps is not established —
+a card-disable both resets chip state and lets the die cool, and an off-time
+sweep could not separate them (`docs/warm-tx-degradation.md`). It also means an
+autonomously-airing beacon stops when the session ends. `PowerOff()` clears
+`_macPwrCtrlOn` so a re-init on the same `HalModule` still runs the power-on
+sequence.
 
 ## TX power
 

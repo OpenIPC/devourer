@@ -1,4 +1,4 @@
-# Warm-session TX degradation — chip temperature caps the modulation
+# Warm-session TX degradation on Jaguar1
 
 A devourer session used to leave a Jaguar1 chip powered up. Not just enumerated
 — in the ACT power state with the RF front end live, indefinitely, long after
@@ -6,105 +6,113 @@ the process that brought it up had exited. Nothing else in the tree does this:
 Jaguar2 resets the chip at init and Jaguar3 has run a full card-disable at
 teardown for a long time.
 
-The consequence was a transmitter that quietly lost its dense constellations.
+Alongside that, high-rate delivery was observed to decay across back-to-back
+sessions and to recover only when power was removed. This document records what
+is measured, what was fixed, and — importantly — **which parts of the causal
+story did not survive testing**.
 
-## The signature
+## First: know your noise floor
 
-Across back-to-back sessions on one RTL8812AU, ch6/20 MHz, constant TX config:
+Ten identical back-to-back MCS7/20 probes on an RTL8812AU, nothing changed
+between them:
 
-| | MCS7 (64-QAM 5/6) | MCS1 control | thermal | RSSI |
-| --- | --- | --- | --- | --- |
-| cold baseline | 83.0% | 98.0% | 43 | 69 |
-| after 24 max-duty sessions | 71.3% | 98.0% | **53** | 69 |
-| 120 s idle, chip still powered | 70.8% | 98.3% | 49 | 69 |
-| after VBUS cold cycle | 79.2% | 97.7% | **44** | 69 |
+| | mean | sd | range |
+| --- | --- | --- | --- |
+| MCS7/20 | 67.3% | **1.8** | 65.0 – 70.7 |
+| MCS1/20 control | 98.0% | 0.2 | 97.5 – 98.3 |
 
-**RSSI never moves.** The transmitter is not losing power; it is losing signal
-quality, and the chip's own thermal meter tracks the loss one-for-one. The
-robust rates are untouched throughout, because they need far less margin.
+**A single probe is worth about ±3 points.** Any claimed effect smaller than
+~4 points is not detectable one-shot, and several plausible-looking "decay
+curves" in this investigation sat inside that band. `tests/probe_repeatability.sh`
+measures the floor for a given pair; run it before believing a delivery
+difference.
 
-This is dangerous to diagnose because nothing reports an error: every frame is
-submitted, the receiver reports a strong RSSI and a clean EVM *on the frames it
-still decodes* (only the low-order ones), and the result is indistinguishable
-from a link too weak to carry the constellation. It produced one confident and
-completely wrong "rig SNR limit" conclusion before the mechanism was found.
+## What is measured
 
-Note what the idle row says: **idling does not cool the part.** 120 s of no
-traffic bought 4 thermal units; a 12 s VBUS cycle bought 9. A chip held in ACT
-with its RF on keeps dissipating whether or not you are transmitting.
+The fix is that `Stop()` and the destructor now power the chip down. Its effect
+on an idle gap, same repro before and after:
+
+| stage | before fix | after fix |
+| --- | --- | --- |
+| 60 s idle, **no** power cycle | thermal 48, MCS7 73.0% | thermal 40, MCS7 **85.8%** |
+
+That is ~13 points, around 7 sd — comfortably real. Before the fix no amount of
+idling recovered anything and only pulling VBUS helped; afterwards an ordinary
+gap between sessions restores the part.
+
+Delivery also correlates with the chip's thermal meter *within* one probe
+sequence: across the ten repeats above, thermal climbed 39 → 45 while MCS7 fell
+70.7% → 65.7%, with the control flat and RSSI unchanged (so nothing is losing
+transmit *power* — only quality).
+
+## What did NOT survive testing
+
+**"It is thermal" is not proven, and two experiments argue against it.**
+
+Every recovery that works removes power, and removing power does two things at
+once: it resets chip state *and* it lets the die cool. No power-cycle experiment
+can separate them. Two attempts to separate them failed to support cooling:
+
+- **Off-time sweep** (`tests/thermal_offtime_sweep.sh`) — degrade the part, then
+  power it down for 5/15/30/60/120 s before an otherwise identical probe. The
+  reset is bit-identical in every arm; only cooling time varies. Temperature
+  fell cleanly with off-time (47 → 40), but delivery scattered 63–83% with **no
+  relationship to off-time or temperature** — the best result came from the
+  *shortest* off-time and the *hottest* chip.
+- **Within a single uninterrupted session**
+  (`tests/thermal_causation_probe.sh`) — 240 s of continuous max-duty TX, one
+  bring-up, no re-init, no state change. The thermal meter stayed **pinned**
+  while MCS7 delivery still drifted down ~10% and the MCS1 control held flat.
+
+So heat is a real correlate of delivery in some conditions and demonstrably not
+the driver in others. The mechanism behind the recovery-on-power-removal is
+**open**. Do not cite this document as evidence that the effect is thermal.
 
 ## The fix
 
-`RtlJaguarDevice::Stop()` and the destructor now run
+`RtlJaguarDevice::Stop()` and the destructor run
 `HalModule::rtw_hal_deinit()` — halt the MAC engines (`REG_CR`, `REG_RCR`) then
-the die's card-disable power sequence. Those sequence tables
-(`rtl8812_card_disable_flow` and the 8814A/8821A equivalents) had been carried
-in `hal/Hal88*PwrSeq.c` since the port began with nothing calling them.
+the die's card-disable power sequence, through the same `HalPwrSeqCmdParsing`
+and the same three-way chip dispatch `InitPowerOn` already uses. The sequence
+tables (`rtl8812_card_disable_flow` and the 8814A/8821A equivalents) had been
+carried in `hal/Hal88*PwrSeq.c` since the port began with nothing calling them.
 
-The chip now powers down whenever no session owns it, so it cools. Same repro,
-after the fix:
+It is justified on its own terms regardless of the mechanism question: leaving a
+radio powered and transmitting-capable after its owning process has exited is
+wrong, it is what every other generation already avoids, and it is what makes an
+autonomously-airing beacon stop at session end.
 
-| stage | before | after |
-| --- | --- | --- |
-| 60 s idle, **no** power cycle | thermal 48, MCS7 73.0% | thermal **40**, MCS7 **85.8%** |
+## What it does not fix
 
-Before, no amount of idling recovered anything and only pulling VBUS helped.
-Now an ordinary gap between sessions restores the part completely, without
-touching the hardware.
+- **Continuous transmission.** Inside one uninterrupted high-duty session the
+  part still drifts down; power-down at teardown cannot help a session that
+  never ends.
+- **`SIGKILL`.** Neither `Stop()` nor the destructor runs, so the chip stays
+  powered. An init-side power-off was considered and rejected: it would run
+  immediately before power-on, buying nothing, while adding risk to a bring-up
+  path that works.
+- **There is no in-flight recovery API.** Until the mechanism is understood
+  there is nothing principled to implement, and a call that restored the rate by
+  dropping the link would not be a recovery for an airborne link anyway.
 
-## What this does not fix
+## Per-chip
 
-**Continuous transmission still heats the chip.** Inside one uninterrupted
-high-duty session the part reaches thermal equilibrium and stays there —
-~80% → ~75% at MCS7 on this adapter. That is physics, not a defect, and it is
-the honest steady-state capability of a hot radio.
-
-There is deliberately **no in-flight recovery API**. Recovery requires the
-radio to stop transmitting long enough to cool, and the measurement says that
-is around a minute (60 s of powered-down idle moved thermal 47 → 40 and MCS7
-75% → 86%). A call that restores the rate by killing the link for a minute is
-not a recovery for an airborne link, so shipping one would be theatre. For a
-long flight the lever is thermal-aware operation instead: poll the meter with
-`DEVOURER_THERMAL_POLL_MS`, watch the `thermal` event's rising `delta`, and
-back off with `SetTxPowerOffsetQdb` or reduce duty before the constellation
-starts failing.
-
-**A killed process leaves the chip hot.** `SIGKILL` runs neither `Stop()` nor
-the destructor, so the chip stays powered and keeps heating until something
-opens it again. An init-side power-off was considered and rejected: it would
-run immediately before power-on and so buys no cooling time at all, while
-adding risk to a bring-up path that works. The real answer for an unattended
-deployment is a supervisor that does not `SIGKILL` its radio process.
-
-## Per-chip findings
-
-- **RTL8812AU** — where the effect is characterized. Thermal 43 → 53, MCS7
-  −12 points. The fix is validated here.
+- **RTL8812AU** — where the effect is characterized and the fix validated.
 - **RTL8814AU** — barely heats at the same duty (34 → 37) and shows no
-  degradation. It re-inits cleanly after the power-down; there was simply
-  nothing to recover. The effect scales with how hot the part actually gets.
-- **RTL8821AU** — re-inits cleanly after the power-down; not separately
-  characterized for the thermal curve.
-- **Jaguar2 (RTL8822BU)** — audited and **inconclusive**: its thermal meter did
-  not move (33–34) across the same run, and the link available for the test was
-  too marginal at MCS7 to resolve a small effect. No teardown power-down was
-  added there on the strength of a non-measurement; it remains the one
-  generation that leaves the chip powered at exit.
+  degradation; re-inits cleanly after the power-down.
+- **RTL8821AU** — re-inits cleanly; not separately characterized.
+- **Jaguar2 (RTL8822BU)** — audited, inconclusive: thermal did not move and the
+  available link was too marginal at MCS7 to resolve a small effect. No teardown
+  power-down added there on the strength of a non-measurement.
 
-## Reproducing
+## Harnesses
 
-```sh
-sudo REGRESS_VBUS_MAP="0bda:8812=3-2.3.4,3;2357:012d=10,2" \
-     tests/warm_tx_degradation_repro.sh
-```
+| script | question it answers |
+| --- | --- |
+| `probe_repeatability.sh` | how big must an effect be to be real on this pair? |
+| `warm_tx_degradation_repro.sh` | does delivery decay across sessions, and what do the sensors say? |
+| `thermal_offtime_sweep.sh` | is the recovery cooling, or the state reset? |
+| `thermal_causation_probe.sh` | does delivery track temperature with nothing else changing? |
 
-Holds one ground receiver up for the whole run so the reference never moves,
-then alternates probes with warm sessions, recording delivery at a test rate and
-a robust control rate alongside the chip thermal meter and the receiver's RSSI
-and EVM. `WARM_PWR=63 WARM_GAP=0` turns the warm sessions into max-power,
-max-duty heating. Two controls close it out: an idle with no power cycle, and a
-VBUS cycle.
-
-Reading it: falling delivery with **flat RSSI and rising thermal** is heat;
-falling delivery with **falling RSSI** would be a transmitter losing power,
-which is a different bug.
+Reading the repro: falling delivery with **flat RSSI** means signal quality, not
+transmit power. Falling RSSI would be a different bug.

@@ -48,6 +48,11 @@ fi
 IFACE="$1"
 CHANNEL="$2"
 CHIP="${3:-8812}"
+# Optional secondary-channel mode (HT40+/HT40-). Without it the channel is set
+# at 20 MHz, which silently overwrites a caller that had already put the
+# interface into HT40 — the dump then describes a 20 MHz chip while claiming to
+# be a 40 MHz capture.
+HTMODE="${4:-}"
 
 case "$CHIP" in
   8812|8821|8814) ;;
@@ -77,7 +82,7 @@ fi
 # channel).
 iw dev "$IFACE" set type monitor 2>/dev/null || true
 ip link set "$IFACE" up
-iw dev "$IFACE" set channel "$CHANNEL"
+iw dev "$IFACE" set channel "$CHANNEL" ${HTMODE:+$HTMODE}
 
 readreg() {
   iwpriv "$IFACE" read 4,"$1" 2>&1 | grep -oP '0x[0-9A-Fa-f]+$' | head -1

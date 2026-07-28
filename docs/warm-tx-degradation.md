@@ -1,118 +1,114 @@
-# Warm-session TX degradation on Jaguar1
+# The "warm TX degradation" that wasn't — a measurement post-mortem
 
-A devourer session used to leave a Jaguar1 chip powered up. Not just enumerated
-— in the ACT power state with the RF front end live, indefinitely, long after
-the process that brought it up had exited. Nothing else in the tree does this:
-Jaguar2 resets the chip at init and Jaguar3 has run a full card-disable at
-teardown for a long time.
+A field report described an RTL8812AU whose 64-QAM rates died across repeated
+sessions while the robust rates stayed perfect, recovering only on a USB power
+cycle. Investigating it produced, in order: a latched-chip-state root cause, a
+thermal root cause, a band-switching root cause, and a degraded-adapter root
+cause. **All four were wrong, and all four had the same origin.**
 
-Alongside that, high-rate delivery was observed to decay across back-to-back
-sessions and to recover only when power was removed. This document records what
-is measured, what was fixed, and — importantly — **which parts of the causal
-story did not survive testing**.
+The ground station was a TP-Link Archer T3U — an RTL8822BU with *internal*
+antennas. Its modulation cliff sits inside the 64-QAM rates, so it could not
+measure what it was being asked to measure.
 
-## First: know your noise floor
+## The measurement that ends it
 
-Ten identical back-to-back MCS7/20 probes on an RTL8812AU, nothing changed
-between them:
+Two RTL8822BU adapters. Identical silicon, identical code path, same
+transmitter, same channel, minutes apart. The only difference is antennas:
 
-| | mean | sd | range |
-| --- | --- | --- | --- |
-| MCS7/20 | 67.3% | **1.8** | 65.0 – 70.7 |
-| MCS1/20 control | 98.0% | 0.2 | 97.5 – 98.3 |
+| ground station | MCS1 | MCS3 | MCS4 | MCS5 | MCS6 | MCS7 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Archer T3U — **internal** | 98.1 | 97.8 | 98.3 | 79.1 | 49.0 | **2.9** |
+| Comfast CF-924AC V2 — **two external** | 95.8 | 95.4 | 95.8 | 95.7 | 94.4 | **95.9** |
 
-**A single probe is worth about ±3 points.** Any claimed effect smaller than
-~4 points is not detectable one-shot, and several plausible-looking "decay
-curves" in this investigation sat inside that band. `tests/probe_repeatability.sh`
-measures the floor for a given pair; run it before believing a delivery
-difference.
+One is a textbook waterfall rolling off through 64-QAM. The other is flat with
+margin to spare. Both adapters are healthy.
 
-## What is measured
+## Why a marginal receiver imitates a degrading transmitter
 
-The fix is that `Stop()` and the destructor now power the chip down. Its effect
-on an idle gap, same repro before and after:
+A receiver perched on its cliff swings between "fine" and "zero" on a few dB of
+ambient, while the rates below the cliff stay pinned at ~98%. That is precisely
+the reported symptom: high-order modulation dies, low rates unaffected,
+apparently recovering at random.
 
-| stage | before fix | after fix |
-| --- | --- | --- |
-| 60 s idle, **no** power cycle | thermal 48, MCS7 73.0% | thermal 40, MCS7 **85.8%** |
+Earlier in one session that same T3U delivered MCS7 at 68%; later, 0.6%. The
+cliff never moved — the operating point did (co-channel ambient rose from ~19 to
+~58 frames/3 s). Power-cycling appeared to "fix" it only because a cycle takes
+long enough for conditions to drift back.
 
-That is ~13 points, around 7 sd — comfortably real. Before the fix no amount of
-idling recovered anything and only pulling VBUS helped; afterwards an ordinary
-gap between sessions restores the part.
+## What each wrong answer was, and what killed it
 
-Delivery also correlates with the chip's thermal meter *within* one probe
-sequence: across the ten repeats above, thermal climbed 39 → 45 while MCS7 fell
-70.7% → 65.7%, with the control flat and RSSI unchanged (so nothing is losing
-transmit *power* — only quality).
+- **Latched chip state.** Refuted by reading the registers: the BB TX-swing is
+  rewritten unconditionally at every init by `phy_SetBBSwingByBand_8812A`.
+- **Thermal.** Refuted by `tests/thermal_offtime_sweep.sh` — vary only the
+  power-off duration, keeping the reset identical, and delivery does not follow
+  temperature (best result came from the *shortest* off-time and the *hottest*
+  chip). Also by `tests/thermal_causation_probe.sh`: inside one uninterrupted
+  session the thermal meter is pinned while delivery still drifts.
+- **A transmitter defect from band switching.** A stressor matrix did reproduce
+  a 32-point collapse — but judged by an AR9271 sniffer the same stressor moved
+  decoded MCS7 from 3721 to 3915 frames, i.e. not at all. The transmitter also
+  matched the vendor driver (62.5% vs 69.8%).
+- **A degraded 8822BU.** The vendor driver failed on it identically, which
+  looked conclusive — but a link-budget shortfall predicts exactly that too. TX
+  power moved nothing (front end already near-field saturated at RSSI 67) and
+  both RX chains read healthy. Then the CF-924AC settled it.
 
-## What did NOT survive testing
+## Rules this produced
 
-**"It is thermal" is not proven, and two experiments argue against it.**
+1. **Qualify the receiver before believing a delivery number.**
+   `tests/ground_station_qualify.sh` sweeps the ladder and refuses the pairing
+   (exit 1) when the test rate is off the flat part. Prefer external-antenna
+   adapters as ground stations for high-MCS work.
+2. **Measure the noise floor first.** `tests/probe_repeatability.sh` — a single
+   MCS7/20 probe here has sd 1.8 and a 5.7-point spread, so effects under ~4
+   points are not findings. Several convincing "decay curves" sat inside it.
+3. **Corroborate with an independent receiver** before attributing a delivery
+   change to either end. An AR9271 and the `reference/` vendor drivers were on
+   this bench the whole time; either would have caught this on day one.
+4. **A control that fails under two drivers does not prove hardware damage.**
+   Run the vendor driver on the *receive* side too (`tests/rx_vendor_ab.sh`),
+   and check the physical setup — antennas, placement, gain.
+5. **Never attribute causation to an intervention that changes two variables.**
+   Removing power both resets chip state and cools the die; no amount of
+   power-cycling separates them.
 
-Every recovery that works removes power, and removing power does two things at
-once: it resets chip state *and* it lets the die cool. No power-cycle experiment
-can separate them. Two attempts to separate them failed to support cooling:
+## The one code change that survived
 
-- **Off-time sweep** (`tests/thermal_offtime_sweep.sh`) — degrade the part, then
-  power it down for 5/15/30/60/120 s before an otherwise identical probe. The
-  reset is bit-identical in every arm; only cooling time varies. Temperature
-  fell cleanly with off-time (47 → 40), but delivery scattered 63–83% with **no
-  relationship to off-time or temperature** — the best result came from the
-  *shortest* off-time and the *hottest* chip.
-- **Within a single uninterrupted session**
-  (`tests/thermal_causation_probe.sh`) — 240 s of continuous max-duty TX, one
-  bring-up, no re-init, no state change. The thermal meter stayed **pinned**
-  while MCS7 delivery still drifted down ~10% and the MCS1 control held flat.
+Jaguar1 was the only generation that neither reset the chip at init nor
+de-initialised it at teardown, so a session left the chip in ACT with its RF
+front end live indefinitely after the owning process exited — and an
+autonomously-airing beacon kept transmitting.
 
-So heat is a real correlate of delivery in some conditions and demonstrably not
-the driver in others. The mechanism behind the recovery-on-power-removal is
-**open**. Do not cite this document as evidence that the effect is thermal.
+`RtlJaguarDevice::Stop()` and the destructor now run
+`HalModule::rtw_hal_deinit()`: halt the MAC engines, then the die's card-disable
+power sequence, using tables that had sat in `hal/Hal88*PwrSeq.c` since the port
+began with nothing calling them.
 
-## The fix
+**It carries no performance claim.** The delivery recovery an earlier revision
+cited was measured through the unqualified T3U. The change stands on the
+architecture alone: every other generation already does this, and it makes a
+stray beacon stop. `tuning.teardown_power_down=0`
+(`DEVOURER_TEARDOWN_POWER_DOWN=0`) disables it, which post-mortems need — a
+powered-down chip answers every register read with the CARDEMU fill.
 
-`RtlJaguarDevice::Stop()` and the destructor run
-`HalModule::rtw_hal_deinit()` — halt the MAC engines (`REG_CR`, `REG_RCR`) then
-the die's card-disable power sequence, through the same `HalPwrSeqCmdParsing`
-and the same three-way chip dispatch `InitPowerOn` already uses. The sequence
-tables (`rtl8812_card_disable_flow` and the 8814A/8821A equivalents) had been
-carried in `hal/Hal88*PwrSeq.c` since the port began with nothing calling them.
+## Is the original report real?
 
-It is justified on its own terms regardless of the mechanism question: leaving a
-radio powered and transmitting-capable after its owning process has exited is
-wrong, it is what every other generation already avoids, and it is what makes an
-autonomously-airing beacon stop at session end.
-
-## What it does not fix
-
-- **Continuous transmission.** Inside one uninterrupted high-duty session the
-  part still drifts down; power-down at teardown cannot help a session that
-  never ends.
-- **`SIGKILL`.** Neither `Stop()` nor the destructor runs, so the chip stays
-  powered. An init-side power-off was considered and rejected: it would run
-  immediately before power-on, buying nothing, while adding risk to a bring-up
-  path that works.
-- **There is no in-flight recovery API.** Until the mechanism is understood
-  there is nothing principled to implement, and a call that restored the rate by
-  dropping the link would not be a recovery for an airborne link anyway.
-
-## Per-chip
-
-- **RTL8812AU** — where the effect is characterized and the fix validated.
-- **RTL8814AU** — barely heats at the same duty (34 → 37) and shows no
-  degradation; re-inits cleanly after the power-down.
-- **RTL8821AU** — re-inits cleanly; not separately characterized.
-- **Jaguar2 (RTL8822BU)** — audited, inconclusive: thermal did not move and the
-  available link was too marginal at MCS7 to resolve a small effect. No teardown
-  power-down added there on the strength of a non-measurement.
+Unknown, and deliberately left open. Every measurement taken here was through an
+instrument that could not support the conclusion, so nothing gathered so far is
+evidence either way. A re-report is worth taking seriously if it comes from a rig
+where the ground station passes rule 1, a second receiver corroborates, and the
+noise floor is established.
 
 ## Harnesses
 
-| script | question it answers |
+| script | question |
 | --- | --- |
-| `probe_repeatability.sh` | how big must an effect be to be real on this pair? |
-| `warm_tx_degradation_repro.sh` | does delivery decay across sessions, and what do the sensors say? |
-| `thermal_offtime_sweep.sh` | is the recovery cooling, or the state reset? |
+| `ground_station_qualify.sh` | can this receiver measure this rate at all? |
+| `probe_repeatability.sh` | how big must an effect be to be real here? |
+| `rx_vendor_ab.sh` | is a bad receiver our code, or the hardware? |
+| `band_stressor_sniffer.sh` | does a stressor hurt the transmitter, judged independently? |
+| `ground_rx_degradation.sh` | which end of the link is losing? |
+| `severe_form_hunt.sh` | which stressor, if any, reproduces the collapse? |
+| `thermal_offtime_sweep.sh` | cooling, or state reset? |
 | `thermal_causation_probe.sh` | does delivery track temperature with nothing else changing? |
-
-Reading the repro: falling delivery with **flat RSSI** means signal quality, not
-transmit power. Falling RSSI would be a different bug.
+| `examples/chipstate` | what state did the last session leave, read without disturbing it? |

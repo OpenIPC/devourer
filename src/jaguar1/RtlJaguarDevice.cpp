@@ -1861,13 +1861,15 @@ bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {
  *
  * The power-down is the point: without it a Jaguar1 chip stays in ACT with its
  * RF front end live for as long as the adapter is plugged in, long after the
- * owning process has exited — which is both wrong on its own terms and what
- * every other generation already avoids. Measured consequence: a 60 s idle
- * recovers MCS7 delivery from 73% to 86% only once this exists; before it,
- * idling recovered nothing (docs/warm-tx-degradation.md, which also records why
- * the *reason* removing power helps is still open). It also means a beacon
- * loaded into the MAC's reserved page stops airing when the session ends
- * instead of transmitting forever.
+ * owning process has exited. That is wrong on its own terms, it is what every
+ * other generation already avoids (HalJaguar2::power_off,
+ * HalJaguar3::rtw_hal_deinit), and it is what makes a beacon loaded into the
+ * MAC's reserved page stop airing when the session ends instead of
+ * transmitting indefinitely.
+ *
+ * No performance claim is attached. An earlier revision cited a delivery
+ * recovery here; that measurement came from a ground station too marginal to
+ * support it (docs/warm-tx-degradation.md).
  *
  * Best-effort: a chip that already dropped off the bus makes the writes fail,
  * which is fine on a teardown path. */

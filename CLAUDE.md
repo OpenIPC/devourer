@@ -631,16 +631,15 @@ generators, never the output files.
   before it means anything — several plausible-looking "decay curves" have
   turned out to sit inside that band. `tests/probe_repeatability.sh` measures
   the floor for a given pair; run it before believing a delivery difference.
-- **A hot 8812AU tends to lose the dense constellations while the robust rates
-  carry on**, and it is easy to over-read. Delivery does correlate with the
-  `thermal` meter within one probe sequence (39 → 45 costing MCS7 ~5 points,
-  control flat) — but a sweep that varied *only* cooling time, by powering the
-  chip down for 5–120 s before an otherwise identical probe, found delivery
-  scattered 63–83% with no relation to either off-time or temperature. So heat
-  is a real correlate and not a demonstrated cause. Read the `thermal` event
-  (`DEVOURER_THERMAL_POLL_MS`) beside any rate-ceiling number, VBUS-cycle per
-  cell, and repeat the cell — do not attribute a difference to temperature
-  without varying temperature independently.
+- **Do not attribute a rate ceiling to chip temperature without varying
+  temperature independently.** Delivery does correlate with the `thermal` meter
+  within a probe sequence, and that correlation is a trap: a sweep varying
+  *only* the power-off duration (identical reset every arm) found delivery
+  scattered 63–83% with no relation to off-time or temperature, and inside a
+  single uninterrupted session the meter stays pinned while delivery drifts.
+  Read the `thermal` event (`DEVOURER_THERMAL_POLL_MS`) beside a rate-ceiling
+  number by all means, but a power cycle changes chip state *and* temperature
+  together, so it can never separate them (`docs/warm-tx-degradation.md`).
 - **MediaTek Android hosts cap bulk-IN reads at 16 KB**: some MTK xhci/usbfs
   stacks (Dimensity 810, Helio G99, MT6765) never complete a larger bulk-IN
   transfer — `LIBUSB_ERROR_TIMEOUT` forever, zero RX with a green init

@@ -1751,6 +1751,9 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
     c.ldpc_rx_ht = true;
     c.ldpc_rx_vht = true;
     c.ldpc_rx_flag = false;
+    /* Decodes 2.4 GHz VHT on the bench (it served as the ground station for
+     * the other dies' runs), but its own TX side is unmeasured there, and
+     * vht_2g4_ok is a transmit claim. */
     break;
   case CHIP_8821:
     c.chip_name = "RTL8821A";
@@ -1765,6 +1768,11 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
     c.ldpc_rx_ht = true;
     c.ldpc_rx_vht = true;
     c.ldpc_rx_flag = true;
+    /* 8812AU on air, cold-cycled: VHT 1SS up to MCS8 — 256-QAM — on 2.4 GHz,
+     * every sampled frame decoded as the commanded VHT rate by an 8822BU peer.
+     * The 8811A is the 1T1R cut of the same die on the same path, unmeasured
+     * on its own. */
+    c.vht_2g4_ok = true;
     if (_eepromManager->version_id.RFType == RF_TYPE_1T1R) {
       c.chip_name = "RTL8811A";
       c.marketing_names = "RTL8811AU/RTL8811AR";

@@ -231,7 +231,10 @@ are parsed in each demo's own code. The ones needed daily:
 - `DEVOURER_TX_RATE=<rate>[/<bw>][/SGI][/LDPC][/STBC][/ER|/ER106][/DCM]` — TX
   mode for rate-less frames (`MCS7/40/SGI`, `VHT2SS_MCS3/80/LDPC`, `1M`...).
   Unset = 6M legacy. CCK rates are 2.4 GHz-only; `1M` buys ~9 dB link budget
-  over `6M`. `/ER`, `/ER106`, `/DCM` are HE-only (Kestrel): the HE ER SU
+  over `6M`. Rate resolution never reads the band, so `VHT*` rates air on
+  2.4 GHz too — the non-standard NitroQAM/TurboQAM extension, confirmed on the
+  dies whose `AdapterCaps.vht_2g4_ok` is set, peer-decode required and the
+  256-QAM MCS8/9 points still unmeasured (`docs/vht-on-2g4.md`). `/ER`, `/ER106`, `/DCM` are HE-only (Kestrel): the HE ER SU
   extended-range PPDU + dual-carrier modulation (`docs/he-extended-range.md`).
   The library itself is radiotap-driven — a frame carrying its own rate
   radiotap overrides the mode per-packet (ER SU = radiotap-HE FORMAT=EXT_SU).
@@ -605,7 +608,14 @@ generators, never the output files.
   After detaching a kernel driver, expect a cold re-init; `DEVOURER_SKIP_RESET`
   only helps when firmware state is intact.
 - **The chip retains state across soft re-init** — cold-bisect hardware
-  problems with a VBUS power-cycle, not a re-run.
+  problems with a VBUS power-cycle, not a re-run. This is not only a bring-up
+  concern: **high-order constellation TX degrades across warm re-inits**. After
+  a run of back-to-back sessions an 8812AU delivered 0% at MCS7 (64-QAM) while
+  16-QAM and below still worked, and a VBUS cycle restored it to 58% at the
+  same channel, power and gap. Nothing logs an error, RSSI and EVM look
+  healthy, and the result is indistinguishable from a link too weak to carry
+  the rate — so any rate-ceiling measurement must cold-cycle per cell or it
+  measures accumulated chip state. An `authorized` toggle does not clear it.
 - **MediaTek Android hosts cap bulk-IN reads at 16 KB**: some MTK xhci/usbfs
   stacks (Dimensity 810, Helio G99, MT6765) never complete a larger bulk-IN
   transfer — `LIBUSB_ERROR_TIMEOUT` forever, zero RX with a green init

@@ -35,7 +35,13 @@ std::vector<uint8_t> build_stream_radiotap(const TxMode& mode);
  *     ER / ER106 / DCM (HE rates only, Kestrel): HE ER SU extended-range PPDU
  *       (242-tone RU, MCS0-2 / 106-tone RU, MCS0) and dual-carrier modulation
  *       (MCS 0/1/3/4; excludes STBC). Out-of-spec combos are clamped (W log).
- * Empty or unrecognised falls back to 6M legacy. */
+ * Empty or unrecognised falls back to 6M legacy.
+ *
+ * The rate is resolved without reference to the band, so a VHT rate on a
+ * 2.4 GHz channel is accepted and aired — the non-standard vendor extension
+ * ("NitroQAM"/"TurboQAM"). It is bench-confirmed on the chips whose
+ * AdapterCaps.vht_2g4_ok is set; the peer must be able to decode it, since a
+ * standards-only 802.11n receiver sees nothing. See docs/vht-on-2g4.md. */
 TxMode parse_tx_mode_str(const std::string& spec);
 
 }  // namespace devourer

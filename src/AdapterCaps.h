@@ -138,6 +138,27 @@ struct AdapterCaps {
    * offsets 16/20 unparsed, and the Jaguar1 phy_status_rpt has no ldpc bit). */
   bool ldpc_rx_flag = false;
 
+  /* Bench-derived like the ldpc_rx_* trio above, and a TRANSMIT claim: the
+   * baseband emits a VHT PPDU that a peer decodes on the 2.4 GHz band.
+   * 802.11ac is a 5 GHz standard, so nothing guarantees a 2.4 GHz VHT frame
+   * works at all; devourer's TX path
+   * never reads the band when resolving a rate, which makes it *selectable*
+   * everywhere, and this flag is the separate question of whether it flies.
+   * False means unmeasured on that chip, not incapable.
+   *
+   * Scope: VHT *format* on 2.4 GHz. The 256-QAM points that motivate the
+   * extension (the "NitroQAM" / "TurboQAM" marketing) are confirmed on the
+   * 8812A only — VHT1SS_MCS8 at 20 MHz, decoded by an 8822BU peer. Measuring
+   * them needs a chip that has been VBUS cold-cycled: high-order constellation
+   * TX degrades across warm re-inits until 64-QAM and up stop decoding, which
+   * reads exactly like a link too weak to carry them (docs/vht-on-2g4.md).
+   * Note VHT MCS9 is not a legal rate at 20 MHz for 1-2 streams; hardware
+   * falls back to MCS8 there, so 40 MHz is required to exercise MCS9 at all.
+   *
+   * A standards-only 802.11n receiver decodes none of it either way: this is a
+   * strong-link, close-range mode, the opposite of a range mode. */
+  bool vht_2g4_ok = false;
+
   /* --- feature flags --- */
   /* Per-packet TX power: a per-frame power trim driven by radiotap
    * DBM_TX_POWER (dB delta vs the calibrated table / session base) or a

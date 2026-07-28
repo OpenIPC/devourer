@@ -1573,6 +1573,11 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
     c.marketing_names = "RTL8812CU/RTL8822CU";
     c.chip_id = 0x13;
     c.variant = "C8822C";
+    /* 8812CU on air: VHT 1SS MCS0 and MCS4 on 2.4 GHz, every sampled frame
+     * decoded as the commanded VHT rate by an 8814AU peer. Not set for the
+     * 8822E above — its 2.4 GHz TX is undecodable under the vendor driver too
+     * (docs/8822e-quirks.md), which this flag would otherwise paper over. */
+    c.vht_2g4_ok = true;
   }
   return c;
 }

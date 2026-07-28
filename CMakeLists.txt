@@ -1134,6 +1134,17 @@ if(Python3_Interpreter_FOUND)
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/la_csi.py --selftest
     )
     set_tests_properties(la_csi_math PROPERTIES SKIP_RETURN_CODE 77)
+
+    # Headless guard for the 2.4 GHz-VHT waterfall's decode + crossing math
+    # (tests/nitroqam_waterfall.py). The DESC_RATE decode is what proves which
+    # modulation a frame actually arrived as, and a bench link that tops out
+    # below 256-QAM never produces a 256-QAM txhit, a legacy fallback, or a
+    # threshold crossing — so those paths need a headless case.
+    add_test(
+        NAME nitroqam_decode_math
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/nitroqam_waterfall.py --self-test
+    )
 endif()
 
 # --- selftest aggregate ----------------------------------------------------

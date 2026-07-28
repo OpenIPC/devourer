@@ -70,3 +70,29 @@ def desc_rate_to_mcs(code):
     if 44 <= code <= 53:                  # DESC_RATEVHTSS1MCS0..9
         return ("vht", code - 44)
     return None
+
+
+def desc_rate_decode(code):
+    """rx.frame/rx.txhit `rate` -> ("cck"|"ofdm"|"ht"|"vht", mcs, nss).
+
+    The stream-aware companion to desc_rate_to_mcs(): it classifies the whole
+    DESC_RATE space instead of collapsing multi-stream rates to None, so a
+    consumer can prove *which* modulation flew — e.g. VHT2SS_MCS9 (0x3f) vs
+    HT MCS15 (0x1b), the 256-QAM-on-2.4GHz question.
+
+    For HT, mcs is the raw 0..31 index and nss = mcs // 8 + 1. For VHT, mcs is
+    0..9 within the stream section. Legacy rates report mcs as the index inside
+    their section and nss 1. Returns None for an unknown code."""
+    if code is None:
+        return None
+    if 0 <= code <= 3:                    # DESC_RATE1M..11M
+        return ("cck", code, 1)
+    if 4 <= code <= 11:                   # DESC_RATE6M..54M
+        return ("ofdm", code - 4, 1)
+    if 12 <= code <= 43:                  # DESC_RATEMCS0..MCS31
+        ht_mcs = code - 12
+        return ("ht", ht_mcs, ht_mcs // 8 + 1)
+    if 44 <= code <= 83:                  # DESC_RATEVHTSS1MCS0..VHTSS4MCS9
+        off = code - 44
+        return ("vht", off % 10, off // 10 + 1)
+    return None

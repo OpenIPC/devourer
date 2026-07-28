@@ -408,6 +408,60 @@ compare curves only on the rising edge). Bench-measured on an 8812AU→8822BU
 pair at MCS7/20 MHz: **+3.0 dB LDPC gain at the 10%-delivery crossing**, and
 in the saturation regime LDPC delivered ~80% where BCC delivered 0–19%.
 
+### `nitroqam_waterfall.sh`: VHT on the 2.4 GHz band
+
+VHT is a 5 GHz standard; airing it on 2.4 GHz is the vendor extension marketed
+as NitroQAM/TurboQAM. Same waterfall method as `ldpc_waterfall.sh` plus a
+**modulation gate**: every sampled `rx.txhit` is decoded back to a rate, so a
+cell that delivers frames which arrive as HT is reported as a fallback rather
+than as a pass.
+
+```bash
+sudo tests/nitroqam_waterfall.sh --emit-vid 0x0bda --emit-pid 0x8812 \
+    --ground-vid 0x2357 --ground-pid 0x012d --channel 6 --bw 20
+python3 tests/nitroqam_waterfall.py report \
+    /tmp/devourer-nitroqam-waterfall/points.jsonl
+```
+
+The power axis defaults to `--pwr-mode offset` (`SetTxPowerOffsetQdb`, which
+preserves the calibrated per-rate shape). Do not substitute the flat
+`DEVOURER_TX_PWR` index: it forces both paths to one level and zeroes the
+per-rate diffs, and measurably degrades the link — the same pair that reaches
+MCS4 at calibrated power tops out at MCS1 under a flat index.
+
+`nitroqam_waterfall.py --self-test` is the headless half, wired into `ctest` as
+`nitroqam_decode_math`: it covers the DESC_RATE decode and threshold-crossing
+math that a bench link topping out below 256-QAM never reaches on air.
+
+**Cold-cycle or measure nothing.** The harness VBUS-cycles both ends before
+every cell (`REGRESS_VBUS_MAP` + uhubctl) because high-order constellation TX
+degrades across warm re-inits: the same 8812AU delivered 0% at MCS7 warm and
+58% cold, same channel/power/gap, with no error logged anywhere. Without it a
+rate ceiling measures accumulated chip state, not the link.
+
+Measured: VHT confirmed on 2.4 GHz from an 8812AU, 8822BU and 8812CU, and
+**256-QAM (VHT1SS_MCS8) confirmed on the 8812AU**, modulation-verified by an
+8822BU peer. Note VHT MCS9 is illegal at 20 MHz for 1-2 streams — hardware
+emits MCS8 and the modulation gate catches it. Full results:
+`docs/vht-on-2g4.md`.
+
+### `nitroqam_kernel_ab.sh`: devourer vs the vendor driver, same dongle
+
+The control that decides whether a delivery wall is ours or the rig's: runs
+devourer and the vendor driver from `reference/rtl8812au` on the same adapter,
+interleaved per rate, judged by an AR9271 sniffer (different vendor's radio, no
+shared silicon or code).
+
+```bash
+sudo REGRESS_VBUS_MAP="0bda:8812=3-2.3.4,3" tests/nitroqam_kernel_ab.sh 6
+```
+
+Measured at the top of the HT ladder: devourer 58.2% vs vendor 64.3% at MCS7,
+61.7% vs 68.4% at MCS5 — on par, no devourer-side high-MCS defect. Do **not**
+substitute the in-tree `rtw88` for the vendor driver: it accepts frames on a
+monitor netdev and reports them injected while airing nothing decodable, which
+reads as a kernel-side failure at every rate.
+
 ### `tx_teardown_asan.sh` / `teardown_gen_sanity.sh`: lifetime bugs on real hardware
 
 A sanitizer only sees what runs, and the interesting lifetime bugs live in the

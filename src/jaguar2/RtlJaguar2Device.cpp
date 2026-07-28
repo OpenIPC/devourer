@@ -1158,6 +1158,12 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
     c.marketing_names = "RTL8822BU/RTL8812BU";
     c.chip_id = 0x0a;
     c.variant = "C8822B";
+    /* 8822BU on air: VHT 1SS MCS0 and 2SS MCS0 on 2.4 GHz, every sampled frame
+     * decoded as the commanded VHT rate by an 8814AU peer. It is also the die
+     * whose TXAGC walk gives 2.4G VHT a real regulatory bound rather than the
+     * table's missing-row fallthrough (HalJaguar2::apply_tx_power). The 8821C
+     * above is unmeasured. */
+    c.vht_2g4_ok = true;
   }
   return c;
 }

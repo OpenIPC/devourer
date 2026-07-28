@@ -133,13 +133,18 @@ stress_session() {
   sleep 1
 }
 
+start_ground() {
+  [ -n "$RXPID" ] && { kill "$RXPID" 2>/dev/null; wait "$RXPID" 2>/dev/null; }
+  DEVOURER_VID="$GND_VID" DEVOURER_PID="$GND_PID" DEVOURER_CHANNEL="$CH" \
+  DEVOURER_RX_AGG_SA=canon DEVOURER_RX_ENERGY_MS=500 DEVOURER_LOG_LEVEL=warn \
+  "$RXDEMO" >> "$RXLOG" 2>>"$OUT/ground.rx.stderr" &
+  RXPID=$!
+  sleep 9
+  kill -0 "$RXPID" 2>/dev/null || { echo "ground RX died" >&2; exit 1; }
+}
+
 cold_cycle "$GND_VID" "$GND_PID" || exit 1
-DEVOURER_VID="$GND_VID" DEVOURER_PID="$GND_PID" DEVOURER_CHANNEL="$CH" \
-DEVOURER_RX_AGG_SA=canon DEVOURER_RX_ENERGY_MS=500 DEVOURER_LOG_LEVEL=warn \
-"$RXDEMO" > "$RXLOG" 2>"$OUT/ground.rx.stderr" &
-RXPID=$!
-sleep 9
-kill -0 "$RXPID" 2>/dev/null || { echo "ground RX died" >&2; exit 1; }
+start_ground
 
 echo "severe-form hunt — $SESSIONS stressor sessions/arm, $PROBES probes/measurement"
 echo "  a hit is a >=20 point drop at $RATE with $CTRL intact (noise is ~+/-3)"
@@ -148,7 +153,16 @@ printf '  %-11s %-9s %-9s %-9s %-9s  %s\n' \
     "arm" "cold" "after" "delta" "ctrl" "verdict"
 
 for ARM in $ARMS; do
+  # Recover BOTH ends before every arm, and restart the ground process with
+  # them. Cycling only the DUT was a systematic flaw in the first version of
+  # this harness: the ground station stayed up across every arm, so anything
+  # that decayed on the receive side accumulated through the whole run and
+  # showed up as a per-arm delta. It produced a convincing 32-point "hit" that
+  # an independent receiver then refuted — the arms' own cold baselines had
+  # been sliding (62 -> 32 -> 1.2 -> 1.8) the entire time.
+  cold_cycle "$GND_VID" "$GND_PID" || exit 1
   cold_cycle "$DUT_VID" "$DUT_PID" || exit 1
+  start_ground
   before=$(measure "$RATE" "${ARM}_cold")
   RANDOM_SEQ=0
   for _ in $(seq 1 "$SESSIONS"); do
@@ -173,6 +187,44 @@ except ValueError:
       > "$OUT/${ARM}_after.canary" 2>&1
 done
 
+
+# --- drift canary ------------------------------------------------------------
+# Re-measure the very first arm's cold baseline at the END, both ends recovered
+# exactly as they were at the start. Nothing about the run should have changed
+# it. If it has, the reference moved underneath every arm and the per-arm deltas
+# above are differences between two different rigs, not stressor effects.
+#
+# This is not hypothetical: the run that "found" a 32-point band-switch collapse
+# had its arms' own cold baselines sliding 62 -> 32 -> 1.2 -> 1.8 -> 1.9 -> 0.7,
+# because the GROUND STATION's receiver was dying. An independent receiver later
+# showed the transmitter untouched, and the vendor driver failed on that ground
+# adapter exactly as devourer did — the adapter, not the code. Without this
+# check the run reports a confident, entirely wrong answer.
+cold_cycle "$GND_VID" "$GND_PID" || exit 1
+cold_cycle "$DUT_VID" "$DUT_PID" || exit 1
+start_ground
+first_arm=$(head -1 "$OUT/results.tsv" | cut -f1)
+first_cold=$(head -1 "$OUT/results.tsv" | cut -f2)
+final=$(measure "$RATE" drift_canary)
+echo
+python3 - "$first_arm" "$first_cold" "$final" <<'EOF'
+import sys
+arm, a, b = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    d = float(b) - float(a)
+except ValueError:
+    print("  drift canary: INVALID (%s -> %s)" % (a, b)); raise SystemExit(1)
+verdict = ("OK — the reference held" if abs(d) <= 4 else
+           "!! RUN INVALID: the reference moved %+.1f points during the run, "
+           "so every per-arm delta above is suspect. Check the GROUND station "
+           "(tests/rx_vendor_ab.sh) before believing any of it." % d)
+print("  drift canary: %s cold was %s, is now %s (%+.1f)  %s"
+      % (arm, a, b, d, verdict))
+raise SystemExit(0 if abs(d) <= 4 else 1)
+EOF
+canary_rc=$?
+
 echo
 echo "per-arm chip dumps: $OUT/*_after.canary"
 echo "results: $OUT/results.tsv"
+exit $canary_rc

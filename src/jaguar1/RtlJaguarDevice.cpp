@@ -1873,6 +1873,11 @@ bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {
  * which is fine on a teardown path. */
 void RtlJaguarDevice::Stop() {
   _device.quiesce_tx();
+  if (!_cfg.tuning.teardown_power_down) {
+    _logger->info("Jaguar1: Stop() leaving the chip powered "
+                  "(tuning.teardown_power_down=0)");
+    return;
+  }
   try {
     _halModule.rtw_hal_deinit();
   } catch (...) {
@@ -1902,12 +1907,14 @@ RtlJaguarDevice::~RtlJaguarDevice() {
     _rxmask_thread.join();
   }
   /* Backstop for a caller that destroys without Stop(): power the chip down so
-   * it is not left in ACT heating itself indefinitely. After the thread joins,
-   * so nothing is still touching the chip. Harmless if Stop() already ran. */
-  try {
-    _halModule.rtw_hal_deinit();
-  } catch (...) {
-    /* Teardown path — a chip that already left the bus is not an error. */
+   * it is not left in ACT indefinitely. After the thread joins, so nothing is
+   * still touching the chip. Harmless if Stop() already ran. */
+  if (_cfg.tuning.teardown_power_down) {
+    try {
+      _halModule.rtw_hal_deinit();
+    } catch (...) {
+      /* Teardown path — a chip that already left the bus is not an error. */
+    }
   }
 }
 

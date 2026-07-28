@@ -722,6 +722,17 @@ void RadioManagementModule::DumpCanary() {
   static const uint16_t bb_pathB[] = {
       0xe1c, 0xe20, 0xe24, 0xe28, 0xe2c, 0xe30, 0xe34, 0xe38, 0xe3c,
       0xe40, 0xe50, 0xe54, 0xe10, 0xe14, 0xe90, 0xe94};
+  /* The TX IQ correction coefficients IQK writes via FillTxIqc. Two reasons
+   * they are worth their own list. They live on BB page C1 (0x82c[31]=1), so a
+   * plain read of the address returns whichever bank happens to be selected —
+   * they have to be read deliberately. And nothing in array_mp_8812a_phy_reg
+   * rewrites them, so unlike everything else here they are NOT re-established
+   * by a bring-up: whatever the last calibration left is what transmits. A bad
+   * value damages TX EVM, which kills the dense constellations while the robust
+   * rates ride through unharmed — and until now nothing in the tree could see
+   * them. */
+  static const uint16_t bb_pageC1_A[] = {0xcc4, 0xcc8, 0xccc, 0xcd4};
+  static const uint16_t bb_pageC1_B[] = {0xec4, 0xec8, 0xecc, 0xed4};
   static const uint16_t bb_pathC[] = {
       0x1820, 0x1824, 0x1828, 0x182c, 0x1830, 0x1834, 0x1838, 0x183c,
       0x1840, 0x181c, 0x1850};
@@ -732,7 +743,12 @@ void RadioManagementModule::DumpCanary() {
                                         0x102, 0x420, 0x4c8, 0x508,
                                         0x522, 0x550, 0x560, 0x610,
                                         0x614};
-  static const uint32_t rf_canary[] = {0x00, 0x05, 0x18, 0x42, 0x65, 0x8f};
+  /* 0x08 is the LOK source and 0x58 the LOK the IQK loads from it. Same
+   * reasoning as the TX IQC above: the RF table does not rewrite 0x58 and the
+   * IQK does not back it up, so it survives a bring-up. A wrong local-oscillator
+   * calibration is phase noise, which again hurts dense constellations first. */
+  static const uint32_t rf_canary[] = {0x00, 0x05, 0x08, 0x18,
+                                       0x42, 0x58, 0x65, 0x8f};
 
   const auto ictype = _eepromManager->version_id.ICType;
   const bool has_pathB = (ictype != CHIP_8821);
@@ -752,6 +768,19 @@ void RadioManagementModule::DumpCanary() {
       _logger->info("BB 0x{:04x} = 0x{:08X}", a, _device.rtw_read32(a));
     for (uint16_t a : bb_pathD)
       _logger->info("BB 0x{:04x} = 0x{:08X}", a, _device.rtw_read32(a));
+  }
+  /* Page-C1 reads. Selecting the bank is a write to 0x82c, so snapshot it and
+   * put it back — the dump must not change what the chip does, only what we
+   * can see of it. */
+  {
+    const uint32_t page_save = _device.rtw_read32(0x82c);
+    _device.phy_set_bb_reg(0x82c, 0x80000000, 0x1);
+    for (uint16_t a : bb_pageC1_A)
+      _logger->info("BBC1 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+    if (has_pathB)
+      for (uint16_t a : bb_pageC1_B)
+        _logger->info("BBC1 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));
+    _device.rtw_write32(0x82c, page_save);
   }
   for (uint16_t a : mac_canary)
     _logger->info("MAC 0x{:03x} = 0x{:08X}", a, _device.rtw_read32(a));

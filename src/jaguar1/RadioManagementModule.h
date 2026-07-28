@@ -280,6 +280,11 @@ public:
    * unconfigured BB). */
   int FastSwingOffsetSteps(int steps, bool apply_now = true);
 
+  /* Read-only dump of the canary register set (BB / MAC / per-path RF) to the
+   * diagnostic plane. Public because it is also the read-only inspection path
+   * for a chip that was never Init'ed — see IRtlDevice::DumpChipState. */
+  void DumpCanary();
+
 private:
   void rtw_hal_set_msr(uint8_t net_type);
   void hw_var_set_monitor();
@@ -305,7 +310,6 @@ private:
   void Set_HW_VAR_ENABLE_RX_BAR(bool val);
   void phy_SwChnl8812();
   void phy_SwChnl8812_fast(uint8_t channelToSW);
-  void DumpCanary();
   void phy_SwChnl8814A();
   bool phy_SwBand8812(uint8_t channelToSW);
   void phy_FixSpur_8812A(ChannelWidth_t Bandwidth, uint8_t Channel);

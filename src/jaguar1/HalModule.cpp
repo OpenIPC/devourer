@@ -692,6 +692,19 @@ bool HalModule::PowerOff() {
   if (!ok) {
     _logger->warn("PowerOff: card-disable flow did not complete");
   }
+  /* Read back the state the sequence is supposed to have produced, rather than
+   * trusting its return value. The only polling step is the MAC-off wait in
+   * ACT->CARDEMU, so a sequence can "succeed" while the chip sits somewhere
+   * unintended — and a power-down that silently does nothing would make this
+   * whole teardown path inert. 0x0005 should show WL-suspend (BIT3) set and the
+   * MAC-off bit (BIT1) clear; REG_CR should read back with the MAC engines
+   * gone. Logged, not asserted: the next session's init already logs the same
+   * two registers, so the pair brackets the power state across a teardown. */
+  const uint8_t pwr_after = _device.rtw_read8(REG_SYS_CLKR + 1);
+  const uint16_t cr_after = _device.rtw_read16(REG_CR);
+  _logger->info("PowerOff: card-disable applied — 0x0005=0x{:02X} "
+                "REG_CR 0x100=0x{:04X} (seq {})",
+                pwr_after, cr_after, ok ? "ok" : "INCOMPLETE");
   /* Either way the chip is no longer in the state InitPowerOn's early-out
    * assumes, so clear the latch — otherwise a re-init on this same HalModule
    * would skip the power-on sequence and bring up a half-powered chip. */

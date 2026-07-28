@@ -705,6 +705,16 @@ add_executable(doctor
 target_include_directories(doctor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 target_link_libraries(doctor PUBLIC devourer PRIVATE PkgConfig::libusb)
 
+# chipstate — read a chip's registers without touching it: no USB reset, no
+# bring-up, no calibration. The only way to inspect the state a previous
+# session left behind, since every other entry point reconfigures the chip on
+# the way in and destroys exactly that evidence.
+add_executable(chipstate
+    examples/chipstate/main.cpp
+)
+target_include_directories(chipstate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+target_link_libraries(chipstate PUBLIC devourer PRIVATE PkgConfig::libusb)
+
 # Headless regression guard for the binary-stdin framing shared by the two
 # stream demos above (examples/common/stream_stdin.h). No libusb, no radio — just the
 # set_stdin_binary() + read_exact() path, so a text-mode regression (e.g. the

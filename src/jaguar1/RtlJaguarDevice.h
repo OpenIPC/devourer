@@ -227,6 +227,8 @@ public:
   devourer::FwBootStatus GetFwBootStatus() override {
     return _halModule.GetFwBootStatus();
   }
+  /* Read-only canary dump, safe to call without Init — see IRtlDevice. */
+  void DumpChipState() override { _radioManagement->DumpCanary(); }
 
   /* Runtime TX-mode default. send_packet honours a frame's own radiotap rate
    * fields per-packet; when a frame's radiotap carries no rate, this mode

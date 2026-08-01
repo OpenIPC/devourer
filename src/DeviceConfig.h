@@ -175,6 +175,15 @@ struct DeviceConfig {
      * Runtime equivalent: StartCwTone/StopCwTone on the concrete device. */
     bool cw_tone = false;
     uint8_t cw_tone_gain = 0;
+    /* env: DEVOURER_TX_RETRY_LIMIT — per-frame hardware retry limit (0..63).
+     * Maps to the TX descriptor DATA_RETRY_LIMIT / RTS_DATA_RTY_LMT field
+     * (Dword4 bits 18-23). 0 = no retries (WFB default: FEC provides
+     * reliability, not MAC retries). On a busy half-duplex link retries flood
+     * the air and blind the receiver. Hardware-ARQ (SetAckResponder + unicast
+     * TA, docs/scheduled-mac.md) needs a nonzero value. Inert on Kestrel
+     * (firmware-level retry) and on the 8814A die (vendor DATA_RETRY_LIMIT=0
+     * carve-out kept). */
+    int retry_limit = 0;
     /* env: DEVOURER_TX_USB_AGG — USB TX aggregation: max frames packed into
      * one bulk-OUT URB by send_packets (0 = off, the default: send_packets
      * degrades to a per-frame loop and every TX path is byte-identical to

@@ -1171,8 +1171,10 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
   SET_TX_DESC_RETRY_LIMIT_ENABLE_8812(usb_frame, 1);
   if (!is_8814a) {
     /* 88XXau leaves DATA_RETRY_LIMIT=0 for monitor injection on 8814A
-     * (RETRY_LIMIT_ENABLE stays set to 1 in both). */
-    SET_TX_DESC_DATA_RETRY_LIMIT_8812(usb_frame, 12);
+     * (RETRY_LIMIT_ENABLE stays set to 1 in both).
+     * Use cfg.tx.retry_limit (DEVOURER_TX_RETRY_LIMIT, default 0) instead of
+     * the hardcoded 12 — retries flood the air on a busy half-duplex link. */
+    SET_TX_DESC_DATA_RETRY_LIMIT_8812(usb_frame, _cfg.tx.retry_limit);
   }
   if (sgi) {
     _logger->info("short gi enabled,set sgi");
@@ -1228,7 +1230,7 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
       SET_TX_DESC_AGG_ENABLE_8812(usb_frame, 1);
       SET_TX_DESC_MAX_AGG_NUM_8812(usb_frame, am.max_num & 0x1f);
       SET_TX_DESC_AMPDU_DENSITY_8812(usb_frame, am.density & 0x7);
-      SET_TX_DESC_DATA_RETRY_LIMIT_8812(usb_frame, am.no_ack ? 0 : 12);
+      SET_TX_DESC_DATA_RETRY_LIMIT_8812(usb_frame, am.no_ack ? 0 : _cfg.tx.retry_limit);
     }
     if (_cfg.debug.tx_qsel)
       SET_TX_DESC_QUEUE_SEL_8812(usb_frame, *_cfg.debug.tx_qsel);

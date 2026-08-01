@@ -13,7 +13,8 @@
 # a different unicast RA (SetAckResponder re-armed) -> expect ON behavior.
 #
 # Usage: python3 ack_txreport_analyze.py <tx.jsonl> --sent N --cell NAME \
-#            --expect on|off
+#            --expect on|off [--expect-retries PIN]
+#        (off-phase verdict pins at PIN, default 12)
 #        python3 ack_txreport_analyze.py --selftest
 import json, sys
 
@@ -31,7 +32,7 @@ def load(path):
             out.append(r)
     return out
 
-def analyze(reports, sent, cell="", expect=None):
+def analyze(reports, sent, cell="", expect=None, expect_retries=12):
     n = len(reports)
     v = {"ev": "ackrep.verdict", "cell": cell, "sent": sent, "reports": n}
     if n == 0:
@@ -57,9 +58,11 @@ def analyze(reports, sent, cell="", expect=None):
     if expect == "on":
         v["capability_ok"] = bool(v["ack_rate"] >= 0.9 and v["retries_mean"] < 2)
     elif expect == "off":
-        # Nobody ACKs: delivery must FAIL and retries pin at the limit — this
-        # proves the no-ACK outcome is visible, not that the link is bad.
-        v["capability_ok"] = bool(v["ack_rate"] <= 0.1 and v["retries_max"] >= 8)
+        # Nobody ACKs: delivery must FAIL and retries pin at the configured
+        # limit (--expect-retries, DEVOURER_TX_RETRY_LIMIT) — this proves the
+        # no-ACK outcome is visible, not that the link is bad.
+        v["capability_ok"] = bool(v["ack_rate"] <= 0.1 and
+                                  v["retries_max"] >= expect_retries)
     else:
         v["capability_ok"] = None
     return v
@@ -79,6 +82,12 @@ def selftest():
             "tag": i % 256, "missed": 0} for i in range(100)]
     v = analyze(off, 100, "off", expect="off")
     check(v["capability_ok"] and v["retries_max"] == 12, "pinned OFF passes")
+    off8 = [{"ev": "tx.report", "ok": False, "state": 1, "retries": 8}
+            for _ in range(100)]
+    v = analyze(off8, 100, "off8", expect="off", expect_retries=8)
+    check(v["capability_ok"], "custom pin (8) OFF passes")
+    v = analyze(off8, 100, "off8-mismatch", expect="off", expect_retries=12)
+    check(not v["capability_ok"], "below-pin OFF fails")
     v = analyze(off, 100, "off-as-on", expect="on")
     check(not v["capability_ok"], "OFF behavior fails an ON expectation")
     v = analyze([], 100, "dead", expect="on")
@@ -102,13 +111,17 @@ def main():
         sys.exit(selftest())
     args = sys.argv[1:]
     sent, cell, expect = 0, "", None
+    expect_retries = 12
     if "--sent" in args:
         i = args.index("--sent"); sent = int(args[i + 1]); del args[i:i + 2]
     if "--cell" in args:
         i = args.index("--cell"); cell = args[i + 1]; del args[i:i + 2]
     if "--expect" in args:
         i = args.index("--expect"); expect = args[i + 1]; del args[i:i + 2]
-    v = analyze(load(args[0]), sent, cell, expect)
+    if "--expect-retries" in args:
+        i = args.index("--expect-retries")
+        expect_retries = int(args[i + 1]); del args[i:i + 2]
+    v = analyze(load(args[0]), sent, cell, expect, expect_retries)
     print(json.dumps(v))
     sys.exit(0 if v.get("capability_ok") else 1)
 

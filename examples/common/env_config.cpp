@@ -106,6 +106,8 @@ devourer::DeviceConfig devourer_config_from_env() {
     if (devourer::parse_ampdu_mode(e, m))
       cfg.tx.ampdu = m;
   }
+  if (env_long("DEVOURER_TX_RETRY_LIMIT", &v))
+    cfg.tx.retry_limit = static_cast<int>(v < 0 ? 0 : (v > 63 ? 63 : v));
 
   /* ---- bf ---- */
   if (const char *snd = env_str("DEVOURER_BF_ARM_SOUNDER")) {

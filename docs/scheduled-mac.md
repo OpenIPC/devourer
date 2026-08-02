@@ -155,7 +155,8 @@ generation three phases: **on** (responder armed with MAC1, unicast QoS-Data
 to MAC1 → expect ~100% `tx.report ok`, retries ~0), **retarget** (responder
 re-armed to a different MAC2, TX to MAC2 → proves RA and responder MAC are
 arbitrary), **off** (no responder → expect 0% ok, retries pinned at the
-descriptor limit: the no-ACK outcome must be *visible*, per frame).
+descriptor limit set by `DEVOURER_TX_RETRY_LIMIT` — this matrix runs it at
+12 — so the no-ACK outcome must be *visible*, per frame).
 `report_coverage` = reports / frames sent (`tx.stats.submitted`); HalMAC adds
 SW_DEFINE tag-echo gap counting.
 
@@ -172,6 +173,11 @@ scheduled MAC runs TX+RX anyway, so this is the relevant session shape.
 | Jaguar2 8812BU | 0.91 / 2.1 (run-to-run 0.12–0.91) | 0.64 / 5.3 | yes (12) | 0.86 | 0 |
 | Jaguar3 8822CU | 1.00 / 0.24 | 1.00 / 0.13 | yes (12) | 0.96 | 0 |
 
+The OFF-phase pin is set by `DEVOURER_TX_RETRY_LIMIT` (the matrix runs 12,
+the value the descriptors used to hardcode) — the knob, not a descriptor
+constant, is now the single source of truth for the retry limit on
+jaguar1/2/3 (inert on Kestrel and the 8814A die).
+
 Responder-side capability (same setup, J3 TX as the reference soliciting
 station): **8814AU** closes the loop at retries ~0.1 (the bench responder of
 choice); **8812AU** works but degraded (97% delivery at ~7 mean retries —
@@ -182,7 +188,8 @@ separately proven (`tests/ack_responder_check.sh`).
 ### The contract
 
 1. **Per-frame delivery detection is GO on all three generations**: the OFF
-   phase pins retries at the descriptor limit with `state=1` on every report —
+   phase pins retries at the configured limit (`DEVOURER_TX_RETRY_LIMIT`,
+   set to 12 by the matrix) with `state=1` on every report —
    a no-ACK outcome is unambiguously visible per frame, which is all a
    software retransmission layer needs. Report coverage 86–100% with zero
    HalMAC tag gaps (interior losses); the reliability layer must tolerate a
@@ -191,7 +198,9 @@ separately proven (`tests/ack_responder_check.sh`).
 2. **Closed-loop hardware ACK + autonomous retry is GO on Jaguar1 and
    Jaguar3** (100% delivery, retries ≈ 0.2–0.3) including retargeting an
    arbitrary UE MAC mid-session (re-arm `SetAckResponder`, change the
-   descriptor RA — both fully dynamic).
+   descriptor RA — both fully dynamic). Requires a nonzero
+   `DEVOURER_TX_RETRY_LIMIT` — the hardware ARQ loop retransmits until ACK
+   only up to that per-frame limit.
 3. **Jaguar2 as the soliciting TX is MARGINAL as measured**: ACK closure
    varied 12–91% across identical runs (mean retries 2–11) against both
    8814AU and 8812AU responders, and its TX pace in the TX+RX-thread shape is

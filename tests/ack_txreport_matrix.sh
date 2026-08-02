@@ -8,7 +8,9 @@
 #              MAC2: proves the injected descriptor's RA and the responder MAC
 #              are both arbitrary, not baked-in.
 #   off      — no responder, TX to MAC1: expect ok~0, retries pinned at the
-#              descriptor limit — the no-ACK outcome is VISIBLE per frame.
+#              descriptor limit set by DEVOURER_TX_RETRY_LIMIT (this matrix
+#              pins 12 so the hardware-ARQ capability stays visible) — the
+#              no-ACK outcome is VISIBLE per frame.
 # Every phase also measures report_coverage (reports / frames sent) and, on
 # HalMAC (J2/J3), SW_DEFINE tag-echo gaps + the firmware missed counter.
 #
@@ -29,6 +31,7 @@ CH=${CH:-36}; SECS=${SECS:-8}; GAP_US=${GAP_US:-5000}
 MAC1=${MAC1:-02:12:34:56:78:9a}
 MAC2=${MAC2:-02:12:34:56:78:9b}
 TX_SA=${TX_SA:-02:aa:bb:cc:dd:01}   # unicast TA (the ACK RA I/G footgun)
+RETRY_LIMIT=${RETRY_LIMIT:-12}      # descriptor retry pin for the off phase
 OUT=${OUT:-/tmp/ack_txreport}
 CELLS=${CELLS:-"j1-8812au:0x0bda:0x8812 j2-8812bu:0x2357:0x012d j3-8822cu:0x0bda:0xc812"}
 
@@ -51,6 +54,7 @@ run_phase() { # $1 cell $2 phase $3 tx vid $4 tx pid $5 RA mac $6 responder mac 
       DEVOURER_TX_QOS_DATA=1 DEVOURER_TX_RA=$ra DEVOURER_TX_SA=$TX_SA \
       DEVOURER_TX_RATE=MCS3 DEVOURER_TX_PAYLOAD_BYTES=200 \
       DEVOURER_TX_GAP_US=$GAP_US DEVOURER_TX_REPORT=1 \
+      DEVOURER_TX_RETRY_LIMIT=$RETRY_LIMIT \
       DEVOURER_TX_WITH_RX=thread DEVOURER_LOG_LEVEL=warn \
       timeout -s INT $SECS ./build/txdemo \
       >"$OUT/tx_$tag.jsonl" 2>"$OUT/tx_$tag.err" || true
@@ -64,7 +68,8 @@ run_phase() { # $1 cell $2 phase $3 tx vid $4 tx pid $5 RA mac $6 responder mac 
   sent=${sent:-0}
   echo "-- $tag: sent=$sent reports=$(grep -c '"ev":"tx.report"' "$OUT/tx_$tag.jsonl" || true)"
   python3 tests/ack_txreport_analyze.py "$OUT/tx_$tag.jsonl" \
-      --sent "$sent" --cell "$tag" --expect "$expect" | tee -a "$VERDICTS" || true
+      --sent "$sent" --cell "$tag" --expect "$expect" \
+      --expect-retries "$RETRY_LIMIT" | tee -a "$VERDICTS" || true
 }
 
 for cell in $CELLS; do

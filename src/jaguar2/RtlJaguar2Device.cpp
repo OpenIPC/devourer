@@ -1529,6 +1529,12 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
     SET_TX_DESC_SW_DEFINE_8822B(out, _tx_rpt_tag.fetch_add(1) & 0xff);
     jaguar2::cal_txdesc_chksum_8822b(out);
   }
+  /* Per-frame retry limit from cfg (DEVOURER_TX_RETRY_LIMIT, default 0) —
+   * the fill_data_tx_desc builder hardcodes 12, which floods a busy
+   * half-duplex link. Both fields sit inside the checksummed span. */
+  SET_TX_DESC_RTY_LMT_EN_8822B(out, 1);
+  SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(out, _cfg.tx.retry_limit);
+  jaguar2::cal_txdesc_chksum_8822b(out);
   const devourer::AmpduMode am = _ampdu; /* one lock-free load */
   if (am.enabled || _cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {
     /* A-MPDU descriptor half. The product SetAmpduMode state applies first
@@ -1541,7 +1547,7 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
       SET_TX_DESC_AGG_EN_8822B(out, 1);
       SET_TX_DESC_MAX_AGG_NUM_8822B(out, am.max_num & 0x1f);
       SET_TX_DESC_AMPDU_DENSITY_8822B(out, am.density & 0x7);
-      SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(out, am.no_ack ? 0 : 12);
+      SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(out, am.no_ack ? 0 : _cfg.tx.retry_limit);
     }
     if (_cfg.debug.tx_qsel)
       SET_TX_DESC_QSEL_8822B(out, *_cfg.debug.tx_qsel);

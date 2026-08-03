@@ -80,7 +80,7 @@ done
 # drone's timeout below the feeder's real runtime.
 NPHASES=$(awk -F, '{print NF}' <<<"$PHASES")
 SPAN=$(awk -v w="$WARMUP_S" -v c="$CYCLES" -v n="$NPHASES" -v p="$PHASE_S" \
-        'BEGIN{printf "%d", w + c*n*p + 11}')
+        'BEGIN{v = w + c*n*p + 11; printf "%d", (v == int(v)) ? v : int(v) + 1}')
 
 WIT_PIDF=""; DUT_PIDF=""; FEED_PIDF=""; DRONE_PIDF=""
 cleanup() {

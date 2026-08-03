@@ -114,6 +114,13 @@ struct AsyncRxShared {
   std::vector<libusb_transfer *> parked;
   bool parking_closed = false;
   std::atomic<unsigned long long> pool_stalls{0};
+  /* Device-gone latch. Plain async self-terminates on unplug (every URB
+   * error-retires, active hits 0, rx_loop returns) — parked URBs never
+   * complete, so backpressure mode needs an explicit signal or a dead device
+   * leaves the loop spinning until Stop(). Set from a NO_DEVICE transfer
+   * status or submit error; rx_loop exits on it and retires the parked set
+   * through the normal teardown path. */
+  std::atomic<bool> dead{false};
   std::mutex queue_mu;
   std::condition_variable queue_cv;
   std::deque<std::pair<uint8_t *, int>> queue;
@@ -138,6 +145,8 @@ inline void rx_consume(AsyncRxShared *s, const uint8_t *buf, int len) {
 
 extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
   auto *s = static_cast<AsyncRxShared *>(t->user_data);
+  if (t->status == LIBUSB_TRANSFER_NO_DEVICE)
+    s->dead.store(true, std::memory_order_relaxed);
   /* This URB just completed — it has left the wire until resubmitted. */
   if (s->telemetry) {
     const int a = s->armed.fetch_sub(1, std::memory_order_relaxed) - 1;
@@ -245,23 +254,24 @@ extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
      * decremented: a parked URB is pending, not retired (teardown retires the
      * parked set explicitly before its cancel pass). */
     if (s->bp && resubmit && rlen > 0) {
-      bool parked_ok = false;
-      {
-        std::lock_guard<std::mutex> lk(s->pool_mu);
-        if (!s->parking_closed) {
-          t->buffer = nullptr; /* payload buffer now belongs to the queue */
-          s->parked.push_back(t);
-          parked_ok = true;
-        }
-      }
+      /* Queue the payload FIRST, park LAST. Once this URB is on the parked
+       * list the teardown path may retire it, finish, and destroy the shared
+       * state — so parked.push_back must be this callback's final shared-
+       * state access (the parked-path analogue of the retire paths' trailing
+       * `active--`, which teardown likewise blocks on). */
+      t->buffer = nullptr; /* payload buffer now belongs to the queue */
       {
         std::lock_guard<std::mutex> lk(s->queue_mu);
         s->queue.emplace_back(received, rlen);
       }
       s->queue_cv.notify_one();
-      if (parked_ok) {
-        s->pool_stalls.fetch_add(1, std::memory_order_relaxed);
-        return;
+      {
+        std::lock_guard<std::mutex> lk(s->pool_mu);
+        if (!s->parking_closed) {
+          s->pool_stalls.fetch_add(1, std::memory_order_relaxed);
+          s->parked.push_back(t);
+          return; /* lock releases on return; nothing may follow the park */
+        }
       }
       s->active--; /* parking closed = teardown: retire without resubmit */
       return;
@@ -462,14 +472,20 @@ void UsbTransport::rx_loop(
           sh.parked.pop_back();
           t->buffer = item.first;
           t->length = sh.buf_size;
-          if (libusb_submit_transfer(t) == 0) {
+          const int rc = libusb_submit_transfer(t);
+          if (rc == 0) {
             if (sh.telemetry)
               sh.armed.fetch_add(1, std::memory_order_relaxed);
             continue;
           }
-          /* Rare submit failure: re-park the URB, pool the buffer. */
+          /* Submit failure: re-park the URB, pool the buffer. Device gone
+           * latches `dead` so rx_loop exits and retires the parked set —
+           * re-park-forever would otherwise pin `active` above zero with no
+           * completion ever coming. */
           t->buffer = nullptr;
           sh.parked.push_back(t);
+          if (rc == LIBUSB_ERROR_NO_DEVICE)
+            sh.dead.store(true, std::memory_order_relaxed);
           if (sh.telemetry)
             sh.resubmit_fail.fetch_add(1, std::memory_order_relaxed);
         }
@@ -488,7 +504,8 @@ void UsbTransport::rx_loop(
     sh.min_armed.store(a0, std::memory_order_relaxed);
   }
   auto last_ring = std::chrono::steady_clock::now();
-  while (!should_stop() && sh.active > 0) {
+  while (!should_stop() && sh.active > 0 &&
+         !sh.dead.load(std::memory_order_relaxed)) {
     struct timeval tv {0, 100000};
     libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
     if (sh.telemetry) {

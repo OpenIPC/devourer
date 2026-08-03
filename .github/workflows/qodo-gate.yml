@@ -75,16 +75,34 @@ jobs:
           # reviewed. Stale reviews of a previous push do NOT count —
           # otherwise any follow-up commit could merge unreviewed, the same
           # race one push later. Summon a re-review with a `/review` comment.
+          #
+          # Two evidence forms, because Qodo re-reviews two ways: a fresh
+          # review object tied to the head oid (observed on PR open), or an
+          # in-place UPDATE of its code-review comment plus a marker comment
+          # "updated up to the latest commit <sha>" (observed on /review after
+          # a push — no new review object is submitted). The fallback accepts
+          # only the bot's own comments naming the exact head oid. NB comment
+          # edits cannot retrigger this check against the PR head (an
+          # issue_comment-triggered run would attach to the default branch),
+          # so after a summoned re-review, retrigger via a thread reply or a
+          # Checks-tab re-run.
           head_oid=$(echo "$json" | jq -r '.data.repository.pullRequest.headRefOid')
           current=$(echo "$json" | jq --arg b "$BOT" --arg oid "$head_oid" \
             '[.data.repository.pullRequest.reviews.nodes[]
               | select(.author.login == $b)
               | select(.commit.oid == $oid)] | length')
           if [ "$current" -eq 0 ]; then
+            current=$(gh api "repos/$REPO_OWNER/$REPO_NAME/issues/$PR/comments" \
+              --paginate --jq "[.[]
+                | select(.user.login == \"${BOT}[bot]\")
+                | select(.body | test(\"up to the latest commit\"))
+                | select(.body | contains(\"$head_oid\"))] | length")
+          fi
+          if [ "$current" -eq 0 ]; then
             echo "FAIL: no Qodo review of the current head ($head_oid) —"
-            echo "comment /review on the PR to summon one; this check re-runs"
-            echo "on review submission. (Outage? Apply the skip-qodo-gate"
-            echo "label.)"
+            echo "comment /review on the PR to summon one, then re-run this"
+            echo "check (or reply in a thread) once it answers. (Outage?"
+            echo "Apply the skip-qodo-gate label.)"
             exit 1
           fi
 

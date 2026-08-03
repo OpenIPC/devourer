@@ -1,0 +1,88 @@
+# Merge gate for the Qodo code-review agent.
+#
+# Why: branch protection's "require conversation resolution" only blocks
+# unresolved threads that EXIST at merge time. Qodo posts its review a minute
+# or two after the PR opens, so a "merge when CI is green" flow can race past
+# it (PR #355 merged 64 s before the review landed). This required check stays
+# red until (a) a Qodo review has been submitted at all, and (b) every review
+# thread Qodo opened is resolved — so the race is closed and the findings must
+# be looked at before merge.
+#
+# Event-driven: re-evaluates when the PR updates, when a review is submitted,
+# and when a review thread is resolved/unresolved. Escape hatch for a Qodo
+# outage: the `skip-qodo-gate` label passes the check (label changes
+# re-trigger it).
+name: qodo-gate
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_thread:
+    types: [resolved, unresolved]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  qodo-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a Qodo review with all its threads resolved
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          BOT='qodo-free-for-open-source-projects'
+
+          json=$(gh api graphql \
+            -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$PR" \
+            -f query='
+              query($owner: String!, $name: String!, $pr: Int!) {
+                repository(owner: $owner, name: $name) {
+                  pullRequest(number: $pr) {
+                    labels(first: 50) { nodes { name } }
+                    reviews(first: 100) { nodes { author { login } } }
+                    reviewThreads(first: 100) {
+                      nodes {
+                        isResolved
+                        comments(first: 1) { nodes { author { login } } }
+                      }
+                    }
+                  }
+                }
+              }')
+
+          if echo "$json" | jq -e --arg l skip-qodo-gate \
+              '.data.repository.pullRequest.labels.nodes[] | select(.name == $l)' \
+              >/dev/null; then
+            echo "PASS: skip-qodo-gate label set (Qodo outage escape hatch)"
+            exit 0
+          fi
+
+          reviews=$(echo "$json" | jq --arg b "$BOT" \
+            '[.data.repository.pullRequest.reviews.nodes[]
+              | select(.author.login == $b)] | length')
+          if [ "$reviews" -eq 0 ]; then
+            echo "FAIL: no Qodo review submitted yet — the agent usually posts"
+            echo "within a few minutes of the PR opening; this check re-runs on"
+            echo "review submission. (Outage? Apply the skip-qodo-gate label.)"
+            exit 1
+          fi
+
+          unresolved=$(echo "$json" | jq --arg b "$BOT" \
+            '[.data.repository.pullRequest.reviewThreads.nodes[]
+              | select(.isResolved | not)
+              | select(.comments.nodes[0].author.login == $b)] | length')
+          if [ "$unresolved" -gt 0 ]; then
+            echo "FAIL: $unresolved unresolved Qodo review thread(s) — address"
+            echo "or explicitly dismiss each finding, then mark the thread"
+            echo "resolved; this check re-runs on thread resolution."
+            exit 1
+          fi
+
+          echo "PASS: Qodo reviewed ($reviews review(s)), all its threads resolved"

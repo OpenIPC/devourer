@@ -222,7 +222,9 @@ extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
      * submit failed: preserve the pump's never-block invariant by re-arming
      * with the received buffer and DROPPING this frame — a bounded loss, vs the
      * cascade an inline consume would trigger. The chip already ACKed this
-     * frame (see the mode comment above): count it, never drop silently.
+     * frame (see the mode comment above): count every received frame dropped
+     * here, exhaustion and failed-re-arm alike — both are post-ACK host drops,
+     * and the re-arm failure is separable because it also ticks resubmit_fail.
      * `resubmit` gates the count: a teardown-window frame (stop requested) is
      * intentional loss, not an overload signal. */
     if (resubmit && rlen > 0)

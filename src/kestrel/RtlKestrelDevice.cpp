@@ -293,26 +293,36 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
           if (!kestrel::parse_rx_8852b(data + off, static_cast<size_t>(n) - off,
                                        f, drv_info_unit))
             break;
-          if (f.rpkt_type == kestrel::RPKT_TYPE_PPDU && f.payload_len >= 6) {
-            /* physts header (halbb physts_hdr_info): byte3 = rssi_avg_td, byte4+
-             * = per-path rssi_td, all U(8,1) (RSSI% = dBm+110 = raw>>1). Cache
-             * for the following WIFI frame(s). */
-            _last_rssi[0] = static_cast<uint8_t>(f.payload[4] >> 1);
-            _last_rssi[1] = static_cast<uint8_t>(f.payload[5] >> 1);
-            /* Per-frame SNR for the passive floor: the 8-byte header is followed
-             * by the IEs; IE_01 (OFDM/HE info, physts_ie_1_info) is
-             * the first for a decodable OFDM/HE PPDU. Self-validate on its ie_hdr
-             * (byte0 [4:0] == 1) before trusting the offset: avg_snr is IE byte 8
-             * [5:0] in dB. Store as raw = dB*2 (the RxQualityAccumulator
-             * convention snr_db = raw/2). 0 when IE_01 absent (e.g. CCK).
-             * On-air-validated on BOTH dies (passive floor cross-matches the
-             * NHM floor within ~1 dB): the C8852C physts is bit-identical to the
-             * C8852B once its measurement engine is brought up (the 8852C branch
-             * in kestrel_halbb_rx_bringup + the R_AX_PPDU_STAT no-APP-prepend
-             * config in bb_reset_all) — same header, same IE_01 offset. */
-            _last_snr = 0;
-            if (f.payload_len >= 8 + 9 && (f.payload[8] & 0x1f) == 1)
-              _last_snr = static_cast<uint8_t>((f.payload[16] & 0x3f) * 2);
+          if (f.rpkt_type == kestrel::RPKT_TYPE_PPDU && f.payload_len >= 8) {
+            /* Full physts parse (header per-path rssi_td + IE01 avg SNR +
+             * IE04..07 per-path SNR/EVM pages) — kestrel::parse_physts_8852.
+             * Cached for the following WIFI frame(s) in the aggregate.
+             * On-air-validated on BOTH dies for the header + IE_01 offsets
+             * (passive floor cross-matches the NHM floor within ~1 dB): the
+             * C8852C physts is bit-identical to the C8852B once its measurement
+             * engine is brought up (the 8852C branch in
+             * kestrel_halbb_rx_bringup + the R_AX_PPDU_STAT no-APP-prepend
+             * config in bb_reset_all) — same header, same IE walk. */
+            kestrel::KestrelPhySts ps;
+            if (kestrel::parse_physts_8852(
+                    f.payload, f.payload_len,
+                    _variant == kestrel::ChipVariant::C8852C, ps))
+              _last_physts = ps;
+            /* Trace: raw physts blobs (first few) — the IE-page ground truth
+             * when a per-path metric reads 0 (is the page absent, or zero?). */
+            static int physts_dumped = 0;
+            if (physts_dumped < 4) {
+              ++physts_dumped;
+              std::string hex;
+              const uint32_t n = f.payload_len < 96 ? f.payload_len : 96;
+              hex.reserve(n * 2);
+              for (uint32_t i = 0; i < n; i++) {
+                static const char d[] = "0123456789abcdef";
+                hex.push_back(d[f.payload[i] >> 4]);
+                hex.push_back(d[f.payload[i] & 0xf]);
+              }
+              _logger->trace("Kestrel physts[{}B]: {}", f.payload_len, hex);
+            }
           } else if (f.rpkt_type == kestrel::RPKT_TYPE_WIFI && packetProcessor) {
             Packet p{};
             p.RxAtrib.pkt_len = static_cast<uint16_t>(f.payload_len);
@@ -323,14 +333,21 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
             p.RxAtrib.ppdu_type = f.ppdu_type; /* 7=HE_SU 8=HE_ERSU */
             p.RxAtrib.ppdu_cnt = f.ppdu_cnt;
             p.RxAtrib.tsfl = f.freerun_cnt;
-            p.RxAtrib.rssi[0] = _last_rssi[0];
-            p.RxAtrib.rssi[1] = _last_rssi[1];
-            p.RxAtrib.snr[0] = _last_snr;
+            for (int i = 0; i < 4; i++) {
+              p.RxAtrib.rssi[i] = _last_physts.rssi[i];
+              p.RxAtrib.snr[i] = _last_physts.snr[i];
+              p.RxAtrib.evm[i] = _last_physts.evm[i];
+            }
             /* Feed the windowed RX-quality aggregate (passive rssi-snr floor +
-             * LinkHealth). rssi_raw = dBm+110 (== _last_rssi), snr_raw = dB*2;
-             * a frame with no IE_01 SNR (snr=0) still counts toward RSSI. */
-            if (_last_rssi[0] > 0)
-              _rxq.add(_last_rssi[0], _last_snr, 0);
+             * LinkHealth) with path-A RSSI + the IE01 average SNR (the
+             * all-paths quantity the passive floor was validated against;
+             * per-path SNR goes to _rxpaths instead). A frame with no IE_01
+             * SNR (snr_avg=0) still counts toward RSSI. */
+            if (_last_physts.rssi[0] > 0)
+              _rxq.add(_last_physts.rssi[0], _last_physts.snr_avg, 0);
+            /* Per-antenna window means (GetActiveRxPaths). Both dies are 2 RX
+             * chains; C/D read 0 and are excluded by n_chains. */
+            _rxpaths.add(p.RxAtrib.rssi, p.RxAtrib.snr, p.RxAtrib.evm, 2);
             p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.payload),
                                         f.payload_len);
             packetProcessor(p);

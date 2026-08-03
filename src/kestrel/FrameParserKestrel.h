@@ -111,6 +111,99 @@ inline bool parse_rx_8852b(const uint8_t *buf, size_t buflen,
   return true;
 }
 
+/* --- PPDU-status (halbb physts) parse: per-path RSSI / SNR / EVM ---
+ *
+ * A PPDU-status payload is the bare halbb physts blob (HalKestrel clears the
+ * MAC-info prepend bits so nothing precedes it): an 8-byte header followed by
+ * fixed-order IEs. Header (physts_hdr_info): byte0 [4:0] ie_bitmap_select /
+ * [7] is_valid, byte1 total length in 8-byte units, byte3 rssi_avg_td,
+ * bytes 4..7 rssi_td[0..3] — all RSSI U(8,1) (dBm+110 = raw>>1). IEs follow in
+ * ascending index order, each starting with its index in byte0 [4:0]; IE00..07
+ * have fixed lengths {2,4,3,3,1,1,1,1} 8-byte units (halbb physts_ie_len_tab),
+ * IE08+ are variable-length so the walk stops there (nothing we need lives
+ * past IE07).
+ *
+ *   IE01 (common OFDM): avg SNR over active paths, byte 8 [5:0], whole dB.
+ *   IE04..07 (extend path A..D): per-path page — byte3 [7:2] snr_lgy (whole
+ *   dB, populated by the BB on the 8852C only), byte4 evm_ss_y (U(8,2),
+ *   quarter-dB distance of the stream this path carries).
+ *
+ * Per-path SNR follows the vendor halbb per-chip split (halbb_physts_ie_04_07):
+ * on the 8852B the IE's snr_lgy field is not driven, and the per-path FD SNR is
+ * derived from the IE01 average plus this path's RSSI distance from the average
+ * (halbb_cmn_rpt: snr_fd[i] = ((snr_fd_avg << 1) - rssi_avg + rssi[i]) >> 1);
+ * on the 8852C snr_lgy is read directly. Units out are the devourer raw
+ * conventions of rx_pkt_attrib: rssi = dBm+110, snr = dB*2, evm = half-dB
+ * (negative — matches the 11ac generations' phy-status sign, more negative =
+ * cleaner constellation). 0 always means "not measured". */
+struct KestrelPhySts {
+  uint8_t rssi_avg = 0; /* dBm+110; 0 = no power measured */
+  uint8_t rssi[4] = {0, 0, 0, 0};
+  uint8_t snr_avg = 0;      /* raw dB*2 from IE01; 0 = IE01 absent (e.g. CCK) */
+  int8_t snr[4] = {0, 0, 0, 0}; /* raw dB*2 per path */
+  int8_t evm[4] = {0, 0, 0, 0}; /* raw half-dB per path (negative) */
+};
+
+inline bool parse_physts_8852(const uint8_t *p, size_t len, bool is_8852c,
+                              KestrelPhySts &out) {
+  if (p == nullptr || len < 8)
+    return false;
+  out.rssi_avg = static_cast<uint8_t>(p[3] >> 1);
+  for (int i = 0; i < 4; i++)
+    out.rssi[i] = static_cast<uint8_t>(p[4 + i] >> 1);
+
+  /* IE walk only on a valid report (header bit7; the BB emits is_valid=0
+   * stubs for e.g. broken PPDUs) — header RSSI above is kept regardless,
+   * matching the pre-IE-walk behaviour. */
+  if ((p[0] & 0x80) == 0)
+    return true;
+  size_t total = static_cast<size_t>(p[1]) << 3; /* header length field */
+  if (total > len)
+    total = len;
+
+  static constexpr uint8_t ie_len8[8] = {2, 4, 3, 3, 1, 1, 1, 1};
+  size_t off = 8;
+  while (off + 8 <= total) {
+    const uint8_t ie = p[off] & 0x1f;
+    if (ie >= 8)
+      break; /* IE08+ are variable-length — stop */
+    const size_t ie_len = static_cast<size_t>(ie_len8[ie]) << 3;
+    if (off + ie_len > total)
+      break;
+    if (ie == 1) {
+      out.snr_avg = static_cast<uint8_t>((p[off + 8] & 0x3f) * 2);
+    } else if (ie >= 4) {
+      const int path = ie - 4;
+      const uint8_t evm_q = p[off + 4]; /* evm_ss_y, quarter-dB */
+      if (evm_q)
+        out.evm[path] = static_cast<int8_t>(-(evm_q >> 1));
+      if (is_8852c) {
+        out.snr[path] = static_cast<int8_t>(((p[off + 3] >> 2) & 0x3f) * 2);
+      }
+    }
+    off += ie_len;
+  }
+  /* 8852B (and fallback when the C's path page is absent): derive per-path FD
+   * SNR from the IE01 average + this path's RSSI distance. rssi raw here is
+   * already dBm+110 (1 dB units) and snr raw is dB*2, so the vendor's U(8,1)
+   * expression collapses to snr[i] = snr_avg + 2*(rssi[i] - rssi_avg). */
+  if (out.snr_avg) {
+    for (int i = 0; i < 4; i++) {
+      if (out.snr[i] || out.rssi[i] == 0)
+        continue;
+      int v = static_cast<int>(out.snr_avg) +
+              2 * (static_cast<int>(out.rssi[i]) -
+                   static_cast<int>(out.rssi_avg));
+      if (v < -128)
+        v = -128;
+      if (v > 127)
+        v = 127;
+      out.snr[i] = static_cast<int8_t>(v);
+    }
+  }
+  return true;
+}
+
 } /* namespace kestrel */
 
 #endif /* FRAME_PARSER_KESTREL_H */

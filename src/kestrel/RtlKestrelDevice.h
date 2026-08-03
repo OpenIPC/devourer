@@ -16,6 +16,7 @@
 #include "SelectedChannel.h"
 
 #include "ChipVariant.h"
+#include "FrameParserKestrel.h" /* KestrelPhySts (cached per-path phy-status) */
 #include "HalKestrel.h"
 
 namespace kestrel {
@@ -130,6 +131,11 @@ public:
   /* Windowed RX link-quality: the passive rssi-snr floor + LinkHealth verdict
    * (fed per frame via _rxq) fused with the active NHM floor from GetRxEnergy. */
   devourer::RxQuality GetRxQuality() override;
+  /* Live per-chain RX-path activity (fed via _rxpaths in the RX loop): per-
+   * antenna RSSI/SNR/EVM window means from the physts per-path pages. */
+  devourer::ActiveRxPaths GetActiveRxPaths() override {
+    return _rxpaths.snapshot();
+  }
 
   /* Arm the AX HW beacon engine (mac_send_bcn_h2c + AP port timing). Requires a
    * prior InitWrite. `beacon` is a full 802.11 beacon; the MAC airs it every
@@ -240,15 +246,17 @@ private:
    *     (a fixed-rate stream pays once and then nothing). */
   std::atomic<bool> _rate_diffs_on{false};
   std::atomic<int8_t> _rate_diff_qdb[10]{};
-  /* Per-chain RSSI (RSSI% = dBm+110) cached from the last PPDU-status physts
-   * header, attached to the following WIFI frame(s) in the aggregate. */
-  uint8_t _last_rssi[2] = {0, 0};
-  /* Per-frame SNR (raw U(8,1) = dB*2), cached from the physts header alongside
-   * RSSI for the passive noise floor (rssi_dbm - snr_db). 0 = unknown. */
-  uint8_t _last_snr = 0;
+  /* Per-path RSSI/SNR/EVM (rx_pkt_attrib raw conventions) parsed from the last
+   * PPDU-status physts blob (kestrel::parse_physts_8852), attached to the
+   * following WIFI frame(s) in the aggregate. snr_avg (raw dB*2, IE01) feeds
+   * the passive noise floor (rssi_dbm - snr_db). 0 = not measured. */
+  kestrel::KestrelPhySts _last_physts{};
   /* Windowed RX link-quality accumulator (passive noise floor + LinkHealth),
    * fed per decoded frame from the RX loop; drained by GetRxQuality. */
   devourer::RxQualityAccumulator _rxq;
+  /* Live per-chain RX-path activity (per-antenna RSSI/SNR/EVM window means),
+   * fed per decoded frame; drained by GetActiveRxPaths. */
+  devourer::RxPathActivityAccumulator _rxpaths;
 };
 
 #endif /* RTL_KESTREL_DEVICE_H */

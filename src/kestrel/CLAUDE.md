@@ -78,6 +78,22 @@ injection/monitor-link mode. `ReadTsf` reads the per-port MAC TSF;
 FORMAT=EXT_SU or `DEVOURER_TX_RATE=.../ER[/DCM]`; RX classifies the format in
 `RxAtrib.ppdu_type` (7=HE_SU, 8=HE_ERSU) — `docs/he-extended-range.md`.
 
+**Per-antenna RSSI/SNR/EVM** (physts per-path pages): the RX loop parses the
+whole PPDU-status blob (`kestrel::parse_physts_8852` — 8-byte header rssi_td +
+IE01 avg SNR + IE04/05 path pages) into `RxAtrib.rssi/snr/evm[0..1]` and the
+`GetActiveRxPaths()` window. The IE04..07 pages only appear when
+`halbb_physts_parsing_init` shifts a `num_rf_path` mask into the physts IE
+bitmap — the glue must set `bb.num_rf_path`/`num_ss` itself (its bb_info is
+memset-zeroed; a zero mask silently drops the pages and per-path SNR falls
+back to the IE01-average+RSSI-distance derivation, which shadows the loss —
+the tell is per-path SNR exactly tracking the RSSI split). On-air-validated on
+the C8852C (direct snr_lgy + per-path EVM). The C8852B path is untested on
+air: its bring-up skips `halbb_physts_parsing_init` (physts fills from the BB
+table default), so whether its bitmap includes the path pages — and thus
+whether its per-path EVM is real or 0 — is unmeasured; its per-path SNR is the
+derivation either way (the 8852B BB does not drive snr_lgy — vendor
+`halbb_physts_ie_04_07` chip branch).
+
 Async packet-C2H (bulk-IN rpkt_type=10) delivery works — routed by
 `handle_c2h` on the C2H class/func — so the #236 C2H surface (TWT/F2P
 reports) is reachable. Not working: the fw's USR_TX_RPT TX-egress-timestamp

@@ -199,4 +199,6 @@ sleep 1
 python3 "$ROOT/tests/arq_e2e_analyze.py" \
     --dut "$OUT/dut.jsonl" --drone "$OUT/drone.jsonl" --wit "$OUT/wit.jsonl" \
     --phases "$PHASES" --cycles "$CYCLES" | tee "$OUT/report.txt"
+ANALYZE_RC=${PIPESTATUS[0]}   # tee would otherwise eat the analyzer verdict
 echo "[arq-e2e] logs: $OUT"
+exit "$ANALYZE_RC"

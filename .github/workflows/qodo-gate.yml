@@ -28,6 +28,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  issues: read # the marker-comment fallback reads issues/<pr>/comments
 
 jobs:
   qodo-gate:
@@ -92,11 +93,15 @@ jobs:
               | select(.author.login == $b)
               | select(.commit.oid == $oid)] | length')
           if [ "$current" -eq 0 ]; then
+            # --paginate applies --jq PER PAGE, so a `| length` there emits
+            # one count per page ("0\n1"), breaking the integer test below.
+            # Emit matching comment ids instead and count lines across pages.
             current=$(gh api "repos/$REPO_OWNER/$REPO_NAME/issues/$PR/comments" \
-              --paginate --jq "[.[]
+              --paginate --jq ".[]
                 | select(.user.login == \"${BOT}[bot]\")
                 | select(.body | test(\"up to the latest commit\"))
-                | select(.body | contains(\"$head_oid\"))] | length")
+                | select(.body | contains(\"$head_oid\"))
+                | .id" | wc -l)
           fi
           if [ "$current" -eq 0 ]; then
             echo "FAIL: no Qodo review of the current head ($head_oid) —"

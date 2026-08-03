@@ -40,6 +40,14 @@ struct kestrel_halbb_ctx *kestrel_halbb_create(struct kestrel_halbb_bridge *br,
     c->hal.chip_id = CHIP_WIFI6_8852C;
   }
   c->bb.rx_path = RF_PATH_AB;
+  /* Both supported dies are 2SS / 2 RF paths. The vendor derives these in
+   * halbb_cmn_info_self_init from ic_type; the minimal bring-up must set them
+   * itself — halbb_physts_parsing_init shifts a
+   * halbb_gen_mask_from_0(num_rf_path) into the physts IE04..07 bits, so a
+   * zero here silently disables the per-path IE pages (per-antenna SNR/EVM). */
+  c->bb.num_rf_path = 2;
+  c->bb.num_tx_path = 2;
+  c->bb.num_ss = 2;
   c->bb.cr_type = BB_CLIENT;     /* USB client CR bank; without it the env-monitor
                                   * CR-init switch falls through and the NHM
                                   * ready-bit address stays 0 (report never rdy) */

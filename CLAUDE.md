@@ -277,8 +277,11 @@ Behavioural traps the per-field docs can't carry:
   `0xAA:0xBB[:0xCC]@<ms>` cycles masks on a timer for mobility/MRC
   measurements (`docs/measuring-spatial-diversity.md`,
   `tests/mrc_mobility.py`). `DEVOURER_RX_ALLPATHS=1` emits per-chain
-  RSSI/SNR/EVM as a separate `rx.path` event (C/D nonzero only on the
-  8814AU).
+  RSSI/SNR/EVM as a separate `rx.path` event on every generation (Kestrel
+  parses its halbb physts path pages; C/D nonzero only on the 8814AU — the
+  other dies are ≤2 RX chains). Windowed per-antenna means ride
+  `GetActiveRxPaths()` / the `adapter.rxpaths` event (rssi/snr/evm per
+  chain).
 - `DEVOURER_RX_KEEP_CORRUPTED=1` is the entry point for the fused-FEC salvage
   layer (`docs/fused-fec.md`), and stays opt-in for a reason: a body with a
   corrupt tail is the worst-case input for an IP-stack consumer that didn't

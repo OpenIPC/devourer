@@ -232,6 +232,15 @@ struct ActiveRxPaths {
   uint8_t active_mask = 0;      /* bit i set = chain i active */
   int rssi_mean_dbm[4] = {0, 0, 0, 0}; /* per-chain window mean (raw - 110) */
   bool chain_sampled[4] = {false, false, false, false}; /* had any sample */
+  /* Per-chain window-mean SNR / EVM (dB), sampled only when the frame's
+   * phy-status carried a nonzero value for that chain (CCK and non-type1
+   * phy-status leave them 0, so a mixed stream doesn't bias toward zero —
+   * the RxQualityAccumulator convention, per chain). EVM follows the
+   * phy-status sign: negative, more negative = cleaner constellation. */
+  double snr_mean_db[4] = {0, 0, 0, 0};
+  bool snr_sampled[4] = {false, false, false, false};
+  double evm_mean_db[4] = {0, 0, 0, 0};
+  bool evm_sampled[4] = {false, false, false, false};
 };
 
 /* Classify which of `n_chains` are active: a chain is active if it was sampled
@@ -261,18 +270,22 @@ inline uint8_t classify_active_paths(const int *rssi_mean_dbm,
   return count;
 }
 
-/* Thread-safe per-chain RSSI accumulator — the ActiveRxPaths analogue of
- * RxQualityAccumulator. The device feeds add() the full rssi[0..3] tuple for
+/* Thread-safe per-chain RSSI/SNR/EVM accumulator — the ActiveRxPaths analogue
+ * of RxQualityAccumulator. The device feeds add() the full [0..3] tuples for
  * every decoded frame; snapshot() drains the window (delta semantics) and
  * classifies. `margin_db` default 20 dB: a chain more than 20 dB below the
  * strongest is a disconnected/masked antenna, not thermal spread across
  * connected chains. */
 class RxPathActivityAccumulator {
 public:
-  /* Feed the per-chain RSSI (raw devourer units) of one decoded frame; only the
-   * first `n_chains` are considered. A chain reading <= 0 (no phy-status power)
-   * is not a sample for that chain. */
-  void add(const uint8_t *rssi_raw, uint8_t n_chains) {
+  /* Feed the per-chain RSSI / SNR / EVM (raw devourer units: rssi = dBm+110,
+   * snr/evm = half-dB) of one decoded frame; only the first `n_chains` are
+   * considered. A chain reading 0 on a metric (no phy-status value) is not a
+   * sample for that chain+metric — RSSI gates the frame count, SNR/EVM are
+   * folded independently so CCK frames don't zero-bias their means. `snr_raw`
+   * / `evm_raw` may be null (RSSI-only callers). */
+  void add(const uint8_t *rssi_raw, const int8_t *snr_raw,
+           const int8_t *evm_raw, uint8_t n_chains) {
     std::lock_guard<std::mutex> lk(mu_);
     if (n_chains > 4)
       n_chains = 4;
@@ -284,6 +297,18 @@ public:
       sum_[i] += rssi_raw[i];
       ++cnt_[i];
       any = true;
+      if (snr_raw && snr_raw[i] != 0) {
+        snr_sum_[i] += snr_raw[i];
+        ++snr_cnt_[i];
+      }
+      /* -128 is the phy-status no-stream rail (a 1SS frame has no stream-2
+       * EVM; the 11ac reports pin the byte at -128) — a sentinel, not a
+       * measurement (on-air: J1/J2/J3 all rail chain 1 at -128 under 1SS
+       * traffic while chain-1 RSSI/SNR stay live). */
+      if (evm_raw && evm_raw[i] != 0 && evm_raw[i] != -128) {
+        evm_sum_[i] += evm_raw[i];
+        ++evm_cnt_[i];
+      }
     }
     if (any)
       ++frames_;
@@ -301,6 +326,14 @@ public:
             static_cast<int>(sum_[i] / cnt_[i]) - 110;
         s.chain_sampled[i] = true;
       }
+      if (snr_cnt_[i]) {
+        s.snr_mean_db[i] = snr_sum_[i] / (2.0 * snr_cnt_[i]);
+        s.snr_sampled[i] = true;
+      }
+      if (evm_cnt_[i]) {
+        s.evm_mean_db[i] = evm_sum_[i] / (2.0 * evm_cnt_[i]);
+        s.evm_sampled[i] = true;
+      }
     }
     s.n_active = classify_active_paths(s.rssi_mean_dbm, s.chain_sampled,
                                        s.n_chains, margin_db, &s.active_mask);
@@ -309,6 +342,10 @@ public:
     for (uint8_t i = 0; i < 4; i++) {
       sum_[i] = 0;
       cnt_[i] = 0;
+      snr_sum_[i] = 0;
+      snr_cnt_[i] = 0;
+      evm_sum_[i] = 0;
+      evm_cnt_[i] = 0;
     }
     return s;
   }
@@ -319,6 +356,10 @@ private:
   uint8_t n_chains_ = 0;
   uint64_t sum_[4] = {0, 0, 0, 0};
   uint32_t cnt_[4] = {0, 0, 0, 0};
+  int64_t snr_sum_[4] = {0, 0, 0, 0};
+  uint32_t snr_cnt_[4] = {0, 0, 0, 0};
+  int64_t evm_sum_[4] = {0, 0, 0, 0};
+  uint32_t evm_cnt_[4] = {0, 0, 0, 0};
 };
 
 } // namespace devourer

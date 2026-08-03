@@ -1061,8 +1061,9 @@ static void packetProcessor(const Packet &packet) {
       /* DEVOURER_RX_ALLPATHS=1: emit all four RX chains (A,B,C,D) of per-stream
        * RSSI / SNR / EVM on a distinct `rx.path` event. Opt-in and separate so
        * the canonical two-path `rx.frame`/`rx.body` events stay untouched.
-       * Paths C/D are non-zero only on the 8814AU (4T4R); on 8812/8821 they
-       * read 0. Consumed by tests/antenna_decorrelation.py to measure
+       * Populated on every generation (Kestrel from its halbb physts path
+       * pages); paths C/D are non-zero only on the 8814AU (4T4R) — the other
+       * dies are <=2 RX chains. Consumed by tests/antenna_decorrelation.py to measure
        * inter-chain envelope correlation and realised diversity gain
        * (spatial-diversity axis). */
       static const bool rxpath_out =
@@ -1598,6 +1599,18 @@ int main(int argc, char **argv) {
                 .f("n_chains", ap.n_chains)
                 .f("frames", ap.frames)
                 .arr("rssi_dbm", ap.rssi_mean_dbm, ap.n_chains);
+            /* Per-chain window-mean SNR / EVM (dB) — present only when at
+             * least one chain carried the metric this window (a CCK-only
+             * stream carries neither). Unsampled chains read 0. */
+            bool any_snr = false, any_evm = false;
+            for (uint8_t i = 0; i < ap.n_chains; i++) {
+              any_snr = any_snr || ap.snr_sampled[i];
+              any_evm = any_evm || ap.evm_sampled[i];
+            }
+            if (any_snr)
+              pev.arr("snr_db", ap.snr_mean_db, ap.n_chains);
+            if (any_evm)
+              pev.arr("evm_db", ap.evm_mean_db, ap.n_chains);
           }
         }
         nap(g_rx_energy_ms);

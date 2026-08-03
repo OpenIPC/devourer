@@ -175,6 +175,73 @@ int main() {
     CHECK(!parse_rx_8852b(b.data(), 8, f));  /* shorter than a short desc */
   }
 
+  /* --- physts blob parse: header RSSI + IE01 avg SNR + IE04/05 path pages ---
+   * Synthetic blob in the halbb layout: 8B header, IE00 (CCK, 16B) skipped by
+   * construction, IE01 (32B), IE02 (24B), IE04 (8B), IE05 (8B). */
+  {
+    std::vector<uint8_t> b(8 + 32 + 24 + 8 + 8, 0);
+    const uint8_t total8 = static_cast<uint8_t>(b.size() >> 3);
+    b[0] = 0x80 | 0x01;     /* is_valid + ie_bitmap_select */
+    b[1] = total8;          /* total length, 8-byte units */
+    b[3] = 120;             /* rssi_avg_td U(8,1) -> raw 60 = -50 dBm */
+    b[4] = 130;             /* path A td -> raw 65 */
+    b[5] = 110;             /* path B td -> raw 55 */
+    size_t off = 8;
+    b[off] = 1;             /* IE01 */
+    b[off + 8] = 30 & 0x3f; /* avg_snr = 30 dB */
+    off += 32;
+    b[off] = 2;             /* IE02 (contents irrelevant) */
+    off += 24;
+    b[off] = 4;             /* IE04 = path A */
+    b[off + 3] = static_cast<uint8_t>(25u << 2); /* snr_lgy = 25 dB */
+    b[off + 4] = 100;       /* evm_ss_y U(8,2) = 25.0 dB -> raw -50 half-dB */
+    off += 8;
+    b[off] = 5;             /* IE05 = path B */
+    b[off + 3] = static_cast<uint8_t>(18u << 2);
+    b[off + 4] = 60;        /* 15.0 dB -> raw -30 */
+
+    KestrelPhySts ps;
+    CHECK(parse_physts_8852(b.data(), b.size(), /*is_8852c=*/true, ps));
+    CHECK(ps.rssi_avg == 60 && ps.rssi[0] == 65 && ps.rssi[1] == 55);
+    CHECK(ps.snr_avg == 60); /* raw dB*2 */
+    CHECK(ps.snr[0] == 50 && ps.snr[1] == 36); /* snr_lgy * 2 */
+    CHECK(ps.evm[0] == -50 && ps.evm[1] == -30);
+
+    /* 8852B: snr_lgy is not driven; per-path SNR derives from the IE01
+     * average + the path's RSSI distance (vendor halbb_cmn_rpt formula):
+     * snr[i] = snr_avg_raw + 2*(rssi[i]-rssi_avg) = 60 +/- 10. */
+    KestrelPhySts pb;
+    CHECK(parse_physts_8852(b.data(), b.size(), /*is_8852c=*/false, pb));
+    CHECK(pb.snr[0] == 70 && pb.snr[1] == 50);
+    CHECK(pb.evm[0] == -50 && pb.evm[1] == -30); /* EVM page read on both */
+  }
+
+  /* --- physts: is_valid=0 keeps header RSSI but skips the IE walk --- */
+  {
+    std::vector<uint8_t> b(8 + 32, 0);
+    b[0] = 0x01; /* no is_valid bit */
+    b[1] = static_cast<uint8_t>(b.size() >> 3);
+    b[4] = 130;
+    b[8] = 1;
+    b[16] = 30;
+    KestrelPhySts ps;
+    CHECK(parse_physts_8852(b.data(), b.size(), true, ps));
+    CHECK(ps.rssi[0] == 65 && ps.snr_avg == 0 && ps.snr[0] == 0);
+  }
+
+  /* --- physts: truncated / lying total-length is bounded by the buffer --- */
+  {
+    std::vector<uint8_t> b(8 + 4, 0); /* room for header + a torn IE */
+    b[0] = 0x80 | 0x01;
+    b[1] = 0x40; /* claims 512 bytes */
+    b[8] = 1;    /* IE01 header, but its 32-byte body is missing */
+    KestrelPhySts ps;
+    CHECK(parse_physts_8852(b.data(), b.size(), true, ps));
+    CHECK(ps.snr_avg == 0); /* torn IE not parsed */
+    KestrelPhySts p2;
+    CHECK(!parse_physts_8852(b.data(), 4, true, p2)); /* below header size */
+  }
+
   if (failures == 0)
     std::printf("kestrel_rxparse_selftest: all checks passed\n");
   return failures == 0 ? 0 : 1;

@@ -92,16 +92,44 @@ int main() {
   {
     RxPathActivityAccumulator acc;
     const uint8_t f1[4] = {70, 30, 0, 0}; /* raw; chain0 strong, chain1 weak */
-    acc.add(f1, 2);
-    acc.add(f1, 2);
+    const int8_t snr1[4] = {60, 20, 0, 0}; /* raw dB*2: 30 dB / 10 dB */
+    const int8_t evm1[4] = {-52, 0, 0, 0}; /* raw half-dB: -26 dB; chain1 none */
+    acc.add(f1, snr1, evm1, 2);
+    acc.add(f1, snr1, evm1, 2);
     ActiveRxPaths s = acc.snapshot(20);
     expect("acc valid after frames", s.valid && s.frames == 2);
     expect("acc chain0 active", (s.active_mask & 0x1) != 0);
     expect("acc chain1 inactive (40 raw below)",
            (s.active_mask & 0x2) == 0);
+    expect("acc per-chain snr means",
+           s.snr_sampled[0] && s.snr_mean_db[0] == 30.0 &&
+               s.snr_sampled[1] && s.snr_mean_db[1] == 10.0);
+    expect("acc evm chain0 sampled, chain1 not",
+           s.evm_sampled[0] && s.evm_mean_db[0] == -26.0 && !s.evm_sampled[1]);
     /* Second snapshot drains to empty (delta semantics). */
     ActiveRxPaths s2 = acc.snapshot(20);
     expect("acc drained on read", !s2.valid && s2.frames == 0);
+    expect("acc snr/evm drained", !s2.snr_sampled[0] && !s2.evm_sampled[0]);
+  }
+  {
+    /* EVM -128 is the phy-status no-stream rail — excluded from the mean. */
+    RxPathActivityAccumulator acc;
+    const uint8_t f1[4] = {70, 60, 0, 0};
+    const int8_t snr1[4] = {40, 40, 0, 0};
+    const int8_t evm1[4] = {-52, -128, 0, 0};
+    acc.add(f1, snr1, evm1, 2);
+    ActiveRxPaths s = acc.snapshot(20);
+    expect("evm -128 rail not a sample",
+           s.evm_sampled[0] && !s.evm_sampled[1]);
+  }
+  {
+    /* Null SNR/EVM pointers (RSSI-only caller) are accepted. */
+    RxPathActivityAccumulator acc;
+    const uint8_t f1[4] = {70, 60, 0, 0};
+    acc.add(f1, nullptr, nullptr, 2);
+    ActiveRxPaths s = acc.snapshot(20);
+    expect("acc rssi-only add works",
+           s.valid && !s.snr_sampled[0] && !s.evm_sampled[0]);
   }
 
   if (g_fail) {

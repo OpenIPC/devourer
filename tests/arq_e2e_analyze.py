@@ -84,9 +84,9 @@ def find_base(reports, rel, pctr_sets, max_pctr):
         return None, 0, 0
     tag0 = reports[0]["tag"]
     ok_rel = [rel[j] for j, rp in enumerate(reports) if rp["ok"]]
-    union = set()
-    for s in pctr_sets:
-        union |= set(s)
+    # Membership tests run against the ledgers' own key views — materializing
+    # a union would copy ~1M ints per analysis for nothing.
+    d0, d1 = pctr_sets
     best, second, best_m = -1, -1, 0
     m_hi = (max_pctr + 4096) // 256 + 2
     # Reports are send-ordered and dense, so the first report's absolute index
@@ -96,14 +96,15 @@ def find_base(reports, rel, pctr_sets, max_pctr):
     # right from wrong decisively) and only the winner is re-scored in full —
     # otherwise non-joining logs cost O(m_hi * n_ok) and the analyzer hangs
     # instead of failing fast.
-    lo_pctr = min(union) if union else 0
+    lo_pctr = min((min(d0) if d0 else 0), (min(d1) if d1 else 0))
     near = range(max(0, (lo_pctr - 2048)) // 256,
                  min(m_hi, (lo_pctr + 2048) // 256 + 1))
     sample = ok_rel[:2000]
     for candidates, pool in ((near, ok_rel), (range(m_hi), sample)):
         for m in candidates:
             base = tag0 + 256 * m
-            score = sum(1 for r in pool if (base + r) in union)
+            score = sum(1 for r in pool
+                        if (base + r) in d0 or (base + r) in d1)
             if score > best:
                 second, best, best_m = best, score, m
             elif score > second:
@@ -112,7 +113,8 @@ def find_base(reports, rel, pctr_sets, max_pctr):
             break  # strong hit — skip / end the wider scan
         best, second = -1, -1  # sampled scores are not comparable to full ones
     full = sum(1 for r in ok_rel
-               if (tag0 + 256 * best_m + r) in union)
+               if (tag0 + 256 * best_m + r) in d0
+               or (tag0 + 256 * best_m + r) in d1)
     return tag0 + 256 * best_m - rel[0], full, second
 
 

@@ -58,6 +58,7 @@ WARMUP_S=${WARMUP_S:-12}               # feeder idle lead-in (duplex bring-up)
 PREFLIGHT_S=${PREFLIGHT_S:-14}         # liveness check delay after drone start
 DUT_RX_MODE=${DUT_RX_MODE:-}           # empty = default async ring
 DUT_POOL_SPARE=${DUT_POOL_SPARE:-16}   # only read by the pool modes
+DUT_POOL_EXHAUST=${DUT_POOL_EXHAUST:-} # spsc-fat: backpressure (default) | drop
 DUT_SPIN_US=${DUT_SPIN_US:-0}          # per-frame inline consumer cost model
 DUT_STALL_MS=${DUT_STALL_MS:-0}        # periodic consumer hiccup (GC pause)
 DUT_STALL_EVERY=${DUT_STALL_EVERY:-1500}
@@ -139,6 +140,7 @@ env DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" DEVOURER_CHANNEL="$CH" \
     DEVOURER_RX_PCTR=1 DEVOURER_RX_AGG_SA="$TX_SA" DEVOURER_RX_RING_MS=200 \
     ${DUT_RX_MODE:+DEVOURER_RX_MODE="$DUT_RX_MODE"} \
     ${DUT_RX_MODE:+DEVOURER_RX_POOL_SPARE="$DUT_POOL_SPARE"} \
+    ${DUT_POOL_EXHAUST:+DEVOURER_RX_POOL_EXHAUST="$DUT_POOL_EXHAUST"} \
     DEVOURER_RX_SINK_SPIN_US="$DUT_SPIN_US" \
     DEVOURER_RX_SINK_STALL_MS="$DUT_STALL_MS" \
     DEVOURER_RX_SINK_STALL_EVERY="$DUT_STALL_EVERY" \

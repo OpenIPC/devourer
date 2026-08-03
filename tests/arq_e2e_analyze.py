@@ -310,12 +310,17 @@ def main():
           f"phases (drone said ok, DUT host never delivered)")
     # separators: machine events must be the grep-able {"ev":"name",...} form
     # (docs/logging.md) — default json.dumps inserts spaces.
+    # flush: the one machine-event line lands atomically even if a consumer
+    # reads the stream live. The human report around it is deliberately on
+    # stdout — this is an offline report generator (the harness tees it into
+    # report.txt), same contract as rxq_analyze.py / pp109_starve_analyze.py,
+    # not a demo's runtime event plane.
     print(json.dumps({"ev": "arqe2e.verdict", "verdict": verdict,
                       "acked_undelivered": total_au,
                       "tail_suspect": tot_tail,
                       "reports": len(reports), "ok": n_ok,
                       "dut_pctrs": len(dut), "wit_pctrs": len(wit),
-                      "base": base}, separators=(",", ":")))
+                      "base": base}, separators=(",", ":")), flush=True)
     return 3 if verdict == "INCONCLUSIVE-SHORT-RUN" else 0
 
 

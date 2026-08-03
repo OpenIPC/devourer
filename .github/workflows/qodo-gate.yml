@@ -4,9 +4,9 @@
 # unresolved threads that EXIST at merge time. Qodo posts its review a minute
 # or two after the PR opens, so a "merge when CI is green" flow can race past
 # it (PR #355 merged 64 s before the review landed). This required check stays
-# red until (a) a Qodo review has been submitted at all, and (b) every review
-# thread Qodo opened is resolved — so the race is closed and the findings must
-# be looked at before merge.
+# red until (a) a Qodo review of the CURRENT head exists — a stale review of
+# an earlier push does not count, or the race just moves to follow-up
+# commits — and (b) every review thread Qodo opened is resolved.
 #
 # Event-driven: re-evaluates when the PR updates, when a review is submitted,
 # and when someone replies in a review thread. GitHub's workflow parser
@@ -33,7 +33,7 @@ jobs:
   qodo-gate:
     runs-on: ubuntu-latest
     steps:
-      - name: Require a Qodo review with all its threads resolved
+      - name: Require a current-head Qodo review with all its threads resolved
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
@@ -49,12 +49,16 @@ jobs:
               query($owner: String!, $name: String!, $pr: Int!) {
                 repository(owner: $owner, name: $name) {
                   pullRequest(number: $pr) {
-                    labels(first: 50) { nodes { name } }
-                    reviews(first: 100) { nodes { author { login } } }
-                    reviewThreads(first: 100) {
+                    headRefOid
+                    commits(last: 1) {
+                      nodes { commit { committedDate } }
+                    }
+                    labels(first: 100) { nodes { name } }
+                    reviews(last: 100) {
                       nodes {
-                        isResolved
-                        comments(first: 1) { nodes { author { login } } }
+                        author { login }
+                        submittedAt
+                        commit { oid }
                       }
                     }
                   }
@@ -68,20 +72,61 @@ jobs:
             exit 0
           fi
 
-          reviews=$(echo "$json" | jq --arg b "$BOT" \
+          # A review counts only if it saw the current head: same commit oid,
+          # or submitted after the head commit landed (Qodo associates some
+          # incremental reviews with an earlier oid). Stale reviews of a
+          # previous push do NOT count — otherwise any follow-up commit could
+          # merge unreviewed, the same race one push later.
+          head_oid=$(echo "$json" | jq -r '.data.repository.pullRequest.headRefOid')
+          head_date=$(echo "$json" | jq -r \
+            '.data.repository.pullRequest.commits.nodes[0].commit.committedDate')
+          current=$(echo "$json" | jq --arg b "$BOT" --arg oid "$head_oid" \
+              --arg d "$head_date" \
             '[.data.repository.pullRequest.reviews.nodes[]
-              | select(.author.login == $b)] | length')
-          if [ "$reviews" -eq 0 ]; then
-            echo "FAIL: no Qodo review submitted yet — the agent usually posts"
-            echo "within a few minutes of the PR opening; this check re-runs on"
-            echo "review submission. (Outage? Apply the skip-qodo-gate label.)"
+              | select(.author.login == $b)
+              | select(.commit.oid == $oid or .submittedAt >= $d)] | length')
+          if [ "$current" -eq 0 ]; then
+            echo "FAIL: no Qodo review of the current head ($head_oid) — the"
+            echo "agent usually posts within a few minutes of a push; this"
+            echo "check re-runs on review submission. (Outage? Apply the"
+            echo "skip-qodo-gate label.)"
             exit 1
           fi
 
-          unresolved=$(echo "$json" | jq --arg b "$BOT" \
-            '[.data.repository.pullRequest.reviewThreads.nodes[]
-              | select(.isResolved | not)
-              | select(.comments.nodes[0].author.login == $b)] | length')
+          # Unresolved Qodo threads, paginated (a long-lived PR can exceed one
+          # 100-thread page; a truncated read must never produce a false pass).
+          unresolved=0
+          cursor=""
+          while :; do
+            args=( -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$PR" )
+            [ -n "$cursor" ] && args+=( -F cursor="$cursor" )
+            page=$(gh api graphql "${args[@]}" \
+              -f query='
+                query($owner: String!, $name: String!, $pr: Int!, $cursor: String) {
+                  repository(owner: $owner, name: $name) {
+                    pullRequest(number: $pr) {
+                      reviewThreads(first: 100, after: $cursor) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes {
+                          isResolved
+                          comments(first: 1) { nodes { author { login } } }
+                        }
+                      }
+                    }
+                  }
+                }')
+            n=$(echo "$page" | jq --arg b "$BOT" \
+              '[.data.repository.pullRequest.reviewThreads.nodes[]
+                | select(.isResolved | not)
+                | select(.comments.nodes[0].author.login == $b)] | length')
+            unresolved=$((unresolved + n))
+            more=$(echo "$page" | jq -r \
+              '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
+            [ "$more" = "true" ] || break
+            cursor=$(echo "$page" | jq -r \
+              '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor')
+          done
+
           if [ "$unresolved" -gt 0 ]; then
             echo "FAIL: $unresolved unresolved Qodo review thread(s) — address"
             echo "or explicitly dismiss each finding, then mark the thread"
@@ -91,4 +136,4 @@ jobs:
             exit 1
           fi
 
-          echo "PASS: Qodo reviewed ($reviews review(s)), all its threads resolved"
+          echo "PASS: current-head Qodo review present, all its threads resolved"

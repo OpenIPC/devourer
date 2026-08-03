@@ -4,9 +4,18 @@
 # unresolved threads that EXIST at merge time. Qodo posts its review a minute
 # or two after the PR opens, so a "merge when CI is green" flow can race past
 # it (PR #355 merged 64 s before the review landed). This required check stays
-# red until (a) a Qodo review of the CURRENT head exists — a stale review of
-# an earlier push does not count, or the race just moves to follow-up
-# commits — and (b) every review thread Qodo opened is resolved.
+# red until (a) Qodo has reviewed the PR at least once — the first, whole-diff
+# pass is the valuable one — and (b) every review thread Qodo opened is
+# resolved.
+#
+# Deliberately NOT pinned to the current head: requiring a review of every
+# follow-up commit turns each review-response push into a fresh summon, and
+# each re-review re-scans the diff and opens a new batch of ever-smaller
+# findings — an unbounded fix/re-review treadmill. The first review catches
+# the substance; thread resolution keeps each finding accountable (address it
+# or dismiss it with rationale, in the thread, before resolving); follow-up
+# commits are maintainer judgment, exactly as with a human reviewer who does
+# not re-review every fixup.
 #
 # Event-driven: re-evaluates when the PR updates, when a review is submitted,
 # and when someone replies in a review thread. GitHub's workflow parser
@@ -28,13 +37,12 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  issues: read # the marker-comment fallback reads issues/<pr>/comments
 
 jobs:
   qodo-gate:
     runs-on: ubuntu-latest
     steps:
-      - name: Require a current-head Qodo review with all its threads resolved
+      - name: Require a Qodo review with all its threads resolved
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
@@ -50,14 +58,7 @@ jobs:
               query($owner: String!, $name: String!, $pr: Int!) {
                 repository(owner: $owner, name: $name) {
                   pullRequest(number: $pr) {
-                    headRefOid
                     labels(first: 100) { nodes { name } }
-                    reviews(last: 100) {
-                      nodes {
-                        author { login }
-                        commit { oid }
-                      }
-                    }
                   }
                 }
               }')
@@ -69,44 +70,23 @@ jobs:
             exit 0
           fi
 
-          # A review counts only if it is tied to the current head oid. No
-          # timestamp fallback: submittedAt >= committedDate is spoofable by a
-          # rebase/cherry-pick whose head commit carries an old committedDate,
-          # and observed Qodo reviews associate with the exact head they
-          # reviewed. Stale reviews of a previous push do NOT count —
-          # otherwise any follow-up commit could merge unreviewed, the same
-          # race one push later. Summon a re-review with a `/review` comment.
-          #
-          # Two evidence forms, because Qodo re-reviews two ways: a fresh
-          # review object tied to the head oid (observed on PR open), or an
-          # in-place UPDATE of its code-review comment plus a marker comment
-          # "updated up to the latest commit <sha>" (observed on /review after
-          # a push — no new review object is submitted). The fallback accepts
-          # only the bot's own comments naming the exact head oid. NB comment
-          # edits cannot retrigger this check against the PR head (an
-          # issue_comment-triggered run would attach to the default branch),
-          # so after a summoned re-review, retrigger via a thread reply or a
-          # Checks-tab re-run.
-          head_oid=$(echo "$json" | jq -r '.data.repository.pullRequest.headRefOid')
-          current=$(echo "$json" | jq --arg b "$BOT" --arg oid "$head_oid" \
-            '[.data.repository.pullRequest.reviews.nodes[]
-              | select(.author.login == $b)
-              | select(.commit.oid == $oid)] | length')
-          if [ "$current" -eq 0 ]; then
-            # --paginate applies --jq PER PAGE, so a `| length` there emits
-            # one count per page ("0\n1"), breaking the integer test below.
-            # Emit matching comment ids instead and count lines across pages.
-            current=$(gh api "repos/$REPO_OWNER/$REPO_NAME/issues/$PR/comments" \
-              --paginate --jq ".[]
-                | select(.user.login == \"${BOT}[bot]\")
-                | select(.body | test(\"up to the latest commit\"))
-                | select(.body | contains(\"$head_oid\"))
-                | .id" | wc -l)
-          fi
-          if [ "$current" -eq 0 ]; then
-            echo "FAIL: no Qodo review of the current head ($head_oid) —"
-            echo "comment /review on the PR to summon one, then re-run this"
-            echo "check (or reply in a thread) once it answers. (Outage?"
+          # Any review by the bot counts — the first pass reviews the whole
+          # diff, and its later in-place updates edit the same review object,
+          # so one review object existing == the PR has been Qodo-reviewed.
+          # Paginated: a busy PR accumulates well over 100 review objects
+          # (every inline reply wraps itself in one), and the bot's first
+          # review is the OLDEST — exactly what a last-100 window loses
+          # first. --paginate applies --jq per page, so emit ids and count
+          # lines. REST spells the bot login with a [bot] suffix, unlike
+          # GraphQL, so match on the prefix.
+          reviewed=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR/reviews" \
+            --paginate --jq ".[]
+              | select(.user.login | startswith(\"$BOT\"))
+              | .id" | wc -l)
+          if [ "$reviewed" -eq 0 ]; then
+            echo "FAIL: no Qodo review on this PR yet — it reviews new PRs"
+            echo "automatically within a couple of minutes; comment /review to"
+            echo "summon one, then re-run this check once it answers. (Outage?"
             echo "Apply the skip-qodo-gate label.)"
             exit 1
           fi
@@ -151,11 +131,11 @@ jobs:
 
           if [ "$unresolved" -gt 0 ]; then
             echo "FAIL: $unresolved unresolved Qodo review thread(s) — address"
-            echo "or explicitly dismiss each finding, then mark the thread"
-            echo "resolved. Plain resolution does not auto-retrigger this"
+            echo "or explicitly dismiss each finding in its thread, then mark"
+            echo "it resolved. Plain resolution does not auto-retrigger this"
             echo "check: leave a reply in a thread (retriggers) or Re-run the"
             echo "check from the PR's Checks tab after resolving."
             exit 1
           fi
 
-          echo "PASS: current-head Qodo review present, all its threads resolved"
+          echo "PASS: Qodo review present, all its threads resolved"

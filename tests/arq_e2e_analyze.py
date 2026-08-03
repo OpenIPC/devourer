@@ -150,7 +150,7 @@ def main():
         return 3
 
     rel = unwrap_tags(reports)
-    max_pctr = max(list(dut.keys()) + list(wit.keys()) + [0])
+    max_pctr = max(max(dut, default=0), max(wit, default=0))
     base, best, second = find_base(reports, rel,
                                    (dut.keys(), wit.keys()), max_pctr)
     n_ok = sum(1 for r in reports if r["ok"])
@@ -231,7 +231,7 @@ def main():
     # (measured: 19 consecutive "losses" at the exact end of a run that were
     # an unflushed-stdout artifact, not RF or USB).
     TAIL_GUARD = 512
-    max_index = max([base + rel[-1]] + list(dut.keys()) + list(wit.keys()))
+    max_index = max(base + rel[-1], max(dut, default=0), max(wit, default=0))
     tail_cutoff = max_index - TAIL_GUARD
     # On a run shorter than 2x the guard the tail window swallows most of the
     # frames and a NOT-REPRODUCED verdict would be vacuous — refuse to conclude

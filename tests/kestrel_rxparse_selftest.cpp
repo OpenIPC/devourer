@@ -243,8 +243,13 @@ int main() {
     KestrelPhySts ps;
     CHECK(parse_physts_8852(b.data(), b.size(), true, ps));
     CHECK(ps.snr_avg == 0); /* torn IE not parsed */
+    /* The failure return also clears a reused struct — the pure-output
+     * contract holds on every path, not just successful parses. */
     KestrelPhySts p2;
+    p2.rssi[0] = 65;
+    p2.snr_avg = 44;
     CHECK(!parse_physts_8852(b.data(), 4, true, p2)); /* below header size */
+    CHECK(p2.rssi[0] == 0 && p2.snr_avg == 0);
   }
 
   if (failures == 0)

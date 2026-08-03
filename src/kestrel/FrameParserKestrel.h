@@ -146,12 +146,13 @@ struct KestrelPhySts {
 
 inline bool parse_physts_8852(const uint8_t *p, size_t len, bool is_8852c,
                               KestrelPhySts &out) {
+  /* Pure output param: the result depends only on this call's buffer, never
+   * on what a reused struct held before — including the failure return (an
+   * is_valid=0 stub, an absent IE, or a too-short buffer must all leave 0,
+   * not a previous blob's values), so the clear precedes the validation. */
+  out = KestrelPhySts{};
   if (p == nullptr || len < 8)
     return false;
-  /* Pure output param: the result depends only on this buffer, never on what
-   * a reused struct held before (an is_valid=0 stub or an absent IE must
-   * read 0, not a previous blob's value). */
-  out = KestrelPhySts{};
   out.rssi_avg = static_cast<uint8_t>(p[3] >> 1);
   for (int i = 0; i < 4; i++)
     out.rssi[i] = static_cast<uint8_t>(p[4 + i] >> 1);

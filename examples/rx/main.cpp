@@ -644,7 +644,8 @@ static const long g_rx_stall_ms = []() {
 }();
 static const long g_rx_stall_every = []() {
   const char *e = std::getenv("DEVOURER_RX_SINK_STALL_EVERY");
-  return e ? std::strtol(e, nullptr, 0) : 100L;
+  const long v = e ? std::strtol(e, nullptr, 0) : 100L;
+  return v > 0 ? v : 100L; /* 0/garbage would divide-by-zero the modulo */
 }();
 
 /* DEVOURER_RX_PCTR: emit a lean rx.seq event (payload counter + tsfl + crc +

@@ -26,18 +26,26 @@ mkdir -p "$OUT"
 declare -A RUNDIR
 for L in $LIMITS; do
   echo "=== retry_limit=$L"
-  RETRY_LIMIT="$L" bash "$ROOT/tests/arq_e2e_delivery.sh" \
+  # Deterministic per-limit run dir (the harness honours OUT=) — inferring
+  # "newest /tmp/arq-e2e/*" would race any concurrent bench run on the host.
+  RUNDIR[$L]="$OUT/limit_$L"
+  RETRY_LIMIT="$L" OUT="${RUNDIR[$L]}" bash "$ROOT/tests/arq_e2e_delivery.sh" \
       >"$OUT/limit_$L.log" 2>&1 || {
     echo "run failed (see $OUT/limit_$L.log)"; exit 1; }
-  RUNDIR[$L]=$(ls -td /tmp/arq-e2e/*/ | head -1)
   echo "    -> ${RUNDIR[$L]}"
 done
 
 echo
-printf "%8s %10s %12s %8s %10s\n" limit reports "delivered%" drops mean_rtry
+printf "%8s %10s %12s %8s %10s %12s %12s\n" \
+       limit reports "delivered%" drops mean_rtry "drops@6M:10" "drops@6M:30"
 for L in $LIMITS; do
   D=${RUNDIR[$L]}
-  python3 - "$D/drone.jsonl" "$L" <<'PYEOF'
+  # Per-burst-phase drop breakout from the run's own per-phase report table —
+  # the limit-vs-burst-length interaction is the curve's point: a bigger burst
+  # needs more backoff-spaced retries to straddle.
+  B10=$(awk '$1=="6M:10"{s+=$8} END{print s+0}' "$D/report.txt")
+  B30=$(awk '$1=="6M:30"{s+=$8} END{print s+0}' "$D/report.txt")
+  python3 - "$D/drone.jsonl" "$L" "$B10" "$B30" <<'PYEOF'
 import json, sys
 n = ok = drops = 0
 rsum = 0
@@ -55,7 +63,7 @@ for line in open(sys.argv[1], errors="replace"):
     else:
         drops += 1
 print(f"{sys.argv[2]:>8} {n:>10} {100.0*ok/max(1,n):>11.2f} "
-      f"{drops:>8} {rsum/max(1,n):>10.3f}")
+      f"{drops:>8} {rsum/max(1,n):>10.3f} {sys.argv[3]:>12} {sys.argv[4]:>12}")
 PYEOF
 done | tee "$OUT/summary.txt"
 

@@ -51,6 +51,13 @@ def undelivered(rundir):
                 r += (t - prev) % 256
             prev = t
             rep[r] = bool(ev.get("ok"))
+    if not rep or not dut:
+        raise SystemExit(
+            f"{rundir}: {'no tagged tx.report events' if not rep else ''}"
+            f"{' and ' if not rep and not dut else ''}"
+            f"{'no rx.seq ledger' if not dut else ''} — an empty ledger would "
+            f"count every frame as undelivered (J1-format reports carry no "
+            f"tag; this tool needs a halmac TX side)")
     hi = max(max(dut, default=0), r)
     lo_cut = min(dut) if dut else 0  # drone frames before the DUT RX was up
     hi_cut = hi - TAIL_GUARD
@@ -73,9 +80,13 @@ def undelivered(rundir):
 
 
 def pct(sorted_g, p):
+    """Nearest-rank percentile: ceil(p*n)-1, 0-based. int(p*n) would be
+    biased one rank upward (P50 of 4 elements landing on the 3rd)."""
     if not sorted_g:
         return 0
-    return sorted_g[min(len(sorted_g) - 1, int(p * len(sorted_g)))]
+    import math
+    return sorted_g[min(len(sorted_g) - 1,
+                        max(0, math.ceil(p * len(sorted_g)) - 1))]
 
 
 def main():

@@ -50,14 +50,10 @@ jobs:
                 repository(owner: $owner, name: $name) {
                   pullRequest(number: $pr) {
                     headRefOid
-                    commits(last: 1) {
-                      nodes { commit { committedDate } }
-                    }
                     labels(first: 100) { nodes { name } }
                     reviews(last: 100) {
                       nodes {
                         author { login }
-                        submittedAt
                         commit { oid }
                       }
                     }
@@ -72,24 +68,23 @@ jobs:
             exit 0
           fi
 
-          # A review counts only if it saw the current head: same commit oid,
-          # or submitted after the head commit landed (Qodo associates some
-          # incremental reviews with an earlier oid). Stale reviews of a
-          # previous push do NOT count — otherwise any follow-up commit could
-          # merge unreviewed, the same race one push later.
+          # A review counts only if it is tied to the current head oid. No
+          # timestamp fallback: submittedAt >= committedDate is spoofable by a
+          # rebase/cherry-pick whose head commit carries an old committedDate,
+          # and observed Qodo reviews associate with the exact head they
+          # reviewed. Stale reviews of a previous push do NOT count —
+          # otherwise any follow-up commit could merge unreviewed, the same
+          # race one push later. Summon a re-review with a `/review` comment.
           head_oid=$(echo "$json" | jq -r '.data.repository.pullRequest.headRefOid')
-          head_date=$(echo "$json" | jq -r \
-            '.data.repository.pullRequest.commits.nodes[0].commit.committedDate')
           current=$(echo "$json" | jq --arg b "$BOT" --arg oid "$head_oid" \
-              --arg d "$head_date" \
             '[.data.repository.pullRequest.reviews.nodes[]
               | select(.author.login == $b)
-              | select(.commit.oid == $oid or .submittedAt >= $d)] | length')
+              | select(.commit.oid == $oid)] | length')
           if [ "$current" -eq 0 ]; then
-            echo "FAIL: no Qodo review of the current head ($head_oid) — the"
-            echo "agent usually posts within a few minutes of a push; this"
-            echo "check re-runs on review submission. (Outage? Apply the"
-            echo "skip-qodo-gate label.)"
+            echo "FAIL: no Qodo review of the current head ($head_oid) —"
+            echo "comment /review on the PR to summon one; this check re-runs"
+            echo "on review submission. (Outage? Apply the skip-qodo-gate"
+            echo "label.)"
             exit 1
           fi
 
@@ -109,16 +104,20 @@ jobs:
                         pageInfo { hasNextPage endCursor }
                         nodes {
                           isResolved
-                          comments(first: 1) { nodes { author { login } } }
+                          comments(first: 10) { nodes { author { login } } }
                         }
                       }
                     }
                   }
                 }')
+            # A thread is Qodo's if ANY of its first comments is by the bot —
+            # first-comment-only attribution loses the thread when the bot's
+            # opening comment is deleted while replies remain (and deletion
+            # re-triggers this check, so that would be a false pass).
             n=$(echo "$page" | jq --arg b "$BOT" \
               '[.data.repository.pullRequest.reviewThreads.nodes[]
                 | select(.isResolved | not)
-                | select(.comments.nodes[0].author.login == $b)] | length')
+                | select([.comments.nodes[].author.login] | index($b))] | length')
             unresolved=$((unresolved + n))
             more=$(echo "$page" | jq -r \
               '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')

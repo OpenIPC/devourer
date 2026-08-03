@@ -85,8 +85,9 @@ cleanup() {
   for p in "$FEED_PIDF" "$DRONE_PIDF" "$DUT_PIDF" "$WIT_PIDF"; do
     [ -n "$p" ] && kill "$p" 2>/dev/null
   done
-  pkill -x duplex 2>/dev/null; pkill -x txdemo 2>/dev/null
-  pkill -x rxdemo 2>/dev/null
+  # Backstop scoped to THIS checkout's binaries (full-path match) — a bare
+  # `pkill -x duplex` from root would kill unrelated instances host-wide.
+  for b in duplex txdemo rxdemo; do pkill -f "^$BUILD/$b" 2>/dev/null; done
   rm -f "$BLACKLIST" "$OUT/fifo"
   wait 2>/dev/null
 }

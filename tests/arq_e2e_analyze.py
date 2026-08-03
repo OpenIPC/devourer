@@ -91,21 +91,29 @@ def find_base(reports, rel, pctr_sets, max_pctr):
     m_hi = (max_pctr + 4096) // 256 + 2
     # Reports are send-ordered and dense, so the first report's absolute index
     # sits near the earliest delivered pctr — search a window around it first
-    # (the full scan is O(m_hi * n_ok) and unaffordable at high frame rates).
+    # with full precision. The exhaustive fallback scores on a SAMPLE of the
+    # reports (a wrong base matches ~1/256 at random, so 2k samples separate
+    # right from wrong decisively) and only the winner is re-scored in full —
+    # otherwise non-joining logs cost O(m_hi * n_ok) and the analyzer hangs
+    # instead of failing fast.
     lo_pctr = min(union) if union else 0
     near = range(max(0, (lo_pctr - 2048)) // 256,
                  min(m_hi, (lo_pctr + 2048) // 256 + 1))
-    for candidates in (near, range(m_hi)):
+    sample = ok_rel[:2000]
+    for candidates, pool in ((near, ok_rel), (range(m_hi), sample)):
         for m in candidates:
             base = tag0 + 256 * m
-            score = sum(1 for r in ok_rel if (base + r - rel[0]) in union)
+            score = sum(1 for r in pool if (base + r) in union)
             if score > best:
                 second, best, best_m = best, score, m
             elif score > second:
                 second = score
-        if best >= max(10, len(ok_rel) // 2):
-            break  # near-window hit — skip the exhaustive scan
-    return tag0 + 256 * best_m - rel[0], best, second
+        if best >= max(10, len(pool) // 2):
+            break  # strong hit — skip / end the wider scan
+        best, second = -1, -1  # sampled scores are not comparable to full ones
+    full = sum(1 for r in ok_rel
+               if (tag0 + 256 * best_m + r) in union)
+    return tag0 + 256 * best_m - rel[0], full, second
 
 
 def phase_names(phases, cycles):
@@ -210,6 +218,14 @@ def main():
     TAIL_GUARD = 512
     max_index = max([base + rel[-1]] + list(dut.keys()) + list(wit.keys()))
     tail_cutoff = max_index - TAIL_GUARD
+    # On a run shorter than 2x the guard the tail window swallows most of the
+    # frames and a NOT-REPRODUCED verdict would be vacuous — refuse to conclude
+    # rather than silently reclassify real losses as truncation.
+    short_run = max_index < 2 * TAIL_GUARD
+    if short_run:
+        print(f"# WARNING: run spans only {max_index + 1} frame indices "
+              f"(< 2x TAIL_GUARD={TAIL_GUARD}) — verdict will be "
+              f"INCONCLUSIVE-SHORT-RUN")
     per = defaultdict(lambda: defaultdict(int))
     detail = []
     for j, rp in enumerate(reports):
@@ -284,17 +300,23 @@ def main():
     if tot_tail:
         print(f"tail_suspect: {tot_tail} ok'd frames missing within the last "
               f"{TAIL_GUARD} indices — excluded (stream-end truncation)")
-    verdict = "REPRODUCED" if total_au > 0 else "NOT-REPRODUCED"
+    if total_au > 0:
+        verdict = "REPRODUCED"
+    elif short_run:
+        verdict = "INCONCLUSIVE-SHORT-RUN"
+    else:
+        verdict = "NOT-REPRODUCED"
     print(f"\nVERDICT: {verdict} — acked_undelivered={total_au} across all "
           f"phases (drone said ok, DUT host never delivered)")
     # separators: machine events must be the grep-able {"ev":"name",...} form
     # (docs/logging.md) — default json.dumps inserts spaces.
-    print(json.dumps({"ev": "arqe2e.verdict", "acked_undelivered": total_au,
+    print(json.dumps({"ev": "arqe2e.verdict", "verdict": verdict,
+                      "acked_undelivered": total_au,
                       "tail_suspect": tot_tail,
                       "reports": len(reports), "ok": n_ok,
                       "dut_pctrs": len(dut), "wit_pctrs": len(wit),
                       "base": base}, separators=(",", ":")))
-    return 0
+    return 3 if verdict == "INCONCLUSIVE-SHORT-RUN" else 0
 
 
 if __name__ == "__main__":

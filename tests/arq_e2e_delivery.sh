@@ -90,7 +90,10 @@ cleanup() {
   done
   # Backstop scoped to THIS checkout's binaries (full-path match) — a bare
   # `pkill -x duplex` from root would kill unrelated instances host-wide.
-  for b in duplex txdemo rxdemo; do pkill -f "^$BUILD/$b" 2>/dev/null; done
+  # $BUILD is caller-controlled and pkill -f takes an ERE: escape the
+  # metacharacters so a path like ".../build+asan" cannot broaden the match.
+  esc_build=$(printf '%s' "$BUILD" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
+  for b in duplex txdemo rxdemo; do pkill -f "^$esc_build/$b" 2>/dev/null; done
   rm -f "$BLACKLIST" "$OUT/fifo"
   wait 2>/dev/null
 }

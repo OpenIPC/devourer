@@ -9,16 +9,21 @@
 # be looked at before merge.
 #
 # Event-driven: re-evaluates when the PR updates, when a review is submitted,
-# and when a review thread is resolved/unresolved. Escape hatch for a Qodo
-# outage: the `skip-qodo-gate` label passes the check (label changes
-# re-trigger it).
+# and when someone replies in a review thread. GitHub's workflow parser
+# rejects the documented `pull_request_review_thread` trigger ("Unexpected
+# value"), so plain thread resolution does not auto-retrigger — after
+# resolving the last thread, either leave a reply (retriggers) or Re-run the
+# failed qodo-gate check from the PR's Checks tab; the check reads the live
+# resolution state each run. Escape hatch for a Qodo outage: the
+# `skip-qodo-gate` label passes the check (label changes re-trigger it).
 name: qodo-gate
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
   pull_request_review:
     types: [submitted]
-  pull_request_review_thread:
+  pull_request_review_comment:
+    types: [created, deleted]
 
 permissions:
   contents: read
@@ -80,7 +85,9 @@ jobs:
           if [ "$unresolved" -gt 0 ]; then
             echo "FAIL: $unresolved unresolved Qodo review thread(s) — address"
             echo "or explicitly dismiss each finding, then mark the thread"
-            echo "resolved; this check re-runs on thread resolution."
+            echo "resolved. Plain resolution does not auto-retrigger this"
+            echo "check: leave a reply in a thread (retriggers) or Re-run the"
+            echo "check from the PR's Checks tab after resolving."
             exit 1
           fi
 

@@ -59,9 +59,6 @@ jobs:
                 repository(owner: $owner, name: $name) {
                   pullRequest(number: $pr) {
                     labels(first: 100) { nodes { name } }
-                    reviews(last: 100) {
-                      nodes { author { login } }
-                    }
                   }
                 }
               }')
@@ -76,9 +73,16 @@ jobs:
           # Any review by the bot counts — the first pass reviews the whole
           # diff, and its later in-place updates edit the same review object,
           # so one review object existing == the PR has been Qodo-reviewed.
-          reviewed=$(echo "$json" | jq --arg b "$BOT" \
-            '[.data.repository.pullRequest.reviews.nodes[]
-              | select(.author.login == $b)] | length')
+          # Paginated: a busy PR accumulates well over 100 review objects
+          # (every inline reply wraps itself in one), and the bot's first
+          # review is the OLDEST — exactly what a last-100 window loses
+          # first. --paginate applies --jq per page, so emit ids and count
+          # lines. REST spells the bot login with a [bot] suffix, unlike
+          # GraphQL, so match on the prefix.
+          reviewed=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR/reviews" \
+            --paginate --jq ".[]
+              | select(.user.login | startswith(\"$BOT\"))
+              | .id" | wc -l)
           if [ "$reviewed" -eq 0 ]; then
             echo "FAIL: no Qodo review on this PR yet — it reviews new PRs"
             echo "automatically within a couple of minutes; comment /review to"

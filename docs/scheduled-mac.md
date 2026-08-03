@@ -178,6 +178,18 @@ the value the descriptors used to hardcode) — the knob, not a descriptor
 constant, is now the single source of truth for the retry limit on
 jaguar1/2/3 (inert on Kestrel and the 8814A die).
 
+Choosing the limit (`tests/arq_retry_sweep.sh`, collision regime: a ~1 k fps
+retrying unicast flood into an 8812EU duplex ground station airing
+PixelPilot-shaped feedback bursts, near-field): retries are backoff-spaced,
+so a small limit can burn entirely inside one 2–3 ms burst. Measured curve —
+limit 3: 99.72% delivered, residual 0.26%; limit 8: 99.97%, residual 0.03%
+(gaps ≤3, a K=8/N=11 FEC floor covers it); limit 16: 100.00% at +5.4%
+retry airtime (mean 0.054 retries/frame); limit 32: no further gain, +17%
+more retries than 16. Queue-time p99 is flat across limits (only the rare
+worst case doubles, then stops growing). Prefer **16** on an ARQ link, or
+**8 + a light FEC floor** where airtime is precious; the per-run residual
+gap analysis is `tests/arq_fec_dimension.py`.
+
 Responder-side capability (same setup, J3 TX as the reference soliciting
 station): **8814AU** closes the loop at retries ~0.1 (the bench responder of
 choice); **8812AU** works but degraded (97% delivery at ~7 mean retries —

@@ -287,11 +287,13 @@ def main():
     verdict = "REPRODUCED" if total_au > 0 else "NOT-REPRODUCED"
     print(f"\nVERDICT: {verdict} — acked_undelivered={total_au} across all "
           f"phases (drone said ok, DUT host never delivered)")
+    # separators: machine events must be the grep-able {"ev":"name",...} form
+    # (docs/logging.md) — default json.dumps inserts spaces.
     print(json.dumps({"ev": "arqe2e.verdict", "acked_undelivered": total_au,
                       "tail_suspect": tot_tail,
                       "reports": len(reports), "ok": n_ok,
                       "dut_pctrs": len(dut), "wit_pctrs": len(wit),
-                      "base": base}))
+                      "base": base}, separators=(",", ":")))
     return 0
 
 

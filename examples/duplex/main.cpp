@@ -160,9 +160,12 @@ static const long g_rx_stall_ms = []() {
 }();
 static const long g_rx_stall_every = []() {
   const char *e = std::getenv("DEVOURER_RX_SINK_STALL_EVERY");
-  return e ? std::strtol(e, nullptr, 0) : 100L;
+  const long v = e ? std::strtol(e, nullptr, 0) : 100L;
+  return v > 0 ? v : 100L; /* 0/garbage would divide-by-zero the modulo */
 }();
-static long g_rx_seen = 0;
+/* Atomic: the RX callback can run on the TX thread's event pump too (libusb's
+ * sync API pumps events; see AsyncRxShared in src/UsbTransport.cpp). */
+static std::atomic<long> g_rx_seen{0};
 
 static void packet_processor(const Packet &packet) {
   if (packet.RxAtrib.pkt_rpt_type == RX_PACKET_TYPE::C2H_PACKET) {
@@ -189,7 +192,7 @@ static void packet_processor(const Packet &packet) {
     }
     return;
   }
-  ++g_rx_seen;
+  const long rx_seen = ++g_rx_seen;
   if (g_rx_sink_spin_us > 0) {
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::microseconds(g_rx_sink_spin_us);
@@ -197,7 +200,7 @@ static void packet_processor(const Packet &packet) {
       /* busy-wait: a sleep would yield the pump thread and defeat the model */
     }
   }
-  if (g_rx_stall_ms > 0 && (g_rx_seen % g_rx_stall_every) == 0) {
+  if (g_rx_stall_ms > 0 && (rx_seen % g_rx_stall_every) == 0) {
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(g_rx_stall_ms);
     while (std::chrono::steady_clock::now() < deadline) {

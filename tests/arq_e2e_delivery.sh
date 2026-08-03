@@ -63,7 +63,10 @@ DUT_STALL_MS=${DUT_STALL_MS:-0}        # periodic consumer hiccup (GC pause)
 DUT_STALL_EVERY=${DUT_STALL_EVERY:-1500}
 
 MODS=${MODS:-"rtw88_8812au rtw88_8821au rtw88_8822bu rtw88_8814au rtw88_8822cu rtw88_8822eu"}
-BLACKLIST=/etc/modprobe.d/zz-temp-blacklist-arqe2e.conf
+# /run/modprobe.d (tmpfs): modprobe reads it like /etc/modprobe.d, but the
+# blacklist self-cleans on reboot even if the trap never runs (SIGKILL, power
+# loss) — a temp blacklist must never outlive the bench across boots.
+BLACKLIST=/run/modprobe.d/zz-temp-blacklist-arqe2e.conf
 OUT=${OUT:-/tmp/arq-e2e/$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$OUT"
 
@@ -93,6 +96,7 @@ trap cleanup EXIT INT TERM
 # claim_interface_then_reset triggers) + unbind by exact VID:PID. Never touch
 # device class 09: the dongles sit behind Realtek-branded hubs and a
 # vendor-only match would unbind the hub driver and drop the whole tree.
+mkdir -p "$(dirname "$BLACKLIST")"   # /run/modprobe.d may not exist yet
 : > "$BLACKLIST"
 for m in $MODS; do echo "blacklist $m" >> "$BLACKLIST"; modprobe -r "$m" 2>/dev/null; done
 ADAPTERS="${DUT_VID#0x}${DUT_PID#0x} ${DRONE_VID#0x}${DRONE_PID#0x} ${WIT_VID#0x}${WIT_PID#0x}"

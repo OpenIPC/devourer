@@ -222,8 +222,10 @@ extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
      * submit failed: preserve the pump's never-block invariant by re-arming
      * with the received buffer and DROPPING this frame — a bounded loss, vs the
      * cascade an inline consume would trigger. The chip already ACKed this
-     * frame (see the mode comment above): count it, never drop silently. */
-    if (rlen > 0)
+     * frame (see the mode comment above): count it, never drop silently.
+     * `resubmit` gates the count: a teardown-window frame (stop requested) is
+     * intentional loss, not an overload signal. */
+    if (resubmit && rlen > 0)
       s->pool_dropped.fetch_add(1, std::memory_order_relaxed);
     if (resubmit && libusb_submit_transfer(t) == 0) {
       if (s->telemetry)

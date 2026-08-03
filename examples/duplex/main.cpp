@@ -123,6 +123,47 @@ static devourer::EventSink *g_ev = nullptr;
 static const bool g_tx_status_enabled =
     std::getenv("DEVOURER_TX_STATUS") != nullptr;
 
+/* DEVOURER_RX_PCTR + DEVOURER_RX_AGG_SA: per-frame rx.seq delivery ledger,
+ * mirroring examples/rx/main.cpp — pctr is the u32 txdemo stamps at the
+ * QoS-Data body start (MPDU offset 26). In this demo the SA gate is required:
+ * the ledger's transmitter is a different station than the canonical-SA
+ * rx.frame stream above (the ARQ end-to-end bench keys on unicast frames
+ * whose TA can't be the group-address canonical SA). */
+static const bool g_rx_pctr = []() {
+  const char *e = std::getenv("DEVOURER_RX_PCTR");
+  return e != nullptr && std::strcmp(e, "0") != 0;
+}();
+static uint8_t g_seq_sa[6] = {};
+static const bool g_seq_sa_set = []() {
+  const char *e = std::getenv("DEVOURER_RX_AGG_SA");
+  if (e == nullptr || *e == '\0')
+    return false;
+  const auto m = devourer::parse_mac(e);
+  if (!m)
+    return false;
+  std::memcpy(g_seq_sa, m->data(), 6);
+  return true;
+}();
+
+/* DEVOURER_RX_SINK_SPIN_US / DEVOURER_RX_SINK_STALL_MS+_EVERY: the same
+ * consumer-cost models as examples/rx/main.cpp — a per-frame busy-spin (the
+ * inline wfb-ng FEC+AES+UDP cost PixelPilot pays on this thread) and a
+ * periodic multi-ms stall (GC pause / consumer preemption). Both run on the
+ * libusb pump thread, which is exactly the point. */
+static const long g_rx_sink_spin_us = []() {
+  const char *e = std::getenv("DEVOURER_RX_SINK_SPIN_US");
+  return e ? std::strtol(e, nullptr, 0) : 0L;
+}();
+static const long g_rx_stall_ms = []() {
+  const char *e = std::getenv("DEVOURER_RX_SINK_STALL_MS");
+  return e ? std::strtol(e, nullptr, 0) : 0L;
+}();
+static const long g_rx_stall_every = []() {
+  const char *e = std::getenv("DEVOURER_RX_SINK_STALL_EVERY");
+  return e ? std::strtol(e, nullptr, 0) : 100L;
+}();
+static long g_rx_seen = 0;
+
 static void packet_processor(const Packet &packet) {
   if (packet.RxAtrib.pkt_rpt_type == RX_PACKET_TYPE::C2H_PACKET) {
     if (!g_tx_status_enabled) return;
@@ -148,6 +189,38 @@ static void packet_processor(const Packet &packet) {
     }
     return;
   }
+  ++g_rx_seen;
+  if (g_rx_sink_spin_us > 0) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::microseconds(g_rx_sink_spin_us);
+    while (std::chrono::steady_clock::now() < deadline) {
+      /* busy-wait: a sleep would yield the pump thread and defeat the model */
+    }
+  }
+  if (g_rx_stall_ms > 0 && (g_rx_seen % g_rx_stall_every) == 0) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(g_rx_stall_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+      /* periodic consumer hiccup */
+    }
+  }
+
+  /* rx.seq — the ARQ bench's host-delivery ground truth: one lean event per
+   * SA-matched frame, same fields as rxdemo's so the analyzers are shared. */
+  if (g_rx_pctr && g_seq_sa_set && packet.Data.size() >= 30 &&
+      std::memcmp(packet.Data.data() + 10, g_seq_sa, 6) == 0) {
+    uint32_t pctr;
+    std::memcpy(&pctr, packet.Data.data() + 26, 4);
+    devourer::Ev(*g_ev, "rx.seq")
+        .t() /* host monotonic ms — correlates a pctr gap with an rx.ring dip */
+        .f("pctr", (unsigned long long)pctr)
+        .f("tsfl", packet.RxAtrib.tsfl)
+        .f("seq", packet.RxAtrib.seq_num)
+        .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
+        .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
+        .f("ppdu", packet.RxAtrib.ppdu_cnt);
+  }
+
   if (packet.Data.size() < 16) return;
   if (std::memcmp(packet.Data.data() + 10, kCanonicalSa, 6) != 0) return;
   long hits = ++g_rx_hits;

@@ -421,7 +421,15 @@ guard time, dynamic beacon grants, ACK/TxReport, per-UE RX attribution) are
 the PHY ceiling by amortizing per-frame overhead — an occupancy metric can't
 show it, count delivered payload. `SetAckResponder(mac)` arms the hardware
 ACK/BlockAck responder; with a unicast TA on the soliciting frame this closes
-a hardware-ARQ loop (autonomous MAC retransmission until ACK). Per-frame TX
+a hardware-ARQ loop (autonomous MAC retransmission until ACK). The ACK's
+horizon is chip-FIFO **admission** (bench: 8812EU responder,
+`tests/arq_e2e_delivery.sh` per-frame ledgers): receiver-side congestion
+upstream of admission declines the ACK, so the loop sees and retries it — but
+a host stage that drops on a full queue while keeping URBs armed (the
+spsc-fat ring at pool exhaustion — counted as `pool_dropped` in `rx.ring`)
+turns the same loss into ACKed-but-undelivered that the TX peer logs as
+delivered and never retries. Under ARQ or delivery accounting, prefer
+backpressure to the chip over drop-on-full host buffering. Per-frame TX
 outcomes surface as `tx.report` events (CCX via C2H) — the TX-side link
 sensor; C2H rides the RX path, so J1/J2 TX-only sessions see none (run
 `DEVOURER_TX_WITH_RX=thread`; J3's coex thread drains C2H regardless).

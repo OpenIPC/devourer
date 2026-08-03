@@ -85,8 +85,19 @@ struct AsyncRxShared {
    * the consumer stalls or is preempted — converting a chip-FIFO overflow
    * (dropped frames) into bounded host-queue backlog (delayed frames). The fix
    * for a stalling/preempted CONSUMER, where reorder-pool can't help because it
-   * still consumes on the pump thread. */
+   * still consumes on the pump thread.
+   *
+   * ARQ caveat, bench-measured (tests/arq_e2e_delivery.sh): keeping the ring
+   * armed means the chip ADMITS AND ACKS every frame — so a frame dropped at
+   * pool exhaustion below is an ACKed-but-undelivered loss the hardware-ARQ
+   * peer will log as delivered and never retry. The default async ring loses
+   * the same frames chip-side instead, where the 8812EU declines the ACK and
+   * the ARQ loop recovers them (14,214/14,214 stall-window drops reported
+   * ok=0 there, vs 5,667 ok=1-but-lost here). Under an ARQ or
+   * delivery-accounting scheme, prefer backpressure over this mode, or watch
+   * pool_dropped. */
   bool spsc = false;
+  std::atomic<unsigned long long> pool_dropped{0};
   std::mutex queue_mu;
   std::condition_variable queue_cv;
   std::deque<std::pair<uint8_t *, int>> queue;
@@ -210,7 +221,10 @@ extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
     /* Pool exhausted (consumer hopelessly behind under sustained overload) or
      * submit failed: preserve the pump's never-block invariant by re-arming
      * with the received buffer and DROPPING this frame — a bounded loss, vs the
-     * cascade an inline consume would trigger. */
+     * cascade an inline consume would trigger. The chip already ACKed this
+     * frame (see the mode comment above): count it, never drop silently. */
+    if (rlen > 0)
+      s->pool_dropped.fetch_add(1, std::memory_order_relaxed);
     if (resubmit && libusb_submit_transfer(t) == 0) {
       if (s->telemetry)
         s->armed.fetch_add(1, std::memory_order_relaxed);
@@ -432,7 +446,9 @@ void UsbTransport::rx_loop(
             .f("empties", (unsigned long long)sh.empties.load(
                               std::memory_order_relaxed))
             .f("pool_free", pool_free)
-            .f("qdepth", qdepth);
+            .f("qdepth", qdepth)
+            .f("pool_dropped", (unsigned long long)sh.pool_dropped.load(
+                                   std::memory_order_relaxed));
       }
     }
   }

@@ -216,7 +216,8 @@ int main() {
     CHECK(pb.evm[0] == -50 && pb.evm[1] == -30); /* EVM page read on both */
   }
 
-  /* --- physts: is_valid=0 keeps header RSSI but skips the IE walk --- */
+  /* --- physts: is_valid=0 keeps header RSSI but skips the IE walk; a reused
+   * output struct is cleared (result depends only on this buffer) --- */
   {
     std::vector<uint8_t> b(8 + 32, 0);
     b[0] = 0x01; /* no is_valid bit */
@@ -225,8 +226,12 @@ int main() {
     b[8] = 1;
     b[16] = 30;
     KestrelPhySts ps;
+    ps.snr_avg = 44; /* stale garbage from a "previous parse" */
+    ps.snr[0] = 33;
+    ps.evm[1] = -40;
     CHECK(parse_physts_8852(b.data(), b.size(), true, ps));
-    CHECK(ps.rssi[0] == 65 && ps.snr_avg == 0 && ps.snr[0] == 0);
+    CHECK(ps.rssi[0] == 65 && ps.snr_avg == 0 && ps.snr[0] == 0 &&
+          ps.evm[1] == 0);
   }
 
   /* --- physts: truncated / lying total-length is bounded by the buffer --- */

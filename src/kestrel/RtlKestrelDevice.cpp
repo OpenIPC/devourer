@@ -338,16 +338,21 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
               p.RxAtrib.snr[i] = _last_physts.snr[i];
               p.RxAtrib.evm[i] = _last_physts.evm[i];
             }
-            /* Feed the windowed RX-quality aggregate (passive rssi-snr floor +
-             * LinkHealth) with path-A RSSI + the IE01 average SNR (the
-             * all-paths quantity the passive floor was validated against;
-             * per-path SNR goes to _rxpaths instead). A frame with no IE_01
-             * SNR (snr_avg=0) still counts toward RSSI. */
-            if (_last_physts.rssi[0] > 0)
-              _rxq.add(_last_physts.rssi[0], _last_physts.snr_avg, 0);
-            /* Per-antenna window means (GetActiveRxPaths). Both dies are 2 RX
-             * chains; C/D read 0 and are excluded by n_chains. */
-            _rxpaths.add(p.RxAtrib.rssi, p.RxAtrib.snr, p.RxAtrib.evm, 2);
+            /* Window aggregates fold CRC-clean frames only (the Jaguar
+             * convention): a garbled frame's cached physts would bias the
+             * means and the active-chain classification.
+             *
+             * _rxq: passive rssi-snr floor + LinkHealth, fed path-A RSSI +
+             * the IE01 average SNR (the all-paths quantity the passive floor
+             * was validated against; per-path SNR goes to _rxpaths instead).
+             * A frame with no IE_01 SNR (snr_avg=0) still counts toward RSSI.
+             * _rxpaths: per-antenna window means (GetActiveRxPaths). Both
+             * dies are 2 RX chains; C/D read 0 and are excluded by n_chains. */
+            if (!f.crc_err) {
+              if (_last_physts.rssi[0] > 0)
+                _rxq.add(_last_physts.rssi[0], _last_physts.snr_avg, 0);
+              _rxpaths.add(p.RxAtrib.rssi, p.RxAtrib.snr, p.RxAtrib.evm, 2);
+            }
             p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.payload),
                                         f.payload_len);
             packetProcessor(p);

@@ -79,6 +79,22 @@ enum class RxMode : uint8_t {
   Decoupled,   /* naive worker-thread hand-off (known-bad A/B control) */
 };
 
+/* What the spsc-fat ring does when its buffer pool runs dry (consumer behind
+ * under sustained overload). The choice decides which side of the hardware-ARQ
+ * contract survives overload — the chip ACKs on FIFO admission, so anything
+ * the HOST discards afterwards is a loss the TX peer believes delivered. */
+enum class PoolExhaust : uint8_t {
+  Backpressure, /* park the URB unarmed: the chip FIFO fills and the chip
+                 * declines further ACKs — congestion loss stays ARQ-visible
+                 * (bench: 14,214/14,214 forced drops reported ok=0 and
+                 * retried). Ring re-arms as the consumer returns buffers. */
+  Drop,         /* keep the ring armed and discard the payload — the chip
+                 * already ACKed it, so the TX peer logs it delivered and
+                 * never retries (counted as rx.ring pool_dropped). Smoother
+                 * under overload, but only for consumers that accept silent
+                 * loss (no ARQ / delivery accounting on top). */
+};
+
 struct DeviceConfig {
   /* ---- RX ------------------------------------------------------------- */
   struct Rx {
@@ -125,6 +141,11 @@ struct DeviceConfig {
      * burst backlog host-side instead of overflowing the chip RX FIFO. 0 =
      * pool of exactly urbs buffers (no spare). Ignored by async/sync. */
     int pool_spare = 0;
+    /* env: DEVOURER_RX_POOL_EXHAUST — "backpressure" (default) | "drop":
+     * the SpscFat pool-exhaustion policy (see PoolExhaust above). Only read
+     * by SpscFat; the other modes never drop host-side (async/reorder degrade
+     * to inline consume, which backpressures the chip by construction). */
+    PoolExhaust pool_exhaust = PoolExhaust::Backpressure;
     /* env: DEVOURER_RX_RING_MS — cadence (ms) for the diagnostic rx.ring
      * telemetry event (armed-URB depth, min depth in the window, resubmit
      * failures, max inline-consume latency). Unset/0 = no telemetry (the

@@ -76,6 +76,12 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.rx.rx_mode = parse_rx_mode(e);
   if (env_long("DEVOURER_RX_POOL_SPARE", &v))
     cfg.rx.pool_spare = static_cast<int>(v);
+  if (const char *e = env_str("DEVOURER_RX_POOL_EXHAUST")) {
+    if (str_ieq(e, "drop"))
+      cfg.rx.pool_exhaust = devourer::PoolExhaust::Drop;
+    else if (str_ieq(e, "backpressure") || str_ieq(e, "bp"))
+      cfg.rx.pool_exhaust = devourer::PoolExhaust::Backpressure;
+  }
   if (env_long("DEVOURER_RX_RING_MS", &v))
     cfg.rx.ring_ms = static_cast<int>(v);
   cfg.rx.phy_status_8821c = !env_flag("DEVOURER_8821C_NO_PHYST");

@@ -89,15 +89,31 @@ struct AsyncRxShared {
    *
    * ARQ caveat, bench-measured (tests/arq_e2e_delivery.sh): keeping the ring
    * armed means the chip ADMITS AND ACKS every frame — so a frame dropped at
-   * pool exhaustion below is an ACKed-but-undelivered loss the hardware-ARQ
-   * peer will log as delivered and never retry. The default async ring loses
-   * the same frames chip-side instead, where the 8812EU declines the ACK and
-   * the ARQ loop recovers them (14,214/14,214 stall-window drops reported
-   * ok=0 there, vs 5,667 ok=1-but-lost here). Under an ARQ or
-   * delivery-accounting scheme, prefer backpressure over this mode, or watch
-   * pool_dropped. */
+   * pool exhaustion is an ACKed-but-undelivered loss the hardware-ARQ peer
+   * will log as delivered and never retry. The default async ring loses the
+   * same frames chip-side instead, where the 8812EU declines the ACK and the
+   * ARQ loop recovers them (14,214/14,214 stall-window drops reported ok=0
+   * there, vs 5,667 ok=1-but-lost under the drop policy here).
+   *
+   * PoolExhaust picks which contract survives overload: Backpressure (the
+   * default) PARKS the completed URB unarmed — the payload still reaches the
+   * consumer queue, the ring shrinks, the chip FIFO fills and the chip
+   * declines further ACKs, so overload loss stays ARQ-visible; parked URBs
+   * re-arm as the consumer returns buffers. Drop keeps the ring armed and
+   * discards the payload (counted in pool_dropped) — smoother, but only for
+   * consumers that accept silent loss. */
   bool spsc = false;
+  bool bp = true; /* PoolExhaust::Backpressure */
   std::atomic<unsigned long long> pool_dropped{0};
+  /* Backpressure-policy state, guarded by pool_mu with free_bufs: URBs parked
+   * bufferless at exhaustion, re-armed from the consumer's buffer-return path.
+   * parking_closed is teardown's gate — set (under pool_mu) before the cancel
+   * pass, so no late re-arm can launch an uncancellable infinite-timeout URB.
+   * pool_stalls counts park events (the backpressure counterpart of
+   * pool_dropped; nothing is lost host-side on this path). */
+  std::vector<libusb_transfer *> parked;
+  bool parking_closed = false;
+  std::atomic<unsigned long long> pool_stalls{0};
   std::mutex queue_mu;
   std::condition_variable queue_cv;
   std::deque<std::pair<uint8_t *, int>> queue;
@@ -219,13 +235,44 @@ extern "C" void LIBUSB_CALL devourer_rx_cb(libusb_transfer *t) {
         s->resubmit_fail.fetch_add(1, std::memory_order_relaxed);
     }
     /* Pool exhausted (consumer hopelessly behind under sustained overload) or
-     * submit failed: preserve the pump's never-block invariant by re-arming
-     * with the received buffer and DROPPING this frame — a bounded loss, vs the
-     * cascade an inline consume would trigger. The chip already ACKed this
-     * frame (see the mode comment above): count every received frame dropped
-     * here, exhaustion and failed-re-arm alike — both are post-ACK host drops,
-     * and the re-arm failure is separable because it also ticks resubmit_fail.
-     * `resubmit` gates the count: a teardown-window frame (stop requested) is
+     * submit failed. Two policies (see the mode comment above):
+     *
+     * Backpressure (default): the payload is NOT lost — hand it to the
+     * consumer queue and PARK this URB bufferless; the ring shrinks, the chip
+     * FIFO fills and the chip declines further ACKs, so the overload loss
+     * happens chip-side where the ARQ peer can see and retry it. The
+     * consumer's buffer-return path re-arms parked URBs. `active` is NOT
+     * decremented: a parked URB is pending, not retired (teardown retires the
+     * parked set explicitly before its cancel pass). */
+    if (s->bp && resubmit && rlen > 0) {
+      bool parked_ok = false;
+      {
+        std::lock_guard<std::mutex> lk(s->pool_mu);
+        if (!s->parking_closed) {
+          t->buffer = nullptr; /* payload buffer now belongs to the queue */
+          s->parked.push_back(t);
+          parked_ok = true;
+        }
+      }
+      {
+        std::lock_guard<std::mutex> lk(s->queue_mu);
+        s->queue.emplace_back(received, rlen);
+      }
+      s->queue_cv.notify_one();
+      if (parked_ok) {
+        s->pool_stalls.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+      s->active--; /* parking closed = teardown: retire without resubmit */
+      return;
+    }
+    /* Drop policy: preserve the pump's never-block invariant by re-arming
+     * with the received buffer and DROPPING this frame — a bounded loss, vs
+     * the cascade an inline consume would trigger. The chip already ACKed
+     * this frame: count every received frame dropped here, exhaustion and
+     * failed-re-arm alike — both are post-ACK host drops, and the re-arm
+     * failure is separable because it also ticks resubmit_fail. `resubmit`
+     * gates the count: a teardown-window frame (stop requested) is
      * intentional loss, not an overload signal. */
     if (resubmit && rlen > 0)
       s->pool_dropped.fetch_add(1, std::memory_order_relaxed);
@@ -257,10 +304,11 @@ UsbTransport::UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
                            libusb_context *ctx,
                            std::shared_ptr<devourer::UsbDeviceLock> usb_lock,
                            bool rx_zerocopy, RxMode rx_mode, int pool_spare,
-                           int ring_ms)
+                           int ring_ms, PoolExhaust pool_exhaust)
     : _dev_handle{dev_handle}, _ctx{ctx}, _logger{std::move(logger)},
       _rx_zerocopy{rx_zerocopy}, _rx_mode{rx_mode}, _pool_spare{pool_spare},
-      _ring_ms{ring_ms}, _usb_lock{std::move(usb_lock)} {
+      _ring_ms{ring_ms}, _pool_exhaust{pool_exhaust},
+      _usb_lock{std::move(usb_lock)} {
   libusb_device_descriptor desc{};
   if (libusb_get_device_descriptor(libusb_get_device(_dev_handle), &desc) ==
       LIBUSB_SUCCESS) {
@@ -317,6 +365,7 @@ void UsbTransport::rx_loop(
   sh.telemetry = _ring_ms > 0;
   sh.reorder = reorder;
   sh.spsc = spsc;
+  sh.bp = _pool_exhaust == PoolExhaust::Backpressure;
   sh.buf_size = buf_size;
   /* reorder-pool and spsc-fat post n_urbs URBs but allocate pool_spare extra
    * buffers so a burst / stall backlog is absorbed in the host pool instead of
@@ -399,7 +448,31 @@ void UsbTransport::rx_loop(
           sh.queue.pop_front();
         }
         rx_consume(&sh, item.first, item.second);
+        /* Buffer return. Backpressure policy: a parked (bufferless) URB gets
+         * this buffer and goes straight back on the wire — the ring re-arms
+         * exactly as fast as the consumer frees capacity. The submit stays
+         * under pool_mu so teardown's parking_closed flip (also under
+         * pool_mu) strictly precedes-or-follows any re-arm: no late launch
+         * after the cancel pass. (libusb_submit_transfer is thread-safe and
+         * the event pump never holds pool_mu while inside libusb, so there is
+         * no lock-order inversion.) */
         std::lock_guard<std::mutex> lk(sh.pool_mu);
+        if (sh.bp && !sh.parking_closed && !sh.parked.empty()) {
+          libusb_transfer *t = sh.parked.back();
+          sh.parked.pop_back();
+          t->buffer = item.first;
+          t->length = sh.buf_size;
+          if (libusb_submit_transfer(t) == 0) {
+            if (sh.telemetry)
+              sh.armed.fetch_add(1, std::memory_order_relaxed);
+            continue;
+          }
+          /* Rare submit failure: re-park the URB, pool the buffer. */
+          t->buffer = nullptr;
+          sh.parked.push_back(t);
+          if (sh.telemetry)
+            sh.resubmit_fail.fetch_add(1, std::memory_order_relaxed);
+        }
         sh.free_bufs.push_back(item.first);
       }
     });
@@ -452,9 +525,22 @@ void UsbTransport::rx_loop(
             .f("pool_free", pool_free)
             .f("qdepth", qdepth)
             .f("pool_dropped", (unsigned long long)sh.pool_dropped.load(
-                                   std::memory_order_relaxed));
+                                   std::memory_order_relaxed))
+            .f("pool_stalls", (unsigned long long)sh.pool_stalls.load(
+                                  std::memory_order_relaxed));
       }
     }
+  }
+  /* Close parking BEFORE the cancel pass (under pool_mu, so no consumer
+   * re-arm is mid-submit), then retire the parked URBs: they are not in
+   * flight, cancel would be a no-op on them, and the active-drain below would
+   * otherwise wait forever for completions that can never come. The transfer
+   * objects stay in `xfers` and are freed centrally. */
+  {
+    std::lock_guard<std::mutex> lk(sh.pool_mu);
+    sh.parking_closed = true;
+    sh.active -= static_cast<int>(sh.parked.size());
+    sh.parked.clear();
   }
   for (auto *t : xfers)
     libusb_cancel_transfer(t);

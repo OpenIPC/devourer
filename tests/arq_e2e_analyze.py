@@ -121,6 +121,14 @@ def phase_names(phases, cycles):
     return [f"{p}" for _ in range(cycles) for p in per]
 
 
+def phase_label(p, names):
+    if p == -1:
+        return "warmup"
+    if p == -3:
+        return "boundary"  # undelivered, nearest neighbours straddle phases
+    return names[p] if p is not None and 0 <= p < len(names) else f"?{p}"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dut", required=True)
@@ -183,16 +191,21 @@ def main():
     delivered_sorted = sorted(k_phase)
 
     def attribute(k):
-        """Phase of an UNdelivered frame k: nearest delivered neighbours."""
+        """Phase of an UNdelivered frame k: nearest delivered neighbours.
+        Neighbours straddling a phase edge get the distinct 'boundary' bucket
+        (-3) — silently picking a side would bias per-phase counts."""
         import bisect
         i = bisect.bisect_left(delivered_sorted, k)
         lo = delivered_sorted[i - 1] if i else None
         hi = delivered_sorted[i] if i < len(delivered_sorted) else None
-        pl = k_phase.get(lo, -2)
-        ph = k_phase.get(hi, -2)
-        if pl == ph:
-            return pl
-        return ph if hi is not None and lo is None else pl
+        if lo is None and hi is None:
+            return -1
+        if lo is None:
+            return k_phase[hi]
+        if hi is None:
+            return k_phase[lo]
+        pl, ph = k_phase[lo], k_phase[hi]
+        return pl if pl == ph else -3
 
     # Ring telemetry per phase: min armed depth + empties/completions deltas.
     ring_by_phase = defaultdict(lambda: {"min_armed": None, "empties": 0,
@@ -268,8 +281,7 @@ def main():
     total_au = 0
     for p in sorted(per):
         st = per[p]
-        name = "warmup" if p == -1 else (
-            names[p] if 0 <= p < len(names) else f"?{p}")
+        name = phase_label(p, names)
         okp = 100.0 * st["ok"] / st["reports"] if st["reports"] else 0.0
         rg = ring_by_phase.get(p, {})
         total_au += st["acked_undelivered"]
@@ -285,8 +297,7 @@ def main():
     if detail:
         print("first acked-undelivered frames (k, retries, phase, witnessed):")
         for k, r, p, w in detail:
-            name = "warmup" if p == -1 else (
-                names[p] if p is not None and 0 <= p < len(names) else f"?{p}")
+            name = phase_label(p, names)
             print(f"  k={k} retries={r} phase={name} wit={'Y' if w else 'n'}")
     # Ledger identity: every ok'd frame must be delivered (minus the au set),
     # plus the ok=0-but-delivered strays. Holding to a few frames certifies

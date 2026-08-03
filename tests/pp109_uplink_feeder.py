@@ -99,4 +99,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        # The pipe reader (duplex) went away — a bench teardown or crash, not
+        # a feeder bug. Exit quietly; os._exit skips the interpreter's stdout
+        # flush-at-exit, which would raise the same error again.
+        print("[feeder] reader closed the pipe — stopping", file=sys.stderr,
+              flush=True)
+        import os
+        os._exit(1)

@@ -75,9 +75,12 @@ for b in duplex txdemo rxdemo; do
   [ -x "$BUILD/$b" ] || { echo "build $b first"; exit 3; }
 done
 
-# Total span the drone must cover: feeder warmup + all phases.
+# Total span the drone must cover: feeder warmup + all phases. Float-safe:
+# WARMUP_S/PHASE_S may be fractional and truncating them would shorten the
+# drone's timeout below the feeder's real runtime.
 NPHASES=$(awk -F, '{print NF}' <<<"$PHASES")
-SPAN=$(( ${WARMUP_S%.*} + CYCLES * NPHASES * ${PHASE_S%.*} + 10 ))
+SPAN=$(awk -v w="$WARMUP_S" -v c="$CYCLES" -v n="$NPHASES" -v p="$PHASE_S" \
+        'BEGIN{printf "%d", w + c*n*p + 11}')
 
 WIT_PIDF=""; DUT_PIDF=""; FEED_PIDF=""; DRONE_PIDF=""
 cleanup() {
@@ -165,7 +168,7 @@ DRONE_PIDF=$!
 
 # --- preflight: fail fast with a diagnosis, not a zero-filled matrix --------
 # Judged after warmup + one burst phase: every ledger must be alive by then.
-sleep "$(( ${WARMUP_S%.*} + PREFLIGHT_S ))"
+sleep "$(awk -v w="$WARMUP_S" -v p="$PREFLIGHT_S" 'BEGIN{print w + p}')"
 fail=""
 n_dut=$(grep -c '"ev":"rx.seq"' "$OUT/dut.jsonl" 2>/dev/null || true)
 n_wit=$(grep -c '"ev":"rx.seq"' "$OUT/wit.jsonl" 2>/dev/null || true)

@@ -85,8 +85,20 @@ def analyze(rundir):
         print(f"   missed field: constant {mv} on every report "
               f"(fw drop-accounting unavailable)")
     else:
-        print(f"   missed field values: {dict(sorted(missed_vals.items()))}")
+        # A fw that populates the field gets the literal reconciliation:
+        # summed fw-acknowledged drops vs the tag-gap ground truth. The
+        # 3-bit field saturates at 7, so a shortfall with gaps > 7 present
+        # is saturation, not necessarily transport loss.
+        fw_sum = sum(mv * c for mv, c in missed_vals.items())
+        print(f"   missed field values: {dict(sorted(missed_vals.items()))} "
+              f"— fw-acknowledged drops {fw_sum} vs unreported {unrep} "
+              f"(delta {unrep - fw_sum})")
 
 
-for rd in sys.argv[1:]:
-    analyze(rd)
+def main():
+    for rd in sys.argv[1:]:
+        analyze(rd)
+
+
+if __name__ == "__main__":
+    main()

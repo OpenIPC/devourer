@@ -109,7 +109,11 @@ inline TxReport parse_ccx_halmac(const uint8_t *c2h, size_t len) {
 inline void emit_tx_report(EventSink &sink, const TxReport &r,
                            const char *fmt) {
   Ev ev(sink, "tx.report");
-  ev.f("state", static_cast<unsigned>(r.state))
+  /* t (host monotonic ms): the achieved-report-rate instrument — the CCX
+   * emission ceiling is a reports-per-second quantity, unmeasurable from a
+   * stream with no timebase. */
+  ev.t()
+      .f("state", static_cast<unsigned>(r.state))
       .f("ok", r.state == 0)
       .f("retries", static_cast<unsigned>(r.data_retries))
       .f("final_rate", static_cast<unsigned>(r.final_rate))

@@ -109,7 +109,7 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | `tx.frame` | TX | n, rc — precoder demo variant: n, ok |
 | `tx.stats` | TX | submitted, failed, was_timeout, last_rc |
 | `tx.agg` | L (`DEVOURER_TX_USB_AGG`, send_packets) | frames, bytes, shim, ok — one per multi-frame bulk-OUT URB |
-| `tx.report` | L (`DEVOURER_TX_REPORT`, CCX decode) | state (0=delivered, 1=retry-drop), ok, retries, final_rate, queue_time_raw, bmc, macid, fmt ("8812"\|"halmac"); halmac adds tag (SW_DEFINE echo), rts_retries, missed |
+| `tx.report` | L (`DEVOURER_TX_REPORT`, CCX decode) | t, state (0=delivered, 1=retry-drop), ok, retries, final_rate, queue_time_raw, bmc, macid, fmt ("8812"\|"halmac"); halmac adds tag (SW_DEFINE echo), rts_retries, missed (fw-stuffed constant on Jaguar3 — tag gaps are the drop signal; `tests/txrpt_coverage_attrib.py`) — t is the achieved-report-rate timebase (the CCX emission ceiling is reports/s) |
 | `tx.status` | RX, duplex (C2H TX_RPT decode) | hoff, queue, retry, airtime_us, rate |
 | `tx.queue` | RX (`DEVOURER_QUEUE_POLL_MS`, 8814) | q1…q5 "0x%08x" |
 | `tx.contx` | TX (continuous mode) | mcs, t_ms |

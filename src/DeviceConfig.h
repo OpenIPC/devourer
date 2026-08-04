@@ -344,10 +344,11 @@ struct DeviceConfig {
      * real on that family): injected/beacon TX stops deferring to a
      * busy channel and punches through co-channel traffic. Default false =
      * carrier-sense + EDCCA ENABLED (the standards-compliant default) on
-     * Jaguar1/2/3. Kestrel's TX bring-up clears the gates regardless and
-     * warns — carrier-sense TX 103-stalls there without the un-ported
-     * IQK/DPK cal. Runtime equivalent: SetCcaMode. Default-on on the
-     * streamtx FPV downlink (the link owns the channel). */
+     * Jaguar1/2/3 and the Kestrel 8852C; the Kestrel 8852B TX bring-up
+     * clears the gates and warns pending its measurement arm
+     * (tests/kestrel_cca_default_check.sh). Runtime equivalent: SetCcaMode.
+     * Default-on on the streamtx FPV downlink (the link owns the
+     * channel). */
     bool disable_cca = false;
     /* env: DEVOURER_TXPKT_STEP_QDB — Jaguar3 per-packet power-bank step size
      * in quarter-dB: the dB weight of one 0x1e70 offset-index step

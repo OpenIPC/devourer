@@ -491,7 +491,9 @@ public:
   KestrelFw _fw; /* persistent: owns the CH12 H2C transport + IO-offload */
   int16_t _txpwr_dbm_q2 = 20 * 4; /* fixed BB TX power, s(9,2); 20 dBm default */
   int16_t _txpwr_offset_qdb = 0;  /* runtime offset (quarter-dB), sticky */
-  bool _cca_on = false; /* DEVOURER_KESTREL_CCA_ON: keep CCA gates on (test) */
+  bool _cca_on = false; /* carrier-sense TX default (8852C) / forced on */
+  bool _cca_default_unmeasured = false; /* 8852B default-clear: warn, don't
+                                         * pretend it's a choice */
 
   /* Vendored halbb-G6 8852C RX bring-up (hal/halbb/g6/kestrel_halbb_glue).
    * The static callbacks route the vendor C's register/OS plane to this device
@@ -578,7 +580,10 @@ public:
 
 public:
   ~HalKestrel();
-  void set_cca_on(bool on) { _cca_on = on; }
+  void set_cca_on(bool on, bool default_unmeasured = false) {
+    _cca_on = on;
+    _cca_default_unmeasured = default_unmeasured;
+  }
   void set_kfr_ofld(bool on) { _kfr_ofld = on; }
 };
 

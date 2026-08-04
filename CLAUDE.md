@@ -304,10 +304,10 @@ Behavioural traps the per-field docs can't carry:
   8822EU/8812CU, `tests/dis_cca_tx_onair.sh`); the energy bit `[15]` alone
   is null against a decodable preamble. **On by default on the streamtx FPV
   downlink** (the link owns the channel — CSMA backoff only stutters it);
-  `DEVOURER_DIS_CCA=0` forces standard carrier-sense back. Kestrel's TX
-  bring-up is the one exception: it clears the gates regardless and WARNS —
-  carrier-sense TX 103-stalls there without the un-ported IQK/DPK cal
-  (perpetual-busy detectors); its RX-side CCA is untouched. Does NOT apply
+  `DEVOURER_DIS_CCA=0` forces standard carrier-sense back. On Kestrel the
+  8852C runs the same enabled default (measured: full-rate TX, 2.4x flood
+  deferral); the 8852B TX bring-up still clears the gates and WARNS pending
+  its measurement arm (`tests/kestrel_cca_default_check.sh`). Does NOT apply
   the vendor BB CCA-off writes (they deafen the RX). RX-decode side is a
   separate null (`tests/dis_cca_onair.sh`).
 

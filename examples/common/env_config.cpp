@@ -122,7 +122,9 @@ devourer::DeviceConfig devourer_config_from_env() {
     }
   }
   if (env_long("DEVOURER_ACK_TIMEOUT_US", &v))
-    cfg.tx.ack_timeout_us = static_cast<int>(v < 1 ? 1 : (v > 255 ? 255 : v));
+    /* 0 = per-chip default (no write); clamp only the top — an explicit 0
+     * collapsing to 1 us would write off every frame. */
+    cfg.tx.ack_timeout_us = static_cast<int>(v < 0 ? 0 : (v > 255 ? 255 : v));
   if (env_long("DEVOURER_TX_RETRY_LIMIT", &v))
     cfg.tx.retry_limit = static_cast<int>(v < 0 ? 0 : (v > 63 ? 63 : v));
   if (const char *e = env_str("DEVOURER_TX_RETRY_FALLBACK")) {

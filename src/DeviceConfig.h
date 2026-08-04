@@ -223,8 +223,9 @@ struct DeviceConfig {
      * needs a nonzero value. Inert on the 8814A die only (vendor
      * DATA_RETRY_LIMIT=0 carve-out kept pending its bench). */
     int retry_limit = 0;
-    /* env: DEVOURER_ACK_TIMEOUT_US — hardware ACK/CTS response window in µs
-     * (1..255; 0 = per-chip default), the hardware-ARQ RANGE lever: the MAC
+    /* env: DEVOURER_ACK_TIMEOUT_US — hardware ACK response window in µs
+     * (1..255, clamped; 0 = per-chip default), the hardware-ARQ RANGE
+     * lever: the MAC
      * writes off a frame (and retries) when no ACK is counted within this
      * window, and round-trip propagation eats ~6.7 µs per km, so a long
      * link needs the window opened. One 8-bit register everywhere:
@@ -232,7 +233,8 @@ struct DeviceConfig {
      * reset value; 0x21 J3 halmac, scaled to 0x3D/0x75 at 10/5 MHz
      * narrowband — the override REPLACES the per-bandwidth default, so
      * budget the slowest ACK duration in use), R_AX_RSP_CHK_SIG 0xCC00
-     * byte0 on Kestrel. Applied at bring-up. Bench: shrinking it below the
+     * byte0 on Kestrel. The neighbouring CTS window (REG_CTS2TO 0x641) is
+     * a separate register this knob does NOT touch. Applied at bring-up. Bench: shrinking it below the
      * ACK flight time (8 µs) pins retries at the limit with 0%% ok against
      * a live responder — the register provably gates the ARQ verdict —
      * while 255 behaves as the default at bench range WHEN ACKS ARRIVE.

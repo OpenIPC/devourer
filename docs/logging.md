@@ -111,6 +111,8 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | `tx.agg` | L (`DEVOURER_TX_USB_AGG`, send_packets) | frames, bytes, shim, ok — one per multi-frame bulk-OUT URB |
 | `tx.report` | L (`DEVOURER_TX_REPORT`, CCX decode) | t, state (0=delivered, 1=retry-drop), ok, retries, final_rate, queue_time_raw, bmc, macid, fmt ("8812"\|"halmac"); halmac adds tag (SW_DEFINE echo), rts_retries, missed (fw-stuffed constant on Jaguar3 — tag gaps are the drop signal; `tests/txrpt_coverage_attrib.py`) — t is the achieved-report-rate timebase (the CCX emission ceiling is reports/s) |
 | `tx.status` | RX, duplex (C2H TX_RPT decode) | hoff, queue, retry, airtime_us, rate |
+| `tx.receipt` | TX (its RX thread, `DEVOURER_TX_RECEIPTS`) | t, fresh, total, covered, receipts, tlv hex — one event per absorbed windowed RX receipt (src/cell/RxReceipt.h), WITH the raw TLV so `tests/receipt_verify.py` can replay the merge and compare frame-exactly against the receiver's rx.seq ledger; decimating would break that comparison |
+| `receipt.tx` | duplex (`DEVOURER_RX_RECEIPT_MS`) | t, n, ok, tlv_len, late — receipt-injection cadence; late counts frames that arrived below the receipt window (reordered past coverage — size the window per the RxReceipt.h sizing rule) |
 | `tx.queue` | RX (`DEVOURER_QUEUE_POLL_MS`, 8814) | q1…q5 "0x%08x" |
 | `tx.contx` | TX (continuous mode) | mcs, t_ms |
 

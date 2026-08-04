@@ -36,6 +36,7 @@
 #include "BfReportDetect.h"
 #include "ChannelFreq.h"
 #include "DeviceSession.h"
+#include "cell/RxReceipt.h"
 #include "HopSchedule.h"
 #include "hopset/HopsetAuthority.h"
 #include "hopset/HopsetEvents.h"
@@ -303,12 +304,44 @@ static bool hopset_sense_window(IRtlDevice *dev, uint32_t settle_us,
 }
 
 static int g_rx_count = 0;
+/* Windowed RX receipts (src/cell/RxReceipt.h): DEVOURER_TX_RECEIPTS=1 arms
+ * the transmitter-side ledger. Receipts name our TA — DEVOURER_TX_SA when
+ * set, else the canonical SA — and anything else refuses to absorb. */
+static const bool g_receipts_on =
+    std::getenv("DEVOURER_TX_RECEIPTS") != nullptr;
+static devourer::cell::ReceiptLedger g_receipt_ledger;
+static uint8_t g_receipt_ta[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
+
 static void packetProcessor(const Packet &packet) {
   /* C2H packets are chip-side status (one per TX during concurrent TX+RX on
    * Jaguar3), not 802.11 frames — skip before counting/parsing. */
   if (packet.RxAtrib.pkt_rpt_type == RX_PACKET_TYPE::C2H_PACKET)
     return;
   ++g_rx_count;
+  /* Windowed RX receipts (DEVOURER_TX_RECEIPTS=1, needs TX_WITH_RX=thread):
+   * a plain data frame whose body parses as a receipt TLV naming OUR TA is
+   * the receiver's delivered-set update (src/cell/RxReceipt.h). Every
+   * absorbed receipt is emitted WITH its TLV hex — the verifier replays the
+   * merge against the receiver's own rx.seq ledger, so decimating here would
+   * break the frame-exact comparison. */
+  if (g_receipts_on &&
+      packet.Data.size() >= 24 + devourer::cell::kReceiptHeader &&
+      packet.Data[0] == 0x08) {
+    const uint8_t *tlv = packet.Data.data() + 24;
+    const size_t tlv_len = packet.Data.size() - 24;
+    const long fresh = g_receipt_ledger.absorb(tlv, tlv_len, g_receipt_ta);
+    if (fresh >= 0) {
+      devourer::Ev(*g_ev, "tx.receipt")
+          .t()
+          .f("fresh", fresh)
+          .f("total", (unsigned long long)g_receipt_ledger.delivered_total())
+          .f("covered",
+             (unsigned long long)g_receipt_ledger.highest_covered())
+          .f("receipts", (unsigned long long)g_receipt_ledger.receipts())
+          .hex("tlv", tlv, tlv_len);
+      return;
+    }
+  }
   /* RX liveness marker for the TX+RX=thread mode: first frame + every 500th.
    * Without it a deaf RX loop is indistinguishable from a quiet channel. */
   if (g_rx_count == 1 || g_rx_count % 500 == 0) {
@@ -1093,6 +1126,7 @@ int main(int argc, char **argv) {
       else
         logger->warn("DEVOURER_TX_SA unparseable — keeping the canonical SA");
     }
+    std::memcpy(g_receipt_ta, kQosSa, 6); /* receipts name this TA */
     uint8_t ra[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
     if (const char *e = std::getenv("DEVOURER_TX_RA")) {
       if (auto m = devourer::parse_mac(e))

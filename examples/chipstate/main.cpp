@@ -91,13 +91,24 @@ void usage() {
                "           (e.g. an armed rxdemo) owns the interface.\n");
 }
 
+/* Range-checked address parse: a silently-wrapped register (0x12345 ->
+ * 0x2345) on a poke tool is a corruption hazard, so out-of-range is a parse
+ * error, never a truncation. */
+bool parse_reg_addr(const char *s, char **end, uint16_t &out) {
+  unsigned long v = std::strtoul(s, end, 0);
+  if (*end == s || v > 0xffff)
+    return false;
+  out = static_cast<uint16_t>(v);
+  return true;
+}
+
 bool parse_peek(const char *s, RegOp &op) {
   char *end = nullptr;
-  op.addr = static_cast<uint16_t>(std::strtoul(s, &end, 0));
+  if (!parse_reg_addr(s, &end, op.addr))
+    return false;
   op.end = op.addr;
   if (*end == '-') {
-    op.end = static_cast<uint16_t>(std::strtoul(end + 1, &end, 0));
-    if (op.end < op.addr)
+    if (!parse_reg_addr(end + 1, &end, op.end) || op.end < op.addr)
       return false;
   }
   return *end == '\0';
@@ -106,13 +117,21 @@ bool parse_peek(const char *s, RegOp &op) {
 bool parse_poke(const char *s, RegOp &op) {
   char *end = nullptr;
   op.write = true;
-  op.addr = static_cast<uint16_t>(std::strtoul(s, &end, 0));
+  if (!parse_reg_addr(s, &end, op.addr))
+    return false;
   if (*end != '=')
     return false;
-  op.val = static_cast<uint32_t>(std::strtoul(end + 1, &end, 0));
+  const char *vs = end + 1;
+  unsigned long v = std::strtoul(vs, &end, 0);
+  if (end == vs || v > 0xfffffffful)
+    return false;
+  op.val = static_cast<uint32_t>(v);
   if (*end == ':') {
     op.width = static_cast<int>(std::strtoul(end + 1, &end, 0));
     if (op.width != 1 && op.width != 2 && op.width != 4)
+      return false;
+    /* An explicit width the value doesn't fit is a mistake, not a mask. */
+    if (op.width < 4 && (op.val >> (op.width * 8)) != 0)
       return false;
   } else {
     op.width = op.val <= 0xff ? 1 : op.val <= 0xffff ? 2 : 4;
@@ -127,27 +146,37 @@ int run_reg_ops(libusb_device_handle *handle, Logger_t logger,
                 std::shared_ptr<devourer::UsbDeviceLock> lock,
                 const std::vector<RegOp> &ops) {
   RtlAdapter adapter(handle, logger, ctx, lock);
-  for (const RegOp &op : ops) {
-    if (op.write) {
-      if (op.width == 4)
-        adapter.rtw_write32(op.addr, op.val);
-      else if (op.width == 2)
-        adapter.rtw_write16(op.addr, static_cast<uint16_t>(op.val));
-      else
-        adapter.rtw_write8(op.addr, static_cast<uint8_t>(op.val));
-      std::printf("poke 0x%04x = 0x%0*x\n", op.addr, op.width * 2, op.val);
-    } else {
-      for (uint32_t row = op.addr & ~0xfu; row <= op.end; row += 16) {
-        std::printf("0x%04x:", row);
-        for (uint32_t i = row; i < row + 16; ++i) {
-          if (i < op.addr || i > op.end)
-            std::printf("   ");
-          else
-            std::printf(" %02x", adapter.rtw_read8(static_cast<uint16_t>(i)));
+  /* A failed vendor-control read throws (UsbTransport::ctrl_read) — on a
+   * powered-down or wedged chip that is a real answer about the chip, so
+   * report which op died and exit nonzero instead of terminating. */
+  try {
+    for (const RegOp &op : ops) {
+      if (op.write) {
+        if (op.width == 4)
+          adapter.rtw_write32(op.addr, op.val);
+        else if (op.width == 2)
+          adapter.rtw_write16(op.addr, static_cast<uint16_t>(op.val));
+        else
+          adapter.rtw_write8(op.addr, static_cast<uint8_t>(op.val));
+        std::printf("poke 0x%04x = 0x%0*x\n", op.addr, op.width * 2, op.val);
+      } else {
+        for (uint32_t row = op.addr & ~0xfu; row <= op.end; row += 16) {
+          std::printf("0x%04x:", row);
+          for (uint32_t i = row; i < row + 16; ++i) {
+            if (i < op.addr || i > op.end)
+              std::printf("   ");
+            else
+              std::printf(" %02x", adapter.rtw_read8(static_cast<uint16_t>(i)));
+          }
+          std::printf("\n");
         }
-        std::printf("\n");
       }
     }
+  } catch (const std::exception &e) {
+    std::fflush(stdout);
+    logger->error("register access failed ({}) — chip powered down / wedged? "
+                  "That is the finding, not a tool error.", e.what());
+    return 4;
   }
   std::fflush(stdout);
   return 0;

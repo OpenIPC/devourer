@@ -1521,12 +1521,17 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
       static_cast<uint8_t>(hdrlen >> 1), ndpa, data_sc, pkt_pwr_step,
       pkt_offset);
   if (_cfg.tx.report) {
-    /* DEVOURER_TX_REPORT: SPE_RPT asks the fw for a per-frame CCX TX report;
-     * the report echoes SW_DEFINE's low byte, so stamp a rotating tag for
-     * per-frame correlation (src/TxReport.h). Both fields sit inside the
-     * checksummed span — re-checksum (idempotent). */
-    SET_TX_DESC_SPE_RPT_8822B(out, 1);
-    SET_TX_DESC_SW_DEFINE_8822B(out, _tx_rpt_tag.fetch_add(1) & 0xff);
+    /* DEVOURER_TX_REPORT: SPE_RPT asks the fw for a CCX TX report; the
+     * report echoes SW_DEFINE's low byte, so stamp a rotating tag for
+     * per-frame correlation (src/TxReport.h). The tag goes on EVERY frame
+     * while the request samples every Nth (cfg value = N): the fw's CCX
+     * emission saturates at ~1.3k reports/s, and with the tag continuous a
+     * received-report tag delta other than N is a dropped report. Both
+     * fields sit inside the checksummed span — re-checksum (idempotent). */
+    const uint16_t k = _tx_rpt_tag.fetch_add(1);
+    SET_TX_DESC_SPE_RPT_8822B(
+        out, k % static_cast<uint16_t>(_cfg.tx.report) == 0 ? 1 : 0);
+    SET_TX_DESC_SW_DEFINE_8822B(out, k & 0xff);
     jaguar2::cal_txdesc_chksum_8822b(out);
   }
   /* Per-frame retry limit from cfg (DEVOURER_TX_RETRY_LIMIT, default 0) —

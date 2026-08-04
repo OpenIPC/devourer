@@ -217,8 +217,14 @@ separately proven (`tests/ack_responder_check.sh`).
    MISSED_RPT_NUM field is stuffed with a constant on this fw (verified
    against the 8822B/C/E vendor headers — parse is exact, the fw just
    doesn't populate it), so tag gaps are the only drop signal. Above the
-   ceiling, either sample SPE_RPT 1-in-N to keep the demanded rate under
-   ~1.3 k/s or account report-less frames as "unknown".
+   ceiling, sample: `DEVOURER_TX_REPORT=N` requests the report on every Nth
+   frame while the tag still stamps every frame, so received-tag deltas are
+   exact multiples of N and coverage of the sampled frames is deterministic
+   (measured at 2.4 k fps: N=1 collapses to 56%, N=2 delivers 100.0% of the
+   sampled reports, zero off-modulo anomalies; the sampled ok-rate read
+   99.71% against a 99.99% ledger truth — pessimistic by the ACK-loss
+   asymmetry, the safe direction). Pick N ≥ fps/1300, or account
+   report-less frames as "unknown".
 2. **Closed-loop hardware ACK + autonomous retry is GO on Jaguar1 and
    Jaguar3** (100% delivery, retries ≈ 0.2–0.3) including retargeting an
    arbitrary UE MAC mid-session (re-arm `SetAckResponder`, change the

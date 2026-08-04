@@ -1163,11 +1163,17 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
     SET_TX_DESC_GID_8812(usb_frame, static_cast<uint8_t>(0x3F));
   }
   SET_TX_DESC_SW_DEFINE_8812(usb_frame, static_cast<uint16_t>(0x001));
-  /* DEVOURER_TX_REPORT: SPE_RPT asks the fw for a per-frame CCX TX report
-   * (delivered / retry count / queue time — src/TxReport.h). Dword2, inside
-   * the checksummed 32 bytes. */
+  /* DEVOURER_TX_REPORT: SPE_RPT asks the fw for a CCX TX report (delivered /
+   * retry count / queue time — src/TxReport.h), sampled every Nth frame
+   * (cfg value = N). The 8812 report format has no tag echo, so sampling
+   * here only relieves the report rate — per-frame attribution stays
+   * order-based. Dword2, inside the checksummed 32 bytes. */
   if (_cfg.tx.report)
-    SET_TX_DESC_SPE_RPT_8812(usb_frame, 1);
+    SET_TX_DESC_SPE_RPT_8812(
+        usb_frame,
+        _tx_ccx_ctr.fetch_add(1) % static_cast<uint32_t>(_cfg.tx.report) == 0
+            ? 1
+            : 0);
   SET_TX_DESC_RETRY_LIMIT_ENABLE_8812(usb_frame, 1);
   if (!is_8814a) {
     /* 88XXau leaves DATA_RETRY_LIMIT=0 for monitor injection on 8814A

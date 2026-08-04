@@ -79,17 +79,21 @@ enum class RxMode : uint8_t {
   Decoupled,   /* naive worker-thread hand-off (known-bad A/B control) */
 };
 
-/* Hardware retry rate-fallback control for injected frames. Every generation
- * defaults to the firmware's fallback ladder (measured on the 8812CU:
- * retried frames step MCS3 → 54M → 24M → 18M → 9M → 6M, the fw's own 5 GHz
- * floor). Off pins every retry at the descriptor DATARATE (DISDATAFB /
- * DISABLE_FB = 1; measured: 1,200/1,200 retried frames re-aired at the
- * original rate) — for constant-rate links where a low-rate retry costs
- * multiples of the frame's airtime. A DATA_RTY_LOWEST_RATE floor form was
- * measured and REJECTED: the fw reinterprets the bound inside the RA-group
- * rate space (inject runs RA-group 9), wandering retries into VHT rates
- * (final_rate 45 = VHT1SS_MCS1 on an HT frame) with a 20x retry inflation —
- * the field is not a plain DESC_RATE bound on this fw. */
+/* Hardware retry rate-fallback control for injected frames. The HalMAC
+ * generations default to the firmware's fallback ladder, whose rate-space is
+ * the descriptor's RA group (rateid_for_mgn, RateDefinitions.h) — with the
+ * family-correct group the ladder is MCS-native, witness-measured per copy
+ * (tests/retry_ladder_probe.sh): 8822B MCS3 -> MCS2 -> MCS1 -> MCS0 (pure),
+ * 8822C MCS3 x4 -> MCS2 -> 6M floor (CCK floor at 2.4 GHz; VHT steps
+ * M7 -> M4 -> M1 -> M0 -> 6M). Jaguar1's fw does not step at all — every
+ * retry at the descriptor rate regardless of this knob (8821AU-measured).
+ * Off pins every retry at the descriptor DATARATE (DISDATAFB / DISABLE_FB =
+ * 1; measured: 1,200/1,200 retried frames re-aired at the original rate) —
+ * for constant-rate links where a step-down retry costs extra airtime. A
+ * DATA_RTY_LOWEST_RATE floor form was measured and REJECTED: the fw
+ * reinterprets the bound inside the RA-group rate space, wandering retries
+ * into VHT rates (final_rate 45 = VHT1SS_MCS1 on an HT frame) with a 20x
+ * retry inflation — the field is not a plain DESC_RATE bound on this fw. */
 enum class RetryFallback : uint8_t { Default, Off };
 
 /* What the spsc-fat ring does when its buffer pool runs dry (consumer behind
@@ -429,6 +433,14 @@ struct DeviceConfig {
      * monitor-inject convention). Data-queue values are the TID (0..7);
      * hardware A-MPDU formation is expected only on data queues. */
     std::optional<uint8_t> tx_qsel;
+    /* env: DEVOURER_TX_RATEID — EXPERIMENTAL (retry-ladder probe,
+     * tests/retry_ladder_probe.sh): override the TX-descriptor RATE_ID (the
+     * RA group). The group defines the rate-space the firmware's retry
+     * fallback ladder walks — the inherited inject value (9 = VHT_2SS on
+     * the 8822C-era table; 8 = the CCK-only B group) is why an MCS frame's
+     * retries fall back through legacy OFDM. Vendor group ids:
+     * reference ieee80211.h RATEID_IDX_* (4 = GN 2SS, 5 = GN 1SS, ...). */
+    std::optional<uint8_t> tx_rateid;
     /* env: DEVOURER_TX_AMPDU="max[/density]" — EXPERIMENTAL (A-MPDU spike):
      * set AGG_EN=1 + MAX_AGG_NUM (1..0x1f; hardware units of 2 MPDUs) +
      * AMPDU_DENSITY (0..7, default 0) on every data TX descriptor, asking the

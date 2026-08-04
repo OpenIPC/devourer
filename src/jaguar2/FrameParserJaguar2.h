@@ -144,7 +144,11 @@ inline void fill_data_tx_desc_8822b(uint8_t *d, uint16_t pkt_size,
   SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(d, 12);
   SET_TX_DESC_MACID_8822B(d, 0x01);
   SET_TX_DESC_QSEL_8822B(d, 0x12);
-  SET_TX_DESC_RATE_ID_8822B(d, 9);
+  /* RA group from the caller (rateid_for_mgn — family/NSS/band); the old
+   * hardcoded 9 ignored the param and put HT frames in the VHT_2SS group,
+   * whose retries wander into VHT rates on this fw
+   * (tests/retry_ladder_probe.sh). */
+  SET_TX_DESC_RATE_ID_8822B(d, rate_id);
   SET_TX_DESC_USE_RATE_8822B(d, 1);
   SET_TX_DESC_DISDATAFB_8822B(d, 0);
   SET_TX_DESC_SW_DEFINE_8822B(d, 1);

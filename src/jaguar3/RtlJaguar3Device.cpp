@@ -1969,7 +1969,13 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   uint8_t bw_desc = (bwidth == CHANNEL_WIDTH_40)   ? 1
                     : (bwidth == CHANNEL_WIDTH_80) ? 2
                                                    : 0;
-  uint8_t rate_id = vht ? 9 : 8;
+  /* RA group by rate family/NSS/band (rateid_for_mgn): the group is the
+   * rate-space the fw retry ladder walks. The inherited `vht ? 9 : 8` put
+   * HT frames in VHT_2SS (retries fell back through the legacy chain) and
+   * legacy frames in the CCK-only B group. Witness-measured per copy: the
+   * family-correct group steps MCSx -> MCS(x-1) -> 6M floor instead. */
+  uint8_t rate_id = rateid_for_mgn(static_cast<unsigned char>(fixed_rate),
+                                   _channel.Channel > 14);
 
   /* 40-in-80: a 40 MHz frame on an 80 MHz-configured channel needs a data
    * sub-channel telling the PHY which 40 MHz half to use — the lower 40 (which
@@ -2021,10 +2027,16 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
    * half-duplex link. Both fields sit inside the checksummed span. */
   SET_TX_DESC_RTY_LMT_EN_8822C(out, 1);
   SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(out, _cfg.tx.retry_limit);
+  /* RA-group override (DEVOURER_TX_RATEID): the ladder-sweep lever the
+   * retry-ladder probe drives (tests/retry_ladder_probe.sh). Checksummed
+   * span. */
+  if (_cfg.debug.tx_rateid)
+    SET_TX_DESC_RATE_ID_8822C(out, *_cfg.debug.tx_rateid);
   /* Retry rate-fallback control (DEVOURER_TX_RETRY_FALLBACK): default leaves
-   * the builder's DISDATAFB=0 (the fw ladder — measured stepping toward 6M
-   * on deep retries); Off pins retries at the descriptor rate. No floor form
-   * (the RetryFallback note in DeviceConfig.h has the measurement). Same
+   * the builder's DISDATAFB=0 — the fw ladder, MCS-native now that the RA
+   * group is family-correct (MCSx -> MCS(x-1) -> 6M floor; CCK floor at
+   * 2.4 GHz); Off pins retries at the descriptor rate. No floor form (the
+   * RetryFallback note in DeviceConfig.h has the measurement). Same
    * checksummed span as the retry limit. */
   if (_cfg.tx.retry_fallback == devourer::RetryFallback::Off)
     SET_TX_DESC_DISDATAFB_8822C(out, 1);

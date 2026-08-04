@@ -198,16 +198,34 @@ worst case doubles, then stops growing). Prefer **16** on an ARQ link, or
 **8 + a light FEC floor** where airtime is precious; the per-run residual
 gap analysis is `tests/arq_fec_dimension.py`.
 
-Retries also change RATE by default: every generation's inject path leaves
-the firmware fallback ladder enabled, and retried frames step down (measured
-on the 8812CU: MCS3 → 54M → 24M → 18M → 9M → 6M, ~10% of retried frames
-finishing below the original rate). `DEVOURER_TX_RETRY_FALLBACK=off` pins
-every retry at the descriptor rate (measured: 1,200/1,200) — for
-constant-rate links where a 6M re-air of an MCS3 frame costs ~4× the
-airtime. There is deliberately no floor form: bounding the ladder via
-DATA_RTY_LOWEST_RATE was measured anomalous (the fw reinterprets the bound
-inside the RA-group rate space — retries wandered into VHT rates with a 20×
-retry inflation), see the `RetryFallback` note in `src/DeviceConfig.h`.
+Retries also change RATE on the HalMAC generations, and the ladder is
+governed by the descriptor's RA group (RATE_ID) — witness-measured per
+on-air copy (`tests/retry_ladder_probe.sh`, ~99% capture, modal chains):
+
+| TX | chain at MCS3, retry 8 (family-correct RA group) |
+|---|---|
+| Jaguar1 8821AU | MCS3 ×9 — **no fallback at all** (fw pins the rate) |
+| Jaguar2 8822BU | MCS3 ×4 → MCS2 ×2 → MCS1 ×2 → MCS0 — pure MCS ladder |
+| Jaguar3 8812CU @5 GHz | MCS3 ×4 → MCS2 → 6M ×4 |
+| Jaguar3 8812CU @2.4 GHz | MCS3 ×4 → MCS2 → 5.5M → 1M ×3 (CCK floor) |
+| Jaguar3 8812CU, VHT | M7 ×4 → M4 → M1 → M0 → 6M (coarse −3 steps) |
+
+The inject descriptors historically carried `rate_id = vht ? 9 : 8` — an
+inherited kernel constant that put HT frames in the VHT_2SS group (and
+legacy frames in the CCK-only B group). A family-mismatched group is
+answered with fw improvisation: the 8822C walked HT retries down the
+full legacy chain (MCS3 → 54M → 24M → 18M → 9M → 6M), the 8822B wandered
+them into VHT rates (MCS3 → VHT1SS_M0 → 6M). `rateid_for_mgn`
+(`src/RateDefinitions.h`) now derives the group from the frame's rate
+family + NSS + band on both HalMAC generations; the closed ARQ loop
+re-measured clean after the change (100% delivered at retry 8, OFF-phase
+retries pinned 846/846). 2SS group rows follow the vendor table
+symmetrically but are unmeasured. `DEVOURER_TX_RETRY_FALLBACK=off` still
+pins every retry at the descriptor rate (measured: 1,200/1,200) — for
+constant-rate links where any step-down costs airtime. There is
+deliberately no floor form: bounding the ladder via DATA_RTY_LOWEST_RATE
+was measured anomalous (the same RA-group reinterpretation, 20× retry
+inflation), see the `RetryFallback` note in `src/DeviceConfig.h`.
 
 Responder-side capability (same setup, J3 TX as the reference soliciting
 station): **8814AU** closes the loop at retries ~0.1 (the bench responder of

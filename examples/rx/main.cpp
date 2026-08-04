@@ -916,7 +916,11 @@ static void packetProcessor(const Packet &packet) {
           .f("seq", packet.RxAtrib.seq_num)
           .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
           .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
-          .f("ppdu", packet.RxAtrib.ppdu_cnt);
+          .f("ppdu", packet.RxAtrib.ppdu_cnt)
+          /* hw rate index of THIS copy — retransmissions of one pctr can air
+           * at different rates (the fw fallback ladder), and per-copy rate +
+           * tsfl order is how a witness reconstructs the ladder on air. */
+          .f("rate", packet.RxAtrib.data_rate);
     }
   }
 

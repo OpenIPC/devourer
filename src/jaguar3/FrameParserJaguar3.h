@@ -159,7 +159,11 @@ inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
   SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(d, 12);
   SET_TX_DESC_MACID_8822C(d, 0x01);
   SET_TX_DESC_QSEL_8822C(d, 0x12); /* MGMT queue (mirrors Jaguar1 inject) */
-  SET_TX_DESC_RATE_ID_8822C(d, 9); /* kernel uses RA-group 9 for the inject path */
+  /* RA group from the caller (rateid_for_mgn — family/NSS/band). The old
+   * hardcoded 9 (VHT_2SS, the kernel inject constant) ignored the param and
+   * put HT frames in a VHT group — which is what sent their retries down
+   * the legacy 54..6M chain (tests/retry_ladder_probe.sh). */
+  SET_TX_DESC_RATE_ID_8822C(d, rate_id);
   SET_TX_DESC_USE_RATE_8822C(d, 1);
   SET_TX_DESC_DISDATAFB_8822C(d, 0);
   SET_TX_DESC_SW_DEFINE_8822C(d, 1);

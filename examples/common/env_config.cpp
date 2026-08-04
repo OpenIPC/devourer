@@ -110,8 +110,16 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.tx.report = static_cast<int>(v < 0 ? 0 : v > 255 ? 255 : v);
   if (const char *e = env_str("DEVOURER_TX_AMPDU_MODE")) {
     devourer::AmpduMode m;
-    if (devourer::parse_ampdu_mode(e, m))
+    if (devourer::parse_ampdu_mode(e, m)) {
       cfg.tx.ampdu = m;
+    } else {
+      /* A silently-ignored spec means a bench that thinks it measured
+       * aggregation and didn't — fail loudly like RETRY_FALLBACK below. */
+      std::fprintf(stderr,
+                   "devourer [W] DEVOURER_TX_AMPDU_MODE='%s' unparsable — "
+                   "A-MPDU stays off\n", e);
+      std::fflush(stderr);
+    }
   }
   if (env_long("DEVOURER_TX_RETRY_LIMIT", &v))
     cfg.tx.retry_limit = static_cast<int>(v < 0 ? 0 : (v > 63 ? 63 : v));

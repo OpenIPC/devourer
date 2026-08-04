@@ -352,10 +352,16 @@ def main():
     # stdout — this is an offline report generator (the harness tees it into
     # report.txt), same contract as rxq_analyze.py / pp109_starve_analyze.py,
     # not a demo's runtime event plane.
+    # Self-describing counts: "reports"/"ok_reports" are raw tx.report events,
+    # "ok_frames" is the per-tag reconciled frame count the identity uses —
+    # equal at one report per frame, divergent once BA multi-reports exist.
     print(json.dumps({"ev": "arqe2e.verdict", "verdict": verdict,
                       "acked_undelivered": total_au,
                       "tail_suspect": tot_tail,
-                      "reports": len(reports), "ok": ok_frames,
+                      "reports": len(reports),
+                      "ok_reports": sum(1 for rp in reports if rp["ok"]),
+                      "ok_frames": ok_frames,
+                      "multi_report_frames": multi,
                       "dut_pctrs": len(dut), "wit_pctrs": len(wit),
                       "base": base}, separators=(",", ":")), flush=True)
     return 3 if verdict == "INCONCLUSIVE-SHORT-RUN" else 0

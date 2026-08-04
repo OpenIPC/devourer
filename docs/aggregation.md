@@ -146,7 +146,14 @@ airtime ground truth):
   226.7 k frames over the same span) — at low MCS the preamble amortization
   is small and the BA machinery costs more than it saves. The +30% above is
   a high-MCS, broadcast/no-ack, near-PHY-ceiling number; measure the
-  intended shape before enabling A-MPDU on an ARQ link.
+  intended shape before enabling A-MPDU on an ARQ link. The delivery
+  *contract* itself is unaffected: the instrumented three-ledger arm shows
+  `acked_undelivered = 0` under BA exactly as per-frame — with the same
+  ACK-loss duplicate asymmetry (the un-aggregated control redelivered +97
+  duplicates, ≈0.04%, at saturation). The BA arm's 1.1% saturation
+  shortfall cannot be decomposed into write-offs vs declines precisely
+  because of the next bullet — inside a BA link, only the receipts tier can
+  say where frames died.
 - **Per-frame CCX accounting does not survive aggregation** (measured,
   8812CU): with AGG_EN, ~60% of requested SPE_RPT reports are never emitted
   (suppressed in a per-aggregate pattern — tag deltas bunch at whole

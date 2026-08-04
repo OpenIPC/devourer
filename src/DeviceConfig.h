@@ -224,27 +224,27 @@ struct DeviceConfig {
      * DATA_RETRY_LIMIT=0 carve-out kept pending its bench). */
     int retry_limit = 0;
     /* env: DEVOURER_ACK_TIMEOUT_US — hardware ACK response window in µs
-     * (1..255, clamped; 0 = per-chip default), the hardware-ARQ RANGE
-     * lever: the MAC
-     * writes off a frame (and retries) when no ACK is counted within this
-     * window, and round-trip propagation eats ~6.7 µs per km, so a long
-     * link needs the window opened. One 8-bit register everywhere:
-     * REG_ACKTO 0x640 on the 11ac generations (defaults: 0x80 J1/J2's MAC
-     * reset value; 0x21 J3 halmac, scaled to 0x3D/0x75 at 10/5 MHz
-     * narrowband — the override REPLACES the per-bandwidth default, so
-     * budget the slowest ACK duration in use), R_AX_RSP_CHK_SIG 0xCC00
-     * byte0 on Kestrel. The neighbouring CTS window (REG_CTS2TO 0x641) is
-     * a separate register this knob does NOT touch. Applied at bring-up. Bench: shrinking it below the
-     * ACK flight time (8 µs) pins retries at the limit with 0%% ok against
-     * a live responder — the register provably gates the ARQ verdict —
-     * while 255 behaves as the default at bench range WHEN ACKS ARRIVE.
-     * The adversarial half: every retry of a LOST frame waits the full
-     * window, so a long window slows the write-off cadence under loss —
-     * measured (dead RA, retry 8, max duty): 33 µs default 2719 write-offs
-     * /8 s vs 128 µs 2015 vs 255 µs 1507 (~1.8x slower). Size the window
-     * to the link (~6.7 µs/km + ACK flight + margin), don't just max it —
-     * and that is why the default is 0/vendor-faithful, not 255. */
-    int ack_timeout_us = 0;
+     * (1..255, clamped), the hardware-ARQ RANGE lever: the MAC writes a
+     * frame off (and retries) when no ACK is counted within this window,
+     * and round-trip propagation eats ~6.7 µs per km. ONE default, 128 µs,
+     * programmed identically on every generation at bring-up — the same
+     * knob value means the same range budget (~15 km round trip) no matter
+     * which die is plugged. 128 is the vendor's interop-blessed J1/J2
+     * value and covers the slowest narrowband ACK in the tree (the 5 MHz
+     * per-bandwidth vendor value is 117 µs), so it also replaces the
+     * per-chip / per-bandwidth vendor defaults (which ranged 33..128 µs
+     * and made hardware-ARQ range silently die-dependent). The register:
+     * REG_ACKTO 0x640 on the 11ac generations, R_AX_RSP_CHK_SIG 0xCC00
+     * byte0 on Kestrel; the CTS window (REG_CTS2TO 0x641) is separate and
+     * untouched. Sizing: ~6.7 µs x round-trip km + ~50 µs ACK flight and
+     * detection margin; a longer window is NOT free — every retry of a
+     * LOST frame waits the full window, measured (dead RA, retry 8, max
+     * duty): 2719 write-offs/8 s at 33 µs vs 2015 at 128 vs 1507 at 255.
+     * Bench proof the register gates the ARQ verdict: at 8 µs (below the
+     * ACK's flight time) retries pin at the limit with 0% ok against a
+     * live responder; at 128/255 the responder cell runs 100% ok,
+     * retries ~0. */
+    int ack_timeout_us = 128;
     /* env: DEVOURER_TX_RETRY_FALLBACK — "off" | unset. Unset = the firmware
      * fallback ladder with its own floor (the current behaviour, descriptors
      * byte-identical). "off" disables per-retry rate fallback (DISDATAFB /

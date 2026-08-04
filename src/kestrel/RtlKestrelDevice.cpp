@@ -254,11 +254,13 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
    * re-asserts explicitly (idempotent) when the knob is set. */
   if (_cfg.tuning.disable_cca)
     SetCcaMode(true);
-  /* DEVOURER_ACK_TIMEOUT_US: the hardware-ARQ range lever — byte0 of
-   * R_AX_RSP_CHK_SIG (the field the vendor's narrowband path scales). */
-  if (_cfg.tx.ack_timeout_us > 0)
-    _device.rtw_write8(0xCC00, static_cast<uint8_t>(
-        _cfg.tx.ack_timeout_us > 255 ? 255 : _cfg.tx.ack_timeout_us));
+  /* ACK window (DEVOURER_ACK_TIMEOUT_US): one library default on every
+   * generation — byte0 of R_AX_RSP_CHK_SIG (the field the vendor's
+   * narrowband path scales); see the DeviceConfig field doc. */
+  _device.rtw_write8(0xCC00, static_cast<uint8_t>(
+      _cfg.tx.ack_timeout_us > 255   ? 255
+      : _cfg.tx.ack_timeout_us < 1 ? 1
+                                     : _cfg.tx.ack_timeout_us));
   _tx_mgmt_ep = _device.nth_bulk_out_ep(0); /* B0MG -> BULKOUTID0 */
   _tx_data_ep = _device.nth_bulk_out_ep(3); /* ACH0 -> BULKOUTID3 */
   if (_tx_mgmt_ep == 0) {

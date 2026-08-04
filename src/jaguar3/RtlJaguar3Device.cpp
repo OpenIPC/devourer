@@ -878,11 +878,14 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   else
     _txpkt_img.store(0, std::memory_order_relaxed);
   apply_dpdt_route_8822e(); /* 8822E DPDT/eFEM pin-mux (post-coex) */
-  /* DEVOURER_ACK_TIMEOUT_US: the hardware-ARQ range lever — overrides the
-   * halmac per-bandwidth REG_ACKTO default init_wmac_cfg just wrote. */
-  if (_cfg.tx.ack_timeout_us > 0)
-    _device.rtw_write8(0x0640, static_cast<uint8_t>(
-        _cfg.tx.ack_timeout_us > 255 ? 255 : _cfg.tx.ack_timeout_us));
+  /* ACK window (DEVOURER_ACK_TIMEOUT_US): one library default on every
+   * generation, replacing the halmac per-bandwidth REG_ACKTO defaults
+   * init_wmac_cfg just wrote (the 128 default covers the slowest
+   * narrowband ACK) — see the DeviceConfig field doc. */
+  _device.rtw_write8(0x0640, static_cast<uint8_t>(
+      _cfg.tx.ack_timeout_us > 255   ? 255
+      : _cfg.tx.ack_timeout_us < 1 ? 1
+                                     : _cfg.tx.ack_timeout_us));
   apply_replay_wseq(); /* DEVOURER_REPLAY_WSEQ golden-init replay (debug) */
   if (_cfg.debug.bb_dump) {
     /* Full MAC+BB dump (0x000..0x4ffc — MAC plane, then BB incl. the RF

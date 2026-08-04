@@ -1124,6 +1124,10 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
    * RF18 re-latch edge after the re-clock (see the set_channel_bw narrowband
    * branch). */
   c.narrowband_ok = true;
+  /* Hardware ARQ (truth table at the AdapterCaps declarations): 8822B
+   * responder + retry knob measured; the 8821C shares the recipe. */
+  c.ack_responder_ok = true;
+  c.tx_retry_limit_ok = true;
   c.hw_rx_timestamp = true;  /* FrameParserJaguar2 fills RxAtrib.tsfl */
   c.hw_beacon_txtsf = true;  /* StartBeacon: MAC inserts the egress TSF into beacons */
   c.xtal_cap_max = 0x3f; /* 6-bit AFE crystal-cap trim (0x24/0x28) */

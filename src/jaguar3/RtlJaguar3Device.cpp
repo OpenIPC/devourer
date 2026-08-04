@@ -1527,6 +1527,10 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
   c.tx_chains = 2; /* 8822C/8822E are 2T2R */
   c.rx_chains = 2;
   c.per_chain_rssi = true;
+  /* Hardware ARQ (truth table at the AdapterCaps declarations): both dies
+   * measured — responder matrix + retry-knob A/B + the arq_e2e ledgers. */
+  c.ack_responder_ok = true;
+  c.tx_retry_limit_ok = true;
   /* Per-packet TX power: the TXPWR_OFSET_TYPE bank selector + programmable
    * 0x1e70 offset banks (SetTxPacketPowerOffsetQdb / radiotap DBM_TX_POWER;
    * TxPktPwrBanks.h). Continuous in step_qdb units, ±63/-64 index travel, 2

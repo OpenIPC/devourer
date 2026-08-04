@@ -190,6 +190,17 @@ worst case doubles, then stops growing). Prefer **16** on an ARQ link, or
 **8 + a light FEC floor** where airtime is precious; the per-run residual
 gap analysis is `tests/arq_fec_dimension.py`.
 
+Retries also change RATE by default: every generation's inject path leaves
+the firmware fallback ladder enabled, and retried frames step down (measured
+on the 8812CU: MCS3 → 54M → 24M → 18M → 9M → 6M, ~10% of retried frames
+finishing below the original rate). `DEVOURER_TX_RETRY_FALLBACK=off` pins
+every retry at the descriptor rate (measured: 1,200/1,200) — for
+constant-rate links where a 6M re-air of an MCS3 frame costs ~4× the
+airtime. There is deliberately no floor form: bounding the ladder via
+DATA_RTY_LOWEST_RATE was measured anomalous (the fw reinterprets the bound
+inside the RA-group rate space — retries wandered into VHT rates with a 20×
+retry inflation), see the `RetryFallback` note in `src/DeviceConfig.h`.
+
 Responder-side capability (same setup, J3 TX as the reference soliciting
 station): **8814AU** closes the loop at retries ~0.1 (the bench responder of
 choice); **8812AU** works but degraded (97% delivery at ~7 mean retries —

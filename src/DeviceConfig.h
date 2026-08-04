@@ -79,6 +79,19 @@ enum class RxMode : uint8_t {
   Decoupled,   /* naive worker-thread hand-off (known-bad A/B control) */
 };
 
+/* Hardware retry rate-fallback control for injected frames. Every generation
+ * defaults to the firmware's fallback ladder (measured on the 8812CU:
+ * retried frames step MCS3 → 54M → 24M → 18M → 9M → 6M, the fw's own 5 GHz
+ * floor). Off pins every retry at the descriptor DATARATE (DISDATAFB /
+ * DISABLE_FB = 1; measured: 1,200/1,200 retried frames re-aired at the
+ * original rate) — for constant-rate links where a low-rate retry costs
+ * multiples of the frame's airtime. A DATA_RTY_LOWEST_RATE floor form was
+ * measured and REJECTED: the fw reinterprets the bound inside the RA-group
+ * rate space (inject runs RA-group 9), wandering retries into VHT rates
+ * (final_rate 45 = VHT1SS_MCS1 on an HT frame) with a 20x retry inflation —
+ * the field is not a plain DESC_RATE bound on this fw. */
+enum class RetryFallback : uint8_t { Default, Off };
+
 /* What the spsc-fat ring does when its buffer pool runs dry (consumer behind
  * under sustained overload). The choice decides which side of the hardware-ARQ
  * contract survives overload — the chip ACKs on FIFO admission, so anything
@@ -205,6 +218,12 @@ struct DeviceConfig {
      * (firmware-level retry) and on the 8814A die (vendor DATA_RETRY_LIMIT=0
      * carve-out kept). */
     int retry_limit = 0;
+    /* env: DEVOURER_TX_RETRY_FALLBACK — "off" | unset. Unset = the firmware
+     * fallback ladder with its own floor (the current behaviour, descriptors
+     * byte-identical). "off" disables per-retry rate fallback (DISDATAFB /
+     * DISABLE_FB = 1): retries re-air at the descriptor rate. See the
+     * RetryFallback enum for why there is no floor form. */
+    RetryFallback retry_fallback = RetryFallback::Default;
     /* env: DEVOURER_TX_USB_AGG — USB TX aggregation: max frames packed into
      * one bulk-OUT URB by send_packets (0 = off, the default: send_packets
      * degrades to a per-frame loop and every TX path is byte-identical to

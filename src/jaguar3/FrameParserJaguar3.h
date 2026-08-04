@@ -42,6 +42,12 @@ constexpr size_t RXDESC_SIZE_8822C = 24; /* RX_DESC_SIZE_88XX */
 #define SET_TX_DESC_NAVUSEHDR_8822C(d, v)  SET_BITS_TO_LE_4BYTE((d) + 0x0C, 15, 1, v)
 #define SET_TX_DESC_NDPA_8822C(d, v)       SET_BITS_TO_LE_4BYTE((d) + 0x0C, 22, 2, v)
 #define SET_TX_DESC_DATARATE_8822C(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x10, 0, 7, v)
+/* DATA_RTY_LOWEST_RATE (0x10 [12:8]): measured NOT a plain DESC_RATE bound —
+ * the fw reinterprets it inside the RA-group rate space (see the
+ * RetryFallback note in DeviceConfig.h). Field documented, deliberately
+ * unwritten. */
+#define SET_TX_DESC_DATA_RTY_LOWEST_RATE_8822C(d, v) \
+  SET_BITS_TO_LE_4BYTE((d) + 0x10, 8, 5, v)
 #define SET_TX_DESC_DATA_SC_8822C(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 0, 4, v)
 #define SET_TX_DESC_DATA_SHORT_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x14, 4, 1, v)
 #define SET_TX_DESC_DATA_BW_8822C(d, v)    SET_BITS_TO_LE_4BYTE((d) + 0x14, 5, 2, v)

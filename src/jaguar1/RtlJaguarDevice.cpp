@@ -1175,6 +1175,13 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
             ? 1
             : 0);
   SET_TX_DESC_RETRY_LIMIT_ENABLE_8812(usb_frame, 1);
+  /* Retry rate-fallback control (DEVOURER_TX_RETRY_FALLBACK): the data path
+   * leaves DISABLE_FB at 0 (the fw ladder) by default — only the NDPA branch
+   * disables it. Off pins retries at the descriptor rate; there is no floor
+   * form (the RetryFallback note in DeviceConfig.h has the measurement).
+   * Dword3, inside the checksummed 32 bytes. */
+  if (_cfg.tx.retry_fallback == devourer::RetryFallback::Off)
+    SET_TX_DESC_DISABLE_FB_8812(usb_frame, 1);
   if (!is_8814a) {
     /* 88XXau leaves DATA_RETRY_LIMIT=0 for monitor injection on 8814A
      * (RETRY_LIMIT_ENABLE stays set to 1 in both).

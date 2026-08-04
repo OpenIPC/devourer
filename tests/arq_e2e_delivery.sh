@@ -44,7 +44,7 @@ MAC1=${MAC1:-02:12:34:56:78:9a}        # DUT responder identity = drone RA
 TX_SA=${TX_SA:-02:aa:bb:cc:dd:01}      # drone TA (unicast — the I/G footgun)
 RETRY_LIMIT=${RETRY_LIMIT:-3}          # field report used 3
 DRONE_REPORT_N=${DRONE_REPORT_N:-1}    # CCX sampling divisor (1 = every frame)
-DRONE_FALLBACK=${DRONE_FALLBACK:-}     # retry rate fallback: off | <rate> | ""
+DRONE_FALLBACK=${DRONE_FALLBACK:-}     # retry rate fallback: off | "" (=fw ladder)
 RECEIPT_MS=${RECEIPT_MS:-}             # windowed RX receipts cadence (off="")
 DRONE_RATE=${DRONE_RATE:-MCS3}
 DRONE_PAYLOAD=${DRONE_PAYLOAD:-512}    # >= 30 so the pctr stamp fits

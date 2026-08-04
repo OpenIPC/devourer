@@ -1541,8 +1541,8 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
   SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(out, _cfg.tx.retry_limit);
   /* Retry rate-fallback control (DEVOURER_TX_RETRY_FALLBACK): default leaves
    * the builder's DISDATAFB=0 (the fw ladder); Off pins retries at the
-   * descriptor rate; Floor bounds the ladder. Same checksummed span as the
-   * retry limit. */
+   * descriptor rate. No floor form (the RetryFallback note in DeviceConfig.h
+   * has the measurement). Same checksummed span as the retry limit. */
   if (_cfg.tx.retry_fallback == devourer::RetryFallback::Off)
     SET_TX_DESC_DISDATAFB_8822B(out, 1);
   jaguar2::cal_txdesc_chksum_8822b(out);

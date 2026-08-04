@@ -220,7 +220,21 @@ static void test_desc_8822c() {
   jaguar3::fill_data_tx_desc_8822c(blk, 1500, 7, 9, 0, false, false, 0,
                                    /*bmc=*/false, /*ndpa=*/false,
                                    /*data_sc=*/0, /*pwr_ofset_type=*/0,
-                                   /*pkt_offset=*/1);
+                                   /*pkt_offset=*/1, /*retry=*/false,
+                                   /*seqnum=*/0xabc);
+  CHECK((blk[0x0d] & 0x06) == 0x06,
+        "8822e: forced-rate fallback bits=0x%02x want DISRTSFB|DISDATAFB",
+        blk[0x0d] & 0x06);
+  CHECK((blk[0x12] & 0x02) != 0 && (blk[0x12] & 0xfc) == 0,
+        "8822e: TX_NOACK retry descriptor byte=0x%02x want enable/limit=0",
+        blk[0x12]);
+  CHECK((blk[0x21] & 0x80) == 0 &&
+            LE_BITS_TO_4BYTE(blk + 0x24, 12, 12) == 0xabc,
+        "8822e: SW sequence mismatch (hwseq=%u swseq=%u)",
+        (blk[0x21] >> 7) & 1, LE_BITS_TO_4BYTE(blk + 0x24, 12, 12));
+  CHECK(LE_BITS_TO_4BYTE(blk + 0x08, 24, 6) == 0 &&
+            LE_BITS_TO_4BYTE(blk + 0x18, 0, 12) == 0,
+        "8822e: injected frame must leave G_ID/SW_DEFINE at the SVP defaults");
   CHECK((blk[0x07] & 0x1f) == 1, "8822c: pkt_offset field=%u want 1",
         blk[0x07] & 0x1f);
   const uint16_t ck_pad0 = static_cast<uint16_t>(blk[0x1C] | (blk[0x1D] << 8));

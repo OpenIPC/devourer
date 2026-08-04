@@ -419,7 +419,10 @@ guard time, dynamic beacon grants, ACK/TxReport, per-UE RX attribution) are
 
 `SetAmpduMode` enables 802.11 A-MPDU on injected frames: ~+30% *goodput* at
 the PHY ceiling by amortizing per-frame overhead — an occupancy metric can't
-show it, count delivered payload. `SetAckResponder(mac)` arms the hardware
+show it, count delivered payload. That number is high-MCS broadcast; the
+unicast-ARQ shape measured **−8%** delivered at MCS3, and per-frame CCX
+accounting does not survive AGG_EN (docs/aggregation.md) — under A-MPDU the
+receipts tier is the delivery truth. `SetAckResponder(mac)` arms the hardware
 ACK/BlockAck responder; with a unicast TA on the soliciting frame this closes
 a hardware-ARQ loop (autonomous MAC retransmission until ACK). The ACK's
 horizon is chip-FIFO **admission** (bench: 8812EU responder,

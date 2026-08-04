@@ -241,10 +241,31 @@ def main():
         print(f"# WARNING: run spans only {max_index + 1} frame indices "
               f"(< 2x TAIL_GUARD={TAIL_GUARD}) — verdict will be "
               f"INCONCLUSIVE-SHORT-RUN")
-    per = defaultdict(lambda: defaultdict(int))
-    detail = []
+    # Per-frame reconciliation: under BlockAck a retransmitted MPDU can emit
+    # MULTIPLE reports for the same tag (data_tx_cnt incrementing per attempt
+    # — vendor-confirmed per-MPDU semantics). The frame's verdict is its LAST
+    # report's state, its retries the maximum seen; a per-frame-ACK run has
+    # exactly one report per frame, so this reduces to the identity there.
+    frames = {}
     for j, rp in enumerate(reports):
         k = base + rel[j]
+        f = frames.get(k)
+        if f is None:
+            frames[k] = {"ok": rp["ok"], "retries": rp["retries"],
+                         "reports": 1}
+        else:
+            f["ok"] = rp["ok"]  # last report wins
+            f["retries"] = max(f["retries"], rp["retries"])
+            f["reports"] += 1
+    multi = sum(1 for f in frames.values() if f["reports"] > 1)
+    if multi:
+        print(f"# BA reconciliation: {multi} frames carried multiple reports "
+              f"(last-state-wins, max-retries)")
+
+    per = defaultdict(lambda: defaultdict(int))
+    detail = []
+    for k in sorted(frames):
+        rp = frames[k]
         in_dut = k in dut
         in_wit = k in wit
         p = k_phase.get(k) if in_dut else attribute(k)
@@ -306,7 +327,10 @@ def main():
     # both the base alignment and the ledgers themselves.
     tot_dd = sum(st["dropped_but_delivered"] for st in per.values())
     tot_tail = sum(st["tail_suspect"] for st in per.values())
-    ident = n_ok - total_au - tot_tail + tot_dd
+    # Reconciled-frame ok, not raw report ok: under BA one frame can carry
+    # several reports and the identity is a per-FRAME conservation law.
+    ok_frames = sum(1 for f in frames.values() if f["ok"])
+    ident = ok_frames - total_au - tot_tail + tot_dd
     print(f"ledger identity: ok - acked_undelivered - tail_suspect "
           f"+ dropped_but_delivered = {ident} vs dut_pctrs = {len(dut)} "
           f"(delta {len(dut) - ident})")
@@ -331,7 +355,7 @@ def main():
     print(json.dumps({"ev": "arqe2e.verdict", "verdict": verdict,
                       "acked_undelivered": total_au,
                       "tail_suspect": tot_tail,
-                      "reports": len(reports), "ok": n_ok,
+                      "reports": len(reports), "ok": ok_frames,
                       "dut_pctrs": len(dut), "wit_pctrs": len(wit),
                       "base": base}, separators=(",", ":")), flush=True)
     return 3 if verdict == "INCONCLUSIVE-SHORT-RUN" else 0

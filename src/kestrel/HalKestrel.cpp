@@ -1210,7 +1210,15 @@ void HalKestrel::sch_tx_en() {
     return;
   }
   clr32(r::R_AX_CCA_CFG_0, r::B_AX_CCA_ALL_EN);
-  _logger->info("Kestrel TRX: CCA TX gates cleared (CCA_CFG_0=0x{:08x})",
+  /* Warn-level on purpose: this is a NON-STANDARD default (every other
+   * generation defaults to carrier-sense + EDCCA enabled). Carrier-sense TX
+   * on this family 103-stalls without the un-ported IQK/DPK cal — the
+   * detectors read perpetual-busy — so the TX path clears the gates to be
+   * able to transmit at all. RX-side CCA is unaffected (the pure-monitor
+   * bring-up leaves the gates on). */
+  _logger->warn("Kestrel TRX: CCA/EDCCA TX gates cleared (CCA_CFG_0=0x{:08x}) "
+                "— carrier-sense TX needs the un-ported IQK/DPK cal; this "
+                "generation cannot run the standards-compliant TX default yet",
                 _device.rtw_read32(r::R_AX_CCA_CFG_0));
 }
 

@@ -402,6 +402,10 @@ void RtlKestrelDevice::SetCcaMode(bool disabled) {
   else
     v |= r::B_AX_CCA_ALL_EN;
   _device.rtw_write32(r::R_AX_CCA_CFG_0, v);
+  if (!disabled)
+    _logger->warn("Kestrel: carrier-sense ENABLED — injected TX is expected "
+                  "to stall (~103-frame PLE pin) until the IQK/DPK cal is "
+                  "ported; the detectors read perpetual-busy uncalibrated");
   _logger->info("Kestrel: MAC carrier-sense {} (CCA_CFG_0=0x{:08x})",
                 disabled ? "DISABLED (dis_cca)" : "enabled", v);
 }

@@ -291,17 +291,25 @@ Behavioural traps the per-field docs can't carry:
   that loss is pre-FCS sync/AGC, upstream of the equalizer. They target
   in-band spurs on otherwise decodable frames
   (`docs/pseudo-preamble-puncturing.md`).
-- `DEVOURER_DIS_CCA=1` (Jaguar2/3, runtime `SetCcaMode`) disables the MAC
-  carrier-sense gate — **both** primary CCA (`0x520[14]`) and EDCCA (`[15]`).
-  The primary-CCA bit is the one that matters: monitor injection is not
-  CCA-free, it defers ~40–60% to a co-channel 802.11 transmitter, and
-  clearing `[14]` recovers ~1.5–2.2× (on-air 8822EU/8812CU,
-  `tests/dis_cca_tx_onair.sh`); the energy bit `[15]` alone is null against a
-  decodable preamble. **On by default on the streamtx FPV downlink** (the
-  link owns the channel — CSMA backoff only stutters it);
-  `DEVOURER_DIS_CCA=0` forces standard carrier-sense back. Does NOT apply the
-  vendor BB CCA-off writes (they deafen the RX). RX-decode side is a separate
-  null (`tests/dis_cca_onair.sh`).
+- `DEVOURER_DIS_CCA=1` (every generation, runtime `SetCcaMode` — the
+  interface method is pure virtual so no generation can silently no-op it)
+  disables the MAC carrier-sense gate — **both** primary CCA (`0x520[14]`)
+  and EDCCA (`[15]`). The default is carrier-sense + EDCCA **enabled** on
+  Jaguar1/2/3; on Jaguar1 the enable is real work — its BB table parks the
+  EDCCA thresholds (`0x8a4`) at never-trigger, so bring-up programs the
+  vendor adaptivity operating point (IGI-coupled; the phydm watchdog
+  re-tracks it when running). The primary-CCA bit is the one that matters:
+  monitor injection is not CCA-free, it defers ~40–60% to a co-channel
+  802.11 transmitter, and clearing `[14]` recovers ~1.5–2.2× (on-air
+  8822EU/8812CU, `tests/dis_cca_tx_onair.sh`); the energy bit `[15]` alone
+  is null against a decodable preamble. **On by default on the streamtx FPV
+  downlink** (the link owns the channel — CSMA backoff only stutters it);
+  `DEVOURER_DIS_CCA=0` forces standard carrier-sense back. Kestrel's TX
+  bring-up is the one exception: it clears the gates regardless and WARNS —
+  carrier-sense TX 103-stalls there without the un-ported IQK/DPK cal
+  (perpetual-busy detectors); its RX-side CCA is untouched. Does NOT apply
+  the vendor BB CCA-off writes (they deafen the RX). RX-decode side is a
+  separate null (`tests/dis_cca_onair.sh`).
 
 **Runtime TX power** — the adaptive-link power lever, three knobs on every
 generation: `SetTxPowerOffsetQdb` (relative, shape-preserving),

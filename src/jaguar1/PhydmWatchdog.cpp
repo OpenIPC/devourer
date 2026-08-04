@@ -98,6 +98,24 @@ void PhydmWatchdog::TickOnce() {
     _digInitialised = true;
   }
   DigTick(fa.cnt_all);
+
+  /* EDCCA threshold re-track (SetCcaMode enable + watchdog running): the
+   * vendor recomputes the 0x8a4 L2H/H2L from IGI every adaptivity cycle —
+   * with DIG walking IGI above, a static threshold would drift off the
+   * operating point. Write-on-change only. */
+  if (_edcca_track.load(std::memory_order_relaxed)) {
+    const int8_t th_ini =
+        _eepromManager->version_id.ICType == CHIP_8814A ? -14 : -17;
+    const int8_t l2h = jaguar1_edcca_l2h(th_ini, _cur_ig_value);
+    if (static_cast<uint8_t>(l2h) != _edcca_last_l2h) {
+      _device.phy_set_bb_reg(0x8a4, 0xFF, static_cast<uint8_t>(l2h));
+      _device.phy_set_bb_reg(0x8a4, 0xFF00, static_cast<uint8_t>(l2h - 7));
+      _edcca_last_l2h = static_cast<uint8_t>(l2h);
+      _logger->info("PhydmWatchdog: EDCCA L2H/H2L re-tracked to {}/{} "
+                    "(igi=0x{:02x})",
+                    l2h, l2h - 7, _cur_ig_value);
+    }
+  }
 }
 
 void PhydmWatchdog::ReadFaCountersAc(FaCnt &out) {

@@ -67,6 +67,10 @@ public:
             Logger_t logger, const devourer::DeviceConfig &cfg = {});
   bool rtw_hal_init(SelectedChannel selectedChannel);
   const devourer::FwBootStatus &GetFwBootStatus() const { return _fwBoot; }
+  /* Nullable — only exists when tuning.phydm_watchdog built it (the default
+   * config runs watchdog-less). SetCcaMode uses it to hand the EDCCA
+   * threshold re-track to the DIG tick. */
+  PhydmWatchdog *phydm_watchdog() { return _phydmWatchdog.get(); }
   /* Halt TRX and run the chip's card-disable power sequence, leaving it powered
    * down but re-enumerable — the counterpart to rtw_hal_init, and what every
    * other generation already does (HalJaguar2::power_off,

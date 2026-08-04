@@ -208,6 +208,25 @@ its SIFS ACKs only land intermittently); **8821AU never closed the loop**
 (TX retries stayed pinned with it armed); the 8812BU responder was
 separately proven (`tests/ack_responder_check.sh`).
 
+The full responder matrix (six cells, ch36, MCS3 unicast; run with
+`DEVOURER_TX_RETRY_LIMIT` at its 0 default, so delivered% is the
+**single-shot** ACK rate and capability is the on-vs-off delta — pin a
+nonzero limit for absolute numbers):
+
+| responder | on | off | verdict |
+|---|---|---|---|
+| 8814AU | 79% | 0% | works |
+| 8812BU | 98% | 0% | works |
+| 8821AU | 0% | 0% | broken (third independent confirmation) |
+| 8812EU | 98% | 0% | works |
+| 8812CU | 69% | 0% | works |
+| 8852CU (Kestrel) | 0% | 0% | not implemented (SetAckResponder is J1/2/3-only) |
+
+Unmeasured for lack of plugged hardware: 8821CU / PCIe 8821CE (recipe-shared
+with the 8822B; their `AdapterCaps.ack_responder_ok` stays false-as-unmeasured
+until a cell runs). The `ack_responder_ok` / `tx_retry_limit_ok` caps flags
+carry this table per die.
+
 ### The contract
 
 1. **Per-frame delivery detection is GO on all three generations**: the OFF

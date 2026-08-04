@@ -784,8 +784,13 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   c.rx_chains = 2;
   c.per_chain_rssi = true; /* per-path RSSI from the PPDU-status physts header */
   /* Hardware ARQ: SetAckResponder is not implemented on the AX generation
-   * (matrix-measured 0% closure) and retry is firmware-level here, so the
-   * DEVOURER_TX_RETRY_LIMIT knob is inert — both flags stay false. */
+   * (matrix-measured 0% closure) — that flag stays false. The retry knob IS
+   * wired (WD DATA_TXCNT_LMT per frame, attempts-semantics folded to the
+   * N-retries contract in send_packet; witness-measured on the 8832CU:
+   * limits {0,2} -> modal {1,3} on-air copies exactly, limit 8 -> an 8/9
+   * near-tie consistent with ~90% witness capture of a 9-copy truth —
+   * obedient, no wedge). */
+  c.tx_retry_limit_ok = true;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   if (_variant == kestrel::ChipVariant::C8852C)
     c.bw_mask |= devourer::kBw160; /* 8852C-only (vendor bw_sup BW_CAP_160M) */
@@ -1069,13 +1074,19 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
   /* Per-frame retry limit (DEVOURER_TX_RETRY_LIMIT, default 0 = single-shot,
    * same contract as the 11ac descriptor families): the AX WD carries it as
    * wd_info dword1 DATA_TXCNT_LMT with SEL, overriding the per-MACID CCTRL
-   * default. The vendor maps its rty_lmt verbatim into the field
-   * (hal_sta.c cctrl.data_tx_cnt_lmt = cap->rty_lmt), so the knob value goes
-   * in unmapped; tests/kestrel_retry_witness.sh is the on-air
-   * attempts-vs-retries semantics check. */
-  const int txcnt = _cfg.tx.retry_limit < 0    ? 0
-                    : _cfg.tx.retry_limit > 63 ? 63
-                                               : _cfg.tx.retry_limit;
+   * default. The field counts ATTEMPTS, not retries — measured on the
+   * 8832CU (tests/kestrel_retry_witness.sh: limit-value 2 -> modal 2 on-air
+   * copies, 8 -> 8, where the J3 retries-field gives N+1), so the knob folds
+   * +1 here to keep N-means-N-retries across generations. Value 0 is
+   * hardware-clamped to one attempt (336/336 frames aired exactly once), so
+   * the explicit 1 below is belt-and-braces, not a behavior change. NB the
+   * vendor's hal_sta.c writes its rty_lmt verbatim into the CCTRL twin of
+   * this field — its "retry limit" is off-by-one against 11ac by the same
+   * measurement. */
+  const int rl = _cfg.tx.retry_limit < 0    ? 0
+                 : _cfg.tx.retry_limit > 62 ? 62
+                                            : _cfg.tx.retry_limit;
+  const int txcnt = rl + 1;
   auto buf = is_data && _tx_data_ep
                  ? kestrel::build_data_txdesc(frame, flen, tr, 0,
                                               _tx_seq++ & 0xfff, wd_len, txcnt)

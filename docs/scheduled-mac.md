@@ -176,7 +176,15 @@ scheduled MAC runs TX+RX anyway, so this is the relevant session shape.
 The OFF-phase pin is set by `DEVOURER_TX_RETRY_LIMIT` (the matrix runs 12,
 the value the descriptors used to hardcode) — the knob, not a descriptor
 constant, is now the single source of truth for the retry limit on
-jaguar1/2/3 (inert on Kestrel and the 8814A die).
+jaguar1/2/3 **and Kestrel** (inert on the 8814A die only). On Kestrel it
+rides the AX WD `DATA_TXCNT_LMT` per-frame field, which counts **attempts**
+— devourer folds +1 so N means N retries on every generation. Witness-
+measured on the 8832CU (`tests/kestrel_retry_witness.sh`: on-air copies of
+an unACKable unicast per stamped payload counter): limits {0,2} → modal
+copies {1,3} exactly; limit 8 → an 8/9 near-tie consistent with ~90%
+witness capture of a 9-copy truth. Kestrel has no CCX `tx.report` path, so
+the witness copy-count is the retry ground truth there — the fw-level
+delivery outcome stays invisible until a receipts-tier consumer counts it.
 
 Choosing the limit (`tests/arq_retry_sweep.sh`, collision regime: a ~1 k fps
 retrying unicast flood into an 8812EU duplex ground station airing

@@ -42,7 +42,9 @@ for LIM in $LIMITS; do
   sudo env DEVOURER_VID=$WIT_VID DEVOURER_PID=$WIT_PID DEVOURER_CHANNEL=$CH \
        DEVOURER_RX_PCTR=1 DEVOURER_RX_AGG_SA=$TX_SA DEVOURER_LOG_LEVEL=info \
        "$BUILD/rxdemo" >"$OUT/wit_$LIM.jsonl" 2>"$OUT/wit_$LIM.err" &
-  w=0; until grep -q "Listening air" "$OUT/wit_$LIM.err"; do
+  # RX-start line differs per generation ("Listening air" J1, "entering RX
+  # loop" J3, ...) — the URB-ring submit line is the generation-neutral tell.
+  w=0; until grep -qE "async ring of .* URBs submitted|Listening air" "$OUT/wit_$LIM.err"; do
     sleep 1; w=$((w+1))
     [ $w -ge 25 ] && { echo "ABORT: witness never started" >&2; exit 1; }
   done; sleep 2

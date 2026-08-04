@@ -1508,13 +1508,12 @@ constexpr uint16_t R_AX_SCH_EXT_CTRL = 0xC3FC;
 constexpr uint32_t B_AX_PORT_RST_TSF_ADV = 1u << 1;
 constexpr uint16_t R_AX_CCA_CFG_0 = 0xC340;
 constexpr uint32_t B_AX_BTCCA_EN = 1u << 5;
-/* CCA medium-busy enables (R_AX_CCA_CFG_0 bits 0-4). Cleared for injection TX:
- * without the RX-DCK/DACK BB calibration the carrier/energy detectors assert a
- * perpetual busy that freezes the CSMA backoff, so the scheduler never grants a
- * TX opportunity and injected frames stall in the CMAC MBH queue (~103-frame
- * mgmt-TX stall). Clearing CCA_EN + the secondary-channel + EDCCA gates lets the
- * frames air — the intended TX/monitor-link mode; carrier-sense returns with
- * the energy-detector calibration. On-air validated: the 8852BU radiates. */
+/* CCA medium-busy enables (R_AX_CCA_CFG_0 bits 0-4). The 8852C runs the
+ * standards-compliant default — all gates on (witness-measured: full-rate TX
+ * and real deferral under a co-channel flood; the bring-up cals suffice) —
+ * with DEVOURER_DIS_CCA clearing them for punch-through injection. The 8852B
+ * default clears them pending its measurement arm
+ * (tests/kestrel_cca_default_check.sh). */
 constexpr uint32_t B_AX_CCA_EN = 1u << 0;
 constexpr uint32_t B_AX_SEC20_EN = 1u << 1;
 constexpr uint32_t B_AX_SEC40_EN = 1u << 2;

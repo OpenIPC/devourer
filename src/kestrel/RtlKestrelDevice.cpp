@@ -227,13 +227,28 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
     _logger->error("Kestrel: TX bring-up failed");
     return;
   }
-  /* TX-only: enable the CMAC port + scheduler contention queues (this clears
-   * the CCA gates — see EnableTxScheduler). Kept out of BringUpMonitor so the
-   * pure-monitor RX path keeps CCA on and can actually hear frames. */
-  _hal.set_cca_on(_cfg.debug.kestrel_cca_on);
+  /* TX-only: enable the CMAC port + scheduler contention queues. Kept out
+   * of BringUpMonitor so the pure-monitor RX path keeps CCA on and can
+   * actually hear frames.
+   *
+   * Carrier-sense default: the 8852C die runs the standards-compliant
+   * default — gates STAY ON unless DEVOURER_DIS_CCA (witness-measured on
+   * the 8832CU: full-rate TX with all gates on from bring-up, 2106
+   * frames/12 s, and real deferral under a co-channel flood, 35 vs 83
+   * frames vs dis_cca — the same both-directions proof as the other
+   * generations; the bring-up's DACK/RX-DCK/ADDCK suffice, no IQK/DPK
+   * needed). The 8852B die keeps the gates cleared until its arm of
+   * tests/kestrel_cca_default_check.sh runs — unmeasured, not incapable.
+   * DEVOURER_KESTREL_CCA_ON forces gates-on on either die (the B-die
+   * measurement lever). */
+  const bool cca_on = _cfg.debug.kestrel_cca_on ||
+                      (_variant == kestrel::ChipVariant::C8852C &&
+                       !_cfg.tuning.disable_cca);
+  _hal.set_cca_on(cca_on, /*default_unmeasured=*/!cca_on &&
+                              !_cfg.tuning.disable_cca);
   EnableTxScheduler();
-  /* DEVOURER_DIS_CCA: EnableTxScheduler already cleared the CCA gates for TX;
-   * this just re-asserts it explicitly (idempotent) when the knob is set. */
+  /* DEVOURER_DIS_CCA: set_cca_on(false) already cleared the gates; this
+   * re-asserts explicitly (idempotent) when the knob is set. */
   if (_cfg.tuning.disable_cca)
     SetCcaMode(true);
   _tx_mgmt_ep = _device.nth_bulk_out_ep(0); /* B0MG -> BULKOUTID0 */
@@ -402,10 +417,6 @@ void RtlKestrelDevice::SetCcaMode(bool disabled) {
   else
     v |= r::B_AX_CCA_ALL_EN;
   _device.rtw_write32(r::R_AX_CCA_CFG_0, v);
-  if (!disabled)
-    _logger->warn("Kestrel: carrier-sense ENABLED — injected TX is expected "
-                  "to stall (~103-frame PLE pin) until the IQK/DPK cal is "
-                  "ported; the detectors read perpetual-busy uncalibrated");
   _logger->info("Kestrel: MAC carrier-sense {} (CCA_CFG_0=0x{:08x})",
                 disabled ? "DISABLED (dis_cca)" : "enabled", v);
 }

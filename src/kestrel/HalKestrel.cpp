@@ -1199,27 +1199,30 @@ void HalKestrel::sch_tx_en() {
    * disabling the gates lets frames air — the intended TX/monitor mode, on-air
    * validated (both the 8852BU and 8832CU radiate). */
   if (_cca_on) {
-    /* Experimental (DEVOURER_KESTREL_CCA_ON): leave the CCA gates ENABLED for a
-     * carrier-sense TX test. NB: measured NOT sufficient on its own — TX still
-     * 103-stalls even with RX-DCK + ADDCK + the EDCCA level threshold seeded to
-     * -62 dBm; carrier-sense TX needs deeper RF/BB config (IQK/DPK or a CCA
-     * state-machine bring-up). */
-    _logger->info("Kestrel TRX: CCA gates LEFT ON (CCA_CFG_0=0x{:08x}) — "
-                  "carrier-sense TX test",
+    /* Standards-compliant TX default (8852C-measured: full-rate TX with all
+     * gates on, real deferral under a co-channel flood —
+     * tests/kestrel_cca_default_check.sh). */
+    _logger->info("Kestrel TRX: carrier-sense + EDCCA enabled "
+                  "(CCA_CFG_0=0x{:08x})",
                   _device.rtw_read32(r::R_AX_CCA_CFG_0));
     return;
   }
   clr32(r::R_AX_CCA_CFG_0, r::B_AX_CCA_ALL_EN);
-  /* Warn-level on purpose: this is a NON-STANDARD default (every other
-   * generation defaults to carrier-sense + EDCCA enabled). Carrier-sense TX
-   * on this family 103-stalls without the un-ported IQK/DPK cal — the
-   * detectors read perpetual-busy — so the TX path clears the gates to be
-   * able to transmit at all. RX-side CCA is unaffected (the pure-monitor
+  /* Two reasons to be here: an explicit DEVOURER_DIS_CCA (intentional — the
+   * FPV punch-through mode, info-grade), or the 8852B die default, whose
+   * carrier-sense TX arm has not run — warn there so a non-standard default
+   * is never silent. RX-side CCA is unaffected either way (the pure-monitor
    * bring-up leaves the gates on). */
-  _logger->warn("Kestrel TRX: CCA/EDCCA TX gates cleared (CCA_CFG_0=0x{:08x}) "
-                "— carrier-sense TX needs the un-ported IQK/DPK cal; this "
-                "generation cannot run the standards-compliant TX default yet",
-                _device.rtw_read32(r::R_AX_CCA_CFG_0));
+  if (_cca_default_unmeasured)
+    _logger->warn("Kestrel TRX: CCA/EDCCA TX gates cleared "
+                  "(CCA_CFG_0=0x{:08x}) — the 8852B carrier-sense TX arm is "
+                  "unmeasured (tests/kestrel_cca_default_check.sh); "
+                  "DEVOURER_KESTREL_CCA_ON=1 runs it",
+                  _device.rtw_read32(r::R_AX_CCA_CFG_0));
+  else
+    _logger->info("Kestrel TRX: CCA/EDCCA TX gates cleared "
+                  "(CCA_CFG_0=0x{:08x}) — dis_cca",
+                  _device.rtw_read32(r::R_AX_CCA_CFG_0));
 }
 
 bool HalKestrel::start_beacon(const uint8_t *body, uint32_t len,

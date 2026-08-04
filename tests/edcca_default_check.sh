@@ -9,7 +9,7 @@
 #   sudo bash tests/edcca_default_check.sh
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD="$ROOT/build" 
+BUILD="$ROOT/build"
 OUT=/tmp/edcca-val; mkdir -p "$OUT"
 CH=6
 J1_VID=0x2357 J1_PID=0x0120     # 8821AU DUT TX

@@ -62,6 +62,13 @@ class RtlJaguarDevice : public IRtlDevice {
    * see SetTxPacketPowerStep. */
   std::atomic<uint8_t> _tx_pkt_pwr_step{0};
 
+  /* CCX report sampling counter (cfg.tx.report = N — request a report on
+   * every Nth frame). The 8812 report format has no SW_DEFINE tag echo, so
+   * unlike Jaguar2/3 this counter drives only the request cadence. 64-bit:
+   * a narrow counter's wrap jumps the sampling phase for any N that doesn't
+   * divide it (2^32 is ~20 days at field frame rates). */
+  std::atomic<uint64_t> _tx_ccx_ctr{0};
+
   /* CW single-tone (StartCwTone/StopCwTone) saved state for a clean restore:
    * the pre-tone RF 0x00 and four BB dwords — RFE-pinmux words on 8812/8821
    * (0xCB0/0xEB0/0xCB4/0xEB4), per-path TX-scale words on 8814 (0xC1C/0xE1C/

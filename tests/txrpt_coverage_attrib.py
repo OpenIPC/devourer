@@ -26,7 +26,7 @@ import sys
 from collections import Counter
 
 
-def analyze(rundir):
+def analyze(rundir, sample_n=1):
     n = 0
     submitted = 0
     prev_tag = None
@@ -66,20 +66,41 @@ def analyze(rundir):
         raise SystemExit(f"{rundir}: no tagged tx.report events "
                          f"(J1-format reports carry no tag)")
     name = rundir.rstrip("/").split("/")[-1]
-    cov = 100.0 * n / max(1, submitted)
     dur_s = (t_last - t_first) / 1000.0 if (t_first is not None and
                                             t_last and t_last > t_first) else 0
     rate = n / dur_s if dur_s else 0
-    unrep = sum(k * v for k, v in gaps.items())
-    small = sum(k * v for k, v in gaps.items() if k <= 2)
-    top = ", ".join(f"{k}x{v}" for k, v in sorted(gaps.items())[:8])
-    print(f"\n== {name}: submitted={submitted} reports={n} "
-          f"coverage={cov:.1f}%"
-          + (f" achieved={rate:.0f} rpt/s" if rate else ""))
-    print(f"   unreported={unrep} gap-hist [{top}"
-          f"{', ...' if len(gaps) > 8 else ''}] "
-          f"max={max(gaps) if gaps else 0} "
-          f"in-gaps<=2: {100.0 * small / max(1, unrep):.1f}%")
+    if sample_n > 1:
+        # Sampled run: only every Nth frame requested a report, so the raw
+        # tag deltas should be exact multiples of N. k*N = k-1 sampled
+        # reports dropped; a non-multiple delta is an anomaly.
+        # The request fires on k % N == 0, i.e. frame 0 first — ceil, not
+        # floor, or odd totals undercount the expectation by one.
+        expected = (submitted + sample_n - 1) // sample_n
+        lost = anomalies = 0
+        for d, c in gaps.items():  # keys are delta-1
+            delta = d + 1
+            if delta % sample_n == 0:
+                lost += (delta // sample_n - 1) * c
+            else:
+                anomalies += c
+        cov = 100.0 * n / max(1, expected)
+        print(f"\n== {name}: submitted={submitted} sample_n={sample_n} "
+              f"expected={expected} reports={n} sampled-coverage={cov:.1f}%"
+              + (f" achieved={rate:.0f} rpt/s" if rate else ""))
+        print(f"   sampled reports lost={lost} off-modulo anomalies="
+              f"{anomalies}")
+    else:
+        cov = 100.0 * n / max(1, submitted)
+        unrep = sum(k * v for k, v in gaps.items())
+        small = sum(k * v for k, v in gaps.items() if k <= 2)
+        top = ", ".join(f"{k}x{v}" for k, v in sorted(gaps.items())[:8])
+        print(f"\n== {name}: submitted={submitted} reports={n} "
+              f"coverage={cov:.1f}%"
+              + (f" achieved={rate:.0f} rpt/s" if rate else ""))
+        print(f"   unreported={unrep} gap-hist [{top}"
+              f"{', ...' if len(gaps) > 8 else ''}] "
+              f"max={max(gaps) if gaps else 0} "
+              f"in-gaps<=2: {100.0 * small / max(1, unrep):.1f}%")
     if len(missed_vals) == 1:
         (mv, _), = missed_vals.items()
         print(f"   missed field: constant {mv} on every report "
@@ -96,8 +117,18 @@ def analyze(rundir):
 
 
 def main():
-    for rd in sys.argv[1:]:
-        analyze(rd)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("runs", nargs="+")
+    ap.add_argument("--sample-n", type=int, default=1,
+                    help="DEVOURER_TX_REPORT sampling divisor the run used: "
+                         "reports are requested on every Nth frame, so "
+                         "received-tag deltas should be exact multiples of N "
+                         "(k*N = k-1 sampled reports dropped; a non-multiple "
+                         "is an anomaly)")
+    a = ap.parse_args()
+    for rd in a.runs:
+        analyze(rd, a.sample_n)
 
 
 if __name__ == "__main__":

@@ -219,8 +219,17 @@ struct DeviceConfig {
      * `tx.report` events. The TX-side link sensor. On the HalMAC chips the
      * descriptor SW_DEFINE also carries a rotating 8-bit tag the report
      * echoes (per-frame correlation). Default off (descriptors
-     * byte-identical). Needs an RX loop to deliver the C2H reports. */
-    bool report = false;
+     * byte-identical). Needs an RX loop to deliver the C2H reports.
+     *
+     * Value = sampling divisor N: 1 requests a report on EVERY frame, N > 1
+     * on every Nth (0..255). The CCX emission path saturates at ~1.3–1.4 k
+     * reports/s (docs/scheduled-mac.md), so above ~1.25 k fps pick
+     * N >= fps/1300 and coverage of the SAMPLED frames stays deterministic
+     * instead of load-collapsing. HalMAC dies stamp the SW_DEFINE tag on
+     * every frame regardless of sampling, so consecutive received-report
+     * tags differ by exactly N — any other delta is a dropped report
+     * (consumers must know N; tests/txrpt_coverage_attrib.py --sample-n). */
+    int report = 0;
     /* env: DEVOURER_TX_AMPDU_MODE="tid/maxnum[/density[/noack[/maxtime_hex]]]"
      * — arm the first-class A-MPDU TX mode (src/AmpduMode.h) at the end of
      * bring-up: mark data frames aggregatable and program the MAC pacing

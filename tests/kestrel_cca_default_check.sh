@@ -40,7 +40,9 @@ wit_up(){
     [ $w -ge 25 ] && { echo "ABORT: witness never started" >&2; exit 1; }
   done; sleep 1
 }
-count(){ grep -c '"ev":"rx.seq"' "$OUT/wit.jsonl" 2>/dev/null || echo 0; }
+# grep -c prints the 0 itself (exiting 1) — || true keeps set -u-safe without
+# emitting a second zero line into $(count).
+count(){ grep -c '"ev":"rx.seq"' "$OUT/wit.jsonl" 2>/dev/null || true; }
 
 echo "=== 1) gates-on from bring-up ==="
 KILL; sleep 1; : >"$OUT/wit.jsonl"; wit_up

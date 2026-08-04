@@ -241,9 +241,12 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
    * tests/kestrel_cca_default_check.sh runs — unmeasured, not incapable.
    * DEVOURER_KESTREL_CCA_ON forces gates-on on either die (the B-die
    * measurement lever). */
-  const bool cca_on = _cfg.debug.kestrel_cca_on ||
-                      (_variant == kestrel::ChipVariant::C8852C &&
-                       !_cfg.tuning.disable_cca);
+  /* DEVOURER_DIS_CCA is the explicit override and beats everything,
+   * including the KESTREL_CCA_ON measurement lever — one knob, one final
+   * state, and the bring-up log matches it. */
+  const bool cca_on = !_cfg.tuning.disable_cca &&
+                      (_cfg.debug.kestrel_cca_on ||
+                       _variant == kestrel::ChipVariant::C8852C);
   _hal.set_cca_on(cca_on, /*default_unmeasured=*/!cca_on &&
                               !_cfg.tuning.disable_cca);
   EnableTxScheduler();

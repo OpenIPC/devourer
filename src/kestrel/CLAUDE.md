@@ -69,14 +69,11 @@ TX-enable path is un-ported — B210-confirmed 0% duty vs 45% at 6G-80 / 40% at
 5G-160; a MAC TXAGC-max / RF-TX-path gap, not a chip limit — the vendor
 drives it). 5/10 MHz narrowband is the BB "small BW" field with the RF left
 in 20 MHz mode (no ADC re-clock, unlike Jaguar). RX bulk-IN delivery requires
-the USB RXAGG engine enabled (`B_AX_RXAGG_EN`). TX on the 8852C runs
-carrier-sense + EDCCA enabled by default (R_AX_CCA_CFG_0 gates on;
-witness-measured: full-rate TX with all gates on from bring-up, 2.4x
-deferral vs `DEVOURER_DIS_CCA=1` under a co-channel flood —
-`tests/kestrel_cca_default_check.sh`); `DEVOURER_DIS_CCA=1` clears the
-gates for punch-through injection. The 8852B TX default still clears them
-(warn-logged) pending its arm of the same harness;
-`DEVOURER_KESTREL_CCA_ON=1` is the measurement lever. `ReadTsf` reads the per-port MAC TSF;
+the USB RXAGG engine enabled (`B_AX_RXAGG_EN`). TX carrier-sense
+defaults are per-die (8852C enabled / 8852B cleared-and-warned pending its
+measurement arm) — the numbers and knob interplay live at the bring-up
+comment in `RtlKestrelDevice.cpp` and the gate doc in `MacRegAx.h`;
+harness: `tests/kestrel_cca_default_check.sh`. `ReadTsf` reads the per-port MAC TSF;
 `StartBeacon` drives the AX HW beacon engine.
 
 **Per-frame retry limit** (`DEVOURER_TX_RETRY_LIMIT`): the AX WD wd_info

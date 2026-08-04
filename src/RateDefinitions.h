@@ -110,6 +110,8 @@ inline unsigned char rateid_for_mgn(unsigned char mgn, bool band5g) {
   if (mgn >= MGN_MCS0)                            /* HT */
     return mgn >= MGN_MCS8 ? (band5g ? 4 /* GN_N2SS */ : 2 /* BGN_20M_2SS */)
                            : (band5g ? 5 /* GN_N1SS */ : 3 /* BGN_20M_1SS */);
+  if (mgn == MGN_MCS32) /* HT duplicate mode — 0x7F sorts BELOW MGN_MCS0 */
+    return band5g ? 5 : 3;
   if (mgn == MGN_1M || mgn == MGN_2M || mgn == MGN_5_5M || mgn == MGN_11M)
     return 8; /* B */
   return band5g ? 7 /* G */ : 6 /* BG */;

@@ -1549,6 +1549,11 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
    * half-duplex link. Both fields sit inside the checksummed span. */
   SET_TX_DESC_RTY_LMT_EN_8822B(out, 1);
   SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(out, _cfg.tx.retry_limit);
+  /* RA-group override (DEVOURER_TX_RATEID): the ladder-sweep lever the
+   * retry-ladder probe drives (tests/retry_ladder_probe.sh). Checksummed
+   * span. */
+  if (_cfg.debug.tx_rateid)
+    SET_TX_DESC_RATE_ID_8822B(out, *_cfg.debug.tx_rateid);
   /* Retry rate-fallback control (DEVOURER_TX_RETRY_FALLBACK): default leaves
    * the builder's DISDATAFB=0 (the fw ladder); Off pins retries at the
    * descriptor rate. No floor form (the RetryFallback note in DeviceConfig.h

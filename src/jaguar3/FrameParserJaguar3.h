@@ -130,7 +130,8 @@ inline void cal_txdesc_chksum_8822c(uint8_t *txdesc) {
 
 /* Fill an 8822C data/monitor-inject TX descriptor (48 bytes, zeroed by caller)
  * and finalise its checksum. `bw` is the descriptor BW code (0=20,1=40,2=80),
- * `rate_hw` the DESC_RATE* index (MRateToHwRate output), `rate_id` 8(HT)/9(VHT).
+ * `rate_hw` the DESC_RATE* index (MRateToHwRate output), `rate_id` the RA
+ * group from rateid_for_mgn (family/NSS/band — RateDefinitions.h).
  * Field choices mirror the Jaguar1 monitor-inject path (MACID 1, USE_RATE,
  * DISDATAFB, HW sequence). */
 inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,

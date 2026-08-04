@@ -25,10 +25,12 @@ RATE=${RATE:-MCS3}
 LIMIT=${LIMIT:-8}
 SECS=${SECS:-8}
 RATEID=${RATEID:-}          # optional DEVOURER_TX_RATEID override (RA group)
-RAMASK=${RAMASK:-}          # optional DEVOURER_TX_RAMASK fw RA-entry bitmap
 FALLBACK=${FALLBACK:-}      # off = pin retries at the descriptor rate
 
-KILL(){ sudo pkill -9 -x rxdemo 2>/dev/null; sudo pkill -9 -x txdemo 2>/dev/null; return 0; }
+# Kill only THIS tree's demos (anchored, ERE-escaped path) — a bare -x kill
+# would take down any other session's rxdemo/txdemo on the machine.
+ESC_BUILD=$(printf '%s' "$BUILD" | sed 's/[][\.*^$/]/\\&/g')
+KILL(){ sudo pkill -9 -f "^$ESC_BUILD/rxdemo" 2>/dev/null; sudo pkill -9 -f "^$ESC_BUILD/txdemo" 2>/dev/null; return 0; }
 trap KILL EXIT
 mkdir -p "$OUT"
 
@@ -46,7 +48,6 @@ sudo env DEVOURER_VID=$TX_VID DEVOURER_PID=$TX_PID DEVOURER_CHANNEL=$CH \
      DEVOURER_TX_SA=$TX_SA DEVOURER_TX_PAYLOAD_BYTES=200 \
      DEVOURER_TX_GAP_US=20000 DEVOURER_TX_RETRY_LIMIT=$LIMIT \
      ${RATEID:+DEVOURER_TX_RATEID=$RATEID} \
-     ${RAMASK:+DEVOURER_TX_RAMASK=$RAMASK} \
      ${FALLBACK:+DEVOURER_TX_RETRY_FALLBACK=$FALLBACK} \
      DEVOURER_LOG_LEVEL=info \
      timeout -s INT $SECS "$BUILD/txdemo" >"$OUT/tx.jsonl" 2>"$OUT/tx.err" || true

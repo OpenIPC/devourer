@@ -249,6 +249,10 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
   if (_cfg.tuning.disable_cca)
     SetCcaMode(true);
 
+  /* DEVOURER_ACK_TIMEOUT_US: the hardware-ARQ range lever (REG_ACKTO). */
+  if (_cfg.tx.ack_timeout_us > 0)
+    _device.rtw_write8(0x0640, static_cast<uint8_t>(_cfg.tx.ack_timeout_us));
+
   /* DEVOURER_XTAL_CAP — apply the crystal-cap trim once the AFE is up
    * (issue #217, the narrowband CFO lever). */
   if (_cfg.tuning.xtal_cap)

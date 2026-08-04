@@ -1182,13 +1182,16 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
    * Dword3, inside the checksummed 32 bytes. */
   if (_cfg.tx.retry_fallback == devourer::RetryFallback::Off)
     SET_TX_DESC_DISABLE_FB_8812(usb_frame, 1);
-  if (!is_8814a) {
-    /* 88XXau leaves DATA_RETRY_LIMIT=0 for monitor injection on 8814A
-     * (RETRY_LIMIT_ENABLE stays set to 1 in both).
-     * Use cfg.tx.retry_limit (DEVOURER_TX_RETRY_LIMIT, default 0) instead of
-     * the hardcoded 12 — retries flood the air on a busy half-duplex link. */
-    SET_TX_DESC_DATA_RETRY_LIMIT_8812(usb_frame, _cfg.tx.retry_limit);
-  }
+  /* DATA_RETRY_LIMIT from cfg (DEVOURER_TX_RETRY_LIMIT, default 0 =
+   * single-shot) on every die, 8814A included. The old 8814A skip was
+   * inherited from byte-matching 88XXau's injection descriptor — the kernel
+   * leaves the field 0 there because its injection path never retries, not
+   * because the die can't: the witness bench (tests/kestrel_retry_witness.sh
+   * methodology, TX_PID=0x8813) measured limit-obedient retransmission and
+   * no TX wedge with the field written. RETRY_LIMIT_ENABLE stays 1 in both
+   * drivers; a hardcoded 12 was rejected earlier — retries flood the air on
+   * a busy half-duplex link. */
+  SET_TX_DESC_DATA_RETRY_LIMIT_8812(usb_frame, _cfg.tx.retry_limit);
   if (sgi) {
     _logger->info("short gi enabled,set sgi");
     SET_TX_DESC_DATA_SHORT_8812(usb_frame, 1);

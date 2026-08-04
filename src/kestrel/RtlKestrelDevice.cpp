@@ -1066,11 +1066,21 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
   const uint32_t wd_len = (_variant == kestrel::ChipVariant::C8852C)
                               ? kestrel::WD_BODY_LEN_V1
                               : kestrel::WD_BODY_LEN;
+  /* Per-frame retry limit (DEVOURER_TX_RETRY_LIMIT, default 0 = single-shot,
+   * same contract as the 11ac descriptor families): the AX WD carries it as
+   * wd_info dword1 DATA_TXCNT_LMT with SEL, overriding the per-MACID CCTRL
+   * default. The vendor maps its rty_lmt verbatim into the field
+   * (hal_sta.c cctrl.data_tx_cnt_lmt = cap->rty_lmt), so the knob value goes
+   * in unmapped; tests/kestrel_retry_witness.sh is the on-air
+   * attempts-vs-retries semantics check. */
+  const int txcnt = _cfg.tx.retry_limit < 0    ? 0
+                    : _cfg.tx.retry_limit > 63 ? 63
+                                               : _cfg.tx.retry_limit;
   auto buf = is_data && _tx_data_ep
                  ? kestrel::build_data_txdesc(frame, flen, tr, 0,
-                                              _tx_seq++ & 0xfff, wd_len)
+                                              _tx_seq++ & 0xfff, wd_len, txcnt)
                  : kestrel::build_mgnt_txdesc(frame, flen, tr, 0,
-                                              _tx_seq++ & 0xfff, wd_len);
+                                              _tx_seq++ & 0xfff, wd_len, txcnt);
   if (is_data && _tx_data_ep)
     ep = _tx_data_ep;
   int rc = _device.bulk_send_sync_ep(ep, buf.data(),

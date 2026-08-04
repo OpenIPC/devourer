@@ -213,15 +213,38 @@ struct DeviceConfig {
      * Runtime equivalent: StartCwTone/StopCwTone on the concrete device. */
     bool cw_tone = false;
     uint8_t cw_tone_gain = 0;
-    /* env: DEVOURER_TX_RETRY_LIMIT — per-frame hardware retry limit (0..63).
-     * Maps to the TX descriptor DATA_RETRY_LIMIT / RTS_DATA_RTY_LMT field
-     * (Dword4 bits 18-23). 0 = no retries (WFB default: FEC provides
-     * reliability, not MAC retries). On a busy half-duplex link retries flood
-     * the air and blind the receiver. Hardware-ARQ (SetAckResponder + unicast
-     * TA, docs/scheduled-mac.md) needs a nonzero value. Inert on Kestrel
-     * (firmware-level retry) and on the 8814A die (vendor DATA_RETRY_LIMIT=0
-     * carve-out kept). */
+    /* env: DEVOURER_TX_RETRY_LIMIT — per-frame hardware retry limit (0..63;
+     * Kestrel ceiling 62 — its attempts-counting WD field folds +1). Maps to
+     * the TX descriptor DATA_RETRY_LIMIT / RTS_DATA_RTY_LMT field on the
+     * 11ac generations and wd_info DATA_TXCNT_LMT on Kestrel. 0 = no retries
+     * (WFB default: FEC provides reliability, not MAC retries). On a busy
+     * half-duplex link retries flood the air and blind the receiver.
+     * Hardware-ARQ (SetAckResponder + unicast TA, docs/scheduled-mac.md)
+     * needs a nonzero value. Inert on the 8814A die only (vendor
+     * DATA_RETRY_LIMIT=0 carve-out kept pending its bench). */
     int retry_limit = 0;
+    /* env: DEVOURER_ACK_TIMEOUT_US — hardware ACK response window in µs
+     * (1..255, clamped), the hardware-ARQ RANGE lever: the MAC writes a
+     * frame off (and retries) when no ACK is counted within this window,
+     * and round-trip propagation eats ~6.7 µs per km. ONE default, 128 µs,
+     * programmed identically on every generation at bring-up — the same
+     * knob value means the same range budget (~15 km round trip) no matter
+     * which die is plugged. 128 is the vendor's interop-blessed J1/J2
+     * value and covers the slowest narrowband ACK in the tree (the 5 MHz
+     * per-bandwidth vendor value is 117 µs), so it also replaces the
+     * per-chip / per-bandwidth vendor defaults (which ranged 33..128 µs
+     * and made hardware-ARQ range silently die-dependent). The register:
+     * REG_ACKTO 0x640 on the 11ac generations, R_AX_RSP_CHK_SIG 0xCC00
+     * byte0 on Kestrel; the CTS window (REG_CTS2TO 0x641) is separate and
+     * untouched. Sizing: ~6.7 µs x round-trip km + ~50 µs ACK flight and
+     * detection margin; a longer window is NOT free — every retry of a
+     * LOST frame waits the full window, measured (dead RA, retry 8, max
+     * duty): 2719 write-offs/8 s at 33 µs vs 2015 at 128 vs 1507 at 255.
+     * Bench proof the register gates the ARQ verdict: at 8 µs (below the
+     * ACK's flight time) retries pin at the limit with 0% ok against a
+     * live responder; at 128/255 the responder cell runs 100% ok,
+     * retries ~0. */
+    int ack_timeout_us = 128;
     /* env: DEVOURER_TX_RETRY_FALLBACK — "off" | unset. Unset = the firmware
      * fallback ladder with its own floor (the current behaviour, descriptors
      * byte-identical). "off" disables per-retry rate fallback (DISDATAFB /

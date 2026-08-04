@@ -80,6 +80,12 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
    * DEVOURER_DIS_CCA. Always applied — the enable path is what programs
    * the BB EDCCA thresholds off their parked never-trigger table value. */
   SetCcaMode(_cfg.tuning.disable_cca);
+  /* ACK window (DEVOURER_ACK_TIMEOUT_US): one library default on every
+   * generation — see the DeviceConfig field doc. */
+  _device.rtw_write8(0x0640, static_cast<uint8_t>(
+      _cfg.tx.ack_timeout_us > 255   ? 255
+      : _cfg.tx.ack_timeout_us < 1 ? 1
+                                     : _cfg.tx.ack_timeout_us));
 
   /* DEVOURER_XTAL_CAP — crystal-cap trim (issue #217, narrowband CFO lever). */
   if (_cfg.tuning.xtal_cap)
@@ -1333,6 +1339,12 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
    * DEVOURER_DIS_CCA. Always applied — the enable path is what programs
    * the BB EDCCA thresholds off their parked never-trigger table value. */
   SetCcaMode(_cfg.tuning.disable_cca);
+  /* ACK window (DEVOURER_ACK_TIMEOUT_US): one library default on every
+   * generation — see the DeviceConfig field doc. */
+  _device.rtw_write8(0x0640, static_cast<uint8_t>(
+      _cfg.tx.ack_timeout_us > 255   ? 255
+      : _cfg.tx.ack_timeout_us < 1 ? 1
+                                     : _cfg.tx.ack_timeout_us));
 
   /* DEVOURER_XTAL_CAP — crystal-cap trim (issue #217, narrowband CFO lever). */
   if (_cfg.tuning.xtal_cap)

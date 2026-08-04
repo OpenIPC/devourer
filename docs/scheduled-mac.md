@@ -186,6 +186,11 @@ witness capture of a 9-copy truth. Kestrel has no CCX `tx.report` path, so
 the witness copy-count is the retry ground truth there — the fw-level
 delivery outcome stays invisible until a receipts-tier consumer counts it.
 
+The ACK window itself is a knob — `DEVOURER_ACK_TIMEOUT_US`, the
+hardware-ARQ *range* lever (round-trip propagation eats ~6.7 µs/km; the
+per-chip defaults and the bench proof live at the field doc in
+`src/DeviceConfig.h`).
+
 Choosing the limit (`tests/arq_retry_sweep.sh`, collision regime: a ~1 k fps
 retrying unicast flood into an 8812EU duplex ground station airing
 PixelPilot-shaped feedback bursts, near-field): retries are backoff-spaced,

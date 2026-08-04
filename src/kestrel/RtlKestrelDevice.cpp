@@ -74,6 +74,17 @@ RtlKestrelDevice::RtlKestrelDevice(RtlAdapter device, Logger_t logger,
    * from the Jaguar2 TXAGC-index meaning). Applied at every set_channel. */
   if (_cfg.tx.power_index.has_value())
     _hal.set_default_txpwr_dbm(*_cfg.tx.power_index);
+  /* The AX DATA_TXCNT_LMT field holds ATTEMPTS in 6 bits, so this family's
+   * retry ceiling is 62 (63 attempts) — one below the 11ac dies' 63. Clamp
+   * once here (send_packet reads the stored copy) and say so, rather than
+   * silently delivering 62 where the knob's 0..63 grammar promised 63. */
+  if (_cfg.tx.retry_limit > 62) {
+    _logger->warn("Kestrel: DEVOURER_TX_RETRY_LIMIT={} exceeds this family's "
+                  "ceiling of 62 retries (the AX field counts attempts, 6 "
+                  "bits) — clamped to 62",
+                  _cfg.tx.retry_limit);
+    _cfg.tx.retry_limit = 62;
+  }
 }
 
 RtlKestrelDevice::~RtlKestrelDevice() {

@@ -165,9 +165,12 @@ inline uint32_t wd_info_dword1(const uint8_t *frame, uint32_t frame_len,
   uint32_t d1 = 0;
   if (frame_len >= 5 && (frame[4] & 0x01))
     d1 |= txd::BMC;
-  if (txcnt_lmt >= 0)
-    d1 |= txd::DATA_TXCNT_LMT_SEL |
-          (static_cast<uint32_t>(txcnt_lmt & 0x3f) << txd::DATA_TXCNT_LMT_SH);
+  if (txcnt_lmt >= 0) {
+    /* Clamp, never mask: 64 & 0x3f would silently program 0 attempts —
+     * the opposite of what an out-of-range caller wanted. */
+    const uint32_t lmt = txcnt_lmt > 63 ? 63u : static_cast<uint32_t>(txcnt_lmt);
+    d1 |= txd::DATA_TXCNT_LMT_SEL | (lmt << txd::DATA_TXCNT_LMT_SH);
+  }
   return d1;
 }
 

@@ -204,20 +204,29 @@ retry inflation), see the `RetryFallback` note in `src/DeviceConfig.h`.
 Responder-side capability (same setup, J3 TX as the reference soliciting
 station): **8814AU** closes the loop at retries ~0.1 (the bench responder of
 choice); **8812AU** works but degraded (97% delivery at ~7 mean retries —
-its SIFS ACKs only land intermittently); **8821AU never closed the loop**
-(TX retries stayed pinned with it armed); the 8812BU responder was
-separately proven (`tests/ack_responder_check.sh`).
+its SIFS ACKs only land intermittently); **8821AU works** (61–64% single-shot
+across three reps, **94% at retry 8** with a healthy retry histogram,
+disarm-proof-verified: 0% with the responder powered down); the 8812BU
+responder was separately proven (`tests/ack_responder_check.sh`).
+
+A cell whose responder never armed reads exactly like a broken chip — on=0%
+/ off=0% — which is how the 8821AU carried a false "broken" verdict through
+three runs (silently dead responder: stale advisory adapter lock / open
+failure; root-caused with concurrent register peeks off the live armed die,
+`chipstate --no-claim --peek`). The check script now verifies the arm line
+and aborts loudly instead; treat any historical on=0/off=0 row from a
+harness without arm-verification as unmeasured, not broken.
 
 The full responder matrix (six cells, ch36, MCS3 unicast; run with
 `DEVOURER_TX_RETRY_LIMIT` at its 0 default, so delivered% is the
 **single-shot** ACK rate and capability is the on-vs-off delta — pin a
-nonzero limit for absolute numbers):
+nonzero limit for absolute numbers; 8821AU row re-measured ch6):
 
 | responder | on | off | verdict |
 |---|---|---|---|
 | 8814AU | 79% | 0% | works |
 | 8812BU | 98% | 0% | works |
-| 8821AU | 0% | 0% | broken (third independent confirmation) |
+| 8821AU | 62% | 0% | works (94% closed-loop at retry 8) |
 | 8812EU | 98% | 0% | works |
 | 8812CU | 69% | 0% | works |
 | 8852CU (Kestrel) | 0% | 0% | not implemented (SetAckResponder is J1/2/3-only) |

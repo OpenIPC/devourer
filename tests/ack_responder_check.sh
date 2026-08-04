@@ -22,6 +22,7 @@ BUILD="$ROOT/build"
 TX_PID=${TX_PID:-0xc812};  TX_VID=${TX_VID:-0x0bda}
 RESP_PID=${RESP_PID:-0x012d}; RESP_VID=${RESP_VID:-0x2357}
 CH=${CH:-6}; SECS=${SECS:-8}
+RETRY_LIMIT=${RETRY_LIMIT:-0}          # 0 = single-shot ACK rate; >0 = closed loop
 MAC=${MAC:-02:12:34:56:78:9a}
 # The TX's TA must be UNICAST — an ACK's RA is the soliciting frame's addr2,
 # and the canonical TX SA (57:42:..) is a group address. Third appearance of
@@ -29,7 +30,9 @@ MAC=${MAC:-02:12:34:56:78:9a}
 TX_SA=${TX_SA:-02:aa:bb:cc:dd:01}
 OUT=${OUT:-/tmp/ack_responder}
 
-KILL(){ pkill -9 -x rxdemo 2>/dev/null; pkill -9 -x txdemo 2>/dev/null; return 0; }
+# sudo: the cells run as root, so an unprivileged pkill silently fails and a
+# leftover responder poisons the next run (holds the adapter AND stays armed).
+KILL(){ sudo pkill -9 -x rxdemo 2>/dev/null; sudo pkill -9 -x txdemo 2>/dev/null; return 0; }
 trap KILL EXIT
 mkdir -p "$OUT"
 
@@ -40,12 +43,27 @@ run_cell() { # $1 = cell name, $2 = responder env ("" = off)
   sudo env DEVOURER_VID=$RESP_VID DEVOURER_PID=$RESP_PID DEVOURER_CHANNEL=$CH \
        $resp_env DEVOURER_LOG_LEVEL=info \
        "$BUILD/rxdemo" >"$OUT/resp_$name.jsonl" 2>"$OUT/resp_$name.err" &
-  sleep 6 # responder bring-up
+  # Arm/bring-up verification — a cell whose responder never came up must
+  # ABORT, not read as "0% delivered": an unverified arm is exactly how the
+  # 8821AU got a false "broken" verdict (three runs of a silently dead
+  # responder — stale adapter lock, open failure — scored on=0/off=0).
+  local want="Listening air" waited=0
+  [ -n "$resp_env" ] && want="ACK responder armed"
+  until grep -q "$want" "$OUT/resp_$name.err"; do
+    sleep 1; waited=$((waited+1))
+    if [ "$waited" -ge 25 ]; then
+      echo "ABORT: cell $name responder never reached '$want' (${waited}s)" >&2
+      tail -5 "$OUT/resp_$name.err" >&2
+      exit 1
+    fi
+  done
+  sleep 2 # RX loop settle
   sudo env DEVOURER_VID=$TX_VID DEVOURER_PID=$TX_PID DEVOURER_CHANNEL=$CH \
        DEVOURER_TX_RATE=MCS3 DEVOURER_TX_QOS_DATA=1 DEVOURER_TX_RA=$MAC \
        DEVOURER_TX_SA=$TX_SA \
        DEVOURER_TX_PAYLOAD_BYTES=200 DEVOURER_TX_GAP_US=5000 \
-       DEVOURER_TX_REPORT=1 DEVOURER_LOG_LEVEL=warn \
+       DEVOURER_TX_REPORT=1 DEVOURER_TX_RETRY_LIMIT=$RETRY_LIMIT \
+       DEVOURER_LOG_LEVEL=warn \
        timeout -s INT $SECS "$BUILD/txdemo" \
        >"$OUT/tx_$name.jsonl" 2>"$OUT/tx_$name.err" || true
   sleep 1

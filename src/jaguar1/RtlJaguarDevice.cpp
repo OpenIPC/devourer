@@ -1725,10 +1725,10 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
     c.narrowband_ok = true;
   }
   c.fastretune_ok = true; /* phy_SwChnl8812_fast (8812/8821) + full-path fallback */
-  /* Hardware ARQ (truth table at the AdapterCaps declarations): the 8821A
-   * die never closes the responder loop; the 8814A die keeps the vendor
-   * retry carve-out (knob inert). */
-  c.ack_responder_ok = _eepromManager->version_id.ICType != CHIP_8821;
+  /* Hardware ARQ (truth table at the AdapterCaps declarations): responder
+   * measured working on all four dies — 8821A included; the 8814A die keeps
+   * the vendor retry carve-out (knob inert). */
+  c.ack_responder_ok = true;
   c.tx_retry_limit_ok = _eepromManager->version_id.ICType != CHIP_8814A;
   /* Per-packet TX power: 8814A only — its dword5 [30:28] descriptor LUT (the
    * 8822B TXPWR_OFSET position; vendor-defined, vendor-unused). measured

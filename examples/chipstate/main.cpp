@@ -34,8 +34,11 @@
 #include <libusb-1.0/libusb.h>
 #endif
 
+#include <vector>
+
 #include "DeviceSession.h"
 #include "IRtlDevice.h"
+#include "RtlAdapter.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
 #include "logger.h"
@@ -48,20 +51,135 @@ const uint16_t kRealtekPids[] = {0x8812, 0x8813, 0x881a, 0x0811, 0xa811,
                                  0x0820, 0x0821, 0x8822, 0x0120, 0x012d,
                                  0xb82c, 0xc811, 0xc812, 0xa81a};
 
+/* One --peek/--poke, kept in argv order so a poke-then-peek verifies the
+ * write inside a single claim. */
+struct RegOp {
+  bool write = false;
+  uint16_t addr = 0;
+  uint16_t end = 0;   /* peek range: inclusive last addr (== addr if single) */
+  uint32_t val = 0;   /* poke */
+  int width = 1;      /* poke: 1/2/4 */
+};
+
 struct Args {
   uint16_t vid = 0x0bda;
   int pid = -1;
   int channel = 6;
   bool init = false;
+  bool no_claim = false;
+  std::vector<RegOp> ops;
 };
 
 void usage() {
   std::fprintf(stderr,
                "usage: chipstate [--vid 0xNNNN] [--pid 0xNNNN] [--init] "
                "[--channel N]\n"
+               "                 [--peek 0xA[-0xB]]... [--poke 0xA=0xV[:W]]...\n"
                "  default: attach read-only, no USB reset, no bring-up.\n"
                "  --init : run a full bring-up first (for a healthy reference\n"
-               "           dump on a freshly power-cycled adapter).\n");
+               "           dump on a freshly power-cycled adapter).\n"
+               "  --peek : dump register byte(s) over the vendor-control path\n"
+               "           (range inclusive, 16 bytes/row) instead of the\n"
+               "           canary set. Bypasses chip dispatch — any die.\n"
+               "  --poke : write a register (width W = 1/2/4, default from the\n"
+               "           value magnitude). The bench-bisection intervention\n"
+               "           lever; ops run in argv order, so a trailing --peek\n"
+               "           verifies the write in the same claim.\n"
+               "  --no-claim : (peek/poke only) skip the interface claim —\n"
+               "           vendor control rides EP0 with device recipient, so\n"
+               "           registers stay reachable while another process\n"
+               "           (e.g. an armed rxdemo) owns the interface.\n");
+}
+
+/* Range-checked address parse: a silently-wrapped register (0x12345 ->
+ * 0x2345) on a poke tool is a corruption hazard, so out-of-range is a parse
+ * error, never a truncation. */
+bool parse_reg_addr(const char *s, char **end, uint16_t &out) {
+  unsigned long v = std::strtoul(s, end, 0);
+  if (*end == s || v > 0xffff)
+    return false;
+  out = static_cast<uint16_t>(v);
+  return true;
+}
+
+bool parse_peek(const char *s, RegOp &op) {
+  char *end = nullptr;
+  if (!parse_reg_addr(s, &end, op.addr))
+    return false;
+  op.end = op.addr;
+  if (*end == '-') {
+    if (!parse_reg_addr(end + 1, &end, op.end) || op.end < op.addr)
+      return false;
+  }
+  return *end == '\0';
+}
+
+bool parse_poke(const char *s, RegOp &op) {
+  char *end = nullptr;
+  op.write = true;
+  if (!parse_reg_addr(s, &end, op.addr))
+    return false;
+  if (*end != '=')
+    return false;
+  const char *vs = end + 1;
+  unsigned long v = std::strtoul(vs, &end, 0);
+  if (end == vs || v > 0xfffffffful)
+    return false;
+  op.val = static_cast<uint32_t>(v);
+  if (*end == ':') {
+    op.width = static_cast<int>(std::strtoul(end + 1, &end, 0));
+    if (op.width != 1 && op.width != 2 && op.width != 4)
+      return false;
+    /* An explicit width the value doesn't fit is a mistake, not a mask. */
+    if (op.width < 4 && (op.val >> (op.width * 8)) != 0)
+      return false;
+  } else {
+    op.width = op.val <= 0xff ? 1 : op.val <= 0xffff ? 2 : 4;
+  }
+  return *end == '\0';
+}
+
+/* Raw register client over the transport layer — deliberately below
+ * CreateRtlDevice so it works on any die, configured or not. */
+int run_reg_ops(libusb_device_handle *handle, Logger_t logger,
+                libusb_context *ctx,
+                std::shared_ptr<devourer::UsbDeviceLock> lock,
+                const std::vector<RegOp> &ops) {
+  RtlAdapter adapter(handle, logger, ctx, lock);
+  /* A failed vendor-control read throws (UsbTransport::ctrl_read) — on a
+   * powered-down or wedged chip that is a real answer about the chip, so
+   * report which op died and exit nonzero instead of terminating. */
+  try {
+    for (const RegOp &op : ops) {
+      if (op.write) {
+        if (op.width == 4)
+          adapter.rtw_write32(op.addr, op.val);
+        else if (op.width == 2)
+          adapter.rtw_write16(op.addr, static_cast<uint16_t>(op.val));
+        else
+          adapter.rtw_write8(op.addr, static_cast<uint8_t>(op.val));
+        std::printf("poke 0x%04x = 0x%0*x\n", op.addr, op.width * 2, op.val);
+      } else {
+        for (uint32_t row = op.addr & ~0xfu; row <= op.end; row += 16) {
+          std::printf("0x%04x:", row);
+          for (uint32_t i = row; i < row + 16; ++i) {
+            if (i < op.addr || i > op.end)
+              std::printf("   ");
+            else
+              std::printf(" %02x", adapter.rtw_read8(static_cast<uint16_t>(i)));
+          }
+          std::printf("\n");
+        }
+      }
+    }
+  } catch (const std::exception &e) {
+    std::fflush(stdout);
+    logger->error("register access failed ({}) — chip powered down / wedged? "
+                  "That is the finding, not a tool error.", e.what());
+    return 4;
+  }
+  std::fflush(stdout);
+  return 0;
 }
 
 } // namespace
@@ -81,6 +199,24 @@ int main(int argc, char **argv) {
       ++i;
     } else if (!std::strcmp(argv[i], "--init")) {
       a.init = true;
+    } else if (!std::strcmp(argv[i], "--no-claim")) {
+      a.no_claim = true;
+    } else if (!std::strcmp(argv[i], "--peek") && v) {
+      RegOp op;
+      if (!parse_peek(v, op)) {
+        usage();
+        return 2;
+      }
+      a.ops.push_back(op);
+      ++i;
+    } else if (!std::strcmp(argv[i], "--poke") && v) {
+      RegOp op;
+      if (!parse_poke(v, op)) {
+        usage();
+        return 2;
+      }
+      a.ops.push_back(op);
+      ++i;
     } else {
       usage();
       return 2;
@@ -114,6 +250,20 @@ int main(int argc, char **argv) {
     return 3;
   }
 
+  /* --no-claim + reg ops: EP0 vendor control with device recipient does not
+   * need the interface, so peeks/pokes work while another process (a live
+   * armed rxdemo) owns it — the concurrent-intervention mode. */
+  if (a.no_claim) {
+    if (a.ops.empty()) {
+      logger->error("--no-claim is peek/poke-only (the canary dump needs the "
+                    "claimed device)");
+      session.adopt_handle(handle);
+      return 2;
+    }
+    session.adopt_handle(handle);
+    return run_reg_ops(handle, logger, ctx, nullptr, a.ops);
+  }
+
   /* do_reset=false is the whole point: a USB reset re-runs the chip's own boot
    * and would wipe the state we came to read. Only --init opts into disturbing
    * the chip, and even then the reset stays off so the bring-up starts from
@@ -127,6 +277,12 @@ int main(int argc, char **argv) {
   }
   session.adopt_handle(handle);
   session.adopt_lock(lock);
+
+  /* --peek/--poke: raw transport-level register access, no device
+   * construction at all — the chip is not even identified, let alone
+   * configured, so this works mid-experiment on any die. */
+  if (!a.ops.empty())
+    return run_reg_ops(handle, logger, ctx, lock, a.ops);
 
   devourer::DeviceConfig cfg;
   /* Leave the chip exactly as found. Without this the device destructor runs

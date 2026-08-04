@@ -164,9 +164,11 @@ struct AdapterCaps {
    * ack_responder_ok: SetAckResponder measurably closes a hardware-ARQ loop
    * as the RESPONDER (SIFS ACKs that a soliciting TX's CCX reports confirm).
    * Measured true: 8812A (works, degraded — intermittent SIFS ACKs), 8814A,
+   * 8821A (61–64% single-shot MCS3, 94% at retry 8, disarm-proof-verified —
+   * an earlier "broken" verdict was a harness artifact: the responder's arm
+   * was never verified, so a silently dead responder read as on=0/off=0),
    * 8822B, 8812C/8822C, 8812E/8822E (the 8811A rides the 8812 die path and
-   * inherits its row). Measured FALSE: the 8821A die — an armed 8821AU never
-   * closed the loop across three independent runs. False-as-unmeasured (the
+   * inherits its row). False-as-unmeasured (the
    * vht_2g4_ok reading: unmeasured, not incapable): the 8821C — it shares
    * the recipe but no 8821CU/CE cell has run. FALSE on Kestrel:
    * SetAckResponder is not implemented on the AX generation.

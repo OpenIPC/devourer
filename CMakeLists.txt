@@ -755,6 +755,17 @@ target_link_libraries(TxQuiesceSelftest PRIVATE devourer PkgConfig::libusb)
 
 add_test(NAME tx_quiesce_seam COMMAND TxQuiesceSelftest)
 
+# Headless guard for the windowed RX-receipt primitives (src/cell/RxReceipt.h):
+# TLV round-trip, ring eviction, late accounting, ledger merge idempotence,
+# strict-parse rejections. The on-air halves are tests/receipt_verify.py over
+# an arq_e2e run.
+add_executable(ReceiptSelftest
+    tests/receipt_selftest.cpp
+)
+target_link_libraries(ReceiptSelftest PRIVATE devourer)
+
+add_test(NAME receipt_roundtrip COMMAND ReceiptSelftest)
+
 # Headless guard for the active idle-noise-floor math (src/NoiseFloorMath.h): the
 # phydm sign/pwdb helpers the Jaguar1 0x0FA0 debug-port measurement uses. Pure
 # math, header-only.

@@ -225,6 +225,20 @@ separately proven (`tests/ack_responder_check.sh`).
    99.71% against a 99.99% ledger truth — pessimistic by the ACK-loss
    asymmetry, the safe direction). Pick N ≥ fps/1300, or account
    report-less frames as "unknown".
+
+   Above both sits the app-layer truth tier: **windowed RX receipts**
+   (`src/cell/RxReceipt.h`) — the receiver's application notes every consumed
+   frame index in a sliding bitmap and mails overlapping receipt TLVs back on
+   its feedback path (`DEVOURER_RX_RECEIPT_MS` in duplex; the TX side absorbs
+   with `DEVOURER_TX_RECEIPTS` and emits `tx.receipt`). Neither the ACK
+   horizon nor the CCX ceiling applies: delivery is counted where it is
+   consumed. Measured frame-exact against the receiver's own rx.seq ledger —
+   126,594 frames clean and 349,455 frames under 150 ms consumer stalls at
+   2.4 k fps (`tests/receipt_verify.py`) — after one sizing lesson the header
+   documents: the window must exceed the worst backlog drain in frames (a
+   2,048-bit window leaked 2,846 delivered frames out of coverage when a
+   stalled spsc-fat pool drained ~3 k frames in one receipt interval; the
+   8192 default clears that bench worst case ~2.7×).
 2. **Closed-loop hardware ACK + autonomous retry is GO on Jaguar1 and
    Jaguar3** (100% delivery, retries ≈ 0.2–0.3) including retargeting an
    arbitrary UE MAC mid-session (re-arm `SetAckResponder`, change the

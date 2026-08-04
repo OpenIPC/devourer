@@ -47,9 +47,12 @@ run_cell() { # $1 = cell name, $2 = responder env ("" = off)
   # ABORT, not read as "0% delivered": an unverified arm is exactly how the
   # 8821AU got a false "broken" verdict (three runs of a silently dead
   # responder — stale adapter lock, open failure — scored on=0/off=0).
-  local want="Listening air" waited=0
+  # RX-start line differs per generation ("Listening air" J1,
+  # "entering RX loop" J3, ...) — the URB-ring submit line is the
+  # generation-neutral tell.
+  local want="async ring of .* URBs submitted|Listening air" waited=0
   [ -n "$resp_env" ] && want="ACK responder armed"
-  until grep -q "$want" "$OUT/resp_$name.err"; do
+  until grep -qE "$want" "$OUT/resp_$name.err"; do
     sleep 1; waited=$((waited+1))
     if [ "$waited" -ge 25 ]; then
       echo "ABORT: cell $name responder never reached '$want' (${waited}s)" >&2

@@ -230,6 +230,8 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.debug.replay_wseq = e;
   if (env_long("DEVOURER_TX_QSEL", &v))
     cfg.debug.tx_qsel = static_cast<uint8_t>(v & 0x1f);
+  if (env_long("DEVOURER_TX_RATEID", &v))
+    cfg.debug.tx_rateid = static_cast<uint8_t>(v & 0x1f);
   /* "max[/density[/rty]]" — A-MPDU spike descriptor overrides. */
   if (const char *e = env_str("DEVOURER_TX_AMPDU")) {
     char *end = nullptr;

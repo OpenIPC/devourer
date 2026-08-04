@@ -94,4 +94,27 @@ enum MGN_RATE {
   MGN_UNKNOWN
 };
 
+/* TX-descriptor RATE_ID (RA group) for a forced-rate injected frame, from the
+ * frame's rate family + NSS + band — the 8822B/8822C-era RATEID_IDX_* table
+ * (vendor ieee80211.h). The group defines the rate-space the firmware retry
+ * ladder walks, and a family-mismatched group is exactly how retries of an
+ * MCS frame end up on the legacy chain (54M..6M on the 8822C, VHT wandering
+ * on the 8822B) — witness-measured per copy, tests/retry_ladder_probe.sh:
+ * with the family-correct group the 8822C fw steps MCSx -> MCS(x-1) -> 6M
+ * floor at 5 GHz (VHT: M7 -> M4 -> M1 -> M0 -> 6M), and at 2.4 GHz the
+ * B-containing group adds the CCK floor. 2SS group rows follow the vendor
+ * table symmetrically (unmeasured — no 2SS retry cell has run). */
+inline unsigned char rateid_for_mgn(unsigned char mgn, bool band5g) {
+  if (mgn >= MGN_VHT1SS_MCS0)                     /* VHT: 10 rates per NSS */
+    return mgn >= MGN_VHT2SS_MCS0 ? 9 /* VHT_2SS */ : 10 /* VHT_1SS */;
+  if (mgn >= MGN_MCS0)                            /* HT */
+    return mgn >= MGN_MCS8 ? (band5g ? 4 /* GN_N2SS */ : 2 /* BGN_20M_2SS */)
+                           : (band5g ? 5 /* GN_N1SS */ : 3 /* BGN_20M_1SS */);
+  if (mgn == MGN_MCS32) /* HT duplicate mode — 0x7F sorts BELOW MGN_MCS0 */
+    return band5g ? 5 : 3;
+  if (mgn == MGN_1M || mgn == MGN_2M || mgn == MGN_5_5M || mgn == MGN_11M)
+    return 8; /* B */
+  return band5g ? 7 /* G */ : 6 /* BG */;
+}
+
 #endif /* DEVOURER_RATE_DEFINITIONS_H */

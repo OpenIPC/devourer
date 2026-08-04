@@ -1457,7 +1457,12 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
   uint8_t bw_desc = (bwidth == CHANNEL_WIDTH_40)   ? 1
                     : (bwidth == CHANNEL_WIDTH_80) ? 2
                                                    : 0;
-  uint8_t rate_id = vht ? 9 : 8;
+  /* RA group by rate family/NSS/band (rateid_for_mgn, RateDefinitions.h):
+   * the group is the rate-space the fw retry ladder walks — the inherited
+   * `vht ? 9 : 8` put HT frames in VHT_2SS, whose retries wander into VHT
+   * rates on this fw (witness-measured, tests/retry_ladder_probe.sh). */
+  uint8_t rate_id = rateid_for_mgn(static_cast<unsigned char>(fixed_rate),
+                                   _channel.Channel > 14);
 
   /* Sub-channel (rtl8821c_sc_mapping): when the frame BW is narrower than the
    * tuned channel BW, tell the PHY which 20/40 MHz slice it occupies so the
@@ -1544,6 +1549,11 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
    * half-duplex link. Both fields sit inside the checksummed span. */
   SET_TX_DESC_RTY_LMT_EN_8822B(out, 1);
   SET_TX_DESC_RTS_DATA_RTY_LMT_8822B(out, _cfg.tx.retry_limit);
+  /* RA-group override (DEVOURER_TX_RATEID): the ladder-sweep lever the
+   * retry-ladder probe drives (tests/retry_ladder_probe.sh). Checksummed
+   * span. */
+  if (_cfg.debug.tx_rateid)
+    SET_TX_DESC_RATE_ID_8822B(out, *_cfg.debug.tx_rateid);
   /* Retry rate-fallback control (DEVOURER_TX_RETRY_FALLBACK): default leaves
    * the builder's DISDATAFB=0 (the fw ladder); Off pins retries at the
    * descriptor rate. No floor form (the RetryFallback note in DeviceConfig.h

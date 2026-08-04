@@ -32,7 +32,10 @@ TX_SA=${TX_SA:-02:aa:bb:cc:dd:01}
 LIMITS=${LIMITS:-0 2 8}
 SECS=${SECS:-6}
 
-KILL(){ sudo pkill -9 -x rxdemo 2>/dev/null; sudo pkill -9 -x txdemo 2>/dev/null; return 0; }
+# Kill only THIS tree's demos (anchored, ERE-escaped path) — a bare -x kill
+# would take down any other session's rxdemo/txdemo on the machine.
+ESC_BUILD=$(printf '%s' "$BUILD" | sed 's/[][\.*^$/]/\\&/g')
+KILL(){ sudo pkill -9 -f "^$ESC_BUILD/rxdemo" 2>/dev/null; sudo pkill -9 -f "^$ESC_BUILD/txdemo" 2>/dev/null; return 0; }
 trap KILL EXIT
 mkdir -p "$OUT"
 

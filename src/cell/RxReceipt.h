@@ -124,14 +124,22 @@ public:
   }
 
 private:
-  /* Ring addressing: index -> bit slot idx % _w. Valid because the window
-   * invariant keeps every live index within [_max - _w + 1, _max]. */
-  void set_bit(uint32_t idx) { _bits[(idx % _w) / 64] |= 1ull << (idx % 64); }
+  /* Ring addressing: index -> bit slot idx % _w, and BOTH the word and the
+   * bit offset derive from the slot — deriving the bit from idx % 64 is only
+   * equivalent when _w is a multiple of 64, and the window size is caller-
+   * chosen. Valid because the window invariant keeps every live index within
+   * [_max - _w + 1, _max]. */
+  void set_bit(uint32_t idx) {
+    const uint32_t s = idx % _w;
+    _bits[s / 64] |= 1ull << (s % 64);
+  }
   void clear_bit(uint32_t idx) {
-    _bits[(idx % _w) / 64] &= ~(1ull << (idx % 64));
+    const uint32_t s = idx % _w;
+    _bits[s / 64] &= ~(1ull << (s % 64));
   }
   bool get_bit(uint32_t idx) const {
-    return (_bits[(idx % _w) / 64] >> (idx % 64)) & 1u;
+    const uint32_t s = idx % _w;
+    return (_bits[s / 64] >> (s % 64)) & 1u;
   }
   static void put32(uint8_t *p, uint32_t v) {
     p[0] = v & 0xff;
@@ -183,18 +191,30 @@ inline bool receipt_decode(const uint8_t *p, size_t len, ReceiptView &out) {
   return true;
 }
 
-/* Transmitter half: merge receipts into the delivered-set. */
+/* Transmitter half: merge receipts into the delivered-set.
+ *
+ * `max_index` bounds the bitmap: receipts arrive OVER THE AIR, so `base` is
+ * attacker-influencable and an unbounded resize would let one crafted TLV
+ * (base near 2^32) allocate half a gigabyte. The default cap (2^26 frames =
+ * 8 MB of bitmap, ~7.7 h at 2.4 k fps) is far above any bench run; a peer
+ * whose real index space outgrows it should shard by session. */
 class ReceiptLedger {
 public:
+  explicit ReceiptLedger(uint64_t max_index = 1ull << 26)
+      : _max_index(max_index) {}
+
   /* Absorb a receipt covering our TA. Returns the number of NEWLY-learned
    * delivered indices (0 for a pure re-receipt), or -1 if the TLV does not
-   * parse or names a different transmitter. */
+   * parse, names a different transmitter, or claims indices beyond the
+   * ledger's cap. */
   long absorb(const uint8_t *tlv, size_t len, const uint8_t own_ta[6]) {
     ReceiptView v;
     if (!receipt_decode(tlv, len, v) || std::memcmp(v.ta, own_ta, 6) != 0)
       return -1;
     std::lock_guard<std::mutex> lk(_mu);
     const uint64_t top = static_cast<uint64_t>(v.base) + v.nbits;
+    if (top > _max_index)
+      return -1;
     if (top > _bits.size() * 64)
       _bits.resize((top + 63) / 64, 0);
     long fresh = 0;
@@ -237,6 +257,7 @@ public:
 
 private:
   mutable std::mutex _mu;
+  uint64_t _max_index;
   std::vector<uint64_t> _bits;
   uint64_t _total = 0;
   uint64_t _highest_covered = 0;

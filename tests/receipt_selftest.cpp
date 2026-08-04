@@ -102,6 +102,28 @@ int main() {
     std::memcpy(bad, buf, n);
     bad[2] = 99;
     assert(led.absorb(bad, n, kTa) == -1);
+    /* Over-the-air DoS guard: a crafted base near 2^32 must refuse, not
+     * allocate half a gigabyte of bitmap. */
+    std::memcpy(bad, buf, n);
+    bad[10] = bad[11] = bad[12] = bad[13] = 0xff;
+    assert(led.absorb(bad, n, kTa) == -1);
+    assert(led.delivered_total() == 98); /* untouched by the rejects */
+  }
+
+  /* Ring addressing with a window that is NOT a multiple of 64 — the word
+   * and bit offsets must both derive from the slot, or bits land in the
+   * wrong positions once idx % _w and idx % 64 diverge. */
+  {
+    ReceiptWindow w(100);
+    std::set<uint32_t> fed;
+    for (uint32_t i = 150; i < 250; i += 7) { /* crosses the ring seam */
+      w.note(i);
+      fed.insert(i);
+    }
+    uint8_t buf[receipt_tlv_size(100)];
+    const size_t n = w.encode(kTa, buf, sizeof buf);
+    assert(n != 0);
+    assert(decode_set(buf, n) == fed);
   }
 
   std::puts("receipt selftest: OK");

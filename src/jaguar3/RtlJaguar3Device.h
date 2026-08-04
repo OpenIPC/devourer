@@ -249,8 +249,12 @@ private:
   std::atomic<int> _tx_pwr_override{-1};
   std::atomic<int> _tx_pwr_offset_steps{0};
   /* Rotating SW_DEFINE tag stamped when tx.report is on — the CCX report
-   * echoes its low byte, correlating reports to frames (src/TxReport.h). */
-  std::atomic<uint16_t> _tx_rpt_tag{0};
+   * echoes its low byte, correlating reports to frames (src/TxReport.h).
+   * 64-bit: the counter also gates the sampled SPE_RPT request (every Nth
+   * frame), and a narrow counter's wrap would jump the sampling phase for
+   * any N that doesn't divide it — off-modulo tag deltas masquerading as
+   * dropped reports at every seam. */
+  std::atomic<uint64_t> _tx_rpt_tag{0};
   /* Per-packet TX-power banks (SetTxPacketPowerOffsetQdb / radiotap
    * DBM_TX_POWER). _txpkt_banks is the allocation policy,
    * mutated under _reg_mu; _txpkt_img mirrors its committed 0x1e70[31:16]

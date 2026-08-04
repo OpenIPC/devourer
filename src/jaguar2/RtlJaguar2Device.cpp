@@ -1528,10 +1528,10 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
      * emission saturates at ~1.3k reports/s, and with the tag continuous a
      * received-report tag delta other than N is a dropped report. Both
      * fields sit inside the checksummed span — re-checksum (idempotent). */
-    const uint16_t k = _tx_rpt_tag.fetch_add(1);
+    const uint64_t k = _tx_rpt_tag.fetch_add(1);
     SET_TX_DESC_SPE_RPT_8822B(
-        out, k % static_cast<uint16_t>(_cfg.tx.report) == 0 ? 1 : 0);
-    SET_TX_DESC_SW_DEFINE_8822B(out, k & 0xff);
+        out, k % static_cast<uint64_t>(_cfg.tx.report) == 0 ? 1 : 0);
+    SET_TX_DESC_SW_DEFINE_8822B(out, static_cast<uint16_t>(k & 0xff));
     jaguar2::cal_txdesc_chksum_8822b(out);
   }
   /* Per-frame retry limit from cfg (DEVOURER_TX_RETRY_LIMIT, default 0) —

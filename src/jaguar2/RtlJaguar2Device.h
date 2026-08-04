@@ -249,8 +249,12 @@ private:
   /* Default per-packet TXPWR_OFSET LUT step (0 = none) — see SetTxPacketPowerStep. */
   std::atomic<uint8_t> _tx_pkt_pwr_step{0};
   /* Rotating SW_DEFINE tag stamped when tx.report is on — the CCX report
-   * echoes its low byte, correlating reports to frames (src/TxReport.h). */
-  std::atomic<uint16_t> _tx_rpt_tag{0};
+   * echoes its low byte, correlating reports to frames (src/TxReport.h).
+   * 64-bit: the counter also gates the sampled SPE_RPT request (every Nth
+   * frame), and a narrow counter's wrap would jump the sampling phase for
+   * any N that doesn't divide it — off-modulo tag deltas masquerading as
+   * dropped reports at every seam. */
+  std::atomic<uint64_t> _tx_rpt_tag{0};
   /* A-MPDU TX mode (SetAmpduMode). Read lock-free in the TX descriptor path
    * (same pattern as _tx_mode_default); a control-plane write during TX is
    * the caller's to sequence and at worst tears one frame's mode benignly. */

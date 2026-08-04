@@ -53,8 +53,11 @@ re-airing one frame N times.
 
 ## TX-status reports (`tx.report`)
 
-`DeviceConfig tx.report` (env `DEVOURER_TX_REPORT`) sets `SPE_RPT` in every
-data descriptor; the firmware answers each transmission with a CCX report,
+`DeviceConfig tx.report` (env `DEVOURER_TX_REPORT`, value = sampling divisor
+N) sets `SPE_RPT` in every Nth data descriptor — 1 = every frame; above
+~1.25 k fps sample with N ≥ fps/1300 or the fw's ~1.3 k reports/s CCX
+emission ceiling collapses coverage (docs/scheduled-mac.md). The firmware
+answers each requested transmission with a CCX report,
 decoded at the C2H RX sites into `tx.report` events (`src/TxReport.h`): `state`
 (0 = delivered/completed, 1 = retry-drop), `retries` (hardware
 retransmissions), `queue_time_raw`, `final_rate`, `bmc`. HalMAC reports echo

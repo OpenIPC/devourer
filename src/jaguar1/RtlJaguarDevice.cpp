@@ -1171,7 +1171,7 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
   if (_cfg.tx.report)
     SET_TX_DESC_SPE_RPT_8812(
         usb_frame,
-        _tx_ccx_ctr.fetch_add(1) % static_cast<uint32_t>(_cfg.tx.report) == 0
+        _tx_ccx_ctr.fetch_add(1) % static_cast<uint64_t>(_cfg.tx.report) == 0
             ? 1
             : 0);
   SET_TX_DESC_RETRY_LIMIT_ENABLE_8812(usb_frame, 1);

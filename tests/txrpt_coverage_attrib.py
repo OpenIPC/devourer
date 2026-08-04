@@ -73,7 +73,9 @@ def analyze(rundir, sample_n=1):
         # Sampled run: only every Nth frame requested a report, so the raw
         # tag deltas should be exact multiples of N. k*N = k-1 sampled
         # reports dropped; a non-multiple delta is an anomaly.
-        expected = submitted // sample_n
+        # The request fires on k % N == 0, i.e. frame 0 first — ceil, not
+        # floor, or odd totals undercount the expectation by one.
+        expected = (submitted + sample_n - 1) // sample_n
         lost = anomalies = 0
         for d, c in gaps.items():  # keys are delta-1
             delta = d + 1

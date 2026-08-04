@@ -44,7 +44,13 @@ struct TxReport {
   uint16_t queue_time_raw = 0; /* Jaguar1: 256 µs units; halmac: raw fw units */
   uint8_t final_rate = 0;  /* DESC_RATE* hw index of the final attempt */
   uint8_t sw_define = 0;   /* halmac: descriptor SW_DEFINE byte-0 echo */
-  uint8_t missed_rpt = 0;  /* halmac: reports the fw dropped before this one */
+  uint8_t missed_rpt = 0;  /* halmac MISSED_RPT_NUM — bench-measured on the
+                            * 8812CU: the fw stuffs a CONSTANT (4) here on
+                            * every report, drops or no drops, so the field
+                            * carries no drop accounting on Jaguar3. Detect
+                            * emission drops from SW_DEFINE tag gaps instead;
+                            * the measured emission ceiling and gap shape are
+                            * in docs/scheduled-mac.md. */
 };
 
 /* Jaguar1 (8812/8821) CCX payload: `p` points AFTER the 2-byte C2H envelope

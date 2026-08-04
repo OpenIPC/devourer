@@ -235,7 +235,13 @@ struct DeviceConfig {
      * byte0 on Kestrel. Applied at bring-up. Bench: shrinking it below the
      * ACK flight time (8 µs) pins retries at the limit with 0%% ok against
      * a live responder — the register provably gates the ARQ verdict —
-     * while 255 behaves as the default at bench range. */
+     * while 255 behaves as the default at bench range WHEN ACKS ARRIVE.
+     * The adversarial half: every retry of a LOST frame waits the full
+     * window, so a long window slows the write-off cadence under loss —
+     * measured (dead RA, retry 8, max duty): 33 µs default 2719 write-offs
+     * /8 s vs 128 µs 2015 vs 255 µs 1507 (~1.8x slower). Size the window
+     * to the link (~6.7 µs/km + ACK flight + margin), don't just max it —
+     * and that is why the default is 0/vendor-faithful, not 255. */
     int ack_timeout_us = 0;
     /* env: DEVOURER_TX_RETRY_FALLBACK — "off" | unset. Unset = the firmware
      * fallback ladder with its own floor (the current behaviour, descriptors

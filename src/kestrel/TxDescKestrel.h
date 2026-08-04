@@ -44,6 +44,15 @@ constexpr uint32_t DATA_DCM_V1 = 1u << 30; /* wd_body dword7 (8852C) */
 constexpr uint32_t BMC = 1u << 11;         /* wd_info dword1: broadcast/multicast
                                             * — group-addressed, no ACK expected,
                                             * so the fw must not retry it */
+/* wd_info dword1 per-frame TX-count limit (vendor txdesc.h AX_TXD_DATA_
+ * TXCNT_LMT*, continuous-dword 7 on the 8852B / 9 on the V1 — the same
+ * wd_info-relative dword both dies): SEL selects this WD's limit over the
+ * per-MACID CCTRL value, the field is 6 bits. The neighbouring
+ * DATA_RTY_LOWEST_RATE [24:16] stays deliberately unwritten — the floor form
+ * was measured anomalous on 11ac (RetryFallback note in DeviceConfig.h) and
+ * is not ported here either. */
+constexpr uint32_t DATA_TXCNT_LMT_SEL = 1u << 31; /* wd_info dword1 */
+constexpr uint8_t DATA_TXCNT_LMT_SH = 25;         /* wd_info dword1 [30:25] */
 } /* namespace txd */
 
 /* Map a devourer MGN_* rate (RateDefinitions.h) to the AX_TXD_DATARATE encoding
@@ -147,11 +156,30 @@ inline void put_txdesc_rate(uint8_t *wd, uint32_t wd_body_len, const TxRate &r) 
   }
 }
 
+/* wd_info dword1 composer shared by the mgmt/data builders: BMC for a
+ * group-addressed RA (fw must not retry an unacked broadcast), plus the
+ * per-frame TX-count limit when the caller passes one (txcnt_lmt 0..63;
+ * -1 = leave SEL clear -> the per-MACID / firmware default governs). */
+inline uint32_t wd_info_dword1(const uint8_t *frame, uint32_t frame_len,
+                               int txcnt_lmt) {
+  uint32_t d1 = 0;
+  if (frame_len >= 5 && (frame[4] & 0x01))
+    d1 |= txd::BMC;
+  if (txcnt_lmt >= 0) {
+    /* Clamp, never mask: 64 & 0x3f would silently program 0 attempts —
+     * the opposite of what an out-of-range caller wanted. */
+    const uint32_t lmt = txcnt_lmt > 63 ? 63u : static_cast<uint32_t>(txcnt_lmt);
+    d1 |= txd::DATA_TXCNT_LMT_SEL | (lmt << txd::DATA_TXCNT_LMT_SH);
+  }
+  return d1;
+}
+
 inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
                                               uint32_t frame_len,
                                               const TxRate &r, uint8_t macid,
                                               uint16_t seq,
-                                              uint32_t wd_body_len = WD_BODY_LEN) {
+                                              uint32_t wd_body_len = WD_BODY_LEN,
+                                              int txcnt_lmt = -1) {
   /* The 8852C data/mgmt TX descriptor is the 32-byte wd_body_t_v1 (dwords 6/7
    * added, dword0-5 field layout identical); the 8852B is the 24-byte wd_body_t.
    * A short WD desyncs the MAC TX parser and the frame never airs (buffer still
@@ -174,12 +202,12 @@ inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
   txd_put_le32(wd + 12, static_cast<uint32_t>(seq & 0xfff) << txd::WIFI_SEQ_SH);
   /* dword4,5 (+ v1 dword6,7) = 0 */
 
-  /* wd_info dword1: mark a group-addressed frame (RA bit0 set — e.g. an injected
-   * broadcast Trigger) as BMC. Without it the fw treats the unacked broadcast as
-   * a failed unicast and retransmits it to the retry limit (~45x the airtime).
-   * The 802.11 RA (addr1) is at frame offset 4 (after FC + Duration). */
-  if (frame_len >= 5 && (frame[4] & 0x01))
-    txd_put_le32(wd + wd_body_len + 4, txd::BMC);
+  /* wd_info dword1: BMC for a group-addressed RA (without it the fw treats
+   * the unacked broadcast as a failed unicast and retransmits it to the
+   * retry limit, ~45x the airtime; addr1 is at frame offset 4) + the
+   * per-frame TX-count limit. */
+  if (const uint32_t d1 = wd_info_dword1(frame, frame_len, txcnt_lmt))
+    txd_put_le32(wd + wd_body_len + 4, d1);
 
   /* Rate fields: force the rate (USERATE_SEL) + DATARATE + BW + GI/LTF +
    * LDPC/STBC + no fallback. On the 8852B (24-byte wd_body) these all live in
@@ -202,7 +230,8 @@ inline std::vector<uint8_t> build_data_txdesc(const uint8_t *frame,
                                               uint32_t frame_len,
                                               const TxRate &r, uint8_t macid,
                                               uint16_t seq,
-                                              uint32_t wd_body_len = WD_BODY_LEN) {
+                                              uint32_t wd_body_len = WD_BODY_LEN,
+                                              int txcnt_lmt = -1) {
   const uint32_t txd_len = wd_body_len + WD_INFO_LEN;
   std::vector<uint8_t> buf(txd_len + frame_len, 0);
   uint8_t *wd = buf.data();
@@ -217,6 +246,9 @@ inline std::vector<uint8_t> build_data_txdesc(const uint8_t *frame,
                    (static_cast<uint32_t>(macid & 0x7f) << txd::MACID_SH));
   /* dword3: WIFI_SEQ (no ampdu_en). */
   txd_put_le32(wd + 12, static_cast<uint32_t>(seq & 0xfff) << txd::WIFI_SEQ_SH);
+  /* wd_info dword1: BMC + per-frame TX-count limit (same as mgmt). */
+  if (const uint32_t d1 = wd_info_dword1(frame, frame_len, txcnt_lmt))
+    txd_put_le32(wd + wd_body_len + 4, d1);
   /* Rate fields: same split as mgmt (V1 -> wd_body dword7, else wd_info d0). */
   put_txdesc_rate(wd, wd_body_len, r);
   std::memcpy(wd + txd_len, frame, frame_len);

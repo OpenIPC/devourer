@@ -74,6 +74,18 @@ EDCCA/CCA gate disabled (`sch_tx_en`, TX path only) — the intended
 injection/monitor-link mode. `ReadTsf` reads the per-port MAC TSF;
 `StartBeacon` drives the AX HW beacon engine.
 
+**Per-frame retry limit** (`DEVOURER_TX_RETRY_LIMIT`): the AX WD wd_info
+dword1 `DATA_TXCNT_LMT[30:25]` + SEL(31) — NOT a mac_ax H2C (the per-MACID
+CCTRL twin exists but the WD field is the injection-path mechanism). The
+field counts **attempts** (witness-measured on the 8832CU, unACKable-unicast
+copy counts: limit-value 2 → modal 2 copies where the 11ac retries-field
+gives 3; value 0 hardware-clamps to one attempt), so `send_packet` folds +1
+to keep N-means-N-retries across generations. The neighbouring
+`DATA_RTY_LOWEST_RATE` floor field stays unwritten (the 11ac floor-form
+anomaly, `RetryFallback` note in `DeviceConfig.h`). No CCX `tx.report`
+exists on this family — `tests/kestrel_retry_witness.sh` (stamped-pctr copy
+counting on a witness monitor) is the retry ground truth.
+
 **HE ER SU + DCM extended range** (both dies): per-packet via radiotap-HE
 FORMAT=EXT_SU or `DEVOURER_TX_RATE=.../ER[/DCM]`; RX classifies the format in
 `RxAtrib.ppdu_type` (7=HE_SU, 8=HE_ERSU) — `docs/he-extended-range.md`.

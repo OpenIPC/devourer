@@ -173,10 +173,12 @@ struct AdapterCaps {
    * the recipe but no 8821CU/CE cell has run. FALSE on Kestrel:
    * SetAckResponder is not implemented on the AX generation.
    * tx_retry_limit_ok: DEVOURER_TX_RETRY_LIMIT drives hardware autonomous
-   * retransmission (measured 12/0/12 A/B: 8821AU, 8812BU, 8822CU). FALSE on
-   * the 8814A die (the vendor DATA_RETRY_LIMIT=0 carve-out is kept — knob
-   * inert), false-as-unmeasured on the 8821C, and FALSE on Kestrel (retry is
-   * firmware-level there). */
+   * retransmission (measured 12/0/12 A/B: 8821AU, 8812BU, 8822CU; Kestrel
+   * 8832CU witness-measured — the AX WD DATA_TXCNT_LMT field counts
+   * ATTEMPTS, folded +1 to the N-retries contract, limits {0,2,8} -> modal
+   * on-air copies {1,3,8-9}). FALSE on the 8814A die (the vendor
+   * DATA_RETRY_LIMIT=0 carve-out is kept — knob inert) and
+   * false-as-unmeasured on the 8821C. */
   bool ack_responder_ok = false;
   bool tx_retry_limit_ok = false;
 

@@ -783,6 +783,9 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   c.tx_chains = 2; /* 8852B/8852C are 2T2R */
   c.rx_chains = 2;
   c.per_chain_rssi = true; /* per-path RSSI from the PPDU-status physts header */
+  /* Hardware ARQ: SetAckResponder is not implemented on the AX generation
+   * (matrix-measured 0% closure) and retry is firmware-level here, so the
+   * DEVOURER_TX_RETRY_LIMIT knob is inert — both flags stay false. */
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   if (_variant == kestrel::ChipVariant::C8852C)
     c.bw_mask |= devourer::kBw160; /* 8852C-only (vendor bw_sup BW_CAP_160M) */

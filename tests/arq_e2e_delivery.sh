@@ -44,6 +44,7 @@ MAC1=${MAC1:-02:12:34:56:78:9a}        # DUT responder identity = drone RA
 TX_SA=${TX_SA:-02:aa:bb:cc:dd:01}      # drone TA (unicast — the I/G footgun)
 RETRY_LIMIT=${RETRY_LIMIT:-3}          # field report used 3
 DRONE_REPORT_N=${DRONE_REPORT_N:-1}    # CCX sampling divisor (1 = every frame)
+DRONE_FALLBACK=${DRONE_FALLBACK:-}     # retry rate fallback: off | <rate> | ""
 RECEIPT_MS=${RECEIPT_MS:-}             # windowed RX receipts cadence (off="")
 DRONE_RATE=${DRONE_RATE:-MCS3}
 DRONE_PAYLOAD=${DRONE_PAYLOAD:-512}    # >= 30 so the pctr stamp fits
@@ -167,6 +168,7 @@ env DEVOURER_VID="$DRONE_VID" DEVOURER_PID="$DRONE_PID" DEVOURER_CHANNEL="$CH" \
     DEVOURER_TX_RATE="$DRONE_RATE" DEVOURER_TX_PAYLOAD_BYTES="$DRONE_PAYLOAD" \
     DEVOURER_TX_GAP_US="$DRONE_GAP_US" \
     DEVOURER_TX_REPORT="$DRONE_REPORT_N" DEVOURER_TX_RETRY_LIMIT="$RETRY_LIMIT" \
+    ${DRONE_FALLBACK:+DEVOURER_TX_RETRY_FALLBACK="$DRONE_FALLBACK"} \
     ${RECEIPT_MS:+DEVOURER_TX_RECEIPTS=1 DEVOURER_TX_WITH_RX=thread} \
     DEVOURER_DIS_CCA="$DRONE_DIS_CCA" \
     DEVOURER_TX_PWR_OFFSET_QDB="$PWR_QDB" \

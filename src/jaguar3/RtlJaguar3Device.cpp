@@ -2017,6 +2017,12 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
    * half-duplex link. Both fields sit inside the checksummed span. */
   SET_TX_DESC_RTY_LMT_EN_8822C(out, 1);
   SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(out, _cfg.tx.retry_limit);
+  /* Retry rate-fallback control (DEVOURER_TX_RETRY_FALLBACK): default leaves
+   * the builder's DISDATAFB=0 (the fw ladder — measured stepping toward 6M
+   * on deep retries); Off pins retries at the descriptor rate; Floor bounds
+   * the ladder. Same checksummed span as the retry limit. */
+  if (_cfg.tx.retry_fallback == devourer::RetryFallback::Off)
+    SET_TX_DESC_DISDATAFB_8822C(out, 1);
   jaguar3::cal_txdesc_chksum_8822c(out);
   const devourer::AmpduMode am = _ampdu; /* one lock-free load */
   if (am.enabled || _cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {

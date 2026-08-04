@@ -115,6 +115,17 @@ devourer::DeviceConfig devourer_config_from_env() {
   }
   if (env_long("DEVOURER_TX_RETRY_LIMIT", &v))
     cfg.tx.retry_limit = static_cast<int>(v < 0 ? 0 : (v > 63 ? 63 : v));
+  if (const char *e = env_str("DEVOURER_TX_RETRY_FALLBACK")) {
+    if (str_ieq(e, "off"))
+      cfg.tx.retry_fallback = devourer::RetryFallback::Off;
+    else
+      /* A floor form was measured and rejected — the fw reinterprets
+       * DATA_RTY_LOWEST_RATE inside the RA-group rate space (see the
+       * RetryFallback enum note in DeviceConfig.h). */
+      std::fprintf(stderr,
+                   "devourer [W] DEVOURER_TX_RETRY_FALLBACK='%s' unsupported "
+                   "(only \"off\") — keeping the firmware ladder\n", e);
+  }
 
   /* ---- bf ---- */
   if (const char *snd = env_str("DEVOURER_BF_ARM_SOUNDER")) {

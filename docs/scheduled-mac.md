@@ -207,6 +207,18 @@ separately proven (`tests/ack_responder_check.sh`).
    HalMAC tag gaps (interior losses); the reliability layer must tolerate a
    ~5–15% report-less frame tail (treat missing report as "unknown", not
    "delivered").
+
+   Coverage is rate-bounded (`tests/txrpt_coverage_attrib.py`, 8812CU TX):
+   the CCX emission path saturates at ~1.3–1.4k reports/s — full coverage to
+   ~1.25 k fps, then `coverage ≈ ceiling/fps` (measured 99.4% @ 1.26 k,
+   77.2% @ 1.82 k, 53–56% @ 2.39 k fps). The excess drops per-report and
+   interleaved (99.3% of unreported frames sit in tag gaps ≤ 2 — an
+   emission-time rate limiter, not transport-batch loss), and the CCX
+   MISSED_RPT_NUM field is stuffed with a constant on this fw (verified
+   against the 8822B/C/E vendor headers — parse is exact, the fw just
+   doesn't populate it), so tag gaps are the only drop signal. Above the
+   ceiling, either sample SPE_RPT 1-in-N to keep the demanded rate under
+   ~1.3 k/s or account report-less frames as "unknown".
 2. **Closed-loop hardware ACK + autonomous retry is GO on Jaguar1 and
    Jaguar3** (100% delivery, retries ≈ 0.2–0.3) including retargeting an
    arbitrary UE MAC mid-session (re-arm `SetAckResponder`, change the

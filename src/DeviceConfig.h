@@ -337,10 +337,17 @@ struct DeviceConfig {
      * follow-up: the fw replays cfg_param but lazily, and its rsvd-page download
      * stalls per batch. */
     int fw_table_offload = 0;
-    /* env: DEVOURER_DIS_CCA — Jaguar2/3 MAC carrier-sense disable at bring-up
-     * (primary CCA 0x520[14] + EDCCA [15]): injected/beacon TX stops deferring to
-     * a busy channel and punches through co-channel traffic. Runtime equivalent:
-     * SetCcaMode. Default-on on the streamtx FPV downlink. */
+    /* env: DEVOURER_DIS_CCA — MAC carrier-sense disable at bring-up, every
+     * generation (primary CCA 0x520[14] + EDCCA [15]; Jaguar1 additionally
+     * programs/parks its BB EDCCA thresholds 0x8a4 — its init table leaves
+     * them at never-trigger, and the explicit apply is what makes EDCCA
+     * real on that family): injected/beacon TX stops deferring to a
+     * busy channel and punches through co-channel traffic. Default false =
+     * carrier-sense + EDCCA ENABLED (the standards-compliant default) on
+     * Jaguar1/2/3. Kestrel's TX bring-up clears the gates regardless and
+     * warns — carrier-sense TX 103-stalls there without the un-ported
+     * IQK/DPK cal. Runtime equivalent: SetCcaMode. Default-on on the
+     * streamtx FPV downlink (the link owns the channel). */
     bool disable_cca = false;
     /* env: DEVOURER_TXPKT_STEP_QDB — Jaguar3 per-packet power-bank step size
      * in quarter-dB: the dB weight of one 0x1e70 offset-index step

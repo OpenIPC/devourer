@@ -53,6 +53,13 @@ public:
   /* Run one watchdog cycle synchronously on the calling thread. */
   void TickOnce();
 
+  /* EDCCA threshold tracking (the SetCcaMode enable path): when on, each
+   * tick re-derives the BB 0x8a4 L2H/H2L from the IGI DIG just wrote —
+   * the vendor couples the EDCCA threshold to IGI per watchdog cycle
+   * (phydm_adaptivity). Off = leave 0x8a4 alone (SetCcaMode owns the
+   * parked/static value). */
+  void SetEdccaTrack(bool on) { _edcca_track.store(on, std::memory_order_relaxed); }
+
   /* Most-recent FA counter snapshot — exposed for diagnostics /
    * future DIG integration. */
   struct FaCnt {
@@ -114,11 +121,25 @@ private:
    * just walk based on FA count). */
   bool _digInitialised = false;
   uint8_t _cur_ig_value = 0x20;
+  std::atomic<bool> _edcca_track{false};
+  uint8_t _edcca_last_l2h = 0x7f; /* parked sentinel — first tick writes */
   uint8_t _dm_dig_max = 0x26;       /* DIG_MAX_COVERAGR */
   uint8_t _dm_dig_min = 0x1c;       /* DIG_MIN_COVERAGE */
   uint8_t _dig_max_of_min = 0x2a;   /* DIG_MAX_OF_MIN_BALANCE_MODE */
   uint8_t _rx_gain_range_max = 0x2a;
   uint8_t _rx_gain_range_min = 0x1c;
 };
+
+/* Vendor adaptivity operating point for the 11AC dies (phydm_adaptivity.c
+ * phydm_adaptivity / phydm_set_l2h_th_ini): the BB EDCCA low-to-high
+ * threshold is IGI-coupled — L2H = th_l2h_ini + (igi_base 0x32 − IGI),
+ * upper-clamped to 10; H2L = L2H − 7. th_l2h_ini is −14 (0xf2) on the
+ * 8814A, −17 (0xef) on the 8812A/8811A/8821A. Shared by the one-shot
+ * SetCcaMode apply (static IGI, watchdog off — the default config) and the
+ * per-tick re-track (watchdog on). */
+inline int8_t jaguar1_edcca_l2h(int8_t th_l2h_ini, uint8_t igi) {
+  const int l2h = th_l2h_ini + (0x32 - static_cast<int>(igi));
+  return static_cast<int8_t>(l2h > 10 ? 10 : l2h);
+}
 
 #endif /* PHYDM_WATCHDOG_H */

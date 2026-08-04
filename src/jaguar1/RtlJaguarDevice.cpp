@@ -76,6 +76,11 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
   if (_cfg.rx.ack_responder)
     SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
 
+  /* Carrier-sense default: EDCCA + primary CCA enabled unless
+   * DEVOURER_DIS_CCA. Always applied — the enable path is what programs
+   * the BB EDCCA thresholds off their parked never-trigger table value. */
+  SetCcaMode(_cfg.tuning.disable_cca);
+
   /* DEVOURER_XTAL_CAP — crystal-cap trim (issue #217, narrowband CFO lever). */
   if (_cfg.tuning.xtal_cap)
     SetXtalCap(*_cfg.tuning.xtal_cap);
@@ -750,6 +755,51 @@ void RtlJaguarDevice::ClearAckResponder() {
   _logger->info("Jaguar1: hardware ACK responder disarmed (net_type=NoLink)");
 }
 
+void RtlJaguarDevice::SetCcaMode(bool disabled) {
+  /* MAC carrier-sense gate: the same REG_TX_PTCL_CTRL bits as the HalMAC
+   * generations — the vendor's phydm_mac_edcca_state drives 0x520[15] on
+   * this family too; [14] is the primary-CCA defer. */
+  uint32_t v520 = _device.rtw_read<uint32_t>(0x0520);
+  if (disabled)
+    v520 |= (1u << 15) | (1u << 14);
+  else
+    v520 &= ~((1u << 15) | (1u << 14));
+  _device.rtw_write<uint32_t>(0x0520, v520);
+
+  /* BB EDCCA thresholds (rEDCCA_Jaguar 0x8a4: L2H byte0 / H2L byte1). The
+   * BB init table parks them at 0x7f/0x7f = never-trigger — the vendor's
+   * adaptivity-off default (CONFIG_RTW_ADAPTIVITY_EN 0). Parked, the BB
+   * never raises the EDCCA signal, so the MAC gate [15] has nothing to
+   * honour — enable must program the vendor operating point from the live
+   * IGI for EDCCA to exist at all; disable re-parks. */
+  const auto ic = _eepromManager->version_id.ICType;
+  if (disabled) {
+    _device.phy_set_bb_reg(0x8a4, 0xFFFF, 0x7f7f);
+  } else {
+    const int8_t th_ini = ic == CHIP_8814A ? -14 : -17;
+    const uint8_t igi = static_cast<uint8_t>(
+        _radioManagement->phy_query_bb_reg_public(0xc50, 0x7f));
+    const int8_t l2h = jaguar1_edcca_l2h(th_ini, igi);
+    _device.phy_set_bb_reg(0x8a4, 0xFF, static_cast<uint8_t>(l2h));
+    _device.phy_set_bb_reg(0x8a4, 0xFF00, static_cast<uint8_t>(l2h - 7));
+    if (ic == CHIP_8812) {
+      /* Vendor 8812A enable-hang erratum ("fix AC series when enable EDCCA
+       * hang issue"): pulse the ADC mask once after programming. */
+      _device.phy_set_bb_reg(0x800, 1u << 10, 1);
+      _device.phy_set_bb_reg(0x800, 1u << 10, 0);
+    }
+    _logger->info("Jaguar1: EDCCA thresholds L2H/H2L = {}/{} (igi=0x{:02x})",
+                  l2h, l2h - 7, igi);
+  }
+  /* With the watchdog running, DIG walks IGI — hand it the re-track so the
+   * threshold follows (vendor couples them per adaptivity cycle). */
+  if (auto *wd = _halModule.phydm_watchdog())
+    wd->SetEdccaTrack(!disabled);
+  _logger->info("Jaguar1: MAC carrier-sense {}",
+                disabled ? "DISABLED (dis_cca: CCA+EDCCA)"
+                         : "enabled (default)");
+}
+
 bool RtlJaguarDevice::SetAmpduMode(const devourer::AmpduMode &mode) {
   /* A-MPDU TX mode (src/AmpduMode.h): record the descriptor state the TX path
    * reads and program the Jaguar1 MAC pacing registers. NB the aggregate-fill
@@ -1278,6 +1328,11 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
 
   if (_cfg.rx.ack_responder)
     SetAckResponder(*_cfg.rx.ack_responder); /* DEVOURER_ACK_RESPONDER */
+
+  /* Carrier-sense default: EDCCA + primary CCA enabled unless
+   * DEVOURER_DIS_CCA. Always applied — the enable path is what programs
+   * the BB EDCCA thresholds off their parked never-trigger table value. */
+  SetCcaMode(_cfg.tuning.disable_cca);
 
   /* DEVOURER_XTAL_CAP — crystal-cap trim (issue #217, narrowband CFO lever). */
   if (_cfg.tuning.xtal_cap)

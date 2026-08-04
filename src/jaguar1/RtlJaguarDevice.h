@@ -256,6 +256,11 @@ public:
   /* Hardware ACK responder (IRtlDevice contract; src/AckResponder.h). */
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
+  /* Carrier-sense gate (IRtlDevice contract): MAC 0x520[14]/[15] like the
+   * HalMAC generations, plus this family's BB EDCCA thresholds (0x8a4) —
+   * parked at never-trigger by the BB table, programmed to the vendor
+   * operating point on enable (EDCCA only exists once they are set). */
+  void SetCcaMode(bool disabled) override;
   /* A-MPDU TX mode (IRtlDevice contract; src/AmpduMode.h). Programs the
    * Jaguar1 aggregate-fill timer (0x0456 — NOT the 0x0455 the HalMAC chips
    * use) + the 8814A burst-mode gate (0x04BC), and records the descriptor

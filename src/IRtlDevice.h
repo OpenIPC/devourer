@@ -405,13 +405,16 @@ public:
    * against a decodable preamble — the primary-CCA bit [14] is what recovers the
    * inject path. This is the MAC-gate only; the vendor's BB CCA-off writes are
    * NOT applied (they deafen the RX). Also DEVOURER_DIS_CCA at construction.
-   * Implemented on Jaguar2/3 and Kestrel (the AX R_AX_CCA_CFG_0 all-CCA-EN field —
-   * on Kestrel injection is already CCA-off by default via sch_tx_en, so this is a
-   * runtime toggle rather than the deferral fix it is on Jaguar); a DELIBERATE
-   * no-op on Jaguar1, whose baseband EDCCA is already disabled by its init table
-   * (0x8A4 = 0x7F7F7F7F) and whose hardware-beacon downlink measures ~0.34 µs RMS
-   * on a crowded channel with no MAC-side gate. */
-  virtual void SetCcaMode(bool disabled) { (void)disabled; }
+   *
+   * Pure virtual: every generation implements or loudly refuses — a silent
+   * no-op here reads as "carrier-sense changed" to the caller. Default
+   * state on Jaguar1/2/3 is carrier-sense + EDCCA ENABLED (Jaguar1 programs
+   * its BB EDCCA thresholds at bring-up — its init table parks them at
+   * never-trigger); Kestrel's TX path keeps the gates cleared because
+   * carrier-sense TX 103-stalls without the un-ported IQK/DPK cal
+   * (perpetual-busy detectors) — it logs that loudly instead of
+   * pretending. */
+  virtual void SetCcaMode(bool disabled) = 0;
 
   /* Shift the next hardware beacon TBTT by `microseconds` (>0 = later/retard,
    * <0 = earlier/advance), quantized to whole TU (1 TU = 1024 µs). One-shot

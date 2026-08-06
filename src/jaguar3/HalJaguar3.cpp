@@ -768,9 +768,12 @@ void HalJaguar3::cache_efuse_8822e() {
 bool HalJaguar3::perm_mac(uint8_t out[6]) {
   if (out == nullptr)
     return false;
-  if (!_perm_mac_valid && _variant == ChipVariant::C8822C) {
+  if (!_perm_mac_valid && !_perm_mac_probed && _variant == ChipVariant::C8822C) {
     /* 8822C OTP stays readable post-bring-up (it is why probe_efuse_map is
-     * 8822C-only), so decode on demand and keep the result. */
+     * 8822C-only), so decode on demand and keep the result — including a
+     * negative one: the map walk is real register I/O under the device lock,
+     * and an unprogrammed EFUSE stays unprogrammed, so one attempt is enough. */
+    _perm_mac_probed = true;
     uint8_t map[kMacLogicalOff + 0x10] = {};
     read_efuse_logical_map(map, sizeof(map));
     memcpy(_perm_mac, map + kMacLogicalOff, sizeof(_perm_mac));

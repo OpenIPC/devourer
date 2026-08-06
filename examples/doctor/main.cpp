@@ -263,17 +263,6 @@ int main(int argc, char **argv) {
     /* 2. EFUSE stability */
     in.efuse = dev->ProbeEfuseStability(a.reads);
 
-    /* 2b. Per-unit identity. Printed here because this is the natural place to
-     * check it against the netdev name the vendor driver would give the same
-     * dongle (`wlx<mac>`) — a one-line confirmation that the EFUSE offset is
-     * right on a chip nobody has measured yet. */
-    uint8_t mac[6];
-    if (dev->GetPermanentMacAddress(mac))
-      std::printf("efuse MAC: %02x:%02x:%02x:%02x:%02x:%02x\n", mac[0], mac[1],
-                  mac[2], mac[3], mac[4], mac[5]);
-    else
-      std::printf("efuse MAC: unavailable (unsupported chip, or unprogrammed)\n");
-
     /* 4. RX smoke */
     if (a.listen_secs > 0 && !g_devourer_should_stop) {
       std::atomic<uint32_t> ok{0}, crc{0};
@@ -303,6 +292,21 @@ int main(int argc, char **argv) {
   /* ---- report ---- */
   std::printf("\n== adapter doctor ==\n");
   std::printf("bring-up:        %s\n", yn(in.init_completed));
+  {
+    /* Per-unit identity. In the report so it can be checked against the netdev
+     * name the vendor driver would give the same dongle (`wlx<mac>`) — a
+     * one-line confirmation that the EFUSE offset is right on a chip nobody
+     * has measured yet. Attempted even after a failed bring-up: on Jaguar1 the
+     * EEPROM map may already be in by then, and false degrades to the
+     * unavailable line either way. */
+    uint8_t mac[6];
+    if (dev->GetPermanentMacAddress(mac))
+      std::printf("efuse MAC:       %02x:%02x:%02x:%02x:%02x:%02x\n", mac[0],
+                  mac[1], mac[2], mac[3], mac[4], mac[5]);
+    else
+      std::printf("efuse MAC:       unavailable (unsupported chip, or "
+                  "unprogrammed)\n");
+  }
   if (in.efuse.supported) {
     std::printf("efuse stability: %d reads, %d mismatched, %d bad-id "
                 "(last id 0x%04x%s)\n",

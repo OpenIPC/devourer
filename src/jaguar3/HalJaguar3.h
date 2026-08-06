@@ -79,15 +79,13 @@ public:
    * stability probe there would flag healthy units. Returns false on 8822E. */
   bool probe_efuse_map(uint8_t *map, size_t len);
 
-  /* Per-unit MAC burned in the EFUSE at logical offset 0x157 on this
-   * generation — the value the vendor driver programs into the netdev, and the
-   * only per-unit identifier these parts carry (the USB serial descriptor lives
-   * a few bytes further along at 0x174 and is the constant "123456").
+  /* Per-unit MAC at logical EFUSE offset 0x157 on this generation (why the MAC
+   * is the identity key at all: IRtlDevice::GetPermanentMacAddress).
    *
    * On 8822E this is served from the value captured during rtw_hal_init: the
    * OTP is not reliably readable after TX/coex bring-up by design, the same
-   * reason _efuse_cache exists. On 8822C the map is read on demand.
-   * false when unprogrammed (all-0xFF) or unread (all-0x00). */
+   * reason _efuse_cache exists. On 8822C the map is read on demand, one
+   * attempt. false when unprogrammed (all-0xFF) or unread (all-0x00). */
   bool perm_mac(uint8_t out[6]);
 
   /* Outcome of the fw download run by the last rtw_hal_init — forwarded from
@@ -228,6 +226,7 @@ private:
   static bool mac_programmed(const uint8_t m[6]);
   uint8_t _perm_mac[6] = {};
   bool _perm_mac_valid = false;
+  bool _perm_mac_probed = false; /* 8822C on-demand walk: one attempt only */
 
   RtlAdapter _device;
   devourer::DeviceConfig _cfg; /* skip_iqk + calibration forward */

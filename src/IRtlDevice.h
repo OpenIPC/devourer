@@ -346,7 +346,10 @@ public:
    * `out` receives the 6 bytes in wire order. Returns false where the chip is
    * unsupported (the default), or the EFUSE value is unprogrammed/unreadable —
    * callers must treat false as "no stable identity available" rather than
-   * substituting a weaker one silently. */
+   * substituting a weaker one silently. The default is a defined answer, not a
+   * silent no-op: Jaguar2 and Kestrel are expected follow-ups, not permanent
+   * gaps (HalMAC has the efuse APIs; EFUSE_USB_MAC_ADDR_8852B is already in
+   * kestrel/MacRegAx.h — each just needs a hardware-verified route here). */
   virtual bool GetPermanentMacAddress(uint8_t /*out*/[6]) { return false; }
 
   /* Read the 64-bit hardware TSF (Timing Synchronization Function) timer — the

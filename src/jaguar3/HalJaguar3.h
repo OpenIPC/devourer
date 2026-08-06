@@ -195,8 +195,10 @@ public:
 private:
 
   /* Decode the packed extended-header EFUSE into a logical map up to (the block
-   * holding) offset `upto`. Backs read_efuse_rfe_type + read_efuse_txpwr_base. */
-  void read_efuse_logical_map(uint8_t *map, size_t len, uint16_t upto);
+   * holding) offset `upto`. Backs read_efuse_rfe_type + read_efuse_txpwr_base.
+   * Walks the whole programmed area: sections are NOT ordered by logical base,
+   * so there is no sound early exit (see the .cpp). */
+  void read_efuse_logical_map(uint8_t *map, size_t len);
 
   /* One-shot decode of the logical EFUSE into _efuse_cache during rtw_hal_init,
    * where OTP access is reliable. RFE + per-channel TX-power base are then served

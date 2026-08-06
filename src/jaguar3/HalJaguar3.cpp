@@ -602,11 +602,27 @@ void HalJaguar3::config_pa_bias_8822e() {
 }
 
 /* Decode the packed (extended-header) EFUSE into a logical map, up to (and
- * including the block holding) logical offset `upto`. Shared by read_efuse_rfe_type
- * and read_efuse_txpwr_base_8822e. `map` must be zero-init'd by the caller (this
- * fills 0xFF for gaps). Standard Realtek section format: header (or header+ext)
- * gives a logical block offset + 4-bit word-enable; each enabled 2-byte word
- * follows. */
+ * including the block holding) every programmed logical offset. Shared by
+ * read_efuse_rfe_type and read_efuse_txpwr_base_8822e. `map` must be zero-init'd
+ * by the caller (this fills 0xFF for gaps). Standard Realtek section format:
+ * header (or header+ext) gives a logical block offset + 4-bit word-enable; each
+ * enabled 2-byte word follows.
+ *
+ * The walk runs to the end of the programmed area. It used to stop early once a
+ * section's base passed the byte the caller asked for, which silently assumed
+ * the sections appear in ascending base order — they do not. Measured on an
+ * RTL8822CU, the third section on the chip jumps to base 0x100:
+ *
+ *   phys 0x00  hdr=0x00         -> base 0x000
+ *   phys 0x09  hdr=0x10         -> base 0x008
+ *   phys 0x12  hdr=0x0F ext=48  -> base 0x100   <- early exit fired here
+ *   phys 0x2C  hdr=0x4F ext=5D  -> base 0x150   (never reached)
+ *
+ * so asking for anything below 0x100 — including EEPROM_RFE_OPTION at 0xCA —
+ * ended the walk after three sections and returned a map that was 0xFF almost
+ * everywhere. On that adapter read_efuse_rfe_type() therefore returned 0 while
+ * the kernel driver read 0x15 from the same chip, i.e. the BB/RFE config was
+ * being chosen from an unprogrammed default. */
 bool HalJaguar3::probe_efuse_map(uint8_t *map, size_t len) {
   /* 8822E OTP reads are not reliable after TX/coex bring-up (by design — see
    * cache_efuse_8822e); probing there would flag healthy units. 8822C only. */
@@ -614,11 +630,11 @@ bool HalJaguar3::probe_efuse_map(uint8_t *map, size_t len) {
     return false;
   if (map == nullptr || len != sizeof(_efuse_cache))
     return false;
-  read_efuse_logical_map(map, len, 0xFA);
+  read_efuse_logical_map(map, len);
   return true;
 }
 
-void HalJaguar3::read_efuse_logical_map(uint8_t *map, size_t len, uint16_t upto) {
+void HalJaguar3::read_efuse_logical_map(uint8_t *map, size_t len) {
   constexpr uint16_t kPhysMax = 1024; /* EFUSE_REAL_CONTENT_LEN_8822C */
   for (size_t i = 0; i < len; ++i) map[i] = 0xFF;
 
@@ -704,15 +720,13 @@ void HalJaguar3::read_efuse_logical_map(uint8_t *map, size_t len, uint16_t upto)
           map[idx] = d;
       }
     }
-    if (base > upto + 8)
-      break; /* past the byte we need */
   }
 }
 
 void HalJaguar3::cache_efuse_8822e() {
   if (_variant != ChipVariant::C8822E)
     return;
-  read_efuse_logical_map(_efuse_cache, sizeof(_efuse_cache), 0xFA);
+  read_efuse_logical_map(_efuse_cache, sizeof(_efuse_cache));
   _efuse_cache_valid = true;
   _logger->info("Jaguar3(8822e): efuse decoded (0x22={:x} 0x4c={:x} 0xca={:x})",
                 _efuse_cache[0x22], _efuse_cache[0x4c], _efuse_cache[0xca]);
@@ -725,7 +739,7 @@ uint8_t HalJaguar3::read_efuse_rfe_type() {
     rfe = _efuse_cache[kRfeLogicalOff];
   } else {
     uint8_t map[0x100 + 0x40]; /* enough to cover block holding 0xCA */
-    read_efuse_logical_map(map, sizeof(map), kRfeLogicalOff);
+    read_efuse_logical_map(map, sizeof(map));
     rfe = map[kRfeLogicalOff];
   }
   return (rfe == 0xFF) ? 0 : rfe;
@@ -762,7 +776,7 @@ void HalJaguar3::read_efuse_txpwr_base_8822e(uint8_t channel, uint8_t &base_a,
   if (_efuse_cache_valid) {
     map = _efuse_cache; /* decoded early where OTP access is reliable */
   } else {
-    read_efuse_logical_map(local, sizeof(local), k5gB + 14);
+    read_efuse_logical_map(local, sizeof(local));
     map = local;
   }
   int g = chnl_group_5g(channel);

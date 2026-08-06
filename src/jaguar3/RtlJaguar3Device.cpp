@@ -2082,6 +2082,12 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
 SelectedChannel RtlJaguar3Device::GetSelectedChannel() { return _channel; }
 
 bool RtlJaguar3Device::GetPermanentMacAddress(uint8_t out[6]) {
+  /* Serialize vs the coex tick, like every other entry point that can touch
+   * the EFUSE or registers: on 8822C perm_mac may run a fresh on-demand map
+   * decode, which is real register I/O. (On 8822E it is a cached lookup and
+   * the lock is uncontended.) The lock also makes the lazy fill of
+   * _perm_mac/_perm_mac_valid single-writer. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
   return _hal.perm_mac(out);
 }
 

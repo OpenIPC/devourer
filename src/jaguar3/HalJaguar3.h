@@ -79,6 +79,17 @@ public:
    * stability probe there would flag healthy units. Returns false on 8822E. */
   bool probe_efuse_map(uint8_t *map, size_t len);
 
+  /* Per-unit MAC burned in the EFUSE at logical offset 0x157 on this
+   * generation — the value the vendor driver programs into the netdev, and the
+   * only per-unit identifier these parts carry (the USB serial descriptor lives
+   * a few bytes further along at 0x174 and is the constant "123456").
+   *
+   * On 8822E this is served from the value captured during rtw_hal_init: the
+   * OTP is not reliably readable after TX/coex bring-up by design, the same
+   * reason _efuse_cache exists. On 8822C the map is read on demand.
+   * false when unprogrammed (all-0xFF) or unread (all-0x00). */
+  bool perm_mac(uint8_t out[6]);
+
   /* Outcome of the fw download run by the last rtw_hal_init — forwarded from
    * the DLFW state machine's real hardware boundaries (checksum-ready bits vs
    * the 0xC078 boot handshake; see HalmacJaguar3Fw::boot_status). */
@@ -208,6 +219,15 @@ private:
   void cache_efuse_8822e();
   uint8_t _efuse_cache[0x100];
   bool _efuse_cache_valid = false;
+
+  /* EFUSE MAC (see perm_mac). Logical 0x157 sits past _efuse_cache, so the
+   * 8822E capture decodes into a larger local buffer and copies both out —
+   * one OTP walk, and _efuse_cache keeps its size so the health probe's
+   * compare surface is unchanged. */
+  static constexpr uint16_t kMacLogicalOff = 0x0157;
+  static bool mac_programmed(const uint8_t m[6]);
+  uint8_t _perm_mac[6] = {};
+  bool _perm_mac_valid = false;
 
   RtlAdapter _device;
   devourer::DeviceConfig _cfg; /* skip_iqk + calibration forward */

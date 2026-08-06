@@ -83,6 +83,9 @@ public:
   devourer::AmpduMode GetAmpduMode() override { return _ampdu; }
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
+  /* EFUSE MAC at logical 0x157 — captured during rtw_hal_init on 8822E (the
+   * OTP is not reliably readable later), decoded on demand on 8822C. */
+  bool GetPermanentMacAddress(uint8_t out[6]) override;
   uint64_t ReadTsf() override;
   void WriteTsf(uint64_t tsf) override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;

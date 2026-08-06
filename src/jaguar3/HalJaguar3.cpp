@@ -1,5 +1,6 @@
 #include "HalJaguar3.h"
 #include <cstdlib>
+#include <cstring>
 
 #include <chrono>
 #include <stdexcept>
@@ -730,13 +731,55 @@ void HalJaguar3::read_efuse_logical_map(uint8_t *map, size_t len) {
   }
 }
 
+/* Unprogrammed EFUSE reads back all-0xFF; an all-zero result means the map was
+ * never populated. Neither is an identity. (Same rule EepromManager applies on
+ * Jaguar1.) */
+bool HalJaguar3::mac_programmed(const uint8_t m[6]) {
+  bool all_ff = true, all_zero = true;
+  for (int i = 0; i < 6; ++i) {
+    if (m[i] != 0xFF) all_ff = false;
+    if (m[i] != 0x00) all_zero = false;
+  }
+  return !all_ff && !all_zero;
+}
+
 void HalJaguar3::cache_efuse_8822e() {
   if (_variant != ChipVariant::C8822E)
     return;
-  read_efuse_logical_map(_efuse_cache, sizeof(_efuse_cache));
+  /* One walk, decoded far enough to reach the MAC, then split: the low 0x100
+   * is the existing cache, and the 6 bytes at 0x157 are the per-unit identity.
+   * Done here rather than on demand because the 8822E OTP is not reliably
+   * readable after TX/coex bring-up — the same constraint this cache exists
+   * for. */
+  uint8_t map[kMacLogicalOff + 0x10] = {};
+  read_efuse_logical_map(map, sizeof(map));
+  memcpy(_efuse_cache, map, sizeof(_efuse_cache));
   _efuse_cache_valid = true;
+  memcpy(_perm_mac, map + kMacLogicalOff, sizeof(_perm_mac));
+  _perm_mac_valid = mac_programmed(_perm_mac);
   _logger->info("Jaguar3(8822e): efuse decoded (0x22={:x} 0x4c={:x} 0xca={:x})",
                 _efuse_cache[0x22], _efuse_cache[0x4c], _efuse_cache[0xca]);
+  if (_perm_mac_valid)
+    _logger->info("Jaguar3(8822e): efuse MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                  _perm_mac[0], _perm_mac[1], _perm_mac[2], _perm_mac[3],
+                  _perm_mac[4], _perm_mac[5]);
+}
+
+bool HalJaguar3::perm_mac(uint8_t out[6]) {
+  if (out == nullptr)
+    return false;
+  if (!_perm_mac_valid && _variant == ChipVariant::C8822C) {
+    /* 8822C OTP stays readable post-bring-up (it is why probe_efuse_map is
+     * 8822C-only), so decode on demand and keep the result. */
+    uint8_t map[kMacLogicalOff + 0x10] = {};
+    read_efuse_logical_map(map, sizeof(map));
+    memcpy(_perm_mac, map + kMacLogicalOff, sizeof(_perm_mac));
+    _perm_mac_valid = mac_programmed(_perm_mac);
+  }
+  if (!_perm_mac_valid)
+    return false;
+  memcpy(out, _perm_mac, sizeof(_perm_mac));
+  return true;
 }
 
 uint8_t HalJaguar3::read_efuse_rfe_type() {

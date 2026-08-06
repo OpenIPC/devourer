@@ -2081,6 +2081,10 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
 
 SelectedChannel RtlJaguar3Device::GetSelectedChannel() { return _channel; }
 
+bool RtlJaguar3Device::GetPermanentMacAddress(uint8_t out[6]) {
+  return _hal.perm_mac(out);
+}
+
 uint64_t RtlJaguar3Device::ReadTsf() {
   /* REG_TSFTR 0x0560 (low) / 0x0564 (high); hi/lo/hi with a wrap retry. Under
    * _reg_mu (shared with the coex runtime thread). Starved to 0 under a heavy

@@ -647,6 +647,15 @@ void HalJaguar3::read_efuse_logical_map(uint8_t *map, size_t len) {
   if (eu)
     efuse_pwr_cut_8822e(true);
   auto rd = [this, eu](uint16_t a) -> uint8_t {
+    /* A section straddling the end of the physical area would otherwise run
+     * `phys` past kPhysMax: the loop head checks it once per section, but a
+     * header + ext + four data words advance it up to ten more bytes. That
+     * matters because efuse_OneByteRead masks the address to 10 bits, so a
+     * read at 1024 aliases to 0 and would silently decode the START of the
+     * EFUSE into whatever logical base the truncated section named. 0xFF is
+     * what both walks already treat as end-of-map / skip. */
+    if (a >= kPhysMax)
+      return 0xFF;
     if (eu)
       return efuse_phys_read_8822e(a);
     uint8_t d = 0xFF;

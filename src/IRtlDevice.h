@@ -344,8 +344,13 @@ public:
    * one host would share state and silently apply each other's measurements.
    *
    * `out` receives the 6 bytes in wire order. Returns false where the EFUSE
-   * value is unprogrammed/unreadable — callers must treat false as "no stable
-   * identity available" rather than substituting a weaker one silently.
+   * value is unprogrammed/unreadable — and, on any generation, possibly before
+   * Init/InitWrite: the EFUSE is only guaranteed readable on a brought-up chip,
+   * and this accessor never powers the chip on as a side effect (Kestrel serves
+   * the bring-up parse; the others fall back to a best-effort pre-init read
+   * that degrades to false on an unpowered adapter). Callers must treat false
+   * as "no stable identity available" rather than substituting a weaker one
+   * silently; for a guaranteed answer on a programmed unit, ask after bring-up.
    * Implemented on every generation (per-chip offsets at each HAL's perm_mac /
    * efuse parse); the interface default stays false so a future generation
    * degrades gracefully rather than fabricating an identity. */

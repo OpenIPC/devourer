@@ -1601,6 +1601,21 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
 
 SelectedChannel RtlJaguar2Device::GetSelectedChannel() { return _channel; }
 
+bool RtlJaguar2Device::GetPermanentMacAddress(uint8_t out[6]) {
+  /* Under _reg_mu like every register-touching entry point: a pre-init call
+   * triggers the HAL's lazy logical-map walk, which is real register I/O. Any
+   * of those control-INs can throw on a USB glitch (rtw_read's
+   * std::ios_base::failure) — the contract folds that into false ("no stable
+   * identity available"), it must not escape from an accessor. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  try {
+    return _hal.perm_mac(out);
+  } catch (const std::exception &e) {
+    _logger->warn("GetPermanentMacAddress: efuse walk failed ({})", e.what());
+    return false;
+  }
+}
+
 bool RtlJaguar2Device::StartBeacon(const uint8_t *beacon, size_t len,
                                    int interval_tu) {
   std::lock_guard<std::mutex> lk(_reg_mu);

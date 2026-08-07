@@ -348,6 +348,22 @@ uint8_t HalJaguar2::efuse_logical_byte(uint16_t off) {
   return off < sizeof(_efuse_map) ? _efuse_map[off] : 0xFF;
 }
 
+bool HalJaguar2::perm_mac(uint8_t out[6]) {
+  constexpr uint16_t kMacOff = 0x107; /* EEPROM_MAC_ADDR_8822BU == _8821CU */
+  if (out == nullptr)
+    return false;
+  for (int i = 0; i < 6; ++i)
+    out[i] = efuse_logical_byte(kMacOff + i);
+  /* Unprogrammed EFUSE reads back all-0xFF; all-zero means the map was never
+   * read. Neither is an identity (same rule as the other generations). */
+  bool all_ff = true, all_zero = true;
+  for (int i = 0; i < 6; ++i) {
+    if (out[i] != 0xFF) all_ff = false;
+    if (out[i] != 0x00) all_zero = false;
+  }
+  return !all_ff && !all_zero;
+}
+
 uint8_t HalJaguar2::read_efuse_rfe() {
   constexpr uint16_t kRfeOff = 0xCA; /* EEPROM_RFE_OPTION_8822B */
   read_efuse_logical_map(_efuse_map, sizeof(_efuse_map),

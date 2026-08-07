@@ -385,6 +385,14 @@ void RtlJaguarDevice::measure_idle_noise_floor() {
 
 SelectedChannel RtlJaguarDevice::GetSelectedChannel() { return _channel; }
 
+bool RtlJaguarDevice::GetPermanentMacAddress(uint8_t out[6]) {
+  /* The read, the per-chip offsets and the unprogrammed-value rejection all
+   * already existed in EepromManager; only the route to a caller was missing. */
+  if (out == nullptr || !_eepromManager)
+    return false;
+  return _eepromManager->GetMacAddress(out);
+}
+
 uint64_t RtlJaguarDevice::ReadTsf() {
   /* REG_TSFTR (0x0560) = TSF low 32, 0x0564 = TSF high 32. Read hi, lo, hi
    * again and retry the pair once if the low word wrapped between the reads. */

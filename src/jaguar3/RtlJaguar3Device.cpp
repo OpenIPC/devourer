@@ -2081,6 +2081,27 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
 
 SelectedChannel RtlJaguar3Device::GetSelectedChannel() { return _channel; }
 
+bool RtlJaguar3Device::GetPermanentMacAddress(uint8_t out[6]) {
+  /* Serialize vs the coex tick, like every other entry point that can touch
+   * the EFUSE or registers: on 8822C perm_mac may run a fresh on-demand map
+   * decode, which is real register I/O. (On 8822E it is a cached lookup and
+   * the lock is uncontended.) The lock also makes the lazy fill of
+   * _perm_mac/_perm_mac_valid single-writer. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* The 8822C walk is thousands of control-IN reads, any of which can throw on
+   * a USB glitch (rtw_read's std::ios_base::failure) — most likely exactly when
+   * a caller probes identity on a dead or unpowered adapter. The contract folds
+   * that into its false ("no stable identity available"), it must not escape as
+   * an exception from an accessor. The one-attempt latch has already been set by
+   * then, so a glitched walk is not silently retried on the next call either. */
+  try {
+    return _hal.perm_mac(out);
+  } catch (const std::exception &e) {
+    _logger->warn("GetPermanentMacAddress: efuse walk failed ({})", e.what());
+    return false;
+  }
+}
+
 uint64_t RtlJaguar3Device::ReadTsf() {
   /* REG_TSFTR 0x0560 (low) / 0x0564 (high); hi/lo/hi with a wrap retry. Under
    * _reg_mu (shared with the coex runtime thread). Starved to 0 under a heavy

@@ -59,6 +59,14 @@ public:
    * default (logical 0xB9). */
   uint8_t efuse_logical_byte(uint16_t off);
 
+  /* Per-unit MAC at logical EFUSE offset 0x107 — the same offset on both dies
+   * (hal_pg.h: EEPROM_MAC_ADDR_8822BU == EEPROM_MAC_ADDR_8821CU; why the MAC
+   * is the identity key at all: IRtlDevice::GetPermanentMacAddress). Served
+   * from the cached logical map — a lookup post-bring-up, a real physical walk
+   * on a pre-init call. false when unprogrammed (all-0xFF) or unread
+   * (all-0x00). */
+  bool perm_mac(uint8_t out[6]);
+
   /* Program the per-rate TXAGC (0x1d00 path A / 0x1d80 path B) from the EFUSE
    * power-by-rate calibration for `channel` at bandwidth `bw` (0=20/1=40/2=80;
    * 5/6 = 5/10 MHz narrowband, folded to the 20 MHz column — the RF runs in

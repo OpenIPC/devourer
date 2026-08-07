@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <thread>
 
@@ -78,6 +79,18 @@ public:
   bool send_packet(const uint8_t *packet, size_t length) override;
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override { return _channel; }
+
+  /* EFUSE MAC at logical 0x488 on both dies: mac_ax's USB efuse-info dispatch
+   * has no 8852C entry and falls back to the 8852B table (efuse.c
+   * offset_usb_8852b), so one constant serves both. Served from the bring-up
+   * parse — false before Init/InitWrite, or when the EFUSE is unprogrammed
+   * (autoload_ok is exactly the all-FF / all-00 MAC check). */
+  bool GetPermanentMacAddress(uint8_t out[6]) override {
+    if (out == nullptr || !_efuse.autoload_ok)
+      return false;
+    std::memcpy(out, _efuse.mac.data(), _efuse.mac.size());
+    return true;
+  }
 
   /* Static capability aggregate (resolved from chip identity; thread-safe,
    * callable pre-Init). The demos emit it as the adapter.caps JSONL event. */

@@ -2088,7 +2088,18 @@ bool RtlJaguar3Device::GetPermanentMacAddress(uint8_t out[6]) {
    * the lock is uncontended.) The lock also makes the lazy fill of
    * _perm_mac/_perm_mac_valid single-writer. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  return _hal.perm_mac(out);
+  /* The 8822C walk is thousands of control-IN reads, any of which can throw on
+   * a USB glitch (rtw_read's std::ios_base::failure) — most likely exactly when
+   * a caller probes identity on a dead or unpowered adapter. The contract folds
+   * that into its false ("no stable identity available"), it must not escape as
+   * an exception from an accessor. The one-attempt latch has already been set by
+   * then, so a glitched walk is not silently retried on the next call either. */
+  try {
+    return _hal.perm_mac(out);
+  } catch (const std::exception &e) {
+    _logger->warn("GetPermanentMacAddress: efuse walk failed ({})", e.what());
+    return false;
+  }
 }
 
 uint64_t RtlJaguar3Device::ReadTsf() {

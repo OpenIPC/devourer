@@ -753,9 +753,9 @@ void HalJaguar3::cache_efuse_8822e() {
    * for. */
   uint8_t map[kMacLogicalOff + 0x10] = {};
   read_efuse_logical_map(map, sizeof(map));
-  memcpy(_efuse_cache, map, sizeof(_efuse_cache));
+  std::memcpy(_efuse_cache, map, sizeof(_efuse_cache));
   _efuse_cache_valid = true;
-  memcpy(_perm_mac, map + kMacLogicalOff, sizeof(_perm_mac));
+  std::memcpy(_perm_mac, map + kMacLogicalOff, sizeof(_perm_mac));
   _perm_mac_valid = mac_programmed(_perm_mac);
   _logger->info("Jaguar3(8822e): efuse decoded (0x22={:x} 0x4c={:x} 0xca={:x})",
                 _efuse_cache[0x22], _efuse_cache[0x4c], _efuse_cache[0xca]);
@@ -776,12 +776,12 @@ bool HalJaguar3::perm_mac(uint8_t out[6]) {
     _perm_mac_probed = true;
     uint8_t map[kMacLogicalOff + 0x10] = {};
     read_efuse_logical_map(map, sizeof(map));
-    memcpy(_perm_mac, map + kMacLogicalOff, sizeof(_perm_mac));
+    std::memcpy(_perm_mac, map + kMacLogicalOff, sizeof(_perm_mac));
     _perm_mac_valid = mac_programmed(_perm_mac);
   }
   if (!_perm_mac_valid)
     return false;
-  memcpy(out, _perm_mac, sizeof(_perm_mac));
+  std::memcpy(out, _perm_mac, sizeof(_perm_mac));
   return true;
 }
 

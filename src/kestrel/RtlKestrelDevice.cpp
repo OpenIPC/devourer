@@ -11,6 +11,7 @@
 #include "KestrelLe.h"
 #include "RadiotapBuilder.h" /* build_stream_radiotap — host-injected trigger */
 #include "RadiotapPeek.h"
+#include "RxParseAbort.h" /* rx.parse_abort — abandoned-aggregate event */
 #include "RateDefinitions.h" /* MGN_* rate enum */
 #include "MacRegAx.h"
 #include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
@@ -320,6 +321,7 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
    * divergence between the dies. */
   const uint16_t drv_info_unit =
       _variant == kestrel::ChipVariant::C8852C ? 16 : 8;
+  long long parse_aborts = 0;
   _device.bulk_read_async_loop(
       32768, 8,
       [&, drv_info_unit](const uint8_t *data, int n) {
@@ -327,8 +329,13 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         while (off + 16 <= static_cast<uint32_t>(n)) {
           kestrel::KestrelRxFrame f;
           if (!kestrel::parse_rx_8852b(data + off, static_cast<size_t>(n) - off,
-                                       f, drv_info_unit))
+                                       f, drv_info_unit)) {
+            devourer::emit_rx_parse_abort(_logger->events(), data + off,
+                                          static_cast<size_t>(n) - off, off, n,
+                                          f.payload_len, f.drvinfo_size,
+                                          f.shift, parse_aborts);
             break;
+          }
           if (f.rpkt_type == kestrel::RPKT_TYPE_PPDU && f.payload_len >= 8) {
             /* Full physts parse (header per-path rssi_td + IE01 avg SNR +
              * IE04..07 per-path SNR/EVM pages) — kestrel::parse_physts_8852.

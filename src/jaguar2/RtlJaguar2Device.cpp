@@ -17,6 +17,7 @@
 #include "RadiotapPeek.h"
 #include "RadiotapTxFlags.h" /* HT MCS field decoder (LDPC/STBC) */
 #include "TxAggPlan.h"
+#include "RxParseAbort.h" /* rx.parse_abort — abandoned-aggregate event */
 #include "TxReport.h"
 
 #include "BeamformingSounder.h"
@@ -548,15 +549,22 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   /* RX loop: async bulk-IN URB queue; walk the aggregated 8822B RX descriptors
    * per completion and hand each PSDU to the packet processor. */
   uint64_t frames = 0, reads = 0;
+  long long parse_aborts = 0;
   auto on_data = [&](const uint8_t *data, int n) {
     cfo_tick();
     if (++reads <= 8)
       _logger->info("Jaguar2 RX: completion #{} -> {} bytes", reads, n);
     uint32_t off = 0;
     while (off + jaguar2::RXDESC_SIZE_8822B <= static_cast<uint32_t>(n)) {
-      jaguar2::Rx8822bFrame f;
-      if (!jaguar2::parse_rx_8822b(data + off, static_cast<size_t>(n) - off, f))
+      jaguar2::Rx8822bFrame f{};
+      if (!jaguar2::parse_rx_8822b(data + off, static_cast<size_t>(n) - off,
+                                   f)) {
+        devourer::emit_rx_parse_abort(_logger->events(), data + off,
+                                      static_cast<size_t>(n) - off, off, n,
+                                      f.frame_len, f.drvinfo_size, f.shift,
+                                      parse_aborts);
         break;
+      }
       if (_packetProcessor) {
         Packet p{};
         p.RxAtrib.pkt_len = static_cast<uint16_t>(f.frame_len);

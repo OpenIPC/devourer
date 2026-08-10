@@ -179,12 +179,15 @@ void Rtl8733bDevice::StartRxLoop(
       if (!rtl8733b::parse_rx_8733b(data + offset,
                                     static_cast<size_t>(length) - offset,
                                     frame)) {
-        ++malformed;
-        devourer::emit_rx_parse_abort(
-            _logger->events(), data + offset,
-            static_cast<size_t>(length) - offset,
-            static_cast<long long>(offset), length, frame.frame_len,
-            frame.drvinfo_size, frame.shift, parse_aborts);
+        const size_t remaining = static_cast<size_t>(length) - offset;
+        if (!devourer::rx_parse_remainder_is_zero_padding(data + offset,
+                                                          remaining)) {
+          ++malformed;
+          devourer::emit_rx_parse_abort(
+              _logger->events(), data + offset, remaining,
+              static_cast<long long>(offset), length, frame.frame_len,
+              frame.drvinfo_size, frame.shift, parse_aborts);
+        }
         break;
       }
       if (packets == 0)

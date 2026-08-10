@@ -29,6 +29,17 @@ int main() {
   expect("unsupported rate has no rate ID",
          rtl8733b::tx_rate_id_8733b(20, 0, false) == 0xff);
 
+  std::array<uint8_t, 4> field{};
+  rtl8733b::txdesc_set_bits(field.data(), 0, 32, 0x89abcdefu);
+  expect("full-width bitfield is defined",
+         rtl8733b::txdesc_le32(field.data()) == 0x89abcdefu);
+  const auto field_before_invalid = field;
+  rtl8733b::txdesc_set_bits(field.data(), 0, 0, 0);
+  rtl8733b::txdesc_set_bits(field.data(), 1, 32, 0);
+  rtl8733b::txdesc_set_bits(field.data(), 31, 2, 0);
+  expect("empty and out-of-range bitfields are no-ops",
+         field == field_before_invalid);
+
   TxDescConfig ofdm{};
   ofdm.packet_size = 48;
   ofdm.sequence = 0x123;

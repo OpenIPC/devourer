@@ -46,7 +46,11 @@ inline void txdesc_write_le32(uint8_t *p, uint32_t value) {
 
 inline void txdesc_set_bits(uint8_t *p, unsigned bit, unsigned width,
                             uint32_t value) {
-  const uint32_t field = ((1u << width) - 1u) << bit;
+  if (width == 0 || width > 32 || bit >= 32 || width > 32 - bit)
+    return;
+  const uint32_t value_mask = width == 32 ? ~uint32_t{0}
+                                          : (uint32_t{1} << width) - 1u;
+  const uint32_t field = value_mask << bit;
   txdesc_write_le32(p, (txdesc_le32(p) & ~field) |
                            ((value << bit) & field));
 }

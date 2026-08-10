@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <vector>
 
+#include "RxParseAbort.h"
 #include "rtl8733b/FrameParser8733b.h"
 
 namespace {
@@ -96,6 +97,14 @@ int main() {
   truncated.resize(truncated.size() - 9);
   expect("truncated body rejected",
          !rtl8733b::parse_rx_8733b(truncated.data(), truncated.size(), parsed));
+  std::array<uint8_t, rtl8733b::kRxDescSize> zero_padding{};
+  expect("all-zero aggregate remainder is benign padding",
+         devourer::rx_parse_remainder_is_zero_padding(zero_padding.data(),
+                                                       zero_padding.size()));
+  zero_padding.back() = 1;
+  expect("non-zero aggregate remainder is malformed",
+         !devourer::rx_parse_remainder_is_zero_padding(zero_padding.data(),
+                                                        zero_padding.size()));
 
   auto first = fixture(7, 0, 0);
   auto second = fixture(11, 0, 0);

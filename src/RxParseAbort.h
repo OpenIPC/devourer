@@ -24,6 +24,8 @@ inline bool emit_rx_parse_abort(EventSink &sink, const uint8_t *rem,
                                 long long buf_len, long long frame_len,
                                 long long drvinfo, long long shift,
                                 long long &total) {
+  if (!sink.enabled())
+    return false;
   bool all_zero = true;
   for (size_t i = 0; i < rem_len; ++i)
     if (rem[i] != 0) {
@@ -32,6 +34,7 @@ inline bool emit_rx_parse_abort(EventSink &sink, const uint8_t *rem,
     }
   if (all_zero)
     return false;
+  ++total;
   Ev(sink, "rx.parse_abort")
       .t()
       .f("off", off)
@@ -40,7 +43,7 @@ inline bool emit_rx_parse_abort(EventSink &sink, const uint8_t *rem,
       .f("frame_len", frame_len)
       .f("drvinfo", drvinfo)
       .f("shift", shift)
-      .f("total", ++total);
+      .f("total", total);
   return true;
 }
 

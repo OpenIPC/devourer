@@ -344,7 +344,7 @@ Phy8733b::tssi_de_plan(const TssiPowerInfo8733b &power, uint8_t channel) {
   };
   auto subtract_two = [](int8_t value) {
     return static_cast<int8_t>(
-        std::max(-128, static_cast<int>(value) - 2));
+        (std::max)(-128, static_cast<int>(value) - 2));
   };
 
   TssiDePlan8733b plan;
@@ -432,7 +432,8 @@ Phy8733b::tssi_rate_offsets(const TxPowerTargets8733b &targets, uint8_t band,
       return std::nullopt;
     }
     offsets[rate] = static_cast<int8_t>(std::clamp(
-        static_cast<int>(std::min(target, max_target_qdbm)) - 64, -128, 127));
+        static_cast<int>((std::min)(target, max_target_qdbm)) - 64, -128,
+        127));
   }
   return offsets;
 }
@@ -492,11 +493,12 @@ TssiThermalPlan8733b Phy8733b::tssi_thermal_plan(uint8_t efuse_thermal,
     return index < 18 ? 0 : index < 20 ? 3 : 5;
   };
   for (size_t i = 0; i < 32; ++i)
-    signed_offsets[i] = static_cast<int8_t>(-swing(std::min(i, size_t{29})));
+    signed_offsets[i] =
+        static_cast<int8_t>(-swing((std::min)(i, size_t{29})));
   size_t swing_index = 1;
   for (int i = 63; i >= 32; --i) {
     signed_offsets[static_cast<size_t>(i)] =
-        swing(std::min(swing_index, size_t{29}));
+        swing((std::min)(swing_index, size_t{29}));
     ++swing_index;
   }
   for (size_t word = 0; word < plan.offsets.size(); ++word) {

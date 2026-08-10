@@ -417,7 +417,7 @@ bool Rtl8733bBringup::dlfw_to_mem(const uint8_t *fw, uint32_t src,
   uint32_t offset = 0;
   bool first = true;
   while (offset < size) {
-    const uint32_t chunk = std::min(FW_PACKET_SIZE, size - offset);
+    const uint32_t chunk = (std::min)(FW_PACKET_SIZE, size - offset);
     if (!send_fw_page(static_cast<uint16_t>(src >> 7), fw + offset, chunk))
       return false;
     if (!iddma(OCPBASE_TXBUF + src + TXDESC_SIZE, dest + offset, chunk,

@@ -19,7 +19,7 @@ inline uint32_t rx_le32(const uint8_t *p) {
 }
 
 inline uint32_t rx_bits(const uint8_t *p, unsigned bit, unsigned width) {
-  const uint32_t mask = width == 32 ? std::numeric_limits<uint32_t>::max()
+  const uint32_t mask = width == 32 ? (std::numeric_limits<uint32_t>::max)()
                                     : ((1u << width) - 1u);
   return (rx_le32(p) >> bit) & mask;
 }
@@ -98,7 +98,7 @@ inline bool parse_rx_8733b(const uint8_t *buf, size_t buflen,
       static_cast<uint32_t>(out.drvinfo_size) + out.shift;
   const uint64_t end = frame_offset + out.frame_len;
   if (out.frame_len == 0 || frame_offset > buflen || end > buflen ||
-      end > std::numeric_limits<uint32_t>::max())
+      end > (std::numeric_limits<uint32_t>::max)())
     return false;
 
   out.frame = buf + static_cast<size_t>(frame_offset);

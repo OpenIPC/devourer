@@ -235,6 +235,7 @@ enum _PUBLIC_ACTION
 class FrameParser
 {
     Logger_t _logger;
+    long long _parse_aborts = 0; /* cumulative rx.parse_abort count */
 
   public:
     FrameParser(Logger_t logger);

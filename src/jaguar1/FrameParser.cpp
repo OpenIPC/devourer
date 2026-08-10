@@ -1,5 +1,7 @@
 #include "FrameParser.h"
 
+#include "RxParseAbort.h" /* rx.parse_abort — abandoned-aggregate event */
+
 #define CONFIG_USB_RX_AGGREGATION 1
 
 #define RXDESC_SIZE 24
@@ -182,6 +184,11 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
           "RX Warning!,pkt_len <= 0 or pkt_offset > transfer_len; pkt_len: "
           "{}, pkt_offset: {}, transfer_len: {}",
           pattrib.pkt_len, pkt_offset, pbuf.size());
+      devourer::emit_rx_parse_abort(
+          _logger->events(), pbuf.data(), pbuf.size(),
+          static_cast<long long>(pbuf.data() - ptr.data()),
+          static_cast<long long>(ptr.size()), pattrib.pkt_len,
+          pattrib.drvinfo_sz, pattrib.shift_sz, _parse_aborts);
       break;
     }
 

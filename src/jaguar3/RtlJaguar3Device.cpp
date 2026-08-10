@@ -12,6 +12,7 @@
 #include "RadiotapPeek.h"   /* send_packets batch pre-parse */
 #include "RadiotapTxFlags.h" /* HT MCS field decoder (LDPC/STBC) */
 #include "TxAggPlan.h"      /* USB TX aggregation URB packing */
+#include "RxParseAbort.h" /* rx.parse_abort — abandoned-aggregate event */
 #include "TxReport.h"     /* CCX TX-status report decode + tx.report event */
 
 #include "BeamformingSounder.h" /* generation-neutral BF self-sounding recipe */
@@ -274,15 +275,22 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
                     static_cast<int>(avg_khz), _xtal_cap);
   };
   /* Process one bulk-IN completion: walk the aggregated 8822C RX descriptors. */
+  long long parse_aborts = 0;
   auto on_data = [&](const uint8_t *data, int n) {
     cfo_tick();
     if (++reads <= 8)
       _logger->info("Jaguar3 RX: async completion #{} -> {} bytes", reads, n);
     uint32_t off = 0;
     while (off + jaguar3::RXDESC_SIZE_8822C <= static_cast<uint32_t>(n)) {
-      jaguar3::Rx8822cFrame f;
-      if (!jaguar3::parse_rx_8822c(data + off, static_cast<size_t>(n) - off, f))
+      jaguar3::Rx8822cFrame f{};
+      if (!jaguar3::parse_rx_8822c(data + off, static_cast<size_t>(n) - off,
+                                   f)) {
+        devourer::emit_rx_parse_abort(_logger->events(), data + off,
+                                      static_cast<size_t>(n) - off, off, n,
+                                      f.frame_len, f.drvinfo_size, f.shift,
+                                      parse_aborts);
         break;
+      }
       if (_packetProcessor) {
         Packet p{};
         p.RxAtrib.pkt_len = static_cast<uint16_t>(f.frame_len);

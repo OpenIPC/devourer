@@ -77,7 +77,8 @@ namespace {
 /* The Realtek PIDs the demos' open loop iterates; --pid narrows to one. */
 const uint16_t kRealtekPids[] = {0x8812, 0x8813, 0x881a, 0x0811, 0xa811,
                                  0x0820, 0x0821, 0x8822, 0x0120, 0x012d,
-                                 0xb82c, 0xc811, 0xc812, 0xa81a};
+                                 0xb82c, 0xc811, 0xc812, 0xa81a, 0xf72b,
+                                 0xb733};
 
 struct Args {
   uint16_t vid = 0x0bda;

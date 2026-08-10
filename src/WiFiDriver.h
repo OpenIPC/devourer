@@ -22,9 +22,9 @@ public:
   explicit WiFiDriver(Logger_t logger);
 
   /* Constructs the right device for the chip behind `dev_handle`:
-   * RtlJaguarDevice for Jaguar wave-1 (8812/8811/8821/8814AU) or
-   * RtlJaguar3Device for Jaguar3 (8822CU/8812EU/8822EU). Returns the common
-   * IRtlDevice interface. See CreateRtlDevice() for how the family is chosen.
+   * RtlJaguarDevice for Jaguar wave-1 (8812/8811/8821/8814AU), the later
+   * Jaguar/Kestrel backends, or the dedicated RTL8733B backend. Returns the
+   * common IRtlDevice interface. See CreateRtlDevice() for dispatch rules.
    *
    * `usb_lock` is the exclusive per-adapter lock. Pass the one returned by
    * devourer::claim_interface_then_reset (the recommended open path) so it is

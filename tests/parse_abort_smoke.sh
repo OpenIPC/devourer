@@ -16,11 +16,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD=${BUILD:-$ROOT/build}
 CH=${CH:-6}          # 2.4 GHz: ambient beacons guarantee RX traffic
 DWELL_S=${DWELL_S:-20}
-# J1 8814AU, J2 8822BU, J3 8812CU, Kestrel. The J3 default is the 8812CU, not
-# the 8822EU: the 8822E's DPDT front end decodes no ambient 2.4 GHz on this
-# bench (green init, DIG sees energy, zero frames) while its 5 GHz RX is
-# proven — the walk under test is identical on both dies.
-DUTS=${DUTS:-"0x8813 0xb812 0xc812 0x0101"}
+# J1 8814AU, J2 8822BU, J3 8812CU, RTL8733B, Kestrel. The J3 default is the
+# 8812CU, not the 8822EU: the 8822E's DPDT front end decodes no ambient 2.4 GHz
+# on this bench (green init, DIG sees energy, zero frames) while its 5 GHz RX
+# is proven — the walk under test is identical on both dies.
+DUTS=${DUTS:-"0x8813 0xb812 0xc812 0xf72b 0x0101"}
 OUT=${OUT:-/tmp/parse-abort-smoke}
 
 [ "$(id -u)" = 0 ] || { echo "must run as root"; exit 3; }

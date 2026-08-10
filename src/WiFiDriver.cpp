@@ -26,6 +26,10 @@
 #include "kestrel/RtlKestrelDevice.h"
 #endif
 #include "kestrel/KestrelUsbIds.h" /* header-only PID table, always compiled */
+#if defined(DEVOURER_HAVE_8733B)
+#include "rtl8733b/Rtl8733bDevice.h"
+#endif
+#include "rtl8733b/Rtl8733bUsbIds.h"
 
 namespace {
 
@@ -37,6 +41,7 @@ namespace {
  *   0x09 = RTL8821C (RTL8811CU / RTL8821CU, 1T1R)             -> Jaguar2
  *   0x0a = RTL8822B (RTL8822BU, 2T2R)                         -> Jaguar2
  *   0x13 = RTL8822C, 0x17 = RTL8822E (RTL8812EU / RTL8822EU)  -> Jaguar3
+ *   0x16 = RTL8733B (RTL8731BU / RTL8733BU, 1T1R)             -> RTL8733B
  * The chip-id (not the USB PID) is authoritative because the rtl8822e RTL8812EU
  * shares PID 0x8812 with the Jaguar1 RTL8812AU. Returns 0 on a failed read,
  * which falls through to the Jaguar1 path. (8821C = 0x09 hardware-verified on a
@@ -166,6 +171,28 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
   }
 
   uint8_t chip_id = read_chip_id(dev_handle);
+  if (rtl8733b::is_chip_id(chip_id)) {
+#if defined(DEVOURER_HAVE_8733B)
+    _logger->info("Creating Rtl8733bDevice ({:04x}:{:04x}, chip-id 0x{:02x})",
+                  vid, pid, chip_id);
+    return std::make_unique<Rtl8733bDevice>(
+        RtlAdapter(dev_handle, _logger, ctx, usb_lock, cfg), _logger, cfg);
+#else
+    _logger->error("RTL8733B (chip-id 0x16) detected but support not compiled "
+                   "in (DEVOURER_8733B=OFF)");
+    return nullptr;
+#endif
+  }
+
+  /* A failed/transient register read on a known 8733B PID must not route the
+   * adapter into Jaguar1 merely because that is the historical fallback. */
+  if (rtl8733b::is_usb_id(vid, pid)) {
+    _logger->error("Known RTL8733B USB device {:04x}:{:04x} reported unexpected "
+                   "SYS_CFG2 chip-id 0x{:02x}; refusing Jaguar fallback",
+                   vid, pid, chip_id);
+    return nullptr;
+  }
+
   if (is_8822b_chip_id(chip_id)) {
 #if defined(DEVOURER_HAVE_JAGUAR2)
     _logger->info("Creating RtlJaguar2Device (PID 0x{:04x}, chip-id 0x{:02x})",

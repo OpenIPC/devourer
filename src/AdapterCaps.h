@@ -38,6 +38,7 @@ enum class ChipGeneration : uint8_t {
   Jaguar1,
   Jaguar2,
   Jaguar3,
+  Rtl8733b, /* HALMAC 87xx 802.11n: RTL8731BU / RTL8733BU */
   Kestrel /* Wi-Fi 6 / 802.11ax (RTL8852BU/8852CU) */
 };
 
@@ -49,6 +50,8 @@ inline const char *generation_name(ChipGeneration g) {
     return "jaguar2";
   case ChipGeneration::Jaguar3:
     return "jaguar3";
+  case ChipGeneration::Rtl8733b:
+    return "rtl8733b";
   case ChipGeneration::Kestrel:
     return "kestrel";
   default:
@@ -77,7 +80,8 @@ inline uint8_t bw_mask_for_generation(ChipGeneration g) {
    * bw_sup declares BW_CAP_5M|10M); 160 MHz is 8852C-only (rtl8852c_halinit.c
    * bw_sup has BW_CAP_160M, rtl8852b_halinit.c tops at 80) and is OR'd in by
    * the device layer per variant. */
-  return g == ChipGeneration::Jaguar1  ? ac
+  return g == ChipGeneration::Rtl8733b ? (kBw20 | kBw40)
+         : g == ChipGeneration::Jaguar1  ? ac
          : g == ChipGeneration::Unknown ? 0
                                         : (ac | kBw5 | kBw10);
 }

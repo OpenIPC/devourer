@@ -1,0 +1,110 @@
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+
+#include "rtl8733b/TxDescriptor8733b.h"
+
+namespace {
+int failures = 0;
+
+void expect(const char *what, bool condition) {
+  if (condition)
+    return;
+  ++failures;
+  std::printf("FAIL: %s\n", what);
+}
+} // namespace
+
+int main() {
+  using rtl8733b::TxDescConfig;
+  std::array<uint8_t, rtl8733b::kTxDescSize> desc{};
+
+  expect("2G legacy rate ID", rtl8733b::tx_rate_id_8733b(4, 0, false) == 6);
+  expect("5G legacy rate ID", rtl8733b::tx_rate_id_8733b(4, 0, true) == 7);
+  expect("2G HT20 rate ID", rtl8733b::tx_rate_id_8733b(12, 0, false) == 3);
+  expect("2G HT40 rate ID", rtl8733b::tx_rate_id_8733b(12, 1, false) == 1);
+  expect("5G HT rate ID", rtl8733b::tx_rate_id_8733b(12, 1, true) == 5);
+  expect("unsupported rate has no rate ID",
+         rtl8733b::tx_rate_id_8733b(20, 0, false) == 0xff);
+
+  TxDescConfig ofdm{};
+  ofdm.packet_size = 48;
+  ofdm.sequence = 0x123;
+  ofdm.rate_hw = 4;
+  ofdm.rate_id = 7;
+  ofdm.bmc = true;
+  expect("6M descriptor builds",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), ofdm));
+  const std::array<uint8_t, rtl8733b::kTxDescSize> expected_ofdm = {
+      0x30, 0x00, 0x28, 0x01, 0x01, 0x12, 0x07, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00,
+      0x04, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0xe7, 0xeb, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x12, 0x00};
+  expect("6M descriptor golden bytes", desc == expected_ofdm);
+  expect("6M checksum folds to all ones",
+         rtl8733b::txdesc_checksum_valid_8733b(desc.data(), desc.size()));
+
+  TxDescConfig ht{};
+  ht.packet_size = 1500;
+  ht.sequence = 0xabc;
+  ht.rate_hw = 19; // MCS7
+  ht.rate_id = 3;  // BGN 1SS
+  ht.bandwidth = 1;
+  ht.short_gi = true;
+  expect("MCS7 descriptor builds",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), ht));
+  const std::array<uint8_t, rtl8733b::kTxDescSize> expected_ht = {
+      0xdc, 0x05, 0x28, 0x00, 0x01, 0x12, 0x03, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00,
+      0x13, 0x00, 0x02, 0x00, 0x30, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x28, 0xef, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0xab, 0x00};
+  expect("MCS7 descriptor golden bytes", desc == expected_ht);
+
+  const uint16_t original_checksum =
+      static_cast<uint16_t>(desc[28] | (desc[29] << 8));
+  desc[39] ^= 0xff;
+  expect("checksum excludes bytes 32..39",
+         rtl8733b::txdesc_checksum_8733b(desc.data()) == original_checksum);
+  desc[7] ^= 1;
+  expect("checksum detects mutation inside first 32 bytes",
+         !rtl8733b::txdesc_checksum_valid_8733b(desc.data(), desc.size()));
+
+  std::array<uint8_t, rtl8733b::kTxDescSize - 1> short_desc{};
+  expect("short output rejected",
+         !rtl8733b::fill_tx_desc_8733b(short_desc.data(), short_desc.size(),
+                                       ofdm));
+  TxDescConfig invalid = ofdm;
+  invalid.packet_size = 0;
+  expect("zero payload rejected",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
+  invalid = ofdm;
+  invalid.rate_hw = 3; // CCK is deliberately outside the advertised TX scope
+  expect("CCK rejected",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
+  invalid = ofdm;
+  invalid.rate_hw = 20; // MCS8 would require a second spatial stream
+  expect("second-stream HT rejected",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
+  invalid = ofdm;
+  invalid.bandwidth = 2;
+  expect("80 MHz rejected",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
+  invalid = ofdm;
+  invalid.short_gi = true;
+  expect("legacy SGI rejected",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
+  invalid = ht;
+  invalid.ldpc = true;
+  expect("RTL8733B LDPC rejected",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
+  invalid = ofdm;
+  invalid.packet_offset = 2;
+  expect("oversized USB boundary shim rejected",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
+
+  return failures == 0 ? 0 : 1;
+}

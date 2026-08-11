@@ -156,10 +156,14 @@ int main() {
   mac_state.rx_boundary = 0x3eff;
   mac_state.cr = 0xff;
   mac_state.rxdma_mode = 0x1e;
-  mac_state.rx_agg = 0x2005;
+  mac_state.rx_agg = 0x2003;
   mac_state.rcr = 0xe410220e;
   expect("normal USB 3-out MAC state accepted",
          mac_state.matches_normal_usb3out());
+  mac_state.rx_agg = 0x2005;
+  expect("20 KiB RX aggregate rejected for 16 KiB URBs",
+         !mac_state.matches_normal_usb3out());
+  mac_state.rx_agg = 0x2003;
   mac_state.reserved_boundary--;
   expect("wrong queue boundary rejected",
          !mac_state.matches_normal_usb3out());

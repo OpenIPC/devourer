@@ -119,6 +119,14 @@ constexpr uint16_t kPublicPages =
     kReservedBoundary - 3 * kQueuePages - 1;
 constexpr uint16_t kRxBoundary = 16384 - 256 - 1;
 constexpr uint32_t kRcrNormal = 0xe410220e;
+/* The receive ring posts 16 KiB URBs. RX aggregates therefore have to remain
+ * smaller than one URB: a vendor-default 20 KiB aggregate can be split by
+ * xHCI, leaving the descriptor tail in one completion and its body in the
+ * next. The HALMAC size field is in 4 KiB pages, so 0x03 caps aggregates at
+ * 12 KiB while retaining the vendor's 0x20 timeout. This matches Devourer's
+ * Jaguar2/Jaguar3 USB invariant and remains compatible with hosts that cannot
+ * complete larger bulk-IN reads. */
+constexpr uint16_t kUsbRxAgg8733b = 0x2003;
 
 uint16_t le16(const uint8_t *data) {
   return static_cast<uint16_t>(data[0] |
@@ -165,7 +173,7 @@ bool MacState::matches_normal_usb3out() const {
          (rqpn_npq & 0x00ff0000) == 0 &&
          reserved_boundary == kReservedBoundary &&
          rx_boundary == kRxBoundary && cr == kMacTrxEnable &&
-         (rxdma_mode & 0x0e) == 0x0e && rx_agg == 0x2005 &&
+         (rxdma_mode & 0x0e) == 0x0e && rx_agg == kUsbRxAgg8733b &&
          rcr == kRcrNormal && (ldpc_control & 0x0300u) == 0;
 }
 
@@ -674,7 +682,7 @@ void Halmac8733bMac::init_usb() {
   _device.rtw_write8(
       kRegRxdmaAgg + 3,
       static_cast<uint8_t>(_device.rtw_read8(kRegRxdmaAgg + 3) & ~(1u << 7)));
-  _device.rtw_write16(kRegRxdmaAgg, 0x2005);
+  _device.rtw_write16(kRegRxdmaAgg, kUsbRxAgg8733b);
 }
 
 void Halmac8733bMac::program_mac(const std::array<uint8_t, 6> &mac) {

@@ -14,9 +14,12 @@ inline constexpr uint8_t kTxMacidManagement = 1;
 
 /* RATE_ID is still consumed by parts of the MAC even when USE_RATE fixes the
  * actual descriptor rate. These values are the RTL8733B vendor RA table IDs:
- * BGN 20/40 MHz 1SS on 2.4 GHz, GN 1SS on 5 GHz, and legacy BG/G. */
+ * BGN 20/40 MHz 1SS on 2.4 GHz, GN 1SS on 5 GHz, legacy BG/G, and B for
+ * 2.4-GHz CCK. */
 inline uint8_t tx_rate_id_8733b(uint8_t rate_hw, uint8_t bandwidth,
                                 bool is_5ghz) {
+  if (rate_hw <= 3)
+    return !is_5ghz && bandwidth == 0 ? 8 : 0xff;
   if (rate_hw >= 4 && rate_hw <= 11)
     return is_5ghz ? 7 : 6;
   if (rate_hw >= 12 && rate_hw <= 19) {
@@ -70,14 +73,16 @@ struct TxDescConfig {
 };
 
 inline bool valid_tx_desc_config(const TxDescConfig &cfg) {
+  const bool legacy_cck = cfg.rate_hw <= 3;
   const bool legacy_ofdm = cfg.rate_hw >= 4 && cfg.rate_hw <= 11;
   const bool ht_1ss = cfg.rate_hw >= 12 && cfg.rate_hw <= 19;
   return cfg.packet_size != 0 && cfg.sequence <= 0x0fff &&
-         (legacy_ofdm || ht_1ss) && cfg.rate_id <= 0x1f &&
+         (legacy_cck || legacy_ofdm || ht_1ss) && cfg.rate_id <= 0x1f &&
          cfg.bandwidth <= 1 && cfg.data_sc <= 0x0f &&
          cfg.packet_offset <= 1 &&
          cfg.retry_limit <= 0x3f &&
-         !cfg.ldpc && (!legacy_ofdm || !cfg.short_gi);
+         (!legacy_cck || cfg.bandwidth == 0) && !cfg.ldpc &&
+         (!(legacy_cck || legacy_ofdm) || !cfg.short_gi);
 }
 
 inline uint16_t txdesc_checksum_8733b(const uint8_t *desc) {

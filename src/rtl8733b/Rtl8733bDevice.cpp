@@ -131,12 +131,12 @@ void Rtl8733bDevice::InitWrite(SelectedChannel channel) {
 
 bool Rtl8733bDevice::configure_tx_power(SelectedChannel channel) {
   _tssi_tracking = false;
+  _tssi_cck = false;
   if (_efuse.tx_power_mode != rtl8733b::TxPowerPgMode8733b::TssiOffset)
     return _phy.set_flat_tx_power(rtl8733b::kSafeTxAgcIndex8733b);
 
-  /* This path is intentionally OFDM/HT-only. CCK selects a
-   * different thermal swing table and remains outside the advertised TX
-   * surface until the rate-dependent table switch is implemented. */
+  /* Start in the OFDM/HT thermal table. A first CCK submission switches the
+   * table through select_tssi_rate_table() before its descriptor reaches USB. */
   if (!_phy.prepare_tssi_bb(channel, _efuse) ||
       !_phy.prepare_tssi_thermal(_efuse, false) ||
       !_phy.prepare_tssi_offsets(channel, _efuse) ||
@@ -144,6 +144,32 @@ bool Rtl8733bDevice::configure_tx_power(SelectedChannel channel) {
           channel, _efuse, rtl8733b::kSafeTssiTargetQdbm8733b))
     return false;
   _tssi_tracking = true;
+  return true;
+}
+
+bool Rtl8733bDevice::select_tssi_rate_table(bool cck) {
+  if (_efuse.tx_power_mode != rtl8733b::TxPowerPgMode8733b::TssiOffset)
+    return true;
+  if (!_tssi_tracking)
+    return false;
+  if (_tssi_cck == cck)
+    return true;
+
+  /* The vendor chooses this table from the current TX rate. The table cannot
+   * be changed while closed-loop tracking is enabled, so make the transition
+   * explicit and reversible: exact rollback, table readback, then a fresh
+   * capped enable with its own thermal check. */
+  if (!_phy.disable_tssi_tracking())
+    return false;
+  _tssi_tracking = false;
+  if (!_phy.prepare_tssi_thermal(_efuse, cck) ||
+      !_phy.enable_tssi_tracking(
+          _channel, _efuse, rtl8733b::kSafeTssiTargetQdbm8733b))
+    return false;
+  _tssi_tracking = true;
+  _tssi_cck = cck;
+  _logger->info("RTL8733B TSSI rate table selected: {}",
+                cck ? "CCK" : "OFDM/HT");
   return true;
 }
 
@@ -332,6 +358,13 @@ bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
   const uint8_t rate_hw = usb_frame[0x10] & 0x7f;
   const uint8_t rate_id = usb_frame[0x06] & 0x1f;
   const uint8_t bandwidth = (usb_frame[0x14] >> 5) & 0x3;
+  const uint8_t short_gi = (usb_frame[0x14] >> 4) & 0x1;
+  const uint8_t ldpc = (usb_frame[0x14] >> 7) & 0x1;
+  if (!select_tssi_rate_table(rate_hw <= 3)) {
+    _logger->error("RTL8733B TX rejected: TSSI rate-table transition failed");
+    Stop();
+    return false;
+  }
   const int sent = _device.bulk_send_sync_ep(
       endpoint, usb_frame.data(), usb_frame.size(), 100);
   if (sent != static_cast<int>(usb_frame.size())) {
@@ -342,9 +375,10 @@ bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
   if (_tx_submits.fetch_add(1) == 0) {
     _logger->info(
         "RTL8733B first TX accepted: EP=0x{:02x} bytes={} frame={} shim={} "
-        "rate_hw={} rate_id={} bw={} fifo={} empty=0x{:04x} "
+        "rate_hw={} rate_id={} bw={} sgi={} ldpc={} fifo={} empty=0x{:04x} "
         "txdma=0x{:08x} pause=0x{:02x} bb_tx_en={} bb_tx_on={}",
         endpoint, sent, frame_len, packet_offset, rate_hw, rate_id, bandwidth,
+        short_gi, ldpc,
         _device.rtw_read8(0x0207), _device.rtw_read16(0x041a),
         _device.rtw_read32(0x0210), _device.rtw_read8(0x0522),
         _device.rtw_read16(0x2de0), _device.rtw_read16(0x2de2));
@@ -434,7 +468,7 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
     }
     case IEEE80211_RADIOTAP_VHT:
     case IEEE80211_RADIOTAP_HE:
-      return 0; // RTL8733B contract is legacy OFDM + HT 1SS only
+      return 0; // RTL8733B contract is legacy CCK/OFDM + HT 1SS only
     default:
       break;
     }
@@ -516,6 +550,7 @@ void Rtl8733bDevice::Stop() {
     }
     _tssi_tracking = false;
   }
+  _tssi_cck = false;
   _phy_ready = false;
   if (_mac_ready) {
     _mac.stop();
@@ -530,12 +565,13 @@ void Rtl8733bDevice::Stop() {
 }
 
 devourer::TxCaps Rtl8733bDevice::GetTxCaps() {
-  /* Advertised surface: one spatial stream, legacy OFDM + HT MCS0-7, 20/40 MHz.
-   * Keep SGI false until an independent on-air cell passes. The vendor driver
-   * advertises TX-LDPC (but not RX-LDPC); this raw-injection backend keeps it
-   * false because only forced-global-BCC operation has passed independently
-   * witnessed injection. Experimental 5/10 MHz is likewise omitted until an
-   * occupied-bandwidth and cross-receiver gate passes. */
+  /* Advertised surface: one spatial stream, 2.4-GHz long-preamble CCK, legacy
+   * OFDM, and HT MCS0-7 at 20/40 MHz. TxCaps has no separate CCK flag. Keep SGI
+   * false: an independent receiver decoded a descriptor-SGI probe as long GI.
+   * The vendor advertises TX-LDPC (but not RX-LDPC); this raw-injection backend
+   * keeps it false because only forced-global-BCC operation has passed
+   * independently witnessed injection. Experimental 5/10 MHz is likewise
+   * omitted until an occupied-bandwidth and cross-receiver gate passes. */
   return devourer::tx_caps_for_chains(1, false, false, 40);
 }
 

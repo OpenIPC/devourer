@@ -21,6 +21,14 @@ int main() {
   using rtl8733b::TxDescConfig;
   std::array<uint8_t, rtl8733b::kTxDescSize> desc{};
 
+  for (uint8_t rate = 0; rate <= 3; ++rate) {
+    expect("2G CCK rate ID",
+           rtl8733b::tx_rate_id_8733b(rate, 0, false) == 8);
+    expect("5G CCK rejected",
+           rtl8733b::tx_rate_id_8733b(rate, 0, true) == 0xff);
+    expect("40 MHz CCK rejected",
+           rtl8733b::tx_rate_id_8733b(rate, 1, false) == 0xff);
+  }
   expect("2G legacy rate ID", rtl8733b::tx_rate_id_8733b(4, 0, false) == 6);
   expect("5G legacy rate ID", rtl8733b::tx_rate_id_8733b(4, 0, true) == 7);
   expect("2G HT20 rate ID", rtl8733b::tx_rate_id_8733b(12, 0, false) == 3);
@@ -58,6 +66,16 @@ int main() {
   expect("6M checksum folds to all ones",
          rtl8733b::txdesc_checksum_valid_8733b(desc.data(), desc.size()));
 
+  TxDescConfig cck = ofdm;
+  cck.rate_hw = 0; // 1 Mbps long-preamble CCK
+  cck.rate_id = 8;
+  expect("1M CCK descriptor builds",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), cck));
+  expect("1M CCK descriptor fields",
+         (desc[0x10] & 0x7f) == 0 && (desc[0x06] & 0x1f) == 8 &&
+             ((desc[0x14] >> 4) & 1) == 0 &&
+             rtl8733b::txdesc_checksum_valid_8733b(desc.data(), desc.size()));
+
   TxDescConfig ht{};
   ht.packet_size = 1500;
   ht.sequence = 0xabc;
@@ -92,9 +110,13 @@ int main() {
   invalid.packet_size = 0;
   expect("zero payload rejected",
          !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
-  invalid = ofdm;
-  invalid.rate_hw = 3; // CCK is deliberately outside the advertised TX scope
-  expect("CCK rejected",
+  invalid = cck;
+  invalid.short_gi = true;
+  expect("CCK short preamble rejected until validated",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
+  invalid = cck;
+  invalid.bandwidth = 1;
+  expect("CCK at 40 MHz rejected",
          !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
   invalid = ofdm;
   invalid.rate_hw = 20; // MCS8 would require a second spatial stream

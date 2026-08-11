@@ -785,7 +785,7 @@ void Halmac8733bMac::stop() {
       kRegTxdmaPqMap,
       static_cast<uint8_t>(_device.rtw_read8(kRegTxdmaPqMap) & ~(1u << 2)));
   _device.rtw_write16(kRegTxPause, 0xffff);
-  _device.rtw_write8(kRegCr, 0);
+  _device.rtw_write16(kRegCr, 0);
 }
 
 } // namespace rtl8733b

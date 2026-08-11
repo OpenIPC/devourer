@@ -308,15 +308,18 @@ int main(int argc, char **argv) {
     bool mac_ok = mac.initialize(efuse);
     bool stopped = false;
     bool reinit_ok = false;
+    uint16_t stopped_cr = 0xffff;
     if (mac_ok) {
       mac.stop();
       const rtl8733b::MacState stopped_state = mac.read_mac_state();
-      stopped = stopped_state.cr == 0 &&
+      stopped_cr = adapter.rtw_read16(0x0100);
+      stopped = stopped_cr == 0 &&
                 (stopped_state.pq_map & (1u << 2)) == 0;
       reinit_ok = stopped && mac.initialize(efuse);
       mac_ok = mac_ok && stopped && reinit_ok;
       devourer::Ev(logger->events(), "rtl8733b.mac_lifecycle")
           .f("stopped", stopped)
+          .hexf("stopped_cr", stopped_cr, 4)
           .f("reinit", reinit_ok);
     }
     const rtl8733b::MacState mac_state = mac.read_mac_state();

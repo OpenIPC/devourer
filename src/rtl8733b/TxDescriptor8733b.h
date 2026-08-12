@@ -30,6 +30,28 @@ inline uint8_t tx_rate_id_8733b(uint8_t rate_hw, uint8_t bandwidth,
   return 0xff;
 }
 
+/* The modulation-admission contract, factored out of
+ * Rtl8733bDevice::build_tx_block so both the SetTxMode branch and the radiotap
+ * branch share one predicate and the refusals are testable without hardware.
+ *
+ * The advertised surface is 1SS BCC: legacy CCK/OFDM at 20 MHz and HT MCS0-7
+ * at 20/40 MHz. SGI is refused because an independent RTL8812AU witness
+ * decoded a descriptor-SGI probe as long GI; LDPC and STBC are refused because
+ * only forced-global-BCC operation has passed witnessed injection, and the
+ * descriptor encoder writes no STBC field at all. VHT and HE are outside the
+ * contract on every band — both vendor trees declare this silicon 802.11b/g/n,
+ * 1SS, 20/40 MHz — so the device path refuses those radiotap fields outright.
+ */
+inline bool ht_request_supported_8733b(unsigned mcs, unsigned bw_mhz, bool sgi,
+                                       bool ldpc, bool stbc) {
+  return mcs <= 7 && (bw_mhz == 20 || bw_mhz == 40) && !sgi && !ldpc && !stbc;
+}
+
+inline bool legacy_request_supported_8733b(unsigned bw_mhz, bool sgi, bool ldpc,
+                                           bool stbc) {
+  return bw_mhz == 20 && !sgi && !ldpc && !stbc;
+}
+
 /* RTL8733B uses the common HALMAC 87xx descriptor layout, but its normal TX
  * descriptor is 40 bytes (not the neighboring 8822B/C 48-byte form). Keep the
  * encoder byte-wise: USB buffers need not be uint32_t-aligned. */

@@ -357,11 +357,15 @@ int main(int argc, char **argv) {
                                         : -1)
           .f("delta", thermal.delta)
           .f("status", bucket);
-      if (thermal.valid && thermal.delta >= 25) {
-        logger->error("RTL8733B thermal: critical delta {}, refusing to continue",
-                      thermal.delta);
-        return 1;
-      }
+      /* Reported, not enforced. The meter is a PA-bias tracking index, not a
+       * calibrated junction temperature, and it is not a validated degradation
+       * predictor (docs/warm-tx-degradation.md) — so it grades the emitted
+       * `thermal` event (ThermalBucket labels this band "critical") and the
+       * abort decision stays with whoever is driving the probe. */
+      if (thermal.valid && thermal.delta >= 25)
+        logger->warn("RTL8733B thermal: delta {} is in the 'critical' bucket — "
+                     "telemetry only, continuing",
+                     thermal.delta);
     }
     if (!phy_ok || wanted < 6)
       return phy_ok ? 0 : 1;

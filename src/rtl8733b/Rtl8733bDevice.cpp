@@ -4,7 +4,6 @@
 #include <cstring>
 #include <span>
 #include <stdexcept>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -44,9 +43,17 @@ void Rtl8733bDevice::bring_up_to_phy() {
           "RTL8733B identity changed during initialization");
     if (!_chip.efuse_autoload_ok)
       throw std::runtime_error("RTL8733B EFUSE autoload failed");
+    /* Arm the teardown BEFORE the attempt, not after it. power_on() walks the
+     * card-disable -> card-emulation -> active sequence write by write and can
+     * fail at any poll with several enables already landed; latching
+     * _power_ready only on success would make Stop() skip power_off() in
+     * exactly the case that left the card half-enabled, and the next attempt
+     * would depend on the sequence being re-enterable from an undefined state.
+     * power_off() is the full HALMAC card-disable flow and is safe to run
+     * against a partially enabled card. */
+    _power_ready = true;
     if (!_bringup.power_on())
       throw std::runtime_error("RTL8733B card-enable sequence failed");
-    _power_ready = true;
     if (!_mac.read_efuse(_efuse))
       throw std::runtime_error("RTL8733B EFUSE read/parse failed");
     _fw_boot = {.supported = true, .attempted = true};
@@ -66,18 +73,6 @@ void Rtl8733bDevice::bring_up_to_phy() {
   _phy_ready = true;
   _logger->info("RTL8733B factory path reached PHY-ready (cut {})",
                 _chip.cut);
-}
-
-[[noreturn]] void
-Rtl8733bDevice::radio_operation_unavailable(const char *operation) {
-  const std::string message =
-      std::string("RTL8733B ") + operation +
-      " is not implemented by this backend";
-  /* Several existing demos intentionally let initialization errors escape
-   * main. That reaches std::terminate without a guaranteed device-destructor
-   * unwind, so staged refusals must leave the hardware safe before throwing. */
-  Stop();
-  throw std::runtime_error(message);
 }
 
 void Rtl8733bDevice::Init(Action_ParsedRadioPacket packetProcessor,
@@ -113,16 +108,21 @@ void Rtl8733bDevice::InitWrite(SelectedChannel channel) {
     if (_cfg.rx.enable_with_tx &&
         !_mac.configure_monitor_rx(_cfg.rx.keep_corrupted))
       throw std::runtime_error("RTL8733B monitor RX configuration failed");
-    const auto thermal = GetThermalStatus();
-    if (thermal.valid && thermal.delta >= 25)
-      throw std::runtime_error("RTL8733B thermal gate refused TX");
     _tx_ready = true;
     _tx_submits = 0;
+    _tx_fatal = nullptr;
+    /* One-shot thermal snapshot at bring-up — the PA-heating baseline for the
+     * session, same as the Kestrel InitWrite snapshot. Logged, never acted on:
+     * the meter is a PA-bias tracking index, not a calibrated °C sensor, and
+     * docs/warm-tx-degradation.md shows it is not a validated degradation
+     * predictor. Live monitoring is the caller's job via GetThermalStatus /
+     * DEVOURER_THERMAL_POLL_MS. */
+    const auto thermal = GetThermalStatus();
     _logger->info(
         "RTL8733B ready for bounded monitor injection: ch={} width={} "
-        "thermal={}/{}",
+        "thermal={}/{} delta={}",
         channel.Channel, static_cast<unsigned>(channel.ChannelWidth),
-        thermal.raw, thermal.baseline);
+        thermal.raw, thermal.baseline, thermal.valid ? thermal.delta : 0);
   } catch (...) {
     Stop();
     throw;
@@ -158,7 +158,9 @@ bool Rtl8733bDevice::select_tssi_rate_table(bool cck) {
   /* The vendor chooses this table from the current TX rate. The table cannot
    * be changed while closed-loop tracking is enabled, so make the transition
    * explicit and reversible: exact rollback, table readback, then a fresh
-   * capped enable with its own thermal check. */
+   * capped enable verified by register readback. (prepare_tssi_thermal here is
+   * the vendor's TSSI thermal-*compensation table*, a hardware feature driven
+   * off the EFUSE baseline constant — not a live temperature read.) */
   if (!_phy.disable_tssi_tracking())
     return false;
   _tssi_tracking = false;
@@ -195,8 +197,8 @@ void Rtl8733bDevice::StartRxLoop(
 
   auto on_data = [&](const uint8_t *data, int length) {
     if (++completions <= 8)
-      _logger->info("RTL8733B RX: completion #{} -> {} bytes", completions,
-                    length);
+      _logger->debug("RTL8733B RX: completion #{} -> {} bytes", completions,
+                     length);
     size_t offset = 0;
     uint8_t advertised = 0;
     uint32_t packets = 0;
@@ -252,9 +254,11 @@ void Rtl8733bDevice::StartRxLoop(
                                        frame.frame_len);
       if (rx_packet_processor)
         rx_packet_processor(packet);
+      /* First-frames breadcrumb: per-frame diagnostics belong on the debug
+       * plane, like every other generation's RX walk. */
       if (++frames <= 8) {
         const uint8_t *status = data + offset + rtl8733b::kRxDescSize;
-        _logger->info(
+        _logger->debug(
             "RTL8733B RX: frame len={} rate={} crc={} c2h={} physt={} drv={} "
             "page={} phy_ok={} rssi={}",
             frame.frame_len, frame.rx_rate, frame.crc_err, frame.c2h,
@@ -273,9 +277,20 @@ void Rtl8733bDevice::StartRxLoop(
       ++aggregate_mismatch;
   };
 
+  /* Floor at the device-side aggregate ceiling, not at some generic minimum: a
+   * URB smaller than one aggregate lets the aggregate straddle two completions,
+   * which is the exact failure the 12 KiB cap was introduced to remove (the
+   * walk stays in bounds, but every split aggregate becomes a malformed abort
+   * and its frames are lost). DEVOURER_RX_URB_BYTES may raise this, never
+   * lower it below rtl8733b::kRxAggregateBytes8733b. */
   int urb_bytes = _cfg.rx.urb_bytes.value_or(16 * 1024);
-  if (urb_bytes < 4096)
-    urb_bytes = 4096;
+  if (urb_bytes < rtl8733b::kRxAggregateBytes8733b) {
+    if (_cfg.rx.urb_bytes)
+      _logger->warn(
+          "RTL8733B RX: raising urb_bytes {} -> {} (device RX aggregate cap)",
+          urb_bytes, rtl8733b::kRxAggregateBytes8733b);
+    urb_bytes = rtl8733b::kRxAggregateBytes8733b;
+  }
   _logger->info("RTL8733B RX: entering async loop ch={} urb={}x8",
                 rx_channel, urb_bytes);
   try {
@@ -318,17 +333,23 @@ void Rtl8733bDevice::SetMonitorChannel(SelectedChannel channel) {
 bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
   if (!_phy_ready || !_mac_ready || !_tx_ready) {
-    _logger->error("RTL8733B TX rejected before InitWrite");
+    /* Name the reason: a retry loop must be able to tell "InitWrite has not run
+     * yet" from "the session was deliberately stopped and will not recover". */
+    if (_tx_fatal != nullptr)
+      _logger->error("RTL8733B TX rejected: session stopped by {} — "
+                     "re-run InitWrite to recover",
+                     _tx_fatal);
+    else
+      _logger->error("RTL8733B TX rejected before InitWrite");
     return false;
   }
   if (packet == nullptr)
     return false;
-  const auto thermal = GetThermalStatus();
-  if (thermal.valid && thermal.delta >= 25) {
-    _logger->error("RTL8733B TX thermal gate: raw={} baseline={} delta={}",
-                   thermal.raw, thermal.baseline, thermal.delta);
-    return false;
-  }
+  /* No thermal read here. read_thermal() is 3 RF writes + a 15 us settle + an
+   * RF read, each several USB control transfers — per frame that dominates the
+   * send budget on a USB-HS part, and no other generation does register I/O on
+   * the send path. The bring-up snapshot in InitWrite is the baseline; live
+   * monitoring rides GetThermalStatus from the caller's own cadence. */
   const uint16_t radiotap_length =
       devourer::radiotap_hdr_len(packet, length);
   if (radiotap_length == 0)
@@ -361,7 +382,18 @@ bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
   const uint8_t short_gi = (usb_frame[0x14] >> 4) & 0x1;
   const uint8_t ldpc = (usb_frame[0x14] >> 7) & 0x1;
   if (!select_tssi_rate_table(rate_hw <= 3)) {
-    _logger->error("RTL8733B TX rejected: TSSI rate-table transition failed");
+    /* Fatal, not transient. The CCK<->OFDM table switch disables closed-loop
+     * TSSI tracking, rewrites the thermal table and re-enables tracking; a
+     * failure anywhere in there means the readback no longer describes the
+     * loop that is driving the PA. Continuing to inject would be transmitting
+     * at an unverified power setting, so tear the session down (MAC stop +
+     * card disable). send_packet keeps its bool contract — no other generation
+     * throws per frame — so the reason is latched in _tx_fatal instead: a bare
+     * `false` is indistinguishable from a short bulk write and would send a
+     * retry loop straight back into the same state. */
+    _logger->error("RTL8733B TX aborted: TSSI rate-table transition failed — "
+                   "closed-loop power state is unverified, stopping the card");
+    _tx_fatal = "a failed TSSI rate-table transition";
     Stop();
     return false;
   }
@@ -425,12 +457,14 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
   if (_tx_mode_default) {
     const auto &mode = *_tx_mode_default;
     if (mode.mode == devourer::TxMode::Mode::Legacy) {
-      if (mode.bw_mhz != 20 || mode.sgi || mode.ldpc || mode.stbc)
+      if (!rtl8733b::legacy_request_supported_8733b(mode.bw_mhz, mode.sgi,
+                                                    mode.ldpc, mode.stbc))
         return 0;
       fixed_rate = mode.legacy_rate_500kbps;
     } else if (mode.mode == devourer::TxMode::Mode::HT) {
-      if (mode.ht_mcs > 7 || (mode.bw_mhz != 20 && mode.bw_mhz != 40) ||
-          mode.sgi || mode.ldpc || mode.stbc)
+      if (!rtl8733b::ht_request_supported_8733b(mode.ht_mcs, mode.bw_mhz,
+                                                mode.sgi, mode.ldpc,
+                                                mode.stbc))
         return 0;
       fixed_rate = static_cast<uint8_t>(MGN_MCS0 + mode.ht_mcs);
       frame_width = mode.bw_mhz == 40 ? CHANNEL_WIDTH_40 : CHANNEL_WIDTH_20;
@@ -459,8 +493,10 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
       break;
     case IEEE80211_RADIOTAP_MCS: {
       const auto m = devourer::decode_radiotap_mcs_field(iterator.this_arg);
-      if (!m.have_mcs || m.mcs > 7 || m.sgi != 0 || m.ldpc != 0 ||
-          m.stbc != 0)
+      if (!m.have_mcs ||
+          !rtl8733b::ht_request_supported_8733b(m.mcs, m.bw40 ? 40 : 20,
+                                                m.sgi != 0, m.ldpc != 0,
+                                                m.stbc != 0))
         return 0;
       fixed_rate = static_cast<uint8_t>(MGN_MCS0 + m.mcs);
       frame_width = m.bw40 ? CHANNEL_WIDTH_40 : CHANNEL_WIDTH_20;
@@ -528,8 +564,26 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
 }
 
 void Rtl8733bDevice::SetCcaMode(bool disabled) {
-  (void)disabled;
-  radio_operation_unavailable("CCA control");
+  if (!disabled) {
+    /* `false` is the universal default — carrier-sense + EDCCA enabled — and
+     * that is exactly what this backend's HALMAC MAC bring-up leaves
+     * programmed. Succeed as a no-op: callers that assert the default
+     * unconditionally (examples/timesync) must not be punished for asking for
+     * the state the chip is already in. */
+    return;
+  }
+  /* `true` (DEVOURER_DIS_CCA) is not ported. The HALMAC 87xx carrier-sense
+   * gate has not been located and measured on this part, and this backend
+   * does not guess at PHY/MAC writes it cannot read back. Refuse loudly, per
+   * the pure-virtual contract in IRtlDevice — but do NOT tear the session
+   * down: an unsupported optional knob is not a hardware-safety event, and
+   * card-disabling here would leave the caller with a dead chip for asking a
+   * question. The session stays up with standard carrier-sense. */
+  _logger->error(
+      "RTL8733B: CCA disable (DEVOURER_DIS_CCA) is not implemented by this "
+      "backend; carrier-sense stays enabled");
+  throw std::runtime_error(
+      "RTL8733B CCA disable is not implemented by this backend");
 }
 
 void Rtl8733bDevice::Stop() {

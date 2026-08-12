@@ -70,8 +70,8 @@
 
 #define USB_VENDOR_ID 0x0bda
 
-  /* Known USB product IDs for the Realtek Jaguar family — same set as the RX
-   * demo (examples/rx/main.cpp). */
+  /* Known USB product IDs driven by this library — same set as the RX demo
+   * (examples/rx/main.cpp). */
   static constexpr uint16_t kRealtekProductIds[] = {
       0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
       0xb812, 0xb82c, /* RTL8822BU (Jaguar2); OEM VIDs via DEVOURER_VID/PID */
@@ -79,6 +79,8 @@
       0x881a, 0x881b, 0x881c, 0xa81a, /* RTL8812EU (Jaguar3 EU; a81a =
                                          BL-M8812EU2) */
       0xe822, 0xa82a,                 /* RTL8822EU (Jaguar3 EU) */
+      0xf72b, 0xb733, /* RTL8731BU/RTL8733BU Wi-Fi function (HALMAC 87xx);
+                         b733 is the combo module's ID from the vendor table */
   };
 
   /* Event sink for the demo's own JSONL emissions (packetProcessor is a free

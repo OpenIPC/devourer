@@ -227,8 +227,18 @@ bool Rtl8733bBringup::power_on() {
 
   init_system_cfg();
   _powered = r8(R8733_CR) != 0xea && (r8(R8733_SYS_STATUS1 + 1) & 1u) == 0;
-  _logger->info("RTL8733B power: card active, CR=0x{:02x} SYS_STATUS1=0x{:08x}",
-                r8(R8733_CR), r32(R8733_SYS_STATUS1));
+  /* Report the computed verdict, not the intent: this line is read during
+   * exactly the triage where the readback failed, so claiming "card active"
+   * one line before the caller throws "card-enable sequence failed" is worse
+   * than useless. */
+  if (_powered)
+    _logger->info(
+        "RTL8733B power: card active, CR=0x{:02x} SYS_STATUS1=0x{:08x}",
+        r8(R8733_CR), r32(R8733_SYS_STATUS1));
+  else
+    _logger->error(
+        "RTL8733B power: card NOT active, CR=0x{:02x} SYS_STATUS1=0x{:08x}",
+        r8(R8733_CR), r32(R8733_SYS_STATUS1));
   return _powered;
 }
 

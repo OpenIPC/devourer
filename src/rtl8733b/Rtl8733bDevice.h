@@ -17,7 +17,9 @@
 
 /* Dedicated RTL8733B IRtlDevice boundary. Power, firmware, EFUSE, HALMAC,
  * PHY/RF, monitor RX, and bounded legacy/HT injection all use the production
- * path; unsupported optional controls remain explicit failures. */
+ * path. Unsupported optional controls refuse loudly rather than silently
+ * no-opping, but a refusal never tears the session down — asking for a knob
+ * this backend has not ported is not a hardware-safety event. */
 class Rtl8733bDevice : public IRtlDevice {
 public:
   Rtl8733bDevice(RtlAdapter device, Logger_t logger,
@@ -51,7 +53,6 @@ private:
   bool select_tssi_rate_table(bool cck);
   size_t build_tx_block(const uint8_t *packet, size_t length, uint8_t *out,
                         uint8_t packet_offset);
-  [[noreturn]] void radio_operation_unavailable(const char *operation);
 
   RtlAdapter _device;
   Logger_t _logger;
@@ -68,6 +69,10 @@ private:
   bool _mac_ready = false;
   bool _phy_ready = false;
   bool _tx_ready = false;
+  /* Non-null once a send-path failure was fatal enough to Stop() the card, so
+   * later rejections can say why instead of reading as "InitWrite never ran".
+   * Static string literal; cleared by InitWrite. */
+  const char *_tx_fatal = nullptr;
   bool _tssi_tracking = false;
   bool _tssi_cck = false;
   std::atomic<bool> _rx_stop{false};

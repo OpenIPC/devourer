@@ -18,6 +18,13 @@ inline constexpr size_t kLogicalEfuseSize = 768;
 inline constexpr size_t kTxPowerEfuseOffset8733b = 0x10;
 inline constexpr size_t kTxPowerCalibrateOffset8733b = 0xc8;
 
+/* Device-side RX aggregate ceiling programmed by configure_monitor_rx (HALMAC
+ * RXDMA_AGG size field, 4 KiB pages -> 0x03). An aggregate must never span two
+ * bulk-IN URBs — the descriptor tail would land in one completion and its body
+ * in the next — so the RX loop floors its URB size at this value. Keep the two
+ * in step: raising either alone reintroduces the straddle. */
+inline constexpr int kRxAggregateBytes8733b = 12 * 1024;
+
 enum class TxPowerPgMode8733b {
   DirectIndex,
   TssiOffset,

@@ -119,14 +119,16 @@ constexpr uint16_t kPublicPages =
     kReservedBoundary - 3 * kQueuePages - 1;
 constexpr uint16_t kRxBoundary = 16384 - 256 - 1;
 constexpr uint32_t kRcrNormal = 0xe410220e;
-/* The receive ring posts 16 KiB URBs. RX aggregates therefore have to remain
- * smaller than one URB: a vendor-default 20 KiB aggregate can be split by
- * xHCI, leaving the descriptor tail in one completion and its body in the
- * next. The HALMAC size field is in 4 KiB pages, so 0x03 caps aggregates at
- * 12 KiB while retaining the vendor's 0x20 timeout. This matches Devourer's
- * Jaguar2/Jaguar3 USB invariant and remains compatible with hosts that cannot
- * complete larger bulk-IN reads. */
+/* RX aggregates have to fit inside one bulk-IN URB: a vendor-default 20 KiB
+ * aggregate can be split by xHCI, leaving the descriptor tail in one completion
+ * and its body in the next. The HALMAC size field is in 4 KiB pages, so 0x03
+ * caps aggregates at kRxAggregateBytes8733b (12 KiB) while retaining the
+ * vendor's 0x20 timeout. This matches Devourer's Jaguar2/Jaguar3 USB invariant
+ * and remains compatible with hosts that cannot complete larger bulk-IN reads.
+ * The RX loop floors its URB size at the same constant. */
 constexpr uint16_t kUsbRxAgg8733b = 0x2003;
+static_assert(kRxAggregateBytes8733b == ((kUsbRxAgg8733b & 0x0f) * 4096),
+              "RX URB floor must match the programmed RXDMA_AGG page count");
 
 uint16_t le16(const uint8_t *data) {
   return static_cast<uint16_t>(data[0] |
@@ -273,7 +275,16 @@ bool Halmac8733bMac::parse_physical_efuse(const uint8_t *physical,
       logical[target + 1] = physical[pos++];
     }
   }
-  return false;
+  /* Running off the end of the readable span is address-space exhaustion, not
+   * corruption: a fully-written EFUSE has no 0xff terminator left to find, and
+   * every header consumed up to here decoded cleanly. The vendor walkers treat
+   * this as success-with-whatever-parsed; failing instead would brick bring-up
+   * on a heavily reprogrammed but perfectly valid map. Malformed input is
+   * still rejected — the early returns above cover truncated headers and
+   * out-of-range block targets. */
+  if (used_bytes != nullptr)
+    *used_bytes = physical_len;
+  return true;
 }
 
 TxPowerPgMode8733b Halmac8733bMac::tx_power_pg_mode(uint8_t calibrate) {

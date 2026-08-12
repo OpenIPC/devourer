@@ -17,6 +17,14 @@ constexpr uint32_t kDwordMask = 0xffffffffu;
 constexpr uint32_t kRfMask = 0x000fffffu;
 constexpr uint16_t kRfBase[2] = {0x3c00, 0x4c00};
 
+/* Sanity bound for the audit_tssi_* probe stages only (rtl8733bprobe): those
+ * stages arm the PA-facing TSSI analog/enable sequence and roll it straight
+ * back, so a meter that has moved this far above the EFUSE baseline across a
+ * sub-second window means the readback is not describing the sequence under
+ * test. It is a probe verdict, never a runtime gate — the device path treats
+ * the meter as telemetry, like every other generation. */
+constexpr int kTssiAuditThermalCeiling = 25;
+
 unsigned bit_shift(uint32_t mask) {
   if (mask == 0)
     return 0;
@@ -1122,9 +1130,10 @@ bool Phy8733b::audit_tssi_analog(SelectedChannel channel,
   const TssiAnalogState8733b restored = read_tssi_analog_state();
   const uint8_t restored_thermal = read_thermal();
   const bool rollback_ok = restored.matches_snapshot(snapshot);
-  const bool thermal_ok = setup_thermal != 0 && restored_thermal != 0 &&
-                          setup_thermal < efuse.thermal + 25 &&
-                          restored_thermal < efuse.thermal + 25;
+  const bool thermal_ok =
+      setup_thermal != 0 && restored_thermal != 0 &&
+      setup_thermal < efuse.thermal + kTssiAuditThermalCeiling &&
+      restored_thermal < efuse.thermal + kTssiAuditThermalCeiling;
   const bool ok = setup_ok && rollback_ok && thermal_ok;
   _logger->info(
       "RTL8733B TSSI analog: ready={} setup={} rollback={} thermal={}/{} "
@@ -1215,9 +1224,10 @@ bool Phy8733b::audit_tssi_enable(SelectedChannel channel,
       restored_digital.reg_439c == digital_snapshot.reg_439c &&
       restored_analog.matches_snapshot(analog_snapshot);
   const uint8_t baseline = efuse.thermal == 0xff ? 0x20 : efuse.thermal;
-  const bool thermal_ok = enabled_thermal != 0 && restored_thermal != 0 &&
-                          enabled_thermal < baseline + 25 &&
-                          restored_thermal < baseline + 25;
+  const bool thermal_ok =
+      enabled_thermal != 0 && restored_thermal != 0 &&
+      enabled_thermal < baseline + kTssiAuditThermalCeiling &&
+      restored_thermal < baseline + kTssiAuditThermalCeiling;
   const bool ok = enabled_ok && rollback_ok && thermal_ok;
   _logger->info(
       "RTL8733B TSSI enable: ready={} enabled={} rollback={} ceiling={} "
@@ -1268,15 +1278,19 @@ bool Phy8733b::enable_tssi_tracking(SelectedChannel channel,
     const TssiBbState8733b enabled = read_tssi_bb_state();
     TssiAnalogState8733b enabled_analog = read_tssi_analog_state();
     enabled_analog.enabled = false;
-    const uint8_t thermal = read_thermal();
-    const uint8_t baseline = efuse.thermal == 0xff ? 0x20 : efuse.thermal;
+    /* Verdict is register readback only. No thermal read here: this runs on
+     * every CCK<->OFDM rate-table transition, i.e. inside send_packet, and
+     * read_thermal() is 3 RF writes + a 15 us settle + an RF read — several
+     * USB control transfers per frame. The meter is also the wrong instrument
+     * for the question: it tracks PA bias, not whether these BB writes landed
+     * (docs/warm-tx-degradation.md). Thermal telemetry rides
+     * GetThermalStatus / DEVOURER_THERMAL_POLL_MS at the caller's cadence. */
     const bool ok = enabled.enabled &&
                     get_bb(0x4318, 0x70000000u) == 7 &&
                     enabled.rate_offsets == capped->rate_offsets &&
                     (enabled.reg_4320 & (1u << 24)) == 0 &&
                     enabled.reg_439c == 0x00800801u &&
-                    enabled_analog.matches_setup() && thermal != 0 &&
-                    thermal < baseline + 25;
+                    enabled_analog.matches_setup();
     if (!ok) {
       set_bb(0x4318, 0x70000000u, 0);
       restore_tssi_analog(analog_snapshot, channel_cfg->is_2g);
@@ -1294,16 +1308,15 @@ bool Phy8733b::enable_tssi_tracking(SelectedChannel channel,
     _tssi_is_2g = channel_cfg->is_2g;
     _logger->info(
         "RTL8733B TSSI tracking enabled: ch={} path={} ceiling={} "
-        "rates={:08x}/{:08x}/{:08x}/{:08x}/{:08x} thermal={}",
+        "rates={:08x}/{:08x}/{:08x}/{:08x}/{:08x}",
         channel.Channel, path, max_target_qdbm, capped->rate_offsets[0],
         capped->rate_offsets[1], capped->rate_offsets[2],
-        capped->rate_offsets[3], capped->rate_offsets[4], thermal);
+        capped->rate_offsets[3], capped->rate_offsets[4]);
     devourer::Ev(_logger->events(), "rtl8733b.tssi_tracking")
         .f("enabled", true)
         .f("channel", channel.Channel)
         .f("path", path)
-        .f("ceiling_qdbm", max_target_qdbm)
-        .f("thermal", thermal);
+        .f("ceiling_qdbm", max_target_qdbm);
     return true;
   } catch (...) {
     set_bb(0x4318, 0x70000000u, 0);

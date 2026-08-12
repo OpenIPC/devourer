@@ -91,6 +91,8 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0xa81a, /* RTL8812EU — LB-LINK BL-M8812EU2 (Jaguar3 EU) */
     0xe822, /* RTL8822EU (Jaguar3 EU) */
     0xa82a, /* RTL8822EU (Jaguar3 EU) */
+    0xf72b, /* RTL8731BU/RTL8733BU Wi-Fi function (HALMAC 87xx) */
+    0xb733, /* RTL8733BU combo module Wi-Fi function (vendor ID table) */
 };
 
 static int g_rx_count = 0;
@@ -274,9 +276,14 @@ static const uint32_t g_qd_poll_ms = []() -> uint32_t {
 }();
 
 /* DEVOURER_THERMAL_POLL_MS=N: periodic snapshot of the chip thermal meter
- * (RF[A][0x42][15:10]), one `thermal` event per interval. Works on
- * every Jaguar member. 0 = disabled. DEVOURER_THERMAL_WARN_DELTA overrides the
- * warn threshold (thermal units above the EFUSE baseline; default 15). */
+ * (RF[A][0x42][15:10]), one `thermal` event per interval. Works on every
+ * generation. 0 = disabled. DEVOURER_THERMAL_WARN_DELTA overrides the warn
+ * threshold (thermal units above the EFUSE baseline; default 15).
+ *
+ * Telemetry only: the meter is a PA-bias tracking index, not a calibrated °C
+ * sensor, and docs/warm-tx-degradation.md shows it is not a validated
+ * degradation predictor (delivery drifts while the meter stays pinned). The
+ * poller therefore emits and warns; it never stops RX or refuses TX. */
 static const uint32_t g_thermal_poll_ms = []() -> uint32_t {
   const char *e = std::getenv("DEVOURER_THERMAL_POLL_MS");
   return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
@@ -1441,10 +1448,11 @@ int main(int argc, char **argv) {
   }
 #endif /* DEVOURER_HAVE_JAGUAR1 */
 
-  /* Cross-generation thermal safety telemetry. GetThermalStatus is part of
-   * IRtlDevice (Jaguar1/2/3, Kestrel, and RTL8733B); using the base pointer is
-   * what makes DEVOURER_THERMAL_POLL_MS work on RTL8812EU and newer backends
-   * instead of silently becoming Jaguar1-only. */
+  /* Cross-generation thermal telemetry. GetThermalStatus is part of IRtlDevice
+   * (Jaguar1/2/3, Kestrel, and RTL8733B); using the base pointer is what makes
+   * DEVOURER_THERMAL_POLL_MS work on RTL8812EU and newer backends instead of
+   * silently becoming Jaguar1-only. Emit + warn only — see the knob's comment
+   * above for why the reading never gates the session. */
   std::atomic<bool> therm_emitter_stop{false};
   std::thread therm_emitter;
   if (g_thermal_poll_ms > 0) {
@@ -1476,10 +1484,6 @@ int main(int argc, char **argv) {
           warned = true;
         } else if (!t.valid || t.delta < g_thermal_warn_delta) {
           warned = false;
-        }
-        if (t.valid && t.delta >= 25) {
-          logger->error("thermal: critical delta {}; stopping RX", t.delta);
-          g_devourer_should_stop = true;
         }
       }
     });

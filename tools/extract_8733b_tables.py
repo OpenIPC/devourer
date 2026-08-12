@@ -16,6 +16,10 @@ from pathlib import Path
 
 UPSTREAM = "libc0607/rtl8733bu-20230626 commit 9e5f684"
 DEFAULT_ROOT = "reference/rtl8733bu-20230626"
+SUBMODULE_HINT = (
+    f"{DEFAULT_ROOT} is a pinned git submodule ({UPSTREAM}); fetch it with\n"
+    f"  git submodule update --init {DEFAULT_ROOT}"
+)
 OUTPUT_C = "hal/hal8733b_tables.c"
 OUTPUT_H = "hal/hal8733b_tables.h"
 
@@ -91,7 +95,7 @@ def load(source_root: Path) -> dict[str, list[int]]:
     for key, (relative, expected_hash) in SOURCES.items():
         path = source_root / relative
         if not path.exists():
-            raise SystemExit(f"missing input: {path}")
+            raise SystemExit(f"missing input: {path}\n{SUBMODULE_HINT}")
         source = path.read_bytes()
         actual_hash = hashlib.sha256(source).hexdigest()
         if actual_hash != expected_hash:
@@ -166,17 +170,22 @@ def main() -> int:
     source_root = args.source_root or root / DEFAULT_ROOT
     arrays = load(source_root)
     outputs = {OUTPUT_C: render_c(arrays), OUTPUT_H: render_h()}
+    # Explicit encoding + newline="": the generated files are byte-defined
+    # artifacts, so --check must compare bytes identically on every platform.
+    # Without newline="", Windows would write CRLF on generate and translate it
+    # back on read, making the round-trip pass while the checked-in file differs.
     if args.check:
         stale = [
             path for path, expected in outputs.items()
-            if not (root / path).exists() or (root / path).read_text() != expected
+            if not (root / path).exists()
+            or (root / path).read_text(encoding="utf-8", newline="") != expected
         ]
         if stale:
             raise SystemExit("stale generated output: " + ", ".join(stale))
         verb = "verified"
     else:
         for path, output in outputs.items():
-            (root / path).write_text(output)
+            (root / path).write_text(output, encoding="utf-8", newline="")
         verb = "wrote"
     summary = ", ".join(f"{name}={len(values)}" for name, values in arrays.items())
     print(f"{verb} {OUTPUT_C} and {OUTPUT_H}: {summary}")

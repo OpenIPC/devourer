@@ -139,5 +139,52 @@ int main() {
   expect("oversized USB boundary shim rejected",
          !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
 
+  /* Close the band gate end-to-end. tx_rate_id_8733b returns the 0xff sentinel
+   * for CCK outside 2.4 GHz / 20 MHz; the descriptor build must refuse that
+   * sentinel too, otherwise the two halves are only ever tested in isolation
+   * and a caller that forwards the sentinel would emit a valid-looking frame. */
+  for (uint8_t rate = 0; rate <= 3; ++rate) {
+    invalid = cck;
+    invalid.rate_hw = rate;
+    invalid.rate_id = rtl8733b::tx_rate_id_8733b(rate, 0, /*is_5ghz=*/true);
+    expect("CCK-on-5GHz yields the rate-ID sentinel", invalid.rate_id == 0xff);
+    expect("rate-ID sentinel refused by the descriptor build",
+           !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
+    invalid.rate_id = rtl8733b::tx_rate_id_8733b(rate, 1, /*is_5ghz=*/false);
+    expect("CCK-at-40MHz yields the rate-ID sentinel", invalid.rate_id == 0xff);
+    expect("40 MHz CCK sentinel refused by the descriptor build",
+           !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
+  }
+  invalid = ofdm;
+  invalid.rate_id = 0x20; // first value past the 5-bit RATE_ID field
+  expect("out-of-range rate ID rejected",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
+
+  /* The modulation-admission contract shared by the SetTxMode and radiotap
+   * branches of Rtl8733bDevice::build_tx_block. Asserting it here is what makes
+   * the SGI/LDPC/STBC and second-stream refusals a tested property rather than
+   * a doc claim — the descriptor encoder has no STBC field to reject on. */
+  expect("HT MCS0-7 BCC at 20/40 MHz admitted",
+         rtl8733b::ht_request_supported_8733b(0, 20, false, false, false) &&
+             rtl8733b::ht_request_supported_8733b(7, 40, false, false, false));
+  expect("HT second stream refused",
+         !rtl8733b::ht_request_supported_8733b(8, 20, false, false, false));
+  expect("HT 80 MHz refused",
+         !rtl8733b::ht_request_supported_8733b(7, 80, false, false, false));
+  expect("HT SGI refused",
+         !rtl8733b::ht_request_supported_8733b(7, 20, true, false, false));
+  expect("HT LDPC refused",
+         !rtl8733b::ht_request_supported_8733b(7, 20, false, true, false));
+  expect("HT STBC refused",
+         !rtl8733b::ht_request_supported_8733b(7, 20, false, false, true));
+  expect("legacy 20 MHz BCC admitted",
+         rtl8733b::legacy_request_supported_8733b(20, false, false, false));
+  expect("legacy 40 MHz refused",
+         !rtl8733b::legacy_request_supported_8733b(40, false, false, false));
+  expect("legacy SGI/LDPC/STBC refused",
+         !rtl8733b::legacy_request_supported_8733b(20, true, false, false) &&
+             !rtl8733b::legacy_request_supported_8733b(20, false, true, false) &&
+             !rtl8733b::legacy_request_supported_8733b(20, false, false, true));
+
   return failures == 0 ? 0 : 1;
 }

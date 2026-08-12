@@ -122,6 +122,28 @@ int main() {
          first_ok && second_ok && one.dma_aggregate_count == 2 &&
              one.next_offset + two.next_offset == aggregate.size());
 
+  /* Aggregate tail: the last frame ends mid-8-byte-group, so its rounded-up
+   * next_offset points past the end of the completion buffer. Parsing the frame
+   * itself must still succeed (its body is entirely present), and advancing the
+   * walk by next_offset must leave no room for another descriptor so the RX
+   * loop's `offset + kRxDescSize <= length` guard terminates instead of reading
+   * past the buffer. */
+  auto tail = fixture(19, 0, 0);
+  const size_t tail_end = rtl8733b::kRxDescSize + 19u;
+  expect("tail fixture is padded to an 8-byte boundary",
+         tail.size() == ((tail_end + 7u) & ~size_t{7}) && tail.size() > tail_end);
+  tail.resize(tail_end);
+  rtl8733b::RxFrame8733b tail_frame;
+  const bool tail_ok =
+      rtl8733b::parse_rx_8733b(tail.data(), tail.size(), tail_frame);
+  expect("unpadded tail frame parses", tail_ok);
+  expect("tail next_offset rounds past the buffer end",
+         tail_ok && tail_frame.next_offset > tail.size());
+  expect("tail advance terminates the aggregate walk",
+         tail_ok && static_cast<size_t>(tail_frame.next_offset) +
+                            rtl8733b::kRxDescSize >
+                        tail.size());
+
   rx_pkt_attrib attrib{};
   std::array<uint8_t, 32> ofdm{};
   ofdm[0] = 1;

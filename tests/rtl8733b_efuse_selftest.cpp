@@ -56,6 +56,21 @@ int main() {
              high_block, sizeof(high_block), small_logical.data(),
              small_logical.size()));
 
+  /* A fully-written map has no 0xff terminator left to find. Running off the
+   * end of the readable span is address-space exhaustion, which the vendor
+   * walkers treat as success-with-whatever-parsed — a heavily reprogrammed but
+   * valid EFUSE must not fail bring-up. */
+  const uint8_t exhausted[] = {0x0c, 0x29, 0x81, 0x34, 0x12};
+  size_t exhausted_used = 0;
+  expect("exhausted map accepted",
+         rtl8733b::Halmac8733bMac::parse_physical_efuse(
+             exhausted, sizeof(exhausted), logical.data(), logical.size(),
+             &exhausted_used));
+  expect("exhausted map reports full span", exhausted_used == sizeof(exhausted));
+  expect("exhausted map decoded its words",
+         logical[0] == 0x29 && logical[1] == 0x81 && logical[2] == 0x34 &&
+             logical[3] == 0x12);
+
   logical.fill(0xff);
   for (size_t path = 0; path < 2; ++path) {
     const size_t base = rtl8733b::kTxPowerEfuseOffset8733b + path * 42;

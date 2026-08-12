@@ -31,7 +31,7 @@
 # traffic without --expect-traffic). All hardware/firmware/EFUSE invariants
 # must still pass. Exit 0 means every requested lifecycle passed.
 
-set -u
+set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="${BUILD:-$ROOT/build}"
@@ -55,6 +55,14 @@ OUT="${OUT:-/tmp/devourer-rtl8733b-soak/$(date +%Y%m%d-%H%M%S)}"
 die() { echo "[rtl8733b-soak] FATAL: $*" >&2; exit 3; }
 is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
+# Canonicalise the identity knobs to lowercase 0xNNNN. sysfs reports lowercase
+# hex without the prefix, so a VID=0x0BDA (or a decimal PID) must not fail
+# verification of a present, correct device.
+for name in VID PID; do
+  [[ "${!name}" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ ]] || die "$name is not numeric: ${!name}"
+  printf -v "$name" '0x%04x' "$((${!name}))"
+done
+
 [[ "$(id -u)" -eq 0 ]] || die "must run as root"
 [[ -x "$DOCTOR" ]] || die "$DOCTOR missing — build doctor first"
 [[ -x "$PROBE" ]] || die "$PROBE missing — build rtl8733bprobe first"
@@ -65,7 +73,7 @@ done
 [[ "$REPS" -gt 0 ]] || die "REPS must be positive"
 [[ "$TIMEOUT_SECS" -ge 10 ]] || die "TIMEOUT_SECS must be at least 10"
 
-read -r -a channel_list <<< "$CHANNELS"
+read -r -a channel_list <<< "$CHANNELS" || true
 [[ "${#channel_list[@]}" -gt 0 ]] || die "CHANNELS is empty"
 for channel in "${channel_list[@]}"; do
   is_uint "$channel" || die "invalid channel: $channel"
@@ -85,9 +93,12 @@ probe_off() {
 }
 
 verify_usb() {
+  local vid pid
   [[ -r "$SYSFS_DIR/idVendor" && -r "$SYSFS_DIR/idProduct" ]] || return 1
-  [[ "0x$(sed -n '1p' "$SYSFS_DIR/idVendor")" = "$VID" ]] || return 1
-  [[ "0x$(sed -n '1p' "$SYSFS_DIR/idProduct")" = "$PID" ]] || return 1
+  vid="$(sed -n '1p' "$SYSFS_DIR/idVendor")"
+  pid="$(sed -n '1p' "$SYSFS_DIR/idProduct")"
+  [[ "0x${vid,,}" = "$VID" ]] || return 1
+  [[ "0x${pid,,}" = "$PID" ]] || return 1
 }
 
 cleanup() {
@@ -112,21 +123,25 @@ for ((rep = 1; rep <= REPS; ++rep)); do
   start=$SECONDS
   echo "[rtl8733b-soak] rep $rep/$REPS ch$channel"
 
+  # A non-zero doctor exit is data, not a script error — capture it explicitly
+  # so `set -e` does not abort before the per-cycle gates below can run.
+  doctor_rc=0
   timeout -k 5 -s INT "$TIMEOUT_SECS" env \
     DEVOURER_LOG_LEVEL=info DEVOURER_EVENTS=stdout \
     "$DOCTOR" --vid "$VID" --pid "$PID" --bus "$BUS" --port "$PORT" \
     --channel "$channel" --reads "$READS" --listen-secs "$LISTEN_SECS" \
-    > "$log" 2>&1
-  doctor_rc=$?
+    > "$log" 2>&1 || doctor_rc=$?
   elapsed=$((SECONDS - start))
 
-  verdict_line="$(grep -F '"ev":"doctor.verdict"' "$log" | tail -1)"
+  # `|| true`: a missing verdict line is a graded failure below, not a reason
+  # to abort under `set -o pipefail`.
+  verdict_line="$(grep -F '"ev":"doctor.verdict"' "$log" | tail -1 || true)"
   verdict="$(sed -n 's/.*"verdict":"\([^"]*\)".*/\1/p' <<< "$verdict_line")"
   reasons="$(sed -n 's/.*"reasons":"\([^"]*\)".*/\1/p' <<< "$verdict_line")"
   rx_ok="$(sed -n 's/.*"rx_ok":\([0-9]*\).*/\1/p' <<< "$verdict_line")"
   rx_crc="$(sed -n 's/.*"rx_crc":\([0-9]*\).*/\1/p' <<< "$verdict_line")"
   thermal_pair="$(sed -n 's/.*ready for bounded monitor injection:.*thermal=\([0-9][0-9]*\)\/\([0-9][0-9]*\).*/\1 \2/p' "$log" | tail -1)"
-  read -r thermal baseline <<< "$thermal_pair"
+  read -r thermal baseline <<< "$thermal_pair" || true
   thermal="${thermal:-}"
   baseline="${baseline:-}"
   digest="$(sha256sum "$log" | cut -d' ' -f1)"
@@ -134,18 +149,22 @@ for ((rep = 1; rep <= REPS; ++rep)); do
   failed=0
   [[ "$doctor_rc" -eq 0 || ("$doctor_rc" -eq 1 && "$reasons" = "0x40") ]] || failed=1
   [[ -n "$verdict_line" ]] || failed=1
-  grep -qF '"efuse_reads":'"$READS" "$log" || failed=1
-  grep -qF '"efuse_mismatch":0' "$log" || failed=1
-  grep -qF '"efuse_bad_id":0' "$log" || failed=1
+  # Anchor the JSON value delimiter: an unanchored '"efuse_reads":4' also
+  # matches '"efuse_reads":40'.
+  grep -qE '"efuse_reads":'"$READS"'[,}]' "$log" || failed=1
+  grep -qE '"efuse_mismatch":0[,}]' "$log" || failed=1
+  grep -qE '"efuse_bad_id":0[,}]' "$log" || failed=1
   grep -qF '"efuse_id":"0x8129"' "$log" || failed=1
-  grep -qF '"fw_ready":1' "$log" || failed=1
-  grep -qF '"init":1' "$log" || failed=1
+  grep -qE '"fw_ready":1[,}]' "$log" || failed=1
+  grep -qE '"init":1[,}]' "$log" || failed=1
   grep -qF 'RTL8733B TSSI tracking disabled: rollback=1' "$log" || failed=1
   grep -qF 'RTL8733B power-off: ready=1 CR=0xea' "$log" || failed=1
   grep -qF 'RF_CTRL=0x00' "$log" || failed=1
   if [[ "$LISTEN_SECS" -gt 0 ]]; then
     grep -Eq 'RTL8733B RX: stopped .*malformed=0 agg_mismatch=0' "$log" || failed=1
-    grep -qF '"ev":"rx.parse_abort"' "$log" && failed=1
+    # Negated match: `! grep || failed=1`, not `grep && failed=1` — the latter
+    # exits non-zero on the (expected) no-match case, aborting under `set -e`.
+    ! grep -qF '"ev":"rx.parse_abort"' "$log" || failed=1
   fi
   verify_usb || failed=1
 
@@ -154,10 +173,10 @@ for ((rep = 1; rep <= REPS; ++rep)); do
     delta=-1
   else
     delta=$((thermal - baseline))
-    [[ "$delta" -lt 0 ]] && delta=$((-delta))
+    [[ "$delta" -ge 0 ]] || delta=$((-delta))
     [[ "$delta" -le "$MAX_THERMAL_DELTA" ]] || failed=1
-    [[ "$thermal" -lt "$min_thermal" ]] && min_thermal=$thermal
-    [[ "$thermal" -gt "$max_thermal" ]] && max_thermal=$thermal
+    [[ "$thermal" -ge "$min_thermal" ]] || min_thermal=$thermal
+    [[ "$thermal" -le "$max_thermal" ]] || max_thermal=$thermal
     [[ $((max_thermal - min_thermal)) -le "$MAX_THERMAL_SPREAD" ]] || failed=1
   fi
 

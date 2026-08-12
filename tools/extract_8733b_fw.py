@@ -109,8 +109,10 @@ def main() -> int:
     if not source.exists():
         raise SystemExit(
             f"missing input: {source}\n"
-            "clone https://github.com/libc0607/rtl8733bu-20230626 under "
-            "reference/, or pass --input"
+            f"reference/rtl8733bu-20230626 is a pinned git submodule "
+            f"({UPSTREAM}); fetch it with\n"
+            "  git submodule update --init reference/rtl8733bu-20230626\n"
+            "or pass --input"
         )
     source_bytes = source.read_bytes()
     source_hash = hashlib.sha256(source_bytes).hexdigest()
@@ -122,18 +124,23 @@ def main() -> int:
         name: extract(source_bytes.decode("utf-8"), name) for name in ARRAYS
     }
     outputs = {OUTPUT_C: render_c(blocks), OUTPUT_H: render_h()}
+    # Explicit encoding + newline="": the generated files are byte-defined
+    # artifacts, so --check must compare bytes identically on every platform.
+    # Without newline="", Windows would write CRLF on generate and translate it
+    # back on read, making the round-trip pass while the checked-in file differs.
     if args.check:
         stale = [
             path
             for path, expected in outputs.items()
-            if not (root / path).exists() or (root / path).read_text() != expected
+            if not (root / path).exists()
+            or (root / path).read_text(encoding="utf-8", newline="") != expected
         ]
         if stale:
             raise SystemExit("stale generated output: " + ", ".join(stale))
         verb = "verified"
     else:
         for path, output in outputs.items():
-            (root / path).write_text(output)
+            (root / path).write_text(output, encoding="utf-8", newline="")
         verb = "wrote"
     sizes = ", ".join(f"{name}={len(blob)}" for name, (_, blob) in blocks.items())
     print(f"{verb} {OUTPUT_C} and {OUTPUT_H}: {sizes}")

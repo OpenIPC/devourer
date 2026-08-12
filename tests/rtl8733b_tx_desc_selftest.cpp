@@ -186,5 +186,41 @@ int main() {
              !rtl8733b::legacy_request_supported_8733b(20, false, true, false) &&
              !rtl8733b::legacy_request_supported_8733b(20, false, false, true));
 
+  /* Whole-TxMode admission, the form SetTxMode actually hands the device.
+   * VHT and HE are refused on every band: both vendor trees declare this
+   * silicon 802.11b/g/n, 1SS, 20/40 MHz, and the 2024 tree's `Fix VHT flags`
+   * commit removes the accidentally enabled VHT build flag. */
+  devourer::TxMode mode;
+  mode.mode = devourer::TxMode::Mode::Legacy;
+  mode.legacy_rate_500kbps = 12; // 6M
+  expect("legacy TxMode admitted", rtl8733b::tx_mode_supported_8733b(mode));
+  mode.bw_mhz = 40;
+  expect("legacy TxMode at 40 MHz refused",
+         !rtl8733b::tx_mode_supported_8733b(mode));
+
+  mode = {};
+  mode.mode = devourer::TxMode::Mode::HT;
+  mode.ht_mcs = 7;
+  mode.bw_mhz = 40;
+  expect("HT MCS7/40 TxMode admitted", rtl8733b::tx_mode_supported_8733b(mode));
+  mode.stbc = true;
+  expect("HT TxMode with STBC refused",
+         !rtl8733b::tx_mode_supported_8733b(mode));
+  mode.stbc = false;
+  mode.ht_mcs = 8;
+  expect("HT TxMode on a second stream refused",
+         !rtl8733b::tx_mode_supported_8733b(mode));
+
+  mode = {};
+  mode.mode = devourer::TxMode::Mode::VHT;
+  mode.vht_mcs = 3;
+  mode.vht_nss = 1;
+  expect("VHT TxMode refused on every band",
+         !rtl8733b::tx_mode_supported_8733b(mode));
+  mode = {};
+  mode.mode = devourer::TxMode::Mode::HE;
+  expect("HE TxMode refused on every band",
+         !rtl8733b::tx_mode_supported_8733b(mode));
+
   return failures == 0 ? 0 : 1;
 }

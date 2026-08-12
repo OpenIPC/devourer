@@ -456,20 +456,17 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
    * use the same SetTxMode default as the established backends and txdemo. */
   if (_tx_mode_default) {
     const auto &mode = *_tx_mode_default;
+    /* One predicate covers the family (VHT/HE refused outright) and its
+     * modulation parameters, so the SetTxMode branch and the radiotap branch
+     * below cannot drift apart — and the refusals are testable without
+     * hardware (tests/rtl8733b_tx_desc_selftest.cpp). */
+    if (!rtl8733b::tx_mode_supported_8733b(mode))
+      return 0;
     if (mode.mode == devourer::TxMode::Mode::Legacy) {
-      if (!rtl8733b::legacy_request_supported_8733b(mode.bw_mhz, mode.sgi,
-                                                    mode.ldpc, mode.stbc))
-        return 0;
       fixed_rate = mode.legacy_rate_500kbps;
-    } else if (mode.mode == devourer::TxMode::Mode::HT) {
-      if (!rtl8733b::ht_request_supported_8733b(mode.ht_mcs, mode.bw_mhz,
-                                                mode.sgi, mode.ldpc,
-                                                mode.stbc))
-        return 0;
+    } else {
       fixed_rate = static_cast<uint8_t>(MGN_MCS0 + mode.ht_mcs);
       frame_width = mode.bw_mhz == 40 ? CHANNEL_WIDTH_40 : CHANNEL_WIDTH_20;
-    } else {
-      return 0;
     }
   }
 

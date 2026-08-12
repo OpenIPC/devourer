@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "TxMode.h"
+
 namespace rtl8733b {
 
 inline constexpr size_t kTxDescSize = 40;
@@ -50,6 +52,21 @@ inline bool ht_request_supported_8733b(unsigned mcs, unsigned bw_mhz, bool sgi,
 inline bool legacy_request_supported_8733b(unsigned bw_mhz, bool sgi, bool ldpc,
                                            bool stbc) {
   return bw_mhz == 20 && !sgi && !ldpc && !stbc;
+}
+
+/* Whole-TxMode admission: the PPDU family plus its modulation parameters. VHT
+ * and HE fall through to false on every band. */
+inline bool tx_mode_supported_8733b(const devourer::TxMode &mode) {
+  switch (mode.mode) {
+  case devourer::TxMode::Mode::Legacy:
+    return legacy_request_supported_8733b(mode.bw_mhz, mode.sgi, mode.ldpc,
+                                          mode.stbc);
+  case devourer::TxMode::Mode::HT:
+    return ht_request_supported_8733b(mode.ht_mcs, mode.bw_mhz, mode.sgi,
+                                      mode.ldpc, mode.stbc);
+  default:
+    return false;
+  }
 }
 
 /* RTL8733B uses the common HALMAC 87xx descriptor layout, but its normal TX

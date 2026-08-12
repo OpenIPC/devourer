@@ -27,6 +27,7 @@ upstream history.
 | `rtl88x2eu-5mhz` | `libc0607/rtl88x2eu-20230815` | `5mhz_bw` | Jaguar3 — 8822EU 5 MHz narrowband reference |
 | `rtl8852bu`      | `josephnef/rtl8852bu` (fork of morrownr/rtl8852bu-20250826) | default | Kestrel — 8852BU/8832BU (Wi-Fi 6) |
 | `rtl8852cu`      | `josephnef/rtl8852cu` (fork of morrownr/rtl8852cu-20251113) | default | Kestrel — 8852CU/8832CU (Wi-Fi 6) |
+| `rtl8733bu-20230626` | `libc0607/rtl8733bu-20230626` | `v5.13.0.1` | RTL8733B — 8731BU/8733BU (HALMAC 87xx) |
 
 ## Why these forks
 
@@ -62,6 +63,17 @@ upstream history.
   `tests/jaguar3_eu_kernel_5mhz_sdr.sh` and `tests/jaguar3_eu_5mhz_mirror_ab.sh`.
   Kept as a distinct submodule alongside the maintained `rtl88x2eu` because
   OpenHD's mainline does not carry the narrowband branch.
+- **libc0607 `rtl8733bu-20230626` for the RTL8733B backend.** The only public
+  vendor drop for the HALMAC 87xx RTL8731BU/RTL8733BU Wi-Fi function. It is the
+  generator input for `hal/hal8733b_fw.c` and `hal/hal8733b_tables.c`, and the
+  source of the `halmac_reg2.h` / power-sequence constants transcribed into
+  `src/rtl8733b/` — pinned so both extractors' `--check` and every transcribed
+  constant stay re-verifiable from a fresh checkout. A newer
+  `libc0607/rtl8733bu-20240806` (commit `2ec19e1`) was read for comparison
+  during the port (active-path TSSI, SRRC band-edge, GPIO/coex, power-saving,
+  C2H/TX-tasklet); it is deliberately **not** a submodule because nothing in
+  `hal/` is generated from it and the already hardware-validated artifacts were
+  not replaced with untested ones. `docs/rtl8733b.md` records what was compared.
 
 ## Consumers
 

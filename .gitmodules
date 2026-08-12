@@ -35,3 +35,8 @@
 	path = reference/rtl8852cu
 	url = https://github.com/josephnef/rtl8852cu.git
 	shallow = true
+[submodule "reference/rtl8733bu-20230626"]
+	path = reference/rtl8733bu-20230626
+	url = https://github.com/libc0607/rtl8733bu-20230626.git
+	branch = v5.13.0.1
+	shallow = true

@@ -60,19 +60,20 @@ unrelated register map.
   reachable only from full TSSI setup, keyed on `phydm_get_tx_rate` at that
   instant, and never re-selected at runtime. So nothing reads or writes a
   register per frame on the send path, matching the other four HALs.
-  `DeviceConfig::tuning::tssi_rate_table` re-selects on each rate-class
-  crossing instead, at **84 ms / 136 USB register round trips** per crossing
-  (bench, one unit), capping a mixed-rate stream around 11 fps — read its
-  declaration in `src/DeviceConfig.h` for when that is worth paying, and
-  OpenIPC/devourer#389 for the cost breakdown and a validated in-place
-  alternative. Enabling it re-introduces send-path register I/O by design,
-  which is why it is default-off and announces itself at bring-up.
-  Note what the opt-in path's failure mode is and is not:
-  `Phy8733b::enable_tssi_tracking` restores its own analog/BB snapshot when its
-  verdict fails, but the *transition* has no rollback to the previous table —
-  `select_tssi_rate_table` returns false with tracking left off, and the caller
-  responds by tearing the session down rather than transmitting at an
-  unverified power setting.
+- **The curve choice is inert at any temperature this part reaches, so do not
+  reintroduce runtime switching.** The CCK and OFDM/HT tables are
+  bit-identical for thermal deltas 0..+17 and first differ at **+18** (the
+  swing ramp starts there; the words either side of the baseline are zero in
+  both). A five-minute max-duty MCS7 soak on the validation unit plateaued at
+  **+8** after two minutes and stopped climbing — less than half the delta
+  needed for the tables to differ by a single entry. A runtime switch
+  therefore costs **84 ms / 136 USB register round trips** per crossing
+  (OpenIPC/devourer#389) to install a table that is bit-identical to the one
+  already loaded. An opt-in knob for it was written, measured and deleted on
+  that evidence. If a future board reaches +18 — a sealed module at high
+  ambient might — the switch is worth revisiting, but implement it as the
+  in-place rewrite validated in #389 (13.8 ms, tracking left enabled), not the
+  teardown/rebuild.
 - **The loop needs settling time, so a fast rate-switching run misreports
   power.** Alternating CCK and OFDM at a few ms per frame leaves CCK
   transmitting above its settled level until the loop converges; pacing the

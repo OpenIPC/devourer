@@ -130,17 +130,6 @@ void Rtl8733bDevice::InitWrite(SelectedChannel channel) {
       throw std::runtime_error("RTL8733B monitor RX configuration failed");
     _tx_ready = true;
     _tx_submits = 0;
-    _tx_fatal = nullptr;
-    /* An opt-in that re-introduces register I/O on the send path should not be
-     * silent about it: enabling this trades ~84 ms per CCK<->OFDM crossing for
-     * thermal-compensation accuracy nobody has yet shown to matter, and a
-     * caller who inherited the knob from an environment deserves to see the
-     * cost rather than discover it as a mysterious frame-rate ceiling. */
-    if (_cfg.tuning.tssi_rate_table && _tssi_tracking)
-      _logger->warn(
-          "RTL8733B: DEVOURER_TSSI_RATE_TABLE is on — each CCK<->OFDM rate "
-          "crossing re-selects the TSSI thermal table inside send_packet at "
-          "~84 ms / 136 USB register round trips (OpenIPC/devourer#389)");
     /* One-shot thermal snapshot at bring-up — the PA-heating baseline for the
      * session, same as the Kestrel InitWrite snapshot. Logged, never acted on:
      * the meter is a PA-bias tracking index, not a calibrated °C sensor, and
@@ -174,9 +163,15 @@ bool Rtl8733bDevice::configure_tx_power(SelectedChannel channel) {
   /* Pick the thermal-compensation curve once, from the TX mode configured at
    * this point, and leave it alone — the vendor's own setup keys the table on
    * `phydm_get_tx_rate` at TSSI-setup time and never re-selects it at runtime.
-   * Re-selecting per frame is the opt-in DEVOURER_TSSI_RATE_TABLE path; the
-   * default keeps send_packet free of register I/O like every other
-   * generation. */
+   * It is never re-selected per frame, so send_packet does no register I/O,
+   * like every other generation.
+   *
+   * The curve choice is inert on this silicon at any temperature the part
+   * reaches: the CCK and OFDM/HT tables are bit-identical for thermal deltas
+   * 0..+17 and first differ at +18, while a five-minute max-duty MCS7 soak
+   * plateaued at +8 after two minutes and stopped climbing. It is set from the
+   * rate class anyway because that costs nothing and is what the vendor does —
+   * but do not expect it to be measurable. */
   const bool cck_table = _tx_mode_default.has_value() &&
                          _tx_mode_default->mode ==
                              devourer::TxMode::Mode::Legacy &&
@@ -190,39 +185,6 @@ bool Rtl8733bDevice::configure_tx_power(SelectedChannel channel) {
     return false;
   _tssi_tracking = true;
   _tssi_cck = cck_table;
-  return true;
-}
-
-bool Rtl8733bDevice::select_tssi_rate_table(bool cck) {
-  /* Default: the table was chosen once in configure_tx_power and stays put, so
-   * the send path does no register I/O — the vendor behaves the same way.
-   * Both conditions must be checked: gating only on the EFUSE PG mode would
-   * return false here, which send_packet treats as fatal and stops the card. */
-  if (!_cfg.tuning.tssi_rate_table ||
-      _efuse.tx_power_mode != rtl8733b::TxPowerPgMode8733b::TssiOffset)
-    return true;
-  if (!_tssi_tracking)
-    return false;
-  if (_tssi_cck == cck)
-    return true;
-
-  /* The vendor chooses this table from the current TX rate. The table cannot
-   * be changed while closed-loop tracking is enabled, so make the transition
-   * explicit and reversible: exact rollback, table readback, then a fresh
-   * capped enable verified by register readback. (prepare_tssi_thermal here is
-   * the vendor's TSSI thermal-*compensation table*, a hardware feature driven
-   * off the EFUSE baseline constant — not a live temperature read.) */
-  if (!_phy.disable_tssi_tracking())
-    return false;
-  _tssi_tracking = false;
-  if (!_phy.prepare_tssi_thermal(_efuse, cck) ||
-      !_phy.enable_tssi_tracking(
-          _channel, _efuse, rtl8733b::kSafeTssiTargetQdbm8733b))
-    return false;
-  _tssi_tracking = true;
-  _tssi_cck = cck;
-  _logger->info("RTL8733B TSSI rate table selected: {}",
-                cck ? "CCK" : "OFDM/HT");
   return true;
 }
 
@@ -384,14 +346,7 @@ void Rtl8733bDevice::SetMonitorChannel(SelectedChannel channel) {
 bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
   if (!_phy_ready || !_mac_ready || !_tx_ready) {
-    /* Name the reason: a retry loop must be able to tell "InitWrite has not run
-     * yet" from "the session was deliberately stopped and will not recover". */
-    if (_tx_fatal != nullptr)
-      _logger->error("RTL8733B TX rejected: session stopped by {} — "
-                     "re-run InitWrite to recover",
-                     _tx_fatal);
-    else
-      _logger->error("RTL8733B TX rejected before InitWrite");
+    _logger->error("RTL8733B TX rejected before InitWrite");
     return false;
   }
   if (packet == nullptr)
@@ -432,22 +387,6 @@ bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
   const uint8_t bandwidth = (usb_frame[0x14] >> 5) & 0x3;
   const uint8_t short_gi = (usb_frame[0x14] >> 4) & 0x1;
   const uint8_t ldpc = (usb_frame[0x14] >> 7) & 0x1;
-  if (!select_tssi_rate_table(rate_hw <= 3)) {
-    /* Fatal, not transient. The CCK<->OFDM table switch disables closed-loop
-     * TSSI tracking, rewrites the thermal table and re-enables tracking; a
-     * failure anywhere in there means the readback no longer describes the
-     * loop that is driving the PA. Continuing to inject would be transmitting
-     * at an unverified power setting, so tear the session down (MAC stop +
-     * card disable). send_packet keeps its bool contract — no other generation
-     * throws per frame — so the reason is latched in _tx_fatal instead: a bare
-     * `false` is indistinguishable from a short bulk write and would send a
-     * retry loop straight back into the same state. */
-    _logger->error("RTL8733B TX aborted: TSSI rate-table transition failed — "
-                   "closed-loop power state is unverified, stopping the card");
-    _tx_fatal = "a failed TSSI rate-table transition";
-    Stop();
-    return false;
-  }
   const int sent = _device.bulk_send_sync_ep(
       endpoint, usb_frame.data(), usb_frame.size(), 100);
   if (sent != static_cast<int>(usb_frame.size())) {

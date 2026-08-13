@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with
 code in this repository. It holds **cross-cutting** facts only. Deep subtree
 facts live in nested `CLAUDE.md` files, auto-loaded when working there:
-`src/{jaguar1,jaguar2,jaguar3,kestrel}/` for per-generation registers,
+`src/{jaguar1,jaguar2,jaguar3,kestrel,rtl8733b}/` for per-generation registers,
 descriptors and per-chip mechanisms; `src/hopset/` for keyed FHSS and the
 adaptive hopset; `src/chanmig/` for channel migration. Add new facts to the
 narrowest file that covers them.
@@ -15,13 +15,13 @@ its adversarial counterpart in the same breath.
 
 ## What this is
 
-Userspace re-implementation of Realtek's USB Wi-Fi drivers (11ac RTL88xx and
-11ax RTL8852 families) — speaks to the chip directly via libusb instead of a
-kernel module. Static library `devourer` (CMake target) + example executables
-under `examples/` (`rxdemo` and `txdemo` are the canonical RX/TX demos). Used
-by the OpenIPC project for long-range video links.
+Userspace re-implementation of Realtek's USB Wi-Fi drivers (11n RTL873x, 11ac
+RTL88xx and 11ax RTL8852 families) — speaks to the chip directly via libusb
+instead of a kernel module. Static library `devourer` (CMake target) + example
+executables under `examples/` (`rxdemo` and `txdemo` are the canonical RX/TX
+demos). Used by the OpenIPC project for long-range video links.
 
-Four chip generations, each behind its own self-contained HAL, dispatched at
+Five hardware backends, each behind its own self-contained HAL, dispatched at
 construction from the `SYS_CFG2` chip-id (Kestrel: PID-first):
 
 - **Jaguar1** (`src/jaguar1/`): RTL8812AU (2T2R reference), RTL8811AU (1T1R
@@ -53,12 +53,24 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first):
   out at 80 MHz (the 6G+160 TX-enable path is un-ported). TX power is a fixed
   BB dBm (`DEVOURER_TX_PWR`, whole dBm here). The 8852A-family (RTL8832AU) is
   deliberately excluded. Quirks: `docs/8852c-quirks.md`.
+- **RTL8733B** (`src/rtl8733b/`): the 802.11n generation — RTL8731BU/RTL8733BU
+  (chip-id `0x16`), a HALMAC 87xx part, not a Jaguar variant: its own power,
+  firmware, MAC, descriptor and PHY paths. 1T1R, and the advertised surface is
+  only what an independent witness decoded — legacy OFDM + HT MCS0-7, BCC,
+  20/40 MHz on 2.4/5 GHz, plus long-preamble CCK on 2.4 GHz at 20 MHz.
+  Everything the backend has not ported (TSF/beacons, hardware ACK, A-MPDU,
+  FastRetune, the runtime TX-power levers) falls through to `IRtlDevice`'s
+  not-ported defaults rather than being faked, so read the base class before
+  assuming a cross-generation feature below applies here. SGI, LDPC, STBC, VHT
+  and HE are refused outright. Scope, one-unit validation record and the
+  deferred matrix: `docs/rtl8733b.md`.
 
 Naming traps: **RTL8821AU is Jaguar1** (not Jaguar2, despite the Jaguar2
 RTL8821C's similar name); RTL8822**B**U (Jaguar2) ≠ RTL8822**C**U (Jaguar3);
 the TP-Link TX50UH is RTL8832**C**U (8852C-family) despite lab lore calling it
-8832AU, while the TX20U **Nano** is RTL8852BU. Full chip / bench-throughput
-table: README **Supported hardware**.
+8832AU, while the TX20U **Nano** is RTL8852BU; RTL8733B**U** is USB and
+supported, RTL8733B**S** is the SDIO sibling and has no transport here. Full
+chip / bench-throughput table: README **Supported hardware**.
 
 **PCIe** (`DEVOURER_PCIE=ON`, Linux-only, default OFF): the RTL8821CE — the
 PCIe sibling of the 8821CU — rides the same Jaguar2 HAL through a vfio-pci
@@ -92,8 +104,9 @@ before running `tools/extract_*.py` or the hardware-testing kernel cells.
 
 Per-chip options, all default ON: `DEVOURER_JAGUAR1`, `DEVOURER_8814` (requires
 JAGUAR1), `DEVOURER_JAGUAR2_8822B`, `DEVOURER_JAGUAR2_8821C`,
-`DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`, `DEVOURER_KESTREL_8852B`,
-`DEVOURER_KESTREL_8852C`. `DEVOURER_PCIE` (default OFF, Linux-only, requires
+`DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`, `DEVOURER_8733B`,
+`DEVOURER_KESTREL_8852B`, `DEVOURER_KESTREL_8852C`.
+`DEVOURER_PCIE` (default OFF, Linux-only, requires
 JAGUAR2_8821C) adds the vfio-pci transport + `pcieprobe`; OFF builds are
 byte-identical to before it existed. Turning groups off drops their firmware
 blobs + PHY tables (an 8812AU-only `rxdemo` is ~1.6 MB vs ~6.3 MB all-on — the
@@ -286,11 +299,11 @@ Behavioural traps the per-field docs can't carry:
   `0xAA:0xBB[:0xCC]@<ms>` cycles masks on a timer for mobility/MRC
   measurements (`docs/measuring-spatial-diversity.md`,
   `tests/mrc_mobility.py`). `DEVOURER_RX_ALLPATHS=1` emits per-chain
-  RSSI/SNR/EVM as a separate `rx.path` event on every generation (Kestrel
-  parses its halbb physts path pages; C/D nonzero only on the 8814AU — the
-  other dies are ≤2 RX chains). Windowed per-antenna means ride
-  `GetActiveRxPaths()` / the `adapter.rxpaths` event (rssi/snr/evm per
-  chain).
+  RSSI/SNR/EVM as a separate `rx.path` event on the four Jaguar/Kestrel
+  generations (Kestrel parses its halbb physts path pages; C/D nonzero only on
+  the 8814AU — the other dies are ≤2 RX chains; the 1T1R RTL8733B does not
+  emit it). Windowed per-antenna means ride `GetActiveRxPaths()` / the
+  `adapter.rxpaths` event (rssi/snr/evm per chain).
 - `DEVOURER_RX_KEEP_CORRUPTED=1` is the entry point for the fused-FEC salvage
   layer (`docs/fused-fec.md`), and stays opt-in for a reason: a body with a
   corrupt tail is the worst-case input for an IP-stack consumer that didn't
@@ -300,8 +313,8 @@ Behavioural traps the per-field docs can't carry:
   that loss is pre-FCS sync/AGC, upstream of the equalizer. They target
   in-band spurs on otherwise decodable frames
   (`docs/pseudo-preamble-puncturing.md`).
-- `DEVOURER_DIS_CCA=1` (every generation, runtime `SetCcaMode` — the
-  interface method is pure virtual so no generation can silently no-op it)
+- `DEVOURER_DIS_CCA=1` (runtime `SetCcaMode` — the interface method is pure
+  virtual so no backend can silently no-op it)
   disables the MAC carrier-sense gate — **both** primary CCA (`0x520[14]`)
   and EDCCA (`[15]`). The default is carrier-sense + EDCCA **enabled** on
   Jaguar1/2/3; on Jaguar1 the enable is real work — its BB table parks the
@@ -316,13 +329,20 @@ Behavioural traps the per-field docs can't carry:
   `DEVOURER_DIS_CCA=0` forces standard carrier-sense back. On Kestrel the
   8852C runs the same enabled default (measured: full-rate TX, 2.4x flood
   deferral); the 8852B TX bring-up still clears the gates and WARNS pending
-  its measurement arm (`tests/kestrel_cca_default_check.sh`). Does NOT apply
+  its measurement arm (`tests/kestrel_cca_default_check.sh`). On the RTL8733B
+  the disable is **not ported** — the HALMAC 87xx carrier-sense gate has not
+  been located and measured there, so `SetCcaMode(true)` throws (loudly, but
+  without tearing the session down) while `SetCcaMode(false)`, the state its
+  MAC bring-up already leaves programmed, succeeds as a no-op; setting the
+  config knob warns at `InitWrite` and airs with carrier-sense. Does NOT apply
   the vendor BB CCA-off writes (they deafen the RX). RX-decode side is a
   separate null (`tests/dis_cca_onair.sh`).
 
-**Runtime TX power** — the adaptive-link power lever, three knobs on every
-generation: `SetTxPowerOffsetQdb` (relative, shape-preserving),
-`SetTxPowerIndexOverride` (flat absolute), `SetTxPowerRateDiffs` (replace the
+**Runtime TX power** — the adaptive-link power lever, three knobs on the four
+Jaguar/Kestrel generations (the RTL8733B ports none of them: it runs a fixed
+safe closed-loop TSSI target): `SetTxPowerOffsetQdb` (relative,
+shape-preserving), `SetTxPowerIndexOverride` (flat absolute),
+`SetTxPowerRateDiffs` (replace the
 calibrated per-rate shape). The contract — how they compose, the MCS7-anchor
 semantics, family step sizes, the write-only-family `hw_readback=false`
 shadow, and Kestrel's software send-time fold — is documented at the
@@ -359,9 +379,10 @@ temporal layer and injects each at its ladder's rate
 ## Frequency hopping
 
 `IRtlDevice::FastRetune(channel)` — lean intra-band, same-bandwidth retune on
-every generation (RF channel switch only, write-only from a compose cache);
-falls back to full `SetMonitorChannel` on a band change. FHSS-grade: ~0.5–2.5 ms
-per hop depending on chip. On the Jaguar2 dies (8822B, 8821C) and Jaguar3
+the four Jaguar/Kestrel generations (RF channel switch only, write-only from a
+compose cache); falls back to full `SetMonitorChannel` on a band change, and to
+the full path entirely on the RTL8733B, which has no fast path yet.
+FHSS-grade: ~0.5–2.5 ms per hop depending on chip. On the Jaguar2 dies (8822B, 8821C) and Jaguar3
 (8822C, 8822E), `DEVOURER_FASTRETUNE_FW=1` hands the hop to the chip firmware
 instead (H2C 0x1D, fire-and-confirm-later): ~1.4 ms dead air on the 8822B (a
 tie on-air on the 8822C/8822E, but ~3× cheaper host-side), and `=2` extends it
@@ -410,8 +431,9 @@ validation matrix and the near-field bench note: `src/chanmig/CLAUDE.md`.
 ## Hardware time, beacons, AP mode
 
 `ReadTsf()` reads the 64-bit MAC TSF and every received frame carries the
-MAC-latched `tsfl` RX timestamp — on all generations, µs-grade
-(`docs/time-distribution.md`, measured vs NTP/PTP: `docs/timing-accuracy.md`).
+MAC-latched `tsfl` RX timestamp — on the four Jaguar/Kestrel generations,
+µs-grade (`docs/time-distribution.md`, measured vs NTP/PTP:
+`docs/timing-accuracy.md`).
 `StartBeacon` loads a beacon into the MAC's reserved page and the chip
 auto-transmits at each TBTT with the live TSF stamped at the TX instant — the
 sub-µs downlink. The chip beacons **autonomously**, so `StopBeacon()` is what
@@ -430,7 +452,8 @@ also the seed of AP mode — a real Linux station associates, open or WPA2-PSK
 (`docs/ap-mode.md`); the multi-cell architecture it enables is
 `docs/multi-ap-cellular.md`, and the measured scheduler contracts (submit→air
 guard time, dynamic beacon grants, ACK/TxReport, per-UE RX attribution) are
-`docs/scheduled-mac.md`.
+`docs/scheduled-mac.md`. None of this section is ported on the RTL8733B —
+`ReadTsf` returns 0 and `StartBeacon` returns false there.
 
 ## Aggregation, hardware ACK, TX reports
 
@@ -483,8 +506,12 @@ with TX still in flight.
 USB PID. `CreateRtlDevice` returns an `IRtlDevice` (`Init` = bring-up + RX
 loop; `InitWrite` = TX bring-up; `StartRxLoop` = blocking RX worker on an
 already-up chip, enabling TX+RX on one handle; `send_packet`) and constructs
-`RtlJaguarDevice` / `RtlJaguar2Device` / `RtlJaguar3Device` per generation.
-`Rtl8812aDevice` is a deprecated alias of `RtlJaguarDevice`.
+`RtlJaguarDevice` / `RtlJaguar2Device` / `RtlJaguar3Device` / `RtlKestrelDevice`
+/ `Rtl8733bDevice` per backend. `Rtl8812aDevice` is a deprecated alias of
+`RtlJaguarDevice`. Optional device methods are **virtual with not-ported
+defaults**, not pure virtual — a backend that hasn't ported a feature inherits
+`false`/`0`/a full-path fallback rather than a fake. Check the override list in
+the backend's header before believing a cross-generation claim.
 
 Generation-agnostic core in `src/` (always compiled; depends on no HAL):
 
@@ -507,13 +534,16 @@ Generation-agnostic core in `src/` (always compiled; depends on no HAL):
   (`UeRxAttribution`: per-transmitter windowed RX statistics keyed by 802.11
   TA); the device RX loops are untouched.
 
-Per-generation HALs are self-contained under `src/jaguar1/`, `src/jaguar2/`,
-`src/jaguar3/`, `src/kestrel/`; each subtree's `CLAUDE.md` maps its files,
-strategy seams and chip-specific mechanisms.
+Per-backend HALs are self-contained under `src/jaguar1/`, `src/jaguar2/`,
+`src/jaguar3/`, `src/kestrel/`, `src/rtl8733b/`; each subtree's `CLAUDE.md`
+maps its files, strategy seams and chip-specific mechanisms.
 
-`hal/` holds vendor headers and tables. The per-chip PHY/limit tables and the
-8821C firmware blob are **generated** by `tools/extract_*.py` — edit the
-generators, never the output files.
+`hal/` holds vendor headers and tables. The per-chip PHY/limit tables and most
+firmware blobs are **generated** by `tools/extract_*.py` (check `tools/` for
+which — the set has grown) — edit the generators, never the output files. The
+newer extractors (`extract_8733b_*.py`) pin per-source and per-array SHA-256
+hashes and carry a `--check` mode that reproduces the checked-in output
+byte-for-byte; prefer that shape when adding one.
 
 ## Hardware gotchas
 
@@ -562,7 +592,11 @@ generators, never the output files.
   `DEVOURER_RX_URB_BYTES`); raise both together or MTK hosts go silent, and
   never let an aggregate exceed the URB size or the parse walk breaks.
   Kestrel is exempt (8852C RXAGG LEN_TH ~20 KB needs its 32 KB ring) and
-  unvalidated on MTK hosts.
+  unvalidated on MTK hosts. The RTL8733B is the worked example of the failure:
+  its vendor-default 20 KiB aggregate was observed being split by xHCI across
+  16 KiB completions, tail and body landing separately. It now caps the device
+  at 12 KiB and floors its URB at the same constant, tied together by a
+  `static_assert` — raising one alone reintroduces the straddle.
 
 ## TX path
 
@@ -587,5 +621,16 @@ moves.
 its USB2 round-trip is too long for a blocking send to saturate the link);
 Jaguar2/Jaguar3 send synchronously (`bulk_send_sync_ep` → `tx_sync` — their
 USB3 round-trip saturates on one blocking thread, and sync gives the HalMAC
-bring-up a clean per-send NAK backoff). Don't unify the two onto one mode —
-either direction regresses throughput or bring-up safety.
+bring-up a clean per-send NAK backoff); the RTL8733B is synchronous too, so
+every submission has a bounded result and no buffer outlives the `send_packet`
+call. Don't unify the modes — either direction regresses throughput or
+bring-up safety.
+
+**Nothing reads a register per frame on the send path.** Measured on one
+RTL8733B unit during bring-up: a single thermal read (3 RF writes + a 15 µs
+settle + an RF read, each several USB control transfers) cost 2.51 ms of a
+2.71 ms per-frame budget on USB high speed — 93%, for a meter that tracks PA
+bias and is not a validated degradation predictor. One bench, one part, and a
+USB3 host would divide it; the shape of the result is the transferable part.
+Sensor reads belong on the caller's own cadence via the runtime getters, never
+inside `send_packet`.

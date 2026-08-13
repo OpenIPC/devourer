@@ -1018,19 +1018,28 @@ bool Phy8733b::prepare_tssi_thermal(const EfuseInfo &efuse, bool cck) {
 
   const TssiThermalState8733b state = read_tssi_thermal_state();
   const bool ok = state.matches_disabled(plan);
+  /* Report words that can actually distinguish the two tables. The CCK and
+   * OFDM/HT plans differ only in words 4..11 — the swing ramp either side of
+   * the baseline — and are identical (all zero) at words 0 and 15, so logging
+   * the table edges could never show whether a CCK<->OFDM swap took effect.
+   * `fold` is an XOR over all 16 words, so any word changing moves it. */
+  uint32_t fold = 0;
+  for (uint32_t word : state.offsets)
+    fold ^= word;
   _logger->info(
       "RTL8733B TSSI thermal table: ready={} enabled={} cck={} "
-      "baseline={} control={:08x} edge={:08x}/{:08x}",
-      ok, state.enabled, cck, plan.baseline, state.control, state.offsets[0],
-      state.offsets[15]);
+      "baseline={} control={:08x} swing={:08x}/{:08x} fold={:08x}",
+      ok, state.enabled, cck, plan.baseline, state.control, state.offsets[4],
+      state.offsets[8], fold);
   devourer::Ev(_logger->events(), "rtl8733b.tssi_thermal_table")
       .f("ok", ok)
       .f("enabled", state.enabled)
       .f("cck", cck)
       .f("baseline", plan.baseline)
       .hexf("control", state.control, 8)
-      .hexf("cold_edge", state.offsets[0], 8)
-      .hexf("hot_edge", state.offsets[15], 8);
+      .hexf("swing_lo", state.offsets[4], 8)
+      .hexf("swing_hi", state.offsets[8], 8)
+      .hexf("fold", fold, 8);
   return ok;
 }
 

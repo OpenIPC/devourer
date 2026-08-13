@@ -85,7 +85,11 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0xc82c, /* RTL8822CU (Jaguar3) */
     0xc82e, /* RTL8822CU (Jaguar3) */
     0xc812, /* RTL8812CU WiFi-only (Jaguar3) */
-    0x881a, /* RTL8812EU variant (Jaguar3 EU) */
+    /* 0x881a is shared silicon-wise: it ships on the Jaguar3 RTL8812EU and
+     * also on the Jaguar1 RTL8812AU-VS (observed on hardware: chip-id 0x04,
+     * 2T2R, EFUSE_HIDDEN_8812AU_VS). The factory resolves the generation from
+     * the SYS_CFG2 chip-id, never from the PID, so both dispatch correctly. */
+    0x881a, /* RTL8812EU (Jaguar3 EU) / RTL8812AU-VS (Jaguar1) */
     0x881b, /* RTL8812EU variant (Jaguar3 EU) */
     0x881c, /* RTL8812EU variant (Jaguar3 EU) */
     0xa81a, /* RTL8812EU — LB-LINK BL-M8812EU2 (Jaguar3 EU) */

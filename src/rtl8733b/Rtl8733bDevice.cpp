@@ -131,6 +131,16 @@ void Rtl8733bDevice::InitWrite(SelectedChannel channel) {
     _tx_ready = true;
     _tx_submits = 0;
     _tx_fatal = nullptr;
+    /* An opt-in that re-introduces register I/O on the send path should not be
+     * silent about it: enabling this trades ~84 ms per CCK<->OFDM crossing for
+     * thermal-compensation accuracy nobody has yet shown to matter, and a
+     * caller who inherited the knob from an environment deserves to see the
+     * cost rather than discover it as a mysterious frame-rate ceiling. */
+    if (_cfg.tuning.tssi_rate_table && _tssi_tracking)
+      _logger->warn(
+          "RTL8733B: DEVOURER_TSSI_RATE_TABLE is on — each CCK<->OFDM rate "
+          "crossing re-selects the TSSI thermal table inside send_packet at "
+          "~84 ms / 136 USB register round trips (OpenIPC/devourer#389)");
     /* One-shot thermal snapshot at bring-up — the PA-heating baseline for the
      * session, same as the Kestrel InitWrite snapshot. Logged, never acted on:
      * the meter is a PA-bias tracking index, not a calibrated °C sensor, and

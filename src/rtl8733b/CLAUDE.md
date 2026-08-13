@@ -60,13 +60,13 @@ unrelated register map.
   reachable only from full TSSI setup, keyed on `phydm_get_tx_rate` at that
   instant, and never re-selected at runtime. So nothing reads or writes a
   register per frame on the send path, matching the other four HALs.
-  `DeviceConfig::tuning::tssi_rate_table` / `DEVOURER_TSSI_RATE_TABLE=1`
-  re-selects on each rate-class crossing instead, at **84 ms / 136 USB
-  register round trips** per crossing (bench, one unit), capping a mixed-rate
-  stream around 11 fps. Read that knob's declaration before enabling it: the
-  default is validated at room temperature, the hot regime is unmeasured, and
-  it is deliberately not presented as a neutral toggle. Cost breakdown and a
-  validated in-place alternative: OpenIPC/devourer#389.
+  `DeviceConfig::tuning::tssi_rate_table` re-selects on each rate-class
+  crossing instead, at **84 ms / 136 USB register round trips** per crossing
+  (bench, one unit), capping a mixed-rate stream around 11 fps — read its
+  declaration in `src/DeviceConfig.h` for when that is worth paying, and
+  OpenIPC/devourer#389 for the cost breakdown and a validated in-place
+  alternative. Enabling it re-introduces send-path register I/O by design,
+  which is why it is default-off and announces itself at bring-up.
   Note what the opt-in path's failure mode is and is not:
   `Phy8733b::enable_tssi_tracking` restores its own analog/BB snapshot when its
   verdict fails, but the *transition* has no rollback to the previous table —

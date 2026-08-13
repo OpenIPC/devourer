@@ -60,19 +60,26 @@ unrelated register map.
   register round trips** (bench, one unit), so a stream alternating CCK and
   OFDM rates is capped around 11 fps; a single-rate stream early-returns and
   pays nothing.
-- **The loop needs settling time.** Alternating CCK and OFDM at ~9 ms/frame
-  leaves CCK airing ~5 dB above its settled level; the same stream paced to
-  86 ms/frame lands on the settled value. Any power measurement taken during a
-  fast rate-switching run is measuring the tracking loop, not the transmitter.
+- **The loop needs settling time, so a fast rate-switching run misreports
+  power.** Alternating CCK and OFDM at a few ms per frame leaves CCK
+  transmitting above its settled level until the loop converges; pacing the
+  same stream to tens of ms per frame lands on the settled value. Pace
+  single-rate and let it settle before reading any power figure — otherwise
+  the tracking loop is what is being measured. No SDR has been on this part,
+  so the magnitude of the overshoot is not characterized; that is
+  SDR-gated work, not a number to quote.
 - **Thermal is telemetry, like everywhere else.** `InitWrite` logs one
   bring-up snapshot and `GetThermalStatus` serves the caller's own cadence.
   Nothing in the send path reads it: measured at 2.51 ms of a 2.71 ms
   per-frame budget on USB high speed, for a meter that tracks PA bias rather
   than junction temperature.
 
-All four bench figures above (84 ms, 11 fps, 5 dB, 2.51/2.71 ms) come from the
-single validation unit described below and have no in-repo oracle — treat them
-as the order of magnitude to design against, not as constants to assert.
+The timing figures above (84 ms, ~11 fps, 2.51/2.71 ms) come from the single
+validation unit described below and have no in-repo oracle. They are
+register-sequence and USB-transfer costs, which is why they are quotable at
+all — nothing here asserts an RF-domain quantity, because no SDR has been on
+this part. Treat them as the order of magnitude to design against, not as
+constants.
 - **EFUSE**: physical packed map walked into a logical map. Running off the end
   of the readable span is address-space exhaustion, not corruption — a fully
   written map has no `0xff` terminator left to find, so that case returns
@@ -86,32 +93,25 @@ as the order of magnitude to design against, not as constants to assert.
 
 ## Admission contract
 
-The advertised surface is only what an independent witness decoded. The
-admission predicates live in `TxDescriptor8733b.h` so they are testable without
-hardware (`tests/rtl8733b_tx_desc_selftest.cpp`), but note which path enforces
-what — they are not uniformly shared:
+What is admitted and why each refusal exists is doc-commented at the predicates
+themselves in `TxDescriptor8733b.h` — read it there, not a copy here. Two
+things that header cannot tell you:
 
-- `tx_mode_supported_8733b` gates the whole `SetTxMode` default (and calls the
-  two below).
-- `ht_request_supported_8733b` additionally gates the radiotap MCS branch, so
-  the HT contract is the one thing both paths genuinely share.
-- `legacy_request_supported_8733b` is **only** reached through `SetTxMode`. The
-  radiotap `RATE` branch takes the byte as given; a legacy rate arriving that
-  way is constrained downstream by `valid_tx_desc_config` (`rate_id <= 0x1f`)
-  rather than by the predicate. That is adequate today only because the
-  radiotap RATE field cannot express SGI/LDPC/STBC — do not assume the two
-  legacy paths are kept in step by construction.
+- **The predicates are not uniformly shared.** `ht_request_supported_8733b`
+  gates both the `SetTxMode` and radiotap MCS branches, so the HT contract
+  genuinely cannot drift. `legacy_request_supported_8733b` is reached only
+  through `SetTxMode`; the radiotap `RATE` branch takes the byte as given and
+  is constrained downstream by `valid_tx_desc_config`'s `rate_id <= 0x1f`
+  range check instead. Adequate today only because the radiotap RATE field
+  cannot express SGI/LDPC/STBC — do not assume the two legacy paths are kept
+  in step by construction.
+- **The CCK band gate closes end-to-end**, not in two halves:
+  `tx_rate_id_8733b` returns a `0xff` sentinel off 2.4 GHz/20 MHz, and that
+  same range check refuses the sentinel rather than encoding it.
 
-- Admitted: 1SS BCC — legacy OFDM and HT MCS0-7, 20/40 MHz, 2.4/5 GHz; plus
-  long-preamble CCK restricted to 2.4 GHz at 20 MHz (`tx_rate_id_8733b`
-  returns a `0xff` sentinel otherwise, which `valid_tx_desc_config`'s
-  `rate_id <= 0x1f` range check then also refuses — the band gate is closed
-  end-to-end, not in two halves).
-- Refused: SGI (a descriptor with the short-GI bit set submitted successfully,
-  but an independent RTL8812AU witness decoded the probes as **long GI** — the
-  descriptor and the air disagree, and the reason is not yet understood), LDPC
-  and STBC (only forced-global-BCC operation has passed witnessed injection;
-  the encoder writes no STBC field at all), VHT and HE on every band.
+The SGI refusal is the one worth re-opening: the descriptor bit was set and the
+frame submitted, but the witness decoded long GI. Descriptor and air disagree,
+and the reason is not yet understood.
 
 ## Not ported
 
@@ -124,9 +124,9 @@ loudly — without tearing the session down, since an unported optional knob is
 not a hardware-safety event — while `false` succeeds as a no-op because that is
 the state MAC bring-up already leaves programmed.
 
-`DeviceConfig::tuning::disable_cca` is currently dropped at bring-up here
-rather than refused, which is the one place a request still vanishes without a
-word.
+`DeviceConfig::tuning::disable_cca` cannot be honoured either, and `InitWrite`
+warns rather than dropping it — a config knob must not be the one door where a
+request the setter refuses loudly instead vanishes without a word.
 
 ## Validation status
 

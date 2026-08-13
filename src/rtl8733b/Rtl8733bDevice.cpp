@@ -111,6 +111,17 @@ void Rtl8733bDevice::InitWrite(SelectedChannel channel) {
     _tx_ready = true;
     _tx_submits = 0;
     _tx_fatal = nullptr;
+    /* Say so rather than dropping it. SetCcaMode(true) refuses loudly, so the
+     * config path must not be the one door where the same request vanishes
+     * without a word — the operator would otherwise believe carrier-sense was
+     * off and read the resulting deferral as a transmitter problem. Warn
+     * rather than throw: the knob is on by default for the streamtx FPV
+     * downlink, and refusing to bring TX up over an unported optimisation is a
+     * worse trade than airing with standard carrier-sense. */
+    if (_cfg.tuning.disable_cca)
+      _logger->warn("RTL8733B: CCA disable (DEVOURER_DIS_CCA) is not "
+                    "implemented by this backend; transmitting with "
+                    "carrier-sense enabled");
     /* One-shot thermal snapshot at bring-up — the PA-heating baseline for the
      * session, same as the Kestrel InitWrite snapshot. Logged, never acted on:
      * the meter is a PA-bias tracking index, not a calibrated °C sensor, and

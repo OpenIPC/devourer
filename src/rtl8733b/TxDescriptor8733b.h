@@ -54,6 +54,15 @@ inline bool legacy_request_supported_8733b(unsigned bw_mhz, bool sgi, bool ldpc,
   return bw_mhz == 20 && !sgi && !ldpc && !stbc;
 }
 
+/* Is a radiotap/TxMode legacy rate (500 kbps units) one of the four
+ * long-preamble CCK rates? 1M=2, 2M=4, 5.5M=11, 11M=22. Used to pick the TSSI
+ * thermal-compensation curve at setup, mirroring the vendor's rate-keyed
+ * table choice. */
+inline bool is_cck_rate_500kbps(uint8_t rate_500kbps) {
+  return rate_500kbps == 2 || rate_500kbps == 4 || rate_500kbps == 11 ||
+         rate_500kbps == 22;
+}
+
 /* Whole-TxMode admission: the PPDU family plus its modulation parameters. VHT
  * and HE fall through to false on every band. */
 inline bool tx_mode_supported_8733b(const devourer::TxMode &mode) {

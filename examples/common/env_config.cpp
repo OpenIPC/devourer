@@ -173,6 +173,9 @@ devourer::DeviceConfig devourer_config_from_env() {
   /* Default-on knob: unset = tracking on; only "0" disables it. */
   if (const char *e = env_str("DEVOURER_THERMAL_TRACK"))
     cfg.tuning.thermal_track = std::strcmp(e, "0") != 0;
+  /* Default-off knob (RTL8733B): unset = one TSSI thermal table per channel
+   * set, so the send path stays free of register I/O. */
+  cfg.tuning.tssi_rate_table = env_flag("DEVOURER_TSSI_RATE_TABLE");
   cfg.tuning.disable_cca = env_flag("DEVOURER_DIS_CCA");
   if (env_long("DEVOURER_FASTRETUNE_FW", &v) && v >= 0)
     cfg.tuning.fastretune_fw = static_cast<int>(v);

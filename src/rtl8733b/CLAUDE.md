@@ -48,18 +48,31 @@ unrelated register map.
   either alone reintroduces the straddle, from opposite sides.
 - **TSSI closed loop.** Power runs from a fixed safe target
   (`kSafeTssiTargetQdbm8733b`); none of the runtime TX-power levers are ported.
-  The CCK and OFDM/HT variants of the thermal-compensation table are different
-  tables, and the table cannot be changed while tracking is enabled — so
-  `select_tssi_rate_table` disables tracking, rewrites, and re-enables, with
-  each stage verified by register readback. Note what the failure path is and
-  is not: `Phy8733b::enable_tssi_tracking` restores its own analog/BB snapshot
-  when its verdict fails, but the *transition* has no rollback to the previous
-  table — `select_tssi_rate_table` returns false with tracking left off, and
-  the caller responds by tearing the session down rather than transmitting at
-  an unverified power setting. That transition costs **84 ms / 136 USB
-  register round trips** (bench, one unit), so a stream alternating CCK and
-  OFDM rates is capped around 11 fps; a single-rate stream early-returns and
-  pays nothing.
+  On a TSSI-offset PG unit the loop **is** the TX-power control, so it is not
+  optional there — an attempt to make it opt-in with a fall back to the flat
+  `kSafeTxAgcIndex8733b` could not carry HT at all (witnessed: MCS7, 300/300
+  submitted, 0 captured, twice). A unit whose EFUSE carries no TSSI calibration
+  has nothing to drive the loop and takes the flat path.
+- **The thermal table is chosen once per channel set, not per frame.** The CCK
+  and OFDM/HT variants of the thermal-compensation table are different tables.
+  `configure_tx_power` picks one from the configured TX mode and leaves it,
+  which is what the vendor does: `_halrf_tssi_set_tmeter_tbl_8733b` is
+  reachable only from full TSSI setup, keyed on `phydm_get_tx_rate` at that
+  instant, and never re-selected at runtime. So nothing reads or writes a
+  register per frame on the send path, matching the other four HALs.
+  `DeviceConfig::tuning::tssi_rate_table` / `DEVOURER_TSSI_RATE_TABLE=1`
+  re-selects on each rate-class crossing instead, at **84 ms / 136 USB
+  register round trips** per crossing (bench, one unit), capping a mixed-rate
+  stream around 11 fps. Read that knob's declaration before enabling it: the
+  default is validated at room temperature, the hot regime is unmeasured, and
+  it is deliberately not presented as a neutral toggle. Cost breakdown and a
+  validated in-place alternative: OpenIPC/devourer#389.
+  Note what the opt-in path's failure mode is and is not:
+  `Phy8733b::enable_tssi_tracking` restores its own analog/BB snapshot when its
+  verdict fails, but the *transition* has no rollback to the previous table —
+  `select_tssi_rate_table` returns false with tracking left off, and the caller
+  responds by tearing the session down rather than transmitting at an
+  unverified power setting.
 - **The loop needs settling time, so a fast rate-switching run misreports
   power.** Alternating CCK and OFDM at a few ms per frame leaves CCK
   transmitting above its settled level until the loop converges; pacing the

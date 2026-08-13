@@ -16,23 +16,26 @@
 
 namespace devourer {
 
-/* Returns true when the remainder was a real abort (event emitted),
- * false for benign all-zero padding. `total` is the caller's cumulative
- * abort counter, incremented on emit. */
+inline bool rx_parse_remainder_is_zero_padding(const uint8_t *rem,
+                                               size_t rem_len) {
+  for (size_t i = 0; i < rem_len; ++i)
+    if (rem[i] != 0)
+      return false;
+  return true;
+}
+
+/* Returns true when an event was emitted, false for benign all-zero padding
+ * or a disabled event sink. `total` is the caller's cumulative emitted-abort
+ * counter. Call rx_parse_remainder_is_zero_padding() when classification must
+ * remain independent of whether event output is enabled. */
 inline bool emit_rx_parse_abort(EventSink &sink, const uint8_t *rem,
                                 size_t rem_len, long long off,
                                 long long buf_len, long long frame_len,
                                 long long drvinfo, long long shift,
                                 long long &total) {
-  if (!sink.enabled())
+  if (rx_parse_remainder_is_zero_padding(rem, rem_len))
     return false;
-  bool all_zero = true;
-  for (size_t i = 0; i < rem_len; ++i)
-    if (rem[i] != 0) {
-      all_zero = false;
-      break;
-    }
-  if (all_zero)
+  if (!sink.enabled())
     return false;
   ++total;
   Ev(sink, "rx.parse_abort")

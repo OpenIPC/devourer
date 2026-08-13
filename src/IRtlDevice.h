@@ -36,10 +36,12 @@ struct TxPacketView {
 };
 
 /* IRtlDevice is the chip-family-agnostic device contract used by the demos and
- * the WiFiDriver factory. Three implementations exist:
+ * the WiFiDriver factory. The production family implementations are:
  *   - RtlJaguarDevice   — Realtek "Jaguar" wave-1 (8812AU/8811AU/8821AU/8814AU)
  *   - RtlJaguar2Device  — Realtek "Jaguar2" (8822BU/8812BU)
  *   - RtlJaguar3Device  — Realtek "Jaguar3" (8822CU/8812EU/8822EU)
+ *   - Rtl8733bDevice    — Realtek HALMAC 87xx 11n (RTL8731BU/RTL8733BU)
+ *   - RtlKestrelDevice  — Realtek G6 11ax (RTL8852BU/RTL8852CU)
  *
  * Chip-family-specific research helpers (BB-debug-port reads, the 8814 queue
  * poller, ...) are intentionally NOT part of this interface — callers that need

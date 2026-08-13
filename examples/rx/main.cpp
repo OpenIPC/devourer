@@ -49,6 +49,26 @@
 
 #define USB_VENDOR_ID 0x0bda
 
+class ScopeExit {
+public:
+  explicit ScopeExit(std::function<void()> action)
+      : _action(std::move(action)) {}
+  ScopeExit(const ScopeExit &) = delete;
+  ScopeExit &operator=(const ScopeExit &) = delete;
+  ~ScopeExit() { Run(); }
+
+  void Run() {
+    if (!_active)
+      return;
+    _active = false;
+    _action();
+  }
+
+private:
+  std::function<void()> _action;
+  bool _active = true;
+};
+
 /* Known USB product IDs for the Realtek Jaguar 802.11ac family driven by this
  * library: RTL8812AU (2T2R), RTL8811AU (1T1R cut), and RTL8814AU (4T4R RF /
  * 3-SS baseband). */
@@ -65,12 +85,18 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0xc82c, /* RTL8822CU (Jaguar3) */
     0xc82e, /* RTL8822CU (Jaguar3) */
     0xc812, /* RTL8812CU WiFi-only (Jaguar3) */
-    0x881a, /* RTL8812EU variant (Jaguar3 EU) */
+    /* 0x881a is shared silicon-wise: it ships on the Jaguar3 RTL8812EU and
+     * also on the Jaguar1 RTL8812AU-VS (observed on hardware: chip-id 0x04,
+     * 2T2R, EFUSE_HIDDEN_8812AU_VS). The factory resolves the generation from
+     * the SYS_CFG2 chip-id, never from the PID, so both dispatch correctly. */
+    0x881a, /* RTL8812EU (Jaguar3 EU) / RTL8812AU-VS (Jaguar1) */
     0x881b, /* RTL8812EU variant (Jaguar3 EU) */
     0x881c, /* RTL8812EU variant (Jaguar3 EU) */
     0xa81a, /* RTL8812EU — LB-LINK BL-M8812EU2 (Jaguar3 EU) */
     0xe822, /* RTL8822EU (Jaguar3 EU) */
     0xa82a, /* RTL8822EU (Jaguar3 EU) */
+    0xf72b, /* RTL8731BU/RTL8733BU Wi-Fi function (HALMAC 87xx) */
+    0xb733, /* RTL8733BU combo module Wi-Fi function (vendor ID table) */
 };
 
 static int g_rx_count = 0;
@@ -254,9 +280,14 @@ static const uint32_t g_qd_poll_ms = []() -> uint32_t {
 }();
 
 /* DEVOURER_THERMAL_POLL_MS=N: periodic snapshot of the chip thermal meter
- * (RF[A][0x42][15:10]), one `thermal` event per interval. Works on
- * every Jaguar member. 0 = disabled. DEVOURER_THERMAL_WARN_DELTA overrides the
- * warn threshold (thermal units above the EFUSE baseline; default 15). */
+ * (RF[A][0x42][15:10]), one `thermal` event per interval. Works on every
+ * generation. 0 = disabled. DEVOURER_THERMAL_WARN_DELTA overrides the warn
+ * threshold (thermal units above the EFUSE baseline; default 15).
+ *
+ * Telemetry only: the meter is a PA-bias tracking index, not a calibrated °C
+ * sensor, and docs/warm-tx-degradation.md shows it is not a validated
+ * degradation predictor (delivery drifts while the meter stays pinned). The
+ * poller therefore emits and warns; it never stops RX or refuses TX. */
 static const uint32_t g_thermal_poll_ms = []() -> uint32_t {
   const char *e = std::getenv("DEVOURER_THERMAL_POLL_MS");
   return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
@@ -1012,10 +1043,13 @@ static void packetProcessor(const Packet &packet) {
             .f("seq", packet.RxAtrib.seq_num)
             .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
             .f("ppdu", packet.RxAtrib.ppdu_cnt)
+            .f("crc", packet.RxAtrib.crc_err ? 1 : 0)
+            .f("icv", packet.RxAtrib.icv_err ? 1 : 0)
             .f("rate", packet.RxAtrib.data_rate)
             .f("bw", packet.RxAtrib.bw)
             .f("stbc", packet.RxAtrib.stbc)
             .f("ldpc", packet.RxAtrib.ldpc)
+            .f("rssi", packet.RxAtrib.rssi[0])
             /* AX PPDU-format nibble (Kestrel; 255 = pre-AX no field): 7=HE_SU
              * 8=HE_ERSU — the on-air proof of an ER SU TX. */
             .f("ppdu_type", packet.RxAtrib.ppdu_type);
@@ -1383,8 +1417,8 @@ int main(int argc, char **argv) {
       .f("stage", "demo.create_device")
       .f("ms", ms_since_start());
   devourer::emit_adapter_caps(*g_ev, rtlDevice);
-  /* The BB-debug-port / queue-depth / thermal research helpers are Jaguar1-only,
-   * so they live on RtlJaguarDevice rather than the IRtlDevice interface. The
+  /* The BB-debug-port / queue-depth research helpers are Jaguar1-only, so
+   * they live on RtlJaguarDevice rather than the IRtlDevice interface. The
    * whole block compiles out when Jaguar1 support isn't built; when it is, the
    * dynamic_cast yields nullptr for a Jaguar3 device, disabling them cleanly. */
 #if defined(DEVOURER_HAVE_JAGUAR1)
@@ -1416,36 +1450,48 @@ int main(int argc, char **argv) {
       }
     });
   }
+#endif /* DEVOURER_HAVE_JAGUAR1 */
+
+  /* Cross-generation thermal telemetry. GetThermalStatus is part of IRtlDevice
+   * (Jaguar1/2/3, Kestrel, and RTL8733B); using the base pointer is what makes
+   * DEVOURER_THERMAL_POLL_MS work on RTL8812EU and newer backends instead of
+   * silently becoming Jaguar1-only. Emit + warn only — see the knob's comment
+   * above for why the reading never gates the session. */
   std::atomic<bool> therm_emitter_stop{false};
   std::thread therm_emitter;
   if (g_thermal_poll_ms > 0) {
     logger->info("DEVOURER_THERMAL_POLL_MS={} warn_delta={} — starting thermal "
                  "poller", g_thermal_poll_ms, g_thermal_warn_delta);
-    /* Thermal poller is a Jaguar1 (RtlJaguarDevice) feature; g_rtl_device is
-     * null on Jaguar3. */
-    if (g_rtl_device != nullptr)
-      g_rtl_device->start_thermal_poller(g_thermal_poll_ms, g_thermal_warn_delta);
-    therm_emitter = std::thread([&therm_emitter_stop]() {
+    IRtlDevice *dev = rtlDevice;
+    therm_emitter = std::thread([&therm_emitter_stop, dev, logger]() {
+      bool warned = false;
       while (!therm_emitter_stop.load()) {
-        if (g_rtl_device != nullptr) {
-          auto t = g_rtl_device->get_thermal_snapshot();
-          devourer::Ev ev(*g_ev, "thermal");
-          ev.t().f("raw", t.raw);
-          if (t.valid)
-            ev.f("baseline", t.baseline).f("delta", t.delta);
-          else
-            ev.f("baseline", nullptr);
-          ev.f("status", ThermalBucket(t));
-        }
         for (uint32_t slept = 0;
              slept < g_thermal_poll_ms && !therm_emitter_stop.load();
-             slept += 50) {
+             slept += 50)
           std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (therm_emitter_stop.load())
+          break;
+        const auto t = dev->GetThermalStatus();
+        if (t.raw == 0 && !t.valid)
+          continue; // backend not initialized yet, or no live meter
+        devourer::Ev ev(*g_ev, "thermal");
+        ev.t().f("raw", t.raw);
+        if (t.valid)
+          ev.f("baseline", t.baseline).f("delta", t.delta);
+        else
+          ev.f("baseline", nullptr);
+        ev.f("status", ThermalBucket(t));
+        if (t.valid && t.delta >= g_thermal_warn_delta && !warned) {
+          logger->warn("thermal: raw={} baseline={} delta={} status={}", t.raw,
+                       t.baseline, t.delta, ThermalBucket(t));
+          warned = true;
+        } else if (!t.valid || t.delta < g_thermal_warn_delta) {
+          warned = false;
         }
       }
     });
   }
-#endif /* DEVOURER_HAVE_JAGUAR1 */
 
   /* DEVOURER_RX_ENERGY_MS: frame-free RX energy / channel-busy telemetry — the
    * read side of DEVOURER_CW_TONE. Cross-generation (IRtlDevice::GetRxEnergy),
@@ -1622,6 +1668,26 @@ int main(int argc, char **argv) {
       }
     });
   }
+
+  /* Every path below may have one or more background register readers alive.
+   * Stop them before DeviceSession tears down the device/USB transport, and do
+   * the same on exceptions: a joinable std::thread destructor terminates the
+   * process instead of unwinding safely. */
+  ScopeExit stop_background_emitters([&]() {
+    therm_emitter_stop = true;
+#if defined(DEVOURER_HAVE_JAGUAR1)
+    qd_emitter_stop = true;
+#endif
+    energy_emitter_stop = true;
+    if (therm_emitter.joinable())
+      therm_emitter.join();
+#if defined(DEVOURER_HAVE_JAGUAR1)
+    if (qd_emitter.joinable())
+      qd_emitter.join();
+#endif
+    if (energy_emitter.joinable())
+      energy_emitter.join();
+  });
 
   /* Default channel 36 (5 GHz) for the 8812 reference. Override with
    * DEVOURER_CHANNEL=N env var (e.g. DEVOURER_CHANNEL=6 for busy 2.4 GHz). */
@@ -1916,6 +1982,7 @@ int main(int argc, char **argv) {
     dev->StopRxLoop();
     if (rx.joinable())
       rx.join();
+    stop_background_emitters.Run();
     dev->Stop();
     session.close();
     return 0;
@@ -2015,6 +2082,7 @@ int main(int argc, char **argv) {
     dev->StopRxLoop();
     if (rx.joinable())
       rx.join();
+    stop_background_emitters.Run();
     dev->Stop();
     session.close();
     return 0;
@@ -2067,10 +2135,7 @@ int main(int argc, char **argv) {
                                        .Band = rx_band,
                                    });
 
-  /* Stop the energy telemetry thread before de-init (it reads chip registers). */
-  energy_emitter_stop = true;
-  if (energy_emitter.joinable())
-    energy_emitter.join();
+  stop_background_emitters.Run();
   if (la_thread.joinable())
     la_thread.join();
 

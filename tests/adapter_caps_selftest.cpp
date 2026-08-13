@@ -9,6 +9,7 @@
 #include "AdapterCaps.h"
 #include "ChannelFreq.h"
 #include "RxQuality.h"
+#include "rtl8733b/Rtl8733bUsbIds.h"
 
 static int g_fail = 0;
 
@@ -34,6 +35,9 @@ int main() {
              (ac | kBw5 | kBw10));
   expect("Unknown bw = 0",
          bw_mask_for_generation(ChipGeneration::Unknown) == 0);
+  expect("RTL8733B bw = 20/40",
+         bw_mask_for_generation(ChipGeneration::Rtl8733b) ==
+             (kBw20 | kBw40));
   /* Kestrel (11ax) does 20/40/80 + 160 MHz (RTL8852C, validated on-air at
    * 6 GHz). */
   expect("Kestrel bw = 20/40/80/160",
@@ -47,9 +51,19 @@ int main() {
   expect("gen name kestrel",
          std::string_view(generation_name(ChipGeneration::Kestrel)) ==
              "kestrel");
+  expect("gen name rtl8733b",
+         std::string_view(generation_name(ChipGeneration::Rtl8733b)) ==
+             "rtl8733b");
   expect("gen name unknown",
          std::string_view(generation_name(ChipGeneration::Unknown)) ==
              "unknown");
+
+  /* --- RTL8733B identity gates --- */
+  expect("RTL8733B chip id accepted", rtl8733b::is_chip_id(0x16));
+  expect("RTL8733B neighboring chip id rejected", !rtl8733b::is_chip_id(0x17));
+  expect("RTL8733B Wi-Fi PID accepted", rtl8733b::is_usb_id(0x0bda, 0xf72b));
+  expect("RTL8733B combo PID accepted", rtl8733b::is_usb_id(0x0bda, 0xb733));
+  expect("RTL8733B wrong VID rejected", !rtl8733b::is_usb_id(0x1234, 0xf72b));
 
   /* --- extended freq<->chan round-trip (Part B lifted the 5895 MHz cap) --- */
   expect("5080 MHz -> ch16", freq_to_chan(5080) == 16);

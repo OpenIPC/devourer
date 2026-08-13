@@ -2,13 +2,13 @@
 
 **The Realtek Wi-Fi driver that simply devours its competitors.**
 
-Devourer is a userspace Wi-Fi driver for Realtek's 802.11ac and 802.11ax
+Devourer is a userspace Wi-Fi driver for Realtek's 802.11n, 802.11ac and 802.11ax
 USB adapters —
 the cheap, everywhere-available dongles that power most long-range FPV video
 links. It talks to the chip directly over libusb: no kernel module, no DKMS
 tree to patch every time your kernel updates, no root filesystem to taint.
 Build one static library, link it, and you have raw monitor-mode RX and
-packet injection on four generations of Realtek silicon, from a single API.
+packet injection across five Realtek hardware backends, from a single API.
 
 It is the [OpenIPC](https://openipc.org) project's driver of choice for
 long-range digital video links.
@@ -53,10 +53,11 @@ long-range digital video links.
   worth it, and the two ends migrate under an authenticated
   ground-proposes/drone-commits protocol that cannot split-brain
   ([how](docs/adaptive-channel-migration.md)).
-- **Narrowband modes the kernel can't do.** 5 and 10 MHz channels on every
-  supported generation — including the decade-old RTL8812AU and RTL8814AU the
-  vendor never gave narrowband — half/quarter the bandwidth, more range from
-  the same power ([how](docs/narrowband.md)).
+- **Narrowband modes the kernel can't do.** 5 and 10 MHz channels on the
+  backends that advertise them — including the decade-old RTL8812AU and
+  RTL8814AU the vendor never gave narrowband — half/quarter the bandwidth,
+  more range from the same power. RTL8733B has an experimental path that stays
+  unadvertised pending RF validation ([how](docs/narrowband.md)).
 - **Hardware time, for coordinating radios.** Every received frame is stamped
   with the chip's microsecond MAC clock (TSF) on every generation, and the
   64-bit timer reads back directly — the primitive multi-radio setups need.
@@ -101,6 +102,8 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8822CU**                 | 2T2R + BT         | —             | —             | —                | —                | not benchmarked (`0bda:c82c`). 5/10 MHz capable |
 | **RTL8812EU**                 | 2T2R              | ‡             | 51            | 47               | —                | LB-LINK BL-M8812EU2 (`0bda:a81a`); bare 5 GHz FPV module. 5/10 MHz capable. ‡ 2.4 GHz TX airs energy but no receiver decodes it — the vendor kernel driver behaves identically on this module ([quirks](docs/8822e-quirks.md)) |
 | **RTL8822EU**                 | 2T2R + BT         | —             | —             | —                | —                | not benchmarked. 5/10 MHz capable |
+| **RTL8731BU**                 | 1T1R              | —             | —             | —                | —                | bare unbranded 1T1R module (`0bda:f72b`, cut D): monitor RX and CCK/legacy/HT raw TX validated on 2.4 GHz, legacy/HT on 5 GHz, 20/40 MHz. Not benchmarked (no SDR available). [Status and test limits](docs/rtl8733b.md) |
+| **RTL8733BU**                 | 1T1R + BT         | —             | —             | —                | —                | rides the RTL8731BU (RTL8733B) code path. `0bda:b733` is recognized from the vendor ID table only — no physical unit was available, and Bluetooth/coexistence is not implemented. Not benchmarked |
 | **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
 | **RTL8852BU** (11ax)          | 2T2R + BT         | 43            | 36            | 33               | —          | TP-Link Archer TX20U Nano (`35bc:0108`); Wi-Fi 6, dual-band. 5/10 MHz capable; HE ER SU + DCM extended range |
 | **RTL8832BU** (11ax)          | 2T2R              | —             | —             | —                | —          | Wi-Fi-only SKU of the 8852B die; rides the 8852BU code path. Not benchmarked. 5/10 MHz capable; HE ER SU + DCM extended range |
@@ -127,6 +130,12 @@ RX-DCK, plus IQK on the 8852C); TSSI/DPK on both dies and IQK on the 8852B are
 gated off with on-air evidence — they degrade TX under the fixed-power model.
 The 8852A-family (e.g. RTL8832AU) stays out of scope — its only vendor driver
 is a frozen 2021 drop.
+
+The RTL8733B backend covers the 1T1R 802.11n RTL8731BU/RTL8733BU family with
+20/40 MHz monitor RX and raw CCK/OFDM/HT injection (CCK is 2.4 GHz, 20 MHz,
+long preamble only). It intentionally does not advertise VHT, LDPC, SGI, STBC,
+or experimental 5/10 MHz operation; see
+[the validation record](docs/rtl8733b.md) for the tested and deferred matrix.
 
 > Heads up — some Realtek sticks ship in "ZeroCD" mode and first enumerate as
 > a USB flash drive holding a Windows installer (`0bda:1a2b` is the canonical
@@ -176,6 +185,7 @@ the `env:` tags in [`src/DeviceConfig.h`](src/DeviceConfig.h).
 | `chanmig` / `chanscout` | evidence-driven channel migration: the protocol, and the survey adapter that feeds it |
 | `dwelltx` | dwell-1 hopping data plane on the standard Linux driver |
 | `kestrelprobe` | Wi-Fi 6 (RTL8852B/C) bring-up probe, layer by layer |
+| `rtl8733bprobe` | RTL8731BU/RTL8733BU identity, power, firmware and PHY diagnostics |
 | `timesync` | over-the-air clock distribution (master / slave / UE roles) |
 | `sense` | Wi-Fi motion sensing from beamforming reports |
 | `doctor` | adapter-health triage → HEALTHY / SUSPECT / FAILING |
@@ -184,8 +194,9 @@ the `env:` tags in [`src/DeviceConfig.h`](src/DeviceConfig.h).
 
 All chips compile in by default; per-chip CMake options (`DEVOURER_JAGUAR1`,
 `DEVOURER_8814`, `DEVOURER_JAGUAR2_8822B`, `DEVOURER_JAGUAR2_8821C`,
-`DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`, `DEVOURER_KESTREL_8852B`,
-`DEVOURER_KESTREL_8852C`) drop unneeded firmware and tables — an 8812AU-only
+`DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`, `DEVOURER_8733B`,
+`DEVOURER_KESTREL_8852B`, `DEVOURER_KESTREL_8852C`) drop unneeded firmware and
+tables — an 8812AU-only
 `rxdemo` is ~1.6 MB against ~6.3 MB with everything on, and dropping just the
 two Wi-Fi 6 dies takes it to ~4.2 MB (their verbatim-vendored halbb/halrf plane
 is the single largest contributor). `DEVOURER_PCIE` (default OFF, Linux-only)
@@ -224,7 +235,7 @@ auto dev = driver.CreateRtlDevice(handle, ctx, lock, cfg);
 Anything that changes mid-session is a runtime setter on the device:
 `SetTxMode`, `SetTxPowerOffsetQdb`, `SetRxPathMask`, `FastRetune`, ...
 The device class is chosen automatically from the chip behind the handle;
-one `IRtlDevice` interface covers all four generations.
+one `IRtlDevice` interface covers all five hardware backends.
 
 ## Going deeper
 
@@ -302,9 +313,10 @@ per-chip quirks notes at the bottom.
   ground-proposes/drone-commits exchange, and
   [its validation](docs/channel-migration-validation.md) is the failure matrix
   every row of which converges without split-brain.
-- [Narrowband](docs/narrowband.md) — 5/10 MHz channels across all three
-  generations: the baseband re-clock, the per-chip register machinery, and the
-  walls (RF re-latch edges, per-die clock coupling, the 5 MHz/5 GHz CFO limit).
+- [Narrowband](docs/narrowband.md) — 5/10 MHz channels across the Jaguar
+  generations, plus the unadvertised RTL8733B experiment: the baseband
+  re-clock, the per-chip register machinery, and the walls (RF re-latch edges,
+  per-die clock coupling, the 5 MHz/5 GHz CFO limit).
 - [Spectrum sensing](docs/rx-spectrum-sensing.md) — RX energy sweeps down to
   5 MHz bins: a coarse per-bin H(f) from the dongle itself.
 - [Pseudo preamble puncturing](docs/pseudo-preamble-puncturing.md) — how close

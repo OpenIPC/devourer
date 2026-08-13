@@ -345,13 +345,18 @@ band's bursts).
 
 `DEVOURER_NB_BW=5` or `=10` on the demos selects narrowband; the library exposes
 it as `CHANNEL_WIDTH_5` / `CHANNEL_WIDTH_10` on `SelectedChannel`, and
-
-`DEVOURER_NB_BW=5` or `=10` on the demos selects narrowband; the library exposes
-it as `CHANNEL_WIDTH_5` / `CHANNEL_WIDTH_10` on `SelectedChannel`, and
 `IRtlDevice::GetAdapterCaps().narrowband_ok` reports whether the running chip
 supports it. Support today: **Jaguar2 (8822B/8821C) and Jaguar3 (8822C/8822E)**
 fully, and **Jaguar1 on the 8812AU/8811AU and the 8814AU** — every generation.
 The 8821A is the one exclusion (its DAC-clock divide starves TX; see the walls).
+
+RTL8731BU/RTL8733BU has an **experimental, unadvertised** 5/10 MHz path. It
+ports the later `rtl8733bu-20230626` monitor-mode patch exactly: configure the
+RF as 20 MHz, then apply `0x9b0`/`0x9b4`/`0x9f0`/`0x81c` after the RF writes.
+The vendor HAL capability table itself declares only 20/40 MHz, and the patch
+calls this a dirty workaround for a no-RF-output failure. Register readback has
+passed on one `0bda:f72b`; `narrowband_ok` deliberately remains false until SDR
+occupied-bandwidth and independent narrowband decode tests pass.
 
 Test scripts: `tests/jaguar2_narrowband_sdr.sh` and
 `tests/jaguar1_nb_divide_sweep.sh` (SDR occupied-bandwidth),

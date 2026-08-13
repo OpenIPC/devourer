@@ -248,12 +248,21 @@ those are the ones listed below.
   dead ZeroCD DISK id (`src/kestrel/CLAUDE.md`).
 - `DEVOURER_TX_GAP_US=N` — txdemo inter-frame gap (default 2000, ~500 fps;
   `0` = max duty for heating experiments).
+- `DEVOURER_TX_FRAMES=N` — txdemo finite frame bound (default `0` =
+  unbounded). Exits through the ordinary `Stop()` path once N frames have been
+  submitted, so first-light and regression captures get a clean teardown
+  instead of a killed timed flood.
 - `DEVOURER_USB_DEBUG=1` — libusb DEBUG log level (~7 MB / 15 s, has filled
   `/tmp` mid-capture; adds 0.5–0.8 s to init).
-- `DEVOURER_THERMAL_POLL_MS=N` — emit `thermal` events from the RF 0x42 meter.
+- `DEVOURER_THERMAL_POLL_MS=N` — emit `thermal` events from the RF 0x42 meter,
+  on every generation (the poller rides `IRtlDevice::GetThermalStatus`).
   `raw` is 0..63 thermal units (~1.5–2 °C each, **not** absolute °C); `delta`
-  = raw − EFUSE baseline, and a rising delta is the early TX-degradation
-  warning.
+  = raw − EFUSE baseline. **Telemetry only**: the poller emits and warns
+  (`DEVOURER_THERMAL_WARN_DELTA`, default 15) and never stops RX; no HAL gates
+  its send path on the meter. A rising delta is *suggestive*, not a validated
+  degradation predictor — `docs/warm-tx-degradation.md` has delivery scattered
+  63–83% with no relation to the meter, and inside one uninterrupted session
+  the meter stays pinned while delivery drifts.
 - `DEVOURER_LINKHEALTH=1` (rxdemo, needs `DEVOURER_RX_ENERGY_MS=N`) — classify
   the RX sensor tuple via `src/LinkHealth.h`. **EVM, not SNR, is the
   saturation tell**: strong RSSI + poor EVM means back power OFF, which is the

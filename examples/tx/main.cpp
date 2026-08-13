@@ -70,15 +70,19 @@
 
 #define USB_VENDOR_ID 0x0bda
 
-  /* Known USB product IDs for the Realtek Jaguar family — same set as the RX
-   * demo (examples/rx/main.cpp). */
+  /* Known USB product IDs driven by this library — same set as the RX demo
+   * (examples/rx/main.cpp). */
   static constexpr uint16_t kRealtekProductIds[] = {
       0x8812, 0x0811, 0xa811, 0xb811, 0x8813,
       0xb812, 0xb82c, /* RTL8822BU (Jaguar2); OEM VIDs via DEVOURER_VID/PID */
       0xc82c, 0xc82e, 0xc812,         /* RTL8822CU/8812CU (Jaguar3 CU) */
-      0x881a, 0x881b, 0x881c, 0xa81a, /* RTL8812EU (Jaguar3 EU; a81a =
-                                         BL-M8812EU2) */
+      /* a81a = BL-M8812EU2. 881a also ships on the Jaguar1 RTL8812AU-VS
+       * (observed: chip-id 0x04) — the factory dispatches on the SYS_CFG2
+       * chip-id, not the PID, so the collision is harmless. */
+      0x881a, 0x881b, 0x881c, 0xa81a, /* RTL8812EU (Jaguar3 EU) */
       0xe822, 0xa82a,                 /* RTL8822EU (Jaguar3 EU) */
+      0xf72b, 0xb733, /* RTL8731BU/RTL8733BU Wi-Fi function (HALMAC 87xx);
+                         b733 is the combo module's ID from the vendor table */
   };
 
   /* Event sink for the demo's own JSONL emissions (packetProcessor is a free
@@ -1262,24 +1266,27 @@ int main(int argc, char **argv) {
   }
 
   /* Thermal monitoring — read inline on the TX (owning) thread, so no
-   * background thread shares the libusb handle (no USB contention). Cadence is
-   * derived from DEVOURER_THERMAL_POLL_MS over the ~2 ms/packet loop; 0 =
-   * disabled. DEVOURER_THERMAL_WARN_DELTA overrides the warn threshold (thermal
+   * background thread shares the libusb handle (no USB contention). Use a
+   * wall-clock deadline: frame-count conversion becomes wrong as soon as a
+   * caller changes the inter-frame delay. DEVOURER_THERMAL_POLL_MS=0 disables
+   * polling. DEVOURER_THERMAL_WARN_DELTA overrides the warn threshold (thermal
    * units above the EFUSE baseline; default 15). */
-  long thermal_every = 0;
+  long thermal_poll_ms = 0;
   if (const char *e = std::getenv("DEVOURER_THERMAL_POLL_MS")) {
     long ms = std::strtol(e, nullptr, 0);
-    if (ms > 0) thermal_every = ms / 2 < 1 ? 1 : ms / 2;
+    if (ms > 0) thermal_poll_ms = ms;
   }
   int thermal_warn_delta = 15;
   if (const char *e = std::getenv("DEVOURER_THERMAL_WARN_DELTA")) {
     thermal_warn_delta = std::atoi(e);
   }
-  if (thermal_every > 0) {
-    logger->info("DEVOURER_THERMAL_POLL_MS — thermal monitor on, every {} TX "
-                 "frames, warn_delta={}", thermal_every, thermal_warn_delta);
+  if (thermal_poll_ms > 0) {
+    logger->info("DEVOURER_THERMAL_POLL_MS — thermal monitor on, every ~{} ms, "
+                 "warn_delta={}", thermal_poll_ms, thermal_warn_delta);
   }
   bool thermal_warned = false;
+  auto thermal_next_poll = std::chrono::steady_clock::now() +
+      std::chrono::milliseconds(thermal_poll_ms);
 
   /* Inter-frame gap. Default 2 ms (~500 fps, gentle on the USB bulk EP). Lower
    * it (e.g. DEVOURER_TX_GAP_US=0) to raise the TX duty cycle for thermal /
@@ -1688,6 +1695,15 @@ int main(int argc, char **argv) {
     }
   }
   long tx_count = 0;
+  /* A finite frame bound is useful for first-light and regression captures:
+   * it exits through the ordinary Stop() path, unlike killing a timed flood.
+   * Keep the default unbounded for existing throughput/soak workflows. */
+  long tx_frame_limit = 0;
+  if (const char *limit = std::getenv("DEVOURER_TX_FRAMES")) {
+    tx_frame_limit = std::strtol(limit, nullptr, 0);
+    if (tx_frame_limit < 0)
+      tx_frame_limit = 0;
+  }
   long consec_fail = 0;
   /* If the TX path isn't enabled the chip NAKs every bulk-OUT; hammering a
    * non-draining endpoint for the whole run is what wedged its USB core. Bail
@@ -2218,6 +2234,8 @@ int main(int argc, char **argv) {
       rc = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
       ++tx_count;
     }
+    if (tx_frame_limit > 0 && tx_count >= tx_frame_limit)
+      g_devourer_should_stop = true;
     if (!hop_channels.empty() && hop_slot_ms == 0 &&
         ++frames_in_dwell >= hop_dwell)
       frames_in_dwell = 0;
@@ -2237,7 +2255,10 @@ int main(int argc, char **argv) {
      * (previously Jaguar1-only): every family reads its RF 0x42 meter —
      * Jaguar1 [15:10] + EFUSE baseline, Jaguar2 [15:10] + efuse 0xBA,
      * Jaguar3 [6:1] + efuse 0xd0 (E) / first-read cold reference (C). */
-    if (thermal_every > 0 && tx_count % thermal_every == 0) {
+    if (thermal_poll_ms > 0 &&
+        std::chrono::steady_clock::now() >= thermal_next_poll) {
+      thermal_next_poll = std::chrono::steady_clock::now() +
+          std::chrono::milliseconds(thermal_poll_ms);
       auto t = rtlDevice->GetThermalStatus();
       if (t.valid || t.raw != 0) {
         devourer::Ev ev(*g_ev, "thermal");

@@ -25,6 +25,7 @@ option(DEVOURER_JAGUAR2_8822B "RTL8822BU (Jaguar2, rtl8822b, 2T2R USB)"         
 option(DEVOURER_JAGUAR2_8821C "RTL8811CU / 8821CU (Jaguar2, rtl8821c, 1T1R)"    ON)
 option(DEVOURER_JAGUAR3_8822C "RTL8812CU / 8822CU (Jaguar3, rtl8822c)"          ON)
 option(DEVOURER_JAGUAR3_8822E "RTL8812EU / 8822EU (Jaguar3, rtl8822e)"          ON)
+option(DEVOURER_8733B         "RTL8731BU / RTL8733BU USB support"               ON)
 # Kestrel — the Wi-Fi 6 / 802.11ax generation (Realtek "G6 phl" architecture,
 # vendor trees reference/rtl8852bu + reference/rtl8852cu): monitor RX, TX
 # injection and channel/BW on-air validated on both chips (see
@@ -82,11 +83,13 @@ else()
     set(DEVOURER_KESTREL OFF)
 endif()
 if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3
+   AND NOT DEVOURER_8733B
    AND NOT DEVOURER_KESTREL)
     message(FATAL_ERROR
         "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
         "DEVOURER_JAGUAR2_8822B / DEVOURER_JAGUAR2_8821C / DEVOURER_JAGUAR3_8822C "
-        "/ DEVOURER_JAGUAR3_8822E / DEVOURER_KESTREL_8852B / DEVOURER_KESTREL_8852C.")
+        "/ DEVOURER_JAGUAR3_8822E / DEVOURER_8733B / DEVOURER_KESTREL_8852B "
+        "/ DEVOURER_KESTREL_8852C.")
 endif()
 if(DEVOURER_PCIE)
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -388,6 +391,21 @@ if(DEVOURER_JAGUAR3_8822E)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR3_8822E=1)
 endif()
 
+# RTL8733B is an 802.11n HALMAC 87xx part, not a Jaguar3 variant. Keep the
+# backend isolated: it has its own power/FW/MAC/PHY path, descriptors, and
+# conservative capabilities.
+if(DEVOURER_8733B)
+    target_sources(devourer PRIVATE
+        src/rtl8733b/Rtl8733bDevice.cpp src/rtl8733b/Rtl8733bDevice.h
+        src/rtl8733b/Rtl8733bBringup.cpp src/rtl8733b/Rtl8733bBringup.h
+        src/rtl8733b/Halmac8733bMac.cpp src/rtl8733b/Halmac8733bMac.h
+        src/rtl8733b/Phy8733b.cpp src/rtl8733b/Phy8733b.h
+        src/rtl8733b/Rtl8733bUsbIds.h
+        hal/hal8733b_fw.c hal/hal8733b_fw.h
+        hal/hal8733b_tables.c hal/hal8733b_tables.h)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_8733B=1)
+endif()
+
 # --- Kestrel (Wi-Fi 6 / 802.11ax: RTL8852BU / RTL8852CU) ---
 # Fourth generation, ported from the vendor "G6 phl" trees (reference/
 # rtl8852bu, reference/rtl8852cu): mac_ax MAC/FW plane, halbb PHY tables,
@@ -544,6 +562,19 @@ if(DEVOURER_KESTREL)
     target_link_libraries(kestrelprobe PUBLIC devourer PRIVATE PkgConfig::libusb)
     # DeviceSession.h (shared teardown-order holder) lives in examples/common/.
     target_include_directories(kestrelprobe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+endif()
+
+# rtl8733bprobe — staged USB bring-up prober for the RTL8733B (HALMAC 87xx),
+# the pcieprobe/kestrelprobe sibling: identity -> power-on + EFUSE -> firmware
+# -> MAC/PHY -> TSSI audit stages, used alongside normal factory dispatch. It
+# never substitutes for the production IRtlDevice path.
+if(DEVOURER_8733B)
+    add_executable(rtl8733bprobe
+        examples/rtl8733bprobe/main.cpp
+    )
+    target_link_libraries(rtl8733bprobe PUBLIC devourer PRIVATE PkgConfig::libusb)
+    # DeviceSession.h (shared teardown-order holder) lives in examples/common/.
+    target_include_directories(rtl8733bprobe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 endif()
 
 # reglat — register round-trip latency microbench (USB ctrl-xfer vs PCIe MMIO).
@@ -1003,6 +1034,32 @@ add_executable(AdapterCapsSelftest
 target_link_libraries(AdapterCapsSelftest PRIVATE devourer)
 
 add_test(NAME adapter_caps_derive COMMAND AdapterCapsSelftest)
+
+if(DEVOURER_8733B)
+    add_executable(Rtl8733bEfuseSelftest
+        tests/rtl8733b_efuse_selftest.cpp
+    )
+    target_link_libraries(Rtl8733bEfuseSelftest PRIVATE devourer)
+    add_test(NAME rtl8733b_efuse_parse COMMAND Rtl8733bEfuseSelftest)
+
+    add_executable(Rtl8733bPhyTableSelftest
+        tests/rtl8733b_phy_table_selftest.cpp
+    )
+    target_link_libraries(Rtl8733bPhyTableSelftest PRIVATE devourer)
+    add_test(NAME rtl8733b_phy_tables COMMAND Rtl8733bPhyTableSelftest)
+
+    add_executable(Rtl8733bRxParseSelftest
+        tests/rtl8733b_rx_parse_selftest.cpp
+    )
+    target_link_libraries(Rtl8733bRxParseSelftest PRIVATE devourer)
+    add_test(NAME rtl8733b_rx_parse COMMAND Rtl8733bRxParseSelftest)
+
+    add_executable(Rtl8733bTxDescSelftest
+        tests/rtl8733b_tx_desc_selftest.cpp
+    )
+    target_link_libraries(Rtl8733bTxDescSelftest PRIVATE devourer)
+    add_test(NAME rtl8733b_tx_desc COMMAND Rtl8733bTxDescSelftest)
+endif()
 
 # Headless guard for the per-UE RX attribution seed (src/cell/UeRxAttribution.h)
 # — TA extraction over the addr2-carrying frame types, the per-TA windowed

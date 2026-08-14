@@ -73,6 +73,26 @@ void Rtl8733bDevice::bring_up_to_phy() {
   _phy_ready = true;
   _logger->info("RTL8733B factory path reached PHY-ready (cut {})",
                 _chip.cut);
+  /* Every other generation applies tuning.disable_cca during bring-up
+   * (jaguar1/2/3, kestrel all call SetCcaMode there), so a caller setting
+   * DEVOURER_DIS_CCA=1 reasonably expects it to take effect. This backend has
+   * not located and measured the HALMAC 87xx carrier-sense gate, so it cannot
+   * honour the request — say so once, loudly, rather than dropping it in
+   * silence, which is the one way a refused knob can look like a granted one:
+   * the operator would otherwise believe carrier-sense was off and read the
+   * resulting deferral as a transmitter problem.
+   *
+   * Deliberately a warning and not the throw SetCcaMode(true) raises: the knob
+   * is on by default for the streamtx FPV downlink, and failing bring-up
+   * outright is a harsh answer to a request the caller may be making only via
+   * an inherited environment. The session runs with standard carrier-sense.
+   *
+   * Sited in bring_up_to_phy rather than InitWrite so an RX-only session that
+   * set the knob is told too, and so it fires exactly once per bring-up. */
+  if (_cfg.tuning.disable_cca)
+    _logger->warn(
+        "RTL8733B: DEVOURER_DIS_CCA / tuning.disable_cca is not implemented by "
+        "this backend — carrier-sense stays ENABLED for this session");
 }
 
 void Rtl8733bDevice::Init(Action_ParsedRadioPacket packetProcessor,
@@ -110,18 +130,6 @@ void Rtl8733bDevice::InitWrite(SelectedChannel channel) {
       throw std::runtime_error("RTL8733B monitor RX configuration failed");
     _tx_ready = true;
     _tx_submits = 0;
-    _tx_fatal = nullptr;
-    /* Say so rather than dropping it. SetCcaMode(true) refuses loudly, so the
-     * config path must not be the one door where the same request vanishes
-     * without a word — the operator would otherwise believe carrier-sense was
-     * off and read the resulting deferral as a transmitter problem. Warn
-     * rather than throw: the knob is on by default for the streamtx FPV
-     * downlink, and refusing to bring TX up over an unported optimisation is a
-     * worse trade than airing with standard carrier-sense. */
-    if (_cfg.tuning.disable_cca)
-      _logger->warn("RTL8733B: CCA disable (DEVOURER_DIS_CCA) is not "
-                    "implemented by this backend; transmitting with "
-                    "carrier-sense enabled");
     /* One-shot thermal snapshot at bring-up — the PA-heating baseline for the
      * session, same as the Kestrel InitWrite snapshot. Logged, never acted on:
      * the meter is a PA-bias tracking index, not a calibrated °C sensor, and
@@ -142,47 +150,48 @@ void Rtl8733bDevice::InitWrite(SelectedChannel channel) {
 
 bool Rtl8733bDevice::configure_tx_power(SelectedChannel channel) {
   _tssi_tracking = false;
-  _tssi_cck = false;
+  /* Closed-loop TSSI is the TX-power control on a TSSI-offset PG unit, so it
+   * is not optional there: the flat fallback index below is a conservative
+   * bring-up value, and on-air it runs cold enough that HT rates do not
+   * survive the link (measured on the DUT: MCS7 undecodable by an RTL8812AU
+   * witness, 300/300 submitted, 0 captured). A unit whose EFUSE carries no
+   * TSSI calibration has nothing to drive the loop and takes the flat path. */
   if (_efuse.tx_power_mode != rtl8733b::TxPowerPgMode8733b::TssiOffset)
     return _phy.set_flat_tx_power(rtl8733b::kSafeTxAgcIndex8733b);
 
-  /* Start in the OFDM/HT thermal table. A first CCK submission switches the
-   * table through select_tssi_rate_table() before its descriptor reaches USB. */
+  /* Pick the thermal-compensation curve once, from the TX mode configured at
+   * this point, and leave it alone — the vendor's own setup keys the table on
+   * `phydm_get_tx_rate` at TSSI-setup time and never re-selects it at runtime.
+   * It is never re-selected per frame, so send_packet does no register I/O,
+   * like every other generation.
+   *
+   * The curve choice is inert on this silicon at any temperature the part
+   * reaches: the CCK and OFDM/HT tables are bit-identical for thermal deltas
+   * 0..+17 and first differ at +18, while a five-minute max-duty MCS7 soak
+   * plateaued at +8 after two minutes and stopped climbing. It is set from the
+   * rate class anyway because that costs nothing and is what the vendor does —
+   * but do not expect it to be measurable.
+   *
+   * Which is just as well, because this is weaker than the vendor's keying in
+   * the canonical demo flow: txdemo calls InitWrite before SetTxMode, so
+   * _tx_mode_default is usually unset here and the OFDM/HT table is what a
+   * DEVOURER_TX_RATE=1M session loads — the CCK branch is reached only by a
+   * caller that configures the mode first, or by a later SetMonitorChannel.
+   * The vendor keys on the rate in flight at setup instead. Nothing chases
+   * that gap, because closing it would buy a table identical to the one
+   * already loaded at every delta this part reaches. */
+  const bool cck_table = _tx_mode_default.has_value() &&
+                         _tx_mode_default->mode ==
+                             devourer::TxMode::Mode::Legacy &&
+                         rtl8733b::is_cck_rate_500kbps(
+                             _tx_mode_default->legacy_rate_500kbps);
   if (!_phy.prepare_tssi_bb(channel, _efuse) ||
-      !_phy.prepare_tssi_thermal(_efuse, false) ||
+      !_phy.prepare_tssi_thermal(_efuse, cck_table) ||
       !_phy.prepare_tssi_offsets(channel, _efuse) ||
       !_phy.enable_tssi_tracking(
           channel, _efuse, rtl8733b::kSafeTssiTargetQdbm8733b))
     return false;
   _tssi_tracking = true;
-  return true;
-}
-
-bool Rtl8733bDevice::select_tssi_rate_table(bool cck) {
-  if (_efuse.tx_power_mode != rtl8733b::TxPowerPgMode8733b::TssiOffset)
-    return true;
-  if (!_tssi_tracking)
-    return false;
-  if (_tssi_cck == cck)
-    return true;
-
-  /* The vendor chooses this table from the current TX rate. The table cannot
-   * be changed while closed-loop tracking is enabled, so make the transition
-   * explicit and reversible: exact rollback, table readback, then a fresh
-   * capped enable verified by register readback. (prepare_tssi_thermal here is
-   * the vendor's TSSI thermal-*compensation table*, a hardware feature driven
-   * off the EFUSE baseline constant — not a live temperature read.) */
-  if (!_phy.disable_tssi_tracking())
-    return false;
-  _tssi_tracking = false;
-  if (!_phy.prepare_tssi_thermal(_efuse, cck) ||
-      !_phy.enable_tssi_tracking(
-          _channel, _efuse, rtl8733b::kSafeTssiTargetQdbm8733b))
-    return false;
-  _tssi_tracking = true;
-  _tssi_cck = cck;
-  _logger->info("RTL8733B TSSI rate table selected: {}",
-                cck ? "CCK" : "OFDM/HT");
   return true;
 }
 
@@ -344,14 +353,7 @@ void Rtl8733bDevice::SetMonitorChannel(SelectedChannel channel) {
 bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
   if (!_phy_ready || !_mac_ready || !_tx_ready) {
-    /* Name the reason: a retry loop must be able to tell "InitWrite has not run
-     * yet" from "the session was deliberately stopped and will not recover". */
-    if (_tx_fatal != nullptr)
-      _logger->error("RTL8733B TX rejected: session stopped by {} — "
-                     "re-run InitWrite to recover",
-                     _tx_fatal);
-    else
-      _logger->error("RTL8733B TX rejected before InitWrite");
+    _logger->error("RTL8733B TX rejected before InitWrite");
     return false;
   }
   if (packet == nullptr)
@@ -392,22 +394,6 @@ bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
   const uint8_t bandwidth = (usb_frame[0x14] >> 5) & 0x3;
   const uint8_t short_gi = (usb_frame[0x14] >> 4) & 0x1;
   const uint8_t ldpc = (usb_frame[0x14] >> 7) & 0x1;
-  if (!select_tssi_rate_table(rate_hw <= 3)) {
-    /* Fatal, not transient. The CCK<->OFDM table switch disables closed-loop
-     * TSSI tracking, rewrites the thermal table and re-enables tracking; a
-     * failure anywhere in there means the readback no longer describes the
-     * loop that is driving the PA. Continuing to inject would be transmitting
-     * at an unverified power setting, so tear the session down (MAC stop +
-     * card disable). send_packet keeps its bool contract — no other generation
-     * throws per frame — so the reason is latched in _tx_fatal instead: a bare
-     * `false` is indistinguishable from a short bulk write and would send a
-     * retry loop straight back into the same state. */
-    _logger->error("RTL8733B TX aborted: TSSI rate-table transition failed — "
-                   "closed-loop power state is unverified, stopping the card");
-    _tx_fatal = "a failed TSSI rate-table transition";
-    Stop();
-    return false;
-  }
   const int sent = _device.bulk_send_sync_ep(
       endpoint, usb_frame.data(), usb_frame.size(), 100);
   if (sent != static_cast<int>(usb_frame.size())) {
@@ -612,7 +598,6 @@ void Rtl8733bDevice::Stop() {
     }
     _tssi_tracking = false;
   }
-  _tssi_cck = false;
   _phy_ready = false;
   if (_mac_ready) {
     _mac.stop();

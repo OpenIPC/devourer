@@ -334,7 +334,8 @@ Behavioural traps the per-field docs can't carry:
   been located and measured there, so `SetCcaMode(true)` throws (loudly, but
   without tearing the session down) while `SetCcaMode(false)`, the state its
   MAC bring-up already leaves programmed, succeeds as a no-op; setting the
-  config knob warns at `InitWrite` and airs with carrier-sense. Does NOT apply
+  config knob warns once at bring-up (RX-only sessions included) and airs
+  with carrier-sense. Does NOT apply
   the vendor BB CCA-off writes (they deafen the RX). RX-decode side is a
   separate null (`tests/dis_cca_onair.sh`).
 

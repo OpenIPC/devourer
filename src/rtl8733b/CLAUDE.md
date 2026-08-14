@@ -48,18 +48,32 @@ unrelated register map.
   either alone reintroduces the straddle, from opposite sides.
 - **TSSI closed loop.** Power runs from a fixed safe target
   (`kSafeTssiTargetQdbm8733b`); none of the runtime TX-power levers are ported.
-  The CCK and OFDM/HT variants of the thermal-compensation table are different
-  tables, and the table cannot be changed while tracking is enabled — so
-  `select_tssi_rate_table` disables tracking, rewrites, and re-enables, with
-  each stage verified by register readback. Note what the failure path is and
-  is not: `Phy8733b::enable_tssi_tracking` restores its own analog/BB snapshot
-  when its verdict fails, but the *transition* has no rollback to the previous
-  table — `select_tssi_rate_table` returns false with tracking left off, and
-  the caller responds by tearing the session down rather than transmitting at
-  an unverified power setting. That transition costs **84 ms / 136 USB
-  register round trips** (bench, one unit), so a stream alternating CCK and
-  OFDM rates is capped around 11 fps; a single-rate stream early-returns and
-  pays nothing.
+  On a TSSI-offset PG unit the loop **is** the TX-power control, so it is not
+  optional there — an attempt to make it opt-in with a fall back to the flat
+  `kSafeTxAgcIndex8733b` could not carry HT at all (witnessed: MCS7, 300/300
+  submitted, 0 captured, twice). A unit whose EFUSE carries no TSSI calibration
+  has nothing to drive the loop and takes the flat path.
+- **The thermal table is chosen once per channel set, not per frame.** The CCK
+  and OFDM/HT variants of the thermal-compensation table are different tables.
+  `configure_tx_power` picks one from the configured TX mode and leaves it,
+  which is what the vendor does: `_halrf_tssi_set_tmeter_tbl_8733b` is
+  reachable only from full TSSI setup, keyed on `phydm_get_tx_rate` at that
+  instant, and never re-selected at runtime. So nothing reads or writes a
+  register per frame on the send path, matching the other four HALs.
+- **The curve choice is inert at any temperature this part reaches, so do not
+  reintroduce runtime switching.** The CCK and OFDM/HT tables are
+  bit-identical for thermal deltas 0..+17 and first differ at **+18** (the
+  swing ramp starts there; the words either side of the baseline are zero in
+  both). A five-minute max-duty MCS7 soak on the validation unit plateaued at
+  **+8** after two minutes and stopped climbing — less than half the delta
+  needed for the tables to differ by a single entry. A runtime switch
+  therefore costs **84 ms / 136 USB register round trips** per crossing
+  (OpenIPC/devourer#389) to install a table that is bit-identical to the one
+  already loaded. An opt-in knob for it was written, measured and deleted on
+  that evidence. If a future board reaches +18 — a sealed module at high
+  ambient might — the switch is worth revisiting, but implement it as the
+  in-place rewrite validated in #389 (13.8 ms, tracking left enabled), not the
+  teardown/rebuild.
 - **The loop needs settling time, so a fast rate-switching run misreports
   power.** Alternating CCK and OFDM at a few ms per frame leaves CCK
   transmitting above its settled level until the loop converges; pacing the
@@ -124,9 +138,11 @@ loudly — without tearing the session down, since an unported optional knob is
 not a hardware-safety event — while `false` succeeds as a no-op because that is
 the state MAC bring-up already leaves programmed.
 
-`DeviceConfig::tuning::disable_cca` cannot be honoured either, and `InitWrite`
+`DeviceConfig::tuning::disable_cca` cannot be honoured either, and bring-up
 warns rather than dropping it — a config knob must not be the one door where a
-request the setter refuses loudly instead vanishes without a word.
+request the setter refuses loudly instead vanishes without a word. The warning
+sits in `bring_up_to_phy`, not `InitWrite`, so an RX-only session that set the
+knob is told too, and so it fires exactly once per bring-up.
 
 ## Validation status
 

@@ -69,7 +69,6 @@ private:
   bool _phy_ready = false;
   bool _tx_ready = false;
   bool _tssi_tracking = false;
-  bool _tssi_cck = false;
   std::atomic<bool> _rx_stop{false};
   std::atomic<bool> _rx_active{false};
   std::atomic<uint8_t> _rx_configured_bw{0};

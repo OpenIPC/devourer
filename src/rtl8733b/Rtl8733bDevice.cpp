@@ -150,7 +150,6 @@ void Rtl8733bDevice::InitWrite(SelectedChannel channel) {
 
 bool Rtl8733bDevice::configure_tx_power(SelectedChannel channel) {
   _tssi_tracking = false;
-  _tssi_cck = false;
   /* Closed-loop TSSI is the TX-power control on a TSSI-offset PG unit, so it
    * is not optional there: the flat fallback index below is a conservative
    * bring-up value, and on-air it runs cold enough that HT rates do not
@@ -171,7 +170,16 @@ bool Rtl8733bDevice::configure_tx_power(SelectedChannel channel) {
    * 0..+17 and first differ at +18, while a five-minute max-duty MCS7 soak
    * plateaued at +8 after two minutes and stopped climbing. It is set from the
    * rate class anyway because that costs nothing and is what the vendor does —
-   * but do not expect it to be measurable. */
+   * but do not expect it to be measurable.
+   *
+   * Which is just as well, because this is weaker than the vendor's keying in
+   * the canonical demo flow: txdemo calls InitWrite before SetTxMode, so
+   * _tx_mode_default is usually unset here and the OFDM/HT table is what a
+   * DEVOURER_TX_RATE=1M session loads — the CCK branch is reached only by a
+   * caller that configures the mode first, or by a later SetMonitorChannel.
+   * The vendor keys on the rate in flight at setup instead. Nothing chases
+   * that gap, because closing it would buy a table identical to the one
+   * already loaded at every delta this part reaches. */
   const bool cck_table = _tx_mode_default.has_value() &&
                          _tx_mode_default->mode ==
                              devourer::TxMode::Mode::Legacy &&
@@ -184,7 +192,6 @@ bool Rtl8733bDevice::configure_tx_power(SelectedChannel channel) {
           channel, _efuse, rtl8733b::kSafeTssiTargetQdbm8733b))
     return false;
   _tssi_tracking = true;
-  _tssi_cck = cck_table;
   return true;
 }
 
@@ -591,7 +598,6 @@ void Rtl8733bDevice::Stop() {
     }
     _tssi_tracking = false;
   }
-  _tssi_cck = false;
   _phy_ready = false;
   if (_mac_ready) {
     _mac.stop();

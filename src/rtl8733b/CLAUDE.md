@@ -138,9 +138,11 @@ loudly — without tearing the session down, since an unported optional knob is
 not a hardware-safety event — while `false` succeeds as a no-op because that is
 the state MAC bring-up already leaves programmed.
 
-`DeviceConfig::tuning::disable_cca` cannot be honoured either, and `InitWrite`
+`DeviceConfig::tuning::disable_cca` cannot be honoured either, and bring-up
 warns rather than dropping it — a config knob must not be the one door where a
-request the setter refuses loudly instead vanishes without a word.
+request the setter refuses loudly instead vanishes without a word. The warning
+sits in `bring_up_to_phy`, not `InitWrite`, so an RX-only session that set the
+knob is told too, and so it fires exactly once per bring-up.
 
 ## Validation status
 

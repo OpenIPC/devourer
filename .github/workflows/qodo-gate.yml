@@ -160,12 +160,19 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           THIS_RUN: ${{ github.run_id }}
         run: |
-          set -uo pipefail
-          gh run list --repo "$REPO" --workflow qodo-gate \
+          set -u
+          # The listing is guarded too, not just the reruns: with an unguarded
+          # pipeline a transient list failure would be the step's exit code —
+          # exactly the PASS-into-FAIL this step promises not to produce.
+          if ! ids=$(gh run list --repo "$REPO" --workflow qodo-gate \
               --commit "$HEAD_SHA" --json databaseId,conclusion \
-              --jq '.[] | select(.conclusion == "failure") | .databaseId' |
-          while read -r id; do
+              --jq '.[] | select(.conclusion == "failure") | .databaseId'); then
+            echo "sweep skipped: could not list this workflow's runs"
+            exit 0
+          fi
+          for id in $ids; do
             [ "$id" = "$THIS_RUN" ] && continue
             echo "re-running failed qodo-gate run $id"
             gh run rerun "$id" --repo "$REPO" --failed || true
           done
+          exit 0

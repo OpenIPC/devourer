@@ -1315,6 +1315,11 @@ bool Phy8733b::enable_tssi_tracking(SelectedChannel channel,
     _tssi_digital_snapshot = digital_snapshot;
     _tssi_analog_snapshot = analog_snapshot;
     _tssi_is_2g = channel_cfg->is_2g;
+    /* fast_retune bookkeeping: the offsets the chip now carries and the RF
+     * path bit (RFE routing — static per session), for the in-place
+     * per-channel rewrite. */
+    _fr_tssi_offsets = capped->rate_offsets;
+    _fr_tssi_path = path;
     _logger->info(
         "RTL8733B TSSI tracking enabled: ch={} path={} ceiling={} "
         "rates={:08x}/{:08x}/{:08x}/{:08x}/{:08x}",
@@ -1365,6 +1370,7 @@ bool Phy8733b::disable_tssi_tracking() {
     _tssi_digital_snapshot.reset();
     _tssi_analog_snapshot.reset();
   }
+  _fr_tssi_offsets.reset();
   _logger->info("RTL8733B TSSI tracking disabled: rollback={}", ok);
   devourer::Ev(_logger->events(), "rtl8733b.tssi_tracking")
       .f("enabled", false)
@@ -1489,6 +1495,15 @@ bool Phy8733b::set_channel(SelectedChannel channel) {
 
   const ChannelState8733b state = read_channel_state();
   const bool ok = state.matches(*plan);
+  /* fast_retune bookkeeping: record where the radio is, and invalidate the
+   * RF compose cache — the switch functions above rewrote both words, so a
+   * cached copy is stale until the next fast hop re-primes it. */
+  if (ok)
+    _fr_plan = *plan;
+  else
+    _fr_plan.reset();
+  _fr_rf18.reset();
+  _fr_rf19.reset();
   _logger->info(
       "RTL8733B channel: ready={} primary={} center={} width={} offset={} "
       "RF18={:05x}/{:05x} RF19={:05x}/{:05x} BB9B0={:08x} "
@@ -1511,6 +1526,135 @@ bool Phy8733b::set_channel(SelectedChannel channel) {
       .hexf("data_sc", state.data_sc, 2)
       .hexf("wmac", state.wmac_trxptcl, 8).f("synth", state.synth_ready);
   return ok;
+}
+
+bool Phy8733b::fast_retune(SelectedChannel channel, bool tssi_live,
+                           uint8_t max_target_qdbm, bool cache_rf) {
+  const auto plan = channel_plan(channel);
+  if (!_initialized || !plan || !_fr_plan)
+    return false;
+  const ChannelPlan8733b cur = *_fr_plan;
+  if (plan->is_2g != cur.is_2g || plan->width != cur.width ||
+      plan->offset != cur.offset)
+    return false;
+  if (plan->center == cur.center && plan->primary == cur.primary)
+    return true;
+
+  /* Everything that can refuse is computed BEFORE the first chip write, so a
+   * declined hop leaves the radio untouched for the caller's full-path
+   * fallback rather than half-hopped. */
+  std::optional<TssiBbPlan8733b> tssi;
+  if (tssi_live && _fr_tssi_offsets) {
+    tssi = tssi_bb_plan(_tx_power_targets, channel.Channel, _rfe_type,
+                        _fr_tssi_path, max_target_qdbm);
+    if (!tssi)
+      return false;
+  }
+  if (!cache_rf || !_fr_rf18) {
+    const uint32_t rf18 = read_rf(0, 0x18);
+    if (rf18 == 0xffffffffu)
+      return false;
+    _fr_rf18 = rf18;
+  }
+  if (!cache_rf || !_fr_rf19) {
+    const uint32_t rf19 = read_rf(0, 0x19);
+    if (rf19 == 0xffffffffu)
+      return false;
+    _fr_rf19 = rf19;
+  }
+
+  uint32_t rf18 = *_fr_rf18;
+  uint32_t rf19 = *_fr_rf19;
+  if (plan->is_2g) {
+    rf18 &= ~((3u << 16) | (3u << 8) | 0xffu);
+    rf18 |= plan->center;
+  } else {
+    rf18 &= ~((1u << 17) | (1u << 9) | 0xffu);
+    rf18 |= (1u << 16) | (1u << 8) | plan->center;
+    rf19 &= ~((1u << 19) | (1u << 18));
+    if (plan->center > 144)
+      rf19 |= 1u << 19;
+    else if (plan->center > 80)
+      rf19 |= 1u << 18;
+  }
+  if (!program_synth(rf18))
+    return false;
+  _fr_rf18 = rf18;
+  if (rf19 != *_fr_rf19) {
+    write_rf(0, 0x19, kRfMask, rf19);
+    write_rf(1, 0x19, kRfMask, rf19);
+    _fr_rf19 = rf19;
+  }
+
+  /* Channel-keyed constants from switch_channel, written only when their
+   * bucket changes across the hop. Band-keyed constants (0x1ea8, the 2.4 GHz
+   * 0x18ac pair, spur cancellation) were set by the last full set at this
+   * band and are untouched — that is the fast path's contract. */
+  if (plan->is_2g) {
+    static constexpr uint32_t sco38[15] = {
+        0, 0x1cfea, 0x1d0e1, 0x1d1d7, 0x1d2cd, 0x1d3c3, 0x1d4b9,
+        0x1d5b0, 0x1d6a6, 0x1d79c, 0x1d892, 0x1d988, 0x1da7f,
+        0x1db75, 0x1ddc4};
+    static constexpr uint32_t sco3c[15] = {
+        0, 0x27de3, 0x27f35, 0x28088, 0x281da, 0x2832d, 0x2847f,
+        0x285d2, 0x28724, 0x28877, 0x289c9, 0x28b1c, 0x28c6e,
+        0x28dc1, 0x290ed};
+    if (plan->center <= 14) {
+      set_bb(0x2a38, 0x07ffff00u, sco38[plan->center]);
+      set_bb(0x2a3c, 0x000fffffu, sco3c[plan->center]);
+    }
+    if ((plan->center == 14) != (cur.center == 14)) {
+      const uint32_t shape[8] = {
+          plan->center == 14 ? 0x452484u : 0x7847cfu,
+          plan->center == 14 ? 0x0fe3c8u : 0x57a6b1u,
+          plan->center == 14 ? 0u : 0x1f2af412u,
+          plan->center == 14 ? 0u : 0x09717du,
+          plan->center == 14 ? 0u : 0xfb9003u,
+          plan->center == 14 ? 0u : 0xfb1fa5u,
+          plan->center == 14 ? 0u : 0xfe2fcau,
+          plan->center == 14 ? 0u : 0xffcff3u};
+      for (unsigned i = 0; i < 8; ++i)
+        set_bb(static_cast<uint16_t>(0x1a00 + i * 4),
+               i == 2 ? kDwordMask : 0x00ffffffu, shape[i]);
+    }
+  } else {
+    const auto agc = [](uint8_t c) {
+      return c <= 64 ? 6u : c <= 144 ? 7u : 0u;
+    };
+    if (agc(plan->center) != agc(cur.center))
+      set_bb(0x18ac, 0x000001f0u, agc(plan->center));
+  }
+  const auto sco = [](uint8_t c) {
+    return c >= 173  ? 0x411u
+           : c >= 120 ? 0x412u
+           : c >= 112 ? 0x452u
+           : c >= 56  ? 0x453u
+           : c >= 52  ? 0x493u
+           : c >= 16  ? 0x494u
+           : c >= 13  ? 0x969u
+           : c >= 11  ? 0x96au
+                      : 0x9aau;
+  };
+  if (sco(plan->center) != sco(cur.center))
+    set_bb(0x0c30, 0xfffu, sco(plan->center));
+  if ((plan->center == 13) != (cur.center == 13))
+    set_bb(0x0808, 0x7fu, plan->center == 13 ? 0x30 : 0x40);
+
+  bb_reset();
+  igi_toggle();
+
+  /* TSSI: tracking stays enabled; only the per-channel rate-offset dwords
+   * are rewritten, in place, and only when the new channel's plan differs
+   * (the #389 shape). The rollback snapshots are untouched — they record
+   * the pre-enable state, which this rewrite does not change. */
+  if (tssi && tssi->rate_offsets != *_fr_tssi_offsets) {
+    for (size_t i = 0; i < tssi->rate_offsets.size(); ++i)
+      set_bb(static_cast<uint16_t>(0x3a00 + i * 4), kDwordMask,
+             tssi->rate_offsets[i]);
+    _fr_tssi_offsets = tssi->rate_offsets;
+  }
+  _fr_plan = *plan;
+  return true;
 }
 
 bool Phy8733b::initialize(uint8_t cut, const EfuseInfo &efuse) {

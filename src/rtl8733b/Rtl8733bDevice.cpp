@@ -660,8 +660,9 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
   caps.characterized_5g = {true, 5180, 5825};
   caps.hw_rx_timestamp = true;
   /* Lean FastRetune override exists (Phy8733b::fast_retune): intra-band,
-   * same-width hops with TSSI tracking kept live. Measured on the .181
-   * validation unit: ~30 ms vs the ~330 ms full path (USB HS). */
+   * same-width hops with TSSI tracking kept live. Measured on the
+   * validation unit: ~55 ms call / ~10 ms p50 radio-live, vs the
+   * ~330-440 ms full path (USB HS). */
   caps.fastretune_ok = true;
   return caps;
 }

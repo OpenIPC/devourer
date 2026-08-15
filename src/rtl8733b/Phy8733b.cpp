@@ -1371,6 +1371,7 @@ bool Phy8733b::disable_tssi_tracking() {
     _tssi_analog_snapshot.reset();
   }
   _fr_tssi_offsets.reset();
+  _fr_tssi_de.reset();
   _logger->info("RTL8733B TSSI tracking disabled: rollback={}", ok);
   devourer::Ev(_logger->events(), "rtl8733b.tssi_tracking")
       .f("enabled", false)
@@ -1434,6 +1435,13 @@ bool Phy8733b::prepare_tssi_offsets(SelectedChannel channel,
 
   const TssiDeState8733b state = read_tssi_de_state();
   const bool ok = state.matches_disabled(*de);
+  if (ok) {
+    /* fast_retune bookkeeping: the DE plan the chip now carries and the
+     * EFUSE calibration that derives it, for the in-place per-channel
+     * rewrite on bucket-crossing hops. */
+    _fr_tssi_de = *de;
+    _fr_tssi_power = efuse.tssi_power;
+  }
   _logger->info(
       "RTL8733B TSSI-DE: ready={} enabled={} ch={} cck={}/{} ht40={}/{} "
       "ofdm={}/{} ht20={}/{}",
@@ -1544,10 +1552,16 @@ bool Phy8733b::fast_retune(SelectedChannel channel, bool tssi_live,
    * declined hop leaves the radio untouched for the caller's full-path
    * fallback rather than half-hopped. */
   std::optional<TssiBbPlan8733b> tssi;
+  std::optional<TssiDePlan8733b> de;
   if (tssi_live && _fr_tssi_offsets) {
     tssi = tssi_bb_plan(_tx_power_targets, channel.Channel, _rfe_type,
                         _fr_tssi_path, max_target_qdbm);
     if (!tssi)
+      return false;
+  }
+  if (tssi_live && _fr_tssi_de && _fr_tssi_power) {
+    de = tssi_de_plan(*_fr_tssi_power, channel.Channel);
+    if (!de)
       return false;
   }
   if (!cache_rf || !_fr_rf18) {
@@ -1643,15 +1657,36 @@ bool Phy8733b::fast_retune(SelectedChannel channel, bool tssi_live,
   bb_reset();
   igi_toggle();
 
-  /* TSSI: tracking stays enabled; only the per-channel rate-offset dwords
-   * are rewritten, in place, and only when the new channel's plan differs
-   * (the #389 shape). The rollback snapshots are untouched — they record
-   * the pre-enable state, which this rewrite does not change. */
+  /* TSSI: tracking stays enabled; the per-channel rate-offset dwords and
+   * the channel-bucketed DE offsets are rewritten, in place, each only
+   * when the new channel's plan differs (the #389 shape). Intra-band the
+   * rate offsets are band-keyed and never change — the DE buckets, ~3
+   * channels wide at 2.4 GHz, are the calibration a hop actually moves.
+   * The rollback snapshots are untouched — they record the pre-enable
+   * state, which these rewrites do not change. */
   if (tssi && tssi->rate_offsets != *_fr_tssi_offsets) {
     for (size_t i = 0; i < tssi->rate_offsets.size(); ++i)
       set_bb(static_cast<uint16_t>(0x3a00 + i * 4), kDwordMask,
              tssi->rate_offsets[i]);
     _fr_tssi_offsets = tssi->rate_offsets;
+  }
+  if (de && !(*de == *_fr_tssi_de)) {
+    /* The prepare_tssi_offsets field sequence, minus its 0x4318
+     * tracking-disable write — the loop stays live across the rewrite. */
+    set_bb(0x433c, 0x0ff00000u, static_cast<uint8_t>(de->cck[0]));
+    set_bb(0x434c, 0x0ff00000u, static_cast<uint8_t>(de->cck[1]));
+    set_bb(0x4334, 0x0ff00000u, static_cast<uint8_t>(de->ht40[0]));
+    set_bb(0x4344, 0x0ff00000u, static_cast<uint8_t>(de->ht40[1]));
+    set_bb(0x43b0, 0x000000ffu, static_cast<uint8_t>(de->ofdm[0]));
+    set_bb(0x43b0, 0x0000ff00u, static_cast<uint8_t>(de->ht40[0]));
+    set_bb(0x43b0, 0x00ff0000u, static_cast<uint8_t>(de->ht40[0]));
+    set_bb(0x43b4, 0x0000ff00u, static_cast<uint8_t>(de->ofdm[1]));
+    set_bb(0x43b4, 0x000000ffu, static_cast<uint8_t>(de->ht40[1]));
+    set_bb(0x43b4, 0x00ff0000u, static_cast<uint8_t>(de->ht40[1]));
+    set_bb(0x43b4, 0xff000000u, static_cast<uint8_t>(de->ht40[1]));
+    set_bb(0x43b0, 0xff000000u, static_cast<uint8_t>(de->ht20[0]));
+    set_bb(0x43b8, 0x000000ffu, static_cast<uint8_t>(de->ht20[1]));
+    _fr_tssi_de = *de;
   }
   _fr_plan = *plan;
   return true;

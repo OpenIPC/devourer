@@ -137,8 +137,18 @@ synth program (bandwidth bits preserved via a compose cache primed on the
 first fast hop after a full set), RF19 sub-band bits and the channel-keyed
 BB constants on bucket change only, then BB reset + IGI toggle. **TSSI
 tracking stays enabled across the hop**, with the per-channel rate-offset
-dwords rewritten in place when the plan differs — the in-place shape #389
-validated; every full set still runs the disable/re-enable pair. Measured
+dwords AND the channel-bucketed TSSI-DE offsets rewritten in place when
+their plans differ — the in-place shape #389 validated; every full set
+still runs the disable/re-enable pair. The DE rewrite is the one that
+matters intra-band: the rate offsets are band-keyed and never change
+across a 2.4 GHz hop, while the DE buckets are ~3 channels wide
+(boundaries at ch 2/5/8/11/14, trim at 7/14), so most hops cross one —
+skipping them leaves the loop tracking with the previous channel's
+calibration (found by review on the first cut of this port). The rewrite
+replays prepare_tssi_offsets' field sequence minus its tracking-disable
+write; measured across 22 ch1→ch13 hops on the validation unit: readback
+parity 22/22, tracking-enable field stayed 7 throughout, settle p50
+unchanged (10.4 ms). Measured
 on the validation unit (20-cycle settle harness, 1 kHz witness emitter):
 call ~55 ms, radio-live 10.0 ms p50 from hop start (min 3.6 / p90 12.9 /
 **max 40.3 ms — a 1-in-20 tail, not noise**), vs 70-100 ms radio-live

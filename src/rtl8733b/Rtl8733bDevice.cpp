@@ -350,6 +350,23 @@ void Rtl8733bDevice::SetMonitorChannel(SelectedChannel channel) {
   }
 }
 
+void Rtl8733bDevice::FastRetune(uint8_t channel, bool cache_rf) {
+  std::lock_guard<std::recursive_mutex> lock(_reg_mu);
+  if (_phy_ready && channel == _channel.Channel)
+    return;
+  SelectedChannel target = _channel;
+  target.Channel = channel;
+  if (_phy_ready &&
+      _phy.fast_retune(target, _tssi_tracking,
+                       rtl8733b::kSafeTssiTargetQdbm8733b, cache_rf)) {
+    _channel = target;
+    return;
+  }
+  /* Fast path declined (band/width change, cold radio) — full channel set at
+   * the current width/offset, under the same recursive lock. */
+  SetMonitorChannel(target);
+}
+
 bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
   if (!_phy_ready || !_mac_ready || !_tx_ready) {
@@ -642,6 +659,11 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
   caps.tune_5g = {true, 5180, 5885};
   caps.characterized_5g = {true, 5180, 5825};
   caps.hw_rx_timestamp = true;
+  /* Lean FastRetune override exists (Phy8733b::fast_retune): intra-band,
+   * same-width hops with TSSI tracking kept live. Measured on the
+   * validation unit: ~55 ms call / ~10 ms p50 radio-live, vs the
+   * ~330-440 ms full path (USB HS). */
+  caps.fastretune_ok = true;
   return caps;
 }
 

@@ -127,9 +127,41 @@ The SGI refusal is the one worth re-opening: the descriptor bit was set and the
 frame submitted, but the witness decoded long GI. Descriptor and air disagree,
 and the reason is not yet understood.
 
+## FastRetune
+
+Ported: intra-band, same-width hops (`Phy8733b::fast_retune`). The full
+`SetMonitorChannel` on this USB-HS part costs ~330-440 ms — profiled as
+~165 ms TSSI disable/re-enable, ~90 ms band+bandwidth switches, ~60 ms
+channel switch — and the fast path keeps only what a hop needs: the RF18
+synth program (bandwidth bits preserved via a compose cache primed on the
+first fast hop after a full set), RF19 sub-band bits and the channel-keyed
+BB constants on bucket change only, then BB reset + IGI toggle. **TSSI
+tracking stays enabled across the hop**, with the per-channel rate-offset
+dwords AND the channel-bucketed TSSI-DE offsets rewritten in place when
+their plans differ — the in-place shape #389 validated; every full set
+still runs the disable/re-enable pair. The DE rewrite is the one that
+matters intra-band: the rate offsets are band-keyed and never change
+across a 2.4 GHz hop, while the DE buckets are ~3 channels wide
+(boundaries at ch 2/5/8/11/14, trim at 7/14), so most hops cross one —
+skipping them leaves the loop tracking with the previous channel's
+calibration (found by review on the first cut of this port). The rewrite
+replays prepare_tssi_offsets' field sequence minus its tracking-disable
+write; measured across 22 ch1→ch13 hops on the validation unit: readback
+parity 22/22, tracking-enable field stayed 7 throughout, settle p50
+unchanged (10.4 ms). Measured
+on the validation unit (20-cycle settle harness, 1 kHz witness emitter):
+call ~55 ms, radio-live 10.0 ms p50 from hop start (min 3.6 / p90 12.9 /
+**max 40.3 ms — a 1-in-20 tail, not noise**), vs 70-100 ms radio-live
+through the full path. Channel-state readback parity held 7/7 hops, and a
+300-frame post-hop burst decoded 299/300 at an independent witness — the
+TSSI-live claim is air-verified. The counterparts: one physical unit, like
+every on-air claim in this subtree; no SDR, so radiated power ACROSS a hop
+is uncharacterized; and cross-band or width-change hops decline (chip
+untouched) and fall back to the full path.
+
 ## Not ported
 
-`ReadTsf`/beacons, hardware ACK/BlockAck, A-MPDU, `FastRetune`,
+`ReadTsf`/beacons, hardware ACK/BlockAck, A-MPDU,
 `FastSetBandwidth`, the runtime TX-power knobs, `rx.path` per-chain telemetry,
 and CCA disable. These inherit `IRtlDevice`'s not-ported defaults (`false`,
 `0`, or a full-path fallback) rather than being faked. `SetCcaMode` is the one

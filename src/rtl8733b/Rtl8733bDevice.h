@@ -32,6 +32,12 @@ public:
   void StartRxLoop(Action_ParsedRadioPacket packetProcessor) override;
   void StopRxLoop() override { _rx_stop = true; }
   void SetMonitorChannel(SelectedChannel channel) override;
+  /* Lean intra-band, same-bandwidth hop (see Phy8733b::fast_retune — the
+   * profile that sized it and the TSSI in-place contract live there). Falls
+   * back to the full SetMonitorChannel on a band/width change or a cold
+   * radio, per the IRtlDevice contract. The cache_rf default binds at the
+   * interface declaration. */
+  void FastRetune(uint8_t channel, bool cache_rf) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;

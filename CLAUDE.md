@@ -59,9 +59,10 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first):
   only what an independent witness decoded — legacy OFDM + HT MCS0-7, BCC,
   20/40 MHz on 2.4/5 GHz, plus long-preamble CCK on 2.4 GHz at 20 MHz.
   Everything the backend has not ported (TSF/beacons, hardware ACK, A-MPDU,
-  FastRetune, the runtime TX-power levers) falls through to `IRtlDevice`'s
+  the runtime TX-power levers) falls through to `IRtlDevice`'s
   not-ported defaults rather than being faked, so read the base class before
-  assuming a cross-generation feature below applies here. SGI, LDPC, STBC, VHT
+  assuming a cross-generation feature below applies here. `FastRetune` IS
+  ported (intra-band, TSSI kept live — `src/rtl8733b/CLAUDE.md`). SGI, LDPC, STBC, VHT
   and HE are refused outright. Scope, one-unit validation record and the
   deferred matrix: `docs/rtl8733b.md`.
 
@@ -380,10 +381,13 @@ temporal layer and injects each at its ladder's rate
 ## Frequency hopping
 
 `IRtlDevice::FastRetune(channel)` — lean intra-band, same-bandwidth retune on
-the four Jaguar/Kestrel generations (RF channel switch only, write-only from a
-compose cache); falls back to full `SetMonitorChannel` on a band change, and to
-the full path entirely on the RTL8733B, which has no fast path yet.
-FHSS-grade: ~0.5–2.5 ms per hop depending on chip. On the Jaguar2 dies (8822B, 8821C) and Jaguar3
+all five generations (RF channel switch only, write-only from a
+compose cache); falls back to full `SetMonitorChannel` on a band change.
+FHSS-grade on the Jaguar/Kestrel dies: ~0.5–2.5 ms per hop depending on chip.
+On the RTL8733B the hop keeps TSSI tracking live (per-channel rate-offset
+dwords rewritten in place) and costs ~55 ms call / ~10 ms p50 radio-live on
+the USB-HS validation unit — vs its ~330-440 ms full path — with a measured
+1-in-20 40 ms radio-live tail; one unit, no SDR (`src/rtl8733b/CLAUDE.md`). On the Jaguar2 dies (8822B, 8821C) and Jaguar3
 (8822C, 8822E), `DEVOURER_FASTRETUNE_FW=1` hands the hop to the chip firmware
 instead (H2C 0x1D, fire-and-confirm-later): ~1.4 ms dead air on the 8822B (a
 tie on-air on the 8822C/8822E, but ~3× cheaper host-side), and `=2` extends it

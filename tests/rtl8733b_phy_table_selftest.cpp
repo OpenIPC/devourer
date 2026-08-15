@@ -235,6 +235,15 @@ int main() {
              tssi_ch6->ht40[0] == 5 && tssi_ch6->ht40[1] == 3 &&
              tssi_ch6->ofdm[0] == 3 && tssi_ch6->ofdm[1] == 1 &&
              tssi_ch6->ht20 == tssi_ch6->ofdm);
+  /* The fast_retune DE rewrite triggers on plan inequality across a hop.
+   * Pin the property it depends on: the 2.4 GHz buckets are ~3 channels
+   * wide, so plans differ across a bucket boundary and match within one. */
+  const auto tssi_ch7 = rtl8733b::Phy8733b::tssi_de_plan(tssi_power, 7);
+  const auto tssi_ch11 = rtl8733b::Phy8733b::tssi_de_plan(tssi_power, 11);
+  expect("TSSI DE plan matches within a 2.4 GHz bucket",
+         tssi_ch7 && *tssi_ch6 == *tssi_ch7);
+  expect("TSSI DE plan differs across a 2.4 GHz bucket boundary",
+         tssi_ch11 && !(*tssi_ch6 == *tssi_ch11));
   tssi_power.path_a_de[24] = -127;
   tssi_power.trim[7][0] = -8;
   const auto tssi_ch177 = rtl8733b::Phy8733b::tssi_de_plan(tssi_power, 177);

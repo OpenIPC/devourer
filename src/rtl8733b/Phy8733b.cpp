@@ -694,6 +694,50 @@ void Phy8733b::spur_cancellation() {
   set_bb(0x1908, 0xf0u, 9);
 }
 
+/* Channel-keyed constants shared by switch_channel (which writes them on
+ * every full set) and fast_retune (which writes them only when their bucket
+ * changes across the hop). One copy, so full-vs-fast register parity cannot
+ * silently diverge. */
+namespace {
+
+constexpr uint32_t kScoFc2a38_2g[15] = {
+    0, 0x1cfea, 0x1d0e1, 0x1d1d7, 0x1d2cd, 0x1d3c3, 0x1d4b9,
+    0x1d5b0, 0x1d6a6, 0x1d79c, 0x1d892, 0x1d988, 0x1da7f,
+    0x1db75, 0x1ddc4};
+constexpr uint32_t kScoFc2a3c_2g[15] = {
+    0, 0x27de3, 0x27f35, 0x28088, 0x281da, 0x2832d, 0x2847f,
+    0x285d2, 0x28724, 0x28877, 0x289c9, 0x28b1c, 0x28c6e,
+    0x28dc1, 0x290ed};
+
+constexpr uint32_t agc_bucket_5g(uint8_t center) {
+  return center <= 64 ? 6u : center <= 144 ? 7u : 0u;
+}
+
+constexpr uint32_t sco_bucket_0c30(uint8_t center) {
+  return center >= 173  ? 0x411u
+         : center >= 120 ? 0x412u
+         : center >= 112 ? 0x452u
+         : center >= 56  ? 0x453u
+         : center >= 52  ? 0x493u
+         : center >= 16  ? 0x494u
+         : center >= 13  ? 0x969u
+         : center >= 11  ? 0x96au
+                         : 0x9aau;
+}
+
+constexpr std::array<uint32_t, 8> tx_shape_2g(uint8_t center) {
+  return {center == 14 ? 0x452484u : 0x7847cfu,
+          center == 14 ? 0x0fe3c8u : 0x57a6b1u,
+          center == 14 ? 0u : 0x1f2af412u,
+          center == 14 ? 0u : 0x09717du,
+          center == 14 ? 0u : 0xfb9003u,
+          center == 14 ? 0u : 0xfb1fa5u,
+          center == 14 ? 0u : 0xfe2fcau,
+          center == 14 ? 0u : 0xffcff3u};
+}
+
+} // namespace
+
 bool Phy8733b::switch_channel(const ChannelPlan8733b &plan) {
   uint32_t rf18 = read_rf(0, 0x18);
   uint32_t rf19 = read_rf(0, 0x19);
@@ -722,44 +766,18 @@ bool Phy8733b::switch_channel(const ChannelPlan8733b &plan) {
     set_bb(0x18ac, 0x000001f0u, 4);
   } else {
     set_bb(0x1ea8, 1u << 7, 0);
-    const uint32_t agc = plan.center <= 64 ? 6 : plan.center <= 144 ? 7 : 0;
-    set_bb(0x18ac, 0x000001f0u, agc);
+    set_bb(0x18ac, 0x000001f0u, agc_bucket_5g(plan.center));
   }
 
-  static constexpr uint32_t sco38[15] = {
-      0, 0x1cfea, 0x1d0e1, 0x1d1d7, 0x1d2cd, 0x1d3c3, 0x1d4b9,
-      0x1d5b0, 0x1d6a6, 0x1d79c, 0x1d892, 0x1d988, 0x1da7f,
-      0x1db75, 0x1ddc4};
-  static constexpr uint32_t sco3c[15] = {
-      0, 0x27de3, 0x27f35, 0x28088, 0x281da, 0x2832d, 0x2847f,
-      0x285d2, 0x28724, 0x28877, 0x289c9, 0x28b1c, 0x28c6e,
-      0x28dc1, 0x290ed};
   if (plan.center <= 14) {
     set_bb(0x2a38, 1u << 27, 0);
-    set_bb(0x2a38, 0x07ffff00u, sco38[plan.center]);
-    set_bb(0x2a3c, 0x000fffffu, sco3c[plan.center]);
+    set_bb(0x2a38, 0x07ffff00u, kScoFc2a38_2g[plan.center]);
+    set_bb(0x2a3c, 0x000fffffu, kScoFc2a3c_2g[plan.center]);
   }
-  const uint32_t sco = plan.center >= 173 ? 0x411
-                       : plan.center >= 120 ? 0x412
-                       : plan.center >= 112 ? 0x452
-                       : plan.center >= 56  ? 0x453
-                       : plan.center >= 52  ? 0x493
-                       : plan.center >= 16  ? 0x494
-                       : plan.center >= 13  ? 0x969
-                       : plan.center >= 11  ? 0x96a
-                                            : 0x9aa;
-  set_bb(0x0c30, 0xfffu, sco);
+  set_bb(0x0c30, 0xfffu, sco_bucket_0c30(plan.center));
 
   if (plan.is_2g) {
-    const uint32_t shape[8] = {
-        plan.center == 14 ? 0x452484u : 0x7847cfu,
-        plan.center == 14 ? 0x0fe3c8u : 0x57a6b1u,
-        plan.center == 14 ? 0u : 0x1f2af412u,
-        plan.center == 14 ? 0u : 0x09717du,
-        plan.center == 14 ? 0u : 0xfb9003u,
-        plan.center == 14 ? 0u : 0xfb1fa5u,
-        plan.center == 14 ? 0u : 0xfe2fcau,
-        plan.center == 14 ? 0u : 0xffcff3u};
+    const auto shape = tx_shape_2g(plan.center);
     for (unsigned i = 0; i < 8; ++i)
       set_bb(static_cast<uint16_t>(0x1a00 + i * 4),
              i == 2 ? kDwordMask : 0x00ffffffu, shape[i]);
@@ -1315,6 +1333,11 @@ bool Phy8733b::enable_tssi_tracking(SelectedChannel channel,
     _tssi_digital_snapshot = digital_snapshot;
     _tssi_analog_snapshot = analog_snapshot;
     _tssi_is_2g = channel_cfg->is_2g;
+    /* fast_retune bookkeeping: the offsets the chip now carries and the RF
+     * path bit (RFE routing — static per session), for the in-place
+     * per-channel rewrite. */
+    _fr_tssi_offsets = capped->rate_offsets;
+    _fr_tssi_path = path;
     _logger->info(
         "RTL8733B TSSI tracking enabled: ch={} path={} ceiling={} "
         "rates={:08x}/{:08x}/{:08x}/{:08x}/{:08x}",
@@ -1365,6 +1388,9 @@ bool Phy8733b::disable_tssi_tracking() {
     _tssi_digital_snapshot.reset();
     _tssi_analog_snapshot.reset();
   }
+  _fr_tssi_offsets.reset();
+  _fr_tssi_de.reset();
+  _fr_tssi_power.reset();
   _logger->info("RTL8733B TSSI tracking disabled: rollback={}", ok);
   devourer::Ev(_logger->events(), "rtl8733b.tssi_tracking")
       .f("enabled", false)
@@ -1428,6 +1454,13 @@ bool Phy8733b::prepare_tssi_offsets(SelectedChannel channel,
 
   const TssiDeState8733b state = read_tssi_de_state();
   const bool ok = state.matches_disabled(*de);
+  if (ok) {
+    /* fast_retune bookkeeping: the DE plan the chip now carries and the
+     * EFUSE calibration that derives it, for the in-place per-channel
+     * rewrite on bucket-crossing hops. */
+    _fr_tssi_de = *de;
+    _fr_tssi_power = efuse.tssi_power;
+  }
   _logger->info(
       "RTL8733B TSSI-DE: ready={} enabled={} ch={} cck={}/{} ht40={}/{} "
       "ofdm={}/{} ht20={}/{}",
@@ -1489,6 +1522,15 @@ bool Phy8733b::set_channel(SelectedChannel channel) {
 
   const ChannelState8733b state = read_channel_state();
   const bool ok = state.matches(*plan);
+  /* fast_retune bookkeeping: record where the radio is, and invalidate the
+   * RF compose cache — the switch functions above rewrote both words, so a
+   * cached copy is stale until the next fast hop re-primes it. */
+  if (ok)
+    _fr_plan = *plan;
+  else
+    _fr_plan.reset();
+  _fr_rf18.reset();
+  _fr_rf19.reset();
   _logger->info(
       "RTL8733B channel: ready={} primary={} center={} width={} offset={} "
       "RF18={:05x}/{:05x} RF19={:05x}/{:05x} BB9B0={:08x} "
@@ -1511,6 +1553,146 @@ bool Phy8733b::set_channel(SelectedChannel channel) {
       .hexf("data_sc", state.data_sc, 2)
       .hexf("wmac", state.wmac_trxptcl, 8).f("synth", state.synth_ready);
   return ok;
+}
+
+bool Phy8733b::fast_retune(SelectedChannel channel, bool tssi_live,
+                           uint8_t max_target_qdbm, bool cache_rf) {
+  const auto plan = channel_plan(channel);
+  if (!_initialized || !plan || !_fr_plan)
+    return false;
+  const ChannelPlan8733b cur = *_fr_plan;
+  if (plan->is_2g != cur.is_2g || plan->width != cur.width ||
+      plan->offset != cur.offset)
+    return false;
+  if (plan->center == cur.center && plan->primary == cur.primary)
+    return true;
+
+  /* Everything that can refuse is computed BEFORE the first chip write, so a
+   * declined hop leaves the radio untouched for the caller's full-path
+   * fallback rather than half-hopped. */
+  std::optional<TssiBbPlan8733b> tssi;
+  std::optional<TssiDePlan8733b> de;
+  if (tssi_live && _fr_tssi_offsets) {
+    tssi = tssi_bb_plan(_tx_power_targets, channel.Channel, _rfe_type,
+                        _fr_tssi_path, max_target_qdbm);
+    if (!tssi)
+      return false;
+  }
+  if (tssi_live && _fr_tssi_de && _fr_tssi_power) {
+    de = tssi_de_plan(*_fr_tssi_power, channel.Channel);
+    if (!de)
+      return false;
+  }
+  if (!cache_rf || !_fr_rf18) {
+    const uint32_t rf18 = read_rf(0, 0x18);
+    if (rf18 == 0xffffffffu)
+      return false;
+    _fr_rf18 = rf18;
+  }
+  if (!cache_rf || !_fr_rf19) {
+    const uint32_t rf19 = read_rf(0, 0x19);
+    if (rf19 == 0xffffffffu)
+      return false;
+    _fr_rf19 = rf19;
+  }
+
+  uint32_t rf18 = *_fr_rf18;
+  uint32_t rf19 = *_fr_rf19;
+  if (plan->is_2g) {
+    rf18 &= ~((3u << 16) | (3u << 8) | 0xffu);
+    rf18 |= plan->center;
+  } else {
+    rf18 &= ~((1u << 17) | (1u << 9) | 0xffu);
+    rf18 |= (1u << 16) | (1u << 8) | plan->center;
+    rf19 &= ~((1u << 19) | (1u << 18));
+    if (plan->center > 144)
+      rf19 |= 1u << 19;
+    else if (plan->center > 80)
+      rf19 |= 1u << 18;
+  }
+  /* From the first chip write onward a transport failure leaves the radio
+   * part-hopped, so the catch drops the fast-path bookkeeping: the next call
+   * declines (stale _fr_plan gone) and the caller's full-path fallback
+   * reprograms everything, instead of a later fast hop bucket-comparing
+   * against a baseline the chip no longer holds. */
+  try {
+    if (!program_synth(rf18)) {
+      _fr_plan.reset();
+      return false;
+    }
+    _fr_rf18 = rf18;
+    if (rf19 != *_fr_rf19) {
+      write_rf(0, 0x19, kRfMask, rf19);
+      write_rf(1, 0x19, kRfMask, rf19);
+      _fr_rf19 = rf19;
+    }
+
+    /* Channel-keyed constants from switch_channel, written only when their
+     * bucket changes across the hop. Band-keyed constants (0x1ea8, the
+     * 2.4 GHz 0x18ac pair, spur cancellation) were set by the last full set
+     * at this band and are untouched — that is the fast path's contract. */
+    if (plan->is_2g) {
+      if (plan->center <= 14) {
+        set_bb(0x2a38, 0x07ffff00u, kScoFc2a38_2g[plan->center]);
+        set_bb(0x2a3c, 0x000fffffu, kScoFc2a3c_2g[plan->center]);
+      }
+      if ((plan->center == 14) != (cur.center == 14)) {
+        const auto shape = tx_shape_2g(plan->center);
+        for (unsigned i = 0; i < 8; ++i)
+          set_bb(static_cast<uint16_t>(0x1a00 + i * 4),
+                 i == 2 ? kDwordMask : 0x00ffffffu, shape[i]);
+      }
+    } else {
+      if (agc_bucket_5g(plan->center) != agc_bucket_5g(cur.center))
+        set_bb(0x18ac, 0x000001f0u, agc_bucket_5g(plan->center));
+    }
+    if (sco_bucket_0c30(plan->center) != sco_bucket_0c30(cur.center))
+      set_bb(0x0c30, 0xfffu, sco_bucket_0c30(plan->center));
+    if ((plan->center == 13) != (cur.center == 13))
+      set_bb(0x0808, 0x7fu, plan->center == 13 ? 0x30 : 0x40);
+
+    bb_reset();
+    igi_toggle();
+
+    /* TSSI: tracking stays enabled; the per-channel rate-offset dwords and
+     * the channel-bucketed DE offsets are rewritten, in place, each only
+     * when the new channel's plan differs (the #389 shape). Intra-band the
+     * rate offsets are band-keyed and never change — the DE buckets, ~3
+     * channels wide at 2.4 GHz, are the calibration a hop actually moves.
+     * The rollback snapshots are untouched — they record the pre-enable
+     * state, which these rewrites do not change. */
+    if (tssi && tssi->rate_offsets != *_fr_tssi_offsets) {
+      for (size_t i = 0; i < tssi->rate_offsets.size(); ++i)
+        set_bb(static_cast<uint16_t>(0x3a00 + i * 4), kDwordMask,
+               tssi->rate_offsets[i]);
+      _fr_tssi_offsets = tssi->rate_offsets;
+    }
+    if (de && !(*de == *_fr_tssi_de)) {
+      /* The prepare_tssi_offsets field sequence, minus its 0x4318
+       * tracking-disable write — the loop stays live across the rewrite. */
+      set_bb(0x433c, 0x0ff00000u, static_cast<uint8_t>(de->cck[0]));
+      set_bb(0x434c, 0x0ff00000u, static_cast<uint8_t>(de->cck[1]));
+      set_bb(0x4334, 0x0ff00000u, static_cast<uint8_t>(de->ht40[0]));
+      set_bb(0x4344, 0x0ff00000u, static_cast<uint8_t>(de->ht40[1]));
+      set_bb(0x43b0, 0x000000ffu, static_cast<uint8_t>(de->ofdm[0]));
+      set_bb(0x43b0, 0x0000ff00u, static_cast<uint8_t>(de->ht40[0]));
+      set_bb(0x43b0, 0x00ff0000u, static_cast<uint8_t>(de->ht40[0]));
+      set_bb(0x43b4, 0x0000ff00u, static_cast<uint8_t>(de->ofdm[1]));
+      set_bb(0x43b4, 0x000000ffu, static_cast<uint8_t>(de->ht40[1]));
+      set_bb(0x43b4, 0x00ff0000u, static_cast<uint8_t>(de->ht40[1]));
+      set_bb(0x43b4, 0xff000000u, static_cast<uint8_t>(de->ht40[1]));
+      set_bb(0x43b0, 0xff000000u, static_cast<uint8_t>(de->ht20[0]));
+      set_bb(0x43b8, 0x000000ffu, static_cast<uint8_t>(de->ht20[1]));
+      _fr_tssi_de = *de;
+    }
+    _fr_plan = *plan;
+    return true;
+  } catch (...) {
+    _fr_plan.reset();
+    _fr_rf18.reset();
+    _fr_rf19.reset();
+    throw;
+  }
 }
 
 bool Phy8733b::initialize(uint8_t cut, const EfuseInfo &efuse) {

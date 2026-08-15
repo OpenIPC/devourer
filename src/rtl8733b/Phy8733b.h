@@ -93,6 +93,8 @@ struct TssiDePlan8733b {
   std::array<int8_t, 2> ht40{};
   std::array<int8_t, 2> ofdm{};
   std::array<int8_t, 2> ht20{};
+
+  bool operator==(const TssiDePlan8733b &) const = default;
 };
 
 struct TssiDeState8733b {
@@ -194,6 +196,28 @@ public:
   bool enable_tssi_tracking(SelectedChannel channel, const EfuseInfo &efuse,
                             uint8_t max_target_qdbm);
   bool disable_tssi_tracking();
+  /* Lean intra-band, same-bandwidth hop — the FastRetune core (see
+   * docs/frequency-hopping.md; profile that sized it: full set_channel on
+   * this USB-HS part is ~330 ms, of which ~165 ms is the TSSI
+   * disable/re-enable dance and ~90 ms the band/bandwidth switches a hop
+   * does not need). The subset a hop DOES need: the RF18 synth program
+   * (bandwidth bits preserved from the cached word), RF19 sub-band bits and
+   * the channel-keyed BB constants (AGC bucket, SCO fc) only when their
+   * bucket changes, then the BB reset + IGI toggle that restart the RX
+   * engine. TSSI tracking stays ENABLED across the hop; the per-channel
+   * rate-offset dwords and the channel-bucketed TSSI-DE offsets are
+   * rewritten in place, each only when the plan for the new channel
+   * differs — the in-place-rewrite-with-tracking-live shape validated in
+   * #389. 2.4 GHz hops also rewrite the per-channel SCO fc words and the
+   * ch13/ch14-keyed constants when crossed.
+   *
+   * cache_rf=true runs write-only from words primed by one read each on the
+   * first fast hop after a full set; cache_rf=false re-reads every hop (the
+   * A/B knob measuring the read penalty). Returns false — chip untouched —
+   * on a band or width change or when the radio was never tuned; the caller
+   * falls back to the full set_channel. */
+  bool fast_retune(SelectedChannel channel, bool tssi_live,
+                   uint8_t max_target_qdbm, bool cache_rf);
   bool prepare_tssi_offsets(SelectedChannel channel, const EfuseInfo &efuse);
   TssiDeState8733b read_tssi_de_state();
   uint8_t read_thermal();
@@ -248,6 +272,28 @@ private:
   std::optional<TssiAnalogState8733b> _tssi_analog_snapshot;
   bool _tssi_is_2g = true;
   bool _initialized = false;
+
+  /* fast_retune state. _fr_plan is the channel the radio is actually on,
+   * recorded by every successful set_channel/fast_retune — the base for the
+   * same-band/same-width admission and the bucket-change comparisons.
+   * _fr_rf18/_fr_rf19 are the compose cache (primed on the first fast hop;
+   * invalidated by every full set_channel, whose switch functions rewrite
+   * both words). _fr_tssi_offsets is the rate-offset table the chip
+   * currently carries, recorded by enable_tssi_tracking and by every
+   * in-place fast-hop rewrite; _fr_tssi_path is the RF path bit read at
+   * enable time (RFE routing — static per session). _fr_tssi_de is the DE
+   * plan the chip currently carries and _fr_tssi_power the EFUSE
+   * calibration that derives it, recorded by prepare_tssi_offsets — the DE
+   * buckets are only ~3 channels wide at 2.4 GHz, so most hops cross one
+   * and must rewrite the DE registers or track with the previous
+   * channel's calibration. */
+  std::optional<ChannelPlan8733b> _fr_plan;
+  std::optional<uint32_t> _fr_rf18;
+  std::optional<uint32_t> _fr_rf19;
+  std::optional<std::array<uint32_t, 5>> _fr_tssi_offsets;
+  uint8_t _fr_tssi_path = 0;
+  std::optional<TssiDePlan8733b> _fr_tssi_de;
+  std::optional<TssiPowerInfo8733b> _fr_tssi_power;
 };
 
 } // namespace rtl8733b

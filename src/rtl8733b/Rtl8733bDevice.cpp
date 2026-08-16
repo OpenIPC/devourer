@@ -714,18 +714,21 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
  * imposes at or below this part's factory targets — which run 18..20 dBm at
  * 2.4 GHz and 16..19 dBm at 5 GHz (kMaxPgTargetQdbm8733b).
  *
- * The range around it is ASYMMETRIC, and only one end is a hardware limit. The
- * 0x3a00 bytes are a signed int8 offset from the 64 qdBm anchor, so the field
- * itself spans [-128, +127] — targets from -16 dBm to +47.75 dBm:
+ * The range is the int8 delta field at BOTH ends, and neither end is a
+ * characterised PA window. The 0x3a00 bytes are a signed offset from the
+ * 64 qdBm anchor, so the field spans [-128, +127] — targets from -16 dBm to
+ * +47.75 dBm. Where the hardware stops responding is measured and documented
+ * per end rather than clamped, the same answer Jaguar1/3 give:
  *
- *   - Down to -64 qdB, which is NOT the field's floor (-128 is). It is where
- *     the absolute target reaches 0 dBm, and stopping there is a judgement
- *     backed by the sweep: the bottom 12 qdB of travel already delivers only
- *     0.125 dB/qdB against 0.25 nominal — reproduced exactly across two passes
- *     — so the loop is visibly running out of authority as its target
- *     approaches zero. Below that nothing is characterised, and a knob that
- *     keeps accepting commands it cannot act on is the defect this whole
- *     lever exists to remove. saturated_low marks that boundary.
+ *   - Down to -128 qdB, a -16 dBm target. An earlier cut stopped at -64 (a
+ *     0 dBm target) on the assumption that a negative absolute target was
+ *     meaningless; the sweep says otherwise. Power keeps falling past it with
+ *     no sign wrap — 7.3 dB more between the 0 dBm and -4 dBm targets — and
+ *     only pins from about -96 qdB (-8 dBm), where three successive rungs read
+ *     52.96 / 52.97 / 52.99. Stopping at -64 threw away ~9 dB of working
+ *     backoff, which is real range for a near-field bench or a link that wants
+ *     to sit quiet. So the floor is the field, as at the top, and ~-96 qdB is
+ *     the measured end of usable travel — documented, not enforced.
  *   - Up to +127 qdB, the delta field's positive limit — the same
  *     clamped-only-at-the-hardware-rail answer Jaguar1 (+126) and Jaguar3
  *     (+127) give. src/TxPower.h is deliberate that headroom above the
@@ -777,8 +780,7 @@ devourer::TxPowerCaps Rtl8733bDevice::GetTxPowerCaps() {
   c.index_max = 0;
   c.step_qdb = 1;
   c.step_measured = false;
-  c.offset_min_qdb =
-      -static_cast<int16_t>(rtl8733b::kSafeTssiTargetQdbm8733b);
+  c.offset_min_qdb = -128; /* the int8 delta field's negative limit */
   c.offset_max_qdb = 127; /* the int8 per-rate delta field's positive limit */
   c.rate_diffs = false;
   c.rate_diffs_hw_table = false;

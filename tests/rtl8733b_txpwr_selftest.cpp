@@ -69,16 +69,36 @@ int main() {
          down24 && (*down24)[7] == -28 &&
              ((*down24)[0] - (*down24)[7]) == ((*base)[0] - (*base)[7]));
 
-  /* 4. Rails. -64 qdB puts the anchor rates at a 0 qdBm target; the rate
-   *    already 4 qdB colder runs out first and says so. */
+  /* 4. The floor is the int8 delta field, not the 0 dBm target. -64 qdB lands
+   *    the anchor rates on a 0 dBm target and rails NOTHING: the ladder keeps
+   *    its calibrated spread straight through it, because the loop was measured
+   *    to keep reducing power well past that point. */
   rtl8733b::TssiOffsetSat8733b sat_clean;
   const auto floor_ok =
       rtl8733b::Phy8733b::tssi_rate_offsets(t, 0, 0, kCeiling, -64,
                                             &sat_clean);
-  expect("-64 qdB reaches the 0 qdBm target without railing the ladder",
-         floor_ok && (*floor_ok)[0] == -64 && !sat_clean.high);
-  expect("the colder rate rails first and is reported",
-         floor_ok && (*floor_ok)[7] == -64 && sat_clean.low);
+  expect("-64 qdB is not a rail — the ladder passes through the 0 dBm target",
+         floor_ok && (*floor_ok)[0] == -64 && (*floor_ok)[7] == -68 &&
+             !sat_clean.low && !sat_clean.high);
+
+  /* Well below it the spread is still intact — this is a shift, not a squeeze
+   * against a floor. */
+  const auto deep =
+      rtl8733b::Phy8733b::tssi_rate_offsets(t, 0, 0, kCeiling, -100);
+  expect("the shape survives below the 0 dBm target",
+         deep && (*deep)[0] == -100 && (*deep)[7] == -104 &&
+             ((*deep)[0] - (*deep)[7]) == ((*base)[0] - (*base)[7]));
+
+  /* The real rail is the field: at -128 the hot rate sits exactly on it and the
+   * colder one cannot follow, which is what saturated_low is for. */
+  rtl8733b::TssiOffsetSat8733b sat_rail;
+  const auto railed =
+      rtl8733b::Phy8733b::tssi_rate_offsets(t, 0, 0, kCeiling, -128,
+                                            &sat_rail);
+  expect("-128 qdB sits on the int8 field floor",
+         railed && (*railed)[0] == -128);
+  expect("the colder rate rails there and is reported",
+         railed && (*railed)[7] == -128 && sat_rail.low && !sat_rail.high);
 
   rtl8733b::TssiOffsetSat8733b sat_zero;
   const auto no_shift = rtl8733b::Phy8733b::tssi_rate_offsets(

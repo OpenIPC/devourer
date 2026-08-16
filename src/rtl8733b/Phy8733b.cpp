@@ -458,16 +458,19 @@ Phy8733b::tssi_rate_offsets(const TxPowerTargets8733b &targets, uint8_t band,
      * measured operating point cannot be commanded. */
     int shifted =
         static_cast<int>((std::min)(target, max_target_qdbm)) + offset_qdb;
-    if (shifted < 0) {
-      /* Below 0 qdBm the target has no meaning left — that is the low rail, and
-       * a closed-loop controller needs to be told rather than handed a wrapped
-       * value. */
-      shifted = 0;
+    /* Both rails are the int8 delta field, nothing softer. The field is signed
+     * against the 64 qdBm anchor, so it spans targets from -16 dBm to
+     * +47.75 dBm, and the loop was measured to keep reducing power the whole
+     * way down to the bottom of it — no sign wrap, power still falling 7.3 dB
+     * between a 0 dBm and a -4 dBm target. Clamping at 0 dBm, as an earlier cut
+     * of this did, threw away ~9 dB of working backoff on the guess that a
+     * negative absolute target was meaningless. Where the loop actually stops
+     * responding (~-8 dBm) is a measured property documented in
+     * GetTxPowerCaps, not a limit imposed here. */
+    if (shifted < -64) {
+      shifted = -64;
       rails.low = true;
     }
-    /* Floored at 0 above, so the delta cannot go below -64: only the int8
-     * field's positive end needs clamping, and it is reachable only with a
-     * ceiling above the 64 qdBm anchor. */
     int delta = shifted - 64;
     if (delta > 127) {
       delta = 127;

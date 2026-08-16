@@ -60,18 +60,26 @@ unrelated register map.
   the five packed dwords at `0x3a00..0x3a10`, rewritten **in place with tracking
   live**, the same #389 shape `fast_retune` uses — not the ~165 ms
   disable/re-enable pair. Caps therefore report the dBm model (`index_max = 0`,
-  one qdB per step) over `[-64, +127]`, and only the top of that is a hardware
-  limit. The 0x3a00 bytes are a signed int8 offset from the 64 qdBm anchor, so
-  the field spans [-128, +127] — targets from −16 to +47.75 dBm. **+127 is the
-  field**, the same clamped-only-at-the-hardware-rail answer Jaguar1/3 give;
-  **−64 is a judgement**, the point where the absolute target reaches 0 dBm.
-  Stopping there is backed by the sweep: the bottom 12 qdB already delivers
-  0.125 dB/qdB against 0.25 nominal, so the loop is running out of authority
-  as the target nears zero, and below it nothing is characterised. The positive
-  half is deliberately NOT re-clamped at the PG table either: an EFUSE trimmed
-  too cold is what an operator calibrates their way out of.
+  one qdB per step) over `[-128, +127]` — the int8 delta field at both ends,
+  the same clamped-only-at-the-hardware-rail answer Jaguar1/3 give. The 0x3a00
+  bytes are a signed offset from the 64 qdBm anchor, so that field spans
+  targets from −16 to +47.75 dBm. Neither end is re-clamped at something
+  softer: not at the PG table on the way up (an EFUSE trimmed too cold is what
+  an operator calibrates their way out of), and not at a 0 dBm target on the
+  way down (an earlier cut did, and it cost ~9 dB of working backoff — see
+  below). Where the chip stops *responding* is measured and documented, not
+  enforced.
   `SetTxPowerIndexOverride`, `SetTxPowerRateDiffs` and `ReApplyTxPower` stay
   unported.
+- **The backoff floor is ~−96 qdB, not the 0 dBm target.** Sweeping past the
+  old −64 clamp (MCS0, ch36): the 0 dBm target read 62.07, and −80 qdB
+  (−4 dBm) read **54.80 — another 7.3 dB down, with no sign wrap**. It pins
+  from about −96 qdB (−8 dBm): 52.96 / 52.97 / 52.99 at −96 / −112 / −128,
+  flat within 0.03 dB. So the usable travel is ~23 dB below the 16 dBm clip,
+  not the ~16 dB the first cut allowed, and EVM only softens from −59 to −53
+  across it. The lesson is the one this whole knob is about: the earlier floor
+  was a guess about what a negative absolute target *must* mean, and the guess
+  was worth 9 dB.
 - **Overdrive above the clip buys ~3 dB and then the PA compresses, and EVM is
   the only tell.** Sweeping UP from the clip (MCS0, ch36, witness reporting EVM
   beside RSSI): +16 qdB — the top of the PG table — gave +2.8 dB with EVM

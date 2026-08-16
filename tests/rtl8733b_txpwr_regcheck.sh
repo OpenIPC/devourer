@@ -22,9 +22,10 @@
 #            actuator, so an on-air null in this geometry is the code and not
 #            the bench.
 #   move     -24 qdB shifts every capped rate byte by exactly -24 (0xe8).
-#   rails    -200 clamps to -64 with saturated_low (the 0 dBm absolute target
-#            floor, NOT the int8 field's -128), +200 to +127 with
-#            saturated_high (that one IS the field's ceiling).
+#   rails    -200 clamps to -128 and +200 to +127, both with their saturation
+#            flag - the int8 per-rate delta field at each end. Where the chip
+#            stops RESPONDING (~-96 qdB down, ~+32 up) is measured and
+#            documented in docs/rtl8733b.md, not clamped here.
 #   sticky   -24 qdB then a full SetMonitorChannel to another 5 GHz group
 #            re-folds the offset against the new channel; a following
 #            FastRetune leaves it in place (the hop rewrites the target table,
@@ -80,8 +81,8 @@ echo "== DUT $PID@$VID (RTL8733B) =="
 run_txpower "$OUT/base.log" --channel "$CH_A" --offset-start 0 --offset-stop 0 --step-ms 200
 caps="$(grep -F '"ev":"txpwr.caps"' "$OUT/base.log" | head -1)"
 case "$caps" in
-    *'"supported":1'*'"max":0'*'"step_qdb":1'*'"min_qdb":-64'*'"max_qdb":127'*)
-        pass "caps: dBm model, delta-field range [-64, +127]" ;;
+    *'"supported":1'*'"max":0'*'"step_qdb":1'*'"min_qdb":-128'*'"max_qdb":127'*)
+        pass "caps: dBm model, delta-field range [-128, +127]" ;;
     "") fail "caps: no txpwr.caps event (bring-up failed? see $OUT/base.log)" ;;
     *)  fail "caps: unexpected $caps" ;;
 esac
@@ -128,8 +129,8 @@ fi
 run_txpower "$OUT/rails.log" --channel "$CH_A" --offset-start -200 --offset-stop 200 --step-qdb 400 --step-ms 200
 lo_applied="$(offset_field "$OUT/rails.log" 1 applied)"; lo_sat="$(state_field "$OUT/rails.log" 2 satlo)"
 hi_applied="$(offset_field "$OUT/rails.log" 2 applied)"; hi_sat="$(state_field "$OUT/rails.log" 3 sathi)"
-if [ "$lo_applied" = "-64" ] && [ "$lo_sat" = "1" ] && [ "$hi_applied" = "127" ] && [ "$hi_sat" = "1" ]; then
-    pass "rails: -200 -> -64 satlo=1, +200 -> +127 sathi=1"
+if [ "$lo_applied" = "-128" ] && [ "$lo_sat" = "1" ] && [ "$hi_applied" = "127" ] && [ "$hi_sat" = "1" ]; then
+    pass "rails: -200 -> -128 satlo=1, +200 -> +127 sathi=1"
 else
     fail "rails: low(applied=$lo_applied satlo=$lo_sat) high(applied=$hi_applied sathi=$hi_sat)"
 fi

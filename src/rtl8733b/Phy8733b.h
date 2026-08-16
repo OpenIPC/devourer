@@ -234,11 +234,16 @@ public:
    * the knob. */
   bool set_tssi_offset(SelectedChannel channel, uint8_t max_target_qdbm,
                        int offset_qdb, TssiOffsetSat8733b *sat = nullptr);
-  /* Does the chip's live per-rate target table still match what this session
-   * believes it wrote? Six register reads (the 0x3a00 dwords via
-   * read_txagc_state), so a caller can poll it at its own cadence — the
-   * chip-truth half of GetTxPowerState on the TSSI path. */
-  bool tssi_offsets_confirmed();
+  /* Does the chip's live per-rate target table match the plan for the offset
+   * the CALLER believes is applied? Recomputed from (channel, ceiling, offset)
+   * rather than compared against this class's own `_fr_tssi_offsets` shadow,
+   * so a disagreement between the device's session state and the PHY's
+   * bookkeeping is caught too — a shadow checked against itself always agrees,
+   * which is the whole failure this API is fixing. Six register reads (the
+   * 0x3a00 dwords via read_txagc_state); the chip-truth half of
+   * GetTxPowerState on the TSSI path. */
+  bool tssi_offsets_confirmed(SelectedChannel channel, uint8_t max_target_qdbm,
+                              int offset_qdb);
   /* Lean intra-band, same-bandwidth hop — the FastRetune core (see
    * docs/frequency-hopping.md; profile that sized it: full set_channel on
    * this USB-HS part is ~330 ms, of which ~165 ms is the TSSI

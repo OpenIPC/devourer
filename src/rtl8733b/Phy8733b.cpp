@@ -1457,12 +1457,19 @@ bool Phy8733b::set_tssi_offset(SelectedChannel channel,
   return ok;
 }
 
-bool Phy8733b::tssi_offsets_confirmed() {
-  if (!_initialized || !_tssi_digital_snapshot || !_fr_tssi_offsets)
+bool Phy8733b::tssi_offsets_confirmed(SelectedChannel channel,
+                                      uint8_t max_target_qdbm,
+                                      int offset_qdb) {
+  if (!_initialized || !_tssi_digital_snapshot)
+    return false;
+  const auto plan =
+      tssi_bb_plan(_tx_power_targets, channel.Channel, _rfe_type,
+                   _fr_tssi_path, max_target_qdbm, offset_qdb);
+  if (!plan)
     return false;
   /* read_txagc_state's rate_diffs array IS 0x3a00..0x3a10 — the same five
    * dwords that carry the loop's per-rate targets while tracking is on. */
-  return read_txagc_state().rate_diffs == *_fr_tssi_offsets;
+  return read_txagc_state().rate_diffs == plan->rate_offsets;
 }
 
 bool Phy8733b::disable_tssi_tracking() {

@@ -156,8 +156,27 @@ bool Rtl8733bDevice::configure_tx_power(SelectedChannel channel) {
    * survive the link (measured on the DUT: MCS7 undecodable by an RTL8812AU
    * witness, 300/300 submitted, 0 captured). A unit whose EFUSE carries no
    * TSSI calibration has nothing to drive the loop and takes the flat path. */
-  if (_efuse.tx_power_mode != rtl8733b::TxPowerPgMode8733b::TssiOffset)
+  if (_efuse.tx_power_mode != rtl8733b::TxPowerPgMode8733b::TssiOffset) {
+    /* No loop, so no actuator. A runtime offset latched BEFORE bring-up (the
+     * demos' ordering: DEVOURER_TX_PWR_OFFSET_QDB is applied before InitWrite)
+     * was accepted on the promise of being applied here, and there is nothing
+     * to apply it to. Drop it loudly and zero the latch so the reported state
+     * agrees with the chip — leaving it set would make GetTxPowerState claim an
+     * offset no register carries, which is the exact failure this knob exists
+     * to end. Not fatal: an unported optional knob is not a hardware-safety
+     * event. */
+    if (_tx_offset_qdb != 0) {
+      _logger->error(
+          "RTL8733B: dropping the {} qdB TX-power offset — this unit's EFUSE "
+          "carries no TSSI calibration, so TX power is the fixed flat index "
+          "and has no runtime actuator",
+          _tx_offset_qdb);
+      _tx_offset_qdb = 0;
+      _tx_sat_low = false;
+      _tx_sat_high = false;
+    }
     return _phy.set_flat_tx_power(rtl8733b::kSafeTxAgcIndex8733b);
+  }
 
   /* Pick the thermal-compensation curve once, from the TX mode configured at
    * this point, and leave it alone — the vendor's own setup keys the table on
@@ -188,6 +207,12 @@ bool Rtl8733bDevice::configure_tx_power(SelectedChannel channel) {
   if (!_phy.prepare_tssi_bb(channel, _efuse) ||
       !_phy.prepare_tssi_thermal(_efuse, cck_table) ||
       !_phy.prepare_tssi_offsets(channel, _efuse) ||
+      /* The ceiling argument stays the safe first-light value; a POSITIVE
+       * session offset therefore lifts the resulting targets above it here, by
+       * design (GetTxPowerCaps argues why the positive half exists). That is a
+       * deliberate widening of what bring-up can program, not a hole in
+       * enable_tssi_tracking's `max_target_qdbm > 64` guard, which still refuses
+       * a caller that tries to raise the ceiling itself. */
       !_phy.enable_tssi_tracking(channel, _efuse,
                                  rtl8733b::kSafeTssiTargetQdbm8733b,
                                  _tx_offset_qdb))
@@ -752,11 +777,21 @@ devourer::TxPowerCaps Rtl8733bDevice::GetTxPowerCaps() {
   return c;
 }
 
+void Rtl8733bDevice::SetTxPowerIndexOverride(int idx) {
+  /* kSafeTxAgcIndex8733b is the only flat index this backend programs, and it
+   * was witnessed unable to carry HT at all (MCS7, 300/300 submitted, 0
+   * captured, twice), so no dB-per-step slope has ever been measured for the
+   * index on this part. SetTxPowerOffsetQdb is the ported lever. */
+  _logger->error("RTL8733B: SetTxPowerIndexOverride({}) ignored — the flat "
+                 "TXAGC index is not ported on this backend; use "
+                 "SetTxPowerOffsetQdb (GetTxPowerCaps reports the dBm model)",
+                 idx);
+}
+
 int Rtl8733bDevice::SetTxPowerOffsetQdb(int qdb) {
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
   const devourer::TxPowerCaps caps = GetTxPowerCaps();
-  int steps = 0;
-  const int applied = devourer::quantize_offset_qdb(qdb, caps, &steps);
+  const int applied = devourer::quantize_offset_qdb(qdb, caps, nullptr);
   const bool req_low = qdb < caps.offset_min_qdb;
   const bool req_high = qdb > caps.offset_max_qdb;
 
@@ -832,12 +867,19 @@ devourer::TxPowerState Rtl8733bDevice::GetTxPowerState() {
   s.offset_steps = _tx_offset_qdb; /* 1 step == 1 qdB on the dBm model */
   s.saturated_low = _tx_sat_low;
   s.saturated_high = _tx_sat_high;
-  s.hw_readback = _phy.tssi_offsets_confirmed();
-  if (!s.hw_readback)
+  s.hw_readback = _phy.tssi_offsets_confirmed(
+      _channel, rtl8733b::kSafeTssiTargetQdbm8733b, _tx_offset_qdb);
+  /* Latched, because this is a getter a control loop polls: an unconfirmed
+   * chip would otherwise emit one warning per poll forever. The state field is
+   * the machine-readable signal; the log line only has to fire the first
+   * time. */
+  if (!s.hw_readback && !_tx_readback_warned) {
+    _tx_readback_warned = true;
     _logger->warn("RTL8733B: TX-power state unconfirmed — the chip's TSSI "
                   "target table does not match the {} qdB offset this session "
-                  "believes it applied",
+                  "believes it applied (warned once)",
                   _tx_offset_qdb);
+  }
   return s;
 }
 

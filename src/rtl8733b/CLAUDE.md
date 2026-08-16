@@ -214,13 +214,24 @@ loudly — without tearing the session down, since an unported optional knob is
 not a hardware-safety event — while `false` succeeds as a no-op because that is
 the state MAC bring-up already leaves programmed.
 
-`SetTxPowerOffsetQdb` is the second exception, in the same spirit: on a unit
-whose EFUSE carries no TSSI calibration there is no actuator at all, and the
-call **refuses loudly and returns 0** rather than reporting a successful
-zero-offset apply. That indistinguishability is what this knob exists to end —
-a consumer measured 18 dB of commanded offset moving nothing while its state
-read `{"applied_qdb":0,"saturated_low":false}`, which is exactly what a healthy
-actuator with travel remaining looks like.
+The TX-power knobs are the other exceptions, in the same spirit:
+
+- `SetTxPowerOffsetQdb` **refuses loudly and returns 0** on a unit whose EFUSE
+  carries no TSSI calibration, rather than reporting a successful zero-offset
+  apply. That indistinguishability is what this knob exists to end — a consumer
+  measured 18 dB of commanded offset moving nothing while its state read
+  `{"applied_qdb":0,"saturated_low":false}`, which is exactly what a healthy
+  actuator with travel remaining looks like. An offset latched *before*
+  bring-up on such a unit is **dropped loudly and zeroed** by
+  `configure_tx_power`, so the reported state never claims an offset no
+  register carries. (That path has no hardware coverage — every unit seen so
+  far is TSSI-offset PG — but it writes no registers, only a log and a reset.)
+- `SetTxPowerIndexOverride` is overridden **solely to log a refusal**. The
+  `IRtlDevice` default returns `void` and ignores the value, so silence would
+  be the caller's only answer on the one backend where the flat index really is
+  unported — a knob that looks granted, in the PR that exists to abolish them.
+  `SetTxPowerRateDiffs` needs no such override: its `false` return already says
+  it.
 
 `DeviceConfig::tuning::disable_cca` cannot be honoured either, and bring-up
 warns rather than dropping it — a config knob must not be the one door where a

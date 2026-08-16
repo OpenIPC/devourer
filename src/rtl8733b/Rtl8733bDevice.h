@@ -56,6 +56,13 @@ public:
   devourer::TxPowerCaps GetTxPowerCaps() override;
   int SetTxPowerOffsetQdb(int qdb) override;
   devourer::TxPowerState GetTxPowerState() override;
+  /* Overridden only to refuse out loud. IRtlDevice's default returns void and
+   * ignores the value, so on this backend — where the flat index is genuinely
+   * unported — silence would be the caller's only answer, and a knob that
+   * looks granted is precisely the defect this family's offset knob was added
+   * to fix. SetTxPowerRateDiffs needs no such override: its `false` return
+   * already says it. */
+  void SetTxPowerIndexOverride(int idx) override;
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   devourer::ThermalStatus GetThermalStatus() override;
   bool GetPermanentMacAddress(uint8_t out[6]) override;
@@ -90,6 +97,7 @@ private:
   int16_t _tx_offset_qdb = 0;
   bool _tx_sat_low = false;
   bool _tx_sat_high = false;
+  bool _tx_readback_warned = false;
   std::atomic<bool> _rx_stop{false};
   std::atomic<bool> _rx_active{false};
   std::atomic<uint8_t> _rx_configured_bw{0};

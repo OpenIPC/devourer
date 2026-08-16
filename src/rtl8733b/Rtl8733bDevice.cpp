@@ -188,10 +188,21 @@ bool Rtl8733bDevice::configure_tx_power(SelectedChannel channel) {
   if (!_phy.prepare_tssi_bb(channel, _efuse) ||
       !_phy.prepare_tssi_thermal(_efuse, cck_table) ||
       !_phy.prepare_tssi_offsets(channel, _efuse) ||
-      !_phy.enable_tssi_tracking(
-          channel, _efuse, rtl8733b::kSafeTssiTargetQdbm8733b))
+      !_phy.enable_tssi_tracking(channel, _efuse,
+                                 rtl8733b::kSafeTssiTargetQdbm8733b,
+                                 _tx_offset_qdb))
     return false;
   _tssi_tracking = true;
+  /* The enable above already installed the offset, so this recomputes the same
+   * plan, writes nothing, and returns the rails it hit — which is how the
+   * saturation flags stay chip-derived on the bring-up and channel-change
+   * paths without a second code path for the arithmetic. */
+  rtl8733b::TssiOffsetSat8733b sat;
+  if (!_phy.set_tssi_offset(channel, rtl8733b::kSafeTssiTargetQdbm8733b,
+                            _tx_offset_qdb, &sat))
+    return false;
+  _tx_sat_low = sat.low;
+  _tx_sat_high = sat.high;
   return true;
 }
 
@@ -358,7 +369,8 @@ void Rtl8733bDevice::FastRetune(uint8_t channel, bool cache_rf) {
   target.Channel = channel;
   if (_phy_ready &&
       _phy.fast_retune(target, _tssi_tracking,
-                       rtl8733b::kSafeTssiTargetQdbm8733b, cache_rf)) {
+                       rtl8733b::kSafeTssiTargetQdbm8733b, cache_rf,
+                       _tx_offset_qdb)) {
     _channel = target;
     return;
   }
@@ -664,7 +676,135 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
    * validation unit: ~55 ms call / ~10 ms p50 radio-live, vs the
    * ~330-440 ms full path (USB HS). */
   caps.fastretune_ok = true;
+  caps.txpwr = GetTxPowerCaps();
   return caps;
+}
+
+/* A dBm-TARGET model, not an index model — the TSSI loop's per-rate target
+ * table is quarter-dBm, so index_max stays 0 (the value TxPowerCaps reserves
+ * for exactly this shape) and one step is one qdB, the same answer Kestrel's
+ * fixed-dBm BB target gives.
+ *
+ * The range is deliberately one-sided. Offset 0 is kSafeTssiTargetQdbm8733b =
+ * 16 dBm, the highest level this backend has characterised, so the knob can
+ * only back off from it and no un-measured power increase is reachable through
+ * this API; raising the ceiling is a separate, conducted-measurement decision.
+ * -64 qdB puts the target at 0 qdBm, where the per-rate delta field bottoms out
+ * too.
+ *
+ * step_measured is false: the quarter-dB step is what the hardware target table
+ * is denominated in, not a slope anyone has measured on air for this part. It
+ * flips when a paced offset sweep against a witness receiver says so — no SDR
+ * has been on this silicon, exactly as every other RF-domain claim in this
+ * backend records.
+ *
+ * Static and state-free, per the GetAdapterCaps contract (resolved at
+ * construction, callable before Init, safe from any thread). In particular it
+ * does NOT consult the EFUSE PG mode, which is unknown until bring-up: a
+ * flat-PG unit's lack of an actuator surfaces on SetTxPowerOffsetQdb (refused,
+ * loudly) and GetTxPowerState, not by mutating the family's capabilities. */
+devourer::TxPowerCaps Rtl8733bDevice::GetTxPowerCaps() {
+  devourer::TxPowerCaps c;
+  c.supported = true;
+  c.index_max = 0;
+  c.step_qdb = 1;
+  c.step_measured = false;
+  c.offset_min_qdb =
+      -static_cast<int16_t>(rtl8733b::kSafeTssiTargetQdbm8733b);
+  c.offset_max_qdb = 0;
+  c.rate_diffs = false;
+  c.rate_diffs_hw_table = false;
+  c.rate_diffs_measured = false;
+  return c;
+}
+
+int Rtl8733bDevice::SetTxPowerOffsetQdb(int qdb) {
+  std::lock_guard<std::recursive_mutex> lock(_reg_mu);
+  const devourer::TxPowerCaps caps = GetTxPowerCaps();
+  int steps = 0;
+  const int applied = devourer::quantize_offset_qdb(qdb, caps, &steps);
+  const bool req_low = qdb < caps.offset_min_qdb;
+  const bool req_high = qdb > caps.offset_max_qdb;
+
+  if (_tx_ready && !_tssi_tracking) {
+    /* This unit's EFUSE carries no TSSI calibration, so TX runs the flat
+     * kSafeTxAgcIndex8733b path, which has no runtime actuator here. Say so
+     * rather than return a number that reads like a successful apply — that
+     * indistinguishability is the whole reason this knob exists. */
+    _logger->error(
+        "RTL8733B: SetTxPowerOffsetQdb({}) refused — no TSSI calibration on "
+        "this unit, so TX power is the fixed flat index and has no runtime "
+        "actuator",
+        qdb);
+    return 0;
+  }
+
+  if (!_tx_ready) {
+    /* Recorded now, applied by configure_tx_power at InitWrite — the family
+     * contract for a knob moved before the chip is up. */
+    _tx_offset_qdb = static_cast<int16_t>(applied);
+    _tx_sat_low = req_low;
+    _tx_sat_high = req_high;
+    _logger->info("RTL8733B: TX-power offset {} qdB recorded (requested {}), "
+                  "applied at InitWrite",
+                  applied, qdb);
+    return applied;
+  }
+
+  rtl8733b::TssiOffsetSat8733b sat;
+  if (!_phy.set_tssi_offset(_channel, rtl8733b::kSafeTssiTargetQdbm8733b,
+                            applied, &sat))
+    return 0;
+  _tx_offset_qdb = static_cast<int16_t>(applied);
+  _tx_sat_low = sat.low || req_low;
+  _tx_sat_high = sat.high || req_high;
+  _logger->info("RTL8733B: SetTxPowerOffsetQdb({}) -> applied {} qdB "
+                "(target {} qdBm) sat_low={} sat_high={}",
+                qdb, applied,
+                rtl8733b::kSafeTssiTargetQdbm8733b + applied, _tx_sat_low,
+                _tx_sat_high);
+  return applied;
+}
+
+devourer::TxPowerState Rtl8733bDevice::GetTxPowerState() {
+  std::lock_guard<std::recursive_mutex> lock(_reg_mu);
+  devourer::TxPowerState s;
+  if (!_phy_ready || !_tx_ready)
+    return s; /* valid=false — no TX-power state has been programmed yet. */
+  s.valid = true;
+
+  if (!_tssi_tracking) {
+    /* Flat-PG unit: no actuator, but the TXAGC registers ARE the level and
+     * they read back, so report chip truth. set_flat_tx_power writes one index
+     * to both references and zeroes the per-rate diffs, so every
+     * representative rate sits at that index. */
+    const rtl8733b::TxAgcState8733b agc = _phy.read_txagc_state();
+    s.flat_index = agc.ofdm_ref_a;
+    s.cck_index = agc.cck_ref_a;
+    s.ofdm_index = agc.ofdm_ref_a;
+    s.mcs7_index = agc.ofdm_ref_a;
+    s.hw_readback = true;
+    return s;
+  }
+
+  /* TSSI path: a dBm-target model, so there is no TXAGC index to report and
+   * flat_index / the three representative fields stay -1 rather than carrying
+   * quarter-dBm targets in fields declared as indices (Kestrel reports the
+   * same shape). hw_readback says the offset below was confirmed against the
+   * chip's live target table, not just read out of this shadow — the
+   * distinction a consumer needs when the whole failure mode being fixed was a
+   * shadow that always agreed with itself. */
+  s.offset_qdb = _tx_offset_qdb;
+  s.offset_steps = _tx_offset_qdb; /* 1 step == 1 qdB on the dBm model */
+  s.saturated_low = _tx_sat_low;
+  s.saturated_high = _tx_sat_high;
+  s.hw_readback = _phy.tssi_offsets_confirmed();
+  if (!s.hw_readback)
+    _logger->warn("RTL8733B: TX-power state unconfirmed — the chip's TSSI "
+                  "target table does not match the {} qdB offset this session "
+                  "believes it applied",
+                  _tx_offset_qdb);
+  return s;
 }
 
 devourer::ThermalStatus Rtl8733bDevice::GetThermalStatus() {

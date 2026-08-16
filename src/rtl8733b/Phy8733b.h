@@ -78,6 +78,18 @@ inline constexpr uint8_t kSafeTxAgcIndex8733b = 0x10;
  * setup. */
 inline constexpr uint8_t kSafeTssiTargetQdbm8733b = 64;
 
+/* Which rail the runtime TX-power offset clamped at, if any — the signal a
+ * closed-loop controller uses to know the knob has run out of travel
+ * (IRtlDevice::GetTxPowerState).  `low` is set when a rate's shifted target hit
+ * 0 qdBm or the int8 delta field's floor; `high` when it hit that field's
+ * ceiling.  Both are per-rate facts: a shift can rail one rate while the rest
+ * still move, which is exactly what a shape-preserving offset does at the end
+ * of its range. */
+struct TssiOffsetSat8733b {
+  bool low = false;
+  bool high = false;
+};
+
 struct TxAgcState8733b {
   uint8_t cck_ref_a = 0;
   uint8_t cck_ref_b = 0;
@@ -194,8 +206,29 @@ public:
   bool audit_tssi_enable(SelectedChannel channel, const EfuseInfo &efuse,
                          uint8_t max_target_qdbm);
   bool enable_tssi_tracking(SelectedChannel channel, const EfuseInfo &efuse,
-                            uint8_t max_target_qdbm);
+                            uint8_t max_target_qdbm, int offset_qdb = 0);
   bool disable_tssi_tracking();
+  /* Runtime TX-power actuator (IRtlDevice::SetTxPowerOffsetQdb). On a
+   * TSSI-offset PG unit the closed loop IS the TX-power control, so moving
+   * power means moving the loop's per-rate target table: the five packed
+   * dwords at 0x3a00..0x3a10, rewritten IN PLACE with tracking left enabled —
+   * the #389 shape fast_retune already uses for its per-channel rewrite, not
+   * the ~165 ms disable/re-enable dance. Everything that can refuse is
+   * computed before the first chip write, so a declined call leaves the
+   * target untouched; a failed readback rolls back to the offsets the chip
+   * was carrying. Returns false when tracking is not live (nothing to
+   * retarget) or the plan does not resolve for this channel.
+   *
+   * The loop needs settling time — see docs/rtl8733b.md — so a caller
+   * sweeping offsets must pace, or it measures the tracking loop rather than
+   * the knob. */
+  bool set_tssi_offset(SelectedChannel channel, uint8_t max_target_qdbm,
+                       int offset_qdb, TssiOffsetSat8733b *sat = nullptr);
+  /* Does the chip's live per-rate target table still match what this session
+   * believes it wrote? Six register reads (the 0x3a00 dwords via
+   * read_txagc_state), so a caller can poll it at its own cadence — the
+   * chip-truth half of GetTxPowerState on the TSSI path. */
+  bool tssi_offsets_confirmed();
   /* Lean intra-band, same-bandwidth hop — the FastRetune core (see
    * docs/frequency-hopping.md; profile that sized it: full set_channel on
    * this USB-HS part is ~330 ms, of which ~165 ms is the TSSI
@@ -217,7 +250,8 @@ public:
    * on a band or width change or when the radio was never tuned; the caller
    * falls back to the full set_channel. */
   bool fast_retune(SelectedChannel channel, bool tssi_live,
-                   uint8_t max_target_qdbm, bool cache_rf);
+                   uint8_t max_target_qdbm, bool cache_rf,
+                   int offset_qdb = 0);
   bool prepare_tssi_offsets(SelectedChannel channel, const EfuseInfo &efuse);
   TssiDeState8733b read_tssi_de_state();
   uint8_t read_thermal();
@@ -233,13 +267,21 @@ public:
   tssi_de_plan(const TssiPowerInfo8733b &power, uint8_t channel);
   static bool parse_tx_power_targets(const uint32_t *table, size_t len,
                                      TxPowerTargets8733b &out);
+  /* Per-rate closed-loop targets as int8 deltas from the 64 qdBm anchor:
+   * clamp(min(factory_target, max_target_qdbm) + offset_qdb) - 64. The ceiling
+   * caps; the offset SHIFTS what survives the cap, which is what preserves the
+   * calibrated per-rate shape the src/TxPower.h contract promises (a lowered
+   * ceiling alone would move only the rates sitting above it). offset_qdb = 0
+   * reproduces the pre-runtime-knob table byte for byte. */
   static std::optional<std::array<int8_t, 20>>
   tssi_rate_offsets(const TxPowerTargets8733b &targets, uint8_t band,
-                    uint8_t path, uint8_t max_target_qdbm = 0xff);
+                    uint8_t path, uint8_t max_target_qdbm = 0xff,
+                    int offset_qdb = 0, TssiOffsetSat8733b *sat = nullptr);
   static std::optional<TssiBbPlan8733b>
   tssi_bb_plan(const TxPowerTargets8733b &targets, uint8_t channel,
                uint8_t rfe_type, uint8_t path,
-               uint8_t max_target_qdbm = 0xff);
+               uint8_t max_target_qdbm = 0xff, int offset_qdb = 0,
+               TssiOffsetSat8733b *sat = nullptr);
   static TssiThermalPlan8733b tssi_thermal_plan(uint8_t efuse_thermal,
                                                 bool cck);
 

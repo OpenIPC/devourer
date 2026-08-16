@@ -62,7 +62,11 @@ cmake --build "$ROOT/build" -j --target txdemo rxdemo >/dev/null || exit 1
 #    not an index, which is also why its range is negative. Its transfer is
 #    TSSI-reshaped like the 8822E's, so it takes the same monotone-lever
 #    assertion: measured 0.222/0.231 dB per qdB overall across two passes, but
-#    only 0.125 in the bottom 12 qdB where the loop nears its 0 qdBm floor.
+#    only 0.125 in the bottom 12 qdB of this sweep, as the target nears 0 qdBm.
+#    That compression is not the floor: the API's floor is the int8 field at
+#    -128, and power keeps falling ~7 dB past 0 qdBm before pinning near
+#    -96 qdB. This sweep just stops at -64 because that is where the SHIPPED
+#    monotone assertion holds.
 #    Its cells stop at 0 — the BACKOFF half. The API allows +127 qdB, but that
 #    half is not monotone in received power and cannot be asserted this way:
 #    +32 qdB reads 8.7 dB louder with EVM collapsed from -62 to -18, and +48/+64

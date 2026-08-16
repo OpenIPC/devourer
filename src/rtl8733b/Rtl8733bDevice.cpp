@@ -859,6 +859,14 @@ devourer::TxPowerState Rtl8733bDevice::GetTxPowerState() {
      * to both references and zeroes the per-rate diffs, so every
      * representative rate sits at that index. */
     const rtl8733b::TxAgcState8733b agc = _phy.read_txagc_state();
+    /* Note the reading this shares with src/TxPower.h's convention: there,
+     * flat_index >= 0 means "a flat override is active" and clearing it is the
+     * caller's move.  Here nothing can have set one — SetTxPowerIndexOverride
+     * refuses — and there is nothing to clear.  The index is simply what this
+     * unit runs at, because a no-TSSI-calibration EFUSE leaves bring-up's flat
+     * index as the level.  A consumer reaching for
+     * SetTxPowerIndexOverride(-1) to "release" it gets a logged refusal, which
+     * is the honest answer: this unit has no runtime power actuator at all. */
     s.flat_index = agc.ofdm_ref_a;
     s.cck_index = agc.cck_ref_a;
     s.ofdm_index = agc.ofdm_ref_a;

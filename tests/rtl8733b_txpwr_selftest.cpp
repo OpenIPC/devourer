@@ -118,7 +118,7 @@ int main() {
          up16 && (*up16)[0] == 16 && (*up16)[7] == 12 &&
              ((*up16)[0] - (*up16)[7]) == ((*base)[0] - (*base)[7]));
   expect("a positive offset within the field rails nothing",
-         !sat_up.high && !sat_up.low);
+         up16 && !sat_up.high && !sat_up.low);
   /* Past the factory target too: the synthetic ladder's rates are calibrated
    * at 80 qdBm, and +32 commands 96 — uncalibrated by construction, reachable
    * by design, compliance the caller's (src/TxPower.h). */

@@ -712,11 +712,20 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
  *
  * Offset 0 is kSafeTssiTargetQdbm8733b (16 dBm), a first-light clip the backend
  * imposes at or below this part's factory targets — which run 18..20 dBm at
- * 2.4 GHz and 16..19 dBm at 5 GHz (kMaxPgTargetQdbm8733b). The range around it
- * is the delta field's, not a characterised PA window:
+ * 2.4 GHz and 16..19 dBm at 5 GHz (kMaxPgTargetQdbm8733b).
  *
- *   - Down to -64 qdB, where the target reaches 0 qdBm and the per-rate delta
- *     field bottoms out at the same moment.
+ * The range around it is ASYMMETRIC, and only one end is a hardware limit. The
+ * 0x3a00 bytes are a signed int8 offset from the 64 qdBm anchor, so the field
+ * itself spans [-128, +127] — targets from -16 dBm to +47.75 dBm:
+ *
+ *   - Down to -64 qdB, which is NOT the field's floor (-128 is). It is where
+ *     the absolute target reaches 0 dBm, and stopping there is a judgement
+ *     backed by the sweep: the bottom 12 qdB of travel already delivers only
+ *     0.125 dB/qdB against 0.25 nominal — reproduced exactly across two passes
+ *     — so the loop is visibly running out of authority as its target
+ *     approaches zero. Below that nothing is characterised, and a knob that
+ *     keeps accepting commands it cannot act on is the defect this whole
+ *     lever exists to remove. saturated_low marks that boundary.
  *   - Up to +127 qdB, the delta field's positive limit — the same
  *     clamped-only-at-the-hardware-rail answer Jaguar1 (+126) and Jaguar3
  *     (+127) give. src/TxPower.h is deliberate that headroom above the

@@ -22,8 +22,9 @@
 #            actuator, so an on-air null in this geometry is the code and not
 #            the bench.
 #   move     -24 qdB shifts every capped rate byte by exactly -24 (0xe8).
-#   rails    -200 clamps to -64 with saturated_low, +200 to +127 with
-#            saturated_high - the int8 per-rate delta field's range.
+#   rails    -200 clamps to -64 with saturated_low (the 0 dBm absolute target
+#            floor, NOT the int8 field's -128), +200 to +127 with
+#            saturated_high (that one IS the field's ceiling).
 #   sticky   -24 qdB then a full SetMonitorChannel to another 5 GHz group
 #            re-folds the offset against the new channel; a following
 #            FastRetune leaves it in place (the hop rewrites the target table,

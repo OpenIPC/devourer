@@ -91,10 +91,10 @@ inline constexpr uint8_t kMaxPgTargetQdbm8733b = 80;
 /* Which rail the runtime TX-power offset clamped at, if any — the signal a
  * closed-loop controller uses to know the knob has run out of travel
  * (IRtlDevice::GetTxPowerState).  `low` is set when a rate's shifted target hit
- * 0 qdBm or the int8 delta field's floor; `high` when it hit that field's
- * ceiling.  Both are per-rate facts: a shift can rail one rate while the rest
- * still move, which is exactly what a shape-preserving offset does at the end
- * of its range. */
+ * the 0 qdBm floor (the low bound is that absolute floor, not the int8 field's
+ * -128); `high` when a rate hit the int8 field's +127 ceiling.  Both are
+ * per-rate facts: a shift can rail one rate while the rest still move, which
+ * is exactly what a shape-preserving offset does at the end of its range. */
 struct TssiOffsetSat8733b {
   bool low = false;
   bool high = false;

@@ -60,11 +60,16 @@ unrelated register map.
   the five packed dwords at `0x3a00..0x3a10`, rewritten **in place with tracking
   live**, the same #389 shape `fast_retune` uses — not the ~165 ms
   disable/re-enable pair. Caps therefore report the dBm model (`index_max = 0`,
-  one qdB per step) over `[-64, +127]` — the int8 delta field's range, the same
-  clamped-only-at-the-hardware-rail answer Jaguar1/3 give. Offset 0 is the safe
-  clip, −64 qdB puts the target at 0 qdBm where the field bottoms out, and the
-  positive half is deliberately NOT re-clamped at the PG table: an EFUSE
-  trimmed too cold is what an operator calibrates their way out of.
+  one qdB per step) over `[-64, +127]`, and only the top of that is a hardware
+  limit. The 0x3a00 bytes are a signed int8 offset from the 64 qdBm anchor, so
+  the field spans [-128, +127] — targets from −16 to +47.75 dBm. **+127 is the
+  field**, the same clamped-only-at-the-hardware-rail answer Jaguar1/3 give;
+  **−64 is a judgement**, the point where the absolute target reaches 0 dBm.
+  Stopping there is backed by the sweep: the bottom 12 qdB already delivers
+  0.125 dB/qdB against 0.25 nominal, so the loop is running out of authority
+  as the target nears zero, and below it nothing is characterised. The positive
+  half is deliberately NOT re-clamped at the PG table either: an EFUSE trimmed
+  too cold is what an operator calibrates their way out of.
   `SetTxPowerIndexOverride`, `SetTxPowerRateDiffs` and `ReApplyTxPower` stay
   unported.
 - **Overdrive above the clip buys ~3 dB and then the PA compresses, and EVM is

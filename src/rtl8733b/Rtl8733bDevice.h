@@ -91,9 +91,11 @@ private:
   bool _phy_ready = false;
   bool _tx_ready = false;
   bool _tssi_tracking = false;
-  /* Session TX-power offset (qdB, <= 0) and the rails the last apply hit.
-   * Sticky by construction: configure_tx_power folds it back in on every
-   * channel set, and FastRetune passes it to the in-place hop rewrite. */
+  /* Session TX-power offset in qdB, over the int8 delta field's full
+   * [-128, +127] (GetTxPowerCaps argues the range and records where the chip
+   * stops responding at each end), plus the rails the last apply hit. Sticky
+   * by construction: configure_tx_power folds it back in on every channel set,
+   * and FastRetune passes it to the in-place hop rewrite. */
   int16_t _tx_offset_qdb = 0;
   bool _tx_sat_low = false;
   bool _tx_sat_high = false;

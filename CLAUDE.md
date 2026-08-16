@@ -346,9 +346,11 @@ shape-preserving), `SetTxPowerIndexOverride` (flat absolute),
 `SetTxPowerRateDiffs` (replace the
 calibrated per-rate shape). The RTL8733B ports **only the first**, and on a
 different mechanism: its closed-loop TSSI target table, not a TXAGC index, so
-its caps report the dBm model (`index_max = 0`) and a one-sided
-`[-64, 0] qdB` range below the safe 16 dBm target — the knob can only back off
-from the level that backend characterised. The flat index is refused there
+its caps report the dBm model (`index_max = 0`) over the int8 delta field's
+`[-128, +127] qdB`, centred on a safe 16 dBm first-light target. Neither end is
+re-clamped at something softer; where the chip stops responding — about
+-96 qdB down, about +32 up, where the PA compresses and only EVM shows it — is
+measured and documented rather than enforced. The flat index is refused there
 because it was measured unable to carry HT at all. The contract — how they
 compose, the MCS7-anchor
 semantics, family step sizes, the write-only-family `hw_readback=false`

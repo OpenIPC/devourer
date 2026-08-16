@@ -433,6 +433,10 @@ Phy8733b::tssi_rate_offsets(const TxPowerTargets8733b &targets, uint8_t band,
   if (band > 1 || path > 1 || !targets.present[band][path])
     return std::nullopt;
   std::array<int8_t, 20> offsets{};
+  /* Accumulated locally and published only on success: a caller that gets
+   * nullopt must not find rail flags set by the rates that were computed
+   * before the one that failed. */
+  TssiOffsetSat8733b rails;
   for (size_t rate = 0; rate < offsets.size(); ++rate) {
     const uint8_t target = targets.qdbm[band][path][rate];
     if (target == 0xff) {
@@ -459,8 +463,7 @@ Phy8733b::tssi_rate_offsets(const TxPowerTargets8733b &targets, uint8_t band,
        * a closed-loop controller needs to be told rather than handed a wrapped
        * value. */
       shifted = 0;
-      if (sat)
-        sat->low = true;
+      rails.low = true;
     }
     /* Floored at 0 above, so the delta cannot go below -64: only the int8
      * field's positive end needs clamping, and it is reachable only with a
@@ -468,11 +471,12 @@ Phy8733b::tssi_rate_offsets(const TxPowerTargets8733b &targets, uint8_t band,
     int delta = shifted - 64;
     if (delta > 127) {
       delta = 127;
-      if (sat)
-        sat->high = true;
+      rails.high = true;
     }
     offsets[rate] = static_cast<int8_t>(delta);
   }
+  if (sat)
+    *sat = rails;
   return offsets;
 }
 

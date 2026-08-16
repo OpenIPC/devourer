@@ -46,13 +46,68 @@ unrelated register map.
   tail and its body in separate completions. The RX loop floors its URB size at
   the same constant and a `static_assert` ties the two together — raising
   either alone reintroduces the straddle, from opposite sides.
-- **TSSI closed loop.** Power runs from a fixed safe target
-  (`kSafeTssiTargetQdbm8733b`); none of the runtime TX-power levers are ported.
-  On a TSSI-offset PG unit the loop **is** the TX-power control, so it is not
+- **TSSI closed loop.** Power runs from a safe ceiling
+  (`kSafeTssiTargetQdbm8733b` = 16 dBm). On a TSSI-offset PG unit the loop
+  **is** the TX-power control, so it is not
   optional there — an attempt to make it opt-in with a fall back to the flat
   `kSafeTxAgcIndex8733b` could not carry HT at all (witnessed: MCS7, 300/300
   submitted, 0 captured, twice). A unit whose EFUSE carries no TSSI calibration
   has nothing to drive the loop and takes the flat path.
+- **The runtime TX-power lever is that loop's target, and only the relative
+  knob is ported.** `SetTxPowerOffsetQdb` shifts every per-rate target below the
+  ceiling (`tssi_rate_offsets`: cap first, then shift — a lowered ceiling would
+  move only the rates above it and flatten the calibrated spread). The write is
+  the five packed dwords at `0x3a00..0x3a10`, rewritten **in place with tracking
+  live**, the same #389 shape `fast_retune` uses — not the ~165 ms
+  disable/re-enable pair. Caps therefore report the dBm model (`index_max = 0`,
+  one qdB per step) over `[-128, +127]` — the int8 delta field at both ends,
+  the same clamped-only-at-the-hardware-rail answer Jaguar1/3 give. The 0x3a00
+  bytes are a signed offset from the 64 qdBm anchor, so that field spans
+  targets from −16 to +47.75 dBm. Neither end is re-clamped at something
+  softer: not at the PG table on the way up (an EFUSE trimmed too cold is what
+  an operator calibrates their way out of), and not at a 0 dBm target on the
+  way down (an earlier cut did, and it cost ~9 dB of working backoff — see
+  below). Where the chip stops *responding* is measured and documented, not
+  enforced.
+  `SetTxPowerIndexOverride`, `SetTxPowerRateDiffs` and `ReApplyTxPower` stay
+  unported.
+- **The backoff floor is ~−96 qdB, not the 0 dBm target.** Sweeping past the
+  old −64 clamp (MCS0, ch36): the 0 dBm target read 62.07, and −80 qdB
+  (−4 dBm) read **54.80 — another 7.3 dB down, with no sign wrap**. It pins
+  from about −96 qdB (−8 dBm): 52.96 / 52.97 / 52.99 at −96 / −112 / −128,
+  flat within 0.03 dB. So the usable travel is ~23 dB below the 16 dBm clip,
+  not the ~16 dB the first cut allowed, and EVM only softens from −59 to −53
+  across it. The lesson is the one this whole knob is about: the earlier floor
+  was a guess about what a negative absolute target *must* mean, and the guess
+  was worth 9 dB.
+- **Overdrive above the clip buys ~3 dB and then the PA compresses, and EVM is
+  the only tell.** Sweeping UP from the clip (MCS0, ch36, witness reporting EVM
+  beside RSSI): +16 qdB — the top of the PG table — gave +2.8 dB with EVM
+  already down from −62 to −50; **+32 qdB read 8.7 dB louder with EVM collapsed
+  to −18**, and +48/+64 changed nothing at all (RSSI and EVM both pinned). More
+  energy, unusable constellation. **SNR held 58..64 throughout and never saw
+  it** — precisely the case `docs/bench-testing-near-field.md` is about. So the
+  counterpart to leaving the range open: the vendor's PG table lands about
+  where this part stops being linear, and +16 qdB is the edge of *usable*
+  overdrive even though the field allows +127. Below the clip EVM stays flat at
+  −58..−61 across all 16 dB of backoff — the negative half is clean.
+- **The lever is worth ~14 dB, and it compresses at the bottom.** On-air
+  against an RTL8812AU witness (chip-RSSI ground station, the
+  `tests/txpwr_offset_onair.sh` method), two independent 6-point passes at
+  ch36: monotone, 14.2 / 14.8 dB of received power for the full 16 dB of
+  command, overall slope 0.222 / 0.231 dB per qdB against the 0.25 nominal.
+  The counterpart in the same breath: the step is **not** constant. The bottom
+  12 qdB delivered 0.125 and 0.126 dB/qdB — the one structure that reproduced
+  exactly across both passes — while everything above −52 qdB ran 0.233..0.242,
+  and the mid-range scattered 0.219..0.252 between passes. So the loop gives
+  about half the commanded dB as its target nears 0 qdBm, while
+  `saturated_low` still reads false (that clamp only fires at −64).
+  `step_measured` stays false for exactly that reason, the same call the 8822E
+  gets: calibrate your own dB-per-qdB or lean on the ground's RSSI. One unit,
+  one witness, near-field, integer-quantised RSSI, no SDR.
+  The pre-change binary measured **flat in the same session and geometry**
+  (0.3 dB across the same 64 qdB) — the do-nothing control that makes the
+  14 dB readable.
 - **The thermal table is chosen once per channel set, not per frame.** The CCK
   and OFDM/HT variants of the thermal-compensation table are different tables.
   `configure_tx_power` picks one from the configured TX mode and leaves it,
@@ -162,13 +217,34 @@ untouched) and fall back to the full path.
 ## Not ported
 
 `ReadTsf`/beacons, hardware ACK/BlockAck, A-MPDU,
-`FastSetBandwidth`, the runtime TX-power knobs, `rx.path` per-chain telemetry,
+`FastSetBandwidth`, the flat-index / per-rate-diff TX-power knobs
+(`SetTxPowerIndexOverride`, `SetTxPowerRateDiffs`, `ReApplyTxPower` — only the
+relative `SetTxPowerOffsetQdb` is ported), `rx.path` per-chain telemetry,
 and CCA disable. These inherit `IRtlDevice`'s not-ported defaults (`false`,
 `0`, or a full-path fallback) rather than being faked. `SetCcaMode` is the one
 exception to the silent-default rule: it is pure virtual, so `true` throws
 loudly — without tearing the session down, since an unported optional knob is
 not a hardware-safety event — while `false` succeeds as a no-op because that is
 the state MAC bring-up already leaves programmed.
+
+The TX-power knobs are the other exceptions, in the same spirit:
+
+- `SetTxPowerOffsetQdb` **refuses loudly and returns 0** on a unit whose EFUSE
+  carries no TSSI calibration, rather than reporting a successful zero-offset
+  apply. That indistinguishability is what this knob exists to end — a consumer
+  measured 18 dB of commanded offset moving nothing while its state read
+  `{"applied_qdb":0,"saturated_low":false}`, which is exactly what a healthy
+  actuator with travel remaining looks like. An offset latched *before*
+  bring-up on such a unit is **dropped loudly and zeroed** by
+  `configure_tx_power`, so the reported state never claims an offset no
+  register carries. (That path has no hardware coverage — every unit seen so
+  far is TSSI-offset PG — but it writes no registers, only a log and a reset.)
+- `SetTxPowerIndexOverride` is overridden **solely to log a refusal**. The
+  `IRtlDevice` default returns `void` and ignores the value, so silence would
+  be the caller's only answer on the one backend where the flat index really is
+  unported — a knob that looks granted, in the PR that exists to abolish them.
+  `SetTxPowerRateDiffs` needs no such override: its `false` return already says
+  it.
 
 `DeviceConfig::tuning::disable_cca` cannot be honoured either, and bring-up
 warns rather than dropping it — a config knob must not be the one door where a

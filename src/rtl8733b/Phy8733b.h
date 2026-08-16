@@ -78,6 +78,30 @@ inline constexpr uint8_t kSafeTxAgcIndex8733b = 0x10;
  * setup. */
 inline constexpr uint8_t kSafeTssiTargetQdbm8733b = 64;
 
+/* Highest per-rate target in the compiled PG table: 80 qdBm = 20 dBm at
+ * 2.4 GHz (5 GHz tops out at 76 = 19 dBm), against the 64 qdBm safe clip
+ * above.  Not a limit on anything — the runtime TX-power offset can be
+ * commanded past it, deliberately (see Rtl8733bDevice::GetTxPowerCaps) — but
+ * it is the reference point that says where the vendor's calibration ends and
+ * the operator's own begins.  Pinned against the generated table by
+ * tests/rtl8733b_txpwr_selftest.cpp so the figure quoted in the docs cannot
+ * drift away from the data. */
+inline constexpr uint8_t kMaxPgTargetQdbm8733b = 80;
+
+/* Which rail the runtime TX-power offset clamped at, if any — the signal a
+ * closed-loop controller uses to know the knob has run out of travel
+ * (IRtlDevice::GetTxPowerState).  `low` is set when a rate's shifted target hit
+ * the int8 delta field's -128 floor — a shifted target below -64 qdBm, i.e.
+ * -16 dBm — and deliberately NOT at the 0 qdBm target, which the loop keeps
+ * responding past by ~7 dB; `high` when a rate hit the field's +127 ceiling.
+ * Both rails are that field and nothing softer, and both are per-rate facts:
+ * a shift can rail one rate while the rest still move, which
+ * is exactly what a shape-preserving offset does at the end of its range. */
+struct TssiOffsetSat8733b {
+  bool low = false;
+  bool high = false;
+};
+
 struct TxAgcState8733b {
   uint8_t cck_ref_a = 0;
   uint8_t cck_ref_b = 0;
@@ -194,8 +218,34 @@ public:
   bool audit_tssi_enable(SelectedChannel channel, const EfuseInfo &efuse,
                          uint8_t max_target_qdbm);
   bool enable_tssi_tracking(SelectedChannel channel, const EfuseInfo &efuse,
-                            uint8_t max_target_qdbm);
+                            uint8_t max_target_qdbm, int offset_qdb = 0);
   bool disable_tssi_tracking();
+  /* Runtime TX-power actuator (IRtlDevice::SetTxPowerOffsetQdb). On a
+   * TSSI-offset PG unit the closed loop IS the TX-power control, so moving
+   * power means moving the loop's per-rate target table: the five packed
+   * dwords at 0x3a00..0x3a10, rewritten IN PLACE with tracking left enabled —
+   * the #389 shape fast_retune already uses for its per-channel rewrite, not
+   * the ~165 ms disable/re-enable dance. Everything that can refuse is
+   * computed before the first chip write, so a declined call leaves the
+   * target untouched; a failed readback rolls back to the offsets the chip
+   * was carrying. Returns false when tracking is not live (nothing to
+   * retarget) or the plan does not resolve for this channel.
+   *
+   * The loop needs settling time — see docs/rtl8733b.md — so a caller
+   * sweeping offsets must pace, or it measures the tracking loop rather than
+   * the knob. */
+  bool set_tssi_offset(SelectedChannel channel, uint8_t max_target_qdbm,
+                       int offset_qdb, TssiOffsetSat8733b *sat = nullptr);
+  /* Does the chip's live per-rate target table match the plan for the offset
+   * the CALLER believes is applied? Recomputed from (channel, ceiling, offset)
+   * rather than compared against this class's own `_fr_tssi_offsets` shadow,
+   * so a disagreement between the device's session state and the PHY's
+   * bookkeeping is caught too — a shadow checked against itself always agrees,
+   * which is the whole failure this API is fixing. Six register reads (the
+   * 0x3a00 dwords via read_txagc_state); the chip-truth half of
+   * GetTxPowerState on the TSSI path. */
+  bool tssi_offsets_confirmed(SelectedChannel channel, uint8_t max_target_qdbm,
+                              int offset_qdb);
   /* Lean intra-band, same-bandwidth hop — the FastRetune core (see
    * docs/frequency-hopping.md; profile that sized it: full set_channel on
    * this USB-HS part is ~330 ms, of which ~165 ms is the TSSI
@@ -217,7 +267,8 @@ public:
    * on a band or width change or when the radio was never tuned; the caller
    * falls back to the full set_channel. */
   bool fast_retune(SelectedChannel channel, bool tssi_live,
-                   uint8_t max_target_qdbm, bool cache_rf);
+                   uint8_t max_target_qdbm, bool cache_rf,
+                   int offset_qdb = 0);
   bool prepare_tssi_offsets(SelectedChannel channel, const EfuseInfo &efuse);
   TssiDeState8733b read_tssi_de_state();
   uint8_t read_thermal();
@@ -233,13 +284,24 @@ public:
   tssi_de_plan(const TssiPowerInfo8733b &power, uint8_t channel);
   static bool parse_tx_power_targets(const uint32_t *table, size_t len,
                                      TxPowerTargets8733b &out);
+  /* Per-rate closed-loop targets as int8 deltas from the 64 qdBm anchor.
+   * `max_target_qdbm` is the safety clip; `offset_qdb` is the runtime knob,
+   * and its two halves do different things because offset 0 sits on that clip
+   * rather than on a hardware rail (the asymmetry is argued at the
+   * implementation): a NEGATIVE offset shifts what survives the clip, which
+   * preserves the calibrated per-rate shape src/TxPower.h promises, while a
+   * POSITIVE offset raises the clip and each rate rises only as far as its own
+   * factory target. offset_qdb = 0 reproduces the pre-runtime-knob table byte
+   * for byte. */
   static std::optional<std::array<int8_t, 20>>
   tssi_rate_offsets(const TxPowerTargets8733b &targets, uint8_t band,
-                    uint8_t path, uint8_t max_target_qdbm = 0xff);
+                    uint8_t path, uint8_t max_target_qdbm = 0xff,
+                    int offset_qdb = 0, TssiOffsetSat8733b *sat = nullptr);
   static std::optional<TssiBbPlan8733b>
   tssi_bb_plan(const TxPowerTargets8733b &targets, uint8_t channel,
                uint8_t rfe_type, uint8_t path,
-               uint8_t max_target_qdbm = 0xff);
+               uint8_t max_target_qdbm = 0xff, int offset_qdb = 0,
+               TssiOffsetSat8733b *sat = nullptr);
   static TssiThermalPlan8733b tssi_thermal_plan(uint8_t efuse_thermal,
                                                 bool cck);
 

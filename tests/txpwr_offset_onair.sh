@@ -14,11 +14,16 @@
 # both read -56.9 dBFS at gain 0), so wideband SDR power cannot see the TXAGC
 # slope at all; a WiFi chip's AGC is built for exactly this input range.
 #
-# Method: one FIXED-INDEX TxDemo process per point (DEVOURER_TX_PWR — the flat
-# override riding the runtime API), 6 points spanning the family's range, the
-# ground's median per-frame RSSI per cell, least-squares slope. Default cell
-# channel is 5 GHz ch36, per-DUT overrides in the table (canonical-SA
-# filtering keeps the ground blind to ambient frames either way).
+# Method: one fixed-power TxDemo process per point, 6 points spanning the
+# family's range, the ground's median per-frame RSSI per cell, least-squares
+# slope. The power is held by the family's own lever (the DUT table's `knob`
+# column): the flat override DEVOURER_TX_PWR on the index families, the
+# relative DEVOURER_TX_PWR_OFFSET_QDB on the RTL8733B, which has no flat lever.
+# Each cell holds one level for 14 s and the fit window opens 6 s in, which is
+# also what gives a closed-loop family time to settle (the RTL8733B's TSSI loop
+# wants tens of ms; 6 s is not close to marginal). Default cell channel is
+# 5 GHz ch36, per-DUT overrides in the table (canonical-SA filtering keeps the
+# ground blind to ambient frames either way).
 #
 # Usage: sudo -v && tests/txpwr_offset_onair.sh [PID ...] (default: plugged set)
 set -u
@@ -42,7 +47,7 @@ trap cleanup EXIT INT TERM
 echo "== building =="
 cmake --build "$ROOT/build" -j --target txdemo rxdemo >/dev/null || exit 1
 
-# DUT table: pid vid ramp_start ramp_stop nominal_db_per_step channel
+# DUT table: pid vid ramp_start ramp_stop nominal_db_per_step channel knob
 #  - 8821AU runs at ch6: its 5 GHz chain IGNORES BB TXAGC (measured flat at
 #    ch36 across two grounds while registers move; 0.50 dB/idx exactly at
 #    2.4 GHz) — the power lever is 2.4 GHz-only on that part.
@@ -50,14 +55,32 @@ cmake --build "$ROOT/build" -j --target txdemo rxdemo >/dev/null || exit 1
 #    transfer (measured 0.3->0.9 dB/idx across the range, ~0.55 avg), so the
 #    cell asserts a working monotone lever (slope 0.15..1.0) instead of a
 #    fixed step classification.
+#  - The `knob` column is the env var each family's lever rides. Every index
+#    family sweeps the flat override DEVOURER_TX_PWR; the RTL8733B has no flat
+#    lever at all (kSafeTxAgcIndex8733b cannot carry HT), so it sweeps the
+#    RELATIVE offset instead — the x axis is qdB below the safe TSSI target,
+#    not an index, which is also why its range is negative. Its transfer is
+#    TSSI-reshaped like the 8822E's, so it takes the same monotone-lever
+#    assertion: measured 0.222/0.231 dB per qdB overall across two passes, but
+#    only 0.125 in the bottom 12 qdB of this sweep, as the target nears 0 qdBm.
+#    That compression is not the floor: the API's floor is the int8 field at
+#    -128, and power keeps falling ~7 dB past 0 qdBm before pinning near
+#    -96 qdB. This sweep just stops at -64 because that is where the SHIPPED
+#    monotone assertion holds.
+#    Its cells stop at 0 — the BACKOFF half. The API allows +127 qdB, but that
+#    half is not monotone in received power and cannot be asserted this way:
+#    +32 qdB reads 8.7 dB louder with EVM collapsed from -62 to -18, and +48/+64
+#    move nothing at all. Characterised with the EVM column in
+#    docs/rtl8733b.md; RSSI alone cannot score it, and SNR never sees it.
 DUTS=(
-    "0x8812 0x0bda 8 56 0.5 36"    # RTL8812AU  (Jaguar1)
-    "0x0120 0x2357 8 56 0.5 6"     # RTL8821AU  (Jaguar1, 2.4G-only lever)
-    "0x8813 0x0bda 8 56 0.5 36"    # RTL8814AU  (Jaguar1)
-    "0x012d 0x2357 8 56 0.5 36"    # RTL8822BU  (Jaguar2)
-    "0xc811 0x0bda 8 56 0.5 36"    # RTL8821CU  (Jaguar2)
-    "0xc812 0x0bda 24 104 0.25 36" # RTL8822CU  (Jaguar3)
-    "0xa81a 0x0bda 24 104 tssi 36" # RTL8822EU  (Jaguar3, TSSI-reshaped)
+    "0x8812 0x0bda 8 56 0.5 36 DEVOURER_TX_PWR"     # RTL8812AU  (Jaguar1)
+    "0x0120 0x2357 8 56 0.5 6 DEVOURER_TX_PWR"      # RTL8821AU  (Jaguar1, 2.4G-only lever)
+    "0x8813 0x0bda 8 56 0.5 36 DEVOURER_TX_PWR"     # RTL8814AU  (Jaguar1)
+    "0x012d 0x2357 8 56 0.5 36 DEVOURER_TX_PWR"     # RTL8822BU  (Jaguar2)
+    "0xc811 0x0bda 8 56 0.5 36 DEVOURER_TX_PWR"     # RTL8821CU  (Jaguar2)
+    "0xc812 0x0bda 24 104 0.25 36 DEVOURER_TX_PWR"  # RTL8822CU  (Jaguar3)
+    "0xa81a 0x0bda 24 104 tssi 36 DEVOURER_TX_PWR"  # RTL8822EU  (Jaguar3, TSSI-reshaped)
+    "0xf72b 0x0bda -64 0 tssi 36 DEVOURER_TX_PWR_OFFSET_QDB" # RTL8733BU (offset lever)
 )
 plugged() { lsusb -d "$(printf '%04x:%04x' "$2" "$1")" >/dev/null 2>&1; }
 
@@ -72,7 +95,7 @@ pick_ground() { # $1=dut_pid -> "pid vid" or ""
 }
 
 for dut in "${DUTS[@]}"; do
-    read -r PID VID START STOP NOMINAL DCH <<<"$dut"
+    read -r PID VID START STOP NOMINAL DCH KNOB <<<"$dut"
     if [ "$#" -gt 0 ]; then
         want=0; for p in "$@"; do [ "$p" = "$PID" ] && want=1; done
         [ "$want" = "1" ] || continue
@@ -89,7 +112,8 @@ for dut in "${DUTS[@]}"; do
     read -r GPID GVID <<<"$ground"
     tag="${PID#0x}"
     CH="$DCH"
-    echo "== DUT $PID@$VID (ground $GPID): ch$CH cells $START..$STOP (nominal $NOMINAL dB/idx) =="
+    unit="idx"; [ "$KNOB" = "DEVOURER_TX_PWR_OFFSET_QDB" ] && unit="qdB"
+    echo "== DUT $PID@$VID (ground $GPID): ch$CH cells $START..$STOP ($KNOB, nominal $NOMINAL dB/$unit) =="
 
     # Ground RX for the whole DUT session, stream lines epoch-stamped.
     : >"$OUT/$tag-ground.log"
@@ -109,7 +133,7 @@ for dut in "${DUTS[@]}"; do
     for idx in $idxs; do
         t0="$(date +%s.%N)"
         sudo -n env DEVOURER_PID="$PID" DEVOURER_VID="$VID" \
-            DEVOURER_CHANNEL="$CH" DEVOURER_TX_PWR="$idx" \
+            DEVOURER_CHANNEL="$CH" "$KNOB=$idx" \
             DEVOURER_TX_GAP_US=2000 \
             timeout 14 "$ROOT/build/txdemo" >"$OUT/$tag-cell$idx.log" 2>&1 || true
         t1="$(date +%s.%N)"
@@ -121,10 +145,11 @@ for dut in "${DUTS[@]}"; do
 
     # Slope fit: per cell, median ground RSSI (chain A) of the canonical-SA
     # rx.frame events in [t0+6, t1-1] (bring-up transmits nothing at first).
-    python3 - "$OUT/$tag-ground.log" "$OUT/$tag-cells.txt" "$NOMINAL" >"$OUT/$tag-fit.txt" 2>&1 <<'PYEOF'
+    python3 - "$OUT/$tag-ground.log" "$OUT/$tag-cells.txt" "$NOMINAL" "$unit" >"$OUT/$tag-fit.txt" 2>&1 <<'PYEOF'
 import re, statistics, sys
 ground_log, cells_txt = sys.argv[1], sys.argv[2]
 tssi = sys.argv[3] == "tssi"
+unit = sys.argv[4] if len(sys.argv) > 4 else "idx"
 nominal = None if tssi else float(sys.argv[3])
 frames = []
 rx = re.compile(r'^([0-9.]+) .*"ev":"rx\.frame".*"rssi":\[(-?\d+),(-?\d+)\]')
@@ -152,11 +177,11 @@ span_db = slope * (pts[-1][0] - pts[0][0])
 detail = " ".join(f"{x}:{y:.1f}" for x, y in pts)
 if tssi:
     ok = 0.15 <= slope <= 1.0
-    print(f"RESULT slope={slope:.3f} dB/idx (TSSI-reshaped lever; monotone "
+    print(f"RESULT slope={slope:.3f} dB/{unit} (TSSI-reshaped lever; monotone "
           f"0.15..1.0) rms_resid={rms:.2f} dB span={span_db:.1f} dB pts={n} [{detail}]")
     sys.exit(0 if ok else 1)
 klass = 0.5 if abs(slope - 0.5) < abs(slope - 0.25) else 0.25
-print(f"RESULT slope={slope:.3f} dB/idx (nominal {nominal}, classified {klass}) "
+print(f"RESULT slope={slope:.3f} dB/{unit} (nominal {nominal}, classified {klass}) "
       f"rms_resid={rms:.2f} dB span={span_db:.1f} dB pts={n} [{detail}]")
 sys.exit(0 if klass == nominal and rms < 2.5 else 1)
 PYEOF

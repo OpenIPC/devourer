@@ -47,6 +47,22 @@ public:
 
   devourer::TxCaps GetTxCaps() override;
   devourer::AdapterCaps GetAdapterCaps() override;
+  /* Runtime TX power. Only the relative offset is ported: on a TSSI-offset PG
+   * unit the closed loop is the power control, and moving its target is the
+   * one lever this part has that was measured to work. The flat-index and
+   * per-rate-diff knobs stay on IRtlDevice's not-ported defaults —
+   * kSafeTxAgcIndex8733b was witnessed unable to carry HT at all, and no
+   * dB-per-step slope has been measured for the index. */
+  devourer::TxPowerCaps GetTxPowerCaps() override;
+  int SetTxPowerOffsetQdb(int qdb) override;
+  devourer::TxPowerState GetTxPowerState() override;
+  /* Overridden only to refuse out loud. IRtlDevice's default returns void and
+   * ignores the value, so on this backend — where the flat index is genuinely
+   * unported — silence would be the caller's only answer, and a knob that
+   * looks granted is precisely the defect this family's offset knob was added
+   * to fix. SetTxPowerRateDiffs needs no such override: its `false` return
+   * already says it. */
+  void SetTxPowerIndexOverride(int idx) override;
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   devourer::ThermalStatus GetThermalStatus() override;
   bool GetPermanentMacAddress(uint8_t out[6]) override;
@@ -75,6 +91,15 @@ private:
   bool _phy_ready = false;
   bool _tx_ready = false;
   bool _tssi_tracking = false;
+  /* Session TX-power offset in qdB, over the int8 delta field's full
+   * [-128, +127] (GetTxPowerCaps argues the range and records where the chip
+   * stops responding at each end), plus the rails the last apply hit. Sticky
+   * by construction: configure_tx_power folds it back in on every channel set,
+   * and FastRetune passes it to the in-place hop rewrite. */
+  int16_t _tx_offset_qdb = 0;
+  bool _tx_sat_low = false;
+  bool _tx_sat_high = false;
+  bool _tx_readback_warned = false;
   std::atomic<bool> _rx_stop{false};
   std::atomic<bool> _rx_active{false};
   std::atomic<uint8_t> _rx_configured_bw{0};

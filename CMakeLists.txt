@@ -1059,6 +1059,12 @@ if(DEVOURER_8733B)
     )
     target_link_libraries(Rtl8733bTxDescSelftest PRIVATE devourer)
     add_test(NAME rtl8733b_tx_desc COMMAND Rtl8733bTxDescSelftest)
+
+    add_executable(Rtl8733bTxPwrSelftest
+        tests/rtl8733b_txpwr_selftest.cpp
+    )
+    target_link_libraries(Rtl8733bTxPwrSelftest PRIVATE devourer)
+    add_test(NAME rtl8733b_txpwr COMMAND Rtl8733bTxPwrSelftest)
 endif()
 
 # Headless guard for the per-UE RX attribution seed (src/cell/UeRxAttribution.h)

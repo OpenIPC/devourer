@@ -428,10 +428,15 @@ bool Phy8733b::parse_tx_power_targets(const uint32_t *table, size_t len,
 
 std::optional<std::array<int8_t, 20>>
 Phy8733b::tssi_rate_offsets(const TxPowerTargets8733b &targets, uint8_t band,
-                            uint8_t path, uint8_t max_target_qdbm) {
+                            uint8_t path, uint8_t max_target_qdbm,
+                            int offset_qdb, TssiOffsetSat8733b *sat) {
   if (band > 1 || path > 1 || !targets.present[band][path])
     return std::nullopt;
   std::array<int8_t, 20> offsets{};
+  /* Accumulated locally and published only on success: a caller that gets
+   * nullopt must not find rail flags set by the rates that were computed
+   * before the one that failed. */
+  TssiOffsetSat8733b rails;
   for (size_t rate = 0; rate < offsets.size(); ++rate) {
     const uint8_t target = targets.qdbm[band][path][rate];
     if (target == 0xff) {
@@ -439,22 +444,55 @@ Phy8733b::tssi_rate_offsets(const TxPowerTargets8733b &targets, uint8_t band,
         continue; // CCK is not defined outside 2.4 GHz.
       return std::nullopt;
     }
-    offsets[rate] = static_cast<int8_t>(std::clamp(
-        static_cast<int>((std::min)(target, max_target_qdbm)) - 64, -128,
-        127));
+    /* Cap first, then shift: the ceiling is the safety limit on absolute
+     * power, the offset is the caller's relative move around it, in either
+     * direction. A rate the ceiling already pulled down keeps its calibrated
+     * distance from the others through the shift.
+     *
+     * The shift is deliberately NOT re-clamped at the factory target on the
+     * way up. The PG table is the vendor's calibration, not a hardware rail,
+     * and a per-unit EFUSE trimmed too cold is exactly the case an operator
+     * calibrates their own way out of — src/TxPower.h states for every family
+     * that headroom above the generated table is deliberate and compliance is
+     * the caller's. Clamping here would make this the one backend where a
+     * measured operating point cannot be commanded. */
+    int shifted =
+        static_cast<int>((std::min)(target, max_target_qdbm)) + offset_qdb;
+    /* Both rails are the int8 delta field, nothing softer. The field is signed
+     * against the 64 qdBm anchor, so it spans targets from -16 dBm to
+     * +47.75 dBm, and the loop was measured to keep reducing power the whole
+     * way down to the bottom of it — no sign wrap, power still falling 7.3 dB
+     * between a 0 dBm and a -4 dBm target. Clamping at 0 dBm, as an earlier cut
+     * of this did, threw away ~9 dB of working backoff on the guess that a
+     * negative absolute target was meaningless. Where the loop actually stops
+     * responding (~-8 dBm) is a measured property documented in
+     * GetTxPowerCaps, not a limit imposed here. */
+    if (shifted < -64) {
+      shifted = -64;
+      rails.low = true;
+    }
+    int delta = shifted - 64;
+    if (delta > 127) {
+      delta = 127;
+      rails.high = true;
+    }
+    offsets[rate] = static_cast<int8_t>(delta);
   }
+  if (sat)
+    *sat = rails;
   return offsets;
 }
 
 std::optional<TssiBbPlan8733b>
 Phy8733b::tssi_bb_plan(const TxPowerTargets8733b &targets, uint8_t channel,
                        uint8_t rfe_type, uint8_t path,
-                       uint8_t max_target_qdbm) {
+                       uint8_t max_target_qdbm, int offset_qdb,
+                       TssiOffsetSat8733b *sat) {
   if (path > 1 || !legal_20mhz(channel))
     return std::nullopt;
   const uint8_t band = channel <= 14 ? 0 : 1;
   const auto offsets =
-      tssi_rate_offsets(targets, band, path, max_target_qdbm);
+      tssi_rate_offsets(targets, band, path, max_target_qdbm, offset_qdb, sat);
   if (!offsets)
     return std::nullopt;
 
@@ -1277,11 +1315,12 @@ bool Phy8733b::audit_tssi_enable(SelectedChannel channel,
 
 bool Phy8733b::enable_tssi_tracking(SelectedChannel channel,
                                     const EfuseInfo &efuse,
-                                    uint8_t max_target_qdbm) {
+                                    uint8_t max_target_qdbm, int offset_qdb) {
   const auto channel_cfg = channel_plan(channel);
   const uint8_t path = static_cast<uint8_t>(get_bb(0x1884, 1u << 20));
   const auto capped = tssi_bb_plan(_tx_power_targets, channel.Channel,
-                                   _rfe_type, path, max_target_qdbm);
+                                   _rfe_type, path, max_target_qdbm,
+                                   offset_qdb);
   if (!_initialized || !channel_cfg || !capped || max_target_qdbm > 64 ||
       efuse.tx_power_mode != TxPowerPgMode8733b::TssiOffset ||
       _tssi_digital_snapshot || _tssi_analog_snapshot ||
@@ -1339,16 +1378,18 @@ bool Phy8733b::enable_tssi_tracking(SelectedChannel channel,
     _fr_tssi_offsets = capped->rate_offsets;
     _fr_tssi_path = path;
     _logger->info(
-        "RTL8733B TSSI tracking enabled: ch={} path={} ceiling={} "
+        "RTL8733B TSSI tracking enabled: ch={} path={} ceiling={} offset={} "
         "rates={:08x}/{:08x}/{:08x}/{:08x}/{:08x}",
-        channel.Channel, path, max_target_qdbm, capped->rate_offsets[0],
-        capped->rate_offsets[1], capped->rate_offsets[2],
-        capped->rate_offsets[3], capped->rate_offsets[4]);
+        channel.Channel, path, max_target_qdbm, offset_qdb,
+        capped->rate_offsets[0], capped->rate_offsets[1],
+        capped->rate_offsets[2], capped->rate_offsets[3],
+        capped->rate_offsets[4]);
     devourer::Ev(_logger->events(), "rtl8733b.tssi_tracking")
         .f("enabled", true)
         .f("channel", channel.Channel)
         .f("path", path)
-        .f("ceiling_qdbm", max_target_qdbm);
+        .f("ceiling_qdbm", max_target_qdbm)
+        .f("offset_qdb", offset_qdb);
     return true;
   } catch (...) {
     set_bb(0x4318, 0x70000000u, 0);
@@ -1360,6 +1401,82 @@ bool Phy8733b::enable_tssi_tracking(SelectedChannel channel,
     set_bb(0x439c, kDwordMask, digital_snapshot.reg_439c);
     throw;
   }
+}
+
+bool Phy8733b::set_tssi_offset(SelectedChannel channel,
+                               uint8_t max_target_qdbm, int offset_qdb,
+                               TssiOffsetSat8733b *sat) {
+  /* Refuse before the first write, like fast_retune: tracking not live means
+   * there is no loop to retarget (the flat-PG path has no actuator at all),
+   * and a channel the radio is not on would install the wrong band's targets. */
+  if (!_initialized || !_tssi_digital_snapshot || !_fr_tssi_offsets ||
+      max_target_qdbm > kSafeTssiTargetQdbm8733b ||
+      (_fr_plan && _fr_plan->primary != channel.Channel)) {
+    _logger->error("RTL8733B TSSI offset: refused (tracking not live or "
+                   "channel/ceiling mismatch)");
+    return false;
+  }
+  const auto plan =
+      tssi_bb_plan(_tx_power_targets, channel.Channel, _rfe_type,
+                   _fr_tssi_path, max_target_qdbm, offset_qdb, sat);
+  if (!plan) {
+    _logger->error("RTL8733B TSSI offset: no target plan for ch{}",
+                   channel.Channel);
+    return false;
+  }
+  if (plan->rate_offsets == *_fr_tssi_offsets)
+    return true;
+
+  /* In place, tracking left enabled — the #389 shape. Only the five packed
+   * per-rate target dwords carry the power level; every other register in the
+   * plan is a constant the enable path already wrote. */
+  for (size_t i = 0; i < plan->rate_offsets.size(); ++i)
+    set_bb(static_cast<uint16_t>(0x3a00 + i * 4), kDwordMask,
+           plan->rate_offsets[i]);
+  const TssiBbState8733b now = read_tssi_bb_state();
+  const bool ok = now.enabled && now.rate_offsets == plan->rate_offsets;
+  if (!ok) {
+    /* Roll back to what the chip was carrying rather than leaving the loop on
+     * a half-written target. _fr_tssi_offsets stays as it was — it describes
+     * the state being restored. */
+    for (size_t i = 0; i < _fr_tssi_offsets->size(); ++i)
+      set_bb(static_cast<uint16_t>(0x3a00 + i * 4), kDwordMask,
+             (*_fr_tssi_offsets)[i]);
+    _logger->error("RTL8733B TSSI offset: readback failed, rolled back");
+  } else {
+    _fr_tssi_offsets = plan->rate_offsets;
+  }
+  _logger->info("RTL8733B TSSI offset: ok={} ch={} ceiling={} offset={} "
+                "sat={}/{} rates={:08x}/{:08x}/{:08x}/{:08x}/{:08x}",
+                ok, channel.Channel, max_target_qdbm, offset_qdb,
+                sat && sat->low, sat && sat->high, plan->rate_offsets[0],
+                plan->rate_offsets[1], plan->rate_offsets[2],
+                plan->rate_offsets[3], plan->rate_offsets[4]);
+  devourer::Ev(_logger->events(), "rtl8733b.tssi_offset")
+      .f("ok", ok)
+      .f("channel", channel.Channel)
+      .f("ceiling_qdbm", max_target_qdbm)
+      .f("offset_qdb", offset_qdb)
+      .f("saturated_low", sat && sat->low)
+      .f("saturated_high", sat && sat->high)
+      .hexf("rate_0_3", plan->rate_offsets[0], 8)
+      .hexf("rate_16_19", plan->rate_offsets[4], 8);
+  return ok;
+}
+
+bool Phy8733b::tssi_offsets_confirmed(SelectedChannel channel,
+                                      uint8_t max_target_qdbm,
+                                      int offset_qdb) {
+  if (!_initialized || !_tssi_digital_snapshot)
+    return false;
+  const auto plan =
+      tssi_bb_plan(_tx_power_targets, channel.Channel, _rfe_type,
+                   _fr_tssi_path, max_target_qdbm, offset_qdb);
+  if (!plan)
+    return false;
+  /* read_txagc_state's rate_diffs array IS 0x3a00..0x3a10 — the same five
+   * dwords that carry the loop's per-rate targets while tracking is on. */
+  return read_txagc_state().rate_diffs == plan->rate_offsets;
 }
 
 bool Phy8733b::disable_tssi_tracking() {
@@ -1556,7 +1673,8 @@ bool Phy8733b::set_channel(SelectedChannel channel) {
 }
 
 bool Phy8733b::fast_retune(SelectedChannel channel, bool tssi_live,
-                           uint8_t max_target_qdbm, bool cache_rf) {
+                           uint8_t max_target_qdbm, bool cache_rf,
+                           int offset_qdb) {
   const auto plan = channel_plan(channel);
   if (!_initialized || !plan || !_fr_plan)
     return false;
@@ -1573,8 +1691,11 @@ bool Phy8733b::fast_retune(SelectedChannel channel, bool tssi_live,
   std::optional<TssiBbPlan8733b> tssi;
   std::optional<TssiDePlan8733b> de;
   if (tssi_live && _fr_tssi_offsets) {
+    /* The live runtime offset rides along: without it a hop would recompute
+     * the targets from the bare ceiling and silently walk the caller's TX-power
+     * backoff back up. */
     tssi = tssi_bb_plan(_tx_power_targets, channel.Channel, _rfe_type,
-                        _fr_tssi_path, max_target_qdbm);
+                        _fr_tssi_path, max_target_qdbm, offset_qdb);
     if (!tssi)
       return false;
   }

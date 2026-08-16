@@ -685,18 +685,52 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
  * for exactly this shape) and one step is one qdB, the same answer Kestrel's
  * fixed-dBm BB target gives.
  *
- * The range is deliberately one-sided. Offset 0 is kSafeTssiTargetQdbm8733b =
- * 16 dBm, the highest level this backend has characterised, so the knob can
- * only back off from it and no un-measured power increase is reachable through
- * this API; raising the ceiling is a separate, conducted-measurement decision.
- * -64 qdB puts the target at 0 qdBm, where the per-rate delta field bottoms out
- * too.
+ * Offset 0 is kSafeTssiTargetQdbm8733b (16 dBm), a first-light clip the backend
+ * imposes at or below this part's factory targets — which run 18..20 dBm at
+ * 2.4 GHz and 16..19 dBm at 5 GHz (kMaxPgTargetQdbm8733b). The range around it
+ * is the delta field's, not a characterised PA window:
  *
- * step_measured is false: the quarter-dB step is what the hardware target table
- * is denominated in, not a slope anyone has measured on air for this part. It
- * flips when a paced offset sweep against a witness receiver says so — no SDR
- * has been on this silicon, exactly as every other RF-domain claim in this
- * backend records.
+ *   - Down to -64 qdB, where the target reaches 0 qdBm and the per-rate delta
+ *     field bottoms out at the same moment.
+ *   - Up to +127 qdB, the delta field's positive limit — the same
+ *     clamped-only-at-the-hardware-rail answer Jaguar1 (+126) and Jaguar3
+ *     (+127) give. src/TxPower.h is deliberate that headroom above the
+ *     generated table belongs to the operator, and a per-unit EFUSE trimmed
+ *     too cold is precisely the case a bench calibration exists to correct:
+ *     clamping at the PG table would make this the one backend where a
+ *     measured operating point cannot be commanded.
+ *
+ * Measured where that goes, because "the operator's call" is only a fair
+ * answer if the operator is told what they are choosing between. Sweeping UP
+ * from the clip (MCS0, ch36, witness EVM alongside RSSI): +16 qdB — the top of
+ * the PG table — bought 2.8 dB but EVM had already fallen from -62 to -50; by
+ * +32 the witness read 8.7 dB more RSSI with EVM COLLAPSED to -18, and +48 and
+ * +64 changed nothing at all (RSSI pinned, EVM pinned at -18). That is the PA
+ * in hard compression: more energy, unusable constellation, and SNR never
+ * moved (58..64) so it cannot be the tell — see docs/bench-testing-near-field.md.
+ * Below the clip EVM stays flat at -58..-61 across the whole 16 dB of backoff.
+ * So the vendor's PG table lands about where this part stops being linear:
+ * treat +16 qdB as the edge of usable overdrive, not the edge of the range.
+ *
+ * step_measured stays false, and now for a MEASURED reason rather than an
+ * unexamined one. On-air against an RTL8812AU witness (chip-RSSI ground
+ * station, tests/txpwr_offset_onair.sh's method; the B210 saturates at this
+ * range), two independent 6-point passes: the lever is monotone and worth
+ * 14.2 / 14.8 dB of received power for the full 16 dB of command, overall
+ * slope 0.222 / 0.231 dB per qdB against the 0.25 nominal. But the step is NOT
+ * constant across the advertised range — the bottom 12 qdB delivered 0.125 and
+ * 0.126 dB/qdB, the one structure that reproduced exactly, while everything
+ * above -52 qdB ran 0.233..0.242. The closed loop compresses as its target
+ * approaches 0 qdBm, so a controller near the floor gets about half the dB it
+ * asked for while saturated_low still reads false (the clamp only fires at
+ * -64). This is the same call the 8822E gets for the same reason: calibrate
+ * your own dB-per-qdB, or lean on GetTxPowerState plus the ground's RSSI.
+ *
+ * The counterparts: one physical unit, one witness, near-field geometry, and
+ * an integer-quantised RSSI scale. The mid-range slope scattered 0.219..0.252
+ * between the two passes, so the ~0.24 figure is a bench average, not a
+ * constant. No SDR has been on this silicon, as with every other RF-domain
+ * claim in this backend.
  *
  * Static and state-free, per the GetAdapterCaps contract (resolved at
  * construction, callable before Init, safe from any thread). In particular it
@@ -711,7 +745,7 @@ devourer::TxPowerCaps Rtl8733bDevice::GetTxPowerCaps() {
   c.step_measured = false;
   c.offset_min_qdb =
       -static_cast<int16_t>(rtl8733b::kSafeTssiTargetQdbm8733b);
-  c.offset_max_qdb = 0;
+  c.offset_max_qdb = 127; /* the int8 per-rate delta field's positive limit */
   c.rate_diffs = false;
   c.rate_diffs_hw_table = false;
   c.rate_diffs_measured = false;

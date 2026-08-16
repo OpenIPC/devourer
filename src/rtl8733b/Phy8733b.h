@@ -78,6 +78,16 @@ inline constexpr uint8_t kSafeTxAgcIndex8733b = 0x10;
  * setup. */
 inline constexpr uint8_t kSafeTssiTargetQdbm8733b = 64;
 
+/* Highest per-rate target in the compiled PG table: 80 qdBm = 20 dBm at
+ * 2.4 GHz (5 GHz tops out at 76 = 19 dBm), against the 64 qdBm safe clip
+ * above.  Not a limit on anything — the runtime TX-power offset can be
+ * commanded past it, deliberately (see Rtl8733bDevice::GetTxPowerCaps) — but
+ * it is the reference point that says where the vendor's calibration ends and
+ * the operator's own begins.  Pinned against the generated table by
+ * tests/rtl8733b_txpwr_selftest.cpp so the figure quoted in the docs cannot
+ * drift away from the data. */
+inline constexpr uint8_t kMaxPgTargetQdbm8733b = 80;
+
 /* Which rail the runtime TX-power offset clamped at, if any — the signal a
  * closed-loop controller uses to know the knob has run out of travel
  * (IRtlDevice::GetTxPowerState).  `low` is set when a rate's shifted target hit
@@ -267,12 +277,15 @@ public:
   tssi_de_plan(const TssiPowerInfo8733b &power, uint8_t channel);
   static bool parse_tx_power_targets(const uint32_t *table, size_t len,
                                      TxPowerTargets8733b &out);
-  /* Per-rate closed-loop targets as int8 deltas from the 64 qdBm anchor:
-   * clamp(min(factory_target, max_target_qdbm) + offset_qdb) - 64. The ceiling
-   * caps; the offset SHIFTS what survives the cap, which is what preserves the
-   * calibrated per-rate shape the src/TxPower.h contract promises (a lowered
-   * ceiling alone would move only the rates sitting above it). offset_qdb = 0
-   * reproduces the pre-runtime-knob table byte for byte. */
+  /* Per-rate closed-loop targets as int8 deltas from the 64 qdBm anchor.
+   * `max_target_qdbm` is the safety clip; `offset_qdb` is the runtime knob,
+   * and its two halves do different things because offset 0 sits on that clip
+   * rather than on a hardware rail (the asymmetry is argued at the
+   * implementation): a NEGATIVE offset shifts what survives the clip, which
+   * preserves the calibrated per-rate shape src/TxPower.h promises, while a
+   * POSITIVE offset raises the clip and each rate rises only as far as its own
+   * factory target. offset_qdb = 0 reproduces the pre-runtime-knob table byte
+   * for byte. */
   static std::optional<std::array<int8_t, 20>>
   tssi_rate_offsets(const TxPowerTargets8733b &targets, uint8_t band,
                     uint8_t path, uint8_t max_target_qdbm = 0xff,

@@ -441,9 +441,17 @@ Phy8733b::tssi_rate_offsets(const TxPowerTargets8733b &targets, uint8_t band,
       return std::nullopt;
     }
     /* Cap first, then shift: the ceiling is the safety limit on absolute
-     * power, the offset is the caller's relative move below it. A rate the
-     * ceiling already pulled down keeps its calibrated distance from the
-     * others through the shift. */
+     * power, the offset is the caller's relative move around it, in either
+     * direction. A rate the ceiling already pulled down keeps its calibrated
+     * distance from the others through the shift.
+     *
+     * The shift is deliberately NOT re-clamped at the factory target on the
+     * way up. The PG table is the vendor's calibration, not a hardware rail,
+     * and a per-unit EFUSE trimmed too cold is exactly the case an operator
+     * calibrates their own way out of — src/TxPower.h states for every family
+     * that headroom above the generated table is deliberate and compliance is
+     * the caller's. Clamping here would make this the one backend where a
+     * measured operating point cannot be commanded. */
     int shifted =
         static_cast<int>((std::min)(target, max_target_qdbm)) + offset_qdb;
     if (shifted < 0) {

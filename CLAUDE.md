@@ -59,7 +59,7 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first):
   only what an independent witness decoded — legacy OFDM + HT MCS0-7, BCC,
   20/40 MHz on 2.4/5 GHz, plus long-preamble CCK on 2.4 GHz at 20 MHz.
   Everything the backend has not ported (TSF/beacons, hardware ACK, A-MPDU,
-  the runtime TX-power levers) falls through to `IRtlDevice`'s
+  the flat-index and per-rate TX-power knobs) falls through to `IRtlDevice`'s
   not-ported defaults rather than being faked, so read the base class before
   assuming a cross-generation feature below applies here. `FastRetune` IS
   ported (intra-band, TSSI kept live — `src/rtl8733b/CLAUDE.md`). SGI, LDPC, STBC, VHT
@@ -341,11 +341,16 @@ Behavioural traps the per-field docs can't carry:
   separate null (`tests/dis_cca_onair.sh`).
 
 **Runtime TX power** — the adaptive-link power lever, three knobs on the four
-Jaguar/Kestrel generations (the RTL8733B ports none of them: it runs a fixed
-safe closed-loop TSSI target): `SetTxPowerOffsetQdb` (relative,
+Jaguar/Kestrel generations: `SetTxPowerOffsetQdb` (relative,
 shape-preserving), `SetTxPowerIndexOverride` (flat absolute),
 `SetTxPowerRateDiffs` (replace the
-calibrated per-rate shape). The contract — how they compose, the MCS7-anchor
+calibrated per-rate shape). The RTL8733B ports **only the first**, and on a
+different mechanism: its closed-loop TSSI target table, not a TXAGC index, so
+its caps report the dBm model (`index_max = 0`) and a one-sided
+`[-64, 0] qdB` range below the safe 16 dBm target — the knob can only back off
+from the level that backend characterised. The flat index is refused there
+because it was measured unable to carry HT at all. The contract — how they
+compose, the MCS7-anchor
 semantics, family step sizes, the write-only-family `hw_readback=false`
 shadow, and Kestrel's software send-time fold — is documented at the
 declarations in `src/TxPower.h`; the per-chip mechanics are in each

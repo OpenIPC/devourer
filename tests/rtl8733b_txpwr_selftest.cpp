@@ -86,6 +86,27 @@ int main() {
   expect("offset 0 rails nothing",
          no_shift && !sat_zero.low && !sat_zero.high);
 
+  /* 4b. The knob is symmetric: a positive offset shifts the same ladder up,
+   *     shape intact, and is NOT re-clamped at the vendor's factory target.
+   *     That last part is the point — a per-unit EFUSE trimmed too cold is the
+   *     case an operator calibrates their own operating point for, and this is
+   *     the only lever this backend gives them to command it. */
+  rtl8733b::TssiOffsetSat8733b sat_up;
+  const auto up16 = rtl8733b::Phy8733b::tssi_rate_offsets(t, 0, 0, kCeiling,
+                                                          16, &sat_up);
+  expect("+16 qdB shifts the ladder up, shape intact",
+         up16 && (*up16)[0] == 16 && (*up16)[7] == 12 &&
+             ((*up16)[0] - (*up16)[7]) == ((*base)[0] - (*base)[7]));
+  expect("a positive offset within the field rails nothing",
+         !sat_up.high && !sat_up.low);
+  /* Past the factory target too: the synthetic ladder's rates are calibrated
+   * at 80 qdBm, and +32 commands 96 — uncalibrated by construction, reachable
+   * by design, compliance the caller's (src/TxPower.h). */
+  const auto up32 =
+      rtl8733b::Phy8733b::tssi_rate_offsets(t, 0, 0, kCeiling, 32);
+  expect("the offset can be commanded past the factory target",
+         up32 && (*up32)[0] == 32);
+
   /* 5. The int8 field's positive end is reachable only above the anchor, which
    *    is what the raised-ceiling default argument does. */
   rtl8733b::TxPowerTargets8733b hot;
@@ -114,6 +135,34 @@ int main() {
          real_base && (*real_base)[0] == 0 && (*real_base)[19] == 0);
   expect("generated 2G table shifts uniformly",
          real_down && (*real_down)[0] == -24 && (*real_down)[19] == -24);
+
+  /* kMaxPgTargetQdbm8733b is the figure the caps comment and docs quote as
+   * where the vendor's calibration ends, so it must stay pinned to the
+   * generated table: a regeneration that moves the highest factory target has
+   * to fail here rather than let the documented number drift off the data. */
+  int table_max = -1;
+  for (uint8_t band = 0; band < 2; ++band)
+    for (uint8_t path = 0; path < 2; ++path) {
+      if (!real.present[band][path])
+        continue;
+      for (size_t rate = 0; rate < 20; ++rate) {
+        const uint8_t v = real.qdbm[band][path][rate];
+        if (v != 0xff && static_cast<int>(v) > table_max)
+          table_max = v;
+      }
+    }
+  expect("kMaxPgTargetQdbm8733b matches the generated table's highest target",
+         table_max == static_cast<int>(rtl8733b::kMaxPgTargetQdbm8733b));
+
+  /* The generated 2G table is flat against the 16 dBm clip, so a +16 qdB
+   * command lands every rate at 20 dBm — at the top of the vendor's range for
+   * the hottest rate and ABOVE it for the rest. That is the shape a
+   * calibrating operator asks for, and it is why the positive half is not
+   * re-clamped per rate. */
+  const auto real_up =
+      rtl8733b::Phy8733b::tssi_rate_offsets(real, 0, 0, kCeiling, 16);
+  expect("+16 qdB commands the 2G ladder to the top of the PG range",
+         real_up && (*real_up)[0] == 16 && (*real_up)[19] == 16);
 
   /* 5 GHz has no CCK targets; those four entries stay inert at the anchor
    * whatever the offset, exactly as they did before the knob existed. */

@@ -518,27 +518,37 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
      * instead of poisoning frames packed beside it. */
     std::vector<size_t> lens;
     for (size_t i = done; i < count && lens.size() < lim.max_frames; ++i) {
-      /* A null view is treated exactly like a malformed one — skipped, per
-       * the IRtlDevice::send_packets contract. Both MUST advance `done` when
-       * they lead the run: breaking without advancing leaves `lens` empty and
-       * spins this loop forever on the same entry. */
+      /* A null view is treated exactly like a malformed one: it ends the run
+       * and, if it led, is skipped per the IRtlDevice::send_packets
+       * contract. */
       const uint16_t rlen =
           pkts[i].data == nullptr
               ? uint16_t{0}
               : devourer::radiotap_hdr_len(pkts[i].data, pkts[i].len);
-      if (rlen == 0) {
-        if (lens.empty())
-          ++done; /* skip a malformed leading frame (contract: skipped) */
+      if (rlen == 0)
         break;
-      }
       const int want =
           devourer::radiotap_peek_channel(pkts[i].data, pkts[i].len);
-      if (want > 0 && want != _channel.Channel)
+      if (want > 0 && want != _channel.Channel) {
+        /* This backend retunes for nobody mid-submission — build_tx_block
+         * refuses an off-channel frame outright. A LEADING one still has to
+         * enter the run alone, so the single-frame path below refuses it and
+         * `done` moves past it; ending the run empty here instead would spin
+         * this loop forever on the same entry, holding _reg_mu. */
+        if (lens.empty())
+          lens.push_back(pkts[i].len - rlen);
         break;
+      }
       lens.push_back(pkts[i].len - rlen);
     }
-    if (lens.empty())
+    if (lens.empty()) {
+      /* The leading view was null or malformed. This is also the loop's
+       * termination guarantee: `done` advances on every iteration whatever
+       * the collector above decided, so no future run rule can reintroduce a
+       * non-advancing path. */
+      ++done;
       continue;
+    }
 
     const devourer::TxAggPlan plan =
         devourer::plan_tx_agg(lens.data(), lens.size(), lim);

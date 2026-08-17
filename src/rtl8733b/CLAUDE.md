@@ -109,27 +109,30 @@ unrelated register map.
   (0.3 dB across the same 64 qdB) — the do-nothing control that makes the
   14 dB readable.
 - **USB TX aggregation is ported, and this is the family it matters most on.**
-  `send_packets` packs up to 3 `[txdesc][frame]` blocks into one bulk-OUT URB
-  (`cfg.tx.usb_agg_max` / `DEVOURER_TX_USB_AGG`; 0 = off = byte-identical).
-  Two facts made it cheap to port and one made it worth porting. MAC init
-  **already** programmed `BLK_DESC_NUM = 3` into `DWBCN0_CTRL[7:4]` (0x0208)
-  — the same field and value the 88xx siblings use — so nothing in bring-up
-  changed. `DMA_TXAGG_NUM` is at `dword7[31:24]` exactly as on the 8822C, but
-  it must be set **before** the checksum, not patched on after: the fold
-  covers 32 bytes skipping only `0x1c-0x1d`, so byte `0x1f` is inside it.
-  That placement was inferred from 8822C parity and then **confirmed on
-  silicon** — the 8822BU precedent is that wrong packing makes the TXDMA
-  re-air block 1 `agg_num` times, which is invisible to frame counts, so it
-  was verified by per-frame stamps (`DEVOURER_TX_QOS_DATA` + `DEVOURER_RX_PCTR`):
-  31552 receptions carried 31551 distinct counters, ratio 1.00 where re-airing
-  would read 3.00.
-  Why it matters here: one bulk submission costs **~248 µs of CPU on the CV610
-  craft** against ~22 µs on x86, ~87% of it kernel USB. Measured A/B on the
-  craft at ~1750 fps: **248 → 148 µs per frame, 43.0% → 26.7% of one core**,
-  frame rate unchanged. Note `GetTxStats().submitted` counts URBs, not frames,
-  so an aggregated session reads ~frames/3 — the same accounting the other
-  families have, and not a throughput drop; the per-URB `tx.agg` event carries
-  the true count.
+  The mechanism (block count placement, the checksum-ordering constraint, the
+  URB-vs-frame accounting) is doc-commented at
+  `TxDescriptor8733b.h`'s `agg_num` and `Rtl8733bDevice::send_packets` — read
+  it there. What only lives here:
+  - **Bring-up needed no change.** MAC init *already* programmed
+    `BLK_DESC_NUM = 3` into `DWBCN0_CTRL[7:4]` (0x0208), the same field and
+    value the 88xx siblings use. The port was two things — a descriptor field
+    and the packer — because of that.
+  - **Why it is worth having here specifically.** One bulk submission costs
+    **~248 µs of CPU on the CV610 craft** against ~22 µs on x86, ~87% of it
+    the kernel USB path. Craft A/B at ~1750 fps: **248 → 148 µs per frame,
+    43.0 → 26.7% of one core**, frame rate unchanged. The counterparts, in the
+    same breath: it buys **nothing on air** — same frames, same airtime, purely
+    host CPU; it buys nothing at all unless the caller uses `send_packets`
+    (waybeam-link does not); and the win shrinks with the host, being only
+    ~11 µs/frame on x86.
+  - **Frame counts cannot verify it.** The 8822BU precedent is that wrong
+    packing makes the TXDMA re-air block 1 `agg_num` times, and `rx_hits` is
+    identical either way — it was 23900 in both arms here. Only per-frame
+    stamps discriminate (`DEVOURER_TX_QOS_DATA` + `DEVOURER_RX_PCTR`, count
+    distinct `pctr`): **ratio 1.00 = distinct, ~3.00 = re-airing**. Verified
+    1.00 with the boundary shim both off and on — and the shim needs a payload
+    chosen for it (MPDU length ≡ 472 mod 512 at USB HS), because a fixed-payload
+    sweep never reaches it.
 - **The thermal table is chosen once per channel set, not per frame.** The CCK
   and OFDM/HT variants of the thermal-compensation table are different tables.
   `configure_tx_power` picks one from the configured TX mode and leaves it,

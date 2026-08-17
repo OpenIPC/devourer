@@ -120,7 +120,13 @@ struct TxDescConfig {
    * keeps the single-frame path byte-identical to before this field existed).
    * HALMAC DMA_TXAGG_NUM, dword7[31:24] — the same placement the 8822C
    * carries it at, alongside the checksum in the same dword's low half.
-   * Capped by BLK_DESC_NUM = 3, which MAC init already programs. */
+   * Capped by BLK_DESC_NUM = 3, which MAC init already programs.
+   *
+   * ORDERING: byte 0x1f is INSIDE the checksummed span (the fold covers 32
+   * bytes and skips only 0x1c-0x1d, the checksum field itself), so this must
+   * be written BEFORE the checksum. fill_tx_desc_8733b does that by
+   * construction; the 8822C's patch-then-recompute shape does not port here,
+   * because this family folds the checksum inside the fill. */
   uint8_t agg_num = 0;
   uint8_t retry_limit = 0;
   bool short_gi = false;

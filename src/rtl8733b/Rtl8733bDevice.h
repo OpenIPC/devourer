@@ -42,9 +42,10 @@ public:
   /* USB TX aggregation (cfg.tx.usb_agg_max / DEVOURER_TX_USB_AGG): pack
    * consecutive frames into one bulk-OUT URB. Measured on the CV610 craft,
    * this is the lever that matters on an embedded host — a single submission
-   * costs ~283 us of CPU there against ~22 us on x86, and ~87% of that is the
+   * costs ~248 us of CPU there against ~22 us on x86, and ~87% of that is the
    * kernel USB submit/completion path, so folding three frames into one URB
-   * removes two of every three. Knob off / non-USB falls back to the
+   * removes two of every three (measured: 248 -> 148 us per frame on the
+   * craft, frame rate unchanged). Knob off / non-USB falls back to the
    * interface-default per-frame loop, byte-identical.
    *
    * Note when reading TX stats against this: GetTxStats().submitted counts

@@ -512,10 +512,10 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
   size_t done = 0, ok = 0;
   while (done < count) {
     /* Collect the contiguous run for ONE URB. A frame carrying a radiotap
-     * CHANNEL other than the session channel ends the run: build_tx_block
-     * refuses such a frame outright on this backend (no per-submission
-     * retune), and letting it lead the next URB keeps that refusal per-frame
-     * instead of poisoning frames packed beside it. */
+     * CHANNEL other than the session channel ends the run — this backend does
+     * not retune mid-submission, so build_tx_block refuses such a frame
+     * outright and it must not be packed beside frames that would have
+     * aired. */
     std::vector<size_t> lens;
     for (size_t i = done; i < count && lens.size() < lim.max_frames; ++i) {
       /* A null view is treated exactly like a malformed one: it ends the run
@@ -586,12 +586,25 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
     const int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
                                              urb.data(), urb.size(),
                                              /*timeout_ms=*/100);
+    /* bulk_send_sync_ep returns BYTES SUBMITTED, so `rc >= 0` also covers a
+     * short write. A truncated URB means the chip got a prefix — some
+     * trailing block is partial or absent — and there is no way to say which
+     * frames aired, so none of them may be reported as submitted. The
+     * single-frame path already refuses a short write; the aggregated one
+     * must not be the looser of the two in the same backend. */
+    const bool sent_all = rc == static_cast<int>(urb.size());
+    if (rc >= 0 && !sent_all)
+      _logger->error("RTL8733B aggregated TX short on EP 0x{:02x}: {}/{} "
+                     "({} frames dropped)",
+                     _device.first_bulk_out_ep(), rc, urb.size(),
+                     plan.frames());
     devourer::Ev(_logger->events(), "tx.agg")
         .f("frames", (unsigned long long)plan.frames())
         .f("bytes", (unsigned long long)urb.size())
+        .f("sent", (long long)rc)
         .f("shim", plan.shim)
-        .f("ok", rc >= 0);
-    if (rc >= 0) {
+        .f("ok", sent_all);
+    if (sent_all) {
       ok += plan.frames();
       /* Same one-shot latch send_packet uses — a session whose very first TX
        * is aggregated must still say so once, or the "first TX accepted"

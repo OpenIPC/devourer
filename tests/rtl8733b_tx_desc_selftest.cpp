@@ -222,5 +222,50 @@ int main() {
   expect("HE TxMode refused on every band",
          !rtl8733b::tx_mode_supported_8733b(mode));
 
+  /* USB TX aggregation: DMA_TXAGG_NUM on the first descriptor of a packed
+   * URB (dword7[31:24]), zero everywhere else. */
+  {
+    rtl8733b::TxDescConfig agg;
+    agg.packet_size = 100;
+    agg.sequence = 0x123;
+    agg.rate_hw = 4; // 6M
+    agg.rate_id = 6;
+
+    std::array<uint8_t, rtl8733b::kTxDescSize> plain{};
+    expect("agg-num 0 descriptor builds",
+           rtl8733b::fill_tx_desc_8733b(plain.data(), plain.size(), agg));
+
+    /* The no-change control: agg_num defaults to 0, so a single-frame
+     * descriptor is byte-identical to one built before this field existed —
+     * which is what makes the knob-off path provably untouched. */
+    expect("agg-num 0 leaves dword7[31:24] clear", plain[0x1f] == 0);
+    expect("agg-num 0 checksum still folds to all ones",
+           rtl8733b::txdesc_checksum_valid_8733b(plain.data(), plain.size()));
+
+    std::array<uint8_t, rtl8733b::kTxDescSize> packed{};
+    agg.agg_num = 3;
+    expect("agg-num 3 descriptor builds",
+           rtl8733b::fill_tx_desc_8733b(packed.data(), packed.size(), agg));
+    expect("agg-num 3 lands in dword7[31:24]", packed[0x1f] == 3);
+
+    /* THE ordering cell. Byte 0x1f is inside the checksummed span (the fold
+     * covers 32 bytes and skips only 0x1c-0x1d), so a build that wrote
+     * agg-num AFTER the checksum would leave a descriptor the chip rejects.
+     * Moving that write below the checksum line must fail exactly here. */
+    expect("agg-num is inside the checksum, and precedes it",
+           rtl8733b::txdesc_checksum_valid_8733b(packed.data(),
+                                                 packed.size()));
+    expect("agg-num actually changed the checksum",
+           !std::equal(plain.begin() + 0x1c, plain.begin() + 0x1e,
+                       packed.begin() + 0x1c));
+
+    /* BLK_DESC_NUM is 3 on this part, so a fourth block is not encodable —
+     * refused at validation rather than truncated into the field. */
+    agg.agg_num = 4;
+    std::array<uint8_t, rtl8733b::kTxDescSize> over{};
+    expect("agg-num above BLK_DESC_NUM refused",
+           !rtl8733b::fill_tx_desc_8733b(over.data(), over.size(), agg));
+  }
+
   return failures == 0 ? 0 : 1;
 }

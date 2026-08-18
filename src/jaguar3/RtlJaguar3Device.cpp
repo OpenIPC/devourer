@@ -1725,7 +1725,12 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
   int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
                                      usb_frame.data(), usb_frame.size(),
                                      /*timeout_ms=*/20);
-  return rc >= 0;
+  /* bulk_send_sync_ep returns BYTES SUBMITTED, so `rc >= 0` would also cover
+   * a short write — a frame the chip got only a prefix of must not be
+   * reported as sent. No error log on the failure path: the NAK-backoff
+   * contract above means logging here would flood exactly when the caller is
+   * already backing off. */
+  return rc == static_cast<int>(usb_frame.size());
 }
 
 size_t RtlJaguar3Device::send_packets(const TxPacketView *pkts, size_t count) {
@@ -1826,12 +1831,24 @@ size_t RtlJaguar3Device::send_packets(const TxPacketView *pkts, size_t count) {
     const int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
                                              urb.data(), urb.size(),
                                              /*timeout_ms=*/50);
+    /* Full write or nothing submitted: a truncated URB means the chip got a
+     * prefix — some trailing block partial or absent — and there is no way to
+     * say which frames aired, so none may be counted. A genuine short write
+     * (rc >= 0) is rare and actionable, so it is logged; rc < 0 stays quiet
+     * like the single-frame path (NAK-backoff flood). */
+    const bool sent_all = rc == static_cast<int>(urb.size());
+    if (rc >= 0 && !sent_all)
+      _logger->error("8822C aggregated TX short on EP 0x{:02x}: {}/{} "
+                     "({} frames dropped)",
+                     _device.first_bulk_out_ep(), rc, urb.size(),
+                     plan.frames());
     devourer::Ev(_logger->events(), "tx.agg")
         .f("frames", (unsigned long long)plan.frames())
         .f("bytes", (unsigned long long)urb.size())
+        .f("sent", (long long)rc)
         .f("shim", plan.shim)
-        .f("ok", rc >= 0);
-    if (rc >= 0)
+        .f("ok", sent_all);
+    if (sent_all)
       ok += plan.frames();
     done += plan.frames();
   }

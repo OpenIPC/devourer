@@ -942,6 +942,10 @@ size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
     rtl8812a_cal_txdesc_chksum(first);
 
     const bool sent = _device.send_packet(urb.data(), urb.size());
+    /* Async TX (this generation's deliberate transfer mode): `ok` means the
+     * URB was ACCEPTED by the transport — bytes-on-wire resolve later at
+     * completion reaping, so there is no `sent` byte count to emit here and
+     * the sync generations' full-write accounting cannot apply. */
     devourer::Ev(_logger->events(), "tx.agg")
         .f("frames", (unsigned long long)plan.frames())
         .f("bytes", (unsigned long long)urb.size())

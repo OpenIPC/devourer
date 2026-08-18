@@ -28,10 +28,25 @@ never lands on an exact bulk-MPS multiple (the sync bulk path has no ZLP).
 
 Per-family hardware rules:
 
-- **HalMAC (8822B/8821C/8822C/8822E)**: at most **3 descriptors per bulk
+- **HalMAC 88xx (8822B/8821C/8822C/8822E)**: at most **3 descriptors per bulk
   transfer** (mainline rtw88 `usb_tx_agg_desc_num` / halmac `BLK_DESC_NUM`) —
   the library clamps. Layout is rtw88-parity: no first-block reserve; the
   8-byte PKT_OFFSET shim is inserted only to escape a bulk-boundary total.
+- **RTL8733B (HALMAC 87xx)**: the same 3-descriptor HalMAC rule and the same
+  no-reserve layout, with a 40-byte descriptor. Two things differ from the
+  88xx siblings. `DMA_TXAGG_NUM` sits at the same `dword7[31:24]`, but this
+  family's checksum is folded *inside* `fill_tx_desc_8733b`, so the count is
+  built in rather than patched on and re-checksummed — byte `0x1f` is inside
+  the checksummed span (the fold skips only `0x1c-0x1d`), so writing it after
+  the checksum yields a descriptor the chip rejects. And `BLK_DESC_NUM = 3`
+  was already programmed by MAC init before this knob existed, so no
+  bring-up change was needed to enable it.
+  **This is the family where batching actually pays.** On the CV610 craft one
+  bulk-OUT submission costs ~248 µs of CPU against ~22 µs on x86, and ~87% of
+  that is the kernel USB submit/completion path — so packing 3:1 measured
+  **248 → 148 µs per frame, 43.0% → 26.7% of one core at ~1750 fps**, with
+  the frame rate unchanged. On x86 the same A/B moves 21.5 → 10.6 µs. Where
+  the host is small, this knob is worth roughly ten points of a core.
 - **Jaguar1 (8812A/8811A/8821A/8814A)**: vendor-parity — the first block
   carries the 8-byte PKT_OFFSET reserve (dropped at a boundary total), and the
   OQT guard caps descriptor STARTS per bulk window (8812A = 1, 8814A = 3,

@@ -108,6 +108,31 @@ unrelated register map.
   The pre-change binary measured **flat in the same session and geometry**
   (0.3 dB across the same 64 qdB) — the do-nothing control that makes the
   14 dB readable.
+- **USB TX aggregation is ported, and this is the family it matters most on.**
+  The mechanism (block count placement, the checksum-ordering constraint, the
+  URB-vs-frame accounting) is doc-commented at
+  `TxDescriptor8733b.h`'s `agg_num` and `Rtl8733bDevice::send_packets` — read
+  it there. What only lives here:
+  - **Bring-up needed no change.** MAC init *already* programmed
+    `BLK_DESC_NUM = 3` into `DWBCN0_CTRL[7:4]` (0x0208), the same field and
+    value the 88xx siblings use. The port was two things — a descriptor field
+    and the packer — because of that.
+  - **Why it is worth having here specifically.** One bulk submission costs
+    **~248 µs of CPU on the CV610 craft** against ~22 µs on x86, ~87% of it
+    the kernel USB path. Craft A/B at ~1750 fps: **248 → 148 µs per frame,
+    43.0 → 26.7% of one core**, frame rate unchanged. The counterparts, in the
+    same breath: it buys **nothing on air** — same frames, same airtime, purely
+    host CPU; it buys nothing at all unless the caller uses `send_packets`
+    (waybeam-link does not); and the win shrinks with the host, being only
+    ~11 µs/frame on x86.
+  - **Frame counts cannot verify it.** The 8822BU precedent is that wrong
+    packing makes the TXDMA re-air block 1 `agg_num` times, and `rx_hits` is
+    identical either way — it was 23900 in both arms here. Only per-frame
+    stamps discriminate (`DEVOURER_TX_QOS_DATA` + `DEVOURER_RX_PCTR`, count
+    distinct `pctr`): **ratio 1.00 = distinct, ~3.00 = re-airing**. Verified
+    1.00 with the boundary shim both off and on — and the shim needs a payload
+    chosen for it (MPDU length ≡ 472 mod 512 at USB HS), because a fixed-payload
+    sweep never reaches it.
 - **The thermal table is chosen once per channel set, not per frame.** The CCK
   and OFDM/HT variants of the thermal-compensation table are different tables.
   `configure_tx_power` picks one from the configured TX mode and leaves it,

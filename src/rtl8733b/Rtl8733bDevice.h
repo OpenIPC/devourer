@@ -39,6 +39,20 @@ public:
    * interface declaration. */
   void FastRetune(uint8_t channel, bool cache_rf) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
+  /* USB TX aggregation (cfg.tx.usb_agg_max / DEVOURER_TX_USB_AGG): pack
+   * consecutive frames into one bulk-OUT URB. Measured on the CV610 craft,
+   * this is the lever that matters on an embedded host — a single submission
+   * costs ~248 us of CPU there against ~22 us on x86, and ~87% of that is the
+   * kernel USB submit/completion path, so folding three frames into one URB
+   * removes two of every three (measured: 248 -> 148 us per frame on the
+   * craft, frame rate unchanged). Knob off / non-USB falls back to the
+   * interface-default per-frame loop, byte-identical.
+   *
+   * Note when reading TX stats against this: GetTxStats().submitted counts
+   * bulk-OUT transfers, so an aggregated session reports roughly frames/3 —
+   * the same accounting Jaguar1/2/3 have, not a throughput drop. The
+   * per-URB `tx.agg` event carries the real frame count. */
+  size_t send_packets(const TxPacketView *pkts, size_t count) override;
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;
   SelectedChannel GetSelectedChannel() override;
@@ -72,8 +86,12 @@ public:
 private:
   void bring_up_to_phy();
   bool configure_tx_power(SelectedChannel channel);
+  /* Fill one [txdesc][frame] block at `out`. `agg_num` is the USB TX
+   * aggregation block count and belongs on the FIRST descriptor of a packed
+   * URB only; 0 everywhere else, which is what keeps the single-frame path
+   * byte-identical. */
   size_t build_tx_block(const uint8_t *packet, size_t length, uint8_t *out,
-                        uint8_t packet_offset);
+                        uint8_t packet_offset, uint8_t agg_num = 0);
 
   RtlAdapter _device;
   Logger_t _logger;

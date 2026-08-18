@@ -114,6 +114,20 @@ struct TxDescConfig {
   uint8_t bandwidth = 0; // 0=20 MHz, 1=40 MHz
   uint8_t data_sc = 0;
   uint8_t packet_offset = 0; // 8-byte USB boundary shim count
+  /* USB TX aggregation block count, set on the FIRST descriptor of a packed
+   * bulk-OUT URB and left 0 on every other descriptor and on every
+   * single-frame transfer (0 and 1 are both "one block" to the TXDMA, and 0
+   * keeps the single-frame path byte-identical to before this field existed).
+   * HALMAC DMA_TXAGG_NUM, dword7[31:24] — the same placement the 8822C
+   * carries it at, alongside the checksum in the same dword's low half.
+   * Capped by BLK_DESC_NUM = 3, which MAC init already programs.
+   *
+   * ORDERING: byte 0x1f is INSIDE the checksummed span (the fold covers 32
+   * bytes and skips only 0x1c-0x1d, the checksum field itself), so this must
+   * be written BEFORE the checksum. fill_tx_desc_8733b does that by
+   * construction; the 8822C's patch-then-recompute shape does not port here,
+   * because this family folds the checksum inside the fill. */
+  uint8_t agg_num = 0;
   uint8_t retry_limit = 0;
   bool short_gi = false;
   bool ldpc = false;
@@ -127,7 +141,7 @@ inline bool valid_tx_desc_config(const TxDescConfig &cfg) {
   return cfg.packet_size != 0 && cfg.sequence <= 0x0fff &&
          (legacy_cck || legacy_ofdm || ht_1ss) && cfg.rate_id <= 0x1f &&
          cfg.bandwidth <= 1 && cfg.data_sc <= 0x0f &&
-         cfg.packet_offset <= 1 &&
+         cfg.packet_offset <= 1 && cfg.agg_num <= 3 &&
          cfg.retry_limit <= 0x3f &&
          (!legacy_cck || cfg.bandwidth == 0) && !cfg.ldpc &&
          (!(legacy_cck || legacy_ofdm) || !cfg.short_gi);
@@ -169,6 +183,11 @@ inline bool fill_tx_desc_8733b(uint8_t *desc, size_t desc_len,
   txdesc_set_bits(desc + 0x14, 7, 1, cfg.ldpc ? 1 : 0);
   txdesc_set_bits(desc + 0x20, 15, 1, 0); // preserve caller sequence
   txdesc_set_bits(desc + 0x24, 12, 12, cfg.sequence);
+  /* DMA_TXAGG_NUM before the checksum, not after: the fold covers 32 bytes
+   * skipping only 0x1c-0x1d (the checksum field itself), so byte 0x1f is
+   * INSIDE the checksummed span. Writing the count afterwards would leave a
+   * descriptor the chip rejects. */
+  txdesc_set_bits(desc + 0x1c, 24, 8, cfg.agg_num);
   txdesc_set_bits(desc + 0x1c, 0, 16, txdesc_checksum_8733b(desc));
   return true;
 }

@@ -8,12 +8,13 @@
 #include <vector>
 
 #include "RateDefinitions.h"
-#include "RadiotapPeek.h"
+#include "RadiotapPeek.h" /* send_packets batch pre-parse */
 #include "RadiotapTxFlags.h"
 #include "RxParseAbort.h" /* rx.parse_abort — abandoned-aggregate event */
 #include "rtl8733b/Rtl8733bUsbIds.h"
 #include "rtl8733b/TxDescriptor8733b.h"
 #include "SignalStop.h"
+#include "TxAggPlan.h" /* shared USB TX aggregation layout planner */
 
 extern "C" {
 #include "ieee80211_radiotap.h"
@@ -484,9 +485,146 @@ SelectedChannel Rtl8733bDevice::GetSelectedChannel() {
   return _channel;
 }
 
+size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
+  const unsigned agg = _cfg.tx.usb_agg_max;
+  if (agg <= 1 || !_device.is_usb() || count == 0)
+    return IRtlDevice::send_packets(pkts, count);
+
+  std::lock_guard<std::recursive_mutex> lock(_reg_mu);
+  if (!_phy_ready || !_mac_ready || !_tx_ready) {
+    _logger->error("RTL8733B TX rejected before InitWrite");
+    return 0;
+  }
+
+  devourer::TxAggLimits lim;
+  lim.desc_size = rtl8733b::kTxDescSize;
+  lim.bulk_size = _device.speed() >= devourer::kUsbSpeedSuper  ? 1024
+                  : _device.speed() >= devourer::kUsbSpeedHigh ? 512
+                                                               : 64;
+  /* BLK_DESC_NUM: MAC init already programs 3 into DWBCN0_CTRL[7:4]
+   * (Halmac8733bMac.cpp) — the same field and value the HalMAC 88xx siblings
+   * use — so 3 descriptors per bulk transfer is what this TXDMA parses.
+   * Layout is rtw88/HalMAC parity: no first-block PKT_OFFSET reserve. */
+  lim.max_frames = std::min<unsigned>(agg, 3u);
+  lim.descs_per_bulk = 0;
+  lim.first_reserve = false;
+
+  size_t done = 0, ok = 0;
+  while (done < count) {
+    /* Collect the contiguous run for ONE URB. A frame carrying a radiotap
+     * CHANNEL other than the session channel ends the run — this backend does
+     * not retune mid-submission, so build_tx_block refuses such a frame
+     * outright and it must not be packed beside frames that would have
+     * aired. */
+    std::vector<size_t> lens;
+    for (size_t i = done; i < count && lens.size() < lim.max_frames; ++i) {
+      /* A null view is treated exactly like a malformed one: it ends the run
+       * and, if it led, is skipped per the IRtlDevice::send_packets
+       * contract. */
+      const uint16_t rlen =
+          pkts[i].data == nullptr
+              ? uint16_t{0}
+              : devourer::radiotap_hdr_len(pkts[i].data, pkts[i].len);
+      if (rlen == 0)
+        break;
+      const int want =
+          devourer::radiotap_peek_channel(pkts[i].data, pkts[i].len);
+      if (want > 0 && want != _channel.Channel) {
+        /* This backend retunes for nobody mid-submission — build_tx_block
+         * refuses an off-channel frame outright. A LEADING one still has to
+         * enter the run alone, so the single-frame path below refuses it and
+         * `done` moves past it; ending the run empty here instead would spin
+         * this loop forever on the same entry, holding _reg_mu. */
+        if (lens.empty())
+          lens.push_back(pkts[i].len - rlen);
+        break;
+      }
+      lens.push_back(pkts[i].len - rlen);
+    }
+    if (lens.empty()) {
+      /* The leading view was null or malformed. This is also the loop's
+       * termination guarantee: `done` advances on every iteration whatever
+       * the collector above decided, so no future run rule can reintroduce a
+       * non-advancing path. */
+      ++done;
+      continue;
+    }
+
+    const devourer::TxAggPlan plan =
+        devourer::plan_tx_agg(lens.data(), lens.size(), lim);
+    if (plan.frames() <= 1) {
+      /* One block (or a frame the URB cap refuses): the classic single-frame
+       * path is byte-identical and uncapped. */
+      if (send_packet(pkts[done].data, pkts[done].len))
+        ++ok;
+      ++done;
+      continue;
+    }
+
+    /* The block count rides the FIRST descriptor, and it must be in place
+     * before that descriptor is checksummed — hence built in, not patched on
+     * afterwards the way the 8822C does it (its checksum is recomputable in
+     * isolation; this one is folded inside fill_tx_desc_8733b). */
+    std::vector<uint8_t> urb(plan.total, 0);
+    size_t built = 0;
+    for (size_t k = 0; k < plan.frames(); ++k) {
+      const uint8_t poff = (k == 0 && plan.shim) ? 1 : 0;
+      const uint8_t anum =
+          k == 0 ? static_cast<uint8_t>(plan.frames()) : uint8_t{0};
+      if (build_tx_block(pkts[done + k].data, pkts[done + k].len,
+                         urb.data() + plan.blocks[k].offset, poff, anum) == 0)
+        break; /* pre-validated, so only a defensive bail */
+      ++built;
+    }
+    if (built != plan.frames()) {
+      for (size_t k = 0; k < plan.frames(); ++k, ++done)
+        if (send_packet(pkts[done].data, pkts[done].len))
+          ++ok;
+      continue;
+    }
+
+    const int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
+                                             urb.data(), urb.size(),
+                                             /*timeout_ms=*/100);
+    /* bulk_send_sync_ep returns BYTES SUBMITTED, so `rc >= 0` also covers a
+     * short write. A truncated URB means the chip got a prefix — some
+     * trailing block is partial or absent — and there is no way to say which
+     * frames aired, so none of them may be reported as submitted. The
+     * single-frame path already refuses a short write; the aggregated one
+     * must not be the looser of the two in the same backend. */
+    const bool sent_all = rc == static_cast<int>(urb.size());
+    if (rc >= 0 && !sent_all)
+      _logger->error("RTL8733B aggregated TX short on EP 0x{:02x}: {}/{} "
+                     "({} frames dropped)",
+                     _device.first_bulk_out_ep(), rc, urb.size(),
+                     plan.frames());
+    devourer::Ev(_logger->events(), "tx.agg")
+        .f("frames", (unsigned long long)plan.frames())
+        .f("bytes", (unsigned long long)urb.size())
+        .f("sent", (long long)rc)
+        .f("shim", plan.shim)
+        .f("ok", sent_all);
+    if (sent_all) {
+      ok += plan.frames();
+      /* Same one-shot latch send_packet uses — a session whose very first TX
+       * is aggregated must still say so once, or the "first TX accepted"
+       * breadcrumb goes missing exactly when the packing is what is on
+       * trial. It counts URB acceptances, not frames; it is a latch, not a
+       * meter. */
+      if (_tx_submits.fetch_add(1) == 0)
+        _logger->info(
+            "RTL8733B first TX accepted (aggregated): EP=0x{:02x} frames={} "
+            "bytes={} shim={}",
+            _device.first_bulk_out_ep(), plan.frames(), urb.size(), plan.shim);
+    }
+    done += plan.frames();
+  }
+  return ok;
+}
+
 size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
-                                      uint8_t *out,
-                                      uint8_t packet_offset) {
+                                      uint8_t *out, uint8_t packet_offset,
+                                      uint8_t agg_num) {
   if (packet == nullptr || out == nullptr)
     return 0;
   const uint16_t radiotap_length =
@@ -595,6 +733,7 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
       cfg.rate_hw, cfg.bandwidth, _channel.Channel > 14);
   cfg.data_sc = data_sc;
   cfg.packet_offset = packet_offset;
+  cfg.agg_num = agg_num;
   cfg.retry_limit = static_cast<uint8_t>(
       std::clamp(_cfg.tx.retry_limit, 0, 63));
   cfg.short_gi = false;

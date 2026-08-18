@@ -8,6 +8,22 @@
 #
 #   sudo bash tests/txagg_bench.sh
 #   TX_PID=0x8812 TX_VID=0x0bda BATCH=32 PAYLOAD=200 sudo bash tests/txagg_bench.sh
+#
+# Pass the env THROUGH sudo (`sudo -n env VAR=... bash tests/txagg_bench.sh`),
+# not before it — sudo strips it otherwise and the run silently uses the
+# defaults against an adapter that is not plugged in.
+#
+# RTL8733B (caps at 3 blocks; BATCH above that is clamped, not an error):
+#   sudo -n env TX_PID=0xf72b TX_VID=0x0bda RX_PID=0x8812 RX_VID=0x0bda \
+#     CH=6 RATE=MCS7 BATCH=3 bash tests/txagg_bench.sh
+#
+# What this script CANNOT tell you: `rx_hits` counts receptions, not distinct
+# frames, so equal counts are also what a chip re-airing block 1 agg-num times
+# would produce (the 8822BU failure). To separate them, stamp every frame and
+# count distinct stamps at the witness:
+#   TX adds DEVOURER_TX_QOS_DATA=1, RX adds DEVOURER_RX_PCTR=1, then
+#   `grep -o '"pctr":[0-9]*' rx.jsonl | sort -u | wc -l` against the rx.seq
+#   count. Ratio 1.0 = distinct delivery; ~3.0 = re-airing.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build"

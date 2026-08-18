@@ -593,9 +593,12 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
      * single-frame path already refuses a short write; the aggregated one
      * must not be the looser of the two in the same backend. */
     const bool sent_all = rc == static_cast<int>(urb.size());
-    if (rc >= 0 && !sent_all)
-      _logger->error("RTL8733B aggregated TX short on EP 0x{:02x}: {}/{} "
-                     "({} frames dropped)",
+    if (!sent_all)
+      /* Both failure shapes reach stderr — rc < 0 (transport error) and a
+       * short write — because the single-frame path logs both and this
+       * backend has no NAK-backoff flood concern excusing silence. */
+      _logger->error("RTL8733B aggregated TX failed/short on EP 0x{:02x}: "
+                     "{}/{} ({} frames dropped)",
                      _device.first_bulk_out_ep(), rc, urb.size(),
                      plan.frames());
     devourer::Ev(_logger->events(), "tx.agg")

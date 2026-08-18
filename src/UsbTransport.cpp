@@ -1018,6 +1018,20 @@ int UsbTransport::tx_sync(uint8_t ep, uint8_t *packet, size_t length,
                    (int)length);
     return rc;
   }
+  if (actual != static_cast<int>(length)) {
+    /* libusb reported success but moved fewer bytes than asked. Under the
+     * full-write contract the device layers enforce (a frame the chip got
+     * only a prefix of is not sent), this is a failure and must count as one
+     * here too — TxStats.failed is "did not complete OK", and a consumer
+     * comparing it against tx.frame/tx.agg outcomes must see the same
+     * verdict. No libusb code exists for the case, hence the sentinel. */
+    _tx_failed.fetch_add(1, std::memory_order_relaxed);
+    _tx_last_rc.store(devourer::kTxShortWriteRc, std::memory_order_relaxed);
+    _tx_last_timeout.store(false, std::memory_order_relaxed);
+    _logger->error("bulk_send EP {} SHORT {}/{} bytes", (int)ep, actual,
+                   (int)length);
+    return actual;
+  }
   _logger->info("bulk_send EP {} OK {} bytes", (int)ep, actual);
   return actual;
 }

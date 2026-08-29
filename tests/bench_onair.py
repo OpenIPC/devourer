@@ -28,6 +28,7 @@ CHIPS = {
     "RTL8812EU": ("3-2.3.3", "0x0bda", "0xa81a"),   # Jaguar3 EU (rtl8822e); adjust sysfs
     "RTL8822BU": ("4-2.3.3", "0x2357", "0x012d"),   # Jaguar2 (8822b); TP-Link Archer T3U
     "RTL8811CU": ("9-1.3", "0x0bda", "0xc811"),     # Jaguar2 (8821c); COMFAST CF-811AC
+    "RTL8733BU": ("9-1.3", "0x0bda", "0xb733"),     # RTL8733B; LB-LINK BL-M8733BU2-L
 }
 BANDS = [("2.4 GHz (ch6)", 6, 2437e6), ("UNII-1 (ch36)", 36, 5180e6),
          ("UNII-2/3 (ch149)", 149, 5745e6)]

@@ -995,11 +995,19 @@ int main(int argc, char **argv) {
   uint8_t tx_band = 0;
   if (const char *b = std::getenv("DEVOURER_BAND"))
     tx_band = static_cast<uint8_t>(std::atoi(b));
-  rtlDevice->InitWrite(SelectedChannel{
-      .Channel = static_cast<uint8_t>(channel),
-      .ChannelOffset = init_offset,
-      .ChannelWidth = init_width,
-      .Band = tx_band});
+  try {
+    rtlDevice->InitWrite(SelectedChannel{
+        .Channel = static_cast<uint8_t>(channel),
+        .ChannelOffset = init_offset,
+        .ChannelWidth = init_width,
+        .Band = tx_band});
+  } catch (const std::exception &e) {
+    /* InitWrite returns void, so a refused bring-up (e.g. a channel/width/
+     * offset combination the chip rejects) surfaces as an exception. The
+     * device already tore itself down; exit cleanly instead of aborting. */
+    logger->error("TX bring-up failed: {}", e.what());
+    return 1;
+  }
 
   write_sentinel(0xBEEF, "post-init/pre-TX");
   devourer::Ev(*g_ev, "init.timing")

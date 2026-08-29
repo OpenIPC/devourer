@@ -122,10 +122,9 @@ bool ChannelState8733b::matches(const ChannelPlan8733b &plan) const {
   } else if (plan.width == CHANNEL_WIDTH_5 ||
              plan.width == CHANNEL_WIDTH_10) {
     const uint32_t small_bw = plan.width == CHANNEL_WIDTH_5 ? 1u : 2u;
-    const uint32_t adc = plan.width == CHANNEL_WIDTH_5 ? 0xau : 0xbu;
     bb_ok = (bb_9b0 & 0x0000ffcfu) == (small_bw << 6) &&
-            ((bb_9b4 & 0x00000700u) >> 8) == small_bw &&
-            (bb_9f0 & 0xfu) == adc && (bb_81c & 0xfu) == 0;
+            ((bb_9b4 & 0x00000700u) >> 8) == plan.dac_code() &&
+            (bb_9f0 & 0xfu) == plan.adc_code() && (bb_81c & 0xfu) == 0;
   } else {
     bb_ok = (bb_9b0 & 0x0000ffcfu) == 0;
   }
@@ -243,8 +242,13 @@ Phy8733b::channel_plan(SelectedChannel channel) {
   plan.width = channel.ChannelWidth;
   if (!legal_20mhz(plan.primary) || channel.Band == 6)
     return std::nullopt;
-  if (plan.width == CHANNEL_WIDTH_20 || plan.width == CHANNEL_WIDTH_5 ||
-      plan.width == CHANNEL_WIDTH_10) {
+  /* WIDTH_5 is refused outright: on this die the 5 MHz BB small-BW mode does
+   * not produce packets — it airs a continuous carrier, measured across the
+   * entire DAC/ADC divider code space on the b733 unit (docs/rtl8733b.md
+   * "Narrowband status"). 10 MHz is qualified and stays. */
+  if (plan.width == CHANNEL_WIDTH_5)
+    return std::nullopt;
+  if (plan.width == CHANNEL_WIDTH_20 || plan.width == CHANNEL_WIDTH_10) {
     if (plan.offset != 0)
       return std::nullopt;
     plan.center = plan.primary;
@@ -875,8 +879,8 @@ bool Phy8733b::switch_bandwidth(const ChannelPlan8733b &plan) {
   if (narrow) {
     const uint32_t small_bw = plan.width == CHANNEL_WIDTH_5 ? 1u : 2u;
     set_bb(0x09b0, 0xc0u, small_bw);
-    set_bb(0x09b4, 0x0700u, small_bw);
-    set_bb(0x09f0, 0xfu, plan.width == CHANNEL_WIDTH_5 ? 0xau : 0xbu);
+    set_bb(0x09b4, 0x0700u, plan.dac_code());
+    set_bb(0x09f0, 0xfu, plan.adc_code());
     set_bb(0x081c, 0xfu, 0);
   }
   spur_cancellation();
@@ -970,7 +974,7 @@ TssiBbState8733b Phy8733b::read_tssi_bb_state() {
 
 bool Phy8733b::prepare_tssi_bb(SelectedChannel channel,
                                const EfuseInfo &efuse) {
-  const auto channel_cfg = channel_plan(channel);
+  const auto channel_cfg = planned(channel);
   const uint8_t path = static_cast<uint8_t>(get_bb(0x1884, 1u << 20));
   const auto plan =
       tssi_bb_plan(_tx_power_targets, channel.Channel, _rfe_type, path);
@@ -1168,7 +1172,7 @@ void Phy8733b::apply_tssi_analog(
 
 bool Phy8733b::audit_tssi_analog(SelectedChannel channel,
                                  const EfuseInfo &efuse) {
-  const auto channel_cfg = channel_plan(channel);
+  const auto channel_cfg = planned(channel);
   if (!_initialized || !channel_cfg ||
       efuse.tx_power_mode != TxPowerPgMode8733b::TssiOffset ||
       get_bb(0x4318, 0x70000000u) != 0 ||
@@ -1229,7 +1233,7 @@ bool Phy8733b::audit_tssi_analog(SelectedChannel channel,
 bool Phy8733b::audit_tssi_enable(SelectedChannel channel,
                                  const EfuseInfo &efuse,
                                  uint8_t max_target_qdbm) {
-  const auto channel_cfg = channel_plan(channel);
+  const auto channel_cfg = planned(channel);
   const uint8_t path = static_cast<uint8_t>(get_bb(0x1884, 1u << 20));
   const auto capped = tssi_bb_plan(_tx_power_targets, channel.Channel,
                                    _rfe_type, path, max_target_qdbm);
@@ -1316,7 +1320,7 @@ bool Phy8733b::audit_tssi_enable(SelectedChannel channel,
 bool Phy8733b::enable_tssi_tracking(SelectedChannel channel,
                                     const EfuseInfo &efuse,
                                     uint8_t max_target_qdbm, int offset_qdb) {
-  const auto channel_cfg = channel_plan(channel);
+  const auto channel_cfg = planned(channel);
   const uint8_t path = static_cast<uint8_t>(get_bb(0x1884, 1u << 20));
   const auto capped = tssi_bb_plan(_tx_power_targets, channel.Channel,
                                    _rfe_type, path, max_target_qdbm,
@@ -1533,7 +1537,7 @@ TssiDeState8733b Phy8733b::read_tssi_de_state() {
 
 bool Phy8733b::prepare_tssi_offsets(SelectedChannel channel,
                                     const EfuseInfo &efuse) {
-  const auto channel_cfg = channel_plan(channel);
+  const auto channel_cfg = planned(channel);
   const auto de = tssi_de_plan(efuse.tssi_power, channel.Channel);
   if (!_initialized || !channel_cfg || !de ||
       efuse.tx_power_mode != TxPowerPgMode8733b::TssiOffset ||
@@ -1613,7 +1617,7 @@ uint8_t Phy8733b::read_thermal() {
 }
 
 bool Phy8733b::set_channel(SelectedChannel channel) {
-  const auto plan = channel_plan(channel);
+  const auto plan = planned(channel);
   if (!_initialized || !plan) {
     _logger->error(
         "RTL8733B channel: reject primary={} width={} offset={} initialized={}",
@@ -1675,7 +1679,7 @@ bool Phy8733b::set_channel(SelectedChannel channel) {
 bool Phy8733b::fast_retune(SelectedChannel channel, bool tssi_live,
                            uint8_t max_target_qdbm, bool cache_rf,
                            int offset_qdb) {
-  const auto plan = channel_plan(channel);
+  const auto plan = planned(channel);
   if (!_initialized || !plan || !_fr_plan)
     return false;
   const ChannelPlan8733b cur = *_fr_plan;

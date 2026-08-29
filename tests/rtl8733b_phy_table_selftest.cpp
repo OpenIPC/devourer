@@ -177,14 +177,13 @@ int main() {
   expect("illegal 40 MHz pair rejected",
          !rtl8733b::Phy8733b::channel_plan(
              SelectedChannel{40, 1, CHANNEL_WIDTH_40}));
-  expect("5 MHz experimental plan",
-         ch5 && ch5->center == 6 && ch5->primary_index == 0 && ch5->is_2g);
-  expect("10 MHz experimental plan",
+  expect("5 MHz refused (continuous-carrier mode on this die)", !ch5);
+  expect("10 MHz plan",
          ch10 && ch10->center == 36 && ch10->primary_index == 0 &&
              !ch10->is_2g);
   expect("narrowband offset rejected",
          !rtl8733b::Phy8733b::channel_plan(
-             SelectedChannel{6, 1, CHANNEL_WIDTH_5}));
+             SelectedChannel{36, 1, CHANNEL_WIDTH_10}));
 
   rtl8733b::ChannelState8733b cs;
   cs.rf_a_18 = cs.rf_b_18 = (1u << 16) | (1u << 8) | (1u << 11) | 38;
@@ -198,18 +197,18 @@ int main() {
   expect("channel predicate rejects path divergence",
          ch40lo && !cs.matches(*ch40lo));
 
-  cs.rf_a_18 = cs.rf_b_18 = (3u << 10) | 6;
-  cs.bb_9b0 = 1u << 6;
-  cs.bb_9b4 = 1u << 8;
-  cs.bb_9f0 = 0xa;
+  cs.rf_a_18 = cs.rf_b_18 = (1u << 16) | (1u << 8) | (3u << 10) | 36;
+  cs.rf_a_19 = cs.rf_b_19 = 0;
+  cs.bb_9b0 = 2u << 6;
+  cs.bb_9b4 = 2u << 8;
+  cs.bb_9f0 = 0xb;
   cs.bb_81c = 0;
   cs.data_sc = 0;
   cs.wmac_trxptcl = 0;
-  expect("5 MHz experimental channel-state predicate",
-         ch5 && cs.matches(*ch5));
-  cs.bb_9f0 = 0xb;
-  expect("5 MHz predicate rejects 10 MHz ADC clock",
-         ch5 && !cs.matches(*ch5));
+  expect("10 MHz channel-state predicate", ch10 && cs.matches(*ch10));
+  cs.bb_9f0 = 0xa;
+  expect("10 MHz predicate rejects 5 MHz ADC clock",
+         ch10 && !cs.matches(*ch10));
 
   rtl8733b::TxAgcState8733b txagc;
   txagc.cck_ref_a = txagc.cck_ref_b = rtl8733b::kSafeTxAgcIndex8733b;

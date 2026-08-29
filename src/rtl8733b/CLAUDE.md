@@ -279,17 +279,21 @@ knob is told too, and so it fires exactly once per bring-up.
 
 ## Validation status
 
-Every on-air claim rests on **one** physical unit: a bare unbranded 1T1R
-RTL8731BU module, `0bda:f72b`, cut D, USB high speed, witnessed by an
-RTL8812AU. No SDR was available, so occupied bandwidth, spectral mask, EVM and
-absolute power are unmeasured — which is also why `narrowband_ok` stays false
-despite the 5/10 MHz register sequence reading back. The code is more
-permissive than the cap: `build_tx_block` accepts a 5/10 MHz session width, so
-narrowband is reachable while unadvertised. No `0bda:b733` combo
-module has been seen, no vendor-driver A/B control was obtained, and the bench
-hub could not switch VBUS, so only warm re-init and physical replug were
-tested. The full tested/deferred matrix, the provenance pins and the second
-unit that overheated and was excluded: `docs/rtl8733b.md`.
+On-air claims rest on **two** physical units: the original bare unbranded 1T1R
+RTL8731BU module (`0bda:f72b`, cut D, USB high speed, RTL8812AU witness) and a
+second sample, the LB-LINK BL-M8733BU2-L combo module (`0bda:b733`, also
+cut D), which re-ran the core evidence set — including true VBUS cold boots —
+and agreed everywhere. SDR characterization exists for the b733 unit (on-air
+throughput, occupied bandwidth at 10/20/40 MHz); spectral mask, EVM and
+absolute power remain unmeasured. **Narrowband is 10 MHz only**
+(`narrowband_ok` true, `kBw10` in the mask): SDR OBW 8.28 MHz plus two-way
+cross-decode with an RTL8812CU narrowband peer on both bands, legacy and HT;
+`WIDTH_5` is refused at `channel_plan` because the 5 MHz BB mode airs a
+continuous carrier across the whole DAC/ADC divider code space
+(`DEVOURER_NB_DAC`/`DEVOURER_NB_ADC` map the codes for any future attempt).
+No vendor-driver A/B control was obtained (its module does not build on
+modern kernels). The full tested/deferred matrix, the provenance pins and the
+second `f72b` unit that overheated and was excluded: `docs/rtl8733b.md`.
 
 Headless coverage: `tests/rtl8733b_{efuse,phy_table,rx_parse,tx_desc}_selftest.cpp`
 in `ctest`. Hardware: `tests/rtl8733b_lifecycle_soak.sh` (bounded warm

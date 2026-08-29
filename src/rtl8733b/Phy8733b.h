@@ -48,6 +48,23 @@ struct ChannelPlan8733b {
   uint8_t offset = 0;
   ChannelWidth_t width = CHANNEL_WIDTH_20;
   bool is_2g = true;
+  /* 5/10 MHz divider-mapping experiment overrides (DEVOURER_NB_DAC /
+   * DEVOURER_NB_ADC): force the 0x9b4[10:8] DAC-divider / 0x9f0[3:0]
+   * ADC-clock codes the experimental narrowband path writes. The codes the
+   * vendor stub carries are measured not to narrow the emission (see
+   * docs/rtl8733b.md "Narrowband status"); the encoding is die-specific and
+   * unmapped, and the Jaguar3 precedent is that the vendor's own table was
+   * wrong on silicon until an SDR sweep found the live codes. Unset = the
+   * stub values, so both the writes and the readback verifier track. */
+  std::optional<uint8_t> nb_dac;
+  std::optional<uint8_t> nb_adc;
+
+  uint8_t dac_code() const {
+    return nb_dac ? *nb_dac : (width == CHANNEL_WIDTH_5 ? 1u : 2u);
+  }
+  uint8_t adc_code() const {
+    return nb_adc ? *nb_adc : (width == CHANNEL_WIDTH_5 ? 0xau : 0xbu);
+  }
 };
 
 struct ChannelState8733b {
@@ -203,6 +220,13 @@ class Phy8733b {
 public:
   Phy8733b(RtlAdapter device, Logger_t logger);
 
+  /* DEVOURER_NB_DAC / DEVOURER_NB_ADC — see ChannelPlan8733b::nb_dac. */
+  void set_narrowband_overrides(std::optional<uint8_t> dac,
+                                std::optional<uint8_t> adc) {
+    _nb_dac = dac;
+    _nb_adc = adc;
+  }
+
   bool initialize(uint8_t cut, const EfuseInfo &efuse);
   PhyState read_state();
   bool set_channel(SelectedChannel channel);
@@ -329,6 +353,20 @@ private:
   Logger_t _logger;
   uint8_t _cut = 0;
   uint8_t _rfe_type = 0xff;
+  std::optional<uint8_t> _nb_dac;
+  std::optional<uint8_t> _nb_adc;
+
+  /* channel_plan stays a pure static (the selftests exercise it); this is
+   * the instance flavour that stamps the divider-experiment overrides so
+   * the writes and the readback verifier agree. */
+  std::optional<ChannelPlan8733b> planned(SelectedChannel channel) const {
+    auto plan = channel_plan(channel);
+    if (plan) {
+      plan->nb_dac = _nb_dac;
+      plan->nb_adc = _nb_adc;
+    }
+    return plan;
+  }
   TxPowerTargets8733b _tx_power_targets{};
   std::optional<TssiBbState8733b> _tssi_digital_snapshot;
   std::optional<TssiAnalogState8733b> _tssi_analog_snapshot;

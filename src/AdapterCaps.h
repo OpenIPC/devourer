@@ -80,7 +80,10 @@ inline uint8_t bw_mask_for_generation(ChipGeneration g) {
    * bw_sup declares BW_CAP_5M|10M); 160 MHz is 8852C-only (rtl8852c_halinit.c
    * bw_sup has BW_CAP_160M, rtl8852b_halinit.c tops at 80) and is OR'd in by
    * the device layer per variant. */
-  return g == ChipGeneration::Rtl8733b ? (kBw20 | kBw40)
+  /* RTL8733B: 10 MHz qualified (SDR OBW 8.28 MHz + two-way cross-decode with
+   * a Jaguar3 peer, both bands); 5 MHz is refused — its BB small-BW mode airs
+   * a continuous carrier on this die across the whole divider code space. */
+  return g == ChipGeneration::Rtl8733b ? (kBw10 | kBw20 | kBw40)
          : g == ChipGeneration::Jaguar1  ? ac
          : g == ChipGeneration::Unknown ? 0
                                         : (ac | kBw5 | kBw10);
@@ -210,7 +213,9 @@ struct AdapterCaps {
   int16_t per_pkt_txpwr_min_qdb = 0;  /* most negative per-packet trim */
   int16_t per_pkt_txpwr_max_qdb = 0;  /* most positive per-packet trim */
   bool per_pkt_txpwr_measured = false; /* on-air-confirmed for this family */
-  bool narrowband_ok = false;      /* 5/10 MHz re-clock (Jaguar2/Jaguar3) */
+  bool narrowband_ok = false;      /* narrowband BB re-clock exists; which
+                                    * widths via bw_mask kBw5/kBw10 (the
+                                    * RTL8733B is 10 MHz only) */
   uint8_t xtal_cap_max = 0;        /* crystal-cap trim range top (0 = no trim;
                                     * 0x3f on Jaguar1/2, 0x7f on Jaguar3) */
   uint8_t xtal_cap_default = 0;    /* efuse/default crystal-cap code */

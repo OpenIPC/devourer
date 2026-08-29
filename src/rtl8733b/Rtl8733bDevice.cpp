@@ -24,7 +24,9 @@ Rtl8733bDevice::Rtl8733bDevice(RtlAdapter device, Logger_t logger,
                                devourer::DeviceConfig cfg)
     : _device(device), _logger(std::move(logger)), _cfg(std::move(cfg)),
       _bringup(device, _logger), _mac(device, _logger),
-      _phy(device, _logger) {}
+      _phy(device, _logger) {
+  _phy.set_narrowband_overrides(_cfg.tuning.nb_dac, _cfg.tuning.nb_adc);
+}
 
 Rtl8733bDevice::~Rtl8733bDevice() {
   try {
@@ -843,6 +845,12 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
    * validation unit: ~55 ms call / ~10 ms p50 radio-live, vs the
    * ~330-440 ms full path (USB HS). */
   caps.fastretune_ok = true;
+  /* 10 MHz only — kBw5 is deliberately absent from bw_mask and WIDTH_5 is
+   * refused at channel_plan: on this die the 5 MHz BB small-BW mode airs a
+   * continuous carrier (measured across the full DAC/ADC divider code
+   * space), while 10 MHz is SDR- and cross-decode-qualified on both bands
+   * (docs/rtl8733b.md "Narrowband status"). */
+  caps.narrowband_ok = true;
   caps.txpwr = GetTxPowerCaps();
   return caps;
 }

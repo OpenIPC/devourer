@@ -386,11 +386,13 @@ struct DeviceConfig {
     /* env: DEVOURER_NB_DAC — 5/10 MHz divider-mapping experiments only.
      * Jaguar3: force the 3-bit DAC-divider code (0x9b4[10:8]). Jaguar2:
      * force the 0x8ac DAC clock field — bits [1:0] -> 0x8ac[21:20],
-     * bit 2 -> 0x8ac[28]. */
+     * bit 2 -> 0x8ac[28]. RTL8733B: force the 0x9b4[10:8] code the
+     * experimental narrowband path writes (stub default 1/2). */
     std::optional<uint8_t> nb_dac;
-    /* env: DEVOURER_NB_ADC — Jaguar2 5/10 MHz: force the 0x8ac ADC clock
-     * field — bits [1:0] -> 0x8ac[9:8], bit 2 -> 0x8ac[16] (divider-mapping
-     * experiments only). */
+    /* env: DEVOURER_NB_ADC — 5/10 MHz divider-mapping experiments only.
+     * Jaguar2: force the 0x8ac ADC clock field — bits [1:0] -> 0x8ac[9:8],
+     * bit 2 -> 0x8ac[16]. RTL8733B: force the 0x9f0[3:0] ADC-clock code
+     * (stub default 0xa/0xb). */
     std::optional<uint8_t> nb_adc;
     /* env: DEVOURER_XTAL_CAP — crystal-cap trim code applied at the end of
      * bring-up (IRtlDevice::SetXtalCap). The CFO lever for narrowband at the

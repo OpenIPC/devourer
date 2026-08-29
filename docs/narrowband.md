@@ -350,13 +350,21 @@ supports it. Support today: **Jaguar2 (8822B/8821C) and Jaguar3 (8822C/8822E)**
 fully, and **Jaguar1 on the 8812AU/8811AU and the 8814AU** — every generation.
 The 8821A is the one exclusion (its DAC-clock divide starves TX; see the walls).
 
-RTL8731BU/RTL8733BU has an **experimental, unadvertised** 5/10 MHz path. It
-ports the later `rtl8733bu-20230626` monitor-mode patch exactly: configure the
-RF as 20 MHz, then apply `0x9b0`/`0x9b4`/`0x9f0`/`0x81c` after the RF writes.
-The vendor HAL capability table itself declares only 20/40 MHz, and the patch
-calls this a dirty workaround for a no-RF-output failure. Register readback has
-passed on one `0bda:f72b`; `narrowband_ok` deliberately remains false until SDR
-occupied-bandwidth and independent narrowband decode tests pass.
+RTL8731BU/RTL8733BU: **10 MHz qualified, 5 MHz refused.** The path ports the
+later `rtl8733bu-20230626` monitor-mode patch (configure the RF as 20 MHz,
+then apply `0x9b0`/`0x9b4`/`0x9f0`/`0x81c` after the RF writes) even though
+the vendor HAL capability table declares only 20/40 MHz. At 10 MHz the b733
+unit measures OBW99 8.28 MHz on a quiet channel and cross-decodes two-way
+with an RTL8812CU narrowband peer at 90–97% on both bands (legacy 6M and HT
+MCS0/MCS7), while a 20 MHz receiver hears 0% of the same flood — the
+re-clock is real. Its wall is 5 MHz: the `0x9b0[7:6]=1` BB mode airs a
+**continuous carrier** across the entire DAC/ADC divider code space on both
+bands, so `WIDTH_5` is refused at the channel plan and `kBw5` is absent from
+the bandwidth mask. Two measurement lessons from its qualification: gate
+narrowband OBW on a quiet channel (ambient 20 MHz frames are wider than the
+signal and inflate a duty-gated PSD into an "inert" verdict), and prefer the
+20-vs-10 MHz peer-decode discriminator, which ambient cannot fake. Evidence:
+`docs/rtl8733b.md` "Narrowband status".
 
 Test scripts: `tests/jaguar2_narrowband_sdr.sh` and
 `tests/jaguar1_nb_divide_sweep.sh` (SDR occupied-bandwidth),

@@ -35,9 +35,9 @@ int main() {
              (ac | kBw5 | kBw10));
   expect("Unknown bw = 0",
          bw_mask_for_generation(ChipGeneration::Unknown) == 0);
-  expect("RTL8733B bw = 20/40",
+  expect("RTL8733B bw = 10/20/40 (5 MHz refused on this die)",
          bw_mask_for_generation(ChipGeneration::Rtl8733b) ==
-             (kBw20 | kBw40));
+             (kBw10 | kBw20 | kBw40));
   /* Kestrel (11ax) does 20/40/80 + 160 MHz (RTL8852C, validated on-air at
    * 6 GHz). */
   expect("Kestrel bw = 20/40/80/160",

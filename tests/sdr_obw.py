@@ -57,6 +57,10 @@ def main() -> int:
                          "clean 8.3 MHz emission read 16 MHz through ambient)")
     ap.add_argument("--occ", type=float, default=99.0,
                     help="occupied-power percentage (default 99)")
+    ap.add_argument("--dump-psd", default=None, metavar="CSV",
+                    help="write the gated average PSD as offset_hz,psd_db "
+                         "rows — for stitched spectral-mask analysis across "
+                         "several capture centers")
     ap.add_argument("--args", default=None,
                     help="UHD device args (e.g. serial=XXXX); default resolves "
                          "via DEVOURER_UHD_ARGS / tests/.uhd_args")
@@ -172,10 +176,22 @@ def main() -> int:
     above = np.flatnonzero(smdb > ref - 20)
     bw20 = (above[-1] - above[0] + 1) * binw if len(above) else 0.0
 
+    # Mean ON-block level: an UNCALIBRATED relative scale (dB full-scale-ish at
+    # this gain). Comparable across captures at the same gain/geometry only.
+    ap_all = np.concatenate(all_powers)
+    sig = float(10 * np.log10(ap_all[ap_all > thr].mean() + 1e-12))
+
+    if args.dump_psd:
+        with open(args.dump_psd, "w") as fh:
+            fh.write("offset_hz,psd_db\n")
+            for f, p in zip(freqs, 10 * np.log10(psd + 1e-18)):
+                fh.write(f"{f:.0f},{p:.2f}\n")
+
     print(f"sdr-obw: serial={serial} freq={args.freq/1e6:.0f}MHz "
           f"span={args.rate/1e6:.0f}MHz on_blocks={on_blocks}/{total_blocks} "
           f"obw{args.occ:.0f}={obw/1e6:.2f}MHz bw-20dBr={bw20/1e6:.2f}MHz "
-          f"center_off={(freqs[lo]+freqs[hi])/2/1e6:+.2f}MHz")
+          f"center_off={(freqs[lo]+freqs[hi])/2/1e6:+.2f}MHz "
+          f"sig={sig:.1f}dB floor={floor:.1f}dB")
     return 0
 
 

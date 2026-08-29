@@ -159,21 +159,20 @@ unrelated register map.
   transmitting above its settled level until the loop converges; pacing the
   same stream to tens of ms per frame lands on the settled value. Pace
   single-rate and let it settle before reading any power figure — otherwise
-  the tracking loop is what is being measured. No SDR has been on this part,
-  so the magnitude of the overshoot is not characterized; that is
-  SDR-gated work, not a number to quote.
+  the tracking loop is what is being measured. The magnitude of the
+  overshoot has not been characterized (the SDR campaigns so far ran
+  single-rate, per this very rule); it is not a number to quote.
 - **Thermal is telemetry, like everywhere else.** `InitWrite` logs one
   bring-up snapshot and `GetThermalStatus` serves the caller's own cadence.
   Nothing in the send path reads it: measured at 2.51 ms of a 2.71 ms
   per-frame budget on USB high speed, for a meter that tracks PA bias rather
   than junction temperature.
 
-The timing figures above (84 ms, ~11 fps, 2.51/2.71 ms) come from the single
-validation unit described below and have no in-repo oracle. They are
-register-sequence and USB-transfer costs, which is why they are quotable at
-all — nothing here asserts an RF-domain quantity, because no SDR has been on
-this part. Treat them as the order of magnitude to design against, not as
-constants.
+The timing figures above (84 ms, ~11 fps, 2.51/2.71 ms) come from the original
+`f72b` validation unit and have no in-repo oracle. They are register-sequence
+and USB-transfer costs. Treat them as the order of magnitude to design
+against, not as constants. (RF-domain quantities are now measured on the
+`b733` sample — see Validation status.)
 - **EFUSE**: physical packed map walked into a logical map. Running off the end
   of the readable span is address-space exhaustion, not corruption — a fully
   written map has no `0xff` terminator left to find, so that case returns
@@ -284,8 +283,9 @@ RTL8731BU module (`0bda:f72b`, cut D, USB high speed, RTL8812AU witness) and a
 second sample, the LB-LINK BL-M8733BU2-L combo module (`0bda:b733`, also
 cut D), which re-ran the core evidence set — including true VBUS cold boots —
 and agreed everywhere. SDR characterization exists for the b733 unit (on-air
-throughput, occupied bandwidth at 10/20/40 MHz); spectral mask, EVM and
-absolute power remain unmeasured. **Narrowband is 10 MHz only** (caps
+throughput, occupied bandwidth at 10/20/40 MHz, stitched spectral mask to
+±25 MHz, witness EVM, per-rate level flatness, TSSI-stability soak); absolute
+power remains unmeasured — the bench has no calibrated instrument. **Narrowband is 10 MHz only** (caps
 contract at its declarations in `src/AdapterCaps.h`): SDR OBW plus two-way
 cross-decode with an RTL8812CU narrowband peer on both bands, legacy and HT;
 `WIDTH_5` is refused at `channel_plan` because the 5 MHz BB mode airs no

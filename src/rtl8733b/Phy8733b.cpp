@@ -242,9 +242,9 @@ Phy8733b::channel_plan(SelectedChannel channel) {
   plan.width = channel.ChannelWidth;
   if (!legal_20mhz(plan.primary) || channel.Band == 6)
     return std::nullopt;
-  /* WIDTH_5 is refused outright: on this die the 5 MHz BB small-BW mode does
-   * not produce packets — it airs a continuous carrier, measured across the
-   * entire DAC/ADC divider code space on the b733 unit (docs/rtl8733b.md
+  /* WIDTH_5 is refused outright: on this die the 5 MHz BB small-BW mode airs
+   * no packets across the entire DAC/ADC divider code space, and was observed
+   * airing a continuous carrier from some warm states (docs/rtl8733b.md
    * "Narrowband status"). 10 MHz is qualified and stays. */
   if (plan.width == CHANNEL_WIDTH_5)
     return std::nullopt;

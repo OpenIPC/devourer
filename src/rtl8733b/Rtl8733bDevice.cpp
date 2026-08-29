@@ -846,9 +846,9 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
    * ~330-440 ms full path (USB HS). */
   caps.fastretune_ok = true;
   /* 10 MHz only — kBw5 is deliberately absent from bw_mask and WIDTH_5 is
-   * refused at channel_plan: on this die the 5 MHz BB small-BW mode airs a
-   * continuous carrier (measured across the full DAC/ADC divider code
-   * space), while 10 MHz is SDR- and cross-decode-qualified on both bands
+   * refused at channel_plan: on this die the 5 MHz BB small-BW mode airs no
+   * packets (measured across the full DAC/ADC divider code space), while
+   * 10 MHz is SDR- and cross-decode-qualified on both bands
    * (docs/rtl8733b.md "Narrowband status"). */
   caps.narrowband_ok = true;
   caps.txpwr = GetTxPowerCaps();

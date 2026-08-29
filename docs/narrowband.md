@@ -357,10 +357,11 @@ the vendor HAL capability table declares only 20/40 MHz. At 10 MHz the b733
 unit measures OBW99 8.28 MHz on a quiet channel and cross-decodes two-way
 with an RTL8812CU narrowband peer at 90–97% on both bands (legacy 6M and HT
 MCS0/MCS7), while a 20 MHz receiver hears 0% of the same flood — the
-re-clock is real. Its wall is 5 MHz: the `0x9b0[7:6]=1` BB mode airs a
-**continuous carrier** across the entire DAC/ADC divider code space on both
-bands, so `WIDTH_5` is refused at the channel plan and `kBw5` is absent from
-the bandwidth mask. Two measurement lessons from its qualification: gate
+re-clock is real. Its wall is 5 MHz: the `0x9b0[7:6]=1` BB mode airs **no
+packets** across the entire DAC/ADC divider code space on both bands — silent
+from a cold state, and observed airing a continuous full-power carrier from
+some warm states — so `WIDTH_5` is refused at the channel plan and `kBw5` is
+absent from the bandwidth mask. Two measurement lessons from its qualification: gate
 narrowband OBW on a quiet channel (ambient 20 MHz frames are wider than the
 signal and inflate a duty-gated PSD into an "inert" verdict), and prefer the
 20-vs-10 MHz peer-decode discriminator, which ambient cannot fake. Evidence:

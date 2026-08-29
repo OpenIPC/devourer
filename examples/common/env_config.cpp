@@ -186,10 +186,13 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.tuning.txpkt_step_qdb = static_cast<int>(v);
   if (env_long("DEVOURER_RFE", &v))
     cfg.tuning.rfe_type = static_cast<uint8_t>(v);
+  /* Raw codes — each backend masks to its own field width (J2/J3 3-bit,
+   * RTL8733B 4-bit ADC at 0x9f0[3:0], whose default codes 0xa/0xb a 0x7
+   * mask would silently corrupt). */
   if (env_long("DEVOURER_NB_DAC", &v))
-    cfg.tuning.nb_dac = static_cast<uint8_t>(v & 0x7);
+    cfg.tuning.nb_dac = static_cast<uint8_t>(v & 0xf);
   if (env_long("DEVOURER_NB_ADC", &v))
-    cfg.tuning.nb_adc = static_cast<uint8_t>(v & 0x7);
+    cfg.tuning.nb_adc = static_cast<uint8_t>(v & 0xf);
   if (env_long("DEVOURER_XTAL_CAP", &v))
     cfg.tuning.xtal_cap = static_cast<uint8_t>(v & 0x7f);
   cfg.tuning.cfo_track = env_flag("DEVOURER_CFO_TRACK");

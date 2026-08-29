@@ -58,8 +58,7 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first):
   firmware, MAC, descriptor and PHY paths. 1T1R, and the advertised surface is
   only what an independent witness decoded — legacy OFDM + HT MCS0-7, BCC,
   20/40 MHz on 2.4/5 GHz, plus long-preamble CCK on 2.4 GHz at 20 MHz, plus
-  10 MHz narrowband on both bands (5 MHz is refused — its BB mode airs a
-  continuous carrier on this die).
+  10 MHz narrowband (5 MHz refused — `src/rtl8733b/CLAUDE.md`).
   Everything the backend has not ported (TSF/beacons, hardware ACK, A-MPDU,
   the flat-index and per-rate TX-power knobs) falls through to `IRtlDevice`'s
   not-ported defaults rather than being faked, so read the base class before

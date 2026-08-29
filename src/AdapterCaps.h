@@ -80,9 +80,9 @@ inline uint8_t bw_mask_for_generation(ChipGeneration g) {
    * bw_sup declares BW_CAP_5M|10M); 160 MHz is 8852C-only (rtl8852c_halinit.c
    * bw_sup has BW_CAP_160M, rtl8852b_halinit.c tops at 80) and is OR'd in by
    * the device layer per variant. */
-  /* RTL8733B: 10 MHz qualified (SDR OBW 8.28 MHz + two-way cross-decode with
-   * a Jaguar3 peer, both bands); 5 MHz is refused — its BB small-BW mode airs
-   * a continuous carrier on this die across the whole divider code space. */
+  /* RTL8733B: 10 MHz qualified (SDR OBW + two-way cross-decode with a
+   * Jaguar3 peer, both bands); 5 MHz is refused — its BB small-BW mode airs
+   * no packets on this die (docs/rtl8733b.md "Narrowband status"). */
   return g == ChipGeneration::Rtl8733b ? (kBw10 | kBw20 | kBw40)
          : g == ChipGeneration::Jaguar1  ? ac
          : g == ChipGeneration::Unknown ? 0

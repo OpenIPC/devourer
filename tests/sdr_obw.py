@@ -48,6 +48,13 @@ def main() -> int:
                          "spectra start accumulating")
     ap.add_argument("--margin-db", type=float, default=8.0,
                     help="ON-block threshold = noise floor + margin")
+    ap.add_argument("--top-db", type=float, default=None,
+                    help="strong-block gate: keep only blocks within this "
+                         "many dB of the strongest block. For busy channels "
+                         "where a near-field DUT is much louder than ambient "
+                         "— ambient 20 MHz frames are WIDER than a narrowband "
+                         "signal and inflate the OBW integral (measured: a "
+                         "clean 8.3 MHz emission read 16 MHz through ambient)")
     ap.add_argument("--occ", type=float, default=99.0,
                     help="occupied-power percentage (default 99)")
     ap.add_argument("--args", default=None,
@@ -72,7 +79,12 @@ def main() -> int:
     wnorm = float((win ** 2).sum())
     warm_powers = []          # per-block mean power during warmup
     all_powers = []           # per-block mean power, whole capture (floor sanity)
-    psd_sum = np.zeros(FFT, dtype=np.float64)
+    # ON spectra accumulate into 1 dB power bins (index = floor(block dB),
+    # clamped to [-90, -1]) so the --top-db strong-block selection can be
+    # made after the peak is known while memory stays O(bins x FFT).
+    NBINS = 90
+    bin_sum = np.zeros((NBINS, FFT), dtype=np.float64)
+    bin_cnt = np.zeros(NBINS, dtype=np.int64)
     on_blocks = total_blocks = 0
     floor = None
     thr = np.inf
@@ -104,7 +116,11 @@ def main() -> int:
                 continue  # warmup blocks establish the floor, nothing else
             on = bp > thr
             if on.any():
-                psd_sum += sx[on].sum(axis=0)
+                bpdb = 10 * np.log10(bp[on] + 1e-12)
+                idx = np.clip(np.floor(bpdb).astype(int) + NBINS, 0,
+                              NBINS - 1)
+                np.add.at(bin_sum, idx, sx[on])
+                np.add.at(bin_cnt, idx, 1)
                 on_blocks += int(on.sum())
     finally:
         rx.issue_stream_cmd(uhd.types.StreamCMD(uhd.types.StreamMode.stop_cont))
@@ -121,7 +137,15 @@ def main() -> int:
     if abs(full_floor - floor) > 3:
         print(f"sdr-obw: WARNING warmup floor {floor:.1f} dB vs whole-capture "
               f"{full_floor:.1f} dB — floor drifted, re-run")
-    psd = psd_sum / on_blocks
+    used = bin_cnt > 0
+    if args.top_db is not None:
+        peak_bin = int(np.flatnonzero(used).max())
+        used &= np.arange(NBINS) > peak_bin - args.top_db
+    kept = int(bin_cnt[used].sum())
+    if args.top_db is not None and kept < on_blocks:
+        print(f"sdr-obw: top-db gate kept {kept}/{on_blocks} ON blocks "
+              f"(within {args.top_db:.0f} dB of the strongest)")
+    psd = bin_sum[used].sum(axis=0) / kept
 
     binw = args.rate / FFT
     freqs = (np.arange(FFT) - FFT // 2) * binw

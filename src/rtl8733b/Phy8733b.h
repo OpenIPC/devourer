@@ -59,11 +59,14 @@ struct ChannelPlan8733b {
   std::optional<uint8_t> nb_dac;
   std::optional<uint8_t> nb_adc;
 
+  /* Masked to the register field widths (0x9b4[10:8] / 0x9f0[3:0]) so the
+   * write and the readback verifier agree for any override value. */
   uint8_t dac_code() const {
-    return nb_dac ? *nb_dac : (width == CHANNEL_WIDTH_5 ? 1u : 2u);
+    return (nb_dac ? *nb_dac : (width == CHANNEL_WIDTH_5 ? 1u : 2u)) & 0x7u;
   }
   uint8_t adc_code() const {
-    return nb_adc ? *nb_adc : (width == CHANNEL_WIDTH_5 ? 0xau : 0xbu);
+    return (nb_adc ? *nb_adc : (width == CHANNEL_WIDTH_5 ? 0xau : 0xbu)) &
+           0xfu;
   }
 };
 

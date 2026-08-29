@@ -285,11 +285,12 @@ second sample, the LB-LINK BL-M8733BU2-L combo module (`0bda:b733`, also
 cut D), which re-ran the core evidence set — including true VBUS cold boots —
 and agreed everywhere. SDR characterization exists for the b733 unit (on-air
 throughput, occupied bandwidth at 10/20/40 MHz); spectral mask, EVM and
-absolute power remain unmeasured. **Narrowband is 10 MHz only**
-(`narrowband_ok` true, `kBw10` in the mask): SDR OBW 8.28 MHz plus two-way
+absolute power remain unmeasured. **Narrowband is 10 MHz only** (caps
+contract at its declarations in `src/AdapterCaps.h`): SDR OBW plus two-way
 cross-decode with an RTL8812CU narrowband peer on both bands, legacy and HT;
-`WIDTH_5` is refused at `channel_plan` because the 5 MHz BB mode airs a
-continuous carrier across the whole DAC/ADC divider code space
+`WIDTH_5` is refused at `channel_plan` because the 5 MHz BB mode airs no
+packets across the whole DAC/ADC divider code space, with a
+continuous-carrier failure mode observed warm
 (`DEVOURER_NB_DAC`/`DEVOURER_NB_ADC` map the codes for any future attempt).
 No vendor-driver A/B control was obtained (its module does not build on
 modern kernels). The full tested/deferred matrix, the provenance pins and the

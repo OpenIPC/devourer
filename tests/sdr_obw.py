@@ -2,19 +2,27 @@
 """Occupied-bandwidth measurement via USRP spectrum capture.
 
 Run a single-rate flood on the DUT, point this at the channel, and it reports
-the 99%-power occupied bandwidth (the regulatory OBW definition) plus the
+the 99%-power occupied bandwidth (equal-tail: the band between the 0.5% and
+99.5% cumulative-power edges, the regulatory OBW definition) plus the
 -20 dBr bandwidth (first 802.11 spectral-mask breakpoint) from a
 frame-gated average power spectrum.
 
-Method: capture at `--rate` (span = rate), gate out inter-frame gaps by
-per-block energy (same floor+margin rule sdr_duty.py uses), average the PSD
-over ON blocks only, notch the +/-150 kHz around DC (B2xx LO leakage), then
-integrate outward from the center until 99% of the in-span power is enclosed.
-The span must comfortably exceed the signal (25 Msps for a 20 MHz PPDU,
-50 Msps for 40 MHz) or the OBW integral is clipped and reads low.
+Method: capture at `--rate` (span = rate). The first `--warmup` seconds
+establish the idle floor (1st percentile of per-FFT-block power — the
+inter-frame gaps), then the remaining capture streams into a bounded
+accumulator: blocks above floor+margin contribute their spectrum, everything
+else is dropped, so memory stays O(FFT) regardless of rate or duration. The
++/-150 kHz around DC is notched (B2xx LO leakage) before any metric. The
+-20 dBr reference is the peak of a 5-bin median-smoothed PSD, so a single-bin
+spur can neither set nor widen it. The span must comfortably exceed the
+signal (25 Msps for a 20 MHz PPDU, 50 Msps for 40 MHz) or the OBW integral
+is clipped and reads low.
 
-An uncalibrated B210 is fine here: OBW and dBr points are relative measures
-within one capture. Absolute dBm stays out of scope.
+The radio is resolved through uhd_select (--args / DEVOURER_UHD_ARGS /
+tests/.uhd_args) and the opened device's serial is printed with the result —
+this bench has two B210s sharing one USB id. An uncalibrated B210 is fine
+here: OBW and dBr points are relative measures within one capture; absolute
+dBm stays out of scope.
 
   sudo python3 tests/sdr_obw.py --freq 5180e6 --rate 25e6 --secs 4
 """
@@ -35,13 +43,20 @@ def main() -> int:
     ap.add_argument("--rate", type=float, default=25e6, help="USRP sample rate = span")
     ap.add_argument("--gain", type=float, default=40.0)
     ap.add_argument("--secs", type=float, default=4.0)
+    ap.add_argument("--warmup", type=float, default=0.5,
+                    help="seconds used to establish the idle floor before "
+                         "spectra start accumulating")
     ap.add_argument("--margin-db", type=float, default=8.0,
                     help="ON-block threshold = noise floor + margin")
     ap.add_argument("--occ", type=float, default=99.0,
                     help="occupied-power percentage (default 99)")
+    ap.add_argument("--args", default=None,
+                    help="UHD device args (e.g. serial=XXXX); default resolves "
+                         "via DEVOURER_UHD_ARGS / tests/.uhd_args")
     args = ap.parse_args()
 
-    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args())
+    usrp = uhd.usrp.MultiUSRP(uhd_select.device_args(args.args))
+    serial = usrp.get_usrp_rx_info(0).get("mboard_serial", "?")
     usrp.set_rx_rate(args.rate)
     usrp.set_rx_freq(uhd.types.TuneRequest(args.freq))
     usrp.set_rx_gain(args.gain)
@@ -53,11 +68,16 @@ def main() -> int:
     cmd.stream_now = True
     rx.issue_stream_cmd(cmd)
 
-    blocks = []       # per-FFT-block mean power (for the ON/OFF gate)
-    spectra = []      # per-FFT-block |X|^2 (gated later)
     win = np.hanning(FFT).astype(np.float32)
     wnorm = float((win ** 2).sum())
-    t_end = time.monotonic() + args.secs
+    warm_powers = []          # per-block mean power during warmup
+    all_powers = []           # per-block mean power, whole capture (floor sanity)
+    psd_sum = np.zeros(FFT, dtype=np.float64)
+    on_blocks = total_blocks = 0
+    floor = None
+    thr = np.inf
+    t0 = time.monotonic()
+    t_end = t0 + args.secs
     tail = np.zeros(0, dtype=np.complex64)
     try:
         while time.monotonic() < t_end:
@@ -72,51 +92,64 @@ def main() -> int:
             xb = x[:nb].reshape(-1, FFT)
             sx = np.fft.fftshift(np.abs(np.fft.fft(xb * win, axis=1)) ** 2,
                                  axes=1) / wnorm
-            spectra.append(sx.astype(np.float32))
-            blocks.append(sx.mean(axis=1))
+            bp = sx.mean(axis=1)
+            all_powers.append(bp.astype(np.float32))
+            total_blocks += len(bp)
+            if floor is None:
+                warm_powers.append(bp.astype(np.float32))
+                if time.monotonic() - t0 >= args.warmup:
+                    wp = 10 * np.log10(np.concatenate(warm_powers) + 1e-12)
+                    floor = float(np.percentile(wp, 1))
+                    thr = 10 ** ((floor + args.margin_db) / 10)
+                continue  # warmup blocks establish the floor, nothing else
+            on = bp > thr
+            if on.any():
+                psd_sum += sx[on].sum(axis=0)
+                on_blocks += int(on.sum())
     finally:
         rx.issue_stream_cmd(uhd.types.StreamCMD(uhd.types.StreamMode.stop_cont))
 
-    if not spectra:
+    if floor is None or total_blocks == 0:
         print("sdr-obw: no samples")
         return 1
-    sx = np.concatenate(spectra)
-    bp = 10 * np.log10(np.concatenate(blocks) + 1e-12)
-    floor = np.percentile(bp, 1)
-    on = bp > floor + args.margin_db
-    if on.sum() < 100:
-        print(f"sdr-obw: only {int(on.sum())} ON blocks "
+    if on_blocks < 100:
+        print(f"sdr-obw: only {on_blocks} ON blocks "
               f"(floor {floor:.1f} dB) — is the flood running?")
         return 1
-    psd = sx[on].mean(axis=0)
+    full_floor = float(np.percentile(
+        10 * np.log10(np.concatenate(all_powers) + 1e-12), 1))
+    if abs(full_floor - floor) > 3:
+        print(f"sdr-obw: WARNING warmup floor {floor:.1f} dB vs whole-capture "
+              f"{full_floor:.1f} dB — floor drifted, re-run")
+    psd = psd_sum / on_blocks
 
     binw = args.rate / FFT
     freqs = (np.arange(FFT) - FFT // 2) * binw
     dc = np.abs(freqs) < 150e3
     psd[dc] = np.interp(np.flatnonzero(dc), np.flatnonzero(~dc), psd[~dc])
 
-    # OBW: grow a window outward from the power centroid bin until it holds
-    # `occ`% of the total in-span power.
-    total = psd.sum()
-    lo = hi = int(np.argmax(np.cumsum(psd) >= total / 2))
-    acc = psd[lo]
-    while acc < total * args.occ / 100 and (lo > 0 or hi < FFT - 1):
-        left = psd[lo - 1] if lo > 0 else -1.0
-        right = psd[hi + 1] if hi < FFT - 1 else -1.0
-        if left >= right:
-            lo -= 1; acc += psd[lo]
-        else:
-            hi += 1; acc += psd[hi]
+    # OBW, equal-tail: the band between the (100-occ)/2 and 100-(100-occ)/2
+    # cumulative-power percentiles, so each side excludes the same tail.
+    c = np.cumsum(psd)
+    total = c[-1]
+    tail_frac = (100.0 - args.occ) / 200.0
+    lo = int(np.searchsorted(c, total * tail_frac))
+    hi = int(np.searchsorted(c, total * (1.0 - tail_frac)))
+    hi = min(hi, FFT - 1)
     obw = (hi - lo + 1) * binw
 
-    # -20 dBr bandwidth: outermost bins within 20 dB of the in-band peak
-    # (peak = 95th percentile of the PSD, so a spur can't set the reference).
-    ref = np.percentile(10 * np.log10(psd + 1e-18), 95)
-    above = np.flatnonzero(10 * np.log10(psd + 1e-18) > ref - 20)
+    # -20 dBr bandwidth on a 5-bin median-smoothed PSD: the smoothing keeps a
+    # single-bin spur from setting the reference peak or widening the result.
+    sm = np.copy(psd)
+    for i in range(2, FFT - 2):
+        sm[i] = np.median(psd[i - 2:i + 3])
+    smdb = 10 * np.log10(sm + 1e-18)
+    ref = float(smdb.max())
+    above = np.flatnonzero(smdb > ref - 20)
     bw20 = (above[-1] - above[0] + 1) * binw if len(above) else 0.0
 
-    print(f"sdr-obw: freq={args.freq/1e6:.0f}MHz span={args.rate/1e6:.0f}MHz "
-          f"on_blocks={int(on.sum())}/{len(on)} "
+    print(f"sdr-obw: serial={serial} freq={args.freq/1e6:.0f}MHz "
+          f"span={args.rate/1e6:.0f}MHz on_blocks={on_blocks}/{total_blocks} "
           f"obw{args.occ:.0f}={obw/1e6:.2f}MHz bw-20dBr={bw20/1e6:.2f}MHz "
           f"center_off={(freqs[lo]+freqs[hi])/2/1e6:+.2f}MHz")
     return 0

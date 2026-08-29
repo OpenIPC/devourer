@@ -1004,8 +1004,16 @@ int main(int argc, char **argv) {
   } catch (const std::exception &e) {
     /* InitWrite returns void, so a refused bring-up (e.g. a channel/width/
      * offset combination the chip rejects) surfaces as an exception. The
-     * device already tore itself down; exit cleanly instead of aborting. */
+     * device already tore itself down; exit cleanly instead of aborting —
+     * which means the optional IN-drainer threads above must be joined
+     * first, or their still-joinable std::thread destructors terminate. */
     logger->error("TX bring-up failed: {}", e.what());
+    bulk_in_running = false;
+    intr_running = false;
+    if (bulk_in_thread.joinable())
+      bulk_in_thread.join();
+    if (intr_in_thread.joinable())
+      intr_in_thread.join();
     return 1;
   }
 

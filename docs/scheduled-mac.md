@@ -187,8 +187,8 @@ BlockAcks (`tests/rtl8733b_blockack_onair.sh`). All are one-RTL8733B bench
 results; details are in `docs/rtl8733b.md`.
 
 The OFF-phase pin is set by `DEVOURER_TX_RETRY_LIMIT` (the matrix runs 12,
-the value the descriptors used to hardcode) — the knob, not a descriptor
-constant, is now the single source of truth for the retry limit on
+the vendor descriptor default) — the knob, not a descriptor constant, is
+the single source of truth for the retry limit on
 jaguar1/2/3 **and Kestrel** (inert on the 8814A die only). On Kestrel it
 rides the AX WD `DATA_TXCNT_LMT` per-frame field, which counts **attempts**
 — devourer folds +1 so N means N retries on every generation. Witness-
@@ -228,8 +228,8 @@ on-air copy (`tests/retry_ladder_probe.sh`, ~99% capture, modal chains):
 | Jaguar3 8812CU @2.4 GHz | MCS3 ×4 → MCS2 → 5.5M → 1M ×3 (CCK floor) |
 | Jaguar3 8812CU, VHT | M7 ×4 → M4 → M1 → M0 → 6M (coarse −3 steps) |
 
-Why the ladder is MCS-native now, what a family-mismatched RA group did
-historically (the 8822C legacy chain, the 8822B VHT wander), the fallback
+Why the ladder is MCS-native, the family-mismatch failure modes it avoids
+(the 8822C legacy chain, the 8822B VHT wander), the fallback
 knob and the rejected floor form are documented at the source of truth:
 `rateid_for_mgn` in `src/RateDefinitions.h` and the `RetryFallback` note in
 `src/DeviceConfig.h` — read those, not a copy here. The closed ARQ loop
@@ -248,8 +248,8 @@ A cell whose responder never armed reads exactly like a broken chip — on=0%
 / off=0% — which is how the 8821AU carried a false "broken" verdict through
 three runs (silently dead responder: stale advisory adapter lock / open
 failure; root-caused with concurrent register peeks off the live armed die,
-`chipstate --no-claim --peek`). The check script now verifies the arm line
-and aborts loudly instead; treat any historical on=0/off=0 row from a
+`chipstate --no-claim --peek`). The check script verifies the arm line
+and aborts loudly; treat an on=0/off=0 row from a
 harness without arm-verification as unmeasured, not broken.
 
 The full responder matrix (six cells, ch36, MCS3 unicast; run with

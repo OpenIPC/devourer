@@ -27,7 +27,7 @@ Conventions:
 - Event names are lowercase dotted namespaces (`rx.frame`, `txpwr.state`).
 - Register addresses/values/masks are hex **strings** (`"addr":"0x0808"`).
 - Per-chain metrics are arrays (`"rssi":[-52,-60]`).
-- A field the chip can't provide is JSON `null` (the old text format used `-`).
+- A field the chip can't provide is JSON `null`.
 - `t` is monotonic **ms since process start**; periodic/marker events carry it,
   per-frame events rely on `seq`/`tsfl` instead.
 - Byte blobs (frame bodies, C2H payloads) are lowercase hex strings.

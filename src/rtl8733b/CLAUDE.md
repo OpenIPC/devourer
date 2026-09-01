@@ -29,7 +29,7 @@ output.
 Chip-id first: `SYS_CFG2` must read `0x16`. The PID table exists for discovery
 and for one safety property — a device whose PID is a known 8733B identity but
 whose chip-id read fails is **refused**, not allowed to fall through to the
-historical Jaguar1 default. A wrong-HAL bring-up on this part writes an
+Jaguar1 default. A wrong-HAL bring-up on this part writes an
 unrelated register map.
 
 ## Chip facts
@@ -171,7 +171,7 @@ unrelated register map.
 The timing figures above (84 ms, ~11 fps, 2.51/2.71 ms) come from the original
 `f72b` validation unit and have no in-repo oracle. They are register-sequence
 and USB-transfer costs. Treat them as the order of magnitude to design
-against, not as constants. (RF-domain quantities are now measured on the
+against, not as constants. (RF-domain quantities are measured on the
 `b733` sample — see Validation status.)
 - **EFUSE**: physical packed map walked into a logical map. Running off the end
   of the readable span is address-space exhaustion, not corruption — a fully

@@ -26,7 +26,7 @@ Puncturing is **PHY signaling, not a driver trick**. Three independent walls:
 What the silicon *does* offer composes into a three-part approximation:
 per-tone **detection** (find the dirty slice), an RX-side **tone mask**
 (de-weight it in the equalizer), and TX-side **avoidance** (place a narrower
-transmission on the clean sub-channels). All three are now in devourer; the
+transmission on the clean sub-channels). All three are in devourer; the
 measurements below say which ones carry their weight.
 
 ## The RX tone mask (`DEVOURER_RX_CSI_MASK`, `DEVOURER_RX_NBI`)
@@ -144,7 +144,7 @@ Two detectors measured (`tests/pseudo_puncture_detect.sh`):
 |--------------------------------------|--------|------------------------------------------|
 | TX tone nulling / true puncturing    | no     | no silicon hook, no VHT signaling         |
 | RX CSI mask against a jammed slice   | no     | loss is pre-FCS (sync/AGC), mask is later |
-| RX CSI mask against in-band spurs    | yes    | the vendor's original use; knob now open  |
+| RX CSI mask against in-band spurs    | yes    | the vendor's original use; knob exposed   |
 | Sub-block salvage of jammed frames   | no     | nothing delivered to salvage              |
 | TX avoidance (narrower, clean half)  | yes    | 78% of clean delivery; per-packet capable |
 | Detection: self-sounding per-tone SNR| partly | senses the peer's channel, not the victim's |

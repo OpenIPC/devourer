@@ -103,7 +103,7 @@ This is a clean **relative** confirmation. It is **not** an absolute SLA test:
 on a near-field bench the static baseline never reaches 0.99 (it tops out
 ≈ 0.89), because the adapters sit inches apart with tens of dB of margin, so
 the interferer is never in the "link holds at 0.99, then fades break it" regime. The residual loss
-is real end-to-end loss (on-air + processing), now measured honestly.
+is real end-to-end loss (on-air + processing).
 
 ## What this validation does not cover
 

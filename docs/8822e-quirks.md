@@ -67,10 +67,10 @@ EU's RX, which would argue for a structural skip. The register is
 exonerated — a direct A/B with per-chain RSSI shows no RX effect from the
 write — but the observation points at something real: the static DPDT route
 disconnects RX path B's antenna outright (see the pin-mux section above),
-and a recheck counting TOTAL frames, which chain A dominates —
+and checks that count TOTAL frames, which chain A dominates —
 `tests/eu_41e8_desense_recheck.sh`'s −2% "noise" verdict and the 24k-frame
-full-duplex proof (`tests/eu_fullduplex_pathb_check.sh`) — is blind to a
-dead chain B. Per-chain RSSI is the only honest RX-health metric on a 2T2R
+full-duplex proof (`tests/eu_fullduplex_pathb_check.sh`) — are both blind to
+a dead chain B. Per-chain RSSI is the only honest RX-health metric on a 2T2R
 part.) Full-duplex holds under the eFEM pin-mux with path-B power applied.
 
 `DEVOURER_TX_WITH_RX=thread` must still be set **before** `InitWrite`

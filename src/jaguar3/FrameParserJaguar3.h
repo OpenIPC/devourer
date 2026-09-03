@@ -217,6 +217,11 @@ struct Rx8822cFrame {
   uint8_t shift;         /* SHIFT_SZ */
   uint32_t tsfl;         /* hardware TSF-low at receive */
   bool paggr;            /* MPDU arrived inside an A-MPDU */
+  bool physt;            /* a PHY-status report was written for THIS frame;
+                          * drvinfo space is reserved on every frame
+                          * (RX_DRVINFO_SZ is global), so without this bit the
+                          * area holds stale bytes — notably on all-but-one
+                          * subframe of an A-MPDU */
   uint8_t ppdu_cnt;      /* 2-bit received-PPDU counter */
   uint32_t next_offset;  /* 8-byte-aligned offset of the next frame in an agg */
 };
@@ -239,6 +244,7 @@ inline bool parse_rx_8822c(const uint8_t *buf, size_t buflen,
   out.rx_rate = static_cast<uint8_t>(GET_RX_DESC_RX_RATE_8822C(buf));
   out.tsfl = static_cast<uint32_t>(GET_RX_DESC_TSFL_8822C(buf));
   out.paggr = GET_RX_DESC_PAGGR_8822C(buf) != 0;
+  out.physt = GET_RX_DESC_PHYST_8822C(buf) != 0;
   out.ppdu_cnt = static_cast<uint8_t>(GET_RX_DESC_PPDU_CNT_8822C(buf));
 
   uint32_t frame_off =
@@ -269,16 +275,19 @@ inline bool parse_rx_8822c(const uint8_t *buf, size_t buflen,
  * vendor's s(8,1) fields). The page type is taken from byte0 low nibble
  * (page_num) rather than guessed from the rate: 0 = CCK type0, else an OFDM
  * page; per-stream EVM/SNR are only present on the type1 OFDM page.
- * Requires physts_len >= 28. */
-inline void parse_phy_sts_jgr3(const uint8_t *physts, uint16_t physts_len,
+ * Requires physts_len >= 28. Returns true iff physts pointed at a page
+ * layout this function actually understands (page 0 CCK or page 1 OFDM
+ * type1) and `a` was filled from it; false on a null/short buffer or any
+ * other page number (caller should not trust `a`'s signal fields then). */
+inline bool parse_phy_sts_jgr3(const uint8_t *physts, uint16_t physts_len,
                                rx_pkt_attrib &a) {
   if (physts == nullptr || physts_len < 28)
-    return;
+    return false;
   const uint8_t page_num = physts[0] & 0x0f;
   if (page_num == 0) {
     /* type0 (CCK): DW0 = page_num(0), pwdb_a(1). Single path-A power. */
     a.rssi[0] = physts[1];
-    return;
+    return true;
   }
   /* OFDM header (valid for every jgr3 OFDM page): per-path pwdb[4] at bytes
    * 1..4, DW1 byte5 l_rxsc[3:0]/ht_rxsc[7:4], DW1 byte7 flags. */
@@ -303,7 +312,9 @@ inline void parse_phy_sts_jgr3(const uint8_t *physts, uint16_t physts_len,
       a.evm[i] = static_cast<int8_t>(physts[16 + i]);
       a.snr[i] = static_cast<int8_t>(physts[24 + i]);
     }
+    return true;
   }
+  return false;
 }
 
 } /* namespace jaguar3 */

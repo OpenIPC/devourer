@@ -559,6 +559,14 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 	 * MT_USB_U3DMA_CFG 0x80c00020 where a healthy one reads 0x00c00020.
 	 * One fixed-length pulse does not shift a busy engine, so drop
 	 * TX_BULK_EN, then pulse TX_CLR until the busy bit falls. */
+	/* A wedge experiment must not have its recovery hidden inside open().
+	 * With this set, open() observes and reports but repairs nothing. */
+	if (getenv("MT7612U_NO_AUTORECOVER")) {
+		LOG("auto-recovery disabled: U3DMA_CFG=0x%08x",
+		    mt_rr(d, CFG_ADDR(MT_USB_U3DMA_CFG)));
+		return 0;
+	}
+
 	if (mt_rr(d, CFG_ADDR(MT_USB_U3DMA_CFG)) & MT_USB_DMA_CFG_TX_BUSY) {
 		WARN("USB TX DMA busy on open - a previous run died mid transfer");
 		mt_clear(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_BULK_EN);

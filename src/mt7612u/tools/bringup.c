@@ -136,6 +136,97 @@ static int gate_regs(void)
 }
 
 /* Gate B: MCU transport + ROM patch + firmware, then a live MCU round-trip. */
+/*
+ * The vendor RTMPSwReset() sequence, from docs/mt7612u-usb-wedge.md.
+ * MT76x2U has SEPARATE UDMA TX/RX and IFDMA/FCE resets that neither mt76 nor
+ * this port ever touched - CFG 0x9014 and CFG 0x0064[22:21].  Every earlier
+ * failed attempt only ever hit CFG 0x9018 and MAC 0x0400, which is why they
+ * could not cover every block.
+ *
+ * `swreset 0` observes and repairs nothing: the failing control.
+ * `swreset 1` runs the sequence.  Either way the verdict is a real firmware
+ * load afterwards, not an idle status register.
+ */
+#define CFG_UDMA_RESET   0x9014
+#define CFG_UDMA_CFG     0x9018
+#define CFG_EP_DROP      0x9080
+#define CFG_IFDMA_RESET  0x0064
+#define CFG_UDMA_TX_STAT 0x9100
+
+static void swreset_dump(const char *when)
+{
+	static const uint16_t epq[] = { 0x2240, 0x2250, 0x2260, 0x2270, 0x2280, 0x2290 };
+	uint32_t v;
+	int idle = 1;
+
+	printf("  %-7s U3DMA=0x%08x UDMA_RST=0x%08x EP_DROP=0x%08x IFDMA=0x%08x\n",
+	       when, mt_rr(&dev, CFG_ADDR(CFG_UDMA_CFG)),
+	       mt_rr(&dev, CFG_ADDR(CFG_UDMA_RESET)),
+	       mt_rr(&dev, CFG_ADDR(CFG_EP_DROP)),
+	       mt_rr(&dev, CFG_ADDR(CFG_IFDMA_RESET)));
+	v = mt_rr(&dev, CFG_ADDR(CFG_UDMA_TX_STAT));
+	printf("          UDMA_TX_STATE=0x%08x (idle=%d)  PBF=0x%08x  DESC_IDX=0x%08x\n",
+	       v, (v & 0x07f00000u) == 0, mt_rr(&dev, MT_PBF_SYS_CTRL),
+	       mt_rr(&dev, 0x09a8));
+	printf("          FCE_TX1=0x%08x FCE_TX2=0x%08x  EP4-9 empty:",
+	       mt_rr(&dev, 0x0a30), mt_rr(&dev, 0x0a34));
+	for (unsigned i = 0; i < sizeof epq / sizeof epq[0]; i++) {
+		int e = !!(mt_rr(&dev, CFG_ADDR(epq[i])) & BIT(17));
+
+		printf(" %d", e);
+		if (!e) idle = 0;
+	}
+	printf("%s\n", idle ? "  (all empty)" : "  (NOT all empty)");
+}
+
+static void swreset_pulse(uint32_t addr, uint32_t mask)
+{
+	mt_set(&dev, addr, mask);
+	mt_usleep(15000);
+	mt_clear(&dev, addr, mask);
+	mt_usleep(15000);
+}
+
+static int gate_swreset(int apply)
+{
+	printf("swreset: %s\n\n", apply ? "running the vendor sequence"
+	                                  : "OBSERVE ONLY (failing control)");
+	swreset_dump("before");
+
+	if (apply) {
+		/* The helper's surrounding contract: stop the MAC and let TX
+		 * drain before touching the DMA.  Bounded - this is the fault
+		 * under investigation, so it must not become an infinite wait. */
+		mt_wr(&dev, MT_MAC_SYS_CTRL, 0);
+		for (int i = 0; i < 50; i++) {
+			if (!(mt_rr(&dev, MT_MAC_STATUS) & BIT(0))) break;
+			mt_usleep(2000);
+		}
+		printf("  MAC stopped, TX idle=%d\n",
+		       !(mt_rr(&dev, MT_MAC_STATUS) & BIT(0)));
+
+		mt_clear(&dev, CFG_ADDR(CFG_UDMA_CFG), 0x00c00000);  /* 1 */
+		swreset_pulse(CFG_ADDR(CFG_EP_DROP),    0x03f00000); /* 2 */
+		swreset_pulse(CFG_ADDR(CFG_UDMA_RESET), 0x00000040); /* 3 UDMA TX */
+		swreset_pulse(CFG_ADDR(CFG_IFDMA_RESET),0x00600000); /* 4 IFDMA/FCE */
+		swreset_pulse(MT_PBF_SYS_CTRL,          0x0000000c); /* 5 MAC/PBF */
+		swreset_pulse(CFG_ADDR(CFG_UDMA_RESET), 0x00000020); /* 6 UDMA RX */
+		mt_set(&dev, CFG_ADDR(CFG_UDMA_CFG),    0x00c00000); /* 7 */
+		mt_usleep(15000);
+		printf("  sequence applied\n");
+		swreset_dump("after");
+	}
+
+	/* The only verdict that counts: does the chip take firmware again? */
+	if (mt_eeprom_init(&dev)) { printf("SWRESET: eeprom failed\n"); return 1; }
+	if (mt_fw_init(&dev, NULL)) {
+		printf("SWRESET: FAIL - firmware still will not load\n");
+		return 1;
+	}
+	printf("SWRESET: PASS - firmware loaded\n");
+	return 0;
+}
+
 static int gate_fw(const char *fw_dir)
 {
 	uint32_t clk, com0;
@@ -2319,6 +2410,8 @@ int main(int argc, char **argv)
 		               argc > 3 ? argv[3] : NULL);
 	} else if (!strcmp(cmd, "init")) {
 		rc = gate_init(argc > 2 ? argv[2] : NULL);
+	} else if (!strcmp(cmd, "swreset")) {
+		rc = gate_swreset(argc > 2 ? atoi(argv[2]) : 1);
 	} else if (!strcmp(cmd, "fw")) {
 		rc = gate_fw(argc > 2 ? argv[2] : NULL);
 	} else {

@@ -1,9 +1,13 @@
-# reference/ — vendor kernel drivers (git submodules)
+# reference/ — reference kernel drivers (git submodules)
 
 devourer is a userspace re-implementation of Realtek's out-of-tree Wi-Fi
 drivers. The vendor kernel modules live here as **git submodules** so every
 developer works against the same fork + commit devourer treats as ground-truth,
 without committing driver source into devourer's own history.
+
+One entry is not a Realtek vendor drop: `mt76` is the mainline Linux driver for
+the MediaTek parts, pinned for the same reason — it is the ground-truth the
+MT7612U backend is derived from and generated against.
 
 ## Fetching
 
@@ -28,6 +32,7 @@ upstream history.
 | `rtl8852bu`      | `josephnef/rtl8852bu` (fork of morrownr/rtl8852bu-20250826) | default | Kestrel — 8852BU/8832BU (Wi-Fi 6) |
 | `rtl8852cu`      | `josephnef/rtl8852cu` (fork of morrownr/rtl8852cu-20251113) | default | Kestrel — 8852CU/8832CU (Wi-Fi 6) |
 | `rtl8733bu-20230626` | `libc0607/rtl8733bu-20230626` | `v5.13.0.1` | RTL8733B — 8731BU/8733BU (HALMAC 87xx) |
+| `mt76`           | `openwrt/mt76` | `master` @ `be5ce79` | MediaTek — MT7612U (mainline, not a vendor drop) |
 
 ## Why these forks
 
@@ -74,6 +79,13 @@ upstream history.
   C2H/TX-tasklet); it is deliberately **not** a submodule because nothing in
   `hal/` is generated from it and the already hardware-validated artifacts were
   not replaced with untested ones. `docs/rtl8733b.md` records what was compared.
+
+- **openwrt/mt76 for MT7612U.** The MediaTek parts have no out-of-tree vendor
+  drop to mirror: mt76 *is* the reference, maintained in mainline Linux and
+  BSD-3-Clause-Clear rather than GPL-2-only, which is why `src/mt7612u/` can
+  carry ported sequences at all. Pinned at `be5ce79` so
+  `tools/extract_mt7612u_tables.py --check` and every register sequence
+  transcribed into `src/mt7612u/` stay re-verifiable from a fresh checkout.
 
 ## Consumers
 

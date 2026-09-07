@@ -40,3 +40,8 @@
 	url = https://github.com/libc0607/rtl8733bu-20230626.git
 	branch = v5.13.0.1
 	shallow = true
+[submodule "reference/mt76"]
+	path = reference/mt76
+	url = https://github.com/openwrt/mt76.git
+	branch = master
+	shallow = true

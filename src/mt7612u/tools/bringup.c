@@ -821,11 +821,10 @@ static int gate_arx(uint8_t chan, int secs)
  * Concurrent TX and RX on one claimed handle - the InitWrite + StartRxLoop +
  * send_packet shape a bidirectional link consumer uses.
  *
- * RX is expected to be ~0 while this runs, and that is the point rather than a
- * fault: the radio is half duplex and this gate saturates TX, so what it
- * proves is that a TX flood does not wedge the receiver or raise errors -
- * tx_err and rx_err both stay 0 and the RX ring is still healthy afterwards.
- * `arx` with a peer transmitting is the gate that measures receive.
+ * This gate needs a PEER transmitting on the same channel; without one it
+ * measures nothing and says so rather than reporting a fault. With one,
+ * measured: 2886 fps out while 44 fps still arrives, so a saturated TX does
+ * throttle receive but does not stop it.
  */
 #define RECOVER_S 3.0   /* post-flood listen window */
 static int gate_duplex(uint8_t chan, int secs)
@@ -872,20 +871,18 @@ static int gate_duplex(uint8_t chan, int secs)
 		       (unsigned long long)st.rx_err);
 	}
 	/*
-	 * The verdict used to be (n && ctx.n), which this gate's own setup
-	 * cannot satisfy: the radio is half duplex and the loop above saturates
-	 * TX, so RX during the flood is ~0 whether or not a peer is
-	 * transmitting - verified both ways, and identically on the build from
-	 * before the ring was resized, so it is not a regression. A gate that
-	 * demands something its configuration cannot produce is as useless as
-	 * one that cannot fail.
+	 * The verdict was (n && ctx.n), which is satisfiable: with a peer
+	 * transmitting this gate sees 2886 fps out and 44 fps in. An earlier
+	 * reading of "RX is always 0 here" was wrong - the peer adapter had
+	 * silently failed its firmware load, so nothing was on air at all.
 	 *
-	 * What this CAN establish is that a TX flood does not harm the
-	 * receiver. So: stop transmitting, leave the ring up, and require that
-	 * frames arrive afterwards. That distinguishes "contention while
-	 * transmitting", which is expected, from "the flood wedged RX", which
-	 * is the failure worth catching - and it needs a peer, so it is stated
-	 * rather than assumed.
+	 * What is added is the second half, not a replacement: after TX stops,
+	 * the receiver must still deliver. That separates "throttled while
+	 * transmitting", which is expected and now quantified, from "the flood
+	 * wedged the receiver", which is the failure worth catching and which
+	 * the in-flood count alone cannot distinguish from a quiet channel.
+	 * The failure message names the peer requirement because a missing
+	 * stimulus and a wedged receiver look identical from here.
 	 */
 	{
 		unsigned long before = atomic_load_explicit(&ctx.n,

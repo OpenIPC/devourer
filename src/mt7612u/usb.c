@@ -75,15 +75,21 @@ int mt_vendor_req(struct mt7612u_dev *d, uint8_t req, uint8_t type,
 {
 	int rc = LIBUSB_ERROR_OTHER;
 
+	/* The PHY tick runs on its own thread and does register I/O; without
+	 * this two control transfers can interleave on one endpoint. */
+	pthread_mutex_lock(&d->io_lock);
+
 	for (int i = 0; i < VEND_RETRIES; i++) {
 		rc = libusb_control_transfer(d->h, type, req, val, idx,
 		                             (unsigned char *)buf, (uint16_t)len,
 		                             CTRL_TIMEOUT_MS);
 		if (rc >= 0 || rc == LIBUSB_ERROR_NO_DEVICE)
-			return rc;
+			goto out;
 		mt_usleep(5000);
 	}
 	ERR("vendor req %02x idx %04x failed: %s", req, idx, libusb_error_name(rc));
+out:
+	pthread_mutex_unlock(&d->io_lock);
 	return rc;
 }
 
@@ -470,6 +476,20 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 	if (!d->h) {
 		libusb_exit(d->ctx); d->ctx = NULL;
 		return -1;
+	}
+
+	/* Every path into the device goes through here, including consumers that
+	 * allocate the struct themselves - a zeroed pthread_mutex_t is a valid
+	 * NON-recursive lock, and the PHY tick nests mt_vendor_req inside its own
+	 * lock, so initialising this anywhere else self-deadlocks. */
+	{
+		pthread_mutexattr_t ma;
+
+		pthread_mutexattr_init(&ma);
+		pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_RECURSIVE);
+		pthread_mutex_init(&d->io_lock, &ma);
+		pthread_mutexattr_destroy(&ma);
+		d->cal.low_gain = -1;
 	}
 
 	d->kernel_was_attached = libusb_kernel_driver_active(d->h, 0) == 1;

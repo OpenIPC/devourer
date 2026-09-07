@@ -479,6 +479,7 @@ void mt7612u_close(struct mt7612u_dev *d)
 	mt_async_stop(d);
 	if (d->h) mt_mac_stop(d);
 	mt_close(d);
+	pthread_mutex_destroy(&d->io_lock);
 	free(d);
 }
 

@@ -431,6 +431,165 @@ out:
 
 /* fast=1 skips the firmware calibration burst, which is what a retune would do
  * if the chip tolerates it. Measured cost of each path: see BRINGUP-RESULTS. */
+/*
+ * The 1 Hz PHY work, ported from mt76's cal_work (mt76x2/usb_phy.c:42,
+ * MT_CALIBRATE_INTERVAL == HZ).  mt76 runs channel_calibrate (self-guarded),
+ * tssi_compensate (which issues an MCU command every second) and
+ * update_channel_gain.  This port ran NONE of it, and the cost is not subtle:
+ * against a transmitter 20 cm away airing 3037 fps, a receiver with no tick
+ * takes 3 frames in 10 s.  With the tick it takes 4362/s.  Bisected - reading
+ * the read-and-clear MT_RX_STAT_* counters alone does nothing (3 frames); it
+ * is the periodic MCU calibration that keeps the receiver alive.
+ */
+static int rssi_gain_thresh(uint8_t bw)
+{
+	return bw == MT7612U_BW_80 ? -62 : bw == MT7612U_BW_40 ? -65 : -68;
+}
+
+static int low_rssi_gain_thresh(uint8_t bw)
+{
+	return bw == MT7612U_BW_80 ? -76 : bw == MT7612U_BW_40 ? -79 : -82;
+}
+
+static int has_ext_lna(struct mt7612u_dev *d)
+{
+	uint16_t c1 = mt_ee(d, MT_EE_NIC_CONF_1);
+
+	return d->chan <= 14 ? !!(c1 & MT_EE_NIC_CONF_1_LNA_EXT_2G)
+	                     : !!(c1 & MT_EE_NIC_CONF_1_LNA_EXT_5G);
+}
+
+/* mt76x2_phy_set_gain_val() */
+static void phy_set_gain_val(struct mt7612u_dev *d)
+{
+	uint8_t g0 = (uint8_t)(d->cal.agc_gain_cur[0] - d->cal.agc_gain_adjust);
+	uint8_t g1 = (uint8_t)(d->cal.agc_gain_cur[1] - d->cal.agc_gain_adjust);
+	uint32_t val = 0x1836u << 16;
+
+	if (!has_ext_lna(d) && d->bw >= MT7612U_BW_40)
+		val = 0x1e42u << 16;
+	if (has_ext_lna(d) && d->chan <= 14 && d->bw < MT7612U_BW_40)
+		val = 0x0f36u << 16;
+	val |= 0xf8;
+
+	mt_wr(d, MT_BBP(AGC, 8), val | FIELD_PREP(MT_BBP_AGC_GAIN, g0));
+	mt_wr(d, MT_BBP(AGC, 9), val | FIELD_PREP(MT_BBP_AGC_GAIN, g1));
+}
+
+/* mt76x02_phy_adjust_vga_gain(): false-CCA driven fine adjustment. */
+static int phy_adjust_vga_gain(struct mt7612u_dev *d)
+{
+	uint8_t limit = d->cal.low_gain > 0 ? 16 : 4;
+	uint32_t false_cca = FIELD_GET(MT_RX_STAT_1_CCA_ERRORS,
+	                               mt_rr(d, MT_RX_STAT_1));
+	int changed = 0;
+
+	d->cal.false_cca = (uint16_t)false_cca;
+	if (false_cca > 800 && d->cal.agc_gain_adjust < limit) {
+		d->cal.agc_gain_adjust += 2;
+		changed = 1;
+	} else if ((false_cca < 10 && d->cal.agc_gain_adjust > 0) ||
+	           (d->cal.agc_gain_adjust >= limit && false_cca < 500)) {
+		d->cal.agc_gain_adjust -= 2;
+		changed = 1;
+	}
+	return changed;
+}
+
+/* mt76x2_phy_update_channel_gain() */
+static void phy_update_channel_gain(struct mt7612u_dev *d)
+{
+	const uint8_t *gain = d->cal.agc_gain_init;
+	uint8_t low_gain_delta, gain_delta;
+	uint32_t agc_35, agc_37, val;
+	int low_gain, gain_change;
+
+	/* mt76 averages RSSI over associated stations.  A monitor consumer has
+	 * none, so this is fed from the RX path; -75 is mt76's own fallback. */
+	if (!d->cal.avg_rssi_all)
+		d->cal.avg_rssi_all = -75;
+
+	low_gain = (d->cal.avg_rssi_all > rssi_gain_thresh(d->bw)) +
+	           (d->cal.avg_rssi_all > low_rssi_gain_thresh(d->bw));
+
+	gain_change = d->cal.low_gain < 0 || ((d->cal.low_gain & 2) ^ (low_gain & 2));
+	d->cal.low_gain = (int8_t)low_gain;
+
+	if (!gain_change) {
+		if (phy_adjust_vga_gain(d))
+			phy_set_gain_val(d);
+		return;
+	}
+
+	if (d->bw == MT7612U_BW_80) {
+		mt_wr(d, MT_BBP(RXO, 14), 0x00560211);
+		val = mt_rr(d, MT_BBP(AGC, 26)) & ~0xfu;
+		val |= (low_gain == 2) ? 0x3 : 0x5;
+		mt_wr(d, MT_BBP(AGC, 26), val);
+	} else {
+		mt_wr(d, MT_BBP(RXO, 14), 0x00560423);
+	}
+
+	low_gain_delta = has_ext_lna(d) ? 10 : 14;
+
+	agc_37 = 0x2121262c;
+	if (d->chan <= 14)                agc_35 = 0x11111516;
+	else if (low_gain == 2)           agc_35 = agc_37 = 0x08080808;
+	else if (d->bw == MT7612U_BW_80)  agc_35 = 0x10101014;
+	else                              agc_35 = 0x11111116;
+
+	if (low_gain == 2) {
+		mt_wr(d, MT_BBP(RXO, 18), 0xf000a990);
+		mt_wr(d, MT_BBP(AGC, 35), 0x08080808);
+		mt_wr(d, MT_BBP(AGC, 37), 0x08080808);
+		gain_delta = low_gain_delta;
+		d->cal.agc_gain_adjust = 0;
+	} else {
+		mt_wr(d, MT_BBP(RXO, 18), 0xf000a991);
+		gain_delta = 0;
+		d->cal.agc_gain_adjust = low_gain_delta;
+	}
+
+	mt_wr(d, MT_BBP(AGC, 35), agc_35);
+	mt_wr(d, MT_BBP(AGC, 37), agc_37);
+
+	d->cal.agc_gain_cur[0] = (uint8_t)(gain[0] - gain_delta);
+	d->cal.agc_gain_cur[1] = (uint8_t)(gain[1] - gain_delta);
+	phy_set_gain_val(d);
+
+	mt_rr(d, MT_RX_STAT_1);       /* clear false CCA, as mt76 does */
+}
+
+/*
+ * mt76's cal_work, once a second.
+ *
+ * The MCU calibration is the part that matters, and that was measured rather
+ * than assumed: with no tick a receiver takes 3 frames in 10 s from a peer
+ * airing 3037 fps; with a periodic MCU calibration it takes 4362/s.  The gain
+ * update alone does NOT help (4 frames) - it is ported because it is the rest
+ * of mt76's 1 Hz work and it tracks signal strength, not because it fixes this.
+ * Reading the read-and-clear MT_RX_STAT_* counters alone does nothing either.
+ *
+ * Runs on the CALLER's thread on purpose.  An earlier revision used its own
+ * thread and hit two failures: MCU commands from two threads share one 4-bit
+ * sequence number and one response endpoint ("mcu resp mismatch ... want 1"),
+ * and a second thread issuing synchronous libusb transfers alongside the RX
+ * ring's event thread hangs outright.
+ */
+void mt_phy_tick(struct mt7612u_dev *d)
+{
+	if (!d || !d->chan) return;
+	pthread_mutex_lock(&d->io_lock);
+	/* Self-guarded after the first run, exactly like mt76's. */
+	channel_calibrate(d, d->chan > 14);
+	/* mt76 keeps the MCU in the loop every second through
+	 * mt76x2_phy_tssi_compensate(); this port has no TSSI compensation, and
+	 * the temperature calibration is the cheapest command that does. */
+	mt_mcu_calibrate(d, MCU_CAL_TEMP_SENSOR, 0);
+	phy_update_channel_gain(d);
+	pthread_mutex_unlock(&d->io_lock);
+}
+
 int mt_set_channel_ex(struct mt7612u_dev *d, uint8_t chan, uint8_t bw, int fast)
 {
 	static const uint32_t ext_cca_chan[4] = {

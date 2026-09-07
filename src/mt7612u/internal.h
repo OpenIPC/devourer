@@ -48,6 +48,13 @@ struct mt7612u_cal {
 	uint32_t mcu_gain;
 	uint8_t  agc_gain_init[2];
 	uint8_t  tssi_cal_done;
+	/* mt76x2's periodic gain tracking.  low_gain starts at -1 so the first
+	 * tick always programs a gain class rather than trusting the initvals. */
+	uint8_t  agc_gain_cur[2];
+	uint8_t  agc_gain_adjust;
+	int8_t   low_gain;
+	int8_t   avg_rssi_all;
+	uint16_t false_cca;
 };
 
 #define MT_RX_RING  16
@@ -140,6 +147,7 @@ struct mt7612u_dev {
 	uint8_t  mcu_seq;
 	uint8_t  chan;
 	uint8_t  bw;
+	pthread_mutex_t io_lock;   /* recursive: guards register + MCU transactions */
 	uint8_t  bw_clamp_warned;   /* the "never widen" notice is once, not per frame */
 	int8_t   txpower_conf;      /* limit, 0.5 dB units (dBm * 2) */
 	int8_t   target_power;
@@ -216,6 +224,14 @@ uint16_t mt_ee(const struct mt7612u_dev *d, unsigned off);
 
 /* --- init.c --- */
 void mt_power_cycle(struct mt7612u_dev *d);
+/*
+ * One round of mt76's 1 Hz cal_work (mt76x2/usb_phy.c:42).  A consumer that
+ * receives MUST call this about once a second: without it the AGC never leaves
+ * its start-up gain and the receiver goes deaf against a strong nearby
+ * transmitter.  Deliberately not a thread - a second thread issuing
+ * synchronous libusb transfers alongside the RX ring's event thread hangs.
+ */
+void mt_phy_tick(struct mt7612u_dev *d);
 int mt_init_hardware(struct mt7612u_dev *d, const char *fw_dir);
 /*
  * enable_rx is not a bool: the receiver must never come up with nothing

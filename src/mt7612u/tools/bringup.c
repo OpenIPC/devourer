@@ -774,7 +774,7 @@ static void arx_cb(void *user, const void *frame, size_t len,
 }
 
 /* Async RX ring: the callback path StartRxLoop needs. */
-static int gate_arx(uint8_t chan, int secs)
+static int gate_arx(uint8_t chan, int secs, int poke)
 {
 	static /* Indexed with (phy & 7): MT_RATE_PHY is three bits, so 5-7 are
 	 * representable and named nothing. Five entries read past the end. */
@@ -792,7 +792,29 @@ static int gate_arx(uint8_t chan, int secs)
 	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) return 1;
 	mt7612u_set_monitor_rx(&dev, 0);
 	t0 = now_ms();
-	wait_ms(secs * 1000.0);
+	/* Bisect: linkstat receives 5062 fps under the same peer where this gate
+	 * receives 3, and the only thing it does differently is poll once a
+	 * second - MT_RX_STAT_* reads (read-and-clear) plus an MCU temperature
+	 * calibration.  poke selects which, so the mechanism is identified
+	 * rather than guessed:  0 = neither, 1 = stat reads, 2 = MCU calibrate,
+	 * 4 = the ported 1 Hz PHY tick. */
+	if (!poke) {
+		wait_ms(secs * 1000.0);
+	} else {
+		for (int i = 0; i < secs; i++) {
+			if (!wait_ms(1000.0)) break;
+			if (poke & 1) {
+				mt_rr(&dev, MT_CH_BUSY); mt_rr(&dev, MT_CH_IDLE);
+				mt_rr(&dev, MT_RX_STAT_0);
+				mt_rr(&dev, MT_RX_STAT_1);
+				mt_rr(&dev, MT_RX_STAT_2);
+			}
+			if (poke & 2)
+				mt_mcu_calibrate(&dev, MCU_CAL_TEMP_SENSOR, 0);
+			if (poke & 4)
+				mt_phy_tick(&dev);      /* the ported 1 Hz gain work */
+		}
+	}
 	{
 		struct mt_async_stats st;
 		/* Actual elapsed, not the requested duration: an interrupt now
@@ -2277,7 +2299,8 @@ int main(int argc, char **argv)
 		                 argc > 3 ? atoi(argv[3]) : 5);
 	} else if (!strcmp(cmd, "arx")) {
 		rc = gate_arx(argc > 2 ? (uint8_t)atoi(argv[2]) : 1,
-		              argc > 3 ? atoi(argv[3]) : 5);
+		              argc > 3 ? atoi(argv[3]) : 5,
+		              argc > 4 ? atoi(argv[4]) : 0);
 	} else if (!strcmp(cmd, "gateg")) {
 		rc = gate_g(argc > 2 ? (uint8_t)atoi(argv[2]) : 149,
 		            argc > 3 ? atoi(argv[3]) : 300);

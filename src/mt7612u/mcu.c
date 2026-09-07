@@ -55,11 +55,19 @@ int mt_mcu_send(struct mt7612u_dev *d, int cmd, const void *data, int len,
                 int wait_resp)
 {
 	uint8_t buf[4 + MCU_MSG_MAX + 8];
+	int mcu_rc;
 	uint8_t seq = 0;
 	uint32_t info;
 	int pad, total, rc;
 
 	if (len > MCU_MSG_MAX) { ERR("mcu payload %d too long", len); return -1; }
+
+	/* Send and response are one transaction: the 4-bit sequence number and
+	 * the EP 5 reply belong together.  mt_phy_tick() runs on the caller's
+	 * thread so nothing contends today, but a consumer that drives the tick
+	 * from a second thread would otherwise steal its own responses - the
+	 * failure reads as "mcu resp mismatch ... (want 1)". */
+	pthread_mutex_lock(&d->io_lock);
 
 	if (wait_resp) {
 		seq = ++d->mcu_seq & 0xf;
@@ -90,9 +98,15 @@ int mt_mcu_send(struct mt7612u_dev *d, int cmd, const void *data, int len,
 	}
 
 	rc = mt_bulk(d, MT_EP_OUT_INBAND_CMD, buf, total, NULL, 500);
-	if (rc) { ERR("mcu cmd %d bulk out: %s", cmd, libusb_error_name(rc)); return -1; }
+	if (rc) {
+		ERR("mcu cmd %d bulk out: %s", cmd, libusb_error_name(rc));
+		pthread_mutex_unlock(&d->io_lock);
+		return -1;
+	}
 
-	return wait_resp ? mcu_wait_resp(d, seq) : 0;
+	mcu_rc = wait_resp ? mcu_wait_resp(d, seq) : 0;
+	pthread_mutex_unlock(&d->io_lock);
+	return mcu_rc;
 }
 
 int mt_mcu_function_select(struct mt7612u_dev *d, int func, uint32_t val)

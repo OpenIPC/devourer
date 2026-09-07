@@ -104,6 +104,12 @@ int mt_rx_parse(struct mt7612u_dev *d, uint8_t *buf, int n,
 	 * channel, so it is reported as no estimate rather than as a very quiet
 	 * channel. */
 	info->noise = info->rssi[2];
+	/* mt76_get_min_avg_rssi() equivalent.  Written on the RX thread and read
+	 * by the PHY tick - a single byte, and a stale sample only delays a gain
+	 * class change by one second. */
+	d->cal.avg_rssi_all = d->cal.avg_rssi_all
+	                    ? (int8_t)((d->cal.avg_rssi_all * 7 + info->rssi[0]) / 8)
+	                    : info->rssi[0];
 	info->noise_valid = info->noise > -100 && info->noise < -30;
 	info->snr_db = info->noise_valid
 	             ? (int8_t)(info->rssi[0] - info->noise) : 0;

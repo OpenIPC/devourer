@@ -69,6 +69,26 @@ int mt_mcu_send(struct mt7612u_dev *d, int cmd, const void *data, int len,
 	 * failure reads as "mcu resp mismatch ... (want 1)". */
 	pthread_mutex_lock(&d->io_lock);
 
+	/* Drain replies nobody collected before sending.  A reply that lands
+	 * after mcu_wait_resp() gave up stays queued on EP 5, so the next
+	 * command reads its predecessor's reply, mismatches, times out (~1.5 s)
+	 * and leaves one more stale reply behind - the channel then never
+	 * resyncs.  Seen as "mcu resp mismatch: evt=0 seq=10..14 (want 15)"
+	 * cascading through every 1 Hz tick.  Bounded: a queue deeper than 16
+	 * is a fault worth reporting, not one worth looping on. */
+	{
+		uint8_t stale[MCU_RESP_URB_SIZE];
+		int n = 0, got;
+
+		while (n < 16 &&
+		       !mt_bulk(d, MT_EP_IN_CMD_RESP, stale, sizeof stale, &got, 5) &&
+		       got >= 4)
+			n++;
+		if (n)
+			WARN("drained %d stale MCU repl%s before cmd %d", n,
+			     n == 1 ? "y" : "ies", cmd);
+	}
+
 	if (wait_resp) {
 		seq = ++d->mcu_seq & 0xf;
 		if (!seq)

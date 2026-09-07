@@ -231,7 +231,22 @@ out:
 int mt_fw_init(struct mt7612u_dev *d, const char *fw_dir)
 {
 	if (!fw_dir) fw_dir = "firmware";
-	if (load_rom_patch(d, fw_dir))
-		return -1;
-	return load_firmware(d, fw_dir);
+
+	/* Two attempts, not one.  Measured (12/12 cycles, both adapters): after
+	 * a process dies mid transfer the first firmware upload times out at
+	 * its first chunk, and the same upload succeeds by itself 3-8 s later
+	 * with nothing repaired.  That is a settling window, not a wedge, and
+	 * an open that lands inside it must not fail.  One bounded retry after
+	 * a settle covers it; a fault that survives the retry is reported as
+	 * before, and that is the case the open-path recovery is for. */
+	for (int attempt = 0; attempt < 2; attempt++) {
+		if (attempt) {
+			WARN("firmware upload failed - a previous run may have died "
+			     "mid transfer; retrying after a 3 s settle");
+			mt_usleep(3000000);
+		}
+		if (!load_rom_patch(d, fw_dir) && !load_firmware(d, fw_dir))
+			return 0;
+	}
+	return -1;
 }

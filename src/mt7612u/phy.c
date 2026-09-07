@@ -570,11 +570,10 @@ static void phy_update_channel_gain(struct mt7612u_dev *d)
  * of mt76's 1 Hz work and it tracks signal strength, not because it fixes this.
  * Reading the read-and-clear MT_RX_STAT_* counters alone does nothing either.
  *
- * Runs on the CALLER's thread on purpose.  An earlier revision used its own
- * thread and hit two failures: MCU commands from two threads share one 4-bit
- * sequence number and one response endpoint ("mcu resp mismatch ... want 1"),
- * and a second thread issuing synchronous libusb transfers alongside the RX
- * ring's event thread hangs outright.
+ * Runs on the CALLER's thread on purpose: MCU commands from two threads share
+ * one 4-bit sequence number and one response endpoint, and the failure reads
+ * as "mcu resp mismatch ... (want 1)".  (A threaded revision also hung once;
+ * that was traced afterwards to a non-recursive io_lock, not to libusb.)
  */
 void mt_phy_tick(struct mt7612u_dev *d)
 {

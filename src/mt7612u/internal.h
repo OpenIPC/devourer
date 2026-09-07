@@ -226,10 +226,16 @@ uint16_t mt_ee(const struct mt7612u_dev *d, unsigned off);
 void mt_power_cycle(struct mt7612u_dev *d);
 /*
  * One round of mt76's 1 Hz cal_work (mt76x2/usb_phy.c:42).  A consumer that
- * receives MUST call this about once a second: without it the AGC never leaves
- * its start-up gain and the receiver goes deaf against a strong nearby
- * transmitter.  Deliberately not a thread - a second thread issuing
- * synchronous libusb transfers alongside the RX ring's event thread hangs.
+ * receives MUST call this about once a second: without it a receiver takes 3
+ * frames in 10 s from a strong nearby transmitter; with it ~4850/s, 9/9 runs.
+ * The periodic MCU calibration is what does it - the gain tracking alone does
+ * not recover the receiver.
+ *
+ * Caller-driven rather than a thread so the MCU command channel - one 4-bit
+ * sequence number, one response endpoint - has exactly one user.  A threaded
+ * version once hung; that was later traced to io_lock being non-recursive on
+ * a caller-allocated device, not to libusb, whose sync-API-beside-an-event-
+ * thread shape is the supported one.  It has not been re-tested as a thread.
  */
 void mt_phy_tick(struct mt7612u_dev *d);
 int mt_init_hardware(struct mt7612u_dev *d, const char *fw_dir);

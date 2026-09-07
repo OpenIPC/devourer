@@ -154,14 +154,16 @@ static void channel_calibrate(struct mt7612u_dev *d, int is_5ghz)
 	if (d->cal.channel_cal_done)
 		return;
 
-	if (is_5ghz)
-		mt_mcu_calibrate(d, MCU_CAL_LC, 0);
+	int failed = 0;
 
-	mt_mcu_calibrate(d, MCU_CAL_TX_LOFT, (uint32_t)is_5ghz);
-	mt_mcu_calibrate(d, MCU_CAL_TXIQ, (uint32_t)is_5ghz);
-	mt_mcu_calibrate(d, MCU_CAL_RXIQC_FI, (uint32_t)is_5ghz);
-	mt_mcu_calibrate(d, MCU_CAL_TEMP_SENSOR, 0);
-	mt_mcu_calibrate(d, MCU_CAL_TX_SHAPING, 0);
+	if (is_5ghz)
+		failed |= mt_mcu_calibrate(d, MCU_CAL_LC, 0);
+
+	failed |= mt_mcu_calibrate(d, MCU_CAL_TX_LOFT, (uint32_t)is_5ghz);
+	failed |= mt_mcu_calibrate(d, MCU_CAL_TXIQ, (uint32_t)is_5ghz);
+	failed |= mt_mcu_calibrate(d, MCU_CAL_RXIQC_FI, (uint32_t)is_5ghz);
+	failed |= mt_mcu_calibrate(d, MCU_CAL_TEMP_SENSOR, 0);
+	failed |= mt_mcu_calibrate(d, MCU_CAL_TX_SHAPING, 0);
 
 	apply_gain_adj(d);
 
@@ -173,6 +175,15 @@ static void channel_calibrate(struct mt7612u_dev *d, int is_5ghz)
 	mt_wr(d, MT_BBP(AGC, 2), 0x00007070);
 	mt_set(d, MT_TXOP_HLDR_ET, MT_TXOP_HLDR_TX40M_BLK_EN);
 
+	/* A burst that timed out leaves the channel half set up - measured as
+	 * a receiver running at 153 fps where 4850 is normal.  mt76 marks the
+	 * channel calibrated regardless; this port marks it only when every
+	 * command was answered, so the 1 Hz tick retries the burst until it
+	 * is.  The one-time MAC configuration above is applied either way. */
+	if (failed) {
+		WARN("channel calibration incomplete - the 1 Hz tick will retry");
+		return;
+	}
 	d->cal.channel_cal_done = 1;
 }
 

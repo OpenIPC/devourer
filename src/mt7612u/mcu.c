@@ -28,7 +28,12 @@ static int mcu_wait_resp(struct mt7612u_dev *d, uint8_t seq)
 	uint8_t buf[MCU_RESP_URB_SIZE];
 	int len, rc;
 
-	for (int i = 0; i < 5; i++) {
+	/* Ten reads of 300 ms, not five.  Measured on 2-1 with a peer 20 cm
+	 * away saturating the channel: the MCU answered every command, but
+	 * seconds late - seven calibrations in a row timed out at 1.5 s and
+	 * their nine replies then arrived together.  mt76's own budget is the
+	 * same five reads; it is not enough for this part under RF load. */
+	for (int i = 0; i < 10; i++) {
 		rc = mt_bulk(d, MT_EP_IN_CMD_RESP, buf, sizeof buf, &len, 300);
 		if (rc == LIBUSB_ERROR_TIMEOUT)
 			continue;

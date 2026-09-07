@@ -75,8 +75,9 @@ int mt_vendor_req(struct mt7612u_dev *d, uint8_t req, uint8_t type,
 {
 	int rc = LIBUSB_ERROR_OTHER;
 
-	/* The PHY tick runs on its own thread and does register I/O; without
-	 * this two control transfers can interleave on one endpoint. */
+	/* One control transfer at a time.  Nothing contends in a single-threaded
+	 * consumer; one that sends from a second thread would otherwise
+	 * interleave two transfers on EP0. */
 	pthread_mutex_lock(&d->io_lock);
 
 	for (int i = 0; i < VEND_RETRIES; i++) {
@@ -534,31 +535,6 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 		goto fail;
 	}
 
-	/* Clear a USB TX DMA left stalled by a run that died mid transfer - a
-	 * SIGKILL during a flood is enough, and it is reproducible on demand.
-	 * The port reset above does NOT reach this: afterwards register reads
-	 * and writes still round-trip, the MAC and RF are fine and the kernel
-	 * mt76x2u driver binds nothing, but every bulk OUT NAKs forever and the
-	 * next firmware upload times out mid-chunk.  It was believed to need a
-	 * physical replug.
-	 *
-	 * Isolated one step at a time against a freshly wedged adapter:
-	 * libusb_clear_halt on all four endpoints, stopping the MAC and the USB
-	 * DMA, taking WLAN_EN/WLAN_CLK_EN down, and the PBF block reset
-	 * (MCU|DMA|MAC|PBF|ASY) each left it wedged.  This bit alone clears it.
-	 * mt76 declares TX_CLR and writes it nowhere.
-	 *
-	 * The receive direction needs its own clean-up: mt_rx_flush() runs from
-	 * mt_mac_stop(), which a killed process never reaches, so the pipe can
-	 * still be full.  Silence the receiver BEFORE draining or it refills as
-	 * fast as it is read. */
-	mt_wr(d, MT_MAC_SYS_CTRL, 0);
-	mt_rx_flush(d);
-
-	/* The signature is TX_BUSY stuck set: a wedged adapter reads
-	 * MT_USB_U3DMA_CFG 0x80c00020 where a healthy one reads 0x00c00020.
-	 * One fixed-length pulse does not shift a busy engine, so drop
-	 * TX_BULK_EN, then pulse TX_CLR until the busy bit falls. */
 	/* A wedge experiment must not have its recovery hidden inside open().
 	 * With this set, open() observes and reports but repairs nothing. */
 	if (getenv("MT7612U_NO_AUTORECOVER")) {
@@ -566,6 +542,29 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 		    mt_rr(d, CFG_ADDR(MT_USB_U3DMA_CFG)));
 		return 0;
 	}
+
+	/* Recover from a previous run that died mid transfer.  The port reset
+	 * above does not reach any of this: afterwards register reads and writes
+	 * still round-trip and the MAC and RF are fine, but every bulk OUT NAKs
+	 * and the next firmware upload times out at its first chunk - the kernel
+	 * mt76x2u driver cannot bind such a device either.  Two tiers, told apart
+	 * by MT_USB_U3DMA_CFG:
+	 *
+	 *   0x00c00020, TX_BUSY clear: isolated one step at a time - clear_halt
+	 *   on all four endpoints, MAC + USB DMA stop, WLAN_EN/WLAN_CLK_EN down
+	 *   and the PBF block reset each left it wedged; pulsing TX_CLR alone
+	 *   clears it (3/3).  mt76 declares TX_CLR and writes it nowhere.
+	 *
+	 *   0x80c00020, TX_BUSY stuck: the pulse loop below has NOT been seen to
+	 *   clear it, nor has anything else tried so far; the vendor-derived
+	 *   UDMA/IFDMA reset sequence in docs/mt7612u-usb-wedge.md (bringup
+	 *   swreset) is the untested candidate.  The WARN is the honest verdict.
+	 *
+	 * The receive direction gets its own clean-up: mt_rx_flush() runs from
+	 * mt_mac_stop(), which a killed process never reaches.  Silence the
+	 * receiver BEFORE draining or it refills as fast as it is read. */
+	mt_wr(d, MT_MAC_SYS_CTRL, 0);
+	mt_rx_flush(d);
 
 	if (mt_rr(d, CFG_ADDR(MT_USB_U3DMA_CFG)) & MT_USB_DMA_CFG_TX_BUSY) {
 		WARN("USB TX DMA busy on open - a previous run died mid transfer");
@@ -580,7 +579,8 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 		}
 		mt_set(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_BULK_EN);
 		if (mt_rr(d, CFG_ADDR(MT_USB_U3DMA_CFG)) & MT_USB_DMA_CFG_TX_BUSY)
-			WARN("USB TX DMA still busy - this open will likely fail");
+			WARN("USB TX DMA still busy - this open will likely fail; "
+			     "see docs/mt7612u-usb-wedge.md");
 		else
 			LOG("USB TX DMA recovered");
 	} else {

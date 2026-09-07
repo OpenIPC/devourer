@@ -58,6 +58,22 @@ static int wait_ms(double ms)
 	return !g_stop;
 }
 
+/* wait_ms() plus mt7612u_phy_tick() once a second - what every receiving
+ * loop must do, see the public header.  Same return contract as wait_ms(). */
+static int wait_ticking(double ms)
+{
+	double t0 = now_ms();
+
+	while (now_ms() - t0 < ms) {
+		double slice = ms - (now_ms() - t0);
+
+		if (slice > 1000.0) slice = 1000.0;
+		if (!wait_ms(slice)) return 0;
+		mt7612u_phy_tick(&dev);
+	}
+	return !g_stop;
+}
+
 
 static int gate_regs(void)
 {
@@ -167,7 +183,8 @@ static void swreset_dump(const char *when)
 	v = mt_rr(&dev, CFG_ADDR(CFG_UDMA_TX_STAT));
 	printf("          UDMA_TX_STATE=0x%08x (idle=%d)  PBF=0x%08x  DESC_IDX=0x%08x\n",
 	       v, (v & 0x07f00000u) == 0, mt_rr(&dev, MT_PBF_SYS_CTRL),
-	       mt_rr(&dev, 0x09a8));
+	       mt_rr(&dev, MT_TX_CPU_FROM_FCE_CPU_DESC_IDX));
+	/* FCE TX1/TX2 fill: MAC 0x0a30/0x0a34, per docs/mt7612u-usb-wedge.md. */
 	printf("          FCE_TX1=0x%08x FCE_TX2=0x%08x  EP4-9 empty:",
 	       mt_rr(&dev, 0x0a30), mt_rr(&dev, 0x0a34));
 	for (unsigned i = 0; i < sizeof epq / sizeof epq[0]; i++) {
@@ -484,7 +501,13 @@ static int gate_rx(uint8_t chan, int want)
 	printf("  MT_RX_STAT_1     = 0x%08x (CCA errors seen = RF is live)\n",
 	       mt_rr(&dev, MT_RX_STAT_1));
 
+	double last_tick = now_ms();
+
 	while (got < want && empty < 200) {
+		if (now_ms() - last_tick >= 1000.0) {
+			mt7612u_phy_tick(&dev);
+			last_tick = now_ms();
+		}
 		struct mt7612u_rx_info info;
 		const uint8_t *f = NULL;
 		int len = mt_rx_one(&dev, buf, sizeof buf, &f, &info, 50);
@@ -865,7 +888,7 @@ static void arx_cb(void *user, const void *frame, size_t len,
 }
 
 /* Async RX ring: the callback path StartRxLoop needs. */
-static int gate_arx(uint8_t chan, int secs, int poke)
+static int gate_arx(uint8_t chan, int secs, int notick)
 {
 	static /* Indexed with (phy & 7): MT_RATE_PHY is three bits, so 5-7 are
 	 * representable and named nothing. Five entries read past the end. */
@@ -883,29 +906,10 @@ static int gate_arx(uint8_t chan, int secs, int poke)
 	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) return 1;
 	mt7612u_set_monitor_rx(&dev, 0);
 	t0 = now_ms();
-	/* Bisect: linkstat receives 5062 fps under the same peer where this gate
-	 * receives 3, and the only thing it does differently is poll once a
-	 * second - MT_RX_STAT_* reads (read-and-clear) plus an MCU temperature
-	 * calibration.  poke selects which, so the mechanism is identified
-	 * rather than guessed:  0 = neither, 1 = stat reads, 2 = MCU calibrate,
-	 * 4 = the ported 1 Hz PHY tick. */
-	if (!poke) {
-		wait_ms(secs * 1000.0);
-	} else {
-		for (int i = 0; i < secs; i++) {
-			if (!wait_ms(1000.0)) break;
-			if (poke & 1) {
-				mt_rr(&dev, MT_CH_BUSY); mt_rr(&dev, MT_CH_IDLE);
-				mt_rr(&dev, MT_RX_STAT_0);
-				mt_rr(&dev, MT_RX_STAT_1);
-				mt_rr(&dev, MT_RX_STAT_2);
-			}
-			if (poke & 2)
-				mt_mcu_calibrate(&dev, MCU_CAL_TEMP_SENSOR, 0);
-			if (poke & 4)
-				mt_phy_tick(&dev);      /* the ported 1 Hz gain work */
-		}
-	}
+	/* notick is the negative control: without the 1 Hz PHY tick this gate
+	 * reads 3 frames in 10 s from a strong nearby peer (reproduced eight
+	 * times); with it ~4850/s.  See mt7612u_phy_tick(). */
+	if (notick) wait_ms(secs * 1000.0); else wait_ticking(secs * 1000.0);
 	{
 		struct mt_async_stats st;
 		/* Actual elapsed, not the requested duration: an interrupt now
@@ -1006,7 +1010,7 @@ static int gate_duplex(uint8_t chan, int secs)
 
 		printf("  TX stopped; listening %.1f s for the receiver to recover\n",
 		       RECOVER_S);
-		if (!wait_ms(RECOVER_S * 1000.0)) {
+		if (!wait_ticking(RECOVER_S * 1000.0)) {
 			mt7612u_rx_stop(&dev);
 			mt_mac_stop(&dev);
 			return 1;
@@ -1419,7 +1423,7 @@ static int gate_ack(uint8_t chan, int secs, int arm)
 	/* wait_ms, not mt_usleep: it honours SIGINT, where the old cast-to-
 	 * unsigned sleep both ignored the signal and turned a negative argument
 	 * into roughly 49 days with the receiver left running. */
-	if (!wait_ms(secs * 1000.0)) {
+	if (!wait_ticking(secs * 1000.0)) {
 		printf("GATE ack: interrupted\n");
 		mt7612u_rx_stop(&dev);
 		mt_mac_stop(&dev);
@@ -1506,7 +1510,7 @@ static int gate_rxbytes(uint8_t chan, int secs)
     mt7612u_set_monitor_rx(&dev, 0);
     mt7612u_link_stats_start(&dev);
 
-    wait_ms(secs * 1000.0);
+    wait_ticking(secs * 1000.0);
     mt7612u_link_stats(&dev, &st);
     mt7612u_rx_stop(&dev);
     mt_mac_stop(&dev);
@@ -1744,7 +1748,7 @@ static int gate_linkrx(uint8_t chan, int secs)
 	mt7612u_set_monitor_rx(&dev, 0);
 
 	printf("RX on ch%u for %d s, filtering our own magic\n", chan, secs);
-	wait_ms(secs * 1000.0);
+	wait_ticking(secs * 1000.0);
 	mt7612u_rx_stop(&dev);
 	mt_mac_stop(&dev);
 

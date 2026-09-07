@@ -484,7 +484,6 @@ static int phy_adjust_vga_gain(struct mt7612u_dev *d)
 	                               mt_rr(d, MT_RX_STAT_1));
 	int changed = 0;
 
-	d->cal.false_cca = (uint16_t)false_cca;
 	if (false_cca > 800 && d->cal.agc_gain_adjust < limit) {
 		d->cal.agc_gain_adjust += 2;
 		changed = 1;
@@ -575,9 +574,9 @@ static void phy_update_channel_gain(struct mt7612u_dev *d)
  * as "mcu resp mismatch ... (want 1)".  (A threaded revision also hung once;
  * that was traced afterwards to a non-recursive io_lock, not to libusb.)
  */
-void mt_phy_tick(struct mt7612u_dev *d)
+int mt7612u_phy_tick(struct mt7612u_dev *d)
 {
-	if (!d || !d->chan) return;
+	if (!d || !d->chan) return -1;
 	pthread_mutex_lock(&d->io_lock);
 	/* Self-guarded after the first run, exactly like mt76's. */
 	channel_calibrate(d, d->chan > 14);
@@ -587,6 +586,7 @@ void mt_phy_tick(struct mt7612u_dev *d)
 	mt_mcu_calibrate(d, MCU_CAL_TEMP_SENSOR, 0);
 	phy_update_channel_gain(d);
 	pthread_mutex_unlock(&d->io_lock);
+	return 0;
 }
 
 int mt_set_channel_ex(struct mt7612u_dev *d, uint8_t chan, uint8_t bw, int fast)

@@ -217,6 +217,14 @@ uint16_t mt_ee(const struct mt7612u_dev *d, unsigned off);
 /* --- init.c --- */
 void mt_power_cycle(struct mt7612u_dev *d);
 int mt_init_hardware(struct mt7612u_dev *d, const char *fw_dir);
+/*
+ * enable_rx is not a bool: the receiver must never come up with nothing
+ * draining EP 4, and "1" was written at three call sites that had no drainer
+ * yet.  Naming the drain source makes mt_mac_start() able to check.
+ */
+#define MT_RX_DRAIN_NONE 0   /* TX only */
+#define MT_RX_DRAIN_RING 1   /* the async ring is already draining - asserted */
+#define MT_RX_DRAIN_SYNC 2   /* caller drains with mt_rx_one() on this thread */
 int mt_mac_start(struct mt7612u_dev *d, int enable_rx);
 void mt_rx_flush(struct mt7612u_dev *d);
 int mt_mac_stop(struct mt7612u_dev *d);

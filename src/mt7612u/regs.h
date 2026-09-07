@@ -97,6 +97,7 @@
 #define MT_USB_U3DMA_CFG     0x9018  /* via CFG_ADDR() */
 #define MT_USB_DMA_CFG_RX_BULK_AGG_TOUT GENMASK(7, 0)
 #define MT_USB_DMA_CFG_RX_DROP_OR_PAD   BIT(18)
+#define MT_USB_DMA_CFG_TX_CLR           BIT(19)  /* declared by mt76, written by nothing */
 #define MT_USB_DMA_CFG_RX_BULK_AGG_EN   BIT(21)
 #define MT_USB_DMA_CFG_RX_BULK_EN       BIT(22)
 #define MT_USB_DMA_CFG_TX_BULK_EN       BIT(23)

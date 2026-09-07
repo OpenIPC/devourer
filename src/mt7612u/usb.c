@@ -513,6 +513,53 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 		libusb_release_interface(d->h, 0);
 		goto fail;
 	}
+
+	/* Clear a USB TX DMA left stalled by a run that died mid transfer - a
+	 * SIGKILL during a flood is enough, and it is reproducible on demand.
+	 * The port reset above does NOT reach this: afterwards register reads
+	 * and writes still round-trip, the MAC and RF are fine and the kernel
+	 * mt76x2u driver binds nothing, but every bulk OUT NAKs forever and the
+	 * next firmware upload times out mid-chunk.  It was believed to need a
+	 * physical replug.
+	 *
+	 * Isolated one step at a time against a freshly wedged adapter:
+	 * libusb_clear_halt on all four endpoints, stopping the MAC and the USB
+	 * DMA, taking WLAN_EN/WLAN_CLK_EN down, and the PBF block reset
+	 * (MCU|DMA|MAC|PBF|ASY) each left it wedged.  This bit alone clears it.
+	 * mt76 declares TX_CLR and writes it nowhere.
+	 *
+	 * The receive direction needs its own clean-up: mt_rx_flush() runs from
+	 * mt_mac_stop(), which a killed process never reaches, so the pipe can
+	 * still be full.  Silence the receiver BEFORE draining or it refills as
+	 * fast as it is read. */
+	mt_wr(d, MT_MAC_SYS_CTRL, 0);
+	mt_rx_flush(d);
+
+	/* The signature is TX_BUSY stuck set: a wedged adapter reads
+	 * MT_USB_U3DMA_CFG 0x80c00020 where a healthy one reads 0x00c00020.
+	 * One fixed-length pulse does not shift a busy engine, so drop
+	 * TX_BULK_EN, then pulse TX_CLR until the busy bit falls. */
+	if (mt_rr(d, CFG_ADDR(MT_USB_U3DMA_CFG)) & MT_USB_DMA_CFG_TX_BUSY) {
+		WARN("USB TX DMA busy on open - a previous run died mid transfer");
+		mt_clear(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_BULK_EN);
+		for (int i = 0; i < 20; i++) {
+			mt_set(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_CLR);
+			mt_usleep(20000);
+			mt_clear(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_CLR);
+			if (!(mt_rr(d, CFG_ADDR(MT_USB_U3DMA_CFG)) &
+			      MT_USB_DMA_CFG_TX_BUSY))
+				break;
+		}
+		mt_set(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_BULK_EN);
+		if (mt_rr(d, CFG_ADDR(MT_USB_U3DMA_CFG)) & MT_USB_DMA_CFG_TX_BUSY)
+			WARN("USB TX DMA still busy - this open will likely fail");
+		else
+			LOG("USB TX DMA recovered");
+	} else {
+		mt_set(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_CLR);
+		mt_usleep(20000);
+		mt_clear(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_CLR);
+	}
 	return 0;
 
 fail:

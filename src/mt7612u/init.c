@@ -268,6 +268,18 @@ void mt_rx_flush(struct mt7612u_dev *d)
 
 int mt_mac_start(struct mt7612u_dev *d, int enable_rx)
 {
+	/* Refuse rather than wedge.  The receiver running with nothing draining
+	 * EP 4 puts this part below the USB level; on a quiet channel the gap
+	 * is survivable, which is why it went unnoticed, but at 80% channel
+	 * busy the FIFO overflows inside it and the RX DMA stops for good.
+	 * Measured: the inverted order delivers 3 frames where the correct one
+	 * delivers 5500/s.  mt7612u_start() has always derived this from
+	 * rx_active - this makes the internal entry point equally safe. */
+	if (enable_rx == MT_RX_DRAIN_RING && !(d->a && d->a->rx_active)) {
+		ERR("mac_start(MT_RX_DRAIN_RING) with no ring draining EP4 - call "
+		    "mt7612u_rx_start() first, or pass MT_RX_DRAIN_SYNC");
+		return -1;
+	}
 	mt_wr(d, MT_MAC_SYS_CTRL, MT_MAC_SYS_CTRL_ENABLE_TX);
 	if (!mt_poll(d, MT_WPDMA_GLO_CFG,
 	             MT_WPDMA_GLO_CFG_TX_DMA_BUSY | MT_WPDMA_GLO_CFG_RX_DMA_BUSY,

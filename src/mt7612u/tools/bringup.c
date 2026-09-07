@@ -1,17 +1,21 @@
 /* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /*
- * MT7612U bringup harness. One subcommand per gate from PLAN.md, so each
+ * MT7612U bringup harness. One subcommand per gate (see src/mt7612u/README.md), so each
  * stage is independently runnable on hardware.
  */
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 #include <sys/resource.h>
+#include <signal.h>
+#include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
 #include <sys/resource.h>
 #include "../internal.h"
+
 
 static struct mt7612u_dev dev;
 
@@ -20,6 +24,40 @@ static double now_ms(void)
 	struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
 	return t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
 }
+
+/* --- interruptible waits --------------------------------------------------
+ *
+ * A gate that hangs on this part hangs hard: the thread blocks inside a USB
+ * ioctl in uninterruptible sleep, where SIGKILL does not reach it and Ctrl-C
+ * does nothing.
+ *
+ * The defence against that is the exclusive per-adapter lock in usb.c, which
+ * refuses a second opener and so removes the cause. A watchdog thread lived
+ * here for one commit and was removed: _exit() cannot reap a thread already
+ * blocked in an uninterruptible ioctl, so against the failure that motivated
+ * it the watchdog could only print a message and then fail to exit. Keeping
+ * it would have been complexity that reads like protection without being any.
+ *
+ * What is kept is the part that does work: signals set a flag every wait loop
+ * polls, so an interrupt unwinds through the normal teardown - MAC stopped,
+ * RX ring torn down, lock released - instead of leaving the receiver running.
+ */
+static volatile sig_atomic_t g_stop;
+
+static void on_signal(int sig) { (void)sig; g_stop = 1; }
+
+/* Interruptible sleep: returns 1 if the caller should keep going. */
+static int wait_ms(double ms)
+{
+	double t0 = now_ms();
+
+	while (now_ms() - t0 < ms) {
+		if (g_stop) return 0;
+		mt_usleep(50000);
+	}
+	return !g_stop;
+}
+
 
 static int gate_regs(void)
 {
@@ -412,7 +450,7 @@ static int gate_hop(void)
 }
 
 /*
- * Gate G, as PLAN.md actually specified it:
+ * Gate G, the per-frame rate-control check:
  *  1. alternate MCS0/MCS7 frame by frame - the witness must see the rate the
  *     frame's own index calls for. Correlating on the index rather than
  *     demanding an unbroken alternating sequence keeps a lost frame from
@@ -514,6 +552,75 @@ static double cpu_ms(void)
 }
 
 /* Sustained TX: synchronous path vs the async ring, same frame and rate. */
+/*
+ * Largest MPDU the part will actually put on air. Not a throughput test: one
+ * burst per size, and the witness decides which sizes arrived.
+ *
+ * Worth measuring because the ceiling in this port was a buffer constant, not
+ * a number anyone had checked, and because the two public TX entry points did
+ * not agree on it - mt7612u_tx() refused above MT_TX_BUF_MAX - 32 while
+ * mt7612u_send_packets() bounded only against the 16 KB aggregate buffer.
+ * 802.11 puts the non-A-MSDU MPDU ceiling at 2304, which is the interesting
+ * boundary; sizes above it are here to see whether the MAC or the USB path
+ * objects first.
+ */
+static int gate_mtu(uint8_t chan, int count)
+{
+	static const uint8_t src[6] = { 0x02, 0x4d, 0x54, 0x76, 0x12, 0x01 };
+	static const int sizes[] = {
+		 200, 1000, 1500, 2000, 2304, 3000, 3836, 3837, 4000, 4064, 4065,
+	};
+	static uint8_t frame[8192];
+	struct mt7612u_tx_rate rate = { .phy = MT7612U_PHY_HT, .mcs = 7, .nss = 1,
+	                                .bw = MT7612U_BW_20, .no_ack = 1 };
+	unsigned k;
+
+	if (count <= 0 || count > 1000) count = 60;
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
+	if (mt_mac_start(&dev, 0)) return 1;
+
+	memset(frame, 0, sizeof frame);
+	frame[0] = 0x08;                        /* data, 3-address */
+	memset(frame + 4, 0xff, 6);             /* broadcast */
+	memcpy(frame + 10, src, 6);
+	memcpy(frame + 16, src, 6);
+	memcpy(frame + 24, "MT7612U-HAL ", 12);
+
+	printf("ch%u, HT MCS7 20 MHz, %d frames per size.\n"
+	       "'accepted' is what this driver submitted; the witness reports\n"
+	       "which lengths actually decoded.\n\n", chan, count);
+	printf("  %-6s %-10s %s\n", "bytes", "accepted", "note");
+
+	for (k = 0; k < sizeof sizes / sizeof sizes[0]; k++) {
+		int len = sizes[k];
+		long ok = 0;
+		int i;
+
+		if ((size_t)len > sizeof frame) continue;
+		/* Tag the payload with the size so the witness can bucket by what
+		 * was ASKED for, not only by what arrived. */
+		frame[36] = (uint8_t)(len & 0xff);
+		frame[37] = (uint8_t)(len >> 8);
+		for (i = 0; i < count; i++) {
+			frame[38] = (uint8_t)i;
+			if (mt7612u_tx(&dev, frame, (size_t)len, &rate) == 0) ok++;
+			mt_usleep(1500);
+		}
+		printf("  %-6d %ld/%-8d %s\n", len, ok, count,
+		       ok == 0 ? "refused by this driver" :
+		       (len > 2304 ? "above the 802.11 MPDU ceiling" : ""));
+		mt_usleep(120000);
+	}
+
+	mt_mac_stop(&dev);
+	printf("\nThe largest size with a non-zero witness count is the answer.\n"
+	       "A size this driver accepted but the witness never saw was\n"
+	       "submitted and dropped somewhere below - that is the real limit.\n");
+	return 0;
+}
+
 static int gate_soak(uint8_t chan, int secs, int framelen)
 {
 	static const uint8_t src[6] = { 0x02, 0x4d, 0x54, 0x76, 0x12, 0x01 };
@@ -609,14 +716,23 @@ static int gate_soak(uint8_t chan, int secs, int framelen)
 	return 0;
 }
 
-struct arx_ctx { unsigned long n; unsigned long by_phy[8]; };
+/*
+ * Written by the libusb event thread, read by the gate while that thread is
+ * still running - gate_arx() and gate_duplex() both print before calling
+ * mt7612u_rx_stop(). Plain increments there are a data race, so the displayed
+ * rate and the duplex pass/fail verdict could be built from torn counts.
+ * Relaxed atomics: these are counters, nothing orders anything else off them,
+ * and this is the RX hot path in a throughput gate.
+ */
+struct arx_ctx { _Atomic unsigned long n; _Atomic unsigned long by_phy[8]; };
 static void arx_cb(void *user, const void *frame, size_t len,
                    const struct mt7612u_rx_info *info)
 {
 	struct arx_ctx *c = user;
 	(void)frame; (void)len;
-	c->n++;
-	c->by_phy[info->phy & 7]++;
+	atomic_fetch_add_explicit(&c->n, 1, memory_order_relaxed);
+	atomic_fetch_add_explicit(&c->by_phy[info->phy & 7], 1,
+	                          memory_order_relaxed);
 }
 
 /* Async RX ring: the callback path StartRxLoop needs. */
@@ -640,17 +756,23 @@ static int gate_arx(uint8_t chan, int secs)
 		printf("GATE arx: FAIL - rx_start failed\n"); return 1;
 	}
 	t0 = now_ms();
-	while (now_ms() - t0 < secs * 1000.0)
-		mt_usleep(100000);
+	wait_ms(secs * 1000.0);
 	{
 		struct mt_async_stats st;
+		/* Actual elapsed, not the requested duration: an interrupt now
+		 * unwinds through here, and dividing by the request would report
+		 * a rate the run never achieved. */
+		double el = (now_ms() - t0) / 1000.0;
 
 		mt_async_stats(&dev, &st);
-		printf("async RX on ch%u for %d s: %lu frames (%.0f/s), rx_err=%llu\n",
-		       chan, secs, ctx.n, ctx.n / (double)secs,
-		       (unsigned long long)st.rx_err);
+		printf("async RX on ch%u for %.1f s: %lu frames (%.0f/s), rx_err=%llu "
+		       "rx_invalid=%llu rx_dropped=%llu\n",
+		       chan, el, ctx.n, ctx.n / (el > 0 ? el : 1),
+		       (unsigned long long)st.rx_err,
+		       (unsigned long long)st.rx_invalid,
+		       (unsigned long long)st.rx_dropped);
 	}
-	for (int i = 0; i < 5; i++)
+	for (int i = 0; i < 8; i++)
 		if (ctx.by_phy[i]) printf("  %-6s %lu\n", phy_name[i], ctx.by_phy[i]);
 	mt7612u_rx_stop(&dev);
 	mt_mac_stop(&dev);
@@ -883,7 +1005,8 @@ static void drain_cb(void *user, const void *frame, size_t len,
                      const struct mt7612u_rx_info *info)
 {
 	(void)frame; (void)len; (void)info;
-	(*(unsigned long *)user)++;
+	atomic_fetch_add_explicit((_Atomic unsigned long *)user, 1,
+	                          memory_order_relaxed);
 }
 
 /* Capability descriptor, TSF and 40 MHz. */
@@ -914,6 +1037,10 @@ static int gate_caps(uint8_t chan)
 	       c.band_2g_min_mhz, c.band_2g_max_mhz);
 	printf("      ampdu_tx=%u per_chain_rssi=%u narrowband=%u fast_retune=%u\n",
 	       c.ampdu_tx, c.per_chain_rssi, c.narrowband, c.fast_retune);
+	printf("      max MPDU: tx %u  rx %u  (rx is MT_MAX_LEN_CFG 0x%03x on air,\n"
+	       "                             less the 4-byte FCS)\n",
+	       c.max_mpdu_tx, c.max_mpdu_rx,
+	       mt_rr(&dev, MT_MAX_LEN_CFG) & 0xfff);
 
 	printf("\nRX gain from EEPROM: rssi_offset=[%d,%d] lna_gain=%d "
 	       "high_gain=[%d,%d] mcu_gain=0x%08x\n",
@@ -1017,7 +1144,8 @@ static int gate_caps(uint8_t chan)
  * The RX filter must keep MT_RX_FILTR_CFG_DUP clear or the hardware drops the
  * duplicates this test is counting.
  */
-struct ack_ctx { unsigned long to_us, retry_to_us, other; };
+/* Same event-thread/gate split as arx_ctx above. */
+struct ack_ctx { _Atomic unsigned long to_us, retry_to_us, other; };
 
 static const uint8_t g_ack_mac[6] = { 0x02, 0x4d, 0x54, 0x76, 0x12, 0xaa };
 
@@ -1029,9 +1157,13 @@ static void ack_cb(void *user, const void *frame, size_t len,
 
 	(void)info;
 	if (len < 16) return;
-	if (memcmp(f + 4, g_ack_mac, 6) != 0) { c->other++; return; }
-	c->to_us++;
-	if (f[1] & 0x08) c->retry_to_us++;      /* FC Retry bit */
+	if (memcmp(f + 4, g_ack_mac, 6) != 0) {
+		atomic_fetch_add_explicit(&c->other, 1, memory_order_relaxed);
+		return;
+	}
+	atomic_fetch_add_explicit(&c->to_us, 1, memory_order_relaxed);
+	if (f[1] & 0x08)                        /* FC Retry bit */
+		atomic_fetch_add_explicit(&c->retry_to_us, 1, memory_order_relaxed);
 }
 
 static int gate_ack(uint8_t chan, int secs, int arm)
@@ -1082,7 +1214,15 @@ static int gate_ack(uint8_t chan, int secs, int arm)
 		return 1;
 	}
 	printf("listening %d s ...\n", secs);
-	mt_usleep((unsigned)secs * 1000000u);
+	/* wait_ms, not mt_usleep: it honours SIGINT, where the old cast-to-
+	 * unsigned sleep both ignored the signal and turned a negative argument
+	 * into roughly 49 days with the receiver left running. */
+	if (!wait_ms(secs * 1000.0)) {
+		printf("GATE ack: interrupted\n");
+		mt7612u_rx_stop(&dev);
+		mt_mac_stop(&dev);
+		return 1;
+	}
 	mt7612u_rx_stop(&dev);
 	printf("  stimulus frames addressed to the responder MAC: %lu (retries %lu)\n",
 	       off.to_us, off.retry_to_us);
@@ -1100,6 +1240,748 @@ static int gate_ack(uint8_t chan, int secs, int arm)
 	}
 	printf("\nstimulus confirmed. The ACKs (if any) are counted on the\n"
 	       "stimulus radio, which receives concurrently.\n");
+	return 0;
+}
+
+
+/*
+ * Every RXWI byte against ambient traffic, bucketed by received level.
+ *
+ * The power sweep answered "does this byte track our transmitter". This asks
+ * the two questions that one could not: does a byte vary with received level
+ * across a much wider span than our own saturated link covers, and does a
+ * byte that looks constant differ between a clean channel and an interfered
+ * one. A noise floor would be flat within a channel and move between them.
+ */
+static struct { unsigned long n; long sum[20]; long mn[20], mx[20]; } g_rxb[6];
+static const int g_rxb_edge[6] = { -100, -80, -70, -60, -50, 0 };
+
+static void rxbytes_cb(void *user, const void *frame, size_t len,
+                       const struct mt7612u_rx_info *info)
+{
+    uint8_t bytes[20];
+    int band = 0;
+
+    (void)user; (void)frame;
+    if (len < 16) return;
+    for (int i = 0; i < 6; i++)
+        if (info->rssi[0] <= g_rxb_edge[i]) { band = i; break; }
+
+    for (int i = 0; i < 4; i++) bytes[i] = (uint8_t)info->rssi[i];
+    for (int w = 0; w < 4; w++)
+        for (int b = 0; b < 4; b++)
+            bytes[4 + w * 4 + b] = (uint8_t)(info->bbp[w] >> (8 * b));
+
+    if (!g_rxb[band].n)
+        for (int i = 0; i < 20; i++) { g_rxb[band].mn[i] = 999; g_rxb[band].mx[i] = -999; }
+    g_rxb[band].n++;
+    for (int i = 0; i < 20; i++) {
+        long v = bytes[i];
+
+        g_rxb[band].sum[i] += v;
+        if (v < g_rxb[band].mn[i]) g_rxb[band].mn[i] = v;
+        if (v > g_rxb[band].mx[i]) g_rxb[band].mx[i] = v;
+    }
+}
+
+static int gate_rxbytes(uint8_t chan, int secs)
+{
+    static const char *nm[20] = {
+        "rssi[0]", "rssi[1]", "rssi[2]", "rssi[3]",
+        "bbp0.b0", "bbp0.b1", "bbp0.b2", "bbp0.b3",
+        "bbp1.b0", "bbp1.b1", "bbp1.b2", "bbp1.b3",
+        "bbp2.b0", "bbp2.b1", "bbp2.b2", "bbp2.b3",
+        "bbp3.b0", "bbp3.b1", "bbp3.b2", "bbp3.b3",
+    };
+    struct mt7612u_link_stats st;
+
+    memset(g_rxb, 0, sizeof g_rxb);
+    if (mt_eeprom_init(&dev)) return 1;
+    if (mt_init_hardware(&dev, NULL)) return 1;
+    if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
+    if (mt7612u_rx_start(&dev, rxbytes_cb, NULL)) return 1;
+    if (mt_mac_start(&dev, 1)) return 1;
+    mt7612u_set_monitor_rx(&dev, 0);
+    mt7612u_link_stats_start(&dev);
+
+    wait_ms(secs * 1000.0);
+    mt7612u_link_stats(&dev, &st);
+    mt7612u_rx_stop(&dev);
+    mt_mac_stop(&dev);
+
+    printf("ch%u, %d s ambient. false CCA this interval: %u (mt76 calls >800 "
+           "interfered, <10 clean)\n", chan, secs, st.rx_false_cca);
+    {
+        unsigned long tot = 0, nv = 0;
+        long rs = 0, ns = 0, ss = 0;
+
+        for (int b = 0; b < 6; b++) {
+            if (!g_rxb[b].n) continue;
+            tot += g_rxb[b].n;
+            rs += g_rxb[b].sum[0];
+            ns += g_rxb[b].sum[2];
+        }
+        if (tot) {
+            double r = rs / (double)tot - 256, n = ns / (double)tot - 256;
+
+            (void)nv; (void)ss;
+            printf("  mean rssi %.1f dBm, noise %.1f dBm  ->  SNR %.1f dB%s\n\n",
+                   r, n, r - n,
+                   n < -100 ? "   (noise below thermal: no valid estimate)" : "");
+        }
+    }
+    printf("  %-8s", "byte");
+    for (int b = 0; b < 6; b++) if (g_rxb[b].n) printf("  <=%-4d", g_rxb_edge[b]);
+    printf("   min  max\n");
+    for (int i = 0; i < 20; i++) {
+        long mn = 999, mx = -999;
+
+        printf("  %-8s", nm[i]);
+        for (int b = 0; b < 6; b++) {
+            if (!g_rxb[b].n) continue;
+            printf(" %7.1f", g_rxb[b].sum[i] / (double)g_rxb[b].n);
+            if (g_rxb[b].mn[i] < mn) mn = g_rxb[b].mn[i];
+            if (g_rxb[b].mx[i] > mx) mx = g_rxb[b].mx[i];
+        }
+        printf("  %4ld %4ld\n", mn, mx);
+    }
+    printf("\n  frames per band:");
+    for (int b = 0; b < 6; b++) if (g_rxb[b].n) printf(" %lu", g_rxb[b].n);
+    printf("\n");
+    return 0;
+}
+
+/*
+ * The MAC's MIB counters, sampled once a second.
+ *
+ * This is where this part's link reporting actually lives. The RX descriptor
+ * carries RSSI and nothing else - `bbp_rxinfo[4]`, which mt76 declares and
+ * never reads, is two words of zero plus a duplicate of the same two RSSI
+ * values - so there is no per-frame SNR or EVM. What there is instead is
+ * per-interval: channel occupancy, four classes of receive error, a false-CCA
+ * count that is the interference signal, and the A-MPDU length histogram.
+ *
+ * Read-and-clear, so each line is the second that just passed.
+ */
+static unsigned long linkstat_drained;
+
+static int gate_linkstat(uint8_t chan, int secs, int with_rx)
+{
+	struct mt7612u_link_stats st;
+
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
+	/* The receiver has to be ON for any of the RX error classes or the
+	 * busy timer to count anything, and the ring has to be draining before
+	 * the receiver is enabled. Getting this wrong reads as "the counters
+	 * are dead" rather than as a harness bug. */
+	if (with_rx) {
+		if (mt7612u_rx_start(&dev, drain_cb, &linkstat_drained)) return 1;
+	}
+	if (mt_mac_start(&dev, with_rx)) return 1;
+	if (with_rx) mt7612u_set_monitor_rx(&dev, 0);
+	mt7612u_link_stats_start(&dev);
+
+	printf("ch%u, receiver %s, %d samples of 1 s (read-and-clear)\n\n",
+	       chan, with_rx ? "ON" : "off", secs);
+	printf("  %5s %9s %9s %6s  %5s %5s %8s %5s %5s %5s  %4s\n",
+	       "s", "busy", "idle", "busy%", "crc", "phy", "falseCCA", "plcp", "dup", "ovf",
+	       "temp");
+	for (int i = 0; i < secs; i++) {
+		double busy_pct;
+
+		if (!wait_ms(1000.0)) break;
+		if (mt7612u_link_stats(&dev, &st)) return 1;
+		busy_pct = (st.ch_busy + st.ch_idle)
+		         ? 100.0 * st.ch_busy / (double)(st.ch_busy + st.ch_idle) : 0.0;
+		printf("  %5d %9u %9u %5.1f%%  %5u %5u %8u %5u %5u %5u  %4d\n",
+		       i, st.ch_busy, st.ch_idle, busy_pct,
+		       st.rx_crc_err, st.rx_phy_err, st.rx_false_cca,
+		       st.rx_plcp_err, st.rx_dup_err, st.rx_overflow, st.temp_c);
+	}
+
+	{
+		int any = 0;
+
+		for (int i = 0; i < 32; i++) if (st.agg_cnt[i]) any = 1;
+		printf("\n  A-MPDU length histogram (last second): %s",
+		       any ? "" : "all zero - nothing aggregated\n");
+		if (any) {
+			for (int i = 0; i < 32; i++)
+				if (st.agg_cnt[i]) printf("[%d]=%u ", i + 1, st.agg_cnt[i]);
+			printf("\n");
+		}
+	}
+	if (with_rx) {
+		mt7612u_rx_stop(&dev);
+		printf("  %lu frames reached the ring over the run\n", linkstat_drained);
+	}
+	mt_mac_stop(&dev);
+	return 0;
+}
+
+/* --- MT7612U -> MT7612U link, and what the baseband reports per frame ---
+ *
+ * Two adapters, one transmitting at a swept TX power and one receiving. It
+ * answers three separate questions at once, which is why the sweep is a
+ * power sweep and not a fixed level:
+ *
+ *  1. Does this port's TX and RX work against each other end to end?
+ *  2. Does mt7612u_set_txpower() move *radiated* power? Everything so far
+ *     compared registers against the kernel's, which is not the same claim.
+ *  3. RXWI bytes 16-31 are `bbp_rxinfo[4]`, which mt76 declares and never
+ *     reads, and mt76x02 has no SNR or EVM anywhere. If any of those bytes
+ *     is a link-quality metric it must move with the transmitter's power;
+ *     if none of them does, they are not one.
+ *
+ * The receiver is NOT an independent instrument - it runs this same decode
+ * path - so this measures the link and the descriptor, not our correctness.
+ */
+static int gate_linktx(uint8_t chan, int count)
+{
+	static const uint8_t src[6] = { 0x02, 0x4d, 0x54, 0x76, 0x12, 0x01 };
+	static const int powers[] = { 0, 4, 8, 12, 16, 20, 24, 30 };
+	struct mt7612u_tx_rate r = { .phy = MT7612U_PHY_HT, .mcs = 2, .nss = 1,
+	                             .bw = MT7612U_BW_20, .no_ack = 1 };
+	uint8_t f[64];
+
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
+	if (mt_mac_start(&dev, 0)) return 1;
+
+	memset(f, 0, sizeof f);
+	f[0] = 0x08;
+	memset(f + 4, 0xff, 6);
+	memcpy(f + 10, src, 6);
+	memcpy(f + 16, src, 6);
+	memcpy(f + 24, "MT7612U-HAL ", 12);
+
+	printf("TX on ch%u, HT MCS2 1SS 20 MHz, %d frames per power step\n",
+	       chan, count);
+	for (unsigned i = 0; i < sizeof powers / sizeof powers[0]; i++) {
+		long sent = 0;
+
+		if (mt7612u_set_txpower(&dev, powers[i])) {
+			printf("  %2d dBm  REFUSED\n", powers[i]);
+			continue;
+		}
+		f[36] = (uint8_t)powers[i];
+		for (int n = 0; n < count; n++) {
+			f[22] = (uint8_t)((n & 0xf) << 4);
+			f[23] = (uint8_t)(n >> 4);
+			f[37] = (uint8_t)n;
+			if (mt7612u_tx(&dev, f, 44, &r) == 0) sent++;
+			mt_usleep(1200);
+		}
+		printf("  %2d dBm  sent %ld/%d\n", powers[i], sent, count);
+		mt_usleep(120000);
+	}
+	mt_mac_stop(&dev);
+	return 0;
+}
+
+/* Every byte the RXWI offers past the two RSSI values mt76 reads, averaged.
+ * 4 rssi bytes (mt76 uses only [0] and [1]; [2] and [3] are read by nobody,
+ * and on the legacy Ralink RXWI those slots were SNR0/SNR1) plus the 16 bytes
+ * of bbp_rxinfo. Signed and unsigned means both, because an SNR would be a
+ * small positive number and an RSSI a negative one. */
+struct link_bucket { unsigned long n; long b_sum[20]; long b_min[20], b_max[20]; };
+static struct link_bucket g_link[32];
+static int g_link_pw[32];
+static int g_link_n;
+
+static void linkrx_cb(void *user, const void *frame, size_t len,
+                      const struct mt7612u_rx_info *info)
+{
+	const uint8_t *f = frame;
+	int slot = -1, pw;
+	uint8_t bytes[20];
+
+	(void)user;
+	if (len < 40) return;
+	if (memcmp(f + 10, "\x02\x4d\x54\x76\x12\x01", 6)) return;
+	if (memcmp(f + 24, "MT7612U-HAL ", 12)) return;
+	pw = f[36];
+	for (int i = 0; i < g_link_n; i++)
+		if (g_link_pw[i] == pw) { slot = i; break; }
+	if (slot < 0) {
+		if (g_link_n >= 32) return;
+		slot = g_link_n++;
+		g_link_pw[slot] = pw;
+		for (int i = 0; i < 20; i++) {
+			g_link[slot].b_min[i] = 999;
+			g_link[slot].b_max[i] = -999;
+		}
+	}
+
+	for (int i = 0; i < 4; i++) bytes[i] = (uint8_t)info->rssi[i];
+	for (int w = 0; w < 4; w++)
+		for (int b = 0; b < 4; b++)
+			bytes[4 + w * 4 + b] = (uint8_t)(info->bbp[w] >> (8 * b));
+
+	g_link[slot].n++;
+	for (int i = 0; i < 20; i++) {
+		long v = bytes[i];
+
+		g_link[slot].b_sum[i] += v;
+		if (v < g_link[slot].b_min[i]) g_link[slot].b_min[i] = v;
+		if (v > g_link[slot].b_max[i]) g_link[slot].b_max[i] = v;
+	}
+}
+
+static int gate_linkrx(uint8_t chan, int secs)
+{
+
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
+	if (mt7612u_rx_start(&dev, linkrx_cb, NULL)) return 1;
+	if (mt_mac_start(&dev, 1)) return 1;
+	mt7612u_set_monitor_rx(&dev, 0);
+
+	printf("RX on ch%u for %d s, filtering our own magic\n", chan, secs);
+	wait_ms(secs * 1000.0);
+	mt7612u_rx_stop(&dev);
+	mt_mac_stop(&dev);
+
+	{
+		static const char *nm[20] = {
+			"rssi[0]", "rssi[1]", "rssi[2]", "rssi[3]",
+			"bbp0.b0", "bbp0.b1", "bbp0.b2", "bbp0.b3",
+			"bbp1.b0", "bbp1.b1", "bbp1.b2", "bbp1.b3",
+			"bbp2.b0", "bbp2.b1", "bbp2.b2", "bbp2.b3",
+			"bbp3.b0", "bbp3.b1", "bbp3.b2", "bbp3.b3",
+		};
+
+		printf("\nmean of every candidate byte, per requested tx power\n");
+		printf("  %-8s", "byte");
+		for (int i = 0; i < g_link_n; i++) printf(" %7d", g_link_pw[i]);
+		printf("   span  as int8\n");
+		for (int b = 0; b < 20; b++) {
+			double lo = 1e9, hi = -1e9;
+
+			printf("  %-8s", nm[b]);
+			for (int i = 0; i < g_link_n; i++) {
+				double m = g_link[i].b_sum[b] / (double)g_link[i].n;
+
+				if (m < lo) lo = m;
+				if (m > hi) hi = m;
+				printf(" %7.1f", m);
+			}
+			printf("  %5.1f  %6.1f\n", hi - lo,
+			       g_link[0].b_sum[b] / (double)g_link[0].n > 127
+			         ? g_link[0].b_sum[b] / (double)g_link[0].n - 256
+			         : g_link[0].b_sum[b] / (double)g_link[0].n);
+		}
+		printf("\n  frames per level:");
+		for (int i = 0; i < g_link_n; i++) printf(" %lu", g_link[i].n);
+		printf("\n");
+	}
+	printf("\nA byte whose span is ~0 across a 30 dB sweep carries no level or\n"
+	       "quality information. One that tracks and stays a small positive\n"
+	       "number is an SNR candidate; one that tracks and reads negative as\n"
+	       "int8 is another copy of RSSI.\n");
+	return g_link_n ? 0 : 1;
+}
+
+/*
+ * Does STBC actually put the stream on both antennas, and does the second
+ * chain radiate without it?
+ *
+ * The coding gate proves the STBC bit reaches the air and the receiver
+ * decodes the frame as STBC. It says nothing about radiated power, and there
+ * is a real confound: a chip may already drive the second chain with cyclic
+ * delay diversity on a one-stream frame, in which case "STBC off" is not
+ * "one antenna".
+ *
+ * Phase 1 alternates STBC off/on frame by frame at one rate. Nothing is
+ * reconfigured between them - only one bit of the rate word changes - so
+ * ambient drift, distance and AGC state cancel.
+ *
+ * Phase 2 needs a chainmask change, which costs a channel re-set, so it runs
+ * in blocks and repeats the sequence twice: if the two passes disagree, the
+ * difference is drift and not the chainmask.
+ */
+static int gate_diversity(uint8_t chan, int count)
+{
+	static const uint8_t src[6] = { 0x02, 0x4d, 0x54, 0x76, 0x12, 0x01 };
+	uint8_t f[64];
+
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
+	if (mt_mac_start(&dev, 0)) return 1;
+
+	memset(f, 0, sizeof f);
+	f[0] = 0x08;
+	memset(f + 4, 0xff, 6);
+	memcpy(f + 10, src, 6);
+	memcpy(f + 16, src, 6);
+	memcpy(f + 24, "MT7612U-HAL ", 12);
+
+	printf("HT MCS2, 1 spatial stream, 20 MHz, ch%u\n", chan);
+	printf("phase 1: STBC off/on alternating frame by frame (tags A / B)\n");
+	{
+		struct mt7612u_tx_rate off = { .phy = MT7612U_PHY_HT, .mcs = 2,
+		                               .nss = 1, .bw = MT7612U_BW_20,
+		                               .no_ack = 1 };
+		struct mt7612u_tx_rate on = off;
+		long n_off = 0, n_on = 0;
+
+		on.stbc = 1;
+		printf("  rate word off 0x%04x  on 0x%04x  (one bit apart)\n",
+		       mt_tx_rate_word(&off), mt_tx_rate_word(&on));
+		for (int i = 0; i < count; i++) {
+			int stbc = i & 1;
+
+			f[22] = (uint8_t)((i & 0xf) << 4);
+			f[23] = (uint8_t)(i >> 4);
+			f[36] = stbc ? 'B' : 'A';
+			f[37] = (uint8_t)i;
+			if (mt7612u_tx(&dev, f, 44, stbc ? &on : &off) == 0) {
+				if (stbc) n_on++; else n_off++;
+			}
+			mt_usleep(1500);
+		}
+		printf("  submitted %ld off, %ld on\n", n_off, n_on);
+	}
+
+	printf("phase 2: 1T1R vs 2T2R, STBC off, two passes (tags C / D)\n");
+	for (int pass = 0; pass < 2; pass++) {
+		for (int two = 0; two < 2; two++) {
+			struct mt7612u_tx_rate r = { .phy = MT7612U_PHY_HT, .mcs = 2,
+			                             .nss = 1, .bw = MT7612U_BW_20,
+			                             .no_ack = 1 };
+			long sent = 0;
+
+			if (mt7612u_set_chainmask(&dev, two ? 0x0202 : 0x0101))
+				return 1;
+			if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
+			printf("  pass %d chainmask 0x%04x txwi[17]=0x%02x\n", pass,
+			       dev.chainmask, ((dev.chainmask & 0xf) > 1) ? 0x13 : 0);
+			f[36] = two ? 'D' : 'C';
+			for (int i = 0; i < count; i++) {
+				f[22] = (uint8_t)((i & 0xf) << 4);
+				f[23] = (uint8_t)(i >> 4);
+				f[37] = (uint8_t)i;
+				if (mt7612u_tx(&dev, f, 44, &r) == 0) sent++;
+				mt_usleep(1500);
+			}
+			printf("    submitted %ld/%d\n", sent, count);
+		}
+	}
+	mt7612u_set_chainmask(&dev, 0x0202);
+
+	mt_mac_stop(&dev);
+	printf("\nWitness RSSI per tag decides. A vs B is the STBC question with\n"
+	       "nothing else changed; C vs D is whether the second chain radiates\n"
+	       "at all without STBC.\n");
+	return 0;
+}
+
+/*
+ * The three modulation flags in the rate word: LDPC, STBC and short GI.
+ *
+ * Each frame carries both the DESC_RATE it should air at and the flag bits it
+ * should carry, so the witness compares the frame against its own claim
+ * rather than against an arm table.
+ *
+ * One arm is a deliberate negative control: STBC is requested at two spatial
+ * streams, where mt_tx_rate_word() refuses to set it because mt76 refuses too
+ * (STBC on this MAC is a 1SS feature). The frame must air with stbc clear. An
+ * arm that only ever asks for things that work cannot tell a working encoder
+ * from one that sets every bit it is handed.
+ */
+/* bw is the MT7612U_BW_* enum: 0 = 20, 1 = 40, 2 = 80. */
+static int gate_coding(uint8_t chan, int count, int bw)
+{
+	static const uint8_t src[6] = { 0x02, 0x4d, 0x54, 0x76, 0x12, 0x01 };
+	static const struct { enum mt7612u_phy phy; uint8_t mcs, nss; int base; }
+	rates[] = {
+		{ MT7612U_PHY_HT,   3, 1, 15 },
+		{ MT7612U_PHY_HT,   7, 1, 19 },
+		{ MT7612U_PHY_HT,  11, 2, 23 },
+		{ MT7612U_PHY_VHT,  3, 1, 47 },
+		{ MT7612U_PHY_VHT,  7, 1, 51 },
+		{ MT7612U_PHY_VHT,  3, 2, 57 },
+		{ MT7612U_PHY_VHT,  7, 2, 61 },
+	};
+	uint8_t f[64];
+	int arms = 0;
+	uint8_t hw_chan = chan;
+
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+	if (mt_set_channel(&dev, chan, (enum mt7612u_bw)bw)) return 1;
+	if (mt_mac_start(&dev, 0)) return 1;
+
+	mt_chan_group(chan, (uint8_t)bw, &hw_chan, NULL, NULL);
+	printf("ch%u (hw centre %u) at %d MHz, %d frames per arm\n\n",
+	       chan, hw_chan, 20 << bw, count);
+	printf("  %-16s %-10s %-9s %s\n", "rate", "asked", "rate word", "expect on air");
+
+	memset(f, 0, sizeof f);
+	f[0] = 0x08;
+	memset(f + 4, 0xff, 6);
+	memcpy(f + 10, src, 6);
+	memcpy(f + 16, src, 6);
+	memcpy(f + 24, "MT7612U-HAL ", 12);
+
+	for (unsigned i = 0; i < sizeof rates / sizeof rates[0]; i++) {
+		/* 802.11n has no 80 MHz, so an HT arm at that width would emit a
+		 * rate word that names no real format. gate_sweep and gate_vht
+		 * skip the same pairing. */
+		if (bw == MT7612U_BW_80 && rates[i].phy != MT7612U_PHY_VHT) {
+			printf("  %-16s skipped: 802.11n has no 80 MHz\n", "HT");
+			continue;
+		}
+		for (int coding = 0; coding < 8; coding++) {
+			struct mt7612u_tx_rate r = {
+				.phy = rates[i].phy, .mcs = rates[i].mcs,
+				.nss = rates[i].nss,
+				.bw = (uint8_t)bw,
+				.sgi = (coding & 4) ? 1u : 0u,
+				.ldpc = (coding & 1) ? 1u : 0u,
+				.stbc = (coding & 2) ? 1u : 0u,
+				.no_ack = 1,
+			};
+			uint16_t word = mt_tx_rate_word(&r);
+			/* What the encoder actually committed to, which is what
+			 * the air must show - not what was asked for. */
+			int on_air = ((word & MT_RATE_LDPC) ? 1 : 0) |
+			             ((word & MT_RATE_STBC) ? 2 : 0) |
+			             ((word & MT_RATE_SGI)  ? 4 : 0);
+			char asked[16], expect[24];
+			long sent = 0;
+
+			snprintf(asked, sizeof asked, "%s%s%s",
+			         (coding & 1) ? "L" : "-", (coding & 2) ? "S" : "-",
+			         (coding & 4) ? "G" : "-");
+			snprintf(expect, sizeof expect, "rate %d  %s%s%s",
+			         rates[i].base,
+			         (on_air & 1) ? "L" : "-", (on_air & 2) ? "S" : "-",
+			         (on_air & 4) ? "G" : "-");
+			printf("  %s MCS%-2d %dSS  %-10s 0x%04x    %s%s\n",
+			       rates[i].phy == MT7612U_PHY_HT ? "HT " : "VHT",
+			       rates[i].mcs, rates[i].nss, asked, word, expect,
+			       (coding & 2) && rates[i].nss > 1 ? "   <- STBC refused at 2SS" : "");
+
+			f[36] = (uint8_t)rates[i].base;
+			f[38] = (uint8_t)on_air;
+			for (int n = 0; n < count; n++) {
+				f[22] = (uint8_t)((n & 0xf) << 4);
+				f[23] = (uint8_t)(n >> 4);
+				f[37] = (uint8_t)n;
+				if (mt7612u_tx(&dev, f, 44, &r) == 0) sent++;
+				mt_usleep(1200);
+			}
+			if (sent != count)
+				printf("       submitted only %ld/%d\n", sent, count);
+			arms++;
+			mt_usleep(80000);
+		}
+	}
+
+	mt_mac_stop(&dev);
+	printf("\n%d arms swept. Payload offset 12 is the expected DESC_RATE,\n"
+	       "offset 14 the expected LDPC|STBC|SGI bits.\n", arms);
+	return 0;
+}
+
+/*
+ * Full rate-ladder sweep: every HT MCS 0-15 and every legal VHT MCS at both
+ * stream counts, at whichever width the caller picks.
+ *
+ * Each frame carries its own expected DESC_RATE code in the payload, so the
+ * check is "did this frame air at the rate it says it should have" rather
+ * than an arm table the analysis has to agree with separately. A frame that
+ * airs at the wrong rate indicts itself.
+ *
+ * VHT MCS9 is not legal at 20 MHz for one or two streams, so it is skipped
+ * there and included at 40.
+ */
+/* bw is the MT7612U_BW_* enum: 0 = 20, 1 = 40, 2 = 80. */
+static int gate_sweep(uint8_t chan, int count, int bw)
+{
+	static const uint8_t src[6] = { 0x02, 0x4d, 0x54, 0x76, 0x12, 0x01 };
+	uint8_t f[64];
+	int arms = 0;
+	uint8_t hw_chan = chan;
+
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+	if (mt_set_channel(&dev, chan, (enum mt7612u_bw)bw)) return 1;
+	if (mt_mac_start(&dev, 0)) return 1;
+
+	/* Report the centre the hardware actually tuned, not the control
+	 * channel: at 80 MHz they differ by up to 6, and a witness listening on
+	 * the control channel with the wrong centre hears nothing. */
+	mt_chan_group(chan, (uint8_t)bw, &hw_chan, NULL, NULL);
+	printf("ch%u (hw centre %u) at %d MHz, chainmask 0x%04x, %d frames per rate\n\n",
+	       chan, hw_chan, 20 << bw, dev.chainmask, count);
+	printf("  %-18s %-9s %s\n", "rate", "rate word", "expected DESC_RATE");
+
+	memset(f, 0, sizeof f);
+	f[0] = 0x08;
+	memset(f + 4, 0xff, 6);
+	memcpy(f + 10, src, 6);
+	memcpy(f + 16, src, 6);
+	memcpy(f + 24, "MT7612U-HAL ", 12);
+
+	for (int phase = 0; phase < 2; phase++) {
+		/* HT has no 80 MHz: 802.11n stops at 40, and 80 is a VHT-only
+		 * width. A rate word naming PHY=HT with BW=80 is not a wide HT
+		 * frame, it is an unspecified one, so the HT ladder is skipped
+		 * rather than swept at a width it cannot mean. */
+		int last_mcs = phase == 0 ? 15 : (bw ? 9 : 8);
+
+		if (phase == 0 && bw == MT7612U_BW_80) {
+			printf("  (HT ladder skipped: 802.11n has no 80 MHz)\n");
+			continue;
+		}
+
+		for (int mcs = 0; mcs <= last_mcs; mcs++) {
+			for (int nss = 1; nss <= 2; nss++) {
+				struct mt7612u_tx_rate r = {
+					.bw = (uint8_t)bw,
+					.no_ack = 1,
+				};
+				char what[32];
+				int expect;
+				long sent = 0;
+
+				if (phase == 0) {
+					/* HT folds the stream count into the MCS
+					 * number, so it is one ladder, not two. */
+					if (nss == 2) continue;
+					r.phy = MT7612U_PHY_HT;
+					r.mcs = (uint8_t)mcs;
+					r.nss = (uint8_t)(1 + (mcs >> 3));
+					expect = 12 + mcs;
+					snprintf(what, sizeof what, "HT  MCS%-2d %dSS", mcs, r.nss);
+				} else {
+					r.phy = MT7612U_PHY_VHT;
+					r.mcs = (uint8_t)mcs;
+					r.nss = (uint8_t)nss;
+					expect = 44 + (nss - 1) * 10 + mcs;
+					snprintf(what, sizeof what, "VHT MCS%-2d %dSS", mcs, nss);
+				}
+
+				printf("  %-18s 0x%04x    %d\n", what,
+				       mt_tx_rate_word(&r), expect);
+				f[36] = (uint8_t)expect;
+				for (int i = 0; i < count; i++) {
+					f[22] = (uint8_t)((i & 0xf) << 4);
+					f[23] = (uint8_t)(i >> 4);
+					f[37] = (uint8_t)i;
+					if (mt7612u_tx(&dev, f, 44, &r) == 0) sent++;
+					mt_usleep(1200);
+				}
+				if (sent != count)
+					printf("       submitted only %ld/%d\n", sent, count);
+				arms++;
+				mt_usleep(100000);
+			}
+		}
+	}
+
+	mt_mac_stop(&dev);
+	printf("\n%d rates swept at %d MHz. Each frame carries its own expected\n"
+	       "DESC_RATE at payload offset 12; the witness compares the two.\n"
+	       "The witness must be listening at the same width - a 20 MHz\n"
+	       "receiver decodes none of a 40 or 80 MHz frame.\n", arms, 20 << bw);
+	return 0;
+}
+
+/*
+ * VHT and two spatial streams on air.
+ *
+ * The rate word encodes both and the RX path decodes both, but until now
+ * neither had been transmitted - docs/mt7612u.md listed them as unexercised.
+ * Each arm carries its own tag byte so the witness attributes frames by
+ * content rather than by timestamp, and each has one expected DESC_RATE code
+ * at the witness: HT is 12+mcs, VHT 1SS is 44+mcs, VHT 2SS is 54+mcs. A
+ * stream count that silently collapsed to one would land on the 1SS codes,
+ * which is exactly the failure this is looking for.
+ *
+ * VHT MCS9 is not a legal rate at 20 MHz for one or two streams, so it only
+ * appears in the 40 MHz arms.
+ */
+/* bw is the MT7612U_BW_* enum: 0 = 20, 1 = 40, 2 = 80. */
+static int gate_vht(uint8_t chan, int count, int bw)
+{
+	static const uint8_t src[6] = { 0x02, 0x4d, 0x54, 0x76, 0x12, 0x01 };
+	static const struct {
+		char tag; enum mt7612u_phy phy; uint8_t mcs, nss; int wide_only;
+		const char *what; int expect;
+	} arms[] = {
+		{ 'P', MT7612U_PHY_HT,  7,  1, 0, "HT   MCS7  1SS", 19 },
+		{ 'Q', MT7612U_PHY_HT, 15,  2, 0, "HT   MCS15 2SS", 27 },
+		{ 'R', MT7612U_PHY_VHT, 0,  1, 0, "VHT  MCS0  1SS", 44 },
+		{ 'S', MT7612U_PHY_VHT, 7,  1, 0, "VHT  MCS7  1SS", 51 },
+		{ 'T', MT7612U_PHY_VHT, 8,  1, 0, "VHT  MCS8  1SS", 52 },
+		{ 'U', MT7612U_PHY_VHT, 0,  2, 0, "VHT  MCS0  2SS", 54 },
+		{ 'V', MT7612U_PHY_VHT, 7,  2, 0, "VHT  MCS7  2SS", 61 },
+		{ 'X', MT7612U_PHY_VHT, 8,  2, 0, "VHT  MCS8  2SS", 62 },
+		{ 'Y', MT7612U_PHY_VHT, 9,  1, 1, "VHT  MCS9  1SS", 53 },
+		{ 'Z', MT7612U_PHY_VHT, 9,  2, 1, "VHT  MCS9  2SS", 63 },
+	};
+	uint8_t f[64];
+	uint8_t hw_chan = chan;
+
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+	if (mt_set_channel(&dev, chan, (enum mt7612u_bw)bw)) return 1;
+	if (mt_mac_start(&dev, 0)) return 1;
+
+	mt_chan_group(chan, (uint8_t)bw, &hw_chan, NULL, NULL);
+	printf("chainmask 0x%04x -> %d spatial streams, txwi[17]=0x%02x\n",
+	       dev.chainmask, (dev.chainmask & 0xf) > 1 ? 2 : 1,
+	       ((dev.chainmask & 0xf) > 1) ? 0x13 : 0);
+	printf("ch%u (hw centre %u) at %d MHz, %d frames per arm\n\n",
+	       chan, hw_chan, 20 << bw, count);
+	printf("  tag  %-16s rate word  expected witness DESC_RATE\n", "arm");
+
+	memset(f, 0, sizeof f);
+	f[0] = 0x08;                       /* data, 3-address */
+	memset(f + 4, 0xff, 6);            /* broadcast */
+	memcpy(f + 10, src, 6);
+	memcpy(f + 16, src, 6);
+	memcpy(f + 24, "MT7612U-HAL ", 12);
+
+	for (unsigned a = 0; a < sizeof arms / sizeof arms[0]; a++) {
+		struct mt7612u_tx_rate r = { .phy = arms[a].phy, .mcs = arms[a].mcs,
+		                             .nss = arms[a].nss,
+		                             .bw = (uint8_t)bw,
+		                             .no_ack = 1 };
+		long sent = 0;
+
+		/* MCS9 has no 20 MHz encoding at 1 or 2 streams. */
+		if (arms[a].wide_only && bw == MT7612U_BW_20) continue;
+		/* HT is a 20/40-only PHY: 80 MHz is VHT-defined. */
+		if (arms[a].phy != MT7612U_PHY_VHT && bw == MT7612U_BW_80) continue;
+
+		printf("  %c    %-16s 0x%04x     %d\n", arms[a].tag, arms[a].what,
+		       mt_tx_rate_word(&r), arms[a].expect);
+		f[36] = (uint8_t)arms[a].tag;
+		for (int i = 0; i < count; i++) {
+			f[22] = (uint8_t)((i & 0xf) << 4);
+			f[23] = (uint8_t)(i >> 4);
+			f[37] = (uint8_t)i;
+			f[38] = (uint8_t)(i >> 8);
+			if (mt7612u_tx(&dev, f, 44, &r) == 0) sent++;
+			mt_usleep(1500);
+		}
+		printf("       submitted %ld/%d\n", sent, count);
+		mt_usleep(150000);
+	}
+
+	mt_mac_stop(&dev);
+	printf("\nFrames submitted. The witness decides: each tag must appear at\n"
+	       "its expected DESC_RATE. A 2SS arm landing on a 1SS code means the\n"
+	       "second stream did not go out.\n");
 	return 0;
 }
 
@@ -1198,7 +2080,23 @@ int main(int argc, char **argv)
 {
 	const char *err = NULL, *cmd = argc > 1 ? argv[1] : "regs";
 	int rc;
+	/* The width argument that sweep/coding/vht share in argv[4]. Validated
+	 * here rather than inside them, because they format it as `20 << bw`,
+	 * which for a negative or large argv value is undefined rather than
+	 * merely wrong. Other gates give argv[4] a different meaning, so the
+	 * check is scoped to the three that read it as a width. */
+	int want_bw = argc > 4 ? atoi(argv[4]) : 0;
 
+	if ((!strcmp(cmd, "sweep") || !strcmp(cmd, "coding") ||
+	     !strcmp(cmd, "vht")) &&
+	    (want_bw < MT7612U_BW_20 || want_bw > MT7612U_BW_80)) {
+		fprintf(stderr, "bad bandwidth '%s': 0 = 20 MHz, 1 = 40, 2 = 80\n",
+		        argv[4]);
+		return 2;
+	}
+
+	signal(SIGINT, on_signal);
+	signal(SIGTERM, on_signal);
 	if (mt_open(&dev, &err)) {
 		fprintf(stderr, "open failed: %s\n", err ? err : "?");
 		return 1;
@@ -1215,6 +2113,34 @@ int main(int argc, char **argv)
 		              argc > 4 ? atoi(argv[4]) : 0);
 	} else if (!strcmp(cmd, "caps")) {
 		rc = gate_caps(argc > 2 ? (uint8_t)atoi(argv[2]) : 149);
+	} else if (!strcmp(cmd, "rxbytes")) {
+		rc = gate_rxbytes(argc > 2 ? (uint8_t)atoi(argv[2]) : 1,
+		                  argc > 3 ? atoi(argv[3]) : 15);
+	} else if (!strcmp(cmd, "linkstat")) {
+		rc = gate_linkstat(argc > 2 ? (uint8_t)atoi(argv[2]) : 149,
+		                   argc > 3 ? atoi(argv[3]) : 10,
+		                   argc > 4 ? atoi(argv[4]) : 0);
+	} else if (!strcmp(cmd, "linktx")) {
+		rc = gate_linktx(argc > 2 ? (uint8_t)atoi(argv[2]) : 149,
+		                 argc > 3 ? atoi(argv[3]) : 400);
+	} else if (!strcmp(cmd, "linkrx")) {
+		rc = gate_linkrx(argc > 2 ? (uint8_t)atoi(argv[2]) : 149,
+		                 argc > 3 ? atoi(argv[3]) : 30);
+	} else if (!strcmp(cmd, "diversity")) {
+		rc = gate_diversity(argc > 2 ? (uint8_t)atoi(argv[2]) : 149,
+		                    argc > 3 ? atoi(argv[3]) : 600);
+	} else if (!strcmp(cmd, "coding")) {
+		rc = gate_coding(argc > 2 ? (uint8_t)atoi(argv[2]) : 149,
+		                 argc > 3 ? atoi(argv[3]) : 100, want_bw);
+	} else if (!strcmp(cmd, "mtu")) {
+		rc = gate_mtu(argc > 2 ? (uint8_t)atoi(argv[2]) : 149,
+		              argc > 3 ? atoi(argv[3]) : 60);
+	} else if (!strcmp(cmd, "sweep")) {
+		rc = gate_sweep(argc > 2 ? (uint8_t)atoi(argv[2]) : 149,
+		                argc > 3 ? atoi(argv[3]) : 120, want_bw);
+	} else if (!strcmp(cmd, "vht")) {
+		rc = gate_vht(argc > 2 ? (uint8_t)atoi(argv[2]) : 149,
+		              argc > 3 ? atoi(argv[3]) : 300, want_bw);
 	} else if (!strcmp(cmd, "ampdu")) {
 		rc = gate_ampdu(argc > 2 ? (uint8_t)atoi(argv[2]) : 149,
 		                argc > 3 ? atoi(argv[3]) : 400);
@@ -1253,6 +2179,8 @@ int main(int argc, char **argv)
 	} else {
 		fprintf(stderr, "unknown subcommand '%s'\n", cmd);
 		fprintf(stderr, "usage: bringup [regs|fw|init|chan|tx|rx|hop|gateg] [chan] [count] [phy 0=CCK 1=OFDM 2=HT 4=VHT] [mcs]\n");
+		fprintf(stderr, "       bringup [sweep|coding|vht] [chan] [count] [bw 0=20 1=40 2=80]\n");
+		fprintf(stderr, "       the witness must listen at the same width (DEVOURER_BW=40|80)\n");
 		rc = 2;
 	}
 

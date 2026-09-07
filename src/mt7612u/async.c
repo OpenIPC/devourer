@@ -55,7 +55,21 @@ static void LIBUSB_CALL rx_done(struct libusb_transfer *t)
 		struct mt7612u_rx_info info;
 		int len = mt_rx_parse(d, t->buffer, t->actual_length, &frame, &info);
 
-		if (len > 0) {
+		if (len <= 0) {
+			/* A frame the parser rejected used to move no counter at
+			 * all, which is indistinguishable from one never sent.
+			 *
+			 * This does NOT cover the oversize case, and it was
+			 * measured not to: frames above the MAC's MT_MAX_LEN_CFG
+			 * ceiling never reach here, never complete a transfer and
+			 * never raise rx_err. The MAC discards them before USB, so
+			 * that loss is invisible from this layer by construction -
+			 * see mt7612u_caps.max_mpdu_rx. What this counts is a
+			 * short or malformed transfer. */
+			pthread_mutex_lock(&a->lock);
+			a->rx_dropped++;
+			pthread_mutex_unlock(&a->lock);
+		} else {
 			pthread_mutex_lock(&a->lock);
 			a->rx_frames++;
 			pthread_mutex_unlock(&a->lock);
@@ -103,6 +117,11 @@ static void LIBUSB_CALL tx_done(struct libusb_transfer *t)
 
 int mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user)
 {
+	if (d->transfers_stranded) {
+		ERR("async start refused: a previous ring's transfers are still "
+		    "owned by libusb on these endpoints");
+		return -1;
+	}
 	struct mt_async *a;
 
 	if (d->a) return 0;
@@ -210,9 +229,18 @@ void mt_async_stop(struct mt7612u_dev *d)
 
 	d->a = NULL;
 	if (stuck_tx || stuck_rx) {
+		/* Leaking the ring is the safe half. The other half is that libusb
+		 * still owns those transfers while the event thread has just been
+		 * joined, so nothing will ever complete them - and releasing the
+		 * interface, closing the handle or exiting the context underneath
+		 * them is undefined. Mark the device stranded: mt_close() then
+		 * leaks the USB objects too rather than freeing what libusb holds,
+		 * and mt_async_start() refuses to submit a second ring onto the
+		 * same endpoints. Consistent with the leak, not a new policy. */
+		d->transfers_stranded = 1;
 		ERR("async stop: %d TX and %d RX transfers still in flight after 2 s "
-		    "- leaking the ring rather than freeing memory libusb owns",
-		    stuck_tx, stuck_rx);
+		    "- leaking the ring, and the USB handle with it, rather than "
+		    "freeing memory libusb still owns", stuck_tx, stuck_rx);
 		return;
 	}
 
@@ -285,6 +313,8 @@ void mt_async_stats(struct mt7612u_dev *d, struct mt_async_stats *out)
 	out->tx_err       = a->tx_err;
 	out->rx_frames    = a->rx_frames;
 	out->rx_err       = a->rx_err;
+	out->rx_invalid   = a->rx_invalid;
+	out->rx_dropped   = a->rx_dropped;
 	pthread_mutex_unlock(&a->lock);
 }
 
@@ -298,4 +328,32 @@ int mt7612u_rx_stop(struct mt7612u_dev *d)
 {
 	mt_async_stop(d);
 	return 0;
+}
+
+/* A frame whose rate word named no valid PHY. Counted under the ring's lock
+ * when one is running; on the synchronous bring-up path there is no ring and
+ * nothing to count into, which is fine - that path prints every frame. */
+void mt_async_note_invalid(struct mt7612u_dev *d)
+{
+	struct mt_async *a = d->a;
+
+	if (!a) return;
+	pthread_mutex_lock(&a->lock);
+	a->rx_invalid++;
+	pthread_mutex_unlock(&a->lock);
+}
+
+/* Public form of the snapshot above. */
+void mt7612u_get_stats(struct mt7612u_dev *d, struct mt7612u_stats *out)
+{
+	struct mt_async_stats st;
+
+	mt_async_stats(d, &st);
+	out->tx_submitted = st.tx_submitted;
+	out->tx_done      = st.tx_done;
+	out->tx_err       = st.tx_err;
+	out->rx_frames    = st.rx_frames;
+	out->rx_err       = st.rx_err;
+	out->rx_invalid   = st.rx_invalid;
+	out->rx_dropped   = st.rx_dropped;
 }

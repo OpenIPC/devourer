@@ -1,4 +1,6 @@
-# Standalone. Not reachable from the project's CMakeLists.txt.
+# Standalone: this subtree is not reachable from the project's CMakeLists.txt.
+# tests/api_link.c links against the public header alone, which is what keeps
+# that an honest test of the exported surface.
 CC      ?= gcc
 CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter
 # -MMD -MP: without header deps, editing internal.h leaves stale objects with

@@ -16,9 +16,19 @@ uint16_t mt_ee(const struct mt7612u_dev *d, unsigned off)
 
 int mt_eeprom_init(struct mt7612u_dev *d)
 {
-	/* Do NOT treat 0xffffffff as a read error here: unprogrammed EEPROM
+	/* Do NOT treat 0xffffffff as a read error by VALUE: unprogrammed EEPROM
 	 * cells legitimately read as all-ones (this image is 0xff from 0x010
-	 * onward for a stretch). Validate the image below instead. */
+	 * onward for a stretch), so the value alone cannot tell a blank cell
+	 * from a failed transfer.
+	 *
+	 * The accumulator can. mt_rr() returns ~0u on failure AND bumps
+	 * d->io_err, so bracketing the slurp separates the two cases without
+	 * giving up the blank-cell behaviour. This matters more here than
+	 * anywhere else in the driver: a failure outside the two cells checked
+	 * below leaves all-ones power and calibration bytes in memory, and the
+	 * device then opens successfully and transmits at whatever those
+	 * garbage terms produce. */
+	mt_io_clear(d);
 	for (unsigned i = 0; i + 4 <= MT7612U_EEPROM_SIZE; i += 4) {
 		uint32_t v = mt_rr(d, EEP_ADDR(i));
 
@@ -26,6 +36,12 @@ int mt_eeprom_init(struct mt7612u_dev *d)
 		d->eeprom[i + 1] = (v >> 8) & 0xff;
 		d->eeprom[i + 2] = (v >> 16) & 0xff;
 		d->eeprom[i + 3] = (v >> 24) & 0xff;
+	}
+	if (mt_io_errors(d)) {
+		ERR("EEPROM read failed on %u of %u transfers - refusing to "
+		    "calibrate from a partial image",
+		    mt_io_errors(d), MT7612U_EEPROM_SIZE / 4);
+		return -1;
 	}
 
 	if (mt_ee(d, MT_EE_CHIP_ID) != 0x7612) {

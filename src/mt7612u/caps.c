@@ -41,9 +41,15 @@ void mt7612u_get_caps(const struct mt7612u_dev *d, struct mt7612u_caps *c)
 	c->chip_name = "MT7612U";
 	c->rev = d->rev;
 	c->nss_rx = c->nss_tx = (uint8_t)((d->chainmask & 0xf) > 1 ? 2 : 1);
-	/* 80 MHz is silicon-capable but the width maths is not ported yet;
-	 * advertise what this driver actually delivers, not what the part could. */
-	c->bw_mask = 0x3;               /* 20 and 40 MHz */
+	/* 20, 40 and 80 MHz. Note the mask is per width, not a ceiling: the
+	 * widths above 20 are 5 GHz-only on this backend, because a bare
+	 * control-channel number cannot name the secondary side in 2.4 GHz
+	 * except for channels 4-11. mt7612u_set_channel() refuses the rest. */
+	c->bw_mask = 0x7;               /* 20, 40 and 80 MHz */
+	/* TX is this backend's buffer, RX is the MAC's MT_MAX_LEN_CFG ceiling
+	 * minus the FCS. See the struct for how each was measured. */
+	c->max_mpdu_tx = MT_TX_BUF_MAX - 32;
+	c->max_mpdu_rx = d->max_mpdu_rx;
 	c->band_5g_min_mhz = 5180; c->band_5g_max_mhz = 5825;
 	c->band_2g_min_mhz = 2412; c->band_2g_max_mhz = 2484;
 	c->ampdu_tx = 1;

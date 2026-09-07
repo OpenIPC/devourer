@@ -282,6 +282,17 @@ size_t mt7612u_send_packets(struct mt7612u_dev *d,
 			/* Worst case for one block: TXINFO + TXWI + hdr pad +
 			 * MPDU + alignment + trailer. */
 			need = 4 + MT_TXWI_LEN + 2 + (plen - (size_t)rlen) + 3 + 4;
+			/* The same per-frame ceiling mt7612u_tx() applies. Without
+			 * it this path accepted anything that fit the 16 KB
+			 * aggregate buffer, so one public entry point refused a
+			 * frame the other aired - and the caller could not tell
+			 * which limit it was under. */
+			if (need > MT_TX_BUF_MAX) {
+				ERR("frame of %zu bytes exceeds the %d-byte per-frame "
+				    "ceiling", plen - (size_t)rlen, MT_TX_BUF_MAX);
+				i++;
+				continue;
+			}
 			if (off + need > sizeof buf) break;
 
 			sel[n_in_buf].mpdu = p + rlen;

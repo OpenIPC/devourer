@@ -312,56 +312,121 @@ int8_t mt_tx_get_txpwr_adj(struct mt7612u_dev *d, int8_t txpwr, int8_t max_adj)
 }
 
 /*
- * The 40 MHz centre channel, or -1 if this control channel cannot carry
- * 40 MHz. mt76x2u_phy_set_channel()'s 40 MHz case, plus the validation it does
- * not need: mt76 gets the segment centre from cfg80211's chandef, so an
- * off-grid channel never reaches it. This API takes a bare channel number and
- * derives the centre from the standard pairing - 36/44/149/157 take the upper
- * half, 40/48/153/161 the lower - which means a channel that is not on the
- * grid still produces *a* number, and the caller transmits 40 MHz wide
- * somewhere it did not ask for. Every register write succeeds, so nothing
- * says so.
+ * Control channel + width -> the three values the rest of the tune needs:
+ * the *hardware* channel, which is the centre of the widened channel and not
+ * the control channel (36 at 80 MHz tunes 42); `bw_index`, which the firmware
+ * reads; and `ch_group_index`, which says which 20 MHz slot of the group the
+ * control channel occupies and so picks both the CCA ordering and the
+ * primary-channel bits in the BBP.
  *
- * Two cases made that reachable through the public API:
+ * mt76 does not compute any of this: mt76x2u_phy_set_channel() gets the
+ * segment centre from cfg80211's chandef, which carries `center_freq1`
+ * alongside the control channel. This API takes a bare channel number, so the
+ * centre has to be derived from the standard groupings instead. That
+ * derivation is an assumption about how the channel is meant to be grouped,
+ * and getting it wrong transmits a full-width signal centred somewhere the
+ * caller did not ask for - silently, because every register write still
+ * succeeds. So the 80 MHz result is checked against the centres the spec
+ * actually defines rather than trusted.
  *
- *   - the arithmetic ran in uint8_t, so control channel 254 computed 256 and
- *     truncated to 0, handing the MCU channel index 0 with the 5 GHz register
- *     set loaded. 255 gave 1.
- *   - in 2.4 GHz the pairing only ever reaches centres 6-9. Channel 1 computed
- *     -1, i.e. 255 after truncation; 12 and 13 would need a secondary above
- *     channel 13.
- *
- * Validating the centre against the ones that exist catches all of it at once,
- * including both wraps - no wrapped value aliases onto a legal centre. The
- * 5 GHz ceiling is channel 159 rather than 175 because centres 167 and 175
- * span past the band mt7612u_caps declares (5825 MHz); widen the declared band
- * first if they are wanted.
+ * Returns 0, or -1 when the control channel cannot carry the width.
  */
-int mt_chan40_centre(uint8_t chan, uint8_t *bw_index, uint8_t *ch_group)
+int mt_chan_group(uint8_t chan, uint8_t bw, uint8_t *hw_chan,
+                  uint8_t *bw_index, uint8_t *ch_group)
 {
-	static const uint8_t centre_5g[] = {
+	/*
+	 * Legal *centre* channels per band and width. Validating the centre
+	 * rather than the control channel catches three failures with one
+	 * check: an off-grid control channel, one whose widened span leaves
+	 * the band this driver declares, and the integer wrap that a uint8_t
+	 * would otherwise hide (control channel 254 at 40 MHz computes 256,
+	 * which truncates to 0 and would tune the MCU to channel index 0 with
+	 * the 5 GHz register set loaded).
+	 *
+	 * The ceilings match caps.c's band_5g_max_mhz = 5825, i.e. channel
+	 * 165. That is why the 165/169/173/177 VHT80 group (centre 171 =
+	 * 5855 MHz, spanning to 5895) and the 40 MHz centres 167 and 175 are
+	 * absent: mt76's own channel list has them, but tuning them would put
+	 * most of the carrier outside the band this driver advertises. Widen
+	 * the declared band first if they are ever wanted.
+	 */
+	static const uint8_t centre_40_5g[] = {
 		38, 46, 54, 62, 102, 110, 118, 126, 134, 142, 151, 159,
 	};
-	static const uint8_t centre_2g[] = { 6, 7, 8, 9 };
-	const uint8_t *ok = chan > 14 ? centre_5g : centre_2g;
-	size_t n_ok = chan > 14 ? sizeof centre_5g / sizeof centre_5g[0]
-	                        : sizeof centre_2g / sizeof centre_2g[0];
-	int group = ((chan / 4) & 1) ? 0 : 1;
-	int idx = group ? 3 : 1;
-	/* int, not uint8_t: this is the expression that wrapped. */
-	int centre = chan + 2 - group * 4;
-	size_t i;
+	/* 2.4 GHz 40 MHz reaches only centres 6-9 through the pairing below,
+	 * i.e. control channels 4-11. 1-3 would need a secondary at or below
+	 * channel 0 and 12-13 one above 13; both are what the old wrap
+	 * produced silently. */
+	static const uint8_t centre_40_2g[] = { 6, 7, 8, 9 };
+	/* VHT80 centres. 5.35-5.47 GHz (centres 74 and 90) is not allocated. */
+	static const uint8_t centre_80_5g[] = { 42, 58, 106, 122, 138, 155 };
 
-	for (i = 0; i < n_ok; i++) {
-		if (centre != ok[i])
-			continue;
-		if (bw_index) *bw_index = (uint8_t)idx;
-		if (ch_group) *ch_group = (uint8_t)group;
-		return centre;
+	const uint8_t *ok = NULL;
+	size_t n_ok = 0, i;
+	/* int, not uint8_t: the arithmetic below can leave 0..255 before it has
+	 * been validated. The grid check is what actually catches that - no
+	 * wrapped value aliases onto a legal centre at either width, so a
+	 * uint8_t here would still be refused - but it would be refused while
+	 * reporting the wrapped number, and "would centre on 0" sends whoever
+	 * reads that message looking for the wrong bug. */
+	int idx = 0, group = 0, hw = chan;
+
+	switch (bw) {
+	case MT7612U_BW_20:
+		goto out;               /* the control channel is the centre */
+	case MT7612U_BW_40:
+		/* mt76x2u_phy_set_channel()'s 40 MHz case. Which side the
+		 * secondary sits on follows the standard pairing: 36/44/149/157
+		 * take the upper half, 40/48/153/161 the lower. */
+		if ((chan / 4) & 1) { idx = 1; group = 0; }
+		else                { idx = 3; group = 1; }
+		hw = chan + 2 - group * 4;
+		if (chan <= 14) {
+			ok = centre_40_2g;
+			n_ok = sizeof centre_40_2g / sizeof centre_40_2g[0];
+		} else {
+			ok = centre_40_5g;
+			n_ok = sizeof centre_40_5g / sizeof centre_40_5g[0];
+		}
+		break;
+	case MT7612U_BW_80:
+		/* mt76 computes this as (freq - freq1 + 30) / 20, i.e. the
+		 * control channel's offset from the segment centre in 20 MHz
+		 * steps. Over the 5 GHz grid that is the same value as the
+		 * channel's position within its group of four, and this form
+		 * needs no centre to be supplied by the caller. It stays
+		 * correct across the U-NII-3 discontinuity (the group starts at
+		 * 149, not 148) because the integer divide absorbs the +1 that
+		 * the whole group carries. */
+		group = ((chan / 4) + 3) & 3;
+		idx = group;
+		hw = chan + 6 - group * 4;
+		/* 802.11ac defines no 80 MHz channel in 2.4 GHz. */
+		if (chan <= 14) {
+			ERR("80 MHz needs a 5 GHz channel (asked for %u)", chan);
+			return -1;
+		}
+		ok = centre_80_5g;
+		n_ok = sizeof centre_80_5g / sizeof centre_80_5g[0];
+		break;
+	default:
+		ERR("unsupported bandwidth %u", bw);
+		return -1;
 	}
-	ERR("channel %u cannot carry 40 MHz: it would centre on %d, which is "
-	    "not a usable 40 MHz centre channel in this band", chan, centre);
+
+	for (i = 0; i < n_ok; i++)
+		if (hw == ok[i])
+			goto out;
+	ERR("channel %u cannot carry %d MHz: it would centre on %d, which is "
+	    "not a usable %d MHz centre channel in this band",
+	    chan, 20 << bw, hw, 20 << bw);
 	return -1;
+
+out:
+	if (hw_chan)  *hw_chan  = (uint8_t)hw;
+	if (bw_index) *bw_index = (uint8_t)idx;
+	if (ch_group) *ch_group = (uint8_t)group;
+	return 0;
 }
 
 /* fast=1 skips the firmware calibration burst, which is what a retune would do
@@ -385,20 +450,22 @@ int mt_set_channel_ex(struct mt7612u_dev *d, uint8_t chan, uint8_t bw, int fast)
 	int band = chan > 14 ? BAND_5GHZ : BAND_2GHZ;
 	uint8_t bw_index = 0, ch_group_index = 0, hw_chan = chan;
 
-	if (bw == MT7612U_BW_40) {
-		int centre = mt_chan40_centre(chan, &bw_index, &ch_group_index);
-
-		if (centre < 0)
-			return -1;
-		hw_chan = (uint8_t)centre;
-	} else if (bw != MT7612U_BW_20) {
-		ERR("only 20 and 40 MHz are implemented");
+	if (mt_chan_group(chan, bw, &hw_chan, &bw_index, &ch_group_index))
 		return -1;
-	}
+
+	/* Same bracket as the bring-up: the tune is a long run of best-effort
+	 * writes, and a channel reported as set while half its registers never
+	 * landed is worse than a refusal. */
+	mt_io_clear(d);
 
 	d->cal.channel_cal_done = fast;
 	d->chan = chan;
 	d->bw = bw;
+	/* The TX "never widen" notice is once per width, not once per device:
+	 * a later tune to a narrower channel is a new situation and deserves
+	 * its own warning. Without this, a clamp consumed by a startup-ordering
+	 * quirk silences every genuine one that follows. */
+	d->bw_clamp_warned = 0;
 
 	mt_read_rx_gain(d, chan, band);
 	phy_set_txpower_regs(d, band);
@@ -412,13 +479,40 @@ int mt_set_channel_ex(struct mt7612u_dev *d, uint8_t chan, uint8_t bw, int fast)
 	       MT_EXT_CCA_CFG_CCA3 | MT_EXT_CCA_CFG_CCA_MASK,
 	       ext_cca_chan[ch_group_index]);
 
-	if (mt_mcu_set_channel(d, hw_chan, bw, bw_index, 0))
+	/* The BBP is already at the new width by here, so a failed synth leaves
+	 * the part genuinely half-tuned. Clear d->chan on the way out: it is the
+	 * "never tuned" sentinel the TX width clamp and the power setter already
+	 * test, and claiming a channel we did not reach is worse than claiming
+	 * none. */
+	if (mt_mcu_set_channel(d, hw_chan, bw, bw_index, 0)) {
+		d->chan = 0;
 		return -1;
-	if (mt_mcu_init_gain(d, hw_chan, d->cal.mcu_gain, 1))
+	}
+	if (mt_mcu_init_gain(d, hw_chan, d->cal.mcu_gain, 1)) {
+		d->chan = 0;
 		return -1;
+	}
 
 	/* rev >= E3: enable LDPC Rx */
 	mt_set(d, MT_BBP(RXO, 13), BIT(10));
+
+	/* The width-dependent half of mt76x2_phy_update_channel_gain()
+	 * (mt76x2/phy.c:300-323). That function is upstream's periodic RX gain
+	 * worker, which this port does not have; but two of its writes depend
+	 * only on the channel width, not on the measured gain, so they belong
+	 * with the tune. Without them an 80 MHz channel runs the RX front end
+	 * on the 20/40 MHz values the firmware init left behind - the part
+	 * still receives, just with the wrong AGC shape. The gain-tracking
+	 * remainder (low_gain, AGC 26's low nibble, the per-width RSSI
+	 * thresholds) stays unported and is noted in the README. */
+	if (bw == MT7612U_BW_80) {
+		mt_wr(d, MT_BBP(RXO, 14), 0x00560211);
+		mt_wr(d, MT_BBP(AGC, 35), 0x10101014);
+	} else {
+		mt_wr(d, MT_BBP(RXO, 14), 0x00560423);
+		mt_wr(d, MT_BBP(AGC, 35),
+		      band == BAND_2GHZ ? 0x11111516 : 0x11111116);
+	}
 
 	if (!d->cal.init_cal_done) {
 		uint8_t v = d->eeprom[MT_EE_BT_RCAL_RESULT];
@@ -465,6 +559,12 @@ int mt_set_channel_ex(struct mt7612u_dev *d, uint8_t chan, uint8_t bw, int fast)
 		mt_mcu_calibrate(d, MCU_CAL_TSSI, flag);
 		d->cal.tssi_cal_done = 1;
 	}
+	if (mt_io_errors(d)) {
+		ERR("channel %u set with %u failed register transfers - the tune "
+		    "is incomplete", chan, mt_io_errors(d));
+		d->chan = 0;
+		return -1;
+	}
 	return 0;
 }
 
@@ -487,12 +587,16 @@ int mt7612u_set_txpower(struct mt7612u_dev *d, int dbm)
 /*
  * Public channel set. `chan` is an 802.11 channel number, not a frequency;
  * the width may narrow a frame below the channel but never widen it.
+ *
+ * `chan` is always the *control* channel, at every width. mt_chan_group()
+ * derives the centre the hardware actually tunes, and refuses a channel that
+ * cannot carry the requested width rather than tuning near it.
  */
 int mt7612u_set_channel(struct mt7612u_dev *d, uint8_t chan, enum mt7612u_bw bw)
 {
 	if (!d || !chan) return -1;
-	if (bw != MT7612U_BW_20 && bw != MT7612U_BW_40) {
-		ERR("set_channel: only 20 and 40 MHz are implemented (bw=%d)", (int)bw);
+	if (bw != MT7612U_BW_20 && bw != MT7612U_BW_40 && bw != MT7612U_BW_80) {
+		ERR("set_channel: bandwidth %d is not a MT7612U_BW_* value", (int)bw);
 		return -1;
 	}
 	return mt_set_channel(d, chan, (uint8_t)bw);

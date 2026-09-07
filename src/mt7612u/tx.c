@@ -10,7 +10,6 @@
 #include <string.h>
 #include "internal.h"
 
-#define MT_TX_BUF_MAX 2048
 
 static void put_le16(uint8_t *p, uint16_t v) { p[0] = v & 0xff; p[1] = v >> 8; }
 static void put_le32(uint8_t *p, uint32_t v)
@@ -138,7 +137,28 @@ int mt_tx_build(struct mt7612u_dev *d, uint8_t *buf, size_t bufsz,
 			      FIELD_PREP(MT_TXWI_FLAGS_MPDU_DENSITY, 4);
 		put_le16(txwi + 0, fl);
 	}
-	put_le16(txwi + 2, mt_tx_rate_word(rate));              /* rate */
+	/* "A frame may narrow below the channel but never widen it" was only
+	 * ever a comment; enforce it here, where the tuned width is known. The
+	 * BBP is configured for one width at a time, so a rate word asking for
+	 * a wider frame than the channel was tuned to does not give a wider
+	 * frame - it gives an unspecified one. Clamping rather than dropping
+	 * keeps a caller that set its TX mode before its channel on the air,
+	 * which is an ordering the C++ layer allows. Warn once: per frame would
+	 * flood a TX loop. */
+	if (d->chan && rate->bw > d->bw) {
+		struct mt7612u_tx_rate narrowed = *rate;
+
+		if (!d->bw_clamp_warned) {
+			d->bw_clamp_warned = 1;
+			WARN("rate asks for bw %u on a bw %u channel; narrowing "
+			    "to the channel width (further occurrences silent)",
+			    rate->bw, d->bw);
+		}
+		narrowed.bw = d->bw;
+		put_le16(txwi + 2, mt_tx_rate_word(&narrowed));
+	} else {
+		put_le16(txwi + 2, mt_tx_rate_word(rate));      /* rate */
+	}
 	/* ack_ctl bit0 REQ: set it only when an ACK is wanted. Leaving it
 	 * clear is how a frame becomes no-ACK, per packet. */
 	txwi[4] = rate->no_ack ? 0 : MT_TXWI_ACK_CTL_REQ;

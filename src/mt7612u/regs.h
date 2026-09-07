@@ -303,8 +303,40 @@ enum mt_mcu_cr_mode { MT_RF_CR, MT_BBP_CR, MT_RF_BBP_CR, MT_HL_TEMP_CR_UPDATE };
 #define MT_TX_ALC_CFG_0_CH_INIT_1 GENMASK(13, 8)
 #define MT_TX_ALC_CFG_1_TEMP_COMP GENMASK(5, 0)
 #define MT_TX_ALC_CFG_2_TEMP_COMP GENMASK(5, 0)
+/* --- MIB counters. All read-and-clear: mt76x02_mac_reset_counters() zeroes
+ * them by reading, and mt76x02_mac_cc_reset() says so of the channel timers.
+ * A caller must therefore difference nothing - each read IS the interval. --- */
+#define MT_CH_TIME_CFG       0x110c
+#define MT_CH_TIME_CFG_TIMER_EN      BIT(0)
+#define MT_CH_TIME_CFG_TX_AS_BUSY    BIT(1)
+#define MT_CH_TIME_CFG_RX_AS_BUSY    BIT(2)
+#define MT_CH_TIME_CFG_NAV_AS_BUSY   BIT(3)
+#define MT_CH_TIME_CFG_EIFS_AS_BUSY  BIT(4)
+#define MT_CH_TIME_CFG_MDRDY_CNT_EN  BIT(5)
+#define MT_CH_CCA_RC_EN              BIT(6)
+#define MT_CH_TIME_CFG_CH_TIMER_CLR  GENMASK(9, 8)
+#define MT_CH_IDLE           0x1130
+#define MT_CH_BUSY           0x1134
+
+#define MT_RX_STAT_0         0x1700
+#define MT_RX_STAT_0_CRC_ERRORS GENMASK(15, 0)
+#define MT_RX_STAT_0_PHY_ERRORS GENMASK(31, 16)
 #define MT_RX_STAT_1         0x1704
 #define MT_RX_STAT_1_CCA_ERRORS GENMASK(15, 0)
+#define MT_RX_STAT_1_PLCP_ERRORS GENMASK(31, 16)
+#define MT_RX_STAT_2         0x1708
+#define MT_RX_STAT_2_DUP_ERRORS      GENMASK(15, 0)
+#define MT_RX_STAT_2_OVERFLOW_ERRORS GENMASK(31, 16)
+#define MT_TX_STA_0          0x170c
+#define MT_TX_STA_1          0x1710
+#define MT_TX_STA_2          0x1714
+/* 16 registers, two 16-bit buckets each: the A-MPDU length histogram. */
+#define MT_TX_AGG_CNT_BASE0  0x1720
+#define MT_TX_AGG_CNT_BASE1  0x174c
+#define MT_TX_AGG_CNT(_id)   ((_id) < 8 ? MT_TX_AGG_CNT_BASE0 + ((_id) << 2) \
+                                        : MT_TX_AGG_CNT_BASE1 + (((_id) - 8) << 2))
+#define MT_TEMP_SENSOR       0x1d000
+#define MT_TEMP_SENSOR_VAL   GENMASK(6, 0)
 #define MT_BBP_CORE_R1_BW    GENMASK(4, 3)
 #define MT_BBP_AGC_R0_BW     GENMASK(14, 12)
 #define MT_BBP_AGC_R0_CTRL_CHAN GENMASK(9, 8)

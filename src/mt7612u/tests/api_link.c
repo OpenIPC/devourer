@@ -15,6 +15,7 @@
 
 static void *const api[] = {
 	(void *)mt7612u_open,
+	(void *)mt7612u_open_handle,
 	(void *)mt7612u_close,
 	(void *)mt7612u_keep_detached,
 	(void *)mt7612u_set_channel,
@@ -25,10 +26,14 @@ static void *const api[] = {
 	(void *)mt7612u_tx,
 	(void *)mt7612u_rx_start,
 	(void *)mt7612u_rx_stop,
+	(void *)mt7612u_set_monitor_rx,
 	(void *)mt7612u_send_packet,
 	(void *)mt7612u_send_packets,
 	(void *)mt7612u_set_ack_responder,
 	(void *)mt7612u_clear_ack_responder,
+	(void *)mt7612u_get_stats,
+	(void *)mt7612u_link_stats_start,
+	(void *)mt7612u_link_stats,
 	(void *)mt7612u_read_tsf,
 	(void *)mt7612u_write_tsf,
 	(void *)mt7612u_get_caps,

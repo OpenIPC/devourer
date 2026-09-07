@@ -55,6 +55,21 @@ struct mt7612u_cal {
 #define MT_RX_BUFSZ 4096
 #define MT_TX_BUFSZ 2048
 #define MT_USB_AGG_BUF  16384   /* one aggregated bulk-OUT transfer */
+
+/*
+ * One page, matching MT_RX_BUFSZ. The old 2048 silently capped a single frame
+ * at 2016 B while mt7612u_send_packets() bounded only against the 16 KB
+ * aggregate buffer, so the two public TX entry points disagreed about the
+ * largest frame this backend accepts.
+ *
+ * 4096 is a deliberate choice, not the hardware's limit: measured on air, this
+ * part transmits at least 7900 B and an RTL8812AU decoded 60/60 at every size
+ * up to that with zero CRC errors - far past 802.11's 2304 non-A-MSDU MPDU
+ * ceiling. It is capped here to match what this backend can RECEIVE, because
+ * MT_RX_BUFSZ is one page and a frame larger than that is dropped without a
+ * counter moving. Raising this means raising the RX buffer too.
+ */
+#define MT_TX_BUF_MAX 4096
 #define MT_USB_AGG_MAX  32      /* frames chained per transfer */
 
 struct mt7612u_dev;
@@ -80,7 +95,8 @@ struct mt_async {
 	int tx_inflight, rx_inflight;
 	mt7612u_rx_cb cb;
 	void *cb_user;
-	uint64_t tx_submitted, tx_done_n, tx_err, rx_frames, rx_err;
+	uint64_t tx_submitted, tx_done_n, tx_err, rx_frames, rx_err, rx_invalid;
+	uint64_t rx_dropped;      /* rejected on length: truncated, or > MT_RX_BUFSZ */
 };
 
 struct mt7612u_dev {
@@ -88,6 +104,10 @@ struct mt7612u_dev {
 	libusb_device_handle *h;
 	int      kernel_was_attached;
 	int      keep_detached;
+	/* 0 when the handle and context were handed in by a caller that keeps
+	 * ownership of them - mt_close() must then release the interface but
+	 * neither close the handle nor exit the context. */
+	int      owns_handle;
 
 	uint32_t rev;             /* MT_ASIC_VERSION, e.g. 0x76120044 */
 	uint8_t  eeprom[MT7612U_EEPROM_SIZE];
@@ -96,6 +116,7 @@ struct mt7612u_dev {
 	uint8_t  mcu_seq;
 	uint8_t  chan;
 	uint8_t  bw;
+	uint8_t  bw_clamp_warned;   /* the "never widen" notice is once, not per frame */
 	int8_t   txpower_conf;      /* limit, 0.5 dB units (dBm * 2) */
 	int8_t   target_power;
 	int8_t   target_power_delta[2];
@@ -104,6 +125,8 @@ struct mt7612u_dev {
 	struct mt7612u_cal cal;
 
 	unsigned io_err;          /* EP0 transfers that exhausted their retries */
+	int      transfers_stranded; /* libusb still owns a cancelled ring */
+	uint16_t max_mpdu_rx;     /* from MT_MAX_LEN_CFG at init, less the FCS */
 
 	/* Oracle-diff log: every EP0 write we emit, in order. */
 	uint8_t  ack_saved_mac[6];
@@ -115,6 +138,9 @@ struct mt7612u_dev {
 
 /* --- usb.c --- */
 int      mt_open(struct mt7612u_dev *d, const char **err);
+/* Adopt a handle the caller already opened, reset and claimed. */
+int      mt_adopt(struct mt7612u_dev *d, libusb_device_handle *h,
+                  libusb_context *ctx, const char **err);
 void     mt_close(struct mt7612u_dev *d);
 /* Checked read: 0 on success with *val filled, -1 on transport failure.
  * Prefer this anywhere the value drives a decision - 0xffffffff is a real
@@ -124,6 +150,10 @@ uint32_t mt_rr(struct mt7612u_dev *d, uint32_t addr);
 void     mt_wr(struct mt7612u_dev *d, uint32_t addr, uint32_t val);
 /* Returns -1 without writing when the read half fails. */
 int      mt_rmw(struct mt7612u_dev *d, uint32_t addr, uint32_t mask, uint32_t val);
+int      mt_wr_chk(struct mt7612u_dev *d, uint32_t addr, uint32_t val);
+/* Register-I/O failure accumulator; see the comment above mt_io_clear(). */
+void     mt_io_clear(struct mt7612u_dev *d);
+unsigned mt_io_errors(struct mt7612u_dev *d);
 #define  mt_set(d, a, v)   mt_rmw(d, a, v, v)
 #define  mt_clear(d, a, v) mt_rmw(d, a, v, 0)
 /* Poll until (rr(addr) & mask) == val. Returns 1 on success, 0 on timeout. */
@@ -187,9 +217,11 @@ int mt_radiotap_parse(const uint8_t *buf, size_t len, struct mt7612u_tx_rate *r)
 
 /* --- async.c --- */
 struct mt_async_stats {
-	uint64_t tx_submitted, tx_done, tx_err, rx_frames, rx_err;
+	uint64_t tx_submitted, tx_done, tx_err, rx_frames, rx_err, rx_invalid;
+	uint64_t rx_dropped;
 };
 void mt_async_stats(struct mt7612u_dev *d, struct mt_async_stats *out);
+void mt_async_note_invalid(struct mt7612u_dev *d);
 int  mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user);
 void mt_async_stop(struct mt7612u_dev *d);
 int  mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len);
@@ -211,9 +243,29 @@ int8_t mt_tx_get_txpwr_adj(struct mt7612u_dev *d, int8_t txpwr, int8_t max_adj);
 void mt_phy_set_txdac(struct mt7612u_dev *d);
 int  mt_set_channel(struct mt7612u_dev *d, uint8_t chan, uint8_t bw);
 int  mt_set_channel_ex(struct mt7612u_dev *d, uint8_t chan, uint8_t bw, int fast);
-int  mt_chan40_centre(uint8_t chan, uint8_t *bw_index, uint8_t *ch_group);
+int  mt_chan_group(uint8_t chan, uint8_t bw, uint8_t *hw_chan,
+                   uint8_t *bw_index, uint8_t *ch_group);
 
-#define LOG(...)  do { fprintf(stderr, "[mt7612u] " __VA_ARGS__); fputc('\n', stderr); } while (0)
-#define ERR(...)  do { fprintf(stderr, "[mt7612u] ERROR " __VA_ARGS__); fputc('\n', stderr); } while (0)
+/*
+ * The diagnostic plane, per docs/logging.md: stderr, one line of
+ * `devourer [X] message` with X in T/D/I/W/E.
+ *
+ * The old macros broke that contract three ways. They used a private
+ * `[mt7612u]` prefix rather than the documented one, so a consumer filtering
+ * on level saw nothing; they emitted the text and its newline as two separate
+ * stdio calls, so a line written from the libusb event thread could be split
+ * by one from a caller; and they never flushed, so a piped reader could sit on
+ * a full buffer while the device was mid-bring-up. mt_diag() formats the whole
+ * line first and emits it with a single fwrite + fflush, which is what
+ * src/Event.h does for the machine plane and for the same reason.
+ */
+void mt_diag(char level, const char *fmt, ...)
+#if defined(__GNUC__)
+	__attribute__((format(printf, 2, 3)))
+#endif
+	;
+#define LOG(...)   mt_diag('I', __VA_ARGS__)
+#define WARN(...)  mt_diag('W', __VA_ARGS__)
+#define ERR(...)   mt_diag('E', __VA_ARGS__)
 
 #endif

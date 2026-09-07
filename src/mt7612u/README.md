@@ -1,8 +1,12 @@
-# src/mt7612u — MediaTek MT7612U, standalone
+# src/mt7612u — MediaTek MT7612U
 
-**Not built by `CMakeLists.txt`.** This subtree does not implement
-`IRtlDevice`, is not reachable from `WiFiDriver`, and adds nothing to the
-library target. It builds on its own:
+**Not reachable from `CMakeLists.txt` yet.** This subtree is a complete,
+self-contained C library for the part — a public header, its own transport, no
+dependency on `RtlAdapter` — plus the bring-up harness that produced every
+measurement in `docs/mt7612u.md`. Wiring it in behind `IRtlDevice` is a
+follow-up PR; nothing in the shipped library links against this today.
+
+It builds and tests on its own:
 
 ```sh
 make -C src/mt7612u            # -> src/mt7612u/bringup
@@ -85,6 +89,26 @@ pwr    TX power vs the kernel's values      ampdu  aggregation A/B
 gateg  per-frame rate control               ack    ACK responder (needs a stimulus)
 rtap   send_packet / send_packets           hop    channel-switch cost
 ```
+
+`make` here builds it as `./bringup`, which is what the hardware notes use.
+The integration PR adds a CMake target for the same source, named
+`mt7612uprobe` to sit beside `pcieprobe` / `kestrelprobe` / `rtl8733bprobe`, so
+the chip-specific tool is not the one part of this backend that only a second
+build system can produce.
+
+`sweep`, `coding` and `vht` take a width as their fourth argument, in the
+`MT7612U_BW_*` numbering — `0` = 20, `1` = 40, `2` = 80 MHz:
+
+```sh
+./bringup sweep 149 120 2      # VHT ladder at 80 MHz, control channel 149
+```
+
+The witness has to listen at the same width (`DEVOURER_BW=40|80` for
+devourer's own `rxdemo`). A 20 MHz receiver decodes *none* of an 80 MHz
+frame — which makes it a good negative control and a misleading oracle.
+
+At 80 MHz the HT ladder is skipped: 802.11n has no 80 MHz, so a rate word
+naming `PHY=HT` with `BW=80` is not a wide HT frame, it is an unspecified one.
 
 ## Provenance
 

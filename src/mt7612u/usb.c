@@ -433,8 +433,15 @@ static libusb_device_handle *open_selected(libusb_context *ctx, const char **err
 				return NULL;
 			}
 			g_lock_fd = lk;
-			if (libusb_open(list[i], &h))
+			if (libusb_open(list[i], &h)) {
+				/* Only mt_close() releases the lock, and a failed
+				 * mt_open() never reaches it - so holding it here
+				 * made the process collide with its own stale lock
+				 * on the very next retry. Release what this
+				 * iteration took. */
 				h = NULL;
+				if (g_lock_fd >= 0) { close(g_lock_fd); g_lock_fd = -1; }
+			}
 		}
 		matches++;
 		if (h && sel && *sel)

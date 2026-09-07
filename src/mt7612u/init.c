@@ -525,7 +525,10 @@ static uint64_t stats_now_us(void)
 	return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
 }
 
-static uint64_t g_stats_last_us;
+/* Was file-static, so two adapters opened in one process overwrote each
+ * other's mark and both reported a nonsense interval_us - and every MIB
+ * counter here is read-and-clear, so the rates derived from it were wrong for
+ * both. Per device now. */
 
 int mt7612u_link_stats_start(struct mt7612u_dev *d)
 {
@@ -552,8 +555,8 @@ int mt7612u_link_stats(struct mt7612u_dev *d, struct mt7612u_link_stats *out)
 
 	if (!d || !out) return -1;
 	memset(out, 0, sizeof *out);
-	out->interval_us = g_stats_last_us ? (uint32_t)(now - g_stats_last_us) : 0;
-	g_stats_last_us = now;
+	out->interval_us = d->stats_last_us ? (uint32_t)(now - d->stats_last_us) : 0;
+	d->stats_last_us = now;
 
 	out->ch_busy = mt_rr(d, MT_CH_BUSY);
 	out->ch_idle = mt_rr(d, MT_CH_IDLE);

@@ -437,9 +437,57 @@ static void test_ht_bandwidth(void)
 }
 
 
+/*
+ * The async ring must carry whatever the TX builders produce.
+ *
+ * MT_TX_BUFSZ was 2048 while mt_tx_raw() built up to MT_TX_BUF_MAX (4096) and
+ * mt7612u_send_packets() up to MT_USB_AGG_BUF (16 KB), and both route through
+ * the ring whenever an RX loop is running - the normal integrated shape. So a
+ * frame over ~2 KB was refused after being built, and every multi-frame batch
+ * reported zero accepted. It never showed on the bench because the sync path
+ * has no ring at all.
+ *
+ * This is a size relationship, not a transfer: it holds without hardware, and
+ * it is the thing that must never regress.
+ */
+static void test_tx_ring_ceiling(void)
+{
+	struct mt_async probe;
+
+	printf("async ring ceiling:\n");
+
+	if (MT_TX_BUFSZ < MT_TX_BUF_MAX) {
+		printf("  FAIL ring slot %d < single-frame builder %d\n",
+		       MT_TX_BUFSZ, MT_TX_BUF_MAX);
+		fails++;
+	}
+	if (MT_TX_BUFSZ < MT_USB_AGG_BUF) {
+		printf("  FAIL ring slot %d < aggregate builder %d\n",
+		       MT_TX_BUFSZ, MT_USB_AGG_BUF);
+		fails++;
+	}
+	/* A full 16 KB aggregate must fit one slot with nothing left over to
+	 * split, which is what mt_async_tx_submit() length-checks against. */
+	if (sizeof probe.tx_buf[0] < (size_t)MT_USB_AGG_BUF) {
+		printf("  FAIL slot storage %zu < aggregate %d\n",
+		       sizeof probe.tx_buf[0], MT_USB_AGG_BUF);
+		fails++;
+	}
+	/* Negative control: if the ring were still 2048 the first two checks
+	 * would have to fire. Assert the constants really are what the
+	 * builders use, so this cannot pass by both sides shrinking together. */
+	if (MT_USB_AGG_BUF != 16384 || MT_TX_BUF_MAX != 4096) {
+		printf("  FAIL builder ceilings moved (agg %d, single %d) - "
+		       "re-check this test still means what it says\n",
+		       MT_USB_AGG_BUF, MT_TX_BUF_MAX);
+		fails++;
+	}
+}
+
 int main(void)
 {
 	test_hdrlen();
+	test_tx_ring_ceiling();
 	test_invalid_phy();
 	test_rx_l2pad();
 	test_chan_group();

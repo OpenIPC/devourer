@@ -51,10 +51,28 @@ struct mt7612u_cal {
 };
 
 #define MT_RX_RING  16
-#define MT_TX_RING  32
+/* 16 slots, not 32: the slots now carry a full aggregate, so this is the
+ * difference between 256 KB and 512 KB of ring. Depth is not what buys
+ * throughput here - see "Async rings bought no throughput" in
+ * docs/mt7612u.md - and soak/ampdu were re-measured after the change. */
+#define MT_TX_RING  16
 #define MT_RX_BUFSZ 4096
-#define MT_TX_BUFSZ 2048
 #define MT_USB_AGG_BUF  16384   /* one aggregated bulk-OUT transfer */
+
+/*
+ * ONE ceiling for everything that reaches the async ring.
+ *
+ * This was 2048 while mt_tx_raw() built up to MT_TX_BUF_MAX (4096) and
+ * mt7612u_send_packets() up to MT_USB_AGG_BUF (16384), and both route through
+ * the ring whenever an RX loop is running - which is the normal integrated
+ * shape. So a frame over ~2 KB was refused after being built, and every
+ * multi-frame batch reported zero accepted. The sync path has no ring, which
+ * is exactly why the mtu sweep never saw it.
+ *
+ * Sized to the aggregate buffer and checked at compile time below, so a future
+ * change to either builder cannot silently reintroduce the mismatch.
+ */
+#define MT_TX_BUFSZ MT_USB_AGG_BUF
 
 /*
  * One page, matching MT_RX_BUFSZ. The old 2048 silently capped a single frame
@@ -70,6 +88,12 @@ struct mt7612u_cal {
  * counter moving. Raising this means raising the RX buffer too.
  */
 #define MT_TX_BUF_MAX 4096
+
+/* Neither TX builder may outgrow the ring. A mismatch here is what made every
+ * aggregate fail silently once an RX loop was up, so it is a build error now
+ * rather than a runtime refusal. */
+typedef char mt_tx_ceiling_covers_single_frame[MT_TX_BUF_MAX <= MT_TX_BUFSZ ? 1 : -1];
+typedef char mt_tx_ceiling_covers_aggregate[MT_USB_AGG_BUF <= MT_TX_BUFSZ ? 1 : -1];
 #define MT_USB_AGG_MAX  32      /* frames chained per transfer */
 
 struct mt7612u_dev;
@@ -127,6 +151,7 @@ struct mt7612u_dev {
 	unsigned io_err;          /* EP0 transfers that exhausted their retries */
 	int      transfers_stranded; /* libusb still owns a cancelled ring */
 	uint16_t max_mpdu_rx;     /* from MT_MAX_LEN_CFG at init, less the FCS */
+	uint64_t stats_last_us;   /* previous mt7612u_link_stats() mark */
 
 	/* Oracle-diff log: every EP0 write we emit, in order. */
 	uint8_t  ack_saved_mac[6];

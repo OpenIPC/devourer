@@ -214,7 +214,7 @@ static int gate_init(const char *fw_dir)
 	if (!dev.wrlog)
 		printf("warning: could not open wrlog.txt for the oracle diff\n");
 
-	if (mt_init_hardware(&dev, NULL)) {
+	if (mt_init_hardware(&dev, fw_dir)) {
 		printf("GATE C: FAIL - init_hardware failed\n");
 		return 1;
 	}
@@ -258,7 +258,7 @@ static int gate_chan(uint8_t chan, const char *fw_dir)
 	dev.wrlog  = fopen("wrlog.txt", "w");
 	dev.mculog = fopen("mculog.txt", "w");
 
-	if (mt_init_hardware(&dev, NULL)) {
+	if (mt_init_hardware(&dev, fw_dir)) {
 		printf("GATE D: FAIL - init_hardware failed\n");
 		return 1;
 	}
@@ -564,6 +564,11 @@ static double cpu_ms(void)
  * boundary; sizes above it are here to see whether the MAC or the USB path
  * objects first.
  */
+/* Defined below with the other RX callbacks; gate_mtu needs it to keep the
+ * receiver drained during its async pass. */
+static void drain_cb(void *user, const void *frame, size_t len,
+                     const struct mt7612u_rx_info *info);
+
 static int gate_mtu(uint8_t chan, int count)
 {
 	static const uint8_t src[6] = { 0x02, 0x4d, 0x54, 0x76, 0x12, 0x01 };
@@ -573,7 +578,8 @@ static int gate_mtu(uint8_t chan, int count)
 	static uint8_t frame[8192];
 	struct mt7612u_tx_rate rate = { .phy = MT7612U_PHY_HT, .mcs = 7, .nss = 1,
 	                                .bw = MT7612U_BW_20, .no_ack = 1 };
-	unsigned k;
+	unsigned k;	int short_arms = 0;   /* sizes where the two TX paths disagreed */
+
 
 	if (count <= 0 || count > 1000) count = 60;
 	if (mt_eeprom_init(&dev)) return 1;
@@ -588,33 +594,65 @@ static int gate_mtu(uint8_t chan, int count)
 	memcpy(frame + 16, src, 6);
 	memcpy(frame + 24, "MT7612U-HAL ", 12);
 
-	printf("ch%u, HT MCS7 20 MHz, %d frames per size.\n"
+	printf("ch%u, HT MCS7 20 MHz, %d frames per size, BOTH TX paths.\n"
 	       "'accepted' is what this driver submitted; the witness reports\n"
 	       "which lengths actually decoded.\n\n", chan, count);
-	printf("  %-6s %-10s %s\n", "bytes", "accepted", "note");
+	/* Two passes on purpose. mt_tx_raw() takes the async ring whenever one
+	 * is running and the synchronous bulk otherwise, and those had
+	 * different ceilings: the ring refused above 2048 while the builder
+	 * produced up to 4096. Measuring only the sync path is what hid that,
+	 * so the sweep now reports both and a divergence is visible in the
+	 * table rather than in an integration months later. */
+	printf("  %-6s %-10s %-10s %s\n", "bytes", "sync", "async", "note");
 
 	for (k = 0; k < sizeof sizes / sizeof sizes[0]; k++) {
 		int len = sizes[k];
-		long ok = 0;
-		int i;
+		long ok_sync = 0, ok_async = 0;
+		unsigned long drained = 0;
+		int i, pass;
 
 		if ((size_t)len > sizeof frame) continue;
 		/* Tag the payload with the size so the witness can bucket by what
 		 * was ASKED for, not only by what arrived. */
 		frame[36] = (uint8_t)(len & 0xff);
 		frame[37] = (uint8_t)(len >> 8);
-		for (i = 0; i < count; i++) {
-			frame[38] = (uint8_t)i;
-			if (mt7612u_tx(&dev, frame, (size_t)len, &rate) == 0) ok++;
-			mt_usleep(1500);
+
+		for (pass = 0; pass < 2; pass++) {
+			long *ok = pass ? &ok_async : &ok_sync;
+
+			/* Pass 1 brings up the RX ring, which is what makes
+			 * mt_tx_raw() take the async path. The receiver must be
+			 * drained or the chip wedges below USB level, hence a
+			 * real callback rather than a null one. */
+			if (pass && mt7612u_rx_start(&dev, drain_cb, &drained)) {
+				printf("  %-6d rx_start failed - async pass skipped\n", len);
+				break;
+			}
+			for (i = 0; i < count; i++) {
+				frame[38] = (uint8_t)i;
+				if (mt7612u_tx(&dev, frame, (size_t)len, &rate) == 0)
+					(*ok)++;
+				mt_usleep(1500);
+			}
+			if (pass) mt7612u_rx_stop(&dev);
 		}
-		printf("  %-6d %ld/%-8d %s\n", len, ok, count,
-		       ok == 0 ? "refused by this driver" :
+
+		printf("  %-6d %ld/%-8d %ld/%-8d %s\n", len, ok_sync, count,
+		       ok_async, count,
+		       (ok_sync == 0 && ok_async == 0) ? "refused by this driver" :
+		       (ok_sync != ok_async) ? "PATHS DISAGREE" :
 		       (len > 2304 ? "above the 802.11 MPDU ceiling" : ""));
+		if (ok_sync != ok_async) short_arms++;
 		mt_usleep(120000);
 	}
 
 	mt_mac_stop(&dev);
+	if (short_arms) {
+		printf("\nGATE mtu: FAIL - %d size(s) where the sync and async TX\n"
+		       "paths disagreed. One public API must not have two ceilings.\n",
+		       short_arms);
+		return 1;
+	}
 	printf("\nThe largest size with a non-zero witness count is the answer.\n"
 	       "A size this driver accepted but the witness never saw was\n"
 	       "submitted and dropped somewhere below - that is the real limit.\n");
@@ -779,8 +817,17 @@ static int gate_arx(uint8_t chan, int secs)
 	return ctx.n ? 0 : 1;
 }
 
-/* Concurrent TX and RX on one claimed handle - the InitWrite + StartRxLoop +
- * send_packet shape waybeam-link uses. */
+/*
+ * Concurrent TX and RX on one claimed handle - the InitWrite + StartRxLoop +
+ * send_packet shape a bidirectional link consumer uses.
+ *
+ * RX is expected to be ~0 while this runs, and that is the point rather than a
+ * fault: the radio is half duplex and this gate saturates TX, so what it
+ * proves is that a TX flood does not wedge the receiver or raise errors -
+ * tx_err and rx_err both stay 0 and the RX ring is still healthy afterwards.
+ * `arx` with a peer transmitting is the gate that measures receive.
+ */
+#define RECOVER_S 3.0   /* post-flood listen window */
 static int gate_duplex(uint8_t chan, int secs)
 {
 	static const uint8_t src[6] = { 0x02, 0x4d, 0x54, 0x76, 0x12, 0x01 };
@@ -824,9 +871,52 @@ static int gate_duplex(uint8_t chan, int secs)
 		       (unsigned long long)st.tx_err,
 		       (unsigned long long)st.rx_err);
 	}
-	mt7612u_rx_stop(&dev);
-	mt_mac_stop(&dev);
-	return (n && ctx.n) ? 0 : 1;
+	/*
+	 * The verdict used to be (n && ctx.n), which this gate's own setup
+	 * cannot satisfy: the radio is half duplex and the loop above saturates
+	 * TX, so RX during the flood is ~0 whether or not a peer is
+	 * transmitting - verified both ways, and identically on the build from
+	 * before the ring was resized, so it is not a regression. A gate that
+	 * demands something its configuration cannot produce is as useless as
+	 * one that cannot fail.
+	 *
+	 * What this CAN establish is that a TX flood does not harm the
+	 * receiver. So: stop transmitting, leave the ring up, and require that
+	 * frames arrive afterwards. That distinguishes "contention while
+	 * transmitting", which is expected, from "the flood wedged RX", which
+	 * is the failure worth catching - and it needs a peer, so it is stated
+	 * rather than assumed.
+	 */
+	{
+		unsigned long before = atomic_load_explicit(&ctx.n,
+		                                            memory_order_relaxed);
+		unsigned long after;
+
+		printf("  TX stopped; listening %.1f s for the receiver to recover\n",
+		       RECOVER_S);
+		if (!wait_ms(RECOVER_S * 1000.0)) {
+			mt7612u_rx_stop(&dev);
+			mt_mac_stop(&dev);
+			return 1;
+		}
+		after = atomic_load_explicit(&ctx.n, memory_order_relaxed);
+		printf("  RX after the flood: %lu frames\n", after - before);
+		mt7612u_rx_stop(&dev);
+		mt_mac_stop(&dev);
+
+		if (!n) {
+			printf("GATE duplex: FAIL - nothing transmitted\n");
+			return 1;
+		}
+		if (after == before) {
+			printf("GATE duplex: FAIL - no frames received after TX stopped. "
+			       "Either the flood wedged the receiver, or no peer was "
+			       "transmitting; this gate needs one on the same channel.\n");
+			return 1;
+		}
+		printf("GATE duplex: PASS - %ld frames out, receiver healthy after\n", n);
+	}
+	return 0;
 }
 
 /* TX power: compare our EEPROM-derived registers against the values the
@@ -1710,6 +1800,7 @@ static int gate_coding(uint8_t chan, int count, int bw)
 	};
 	uint8_t f[64];
 	int arms = 0;
+	int short_arms = 0;   /* arms that aired fewer frames than asked */
 	uint8_t hw_chan = chan;
 
 	if (mt_eeprom_init(&dev)) return 1;
@@ -1777,8 +1868,10 @@ static int gate_coding(uint8_t chan, int count, int bw)
 				if (mt7612u_tx(&dev, f, 44, &r) == 0) sent++;
 				mt_usleep(1200);
 			}
-			if (sent != count)
+			if (sent != count) {
 				printf("       submitted only %ld/%d\n", sent, count);
+				short_arms++;
+			}
 			arms++;
 			mt_usleep(80000);
 		}
@@ -1787,6 +1880,12 @@ static int gate_coding(uint8_t chan, int count, int bw)
 	mt_mac_stop(&dev);
 	printf("\n%d arms swept. Payload offset 12 is the expected DESC_RATE,\n"
 	       "offset 14 the expected LDPC|STBC|SGI bits.\n", arms);
+	if (short_arms) {
+		printf("GATE coding: FAIL - %d arm(s) submitted fewer frames than "
+		       "asked; the witness cannot rule on an arm that did not air\n",
+		       short_arms);
+		return 1;
+	}
 	return 0;
 }
 
@@ -1808,6 +1907,7 @@ static int gate_sweep(uint8_t chan, int count, int bw)
 	static const uint8_t src[6] = { 0x02, 0x4d, 0x54, 0x76, 0x12, 0x01 };
 	uint8_t f[64];
 	int arms = 0;
+	int short_arms = 0;   /* arms that aired fewer frames than asked */
 	uint8_t hw_chan = chan;
 
 	if (mt_eeprom_init(&dev)) return 1;
@@ -1879,8 +1979,10 @@ static int gate_sweep(uint8_t chan, int count, int bw)
 					if (mt7612u_tx(&dev, f, 44, &r) == 0) sent++;
 					mt_usleep(1200);
 				}
-				if (sent != count)
+				if (sent != count) {
 					printf("       submitted only %ld/%d\n", sent, count);
+					short_arms++;
+				}
 				arms++;
 				mt_usleep(100000);
 			}
@@ -1892,6 +1994,11 @@ static int gate_sweep(uint8_t chan, int count, int bw)
 	       "DESC_RATE at payload offset 12; the witness compares the two.\n"
 	       "The witness must be listening at the same width - a 20 MHz\n"
 	       "receiver decodes none of a 40 or 80 MHz frame.\n", arms, 20 << bw);
+	if (short_arms) {
+		printf("GATE sweep: FAIL - %d rate(s) submitted fewer frames than "
+		       "asked\n", short_arms);
+		return 1;
+	}
 	return 0;
 }
 
@@ -1929,6 +2036,7 @@ static int gate_vht(uint8_t chan, int count, int bw)
 		{ 'Z', MT7612U_PHY_VHT, 9,  2, 1, "VHT  MCS9  2SS", 63 },
 	};
 	uint8_t f[64];
+	int short_arms = 0;   /* arms that aired fewer frames than asked */
 	uint8_t hw_chan = chan;
 
 	if (mt_eeprom_init(&dev)) return 1;
@@ -1975,6 +2083,7 @@ static int gate_vht(uint8_t chan, int count, int bw)
 			mt_usleep(1500);
 		}
 		printf("       submitted %ld/%d\n", sent, count);
+		if (sent != count) short_arms++;
 		mt_usleep(150000);
 	}
 
@@ -1982,6 +2091,11 @@ static int gate_vht(uint8_t chan, int count, int bw)
 	printf("\nFrames submitted. The witness decides: each tag must appear at\n"
 	       "its expected DESC_RATE. A 2SS arm landing on a 1SS code means the\n"
 	       "second stream did not go out.\n");
+	if (short_arms) {
+		printf("GATE vht: FAIL - %d arm(s) submitted fewer frames than "
+		       "asked\n", short_arms);
+		return 1;
+	}
 	return 0;
 }
 
@@ -2087,12 +2201,21 @@ int main(int argc, char **argv)
 	 * check is scoped to the three that read it as a width. */
 	int want_bw = argc > 4 ? atoi(argv[4]) : 0;
 
-	if ((!strcmp(cmd, "sweep") || !strcmp(cmd, "coding") ||
-	     !strcmp(cmd, "vht")) &&
-	    (want_bw < MT7612U_BW_20 || want_bw > MT7612U_BW_80)) {
-		fprintf(stderr, "bad bandwidth '%s': 0 = 20 MHz, 1 = 40, 2 = 80\n",
-		        argv[4]);
-		return 2;
+	if (!strcmp(cmd, "sweep") || !strcmp(cmd, "coding") || !strcmp(cmd, "vht")) {
+		if (want_bw < MT7612U_BW_20 || want_bw > MT7612U_BW_80) {
+			fprintf(stderr,
+			        "bad bandwidth '%s': 0 = 20 MHz, 1 = 40, 2 = 80\n",
+			        argv[4]);
+			return 2;
+		}
+		/* A non-positive count sweeps every arm with zero frames and
+		 * then reports success, which is the same "structurally
+		 * guaranteed pass" the shortfall check above exists to stop. */
+		if (argc > 3 && atoi(argv[3]) <= 0) {
+			fprintf(stderr, "bad frame count '%s': must be positive\n",
+			        argv[3]);
+			return 2;
+		}
 	}
 
 	signal(SIGINT, on_signal);

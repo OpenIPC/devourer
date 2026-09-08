@@ -88,6 +88,10 @@ public:
   /* Pre-power-on HCI programming (rtw88 rtw_hci_setup slot): PCIe TRX ring
    * registers; no-op on USB. Call per bring-up attempt, before power-on. */
   void hci_setup() { _transport->hci_setup(); }
+  /* Pipelined register writes — see IRtlTransport::write_batch_begin. */
+  void write_batch_begin() { _transport->write_batch_begin(); }
+  void write_batch_end() { _transport->write_batch_end(); }
+  void flush_writes() { _transport->flush_writes(); }
 
   /* Kernel-style async RX: keep n_urbs concurrent bulk-IN transfers in flight
    * (USB) or reap the RX buffer-descriptor ring (PCIe), invoking

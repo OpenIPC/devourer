@@ -87,6 +87,7 @@ void Halrf8822e::delay_us(uint32_t us) {
   std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
 void Halrf8822e::delay_ms(uint32_t ms) {
+  _device.flush_writes(); /* the settle time must follow the writes */
   std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 

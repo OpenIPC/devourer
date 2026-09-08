@@ -53,7 +53,7 @@ private:
   uint32_t rf_read(uint8_t path, uint16_t addr, uint32_t mask);
   void rf_write(uint8_t path, uint16_t addr, uint32_t mask, uint32_t val);
   static void delay_us(uint32_t us);
-  static void delay_ms(uint32_t ms);
+  void delay_ms(uint32_t ms); /* drains pipelined writes first */
 
   /* --- DAC calibration (port of halrf_dac_cal_8822e / halrf_8822e.c) ---
    * 8822e DACK uses the AFE S0/S1 banks (0x3800/0x3900) rather than 8822c's BB

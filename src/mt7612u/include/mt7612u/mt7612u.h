@@ -290,8 +290,10 @@ int mt7612u_link_stats(struct mt7612u_dev *dev, struct mt7612u_link_stats *out);
  * One round of mt76's 1 Hz cal_work (mt76x2/usb_phy.c:42, MT_CALIBRATE_INTERVAL
  * == HZ).  A receiving consumer MUST call this about once a second.  Measured:
  * against a peer 20 cm away airing 3037 fps, a receiver with no tick takes 3
- * frames in 10 s; with it ~4850/s (nine runs).  It issues one MCU calibration
- * - the part that matters, bisected - and runs the channel-gain tracking.
+ * frames in 10 s; with it 5415-5470/s (eight consecutive runs, both adapters).
+ * This comment is the one home for that figure - everything else points here.
+ * It issues one MCU calibration - the part that matters, bisected - and runs
+ * the channel-gain tracking.
  *
  * Caller-driven on purpose: MCU commands share one 4-bit sequence number and
  * one response endpoint, so they need a single user.  It reads and clears the

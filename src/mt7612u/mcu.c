@@ -39,7 +39,7 @@ static int mcu_wait_resp(struct mt7612u_dev *d, uint8_t seq)
 			continue;
 		if (rc) {
 			ERR("mcu resp bulk: %s", libusb_error_name(rc));
-			return -1;
+			goto unanswered;
 		}
 		if (len < 4)
 			continue;
@@ -53,6 +53,12 @@ static int mcu_wait_resp(struct mt7612u_dev *d, uint8_t seq)
 		    FIELD_GET(MT_RX_FCE_INFO_CMD_SEQ, rxfce), seq);
 	}
 	ERR("mcu command timed out waiting for response");
+unanswered:
+	/* Giving up leaves the reply outstanding: it can still land on EP 5 and be
+	 * read as the next command's.  Arm the drain in mt_mcu_send() - both exits
+	 * here are that case, and arming it is what lets the drain stay off the
+	 * healthy path entirely. */
+	d->mcu_stale_pending = 1;
 	return -1;
 }
 
@@ -74,30 +80,56 @@ int mt_mcu_send(struct mt7612u_dev *d, int cmd, const void *data, int len,
 	 * failure reads as "mcu resp mismatch ... (want 1)". */
 	pthread_mutex_lock(&d->io_lock);
 
-	/* Drain replies nobody collected before sending.  A reply that lands
-	 * after mcu_wait_resp() gave up stays queued on EP 5, so the next
-	 * command reads its predecessor's reply, mismatches, times out (~1.5 s)
-	 * and leaves one more stale reply behind - the channel then never
-	 * resyncs.  Seen as "mcu resp mismatch: evt=0 seq=10..14 (want 15)"
-	 * cascading through every 1 Hz tick.  The loop exits when the queue is
-	 * empty (a 5 ms read returns nothing); observed depth is ~5, but the cap
-	 * is generous so a deeper transient is fully drained rather than leaving
-	 * a straggler that re-desyncs the next command.  Hitting the cap means
-	 * the queue is still non-empty - a real fault, warned distinctly. */
-	{
+	/* Drain replies nobody collected before sending, but only when one is
+	 * actually outstanding.  A reply that lands after mcu_wait_resp() gave up
+	 * stays queued on EP 5, so the next command reads its predecessor's reply,
+	 * mismatches, times out (~1.5 s) and leaves one more stale reply behind -
+	 * the channel then never resyncs.  Seen as "mcu resp mismatch: evt=0
+	 * seq=10..14 (want 15)" cascading through every 1 Hz tick.
+	 *
+	 * Gated on mcu_stale_pending rather than run before every command: with an
+	 * empty queue the 5 ms read is a guaranteed LIBUSB_ERROR_TIMEOUT, and it
+	 * would be paid by all of them - the 3-6 inside each mt_set_channel_ex(),
+	 * fast retune included, and the no-wait commands that never produce a reply
+	 * at all - putting +15-30 ms on every hop to drain nothing.  Zero cost when
+	 * healthy, unchanged protection when not.
+	 *
+	 * The loop exits when the queue is empty (a 5 ms read returns nothing);
+	 * observed depth is ~5, but the cap is generous so a deeper transient is
+	 * fully drained rather than leaving a straggler that re-desyncs the next
+	 * command.  Hitting the cap means the queue is still non-empty - a real
+	 * fault, warned distinctly, and the flag stays armed so the next command
+	 * drains again rather than reading a straggler as its own reply. */
+	if (d->mcu_stale_pending) {
 		uint8_t stale[MCU_RESP_URB_SIZE];
 		int n = 0, got;
 
-		while (n < 64 &&
-		       !mt_bulk(d, MT_EP_IN_CMD_RESP, stale, sizeof stale, &got, 5) &&
-		       got >= 4)
+		int drained_clean = 0;
+
+		while (n < 64) {
+			int brc = mt_bulk(d, MT_EP_IN_CMD_RESP, stale, sizeof stale,
+			                  &got, 5);
+
+			/* A timeout is the only exit that PROVES the queue is empty.
+			 * Exiting on a short packet says nothing about what is still
+			 * behind it, so it must not disarm the drain - the old
+			 * unconditional version retried on the next command, and
+			 * dropping the flag there would lose that protection for
+			 * good. */
+			if (brc == LIBUSB_ERROR_TIMEOUT) { drained_clean = 1; break; }
+			if (brc || got < 4)
+				break;
 			n++;
-		if (n == 64)
+		}
+		if (n == 64) {
 			WARN("MCU reply queue still draining at the cap before cmd %d - "
 			     "the response channel may be desynced", cmd);
-		else if (n)
-			WARN("drained %d stale MCU repl%s before cmd %d", n,
-			     n == 1 ? "y" : "ies", cmd);
+		} else if (drained_clean) {
+			d->mcu_stale_pending = 0;
+			if (n)
+				WARN("drained %d stale MCU repl%s before cmd %d", n,
+				     n == 1 ? "y" : "ies", cmd);
+		}
 	}
 
 	if (wait_resp) {
@@ -131,6 +163,12 @@ int mt_mcu_send(struct mt7612u_dev *d, int cmd, const void *data, int len,
 	rc = mt_bulk(d, MT_EP_OUT_INBAND_CMD, buf, total, NULL, 500);
 	if (rc) {
 		ERR("mcu cmd %d bulk out: %s", cmd, libusb_error_name(rc));
+		/* A failed OUT does not mean the MCU never saw it: a timeout that
+		 * still delivered, or a stall after the data stage, both leave a
+		 * reply that can land on EP 5 with nothing waiting for it.  This
+		 * is the third way a command goes unanswered, so it arms the
+		 * drain like the two in mcu_wait_resp(). */
+		d->mcu_stale_pending = 1;
 		pthread_mutex_unlock(&d->io_lock);
 		return -1;
 	}

@@ -297,6 +297,24 @@ int mt_mac_start(struct mt7612u_dev *d, int enable_rx)
 	return 0;
 }
 
+/*
+ * Silence the receiver, leaving TX as it was. This is the first half of a
+ * teardown: mt_mac_stop() below does not clear ENABLE_RX until after its own
+ * mt_rx_flush() and a TX-idle wait of up to 150 ms, and mt_async_stop() reaps
+ * the EP 4 ring before even that - so without this the MAC keeps filling a
+ * receive pipe nobody is draining, which on a busy channel is the FIFO
+ * overflow that stops RX DMA for good. It is the exact window mt_mac_start()
+ * refuses to create, reached at the end of every session.
+ *
+ * mt_clear() leaves RX enabled if its read half fails; acceptable here because
+ * mt_mac_stop() clears the register outright a moment later.
+ */
+void mt_mac_rx_disable(struct mt7612u_dev *d)
+{
+	if (!d || !d->h) return;
+	mt_clear(d, MT_MAC_SYS_CTRL, MT_MAC_SYS_CTRL_ENABLE_RX);
+}
+
 int mt_mac_stop(struct mt7612u_dev *d)
 {
 	uint32_t rts_cfg = mt_rr(d, MT_TX_RTS_CFG);
@@ -477,6 +495,10 @@ struct mt7612u_dev *mt7612u_open_handle(void *h, void *ctx, const char *fw_dir,
 void mt7612u_close(struct mt7612u_dev *d)
 {
 	if (!d) return;
+	/* RX off BEFORE the ring is cancelled - mt_async_stop() reaps the EP 4
+	 * drainer, and mt_mac_stop() would not clear ENABLE_RX until after its
+	 * flush and TX-idle wait. See mt_mac_rx_disable(). */
+	if (d->h) mt_mac_rx_disable(d);
 	mt_async_stop(d);
 	if (d->h) mt_mac_stop(d);
 	mt_close(d);   /* releases io_lock via mt_dev_state_destroy() */

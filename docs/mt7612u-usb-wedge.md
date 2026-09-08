@@ -1,11 +1,7 @@
 # MT7612U hard USB TX wedge: reset evidence
 
-Research date: 2026-09-07. Devourer HEAD initially: `4e7a793` on
-`feat/mt7612u-mediatek-backend`; concurrent PHY/I/O work was subsequently
-committed as `5757712`. Its separate host-side libusb hang report does not
-establish the cause of this persistent device-side wedge.
-Reference: `openwrt/mt76` at `be5ce7910521492d4a2e4ce7ee3843680a46c047`.
-**Status: source-level investigation only; no new device measurements.**
+**Status: source-level investigation only; no new device measurements.** Every
+source below is linked at a pinned commit.
 
 There is a concrete reset candidate beyond `TX_CLR`: the vendor-derived
 MT76x2U source has separate UDMA TX and IFDMA/FCE reset controls. Its

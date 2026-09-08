@@ -74,6 +74,21 @@ static int wait_ticking(double ms)
 	return !g_stop;
 }
 
+/*
+ * RX off, then the ring.  mt_async_stop() reaps the EP 4 drainer and
+ * mt_mac_stop() does not clear ENABLE_RX until after its own flush and TX-idle
+ * wait, so cancelling the ring first leaves the MAC filling a receive pipe
+ * nobody reads - the FIFO overflow that stops RX DMA for good, reached at the
+ * end of every gate that receives.  One helper rather than the pair open-coded
+ * at each of the twenty teardowns, error paths included: an invariant spelled
+ * out twenty times is one that gets half-enforced.  See mt_mac_rx_disable().
+ */
+static void rx_teardown(void)
+{
+	mt_mac_rx_disable(&dev);
+	mt7612u_rx_stop(&dev);
+}
+
 
 static int gate_regs(void)
 {
@@ -215,12 +230,18 @@ static int gate_swreset(int apply)
 		 * drain before touching the DMA.  Bounded - this is the fault
 		 * under investigation, so it must not become an infinite wait. */
 		mt_wr(&dev, MT_MAC_SYS_CTRL, 0);
-		for (int i = 0; i < 50; i++) {
-			if (!(mt_rr(&dev, MT_MAC_STATUS) & BIT(0))) break;
-			mt_usleep(2000);
-		}
-		printf("  MAC stopped, TX idle=%d\n",
-		       !(mt_rr(&dev, MT_MAC_STATUS) & BIT(0)));
+		/* MT_MAC_STATUS_TX, not BIT(0) - BIT(0) is _RX.  Waiting on RX
+		 * idle pulsed the UDMA TX reset with TX possibly still in
+		 * flight, which is the one precondition the vendor sequence
+		 * states, so a FAIL below could not separate "the sequence does
+		 * not work" from "it ran too early".  Same test init.c polls,
+		 * and the same 100 ms budget as the 50 x 2 ms loop it replaces. */
+		int tx_idle = mt_poll(&dev, MT_MAC_STATUS, MT_MAC_STATUS_TX, 0,
+		                      100000);
+		printf("  MAC stopped, TX idle=%d\n", tx_idle);
+		if (!tx_idle)
+			printf("  TX never went idle - the sequence ran without its "
+			       "precondition, so a FAIL below is about that\n");
 
 		mt_clear(&dev, CFG_ADDR(CFG_UDMA_CFG), 0x00c00000);  /* 1 */
 		swreset_pulse(CFG_ADDR(CFG_EP_DROP),    0x03f00000); /* 2 */
@@ -400,6 +421,126 @@ static int gate_chan(uint8_t chan, const char *fw_dir)
 	return 0;
 }
 
+/*
+ * Exercise the adopt path - how a libusb-owning consumer (the IRtlDevice
+ * wrapper) reaches this subtree. Everything else in this tool arrives through
+ * mt_open(), so without this gate the second entry point is never opened on
+ * hardware at all.
+ *
+ * That mattered: the wedge recovery used to live inside mt_open() alone, so a
+ * caller adopting a handle after a run died mid-transfer paid both mt_fw_init()
+ * attempts and failed with the exact error the recovery removes. A PASS here
+ * after a killed run is the evidence that the recovery is shared.
+ *
+ * It runs mt_adopt() + mt_init_hardware() on bringup's own device rather than
+ * calling mt7612u_open_handle() - that function is exactly those two steps, and
+ * driving them directly is what lets MT7612U_NO_AUTORECOVER reach this gate:
+ * the public entry point allocates the device itself, so an observe-only wedge
+ * experiment could never be set up through it.
+ */
+static int gate_adopt(const char *sel)
+{
+	libusb_context *ctx = NULL;
+	libusb_device_handle *h = NULL;
+	libusb_device **list = NULL;
+	const char *err = NULL;
+	ssize_t n;
+	int detached = 0, matches = 0, rrc, rc = 1;
+
+	if (libusb_init(&ctx)) { printf("ADOPT: FAIL - libusb_init\n"); return 1; }
+
+	/* Same selector spellings open_selected() accepts - a "bus-port" like
+	 * "2-1", or a bare index - so a two-adapter bench does not silently test
+	 * the other unit, and MT7612U_DEV=0 does not read as "no adapter". */
+	n = libusb_get_device_list(ctx, &list);
+	for (ssize_t i = 0; i < n && !h; i++) {
+		struct libusb_device_descriptor desc;
+		uint8_t ports[8];
+		char id[32], idx[8];
+		int np, off;
+
+		if (libusb_get_device_descriptor(list[i], &desc))
+			continue;
+		if (desc.idVendor != 0x0e8d || desc.idProduct != 0x7612)
+			continue;
+		off = snprintf(id, sizeof id, "%u", libusb_get_bus_number(list[i]));
+		np = libusb_get_port_numbers(list[i], ports, sizeof ports);
+		for (int p = 0; p < np && off > 0 && off < (int)sizeof id; p++)
+			off += snprintf(id + off, sizeof id - (size_t)off, "%s%u",
+			                p ? "." : "-", ports[p]);
+		snprintf(idx, sizeof idx, "%d", matches);
+		if (sel && *sel && strcmp(sel, id) && strcmp(sel, idx)) {
+			matches++;
+			continue;
+		}
+		if (!libusb_open(list[i], &h))
+			printf("adopting the caller-owned handle at %s\n", id);
+		matches++;
+	}
+	if (list) libusb_free_device_list(list, 1);
+	if (!h) {
+		printf("ADOPT: FAIL - no MT7612U%s%s\n", sel ? " at " : "", sel ? sel : "");
+		libusb_exit(ctx);
+		return 1;
+	}
+
+	if (libusb_kernel_driver_active(h, 0) == 1 &&
+	    libusb_detach_kernel_driver(h, 0) == 0)
+		detached = 1;
+
+	/* Claim BEFORE resetting. This gate opens libusb itself - that is the
+	 * point of it - so it cannot take the exclusive adapter lock that
+	 * open_selected() uses, and a reset would otherwise yank the device out
+	 * from under a live capture in another process and only fail afterwards.
+	 * A failed claim here is that other process still holding the interface. */
+	if (libusb_claim_interface(h, 0)) {
+		printf("ADOPT: FAIL - interface 0 is claimed elsewhere; not resetting\n");
+		goto out;
+	}
+	libusb_release_interface(h, 0);
+
+	rrc = libusb_reset_device(h);
+	if (rrc) {
+		printf("ADOPT: FAIL - libusb_reset_device: %s\n", libusb_error_name(rrc));
+		goto out;
+	}
+	if (libusb_claim_interface(h, 0)) {
+		printf("ADOPT: FAIL - could not claim interface 0 after reset\n");
+		goto out;
+	}
+
+	/* The caller owns the handle and the context; mt_adopt() records that and
+	 * mt_close() then leaves both to us. */
+	if (mt_adopt(&dev, h, ctx, &err)) {
+		printf("ADOPT: FAIL - mt_adopt: %s\n", err ? err : "?");
+		printf("  (a wedged adapter failing HERE but not via `bringup regs` is\n"
+		       "   the recovery being unreachable from the adopt path)\n");
+		goto out_release;
+	}
+	if (mt_eeprom_init(&dev) || mt_init_hardware(&dev, NULL)) {
+		printf("ADOPT: FAIL - bring-up after adopt\n");
+		goto out_close;
+	}
+
+	printf("U3DMA_CFG after adopt = 0x%08x (0x00c00020 = soft wedge, "
+	       "0x80c00020 = hard)\n", mt_rr(&dev, CFG_ADDR(MT_USB_U3DMA_CFG)));
+	printf("ADOPT: PASS - the adopt path brought the device up; the wedge "
+	       "recovery runs here too\n");
+	rc = 0;
+
+out_close:
+	mt_mac_stop(&dev);
+	mt_close(&dev);      /* adopted: releases nothing of ours, drops io_lock */
+out_release:
+	libusb_release_interface(h, 0);
+out:
+	if (detached)
+		libusb_attach_kernel_driver(h, 0);
+	libusb_close(h);
+	libusb_exit(ctx);
+	return rc;
+}
+
 /* Gate E: inject frames. The witness is a separate radio - our own RX seeing
  * these would prove nothing. */
 static int gate_tx(uint8_t chan, int count, int phy, int mcs)
@@ -500,6 +641,23 @@ static int gate_rx(uint8_t chan, int want)
 	printf("  MT_MAC_STATUS    = 0x%08x\n", mt_rr(&dev, MT_MAC_STATUS));
 	printf("  MT_RX_STAT_1     = 0x%08x (CCA errors seen = RF is live)\n",
 	       mt_rr(&dev, MT_RX_STAT_1));
+	/*
+	 * Declared, not fixed.  The tick below runs on this thread, which under
+	 * MT_RX_DRAIN_SYNC is the only EP 4 drainer, and mt7612u_phy_tick() can
+	 * block in the MCU for ~3.3 s when the part answers late under RF load -
+	 * so the gate opens the very undrained-receiver window it exists to
+	 * observe.  Gating RX around the tick would close that window, but the
+	 * re-enable runs through mt_mac_start(), which rewrites MT_RX_FILTR_CFG
+	 * back to the initvals value and would silently undo the monitor filter
+	 * set above - a quieter gate measuring something else.  A sync gate that
+	 * can no longer reproduce the hazard is worth less than one that reports
+	 * it, and gate_arx is the witness that holds anyway: its ring drains on
+	 * the libusb event thread, and its notick arm is the measured control.
+	 */
+	printf("  NOTE: the 1 Hz tick blocks this thread, the only EP 4 drainer -\n"
+	       "        under load this gate is NOT a valid tick witness. Use\n"
+	       "        `arx <ch> <secs>` for that (`arx <ch> <secs> 1` is its\n"
+	       "        negative control).\n");
 
 	double last_tick = now_ms();
 
@@ -526,6 +684,12 @@ static int gate_rx(uint8_t chan, int want)
 	}
 
 	printf("\nreceived %d frames\n", got);
+	/* The same invariant every ring-cancelling gate now follows, and it
+	 * applies here even though there is no ring: mt_mac_stop() does not clear
+	 * ENABLE_RX until after its own mt_rx_flush() and a TX-idle wait of up to
+	 * 150 ms, and this thread has already stopped draining EP 4 - on the busy
+	 * channel this gate was just listening to, that IS the undrained window. */
+	mt_mac_rx_disable(&dev);
 	mt_mac_stop(&dev);
 	if (got == 0) {
 		printf("GATE F: FAIL - no frames received\n");
@@ -748,7 +912,7 @@ static int gate_mtu(uint8_t chan, int count)
 					(*ok)++;
 				mt_usleep(1500);
 			}
-			if (pass) mt7612u_rx_stop(&dev);
+			if (pass) rx_teardown();
 		}
 
 		printf("  %-6d %ld/%-8d %ld/%-8d %s\n", len, ok_sync, count,
@@ -903,12 +1067,12 @@ static int gate_arx(uint8_t chan, int secs, int notick)
 	if (mt7612u_rx_start(&dev, arx_cb, &ctx)) {
 		printf("GATE arx: FAIL - rx_start failed\n"); return 1;
 	}
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { mt7612u_rx_stop(&dev); return 1; }
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { rx_teardown(); return 1; }
 	mt7612u_set_monitor_rx(&dev, 0);
 	t0 = now_ms();
 	/* notick is the negative control: without the 1 Hz PHY tick this gate
 	 * reads 3 frames in 10 s from a strong nearby peer (reproduced eight
-	 * times); with it ~4850/s.  See mt7612u_phy_tick(). */
+	 * times); with it the rate quoted on mt7612u_phy_tick().  See that comment. */
 	if (notick) wait_ms(secs * 1000.0); else wait_ticking(secs * 1000.0);
 	{
 		struct mt_async_stats st;
@@ -932,7 +1096,7 @@ static int gate_arx(uint8_t chan, int secs, int notick)
 	}
 	for (int i = 0; i < 8; i++)
 		if (ctx.by_phy[i]) printf("  %-6s %lu\n", phy_name[i], ctx.by_phy[i]);
-	mt7612u_rx_stop(&dev);
+	rx_teardown();
 	mt_mac_stop(&dev);
 	return ctx.n ? 0 : 1;
 }
@@ -969,7 +1133,7 @@ static int gate_duplex(uint8_t chan, int secs)
 	memcpy(frame + 24, "MT7612U-HAL ", 12);
 
 	if (mt7612u_rx_start(&dev, arx_cb, &ctx)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { mt7612u_rx_stop(&dev); return 1; }
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { rx_teardown(); return 1; }
 	mt7612u_set_monitor_rx(&dev, 0);
 
 	t0 = now_ms();
@@ -1021,13 +1185,13 @@ static int gate_duplex(uint8_t chan, int secs)
 		printf("  TX stopped; listening %.1f s for the receiver to recover\n",
 		       RECOVER_S);
 		if (!wait_ticking(RECOVER_S * 1000.0)) {
-			mt7612u_rx_stop(&dev);
+			rx_teardown();
 			mt_mac_stop(&dev);
 			return 1;
 		}
 		after = atomic_load_explicit(&ctx.n, memory_order_relaxed);
 		printf("  RX after the flood: %lu frames\n", after - before);
-		mt7612u_rx_stop(&dev);
+		rx_teardown();
 		mt_mac_stop(&dev);
 
 		if (!n) {
@@ -1242,7 +1406,7 @@ static int gate_caps(uint8_t chan)
 	 * with nothing reading, that is long enough to wedge the part below
 	 * the USB level, which no software reset recovers. */
 	if (mt_async_start(&dev, drain_cb, &drained)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { mt_async_stop(&dev); return 1; }
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { rx_teardown(); return 1; }
 
 	mt7612u_get_caps(&dev, &c);
 	printf("caps: %s rev 0x%08x  %dTx%dRx  bw_mask 0x%02x (20%s%s)\n",
@@ -1343,7 +1507,7 @@ static int gate_caps(uint8_t chan)
 		}
 	}
 
-	mt_async_stop(&dev);
+	rx_teardown();
 	mt_mac_stop(&dev);
 	printf("\n%lu frames drained from EP 4 while the receiver was on\n", drained);
 	printf("\nGATE caps: %s\n", bad ? "FAIL" : "PASS");
@@ -1392,7 +1556,7 @@ static int gate_ack(uint8_t chan, int secs, int arm)
 	/* Ring first, receiver second - see gate_caps. Arming the responder and
 	 * printing between the two would otherwise leave RX on and undrained. */
 	if (mt7612u_rx_start(&dev, ack_cb, &off)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { mt7612u_rx_stop(&dev); return 1; }
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { rx_teardown(); return 1; }
 	/* CRC and PHY errors only: DUP must stay clear so retries reach us. */
 	mt_wr(&dev, MT_RX_FILTR_CFG,
 	      MT_RX_FILTR_CFG_CRC_ERR | MT_RX_FILTR_CFG_PHY_ERR);
@@ -1408,7 +1572,7 @@ static int gate_ack(uint8_t chan, int secs, int arm)
 	if (arm) {
 		if (mt7612u_set_ack_responder(&dev, g_ack_mac)) {
 			printf("GATE ack: FAIL - could not arm\n");
-			mt7612u_rx_stop(&dev);
+			rx_teardown();
 			mt_mac_stop(&dev);
 			return 1;
 		}
@@ -1425,7 +1589,7 @@ static int gate_ack(uint8_t chan, int secs, int arm)
 	if (secs <= 0 || secs > 3600) {
 		printf("GATE ack: FAIL - listen duration %d out of range (1..3600 s)\n",
 		       secs);
-		mt7612u_rx_stop(&dev);
+		rx_teardown();
 		mt_mac_stop(&dev);
 		return 1;
 	}
@@ -1435,11 +1599,11 @@ static int gate_ack(uint8_t chan, int secs, int arm)
 	 * into roughly 49 days with the receiver left running. */
 	if (!wait_ticking(secs * 1000.0)) {
 		printf("GATE ack: interrupted\n");
-		mt7612u_rx_stop(&dev);
+		rx_teardown();
 		mt_mac_stop(&dev);
 		return 1;
 	}
-	mt7612u_rx_stop(&dev);
+	rx_teardown();
 	printf("  stimulus frames addressed to the responder MAC: %lu (retries %lu)\n",
 	       off.to_us, off.retry_to_us);
 
@@ -1516,13 +1680,13 @@ static int gate_rxbytes(uint8_t chan, int secs)
     if (mt_init_hardware(&dev, NULL)) return 1;
     if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
     if (mt7612u_rx_start(&dev, rxbytes_cb, NULL)) return 1;
-    if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { mt7612u_rx_stop(&dev); return 1; }
+    if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { rx_teardown(); return 1; }
     mt7612u_set_monitor_rx(&dev, 0);
     mt7612u_link_stats_start(&dev);
 
     wait_ticking(secs * 1000.0);
     mt7612u_link_stats(&dev, &st);
-    mt7612u_rx_stop(&dev);
+    rx_teardown();
     mt_mac_stop(&dev);
 
     printf("ch%u, %d s ambient. false CCA this interval: %u (mt76 calls >800 "
@@ -1595,7 +1759,7 @@ static int gate_linkstat(uint8_t chan, int secs, int with_rx)
 	if (with_rx) {
 		if (mt7612u_rx_start(&dev, drain_cb, &linkstat_drained)) return 1;
 	}
-	if (mt_mac_start(&dev, with_rx)) { if (with_rx) mt7612u_rx_stop(&dev); return 1; }
+	if (mt_mac_start(&dev, with_rx)) { if (with_rx) rx_teardown(); return 1; }
 	if (with_rx) mt7612u_set_monitor_rx(&dev, 0);
 	mt7612u_link_stats_start(&dev);
 
@@ -1609,7 +1773,7 @@ static int gate_linkstat(uint8_t chan, int secs, int with_rx)
 
 		if (!wait_ms(1000.0)) break;
 		if (mt7612u_link_stats(&dev, &st)) {
-			if (with_rx) mt7612u_rx_stop(&dev);
+			if (with_rx) rx_teardown();
 			return 1;
 		}
 		busy_pct = (st.ch_busy + st.ch_idle)
@@ -1633,7 +1797,7 @@ static int gate_linkstat(uint8_t chan, int secs, int with_rx)
 		}
 	}
 	if (with_rx) {
-		mt7612u_rx_stop(&dev);
+		rx_teardown();
 		printf("  %lu frames reached the ring over the run\n", linkstat_drained);
 	}
 	mt_mac_stop(&dev);
@@ -1757,12 +1921,12 @@ static int gate_linkrx(uint8_t chan, int secs)
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
 	if (mt7612u_rx_start(&dev, linkrx_cb, NULL)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { mt7612u_rx_stop(&dev); return 1; }
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { rx_teardown(); return 1; }
 	mt7612u_set_monitor_rx(&dev, 0);
 
 	printf("RX on ch%u for %d s, filtering our own magic\n", chan, secs);
 	wait_ticking(secs * 1000.0);
-	mt7612u_rx_stop(&dev);
+	rx_teardown();
 	mt_mac_stop(&dev);
 
 	{
@@ -2349,6 +2513,16 @@ int main(int argc, char **argv)
 
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
+	/* The knob lives here, not in the library: mt_recover_usb() reads the
+	 * field, and setting it before mt_open() is what makes the wedge
+	 * experiments observe-only.  Same spelling as before. */
+	if (getenv("MT7612U_NO_AUTORECOVER"))
+		dev.no_autorecover = 1;
+
+	/* Runs before the global mt_open() below, because it IS an open - of the
+	 * other public entry point. */
+	if (!strcmp(cmd, "adopt"))
+		return gate_adopt(getenv("MT7612U_DEV"));
 	if (mt_open(&dev, &err)) {
 		fprintf(stderr, "open failed: %s\n", err ? err : "?");
 		return 1;
@@ -2434,6 +2608,7 @@ int main(int argc, char **argv)
 	} else {
 		fprintf(stderr, "unknown subcommand '%s'\n", cmd);
 		fprintf(stderr, "usage: bringup [regs|fw|init|chan|tx|rx|hop|gateg] [chan] [count] [phy 0=CCK 1=OFDM 2=HT 4=VHT] [mcs]\n");
+		fprintf(stderr, "       bringup adopt                  (the mt_adopt path a libusb-owning consumer uses)\n");
 		fprintf(stderr, "       bringup [sweep|coding|vht] [chan] [count] [bw 0=20 1=40 2=80]\n");
 		fprintf(stderr, "       the witness must listen at the same width (DEVOURER_BW=40|80)\n");
 		rc = 2;

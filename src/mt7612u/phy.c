@@ -176,7 +176,7 @@ static void channel_calibrate(struct mt7612u_dev *d, int is_5ghz)
 	/* Marked done once, as mt76 does.  An individual mt_mcu_calibrate() can
 	 * time out when the MCU answers slowly under RF load, and its reply then
 	 * arrives late (mt_mcu_send drains those) - but the calibration still
-	 * takes: the receiver runs at ~4850 fps either way, measured across
+	 * takes: the receiver runs at its normal rate either way, measured across
 	 * eight runs that each logged those timeouts.  Withholding this flag and
 	 * re-running the whole burst every second made it WORSE (153 fps). */
 	d->cal.channel_cal_done = 1;
@@ -443,7 +443,7 @@ out:
  * tssi_compensate (which issues an MCU command every second) and
  * update_channel_gain.  This port ran NONE of it, and the cost is not subtle:
  * against a transmitter 20 cm away airing 3037 fps, a receiver with no tick
- * takes 3 frames in 10 s.  With the tick it takes 4362/s.  Bisected - reading
+ * takes 3 frames in 10 s.  With the tick it takes the rate quoted on mt7612u_phy_tick().  Bisected - reading
  * the read-and-clear MT_RX_STAT_* counters alone does nothing (3 frames); it
  * is the periodic MCU calibration that keeps the receiver alive.
  */
@@ -486,9 +486,16 @@ static void phy_set_gain_val(struct mt7612u_dev *d)
 static int phy_adjust_vga_gain(struct mt7612u_dev *d)
 {
 	uint8_t limit = d->cal.low_gain > 0 ? 16 : 4;
-	uint32_t false_cca = FIELD_GET(MT_RX_STAT_1_CCA_ERRORS,
-	                               mt_rr(d, MT_RX_STAT_1));
+	uint32_t stat, false_cca;
 	int changed = 0;
+
+	/* Checked read: mt_rr()'s ~0u failure value comes through
+	 * MT_RX_STAT_1_CCA_ERRORS as 65535, which is over the 800 threshold, so
+	 * every failed control transfer stepped the gain down 2 dB. A read that
+	 * did not happen is not evidence about the channel - leave the gain. */
+	if (mt_rr_chk(d, MT_RX_STAT_1, &stat))
+		return 0;
+	false_cca = FIELD_GET(MT_RX_STAT_1_CCA_ERRORS, stat);
 
 	if (false_cca > 800 && d->cal.agc_gain_adjust < limit) {
 		d->cal.agc_gain_adjust += 2;
@@ -509,16 +516,29 @@ static void phy_update_channel_gain(struct mt7612u_dev *d)
 	uint32_t agc_35, agc_37, val;
 	int low_gain, gain_change;
 
-	/* mt76 averages RSSI over associated stations.  A monitor consumer has
-	 * none, so this is fed from the RX path (atomic; written there); -75 is
-	 * mt76's own fallback. */
-	int8_t avg = atomic_load_explicit(&d->cal.avg_rssi_all,
-	                                  memory_order_relaxed);
-
-	if (!avg) {
-		avg = -75;
-		atomic_store_explicit(&d->cal.avg_rssi_all, avg, memory_order_relaxed);
-	}
+	/*
+	 * mt76 takes this from mt76_get_min_avg_rssi() (util.c:72), which walks
+	 * the associated-station table and returns the weakest station's average.
+	 * A monitor consumer associates with nobody, so that walk finds no wcid
+	 * and returns 0, and mt76 substitutes -75 (mt76x2/phy.c:283-285): in
+	 * monitor mode upstream never leaves the middle gain class.
+	 *
+	 * This port fed an EMA of rssi[0] over every frame the receiver parsed,
+	 * which on a monitor receiver is every transmitter on the channel - one
+	 * -40 dBm neighbour AP drove low_gain=2, AGC 35/37 to 0x08080808 and
+	 * gain_cur down 10-14 against a wanted peer at -80 dBm.  The bisect above
+	 * says gain tracking is not what keeps RX alive, so that EMA was
+	 * fidelity-only code that was less faithful than the constant it
+	 * replaced.  Pinned to mt76's monitor value; rx.c no longer feeds it.
+	 */
+	const int avg = -75;
+	/* Pinned, so `low_gain` is 1 at every width (the thresholds are
+	 * -68/-82, -65/-79, -62/-76) and the `low_gain == 2` arms below - AGC
+	 * 26's 0x3 case, the 0x08080808 pair and the low_gain_delta block - are
+	 * unreachable today.  They are kept because they are the faithful
+	 * mt76x2_phy_update_channel_gain() port and become live the moment a
+	 * real per-peer RSSI source exists; the compiler cannot see that they
+	 * are dead, so this note is the only thing stopping them rotting. */
 
 	low_gain = (avg > rssi_gain_thresh(d->bw)) +
 	           (avg > low_rssi_gain_thresh(d->bw));
@@ -576,7 +596,7 @@ static void phy_update_channel_gain(struct mt7612u_dev *d)
  *
  * The MCU calibration is the part that matters, and that was measured rather
  * than assumed: with no tick a receiver takes 3 frames in 10 s from a peer
- * airing 3037 fps; with a periodic MCU calibration it takes 4362/s.  The gain
+ * airing 3037 fps; with a periodic MCU calibration it recovers to the rate quoted on mt7612u_phy_tick().  The gain
  * update alone does NOT help (4 frames) - it is ported because it is the rest
  * of mt76's 1 Hz work and it tracks signal strength, not because it fixes this.
  * Reading the read-and-clear MT_RX_STAT_* counters alone does nothing either.
@@ -631,12 +651,10 @@ int mt_set_channel_ex(struct mt7612u_dev *d, uint8_t chan, uint8_t bw, int fast)
 	d->cal.channel_cal_done = fast;
 	d->chan = chan;
 	d->bw = bw;
-	/* Reset the periodic gain tracker for the new channel: its cached RSSI,
-	 * gain class and fine VGA offset all belong to the old channel/band.
-	 * low_gain=-1 forces the first tick to program a class (this is also
-	 * what makes an adopted handle's first tick valid - see mt_dev_state_init).
-	 * avg_rssi_all is written on the RX thread, so store it atomically. */
-	atomic_store_explicit(&d->cal.avg_rssi_all, 0, memory_order_relaxed);
+	/* Reset the periodic gain tracker for the new channel: its gain class and
+	 * fine VGA offset both belong to the old channel/band.  low_gain=-1
+	 * forces the first tick to program a class (this is also what makes an
+	 * adopted handle's first tick valid - see mt_dev_state_init). */
 	d->cal.low_gain = -1;
 	d->cal.agc_gain_adjust = 0;
 	/* The TX "never widen" notice is once per width, not once per device:
@@ -714,13 +732,51 @@ int mt_set_channel_ex(struct mt7612u_dev *d, uint8_t chan, uint8_t bw, int fast)
 
 	channel_calibrate(d, band == BAND_5GHZ);
 
+	/*
+	 * mt76x02_init_agc_gain(): host-side snapshot of the AGC gain the
+	 * firmware settled on, used later by the RX gain tracking.
+	 *
+	 * Above the fast return, unlike mt76 (mt76x2/usb_phy.c:170-174 takes it
+	 * after `if (scan) return 0`).  mt_mcu_init_gain() has just reprogrammed
+	 * AGC 8/9 for the new channel, and this function resets low_gain to -1 on
+	 * every tune - including a fast one - so the next tick takes the
+	 * gain_change branch and rebuilds agc_gain_cur from this snapshot.  Left
+	 * from the previous tune it would write the old channel's gain base.
+	 * mt76 gets away with skipping it because its scan path leaves low_gain
+	 * alone, so its next tick changes no gain class.
+	 *
+	 * Still after channel_calibrate(): on the full path that runs
+	 * apply_gain_adj(), which writes AGC 8/9, and mt76 snapshots after it for
+	 * the same reason.  On a fast tune it is a no-op (channel_cal_done).
+	 */
+	/*
+	 * Checked, because hoisting these above the fast return also moved them
+	 * out of the only thing that was guarding them.  The mt_io_errors() check
+	 * at the end of this function fails the tune on a bad transfer, but the
+	 * fast path returns before reaching it.  mt_rr() reports a failed control
+	 * transfer as ~0u, and FIELD_GET(MT_BBP_AGC_GAIN, ~0u) is 0x7f - so one
+	 * EP0 hiccup during a fast retune would store a gain base of 127, and the
+	 * next tick (low_gain was just reset to -1, so gain_change is true) would
+	 * program 127 - agc_gain_adjust into AGC 8/9: roughly double a normal
+	 * base, deaf until the next full tune, with nothing logged.  Keep the
+	 * previous snapshot instead; it is at worst one channel stale, which is
+	 * the condition this hoist set out to fix and is survivable, unlike 0x7f.
+	 */
+	{
+		uint32_t g8, g9;
+
+		if (mt_rr_chk(d, MT_BBP(AGC, 8), &g8) ||
+		    mt_rr_chk(d, MT_BBP(AGC, 9), &g9)) {
+			WARN("AGC gain snapshot unreadable on ch%u - keeping the "
+			     "previous base", chan);
+		} else {
+			d->cal.agc_gain_init[0] = FIELD_GET(MT_BBP_AGC_GAIN, g8);
+			d->cal.agc_gain_init[1] = FIELD_GET(MT_BBP_AGC_GAIN, g9);
+		}
+	}
+
 	if (fast)
 		return 0;
-
-	/* mt76x02_init_agc_gain(): host-side snapshot of the AGC gain the
-	 * firmware settled on, used later by the RX gain tracking. */
-	d->cal.agc_gain_init[0] = FIELD_GET(MT_BBP_AGC_GAIN, mt_rr(d, MT_BBP(AGC, 8)));
-	d->cal.agc_gain_init[1] = FIELD_GET(MT_BBP_AGC_GAIN, mt_rr(d, MT_BBP(AGC, 9)));
 
 	if (tssi_enabled(d)) {
 		uint32_t flag = 0;

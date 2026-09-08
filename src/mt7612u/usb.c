@@ -180,6 +180,11 @@ void mt_wr(struct mt7612u_dev *d, uint32_t addr, uint32_t val)
  * Optional or diagnostic writes stay best-effort by not being bracketed.
  */
 void mt_io_clear(struct mt7612u_dev *d)      { d->io_err = 0; }
+/* Put the accumulator back to a value taken earlier.  For a nested retry that
+ * must discard only its OWN failed attempt: there is one accumulator, and the
+ * caller's bracket may already have counted failures before the retrying code
+ * was reached, so zeroing would silently forgive those too. */
+void mt_io_restore(struct mt7612u_dev *d, unsigned v) { d->io_err = v; }
 unsigned mt_io_errors(struct mt7612u_dev *d) { return d->io_err; }
 
 /* Checked single write, for a caller that wants to fail at the write rather
@@ -311,6 +316,87 @@ void mt_dev_state_destroy(struct mt7612u_dev *d)
 	d->io_lock_ready = 0;
 }
 
+/*
+ * Recover from a previous run that died mid transfer.  A USB port reset does
+ * not reach any of this: afterwards register reads and writes still round-trip
+ * and the MAC and RF are fine, but every bulk OUT NAKs and the next firmware
+ * upload times out at its first chunk - the kernel mt76x2u driver cannot bind
+ * such a device either.  Two tiers, told apart by MT_USB_U3DMA_CFG:
+ *
+ *   0x00c00020, TX_BUSY clear: isolated one step at a time - clear_halt on all
+ *   four endpoints, MAC + USB DMA stop, WLAN_EN/WLAN_CLK_EN down and the PBF
+ *   block reset each left it wedged; pulsing TX_CLR alone clears it (3/3).
+ *   mt76 declares TX_CLR and writes it nowhere.
+ *
+ *   0x80c00020, TX_BUSY stuck: the pulse loop below has NOT been seen to clear
+ *   it, nor has anything else tried so far; the vendor-derived UDMA/IFDMA reset
+ *   sequence in docs/mt7612u-usb-wedge.md (bringup swreset) is the untested
+ *   candidate.  The WARN is the honest verdict.
+ *
+ * The receive direction gets its own clean-up: mt_rx_flush() runs from
+ * mt_mac_stop(), which a killed process never reaches.  Silence the receiver
+ * BEFORE draining or it refills as fast as it is read.
+ *
+ * This runs on BOTH open paths.  It lived in mt_open() alone, which left the
+ * consumer this subtree exists for - a libusb-owning caller arriving through
+ * mt7612u_open_handle() / mt_adopt() - paying both mt_fw_init() attempts and
+ * failing with the exact error the recovery removes.
+ */
+void mt_recover_usb(struct mt7612u_dev *d)
+{
+	uint32_t cfg;
+
+	/* A wedge experiment must not have its recovery hidden inside open().
+	 * With this set, open() observes and reports but repairs nothing.  It is
+	 * a field rather than a getenv(): this library reads no environment, so
+	 * the tool that wants the behaviour sets it (bringup does, from
+	 * MT7612U_NO_AUTORECOVER). */
+	if (d->no_autorecover) {
+		if (mt_rr_chk(d, CFG_ADDR(MT_USB_U3DMA_CFG), &cfg))
+			LOG("auto-recovery disabled: U3DMA_CFG unreadable");
+		else
+			LOG("auto-recovery disabled: U3DMA_CFG=0x%08x", cfg);
+		return;
+	}
+
+	mt_wr(d, MT_MAC_SYS_CTRL, 0);
+	mt_rx_flush(d);
+
+	/* Checked read: mt_rr() reports a failed control transfer as ~0u, which
+	 * has TX_BUSY set.  One EP0 hiccup would otherwise send a healthy adapter
+	 * through TX_BULK_EN off, twenty TX_CLR pulses (400 ms) and a false "still
+	 * busy" verdict.  A read we cannot trust is not evidence of a wedge. */
+	if (mt_rr_chk(d, CFG_ADDR(MT_USB_U3DMA_CFG), &cfg)) {
+		WARN("U3DMA_CFG unreadable on open - skipping wedge recovery");
+		return;
+	}
+
+	if (cfg & MT_USB_DMA_CFG_TX_BUSY) {
+		WARN("USB TX DMA busy on open - a previous run died mid transfer");
+		mt_clear(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_BULK_EN);
+		for (int i = 0; i < 20; i++) {
+			mt_set(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_CLR);
+			mt_usleep(20000);
+			mt_clear(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_CLR);
+			if (!mt_rr_chk(d, CFG_ADDR(MT_USB_U3DMA_CFG), &cfg) &&
+			    !(cfg & MT_USB_DMA_CFG_TX_BUSY))
+				break;
+		}
+		mt_set(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_BULK_EN);
+		if (mt_rr_chk(d, CFG_ADDR(MT_USB_U3DMA_CFG), &cfg))
+			WARN("USB TX DMA state unreadable after recovery");
+		else if (cfg & MT_USB_DMA_CFG_TX_BUSY)
+			WARN("USB TX DMA still busy - this open will likely fail; "
+			     "see docs/mt7612u-usb-wedge.md");
+		else
+			LOG("USB TX DMA recovered");
+	} else {
+		mt_set(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_CLR);
+		mt_usleep(20000);
+		mt_clear(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_CLR);
+	}
+}
+
 int mt_adopt(struct mt7612u_dev *d, libusb_device_handle *h,
              libusb_context *ctx, const char **err)
 {
@@ -321,7 +407,12 @@ int mt_adopt(struct mt7612u_dev *d, libusb_device_handle *h,
 	d->ctx = ctx;
 	d->owns_handle = 0;
 	d->kernel_was_attached = 0;
-	return mt_identify(d, err);
+	if (mt_identify(d, err))
+		return -1;
+	/* Same recovery mt_open() gets: this is the path the IRtlDevice wrapper
+	 * takes, and a killed previous run wedges the device for it identically. */
+	mt_recover_usb(d);
+	return 0;
 }
 
 /*
@@ -332,6 +423,14 @@ int mt_adopt(struct mt7612u_dev *d, libusb_device_handle *h,
  * with two - a measurement then attributes itself to whichever unit the bus
  * happened to hand over. MT7612U_DEV takes a "bus-port" as lsusb and sysfs
  * spell it ("2-1"), or a bare index into the matches in enumeration order.
+ *
+ * This is the ONE environment read left in the library, and it stays deferred
+ * to integration as agreed in #412 rather than being removed here: there is no
+ * public way to pass a selector (mt7612u_open() allocates the device itself and
+ * the struct is opaque), so dropping it would leave a multi-adapter consumer
+ * unable to choose an adapter at all. The wrapper does not need it - it arrives
+ * through mt7612u_open_handle() having already selected the device itself.
+ * MT7612U_NO_AUTORECOVER, which had no such constraint, is now d->no_autorecover.
  */
 /*
  * Exclusive per-adapter lock - the same lock devourer's own UsbDeviceLock
@@ -420,6 +519,7 @@ static int lock_adapter(libusb_device *dev, const char **err)
 static libusb_device_handle *open_selected(libusb_context *ctx, const char **err)
 {
 	const char *sel = getenv("MT7612U_DEV");
+
 	libusb_device **list = NULL;
 	libusb_device_handle *h = NULL;
 	ssize_t n = libusb_get_device_list(ctx, &list);
@@ -551,59 +651,9 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 		goto fail;
 	}
 
-	/* A wedge experiment must not have its recovery hidden inside open().
-	 * With this set, open() observes and reports but repairs nothing. */
-	if (getenv("MT7612U_NO_AUTORECOVER")) {
-		LOG("auto-recovery disabled: U3DMA_CFG=0x%08x",
-		    mt_rr(d, CFG_ADDR(MT_USB_U3DMA_CFG)));
-		return 0;
-	}
-
-	/* Recover from a previous run that died mid transfer.  The port reset
-	 * above does not reach any of this: afterwards register reads and writes
-	 * still round-trip and the MAC and RF are fine, but every bulk OUT NAKs
-	 * and the next firmware upload times out at its first chunk - the kernel
-	 * mt76x2u driver cannot bind such a device either.  Two tiers, told apart
-	 * by MT_USB_U3DMA_CFG:
-	 *
-	 *   0x00c00020, TX_BUSY clear: isolated one step at a time - clear_halt
-	 *   on all four endpoints, MAC + USB DMA stop, WLAN_EN/WLAN_CLK_EN down
-	 *   and the PBF block reset each left it wedged; pulsing TX_CLR alone
-	 *   clears it (3/3).  mt76 declares TX_CLR and writes it nowhere.
-	 *
-	 *   0x80c00020, TX_BUSY stuck: the pulse loop below has NOT been seen to
-	 *   clear it, nor has anything else tried so far; the vendor-derived
-	 *   UDMA/IFDMA reset sequence in docs/mt7612u-usb-wedge.md (bringup
-	 *   swreset) is the untested candidate.  The WARN is the honest verdict.
-	 *
-	 * The receive direction gets its own clean-up: mt_rx_flush() runs from
-	 * mt_mac_stop(), which a killed process never reaches.  Silence the
-	 * receiver BEFORE draining or it refills as fast as it is read. */
-	mt_wr(d, MT_MAC_SYS_CTRL, 0);
-	mt_rx_flush(d);
-
-	if (mt_rr(d, CFG_ADDR(MT_USB_U3DMA_CFG)) & MT_USB_DMA_CFG_TX_BUSY) {
-		WARN("USB TX DMA busy on open - a previous run died mid transfer");
-		mt_clear(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_BULK_EN);
-		for (int i = 0; i < 20; i++) {
-			mt_set(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_CLR);
-			mt_usleep(20000);
-			mt_clear(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_CLR);
-			if (!(mt_rr(d, CFG_ADDR(MT_USB_U3DMA_CFG)) &
-			      MT_USB_DMA_CFG_TX_BUSY))
-				break;
-		}
-		mt_set(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_BULK_EN);
-		if (mt_rr(d, CFG_ADDR(MT_USB_U3DMA_CFG)) & MT_USB_DMA_CFG_TX_BUSY)
-			WARN("USB TX DMA still busy - this open will likely fail; "
-			     "see docs/mt7612u-usb-wedge.md");
-		else
-			LOG("USB TX DMA recovered");
-	} else {
-		mt_set(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_CLR);
-		mt_usleep(20000);
-		mt_clear(d, CFG_ADDR(MT_USB_U3DMA_CFG), MT_USB_DMA_CFG_TX_CLR);
-	}
+	/* Shared with mt_adopt(): the wedge is a property of the device, not of
+	 * how this process got hold of it. */
+	mt_recover_usb(d);
 	return 0;
 
 fail:

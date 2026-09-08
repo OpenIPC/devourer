@@ -104,16 +104,12 @@ int mt_rx_parse(struct mt7612u_dev *d, uint8_t *buf, int n,
 	 * channel, so it is reported as no estimate rather than as a very quiet
 	 * channel. */
 	info->noise = info->rssi[2];
-	/* mt76_get_min_avg_rssi() equivalent, on the RX (libusb event) thread;
-	 * the PHY tick reads it on the caller's thread.  Relaxed atomic load+store:
-	 * a torn value only delays a gain-class change by ~1 s, and taking io_lock
-	 * here would block RX behind the tick's multi-second MCU calibration. */
-	{
-		int8_t avg = atomic_load_explicit(&d->cal.avg_rssi_all,
-		                                  memory_order_relaxed);
-		avg = avg ? (int8_t)((avg * 7 + info->rssi[0]) / 8) : info->rssi[0];
-		atomic_store_explicit(&d->cal.avg_rssi_all, avg, memory_order_relaxed);
-	}
+	/* Nothing here feeds the PHY gain tracker, deliberately: mt76's input is
+	 * mt76_get_min_avg_rssi() (util.c:72), which sees associated stations
+	 * only, and a monitor receiver has none - see phy_update_channel_gain().
+	 * An EMA over every parsed frame would let any third-party transmitter on
+	 * the channel set the RX gain class, and put a cross-thread write in this
+	 * hot path for a tracker the bisect showed does not restore RX. */
 	info->noise_valid = info->noise > -100 && info->noise < -30;
 	info->snr_db = info->noise_valid
 	             ? (int8_t)(info->rssi[0] - info->noise) : 0;

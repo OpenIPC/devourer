@@ -79,17 +79,23 @@ int mt_mcu_send(struct mt7612u_dev *d, int cmd, const void *data, int len,
 	 * command reads its predecessor's reply, mismatches, times out (~1.5 s)
 	 * and leaves one more stale reply behind - the channel then never
 	 * resyncs.  Seen as "mcu resp mismatch: evt=0 seq=10..14 (want 15)"
-	 * cascading through every 1 Hz tick.  Bounded: a queue deeper than 16
-	 * is a fault worth reporting, not one worth looping on. */
+	 * cascading through every 1 Hz tick.  The loop exits when the queue is
+	 * empty (a 5 ms read returns nothing); observed depth is ~5, but the cap
+	 * is generous so a deeper transient is fully drained rather than leaving
+	 * a straggler that re-desyncs the next command.  Hitting the cap means
+	 * the queue is still non-empty - a real fault, warned distinctly. */
 	{
 		uint8_t stale[MCU_RESP_URB_SIZE];
 		int n = 0, got;
 
-		while (n < 16 &&
+		while (n < 64 &&
 		       !mt_bulk(d, MT_EP_IN_CMD_RESP, stale, sizeof stale, &got, 5) &&
 		       got >= 4)
 			n++;
-		if (n)
+		if (n == 64)
+			WARN("MCU reply queue still draining at the cap before cmd %d - "
+			     "the response channel may be desynced", cmd);
+		else if (n)
 			WARN("drained %d stale MCU repl%s before cmd %d", n,
 			     n == 1 ? "y" : "ies", cmd);
 	}

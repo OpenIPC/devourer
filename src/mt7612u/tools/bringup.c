@@ -903,7 +903,7 @@ static int gate_arx(uint8_t chan, int secs, int notick)
 	if (mt7612u_rx_start(&dev, arx_cb, &ctx)) {
 		printf("GATE arx: FAIL - rx_start failed\n"); return 1;
 	}
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { mt7612u_rx_stop(&dev); return 1; }
 	mt7612u_set_monitor_rx(&dev, 0);
 	t0 = now_ms();
 	/* notick is the negative control: without the 1 Hz PHY tick this gate
@@ -969,13 +969,23 @@ static int gate_duplex(uint8_t chan, int secs)
 	memcpy(frame + 24, "MT7612U-HAL ", 12);
 
 	if (mt7612u_rx_start(&dev, arx_cb, &ctx)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { mt7612u_rx_stop(&dev); return 1; }
 	mt7612u_set_monitor_rx(&dev, 0);
 
 	t0 = now_ms();
-	while (now_ms() - t0 < secs * 1000.0) {
-		frame[36] = (uint8_t)n; frame[37] = (uint8_t)(n >> 8);
-		if (mt7612u_tx(&dev, frame, 1400, &rate) == 0) n++;
+	{
+		double last_tick = t0;
+
+		while (now_ms() - t0 < secs * 1000.0) {
+			frame[36] = (uint8_t)n; frame[37] = (uint8_t)(n >> 8);
+			if (mt7612u_tx(&dev, frame, 1400, &rate) == 0) n++;
+			/* RX stays enabled through the flood; without the 1 Hz tick the
+			 * receiver decays and the concurrent-RX figure is confounded. */
+			if (now_ms() - last_tick >= 1000.0) {
+				mt7612u_phy_tick(&dev);
+				last_tick = now_ms();
+			}
+		}
 	}
 	wall = now_ms() - t0;
 	printf("duplex on ch%u for %.1f s:\n", chan, wall / 1000.0);
@@ -1506,7 +1516,7 @@ static int gate_rxbytes(uint8_t chan, int secs)
     if (mt_init_hardware(&dev, NULL)) return 1;
     if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
     if (mt7612u_rx_start(&dev, rxbytes_cb, NULL)) return 1;
-    if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) return 1;
+    if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { mt7612u_rx_stop(&dev); return 1; }
     mt7612u_set_monitor_rx(&dev, 0);
     mt7612u_link_stats_start(&dev);
 
@@ -1585,7 +1595,7 @@ static int gate_linkstat(uint8_t chan, int secs, int with_rx)
 	if (with_rx) {
 		if (mt7612u_rx_start(&dev, drain_cb, &linkstat_drained)) return 1;
 	}
-	if (mt_mac_start(&dev, with_rx)) return 1;
+	if (mt_mac_start(&dev, with_rx)) { if (with_rx) mt7612u_rx_stop(&dev); return 1; }
 	if (with_rx) mt7612u_set_monitor_rx(&dev, 0);
 	mt7612u_link_stats_start(&dev);
 
@@ -1598,7 +1608,10 @@ static int gate_linkstat(uint8_t chan, int secs, int with_rx)
 		double busy_pct;
 
 		if (!wait_ms(1000.0)) break;
-		if (mt7612u_link_stats(&dev, &st)) return 1;
+		if (mt7612u_link_stats(&dev, &st)) {
+			if (with_rx) mt7612u_rx_stop(&dev);
+			return 1;
+		}
 		busy_pct = (st.ch_busy + st.ch_idle)
 		         ? 100.0 * st.ch_busy / (double)(st.ch_busy + st.ch_idle) : 0.0;
 		printf("  %5d %9u %9u %5.1f%%  %5u %5u %8u %5u %5u %5u  %4d\n",
@@ -1744,7 +1757,7 @@ static int gate_linkrx(uint8_t chan, int secs)
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
 	if (mt7612u_rx_start(&dev, linkrx_cb, NULL)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { mt7612u_rx_stop(&dev); return 1; }
 	mt7612u_set_monitor_rx(&dev, 0);
 
 	printf("RX on ch%u for %d s, filtering our own magic\n", chan, secs);

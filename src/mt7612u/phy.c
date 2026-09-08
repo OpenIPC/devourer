@@ -510,12 +510,18 @@ static void phy_update_channel_gain(struct mt7612u_dev *d)
 	int low_gain, gain_change;
 
 	/* mt76 averages RSSI over associated stations.  A monitor consumer has
-	 * none, so this is fed from the RX path; -75 is mt76's own fallback. */
-	if (!d->cal.avg_rssi_all)
-		d->cal.avg_rssi_all = -75;
+	 * none, so this is fed from the RX path (atomic; written there); -75 is
+	 * mt76's own fallback. */
+	int8_t avg = atomic_load_explicit(&d->cal.avg_rssi_all,
+	                                  memory_order_relaxed);
 
-	low_gain = (d->cal.avg_rssi_all > rssi_gain_thresh(d->bw)) +
-	           (d->cal.avg_rssi_all > low_rssi_gain_thresh(d->bw));
+	if (!avg) {
+		avg = -75;
+		atomic_store_explicit(&d->cal.avg_rssi_all, avg, memory_order_relaxed);
+	}
+
+	low_gain = (avg > rssi_gain_thresh(d->bw)) +
+	           (avg > low_rssi_gain_thresh(d->bw));
 
 	gain_change = d->cal.low_gain < 0 || ((d->cal.low_gain & 2) ^ (low_gain & 2));
 	d->cal.low_gain = (int8_t)low_gain;
@@ -625,6 +631,14 @@ int mt_set_channel_ex(struct mt7612u_dev *d, uint8_t chan, uint8_t bw, int fast)
 	d->cal.channel_cal_done = fast;
 	d->chan = chan;
 	d->bw = bw;
+	/* Reset the periodic gain tracker for the new channel: its cached RSSI,
+	 * gain class and fine VGA offset all belong to the old channel/band.
+	 * low_gain=-1 forces the first tick to program a class (this is also
+	 * what makes an adopted handle's first tick valid - see mt_dev_state_init).
+	 * avg_rssi_all is written on the RX thread, so store it atomically. */
+	atomic_store_explicit(&d->cal.avg_rssi_all, 0, memory_order_relaxed);
+	d->cal.low_gain = -1;
+	d->cal.agc_gain_adjust = 0;
 	/* The TX "never widen" notice is once per width, not once per device:
 	 * a later tune to a narrower channel is a new situation and deserves
 	 * its own warning. Without this, a clamp consumed by a startup-ordering

@@ -453,7 +453,7 @@ struct mt7612u_dev *mt7612u_open(const char *fw_dir, const char **err)
 		if (err) *err = "out of memory";
 		return NULL;
 	}
-	if (mt_open(d, err)) { free(d); return NULL; }
+	if (mt_open(d, err)) { mt_dev_state_destroy(d); free(d); return NULL; }
 	return bring_up(d, fw_dir, err);
 }
 
@@ -467,6 +467,7 @@ struct mt7612u_dev *mt7612u_open_handle(void *h, void *ctx, const char *fw_dir,
 		return NULL;
 	}
 	if (mt_adopt(d, (libusb_device_handle *)h, (libusb_context *)ctx, err)) {
+		mt_dev_state_destroy(d);
 		free(d);
 		return NULL;
 	}
@@ -478,8 +479,7 @@ void mt7612u_close(struct mt7612u_dev *d)
 	if (!d) return;
 	mt_async_stop(d);
 	if (d->h) mt_mac_stop(d);
-	mt_close(d);
-	pthread_mutex_destroy(&d->io_lock);
+	mt_close(d);   /* releases io_lock via mt_dev_state_destroy() */
 	free(d);
 }
 

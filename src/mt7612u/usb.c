@@ -286,10 +286,37 @@ static int mt_identify(struct mt7612u_dev *d, const char **err)
  * reset here: it would invalidate the caller's own handle. No detach either -
  * a caller that got this far already dealt with the kernel driver.
  */
+void mt_dev_state_init(struct mt7612u_dev *d)
+{
+	pthread_mutexattr_t ma;
+
+	if (d->io_lock_ready) return;
+	/* Recursive: the PHY tick locks io_lock and then nests mt_vendor_req /
+	 * mt_mcu_send, which lock it again.  A zeroed pthread_mutex_t is a valid
+	 * NON-recursive lock, so a path that skipped this (the adopt path once
+	 * did) would self-deadlock the tick or lock an uninitialised mutex. */
+	pthread_mutexattr_init(&ma);
+	pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_RECURSIVE);
+	pthread_mutex_init(&d->io_lock, &ma);
+	pthread_mutexattr_destroy(&ma);
+	d->io_lock_ready = 1;
+	/* cal sentinels (low_gain=-1 etc.) are reset per-tune in
+	 * mt_set_channel_ex(), which always runs before the first PHY tick. */
+}
+
+void mt_dev_state_destroy(struct mt7612u_dev *d)
+{
+	if (!d || !d->io_lock_ready) return;
+	pthread_mutex_destroy(&d->io_lock);
+	d->io_lock_ready = 0;
+}
+
 int mt_adopt(struct mt7612u_dev *d, libusb_device_handle *h,
              libusb_context *ctx, const char **err)
 {
 	if (!h) { if (err) *err = "no USB handle"; return -1; }
+	/* Before mt_identify(): it reads a register, which locks io_lock. */
+	mt_dev_state_init(d);
 	d->h = h;
 	d->ctx = ctx;
 	d->owns_handle = 0;
@@ -470,6 +497,9 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 {
 	int rc;
 
+	/* Both open paths init this before any register I/O; see mt_adopt(). */
+	mt_dev_state_init(d);
+
 	if (libusb_init(&d->ctx)) { if (err) *err = "libusb_init failed"; return -1; }
 	d->owns_handle = 1;
 
@@ -477,20 +507,6 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 	if (!d->h) {
 		libusb_exit(d->ctx); d->ctx = NULL;
 		return -1;
-	}
-
-	/* Every path into the device goes through here, including consumers that
-	 * allocate the struct themselves - a zeroed pthread_mutex_t is a valid
-	 * NON-recursive lock, and the PHY tick nests mt_vendor_req inside its own
-	 * lock, so initialising this anywhere else self-deadlocks. */
-	{
-		pthread_mutexattr_t ma;
-
-		pthread_mutexattr_init(&ma);
-		pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_RECURSIVE);
-		pthread_mutex_init(&d->io_lock, &ma);
-		pthread_mutexattr_destroy(&ma);
-		d->cal.low_gain = -1;
 	}
 
 	d->kernel_was_attached = libusb_kernel_driver_active(d->h, 0) == 1;
@@ -600,6 +616,12 @@ fail:
 
 void mt_close(struct mt7612u_dev *d)
 {
+	/* Terminal teardown, and the single place io_lock is released: callers
+	 * do their last register I/O (mt_mac_stop) before mt_close, and mt_close
+	 * itself takes no lock.  Guarded, so it is a no-op if open never got far
+	 * enough to init it.  Covers mt7612u_close() and bring_up()'s fail path;
+	 * the two open-failure returns that bypass mt_close destroy it directly. */
+	mt_dev_state_destroy(d);
 	if (d->wrlog) { fclose(d->wrlog); d->wrlog = NULL; }
 	if (d->mculog) { fclose(d->mculog); d->mculog = NULL; }
 	if (d->transfers_stranded) {

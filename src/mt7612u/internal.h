@@ -17,6 +17,7 @@
 #  include <libusb-1.0/libusb.h>
 #endif
 #include <pthread.h>
+#include <stdatomic.h>
 #include <time.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -53,7 +54,10 @@ struct mt7612u_cal {
 	uint8_t  agc_gain_cur[2];
 	uint8_t  agc_gain_adjust;
 	int8_t   low_gain;
-	int8_t   avg_rssi_all;
+	/* Written by the RX callback (libusb event thread), read by the PHY tick
+	 * on the caller's thread - atomic so the concurrent access is defined.
+	 * Relaxed: a torn value only delays a gain-class change by ~1 s. */
+	_Atomic int8_t avg_rssi_all;
 };
 
 #define MT_RX_RING  16
@@ -147,6 +151,7 @@ struct mt7612u_dev {
 	uint8_t  chan;
 	uint8_t  bw;
 	pthread_mutex_t io_lock;   /* recursive: guards register + MCU transactions */
+	uint8_t  io_lock_ready;    /* io_lock initialised - guards its destroy */
 	uint8_t  bw_clamp_warned;   /* the "never widen" notice is once, not per frame */
 	int8_t   txpower_conf;      /* limit, 0.5 dB units (dBm * 2) */
 	int8_t   target_power;
@@ -169,6 +174,13 @@ struct mt7612u_dev {
 };
 
 /* --- usb.c --- */
+/* Per-device state both open paths need before ANY register I/O: the recursive
+ * io_lock and the calibration sentinels.  Both mt_open() and mt_adopt() reach
+ * mt_vendor_req() (which locks io_lock) during identification, so this must run
+ * first on either path.  Idempotent.  mt_dev_state_destroy() is the matching
+ * teardown, guarded so it runs exactly once regardless of how far open got. */
+void     mt_dev_state_init(struct mt7612u_dev *d);
+void     mt_dev_state_destroy(struct mt7612u_dev *d);
 int      mt_open(struct mt7612u_dev *d, const char **err);
 /* Adopt a handle the caller already opened, reset and claimed. */
 int      mt_adopt(struct mt7612u_dev *d, libusb_device_handle *h,

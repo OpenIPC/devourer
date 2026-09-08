@@ -68,6 +68,20 @@ public:
     return read32(static_cast<uint16_t>(addr));
   }
 
+  /* ---- pipelined register writes ----
+   * Inside a write batch, register writes are submitted as asynchronous
+   * in-order transfers and only a read (or a bulk transfer, or flush_writes)
+   * waits for them. Bring-up is ~14k synchronous EP0 round trips at ~80 us
+   * each on an embedded host; pipelined, a write costs ~27 us (measured,
+   * ssc338q + RTL8812EU, depth >= 8). Correctness rests on EP0 completing
+   * URBs in submission order, so a read that follows a write still sees it.
+   * Single-threaded by contract: open a batch only while no other thread
+   * touches the transport (the Jaguar3 InitWrite/Init bring-up), and close
+   * it before any worker thread starts. Defaults are no-ops (PCIe). */
+  virtual void write_batch_begin() {}
+  virtual void write_batch_end() {}
+  virtual void flush_writes() {}
+
   /* ---- frame plane ---- */
   /* Fire-and-forget data TX (the send_packet hot path). `ep` is the USB
    * bulk-OUT endpoint choice; the PCIe transport ignores it (the ring is

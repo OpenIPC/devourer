@@ -8,6 +8,7 @@
  * that discovers the bulk endpoints. The exclusive per-adapter UsbDeviceLock
  * rides here too — its lifetime is the transport's. */
 
+#include "UsbXferCount.h"
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -51,6 +52,10 @@ public:
     /* Realtek USB register addressing: wValue = addr[15:0], wIndex =
      * addr[31:16]. Lets the BB/RF window (addr + 0x10000) reach wIndex=1
      * instead of colliding with the MAC/system space at wIndex=0. */
+    usb_ctrl_xfers().fetch_add(1, std::memory_order_relaxed);
+    if (_batch)
+      return async_write(static_cast<uint16_t>(addr & 0xFFFF),
+                         static_cast<uint16_t>(addr >> 16), &v, sizeof(v));
     return libusb_control_transfer(
                _dev_handle, REALTEK_USB_VENQT_WRITE, 5,
                static_cast<uint16_t>(addr & 0xFFFF),
@@ -59,6 +64,13 @@ public:
   }
   uint32_t read32_wide(uint32_t addr) override {
     uint32_t data = 0;
+    usb_ctrl_xfers().fetch_add(1, std::memory_order_relaxed);
+    if (_batch) {
+      if (async_read(static_cast<uint16_t>(addr & 0xFFFF),
+                     static_cast<uint16_t>(addr >> 16), &data, sizeof(data)))
+        return data;
+      return 0xFFFFFFFFu;
+    }
     if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5,
                                 static_cast<uint16_t>(addr & 0xFFFF),
                                 static_cast<uint16_t>(addr >> 16),
@@ -68,6 +80,9 @@ public:
     return 0xFFFFFFFFu; /* INVALID_RF_DATA-style sentinel on a failed read */
   }
   bool write_bytes(uint16_t reg, const uint8_t *p, size_t n) override;
+  void write_batch_begin() override;
+  void write_batch_end() override;
+  void flush_writes() override;
 
   bool tx_async(uint8_t ep, uint8_t *buf, size_t len,
                 unsigned timeout_ms) override;
@@ -85,6 +100,44 @@ public:
 private:
   template <typename T> T ctrl_read(uint16_t reg);
   template <typename T> bool ctrl_write(uint16_t reg, T value);
+  /* Pipelined-write machinery (see IRtlTransport::write_batch_begin). */
+  /* Register transfers are 1/2/4 bytes; async_write/async_read refuse a
+   * larger payload rather than overrun the inline setup buffer. */
+  static constexpr size_t kAsyncMaxPayload = 4;
+  struct AsyncWrite {
+    libusb_transfer *t;
+    uint8_t buf[LIBUSB_CONTROL_SETUP_SIZE + kAsyncMaxPayload];
+    UsbTransport *self;
+    bool done;
+    /* Submitted and not yet reaped: libusb owns `t` and `buf` while set, so
+     * the slot must not be reused, freed, or handed back to the free list. */
+    bool inflight;
+    int status;
+    int actual;
+  };
+  static constexpr int kAsyncWriteDepth = 8;
+  /* Extra event-loop turns spent reaping cancellations after a drain times
+   * out. A live loop reports each cancellation promptly; a dead one fails
+   * every turn immediately, so this costs nothing in the case that matters. */
+  static constexpr int kFlushCancelTurns = 8;
+  bool async_write(uint16_t wvalue, uint16_t windex, const void *data,
+                   size_t n);
+  /* Read queued behind the pending writes (EP0 order) and waited for on its
+   * own completion only: a read-modify-write pair costs one wakeup, not two.
+   * Returns false on failure (data untouched). */
+  bool async_read(uint16_t wvalue, uint16_t windex, void *data, size_t n);
+  AsyncWrite *async_take_slot();
+  bool async_wait_progress(); /* one event-loop turn; false on timeout/error */
+  static void LIBUSB_CALL async_write_cb(libusb_transfer *t);
+  bool _batch = false;
+  std::vector<AsyncWrite *> _aw_free;
+  std::vector<AsyncWrite *> _aw_all;
+  int _aw_inflight = 0;
+  uint64_t _aw_completed = 0;
+  int _aw_errors = 0;
+  /* Set when a drain gave up with transfers still submitted: the destructor
+   * then leaks those slots instead of freeing a transfer libusb still owns. */
+  bool _aw_abandoned = false;
   void discover_endpoints(); /* was InitDvObj */
   const char *speed_str() const;
   static void transfer_callback(struct libusb_transfer *transfer);
@@ -158,6 +211,13 @@ private:
 
 template <typename T> T UsbTransport::ctrl_read(uint16_t reg_num) {
   T data = 0;
+  usb_ctrl_xfers().fetch_add(1, std::memory_order_relaxed);
+  if (_batch) {
+    if (async_read(reg_num, 0, &data, sizeof(T)))
+      return data;
+    _logger->error("rtw_read({:04x}) pipelined, sizeof(T) = {}", reg_num, sizeof(T));
+    throw std::ios_base::failure("rtw_read");
+  }
   if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5, reg_num,
                               0, (uint8_t *)&data, sizeof(T),
                               USB_TIMEOUT) == sizeof(T)) {
@@ -169,6 +229,9 @@ template <typename T> T UsbTransport::ctrl_read(uint16_t reg_num) {
 }
 
 template <typename T> bool UsbTransport::ctrl_write(uint16_t reg_num, T value) {
+  usb_ctrl_xfers().fetch_add(1, std::memory_order_relaxed);
+  if (_batch)
+    return async_write(reg_num, 0, &value, sizeof(T));
   return libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_WRITE, 5,
                                  reg_num, 0, (uint8_t *)&value, sizeof(T),
                                  USB_TIMEOUT) == sizeof(T);

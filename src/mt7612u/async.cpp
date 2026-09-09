@@ -14,7 +14,6 @@
  */
 #include <stdlib.h>
 #include <string.h>
-#include <new>
 #include "internal.h"
 
 /*
@@ -124,8 +123,17 @@ int mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user)
 	struct mt_async *a;
 
 	if (d->a) return 0;
-	a = new (std::nothrow) mt_async{};
-	if (!a) return -1;
+	/* try/catch, not new(nothrow): nothrow suppresses a throw from the
+	 * allocation FUNCTION only, and these members allocate in their
+	 * CONSTRUCTORS - std::condition_variable_any holds a shared_ptr<mutex> -
+	 * so bad_alloc escapes a nothrow new here. This library is reached over an
+	 * extern "C" ABI, and an exception unwinding into a C caller has no
+	 * handler, so nothing may throw past this point. */
+	try {
+		a = new mt_async{};
+	} catch (...) {
+		return -1;
+	}
 	d->a = a;
 	a->cb = cb;
 	a->cb_user = user;
@@ -150,7 +158,13 @@ int mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user)
 	 * an error code; catching keeps this the same `goto fail` teardown. */
 	try {
 		a->evt = std::thread(evt_thread, d);
-	} catch (const std::system_error &) {
+	} catch (...) {
+		/* Deliberately catch-all rather than std::system_error: libstdc++
+		 * allocates the thread state with a THROWING new inside the
+		 * constructor, so an out-of-memory failure arrives as bad_alloc, not
+		 * as the system_error that pthread_create's EAGAIN maps to. Letting
+		 * that one escape would skip this teardown - leaving d->a live with
+		 * running=1 and evt_started=0 - and then unwind into a C caller. */
 		a->running = 0;
 		goto fail;
 	}

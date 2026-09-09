@@ -49,8 +49,9 @@ option(DEVOURER_PCIE          "PCIe transport via vfio-pci (Linux; RTL8821CE)"  
 # joins that list when the backend lands (#419). Turning it ON today buys one
 # thing, and it is the point of the option: CI compiles the subtree across the
 # whole platform matrix — gcc, clang, MSVC, mingw, macOS — where it was
-# previously only ever built by its own Makefile, on Linux.
-option(DEVOURER_MT7612U       "MediaTek MT7612U / MT7662U (2T2R 11ac USB)"      OFF)
+# previously only ever built by its own Makefile, on Linux. It does NOT gate the
+# factory's MediaTek refusal, which is unconditional.
+option(DEVOURER_MT7612U       "Compile the MediaTek MT7612U subtree (the id gate is always on)" OFF)
 
 # Compile-time diagnostics floor (src/logger.h). Calls below the floor —
 # including their argument expressions at DVR_TRACE/DVR_DEBUG sites — compile
@@ -357,6 +358,10 @@ if(DEVOURER_JAGUAR2_8821C)
 endif()
 
 # --- MediaTek MT7612U (MT7662 MAC) ---
+# Note the option gates only the COMPILE. Mt7612uUsbIds.h is header-only and is
+# included unconditionally by WiFiDriver.cpp, so a default OFF build still
+# refuses MediaTek adapters and still runs the mt7612u_usb_ids test; it just
+# links none of the subtree.
 # The subtree is self-contained: it talks to libusb directly rather than through
 # RtlAdapter/ITransport, because 32-bit registers and an in-band MCU over EP8/EP5
 # do not fit the Realtek shape. Its public surface is the C ABI in
@@ -377,7 +382,8 @@ if(DEVOURER_MT7612U)
         src/mt7612u/usb.cpp
         src/mt7612u/internal.h
         src/mt7612u/regs.h
-        src/mt7612u/initvals.h)
+        src/mt7612u/initvals.h
+        src/mt7612u/Mt7612uUsbIds.h)  # listed for IDEs; compiled unconditionally
     target_include_directories(devourer PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u
         ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u/include)

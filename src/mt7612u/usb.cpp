@@ -64,6 +64,13 @@ void mt_diag(char level, const char *fmt, ...)
 
 void mt_usleep(unsigned us)
 {
+	/* Not interruptible, where nanosleep(&ts, NULL) was: libstdc++ retries
+	 * sleep_for on EINTR, so a signal no longer cuts the wait short (measured:
+	 * a 200 ms request under 100 Hz SIGALRM returned after 10 ms before, 201 ms
+	 * now). That is the behaviour this call wants — every use is a hardware
+	 * settle or poll interval, and a delivered signal is not a reason for the
+	 * chip to be ready sooner. Worth knowing if a caller ever wants to
+	 * interrupt a long bring-up. */
 	std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
 

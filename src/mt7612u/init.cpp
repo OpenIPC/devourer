@@ -7,7 +7,6 @@
  */
 #include <limits.h>
 #include <stdlib.h>
-#include <new>
 #include <string.h>
 #include "internal.h"
 #include "initvals.h"
@@ -466,7 +465,15 @@ fail:
 
 struct mt7612u_dev *mt7612u_open(const char *fw_dir, const char **err)
 {
-	struct mt7612u_dev *d = new (std::nothrow) mt7612u_dev{};
+	struct mt7612u_dev *d = NULL;
+
+	/* See mt_async_start(): nothrow does not cover a member constructor that
+	 * allocates, and nothing may throw across the extern "C" boundary. */
+	try {
+		d = new mt7612u_dev{};
+	} catch (...) {
+		d = NULL;
+	}
 
 	if (!d) {
 		if (err) *err = "out of memory";
@@ -479,7 +486,15 @@ struct mt7612u_dev *mt7612u_open(const char *fw_dir, const char **err)
 struct mt7612u_dev *mt7612u_open_handle(void *h, void *ctx, const char *fw_dir,
                                         const char **err)
 {
-	struct mt7612u_dev *d = new (std::nothrow) mt7612u_dev{};
+	struct mt7612u_dev *d = NULL;
+
+	/* See mt_async_start(): nothrow does not cover a member constructor that
+	 * allocates, and nothing may throw across the extern "C" boundary. */
+	try {
+		d = new mt7612u_dev{};
+	} catch (...) {
+		d = NULL;
+	}
 
 	if (!d) {
 		if (err) *err = "out of memory";
@@ -502,7 +517,7 @@ void mt7612u_close(struct mt7612u_dev *d)
 	if (d->h) mt_mac_rx_disable(d);
 	mt_async_stop(d);
 	if (d->h) mt_mac_stop(d);
-	mt_close(d);   /* releases io_lock via mt_dev_state_destroy() */
+	mt_close(d);
 	delete d;
 }
 

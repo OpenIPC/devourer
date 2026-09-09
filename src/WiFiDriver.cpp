@@ -190,17 +190,17 @@ WiFiDriver::CreateRadio(libusb_device_handle *dev_handle,
   /* MediaTek MT7612U gates on the USB VID:PID BEFORE the SYS_CFG2 read, for the
    * same reason Kestrel does above — but with a sharper failure mode. On this
    * silicon the Realtek vendor request read_chip_id() issues (bRequest 5) is not
-   * implemented at all: the control transfer stalls, `id` stays 0, and 0 matches
-   * no Realtek chip-id, so the adapter reaches the unconditional Jaguar1
-   * fallback at the end of this function (see read_chip_id's own note: "Returns
-   * 0 on a failed read, which falls through to the Jaguar1 path"). A MediaTek
-   * adapter then comes up as an RTL8812AU and every register access after it is
-   * addressed at the wrong MAC. Refusing here is the whole point of this gate.
+   * implemented at all, so the control transfer stalls. Before the nullopt
+   * return below existed, that failure was discarded, `id` stayed 0, 0 matched
+   * no Realtek chip-id, and the adapter reached the unconditional Jaguar1
+   * fallback at the end of this function — coming up as an RTL8812AU with every
+   * subsequent register access addressed at the wrong MAC.
    *
-   * The pair set is disjoint from every USB id devourer tables, but the VENDOR
-   * ids are NOT — 0x0b05, 0x7392 and 0x2c4e each ship both silicon families —
-   * so this must stay a vid:pid test and must never be widened to "not a
-   * Realtek vendor id". Mt7612uUsbIds.h carries the measurement, and
+   * The pair set is disjoint from all 91 Realtek ids devourer can serve, but the
+   * VENDOR ids are NOT: six of them ship both silicon families, and Netgear,
+   * ELECOM and ASUS interleave the two within one vendor's product-id range. So
+   * this must stay a vid:pid test and must never be widened to "not a Realtek
+   * vendor id". Mt7612uUsbIds.h carries the table and the evidence;
    * Mt7612uUsbIdsSelftest.cpp fails if a later id addition breaks it. */
   if (mt7612u::is_usb_id(vid, pid)) {
     _logger->error("MediaTek MT7612U ({:04x}:{:04x}) detected; devourer has no "

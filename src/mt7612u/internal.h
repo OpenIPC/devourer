@@ -203,11 +203,15 @@ struct mt7612u_dev {
 };
 
 /* --- usb.c --- */
-/* Per-device state both open paths need before ANY register I/O: the recursive
- * io_lock and the calibration sentinels.  Both mt_open() and mt_adopt() reach
- * mt_vendor_req() (which locks io_lock) during identification, so this must run
- * first on either path.  Idempotent.  mt_dev_state_destroy() is the matching
- * teardown, guarded so it runs exactly once regardless of how far open got. */
+/* Per-device state both open paths need before ANY register I/O.
+ *
+ * This used to construct the recursive io_lock, and existed because both
+ * mt_open() and mt_adopt() reach mt_vendor_req() (which locks it) during
+ * identification, so a path that skipped it locked an uninitialised mutex.
+ * io_lock is a std::recursive_mutex member now, constructed with the device,
+ * so that hazard is gone and both functions are empty - kept as named seams
+ * because the calibration sentinels belong to the same step, and because two
+ * public open paths and one close path call them. */
 void     mt_dev_state_init(struct mt7612u_dev *d);
 void     mt_dev_state_destroy(struct mt7612u_dev *d);
 int      mt_open(struct mt7612u_dev *d, const char **err);

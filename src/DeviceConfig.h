@@ -536,6 +536,28 @@ struct DeviceConfig {
      * (DEVOURER_PCIE_BDF) is likewise demo-local, like USB device selection. */
     std::optional<int> rx_poll_us;
   } pcie;
+
+  /* ---- MediaTek MT7612U (DEVOURER_MT7612U builds) ---------------------- */
+  struct Mt7612u {
+    /* env: DEVOURER_MT7612U_FW_DIR — directory holding mt7662_rom_patch.bin
+     * and mt7662.bin. Unset = search /lib/firmware/mediatek then ./firmware.
+     *
+     * A path rather than an embedded blob, unlike every Realtek backend: this
+     * firmware ships in linux-firmware under its own licence rather than being
+     * generated into hal/, and it is zstd-compressed on most distributions, so
+     * it can be neither vendored here nor assumed ready at a fixed path.
+     * Decompress both and point this at the directory.
+     *
+     * Here rather than a getenv inside the backend so the library and the
+     * device class both stay free of ambient process state; the demos fold the
+     * variable in, the way they do for every other knob in this file. */
+    std::optional<std::string> firmware_dir;
+    /* env: MT7612U_DEV — which adapter to open when several are attached,
+     * "<bus>-<port>" as lsusb spells the port path. Unset = the first.
+     * Only consulted on the library's own open path, not when devourer hands
+     * it an already-claimed handle (which is the devourer path). */
+    std::optional<std::string> device_selector;
+  } mt7612u;
 };
 
 } // namespace devourer

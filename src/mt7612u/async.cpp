@@ -334,8 +334,19 @@ int mt7612u_rx_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user)
 	return mt_async_start(d, cb, user);
 }
 
+int mt7612u_rx_quiesce(struct mt7612u_dev *d)
+{
+	if (!d) return -1;
+	mt_mac_rx_disable(d);
+	return 0;
+}
+
 int mt7612u_rx_stop(struct mt7612u_dev *d)
 {
+	/* Callers that want the receiver silenced BEFORE the drain disappears
+	 * call mt7612u_rx_quiesce() first; see its contract. Not folded in here
+	 * because bringup's gates already quiesce explicitly at each of their own
+	 * teardown points, and doing it twice would hide which one did it. */
 	mt_async_stop(d);
 	return 0;
 }

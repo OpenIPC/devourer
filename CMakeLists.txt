@@ -380,12 +380,18 @@ if(DEVOURER_MT7612U)
         src/mt7612u/rx.cpp
         src/mt7612u/tx.cpp
         src/mt7612u/usb.cpp
+        src/mt7612u/Mt7612uRadio.cpp src/mt7612u/Mt7612uRadio.h
+        src/mt7612u/Mt7612uMapping.h
         src/mt7612u/internal.h
         src/mt7612u/regs.h
         src/mt7612u/initvals.h
         src/mt7612u/Mt7612uUsbIds.h)  # listed for IDEs; compiled unconditionally
     target_include_directories(devourer PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u)
+    # PUBLIC: Mt7612uRadio.h is reached as "mt7612u/Mt7612uRadio.h" and pulls in
+    # <mt7612u/mt7612u.h>, so a consumer compiling against this target needs the
+    # subtree's public include root too.
+    target_include_directories(devourer PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u/include)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_MT7612U=1)
 endif()

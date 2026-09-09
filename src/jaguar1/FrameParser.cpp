@@ -228,13 +228,18 @@ std::vector<Packet> FrameParser::recvbuf2recvframe(std::span<uint8_t> ptr) {
 
       struct _phy_status_rpt_8812 driver_data = {};
       /* Only read the PHY-status report when the descriptor says one is
-       * present and it fits the remaining buffer. The kernel gates this
-       * on pattrib->physt (usb_ops_linux.c:179); drvinfo_sz >= the report
-       * size is the equivalent condition with the fields we carry —
-       * without it, frames with drvinfo_sz==0 had payload bytes decoded
-       * as RSSI/EVM/SNR, and a frame ending near the buffer tail
-       * over-read the transfer buffer. */
-      if (pattrib.drvinfo_sz >= sizeof(driver_data) &&
+       * present and it fits the remaining buffer. pattrib.physt (DW0 bit 26)
+       * is the per-frame fact — the same gate the kernel uses
+       * (usb_ops_linux.c:179 passes pbuf+RXDESC_OFFSET only when it is set).
+       * The size check alone is NOT equivalent: REG_RX_DRVINFO_SZ is a global
+       * register (_InitDriverInfoSize_8812A writes 4 = 32 bytes), so the
+       * drvinfo space is reserved on EVERY frame while the PHY writes a report
+       * only where the bit is set. On all-but-one subframe of an A-MPDU the
+       * area therefore holds bytes left by an earlier frame, and copying them
+       * decodes stale RSSI/SNR/EVM/CFO — including the per-chain values the
+       * 8814AU spatial-diversity work reads. The size check still guards the
+       * tail over-read it was added for. */
+      if (pattrib.physt && pattrib.drvinfo_sz >= sizeof(driver_data) &&
           pbuf.size() >= RXDESC_SIZE + sizeof(driver_data)) {
         memcpy(static_cast<void *>(&driver_data), pbuf.data() + RXDESC_SIZE,
                sizeof(driver_data));

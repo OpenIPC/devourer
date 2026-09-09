@@ -1124,6 +1124,18 @@ target_link_libraries(TxPktBankSelftest PRIVATE devourer)
 target_include_directories(TxPktBankSelftest PRIVATE src)
 add_test(NAME txpkt_bank_policy COMMAND TxPktBankSelftest)
 
+# Headless guard for the Jaguar2/Jaguar3 RX PHY-status gate: the descriptor
+# PHYST bit (DW0 bit 26) that keeps A-MPDU subframes' reserved-but-unwritten
+# drvinfo bytes out of the RF EMAs, plus the PhyStsFill tier each parser
+# returns (which fields it actually filled). Both parsers are header-only and
+# self-contained, so the test builds whenever either generation is selected.
+if(DEVOURER_JAGUAR3 OR DEVOURER_JAGUAR2_8822B OR DEVOURER_JAGUAR2_8821C)
+    add_executable(RxPhystSelftest tests/rx_physt_selftest.cpp)
+    target_link_libraries(RxPhystSelftest PRIVATE devourer)
+    target_include_directories(RxPhystSelftest PRIVATE src)
+    add_test(NAME rx_physt_bit COMMAND RxPhystSelftest)
+endif()
+
 # Headless guard for the USB TX-aggregation URB packing (src/TxAggPlan.h) —
 # block alignment, the never-a-bulk-multiple boundary shim, the OQT
 # descs-per-bulk guard, the frame/byte caps — plus the HalMAC descriptor agg

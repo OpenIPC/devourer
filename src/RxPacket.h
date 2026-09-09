@@ -19,9 +19,32 @@ enum class RX_PACKET_TYPE
     C2H_PACKET
 };
 
+/* How much of an rx_pkt_attrib's signal block a PHY-status report actually
+ * filled. Reports are paged/typed per generation — a CCK page carries only
+ * path-A power, while the per-stream EVM/SNR and the CFO tail live on one OFDM
+ * page only — so a plain bool cannot tell a caller which of the fields below
+ * are a measurement and which are still zero. Feeding an unfilled field into a
+ * running average is not a null operation: it drags the mean toward zero. */
+enum class PhyStsFill : uint8_t
+{
+    None,  /* nothing filled: no report, too short, or a layout not decoded */
+    Power, /* per-path RSSI, plus ldpc/stbc/bw on an OFDM page */
+    Full   /* Power, plus per-stream EVM/SNR and the path-A CFO tail */
+};
+
 struct rx_pkt_attrib
 {
     uint16_t pkt_len;
+    /* RX-descriptor PHY-status bit: the PHY wrote a status report into THIS
+     * frame's drvinfo area. It is the RAW descriptor bit on every generation
+     * that decodes it (Jaguar1, Jaguar2, Jaguar3, RTL8733B) — deliberately NOT
+     * "the report parsed" and NOT "the signal fields below are valid", since a
+     * parser can still decline an unrecognised page (that is PhyStsFill's job,
+     * kept in a local at the parse site). The drvinfo area is reserved on every
+     * frame (RX_DRVINFO_SZ is a global register), so this bit is the only thing
+     * separating a written report from stale bytes left by an earlier frame —
+     * notably on all-but-one subframe of an A-MPDU. Never set on Kestrel, whose
+     * PHY status arrives as its own PPDU-status frame rather than in drvinfo. */
     bool physt;
     uint8_t drvinfo_sz;
     uint8_t shift_sz;

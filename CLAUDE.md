@@ -528,6 +528,8 @@ the backend's header before believing a cross-generation claim.
 
 Generation-agnostic core in `src/` (always compiled; depends on no HAL):
 
+- `IRadio` (`src/IRadio.h`) — the vendor-neutral radio contract every backend
+  implements; `WiFiDriver::CreateRadio` returns one.
 - `WiFiDriver` — the factory (`CreateRadio`).
 - `DeviceConfig.h` — construction-time configuration struct; every component
   copies the sub-struct it consumes at construction.

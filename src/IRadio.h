@@ -35,8 +35,9 @@ struct TxPacketView {
   size_t len;
 };
 
-/* IRadio is the chip-family-agnostic device contract used by the demos and
- * the WiFiDriver factory. The production family implementations are:
+/* IRadio is the vendor-neutral radio contract used by the demos and the
+ * WiFiDriver factory (CreateRadio returns one). Every backend implements it;
+ * the production implementations today are the Realtek families:
  *   - RtlJaguarDevice   — Realtek "Jaguar" wave-1 (8812AU/8811AU/8821AU/8814AU)
  *   - RtlJaguar2Device  — Realtek "Jaguar2" (8822BU/8812BU)
  *   - RtlJaguar3Device  — Realtek "Jaguar3" (8822CU/8812EU/8822EU)

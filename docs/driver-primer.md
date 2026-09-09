@@ -50,7 +50,8 @@ access is a vendor **control transfer**: the host submits a **URB** (USB request
 block) to the kernel's USB stack, the request crosses the wire with the register
 address packed into its setup fields, and the chip answers with the data. That's
 the whole trick — `lsusb`-level plumbing, no kernel driver magic. devourer's
-`RtlAdapter` (`src/Transport.h`) is nothing but this, and the vendor equivalent
+`RtlAdapter` (`src/RtlAdapter.h`, over `devourer::UsbTransport` in
+`src/UsbTransport.h`) is nothing but this, and the vendor equivalent
 is `usb_ops_linux.c` in each tree.
 
 The address space is a map you'll internalize fast: the MAC's registers occupy the
@@ -442,7 +443,7 @@ find each in the vendor trees and in devourer.
 | PA / LNA | power amp (TX) / low-noise amp (RX) front end | 1 | board-level; selected by RFE type |
 | WCPU | the MAC's embedded CPU running firmware | 1,5 | booted by FWDL |
 | A-die / D-die | analog / digital silicon dies in one package | 1,9 | reached via DAV / DDV |
-| URB | USB request block — one queued USB transfer | 2 | `usb_ops_linux.c` / `src/Transport.h` |
+| URB | USB request block — one queued USB transfer | 2 | `usb_ops_linux.c` / `src/UsbTransport.h` |
 | chip id | which die design; drives HAL dispatch | 3 | `SYS_CFG` / `WiFiDriver` factory |
 | cut | silicon revision (A/B/C…) | 3 | gates tables + firmware images |
 | RFE (type) | board's RF front-end wiring variant, from efuse | 3 | gates PHY table blocks |

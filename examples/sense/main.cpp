@@ -177,9 +177,9 @@ class Sensor {
 public:
   explicit Sensor(double k) : _det(k) {}
 
-  void feed(const uint8_t *frame, size_t n) {
+  void feed(const uint8_t *frame, size_t n, bool fcs_present = true) {
     ReportHdr hdr;
-    if (!parse_report(frame, n, hdr))
+    if (!parse_report(frame, n, hdr, fcs_present))
       return;
     if (std::getenv("DEVOURER_SENSE_DUMP") && g_ev) {
       /* python-tool-compatible raw dump (events ride stderr in sense, so the
@@ -437,7 +437,7 @@ static int run_active(uint16_t snd_vid, uint16_t snd_pid, uint16_t bfe_vid,
   /* Self-capture the returned reports on the sounder's RX loop. */
   std::thread snd_rx([&snd, &sensor]() {
     snd.dev()->StartRxLoop(
-        [&sensor](const Packet &p) { sensor.feed(p.Data.data(), p.Data.size()); });
+        [&sensor](const Packet &p) { sensor.feed(p.Data.data(), p.Data.size(), p.RxAtrib.fcs_present); });
   });
   std::thread disp(run_display, std::ref(sensor));
 

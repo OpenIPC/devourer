@@ -95,9 +95,13 @@ static void packetProcessor(const Packet &packet) {
     return;
   g_rx_count.fetch_add(1, std::memory_order_relaxed);
   const auto &a = packet.RxAtrib;
-  const uint32_t air = cm::frame_airtime_us(
-      a.data_rate, static_cast<uint32_t>(packet.Data.size()), a.bw,
-      a.sgi != 0);
+  /* Airtime is what occupied the channel, and the FCS was transmitted even
+   * where the MAC strips it before DMA - so add it back when the buffer does
+   * not carry it, or occupancy reads 4 bytes light on every frame. */
+  const uint32_t on_air_len =
+      static_cast<uint32_t>(packet.Data.size()) + (a.fcs_present ? 0u : 4u);
+  const uint32_t air =
+      cm::frame_airtime_us(a.data_rate, on_air_len, a.bw, a.sgi != 0);
   const bool ours = packet.Data.size() >= 16 &&
                     std::memcmp(packet.Data.data() + 10, kDvrSa, 6) == 0;
   std::lock_guard<std::mutex> lk(g_agg_mu);

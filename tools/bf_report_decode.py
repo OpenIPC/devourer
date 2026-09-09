@@ -80,7 +80,7 @@ def dequant_psi(q: int, b: int) -> float:
     return (2 * q + 1) * math.pi / (1 << (b + 2))
 
 
-def parse_frame(hexstr: str):
+def parse_frame(hexstr: str, fcs_present: bool = True):
     """Return dict with header fields + raw angle bytes, or None if not a
     VHT/HT compressed beamforming report."""
     try:
@@ -105,7 +105,12 @@ def parse_frame(hexstr: str):
     feedback = (mc >> 11) & 0x1           # 0 = SU, 1 = MU
     sa = ":".join(f"{b:02x}" for b in d[10:16])
     snr = list(d[29:29 + nc])             # avg SNR per column (signed 0.25 dB)
-    angle_bytes = d[29 + nc:len(d) - 4]   # drop 4-byte FCS
+    # Drop the FCS only when the capturing backend appended one. MediaTek
+    # MT7612U strips it, and its trailing bytes are the FCE info trailer, so
+    # taking four off there would discard real angle data. The bf.report_raw
+    # event carries "fcs"; bare-hex input predates it and is assumed Realtek.
+    fcs = 4 if fcs_present else 0
+    angle_bytes = d[29 + nc:len(d) - fcs]
     return dict(sa=sa, nc=nc, nr=nr, bw=bw, ng=ng, codebook=codebook,
                 feedback=feedback, snr=snr, angle_bytes=angle_bytes, raw=d)
 
@@ -185,8 +190,11 @@ def decode_angles(angle_bytes: bytes, ns: int, na: int, bphi: int, bpsi: int,
 
 def report_hex(line: str):
     """Hex payload of one input line: a `bf.report_raw` event's `frame` field,
-    or the line itself when it's bare hex. Returns None for any other event
-    line (other-event JSON must not fall through to the hex parser)."""
+    or the line itself when it's bare hex. Returns (hex, fcs_present) so the
+    caller knows whether those trailing four bytes are an FCS; bare hex has no
+    metadata and is assumed to carry one, which is what every Realtek capture
+    did before the field existed. Returns None for any other event line
+    (other-event JSON must not fall through to the hex parser)."""
     line = line.strip()
     if line.startswith('{"ev":"'):
         if not line.startswith('{"ev":"bf.report_raw"'):
@@ -197,18 +205,19 @@ def report_hex(line: str):
             return None
         if not isinstance(obj, dict) or obj.get("ev") != "bf.report_raw":
             return None
-        return obj.get("frame")
-    return line
+        return obj.get("frame"), bool(obj.get("fcs", 1))
+    return line, True
 
 
 def read_frames(src, max_frames=200):
     """Parse `bf.report_raw` event (or bare hex) lines into frame dicts."""
     frames = []
     for line in src:
-        h = report_hex(line)
-        if h is None:
+        hf = report_hex(line)
+        if hf is None:
             continue
-        f = parse_frame(h)
+        h, fcs_present = hf
+        f = parse_frame(h, fcs_present)
         if f:
             frames.append(f)
         if len(frames) >= max_frames:

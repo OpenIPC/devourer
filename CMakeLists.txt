@@ -1124,10 +1124,12 @@ target_link_libraries(TxPktBankSelftest PRIVATE devourer)
 target_include_directories(TxPktBankSelftest PRIVATE src)
 add_test(NAME txpkt_bank_policy COMMAND TxPktBankSelftest)
 
-# Headless guard for the Jaguar3 RX-descriptor PHYST bit (DW0 bit 26): the
-# "a PHY-status report was actually written for this frame" flag that keeps
-# A-MPDU subframes' reserved-but-unwritten drvinfo bytes out of the RF EMAs.
-if(DEVOURER_JAGUAR3)
+# Headless guard for the Jaguar2/Jaguar3 RX PHY-status gate: the descriptor
+# PHYST bit (DW0 bit 26) that keeps A-MPDU subframes' reserved-but-unwritten
+# drvinfo bytes out of the RF EMAs, plus the PhyStsFill tier each parser
+# returns (which fields it actually filled). Both parsers are header-only and
+# self-contained, so the test builds whenever either generation is selected.
+if(DEVOURER_JAGUAR3 OR DEVOURER_JAGUAR2_8822B OR DEVOURER_JAGUAR2_8821C)
     add_executable(RxPhystSelftest tests/rx_physt_selftest.cpp)
     target_link_libraries(RxPhystSelftest PRIVATE devourer)
     target_include_directories(RxPhystSelftest PRIVATE src)

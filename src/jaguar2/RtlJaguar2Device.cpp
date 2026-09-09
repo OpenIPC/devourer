@@ -618,17 +618,31 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         /* Per-frame RSSI/SNR/EVM from the jgr2 PHY-status (present when
          * APP_PHYSTS is on, i.e. drvinfo carries the 32-byte report). CCK rates
          * (DESC_RATE1M..11M = 0..3) use type0, everything else type1. C2H has no
-         * phy-status (drvinfo=0), so the size guard already skips it. */
-        if (!is_c2h && f.drvinfo_size >= 28)
-          jaguar2::parse_phy_sts_jgr2(data + off + jaguar2::RXDESC_SIZE_8822B,
-                                      f.drvinfo_size, f.rx_rate <= 3, p.RxAtrib);
+         * phy-status (drvinfo=0), so the size guard already skips it.
+         * REG_RX_DRVINFO_SZ (0x060F) is a GLOBAL register, so the 32 drvinfo
+         * bytes are reserved on EVERY frame while the PHY writes a report only
+         * where the descriptor's PHYST bit (DW0 bit 26, f.physt) is set —
+         * on an A-MPDU's other subframes the area holds bytes left by an
+         * earlier frame, and parsing them anyway decodes garbage as
+         * rssi/snr/evm/cfo_tail. cfo_tail is the one that does damage: it
+         * steers the closed-loop XtalCap crystal trim below. */
+        PhyStsFill phy = PhyStsFill::None;
+        if (!is_c2h && f.physt && f.drvinfo_size >= 28)
+          phy = jaguar2::parse_phy_sts_jgr2(
+              data + off + jaguar2::RXDESC_SIZE_8822B, f.drvinfo_size,
+              f.rx_rate <= 3, p.RxAtrib);
+        /* The RAW descriptor bit, matching the field's meaning on Jaguar1 /
+         * Jaguar3 / RTL8733B; `phy` says which fields are safe to fold. */
+        p.RxAtrib.physt = f.physt;
         p.Data =
             std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
-        if (!p.RxAtrib.crc_err) {
+        if (!p.RxAtrib.crc_err && phy != PhyStsFill::None) {
           _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
           _rxpaths.add(p.RxAtrib.rssi, p.RxAtrib.snr, p.RxAtrib.evm,
                        _variant == jaguar2::ChipVariant::C8821C ? 1 : 2);
-          if (_cfg.tuning.cfo_track)
+          /* cfo_tail lives only in the type1 layout; the 0 a CCK report leaves
+           * would pull the tracker's average below its enable threshold. */
+          if (_cfg.tuning.cfo_track && phy == PhyStsFill::Full)
             _cfo.add(p.RxAtrib.cfo_tail); /* closed-loop CFO input (#217) */
         }
         _packetProcessor(p);

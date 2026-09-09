@@ -318,25 +318,37 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
           devourer::emit_tx_report(
               _logger->events(),
               devourer::parse_ccx_halmac(f.frame, f.frame_len), "halmac");
-        /* Decode the jgr3 PHY-status report (per-frame RSSI/SNR/EVM) when it is
-         * present (monitor_rx_cfg enables APP_PHYSTS + RX_DRVINFO_SZ=4, so the
-         * 32-byte report is counted in drvinfo). Skips C2H reports and any
-         * frame whose drvinfo is too short (e.g. CCK, which carries no OFDM
-         * report). The report sits immediately after the 24-byte descriptor.
-         * f.physt (RX desc DW0 bit 26) says the PHY actually WROTE a report
-         * for this frame — the drvinfo space itself is reserved on every
-         * frame, so on A-MPDU subframes without the bit it holds stale bytes
-         * whose page nibble can alias 0/1 (contaminated RSSI/SNR tails). */
+        /* Decode the jgr3 PHY-status report (per-frame RSSI/SNR/EVM), which
+         * sits immediately after the 24-byte descriptor inside the drvinfo
+         * area (monitor_rx_cfg enables APP_PHYSTS + RX_DRVINFO_SZ=4).
+         * RX_DRVINFO_SZ is a GLOBAL register, so those 32 bytes are reserved
+         * on EVERY frame — CCK included, and the parser decodes the CCK page
+         * 0 report — while the PHY writes a report only where the descriptor's
+         * PHYST bit (DW0 bit 26, f.physt) is set. Parsing without that bit
+         * reads bytes left over from an earlier frame, notably on all-but-one
+         * subframe of an A-MPDU, and a stale page nibble can alias 0/1 so the
+         * parse "succeeds" on garbage (contaminated RSSI/SNR tails). C2H
+         * reports carry no phy-status. */
+        PhyStsFill phy = PhyStsFill::None;
         if (!is_c2h && f.physt && f.drvinfo_size >= 28)
-          p.RxAtrib.physt = jaguar3::parse_phy_sts_jgr3(
+          phy = jaguar3::parse_phy_sts_jgr3(
               data + off + jaguar3::RXDESC_SIZE_8822C, f.drvinfo_size,
               p.RxAtrib);
+        /* The RAW descriptor bit, not the parse outcome — that is the meaning
+         * the shared field carries on Jaguar1 and the RTL8733B too, and what
+         * a caller needs to tell which A-MPDU subframe the report belonged to.
+         * `phy` is the local that says which fields are safe to fold. */
+        p.RxAtrib.physt = f.physt;
         p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
-        if (!p.RxAtrib.crc_err && p.RxAtrib.physt) {
+        if (!p.RxAtrib.crc_err && phy != PhyStsFill::None) {
           _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
           _rxpaths.add(p.RxAtrib.rssi, p.RxAtrib.snr, p.RxAtrib.evm,
                        2); /* 8822C/8822E are 2T2R */
-          if (_cfg.tuning.cfo_track)
+          /* cfo_tail exists only on the type1 OFDM page. Feeding the 0 that a
+           * CCK or non-type1 report leaves would pull the tracker's running
+           * average below its enable threshold, so a real offset on a channel
+           * carrying CCK beacons/probes would go uncorrected. */
+          if (_cfg.tuning.cfo_track && phy == PhyStsFill::Full)
             _cfo.add(p.RxAtrib.cfo_tail); /* closed-loop CFO input (#217) */
         }
         /* TX-BF apply gate (DEVOURER_BF_TXBF): a VHT Compressed Beamforming

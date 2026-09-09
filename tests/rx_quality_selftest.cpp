@@ -65,6 +65,41 @@ int main() {
     check("q.noise_floor", approx(q.noise_floor_dbm, -55.0));
   }
 
+  /* A window mixing OFDM frames (SNR present) with CCK / non-type1 ones (the
+   * phy-status page carries no SNR, so the field arrives as 0) must average
+   * the SNR over the reporting frames only. Folding the zeros would drag the
+   * mean down and pin snr_min to 0 — which reads as a collapsing link that
+   * tracks CCK traffic density rather than the channel. RSSI still counts
+   * every frame, since every page reports path-A power. */
+  {
+    RxQualityAccumulator acc;
+    acc.add(60, 40, -50); /* OFDM: snr 40 */
+    acc.add(70, 0, 0);    /* CCK:  no snr, no evm */
+    acc.add(80, 20, -40); /* OFDM: snr 20 */
+    RxQualitySnapshot s = acc.snapshot();
+    check("mixed.frames", s.frames == 3);
+    check("mixed.rssi_mean_raw", s.rssi_mean_raw == 70); /* all three */
+    check("mixed.snr_valid", s.snr_valid);
+    check("mixed.snr_mean_raw", s.snr_mean_raw == 30); /* (40+20)/2, not /3 */
+    check("mixed.snr_min_raw", s.snr_min_raw == 20);   /* not pinned to 0 */
+    check("mixed.evm_mean_raw", s.evm_mean_raw == -45);
+  }
+
+  /* A CCK-only window reports no SNR at all rather than a fabricated 0. */
+  {
+    RxQualityAccumulator acc;
+    acc.add(75, 0, 0);
+    acc.add(85, 0, 0);
+    RxQualitySnapshot s = acc.snapshot();
+    check("cck.frames", s.frames == 2);
+    check("cck.rssi_mean_raw", s.rssi_mean_raw == 80);
+    check("cck.snr_valid_false", !s.snr_valid);
+    check("cck.snr_mean_raw", s.snr_mean_raw == 0);
+    check("cck.evm_valid_false", !s.evm_valid);
+    RxQuality q = build_rx_quality(s, RxEnergy{});
+    check("cck.q.snr_valid_false", !q.snr_valid);
+  }
+
   /* snapshot() resets (delta semantics). */
   {
     RxQualityAccumulator acc;

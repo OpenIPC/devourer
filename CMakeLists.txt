@@ -843,6 +843,20 @@ target_link_libraries(Mt7612uUsbIdsSelftest PRIVATE devourer)
 
 add_test(NAME mt7612u_usb_ids COMMAND Mt7612uUsbIdsSelftest)
 
+# Headless guard for the MT7612U <-> devourer descriptor translations. Pure
+# lookups, so no hardware and no subtree compile — this cell runs whether or
+# not DEVOURER_MT7612U is on, which is the point: the header it covers is the
+# one place a wrong RSSI base or a per-chain copy that publishes the noise
+# floor would be introduced, and both have happened.
+add_executable(Mt7612uMappingSelftest
+    tests/mt7612u_mapping_selftest.cpp
+)
+target_link_libraries(Mt7612uMappingSelftest PRIVATE devourer)
+target_include_directories(Mt7612uMappingSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u/include)
+
+add_test(NAME mt7612u_mapping COMMAND Mt7612uMappingSelftest)
+
 # Headless guard for the TX quiesce seam (ITransport::quiesce_tx via
 # RtlAdapter): the explicit "stop TX and wait it out" call every device makes
 # before anything is released. UsbTransport's cancel/drain is validated on

@@ -15,7 +15,7 @@
 #include "BbDbgportReader.h"
 #include "LaCapture.h"
 #include "HalModule.h"
-#include "IRadio.h"
+#include "IRtlRadio.h"
 #include "SelectedChannel.h"
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
@@ -36,7 +36,7 @@ extern "C"
  * baseband). The chip is identified at construction time via SYS_CFG bits and
  * USB PID; this class drives bring-up, RX, and TX for whichever member of the
  * family is present. */
-class RtlJaguarDevice : public IRadio {
+class RtlJaguarDevice : public IRtlRadio {
   /* Declared before every component that consumes it: members initialise in
    * declaration order, and _eepromManager / _radioManagement / _halModule all
    * take _cfg in the constructor's init list. */

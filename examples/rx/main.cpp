@@ -46,6 +46,7 @@
 #include "SignalStop.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "IRtlRadio.h"
 #include "env_config.h"
 #include "usb_select.h"
 #if defined(DEVOURER_HAVE_PCIE)
@@ -532,7 +533,7 @@ static void run_la_capture(
 /* DEVOURER_RX_ENERGY_MS=N: periodic frame-free RX energy / channel-busy
  * telemetry — the read side of DEVOURER_CW_TONE. Each interval emits one
  * rx.energy event combining the chip's phydm FA/CCA counters + IGI
- * (IRadio::GetRxEnergy, frame-free, all three generations) with a rolling
+ * (IRtlRadio::GetRxEnergy, frame-free, all three generations) with a rolling
  * per-frame RSSI/SNR aggregate. A second adapter running this detects the first
  * adapter's CW carrier as a jump in cca_ofdm / fa_ofdm and a rise in igi.
  * 0 = disabled. */
@@ -694,7 +695,7 @@ static const bool g_rx_pctr = []() {
   return e != nullptr && std::strcmp(e, "0") != 0;
 }();
 
-/* Emit the frame-free NHM power histogram (IRadio::GetRxEnergy fills it) as
+/* Emit the frame-free NHM power histogram (IRtlRadio::GetRxEnergy fills it) as
  * a distinct rx.nhm event so it never disturbs the rx.energy
  * fields its consumers key on. `peak` = the fullest bucket (0 = quiet
  * noise floor, higher = energy is landing in a higher power band, e.g. under an
@@ -1566,8 +1567,8 @@ int main(int argc, char **argv) {
   }
 
   /* DEVOURER_RX_ENERGY_MS: frame-free RX energy / channel-busy telemetry — the
-   * read side of DEVOURER_CW_TONE. Cross-generation (IRadio::GetRxEnergy),
-   * so it runs off the base device pointer, not the Jaguar1 downcast. The thread
+   * read side of DEVOURER_CW_TONE. Cross-generation (IRtlRadio::GetRxEnergy),
+   * so it runs off the IRtlRadio cast, not the Jaguar1 downcast. The thread
    * sleeps one interval first (so its first read lands after bring-up completes,
    * not mid-init), then each interval reads GetRxEnergy() + drains the rolling
    * frame aggregate and emits one rx.energy event. Concurrency caveat:
@@ -1575,10 +1576,14 @@ int main(int argc, char **argv) {
    * poller) — keep the cadence conservative (>= a few hundred ms). */
   std::atomic<bool> energy_emitter_stop{false};
   std::thread energy_emitter;
-  if (g_rx_energy_ms > 0) {
+  IRtlRadio *const energy_dev = dynamic_cast<IRtlRadio *>(rtlDevice);
+  if (g_rx_energy_ms > 0 && !energy_dev)
+    logger->warn("DEVOURER_RX_ENERGY_MS: frame-free energy is Realtek-only "
+                 "(IRtlRadio) — telemetry not started on this radio");
+  if (g_rx_energy_ms > 0 && energy_dev) {
     logger->info("DEVOURER_RX_ENERGY_MS={} — starting RX energy telemetry",
                  g_rx_energy_ms);
-    IRadio *dev = rtlDevice;
+    IRtlRadio *dev = energy_dev;
     energy_emitter = std::thread([&energy_emitter_stop, dev]() {
       auto nap = [&](uint32_t ms) {
         for (uint32_t s = 0; s < ms && !energy_emitter_stop.load(); s += 50)
@@ -2067,8 +2072,12 @@ int main(int argc, char **argv) {
     logger->info("DEVOURER_RX_SWEEP: {} bins, dwell {} ms — live spectrum map",
                  g_rx_sweep.size(), g_rx_sweep_dwell_ms);
     IRadio *dev = rtlDevice;
+    IRtlRadio *const rtl = dynamic_cast<IRtlRadio *>(rtlDevice);
+    if (!rtl)
+      logger->warn("DEVOURER_RX_SWEEP: frame-free energy is Realtek-only "
+                   "(IRtlRadio) — bins carry frame stats only");
     SelectedChannel first{static_cast<uint8_t>(g_rx_sweep[0]), ch_offset, width};
-    std::thread rx([dev, first, &logger]() {
+    std::thread rx([dev, rtl, first, &logger]() {
       try {
         dev->Init(packetProcessor, first);
       } catch (const std::exception &e) {
@@ -2110,7 +2119,7 @@ int main(int argc, char **argv) {
       for (uint32_t s = 0; s < g_rx_sweep_dwell_ms && !g_devourer_should_stop;
            s += 50)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      RxEnergy e = dev->GetRxEnergy(true);
+      RxEnergy e = rtl ? rtl->GetRxEnergy(true) : RxEnergy{};
       RxAgg agg;
       {
         std::lock_guard<std::mutex> lk(g_rxagg_mu);

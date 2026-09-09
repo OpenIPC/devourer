@@ -40,6 +40,7 @@
 #include "SignalStop.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "IRtlRadio.h"
 #include "chanmig/ChannelDef.h"
 #include "chanmig/JsonlLite.h"
 #include "chanmig/MigClock.h"
@@ -57,6 +58,8 @@ using devourer::Ev;
 
 static devourer::EventSink *g_ev = nullptr;
 static IRadio *g_dev = nullptr;
+/* Realtek-only view of g_dev for the frame-free energy probe; null elsewhere. */
+static IRtlRadio *g_rtl = nullptr;
 static std::mutex g_dev_mu; /* serialize send/retune against the RX thread */
 /* The pure state machines are single-threaded by design; the demo drives them
  * from the RX callback, the tick loop, and (ground) the operator thread, so
@@ -380,15 +383,15 @@ static void drone_do(const std::vector<cm::MigAction> &acts) {
         bool valid = false;
         {
           std::lock_guard<std::mutex> lk(g_dev_mu);
-          if (g_dev) {
-            (void)g_dev->GetRxEnergy(false); /* reset the delta counters */
+          if (g_rtl) {
+            (void)g_rtl->GetRxEnergy(false); /* reset the delta counters */
           }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(dwell_ms));
         {
           std::lock_guard<std::mutex> lk(g_dev_mu);
-          if (g_dev) {
-            RxEnergy e = g_dev->GetRxEnergy(true);
+          if (g_rtl) {
+            RxEnergy e = g_rtl->GetRxEnergy(true);
             if (e.valid_nhm) {
               uint32_t total = 0;
               for (int k = 0; k < 12; k++)
@@ -551,6 +554,10 @@ int main(int argc, char **argv) {
   session.adopt_device(std::move(owned_device));
   IRadio *const dev = session.device();
   g_dev = dev;
+  g_rtl = dynamic_cast<IRtlRadio *>(dev);
+  if (!g_rtl)
+    logger->warn("chanmig: the frame-free energy probe is Realtek-only "
+                 "(IRtlRadio) — probe samples are invalid on this radio");
 
   Ev(*g_ev, "migrate.id").t().f("role", role.c_str())
       .f("chip", pick.pid).f("source", source.str().c_str())
@@ -741,6 +748,7 @@ int main(int argc, char **argv) {
   {
     std::lock_guard<std::mutex> lk(g_dev_mu);
     g_dev = nullptr;
+    g_rtl = nullptr;
   }
   dev->Stop();
   session.close();

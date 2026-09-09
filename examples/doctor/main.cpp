@@ -70,6 +70,7 @@
 #include "SignalStop.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "IRtlRadio.h"
 #include "logger.h"
 
 namespace {
@@ -262,7 +263,11 @@ int main(int argc, char **argv) {
 
   if (in.init_completed) {
     /* 2. EFUSE stability */
-    in.efuse = dev->ProbeEfuseStability(a.reads);
+    if (auto *rtl = dynamic_cast<IRtlRadio *>(dev))
+      in.efuse = rtl->ProbeEfuseStability(a.reads);
+    else
+      logger->warn("doctor: the EFUSE stability probe is Realtek-only "
+                   "(IRtlRadio) — skipped on this radio");
 
     /* 4. RX smoke */
     if (a.listen_secs > 0 && !g_devourer_should_stop) {

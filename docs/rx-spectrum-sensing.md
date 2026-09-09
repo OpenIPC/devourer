@@ -87,7 +87,7 @@ event every `N` ms:
  "igi":..,"frames":N,"rssi_mean":..,"rssi_max":..,"snr_mean":..,"snr_min":..}
 ```
 
-`cca_*`/`fa_*`/`igi` are frame-free (`IRadio::GetRxEnergy`, `null` on a chip
+`cca_*`/`fa_*`/`igi` are frame-free (`IRtlRadio::GetRxEnergy`, `null` on a chip
 that doesn't expose them); the FA/CCA counts
 are the delta since the previous event (each read resets the hardware counters).
 `rssi_*`/`snr_*`/`frames` are the rolling per-frame aggregate over the interval.

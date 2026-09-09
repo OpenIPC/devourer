@@ -60,7 +60,7 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first):
   20/40 MHz on 2.4/5 GHz, plus long-preamble CCK on 2.4 GHz at 20 MHz, plus
   10 MHz narrowband (5 MHz refused — `src/rtl8733b/CLAUDE.md`).
   Everything the backend has not ported (TSF/beacons, A-MPDU, CCX/`tx.report`,
-  the flat-index and per-rate TX-power knobs) falls through to `IRadio`'s
+  the flat-index and per-rate TX-power knobs) falls through to `IRadio`/`IRtlRadio`'s
   not-ported defaults rather than being faked, so read the base class before
   assuming a cross-generation feature below applies here. `FastRetune` IS
   ported (intra-band, TSSI kept live — `src/rtl8733b/CLAUDE.md`). SGI, LDPC, STBC, VHT
@@ -173,7 +173,8 @@ second back-to-back `sdr_duty` read can fail to reacquire and report ~0).
 
 Suspect a DUT itself (deaf with a green init, chronic FW-boot fails):
 `build/doctor` grades adapter health — EFUSE read-stability ×N, fw-boot,
-RX smoke → HEALTHY/SUSPECT/FAILING in the exit code;
+RX smoke → HEALTHY/SUSPECT/FAILING in the exit code (EFUSE stability is
+`IRtlRadio`-only; the other legs are `IRadio`);
 `tests/adapter_doctor_cold.sh` wraps it in per-rep VBUS cold + a vouched
 flood for a definitive verdict (`docs/adapter-doctor.md`). Two cold-init
 traps it encodes: the in-tree rtw88 modules auto-probe (and fw-download
@@ -521,7 +522,11 @@ loop; `InitWrite` = TX bring-up; `StartRxLoop` = blocking RX worker on an
 already-up chip, enabling TX+RX on one handle; `send_packet`) and constructs
 `RtlJaguarDevice` / `RtlJaguar2Device` / `RtlJaguar3Device` / `RtlKestrelDevice`
 / `Rtl8733bDevice` per backend. `Rtl8812aDevice` is a deprecated alias of
-`RtlJaguarDevice`. Optional device methods are **virtual with not-ported
+`RtlJaguarDevice`. The five Realtek backends derive from `IRtlRadio`
+(`src/IRtlRadio.h`), which adds the Realtek-only members (`GetRxEnergy`,
+`SetXtalCap`/`GetXtalCap`, `ProbeEfuseStability`, `DumpChipState`); reach them
+via `dynamic_cast<IRtlRadio*>` and treat `nullptr` as "not on this radio".
+Optional device methods are **virtual with not-ported
 defaults**, not pure virtual — a backend that hasn't ported a feature inherits
 `false`/`0`/a full-path fallback rather than a fake. Check the override list in
 the backend's header before believing a cross-generation claim.

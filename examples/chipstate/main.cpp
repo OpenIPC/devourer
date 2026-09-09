@@ -37,7 +37,7 @@
 #include <vector>
 
 #include "DeviceSession.h"
-#include "IRadio.h"
+#include "IRtlRadio.h"
 #include "RtlAdapter.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
@@ -308,6 +308,12 @@ int main(int argc, char **argv) {
                  "the chip is being read exactly as the last session left it");
   }
 
-  dev->DumpChipState();
+  auto *rtl = dynamic_cast<IRtlRadio *>(dev);
+  if (!rtl) {
+    logger->error("chipstate: no canary register dump on this radio (not a "
+                  "Realtek backend)");
+    return 4;
+  }
+  rtl->DumpChipState();
   return 0;
 }

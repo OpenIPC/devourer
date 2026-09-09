@@ -225,6 +225,7 @@ add_library(devourer
     src/hopset/HopsetFusion.h
     src/hopset/HopsetEvents.h
     src/IRadio.h
+    src/IRtlRadio.h
     src/SignalStop.cpp
     src/SignalStop.h
     src/WiFiDriver.cpp
@@ -774,6 +775,17 @@ add_executable(ToneMaskSelftest
 target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
+
+# Headless guard for the radio contract: a radio implementing only IRadio's
+# pure-virtual core must compile without any Realtek type, its not-ported
+# defaults must hold, and it must not be an IRtlRadio. A Realtek-typed pure
+# virtual added to IRadio stops this compiling, which is the point.
+add_executable(RadioIfaceSelftest
+    tests/radio_iface_selftest.cpp
+)
+target_link_libraries(RadioIfaceSelftest PRIVATE devourer)
+
+add_test(NAME radio_iface COMMAND RadioIfaceSelftest)
 
 # Headless guard for the TX quiesce seam (ITransport::quiesce_tx via
 # RtlAdapter): the explicit "stop TX and wait it out" call every device makes

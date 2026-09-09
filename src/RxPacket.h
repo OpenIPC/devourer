@@ -90,7 +90,7 @@ struct rx_pkt_attrib
     /* Path-A CFO tail from the OFDM phy-status (signed HW units; kHz = raw *
      * 2.5, phydm CFO_HW_RPT_2_KHZ). The carrier-frequency offset between this
      * receiver's crystal and the transmitter's — the closed-loop CFO tracker's
-     * input (see IRadio::SetXtalCap). 0 when the phy-status carries none. */
+     * input (see IRtlRadio::SetXtalCap). 0 when the phy-status carries none. */
     int8_t cfo_tail = 0;
     /* A-MPDU RX markers. paggr: this MPDU arrived inside an aggregated PPDU
      * (rx-desc PAGGR — 8812 dword1[15], same position in the halmac layout).

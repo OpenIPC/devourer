@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "logger.h"
-#include "IRadio.h"
+#include "IRtlRadio.h"
 #include "TxMode.h"
 #include "RtlAdapter.h"
 #include "SelectedChannel.h"
@@ -38,7 +38,7 @@
  * (Jaguar2PhyTables table data + RF-path count), HalmacJaguar2Fw (blob) and the
  * Jaguar2Calibration IQK factory — the same strategy-dispatch shape as the
  * Jaguar3 8822C/8822E HAL. */
-class RtlJaguar2Device : public IRadio {
+class RtlJaguar2Device : public IRtlRadio {
 public:
   RtlJaguar2Device(RtlAdapter device, Logger_t logger,
                    jaguar2::ChipVariant variant = jaguar2::ChipVariant::C8822B,

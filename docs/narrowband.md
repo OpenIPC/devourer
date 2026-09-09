@@ -150,7 +150,7 @@ chip-specific traps. The ones this port paid for, current-state:
    power-up and is deaf on the next — while a closer-crystal peer decodes the
    same transmitter and the same pair is stable at 2.4 GHz. This is physics, not
    a driver bug — and it drifts, so a fixed trim is not enough (below). The
-   manual lever is `IRadio::SetXtalCap` (env `DEVOURER_XTAL_CAP`):
+   manual lever is `IRtlRadio::SetXtalCap` (env `DEVOURER_XTAL_CAP`):
    the AFE crystal load-capacitance trim pulls the chip's reference oscillator a
    few ppm, so trimming one end of a marginal pair moves the offset off the sync
    boundary. The trim range is per generation (`GetAdapterCaps().xtal_cap_max`:

@@ -8,7 +8,7 @@
 #include "DeviceConfig.h"
 #include "FrameParser8733b.h"
 #include "Halmac8733bMac.h"
-#include "IRadio.h"
+#include "IRtlRadio.h"
 #include "Phy8733b.h"
 #include "Rtl8733bBringup.h"
 #include "RtlAdapter.h"
@@ -20,7 +20,7 @@
  * path. Unsupported optional controls refuse loudly rather than silently
  * no-opping, but a refusal never tears the session down — asking for a knob
  * this backend has not ported is not a hardware-safety event. */
-class Rtl8733bDevice : public IRadio {
+class Rtl8733bDevice : public IRtlRadio {
 public:
   Rtl8733bDevice(RtlAdapter device, Logger_t logger,
                  devourer::DeviceConfig cfg = {});

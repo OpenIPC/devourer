@@ -16,8 +16,8 @@
  * validity, the firmware-boot outcome of the last bring-up, and an RX smoke
  * count. The classifier maps those to a plain verdict + reason bits.
  *
- * IRadio carries the probe entry points (ProbeEfuseStability,
- * GetFwBootStatus); examples/doctor is the reference consumer.
+ * IRtlRadio carries ProbeEfuseStability and IRadio carries GetFwBootStatus;
+ * examples/doctor is the reference consumer.
  */
 #ifndef DEVOURER_ADAPTER_HEALTH_H
 #define DEVOURER_ADAPTER_HEALTH_H
@@ -46,7 +46,7 @@ struct EfuseStability {
   uint16_t first_mismatch_off = 0xFFFF; /* first differing offset, if any */
 };
 
-/* Shared probe loop behind IRadio::ProbeEfuseStability — each generation
+/* Shared probe loop behind IRtlRadio::ProbeEfuseStability — each generation
  * supplies its own fresh-physical-map reader as `read_map(uint8_t *buf)`
  * (return false on transport failure) and this does the cross-compare. */
 template <typename ReadFn>

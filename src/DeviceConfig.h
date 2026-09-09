@@ -403,7 +403,7 @@ struct DeviceConfig {
      * (stub default 0xa/0xb). */
     std::optional<uint8_t> nb_adc;
     /* env: DEVOURER_XTAL_CAP — crystal-cap trim code applied at the end of
-     * bring-up (IRadio::SetXtalCap). The CFO lever for narrowband at the
+     * bring-up (IRtlRadio::SetXtalCap). The CFO lever for narrowband at the
      * edge of its budget; unset = efuse/default. Raw code, 0..0x3f (Jaguar1/2)
      * or 0..0x7f (Jaguar3). */
     std::optional<uint8_t> xtal_cap;

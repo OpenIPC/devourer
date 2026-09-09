@@ -8,7 +8,7 @@
 
 #include "logger.h"
 #include "CfoTracker.h"
-#include "IRadio.h"
+#include "IRtlRadio.h"
 #include "TxMode.h"
 #include "RtlAdapter.h"
 #include "SelectedChannel.h"
@@ -29,7 +29,7 @@
  * channel/bandwidth (incl. 5/10 MHz narrowband) and on-air TX. send_packet is
  * on-air; sustained continuous TX is kept alive by the coex runtime thread
  * (coex_runtime_loop) — see src/jaguar3/CLAUDE.md. */
-class RtlJaguar3Device : public IRadio {
+class RtlJaguar3Device : public IRtlRadio {
 public:
   RtlJaguar3Device(RtlAdapter device, Logger_t logger,
                    jaguar3::ChipVariant variant = jaguar3::ChipVariant::C8822C,

@@ -48,6 +48,7 @@
 #include "SignalStop.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "IRtlRadio.h"
 #include "caps_event.h"
 #include "chanmig/ChannelDef.h"
 #include "chanmig/ChannelEvents.h"
@@ -361,8 +362,12 @@ int main() {
 
   /* --- RX loop on a worker thread (rxdemo sweep pattern) --- */
   IRadio *devp = dev;
+  IRtlRadio *const rtl = dynamic_cast<IRtlRadio *>(dev);
+  if (!rtl)
+    logger->warn("chanscout: frame-free FA/CCA/NHM is Realtek-only (IRtlRadio) "
+                 "— dwells carry frame stats only on this radio");
   const cm::ScanScheduler::DwellPlan first = sched.next(steady_ms());
-  std::thread rx([devp, first, &logger]() {
+  std::thread rx([devp, rtl, first, &logger]() {
     try {
       devp->Init(packetProcessor, first.def.to_selected());
     } catch (const std::exception &e) {
@@ -506,7 +511,8 @@ int main() {
      * frames that raced in from the previous channel. */
     if (!nap_ms(cfg.settle_ms))
       d.flags |= cm::kFlagTruncated;
-    (void)devp->GetRxEnergy(/*with_nhm=*/false);
+    if (rtl)
+      (void)rtl->GetRxEnergy(/*with_nhm=*/false);
     {
       std::lock_guard<std::mutex> lk(g_agg_mu);
       g_agg = ScoutAgg{};
@@ -516,7 +522,7 @@ int main() {
     if (!nap_ms(cfg.dwell_ms))
       d.flags |= cm::kFlagTruncated;
 
-    RxEnergy e = devp->GetRxEnergy(/*with_nhm=*/true);
+    RxEnergy e = rtl ? rtl->GetRxEnergy(/*with_nhm=*/true) : RxEnergy{};
     ScoutAgg agg;
     {
       std::lock_guard<std::mutex> lk(g_agg_mu);

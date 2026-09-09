@@ -282,7 +282,7 @@ public:
 
   /* Read-only dump of the canary register set (BB / MAC / per-path RF) to the
    * diagnostic plane. Public because it is also the read-only inspection path
-   * for a chip that was never Init'ed — see IRadio::DumpChipState. */
+   * for a chip that was never Init'ed — see IRtlRadio::DumpChipState. */
   void DumpCanary();
 
 private:

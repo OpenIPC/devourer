@@ -11,7 +11,7 @@
 
 #include "logger.h"
 #include "DeviceConfig.h"
-#include "IRadio.h"
+#include "IRtlRadio.h"
 #include "RtlAdapter.h"
 #include "RxQuality.h" /* RxQualityAccumulator + build_rx_quality */
 #include "SelectedChannel.h"
@@ -49,7 +49,7 @@ struct ChipInfo {
  * hand-ported C++ here + HalKestrel/KestrelFw; the halbb PHY and halrf
  * calibration planes are the vendor C compiled verbatim (hal/halbb, hal/halrf)
  * behind the kestrel glue. */
-class RtlKestrelDevice : public IRadio {
+class RtlKestrelDevice : public IRtlRadio {
 public:
   RtlKestrelDevice(RtlAdapter device, Logger_t logger,
                    kestrel::ChipVariant variant = kestrel::ChipVariant::C8852B,

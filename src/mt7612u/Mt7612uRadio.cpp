@@ -352,7 +352,9 @@ bool Mt7612uRadio::send_packet(const uint8_t *packet, size_t length) {
   std::lock_guard<std::recursive_mutex> lock(_mu);
   if (!_dev)
     return false;
-  return mt7612u_send_packet(_dev, packet, length) == 0;
+  const bool ok = mt7612u_send_packet(_dev, packet, length) == 0;
+  (ok ? _tx_submitted : _tx_failed).fetch_add(1, std::memory_order_relaxed);
+  return ok;
 }
 
 size_t Mt7612uRadio::send_packets(const TxPacketView *pkts, size_t count) {
@@ -367,7 +369,10 @@ size_t Mt7612uRadio::send_packets(const TxPacketView *pkts, size_t count) {
     views[i].data = pkts[i].data;
     views[i].len = pkts[i].len;
   }
-  return mt7612u_send_packets(_dev, views.data(), count);
+  const size_t sent = mt7612u_send_packets(_dev, views.data(), count);
+  _tx_submitted.fetch_add(sent, std::memory_order_relaxed);
+  _tx_failed.fetch_add(count - sent, std::memory_order_relaxed);
+  return sent;
 }
 
 void Mt7612uRadio::SetCcaMode(bool disabled) {
@@ -431,6 +436,26 @@ void Mt7612uRadio::WriteTsf(uint64_t tsf) {
   std::lock_guard<std::recursive_mutex> lock(_mu);
   if (_dev)
     mt7612u_write_tsf(_dev, tsf);
+}
+
+devourer::TxStats Mt7612uRadio::GetTxStats() {
+  devourer::TxStats out{};
+
+  /* Counted here rather than read from mt7612u_get_stats(), which reports the
+   * ASYNC RING's counters. mt_tx_raw() only uses that ring when one is running
+   * (tx.cpp), and the TX-only bring-up this backend offers - InitWrite with no
+   * StartRxLoop - starts no ring, so those counters read 0 while frames are
+   * going out. Measured: txdemo on this part reported submitted=0 against
+   * twelve tx.frame events with rc=1. A stat that reads zero while the radio
+   * transmits is worse than no stat, so this counts what devourer actually
+   * handed the transport.
+   *
+   * last_error_rc and last_was_timeout stay at their defaults: the library
+   * returns a count, not the libusb rc of the last failure, and inventing one
+   * would be the same fault in a different field. */
+  out.submitted = _tx_submitted.load(std::memory_order_relaxed);
+  out.failed = _tx_failed.load(std::memory_order_relaxed);
+  return out;
 }
 
 bool Mt7612uRadio::SetAckResponder(const devourer::MacAddr &mac) {

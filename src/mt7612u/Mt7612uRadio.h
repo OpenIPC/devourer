@@ -89,6 +89,7 @@ public:
   bool GetPermanentMacAddress(uint8_t out[6]) override;
   uint64_t ReadTsf() override;
   void WriteTsf(uint64_t tsf) override;
+  devourer::TxStats GetTxStats() override;
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
 
@@ -119,6 +120,8 @@ private:
   std::atomic<bool> _rx_stop{false};
   std::atomic<bool> _rx_active{false};
   std::atomic<uint64_t> _rx_frames{0};
+  std::atomic<uint64_t> _tx_submitted{0};
+  std::atomic<uint64_t> _tx_failed{0};
 
   /* The tick thread and the gate that lets StopRxLoop / Stop wake it early
    * instead of waiting out a whole second. */

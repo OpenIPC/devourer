@@ -268,6 +268,18 @@ void mt_rx_flush(struct mt7612u_dev *d)
 
 int mt_mac_start(struct mt7612u_dev *d, int enable_rx)
 {
+	/* Refuse rather than wedge.  The receiver running with nothing draining
+	 * EP 4 puts this part below the USB level; on a quiet channel the gap
+	 * is survivable, which is why it went unnoticed, but at 80% channel
+	 * busy the FIFO overflows inside it and the RX DMA stops for good.
+	 * Measured: the inverted order delivers 3 frames where the correct one
+	 * delivers 5500/s.  mt7612u_start() has always derived this from
+	 * rx_active - this makes the internal entry point equally safe. */
+	if (enable_rx == MT_RX_DRAIN_RING && !(d->a && d->a->rx_active)) {
+		ERR("mac_start(MT_RX_DRAIN_RING) with no ring draining EP4 - call "
+		    "mt7612u_rx_start() first, or pass MT_RX_DRAIN_SYNC");
+		return -1;
+	}
 	mt_wr(d, MT_MAC_SYS_CTRL, MT_MAC_SYS_CTRL_ENABLE_TX);
 	if (!mt_poll(d, MT_WPDMA_GLO_CFG,
 	             MT_WPDMA_GLO_CFG_TX_DMA_BUSY | MT_WPDMA_GLO_CFG_RX_DMA_BUSY,
@@ -283,6 +295,24 @@ int mt_mac_start(struct mt7612u_dev *d, int enable_rx)
 	mt_wr(d, MT_MAC_SYS_CTRL, MT_MAC_SYS_CTRL_ENABLE_TX |
 	      (enable_rx ? MT_MAC_SYS_CTRL_ENABLE_RX : 0));
 	return 0;
+}
+
+/*
+ * Silence the receiver, leaving TX as it was. This is the first half of a
+ * teardown: mt_mac_stop() below does not clear ENABLE_RX until after its own
+ * mt_rx_flush() and a TX-idle wait of up to 150 ms, and mt_async_stop() reaps
+ * the EP 4 ring before even that - so without this the MAC keeps filling a
+ * receive pipe nobody is draining, which on a busy channel is the FIFO
+ * overflow that stops RX DMA for good. It is the exact window mt_mac_start()
+ * refuses to create, reached at the end of every session.
+ *
+ * mt_clear() leaves RX enabled if its read half fails; acceptable here because
+ * mt_mac_stop() clears the register outright a moment later.
+ */
+void mt_mac_rx_disable(struct mt7612u_dev *d)
+{
+	if (!d || !d->h) return;
+	mt_clear(d, MT_MAC_SYS_CTRL, MT_MAC_SYS_CTRL_ENABLE_RX);
 }
 
 int mt_mac_stop(struct mt7612u_dev *d)
@@ -441,7 +471,7 @@ struct mt7612u_dev *mt7612u_open(const char *fw_dir, const char **err)
 		if (err) *err = "out of memory";
 		return NULL;
 	}
-	if (mt_open(d, err)) { free(d); return NULL; }
+	if (mt_open(d, err)) { mt_dev_state_destroy(d); free(d); return NULL; }
 	return bring_up(d, fw_dir, err);
 }
 
@@ -455,6 +485,7 @@ struct mt7612u_dev *mt7612u_open_handle(void *h, void *ctx, const char *fw_dir,
 		return NULL;
 	}
 	if (mt_adopt(d, (libusb_device_handle *)h, (libusb_context *)ctx, err)) {
+		mt_dev_state_destroy(d);
 		free(d);
 		return NULL;
 	}
@@ -464,9 +495,13 @@ struct mt7612u_dev *mt7612u_open_handle(void *h, void *ctx, const char *fw_dir,
 void mt7612u_close(struct mt7612u_dev *d)
 {
 	if (!d) return;
+	/* RX off BEFORE the ring is cancelled - mt_async_stop() reaps the EP 4
+	 * drainer, and mt_mac_stop() would not clear ENABLE_RX until after its
+	 * flush and TX-idle wait. See mt_mac_rx_disable(). */
+	if (d->h) mt_mac_rx_disable(d);
 	mt_async_stop(d);
 	if (d->h) mt_mac_stop(d);
-	mt_close(d);
+	mt_close(d);   /* releases io_lock via mt_dev_state_destroy() */
 	free(d);
 }
 

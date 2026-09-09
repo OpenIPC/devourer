@@ -48,6 +48,19 @@ struct mt7612u_cal {
 	uint32_t mcu_gain;
 	uint8_t  agc_gain_init[2];
 	uint8_t  tssi_cal_done;
+	/* mt76x2's periodic gain tracking.  low_gain starts at -1 so the first
+	 * tick always programs a gain class rather than trusting the initvals. */
+	uint8_t  agc_gain_cur[2];
+	uint8_t  agc_gain_adjust;
+	int8_t   low_gain;
+	/* There is deliberately no averaged-RSSI field here.  mt76 feeds the gain
+	 * class from mt76_get_min_avg_rssi() (util.c:72), which averages ASSOCIATED
+	 * stations; a monitor consumer has none, so mt76 substitutes -75 and never
+	 * leaves the middle class.  Driving it from every frame the receiver parses
+	 * instead - neighbours included - let a -40 dBm neighbour AP step the gain
+	 * down against a wanted peer at -80 dBm, which is less faithful than doing
+	 * nothing.  phy_update_channel_gain() now uses mt76's -75 directly, and the
+	 * RX hot path does no cross-thread write at all. */
 };
 
 #define MT_RX_RING  16
@@ -138,8 +151,19 @@ struct mt7612u_dev {
 	uint8_t  macaddr[6];
 	uint16_t chainmask;       /* 0x202 = 2T2R */
 	uint8_t  mcu_seq;
+	/* Set when a mcu_wait_resp() gave up, so its reply may still land on
+	 * EP 5 and desync the next command.  The stale-reply drain is paid only
+	 * then: an unconditional drain costs a guaranteed 5 ms bulk timeout on
+	 * every command, including the 3-6 inside each tune. */
+	uint8_t  mcu_stale_pending;
 	uint8_t  chan;
 	uint8_t  bw;
+	pthread_mutex_t io_lock;   /* recursive: guards register + MCU transactions */
+	uint8_t  io_lock_ready;    /* io_lock initialised - guards its destroy */
+	/* Observe-but-do-not-repair, for wedge experiments.  A field, not a
+	 * getenv: this library reads no environment - the tool that wants the
+	 * behaviour sets it before mt_open() (bringup does). */
+	uint8_t  no_autorecover;
 	uint8_t  bw_clamp_warned;   /* the "never widen" notice is once, not per frame */
 	int8_t   txpower_conf;      /* limit, 0.5 dB units (dBm * 2) */
 	int8_t   target_power;
@@ -162,10 +186,25 @@ struct mt7612u_dev {
 };
 
 /* --- usb.c --- */
+/* Per-device state both open paths need before ANY register I/O: the recursive
+ * io_lock and the calibration sentinels.  Both mt_open() and mt_adopt() reach
+ * mt_vendor_req() (which locks io_lock) during identification, so this must run
+ * first on either path.  Idempotent.  mt_dev_state_destroy() is the matching
+ * teardown, guarded so it runs exactly once regardless of how far open got. */
+void     mt_dev_state_init(struct mt7612u_dev *d);
+void     mt_dev_state_destroy(struct mt7612u_dev *d);
 int      mt_open(struct mt7612u_dev *d, const char **err);
 /* Adopt a handle the caller already opened, reset and claimed. */
 int      mt_adopt(struct mt7612u_dev *d, libusb_device_handle *h,
                   libusb_context *ctx, const char **err);
+/*
+ * Repair a device left wedged by a run that died mid transfer: silence the
+ * receiver, drain EP 4, and pulse MT_USB_DMA_CFG_TX_CLR. Runs after identify
+ * on BOTH open paths - a libusb-owning consumer arrives through mt_adopt(),
+ * and skipping it there means the very failure this recovery exists to fix.
+ * Honours d->no_autorecover (observe and report, repair nothing).
+ */
+void     mt_recover_usb(struct mt7612u_dev *d);
 void     mt_close(struct mt7612u_dev *d);
 /* Checked read: 0 on success with *val filled, -1 on transport failure.
  * Prefer this anywhere the value drives a decision - 0xffffffff is a real
@@ -178,6 +217,8 @@ int      mt_rmw(struct mt7612u_dev *d, uint32_t addr, uint32_t mask, uint32_t va
 int      mt_wr_chk(struct mt7612u_dev *d, uint32_t addr, uint32_t val);
 /* Register-I/O failure accumulator; see the comment above mt_io_clear(). */
 void     mt_io_clear(struct mt7612u_dev *d);
+/* Restore a previously sampled accumulator; see the note in usb.c. */
+void     mt_io_restore(struct mt7612u_dev *d, unsigned v);
 unsigned mt_io_errors(struct mt7612u_dev *d);
 #define  mt_set(d, a, v)   mt_rmw(d, a, v, v)
 #define  mt_clear(d, a, v) mt_rmw(d, a, v, 0)
@@ -217,9 +258,25 @@ uint16_t mt_ee(const struct mt7612u_dev *d, unsigned off);
 /* --- init.c --- */
 void mt_power_cycle(struct mt7612u_dev *d);
 int mt_init_hardware(struct mt7612u_dev *d, const char *fw_dir);
+/*
+ * enable_rx is not a bool: the receiver must never come up with nothing
+ * draining EP 4, and "1" was written at three call sites that had no drainer
+ * yet.  Naming the drain source makes mt_mac_start() able to check.
+ */
+#define MT_RX_DRAIN_NONE 0   /* TX only */
+#define MT_RX_DRAIN_RING 1   /* the async ring is already draining - asserted */
+#define MT_RX_DRAIN_SYNC 2   /* caller drains with mt_rx_one() on this thread */
 int mt_mac_start(struct mt7612u_dev *d, int enable_rx);
 void mt_rx_flush(struct mt7612u_dev *d);
 int mt_mac_stop(struct mt7612u_dev *d);
+/*
+ * Silence the receiver while leaving TX up. Must run BEFORE the EP 4 ring is
+ * cancelled: mt_async_stop() reaps the ring first and mt_mac_stop() does not
+ * clear ENABLE_RX until after its own mt_rx_flush() and TX-idle wait, so the
+ * teardown otherwise reproduces exactly the undrained-receiver window that
+ * mt_mac_start() refuses to create - at the end of every session.
+ */
+void mt_mac_rx_disable(struct mt7612u_dev *d);
 
 /* --- tx.c --- */
 uint16_t mt_tx_rate_word(const struct mt7612u_tx_rate *r);

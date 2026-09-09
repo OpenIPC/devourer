@@ -523,11 +523,10 @@ already-up chip, enabling TX+RX on one handle; `send_packet`) and constructs
 `RtlJaguarDevice` / `RtlJaguar2Device` / `RtlJaguar3Device` / `RtlKestrelDevice`
 / `Rtl8733bDevice` per backend. `Rtl8812aDevice` is a deprecated alias of
 `RtlJaguarDevice`. The five Realtek backends derive from `IRtlRadio`
-(`src/IRtlRadio.h`), which adds the Realtek-only members (`GetRxEnergy`,
-`SetXtalCap`/`GetXtalCap`, `ProbeEfuseStability`, `DumpChipState`); reach them
-via `dynamic_cast<IRtlRadio*>` and treat `nullptr` as "not on this radio".
-Optional device methods are **virtual with not-ported
-defaults**, not pure virtual — a backend that hasn't ported a feature inherits
+(`src/IRtlRadio.h`), the Realtek-only extension of `IRadio` — the header
+carries the member list and the downcast contract. Optional device methods
+are **virtual with not-ported defaults**, not pure virtual — a backend that
+hasn't ported a feature inherits
 `false`/`0`/a full-path fallback rather than a fake. Check the override list in
 the backend's header before believing a cross-generation claim.
 

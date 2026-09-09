@@ -74,7 +74,7 @@ DEVOURER_PID=0x8813 DEVOURER_CHANNEL=100 DEVOURER_BF_DETECT_REPORT=4 \
 # single-radio beamformer: the report is addressed TO the sounder, so one
 # adapter can sound and capture its own reports — DEVOURER_TX_WITH_RX=thread
 # runs the RX worker loop on a thread next to the TX loop (one bring-up, one
-# claimed handle; see StartRxLoop in IRtlDevice). Hardware-validated on the
+# claimed handle; see StartRxLoop in IRadio). Hardware-validated on the
 # 8814AU (Jaguar-1), the 8822BU (Jaguar-2) and both Jaguar-3 variants
 # (8822CU / 8822EU) — 50k+ self-captured reports per 20 s at full sounding
 # rate. On Jaguar-2/3, DEVOURER_BF_ARM_SOUNDER takes the sounder MAC

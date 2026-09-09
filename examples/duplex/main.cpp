@@ -295,7 +295,7 @@ static void packet_processor(const Packet &packet) {
 }
 
 struct TxArgs {
-  class IRtlDevice *rtl;  // unique_ptr lives in main(); raw ptr OK while
+  class IRadio *rtl;  // unique_ptr lives in main(); raw ptr OK while
                           // we join() before that unique_ptr goes away
   int interval_ms;
   size_t max_psdu;
@@ -483,12 +483,12 @@ int main(int argc, char **argv) {
   session.adopt_lock(usb_lock);
 
   WiFiDriver wifi_driver{logger};
-  auto owned_device = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+  auto owned_device = wifi_driver.CreateRadio(handle, nullptr, usb_lock,
                                                   devourer_config_from_env());
   /* The session owns the device from here: it is what guarantees the device
    * (and its in-flight TX) dies before libusb does. */
   session.adopt_device(std::move(owned_device));
-  IRtlDevice *const rtlDevice = session.device();
+  IRadio *const rtlDevice = session.device();
 
   int channel = 6;
   if (const char *ch_env = std::getenv("DEVOURER_CHANNEL")) {

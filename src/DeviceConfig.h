@@ -1,9 +1,9 @@
 #pragma once
 
 /* DeviceConfig — construction-time configuration, passed to
- * WiFiDriver::CreateRtlDevice (defaulted: CreateRtlDevice(handle) gives stock
+ * WiFiDriver::CreateRadio (defaulted: CreateRadio(handle) gives stock
  * behaviour). Fields are fixed for the device's lifetime; knobs that change
- * mid-session are runtime setters on IRtlDevice / the concrete device classes
+ * mid-session are runtime setters on IRadio / the concrete device classes
  * (SetTxMode, SetTxPowerOffsetQdb, SetRxPathMask, SetCcaMode, ...).
  *
  * The example binaries populate this from DEVOURER_* environment variables via
@@ -403,7 +403,7 @@ struct DeviceConfig {
      * (stub default 0xa/0xb). */
     std::optional<uint8_t> nb_adc;
     /* env: DEVOURER_XTAL_CAP — crystal-cap trim code applied at the end of
-     * bring-up (IRtlDevice::SetXtalCap). The CFO lever for narrowband at the
+     * bring-up (IRadio::SetXtalCap). The CFO lever for narrowband at the
      * edge of its budget; unset = efuse/default. Raw code, 0..0x3f (Jaguar1/2)
      * or 0..0x7f (Jaguar3). */
     std::optional<uint8_t> xtal_cap;

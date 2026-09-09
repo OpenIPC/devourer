@@ -7,7 +7,7 @@
  * side of the DEVOURER_CW_TONE emitter: a coarse "how much in-band energy /
  * channel activity is here" measurement that does NOT require receiving a frame.
  *
- * Filled by IRtlDevice::GetRxEnergy() from the chip's phydm facilities:
+ * Filled by IRadio::GetRxEnergy() from the chip's phydm facilities:
  *   - false-alarm (FA) + CCA (channel-busy) counters,
  *   - the DIG initial-gain index (a noise-floor proxy),
  *   - and, where triggered, the NHM in-band power histogram.

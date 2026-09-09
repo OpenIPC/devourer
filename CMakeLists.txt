@@ -173,7 +173,7 @@ add_library(devourer
     src/Radiotap.c
     src/RadiotapBuilder.cpp
     src/RadiotapBuilder.h
-    src/RtlTransport.h
+    src/Transport.h
     src/RtlAdapter.cpp
     src/RtlAdapter.h
     src/RtlUsbAdapter.h # compat alias shim (RtlUsbAdapter = RtlAdapter)
@@ -224,7 +224,7 @@ add_library(devourer
     src/hopset/HopsetSense.h
     src/hopset/HopsetFusion.h
     src/hopset/HopsetEvents.h
-    src/IRtlDevice.h
+    src/IRadio.h
     src/SignalStop.cpp
     src/SignalStop.h
     src/WiFiDriver.cpp
@@ -567,7 +567,7 @@ endif()
 # rtl8733bprobe — staged USB bring-up prober for the RTL8733B (HALMAC 87xx),
 # the pcieprobe/kestrelprobe sibling: identity -> power-on + EFUSE -> firmware
 # -> MAC/PHY -> TSSI audit stages, used alongside normal factory dispatch. It
-# never substitutes for the production IRtlDevice path.
+# never substitutes for the production IRadio path.
 if(DEVOURER_8733B)
     add_executable(rtl8733bprobe
         examples/rtl8733bprobe/main.cpp
@@ -676,7 +676,7 @@ target_link_libraries(duplex PUBLIC devourer PRIVATE PkgConfig::libusb)
 target_include_directories(duplex PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
 # txpower — reference consumer of the runtime TX-power API
-# (IRtlDevice::SetTxPowerOffsetQdb / SetTxPowerIndexOverride / GetTxPowerState /
+# (IRadio::SetTxPowerOffsetQdb / SetTxPowerIndexOverride / GetTxPowerState /
 # GetThermalStatus): opens one adapter, steps the knobs from CLI args (no env
 # vars), and prints machine-readable state markers. The register-level
 # validation driver for tests/txpwr_offset_regcheck.sh and the shape of an
@@ -775,7 +775,7 @@ target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
 
-# Headless guard for the TX quiesce seam (IRtlTransport::quiesce_tx via
+# Headless guard for the TX quiesce seam (ITransport::quiesce_tx via
 # RtlAdapter): the explicit "stop TX and wait it out" call every device makes
 # before anything is released. UsbTransport's cancel/drain is validated on
 # hardware under ASan — the test header says what it does and does not cover.

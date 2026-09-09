@@ -346,7 +346,7 @@ UsbTransport::~UsbTransport() {
   if (!_tx_shutdown.load(std::memory_order_acquire) &&
       _tx_inflight.load(std::memory_order_acquire) > 0)
     _logger->error("USB transport destroyed with TX in flight — the owner "
-                   "should quiesce (IRtlDevice::Stop) and release the device "
+                   "should quiesce (IRadio::Stop) and release the device "
                    "BEFORE libusb_close/libusb_exit; see the teardown order in "
                    "examples/common/DeviceSession.h");
   quiesce_tx();
@@ -810,7 +810,7 @@ void UsbTransport::transfer_callback(struct libusb_transfer *transfer) {
 }
 
 /* Cancel + drain, called while the caller's libusb context is still alive.
- * See IRtlTransport::quiesce_tx for the contract. */
+ * See ITransport::quiesce_tx for the contract. */
 void UsbTransport::quiesce_tx() {
   if (_tx_shutdown.exchange(true, std::memory_order_acq_rel))
     return; /* already quiesced (Stop() then the destructor) */

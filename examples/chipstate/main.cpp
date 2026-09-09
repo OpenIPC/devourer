@@ -37,7 +37,7 @@
 #include <vector>
 
 #include "DeviceSession.h"
-#include "IRtlDevice.h"
+#include "IRadio.h"
 #include "RtlAdapter.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
@@ -140,7 +140,7 @@ bool parse_poke(const char *s, RegOp &op) {
 }
 
 /* Raw register client over the transport layer — deliberately below
- * CreateRtlDevice so it works on any die, configured or not. */
+ * CreateRadio so it works on any die, configured or not. */
 int run_reg_ops(libusb_device_handle *handle, Logger_t logger,
                 libusb_context *ctx,
                 std::shared_ptr<devourer::UsbDeviceLock> lock,
@@ -290,13 +290,13 @@ int main(int argc, char **argv) {
    * very state it exists to inspect — one look and the evidence is gone. */
   cfg.tuning.teardown_power_down = false;
   WiFiDriver driver(logger);
-  std::unique_ptr<IRtlDevice> owned = driver.CreateRtlDevice(handle, ctx, lock, cfg);
+  std::unique_ptr<IRadio> owned = driver.CreateRadio(handle, ctx, lock, cfg);
   if (!owned) {
-    logger->error("CreateRtlDevice failed (chip support not built?)");
+    logger->error("CreateRadio failed (chip support not built?)");
     return 3;
   }
   session.adopt_device(std::move(owned));
-  IRtlDevice *const dev = session.device();
+  IRadio *const dev = session.device();
 
   if (a.init) {
     logger->info("chipstate: --init, running a full bring-up before the dump");

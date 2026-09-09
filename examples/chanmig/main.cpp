@@ -56,7 +56,7 @@ namespace cm = devourer::chanmig;
 using devourer::Ev;
 
 static devourer::EventSink *g_ev = nullptr;
-static IRtlDevice *g_dev = nullptr;
+static IRadio *g_dev = nullptr;
 static std::mutex g_dev_mu; /* serialize send/retune against the RX thread */
 /* The pure state machines are single-threaded by design; the demo drives them
  * from the RX callback, the tick loop, and (ground) the operator thread, so
@@ -541,7 +541,7 @@ int main(int argc, char **argv) {
 #endif
   WiFiDriver driver(logger);
   auto owned_device =
-      driver.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
+      driver.CreateRadio(handle, ctx, lock, devourer_config_from_env());
   if (!owned_device) {
     logger->error("no driver for this chip");
     return 1;
@@ -549,7 +549,7 @@ int main(int argc, char **argv) {
   /* The session owns the device from here: it is what guarantees the device
    * (and its in-flight TX) dies before libusb does. */
   session.adopt_device(std::move(owned_device));
-  IRtlDevice *const dev = session.device();
+  IRadio *const dev = session.device();
   g_dev = dev;
 
   Ev(*g_ev, "migrate.id").t().f("role", role.c_str())

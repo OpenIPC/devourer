@@ -211,7 +211,7 @@ the full boilerplate; the minimal RX path is:
 ```cpp
 auto logger = std::make_shared<Logger>();
 WiFiDriver driver(logger);
-auto dev = driver.CreateRtlDevice(handle);     // handle is already claimed
+auto dev = driver.CreateRadio(handle);     // handle is already claimed
 dev->Init(packetProcessor, SelectedChannel{
     .Channel      = 36,
     .ChannelOffset = 0,
@@ -229,13 +229,13 @@ Construction-time options travel in a `devourer::DeviceConfig`
 ```cpp
 devourer::DeviceConfig cfg;
 cfg.rx.keep_corrupted = true;                  // deliver CRC-failed frames too
-auto dev = driver.CreateRtlDevice(handle, ctx, lock, cfg);
+auto dev = driver.CreateRadio(handle, ctx, lock, cfg);
 ```
 
 Anything that changes mid-session is a runtime setter on the device:
 `SetTxMode`, `SetTxPowerOffsetQdb`, `SetRxPathMask`, `FastRetune`, ...
 The device class is chosen automatically from the chip behind the handle;
-one `IRtlDevice` interface covers all five hardware backends.
+one `IRadio` interface covers all five hardware backends.
 
 ## Going deeper
 

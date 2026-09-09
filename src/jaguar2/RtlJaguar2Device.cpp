@@ -1310,7 +1310,7 @@ size_t RtlJaguar2Device::send_packets(const TxPacketView *pkts, size_t count) {
    * interface-default per-frame loop. */
   const unsigned agg = _cfg.tx.usb_agg_max;
   if (agg <= 1 || !_device.is_usb() || count == 0)
-    return IRtlDevice::send_packets(pkts, count);
+    return IRadio::send_packets(pkts, count);
 
   devourer::TxAggLimits lim;
   lim.desc_size = jaguar2::TXDESC_SIZE_8822B;

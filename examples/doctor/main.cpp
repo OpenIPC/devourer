@@ -229,16 +229,16 @@ int main(int argc, char **argv) {
   cfg.rx.enable_with_tx = true;
 
   WiFiDriver driver(logger);
-  std::unique_ptr<IRtlDevice> owned_device =
-      driver.CreateRtlDevice(handle, ctx, lock, cfg);
+  std::unique_ptr<IRadio> owned_device =
+      driver.CreateRadio(handle, ctx, lock, cfg);
   if (!owned_device) {
-    logger->error("CreateRtlDevice failed (chip support not built?)");
+    logger->error("CreateRadio failed (chip support not built?)");
     return 3;
   }
   /* The session owns the device from here: it is what guarantees the device
    * (and its in-flight TX) dies before libusb does. */
   session.adopt_device(std::move(owned_device));
-  IRtlDevice *const dev = session.device();
+  IRadio *const dev = session.device();
 
   devourer::emit_adapter_caps(logger->events(), dev);
 

@@ -87,7 +87,7 @@ event every `N` ms:
  "igi":..,"frames":N,"rssi_mean":..,"rssi_max":..,"snr_mean":..,"snr_min":..}
 ```
 
-`cca_*`/`fa_*`/`igi` are frame-free (`IRtlDevice::GetRxEnergy`, `null` on a chip
+`cca_*`/`fa_*`/`igi` are frame-free (`IRadio::GetRxEnergy`, `null` on a chip
 that doesn't expose them); the FA/CCA counts
 are the delta since the previous event (each read resets the hardware counters).
 `rssi_*`/`snr_*`/`frames` are the rolling per-frame aggregate over the interval.
@@ -151,7 +151,7 @@ stays in the moderate regime where `cca_ofdm` rises without saturating.
 The energy sensor reads one channel at a time; to localise an interferer in
 frequency, sweep. With `DEVOURER_RX_SWEEP="1,6,11"` the sensor cycles the listed
 bins — the RX loop runs on a worker thread while the main thread retunes between
-reads via `IRtlDevice::FastRetune` (the lean intra-band hop path every
+reads via `IRadio::FastRetune` (the lean intra-band hop path every
 generation implements; `DEVOURER_RX_SWEEP_FULL=1` forces the full
 `SetMonitorChannel` per dwell for A/B) — and emits one `rx.energy`
 event (tagged `"ch":N`) per bin. Aggregating those into an energy-vs-frequency bar chart peaks (or,

@@ -61,7 +61,7 @@ public:
 
   /* Per-unit MAC at logical EFUSE offset 0x107 — the same offset on both dies
    * (hal_pg.h: EEPROM_MAC_ADDR_8822BU == EEPROM_MAC_ADDR_8821CU; why the MAC
-   * is the identity key at all: IRtlDevice::GetPermanentMacAddress). Served
+   * is the identity key at all: IRadio::GetPermanentMacAddress). Served
    * from the cached logical map — a lookup post-bring-up, a real physical walk
    * on a pre-init call. false when unprogrammed (all-0xFF) or unread
    * (all-0x00). */
@@ -80,11 +80,11 @@ public:
    * VHT regulatory clamp — hw_rate 0x2c-0x3f).
    *
    * `offset_steps` is the runtime TX-power offset (TXAGC index steps, 0.5 dB
-   * each) behind IRtlDevice::SetTxPowerOffsetQdb: folded AFTER the min() with
+   * each) behind IRadio::SetTxPowerOffsetQdb: folded AFTER the min() with
    * the regulatory table, clamped only at the 6-bit rails (the saturation
    * flags below record rail hits — reset per apply).
    *
-   * A non-null `diffs` (IRtlDevice::SetTxPowerRateDiffs) REPLACES the
+   * A non-null `diffs` (IRadio::SetTxPowerRateDiffs) REPLACES the
    * calibrated per-rate shape: every rate is written at the section reference
    * rate's index (HT MCS7 1SS, the anchor) plus the caller's own diff for that
    * rate, quantized to this family's 0.5 dB step. Null keeps the calibrated

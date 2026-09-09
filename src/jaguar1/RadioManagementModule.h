@@ -56,7 +56,7 @@ enum RATE_SECTION {
 #include "RateDefinitions.h"
 
 /* ThermalStatus/ThermalBucket moved to the generation-agnostic
- * src/ThermalStatus.h when GetThermalStatus was promoted to IRtlDevice;
+ * src/ThermalStatus.h when GetThermalStatus was promoted to IRadio;
  * the alias keeps the many existing Jaguar1 + demo references compiling
  * unchanged. */
 #include "../ThermalStatus.h"
@@ -123,7 +123,7 @@ class RadioManagementModule {
   /* Runtime TX-power offset in TXAGC index steps (0.5 dB each), folded onto
    * the per-rate baseline (EFUSE table or flat override) AFTER the per-rate
    * regulatory min and clamped only at the 6-bit rails — the relative knob
-   * behind IRtlDevice::SetTxPowerOffsetQdb. The saturation flags record
+   * behind IRadio::SetTxPowerOffsetQdb. The saturation flags record
    * whether the last apply hit a rail on any rate (reset per
    * PHY_SetTxPowerLevel8812 pass) — the "knob out of travel" signal for a
    * closed-loop controller. */
@@ -282,7 +282,7 @@ public:
 
   /* Read-only dump of the canary register set (BB / MAC / per-path RF) to the
    * diagnostic plane. Public because it is also the read-only inspection path
-   * for a chip that was never Init'ed — see IRtlDevice::DumpChipState. */
+   * for a chip that was never Init'ed — see IRadio::DumpChipState. */
   void DumpCanary();
 
 private:

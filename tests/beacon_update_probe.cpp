@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
   if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lock) != 0)
     return 1;
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRtlDevice(h, ctx, lock, devourer_config_from_env());
+  auto dev = wifi.CreateRadio(h, ctx, lock, devourer_config_from_env());
   if (!dev) { fprintf(stderr, "no driver\n"); return 1; }
 
   if (rx_mode) {

@@ -3,7 +3,7 @@
 #
 # WriteTsf (REG_TSFTR 0x0560) was shown NOT to move the beacon TBTT air-time
 # (the beacon engine runs off a separate/per-port timer). This exercises +
-# validates the productized actuator IRtlDevice::AdjustBeaconTiming(us): a
+# validates the productized actuator IRadio::AdjustBeaconTiming(us): a
 # ONE-SHOT beacon-interval tweak (REG_BCN_INTERVAL 0x0554) — run one interval at
 # (nominal +/- delta) TU then restore, and a clean interval-phased engine
 # advances/retards the next TBTT by delta TU, resuming cadence phase-shifted.
@@ -79,7 +79,7 @@ int main(int argc,char**argv){
   std::shared_ptr<devourer::UsbDeviceLock> lk;
   if(devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h),logger,true,lk)!=0)return 1;
   WiFiDriver wifi(logger);
-  auto dev=wifi.CreateRtlDevice(h,ctx,lk,devourer_config_from_env());
+  auto dev=wifi.CreateRadio(h,ctx,lk,devourer_config_from_env());
   if(!dev)return 1;
   dev->InitWrite(SelectedChannel{ch,0,CHANNEL_WIDTH_20});
   std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -137,7 +137,7 @@ int main(){
   std::shared_ptr<devourer::UsbDeviceLock> lk;
   if(devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h),logger,true,lk)!=0)return 1;
   WiFiDriver wifi(logger);
-  auto dev=wifi.CreateRtlDevice(h,ctx,lk,devourer_config_from_env());
+  auto dev=wifi.CreateRadio(h,ctx,lk,devourer_config_from_env());
   if(!dev)return 1;
   auto cb=[](const Packet&p){
     if(p.Data.size()<32||p.RxAtrib.crc_err)return;

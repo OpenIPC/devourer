@@ -80,7 +80,7 @@ which is why scheduled **UL** rides beacon-steered timing, not `send_packet`.
 A scheduled MAC that carries its DCI-style grant map in the beacon body must
 be able to **change the airing beacon's content** without missing, duplicating
 or tearing beacons. The primitive is
-`IRtlDevice::UpdateBeaconPayload(beacon, len)` — an in-place content swap for
+`IRadio::UpdateBeaconPayload(beacon, len)` — an in-place content swap for
 an active `StartBeacon` (same buffer contract; interval, TBTT phase and port
 identity untouched) riding the same reserved-page re-download the TBTT steers
 use. Its companion `StopBeacon()` silences the beacon function: the chip

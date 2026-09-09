@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Register-level validation of the runtime TX-power API (IRtlDevice::
+# Register-level validation of the runtime TX-power API (IRadio::
 # SetTxPowerOffsetQdb / SetTxPowerIndexOverride / GetTxPowerState).
 #
 # Cells per plugged DUT (skip-if-unplugged, PASS/FAIL/SKIP tally like

@@ -11,7 +11,7 @@
 
 #include "logger.h"
 #include "DeviceConfig.h"
-#include "IRtlDevice.h"
+#include "IRadio.h"
 #include "RtlAdapter.h"
 #include "RxQuality.h" /* RxQualityAccumulator + build_rx_quality */
 #include "SelectedChannel.h"
@@ -39,7 +39,7 @@ struct ChipInfo {
 
 /* RtlKestrelDevice is the orchestrator for the Realtek "Kestrel" Wi-Fi 6 /
  * 802.11ax family (G6 "phl" vendor architecture) — RTL8852BU/8832BU and
- * RTL8852CU/8832CU. It implements the same IRtlDevice contract as the three
+ * RTL8852CU/8832CU. It implements the same IRadio contract as the three
  * Jaguar (11ac) generations so the demos and WiFiDriver factory treat all
  * four uniformly.
  *
@@ -49,7 +49,7 @@ struct ChipInfo {
  * hand-ported C++ here + HalKestrel/KestrelFw; the halbb PHY and halrf
  * calibration planes are the vendor C compiled verbatim (hal/halbb, hal/halrf)
  * behind the kestrel glue. */
-class RtlKestrelDevice : public IRtlDevice {
+class RtlKestrelDevice : public IRadio {
 public:
   RtlKestrelDevice(RtlAdapter device, Logger_t logger,
                    kestrel::ChipVariant variant = kestrel::ChipVariant::C8852B,
@@ -188,7 +188,7 @@ public:
   kestrel::ChipVariant variant() const { return _variant; }
 
   /* Staged bring-up, exposed for kestrelprobe's "power" stage: power the MAC
-   * on and dump the efuse. Not part of the IRtlDevice contract (Init/InitWrite
+   * on and dump the efuse. Not part of the IRadio contract (Init/InitWrite
    * drive the full sequence). Returns false on failure. */
   bool PowerOnAndReadEfuse(kestrel::EfuseInfo &out);
 

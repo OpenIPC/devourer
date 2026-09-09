@@ -337,7 +337,7 @@ struct Adapter {
   devourer::DeviceSession session;
 
   libusb_device_handle *handle() const { return session.handle(); }
-  IRtlDevice *dev() const { return session.device(); }
+  IRadio *dev() const { return session.device(); }
 };
 
 /* Open one adapter by VID:PID on its own libusb context, claim + reset, and build
@@ -368,7 +368,7 @@ static bool open_adapter(Adapter &a, uint16_t vid, uint16_t pid,
   a.session.adopt_lock(lock);
   WiFiDriver driver(logger);
   auto owned_device =
-      driver.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
+      driver.CreateRadio(handle, ctx, lock, devourer_config_from_env());
   if (!owned_device)
     return false;
   a.session.adopt_device(std::move(owned_device));

@@ -28,7 +28,7 @@ RtlAdapter::RtlAdapter(libusb_device_handle *dev_handle, Logger_t logger,
   init_from_transport(cfg);
 }
 
-RtlAdapter::RtlAdapter(std::shared_ptr<devourer::IRtlTransport> transport,
+RtlAdapter::RtlAdapter(std::shared_ptr<devourer::ITransport> transport,
                        Logger_t logger, const devourer::DeviceConfig &cfg)
     : _transport{std::move(transport)}, _logger{std::move(logger)} {
   init_from_transport(cfg);

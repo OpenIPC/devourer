@@ -33,7 +33,7 @@ without stalling the data stream is the engineering problem.
 
 ## The hop engine: a lean retune
 
-`IRtlDevice::FastRetune(channel, cache_rf)` is the generation-agnostic entry
+`IRadio::FastRetune(channel, cache_rf)` is the generation-agnostic entry
 point. The default implementation is the full `SetMonitorChannel`; every chip
 family overrides it with a stripped-down path. The vendor's channel-set routine
 does a great deal that does not change between two channels of the same band and

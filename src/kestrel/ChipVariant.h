@@ -11,7 +11,7 @@ namespace kestrel {
  *   C8852B — RTL8852BU / RTL8832BU  (die-id 0x51 at R_AX_SYS_CHIPINFO)
  *   C8852C — RTL8852CU / RTL8832CU  (die-id 0x52)
  *
- * Resolved at construction in WiFiDriver::CreateRtlDevice — from the USB PID
+ * Resolved at construction in WiFiDriver::CreateRadio — from the USB PID
  * (kestrel::variant_for_usb_id), NOT from the 0x00FC register byte the 11ac
  * dispatch reads: on AX silicon 0x00FC is R_AX_SYS_CHIPINFO, whose 8852A value
  * (0x50) collides with the 8822B cold-boot transient the Jaguar2 dispatch

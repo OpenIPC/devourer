@@ -273,7 +273,7 @@ int main() {
   session.adopt_lock(usb_lock);
 
   WiFiDriver driver(logger);
-  auto owned_device = driver.CreateRtlDevice(handle, ctx, usb_lock,
+  auto owned_device = driver.CreateRadio(handle, ctx, usb_lock,
                                              devourer_config_from_env());
   if (!owned_device) {
     logger->error("No driver for this chip in this build — exiting");
@@ -282,7 +282,7 @@ int main() {
   /* The session owns the device from here: it is what guarantees the device
    * (and its in-flight TX) dies before libusb does. */
   session.adopt_device(std::move(owned_device));
-  IRtlDevice *const dev = session.device();
+  IRadio *const dev = session.device();
   devourer::emit_adapter_caps(*g_ev, dev);
   const devourer::AdapterCaps caps = dev->GetAdapterCaps();
 
@@ -360,7 +360,7 @@ int main() {
   cm::ScanScheduler sched(cfg);
 
   /* --- RX loop on a worker thread (rxdemo sweep pattern) --- */
-  IRtlDevice *devp = dev;
+  IRadio *devp = dev;
   const cm::ScanScheduler::DwellPlan first = sched.next(steady_ms());
   std::thread rx([devp, first, &logger]() {
     try {

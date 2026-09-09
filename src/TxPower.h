@@ -1,6 +1,6 @@
 /* Runtime TX-power control types for the adaptive link.
  *
- * The TX-power lever has three knobs on IRtlDevice, all live (applied
+ * The TX-power lever has three knobs on IRadio, all live (applied
  * immediately on a brought-up chip, recorded and applied at InitWrite
  * otherwise) and all sticky across channel switches:
  *
@@ -125,7 +125,7 @@ inline int txpkt_pwr_db_for_step(uint8_t step) {
 }
 
 /* Caller-supplied per-rate TX-power diffs (signed qdB vs the reference anchor),
- * programmed by IRtlDevice::SetTxPowerRateDiffs. Motivating consumer: a
+ * programmed by IRadio::SetTxPowerRateDiffs. Motivating consumer: a
  * wall-equalized rate ladder — each rate parked a uniform margin below its
  * measured PA-compression wall.
  *

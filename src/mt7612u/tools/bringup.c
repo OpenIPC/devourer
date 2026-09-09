@@ -422,7 +422,7 @@ static int gate_chan(uint8_t chan, const char *fw_dir)
 }
 
 /*
- * Exercise the adopt path - how a libusb-owning consumer (the IRtlDevice
+ * Exercise the adopt path - how a libusb-owning consumer (the IRadio
  * wrapper) reaches this subtree. Everything else in this tool arrives through
  * mt_open(), so without this gate the second entry point is never opened on
  * hardware at all.

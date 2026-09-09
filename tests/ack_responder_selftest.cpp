@@ -41,7 +41,7 @@ namespace {
  * but modelling the whole space keeps the test honest about WHERE it writes:
  * an implementation that hit the wrong offset would read back zero here rather
  * than quietly passing. */
-class FakeRegs final : public devourer::IRtlTransport {
+class FakeRegs final : public devourer::ITransport {
 public:
   std::map<uint16_t, uint8_t> mem;
   bool fail_writes = false;

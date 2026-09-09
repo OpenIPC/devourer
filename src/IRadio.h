@@ -1,5 +1,5 @@
-#ifndef IRTL_DEVICE_H
-#define IRTL_DEVICE_H
+#ifndef IRADIO_H
+#define IRADIO_H
 
 #include <cstddef>
 #include <cstdint>
@@ -35,7 +35,7 @@ struct TxPacketView {
   size_t len;
 };
 
-/* IRtlDevice is the chip-family-agnostic device contract used by the demos and
+/* IRadio is the chip-family-agnostic device contract used by the demos and
  * the WiFiDriver factory. The production family implementations are:
  *   - RtlJaguarDevice   — Realtek "Jaguar" wave-1 (8812AU/8811AU/8821AU/8814AU)
  *   - RtlJaguar2Device  — Realtek "Jaguar2" (8822BU/8812BU)
@@ -46,9 +46,9 @@ struct TxPacketView {
  * Chip-family-specific research helpers (BB-debug-port reads, the 8814 queue
  * poller, ...) are intentionally NOT part of this interface — callers that need
  * them dynamic_cast down to the concrete type. */
-class IRtlDevice {
+class IRadio {
 public:
-  virtual ~IRtlDevice() = default;
+  virtual ~IRadio() = default;
 
   virtual void Init(Action_ParsedRadioPacket packetProcessor,
                     SelectedChannel channel) = 0;
@@ -198,7 +198,7 @@ public:
    * feature flags (per-packet TX power, narrowband, fast retune, per-chain
    * RSSI). Resolved at construction — safe from any thread and callable BEFORE
    * Init/InitWrite (the demos emit it as the `adapter.caps` event right after
-   * CreateRtlDevice). Default returns supported=false. */
+   * CreateRadio). Default returns supported=false. */
   virtual devourer::AdapterCaps GetAdapterCaps() { return {}; }
 
   /* Best-effort live estimate of which RX chains are actually carrying signal
@@ -617,4 +617,4 @@ public:
   virtual void DumpChipState() {}
 };
 
-#endif /* IRTL_DEVICE_H */
+#endif /* IRADIO_H */

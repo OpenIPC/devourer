@@ -8,19 +8,19 @@
 #include "DeviceConfig.h"
 #include "FrameParser8733b.h"
 #include "Halmac8733bMac.h"
-#include "IRtlDevice.h"
+#include "IRadio.h"
 #include "Phy8733b.h"
 #include "Rtl8733bBringup.h"
 #include "RtlAdapter.h"
 #include "SelectedChannel.h"
 #include "logger.h"
 
-/* Dedicated RTL8733B IRtlDevice boundary. Power, firmware, EFUSE, HALMAC,
+/* Dedicated RTL8733B IRadio boundary. Power, firmware, EFUSE, HALMAC,
  * PHY/RF, monitor RX, and bounded legacy/HT injection all use the production
  * path. Unsupported optional controls refuse loudly rather than silently
  * no-opping, but a refusal never tears the session down — asking for a knob
  * this backend has not ported is not a hardware-safety event. */
-class Rtl8733bDevice : public IRtlDevice {
+class Rtl8733bDevice : public IRadio {
 public:
   Rtl8733bDevice(RtlAdapter device, Logger_t logger,
                  devourer::DeviceConfig cfg = {});
@@ -35,7 +35,7 @@ public:
   /* Lean intra-band, same-bandwidth hop (see Phy8733b::fast_retune — the
    * profile that sized it and the TSSI in-place contract live there). Falls
    * back to the full SetMonitorChannel on a band/width change or a cold
-   * radio, per the IRtlDevice contract. The cache_rf default binds at the
+   * radio, per the IRadio contract. The cache_rf default binds at the
    * interface declaration. */
   void FastRetune(uint8_t channel, bool cache_rf) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
@@ -74,13 +74,13 @@ public:
   /* Runtime TX power. Only the relative offset is ported: on a TSSI-offset PG
    * unit the closed loop is the power control, and moving its target is the
    * one lever this part has that was measured to work. The flat-index and
-   * per-rate-diff knobs stay on IRtlDevice's not-ported defaults —
+   * per-rate-diff knobs stay on IRadio's not-ported defaults —
    * kSafeTxAgcIndex8733b was witnessed unable to carry HT at all, and no
    * dB-per-step slope has been measured for the index. */
   devourer::TxPowerCaps GetTxPowerCaps() override;
   int SetTxPowerOffsetQdb(int qdb) override;
   devourer::TxPowerState GetTxPowerState() override;
-  /* Overridden only to refuse out loud. IRtlDevice's default returns void and
+  /* Overridden only to refuse out loud. IRadio's default returns void and
    * ignores the value, so on this backend — where the flat index is genuinely
    * unported — silence would be the caller's only answer, and a knob that
    * looks granted is precisely the defect this family's offset knob was added

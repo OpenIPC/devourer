@@ -110,7 +110,7 @@ inline constexpr uint8_t kMaxPgTargetQdbm8733b = 80;
 
 /* Which rail the runtime TX-power offset clamped at, if any — the signal a
  * closed-loop controller uses to know the knob has run out of travel
- * (IRtlDevice::GetTxPowerState).  `low` is set when a rate's shifted target hit
+ * (IRadio::GetTxPowerState).  `low` is set when a rate's shifted target hit
  * the int8 delta field's -128 floor — a shifted target below -64 qdBm, i.e.
  * -16 dBm — and deliberately NOT at the 0 qdBm target, which the loop keeps
  * responding past by ~7 dB; `high` when a rate hit the field's +127 ceiling.
@@ -247,7 +247,7 @@ public:
   bool enable_tssi_tracking(SelectedChannel channel, const EfuseInfo &efuse,
                             uint8_t max_target_qdbm, int offset_qdb = 0);
   bool disable_tssi_tracking();
-  /* Runtime TX-power actuator (IRtlDevice::SetTxPowerOffsetQdb). On a
+  /* Runtime TX-power actuator (IRadio::SetTxPowerOffsetQdb). On a
    * TSSI-offset PG unit the closed loop IS the TX-power control, so moving
    * power means moving the loop's per-rate target table: the five packed
    * dwords at 0x3a00..0x3a10, rewritten IN PLACE with tracking left enabled —

@@ -409,7 +409,7 @@ int mt_adopt(struct mt7612u_dev *d, libusb_device_handle *h,
 	d->kernel_was_attached = 0;
 	if (mt_identify(d, err))
 		return -1;
-	/* Same recovery mt_open() gets: this is the path the IRtlDevice wrapper
+	/* Same recovery mt_open() gets: this is the path the IRadio wrapper
 	 * takes, and a killed previous run wedges the device for it identically. */
 	mt_recover_usb(d);
 	return 0;

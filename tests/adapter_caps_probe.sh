@@ -31,7 +31,7 @@ for spec in $PIDS; do
   fi
   echo "== probing ${vid}:${pid} =="
   log=$(mktemp)
-  # rxdemo emits adapter.caps right after CreateRtlDevice, well before the RX
+  # rxdemo emits adapter.caps right after CreateRadio, well before the RX
   # loop; 6 s covers bring-up on the slowest chip. 2>/dev/null = pure events.
   sudo timeout 6 env DEVOURER_VID="0x${vid}" DEVOURER_PID="0x${pid}" \
       DEVOURER_LOG_LEVEL=silent build/rxdemo >"$log" 2>/dev/null || true

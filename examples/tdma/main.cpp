@@ -102,7 +102,7 @@ static libusb_device_handle* open_device(
 }
 
 // --- TX role ----------------------------------------------------------------
-static void run_tx(IRtlDevice* dev, const tdma::Config& c) {
+static void run_tx(IRadio* dev, const tdma::Config& c) {
   dev->InitWrite(SelectedChannel{c.channel, 0, CHANNEL_WIDTH_20});
   std::this_thread::sleep_for(std::chrono::seconds(2));
   const auto rt_crit = devourer::build_stream_radiotap(c.crit_rate);
@@ -225,7 +225,7 @@ static ChannelWidth_t desired_width(const tdma::Config& c) {
   return pos < c.sched.nb_ms ? c.sched.nb_w : c.sched.wide_w;
 }
 
-static void run_rx(IRtlDevice* dev, const tdma::Config& c) {
+static void run_rx(IRadio* dev, const tdma::Config& c) {
   // Bring RX up: rx-camp at its band; rx-sync wide (the control loop corrects).
   ChannelWidth_t start_w = c.role == tdma::Role::RxCamp ? c.camp_w : CHANNEL_WIDTH_20;
   g_rx_mhz.store(tdma::mhz_of(start_w));
@@ -320,12 +320,12 @@ int main() {
 
   WiFiDriver wifi(logger);
   auto owned_device =
-      wifi.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
+      wifi.CreateRadio(handle, ctx, lock, devourer_config_from_env());
   if (!owned_device) { logger->error("no driver for this chip"); return 1; }
   // The session owns the device from here: it is what guarantees the device
   // (and its in-flight TX) dies before libusb does.
   session.adopt_device(std::move(owned_device));
-  IRtlDevice* const dev = session.device();
+  IRadio* const dev = session.device();
 
   if (c.role == tdma::Role::Tx) run_tx(dev, c);
   else run_rx(dev, c);

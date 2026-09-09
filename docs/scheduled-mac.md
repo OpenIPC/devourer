@@ -174,8 +174,17 @@ undefined.
 
 The Jaguar1 disarm cell was measured on a reference `0bda:8812` responder
 with a `0bda:c812` solicitor at channel 36/MCS3/retry limit 12. It reproduced
-the gate-only failure and passed after restoring the captured pre-arm MACID;
-`src/AdapterCaps.h` owns the exact counts and the same-address adversary. The
+the gate-only failure and passed after restoring the captured pre-arm MACID:
+
+| Jaguar1 identity/disarm cell | ACKed / reported |
+|---|---:|
+| arm MAC1, then gate-only clear | 1946 / 1946 |
+| arm MAC1, then verified identity restore | 0 / 997 |
+| never arm, solicit captured MACID | 0 / 1074 |
+| arm captured MACID, then gate-only clear | 1120 / 1120 |
+
+The last two rows are the same-address adversary: restoring the captured MACID
+cannot disarm a responder armed to that address, so the arm is refused. The
 implementation also restores and readback-verifies BSSID as defensive
 port-state cleanup; the ACK-rate result does not establish that BSSID affected
 response behavior.

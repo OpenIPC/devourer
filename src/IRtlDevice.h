@@ -426,9 +426,10 @@ public:
    * process does NOT silence it (bench-bitten: a killed probe's beacon kept
    * airing and contaminated the next test's witness) — so any beaconing
    * session that ends without a device power-cycle must call this. Idempotent;
-   * returns false when no beacon was active or shutdown could not be verified.
-   * A failed verified stop must be retried (or followed by hardware shutdown)
-   * before a shared port is reused. */
+   * returns false when no beacon was active. Jaguar1 additionally reads back
+   * its three stop controls and returns false if any remains active; that
+   * failure must be retried (or followed by hardware shutdown) before its
+   * shared port is reused. */
   virtual bool StopBeacon() { return false; }
 
   /* Disable / restore the MAC carrier-sense gate that defers TX — both primary

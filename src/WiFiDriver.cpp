@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -30,6 +31,7 @@
 #include "rtl8733b/Rtl8733bDevice.h"
 #endif
 #include "rtl8733b/Rtl8733bUsbIds.h"
+#include "mt7612u/Mt7612uUsbIds.h" /* header-only VID:PID table, always compiled */
 
 namespace {
 
@@ -43,14 +45,29 @@ namespace {
  *   0x13 = RTL8822C, 0x17 = RTL8822E (RTL8812EU / RTL8822EU)  -> Jaguar3
  *   0x16 = RTL8733B (RTL8731BU / RTL8733BU, 1T1R)             -> RTL8733B
  * The chip-id (not the USB PID) is authoritative because the rtl8822e RTL8812EU
- * shares PID 0x8812 with the Jaguar1 RTL8812AU. Returns 0 on a failed read,
- * which falls through to the Jaguar1 path. (8821C = 0x09 hardware-verified on a
- * CF-811AC; it is a HalMAC/phydm Jaguar2 chip, NOT the page-write Jaguar1 the
- * "8821C" name might suggest — routing it to Jaguar1 would fail at DLFW.) */
-uint8_t read_chip_id(libusb_device_handle *dev_handle) {
+ * shares PID 0x8812 with the Jaguar1 RTL8812AU. (8821C = 0x09 hardware-verified
+ * on a CF-811AC; it is a HalMAC/phydm Jaguar2 chip, NOT the page-write Jaguar1
+ * the "8821C" name might suggest — routing it to Jaguar1 would fail at DLFW.)
+ *
+ * Returns nullopt when the control transfer itself failed, which is NOT the same
+ * as reading 0x00 and matters: this request is Realtek's vendor protocol, so a
+ * device that does not answer it is not Realtek silicon. Measured on the bench,
+ * same transfer, both arms:
+ *   RTL8812AU  0bda:8812  rc=1                      chip_id=0x04
+ *   MT7612U    0e8d:7612  rc=-7 LIBUSB_ERROR_TIMEOUT, destination byte UNTOUCHED
+ * (the MediaTek arm was run with a 0xAA poison byte, which survived — so the
+ * value the caller sees is its own initialiser, never a reading). Discarding the
+ * return code turned that into a plain 0, and 0 matches no id below, so the
+ * device reached the unconditional Jaguar1 fallback and came up as an RTL8812AU.
+ * Distinguishing the two lets CreateRadio refuse instead. A successful read of
+ * 0x00 is deliberately still returned as a value, so any cold-boot transient
+ * keeps its existing fall-through behaviour. */
+std::optional<uint8_t> read_chip_id(libusb_device_handle *dev_handle) {
   uint8_t id = 0;
-  libusb_control_transfer(dev_handle, REALTEK_USB_VENQT_READ, 5, 0x00FC, 0, &id,
-                          sizeof(id), USB_TIMEOUT);
+  int rc = libusb_control_transfer(dev_handle, REALTEK_USB_VENQT_READ, 5, 0x00FC,
+                                   0, &id, sizeof(id), USB_TIMEOUT);
+  if (rc != static_cast<int>(sizeof(id)))
+    return std::nullopt;
   return id;
 }
 
@@ -170,7 +187,49 @@ WiFiDriver::CreateRadio(libusb_device_handle *dev_handle,
 #endif
   }
 
-  uint8_t chip_id = read_chip_id(dev_handle);
+  /* MediaTek MT7612U gates on the USB VID:PID BEFORE the SYS_CFG2 read, for the
+   * same reason Kestrel does above — but with a sharper failure mode. On this
+   * silicon the Realtek vendor request read_chip_id() issues (bRequest 5) is not
+   * implemented at all: the control transfer stalls, `id` stays 0, and 0 matches
+   * no Realtek chip-id, so the adapter reaches the unconditional Jaguar1
+   * fallback at the end of this function (see read_chip_id's own note: "Returns
+   * 0 on a failed read, which falls through to the Jaguar1 path"). A MediaTek
+   * adapter then comes up as an RTL8812AU and every register access after it is
+   * addressed at the wrong MAC. Refusing here is the whole point of this gate.
+   *
+   * The pair set is disjoint from every USB id devourer tables, but the VENDOR
+   * ids are NOT — 0x0b05, 0x7392 and 0x2c4e each ship both silicon families —
+   * so this must stay a vid:pid test and must never be widened to "not a
+   * Realtek vendor id". Mt7612uUsbIds.h carries the measurement, and
+   * Mt7612uUsbIdsSelftest.cpp fails if a later id addition breaks it. */
+  if (mt7612u::is_usb_id(vid, pid)) {
+    _logger->error("MediaTek MT7612U ({:04x}:{:04x}) detected; devourer has no "
+                   "MediaTek radio backend yet — refusing rather than "
+                   "misdetecting it as Realtek",
+                   vid, pid);
+    return nullptr;
+  }
+
+  /* A vendor read that did not complete means this device is not speaking the
+   * Realtek protocol at all — refuse instead of dropping through to the Jaguar1
+   * fallback at the end of this function, which would bring an unknown part up
+   * as an RTL8812AU. This is the generation-independent half of the same guard
+   * the MediaTek gate above applies by id: the gate names the parts we know,
+   * this catches the ones we do not. It deliberately keys on TRANSFER FAILURE
+   * and not on "vid is not 0x0bda": devourer already serves Realtek silicon
+   * behind ASUS, Edimax, D-Link, ZyXEL, MSI and Mercury vendor ids, and every
+   * one of those answers this read normally (measured: an RTL8812AU returns
+   * 0x04), so a vendor-id rule would refuse working adapters. */
+  std::optional<uint8_t> chip_id_read = read_chip_id(dev_handle);
+  if (!chip_id_read) {
+    _logger->error("SYS_CFG2 chip-id read failed on {:04x}:{:04x} — not a "
+                   "Realtek vendor-protocol device; refusing rather than "
+                   "falling through to Jaguar1",
+                   vid, pid);
+    return nullptr;
+  }
+  uint8_t chip_id = *chip_id_read;
+
   if (rtl8733b::is_chip_id(chip_id)) {
 #if defined(DEVOURER_HAVE_8733B)
     _logger->info("Creating Rtl8733bDevice ({:04x}:{:04x}, chip-id 0x{:02x})",

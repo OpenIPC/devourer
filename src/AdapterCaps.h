@@ -39,7 +39,12 @@ enum class ChipGeneration : uint8_t {
   Jaguar2,
   Jaguar3,
   Rtl8733b, /* HALMAC 87xx 802.11n: RTL8731BU / RTL8733BU */
-  Kestrel /* Wi-Fi 6 / 802.11ax (RTL8852BU/8852CU) */
+  Kestrel,  /* Wi-Fi 6 / 802.11ax (RTL8852BU/8852CU) */
+  /* MediaTek MT7662 MAC (MT7612U / MT7662U, 2T2R 11ac USB) — the first
+   * non-Realtek generation. Register width, the vendor-request opcodes and the
+   * in-band MCU plane all differ; nothing that switches on this value may
+   * assume a Realtek register map. */
+  Mt7612u
 };
 
 inline const char *generation_name(ChipGeneration g) {
@@ -54,6 +59,8 @@ inline const char *generation_name(ChipGeneration g) {
     return "rtl8733b";
   case ChipGeneration::Kestrel:
     return "kestrel";
+  case ChipGeneration::Mt7612u:
+    return "mt7612u";
   default:
     return "unknown";
   }

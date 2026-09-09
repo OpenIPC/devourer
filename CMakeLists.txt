@@ -787,6 +787,18 @@ target_link_libraries(RadioIfaceSelftest PRIVATE devourer)
 
 add_test(NAME radio_iface COMMAND RadioIfaceSelftest)
 
+# Headless guard for the MediaTek USB-id gate. CreateRadio consults it BEFORE
+# the Realtek SYS_CFG2 read, so an id it wrongly claims is refused outright with
+# no second chance. This pins the one property that makes that safe: the
+# MediaTek pair set never claims a device a Realtek table owns. Header-only, so
+# it costs a compile and no hardware.
+add_executable(Mt7612uUsbIdsSelftest
+    tests/mt7612u_usb_ids_selftest.cpp
+)
+target_link_libraries(Mt7612uUsbIdsSelftest PRIVATE devourer)
+
+add_test(NAME mt7612u_usb_ids COMMAND Mt7612uUsbIdsSelftest)
+
 # Headless guard for the TX quiesce seam (ITransport::quiesce_tx via
 # RtlAdapter): the explicit "stop TX and wait it out" call every device makes
 # before anything is released. UsbTransport's cancel/drain is validated on

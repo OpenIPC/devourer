@@ -110,6 +110,19 @@ struct mt7612u_dev;
 struct mt7612u_dev *mt7612u_open(const char *fw_dir, const char **err);
 
 /*
+ * Same, but choosing which adapter to open when more than one is attached:
+ * selector is "<bus>-<port>" as lsusb spells the port path (e.g. "2-1"), or
+ * NULL for "the first one", which is what mt7612u_open() passes.
+ *
+ * Explicit because this is a library. It reads no environment of its own, so a
+ * caller with two adapters is never at the mercy of an inherited variable —
+ * the tool that wants MT7612U_DEV reads it and passes it here. The string is
+ * borrowed for the duration of the call only.
+ */
+struct mt7612u_dev *mt7612u_open_selected(const char *selector,
+                                          const char *fw_dir, const char **err);
+
+/*
  * Same, but adopting a libusb handle the caller already opened, reset and
  * claimed interface 0 on. Neither the handle nor the context is closed by
  * mt7612u_close() - the caller keeps ownership of both, and of any exclusive

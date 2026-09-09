@@ -2523,6 +2523,9 @@ int main(int argc, char **argv)
 	 * experiments observe-only.  Same spelling as before. */
 	if (getenv("MT7612U_NO_AUTORECOVER"))
 		dev.no_autorecover = 1;
+	/* Same shape, same reason: the library takes a selector, this tool is what
+	 * reads the environment for it. Operator-facing spelling is unchanged. */
+	dev.dev_selector = getenv("MT7612U_DEV");
 
 	/* Runs before the global mt_open() below, because it IS an open - of the
 	 * other public entry point. */

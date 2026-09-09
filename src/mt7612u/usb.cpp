@@ -357,12 +357,10 @@ void mt_recover_usb(struct mt7612u_dev *d)
 	 * a field rather than a getenv(): the tool that wants the behaviour sets
 	 * it (bringup does, from MT7612U_NO_AUTORECOVER).
 	 *
-	 * That is the direction of travel, not a property the library has yet:
-	 * open_selected() below still reads MT7612U_DEV directly. #412 deferred
-	 * that one because there is no public way to pass a selector -
-	 * mt7612u_open() allocates the device itself and the struct is opaque -
-	 * so removing it would strand multi-adapter callers with no replacement.
-	 * It moves to a DeviceConfig field when the backend lands (#419). */
+	 * The same is now true of adapter selection: d->dev_selector replaced the
+	 * getenv("MT7612U_DEV") that open_selected() used to read, and
+	 * mt7612u_open_selected() is the public way to pass it. This library reads
+	 * no environment at all. */
 	if (d->no_autorecover) {
 		if (mt_rr_chk(d, CFG_ADDR(MT_USB_U3DMA_CFG), &cfg))
 			LOG("auto-recovery disabled: U3DMA_CFG unreadable");
@@ -428,13 +426,18 @@ int mt_adopt(struct mt7612u_dev *d, libusb_device_handle *h,
 }
 
 /*
- * Open one MT7612U, honouring MT7612U_DEV when more than one is attached.
+ * Open one MT7612U, honouring the caller's selector when more than one is
+ * attached.
  *
  * libusb_open_device_with_vid_pid() returns whichever matching device
  * enumerates first, which is fine with one adapter and silently ambiguous
  * with two - a measurement then attributes itself to whichever unit the bus
- * happened to hand over. MT7612U_DEV takes a "bus-port" as lsusb and sysfs
+ * happened to hand over. The selector takes a "bus-port" as lsusb and sysfs
  * spell it ("2-1"), or a bare index into the matches in enumeration order.
+ * It is passed in, never read from the environment: bringup fills it from
+ * MT7612U_DEV, and a library consumer passes whatever its own config says.
+ * Messages below therefore name "the selector", not that variable - a caller
+ * that is not bringup would be told to set something it does not use.
  *
  * This is the ONE environment read left in the library, and it stays deferred
  * to integration as agreed in #412 rather than being removed here: there is no
@@ -554,9 +557,9 @@ static int lock_adapter(libusb_device *dev, const char **err)
 }
 #endif /* !_WIN32 */
 
-static libusb_device_handle *open_selected(libusb_context *ctx, const char **err)
+static libusb_device_handle *open_selected(libusb_context *ctx, const char *sel,
+                                           const char **err)
 {
-	const char *sel = getenv("MT7612U_DEV");
 
 	libusb_device **list = NULL;
 	libusb_device_handle *h = NULL;
@@ -588,13 +591,13 @@ static libusb_device_handle *open_selected(libusb_context *ctx, const char **err
 		if (!sel || !*sel) {
 			LOG("MT7612U at %s%s", id, matches ? "" : "  <- selected (first)");
 		} else if (!strcmp(sel, id)) {
-			LOG("MT7612U at %s  <- selected by MT7612U_DEV", id);
+			LOG("MT7612U at %s  <- selected", id);
 		} else {
 			char idx[8];
 
 			snprintf(idx, sizeof idx, "%d", matches);
 			if (strcmp(sel, idx)) { matches++; continue; }
-			LOG("MT7612U at %s  <- selected by MT7612U_DEV index %d", id, matches);
+			LOG("MT7612U at %s  <- selected by index %d", id, matches);
 		}
 
 		if (!h) {
@@ -621,9 +624,9 @@ static libusb_device_handle *open_selected(libusb_context *ctx, const char **err
 	}
 
 	if (matches > 1 && (!sel || !*sel))
-		WARN("%d MT7612U adapters attached and MT7612U_DEV is unset - "
-		    "using the first. Set MT7612U_DEV=<bus-port> to be explicit.",
-		    matches);
+		WARN("%d MT7612U adapters attached and no selector was given - "
+		    "using the first. Pass a \"<bus>-<port>\" selector to choose "
+		    "(bringup takes it from MT7612U_DEV).", matches);
 	libusb_free_device_list(list, 1);
 	if (!h && err)
 		*err = matches ? "MT7612U found but could not be opened (try sudo)"
@@ -641,7 +644,7 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 	if (libusb_init(&d->ctx)) { if (err) *err = "libusb_init failed"; return -1; }
 	d->owns_handle = 1;
 
-	d->h = open_selected(d->ctx, err);
+	d->h = open_selected(d->ctx, d->dev_selector, err);
 	if (!d->h) {
 		libusb_exit(d->ctx); d->ctx = NULL;
 		return -1;
@@ -666,7 +669,7 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 		/* Re-enumerated under a new address: reopen and re-detach. */
 		libusb_close(d->h);
 		mt_usleep(200000);
-		d->h = open_selected(d->ctx, NULL);
+		d->h = open_selected(d->ctx, d->dev_selector, NULL);
 		if (!d->h) {
 			if (err) *err = "device vanished after USB reset";
 			libusb_exit(d->ctx); d->ctx = NULL;

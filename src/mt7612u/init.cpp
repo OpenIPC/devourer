@@ -465,6 +465,12 @@ fail:
 
 struct mt7612u_dev *mt7612u_open(const char *fw_dir, const char **err)
 {
+	return mt7612u_open_selected(NULL, fw_dir, err);
+}
+
+struct mt7612u_dev *mt7612u_open_selected(const char *selector,
+                                          const char *fw_dir, const char **err)
+{
 	struct mt7612u_dev *d = NULL;
 
 	/* See mt_async_start(): nothrow does not cover a member constructor that
@@ -479,6 +485,7 @@ struct mt7612u_dev *mt7612u_open(const char *fw_dir, const char **err)
 		if (err) *err = "out of memory";
 		return NULL;
 	}
+	d->dev_selector = selector;
 	if (mt_open(d, err)) { mt_dev_state_destroy(d); delete d; return NULL; }
 	return bring_up(d, fw_dir, err);
 }

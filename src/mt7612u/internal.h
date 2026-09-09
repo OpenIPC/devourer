@@ -181,6 +181,13 @@ struct mt7612u_dev {
 	 * (bringup does). Note this is not yet true of the library as a whole:
 	 * open_selected() still reads MT7612U_DEV (see usb.cpp). */
 	uint8_t  no_autorecover;
+	/* Which adapter to open, "<bus>-<port>" as bringup spells it, or NULL for
+	 * "the first one". A field and not a getenv: this is a LIBRARY now
+	 * (DEVOURER_MT7612U links it into libdevourer), and a library that picks
+	 * its hardware from ambient process state can claim an adapter its caller
+	 * never asked for. Points at caller-owned storage and is only read during
+	 * mt_open(). */
+	const char *dev_selector;
 	uint8_t  bw_clamp_warned;   /* the "never widen" notice is once, not per frame */
 	int8_t   txpower_conf;      /* limit, 0.5 dB units (dBm * 2) */
 	int8_t   target_power;

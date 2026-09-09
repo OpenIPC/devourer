@@ -63,7 +63,7 @@ responses and data frames:
    `TriggerConfig`: frame-control `0x24`, duration, RA/TA, the HE Common Info
    field, and one User Info field per granted user (AID, RU allocation, MCS,
    spatial streams, target RSSI).
-2. `IRtlDevice::SendTrigger()` prepends a radiotap header (legacy OFDM, so any
+2. `IRadio::SendTrigger()` prepends a radiotap header (legacy OFDM, so any
    monitor decodes it) and calls the normal `send_packet()` transmit path. The
    firmware's trigger scheduler is bypassed entirely.
 
@@ -91,7 +91,7 @@ client firmware does not air. In short:
 
 ## Device API
 
-The surface is on `IRtlDevice`; each call returns `false` on pre-AX generations.
+The surface is on `IRadio`; each call returns `false` on pre-AX generations.
 
 - `SendTrigger(const TriggerConfig&)` — air one Basic Trigger. Default path is
   host-injection; set `DeviceConfig.debug.kestrel_trigger_f2p` (env

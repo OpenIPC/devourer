@@ -13,7 +13,7 @@
  * NIC-firmware host-NDPA path is unwired in the vendor tree. So, like the
  * F2P_TEST command, this is a byte-exact command surface the shipped fw does not
  * act on. The path that actually puts a Trigger on the air on this firmware is
- * host-injection (IRtlDevice::SendTrigger, src/TriggerTwt.h). See
+ * host-injection (IRadio::SendTrigger, src/TriggerTwt.h). See
  * docs/he-trigger-ul.md.
  *
  * These aggregates are devourer-native; the Kestrel HAL maps them onto the

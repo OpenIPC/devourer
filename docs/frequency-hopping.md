@@ -325,7 +325,7 @@ constants once); every subsequent same-band hop is ~1.5 ms.
 
 ## The ports: all three generations
 
-`IRtlDevice::FastRetune(channel, cache_rf)` is the generation-agnostic entry
+`IRadio::FastRetune(channel, cache_rf)` is the generation-agnostic entry
 point (default = the full `SetMonitorChannel` at the current width/offset), and
 every generation overrides it with a lean path built from the tricks above:
 
@@ -481,7 +481,7 @@ implies.
 
 ## The bandwidth analogue: FastSetBandwidth
 
-The same method applies to a *bandwidth* switch. `IRtlDevice::FastSetBandwidth(bw)`
+The same method applies to a *bandwidth* switch. `IRadio::FastSetBandwidth(bw)`
 is a lean same-channel toggle between 20 MHz and 5/10 MHz narrowband — and it
 collapses even harder than a hop, because narrowband keeps the RF in 20 MHz mode
 (so the RF bandwidth register, MAC BW, sub-channel, TX power, and IQK are all

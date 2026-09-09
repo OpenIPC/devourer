@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Register-level validation of the RTL8733B runtime TX-power offset
-# (IRtlDevice::SetTxPowerOffsetQdb / GetTxPowerState), the on-device
+# (IRadio::SetTxPowerOffsetQdb / GetTxPowerState), the on-device
 # counterpart to tests/rtl8733b_txpwr_selftest.cpp's pure math and to
 # tests/txpwr_offset_onair.sh's slope measurement.
 #

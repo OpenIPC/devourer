@@ -64,6 +64,7 @@
 #include "PcieTransport.h"
 #endif
 #include "WiFiDriver.h"
+#include "IRtlRadio.h"
 #include "env_config.h"
 #include "RadiotapBuilder.h"
 #include "logger.h"
@@ -147,7 +148,7 @@ static std::mutex g_hopset_mu;
 static std::optional<devourer::hopset::HopsetKeys> g_hopset_keys;
 static std::optional<devourer::hopset::HopsetAuthority> g_hopset_auth;
 static std::optional<devourer::hopset::AdaptiveScheduleView> g_hopset_view;
-static IRtlDevice *g_hopset_dev = nullptr;
+static IRadio *g_hopset_dev = nullptr;
 static std::atomic<uint64_t> g_hopset_tick_slot{0};
 /* Quiet-window sensing (DEVOURER_TX_SENSE=1) and the fusion layer that decides
  * whether this side's own evidence may act on the schedule. */
@@ -221,7 +222,7 @@ static void hopset_route(
  *
  * window_us is measured, not nominal — the hardware keeps counting during the
  * read's own bus round-trips, so excluding that time would inflate the rate. */
-static bool hopset_sense_window(IRtlDevice *dev, uint32_t settle_us,
+static bool hopset_sense_window(IRtlRadio *dev, uint32_t settle_us,
                                 uint32_t window_us, bool with_nhm,
                                 devourer::hopset::SensePhase phase,
                                 uint64_t slot, uint64_t round,
@@ -762,7 +763,7 @@ int main(int argc, char **argv) {
   }
 
   WiFiDriver wifi_driver{logger};
-  std::unique_ptr<IRtlDevice> owned_device;
+  std::unique_ptr<IRadio> owned_device;
 #if defined(DEVOURER_HAVE_PCIE)
   if (pcie_bdf) {
     auto transport = devourer::PcieTransport::Open(pcie_bdf, logger);
@@ -771,7 +772,7 @@ int main(int argc, char **argv) {
     devourer::Ev(*g_ev, "init.timing")
         .f("stage", "txdemo.open_device")
         .f("ms", ms_since_start());
-    owned_device = wifi_driver.CreateRtlDevicePcie(std::move(transport),
+    owned_device = wifi_driver.CreateRadioPcie(std::move(transport),
                                                    devourer_config_from_env());
   } else
 #endif
@@ -780,7 +781,7 @@ int main(int argc, char **argv) {
       logger->error("DEVOURER_PCIE_BDF set but this build has DEVOURER_PCIE=OFF");
       return 1;
     }
-    owned_device = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+    owned_device = wifi_driver.CreateRadio(handle, nullptr, usb_lock,
                                                devourer_config_from_env());
   }
   if (!owned_device) {
@@ -792,7 +793,7 @@ int main(int argc, char **argv) {
   /* The session owns the device from here: it is what guarantees the device
    * (and its in-flight TX) dies before libusb does. */
   session.adopt_device(std::move(owned_device));
-  IRtlDevice *const rtlDevice = session.device();
+  IRadio *const rtlDevice = session.device();
   devourer::Ev(*g_ev, "init.timing")
       .f("stage", "txdemo.create_device")
       .f("ms", ms_since_start());
@@ -800,7 +801,7 @@ int main(int argc, char **argv) {
 
   /* Jaguar1-only research features (TX-mode default, fast-retune hopping,
    * thermal telemetry, TXAGC override, BB-reg probe) are not part of the
-   * IRtlDevice contract — reach them by downcasting. jag is null on Jaguar3,
+   * IRadio contract — reach them by downcasting. jag is null on Jaguar3,
    * where those call sites are skipped, and compiled out entirely when Jaguar1
    * support isn't built. */
 #if defined(DEVOURER_HAVE_JAGUAR1)
@@ -814,6 +815,10 @@ int main(int argc, char **argv) {
 #if defined(DEVOURER_HAVE_JAGUAR3)
   RtlJaguar3Device *jag3 = dynamic_cast<RtlJaguar3Device *>(rtlDevice);
 #endif
+  /* Realtek-only members (frame-free energy counters, the crystal-cap trim).
+   * Null on a non-Realtek radio; every feature that needs it says so and
+   * skips rather than reporting a fictional measurement. */
+  IRtlRadio *const rtlRadio = dynamic_cast<IRtlRadio *>(rtlDevice);
 
   int channel = 161;
   if (const char *ch_env = std::getenv("DEVOURER_CHANNEL")) {
@@ -1066,7 +1071,7 @@ int main(int argc, char **argv) {
    * default apply; a frame embedding its own rate radiotap overrides it per
    * packet. Default (no env) = 6 M legacy. Replaces the former per-knob
    * DEVOURER_TX_MCS/_VHT/_LDPC/_STBC/_BW env vars + the DEVOURER_TX_HT_MCS gate. */
-  /* TX-mode default (DEVOURER_TX_RATE) — now a first-class IRtlDevice feature so
+  /* TX-mode default (DEVOURER_TX_RATE) — now a first-class IRadio feature so
    * it applies to Jaguar3 (8822CU/EU) too. The demo's beacon is rate-less, so
    * without this its Jaguar3 TX fell back to MGN_1M (1 Mbps) regardless of
    * DEVOURER_TX_RATE. Per-packet radiotap still overrides. */
@@ -1658,6 +1663,11 @@ int main(int argc, char **argv) {
        * contain an unknown number of our own frames and read as interference.
        * A silently wrong measurement feeding an exclusion is worse than no
        * measurement, so refuse rather than half-gate. */
+      if (!rtlRadio) {
+        logger->error("DEVOURER_TX_SENSE needs a Realtek radio (IRtlRadio "
+                      "frame-free counters) — sensing not armed");
+        tx_sense = false;
+      }
       if (tx_threads > 1) {
         logger->error("DEVOURER_TX_SENSE is incompatible with "
                       "DEVOURER_TX_THREADS>1 — sensing not armed");
@@ -1770,13 +1780,16 @@ int main(int argc, char **argv) {
         int dwell = 4000;
         if (const char *ms = std::getenv("DEVOURER_XTAL_STEP_MS"))
           dwell = std::atoi(ms);
+        if (!rtlRadio)
+          logger->warn("DEVOURER_XTAL_STEP is Realtek-only (IRtlRadio) — "
+                       "steps are logged with cap=-1 on this radio");
         std::string s(steps);
         size_t pos = 0;
         while (!g_devourer_should_stop && pos < s.size()) {
           size_t comma = s.find(',', pos);
           int cap = std::strtol(s.substr(pos, comma - pos).c_str(), nullptr, 0);
           pos = (comma == std::string::npos) ? s.size() : comma + 1;
-          int applied = rtlDevice->SetXtalCap(cap);
+          int applied = rtlRadio ? rtlRadio->SetXtalCap(cap) : -1;
           devourer::Ev(*g_ev, "xtal.step").f("cap", applied);
           logger->info("xtal.step cap=0x{:02x}", applied);
           for (int t = 0; t < dwell && !g_devourer_should_stop; t += 100)
@@ -1991,7 +2004,7 @@ int main(int argc, char **argv) {
         mode = "radiotap";
       }
       else if (hop_fast) {
-        /* IRtlDevice virtual: every generation implements the lean fast path
+        /* IRadio virtual: every generation implements the lean fast path
          * (cached RF18 write + on-change constants, with the internal
          * band-change fallback to the full set). */
         rtlDevice->FastRetune(static_cast<uint8_t>(ch),
@@ -2051,7 +2064,7 @@ int main(int argc, char **argv) {
         if (committing) {
           sense_armed = false;
         } else {
-          hopset_sense_window(rtlDevice, tx_sense_settle_us,
+          hopset_sense_window(rtlRadio, tx_sense_settle_us,
                               tx_sense_window_us, tx_sense_nhm,
                               devourer::hopset::SensePhase::PreBurst,
                               desired_slot, round,
@@ -2084,7 +2097,7 @@ int main(int argc, char **argv) {
           gen = g_hopset_view->state().generation;
         }
         sense_post_done = true;
-        hopset_sense_window(rtlDevice, 0, tx_sense_post_us,
+        hopset_sense_window(rtlRadio, 0, tx_sense_post_us,
                             tx_sense_nhm,
                             devourer::hopset::SensePhase::PostBurst,
                             desired_slot, round,

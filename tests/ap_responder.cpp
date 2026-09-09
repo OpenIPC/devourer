@@ -63,7 +63,7 @@
 // refuses to emit the auth (bench-proven — flipping 0x57->0x02 made the station
 // transmit auth). Use 0x02 (locally-administered unicast).
 static const uint8_t kBssid[6] = {0x02, 0x42, 0x75, 0x05, 0xd6, 0x00};
-static IRtlDevice* g_dev = nullptr;
+static IRadio* g_dev = nullptr;
 static std::vector<uint8_t> g_rt;
 static uint8_t g_chan = 6;
 static std::atomic<uint64_t> g_probe{0}, g_auth{0}, g_assoc{0}, g_sent{0}, g_data{0};
@@ -256,7 +256,7 @@ int main(int argc, char** argv) {
   std::shared_ptr<devourer::UsbDeviceLock> lk;
   if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lk) != 0) return 1;
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRtlDevice(h, ctx, lk, devourer_config_from_env());
+  auto dev = wifi.CreateRadio(h, ctx, lk, devourer_config_from_env());
   g_dev = dev.get();
   if (!g_dev) return 1;
   g_rt = devourer::build_stream_radiotap(devourer::parse_tx_mode_str("6M"));

@@ -80,7 +80,7 @@ public:
   bool probe_efuse_map(uint8_t *map, size_t len);
 
   /* Per-unit MAC at logical EFUSE offset 0x157 on this generation (why the MAC
-   * is the identity key at all: IRtlDevice::GetPermanentMacAddress).
+   * is the identity key at all: IRadio::GetPermanentMacAddress).
    *
    * On 8822E this is served from the value captured during rtw_hal_init: the
    * OTP is not reliably readable after TX/coex bring-up by design, the same

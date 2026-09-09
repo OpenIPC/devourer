@@ -58,7 +58,7 @@ int main(int argc, char **argv) {
   auto t = devourer::PcieTransport::Open(bdf, logger);
   if (!t) { fprintf(stderr, "pcie open failed\n"); return 1; }
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRtlDevicePcie(std::move(t));
+  auto dev = wifi.CreateRadioPcie(std::move(t));
   if (!dev) { fprintf(stderr, "create failed\n"); return 1; }
   dev->InitWrite(SelectedChannel{ch, 0, CHANNEL_WIDTH_20});
 

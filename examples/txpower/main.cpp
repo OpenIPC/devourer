@@ -209,7 +209,7 @@ ChannelWidth_t bw_enum(int bw) {
   }
 }
 
-void print_state(IRtlDevice *dev, bool with_thermal) {
+void print_state(IRadio *dev, bool with_thermal) {
   const devourer::TxPowerState s = dev->GetTxPowerState();
   devourer::Ev(*g_ev, "txpwr.state")
       .f("flat", s.flat_index)
@@ -286,16 +286,16 @@ int main(int argc, char **argv) {
   session.adopt_lock(lock);
 
   WiFiDriver driver(logger);
-  std::unique_ptr<IRtlDevice> owned_device =
-      driver.CreateRtlDevice(handle, ctx, lock, devourer_config_from_env());
+  std::unique_ptr<IRadio> owned_device =
+      driver.CreateRadio(handle, ctx, lock, devourer_config_from_env());
   if (!owned_device) {
-    logger->error("CreateRtlDevice failed (chip support not built?)");
+    logger->error("CreateRadio failed (chip support not built?)");
     return 1;
   }
   /* The session owns the device from here: it is what guarantees the device
    * (and its in-flight TX) dies before libusb does. */
   session.adopt_device(std::move(owned_device));
-  IRtlDevice *const dev = session.device();
+  IRadio *const dev = session.device();
 
   devourer::emit_adapter_caps(*g_ev, dev);
 

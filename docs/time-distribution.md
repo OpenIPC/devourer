@@ -3,7 +3,7 @@
 devourer exposes the chip's hardware TSF (the 802.11 MAC's free-running 64-bit
 microsecond clock) two ways: a per-frame receive stamp (`rx_pkt_attrib::tsfl`,
 the low 32 bits latched in the MAC at reception, on all three generations) and a
-direct `IRtlDevice::ReadTsf()`. Together they are the primitive an LTE eNB uses
+direct `IRadio::ReadTsf()`. Together they are the primitive an LTE eNB uses
 to give its UEs a common timebase — one node holds a reference and distributes it
 over the air, and every other node slaves to it with no GPS of its own. The
 `timesync` example (`examples/timesync/`) is a worked demonstration.
@@ -79,7 +79,7 @@ Run it with `tests/timesync_demo.sh` (one master + two slaves; joins the two
 ## Hardware beacon — sub-µs downlink (`DEVOURER_TSYNC_HWBEACON`)
 
 The software downlink above is bounded by the master's stamp→air jitter. The
-hardware path removes it entirely: `IRtlDevice::StartBeacon` loads a beacon into
+hardware path removes it entirely: `IRadio::StartBeacon` loads a beacon into
 the MAC's beacon reserved-page and lets the chip **auto-transmit it at each
 TBTT** — hardware-timed, and the MAC inserts the live 64-bit TSF into the
 beacon's timestamp field at the transmit instant. No `ReadTsf()`, no

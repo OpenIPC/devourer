@@ -28,13 +28,14 @@ build/doctor --bus 3 --port 2.3.3  # topology select (two same-PID adapters)
 
 1. **Bring-up** — `InitWrite`; an abort is an immediate FAILING.
 2. **EFUSE stability** — N fresh *physical* map reads
-   (`IRtlDevice::ProbeEfuseStability`), cross-compared byte-for-byte +
+   (`IRtlRadio::ProbeEfuseStability`), cross-compared byte-for-byte +
    EEPROM-ID (0x8129) validated. Any read-to-read mismatch is
    conclusive by itself. Not probed on the 8822E — its OTP is not
    reliably readable after bring-up by design, so probing would flag
-   healthy units.
+   healthy units. Realtek-only (`IRtlRadio`): on another radio doctor
+   skips this step and grades the remaining legs.
 3. **FW boot** — checksum + MCU-ready outcome of the bring-up's
-   download (`IRtlDevice::GetFwBootStatus`).
+   download (`IRadio::GetFwBootStatus`).
 4. **RX smoke** — FCS-clean frame count over `--listen-secs`. Ambient
    traffic counts. Hearing *nothing* is only SUSPECT unless
    `--expect-traffic` vouches for a source on the channel — an

@@ -705,7 +705,7 @@ void RtlJaguar3Device::apply_replay_wseq() {
                 _cfg.debug.replay_wseq);
 }
 
-/* Clean shutdown — see IRtlDevice::Stop. Best-effort: a chip that already
+/* Clean shutdown — see IRadio::Stop. Best-effort: a chip that already
  * dropped off the bus will make the de-init writes fail, which is fine. */
 void RtlJaguar3Device::Stop() {
   _coex_stop = true;
@@ -1762,7 +1762,7 @@ size_t RtlJaguar3Device::send_packets(const TxPacketView *pkts, size_t count) {
    * interface-default per-frame loop. */
   const unsigned agg = _cfg.tx.usb_agg_max;
   if (agg <= 1 || !_device.is_usb() || count == 0)
-    return IRtlDevice::send_packets(pkts, count);
+    return IRadio::send_packets(pkts, count);
 
   devourer::TxAggLimits lim;
   lim.desc_size = jaguar3::TXDESC_SIZE_8822C;
@@ -2047,7 +2047,7 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
    * the kernel's descriptor for group-addressed frames. */
   const uint8_t *dot11 = packet + radiotap_length;
   bool bmc = frame_len >= 6 && (dot11[4] & 0x01);
-  /* STBC guard (IRtlDevice contract) — 8822C/8822E are 2T2R so this never
+  /* STBC guard (IRadio contract) — 8822C/8822E are 2T2R so this never
    * fires today, but keeps the invariant uniform across families: never air an
    * STBC frame the chip can't do. */
   if (stbc && !GetTxCaps().stbc_ok)

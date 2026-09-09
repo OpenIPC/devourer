@@ -81,8 +81,8 @@ constexpr uint8_t kChipId8821C = 0x09;
 
 WiFiDriver::WiFiDriver(Logger_t logger) : _logger{std::move(logger)} {}
 
-std::unique_ptr<IRtlDevice>
-WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
+std::unique_ptr<IRadio>
+WiFiDriver::CreateRadio(libusb_device_handle *dev_handle,
                             libusb_context *ctx,
                             std::shared_ptr<devourer::UsbDeviceLock> usb_lock,
                             const devourer::DeviceConfig &cfg) {
@@ -274,11 +274,11 @@ WiFiDriver::CreateRtlDevice(libusb_device_handle *dev_handle,
 }
 
 #if defined(DEVOURER_HAVE_PCIE)
-std::unique_ptr<IRtlDevice> WiFiDriver::CreateRtlDevicePcie(
+std::unique_ptr<IRadio> WiFiDriver::CreateRadioPcie(
     std::shared_ptr<devourer::PcieTransport> transport,
     const devourer::DeviceConfig &cfg) {
   if (!transport) {
-    _logger->error("CreateRtlDevicePcie: null transport");
+    _logger->error("CreateRadioPcie: null transport");
     return nullptr;
   }
   /* Chip identity from SYS_CFG2 (0x00FC) over BAR2 MMIO — the same dispatch

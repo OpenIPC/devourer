@@ -6,7 +6,7 @@
  * The caller owns libusb (see the architecture note in CLAUDE.md), which means
  * the caller also owns the order things die in. That order is not arbitrary:
  *
- *   1. destroy the IRtlDevice   — quiesces TX (cancels and reaps the in-flight
+ *   1. destroy the IRadio   — quiesces TX (cancels and reaps the in-flight
  *                                 bulk-OUT URBs) and drops the transport, all
  *                                 while the libusb context is still valid;
  *   2. libusb_release_interface — the chip is no longer being driven;
@@ -30,7 +30,7 @@
 
 #include <libusb.h>
 
-#include "IRtlDevice.h"
+#include "IRadio.h"
 #include "UsbDeviceLock.h"
 #include "UsbOpen.h" /* find_wifi_interface — the interface the claim used */
 #include "logger.h"
@@ -59,11 +59,11 @@ public:
   void adopt_lock(std::shared_ptr<UsbDeviceLock> lock) {
     _lock = std::move(lock);
   }
-  void adopt_device(std::unique_ptr<IRtlDevice> dev) { _dev = std::move(dev); }
+  void adopt_device(std::unique_ptr<IRadio> dev) { _dev = std::move(dev); }
 
   libusb_context *context() const { return _ctx; }
   libusb_device_handle *handle() const { return _handle; }
-  IRtlDevice *device() const { return _dev.get(); }
+  IRadio *device() const { return _dev.get(); }
   const std::shared_ptr<UsbDeviceLock> &lock() const { return _lock; }
 
   /* Explicit teardown for demos that have work to do after the adapter is
@@ -90,7 +90,7 @@ public:
 
 private:
   Logger_t _logger;
-  std::unique_ptr<IRtlDevice> _dev;
+  std::unique_ptr<IRadio> _dev;
   std::shared_ptr<UsbDeviceLock> _lock;
   libusb_device_handle *_handle = nullptr;
   libusb_context *_ctx = nullptr;

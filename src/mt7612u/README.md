@@ -3,7 +3,7 @@
 **Not reachable from `CMakeLists.txt` yet.** This subtree is a complete,
 self-contained C library for the part — a public header, its own transport, no
 dependency on `RtlAdapter` — plus the bring-up harness that produced every
-measurement in `docs/mt7612u.md`. Wiring it in behind `IRtlDevice` is a
+measurement in `docs/mt7612u.md`. Wiring it in behind `IRadio` is a
 follow-up PR; nothing in the shipped library links against this today.
 
 It builds and tests on its own:

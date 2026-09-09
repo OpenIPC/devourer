@@ -13,7 +13,7 @@ namespace jaguar2 {
  *   C8821C — RTL8811CU / RTL8821CU: 1T1R AC600 + BT combo (SYS_CFG2 chip-id 0x09,
  *            hardware-verified on a CF-811AC; RF_TYPE bit27=0 => 1T1R)
  *
- * Resolved at construction in WiFiDriver::CreateRtlDevice from the SYS_CFG2
+ * Resolved at construction in WiFiDriver::CreateRadio from the SYS_CFG2
  * (0x00FC) chip-id byte and threaded into HalJaguar2 (table/RF-path select),
  * HalmacJaguar2Fw (blob select) and the calibration factory. */
 enum class ChipVariant { C8822B, C8821C };

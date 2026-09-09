@@ -25,7 +25,7 @@
 //   3. Construct a libusb handle from that fd via
 //      `libusb_wrap_sys_device(ctx, fd, &handle)` — same path Android
 //      takes from `UsbDeviceConnection.getFileDescriptor()`.
-//   4. Run a regular `CreateRtlDevice` + `Init` for RX_SECONDS to count
+//   4. Run a regular `CreateRadio` + `Init` for RX_SECONDS to count
 //      RX hits. Then close.
 //   5. Run an externally-triggered sysfs unbind+rebind so the chip
 //      goes through a real USB reset cycle.
@@ -183,7 +183,7 @@ int run_session(libusb_context* ctx, uint16_t vid, uint16_t pid,
 
   int before = g_rx.load();
   WiFiDriver drv(logger);
-  auto dev = drv.CreateRtlDevice(h, nullptr, nullptr,
+  auto dev = drv.CreateRadio(h, nullptr, nullptr,
                                  devourer_config_from_env());
 
   std::thread t([&]{

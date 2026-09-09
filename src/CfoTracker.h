@@ -9,7 +9,7 @@ namespace devourer {
 /* Closed-loop carrier-frequency-offset tracker (issue #217). Ported from the
  * vendor phydm_cfo_tracking control law: accumulate the per-frame path-A CFO
  * tail from the RX phy-status, and on a periodic tick step the crystal-cap
- * trim (IRtlDevice::SetXtalCap) by ±1 to drive the average CFO toward zero.
+ * trim (IRtlRadio::SetXtalCap) by ±1 to drive the average CFO toward zero.
  *
  * A bang-bang integrator with hysteresis: it starts correcting once |CFO|
  * exceeds an enable threshold and stops inside a deadband, so it doesn't

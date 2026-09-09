@@ -15,7 +15,7 @@
 #include "BbDbgportReader.h"
 #include "LaCapture.h"
 #include "HalModule.h"
-#include "IRtlDevice.h"
+#include "IRtlRadio.h"
 #include "SelectedChannel.h"
 #include "EepromManager.h"
 #include "RadioManagementModule.h"
@@ -28,7 +28,7 @@ extern "C"
 #include "ieee80211_radiotap.h"
 }
 
-/* Action_ParsedRadioPacket is declared in IRtlDevice.h (shared with the
+/* Action_ParsedRadioPacket is declared in IRadio.h (shared with the
  * Jaguar3 device and the factory). */
 
 /* RtlJaguarDevice is the orchestrator for the Realtek "Jaguar" 802.11ac family
@@ -36,7 +36,7 @@ extern "C"
  * baseband). The chip is identified at construction time via SYS_CFG bits and
  * USB PID; this class drives bring-up, RX, and TX for whichever member of the
  * family is present. */
-class RtlJaguarDevice : public IRtlDevice {
+class RtlJaguarDevice : public IRtlRadio {
   /* Declared before every component that consumes it: members initialise in
    * declaration order, and _eepromManager / _radioManagement / _halModule all
    * take _cfg in the constructor's init list. */
@@ -97,7 +97,7 @@ public:
   ~RtlJaguarDevice() override;
   void Init(Action_ParsedRadioPacket packetProcessor,
             SelectedChannel channel) override;
-  /* Blocking RX worker loop on an already-brought-up chip (see IRtlDevice).
+  /* Blocking RX worker loop on an already-brought-up chip (see IRadio).
    * Init = bring-up + BFEE arm + StartRxLoop; a TX+RX caller does InitWrite
    * once, then runs this on its own std::thread next to the TX loop. */
   void StartRxLoop(Action_ParsedRadioPacket packetProcessor) override;
@@ -117,12 +117,12 @@ public:
    * cache_rf=true additionally avoids the per-write 20 ms C-cut RF-read sleep
    * by writing RF_CHNLBW from a cached value. Intended for channel hopping;
    * keeps the device channel state in sync for the 5 GHz CCK clamp.
-   * (The cache_rf default binds at IRtlDevice — virtual default arguments
+   * (The cache_rf default binds at IRadio — virtual default arguments
    * resolve statically, so overrides must not re-declare it.) */
   void FastRetune(uint8_t channel, bool cache_rf) override;
   void FastSetBandwidth(ChannelWidth_t bw) override;
   void InitWrite(SelectedChannel channel) override;
-  /* Legacy per-rate TXAGC override pair — superseded by the IRtlDevice
+  /* Legacy per-rate TXAGC override pair — superseded by the IRadio
    * runtime TX-power API (SetTxPowerIndexOverride applies in one call).
    * Inline forwards kept for one release cycle, Rtl8812aDevice-alias style. */
   [[deprecated("use SetTxPowerIndexOverride (applies live)")]]
@@ -135,7 +135,7 @@ public:
     ReApplyTxPower();
   }
 
-  /* Runtime TX-power control (IRtlDevice contract; see src/TxPower.h).
+  /* Runtime TX-power control (IRadio contract; see src/TxPower.h).
    * Jaguar1 caps: 6-bit TXAGC index, 0.5 dB (2 qdB) per step. The offset
    * folds into ComputeTxPowerIndex, so it reaches the per-rate TXAGC fanout
    * (0xc20..0xc4c / packed 0x1998 on 8814) AND the 0xc54 power-training
@@ -173,11 +173,11 @@ public:
   int SetXtalCap(int cap) override;
   int GetXtalCap() override { return _xtal_cap; }
   devourer::TxPowerState GetTxPowerState() override;
-  /* Per-chip TX caps (IRtlDevice): n_ss + STBC/LDPC/SGI/bw from the EFUSE
+  /* Per-chip TX caps (IRadio): n_ss + STBC/LDPC/SGI/bw from the EFUSE
    * RF-type. STBC needs >=2 chains, so 1T1R cuts (8811AU/8821AU) report
    * stbc_ok=false and send_packet drops an STBC request. */
   devourer::TxCaps GetTxCaps() override;
-  /* Aggregate identity + radio + feature caps (IRtlDevice). Composes GetTxCaps
+  /* Aggregate identity + radio + feature caps (IRadio). Composes GetTxCaps
    * / GetTxPowerCaps; identity from the EFUSE version-id + RF-type. */
   devourer::AdapterCaps GetAdapterCaps() override;
   /* Live per-chain RX-path activity (fed via _rxpaths in the RX loop). */
@@ -234,7 +234,7 @@ public:
   devourer::FwBootStatus GetFwBootStatus() override {
     return _halModule.GetFwBootStatus();
   }
-  /* Read-only canary dump, safe to call without Init — see IRtlDevice. */
+  /* Read-only canary dump, safe to call without Init — see IRadio. */
   void DumpChipState() override { _radioManagement->DumpCanary(); }
 
   /* Runtime TX-mode default. send_packet honours a frame's own radiotap rate
@@ -246,22 +246,22 @@ public:
   void ClearTxMode();
 
   bool send_packet(const uint8_t* packet, size_t length) override;
-  /* Batch TX with USB aggregation (IRtlDevice contract): with
+  /* Batch TX with USB aggregation (IRadio contract): with
    * cfg.tx.usb_agg_max > 1 consecutive frames are packed into shared bulk-OUT
    * URBs — one [txdesc][frame] block per frame, first descriptor carrying the
    * count in USB_TXAGG_NUM (see src/TxAggPlan.h; the MAC-side TDECTRL
    * block-desc count is programmed at bring-up when the knob is on). Falls
    * back to the per-frame loop when the knob is off. */
   size_t send_packets(const TxPacketView *pkts, size_t count) override;
-  /* Hardware ACK responder (IRtlDevice contract; src/AckResponder.h). */
+  /* Hardware ACK responder (IRadio contract; src/AckResponder.h). */
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
-  /* Carrier-sense gate (IRtlDevice contract): MAC 0x520[14]/[15] like the
+  /* Carrier-sense gate (IRadio contract): MAC 0x520[14]/[15] like the
    * HalMAC generations, plus this family's BB EDCCA thresholds (0x8a4) —
    * parked at never-trigger by the BB table, programmed to the vendor
    * operating point on enable (EDCCA only exists once they are set). */
   void SetCcaMode(bool disabled) override;
-  /* A-MPDU TX mode (IRtlDevice contract; src/AmpduMode.h). Programs the
+  /* A-MPDU TX mode (IRadio contract; src/AmpduMode.h). Programs the
    * Jaguar1 aggregate-fill timer (0x0456 — NOT the 0x0455 the HalMAC chips
    * use) + the 8814A burst-mode gate (0x04BC), and records the descriptor
    * state the TX path reads. */
@@ -276,7 +276,7 @@ public:
   bool GetPermanentMacAddress(uint8_t out[6]) override;
   uint64_t ReadTsf() override;
 
-  /* Hardware-timed beacon (IRtlDevice contract): download the beacon MPDU to
+  /* Hardware-timed beacon (IRadio contract): download the beacon MPDU to
    * the reserved page at the BCNQ boundary (the vendor rtl8812_download_rsvd_page
    * bracket: CR+1 SW-beacon-DMA, beacon function off, 0x422[6] cleared so the
    * QSEL-beacon bulk-OUT is stored instead of aired, BCN_VALID 0x20A[0] W1C +
@@ -285,16 +285,16 @@ public:
    * stored beacon airs with the hardware sequence pinned at 0 (kernel rtw88
    * parity). `interval_tu` is the beacon interval in TU (1024 µs). */
   bool StartBeacon(const uint8_t* beacon, size_t len, int interval_tu) override;
-  /* In-place beacon content swap (IRtlDevice contract): retain the new MPDU +
+  /* In-place beacon content swap (IRadio contract): retain the new MPDU +
    * a fresh BCNQ-boundary store; interval/TBTT/port identity untouched. */
   bool UpdateBeaconPayload(const uint8_t* beacon, size_t len) override;
   bool StopBeacon() override;
-  /* Beacon-TBTT steering (IRtlDevice contract) — the Jaguar2 steer-then-
+  /* Beacon-TBTT steering (IRadio contract) — the Jaguar2 steer-then-
    * re-download pattern: re-download the retained MPDU after the re-latch to
    * re-arm the bcn-valid latch. */
   int32_t AdjustBeaconTiming(int32_t microseconds) override;
   int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
-  /* TSF-preserving TBTT arm (IRtlDevice contract, J1 subset): the J1 TBTT is
+  /* TSF-preserving TBTT arm (IRadio contract, J1 subset): the J1 TBTT is
    * hardware-locked to the TSF grid (bench: a pinned nonzero offset never
    * holds — the phase follows the restored TSF), so only offset 0 is
    * supported (the arm/igniter StartBeacon uses); nonzero refuses. Steering

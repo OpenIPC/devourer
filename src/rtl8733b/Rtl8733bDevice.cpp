@@ -590,7 +590,7 @@ SelectedChannel Rtl8733bDevice::GetSelectedChannel() {
 size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
   const unsigned agg = _cfg.tx.usb_agg_max;
   if (agg <= 1 || !_device.is_usb() || count == 0)
-    return IRtlDevice::send_packets(pkts, count);
+    return IRadio::send_packets(pkts, count);
 
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
   if (!_phy_ready || !_mac_ready || !_tx_ready) {
@@ -621,7 +621,7 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
     std::vector<size_t> lens;
     for (size_t i = done; i < count && lens.size() < lim.max_frames; ++i) {
       /* A null view is treated exactly like a malformed one: it ends the run
-       * and, if it led, is skipped per the IRtlDevice::send_packets
+       * and, if it led, is skipped per the IRadio::send_packets
        * contract. */
       const uint16_t rlen =
           pkts[i].data == nullptr
@@ -981,7 +981,7 @@ void Rtl8733bDevice::SetCcaMode(bool disabled) {
   /* `true` (DEVOURER_DIS_CCA) is not ported. The HALMAC 87xx carrier-sense
    * gate has not been located and measured on this part, and this backend
    * does not guess at PHY/MAC writes it cannot read back. Refuse loudly, per
-   * the pure-virtual contract in IRtlDevice — but do NOT tear the session
+   * the pure-virtual contract in IRadio — but do NOT tear the session
    * down: an unsupported optional knob is not a hardware-safety event, and
    * card-disabling here would leave the caller with a dead chip for asking a
    * question. The session stays up with standard carrier-sense. */

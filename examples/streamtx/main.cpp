@@ -226,14 +226,14 @@ int main(int argc, char **argv) {
    * it. Explicit DEVOURER_DIS_CCA=0 still forces standard carrier-sense back on. */
   if (std::getenv("DEVOURER_DIS_CCA") == nullptr)
     stream_cfg.tuning.disable_cca = true;
-  auto owned_device = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+  auto owned_device = wifi_driver.CreateRadio(handle, nullptr, usb_lock,
                                                   stream_cfg);
   /* The session owns the device from here: it is what guarantees the device
    * (and its in-flight TX) dies before libusb does. */
   session.adopt_device(std::move(owned_device));
-  IRtlDevice *const rtlDevice = session.device();
+  IRadio *const rtlDevice = session.device();
   /* Jaguar1-only research features (TXAGC override, fast-retune hopping) aren't
-   * on the IRtlDevice contract — downcast for them; jag is null on Jaguar3, and
+   * on the IRadio contract — downcast for them; jag is null on Jaguar3, and
    * the downcast plus its call sites compile out when Jaguar1 isn't built. */
 #if defined(DEVOURER_HAVE_JAGUAR1)
   RtlJaguarDevice *jag = dynamic_cast<RtlJaguarDevice *>(rtlDevice);
@@ -265,7 +265,7 @@ int main(int argc, char **argv) {
    * corrupted-frame salvage path gets exercised (pairs with the B210 interferer
    * in tests/fused_fec_onair.sh). Applied once and held, unlike
    * txdemo's DEVOURER_TX_PWR_START ramp. Must follow InitWrite so it
-   * applies live. Generation-agnostic (IRtlDevice runtime TX-power API). */
+   * applies live. Generation-agnostic (IRadio runtime TX-power API). */
   if (const char *o = std::getenv("DEVOURER_TX_PWR_OVERRIDE")) {
     int idx = std::atoi(o);
     rtlDevice->SetTxPowerIndexOverride(idx);

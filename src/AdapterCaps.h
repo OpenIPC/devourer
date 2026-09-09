@@ -11,7 +11,7 @@
  * there is one source of truth per fact. Like those, it is STATIC — resolved at
  * construction, safe from any thread, callable before Init/InitWrite. The live
  * "which antennas look connected" question is deliberately NOT here (it needs
- * traffic); see IRtlDevice::GetActiveRxPaths / ActiveRxPaths in RxQuality.h.
+ * traffic); see IRadio::GetActiveRxPaths / ActiveRxPaths in RxQuality.h.
  *
  * FREQUENCY COVERAGE. The 5 GHz synthesizer on these parts tunes well past the
  * regulatory UNII channels (the vendor rtl88x2bu "monitor_chan_override" hack:

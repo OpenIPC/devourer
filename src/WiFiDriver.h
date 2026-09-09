@@ -4,7 +4,7 @@
 #include <memory>
 
 #include "DeviceConfig.h"
-#include "IRtlDevice.h"
+#include "IRadio.h"
 #include "logger.h"
 
 struct libusb_device_handle;
@@ -24,19 +24,19 @@ public:
   /* Constructs the right device for the chip behind `dev_handle`:
    * RtlJaguarDevice for Jaguar wave-1 (8812/8811/8821/8814AU), the later
    * Jaguar/Kestrel backends, or the dedicated RTL8733B backend. Returns the
-   * common IRtlDevice interface. See CreateRtlDevice() for dispatch rules.
+   * common IRadio interface. See CreateRadio() for dispatch rules.
    *
    * `usb_lock` is the exclusive per-adapter lock. Pass the one returned by
    * devourer::claim_interface_then_reset (the recommended open path) so it is
    * held for the device lifetime and not re-acquired. When null (a caller that
-   * opened/claimed the handle itself), CreateRtlDevice acquires its own as a
+   * opened/claimed the handle itself), CreateRadio acquires its own as a
    * best-effort second gate, and returns nullptr if the adapter is already in
    * use.
    *
    * `cfg` is the construction-time configuration (see DeviceConfig.h); the
    * default gives stock behaviour. Fixed for the device's lifetime. */
-  std::unique_ptr<IRtlDevice>
-  CreateRtlDevice(libusb_device_handle *dev_handle,
+  std::unique_ptr<IRadio>
+  CreateRadio(libusb_device_handle *dev_handle,
                   libusb_context *ctx = nullptr,
                   std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr,
                   const devourer::DeviceConfig &cfg = {});
@@ -51,8 +51,8 @@ public:
    * anything else logs and returns nullptr (same contract as an unsupported
    * chip on USB). No UsbDeviceLock: a vfio device fd is exclusive by
    * construction (a second open fails). */
-  std::unique_ptr<IRtlDevice>
-  CreateRtlDevicePcie(std::shared_ptr<devourer::PcieTransport> transport,
+  std::unique_ptr<IRadio>
+  CreateRadioPcie(std::shared_ptr<devourer::PcieTransport> transport,
                       const devourer::DeviceConfig &cfg = {});
 #endif
 };

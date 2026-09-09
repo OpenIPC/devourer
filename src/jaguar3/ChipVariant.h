@@ -11,7 +11,7 @@ namespace jaguar3 {
  *   C8822C — rtl8822c: RTL8812CU / RTL8822CU  (SYS_CFG2 chip-id 0x13)
  *   C8822E — rtl8822e: RTL8812EU / RTL8822EU  (SYS_CFG2 chip-id 0x17)
  *
- * Resolved at construction in WiFiDriver::CreateRtlDevice from the SYS_CFG2
+ * Resolved at construction in WiFiDriver::CreateRadio from the SYS_CFG2
  * (0x00FC) chip-id byte and threaded down into HalmacJaguar3Fw for blob select. */
 enum class ChipVariant { C8822C, C8822E };
 

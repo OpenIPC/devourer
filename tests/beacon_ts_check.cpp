@@ -34,7 +34,7 @@ int main() {
   std::shared_ptr<devourer::UsbDeviceLock> lk;
   if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lk) != 0) return 1;
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRtlDevice(h, ctx, lk, devourer_config_from_env());
+  auto dev = wifi.CreateRadio(h, ctx, lk, devourer_config_from_env());
   if (!dev) return 1;
   auto cb = [](const Packet& p) {
     if (p.Data.size() < 32 || p.RxAtrib.crc_err) return;

@@ -885,7 +885,7 @@ size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
    * rules in src/TxAggPlan.h. Knob off -> the interface-default loop. */
   const unsigned agg = _cfg.tx.usb_agg_max;
   if (agg <= 1 || !_device.is_usb() || count == 0)
-    return IRtlDevice::send_packets(pkts, count);
+    return IRadio::send_packets(pkts, count);
 
   devourer::TxAggLimits lim;
   lim.desc_size = TXDESC_SIZE;
@@ -1989,7 +1989,7 @@ bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {
   return true;
 }
 
-/* Clean shutdown — see IRtlDevice::Stop. Quiesce TX first so the de-init writes
+/* Clean shutdown — see IRadio::Stop. Quiesce TX first so the de-init writes
  * are not racing frames the transport still owns, then power the chip down.
  *
  * The power-down is the point: without it a Jaguar1 chip stays in ACT with its

@@ -1,7 +1,7 @@
 // beacon_tbtt.cpp — experiment (idea 6): can the MAC transmit a beacon at each
 // TBTT (hardware-timed off the TSF) in devourer's monitor/injection mode? Brings
 // up TX on a Jaguar1 adapter, loads a beacon into the beacon queue + enables the
-// beacon function (IRtlDevice::StartBeacon), then IDLES — no send loop. If
+// beacon function (IRadio::StartBeacon), then IDLES — no send loop. If
 // the beacon function works, the chip transmits the beacon on its own at the
 // interval. Observe with a second adapter running rxdemo (count rx.txhit of the
 // canonical SA; ~1 per 102.4 ms at 100 TU => hardware-timed TX confirmed).
@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
   std::shared_ptr<devourer::UsbDeviceLock> lock;
   if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lock) != 0) return 1;
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRtlDevice(h, ctx, lock, devourer_config_from_env());
+  auto dev = wifi.CreateRadio(h, ctx, lock, devourer_config_from_env());
   if (!dev) { fprintf(stderr, "no driver\n"); return 1; }
 
   dev->InitWrite(SelectedChannel{ch, 0, CHANNEL_WIDTH_20});

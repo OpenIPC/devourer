@@ -16,8 +16,14 @@
 #else
 #  include <libusb-1.0/libusb.h>
 #endif
-#include <pthread.h>
-#include <time.h>
+/* C++ only: the sync members below are std:: types, chosen over pthreads
+ * because MSVC has no <pthread.h> and devourer builds Windows first-class.
+ * Nothing outside this subtree includes this header; the public C ABI in
+ * include/mt7612u/mt7612u.h is unaffected and stays C-includable. */
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -124,9 +130,14 @@ struct mt_async {
 	int     tx_busy[MT_TX_RING];
 	/* Guards running, rx_active, tx_busy[], tx_inflight and rx_inflight -
 	 * all of which the event thread writes and the caller reads. */
-	pthread_mutex_t lock;
-	pthread_cond_t  cv;
-	pthread_t evt;
+	std::mutex lock;
+	/* condition_variable_any, not condition_variable: it waits on any
+	 * BasicLockable, so every site below keeps the plain lock()/unlock()
+	 * shape the pthread code had instead of being restructured around
+	 * unique_lock. The waits here are teardown and TX back-pressure, not a
+	 * hot path, so the extra indirection costs nothing measurable. */
+	std::condition_variable_any cv;
+	std::thread evt;
 	int evt_started;
 	int running, rx_active;
 	int tx_inflight, rx_inflight;
@@ -158,11 +169,17 @@ struct mt7612u_dev {
 	uint8_t  mcu_stale_pending;
 	uint8_t  chan;
 	uint8_t  bw;
-	pthread_mutex_t io_lock;   /* recursive: guards register + MCU transactions */
-	uint8_t  io_lock_ready;    /* io_lock initialised - guards its destroy */
+	/* Recursive: the PHY tick holds this and then nests mt_vendor_req /
+	 * mt_mcu_send, which take it again. As a member it is constructed with
+	 * the device, which is what retires the old io_lock_ready flag: a zeroed
+	 * pthread_mutex_t was a valid NON-recursive lock, so a path that skipped
+	 * the explicit init (the adopt path once did) self-deadlocked the tick.
+	 * That failure is now unrepresentable. */
+	std::recursive_mutex io_lock;
 	/* Observe-but-do-not-repair, for wedge experiments.  A field, not a
-	 * getenv: this library reads no environment - the tool that wants the
-	 * behaviour sets it before mt_open() (bringup does). */
+	 * getenv - the tool that wants the behaviour sets it before mt_open()
+	 * (bringup does). Note this is not yet true of the library as a whole:
+	 * open_selected() still reads MT7612U_DEV (see usb.cpp). */
 	uint8_t  no_autorecover;
 	uint8_t  bw_clamp_warned;   /* the "never widen" notice is once, not per frame */
 	int8_t   txpower_conf;      /* limit, 0.5 dB units (dBm * 2) */

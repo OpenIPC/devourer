@@ -1,38 +1,59 @@
-# Standalone: this subtree is not reachable from the project's CMakeLists.txt.
-# tests/api_link.c links against the public header alone, which is what keeps
-# that an honest test of the exported surface.
-CC      ?= gcc
-CFLAGS  ?= -O2 -g -Wall -Wextra -Wno-unused-parameter
+# Standalone build of the subtree. The project's CMakeLists.txt also compiles
+# the library sources (DEVOURER_MT7612U=ON); this Makefile stays because it
+# builds `bringup` and the offline tests, which CMake does not.
+#
+# The library is C++ (see internal.h): MSVC has no <pthread.h>, and devourer
+# builds Windows first-class, so the sync and timing primitives are std:: types.
+# Both builds therefore compile the SAME sources in the SAME language — there is
+# no second compilation mode that can rot unnoticed.
+#
+# tests/api_link.c is deliberately still C. It includes only the public header,
+# whose extern "C" guard is what keeps the exported surface callable from C;
+# compiling it with $(CC) is what actually tests that, and it would silently
+# stop testing it if it became C++ along with everything else.
+CC       ?= gcc
+CXX      ?= g++
+CXXFLAGS ?= -O2 -g -std=c++20 -Wall -Wextra -Wno-unused-parameter \
+            -Wno-missing-field-initializers
+CFLAGS   ?= -O2 -g -Wall -Wextra
 # -MMD -MP: without header deps, editing internal.h leaves stale objects with
 # the old struct layout linked against new ones. That corrupts the device
 # struct at runtime and presents as a wild pointer, not a build problem.
 DEPFLAGS = -MMD -MP
+INCS     = -I. -Iinclude
 LDLIBS   = -lusb-1.0 -lpthread
-LIBSRCS  = $(wildcard *.c)
+LIBSRCS  = $(wildcard *.cpp)
 TESTS    = tests/api_link tests/frame_shape tests/field_macros
-SRCS     = $(LIBSRCS) tools/bringup.c $(TESTS:=.c)
-OBJS     = $(SRCS:.c=.o)
-LIBOBJS  = $(LIBSRCS:.c=.o)
+CXXSRCS  = $(LIBSRCS) tools/bringup.cpp tests/frame_shape.cpp tests/field_macros.cpp
+CSRCS    = tests/api_link.c
+OBJS     = $(CXXSRCS:.cpp=.o) $(CSRCS:.c=.o)
+LIBOBJS  = $(LIBSRCS:.cpp=.o)
 DEPS     = $(OBJS:.o=.d)
 
 all: bringup $(TESTS)
 
+# Linked with $(CXX): the library objects are C++ and need libstdc++, including
+# on the api_link path whose own object is C.
 bringup: $(LIBOBJS) tools/bringup.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 # Links against the public header only, so a declaration with no definition
-# is a link error here rather than a surprise at the first caller.
+# is a link error here rather than a surprise at the first caller. Its object is
+# compiled as C, so this also fails if the extern "C" guard ever regresses.
 tests/api_link: $(LIBOBJS) tests/api_link.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/frame_shape: $(LIBOBJS) tests/frame_shape.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/field_macros: $(LIBOBJS) tests/field_macros.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) $(INCS) -c -o $@ $<
 
 %.o: %.c
-	$(CC) $(CFLAGS) $(DEPFLAGS) -I. -Iinclude -c -o $@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) $(INCS) -c -o $@ $<
 
 # No hardware and no privileges needed: safe to run anywhere. `bringup` is a
 # dependency but is not run: nothing else compiles it, so without it here a

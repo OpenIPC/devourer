@@ -7,6 +7,7 @@
  */
 #include <limits.h>
 #include <stdlib.h>
+#include <new>
 #include <string.h>
 #include "internal.h"
 #include "initvals.h"
@@ -459,26 +460,26 @@ static struct mt7612u_dev *bring_up(struct mt7612u_dev *d, const char *fw_dir,
 
 fail:
 	mt_close(d);
-	free(d);
+	delete d;
 	return NULL;
 }
 
 struct mt7612u_dev *mt7612u_open(const char *fw_dir, const char **err)
 {
-	struct mt7612u_dev *d = calloc(1, sizeof *d);
+	struct mt7612u_dev *d = new (std::nothrow) mt7612u_dev{};
 
 	if (!d) {
 		if (err) *err = "out of memory";
 		return NULL;
 	}
-	if (mt_open(d, err)) { mt_dev_state_destroy(d); free(d); return NULL; }
+	if (mt_open(d, err)) { mt_dev_state_destroy(d); delete d; return NULL; }
 	return bring_up(d, fw_dir, err);
 }
 
 struct mt7612u_dev *mt7612u_open_handle(void *h, void *ctx, const char *fw_dir,
                                         const char **err)
 {
-	struct mt7612u_dev *d = calloc(1, sizeof *d);
+	struct mt7612u_dev *d = new (std::nothrow) mt7612u_dev{};
 
 	if (!d) {
 		if (err) *err = "out of memory";
@@ -486,7 +487,7 @@ struct mt7612u_dev *mt7612u_open_handle(void *h, void *ctx, const char *fw_dir,
 	}
 	if (mt_adopt(d, (libusb_device_handle *)h, (libusb_context *)ctx, err)) {
 		mt_dev_state_destroy(d);
-		free(d);
+		delete d;
 		return NULL;
 	}
 	return bring_up(d, fw_dir, err);
@@ -502,7 +503,7 @@ void mt7612u_close(struct mt7612u_dev *d)
 	mt_async_stop(d);
 	if (d->h) mt_mac_stop(d);
 	mt_close(d);   /* releases io_lock via mt_dev_state_destroy() */
-	free(d);
+	delete d;
 }
 
 /*
@@ -554,10 +555,8 @@ int mt7612u_set_monitor_rx(struct mt7612u_dev *d, int keep_corrupted)
  */
 static uint64_t stats_now_us(void)
 {
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
+	return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+	           std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 /* Was file-static, so two adapters opened in one process overwrote each

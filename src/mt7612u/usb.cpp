@@ -5,13 +5,16 @@
  * ../../INVESTIGATION.md §11).
  */
 #include <errno.h>
-#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
-#include <time.h>
-#include <unistd.h>
 #include <stdarg.h>
+/* The adapter lock below is POSIX file locking. MSVC has none of these headers;
+ * see lock_adapter() for what Windows does instead. */
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 
 #include "internal.h"
 
@@ -45,8 +48,14 @@ void mt_diag(char level, const char *fmt, ...)
 	fflush(stderr);
 }
 
-#define REQ_IN   (LIBUSB_ENDPOINT_IN  | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE)
-#define REQ_OUT  (LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE)
+/* Each operand is cast to the uint8_t that libusb's bmRequestType actually is:
+ * these are three DIFFERENT libusb enum types, and C++20 deprecates a bitwise
+ * operation between different enumeration types ([depr.ee.conv]). Casting keeps
+ * the value identical while making the operation an ordinary integer OR. */
+#define REQ_IN   ((uint8_t)LIBUSB_ENDPOINT_IN  | (uint8_t)LIBUSB_REQUEST_TYPE_VENDOR | \
+                  (uint8_t)LIBUSB_RECIPIENT_DEVICE)
+#define REQ_OUT  ((uint8_t)LIBUSB_ENDPOINT_OUT | (uint8_t)LIBUSB_REQUEST_TYPE_VENDOR | \
+                  (uint8_t)LIBUSB_RECIPIENT_DEVICE)
 /* mt76's MT_VEND_REQ_TOUT_MS / MT_VEND_REQ_MAX_RETRY. The product of the two
  * is the worst-case cost of one register access, so it bounds every poll
  * loop below - which is why the timeout is 300 ms and not something longer. */
@@ -55,8 +64,7 @@ void mt_diag(char level, const char *fmt, ...)
 
 void mt_usleep(unsigned us)
 {
-	struct timespec ts = { .tv_sec = us / 1000000, .tv_nsec = (us % 1000000) * 1000 };
-	nanosleep(&ts, NULL);
+	std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
 
 /* Held for the process lifetime; flock releases it on any exit. */
@@ -64,10 +72,10 @@ static int g_lock_fd = -1;
 
 static uint64_t now_us(void)
 {
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
+	/* steady_clock, matching CLOCK_MONOTONIC: never stepped by a wall-clock
+	 * adjustment, which is what an elapsed-time measurement needs. */
+	return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+	           std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 int mt_vendor_req(struct mt7612u_dev *d, uint8_t req, uint8_t type,
@@ -78,7 +86,7 @@ int mt_vendor_req(struct mt7612u_dev *d, uint8_t req, uint8_t type,
 	/* One control transfer at a time.  Nothing contends in a single-threaded
 	 * consumer; one that sends from a second thread would otherwise
 	 * interleave two transfers on EP0. */
-	pthread_mutex_lock(&d->io_lock);
+	d->io_lock.lock();
 
 	for (int i = 0; i < VEND_RETRIES; i++) {
 		rc = libusb_control_transfer(d->h, type, req, val, idx,
@@ -90,7 +98,7 @@ int mt_vendor_req(struct mt7612u_dev *d, uint8_t req, uint8_t type,
 	}
 	ERR("vendor req %02x idx %04x failed: %s", req, idx, libusb_error_name(rc));
 out:
-	pthread_mutex_unlock(&d->io_lock);
+	d->io_lock.unlock();
 	return rc;
 }
 
@@ -293,27 +301,18 @@ static int mt_identify(struct mt7612u_dev *d, const char **err)
  */
 void mt_dev_state_init(struct mt7612u_dev *d)
 {
-	pthread_mutexattr_t ma;
-
-	if (d->io_lock_ready) return;
-	/* Recursive: the PHY tick locks io_lock and then nests mt_vendor_req /
-	 * mt_mcu_send, which lock it again.  A zeroed pthread_mutex_t is a valid
-	 * NON-recursive lock, so a path that skipped this (the adopt path once
-	 * did) would self-deadlock the tick or lock an uninitialised mutex. */
-	pthread_mutexattr_init(&ma);
-	pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_RECURSIVE);
-	pthread_mutex_init(&d->io_lock, &ma);
-	pthread_mutexattr_destroy(&ma);
-	d->io_lock_ready = 1;
-	/* cal sentinels (low_gain=-1 etc.) are reset per-tune in
+	/* io_lock is a std::recursive_mutex member, constructed with the device,
+	 * so there is nothing to initialise here and no path that can reach the
+	 * tick with an unusable lock. Kept as a named seam because both open
+	 * paths call it and the cal sentinels (low_gain=-1 etc.) belong to the
+	 * same "device state is ready" step - those are reset per-tune in
 	 * mt_set_channel_ex(), which always runs before the first PHY tick. */
+	(void)d;
 }
 
 void mt_dev_state_destroy(struct mt7612u_dev *d)
 {
-	if (!d || !d->io_lock_ready) return;
-	pthread_mutex_destroy(&d->io_lock);
-	d->io_lock_ready = 0;
+	(void)d;
 }
 
 /*
@@ -348,9 +347,15 @@ void mt_recover_usb(struct mt7612u_dev *d)
 
 	/* A wedge experiment must not have its recovery hidden inside open().
 	 * With this set, open() observes and reports but repairs nothing.  It is
-	 * a field rather than a getenv(): this library reads no environment, so
-	 * the tool that wants the behaviour sets it (bringup does, from
-	 * MT7612U_NO_AUTORECOVER). */
+	 * a field rather than a getenv(): the tool that wants the behaviour sets
+	 * it (bringup does, from MT7612U_NO_AUTORECOVER).
+	 *
+	 * That is the direction of travel, not a property the library has yet:
+	 * open_selected() below still reads MT7612U_DEV directly. #412 deferred
+	 * that one because there is no public way to pass a selector -
+	 * mt7612u_open() allocates the device itself and the struct is opaque -
+	 * so removing it would strand multi-adapter callers with no replacement.
+	 * It moves to a DeviceConfig field when the backend lands (#419). */
 	if (d->no_autorecover) {
 		if (mt_rr_chk(d, CFG_ADDR(MT_USB_U3DMA_CFG), &cfg))
 			LOG("auto-recovery disabled: U3DMA_CFG unreadable");
@@ -474,8 +479,33 @@ static void adapter_key(libusb_device *dev, char *out, size_t n)
 		                i ? "." : "-", ports[i]);
 }
 
+/* Drop the adapter lock, if this process is holding one. */
+static void unlock_adapter(void)
+{
+#if !defined(_WIN32)
+	if (g_lock_fd >= 0) { close(g_lock_fd); g_lock_fd = -1; }
+#endif
+}
+
 /* Returns a held fd, -1 to proceed unlocked (infrastructure failure), or
  * -2 when another process holds the adapter and the caller must refuse. */
+#if defined(_WIN32)
+static int lock_adapter(libusb_device *dev, const char **err)
+{
+	/* Not ported. The Linux interlock above works by contending for the SAME
+	 * lock file UsbDeviceLock uses; on Windows UsbDeviceLock is a named mutex
+	 * instead (UsbDeviceLock.cpp), so a file lock here would exclude nobody
+	 * and mirroring the mutex would be a second copy of a mechanism the
+	 * devourer path already owns. Exclusivity on Windows therefore comes from
+	 * UsbDeviceLock, which WiFiDriver takes before it ever reaches this
+	 * library. What is genuinely unprotected is a direct mt7612u_open() with
+	 * no devourer around it - the bench tool's case, and the bench is Linux.
+	 * Proceed unlocked rather than refuse: fail-open is what the POSIX path
+	 * does for an infrastructure failure too. */
+	(void)dev; (void)err;
+	return -1;
+}
+#else
 static int lock_adapter(libusb_device *dev, const char **err)
 {
 	/* "/tmp" literally, and deliberately NOT getenv("TMPDIR"): the whole
@@ -515,6 +545,7 @@ static int lock_adapter(libusb_device *dev, const char **err)
 	    path, strerror(errno));
 	return -1;
 }
+#endif /* !_WIN32 */
 
 static libusb_device_handle *open_selected(libusb_context *ctx, const char **err)
 {
@@ -574,7 +605,7 @@ static libusb_device_handle *open_selected(libusb_context *ctx, const char **err
 				 * on the very next retry. Release what this
 				 * iteration took. */
 				h = NULL;
-				if (g_lock_fd >= 0) { close(g_lock_fd); g_lock_fd = -1; }
+				unlock_adapter();
 			}
 		}
 		matches++;
@@ -684,7 +715,7 @@ void mt_close(struct mt7612u_dev *d)
 		    "handle and context rather than closing underneath them");
 		d->h = NULL;
 		d->ctx = NULL;
-		if (g_lock_fd >= 0) { close(g_lock_fd); g_lock_fd = -1; }
+		unlock_adapter();
 		return;
 	}
 	if (d->h) {
@@ -700,7 +731,7 @@ void mt_close(struct mt7612u_dev *d)
 	}
 	if (d->ctx && d->owns_handle) libusb_exit(d->ctx);
 	d->ctx = NULL;
-	if (g_lock_fd >= 0) { close(g_lock_fd); g_lock_fd = -1; }
+	unlock_adapter();
 }
 
 /* Block write, as mt76u_copy(): one MULTI_WRITE per batch, wValue 0.
@@ -708,7 +739,7 @@ void mt_close(struct mt7612u_dev *d)
  * table (32 B) - 192 transfers that would otherwise be ~700 4-byte writes. */
 void mt_wr_copy(struct mt7612u_dev *d, uint32_t offset, const void *data, int len)
 {
-	const uint8_t *p = data;
+	const uint8_t *p = (const uint8_t *)data;
 	uint8_t buf[64];
 
 	/* The hardware wants whole 32-bit words, but only `len` bytes belong to

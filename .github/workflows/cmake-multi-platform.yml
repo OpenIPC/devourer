@@ -85,11 +85,17 @@ jobs:
           brew install libusb
 
       - name: Configure CMake
+        # DEVOURER_MT7612U=ON: the option defaults OFF, so without it here the
+        # MediaTek subtree would be compiled by nothing but its own Makefile on
+        # Linux. Turning it on in the matrix is what makes MSVC and macOS
+        # first-class for it — the POSIX-only pieces it still has (the flock
+        # adapter lock) are _WIN32-guarded, and this is what proves it.
         run: >
           cmake -B ${{ steps.strings.outputs.build-output-dir }}
           -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
           -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DDEVOURER_MT7612U=ON
           -S ${{ github.workspace }}
 
       - name: Build
@@ -136,6 +142,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER=gcc
           -DCMAKE_CXX_COMPILER=g++
+          -DDEVOURER_MT7612U=ON
 
       - name: Build (library + stream demos + self-tests)
         # rxdemo / txdemo / precoder use POSIX-only APIs
@@ -184,6 +191,8 @@ jobs:
             flags: "-DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR2_8821C=OFF -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF -DDEVOURER_8733B=OFF -DDEVOURER_KESTREL_8852C=OFF"
           - name: kestrel-8852c-only
             flags: "-DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR2_8821C=OFF -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF -DDEVOURER_8733B=OFF -DDEVOURER_KESTREL_8852B=OFF"
+          - name: mt7612u+jaguar1
+            flags: "-DDEVOURER_MT7612U=ON -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR2_8821C=OFF -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF -DDEVOURER_8733B=OFF -DDEVOURER_KESTREL_8852B=OFF -DDEVOURER_KESTREL_8852C=OFF"
           - name: rtl8733b-only
             flags: "-DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR2_8821C=OFF -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF -DDEVOURER_KESTREL_8852B=OFF -DDEVOURER_KESTREL_8852C=OFF"
     steps:

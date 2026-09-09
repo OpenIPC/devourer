@@ -41,6 +41,16 @@ option(DEVOURER_KESTREL_8852C "RTL8852CU / 8832CU (Kestrel 11ax, G6)"           
 # with the older rtlwifi-style own-bit descriptor DMA, a different engine.
 # OFF by default — libusb-only builds are bit-identical.
 option(DEVOURER_PCIE          "PCIe transport via vfio-pci (Linux; RTL8821CE)"  OFF)
+# MediaTek MT7612U / MT7662U — the first non-Realtek part. Compiles the
+# src/mt7612u subtree (its own C++ library with a C ABI, landed unwired in #412)
+# into libdevourer. OFF by default and deliberately NOT counted as chip support
+# by the "No chip support selected" check below: there is no IRadio backend yet,
+# so an MT7612U-only build would produce a library that can open nothing. It
+# joins that list when the backend lands (#419). Turning it ON today buys one
+# thing, and it is the point of the option: CI compiles the subtree across the
+# whole platform matrix — gcc, clang, MSVC, mingw, macOS — where it was
+# previously only ever built by its own Makefile, on Linux.
+option(DEVOURER_MT7612U       "MediaTek MT7612U / MT7662U (2T2R 11ac USB)"      OFF)
 
 # Compile-time diagnostics floor (src/logger.h). Calls below the floor —
 # including their argument expressions at DVR_TRACE/DVR_DEBUG sites — compile
@@ -344,6 +354,34 @@ if(DEVOURER_JAGUAR2_8821C)
         hal/hal8821c_fw.c hal/hal8821c_fw.h
         hal/phydm/rtl8821c/Hal8821c_PhyTables.c hal/phydm/rtl8821c/Hal8821c_PhyTables.h)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_JAGUAR2_8821C=1)
+endif()
+
+# --- MediaTek MT7612U (MT7662 MAC) ---
+# The subtree is self-contained: it talks to libusb directly rather than through
+# RtlAdapter/ITransport, because 32-bit registers and an in-band MCU over EP8/EP5
+# do not fit the Realtek shape. Its public surface is the C ABI in
+# include/mt7612u/mt7612u.h; nothing here exports its internal headers, so the
+# include directory is PRIVATE until the backend needs it.
+if(DEVOURER_MT7612U)
+    target_sources(devourer PRIVATE
+        src/mt7612u/async.cpp
+        src/mt7612u/caps.cpp
+        src/mt7612u/eeprom.cpp
+        src/mt7612u/fw.cpp
+        src/mt7612u/init.cpp
+        src/mt7612u/mcu.cpp
+        src/mt7612u/phy.cpp
+        src/mt7612u/radiotap.cpp
+        src/mt7612u/rx.cpp
+        src/mt7612u/tx.cpp
+        src/mt7612u/usb.cpp
+        src/mt7612u/internal.h
+        src/mt7612u/regs.h
+        src/mt7612u/initvals.h)
+    target_include_directories(devourer PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u/include)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_MT7612U=1)
 endif()
 
 # --- PCIe transport (vfio-pci; see src/PcieTransport.h) ---

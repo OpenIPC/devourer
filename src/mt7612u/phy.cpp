@@ -609,7 +609,7 @@ static void phy_update_channel_gain(struct mt7612u_dev *d)
 int mt7612u_phy_tick(struct mt7612u_dev *d)
 {
 	if (!d || !d->chan) return -1;
-	pthread_mutex_lock(&d->io_lock);
+	d->io_lock.lock();
 	/* Self-guarded after the first run, exactly like mt76's. */
 	channel_calibrate(d, d->chan > 14);
 	/* mt76 keeps the MCU in the loop every second through
@@ -617,7 +617,7 @@ int mt7612u_phy_tick(struct mt7612u_dev *d)
 	 * the temperature calibration is the cheapest command that does. */
 	mt_mcu_calibrate(d, MCU_CAL_TEMP_SENSOR, 0);
 	phy_update_channel_gain(d);
-	pthread_mutex_unlock(&d->io_lock);
+	d->io_lock.unlock();
 	return 0;
 }
 

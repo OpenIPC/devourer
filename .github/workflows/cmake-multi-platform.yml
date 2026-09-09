@@ -225,9 +225,13 @@ jobs:
         run: sudo apt install libusb-1.0-0-dev
 
       - name: Configure (ASan + UBSan)
+        # DEVOURER_MT7612U=ON here too: that subtree moved from calloc/free to
+        # new/delete and its sync primitives are constructed members now, so the
+        # sanitizers are the cheapest guard against a lifetime regression in it.
         run: >
           cmake -B build-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DDEVOURER_SANITIZE=address+undefined -S ${{ github.workspace }}
+          -DDEVOURER_SANITIZE=address+undefined -DDEVOURER_MT7612U=ON
+          -S ${{ github.workspace }}
 
       - name: Build (ASan + UBSan)
         run: cmake --build build-asan -j

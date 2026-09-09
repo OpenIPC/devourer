@@ -38,7 +38,7 @@ inline devourer::EventSink *bf_events = nullptr;
 
 inline void detect_report(const Packet &packet) {
   const char *mode_s = std::getenv("DEVOURER_BF_DETECT_REPORT");
-  if (!mode_s || packet.Data.size() < 27 || bf_events == nullptr)
+  if (!mode_s || packet.Data.size() < 29 || bf_events == nullptr)
     return;
   const char mode = mode_s[0];
   const uint8_t *d = packet.Data.data();

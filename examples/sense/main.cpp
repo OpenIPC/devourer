@@ -177,7 +177,10 @@ class Sensor {
 public:
   explicit Sensor(double k) : _det(k) {}
 
-  void feed(const uint8_t *frame, size_t n, bool fcs_present = true) {
+  /* No default: the single call site has the Packet and must pass the
+   * frame's own flag. A default here would only let a future second
+   * caller compile while silently applying the Realtek rule. */
+  void feed(const uint8_t *frame, size_t n, bool fcs_present) {
     ReportHdr hdr;
     if (!parse_report(frame, n, hdr, fcs_present))
       return;

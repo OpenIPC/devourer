@@ -93,8 +93,17 @@ int main() {
     CHECK(h2.angle_len == hdr.angle_len, "no-FCS angle_len identical");
 
     /* Exactly the angle block, nothing after it. */
+    /* CHECK only records a failure and returns, so this has to gate the
+     * slicing too - otherwise a shorter fixture walks the iterator past the
+     * end (UB) on exactly the path the check was meant to protect.
+     *
+     * The rejection below is MU-specific: it bites via the MU clamp
+     * (vbytes 65 > ab_len 61). An SU fixture would instead depend on
+     * (angle_len-4)*8 % ns, which is 0 for ns=16 - so this control would pass
+     * spuriously there. It requires an MU fixture, which this one is. */
     const size_t tight = 29u + (size_t)hdr.nc + (size_t)hdr.angle_len;
     CHECK(tight <= frame.size(), "fixture long enough to build the tight case");
+    if (tight <= frame.size()) {
     std::vector<uint8_t> snug(frame.begin(), frame.begin() + (long)tight);
 
     ReportHdr h4;
@@ -105,6 +114,7 @@ int main() {
     ReportHdr h5;
     CHECK(!parse_report(snug.data(), snug.size(), h5, /*fcs_present=*/true),
           "assuming an FCS that is not there must reject, not silently shorten");
+    }
   }
 
   /* 4. fixed-split decode vs offline reference. */

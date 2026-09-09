@@ -210,18 +210,27 @@ def report_hex(line: str):
             return None
         if not isinstance(obj, dict) or obj.get("ev") != "bf.report_raw":
             return None
-        return obj.get("frame"), bool(obj.get("fcs", 1))
+        frame = obj.get("frame")
+        if frame is None:
+            return None          # malformed event: skippable, as before
+        return frame, bool(obj.get("fcs", 1))
     return line, True
 
 
-def read_frames(src, max_frames=200):
-    """Parse `bf.report_raw` event (or bare hex) lines into frame dicts."""
+def read_frames(src, max_frames=200, bare_fcs=True):
+    """Parse `bf.report_raw` event (or bare hex) lines into frame dicts.
+
+    bare_fcs is the FCS assumption for BARE HEX input only; events carry their
+    own `fcs` field and always win. A hand-captured MediaTek dump has no
+    metadata channel, so --no-fcs is the only way to decode one correctly."""
     frames = []
     for line in src:
         hf = report_hex(line)
         if hf is None:
             continue
         h, fcs_present = hf
+        if line.strip() and not line.strip().startswith('{"ev":"'):
+            fcs_present = bare_fcs        # bare hex: no metadata, use the flag
         f = parse_frame(h, fcs_present)
         if f:
             frames.append(f)
@@ -362,6 +371,10 @@ def main() -> int:
     ap.add_argument("--csv", help="write per-subcarrier CSV here")
     ap.add_argument("--max-frames", type=int, default=200)
     ap.add_argument("--msb", action="store_true", help="MSB-first bit order")
+    ap.add_argument("--no-fcs", action="store_true",
+                    help="bare-hex input carries no trailing FCS (MediaTek "
+                         "MT7612U strips it). Events carry their own `fcs` "
+                         "field and are unaffected by this flag.")
     ap.add_argument("--operating-snr", type=float, default=None,
                     help="re-centre the MEASURED per-tone SNR shape so its mean "
                          "= this dB (models a weaker/longer-range link at the "
@@ -371,7 +384,7 @@ def main() -> int:
     global _MSB
     _MSB = args.msb
     src = open(args.infile) if args.infile else sys.stdin
-    frames = read_frames(src, args.max_frames)
+    frames = read_frames(src, args.max_frames, bare_fcs=not args.no_fcs)
     if not frames:
         print("no VHT/HT compressed-beamforming reports found", file=sys.stderr)
         return 1

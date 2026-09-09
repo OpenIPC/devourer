@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include <libusb.h>
 
@@ -86,6 +87,10 @@ public:
   devourer::TxPowerCaps GetTxPowerCaps() override;
   void SetTxPower(uint8_t power) override;
   void SetTxPowerIndexOverride(int idx) override;
+  int SetTxPowerOffsetQdb(int qdb) override;
+  void SetTxMode(const devourer::TxMode &mode) override;
+  void ClearTxMode() override;
+  bool SetAmpduMode(const devourer::AmpduMode &mode) override;
   bool GetPermanentMacAddress(uint8_t out[6]) override;
   uint64_t ReadTsf() override;
   void WriteTsf(uint64_t tsf) override;
@@ -95,6 +100,7 @@ public:
 
 private:
   void bring_up(SelectedChannel channel);           /* _mu held */
+  void apply_config();                              /* _mu held */
   void start_tick();                                /* _mu held */
   void stop_tick();                                 /* _mu NOT held */
   void tick_loop();
@@ -103,6 +109,10 @@ private:
   void on_rx(const void *frame, size_t len,
              const struct mt7612u_rx_info *info);
   static void log_trampoline(void *user, char level, const char *line);
+  /* The C library's diagnostic sink is process-global, so the routing has to
+   * be too. See the constructor for why this is a registry and not `this`. */
+  static std::mutex &sink_mu();
+  static std::vector<Mt7612uRadio *> &sink_registry();
 
   libusb_device_handle *_handle;
   libusb_context *_ctx;
@@ -117,6 +127,13 @@ private:
   SelectedChannel _channel{};
   Action_ParsedRadioPacket _rx_processor;
 
+  /* Serialises the whole RX teardown. StopRxLoop is documented to have torn
+   * the ring down and joined the event thread BEFORE it returns, so a second
+   * caller has to WAIT for the first rather than see a cleared flag and return
+   * early - the early return let Stop() close and free the device out from
+   * under a thread still inside mt7612u_rx_stop(). Never held while _mu is
+   * held. */
+  std::mutex _teardown_mu;
   std::atomic<bool> _rx_stop{false};
   std::atomic<bool> _rx_active{false};
   std::atomic<uint64_t> _rx_frames{0};
@@ -130,7 +147,8 @@ private:
   std::condition_variable _tick_cv;
   bool _tick_stop = false;
 
-  int _txpwr_dbm = 20; /* the absolute dBm limit mt7612u_set_txpower takes */
+  int _txpwr_dbm = 20;    /* the absolute dBm limit mt7612u_set_txpower takes */
+  int _txpwr_offset_qdb = 0; /* sticky, folded onto _txpwr_dbm */
 };
 
 #endif /* MT7612U_RADIO_H */

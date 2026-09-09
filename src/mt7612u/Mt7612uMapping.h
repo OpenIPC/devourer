@@ -46,10 +46,18 @@ inline uint8_t rssi_to_raw(int8_t dbm) {
  * a 2-path part (RxPacket.h), so that is what a 2T2R MediaTek must report
  * too, and n_chains is the authority rather than the array's extent.
  *
- * snr[] is filled from the same report while it is in hand: `snr_db` is
- * rssi[0] - noise and is only meaningful when noise_valid, which is why the
- * unvalidated case leaves the slots at zero rather than writing a plausible
- * number. See the -116 dBm caveat on `noise` in the public header. */
+ * snr[] is filled from the same report while it is in hand, and it is filled in
+ * HALF-dB. That is the unit every other producer and consumer of this field
+ * uses - Realtek parsers write s(8,1) (FrameParserJaguar2.h), LinkHealth.cpp
+ * reads `snr_raw / 2.0`, and RxQuality derives its noise floor as
+ * `(rssi_raw - 110) - snr_raw / 2.0`. The library reports whole dB (`snr_db` is
+ * rssi[0] - noise), so writing it through unscaled would report every MT7612U
+ * link at half its true SNR and put the derived noise floor snr/2 dB high - the
+ * same class of fault as the phantom chain above, one field below it.
+ *
+ * Only meaningful when noise_valid, which is why the unvalidated case leaves
+ * the slots at zero rather than writing a plausible number. See the -116 dBm
+ * caveat on `noise` in the public header. */
 inline void copy_signal(const struct mt7612u_rx_info &info,
                         struct rx_pkt_attrib &out) {
   const unsigned chains = info.n_chains > 2u ? 2u : info.n_chains;
@@ -61,9 +69,39 @@ inline void copy_signal(const struct mt7612u_rx_info &info,
 
   for (unsigned i = 0; i < 4u; ++i)
     out.snr[i] = 0;
-  if (info.noise_valid)
+  if (info.noise_valid) {
+    int half_db = static_cast<int>(info.snr_db) * 2;
+    if (half_db > 127)
+      half_db = 127;
+    if (half_db < -128)
+      half_db = -128;
     for (unsigned i = 0; i < chains; ++i)
-      out.snr[i] = info.snr_db;
+      out.snr[i] = static_cast<int8_t>(half_db);
+  }
+}
+
+/* The QoS TID, or nothing when this frame carries no QoS Control field.
+ *
+ * The offset is NOT a constant 24. A 4-address data frame (ToDS and FromDS
+ * both set) has a 30-byte header, so its QoS Control sits at 30 - reading
+ * byte 24 there returns the low nibble of Address 4, which is arbitrary and
+ * WORSE than leaving the TID zero, because it looks like a plausible priority.
+ * The subtree's own mt_hdrlen_from_fc() gets this right for the TX path and
+ * rx.cpp uses it for the L2-pad fold; this is the same rule, kept here as a
+ * pure function so the selftest can pin it. */
+inline bool qos_tid(const uint8_t *f, size_t len, uint8_t &tid) {
+  if (len < 2)
+    return false;
+  const unsigned fc = (unsigned)f[0] | ((unsigned)f[1] << 8);
+  if (((fc >> 2) & 3u) != 2u)   /* not a data frame */
+    return false;
+  if (!(fc & 0x0080u))          /* not a QoS subtype */
+    return false;
+  const size_t hdr = ((fc & 0x0300u) == 0x0300u) ? 30u : 24u;
+  if (len < hdr + 2u)
+    return false;
+  tid = f[hdr] & 0x0f;
+  return true;
 }
 
 /* mt7612u_rx_info -> the DESC_RATE numbering consumers read, so a caller does
@@ -78,10 +116,20 @@ inline uint16_t desc_rate(const struct mt7612u_rx_info &info) {
   case MT7612U_PHY_HT:
   case MT7612U_PHY_HT_GF:
     /* HT folds NSS into the MCS number on both sides, so this is a straight
-     * offset for MCS 0-31. */
+     * offset for MCS 0-31. Bounded because MT_RATE_INDEX is SIX bits: an index
+     * of 32..63 would run past DESC_RATEMCS31 into the VHT numbering and
+     * report garbage as a real VHT rate rather than as unknown. rx.cpp filters
+     * the PHY field, not the index. */
+    if (info.mcs > 31)
+      return 0;
     return static_cast<uint16_t>(DESC_RATEMCS0 + info.mcs);
   case MT7612U_PHY_VHT: {
     const uint8_t nss = info.nss ? info.nss : 1;
+    /* VHT MCS is 0-9 and the DESC numbering strides by 10 per stream, so an
+     * index above 9 spills into the NEXT stream's block - SS1 MCS12 would
+     * report as SS2 MCS2. Four streams is likewise the end of the numbering. */
+    if (info.mcs > 9 || nss > 4)
+      return 0;
     return static_cast<uint16_t>(DESC_RATEVHTSS1MCS0 + (nss - 1) * 10 +
                                  info.mcs);
   }

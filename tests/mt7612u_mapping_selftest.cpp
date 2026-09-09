@@ -73,9 +73,29 @@ int main() {
      * chain C sitting near -92 dBm. */
     expect("the noise floor is NOT published as chain C", a.rssi[2] == 0);
     expect("the unidentified slot is NOT published as chain D", a.rssi[3] == 0);
-    expect("snr filled on the real chains", a.snr[0] == 37 && a.snr[1] == 37);
+    /* HALF-dB, the unit LinkHealth and RxQuality divide by two. Asserting the
+     * raw value here is how an earlier cut of this test locked in a bug that
+     * reported every link at half its SNR. */
+    expect("snr is half-dB, not whole dB", a.snr[0] == 74 && a.snr[1] == 74);
+    expect("snr round-trips to dB the way consumers read it",
+           a.snr[0] / 2 == 37);
     expect("snr not invented past the real chains",
            a.snr[2] == 0 && a.snr[3] == 0);
+  }
+  {
+    /* int8_t holds +-127 in half-dB, i.e. +-63.5 dB. A report past that must
+     * clamp rather than wrap into a negative SNR. */
+    struct mt7612u_rx_info i {};
+    struct rx_pkt_attrib a {};
+
+    i.n_chains = 2;
+    i.noise_valid = 1;
+    i.snr_db = 90;
+    copy_signal(i, a);
+    expect("an out-of-range snr clamps positive", a.snr[0] == 127);
+    i.snr_db = -90;
+    copy_signal(i, a);
+    expect("an out-of-range negative snr clamps", a.snr[0] == -128);
   }
   {
     /* Without a valid noise estimate there is no SNR to report. Zero, not a
@@ -134,6 +154,50 @@ int main() {
   expect("VHT nss 0 is treated as 1",
          desc_rate(rx(MT7612U_PHY_VHT, 3, 0)) ==
              desc_rate(rx(MT7612U_PHY_VHT, 3, 1)));
+  /* MT_RATE_INDEX is six bits, so these are representable and mean nothing.
+   * Reporting 0 (unknown) is right; running off the end of the HT block into
+   * the VHT numbering would present garbage as a real VHT rate. */
+  expect("HT MCS32 is unknown, not a VHT rate",
+         desc_rate(rx(MT7612U_PHY_HT, 32)) == 0);
+  expect("HT MCS63 is unknown, not a VHT rate",
+         desc_rate(rx(MT7612U_PHY_HT, 63)) == 0);
+  expect("VHT MCS10 does not spill into the next stream's block",
+         desc_rate(rx(MT7612U_PHY_VHT, 10, 1)) == 0);
+  expect("VHT MCS12 SS1 is not reported as SS2 MCS2",
+         desc_rate(rx(MT7612U_PHY_VHT, 12, 1)) !=
+             desc_rate(rx(MT7612U_PHY_VHT, 2, 2)));
+  expect("VHT beyond 4 streams is unknown",
+         desc_rate(rx(MT7612U_PHY_VHT, 0, 5)) == 0);
+
+  /* --- the QoS TID, at the right offset --- */
+  {
+    uint8_t tid = 0xff;
+    /* 3-address QoS data: fc=0x0088, header 24, QoS Control at 24. */
+    uint8_t three[32] = {0x88, 0x00};
+    three[24] = 0x06;
+    expect("3-address QoS is recognised", qos_tid(three, sizeof three, tid));
+    expect("3-address TID comes from byte 24", tid == 6);
+
+    /* 4-address QoS data: ToDS|FromDS, header 30, QoS Control at 30. Byte 24
+     * is Address 4 and must NOT be read as a TID. */
+    tid = 0xff;
+    uint8_t four[36] = {0x88, 0x03};
+    four[24] = 0x0b; /* a plausible-looking decoy inside Address 4 */
+    four[30] = 0x02;
+    expect("4-address QoS is recognised", qos_tid(four, sizeof four, tid));
+    expect("4-address TID comes from byte 30, not 24", tid == 2);
+
+    tid = 0xff;
+    uint8_t nonqos[32] = {0x08, 0x00}; /* data, non-QoS subtype */
+    expect("a non-QoS data frame has no TID",
+           !qos_tid(nonqos, sizeof nonqos, tid));
+    uint8_t beacon[32] = {0x80, 0x00};
+    expect("a beacon has no TID", !qos_tid(beacon, sizeof beacon, tid));
+    /* Truncated: the QoS Control field is not present, so there is nothing to
+     * read and nothing may be read past the end. */
+    expect("a truncated QoS frame has no TID", !qos_tid(three, 25, tid));
+    expect("a truncated 4-address QoS frame has no TID", !qos_tid(four, 31, tid));
+  }
 
   /* --- bandwidth code --- */
   expect("BW_20 -> 0", bw_to_desc(MT7612U_BW_20) == 0);

@@ -552,11 +552,12 @@ struct DeviceConfig {
      * device class both stay free of ambient process state; the demos fold the
      * variable in, the way they do for every other knob in this file. */
     std::optional<std::string> firmware_dir;
-    /* env: MT7612U_DEV — which adapter to open when several are attached,
-     * "<bus>-<port>" as lsusb spells the port path. Unset = the first.
-     * Only consulted on the library's own open path, not when devourer hands
-     * it an already-claimed handle (which is the devourer path). */
-    std::optional<std::string> device_selector;
+    /* No adapter selector here on purpose. devourer chooses the adapter before
+     * a backend exists (DEVOURER_USB_BUS / _PORT / _VID / _PID) and hands the
+     * backend an already-claimed handle, so a MediaTek-specific selector would
+     * be read by nothing. The C library's own mt7612u_open_selected() is for a
+     * consumer that opens the device itself; MT7612U_DEV drives the bring-up
+     * tool, not devourer. */
   } mt7612u;
 };
 

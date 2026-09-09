@@ -628,6 +628,26 @@ if(DEVOURER_8733B)
     target_include_directories(rtl8733bprobe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 endif()
 
+# mt7612uprobe — the MediaTek bring-up harness, the rtl8733bprobe/kestrelprobe
+# sibling: one subcommand per verified hardware gate (registers, firmware, MAC,
+# channel, TX, RX, ACK responder, the wedge experiments). Same source the
+# subtree's own Makefile builds as ./bringup, built here so the chip-specific
+# tool is not the one part of this backend that only a second build system can
+# produce — and so it picks up CMAKE_C_COMPILER and DEVOURER_SANITIZE, which
+# shelling out to that Makefile would silently ignore.
+#
+# It talks to the C library directly, NOT through Mt7612uRadio: it predates the
+# backend and its whole purpose is to exercise the layer underneath one. It
+# never substitutes for the production IRadio path.
+if(DEVOURER_MT7612U)
+    add_executable(mt7612uprobe
+        src/mt7612u/tools/bringup.cpp
+    )
+    target_link_libraries(mt7612uprobe PUBLIC devourer PRIVATE PkgConfig::libusb)
+    target_include_directories(mt7612uprobe PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u)
+endif()
+
 # reglat — register round-trip latency microbench (USB ctrl-xfer vs PCIe MMIO).
 # Times RtlAdapter::rtw_read32; the PCIe path compiles only with DEVOURER_PCIE
 # (inherited via the devourer PUBLIC DEVOURER_HAVE_PCIE define). See its header.

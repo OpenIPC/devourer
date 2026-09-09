@@ -467,13 +467,8 @@ int mt_adopt(struct mt7612u_dev *d, libusb_device_handle *h,
  * Messages below therefore name "the selector", not that variable - a caller
  * that is not bringup would be told to set something it does not use.
  *
- * This is the ONE environment read left in the library, and it stays deferred
- * to integration as agreed in #412 rather than being removed here: there is no
- * public way to pass a selector (mt7612u_open() allocates the device itself and
- * the struct is opaque), so dropping it would leave a multi-adapter consumer
- * unable to choose an adapter at all. The wrapper does not need it - it arrives
- * through mt7612u_open_handle() having already selected the device itself.
- * MT7612U_NO_AUTORECOVER, which had no such constraint, is now d->no_autorecover.
+ * mt7612u_open_selected() is the public way to pass it; mt7612u_open() is
+ * that with NULL. Nothing in this library reads the environment.
  */
 /*
  * Exclusive per-adapter lock - the same lock devourer's own UsbDeviceLock

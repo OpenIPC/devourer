@@ -178,8 +178,8 @@ struct mt7612u_dev {
 	std::recursive_mutex io_lock;
 	/* Observe-but-do-not-repair, for wedge experiments.  A field, not a
 	 * getenv - the tool that wants the behaviour sets it before mt_open()
-	 * (bringup does). Note this is not yet true of the library as a whole:
-	 * open_selected() still reads MT7612U_DEV (see usb.cpp). */
+	 * (bringup does). True of the library as a whole now: the selector moved
+	 * to a field too, so nothing here reads the environment. */
 	uint8_t  no_autorecover;
 	/* Which adapter to open, "<bus>-<port>" as bringup spells it, or NULL for
 	 * "the first one". A field and not a getenv: this is a LIBRARY now

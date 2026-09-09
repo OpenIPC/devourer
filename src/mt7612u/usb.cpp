@@ -24,28 +24,56 @@
  * a piped consumer mid-bring-up. Truncation is silent and deliberate - a
  * diagnostic is not worth a heap allocation on a path that may already be
  * failing. */
+/* Set before threads start, read from the RX event thread; see the contract on
+ * mt7612u_set_log_sink() in the public header. */
+static mt7612u_log_sink g_log_sink;
+static void            *g_log_user;
+
+void mt7612u_set_log_sink(mt7612u_log_sink sink, void *user)
+{
+	g_log_sink = sink;
+	g_log_user = user;
+}
+
+/* The built-in sink, and the only place this library names stderr or devourer's
+ * line format. A host that installs its own sink gets the bare message and
+ * applies its own prefix, so nothing double-prefixes. */
+static void default_sink(void *user, char level, const char *line)
+{
+	char out[544];
+	int n;
+
+	(void)user;
+	n = snprintf(out, sizeof out, "devourer [%c] mt7612u: %s\n", level, line);
+	if (n < 0)
+		return;
+	if ((size_t)n > sizeof out - 1)
+		n = (int)(sizeof out - 1);
+	/* One line, one fwrite + fflush: per-line atomicity against the event
+	 * thread, and no pipe-buffering stall for a subprocess supervisor. Same
+	 * reasoning as devourer's Logger::emit and src/Event.h. */
+	fwrite(out, 1, (size_t)n, stderr);
+	fflush(stderr);
+}
+
 void mt_diag(char level, const char *fmt, ...)
 {
-	char line[512];
+	char msg[512];
 	int n;
 	va_list ap;
 
-	n = snprintf(line, sizeof line, "devourer [%c] mt7612u: ", level);
-	if (n < 0 || (size_t)n >= sizeof line)
-		return;
 	va_start(ap, fmt);
-	n += vsnprintf(line + n, sizeof line - (size_t)n - 1, fmt, ap);
+	n = vsnprintf(msg, sizeof msg, fmt, ap);
 	va_end(ap);
 	if (n < 0)
 		return;
-	/* vsnprintf returns what it WOULD have written, so clamp before using
-	 * it as a length - otherwise a truncated line writes past the buffer. */
-	if ((size_t)n > sizeof line - 2)
-		n = (int)(sizeof line - 2);
-	line[n++] = '\n';
+	/* vsnprintf returns what it WOULD have written; the buffer is already
+	 * NUL-terminated at the truncation point, so nothing more is needed. */
 
-	fwrite(line, 1, (size_t)n, stderr);
-	fflush(stderr);
+	if (g_log_sink)
+		g_log_sink(g_log_user, level, msg);
+	else
+		default_sink(NULL, level, msg);
 }
 
 /* Each operand is cast to the uint8_t that libusb's bmRequestType actually is:

@@ -141,6 +141,32 @@ struct mt7612u_dev *mt7612u_open_handle(void *h, void *ctx, const char *fw_dir,
 
 void mt7612u_close(struct mt7612u_dev *dev);
 
+/*
+ * Diagnostic sink.
+ *
+ * This library emits human diagnostics — bring-up progress, firmware version,
+ * USB and MCU failures. By default they go to stderr, formatted the way
+ * devourer's own logger formats its lines, which is right for the standalone
+ * bring-up tool and wrong for anything embedding this library: writing straight
+ * to stderr bypasses the host's log level, bypasses a redirected diagnostic
+ * stream, and on Android bypasses __android_log_write entirely, so the lines
+ * land nowhere a user can see them.
+ *
+ * Install a sink and every line goes there instead. `level` is one of
+ * 'I' / 'W' / 'E'; `line` is the bare message with NO prefix, so a host can
+ * apply its own — a devourer consumer forwards it to Logger::info/warn/error,
+ * which re-adds "devourer [X] " and honours the level and stream it was
+ * configured with. Passing NULL restores the built-in stderr sink; installing a
+ * sink that does nothing silences the library.
+ *
+ * Set it before any worker thread starts, and do not change it afterwards: the
+ * pointer is read from the RX event thread without synchronisation. That is the
+ * same discipline devourer's own logger documents for set_level and
+ * set_diag_stream, and for the same reason.
+ */
+typedef void (*mt7612u_log_sink)(void *user, char level, const char *line);
+void mt7612u_set_log_sink(mt7612u_log_sink sink, void *user);
+
 /* Reattaches the kernel driver on close unless this is set. */
 void mt7612u_keep_detached(struct mt7612u_dev *dev, int keep);
 

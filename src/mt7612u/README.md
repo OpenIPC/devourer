@@ -39,7 +39,7 @@ Measurements, methods and limits: [`../../docs/mt7612u.md`](../../docs/mt7612u.m
 | `radiotap.cpp` | `send_packet` / `send_packets` (USB chaining via `NEXT_VLD`) |
 | `caps.cpp` | TSF, capability descriptor, ACK responder |
 | `tools/bringup.cpp` | one subcommand per verified gate |
-| `tests/` | offline tests (`make check`): public-API link (C), frame shapes |
+| `tests/` | offline tests (`make check`): public-API link (C), frame shapes, field macros, log sink |
 | `initvals.h` | **generated** — see Provenance |
 
 ## The receiver must never run undrained

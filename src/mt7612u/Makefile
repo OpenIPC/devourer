@@ -23,8 +23,9 @@ DEPFLAGS = -MMD -MP
 INCS     = -I. -Iinclude
 LDLIBS   = -lusb-1.0 -lpthread
 LIBSRCS  = $(wildcard *.cpp)
-TESTS    = tests/api_link tests/frame_shape tests/field_macros
-CXXSRCS  = $(LIBSRCS) tools/bringup.cpp tests/frame_shape.cpp tests/field_macros.cpp
+TESTS    = tests/api_link tests/frame_shape tests/field_macros tests/log_sink
+CXXSRCS  = $(LIBSRCS) tools/bringup.cpp tests/frame_shape.cpp tests/field_macros.cpp \
+           tests/log_sink.cpp
 CSRCS    = tests/api_link.c
 OBJS     = $(CXXSRCS:.cpp=.o) $(CSRCS:.c=.o)
 LIBOBJS  = $(LIBSRCS:.cpp=.o)
@@ -47,6 +48,9 @@ tests/frame_shape: $(LIBOBJS) tests/frame_shape.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 tests/field_macros: $(LIBOBJS) tests/field_macros.o
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/log_sink: $(LIBOBJS) tests/log_sink.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDLIBS)
 
 %.o: %.cpp

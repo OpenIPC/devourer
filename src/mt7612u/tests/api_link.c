@@ -18,6 +18,7 @@ static void *const api[] = {
 	(void *)mt7612u_open_selected,
 	(void *)mt7612u_open_handle,
 	(void *)mt7612u_close,
+	(void *)mt7612u_set_log_sink,
 	(void *)mt7612u_keep_detached,
 	(void *)mt7612u_set_channel,
 	(void *)mt7612u_set_txpower,

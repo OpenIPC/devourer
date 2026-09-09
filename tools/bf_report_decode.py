@@ -112,7 +112,8 @@ def parse_frame(hexstr: str, fcs_present: bool = True):
     fcs = 4 if fcs_present else 0
     angle_bytes = d[29 + nc:len(d) - fcs]
     return dict(sa=sa, nc=nc, nr=nr, bw=bw, ng=ng, codebook=codebook,
-                feedback=feedback, snr=snr, angle_bytes=angle_bytes, raw=d)
+                feedback=feedback, snr=snr, angle_bytes=angle_bytes, raw=d,
+                fcs_present=fcs_present)
 
 
 def parse_mu_snr(frame, ns, vbytes):
@@ -126,8 +127,12 @@ def parse_mu_snr(frame, ns, vbytes):
     mu_start = 29 + frame["nc"] + vbytes
     if mu_start + 4 >= len(d):
         return None
+    # The FCS-present bound stays exactly what it always was (len - 2); only
+    # the FCS-less case extends, because there the trailing bytes are payload
+    # and stopping short of them drops the final SNR pair.
+    end = len(d) - 2 if frame.get("fcs_present", True) else len(d)
     vals, i, last = [], mu_start, None
-    while i + 1 < len(d) - 2:
+    while i + 1 < end:
         a = d[i]
         if a < 40 or (last is not None and abs(a - last) > 40):
             break                         # trailer/junk boundary

@@ -33,10 +33,11 @@ def main() -> int:
 
     frames = []
     for line in open(args.infile):
-        h = bf.report_hex(line)
-        if h is None:
+        hf = bf.report_hex(line)
+        if hf is None:
             continue
-        f = bf.parse_frame(h)
+        h, fcs_present = hf
+        f = bf.parse_frame(h, fcs_present)
         if f and f["feedback"]:
             frames.append(f)
     if not frames:

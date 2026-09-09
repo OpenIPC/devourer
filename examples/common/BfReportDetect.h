@@ -84,6 +84,7 @@ inline void detect_report(const Packet &packet) {
       size_t end = packet.Data.size() >= fcs ? packet.Data.size() - fcs : off;
       size_t n = end > off ? end - off : 0;
       devourer::Ev(*bf_events, "bf.csi")
+          .f("fcs", packet.RxAtrib.fcs_present ? 1 : 0)
           .f("len", n)
           .hex("csi", d + off, n < 40 ? n : 40);
     }

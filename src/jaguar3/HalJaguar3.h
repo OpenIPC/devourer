@@ -99,7 +99,7 @@ private:
   void power_off();           /* card-disable PWR_SEQ — reset from active state */
   void power_on();            /* card-enable PWR_SEQ */
   void init_rfk();            /* RF-calibration init (0x1B00 cal_init block) */
-  void apply_bb_rf_agc_tables(); /* phydm BB/AGC/RF tables via PhyTableLoader */
+  void apply_bb_rf_agc_tables(class InitTimer *timer = nullptr); /* phydm BB/AGC/RF tables via PhyTableLoader */
   void bf_init();                /* rtl8822c_phy_bf_init: BF/MU + NDPA sounding */
   void config_phydm_parameter_init(); /* POST_SETTING: 3-wire + OFDM/CCK block */
   void enable_tx_path();         /* OFDM/CCK TX block + AGC/path enable (on-air TX) */

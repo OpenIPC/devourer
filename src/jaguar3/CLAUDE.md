@@ -36,6 +36,29 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   single-path 1SS TX, spur channels, LCK, the 2.4 GHz TX kernel-parity
   limitation) live in `docs/8822e-quirks.md`.
 
+## Bring-up cost and the pipelined register writes
+
+`InitWrite` is ~14k USB control transfers and nothing else (stage timing:
+`InitTimer` events `j3hal.*` / `j3init.*`, each carrying both `ms` and the
+`xfers` it spent; `bench_init.py` parses these events but reports only `ms`).
+Synchronous, a transfer costs 76–80 µs on an embedded host (ssc338q) and
+~27 µs pipelined 8-deep — EP0 completes URBs
+in submission order, so `UsbTransport` queues writes asynchronously inside
+a `write_batch_begin/end` scope and only reads (submitted behind the queue,
+waited on their own completion), bulk transfers and `flush_writes` wait.
+`InitWrite` runs its whole bring-up in one batch (RAII scope, ended before
+the coex thread starts): 1.30 → 0.65 s warm, 2.04 → ~0.7 s cold, one
+drone-side unit. **`Init` (RX-only) opens no batch yet** — not measured on a
+ground-station card.
+Batches are single-threaded by contract. The ms-scale settle delays
+(`write_bb` 0xfc–0xfe, `rf_writer` 0xffe, `Halrf8822e::delay_ms`, the efuse
+power-cut) flush first.
+
+The RF radio-table load is write-only: bits [31:20] of the direct window
+(`0x3c00`/`0x4c00 + addr*4`) read back 0 for all 1540 entries, cold and
+warm (one 8812EU unit), so the vendor's `MASK20BITS` read-modify-write
+preserved nothing at the price of a synchronous read per entry.
+
 ## TX power
 
 Both dies drive the SAME TXAGC block (`set_tx_power_ref` is the port of

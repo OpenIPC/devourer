@@ -1,3 +1,4 @@
+#include "InitTimer.h"
 #include "RtlJaguar3Device.h"
 
 #include <algorithm>
@@ -54,10 +55,23 @@ RtlJaguar3Device::RtlJaguar3Device(RtlAdapter device, Logger_t logger,
                 variant == jaguar3::ChipVariant::C8822E ? "8822E/EU" : "8822C/CU");
 }
 
+/* Pipelined register writes for the whole bring-up (IRtlTransport::
+ * write_batch_begin): ends on scope exit so a throw never leaves the
+ * transport in batch mode for the threads that start afterwards. */
+struct WriteBatchScope {
+  RtlAdapter &dev;
+  explicit WriteBatchScope(RtlAdapter &d) : dev(d) { dev.write_batch_begin(); }
+  void end() { dev.write_batch_end(); }
+  ~WriteBatchScope() { dev.write_batch_end(); }
+};
+
 void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
   _channel = channel;
   _rx_wanted = true;
+  /* No WriteBatchScope here (yet): the pipelined bring-up is validated on
+   * the TX path (InitWrite, cold + warm); the RX-only
+   * Init path has not been measured with it on a ground-station card. */
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
   /* Tune the channel/bandwidth (5/10 MHz ChannelWidth re-clocks to narrowband),
    * then run IQK calibration (it reads RF18 for the tuned channel).
@@ -711,7 +725,10 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * race the running TX). */
   const bool want_rx = _cfg.rx.enable_with_tx;
   _rx_wanted = want_rx;
+  InitTimer timer(_logger, "j3init");
+  WriteBatchScope batch(_device);
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
+  timer.stage("hal_init");
   /* 8822C at 40/80 MHz: IQK at 20 MHz, then retune — see Init. */
   const bool iqk_at_20 = _variant == jaguar3::ChipVariant::C8822C &&
                          (channel.ChannelWidth == CHANNEL_WIDTH_40 ||
@@ -722,7 +739,9 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   SelectedChannel iqk_ch = channel;
   if (iqk_at_20)
     iqk_ch.ChannelWidth = CHANNEL_WIDTH_20; /* IQK command set follows the RF */
+  timer.stage("set_channel");
   _hal.run_iqk(iqk_ch);
+  timer.stage("iqk");
   if (iqk_at_20)
     _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                         channel.ChannelWidth);
@@ -731,6 +750,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   _hal.dpk_force_bypass_8822e(); /* 8822e rfe 21/22: kernel bypasses DPK (after IQK) */
   _hal.config_rfe(channel.Channel); /* 8822e RFE/PAPE antenna-switch pins (PA enable) */
   _hal.config_channel_8822e(channel.Channel); /* 8822e band TX scaling/backoff + shaping */
+  timer.stage("rx_path_rfe_channel");
 
   /* DEVOURER_CW_TONE — a bare RF LO carrier. Armed HERE (before the FW power-mode
    * / coex H2C steps below, which on the 8812EU at 5 GHz leave the chip NAKing
@@ -777,10 +797,12 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * re-apply at the end of this function; this early one just keeps the
    * intermediate bring-up steps on sane references. */
   apply_tx_power_current(/*full=*/true);
+  timer.stage("txpower_pre");
   _brought_up = true;
   /* WiFi-only coex bring-up: disable the BT/LTE antenna arbitration and lock the
    * antenna to WLAN so on-air TX is not killed by the coex firmware. */
   _hal.coex_wlan_only_init();
+  timer.stage("coex_wlan_only_init");
   /* RFE GPIO/pad pinmux — the HalMAC "Config PIN Mux" (halmac_init_8822e) that
    * devourer's hand-rolled MAC init skips: route + drive the RFE PA-enable /
    * antenna-switch control pins. Without it the 8822e's PA pins are never driven
@@ -801,9 +823,13 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     _device.rtw_write<uint32_t>(0x0064, v64 & ~0x02040000u); /* PAD_CTRL1: RFE pads */
   }
 
+  timer.stage("rfe_pinmux");
   _hal.fw_set_pwr_mode_active(); /* keep all FW power domains on (no auto-PS) */
+  timer.stage("fw_pwr_mode");
   _hal.fw_coex_query_bt_info();  /* make the FW confirm BT is absent */
+  timer.stage("fw_coex_query");
   _hal.fw_coex_tdma_off();       /* disable coex time-division (WL keeps antenna) */
+  timer.stage("fw_coex_tdma_off");
   /* DEVOURER_BF_ARM_SOUNDER=1 — beamforming self-sounding probe (beamformer
    * side): arm the MAC's hardware sounding engine so a TX-descriptor-marked
    * NDPA (DEVOURER_TX_NDPA=1) is followed by a hardware-generated NDP. The MAC
@@ -868,6 +894,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * Applied before the coex thread starts so the writes don't contend. */
   if (_cfg.tuning.disable_cca)
     SetCcaMode(true);
+  timer.stage("filters_cca");
   /* DEVOURER_XTAL_CAP — crystal-cap trim (issue #217); before the coex thread
    * so the AFE write doesn't contend with the periodic coex re-apply. */
   if (_cfg.tuning.xtal_cap)
@@ -878,6 +905,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * TX-power state (flat override / offset) only sticks when applied after
    * them. The coex thread's ~2 s ticks do not rewrite the refs. */
   apply_tx_power_current(/*full=*/true);
+  timer.stage("txpower_post");
   /* Per-packet power banks: the BB init table reset 0x1e70 (0x00001000, all
    * banks disabled) and may have cleared the per-STA RAM — re-sync the
    * hardware to the planner state (a pre-bring-up SetTxPacketPowerOffsetQdb
@@ -907,6 +935,8 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
                     _device.rtw_read32(a), _device.rtw_read32(a + 4),
                     _device.rtw_read32(a + 8), _device.rtw_read32(a + 12));
   }
+  timer.stage("dpdt_ack_misc");
+  batch.end(); /* sync writes from here: the coex thread shares the transport */
   _coex_thread = std::thread([this] { coex_runtime_loop(); });
   if (_cfg.rx.ack_responder &&
       !SetAckResponder(*_cfg.rx.ack_responder)) /* DEVOURER_ACK_RESPONDER */
@@ -914,6 +944,8 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
         "Jaguar3: configured ACK responder could not be armed");
   if (_cfg.tx.ampdu)
     SetAmpduMode(*_cfg.tx.ampdu); /* DEVOURER_TX_AMPDU_MODE */
+  timer.stage("coex_thread_ampdu");
+  timer.total();
   _logger->info("Jaguar3: ready for TX (monitor inject)");
 }
 

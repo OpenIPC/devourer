@@ -865,6 +865,13 @@ bool Mt7612uRadio::StartBeacon(const uint8_t *beacon, size_t len,
   std::lock_guard<std::recursive_mutex> lock(_mu);
   if (!_dev || !beacon || len == 0 || interval_tu <= 0)
     return false;
+  /* Cleared BEFORE the call, not just set after it. mt7612u_beacon_start()
+   * runs mt_beacon_init(), which disarms the timer and suppresses every slot,
+   * so a failure after that point leaves the beacon dead - and a re-arm that
+   * fails (an over-long beacon body, say) would otherwise keep reporting the
+   * PREVIOUS arm as live, which is how UpdateBeaconPayload comes to return
+   * true for every write into a disarmed engine. */
+  _beacon_active = false;
   if (mt7612u_beacon_start(_dev, beacon, len,
                            static_cast<unsigned>(interval_tu)) != 0)
     return false;
@@ -887,16 +894,18 @@ bool Mt7612uRadio::StopBeacon() {
   std::lock_guard<std::recursive_mutex> lock(_mu);
   if (!_dev || !_beacon_active)
     return false;
-  const bool ok = mt7612u_beacon_stop(_dev) == 0;
-  /* Cleared either way. A failed stop leaves the MAC beaconing and there is
-   * nothing further this object can do about it, but reporting the beacon as
-   * still ours would make the destructor try again on a device that is about
-   * to be closed. */
+  if (mt7612u_beacon_stop(_dev) != 0) {
+    /* Deliberately still active. A caller retrying after a transient USB
+     * stall must not be told "already stopped" - false means "no beacon was
+     * active" in this interface, and reading a failed stop as that walks away
+     * from a beacon the MAC is still airing. Stop() calls this inside a
+     * try/catch, so a retry there costs nothing. */
+    _logger->error("MT7612U beacon stop FAILED - the MAC is still airing it; "
+                   "retry, or power-cycle the adapter");
+    return false;
+  }
   _beacon_active = false;
-  if (!ok)
-    _logger->error("MT7612U beacon stop failed - the MAC may still be airing "
-                   "it; a power-cycle is the only certain silence");
-  return ok;
+  return true;
 }
 
 /* The absolute dBm the actuator should carry: the base plus whatever offset is
@@ -1005,7 +1014,11 @@ devourer::AdapterCaps Mt7612uRadio::GetAdapterCaps() {
   c.ldpc_rx_flag = true;     /* the RXWI carries the per-frame LDPC bit */
   c.per_chain_rssi = true;
   c.hw_rx_timestamp = false; /* the RXWI TSF field is not parsed */
-  c.hw_beacon_txtsf = false; /* no hardware beacon function ported */
+  /* The MAC inserts the live 64-bit TSF into the beacon it auto-transmits;
+   * measured at 102400 us per beacon, exactly 100 TU (docs/mt7612u-ap-mode.md).
+   * True since the beacon plane landed - it read false while the function it
+   * describes sat three hundred lines above. */
+  c.hw_beacon_txtsf = true;
   /* Measured on air: 0 frames at the stimulus radio unarmed, 3500+ armed. */
   c.ack_responder_ok = true;
   /* Unmeasured, so false rather than optimistic - nothing here drives the

@@ -290,18 +290,22 @@ void mt7612u_clear_ack_responder(struct mt7612u_dev *dev);
  * MPDU with no radiotap header is accepted too and airs at OFDM 6 Mbps, the
  * rate a beacon wants.
  *
- * The BSSID is taken from addr3 and published in APC slot 0, which is what
- * makes the MAC match - and therefore auto-ACK - frames addressed to the BSS.
- * Two configurations are REFUSED rather than half-served, because both air a
- * beacon that no station can associate to:
+ * addr2 becomes the MAC's port identity and addr3 is published in the APC slot
+ * the hardware will match that BSS in - together, those two ARE "being an AP"
+ * on this part; there is no AP op-mode register and mt76 sets none either.
+ * Retargeting the identity is required, not a convenience: without it the MAC
+ * keeps ACKing for the adapter's factory MAC while beaconing a different
+ * BSSID, so a station's auth is never acknowledged and it retries until it
+ * gives up. The slot index follows mt76 - 1 for a locally-administered
+ * address, 0 otherwise - because under MBSS_MODE=3 the hardware derives it
+ * from the address bits, and slot 0 for an 02:/06:/0a: BSSID matches nothing.
  *
- *   - addr3 different from the adapter's own MAC. The port identity the MAC
- *     ACKs against is MT_MAC_ADDR, and this call does not retarget it; a BSSID
- *     that disagrees with it beacons fine and ACKs nothing.
- *   - a locally-administered adapter MAC (bit 1 of byte 0). Under MBSS_MODE=3
- *     the hardware derives the BSS index from the address bits and mt76 uses
- *     1 + (((macaddr[0] ^ addr[0]) >> 2) & 7), so slot 0 is the wrong slot and
- *     the match would silently never fire.
+ * The identity is one register plane with one saved copy, shared with
+ * mt7612u_set_ack_responder(): a caller doing both is setting the same thing
+ * twice, and mt7612u_clear_ack_responder() is what restores the factory MAC.
+ * mt7612u_beacon_stop() deliberately does NOT restore it - it silences the
+ * beacon and leaves the identity alone rather than clobbering a responder the
+ * caller may own.
  *
  * mt7612u_beacon_update() replaces the loaded beacon in place; the interval,
  * TBTT phase and BSSID are untouched. The swap is not atomic against TBTT - a

@@ -501,7 +501,7 @@ static void test_tx_ring_ceiling(void)
  */
 static void test_beacon_txwi(void)
 {
-	struct mt7612u_dev d;
+	struct mt7612u_dev d{};
 	uint8_t buf[128];
 	uint8_t beacon[36], data[36];
 	struct mt7612u_tx_rate bcn_rate = {
@@ -516,7 +516,6 @@ static void test_beacon_txwi(void)
 
 	printf("beacon TXWI (MT_TXOPT_BEACON sets TS + NSEQ):\n");
 
-	memset(&d, 0, sizeof d);
 	d.chainmask = 0x0202;
 
 	memset(beacon, 0, sizeof beacon);

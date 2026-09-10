@@ -214,6 +214,11 @@ struct mt7612u_dev {
 	/* Oracle-diff log: every EP0 write we emit, in order. */
 	uint8_t  ack_saved_mac[6];
 	int      ack_saved;
+	/* Set when mt7612u_beacon_start() was the one that retargeted the port
+	 * identity, so mt7612u_beacon_stop() restores it - and does NOT when a
+	 * caller had already armed an ACK responder, because then the identity is
+	 * theirs and restoring would silently disarm it. */
+	int      beacon_took_identity;
 	struct mt_async *a;
 	FILE    *wrlog;
 	FILE    *mculog;

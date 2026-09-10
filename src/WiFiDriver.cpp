@@ -32,6 +32,9 @@
 #endif
 #include "rtl8733b/Rtl8733bUsbIds.h"
 #include "mt7612u/Mt7612uUsbIds.h" /* header-only VID:PID table, always compiled */
+#if defined(DEVOURER_HAVE_MT7612U)
+#include "mt7612u/Mt7612uRadio.h"
+#endif
 
 namespace {
 
@@ -203,11 +206,17 @@ WiFiDriver::CreateRadio(libusb_device_handle *dev_handle,
    * vendor id". Mt7612uUsbIds.h carries the table and the evidence;
    * Mt7612uUsbIdsSelftest.cpp fails if a later id addition breaks it. */
   if (mt7612u::is_usb_id(vid, pid)) {
-    _logger->error("MediaTek MT7612U ({:04x}:{:04x}) detected; devourer has no "
-                   "MediaTek radio backend yet — refusing rather than "
-                   "misdetecting it as Realtek",
+#if defined(DEVOURER_HAVE_MT7612U)
+    _logger->info("Creating Mt7612uRadio ({:04x}:{:04x})", vid, pid);
+    return std::make_unique<Mt7612uRadio>(dev_handle, ctx, std::move(usb_lock),
+                                          _logger, cfg);
+#else
+    _logger->error("MediaTek MT7612U ({:04x}:{:04x}) detected but MediaTek "
+                   "support is not compiled in (DEVOURER_MT7612U=OFF) — "
+                   "refusing rather than misdetecting it as Realtek",
                    vid, pid);
     return nullptr;
+#endif
   }
 
   /* A vendor read that did not complete means this device is not speaking the

@@ -43,15 +43,18 @@ option(DEVOURER_KESTREL_8852C "RTL8852CU / 8832CU (Kestrel 11ax, G6)"           
 option(DEVOURER_PCIE          "PCIe transport via vfio-pci (Linux; RTL8821CE)"  OFF)
 # MediaTek MT7612U / MT7662U — the first non-Realtek part. Compiles the
 # src/mt7612u subtree (its own C++ library with a C ABI, landed unwired in #412)
-# into libdevourer. OFF by default and deliberately NOT counted as chip support
-# by the "No chip support selected" check below: there is no IRadio backend yet,
-# so an MT7612U-only build would produce a library that can open nothing. It
-# joins that list when the backend lands (#419). Turning it ON today buys one
-# thing, and it is the point of the option: CI compiles the subtree across the
-# whole platform matrix — gcc, clang, MSVC, mingw, macOS — where it was
-# previously only ever built by its own Makefile, on Linux. It does NOT gate the
-# factory's MediaTek refusal, which is unconditional.
-option(DEVOURER_MT7612U       "Compile the MediaTek MT7612U subtree (the id gate is always on)" OFF)
+# into libdevourer along with Mt7612uRadio, the IRadio backend WiFiDriver
+# constructs for a MediaTek adapter. OFF by default, but it DOES count as chip
+# support in the "No chip support selected" check below: with the backend behind
+# it an MT7612U-only build opens, receives and transmits, which is exactly what
+# that check exists to require.
+#
+# Turning it on also compiles the subtree across the whole platform matrix —
+# gcc, clang, MSVC, mingw, macOS — where it was previously only ever built by
+# its own Makefile, on Linux. The option does NOT gate the factory's MediaTek id
+# gate, which is unconditional: with it OFF, such an adapter is refused rather
+# than misdetected as Realtek.
+option(DEVOURER_MT7612U       "MediaTek MT7612U / MT7662U (2T2R 11ac USB)"      OFF)
 
 # Compile-time diagnostics floor (src/logger.h). Calls below the floor —
 # including their argument expressions at DVR_TRACE/DVR_DEBUG sites — compile
@@ -95,7 +98,8 @@ else()
 endif()
 if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3
    AND NOT DEVOURER_8733B
-   AND NOT DEVOURER_KESTREL)
+   AND NOT DEVOURER_KESTREL
+   AND NOT DEVOURER_MT7612U)
     message(FATAL_ERROR
         "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
         "DEVOURER_JAGUAR2_8822B / DEVOURER_JAGUAR2_8821C / DEVOURER_JAGUAR3_8822C "
@@ -380,12 +384,18 @@ if(DEVOURER_MT7612U)
         src/mt7612u/rx.cpp
         src/mt7612u/tx.cpp
         src/mt7612u/usb.cpp
+        src/mt7612u/Mt7612uRadio.cpp src/mt7612u/Mt7612uRadio.h
+        src/mt7612u/Mt7612uMapping.h
         src/mt7612u/internal.h
         src/mt7612u/regs.h
         src/mt7612u/initvals.h
         src/mt7612u/Mt7612uUsbIds.h)  # listed for IDEs; compiled unconditionally
     target_include_directories(devourer PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u)
+    # PUBLIC: Mt7612uRadio.h is reached as "mt7612u/Mt7612uRadio.h" and pulls in
+    # <mt7612u/mt7612u.h>, so a consumer compiling against this target needs the
+    # subtree's public include root too.
+    target_include_directories(devourer PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u/include)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_MT7612U=1)
 endif()
@@ -622,6 +632,32 @@ if(DEVOURER_8733B)
     target_include_directories(rtl8733bprobe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 endif()
 
+# mt7612uprobe — the MediaTek bring-up harness, the rtl8733bprobe/kestrelprobe
+# sibling: one subcommand per verified hardware gate (registers, firmware, MAC,
+# channel, TX, RX, ACK responder, the wedge experiments). Same source the
+# subtree's own Makefile builds as ./bringup, built here so the chip-specific
+# tool is not the one part of this backend that only a second build system can
+# produce — and so it picks up CMAKE_C_COMPILER and DEVOURER_SANITIZE, which
+# shelling out to that Makefile would silently ignore.
+#
+# It talks to the C library directly, NOT through Mt7612uRadio: it predates the
+# backend and its whole purpose is to exercise the layer underneath one. It
+# never substitutes for the production IRadio path.
+# UNIX-only, unlike its kestrelprobe/rtl8733bprobe siblings. Those are portable
+# C++; this one is the hardware bench harness and uses <unistd.h>,
+# <sys/resource.h> and getrusage() unguarded, so on the MSVC cell of the
+# multi-platform matrix - which now passes DEVOURER_MT7612U=ON - an unguarded
+# add_executable would put it in `all` and break the build. The LIBRARY is
+# MSVC-clean; this tool is not, and does not need to be.
+if(DEVOURER_MT7612U AND UNIX)
+    add_executable(mt7612uprobe
+        src/mt7612u/tools/bringup.cpp
+    )
+    target_link_libraries(mt7612uprobe PRIVATE devourer PkgConfig::libusb)
+    target_include_directories(mt7612uprobe PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u)
+endif()
+
 # reglat — register round-trip latency microbench (USB ctrl-xfer vs PCIe MMIO).
 # Times RtlAdapter::rtw_read32; the PCIe path compiles only with DEVOURER_PCIE
 # (inherited via the devourer PUBLIC DEVOURER_HAVE_PCIE define). See its header.
@@ -842,6 +878,20 @@ add_executable(Mt7612uUsbIdsSelftest
 target_link_libraries(Mt7612uUsbIdsSelftest PRIVATE devourer)
 
 add_test(NAME mt7612u_usb_ids COMMAND Mt7612uUsbIdsSelftest)
+
+# Headless guard for the MT7612U <-> devourer descriptor translations. Pure
+# lookups, so no hardware and no subtree compile — this cell runs whether or
+# not DEVOURER_MT7612U is on, which is the point: the header it covers is the
+# one place a wrong RSSI base or a per-chain copy that publishes the noise
+# floor would be introduced, and both have happened.
+add_executable(Mt7612uMappingSelftest
+    tests/mt7612u_mapping_selftest.cpp
+)
+target_link_libraries(Mt7612uMappingSelftest PRIVATE devourer)
+target_include_directories(Mt7612uMappingSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u/include)
+
+add_test(NAME mt7612u_mapping COMMAND Mt7612uMappingSelftest)
 
 # Headless guard for the TX quiesce seam (ITransport::quiesce_tx via
 # RtlAdapter): the explicit "stop TX and wait it out" call every device makes

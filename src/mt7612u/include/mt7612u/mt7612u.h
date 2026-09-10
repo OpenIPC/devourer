@@ -221,6 +221,26 @@ int mt7612u_rx_start(struct mt7612u_dev *dev, mt7612u_rx_cb cb, void *user);
 int mt7612u_rx_stop(struct mt7612u_dev *dev);
 
 /*
+ * Silence the receiver WITHOUT tearing the ring down: clears MAC RX only,
+ * leaving TX, the ring and the event thread alone.
+ *
+ * This is the first half of an orderly RX teardown, and the order is not
+ * cosmetic. mt7612u_rx_stop() cancels the bulk-IN transfers, which removes the
+ * drain; doing that while the MAC is still receiving is the state that wedges
+ * this part below the USB level, where libusb_reset_device, the sysfs
+ * authorized toggle and rebinding the kernel driver all fail to recover it and
+ * only a physical replug does. So: quiesce, then stop.
+ *
+ * mt7612u_stop() would also silence the receiver, but it stops the whole MAC
+ * including TX — no use to a caller that brought the chip up for transmit and
+ * is only shutting the RX half down.
+ *
+ * Leaves the ring restartable: a later mt7612u_start() re-enables MAC RX if a
+ * ring is running.
+ */
+int mt7612u_rx_quiesce(struct mt7612u_dev *dev);
+
+/*
  * Put the receive filter into monitor mode: pass everything the PHY decodes,
  * dropping only PHY errors and (unless keep_corrupted) frames that failed FCS.
  *

@@ -102,9 +102,6 @@ void mt_usleep(unsigned us)
 	std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
 
-/* Held for the process lifetime; flock releases it on any exit. */
-static int g_lock_fd = -1;
-
 static uint64_t now_us(void)
 {
 	/* steady_clock, matching CLOCK_MONOTONIC: never stepped by a wall-clock
@@ -467,13 +464,8 @@ int mt_adopt(struct mt7612u_dev *d, libusb_device_handle *h,
  * Messages below therefore name "the selector", not that variable - a caller
  * that is not bringup would be told to set something it does not use.
  *
- * This is the ONE environment read left in the library, and it stays deferred
- * to integration as agreed in #412 rather than being removed here: there is no
- * public way to pass a selector (mt7612u_open() allocates the device itself and
- * the struct is opaque), so dropping it would leave a multi-adapter consumer
- * unable to choose an adapter at all. The wrapper does not need it - it arrives
- * through mt7612u_open_handle() having already selected the device itself.
- * MT7612U_NO_AUTORECOVER, which had no such constraint, is now d->no_autorecover.
+ * mt7612u_open_selected() is the public way to pass it; mt7612u_open() is
+ * that with NULL. Nothing in this library reads the environment.
  */
 /*
  * Exclusive per-adapter lock - the same lock devourer's own UsbDeviceLock
@@ -517,11 +509,13 @@ static void adapter_key(libusb_device *dev, char *out, size_t n)
 		                i ? "." : "-", ports[i]);
 }
 
-/* Drop the adapter lock, if this process is holding one. */
-static void unlock_adapter(void)
+/* Drop this device's adapter lock, if it is holding one. */
+static void unlock_adapter(struct mt7612u_dev *d)
 {
 #if !defined(_WIN32)
-	if (g_lock_fd >= 0) { close(g_lock_fd); g_lock_fd = -1; }
+	if (d && d->lock_fd >= 0) { close(d->lock_fd); d->lock_fd = -1; }
+#else
+	(void)d;
 #endif
 }
 
@@ -585,7 +579,8 @@ static int lock_adapter(libusb_device *dev, const char **err)
 }
 #endif /* !_WIN32 */
 
-static libusb_device_handle *open_selected(libusb_context *ctx, const char *sel,
+static libusb_device_handle *open_selected(struct mt7612u_dev *d,
+                                           libusb_context *ctx, const char *sel,
                                            const char **err)
 {
 
@@ -635,7 +630,7 @@ static libusb_device_handle *open_selected(libusb_context *ctx, const char *sel,
 				libusb_free_device_list(list, 1);
 				return NULL;
 			}
-			g_lock_fd = lk;
+			d->lock_fd = lk;
 			if (libusb_open(list[i], &h)) {
 				/* Only mt_close() releases the lock, and a failed
 				 * mt_open() never reaches it - so holding it here
@@ -643,7 +638,7 @@ static libusb_device_handle *open_selected(libusb_context *ctx, const char *sel,
 				 * on the very next retry. Release what this
 				 * iteration took. */
 				h = NULL;
-				unlock_adapter();
+				unlock_adapter(d);
 			}
 		}
 		matches++;
@@ -672,7 +667,7 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 	if (libusb_init(&d->ctx)) { if (err) *err = "libusb_init failed"; return -1; }
 	d->owns_handle = 1;
 
-	d->h = open_selected(d->ctx, d->dev_selector, err);
+	d->h = open_selected(d, d->ctx, d->dev_selector, err);
 	if (!d->h) {
 		libusb_exit(d->ctx); d->ctx = NULL;
 		return -1;
@@ -697,7 +692,7 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 		/* Re-enumerated under a new address: reopen and re-detach. */
 		libusb_close(d->h);
 		mt_usleep(200000);
-		d->h = open_selected(d->ctx, d->dev_selector, NULL);
+		d->h = open_selected(d, d->ctx, d->dev_selector, NULL);
 		if (!d->h) {
 			if (err) *err = "device vanished after USB reset";
 			libusb_exit(d->ctx); d->ctx = NULL;
@@ -753,7 +748,7 @@ void mt_close(struct mt7612u_dev *d)
 		    "handle and context rather than closing underneath them");
 		d->h = NULL;
 		d->ctx = NULL;
-		unlock_adapter();
+		unlock_adapter(d);
 		return;
 	}
 	if (d->h) {
@@ -769,7 +764,7 @@ void mt_close(struct mt7612u_dev *d)
 	}
 	if (d->ctx && d->owns_handle) libusb_exit(d->ctx);
 	d->ctx = NULL;
-	unlock_adapter();
+	unlock_adapter(d);
 }
 
 /* Block write, as mt76u_copy(): one MULTI_WRITE per batch, wValue 0.

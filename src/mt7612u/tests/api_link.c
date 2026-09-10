@@ -28,6 +28,7 @@ static void *const api[] = {
 	(void *)mt7612u_tx,
 	(void *)mt7612u_rx_start,
 	(void *)mt7612u_rx_stop,
+	(void *)mt7612u_rx_quiesce,
 	(void *)mt7612u_set_monitor_rx,
 	(void *)mt7612u_send_packet,
 	(void *)mt7612u_send_packets,

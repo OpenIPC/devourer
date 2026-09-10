@@ -29,15 +29,15 @@ def main() -> int:
     ap.add_argument("--operating-snr", type=float, default=None)
     ap.add_argument("--snr-lo", type=float, default=15.0)
     ap.add_argument("--snr-hi", type=float, default=55.0)
+    ap.add_argument("--no-fcs", action="store_true",
+                    help="bare-hex input carries no trailing FCS (MediaTek "
+                         "MT7612U strips it). Events carry their own fcs field "
+                         "and always win.")
     args = ap.parse_args()
 
     frames = []
     for line in open(args.infile):
-        hf = bf.report_hex(line)
-        if hf is None:
-            continue
-        h, fcs_present = hf
-        f = bf.parse_frame(h, fcs_present)
+        f = bf.frame_from_line(line, bare_fcs=not args.no_fcs)
         if f and f["feedback"]:
             frames.append(f)
     if not frames:

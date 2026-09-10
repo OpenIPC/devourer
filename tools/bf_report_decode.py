@@ -217,6 +217,23 @@ def report_hex(line: str):
     return line, True
 
 
+def frame_from_line(line, bare_fcs=True):
+    """report_hex + the bare-hex FCS override + parse_frame, in ONE place.
+
+    The override is easy to omit, and omitting it is silent: both waterfall
+    tools took report_hex's fcs_present straight to parse_frame, so a bare
+    MediaTek capture lost its last four payload bytes there while an event
+    capture of the same frames decoded fine. Factored out so a caller cannot
+    get it wrong by leaving a step out."""
+    hf = report_hex(line)
+    if hf is None:
+        return None
+    h, fcs_present = hf
+    if line.strip() and not line.strip().startswith('{"ev":"'):
+        fcs_present = bare_fcs        # bare hex: no metadata, use the flag
+    return parse_frame(h, fcs_present)
+
+
 def read_frames(src, max_frames=200, bare_fcs=True):
     """Parse `bf.report_raw` event (or bare hex) lines into frame dicts.
 
@@ -225,13 +242,7 @@ def read_frames(src, max_frames=200, bare_fcs=True):
     metadata channel, so --no-fcs is the only way to decode one correctly."""
     frames = []
     for line in src:
-        hf = report_hex(line)
-        if hf is None:
-            continue
-        h, fcs_present = hf
-        if line.strip() and not line.strip().startswith('{"ev":"'):
-            fcs_present = bare_fcs        # bare hex: no metadata, use the flag
-        f = parse_frame(h, fcs_present)
+        f = frame_from_line(line, bare_fcs)
         if f:
             frames.append(f)
         if len(frames) >= max_frames:

@@ -178,8 +178,8 @@ struct mt7612u_dev {
 	std::recursive_mutex io_lock;
 	/* Observe-but-do-not-repair, for wedge experiments.  A field, not a
 	 * getenv - the tool that wants the behaviour sets it before mt_open()
-	 * (bringup does). Note this is not yet true of the library as a whole:
-	 * open_selected() still reads MT7612U_DEV (see usb.cpp). */
+	 * (bringup does). True of the library as a whole now: the selector moved
+	 * to a field too, so nothing here reads the environment. */
 	uint8_t  no_autorecover;
 	/* Which adapter to open, "<bus>-<port>" as bringup spells it, or NULL for
 	 * "the first one". A field and not a getenv: this is a LIBRARY now
@@ -188,6 +188,16 @@ struct mt7612u_dev {
 	 * never asked for. Points at caller-owned storage and is only read during
 	 * mt_open(). */
 	const char *dev_selector;
+	/* The adapter's exclusivity lock (flock on the same file UsbDeviceLock
+	 * uses), or -1. PER DEVICE, not a file-global: mt7612u_open_selected()
+	 * makes one process holding two adapters a supported shape, and a single
+	 * global fd meant opening B overwrote A's descriptor - so closing A
+	 * released B's lock and leaked A's, leaving another process free to
+	 * reset and claim B while A was still using it. */
+	/* -1, NOT the 0 that value-initialising the device would give: 0 is
+	 * stdin, and unlock_adapter() would close it on a device that never took
+	 * a lock. */
+	int lock_fd = -1;
 	uint8_t  bw_clamp_warned;   /* the "never widen" notice is once, not per frame */
 	int8_t   txpower_conf;      /* limit, 0.5 dB units (dBm * 2) */
 	int8_t   target_power;

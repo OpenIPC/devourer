@@ -157,6 +157,12 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.bf.ndpa_period = p > 0 ? p : 1;
   }
 
+  /* ---- MediaTek MT7612U ---- */
+  /* Folded in here rather than read inside the backend, so neither the C
+   * library nor the device class consults ambient process state. */
+  if (const char *e = env_str("DEVOURER_MT7612U_FW_DIR"))
+    cfg.mt7612u.firmware_dir = std::string(e);
+
   /* ---- tuning ---- */
   /* Defaults ON, so this reads the negation: only an explicit 0 disables it. */
   if (const char *e = env_str("DEVOURER_TEARDOWN_POWER_DOWN"))

@@ -235,6 +235,12 @@ void mt_async_stop(struct mt7612u_dev *d)
 	stuck_rx = a->rx_inflight;
 	a->running = 0;
 	a->lock.unlock();
+	/* Wake anyone parked in mt_async_tx_submit's slot wait. Clearing `running`
+	 * is what its guard tests, but without this notify the guard only fired
+	 * when the cancel pass happened to produce a completion - so a teardown
+	 * with no completions left a submitter blocked forever, which is exactly
+	 * what its comment says must not happen. */
+	a->cv.notify_all();
 
 	if (a->evt_started)
 		a->evt.join();
@@ -334,8 +340,19 @@ int mt7612u_rx_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user)
 	return mt_async_start(d, cb, user);
 }
 
+int mt7612u_rx_quiesce(struct mt7612u_dev *d)
+{
+	if (!d) return -1;
+	mt_mac_rx_disable(d);
+	return 0;
+}
+
 int mt7612u_rx_stop(struct mt7612u_dev *d)
 {
+	/* Callers that want the receiver silenced BEFORE the drain disappears
+	 * call mt7612u_rx_quiesce() first; see its contract. Not folded in here
+	 * because bringup's gates already quiesce explicitly at each of their own
+	 * teardown points, and doing it twice would hide which one did it. */
 	mt_async_stop(d);
 	return 0;
 }

@@ -1,11 +1,12 @@
 # src/mt7612u — MediaTek MT7612U
 
-**Compiled by `CMakeLists.txt` under `DEVOURER_MT7612U` (default OFF); still no
-`IRadio` backend.** This subtree is a complete, self-contained library for the
-part — a public C ABI, its own transport, no dependency on `RtlAdapter` — plus
-the bring-up harness that produced every measurement in `docs/mt7612u.md`.
-`WiFiDriver::CreateRadio` recognises the MediaTek USB ids today only to refuse
-them; wiring a radio in behind `IRadio` is the follow-up.
+**Compiled by `CMakeLists.txt` under `DEVOURER_MT7612U` (default OFF), and
+wired in behind `IRadio`.** This subtree is a complete, self-contained library
+for the part — a public C ABI, its own transport, no dependency on `RtlAdapter`
+— plus the bring-up harness that produced every measurement in
+`docs/mt7612u.md`. `Mt7612uRadio` is the backend `WiFiDriver::CreateRadio`
+constructs for a MediaTek adapter; `Mt7612uMapping.h` holds the pure
+translations between this part's descriptor vocabulary and devourer's.
 
 The sources are C++ (`.cpp`), not C: MSVC has no `<pthread.h>` and devourer
 builds Windows first-class, so the sync and timing primitives are `std::` types.
@@ -40,6 +41,9 @@ Measurements, methods and limits: [`../../docs/mt7612u.md`](../../docs/mt7612u.m
 | `caps.cpp` | TSF, capability descriptor, ACK responder |
 | `tools/bringup.cpp` | one subcommand per verified gate |
 | `tests/` | offline tests (`make check`): public-API link (C), frame shapes, field macros, log sink |
+| `Mt7612uRadio.{h,cpp}` | the `IRadio` backend: bring-up, RX/TX, the 1 Hz tick, caps |
+| `Mt7612uMapping.h` | pure translations (RSSI bias, per-chain signal, rate codes, TID) — pinned by `tests/mt7612u_mapping_selftest.cpp` |
+| `Mt7612uUsbIds.h` | the vid:pid gate `WiFiDriver::CreateRadio` consults |
 | `initvals.h` | **generated** — see Provenance |
 
 ## The receiver must never run undrained
@@ -126,10 +130,12 @@ rtap   send_packet / send_packets           hop    channel-switch cost
 ```
 
 `make` here builds it as `./bringup`, which is what the hardware notes use.
-The integration PR adds a CMake target for the same source, named
-`mt7612uprobe` to sit beside `pcieprobe` / `kestrelprobe` / `rtl8733bprobe`, so
-the chip-specific tool is not the one part of this backend that only a second
-build system can produce.
+CMake builds the same source as `mt7612uprobe` (with `DEVOURER_MT7612U=ON`), to
+sit beside `pcieprobe` / `kestrelprobe` / `rtl8733bprobe` — so the chip-specific
+tool is not the one part of this backend that only a second build system can
+produce, and so it picks up the sanitizer and compiler settings the rest of the
+tree is built with. It drives the C library directly rather than `Mt7612uRadio`:
+its purpose is to exercise the layer underneath the backend.
 
 `sweep`, `coding` and `vht` take a width as their fourth argument, in the
 `MT7612U_BW_*` numbering — `0` = 20, `1` = 40, `2` = 80 MHz:

@@ -74,6 +74,10 @@ def main() -> int:
     ap.add_argument("--operating-snr", type=float, default=None,
                     help="re-centre measured per-tone SNR to this mean dB "
                          "(models a weaker link so the QAM ramp spreads)")
+    ap.add_argument("--no-fcs", action="store_true",
+                    help="bare-hex input carries no trailing FCS (MediaTek "
+                         "MT7612U strips it). Events carry their own fcs field "
+                         "and always win.")
     ap.add_argument("--width", type=int, default=2,
                     help="terminal columns per subcarrier (default 2)")
     args = ap.parse_args()
@@ -141,11 +145,7 @@ def main() -> int:
 
     try:
         for line in sys.stdin:
-            hf = bf.report_hex(line)
-            if hf is None:
-                continue
-            h, fcs_present = hf
-            f = bf.parse_frame(h, fcs_present)
+            f = bf.frame_from_line(line, bare_fcs=not args.no_fcs)
             if not f:
                 continue
             if ns is None:

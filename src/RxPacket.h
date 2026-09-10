@@ -106,18 +106,39 @@ struct rx_pkt_attrib
      * format. 0xff on pre-AX generations (their descriptors carry no such
      * field). */
     uint8_t ppdu_type = 0xff;
+    /* Whether Data still carries the trailing 4-byte FCS.
+     *
+     * True on every Realtek generation, because each sets the MAC's append-FCS
+     * bit at init (RCR_APPFCS on Jaguar1/2, bit 31 of RCR on Jaguar3 and
+     * 8733B, B_AX_APPEND_FCS on Kestrel), so the RX descriptor's PKT_LEN
+     * already counts those four bytes and the parser slices them in.
+     *
+     * False on MediaTek MT7612U: that MAC strips the FCS, and the four bytes
+     * following the MPDU are the FCE info trailer, not a checksum (CRC-32
+     * matched them on 0 of 4263 measured frames — docs/mt7612u.md). A consumer
+     * that removes four bytes there deletes real payload.
+     *
+     * Defaulted true so a parser that does not set it keeps the historical
+     * contract; adding this therefore changes nothing for existing backends.
+     * It is per-frame rather than an AdapterCaps entry because the consumers
+     * that need it — devourer::bf::parse_report() above all — are free
+     * functions handed a pointer and a length, with no device in reach. */
+    bool fcs_present = true;
     RX_PACKET_TYPE pkt_rpt_type;
 };
 
 struct Packet
 {
     rx_pkt_attrib RxAtrib;
-    /* Full 802.11 frame including the trailing FCS. Every Realtek RX parser
-     * follows this contract; consumers remove the FCS at their protocol
-     * boundary rather than making the frame length chip-specific. Retaining it
-     * also lets DEVOURER_RX_KEEP_CORRUPTED and fused-FEC salvage inspect a
-     * failed frame, while tools/bf_report_decode.py trims the trailing four
-     * bytes when decoding beamforming reports. */
+    /* The 802.11 frame. It carries the trailing FCS when
+     * RxAtrib.fcs_present is set, which is the case on every Realtek
+     * generation; a consumer that strips four bytes MUST check that flag
+     * rather than assume, because the MediaTek backend delivers no FCS.
+     * Keeping the FCS where the hardware supplies it lets
+     * DEVOURER_RX_KEEP_CORRUPTED and fused-FEC salvage inspect a failed frame,
+     * and tools/bf_report_decode.py trims those four bytes when decoding
+     * beamforming reports (it reads the `fcs` field of the bf.report_raw
+     * event to know whether to). */
     std::span<uint8_t> Data;
 
     /* The transmitter's hardware TX-egress TSF, when the frame carries one.

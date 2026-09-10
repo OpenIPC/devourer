@@ -80,7 +80,7 @@ def dequant_psi(q: int, b: int) -> float:
     return (2 * q + 1) * math.pi / (1 << (b + 2))
 
 
-def parse_frame(hexstr: str):
+def parse_frame(hexstr: str, fcs_present: bool = True):
     """Return dict with header fields + raw angle bytes, or None if not a
     VHT/HT compressed beamforming report."""
     try:
@@ -105,9 +105,15 @@ def parse_frame(hexstr: str):
     feedback = (mc >> 11) & 0x1           # 0 = SU, 1 = MU
     sa = ":".join(f"{b:02x}" for b in d[10:16])
     snr = list(d[29:29 + nc])             # avg SNR per column (signed 0.25 dB)
-    angle_bytes = d[29 + nc:len(d) - 4]   # drop 4-byte FCS
+    # Drop the FCS only when the capturing backend appended one. MediaTek
+    # MT7612U strips it, and its trailing bytes are the FCE info trailer, so
+    # taking four off there would discard real angle data. The bf.report_raw
+    # event carries "fcs"; bare-hex input predates it and is assumed Realtek.
+    fcs = 4 if fcs_present else 0
+    angle_bytes = d[29 + nc:len(d) - fcs]
     return dict(sa=sa, nc=nc, nr=nr, bw=bw, ng=ng, codebook=codebook,
-                feedback=feedback, snr=snr, angle_bytes=angle_bytes, raw=d)
+                feedback=feedback, snr=snr, angle_bytes=angle_bytes, raw=d,
+                fcs_present=fcs_present)
 
 
 def parse_mu_snr(frame, ns, vbytes):
@@ -121,8 +127,12 @@ def parse_mu_snr(frame, ns, vbytes):
     mu_start = 29 + frame["nc"] + vbytes
     if mu_start + 4 >= len(d):
         return None
+    # The FCS-present bound stays exactly what it always was (len - 2); only
+    # the FCS-less case extends, because there the trailing bytes are payload
+    # and stopping short of them drops the final SNR pair.
+    end = len(d) - 2 if frame.get("fcs_present", True) else len(d)
     vals, i, last = [], mu_start, None
-    while i + 1 < len(d) - 2:
+    while i + 1 < end:
         a = d[i]
         if a < 40 or (last is not None and abs(a - last) > 40):
             break                         # trailer/junk boundary
@@ -185,8 +195,11 @@ def decode_angles(angle_bytes: bytes, ns: int, na: int, bphi: int, bpsi: int,
 
 def report_hex(line: str):
     """Hex payload of one input line: a `bf.report_raw` event's `frame` field,
-    or the line itself when it's bare hex. Returns None for any other event
-    line (other-event JSON must not fall through to the hex parser)."""
+    or the line itself when it's bare hex. Returns (hex, fcs_present) so the
+    caller knows whether those trailing four bytes are an FCS; bare hex has no
+    metadata and is assumed to carry one, which is what every Realtek capture
+    did before the field existed. Returns None for any other event line
+    (other-event JSON must not fall through to the hex parser)."""
     line = line.strip()
     if line.startswith('{"ev":"'):
         if not line.startswith('{"ev":"bf.report_raw"'):
@@ -197,18 +210,28 @@ def report_hex(line: str):
             return None
         if not isinstance(obj, dict) or obj.get("ev") != "bf.report_raw":
             return None
-        return obj.get("frame")
-    return line
+        frame = obj.get("frame")
+        if frame is None:
+            return None          # malformed event: skippable, as before
+        return frame, bool(obj.get("fcs", 1))
+    return line, True
 
 
-def read_frames(src, max_frames=200):
-    """Parse `bf.report_raw` event (or bare hex) lines into frame dicts."""
+def read_frames(src, max_frames=200, bare_fcs=True):
+    """Parse `bf.report_raw` event (or bare hex) lines into frame dicts.
+
+    bare_fcs is the FCS assumption for BARE HEX input only; events carry their
+    own `fcs` field and always win. A hand-captured MediaTek dump has no
+    metadata channel, so --no-fcs is the only way to decode one correctly."""
     frames = []
     for line in src:
-        h = report_hex(line)
-        if h is None:
+        hf = report_hex(line)
+        if hf is None:
             continue
-        f = parse_frame(h)
+        h, fcs_present = hf
+        if line.strip() and not line.strip().startswith('{"ev":"'):
+            fcs_present = bare_fcs        # bare hex: no metadata, use the flag
+        f = parse_frame(h, fcs_present)
         if f:
             frames.append(f)
         if len(frames) >= max_frames:
@@ -348,6 +371,10 @@ def main() -> int:
     ap.add_argument("--csv", help="write per-subcarrier CSV here")
     ap.add_argument("--max-frames", type=int, default=200)
     ap.add_argument("--msb", action="store_true", help="MSB-first bit order")
+    ap.add_argument("--no-fcs", action="store_true",
+                    help="bare-hex input carries no trailing FCS (MediaTek "
+                         "MT7612U strips it). Events carry their own `fcs` "
+                         "field and are unaffected by this flag.")
     ap.add_argument("--operating-snr", type=float, default=None,
                     help="re-centre the MEASURED per-tone SNR shape so its mean "
                          "= this dB (models a weaker/longer-range link at the "
@@ -357,7 +384,7 @@ def main() -> int:
     global _MSB
     _MSB = args.msb
     src = open(args.infile) if args.infile else sys.stdin
-    frames = read_frames(src, args.max_frames)
+    frames = read_frames(src, args.max_frames, bare_fcs=not args.no_fcs)
     if not frames:
         print("no VHT/HT compressed-beamforming reports found", file=sys.stderr)
         return 1

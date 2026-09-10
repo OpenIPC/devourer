@@ -141,10 +141,11 @@ def main() -> int:
 
     try:
         for line in sys.stdin:
-            h = bf.report_hex(line)
-            if h is None:
+            hf = bf.report_hex(line)
+            if hf is None:
                 continue
-            f = bf.parse_frame(h)
+            h, fcs_present = hf
+            f = bf.parse_frame(h, fcs_present)
             if not f:
                 continue
             if ns is None:

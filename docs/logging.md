@@ -176,8 +176,8 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 |---|---|---|
 | `bf.report` | BfReportDetect.h | kind, n, sa, nc, nr, bw, ng, len |
 | `bf.any` | BfReportDetect.h | fc "0xNNNN", cat, act, crc, len |
-| `bf.report_raw` | BfReportDetect.h, sense (stderr) | frame hex |
-| `bf.csi` | BfReportDetect.h (mode 3) | len, csi hex |
+| `bf.report_raw` | BfReportDetect.h, sense (stderr) | fcs, frame hex |
+| `bf.csi` | BfReportDetect.h (mode 3) | fcs, len, csi hex |
 | `csi.hit` / `csi.wedged` | RX (`DEVOURER_RX_DUMP_CSI`) | hit, selector "0x…", value "0x…" / selector |
 
 ### Stream demos / misc

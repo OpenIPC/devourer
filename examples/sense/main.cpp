@@ -177,15 +177,20 @@ class Sensor {
 public:
   explicit Sensor(double k) : _det(k) {}
 
-  void feed(const uint8_t *frame, size_t n) {
+  /* No default: the single call site has the Packet and must pass the
+   * frame's own flag. A default here would only let a future second
+   * caller compile while silently applying the Realtek rule. */
+  void feed(const uint8_t *frame, size_t n, bool fcs_present) {
     ReportHdr hdr;
-    if (!parse_report(frame, n, hdr))
+    if (!parse_report(frame, n, hdr, fcs_present))
       return;
     if (std::getenv("DEVOURER_SENSE_DUMP") && g_ev) {
       /* python-tool-compatible raw dump (events ride stderr in sense, so the
        * stdout display is untouched): capture with 2>file, analyse with
        * tools/bf_report_decode.py */
-      devourer::Ev(*g_ev, "bf.report_raw").hex("frame", frame, n);
+      devourer::Ev(*g_ev, "bf.report_raw")
+          .f("fcs", fcs_present ? 1 : 0)
+          .hex("frame", frame, n);
     }
     if (std::getenv("DEVOURER_SENSE_DEBUG")) {
       static int dbg = 0;
@@ -202,7 +207,7 @@ public:
     ++_total;
     if (!_meter) {
       /* calibration: copy full frames until we can pick a stable split */
-      _cal.emplace_back(frame, frame + n);
+      _cal.push_back({std::vector<uint8_t>(frame, frame + n), fcs_present});
       _ns = hdr.ns;
       _per = hdr.per_sc_bits;
       if ((int)_cal.size() >= kCalReports)
@@ -252,7 +257,10 @@ private:
     batch.reserve(_cal.size());
     for (auto &f : _cal) {
       ReportHdr h;
-      if (parse_report(f.data(), f.size(), h))
+      /* Reparse under the SAME rule the frame arrived with. Defaulting to
+       * fcs_present here would reject tight MU reports and mis-derive
+       * per_sc_bits for SU ones on any backend that strips the FCS. */
+      if (parse_report(f.first.data(), f.first.size(), h, f.second))
         batch.push_back(h);
     }
     int bphi = 0, bpsi = 0;
@@ -271,7 +279,8 @@ private:
   }
 
   std::mutex _mu;
-  std::vector<std::vector<uint8_t>> _cal;
+  /* frame bytes + whether they carry an FCS; calibrate() needs both. */
+  std::vector<std::pair<std::vector<uint8_t>, bool>> _cal;
   std::unique_ptr<MotionMeter> _meter;
   AdaptiveDetector _det;
   int _ns = 0, _per = 0, _bphi = 0, _bpsi = 0;
@@ -437,7 +446,7 @@ static int run_active(uint16_t snd_vid, uint16_t snd_pid, uint16_t bfe_vid,
   /* Self-capture the returned reports on the sounder's RX loop. */
   std::thread snd_rx([&snd, &sensor]() {
     snd.dev()->StartRxLoop(
-        [&sensor](const Packet &p) { sensor.feed(p.Data.data(), p.Data.size()); });
+        [&sensor](const Packet &p) { sensor.feed(p.Data.data(), p.Data.size(), p.RxAtrib.fcs_present); });
   });
   std::thread disp(run_display, std::ref(sensor));
 

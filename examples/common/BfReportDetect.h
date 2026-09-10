@@ -38,7 +38,7 @@ inline devourer::EventSink *bf_events = nullptr;
 
 inline void detect_report(const Packet &packet) {
   const char *mode_s = std::getenv("DEVOURER_BF_DETECT_REPORT");
-  if (!mode_s || packet.Data.size() < 27 || bf_events == nullptr)
+  if (!mode_s || packet.Data.size() < 29 || bf_events == nullptr)
     return;
   const char mode = mode_s[0];
   const uint8_t *d = packet.Data.data();
@@ -78,15 +78,20 @@ inline void detect_report(const Packet &packet) {
         .f("len", packet.Data.size());
     if (mode == '3' && rpt <= 6) {
       size_t off = 26 + 3; /* hdr(24)+cat+act+mimoctrl(3) */
-      size_t end = packet.Data.size() >= 4 ? packet.Data.size() - 4 : off;
+      /* Only the backends that append an FCS have four bytes to drop here;
+       * on MediaTek those bytes are CSI, not a checksum. */
+      const size_t fcs = packet.RxAtrib.fcs_present ? 4u : 0u;
+      size_t end = packet.Data.size() >= fcs ? packet.Data.size() - fcs : off;
       size_t n = end > off ? end - off : 0;
       devourer::Ev(*bf_events, "bf.csi")
+          .f("fcs", packet.RxAtrib.fcs_present ? 1 : 0)
           .f("len", n)
           .hex("csi", d + off, n < 40 ? n : 40);
     }
     if (mode == '4' && rpt <= 200) {
       /* Full-frame hex — consumed by tools/bf_report_decode.py. */
       devourer::Ev(*bf_events, "bf.report_raw")
+          .f("fcs", packet.RxAtrib.fcs_present ? 1 : 0)
           .hex("frame", d, packet.Data.size());
     }
   }

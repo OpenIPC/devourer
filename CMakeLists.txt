@@ -1245,6 +1245,17 @@ if(Python3_Interpreter_FOUND)
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/rx_tone_localize.py --self-test
     )
 
+    # FCS-presence handling in tools/bf_report_decode.py. The C++ trim has the
+    # bf_report_decode cell; this covers the Python one, which is where both
+    # review-found regressions actually were - a dropped None guard that turned
+    # a skippable malformed event into an uncaught TypeError across three
+    # tools, and an unconditional trailing-byte reservation in parse_mu_snr.
+    add_test(
+        NAME bf_report_fcs
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/bf_report_fcs_selftest.py
+    )
+
     # Headless guard for the LA-capture CSI math (tools/la_csi.py): synthetic
     # L-LTF through a known 2-tap channel + CFO + AWGN must locate, correct,
     # and recover |H(k)| with correlation > 0.99. Skips (77) without numpy.

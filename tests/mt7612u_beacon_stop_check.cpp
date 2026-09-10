@@ -154,7 +154,18 @@ int main(int argc, char **argv) {
 
   /* Explicit, not left to the destructor - the point of this program is that
    * the teardown path is the thing under test. */
-  dev->StopBeacon();
+  {
+    /* Retried like the AP harnesses: the point of this program is the teardown
+     * path, so leaving its own beacon airing would be the worst possible way
+     * to end it. */
+    bool silenced = false;
+    for (int i = 0; i < 3 && !silenced; ++i) silenced = dev->StopBeacon();
+    if (!silenced) {
+      std::fprintf(stderr, "FAIL: the final StopBeacon never succeeded - the "
+                           "beacon is still airing\n");
+      fails++;
+    }
+  }
   std::printf("\nlocal checks: %d failure(s). The SSID phases are the "
               "witness's call.\n", fails);
   return fails ? 1 : 0;

@@ -198,22 +198,33 @@ static int beacon_split(const void *buf, size_t len, const uint8_t **mpdu,
 	 * because mt_radiotap_parse() memsets its output. */
 	*r = mt7612u_tx_rate{};
 
-	rlen = mt_radiotap_parse(p, len, r);
-	/* Three return classes, not two: <0 means "this IS a radiotap header and
-	 * it is malformed". Treating that as a bare MPDU would parse the radiotap
-	 * bytes as an 802.11 header and read the BSSID out of the middle of it.
-	 * mt7612u_send_packet() refuses on <= 0; so does this. */
-	if (rlen < 0) {
-		ERR("beacon: malformed radiotap header");
-		return -1;
-	}
-	if (rlen > 0 && (size_t)rlen < len) {
+	/*
+	 * Which shape is this? An 802.11 beacon's first byte is its frame control,
+	 * 0x80 - never 0. A radiotap header's first byte is its version, which must
+	 * be 0. So byte 0 decides, and each shape is then held to its own rules
+	 * rather than being allowed to fall back to the other:
+	 *
+	 * mt_radiotap_parse() returns 0 for BOTH "not a radiotap header" and "is
+	 * one and it is malformed" (bad version, bad length, truncated present
+	 * map), and negative for "declared a field past its own length". Treating
+	 * any of those as a bare MPDU parses radiotap bytes as an 802.11 header and
+	 * loads them into the beacon page - which then airs.
+	 */
+	if (p[0] == 0) {
+		rlen = mt_radiotap_parse(p, len, r);
+		if (rlen <= 0) {
+			ERR("beacon: radiotap header is malformed");
+			return -1;
+		}
+		if ((size_t)rlen >= len) {
+			ERR("beacon: %d B of radiotap and no frame after it", rlen);
+			return -1;
+		}
 		*mpdu = p + rlen;
 		*mpdu_len = len - (size_t)rlen;
 	} else {
-		/* rlen == 0 (no radiotap) or rlen == len (a header with no frame
-		 * after it): treat the buffer as a bare MPDU. OFDM 6 Mbps is the
-		 * basic rate every station must decode, which is what a beacon wants. */
+		/* A bare MPDU. OFDM 6 Mbps is the basic rate every station must
+		 * decode, which is what a beacon wants. */
 		r->phy = MT7612U_PHY_OFDM;
 		r->mcs = 0;
 		r->nss = 1;
@@ -221,6 +232,7 @@ static int beacon_split(const void *buf, size_t len, const uint8_t **mpdu,
 		*mpdu = p;
 		*mpdu_len = len;
 	}
+
 	/* Unconditionally, whatever the caller's radiotap said: a beacon is
 	 * broadcast, and mt_tx_build() turns a cleared no_ack into
 	 * MT_TXWI_ACK_CTL_REQ - an ACK request on a frame no one may ACK. Both
@@ -270,6 +282,17 @@ static int mt_mac_set_bss_base(struct mt7612u_dev *d, const uint8_t *a)
 	return mt_rmw(d, MT_MAC_BSSID_DW1, MT_MAC_BSSID_DW1_ADDR, dw1);
 }
 
+/* Put the identity back if THIS call was what moved it. Shared by every
+ * failure path in beacon_start and by beacon_stop. */
+static void unwind_identity(struct mt7612u_dev *d, int took)
+{
+	if (!took)
+		return;
+	mt7612u_clear_ack_responder(d);
+	mt_mac_set_bss_base(d, d->macaddr);
+	d->beacon_took_identity = 0;
+}
+
 int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
                          unsigned interval_tu)
 {
@@ -278,6 +301,8 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 	size_t mpdu_len = 0;
 	const uint8_t *ta, *bssid;
 	uint8_t idx;
+	unsigned before;
+	int took = 0;
 
 	if (!dev) return -1;
 	if (beacon_split(buf, len, &mpdu, &mpdu_len, &rate)) return -1;
@@ -326,8 +351,10 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 		/* Only claim ownership if nobody else already held the identity: a
 		 * caller who armed a responder first owns the saved factory address,
 		 * and restoring it on beacon stop would silently disarm them. */
-		if (!was_taken)
+		if (!was_taken) {
 			dev->beacon_took_identity = 1;
+			took = 1;
+		}
 	}
 
 	/*
@@ -345,10 +372,44 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 	 */
 	idx = (ta[0] & 0x02) ? 1 : 0;
 
-	if (mt_ap_set_bssid(dev, idx, bssid)) return -1;
+	/*
+	 * From here the hardware is being changed, so every exit unwinds. Two
+	 * things are being unwound, and they are different:
+	 *
+	 *  - the identity, if THIS call took it. Leaving it retargeted after a
+	 *    failed start means the adapter answers for a BSS that does not exist.
+	 *  - the beacon engine, once mt_beacon_init() has disarmed it. That is why
+	 *    a failure at or after that point returns -2 and one before it returns
+	 *    -1: only the caller can know whether a PREVIOUS beacon is still on the
+	 *    air, and -1 means "nothing was touched, whatever was airing still is".
+	 *
+	 * And the io_err delta, because mt_beacon_set_enable()'s arming path is
+	 * mt_rmw()/mt_set() - which report their read halves, not their writes - so
+	 * without it a failed EP0 transfer returns 0 and the caller reports an AP
+	 * that is ready and airing nothing.
+	 */
+	before = mt_io_errors(dev);
+
+	if (mt_ap_set_bssid(dev, idx, bssid))
+		goto fail_pre;
 	mt_beacon_init(dev);
-	if (mt_beacon_write(dev, mpdu, mpdu_len, &rate)) return -1;
-	return mt_beacon_set_enable(dev, 1, interval_tu);
+	if (mt_beacon_write(dev, mpdu, mpdu_len, &rate))
+		goto fail_post;
+	if (mt_beacon_set_enable(dev, 1, interval_tu))
+		goto fail_post;
+	if (mt_io_errors(dev) != before) {
+		ERR("beacon: a USB transfer failed while arming");
+		goto fail_post;
+	}
+	return 0;
+
+fail_post:
+	mt_beacon_set_enable(dev, 0, 0);
+	unwind_identity(dev, took);
+	return -2;
+fail_pre:
+	unwind_identity(dev, took);
+	return -1;
 }
 
 int mt7612u_beacon_update(struct mt7612u_dev *dev, const void *buf, size_t len)
@@ -369,7 +430,14 @@ int mt7612u_beacon_update(struct mt7612u_dev *dev, const void *buf, size_t len)
 	 *
 	 * Still no mt_beacon_init() and no set_enable(): the engine is armed, and
 	 * re-initialising it would clear the timer bits mid-flight. */
-	mt_wr(dev, MT_BCN_BYPASS_MASK, 0xffff);
+	if (mt_wr_chk(dev, MT_BCN_BYPASS_MASK, 0xffff)) {
+		/* Checked: if the guard never lands, the copy below runs against a
+		 * LIVE slot and a TBTT mid-copy airs a torn beacon - which is the one
+		 * outcome this bracket exists to prevent, so failing to raise it must
+		 * not be the quiet path. */
+		ERR("beacon: could not suppress the slot for an in-place update");
+		return -1;
+	}
 	return mt_beacon_write(dev, mpdu, mpdu_len, &rate);
 }
 
@@ -408,11 +476,7 @@ int mt7612u_beacon_stop(struct mt7612u_dev *dev)
 
 	/* And the port MAC, if this call's opposite number was what retargeted
 	 * it. mt7612u_clear_ack_responder() is the restore. */
-	if (dev->beacon_took_identity) {
-		mt7612u_clear_ack_responder(dev);
-		if (mt_mac_set_bss_base(dev, dev->macaddr)) rc = -1;
-		dev->beacon_took_identity = 0;
-	}
+	unwind_identity(dev, dev->beacon_took_identity);
 	if (mt_io_errors(dev) != before) rc = -1;
 	return rc;
 }

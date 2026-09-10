@@ -875,15 +875,21 @@ bool Mt7612uRadio::StartBeacon(const uint8_t *beacon, size_t len,
   std::lock_guard<std::recursive_mutex> lock(_mu);
   if (!_dev || !beacon || len == 0 || interval_tu <= 0)
     return false;
-  /* Cleared BEFORE the call, not just set after it. mt7612u_beacon_start()
-   * runs mt_beacon_init(), which disarms the timer and suppresses every slot,
-   * so a failure after that point leaves the beacon dead - and a re-arm that
-   * fails (an over-long beacon body, say) would otherwise keep reporting the
-   * PREVIOUS arm as live, which is how UpdateBeaconPayload comes to return
-   * true for every write into a disarmed engine. */
-  _beacon_active = false;
-  if (mt7612u_beacon_start(_dev, beacon, len,
-                           static_cast<unsigned>(interval_tu)) != 0)
+  /* Three outcomes, not two, because a failed re-arm has to say whether the
+   * PREVIOUS beacon is still on the air:
+   *
+   *   0  armed
+   *  -1  refused before the hardware was touched - whatever was airing still
+   *      is, so the flag must NOT be cleared. Clearing it here was a way to
+   *      orphan a live beacon: update, stop and the destructor would all then
+   *      treat it as inactive and nobody would ever silence it.
+   *  -2  failed after the engine was disarmed, and the library unwound the
+   *      rest - so nothing is airing and the flag is false. */
+  const int rc = mt7612u_beacon_start(_dev, beacon, len,
+                                      static_cast<unsigned>(interval_tu));
+  if (rc == -2)
+    _beacon_active = false;
+  if (rc != 0)
     return false;
   _beacon_active = true;
   _logger->info("MT7612U beaconing every {} TU", interval_tu);

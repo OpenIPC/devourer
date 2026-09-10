@@ -53,18 +53,35 @@ say()  { printf '%s\n' "$*"; }
 ok()   { pass=$((pass+1)); printf '  PASS  %s\n' "$*"; }
 bad()  { fail=$((fail+1)); printf '  FAIL  %s\n' "$*"; }
 
+# PIDs this script started, so cleanup kills those and nothing else. `pkill -x
+# wpa_supplicant` would drop every wireless client on the host, and a name kill
+# would reach a concurrent run of this same test.
+KIDS=""
+reap() {
+  local pid
+  for pid in $KIDS; do kill "$pid" 2>/dev/null; done
+  KIDS=""
+}
+
 cleanup() {
-  pkill -x apr_onair apw_onair bstop_onair 2>/dev/null
-  pkill -x wpa_supplicant 2>/dev/null
+  reap
   [ -n "${STA_IF:-}" ] && { ip addr flush dev "$STA_IF" 2>/dev/null
                             iw dev "$STA_IF" disconnect 2>/dev/null; }
   # The MAC beacons autonomously. If a cell died before its teardown, only a
   # port power-cycle is certain to silence it - and leaving one airing poisons
   # the next run of this very script.
-  echo 0 > "/sys/bus/usb/devices/$AP_SYSFS/authorized" 2>/dev/null
-  sleep 2
-  echo 1 > "/sys/bus/usb/devices/$AP_SYSFS/authorized" 2>/dev/null
-  sleep 3
+  #
+  # Confirmed against the VID:PID first. This runs as root and writes a
+  # deauthorize to a path the caller supplied; a stale or mistyped AP_SYSFS
+  # would otherwise yank whatever else is plugged there - someone's keyboard,
+  # a disk mid-write.
+  if [ "$(cat "/sys/bus/usb/devices/$AP_SYSFS/idVendor" 2>/dev/null)" = "0e8d" ] &&
+     [ "$(cat "/sys/bus/usb/devices/$AP_SYSFS/idProduct" 2>/dev/null)" = "7612" ]; then
+    echo 0 > "/sys/bus/usb/devices/$AP_SYSFS/authorized" 2>/dev/null
+    sleep 2
+    echo 1 > "/sys/bus/usb/devices/$AP_SYSFS/authorized" 2>/dev/null
+    sleep 3
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -89,10 +106,18 @@ say "AP $AP_SYSFS   station $STA_SYSFS ($STA_IF)   ch$CH ($FREQ MHz)"
 # a live beacon into a pass for "gone", and it stops a missed scan reporting a
 # live beacon as absent. Observed: a "beacon not scannable" FAIL in a run where
 # the station then associated, pinged, and got an auth at retry=0.
-seen() {
+seen() {   # $1 = SSID, $2 = BSSID
   local i n best=0
   for i in 1 2 3; do
-    n=$(iw dev "$STA_IF" scan flush freq "$FREQ" 2>/dev/null | grep -c "SSID: $1")
+    # Matched on BSSID *and* SSID: a neighbour running "devourerAP" would
+    # otherwise pass an arm check, fail a stop check, or break the exact-count
+    # comparison. awk keeps the pairing - grep -c on two patterns would count
+    # them independently.
+    n=$(iw dev "$STA_IF" scan flush freq "$FREQ" 2>/dev/null |
+        awk -v b="$2" -v ss="SSID: $1" '
+          /^BSS /   { cur = tolower($2); sub(/\(.*/, "", cur) }
+          index($0, ss) { if (cur == tolower(b)) c++ }
+          END { print c + 0 }')
     n=${n:-0}
     [ "$n" -gt "$best" ] && best=$n
     [ "$best" -gt 0 ] && break
@@ -126,12 +151,12 @@ cell_open() {
   build ap_responder apr_onair || { bad "open: build"; return; }
   env $(apenv) timeout $((SECS + 20)) /tmp/apr_onair "$SECS" \
       >"$OUT/open.jsonl" 2>"$OUT/open.log" &
-  local ap=$!
+  local ap=$!; KIDS="$KIDS $ap"
   sleep 12
   came_up "$OUT/open.log" || { bad "open: AP did not come up (see $OUT/open.log)"; kill $ap 2>/dev/null; return; }
   ok "open: beacon armed"
 
-  [ "$(seen devourerAP)" = 1 ] && ok "open: beacon on air" || bad "open: beacon not scannable"
+  [ "$(seen devourerAP 02:42:75:05:d6:00)" = 1 ] && ok "open: beacon on air" || bad "open: beacon not scannable"
 
   ip addr flush dev "$STA_IF" 2>/dev/null
   if timeout 30 iw dev "$STA_IF" connect -w devourerAP >/dev/null 2>&1; then
@@ -157,7 +182,7 @@ cell_open() {
   iw dev "$STA_IF" disconnect 2>/dev/null; ip addr flush dev "$STA_IF" 2>/dev/null
   wait $ap 2>/dev/null
   sleep 3
-  [ "$(seen devourerAP)" = 0 ] \
+  [ "$(seen devourerAP 02:42:75:05:d6:00)" = 0 ] \
     && ok "open: nothing left airing after exit" \
     || bad "open: beacon STILL AIRING after exit"
 }
@@ -168,7 +193,7 @@ cell_wpa2() {
   build ap_wpa2 apw_onair -lcrypto || { bad "wpa2: build"; return; }
   env $(apenv) DEVOURER_WPA2_PSK="$PSK" timeout $((SECS + 20)) /tmp/apw_onair "$SECS" \
       >"$OUT/wpa2.jsonl" 2>"$OUT/wpa2.log" &
-  local ap=$!
+  local ap=$!; KIDS="$KIDS $ap"
   sleep 12
   came_up "$OUT/wpa2.log" || { bad "wpa2: AP did not come up (see $OUT/wpa2.log)"; kill $ap 2>/dev/null; return; }
   ok "wpa2: beacon armed"
@@ -176,7 +201,8 @@ cell_wpa2() {
   local wpa="$OUT/wpa.conf"
   printf 'network={\n\tssid="devourerAP"\n\tpsk="%s"\n\tkey_mgmt=WPA-PSK\n\tproto=RSN\n\tpairwise=CCMP\n\tgroup=CCMP\n\tscan_ssid=1\n}\n' "$PSK" > "$wpa"
   ip addr flush dev "$STA_IF" 2>/dev/null
-  wpa_supplicant -i "$STA_IF" -c "$wpa" -B >/dev/null 2>&1
+  wpa_supplicant -i "$STA_IF" -c "$wpa" -P "$OUT/wpa.pid" -B >/dev/null 2>&1
+  KIDS="$KIDS $(cat "$OUT/wpa.pid" 2>/dev/null)"
   local i
   for i in $(seq 1 20); do
     grep -q "4-WAY HANDSHAKE COMPLETE" "$OUT/wpa2.log" && break
@@ -185,7 +211,8 @@ cell_wpa2() {
   if grep -q "4-WAY HANDSHAKE COMPLETE" "$OUT/wpa2.log"; then
     ok "wpa2: 4-way complete (MIC verified, station keyed)"
   else
-    bad "wpa2: 4-way did not complete"; pkill -x wpa_supplicant 2>/dev/null
+    bad "wpa2: 4-way did not complete"
+    kill "$(cat "$OUT/wpa.pid" 2>/dev/null)" 2>/dev/null
     kill $ap 2>/dev/null; return
   fi
 
@@ -197,11 +224,11 @@ cell_wpa2() {
     bad "wpa2: encrypted ping lost packets"
   fi
 
-  pkill -x wpa_supplicant 2>/dev/null
+  kill "$(cat "$OUT/wpa.pid" 2>/dev/null)" 2>/dev/null
   ip addr flush dev "$STA_IF" 2>/dev/null
   wait $ap 2>/dev/null
   sleep 3
-  [ "$(seen devourerAP)" = 0 ] \
+  [ "$(seen devourerAP 02:42:75:05:d6:00)" = 0 ] \
     && ok "wpa2: nothing left airing after exit" \
     || bad "wpa2: beacon STILL AIRING after exit"
 }
@@ -213,7 +240,7 @@ cell_stop() {
   local phase=24
   env $(apenv) timeout $((phase * 3 + 40)) /tmp/bstop_onair "$phase" \
       >"$OUT/stop.log" 2>&1 &
-  local ap=$!
+  local ap=$!; KIDS="$KIDS $ap"
 
   # Wait for the ARM ITSELF, not for the phase banner. The banner prints
   # before StartBeacon, and the arm is not instant - it copies a 1600-byte
@@ -240,19 +267,19 @@ cell_stop() {
 
   wait_arm 0 30 || { bad "stop: never armed"; kill $ap 2>/dev/null; return; }
   sleep 4
-  [ "$(seen mtStopCheck)" = 1 ] && ok "stop: armed - beacon on air" || bad "stop: armed but not scannable"
+  [ "$(seen mtStopCheck 02:4d:54:53:54:50)" = 1 ] && ok "stop: armed - beacon on air" || bad "stop: armed but not scannable"
 
   local n_arms; n_arms=$(armed)
   local i
   for i in $(seq 1 60); do grep -q "PHASE 2" "$OUT/stop.log" && break; sleep 1; done
   sleep 6
-  [ "$(seen mtStopCheck)" = 0 ] && ok "stop: stopped - beacon gone" || bad "stop: STILL AIRING after StopBeacon"
+  [ "$(seen mtStopCheck 02:4d:54:53:54:50)" = 0 ] && ok "stop: stopped - beacon gone" || bad "stop: STILL AIRING after StopBeacon"
 
   # The re-arm is the same non-instant operation: wait for the second
   # "beaconing every", not for the banner that precedes it.
   wait_arm "$n_arms" 60 || { bad "stop: re-arm never reported"; kill $ap 2>/dev/null; return; }
   sleep 4
-  [ "$(seen mtStopCheck)" = 1 ] && ok "stop: re-armed - beacon back" || bad "stop: re-arm did not air"
+  [ "$(seen mtStopCheck 02:4d:54:53:54:50)" = 1 ] && ok "stop: re-armed - beacon back" || bad "stop: re-arm did not air"
 
   wait $ap 2>/dev/null
   grep -q "0 failure(s)" "$OUT/stop.log" \

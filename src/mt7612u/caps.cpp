@@ -81,6 +81,13 @@ int mt7612u_set_ack_responder(struct mt7612u_dev *d, const uint8_t mac[6])
 		memcpy(d->ack_saved_mac, d->macaddr, 6);
 		d->ack_saved = 1;
 	}
+	/* Ownership TRANSFERS to this caller. MT_MAC_ADDR is one register with two
+	 * users - the beacon takes it too - and whoever wrote last owns what is
+	 * there. Without this, a responder armed after StartBeacon would be
+	 * silently disarmed by the matching StopBeacon restoring the factory
+	 * address, and a stop after this call would put back an address the caller
+	 * never asked for. */
+	d->beacon_took_identity = 0;
 
 	dw0 = (uint32_t)mac[0] | ((uint32_t)mac[1] << 8) |
 	      ((uint32_t)mac[2] << 16) | ((uint32_t)mac[3] << 24);

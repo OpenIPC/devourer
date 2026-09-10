@@ -224,6 +224,20 @@ void Mt7612uRadio::apply_config() {
                   "implemented by this backend - carrier-sense stays ENABLED "
                   "for this session");
 
+  /* rx.pool_exhaust defaults to Backpressure, and DeviceConfig says the
+   * non-SpscFat modes "never drop host-side ... which backpressures the chip by
+   * construction". Not available on this part: backpressure here means not
+   * draining EP4, and an undrained receiver wedges this silicon below the USB
+   * level where only a physical replug recovers it. The hand-off queue drops
+   * the newest frame and counts it instead, and the teardown line reports any
+   * loss. Said once, rather than left to be inferred from a frame count. */
+  if (_cfg.rx.pool_exhaust == devourer::PoolExhaust::Backpressure)
+    _logger->warn("MT7612U: rx.pool_exhaust=backpressure cannot be honoured - "
+                  "host-side backpressure on this part means an undrained "
+                  "receiver, which wedges it below the USB level. The RX "
+                  "hand-off queue drops the newest frame instead, and counts "
+                  "every drop.");
+
   if (_cfg.tx.usb_agg_max > 0)
     _logger->warn("MT7612U: tx.usb_agg_max={} is not consulted - send_packets "
                   "always chains frames into shared bulk-OUT URBs on this "
@@ -659,7 +673,18 @@ void Mt7612uRadio::SetTxPower(uint8_t power) {
   /* Deliberately NOT forwarded to SetTxPowerIndexOverride the way the base
    * class does: there is no TXAGC index here, so the argument is read as the
    * dBm limit it actually maps to. */
-  _txpwr_dbm = static_cast<int>(power);
+  /* Clamped HERE, not only at the actuator. Storing the raw byte let a value
+   * above 30 - including a negative that narrowed into uint8_t - sit in the
+   * base while txpower_target_dbm() quietly clamped the hardware to maximum
+   * output, so every later offset composed against a base the radio never
+   * used. */
+  int dbm = static_cast<int>(power);
+  if (dbm > 30) {
+    _logger->warn("MT7612U TX power {} dBm is above this part's 30 dBm ceiling "
+                  "- clamping", dbm);
+    dbm = 30;
+  }
+  _txpwr_dbm = dbm;
   /* Composes with a live offset rather than discarding it - IRadio says the two
    * compose, and writing the bare base would silently undo an offset while
    * _txpwr_offset_qdb still reported it as applied. */
@@ -706,10 +731,13 @@ int Mt7612uRadio::SetTxPowerOffsetQdb(int qdb) {
     _logger->error("MT7612U TX power offset {} qdB -> {} dBm refused", qdb, dbm);
     return 0;
   }
-  /* Sticky, and it has to be recorded even with no device open: SetTxPower and
-   * bring_up both fold it back in, so an offset set before Init survives to the
-   * first tune instead of being silently swallowed. */
-  _txpwr_offset_qdb = applied_qdb;
+  /* REQUESTED is what is remembered; APPLIED is what is returned. Storing the
+   * rail-clamped figure instead would shrink the offset permanently: ask for
+   * -20 dB against a 5 dBm base, get -5 dB at the 0 dBm rail, and a later
+   * SetTxPower(20) would compose with -5 rather than restoring the -20 that is
+   * still configured. Recorded even with no device open, so an offset set
+   * before Init survives to the first tune instead of being swallowed. */
+  _txpwr_offset_qdb = want_qdb;
   return applied_qdb;
 }
 

@@ -43,15 +43,18 @@ option(DEVOURER_KESTREL_8852C "RTL8852CU / 8832CU (Kestrel 11ax, G6)"           
 option(DEVOURER_PCIE          "PCIe transport via vfio-pci (Linux; RTL8821CE)"  OFF)
 # MediaTek MT7612U / MT7662U — the first non-Realtek part. Compiles the
 # src/mt7612u subtree (its own C++ library with a C ABI, landed unwired in #412)
-# into libdevourer. OFF by default and deliberately NOT counted as chip support
-# by the "No chip support selected" check below: there is no IRadio backend yet,
-# so an MT7612U-only build would produce a library that can open nothing. It
-# joins that list when the backend lands (#419). Turning it ON today buys one
-# thing, and it is the point of the option: CI compiles the subtree across the
-# whole platform matrix — gcc, clang, MSVC, mingw, macOS — where it was
-# previously only ever built by its own Makefile, on Linux. It does NOT gate the
-# factory's MediaTek refusal, which is unconditional.
-option(DEVOURER_MT7612U       "Compile the MediaTek MT7612U subtree (the id gate is always on)" OFF)
+# into libdevourer along with Mt7612uRadio, the IRadio backend WiFiDriver
+# constructs for a MediaTek adapter. OFF by default, but it DOES count as chip
+# support in the "No chip support selected" check below: with the backend behind
+# it an MT7612U-only build opens, receives and transmits, which is exactly what
+# that check exists to require.
+#
+# Turning it on also compiles the subtree across the whole platform matrix —
+# gcc, clang, MSVC, mingw, macOS — where it was previously only ever built by
+# its own Makefile, on Linux. The option does NOT gate the factory's MediaTek id
+# gate, which is unconditional: with it OFF, such an adapter is refused rather
+# than misdetected as Realtek.
+option(DEVOURER_MT7612U       "MediaTek MT7612U / MT7662U (2T2R 11ac USB)"      OFF)
 
 # Compile-time diagnostics floor (src/logger.h). Calls below the floor —
 # including their argument expressions at DVR_TRACE/DVR_DEBUG sites — compile
@@ -95,7 +98,8 @@ else()
 endif()
 if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3
    AND NOT DEVOURER_8733B
-   AND NOT DEVOURER_KESTREL)
+   AND NOT DEVOURER_KESTREL
+   AND NOT DEVOURER_MT7612U)
     message(FATAL_ERROR
         "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
         "DEVOURER_JAGUAR2_8822B / DEVOURER_JAGUAR2_8821C / DEVOURER_JAGUAR3_8822C "

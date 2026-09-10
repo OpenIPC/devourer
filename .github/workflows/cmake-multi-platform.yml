@@ -197,6 +197,12 @@ jobs:
           # counted as chip support, so an MT7612U-only configure is a
           # FATAL_ERROR. This proves the subtree is independent of the other
           # seven Realtek chips' sources, not of Jaguar1's.
+          # MediaTek alone, valid now that the option carries a radio backend.
+          # This is the cell that can catch the subtree depending on a Realtek
+          # chip's sources - the one below cannot, because it must leave
+          # Jaguar1 on.
+          - name: mt7612u-only
+            flags: "-DDEVOURER_MT7612U=ON -DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR2_8821C=OFF -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF -DDEVOURER_8733B=OFF -DDEVOURER_KESTREL_8852B=OFF -DDEVOURER_KESTREL_8852C=OFF"
           - name: mt7612u+jaguar1
             flags: "-DDEVOURER_MT7612U=ON -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR2_8821C=OFF -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF -DDEVOURER_8733B=OFF -DDEVOURER_KESTREL_8852B=OFF -DDEVOURER_KESTREL_8852C=OFF"
           - name: rtl8733b-only

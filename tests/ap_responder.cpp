@@ -290,5 +290,13 @@ int main(int argc, char** argv) {
           (unsigned long long)g_probe.load(), (unsigned long long)g_auth.load(),
           (unsigned long long)g_assoc.load(), (unsigned long long)g_data.load(),
           (unsigned long long)g_sent.load());
+  /* The chip beacons AUTONOMOUSLY once StartBeacon arms it, and _exit(0)
+   * below skips every destructor - so without this the beacon keeps airing
+   * after the process is gone, until the adapter is power-cycled, and it
+   * contaminates whatever runs next on that channel. Measured on MT7612U:
+   * a scan after exit still found the SSID live at 308 ms. Realtek has the
+   * same exposure - IRadio.h calls it bench-bitten. beacon_update_probe.cpp
+   * already did this; these did not. */
+  if (g_dev) g_dev->StopBeacon();
   _exit(0);
 }

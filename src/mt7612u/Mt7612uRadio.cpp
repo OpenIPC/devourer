@@ -634,6 +634,15 @@ void Mt7612uRadio::Stop() {
     StopRxLoop();
   } catch (...) {
   }
+  /* Before anything else lets go of the device: the MAC beacons AUTONOMOUSLY
+   * once armed, so a beacon that outlives this object keeps airing until the
+   * adapter is power-cycled and contaminates whatever runs next on that
+   * channel. Bench-bitten on the Realtek side, and the bring-up gate silences
+   * its beacon on every exit path for the same reason. */
+  try {
+    StopBeacon();
+  } catch (...) {
+  }
   stop_tick(); /* joins; must not run with _mu held */
 
   /* Take the device out under _mu, then close it OUTSIDE - mt7612u_close()
@@ -839,6 +848,55 @@ void Mt7612uRadio::ClearAckResponder() {
   std::lock_guard<std::recursive_mutex> lock(_mu);
   if (_dev)
     mt7612u_clear_ack_responder(_dev);
+}
+
+/* The beacon plane. Thin on purpose: the sequence these wrap is the one the
+ * bring-up harness's Stage A and Stage B gates run, device-verified on
+ * 2026-09-08 - beacon on air on both bands, hardware TSF and sequence, and a
+ * real station's auth arriving at retry=0, which is the auto-ACK. Putting it
+ * behind IRadio is what lets devourer's existing backend-agnostic AP
+ * harnesses (tests/ap_responder.cpp, tests/ap_wpa2.cpp - both already take an
+ * IRadio*) drive this part with no MediaTek-specific code in them.
+ *
+ * Under _mu with the rest of the control plane: every one of these is a
+ * register write, and the 1 Hz tick is issuing MCU traffic on its own thread. */
+bool Mt7612uRadio::StartBeacon(const uint8_t *beacon, size_t len,
+                               int interval_tu) {
+  std::lock_guard<std::recursive_mutex> lock(_mu);
+  if (!_dev || !beacon || len == 0 || interval_tu <= 0)
+    return false;
+  if (mt7612u_beacon_start(_dev, beacon, len,
+                           static_cast<unsigned>(interval_tu)) != 0)
+    return false;
+  _beacon_active = true;
+  _logger->info("MT7612U beaconing every {} TU", interval_tu);
+  return true;
+}
+
+bool Mt7612uRadio::UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
+  std::lock_guard<std::recursive_mutex> lock(_mu);
+  /* "Requires an active StartBeacon; returns false otherwise" - and without
+   * the guard this would load a beacon into a disarmed engine and report
+   * success for something that never airs. */
+  if (!_dev || !_beacon_active || !beacon || len == 0)
+    return false;
+  return mt7612u_beacon_update(_dev, beacon, len) == 0;
+}
+
+bool Mt7612uRadio::StopBeacon() {
+  std::lock_guard<std::recursive_mutex> lock(_mu);
+  if (!_dev || !_beacon_active)
+    return false;
+  const bool ok = mt7612u_beacon_stop(_dev) == 0;
+  /* Cleared either way. A failed stop leaves the MAC beaconing and there is
+   * nothing further this object can do about it, but reporting the beacon as
+   * still ours would make the destructor try again on a device that is about
+   * to be closed. */
+  _beacon_active = false;
+  if (!ok)
+    _logger->error("MT7612U beacon stop failed - the MAC may still be airing "
+                   "it; a power-cycle is the only certain silence");
+  return ok;
 }
 
 /* The absolute dBm the actuator should carry: the base plus whatever offset is

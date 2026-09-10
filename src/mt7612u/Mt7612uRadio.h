@@ -100,6 +100,9 @@ public:
   void WriteTsf(uint64_t tsf) override;
   devourer::TxStats GetTxStats() override;
   bool SetAckResponder(const devourer::MacAddr &mac) override;
+  bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+  bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) override;
+  bool StopBeacon() override;
   void ClearAckResponder() override;
 
 private:
@@ -159,6 +162,12 @@ private:
   std::mutex _tick_mu;
   std::condition_variable _tick_cv;
   bool _tick_stop = false;
+
+  /* StopBeacon/UpdateBeaconPayload are documented to return false when no
+   * beacon is active, and the MAC keeps beaconing after the host process dies,
+   * so the destructor needs to know too. Guarded by _mu like the rest of the
+   * control plane. */
+  bool _beacon_active = false;
 
   int _txpwr_dbm = 20;    /* the absolute dBm limit mt7612u_set_txpower takes */
   int _txpwr_offset_qdb = 0; /* sticky, folded onto _txpwr_dbm */

@@ -280,6 +280,45 @@ int  mt7612u_set_ack_responder(struct mt7612u_dev *dev, const uint8_t mac[6]);
 void mt7612u_clear_ack_responder(struct mt7612u_dev *dev);
 
 /*
+ * Hardware beacon, from the MAC's reserved page.
+ *
+ * mt7612u_beacon_start() loads the beacon and arms the TBTT timer; the MAC
+ * then transmits it on its own at every TBTT, stamping the live 64-bit TSF
+ * into the timestamp field and assigning the 802.11 sequence number. There is
+ * no host involvement per beacon and no host jitter. `buf` is one
+ * radiotap-framed MPDU, the same contract as mt7612u_send_packet(); a bare
+ * MPDU with no radiotap header is accepted too and airs at OFDM 6 Mbps, the
+ * rate a beacon wants.
+ *
+ * The BSSID is taken from addr3 and published in APC slot 0, which is what
+ * makes the MAC match - and therefore auto-ACK - frames addressed to the BSS.
+ * Two configurations are REFUSED rather than half-served, because both air a
+ * beacon that no station can associate to:
+ *
+ *   - addr3 different from the adapter's own MAC. The port identity the MAC
+ *     ACKs against is MT_MAC_ADDR, and this call does not retarget it; a BSSID
+ *     that disagrees with it beacons fine and ACKs nothing.
+ *   - a locally-administered adapter MAC (bit 1 of byte 0). Under MBSS_MODE=3
+ *     the hardware derives the BSS index from the address bits and mt76 uses
+ *     1 + (((macaddr[0] ^ addr[0]) >> 2) & 7), so slot 0 is the wrong slot and
+ *     the match would silently never fire.
+ *
+ * mt7612u_beacon_update() replaces the loaded beacon in place; the interval,
+ * TBTT phase and BSSID are untouched. The swap is not atomic against TBTT - a
+ * beacon airing during the write may still carry the previous content.
+ *
+ * mt7612u_beacon_stop() clears the timer bits. It matters: the MAC beacons
+ * AUTONOMOUSLY once armed, so killing the host process does NOT silence it,
+ * and a beacon left airing contaminates whatever runs next on that channel.
+ *
+ * All three return 0 on success, negative on failure.
+ */
+int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
+                         unsigned interval_tu);
+int mt7612u_beacon_update(struct mt7612u_dev *dev, const void *buf, size_t len);
+int mt7612u_beacon_stop(struct mt7612u_dev *dev);
+
+/*
  * TX/RX counters from the async rings. Zeroed when no ring is running, and
  * taken under the ring's own lock - reading the fields directly would race
  * the libusb event thread.

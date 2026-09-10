@@ -219,12 +219,12 @@ int main(int argc, char **argv) {
   session.adopt_lock(usb_lock);
 
   WiFiDriver wifi_driver{logger};
-  auto owned_device = wifi_driver.CreateRtlDevice(handle, nullptr, usb_lock,
+  auto owned_device = wifi_driver.CreateRadio(handle, nullptr, usb_lock,
                                                   devourer_config_from_env());
   /* The session owns the device from here: it is what guarantees the device
    * (and its in-flight TX) dies before libusb does. */
   session.adopt_device(std::move(owned_device));
-  IRtlDevice *const rtlDevice = session.device();
+  IRadio *const rtlDevice = session.device();
 
   // 2.4 GHz channel 6 is the plan's matrix-validated cell for these chips.
   int channel = 6;

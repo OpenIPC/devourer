@@ -5,7 +5,7 @@
 // The idea (see docs/narrowband.md, "Burst-level bandwidth TDMA"): a transmitter
 // alternates BURSTS between a robust narrowband width (5/10 MHz — ~6 dB link
 // budget, for critical frames) and a wide width (20/40 MHz — throughput, for
-// bulk frames), flipping bandwidth with the cheap IRtlDevice::FastSetBandwidth.
+// bulk frames), flipping bandwidth with the cheap IRadio::FastSetBandwidth.
 // Narrowband is an ADC-clock-domain state, not a per-packet radiotap field, and
 // a receiver decodes exactly one width at a time — so the scheme is inherently
 // burst-level and the hard part is schedule synchronization.

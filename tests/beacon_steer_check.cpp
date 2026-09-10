@@ -69,13 +69,13 @@ int main(int argc, char **argv) {
   libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_WARNING);
 
   WiFiDriver wifi(logger);
-  std::unique_ptr<IRtlDevice> dev;
+  std::unique_ptr<IRadio> dev;
   const char *bdf = std::getenv("DEVOURER_PCIE_BDF");
 #if defined(DEVOURER_HAVE_PCIE)
   if (bdf) {
     auto transport = devourer::PcieTransport::Open(bdf, logger);
     if (!transport) { fprintf(stderr, "PCIe open %s failed\n", bdf); return 1; }
-    dev = wifi.CreateRtlDevicePcie(std::move(transport),
+    dev = wifi.CreateRadioPcie(std::move(transport),
                                    devourer_config_from_env());
   } else
 #endif
@@ -89,7 +89,7 @@ int main(int argc, char **argv) {
     std::shared_ptr<devourer::UsbDeviceLock> lock;
     if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lock) != 0)
       return 1;
-    dev = wifi.CreateRtlDevice(h, ctx, lock, devourer_config_from_env());
+    dev = wifi.CreateRadio(h, ctx, lock, devourer_config_from_env());
   }
   if (!dev) { fprintf(stderr, "no driver\n"); return 1; }
 

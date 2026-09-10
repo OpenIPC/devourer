@@ -1,5 +1,5 @@
 /* Chip thermal-meter snapshot, generation-agnostic (moved out of the Jaguar1
- * HAL when GetThermalStatus was promoted to IRtlDevice — the meter register
+ * HAL when GetThermalStatus was promoted to IRadio — the meter register
  * family (RF 0x42) and the efuse-baseline semantics are common to all three
  * generations, only the field layout and baseline source differ per family).
  */

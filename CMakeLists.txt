@@ -173,7 +173,7 @@ add_library(devourer
     src/Radiotap.c
     src/RadiotapBuilder.cpp
     src/RadiotapBuilder.h
-    src/RtlTransport.h
+    src/Transport.h
     src/RtlAdapter.cpp
     src/RtlAdapter.h
     src/RtlUsbAdapter.h # compat alias shim (RtlUsbAdapter = RtlAdapter)
@@ -224,7 +224,8 @@ add_library(devourer
     src/hopset/HopsetSense.h
     src/hopset/HopsetFusion.h
     src/hopset/HopsetEvents.h
-    src/IRtlDevice.h
+    src/IRadio.h
+    src/IRtlRadio.h
     src/SignalStop.cpp
     src/SignalStop.h
     src/WiFiDriver.cpp
@@ -567,7 +568,7 @@ endif()
 # rtl8733bprobe — staged USB bring-up prober for the RTL8733B (HALMAC 87xx),
 # the pcieprobe/kestrelprobe sibling: identity -> power-on + EFUSE -> firmware
 # -> MAC/PHY -> TSSI audit stages, used alongside normal factory dispatch. It
-# never substitutes for the production IRtlDevice path.
+# never substitutes for the production IRadio path.
 if(DEVOURER_8733B)
     add_executable(rtl8733bprobe
         examples/rtl8733bprobe/main.cpp
@@ -676,7 +677,7 @@ target_link_libraries(duplex PUBLIC devourer PRIVATE PkgConfig::libusb)
 target_include_directories(duplex PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
 # txpower — reference consumer of the runtime TX-power API
-# (IRtlDevice::SetTxPowerOffsetQdb / SetTxPowerIndexOverride / GetTxPowerState /
+# (IRadio::SetTxPowerOffsetQdb / SetTxPowerIndexOverride / GetTxPowerState /
 # GetThermalStatus): opens one adapter, steps the knobs from CLI args (no env
 # vars), and prints machine-readable state markers. The register-level
 # validation driver for tests/txpwr_offset_regcheck.sh and the shape of an
@@ -775,7 +776,18 @@ target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
 
-# Headless guard for the TX quiesce seam (IRtlTransport::quiesce_tx via
+# Headless guard for the radio contract: a radio implementing only IRadio's
+# pure-virtual core must compile without any Realtek type, its not-ported
+# defaults must hold, and it must not be an IRtlRadio. A Realtek-typed pure
+# virtual added to IRadio stops this compiling, which is the point.
+add_executable(RadioIfaceSelftest
+    tests/radio_iface_selftest.cpp
+)
+target_link_libraries(RadioIfaceSelftest PRIVATE devourer)
+
+add_test(NAME radio_iface COMMAND RadioIfaceSelftest)
+
+# Headless guard for the TX quiesce seam (ITransport::quiesce_tx via
 # RtlAdapter): the explicit "stop TX and wait it out" call every device makes
 # before anything is released. UsbTransport's cancel/drain is validated on
 # hardware under ASan — the test header says what it does and does not cover.
@@ -1123,6 +1135,18 @@ add_executable(TxPktBankSelftest
 target_link_libraries(TxPktBankSelftest PRIVATE devourer)
 target_include_directories(TxPktBankSelftest PRIVATE src)
 add_test(NAME txpkt_bank_policy COMMAND TxPktBankSelftest)
+
+# Headless guard for the Jaguar2/Jaguar3 RX PHY-status gate: the descriptor
+# PHYST bit (DW0 bit 26) that keeps A-MPDU subframes' reserved-but-unwritten
+# drvinfo bytes out of the RF EMAs, plus the PhyStsFill tier each parser
+# returns (which fields it actually filled). Both parsers are header-only and
+# self-contained, so the test builds whenever either generation is selected.
+if(DEVOURER_JAGUAR3 OR DEVOURER_JAGUAR2_8822B OR DEVOURER_JAGUAR2_8821C)
+    add_executable(RxPhystSelftest tests/rx_physt_selftest.cpp)
+    target_link_libraries(RxPhystSelftest PRIVATE devourer)
+    target_include_directories(RxPhystSelftest PRIVATE src)
+    add_test(NAME rx_physt_bit COMMAND RxPhystSelftest)
+endif()
 
 # Headless guard for the USB TX-aggregation URB packing (src/TxAggPlan.h) —
 # block alignment, the never-a-bulk-multiple boundary shim, the OQT

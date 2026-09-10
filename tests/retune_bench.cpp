@@ -63,7 +63,7 @@ int main(int argc, char **argv) {
   }
 
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRtlDevice(h, ctx, lock, devourer_config_from_env());
+  auto dev = wifi.CreateRadio(h, ctx, lock, devourer_config_from_env());
   if (!dev) { fprintf(stderr, "no driver for this chip\n"); return 1; }
 
   // Bring up TX at 20 MHz on the target channel.

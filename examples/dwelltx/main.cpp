@@ -135,13 +135,13 @@ int main() {
 
   WiFiDriver driver{logger};
   auto cfg = devourer_config_from_env(); // honors DEVOURER_FASTRETUNE_FW
-  auto owned_device = driver.CreateRtlDevice(handle, nullptr, usb_lock, cfg);
+  auto owned_device = driver.CreateRadio(handle, nullptr, usb_lock, cfg);
   if (!owned_device)
     return 1;
   // The session owns the device from here: it is what guarantees the device
   // (and its in-flight TX) dies before libusb does.
   session.adopt_device(std::move(owned_device));
-  IRtlDevice *const dev = session.device();
+  IRadio *const dev = session.device();
 
   // --- schedule + admission parameters ---------------------------------------
   std::vector<int> chans;

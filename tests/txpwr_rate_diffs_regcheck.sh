@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression validation of the per-rate TX-power diff table
-# (IRtlDevice::SetTxPowerRateDiffs / GetTxPowerState.rate_diffs_custom),
+# (IRadio::SetTxPowerRateDiffs / GetTxPowerState.rate_diffs_custom),
 # exercised end-to-end through the txpower demo's --rate-diffs flag, on every
 # plugged DUT that advertises the knob (txpwr.caps rate_diffs=1 — the device's
 # own advertisement, so this table needs no per-chip support list).

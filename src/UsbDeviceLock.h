@@ -16,7 +16,7 @@ namespace devourer {
  * processes stuck in uninterruptible USB I/O that even `kill -9` won't clear).
  * A real OS serialises access to a device node; this gives devourer the same
  * guarantee at the library boundary — the second instance's acquisition fails,
- * so `CreateRtlDevice` refuses instead of racing.
+ * so `CreateRadio` refuses instead of racing.
  *
  * LIFETIME: the lock is held for this object's lifetime and released
  * automatically when the owning process exits — normally, via SIGKILL, or on a

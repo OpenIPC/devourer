@@ -1,6 +1,6 @@
 #pragma once
 
-/* IRtlTransport — the bus seam. USB (libusb) and PCIe (vfio) are independent
+/* ITransport — the bus seam. USB (libusb) and PCIe (vfio) are independent
  * transports implementing this one interface; RtlAdapter (the copyable value
  * type every HAL holds) owns a shared_ptr to one of them and forwards. Nothing
  * here depends on libusb or vfio.
@@ -39,9 +39,9 @@ struct UsbLinkInfo {
   std::vector<uint8_t> bulk_out_eps; /* descriptor order */
 };
 
-class IRtlTransport {
+class ITransport {
 public:
-  virtual ~IRtlTransport() = default;
+  virtual ~ITransport() = default;
 
   virtual bool is_usb() const = 0;
 

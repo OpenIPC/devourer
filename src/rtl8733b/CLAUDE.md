@@ -11,7 +11,7 @@ them. Do not reach for a Jaguar file expecting a shared mechanism.
 
 ## HAL layout
 
-`Rtl8733bDevice` (the `IRtlDevice` boundary), `Rtl8733bBringup` (card
+`Rtl8733bDevice` (the `IRadio` boundary), `Rtl8733bBringup` (card
 enable/disable power sequence, system-cfg), `Halmac8733bMac` (MAC init,
 firmware download, EFUSE read + packed-map decode, monitor RX config),
 `Phy8733b` (BB/RF table apply, channel plan, TXAGC, TSSI), plus the header-only
@@ -244,7 +244,7 @@ untouched) and fall back to the full path.
 `FastSetBandwidth`, the flat-index / per-rate-diff TX-power knobs
 (`SetTxPowerIndexOverride`, `SetTxPowerRateDiffs`, `ReApplyTxPower` — only the
 relative `SetTxPowerOffsetQdb` is ported), `rx.path` per-chain telemetry,
-and CCA disable. These inherit `IRtlDevice`'s not-ported defaults (`false`,
+and CCA disable. These inherit `IRadio`'s not-ported defaults (`false`,
 `0`, or a full-path fallback) rather than being faked. `SetCcaMode` is the one
 exception to the silent-default rule: it is pure virtual, so `true` throws
 loudly — without tearing the session down, since an unported optional knob is
@@ -264,7 +264,7 @@ The TX-power knobs are the other exceptions, in the same spirit:
   register carries. (That path has no hardware coverage — every unit seen so
   far is TSSI-offset PG — but it writes no registers, only a log and a reset.)
 - `SetTxPowerIndexOverride` is overridden **solely to log a refusal**. The
-  `IRtlDevice` default returns `void` and ignores the value, so silence would
+  `IRadio` default returns `void` and ignores the value, so silence would
   be the caller's only answer on the one backend where the flat index really is
   unported — a knob that looks granted, in the PR that exists to abolish them.
   `SetTxPowerRateDiffs` needs no such override: its `false` return already says

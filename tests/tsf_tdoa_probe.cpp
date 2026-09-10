@@ -76,7 +76,7 @@ static libusb_device_handle* open_pid(libusb_context* ctx, uint16_t vid,
   return h;
 }
 
-static void run_rx(IRtlDevice* dev, int idx) {
+static void run_rx(IRadio* dev, int idx) {
   Recon recon;
   auto cb = [&, idx](const Packet& p) {
     auto pr = tdma::parse_frame(p.Data.data(), p.Data.size());
@@ -119,8 +119,8 @@ int main(int argc, char** argv) {
   auto* hB = open_pid(ctx, vB, pB, logger, lkB);
   if (!hA || !hB) return 1;
   WiFiDriver wifi(logger);
-  auto devA = wifi.CreateRtlDevice(hA, ctx, lkA, devourer_config_from_env());
-  auto devB = wifi.CreateRtlDevice(hB, ctx, lkB, devourer_config_from_env());
+  auto devA = wifi.CreateRadio(hA, ctx, lkA, devourer_config_from_env());
+  auto devB = wifi.CreateRadio(hB, ctx, lkB, devourer_config_from_env());
   if (!devA || !devB) { fprintf(stderr, "device create failed\n"); return 1; }
 
   std::thread tA([&] { run_rx(devA.get(), 0); });

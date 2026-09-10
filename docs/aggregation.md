@@ -18,7 +18,7 @@ and A-MPDU unicast into reliable (hardware-ARQ) links.
 
 ## USB TX aggregation (`send_packets`)
 
-`IRtlDevice::send_packets(TxPacketView*, n)` + `DeviceConfig tx.usb_agg_max`
+`IRadio::send_packets(TxPacketView*, n)` + `DeviceConfig tx.usb_agg_max`
 (env `DEVOURER_TX_USB_AGG`, default 0 = off → per-frame loop, byte-identical
 descriptors). Packing rules live in `src/TxAggPlan.h` (pure math, ctest'd):
 blocks 8-byte aligned, the FIRST descriptor carries the block count
@@ -90,7 +90,7 @@ coverage a reliability layer can count on — is in
 
 ## A-MPDU (`SetAmpduMode`)
 
-`IRtlDevice::SetAmpduMode(AmpduMode)` / `ClearAmpduMode()` / `GetAmpduMode()`
+`IRadio::SetAmpduMode(AmpduMode)` / `ClearAmpduMode()` / `GetAmpduMode()`
 (env `DEVOURER_TX_AMPDU_MODE="tid/maxnum[/density[/noack[/maxtime_hex]]]"`,
 `src/AmpduMode.h`, all generations) configure A-MPDU TX in one call: it marks
 every data frame aggregatable (data QSEL + AGG_EN + MAX_AGG_NUM +
@@ -187,7 +187,7 @@ numbers above came from.
 
 ## Hardware ACK/BlockAck responder — reliable unicast
 
-`IRtlDevice::SetAckResponder(mac)` / `ClearAckResponder()` (env
+`IRadio::SetAckResponder(mac)` / `ClearAckResponder()` (env
 `DEVOURER_ACK_RESPONDER=<unicast mac>`, all generations; `src/AckResponder.h`)
 arms the MAC's autonomous ACK engine while monitor RX/injection continue
 unchanged: port identity (MACID/BSSID 0x610/0x618 = `mac`) + net_type (0x102

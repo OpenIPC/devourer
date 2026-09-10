@@ -150,7 +150,7 @@ chip-specific traps. The ones this port paid for, current-state:
    power-up and is deaf on the next — while a closer-crystal peer decodes the
    same transmitter and the same pair is stable at 2.4 GHz. This is physics, not
    a driver bug — and it drifts, so a fixed trim is not enough (below). The
-   manual lever is `IRtlDevice::SetXtalCap` (env `DEVOURER_XTAL_CAP`):
+   manual lever is `IRtlRadio::SetXtalCap` (env `DEVOURER_XTAL_CAP`):
    the AFE crystal load-capacitance trim pulls the chip's reference oscillator a
    few ppm, so trimming one end of a marginal pair moves the offset off the sync
    boundary. The trim range is per generation (`GetAdapterCaps().xtal_cap_max`:
@@ -239,7 +239,7 @@ keeps the RF in 20 MHz mode (RF18[11:10] unchanged) and the MAC at 20 MHz, so
 the RF bandwidth register, the MAC BW bits, the sub-channel, the RX DFIR/CCA
 tail, TX power (narrowband folds to the 20 MHz column), and IQK are all
 invariant. The only thing that actually changes is the baseband ADC/DAC
-re-clock register. `IRtlDevice::FastSetBandwidth(bw)` — the bandwidth analogue
+re-clock register. `IRadio::FastSetBandwidth(bw)` — the bandwidth analogue
 of `FastRetune` (`docs/frequency-hopping.md`) — writes just that delta from a
 cached channel state, and falls back to the full `SetMonitorChannel` for a
 40/80 MHz endpoint:
@@ -345,7 +345,7 @@ band's bursts).
 
 `DEVOURER_NB_BW=5` or `=10` on the demos selects narrowband; the library exposes
 it as `CHANNEL_WIDTH_5` / `CHANNEL_WIDTH_10` on `SelectedChannel`, and
-`IRtlDevice::GetAdapterCaps().narrowband_ok` reports whether the running chip
+`IRadio::GetAdapterCaps().narrowband_ok` reports whether the running chip
 supports it. Support today: **Jaguar2 (8822B/8821C) and Jaguar3 (8822C/8822E)**
 fully, and **Jaguar1 on the 8812AU/8811AU and the 8814AU** — every generation.
 The 8821A is the one exclusion (its DAC-clock divide starves TX; see the walls).

@@ -41,8 +41,8 @@ int main(int argc, char **argv) {
   auto transport = devourer::PcieTransport::Open(bdf, logger);
   if (!transport) { fprintf(stderr, "pcie open failed for %s (vfio-bound?)\n", bdf); return 1; }
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRtlDevicePcie(std::move(transport));
-  if (!dev) { fprintf(stderr, "CreateRtlDevicePcie failed\n"); return 1; }
+  auto dev = wifi.CreateRadioPcie(std::move(transport));
+  if (!dev) { fprintf(stderr, "CreateRadioPcie failed\n"); return 1; }
 
   dev->InitWrite(SelectedChannel{ch, 0, CHANNEL_WIDTH_20});
   dev->SetCcaMode(true);   // disable EDCCA — suppress CSMA backoff so the residual

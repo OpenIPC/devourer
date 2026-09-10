@@ -1,5 +1,5 @@
-#ifndef IRTL_DEVICE_H
-#define IRTL_DEVICE_H
+#ifndef IRADIO_H
+#define IRADIO_H
 
 #include <cstddef>
 #include <cstdint>
@@ -11,7 +11,6 @@
 #include "DeviceConfig.h"
 #include "AdapterHealth.h"
 #include "RxQuality.h"
-#include "RxSense.h"
 #include "SelectedChannel.h"
 #include "ThermalStatus.h"
 #include "Sounding.h"
@@ -35,20 +34,21 @@ struct TxPacketView {
   size_t len;
 };
 
-/* IRtlDevice is the chip-family-agnostic device contract used by the demos and
- * the WiFiDriver factory. The production family implementations are:
- *   - RtlJaguarDevice   — Realtek "Jaguar" wave-1 (8812AU/8811AU/8821AU/8814AU)
- *   - RtlJaguar2Device  — Realtek "Jaguar2" (8822BU/8812BU)
- *   - RtlJaguar3Device  — Realtek "Jaguar3" (8822CU/8812EU/8822EU)
- *   - Rtl8733bDevice    — Realtek HALMAC 87xx 11n (RTL8731BU/RTL8733BU)
- *   - RtlKestrelDevice  — Realtek G6 11ax (RTL8852BU/RTL8852CU)
+/* IRadio is the vendor-neutral radio contract used by the demos and the
+ * WiFiDriver factory (CreateRadio returns one). Optional members are virtual
+ * with not-ported defaults; the pure-virtual core is Init / InitWrite /
+ * StartRxLoop / SetMonitorChannel / send_packet / GetSelectedChannel /
+ * SetCcaMode.
  *
- * Chip-family-specific research helpers (BB-debug-port reads, the 8814 queue
- * poller, ...) are intentionally NOT part of this interface — callers that need
- * them dynamic_cast down to the concrete type. */
-class IRtlDevice {
+ * Realtek-specific members (phydm energy counters, EFUSE stability, the
+ * crystal-cap trim, the canary register dump) live on IRtlRadio
+ * (src/IRtlRadio.h), which every Realtek backend derives from; per-generation
+ * research helpers (BB-debug-port reads, the 8814 queue poller, ...) live on
+ * the concrete classes. Callers that need either level dynamic_cast down and
+ * treat nullptr as "not available on this radio". */
+class IRadio {
 public:
-  virtual ~IRtlDevice() = default;
+  virtual ~IRadio() = default;
 
   virtual void Init(Action_ParsedRadioPacket packetProcessor,
                     SelectedChannel channel) = 0;
@@ -158,23 +158,6 @@ public:
    * any knob. Returns false when unsupported or the chip isn't brought up. */
   virtual bool ReApplyTxPower() { return false; }
 
-  /* Crystal (XTAL) load-capacitance trim — the CFO lever. Writes the AFE
-   * crystal-cap field (a per-chip register), pulling the chip's reference
-   * oscillator a few ppm to align a marginal TX/RX crystal pair; the payoff
-   * is narrowband at the edge of its CFO budget (5 MHz at 5 GHz). `cap` is a
-   * raw trim code in [0, GetAdapterCaps().xtal_cap_max]; cap < 0 reverts to
-   * the efuse/default value. Both physical caps (Xi/Xo) are set together.
-   * Returns the applied code, or -1 when unsupported. Sticky across channel
-   * changes (an AFE register, untouched by the RF retune). */
-  virtual int SetXtalCap(int cap) {
-    (void)cap;
-    return -1;
-  }
-
-  /* Current crystal-cap code (the last SetXtalCap value, or the efuse default
-   * at bring-up). -1 when unsupported. */
-  virtual int GetXtalCap() { return -1; }
-
   /* Snapshot of the knob state + representative effective indices (register
    * readback where the family's TXAGC block is readable). */
   virtual devourer::TxPowerState GetTxPowerState() { return {}; }
@@ -198,7 +181,7 @@ public:
    * feature flags (per-packet TX power, narrowband, fast retune, per-chain
    * RSSI). Resolved at construction — safe from any thread and callable BEFORE
    * Init/InitWrite (the demos emit it as the `adapter.caps` event right after
-   * CreateRtlDevice). Default returns supported=false. */
+   * CreateRadio). Default returns supported=false. */
   virtual devourer::AdapterCaps GetAdapterCaps() { return {}; }
 
   /* Best-effort live estimate of which RX chains are actually carrying signal
@@ -557,67 +540,25 @@ public:
    * all-zero snapshot. */
   virtual devourer::TxStats GetTxStats() { return {}; }
 
-  /* Frame-free RX energy / channel-busy snapshot (see RxSense.h) — the read side
-   * of the DEVOURER_CW_TONE emitter, used for spectrum-sensing / interferer
-   * detection. Reads the chip's phydm false-alarm + CCA counters, DIG/IGI, and
-   * (when asked) the NHM power histogram. FA/CCA counts are the delta since the
-   * previous call. Default returns an all-invalid snapshot; each generation
-   * overrides with a real reader.
-   *
-   * `with_nhm` is a cost decision, not a preference: the NHM read arms a ~2 ms
-   * measurement window and then polls a ready bit at 1 ms granularity
-   * (src/NhmReader.h), so it dominates the call — the scalar FA/CCA/IGI path is
-   * a handful of register reads. Pass false for the throwaway read that resets
-   * the delta counters before an observation window, and for any caller
-   * sampling faster than a few times a second. */
-  virtual RxEnergy GetRxEnergy(bool with_nhm) { (void)with_nhm; return {}; }
-
   /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — the
    * runtime feed a closed-loop adaptive-link controller reads instead of
    * scraping the demo's stdout. Fuses the per-frame RSSI/SNR/EVM aggregate the
    * device accumulates internally, a passive noise-floor estimate (rssi - snr,
    * the self-jamming signal), the frame-free FA/CCA/IGI energy, and the
-   * LinkHealth verdict. Drains the window (delta semantics) and SUBSUMES
-   * GetRxEnergy (it calls it internally + consumes the FA/CCA delta — don't also
-   * poll GetRxEnergy separately on the same cadence). Default is an all-invalid
+   * LinkHealth verdict. Drains the window (delta semantics); on the Realtek
+   * backends it consumes the same FA/CCA/IGI delta that IRtlRadio::GetRxEnergy
+   * reads, so do not poll both on the same cadence. Default is an all-invalid
    * snapshot; each generation overrides. */
   virtual devourer::RxQuality GetRxQuality() { return {}; }
 
-  /* --- Adapter-health probes (see src/AdapterHealth.h; examples/doctor is
-   * the reference consumer) --- */
-
-  /* Perform `reads` fresh PHYSICAL EFUSE logical-map reads (each pass re-runs
-   * the efuse-controller read sequence — not the cached shadow) and
-   * cross-compare them. Dying silicon returns different content per read;
-   * healthy silicon is byte-identical every time. Post-bring-up only: returns
-   * supported=false before Init/InitWrite (on the 8814AU a pre-fwdl EFUSE
-   * read breaks the RSVD-page firmware download). Control-plane threading
-   * contract applies (same as SetMonitorChannel). */
-  virtual devourer::EfuseStability ProbeEfuseStability(int reads = 4) {
-    (void)reads;
-    return {};
-  }
+  /* --- Adapter health (see src/AdapterHealth.h; examples/doctor is the
+   * reference consumer; the EFUSE probe is on IRtlRadio) --- */
 
   /* Outcome of the most recent firmware download (populated during
    * Init/InitWrite). On Jaguar1 a failed FW boot does not abort bring-up —
    * this is the only place the failure is visible to a caller. */
   virtual devourer::FwBootStatus GetFwBootStatus() { return {}; }
 
-  /* Dump the chip's canary register set (BB / MAC / per-path RF) to the
-   * diagnostic plane. Reads only — no writes, no calibration, no bring-up.
-   *
-   * The point is that it is callable on a device that has NOT been Init'ed, so
-   * a chip left in whatever state a previous session abandoned it in can be
-   * inspected AS IT IS. Every other path into this driver reconfigures the chip
-   * on the way in, which destroys exactly the evidence a state bug leaves
-   * behind. Pair it with an open that skips libusb_reset_device
-   * (claim_interface_then_reset's `do_reset=false`) — a USB reset re-runs the
-   * chip's own boot and is just as destructive.
-   *
-   * Output format matches DEVOURER_DUMP_CANARY, so two dumps diff directly with
-   * tests/canary_diff.py. Reading a powered-down chip yields garbage or throws;
-   * interpreting that is the caller's job. No-op where unsupported (default). */
-  virtual void DumpChipState() {}
 };
 
-#endif /* IRTL_DEVICE_H */
+#endif /* IRADIO_H */

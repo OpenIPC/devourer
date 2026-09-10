@@ -34,12 +34,12 @@
 #include <memory>
 #include <string>
 
-#include "RtlTransport.h"
+#include "Transport.h"
 #include "logger.h"
 
 namespace devourer {
 
-class PcieTransport final : public IRtlTransport {
+class PcieTransport final : public ITransport {
 public:
   /* TX queues, indexing _tx_rings. Order is fixed (ring register map). */
   enum Queue : int {
@@ -81,7 +81,7 @@ public:
   PcieTransport(const PcieTransport &) = delete;
   PcieTransport &operator=(const PcieTransport &) = delete;
 
-  /* ---- IRtlTransport: register plane (BAR2 MMIO) ---- */
+  /* ---- ITransport: register plane (BAR2 MMIO) ---- */
   bool is_usb() const override { return false; }
   uint8_t read8(uint16_t reg) override { return guarded_read<uint8_t>(reg); }
   uint16_t read16(uint16_t reg) override { return guarded_read<uint16_t>(reg); }
@@ -98,7 +98,7 @@ public:
     return true;
   }
 
-  /* ---- IRtlTransport: frame plane (88xx BD rings) ---- */
+  /* ---- ITransport: frame plane (88xx BD rings) ---- */
   /* The ring is chosen from the tx-descriptor QSEL at buf[5] bits [4:0]
    * (identical position on every 88xx descriptor this library builds); the
    * `ep` hint is USB addressing and ignored. QSEL_BEACON -> BCN ring is the

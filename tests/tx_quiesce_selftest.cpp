@@ -1,4 +1,4 @@
-/* Headless guard for the TX quiesce seam (IRtlTransport::quiesce_tx,
+/* Headless guard for the TX quiesce seam (ITransport::quiesce_tx,
  * RtlAdapter::quiesce_tx).
  *
  * What this covers: that the quiesce call reaches the transport through the
@@ -33,7 +33,7 @@ namespace {
 
 /* Models the asynchronous half of a USB transport: a send is accepted while
  * running and refused once quiesced, and quiesce is what drains. */
-class FakeAsyncTransport final : public devourer::IRtlTransport {
+class FakeAsyncTransport final : public devourer::ITransport {
 public:
   int accepted = 0;
   int refused = 0;
@@ -78,7 +78,7 @@ private:
 
 /* A transport whose TX is synchronous has nothing outstanding, so it inherits
  * the interface's no-op — the property the HalMAC generations depend on. */
-class SyncOnlyTransport final : public devourer::IRtlTransport {
+class SyncOnlyTransport final : public devourer::ITransport {
 public:
   bool is_usb() const override { return false; }
   uint8_t read8(uint16_t) override { return 0; }

@@ -1,6 +1,6 @@
 #pragma once
 
-/* UsbTransport — the libusb implementation of IRtlTransport. Everything
+/* UsbTransport — the libusb implementation of ITransport. Everything
  * USB-wire-specific that used to live inside the adapter is here: vendor
  * control transfers for the register plane, sync/async bulk-OUT TX with the
  * wedge (mid-stream stall) recovery and TX submission counters, the
@@ -16,7 +16,7 @@
 #include <libusb.h>
 
 #include "DeviceConfig.h"
-#include "RtlTransport.h"
+#include "Transport.h"
 #include "logger.h"
 
 namespace devourer {
@@ -29,7 +29,7 @@ class UsbDeviceLock;
 
 namespace devourer {
 
-class UsbTransport final : public IRtlTransport {
+class UsbTransport final : public ITransport {
 public:
   UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
                libusb_context *ctx = nullptr,

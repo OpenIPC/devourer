@@ -70,6 +70,7 @@
 #include "SignalStop.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
+#include "IRtlRadio.h"
 #include "logger.h"
 
 namespace {
@@ -229,16 +230,16 @@ int main(int argc, char **argv) {
   cfg.rx.enable_with_tx = true;
 
   WiFiDriver driver(logger);
-  std::unique_ptr<IRtlDevice> owned_device =
-      driver.CreateRtlDevice(handle, ctx, lock, cfg);
+  std::unique_ptr<IRadio> owned_device =
+      driver.CreateRadio(handle, ctx, lock, cfg);
   if (!owned_device) {
-    logger->error("CreateRtlDevice failed (chip support not built?)");
+    logger->error("CreateRadio failed (chip support not built?)");
     return 3;
   }
   /* The session owns the device from here: it is what guarantees the device
    * (and its in-flight TX) dies before libusb does. */
   session.adopt_device(std::move(owned_device));
-  IRtlDevice *const dev = session.device();
+  IRadio *const dev = session.device();
 
   devourer::emit_adapter_caps(logger->events(), dev);
 
@@ -262,7 +263,11 @@ int main(int argc, char **argv) {
 
   if (in.init_completed) {
     /* 2. EFUSE stability */
-    in.efuse = dev->ProbeEfuseStability(a.reads);
+    if (auto *rtl = dynamic_cast<IRtlRadio *>(dev))
+      in.efuse = rtl->ProbeEfuseStability(a.reads);
+    else
+      logger->warn("doctor: the EFUSE stability probe is Realtek-only "
+                   "(IRtlRadio) — skipped on this radio");
 
     /* 4. RX smoke */
     if (a.listen_secs > 0 && !g_devourer_should_stop) {

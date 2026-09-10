@@ -43,6 +43,10 @@ struct RxQuality {
   int rssi_max_dbm = 0;  /* window peak — the strength signal (see LinkHealth) */
   double snr_mean_db = 0.0;
   double snr_min_db = 0.0;
+  /* false when no frame in the window carried SNR (a CCK-only or non-type1
+   * phy-status window); snr_mean_db / snr_min_db are 0 then, and are a mean
+   * over the reporting frames only otherwise — not over every decoded frame. */
+  bool snr_valid = false;
   double evm_mean_db = 0.0; /* 0 when evm_valid is false */
   bool evm_valid = false;
 
@@ -84,6 +88,7 @@ struct RxQualitySnapshot {
   int rssi_max_raw = 0;
   int snr_mean_raw = 0;
   int snr_min_raw = 0;
+  bool snr_valid = false; /* false when no frame in the window carried SNR */
   int evm_mean_raw = 0;
   bool evm_valid = false;
   double nf_mean_dbm = 0.0;
@@ -99,7 +104,10 @@ public:
   /* Raw path-A values straight off rx_pkt_attrib. A frame with no phy-status
    * power (rssi_raw <= 0) is not a quality sample and is skipped. SNR/EVM are
    * folded only when present (raw != 0 — CCK / non-type1 phy-status leaves them
-   * 0), so a mixed stream doesn't bias those means toward zero. */
+   * 0), so a mixed stream doesn't bias those means toward zero; snr_min_raw
+   * likewise ignores the absent ones rather than pinning itself to 0. Each
+   * carries its own sample count, so the window means are over the frames that
+   * actually reported the metric. */
   void add(int rssi_raw, int snr_raw, int evm_raw) {
     if (rssi_raw <= 0)
       return;
@@ -108,9 +116,12 @@ public:
     rssi_sum_ += rssi_raw;
     if (rssi_raw > rssi_max_)
       rssi_max_ = rssi_raw;
-    snr_sum_ += snr_raw;
-    if (snr_raw < snr_min_)
-      snr_min_ = snr_raw;
+    if (snr_raw != 0) {
+      snr_sum_ += snr_raw;
+      ++snr_n_;
+      if (snr_raw < snr_min_)
+        snr_min_ = snr_raw;
+    }
     if (evm_raw != 0) {
       evm_sum_ += evm_raw;
       ++evm_n_;
@@ -130,8 +141,11 @@ public:
     if (n_) {
       s.rssi_mean_raw = rssi_sum_ / static_cast<int>(n_);
       s.rssi_max_raw = rssi_max_;
-      s.snr_mean_raw = snr_sum_ / static_cast<int>(n_);
+    }
+    if (snr_n_) {
+      s.snr_mean_raw = snr_sum_ / static_cast<int>(snr_n_);
       s.snr_min_raw = snr_min_;
+      s.snr_valid = true;
     }
     if (evm_n_) {
       s.evm_mean_raw = evm_sum_ / static_cast<int>(evm_n_);
@@ -145,6 +159,7 @@ public:
     rssi_sum_ = 0;
     rssi_max_ = -128;
     snr_sum_ = 0;
+    snr_n_ = 0;
     snr_min_ = 127;
     evm_sum_ = 0;
     evm_n_ = 0;
@@ -158,6 +173,7 @@ private:
   uint32_t n_ = 0;
   int32_t rssi_sum_ = 0, rssi_max_ = -128;
   int32_t snr_sum_ = 0, snr_min_ = 127;
+  uint32_t snr_n_ = 0;
   int32_t evm_sum_ = 0;
   uint32_t evm_n_ = 0;
   double nf_sum_ = 0.0;
@@ -178,6 +194,7 @@ inline RxQuality build_rx_quality(const RxQualitySnapshot &s, const RxEnergy &e,
   q.rssi_max_dbm = s.rssi_max_raw - 110;
   q.snr_mean_db = s.snr_mean_raw / 2.0;
   q.snr_min_db = s.snr_min_raw / 2.0;
+  q.snr_valid = s.snr_valid;
   q.evm_valid = s.evm_valid;
   q.evm_mean_db = s.evm_mean_raw / 2.0;
   q.noise_floor_dbm = s.nf_mean_dbm;

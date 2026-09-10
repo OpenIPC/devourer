@@ -29,7 +29,7 @@ int find_wifi_interface(libusb_device_handle *handle);
  *      does not report BUSY, so the lock — not the claim — is what turns a
  *      second devourer away there, and taking it up front means that second
  *      process resets nothing. `out_lock` receives it; the caller must keep it
- *      alive for as long as it drives the adapter (hand it to CreateRtlDevice,
+ *      alive for as long as it drives the adapter (hand it to CreateRadio,
  *      which then does NOT re-acquire);
  *   2. detach an attached kernel driver on `iface`;
  *   3. set configuration 1 (a cold, never-kernel-configured chip sits in config

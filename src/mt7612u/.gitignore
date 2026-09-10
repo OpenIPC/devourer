@@ -1,0 +1,9 @@
+bringup
+tests/api_link
+tests/frame_shape
+tests/field_macros
+*.o
+*.d
+firmware/
+wrlog.txt
+mculog.txt

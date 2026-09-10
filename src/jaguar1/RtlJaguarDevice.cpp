@@ -1071,7 +1071,7 @@ size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
    * rules in src/TxAggPlan.h. Knob off -> the interface-default loop. */
   const unsigned agg = _cfg.tx.usb_agg_max;
   if (agg <= 1 || !_device.is_usb() || count == 0)
-    return IRtlDevice::send_packets(pkts, count);
+    return IRadio::send_packets(pkts, count);
 
   devourer::TxAggLimits lim;
   lim.desc_size = TXDESC_SIZE;
@@ -1806,7 +1806,13 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
              std::span<uint8_t>{const_cast<uint8_t *>(data), (size_t)n})) {
       if (should_stop || g_devourer_should_stop)
         break;
-      if (!p.RxAtrib.crc_err) {
+      /* physt: the descriptor says the PHY wrote a status report for THIS
+       * frame. Without it FrameParser leaves the signal fields at 0 (the
+       * drvinfo space is reserved on every frame but written only where the
+       * bit is set), and folding those zeros would drag the running averages
+       * — the CFO tracker in particular, whose enable threshold a diluted
+       * average never crosses. */
+      if (!p.RxAtrib.crc_err && p.RxAtrib.physt) {
         _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);
         _rxpaths.add(p.RxAtrib.rssi, p.RxAtrib.snr, p.RxAtrib.evm,
                      _eepromManager->numTotalRfPath);
@@ -2239,7 +2245,7 @@ bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {
   return true;
 }
 
-/* Clean shutdown — see IRtlDevice::Stop. Quiesce TX first so the de-init writes
+/* Clean shutdown — see IRadio::Stop. Quiesce TX first so the de-init writes
  * are not racing frames the transport still owns, then power the chip down.
  *
  * The power-down is the point: without it a Jaguar1 chip stays in ACT with its

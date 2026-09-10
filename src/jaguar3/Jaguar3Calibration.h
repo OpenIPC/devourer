@@ -37,7 +37,7 @@ public:
                                  uint8_t /*thermal_base_b*/,
                                  uint8_t /*channel*/) {}
 
-  /* One-shot thermal-meter read (path A) for IRtlDevice::GetThermalStatus:
+  /* One-shot thermal-meter read (path A) for IRadio::GetThermalStatus:
    * `raw` = the live RF 0x42[6:1] reading, `baseline` = the calibration
    * reference — the efuse baseline on the 8822e (0xFF = unprogrammed), the
    * first-read cold reference on the 8822c (no efuse baseline is wired on the

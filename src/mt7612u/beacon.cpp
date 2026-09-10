@@ -72,7 +72,10 @@ int mt_beacon_write(struct mt7612u_dev *d, const void *frame, size_t len,
 	uint8_t buf[MT_BCN_SLOT_SIZE];
 	int total;
 
-	if (len + MT_TXWI_LEN > MT_BCN_SLOT_SIZE) {
+	/* The slot must hold the TXWI and the DMA header as well as the body;
+	 * mt_tx_build() enforces the tighter bound anyway, but from here the
+	 * error names the beacon rather than reporting a bad frame length. */
+	if (len + MT_TXWI_LEN + MT_DMA_HDR_LEN > MT_BCN_SLOT_SIZE) {
 		ERR("beacon %zu B + TXWI exceeds the %d B slot", len,
 		    (int)MT_BCN_SLOT_SIZE);
 		return -1;
@@ -82,8 +85,20 @@ int mt_beacon_write(struct mt7612u_dev *d, const void *frame, size_t len,
 	if (total < 0)
 		return -1;
 
-	mt_wr_copy(d, MT_BEACON_BASE, buf + MT_DMA_HDR_LEN,
-	           total - MT_DMA_HDR_LEN);
+	/* Checked by the io_err delta, because mt_wr_copy() returns void and
+	 * gives up mid-loop on the first failed vendor request - leaving a HALF
+	 * WRITTEN beacon in the page, which then airs. That is worse than no
+	 * beacon, and the paragraph below already argues why USB writes here get
+	 * checked when mt76's MMIO ones do not. */
+	{
+		const unsigned before = mt_io_errors(d);
+		mt_wr_copy(d, MT_BEACON_BASE, buf + MT_DMA_HDR_LEN,
+		           total - MT_DMA_HDR_LEN);
+		if (mt_io_errors(d) != before) {
+			ERR("beacon: the reserved-page copy failed part way");
+			return -1;
+		}
+	}
 
 	/*
 	 * Unsuppress the slot just written. BCN_BYPASS_MASK is inverted: a set
@@ -231,6 +246,30 @@ static int beacon_split(const void *buf, size_t len, const uint8_t **mpdu,
 	return 0;
 }
 
+/*
+ * The MBSS base address: MT_MAC_BSSID_DW0/DW1's address halves, leaving
+ * MBSS_MODE / MBEACON_N / LOCAL_BIT alone.
+ *
+ * This is the half of "retarget the identity" that mt76 does and devourer's
+ * ACK responder does not. mt76x02_mac_setaddr() moves mphy.macaddr,
+ * MT_MAC_ADDR and MT_MAC_BSSID together, and the whole per-BSS index
+ * derivation is written against that invariant. Move only MT_MAC_ADDR - which
+ * is all mt7612u_set_ack_responder() does, and all this function used to do -
+ * and the MBSS base is still the factory address, so the hardware derives the
+ * BSS index from a different address than the host thinks it does. That is
+ * silent: the AP beacons perfectly and matches nobody.
+ */
+static int mt_mac_set_bss_base(struct mt7612u_dev *d, const uint8_t *a)
+{
+	const uint32_t dw0 = (uint32_t)a[0] | ((uint32_t)a[1] << 8) |
+	                     ((uint32_t)a[2] << 16) | ((uint32_t)a[3] << 24);
+	const uint32_t dw1 = (uint32_t)a[4] | ((uint32_t)a[5] << 8);
+
+	if (mt_wr_chk(d, MT_MAC_BSSID_DW0, dw0))
+		return -1;
+	return mt_rmw(d, MT_MAC_BSSID_DW1, MT_MAC_BSSID_DW1_ADDR, dw1);
+}
+
 int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
                          unsigned interval_tu)
 {
@@ -268,13 +307,25 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 	 * beacons is setting the same thing twice, and the restore is whichever
 	 * of the two runs last.
 	 */
-	if (memcmp(ta, dev->macaddr, 6) != 0) {
-		/* Only claim the identity if nobody else already holds it. When a
-		 * caller armed an ACK responder first, the saved factory MAC is
-		 * theirs and restoring it on beacon stop would silently disarm them. */
+	/* Unconditional, and BOTH registers. Unconditional because the old
+	 * `ta != dev->macaddr` guard compared against the FACTORY address -
+	 * dev->macaddr is written once, from the EEPROM, and nothing moves it -
+	 * so a caller who had armed an ACK responder and then beaconed as the
+	 * factory MAC kept the responder's address in MT_MAC_ADDR and ACKed for
+	 * the wrong station all session. The retarget is idempotent and costs two
+	 * EP0 writes; there is nothing to save by skipping it.
+	 *
+	 * Both registers because the index below is derived from the MBSS base,
+	 * not from MT_MAC_ADDR. */
+	{
 		const int was_taken = dev->ack_saved;
 		if (mt7612u_set_ack_responder(dev, ta))
 			return -1;
+		if (mt_mac_set_bss_base(dev, ta))
+			return -1;
+		/* Only claim ownership if nobody else already held the identity: a
+		 * caller who armed a responder first owns the saved factory address,
+		 * and restoring it on beacon stop would silently disarm them. */
 		if (!was_taken)
 			dev->beacon_took_identity = 1;
 	}
@@ -284,10 +335,13 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 	 * index comes from the address bits, and mt76 computes
 	 *   idx = 1 + (((macaddr[0] ^ addr[0]) >> 2) & 7)
 	 * for a locally-administered address, 0 otherwise (mt76x02_util.c:310).
-	 * It runs that AFTER retargeting the identity, so macaddr == addr and the
-	 * XOR is zero: the expression collapses to 1. Getting this wrong is
-	 * silent - slot 0 for an 02:/06:/0a: BSSID matches nothing, and the AP
-	 * beacons perfectly while acknowledging nobody.
+	 * mt76 runs that AFTER mt76x02_mac_setaddr(), so its macaddr IS addr and
+	 * the XOR is zero, collapsing the expression to 1. mt_mac_set_bss_base()
+	 * above is what makes the same thing true here - without it the base
+	 * stays the factory address, the hardware derives 1 + ((factory[0] ^
+	 * ta[0]) >> 2 & 7), and this constant is right only for the adapters
+	 * where that happens to be 1. Getting it wrong is silent: the AP beacons
+	 * perfectly and acknowledges nobody.
 	 */
 	idx = (ta[0] & 0x02) ? 1 : 0;
 
@@ -305,18 +359,36 @@ int mt7612u_beacon_update(struct mt7612u_dev *dev, const void *buf, size_t len)
 
 	if (!dev) return -1;
 	if (beacon_split(buf, len, &mpdu, &mpdu_len, &rate)) return -1;
-	/* No mt_beacon_init() and no set_enable(): the engine is already armed and
-	 * re-initialising it would re-suppress every slot mid-flight. */
+
+	/* Suppress the slot for the duration of the copy. mt_wr_copy() spans many
+	 * 64-byte EP0 transactions, so a TBTT landing mid-copy would air a TORN
+	 * beacon - leading bytes new, trailing bytes old. mt76 brackets the same
+	 * write for the same reason ("Prevent corrupt transmissions during
+	 * update", mt76x02_usb_core.c). mt_beacon_write() lowers the guard again
+	 * on its way out, which is why this is the only half needed here.
+	 *
+	 * Still no mt_beacon_init() and no set_enable(): the engine is armed, and
+	 * re-initialising it would clear the timer bits mid-flight. */
+	mt_wr(dev, MT_BCN_BYPASS_MASK, 0xffff);
 	return mt_beacon_write(dev, mpdu, mpdu_len, &rate);
 }
 
 int mt7612u_beacon_stop(struct mt7612u_dev *dev)
 {
 	static const uint8_t zero[6] = { 0 };
+	unsigned before;
 	int rc;
 
 	if (!dev) return -1;
 
+	/* The io_err delta is what makes a failed stop VISIBLE. mt_beacon_set_enable's
+	 * off path is mt_clear() -> mt_rmw(), which reports only its READ half, and
+	 * mt_ap_set_bssid()'s writes are checked but their returns were dropped. So
+	 * this function used to be incapable of returning non-zero, which made
+	 * Mt7612uRadio::StopBeacon's whole failure branch unreachable and the
+	 * harness assertion for it vacuous - while the real hazard (an EP0 stall
+	 * during teardown leaving the MAC beaconing) reported success. */
+	before = mt_io_errors(dev);
 	rc = mt_beacon_set_enable(dev, 0, 0);
 
 	/*
@@ -331,14 +403,16 @@ int mt7612u_beacon_stop(struct mt7612u_dev *dev)
 	 * them by the address's locally-administered bit, and stop does not have
 	 * the beacon any more to re-derive which one it used.
 	 */
-	mt_ap_set_bssid(dev, 0, zero);
-	mt_ap_set_bssid(dev, 1, zero);
+	if (mt_ap_set_bssid(dev, 0, zero)) rc = -1;
+	if (mt_ap_set_bssid(dev, 1, zero)) rc = -1;
 
 	/* And the port MAC, if this call's opposite number was what retargeted
 	 * it. mt7612u_clear_ack_responder() is the restore. */
 	if (dev->beacon_took_identity) {
 		mt7612u_clear_ack_responder(dev);
+		if (mt_mac_set_bss_base(dev, dev->macaddr)) rc = -1;
 		dev->beacon_took_identity = 0;
 	}
+	if (mt_io_errors(dev) != before) rc = -1;
 	return rc;
 }

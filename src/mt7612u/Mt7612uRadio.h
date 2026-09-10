@@ -103,6 +103,10 @@ public:
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
   bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) override;
   bool StopBeacon() override;
+  /* Refuse loudly rather than report a 0 us shift that was never applied. */
+  int32_t AdjustBeaconTiming(int32_t microseconds) override;
+  int32_t AdjustBeaconTimingFine(int32_t microseconds) override;
+  int32_t PinBeaconTbtt(int32_t offset_us) override;
   void ClearAckResponder() override;
 
 private:

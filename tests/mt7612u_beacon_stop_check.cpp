@@ -1,11 +1,12 @@
 /*
  * Does StopBeacon actually silence the MAC?
  *
- * This exists because the obvious way to check it does not check it. Both AP
- * harnesses (tests/ap_responder.cpp, tests/ap_wpa2.cpp) end in `_exit(0)`,
- * which bypasses every destructor - so the radio's Stop(), and with it
- * StopBeacon(), never run, and "the beacon was gone after the process exited"
- * measures nothing. On this part that is not a cosmetic difference: the MAC
+ * This exists because the obvious way to check it did not check it. Both AP
+ * harnesses used to end in `_exit(0)` with no teardown, which bypasses every
+ * destructor - so the radio's Stop(), and with it StopBeacon(), never ran, and
+ * "the beacon was gone after the process exited" measured nothing. They call
+ * StopBeacon explicitly now, but that still tests the call from one place at
+ * one moment; this drives the whole transition and lets a witness look. On this part that is not a cosmetic difference: the MAC
  * beacons AUTONOMOUSLY from the reserved page once armed, so a session that
  * skips the teardown leaves it airing until the adapter is power-cycled.
  *
@@ -19,6 +20,12 @@
  * the transitions and prints when each phase begins, so the operator or a
  * script can scan in the right window. It is not a ctest cell - it needs an
  * adapter and a second radio to look.
+ *
+ * Build:
+ *   g++ -std=c++20 -O2 -Isrc -Iexamples/common \
+ *       tests/mt7612u_beacon_stop_check.cpp examples/common/env_config.cpp \
+ *       build/libdevourer.a $(pkg-config --cflags --libs libusb-1.0) \
+ *       -lpthread -o beacon_stop_check
  *
  *   sudo DEVOURER_VID=0x0e8d DEVOURER_PID=0x7612 DEVOURER_CHANNEL=36 \
  *        DEVOURER_MT7612U_FW_DIR=<dir> ./beacon_stop_check [phase_secs]

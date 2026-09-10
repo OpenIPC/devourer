@@ -640,7 +640,17 @@ void Mt7612uRadio::Stop() {
    * channel. Bench-bitten on the Realtek side, and the bring-up gate silences
    * its beacon on every exit path for the same reason. */
   try {
-    StopBeacon();
+    /* Retried, because the comment in StopBeacon promises one and because a
+     * beacon that survives this call survives the process: the MAC keeps
+     * airing it until the adapter is power-cycled. Three attempts, then say so
+     * at error level rather than closing the device in silence. */
+    bool silenced = false;
+    for (int attempt = 0; attempt < 3 && !silenced; ++attempt)
+      silenced = StopBeacon();
+    if (!silenced && _beacon_active)
+      _logger->error("MT7612U: closing the device with a beacon still armed - "
+                     "the MAC will keep airing it until the adapter is "
+                     "power-cycled");
   } catch (...) {
   }
   stop_tick(); /* joins; must not run with _mu held */
@@ -890,6 +900,34 @@ bool Mt7612uRadio::UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
   return mt7612u_beacon_update(_dev, beacon, len) == 0;
 }
 
+/* The beacon-steer trio. Not implemented, and REFUSING QUIETLY IS THE PROBLEM:
+ * IRadio's default returns 0, which means "applied a 0 us shift" and is
+ * indistinguishable from "this backend cannot steer". tests/beacon_steer_check
+ * and the PTP harnesses run against any backend and would read a clean zero.
+ * Every other unsupported knob here says so out loud; these were the exception.
+ *
+ * Steering needs a pre-TBTT interrupt to re-time against, which this static
+ * reserved-page path does not have - mt76's own steering lives in
+ * mt76x02u_pre_tbtt_work(), a path this port does not run. */
+int32_t Mt7612uRadio::AdjustBeaconTiming(int32_t microseconds) {
+  (void)microseconds;
+  _logger->error("MT7612U: AdjustBeaconTiming is not implemented - the static "
+                 "reserved-page beacon has no pre-TBTT hook to steer against");
+  return 0;
+}
+
+int32_t Mt7612uRadio::AdjustBeaconTimingFine(int32_t microseconds) {
+  (void)microseconds;
+  _logger->error("MT7612U: AdjustBeaconTimingFine is not implemented");
+  return 0;
+}
+
+int32_t Mt7612uRadio::PinBeaconTbtt(int32_t offset_us) {
+  (void)offset_us;
+  _logger->error("MT7612U: PinBeaconTbtt is not implemented");
+  return 0;
+}
+
 bool Mt7612uRadio::StopBeacon() {
   std::lock_guard<std::recursive_mutex> lock(_mu);
   if (!_dev || !_beacon_active)
@@ -902,7 +940,7 @@ bool Mt7612uRadio::StopBeacon() {
      * try/catch, so a retry there costs nothing. */
     _logger->error("MT7612U beacon stop FAILED - the MAC is still airing it; "
                    "retry, or power-cycle the adapter");
-    return false;
+    return false;   /* _beacon_active deliberately left set: see above */
   }
   _beacon_active = false;
   return true;

@@ -4,13 +4,16 @@
 unmodified — beacon, probe, auth, assoc, and the ARP/ICMP data plane — with a
 real Linux station associated. `StartBeacon`, `UpdateBeaconPayload` and
 `StopBeacon` are implemented on `Mt7612uRadio`, so nothing in
-`tests/ap_responder.cpp` or `tests/ap_wpa2.cpp` knows this is MediaTek.
+`tests/ap_responder.cpp` or `tests/ap_wpa2.cpp` branches on the backend. (Both
+carry one MediaTek-specific *comment* now, explaining why they silence the
+beacon before `_exit`; no code depends on it.)
 
 **WPA2-PSK works too.** `tests/ap_wpa2.cpp`, also unmodified, completes the
 4-way handshake against a real `wpa_supplicant` station and carries encrypted
-traffic. It needs the same four `IRadio` methods as the open-network harness —
-`InitWrite`, `StartBeacon`, `StartRxLoop`, `send_packet` — and no others,
-because CCMP is done in software there.
+traffic. It needs the same five `IRadio` methods as the open-network harness -
+`InitWrite`, `StartBeacon`, `StartRxLoop`, `send_packet`, `StopBeacon` - and no
+others. CCMP is done in software in the harness, so no key API is involved;
+that is a separate point from the method count.
 
 What is NOT done: **hardware** CCMP. `MT_WCID_KEY` and `MT_SKEY` are untouched,
 so the claim below that hardware crypto is a capability *gain* on this part
@@ -39,7 +42,6 @@ station, plus an RTL8812AU running `rxdemo` as an independent on-air witness.
 | Corrected MBSS masks | `MT_MAC_BSSID_DW1` reads `0x003fa127` — upper bits exactly mt76's `MBSS_MODE=3 / MBEACON_N=7 / LOCAL_BIT` |
 | Hardware auto-ACK (Gate B) | A real station's **3 auth frames, 0 retried**. An un-ACKed frame is retransmitted with FC Retry set, so retry=0 is the ACK |
 | APC BSSID slot programmed | `MT_MAC_APC_BSSID_L(0)=0x50efa540` (device MAC `40:a5:ef:50:…`) |
-| StopBeacon contract | After the process exits the BSSID is absent from a fresh scan — nothing left airing |
 
 Not yet done: probe **responses**, auth/assoc **responses** and the data plane —
 those are the existing backend-agnostic C++ harnesses' job (Stages C–E), not
@@ -84,12 +86,12 @@ one is devourer itself: `tests/ap_responder.cpp`, unmodified, built against
   holds an entry ~30 s after the beacon dies, and it reported a stopped beacon
   as present until `iw scan flush` was used. A re-arm also takes long enough
   (a 1600-byte page copy over EP0) that a scan at +8 s still misses it.
-- **Neither AP harness silences the beacon on exit.** Both end in `_exit(0)`,
-  which bypasses the destructor, so `Stop()` and `StopBeacon()` never run and
-  the MAC keeps beaconing until the adapter is power-cycled. That is why the
-  StopBeacon evidence above comes from a purpose-built harness and not from
-  "the SSID was gone after the process exited" — which is what it looked like
-  once, by luck, and was false.
+- **The beacon-stop evidence is from a purpose-built harness, not from process
+  exit.** Both AP harnesses used to end in `_exit(0)`, skipping the destructor,
+  so `StopBeacon` never ran and "the SSID was gone after exit" measured nothing
+  - it looked true once, by luck, and was false. They call `StopBeacon`
+  explicitly now, and `tests/mt7612u_beacon_stop_check.cpp` is what actually
+  exercises the transition.
 
 ## The claim, and why it holds
 
@@ -126,7 +128,7 @@ Verified in the merged subtree:
 |---|---|---|
 | Port MAC + BSSID programmed | yes — `MT_MAC_ADDR_DW0/1`, `MT_MAC_BSSID_DW0/1`, MBSS_MODE=3, MBEACON_N | `init.c:206‑216` (`mac_setaddr`) |
 | Station table (WCID) | yes — `mt_wcid_setup(idx, mac)` writes `MT_WCID_ATTR` + address; all zeroed at init | `tx.c:95`, `init.c:236` |
-| Crypto key slots | present and zeroed — `MT_WCID_KEY`, `MT_SKEY`, `MT_SKEY_MODE` | `regs.h:239‑245`, `init.c:242‑246` |
+| Crypto key slots | the shared-key store is present and zeroed at init (`MT_SKEY`, `MT_SKEY_MODE`, `src/mt7612u/init.cpp` `wcid_and_key_clear()`). The per-station key store is NOT defined in this tree - `MT_WCID_KEY` does not exist here, which is part of why hardware CCMP is unreached |
 | ACKed unicast TX | yes — `no_ack=0` sets `MT_TXWI_ACK_CTL_REQ`; BA-window field present | `tx.c:164‑167` |
 | Beacon-interval timer regs | defined — `MT_BEACON_TIME_CFG` INTVAL/TIMER_EN/TBTT_EN/BEACON_TX, `MBEACON_N` | `regs.h:176‑180,169` |
 | RX filter control | yes — managed default `0x00015f97`, monitor clears to error-only | `init.c:278,494‑509` |

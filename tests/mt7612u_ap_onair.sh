@@ -82,10 +82,23 @@ say "AP $AP_SYSFS   station $STA_SYSFS ($STA_IF)   ch$CH ($FREQ MHz)"
 # `flush` is not optional: without it the BSS cache reports a beacon that
 # stopped up to ~30 s ago as still present, which is how a broken StopBeacon
 # reads as working.
+# Scan up to three times and take the HIGHEST count. A scan can come back empty
+# for its own reasons - colliding with another scan, a busy card, a dwell that
+# misses a 100 TU beacon - and one empty result is not evidence of absence.
+# Taking the max is the conservative reading in BOTH directions: it cannot turn
+# a live beacon into a pass for "gone", and it stops a missed scan reporting a
+# live beacon as absent. Observed: a "beacon not scannable" FAIL in a run where
+# the station then associated, pinged, and got an auth at retry=0.
 seen() {
-  local n
-  n=$(iw dev "$STA_IF" scan flush freq "$FREQ" 2>/dev/null | grep -c "SSID: $1")
-  printf '%s' "${n:-0}"
+  local i n best=0
+  for i in 1 2 3; do
+    n=$(iw dev "$STA_IF" scan flush freq "$FREQ" 2>/dev/null | grep -c "SSID: $1")
+    n=${n:-0}
+    [ "$n" -gt "$best" ] && best=$n
+    [ "$best" -gt 0 ] && break
+    sleep 2
+  done
+  printf '%s' "$best"
 }
 
 apenv() {

@@ -374,6 +374,7 @@ endif()
 if(DEVOURER_MT7612U)
     target_sources(devourer PRIVATE
         src/mt7612u/async.cpp
+        src/mt7612u/beacon.cpp
         src/mt7612u/caps.cpp
         src/mt7612u/eeprom.cpp
         src/mt7612u/fw.cpp

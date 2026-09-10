@@ -492,6 +492,57 @@ static void test_tx_ring_ceiling(void)
 	}
 }
 
+/*
+ * A reserved-page beacon must carry two TXWI bits an injected frame must not:
+ * MT_TXWI_FLAGS_TS (the MAC fills the TSF timestamp) and MT_TXWI_ACK_CTL_NSEQ
+ * (the MAC assigns the sequence number). Without them the witness sees a frozen
+ * TSF and a constant sequence number - exactly what Gate A checks on air. This
+ * pins the bits at build time so the on-air gate is not the first to notice.
+ */
+static void test_beacon_txwi(void)
+{
+	struct mt7612u_dev d;
+	uint8_t buf[128];
+	uint8_t beacon[36], data[36];
+	struct mt7612u_tx_rate bcn_rate = {
+		.phy = MT7612U_PHY_OFDM, .mcs = 0, .nss = 1,
+		.bw = MT7612U_BW_20, .no_ack = 1,
+	};
+	struct mt7612u_tx_rate data_rate = {
+		.phy = MT7612U_PHY_OFDM, .mcs = 0, .nss = 1, .bw = MT7612U_BW_20,
+	};
+	int total;
+	uint8_t flags_lo, ack_ctl;
+
+	printf("beacon TXWI (MT_TXOPT_BEACON sets TS + NSEQ):\n");
+
+	memset(&d, 0, sizeof d);
+	d.chainmask = 0x0202;
+
+	memset(beacon, 0, sizeof beacon);
+	beacon[0] = 0x80;   /* FC: mgmt beacon, 24-byte header */
+	memset(data, 0, sizeof data);
+	data[0] = 0x08;     /* FC: data, 24-byte header */
+
+	total = mt_tx_build(&d, buf, sizeof buf, beacon, sizeof beacon,
+	                    &bcn_rate, 0xff, MT_TXOPT_BEACON, 0, 0);
+	if (total < 0) { printf("  FAIL beacon build returned %d\n", total); fails++; return; }
+	flags_lo = buf[4];        /* TXWI flags, low byte (TXWI is at buf+4) */
+	ack_ctl  = buf[8];        /* TXWI ack_ctl */
+	if (!(flags_lo & MT_TXWI_FLAGS_TS))       { printf("  FAIL beacon missing FLAGS_TS\n"); fails++; }
+	if (!(ack_ctl & MT_TXWI_ACK_CTL_NSEQ))    { printf("  FAIL beacon missing ACK_CTL_NSEQ\n"); fails++; }
+	if (ack_ctl & MT_TXWI_ACK_CTL_REQ)        { printf("  FAIL beacon requested an ACK\n"); fails++; }
+
+	total = mt_tx_build(&d, buf, sizeof buf, data, sizeof data,
+	                    &data_rate, 0xff, 0, 0, 0);
+	if (total < 0) { printf("  FAIL data build returned %d\n", total); fails++; return; }
+	flags_lo = buf[4];
+	ack_ctl  = buf[8];
+	if (flags_lo & MT_TXWI_FLAGS_TS)          { printf("  FAIL data frame set FLAGS_TS\n"); fails++; }
+	if (ack_ctl & MT_TXWI_ACK_CTL_NSEQ)       { printf("  FAIL data frame set NSEQ\n"); fails++; }
+	if (!(ack_ctl & MT_TXWI_ACK_CTL_REQ))     { printf("  FAIL data frame did not request an ACK\n"); fails++; }
+}
+
 int main(void)
 {
 	test_hdrlen();
@@ -501,6 +552,7 @@ int main(void)
 	test_chan_group();
 	test_vht_bandwidth();
 	test_ht_bandwidth();
+	test_beacon_txwi();
 	printf("frame_shape: %s\n", fails ? "FAIL" : "PASS");
 	return fails ? 1 : 0;
 }

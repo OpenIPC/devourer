@@ -324,6 +324,7 @@ int mt_hdrlen_from_fc(const uint8_t *frame);
 #define MT_TXOPT_RATE_LUT  0x01  /* set MT_TXWI_FLAGS_TX_RATE_LUT */
 #define MT_TXOPT_AMPDU     0x02  /* AMPDU flag + density + BA window */
 #define MT_TXOPT_QSEL_MGMT 0x04  /* mt76 uses MT_QSEL_MGMT for aggregated TX */
+#define MT_TXOPT_BEACON    0x08  /* HW timestamp (FLAGS_TS) + HW sequence (ACK_CTL_NSEQ) */
 int mt_tx_build(struct mt7612u_dev *d, uint8_t *buf, size_t bufsz,
                 const void *frame, size_t len,
                 const struct mt7612u_tx_rate *rate, uint8_t wcid, unsigned opts,
@@ -331,6 +332,19 @@ int mt_tx_build(struct mt7612u_dev *d, uint8_t *buf, size_t bufsz,
 int mt_tx_raw(struct mt7612u_dev *d, const void *frame, size_t len,
               const struct mt7612u_tx_rate *rate, uint8_t wcid, unsigned opts);
 void mt_wcid_setup(struct mt7612u_dev *d, uint8_t idx, const uint8_t *mac);
+
+/* --- beacon.c --- */
+/* Static reserved-page beacon. mt_beacon_init() prepares the beacon engine
+ * (offsets, bypass, sync) once; mt_beacon_write() loads slot 0; mt_beacon_set_enable()
+ * arms or disarms auto-TX. No pre-TBTT host work - the MAC beacons on its own. */
+void mt_beacon_init(struct mt7612u_dev *d);
+int  mt_beacon_write(struct mt7612u_dev *d, const void *frame, size_t len,
+                     const struct mt7612u_tx_rate *rate);
+int  mt_beacon_set_enable(struct mt7612u_dev *d, int on, unsigned interval_tu);
+/* Publish the AP's BSSID in APC slot `idx` so the MAC matches and auto-ACKs
+ * frames addressed to the BSS. mac_setaddr() zeroes every slot at init.
+ * Returns 0 on success, -1 if either half of the address failed to program. */
+int mt_ap_set_bssid(struct mt7612u_dev *d, uint8_t idx, const uint8_t *addr);
 
 /* --- radiotap.c --- */
 int mt_radiotap_parse(const uint8_t *buf, size_t len, struct mt7612u_tx_rate *r);

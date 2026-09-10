@@ -1,9 +1,31 @@
 # MT7612U as a fully-userspace access point — what is missing
 
-**Status: research and gap analysis, no code.** File:line references are to the
-merged subtree at `daabab7` (`src/mt7612u/`), the mt76 reference at `be5ce79`,
-and devourer's existing AP work. A companion implementation/verification plan
-is at the end.
+**Status: Stages A and B implemented and device-verified** (see "Verified on
+hardware" below); Stages C–E (association responder, data plane, WPA2) still
+need the `IRtlDevice` wrapper and the existing C++ harnesses. File:line
+references are to the merged subtree at `daabab7` (`src/mt7612u/`), the mt76
+reference at `be5ce79`, and devourer's existing AP work.
+
+## Verified on hardware (2026-09-08, MT7612U at USB 2-1)
+
+Measured against a second MT7612U bound to the kernel `mt76x2u` driver as a
+station, plus an RTL8812AU running `rxdemo` as an independent on-air witness.
+
+| Claim | Evidence |
+|---|---|
+| Beacon reaches the air | Kernel station's `iw scan` lists `SSID: MT7612U-AP`, `beacon interval: 100 TUs`, `capability: ESS (0x0001)`, correct `DS Parameter set` and basic-rate flags — on ch149, ch36 **and** ch6 (both bands) |
+| Independent radio decodes it | 8812AU witness: 177 frames on a channel measured empty beforehand, each `len:71` (our 67-byte MPDU + FCS) at `rate:4` (OFDM 6M), ~9.8/s |
+| HW TSF timestamp (`FLAGS_TS`) | `wlan.fixed.timestamp` advances **102400 µs** per beacon — exactly 100 TU |
+| HW sequence (`ACK_CTL_NSEQ`) | `wlan.seq` increments **+1 per beacon** (2140, 2141, 2142 …) |
+| Beacon interval math | On-air spacing 102.4 ms, confirming `INTVAL = interval_tu << 4` (1/16 TU) |
+| Corrected MBSS masks | `MT_MAC_BSSID_DW1` reads `0x003fa127` — upper bits exactly mt76's `MBSS_MODE=3 / MBEACON_N=7 / LOCAL_BIT` |
+| Hardware auto-ACK (Gate B) | A real station's **3 auth frames, 0 retried**. An un-ACKed frame is retransmitted with FC Retry set, so retry=0 is the ACK |
+| APC BSSID slot programmed | `MT_MAC_APC_BSSID_L(0)=0x50efa540` (device MAC `40:a5:ef:50:…`) |
+| StopBeacon contract | After the process exits the BSSID is absent from a fresh scan — nothing left airing |
+
+Not yet done: probe **responses**, auth/assoc **responses** and the data plane —
+those are the existing backend-agnostic C++ harnesses' job (Stages C–E), not
+driver work.
 
 ## The claim, and why it holds
 
@@ -72,6 +94,26 @@ Each has a direct mt76 recipe. Estimates are the C-library side only.
    - 802.11 sequence numbering: let the MAC number it (the HW-seq path mt76
      uses for beacons) or number it per update in software; `beacon_wire_check`
      expects +1 per beacon.
+   - **Trap — a silent no-transmit.** `MT_BCN_BYPASS_MASK` (0x108c) is
+     **inverted**. `0xffff`, the value `mt76x02_init_beacon_config()` writes, is
+     "suppress every slot" — the guard mt76 raises *during* an update ("prevent
+     corrupt transmissions during update"). A slot only airs once its bit is
+     **cleared**, which mt76 does after loading the page:
+     `0xff00 | ~(0xff00 >> beacon_data_count)` (`mt76x02_usb_core.c:223`,
+     identically `mt76x02_mmio.c:43`); for one beacon in slot 0 that is
+     `0xffffff7f`. Leave it at `0xffff` and the beacon timer runs, the TSF
+     advances and every register reads correct — while nothing reaches the air.
+   - **Trap — the beacon TXWI needs two extra bits.** `MT_TXWI_FLAGS_TS` (BIT 3;
+     MAC inserts the TSF timestamp) and `MT_TXWI_ACK_CTL_NSEQ` (MAC assigns the
+     sequence number), exactly as `mt76x02_mac_write_txwi()` sets them for
+     beacon/probe-resp subtypes. Without them the beacon airs with a frozen
+     timestamp and a constant sequence number.
+   - **Trap — `regs.h` had the MBSS masks two bits high.** `MBSS_MODE`,
+     `MBEACON_N` and `MBSS_LOCAL_BIT` were transcribed as 19:18 / 22:20 / 23
+     instead of mt76's 17:16 / 20:18 / 21. Harmless while the port only
+     injected (only `mac_setaddr` uses them, and beacons were never generated),
+     but it programmed MBSS_MODE=4 (invalid) and MBEACON_N=15. Corrected;
+     `MT_MAC_BSSID_DW1` now reads `0x003f____`, matching mt76 bit for bit.
 
 2. **`StopBeacon` (~10 LOC).** Clear `BEACON_TX | TBTT_EN | TIMER_EN`. Note the
    `IRtlDevice` contract: the chip beacons autonomously, so a session that ends
@@ -85,17 +127,34 @@ Each has a direct mt76 recipe. Estimates are the C-library side only.
    **hardware CCMP**; the software CCMP in `ap_wpa2.cpp` still works as the
    fallback/portable path.
 
-4. **AP RX filter (~15 LOC).** A third mode beside monitor: accept probe-req
-   (broadcast), auth/assoc to the BSSID, and data addressed to us; keep
-   dropping foreign-BSS and error frames. Derive the mask from the managed
-   default `0x00015f97` by clearing the "not-to-me" drops the AP needs to hear.
+4. **AP RX filter — one line, not ~15 LOC.** Measured: the managed default
+   `0x00015f97` already leaves `OTHER_BSS`, `BCAST` and `MCAST` **undropped**,
+   so a probe request with a wildcard BSSID and auth addressed to us both
+   arrive unchanged; mt76 clears `OTHER_BSS` for every mode too
+   (`mt76x02_configure_filter`), and defines no AP-specific filter. The single
+   change an AP wants is clearing `DUP` (`0x00015f17`) so a station's
+   retransmission stays visible — dropping duplicates hides exactly the
+   retry evidence that tells you whether your ACKs are landing.
 
-5. **`SetAckResponder` — likely already covered.** On MT the MAC auto-ACKs
-   frames matching the programmed `MT_MAC_ADDR`, so pointing it at the BSSID
-   (done in `mac_setaddr`) is the ACK responder. **Open item to confirm on
-   hardware:** whether MT needs an explicit op-mode/net-type register beyond
-   beacon-enable + address match (Realtek needs `net_type = AP`); mt76 sets no
-   distinct AP opmode reg for this part, but verify auth arrives at retry=0.
+5. **`SetAckResponder` — covered by address match. OPEN ITEM NOW RESOLVED.**
+   On MT the MAC auto-ACKs frames matching the programmed `MT_MAC_ADDR`, so
+   pointing it at the BSSID (done in `mac_setaddr`) is the ACK responder.
+   Confirmed on hardware: **there is no AP op-mode/net-type register on this
+   part.** mt76 sets none — its only AP-specific work in `mt76x02_sta_add` is a
+   *software* PS flag (`MT_WCID_FLAG_CHECK_PS`) plus a GTK restriction — and a
+   real station's auth arrived at **retry=0** with nothing but address match +
+   beacon enable. Address match + beacon *is* the AP.
+   - **But one register the gap analysis missed:** `mac_setaddr()` zeroes all
+     eight APC BSSID slots, which is right for an injector and wrong for an AP.
+     The MAC matches the BSS against `MT_MAC_APC_BSSID_L/H(idx)` for the slot
+     the MBSS index selects, so an AP must publish its BSSID there —
+     `mt76x02_mac_set_bssid()` (`mt76x02_mac.c`), 4 lines. Without it the MAC
+     matches nothing for the BSS.
+   - The simplest consistent choice is to make the AP BSSID the device's own
+     MAC: `mac_setaddr()` already programs it into `MT_MAC_ADDR` (what the MAC
+     ACKs against) and `MT_MAC_BSSID`, so only the APC slot is left to write.
+     Advertising any *other* BSSID in the beacon leaves a station addressing
+     auth to an address the MAC does not answer for.
 
 6. **`UpdateBeaconPayload` (~10 LOC, optional).** Re-write the reserved page in
    place. Only needed for dynamic beacon content (below).

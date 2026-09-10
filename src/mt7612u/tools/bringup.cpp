@@ -886,7 +886,8 @@ static int gate_mtu(uint8_t chan, int count)
 	for (k = 0; k < sizeof sizes / sizeof sizes[0]; k++) {
 		int len = sizes[k];
 		long ok_sync = 0, ok_async = 0;
-		unsigned long drained = 0;
+		/* atomic because drain_cb increments it from the RX event thread. */
+		std::atomic<unsigned long> drained{0};
 		int i, pass;
 
 		if ((size_t)len > sizeof frame) continue;
@@ -1396,7 +1397,8 @@ static void drain_cb(void *user, const void *frame, size_t len,
 static int gate_caps(uint8_t chan)
 {
 	struct mt7612u_caps c;
-	unsigned long drained = 0;
+	/* atomic: drain_cb runs on the RX event thread. */
+	std::atomic<unsigned long> drained{0};
 	uint64_t t1, t2;
 	int64_t delta;
 	int bad = 0;
@@ -1512,7 +1514,8 @@ static int gate_caps(uint8_t chan)
 
 	rx_teardown();
 	mt_mac_stop(&dev);
-	printf("\n%lu frames drained from EP 4 while the receiver was on\n", drained);
+	printf("\n%lu frames drained from EP 4 while the receiver was on\n",
+	       drained.load());
 	printf("\nGATE caps: %s\n", bad ? "FAIL" : "PASS");
 	return bad;
 }
@@ -1748,7 +1751,8 @@ static int gate_rxbytes(uint8_t chan, int secs)
  *
  * Read-and-clear, so each line is the second that just passed.
  */
-static unsigned long linkstat_drained;
+/* atomic: drain_cb runs on the RX event thread. */
+static std::atomic<unsigned long> linkstat_drained{0};
 
 static int gate_linkstat(uint8_t chan, int secs, int with_rx)
 {
@@ -1803,7 +1807,8 @@ static int gate_linkstat(uint8_t chan, int secs, int with_rx)
 	}
 	if (with_rx) {
 		rx_teardown();
-		printf("  %lu frames reached the ring over the run\n", linkstat_drained);
+		printf("  %lu frames reached the ring over the run\n",
+		       linkstat_drained.load());
 	}
 	mt_mac_stop(&dev);
 	return 0;

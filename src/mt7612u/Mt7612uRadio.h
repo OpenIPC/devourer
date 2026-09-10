@@ -15,6 +15,7 @@
 #include "RxPacket.h"
 #include "UsbDeviceLock.h"
 #include "logger.h"
+#include "mt7612u/Mt7612uRxQueue.h"
 #include "mt7612u/mt7612u.h"
 
 /*
@@ -141,34 +142,14 @@ private:
   std::atomic<bool> _rx_stop{false};
   std::atomic<bool> _rx_active{false};
   std::atomic<uint64_t> _rx_frames{0};
-  std::atomic<uint64_t> _rx_queue_dropped{0};
 
   /* Frames cross from the C library's event thread to the StartRxLoop thread
    * here, rather than the processor being invoked where the frame arrives.
-   *
-   * That is not a style choice. The library's event thread is the SOLE
-   * servicer of both RX and TX completions, so a processor that transmits -
-   * examples/chanmig does, from its RX callback - would park that thread in
-   * mt_async_tx_submit waiting for a TX slot only that same thread can free.
-   * MAC RX stays enabled, EP4 stops being drained, and this part wedges below
-   * the USB level where only a physical replug recovers it. Anything taking
-   * _mu from the processor has a milder version of the same problem: it stalls
-   * the drain for a 526 ms channel change.
-   *
-   * Delivering on the StartRxLoop thread also restores the contract every
-   * Realtek backend keeps - the processor runs on the thread that called
-   * StartRxLoop - and keeps the library's "must not block, must not call back"
-   * rule an internal invariant instead of one silently exported to consumers.
-   * The copy costs ~2 MB/s at the measured 1400 fps. */
-  struct RxSlot {
-    std::vector<uint8_t> data;
-    rx_pkt_attrib attrib{};
-  };
-  std::vector<RxSlot> _rx_q;
-  size_t _rx_q_head = 0; /* next slot to write */
-  size_t _rx_q_tail = 0; /* next slot to read  */
-  std::mutex _rx_q_mu;
-  std::condition_variable _rx_q_cv;
+   * That is not a style choice - it is what keeps a transmitting processor
+   * from wedging the part below the USB level. The queue's own header carries
+   * the argument and the two properties (drop the newest and count it; the
+   * popped slot outlives the lock) that its selftest holds. */
+  mt7612u::RxQueue _rx_q;
   std::atomic<uint64_t> _tx_submitted{0};
   std::atomic<uint64_t> _tx_failed{0};
 

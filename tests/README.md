@@ -99,6 +99,21 @@ probe on kernels 6.15+ (`failed to download firmware`, `error -22`), but
 - `iw`, `tcpdump`, `ip` on PATH
 - Passwordless `sudo`, or run directly as root
 
+### For MediaTek (MT7612U) DUTs
+
+- devourer configured with `-DDEVOURER_MT7612U=ON`. Without it `rxdemo`
+  still builds and still refuses the adapter at `CreateRadio`, by design —
+  falling through to the Realtek path would misdetect it as a Jaguar1.
+- `mt7662.bin` + `mt7662_rom_patch.bin`, decompressed, passed with
+  `--mt7612u-fw-dir`. They ship as `.bin.zst` in linux-firmware.
+- `mt76x2u` for the kernel-side cells.
+
+`regress.py` checks the first two before the first cell — each otherwise
+produces a cell that reads exactly like a dead radio — and only if `build/` has
+a CMake cache to read. A missing `mt76x2u` is a warning rather than an error,
+since a devourer-only run does not need it; it shows up later as
+`no wlan iface appeared for 0e8d:7612 after 20.0s`.
+
 ### Adaptive-hopset validation (`hopset_adaptive_jammer.sh`)
 
 Three radios — a transmitting authority, a lockstep receiver running the
@@ -204,7 +219,16 @@ per-cell stdout/stderr logs end up at `/tmp/devourer-regress-last/`.
 - `--duration SECONDS` — per-cell injection/measurement window (default 15)
 - `--pass-threshold N` — min hits to pass (default 1)
 - `--tx-pid 0xNNNN` / `--rx-pid 0xNNNN` — pick specific DUTs (defaults to
-  the first two auto-detected)
+  the first two auto-detected). Each also accepts a **sysfs id** (`2-1`,
+  `3-2.2`), which is the only way to name one of two adapters that share a
+  model — the normal case for a MediaTek matrix, where there is one PID
+  worth having.
+- `--mt7612u-fw-dir DIR` — where `mt7662.bin` + `mt7662_rom_patch.bin` live,
+  for MediaTek DUTs (env: `DEVOURER_MT7612U_FW_DIR`). Unlike every Realtek
+  backend the MediaTek firmware is not embedded: it ships zstd-compressed in
+  linux-firmware under its own licence, so the pair has to be decompressed
+  somewhere first. Unset lets the backend search its own defaults
+  (`/lib/firmware/mediatek`, then `./firmware`).
 - `--no-baseline-abort` — run all 4 cells even if kernel-kernel fails
   (useful when one chipset has no working kernel driver on the host)
 - `--no-rf-reset` — skip the per-cell USB port-level authorize-cycle.
@@ -219,7 +243,7 @@ per-cell stdout/stderr logs end up at `/tmp/devourer-regress-last/`.
 - `--keep-logs` — symlink the temp log dir at `/tmp/devourer-regress-last`
 
 Environment variable equivalents: `DEVOURER_VM_NAME`, `DEVOURER_VM_SSH`,
-`DEVOURER_SNIFFER_IFACE`.
+`DEVOURER_SNIFFER_IFACE`, `DEVOURER_MT7612U_FW_DIR`.
 
 ### `--sniffer-iface` — on-air encoding verification + attribution
 

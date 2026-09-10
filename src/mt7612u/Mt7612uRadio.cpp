@@ -378,12 +378,17 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
       throw std::runtime_error("MT7612U RX loop is already active");
     _rx_processor = std::move(packetProcessor);
     _rx_stop = false;
-    /* 64 slots at the part's 3836-byte max MPDU is ~245 KB, about 45 ms of
-     * headroom at the measured 1400 fps - enough to ride out a slow processor
-     * without letting the producer block. Allocated here, not per frame. */
-    _rx_q.assign(64, RxSlot{});
-    _rx_q_head = _rx_q_tail = 0;
-    _rx_queue_dropped = 0;
+    /* 64 slots is about 45 ms of headroom at the measured 1400 fps - enough to
+     * ride out a slow processor without letting the producer block. The ring
+     * itself is allocated here; each slot's payload buffer then grows to the
+     * largest frame that slot has held (~245 KB in total at the part's
+     * 3836-byte max MPDU), so the event thread does still allocate during the
+     * first pass round the ring and on any frame-size step-up. */
+    _rx_q.reset(64);
+    /* Zeroed with the queue's drop count, so the teardown line reports both
+     * over the same interval. Left lifetime-monotonic, it paired a cumulative
+     * received count with one session's drops. */
+    _rx_frames.store(0, std::memory_order_relaxed);
 
     /* Ring first, receiver second - see rule 1 in the header. */
     if (mt7612u_rx_start(_dev, &Mt7612uRadio::rx_trampoline, this) != 0)
@@ -422,34 +427,27 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
    * contract every other backend keeps. See the queue's comment in the header
    * for why delivering on the event thread wedges the hardware. */
   for (;;) {
-    RxSlot *slot = nullptr;
-    {
-      std::unique_lock<std::mutex> lock(_rx_q_mu);
-      _rx_q_cv.wait_for(lock, std::chrono::milliseconds(20), [this] {
-        return _rx_q_head != _rx_q_tail || _rx_stop.load();
-      });
-      if (_rx_q_head != _rx_q_tail)
-        slot = &_rx_q[_rx_q_tail];
-    }
-    if (!slot) {
-      if (_rx_stop.load() || g_devourer_should_stop)
-        break;
+    /* Tested at the TOP, not only when the queue runs dry. A busy channel can
+     * keep the ring non-empty indefinitely, and checking the flags only on the
+     * empty path meant SIGINT could not reach StopRxLoop for as long as frames
+     * kept arriving - i.e. exactly when a consumer most wants to stop. */
+    if (_rx_stop.load() || g_devourer_should_stop)
+      break;
+    mt7612u::RxQueue::Slot *slot =
+        _rx_q.pop_begin(std::chrono::milliseconds(20), _rx_stop);
+    if (!slot)
       continue;
-    }
 
     /* Outside the queue lock: user code runs here, and it may call back into
-     * this object. The producer never writes the slot at _rx_q_tail, so this
-     * reference stays valid until the tail is advanced below. */
+     * this object. The producer never writes the slot at the tail, so this
+     * reference stays valid until pop_commit() below. */
     Packet packet{};
     packet.RxAtrib = slot->attrib;
     packet.Data = std::span<uint8_t>(slot->data.data(), slot->data.size());
     if (_rx_processor)
       _rx_processor(packet);
 
-    {
-      std::lock_guard<std::mutex> lock(_rx_q_mu);
-      _rx_q_tail = (_rx_q_tail + 1) % _rx_q.size();
-    }
+    _rx_q.pop_commit(slot);
   }
 
   StopRxLoop();
@@ -458,7 +456,7 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
 void Mt7612uRadio::StopRxLoop() {
   _rx_stop = true;
   /* Wake the consumer immediately rather than leaving it to time out. */
-  _rx_q_cv.notify_all();
+  _rx_q.wake();
 
   /* Held across the WHOLE teardown, so a second caller blocks here instead of
    * returning while the first is still inside mt7612u_rx_stop(). That early
@@ -491,10 +489,13 @@ void Mt7612uRadio::StopRxLoop() {
    * existed, and mt7612u_rx_start() then returned success WITHOUT arming. */
   _rx_active.store(false, std::memory_order_release);
 
-  const uint64_t dropped = _rx_queue_dropped.load(std::memory_order_relaxed);
+  const uint64_t dropped = _rx_q.dropped();
   if (dropped)
-    _logger->warn("MT7612U RX stopped after {} frames, {} DROPPED at the "
-                  "hand-off queue - the packet processor could not keep up",
+    /* "received" is the count off the air, so it INCLUDES the dropped ones -
+     * spelling that out because "N frames, D DROPPED" reads as N delivered. */
+    _logger->warn("MT7612U RX stopped after {} frames received, of which {} "
+                  "DROPPED at the hand-off queue - the packet processor could "
+                  "not keep up",
                   _rx_frames.load(std::memory_order_relaxed), dropped);
   else
     _logger->info("MT7612U RX stopped after {} frames",
@@ -543,25 +544,10 @@ void Mt7612uRadio::on_rx(const void *frame, size_t len,
 
   /* Copy and hand off. The library's buffer is reused the moment this returns,
    * and the consumer now runs on another thread, so the frame cannot be passed
-   * by reference the way it could when the processor ran here. */
-  {
-    std::lock_guard<std::mutex> lock(_rx_q_mu);
-    const size_t next = (_rx_q_head + 1) % _rx_q.size();
-    if (next == _rx_q_tail) {
-      /* Full: the consumer is slower than the air. Drop the NEWEST rather than
-       * block - blocking here is precisely the wedge this queue exists to
-       * prevent, and dropping the oldest would reorder frames. Counted so the
-       * loss is visible instead of silent. */
-      _rx_queue_dropped.fetch_add(1, std::memory_order_relaxed);
-      return;
-    }
-    RxSlot &slot = _rx_q[_rx_q_head];
-    slot.attrib = packet.RxAtrib;
-    slot.data.assign(static_cast<const uint8_t *>(frame),
-                     static_cast<const uint8_t *>(frame) + len);
-    _rx_q_head = next;
-  }
-  _rx_q_cv.notify_one();
+   * by reference the way it could when the processor ran here. A full queue
+   * drops this frame and counts it rather than blocking - blocking here is
+   * precisely the wedge the queue exists to prevent. */
+  _rx_q.push(packet.RxAtrib, static_cast<const uint8_t *>(frame), len);
 }
 
 void Mt7612uRadio::SetMonitorChannel(SelectedChannel channel) {

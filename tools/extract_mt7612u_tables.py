@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import sys
 from pathlib import Path
 
 UPSTREAM = "openwrt/mt76 commit be5ce79"
@@ -202,7 +203,11 @@ def load(source_root: Path) -> list[tuple[int, int, str]]:
     for key, (relative, expected_hash) in SOURCES.items():
         path = source_root / relative
         if not path.exists():
-            raise SystemExit(f"missing {path}\n{SUBMODULE_HINT}")
+            # 77, not 1: this is registered as a ctest cell, and ctest reads 77
+            # as SKIP. A shell still sees a non-zero exit, so nothing that
+            # drives this script by hand starts passing on a missing submodule.
+            print(f"missing {path}\n{SUBMODULE_HINT}", file=sys.stderr)
+            raise SystemExit(77)
         source = path.read_bytes()
         actual_hash = hashlib.sha256(source).hexdigest()
         if actual_hash != expected_hash:

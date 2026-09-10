@@ -386,6 +386,7 @@ if(DEVOURER_MT7612U)
         src/mt7612u/usb.cpp
         src/mt7612u/Mt7612uRadio.cpp src/mt7612u/Mt7612uRadio.h
         src/mt7612u/Mt7612uMapping.h
+        src/mt7612u/Mt7612uRxQueue.h
         src/mt7612u/internal.h
         src/mt7612u/regs.h
         src/mt7612u/initvals.h
@@ -893,6 +894,25 @@ target_include_directories(Mt7612uMappingSelftest PRIVATE
 
 add_test(NAME mt7612u_mapping COMMAND Mt7612uMappingSelftest)
 
+# Headless guard for the RX hand-off queue, the one piece of backend BEHAVIOUR
+# (as opposed to descriptor lookups) that can be exercised without a radio. Its
+# two load-bearing properties - a full ring drops the newest frame and counts
+# it, and a popped slot outlives the lock so user code can run unlocked - are
+# both invisible on a healthy bench and both turn into a wedge, a reorder or a
+# use-after-free when broken. Like the mapping cell it compiles regardless of
+# DEVOURER_MT7612U: it is header-only and needs no libusb.
+add_executable(Mt7612uRxQueueSelftest
+    tests/mt7612u_rx_queue_selftest.cpp
+)
+# The first selftest in the tree to use <thread> directly. It links today
+# without this because libdevourer already pulls the thread runtime in, and on
+# glibc >= 2.34 pthread is part of libc anyway — but that is two accidents, not
+# a dependency, and this costs nothing.
+find_package(Threads REQUIRED)
+target_link_libraries(Mt7612uRxQueueSelftest PRIVATE devourer Threads::Threads)
+
+add_test(NAME mt7612u_rx_queue COMMAND Mt7612uRxQueueSelftest)
+
 # Headless guard for the TX quiesce seam (ITransport::quiesce_tx via
 # RtlAdapter): the explicit "stop TX and wait it out" call every device makes
 # before anything is released. UsbTransport's cancel/drain is validated on
@@ -1382,6 +1402,28 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/nitroqam_waterfall.py --self-test
     )
+
+    # The two MediaTek artifacts that are transcriptions of reference/mt76 —
+    # the USB-id gate table and the generated MAC initvals. Both were
+    # hand-checked once and then trusted; the id table was wrong the first time
+    # (11 of 16 entries, from the host kernel tree rather than the pinned one)
+    # and nothing caught it. Both SKIP (77) when the submodule is absent, which
+    # is the case in CI: `actions/checkout` here does not fetch submodules, so
+    # these are bench cells, not CI cells. Anyone who can regenerate initvals.h
+    # can run them.
+    add_test(
+        NAME mt7612u_usb_ids_vs_mt76
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/mt7612u_usb_ids_vs_mt76.py
+    )
+    set_tests_properties(mt7612u_usb_ids_vs_mt76 PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME mt7612u_initvals_generated
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_mt7612u_tables.py --check
+    )
+    set_tests_properties(mt7612u_initvals_generated PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # --- selftest aggregate ----------------------------------------------------

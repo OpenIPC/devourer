@@ -639,11 +639,17 @@ endif()
 # It talks to the C library directly, NOT through Mt7612uRadio: it predates the
 # backend and its whole purpose is to exercise the layer underneath one. It
 # never substitutes for the production IRadio path.
-if(DEVOURER_MT7612U)
+# UNIX-only, unlike its kestrelprobe/rtl8733bprobe siblings. Those are portable
+# C++; this one is the hardware bench harness and uses <unistd.h>,
+# <sys/resource.h> and getrusage() unguarded, so on the MSVC cell of the
+# multi-platform matrix - which now passes DEVOURER_MT7612U=ON - an unguarded
+# add_executable would put it in `all` and break the build. The LIBRARY is
+# MSVC-clean; this tool is not, and does not need to be.
+if(DEVOURER_MT7612U AND UNIX)
     add_executable(mt7612uprobe
         src/mt7612u/tools/bringup.cpp
     )
-    target_link_libraries(mt7612uprobe PUBLIC devourer PRIVATE PkgConfig::libusb)
+    target_link_libraries(mt7612uprobe PRIVATE devourer PkgConfig::libusb)
     target_include_directories(mt7612uprobe PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u)
 endif()

@@ -76,9 +76,16 @@ int main() {
     /* HALF-dB, the unit LinkHealth and RxQuality divide by two. Asserting the
      * raw value here is how an earlier cut of this test locked in a bug that
      * reported every link at half its SNR. */
-    expect("snr is half-dB, not whole dB", a.snr[0] == 74 && a.snr[1] == 74);
+    expect("chain A snr is half-dB, not whole dB", a.snr[0] == 74);
     expect("snr round-trips to dB the way consumers read it",
            a.snr[0] / 2 == 37);
+    /* PER CHAIN. rssi[1] is -58 against the same -92 noise, so chain B is
+     * 34 dB = 68 half-dB - NOT chain A's 37. Two identical per-chain SNRs are
+     * how a dead chain-B antenna hides: its RSSI drops while its SNR appears
+     * to track chain A. An earlier cut of this test asserted 74 on both. */
+    expect("chain B snr is its OWN, not a copy of chain A's", a.snr[1] == 68);
+    expect("the two chains differ by the RSSI imbalance",
+           a.snr[0] - a.snr[1] == (rssi_to_raw(-55) - rssi_to_raw(-58)) * 2);
     expect("snr not invented past the real chains",
            a.snr[2] == 0 && a.snr[3] == 0);
   }
@@ -90,10 +97,14 @@ int main() {
 
     i.n_chains = 2;
     i.noise_valid = 1;
-    i.snr_db = 90;
+    /* Driven through rssi - noise, which is what copy_signal actually reads.
+     * 40 - (-90) = 130 dB = 260 half-dB, past int8_t. */
+    i.rssi[0] = 40;
+    i.noise = -90;
     copy_signal(i, a);
     expect("an out-of-range snr clamps positive", a.snr[0] == 127);
-    i.snr_db = -90;
+    i.rssi[0] = -100;
+    i.noise = 20;
     copy_signal(i, a);
     expect("an out-of-range negative snr clamps", a.snr[0] == -128);
   }

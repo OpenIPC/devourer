@@ -70,13 +70,21 @@ inline void copy_signal(const struct mt7612u_rx_info &info,
   for (unsigned i = 0; i < 4u; ++i)
     out.snr[i] = 0;
   if (info.noise_valid) {
-    int half_db = static_cast<int>(info.snr_db) * 2;
-    if (half_db > 127)
-      half_db = 127;
-    if (half_db < -128)
-      half_db = -128;
-    for (unsigned i = 0; i < chains; ++i)
+    /* PER CHAIN, from that chain's own RSSI. info.snr_db is defined as
+     * rssi[0] - noise (rx.cpp), so writing it into every slot would report
+     * chain A's SNR on chain B - two identical numbers, which is exactly what
+     * hides a dead chain-B antenna: its RSSI drops while its SNR still tracks
+     * chain A's. The noise floor is common to both chains, so the per-chain
+     * value is simply rssi[i] - noise. */
+    for (unsigned i = 0; i < chains; ++i) {
+      int half_db = (static_cast<int>(info.rssi[i]) -
+                     static_cast<int>(info.noise)) * 2;
+      if (half_db > 127)
+        half_db = 127;
+      if (half_db < -128)
+        half_db = -128;
       out.snr[i] = static_cast<int8_t>(half_db);
+    }
   }
 }
 
@@ -120,6 +128,10 @@ inline uint16_t desc_rate(const struct mt7612u_rx_info &info) {
      * of 32..63 would run past DESC_RATEMCS31 into the VHT numbering and
      * report garbage as a real VHT rate rather than as unknown. rx.cpp filters
      * the PHY field, not the index. */
+    /* 0 is DESC_RATE1M, not an "unknown" sentinel - the enum has none - so a
+     * consumer sees a plausible 1 Mbps CCK frame rather than a rejected one.
+     * Still better than the alternative, which was reporting garbage as a real
+     * VHT rate; rx.cpp already drops frames whose PHY field names nothing. */
     if (info.mcs > 31)
       return 0;
     return static_cast<uint16_t>(DESC_RATEMCS0 + info.mcs);

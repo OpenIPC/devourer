@@ -88,8 +88,10 @@ jobs:
         # DEVOURER_MT7612U=ON: the option defaults OFF, so without it here the
         # MediaTek subtree would be compiled by nothing but its own Makefile on
         # Linux. Turning it on in the matrix is what makes MSVC and macOS
-        # first-class for it — the POSIX-only pieces it still has (the flock
-        # adapter lock) are _WIN32-guarded, and this is what proves it.
+        # first-class for the LIBRARY — the POSIX-only pieces it still has (the
+        # flock adapter lock) are _WIN32-guarded, and this is what proves it.
+        # The mt7612uprobe bench tool is NOT portable and is gated on UNIX in
+        # CMakeLists.txt; it is deliberately outside that claim.
         run: >
           cmake -B ${{ steps.strings.outputs.build-output-dir }}
           -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}

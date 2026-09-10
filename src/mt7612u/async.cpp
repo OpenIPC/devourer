@@ -235,6 +235,12 @@ void mt_async_stop(struct mt7612u_dev *d)
 	stuck_rx = a->rx_inflight;
 	a->running = 0;
 	a->lock.unlock();
+	/* Wake anyone parked in mt_async_tx_submit's slot wait. Clearing `running`
+	 * is what its guard tests, but without this notify the guard only fired
+	 * when the cancel pass happened to produce a completion - so a teardown
+	 * with no completions left a submitter blocked forever, which is exactly
+	 * what its comment says must not happen. */
+	a->cv.notify_all();
 
 	if (a->evt_started)
 		a->evt.join();

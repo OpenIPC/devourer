@@ -22,7 +22,12 @@ CFLAGS   ?= -O2 -g -Wall -Wextra
 DEPFLAGS = -MMD -MP
 INCS     = -I. -Iinclude
 LDLIBS   = -lusb-1.0 -lpthread
-LIBSRCS  = $(wildcard *.cpp)
+# Everything here EXCEPT the devourer-side backend. Mt7612uRadio.cpp implements
+# devourer's IRadio and includes its headers (IRadio.h, logger.h, DeviceConfig.h),
+# which this standalone build has no include path for and should not - the point
+# of this Makefile is that the library builds with nothing but libusb. CMake
+# compiles that file; this does not.
+LIBSRCS  = $(filter-out Mt7612uRadio.cpp,$(wildcard *.cpp))
 TESTS    = tests/api_link tests/frame_shape tests/field_macros tests/log_sink
 CXXSRCS  = $(LIBSRCS) tools/bringup.cpp tests/frame_shape.cpp tests/field_macros.cpp \
            tests/log_sink.cpp

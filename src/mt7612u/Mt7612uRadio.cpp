@@ -10,6 +10,7 @@
 #include <system_error>
 #include <vector>
 
+#include "TxPower.h"
 #include "mt7612u/Mt7612uMapping.h"
 
 extern volatile bool g_devourer_should_stop;
@@ -85,8 +86,22 @@ Mt7612uRadio::Mt7612uRadio(libusb_device_handle *handle, libusb_context *ctx,
 }
 
 Mt7612uRadio::~Mt7612uRadio() {
-  /* Deregister BEFORE Stop(): the library can still log from its event thread
-   * during teardown, and nothing may reach a destroyed `this`. */
+  /* Everything, not just StopRxLoop: stop_tick()'s join throws on EDEADLK or
+   * EINVAL, and a destructor is implicitly noexcept, so an escape here is
+   * std::terminate rather than a caught error. */
+  try {
+    Stop();
+  } catch (...) {
+  }
+
+  /* Deregister AFTER Stop(), not before. Teardown is when the library has the
+   * most to say - "async stop: N TX and M RX transfers still in flight after
+   * 2 s, leaking the ring and the USB handle with it" is the single most
+   * important line it can print - and deregistering first sent all of it to
+   * raw stderr, bypassing the log level, a redirected stream and
+   * __android_log_write, which is the whole reason the sink exists. Safe in
+   * this order because log_trampoline holds sink_mu() for its entire call and
+   * _logger outlives the body of this destructor. */
   {
     std::lock_guard<std::mutex> lock(sink_mu());
     auto &reg = sink_registry();
@@ -98,17 +113,19 @@ Mt7612uRadio::~Mt7612uRadio() {
     if (reg.empty())
       mt7612u_set_log_sink(nullptr, nullptr);
   }
-  Stop();
 }
 
+/* Deliberately leaked. A Mt7612uRadio destroyed during static destruction would
+ * otherwise touch a destroyed mutex and vector; leaking two small objects at
+ * exit is the cheaper failure. */
 std::mutex &Mt7612uRadio::sink_mu() {
-  static std::mutex m;
-  return m;
+  static std::mutex *m = new std::mutex();
+  return *m;
 }
 
 std::vector<Mt7612uRadio *> &Mt7612uRadio::sink_registry() {
-  static std::vector<Mt7612uRadio *> reg;
-  return reg;
+  static std::vector<Mt7612uRadio *> *reg = new std::vector<Mt7612uRadio *>();
+  return *reg;
 }
 
 void Mt7612uRadio::log_trampoline(void *user, char level, const char *line) {
@@ -162,8 +179,9 @@ void Mt7612uRadio::bring_up(SelectedChannel channel) {
       throw std::runtime_error(std::string("MT7612U bring-up failed: ") +
                                (err ? err : "unknown"));
     _logger->info("MT7612U up: ASIC 0x{:08x}", mt7612u_asic_version(_dev));
-    if (_txpwr_dbm != 20)
-      mt7612u_set_txpower(_dev, _txpwr_dbm);
+    /* Replays base AND offset, so neither is lost across a Stop()/re-Init().  */
+    if (_txpwr_dbm != 20 || _txpwr_offset_qdb != 0)
+      mt7612u_set_txpower(_dev, txpower_target_dbm());
   }
 
   if (mt7612u_set_channel(_dev, channel.Channel, bw) != 0)
@@ -290,8 +308,16 @@ void Mt7612uRadio::Init(Action_ParsedRadioPacket packetProcessor,
     Stop();
     std::rethrow_exception(failed);
   }
-  /* Deliberately outside the lock: StartRxLoop blocks until StopRxLoop. */
-  StartRxLoop(std::move(packetProcessor));
+  /* Deliberately outside the lock: StartRxLoop blocks until StopRxLoop. Its
+   * four throws get the same cleanup as bring_up's - without this, "RX ring
+   * failed to start" left the device open and the tick running, which is the
+   * half-open object this whole guard exists to prevent. */
+  try {
+    StartRxLoop(std::move(packetProcessor));
+  } catch (...) {
+    Stop();
+    throw;
+  }
 }
 
 void Mt7612uRadio::InitWrite(SelectedChannel channel) {
@@ -320,6 +346,17 @@ void Mt7612uRadio::InitWrite(SelectedChannel channel) {
 void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   struct mt7612u_dev *mac_failed = nullptr;
   {
+    /* The WHOLE prologue, arming through the failure teardown, under the same
+     * lock StopRxLoop uses - and released before the sleep loop below, which
+     * calls StopRxLoop and would otherwise self-deadlock on it.
+     *
+     * Without this, moving mt7612u_rx_stop() out of the _mu scope reopened the
+     * use-after-free _teardown_mu exists to close: between releasing _mu and
+     * the teardown, a concurrent Stop() sees _rx_active still false, takes _mu
+     * and calls mt7612u_close(), which frees the device this thread is about
+     * to hand to mt7612u_rx_stop(). Ordering is _teardown_mu -> _mu here and in
+     * StopRxLoop; nothing takes them the other way round. */
+    std::lock_guard<std::mutex> teardown(_teardown_mu);
     std::lock_guard<std::recursive_mutex> lock(_mu);
     if (!_dev)
       throw std::runtime_error("MT7612U RX loop requires initialized hardware");
@@ -327,6 +364,12 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
       throw std::runtime_error("MT7612U RX loop is already active");
     _rx_processor = std::move(packetProcessor);
     _rx_stop = false;
+    /* 64 slots at the part's 3836-byte max MPDU is ~245 KB, about 45 ms of
+     * headroom at the measured 1400 fps - enough to ride out a slow processor
+     * without letting the producer block. Allocated here, not per frame. */
+    _rx_q.assign(64, RxSlot{});
+    _rx_q_head = _rx_q_tail = 0;
+    _rx_queue_dropped = 0;
 
     /* Ring first, receiver second - see rule 1 in the header. */
     if (mt7612u_rx_start(_dev, &Mt7612uRadio::rx_trampoline, this) != 0)
@@ -338,7 +381,6 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
        * takes this lock, and mt7612u_rx_stop() joins that thread. Recorded
        * here and acted on below rather than unlocking by hand mid-scope. */
       mt7612u_rx_quiesce(_dev);
-      _rx_processor = nullptr;
       mac_failed = _dev;
     } else {
       /* AFTER mt7612u_start(), which rewrites the filter to mt76's managed-mode
@@ -349,30 +391,60 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
       mt7612u_link_stats_start(_dev);
       _rx_active.store(true, std::memory_order_release);
     }
+    if (mac_failed) {
+      mt7612u_rx_stop(mac_failed);
+      /* Only now that the ring is down: clearing it while transfers are armed
+       * would destroy a std::function the event thread can be inside. */
+      _rx_processor = nullptr;
+    }
   }
-  if (mac_failed) {
-    mt7612u_rx_stop(mac_failed);
+  if (mac_failed)
     throw std::runtime_error("MT7612U MAC start failed");
-  }
 
   _logger->info("MT7612U monitor RX on channel {}", _channel.Channel);
 
-  /* The C layer drives RX from its own libusb event thread, so this loop has
-   * nothing to poll - it exists to give StartRxLoop the blocking contract
-   * every other backend has, and to notice Stop() and SIGINT.
-   *
-   * Delivery therefore happens on the event thread rather than on this one,
-   * which differs from the Realtek backends. The guarantee that matters is
-   * preserved: StopRxLoop tears the ring down and joins that thread before
-   * returning, so no callback can arrive after StartRxLoop returns. */
-  while (!_rx_stop.load() && !g_devourer_should_stop)
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  /* THE consumer. The C layer parses on its own event thread and enqueues; the
+   * processor runs here, on the thread that called StartRxLoop, which is the
+   * contract every other backend keeps. See the queue's comment in the header
+   * for why delivering on the event thread wedges the hardware. */
+  for (;;) {
+    RxSlot *slot = nullptr;
+    {
+      std::unique_lock<std::mutex> lock(_rx_q_mu);
+      _rx_q_cv.wait_for(lock, std::chrono::milliseconds(20), [this] {
+        return _rx_q_head != _rx_q_tail || _rx_stop.load();
+      });
+      if (_rx_q_head != _rx_q_tail)
+        slot = &_rx_q[_rx_q_tail];
+    }
+    if (!slot) {
+      if (_rx_stop.load() || g_devourer_should_stop)
+        break;
+      continue;
+    }
+
+    /* Outside the queue lock: user code runs here, and it may call back into
+     * this object. The producer never writes the slot at _rx_q_tail, so this
+     * reference stays valid until the tail is advanced below. */
+    Packet packet{};
+    packet.RxAtrib = slot->attrib;
+    packet.Data = std::span<uint8_t>(slot->data.data(), slot->data.size());
+    if (_rx_processor)
+      _rx_processor(packet);
+
+    {
+      std::lock_guard<std::mutex> lock(_rx_q_mu);
+      _rx_q_tail = (_rx_q_tail + 1) % _rx_q.size();
+    }
+  }
 
   StopRxLoop();
 }
 
 void Mt7612uRadio::StopRxLoop() {
   _rx_stop = true;
+  /* Wake the consumer immediately rather than leaving it to time out. */
+  _rx_q_cv.notify_all();
 
   /* Held across the WHOLE teardown, so a second caller blocks here instead of
    * returning while the first is still inside mt7612u_rx_stop(). That early
@@ -405,8 +477,14 @@ void Mt7612uRadio::StopRxLoop() {
    * existed, and mt7612u_rx_start() then returned success WITHOUT arming. */
   _rx_active.store(false, std::memory_order_release);
 
-  _logger->info("MT7612U RX stopped after {} frames",
-                _rx_frames.load(std::memory_order_relaxed));
+  const uint64_t dropped = _rx_queue_dropped.load(std::memory_order_relaxed);
+  if (dropped)
+    _logger->warn("MT7612U RX stopped after {} frames, {} DROPPED at the "
+                  "hand-off queue - the packet processor could not keep up",
+                  _rx_frames.load(std::memory_order_relaxed), dropped);
+  else
+    _logger->info("MT7612U RX stopped after {} frames",
+                  _rx_frames.load(std::memory_order_relaxed));
 }
 
 void Mt7612uRadio::rx_trampoline(void *user, const void *frame, size_t len,
@@ -416,9 +494,6 @@ void Mt7612uRadio::rx_trampoline(void *user, const void *frame, size_t len,
 
 void Mt7612uRadio::on_rx(const void *frame, size_t len,
                          const struct mt7612u_rx_info *info) {
-  if (!_rx_processor)
-    return;
-
   Packet packet{};
   packet.RxAtrib.pkt_len = static_cast<uint16_t>(len);
   packet.RxAtrib.crc_err = info->crc_err != 0;
@@ -450,15 +525,29 @@ void Mt7612uRadio::on_rx(const void *frame, size_t len,
     packet.RxAtrib.priority = tid;
   }
 
-  /* The span points into the ring buffer the libusb event thread owns and
-   * reuses the moment this returns, so the processor must not retain it - the
-   * same contract every other backend's parser has. const_cast because
-   * Packet::Data is a mutable span and the buffer genuinely is ours. */
-  packet.Data = std::span<uint8_t>(
-      const_cast<uint8_t *>(static_cast<const uint8_t *>(frame)), len);
-
   _rx_frames.fetch_add(1, std::memory_order_relaxed);
-  _rx_processor(packet);
+
+  /* Copy and hand off. The library's buffer is reused the moment this returns,
+   * and the consumer now runs on another thread, so the frame cannot be passed
+   * by reference the way it could when the processor ran here. */
+  {
+    std::lock_guard<std::mutex> lock(_rx_q_mu);
+    const size_t next = (_rx_q_head + 1) % _rx_q.size();
+    if (next == _rx_q_tail) {
+      /* Full: the consumer is slower than the air. Drop the NEWEST rather than
+       * block - blocking here is precisely the wedge this queue exists to
+       * prevent, and dropping the oldest would reorder frames. Counted so the
+       * loss is visible instead of silent. */
+      _rx_queue_dropped.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    RxSlot &slot = _rx_q[_rx_q_head];
+    slot.attrib = packet.RxAtrib;
+    slot.data.assign(static_cast<const uint8_t *>(frame),
+                     static_cast<const uint8_t *>(frame) + len);
+    _rx_q_head = next;
+  }
+  _rx_q_cv.notify_one();
 }
 
 void Mt7612uRadio::SetMonitorChannel(SelectedChannel channel) {
@@ -546,12 +635,23 @@ void Mt7612uRadio::Stop() {
   } catch (...) {
   }
   stop_tick(); /* joins; must not run with _mu held */
-  std::lock_guard<std::recursive_mutex> lock(_mu);
-  if (_dev) {
-    mt7612u_stop(_dev);
-    mt7612u_close(_dev);
+
+  /* Take the device out under _mu, then close it OUTSIDE - mt7612u_close()
+   * runs mt_async_stop(), which joins the libusb event thread, and holding _mu
+   * across that join is the same deadlock StopRxLoop documents avoiding. The
+   * teardown lock is what keeps a concurrent StopRxLoop from using the pointer
+   * after this steals it. */
+  struct mt7612u_dev *dev = nullptr;
+  {
+    std::lock_guard<std::mutex> teardown(_teardown_mu);
+    std::lock_guard<std::recursive_mutex> lock(_mu);
+    dev = _dev;
     _dev = nullptr;
+    if (dev)
+      mt7612u_stop(dev);
   }
+  if (dev)
+    mt7612u_close(dev);
 }
 
 void Mt7612uRadio::SetTxPower(uint8_t power) {
@@ -560,7 +660,10 @@ void Mt7612uRadio::SetTxPower(uint8_t power) {
    * class does: there is no TXAGC index here, so the argument is read as the
    * dBm limit it actually maps to. */
   _txpwr_dbm = static_cast<int>(power);
-  if (_dev && mt7612u_set_txpower(_dev, _txpwr_dbm) != 0)
+  /* Composes with a live offset rather than discarding it - IRadio says the two
+   * compose, and writing the bare base would silently undo an offset while
+   * _txpwr_offset_qdb still reported it as applied. */
+  if (_dev && mt7612u_set_txpower(_dev, txpower_target_dbm()) != 0)
     _logger->error("MT7612U TX power {} dBm refused (valid range 0-30)",
                    _txpwr_dbm);
 }
@@ -577,26 +680,35 @@ void Mt7612uRadio::SetTxPower(uint8_t power) {
  * SetMonitorChannel because the base is re-applied from _txpwr_dbm. */
 int Mt7612uRadio::SetTxPowerOffsetQdb(int qdb) {
   std::lock_guard<std::recursive_mutex> lock(_mu);
+  /* The family's own quantizer, not a local q/4. It rounds to nearest with
+   * ties away from zero, which is the documented rule every other backend
+   * follows; truncating toward zero instead turned a -6 qdB request into -4
+   * (LESS attenuation than asked for) and any sub-step request into 0 - which
+   * is also the "refused" return, so a small request was indistinguishable
+   * from a refusal. That was the exact fault this override exists to remove. */
   const devourer::TxPowerCaps caps = GetTxPowerCaps();
+  const int want_qdb = devourer::quantize_offset_qdb(qdb, caps, nullptr);
 
-  int q = qdb;
-  if (q < caps.offset_min_qdb)
-    q = caps.offset_min_qdb;
-  if (q > caps.offset_max_qdb)
-    q = caps.offset_max_qdb;
-  /* Toward zero, so an offset never asks for more power than requested. */
-  const int applied_db = q / 4;
-  const int applied_qdb = applied_db * 4;
-
-  int dbm = _txpwr_dbm + applied_db;
+  /* The applied value is derived AFTER the rail clamp, never before. The
+   * actuator is an absolute 0-30 dBm limit, so an offset that would drive it
+   * past a rail is only partly applied - and returning the requested figure
+   * there tells a closed-loop controller the radio moved further than it did.
+   * With base 5 dBm, a -20 dB request lands at 0 dBm, i.e. -5 dB, and that is
+   * what comes back. */
+  int dbm = _txpwr_dbm + want_qdb / 4;
   if (dbm < 0)
     dbm = 0;
   if (dbm > 30)
     dbm = 30;
+  const int applied_qdb = (dbm - _txpwr_dbm) * 4;
+
   if (_dev && mt7612u_set_txpower(_dev, dbm) != 0) {
     _logger->error("MT7612U TX power offset {} qdB -> {} dBm refused", qdb, dbm);
     return 0;
   }
+  /* Sticky, and it has to be recorded even with no device open: SetTxPower and
+   * bring_up both fold it back in, so an offset set before Init survives to the
+   * first tune instead of being silently swallowed. */
   _txpwr_offset_qdb = applied_qdb;
   return applied_qdb;
 }
@@ -671,7 +783,21 @@ void Mt7612uRadio::WriteTsf(uint64_t tsf) {
 devourer::TxStats Mt7612uRadio::GetTxStats() {
   devourer::TxStats out{};
 
-  /* Counted here rather than read from mt7612u_get_stats(), which reports the
+  /* INCOMPLETE, deliberately, and the incompleteness is documented rather than
+   * papered over: `failed` counts frames the transport REFUSED, not frames
+   * that died on the wire. An earlier cut added the ring's tx_err to close
+   * that, and it was wrong three ways - mt_async_tx_submit increments tx_err
+   * AND returns -1, so a submit failure counted twice; tx_err counts URBs
+   * while this counts frames, and an aggregated URB carries up to 32; and
+   * mt_async_stop deletes the ring, so the counter restarts at zero and
+   * `failed` went BACKWARDS across an RX restart, which a consumer differencing
+   * a uint64_t reads as ~1.8e19. Reading it also took _mu, which send_packet
+   * holds across a blocking submit - so a stats poll from another thread
+   * stalled for as long as the TX ring was saturated. A documented gap beats
+   * four wrong numbers; the fix belongs in the library, which needs a
+   * monotonic wire-failure counter that outlives a ring.
+   *
+   * Counted here rather than read from mt7612u_get_stats(), which reports the
    * ASYNC RING's counters. mt_tx_raw() only uses that ring when one is running
    * (tx.cpp), and the TX-only bring-up this backend offers - InitWrite with no
    * StartRxLoop - starts no ring, so those counters read 0 while frames are
@@ -685,21 +811,6 @@ devourer::TxStats Mt7612uRadio::GetTxStats() {
    * would be the same fault in a different field. */
   out.submitted = _tx_submitted.load(std::memory_order_relaxed);
   out.failed = _tx_failed.load(std::memory_order_relaxed);
-
-  /* A refusal is only half of `failed`. TxStats defines it as a synchronous
-   * submit error OR an async URB that completed with a non-OK status, and when
-   * an RX ring is up mt_tx_raw() routes through the async pool - which returns
-   * 0 the moment the URB is submitted and counts the wire failure later, in
-   * tx_done. Without this the primary devourer shape (Init plus concurrent
-   * send_packets) reports failed=0 even if every frame dies on the wire: the
-   * same "stat that reads zero while the radio transmits" fault as submitted,
-   * in the other half. */
-  std::lock_guard<std::recursive_mutex> lock(_mu);
-  if (_dev) {
-    struct mt7612u_stats st {};
-    mt7612u_get_stats(_dev, &st);
-    out.failed += st.tx_err;
-  }
   return out;
 }
 
@@ -716,10 +827,34 @@ void Mt7612uRadio::ClearAckResponder() {
     mt7612u_clear_ack_responder(_dev);
 }
 
+/* The absolute dBm the actuator should carry: the base plus whatever offset is
+ * live, clamped to the part's 0-30 range. One place, so the base setter, the
+ * offset setter and the bring-up replay cannot drift apart. */
+int Mt7612uRadio::txpower_target_dbm() const {
+  int dbm = _txpwr_dbm + _txpwr_offset_qdb / 4;
+  if (dbm < 0)
+    return 0;
+  if (dbm > 30)
+    return 30;
+  return dbm;
+}
+
 devourer::TxCaps Mt7612uRadio::GetTxCaps() {
   devourer::TxCaps c{};
   c.supported = true;
-  c.n_ss = 2;
+  /* From the library, so this cannot disagree with GetAdapterCaps().tx_chains,
+   * which reads the same field - the two travel together in one adapter.caps
+   * event and a consumer comparing them would have no way to pick. */
+  {
+    std::lock_guard<std::recursive_mutex> lock(_mu);
+    struct mt7612u_caps hw {};
+    if (_dev) {
+      mt7612u_get_caps(_dev, &hw);
+      c.n_ss = hw.nss_tx;
+    } else {
+      c.n_ss = 2;
+    }
+  }
   c.stbc_ok = true;
   c.ldpc_ok = true;
   c.sgi_ok = true;

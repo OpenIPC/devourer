@@ -6,11 +6,17 @@ real Linux station associated. `StartBeacon`, `UpdateBeaconPayload` and
 `StopBeacon` are implemented on `Mt7612uRadio`, so nothing in
 `tests/ap_responder.cpp` or `tests/ap_wpa2.cpp` knows this is MediaTek.
 
-What is NOT done: WPA2. `tests/ap_wpa2.cpp` has not been run against this
-backend, and the hardware CCMP path (`MT_WCID_KEY`, `MT_SKEY`) is untouched —
-the claim below that hardware crypto is a capability *gain* on this part
-remains unmeasured. Key install is the one item of the original gap list that
-is still open.
+**WPA2-PSK works too.** `tests/ap_wpa2.cpp`, also unmodified, completes the
+4-way handshake against a real `wpa_supplicant` station and carries encrypted
+traffic. It needs the same four `IRadio` methods as the open-network harness —
+`InitWrite`, `StartBeacon`, `StartRxLoop`, `send_packet` — and no others,
+because CCMP is done in software there.
+
+What is NOT done: **hardware** CCMP. `MT_WCID_KEY` and `MT_SKEY` are untouched,
+so the claim below that hardware crypto is a capability *gain* on this part
+remains unmeasured — what is measured is that the software path devourer
+already had works here. Key install is the one item of the original gap list
+that is still open.
 
 File:line references below are to the merged subtree (`src/mt7612u/`, all
 `.cpp` since the C++ migration) and to `reference/mt76 @ be5ce79`. Some of the
@@ -55,10 +61,20 @@ one is devourer itself: `tests/ap_responder.cpp`, unmodified, built against
 | The MAC auto-ACKs | AP side, three runs: `AUTH req … alg=0 seq=1 retry=0` and `ASSOC req … retry=0`. An un-ACKed frame is retransmitted with FC Retry set, so retry=0 IS the ACK |
 | The data plane works | `6 packets transmitted, 6 received, 0% packet loss, rtt avg 0.808 ms`; AP side `data(arp/icmp)=8 responses_sent=16` |
 | `StopBeacon` silences it | `tests/mt7612u_beacon_stop_check.cpp`: armed → SSID seen; stopped → gone; re-armed → seen again |
+| WPA2-PSK 4-way completes | AP side: `msg2 OK (SNonce, MIC verified) — PTK derived`, `sent msg3 (GTK, MIC)`, `msg4 OK — 4-WAY HANDSHAKE COMPLETE (station keyed)` against `wpa_supplicant` with `proto=RSN pairwise=CCMP group=CCMP` |
+| Encrypted traffic flows | `6 packets transmitted, 6 received, 0% packet loss, rtt avg 1.156 ms` after the handshake — which requires both ends to agree on CCMP |
 
 ### What this does not show
 
-- **WPA2 was not run.** Open network only.
+- **The encryption was not independently captured.** The 4-way completing with
+  a verified MIC, and traffic flowing to a CCMP-only station, is strong
+  evidence that frames are protected — but no third radio sniffed the air to
+  confirm the Protected bit directly, and `wpa_cli` could not be queried for
+  the negotiated cipher (the supplicant was started without a control socket).
+- **Hardware CCMP is untested.** The 4-way above is devourer's software CCMP,
+  the same code the Realtek backends use. `MT_WCID_KEY` / `MT_SKEY` are not
+  wired up, so the "crypto becomes hardware on MediaTek" claim is still a
+  claim.
 - **The station is the same silicon** (MT7612U on `mt76x2u`), so this is not an
   independent-generation witness. The RTL8812AU witness in the section above is.
 - **One AP, one station, ~20 cm apart.** Every RSSI here is near-field.

@@ -385,6 +385,10 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
      * 3836-byte max MPDU), so the event thread does still allocate during the
      * first pass round the ring and on any frame-size step-up. */
     _rx_q.reset(64);
+    /* Zeroed with the queue's drop count, so the teardown line reports both
+     * over the same interval. Left lifetime-monotonic, it paired a cumulative
+     * received count with one session's drops. */
+    _rx_frames.store(0, std::memory_order_relaxed);
 
     /* Ring first, receiver second - see rule 1 in the header. */
     if (mt7612u_rx_start(_dev, &Mt7612uRadio::rx_trampoline, this) != 0)
@@ -423,13 +427,16 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
    * contract every other backend keeps. See the queue's comment in the header
    * for why delivering on the event thread wedges the hardware. */
   for (;;) {
+    /* Tested at the TOP, not only when the queue runs dry. A busy channel can
+     * keep the ring non-empty indefinitely, and checking the flags only on the
+     * empty path meant SIGINT could not reach StopRxLoop for as long as frames
+     * kept arriving - i.e. exactly when a consumer most wants to stop. */
+    if (_rx_stop.load() || g_devourer_should_stop)
+      break;
     mt7612u::RxQueue::Slot *slot =
         _rx_q.pop_begin(std::chrono::milliseconds(20), _rx_stop);
-    if (!slot) {
-      if (_rx_stop.load() || g_devourer_should_stop)
-        break;
+    if (!slot)
       continue;
-    }
 
     /* Outside the queue lock: user code runs here, and it may call back into
      * this object. The producer never writes the slot at the tail, so this

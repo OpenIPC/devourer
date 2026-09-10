@@ -76,13 +76,27 @@ if wrong and no_fcs:
 
 # --- parse_mu_snr: the FCS-present bound must not have moved --------------
 if with_fcs:
-    a = bf.parse_mu_snr(with_fcs, with_fcs["ns"] if "ns" in with_fcs else 52,
-                        len(with_fcs["angle_bytes"]))
+    # vbytes has to leave room for the MU report: parse_mu_snr computes
+    # mu_start = 29 + nc + vbytes and gives up when mu_start + 4 >= len(raw).
+    # Passing the whole angle_bytes length put mu_start at len(raw) - 4, so
+    # BOTH calls below returned None and their equality held whatever the
+    # parser did. 20 lands inside the report and yields a real series.
+    MU_VBYTES = 20
+    ns_ = with_fcs["ns"] if "ns" in with_fcs else 52
+    a = bf.parse_mu_snr(with_fcs, ns_, MU_VBYTES)
     legacy = dict(with_fcs)
     legacy.pop("fcs_present", None)        # a dict from before the field existed
-    b = bf.parse_mu_snr(legacy, legacy["ns"] if "ns" in legacy else 52,
-                        len(legacy["angle_bytes"]))
+    b = bf.parse_mu_snr(legacy, ns_, MU_VBYTES)
+    check(a is not None, "MU-SNR actually parses (a None here is a dead probe)")
     check(a == b, "FCS-present MU-SNR identical with and without the new key")
+
+    # What this fixture CANNOT hold: that the fcs_present bound itself moved.
+    # parse_mu_snr stops when the smooth SNR series collapses, and on this
+    # capture that always fires before either end bound - measured at vbytes
+    # 2, 4, 10, 20 and 30, len - 2 and len give the same series every time.
+    # A check comparing them would pass with the bound reverted, so there
+    # isn't one. The bound is covered where it IS observable: parse_frame's
+    # four-byte angle trim, asserted above.
 
 print("bf_report_fcs: " + ("FAIL" if fails else "PASS"))
 sys.exit(1 if fails else 0)

@@ -447,7 +447,25 @@ class KernelHost:
             # tcpdump on the very adapter devourer has claimed.
             net_dir = f"/sys/bus/usb/devices/{dut.iface_id}/net"
             if not os.path.isdir(net_dir):
-                return None
+                # Either the driver has not bound yet - the caller polls for
+                # that - or the device re-enumerated somewhere else. Fall back
+                # the same way _devourer_env does, and on the same condition:
+                # only when exactly one device with this VID:PID is plugged, so
+                # there is nothing to confuse it with.
+                if _sysfs_id_still_holds(dut) or _count_plugged(dut) != 1:
+                    return None
+                for d in discover_duts():
+                    if d.vidpid != dut.vidpid:
+                        continue
+                    moved = f"/sys/bus/usb/devices/{d.iface_id}/net"
+                    if os.path.isdir(moved):
+                        sys.stderr.write(
+                            f"warning: {dut.vidpid} moved from {dut.sysfs_id} "
+                            f"to {d.sysfs_id}; using its interface there.\n")
+                        net_dir = moved
+                        break
+                else:
+                    return None
             ifaces = os.listdir(net_dir)
             return ifaces[0] if ifaces else None
         # Remote: ssh and iterate /sys/bus/usb/devices/ over there. The host's

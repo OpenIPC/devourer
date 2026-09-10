@@ -26,26 +26,24 @@ static int locked_get(struct mt_async *a, const int *field)
 {
 	int v;
 
-	pthread_mutex_lock(&a->lock);
+	a->lock.lock();
 	v = *field;
-	pthread_mutex_unlock(&a->lock);
+	a->lock.unlock();
 	return v;
 }
 
-static void *evt_thread(void *arg)
+static void evt_thread(struct mt7612u_dev *d)
 {
-	struct mt7612u_dev *d = arg;
 	struct mt_async *a = d->a;
-	struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 };
+	struct timeval tv = { 0, 50000 };
 
 	while (locked_get(a, &a->running))
 		libusb_handle_events_timeout_completed(d->ctx, &tv, NULL);
-	return NULL;
 }
 
 static void LIBUSB_CALL rx_done(struct libusb_transfer *t)
 {
-	struct mt_slot *s = t->user_data;
+	struct mt_slot *s = (struct mt_slot *)t->user_data;
 	struct mt7612u_dev *d = s->d;
 	struct mt_async *a = s->a;
 	int resubmit;
@@ -66,22 +64,22 @@ static void LIBUSB_CALL rx_done(struct libusb_transfer *t)
 			 * that loss is invisible from this layer by construction -
 			 * see mt7612u_caps.max_mpdu_rx. What this counts is a
 			 * short or malformed transfer. */
-			pthread_mutex_lock(&a->lock);
+			a->lock.lock();
 			a->rx_dropped++;
-			pthread_mutex_unlock(&a->lock);
+			a->lock.unlock();
 		} else {
-			pthread_mutex_lock(&a->lock);
+			a->lock.lock();
 			a->rx_frames++;
-			pthread_mutex_unlock(&a->lock);
+			a->lock.unlock();
 			/* Outside the lock: a callback is allowed to transmit,
 			 * and mt_async_tx_submit() takes this same mutex. */
 			if (a->cb)
 				a->cb(a->cb_user, frame, (size_t)len, &info);
 		}
 	} else if (t->status != LIBUSB_TRANSFER_CANCELLED) {
-		pthread_mutex_lock(&a->lock);
+		a->lock.lock();
 		a->rx_err++;
-		pthread_mutex_unlock(&a->lock);
+		a->lock.unlock();
 	}
 
 	resubmit = locked_get(a, &a->rx_active) &&
@@ -90,20 +88,20 @@ static void LIBUSB_CALL rx_done(struct libusb_transfer *t)
 		return;
 
 	/* Not resubmitted: this transfer is now owned by us again. */
-	pthread_mutex_lock(&a->lock);
+	a->lock.lock();
 	if (resubmit)
 		a->rx_err++;
 	a->rx_inflight--;
-	pthread_cond_broadcast(&a->cv);
-	pthread_mutex_unlock(&a->lock);
+	a->cv.notify_all();
+	a->lock.unlock();
 }
 
 static void LIBUSB_CALL tx_done(struct libusb_transfer *t)
 {
-	struct mt_slot *s = t->user_data;
+	struct mt_slot *s = (struct mt_slot *)t->user_data;
 	struct mt_async *a = s->a;
 
-	pthread_mutex_lock(&a->lock);
+	a->lock.lock();
 	if (t->status == LIBUSB_TRANSFER_COMPLETED &&
 	    t->actual_length == t->length)
 		a->tx_done_n++;
@@ -111,8 +109,8 @@ static void LIBUSB_CALL tx_done(struct libusb_transfer *t)
 		a->tx_err++;
 	a->tx_busy[s->idx] = 0;
 	a->tx_inflight--;
-	pthread_cond_broadcast(&a->cv);
-	pthread_mutex_unlock(&a->lock);
+	a->cv.notify_all();
+	a->lock.unlock();
 }
 
 int mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user)
@@ -125,13 +123,20 @@ int mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user)
 	struct mt_async *a;
 
 	if (d->a) return 0;
-	a = calloc(1, sizeof *a);
-	if (!a) return -1;
+	/* try/catch, not new(nothrow): nothrow suppresses a throw from the
+	 * allocation FUNCTION only, and these members allocate in their
+	 * CONSTRUCTORS - std::condition_variable_any holds a shared_ptr<mutex> -
+	 * so bad_alloc escapes a nothrow new here. This library is reached over an
+	 * extern "C" ABI, and an exception unwinding into a C caller has no
+	 * handler, so nothing may throw past this point. */
+	try {
+		a = new mt_async{};
+	} catch (...) {
+		return -1;
+	}
 	d->a = a;
 	a->cb = cb;
 	a->cb_user = user;
-	pthread_mutex_init(&a->lock, NULL);
-	pthread_cond_init(&a->cv, NULL);
 
 	for (int i = 0; i < MT_TX_RING; i++) {
 		a->tx_slot[i].d = d;
@@ -149,13 +154,26 @@ int mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user)
 	}
 
 	a->running = 1;
-	if (pthread_create(&a->evt, NULL, evt_thread, d)) { a->running = 0; goto fail; }
+	/* std::thread reports failure by throwing where pthread_create returned
+	 * an error code; catching keeps this the same `goto fail` teardown. */
+	try {
+		a->evt = std::thread(evt_thread, d);
+	} catch (...) {
+		/* Deliberately catch-all rather than std::system_error: libstdc++
+		 * allocates the thread state with a THROWING new inside the
+		 * constructor, so an out-of-memory failure arrives as bad_alloc, not
+		 * as the system_error that pthread_create's EAGAIN maps to. Letting
+		 * that one escape would skip this teardown - leaving d->a live with
+		 * running=1 and evt_started=0 - and then unwind into a C caller. */
+		a->running = 0;
+		goto fail;
+	}
 	a->evt_started = 1;
 
 	if (cb) {
-		pthread_mutex_lock(&a->lock);
+		a->lock.lock();
 		a->rx_active = 1;
-		pthread_mutex_unlock(&a->lock);
+		a->lock.unlock();
 		for (int i = 0; i < MT_RX_RING; i++) {
 			libusb_fill_bulk_transfer(a->rx[i], d->h, MT_EP_IN_PKT_RX,
 			                          a->rx_buf[i], MT_RX_BUFSZ,
@@ -164,9 +182,9 @@ int mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user)
 				ERR("could not submit RX transfer %d", i);
 				goto fail;
 			}
-			pthread_mutex_lock(&a->lock);
+			a->lock.lock();
 			a->rx_inflight++;
-			pthread_mutex_unlock(&a->lock);
+			a->lock.unlock();
 		}
 		LOG("async: %d RX transfers in flight, %d TX slots",
 		    MT_RX_RING, MT_TX_RING);
@@ -198,9 +216,9 @@ void mt_async_stop(struct mt7612u_dev *d)
 
 	if (!a) return;
 
-	pthread_mutex_lock(&a->lock);
+	a->lock.lock();
 	a->rx_active = 0;
-	pthread_mutex_unlock(&a->lock);
+	a->lock.unlock();
 
 	/* Cancel *both* rings. Cancelling only RX leaves TX transfers owned by
 	 * libusb, and the wait below would then time out with them in flight. */
@@ -210,22 +228,16 @@ void mt_async_stop(struct mt7612u_dev *d)
 		if (a->tx[i]) libusb_cancel_transfer(a->tx[i]);
 
 	/* The event thread is still running, so completions keep arriving. */
-	pthread_mutex_lock(&a->lock);
-	for (int spins = 0; (a->tx_inflight || a->rx_inflight) && spins < 200; spins++) {
-		struct timespec ts;
-
-		clock_gettime(CLOCK_REALTIME, &ts);
-		ts.tv_nsec += 10000000;
-		if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
-		pthread_cond_timedwait(&a->cv, &a->lock, &ts);
-	}
+	a->lock.lock();
+	for (int spins = 0; (a->tx_inflight || a->rx_inflight) && spins < 200; spins++)
+		a->cv.wait_for(a->lock, std::chrono::milliseconds(10));
 	stuck_tx = a->tx_inflight;
 	stuck_rx = a->rx_inflight;
 	a->running = 0;
-	pthread_mutex_unlock(&a->lock);
+	a->lock.unlock();
 
 	if (a->evt_started)
-		pthread_join(a->evt, NULL);
+		a->evt.join();
 
 	d->a = NULL;
 	if (stuck_tx || stuck_rx) {
@@ -248,9 +260,7 @@ void mt_async_stop(struct mt7612u_dev *d)
 		if (a->tx[i]) libusb_free_transfer(a->tx[i]);
 	for (int i = 0; i < MT_RX_RING; i++)
 		if (a->rx[i]) libusb_free_transfer(a->rx[i]);
-	pthread_mutex_destroy(&a->lock);
-	pthread_cond_destroy(&a->cv);
-	free(a);
+	delete a;
 }
 
 /*
@@ -264,18 +274,18 @@ int mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len)
 
 	if (!a || len > MT_TX_BUFSZ) return -1;
 
-	pthread_mutex_lock(&a->lock);
+	a->lock.lock();
 	for (;;) {
 		/* A teardown must not leave a caller parked here forever. */
-		if (!a->running) { pthread_mutex_unlock(&a->lock); return -1; }
+		if (!a->running) { a->lock.unlock(); return -1; }
 		for (int i = 0; i < MT_TX_RING; i++)
 			if (!a->tx_busy[i]) { idx = i; break; }
 		if (idx >= 0) break;
-		pthread_cond_wait(&a->cv, &a->lock);
+		a->cv.wait(a->lock);
 	}
 	a->tx_busy[idx] = 1;
 	a->tx_inflight++;
-	pthread_mutex_unlock(&a->lock);
+	a->lock.unlock();
 
 	memcpy(a->tx_buf[idx], buf, (size_t)len);
 	libusb_fill_bulk_transfer(a->tx[idx], d->h, MT_EP_OUT_AC_BE,
@@ -283,16 +293,16 @@ int mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len)
 	                          &a->tx_slot[idx], 1000);
 	rc = libusb_submit_transfer(a->tx[idx]);
 
-	pthread_mutex_lock(&a->lock);
+	a->lock.lock();
 	if (rc) {
 		a->tx_busy[idx] = 0;
 		a->tx_inflight--;
 		a->tx_err++;
-		pthread_cond_broadcast(&a->cv);
+		a->cv.notify_all();
 	} else {
 		a->tx_submitted++;
 	}
-	pthread_mutex_unlock(&a->lock);
+	a->lock.unlock();
 	return rc ? -1 : 0;
 }
 
@@ -307,7 +317,7 @@ void mt_async_stats(struct mt7612u_dev *d, struct mt_async_stats *out)
 
 	memset(out, 0, sizeof *out);
 	if (!a) return;
-	pthread_mutex_lock(&a->lock);
+	a->lock.lock();
 	out->tx_submitted = a->tx_submitted;
 	out->tx_done      = a->tx_done_n;
 	out->tx_err       = a->tx_err;
@@ -315,7 +325,7 @@ void mt_async_stats(struct mt7612u_dev *d, struct mt_async_stats *out)
 	out->rx_err       = a->rx_err;
 	out->rx_invalid   = a->rx_invalid;
 	out->rx_dropped   = a->rx_dropped;
-	pthread_mutex_unlock(&a->lock);
+	a->lock.unlock();
 }
 
 int mt7612u_rx_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user)
@@ -338,9 +348,9 @@ void mt_async_note_invalid(struct mt7612u_dev *d)
 	struct mt_async *a = d->a;
 
 	if (!a) return;
-	pthread_mutex_lock(&a->lock);
+	a->lock.lock();
 	a->rx_invalid++;
-	pthread_mutex_unlock(&a->lock);
+	a->lock.unlock();
 }
 
 /* Public form of the snapshot above. */

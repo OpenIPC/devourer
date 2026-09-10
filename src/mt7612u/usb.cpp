@@ -5,13 +5,16 @@
  * ../../INVESTIGATION.md §11).
  */
 #include <errno.h>
-#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
-#include <time.h>
-#include <unistd.h>
 #include <stdarg.h>
+/* The adapter lock below is POSIX file locking. MSVC has none of these headers;
+ * see lock_adapter() for what Windows does instead. */
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 
 #include "internal.h"
 
@@ -21,32 +24,66 @@
  * a piped consumer mid-bring-up. Truncation is silent and deliberate - a
  * diagnostic is not worth a heap allocation on a path that may already be
  * failing. */
-void mt_diag(char level, const char *fmt, ...)
-{
-	char line[512];
-	int n;
-	va_list ap;
+/* Set before threads start, read from the RX event thread; see the contract on
+ * mt7612u_set_log_sink() in the public header. */
+static mt7612u_log_sink g_log_sink;
+static void            *g_log_user;
 
-	n = snprintf(line, sizeof line, "devourer [%c] mt7612u: ", level);
-	if (n < 0 || (size_t)n >= sizeof line)
-		return;
-	va_start(ap, fmt);
-	n += vsnprintf(line + n, sizeof line - (size_t)n - 1, fmt, ap);
-	va_end(ap);
+void mt7612u_set_log_sink(mt7612u_log_sink sink, void *user)
+{
+	g_log_sink = sink;
+	g_log_user = user;
+}
+
+/* The built-in sink, and the only place this library names stderr or devourer's
+ * line format. A host that installs its own sink gets the bare message and
+ * applies its own prefix, so nothing double-prefixes. */
+static void default_sink(void *user, char level, const char *line)
+{
+	char out[544];
+	int n;
+
+	(void)user;
+	n = snprintf(out, sizeof out, "devourer [%c] mt7612u: %s\n", level, line);
 	if (n < 0)
 		return;
-	/* vsnprintf returns what it WOULD have written, so clamp before using
-	 * it as a length - otherwise a truncated line writes past the buffer. */
-	if ((size_t)n > sizeof line - 2)
-		n = (int)(sizeof line - 2);
-	line[n++] = '\n';
-
-	fwrite(line, 1, (size_t)n, stderr);
+	if ((size_t)n > sizeof out - 1)
+		n = (int)(sizeof out - 1);
+	/* One line, one fwrite + fflush: per-line atomicity against the event
+	 * thread, and no pipe-buffering stall for a subprocess supervisor. Same
+	 * reasoning as devourer's Logger::emit and src/Event.h. */
+	fwrite(out, 1, (size_t)n, stderr);
 	fflush(stderr);
 }
 
-#define REQ_IN   (LIBUSB_ENDPOINT_IN  | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE)
-#define REQ_OUT  (LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE)
+void mt_diag(char level, const char *fmt, ...)
+{
+	char msg[512];
+	int n;
+	va_list ap;
+
+	va_start(ap, fmt);
+	n = vsnprintf(msg, sizeof msg, fmt, ap);
+	va_end(ap);
+	if (n < 0)
+		return;
+	/* vsnprintf returns what it WOULD have written; the buffer is already
+	 * NUL-terminated at the truncation point, so nothing more is needed. */
+
+	if (g_log_sink)
+		g_log_sink(g_log_user, level, msg);
+	else
+		default_sink(NULL, level, msg);
+}
+
+/* Each operand is cast to the uint8_t that libusb's bmRequestType actually is:
+ * these are three DIFFERENT libusb enum types, and C++20 deprecates a bitwise
+ * operation between different enumeration types ([depr.ee.conv]). Casting keeps
+ * the value identical while making the operation an ordinary integer OR. */
+#define REQ_IN   ((uint8_t)LIBUSB_ENDPOINT_IN  | (uint8_t)LIBUSB_REQUEST_TYPE_VENDOR | \
+                  (uint8_t)LIBUSB_RECIPIENT_DEVICE)
+#define REQ_OUT  ((uint8_t)LIBUSB_ENDPOINT_OUT | (uint8_t)LIBUSB_REQUEST_TYPE_VENDOR | \
+                  (uint8_t)LIBUSB_RECIPIENT_DEVICE)
 /* mt76's MT_VEND_REQ_TOUT_MS / MT_VEND_REQ_MAX_RETRY. The product of the two
  * is the worst-case cost of one register access, so it bounds every poll
  * loop below - which is why the timeout is 300 ms and not something longer. */
@@ -55,8 +92,14 @@ void mt_diag(char level, const char *fmt, ...)
 
 void mt_usleep(unsigned us)
 {
-	struct timespec ts = { .tv_sec = us / 1000000, .tv_nsec = (us % 1000000) * 1000 };
-	nanosleep(&ts, NULL);
+	/* Not interruptible, where nanosleep(&ts, NULL) was: libstdc++ retries
+	 * sleep_for on EINTR, so a signal no longer cuts the wait short (measured:
+	 * a 200 ms request under 100 Hz SIGALRM returned after 10 ms before, 201 ms
+	 * now). That is the behaviour this call wants — every use is a hardware
+	 * settle or poll interval, and a delivered signal is not a reason for the
+	 * chip to be ready sooner. Worth knowing if a caller ever wants to
+	 * interrupt a long bring-up. */
+	std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
 
 /* Held for the process lifetime; flock releases it on any exit. */
@@ -64,10 +107,10 @@ static int g_lock_fd = -1;
 
 static uint64_t now_us(void)
 {
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
+	/* steady_clock, matching CLOCK_MONOTONIC: never stepped by a wall-clock
+	 * adjustment, which is what an elapsed-time measurement needs. */
+	return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+	           std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 int mt_vendor_req(struct mt7612u_dev *d, uint8_t req, uint8_t type,
@@ -78,7 +121,7 @@ int mt_vendor_req(struct mt7612u_dev *d, uint8_t req, uint8_t type,
 	/* One control transfer at a time.  Nothing contends in a single-threaded
 	 * consumer; one that sends from a second thread would otherwise
 	 * interleave two transfers on EP0. */
-	pthread_mutex_lock(&d->io_lock);
+	d->io_lock.lock();
 
 	for (int i = 0; i < VEND_RETRIES; i++) {
 		rc = libusb_control_transfer(d->h, type, req, val, idx,
@@ -90,7 +133,7 @@ int mt_vendor_req(struct mt7612u_dev *d, uint8_t req, uint8_t type,
 	}
 	ERR("vendor req %02x idx %04x failed: %s", req, idx, libusb_error_name(rc));
 out:
-	pthread_mutex_unlock(&d->io_lock);
+	d->io_lock.unlock();
 	return rc;
 }
 
@@ -293,27 +336,18 @@ static int mt_identify(struct mt7612u_dev *d, const char **err)
  */
 void mt_dev_state_init(struct mt7612u_dev *d)
 {
-	pthread_mutexattr_t ma;
-
-	if (d->io_lock_ready) return;
-	/* Recursive: the PHY tick locks io_lock and then nests mt_vendor_req /
-	 * mt_mcu_send, which lock it again.  A zeroed pthread_mutex_t is a valid
-	 * NON-recursive lock, so a path that skipped this (the adopt path once
-	 * did) would self-deadlock the tick or lock an uninitialised mutex. */
-	pthread_mutexattr_init(&ma);
-	pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_RECURSIVE);
-	pthread_mutex_init(&d->io_lock, &ma);
-	pthread_mutexattr_destroy(&ma);
-	d->io_lock_ready = 1;
-	/* cal sentinels (low_gain=-1 etc.) are reset per-tune in
+	/* io_lock is a std::recursive_mutex member, constructed with the device,
+	 * so there is nothing to initialise here and no path that can reach the
+	 * tick with an unusable lock. Kept as a named seam because both open
+	 * paths call it and the cal sentinels (low_gain=-1 etc.) belong to the
+	 * same "device state is ready" step - those are reset per-tune in
 	 * mt_set_channel_ex(), which always runs before the first PHY tick. */
+	(void)d;
 }
 
 void mt_dev_state_destroy(struct mt7612u_dev *d)
 {
-	if (!d || !d->io_lock_ready) return;
-	pthread_mutex_destroy(&d->io_lock);
-	d->io_lock_ready = 0;
+	(void)d;
 }
 
 /*
@@ -348,9 +382,13 @@ void mt_recover_usb(struct mt7612u_dev *d)
 
 	/* A wedge experiment must not have its recovery hidden inside open().
 	 * With this set, open() observes and reports but repairs nothing.  It is
-	 * a field rather than a getenv(): this library reads no environment, so
-	 * the tool that wants the behaviour sets it (bringup does, from
-	 * MT7612U_NO_AUTORECOVER). */
+	 * a field rather than a getenv(): the tool that wants the behaviour sets
+	 * it (bringup does, from MT7612U_NO_AUTORECOVER).
+	 *
+	 * The same is now true of adapter selection: d->dev_selector replaced the
+	 * getenv("MT7612U_DEV") that open_selected() used to read, and
+	 * mt7612u_open_selected() is the public way to pass it. This library reads
+	 * no environment at all. */
 	if (d->no_autorecover) {
 		if (mt_rr_chk(d, CFG_ADDR(MT_USB_U3DMA_CFG), &cfg))
 			LOG("auto-recovery disabled: U3DMA_CFG unreadable");
@@ -416,13 +454,18 @@ int mt_adopt(struct mt7612u_dev *d, libusb_device_handle *h,
 }
 
 /*
- * Open one MT7612U, honouring MT7612U_DEV when more than one is attached.
+ * Open one MT7612U, honouring the caller's selector when more than one is
+ * attached.
  *
  * libusb_open_device_with_vid_pid() returns whichever matching device
  * enumerates first, which is fine with one adapter and silently ambiguous
  * with two - a measurement then attributes itself to whichever unit the bus
- * happened to hand over. MT7612U_DEV takes a "bus-port" as lsusb and sysfs
+ * happened to hand over. The selector takes a "bus-port" as lsusb and sysfs
  * spell it ("2-1"), or a bare index into the matches in enumeration order.
+ * It is passed in, never read from the environment: bringup fills it from
+ * MT7612U_DEV, and a library consumer passes whatever its own config says.
+ * Messages below therefore name "the selector", not that variable - a caller
+ * that is not bringup would be told to set something it does not use.
  *
  * This is the ONE environment read left in the library, and it stays deferred
  * to integration as agreed in #412 rather than being removed here: there is no
@@ -474,8 +517,33 @@ static void adapter_key(libusb_device *dev, char *out, size_t n)
 		                i ? "." : "-", ports[i]);
 }
 
+/* Drop the adapter lock, if this process is holding one. */
+static void unlock_adapter(void)
+{
+#if !defined(_WIN32)
+	if (g_lock_fd >= 0) { close(g_lock_fd); g_lock_fd = -1; }
+#endif
+}
+
 /* Returns a held fd, -1 to proceed unlocked (infrastructure failure), or
  * -2 when another process holds the adapter and the caller must refuse. */
+#if defined(_WIN32)
+static int lock_adapter(libusb_device *dev, const char **err)
+{
+	/* Not ported. The Linux interlock above works by contending for the SAME
+	 * lock file UsbDeviceLock uses; on Windows UsbDeviceLock is a named mutex
+	 * instead (UsbDeviceLock.cpp), so a file lock here would exclude nobody
+	 * and mirroring the mutex would be a second copy of a mechanism the
+	 * devourer path already owns. Exclusivity on Windows therefore comes from
+	 * UsbDeviceLock, which WiFiDriver takes before it ever reaches this
+	 * library. What is genuinely unprotected is a direct mt7612u_open() with
+	 * no devourer around it - the bench tool's case, and the bench is Linux.
+	 * Proceed unlocked rather than refuse: fail-open is what the POSIX path
+	 * does for an infrastructure failure too. */
+	(void)dev; (void)err;
+	return -1;
+}
+#else
 static int lock_adapter(libusb_device *dev, const char **err)
 {
 	/* "/tmp" literally, and deliberately NOT getenv("TMPDIR"): the whole
@@ -515,10 +583,11 @@ static int lock_adapter(libusb_device *dev, const char **err)
 	    path, strerror(errno));
 	return -1;
 }
+#endif /* !_WIN32 */
 
-static libusb_device_handle *open_selected(libusb_context *ctx, const char **err)
+static libusb_device_handle *open_selected(libusb_context *ctx, const char *sel,
+                                           const char **err)
 {
-	const char *sel = getenv("MT7612U_DEV");
 
 	libusb_device **list = NULL;
 	libusb_device_handle *h = NULL;
@@ -550,13 +619,13 @@ static libusb_device_handle *open_selected(libusb_context *ctx, const char **err
 		if (!sel || !*sel) {
 			LOG("MT7612U at %s%s", id, matches ? "" : "  <- selected (first)");
 		} else if (!strcmp(sel, id)) {
-			LOG("MT7612U at %s  <- selected by MT7612U_DEV", id);
+			LOG("MT7612U at %s  <- selected", id);
 		} else {
 			char idx[8];
 
 			snprintf(idx, sizeof idx, "%d", matches);
 			if (strcmp(sel, idx)) { matches++; continue; }
-			LOG("MT7612U at %s  <- selected by MT7612U_DEV index %d", id, matches);
+			LOG("MT7612U at %s  <- selected by index %d", id, matches);
 		}
 
 		if (!h) {
@@ -574,7 +643,7 @@ static libusb_device_handle *open_selected(libusb_context *ctx, const char **err
 				 * on the very next retry. Release what this
 				 * iteration took. */
 				h = NULL;
-				if (g_lock_fd >= 0) { close(g_lock_fd); g_lock_fd = -1; }
+				unlock_adapter();
 			}
 		}
 		matches++;
@@ -583,9 +652,9 @@ static libusb_device_handle *open_selected(libusb_context *ctx, const char **err
 	}
 
 	if (matches > 1 && (!sel || !*sel))
-		WARN("%d MT7612U adapters attached and MT7612U_DEV is unset - "
-		    "using the first. Set MT7612U_DEV=<bus-port> to be explicit.",
-		    matches);
+		WARN("%d MT7612U adapters attached and no selector was given - "
+		    "using the first. Pass a \"<bus>-<port>\" selector to choose "
+		    "(bringup takes it from MT7612U_DEV).", matches);
 	libusb_free_device_list(list, 1);
 	if (!h && err)
 		*err = matches ? "MT7612U found but could not be opened (try sudo)"
@@ -603,7 +672,7 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 	if (libusb_init(&d->ctx)) { if (err) *err = "libusb_init failed"; return -1; }
 	d->owns_handle = 1;
 
-	d->h = open_selected(d->ctx, err);
+	d->h = open_selected(d->ctx, d->dev_selector, err);
 	if (!d->h) {
 		libusb_exit(d->ctx); d->ctx = NULL;
 		return -1;
@@ -628,7 +697,7 @@ int mt_open(struct mt7612u_dev *d, const char **err)
 		/* Re-enumerated under a new address: reopen and re-detach. */
 		libusb_close(d->h);
 		mt_usleep(200000);
-		d->h = open_selected(d->ctx, NULL);
+		d->h = open_selected(d->ctx, d->dev_selector, NULL);
 		if (!d->h) {
 			if (err) *err = "device vanished after USB reset";
 			libusb_exit(d->ctx); d->ctx = NULL;
@@ -684,7 +753,7 @@ void mt_close(struct mt7612u_dev *d)
 		    "handle and context rather than closing underneath them");
 		d->h = NULL;
 		d->ctx = NULL;
-		if (g_lock_fd >= 0) { close(g_lock_fd); g_lock_fd = -1; }
+		unlock_adapter();
 		return;
 	}
 	if (d->h) {
@@ -700,7 +769,7 @@ void mt_close(struct mt7612u_dev *d)
 	}
 	if (d->ctx && d->owns_handle) libusb_exit(d->ctx);
 	d->ctx = NULL;
-	if (g_lock_fd >= 0) { close(g_lock_fd); g_lock_fd = -1; }
+	unlock_adapter();
 }
 
 /* Block write, as mt76u_copy(): one MULTI_WRITE per batch, wValue 0.
@@ -708,7 +777,7 @@ void mt_close(struct mt7612u_dev *d)
  * table (32 B) - 192 transfers that would otherwise be ~700 4-byte writes. */
 void mt_wr_copy(struct mt7612u_dev *d, uint32_t offset, const void *data, int len)
 {
-	const uint8_t *p = data;
+	const uint8_t *p = (const uint8_t *)data;
 	uint8_t buf[64];
 
 	/* The hardware wants whole 32-bit words, but only `len` bytes belong to

@@ -43,6 +43,16 @@ int main() {
   expect("Kestrel bw = 20/40/80/160",
          bw_mask_for_generation(ChipGeneration::Kestrel) ==
              (ac | kBw5 | kBw10));
+  /* MT7612U has no narrowband: MT_RATE_BW encodes 20/40/80/160 only, so there
+   * is nothing to select for 5 or 10 MHz. This is pinned because the trailing
+   * arm of bw_mask_for_generation is the permissive one — a MediaTek adapter
+   * that fell through to it would advertise two bandwidths the part cannot
+   * represent, and nothing else would notice. */
+  expect("MT7612U bw = 20/40/80, no 5/10 MHz",
+         bw_mask_for_generation(ChipGeneration::Mt7612u) == ac);
+  expect("MT7612U advertises no narrowband",
+         (bw_mask_for_generation(ChipGeneration::Mt7612u) &
+          (kBw5 | kBw10)) == 0);
 
   /* --- generation names --- */
   expect("gen name jaguar3",
@@ -54,6 +64,9 @@ int main() {
   expect("gen name rtl8733b",
          std::string_view(generation_name(ChipGeneration::Rtl8733b)) ==
              "rtl8733b");
+  expect("gen name mt7612u",
+         std::string_view(generation_name(ChipGeneration::Mt7612u)) ==
+             "mt7612u");
   expect("gen name unknown",
          std::string_view(generation_name(ChipGeneration::Unknown)) ==
              "unknown");

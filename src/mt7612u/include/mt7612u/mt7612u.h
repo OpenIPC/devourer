@@ -110,6 +110,19 @@ struct mt7612u_dev;
 struct mt7612u_dev *mt7612u_open(const char *fw_dir, const char **err);
 
 /*
+ * Same, but choosing which adapter to open when more than one is attached:
+ * selector is "<bus>-<port>" as lsusb spells the port path (e.g. "2-1"), or
+ * NULL for "the first one", which is what mt7612u_open() passes.
+ *
+ * Explicit because this is a library. It reads no environment of its own, so a
+ * caller with two adapters is never at the mercy of an inherited variable —
+ * the tool that wants MT7612U_DEV reads it and passes it here. The string is
+ * borrowed for the duration of the call only.
+ */
+struct mt7612u_dev *mt7612u_open_selected(const char *selector,
+                                          const char *fw_dir, const char **err);
+
+/*
  * Same, but adopting a libusb handle the caller already opened, reset and
  * claimed interface 0 on. Neither the handle nor the context is closed by
  * mt7612u_close() - the caller keeps ownership of both, and of any exclusive
@@ -127,6 +140,32 @@ struct mt7612u_dev *mt7612u_open_handle(void *h, void *ctx, const char *fw_dir,
                                         const char **err);
 
 void mt7612u_close(struct mt7612u_dev *dev);
+
+/*
+ * Diagnostic sink.
+ *
+ * This library emits human diagnostics — bring-up progress, firmware version,
+ * USB and MCU failures. By default they go to stderr, formatted the way
+ * devourer's own logger formats its lines, which is right for the standalone
+ * bring-up tool and wrong for anything embedding this library: writing straight
+ * to stderr bypasses the host's log level, bypasses a redirected diagnostic
+ * stream, and on Android bypasses __android_log_write entirely, so the lines
+ * land nowhere a user can see them.
+ *
+ * Install a sink and every line goes there instead. `level` is one of
+ * 'I' / 'W' / 'E'; `line` is the bare message with NO prefix, so a host can
+ * apply its own — a devourer consumer forwards it to Logger::info/warn/error,
+ * which re-adds "devourer [X] " and honours the level and stream it was
+ * configured with. Passing NULL restores the built-in stderr sink; installing a
+ * sink that does nothing silences the library.
+ *
+ * Set it before any worker thread starts, and do not change it afterwards: the
+ * pointer is read from the RX event thread without synchronisation. That is the
+ * same discipline devourer's own logger documents for set_level and
+ * set_diag_stream, and for the same reason.
+ */
+typedef void (*mt7612u_log_sink)(void *user, char level, const char *line);
+void mt7612u_set_log_sink(mt7612u_log_sink sink, void *user);
 
 /* Reattaches the kernel driver on close unless this is set. */
 void mt7612u_keep_detached(struct mt7612u_dev *dev, int keep);

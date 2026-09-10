@@ -53,7 +53,7 @@ static uint8_t *slurp(const char *dir, const char *name, size_t *out_len)
 	if (!f) { ERR("cannot open %s", path); return NULL; }
 	fseek(f, 0, SEEK_END); n = ftell(f); fseek(f, 0, SEEK_SET);
 	if (n <= 0) { fclose(f); ERR("%s is empty", path); return NULL; }
-	buf = malloc((size_t)n);
+	buf = (uint8_t *)malloc((size_t)n);
 	if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) {
 		free(buf); fclose(f); ERR("short read on %s", path); return NULL;
 	}
@@ -66,8 +66,8 @@ static uint8_t *slurp(const char *dir, const char *name, size_t *out_len)
 static void fw_reset(struct mt7612u_dev *d)
 {
 	mt_vendor_req(d, MT_VEND_DEV_MODE,
-	              LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR |
-	              LIBUSB_RECIPIENT_DEVICE, 0x1, 0, NULL, 0);
+	              (uint8_t)LIBUSB_ENDPOINT_OUT | (uint8_t)LIBUSB_REQUEST_TYPE_VENDOR |
+	              (uint8_t)LIBUSB_RECIPIENT_DEVICE, 0x1, 0, NULL, 0);
 }
 
 /* The FCE preamble that must precede every blob upload. */
@@ -118,7 +118,7 @@ static int fw_send_data(struct mt7612u_dev *d, const uint8_t *data, int data_len
                         uint32_t max_payload, uint32_t offset)
 {
 	int max_len = (int)max_payload - 8, pos = 0, rc = 0;
-	uint8_t *scratch = malloc(max_payload);
+	uint8_t *scratch = (uint8_t *)malloc(max_payload);
 
 	if (!scratch) return FW_ERR_FATAL;
 	while (data_len > 0) {
@@ -163,8 +163,9 @@ static int load_rom_patch(struct mt7612u_dev *d, const char *dir)
 		static const uint8_t wmt[]    = { 0x6f, 0xfc, 0x05, 0x01,
 		                                  0x07, 0x01, 0x00, 0x04 };
 		uint8_t b[16];
-		const uint8_t type = LIBUSB_ENDPOINT_OUT |
-		                     LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_DEVICE;
+		const uint8_t type = (uint8_t)LIBUSB_ENDPOINT_OUT |
+		                     (uint8_t)LIBUSB_REQUEST_TYPE_CLASS |
+		                     (uint8_t)LIBUSB_RECIPIENT_DEVICE;
 
 		memcpy(b, enable, sizeof enable);
 		mt_vendor_req(d, MT_VEND_DEV_MODE, type, 0x12, 0, b, sizeof enable);
@@ -227,8 +228,8 @@ static int load_firmware(struct mt7612u_dev *d, const char *dir)
 
 	/* load IVB: MT_VEND_DEV_MODE, VENDOR type, wValue 0x12, no data. */
 	mt_vendor_req(d, MT_VEND_DEV_MODE,
-	              LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR |
-	              LIBUSB_RECIPIENT_DEVICE, 0x12, 0, NULL, 0);
+	              (uint8_t)LIBUSB_ENDPOINT_OUT | (uint8_t)LIBUSB_REQUEST_TYPE_VENDOR |
+	              (uint8_t)LIBUSB_RECIPIENT_DEVICE, 0x12, 0, NULL, 0);
 
 	if (!mt_poll(d, MT_MCU_COM_REG0, BIT(0), BIT(0), 100000)) {
 		ERR("firmware failed to start (MT_MCU_COM_REG0=0x%08x)",

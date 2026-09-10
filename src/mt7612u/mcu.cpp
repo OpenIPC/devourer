@@ -78,7 +78,7 @@ int mt_mcu_send(struct mt7612u_dev *d, int cmd, const void *data, int len,
 	 * thread so nothing contends today, but a consumer that drives the tick
 	 * from a second thread would otherwise steal its own responses - the
 	 * failure reads as "mcu resp mismatch ... (want 1)". */
-	pthread_mutex_lock(&d->io_lock);
+	d->io_lock.lock();
 
 	/* Drain replies nobody collected before sending, but only when one is
 	 * actually outstanding.  A reply that lands after mcu_wait_resp() gave up
@@ -169,12 +169,12 @@ int mt_mcu_send(struct mt7612u_dev *d, int cmd, const void *data, int len,
 		 * is the third way a command goes unanswered, so it arms the
 		 * drain like the two in mcu_wait_resp(). */
 		d->mcu_stale_pending = 1;
-		pthread_mutex_unlock(&d->io_lock);
+		d->io_lock.unlock();
 		return -1;
 	}
 
 	mcu_rc = wait_resp ? mcu_wait_resp(d, seq) : 0;
-	pthread_mutex_unlock(&d->io_lock);
+	d->io_lock.unlock();
 	return mcu_rc;
 }
 

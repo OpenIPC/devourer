@@ -164,12 +164,30 @@ SW_DEFINE tag-echo gap counting. An off verdict also requires at least 90% of
 reported frames at the configured retry limit (`MIN_RETRY_PIN_RATE`); one
 pinned outlier cannot stand in for the claimed retry-pinned distribution.
 
-When the configured responder is an RTL8733B (`0bda:f72b` or `0bda:b733`),
-the harness adds a fourth **disarmed** phase: arm MAC1, start a timer only
-after the backend has completed bring-up and arming, clear it in the same live
-process, then solicit MAC1 and expect the off verdict. That phase is
-deliberately skipped for the default Jaguar1 responder; its disarm semantics
-require separate backend-specific evidence.
+When the configured responder has a measured backend-owned hook — RTL8733B
+(`0bda:f72b` / `0bda:b733`) or the reference RTL8812AU (`0bda:8812`) — the
+harness adds a fourth **disarmed** phase: arm MAC1, start a timer only after
+that backend has completed bring-up and arming, clear it in the same live
+process, then solicit MAC1 and expect the off verdict. Other responders are
+skipped rather than using a generic timer whose ordering against `Init()` is
+undefined.
+
+The Jaguar1 disarm cell was measured on a reference `0bda:8812` responder
+with a `0bda:c812` solicitor at channel 36/MCS3/retry limit 12. It reproduced
+the gate-only failure and passed after restoring the captured pre-arm MACID:
+
+| Jaguar1 identity/disarm cell | ACKed / reported |
+|---|---:|
+| arm MAC1, then gate-only clear | 1946 / 1946 |
+| arm MAC1, then verified identity restore | 0 / 997 |
+| never arm, solicit captured MACID | 0 / 1074 |
+| arm captured MACID, then gate-only clear | 1120 / 1120 |
+
+The last two rows are the same-address adversary: restoring the captured MACID
+cannot disarm a responder armed to that address, so the arm is refused. The
+implementation also restores and readback-verifies BSSID as defensive
+port-state cleanup; the ACK-rate result does not establish that BSSID affected
+response behavior.
 
 TX sessions run `DEVOURER_TX_WITH_RX=thread`: CCX reports arrive on the C2H
 RX path, so J1/J2 TX-only sessions never see them (measured: J2 TX-only = 0

@@ -11,7 +11,8 @@
 #              descriptor limit set by DEVOURER_TX_RETRY_LIMIT (this matrix
 #              pins 12 so the hardware-ARQ capability stays visible) — the
 #              no-ACK outcome is VISIBLE per frame.
-# An RTL8733B responder adds a fourth, same-process `disarmed` phase.
+# A responder with a measured backend-owned hook adds a fourth, same-process
+# `disarmed` phase (currently RTL8733B and reference RTL8812AU USB IDs).
 # Every phase also measures report_coverage (reports / frames sent) and, on
 # HalMAC (J2/J3), SW_DEFINE tag-echo gaps + the firmware missed counter.
 #
@@ -33,7 +34,7 @@ MAC1=${MAC1:-02:12:34:56:78:9a}
 MAC2=${MAC2:-02:12:34:56:78:9b}
 TX_SA=${TX_SA:-02:aa:bb:cc:dd:01}   # unicast TA (the ACK RA I/G footgun)
 RETRY_LIMIT=${RETRY_LIMIT:-12}      # descriptor retry pin for the off phase
-DISARM_MS=${DISARM_MS:-2000}        # RTL8733B post-bring-up disarm delay
+DISARM_MS=${DISARM_MS:-2000}        # backend-anchored post-bring-up delay
 MIN_SENT=${MIN_SENT:-100}           # reject dead/too-short transmitter cells
 MIN_REPORT_COVERAGE=${MIN_REPORT_COVERAGE:-0.80} # reject sparse CCX samples
 MIN_RETRY_PIN_RATE=${MIN_RETRY_PIN_RATE:-0.90} # OFF must be broadly pinned
@@ -130,10 +131,11 @@ run_phase() { # $1 cell $2 phase $3 tx vid $4 tx pid $5 RA mac $6 responder mac 
       'async ring of .* URBs submitted' "$tag responder RX readiness"
     if [ -n "$disarm_ms" ]; then
       wait_for_log "$resp_pid" "$OUT/resp_$tag.err" \
-        'hardware ACK responder disarmed \(MACID back to' \
+        'hardware ACK responder disarmed \(MACID(/BSSID)? back to' \
         "$tag responder disarm"
     fi
-    if grep -qE 'ACK responder (gate did not latch|MACID could not|.*UNKNOWN)' \
+    if grep -qE \
+         'ACK responder gate did not latch|net_type did not read NoLink|MACID(/BSSID)? (could not be|was not) restored|rollback was not fully verified|hardware state UNKNOWN' \
          "$OUT/resp_$tag.err"; then
       echo "ABORT: $tag responder state was not verified" >&2
       tail -8 "$OUT/resp_$tag.err" >&2
@@ -195,16 +197,16 @@ for cell in $CELLS; do
   run_phase "$name" on       "$vid" "$pid" "$MAC1" "$MAC1" on
   run_phase "$name" retarget "$vid" "$pid" "$MAC2" "$MAC2" on
   run_phase "$name" off      "$vid" "$pid" "$MAC1" ""      off
-  # The RTL8733B-only cell that measures a DISARM rather than a never-armed
+  # The backend-scoped cell that measures a DISARM rather than a never-armed
   # chip: arm on MAC1, start the timer after verified bring-up, disarm, then
-  # solicit MAC1. The hook is intentionally not generic: Jaguar1/2/3 have no
-  # init-wide synchronization, and their disarm semantics need separate cells.
+  # solicit MAC1. Each accepted backend owns that sequencing; unmeasured
+  # generations are skipped rather than racing a generic timer against Init.
   case "${RESP_VID,,}:${RESP_PID,,}" in
-    0x0bda:0xf72b|0x0bda:0xb733)
+    0x0bda:0xf72b|0x0bda:0xb733|0x0bda:0x8812)
       run_phase "$name" disarmed "$vid" "$pid" "$MAC1" "$MAC1" off "$DISARM_MS"
       ;;
     *)
-      echo "-- ${name}_disarmed: SKIP (RTL8733B responder required)"
+      echo "-- ${name}_disarmed: SKIP (no measured backend-owned hook)"
       ;;
   esac
 done

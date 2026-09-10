@@ -208,11 +208,11 @@ public:
    * when unsupported or when arm/verification fails; false is not proof of
    * passive state, so implementations log if rollback cannot be verified.
    * Clear is a non-throwing best effort to return net_type to No Link — and,
-   * on a die whose engine does not consult net_type, to move the port identity
-   * off `mac` as well, which is the only thing that changes its behaviour
-   * there (see Rtl8733bDevice::disarm_ack_responder). Clear does not promise
-   * silence: a die that matches MACID alone answers for whatever address is
-   * left programmed, including the one MAC bring-up wrote. */
+   * where clearing net_type does not end the measured response behavior, to
+   * move the port identity off `mac` as well (see the RTL8733B and
+   * Jaguar1/CHIP_8812 backends). Clear does not promise silence: a die that
+   * matches MACID alone answers for whatever address is left programmed,
+   * including the one MAC bring-up wrote. */
   virtual bool SetAckResponder(const devourer::MacAddr &mac) {
     (void)mac;
     return false;
@@ -409,7 +409,10 @@ public:
    * process does NOT silence it (bench-bitten: a killed probe's beacon kept
    * airing and contaminated the next test's witness) — so any beaconing
    * session that ends without a device power-cycle must call this. Idempotent;
-   * returns false when no beacon was active. */
+   * returns false when no beacon was active. Jaguar1 additionally reads back
+   * its three stop controls and returns false if any remains active; that
+   * failure must be retried (or followed by hardware shutdown) before its
+   * shared port is reused. */
   virtual bool StopBeacon() { return false; }
 
   /* Disable / restore the MAC carrier-sense gate that defers TX — both primary

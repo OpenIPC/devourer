@@ -1448,9 +1448,9 @@ int main(int argc, char **argv) {
       .f("stage", "demo.create_device")
       .f("ms", ms_since_start());
   devourer::emit_adapter_caps(*g_ev, rtlDevice);
-  /* RTL8733B-only measurement hook. Scheduling belongs to the concrete
-   * backend so the delay starts after its verified arm/bring-up rather than
-   * racing Init from a generic side thread. Refuse other generations: a green
+  /* Backend-scoped measurement hook. Scheduling belongs to each measured
+   * concrete backend so the delay starts after its arm/bring-up rather than
+   * racing Init from a generic side thread. Refuse unmeasured paths: a green
    * run that cleared a cold port before Init armed it is false evidence. */
   if (const char *d = std::getenv("DEVOURER_ACK_DISARM_AFTER_MS")) {
     const char *responder = std::getenv("DEVOURER_ACK_RESPONDER");
@@ -1472,22 +1472,28 @@ int main(int argc, char **argv) {
                       d);
         return 1;
       }
+      bool scheduled = false;
+#if defined(DEVOURER_HAVE_JAGUAR1)
+      if (auto *jaguar1 = dynamic_cast<RtlJaguarDevice *>(rtlDevice))
+        scheduled = jaguar1->ScheduleAckResponderDisarmForTest(
+            static_cast<uint32_t>(ms));
+#endif
 #if defined(DEVOURER_HAVE_8733B)
-      auto *rtl8733b = dynamic_cast<Rtl8733bDevice *>(rtlDevice);
-      if (rtl8733b == nullptr) {
-        logger->error("DEVOURER_ACK_DISARM_AFTER_MS is RTL8733B-only: "
-                      "refusing a race-prone measurement on {}",
-                      devourer::generation_name(
-                          rtlDevice->GetAdapterCaps().generation));
+      if (auto *rtl8733b = dynamic_cast<Rtl8733bDevice *>(rtlDevice)) {
+        rtl8733b->ScheduleAckResponderDisarmForTest(
+            static_cast<uint32_t>(ms));
+        scheduled = true;
+      }
+#endif
+      if (!scheduled) {
+        logger->error(
+            "DEVOURER_ACK_DISARM_AFTER_MS is supported only by RTL8733B "
+            "and the Jaguar1/CHIP_8812 path (measured on RTL8812AU); "
+            "refusing {}",
+            devourer::generation_name(
+                rtlDevice->GetAdapterCaps().generation));
         return 1;
       }
-      rtl8733b->ScheduleAckResponderDisarmForTest(
-          static_cast<uint32_t>(ms));
-#else
-      logger->error("DEVOURER_ACK_DISARM_AFTER_MS requires an RTL8733B-enabled "
-                    "build");
-      return 1;
-#endif
     }
   }
   /* The BB-debug-port / queue-depth research helpers are Jaguar1-only, so

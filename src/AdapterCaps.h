@@ -194,9 +194,17 @@ struct AdapterCaps {
    * tests/ack_txreport_matrix.sh run with the 8733B as the responder).
    *
    * The `on`, `retarget`, and legacy `off` rows establish arming, retargeting,
-   * and a never-armed control. Only the RTL8733B-scoped `disarmed` row arms and
-   * clears within one process; it supports the RTL8733B live-disarm claim only
-   * and establishes nothing about disarm on other dies.
+   * and a never-armed control. A backend-owned `disarmed` row supports only
+   * the live-disarm claim for the responder used in that run. On the reference
+   * RTL8812AU, the old gate-only clear left every soliciting report ACKed;
+   * restoring the captured pre-arm MACID produced no ACKs with retries pinned
+   * at the configured limit. The own-MAC adversary also showed why an arm equal
+   * to the captured MACID must be refused. docs/scheduled-mac.md owns the exact
+   * counts. The implementation additionally restores and readback-verifies
+   * BSSID as port-state hygiene; the ACK-rate result does not attribute the
+   * behavioral change to BSSID. The implementation covers the shared CHIP_8812
+   * path, but its 1T1R RTL8811AU cut was not separately measured; 8814A/8821A
+   * and the HalMAC generations do not inherit the result.
    *
    * On the 8733B the net_type gate is INERT and the engine matches MACID
    * alone: at single-shot ACK rate a never-armed port answers on its own EFUSE

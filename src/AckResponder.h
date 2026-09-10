@@ -9,12 +9,13 @@
  * matches MACID while net_type reads NoLink, so MAC bring-up already permits
  * responses to the adapter's own address and SetAckResponder retargets that
  * match to the requested address. See the measured truth table in
- * AdapterCaps.h and Rtl8733bDevice::ClearAckResponder.
+ * AdapterCaps.h and the RTL8733B/Jaguar1 clear implementations.
  *
  * This header carries that register recipe minus the beacon machinery. Which
  * half controls a live disarm is a measured per-die property: use the shared
  * gate-only clear only where net_type is sufficient; otherwise the backend
- * must also move the identity off the responder address with retarget().
+ * must also move the identity off the responder address with retarget() or an
+ * exact captured-identity restore.
  *
  * On the adapter combinations exercised by tests/ampdu_ba_check.sh, the SAME
  * gate also enables the hardware BlockAck responder. RTL8733B has its own
@@ -99,13 +100,13 @@ inline bool enable(RtlAdapter &dev, const uint8_t mac[6]) noexcept {
     return false;
   } catch (...) {
     /* SetAckResponder is a bool contract. Its callers perform a verified
-     * rollback and report UNKNOWN state if transport reads remain unavailable. */
+     * rollback and diagnose whichever register readbacks remain unavailable. */
     return false;
   }
 }
 
 /* Shared gate-only clear for dies where net_type controls the responder.
- * RTL8733B callers must additionally retarget MACID. */
+ * RTL8733B and Jaguar1/CHIP_8812 callers must additionally retarget MACID. */
 inline bool disable(RtlAdapter &dev) {
   const uint8_t nt = dev.rtw_read8(0x0102);
   return dev.rtw_write8(0x0102, static_cast<uint8_t>(nt & ~0x03u));
@@ -113,7 +114,7 @@ inline bool disable(RtlAdapter &dev) {
 
 /* Point the ACK-match identity at another address WITHOUT touching the gate.
  *
- * On the RTL8733B this is the ONLY thing that changes whether the port answers.
+ * On RTL8733B this is the ONLY thing that changes whether the port answers.
  * net_type is inert there — measured, three cells, single-shot ACK rate at
  * MCS3 with a Jaguar1 soliciting:
  *
@@ -141,6 +142,11 @@ inline bool disable(RtlAdapter &dev) {
  * (src/jaguar1/HalModule.cpp, EepromManager.h) — and a radio being disarmed may
  * still be injecting. Zero would not remove the match either, only move it:
  * 00:00:00:00:00:00 has the I/G bit clear, so is_unicast() accepts it.
+ * Jaguar1/CHIP_8812 has a distinct measured failure with the same remedy:
+ * NoLink verifies after a gate-only clear, but the old MACID continues
+ * answering until the backend restores its captured pre-arm port identity.
+ * AdapterCaps.h owns that before/after evidence; the result is not generalized
+ * to other Jaguar1 dies.
  *
  * Gate untouched on purpose: this is the identity half, so a caller composes it
  * with disable() in whichever order its die needs, and no generation gets a
@@ -176,10 +182,91 @@ inline bool disable_verified(RtlAdapter &dev) noexcept {
   }
 }
 
+/* Exact port-0 identity snapshot/restore for a backend that must return more
+ * than MACID to its pre-arm state. Keep the packed register representation so
+ * no byte-order conversion can diverge between capture and restore. */
+struct PortIdentity {
+  uint32_t macid_lo = 0;
+  uint16_t macid_hi = 0;
+  uint32_t bssid_lo = 0;
+  uint16_t bssid_hi = 0;
+};
+
+inline bool snapshot_port_identity(RtlAdapter &dev, PortIdentity &out) noexcept {
+  try {
+    out = {.macid_lo = dev.rtw_read<uint32_t>(0x0610),
+           .macid_hi = dev.rtw_read16(0x0614),
+           .bssid_lo = dev.rtw_read<uint32_t>(0x0618),
+           .bssid_hi = dev.rtw_read16(0x061c)};
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+inline bool port_mac_is(const PortIdentity &identity,
+                        const uint8_t mac[6]) noexcept {
+  return identity.macid_lo == macid_lo(mac) &&
+         identity.macid_hi == macid_hi(mac);
+}
+
+inline bool restore_port_identity(RtlAdapter &dev,
+                                  const PortIdentity &identity) noexcept {
+  /* Keep each operation exception-contained so all four halves are attempted
+   * even if a transport throws instead of returning false. */
+  auto write32 = [&dev](uint16_t reg, uint32_t value) noexcept {
+    try {
+      return dev.rtw_write<uint32_t>(reg, value);
+    } catch (...) {
+      return false;
+    }
+  };
+  auto write16 = [&dev](uint16_t reg, uint16_t value) noexcept {
+    try {
+      return dev.rtw_write16(reg, value);
+    } catch (...) {
+      return false;
+    }
+  };
+  const bool ml = write32(0x0610, identity.macid_lo);
+  const bool mh = write16(0x0614, identity.macid_hi);
+  const bool bl = write32(0x0618, identity.bssid_lo);
+  const bool bh = write16(0x061c, identity.bssid_hi);
+  return ml && mh && bl && bh;
+}
+
+inline bool port_identity_is(RtlAdapter &dev,
+                             const PortIdentity &identity) noexcept {
+  try {
+    return dev.rtw_read<uint32_t>(0x0610) == identity.macid_lo &&
+           dev.rtw_read16(0x0614) == identity.macid_hi &&
+           dev.rtw_read<uint32_t>(0x0618) == identity.bssid_lo &&
+           dev.rtw_read16(0x061c) == identity.bssid_hi;
+  } catch (...) {
+    return false;
+  }
+}
+
 /* The MAC must be UNICAST: a station cannot ACK-target a group address, so an
  * arm on one can never fire. Lives here rather than in each backend because
  * the precondition is a property of the recipe, not of any one die. */
 inline bool is_unicast(const uint8_t mac[6]) { return (mac[0] & 0x01u) == 0; }
+
+/* A rollback target must be a usable station identity, not merely readable.
+ * An all-zero MAC has the I/G bit clear (so is_unicast accepts it), remains a
+ * matchable address, and also stops TX scheduling on the Jaguar1 8812 path. */
+inline bool has_safe_restore_mac(const PortIdentity &identity) noexcept {
+  return (identity.macid_lo != 0 || identity.macid_hi != 0) &&
+         (identity.macid_lo & 0x01u) == 0;
+}
+
+/* Retargeting can only move a responder off its armed address when the restore
+ * identity differs. The caller owns both values and must reject equality on a
+ * die where the gate clear alone was measured insufficient. */
+inline bool disarmable_by_retarget(const uint8_t responder[6],
+                                   const PortIdentity &restore) noexcept {
+  return !port_mac_is(restore, responder);
+}
 
 /* Did the requested arm recipe land? Reads back net_type and the RA the ACK
  * engine matches (MACID), composed exactly as enable() writes them — keeping

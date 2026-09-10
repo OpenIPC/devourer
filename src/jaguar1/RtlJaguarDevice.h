@@ -7,10 +7,12 @@
 #include <iostream>
 #include <iomanip>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
 #include <vector>
 
+#include "AckResponder.h"
 #include "logger.h"
 #include "BbDbgportReader.h"
 #include "LaCapture.h"
@@ -68,6 +70,36 @@ class RtlJaguarDevice : public IRtlRadio {
    * a narrow counter's wrap jumps the sampling phase for any N that doesn't
    * divide it (2^32 is ~20 days at field frame rates). */
   std::atomic<uint64_t> _tx_ccx_ctr{0};
+
+  /* rxdemo's live-disarm measurement request. Consumed by Init only after
+   * bring-up and a configured responder arm have completed. */
+  std::optional<uint32_t> _ack_disarm_after_ms;
+  std::optional<devourer::ack::PortIdentity> _ack_restore_identity;
+  /* Port 0 backs both the hardware ACK responder and beacon engine on every
+   * Jaguar1 die. Track ACK ownership independently of CHIP_8812's restore
+   * snapshot: the other dies still use the same MACID/BSSID/net-type registers
+   * and must not overwrite a beacon (or have a stray clear disable one). */
+  bool _port0_ack_claimed = false;
+  /* Successful-arm identity for delayed test clears and Init rollback. A
+   * replacement arm gets a new generation even when it uses the same MAC. The
+   * active token is invalidated before the replacement's first mutation and
+   * installed only after full success, so a failed/ambiguous replacement
+   * cannot inherit an older timer. Protected by _port0_mu. */
+  uint64_t _ack_arm_generation = 0;
+  std::optional<uint64_t> _active_ack_arm_generation;
+  /* The test disarm worker is concurrent with callers, and StartBeacon calls
+   * back into PinBeaconTbtt, so serialize the complete ownership checks and
+   * multi-register transactions with a recursive mutex. */
+  std::recursive_mutex _port0_mu;
+
+  /* Shared by ClearAckResponder and SetAckResponder rollback. On 8812
+   * silicon a gate-only clear was measured to leave the old MACID answering,
+   * so this restores and verifies the captured pre-arm identity as well. */
+  bool disarm_ack_responder();
+  bool ack_arm_token_is_current(uint64_t expected) const noexcept {
+    return _port0_ack_claimed && _active_ack_arm_generation &&
+           *_active_ack_arm_generation == expected;
+  }
 
   /* CW single-tone (StartCwTone/StopCwTone) saved state for a clean restore:
    * the pre-tone RF 0x00 and four BB dwords — RFE-pinmux words on 8812/8821
@@ -256,6 +288,16 @@ public:
   /* Hardware ACK responder (IRadio contract; src/AckResponder.h). */
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
+  /* Schedule rxdemo's hardware-only live-disarm cell. False leaves the
+   * request unset. Enabled for the shared CHIP_8812 implementation; measured
+   * on a reference RTL8812AU, not separately on its RTL8811AU cut. */
+  bool ScheduleAckResponderDisarmForTest(uint32_t delay_ms) {
+    std::lock_guard<std::recursive_mutex> lock(_port0_mu);
+    if (_eepromManager->version_id.ICType != CHIP_8812)
+      return false;
+    _ack_disarm_after_ms = delay_ms;
+    return true;
+  }
   /* Carrier-sense gate (IRadio contract): MAC 0x520[14]/[15] like the
    * HalMAC generations, plus this family's BB EDCCA thresholds (0x8a4) —
    * parked at never-trigger by the BB table, programmed to the vendor
@@ -402,6 +444,12 @@ private:
    * steer rides the fine mechanism, which keeps the grid TSF-derived.) */
   std::vector<uint8_t> _bcn_mpdu;
   int _bcn_interval_tu = 0;
+  /* Set before StartBeacon's first port mutation and retained if setup fails,
+   * so ACK arming cannot mistake a partially configured beacon port for free.
+   * StopBeacon releases the claim only after every hardware stop control reads
+   * back inactive, even when no payload was retained. Mutual exclusion with
+   * _port0_ack_claimed applies to every Jaguar1 die. */
+  bool _port0_beacon_claimed = false;
   /* Download `mpdu` to the reserved page at the BCNQ boundary via the vendor
    * rtl8812_download_rsvd_page bracket; polls BCN_VALID (0x20A[0]). Leaves
    * BCN_CTRL as it found it. */

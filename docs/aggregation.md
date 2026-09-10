@@ -192,10 +192,13 @@ numbers above came from.
 arms the MAC's autonomous ACK engine while monitor RX/injection continue
 unchanged: port identity (MACID/BSSID 0x610/0x618 = `mac`) + net_type (0x102
 [1:0] = AP). No beacon machinery, no ADDBA session state, no CAM entry.
-Which half of that pair is actually the gate is per-die: on the generations
-the AP-mode work covered, net_type is; on the RTL8733B it is inert and the
-engine matches MACID alone, so a disarm there must move the identity
-(`src/AckResponder.h` retarget(), `src/AdapterCaps.h`).
+Which half of that pair ends live response behavior is per-die. net_type
+participates on the Jaguar generations covered by the AP-mode work, but a
+reference RTL8812AU still answered on the old MACID after NoLink read back and
+needed its pre-arm MACID restored (BSSID is restored too as defensive port
+state, not as a claimed response gate). On RTL8733B net_type is wholly inert
+and the engine matches MACID alone. See the per-die evidence in
+`src/AdapterCaps.h` and the shared mechanics in `src/AckResponder.h`.
 
 With a responder armed, a peer TXing unicast QoS-Data (normal ack-policy) to
 `mac` runs a full hardware ARQ loop — SIFS-timed ACKs from the responder,

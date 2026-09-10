@@ -1,10 +1,22 @@
-# MT7612U as a fully-userspace access point — what is missing
+# MT7612U as a fully-userspace access point
 
-**Status: Stages A and B implemented and device-verified** (see "Verified on
-hardware" below); Stages C–E (association responder, data plane, WPA2) still
-need the `IRtlDevice` wrapper and the existing C++ harnesses. File:line
-references are to the merged subtree at `daabab7` (`src/mt7612u/`), the mt76
-reference at `be5ce79`, and devourer's existing AP work.
+**Status: it works.** devourer's own AP harnesses run against this part
+unmodified — beacon, probe, auth, assoc, and the ARP/ICMP data plane — with a
+real Linux station associated. `StartBeacon`, `UpdateBeaconPayload` and
+`StopBeacon` are implemented on `Mt7612uRadio`, so nothing in
+`tests/ap_responder.cpp` or `tests/ap_wpa2.cpp` knows this is MediaTek.
+
+What is NOT done: WPA2. `tests/ap_wpa2.cpp` has not been run against this
+backend, and the hardware CCMP path (`MT_WCID_KEY`, `MT_SKEY`) is untouched —
+the claim below that hardware crypto is a capability *gain* on this part
+remains unmeasured. Key install is the one item of the original gap list that
+is still open.
+
+File:line references below are to the merged subtree (`src/mt7612u/`, all
+`.cpp` since the C++ migration) and to `reference/mt76 @ be5ce79`. Some of the
+citations in "The gap" section still name the pre-migration `.c` filenames and
+pre-merge line numbers; they are kept because the reasoning is still correct,
+but do not expect them to resolve.
 
 ## Verified on hardware (2026-09-08, MT7612U at USB 2-1)
 
@@ -27,6 +39,42 @@ Not yet done: probe **responses**, auth/assoc **responses** and the data plane �
 those are the existing backend-agnostic C++ harnesses' job (Stages C–E), not
 driver work.
 
+## Verified through IRadio (2026-09-10) — devourer as the AP
+
+The section above is the bring-up gates driving the C library directly. This
+one is devourer itself: `tests/ap_responder.cpp`, unmodified, built against
+`libdevourer.a` and pointed at an MT7612U. A second MT7612U on the kernel
+`mt76x2u` driver is the station. ch36, `iw reg set SE`.
+
+| Claim | Evidence |
+|---|---|
+| `StartBeacon` arms the MAC | `MT7612U beaconing every 100 TU`, then `ap_responder up on ch36 SSID devourerAP (beacon OK)` |
+| The beacon is on air and correct | station `iw scan`: `SSID: devourerAP`, `BSS 02:42:75:05:d6:00`, `beacon interval: 100 TUs`, `capability: ESS (0x0001)`, `DS Parameter set: channel 36`, −32 dBm |
+| A locally-administered BSSID works | that BSSID is `02:…`, so it lands in APC slot 1 by mt76's rule. The first draft of `mt7612u_beacon_start()` refused it outright |
+| A real station associates | `wlx…: connected to 02:42:75:05:d6:00`, `freq: 5180.0` |
+| The MAC auto-ACKs | AP side, three runs: `AUTH req … alg=0 seq=1 retry=0` and `ASSOC req … retry=0`. An un-ACKed frame is retransmitted with FC Retry set, so retry=0 IS the ACK |
+| The data plane works | `6 packets transmitted, 6 received, 0% packet loss, rtt avg 0.808 ms`; AP side `data(arp/icmp)=8 responses_sent=16` |
+| `StopBeacon` silences it | `tests/mt7612u_beacon_stop_check.cpp`: armed → SSID seen; stopped → gone; re-armed → seen again |
+
+### What this does not show
+
+- **WPA2 was not run.** Open network only.
+- **The station is the same silicon** (MT7612U on `mt76x2u`), so this is not an
+  independent-generation witness. The RTL8812AU witness in the section above is.
+- **One AP, one station, ~20 cm apart.** Every RSSI here is near-field.
+- **Longest run 70 s.** No soak, no second station, no rekey, no roaming, and
+  no channel change while beaconing.
+- **`iw scan` alone is not a witness for a beacon *stopping*.** Its BSS cache
+  holds an entry ~30 s after the beacon dies, and it reported a stopped beacon
+  as present until `iw scan flush` was used. A re-arm also takes long enough
+  (a 1600-byte page copy over EP0) that a scan at +8 s still misses it.
+- **Neither AP harness silences the beacon on exit.** Both end in `_exit(0)`,
+  which bypasses the destructor, so `Stop()` and `StopBeacon()` never run and
+  the MAC keeps beaconing until the adapter is power-cycled. That is why the
+  StopBeacon evidence above comes from a purpose-built harness and not from
+  "the SSID was gone after the process exited" — which is what it looked like
+  once, by luck, and was false.
+
 ## The claim, and why it holds
 
 The gap between "MT7612U injector" (what the subtree is) and "MT7612U userspace
@@ -37,7 +85,7 @@ all. Two reasons:
    probe/auth/assoc responder, the DHCP/ARP/ICMP data plane, and the WPA2 4-way
    handshake with software CCMP all live in `tests/` (`ap_responder.cpp`,
    `ap_wpa2.cpp`, `probe_responder.cpp`, `beacon_*.cpp`), driven entirely
-   through the `IRtlDevice` interface — `StartBeacon` + the RX callback +
+   through the `IRadio` interface — `StartBeacon` + the RX callback +
    `send_packet`. `docs/ap-mode.md` documents a complete open and WPA2-PSK AP
    validated against real Linux stations on this stack. None of it is
    Realtek-specific; it works against any backend that implements the beacon
@@ -116,9 +164,9 @@ Each has a direct mt76 recipe. Estimates are the C-library side only.
      `MT_MAC_BSSID_DW1` now reads `0x003f____`, matching mt76 bit for bit.
 
 2. **`StopBeacon` (~10 LOC).** Clear `BEACON_TX | TBTT_EN | TIMER_EN`. Note the
-   `IRtlDevice` contract: the chip beacons autonomously, so a session that ends
+   `IRadio` contract: the chip beacons autonomously, so a session that ends
    without a power-cycle **must** call this or the beacon contaminates the next
-   run (`src/IRtlDevice.h:424`).
+   run (`src/IRadio.h:407-413`).
 
 3. **Per-station / group key install (~50 LOC).** `MT_WCID_KEY(idx)` +
    `MT_WCID_ATTR` PKEY_MODE/PAIRWISE for pairwise, `MT_SKEY` + `MT_SKEY_MODE`
@@ -162,7 +210,7 @@ Each has a direct mt76 recipe. Estimates are the C-library side only.
 ### The two integration layers
 
 - **The mt7612u C library** gains items 1–4 above (~150 LOC, all with recipes).
-- **`RtlMt7612uDevice`** (the wrapper from the integration PR) exposes them as
+- **`Mt7612uRadio`** (the wrapper from the integration PR) exposes them as
   `StartBeacon`/`StopBeacon`/`UpdateBeaconPayload`/`SetAckResponder` over the C
   ABI, so the **existing** C++ AP harnesses in `tests/` run unchanged. No AP
   logic is written — it already exists.

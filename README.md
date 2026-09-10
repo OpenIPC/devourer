@@ -109,9 +109,18 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8832BU** (11ax)          | 2T2R              | —             | —             | —                | —          | Wi-Fi-only SKU of the 8852B die; rides the 8852BU code path. Not benchmarked. 5/10 MHz capable; HE ER SU + DCM extended range |
 | **RTL8832CU** (11ax)          | 2T2R + BT         | 40            | 33            | 32               | 32          | TP-Link Archer TX50UH (`35bc:0101`); Wi-Fi 6E tri-band (2.4/5/6 GHz). 5/10 and 160 MHz capable; HE ER SU + DCM extended range. Host-push injection over USB 2.0 (~50% duty ceiling); [6G TX+RX validated](tests/kestrel_8832cu_6g_txrx.sh) |
 | **RTL8852CU** (11ax)          | 2T2R + BT         | —             | —             | —                | —          | "8852" branding of the same 8852C die; rides the 8832CU code path. Not benchmarked. 5/10 and 160 MHz capable; HE ER SU + DCM extended range |
+| **MT7612U** (MediaTek)        | 2T2R              | ‖             | ‖             | —                | —          | Alfa AWUS036ACM / Aukey USBAC1200 (`0e8d:7612`) and 15 OEM ids; the one non-Realtek backend, opt-in with `-DDEVOURER_MT7612U=ON`. 20/40/80 MHz; no 5/10 MHz, no fast retune. [Measured record](docs/mt7612u.md) |
 
 `†` = works on-air but the reading varies run-to-run (bracketed = best clean
 reading).
+
+`‖` = **measured, but not by this column's method**, so not comparable with the
+rows above. These cells are USRP duty cycle × PHY rate; the MT7612U bench has
+no USRP, and its HT MCS7 / 20 MHz figures — 34.03 Mbit/s single-frame, 44.55
+with A-MPDU — are receiver frame counts instead, which is the instrument this
+project deliberately does not judge TX by. Both directions are validated
+against the kernel `mt76x2u` driver on 2.4 GHz and UNII-1:
+[the regression matrix](docs/mt7612u.md#on-air-against-the-kernel-driver).
 
 These cells are single-frame injection (the default TX path), measured as
 channel occupancy × PHY rate. A-MPDU (`SetAmpduMode`) does **not** move them on
@@ -136,6 +145,21 @@ The RTL8733B backend covers the 1T1R 802.11n RTL8731BU/RTL8733BU family with
 long preamble only). It intentionally does not advertise VHT, LDPC, SGI, STBC,
 or experimental 5/10 MHz operation; see
 [the validation record](docs/rtl8733b.md) for the tested and deferred matrix.
+
+The **MT7612U** backend (`src/mt7612u/`) is the one non-Realtek family, behind
+the same `IRadio` contract and sharing none of the Realtek HAL — this is 32-bit
+registers over EP0 plus an in-band MCU on EP8/EP5, with firmware uploaded at
+bring-up. It is OFF by default; build it with `-DDEVOURER_MT7612U=ON`, and note
+that the firmware is *not* embedded the way every Realtek blob is: `mt7662.bin`
+and `mt7662_rom_patch.bin` ship zstd-compressed in linux-firmware under their
+own licence, so they are searched for at runtime
+(`DeviceConfig.mt7612u.firmware_dir`). Monitor RX with per-chain RSSI, raw
+injection at any rate the TXWI can express, hardware ACK, A-MPDU and 20/40/80
+MHz tuning all work; there is no fast retune (≈50 ms fast / ≈530 ms full), no
+5/10 MHz, no HE, no 160 MHz, no beacons, and unicast injection is a 40× cliff.
+`SetTxMode` is refused — the C library has no session-default rate, so the rate
+goes in each frame's radiotap header instead, where it always wins. [Every
+number and its counterpart](docs/mt7612u.md).
 
 > Heads up — some Realtek sticks ship in "ZeroCD" mode and first enumerate as
 > a USB flash drive holding a Windows installer (`0bda:1a2b` is the canonical
@@ -371,7 +395,9 @@ per-chip quirks notes at the bottom.
 Headless selftests run with `ctest`. Hardware regression is
 `tests/regress.py`: a TX/RX matrix between devourer and the kernel driver
 across plugged-in adapters, with optional full-pair, encoding-sweep, and
-third-adapter-sniffer modes — see [`tests/README.md`](tests/README.md).
+third-adapter-sniffer modes — see [`tests/README.md`](tests/README.md). It
+covers the MediaTek backend too (`--mt7612u-fw-dir`, and `--tx-pid`/`--rx-pid`
+accept a sysfs id so two adapters of one model can be told apart).
 
 ## License
 

@@ -233,7 +233,7 @@ int mt_radiotap_parse(const uint8_t *buf, size_t len, struct mt7612u_tx_rate *r)
 int mt7612u_send_packet(struct mt7612u_dev *d, const void *buf, size_t len)
 {
 	struct mt7612u_tx_rate r;
-	const uint8_t *p = buf;
+	const uint8_t *p = (const uint8_t *)buf;
 	int rlen = mt_radiotap_parse(p, len, &r);
 
 	if (rlen <= 0 || (size_t)rlen >= len) {

@@ -65,7 +65,11 @@ static void test_hdrlen(void)
  */
 static void test_rx_l2pad(void)
 {
-	struct mt7612u_dev d;
+	/* Value-initialised, not memset: the device carries a
+	 * std::recursive_mutex now, and memsetting over a constructed
+	 * one is undefined (-Wclass-memaccess). {} zeroes every scalar
+	 * exactly as the memset did. */
+	struct mt7612u_dev d{};
 	uint8_t buf[256];
 	const uint8_t *frame = NULL;
 	struct mt7612u_rx_info info;
@@ -79,7 +83,6 @@ static void test_rx_l2pad(void)
 
 	printf("mt_rx_parse, L2 pad on a QoS frame:\n");
 
-	memset(&d, 0, sizeof d);
 	d.chainmask = 0x0202;
 	memset(buf, 0, sizeof buf);
 
@@ -201,7 +204,6 @@ static void test_vht_bandwidth(void)
  */
 static void test_invalid_phy(void)
 {
-	struct mt7612u_dev d;
 	uint8_t buf[128];
 	const uint8_t *frame = NULL;
 	struct mt7612u_rx_info info;
@@ -209,10 +211,16 @@ static void test_invalid_phy(void)
 
 	printf("mt_rx_parse, invalid PHY in the rate word:\n");
 	for (unsigned phy = 0; phy < 8; phy++) {
+		/* Declared inside the loop so each iteration still starts from a
+		 * zeroed device, which is what the memset here used to do. It
+		 * cannot be a memset any more: the device carries a
+		 * std::recursive_mutex, and writing over a constructed one is
+		 * undefined (-Wclass-memaccess). {} zeroes every scalar the same
+		 * way. */
+		struct mt7612u_dev d{};
 		uint16_t rate = (uint16_t)FIELD_PREP(MT_RATE_PHY, phy);
 		int len;
 
-		memset(&d, 0, sizeof d);
 		d.chainmask = 0x0202;
 		memset(buf, 0, sizeof buf);
 		for (int i = 0; i < 4; i++)

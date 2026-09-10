@@ -3,7 +3,7 @@
  * MT7612U bringup harness. One subcommand per gate (see src/mt7612u/README.md), so each
  * stage is independently runnable on hardware.
  */
-#include <stdatomic.h>
+#include <atomic>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -886,7 +886,8 @@ static int gate_mtu(uint8_t chan, int count)
 	for (k = 0; k < sizeof sizes / sizeof sizes[0]; k++) {
 		int len = sizes[k];
 		long ok_sync = 0, ok_async = 0;
-		unsigned long drained = 0;
+		/* atomic because drain_cb increments it from the RX event thread. */
+		std::atomic<unsigned long> drained{0};
 		int i, pass;
 
 		if ((size_t)len > sizeof frame) continue;
@@ -1040,15 +1041,17 @@ static int gate_soak(uint8_t chan, int secs, int framelen)
  * Relaxed atomics: these are counters, nothing orders anything else off them,
  * and this is the RX hot path in a throughput gate.
  */
-struct arx_ctx { _Atomic unsigned long n; _Atomic unsigned long by_phy[8]; };
+struct arx_ctx {
+	std::atomic<unsigned long> n;
+	std::atomic<unsigned long> by_phy[8];
+};
 static void arx_cb(void *user, const void *frame, size_t len,
                    const struct mt7612u_rx_info *info)
 {
-	struct arx_ctx *c = user;
+	struct arx_ctx *c = (struct arx_ctx *)user;
 	(void)frame; (void)len;
-	atomic_fetch_add_explicit(&c->n, 1, memory_order_relaxed);
-	atomic_fetch_add_explicit(&c->by_phy[info->phy & 7], 1,
-	                          memory_order_relaxed);
+	c->n.fetch_add(1, std::memory_order_relaxed);
+	c->by_phy[info->phy & 7].fetch_add(1, std::memory_order_relaxed);
 }
 
 /* Async RX ring: the callback path StartRxLoop needs. */
@@ -1088,14 +1091,15 @@ static int gate_arx(uint8_t chan, int secs, int notick)
 		printf("async RX on ch%u for %.1f s: %lu frames (%.0f/s), "
 		       "ring=%llu rx_err=%llu "
 		       "rx_invalid=%llu rx_dropped=%llu\n",
-		       chan, el, ctx.n, ctx.n / (el > 0 ? el : 1),
+		       chan, el, ctx.n.load(), ctx.n.load() / (el > 0 ? el : 1),
 		       (unsigned long long)st.rx_frames,
 		       (unsigned long long)st.rx_err,
 		       (unsigned long long)st.rx_invalid,
 		       (unsigned long long)st.rx_dropped);
 	}
 	for (int i = 0; i < 8; i++)
-		if (ctx.by_phy[i]) printf("  %-6s %lu\n", phy_name[i], ctx.by_phy[i]);
+		if (ctx.by_phy[i])
+			printf("  %-6s %lu\n", phy_name[i], ctx.by_phy[i].load());
 	rx_teardown();
 	mt_mac_stop(&dev);
 	return ctx.n ? 0 : 1;
@@ -1159,7 +1163,8 @@ static int gate_duplex(uint8_t chan, int secs)
 		mt_async_stats(&dev, &st);
 		printf("  TX %ld frames (%.0f fps)  RX %lu frames (%.0f fps)  "
 		       "tx_err=%llu rx_err=%llu\n",
-		       n, n * 1000.0 / wall, ctx.n, ctx.n * 1000.0 / wall,
+		       n, n * 1000.0 / wall, ctx.n.load(),
+		       ctx.n.load() * 1000.0 / wall,
 		       (unsigned long long)st.tx_err,
 		       (unsigned long long)st.rx_err);
 	}
@@ -1178,8 +1183,7 @@ static int gate_duplex(uint8_t chan, int secs)
 	 * stimulus and a wedged receiver look identical from here.
 	 */
 	{
-		unsigned long before = atomic_load_explicit(&ctx.n,
-		                                            memory_order_relaxed);
+		unsigned long before = ctx.n.load(std::memory_order_relaxed);
 		unsigned long after;
 
 		printf("  TX stopped; listening %.1f s for the receiver to recover\n",
@@ -1189,7 +1193,7 @@ static int gate_duplex(uint8_t chan, int secs)
 			mt_mac_stop(&dev);
 			return 1;
 		}
-		after = atomic_load_explicit(&ctx.n, memory_order_relaxed);
+		after = ctx.n.load(std::memory_order_relaxed);
 		printf("  RX after the flood: %lu frames\n", after - before);
 		rx_teardown();
 		mt_mac_stop(&dev);
@@ -1385,15 +1389,16 @@ static void drain_cb(void *user, const void *frame, size_t len,
                      const struct mt7612u_rx_info *info)
 {
 	(void)frame; (void)len; (void)info;
-	atomic_fetch_add_explicit((_Atomic unsigned long *)user, 1,
-	                          memory_order_relaxed);
+	((std::atomic<unsigned long> *)user)->fetch_add(
+	    1, std::memory_order_relaxed);
 }
 
 /* Capability descriptor, TSF and 40 MHz. */
 static int gate_caps(uint8_t chan)
 {
 	struct mt7612u_caps c;
-	unsigned long drained = 0;
+	/* atomic: drain_cb runs on the RX event thread. */
+	std::atomic<unsigned long> drained{0};
 	uint64_t t1, t2;
 	int64_t delta;
 	int bad = 0;
@@ -1509,7 +1514,8 @@ static int gate_caps(uint8_t chan)
 
 	rx_teardown();
 	mt_mac_stop(&dev);
-	printf("\n%lu frames drained from EP 4 while the receiver was on\n", drained);
+	printf("\n%lu frames drained from EP 4 while the receiver was on\n",
+	       drained.load());
 	printf("\nGATE caps: %s\n", bad ? "FAIL" : "PASS");
 	return bad;
 }
@@ -1525,25 +1531,27 @@ static int gate_caps(uint8_t chan)
  * duplicates this test is counting.
  */
 /* Same event-thread/gate split as arx_ctx above. */
-struct ack_ctx { _Atomic unsigned long to_us, retry_to_us, other; };
+struct ack_ctx {
+	std::atomic<unsigned long> to_us, retry_to_us, other;
+};
 
 static const uint8_t g_ack_mac[6] = { 0x02, 0x4d, 0x54, 0x76, 0x12, 0xaa };
 
 static void ack_cb(void *user, const void *frame, size_t len,
                    const struct mt7612u_rx_info *info)
 {
-	struct ack_ctx *c = user;
-	const uint8_t *f = frame;
+	struct ack_ctx *c = (struct ack_ctx *)user;
+	const uint8_t *f = (const uint8_t *)frame;
 
 	(void)info;
 	if (len < 16) return;
 	if (memcmp(f + 4, g_ack_mac, 6) != 0) {
-		atomic_fetch_add_explicit(&c->other, 1, memory_order_relaxed);
+		c->other.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
-	atomic_fetch_add_explicit(&c->to_us, 1, memory_order_relaxed);
+	c->to_us.fetch_add(1, std::memory_order_relaxed);
 	if (f[1] & 0x08)                        /* FC Retry bit */
-		atomic_fetch_add_explicit(&c->retry_to_us, 1, memory_order_relaxed);
+		c->retry_to_us.fetch_add(1, std::memory_order_relaxed);
 }
 
 static int gate_ack(uint8_t chan, int secs, int arm)
@@ -1605,7 +1613,7 @@ static int gate_ack(uint8_t chan, int secs, int arm)
 	}
 	rx_teardown();
 	printf("  stimulus frames addressed to the responder MAC: %lu (retries %lu)\n",
-	       off.to_us, off.retry_to_us);
+	       off.to_us.load(), off.retry_to_us.load());
 
 	if (arm) {
 		mt7612u_clear_ack_responder(&dev);
@@ -1743,7 +1751,8 @@ static int gate_rxbytes(uint8_t chan, int secs)
  *
  * Read-and-clear, so each line is the second that just passed.
  */
-static unsigned long linkstat_drained;
+/* atomic: drain_cb runs on the RX event thread. */
+static std::atomic<unsigned long> linkstat_drained{0};
 
 static int gate_linkstat(uint8_t chan, int secs, int with_rx)
 {
@@ -1798,7 +1807,8 @@ static int gate_linkstat(uint8_t chan, int secs, int with_rx)
 	}
 	if (with_rx) {
 		rx_teardown();
-		printf("  %lu frames reached the ring over the run\n", linkstat_drained);
+		printf("  %lu frames reached the ring over the run\n",
+		       linkstat_drained.load());
 	}
 	mt_mac_stop(&dev);
 	return 0;
@@ -1878,7 +1888,7 @@ static int g_link_n;
 static void linkrx_cb(void *user, const void *frame, size_t len,
                       const struct mt7612u_rx_info *info)
 {
-	const uint8_t *f = frame;
+	const uint8_t *f = (const uint8_t *)frame;
 	int slot = -1, pw;
 	uint8_t bytes[20];
 
@@ -2125,7 +2135,7 @@ static int gate_coding(uint8_t chan, int count, int bw)
 			struct mt7612u_tx_rate r = {
 				.phy = rates[i].phy, .mcs = rates[i].mcs,
 				.nss = rates[i].nss,
-				.bw = (uint8_t)bw,
+				.bw = (enum mt7612u_bw)bw,
 				.sgi = (coding & 4) ? 1u : 0u,
 				.ldpc = (coding & 1) ? 1u : 0u,
 				.stbc = (coding & 2) ? 1u : 0u,
@@ -2238,7 +2248,7 @@ static int gate_sweep(uint8_t chan, int count, int bw)
 		for (int mcs = 0; mcs <= last_mcs; mcs++) {
 			for (int nss = 1; nss <= 2; nss++) {
 				struct mt7612u_tx_rate r = {
-					.bw = (uint8_t)bw,
+					.bw = (enum mt7612u_bw)bw,
 					.no_ack = 1,
 				};
 				char what[32];
@@ -2355,7 +2365,7 @@ static int gate_vht(uint8_t chan, int count, int bw)
 	for (unsigned a = 0; a < sizeof arms / sizeof arms[0]; a++) {
 		struct mt7612u_tx_rate r = { .phy = arms[a].phy, .mcs = arms[a].mcs,
 		                             .nss = arms[a].nss,
-		                             .bw = (uint8_t)bw,
+		                             .bw = (enum mt7612u_bw)bw,
 		                             .no_ack = 1 };
 		long sent = 0;
 
@@ -2518,6 +2528,9 @@ int main(int argc, char **argv)
 	 * experiments observe-only.  Same spelling as before. */
 	if (getenv("MT7612U_NO_AUTORECOVER"))
 		dev.no_autorecover = 1;
+	/* Same shape, same reason: the library takes a selector, this tool is what
+	 * reads the environment for it. Operator-facing spelling is unchanged. */
+	dev.dev_selector = getenv("MT7612U_DEV");
 
 	/* Runs before the global mt_open() below, because it IS an open - of the
 	 * other public entry point. */

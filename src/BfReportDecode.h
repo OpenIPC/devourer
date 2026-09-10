@@ -59,7 +59,12 @@ struct ReportHdr {
 
 /* True if `d`(n) is a VHT/HT Compressed Beamforming report; fills `hdr`. Mirrors
  * parse_frame() + the MU V-angle slice (ns*10 bits) in the Python tool. */
-inline bool parse_report(const uint8_t *d, size_t n, ReportHdr &hdr) {
+/* fcs_present: does `d` still carry the trailing 4-byte FCS?  Defaulted true
+ * because that is what every Realtek backend delivers and what the captured
+ * selftest fixture contains; pass RxAtrib.fcs_present when a Packet is in
+ * reach, so a MediaTek frame is not shortened by four bytes of real payload. */
+inline bool parse_report(const uint8_t *d, size_t n, ReportHdr &hdr,
+                         bool fcs_present = true) {
   if (d == nullptr || n < 30)
     return false;
   uint8_t sub = d[0] & 0xF0;
@@ -79,10 +84,14 @@ inline bool parse_report(const uint8_t *d, size_t n, ReportHdr &hdr) {
   hdr.mu = ((mc >> 11) & 0x1) != 0;
   hdr.vht = vht;
   hdr.ns = report_ns(hdr.bw, hdr.ng);
-  if (hdr.ns <= 0 || n < 30 + (size_t)hdr.nc + 4)
+  const size_t fcs = fcs_present ? 4u : 0u;
+  if (hdr.ns <= 0 || n < 30 + (size_t)hdr.nc + fcs)
     return false;
   const uint8_t *ab = d + 29 + hdr.nc;          /* after per-column avg SNR */
-  size_t ab_len = n - (29 + (size_t)hdr.nc) - 4; /* drop 4-byte FCS */
+  /* Drop the FCS only when the backend actually delivered one; the
+   * MediaTek MAC strips it, and taking four bytes off there removes
+   * real angle data (see rx_pkt_attrib::fcs_present). */
+  size_t ab_len = n - (29 + (size_t)hdr.nc) - fcs;
   if (hdr.mu) {
     /* MU report: the V-angles are the first ns*10 bits (the Realtek compact 2x1
      * codebook); the MU Exclusive per-tone SNR follows and is not decoded here. */

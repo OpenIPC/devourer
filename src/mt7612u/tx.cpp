@@ -117,7 +117,7 @@ int mt_tx_build(struct mt7612u_dev *d, uint8_t *buf, size_t bufsz,
 	uint8_t *txwi = buf + 4;
 	uint32_t info;
 	int hdrlen, hdr_pad = 0, body, padded, pad, total, rc, n = 0;
-	const uint8_t *f = frame;
+	const uint8_t *f = (const uint8_t *)frame;
 
 	if (len < 10 || len + 32 > bufsz) { ERR("bad frame length %zu", len); return -1; }
 
@@ -154,7 +154,7 @@ int mt_tx_build(struct mt7612u_dev *d, uint8_t *buf, size_t bufsz,
 			    "to the channel width (further occurrences silent)",
 			    rate->bw, d->bw);
 		}
-		narrowed.bw = d->bw;
+		narrowed.bw = (enum mt7612u_bw)d->bw;
 		put_le16(txwi + 2, mt_tx_rate_word(&narrowed));
 	} else {
 		put_le16(txwi + 2, mt_tx_rate_word(rate));      /* rate */

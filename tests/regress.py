@@ -53,6 +53,7 @@ import ctypes
 import dataclasses
 import glob
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -161,6 +162,49 @@ def _install_cleanup_handlers() -> None:
 # injector both use this.
 CANONICAL_SA = "57:42:75:05:d6:00"
 
+
+def _mediatek_duts() -> dict[str, str]:
+    """The MediaTek ids, read from the C++ gate table rather than copied.
+
+    src/mt7612u/Mt7612uUsbIds.h is what WiFiDriver::CreateRadio actually
+    consults, so a second hand-maintained list here would drift — and the
+    failure mode of drift is silent: a plugged adapter this table has never
+    heard of is simply not discovered, and the matrix reports "need 2 DUTs".
+    An unreadable header is loud rather than empty for the same reason."""
+    root = Path(__file__).resolve().parent.parent
+    header = root / "src" / "mt7612u" / "Mt7612uUsbIds.h"
+    unavailable = "MediaTek DUTs unavailable —"
+    try:
+        text = header.read_text(encoding="utf-8")
+    except OSError as e:
+        sys.stderr.write(f"{unavailable} cannot read {header}: {e}\n")
+        return {}
+    body = re.search(r"kUsbIds\[\]\s*=\s*\{(.*?)\n\};", text, re.S)
+    if not body:
+        sys.stderr.write(f"{unavailable} no kUsbIds[] in {header}\n")
+        return {}
+    out: dict[str, str] = {}
+    # The trailing comma is OPTIONAL. Requiring it dropped the last entry when
+    # anything reformatted the table, leaving `out` non-empty so no warning
+    # fired and that one adapter merely undiscoverable — the exact silent drift
+    # this function exists to rule out. tests/mt7612u_usb_ids_vs_mt76.py parses
+    # the same table and must agree with this.
+    for vid, pid, comment in re.findall(
+        r"\{\s*0x([0-9a-fA-F]{4})\s*,\s*0x([0-9a-fA-F]{4})\s*\}\s*,?"
+        r"(?:[^\S\n]*/\*\s*(.*?)\s*\*/)?",
+        body.group(1),
+    ):
+        label = comment.split("—")[0].strip() or "MediaTek"
+        out[f"{vid.lower()}:{pid.lower()}"] = f"MT7612U ({label})"
+    if not out:
+        sys.stderr.write(f"{unavailable} kUsbIds[] parsed empty in {header}\n")
+    return out
+
+
+# The MediaTek half, kept separately as well as merged below: a cell has to
+# know which side of the matrix needs firmware and a MediaTek-enabled build.
+MEDIATEK_DUTS = _mediatek_duts()
+
 # Map every supported PID to the chipset family used for log readability.
 # Detection of the kernel driver claiming the device is dynamic (via sysfs);
 # this table is informational only.
@@ -178,6 +222,7 @@ SUPPORTED_DUTS = {
     "0bda:c82c": "RTL8822CU (Jaguar3)",
     "0bda:a81a": "RTL8812EU (Jaguar3 EU)",
     "0bda:e822": "RTL8822EU (Jaguar3 EU)",
+    **MEDIATEK_DUTS,
 }
 
 # Required external tools on the host. Each entry: (binary, install hint).
@@ -395,25 +440,40 @@ class KernelHost:
 
     def _wlan_iface_for_dut(self, dut: "Dut") -> Optional[str]:
         if not self.is_remote:
-            # Local mode: walk /sys/bus/usb/devices for the DUT, then
-            # look at <iface_id>/net/ for a wlan name.
-            for d in glob.glob("/sys/bus/usb/devices/*"):
-                try:
-                    with open(f"{d}/idVendor") as f:
-                        if f.read().strip() != dut.vid:
-                            continue
-                    with open(f"{d}/idProduct") as f:
-                        if f.read().strip() != dut.pid:
-                            continue
-                except (FileNotFoundError, PermissionError):
-                    continue
-                net_dir = f"{d}:1.0/net"
-                if not os.path.isdir(net_dir):
+            # Local mode: the DUT's sysfs id IS its address on this machine, so
+            # go straight to it. Searching by VID:PID instead returns the first
+            # match, which on a rig with two adapters of the same model is a
+            # coin flip - and the wrong side of that flip puts a cell's kernel
+            # tcpdump on the very adapter devourer has claimed.
+            net_dir = f"/sys/bus/usb/devices/{dut.iface_id}/net"
+            if not os.path.isdir(net_dir):
+                # Either the driver has not bound yet - the caller polls for
+                # that - or the device re-enumerated somewhere else. Fall back
+                # the same way _devourer_env does, and on the same condition:
+                # only when exactly one device with this VID:PID is plugged, so
+                # there is nothing to confuse it with.
+                if _sysfs_id_still_holds(dut) or _count_plugged(dut) != 1:
                     return None
-                ifaces = os.listdir(net_dir)
-                return ifaces[0] if ifaces else None
-            return None
-        # Remote: ssh and iterate /sys/bus/usb/devices/ over there.
+                for d in discover_duts():
+                    if d.vidpid != dut.vidpid:
+                        continue
+                    moved = f"/sys/bus/usb/devices/{d.iface_id}/net"
+                    if os.path.isdir(moved):
+                        sys.stderr.write(
+                            f"warning: {dut.vidpid} moved from {dut.sysfs_id} "
+                            f"to {d.sysfs_id}; using its interface there.\n")
+                        net_dir = moved
+                        break
+                else:
+                    return None
+            ifaces = os.listdir(net_dir)
+            return ifaces[0] if ifaces else None
+        # Remote: ssh and iterate /sys/bus/usb/devices/ over there. The host's
+        # sysfs id is meaningless inside the guest, so this matches on VID:PID
+        # and takes what it finds - which cannot tell two adapters of the same
+        # model apart. Rather than pick one at random (the local branch's old
+        # bug, which silently pointed a cell at the wrong radio), list them all
+        # and refuse when there is more than one.
         r = self.run([
             "sh", "-c",
             "for d in /sys/bus/usb/devices/*; do "
@@ -421,11 +481,17 @@ class KernelHost:
             f"  [ \"$(cat $d/idVendor)\" = \"{dut.vid}\" ] || continue; "
             f"  [ \"$(cat $d/idProduct)\" = \"{dut.pid}\" ] || continue; "
             "  ls \"$d:1.0/net\" 2>/dev/null | head -1; "
-            "  break; "
             "done",
         ])
-        out = (r.stdout or "").strip()
-        return out or None
+        ifaces = [line for line in (r.stdout or "").split() if line]
+        if len(ifaces) > 1:
+            raise RuntimeError(
+                f"VM mode found {len(ifaces)} interfaces for {dut.vidpid} "
+                f"({', '.join(ifaces)}) and cannot tell them apart — the "
+                f"guest's sysfs ids are not the host's. Use two adapters of "
+                f"different models, or run local mode."
+            )
+        return ifaces[0] if ifaces else None
 
     def iface_to_monitor(self, iface: str, channel: int) -> None:
         """Put a wlan iface into monitor mode on a channel."""
@@ -497,6 +563,81 @@ def preflight(devourer_root: Path, kh: KernelHost) -> None:
         sys.exit(2)
 
 
+def preflight_mediatek(devourer_root: Path, duts: list[Dut]) -> None:
+    """Prerequisites that only bite when a MediaTek DUT is in the run.
+
+    Both of these produce a cell that reads on the matrix exactly like a dead
+    radio - 0 hits, no explanation - so they are worth catching before the
+    first authorize-cycle rather than after four failed cells.
+
+    `duts` is the SELECTED pair (or, for --full-matrix, everything), never
+    simply everything plugged in: a MediaTek adapter sharing the bench with two
+    Realteks must not stop an all-Realtek matrix from running."""
+    if not any(d.is_mediatek for d in duts):
+        return
+
+    missing = []
+    cache = devourer_root / "build" / "CMakeCache.txt"
+    if cache.is_file():
+        # A build without the backend still BUILDS rxdemo; it just refuses the
+        # adapter at CreateRadio, which is by design (falling through to the
+        # Realtek path would misdetect it as a Jaguar1).
+        #
+        # Read the VALUE, don't string-match "=ON": the cache records whatever
+        # the operator typed, and `-DDEVOURER_MT7612U=1` — idiomatic CMake —
+        # lands as `:BOOL=1`. Matching the literal would have failed a
+        # correctly configured build, which is this function's own failure mode
+        # inverted.
+        m = re.search(r"^DEVOURER_MT7612U:BOOL=(.*)$",
+                      cache.read_text(errors="replace"), re.M)
+        value = (m.group(1).strip() if m else "").upper()
+        # CMake's false constants; anything else (1, ON, TRUE, YES...) is true.
+        if value in ("", "OFF", "0", "FALSE", "NO", "N", "IGNORE",
+                     "NOTFOUND") or value.endswith("-NOTFOUND"):
+            missing.append(
+                f"  - a MediaTek DUT is plugged but {cache.parent} was "
+                f"configured without the backend "
+                f"(DEVOURER_MT7612U={value or 'unset'}) — reconfigure with "
+                f"`cmake -S {devourer_root} -B {devourer_root}/build "
+                f"-DDEVOURER_MT7612U=ON` and rebuild, or unplug it"
+            )
+
+    # Same search order the backend uses (DeviceConfig.mt7612u.firmware_dir,
+    # then /lib/firmware/mediatek, then ./firmware) so the message names the
+    # paths that will actually be tried.
+    tried = ([_MT7612U_FW_DIR] if _MT7612U_FW_DIR else []) + [
+        "/lib/firmware/mediatek", "firmware",
+    ]
+    if not any((Path(d) / "mt7662.bin").is_file()
+               and (Path(d) / "mt7662_rom_patch.bin").is_file()
+               for d in tried):
+        missing.append(
+            "  - MediaTek firmware (mt7662.bin + mt7662_rom_patch.bin) not "
+            "found in: " + ", ".join(tried) + ". It ships zstd-compressed in "
+            "linux-firmware; decompress the pair somewhere and pass "
+            "`--mt7612u-fw-dir <dir>`."
+        )
+
+    if missing:
+        sys.stderr.write("Prerequisites not met:\n" + "\n".join(missing) + "\n")
+        sys.exit(2)
+
+    # A warning, not an error: a run can legitimately skip the kernel side.
+    # But name the flags that actually do it — `--modes` is parsed only under
+    # `--encoding-matrix`, so on the default 4-cell matrix it is silently
+    # ignored and the operator still waits out wait_for_wlan_iface and still
+    # loses the run to the baseline abort.
+    if shutil.which("modinfo") and run(["modinfo", "mt76x2u"]).returncode != 0:
+        sys.stderr.write(
+            "warning: kernel module mt76x2u not available — every kernel-side "
+            "cell of a MediaTek matrix will fail to find a wlan iface, and on "
+            "the default matrix the kernel/kernel baseline then aborts the "
+            "run. Either `--encoding-matrix --modes devourer:devourer` for the "
+            "devourer-only rows, or `--no-baseline-abort` to see the rest fail "
+            "anyway.\n"
+        )
+
+
 # ---------------------------------------------------------------------------
 # DUT discovery — find plugged-in adapters via sysfs (host side only;
 # the VM sees DUTs only when we explicitly hand them over via virsh).
@@ -518,6 +659,18 @@ class Dut:
     def iface_id(self) -> str:
         """Interface address sysfs expects for bind/unbind."""
         return f"{self.sysfs_id}:1.0"
+
+    @property
+    def is_mediatek(self) -> bool:
+        return self.vidpid in MEDIATEK_DUTS
+
+    @property
+    def topology(self) -> tuple[str, str]:
+        """(bus, dotted port path) from the sysfs id — "2-1" -> ("2", "1"),
+        "3-2.2" -> ("3", "2.2"). This is what tells two adapters of the SAME
+        model apart, which VID:PID cannot."""
+        bus, _, port = self.sysfs_id.partition("-")
+        return bus, port
 
 
 def discover_duts() -> list[Dut]:
@@ -577,6 +730,11 @@ def attach_to_host_kernel(dut: Dut) -> None:
 # Module-level toggle for usb_port_power_cycle. main() flips this off when
 # --no-rf-reset is passed.
 _RF_RESET_ENABLED: bool = True
+
+# Directory holding mt7662.bin + mt7662_rom_patch.bin, set by main() from
+# --mt7612u-fw-dir. Empty means "let the backend search its own defaults"
+# (/lib/firmware/mediatek, then ./firmware).
+_MT7612U_FW_DIR: str = ""
 
 
 def usb_port_power_cycle(dut: Dut, settle_s: float = 2.0) -> None:
@@ -669,12 +827,62 @@ class CellResult:
 # ---------------------------------------------------------------------------
 
 
+def _sysfs_id_still_holds(dut: Dut) -> bool:
+    """True when dut.sysfs_id still names a device with this VID:PID."""
+    base = f"/sys/bus/usb/devices/{dut.sysfs_id}"
+    try:
+        with open(f"{base}/idVendor") as f:
+            if f.read().strip() != dut.vid:
+                return False
+        with open(f"{base}/idProduct") as f:
+            return f.read().strip() == dut.pid
+    except OSError:
+        return False
+
+
+def _count_plugged(dut: Dut) -> int:
+    """How many devices with this VID:PID are on the host bus right now."""
+    return sum(1 for d in discover_duts() if d.vidpid == dut.vidpid)
+
+
 def _devourer_env(dut: Dut, channel: int,
                   tx_encoding: Optional[dict] = None) -> dict[str, str]:
     env = os.environ.copy()
     env["DEVOURER_VID"] = f"0x{dut.vid}"
     env["DEVOURER_PID"] = f"0x{dut.pid}"
     env["DEVOURER_CHANNEL"] = str(channel)
+    # Pin the PHYSICAL device, not just its model. discover_duts() found this
+    # adapter at a specific sysfs id and every other part of a cell (the
+    # authorize-cycle, the kernel unbind, the wlan iface lookup) addresses it
+    # that way; without this the demo opens the first adapter with a matching
+    # VID:PID, which on a rig with two of the same model can be the OTHER one -
+    # including, for a devourer-to-devourer cell, the one already claimed.
+    #
+    # The sysfs id is resolved ONCE, at discovery. An authorize-cycle keeps it,
+    # but a device that re-enumerates onto another bus (a SuperSpeed part
+    # falling back to its companion HS controller, say) moves - and usb_select
+    # is deliberately strict, so a stale pin would fail to open rather than
+    # silently take the wrong adapter. That is the right trade on a same-model
+    # pair and the wrong one when there is nothing to confuse it with, so: keep
+    # the pin, and drop back to VID:PID only when exactly one such device is
+    # plugged and therefore nothing is ambiguous.
+    bus, port = dut.topology
+    if bus and port:
+        if _sysfs_id_still_holds(dut) or _count_plugged(dut) != 1:
+            env["DEVOURER_USB_BUS"] = bus
+            env["DEVOURER_USB_PORT"] = port
+        else:
+            sys.stderr.write(
+                f"warning: {dut.vidpid} is no longer at {dut.sysfs_id} — it "
+                f"re-enumerated. Falling back to VID:PID, which is "
+                f"unambiguous here because it is the only one plugged.\n"
+            )
+    if dut.is_mediatek and _MT7612U_FW_DIR:
+        # The MediaTek firmware is not embedded: it ships in linux-firmware
+        # under its own licence and zstd-compressed, so the backend searches a
+        # directory at runtime. Without this the cell fails at bring-up, which
+        # reads on the matrix exactly like a dead radio.
+        env["DEVOURER_MT7612U_FW_DIR"] = _MT7612U_FW_DIR
     if tx_encoding:
         # The TX rate/mode is a single DEVOURER_TX_RATE string read by
         # txdemo (-> RtlJaguarDevice::SetTxMode):
@@ -909,8 +1117,13 @@ def _count_devourer_tx_attempts(log_path: Path) -> tuple[int, int]:
 
 
 def _count_tcpdump_hits(log_path: Path) -> int:
+    # Blank lines do not count. tcpdump's log ends with a trailing newline, so
+    # splitlines() yielded one phantom record and EVERY kernel-RX cell was
+    # published one frame high - including a baseline that read a suspiciously
+    # perfect "459 hits / 459 TX" when 458 of 459 arrived.
     try:
-        return sum(1 for _ in log_path.read_text(errors="replace").splitlines())
+        return sum(1 for line in log_path.read_text(errors="replace").splitlines()
+                   if line.strip())
     except FileNotFoundError:
         return 0
 
@@ -1465,11 +1678,13 @@ def main():
     )
     ap.add_argument(
         "--tx-pid",
-        help="USB PID hex of TX adapter (default: first auto-detected DUT)",
+        help="USB PID hex of TX adapter, or a sysfs id like `2-1` when two "
+             "plugged adapters share a PID (default: first auto-detected DUT)",
     )
     ap.add_argument(
         "--rx-pid",
-        help="USB PID hex of RX adapter (default: second auto-detected DUT)",
+        help="USB PID hex of RX adapter, or a sysfs id like `5-1` when two "
+             "plugged adapters share a PID (default: second auto-detected DUT)",
     )
     ap.add_argument(
         "--keep-logs", action="store_true",
@@ -1525,6 +1740,16 @@ def main():
              "VM. Env: DEVOURER_SNIFFER_IFACE.",
     )
     ap.add_argument(
+        "--mt7612u-fw-dir",
+        default=os.environ.get("DEVOURER_MT7612U_FW_DIR", ""),
+        help="directory holding mt7662.bin + mt7662_rom_patch.bin, for "
+             "MediaTek DUTs (env: DEVOURER_MT7612U_FW_DIR). Unlike the Realtek "
+             "backends the MediaTek firmware is not embedded — it ships "
+             "zstd-compressed in linux-firmware — so the pair has to be "
+             "decompressed somewhere first. Unset means let the backend search "
+             "its own defaults: /lib/firmware/mediatek, then ./firmware.",
+    )
+    ap.add_argument(
         "--no-rf-reset",
         action="store_true",
         help="skip the per-cell USB port-level authorize-cycle that "
@@ -1537,8 +1762,9 @@ def main():
     args = ap.parse_args()
 
     # Apply RF-reset toggle before any cell runs.
-    global _RF_RESET_ENABLED
+    global _RF_RESET_ENABLED, _MT7612U_FW_DIR
     _RF_RESET_ENABLED = not args.no_rf_reset
+    _MT7612U_FW_DIR = args.mt7612u_fw_dir
 
     if args.vm_name and not args.vm_ssh:
         sys.stderr.write("--vm-name requires --vm-ssh\n")
@@ -1567,10 +1793,20 @@ def main():
     def pick(pid_arg, default_idx):
         if pid_arg is None:
             return duts[default_idx]
+        # A sysfs id ("2-1") rather than a PID: the only way to name ONE of two
+        # adapters that share a model, which is the normal case for a MediaTek
+        # matrix (there is one MediaTek PID worth having).
+        for d in duts:
+            if d.sysfs_id == pid_arg:
+                return d
         for d in duts:
             if d.pid == pid_arg.lower().removeprefix("0x"):
                 return d
-        sys.stderr.write(f"No plugged DUT has PID {pid_arg}\n")
+        sys.stderr.write(
+            f"No plugged DUT has PID or sysfs id {pid_arg}. Plugged:\n"
+            + "".join(f"  - {d.vidpid} ({d.chipset}) at {d.sysfs_id}\n"
+                      for d in duts)
+        )
         sys.exit(2)
 
     if args.encoding_matrix:
@@ -1579,6 +1815,7 @@ def main():
         if tx_dut.sysfs_id == rx_dut.sysfs_id:
             sys.stderr.write("TX and RX must be different physical devices.\n")
             sys.exit(2)
+        preflight_mediatek(args.devourer_root, [tx_dut, rx_dut])
         print(f"Encoding matrix mode:")
         print(f"  TX adapter: {tx_dut.vidpid} ({tx_dut.chipset}) at {tx_dut.sysfs_id}")
         print(f"  RX adapter: {rx_dut.vidpid} ({rx_dut.chipset}) at {rx_dut.sysfs_id}")
@@ -1631,10 +1868,12 @@ def main():
                 print(f"(logs kept at {kept} — symlink, valid until next run)",
                       flush=True)
                 sys.stdout.flush()
+                sys.stderr.flush()
                 os._exit(0)
         return
 
     if args.full_matrix:
+        preflight_mediatek(args.devourer_root, duts)
         print(f"Full matrix mode over {len(duts)} adapters:")
         for d in duts:
             print(f"  - {d.vidpid} ({d.chipset}) at {d.sysfs_id}")
@@ -1671,6 +1910,8 @@ def main():
                     kept.unlink()
                 kept.symlink_to(tmpdir)
                 print(f"(logs kept at {kept} — symlink, valid until next run)")
+                sys.stdout.flush()  # see the note in the 4-cell branch below
+                sys.stderr.flush()
                 os._exit(0)
         return
 
@@ -1679,6 +1920,7 @@ def main():
     if tx_dut.sysfs_id == rx_dut.sysfs_id:
         sys.stderr.write("TX and RX must be different physical devices.\n")
         sys.exit(2)
+    preflight_mediatek(args.devourer_root, [tx_dut, rx_dut])
 
     print(f"TX: {tx_dut.vidpid} ({tx_dut.chipset}) at {tx_dut.sysfs_id}")
     print(f"RX: {rx_dut.vidpid} ({rx_dut.chipset}) at {rx_dut.sysfs_id}")
@@ -1714,6 +1956,14 @@ def main():
                 kept.unlink()
             kept.symlink_to(tmpdir)
             print(f"(logs kept at {kept} — symlink, valid until next run)")
+            # os._exit skips the TemporaryDirectory cleanup on purpose - it is
+            # what keeps the logs - but it also skips the stdout flush, and
+            # stdout is block-buffered whenever this is piped or redirected.
+            # Without these the whole markdown table is discarded, which is
+            # exactly the output the flag exists to preserve. The
+            # encoding-matrix branch already learned this.
+            sys.stdout.flush()
+            sys.stderr.flush()
             os._exit(0)
 
 

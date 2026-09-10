@@ -71,6 +71,52 @@ int main() {
   CHECK(hdr.per_sc_bits == 10, "per_sc_bits=10 (MU)");
   CHECK(hdr.angle_len == 65, "angle_len=65 (52*10 bits)");
 
+  /* 3b. The same logical report delivered WITHOUT a trailing FCS - the
+   * MediaTek MT7612U shape, where the MAC strips it.
+   *
+   * With slack in the buffer the MU path clamps angle_len to vbytes, so the
+   * flag provably changes nothing there; that equivalence is the first check.
+   * To show the flag actually DOES something, the second half trims the frame
+   * to exactly (29 + nc) + vbytes - no slack at all - which is the shape a
+   * real FCS-less capture has. There, believing a non-existent FCS eats four
+   * angle bytes and the report must be REJECTED. A control that cannot fail is
+   * not a control. */
+  {
+    std::vector<uint8_t> nofcs(frame.begin(), frame.end() - 4);
+    ReportHdr h2;
+    CHECK(parse_report(nofcs.data(), nofcs.size(), h2, /*fcs_present=*/false),
+          "parse_report matches with no FCS");
+    CHECK(h2.nc == hdr.nc && h2.nr == hdr.nr && h2.bw == hdr.bw &&
+              h2.ng == hdr.ng && h2.mu == hdr.mu && h2.vht == hdr.vht &&
+              h2.ns == hdr.ns && h2.per_sc_bits == hdr.per_sc_bits,
+          "no-FCS header identical to FCS-present");
+    CHECK(h2.angle_len == hdr.angle_len, "no-FCS angle_len identical");
+
+    /* Exactly the angle block, nothing after it. */
+    /* CHECK only records a failure and returns, so this has to gate the
+     * slicing too - otherwise a shorter fixture walks the iterator past the
+     * end (UB) on exactly the path the check was meant to protect.
+     *
+     * The rejection below is MU-specific: it bites via the MU clamp
+     * (vbytes 65 > ab_len 61). An SU fixture would instead depend on
+     * (angle_len-4)*8 % ns, which is 0 for ns=16 - so this control would pass
+     * spuriously there. It requires an MU fixture, which this one is. */
+    const size_t tight = 29u + (size_t)hdr.nc + (size_t)hdr.angle_len;
+    CHECK(tight <= frame.size(), "fixture long enough to build the tight case");
+    if (tight <= frame.size()) {
+    std::vector<uint8_t> snug(frame.begin(), frame.begin() + (long)tight);
+
+    ReportHdr h4;
+    CHECK(parse_report(snug.data(), snug.size(), h4, /*fcs_present=*/false),
+          "tight FCS-less report still decodes");
+    CHECK(h4.angle_len == hdr.angle_len, "tight FCS-less angle_len intact");
+
+    ReportHdr h5;
+    CHECK(!parse_report(snug.data(), snug.size(), h5, /*fcs_present=*/true),
+          "assuming an FCS that is not there must reject, not silently shorten");
+    }
+  }
+
   /* 4. fixed-split decode vs offline reference. */
   std::vector<double> psi;
   CHECK(decode_psi(hdr, 8, 2, psi), "decode_psi ok");

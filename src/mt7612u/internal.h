@@ -16,8 +16,14 @@
 #else
 #  include <libusb-1.0/libusb.h>
 #endif
-#include <pthread.h>
-#include <time.h>
+/* C++ only: the sync members below are std:: types, chosen over pthreads
+ * because MSVC has no <pthread.h> and devourer builds Windows first-class.
+ * Nothing outside this subtree includes this header; the public C ABI in
+ * include/mt7612u/mt7612u.h is unaffected and stays C-includable. */
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -124,9 +130,14 @@ struct mt_async {
 	int     tx_busy[MT_TX_RING];
 	/* Guards running, rx_active, tx_busy[], tx_inflight and rx_inflight -
 	 * all of which the event thread writes and the caller reads. */
-	pthread_mutex_t lock;
-	pthread_cond_t  cv;
-	pthread_t evt;
+	std::mutex lock;
+	/* condition_variable_any, not condition_variable: it waits on any
+	 * BasicLockable, so every site below keeps the plain lock()/unlock()
+	 * shape the pthread code had instead of being restructured around
+	 * unique_lock. The waits here are teardown and TX back-pressure, not a
+	 * hot path, so the extra indirection costs nothing measurable. */
+	std::condition_variable_any cv;
+	std::thread evt;
 	int evt_started;
 	int running, rx_active;
 	int tx_inflight, rx_inflight;
@@ -158,12 +169,35 @@ struct mt7612u_dev {
 	uint8_t  mcu_stale_pending;
 	uint8_t  chan;
 	uint8_t  bw;
-	pthread_mutex_t io_lock;   /* recursive: guards register + MCU transactions */
-	uint8_t  io_lock_ready;    /* io_lock initialised - guards its destroy */
+	/* Recursive: the PHY tick holds this and then nests mt_vendor_req /
+	 * mt_mcu_send, which take it again. As a member it is constructed with
+	 * the device, which is what retires the old io_lock_ready flag: a zeroed
+	 * pthread_mutex_t was a valid NON-recursive lock, so a path that skipped
+	 * the explicit init (the adopt path once did) self-deadlocked the tick.
+	 * That failure is now unrepresentable. */
+	std::recursive_mutex io_lock;
 	/* Observe-but-do-not-repair, for wedge experiments.  A field, not a
-	 * getenv: this library reads no environment - the tool that wants the
-	 * behaviour sets it before mt_open() (bringup does). */
+	 * getenv - the tool that wants the behaviour sets it before mt_open()
+	 * (bringup does). True of the library as a whole now: the selector moved
+	 * to a field too, so nothing here reads the environment. */
 	uint8_t  no_autorecover;
+	/* Which adapter to open, "<bus>-<port>" as bringup spells it, or NULL for
+	 * "the first one". A field and not a getenv: this is a LIBRARY now
+	 * (DEVOURER_MT7612U links it into libdevourer), and a library that picks
+	 * its hardware from ambient process state can claim an adapter its caller
+	 * never asked for. Points at caller-owned storage and is only read during
+	 * mt_open(). */
+	const char *dev_selector;
+	/* The adapter's exclusivity lock (flock on the same file UsbDeviceLock
+	 * uses), or -1. PER DEVICE, not a file-global: mt7612u_open_selected()
+	 * makes one process holding two adapters a supported shape, and a single
+	 * global fd meant opening B overwrote A's descriptor - so closing A
+	 * released B's lock and leaked A's, leaving another process free to
+	 * reset and claim B while A was still using it. */
+	/* -1, NOT the 0 that value-initialising the device would give: 0 is
+	 * stdin, and unlock_adapter() would close it on a device that never took
+	 * a lock. */
+	int lock_fd = -1;
 	uint8_t  bw_clamp_warned;   /* the "never widen" notice is once, not per frame */
 	int8_t   txpower_conf;      /* limit, 0.5 dB units (dBm * 2) */
 	int8_t   target_power;
@@ -186,11 +220,15 @@ struct mt7612u_dev {
 };
 
 /* --- usb.c --- */
-/* Per-device state both open paths need before ANY register I/O: the recursive
- * io_lock and the calibration sentinels.  Both mt_open() and mt_adopt() reach
- * mt_vendor_req() (which locks io_lock) during identification, so this must run
- * first on either path.  Idempotent.  mt_dev_state_destroy() is the matching
- * teardown, guarded so it runs exactly once regardless of how far open got. */
+/* Per-device state both open paths need before ANY register I/O.
+ *
+ * This used to construct the recursive io_lock, and existed because both
+ * mt_open() and mt_adopt() reach mt_vendor_req() (which locks it) during
+ * identification, so a path that skipped it locked an uninitialised mutex.
+ * io_lock is a std::recursive_mutex member now, constructed with the device,
+ * so that hazard is gone and both functions are empty - kept as named seams
+ * because the calibration sentinels belong to the same step, and because two
+ * public open paths and one close path call them. */
 void     mt_dev_state_init(struct mt7612u_dev *d);
 void     mt_dev_state_destroy(struct mt7612u_dev *d);
 int      mt_open(struct mt7612u_dev *d, const char **err);

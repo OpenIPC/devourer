@@ -1,12 +1,20 @@
 # src/mt7612u — MediaTek MT7612U
 
-**Not reachable from `CMakeLists.txt` yet.** This subtree is a complete,
-self-contained C library for the part — a public header, its own transport, no
-dependency on `RtlAdapter` — plus the bring-up harness that produced every
-measurement in `docs/mt7612u.md`. Wiring it in behind `IRadio` is a
-follow-up PR; nothing in the shipped library links against this today.
+**Compiled by `CMakeLists.txt` under `DEVOURER_MT7612U` (default OFF), and
+wired in behind `IRadio`.** This subtree is a complete, self-contained library
+for the part — a public C ABI, its own transport, no dependency on `RtlAdapter`
+— plus the bring-up harness that produced every measurement in
+`docs/mt7612u.md`. `Mt7612uRadio` is the backend `WiFiDriver::CreateRadio`
+constructs for a MediaTek adapter; `Mt7612uMapping.h` holds the pure
+translations between this part's descriptor vocabulary and devourer's.
 
-It builds and tests on its own:
+The sources are C++ (`.cpp`), not C: MSVC has no `<pthread.h>` and devourer
+builds Windows first-class, so the sync and timing primitives are `std::` types.
+The *exported* surface is still C — `include/mt7612u/mt7612u.h` carries an
+`extern "C"` guard, and `tests/api_link.c` is deliberately still compiled as C
+so that stays true.
+
+It also builds and tests on its own:
 
 ```sh
 make -C src/mt7612u            # -> src/mt7612u/bringup
@@ -20,19 +28,22 @@ Measurements, methods and limits: [`../../docs/mt7612u.md`](../../docs/mt7612u.m
 
 | file | what |
 |---|---|
-| `usb.c` | libusb transport: EP0 vendor register access, sync bulk, open/claim/reset |
-| `async.c` | event thread, 16-deep RX ring, 32-slot TX pool |
-| `mcu.c` | in-band MCU command framing (EP 8 out, EP 5 in, 4-bit sequence) |
-| `fw.c` | ROM patch + ILM/DLM firmware upload |
-| `eeprom.c` | 512-byte EEPROM: identity, TX power tables, RX gain |
-| `init.c` | power-on, MAC initvals, mac_start/stop, EP-4 flush |
-| `phy.c` | band/bandwidth/TX power registers, channel + calibration sequence |
-| `tx.c` | TXWI + TXINFO construction |
-| `rx.c` | RXWI parse, per-chain RSSI, rate decode |
-| `radiotap.c` | `send_packet` / `send_packets` (USB chaining via `NEXT_VLD`) |
-| `caps.c` | TSF, capability descriptor, ACK responder |
-| `tools/bringup.c` | one subcommand per verified gate |
-| `tests/` | offline tests (`make check`): public-API link, frame shapes |
+| `usb.cpp` | libusb transport: EP0 vendor register access, sync bulk, open/claim/reset |
+| `async.cpp` | event thread, 16-deep RX ring, 32-slot TX pool |
+| `mcu.cpp` | in-band MCU command framing (EP 8 out, EP 5 in, 4-bit sequence) |
+| `fw.cpp` | ROM patch + ILM/DLM firmware upload |
+| `eeprom.cpp` | 512-byte EEPROM: identity, TX power tables, RX gain |
+| `init.cpp` | power-on, MAC initvals, mac_start/stop, EP-4 flush |
+| `phy.cpp` | band/bandwidth/TX power registers, channel + calibration sequence |
+| `tx.cpp` | TXWI + TXINFO construction |
+| `rx.cpp` | RXWI parse, per-chain RSSI, rate decode |
+| `radiotap.cpp` | `send_packet` / `send_packets` (USB chaining via `NEXT_VLD`) |
+| `caps.cpp` | TSF, capability descriptor, ACK responder |
+| `tools/bringup.cpp` | one subcommand per verified gate |
+| `tests/` | offline tests (`make check`): public-API link (C), frame shapes, field macros, log sink |
+| `Mt7612uRadio.{h,cpp}` | the `IRadio` backend: bring-up, RX/TX, the 1 Hz tick, caps |
+| `Mt7612uMapping.h` | pure translations (RSSI bias, per-chain signal, rate codes, TID) — pinned by `tests/mt7612u_mapping_selftest.cpp` |
+| `Mt7612uUsbIds.h` | the vid:pid gate `WiFiDriver::CreateRadio` consults |
 | `initvals.h` | **generated** — see Provenance |
 
 ## The receiver must never run undrained
@@ -60,11 +71,39 @@ Done here, because these are correctness issues regardless of compiler:
 - `<libusb.h>` (this project's spelling) is tried first, with the
   distribution's `<libusb-1.0/libusb.h>` as the fallback.
 
-**Not** done here: `async.c` uses pthreads and `usb.c` uses `nanosleep` /
-`clock_gettime`. This project has no C threading or time shim - its shim is
-the C++ standard library, which every other backend uses directly. Building
-a throwaway C shim now would be deleted at integration, so those two files
-keep POSIX until the subtree joins the build. They are the only two.
+Done at integration, as that paragraph used to promise: the sources are C++
+and the POSIX threading and timing primitives are gone.
+
+- `pthread_mutex_t` -> `std::mutex`, and the device's recursive `io_lock` ->
+  `std::recursive_mutex`. As a constructed member it also retires the old
+  `io_lock_ready` flag: a zeroed `pthread_mutex_t` was a valid NON-recursive
+  lock, so an open path that skipped the explicit init self-deadlocked the PHY
+  tick. That state is now unrepresentable.
+- `pthread_cond_t` -> `std::condition_variable_any`. `_any` rather than the
+  plain one so it waits on the bare `std::mutex`, which let every lock site
+  keep its original shape instead of being restructured around `unique_lock` -
+  a smaller diff through code whose teardown ordering is a use-after-free
+  hazard. These waits are teardown and TX back-pressure, not a hot path.
+- `pthread_t` -> `std::thread`; `pthread_create`'s error return becomes a
+  caught `std::system_error`, so the `goto fail` teardown is unchanged.
+- `nanosleep` -> `std::this_thread::sleep_for`; `clock_gettime(CLOCK_MONOTONIC)`
+  -> `std::chrono::steady_clock`. The teardown's `pthread_cond_timedwait`
+  deadline arithmetic became one `wait_for`, which also drops its dependence on
+  `CLOCK_REALTIME` - a wall-clock step could previously stretch or skip the 2 s
+  budget.
+- The two structs holding those members moved from `calloc`/`free` to
+  `new (std::nothrow) T{}` / `delete`: `calloc` never runs a constructor, and
+  `{}` still zeroes every scalar exactly as `calloc` did. `nothrow` keeps the
+  existing `if (!p) return -1;` checks meaningful.
+
+**Not** done here: the `flock` adapter lock in `usb.cpp` is POSIX-only and is
+`_WIN32`-guarded rather than ported. It works by contending for the *same* lock
+file `UsbDeviceLock` uses, but on Windows `UsbDeviceLock` is a named mutex
+instead - so a file lock there would exclude nobody, and mirroring the mutex
+would duplicate a mechanism the devourer path already owns. On Windows the lock
+is a no-op and exclusivity comes from `UsbDeviceLock`; what is genuinely
+unprotected is a direct `mt7612u_open()` with no devourer around it, which is
+the bench tool's case, and the bench is Linux.
 
 ## Firmware
 
@@ -91,10 +130,12 @@ rtap   send_packet / send_packets           hop    channel-switch cost
 ```
 
 `make` here builds it as `./bringup`, which is what the hardware notes use.
-The integration PR adds a CMake target for the same source, named
-`mt7612uprobe` to sit beside `pcieprobe` / `kestrelprobe` / `rtl8733bprobe`, so
-the chip-specific tool is not the one part of this backend that only a second
-build system can produce.
+CMake builds the same source as `mt7612uprobe` (with `DEVOURER_MT7612U=ON`), to
+sit beside `pcieprobe` / `kestrelprobe` / `rtl8733bprobe` — so the chip-specific
+tool is not the one part of this backend that only a second build system can
+produce, and so it picks up the sanitizer and compiler settings the rest of the
+tree is built with. It drives the C library directly rather than `Mt7612uRadio`:
+its purpose is to exercise the layer underneath the backend.
 
 `sweep`, `coding` and `vht` take a width as their fourth argument, in the
 `MT7612U_BW_*` numbering — `0` = 20, `1` = 40, `2` = 80 MHz:

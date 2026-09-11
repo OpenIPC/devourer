@@ -81,13 +81,38 @@ int mt7612u_set_ack_responder(struct mt7612u_dev *d, const uint8_t mac[6])
 		memcpy(d->ack_saved_mac, d->macaddr, 6);
 		d->ack_saved = 1;
 	}
+	/* Ownership TRANSFERS to this caller. MT_MAC_ADDR is one register with two
+	 * users - the beacon takes it too - and whoever wrote last owns what is
+	 * there. Without this, a responder armed after StartBeacon would be
+	 * silently disarmed by the matching StopBeacon restoring the factory
+	 * address, and a stop after this call would put back an address the caller
+	 * never asked for. */
+	d->beacon_took_identity = 0;
 
 	dw0 = (uint32_t)mac[0] | ((uint32_t)mac[1] << 8) |
 	      ((uint32_t)mac[2] << 16) | ((uint32_t)mac[3] << 24);
 	mt_wr(d, MT_MAC_ADDR_DW0, dw0);
 	mt_wr(d, MT_MAC_ADDR_DW1, (uint32_t)mac[4] | ((uint32_t)mac[5] << 8) |
 	      FIELD_PREP(MT_MAC_ADDR_DW1_U2ME_MASK, 0xff));
-	mt_set(d, MT_AUTO_RSP_CFG, MT_AUTO_RSP_EN);
+	/*
+	 * Kept out of the I/O-error accumulator, deliberately.
+	 *
+	 * The gate is already on: mac_reset() writes MT_AUTO_RSP_CFG = 0x13
+	 * (init.cpp:174, reached from mt_init_hardware() at :408) and
+	 * MT_AUTO_RSP_EN is BIT(0), so this mt_set() is a re-assertion of a bit
+	 * that is already set - the same no-op mt7612u_clear_ack_responder()
+	 * relies on. But mt_set() is mt_rmw(), which on a failed READ bumps
+	 * io_err and skips its write; a transient EP0 read stall here would then
+	 * show up in mt7612u_beacon_start()'s io_err delta and tear down an arm
+	 * this function just verified as good, returning -2 for a beacon that is
+	 * on the air. The readback below is the check for this bit - if the gate
+	 * really is closed, that is what fails, with a message that says so.
+	 */
+	{
+		const unsigned io = mt_io_errors(d);
+		mt_set(d, MT_AUTO_RSP_CFG, MT_AUTO_RSP_EN);
+		mt_io_restore(d, io);
+	}
 
 	/* Verify the arm. The U2ME byte of DW1 is write-only on this silicon,
 	 * so only DW0 and the low half of DW1 can be read back. */
@@ -106,15 +131,20 @@ int mt7612u_set_ack_responder(struct mt7612u_dev *d, const uint8_t mac[6])
 
 void mt7612u_clear_ack_responder(struct mt7612u_dev *d)
 {
+	unsigned before;
+
 	if (!d->ack_saved)
 		return;
+
+	before = mt_io_errors(d);
 
 	/* Move the identity off the responder address first: on a MAC that
 	 * matches on address 1, clearing the gate alone leaves it answering
 	 * for whatever address is still programmed.
 	 *
-	 * MT_AUTO_RSP_EN is deliberately NOT cleared here. mt_init_hardware()
-	 * writes MT_AUTO_RSP_CFG = 0x13 (init.c), and MT_AUTO_RSP_EN is BIT(0),
+	 * MT_AUTO_RSP_EN is deliberately NOT cleared here. mac_reset(), which
+	 * mt_init_hardware() runs, writes MT_AUTO_RSP_CFG = 0x13
+	 * (init.cpp:174 from init.cpp:408), and MT_AUTO_RSP_EN is BIT(0),
 	 * so the gate is already on before any caller arms a responder - the
 	 * mt_set() in mt7612u_set_ack_responder() is a no-op on it. Clearing it
 	 * here would leave the device in a state its own init never produces;
@@ -127,5 +157,16 @@ void mt7612u_clear_ack_responder(struct mt7612u_dev *d)
 		mt_wr(d, MT_MAC_ADDR_DW1, (uint32_t)a[4] | ((uint32_t)a[5] << 8) |
 		      FIELD_PREP(MT_MAC_ADDR_DW1_U2ME_MASK, 0xff));
 	}
+
+	/* Keep ack_saved when the restore did not land, so the caller's retry has
+	 * something to retry. Both writes are bare mt_wr() - void, no readback -
+	 * so a failed EP0 transfer is otherwise indistinguishable from a landed
+	 * one. Clearing the flag regardless made the early-return above swallow
+	 * every later attempt, including the three mt7612u_beacon_stop() drives
+	 * through unwind_identity(), against an MT_MAC_ADDR still sitting on the
+	 * responder address. The flag means "a restore is still owed" and nothing
+	 * reads it as "a responder is armed", so leaving it set is safe. */
+	if (mt_io_errors(d) != before)
+		return;
 	d->ack_saved = 0;
 }

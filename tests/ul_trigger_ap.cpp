@@ -446,5 +446,17 @@ int main(int argc, char** argv) {
           (unsigned long long)g_ul.load(),
           (unsigned long long)g_ul_tb.load(), (unsigned long long)g_data.load(),
           (unsigned long long)g_sent.load());
+  /* Retried, and the failure reported. StopBeacon can now genuinely fail (an
+   * EP0 stall during teardown), IRadio.h says such a failure "must be retried
+   * ... before its shared port is reused", and `_exit(0)` below means there is
+   * no destructor coming to try again. A beacon that survives here survives
+   * the process. */
+  if (g_dev) {
+    bool silenced = false;
+    for (int i = 0; i < 3 && !silenced; ++i) silenced = g_dev->StopBeacon();
+    if (!silenced)
+      fprintf(stderr, "WARNING: the beacon could not be stopped - it is still "
+                      "airing; power-cycle the adapter\n");
+  }
   _exit(0);
 }

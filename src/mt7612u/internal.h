@@ -214,6 +214,21 @@ struct mt7612u_dev {
 	/* Oracle-diff log: every EP0 write we emit, in order. */
 	uint8_t  ack_saved_mac[6];
 	int      ack_saved;
+	/* Set when mt7612u_beacon_start() was the one that retargeted the port
+	 * identity, so mt7612u_beacon_stop() restores it - and does NOT when a
+	 * caller had already armed an ACK responder, because then the identity is
+	 * theirs and restoring would silently disarm it. */
+	int      beacon_took_identity;
+	/* The addr2 AND addr3 mt7612u_beacon_start() programmed, so an in-place
+	 * update can refuse a beacon that would change either. Both, because they
+	 * land in different registers: addr2 in MT_MAC_ADDR and the MBSS base,
+	 * addr3 in the APC BSSID slot. Guarding addr2 alone let an update move the
+	 * BSSID the beacon advertises while the slot still held the old one - the
+	 * AP beacons perfectly and acknowledges nobody, which is the exact failure
+	 * this guard exists to prevent. The two are adjacent in the 802.11 header
+	 * (bytes 10 and 16 of the 24-byte management header beacon_split()
+	 * requires), so one memcpy covers them. */
+	uint8_t  beacon_ident[12];
 	struct mt_async *a;
 	FILE    *wrlog;
 	FILE    *mculog;
@@ -324,6 +339,7 @@ int mt_hdrlen_from_fc(const uint8_t *frame);
 #define MT_TXOPT_RATE_LUT  0x01  /* set MT_TXWI_FLAGS_TX_RATE_LUT */
 #define MT_TXOPT_AMPDU     0x02  /* AMPDU flag + density + BA window */
 #define MT_TXOPT_QSEL_MGMT 0x04  /* mt76 uses MT_QSEL_MGMT for aggregated TX */
+#define MT_TXOPT_BEACON    0x08  /* HW timestamp (FLAGS_TS) + HW sequence (ACK_CTL_NSEQ) */
 int mt_tx_build(struct mt7612u_dev *d, uint8_t *buf, size_t bufsz,
                 const void *frame, size_t len,
                 const struct mt7612u_tx_rate *rate, uint8_t wcid, unsigned opts,
@@ -331,6 +347,19 @@ int mt_tx_build(struct mt7612u_dev *d, uint8_t *buf, size_t bufsz,
 int mt_tx_raw(struct mt7612u_dev *d, const void *frame, size_t len,
               const struct mt7612u_tx_rate *rate, uint8_t wcid, unsigned opts);
 void mt_wcid_setup(struct mt7612u_dev *d, uint8_t idx, const uint8_t *mac);
+
+/* --- beacon.c --- */
+/* Static reserved-page beacon. mt_beacon_init() prepares the beacon engine
+ * (offsets, bypass, sync) once; mt_beacon_write() loads slot 0; mt_beacon_set_enable()
+ * arms or disarms auto-TX. No pre-TBTT host work - the MAC beacons on its own. */
+void mt_beacon_init(struct mt7612u_dev *d);
+int  mt_beacon_write(struct mt7612u_dev *d, const void *frame, size_t len,
+                     const struct mt7612u_tx_rate *rate);
+int  mt_beacon_set_enable(struct mt7612u_dev *d, int on, unsigned interval_tu);
+/* Publish the AP's BSSID in APC slot `idx` so the MAC matches and auto-ACKs
+ * frames addressed to the BSS. mac_setaddr() zeroes every slot at init.
+ * Returns 0 on success, -1 if either half of the address failed to program. */
+int mt_ap_set_bssid(struct mt7612u_dev *d, uint8_t idx, const uint8_t *addr);
 
 /* --- radiotap.c --- */
 int mt_radiotap_parse(const uint8_t *buf, size_t len, struct mt7612u_tx_rate *r);

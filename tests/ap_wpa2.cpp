@@ -423,5 +423,17 @@ int main(int argc, char** argv) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   fprintf(stderr, "sent=%llu 4way_state=%d\n", (unsigned long long)g_sent.load(), g_state);
+  /* Retried, and the failure reported. StopBeacon can now genuinely fail (an
+   * EP0 stall during teardown), IRadio.h says such a failure "must be retried
+   * ... before its shared port is reused", and `_exit(0)` below means there is
+   * no destructor coming to try again. A beacon that survives here survives
+   * the process. */
+  if (g_dev) {
+    bool silenced = false;
+    for (int i = 0; i < 3 && !silenced; ++i) silenced = g_dev->StopBeacon();
+    if (!silenced)
+      fprintf(stderr, "WARNING: the beacon could not be stopped - it is still "
+                      "airing; power-cycle the adapter\n");
+  }
   _exit(0);
 }

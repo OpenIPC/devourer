@@ -280,6 +280,64 @@ int  mt7612u_set_ack_responder(struct mt7612u_dev *dev, const uint8_t mac[6]);
 void mt7612u_clear_ack_responder(struct mt7612u_dev *dev);
 
 /*
+ * Hardware beacon, from the MAC's reserved page.
+ *
+ * mt7612u_beacon_start() loads the beacon and arms the TBTT timer; the MAC
+ * then transmits it on its own at every TBTT, stamping the live 64-bit TSF
+ * into the timestamp field and assigning the 802.11 sequence number. There is
+ * no host involvement per beacon and no host jitter. `buf` is one
+ * radiotap-framed MPDU, the same contract as mt7612u_send_packet(); a bare
+ * MPDU with no radiotap header is accepted too and airs at OFDM 6 Mbps, the
+ * rate a beacon wants.
+ *
+ * addr2 becomes the MAC's identity - MT_MAC_ADDR (what it ACKs against) and
+ * the MT_MAC_BSSID base (what the per-BSS index is derived from), moved
+ * together the way mt76x02_mac_setaddr() moves them. Moving only the first
+ * leaves the hardware deriving its BSS index from a different address than the
+ * caller thinks, which is silent: the AP beacons perfectly and matches nobody.
+ * addr3 is then published in the APC slot that index selects - 1 for a
+ * locally-administered address, 0 otherwise.
+ *
+ * The identity is one register plane, shared with mt7612u_set_ack_responder():
+ * a caller doing both is setting the same thing twice and the last writer
+ * wins. mt7612u_beacon_stop() restores the factory identity ONLY if this call
+ * was what moved it - if a responder was already armed, that address is the
+ * caller's and stop leaves it alone.
+ *
+ * mt7612u_beacon_update() replaces the loaded beacon in place; the interval,
+ * TBTT phase and BSSID are untouched. It suppresses the slot for the duration
+ * of the copy, so a beacon airing across an update carries the PREVIOUS
+ * content rather than a torn mixture of the two - but it may be skipped
+ * entirely.
+ *
+ * mt7612u_beacon_stop() clears the timer bits, zeroes APC slots 0 and 1, and
+ * restores the identity as above. It matters that it is called: the MAC
+ * beacons AUTONOMOUSLY once armed, so killing the host process does NOT
+ * silence it, and a beacon left airing contaminates whatever runs next on that
+ * channel.
+ *
+ * What mt7612u_beacon_start() REFUSES, all silently fatal if allowed through:
+ *   - a multicast addr2 (a station cannot unicast-auth to it)
+ *   - an 802.11 header that is not 24 bytes. A QoS or 4-address frame makes
+ *     mt_tx_build() insert an interior L2 pad, and the reserved page needs an
+ *     unpadded [TXWI][MPDU]
+ *   - a beacon body that does not fit the 1600-byte slot alongside its TXWI
+ *   - an interval outside 1..4095 TU (INTVAL is 16 bits of 1/16 TU)
+ *
+ * And what it FORCES, whatever the caller's radiotap said: no_ack (a broadcast
+ * beacon must not request an ACK). A bare MPDU with no radiotap header is
+ * accepted and pinned to OFDM 6 Mbps, NSS 1, 20 MHz - the basic rate every
+ * station must decode.
+ *
+ * All three return 0 on success, negative on failure. A failed stop is a
+ * beacon still on the air; it is worth retrying.
+ */
+int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
+                         unsigned interval_tu);
+int mt7612u_beacon_update(struct mt7612u_dev *dev, const void *buf, size_t len);
+int mt7612u_beacon_stop(struct mt7612u_dev *dev);
+
+/*
  * TX/RX counters from the async rings. Zeroed when no ring is running, and
  * taken under the ring's own lock - reading the fields directly would race
  * the libusb event thread.

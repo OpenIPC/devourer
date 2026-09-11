@@ -634,6 +634,25 @@ void Mt7612uRadio::Stop() {
     StopRxLoop();
   } catch (...) {
   }
+  /* Before anything else lets go of the device: the MAC beacons AUTONOMOUSLY
+   * once armed, so a beacon that outlives this object keeps airing until the
+   * adapter is power-cycled and contaminates whatever runs next on that
+   * channel. Bench-bitten on the Realtek side, and the bring-up gate silences
+   * its beacon on every exit path for the same reason. */
+  try {
+    /* Retried, because the comment in StopBeacon promises one and because a
+     * beacon that survives this call survives the process: the MAC keeps
+     * airing it until the adapter is power-cycled. Three attempts, then say so
+     * at error level rather than closing the device in silence. */
+    bool silenced = false;
+    for (int attempt = 0; attempt < 3 && !silenced; ++attempt)
+      silenced = StopBeacon();
+    if (!silenced && _beacon_active)
+      _logger->error("MT7612U: closing the device with a beacon still armed - "
+                     "the MAC will keep airing it until the adapter is "
+                     "power-cycled");
+  } catch (...) {
+  }
   stop_tick(); /* joins; must not run with _mu held */
 
   /* Take the device out under _mu, then close it OUTSIDE - mt7612u_close()
@@ -841,6 +860,101 @@ void Mt7612uRadio::ClearAckResponder() {
     mt7612u_clear_ack_responder(_dev);
 }
 
+/* The beacon plane. Thin on purpose: the sequence these wrap is the one the
+ * bring-up harness's Stage A and Stage B gates run, device-verified on
+ * 2026-09-08 - beacon on air on both bands, hardware TSF and sequence, and a
+ * real station's auth arriving at retry=0, which is the auto-ACK. Putting it
+ * behind IRadio is what lets devourer's existing backend-agnostic AP
+ * harnesses (tests/ap_responder.cpp, tests/ap_wpa2.cpp - both already take an
+ * IRadio*) drive this part with no MediaTek-specific code in them.
+ *
+ * Under _mu with the rest of the control plane: every one of these is a
+ * register write, and the 1 Hz tick is issuing MCU traffic on its own thread. */
+bool Mt7612uRadio::StartBeacon(const uint8_t *beacon, size_t len,
+                               int interval_tu) {
+  std::lock_guard<std::recursive_mutex> lock(_mu);
+  if (!_dev || !beacon || len == 0 || interval_tu <= 0)
+    return false;
+  /* Three outcomes, not two, because a failed re-arm has to say whether the
+   * PREVIOUS beacon is still on the air:
+   *
+   *   0  armed
+   *  -1  refused before the hardware was touched - whatever was airing still
+   *      is, so the flag must NOT be cleared. Clearing it here was a way to
+   *      orphan a live beacon: update, stop and the destructor would all then
+   *      treat it as inactive and nobody would ever silence it.
+   *  -2  failed after the engine was disarmed, and the library unwound the
+   *      rest - so nothing is airing and the flag is false. */
+  const int rc = mt7612u_beacon_start(_dev, beacon, len,
+                                      static_cast<unsigned>(interval_tu));
+  if (rc == -2)
+    _beacon_active = false;
+  if (rc != 0)
+    return false;
+  _beacon_active = true;
+  _logger->info("MT7612U beaconing every {} TU", interval_tu);
+  return true;
+}
+
+bool Mt7612uRadio::UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
+  std::lock_guard<std::recursive_mutex> lock(_mu);
+  /* "Requires an active StartBeacon; returns false otherwise" - and without
+   * the guard this would load a beacon into a disarmed engine and report
+   * success for something that never airs. */
+  if (!_dev || !_beacon_active || !beacon || len == 0)
+    return false;
+  return mt7612u_beacon_update(_dev, beacon, len) == 0;
+}
+
+/* The beacon-steer trio. Not implemented.
+ *
+ * These log and still return 0, which is what IRadio documents as the "no
+ * active beacon" answer - so a PROGRAMMATIC caller cannot tell "cannot steer"
+ * from "steered by nothing" any better than before. The log is for the
+ * operator reading a harness run, and that is all it buys; saying so because
+ * every other unsupported knob here refuses in a way a caller can act on, and
+ * these three cannot without an interface change.
+ *
+ * Steering needs a pre-TBTT interrupt to re-time against, which this static
+ * reserved-page path does not have - mt76's own steering lives in
+ * mt76x02u_pre_tbtt_work(), a path this port does not run. */
+int32_t Mt7612uRadio::AdjustBeaconTiming(int32_t microseconds) {
+  (void)microseconds;
+  _logger->error("MT7612U: AdjustBeaconTiming is not implemented - the static "
+                 "reserved-page beacon has no pre-TBTT hook to steer against");
+  return 0;
+}
+
+int32_t Mt7612uRadio::AdjustBeaconTimingFine(int32_t microseconds) {
+  (void)microseconds;
+  _logger->error("MT7612U: AdjustBeaconTimingFine is not implemented");
+  return 0;
+}
+
+int32_t Mt7612uRadio::PinBeaconTbtt(int32_t offset_us) {
+  (void)offset_us;
+  _logger->error("MT7612U: PinBeaconTbtt is not implemented");
+  return 0;
+}
+
+bool Mt7612uRadio::StopBeacon() {
+  std::lock_guard<std::recursive_mutex> lock(_mu);
+  if (!_dev || !_beacon_active)
+    return false;
+  if (mt7612u_beacon_stop(_dev) != 0) {
+    /* Deliberately still active. A caller retrying after a transient USB
+     * stall must not be told "already stopped" - false means "no beacon was
+     * active" in this interface, and reading a failed stop as that walks away
+     * from a beacon the MAC is still airing. Stop() calls this inside a
+     * try/catch, so a retry there costs nothing. */
+    _logger->error("MT7612U beacon stop FAILED - the MAC is still airing it; "
+                   "retry, or power-cycle the adapter");
+    return false;   /* _beacon_active deliberately left set: see above */
+  }
+  _beacon_active = false;
+  return true;
+}
+
 /* The absolute dBm the actuator should carry: the base plus whatever offset is
  * live, clamped to the part's 0-30 range. One place, so the base setter, the
  * offset setter and the bring-up replay cannot drift apart. */
@@ -947,7 +1061,11 @@ devourer::AdapterCaps Mt7612uRadio::GetAdapterCaps() {
   c.ldpc_rx_flag = true;     /* the RXWI carries the per-frame LDPC bit */
   c.per_chain_rssi = true;
   c.hw_rx_timestamp = false; /* the RXWI TSF field is not parsed */
-  c.hw_beacon_txtsf = false; /* no hardware beacon function ported */
+  /* The MAC inserts the live 64-bit TSF into the beacon it auto-transmits;
+   * measured at 102400 us per beacon, exactly 100 TU (docs/mt7612u-ap-mode.md).
+   * True since the beacon plane landed - it read false while the function it
+   * describes sat three hundred lines above. */
+  c.hw_beacon_txtsf = true;
   /* Measured on air: 0 frames at the stimulus radio unarmed, 3500+ armed. */
   c.ack_responder_ok = true;
   /* Unmeasured, so false rather than optimistic - nothing here drives the

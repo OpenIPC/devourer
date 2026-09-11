@@ -135,6 +135,10 @@ int mt_tx_build(struct mt7612u_dev *d, uint8_t *buf, size_t bufsz,
 		if (opts & MT_TXOPT_AMPDU)
 			fl |= MT_TXWI_FLAGS_AMPDU |
 			      FIELD_PREP(MT_TXWI_FLAGS_MPDU_DENSITY, 4);
+		/* Beacon/probe-resp: the MAC fills the TSF timestamp field, as
+		 * mt76x02_mac_write_txwi() does for these subtypes. */
+		if (opts & MT_TXOPT_BEACON)
+			fl |= MT_TXWI_FLAGS_TS;
 		put_le16(txwi + 0, fl);
 	}
 	/* "A frame may narrow below the channel but never widen it" was only
@@ -162,6 +166,10 @@ int mt_tx_build(struct mt7612u_dev *d, uint8_t *buf, size_t bufsz,
 	/* ack_ctl bit0 REQ: set it only when an ACK is wanted. Leaving it
 	 * clear is how a frame becomes no-ACK, per packet. */
 	txwi[4] = rate->no_ack ? 0 : MT_TXWI_ACK_CTL_REQ;
+	/* Beacon: let the MAC assign the 802.11 sequence number (mt76 sets this
+	 * for IEEE80211_TX_CTL_ASSIGN_SEQ frames), so each beacon airs seq+1. */
+	if (opts & MT_TXOPT_BEACON)
+		txwi[4] |= MT_TXWI_ACK_CTL_NSEQ;
 	if (opts & MT_TXOPT_AMPDU)
 		txwi[4] |= FIELD_PREP(MT_TXWI_ACK_CTL_BA_WINDOW, 63);
 	txwi[5] = wcid;                                         /* 0xff = none */

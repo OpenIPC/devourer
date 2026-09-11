@@ -166,19 +166,40 @@ enum mt_mcu_cr_mode { MT_RF_CR, MT_BBP_CR, MT_RF_BBP_CR, MT_HL_TEMP_CR_UPDATE };
 #define MT_MAC_ADDR_DW1_U2ME_MASK GENMASK(23, 16)
 #define MT_MAC_BSSID_DW0     0x1010
 #define MT_MAC_BSSID_DW1     0x1014
-#define MT_MAC_BSSID_DW1_MBSS_MODE      GENMASK(19, 18)
-#define MT_MAC_BSSID_DW1_MBEACON_N      GENMASK(22, 20)
-#define MT_MAC_BSSID_DW1_MBSS_LOCAL_BIT BIT(23)
+/*
+ * These three were transcribed two bits high (MBSS_MODE at 19:18, MBEACON_N at
+ * 22:20, LOCAL_BIT at 23) - the whole group shifted left by 2 versus mt76's
+ * mt76x02_regs.h. It was harmless while this HAL only injected: mac_setaddr()
+ * is the only user, and MBSS_MODE / MBEACON_N steer beacon generation, which
+ * an injector never exercises. The AP path beacons, so the true positions
+ * matter - the shifted masks programmed MBSS_MODE=4 (invalid) and MBEACON_N=15.
+ */
+#define MT_MAC_BSSID_DW1_ADDR           GENMASK(15, 0)
+#define MT_MAC_BSSID_DW1_MBSS_MODE      GENMASK(17, 16)
+#define MT_MAC_BSSID_DW1_MBEACON_N      GENMASK(20, 18)
+#define MT_MAC_BSSID_DW1_MBSS_LOCAL_BIT BIT(21)
+#define MT_MAC_BSSID_DW1_MBSS_MODE_B2   BIT(22)
+#define MT_MAC_BSSID_DW1_MBEACON_N_B3   BIT(23)
 #define MT_MAX_LEN_CFG       0x1018
 #define MT_XIFS_TIME_CFG     0x1100
 #define MT_XIFS_TIME_CFG_OFDM_SIFS GENMASK(15, 8)
 #define MT_BKOFF_SLOT_CFG    0x1104
 #define MT_BKOFF_SLOT_CFG_CC_DELAY GENMASK(11, 8)
 #define MT_BEACON_TIME_CFG   0x1114
-#define MT_BEACON_TIME_CFG_INTVAL   GENMASK(15, 0)
+#define MT_BEACON_TIME_CFG_INTVAL   GENMASK(15, 0)   /* in 1/16 TU units */
 #define MT_BEACON_TIME_CFG_TIMER_EN BIT(16)
+#define MT_BEACON_TIME_CFG_SYNC_MODE GENMASK(18, 17)
 #define MT_BEACON_TIME_CFG_TBTT_EN  BIT(19)
 #define MT_BEACON_TIME_CFG_BEACON_TX BIT(20)
+/* Reserved-page beacon (mt76x02_beacon.c). BCN_OFFSET packs four slot offsets
+ * (each offset/64) per register. BCN_BYPASS_MASK is per-slot and INVERTED: a
+ * set bit SUPPRESSES that slot (0xffff = all suppressed, used during an
+ * update); a slot only airs once its bit is CLEARED. mt76 enables N written
+ * beacons with 0xff00 | ~(0xff00 >> N). */
+#define MT_BCN_OFFSET_BASE   0x041c
+#define MT_BCN_OFFSET(_n)    (MT_BCN_OFFSET_BASE + ((_n) << 2))
+#define MT_BCN_BYPASS_MASK   0x108c
+#define MT_BEACON_BASE       0xc000
 #define MT_TSF_TIMER_DW0     0x111c
 #define MT_TSF_TIMER_DW1     0x1120
 #define MT_MAC_STATUS        0x1200
@@ -411,6 +432,7 @@ enum mt_ee_field {
 #define MT_RXWI_LEN          32
 #define MT_DMA_HDR_LEN       4
 
+#define MT_TXWI_FLAGS_TS           BIT(3)  /* MAC inserts the TSF timestamp (beacon/probe-resp) */
 #define MT_TXWI_FLAGS_AMPDU        BIT(4)
 #define MT_TXWI_FLAGS_MPDU_DENSITY GENMASK(7, 5)
 #define MT_TXWI_ACK_CTL_BA_WINDOW  GENMASK(7, 2)

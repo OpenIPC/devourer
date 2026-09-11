@@ -57,6 +57,20 @@ void mt_beacon_init(struct mt7612u_dev *d)
 	mt_beacon_set_offsets(d);
 }
 
+/* The slot has to hold the body, its TXWI and the DMA header. Factored out so
+ * mt7612u_beacon_update() can apply it BEFORE it suppresses the slot - a
+ * refusal after the guard is up leaves the AP off the air. Returns non-zero
+ * when the frame does not fit, and says so. */
+static int len_fits_slot(size_t len)
+{
+	if (len + MT_TXWI_LEN + MT_DMA_HDR_LEN > MT_BCN_SLOT_SIZE) {
+		ERR("beacon %zu B + TXWI exceeds the %d B slot", len,
+		    (int)MT_BCN_SLOT_SIZE);
+		return -1;
+	}
+	return 0;
+}
+
 /*
  * mt76x02_mac_set_beacon(): write [TXWI][beacon MPDU] into slot 0.
  *
@@ -72,14 +86,10 @@ int mt_beacon_write(struct mt7612u_dev *d, const void *frame, size_t len,
 	uint8_t buf[MT_BCN_SLOT_SIZE];
 	int total;
 
-	/* The slot must hold the TXWI and the DMA header as well as the body;
-	 * mt_tx_build() enforces the tighter bound anyway, but from here the
-	 * error names the beacon rather than reporting a bad frame length. */
-	if (len + MT_TXWI_LEN + MT_DMA_HDR_LEN > MT_BCN_SLOT_SIZE) {
-		ERR("beacon %zu B + TXWI exceeds the %d B slot", len,
-		    (int)MT_BCN_SLOT_SIZE);
+	/* Same rule mt7612u_beacon_update() applies before it suppresses the slot;
+	 * kept here too because beacon_start reaches this directly. */
+	if (len_fits_slot(len))
 		return -1;
-	}
 	total = mt_tx_build(d, buf, sizeof buf, frame, len, rate, 0xff,
 	                    MT_TXOPT_BEACON, 0, 0);
 	if (total < 0)
@@ -343,18 +353,23 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 	 * Both registers because the index below is derived from the MBSS base,
 	 * not from MT_MAC_ADDR. */
 	{
+		/* Ownership is claimed BEFORE the writes, not after them. Both calls
+		 * below move MT_MAC_ADDR and can then fail - set_ack_responder writes
+		 * the register and readback-verifies afterwards, and set_bss_base can
+		 * only be reached once that write landed - so a failure here leaves
+		 * the identity moved. Claiming first is what lets the unwind put it
+		 * back; claiming after meant these two paths leaked it, and returned
+		 * -1, which tells the caller the hardware was never touched. */
 		const int was_taken = dev->ack_saved;
-		if (mt7612u_set_ack_responder(dev, ta))
-			return -1;
-		if (mt_mac_set_bss_base(dev, ta))
-			return -1;
-		/* Only claim ownership if nobody else already held the identity: a
-		 * caller who armed a responder first owns the saved factory address,
-		 * and restoring it on beacon stop would silently disarm them. */
 		if (!was_taken) {
 			dev->beacon_took_identity = 1;
 			took = 1;
 		}
+		if (mt7612u_set_ack_responder(dev, ta))
+			goto fail_pre;
+		if (mt_mac_set_bss_base(dev, ta))
+			goto fail_pre;
+		memcpy(dev->beacon_ident, ta, 6);
 	}
 
 	/*
@@ -390,6 +405,18 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 	 */
 	before = mt_io_errors(dev);
 
+	/*
+	 * The one RX-filter change an AP wants, and the reason is evidence rather
+	 * than throughput: DUP drops retransmissions, and a station's retry is
+	 * exactly how you learn whether your ACKs are landing. An auth arriving
+	 * with FC Retry set means the MAC did not acknowledge the first one; drop
+	 * duplicates and that signal disappears. mt76 leaves OTHER_BSS, BCAST and
+	 * MCAST undropped in every mode, so a wildcard probe request already
+	 * reaches us and nothing else here needs changing. Cleared in place rather
+	 * than rewriting a copied literal, so it cannot drift from the default.
+	 */
+	mt_clear(dev, MT_RX_FILTR_CFG, MT_RX_FILTR_CFG_DUP);
+
 	if (mt_ap_set_bssid(dev, idx, bssid))
 		goto fail_pre;
 	mt_beacon_init(dev);
@@ -417,28 +444,52 @@ int mt7612u_beacon_update(struct mt7612u_dev *dev, const void *buf, size_t len)
 	struct mt7612u_tx_rate rate;
 	const uint8_t *mpdu = NULL;
 	size_t mpdu_len = 0;
+	int rc;
 
 	if (!dev) return -1;
 	if (beacon_split(buf, len, &mpdu, &mpdu_len, &rate)) return -1;
 
-	/* Suppress the slot for the duration of the copy. mt_wr_copy() spans many
-	 * 64-byte EP0 transactions, so a TBTT landing mid-copy would air a TORN
-	 * beacon - leading bytes new, trailing bytes old. mt76 brackets the same
-	 * write for the same reason ("Prevent corrupt transmissions during
-	 * update", mt76x02_usb_core.c). mt_beacon_write() lowers the guard again
-	 * on its way out, which is why this is the only half needed here.
-	 *
-	 * Still no mt_beacon_init() and no set_enable(): the engine is armed, and
-	 * re-initialising it would clear the timer bits mid-flight. */
+	/*
+	 * Refuse a beacon that would change the identity. IRadio says addr2/addr3
+	 * are not changeable mid-flight and that the port registers keep the
+	 * StartBeacon identity - so loading one with a different BSSID airs a
+	 * beacon that no longer matches the programmed APC slot or MT_MAC_ADDR.
+	 * It beacons perfectly and acknowledges nobody, which is the failure the
+	 * start path goes to some length to prevent.
+	 */
+	if (memcmp(mpdu + 10, dev->beacon_ident, 6) != 0) {
+		ERR("beacon: an in-place update cannot change addr2 - the port "
+		    "identity keeps what beacon_start programmed");
+		return -1;
+	}
+
+	/*
+	 * Everything that can refuse this payload runs BEFORE the slot is
+	 * suppressed. mt_beacon_write() checks a caller-controlled length, and
+	 * checking it after the guard was up meant a rejected payload left every
+	 * slot suppressed with no path to lower them again - the AP silently off
+	 * the air while _beacon_active still said otherwise.
+	 */
+	if (len_fits_slot(mpdu_len))
+		return -1;
+
 	if (mt_wr_chk(dev, MT_BCN_BYPASS_MASK, 0xffff)) {
-		/* Checked: if the guard never lands, the copy below runs against a
-		 * LIVE slot and a TBTT mid-copy airs a torn beacon - which is the one
-		 * outcome this bracket exists to prevent, so failing to raise it must
-		 * not be the quiet path. */
+		/* If the guard never lands the copy below runs against a LIVE slot,
+		 * and a TBTT mid-copy airs a torn beacon - the one outcome this
+		 * bracket exists to prevent, so failing to raise it is not the quiet
+		 * path. Nothing to unwind: the mask is whatever it already was. */
 		ERR("beacon: could not suppress the slot for an in-place update");
 		return -1;
 	}
-	return mt_beacon_write(dev, mpdu, mpdu_len, &rate);
+
+	rc = mt_beacon_write(dev, mpdu, mpdu_len, &rate);
+	if (rc) {
+		/* Lower the guard again rather than leaving the AP dark. A failed
+		 * update should cost the update, not the beacon. */
+		mt_wr(dev, MT_BCN_BYPASS_MASK, 0xff00u | ~(0xff00u >> 1));
+		return rc;
+	}
+	return 0;
 }
 
 int mt7612u_beacon_stop(struct mt7612u_dev *dev)

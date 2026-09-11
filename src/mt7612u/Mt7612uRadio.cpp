@@ -906,11 +906,14 @@ bool Mt7612uRadio::UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
   return mt7612u_beacon_update(_dev, beacon, len) == 0;
 }
 
-/* The beacon-steer trio. Not implemented, and REFUSING QUIETLY IS THE PROBLEM:
- * IRadio's default returns 0, which means "applied a 0 us shift" and is
- * indistinguishable from "this backend cannot steer". tests/beacon_steer_check
- * and the PTP harnesses run against any backend and would read a clean zero.
- * Every other unsupported knob here says so out loud; these were the exception.
+/* The beacon-steer trio. Not implemented.
+ *
+ * These log and still return 0, which is what IRadio documents as the "no
+ * active beacon" answer - so a PROGRAMMATIC caller cannot tell "cannot steer"
+ * from "steered by nothing" any better than before. The log is for the
+ * operator reading a harness run, and that is all it buys; saying so because
+ * every other unsupported knob here refuses in a way a caller can act on, and
+ * these three cannot without an interface change.
  *
  * Steering needs a pre-TBTT interrupt to re-time against, which this static
  * reserved-page path does not have - mt76's own steering lives in

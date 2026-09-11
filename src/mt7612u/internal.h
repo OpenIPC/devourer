@@ -219,6 +219,10 @@ struct mt7612u_dev {
 	 * caller had already armed an ACK responder, because then the identity is
 	 * theirs and restoring would silently disarm it. */
 	int      beacon_took_identity;
+	/* The addr2 mt7612u_beacon_start() programmed, so an in-place update can
+	 * refuse a beacon that would change it - the port registers keep the
+	 * start identity, so a changed BSSID airs and matches nothing. */
+	uint8_t  beacon_ident[6];
 	struct mt_async *a;
 	FILE    *wrlog;
 	FILE    *mculog;

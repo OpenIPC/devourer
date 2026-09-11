@@ -28,7 +28,8 @@
 #   sudo tests/mt7612u_ap_onair.sh
 #   sudo AP_SYSFS=5-1 STA_SYSFS=2-1 CH=36 tests/mt7612u_ap_onair.sh open
 #
-# Env: AP_SYSFS, STA_SYSFS, CH, PSK, FW_DIR, SECS. Cells: open|wpa2|stop|all.
+# Env: AP_SYSFS, STA_SYSFS, CH, PSK, FW_DIR, SECS, AP_VBUS (hubloc:port for a
+# real VBUS cold cycle via uhubctl; hub ports only). Cells: open|wpa2|stop|all.
 
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -67,20 +68,38 @@ cleanup() {
   reap
   [ -n "${STA_IF:-}" ] && { ip addr flush dev "$STA_IF" 2>/dev/null
                             iw dev "$STA_IF" disconnect 2>/dev/null; }
-  # The MAC beacons autonomously. If a cell died before its teardown, only a
-  # port power-cycle is certain to silence it - and leaving one airing poisons
-  # the next run of this very script.
+  # The MAC beacons autonomously, so a cell that died before its teardown can
+  # leave one airing into the next cell. What silences it:
   #
-  # Confirmed against the VID:PID first. This runs as root and writes a
-  # deauthorize to a path the caller supplied; a stale or mistyped AP_SYSFS
-  # would otherwise yank whatever else is plugged there - someone's keyboard,
-  # a disk mid-write.
+  # An `authorized` toggle is NOT a power cycle - VBUS never drops and chip
+  # state survives, which is why this tree's CLAUDE.md warns against calling it
+  # cold. But on this part it does end the beacon, measured rather than assumed:
+  # armed -> SSID seen; host process killed -> SSID STILL seen (the beacon is
+  # autonomous); toggle -> SSID gone. The re-enumeration is what stops the
+  # timer. That is all this needs to guarantee between cells, and it is all it
+  # claims.
+  #
+  # For a genuine cold cycle, set AP_VBUS=<hubloc>:<port> and it uses uhubctl
+  # the way tests/regress.py's REGRESS_VBUS_MAP does. Per-port-switchable HUB
+  # ports only - never an xhci root port, which has wedged a device here badly
+  # enough to need the machine powered off.
+  #
+  # Either way, confirmed against the VID:PID first: this runs as root and
+  # writes to a path the caller supplied, and a stale AP_SYSFS would otherwise
+  # yank whatever else is plugged there.
   if [ "$(cat "/sys/bus/usb/devices/$AP_SYSFS/idVendor" 2>/dev/null)" = "0e8d" ] &&
      [ "$(cat "/sys/bus/usb/devices/$AP_SYSFS/idProduct" 2>/dev/null)" = "7612" ]; then
-    echo 0 > "/sys/bus/usb/devices/$AP_SYSFS/authorized" 2>/dev/null
-    sleep 2
-    echo 1 > "/sys/bus/usb/devices/$AP_SYSFS/authorized" 2>/dev/null
-    sleep 3
+    if [ -n "${AP_VBUS:-}" ]; then
+      uhubctl -l "${AP_VBUS%%:*}" -p "${AP_VBUS##*:}" -a off >/dev/null 2>&1
+      sleep 4
+      uhubctl -l "${AP_VBUS%%:*}" -p "${AP_VBUS##*:}" -a on  >/dev/null 2>&1
+      sleep 5
+    else
+      echo 0 > "/sys/bus/usb/devices/$AP_SYSFS/authorized" 2>/dev/null
+      sleep 2
+      echo 1 > "/sys/bus/usb/devices/$AP_SYSFS/authorized" 2>/dev/null
+      sleep 3
+    fi
   fi
 }
 trap cleanup EXIT INT TERM
@@ -257,11 +276,6 @@ cell_stop() {
   wait_arm() { # $1 = the count to exceed, $2 = seconds to wait
     local i
     for i in $(seq 1 "$2"); do [ "$(armed)" -gt "$1" ] && return 0; sleep 1; done
-    return 1
-  }
-  wait_gone() { # the log line that says StopBeacon ran, then a settle
-    local i
-    for i in $(seq 1 "$1"); do grep -q "PHASE 3" "$OUT/stop.log" && return 0; sleep 1; done
     return 1
   }
 

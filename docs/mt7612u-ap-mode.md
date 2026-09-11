@@ -1,31 +1,29 @@
 # MT7612U as a fully-userspace access point
 
-**Status: it works.** devourer's own AP harnesses run against this part
-unmodified — beacon, probe, auth, assoc, and the ARP/ICMP data plane — with a
-real Linux station associated. `StartBeacon`, `UpdateBeaconPayload` and
+**Status: it works.** devourer's own AP harnesses run against this part with no
+change to their AP logic — beacon, probe, auth, assoc, and the ARP/ICMP data
+plane — with a real Linux station associated. `StartBeacon`, `UpdateBeaconPayload` and
 `StopBeacon` are implemented on `Mt7612uRadio`, so nothing in
-`tests/ap_responder.cpp` or `tests/ap_wpa2.cpp` branches on the backend. (Both
-carry one MediaTek-specific *comment* now, explaining why they silence the
-beacon before `_exit`; no code depends on it.)
+`tests/ap_responder.cpp` or `tests/ap_wpa2.cpp` branches on the backend. Their AP
+logic is untouched; each gained a dozen lines that silence the beacon before
+`_exit`, and nothing in that is MediaTek-specific — the beacon is
+hardware-autonomous on the Realtek parts too.
 
-**WPA2-PSK works too.** `tests/ap_wpa2.cpp`, also unmodified, completes the
+**WPA2-PSK works too.** `tests/ap_wpa2.cpp`, its AP logic equally untouched, completes the
 4-way handshake against a real `wpa_supplicant` station and carries encrypted
 traffic. It needs the same five `IRadio` methods as the open-network harness -
 `InitWrite`, `StartBeacon`, `StartRxLoop`, `send_packet`, `StopBeacon` - and no
 others. CCMP is done in software in the harness, so no key API is involved;
 that is a separate point from the method count.
 
-What is NOT done: **hardware** CCMP. `MT_WCID_KEY` and `MT_SKEY` are untouched,
-so the claim below that hardware crypto is a capability *gain* on this part
-remains unmeasured — what is measured is that the software path devourer
-already had works here. Key install is the one item of the original gap list
-that is still open.
+What is NOT done: **hardware** CCMP. `MT_WCID_KEY` is absent and the key path
+is unreached (`MT_SKEY` is defined, and zeroed at init), so whether hardware
+crypto is a capability *gain* on this part is unmeasured — what is measured is
+that the software path devourer already had works here. See "What is still
+missing" below.
 
 File:line references below are to the merged subtree (`src/mt7612u/`, all
-`.cpp` since the C++ migration) and to `reference/mt76 @ be5ce79`. Some of the
-citations in "The gap" section still name the pre-migration `.c` filenames and
-pre-merge line numbers; they are kept because the reasoning is still correct,
-but do not expect them to resolve.
+`.cpp` since the C++ migration) and to `reference/mt76 @ be5ce79`.
 
 ## Verified on hardware (2026-09-08, MT7612U at USB 2-1)
 
@@ -50,7 +48,7 @@ driver work.
 ## Verified through IRadio (2026-09-10) — devourer as the AP
 
 The section above is the bring-up gates driving the C library directly. This
-one is devourer itself: `tests/ap_responder.cpp`, unmodified, built against
+one is devourer itself: `tests/ap_responder.cpp`, built unchanged against
 `libdevourer.a` and pointed at an MT7612U. A second MT7612U on the kernel
 `mt76x2u` driver is the station. ch36, `iw reg set SE`.
 
@@ -93,82 +91,80 @@ one is devourer itself: `tests/ap_responder.cpp`, unmodified, built against
   explicitly now, and `tests/mt7612u_beacon_stop_check.cpp` is what actually
   exercises the transition.
 
-## The claim, and why it holds
+## Three findings that shaped the implementation
 
-The gap between "MT7612U injector" (what the subtree is) and "MT7612U userspace
-AP" is small — a few hundred lines of C in the backend, and no new AP logic at
-all. Two reasons:
+Not a status list — these are the things that were not obvious from mt76 and
+that the code now depends on.
 
-1. **devourer already has the AP brain, and it is backend-agnostic.** The
-   probe/auth/assoc responder, the DHCP/ARP/ICMP data plane, and the WPA2 4-way
-   handshake with software CCMP all live in `tests/` (`ap_responder.cpp`,
-   `ap_wpa2.cpp`, `probe_responder.cpp`, `beacon_*.cpp`), driven entirely
-   through the `IRadio` interface — `StartBeacon` + the RX callback +
-   `send_packet`. `docs/ap-mode.md` documents a complete open and WPA2-PSK AP
-   validated against real Linux stations on this stack. None of it is
-   Realtek-specific; it works against any backend that implements the beacon
-   and ACK primitives.
+1. **On this MAC, "the AP" is an address match plus a beacon; there is no
+   responder register.** The immediate-response engine ACKs frames whose
+   address 1 matches `MT_MAC_ADDR_DW0/DW1`, gated by `MT_AUTO_RSP_EN` — which
+   init already leaves on (`mac_reset()` writes `MT_AUTO_RSP_CFG = 0x13`,
+   `init.cpp:174`, reached from `mt_init_hardware()` at `:408`). So arming
+   an ACK responder means *retargeting the port identity*, and closing the gate
+   does not stop a die that matches on identity — restoring the address does.
+   The consequence is that `MT_MAC_ADDR` has two users, the beacon and
+   `SetAckResponder`, sharing one register and one save slot; ownership belongs
+   to whoever wrote last, and both paths have to hand it over explicitly.
 
-2. **MediaTek's MAC offloads in hardware exactly what an AP needs most.** The
-   beacon is auto-transmitted from a reserved page at each TBTT, TSF-stamped by
-   the MAC; ACK is SIFS-timed by the MAC against the programmed address;
-   802.11 sequence numbering is a MAC function; and CCMP has real per-station
-   key hardware (`MT_WCID_KEY`, `MT_SKEY`). On Realtek, devourer does CCMP in
-   **software** because the security TX-desc field is absent on most
-   generations (`docs/ap-mode.md`: "only Jaguar1 has
-   `SET_TX_DESC_SEC_TYPE_8812`"). So on MT the encrypted data plane, and GTK
-   rekey which is explicitly out of scope on Realtek, become **hardware** —
-   this part is a capability *gain*, not a gap.
+2. **The APC BSSID slot index is derived from the address, and getting it wrong
+   is silent.** Under `MBSS_MODE=3` mt76 computes
+   `idx = 1 + (((macaddr[0] ^ addr[0]) >> 2) & 7)` for a locally-administered
+   address and 0 otherwise (`mt76x02_util.c:310`) — *after* `mt76x02_mac_setaddr`
+   has moved both the port MAC and the MBSS base, so its XOR is zero by
+   construction. A beacon that retargets only `MT_MAC_ADDR` leaves the base at
+   the factory address, the hardware derives a different slot, and the AP
+   beacons perfectly and acknowledges nobody. `mt_mac_set_bss_base()`
+   (`beacon.cpp`) is what makes the mt76 identity hold here. The masks
+   themselves were also transcribed two bits high in an earlier draft
+   (`regs.h:170-179`); `MBSS_MODE=4` is not a valid mode.
 
-## What the MT7612U backend already has
-
-Verified in the merged subtree:
-
-| AP need | present today | where |
-|---|---|---|
-| Port MAC + BSSID programmed | yes — `MT_MAC_ADDR_DW0/1`, `MT_MAC_BSSID_DW0/1`, MBSS_MODE=3, MBEACON_N | `init.c:206‑216` (`mac_setaddr`) |
-| Station table (WCID) | yes — `mt_wcid_setup(idx, mac)` writes `MT_WCID_ATTR` + address; all zeroed at init | `tx.c:95`, `init.c:236` |
-| Crypto key slots | the shared-key store is present and zeroed at init (`MT_SKEY`, `MT_SKEY_MODE`, `src/mt7612u/init.cpp` `wcid_and_key_clear()`). The per-station key store is NOT defined in this tree - `MT_WCID_KEY` does not exist here, which is part of why hardware CCMP is unreached |
-| ACKed unicast TX | yes — `no_ack=0` sets `MT_TXWI_ACK_CTL_REQ`; BA-window field present | `tx.c:164‑167` |
-| Beacon-interval timer regs | defined — `MT_BEACON_TIME_CFG` INTVAL/TIMER_EN/TBTT_EN/BEACON_TX, `MBEACON_N` | `regs.h:176‑180,169` |
-| RX filter control | yes — managed default `0x00015f97`, monitor clears to error-only | `init.c:278,494‑509` |
-| Register block copy | yes — `mt_wr_copy()` for reserved-page writes | used in `init.c` |
-
-So the addressing, the station table, the crypto slots, the ACK path and the
-beacon *timer* are already in place. The receiver runs (per the #414 tick), and
-`mt_tx_build()` already produces `[TXWI][802.11]` which is exactly the reserved-
-page beacon shape.
+3. **The RX filter's *default* is not what an AP wants — `set_monitor_rx` is.**
+   The init value is `0x00015f97` (`init.cpp:290`), and `MT_RX_FILTR_CFG_DUP`
+   is set in it. What leaves DUP clear is `mt7612u_set_monitor_rx()`
+   (`init.cpp:560-569`), deliberately, because duplicate suppression hides the
+   retransmissions an ACK-responder test counts — a station's retry with the FC
+   Retry bit set is exactly how you learn whether your ACKs are landing, and
+   `auth … retry=0` in the on-air harness is that evidence. Every AP path
+   reaches it (`StartRxLoop` calls it, and an AP must receive); a TX-only
+   consumer does not, and has no receiver to count retries with anyway. The
+   beacon path therefore touches the filter in neither direction.
 
 ## What is still missing: hardware key install
 
-One item, and it is the only thing between this and a fully hardware-accelerated
-AP. Everything else in the original gap list — the beacon load and arm, the APC
-address match, the TSF/sequence offload, the RX filter — is implemented and on
-air; git has the history.
+The MAC has real per-station key hardware and none of it is reached. This is
+the last item, but it is more than one register:
 
-The MAC has real per-station key hardware, and none of it is reached:
+- **Two registers are absent from this tree.** `MT_WCID_KEY` and `MT_WCID_IV`
+  are both undefined here; `mt76x02_mac_wcid_set_key` writes both
+  (`mt76x02_mac.c`). `MT_WCID_ATTR`, `MT_SKEY` and `MT_SKEY_MODE` *are* defined
+  and are zeroed at init by `wcid_and_key_clear()` — the "encrypt nothing"
+  configuration an injector wants, and the same registers a key install writes.
+- **The per-frame encrypt gate is set the wrong way for crypto.** There IS such
+  a flag — `MT_TXD_INFO_WIV` (`regs.h`) — and `mt_tx_build()` sets it
+  unconditionally, meaning "no hardware IV insertion, this frame is not
+  encrypted". mt76 gates it on whether the WCID has a key
+  (`mt76x02_usb_core.c`, `mt76x02_txrx.c`: `!wcid || hw_key_idx == 0xff ||
+  sw_iv`). A key install has to make WIV conditional too, not just fill the key
+  slots.
+- **TX selects encryption by WCID, so it is per-station and all-or-nothing.**
+  `txwi->wcid` chooses the key; `mt_tx_build()` is called with `0xff` (the
+  no-station index) from every library path. `tools/bringup.cpp` does pass a
+  real WCID for its rate-LUT gate, so the plumbing exists — but no
+  `Mt7612uRadio` path or AP harness installs a station.
+- **RX needs real work, not a flag.** The hardware strips the MIC and MMIC, but
+  **not** the IV/PN: mt76 removes that in the driver using `MT_RXINFO_PN_LEN`,
+  and deliberately does not on a fragment. `MT_RXINFO_PN_LEN` is already
+  defined here and unused; `MT_RXINFO_DECRYPT` is not defined at all.
 
-- `MT_WCID_KEY(idx)` is not even defined in this tree. `MT_WCID_ATTR`,
-  `MT_SKEY` and `MT_SKEY_MODE` are, and are zeroed at init
-  (`wcid_and_key_clear()` in `init.cpp`) — the "encrypt nothing" configuration
-  an injector wants, and the same registers a key install writes.
-- mt76's recipe is small: `mt76x02_mac_wcid_set_key` is ~40 lines of
-  `wr_copy` + `rmw_field` over primitives this subtree already has, plus
-  `mt76x02_mac_shared_key_setup` for the GTK.
-- **There is no per-frame encrypt flag.** TX encryption is selected entirely by
-  `txwi->wcid` pointing at a WCID whose `ATTR.PKEY_MODE` is set, and this
-  backend hardcodes `wcid = 0xff` (the no-station index). So it is all-or-
-  nothing per station: install a key and every frame to that WCID is encrypted
-  in hardware; you cannot mix with software CCMP on the same peer.
-- On RX the hardware sets `MT_RXINFO_DECRYPT` and **strips IV, MIC and MMIC**,
-  so `mt_rx_parse()` would need to handle a changed frame layout, not just
-  report a flag.
-
-The blocker is not the driver. `IRadio` has no key surface at all — no install,
-no cipher enum — because devourer does CCMP in software on every backend, which
-is a reasonable choice when only Jaguar1 has the Realtek TX-descriptor security
-field. Reaching MediaTek's crypto therefore means adding an interface member
-most backends cannot implement, which is a design decision rather than a port.
+The blocker is still not the driver. `IRadio` has no key surface at all — no
+install, no cipher enum — because devourer does CCMP in software on every
+backend, which is reasonable when only Jaguar1 has the Realtek TX-descriptor
+security field. The maintainer's guidance (PR #424) is to keep it that way for
+now and design the key surface against two backends rather than one: a crypto
+key interface is a much larger contract than a feature flag — key lifetime, GTK
+vs PTK, rekey, who owns the replay counter — and expensive to undo once callers
+exist.
 
 ## Limitations and shortfalls of a userspace AP on MediaTek — and workarounds
 
@@ -223,19 +219,30 @@ clients and BlockAck reordering are where a userspace MT AP stops being worth
 it, and both have clean "don't support it" workarounds for the return-video
 use case.
 
-## End-to-end verification (reuse, don't rebuild)
+## End-to-end verification
 
-devourer's existing AP checks are backend-agnostic and become the acceptance
-suite once the MT backend implements the primitives:
+devourer's existing AP checks are backend-agnostic, so they are the acceptance
+suite for this backend with no AP-logic change:
 
 - `tests/beacon_wire_check.cpp` — beacon frame control, +1 seq per beacon, live TSF.
-- `tests/beacon_kernel_scan.sh` — a real `rtw88` station's `iw scan` lists the AP.
+- `tests/beacon_kernel_scan.sh` — a real station's `iw scan` lists the AP.
 - `tests/probe_responder.cpp` — active-scan probe response, no beacon.
 - `tests/ap_responder.cpp` + `tests/ap_ping_demo.sh` — open assoc → DHCP lease →
   ping 0% loss.
 - `tests/ap_wpa2.cpp` + `tests/ap_wpa2_demo.sh` — WPA2 4-way → encrypted DHCP →
-  encrypted ping (here, exercise the **hardware** CCMP path).
+  encrypted ping. Software CCMP; the **hardware** CCMP path is the open item.
+
+`tests/mt7612u_ap_onair.sh` is the one MT-specific piece. Its three cells drive
+`ap_responder`, `ap_wpa2` and `tests/mt7612u_beacon_stop_check.cpp` against a
+real station and grade them by `iw scan` (matched on BSSID *and* SSID) and by
+the AP's own log, so a run is a pass/fail line rather than an operator reading
+output. It is a root harness — `iw`, `wpa_supplicant`, and between cells a USB
+power-cycle when `AP_VBUS` names a hub port, otherwise an `authorized` toggle,
+which is not a cold cycle but does end this MAC's autonomous beacon (measured,
+see the comment there). Environment: `CH`, `BUILD`, `FW_DIR`, `PSK`, `SECS`,
+`AP_SYSFS`, `STA_SYSFS`, `AP_VBUS`, plus an optional cell argument (`open`,
+`wpa2`, `stop`, `all`).
 
 Success = a real Linux station associates and passes IP traffic against the
 MT7612U backend, open and WPA2-PSK, on both 2.4 and 5 GHz, with the static
-beacon.
+beacon. Measured: 14/14 on ch36 and 14/14 on ch6.

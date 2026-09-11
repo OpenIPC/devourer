@@ -297,7 +297,7 @@ cell_stop() {
 
   wait $ap 2>/dev/null
   grep -q "0 failure(s)" "$OUT/stop.log" \
-    && ok "stop: local contract checks (2nd stop false, update-with-no-beacon false)" \
+    && ok "stop: local contract checks (2nd stop false, update-with-no-beacon false, update accepts an unchanged payload and refuses a changed addr3 - and still refuses a changed addr2)" \
     || bad "stop: local contract checks failed"
 }
 

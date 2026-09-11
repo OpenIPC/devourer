@@ -296,11 +296,38 @@ static int mt_mac_set_bss_base(struct mt7612u_dev *d, const uint8_t *a)
  * failure path in beacon_start and by beacon_stop. */
 static void unwind_identity(struct mt7612u_dev *d, int took)
 {
-	if (!took)
-		return;
-	mt7612u_clear_ack_responder(d);
+	const unsigned before = mt_io_errors(d);
+
+	/*
+	 * The two registers have different ownership and cannot share one flag.
+	 *
+	 * MT_MAC_BSSID has exactly two writers in the whole backend - mac_setaddr
+	 * at init, and mt_mac_set_bss_base() here - so a beacon that moved it
+	 * always owns it, and it is restored unconditionally. Gating it on `took`
+	 * left it pointing at the beacon's addr2 after any hand-off, and nothing
+	 * else in the library ever writes it back: the hardware then derives the
+	 * BSS index from an address the host no longer believes it is using.
+	 *
+	 * MT_MAC_ADDR is co-owned with the ACK responder, so it is restored only
+	 * while the beacon still holds it.
+	 */
 	mt_mac_set_bss_base(d, d->macaddr);
-	d->beacon_took_identity = 0;
+	if (took)
+		mt7612u_clear_ack_responder(d);
+
+	/* Flags survive a restore that did not land, so Stop()'s documented retry
+	 * has something left to retry. Clearing them regardless made the second
+	 * and third attempts no-ops against a still-leaked identity.
+	 *
+	 * This only reaches MT_MAC_ADDR because mt7612u_clear_ack_responder()
+	 * keeps `ack_saved` on its own failure for the same reason - it early-
+	 * returns on !ack_saved, so a retry that found the flag cleared would do
+	 * nothing at all no matter what this function decides. The two halves of
+	 * the retry have to agree. */
+	if (mt_io_errors(d) != before)
+		return;
+	if (took)
+		d->beacon_took_identity = 0;
 }
 
 int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
@@ -309,6 +336,7 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 	struct mt7612u_tx_rate rate;
 	const uint8_t *mpdu = NULL;
 	size_t mpdu_len = 0;
+	static const uint8_t zero6[6] = { 0 };
 	const uint8_t *ta, *bssid;
 	uint8_t idx;
 	unsigned before;
@@ -352,24 +380,76 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 	 *
 	 * Both registers because the index below is derived from the MBSS base,
 	 * not from MT_MAC_ADDR. */
+
+	/* Snapshot before the FIRST hardware write, so the delta covers the
+	 * identity writes too - MT_MAC_ADDR_DW1 goes out as a bare mt_wr and the
+	 * readback checks DW0 only, so a failed DW1 would otherwise be invisible
+	 * and the AP would beacon with half an address. */
+	before = mt_io_errors(dev);
 	{
-		/* Ownership is claimed BEFORE the writes, not after them. Both calls
-		 * below move MT_MAC_ADDR and can then fail - set_ack_responder writes
-		 * the register and readback-verifies afterwards, and set_bss_base can
-		 * only be reached once that write landed - so a failure here leaves
-		 * the identity moved. Claiming first is what lets the unwind put it
-		 * back; claiming after meant these two paths leaked it, and returned
-		 * -1, which tells the caller the hardware was never touched. */
-		const int was_taken = dev->ack_saved;
-		if (!was_taken) {
-			dev->beacon_took_identity = 1;
-			took = 1;
-		}
+		/*
+		 * `took` is decided BEFORE the writes and the device flag is set
+		 * AFTER them, and the split is load-bearing in both directions.
+		 *
+		 * Before, because both calls move MT_MAC_ADDR and can then fail -
+		 * set_ack_responder writes the register and readback-verifies
+		 * afterwards, and set_bss_base is only reachable once that write
+		 * landed - so the unwind needs to know we own it while those failures
+		 * are still in flight.
+		 *
+		 * After, because mt7612u_set_ack_responder() CLEARS
+		 * beacon_took_identity itself: that is how a caller arming a responder
+		 * takes ownership away from a beacon. Setting the device flag first
+		 * meant the call immediately below wiped it, and StopBeacon then never
+		 * restored the identity on the success path - which is the previous
+		 * round's fix for the failure paths breaking the success one.
+		 */
+		/*
+		 * Always 1. The retarget below is unconditional, so this call always
+		 * moves the identity and therefore always owns it at this instant.
+		 *
+		 * It used to be `!dev->ack_saved`, meaning "somebody else got here
+		 * first, leave it to them" - but ack_saved is also set by THIS
+		 * function's own call below, and is only cleared by a successful
+		 * beacon_stop. So a re-arm over a live beacon, and any session whose
+		 * config arms rx.ack_responder, both took the "somebody else" branch
+		 * and disabled the restore for the rest of the session. And the branch
+		 * protected nothing even when it fired: the retarget had already
+		 * overwritten that responder's address in hardware, so declining to
+		 * restore left MT_MAC_ADDR at the beacon's addr2 - neither the
+		 * responder's address nor the factory one.
+		 *
+		 * Hand-off is the responder's job, not ours: mt7612u_set_ack_responder()
+		 * clears beacon_took_identity, so a caller arming one AFTER the beacon
+		 * takes ownership and beacon_stop then leaves it alone.
+		 */
+		took = 1;
+		/*
+		 * fail_post, not fail_pre, and that is the whole point of there being
+		 * only one failure label past this line.
+		 *
+		 * -1 is contracted as "nothing was touched, whatever was airing still
+		 * is", and these two exits cannot honour it: set_ack_responder has
+		 * already written MT_MAC_ADDR before it readback-verifies, and
+		 * set_bss_base is only reachable once that write landed. The unwind
+		 * puts the FACTORY address back - the only address saved anywhere -
+		 * so over a live beacon a failed re-arm restored an identity that
+		 * beacon never had, while its page and timers kept airing it. The
+		 * caller, told -1, left _beacon_active true and went on believing in
+		 * an AP that beacons perfectly and acknowledges nobody.
+		 *
+		 * There is no atomic re-arm to offer here: one MT_MAC_ADDR, one save
+		 * slot, and the previous occupant's address is not in it. So a failure
+		 * after the identity moves takes the beacon down deliberately - engine
+		 * disarmed, APC slots zeroed, identity retracted, -2 - which the
+		 * caller can act on. Silence is a worse outcome than a deaf AP only if
+		 * you are not told about it.
+		 */
 		if (mt7612u_set_ack_responder(dev, ta))
-			goto fail_pre;
+			goto fail_post;
 		if (mt_mac_set_bss_base(dev, ta))
-			goto fail_pre;
-		memcpy(dev->beacon_ident, ta, 6);
+			goto fail_post;
+		dev->beacon_took_identity = took;
 	}
 
 	/*
@@ -393,33 +473,57 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 	 *
 	 *  - the identity, if THIS call took it. Leaving it retargeted after a
 	 *    failed start means the adapter answers for a BSS that does not exist.
-	 *  - the beacon engine, once mt_beacon_init() has disarmed it. That is why
-	 *    a failure at or after that point returns -2 and one before it returns
-	 *    -1: only the caller can know whether a PREVIOUS beacon is still on the
-	 *    air, and -1 means "nothing was touched, whatever was airing still is".
+	 *  - the beacon engine, once mt_beacon_init() has disarmed it.
 	 *
-	 * And the io_err delta, because mt_beacon_set_enable()'s arming path is
-	 * mt_rmw()/mt_set() - which report their read halves, not their writes - so
-	 * without it a failed EP0 transfer returns 0 and the caller reports an AP
-	 * that is ready and airing nothing.
+	 * Both unwind through the single fail_post label and return -2. -1 is
+	 * reserved for the refusals ABOVE the first hardware write - bad input, a
+	 * malformed frame, a multicast addr2 - so it can keep meaning "nothing was
+	 * touched, whatever was airing still is" without qualification. An earlier
+	 * draft returned -1 from inside the identity block, where that promise was
+	 * already false.
+	 *
+	 * And the io_err delta, because several writes on this path report only
+	 * their read halves or nothing at all - mt_beacon_set_enable()'s
+	 * mt_rmw()/mt_set(), and MT_MAC_ADDR_DW1, which set_ack_responder writes
+	 * with a bare mt_wr and whose readback checks DW0 only. Without the delta
+	 * a failed DW1 transfer returns 0 and the AP beacons with half an address
+	 * and acknowledges nobody. The snapshot is taken before the identity
+	 * writes, above, for exactly that reason.
 	 */
-	before = mt_io_errors(dev);
 
 	/*
-	 * The one RX-filter change an AP wants, and the reason is evidence rather
-	 * than throughput: DUP drops retransmissions, and a station's retry is
-	 * exactly how you learn whether your ACKs are landing. An auth arriving
-	 * with FC Retry set means the MAC did not acknowledge the first one; drop
-	 * duplicates and that signal disappears. mt76 leaves OTHER_BSS, BCAST and
-	 * MCAST undropped in every mode, so a wildcard probe request already
-	 * reaches us and nothing else here needs changing. Cleared in place rather
-	 * than rewriting a copied literal, so it cannot drift from the default.
+	 * No RX-filter change, and the reason is mt7612u_set_monitor_rx(), NOT a
+	 * default. The init value is 0x00015f97 (initvals.h, re-written at
+	 * init.cpp:290) and BIT(7) - MT_RX_FILTR_CFG_DUP - is SET in it. What
+	 * leaves DUP clear is mt7612u_set_monitor_rx(), which rewrites the
+	 * register as PHY_ERR and nothing else - these are DROP bits, so CRC_ERR
+	 * joins it when the caller does NOT want corrupted frames kept
+	 * (init.cpp:566, `if (!keep_corrupted)`). init.cpp:557 says dropping DUP
+	 * there is deliberate, because "duplicate suppression would hide the
+	 * retransmissions an ACK-responder test counts".
+	 *
+	 * Every AP path goes through it: Mt7612uRadio::StartRxLoop() calls it, and
+	 * an AP has to receive. A TX-only consumer - InitWrite() with no RX loop -
+	 * does not, and there DUP stays set; that costs it nothing, because with
+	 * no receiver there are no retransmissions to count.
+	 *
+	 * So touching the filter here would be wrong in both directions: clearing
+	 * DUP is a no-op on every path that beacons, and RESTORING it on the way
+	 * out would switch duplicate filtering on in a session that deliberately
+	 * had it off - destroying the retry=0 evidence the AP harness measures.
+	 * Both were here for one round; neither belongs.
 	 */
-	mt_clear(dev, MT_RX_FILTR_CFG, MT_RX_FILTR_CFG_DUP);
-
-	if (mt_ap_set_bssid(dev, idx, bssid))
-		goto fail_pre;
 	mt_beacon_init(dev);
+	/*
+	 * Kept below mt_beacon_init(). It writes MT_MAC_APC_BSSID_L then _H and
+	 * nothing in unwind_identity() touches the APC slots, so a failure between
+	 * the two leaves a half-programmed slot: over a live beacon that
+	 * half-overwrites the airing AP's own entry and it silently stops
+	 * acknowledging. fail_post zeroes both slots, which is the only unwind
+	 * that covers it, and everything from here down exits that way.
+	 */
+	if (mt_ap_set_bssid(dev, idx, bssid))
+		goto fail_post;
 	if (mt_beacon_write(dev, mpdu, mpdu_len, &rate))
 		goto fail_post;
 	if (mt_beacon_set_enable(dev, 1, interval_tu))
@@ -428,15 +532,32 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 		ERR("beacon: a USB transfer failed while arming");
 		goto fail_post;
 	}
+	/* Recorded only once the arm has succeeded. Written before the last
+	 * failure exit, a -1 re-arm replaced it while the OLD beacon was still
+	 * airing - and beacon_update then refused the live beacon's real addr2 and
+	 * accepted one that was not on the air. Host state describing the hardware
+	 * is part of what -1 promises not to change.
+	 *
+	 * addr2 and addr3 together: `ta` is mpdu + 10 and `bssid` is mpdu + 16, so
+	 * twelve bytes from `ta` are exactly the pair, and both were programmed
+	 * above - addr2 into the identity registers, addr3 into APC slot `idx`. */
+	memcpy(dev->beacon_ident, ta, 12);
 	return 0;
 
+/*
+ * The only failure label past the first hardware write, so -2 covers every one
+ * of them and -1 is left to mean exactly what it says: refused on its input,
+ * nothing touched. Disarm, erase, retract, in that order.
+ */
 fail_post:
 	mt_beacon_set_enable(dev, 0, 0);
+	/* The APC slot was programmed above; leave no BSS the MAC still matches.
+	 * After a -2 the caller clears _beacon_active, so StopBeacon early-returns
+	 * and this residue would be unreachable for the rest of the session. */
+	mt_ap_set_bssid(dev, 0, zero6);
+	mt_ap_set_bssid(dev, 1, zero6);
 	unwind_identity(dev, took);
 	return -2;
-fail_pre:
-	unwind_identity(dev, took);
-	return -1;
 }
 
 int mt7612u_beacon_update(struct mt7612u_dev *dev, const void *buf, size_t len)
@@ -456,10 +577,16 @@ int mt7612u_beacon_update(struct mt7612u_dev *dev, const void *buf, size_t len)
 	 * beacon that no longer matches the programmed APC slot or MT_MAC_ADDR.
 	 * It beacons perfectly and acknowledges nobody, which is the failure the
 	 * start path goes to some length to prevent.
+	 *
+	 * BOTH addresses, in one 12-byte compare over the adjacent addr2/addr3
+	 * pair. Checking addr2 alone still admitted a changed addr3, and addr3 is
+	 * the half that goes into the APC slot - the update would air a BSSID the
+	 * slot does not hold, producing precisely the deaf AP described above
+	 * through the guard meant to stop it.
 	 */
-	if (memcmp(mpdu + 10, dev->beacon_ident, 6) != 0) {
-		ERR("beacon: an in-place update cannot change addr2 - the port "
-		    "identity keeps what beacon_start programmed");
+	if (memcmp(mpdu + 10, dev->beacon_ident, 12) != 0) {
+		ERR("beacon: an in-place update cannot change addr2 or addr3 - the "
+		    "port identity and the APC slot keep what beacon_start programmed");
 		return -1;
 	}
 

@@ -219,10 +219,16 @@ struct mt7612u_dev {
 	 * caller had already armed an ACK responder, because then the identity is
 	 * theirs and restoring would silently disarm it. */
 	int      beacon_took_identity;
-	/* The addr2 mt7612u_beacon_start() programmed, so an in-place update can
-	 * refuse a beacon that would change it - the port registers keep the
-	 * start identity, so a changed BSSID airs and matches nothing. */
-	uint8_t  beacon_ident[6];
+	/* The addr2 AND addr3 mt7612u_beacon_start() programmed, so an in-place
+	 * update can refuse a beacon that would change either. Both, because they
+	 * land in different registers: addr2 in MT_MAC_ADDR and the MBSS base,
+	 * addr3 in the APC BSSID slot. Guarding addr2 alone let an update move the
+	 * BSSID the beacon advertises while the slot still held the old one - the
+	 * AP beacons perfectly and acknowledges nobody, which is the exact failure
+	 * this guard exists to prevent. The two are adjacent in the 802.11 header
+	 * (bytes 10 and 16 of the 24-byte management header beacon_split()
+	 * requires), so one memcpy covers them. */
+	uint8_t  beacon_ident[12];
 	struct mt_async *a;
 	FILE    *wrlog;
 	FILE    *mculog;

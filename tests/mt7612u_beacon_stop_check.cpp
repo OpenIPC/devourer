@@ -125,6 +125,49 @@ int main(int argc, char **argv) {
     std::fprintf(stderr, "FAIL: StartBeacon returned false\n");
     return 1;
   }
+
+  /*
+   * The identity guard, exercised against a LIVE beacon.
+   *
+   * StartBeacon records addr2 AND addr3, and an in-place update may change
+   * neither: addr2 is in the port identity registers and the MBSS base, addr3
+   * is in the APC slot, and an update rewrites none of them. A beacon that
+   * aired a different BSSID than the slot holds looks perfect on a scan and
+   * acknowledges nobody - it cannot be caught by watching the air.
+   *
+   * Only the addr3 arm discriminates. addr2 was already guarded, so that arm
+   * is a regression check, not evidence for this change; addr3 was accepted
+   * before and is refused now. Both are kept, and said apart, because a test
+   * whose arms are not distinguished reads as twice the coverage it has.
+   *
+   * The positive control carries as much weight as the two negatives: a guard
+   * that refused every payload would pass both refusal checks. The GUARD runs
+   * ahead of the suppress/copy bracket, so a refusal costs the update and not
+   * the beacon - the PHASE 1 scan below must still find it. The accepted one
+   * does go through the bracket and re-copies the page, which is two EP0
+   * transfers for a 62-byte beacon, not the full slot.
+   */
+  {
+    const size_t rtap = (size_t)bcn[2] | ((size_t)bcn[3] << 8);
+    const struct { size_t off; const char *what; } probes[] = {
+        { rtap + 10, "addr2" }, { rtap + 16, "addr3" } };
+
+    if (!dev->UpdateBeaconPayload(bcn.data(), bcn.size())) {
+      std::fprintf(stderr, "FAIL: UpdateBeaconPayload refused an unchanged "
+                           "payload over a live beacon\n");
+      fails++;
+    }
+    for (const auto &p : probes) {
+      std::vector<uint8_t> bad = bcn;
+      bad[p.off] ^= 0x40;   /* still unicast, still locally administered */
+      if (dev->UpdateBeaconPayload(bad.data(), bad.size())) {
+        std::fprintf(stderr, "FAIL: UpdateBeaconPayload accepted a changed "
+                             "%s\n", p.what);
+        fails++;
+      }
+    }
+  }
+
   std::this_thread::sleep_for(std::chrono::seconds(secs));
 
   banner("PHASE 2: stopped - the SSID MUST be gone");

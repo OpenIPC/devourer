@@ -304,12 +304,12 @@ private:
   std::atomic<bool> _bf_apply_on{false};
   std::atomic<uint64_t> _bf_cbr_count{0};
   uint8_t _bf_peer[6] = {0};
-  /* dis_cca sticky state — re-applied after SetMonitorChannel (the channel set
-   * rewrites the BB CCA registers). Caller holds _reg_mu. */
-  bool _cca_disabled = false;
-  /* The two gates, tracked separately so a channel set re-asserts exactly
-   * what the caller asked for. Both false is the default, which is what
-   * _cca_disabled == false always meant. */
+  /* dis_cca sticky state, one field per gate — re-applied after
+   * SetMonitorChannel (the channel set rewrites the BB CCA registers) and
+   * handed to phydm as edcca_track. Both false is the default. Caller holds
+   * _reg_mu. There is deliberately no combined flag: every consumer wants
+   * one specific gate, and the single all-or-nothing bool this replaced was
+   * how EDCCA tracking ended up keyed on the wrong one. */
   bool _cca_primary_disabled = false;
   bool _cca_edcca_disabled = false;
   void apply_cca_mode_locked(bool disabled);

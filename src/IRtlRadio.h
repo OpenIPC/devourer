@@ -85,30 +85,62 @@ public:
    * tests/canary_diff.py. Reading a powered-down chip yields garbage or throws;
    * interpreting that is the caller's job. No-op where unsupported (default). */
   virtual void DumpChipState() {}
-
   /* The MAC carrier-sense gate, one bit at a time.
    *
-   * SetCcaMode is all-or-nothing, and on this family it is two gates:
-   * 0x520[14] primary CCA (defers to a decodable preamble) and 0x520[15]
-   * EDCCA (defers to raw in-band energy). They answer different questions
-   * and they do not behave the same way — tests/dis_cca_tx_onair.sh measured
-   * primary CCA costing a Jaguar3 injector 41-45% against a co-channel
-   * flooder while the energy bit alone was null, and on Jaguar1 the result
-   * inverts (see below). A caller that needs one of them should not have to
-   * turn off both, and a caller diagnosing a deferral needs to tell them
-   * apart.
+   * SetCcaMode is all-or-nothing, and on Jaguar1 and Jaguar3 it is two
+   * gates: 0x520[14] primary CCA (defers to a decodable preamble) and
+   * 0x520[15] EDCCA (defers to raw in-band energy). They answer different
+   * questions, and the two families measured so far DISAGREE about which one
+   * stops an injector — so a caller diagnosing a deferral has to tell them
+   * apart, and one that needs a single gate should not have to turn off
+   * both. CLAUDE.md summarises the on-air delivery figures and
+   * tests/dis_cca_tx_onair.sh is the harness behind them;
+   * tests/cca_gates_regcheck.sh is the register-level check that this
+   * contract holds, not a delivery measurement.
    *
    * `true` means DISABLED, matching SetCcaMode's argument sense and the
    * register's own polarity (bit set = gate off). SetCcaMode is exactly
-   * SetCcaGates(d, d) and writes the same bytes it always did. Returns false
-   * where the split is not ported; SetCcaMode remains the portable call. */
+   * SetCcaGates(d, d) and writes the same bytes it always did; it stays the
+   * portable call, and is all a backend without the split offers.
+   *
+   * CONTRACT, because both halves of this have bitten:
+   *
+   *  - POST-BRING-UP ONLY. Both calls return false before Init/InitWrite:
+   *    0x520 is meaningless until the MAC is configured, so reading it would
+   *    be a fabricated gate state and writing it would poke an uninitialised
+   *    MAC. `false` therefore means EITHER "not ported on this backend" OR
+   *    "not brought up yet"; a caller probing capability at construction
+   *    cannot tell those apart and must re-ask after bring-up. On a refusal
+   *    GetCcaGates leaves its out-parameters untouched.
+   *
+   *    SetCcaMode is NOT the same, and the difference is pre-existing rather
+   *    than something the split introduced: it returns void, so a
+   *    pre-bring-up call cannot report anything, and what it does with one
+   *    is per-backend. The way to ask for a gate state from bring-up is the
+   *    tuning.disable_cca config knob, which Init applies once the MAC is
+   *    up.
+   *
+   *  - STICKINESS SURVIVES A RETUNE ON BOTH, BUT ONLY ONE OF THEM MEANS IT.
+   *    Measured on an 8812AU and an 8822C, the gate state is intact after
+   *    SetMonitorChannel AND after FastRetune, both within a band and across
+   *    a 5 GHz/2.4 GHz change, at 0x520, 0x524 and Jaguar1's BB thresholds.
+   *    The mechanisms are not equivalent: Jaguar3 records the pair and
+   *    re-asserts it in SetMonitorChannel (its FastRetune fallback does not,
+   *    and does not need to), while Jaguar1 records nothing and survives
+   *    only because its channel path happens not to rewrite those registers.
+   *    Do not build on the Jaguar1 case — re-read with GetCcaGates rather
+   *    than assume. Bring-up IS a reset on Jaguar1: Init/InitWrite
+   *    unconditionally re-run SetCcaMode(_cfg.tuning.disable_cca), so a
+   *    re-Init puts the gates back to the configured default. */
   virtual bool SetCcaGates(bool primary_disabled, bool edcca_disabled) {
     (void)primary_disabled;
     (void)edcca_disabled;
     return false;
   }
 
-  /* Current gate state, read back from the hardware rather than remembered. */
+  /* Current gate state, read back from the hardware rather than remembered.
+   * Same contract as SetCcaGates above: post-bring-up only, false where the
+   * split is unavailable, out-parameters untouched on a refusal. */
   virtual bool GetCcaGates(bool &primary_disabled, bool &edcca_disabled) {
     (void)primary_disabled;
     (void)edcca_disabled;

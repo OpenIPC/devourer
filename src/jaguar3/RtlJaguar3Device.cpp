@@ -241,7 +241,9 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         next += std::chrono::seconds(2);
         try {
           std::lock_guard<std::mutex> lk(_reg_mu);
-          _phydm.tick(_channel.Channel, !_cca_disabled);
+          /* edcca_track follows the EDCCA gate alone — see the housekeeping
+           * tick below for why the all-or-nothing flag is the wrong input. */
+          _phydm.tick(_channel.Channel, !_cca_edcca_disabled);
         } catch (...) {
           break; /* chip gone — the RX loop will wind down too */
         }
@@ -472,9 +474,13 @@ void RtlJaguar3Device::coex_runtime_loop() {
       _hal.coex_run_5g();
       _hal.pwr_track(); /* thermal TX-power compensation (sustains upper 5 GHz) */
       /* phydm dynamic mechanisms (vendor watchdog parity): FA/CCA window
-       * statistics -> DIG -> CCK-PD -> EDCCA. EDCCA tracking is owned by
-       * SetCcaMode when the EDCCA-disable knob is active. */
-      _phydm.tick(_channel.Channel, !_cca_disabled);
+       * statistics -> DIG -> CCK-PD -> EDCCA. EDCCA tracking is owned by the
+       * EDCCA gate: keyed on the all-or-nothing flag instead, the watchdog
+       * would keep running PhydmRuntimeJaguar3::edcca() and rewriting the BB
+       * thresholds at 0x84c every ~2 s in the EDCCA-off/primary-on arm,
+       * undoing the disable the caller asked for. Jaguar1 does the same
+       * thing via SetEdccaTrack(!edcca_disabled) at the end of apply_cca. */
+      _phydm.tick(_channel.Channel, !_cca_edcca_disabled);
       _hal.fw_update_wl_phy_info();
       _hal.fw_set_pwr_mode_active();
       _hal.fw_coex_query_bt_info();
@@ -1192,19 +1198,28 @@ void RtlJaguar3Device::apply_cca_gates_locked(bool primary_disabled,
   /* DIS_EDCCA (energy) + DIS_CCA (carrier-sense); a set bit disables. */
   if (primary_disabled) v520 |= (1u << 14); else v520 &= ~(1u << 14);
   if (edcca_disabled)   v520 |= (1u << 15); else v520 &= ~(1u << 15);
-  /* 0x524[11] moves with the pair and only with the pair. Deliberate: the
-   * two pure states then write exactly the bytes the all-or-nothing path
-   * wrote before this split, so SetCcaMode is byte-identical. What this bit
-   * means on its own is not documented here and was not measured, so a
-   * mixed state leaves it at the enabled value rather than guessing. */
-  if (primary_disabled && edcca_disabled) v524 &= ~(1u << 11);
-  else                                    v524 |=  (1u << 11);
+  /* 0x524[11] is BIT_EDCCA_MSK_CNTDOWN_EN (REG_RD_CTRL) — EDCCA masking the
+   * backoff countdown. Same name and bit on 8822B/8822C/8822E, so the
+   * meaning is family-stable rather than an 8822C guess. Being EDCCA-scoped
+   * it follows edcca_disabled alone: leaving it set in the EDCCA-off arm
+   * would let EDCCA keep masking the countdown, i.e. only half-disable the
+   * gate the caller asked to turn off. SetCcaMode's two pure states are
+   * unaffected — both gates equal means this writes what it always did. */
+  if (edcca_disabled) v524 &= ~(1u << 11);
+  else                v524 |= (1u << 11);
   _device.rtw_write<uint32_t>(0x0520, v520);
   _device.rtw_write<uint32_t>(0x0524, v524);
 }
 
 bool RtlJaguar3Device::GetCcaGates(bool &primary_disabled, bool &edcca_disabled) {
   std::lock_guard<std::mutex> lk(_reg_mu);
+  /* Before bring-up 0x520 holds whatever the chip's own boot left there (or
+   * whatever the bus returns on a powered-down part), and reporting that as
+   * the gate state would be a fabricated measurement. Same guard as Jaguar1,
+   * and it keeps the setter's refusal below honest: a caller that cannot set
+   * the gates yet cannot be handed a reading of them either. */
+  if (!_brought_up)
+    return false;
   const uint32_t v = _device.rtw_read<uint32_t>(0x0520);
   primary_disabled = (v & (1u << 14)) != 0;
   edcca_disabled = (v & (1u << 15)) != 0;
@@ -1213,13 +1228,18 @@ bool RtlJaguar3Device::GetCcaGates(bool &primary_disabled, bool &edcca_disabled)
 
 bool RtlJaguar3Device::SetCcaGates(bool primary_disabled, bool edcca_disabled) {
   std::lock_guard<std::mutex> lk(_reg_mu);
+  /* Post-bring-up only, and it says so rather than recording a request it
+   * will not carry out: neither Init nor InitWrite replays this state, so
+   * caching it here and returning true would report success for a write that
+   * never happens. The "configure it from bring-up" path is the existing
+   * tuning.disable_cca knob, which Init applies through SetCcaMode. */
+  if (!_brought_up)
+    return false;
   /* Sticky the same way dis_cca is: a channel set rewrites the BB CCA
    * registers and SetMonitorChannel re-asserts from these. */
-  _cca_disabled = primary_disabled && edcca_disabled;
   _cca_primary_disabled = primary_disabled;
   _cca_edcca_disabled = edcca_disabled;
-  if (_brought_up)
-    apply_cca_gates_locked(primary_disabled, edcca_disabled);
+  apply_cca_gates_locked(primary_disabled, edcca_disabled);
   _logger->info("Jaguar3: CCA gates primary={} edcca={}",
                 primary_disabled ? "OFF" : "on", edcca_disabled ? "OFF" : "on");
   return true;
@@ -1227,7 +1247,6 @@ bool RtlJaguar3Device::SetCcaGates(bool primary_disabled, bool edcca_disabled) {
 
 void RtlJaguar3Device::SetCcaMode(bool disabled) {
   std::lock_guard<std::mutex> lk(_reg_mu);
-  _cca_disabled = disabled;
   _cca_primary_disabled = disabled;
   _cca_edcca_disabled = disabled;
   if (_brought_up)

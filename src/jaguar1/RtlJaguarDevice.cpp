@@ -981,6 +981,12 @@ void RtlJaguarDevice::ClearAckResponder() {
 }
 
 bool RtlJaguarDevice::GetCcaGates(bool &primary_disabled, bool &edcca_disabled) {
+  /* The MAC register is meaningless before bring-up, and handing back
+   * whatever the bus returns would be a fabricated gate state. Jaguar3's
+   * SetCcaGates already guards on _brought_up; this is the read side and
+   * the Jaguar1 equivalent. */
+  if (!_brought_up)
+    return false;
   const uint32_t v = _device.rtw_read<uint32_t>(0x0520);
   primary_disabled = (v & (1u << 14)) != 0;
   edcca_disabled = (v & (1u << 15)) != 0;
@@ -988,6 +994,8 @@ bool RtlJaguarDevice::GetCcaGates(bool &primary_disabled, bool &edcca_disabled) 
 }
 
 bool RtlJaguarDevice::SetCcaGates(bool primary_disabled, bool edcca_disabled) {
+  if (!_brought_up)
+    return false;
   apply_cca(primary_disabled, edcca_disabled);
   _logger->info("Jaguar1: CCA gates primary={} edcca={}",
                 primary_disabled ? "OFF" : "on",

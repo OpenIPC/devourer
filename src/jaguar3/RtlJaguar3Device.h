@@ -200,6 +200,9 @@ public:
    * downlink residual from ~472 µs to 0.39 µs on a crowded channel (the TBTT
    * beacon airs on schedule instead of after a CSMA backoff). */
   void SetCcaMode(bool disabled) override;
+  /* The two gates independently — see IRtlRadio. */
+  bool SetCcaGates(bool primary_disabled, bool edcca_disabled) override;
+  bool GetCcaGates(bool &primary_disabled, bool &edcca_disabled) override;
 
   /* Adapter-health probes (see src/AdapterHealth.h). EFUSE probe is 8822C
    * only — the 8822E's OTP is not reliably readable post-bring-up by design
@@ -304,7 +307,13 @@ private:
   /* dis_cca sticky state — re-applied after SetMonitorChannel (the channel set
    * rewrites the BB CCA registers). Caller holds _reg_mu. */
   bool _cca_disabled = false;
+  /* The two gates, tracked separately so a channel set re-asserts exactly
+   * what the caller asked for. Both false is the default, which is what
+   * _cca_disabled == false always meant. */
+  bool _cca_primary_disabled = false;
+  bool _cca_edcca_disabled = false;
   void apply_cca_mode_locked(bool disabled);
+  void apply_cca_gates_locked(bool primary_disabled, bool edcca_disabled);
   /* TX+RX intent (DEVOURER_TX_WITH_RX at InitWrite / an RX-side Init):
    * keeps the RX filters open across the TX bring-up. */
   bool _rx_wanted = false;

@@ -1182,22 +1182,54 @@ RxEnergy RtlJaguar3Device::GetRxEnergy(bool with_nhm) {
  * MEASURED: the full recipe dropped 8822EU delivery from ~6800 to ~10 frames.
  * These MAC 0x520/0x524 bits gate TX only and are safe on a live RX. */
 void RtlJaguar3Device::apply_cca_mode_locked(bool disabled) {
+  apply_cca_gates_locked(disabled, disabled);
+}
+
+void RtlJaguar3Device::apply_cca_gates_locked(bool primary_disabled,
+                                              bool edcca_disabled) {
   uint32_t v520 = _device.rtw_read<uint32_t>(0x0520);
   uint32_t v524 = _device.rtw_read<uint32_t>(0x0524);
-  if (disabled) {
-    v520 |= (1u << 15) | (1u << 14);   /* DIS_EDCCA (energy) + DIS_CCA (carrier-sense) */
-    v524 &= ~(1u << 11);
-  } else {
-    v520 &= ~((1u << 15) | (1u << 14));
-    v524 |= (1u << 11);
-  }
+  /* DIS_EDCCA (energy) + DIS_CCA (carrier-sense); a set bit disables. */
+  if (primary_disabled) v520 |= (1u << 14); else v520 &= ~(1u << 14);
+  if (edcca_disabled)   v520 |= (1u << 15); else v520 &= ~(1u << 15);
+  /* 0x524[11] moves with the pair and only with the pair. Deliberate: the
+   * two pure states then write exactly the bytes the all-or-nothing path
+   * wrote before this split, so SetCcaMode is byte-identical. What this bit
+   * means on its own is not documented here and was not measured, so a
+   * mixed state leaves it at the enabled value rather than guessing. */
+  if (primary_disabled && edcca_disabled) v524 &= ~(1u << 11);
+  else                                    v524 |=  (1u << 11);
   _device.rtw_write<uint32_t>(0x0520, v520);
   _device.rtw_write<uint32_t>(0x0524, v524);
+}
+
+bool RtlJaguar3Device::GetCcaGates(bool &primary_disabled, bool &edcca_disabled) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  const uint32_t v = _device.rtw_read<uint32_t>(0x0520);
+  primary_disabled = (v & (1u << 14)) != 0;
+  edcca_disabled = (v & (1u << 15)) != 0;
+  return true;
+}
+
+bool RtlJaguar3Device::SetCcaGates(bool primary_disabled, bool edcca_disabled) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* Sticky the same way dis_cca is: a channel set rewrites the BB CCA
+   * registers and SetMonitorChannel re-asserts from these. */
+  _cca_disabled = primary_disabled && edcca_disabled;
+  _cca_primary_disabled = primary_disabled;
+  _cca_edcca_disabled = edcca_disabled;
+  if (_brought_up)
+    apply_cca_gates_locked(primary_disabled, edcca_disabled);
+  _logger->info("Jaguar3: CCA gates primary={} edcca={}",
+                primary_disabled ? "OFF" : "on", edcca_disabled ? "OFF" : "on");
+  return true;
 }
 
 void RtlJaguar3Device::SetCcaMode(bool disabled) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   _cca_disabled = disabled;
+  _cca_primary_disabled = disabled;
+  _cca_edcca_disabled = disabled;
   if (_brought_up)
     apply_cca_mode_locked(disabled);
   _logger->info("Jaguar3: MAC carrier-sense {}",
@@ -1224,8 +1256,8 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
     apply_tx_power_current(/*full=*/true);
   /* dis_cca is sticky — the channel set rewrote the BB CCA registers, so
    * re-assert the disable if it was armed. */
-  if (_brought_up && _cca_disabled)
-    apply_cca_mode_locked(true);
+  if (_brought_up && (_cca_primary_disabled || _cca_edcca_disabled))
+    apply_cca_gates_locked(_cca_primary_disabled, _cca_edcca_disabled);
   /* Per-packet power banks are sticky too (the lever contract): the channel
    * set doesn't touch 0x1e70[31:16] today, but a cheap RMW re-assert keeps
    * the contract robust against future channel-path changes. */

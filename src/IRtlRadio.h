@@ -85,6 +85,35 @@ public:
    * tests/canary_diff.py. Reading a powered-down chip yields garbage or throws;
    * interpreting that is the caller's job. No-op where unsupported (default). */
   virtual void DumpChipState() {}
+
+  /* The MAC carrier-sense gate, one bit at a time.
+   *
+   * SetCcaMode is all-or-nothing, and on this family it is two gates:
+   * 0x520[14] primary CCA (defers to a decodable preamble) and 0x520[15]
+   * EDCCA (defers to raw in-band energy). They answer different questions
+   * and they do not behave the same way — tests/dis_cca_tx_onair.sh measured
+   * primary CCA costing a Jaguar3 injector 41-45% against a co-channel
+   * flooder while the energy bit alone was null, and on Jaguar1 the result
+   * inverts (see below). A caller that needs one of them should not have to
+   * turn off both, and a caller diagnosing a deferral needs to tell them
+   * apart.
+   *
+   * `true` means DISABLED, matching SetCcaMode's argument sense and the
+   * register's own polarity (bit set = gate off). SetCcaMode is exactly
+   * SetCcaGates(d, d) and writes the same bytes it always did. Returns false
+   * where the split is not ported; SetCcaMode remains the portable call. */
+  virtual bool SetCcaGates(bool primary_disabled, bool edcca_disabled) {
+    (void)primary_disabled;
+    (void)edcca_disabled;
+    return false;
+  }
+
+  /* Current gate state, read back from the hardware rather than remembered. */
+  virtual bool GetCcaGates(bool &primary_disabled, bool &edcca_disabled) {
+    (void)primary_disabled;
+    (void)edcca_disabled;
+    return false;
+  }
 };
 
 #endif /* IRTL_RADIO_H */

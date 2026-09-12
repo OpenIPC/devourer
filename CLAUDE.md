@@ -323,11 +323,29 @@ Behavioural traps the per-field docs can't carry:
   Jaguar1/2/3; on Jaguar1 the enable is real work — its BB table parks the
   EDCCA thresholds (`0x8a4`) at never-trigger, so bring-up programs the
   vendor adaptivity operating point (IGI-coupled; the phydm watchdog
-  re-tracks it when running). The primary-CCA bit is the one that matters:
-  monitor injection is not CCA-free, it defers ~40–60% to a co-channel
-  802.11 transmitter, and clearing `[14]` recovers ~1.5–2.2× (on-air
-  8822EU/8812CU, `tests/dis_cca_tx_onair.sh`); the energy bit `[15]` alone
-  is null against a decodable preamble. **On by default on the streamtx FPV
+  re-tracks it when running). **Which bit matters is family-specific and the
+  two measured families disagree — do not generalise either result.** On
+  Jaguar3, monitor injection defers to a co-channel 802.11 transmitter and
+  clearing `[14]` recovers it while the energy bit `[15]` alone is null
+  against a decodable preamble (on-air 8822EU/8812CU,
+  `tests/dis_cca_tx_onair.sh`, measuring the DUT's host-side `submitted`
+  rate). On Jaguar1 it inverts: with an 8812AU injecting on an idle channel
+  and two independent witnesses decoding, clearing `[15]` alone recovers
+  ~95% while clearing `[14]` alone recovers little, because what stops this
+  family is the EDCCA its own bring-up turned on. The two are not in
+  conflict — they measure different things on different silicon — but
+  neither is the general answer.
+
+  Turning both gates off is WORSE than turning off the one that matters:
+  with EDCCA off and primary CCA left on, the same Jaguar1 injector delivers
+  95% on an idle channel and still 78% under a co-channel flooder; with both
+  gates off it collapses to 0.3%, because it stops waiting for a gap and
+  collides instead. `SetCcaGates` (`IRtlRadio`, Jaguar1 and Jaguar3) is the
+  one-bit-at-a-time form for exactly this; `SetCcaMode` remains the portable
+  all-or-nothing call and is `SetCcaGates(d, d)`. Both gate calls are
+  post-bring-up only and return false before it — see `src/IRtlRadio.h` for
+  the contract, and `tests/cca_gates_regcheck.sh` to reproduce the tables.
+  **On by default on the streamtx FPV
   downlink** (the link owns the channel — CSMA backoff only stutters it);
   `DEVOURER_DIS_CCA=0` forces standard carrier-sense back. On Kestrel the
   8852C runs the same enabled default (measured: full-rate TX, 2.4x flood

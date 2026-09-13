@@ -1929,9 +1929,13 @@ int32_t RtlJaguar2Device::PinBeaconTbtt(int32_t offset_us) {
 void RtlJaguar2Device::SetCcaMode(bool disabled) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   /* Both MAC carrier-sense bits in REG_TX_PTCL_CTRL: primary CCA 0x520[14] +
-   * EDCCA [15], plus EDCCA_MSK_COUNTDOWN 0x524[11]. The primary-CCA bit is the
-   * one that stops TX deferring to a co-channel transmitter; 0x520
-   * is the same HalMAC layout as the on-air-validated Jaguar3. */
+   * EDCCA [15], plus EDCCA_MSK_COUNTDOWN 0x524[11]. 0x520 is the same HalMAC
+   * layout as the on-air-validated Jaguar3, which is why the register writes
+   * are shared. Which of the two bits actually stops an injector is NOT:
+   * Jaguar3 and Jaguar1 measure opposite answers (see CLAUDE.md), and this
+   * family has no measurement of its own, so nothing here should be read as
+   * one. Jaguar2 has not ported the per-gate split — SetCcaGates is the
+   * not-ported default and this stays all-or-nothing. */
   uint32_t v520 = _device.rtw_read<uint32_t>(0x0520);
   uint32_t v524 = _device.rtw_read<uint32_t>(0x0524);
   if (disabled) { v520 |= (1u << 15) | (1u << 14); v524 &= ~(1u << 11); }

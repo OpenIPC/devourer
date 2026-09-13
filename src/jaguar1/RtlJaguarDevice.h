@@ -303,6 +303,9 @@ public:
    * parked at never-trigger by the BB table, programmed to the vendor
    * operating point on enable (EDCCA only exists once they are set). */
   void SetCcaMode(bool disabled) override;
+  /* The two gates independently — see IRtlRadio. */
+  bool SetCcaGates(bool primary_disabled, bool edcca_disabled) override;
+  bool GetCcaGates(bool &primary_disabled, bool &edcca_disabled) override;
   /* A-MPDU TX mode (IRadio contract; src/AmpduMode.h). Programs the
    * Jaguar1 aggregate-fill timer (0x0456 — NOT the 0x0455 the HalMAC chips
    * use) + the 8814A burst-mode gate (0x04BC), and records the descriptor
@@ -425,6 +428,11 @@ public:
   bool la_capture_wedged() const { return _la && _la->is_wedged(); }
 
 private:
+  /* Programs 0x520[14]/[15] and, for the EDCCA gate only, the BB thresholds
+   * at 0x8a4. SetCcaMode is apply_cca(d, d) and writes exactly what it
+   * wrote before the split existed. */
+  void apply_cca(bool primary_disabled, bool edcca_disabled);
+
   void StartWithMonitorMode(SelectedChannel selectedChannel);
   bool NetDevOpen(SelectedChannel selectedChannel);
 

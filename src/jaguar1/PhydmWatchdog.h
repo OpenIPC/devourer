@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 class RadioManagementModule;
@@ -53,12 +54,19 @@ public:
   /* Run one watchdog cycle synchronously on the calling thread. */
   void TickOnce();
 
-  /* EDCCA threshold tracking (the SetCcaMode enable path): when on, each
-   * tick re-derives the BB 0x8a4 L2H/H2L from the IGI DIG just wrote —
-   * the vendor couples the EDCCA threshold to IGI per watchdog cycle
-   * (phydm_adaptivity). Off = leave 0x8a4 alone (SetCcaMode owns the
-   * parked/static value). */
-  void SetEdccaTrack(bool on) { _edcca_track.store(on, std::memory_order_relaxed); }
+  /* EDCCA threshold tracking (the SetCcaMode / SetCcaGates enable path):
+   * when on, each tick re-derives the BB 0x8a4 L2H/H2L from the IGI DIG
+   * just wrote — the vendor couples the EDCCA threshold to IGI per watchdog
+   * cycle (phydm_adaptivity). Off = leave 0x8a4 alone (the caller owns the
+   * parked/static value).
+   *
+   * Synchronous by contract: this returns only once no tick is inside the
+   * EDCCA block and none can enter, so a caller turning tracking OFF may
+   * then write 0x8a4 knowing the watchdog will not overwrite it. Without
+   * that, a tick landing between the park write and the flag store leaves
+   * live thresholds behind a disable the caller already asked for — which
+   * only becomes reachable once the gates are settable mid-session. */
+  void SetEdccaTrack(bool on);
 
   /* Most-recent FA counter snapshot — exposed for diagnostics /
    * future DIG integration. */
@@ -121,7 +129,10 @@ private:
    * just walk based on FA count). */
   bool _digInitialised = false;
   uint8_t _cur_ig_value = 0x20;
-  std::atomic<bool> _edcca_track{false};
+  /* Serialises the tick's EDCCA block against SetEdccaTrack. Held only
+   * across that block, never across a whole tick. */
+  std::mutex _edcca_mu;
+  bool _edcca_track = false;          /* guarded by _edcca_mu */
   uint8_t _edcca_last_l2h = 0x7f; /* parked sentinel — first tick writes */
   uint8_t _dm_dig_max = 0x26;       /* DIG_MAX_COVERAGR */
   uint8_t _dm_dig_min = 0x1c;       /* DIG_MIN_COVERAGE */

@@ -103,19 +103,35 @@ void PhydmWatchdog::TickOnce() {
    * vendor recomputes the 0x8a4 L2H/H2L from IGI every adaptivity cycle —
    * with DIG walking IGI above, a static threshold would drift off the
    * operating point. Write-on-change only. */
-  if (_edcca_track.load(std::memory_order_relaxed)) {
-    const int8_t th_ini =
-        _eepromManager->version_id.ICType == CHIP_8814A ? -14 : -17;
-    const int8_t l2h = jaguar1_edcca_l2h(th_ini, _cur_ig_value);
-    if (static_cast<uint8_t>(l2h) != _edcca_last_l2h) {
-      _device.phy_set_bb_reg(0x8a4, 0xFF, static_cast<uint8_t>(l2h));
-      _device.phy_set_bb_reg(0x8a4, 0xFF00, static_cast<uint8_t>(l2h - 7));
-      _edcca_last_l2h = static_cast<uint8_t>(l2h);
-      _logger->info("PhydmWatchdog: EDCCA L2H/H2L re-tracked to {}/{} "
-                    "(igi=0x{:02x})",
-                    l2h, l2h - 7, _cur_ig_value);
+  {
+    /* Under _edcca_mu so a caller disabling the gate cannot have its park
+     * write raced by a tick that already passed the flag check. */
+    std::lock_guard<std::mutex> lk(_edcca_mu);
+    if (_edcca_track) {
+      const int8_t th_ini =
+          _eepromManager->version_id.ICType == CHIP_8814A ? -14 : -17;
+      const int8_t l2h = jaguar1_edcca_l2h(th_ini, _cur_ig_value);
+      if (static_cast<uint8_t>(l2h) != _edcca_last_l2h) {
+        _device.phy_set_bb_reg(0x8a4, 0xFF, static_cast<uint8_t>(l2h));
+        _device.phy_set_bb_reg(0x8a4, 0xFF00, static_cast<uint8_t>(l2h - 7));
+        _edcca_last_l2h = static_cast<uint8_t>(l2h);
+        _logger->info("PhydmWatchdog: EDCCA L2H/H2L re-tracked to {}/{} "
+                      "(igi=0x{:02x})",
+                      l2h, l2h - 7, _cur_ig_value);
+      }
     }
   }
+}
+
+void PhydmWatchdog::SetEdccaTrack(bool on) {
+  std::lock_guard<std::mutex> lk(_edcca_mu);
+  _edcca_track = on;
+  /* Turning tracking off hands 0x8a4 back to the caller, which parks it at
+   * the never-trigger value. Drop the write-on-change cache with it: the
+   * register no longer holds _edcca_last_l2h, so keeping it would let a
+   * later re-enable at the same IGI decide it had nothing to write. */
+  if (!on)
+    _edcca_last_l2h = 0x7f;
 }
 
 void PhydmWatchdog::ReadFaCountersAc(FaCnt &out) {

@@ -200,6 +200,9 @@ public:
    * downlink residual from ~472 µs to 0.39 µs on a crowded channel (the TBTT
    * beacon airs on schedule instead of after a CSMA backoff). */
   void SetCcaMode(bool disabled) override;
+  /* The two gates independently — see IRtlRadio. */
+  bool SetCcaGates(bool primary_disabled, bool edcca_disabled) override;
+  bool GetCcaGates(bool &primary_disabled, bool &edcca_disabled) override;
 
   /* Adapter-health probes (see src/AdapterHealth.h). EFUSE probe is 8822C
    * only — the 8822E's OTP is not reliably readable post-bring-up by design
@@ -301,10 +304,16 @@ private:
   std::atomic<bool> _bf_apply_on{false};
   std::atomic<uint64_t> _bf_cbr_count{0};
   uint8_t _bf_peer[6] = {0};
-  /* dis_cca sticky state — re-applied after SetMonitorChannel (the channel set
-   * rewrites the BB CCA registers). Caller holds _reg_mu. */
-  bool _cca_disabled = false;
+  /* dis_cca sticky state, one field per gate — re-applied after
+   * SetMonitorChannel (the channel set rewrites the BB CCA registers) and
+   * handed to phydm as edcca_track. Both false is the default. Caller holds
+   * _reg_mu. There is deliberately no combined flag: every consumer wants
+   * one specific gate, and the single all-or-nothing bool this replaced was
+   * how EDCCA tracking ended up keyed on the wrong one. */
+  bool _cca_primary_disabled = false;
+  bool _cca_edcca_disabled = false;
   void apply_cca_mode_locked(bool disabled);
+  void apply_cca_gates_locked(bool primary_disabled, bool edcca_disabled);
   /* TX+RX intent (DEVOURER_TX_WITH_RX at InitWrite / an RX-side Init):
    * keeps the RX filters open across the TX bring-up. */
   bool _rx_wanted = false;

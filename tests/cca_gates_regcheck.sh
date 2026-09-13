@@ -41,7 +41,10 @@
 #             poking the other family's register reports "no tracker" and
 #             passes a broken tracker silently. Skipped where no tracker runs
 #             in the default arm, or where the generation has no known
-#             threshold register.
+#             threshold register. Runs the probe with --phydm-watchdog:
+#             Jaguar1's tracker IS the optional phydm thread, off by default,
+#             so without it this cell measures a backend whose tracking path
+#             was never built and calls that "no tracker".
 #   retune    the state survives SetMonitorChannel and FastRetune, within a
 #             band and across a band change. Jaguar3 re-asserts by design;
 #             Jaguar1 merely is not clobbered (see src/IRtlRadio.h) — so this
@@ -51,6 +54,12 @@
 #
 # Usage: sudo -v && tests/cca_gates_regcheck.sh            # every plugged part
 #        PIDS=0xc812 sudo -v && tests/cca_gates_regcheck.sh
+#        VID=0x2357 PIDS=0x0120 tests/cca_gates_regcheck.sh  # non-Realtek VID
+#
+# VID applies to the register peeks as well as the probe, so an adapter that
+# enumerates under a vendor's own VID (TP-Link 0x2357, and most retail parts)
+# is checkable — addressing chipstate by PID alone silently looked for it
+# under 0x0bda and failed every register cell.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${CCA_GATES_OUT:-/tmp/devourer-cca-gates}"
@@ -100,7 +109,7 @@ done
 # dead probe, i.e. the default arm would pass on no evidence.
 peek32() { # $1=pid $2=addr
     local bytes n
-    bytes=$(sudo -n "$BUILD/chipstate" --pid "$1" --no-claim \
+    bytes=$(sudo -n "$BUILD/chipstate" --vid "$VID" --pid "$1" --no-claim \
         --peek "$(printf '0x%x-0x%x' "$2" $(( $2 + 3 )))" 2>&1 |
         sed -n 's/^0x[0-9a-fA-F]\{4\}://p' | tr -s ' ' '\n' |
         grep -E '^[0-9a-f]{2}$' | head -4)
@@ -109,7 +118,7 @@ peek32() { # $1=pid $2=addr
     printf '%s\n' "$bytes" |
         awk '{b[NR]=strtonum("0x"$1)} END{printf "%u\n", b[1]+b[2]*256+b[3]*65536+b[4]*16777216}'
 }
-poke32() { sudo -n "$BUILD/chipstate" --pid "$1" --no-claim \
+poke32() { sudo -n "$BUILD/chipstate" --vid "$VID" --pid "$1" --no-claim \
             --poke "$(printf '0x%x=0x%x:4' "$2" "$3")" >/dev/null 2>&1; }
 bit() { echo $(( ( $1 >> $2 ) & 1 )); }
 
@@ -185,7 +194,7 @@ for pid in $PIDS; do
     [ $rc -eq 0 ] && pass "$pid api: probe walk clean" \
                   || fail "$pid api: probe reported failures (see $log)"
 
-    gen=$(sed -n 's/^GATES-GEN //p' "$log" | head -1)
+    gen=$(sed -n 's/^GATES-GEN //p' "$log" | head -1 | cut -d' ' -f1)
     note "$pid generation: ${gen:-unknown}"
 
     # --- regs + cntdown ---------------------------------------------------
@@ -282,7 +291,11 @@ for pid in $PIDS; do
     for arm in "0 0" "0 1"; do
         set -- $arm; want_p=$1; want_e=$2
         tlog="$OUT/track-$pid-$want_p$want_e.log"
-        start_hold "$pid" "$tlog"
+        # --phydm-watchdog because Jaguar1's EDCCA tracker is only built when
+        # tuning.phydm_watchdog is set; without it this cell measures a
+        # backend whose tracking path was never instantiated and calls that
+        # "no tracker". Jaguar3 ignores the flag.
+        start_hold "$pid" "$tlog" --phydm-watchdog
         if ! wait_marker "$tlog" "^GATES set-primary$want_p-edcca$want_e "; then
             fail "$pid track: probe never reported primary=$want_p edcca=$want_e"
             stop_hold; continue

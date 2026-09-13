@@ -11,6 +11,11 @@
  *
  *   sudo build/CcaGatesProbe --pid 0xc812 --channel 36
  *   sudo build/CcaGatesProbe --pid 0x8812 --channel 36 --hold 12
+ *   sudo build/CcaGatesProbe --pid 0x0120 --vid 0x2357 --phydm-watchdog
+ *
+ * --phydm-watchdog builds Jaguar1's optional phydm thread. Its EDCCA
+ * tracker is what SetCcaGates has to stop, and it does not exist without
+ * it, so the tracker cell needs this on Jaguar1 (Jaguar3 ignores it).
  *
  * --hold N keeps each state applied for N seconds so an external peek can
  * sample it. Exit 0 = every step behaved; 4 = not a Realtek radio; 5 = the
@@ -56,7 +61,7 @@ void report(const char *tag, bool ret, bool primary, bool edcca) {
 
 int main(int argc, char **argv) {
   uint16_t vid = 0x0bda, pid = 0xc812;
-  int channel = 36, retune = 0, fast_retune = 0, hold = 0;
+  int channel = 36, retune = 0, fast_retune = 0, hold = 0, phydm_wd = 0;
   for (int i = 1; i < argc; i++) {
     if (!std::strcmp(argv[i], "--vid") && i + 1 < argc)
       vid = (uint16_t)std::strtoul(argv[++i], nullptr, 0);
@@ -70,6 +75,8 @@ int main(int argc, char **argv) {
       fast_retune = std::atoi(argv[++i]);
     else if (!std::strcmp(argv[i], "--hold") && i + 1 < argc)
       hold = std::atoi(argv[++i]);
+    else if (!std::strcmp(argv[i], "--phydm-watchdog"))
+      phydm_wd = 1;
   }
 
   auto logger = std::make_shared<Logger>();
@@ -95,6 +102,13 @@ int main(int argc, char **argv) {
   session.adopt_lock(lock);
 
   devourer::DeviceConfig cfg;
+  /* Jaguar1's EDCCA tracker only EXISTS when the phydm watchdog is built —
+   * HalModule constructs it solely under tuning.phydm_watchdog, which is off
+   * by default. Without this the tracker cell has nothing to catch tracking,
+   * and reports "no tracker running" on a backend whose tracking path is
+   * simply not instantiated. Jaguar3 ignores the field (its phydm runtime
+   * rides the RX/coex thread), so passing it there costs nothing. */
+  cfg.tuning.phydm_watchdog = phydm_wd != 0;
   WiFiDriver driver(logger);
   std::unique_ptr<IRadio> owned = driver.CreateRadio(handle, ctx, lock, cfg);
   if (!owned) {
@@ -114,8 +128,9 @@ int main(int argc, char **argv) {
    * pokes the wrong one reports "no tracker running" instead of failing —
    * a false negative on exactly the arm the split exists to serve. Caps are
    * resolved at construction, so this is readable before bring-up. */
-  std::printf("GATES-GEN %s\n",
-              devourer::generation_name(dev->GetAdapterCaps().generation));
+  std::printf("GATES-GEN %s phydm_watchdog=%d\n",
+              devourer::generation_name(dev->GetAdapterCaps().generation),
+              phydm_wd);
   std::fflush(stdout);
 
   /* Pre-bring-up: both calls must refuse, and the refusal must not write the

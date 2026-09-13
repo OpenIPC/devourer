@@ -662,6 +662,18 @@ bool HalModule::rtl8812au_hal_init(uint8_t init_channel) {
 
 void HalModule::rtw_hal_deinit() {
   _logger->info("Jaguar1: clean de-init (stop TRX + card-disable)");
+  /* Stop the phydm watchdog FIRST, before any of the writes below. Its
+   * thread does periodic BB reads/writes (FA counters, DIG on 0xc50/0xe50,
+   * the EDCCA thresholds), and everything after this point is tearing the
+   * chip down underneath it — MAC engines off, RX FIFO off, then the
+   * card-disable power sequence. Left running it races register access
+   * against power-off, which is the teardown-ordering hazard this driver
+   * takes seriously everywhere else. Stop() is idempotent (it
+   * compare-exchanges _running), so the destructor's own Stop() after this
+   * is a no-op, and a chip torn down twice is still safe. Null whenever
+   * tuning.phydm_watchdog did not build one, which is the default. */
+  if (_phydmWatchdog)
+    _phydmWatchdog->Stop();
   /* Halt the MAC engines before pulling power out from under them, so the
    * sequence isn't racing DMA that is still moving frames. Mirrors
    * HalJaguar3::rtw_hal_deinit. */

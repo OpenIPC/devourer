@@ -16,6 +16,10 @@
  * --phydm-watchdog builds Jaguar1's optional phydm thread. Its EDCCA
  * tracker is what SetCcaGates has to stop, and it does not exist without
  * it, so the tracker cell needs this on Jaguar1 (Jaguar3 ignores it).
+ * A test lever, not a hint at a better default: that thread is opt-in
+ * because its periodic BB traffic shares the libusb queue with the TX bulk
+ * path and costs throughput (see HalModule). This probe never transmits,
+ * so it pays none of that.
  *
  * --hold N keeps each state applied for N seconds so an external peek can
  * sample it. Exit 0 = every step behaved; 4 = not a Realtek radio; 5 = the

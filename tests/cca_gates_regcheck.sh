@@ -45,6 +45,14 @@
 #             Jaguar1's tracker IS the optional phydm thread, off by default,
 #             so without it this cell measures a backend whose tracking path
 #             was never built and calls that "no tracker".
+#             DEPENDS ON DIG BEING IN MOTION. The tracker is write-on-change
+#             (l2h != _edcca_last_l2h), so it only rewrites the marker while
+#             DIG is still walking IGI. Each arm restarts the probe, so DIG
+#             restarts with it and is walking during the sample window; if it
+#             has converged instead, the default arm reads as "no tracker"
+#             and the EDCCA-off arm SKIPs. That degrades to no verdict rather
+#             than a false one, but a SKIP here means the cell could not
+#             create the condition, not that the tracker behaved.
 #   retune    the state survives SetMonitorChannel and FastRetune, within a
 #             band and across a band change. Jaguar3 re-asserts by design;
 #             Jaguar1 merely is not clobbered (see src/IRtlRadio.h) — so this

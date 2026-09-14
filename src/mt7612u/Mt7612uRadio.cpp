@@ -807,10 +807,12 @@ uint64_t Mt7612uRadio::ReadTsf() {
   return _dev ? mt7612u_read_tsf(_dev) : 0;
 }
 
-void Mt7612uRadio::WriteTsf(uint64_t tsf) {
-  std::lock_guard<std::recursive_mutex> lock(_mu);
-  if (_dev)
-    mt7612u_write_tsf(_dev, tsf);
+bool Mt7612uRadio::WriteTsf(uint64_t tsf) {
+  /* No TSF load path on this part: every plausible sequence was measured
+   * ignored (the bringup `tsfwrite` gate; docs/mt7612u.md). Reporting true
+   * would dress a silent no-op as success, so it reports false. */
+  (void)tsf;
+  return false;
 }
 
 devourer::TxStats Mt7612uRadio::GetTxStats() {

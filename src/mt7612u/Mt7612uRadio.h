@@ -97,7 +97,7 @@ public:
   bool SetAmpduMode(const devourer::AmpduMode &mode) override;
   bool GetPermanentMacAddress(uint8_t out[6]) override;
   uint64_t ReadTsf() override;
-  void WriteTsf(uint64_t tsf) override;
+  bool WriteTsf(uint64_t tsf) override;
   devourer::TxStats GetTxStats() override;
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;

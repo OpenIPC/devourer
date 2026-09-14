@@ -2213,12 +2213,18 @@ uint64_t RtlJaguar3Device::ReadTsf() {
   return (static_cast<uint64_t>(hi) << 32) | lo;
 }
 
-void RtlJaguar3Device::WriteTsf(uint64_t tsf) {
+bool RtlJaguar3Device::WriteTsf(uint64_t tsf) {
   /* REG_TSFTR 0x0560 (low) / 0x0564 (high). Serialized on _reg_mu against the
-   * coex tick. The counter keeps running, so this sets it to ~tsf. */
+   * coex tick. The counter keeps running, so this sets it to ~tsf. Measured on
+   * the bench (RTL8822C): the reported TSF moves to the requested target plus
+   * the control round trip. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
-  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
+  /* Both words are always attempted: true means both transfers landed; false
+   * means at least one did not, so the counter may be half-updated. The caller
+   * can read back, retry, or treat the write as failed. */
+  const bool lo_ok = _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
+  const bool hi_ok = _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
+  return lo_ok && hi_ok;
 }
 
 bool RtlJaguar3Device::SetAckResponder(const devourer::MacAddr &mac) {

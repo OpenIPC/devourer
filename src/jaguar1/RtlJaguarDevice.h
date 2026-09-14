@@ -320,6 +320,15 @@ public:
    * so this is a lookup, not a chip access. */
   bool GetPermanentMacAddress(uint8_t out[6]) override;
   uint64_t ReadTsf() override;
+  /* No standalone TSF write. On this generation the TSF is moved only by the
+   * complete beacon-steer sequence (see PinBeaconTbtt/AdjustBeaconTimingFine
+   * below), which shifts the reported TSF and the TBTT grid together; a bare
+   * REG_TSFTR write was never shown to take on its own. This method
+   * deliberately does not perform that sequence's EN_BCN_FUNCTION toggle and
+   * TBTT re-download: doing it here would move the beacon grid, which is a
+   * different operation than setting the counter. Reporting false keeps
+   * "unsupported here" honest rather than inheriting a silent no-op. */
+  bool WriteTsf(uint64_t tsf) override { (void)tsf; return false; }
 
   /* Hardware-timed beacon (IRadio contract): download the beacon MPDU to
    * the reserved page at the BCNQ boundary (the vendor rtl8812_download_rsvd_page

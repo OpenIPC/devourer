@@ -367,8 +367,16 @@ public:
    * TSF (and the beacon-body timestamp) but NOT the beacon TBTT air-time — a
    * separate per-port timer drives the TBTT (bench-proven). To steer the
    * hardware-timed beacon (the uplink timing-advance actuator) use
-   * AdjustBeaconTiming. No-op where unsupported. */
-  virtual void WriteTsf(uint64_t tsf) { (void)tsf; }
+   * AdjustBeaconTiming.
+   *
+   * Returns true when this backend drives a TSF write the part's hardware
+   * accepts, false otherwise (the default). False means "no standalone write
+   * here" — either the part has no load path or the write is not implemented.
+   * True does not by itself prove the value landed byte-for-byte: the counter
+   * keeps running, so a caller that needs certainty should still read back — a
+   * successful write reads as target + the control round trip. Per-backend
+   * state: docs/time-distribution.md. */
+  virtual bool WriteTsf(uint64_t tsf) { (void)tsf; return false; }
 
   /* Load a beacon into the beacon reserved-page + enable the MAC beacon function,
    * so the chip AUTO-TRANSMITS it at each TBTT — hardware-timed and

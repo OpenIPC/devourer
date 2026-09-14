@@ -29,12 +29,6 @@ uint64_t mt7612u_read_tsf(struct mt7612u_dev *d)
 	return ((uint64_t)dw1 << 32) | dw0;
 }
 
-void mt7612u_write_tsf(struct mt7612u_dev *d, uint64_t tsf)
-{
-	mt_wr(d, MT_TSF_TIMER_DW0, (uint32_t)tsf);
-	mt_wr(d, MT_TSF_TIMER_DW1, (uint32_t)(tsf >> 32));
-}
-
 void mt7612u_get_caps(const struct mt7612u_dev *d, struct mt7612u_caps *c)
 {
 	memset(c, 0, sizeof *c);

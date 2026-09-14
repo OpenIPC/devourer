@@ -816,10 +816,14 @@ uint64_t Mt7612uRadio::ReadTsf() {
   return _dev ? mt7612u_read_tsf(_dev) : 0;
 }
 
-void Mt7612uRadio::WriteTsf(uint64_t tsf) {
-  std::lock_guard<std::recursive_mutex> lock(_mu);
-  if (_dev)
-    mt7612u_write_tsf(_dev, tsf);
+bool Mt7612uRadio::WriteTsf(uint64_t tsf) {
+  /* This part has no TSF load path: the DW0/DW1 registers do not latch the
+   * counter. Every plausible sequence was measured ignored on two units — both
+   * word orders, TIMER_EN cleared and restored, and the write issued with the
+   * MAC stopped (the bringup `tsfwrite` gate; docs/mt7612u.md). Reporting true
+   * here would dress a silent no-op as success, so it reports false. */
+  (void)tsf;
+  return false;
 }
 
 /* Busy airtime from the MAC channel timers — the MediaTek half of the neutral

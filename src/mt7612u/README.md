@@ -127,6 +127,7 @@ caps   capabilities, TSF, 40 MHz            soak   sync vs async throughput
 pwr    TX power vs the kernel's values      ampdu  aggregation A/B
 gateg  per-frame rate control               ack    ACK responder (needs a stimulus)
 rtap   send_packet / send_packets           hop    channel-switch cost
+tsfwrite  no TSF load path (positive control + every write sequence)
 ```
 
 `make` here builds it as `./bringup`, which is what the hardware notes use.

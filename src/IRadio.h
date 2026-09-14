@@ -367,8 +367,19 @@ public:
    * TSF (and the beacon-body timestamp) but NOT the beacon TBTT air-time — a
    * separate per-port timer drives the TBTT (bench-proven). To steer the
    * hardware-timed beacon (the uplink timing-advance actuator) use
-   * AdjustBeaconTiming. No-op where unsupported. */
-  virtual void WriteTsf(uint64_t tsf) { (void)tsf; }
+   * AdjustBeaconTiming.
+   *
+   * Returns true when this backend drives a TSF write that the part's hardware
+   * accepts, false otherwise (the default). False means either that the part
+   * has no TSF load path (the MT7612U: DW0/DW1 writes were swept through every
+   * order, with TIMER_EN toggled and with the MAC stopped, and the clock ignored
+   * all of them — docs/mt7612u.md) or that no standalone write is implemented
+   * (Jaguar1 moves its TSF only as part of the full beacon-steer sequence; the
+   * RTL8733B and Kestrel have no TSF write). True does not by itself prove the value landed
+   * byte-for-byte: the counter keeps running, so a caller that needs certainty
+   * should still read back — a successful write reads as target + the control
+   * round trip. */
+  virtual bool WriteTsf(uint64_t tsf) { (void)tsf; return false; }
 
   /* Load a beacon into the beacon reserved-page + enable the MAC beacon function,
    * so the chip AUTO-TRANSMITS it at each TBTT — hardware-timed and

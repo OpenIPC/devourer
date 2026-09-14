@@ -420,9 +420,9 @@ int mt7612u_link_stats(struct mt7612u_dev *dev, struct mt7612u_link_stats *out);
  */
 int mt7612u_phy_tick(struct mt7612u_dev *dev);
 
-/* TSF, the hardware microsecond clock. Two register reads. */
+/* TSF, the hardware microsecond clock. Two register reads. There is no writer:
+ * the DW0/DW1 registers do not load the counter (measured, see docs/mt7612u.md). */
 uint64_t mt7612u_read_tsf(struct mt7612u_dev *dev);
-void     mt7612u_write_tsf(struct mt7612u_dev *dev, uint64_t tsf);
 
 /* What this adapter can do, so a caller need not assume. */
 struct mt7612u_caps {

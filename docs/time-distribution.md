@@ -209,10 +209,11 @@ beacon, so the TBTT is deaf to `REG_TSFTR`. `WriteTsf` returns true on Jaguar3 a
 bench: the reported TSF moves to the target plus the control round trip). It
 returns false on the RTL8733B and Kestrel (no TSF write), on the MT7612U (its
 DW0/DW1 registers do not load the counter — measured, `docs/mt7612u.md`), and
-explicitly on Jaguar1, whose TSF moves only as part of the full beacon-steer
-sequence rather than a standalone write: Jaguar1 is the opposite architecture,
-its TBTT hardware-locked to the TSF grid, so the steer sequence moves both (see
-the `PinBeaconTbtt` per-generation notes). `false` therefore means "no standalone
+explicitly on Jaguar1: its TSF does move, but only as part of the full
+beacon-steer sequence, whose `EN_BCN_FUNCTION` toggle and TBTT re-download the
+standalone method deliberately does not perform (Jaguar1's TBTT is
+hardware-locked to the TSF grid, so that sequence moves both; see the
+`PinBeaconTbtt` per-generation notes). `false` therefore means "no standalone
 write here", and an adoption loop gets the failure instead of a silent no-op.
 A one-shot
 beacon-interval tweak *does* steer the J2/J3 TBTT: running

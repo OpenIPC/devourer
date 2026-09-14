@@ -817,11 +817,9 @@ uint64_t Mt7612uRadio::ReadTsf() {
 }
 
 bool Mt7612uRadio::WriteTsf(uint64_t tsf) {
-  /* This part has no TSF load path: the DW0/DW1 registers do not latch the
-   * counter. Every plausible sequence was measured ignored on two units — both
-   * word orders, TIMER_EN cleared and restored, and the write issued with the
-   * MAC stopped (the bringup `tsfwrite` gate; docs/mt7612u.md). Reporting true
-   * here would dress a silent no-op as success, so it reports false. */
+  /* No TSF load path on this part: every plausible sequence was measured
+   * ignored (the bringup `tsfwrite` gate; docs/mt7612u.md). Reporting true
+   * would dress a silent no-op as success, so it reports false. */
   (void)tsf;
   return false;
 }

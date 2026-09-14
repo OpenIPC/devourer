@@ -1970,9 +1970,12 @@ bool RtlJaguar2Device::WriteTsf(uint64_t tsf) {
    * Same register pair as Jaguar3; both are bench-proven to move the reported
    * TSF (RTL8822B readback: the target plus the control round trip). */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
-  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
-  return true;
+  /* Both words are always attempted: true means both transfers landed; false
+   * means at least one did not, so the counter may be half-updated. The caller
+   * can read back, retry, or treat the write as failed. */
+  const bool lo_ok = _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
+  const bool hi_ok = _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
+  return lo_ok && hi_ok;
 }
 
 void RtlJaguar2Device::Stop() {

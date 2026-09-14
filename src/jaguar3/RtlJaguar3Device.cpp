@@ -2223,9 +2223,12 @@ bool RtlJaguar3Device::WriteTsf(uint64_t tsf) {
    * the bench (RTL8822C): the reported TSF moves to the requested target plus
    * the control round trip. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
-  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
-  return true;
+  /* Both words are always attempted: true means both transfers landed; false
+   * means at least one did not, so the counter may be half-updated. The caller
+   * can read back, retry, or treat the write as failed. */
+  const bool lo_ok = _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
+  const bool hi_ok = _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
+  return lo_ok && hi_ok;
 }
 
 bool RtlJaguar3Device::SetAckResponder(const devourer::MacAddr &mac) {

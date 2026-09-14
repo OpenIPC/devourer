@@ -2888,19 +2888,32 @@ static bool tsf_clock_alive(void)
 	return alive;
 }
 
-/* One load attempt. A take is the readback landing on the target; what the
- * clock does afterwards is printed but does not decide, so a load that takes
- * and then stalls is still a take. */
-static bool tsf_variant(const char *label, uint64_t target, bool stop_timer,
-                        bool high_word_first, int which)
+/* One load attempt. Returns 1 on a take, 0 on a no-op with the clock still
+ * running, and -1 when the arm produced no usable conclusion: a failed config
+ * read, or a counter that stopped during the arm. A stalled counter prints
+ * no-op and would otherwise let the gate PASS on a dead clock, so -1 is a
+ * failure of the run rather than a "the write was ignored" datum. A take is
+ * the readback landing on the target; what the clock does after a take does
+ * not decide, so a load that takes and then stalls is still a take. */
+static int tsf_variant(const char *label, uint64_t target, bool stop_timer,
+                       bool high_word_first, int which)
 {
-	uint32_t cfg = mt_rr(&dev, MT_BEACON_TIME_CFG);
+	uint32_t cfg = 0;
 	uint64_t r1, r2;
 	int64_t err, rate;
-	bool took;
+	bool took, live;
+	const char *verdict;
 
-	if (stop_timer)
+	if (stop_timer) {
+		/* mt_rr returns 0xffffffff on a failed transfer, which must never be
+		 * written back as configuration. If the read fails, skip the arm: the
+		 * accumulated I/O error makes the gate FAIL at the sweep boundary. */
+		if (mt_rr_chk(&dev, MT_BEACON_TIME_CFG, &cfg)) {
+			printf("  %-34s skipped: MT_BEACON_TIME_CFG read failed\n", label);
+			return -1;
+		}
 		mt_wr(&dev, MT_BEACON_TIME_CFG, cfg & ~MT_BEACON_TIME_CFG_TIMER_EN);
+	}
 
 	if (which == 0) {                 /* both words */
 		if (high_word_first) {
@@ -2926,17 +2939,22 @@ static bool tsf_variant(const char *label, uint64_t target, bool stop_timer,
 	err = (int64_t)(r1 - target);
 	rate = (int64_t)(r2 - r1);
 	took = llabs(err) < 200000;
+	live = rate > 10000 && rate < 200000; /* the control's wall-rate window */
+	verdict = took ? "TOOK" : (live ? "no-op" : "no-op (clock stalled)");
 	printf("  %-34s target=%llu read=%llu err=%+lld delta50ms=%+lld  %s\n",
 	       label, (unsigned long long)target, (unsigned long long)r1,
-	       (long long)err, (long long)rate, took ? "TOOK" : "no-op");
-	return took;
+	       (long long)err, (long long)rate, verdict);
+	if (took)
+		return 1;
+	return live ? 0 : -1;
 }
 
 static int gate_tsfwrite(uint8_t chan)
 {
 	uint64_t base;
 	uint32_t cfg;
-	bool any = false;
+	bool any = false, invalid = false;
+	int r;
 
 	if (mt_eeprom_init(&dev)) {
 		printf("GATE TSF-WRITE: FAIL - eeprom_init failed\n");
@@ -2951,7 +2969,10 @@ static int gate_tsfwrite(uint8_t chan)
 		return 1;
 	}
 
-	cfg = mt_rr(&dev, MT_BEACON_TIME_CFG);
+	if (mt_rr_chk(&dev, MT_BEACON_TIME_CFG, &cfg)) {
+		printf("GATE TSF-WRITE: FAIL - MT_BEACON_TIME_CFG read failed\n");
+		return 1;
+	}
 	printf("MT_BEACON_TIME_CFG=0x%08x TIMER_EN=%u TBTT_EN=%u BEACON_TX=%u SYNC_MODE=%u\n",
 	       cfg, !!(cfg & MT_BEACON_TIME_CFG_TIMER_EN),
 	       !!(cfg & MT_BEACON_TIME_CFG_TBTT_EN),
@@ -2968,31 +2989,49 @@ static int gate_tsfwrite(uint8_t chan)
 	 * then each word alone. The high-word-only target sets a high word that
 	 * differs from the live one, so the arm is not vacuous. */
 	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) {
+		/* The start enables TX control before its DMA-idle poll, so stop
+		 * before bailing out rather than leaving the MAC half-started. */
+		mt_mac_stop(&dev);
 		printf("\nGATE TSF-WRITE: FAIL - mt_mac_start failed\n");
 		return 1;
 	}
 	base = mt7612u_read_tsf(&dev);
-	any |= tsf_variant("MAC on, both words DW0,DW1", base + 5000000, false, false, 0);
+	r = tsf_variant("MAC on, both words DW0,DW1", base + 5000000, false, false, 0);
+	if (r > 0) any = true;
+	if (r < 0) invalid = true;
 	base = mt7612u_read_tsf(&dev);
-	any |= tsf_variant("MAC on, both words DW1,DW0", base + 5000000, false, true, 0);
+	r = tsf_variant("MAC on, both words DW1,DW0", base + 5000000, false, true, 0);
+	if (r > 0) any = true;
+	if (r < 0) invalid = true;
 	base = mt7612u_read_tsf(&dev);
-	any |= tsf_variant("MAC on, high word (DW1) only", base + (1ull << 32), false, false, 2);
+	r = tsf_variant("MAC on, high word (DW1) only", base + (1ull << 32), false, false, 2);
+	if (r > 0) any = true;
+	if (r < 0) invalid = true;
 	base = mt7612u_read_tsf(&dev);
-	any |= tsf_variant("MAC on, low word (DW0) only", base + 5000000, false, false, 1);
+	r = tsf_variant("MAC on, low word (DW0) only", base + 5000000, false, false, 1);
+	if (r > 0) any = true;
+	if (r < 0) invalid = true;
 
 	/* With the MAC stopped, and with the free-running timer disabled. */
 	mt_mac_stop(&dev);
 	base = mt7612u_read_tsf(&dev);
-	any |= tsf_variant("MAC off, both words", base + 5000000, false, false, 0);
+	r = tsf_variant("MAC off, both words", base + 5000000, false, false, 0);
+	if (r > 0) any = true;
+	if (r < 0) invalid = true;
 	base = mt7612u_read_tsf(&dev);
-	any |= tsf_variant("MAC off, timer off, both words", base + 5000000, true, false, 0);
+	r = tsf_variant("MAC off, timer off, both words", base + 5000000, true, false, 0);
+	if (r > 0) any = true;
+	if (r < 0) invalid = true;
 
 	/* A mid-run transport failure reads as all-ones, which every arm would
-	 * otherwise report as "ignored" — the exact false conclusion this gate
-	 * exists to prevent. */
-	if (mt_io_errors(&dev) != 0) {
-		printf("\nGATE TSF-WRITE: FAIL - %u USB transfer(s) failed during the sweep; no load conclusion\n",
-		       mt_io_errors(&dev));
+	 * otherwise report as "ignored" - the exact false conclusion this gate
+	 * exists to prevent. A stalled clock is the same class of false
+	 * conclusion: no arm can be read as "the write was ignored" if the
+	 * counter was not advancing while the arm ran. */
+	if (invalid || mt_io_errors(&dev) != 0) {
+		printf("\nGATE TSF-WRITE: FAIL - %u USB transfer(s) failed%s; no load conclusion\n",
+		       mt_io_errors(&dev),
+		       invalid ? " and/or the clock stalled during an arm" : " during the sweep");
 		return 1;
 	}
 

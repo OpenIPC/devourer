@@ -205,16 +205,14 @@ actuator, and the µs-class UE path is a PCIe UE. Harness:
 **Steering the TBTT.** The actuator is `AdjustBeaconTiming(microseconds)`, not a
 TSF write: on Jaguar2/3, `WriteTsf` moves the reported TSF (and the beacon-body
 timestamp) but NOT the TBTT air-time — a separate per-port timer drives the
-beacon, so the TBTT is deaf to `REG_TSFTR`. `WriteTsf` returns true on Jaguar3
-(measured on the bench: the reported TSF moves to the target plus the control
-round trip) and on Jaguar2 (the same register pair, exercised by the fine-steer
-path; a bare write there is inferred, not separately measured). It returns
-false on the RTL8733B and Kestrel (no TSF write), on the MT7612U (its DW0/DW1
-registers do not load the counter — measured, `docs/mt7612u.md`), and explicitly
-on Jaguar1, whose TSF moves only as part of the full beacon-steer sequence
-rather than a standalone write: Jaguar1 is the opposite architecture, its TBTT
-hardware-locked to the TSF grid, so the steer sequence moves both (see the
-`PinBeaconTbtt` per-generation notes). `false` therefore means "no standalone
+beacon, so the TBTT is deaf to `REG_TSFTR`. `WriteTsf` returns true on Jaguar3 and Jaguar2 (both readback-measured on the
+bench: the reported TSF moves to the target plus the control round trip). It
+returns false on the RTL8733B and Kestrel (no TSF write), on the MT7612U (its
+DW0/DW1 registers do not load the counter — measured, `docs/mt7612u.md`), and
+explicitly on Jaguar1, whose TSF moves only as part of the full beacon-steer
+sequence rather than a standalone write: Jaguar1 is the opposite architecture,
+its TBTT hardware-locked to the TSF grid, so the steer sequence moves both (see
+the `PinBeaconTbtt` per-generation notes). `false` therefore means "no standalone
 write here", and an adoption loop gets the failure instead of a silent no-op.
 A one-shot
 beacon-interval tweak *does* steer the J2/J3 TBTT: running

@@ -1963,10 +1963,8 @@ uint64_t RtlJaguar2Device::ReadTsf() {
 bool RtlJaguar2Device::WriteTsf(uint64_t tsf) {
   /* REG_TSFTR 0x0560 (low) / 0x0564 (high). Serialized on _reg_mu against the
    * coex/thermal tick. The counter keeps running, so this sets it to ~tsf.
-   * Same register pair as Jaguar3, and the fine-steer path that writes it is
-   * bench-proven to move the reported TSF there; a bare WriteTsf on this die
-   * has NOT been measured, so true means "the write was issued on a part with
-   * a load path", not "readback verified". */
+   * Same register pair as Jaguar3; both are bench-proven to move the reported
+   * TSF (RTL8822B readback: the target plus the control round trip). */
   std::lock_guard<std::mutex> lk(_reg_mu);
   _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
   _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));

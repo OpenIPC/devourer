@@ -117,7 +117,8 @@ struct DeviceConfig {
   struct Rx {
     /* env: DEVOURER_RX_KEEP_CORRUPTED — pass frames that fail the 802.11 FCS
      * (CRC32) or decryption-ICV check up to the host instead of dropping them
-     * at the WMAC filter (sets RCR ACRC32|AICV). Jaguar1 + Jaguar2. */
+     * at the WMAC filter (sets RCR ACRC32|AICV). Jaguar1, Jaguar2, Jaguar3 and
+     * the RTL8733B; not ported on Kestrel, where it is silently inert. */
     bool keep_corrupted = false;
     /* env: DEVOURER_TX_WITH_RX — Jaguar3 only: keep the RX filters open and
      * enable the RX path during a TX (InitWrite) bring-up so StartRxLoop can

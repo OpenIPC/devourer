@@ -461,9 +461,13 @@ void HalJaguar3::rtw_hal_deinit() {
 }
 
 /* Monitor-mode RX configuration (devourer-specific; the vendor driver has no
- * pure-monitor path). Accept all frames incl. CRC/ICV errors, append PHY status
- * drvinfo (so parse_rx_8822c's drvinfo_size is consistent), all RX filter maps
- * open. RCR bits: AAP/APM/AM/AB/ACF/AICV/ACRC32 + APP_PHYSTS. */
+ * pure-monitor path). Accept all frames, append PHY status drvinfo (so
+ * parse_rx_8822c's drvinfo_size is consistent), all RX filter maps open.
+ * RCR base 0xF410400F = AAP/APM/AM/AB + HTC_LOC_CTRL + PKTCTL_DLEN + VHT_DACK
+ * + APP_FCS/APP_MIC/APP_ICV/APP_PHYSTS (halmac_bit_8822c.h). ACRC32 (BIT8)
+ * and AICV (BIT9) are NOT in the base — the WMAC drops FCS/ICV-failed frames
+ * — and are added only under rx.keep_corrupted, same as Jaguar1/2 and the
+ * RTL8733B. */
 void HalJaguar3::monitor_rx_cfg() {
   constexpr uint16_t REG_RCR_8822C = 0x0608;
   constexpr uint16_t REG_RXFLTMAP0_8822C = 0x06A0;
@@ -481,7 +485,17 @@ void HalJaguar3::monitor_rx_cfg() {
    * control frames and VHT beamforming reports, which is why the beamformee
    * (whose arm programs the self-MAC to the NDPA RA) saw sounding frames while
    * a plain monitor did not. */
-  _device.rtw_write32(REG_RCR_8822C, 0xF410400F | (1u << 28));
+  uint32_t rcr = 0xF410400F | (1u << 28);
+  /* DEVOURER_RX_KEEP_CORRUPTED: also pass FCS/ICV-failed frames (ACRC32 BIT8,
+   * AICV BIT9). The vendor 8822E driver clears both in init_misc and on every
+   * opmode change except monitor; the RX descriptor's crc_err/icv_err bits
+   * (parse_rx_8822c) mark the frames so a FEC consumer can salvage them.
+   * Verified on one 8812EU unit: with the bits set, FCS-failed frames reach
+   * the host; without them the count is zero regardless of channel
+   * conditions. */
+  if (_cfg.rx.keep_corrupted)
+    rcr |= (1u << 8) | (1u << 9);
+  _device.rtw_write32(REG_RCR_8822C, rcr);
   _device.rtw_write8(REG_RX_DRVINFO_SZ_8822C, 0x04);
   _device.rtw_write16(REG_RXFLTMAP0_8822C, 0xFFFF);
   _device.rtw_write16(REG_RXFLTMAP1_8822C, 0xFFFF);

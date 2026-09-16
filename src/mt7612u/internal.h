@@ -207,7 +207,6 @@ struct mt7612u_dev {
 	struct mt7612u_cal cal;
 
 	unsigned io_err;          /* EP0 transfers that exhausted their retries */
-	unsigned tsf_retries;     /* coherent TSF reads that took the wrap retry */
 	int      transfers_stranded; /* libusb still owns a cancelled ring */
 	uint16_t max_mpdu_rx;     /* from MT_MAX_LEN_CFG at init, less the FCS */
 	uint64_t stats_last_us;   /* previous mt7612u_link_stats() mark */
@@ -279,10 +278,6 @@ void     mt_io_clear(struct mt7612u_dev *d);
 /* Restore a previously sampled accumulator; see the note in usb.c. */
 void     mt_io_restore(struct mt7612u_dev *d, unsigned v);
 unsigned mt_io_errors(struct mt7612u_dev *d);
-/* How many mt7612u_read_tsf_chk() reads took the low-word-wrap retry. A soak
- * reads this to show the retry path actually ran, not merely that nothing
- * went wrong. */
-unsigned mt_tsf_retries(struct mt7612u_dev *d);
 #define  mt_set(d, a, v)   mt_rmw(d, a, v, v)
 #define  mt_clear(d, a, v) mt_rmw(d, a, v, 0)
 /* Poll until (rr(addr) & mask) == val. Returns 1 on success, 0 on timeout. */

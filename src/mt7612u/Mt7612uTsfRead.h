@@ -35,8 +35,8 @@ namespace mt7612u {
  * (tests/mt7612u_tsf_read_selftest.cpp).
  *
  * Returns 0 and fills *out, or -1. `*retried`, when given, reports whether the
- * wrap retry ran - a hardware soak needs to know the path was exercised, not
- * merely that nothing went wrong.
+ * wrap retry ran, so a test can show the path was exercised rather than merely
+ * that nothing went wrong.
  */
 template <typename Rd>
 int tsf_read(Rd &&rd, uint64_t *out, bool *retried = nullptr) {

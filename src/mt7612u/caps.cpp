@@ -28,16 +28,10 @@
  */
 int mt7612u_read_tsf_chk(struct mt7612u_dev *d, uint64_t *out)
 {
-	bool retried = false;
-
 	if (!d || !out)
 		return -1;
-	if (mt7612u::tsf_read([d](uint32_t addr, uint32_t *v) { return mt_rr_chk(d, addr, v); },
-	                      out, &retried))
-		return -1;
-	if (retried)
-		d->tsf_retries++;
-	return 0;
+	return mt7612u::tsf_read(
+		[d](uint32_t addr, uint32_t *v) { return mt_rr_chk(d, addr, v); }, out);
 }
 
 uint64_t mt7612u_read_tsf(struct mt7612u_dev *d)
@@ -46,8 +40,6 @@ uint64_t mt7612u_read_tsf(struct mt7612u_dev *d)
 
 	return mt7612u_read_tsf_chk(d, &tsf) ? 0 : tsf;
 }
-
-unsigned mt_tsf_retries(struct mt7612u_dev *d) { return d->tsf_retries; }
 
 void mt7612u_get_caps(const struct mt7612u_dev *d, struct mt7612u_caps *c)
 {

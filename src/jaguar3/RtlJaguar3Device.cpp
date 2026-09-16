@@ -21,6 +21,7 @@
 #include "FrameParserJaguar3.h"
 #include "NhmReader.h"       /* frame-free NHM power histogram (shared) */
 #include "RateDefinitions.h" /* MGN_* rate enum (shared across the family) */
+#include "RtlTsf.h"          /* REG_TSFTR read/write shared with Jaguar1/2 */
 #include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
 #include "ToneMask.h"   /* DEVOURER_RX_CSI_MASK / DEVOURER_RX_NBI knobs */
 
@@ -1649,6 +1650,7 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
   c.narrowband_ok = true; /* 5/10 MHz baseband re-clock — Jaguar3 only */
   c.hw_rx_timestamp = true;  /* FrameParserJaguar3 fills RxAtrib.tsfl */
   c.hw_beacon_txtsf = true;  /* StartBeacon: MAC inserts the egress TSF into beacons */
+  c.tsf_write_ok = true;     /* WriteTsf: REG_TSFTR (8822C readback) */
   c.xtal_cap_max = 0x7f;   /* 7-bit AFE crystal-cap trim (0x1040) */
   c.xtal_cap_default = 0x20;
   /* LDPC RX: both variants decode HT+VHT LDPC (bench: encoding-matrix
@@ -2208,27 +2210,16 @@ uint64_t RtlJaguar3Device::ReadTsf() {
    * _reg_mu (shared with the coex runtime thread). Starved to 0 under a heavy
    * RX bulk-IN flood — reliable from a quiet TX. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
-  uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
-  if (_device.rtw_read<uint32_t>(0x0564) != hi) {
-    hi = _device.rtw_read<uint32_t>(0x0564);
-    lo = _device.rtw_read<uint32_t>(0x0560);
-  }
-  return (static_cast<uint64_t>(hi) << 32) | lo;
+  return devourer::read_tsftr(_device);
 }
 
 bool RtlJaguar3Device::WriteTsf(uint64_t tsf) {
-  /* REG_TSFTR 0x0560 (low) / 0x0564 (high). Serialized on _reg_mu against the
-   * coex tick. The counter keeps running, so this sets it to ~tsf. Measured on
-   * the bench (RTL8822C): the reported TSF moves to the requested target plus
-   * the control round trip. */
+  /* REG_TSFTR, serialized on _reg_mu against the coex tick. The counter keeps
+   * running, so this sets it to ~tsf. Readback-measured on the RTL8822C; the
+   * 8822E rides the same pair and is not separately measured. Success rule:
+   * devourer::write_tsftr. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  /* Both words are always attempted: true means both transfers landed; false
-   * means at least one did not, so the counter may be half-updated. The caller
-   * can read back, retry, or treat the write as failed. */
-  const bool lo_ok = _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
-  const bool hi_ok = _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
-  return lo_ok && hi_ok;
+  return devourer::write_tsftr(_device, tsf);
 }
 
 bool RtlJaguar3Device::SetAckResponder(const devourer::MacAddr &mac) {

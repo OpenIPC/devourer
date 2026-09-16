@@ -816,14 +816,6 @@ uint64_t Mt7612uRadio::ReadTsf() {
   return _dev ? mt7612u_read_tsf(_dev) : 0;
 }
 
-bool Mt7612uRadio::WriteTsf(uint64_t tsf) {
-  /* No TSF load path on this part: every plausible sequence was measured
-   * ignored (the bringup `tsfwrite` gate; docs/mt7612u.md). Reporting true
-   * would dress a silent no-op as success, so it reports false. */
-  (void)tsf;
-  return false;
-}
-
 /* Busy airtime from the MAC channel timers — the MediaTek half of the neutral
  * IRadio::GetChannelBusy contract.
  *
@@ -1109,6 +1101,9 @@ devourer::AdapterCaps Mt7612uRadio::GetAdapterCaps() {
    * True since the beacon plane landed - it read false while the function it
    * describes sat three hundred lines above. */
   c.hw_beacon_txtsf = true;
+  /* No TSF load path: every write sequence the bringup `tsfwrite` gate tries
+   * is ignored (docs/mt7612u.md), so WriteTsf stays on the IRadio default. */
+  c.tsf_write_ok = false;
   /* Measured on air: 0 frames at the stimulus radio unarmed, 3500+ armed. */
   c.ack_responder_ok = true;
   /* Unmeasured, so false rather than optimistic - nothing here drives the

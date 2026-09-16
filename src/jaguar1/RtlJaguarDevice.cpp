@@ -6,6 +6,7 @@
 #include "Hal8812PhyReg.h"
 #include "NhmReader.h"
 #include "NoiseFloorMath.h" /* active idle-noise-floor sign/pwdb helpers */
+#include "RtlTsf.h" /* REG_TSFTR read/write shared with Jaguar2/3 */
 #include "RadioManagementModule.h"
 #include "AckResponder.h" /* hardware ACK responder recipe */
 #include "RadiotapPeek.h" /* send_packets batch pre-parse */
@@ -441,15 +442,19 @@ bool RtlJaguarDevice::GetPermanentMacAddress(uint8_t out[6]) {
 }
 
 uint64_t RtlJaguarDevice::ReadTsf() {
-  /* REG_TSFTR (0x0560) = TSF low 32, 0x0564 = TSF high 32. Read hi, lo, hi
-   * again and retry the pair once if the low word wrapped between the reads. */
-  uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
-  uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
-  if (_device.rtw_read<uint32_t>(0x0564) != hi) {
-    hi = _device.rtw_read<uint32_t>(0x0564);
-    lo = _device.rtw_read<uint32_t>(0x0560);
-  }
-  return (static_cast<uint64_t>(hi) << 32) | lo;
+  return devourer::read_tsftr(_device);
+}
+
+bool RtlJaguarDevice::WriteTsf(uint64_t tsf) {
+  /* The bare REG_TSFTR pair, without the beacon-steer bracket. Under _port0_mu
+   * so it cannot interleave with a PinBeaconTbtt/AdjustBeaconTimingFine
+   * sequence, which writes the same pair (PinBeaconTbtt's restore step is
+   * this same bare write). The raw pair is readback-measured on an RTL8821AU
+   * (scratch probe, no beacon armed, both word orders); this override has not
+   * itself run on Jaguar1 hardware, and the 8812AU/8814AU share the register
+   * block without a separate measurement. Success rule: devourer::write_tsftr. */
+  std::lock_guard<std::recursive_mutex> lock(_port0_mu);
+  return devourer::write_tsftr(_device, tsf);
 }
 
 bool RtlJaguarDevice::download_rsvd_beacon(const uint8_t *mpdu,
@@ -2163,6 +2168,7 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
   c.hw_beacon_txtsf = true;  /* StartBeacon: MAC inserts the egress TSF into
                               * beacons (bench: 8821AU + 8814AU body-TS steps
                               * live at the beacon interval) */
+  c.tsf_write_ok = true; /* WriteTsf: bare REG_TSFTR (8821AU readback) */
   c.xtal_cap_max = 0x3f; /* 6-bit AFE crystal-cap trim (0x2C) */
   c.xtal_cap_default = _eepromManager->crystal_cap & 0x3f;
   devourer::set_standard_freq_ranges(c);

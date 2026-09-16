@@ -87,6 +87,7 @@ inline void emit_adapter_caps(EventSink &sink, IRadio *dev) {
       .f("per_chain_rssi", c.per_chain_rssi ? 1 : 0)
       .f("hw_rx_tsf", c.hw_rx_timestamp ? 1 : 0)
       .f("hw_beacon_txtsf", c.hw_beacon_txtsf ? 1 : 0)
+      .f("tsf_write", c.tsf_write_ok ? 1 : 0)
       .f("xtal_cap_max", c.xtal_cap_max)
       .f("xtal_cap_default", c.xtal_cap_default);
 }

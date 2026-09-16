@@ -298,9 +298,21 @@ struct AdapterCaps {
    * (a genuine sub-µs TX-egress timestamp a receiver reads via
    * Packet::TxEgressTsf) — rides the hardware beacon function (StartBeacon);
    * true on all generations. Together they are the primitives for one-way
-   * hardware time distribution (see TsfSync). */
+   * hardware time distribution (see TsfSync). tsf_write_ok: IRadio::WriteTsf
+   * drives a standalone write the part's counter loads (the static half of the
+   * WriteTsf contract; its bool return is the per-call transport result).
+   * Readback-measured through WriteTsf: 8822B (Jaguar2; incl. an RTL8812BU,
+   * 40/40 forward and backward writes landed), 8822C (Jaguar3). The
+   * 8821AU (Jaguar1) is measured on the raw REG_TSFTR pair with a scratch probe
+   * (both word orders, no beacon armed), which is exactly what the Jaguar1
+   * WriteTsf writes; the override itself has not run on Jaguar1 hardware. The
+   * 8812A/8814A, 8821C (USB and PCIe) and 8822E ride the same pair and code
+   * path and are not separately measured. FALSE on the MT7612U (measured: its DW0/DW1 registers
+   * do not load the counter, docs/mt7612u.md), and on Kestrel and the RTL8733B
+   * (no TSF write in the source — not a bench fact). */
   bool hw_rx_timestamp = false;
   bool hw_beacon_txtsf = false;
+  bool tsf_write_ok = false;
   /* 802.11ax scheduled UL (Kestrel/RTL8852 only). trigger_ul_ok: the adapter
    * can air an HE Trigger frame (UL-OFDMA grant) and program the fw UL-OFDMA
    * scheduler (SendTrigger / ConfigureUlOfdma). twt_ok: the fw exposes the TWT

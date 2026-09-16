@@ -363,19 +363,28 @@ public:
    * — the primitive for TSF *adoption* (a slave slewing its clock onto the
    * master's, so its per-frame `tsfl` reads in the master's timebase). The
    * counter keeps running, so a read-add-write shifts by an approximate delta (a
-   * control loop absorbs the read→write latency). NOTE: this moves the reported
-   * TSF (and the beacon-body timestamp) but NOT the beacon TBTT air-time — a
-   * separate per-port timer drives the TBTT (bench-proven). To steer the
-   * hardware-timed beacon (the uplink timing-advance actuator) use
+   * control loop absorbs the read→write latency). NOTE: on Jaguar2/3 this moves
+   * the reported TSF (and the beacon-body timestamp) but NOT the beacon TBTT
+   * air-time — a separate per-port timer drives the TBTT (bench-proven). On
+   * Jaguar1 the TBTT is recorded as hardware-locked to the TSF grid
+   * (PinBeaconTbtt, bench on all three dies), so expect a write there to move
+   * an active beacon's TBTT with it; neither that nor whether the beacon keeps
+   * airing without the steer's re-download was measured through this call. To
+   * steer the hardware-timed beacon (the uplink timing-advance actuator) use
    * AdjustBeaconTiming.
    *
-   * Returns true when this backend drives a TSF write the part's hardware
-   * accepts, false otherwise (the default). False means "no standalone write
-   * here" — either the part has no load path or the write is not implemented.
-   * True does not by itself prove the value landed byte-for-byte: the counter
-   * keeps running, so a caller that needs certainty should still read back — a
-   * successful write reads as target + the control round trip. Per-backend
-   * state: docs/time-distribution.md. */
+   * Two questions, two answers. Whether this part HAS a standalone TSF write is
+   * static: AdapterCaps::tsf_write_ok, resolved at construction — check it once
+   * rather than inferring it from a return value. The return value is per call:
+   * true when the transport accepted the write (backend-specific; the Realtek
+   * rule, including the PCIe readback, is devourer::write_tsftr in
+   * src/RtlTsf.h), false when it did not OR when tsf_write_ok is false (the
+   * default here). So on a tsf_write_ok part, false is a transport failure and
+   * the counter may be half-updated: read back, and retry only while the device
+   * is still present - a device that has gone reports false on every call. True
+   * is not a byte-for-byte proof either: the counter keeps running, so a caller
+   * that needs certainty reads back. Per-backend state and the measured readbacks:
+   * docs/time-distribution.md. */
   virtual bool WriteTsf(uint64_t tsf) { (void)tsf; return false; }
 
   /* Load a beacon into the beacon reserved-page + enable the MAC beacon function,
@@ -452,8 +461,8 @@ public:
    * REG_BCN_INTERVAL tweak: runs one beacon interval at (nominal + round(µs/1024))
    * TU then restores nominal, so the next TBTT — and the cadence thereafter —
    * shifts by that many TU. This is the beacon-timing / uplink timing-advance
-   * actuator: WriteTsf moves the reported TSF but NOT the TBTT air-time (a
-   * separate per-port timer drives it), whereas the interval tweak steers it
+   * actuator: on Jaguar2/3 WriteTsf moves the reported TSF but NOT the TBTT
+   * air-time (a separate per-port timer drives it), whereas the interval tweak steers it
    * deterministically (the 802.11 IBSS/TSF-merge mechanism; bench-proven to the
    * microsecond). Requires an active StartBeacon. BLOCKS the caller ~one beacon
    * interval (the tweaked interval must latch and fire once before restore).

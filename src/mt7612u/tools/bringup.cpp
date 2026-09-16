@@ -641,11 +641,12 @@ static int gate_beacon(uint8_t chan, int secs)
 	{
 		uint64_t prev = 0, tsf;
 		bool have = false;
-		int good = 0;
+		int good = 0, failed = 0;
 
 		for (int s = 0; s < secs && !g_stop; s++) {
 			if (mt7612u_read_tsf_chk(&dev, &tsf)) {
 				printf("  t=%ds TSF read failed\n", s);
+				failed++;
 				have = false;
 			} else {
 				if (have)
@@ -662,6 +663,11 @@ static int gate_beacon(uint8_t chan, int secs)
 		}
 		/* A running TSF is necessary, not sufficient - the witness is the
 		 * real gate - but a frozen TSF means no beacons are being sent. */
+		if (failed) {
+			printf("GATE A: FAIL - %d TSF read(s) failed; no timer verdict on a failing transport\n",
+			       failed);
+			goto out;
+		}
 		if (good == 0) {
 			printf("GATE A: FAIL - TSF did not advance; beacon timer is dead\n");
 			goto out;

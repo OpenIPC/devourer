@@ -392,6 +392,7 @@ if(DEVOURER_MT7612U)
         src/mt7612u/Mt7612uRadio.cpp src/mt7612u/Mt7612uRadio.h
         src/mt7612u/Mt7612uMapping.h
         src/mt7612u/Mt7612uRxQueue.h
+        src/mt7612u/Mt7612uTsfRead.h
         src/mt7612u/internal.h
         src/mt7612u/regs.h
         src/mt7612u/initvals.h

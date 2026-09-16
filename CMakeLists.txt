@@ -927,6 +927,18 @@ target_link_libraries(Mt7612uRxQueueSelftest PRIVATE devourer Threads::Threads)
 
 add_test(NAME mt7612u_rx_queue COMMAND Mt7612uRxQueueSelftest)
 
+# Headless guard for the MT7612U coherent TSF read. The two register halves are
+# not latched, so the read order is the whole correctness argument, and on a
+# bench a wrong order only shows for a few hundred microseconds every 71.6 min.
+# The cell sweeps a scripted counter across the low-word wrap and requires the
+# pre-fix order to tear in the same sweep. Header-only; no libusb.
+add_executable(Mt7612uTsfReadSelftest
+    tests/mt7612u_tsf_read_selftest.cpp
+)
+target_link_libraries(Mt7612uTsfReadSelftest PRIVATE devourer)
+
+add_test(NAME mt7612u_tsf_read COMMAND Mt7612uTsfReadSelftest)
+
 # Headless guard for the TX quiesce seam (ITransport::quiesce_tx via
 # RtlAdapter): the explicit "stop TX and wait it out" call every device makes
 # before anything is released. UsbTransport's cancel/drain is validated on

@@ -2,6 +2,7 @@
 /* TSF access and the static capability descriptor. */
 #include <string.h>
 #include "internal.h"
+#include "Mt7612uTsfRead.h"
 
 /*
  * DW0 is the LOW word.
@@ -20,14 +21,33 @@
  * (DW1 << 32) | DW0 gives 200159 us over a 200000 us sleep. The `caps` gate
  * prints both orders against a known sleep so the claim is re-checkable on
  * any sample.
+ *
+ * The two halves are not latched, so the read order matters as much as the
+ * join: see mt7612u::tsf_read (Mt7612uTsfRead.h) for the wrap retry and the
+ * measurement behind it.
  */
+int mt7612u_read_tsf_chk(struct mt7612u_dev *d, uint64_t *out)
+{
+	bool retried = false;
+
+	if (!d || !out)
+		return -1;
+	if (mt7612u::tsf_read([d](uint32_t addr, uint32_t *v) { return mt_rr_chk(d, addr, v); },
+	                      out, &retried))
+		return -1;
+	if (retried)
+		d->tsf_retries++;
+	return 0;
+}
+
 uint64_t mt7612u_read_tsf(struct mt7612u_dev *d)
 {
-	uint32_t dw0 = mt_rr(d, MT_TSF_TIMER_DW0);
-	uint32_t dw1 = mt_rr(d, MT_TSF_TIMER_DW1);
+	uint64_t tsf;
 
-	return ((uint64_t)dw1 << 32) | dw0;
+	return mt7612u_read_tsf_chk(d, &tsf) ? 0 : tsf;
 }
+
+unsigned mt_tsf_retries(struct mt7612u_dev *d) { return d->tsf_retries; }
 
 void mt7612u_get_caps(const struct mt7612u_dev *d, struct mt7612u_caps *c)
 {

@@ -451,8 +451,21 @@ int mt7612u_ch_time(struct mt7612u_dev *dev, uint32_t *busy, uint32_t *idle,
 
 int mt7612u_phy_tick(struct mt7612u_dev *dev);
 
-/* TSF, the hardware microsecond clock. Read only: there is no load path
- * (measured, docs/mt7612u.md). */
+/*
+ * TSF, the hardware microsecond clock. Read only: there is no load path
+ * (measured, docs/mt7612u.md). Bring-up restarts it near 0, so its low
+ * word first wraps 71.6 min later - and the two halves are not latched, so a
+ * plain two-register read tears there by 2^32 us. Both functions read high,
+ * low, high and retry across a wrap (three or four control transfers).
+ *
+ * mt7612u_read_tsf_chk: 0 and fills *out, or -1 on a failed transfer (or a
+ * NULL argument), leaving *out untouched.
+ *
+ * mt7612u_read_tsf: the same read with no error channel - 0 on failure. A
+ * running counter never reads 0 after bring-up, but 0 cannot say why; use
+ * _chk wherever a failure has to be told apart.
+ */
+int      mt7612u_read_tsf_chk(struct mt7612u_dev *dev, uint64_t *out);
 uint64_t mt7612u_read_tsf(struct mt7612u_dev *dev);
 
 /* What this adapter can do, so a caller need not assume. */

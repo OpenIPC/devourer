@@ -634,24 +634,29 @@ static int gate_beacon(uint8_t chan, int secs)
 	printf("witness: run rxdemo on the 8812AU and grep the BSSID; "
 	       "or `iw dev <sta> scan | grep MT7612U-AP`\n");
 
-	/* Watch the TSF advance - proof the beacon timer is running. DW0 is the
-	 * low word on this silicon (mt76's debug read has it backwards). */
+	/* Watch the TSF advance - proof the beacon timer is running. The checked
+	 * read matters here: an unchecked one returns all-ones on a failed
+	 * transfer, which is "greater than the previous sample" and would count a
+	 * dead transport as a live timer. A failed read breaks the chain instead. */
 	{
-		uint64_t prev = 0;
+		uint64_t prev = 0, tsf;
+		bool have = false;
 		int good = 0;
 
 		for (int s = 0; s < secs && !g_stop; s++) {
-			uint32_t lo = mt_rr(&dev, MT_TSF_TIMER_DW0);
-			uint32_t hi = mt_rr(&dev, MT_TSF_TIMER_DW1);
-			uint64_t tsf = ((uint64_t)hi << 32) | lo;
-
-			if (s)
-				printf("  t=%ds TSF=%llu (+%llu us)\n", s,
-				       (unsigned long long)tsf,
-				       (unsigned long long)(tsf - prev));
-			if (s && tsf > prev)
-				good++;
-			prev = tsf;
+			if (mt7612u_read_tsf_chk(&dev, &tsf)) {
+				printf("  t=%ds TSF read failed\n", s);
+				have = false;
+			} else {
+				if (have)
+					printf("  t=%ds TSF=%llu (+%llu us)\n", s,
+					       (unsigned long long)tsf,
+					       (unsigned long long)(tsf - prev));
+				if (have && tsf > prev)
+					good++;
+				prev = tsf;
+				have = true;
+			}
 			if (!wait_ms(1000))
 				break;
 		}
@@ -1813,16 +1818,24 @@ static int gate_caps(uint8_t chan)
 
 	/* TSF: the register names suggest DW0 is the low word but mt76 reads
 	 * DW0 as the high one. Rather than trust either reading, sleep a known
-	 * 200 ms and require the clock to have advanced by that much. */
+	 * 200 ms and require the clock to have advanced by that much. The raw
+	 * words stay raw on purpose - this is the measurement of the word order -
+	 * but they are checked: an all-ones failure would otherwise pose as a
+	 * word-order answer. */
 	{
-		uint32_t a0 = mt_rr(&dev, MT_TSF_TIMER_DW0);
-		uint32_t a1 = mt_rr(&dev, MT_TSF_TIMER_DW1);
-		uint32_t b0, b1;
+		uint32_t a0 = 0, a1 = 0, b0 = 0, b1 = 0;
 		int64_t d_hi0, d_lo0;
+		bool raw_ok;
 
+		raw_ok = !mt_rr_chk(&dev, MT_TSF_TIMER_DW0, &a0) &&
+		         !mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &a1);
 		mt_usleep(200000);
-		b0 = mt_rr(&dev, MT_TSF_TIMER_DW0);
-		b1 = mt_rr(&dev, MT_TSF_TIMER_DW1);
+		raw_ok = raw_ok && !mt_rr_chk(&dev, MT_TSF_TIMER_DW0, &b0) &&
+		         !mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &b1);
+		if (!raw_ok) {
+			printf("\nTSF raw: read failed - no word-order verdict\n");
+			bad++;
+		}
 
 		d_hi0 = (int64_t)((((uint64_t)b0 << 32) | b1) - (((uint64_t)a0 << 32) | a1));
 		d_lo0 = (int64_t)((((uint64_t)b1 << 32) | b0) - (((uint64_t)a1 << 32) | a0));
@@ -1833,13 +1846,19 @@ static int gate_caps(uint8_t chan)
 		printf("  over a 200000 us sleep -> DW%d is the low word\n",
 		       (d_lo0 > 150000 && d_lo0 < 400000) ? 0 : 1);
 
-		t1 = mt7612u_read_tsf(&dev);
+		int rc = mt7612u_read_tsf_chk(&dev, &t1);
+
 		mt_usleep(200000);
-		t2 = mt7612u_read_tsf(&dev);
-		delta = (int64_t)(t2 - t1);
-		printf("  mt7612u_read_tsf(): delta %lld us  %s\n", (long long)delta,
-		       (delta > 150000 && delta < 400000) ? "OK" : "*** WRONG ORDER ***");
-		if (delta < 150000 || delta > 400000) bad++;
+		rc |= mt7612u_read_tsf_chk(&dev, &t2);
+		if (rc) {
+			printf("  mt7612u_read_tsf_chk(): read failed\n");
+			bad++;
+		} else {
+			delta = (int64_t)(t2 - t1);
+			printf("  mt7612u_read_tsf_chk(): delta %lld us  %s\n", (long long)delta,
+			       (delta > 150000 && delta < 400000) ? "OK" : "*** WRONG ORDER ***");
+			if (delta < 150000 || delta > 400000) bad++;
+		}
 	}
 
 	/* 40 MHz */

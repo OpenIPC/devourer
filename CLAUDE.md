@@ -454,35 +454,16 @@ The frame-free energy read also carries the two CCX window products, `clm`
 floor — the comparable form of the histogram, unlike the naive `nhm_busy` that
 rails ~100 on a quiet channel). Their disagreement is the signal: an 802.11
 transmitter lifts both, a non-802.11 emitter lifts only `nhm_env`, which is the
-case a frame sniffer calls a free channel — measured on a traffic-free ch100,
-8812CU: a 5 MHz non-802.11 carrier read 0 frames / `clm` 34 / `nhm_env` 98
-against a quiet 0/0/0, while 802.11 traffic read 618 frames / 15 / 16. The
-adversarial half is two-part. `fa_ofdm` went 4 → 2926 on that same carrier arm,
-so the existing counters are **not** blind to it; what the pair adds is an
-airtime unit and a ratio that doesn't rail, not a new detection. And `nhm_env`
-is only valid while the gain reference holds still — the NHM thresholds are
-recomputed from the live IGI, and how far DIG may walk it is a constant in our
-own code, not silicon: Jaguar2 spans 0x1c–0x3e (34 steps) and walked to 40 to
-absorb the interferer, reading `nhm_env` **0** where `clm` read 36; Jaguar3 is
-clamped to 0x1e–0x22 (4 steps) and read 98; Jaguar1's watchdog spans 14 steps
-but is off unless `DEVOURER_PHYDM_WATCHDOG=1`, so a default J1 session should
-behave like J3 — predicted from the constants, not measured. Hence tunable:
-narrow the J2 window, or pin IGI across the NHM window as phydm does for its
-fixed-threshold apps. `clm` counts ticks, not power against a moving reference, and separated
-on both — though only 0 → 4 on the 8822BU, where plain `fa_ofdm` went 0 → 318
-and remains the most sensitive of the three. Also: the ~2 ms window makes one
-dwell a sample, not a measurement (single-read sd 4–24; the median over ~20
-replicates) — `chanscout` takes exactly one per dwell today. And CLM does **not**
-rescue TX-side sensing: in a transmit session the 8822BU pins `clm`, `fa` and
-`cca` all at zero with a carrier present, which points at a shared counter
-enable the TX bring-up misses rather than at the DIG loop; the 8812CU is alive
-in both, on the same chip and code path that read *inert* with 4–20 ms windows,
-so window length is the live variable there. Measured on Jaguar3 (JGR3 map) +
-Jaguar2 (11AC map), so both register maps are validated; Jaguar1 is unmeasured
-and shares the 11AC map. Both are **emitted, not scored** — neither
-`ChannelScore` nor the hopset occupancy law reads them, and measured separation
-on one bench is not yet a policy. Not measured on Kestrel; there the vendor
-engine already computes `clm_ratio` and the glue discards it.
+case a frame sniffer calls a free channel. Three cross-cutting caveats, none of
+them chip-specific: plain `fa_ofdm` outperformed both new sensors on every part
+measured, so this buys an airtime unit and a non-railing ratio rather than a new
+detection; `nhm_env` is referenced to the live IGI, so it is only dependable
+where DIG is not free to walk the gain out from under it (the per-generation
+windows are in each `src/<gen>/CLAUDE.md`); and the ~2 ms window makes one dwell
+a sample, not a measurement — average ~20, which `chanscout` does not do today.
+Both are **emitted, not scored**: neither `ChannelScore` nor the hopset
+occupancy law reads them. Measured numbers, the generation matrix and the
+harness: `docs/rx-spectrum-sensing.md`.
 
 ## Adaptive channel migration
 

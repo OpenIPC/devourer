@@ -973,6 +973,10 @@ add_test(NAME noise_floor_math COMMAND NoiseFloorMathSelftest)
 add_executable(NhmEnvMathSelftest tests/nhm_env_math_selftest.cpp)
 target_include_directories(NhmEnvMathSelftest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# Standalone (does not link `devourer`, so it does not inherit that target's
+# PUBLIC cxx_std_20) and the header uses inline constexpr variables, which MSVC
+# rejects below /std:c++17.
+target_compile_features(NhmEnvMathSelftest PRIVATE cxx_std_20)
 
 add_test(NAME nhm_env_math COMMAND NhmEnvMathSelftest)
 

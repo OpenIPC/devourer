@@ -69,3 +69,23 @@ at BB-table load, so the descriptor field alone is inert until programmed
 On-air-validated on 8822CU + 8822EU, sticky across
 `SetMonitorChannel`/`FastRetune`; the E compresses deep cuts (≈−6 dB floor,
 same TSSI reshape as its offset slope).
+
+## CCX energy sensing (`clm` / `nhm_env`)
+
+`GetRxEnergy(with_nhm=true)` runs the shared CCX window (`src/NhmReader.h`) on
+the JGR3 register map (CLM period is the low half of `0x1e40`, trigger
+`0x1e60[0]`, ready+result `0x2d88`); on-air validated on an RTL8812CU, ch100.
+
+This is the generation where `nhm_env` works as intended, because
+`PhydmRuntimeJaguar3.cpp` clamps DIG to `DIG_MIN_COVERAGE 0x1e` …
+`DIG_MAX_OF_MIN_COVERAGE 0x22` — four steps — so the gain reference barely
+moves and the histogram mass is free to march up under an interferer. Against a
+5 MHz non-802.11 carrier on a traffic-free channel: 0 frames decoded, `clm` 34,
+`nhm_env` 98, against a quiet 0/0/0; 802.11 traffic at MCS1 read 618 frames /
+15 / 16. Note `fa_ofdm` moved 4 → 2926 on that same arm and remains the more
+sensitive counter.
+
+In a **TX session** with a 300 ms quiet window the counters are alive (clean
+0/0/0, carrier `clm` 51 / `fa` 1772 / `cca` 1750) — on the same 8812CU and code
+path that previously read *inert* with 4–20 ms windows, so window length rather
+than generation is the live variable in that older result.

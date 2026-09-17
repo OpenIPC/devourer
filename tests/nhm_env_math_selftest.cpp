@@ -7,9 +7,11 @@
  * naive ratio reads busy. That difference is the whole reason the env form
  * exists. */
 #include "NhmEnvMath.h"
+#include "NhmReader.h"
 
 #include <cstdio>
 #include <cstring>
+#include <map>
 
 using devourer::ccx_rpt_ratio;
 using devourer::kNhmRptNum;
@@ -161,6 +163,81 @@ int main() {
     h[0] = 200;
     const NhmUtility u = nhm_utility(h, th_hi); /* bucket 0 excluded twice */
     check("no underflow", u.env_ratio, 0);
+  }
+
+  /* --- programmed thresholds must match the ones nhm_utility() is handed ---
+   *
+   * phy_set_bb_reg (PHY_SetBBReg8812) shifts the caller's value left by the
+   * mask's own bit position. A value pre-shifted by the caller is therefore
+   * shifted twice and the field lands as zero, while RxEnergy::nhm_th still
+   * reports the intended value — so the env reduction would be computed
+   * against boundaries the hardware never used. This mock reproduces the real
+   * masked-write semantics and checks the round trip on BOTH register maps. */
+  for (int map = 0; map < 2; map++) {
+    const devourer::NhmRegs r =
+        map == 0 ? devourer::nhm_regs_11ac() : devourer::nhm_regs_jgr3();
+    const char *name = map == 0 ? "11ac" : "jgr3";
+    std::map<uint16_t, uint32_t> regs;
+
+    auto shift_of = [](uint32_t mask) {
+      int i = 0;
+      while (i < 32 && !((mask >> i) & 1u))
+        i++;
+      return i;
+    };
+    auto set_bb = [&](uint16_t addr, uint32_t mask, uint32_t val) {
+      if (mask == 0xffffffffu) {
+        regs[addr] = val;
+        return;
+      }
+      const uint32_t cur = regs.count(addr) ? regs[addr] : 0u;
+      regs[addr] = (cur & ~mask) | ((val << shift_of(mask)) & mask);
+    };
+    /* Report the NHM window ready immediately; the buckets themselves are not
+     * under test here, only the thresholds that were programmed. */
+    auto read32 = [&](uint16_t addr) -> uint32_t {
+      uint32_t v = regs.count(addr) ? regs[addr] : 0u;
+      if (addr == r.ready)
+        v |= (1u << 16);
+      return v;
+    };
+
+    RxEnergy e;
+    devourer::read_nhm(r, /*igi7=*/0x20, read32, set_bb, e, /*period=*/500);
+
+    uint8_t want[kNhmThNum];
+    th_for_igi(0x20, want);
+
+    auto field = [&](uint16_t addr, uint32_t mask) {
+      return (regs[addr] & mask) >> shift_of(mask);
+    };
+    char label[48];
+    for (int i = 0; i < 4; i++) {
+      std::snprintf(label, sizeof(label), "%s th[%d] programmed", name, i);
+      check(label, field(r.th0_3, 0xffu << (8 * i)), want[i]);
+    }
+    for (int i = 0; i < 4; i++) {
+      std::snprintf(label, sizeof(label), "%s th[%d] programmed", name, i + 4);
+      check(label, field(r.th4_7, 0xffu << (8 * i)), want[i + 4]);
+    }
+    std::snprintf(label, sizeof(label), "%s th[8] programmed", name);
+    check(label, field(r.th8, 0xffu << r.th8_shift), want[8]);
+    std::snprintf(label, sizeof(label), "%s th[9] programmed", name);
+    check(label, field(r.ctrl, 0x00ff0000u), want[9]);
+    std::snprintf(label, sizeof(label), "%s th[10] programmed", name);
+    check(label, field(r.ctrl, 0xff000000u), want[10]);
+
+    /* What the reader reports must be what it programmed. */
+    for (int i = 0; i < kNhmThNum; i++) {
+      std::snprintf(label, sizeof(label), "%s nhm_th[%d] reported", name, i);
+      check(label, e.nhm_th[i], want[i]);
+    }
+
+    /* The two period fields share one dword: NHM high half, CLM low half. */
+    std::snprintf(label, sizeof(label), "%s nhm period", name);
+    check(label, field(r.period, 0xffff0000u), 500);
+    std::snprintf(label, sizeof(label), "%s clm period", name);
+    check(label, field(r.period, 0x0000ffffu), 500);
   }
 
   if (g_fail) {

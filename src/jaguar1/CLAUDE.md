@@ -84,3 +84,19 @@ rate-independent, so neither can implement the other.
   `FastSetTxPowerOffsetQdb` (BB-swing TxScale `0xc1c/0xe1c`: global
   per-burst, 1–4 writes, 0.5 dB steps, −12..+2 dB, folded through the 8812A
   thermal tracker; on-air-validated on the 8812AU).
+
+## CCX energy sensing (`clm` / `nhm_env`)
+
+`GetRxEnergy(with_nhm=true)` runs the shared CCX window (`src/NhmReader.h`) on
+the 11AC register map — the same map validated on the Jaguar2 8822BU, so CLM
+lands here with no Jaguar1-specific code. **Unmeasured on this generation.**
+
+The `nhm_env` reduction is referenced to the live IGI, so what matters is how
+far DIG may walk it. `PhydmWatchdog` clamps to `0x1c`–`0x2a` (14 steps,
+`PhydmWatchdog.h`) — but the watchdog is **opt-in** (`DEVOURER_PHYDM_WATCHDOG=1`,
+`HalModule.cpp`; the default path runs watchdog-less because its BB traffic cost
+4500→1000 TX submits on an 8821 and 2300→0 RX hits on an 8814). A default
+session therefore walks IGI not at all, a stiffer reference than Jaguar3's
+4-step clamp, so `nhm_env` should behave like the 8812CU rather than the
+8822BU — and should degrade toward the 8822BU once the watchdog is enabled and
+hands DIG 14 steps of travel. Predicted from those constants, not measured.

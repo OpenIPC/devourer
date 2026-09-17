@@ -96,8 +96,13 @@ inline void read_nhm(const NhmRegs& r, uint8_t igi7,
          th[0] | (th[1] << 8) | (th[2] << 16) | (uint32_t(th[3]) << 24));
   set_bb(r.th4_7, 0xffffffffu,
          th[4] | (th[5] << 8) | (th[6] << 16) | (uint32_t(th[7]) << 24));
-  set_bb(r.th8, 0xffu << r.th8_shift, uint32_t(th[8]) << r.th8_shift);
-  set_bb(r.ctrl, 0xffff0000u, (th[9] | (uint32_t(th[10]) << 8)) << 16);
+  /* set_bb (phy_set_bb_reg -> PHY_SetBBReg8812) shifts the value left by the
+   * mask's own bit position, so every value here is passed RELATIVE to its
+   * mask — never pre-shifted, or it is shifted twice and the field lands as
+   * zero. Matches the vendor, which passes th[8] and the packed th9|th10<<8
+   * raw (phydm_nhm_set_th_reg). */
+  set_bb(r.th8, 0xffu << r.th8_shift, th[8]);
+  set_bb(r.ctrl, 0xffff0000u, th[9] | (uint32_t(th[10]) << 8));
 
   /* Trigger both engines (pulse each bit 0->1: CLM bit0, NHM bit1). */
   set_bb(r.ctrl, 0x1u, 0);

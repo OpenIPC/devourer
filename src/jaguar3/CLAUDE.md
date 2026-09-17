@@ -50,10 +50,11 @@ this file carries only how Jaguar3 uses it:
   (`RtlJaguar3Device.cpp`), ended before the coex thread starts because that
   thread shares the transport. `Init` (RX-only) opens no batch yet — not
   measured on a ground-station card.
-- Every ms-scale settle delay drains the queue first, on both dies:
-  `write_bb` 0xfc–0xfe, `rf_writer` 0xffe, `Halrf8822c::delay_ms`,
-  `Halrf8822e::delay_ms`, the efuse power-cut. A settle that sleeps while
-  its writes are still queued is no settle.
+- Every settle delay drains the queue first, µs ones included, on both
+  dies: the `write_bb` / `rf_writer` table delay markers, `delay_us` and
+  `delay_ms` on `Halrf8822c` and `Halrf8822e`, the efuse power-cut. A settle
+  that sleeps while its writes are still queued is no settle; the drain is
+  free on an empty queue and bounded by its depth otherwise.
 - Measured: 1.30 → 0.65 s warm, 2.04 → ~0.7 s cold on one drone-side
   8812EU (ssc338q host). The transfer-count reduction is deterministic; the
   wall-clock figure is one unit, one host.

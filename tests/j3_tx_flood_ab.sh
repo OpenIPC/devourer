@@ -11,10 +11,11 @@ OUT=${OUT:-/tmp/j3_tx_flood_ab/pid${PID}_ch${CH}}; mkdir -p "$OUT"
 run() {
   local tree=$1 rep=$2 n; n=$(basename "$tree")
   local log=$OUT/${n}_rep${rep}
-  if ! env DEVOURER_PID="$PID" DEVOURER_CHANNEL="$CH" DEVOURER_LOG_LEVEL=info \
-       timeout -s INT "$SECS" "$tree/build/txdemo" >"$log.jsonl" 2>"$log.err"; then
-    rc=$?; case $rc in 0|124|130) ;; *) echo "$n rep$rep: txdemo exited rc=$rc"; tail -3 "$log.err";; esac
-  fi
+  local rc=0
+  env DEVOURER_PID="$PID" DEVOURER_CHANNEL="$CH" DEVOURER_LOG_LEVEL=info \
+    timeout -s INT "$SECS" "$tree/build/txdemo" >"$log.jsonl" 2>"$log.err" || rc=$?
+  # 124 = timeout fired (the normal end), 0/130 = txdemo took the INT itself.
+  case $rc in 0|124|130) ;; *) echo "$n rep$rep: txdemo exited rc=$rc"; tail -3 "$log.err";; esac
   local tx fail rd first
   tx=$(grep -cF '"ev":"tx.' "$log.jsonl" || true)
   fail=$(grep -c 'bulk_send EP .* FAIL' "$log.err" || true)

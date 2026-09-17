@@ -42,15 +42,17 @@ void retry_cal(Logger_t &logger, const char *what, F &&step, int tries = 3) {
  * write. */
 void write_bb(RtlAdapter &dev, uint32_t addr, uint32_t data) {
   switch (addr) {
-  /* The ms-scale table delays exist to let the preceding writes settle:
-   * drain the pipelined-write queue before sleeping (sub-ms ones are noise
-   * next to the ~0.2 ms a depth-8 queue can hold). */
+  /* The table delays exist to let the preceding writes settle, so every
+   * one of them drains the pipelined-write queue before sleeping — a
+   * settle measured from a write that is still queued is no settle. The
+   * drain is free when the queue is empty and bounded by its depth when
+   * not. */
   case 0xfe: dev.flush_writes(); std::this_thread::sleep_for(std::chrono::milliseconds(50)); return;
   case 0xfd: dev.flush_writes(); std::this_thread::sleep_for(std::chrono::milliseconds(5)); return;
   case 0xfc: dev.flush_writes(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); return;
-  case 0xfb: std::this_thread::sleep_for(std::chrono::microseconds(50)); return;
-  case 0xfa: std::this_thread::sleep_for(std::chrono::microseconds(5)); return;
-  case 0xf9: std::this_thread::sleep_for(std::chrono::microseconds(1)); return;
+  case 0xfb: dev.flush_writes(); std::this_thread::sleep_for(std::chrono::microseconds(50)); return;
+  case 0xfa: dev.flush_writes(); std::this_thread::sleep_for(std::chrono::microseconds(5)); return;
+  case 0xf9: dev.flush_writes(); std::this_thread::sleep_for(std::chrono::microseconds(1)); return;
   default: dev.phy_set_bb_reg(static_cast<uint16_t>(addr), MASKDWORD, data);
   }
 }
@@ -1012,8 +1014,8 @@ void HalJaguar3::apply_bb_rf_agc_tables(InitTimer *timer) {
     return [this, base](uint32_t addr, uint32_t data) {
       switch (addr) {
       case 0xffe: _device.flush_writes(); std::this_thread::sleep_for(std::chrono::milliseconds(50)); return;
-      case 0xfe:  std::this_thread::sleep_for(std::chrono::microseconds(100)); return;
-      case 0xffff: std::this_thread::sleep_for(std::chrono::microseconds(1)); return;
+      case 0xfe:  _device.flush_writes(); std::this_thread::sleep_for(std::chrono::microseconds(100)); return;
+      case 0xffff: _device.flush_writes(); std::this_thread::sleep_for(std::chrono::microseconds(1)); return;
       case 0x0:
         /* RF reg 0x0 (mode register) can't be written through the direct
          * window — it silently no-ops (hardware-observed on the 8822e). The

@@ -110,7 +110,7 @@ private:
   uint8_t mac_read8(uint16_t addr) { return _device.rtw_read8(addr); }
   uint32_t rf_read(uint8_t path, uint16_t addr, uint32_t mask);
   void rf_write(uint8_t path, uint16_t addr, uint32_t mask, uint32_t val);
-  static void delay_us(uint32_t us);
+  void delay_us(uint32_t us); /* drains pipelined writes first */
   void delay_ms(uint32_t ms); /* drains pipelined writes first */
 
   /* --- BTC/GNT indirect-register + IQK trigger/poll primitives --- */

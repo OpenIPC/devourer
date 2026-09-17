@@ -49,7 +49,7 @@ namespace {
 /* Same list the other demos' open loop iterates; --pid narrows to one. */
 const uint16_t kRealtekPids[] = {0x8812, 0x8813, 0x881a, 0x0811, 0xa811,
                                  0x0820, 0x0821, 0x8822, 0x0120, 0x012d,
-                                 0xb82c, 0xc811, 0xc812, 0xa81a};
+                                 0xb82c, 0xb812, 0xc811, 0xc812, 0xa81a};
 
 /* One --peek/--poke, kept in argv order so a poke-then-peek verifies the
  * write inside a single claim. */
@@ -326,10 +326,15 @@ int main(int argc, char **argv) {
                                    .ChannelOffset = 0,
                                    .ChannelWidth = CHANNEL_WIDTH_20});
     /* --init + ops: the question is what the bring-up left in a register,
-     * so the ops run on the configured chip (vendor control is stateless
-     * on the handle; the device object stays alive underneath). */
-    if (!a.ops.empty())
+     * so the ops run on the configured chip. The device object is released
+     * first: its destructor joins the Jaguar3 coex thread (and does not
+     * de-init the chip — that is Stop(), which this tool never calls), so
+     * the raw-adapter ops below cannot interleave with a background
+     * register write. Same handle, interface still claimed. */
+    if (!a.ops.empty()) {
+      session.adopt_device(nullptr);
       return run_reg_ops(handle, logger, ctx, lock, a.ops);
+    }
   } else {
     logger->info("chipstate: read-only attach (no USB reset, no bring-up) — "
                  "the chip is being read exactly as the last session left it");

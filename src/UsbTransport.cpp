@@ -440,7 +440,10 @@ UsbTransport::AsyncWrite *UsbTransport::async_take_slot() {
   while (_aw->free.empty()) {
     if (!async_wait_progress()) {
       flush_writes(); /* recovers the pool on a stuck queue */
-      if (_aw->free.empty())
+      /* A recovery that retired slots closed the batch: hand out nothing,
+       * even if some cancellations did return a slot, so the caller takes
+       * the synchronous path instead of queueing behind the stuck ones. */
+      if (_aw_abandoned || !_batch || _aw->free.empty())
         return nullptr;
     }
   }
@@ -501,6 +504,11 @@ bool UsbTransport::async_wait_progress() {
 }
 
 void UsbTransport::flush_writes() {
+  /* Retired slots keep the in-flight count positive for good; draining
+   * them again would only repeat the timeout + cancel turns on every later
+   * flush (bulk sends, batch close, destruction). */
+  if (_aw_abandoned)
+    return;
   while (_aw->inflight > 0) {
     if (async_wait_progress())
       continue;

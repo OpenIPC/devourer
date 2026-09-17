@@ -52,9 +52,13 @@ public:
      * addr[31:16]. Lets the BB/RF window (addr + 0x10000) reach wIndex=1
      * instead of colliding with the MAC/system space at wIndex=0. */
     _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
-    if (_batch)
-      return async_write(static_cast<uint16_t>(addr & 0xFFFF),
-                         static_cast<uint16_t>(addr >> 16), &v, sizeof(v));
+    /* A pipelined write that cannot be submitted (no usable slot, submit
+     * rejected) falls through to the synchronous transfer below: EP0 keeps
+     * submission order, so it lands behind whatever is still queued and no
+     * register write is silently dropped. */
+    if (_batch && async_write(static_cast<uint16_t>(addr & 0xFFFF),
+                              static_cast<uint16_t>(addr >> 16), &v, sizeof(v)))
+      return true;
     return libusb_control_transfer(
                _dev_handle, REALTEK_USB_VENQT_WRITE, 5,
                static_cast<uint16_t>(addr & 0xFFFF),
@@ -251,8 +255,9 @@ template <typename T> T UsbTransport::ctrl_read(uint16_t reg_num) {
 
 template <typename T> bool UsbTransport::ctrl_write(uint16_t reg_num, T value) {
   _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
-  if (_batch)
-    return async_write(reg_num, 0, &value, sizeof(T));
+  /* Unsubmittable pipelined write -> synchronous, in order (see write32_wide). */
+  if (_batch && async_write(reg_num, 0, &value, sizeof(T)))
+    return true;
   return libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_WRITE, 5,
                                  reg_num, 0, (uint8_t *)&value, sizeof(T),
                                  USB_TIMEOUT) == sizeof(T);

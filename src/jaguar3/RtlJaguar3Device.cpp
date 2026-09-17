@@ -61,9 +61,16 @@ RtlJaguar3Device::RtlJaguar3Device(RtlAdapter device, Logger_t logger,
  * transport in batch mode for the threads that start afterwards. */
 struct WriteBatchScope {
   RtlAdapter &dev;
+  bool open = true;
   explicit WriteBatchScope(RtlAdapter &d) : dev(d) { dev.write_batch_begin(); }
-  void end() { dev.write_batch_end(); }
-  ~WriteBatchScope() { dev.write_batch_end(); }
+  /* Closes once: after end() the destructor is a no-op, so it never touches
+   * the transport again once the coex thread (which shares it) is running. */
+  void end() {
+    if (open)
+      dev.write_batch_end();
+    open = false;
+  }
+  ~WriteBatchScope() { end(); }
 };
 
 void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
@@ -961,6 +968,10 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   }
   timer.stage("dpdt_ack_misc");
   batch.end(); /* sync writes from here: the coex thread shares the transport */
+  /* The timing closes here, before the coex thread starts: it shares the
+   * adapter's transfer counter, so anything emitted after it would count
+   * that thread's register and H2C traffic as bring-up. */
+  timer.total();
   _coex_thread = std::thread([this] { coex_runtime_loop(); });
   if (_cfg.rx.ack_responder &&
       !SetAckResponder(*_cfg.rx.ack_responder)) /* DEVOURER_ACK_RESPONDER */
@@ -968,8 +979,6 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
         "Jaguar3: configured ACK responder could not be armed");
   if (_cfg.tx.ampdu)
     SetAmpduMode(*_cfg.tx.ampdu); /* DEVOURER_TX_AMPDU_MODE */
-  timer.stage("coex_thread_ampdu");
-  timer.total();
   _logger->info("Jaguar3: ready for TX (monitor inject)");
 }
 

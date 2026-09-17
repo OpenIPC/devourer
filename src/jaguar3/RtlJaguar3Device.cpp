@@ -1615,6 +1615,10 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
   c.tx_chains = 2; /* 8822C/8822E are 2T2R */
   c.rx_chains = 2;
   c.per_chain_rssi = true;
+  /* CCX CLM via NhmReader's JGR3 map; separated arm-vs-quiet on air (#431). */
+  c.busy_airtime_ok = true;
+  c.busy_airtime_measured = true;
+  c.rx_energy_ok = true;
   /* Hardware ARQ (truth table at the AdapterCaps declarations): both dies
    * measured — responder matrix + retry-knob A/B + the arq_e2e ledgers. */
   c.ack_responder_ok = true;

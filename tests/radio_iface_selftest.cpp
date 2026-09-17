@@ -38,6 +38,30 @@ struct NullRtlRadio final : IRtlRadio {
   void SetCcaMode(bool) override {}
 };
 
+/* A Realtek backend that HAS ported its energy reader. Proves the neutral
+ * GetChannelBusy implemented once on IRtlRadio actually reaches a derived
+ * class's GetRxEnergy — the whole point of putting it there rather than
+ * overriding it five times. */
+struct ClmRtlRadio final : IRtlRadio {
+  void Init(Action_ParsedRadioPacket, SelectedChannel) override {}
+  void InitWrite(SelectedChannel) override {}
+  void StartRxLoop(Action_ParsedRadioPacket) override {}
+  void SetMonitorChannel(SelectedChannel) override {}
+  bool send_packet(const uint8_t *, size_t) override { return false; }
+  SelectedChannel GetSelectedChannel() override { return {}; }
+  void SetCcaMode(bool) override {}
+
+  RxEnergy GetRxEnergy(bool) override {
+    RxEnergy e;
+    e.valid_clm = true;
+    e.clm_ratio_pct = 42;
+    e.clm_period = 500; /* 4 us ticks -> a 2000 us window */
+    e.valid_nhm = true;
+    e.nhm_env_ratio_pct = 7;
+    return e;
+  }
+};
+
 int fails = 0;
 void check(bool ok, const char *what) {
   if (!ok) {
@@ -55,6 +79,18 @@ int main() {
         "a neutral radio is not an IRtlRadio");
   check(!r->GetAdapterCaps().supported, "GetAdapterCaps default is unsupported");
   check(!r->GetRxQuality().valid, "GetRxQuality default is invalid");
+  /* The neutral frame-free reading. That this compiles against a radio with no
+   * Realtek type in sight is the proof GetChannelBusy sits on IRadio. */
+  const devourer::ChannelBusy busy = r->GetChannelBusy();
+  check(!busy.valid && !busy.valid_busy && !busy.valid_energy,
+        "GetChannelBusy default reports no reading");
+  check(busy.source == devourer::BusySource::None,
+        "GetChannelBusy default names no source");
+  check(!r->GetAdapterCaps().busy_airtime_ok,
+        "busy_airtime_ok defaults false");
+  check(!r->GetAdapterCaps().busy_airtime_measured,
+        "busy_airtime_measured defaults false");
+  check(!r->GetAdapterCaps().rx_energy_ok, "rx_energy_ok defaults false");
   check(!r->GetFwBootStatus().supported, "GetFwBootStatus default is unsupported");
   check(!r->GetTxPowerCaps().supported, "GetTxPowerCaps default is unsupported");
   check(!r->SetAckResponder(devourer::MacAddr{}), "SetAckResponder default refuses");
@@ -80,11 +116,26 @@ int main() {
         "GetRxEnergy default reports every field invalid");
   check(!rtl->ProbeEfuseStability().supported,
         "ProbeEfuseStability default is unsupported");
+  /* The RTL8733B shape: derives from IRtlRadio, ports no energy reader. The
+   * inherited GetChannelBusy must report nothing rather than a zero reading —
+   * this is the false positive the dynamic_cast used to produce. */
+  check(!rtl->GetChannelBusy().valid,
+        "a Realtek radio with no GetRxEnergy reports no channel-busy reading");
 
   check(!rtl->SetCcaGates(true, true), "SetCcaGates default refuses");
   bool primary = true, edcca = true; /* poison: a refusal must not write */
   check(!rtl->GetCcaGates(primary, edcca), "GetCcaGates default refuses");
   check(primary && edcca, "GetCcaGates leaves its out-params alone when it refuses");
+
+  /* A Realtek backend that HAS ported GetRxEnergy: the shared IRtlRadio
+   * implementation must translate its CLM/NHM-env into the neutral reading. */
+  std::unique_ptr<IRadio> clm_owner = std::make_unique<ClmRtlRadio>();
+  const devourer::ChannelBusy clm = clm_owner->GetChannelBusy();
+  check(clm.valid, "a Realtek radio with CLM reports a reading");
+  check(clm.source == devourer::BusySource::Clm, "the reading names CLM");
+  check(clm.valid_busy && clm.busy_pct == 42, "busy airtime passes through");
+  check(clm.window_us == 2000, "window is the CLM period in 4 us ticks");
+  check(clm.valid_energy && clm.energy_pct == 7, "NHM-env passes through");
 
   if (fails) return 1;
   std::puts("radio_iface: PASS");

@@ -418,6 +418,31 @@ int mt7612u_link_stats(struct mt7612u_dev *dev, struct mt7612u_link_stats *out);
  * mt7612u_link_stats() will see that column reduced.  Returns 0, or -1 before
  * a channel is set.
  */
+/*
+ * Channel busy/idle only — MT_CH_BUSY / MT_CH_IDLE (0x1134 / 0x1130) and
+ * nothing else.
+ *
+ * Deliberately NOT mt7612u_link_stats(): that function also reads
+ * MT_RX_STAT_1, whose false-CCA field is read-and-clear and is owned by
+ * mt7612u_phy_tick()'s AGC loop. Polling it at a caller's cadence would both
+ * misreport the interference figure and starve the gain tracking of the
+ * evidence it steps on. The channel timers are separate registers with no
+ * other reader inside the library.
+ *
+ * Read-and-clear like everything else here: each call returns the interval
+ * since the previous mt7612u_ch_time() call, tracked on its own per-device
+ * mark so it does not disturb mt7612u_link_stats()'s interval (and vice
+ * versa). Note mt7612u_link_stats() DOES also read and clear these two
+ * registers, so a session polling both splits the counts between them.
+ *
+ * Requires mt7612u_link_stats_start() to have armed the timers. Returns 0 on
+ * success, -1 on a bad device or a failed read — never a fabricated value,
+ * because a failed control transfer would otherwise read as a 100%-busy
+ * channel.
+ */
+int mt7612u_ch_time(struct mt7612u_dev *dev, uint32_t *busy, uint32_t *idle,
+                    uint32_t *interval_us);
+
 int mt7612u_phy_tick(struct mt7612u_dev *dev);
 
 /* TSF, the hardware microsecond clock. Two register reads. */

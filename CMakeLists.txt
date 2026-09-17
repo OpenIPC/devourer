@@ -980,6 +980,17 @@ target_compile_features(NhmEnvMathSelftest PRIVATE cxx_std_20)
 
 add_test(NAME nhm_env_math COMMAND NhmEnvMathSelftest)
 
+# Headless guard for the vendor-neutral ChannelBusy conversions (src/RxSense.h):
+# the Realtek RxEnergy reduction and the MediaTek channel-timer ratio. Pure
+# arithmetic, header-only. The load-bearing case is the refusal — a counter that
+# was never armed must report NO reading, never 0% busy.
+add_executable(ChannelBusySelftest tests/channel_busy_selftest.cpp)
+target_include_directories(ChannelBusySelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_features(ChannelBusySelftest PRIVATE cxx_std_20)
+
+add_test(NAME channel_busy_math COMMAND ChannelBusySelftest)
+
 # Headless round-trip guard for the 802.11ax HE TX radiotap path
 # (src/RadiotapBuilder.cpp build_he + the shared Radiotap.c field-23 size entry
 # + src/ieee80211_radiotap.h HE masks): parse an HE spec -> build -> iterate ->

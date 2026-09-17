@@ -604,6 +604,30 @@ int mt7612u_link_stats_start(struct mt7612u_dev *d)
 	return 0;
 }
 
+/* Channel timers only. See the header for why this is not link_stats(). */
+int mt7612u_ch_time(struct mt7612u_dev *d, uint32_t *busy, uint32_t *idle,
+                    uint32_t *interval_us)
+{
+	uint64_t now = stats_now_us();
+	uint32_t b = 0, i = 0;
+
+	if (!d || !busy || !idle) return -1;
+	/* Checked reads: mt_rr() returns ~0u on a failed control transfer, and
+	 * an unchecked read here would surface as a 100%-busy channel rather
+	 * than as the absent reading it is. */
+	if (mt_rr_chk(d, MT_CH_BUSY, &b) || mt_rr_chk(d, MT_CH_IDLE, &i))
+		return -1;
+
+	*busy = b;
+	*idle = i;
+	if (interval_us)
+		*interval_us = d->ch_time_last_us
+		                   ? (uint32_t)(now - d->ch_time_last_us)
+		                   : 0; /* first call: no previous mark */
+	d->ch_time_last_us = now;
+	return 0;
+}
+
 int mt7612u_link_stats(struct mt7612u_dev *d, struct mt7612u_link_stats *out)
 {
 	uint64_t now = stats_now_us();

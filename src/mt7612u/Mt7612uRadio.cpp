@@ -813,6 +813,31 @@ void Mt7612uRadio::WriteTsf(uint64_t tsf) {
     mt7612u_write_tsf(_dev, tsf);
 }
 
+/* Busy airtime from the MAC channel timers — the MediaTek half of the neutral
+ * IRadio::GetChannelBusy contract.
+ *
+ * NOT hardware-validated: no MT7612U was available when this was written. The
+ * register pair and its arming configuration match mt76's
+ * mt76x02_mac_cc_reset() exactly, and the C accessor it calls is the one this
+ * port already runs, but no arm-vs-quiet separation has been measured on air.
+ * GetAdapterCaps().busy_airtime_measured stays false until it has been. */
+devourer::ChannelBusy Mt7612uRadio::GetChannelBusy() {
+  uint32_t busy = 0, idle = 0, interval_us = 0;
+  {
+    /* The 1 Hz tick thread holds _mu inside mt7612u_phy_tick, which issues MCU
+     * commands; serialising here keeps register access single-file the way
+     * every other accessor on this class does. */
+    std::lock_guard<std::recursive_mutex> lock(_mu);
+    /* Refuses before bring-up: the timers are armed by
+     * mt7612u_link_stats_start() in StartRxLoop, and a read before that is a
+     * counter that was never enabled — indistinguishable from an idle channel
+     * if it were reported as one. */
+    if (!_dev || mt7612u_ch_time(_dev, &busy, &idle, &interval_us) != 0)
+      return {};
+  }
+  return devourer::busy_from_ch_time(busy, idle, interval_us);
+}
+
 devourer::TxStats Mt7612uRadio::GetTxStats() {
   devourer::TxStats out{};
 
@@ -1060,6 +1085,13 @@ devourer::AdapterCaps Mt7612uRadio::GetAdapterCaps() {
   c.ldpc_rx_vht = false;
   c.ldpc_rx_flag = true;     /* the RXWI carries the per-frame LDPC bit */
   c.per_chain_rssi = true;
+  /* Busy airtime from the MAC channel timers (MT_CH_BUSY / MT_CH_IDLE), via
+   * mt7612u_ch_time(). Implemented, NOT measured: no MT7612U was on the bench,
+   * so no arm-vs-quiet separation has been taken on air. There are no phydm
+   * counters here at all, so rx_energy_ok is structurally false. */
+  c.busy_airtime_ok = true;
+  c.busy_airtime_measured = false;
+  c.rx_energy_ok = false;
   c.hw_rx_timestamp = false; /* the RXWI TSF field is not parsed */
   /* The MAC inserts the live 64-bit TSF into the beacon it auto-transmits;
    * measured at 102400 us per beacon, exactly 100 TU (docs/mt7612u-ap-mode.md).

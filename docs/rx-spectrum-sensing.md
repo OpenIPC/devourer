@@ -118,6 +118,29 @@ noise-floor cluster subtracted (`src/NhmEnvMath.h`, ported from
 carrier, on an 8812CU — while `busy` sat at exactly 100 in every one of those
 arms, the quiet ones included. Compare arms on `env`.
 
+## The portable surface vs the Realtek one
+
+Two interfaces reach this data, and which one a consumer uses decides what
+hardware it runs on:
+
+| | `IRadio::GetChannelBusy()` | `IRtlRadio::GetRxEnergy()` |
+|---|---|---|
+| returns | `ChannelBusy` — busy airtime + energy-above-floor | `RxEnergy` — the phydm counter set |
+| available on | any backend with a hardware busy-airtime counter | Realtek only |
+| today | Jaguar1/2/3 (CCX CLM), MT7612U (MAC channel timers, **unvalidated**) | Jaguar1/2/3, Kestrel (floor only) |
+| not available | Kestrel, RTL8733B — both report *no reading*, never zero | RTL8733B, MT7612U |
+
+Advertised statically by `AdapterCaps::busy_airtime_ok` /
+`busy_airtime_measured` / `rx_energy_ok`. **Do not use a successful
+`dynamic_cast<IRtlRadio*>` as the discriminator** — it was never correct: the
+RTL8733B derives from `IRtlRadio` and implements no energy reader at all.
+
+`ChannelBusy` carries its own `source` (`Clm` or `ChTime`) because the two
+facilities define busy differently: the MediaTek timers count TX+RX+NAV+EIFS,
+so a transmitting radio includes its own airtime, while Realtek's CLM is
+receive-side deferral only. Ranking channels within one adapter is unaffected;
+ranking across a mixed pair means comparing two rulers.
+
 ## CLM and the non-802.11 emitter
 
 `rx.energy` also carries **`clm`**, the percent of the measurement window in

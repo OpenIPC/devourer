@@ -99,6 +99,7 @@ public:
   uint64_t ReadTsf() override;
   void WriteTsf(uint64_t tsf) override;
   devourer::TxStats GetTxStats() override;
+  devourer::ChannelBusy GetChannelBusy() override;
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
   bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) override;

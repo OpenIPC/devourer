@@ -3220,7 +3220,7 @@ static int gate_tsfwrite(uint8_t chan)
  *  1. Continuous: mt7612u_read_tsf_chk in a tight loop for the whole run. Any
  *     failed read or backwards step fails the gate, and every read within
  *     kTsfWrapWindowUs of the wrap must sit within kTsfWrapTolUs of the model.
- *  2. Forced: ~3 s before the predicted wrap, the mt7612u::tsf_read template
+ *  2. Forced: once the counter is within 3 s of the wrap, the mt7612u::tsf_read template
  *     the library compiles runs with a reader that sleeps to a schedule, so the
  *     wrap lands in the chosen gap of the read (gap 1: between the first high
  *     and the low read; gap 2: between the low and the second high). It must
@@ -3462,7 +3462,9 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 
 			if (k < 4) {
 				if (k == first_post) {
-					sleep_until_us(w + m1 / 2);
+					/* After the wrap, and before the forced read's own first
+					 * post-wrap access, with room for a slow transfer. */
+					sleep_until_us(w + m1 - 5000);
 					c_ok = c_ok && !mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &c_hi);
 				}
 				sleep_until_us(sched[k]);
@@ -3532,25 +3534,31 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 		       c_err);
 		return c_held ? 0 : 1;
 	}
+	/* Defensive: the forced read only runs on a fitted model, and the model
+	 * needs reads from inside the same 120 s window, so this cannot be 0 today.
+	 * It is the one thing a PASS silently rests on, so it is checked. */
 	if (checked == 0) {
 		printf("\nGATE TSF-WRAP: FAIL - no continuous read was checked near the wrap\n");
 		return 1;
 	}
-	if (!f_retried) {
-		/* The read is coherent (checked above); the wrap just did not land in
-		 * the gap, which transfer jitter can do. Not a defect - re-run. */
-		printf("\nGATE TSF-WRAP: INCONCLUSIVE - the forced read holds but took no retry; the wrap missed gap %d. Re-run.\n",
-		       gap);
-		return 2;
-	}
 	/* The control reads the low word before the wrap and the high word after,
 	 * so a torn value is one whole high-word step ABOVE the truth. The sign
 	 * matters: a read that is systematically 2^32 low would also fail on
-	 * magnitude alone, and the model would have absorbed it. */
+	 * magnitude alone, and the model would have absorbed it. Checked before the
+	 * retry verdict, so a run that misses the gap still reports whether the rig
+	 * can see a tear at all. */
 	if (c_err < 2147483648.0 || c_err > 6442450944.0) {
 		printf("\nGATE TSF-WRAP: FAIL - the control is %+.0f us off, not the +2^32 us a torn read gives; the rig cannot see a tear\n",
 		       c_err);
 		return 1;
+	}
+	if (!f_retried) {
+		/* The read holds against the model (checked above) and the control did
+		 * tear, so the wrap simply did not land in the gap - transfer jitter
+		 * can do that. Not a defect: re-run. */
+		printf("\nGATE TSF-WRAP: INCONCLUSIVE - the forced read holds and the control tore, but the read took no retry; the wrap missed gap %d. Re-run.\n",
+		       gap);
+		return 2;
 	}
 	printf("\nGATE TSF-WRAP: PASS - retried across the wrap in gap %d, %+.0f us off the model; control tore by %+.0f us\n",
 	       gap, f_err, c_err);

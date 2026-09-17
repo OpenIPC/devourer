@@ -1112,8 +1112,11 @@ devourer::AdapterCaps Mt7612uRadio::GetAdapterCaps() {
    * describes sat three hundred lines above. */
   c.hw_beacon_txtsf = true;
   /* No TSF load path: every write sequence the bringup `tsfwrite` gate tries
-   * is ignored (docs/mt7612u.md), so WriteTsf stays on the IRadio default. */
-  c.tsf_write_ok = false;
+   * is ignored (docs/mt7612u.md), so WriteTsf stays on the IRadio default.
+   * Taken from the C caps rather than restated, so the two cannot drift; the
+   * C library owns the fact (mt7612u_get_caps), and `hw` is zeroed when there
+   * is no device, which is the same answer. */
+  c.tsf_write_ok = hw.tsf_write;
   /* Measured on air: 0 frames at the stimulus radio unarmed, 3500+ armed. */
   c.ack_responder_ok = true;
   /* Unmeasured, so false rather than optimistic - nothing here drives the

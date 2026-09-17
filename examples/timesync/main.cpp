@@ -165,8 +165,14 @@ static void run_master(IRadio* dev, const timesync::Config& c) {
     try {
       tsf = dev->ReadTsf();
     } catch (const std::exception &e) {
+      static bool warned = false;
       stamped = false;
-      fprintf(stderr, "timesync master: TSF read failed (%s), marker skipped\n", e.what());
+      if (!warned) {
+        warned = true;
+        fprintf(stderr, "timesync master: TSF read failed (%s), marker skipped "
+                        "(said once; markers keep being skipped while it fails)\n",
+                e.what());
+      }
     }
     if (stamped) {
       auto f = tdma::build_frame(rt, tdma::Class::Marker, seq++, 0, tsf);

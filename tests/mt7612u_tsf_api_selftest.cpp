@@ -11,8 +11,9 @@
  *
  * A NULL device is the only failure this can reach without hardware, so that
  * is what it pins. What it does NOT cover: a failed transfer on a live device,
- * and Mt7612uRadio::ReadTsf throwing. Those need the part - the
- * `bringup tsfwrap` gate and the bus-disconnect run in docs/mt7612u.md. */
+ * Mt7612uRadio::ReadTsf throwing, and the caps bit (filling it needs a device).
+ * Those need the part - the `bringup tsfwrap` and `caps` gates, and the
+ * bus-disconnect run in docs/mt7612u.md. */
 #include "mt7612u/mt7612u.h"
 
 #include <cstdint>
@@ -44,16 +45,11 @@ int main() {
   /* The no-error-channel form answers 0, never a value built from a failure. */
   expect("read_tsf(NULL) is 0", mt7612u_read_tsf(nullptr) == 0);
 
-  /* The caps bit says this part has no TSF load path, so a C caller need not
-   * discover it from a missing symbol. */
-  {
-    struct mt7612u_caps c;
-
-    /* No device to fill it: the field must exist and be addressable, which is
-     * what the C ABI half of this is. */
-    c.tsf_write = 0;
-    expect("caps carry tsf_write", c.tsf_write == 0);
-  }
+  /* The caps bit (struct mt7612u_caps::tsf_write) is NOT checked here: filling
+   * it needs mt7612u_get_caps on a live device, and asserting on a field this
+   * cell set itself would hold nothing. Mt7612uRadio::GetAdapterCaps takes
+   * tsf_write_ok from it rather than restating it, so the two cannot drift,
+   * and `bringup caps` prints it from the part. */
 
   if (fails == 0)
     std::printf("mt7612u_tsf_api: PASS\n");

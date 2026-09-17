@@ -130,14 +130,25 @@ static void run_tx(IRadio* dev, const tdma::Config& c) {
       // A failed read throws (IRadio contract): skip this burst's marker
       // rather than hand the drift fit a wrong stamp, and leave the burst
       // unmarked so the next pass through it tries again.
+      uint64_t tx_tsf = 0;
+      bool stamped = true;
       try {
-        uint64_t tx_tsf = dev->ReadTsf();
+        tx_tsf = dev->ReadTsf();
+      } catch (const std::exception &e) {
+        static bool warned = false;
+        stamped = false;
+        if (!warned) {
+          warned = true;
+          fprintf(stderr, "tdma: TSF read failed (%s), marker skipped "
+                          "(said once; markers keep being skipped while it fails)\n",
+                  e.what());
+        }
+      }
+      if (stamped) {
         auto f = tdma::build_frame(rt_marker, tdma::Class::Marker, seq[0]++,
                                    (uint32_t)a.burst, tx_tsf);
         dev->send_packet(f.data(), f.size());
         last_marker_burst = a.burst;
-      } catch (const std::exception &e) {
-        fprintf(stderr, "tdma: TSF read failed (%s), marker skipped\n", e.what());
       }
     }
     tdma::Class cls =

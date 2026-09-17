@@ -2928,26 +2928,12 @@ static bool tsf_live(int64_t delta)
 	return delta > kTsfLiveMinUs && delta < kTsfLiveMaxUs;
 }
 
-/* A checked TSF read: DW1, DW0, DW1 again with one retry if the low word
- * wrapped in between, every word through mt_rr_chk. mt7612u_read_tsf() goes
- * through mt_rr, which reports a failed transfer as all-ones - two of those
- * read as a stopped clock, and a flaky cable would be reported as a dead
- * timer. False means a transfer failed and *out is not a TSF. */
+/* The library's checked, wrap-safe TSF read. A failed transfer must stay
+ * distinguishable from a stopped clock here, or a flaky cable is reported as
+ * a dead timer. False means a transfer failed and *out is not a TSF. */
 static bool tsf_read_chk(uint64_t *out)
 {
-	uint32_t hi, lo, hi2;
-
-	if (mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &hi) ||
-	    mt_rr_chk(&dev, MT_TSF_TIMER_DW0, &lo) ||
-	    mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &hi2))
-		return false;
-	if (hi2 != hi) {
-		hi = hi2;
-		if (mt_rr_chk(&dev, MT_TSF_TIMER_DW0, &lo))
-			return false;
-	}
-	*out = ((uint64_t)hi << 32) | lo;
-	return true;
+	return mt7612u_read_tsf_chk(&dev, out) == 0;
 }
 
 /* A fresh base for one arm, clear of a low-word wrap. Each arm judges a take

@@ -1028,14 +1028,15 @@ void HalJaguar3::apply_bb_rf_agc_tables(InitTimer *timer) {
         return;
       default:
         /* Plain 20-bit write, not the vendor's read-modify-write under
-         * MASK20BITS: the direct window's bits [31:20] read back 0 for every
-         * word of both path windows after a bring-up, on an 8812EU (cold
-         * and warm) and on an 8812CU (tests/j3_rf_window_readback.sh), so
-         * an RMW that reads 0 writes exactly `data` and preserving those
-         * bits is a no-op that cost a synchronous read per entry -- about
-         * half the RF table stage (~80 ms on the one 8812EU + ssc338q host
-         * measured; the x86 bench figures are in src/jaguar3/CLAUDE.md).
-         * Write-only also pipelines (ITransport::write_batch_begin). */
+         * MASK20BITS: the direct window's bits [31:20] are not storage --
+         * every one of the 512 window words (both paths) poked with those
+         * bits set reads back 0, on one 8812CU and one 8812EU
+         * (tests/j3_rf_window_readback.sh) -- so an RMW there writes
+         * exactly `data`, and preserving those bits was a no-op that cost a
+         * synchronous read per entry: about half the RF table stage (~80 ms
+         * on the one 8812EU + ssc338q host measured; x86 bench figures in
+         * src/jaguar3/CLAUDE.md). Write-only also pipelines
+         * (ITransport::write_batch_begin). */
         _device.rtw_write32(static_cast<uint16_t>(base + ((addr & 0xff) << 2)),
                             data & RFREG_MASK);
       }

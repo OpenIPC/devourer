@@ -63,10 +63,12 @@ Jaguar3 uses it:
   wall-clock figure is one unit, one host.
 
 The RF radio-table load is write-only: bits [31:20] of the direct window
-(`0x3c00`/`0x4c00 + addr*4`) read back 0 for every table entry, so the
-vendor's `MASK20BITS` read-modify-write preserved nothing at the price of a
-synchronous read per entry. Measured on one 8812EU (cold and warm) and one
-8812CU (`tests/j3_rf_window_readback.sh`).
+(`0x3c00`/`0x4c00 + addr*4`) are not storage, so the vendor's `MASK20BITS`
+read-modify-write preserved nothing at the price of a synchronous read per
+entry. Scope of that claim (`tests/j3_rf_window_readback.sh`): every one of
+the 512 window words (both paths) poked with the high 12 bits set read back
+0, on one 8812CU and one 8812EU; the post-bring-up histogram (all 512 words
+0) is only a control, since the write-only load itself clears those bits.
 
 ## TX power
 

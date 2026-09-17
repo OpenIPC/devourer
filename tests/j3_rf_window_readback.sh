@@ -10,7 +10,7 @@
 #   1. histogram: dump both path windows after a bring-up and histogram the
 #      high 12 bits of every word (expected all 0). On its own this proves
 #      little, because the write-only load itself clears those bits.
-#   2. write-back: for a sample of words in each window, poke the word with
+#   2. write-back: for every word in each window (SAMPLE=N narrows it), poke the word with
 #      its high 12 bits SET (low 20 bits unchanged, so the RF register keeps
 #      its value), read it back, then restore. If the bits are storage they
 #      read back set and the RMW was preserving real state; if they read back
@@ -28,7 +28,7 @@ PID=${1:?usage: $0 <pid-hex>}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 CS=$ROOT/build/chipstate
 OUT=${OUT:-/tmp/j3_rf_window_readback}; mkdir -p "$OUT"
-SAMPLE=${SAMPLE:-8}   # words sampled per path window for the write-back leg
+SAMPLE=${SAMPLE:-256} # words per path window for the write-back leg (256 = the whole window)
 dump=$OUT/pid${PID}.peek
 "$CS" --pid "$PID" --init --peek 0x3c00-0x3fff:4 --peek 0x4c00-0x4fff:4 \
   >"$dump" 2>"$dump.err" || { echo "FAIL: chipstate exited non-zero (leg 1)"; tail -5 "$dump.err"; exit 1; }

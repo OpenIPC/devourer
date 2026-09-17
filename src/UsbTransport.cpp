@@ -562,6 +562,10 @@ bool UsbTransport::async_wait_progress() {
 bool UsbTransport::pump_once(int ms) {
   struct timeval tv {0, ms * 1000};
   const int rc = libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
+  /* A signal landing in the wait is a wake-up, not a broken loop; the
+   * caller's elapsed-time deadline still bounds it. */
+  if (rc == LIBUSB_ERROR_INTERRUPTED)
+    return true;
   if (rc < 0) {
     _logger->error("USB: event loop error {} while draining pipelined writes",
                    rc);

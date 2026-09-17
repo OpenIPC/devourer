@@ -149,6 +149,11 @@ private:
      * caller directly (false / throw) and is NOT counted here — a read
      * glitch that the caller retries and recovers must not fail the batch. */
     std::atomic<int> write_errors{0};
+    /* Bumped by every write_batch_begin; a slot carries the generation it
+     * was submitted under, and a completion from an older generation (a
+     * slot retired by a drain that finishes late) never touches the current
+     * batch's verdict — it was already counted when it was retired. */
+    std::atomic<uint64_t> generation{0};
   };
   struct AsyncWrite {
     libusb_transfer *t;
@@ -164,6 +169,7 @@ private:
      * as the destructor's "safe to free" signal — this is. */
     std::atomic<bool> cb_busy{false};
     bool is_read = false; /* set before submit; decides which failure it is */
+    uint64_t gen = 0;     /* batch generation the slot was submitted under */
     int status = -1;
     int actual = 0;
   };

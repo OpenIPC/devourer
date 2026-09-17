@@ -404,6 +404,7 @@ void UsbTransport::write_batch_begin() {
    * the same problem whichever path the write took. */
   _batch_open = true;
   _aw->write_errors = 0;
+  _aw->generation++;
   /* A session that already failed to reap its transfers has a short pool and
    * a suspect event loop; stay synchronous rather than pipeline into it. */
   if (_aw_abandoned)
@@ -475,9 +476,10 @@ void LIBUSB_CALL UsbTransport::async_write_cb(libusb_transfer *t) {
    * anything else, so the buffer is intact when it does. */
   w->status = t->status;
   w->actual = t->actual_length;
-  if (!w->is_read && (t->status != LIBUSB_TRANSFER_COMPLETED ||
-                      t->actual_length != t->length - LIBUSB_CONTROL_SETUP_SIZE))
-    pool->write_errors++;
+  if (!w->is_read && w->gen == pool->generation &&
+      (t->status != LIBUSB_TRANSFER_COMPLETED ||
+       t->actual_length != t->length - LIBUSB_CONTROL_SETUP_SIZE))
+    pool->write_errors++; /* a stale generation was counted when retired */
   w->inflight = false;
   w->done = true;
   pool->inflight--;
@@ -671,6 +673,7 @@ bool UsbTransport::async_write(uint16_t wvalue, uint16_t windex,
  * on another thread's event pump the moment libusb has it — and rolls the
  * accounting back if libusb refuses the transfer. */
 bool UsbTransport::async_submit(AsyncWrite *w) {
+  w->gen = _aw->generation;
   w->inflight = true;
   _aw->inflight++;
   const int rc = libusb_submit_transfer(w->t);

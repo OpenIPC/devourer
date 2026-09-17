@@ -51,14 +51,15 @@ public:
     /* Realtek USB register addressing: wValue = addr[15:0], wIndex =
      * addr[31:16]. Lets the BB/RF window (addr + 0x10000) reach wIndex=1
      * instead of colliding with the MAC/system space at wIndex=0. */
-    _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
     /* A pipelined write that cannot be submitted (no usable slot, submit
      * rejected) falls through to the synchronous transfer below: EP0 keeps
      * submission order, so it lands behind whatever is still queued and no
-     * register write is silently dropped. */
+     * register write is silently dropped. Transfers are counted where they
+     * are issued (async_submit / here), so a fallback counts as its own. */
     if (_batch && async_write(static_cast<uint16_t>(addr & 0xFFFF),
                               static_cast<uint16_t>(addr >> 16), &v, sizeof(v)))
       return true;
+    _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
     const bool ok =
         libusb_control_transfer(
                _dev_handle, REALTEK_USB_VENQT_WRITE, 5,
@@ -73,7 +74,6 @@ public:
   }
   uint32_t read32_wide(uint32_t addr) override {
     uint32_t data = 0;
-    _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
     if (_batch) {
       if (async_read(static_cast<uint16_t>(addr & 0xFFFF),
                      static_cast<uint16_t>(addr >> 16), &data, sizeof(data)))
@@ -86,6 +86,7 @@ public:
       _logger->error("USB: pipelined read32_wide(0x{:05x}) failed; reading "
                      "synchronously", addr);
     }
+    _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
     if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5,
                                 static_cast<uint16_t>(addr & 0xFFFF),
                                 static_cast<uint16_t>(addr >> 16),
@@ -266,7 +267,6 @@ private:
 
 template <typename T> T UsbTransport::ctrl_read(uint16_t reg_num) {
   T data = 0;
-  _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
   if (_batch) {
     if (async_read(reg_num, 0, &data, sizeof(T)))
       return data;
@@ -275,6 +275,7 @@ template <typename T> T UsbTransport::ctrl_read(uint16_t reg_num) {
     _logger->error("rtw_read({:04x}) pipelined failed; reading synchronously",
                    reg_num);
   }
+  _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
   if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5, reg_num,
                               0, (uint8_t *)&data, sizeof(T),
                               USB_TIMEOUT) == sizeof(T)) {
@@ -286,10 +287,10 @@ template <typename T> T UsbTransport::ctrl_read(uint16_t reg_num) {
 }
 
 template <typename T> bool UsbTransport::ctrl_write(uint16_t reg_num, T value) {
-  _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
   /* Unsubmittable pipelined write -> synchronous, in order (see write32_wide). */
   if (_batch && async_write(reg_num, 0, &value, sizeof(T)))
     return true;
+  _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
   const bool ok =
       libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_WRITE, 5, reg_num,
                               0, (uint8_t *)&value, sizeof(T),

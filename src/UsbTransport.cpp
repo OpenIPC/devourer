@@ -662,8 +662,10 @@ bool UsbTransport::async_submit(AsyncWrite *w) {
   w->inflight = true;
   _aw->inflight++;
   const int rc = libusb_submit_transfer(w->t);
-  if (rc == 0)
+  if (rc == 0) {
+    _ctrl_xfers.fetch_add(1, std::memory_order_relaxed); /* issued */
     return true;
+  }
   _aw->inflight--;
   w->inflight = false;
   /* Not a batch write error yet: the caller retries a refused write

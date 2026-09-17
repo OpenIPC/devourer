@@ -781,7 +781,12 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     }
   } brought_up_guard{_brought_up};
   _brought_up = false;
-  InitTimer timer(_logger, "j3init", [this] { return _device.ctrl_xfers(); },
+  /* The transfer counter is a USB notion (xfers is emitted only when a
+   * counter is attached); a PCIe transport gets none, and its timer omits
+   * the field instead of reporting 0. */
+  InitTimer timer(_logger, "j3init",
+                  _device.is_usb() ? InitTimer::XferCounter{[this] { return _device.ctrl_xfers(); }}
+                                   : InitTimer::XferCounter{},
                   [this] { _device.flush_writes(); });
   WriteBatchScope batch(_device);
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */

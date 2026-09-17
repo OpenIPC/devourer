@@ -93,7 +93,12 @@ void HalJaguar3::run_iqk(SelectedChannel channel) {
  * Every step is ported from vendor source. */
 void HalJaguar3::rtw_hal_init(SelectedChannel channel) {
   ChannelWidth_t bw = channel.ChannelWidth;
-  InitTimer timer(_logger, "j3hal", [this] { return _device.ctrl_xfers(); },
+  /* The transfer counter is a USB notion (xfers is emitted only when a
+   * counter is attached); a PCIe transport gets none, and its timer omits
+   * the field instead of reporting 0. */
+  InitTimer timer(_logger, "j3hal",
+                  _device.is_usb() ? InitTimer::XferCounter{[this] { return _device.ctrl_xfers(); }}
+                                   : InitTimer::XferCounter{},
                   [this] { _device.flush_writes(); });
 
   _macinit.pre_init_system_cfg();

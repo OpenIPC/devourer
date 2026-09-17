@@ -4,6 +4,7 @@
  * stage is independently runnable on hardware.
  */
 #include <atomic>
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3237,6 +3238,9 @@ static int gate_tsfwrite(uint8_t chan)
  * as the "wrap" (16.7 s at 24). That checks the schedule and the model in
  * seconds but cannot tear a read, so it reports SMOKE, never PASS. */
 static const int64_t kTsfWrapTolUs = 5000;
+/* A gone device fails every read at loop speed; stop rather than spin for the
+ * rest of the run (an interrupted run reached 192 million failed reads). */
+static const uint64_t kTsfWrapMaxConsecFails = 100;
 static const int64_t kTsfWrapWindowUs = 120000000;
 static const int kTsfWrapModelPts = 600;
 
@@ -3254,7 +3258,9 @@ static void sleep_until_us(int64_t at)
 
 	t.tv_sec = at / 1000000;
 	t.tv_nsec = (long)(at % 1000000) * 1000;
-	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL) != 0 && !g_stop)
+	/* clock_nanosleep returns the error number itself; only an interrupt is
+	 * worth resuming, and never past a stop request. */
+	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL) == EINTR && !g_stop)
 		;
 }
 
@@ -3323,6 +3329,8 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 	int64_t deadline = t_start + (int64_t)(max_min * 60e6);
 	int64_t last_pt = 0, last_status = 0, wrap_host = 0;
 	uint64_t prev = 0, reads = 0, fails = 0, backwards = 0, checked = 0, off_model = 0;
+	uint64_t consec_fails = 0;
+	bool gone = false;
 	double worst = 0;
 	bool have = false, forced = false, f_retried = false, f_held = false, c_held = false;
 	int f_rc = -1;
@@ -3349,8 +3357,13 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 		if (mt7612u_read_tsf_chk(&dev, &v)) {
 			fails++;
 			have = false;
+			if (++consec_fails >= kTsfWrapMaxConsecFails) {
+				gone = true;
+				break;
+			}
 			continue;
 		}
+		consec_fails = 0;
 		const int64_t h1 = mono_us();
 		const double hm = (h0 + h1) / 2.0;
 
@@ -3463,6 +3476,11 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 	       (unsigned long long)backwards, (unsigned long long)checked,
 	       (unsigned long long)off_model, worst);
 
+	if (gone) {
+		printf("\nGATE TSF-WRAP: FAIL - %llu reads in a row failed; the adapter is gone\n",
+		       (unsigned long long)consec_fails);
+		return 1;
+	}
 	if (fails || backwards || off_model) {
 		printf("\nGATE TSF-WRAP: FAIL - %llu failed read(s), %llu backwards step(s), %llu read(s) off the model\n",
 		       (unsigned long long)fails, (unsigned long long)backwards,

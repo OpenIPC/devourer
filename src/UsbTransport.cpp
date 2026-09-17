@@ -402,6 +402,7 @@ void UsbTransport::write_batch_begin() {
       slots.push_back(w);
     }
     _aw_all = slots;
+    std::lock_guard<std::mutex> lk(_aw->mu);
     _aw->free = slots;
   }
   _aw->errors = 0;
@@ -410,9 +411,9 @@ void UsbTransport::write_batch_begin() {
 
 void UsbTransport::write_batch_end() {
   flush_writes();
-  if (_batch && _aw->errors)
+  if (_batch && _aw->errors.load())
     _logger->error("USB: {} pipelined register write(s) failed in this batch",
-                   _aw->errors);
+                   _aw->errors.load());
   _batch = false;
 }
 
@@ -421,10 +422,6 @@ void LIBUSB_CALL UsbTransport::async_write_cb(libusb_transfer *t) {
   /* Only the shared pool is touched here — never the transport, which a
    * leaked slot can outlive (AsyncPool). */
   AsyncPool &pool = *w->pool;
-  pool.inflight--;
-  pool.completed++;
-  w->inflight = false;
-  w->done = true;
   w->status = t->status;
   w->actual = t->actual_length;
   if (t->status != LIBUSB_TRANSFER_COMPLETED ||
@@ -432,23 +429,40 @@ void LIBUSB_CALL UsbTransport::async_write_cb(libusb_transfer *t) {
     pool.errors++;
   /* The slot goes back on the free list here; a reader that is waiting on
    * this very slot copies its data out before it submits anything else
-   * (single-threaded by contract), so the buffer is still intact. */
-  pool.free.push_back(w);
+   * (single-threaded by contract), so the buffer is still intact. `done`
+   * is published last, after status/actual, so a waiter that sees it sees
+   * the result too. */
+  {
+    std::lock_guard<std::mutex> lk(pool.mu);
+    pool.free.push_back(w);
+  }
+  w->inflight = false;
+  pool.inflight--;
+  w->done = true;
+  pool.completed++;
 }
 
 UsbTransport::AsyncWrite *UsbTransport::async_take_slot() {
-  while (_aw->free.empty()) {
+  auto take = [this]() -> AsyncWrite * {
+    std::lock_guard<std::mutex> lk(_aw->mu);
+    if (_aw->free.empty())
+      return nullptr;
+    AsyncWrite *w = _aw->free.back();
+    _aw->free.pop_back();
+    return w;
+  };
+  AsyncWrite *w = take();
+  while (!w) {
     if (!async_wait_progress()) {
       flush_writes(); /* recovers the pool on a stuck queue */
       /* A recovery that retired slots closed the batch: hand out nothing,
        * even if some cancellations did return a slot, so the caller takes
        * the synchronous path instead of queueing behind the stuck ones. */
-      if (_aw_abandoned || !_batch || _aw->free.empty())
+      if (_aw_abandoned || !_batch)
         return nullptr;
     }
+    w = take();
   }
-  AsyncWrite *w = _aw->free.back();
-  _aw->free.pop_back();
   w->done = false;
   w->inflight = false;
   w->status = -1;
@@ -467,15 +481,10 @@ bool UsbTransport::async_read(uint16_t wvalue, uint16_t windex, void *data,
                             static_cast<uint16_t>(n));
   libusb_fill_control_transfer(w->t, _dev_handle, w->buf, async_write_cb, w,
                                USB_TIMEOUT);
-  const int rc = libusb_submit_transfer(w->t);
-  if (rc != 0) {
-    _aw->free.push_back(w);
-    _aw->errors++;
-    _logger->error("USB: pipelined read submit failed ({})", rc);
+  if (!async_submit(w)) {
+    _logger->error("USB: pipelined read submit failed");
     return false;
   }
-  w->inflight = true;
-  _aw->inflight++;
   while (!w->done) {
     if (!async_wait_progress()) {
       flush_writes(); /* cancels + recovers; w->done is set by the cancel */
@@ -519,7 +528,7 @@ void UsbTransport::flush_writes() {
      * Cancel what is still submitted so the caller's next synchronous
      * transfer is not queued behind it. */
     _logger->error("USB: pipelined write drain timed out ({} in flight)",
-                   _aw->inflight);
+                   _aw->inflight.load());
     for (auto *w : _aw_all)
       if (w->inflight)
         libusb_cancel_transfer(w->t);
@@ -544,7 +553,7 @@ void UsbTransport::flush_writes() {
       _batch = false;
       _logger->error("USB: {} pipelined transfer(s) could not be reaped; "
                      "their slots are retired for this session",
-                     _aw->inflight);
+                     _aw->inflight.load());
     }
     return;
   }
@@ -562,16 +571,31 @@ bool UsbTransport::async_write(uint16_t wvalue, uint16_t windex,
   std::memcpy(w->buf + LIBUSB_CONTROL_SETUP_SIZE, data, n);
   libusb_fill_control_transfer(w->t, _dev_handle, w->buf, async_write_cb, w,
                                USB_TIMEOUT);
-  const int rc = libusb_submit_transfer(w->t);
-  if (rc != 0) {
-    _aw->free.push_back(w);
-    _aw->errors++;
-    _logger->error("USB: pipelined write submit failed ({})", rc);
+  if (!async_submit(w)) {
+    _logger->error("USB: pipelined write submit failed");
     return false;
   }
+  return true;
+}
+
+/* Accounts the slot as in flight BEFORE submitting it — the callback may run
+ * on another thread's event pump the moment libusb has it — and rolls the
+ * accounting back if libusb refuses the transfer. */
+bool UsbTransport::async_submit(AsyncWrite *w) {
   w->inflight = true;
   _aw->inflight++;
-  return true;
+  const int rc = libusb_submit_transfer(w->t);
+  if (rc == 0)
+    return true;
+  _aw->inflight--;
+  w->inflight = false;
+  _aw->errors++;
+  {
+    std::lock_guard<std::mutex> lk(_aw->mu);
+    _aw->free.push_back(w);
+  }
+  _logger->error("USB: libusb_submit_transfer rc={}", rc);
+  return false;
 }
 
 bool UsbTransport::write_bytes(uint16_t reg_num, const uint8_t *ptr, size_t n) {

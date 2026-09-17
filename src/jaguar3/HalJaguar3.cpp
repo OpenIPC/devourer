@@ -602,6 +602,7 @@ uint8_t HalJaguar3::efuse_phys_read_8822e(uint16_t addr) {
   uint32_t v = _device.rtw_read32(EFC);
   v = (v & ~(kAddr | kData | kRdy)) | ((static_cast<uint32_t>(addr) & 0x7ff) << 16);
   _device.rtw_write32(EFC, v);
+  _device.flush_writes(); /* the 50 µs settle counts from the trigger landing */
   for (int i = 0; i < 1000; ++i) {
     std::this_thread::sleep_for(std::chrono::microseconds(50));
     uint32_t t = _device.rtw_read32(EFC);

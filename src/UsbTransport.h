@@ -122,22 +122,31 @@ private:
    * this block, which the leaked slot keeps alive, instead of a freed
    * UsbTransport. */
   struct AsyncWrite;
+  /* The submitter and the completion callback are normally the same thread
+   * (this transport pumps its own events while it waits), but a second
+   * adapter sharing the libusb context can pump it from another thread and
+   * run the callback there, right after libusb_submit_transfer returns. So
+   * the counters are atomic, the free list is under a mutex, and a slot is
+   * marked in flight BEFORE it is submitted (rolled back if the submit is
+   * refused) — the callback never sees a completed slot that the submitter
+   * has not yet accounted for. */
   struct AsyncPool {
+    std::mutex mu; /* guards `free` */
     std::vector<AsyncWrite *> free;
-    int inflight = 0;
-    uint64_t completed = 0;
-    int errors = 0;
+    std::atomic<int> inflight{0};
+    std::atomic<uint64_t> completed{0};
+    std::atomic<int> errors{0};
   };
   struct AsyncWrite {
     libusb_transfer *t;
     uint8_t buf[LIBUSB_CONTROL_SETUP_SIZE + kAsyncMaxPayload];
     std::shared_ptr<AsyncPool> pool;
-    bool done;
+    std::atomic<bool> done{false};
     /* Submitted and not yet reaped: libusb owns `t` and `buf` while set, so
      * the slot must not be reused, freed, or handed back to the free list. */
-    bool inflight;
-    int status;
-    int actual;
+    std::atomic<bool> inflight{false};
+    int status = -1;
+    int actual = 0;
   };
   static constexpr int kAsyncWriteDepth = 8;
   /* Extra event-loop turns spent reaping cancellations after a drain times
@@ -151,6 +160,7 @@ private:
    * Returns false on failure (data untouched). */
   bool async_read(uint16_t wvalue, uint16_t windex, void *data, size_t n);
   AsyncWrite *async_take_slot();
+  bool async_submit(AsyncWrite *w); /* in-flight accounting before submit */
   bool async_wait_progress(); /* one event-loop turn; false on timeout/error */
   static void LIBUSB_CALL async_write_cb(libusb_transfer *t);
   bool _batch = false;

@@ -810,6 +810,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
         }
         _logger->error("CW tone arm: USB glitch ({}) — retry {}/3", ex.what(),
                        attempt);
+        _device.flush_writes(); /* settle from a drained queue before retrying */
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
       }
     }

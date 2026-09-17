@@ -42,10 +42,17 @@ public:
     _x_last = x;
   }
 
+  /* Reports the total once. An early return or a throw out of the timed
+   * scope still gets its total from the destructor, so a failed bring-up
+   * carries its cost too; a scope that called total() emits exactly one. */
   void total() {
+    if (_finalized)
+      return;
+    _finalized = true;
     emit("total", ms(_start, clock::now()),
          static_cast<long long>(count() - _x_start));
   }
+  ~InitTimer() { total(); }
 
 private:
   uint64_t count() const { return _xfers ? _xfers() : 0; }
@@ -71,6 +78,7 @@ private:
   clock::time_point _last;
   uint64_t _x_start;
   uint64_t _x_last;
+  bool _finalized = false;
 };
 
 #endif /* INIT_TIMER_H */

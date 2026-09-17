@@ -394,7 +394,7 @@ UsbTransport::~UsbTransport() {
  * followed by a read behaves exactly like the synchronous sequence; the win
  * is that the host does not sit through a full URB round trip per write. */
 void UsbTransport::write_batch_begin() {
-  if (_batch)
+  if (_batch_open)
     return;
   /* A session that already failed to reap its transfers has a short pool and
    * a suspect event loop; stay synchronous rather than pipeline into it. */
@@ -427,20 +427,24 @@ void UsbTransport::write_batch_begin() {
   }
   _aw->write_errors = 0;
   _batch = true;
+  _batch_open = true;
 }
 
 bool UsbTransport::write_batch_end() {
-  if (!_batch)
+  if (!_batch_open)
     return true;
   flush_writes();
   /* Failed and short completions are only known here, after the fact: a
-   * write reported true at submission. The count covers submit refusals,
-   * completion failures and retired slots alike. */
+   * write reported true at submission. The count covers failed/short
+   * write completions, failed synchronous fallbacks and retired slots —
+   * kept even when a drain already disabled pipelining (`_batch`), which is
+   * exactly the case with the most to report. */
   const int errors = _aw->write_errors.load();
   if (errors)
     _logger->error("USB: {} pipelined register write(s) failed in this batch",
                    errors);
   _batch = false;
+  _batch_open = false;
   return errors == 0;
 }
 
@@ -603,7 +607,8 @@ void UsbTransport::flush_writes() {
        * here on. */
       _aw->write_errors += _aw->inflight; /* reads among them fail their callers too */
       _aw_abandoned = true;
-      _batch = false;
+      _batch = false; /* pipelining off; the caller's batch stays open so
+                       * write_batch_end still returns this verdict */
       _logger->error("USB: {} pipelined transfer(s) could not be reaped; "
                      "their slots are retired for this session",
                      _aw->inflight.load());
@@ -643,8 +648,8 @@ bool UsbTransport::async_submit(AsyncWrite *w) {
     return true;
   _aw->inflight--;
   w->inflight = false;
-  if (!w->is_read)
-    _aw->write_errors++;
+  /* Not a batch write error yet: the caller retries a refused write
+   * synchronously and counts it only if that fails too. */
   {
     std::lock_guard<std::mutex> lk(_aw->mu);
     _aw->free.push_back(w);

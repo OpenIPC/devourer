@@ -59,11 +59,17 @@ public:
     if (_batch && async_write(static_cast<uint16_t>(addr & 0xFFFF),
                               static_cast<uint16_t>(addr >> 16), &v, sizeof(v)))
       return true;
-    return libusb_control_transfer(
+    const bool ok =
+        libusb_control_transfer(
                _dev_handle, REALTEK_USB_VENQT_WRITE, 5,
                static_cast<uint16_t>(addr & 0xFFFF),
                static_cast<uint16_t>(addr >> 16), (uint8_t *)&v, sizeof(v),
                USB_TIMEOUT) == static_cast<int>(sizeof(v));
+    /* Only a fallback that ALSO failed is a batch write error; a refused
+     * async submit that the synchronous path completed is not. */
+    if (!ok && _batch_open)
+      _aw->write_errors++;
+    return ok;
   }
   uint32_t read32_wide(uint32_t addr) override {
     uint32_t data = 0;
@@ -170,7 +176,12 @@ private:
   bool async_wait_progress(); /* pump until this pool progresses; false on a 2 s deadline/error */
   bool pump_once(int ms);      /* one bounded handle_events turn; false on error */
   static void LIBUSB_CALL async_write_cb(libusb_transfer *t);
+  /* `_batch`: pipelined submission is enabled right now. `_batch_open`: the
+   * caller's batch is open. They part when a drain retires slots — that
+   * disables pipelining at once but must keep the batch's verdict (its
+   * write errors) for write_batch_end to return. */
   bool _batch = false;
+  bool _batch_open = false;
   std::shared_ptr<AsyncPool> _aw = std::make_shared<AsyncPool>();
   std::vector<AsyncWrite *> _aw_all;
   /* Set when a drain gave up with transfers still submitted: the destructor
@@ -275,9 +286,13 @@ template <typename T> bool UsbTransport::ctrl_write(uint16_t reg_num, T value) {
   /* Unsubmittable pipelined write -> synchronous, in order (see write32_wide). */
   if (_batch && async_write(reg_num, 0, &value, sizeof(T)))
     return true;
-  return libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_WRITE, 5,
-                                 reg_num, 0, (uint8_t *)&value, sizeof(T),
-                                 USB_TIMEOUT) == sizeof(T);
+  const bool ok =
+      libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_WRITE, 5, reg_num,
+                              0, (uint8_t *)&value, sizeof(T),
+                              USB_TIMEOUT) == sizeof(T);
+  if (!ok && _batch_open)
+    _aw->write_errors++; /* the fallback failed too (see write32_wide) */
+  return ok;
 }
 
 } /* namespace devourer */

@@ -828,6 +828,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     if (!batch.end())
       throw std::runtime_error(
           "Jaguar3: pipelined register write(s) failed during CW-tone arm");
+    brought_up_guard.committed = true;
     _logger->info("Jaguar3: CW tone hold (minimal bring-up, no coex thread)");
     return;
   }
@@ -840,6 +841,17 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * intermediate bring-up steps on sane references. */
   apply_tx_power_current(/*full=*/true);
   timer.stage("txpower_pre");
+  /* Readiness is provisional until the batch closes clean: a throw from
+   * anywhere below (a failed queued write is only known at the close)
+   * must not leave the runtime APIs believing the chip is programmed. */
+  struct BroughtUpGuard {
+    bool &flag;
+    bool committed = false;
+    ~BroughtUpGuard() {
+      if (!committed)
+        flag = false;
+    }
+  } brought_up_guard{_brought_up};
   _brought_up = true;
   /* WiFi-only coex bring-up: disable the BT/LTE antenna arbitration and lock the
    * antenna to WLAN so on-air TX is not killed by the coex firmware. */
@@ -985,6 +997,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   if (!batch.end())
     throw std::runtime_error(
         "Jaguar3: pipelined register write(s) failed during bring-up");
+  brought_up_guard.committed = true;
   /* The timing closes here, before the coex thread starts: it shares the
    * adapter's transfer counter, so anything emitted after it would count
    * that thread's register and H2C traffic as bring-up. */

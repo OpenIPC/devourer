@@ -125,16 +125,17 @@ static void run_tx(IRadio* dev, const tdma::Config& c) {
     if (w != cur_w) { dev->FastSetBandwidth(w); cur_w = w; }
 
     if (a.phase == tdma::Phase::NB && a.burst != last_marker_burst) {
-      last_marker_burst = a.burst;
       // Stamp the marker with the TX's hardware TSF (works TX-side — no RX
       // flood starving the control read); the TSF-sync RX uses it for drift.
       // A failed read throws (IRadio contract): skip this burst's marker
-      // rather than hand the drift fit a wrong stamp.
+      // rather than hand the drift fit a wrong stamp, and leave the burst
+      // unmarked so the next pass through it tries again.
       try {
         uint64_t tx_tsf = dev->ReadTsf();
         auto f = tdma::build_frame(rt_marker, tdma::Class::Marker, seq[0]++,
                                    (uint32_t)a.burst, tx_tsf);
         dev->send_packet(f.data(), f.size());
+        last_marker_burst = a.burst;
       } catch (const std::exception &e) {
         fprintf(stderr, "tdma: TSF read failed (%s), marker skipped\n", e.what());
       }

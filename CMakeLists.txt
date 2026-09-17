@@ -940,6 +940,21 @@ target_link_libraries(Mt7612uTsfReadSelftest PRIVATE devourer)
 
 add_test(NAME mt7612u_tsf_read COMMAND Mt7612uTsfReadSelftest)
 
+# The C entry points' failure contract, which the cell above cannot reach: a
+# failed read must be distinguishable from a value, because 0xffffffff is a
+# legitimate register word on this part. Needs the subtree's symbols, so it is
+# gated on DEVOURER_MT7612U (CI's MediaTek jobs turn it on).
+if(DEVOURER_MT7612U)
+    add_executable(Mt7612uTsfApiSelftest
+        tests/mt7612u_tsf_api_selftest.cpp
+    )
+    target_link_libraries(Mt7612uTsfApiSelftest PRIVATE devourer)
+    target_include_directories(Mt7612uTsfApiSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u/include)
+
+    add_test(NAME mt7612u_tsf_api COMMAND Mt7612uTsfApiSelftest)
+endif()
+
 # Headless guard for the TX quiesce seam (ITransport::quiesce_tx via
 # RtlAdapter): the explicit "stop TX and wait it out" call every device makes
 # before anything is released. UsbTransport's cancel/drain is validated on

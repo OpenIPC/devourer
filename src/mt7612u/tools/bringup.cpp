@@ -3241,6 +3241,19 @@ static const int64_t kTsfWrapTolUs = 5000;
 /* A gone device fails every read at loop speed; stop rather than spin for the
  * rest of the run (an interrupted run reached 192 million failed reads). */
 static const uint64_t kTsfWrapMaxConsecFails = 100;
+/* A read this slow still judges (it is judged over its own interval), but it is
+ * too coarse to fit the model from. Decoupled from the tolerance: on a busy
+ * USB 2.0 bus a 3-transfer read can take longer than the tolerance, and
+ * refusing to fit from those would leave the model empty. */
+static const int64_t kTsfWrapFeedMaxUs = 20000;
+/* The counter runs at the host's rate to within a crystal's error. A fit
+ * outside this band is a frozen or wedged counter, not a clock to predict a
+ * wrap from. */
+static const double kTsfWrapRateMin = 0.9, kTsfWrapRateMax = 1.1;
+/* How far either side of the wrap the forced read places its accesses. Wide
+ * enough that one slow (~10 ms) control transfer cannot move a latch across
+ * the wrap. */
+static const int64_t kTsfWrapMarginUs = 40000;
 static const int64_t kTsfWrapWindowUs = 120000000;
 static const int kTsfWrapModelPts = 600;
 
@@ -3344,6 +3357,8 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 		printf("GATE TSF-WRAP: FAIL - wrap_bits must be 20..32\n");
 		return 1;
 	}
+	/* Register reads only: the MAC stays as mt_init_hardware left it (stopped),
+	 * so there is nothing for an early return to unwind. */
 	if (mt_eeprom_init(&dev) || mt_init_hardware(&dev, NULL) ||
 	    mt_set_channel(&dev, 6, MT7612U_BW_20)) {
 		printf("GATE TSF-WRAP: FAIL - bring-up failed\n");
@@ -3394,7 +3409,7 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 				       (unsigned long long)v, e, (long long)(h1 - h0));
 		}
 		/* Feed the model only fast reads it agrees with, once it exists. */
-		if (h1 - last_pt > 100000 && h1 - h0 <= kTsfWrapTolUs && holds) {
+		if (h1 - last_pt > 100000 && h1 - h0 <= kTsfWrapFeedMaxUs && holds) {
 			last_pt = h1;
 			tsf_model_add(&model, hm, (double)v);
 		}
@@ -3412,10 +3427,16 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 			continue;
 
 		/* Parts 2 and 3, once. */
+		if (model.b < kTsfWrapRateMin || model.b > kTsfWrapRateMax) {
+			printf("\nGATE TSF-WRAP: FAIL - the counter runs at %.6f x the host clock; not a clock to time a wrap from\n",
+			       model.b);
+			return 1;
+		}
 		forced = true;
 		const int64_t w = (int64_t)(hm + (double)(period - (v & mask)) / model.b);
-		const int64_t sched_gap1[4] = { w - 20000, w + 20000, w + 25000, w + 30000 };
-		const int64_t sched_gap2[4] = { w - 25000, w - 20000, w + 20000, w + 25000 };
+		const int64_t m1 = kTsfWrapMarginUs, m2 = m1 + 5000, m3 = m1 + 10000;
+		const int64_t sched_gap1[4] = { w - m1, w + m1, w + m2, w + m3 };
+		const int64_t sched_gap2[4] = { w - m2, w - m1, w + m1, w + m2 };
 		const int64_t *sched = gap == 1 ? sched_gap1 : sched_gap2;
 		const int first_post = gap == 1 ? 1 : 2;
 		int64_t lo_start = 0, lo_end = 0, c_start, c_end, at_ms[4] = { 0 };
@@ -3425,7 +3446,12 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 		uint64_t fv = 0;
 
 		wrap_host = w;
-		sleep_until_us(w - 30000);
+		if (w - m3 > deadline) {
+			printf("\nGATE TSF-WRAP: FAIL - the predicted wrap (%.1f min away) is past the deadline\n",
+			       (w - mono_us()) / 60e6);
+			return 1;
+		}
+		sleep_until_us(w - m3);
 		c_start = mono_us();
 		c_ok = !mt_rr_chk(&dev, MT_TSF_TIMER_DW0, &c_lo);
 		c_end = mono_us();
@@ -3436,7 +3462,7 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 
 			if (k < 4) {
 				if (k == first_post) {
-					sleep_until_us(w + 15000);
+					sleep_until_us(w + m1 / 2);
 					c_ok = c_ok && !mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &c_hi);
 				}
 				sleep_until_us(sched[k]);
@@ -3487,9 +3513,13 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 		       (unsigned long long)off_model);
 		return 1;
 	}
+	if (g_stop) {
+		printf("\nGATE TSF-WRAP: INTERRUPTED - no verdict\n");
+		return 2;
+	}
 	if (!forced) {
-		printf("\nGATE TSF-WRAP: FAIL - no wrap reached before the deadline (%.0f min)%s\n",
-		       max_min, g_stop ? ", interrupted" : "");
+		printf("\nGATE TSF-WRAP: FAIL - no wrap reached before the deadline (%.0f min)\n",
+		       max_min);
 		return 1;
 	}
 	if (f_rc || !f_held) {
@@ -3502,14 +3532,23 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 		       c_err);
 		return c_held ? 0 : 1;
 	}
-	if (!f_retried || checked == 0) {
-		printf("\nGATE TSF-WRAP: FAIL - %s\n",
-		       !f_retried ? "the forced read did not take the retry (wrap not in the gap)"
-		                  : "no continuous read was checked near the wrap");
+	if (checked == 0) {
+		printf("\nGATE TSF-WRAP: FAIL - no continuous read was checked near the wrap\n");
 		return 1;
 	}
-	if (fabs(c_err) < 2147483648.0) {
-		printf("\nGATE TSF-WRAP: FAIL - the control did not tear (err %+.0f us); the rig cannot see a tear\n",
+	if (!f_retried) {
+		/* The read is coherent (checked above); the wrap just did not land in
+		 * the gap, which transfer jitter can do. Not a defect - re-run. */
+		printf("\nGATE TSF-WRAP: INCONCLUSIVE - the forced read holds but took no retry; the wrap missed gap %d. Re-run.\n",
+		       gap);
+		return 2;
+	}
+	/* The control reads the low word before the wrap and the high word after,
+	 * so a torn value is one whole high-word step ABOVE the truth. The sign
+	 * matters: a read that is systematically 2^32 low would also fail on
+	 * magnitude alone, and the model would have absorbed it. */
+	if (c_err < 2147483648.0 || c_err > 6442450944.0) {
+		printf("\nGATE TSF-WRAP: FAIL - the control is %+.0f us off, not the +2^32 us a torn read gives; the rig cannot see a tear\n",
 		       c_err);
 		return 1;
 	}
@@ -3660,7 +3699,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "usage: bringup [regs|fw|init|chan|tx|rx|hop|gateg|tsfwrite|tsfwrap] [chan] [count] [phy 0=CCK 1=OFDM 2=HT 4=VHT] [mcs]\n");
 		fprintf(stderr, "       bringup adopt                  (the mt_adopt path a libusb-owning consumer uses)\n");
 		fprintf(stderr, "       bringup tsfwrite [chan]        (confirm this part has no TSF load path)\n");
-		fprintf(stderr, "       bringup tsfwrap [gap 1|2] [wrap_bits] [max_min]  (TSF read across the low-word wrap, ~72 min)\n");
+		fprintf(stderr, "       bringup tsfwrap [gap 1|2] [wrap_bits] [max_min]  (TSF read across the low-word wrap, ~72 min; rc 2 = inconclusive)\n");
 		fprintf(stderr, "       bringup beacon [chan] [secs]   (Stage A: static AP beacon on air)\n");
 		fprintf(stderr, "       bringup ap     [chan] [secs]   (Stage B: beacon + RX, probe/auth/assoc)\n");
 		fprintf(stderr, "       bringup [sweep|coding|vht] [chan] [count] [bw 0=20 1=40 2=80]\n");

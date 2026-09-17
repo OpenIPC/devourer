@@ -702,6 +702,25 @@ static const bool g_rx_pctr = []() {
  * interferer); `busy` = percent of samples above the lowest bucket; `hist` =
  * the 12 raw bucket counts (IGI-referenced, low→high power). ch<0 omits the
  * channel field (steady-state emitter); ch>=0 tags it (sweep). */
+/* The two CCX window products, appended to both rx.energy emitters.
+ *
+ * `clm` is busy AIRTIME percent (hardware 4 us ticks with CCA asserted) and
+ * `nhm_env` is the percent of the NHM histogram sitting above the receiver's
+ * own noise floor. Read them together: energy that lifts nhm_env without
+ * lifting clm is an emitter the baseband does not recognise as 802.11 — which
+ * is exactly what a frame sniffer reports as a free channel. Both go null when
+ * the generation or the window did not produce them. */
+static void emit_ccx(devourer::Ev &ev, const RxEnergy &e) {
+  if (e.valid_clm)
+    ev.f("clm", e.clm_ratio_pct);
+  else
+    ev.f("clm", nullptr);
+  if (e.valid_nhm)
+    ev.f("nhm_env", e.nhm_env_ratio_pct);
+  else
+    ev.f("nhm_env", nullptr);
+}
+
 static void emit_nhm(const RxEnergy &e, int ch) {
   if (!e.valid_nhm)
     return;
@@ -717,8 +736,13 @@ static void emit_nhm(const RxEnergy &e, int ch) {
   devourer::Ev ev(*g_ev, "rx.nhm");
   if (ch >= 0)
     ev.f("ch", ch);
-  ev.f("peak", peak_k).f("busy", busy).f("dur", e.nhm_duration)
-      .arr("hist", hist, 12);
+  /* `busy` is the naive mass-above-bucket-0 and rails at ~100 on a quiet
+   * channel; `ratio` is the vendor's rounded form of the same thing, and `env`
+   * is that with the receiver's own floor cluster removed. Compare arms on
+   * `env`. */
+  ev.f("peak", peak_k).f("busy", busy)
+      .f("ratio", e.nhm_ratio_pct).f("env", e.nhm_env_ratio_pct)
+      .f("dur", e.nhm_duration).arr("hist", hist, 12);
 }
 
 static void packetProcessor(const Packet &packet) {
@@ -1630,6 +1654,7 @@ int main(int argc, char **argv) {
             ev.f("abs_noise_floor_dbm", e.abs_noise_floor_dbm);
           else
             ev.f("abs_noise_floor_dbm", nullptr);
+          emit_ccx(ev, e);
           ev.f("frames", agg.n)
               .f("frames_ldpc", agg.n_ldpc)
               .f("frames_stbc", agg.n_stbc)
@@ -2152,6 +2177,7 @@ int main(int argc, char **argv) {
           ev.f("igi", e.igi);
         else
           ev.f("igi", nullptr);
+        emit_ccx(ev, e);
         ev.f("retune_us", retune_us)
             .f("frames", agg.n)
             .f("frames_ldpc", agg.n_ldpc)

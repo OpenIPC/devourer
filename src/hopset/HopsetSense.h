@@ -70,7 +70,16 @@ struct TxSenseSample {
 
   bool valid_nhm = false;
   uint8_t nhm_busy_pct = 0; /* 100*(total-bucket0)/total, host-derived */
+  uint8_t nhm_env_pct = 0;  /* the same mass with the IC's own floor removed */
   uint16_t nhm_duration = 0;
+
+  /* CLM busy airtime over the window. Carried and emitted but deliberately NOT
+   * scored: the FA/CCA/IGI counters this scorer weighs are measured inert in a
+   * transmit-oriented session, and whether CLM shares that fate is the open
+   * question. Feeding an unvalidated source into the occupancy law would hide
+   * the answer inside a weighted mean. */
+  bool valid_clm = false;
+  uint8_t clm_ratio_pct = 0;
 
   /* Synthetic evidence. A caller that sets this hands the scorer an occupancy
    * directly instead of counters, and every stage downstream — ring depth,

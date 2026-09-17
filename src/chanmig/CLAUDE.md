@@ -13,13 +13,18 @@ Docs: `docs/adaptive-channel-migration.md`,
   passively surveys a candidate plan (`DEVOURER_SCOUT_PLAN`) while the primary
   RX stays on the video channel, emitting versioned `survey.dwell` records
   with a counter-hygiene discard barrier — the FA/CCA counters are
-  delta-on-read. Measures only; retunes nothing but itself. Grid-legality
+  delta-on-read. v2 records also carry `clm` / `nhm_env`
+  (`docs/rx-spectrum-sensing.md`); the parser still accepts v1.
+  Measures only; retunes nothing but itself. Grid-legality
   validation, **no regulatory DB** — the caller owns compliance.
 - **Scoring** (`ChannelScore`, `DEVOURER_SCOUT_ADVISE`): a pure two-leg
   recommendation engine. The primary receiver's *delivery* is authoritative on
   the active channel (scout energy there is confounded by the wanted video);
   the scout's occupancy is authoritative on candidates. Emits explainable
-  `channel.recommend` / `channel.hold`.
+  `channel.recommend` / `channel.hold`. That occupancy has exactly two terms —
+  foreign decoded airtime and a bounded false-alarm rate; `cca_rate`, `igi`, the
+  NHM fields and `clm` are recorded in the dwell and deliberately not scored
+  (NHM because its naive busy% is generation-dependent).
 - **Protocol** (`examples/chanmig --role ground|drone`): an authenticated
   ground-proposes / drone-commits migration — SipHash-MAC'd wire codec
   (`MigWire.h`), pure `MigProposer` / `MigResponder` state machines, random

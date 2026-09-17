@@ -113,7 +113,12 @@ inline void emit_sense(EventSink &sink, const TxSenseSample &s,
   ev.f("valid_nhm", s.valid_nhm);
   if (s.valid_nhm)
     ev.f("nhm_busy", (unsigned long long)s.nhm_busy_pct)
+        .f("nhm_env", (unsigned long long)s.nhm_env_pct)
         .f("nhm_dur", (unsigned long long)s.nhm_duration);
+  /* Emitted, not scored — see TxSenseSample::valid_clm. */
+  ev.f("valid_clm", s.valid_clm);
+  if (s.valid_clm)
+    ev.f("clm", (unsigned long long)s.clm_ratio_pct);
   if (s.injected)
     ev.f("inject", 1);
   ev.hexf("flags", s.flags, 0).f("scored", scored);

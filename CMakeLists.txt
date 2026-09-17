@@ -966,6 +966,16 @@ target_include_directories(NoiseFloorMathSelftest PRIVATE
 
 add_test(NAME noise_floor_math COMMAND NoiseFloorMathSelftest)
 
+# Headless guard for the NHM utility reduction (src/NhmEnvMath.h): bucket
+# weights, the rounded ratio helper shared with CLM, and the noise-floor-cluster
+# exclusion that makes nhm_env_ratio usable where the naive ratio rails. Pure
+# math, header-only.
+add_executable(NhmEnvMathSelftest tests/nhm_env_math_selftest.cpp)
+target_include_directories(NhmEnvMathSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_test(NAME nhm_env_math COMMAND NhmEnvMathSelftest)
+
 # Headless round-trip guard for the 802.11ax HE TX radiotap path
 # (src/RadiotapBuilder.cpp build_he + the shared Radiotap.c field-23 size entry
 # + src/ieee80211_radiotap.h HE masks): parse an HE spec -> build -> iterate ->

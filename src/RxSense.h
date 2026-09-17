@@ -10,7 +10,8 @@
  * Filled by IRtlRadio::GetRxEnergy() from the chip's phydm facilities:
  *   - false-alarm (FA) + CCA (channel-busy) counters,
  *   - the DIG initial-gain index (a noise-floor proxy),
- *   - and, where triggered, the NHM in-band power histogram.
+ *   - and, where triggered, the NHM in-band power histogram and the CLM
+ *     busy-airtime measurement that shares its window.
  *
  * All values are channel-wide scalars — no Realtek 88xx chip exports
  * per-subcarrier CSI to the host, so this is energy, not a spectrum. Build a
@@ -48,6 +49,34 @@ struct RxEnergy {
   bool valid_nhm = false;
   uint8_t nhm[12] = {};
   uint16_t nhm_duration = 0;
+  /* The thresholds that produced those buckets (U(8,1) PWdB, IGI-referenced).
+   * Kept because the histogram alone does not say where in absolute power it
+   * sits — devourer::nhm_utility() needs both. */
+  uint8_t nhm_th[11] = {};
+  /* Vendor utility reductions of the histogram above (devourer::nhm_utility):
+   * nhm_ratio is the mass above bucket 0, nhm_env_ratio the mass above the
+   * receiver's OWN noise floor. The second is the one that means "something is
+   * transmitting here"; the first rails busy on a quiet channel. */
+  uint8_t nhm_ratio_pct = 0;
+  uint8_t nhm_env_ratio_pct = 0;
+
+  /* CLM (Channel Load Measurement): the fraction of the measurement window in
+   * which the baseband asserted CCA busy, counted by hardware in 4 us ticks.
+   * Unlike the FA/CCA event counters this is AIRTIME, directly comparable
+   * across channels and adapters, and unlike NHM it needs no gain reference.
+   *
+   * Read CLM against nhm_env_ratio_pct rather than alone: CLM counts the
+   * channel held by anything the BB recognises as a signal it must defer to,
+   * while NHM-env counts energy above the floor whether or not it looked like
+   * one. Energy that raises NHM-env without raising CLM is the non-802.11
+   * emitter a frame sniffer cannot see at all.
+   *
+   * Rides the same armed window as the NHM histogram, so it is only populated
+   * when the caller asked for NHM (GetRxEnergy(with_nhm=true)). */
+  bool valid_clm = false;
+  uint8_t clm_ratio_pct = 0;  /* 0..100 busy airtime */
+  uint16_t clm_result = 0;    /* raw busy ticks, 4 us each */
+  uint16_t clm_period = 0;    /* window length in the same 4 us ticks */
 
   /* Active/frame-free ABSOLUTE noise floor (dBm) — the vendor idle-noise
    * monitor, distinct from the passive rssi-snr floor in RxQuality. Heavy

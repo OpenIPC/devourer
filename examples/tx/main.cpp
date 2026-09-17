@@ -288,10 +288,13 @@ static bool hopset_sense_window(IRtlRadio *dev, uint32_t settle_us,
     x.valid_nhm = total > 0;
     x.nhm_busy_pct =
         total ? static_cast<uint8_t>(100u * (total - e.nhm[0]) / total) : 0;
+    x.nhm_env_pct = e.nhm_env_ratio_pct;
     x.nhm_duration = e.nhm_duration;
   } else {
     x.flags |= devourer::hopset::kTsNhmMissing;
   }
+  x.valid_clm = e.valid_clm;
+  x.clm_ratio_pct = e.clm_ratio_pct;
   if (!e.valid_fa && !e.valid_igi && !x.valid_nhm)
     x.flags |= devourer::hopset::kTsReadFailed;
 

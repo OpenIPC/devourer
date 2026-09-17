@@ -826,6 +826,11 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   c.tx_chains = 2; /* 8852B/8852C are 2T2R */
   c.rx_chains = 2;
   c.per_chain_rssi = true; /* per-path RSSI from the PPDU-status physts header */
+  /* No CLM: the G6 NHM rides the halbb env-monitor glue, not NhmReader, and
+   * that glue keeps only the noise floor — the vendor engine's clm_ratio is
+   * computed and discarded. No phydm FA/CCA/IGI monitor either. */
+  c.busy_airtime_ok = false;
+  c.rx_energy_ok = false;
   /* Hardware ARQ: SetAckResponder is not implemented on the AX generation
    * (matrix-measured 0% closure) — that flag stays false. The retry knob IS
    * wired (WD DATA_TXCNT_LMT per frame, attempts-semantics folded to the

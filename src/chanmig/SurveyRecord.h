@@ -23,9 +23,10 @@
 namespace devourer {
 namespace chanmig {
 
-/* v2 added clm / nhm_env. Readers accept any version up to this one: the added
- * fields are optional, so a v1 record still parses with them absent. */
-inline constexpr int kSurveySchemaV = 2;
+/* v2 added clm / nhm_env; v3 added busy_source. Readers accept any version up
+ * to this one: every added field is optional, so an older record still parses
+ * with them absent. */
+inline constexpr int kSurveySchemaV = 3;
 
 enum SurveyFlag : uint16_t {
   kFlagTruncated = 1u << 0,      /* dwell cut short (shutdown) */
@@ -77,6 +78,12 @@ struct SurveyDwell {
    * survey — and a monitor-mode sniffer — calls empty. */
   bool valid_clm = false;
   uint8_t clm_ratio_pct = 0;
+  /* Which facility produced clm_ratio_pct (devourer::BusySource): 1 = Realtek
+   * CCX CLM, 2 = a MAC channel-timer pair. Not decoration — the two define
+   * "busy" differently (a channel-timer family counts the radio's own TX),
+   * so ranking across a MIXED pair of scouts compares two rulers. 0 on a
+   * record with no reading, and on a v1/v2 record that predates the field. */
+  uint8_t busy_source = 0;
 
   /* Frame-driven aggregate over the observe window (raw devourer units). */
   uint32_t frames = 0;

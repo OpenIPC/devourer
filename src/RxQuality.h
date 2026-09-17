@@ -70,6 +70,12 @@ struct RxQuality {
   bool igi_valid = false;
   int igi = 0;
 
+  /* The vendor-neutral reduction of the same read (see ChannelBusy in
+   * RxSense.h). Carried here so a controller polling GetRxQuality() on any
+   * backend gets the portable reading without a second call that would steal
+   * the delta. Invalid on a family with no busy-airtime counter. */
+  devourer::ChannelBusy busy{};
+
   /* Fused verdict (classify_link_health). */
   LinkVerdict verdict = LinkVerdict::NoSignal;
   const char *label = "NO_SIGNAL";
@@ -206,6 +212,12 @@ inline RxQuality build_rx_quality(const RxQualitySnapshot &s, const RxEnergy &e,
   q.cca_ofdm = e.cca_ofdm;
   q.igi_valid = e.valid_igi;
   q.igi = e.igi;
+  /* One representation, filled from the same RxEnergy the caller already
+   * paid for. Deliberately NOT fed into LinkHealthInput below: whether CLM
+   * earns a place in a scoring law is a policy decision with its own
+   * validation, and routing it through classify_link_health would change
+   * every backend's verdict as a side effect of an interface change. */
+  q.busy = devourer::busy_from_rx_energy(e);
 
   LinkHealthInput in;
   in.frames = s.frames;
@@ -218,8 +230,8 @@ inline RxQuality build_rx_quality(const RxQualitySnapshot &s, const RxEnergy &e,
   in.cca_ofdm = e.cca_ofdm;
   in.igi_valid = e.valid_igi;
   in.igi = e.igi;
-  in.igi_min = 0x1c;
-  in.igi_max = 0x7f;
+  in.igi_min = th.igi_min;
+  in.igi_max = th.igi_max;
   LinkHealthVerdict h = classify_link_health(in, th);
   q.verdict = h.verdict;
   q.label = h.label;

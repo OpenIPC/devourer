@@ -23,7 +23,13 @@
  * Per-generation research helpers (BB-debug-port reads, the 8814 queue poller,
  * the CW tone) stay on the concrete classes: the same convention one level
  * further down. Every member here keeps the IRadio rule — virtual with a
- * not-ported default, never pure. */
+ * not-ported default, never pure.
+ *
+ * One member here is the other direction: GetChannelBusy is DECLARED on IRadio
+ * (it is a vendor-neutral concept) and merely IMPLEMENTED here, once, in terms
+ * of this family's own facility. The split is about where a member is
+ * declared, not where a family implements it — so this is not a re-mixing of
+ * it, and it saves five identical per-backend overrides. */
 class IRtlRadio : public IRadio {
 public:
   /* Crystal (XTAL) load-capacitance trim — the CFO lever. Writes the AFE
@@ -57,6 +63,28 @@ public:
    * the delta counters before an observation window, and for any caller
    * sampling faster than a few times a second. */
   virtual RxEnergy GetRxEnergy(bool with_nhm) { (void)with_nhm; return {}; }
+
+  /* The neutral reading (IRadio::GetChannelBusy), expressed in this family's
+   * own facility: CLM busy airtime plus NHM-env, both of which ride
+   * GetRxEnergy's armed CCX window.
+   *
+   * Implemented ONCE here rather than five times because every Realtek
+   * backend's answer is the same function of its GetRxEnergy. A generation
+   * that overrides GetRxEnergy gets this for free; one that does not gets a
+   * correct "no reading" instead of a fabricated zero — which is the right
+   * answer for the RTL8733B (no override at all) and for Kestrel (whose
+   * GetRxEnergy fills only the absolute noise floor: its NHM rides the halbb
+   * glue, not NhmReader, so there is no CLM).
+   *
+   * Left non-final on purpose: CLM's period field is independent of the NHM
+   * window and reaches ~262 ms, so a generation may later want a longer,
+   * lower-variance window than the shared read gives.
+   *
+   * COST + CONTENTION: see the IRadio declaration. This arms the ~2 ms NHM
+   * window and consumes the same delta GetRxEnergy and GetRxQuality read. */
+  devourer::ChannelBusy GetChannelBusy() override {
+    return devourer::busy_from_rx_energy(GetRxEnergy(/*with_nhm=*/true));
+  }
 
   /* Perform `reads` fresh PHYSICAL EFUSE logical-map reads (each pass re-runs
    * the efuse-controller read sequence — not the cached shadow) and

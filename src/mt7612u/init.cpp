@@ -601,6 +601,40 @@ int mt7612u_link_stats_start(struct mt7612u_dev *d)
 	      FIELD_PREP(MT_CH_TIME_CFG_CH_TIMER_CLR, 1));
 	/* One read to clear everything, so the first real sample is clean. */
 	mt7612u_link_stats(d, &discard);
+	/* Arming is what makes a ch_time reading meaningful. Reset the mark with
+	 * it: the next interval must start here, not at whatever the previous
+	 * session left behind. */
+	d->ch_time_armed = 1;
+	d->ch_time_last_us = 0;
+	return 0;
+}
+
+/* Channel timers only. See the header for why this is not link_stats(). */
+int mt7612u_ch_time(struct mt7612u_dev *d, uint32_t *busy, uint32_t *idle,
+                    uint32_t *interval_us)
+{
+	uint64_t now = stats_now_us();
+	uint32_t b = 0, i = 0;
+
+	if (!d || !busy || !idle) return -1;
+	/* Refuse while unarmed. The timers only count once MT_CH_TIME_CFG has been
+	 * written, and the registers hold whatever a previous session left — which
+	 * a busy+idle ratio would otherwise turn into a perfectly plausible
+	 * percentage for a window that was never measured. */
+	if (!d->ch_time_armed) return -1;
+	/* Checked reads: mt_rr() returns ~0u on a failed control transfer, and
+	 * an unchecked read here would surface as a 100%-busy channel rather
+	 * than as the absent reading it is. */
+	if (mt_rr_chk(d, MT_CH_BUSY, &b) || mt_rr_chk(d, MT_CH_IDLE, &i))
+		return -1;
+
+	*busy = b;
+	*idle = i;
+	if (interval_us)
+		*interval_us = d->ch_time_last_us
+		                   ? (uint32_t)(now - d->ch_time_last_us)
+		                   : 0; /* first call: no previous mark */
+	d->ch_time_last_us = now;
 	return 0;
 }
 

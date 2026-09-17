@@ -230,6 +230,10 @@ add_library(devourer
     src/chanmig/MigClock.h
     src/chanmig/MigProposer.h
     src/chanmig/MigResponder.h
+    src/sensing/SenseWindow.h
+    src/sensing/SenseWindow.cpp
+    src/sensing/SurveyFrameAgg.h
+    src/sensing/DwellExecutor.h
     src/hopset/HopsetState.h
     src/hopset/HopsetTypes.h
     src/hopset/HopsetWire.h
@@ -980,6 +984,17 @@ target_compile_features(NhmEnvMathSelftest PRIVATE cxx_std_20)
 
 add_test(NAME nhm_env_math COMMAND NhmEnvMathSelftest)
 
+# Headless guard for the vendor-neutral ChannelBusy conversions (src/RxSense.h):
+# the Realtek RxEnergy reduction and the MediaTek channel-timer ratio. Pure
+# arithmetic, header-only. The load-bearing case is the refusal — a counter that
+# was never armed must report NO reading, never 0% busy.
+add_executable(ChannelBusySelftest tests/channel_busy_selftest.cpp)
+target_include_directories(ChannelBusySelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_features(ChannelBusySelftest PRIVATE cxx_std_20)
+
+add_test(NAME channel_busy_math COMMAND ChannelBusySelftest)
+
 # Headless round-trip guard for the 802.11ax HE TX radiotap path
 # (src/RadiotapBuilder.cpp build_he + the shared Radiotap.c field-23 size entry
 # + src/ieee80211_radiotap.h HE masks): parse an HE spec -> build -> iterate ->
@@ -1339,6 +1354,18 @@ add_test(NAME scan_plan_policy COMMAND ScanPlanSelftest)
 add_executable(SurveyAggSelftest tests/survey_agg_selftest.cpp)
 target_link_libraries(SurveyAggSelftest PRIVATE devourer)
 add_test(NAME survey_aggregate COMMAND SurveyAggSelftest)
+
+# The executor gate (src/sensing/): the dwell phase machine against a scripted
+# fake radio and a scripted clock — discard-barrier ordering, the FastRetune
+# width-restoration rule after a full-width dwell, counter plausibility at the
+# exact ceiling, the read-failure latch, the retune-throw paths, frame
+# attribution as configuration, a non-Realtek radio still producing evidence,
+# and round/seq bookkeeping against the real ScanScheduler. This loop was demo
+# code until now; a regression in it used to be findable only on air.
+add_executable(DwellExecSelftest tests/dwell_exec_selftest.cpp)
+target_link_libraries(DwellExecSelftest PRIVATE devourer)
+
+add_test(NAME dwell_executor COMMAND DwellExecSelftest)
 
 # The #277 gate: the RecommendEngine's two-leg policy over the issue's ten
 # offline scenarios (recommend / hold-healthy / weak!=congestion / saturation

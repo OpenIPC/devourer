@@ -1173,6 +1173,10 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
   c.tx_chains = chains;
   c.rx_chains = chains;
   c.per_chain_rssi = chains >= 2;
+  /* CCX CLM via NhmReader's 11AC map; separated arm-vs-quiet on air (#431). */
+  c.busy_airtime_ok = true;
+  c.busy_airtime_measured = true;
+  c.rx_energy_ok = true;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   /* 5/10 MHz baseband re-clock via the 0x8ac small-BW/clock word — both
    * variants, hardware-validated at both widths, both directions and both

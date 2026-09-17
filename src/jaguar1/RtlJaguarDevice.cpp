@@ -2119,6 +2119,11 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
   c.tx_chains = chains;
   c.rx_chains = chains;
   c.per_chain_rssi = chains >= 2;
+  /* CCX CLM via NhmReader's 11AC map — the same map validated on the Jaguar2,
+   * but unmeasured on this family, so _measured stays false. */
+  c.busy_airtime_ok = true;
+  c.busy_airtime_measured = false;
+  c.rx_energy_ok = true;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   /* 5/10 MHz narrowband on the 8812 die (8812AU/8811AU) and the 8814AU. Both
    * share the Jaguar2 0x8ac baseband clock-divider block; the codes are

@@ -239,6 +239,7 @@ int main() {
     d.nhm_env_pct = 37;
     d.valid_clm = true;
     d.clm_ratio_pct = 61;
+    d.busy_source = 2; /* BusySource::ChTime */
     d.adapter_gen = 2;
     d.scout_id = 0x9f3a2c11;
     emit_survey_dwell(sink, d);
@@ -265,6 +266,7 @@ int main() {
           "nhm survives");
     CHECK(r.nhm_env_pct == 37, "nhm_env survives");
     CHECK(r.valid_clm && r.clm_ratio_pct == 61, "clm survives");
+    CHECK(r.busy_source == 2, "busy provenance survives");
     CHECK(r.evm_valid && r.evm_mean_raw == -52, "evm survives");
     CHECK(r.dvr_air_us == d.dvr_air_us && r.oth_air_us == d.oth_air_us,
           "airtime survives");
@@ -311,6 +313,7 @@ int main() {
     CHECK(r3.valid_nhm && r3.nhm_busy_pct == 90, "v1 nhm survives");
     CHECK(!r3.valid_clm && r3.nhm_env_pct == 0,
           "v1 leaves the v2 fields unset, not faked");
+    CHECK(r3.busy_source == 0, "v1 leaves the v3 provenance unset");
 
     /* A version this build does not know is still refused. */
     SurveyDwell r4;

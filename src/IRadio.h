@@ -551,6 +551,29 @@ public:
    * snapshot; each generation overrides. */
   virtual devourer::RxQuality GetRxQuality() { return {}; }
 
+  /* Frame-free channel-occupancy snapshot (see ChannelBusy in RxSense.h) — the
+   * vendor-NEUTRAL half of frame-free sensing, and the only energy evidence
+   * src/chanmig/ and src/hopset/ can ask an arbitrary backend for. Busy
+   * airtime (both silicon families count it in hardware) plus, where the
+   * family has one, the share of energy above the receiver's own floor.
+   *
+   * Delta semantics: the window drains on read. On the Realtek backends this
+   * is IMPLEMENTED BY GetRxEnergy(true), so GetRxEnergy, GetRxQuality and this
+   * all consume the same counters — poll one of the three, not two.
+   *
+   * Cost is NOT symmetric across families: the Realtek path arms a ~2 ms CCX
+   * measurement window and polls a ready bit at 1 ms granularity, while the
+   * MediaTek path is two register reads. A caller written against the cheap
+   * one will stall on the expensive one; this is a dwell-cadence call.
+   *
+   * The Realtek-only phydm detail (false-alarm classes, DIG/IGI, the NHM
+   * histogram) stays on IRtlRadio::GetRxEnergy; this is its portable
+   * reduction. Default is an all-invalid snapshot; a backend with a hardware
+   * busy-airtime counter overrides. Advertised by AdapterCaps::busy_airtime_ok
+   * — do NOT infer support from a successful dynamic_cast to IRtlRadio, which
+   * was never a correct discriminator. */
+  virtual devourer::ChannelBusy GetChannelBusy() { return {}; }
+
   /* --- Adapter health (see src/AdapterHealth.h; examples/doctor is the
    * reference consumer; the EFUSE probe is on IRtlRadio) --- */
 

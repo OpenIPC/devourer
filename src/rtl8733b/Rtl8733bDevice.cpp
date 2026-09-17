@@ -1041,6 +1041,11 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
   caps.marketing_names = "RTL8731BU/RTL8733BU";
   caps.chip_id = rtl8733b::kChipId;
   caps.generation = devourer::ChipGeneration::Rtl8733b;
+  /* No frame-free sensing of any kind: no phydm FA/CCA block, no CCX/NHM
+   * register set for the HALMAC 87xx, and GetRxEnergy is not overridden — so
+   * both report false rather than letting the IRtlRadio cast imply a sensor. */
+  caps.busy_airtime_ok = false;
+  caps.rx_energy_ok = false;
   caps.variant = "cut-selected";
   caps.transport = _device.is_usb() ? "usb" : "unknown";
   caps.tx_chains = 1;

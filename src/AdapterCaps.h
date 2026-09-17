@@ -269,6 +269,28 @@ struct AdapterCaps {
    * equivalent. */
   bool he_er_su_ok = false;
   bool per_chain_rssi = false;     /* frame parser fills per-chain rssi (>=2ch) */
+
+  /* Frame-free sensing. These exist because a successful
+   * dynamic_cast<IRtlRadio*> is not a correct discriminator and never was: the
+   * RTL8733B derives from IRtlRadio and implements no GetRxEnergy at all, so
+   * the cast reports a sensor that returns nothing.
+   *
+   * busy_airtime_ok: IRadio::GetChannelBusy returns a real busy-airtime
+   * reading — the Realtek CCX CLM engine (Jaguar1/2/3) or the MediaTek MAC
+   * channel timers. FALSE on Kestrel (its NHM rides the halbb glue, not
+   * NhmReader, so it has no CLM) and on the RTL8733B.
+   *
+   * busy_airtime_measured: that reading has been separated arm-vs-quiet ON AIR
+   * for this family (tests/ccx_clm_probe.sh), not merely implemented. False on
+   * Jaguar1 (shares the validated Jaguar2 11AC map, unmeasured) and on the
+   * MT7612U (no adapter available). False-as-unmeasured, per the house rule.
+   *
+   * rx_energy_ok: IRtlRadio::GetRxEnergy returns real phydm FA/CCA/IGI
+   * counters. Always false on a non-Realtek radio; false on the RTL8733B and
+   * Kestrel, which is exactly the false positive the cast produced. */
+  bool busy_airtime_ok = false;
+  bool busy_airtime_measured = false;
+  bool rx_energy_ok = false;
   /* Hardware timing. hw_rx_timestamp: every received frame is stamped with the
    * MAC's microsecond TSF at receive (RxPacket.RxAtrib.tsfl) — true on all
    * generations. hw_beacon_txtsf: this adapter, as a transmitter, inserts its

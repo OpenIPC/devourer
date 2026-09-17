@@ -89,6 +89,13 @@ struct LinkHealthThresholds {
   int snr_lo = 16;       /* < this (8 dB) = poor SNR */
   int snr_good = 30;     /* >= this (15 dB) = comfortable */
   uint32_t fa_high = 300; /* OFDM FA/window above this = a noisy channel */
+  /* DIG rails of whatever family filled igi — the union Jaguar1/2 floor and
+   * the Jaguar3 ceiling. Consulted ONLY when igi_valid, so a backend with no
+   * DIG never touches them. They live here rather than hardcoded inside
+   * build_rx_quality() so a vendor-neutral header stops asserting Realtek
+   * register constants, and so a future family can pass its own. */
+  int igi_min = 0x1c;
+  int igi_max = 0x7f;
 };
 
 /* Classify. Pure function of the snapshot + thresholds (defaulted from the

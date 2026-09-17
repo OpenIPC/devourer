@@ -145,6 +145,11 @@ private:
     /* Submitted and not yet reaped: libusb owns `t` and `buf` while set, so
      * the slot must not be reused, freed, or handed back to the free list. */
     std::atomic<bool> inflight{false};
+    /* The completion callback is inside the slot: set first thing on entry,
+     * cleared as its very last store. `inflight` has to clear before the
+     * free-list push (a taker must see a finished slot), so it cannot double
+     * as the destructor's "safe to free" signal — this is. */
+    std::atomic<bool> cb_busy{false};
     int status = -1;
     int actual = 0;
   };

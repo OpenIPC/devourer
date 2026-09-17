@@ -286,9 +286,11 @@ int main(int argc, char **argv) {
    * need the interface, so peeks/pokes work while another process (a live
    * armed rxdemo) owns it — the concurrent-intervention mode. */
   if (a.no_claim) {
-    if (a.ops.empty()) {
-      logger->error("--no-claim is peek/poke-only (the canary dump needs the "
-                    "claimed device)");
+    if (a.ops.empty() || a.init) {
+      logger->error(a.init ? "--init needs the claimed-device path; drop "
+                             "--no-claim"
+                           : "--no-claim is peek/poke-only (the canary dump "
+                             "needs the claimed device)");
       session.adopt_handle(handle);
       return 2;
     }

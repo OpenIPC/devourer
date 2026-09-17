@@ -339,6 +339,11 @@ UsbTransport::~UsbTransport() {
   flush_writes();
   int leaked = 0;
   for (auto *w : _aw_all) {
+    /* A callback still inside the slot (another adapter's pump thread
+     * reaping it right now) finishes in a handful of stores; wait it out
+     * rather than free under it. */
+    while (w->cb_busy)
+      std::this_thread::yield();
     /* libusb forbids freeing an active transfer, and its callback still
      * writes through `w`. If the drain above could not reap it (dead event
      * loop / yanked device), leaking the slot is the lesser evil: a callback
@@ -422,6 +427,7 @@ void LIBUSB_CALL UsbTransport::async_write_cb(libusb_transfer *t) {
   /* Only the shared pool is touched here — never the transport, which a
    * leaked slot can outlive (AsyncPool). */
   AsyncPool &pool = *w->pool;
+  w->cb_busy = true;
   /* Order matters: the result and every piece of accounting are final
    * before the slot becomes visible again. `done` is published after
    * status/actual so a waiter that sees it sees the result; the free-list
@@ -442,6 +448,7 @@ void LIBUSB_CALL UsbTransport::async_write_cb(libusb_transfer *t) {
     std::lock_guard<std::mutex> lk(pool.mu);
     pool.free.push_back(w);
   }
+  w->cb_busy = false; /* last: the destructor may free the slot after this */
 }
 
 UsbTransport::AsyncWrite *UsbTransport::async_take_slot() {

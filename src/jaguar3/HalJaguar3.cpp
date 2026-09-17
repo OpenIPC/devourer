@@ -1,4 +1,5 @@
 #include "HalJaguar3.h"
+#include "InitTimer.h"
 #include <cstdlib>
 #include <cstring>
 
@@ -41,12 +42,17 @@ void retry_cal(Logger_t &logger, const char *what, F &&step, int tries = 3) {
  * write. */
 void write_bb(RtlAdapter &dev, uint32_t addr, uint32_t data) {
   switch (addr) {
-  case 0xfe: std::this_thread::sleep_for(std::chrono::milliseconds(50)); return;
-  case 0xfd: std::this_thread::sleep_for(std::chrono::milliseconds(5)); return;
-  case 0xfc: std::this_thread::sleep_for(std::chrono::milliseconds(1)); return;
-  case 0xfb: std::this_thread::sleep_for(std::chrono::microseconds(50)); return;
-  case 0xfa: std::this_thread::sleep_for(std::chrono::microseconds(5)); return;
-  case 0xf9: std::this_thread::sleep_for(std::chrono::microseconds(1)); return;
+  /* The table delays exist to let the preceding writes settle, so every
+   * one of them drains the pipelined-write queue before sleeping — a
+   * settle measured from a write that is still queued is no settle. The
+   * drain is free when the queue is empty and bounded by its depth when
+   * not. */
+  case 0xfe: dev.flush_writes(); std::this_thread::sleep_for(std::chrono::milliseconds(50)); return;
+  case 0xfd: dev.flush_writes(); std::this_thread::sleep_for(std::chrono::milliseconds(5)); return;
+  case 0xfc: dev.flush_writes(); std::this_thread::sleep_for(std::chrono::milliseconds(1)); return;
+  case 0xfb: dev.flush_writes(); std::this_thread::sleep_for(std::chrono::microseconds(50)); return;
+  case 0xfa: dev.flush_writes(); std::this_thread::sleep_for(std::chrono::microseconds(5)); return;
+  case 0xf9: dev.flush_writes(); std::this_thread::sleep_for(std::chrono::microseconds(1)); return;
   default: dev.phy_set_bb_reg(static_cast<uint16_t>(addr), MASKDWORD, data);
   }
 }
@@ -87,11 +93,22 @@ void HalJaguar3::run_iqk(SelectedChannel channel) {
  * Every step is ported from vendor source. */
 void HalJaguar3::rtw_hal_init(SelectedChannel channel) {
   ChannelWidth_t bw = channel.ChannelWidth;
+  /* The transfer counter is a USB notion (xfers is emitted only when a
+   * counter is attached); a PCIe transport gets none, and its timer omits
+   * the field instead of reporting 0. */
+  InitTimer timer(_logger, "j3hal",
+                  _device.is_usb() ? InitTimer::XferCounter{[this] { return _device.ctrl_xfers(); }}
+                                   : InitTimer::XferCounter{},
+                  [this] { _device.flush_writes(); });
 
   _macinit.pre_init_system_cfg();
+  timer.stage("pre_init_system_cfg");
   power_on();                 /* mac_power_switch(on) — card_en_flow */
+  timer.stage("power_on");
   read_chip_version();        /* needs MAC alive; supplies cut for system_cfg */
+  timer.stage("chip_version");
   cache_efuse_8822e();        /* one-shot OTP decode while access is reliable */
+  timer.stage("efuse_cache");
   if (_variant == ChipVariant::C8822E && _efuse_cache_valid)
     /* Efuse thermal baseline (0xd0/0xd1) + channel for pwr_track thermal tracking. */
     _cal->set_pwr_track_ctx(_efuse_cache[0xd0], _efuse_cache[0xd1],
@@ -109,35 +126,46 @@ void HalJaguar3::rtw_hal_init(SelectedChannel channel) {
       (_phy_ctx.rfe_type == 0 || _phy_ctx.rfe_type == 0xff))
     _phy_ctx.rfe_type = 21;
   _logger->info("Jaguar3: rfe_type=0x{:02x}", _phy_ctx.rfe_type);
+  timer.stage("efuse_rfe");
   _macinit.init_system_cfg(bw, _ver.cut);
+  timer.stage("init_system_cfg");
 
   if (!_fw.download_default_firmware()) {
     _logger->error("Jaguar3: firmware download FAILED (structured)");
     return;
   }
   _logger->info("Jaguar3: firmware booted (structured)");
+  timer.stage("dlfw");
 
   if (!_macinit.init_mac_cfg(bw)) {
     _logger->error("Jaguar3: init_mac_cfg FAILED (structured)");
     return;
   }
+  timer.stage("init_mac_cfg");
   /* Propagate the queue-init reserved-page boundary to the FW downloader — it
    * was 0 during the pre-queue-init FW stage, so a beacon rsvd-page download
    * would otherwise target page 0 instead of the real boundary. */
   _fw.set_rsvd_boundary(_macinit.rsvd_boundary());
   _macinit.init_usb_cfg();         /* USB RX-DMA mode — RX delivery to bulk-IN */
   _macinit.enable_bb_rf(true);     /* set_hw_value(EN_BB_RF) */
-  apply_bb_rf_agc_tables();        /* init_phy: BB + AGC + RF tables */
+  timer.stage("usb_cfg_bbrf");
+  apply_bb_rf_agc_tables(&timer);  /* init_phy: BB + AGC + RF tables */
   config_pa_bias_8822e();          /* kfree: efuse PA-bias trim -> RF 0x60 */
+  timer.stage("pa_bias");
   config_phydm_parameter_init();   /* POST_SETTING: 3-wire + OFDM/CCK block + bb-reset */
+  timer.stage("phydm_param_init");
   init_rfk();                      /* RF cal_init (0x1B00); IQK runs via run_iqk */
+  timer.stage("rfk_init");
   /* halrf DACK — DAC cal before IQK. Retry-wrapped: its status-poll loops issue
    * tens of thousands of USB reads and an intermittent glitch was aborting
    * bring-up (rtw_read iostream error, seen on 8822EU). */
   retry_cal(_logger, "DACK", [this] { _cal->dac_calibrate(); });
+  timer.stage("dack");
   bf_init();                       /* rtl8822c_phy_bf_init (rtl8822c_halinit.c) */
   monitor_rx_cfg();                /* devourer monitor-mode RX enable */
   enable_tx_path();                /* enable OFDM/CCK TX block (gates on-air TX) */
+  timer.stage("bf_rx_tx_cfg");
+  timer.total();
   _logger->info("Jaguar3: bring-up complete");
 }
 
@@ -543,6 +571,7 @@ void HalJaguar3::efuse_pwr_cut_8822e(bool on) {
   if (on) {
     _device.rtw_write8(PMC, static_cast<uint8_t>(_device.rtw_read8(PMC) | kWrMsk));
     _device.rtw_write16(SYS_ISO, static_cast<uint16_t>(_device.rtw_read16(SYS_ISO) | kPwcS));
+    _device.flush_writes();
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
     _device.rtw_write16(SYS_ISO, static_cast<uint16_t>(_device.rtw_read16(SYS_ISO) | kPwcB));
     _device.rtw_write16(SYS_ISO, static_cast<uint16_t>(_device.rtw_read16(SYS_ISO) & ~kEbCore));
@@ -555,6 +584,7 @@ void HalJaguar3::efuse_pwr_cut_8822e(bool on) {
     _device.rtw_write32(EFC1, _device.rtw_read32(EFC1) & ~kBurst);
     _device.rtw_write16(SYS_ISO, static_cast<uint16_t>(_device.rtw_read16(SYS_ISO) | kEbCore));
     _device.rtw_write16(SYS_ISO, static_cast<uint16_t>(_device.rtw_read16(SYS_ISO) & ~kPwcB));
+    _device.flush_writes();
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
     _device.rtw_write16(SYS_ISO, static_cast<uint16_t>(_device.rtw_read16(SYS_ISO) & ~kPwcS));
     _device.rtw_write8(PMC, static_cast<uint8_t>(_device.rtw_read8(PMC) & ~kWrMsk));
@@ -578,6 +608,7 @@ uint8_t HalJaguar3::efuse_phys_read_8822e(uint16_t addr) {
   uint32_t v = _device.rtw_read32(EFC);
   v = (v & ~(kAddr | kData | kRdy)) | ((static_cast<uint32_t>(addr) & 0x7ff) << 16);
   _device.rtw_write32(EFC, v);
+  _device.flush_writes(); /* the 50 µs settle counts from the trigger landing */
   for (int i = 0; i < 1000; ++i) {
     std::this_thread::sleep_for(std::chrono::microseconds(50));
     uint32_t t = _device.rtw_read32(EFC);
@@ -965,7 +996,7 @@ void HalJaguar3::power_on() {
   _logger->info("Jaguar3: power-on sequence complete (card active)");
 }
 
-void HalJaguar3::apply_bb_rf_agc_tables() {
+void HalJaguar3::apply_bb_rf_agc_tables(InitTimer *timer) {
   /* BB + AGC baseline via the validated halbb walker (src/jaguar3/
    * PhyTableLoaderJaguar3). _phy_ctx must be populated from the chip-version +
    * EFUSE read (done earlier in rtw_hal_init) before the tables are walked. */
@@ -976,8 +1007,10 @@ void HalJaguar3::apply_bb_rf_agc_tables() {
   const auto agc_tab = _tables->agc_tab();
   _logger->info("Jaguar3: applying BB phy_reg table ({} words)", phy_reg.len);
   PhyTableLoaderJaguar3::Load(phy_reg.data, phy_reg.len, _phy_ctx, bb);
+  if (timer) timer->stage("table_phy_reg");
   _logger->info("Jaguar3: applying AGC table ({} words)", agc_tab.len);
   PhyTableLoaderJaguar3::Load(agc_tab.data, agc_tab.len, _phy_ctx, bb);
+  if (timer) timer->stage("table_agc");
 
   /* RF radio tables. On 8822C an RF register write is a direct BB write to a
    * per-path window: BB[base + (rf_addr&0xff)*4], 20-bit mask, base 0x3c00
@@ -987,9 +1020,9 @@ void HalJaguar3::apply_bb_rf_agc_tables() {
   auto rf_writer = [this](uint16_t base) {
     return [this, base](uint32_t addr, uint32_t data) {
       switch (addr) {
-      case 0xffe: std::this_thread::sleep_for(std::chrono::milliseconds(50)); return;
-      case 0xfe:  std::this_thread::sleep_for(std::chrono::microseconds(100)); return;
-      case 0xffff: std::this_thread::sleep_for(std::chrono::microseconds(1)); return;
+      case 0xffe: _device.flush_writes(); std::this_thread::sleep_for(std::chrono::milliseconds(50)); return;
+      case 0xfe:  _device.flush_writes(); std::this_thread::sleep_for(std::chrono::microseconds(100)); return;
+      case 0xffff: _device.flush_writes(); std::this_thread::sleep_for(std::chrono::microseconds(1)); return;
       case 0x0:
         /* RF reg 0x0 (mode register) can't be written through the direct
          * window — it silently no-ops (hardware-observed on the 8822e). The
@@ -1000,8 +1033,18 @@ void HalJaguar3::apply_bb_rf_agc_tables() {
         _device.rtw_write32(base == 0x4c00 ? 0x4108 : 0x1808, data & RFREG_MASK);
         return;
       default:
-        _device.phy_set_bb_reg(static_cast<uint16_t>(base + ((addr & 0xff) << 2)),
-                               RFREG_MASK, data);
+        /* Plain 20-bit write, not the vendor's read-modify-write under
+         * MASK20BITS: the direct window's bits [31:20] are not storage --
+         * every one of the 512 window words (both paths) poked with those
+         * bits set reads back 0, on one 8812CU and one 8812EU
+         * (tests/j3_rf_window_readback.sh) -- so an RMW there writes
+         * exactly `data`, and preserving those bits was a no-op that cost a
+         * synchronous read per entry: about half the RF table stage (~80 ms
+         * on the one 8812EU + ssc338q host measured; x86 bench figures in
+         * src/jaguar3/CLAUDE.md). Write-only also pipelines
+         * (ITransport::write_batch_begin). */
+        _device.rtw_write32(static_cast<uint16_t>(base + ((addr & 0xff) << 2)),
+                            data & RFREG_MASK);
       }
     };
   };
@@ -1017,6 +1060,7 @@ void HalJaguar3::apply_bb_rf_agc_tables() {
   _device.phy_set_bb_reg(0x1c90, 1u << 8, 1);
   _device.phy_set_bb_reg(0x1830, 1u << 29, 1);
   _device.phy_set_bb_reg(0x4130, 1u << 29, 1);
+  if (timer) timer->stage("table_rf_ab");
   _logger->info("Jaguar3: BB/AGC/RF tables applied");
 }
 

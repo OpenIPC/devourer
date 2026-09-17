@@ -1,4 +1,5 @@
 #include "RtlJaguar3Device.h"
+#include "InitTimer.h"
 
 #include <algorithm>
 #include <climits> /* INT_MIN — "no radiotap DBM_TX_POWER" sentinel */
@@ -55,10 +56,34 @@ RtlJaguar3Device::RtlJaguar3Device(RtlAdapter device, Logger_t logger,
                 variant == jaguar3::ChipVariant::C8822E ? "8822E/EU" : "8822C/CU");
 }
 
+/* Pipelined register writes for the whole bring-up (ITransport::
+ * write_batch_begin): ends on scope exit so a throw never leaves the
+ * transport in batch mode for the threads that start afterwards. */
+struct WriteBatchScope {
+  RtlAdapter &dev;
+  bool open = true;
+  explicit WriteBatchScope(RtlAdapter &d) : dev(d) { dev.write_batch_begin(); }
+  /* Closes once: after end() the destructor is a no-op, so it never touches
+   * the transport again once the coex thread (which shares it) is running.
+   * Returns whether every queued write completed; the destructor's close
+   * (unwinding) drops that result, an explicit end() must act on it. */
+  bool end() {
+    bool ok = true;
+    if (open)
+      ok = dev.write_batch_end();
+    open = false;
+    return ok;
+  }
+  ~WriteBatchScope() { end(); }
+};
+
 void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
   _channel = channel;
   _rx_wanted = true;
+  /* No WriteBatchScope here (yet): the pipelined bring-up is validated on
+   * the TX path (InitWrite, cold + warm); the RX-only
+   * Init path has not been measured with it on a ground-station card. */
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
   /* Tune the channel/bandwidth (5/10 MHz ChannelWidth re-clocks to narrowband),
    * then run IQK calibration (it reads RF18 for the tuned channel).
@@ -735,7 +760,42 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * race the running TX). */
   const bool want_rx = _cfg.rx.enable_with_tx;
   _rx_wanted = want_rx;
+  /* A second bring-up on a live device: the coex thread of the previous
+   * one shares the transport, and the batch below is single-threaded by
+   * contract, so stop and join it before anything is queued. A running RX
+   * loop (and its phydm worker) cannot be stopped from here — that is the
+   * caller's thread — so it is refused outright. */
+  if (_rx_loop_active.load())
+    throw std::runtime_error(
+        "Jaguar3: InitWrite while the RX loop is running — stop it first");
+  if (_coex_thread.joinable()) {
+    _coex_stop = true;
+    _coex_thread.join();
+    _coex_stop = false;
+  }
+  /* Readiness is provisional from here until the batch closes clean: a
+   * throw from any bring-up step (a failed queued write is only known at
+   * the close) must not leave the runtime APIs believing the chip is
+   * programmed — including a re-init that fails after a successful one. */
+  struct BroughtUpGuard {
+    bool &flag;
+    bool committed = false;
+    ~BroughtUpGuard() {
+      if (!committed)
+        flag = false;
+    }
+  } brought_up_guard{_brought_up};
+  _brought_up = false;
+  /* The transfer counter is a USB notion (xfers is emitted only when a
+   * counter is attached); a PCIe transport gets none, and its timer omits
+   * the field instead of reporting 0. */
+  InitTimer timer(_logger, "j3init",
+                  _device.is_usb() ? InitTimer::XferCounter{[this] { return _device.ctrl_xfers(); }}
+                                   : InitTimer::XferCounter{},
+                  [this] { _device.flush_writes(); });
+  WriteBatchScope batch(_device);
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
+  timer.stage("hal_init");
   /* 8822C at 40/80 MHz: IQK at 20 MHz, then retune — see Init. */
   const bool iqk_at_20 = _variant == jaguar3::ChipVariant::C8822C &&
                          (channel.ChannelWidth == CHANNEL_WIDTH_40 ||
@@ -746,7 +806,9 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   SelectedChannel iqk_ch = channel;
   if (iqk_at_20)
     iqk_ch.ChannelWidth = CHANNEL_WIDTH_20; /* IQK command set follows the RF */
+  timer.stage("set_channel");
   _hal.run_iqk(iqk_ch);
+  timer.stage("iqk");
   if (iqk_at_20)
     _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                         channel.ChannelWidth);
@@ -755,6 +817,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   _hal.dpk_force_bypass_8822e(); /* 8822e rfe 21/22: kernel bypasses DPK (after IQK) */
   _hal.config_rfe(channel.Channel); /* 8822e RFE/PAPE antenna-switch pins (PA enable) */
   _hal.config_channel_8822e(channel.Channel); /* 8822e band TX scaling/backoff + shaping */
+  timer.stage("rx_path_rfe_channel");
 
   /* DEVOURER_CW_TONE — a bare RF LO carrier. Armed HERE (before the FW power-mode
    * / coex H2C steps below, which on the 8812EU at 5 GHz leave the chip NAKing
@@ -783,6 +846,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
         }
         _logger->error("CW tone arm: USB glitch ({}) — retry {}/3", ex.what(),
                        attempt);
+        _device.flush_writes(); /* settle from a drained queue before retrying */
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
       }
     }
@@ -790,6 +854,12 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
       _device.rtw_write<uint32_t>(0x0040, v40 | 0x14030008u);
       _device.rtw_write<uint32_t>(0x0064, v64 & ~0x02040000u);
     }
+    /* This return leaves InitWrite early: close the batch here so a
+     * failed completion during the CW arm fails the call, instead of the
+     * scope destructor draining it and dropping the verdict. */
+    if (!batch.end())
+      throw std::runtime_error(
+          "Jaguar3: pipelined register write(s) failed during CW-tone arm");
     _logger->info("Jaguar3: CW tone hold (minimal bring-up, no coex thread)");
     return;
   }
@@ -801,10 +871,12 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * re-apply at the end of this function; this early one just keeps the
    * intermediate bring-up steps on sane references. */
   apply_tx_power_current(/*full=*/true);
-  _brought_up = true;
+  timer.stage("txpower_pre");
+  _brought_up = true; /* provisional — see BroughtUpGuard above */
   /* WiFi-only coex bring-up: disable the BT/LTE antenna arbitration and lock the
    * antenna to WLAN so on-air TX is not killed by the coex firmware. */
   _hal.coex_wlan_only_init();
+  timer.stage("coex_wlan_only_init");
   /* RFE GPIO/pad pinmux — the HalMAC "Config PIN Mux" (halmac_init_8822e) that
    * devourer's hand-rolled MAC init skips: route + drive the RFE PA-enable /
    * antenna-switch control pins. Without it the 8822e's PA pins are never driven
@@ -825,9 +897,13 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     _device.rtw_write<uint32_t>(0x0064, v64 & ~0x02040000u); /* PAD_CTRL1: RFE pads */
   }
 
+  timer.stage("rfe_pinmux");
   _hal.fw_set_pwr_mode_active(); /* keep all FW power domains on (no auto-PS) */
+  timer.stage("fw_pwr_mode");
   _hal.fw_coex_query_bt_info();  /* make the FW confirm BT is absent */
+  timer.stage("fw_coex_query");
   _hal.fw_coex_tdma_off();       /* disable coex time-division (WL keeps antenna) */
+  timer.stage("fw_coex_tdma_off");
   /* DEVOURER_BF_ARM_SOUNDER=1 — beamforming self-sounding probe (beamformer
    * side): arm the MAC's hardware sounding engine so a TX-descriptor-marked
    * NDPA (DEVOURER_TX_NDPA=1) is followed by a hardware-generated NDP. The MAC
@@ -892,6 +968,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * Applied before the coex thread starts so the writes don't contend. */
   if (_cfg.tuning.disable_cca)
     SetCcaMode(true);
+  timer.stage("filters_cca");
   /* DEVOURER_XTAL_CAP — crystal-cap trim (issue #217); before the coex thread
    * so the AFE write doesn't contend with the periodic coex re-apply. */
   if (_cfg.tuning.xtal_cap)
@@ -902,6 +979,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * TX-power state (flat override / offset) only sticks when applied after
    * them. The coex thread's ~2 s ticks do not rewrite the refs. */
   apply_tx_power_current(/*full=*/true);
+  timer.stage("txpower_post");
   /* Per-packet power banks: the BB init table reset 0x1e70 (0x00001000, all
    * banks disabled) and may have cleared the per-STA RAM — re-sync the
    * hardware to the planner state (a pre-bring-up SetTxPacketPowerOffsetQdb
@@ -931,6 +1009,19 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
                     _device.rtw_read32(a), _device.rtw_read32(a + 4),
                     _device.rtw_read32(a + 8), _device.rtw_read32(a + 12));
   }
+  timer.stage("dpdt_ack_misc");
+  /* Sync writes from here: the coex thread shares the transport. A queued
+   * write that completed failed or short is only known at this close, and
+   * a chip with one register unprogrammed is not one to start the coex
+   * thread over and announce ready. */
+  if (!batch.end())
+    throw std::runtime_error(
+        "Jaguar3: pipelined register write(s) failed during bring-up");
+  brought_up_guard.committed = true;
+  /* The timing closes here, before the coex thread starts: it shares the
+   * adapter's transfer counter, so anything emitted after it would count
+   * that thread's register and H2C traffic as bring-up. */
+  timer.total();
   _coex_thread = std::thread([this] { coex_runtime_loop(); });
   if (_cfg.rx.ack_responder &&
       !SetAckResponder(*_cfg.rx.ack_responder)) /* DEVOURER_ACK_RESPONDER */

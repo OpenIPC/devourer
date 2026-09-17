@@ -84,9 +84,14 @@ void Halrf8822e::rf_write(uint8_t path, uint16_t addr, uint32_t mask,
 /* --- calibration (Phase C: ported incrementally, hardware-iterated) --- */
 
 void Halrf8822e::delay_us(uint32_t us) {
+  /* A settle is measured from the write reaching the chip, so drain the
+   * pipelined queue first (free when it is empty; bounded by the queue
+   * depth when not). The µs sites include 2 ms and 10 ms waits. */
+  _device.flush_writes();
   std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
 void Halrf8822e::delay_ms(uint32_t ms) {
+  _device.flush_writes(); /* the settle time must follow the writes */
   std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 

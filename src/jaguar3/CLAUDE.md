@@ -36,6 +36,40 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   single-path 1SS TX, spur channels, LCK, the 2.4 GHz TX kernel-parity
   limitation) live in `docs/8822e-quirks.md`.
 
+## Bring-up cost and the pipelined register writes
+
+`InitWrite` is ~14k USB register transfers and nothing else. The stage
+timing shows it: `init.timing` events under the `j3hal.*` (HAL bring-up)
+and `j3init.*` (`InitWrite`) scopes, field schema in `src/InitTimer.h` /
+`docs/logging.md`; `bench_init.py` parses them but reports only `ms`. The
+batching contract itself — ordering, what waits, single-threadedness,
+failure propagation — is documented once, at `ITransport::write_batch_begin`
+(`src/Transport.h`) and in `UsbTransport`; this file carries only how
+Jaguar3 uses it:
+
+- `InitWrite` runs its whole bring-up inside one `WriteBatchScope`
+  (`RtlJaguar3Device.cpp`), ended before the coex thread starts because that
+  thread shares the transport. A queued write that completed failed or
+  short fails the batch close, and `InitWrite` throws there rather than
+  start the coex thread over an incompletely programmed chip. `Init`
+  (RX-only) opens no batch yet — not measured on a ground-station card.
+- Every settle delay drains the queue first, µs ones included, on both
+  dies: the `write_bb` / `rf_writer` table delay markers, `delay_us` and
+  `delay_ms` on `Halrf8822c` and `Halrf8822e`, the efuse power-cut. A settle
+  that sleeps while its writes are still queued is no settle; the drain is
+  free on an empty queue and bounded by its depth otherwise.
+- Measured: 1.30 → 0.65 s warm, 2.04 → ~0.7 s cold on one drone-side
+  8812EU (ssc338q host). The transfer-count reduction is deterministic; the
+  wall-clock figure is one unit, one host.
+
+The RF radio-table load is write-only: bits [31:20] of the direct window
+(`0x3c00`/`0x4c00 + addr*4`) are not storage, so the vendor's `MASK20BITS`
+read-modify-write preserved nothing at the price of a synchronous read per
+entry. Scope of that claim (`tests/j3_rf_window_readback.sh`): every one of
+the 512 window words (both paths) poked with the high 12 bits set read back
+0, on one 8812CU and one 8812EU; the post-bring-up histogram (all 512 words
+0) is only a control, since the write-only load itself clears those bits.
+
 ## TX power
 
 Both dies drive the SAME TXAGC block (`set_tx_power_ref` is the port of

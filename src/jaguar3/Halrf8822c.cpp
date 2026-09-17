@@ -175,9 +175,14 @@ void Halrf8822c::restore_rf(const uint32_t rf[][2]) {
 }
 
 void Halrf8822c::delay_us(uint32_t us) {
+  /* A settle is measured from the write reaching the chip, so drain the
+   * pipelined queue first (free when it is empty; bounded by the queue
+   * depth when not). The µs sites include 2 ms and 10 ms waits. */
+  _device.flush_writes();
   std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
 void Halrf8822c::delay_ms(uint32_t ms) {
+  _device.flush_writes(); /* the settle time must follow the writes */
   std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 

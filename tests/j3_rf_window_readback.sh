@@ -63,12 +63,16 @@ restore_ops=$(tail -n1 <<<"$ops"); ops=$(head -n1 <<<"$ops")
 # Whatever happens once the first high-bit poke is out, put every sampled
 # word back to its dump value. The chip stays configured after chipstate
 # exits (its device teardown does not de-init), so a plain attach suffices.
-restore() {
+finish() {
+  local rc=$?
   # shellcheck disable=SC2086
-  "$CS" --pid "$PID" $restore_ops >"$OUT/pid${PID}.restore" 2>&1 \
-    || echo "WARN: restore pass failed — sampled window words may be left modified (see $OUT/pid${PID}.restore)" >&2
+  if ! "$CS" --pid "$PID" $restore_ops >"$OUT/pid${PID}.restore" 2>&1; then
+    echo "FAIL: restore pass failed — window words may be left modified (see $OUT/pid${PID}.restore)" >&2
+    [ "$rc" -ne 0 ] || rc=1   # an unrestored radio is not a passing run
+  fi
+  exit "$rc"
 }
-trap restore EXIT
+trap finish EXIT
 wb=$OUT/pid${PID}.writeback
 # shellcheck disable=SC2086
 "$CS" --pid "$PID" --init $ops >"$wb" 2>"$wb.err" || { echo "FAIL: chipstate exited non-zero (leg 2)"; tail -5 "$wb.err"; exit 1; }

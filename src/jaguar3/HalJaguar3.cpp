@@ -93,7 +93,8 @@ void HalJaguar3::run_iqk(SelectedChannel channel) {
  * Every step is ported from vendor source. */
 void HalJaguar3::rtw_hal_init(SelectedChannel channel) {
   ChannelWidth_t bw = channel.ChannelWidth;
-  InitTimer timer(_logger, "j3hal", [this] { return _device.ctrl_xfers(); });
+  InitTimer timer(_logger, "j3hal", [this] { return _device.ctrl_xfers(); },
+                  [this] { _device.flush_writes(); });
 
   _macinit.pre_init_system_cfg();
   timer.stage("pre_init_system_cfg");

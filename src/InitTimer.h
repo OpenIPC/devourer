@@ -28,13 +28,21 @@ class InitTimer {
 
 public:
   using XferCounter = std::function<uint64_t()>;
+  using Drain = std::function<void()>;
 
-  InitTimer(Logger_t logger, const char *scope, XferCounter xfers = {})
+  /* `drain`, when given, runs at the start of every checkpoint: a transport
+   * that queues writes (ITransport::write_batch_begin) completes the stage's
+   * own writes before the stage is measured, so their tail latency is billed
+   * to the stage that issued them, not to the next one. */
+  InitTimer(Logger_t logger, const char *scope, XferCounter xfers = {},
+            Drain drain = {})
       : _logger{std::move(logger)}, _scope{scope}, _xfers{std::move(xfers)},
-        _start{clock::now()}, _last{_start}, _x_start{count()},
-        _x_last{_x_start} {}
+        _drain{std::move(drain)}, _start{clock::now()}, _last{_start},
+        _x_start{count()}, _x_last{_x_start} {}
 
   void stage(const char *name) {
+    if (_drain)
+      _drain();
     const auto now = clock::now();
     const auto x = count();
     emit(name, ms(_last, now), static_cast<long long>(x - _x_last));
@@ -49,6 +57,8 @@ public:
     if (_finalized)
       return;
     _finalized = true;
+    if (_drain)
+      _drain();
     emit("total", ms(_start, clock::now()),
          static_cast<long long>(count() - _x_start));
   }
@@ -74,6 +84,7 @@ private:
   Logger_t _logger;
   const char *_scope;
   XferCounter _xfers;
+  Drain _drain;
   clock::time_point _start;
   clock::time_point _last;
   uint64_t _x_start;

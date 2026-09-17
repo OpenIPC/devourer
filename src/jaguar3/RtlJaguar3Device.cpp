@@ -760,7 +760,8 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * race the running TX). */
   const bool want_rx = _cfg.rx.enable_with_tx;
   _rx_wanted = want_rx;
-  InitTimer timer(_logger, "j3init", [this] { return _device.ctrl_xfers(); });
+  InitTimer timer(_logger, "j3init", [this] { return _device.ctrl_xfers(); },
+                  [this] { _device.flush_writes(); });
   WriteBatchScope batch(_device);
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
   timer.stage("hal_init");

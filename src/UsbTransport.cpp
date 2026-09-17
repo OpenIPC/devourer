@@ -453,30 +453,36 @@ bool UsbTransport::write_batch_end() {
 void LIBUSB_CALL UsbTransport::async_write_cb(libusb_transfer *t) {
   auto *w = static_cast<AsyncWrite *>(t->user_data);
   /* Only the shared pool is touched here — never the transport, which a
-   * leaked slot can outlive (AsyncPool). */
-  AsyncPool &pool = *w->pool;
+   * leaked slot can outlive (AsyncPool). A local reference keeps the pool
+   * alive past the slot too: the free-list push below is this callback's
+   * last act, after which `w` may be freed (destructor) or reused (a later
+   * submission) at any moment. */
+  std::shared_ptr<AsyncPool> pool = w->pool;
   w->cb_busy = true;
-  /* Order matters: the result and every piece of accounting are final
-   * before the slot becomes visible again. `done` is published after
-   * status/actual so a waiter that sees it sees the result; the free-list
-   * push comes last so a taker (always the batch's own thread) can never
-   * reset a slot this callback is still writing to. A reader that is
+  /* Order matters. The result and every piece of accounting are final
+   * before the slot becomes visible again: `done` is published after
+   * status/actual so a waiter that sees it sees the result. `cb_busy`
+   * clears BEFORE the free-list push, so the push — which touches only
+   * the pool, never `w` — is the last access, and no later submission's
+   * callback can have its own busy flag cleared by this one. A taker
+   * (always the batch's own thread) cannot see the slot before the push;
+   * the destructor cannot free it while cb_busy is set. A reader that is
    * waiting on this very slot copies its data out before it submits
    * anything else, so the buffer is intact when it does. */
   w->status = t->status;
   w->actual = t->actual_length;
   if (!w->is_read && (t->status != LIBUSB_TRANSFER_COMPLETED ||
                       t->actual_length != t->length - LIBUSB_CONTROL_SETUP_SIZE))
-    pool.write_errors++;
+    pool->write_errors++;
   w->inflight = false;
   w->done = true;
-  pool.inflight--;
-  pool.completed++;
+  pool->inflight--;
+  pool->completed++;
+  w->cb_busy = false;
   {
-    std::lock_guard<std::mutex> lk(pool.mu);
-    pool.free.push_back(w);
+    std::lock_guard<std::mutex> lk(pool->mu);
+    pool->free.push_back(w); /* pointer value only — no access through it */
   }
-  w->cb_busy = false; /* last: the destructor may free the slot after this */
 }
 
 UsbTransport::AsyncWrite *UsbTransport::async_take_slot() {
@@ -674,6 +680,7 @@ void UsbTransport::rx_loop(
     int buf_size, int n_urbs,
     const std::function<void(const uint8_t *, int)> &on_data,
     const std::function<bool()> &should_stop) {
+  flush_writes(); /* bulk-IN behind queued register writes (batch contract) */
   if (_rx_mode == RxMode::Sync) {
     rx_loop_sync(buf_size, on_data, should_stop);
     return;
@@ -958,6 +965,7 @@ void UsbTransport::rx_loop_sync(
 }
 
 int UsbTransport::rx_raw(uint8_t *buf, int len, int timeout_ms) {
+  flush_writes(); /* as rx_loop: the RX must not outrun queued configuration */
   int actual = 0;
   int rc = libusb_bulk_transfer(_dev_handle, _info.bulk_in_ep, buf, len,
                                 &actual, timeout_ms);

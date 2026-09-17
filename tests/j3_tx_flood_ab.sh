@@ -9,8 +9,10 @@ set -euo pipefail
 PID=${1:?pid}; CH=${2:?channel}; A=${3:?treeA}; B=${4:?treeB}; REPS=${5:-3}; SECS=${6:-15}
 OUT=${OUT:-/tmp/j3_tx_flood_ab/pid${PID}_ch${CH}}; mkdir -p "$OUT"
 run() {
-  local tree=$1 rep=$2 n; n=$(basename "$tree")
-  local log=$OUT/${n}_rep${rep}
+  # Logs and lines are keyed by side (A/B) so two checkouts that share a
+  # directory name cannot overwrite each other; the basename is context.
+  local side=$1 tree=$2 rep=$3 n; n="$side:$(basename "$tree")"
+  local log=$OUT/${side}_rep${rep}
   local rc=0
   env DEVOURER_PID="$PID" DEVOURER_CHANNEL="$CH" DEVOURER_LOG_LEVEL=info \
     timeout -s INT "$SECS" "$tree/build/txdemo" >"$log.jsonl" 2>"$log.err" || rc=$?
@@ -30,6 +32,6 @@ run() {
   echo "$n rep$rep: first_tx_ms=$first submitted=$submitted bulk_fail=$fail read_fail=$rd"
 }
 failed=0
-for r in $(seq 1 "$REPS"); do run "$A" "$r"; run "$B" "$r"; done
+for r in $(seq 1 "$REPS"); do run A "$A" "$r"; run B "$B" "$r"; done
 # Every rep is still reported, but a crashed or failed run fails the script.
 exit "$failed"

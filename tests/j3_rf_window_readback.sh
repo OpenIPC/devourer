@@ -83,14 +83,19 @@ import re, sys
 # Each poke is followed by its own one-word peek, printed as a 16-byte row
 # with the other three columns blank; a row may still carry 1-4 words, so
 # every word on it is checked. The count must equal the pokes issued.
-rows = []
+vals = []
 for l in open(sys.argv[1]):
     m = re.match(r'^0x([0-9a-fA-F]{4}):((?:\s+[0-9a-fA-F]{8}){1,4})\s*$', l)
     if m:
-        rows += [(int(m.group(1), 16), int(w, 16)) for w in m.group(2).split()]
-expected = 2 * int(sys.argv[3])
-if len(rows) != expected:
-    print(f"FAIL: parsed {len(rows)} read-back words, expected {expected} (one per poke)"); sys.exit(1)
+        vals += [int(w, 16) for w in m.group(2).split()]
+n = int(sys.argv[3])
+# The peeks were issued in this exact order (path A window, then path B),
+# one word each, so the values pair with these addresses — not with the
+# printed row base, which is the 16-byte row the word sits in.
+addrs = [a for base in (0x3c00, 0x4c00) for a in range(base, base + 4 * n, 4)]
+if len(vals) != len(addrs):
+    print(f"FAIL: parsed {len(vals)} read-back words, expected {len(addrs)} (one per poke)"); sys.exit(1)
+rows = list(zip(addrs, vals))
 bad = [(a, v) for a, v in rows if v >> 20]
 print(f"leg2 pid={sys.argv[2]} words_poked_with_hi_bits_set={len(rows)} read_back_nonzero_hi={len(bad)}")
 for a, v in bad: print(f"  0x{a:04x} -> 0x{v:08x}")

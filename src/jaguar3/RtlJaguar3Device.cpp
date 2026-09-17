@@ -768,6 +768,19 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     _coex_thread.join();
     _coex_stop = false;
   }
+  /* Readiness is provisional from here until the batch closes clean: a
+   * throw from any bring-up step (a failed queued write is only known at
+   * the close) must not leave the runtime APIs believing the chip is
+   * programmed — including a re-init that fails after a successful one. */
+  struct BroughtUpGuard {
+    bool &flag;
+    bool committed = false;
+    ~BroughtUpGuard() {
+      if (!committed)
+        flag = false;
+    }
+  } brought_up_guard{_brought_up};
+  _brought_up = false;
   InitTimer timer(_logger, "j3init", [this] { return _device.ctrl_xfers(); },
                   [this] { _device.flush_writes(); });
   WriteBatchScope batch(_device);
@@ -849,18 +862,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * intermediate bring-up steps on sane references. */
   apply_tx_power_current(/*full=*/true);
   timer.stage("txpower_pre");
-  /* Readiness is provisional until the batch closes clean: a throw from
-   * anywhere below (a failed queued write is only known at the close)
-   * must not leave the runtime APIs believing the chip is programmed. */
-  struct BroughtUpGuard {
-    bool &flag;
-    bool committed = false;
-    ~BroughtUpGuard() {
-      if (!committed)
-        flag = false;
-    }
-  } brought_up_guard{_brought_up};
-  _brought_up = true;
+  _brought_up = true; /* provisional — see BroughtUpGuard above */
   /* WiFi-only coex bring-up: disable the BT/LTE antenna arbitration and lock the
    * antenna to WLAN so on-air TX is not killed by the coex firmware. */
   _hal.coex_wlan_only_init();

@@ -135,7 +135,11 @@ private:
     std::vector<AsyncWrite *> free;
     std::atomic<int> inflight{0};
     std::atomic<uint64_t> completed{0};
-    std::atomic<int> errors{0};
+    /* Failed/short WRITE completions, write submit refusals and retired
+     * slots: what write_batch_end reports. A failed read is reported to its
+     * caller directly (false / throw) and is NOT counted here — a read
+     * glitch that the caller retries and recovers must not fail the batch. */
+    std::atomic<int> write_errors{0};
   };
   struct AsyncWrite {
     libusb_transfer *t;
@@ -150,14 +154,11 @@ private:
      * free-list push (a taker must see a finished slot), so it cannot double
      * as the destructor's "safe to free" signal — this is. */
     std::atomic<bool> cb_busy{false};
+    bool is_read = false; /* set before submit; decides which failure it is */
     int status = -1;
     int actual = 0;
   };
   static constexpr int kAsyncWriteDepth = 8;
-  /* Extra event-loop turns spent reaping cancellations after a drain times
-   * out. A live loop reports each cancellation promptly; a dead one fails
-   * every turn immediately, so this costs nothing in the case that matters. */
-  static constexpr int kFlushCancelTurns = 8;
   bool async_write(uint16_t wvalue, uint16_t windex, const void *data,
                    size_t n);
   /* Read queued behind the pending writes (EP0 order) and waited for on its
@@ -166,7 +167,8 @@ private:
   bool async_read(uint16_t wvalue, uint16_t windex, void *data, size_t n);
   AsyncWrite *async_take_slot();
   bool async_submit(AsyncWrite *w); /* in-flight accounting before submit */
-  bool async_wait_progress(); /* one event-loop turn; false on timeout/error */
+  bool async_wait_progress(); /* pump until this pool progresses; false on a 2 s deadline/error */
+  bool pump_once(int ms);      /* one bounded handle_events turn; false on error */
   static void LIBUSB_CALL async_write_cb(libusb_transfer *t);
   bool _batch = false;
   std::shared_ptr<AsyncPool> _aw = std::make_shared<AsyncPool>();

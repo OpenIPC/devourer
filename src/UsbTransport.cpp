@@ -337,6 +337,21 @@ UsbTransport::UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
 
 UsbTransport::~UsbTransport() {
   flush_writes();
+  /* Last chance while the handle and context are still valid: a queue that
+   * was retired earlier gets one more cancel + bounded reap here, in case
+   * the event loop has come back. What is still submitted after this is
+   * leaked deliberately — the alternative is freeing a transfer libusb
+   * owns, and the caller's libusb_exit will report it rather than crash. */
+  if (_aw->inflight > 0) {
+    for (auto *w : _aw_all)
+      if (w->inflight)
+        libusb_cancel_transfer(w->t);
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (_aw->inflight > 0 && std::chrono::steady_clock::now() < deadline)
+      if (!pump_once(100))
+        break;
+  }
   int leaked = 0;
   for (auto *w : _aw_all) {
     /* A callback still inside the slot (another adapter's pump thread
@@ -410,7 +425,7 @@ void UsbTransport::write_batch_begin() {
     std::lock_guard<std::mutex> lk(_aw->mu);
     _aw->free = slots;
   }
-  _aw->errors = 0;
+  _aw->write_errors = 0;
   _batch = true;
 }
 
@@ -421,7 +436,7 @@ bool UsbTransport::write_batch_end() {
   /* Failed and short completions are only known here, after the fact: a
    * write reported true at submission. The count covers submit refusals,
    * completion failures and retired slots alike. */
-  const int errors = _aw->errors.load();
+  const int errors = _aw->write_errors.load();
   if (errors)
     _logger->error("USB: {} pipelined register write(s) failed in this batch",
                    errors);
@@ -444,9 +459,9 @@ void LIBUSB_CALL UsbTransport::async_write_cb(libusb_transfer *t) {
    * anything else, so the buffer is intact when it does. */
   w->status = t->status;
   w->actual = t->actual_length;
-  if (t->status != LIBUSB_TRANSFER_COMPLETED ||
-      t->actual_length != t->length - LIBUSB_CONTROL_SETUP_SIZE)
-    pool.errors++;
+  if (!w->is_read && (t->status != LIBUSB_TRANSFER_COMPLETED ||
+                      t->actual_length != t->length - LIBUSB_CONTROL_SETUP_SIZE))
+    pool.write_errors++;
   w->inflight = false;
   w->done = true;
   pool.inflight--;
@@ -493,6 +508,7 @@ bool UsbTransport::async_read(uint16_t wvalue, uint16_t windex, void *data,
   AsyncWrite *w = async_take_slot();
   if (!w)
     return false;
+  w->is_read = true;
   libusb_fill_control_setup(w->buf, REALTEK_USB_VENQT_READ, 5, wvalue, windex,
                             static_cast<uint16_t>(n));
   libusb_fill_control_transfer(w->t, _dev_handle, w->buf, async_write_cb, w,
@@ -525,13 +541,19 @@ bool UsbTransport::async_wait_progress() {
   while (_aw->completed == before) {
     if (std::chrono::steady_clock::now() >= deadline)
       return false;
-    struct timeval tv {0, 250 * 1000};
-    const int rc = libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
-    if (rc < 0) {
-      _logger->error("USB: event loop error {} while draining pipelined writes",
-                     rc);
+    if (!pump_once(250))
       return false;
-    }
+  }
+  return true;
+}
+
+bool UsbTransport::pump_once(int ms) {
+  struct timeval tv {0, ms * 1000};
+  const int rc = libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
+  if (rc < 0) {
+    _logger->error("USB: event loop error {} while draining pipelined writes",
+                   rc);
+    return false;
   }
   return true;
 }
@@ -561,8 +583,15 @@ void UsbTransport::flush_writes() {
      * must never be zeroed by hand, or a late callback decrements it below
      * zero (silently disabling every later drain), pushes its slot onto the
      * free list a second time, and races the destructor's free. */
-    for (int i = 0; i < kFlushCancelTurns && _aw->inflight > 0; ++i)
-      async_wait_progress();
+    /* One absolute deadline for the whole post-cancel phase, pumped in
+     * short turns — not a fresh 2 s wait per slot, which would let an
+     * eight-deep dead queue hold the bring-up for the better part of 20 s. */
+    const auto cancel_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (_aw->inflight > 0 &&
+           std::chrono::steady_clock::now() < cancel_deadline)
+      if (!pump_once(100))
+        break;
     if (_aw->inflight > 0) {
       /* The event loop itself is gone (a yanked device reports the error
        * immediately, so the turns above cost nothing). Leave the slots
@@ -572,7 +601,7 @@ void UsbTransport::flush_writes() {
        * register access would otherwise walk take-slot -> wait -> drain
        * (seconds each) for the rest of the bring-up. Synchronous from
        * here on. */
-      _aw->errors += _aw->inflight;
+      _aw->write_errors += _aw->inflight; /* reads among them fail their callers too */
       _aw_abandoned = true;
       _batch = false;
       _logger->error("USB: {} pipelined transfer(s) could not be reaped; "
@@ -590,6 +619,7 @@ bool UsbTransport::async_write(uint16_t wvalue, uint16_t windex,
   AsyncWrite *w = async_take_slot();
   if (!w)
     return false;
+  w->is_read = false;
   libusb_fill_control_setup(w->buf, REALTEK_USB_VENQT_WRITE, 5, wvalue, windex,
                             static_cast<uint16_t>(n));
   std::memcpy(w->buf + LIBUSB_CONTROL_SETUP_SIZE, data, n);
@@ -613,7 +643,8 @@ bool UsbTransport::async_submit(AsyncWrite *w) {
     return true;
   _aw->inflight--;
   w->inflight = false;
-  _aw->errors++;
+  if (!w->is_read)
+    _aw->write_errors++;
   {
     std::lock_guard<std::mutex> lk(_aw->mu);
     _aw->free.push_back(w);

@@ -822,6 +822,12 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
       _device.rtw_write<uint32_t>(0x0040, v40 | 0x14030008u);
       _device.rtw_write<uint32_t>(0x0064, v64 & ~0x02040000u);
     }
+    /* This return leaves InitWrite early: close the batch here so a
+     * failed completion during the CW arm fails the call, instead of the
+     * scope destructor draining it and dropping the verdict. */
+    if (!batch.end())
+      throw std::runtime_error(
+          "Jaguar3: pipelined register write(s) failed during CW-tone arm");
     _logger->info("Jaguar3: CW tone hold (minimal bring-up, no coex thread)");
     return;
   }

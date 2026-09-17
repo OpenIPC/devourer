@@ -50,14 +50,25 @@ if set(hi) != {0}:
     print("FAIL leg1: some window words hold bits above 19 after the bring-up — "
           "contradicts the no-storage premise; the write-back leg is not run", file=sys.stderr)
     sys.exit(1)
-n = int(sys.argv[3]); ops = []
+n = int(sys.argv[3]); ops = []; restore = []
 for base in (0x3c00, 0x4c00):
     for a in range(base, base + 4 * n, 4):
         v = words[a]
         ops += [f"--poke 0x{a:04x}=0x{(v | 0xFFF00000):08x}:4", f"--peek 0x{a:04x}-0x{a+3:04x}:4", f"--poke 0x{a:04x}=0x{v:08x}:4"]
-print(" ".join(ops))
+        restore.append(f"--poke 0x{a:04x}=0x{v:08x}:4")
+print(" ".join(ops)); print(" ".join(restore))
 PY
 ) || exit 1
+restore_ops=$(tail -n1 <<<"$ops"); ops=$(head -n1 <<<"$ops")
+# Whatever happens once the first high-bit poke is out, put every sampled
+# word back to its dump value. The chip stays configured after chipstate
+# exits (its device teardown does not de-init), so a plain attach suffices.
+restore() {
+  # shellcheck disable=SC2086
+  "$CS" --pid "$PID" $restore_ops >"$OUT/pid${PID}.restore" 2>&1 \
+    || echo "WARN: restore pass failed — sampled window words may be left modified (see $OUT/pid${PID}.restore)" >&2
+}
+trap restore EXIT
 wb=$OUT/pid${PID}.writeback
 # shellcheck disable=SC2086
 "$CS" --pid "$PID" --init $ops >"$wb" 2>"$wb.err" || { echo "FAIL: chipstate exited non-zero (leg 2)"; tail -5 "$wb.err"; exit 1; }

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # beacon_interval_shift.sh — de-risk the uplink timing-advance actuator.
 #
-# WriteTsf (REG_TSFTR 0x0560) was shown NOT to move the beacon TBTT air-time
-# (the beacon engine runs off a separate/per-port timer). This exercises +
+# On Jaguar2/3, WriteTsf (REG_TSFTR 0x0560) was shown NOT to move the beacon
+# TBTT air-time (the beacon engine runs off a separate/per-port timer). This exercises +
 # validates the productized actuator IRadio::AdjustBeaconTiming(us): a
 # ONE-SHOT beacon-interval tweak (REG_BCN_INTERVAL 0x0554) — run one interval at
 # (nominal +/- delta) TU then restore, and a clean interval-phased engine

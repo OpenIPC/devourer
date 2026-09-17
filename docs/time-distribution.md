@@ -205,9 +205,53 @@ actuator, and the µs-class UE path is a PCIe UE. Harness:
 **Steering the TBTT.** The actuator is `AdjustBeaconTiming(microseconds)`, not a
 TSF write: on Jaguar2/3, `WriteTsf` moves the reported TSF (and the beacon-body
 timestamp) but NOT the TBTT air-time — a separate per-port timer drives the
-beacon, so the TBTT is deaf to `REG_TSFTR`. (Jaguar1 is the opposite
-architecture: its TBTT is hardware-locked to the TSF grid, so a TSF write moves
-both — see the `PinBeaconTbtt` per-generation notes.) A one-shot
+beacon, so the TBTT is deaf to `REG_TSFTR`. (Jaguar1 is recorded the other
+way — its TBTT is hardware-locked to the TSF grid, bench on all three dies, see
+the `PinBeaconTbtt` per-generation notes below — so expect a J1 write to move an
+active beacon's TBTT with it. Neither that nor whether the beacon keeps airing
+without the steer's re-download has been measured through `WriteTsf`.)
+
+Whether a part has a standalone TSF write is `AdapterCaps::tsf_write_ok`;
+`WriteTsf`'s bool is only the per-call transport result (on PCIe, a readback,
+because an MMIO store has no completion — `src/RtlTsf.h`). `tsf_write_ok` is
+true on Jaguar1, Jaguar2 and Jaguar3, which all load the bare `REG_TSFTR` pair.
+Every recorded readback, each a ±5 s write read back after a host sleep (the
+"bridge" rows are the devourer-mcp `radio_tsf` tool, whose readback follows the
+write immediately; the "probe" rows are a scratch tool writing the raw pair
+through a second `RtlAdapter`; the "timed" rows call `WriteTsf` itself with the
+host clock bracketing each call):
+
+| die | path | sleep | readback error − sleep |
+|---|---|---|---|
+| RTL8821AU (J1), no beacon armed | probe, raw pair DW0→DW1 / DW1→DW0 | 20 ms | +1000 / +625 µs |
+| RTL8822B (J2) | bridge, `WriteTsf` | 0 / 50 ms | +110 / **+3419** µs |
+| RTL8822B (J2) | independent build, `WriteTsf` | 50 ms | +443 µs |
+| RTL8822B (J2) | probe, raw pair DW0→DW1 / DW1→DW0 | 20 ms | +196 / +173 µs |
+| RTL8812BU (J2, 8822B die), ch36 | timed, `WriteTsf` +5 s, n = 10 each | 0 / 20 / 50 ms | +98…+149 / +280…+881 / +186…+421 µs |
+| RTL8812BU (J2, 8822B die), ch36 | timed, `WriteTsf` −5 s, n = 10 | 20 ms | +192…+676 µs |
+| RTL8822C (J3) | bridge, `WriteTsf` | 0 ms | +1013 µs |
+| RTL8822C (J3) | independent build, `WriteTsf` | 50 ms | +274 µs |
+
+So a write reads back as target + sleep + 0.1–3.4 ms. The timed rows say what
+that residual is: on the 8812BU all 40 writes (forward and backward) returned
+true and landed, the clock stayed at wall rate after each (50 ms re-read:
++50174…+51053 µs), and readback error minus the host time from `WriteTsf`
+returning to `ReadTsf` returning was −485…+38 µs (medians −62…+20 µs). The
+counter loads the target as the write completes and runs at wall rate from
+there; the residual is host time — sleep overshoot plus the read's control
+transfers — not a load offset. The 8822B-family rows total n = 45; the other
+dies are n ≤ 2, a range rather than a characterised distribution, and the
++3419 µs bridge cell is the one outlier none of the timed rows reproduce. The Jaguar1 row is the raw register pair, which is exactly what
+the J1 override writes, but the override itself has not run on J1 hardware. The
+8812AU/8814AU, the 8821C (USB and the 8821CE) and the 8822E share the pair and
+code path and are not separately measured.
+`tsf_write_ok` is false on the MT7612U — its DW0/DW1 registers hold the
+counter and do not load it (`bringup tsfwrite`, `docs/mt7612u.md`) — and on
+Kestrel and the RTL8733B, where the source has no TSF write at all (a source
+fact, not a bench measurement). There `WriteTsf` returns false without touching
+a register, so an adoption loop gets a refusal instead of a silent no-op.
+
+A one-shot
 beacon-interval tweak *does* steer the J2/J3 TBTT: running
 one interval at (nominal ± Δ) TU then restoring advances/retards the next TBTT —
 and the cadence thereafter — by Δ TU. Bench-proven to the microsecond on an

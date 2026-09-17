@@ -95,6 +95,8 @@ int main() {
   check(!r->GetTxPowerCaps().supported, "GetTxPowerCaps default is unsupported");
   check(!r->SetAckResponder(devourer::MacAddr{}), "SetAckResponder default refuses");
   check(r->ReadTsf() == 0, "ReadTsf default is 0");
+  check(!r->WriteTsf(123456789ull), "WriteTsf default refuses and reports false");
+  check(!r->GetAdapterCaps().tsf_write_ok, "tsf_write_ok default is false");
 
   r->FastRetune(6);
   check(r->GetSelectedChannel().Channel == 6,

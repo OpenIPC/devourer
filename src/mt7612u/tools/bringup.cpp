@@ -2863,6 +2863,327 @@ static int gate_rtap(uint8_t chan, int count)
 	return 0;
 }
 
+/* Gate TSF-WRITE: characterises whether this part has a TSF load path at all.
+ * The DW0/DW1 registers hold the free-running counter and do not load it:
+ * every sequence tried below was ignored on two units (docs/mt7612u.md), with
+ * the clock first verified alive (a dead or wedged counter would also read as
+ * "no load path").
+ * That measurement is why this backend reports AdapterCaps::tsf_write_ok false
+ * and leaves WriteTsf on the refusing IRadio default. A future firmware that
+ * enables loading must fail this gate so the contract is revisited. Every arm
+ * builds its target from a fresh read so a stale write cannot look like a
+ * take. */
+
+/* The wall-rate window the clock control and every arm's liveness check
+ * share: a kTsfLiveSleepUs sleep must advance the counter by more than
+ * kTsfLiveMinUs and less than kTsfLiveMaxUs. */
+static const unsigned kTsfLiveSleepUs = 50000;
+static const int64_t kTsfLiveMinUs = 10000;
+static const int64_t kTsfLiveMaxUs = 200000;
+
+/* How far from its target a readback may land and still count as a take: the
+ * 20 ms settle plus control round trips, with margin. */
+static const int64_t kTsfTakeWindowUs = 200000;
+
+/* How close to a low-word wrap an arm may start: the 5 s target plus the arm's
+ * own time, which kTsfArmMaxMs bounds, with margin. */
+static const uint64_t kTsfWrapGuardUs = 6000000;
+
+/* Host-time bounds that keep an arm's verdict meaningful. mt_vendor_req
+ * retries a timed-out EP0 transfer silently (no io_err on eventual success),
+ * so a stall between a real load and the readback could push the error past
+ * kTsfTakeWindowUs and print no-op on a part that loads - and a slow enough arm
+ * could outlast the wrap guard. An arm slower than either bound is
+ * inconclusive, never "ignored". */
+static const double kTsfWriteToReadbackMaxMs = 150.0; /* < kTsfTakeWindowUs */
+static const double kTsfArmMaxMs = 1000.0;             /* << kTsfWrapGuardUs */
+
+static bool tsf_live(int64_t delta)
+{
+	return delta > kTsfLiveMinUs && delta < kTsfLiveMaxUs;
+}
+
+/* A checked TSF read: DW1, DW0, DW1 again with one retry if the low word
+ * wrapped in between, every word through mt_rr_chk. mt7612u_read_tsf() goes
+ * through mt_rr, which reports a failed transfer as all-ones - two of those
+ * read as a stopped clock, and a flaky cable would be reported as a dead
+ * timer. False means a transfer failed and *out is not a TSF. */
+static bool tsf_read_chk(uint64_t *out)
+{
+	uint32_t hi, lo, hi2;
+
+	if (mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &hi) ||
+	    mt_rr_chk(&dev, MT_TSF_TIMER_DW0, &lo) ||
+	    mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &hi2))
+		return false;
+	if (hi2 != hi) {
+		hi = hi2;
+		if (mt_rr_chk(&dev, MT_TSF_TIMER_DW0, &lo))
+			return false;
+	}
+	*out = ((uint64_t)hi << 32) | lo;
+	return true;
+}
+
+/* A fresh base for one arm, clear of a low-word wrap. Each arm judges a take
+ * with a 64-bit compare against base + offset. Near a wrap that compare lies
+ * in both directions: a DW0-only load whose 5 s target carries into DW1 reads
+ * back ~2^32 short and prints no-op (a false PASS), and a natural carry
+ * between the base read and the readback makes the DW1-only arm read as a
+ * take. Waiting out the last kTsfWrapGuardUs before a wrap removes both. */
+static bool tsf_fresh_base(uint64_t *base)
+{
+	uint32_t lo;
+
+	if (!tsf_read_chk(base))
+		return false;
+	lo = (uint32_t)*base;
+	if (lo > 0xffffffffull - kTsfWrapGuardUs) {
+		mt_usleep((unsigned)(0x100000000ull - lo) + 100000);
+		if (!tsf_read_chk(base))
+			return false;
+	}
+	return true;
+}
+
+/* 1 = alive, 0 = the counter is not advancing, -1 = a read failed (the
+ * transport, not the clock). */
+static int tsf_clock_control(void)
+{
+	uint64_t t0, t1;
+	int64_t d;
+
+	if (!tsf_read_chk(&t0))
+		return -1;
+	mt_usleep(kTsfLiveSleepUs);
+	if (!tsf_read_chk(&t1))
+		return -1;
+	d = (int64_t)(t1 - t0);
+	printf("  %-34s t0=%llu t1=%llu delta=%+lld  %s\n",
+	       "clock control", (unsigned long long)t0, (unsigned long long)t1,
+	       (long long)d, tsf_live(d) ? "ALIVE" : "DEAD");
+	return tsf_live(d) ? 1 : 0;
+}
+
+enum tsf_write_order {
+	TSF_DW0_THEN_DW1,
+	TSF_DW1_THEN_DW0,
+	TSF_DW0_ONLY,
+	TSF_DW1_ONLY,
+};
+
+struct tsf_arm {
+	const char *label;
+	enum tsf_write_order order;
+	uint64_t offset;  /* target = fresh base + offset */
+	/* Clear MT_BEACON_TIME_CFG_TIMER_EN around the write. Restoring TIMER_EN
+	 * restarts the counter from ~0, which would wipe a load before the normal
+	 * readback, so this arm also reads the counter while the timer is still
+	 * off and judges the take on that read too. */
+	bool stop_timer;
+};
+
+/* One load attempt. Returns 1 on a take, 0 on a no-op with the clock still
+ * running, and -1 when the arm produced no usable conclusion: a failed read,
+ * or a counter that stopped during the arm. A stalled counter prints no-op and
+ * would otherwise let the gate PASS on a dead clock, so -1 is a failure of the
+ * run rather than a "the write was ignored" datum. A take is the readback
+ * landing on the target; what the clock does after a take does not decide, so
+ * a load that takes and then stalls is still a take. */
+static int tsf_arm_run(const struct tsf_arm *a)
+{
+	uint32_t cfg = 0;
+	uint64_t base, target, r1, r2, held = 0;
+	int64_t err, rate;
+	double t_base, t_write, t_r1, t_end;
+	bool took, live, slow;
+
+	if (!tsf_fresh_base(&base)) {
+		printf("  %-34s skipped: TSF read failed\n", a->label);
+		return -1;
+	}
+	t_base = now_ms();
+	target = base + a->offset;
+
+	if (a->stop_timer) {
+		/* mt_rr returns 0xffffffff on a failed transfer, which must never be
+		 * written back as configuration. If the read fails, skip the arm: the
+		 * accumulated I/O error makes the gate FAIL at the sweep boundary. */
+		if (mt_rr_chk(&dev, MT_BEACON_TIME_CFG, &cfg)) {
+			printf("  %-34s skipped: MT_BEACON_TIME_CFG read failed\n", a->label);
+			return -1;
+		}
+		mt_wr(&dev, MT_BEACON_TIME_CFG, cfg & ~MT_BEACON_TIME_CFG_TIMER_EN);
+	}
+
+	t_write = now_ms();
+	switch (a->order) {
+	case TSF_DW0_THEN_DW1:
+		mt_wr(&dev, MT_TSF_TIMER_DW0, (uint32_t)target);
+		mt_wr(&dev, MT_TSF_TIMER_DW1, (uint32_t)(target >> 32));
+		break;
+	case TSF_DW1_THEN_DW0:
+		mt_wr(&dev, MT_TSF_TIMER_DW1, (uint32_t)(target >> 32));
+		mt_wr(&dev, MT_TSF_TIMER_DW0, (uint32_t)target);
+		break;
+	case TSF_DW0_ONLY:
+		mt_wr(&dev, MT_TSF_TIMER_DW0, (uint32_t)target);
+		break;
+	case TSF_DW1_ONLY:
+		mt_wr(&dev, MT_TSF_TIMER_DW1, (uint32_t)(target >> 32));
+		break;
+	}
+
+	if (a->stop_timer) {
+		bool held_ok = tsf_read_chk(&held);
+
+		/* Restore before judging, so a failed read cannot leave the
+		 * timer off. */
+		mt_wr(&dev, MT_BEACON_TIME_CFG, cfg);
+		if (!held_ok) {
+			printf("  %-34s TSF read with the timer off failed\n", a->label);
+			return -1;
+		}
+	}
+
+	mt_usleep(20000);
+	if (!tsf_read_chk(&r1)) {
+		printf("  %-34s TSF readback failed\n", a->label);
+		return -1;
+	}
+	t_r1 = now_ms();
+	mt_usleep(kTsfLiveSleepUs);
+	if (!tsf_read_chk(&r2)) {
+		printf("  %-34s TSF liveness read failed\n", a->label);
+		return -1;
+	}
+	t_end = now_ms();
+	err = (int64_t)(r1 - target);
+	rate = (int64_t)(r2 - r1);
+	took = llabs(err) < kTsfTakeWindowUs ||
+	       (a->stop_timer && llabs((int64_t)(held - target)) < kTsfTakeWindowUs);
+	live = tsf_live(rate);
+	slow = t_r1 - t_write > kTsfWriteToReadbackMaxMs ||
+	       t_end - t_base > kTsfArmMaxMs;
+	if (a->stop_timer)
+		printf("  %-34s held=%llu (read with TIMER_EN clear)\n", "",
+		       (unsigned long long)held);
+	printf("  %-34s target=%llu read=%llu err=%+lld delta50ms=%+lld  %s\n",
+	       a->label, (unsigned long long)target, (unsigned long long)r1,
+	       (long long)err, (long long)rate,
+	       took ? "TOOK" : slow ? "inconclusive (arm too slow)"
+	            : live ? "no-op" : "no-op (clock stalled)");
+	if (took)
+		return 1;
+	if (slow) {
+		printf("  %-34s write->readback %.1f ms (max %.0f), arm %.1f ms (max %.0f)\n",
+		       "", t_r1 - t_write, kTsfWriteToReadbackMaxMs, t_end - t_base,
+		       kTsfArmMaxMs);
+		return -1;
+	}
+	return live ? 0 : -1;
+}
+
+/* Runs every arm, even after a take, so the printout is the whole picture. */
+static void tsf_arms_run(const struct tsf_arm *arms, size_t n, bool *any,
+                         bool *invalid)
+{
+	for (size_t i = 0; i < n; i++) {
+		int r = tsf_arm_run(&arms[i]);
+
+		if (r > 0)
+			*any = true;
+		if (r < 0)
+			*invalid = true;
+	}
+}
+
+static int gate_tsfwrite(uint8_t chan)
+{
+	/* With the MAC running (the state a live link is in): both word orders,
+	 * then each word alone. The high-word-only target sets a high word that
+	 * differs from the live one, so the arm is not vacuous. */
+	static const struct tsf_arm mac_on[] = {
+		{ "MAC on, both words DW0,DW1", TSF_DW0_THEN_DW1, 5000000, false },
+		{ "MAC on, both words DW1,DW0", TSF_DW1_THEN_DW0, 5000000, false },
+		{ "MAC on, high word (DW1) only", TSF_DW1_ONLY, 1ull << 32, false },
+		{ "MAC on, low word (DW0) only", TSF_DW0_ONLY, 5000000, false },
+	};
+	/* With the MAC stopped, and with the free-running timer disabled. */
+	static const struct tsf_arm mac_off[] = {
+		{ "MAC off, both words", TSF_DW0_THEN_DW1, 5000000, false },
+		{ "MAC off, timer off, both words", TSF_DW0_THEN_DW1, 5000000, true },
+	};
+	uint32_t cfg;
+	bool any = false, invalid = false;
+	int alive;
+
+	if (mt_eeprom_init(&dev)) {
+		printf("GATE TSF-WRITE: FAIL - eeprom_init failed\n");
+		return 1;
+	}
+	if (mt_init_hardware(&dev, NULL)) {
+		printf("GATE TSF-WRITE: FAIL - init_hardware failed\n");
+		return 1;
+	}
+	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) {
+		printf("GATE TSF-WRITE: FAIL - set_channel failed\n");
+		return 1;
+	}
+
+	if (mt_rr_chk(&dev, MT_BEACON_TIME_CFG, &cfg)) {
+		printf("GATE TSF-WRITE: FAIL - MT_BEACON_TIME_CFG read failed\n");
+		return 1;
+	}
+	printf("MT_BEACON_TIME_CFG=0x%08x TIMER_EN=%u TBTT_EN=%u BEACON_TX=%u SYNC_MODE=%u\n",
+	       cfg, !!(cfg & MT_BEACON_TIME_CFG_TIMER_EN),
+	       !!(cfg & MT_BEACON_TIME_CFG_TBTT_EN),
+	       !!(cfg & MT_BEACON_TIME_CFG_BEACON_TX),
+	       (unsigned)FIELD_GET(MT_BEACON_TIME_CFG_SYNC_MODE, cfg));
+
+	/* A dead counter reads exactly like a counter that ignores loads, and a
+	 * failed read reads like a dead counter - keep the three apart. */
+	alive = tsf_clock_control();
+	if (alive < 0) {
+		printf("\nGATE TSF-WRITE: FAIL - TSF read failed (%u USB transfer error(s)); "
+		       "a transport fault, not a clock verdict\n", mt_io_errors(&dev));
+		return 1;
+	}
+	if (alive == 0) {
+		printf("\nGATE TSF-WRITE: FAIL - the TSF clock is not running; no load conclusion\n");
+		return 1;
+	}
+
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) {
+		/* The start enables TX control before its DMA-idle poll, so stop
+		 * before bailing out rather than leaving the MAC half-started. */
+		mt_mac_stop(&dev);
+		printf("\nGATE TSF-WRITE: FAIL - mt_mac_start failed\n");
+		return 1;
+	}
+	tsf_arms_run(mac_on, sizeof mac_on / sizeof mac_on[0], &any, &invalid);
+	mt_mac_stop(&dev);
+	tsf_arms_run(mac_off, sizeof mac_off / sizeof mac_off[0], &any, &invalid);
+
+	/* A mid-run transport failure reads as all-ones, which every arm would
+	 * otherwise report as "ignored" - the exact false conclusion this gate
+	 * exists to prevent. A stalled clock is the same class of false
+	 * conclusion: no arm can be read as "the write was ignored" if the
+	 * counter was not advancing while the arm ran. */
+	if (invalid || mt_io_errors(&dev) != 0) {
+		printf("\nGATE TSF-WRITE: FAIL - %u USB transfer(s) failed%s; no load conclusion\n",
+		       mt_io_errors(&dev),
+		       invalid ? " and/or an arm was inconclusive (failed read, stalled clock, or too slow)"
+		               : " during the sweep");
+		return 1;
+	}
+
+	printf("\nGATE TSF-WRITE: %s\n", any
+	       ? "FAIL - a write sequence takes; tsf_write_ok and WriteTsf must be revisited"
+	       : "PASS - confirmed: no sequence loads the TSF, so tsf_write_ok is false");
+	return any ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *err = NULL, *cmd = argc > 1 ? argv[1] : "regs";
@@ -2922,6 +3243,8 @@ int main(int argc, char **argv)
 		              argc > 4 ? atoi(argv[4]) : 0);
 	} else if (!strcmp(cmd, "caps")) {
 		rc = gate_caps(argc > 2 ? (uint8_t)atoi(argv[2]) : 149);
+	} else if (!strcmp(cmd, "tsfwrite")) {
+		rc = gate_tsfwrite(argc > 2 ? (uint8_t)atoi(argv[2]) : 149);
 	} else if (!strcmp(cmd, "rxbytes")) {
 		rc = gate_rxbytes(argc > 2 ? (uint8_t)atoi(argv[2]) : 1,
 		                  argc > 3 ? atoi(argv[3]) : 15);
@@ -2996,8 +3319,9 @@ int main(int argc, char **argv)
 		rc = gate_fw(argc > 2 ? argv[2] : NULL);
 	} else {
 		fprintf(stderr, "unknown subcommand '%s'\n", cmd);
-		fprintf(stderr, "usage: bringup [regs|fw|init|chan|tx|rx|hop|gateg] [chan] [count] [phy 0=CCK 1=OFDM 2=HT 4=VHT] [mcs]\n");
+		fprintf(stderr, "usage: bringup [regs|fw|init|chan|tx|rx|hop|gateg|tsfwrite] [chan] [count] [phy 0=CCK 1=OFDM 2=HT 4=VHT] [mcs]\n");
 		fprintf(stderr, "       bringup adopt                  (the mt_adopt path a libusb-owning consumer uses)\n");
+		fprintf(stderr, "       bringup tsfwrite [chan]        (confirm this part has no TSF load path)\n");
 		fprintf(stderr, "       bringup beacon [chan] [secs]   (Stage A: static AP beacon on air)\n");
 		fprintf(stderr, "       bringup ap     [chan] [secs]   (Stage B: beacon + RX, probe/auth/assoc)\n");
 		fprintf(stderr, "       bringup [sweep|coding|vht] [chan] [count] [bw 0=20 1=40 2=80]\n");

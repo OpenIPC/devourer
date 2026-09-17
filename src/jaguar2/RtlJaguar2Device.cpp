@@ -27,6 +27,7 @@
 #include "NhmReader.h"
 #include "ToneMask.h"
 #include "RateDefinitions.h"
+#include "RtlTsf.h" /* REG_TSFTR read/write shared with Jaguar1/3 */
 #include "RxPacket.h"
 #include "SignalStop.h" /* g_devourer_should_stop */
 extern "C" {
@@ -1191,6 +1192,7 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
   c.tx_retry_limit_ok = _variant == jaguar2::ChipVariant::C8822B;
   c.hw_rx_timestamp = true;  /* FrameParserJaguar2 fills RxAtrib.tsfl */
   c.hw_beacon_txtsf = true;  /* StartBeacon: MAC inserts the egress TSF into beacons */
+  c.tsf_write_ok = true;     /* WriteTsf: REG_TSFTR (8822B readback) */
   c.xtal_cap_max = 0x3f; /* 6-bit AFE crystal-cap trim (0x24/0x28) */
   c.xtal_cap_default = _hal.efuse_logical_byte(0xB9) == 0xFF
                            ? 0x20
@@ -1955,21 +1957,17 @@ uint64_t RtlJaguar2Device::ReadTsf() {
    * _reg_mu (shared with the coex/thermal tick). NB starved to 0 under a heavy
    * RX bulk-IN flood — reliable from a quiet TX. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
-  uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
-  if (_device.rtw_read<uint32_t>(0x0564) != hi) {
-    hi = _device.rtw_read<uint32_t>(0x0564);
-    lo = _device.rtw_read<uint32_t>(0x0560);
-  }
-  return (static_cast<uint64_t>(hi) << 32) | lo;
+  return devourer::read_tsftr(_device);
 }
 
-void RtlJaguar2Device::WriteTsf(uint64_t tsf) {
-  /* REG_TSFTR 0x0560 (low) / 0x0564 (high). Serialized on _reg_mu against the
-   * coex/thermal tick. The counter keeps running, so this sets it to ~tsf. */
+bool RtlJaguar2Device::WriteTsf(uint64_t tsf) {
+  /* REG_TSFTR, serialized on _reg_mu against the coex/thermal tick. The
+   * counter keeps running, so this sets it to ~tsf. Readback-measured on the
+   * RTL8822B over USB; the 8821C (USB and the 8821CE's PCIe) rides the same
+   * pair and is not separately measured. Success rule, including the PCIe
+   * readback: devourer::write_tsftr. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
-  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
+  return devourer::write_tsftr(_device, tsf);
 }
 
 void RtlJaguar2Device::Stop() {

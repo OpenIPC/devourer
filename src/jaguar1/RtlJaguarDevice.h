@@ -320,6 +320,12 @@ public:
    * so this is a lookup, not a chip access. */
   bool GetPermanentMacAddress(uint8_t out[6]) override;
   uint64_t ReadTsf() override;
+  /* The bare REG_TSFTR write, without the beacon-steer bracket. The TBTT here
+   * is recorded as locked to the TSF grid (PinBeaconTbtt below), so expect an
+   * active beacon's TBTT to move with the write; that, and whether the beacon
+   * keeps airing without the steer's re-download, is unmeasured through this
+   * call. */
+  bool WriteTsf(uint64_t tsf) override;
 
   /* Hardware-timed beacon (IRadio contract): download the beacon MPDU to
    * the reserved page at the BCNQ boundary (the vendor rtl8812_download_rsvd_page

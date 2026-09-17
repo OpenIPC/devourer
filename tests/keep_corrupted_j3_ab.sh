@@ -20,11 +20,22 @@ trap cleanup EXIT
 run_cell() {
   local knob=$1
   local log=$OUT/pid${PID}_keep${knob}.jsonl
-  local env=(DEVOURER_PID="$PID" DEVOURER_CHANNEL="$CH" DEVOURER_RX_DUMP_ALL=1 DEVOURER_LOG_LEVEL=warn)
+  # The off arm scrubs the knob from the environment (env -u) rather than
+  # relying on the caller not having exported it; the on arm sets it.
+  local env=(-u DEVOURER_RX_KEEP_CORRUPTED
+             DEVOURER_PID="$PID" DEVOURER_CHANNEL="$CH" DEVOURER_RX_DUMP_ALL=1 DEVOURER_LOG_LEVEL=warn)
   [ "$knob" = 1 ] && env+=(DEVOURER_RX_KEEP_CORRUPTED=1)
   env "${env[@]}" "$RX" >"$log" 2>"$log.err" &
   local p=$!; pids+=("$p")
   sleep "$SECS"
+  # A cell whose rxdemo is no longer running did not measure anything (device
+  # open / claim / bring-up failed) — refuse to print a zero as a result.
+  if ! kill -0 "$p" 2>/dev/null; then
+    local rc=0; wait "$p" 2>/dev/null || rc=$?
+    echo "FAIL: pid=$PID keep_corrupted=$knob rxdemo exited early (rc=$rc); stderr tail:" >&2
+    tail -n 5 "$log.err" >&2
+    exit 1
+  fi
   kill -INT "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true
   local total crc
   total=$(grep -c -F '"ev":"rx.corrupt"' "$log" || true)

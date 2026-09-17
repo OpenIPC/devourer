@@ -453,10 +453,11 @@ int mt7612u_phy_tick(struct mt7612u_dev *dev);
 
 /*
  * TSF, the hardware microsecond clock. Read only: there is no load path
- * (measured, docs/mt7612u.md). Bring-up restarts it near 0, so its low
- * word first wraps 71.6 min later - and the two halves are not latched, so a
- * plain two-register read tears there by 2^32 us. Both functions read high,
- * low, high and retry across a wrap (three or four control transfers).
+ * (measured, docs/mt7612u.md). Bring-up restarts it near 0 (measured on two
+ * units), so its low word first wraps 71.6 min later - and the two halves are
+ * not latched, so a plain two-register read tears there by 2^32 us. Both
+ * functions read high, low, high and retry across a wrap (three or four control
+ * transfers).
  *
  * mt7612u_read_tsf_chk: 0 and fills *out, or -1 on a failed transfer (or a
  * NULL argument), leaving *out untouched.
@@ -500,6 +501,8 @@ struct mt7612u_caps {
 	unsigned per_chain_rssi : 1;
 	unsigned narrowband : 1;   /* 5/10 MHz - not available on this part */
 	unsigned fast_retune : 1;  /* sub-ms channel change - not on this part */
+	unsigned tsf_write : 1;    /* a TSF load path - none on this part (measured,
+	                            * docs/mt7612u.md); AdapterCaps::tsf_write_ok */
 };
 void mt7612u_get_caps(const struct mt7612u_dev *dev, struct mt7612u_caps *caps);
 

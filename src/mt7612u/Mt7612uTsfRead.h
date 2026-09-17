@@ -11,18 +11,16 @@ namespace mt7612u {
  * A coherent read of the 64-bit TSF from its two 32-bit halves,
  * MT_TSF_TIMER_DW0 (low) and MT_TSF_TIMER_DW1 (high).
  *
- * WHY NOT TWO READS. Nothing latches the pair. Measured on two units by forcing
- * a read across the 2^32 µs low-word wrap (71.6 min after bring-up, which
- * resets the counter): DW0 read just before the wrap and DW1 just after tore
- * the value by +2^32 µs, and the reverse order by -2^32 µs, on both. A DW0 read
- * does not freeze DW1. docs/mt7612u.md has the numbers.
+ * WHY NOT TWO READS. Nothing latches the pair: a DW0 read does not freeze DW1,
+ * so a read whose halves straddle the 2^32 µs low-word wrap tears by 2^32 µs.
+ * Bring-up restarts the counter, so that is 71.6 min in. Measured on hardware
+ * by the bringup `tsfwrap` gate; docs/mt7612u.md has the numbers.
  *
  * THE DISCIPLINE. High, low, high again; if the high word moved, the low word
  * wrapped somewhere in between, so read the low word once more and pair it with
  * the second high word. The retry cannot itself tear: that would take a second
- * wrap, 71.6 min later, inside two control transfers. On the same forced
- * straddle this read retried and landed within 0.75 ms of an independent read.
- * It is the Realtek generations' REG_TSFTR discipline too.
+ * wrap, 71.6 min later, inside two control transfers. Same idea as the Realtek
+ * read_tsftr (src/RtlTsf.h), which re-reads both words instead.
  *
  * FAILURE. `rd(addr, &val)` returns 0 on success and nonzero on a failed
  * transfer; any failure fails the whole read, and *out is left untouched.

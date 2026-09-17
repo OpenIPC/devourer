@@ -62,6 +62,7 @@ void mt7612u_get_caps(const struct mt7612u_dev *d, struct mt7612u_caps *c)
 	c->per_chain_rssi = 1;
 	c->narrowband = 0;              /* MT_RATE_BW has no 5/10 MHz encoding */
 	c->fast_retune = 0;             /* measured 48 ms even with calibration skipped */
+	c->tsf_write = 0;               /* DW0/DW1 do not load: the bringup tsfwrite gate */
 }
 
 /*

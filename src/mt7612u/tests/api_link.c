@@ -40,6 +40,8 @@ static void *const api[] = {
 	(void *)mt7612u_get_stats,
 	(void *)mt7612u_link_stats_start,
 	(void *)mt7612u_link_stats,
+	(void *)mt7612u_ch_time,
+	(void *)mt7612u_phy_tick,
 	(void *)mt7612u_read_tsf_chk,
 	(void *)mt7612u_read_tsf,
 	(void *)mt7612u_get_caps,

@@ -354,10 +354,13 @@ public:
    * chip's crystal and is latched into every RX descriptor at receive
    * (rx_pkt_attrib::tsfl, the low 32 bits), so it is a precise, host-jitter-free
    * timing reference for multi-radio sync / TDOA / scheduled bursts. Returns 0
-   * where unsupported (default). A failed read throws std::ios_base::failure
-   * on the Realtek backends and the MT7612U alike; it never returns a guess. NB:
-   * a register read is a control transfer — calling it concurrently with a
-   * heavy RX bulk-IN load can race (catch the exception). */
+   * where unsupported (default, and the RTL8733B). Over USB a failed read
+   * throws std::ios_base::failure on every backend that implements it
+   * (Jaguar1/2/3, Kestrel, MT7612U). Over PCIe a register read has no
+   * completion to fail: a device that has left the bus typically reads
+   * all-ones (platform behaviour, not measured here), and over vfio the load can
+   * fault instead. NB: a register read is a control transfer — calling it
+   * concurrently with a heavy RX bulk-IN load can race (catch the exception). */
   virtual uint64_t ReadTsf() { return 0; }
 
   /* Write the 64-bit MAC TSF (REG_TSFTR). Sets the free-running microsecond clock

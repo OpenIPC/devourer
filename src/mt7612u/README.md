@@ -128,6 +128,7 @@ pwr    TX power vs the kernel's values      ampdu  aggregation A/B
 gateg  per-frame rate control               ack    ACK responder (needs a stimulus)
 rtap   send_packet / send_packets           hop    channel-switch cost
 tsfwrite  no TSF load path (positive control + every write sequence)
+tsfwrap   the TSF read across the low-word wrap (~72 min; host-clock model + control)
 ```
 
 `make` here builds it as `./bringup`, which is what the hardware notes use.

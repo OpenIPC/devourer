@@ -354,20 +354,22 @@ UsbTransport::~UsbTransport() {
   }
   int leaked = 0;
   for (auto *w : _aw_all) {
-    /* A callback still inside the slot (another adapter's pump thread
-     * reaping it right now) finishes in a handful of stores; wait it out
-     * rather than free under it. */
-    while (w->cb_busy)
-      std::this_thread::yield();
     /* libusb forbids freeing an active transfer, and its callback still
      * writes through `w`. If the drain above could not reap it (dead event
      * loop / yanked device), leaking the slot is the lesser evil: a callback
      * that somehow fires later touches leaked memory, whereas freeing here
-     * hands libusb a dangling transfer it is still holding. */
+     * hands libusb a dangling transfer it is still holding. Checked FIRST:
+     * a slot seen in flight is kept whatever a concurrent callback does. */
     if (w->inflight) {
       ++leaked; /* keeps its shared AsyncPool alive for a late callback */
       continue;
     }
+    /* Seen not in flight: any callback for it has at least reached the
+     * store that cleared `inflight`, and it set `cb_busy` before that, so
+     * waiting here covers the whole of its remaining stores (another
+     * adapter's pump thread reaping it right now). */
+    while (w->cb_busy)
+      std::this_thread::yield();
     libusb_free_transfer(w->t);
     delete w;
   }

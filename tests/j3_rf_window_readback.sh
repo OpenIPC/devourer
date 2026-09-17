@@ -29,6 +29,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 CS=$ROOT/build/chipstate
 OUT=${OUT:-/tmp/j3_rf_window_readback}; mkdir -p "$OUT"
 SAMPLE=${SAMPLE:-256} # words per path window for the write-back leg (256 = the whole window)
+case $SAMPLE in ''|*[!0-9]*) echo "FAIL: SAMPLE must be an integer 1..256 (got '$SAMPLE')"; exit 2;; esac
+if [ "$SAMPLE" -lt 1 ] || [ "$SAMPLE" -gt 256 ]; then echo "FAIL: SAMPLE must be 1..256 (got $SAMPLE) — a probe of zero words proves nothing"; exit 2; fi
 dump=$OUT/pid${PID}.peek
 "$CS" --pid "$PID" --init --peek 0x3c00-0x3fff:4 --peek 0x4c00-0x4fff:4 \
   >"$dump" 2>"$dump.err" || { echo "FAIL: chipstate exited non-zero (leg 1)"; tail -5 "$dump.err"; exit 1; }

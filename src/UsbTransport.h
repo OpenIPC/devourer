@@ -78,11 +78,13 @@ public:
       if (async_read(static_cast<uint16_t>(addr & 0xFFFF),
                      static_cast<uint16_t>(addr >> 16), &data, sizeof(data)))
         return data;
-      /* Logged, unlike the synchronous path below: a failed pipelined read
-       * is a queue problem, not a register problem, and must not be
-       * mistaken for a register that genuinely reads all-ones. */
-      _logger->error("USB: pipelined read32_wide(0x{:05x}) failed", addr);
-      return 0xFFFFFFFFu;
+      /* A pipelined read that could not be submitted or completed is a
+       * queue problem, not a register problem: say so, then read it
+       * synchronously below — EP0 order still places that read behind
+       * whatever is queued — so only a real transfer failure yields the
+       * all-ones sentinel. */
+      _logger->error("USB: pipelined read32_wide(0x{:05x}) failed; reading "
+                     "synchronously", addr);
     }
     if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5,
                                 static_cast<uint16_t>(addr & 0xFFFF),
@@ -268,8 +270,10 @@ template <typename T> T UsbTransport::ctrl_read(uint16_t reg_num) {
   if (_batch) {
     if (async_read(reg_num, 0, &data, sizeof(T)))
       return data;
-    _logger->error("rtw_read({:04x}) pipelined, sizeof(T) = {}", reg_num, sizeof(T));
-    throw std::ios_base::failure("rtw_read");
+    /* Fall through to the synchronous read (see read32_wide): only a
+     * transfer that fails there too throws. */
+    _logger->error("rtw_read({:04x}) pipelined failed; reading synchronously",
+                   reg_num);
   }
   if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5, reg_num,
                               0, (uint8_t *)&data, sizeof(T),

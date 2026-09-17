@@ -617,7 +617,13 @@ void UsbTransport::flush_writes() {
        * register access would otherwise walk take-slot -> wait -> drain
        * (seconds each) for the rest of the bring-up. Synchronous from
        * here on. */
-      _aw->write_errors += _aw->inflight; /* reads among them fail their callers too */
+      /* Only the writes among the retired slots are batch write errors; a
+       * stranded read already failed its caller (false / throw), and a
+       * caller that retried it synchronously and recovered must not see
+       * the batch fail for it. */
+      for (auto *w : _aw_all)
+        if (w->inflight && !w->is_read)
+          _aw->write_errors++;
       _aw_abandoned = true;
       _batch = false; /* pipelining off; the caller's batch stays open so
                        * write_batch_end still returns this verdict */

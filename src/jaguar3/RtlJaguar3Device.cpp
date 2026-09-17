@@ -828,7 +828,6 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     if (!batch.end())
       throw std::runtime_error(
           "Jaguar3: pipelined register write(s) failed during CW-tone arm");
-    brought_up_guard.committed = true;
     _logger->info("Jaguar3: CW tone hold (minimal bring-up, no coex thread)");
     return;
   }

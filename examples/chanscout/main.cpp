@@ -57,6 +57,7 @@
 #include "chanmig/ScanPlan.h"
 #include "chanmig/SurveyJsonl.h"
 #include "chanmig/SurveyRecord.h"
+#include "sensing/DwellExecutor.h"
 #include "env_config.h"
 #include "logger.h"
 #include "usb_select.h"
@@ -74,57 +75,10 @@ static std::atomic<int> g_rx_count{0};
 /* The canonical devourer TX SA (examples/tx, examples/streamtx, regress.py):
  * frames from it are OUR OWN video/probe traffic, split out of the occupancy
  * picture so the scoring layer never mistakes wanted airtime for an
- * interferer. */
-static const uint8_t kDvrSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
-
-/* Rolling per-dwell aggregate fed by the RX callback, drained at dwell
- * boundaries (rxdemo RxAgg shape + the airtime attribution buckets). */
-struct ScoutAgg {
-  uint32_t n = 0;
-  int32_t rssi_sum = 0, rssi_max = -128, snr_sum = 0, snr_min = 127;
-  int32_t evm_sum = 0;
-  uint32_t evm_n = 0;
-  uint32_t dvr_frames = 0;
-  uint64_t dvr_air_us = 0, oth_air_us = 0;
-};
-static std::mutex g_agg_mu;
-static ScoutAgg g_agg;
-
-static void packetProcessor(const Packet &packet) {
-  if (packet.RxAtrib.pkt_rpt_type == RX_PACKET_TYPE::C2H_PACKET)
-    return;
-  g_rx_count.fetch_add(1, std::memory_order_relaxed);
-  const auto &a = packet.RxAtrib;
-  /* Airtime is what occupied the channel, and the FCS was transmitted even
-   * where the MAC strips it before DMA - so add it back when the buffer does
-   * not carry it, or occupancy reads 4 bytes light on every frame. */
-  const uint32_t on_air_len =
-      static_cast<uint32_t>(packet.Data.size()) + (a.fcs_present ? 0u : 4u);
-  const uint32_t air =
-      cm::frame_airtime_us(a.data_rate, on_air_len, a.bw, a.sgi != 0);
-  const bool ours = packet.Data.size() >= 16 &&
-                    std::memcmp(packet.Data.data() + 10, kDvrSa, 6) == 0;
-  std::lock_guard<std::mutex> lk(g_agg_mu);
-  if (a.rssi[0] > 0) {
-    ++g_agg.n;
-    g_agg.rssi_sum += a.rssi[0];
-    if (a.rssi[0] > g_agg.rssi_max)
-      g_agg.rssi_max = a.rssi[0];
-    g_agg.snr_sum += a.snr[0];
-    if (a.snr[0] < g_agg.snr_min)
-      g_agg.snr_min = a.snr[0];
-    if (a.evm[0] != 0) {
-      g_agg.evm_sum += a.evm[0];
-      ++g_agg.evm_n;
-    }
-  }
-  if (ours) {
-    ++g_agg.dvr_frames;
-    g_agg.dvr_air_us += air;
-  } else {
-    g_agg.oth_air_us += air;
-  }
-}
+ * interferer. The library takes it as configuration; this is the demos' value.
+ */
+static const std::array<uint8_t, 6> kDvrSa = {0x57, 0x42, 0x75,
+                                              0x05, 0xd6, 0x00};
 
 static long long steady_ms() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -370,10 +324,28 @@ int main() {
   if (!rtl)
     logger->warn("chanscout: frame-free FA/CCA/NHM is Realtek-only (IRtlRadio) "
                  "— dwells carry frame stats only on this radio");
+
+  /* The aggregator is handed to the RX thread by reference, so it must
+   * outlive the loop: declared here, joined below before it goes out of
+   * scope. The library owns no thread — that contract is ours to keep. */
+  devourer::sensing::SurveyAggConfig aggcfg;
+  aggcfg.own_sa = kDvrSa;
+  aggcfg.own_sa_valid = true;
+  devourer::sensing::SurveyFrameAggregator agg(aggcfg);
+
+  devourer::sensing::DwellExecConfig ecfg;
+  ecfg.settle_ms = cfg.settle_ms;
+  ecfg.with_nhm = true;
+  ecfg.plan_hash = plan_hash;
+  ecfg.scout_id = scout_id;
+  ecfg.adapter_gen = static_cast<uint8_t>(caps.generation);
+  devourer::sensing::DwellExecutor exec(devp, rtl, &agg, ecfg);
+
+  auto sink = devourer::sensing::rx_sink(agg, &g_rx_count);
   const cm::ScanScheduler::DwellPlan first = sched.next(steady_ms());
-  std::thread rx([devp, rtl, first, &logger]() {
+  std::thread rx([devp, &sink, first, &logger]() {
     try {
-      devp->Init(packetProcessor, first.def.to_selected());
+      devp->Init(sink, first.def.to_selected());
     } catch (const std::exception &e) {
       logger->error("scout RX bring-up failed: {}", e.what());
       g_devourer_should_stop = true;
@@ -397,9 +369,6 @@ int main() {
 #endif
 
   HealthReporter health;
-  uint64_t seq = 0;
-  int energy_invalid_streak = 0;
-  bool energy_ever_valid = false;
   int quiet_dwells = 0;
   bool ever_active = false;
   std::vector<int64_t> retune_ring;
@@ -458,46 +427,11 @@ int main() {
     if (!plan.valid)
       break;
 
+    /* The dwell itself lives in the library (src/sensing/DwellExecutor.h).
+     * The two sleeps stay here because they are policy, not mechanism: this
+     * demo wants a chunked stop-aware nap so SIGINT stays responsive. */
     cm::SurveyDwell d;
-    d.seq = seq++;
-    d.def = plan.def;
-    d.round = plan.round;
-    d.plan_hash = plan_hash;
-    d.t_start_ms = t_start;
-    d.settle_ms = cfg.settle_ms;
-    d.scout_id = scout_id;
-    d.adapter_gen = static_cast<uint8_t>(caps.generation);
-    if (plan.full_width)
-      d.flags |= cm::kFlagFullWidth;
-
-    /* retune. FastRetune is the same-width lean path, so the first bin dwell
-     * after a wide verification dwell must go through the full gate to
-     * restore 20 MHz — otherwise every subsequent "bin" would observe at the
-     * candidate's width. */
-    bool tuned = false;
-    const auto rt0 = std::chrono::steady_clock::now();
-    try {
-      if (plan.full_width) {
-        devp->SetMonitorChannel(plan.def.to_selected());
-        last_was_wide = true;
-      } else if (last_was_wide) {
-        devp->SetMonitorChannel(plan.def.to_selected());
-        last_was_wide = false;
-      } else {
-        devp->FastRetune(plan.bin_ch, /*cache_rf=*/true);
-      }
-      tuned = true;
-    } catch (const std::exception &e) {
-      logger->warn("scout retune ch{} failed: {}", plan.bin_ch, e.what());
-    }
-    d.retune_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                      std::chrono::steady_clock::now() - rt0)
-                      .count();
-
-    if (!tuned) {
-      d.flags |= cm::kFlagRetuneFailed;
-      d.t_end_ms = steady_ms();
-      d.observe_ms = 0;
+    if (!exec.begin(plan, t_start, d)) {
       cm::emit_survey_dwell(*g_ev, d);
       sched.complete(plan, steady_ms(), false);
       const int cf = sched.consecutive_failures();
@@ -511,93 +445,10 @@ int main() {
       continue;
     }
 
-    /* settle, then the DISCARD BARRIER: reset the delta counters and drain
-     * frames that raced in from the previous channel. */
-    if (!nap_ms(cfg.settle_ms))
-      d.flags |= cm::kFlagTruncated;
-    if (rtl)
-      (void)rtl->GetRxEnergy(/*with_nhm=*/false);
-    {
-      std::lock_guard<std::mutex> lk(g_agg_mu);
-      g_agg = ScoutAgg{};
-    }
-    const int64_t t_obs = steady_ms();
-
-    if (!nap_ms(cfg.dwell_ms))
-      d.flags |= cm::kFlagTruncated;
-
-    RxEnergy e = rtl ? rtl->GetRxEnergy(/*with_nhm=*/true) : RxEnergy{};
-    ScoutAgg agg;
-    {
-      std::lock_guard<std::mutex> lk(g_agg_mu);
-      agg = g_agg;
-      g_agg = ScoutAgg{};
-    }
-    d.t_end_ms = steady_ms();
-    d.observe_ms = d.t_end_ms - t_obs;
-
-    d.valid_fa = e.valid_fa;
-    d.fa_ofdm = e.fa_ofdm;
-    d.fa_cck = e.fa_cck;
-    d.cca_ofdm = e.cca_ofdm;
-    d.cca_cck = e.cca_cck;
-    d.valid_igi = e.valid_igi;
-    d.igi = e.igi;
-    d.valid_nhm = e.valid_nhm;
-    if (e.valid_nhm) {
-      uint32_t total = 0, peak = 0;
-      int peak_k = 0;
-      for (int k = 0; k < 12; k++) {
-        d.nhm[k] = e.nhm[k];
-        total += e.nhm[k];
-        if (e.nhm[k] > peak) {
-          peak = e.nhm[k];
-          peak_k = k;
-        }
-      }
-      d.nhm_dur = e.nhm_duration;
-      d.nhm_peak = static_cast<uint8_t>(peak_k);
-      d.nhm_busy_pct = static_cast<uint8_t>(
-          total ? 100 * (total - e.nhm[0]) / total : 0);
-      d.nhm_env_pct = e.nhm_env_ratio_pct;
-    } else {
-      d.flags |= cm::kFlagNhmMissing;
-    }
-    /* CLM shares the NHM window, so it lands or fails with it on the phydm
-     * generations; it is flagged separately because nothing forces that. */
-    d.valid_clm = e.valid_clm;
-    d.clm_ratio_pct = e.clm_ratio_pct;
-    /* Producer-side counter plausibility (the aggregator re-checks): a delta
-     * beyond ~1000 events/ms of observation is a wrapped/reset counter. */
-    if (e.valid_fa && d.observe_ms > 0) {
-      const uint64_t ceiling =
-          1000ull * static_cast<uint64_t>(d.observe_ms);
-      if (d.cca_ofdm > ceiling || d.fa_ofdm > ceiling ||
-          d.cca_cck > ceiling || d.fa_cck > ceiling)
-        d.flags |= cm::kFlagCounterSuspect;
-    }
-    d.frames = agg.n;
-    if (agg.n) {
-      d.rssi_mean_raw = agg.rssi_sum / static_cast<int>(agg.n);
-      d.rssi_max_raw = agg.rssi_max;
-      d.snr_mean_raw = agg.snr_sum / static_cast<int>(agg.n);
-      d.snr_min_raw = agg.snr_min;
-    }
-    if (agg.evm_n) {
-      d.evm_mean_raw = agg.evm_sum / static_cast<int>(agg.evm_n);
-      d.evm_valid = true;
-    }
-    d.dvr_frames = agg.dvr_frames;
-    d.dvr_air_us = agg.dvr_air_us;
-    d.oth_air_us = agg.oth_air_us;
-
-    /* A generation whose energy counters were once valid going invalid is a
-     * read failure, not a quiet channel — flag the record before it flies. */
-    if (e.valid_fa)
-      energy_ever_valid = true;
-    energy_invalid_streak = e.valid_fa ? 0 : energy_invalid_streak + 1;
-    if (energy_ever_valid && !e.valid_fa)
-      d.flags |= cm::kFlagReadFailed;
+    bool truncated = !nap_ms(cfg.settle_ms);
+    exec.barrier(steady_ms());
+    truncated |= !nap_ms(cfg.dwell_ms);
+    exec.finish(truncated, d);
 
     cm::emit_survey_dwell(*g_ev, d);
     const bool ok = (d.flags & (cm::kFlagRetuneFailed | cm::kFlagTruncated)) == 0;
@@ -605,10 +456,13 @@ int main() {
     if (advise && engine != std::nullopt)
       engine->ingest_dwell(d, d.t_end_ms);
 
+
     /* --- health --- */
-    if (energy_ever_valid && energy_invalid_streak >= 10)
-      health.report("degraded", "energy_read_fail", energy_invalid_streak);
-    const bool active = agg.n > 0 || (e.valid_fa && (e.cca_ofdm | e.cca_cck));
+    if (exec.energy_ever_valid() && exec.energy_invalid_streak() >= 10)
+      health.report("degraded", "energy_read_fail",
+                    exec.energy_invalid_streak());
+    const bool active =
+        d.frames > 0 || (d.valid_fa && (d.cca_ofdm | d.cca_cck));
     if (active) {
       ever_active = true;
       quiet_dwells = 0;
@@ -665,7 +519,7 @@ int main() {
       if (stale)
         health.report("degraded", "stale_survey", worst);
       else if (sched.consecutive_failures() == 0 &&
-               energy_invalid_streak < 10 && quiet_dwells < 50)
+               exec.energy_invalid_streak() < 10 && quiet_dwells < 50)
         health.ok();
     }
 

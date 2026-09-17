@@ -230,6 +230,10 @@ add_library(devourer
     src/chanmig/MigClock.h
     src/chanmig/MigProposer.h
     src/chanmig/MigResponder.h
+    src/sensing/SenseWindow.h
+    src/sensing/SenseWindow.cpp
+    src/sensing/SurveyFrameAgg.h
+    src/sensing/DwellExecutor.h
     src/hopset/HopsetState.h
     src/hopset/HopsetTypes.h
     src/hopset/HopsetWire.h
@@ -1350,6 +1354,18 @@ add_test(NAME scan_plan_policy COMMAND ScanPlanSelftest)
 add_executable(SurveyAggSelftest tests/survey_agg_selftest.cpp)
 target_link_libraries(SurveyAggSelftest PRIVATE devourer)
 add_test(NAME survey_aggregate COMMAND SurveyAggSelftest)
+
+# The executor gate (src/sensing/): the dwell phase machine against a scripted
+# fake radio and a scripted clock — discard-barrier ordering, the FastRetune
+# width-restoration rule after a full-width dwell, counter plausibility at the
+# exact ceiling, the read-failure latch, the retune-throw paths, frame
+# attribution as configuration, a non-Realtek radio still producing evidence,
+# and round/seq bookkeeping against the real ScanScheduler. This loop was demo
+# code until now; a regression in it used to be findable only on air.
+add_executable(DwellExecSelftest tests/dwell_exec_selftest.cpp)
+target_link_libraries(DwellExecSelftest PRIVATE devourer)
+
+add_test(NAME dwell_executor COMMAND DwellExecSelftest)
 
 # The #277 gate: the RecommendEngine's two-leg policy over the issue's ten
 # offline scenarios (recommend / hold-healthy / weak!=congestion / saturation

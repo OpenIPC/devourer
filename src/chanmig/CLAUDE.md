@@ -13,7 +13,10 @@ Docs: `docs/adaptive-channel-migration.md`,
   passively surveys a candidate plan (`DEVOURER_SCOUT_PLAN`) while the primary
   RX stays on the video channel, emitting versioned `survey.dwell` records
   with a counter-hygiene discard barrier — the FA/CCA counters are
-  delta-on-read. v2 records also carry `clm` / `nhm_env`
+  delta-on-read. The dwell itself — retune, settle, barrier, observe, read — is
+  `devourer::sensing::DwellExecutor` (`src/sensing/`), so `chanscout` is now the
+  env-mapping and event-emitting shell around it and this subtree stays pure.
+  v2 records also carry `clm` / `nhm_env`
   (`docs/rx-spectrum-sensing.md`); the parser still accepts v1.
   Measures only; retunes nothing but itself. Grid-legality
   validation, **no regulatory DB** — the caller owns compliance.
@@ -44,7 +47,8 @@ Docs: `docs/adaptive-channel-migration.md`,
 
 Headless: `chanmig_wire_kat`, `chanmig_proto_matrix` (a 14-row failure matrix +
 a drop-every-message sweep), `chan_score_policy`, `chanmig_gate_policy`,
-`chanmig_clock_math`.
+`chanmig_clock_math`, plus `dwell_executor` for the acquisition side
+(`src/sensing/`).
 
 On-air: `tests/chanmig_endurance.sh`, `tests/chanscout_stress.sh`,
 `tests/chanmig_soak.sh`.

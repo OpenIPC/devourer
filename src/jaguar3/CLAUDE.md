@@ -80,12 +80,16 @@ This is the generation where `nhm_env` works as intended, because
 `PhydmRuntimeJaguar3.cpp` clamps DIG to `DIG_MIN_COVERAGE 0x1e` …
 `DIG_MAX_OF_MIN_COVERAGE 0x22` — four steps — so the gain reference barely
 moves and the histogram mass is free to march up under an interferer. Against a
-5 MHz non-802.11 carrier on a traffic-free channel: 0 frames decoded, `clm` 34,
-`nhm_env` 98, against a quiet 0/0/0; 802.11 traffic at MCS1 read 618 frames /
-15 / 16. Note `fa_ofdm` moved 4 → 2926 on that same arm and remains the more
-sensitive counter.
+5 MHz non-802.11 carrier on a traffic-free channel: 0 frames decoded, `clm` 6,
+`nhm_env` 56, against a quiet 0/0/0; 802.11 traffic at MCS1 read 606 frames /
+15 / 15. The discriminator is the ratio — `nhm_env`/`clm` ≈ 1 under 802.11, ≈ 9
+under the carrier. Note `fa_ofdm` moved 0 → 1776 on that same arm and remains
+the more sensitive counter, and that the magnitudes are session-specific (an
+earlier run of the same arms read 34 / 98 with `fa_ofdm` 2926 — a stronger
+carrier at the receiver for the same SDR gain). Compare arms within one
+session.
 
 In a **TX session** with a 300 ms quiet window the counters are alive (clean
-0/0/0, carrier `clm` 51 / `fa` 1772 / `cca` 1750) — on the same 8812CU and code
+0/0/0, carrier `clm` 5 / `fa` 1118 / `cca` 1122) — on the same 8812CU and code
 path that previously read *inert* with 4–20 ms windows, so window length rather
 than generation is the live variable in that older result.

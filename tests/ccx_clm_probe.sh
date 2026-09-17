@@ -34,6 +34,8 @@ CHANNEL="${CHANNEL:-6}"
 JAM_GAIN="${JAM_GAIN:-50}"
 JAM_RATE="${JAM_RATE:-5e6}"
 SECS="${SECS:-12}"
+JAM_SETTLE="${JAM_SETTLE:-8}"   # B210 acquisition can take several seconds
+ARMS="${ARMS:-quiet sdr wifi txsess txsessjam}"
 REPS="${REPS:-3}"
 ENERGY_MS="${ENERGY_MS:-500}"
 SDR_ARGS="${SDR_ARGS-}"
@@ -75,12 +77,33 @@ mkdir -p "$OUT"; rm -f "$OUT"/*.log
 PYV="$HERE/.venv/bin/python"
 [ -x "$PYV" ] || PYV="$(command -v python3)"
 
+# The B210 can take several seconds to acquire, and a jammer that comes up late
+# leaves an arm measuring an empty channel while the log still says it started.
+# Wait for the interferer to announce its centre frequency, then give it a
+# settle margin on top -- a silent arm is worse than a slow one.
 start_jammer() {
     kill_jammer
+    local before
+    before=$(grep -c "interferer\] freq" "$OUT/jammer.log" 2>/dev/null || true)
+    before=${before:-0}
     sudo "$PYV" "$HERE/sdr_interferer.py" ${SDR_SEL:+--args "$SDR_SEL"} \
         --channel "$CHANNEL" --tx-gain "$JAM_GAIN" --rate "$JAM_RATE" \
         >>"$OUT/jammer.log" 2>&1 &
-    sleep 3
+    local waited=0
+    while [ "$waited" -lt 25 ]; do
+        local now
+        now=$(grep -c "interferer\] freq" "$OUT/jammer.log" 2>/dev/null || true)
+        if [ "${now:-0}" -gt "$before" ]; then
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if [ "$waited" -ge 25 ]; then
+        echo "   WARNING: jammer never announced a centre frequency -- this arm"
+        echo "            is measuring an unjammed channel. Treat it as void."
+    fi
+    sleep "$JAM_SETTLE"
 }
 
 start_wifi_tx() {
@@ -141,27 +164,39 @@ echo "   ok -- clm is live"
 for r in $(seq 1 "$REPS"); do
     echo "== rep $r/$REPS =="
 
-    echo "   quiet"
-    kill_jammer; stop_radios
-    rx_sense "quiet_$r"
+    want() { case " $ARMS " in *" $1 "*) return 0;; *) return 1;; esac; }
 
-    echo "   sdr (non-802.11 narrowband, gain $JAM_GAIN, $JAM_RATE)"
-    start_jammer
-    rx_sense "sdr_$r"
-    kill_jammer
+    if want quiet; then
+        echo "   quiet"
+        kill_jammer; stop_radios
+        rx_sense "quiet_$r"
+    fi
 
-    echo "   wifi (devourer 802.11 TX, MCS1)"
-    start_wifi_tx
-    rx_sense "wifi_$r"
-    stop_radios
+    if want sdr; then
+        echo "   sdr (non-802.11 narrowband, gain $JAM_GAIN, $JAM_RATE)"
+        start_jammer
+        rx_sense "sdr_$r"
+        kill_jammer
+    fi
 
-    echo "   txsess (sensor transmitting, quiet-window read)"
-    tx_sense "txsess_$r"
+    if want wifi; then
+        echo "   wifi (devourer 802.11 TX, MCS1)"
+        start_wifi_tx
+        rx_sense "wifi_$r"
+        stop_radios
+    fi
 
-    echo "   txsess+sdr"
-    start_jammer
-    tx_sense "txsessjam_$r"
-    kill_jammer
+    if want txsess; then
+        echo "   txsess (sensor transmitting, quiet-window read)"
+        tx_sense "txsess_$r"
+    fi
+
+    if want txsessjam; then
+        echo "   txsess+sdr"
+        start_jammer
+        tx_sense "txsessjam_$r"
+        kill_jammer
+    fi
 done
 
 cleanup

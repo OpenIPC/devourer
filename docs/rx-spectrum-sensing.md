@@ -140,25 +140,34 @@ it looked like one. So:
 That third row is the case a monitor-mode sniffer — and devourer's own
 frame-derived occupancy — reports as a free channel.
 
-Measured with `tests/ccx_clm_probe.sh`, 8812CU sensor (Jaguar3) on ch100 (chosen because it
-is genuinely traffic-free on this bench: 0 decoded frames, `fa_ofdm` 4), three
-repetitions:
+Measured with `tests/ccx_clm_probe.sh`, 8812CU sensor (Jaguar3) on ch100 (chosen
+because it is genuinely traffic-free on this bench: 0 decoded frames, `fa_ofdm`
+0), three repetitions:
 
 | arm | decoded frames | `clm` | `nhm_env` | `fa_ofdm` |
 |---|---|---|---|---|
-| quiet | 0 | 0 | 0 | 4 |
-| 5 MHz non-802.11 carrier | **0** | 34 | **98** | 2926 |
-| devourer 802.11 TX, MCS1 | 618 | 15 | 16 | 19 |
+| quiet | 0 | 0 | 0 | 0 |
+| 5 MHz non-802.11 carrier | **0** | 6 | **56** | 1776 |
+| devourer 802.11 TX, MCS1 | 606 | 15 | 15 | 0 |
 
-The middle row is the claim, and it holds: zero frames decoded, `nhm_env` at 98.
-The discriminator is the *ratio* — `nhm_env`/`clm` is about 1.1 under 802.11 and
-about 2.9 under the carrier — which is what the vendor's ACS table encodes.
+The middle row is the claim, and it holds: zero frames decoded, `nhm_env` at 56
+against a quiet floor of 0, per-rep spread 3. The discriminator is the *ratio* —
+`nhm_env`/`clm` is about 1.0 under 802.11 and about 9 under the carrier — which
+is what the vendor's ACS table encodes.
+
+**Treat the magnitudes as session-specific, not as constants.** An earlier run
+of the same arms on the same pair read `clm` 34 / `nhm_env` 98 with `fa_ofdm`
+2926 — a ~65% stronger interferer at the receiver for the same configured SDR
+gain. Two things changed between those runs (the threshold fix below, and the
+coupling), so neither number is attributable to one cause. What reproduces is
+the *separation* and its direction, not the value. When comparing arms, compare
+within one session.
 
 That table is an **8812CU**, and the ratio does not survive the move to a die
 whose DIG loop has room to move: see the gain-reference section below, where the
 same carrier reads `nhm_env` 0 on an 8822BU.
 
-**But the existing sensors are not blind to that row.** `fa_ofdm` went 4 to 2926
+**But the existing sensors are not blind to that row.** `fa_ofdm` went 0 to 1776
 on the same arm. So on this bench CLM and NHM-env did not find an interferer
 `fa_ofdm` misses; what they add is an *airtime* unit that compares across
 channels and adapters without a magic normalising constant, and a histogram
@@ -177,8 +186,8 @@ away. Measured, same SDR carrier, same channel, same window:
 
 | sensor | arm | IGI | `clm` | `nhm_env` | `fa_ofdm` | last histogram |
 |---|---|---|---|---|---|---|
-| 8812CU (J3) | quiet | 32 | 0 | 0 | 4 | `[0,0,0,134,121,0,…]` |
-| 8812CU (J3) | carrier | 32 | 34 | **98** | 2926 | `[0,0,0,0,0,0,3,16,52,82,73,27]` |
+| 8812CU (J3) | quiet | 32 | 0 | 0 | 0 | mass low, buckets 3–4 |
+| 8812CU (J3) | carrier | 32 | 6 | **56** | 1776 | mass marched into the upper buckets |
 | 8822BU (J2) | quiet | 28 | 0 | 0 | 0 | `[0,0,255,0,…]` |
 | 8822BU (J2) | carrier | 40 | 4 | **0** | 318 | `[2,0,251,1,0,…]` |
 
@@ -193,7 +202,8 @@ are constants in devourer's own code:
 | Jaguar3 (`PhydmRuntimeJaguar3.cpp`) | `0x1e`–`0x22` | 4 steps | yes |
 
 Jaguar3's four-step clamp leaves the reference effectively fixed, so the
-histogram mass marches from bucket 3–4 up to 6–11 and `nhm_env` reads 98.
+histogram mass marches up out of buckets 3–4 and `nhm_env` reads 56 against a
+quiet 0.
 Jaguar2's 34-step window let DIG walk to 40 under the same carrier, taking the
 thresholds with it: **`nhm_env` separated by 0 across repetitions — "within
 noise" — against an interferer that moved `fa_ofdm` from 0 to 318.**
@@ -233,13 +243,14 @@ ch100 over 23 consecutive reads per arm, 8812CU sensor:
 
 | arm | `clm` med (sd) | `nhm_env` med (sd) |
 |---|---|---|
-| quiet | 0 (0.0) | 0 (1.4) |
-| non-802.11 carrier | 29 (24.2) | 96 (41.7) |
-| 802.11 traffic, ~600 frames | 15 (3.6-9.2) | 13-16 (3.8-20.0) |
+| quiet | 0 (9.6) | 0 (11.2) |
+| non-802.11 carrier | 8 (27.7) | 58 (12.5) |
+| 802.11 traffic, ~600 frames | 15 (3.5) | 16 (10.3) |
 
-Every arm has single windows reading 0 — a window that happened to land in a
-gap. The *median* is what is stable: the 802.11 arm's per-rep medians were 15,
-15, 15 across three repetitions, and the carrier arm 96, 98, 98.
+Every arm has single windows reading 0, and the quiet arm has single windows
+reading as high as 55 — a window that happened to land in a gap, or on a burst
+of ambient. The *median* is what is stable: the 802.11 arm's per-rep medians
+were 15, 15 and the carrier arm 55, 58.
 
 On a channel with uncontrolled ambient traffic it is worse. The same probe on
 ch36 — which carries ~370 foreign frames per 500 ms window on this bench — gave
@@ -270,7 +281,7 @@ counter, not something riding the DIG runtime. It is not:
 
 | sensor | TX session, clean | TX session, carrier present |
 |---|---|---|
-| 8812CU (J3) | `clm` 0, `fa` 0, `cca` 0 | `clm` 51, `fa` 1772, `cca` 1750 — **alive** |
+| 8812CU (J3) | `clm` 0, `fa` 0, `cca` 0 | `clm` 5, `fa` 1118, `cca` 1122 — **alive** |
 | 8822BU (J2) | `clm` 0, `fa` 0, `cca` 0 | `clm` 0, `fa` 0, `cca` 0 — **inert** |
 
 On Jaguar2 every counter including CLM stays pinned at zero with a carrier on

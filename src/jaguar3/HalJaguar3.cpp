@@ -1,5 +1,5 @@
-#include "InitTimer.h"
 #include "HalJaguar3.h"
+#include "InitTimer.h"
 #include <cstdlib>
 #include <cstring>
 
@@ -91,7 +91,7 @@ void HalJaguar3::run_iqk(SelectedChannel channel) {
  * Every step is ported from vendor source. */
 void HalJaguar3::rtw_hal_init(SelectedChannel channel) {
   ChannelWidth_t bw = channel.ChannelWidth;
-  InitTimer timer(_logger, "j3hal");
+  InitTimer timer(_logger, "j3hal", [this] { return _device.ctrl_xfers(); });
 
   _macinit.pre_init_system_cfg();
   timer.stage("pre_init_system_cfg");
@@ -1026,11 +1026,12 @@ void HalJaguar3::apply_bb_rf_agc_tables(InitTimer *timer) {
       default:
         /* Plain 20-bit write, not the vendor's read-modify-write under
          * MASK20BITS: the direct window's bits [31:20] read back 0 for every
-         * one of the 1540 table entries, cold boot and warm restart alike
-         * (histogrammed on one 8812EU unit), so preserving them is a
-         * no-op that cost a synchronous read per entry -- half the RF table
-         * stage, ~80 ms on the ssc338q. Write-only also pipelines
-         * (IRtlTransport::write_batch_begin). */
+         * word of both path windows after a bring-up, on an 8812EU (cold
+         * and warm) and on an 8812CU (tests/j3_rf_window_readback.sh), so
+         * an RMW that reads 0 writes exactly `data` and preserving those
+         * bits is a no-op that cost a synchronous read per entry -- half
+         * the RF table stage, ~80 ms on the ssc338q. Write-only also
+         * pipelines (ITransport::write_batch_begin). */
         _device.rtw_write32(static_cast<uint16_t>(base + ((addr & 0xff) << 2)),
                             data & RFREG_MASK);
       }

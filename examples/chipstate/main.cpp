@@ -58,7 +58,7 @@ struct RegOp {
   uint16_t addr = 0;
   uint16_t end = 0;   /* peek range: inclusive last addr (== addr if single) */
   uint32_t val = 0;   /* poke */
-  int width = 1;      /* poke: 1/2/4 */
+  int width = 1;      /* poke: 1/2/4; peek: 1 (bytes) or 4 (aligned words) */
 };
 
 struct Args {
@@ -74,13 +74,16 @@ void usage() {
   std::fprintf(stderr,
                "usage: chipstate [--vid 0xNNNN] [--pid 0xNNNN] [--init] "
                "[--channel N]\n"
-               "                 [--peek 0xA[-0xB]]... [--poke 0xA=0xV[:W]]...\n"
+               "                 [--peek 0xA[-0xB][:4]]... [--poke 0xA=0xV[:W]]...\n"
                "  default: attach read-only, no USB reset, no bring-up.\n"
                "  --init : run a full bring-up first (for a healthy reference\n"
-               "           dump on a freshly power-cycled adapter).\n"
+               "           dump on a freshly power-cycled adapter). With\n"
+               "           --peek/--poke the ops run AFTER the bring-up.\n"
                "  --peek : dump register byte(s) over the vendor-control path\n"
                "           (range inclusive, 16 bytes/row) instead of the\n"
                "           canary set. Bypasses chip dispatch — any die.\n"
+               "           `:4` reads aligned 32-bit words instead (the BB/RF\n"
+               "           windows answer 32-bit reads only).\n"
                "  --poke : write a register (width W = 1/2/4, default from the\n"
                "           value magnitude). The bench-bisection intervention\n"
                "           lever; ops run in argv order, so a trailing --peek\n"
@@ -110,6 +113,14 @@ bool parse_peek(const char *s, RegOp &op) {
   if (*end == '-') {
     if (!parse_reg_addr(end + 1, &end, op.end) || op.end < op.addr)
       return false;
+  }
+  if (*end == ':') {
+    if (end[1] != '4' || end[2] != '\0')
+      return false;
+    op.width = 4;
+    op.addr &= ~3u;
+    op.end |= 3u;
+    return true;
   }
   return *end == '\0';
 }
@@ -159,6 +170,17 @@ int run_reg_ops(libusb_device_handle *handle, Logger_t logger,
         else
           adapter.rtw_write8(op.addr, static_cast<uint8_t>(op.val));
         std::printf("poke 0x%04x = 0x%0*x\n", op.addr, op.width * 2, op.val);
+      } else if (op.width == 4) {
+        for (uint32_t row = op.addr & ~0xfu; row <= op.end; row += 16) {
+          std::printf("0x%04x:", row);
+          for (uint32_t i = row; i < row + 16; i += 4) {
+            if (i < op.addr || i > op.end)
+              std::printf("         ");
+            else
+              std::printf(" %08x", adapter.rtw_read32(static_cast<uint16_t>(i)));
+          }
+          std::printf("\n");
+        }
       } else {
         for (uint32_t row = op.addr & ~0xfu; row <= op.end; row += 16) {
           std::printf("0x%04x:", row);
@@ -281,7 +303,7 @@ int main(int argc, char **argv) {
   /* --peek/--poke: raw transport-level register access, no device
    * construction at all — the chip is not even identified, let alone
    * configured, so this works mid-experiment on any die. */
-  if (!a.ops.empty())
+  if (!a.ops.empty() && !a.init)
     return run_reg_ops(handle, logger, ctx, lock, a.ops);
 
   devourer::DeviceConfig cfg;
@@ -303,6 +325,11 @@ int main(int argc, char **argv) {
     dev->InitWrite(SelectedChannel{.Channel = static_cast<uint8_t>(a.channel),
                                    .ChannelOffset = 0,
                                    .ChannelWidth = CHANNEL_WIDTH_20});
+    /* --init + ops: the question is what the bring-up left in a register,
+     * so the ops run on the configured chip (vendor control is stateless
+     * on the handle; the device object stays alive underneath). */
+    if (!a.ops.empty())
+      return run_reg_ops(handle, logger, ctx, lock, a.ops);
   } else {
     logger->info("chipstate: read-only attach (no USB reset, no bring-up) — "
                  "the chip is being read exactly as the last session left it");

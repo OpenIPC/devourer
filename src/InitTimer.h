@@ -5,15 +5,19 @@
 #include <cstdio>
 #include <utility>
 
+#include <functional>
+
 #include "logger.h"
-#include "UsbXferCount.h"
 
 /* Stage timer for init-path profiling. Emits one event per checkpoint:
  *
- *   {"ev":"init.timing","stage":"<scope>.<stage>","ms":N,"xfers":K}
+ *   {"ev":"init.timing","stage":"<scope>.<stage>","ms":N[,"xfers":K]}
  *
- * `xfers` is the number of USB control transfers (register reads/writes)
- * the stage spent — see UsbXferCount.h; 0 on the PCIe transport.
+ * `xfers` is emitted only when the timer was given a transfer counter: the
+ * number of register transfers (reads + writes) that stage spent on that one
+ * adapter's transport (ITransport::ctrl_xfers, via RtlAdapter::ctrl_xfers),
+ * which is the unit a USB bring-up is actually paid in. Per adapter, so two
+ * devices brought up in one process do not cross-attribute; 0 on PCIe.
  *
  * `stage()` reports time since the previous checkpoint (or construction);
  * `total()` reports time since construction. Always-on: a handful of events
@@ -23,13 +27,16 @@ class InitTimer {
   using clock = std::chrono::steady_clock;
 
 public:
-  InitTimer(Logger_t logger, const char *scope)
-      : _logger{std::move(logger)}, _scope{scope}, _start{clock::now()},
-        _last{_start}, _x_start{xfers()}, _x_last{_x_start} {}
+  using XferCounter = std::function<uint64_t()>;
+
+  InitTimer(Logger_t logger, const char *scope, XferCounter xfers = {})
+      : _logger{std::move(logger)}, _scope{scope}, _xfers{std::move(xfers)},
+        _start{clock::now()}, _last{_start}, _x_start{count()},
+        _x_last{_x_start} {}
 
   void stage(const char *name) {
     const auto now = clock::now();
-    const auto x = xfers();
+    const auto x = count();
     emit(name, ms(_last, now), static_cast<long long>(x - _x_last));
     _last = now;
     _x_last = x;
@@ -37,21 +44,19 @@ public:
 
   void total() {
     emit("total", ms(_start, clock::now()),
-         static_cast<long long>(xfers() - _x_start));
+         static_cast<long long>(count() - _x_start));
   }
 
 private:
-  static uint64_t xfers() {
-    return devourer::usb_ctrl_xfers().load(std::memory_order_relaxed);
-  }
+  uint64_t count() const { return _xfers ? _xfers() : 0; }
 
   void emit(const char *name, long long millis, long long nx) {
     char stage[96];
     std::snprintf(stage, sizeof(stage), "%s.%s", _scope, name);
-    devourer::Ev(_logger->events(), "init.timing")
-        .f("stage", stage)
-        .f("ms", millis)
-        .f("xfers", nx);
+    devourer::Ev ev(_logger->events(), "init.timing");
+    ev.f("stage", stage).f("ms", millis);
+    if (_xfers)
+      ev.f("xfers", nx);
   }
 
   static long long ms(clock::time_point from, clock::time_point to) {
@@ -61,6 +66,7 @@ private:
 
   Logger_t _logger;
   const char *_scope;
+  XferCounter _xfers;
   clock::time_point _start;
   clock::time_point _last;
   uint64_t _x_start;

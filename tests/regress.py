@@ -217,6 +217,7 @@ SUPPORTED_DUTS = {
     "0bda:b811": "RTL8811AU",
     "2357:012d": "RTL8822BU (TP-Link T3U, Jaguar2)",
     "0bda:b82c": "RTL8822BU (Jaguar2)",
+    "0bda:b812": "RTL8822BU (CF-924AC V2, Jaguar2)",
     "0bda:c811": "RTL8821CU (Jaguar2)",
     "0bda:c812": "RTL8812CU (Jaguar3)",
     "0bda:c82c": "RTL8822CU (Jaguar3)",

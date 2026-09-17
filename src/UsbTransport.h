@@ -8,7 +8,6 @@
  * that discovers the bulk endpoints. The exclusive per-adapter UsbDeviceLock
  * rides here too — its lifetime is the transport's. */
 
-#include "UsbXferCount.h"
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -52,7 +51,7 @@ public:
     /* Realtek USB register addressing: wValue = addr[15:0], wIndex =
      * addr[31:16]. Lets the BB/RF window (addr + 0x10000) reach wIndex=1
      * instead of colliding with the MAC/system space at wIndex=0. */
-    usb_ctrl_xfers().fetch_add(1, std::memory_order_relaxed);
+    _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
     if (_batch)
       return async_write(static_cast<uint16_t>(addr & 0xFFFF),
                          static_cast<uint16_t>(addr >> 16), &v, sizeof(v));
@@ -64,11 +63,15 @@ public:
   }
   uint32_t read32_wide(uint32_t addr) override {
     uint32_t data = 0;
-    usb_ctrl_xfers().fetch_add(1, std::memory_order_relaxed);
+    _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
     if (_batch) {
       if (async_read(static_cast<uint16_t>(addr & 0xFFFF),
                      static_cast<uint16_t>(addr >> 16), &data, sizeof(data)))
         return data;
+      /* Logged, unlike the synchronous path below: a failed pipelined read
+       * is a queue problem, not a register problem, and must not be
+       * mistaken for a register that genuinely reads all-ones. */
+      _logger->error("USB: pipelined read32_wide(0x{:05x}) failed", addr);
       return 0xFFFFFFFFu;
     }
     if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5,
@@ -83,6 +86,9 @@ public:
   void write_batch_begin() override;
   void write_batch_end() override;
   void flush_writes() override;
+  uint64_t ctrl_xfers() const override {
+    return _ctrl_xfers.load(std::memory_order_relaxed);
+  }
 
   bool tx_async(uint8_t ep, uint8_t *buf, size_t len,
                 unsigned timeout_ms) override;
@@ -100,14 +106,28 @@ public:
 private:
   template <typename T> T ctrl_read(uint16_t reg);
   template <typename T> bool ctrl_write(uint16_t reg, T value);
-  /* Pipelined-write machinery (see IRtlTransport::write_batch_begin). */
+  /* Pipelined-write machinery (see ITransport::write_batch_begin). */
   /* Register transfers are 1/2/4 bytes; async_write/async_read refuse a
    * larger payload rather than overrun the inline setup buffer. */
   static constexpr size_t kAsyncMaxPayload = 4;
+  /* Bookkeeping the completion callback writes to. It is owned jointly by
+   * the transport and every slot (shared_ptr), not by the transport alone:
+   * a slot that could not be reaped outlives the transport (see the
+   * destructor), and its callback may still fire later through a libusb
+   * context another adapter in the process keeps pumping. It then updates
+   * this block, which the leaked slot keeps alive, instead of a freed
+   * UsbTransport. */
+  struct AsyncWrite;
+  struct AsyncPool {
+    std::vector<AsyncWrite *> free;
+    int inflight = 0;
+    uint64_t completed = 0;
+    int errors = 0;
+  };
   struct AsyncWrite {
     libusb_transfer *t;
     uint8_t buf[LIBUSB_CONTROL_SETUP_SIZE + kAsyncMaxPayload];
-    UsbTransport *self;
+    std::shared_ptr<AsyncPool> pool;
     bool done;
     /* Submitted and not yet reaped: libusb owns `t` and `buf` while set, so
      * the slot must not be reused, freed, or handed back to the free list. */
@@ -130,14 +150,15 @@ private:
   bool async_wait_progress(); /* one event-loop turn; false on timeout/error */
   static void LIBUSB_CALL async_write_cb(libusb_transfer *t);
   bool _batch = false;
-  std::vector<AsyncWrite *> _aw_free;
+  std::shared_ptr<AsyncPool> _aw = std::make_shared<AsyncPool>();
   std::vector<AsyncWrite *> _aw_all;
-  int _aw_inflight = 0;
-  uint64_t _aw_completed = 0;
-  int _aw_errors = 0;
   /* Set when a drain gave up with transfers still submitted: the destructor
    * then leaks those slots instead of freeing a transfer libusb still owns. */
   bool _aw_abandoned = false;
+  /* Vendor control transfers (register reads + writes) this transport has
+   * issued; per instance, so two adapters in one process do not
+   * cross-attribute their InitTimer stage counts. */
+  std::atomic<uint64_t> _ctrl_xfers{0};
   void discover_endpoints(); /* was InitDvObj */
   const char *speed_str() const;
   static void transfer_callback(struct libusb_transfer *transfer);
@@ -211,7 +232,7 @@ private:
 
 template <typename T> T UsbTransport::ctrl_read(uint16_t reg_num) {
   T data = 0;
-  usb_ctrl_xfers().fetch_add(1, std::memory_order_relaxed);
+  _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
   if (_batch) {
     if (async_read(reg_num, 0, &data, sizeof(T)))
       return data;
@@ -229,7 +250,7 @@ template <typename T> T UsbTransport::ctrl_read(uint16_t reg_num) {
 }
 
 template <typename T> bool UsbTransport::ctrl_write(uint16_t reg_num, T value) {
-  usb_ctrl_xfers().fetch_add(1, std::memory_order_relaxed);
+  _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
   if (_batch)
     return async_write(reg_num, 0, &value, sizeof(T));
   return libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_WRITE, 5,

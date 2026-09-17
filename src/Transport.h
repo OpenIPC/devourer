@@ -81,6 +81,11 @@ public:
   virtual void write_batch_begin() {}
   virtual void write_batch_end() {}
   virtual void flush_writes() {}
+  /* Register transfers (reads + writes) this transport instance has issued
+   * so far — the unit a USB bring-up is paid in. InitTimer differences it
+   * per stage. Per instance, never process-wide. 0 where the notion does
+   * not apply (PCIe MMIO). */
+  virtual uint64_t ctrl_xfers() const { return 0; }
 
   /* ---- frame plane ---- */
   /* Fire-and-forget data TX (the send_packet hot path). `ep` is the USB

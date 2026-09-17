@@ -1,5 +1,5 @@
-#include "InitTimer.h"
 #include "RtlJaguar3Device.h"
+#include "InitTimer.h"
 
 #include <algorithm>
 #include <climits> /* INT_MIN — "no radiotap DBM_TX_POWER" sentinel */
@@ -56,7 +56,7 @@ RtlJaguar3Device::RtlJaguar3Device(RtlAdapter device, Logger_t logger,
                 variant == jaguar3::ChipVariant::C8822E ? "8822E/EU" : "8822C/CU");
 }
 
-/* Pipelined register writes for the whole bring-up (IRtlTransport::
+/* Pipelined register writes for the whole bring-up (ITransport::
  * write_batch_begin): ends on scope exit so a throw never leaves the
  * transport in batch mode for the threads that start afterwards. */
 struct WriteBatchScope {
@@ -749,7 +749,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * race the running TX). */
   const bool want_rx = _cfg.rx.enable_with_tx;
   _rx_wanted = want_rx;
-  InitTimer timer(_logger, "j3init");
+  InitTimer timer(_logger, "j3init", [this] { return _device.ctrl_xfers(); });
   WriteBatchScope batch(_device);
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
   timer.stage("hal_init");

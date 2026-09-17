@@ -382,7 +382,7 @@ private:
    * active (_rx_loop_active) the coex thread skips its C2H drain — the RX async
    * loop sees the C2H reports as part of its stream. */
   std::thread _coex_thread;
-  volatile bool _coex_stop = false;
+  std::atomic<bool> _coex_stop{false}; /* written by Stop/~/re-init, read by the coex loop */
   void coex_runtime_loop();
   /* Nominal beacon interval in TU while a beacon is active (0 = none); the
    * AdjustBeaconTiming one-shot tweak restores to this. */

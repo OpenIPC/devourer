@@ -762,7 +762,12 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   _rx_wanted = want_rx;
   /* A second bring-up on a live device: the coex thread of the previous
    * one shares the transport, and the batch below is single-threaded by
-   * contract, so stop and join it before anything is queued. */
+   * contract, so stop and join it before anything is queued. A running RX
+   * loop (and its phydm worker) cannot be stopped from here — that is the
+   * caller's thread — so it is refused outright. */
+  if (_rx_loop_active.load())
+    throw std::runtime_error(
+        "Jaguar3: InitWrite while the RX loop is running — stop it first");
   if (_coex_thread.joinable()) {
     _coex_stop = true;
     _coex_thread.join();

@@ -64,11 +64,15 @@ struct WriteBatchScope {
   bool open = true;
   explicit WriteBatchScope(RtlAdapter &d) : dev(d) { dev.write_batch_begin(); }
   /* Closes once: after end() the destructor is a no-op, so it never touches
-   * the transport again once the coex thread (which shares it) is running. */
-  void end() {
+   * the transport again once the coex thread (which shares it) is running.
+   * Returns whether every queued write completed; the destructor's close
+   * (unwinding) drops that result, an explicit end() must act on it. */
+  bool end() {
+    bool ok = true;
     if (open)
-      dev.write_batch_end();
+      ok = dev.write_batch_end();
     open = false;
+    return ok;
   }
   ~WriteBatchScope() { end(); }
 };
@@ -968,7 +972,13 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
                     _device.rtw_read32(a + 8), _device.rtw_read32(a + 12));
   }
   timer.stage("dpdt_ack_misc");
-  batch.end(); /* sync writes from here: the coex thread shares the transport */
+  /* Sync writes from here: the coex thread shares the transport. A queued
+   * write that completed failed or short is only known at this close, and
+   * a chip with one register unprogrammed is not one to start the coex
+   * thread over and announce ready. */
+  if (!batch.end())
+    throw std::runtime_error(
+        "Jaguar3: pipelined register write(s) failed during bring-up");
   /* The timing closes here, before the coex thread starts: it shares the
    * adapter's transfer counter, so anything emitted after it would count
    * that thread's register and H2C traffic as bring-up. */

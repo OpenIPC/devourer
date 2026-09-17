@@ -88,7 +88,7 @@ public:
   }
   bool write_bytes(uint16_t reg, const uint8_t *p, size_t n) override;
   void write_batch_begin() override;
-  void write_batch_end() override;
+  bool write_batch_end() override;
   void flush_writes() override;
   uint64_t ctrl_xfers() const override {
     return _ctrl_xfers.load(std::memory_order_relaxed);

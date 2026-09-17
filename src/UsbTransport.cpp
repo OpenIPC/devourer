@@ -414,12 +414,19 @@ void UsbTransport::write_batch_begin() {
   _batch = true;
 }
 
-void UsbTransport::write_batch_end() {
+bool UsbTransport::write_batch_end() {
+  if (!_batch)
+    return true;
   flush_writes();
-  if (_batch && _aw->errors.load())
+  /* Failed and short completions are only known here, after the fact: a
+   * write reported true at submission. The count covers submit refusals,
+   * completion failures and retired slots alike. */
+  const int errors = _aw->errors.load();
+  if (errors)
     _logger->error("USB: {} pipelined register write(s) failed in this batch",
-                   _aw->errors.load());
+                   errors);
   _batch = false;
+  return errors == 0;
 }
 
 void LIBUSB_CALL UsbTransport::async_write_cb(libusb_transfer *t) {

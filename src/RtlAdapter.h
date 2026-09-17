@@ -90,7 +90,7 @@ public:
   void hci_setup() { _transport->hci_setup(); }
   /* Pipelined register writes — see ITransport::write_batch_begin. */
   void write_batch_begin() { _transport->write_batch_begin(); }
-  void write_batch_end() { _transport->write_batch_end(); }
+  bool write_batch_end() { return _transport->write_batch_end(); }
   void flush_writes() { _transport->flush_writes(); }
   uint64_t ctrl_xfers() const { return _transport->ctrl_xfers(); }
 

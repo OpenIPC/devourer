@@ -39,17 +39,20 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
 ## Bring-up cost and the pipelined register writes
 
 `InitWrite` is ~14k USB register transfers and nothing else. The stage
-timing (`InitTimer` events `j3hal.*` / `j3init.*`, each carrying `ms` and
-the `xfers` it spent; `bench_init.py` parses these events but reports only
-`ms`) is what shows it. The batching contract itself — ordering, what
-waits, single-threadedness — is documented once, at
-`ITransport::write_batch_begin` (`src/Transport.h`) and in `UsbTransport`;
-this file carries only how Jaguar3 uses it:
+timing shows it: `init.timing` events under the `j3hal.*` (HAL bring-up)
+and `j3init.*` (`InitWrite`) scopes, field schema in `src/InitTimer.h` /
+`docs/logging.md`; `bench_init.py` parses them but reports only `ms`. The
+batching contract itself — ordering, what waits, single-threadedness,
+failure propagation — is documented once, at `ITransport::write_batch_begin`
+(`src/Transport.h`) and in `UsbTransport`; this file carries only how
+Jaguar3 uses it:
 
 - `InitWrite` runs its whole bring-up inside one `WriteBatchScope`
   (`RtlJaguar3Device.cpp`), ended before the coex thread starts because that
-  thread shares the transport. `Init` (RX-only) opens no batch yet — not
-  measured on a ground-station card.
+  thread shares the transport. A queued write that completed failed or
+  short fails the batch close, and `InitWrite` throws there rather than
+  start the coex thread over an incompletely programmed chip. `Init`
+  (RX-only) opens no batch yet — not measured on a ground-station card.
 - Every settle delay drains the queue first, µs ones included, on both
   dies: the `write_bb` / `rf_writer` table delay markers, `delay_us` and
   `delay_ms` on `Halrf8822c` and `Halrf8822e`, the efuse power-cut. A settle

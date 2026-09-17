@@ -17,7 +17,9 @@
 #      0 the RMW could never have preserved anything. This leg is what
 #      decides, and it does not depend on which bring-up ran first.
 #
-# Exit 0 only when both legs say the bits are not storage.
+# Exit 0 only when both legs say the bits are not storage: a non-zero
+# histogram fails leg 1 outright (the write-back leg is not run), and any
+# poked word reading back with its high bits set fails leg 2.
 #
 #   sudo tests/j3_rf_window_readback.sh 0xc812      # 8812CU
 #   sudo tests/j3_rf_window_readback.sh 0xa81a      # 8812EU
@@ -44,6 +46,10 @@ if not words:
     print("FAIL: no register rows parsed", file=sys.stderr); sys.exit(1)
 hi = collections.Counter(w >> 20 for w in words.values())
 print(f"leg1 pid={sys.argv[2]} words={len(words)} hi12_histogram={dict(sorted(hi.items()))}", file=sys.stderr)
+if set(hi) != {0}:
+    print("FAIL leg1: some window words hold bits above 19 after the bring-up — "
+          "contradicts the no-storage premise; the write-back leg is not run", file=sys.stderr)
+    sys.exit(1)
 n = int(sys.argv[3]); ops = []
 for base in (0x3c00, 0x4c00):
     for a in range(base, base + 4 * n, 4):

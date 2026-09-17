@@ -449,6 +449,22 @@ per-bin energy + frame stats; `tests/sounding_sweep.sh` + `tests/sounding_map.py
 recover a coarse per-bin H(f) — down to 5 MHz bins on Jaguar3
 (`docs/rx-spectrum-sensing.md`).
 
+The frame-free energy read also carries the two CCX window products, `clm`
+(hardware busy **airtime** %) and `nhm_env` (NHM mass above the receiver's own
+floor — the comparable form of the histogram, unlike the naive `nhm_busy` that
+rails ~100 on a quiet channel). Their disagreement is the signal: an 802.11
+transmitter lifts both, a non-802.11 emitter lifts only `nhm_env`, which is the
+case a frame sniffer calls a free channel. Three cross-cutting caveats, none of
+them chip-specific: plain `fa_ofdm` outperformed both new sensors on every part
+measured, so this buys an airtime unit and a non-railing ratio rather than a new
+detection; `nhm_env` is referenced to the live IGI, so it is only dependable
+where DIG is not free to walk the gain out from under it (the per-generation
+windows are in each `src/<gen>/CLAUDE.md`); and the ~2 ms window makes one dwell
+a sample, not a measurement — average ~20, which `chanscout` does not do today.
+Both are **emitted, not scored**: neither `ChannelScore` nor the hopset
+occupancy law reads them. Measured numbers, the generation matrix and the
+harness: `docs/rx-spectrum-sensing.md`.
+
 ## Adaptive channel migration
 
 Slow, evidence-driven whole-link channel moves — the deliberate complement to

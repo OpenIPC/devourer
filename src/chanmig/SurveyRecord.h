@@ -23,7 +23,9 @@
 namespace devourer {
 namespace chanmig {
 
-inline constexpr int kSurveySchemaV = 1;
+/* v2 added clm / nhm_env. Readers accept any version up to this one: the added
+ * fields are optional, so a v1 record still parses with them absent. */
+inline constexpr int kSurveySchemaV = 2;
 
 enum SurveyFlag : uint16_t {
   kFlagTruncated = 1u << 0,      /* dwell cut short (shutdown) */
@@ -57,6 +59,24 @@ struct SurveyDwell {
   uint16_t nhm_dur = 0;
   uint8_t nhm_busy_pct = 0; /* % of NHM samples above the lowest bucket */
   uint8_t nhm_peak = 0;     /* fullest bucket index */
+  /* The same histogram with the receiver's own noise floor removed (the
+   * vendor's nhm_env_ratio). nhm_busy_pct rails near 100 on a quiet channel
+   * because the ambient floor already clears the lowest bucket; this one does
+   * not, which is what makes it comparable between bins. */
+  uint8_t nhm_env_pct = 0;
+
+  /* CLM busy airtime over the observe window: the fraction of 4 us ticks in
+   * which the baseband held the channel. Unlike everything above it is a
+   * time fraction rather than an event count, so it needs no per-adapter
+   * normalisation to compare bins.
+   *
+   * Its value here is the CONTRAST with nhm_env_pct, not either alone. A bin
+   * busy with 802.11 raises both; a bin carrying a non-802.11 emitter raises
+   * nhm_env_pct while clm_ratio_pct stays low, because the BB never recognises
+   * a preamble to defer to. That second case is the one a frame-counting
+   * survey — and a monitor-mode sniffer — calls empty. */
+  bool valid_clm = false;
+  uint8_t clm_ratio_pct = 0;
 
   /* Frame-driven aggregate over the observe window (raw devourer units). */
   uint32_t frames = 0;

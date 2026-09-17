@@ -24,6 +24,10 @@ What *is* available is **scalar, channel-wide** energy:
   sits, so a rising interferer moves the histogram's mass into higher buckets
   without needing a sweep. Ported from phydm CCX across all three generations
   (11AC register map for Jaguar1/2, the newer JGR3 map for Jaguar3).
+- **CLM (channel load measurement)** — the fraction of a window in which the
+  baseband held the channel busy, counted by hardware in 4 µs ticks. The one
+  number here that is *airtime* rather than an event count, so it compares
+  directly across channels and adapters without per-adapter normalisation.
 - **per-frame per-chain RSSI / SNR / EVM** — link-quality scalars averaged over
   the whole channel, available only on frames that arrive.
 
@@ -97,13 +101,218 @@ The same call also fills the **NHM power histogram**, emitted as a companion
 are untouched):
 
 ```json
-{"ev":"rx.nhm","peak":..,"busy":..,"dur":..,"hist":[b0,b1,..,b11]}
+{"ev":"rx.nhm","peak":..,"busy":..,"ratio":..,"env":..,"dur":..,"hist":[b0,..,b11]}
 ```
 
 `peak` is the fullest bucket (0 = noise floor, higher = energy in a higher power
 band), `busy` the percent of samples above the lowest bucket, `hist` the 12 raw
 IGI-referenced counts (low→high power). A frame-free measurement: the driver sets
 11 thresholds, pulses a trigger, polls a ready bit, and reads 12 counters.
+
+`busy` is the naive form and **is not comparable between bins**: the ambient
+floor already clears the lowest bucket, so it reads near 100 on a quiet channel.
+`env` is the vendor's `nhm_env_ratio` — the same mass with the receiver's own
+noise-floor cluster subtracted (`src/NhmEnvMath.h`, ported from
+`phydm_nhm_cal_nhm_env`) — and does not: measured 0% on a quiet 5 GHz channel,
+4% on a busier one and 24% on 2.4 GHz ch6, against 96-100% under a narrowband
+carrier, on an 8812CU — while `busy` sat at exactly 100 in every one of those
+arms, the quiet ones included. Compare arms on `env`.
+
+## CLM and the non-802.11 emitter
+
+`rx.energy` also carries **`clm`**, the percent of the measurement window in
+which the baseband asserted CCA busy, and **`nhm_env`**, the reduction above.
+CLM shares NHM's armed window, its `ccx_en` bit and its period register, so it
+costs one extra masked write and one extra register read on a window already
+paid for; it is filled whenever the caller asked for NHM.
+
+The pair is worth more than either number alone, because they disagree in a
+useful way. CLM counts the channel held by something the baseband recognised as
+a signal it must defer to; NHM-env counts energy above the floor whether or not
+it looked like one. So:
+
+| what is on the channel | `clm` | `nhm_env` | decoded frames |
+|---|---|---|---|
+| nothing | low | low | none |
+| an 802.11 transmitter | **high** | high | many |
+| a non-802.11 emitter | low | **high** | none |
+
+That third row is the case a monitor-mode sniffer — and devourer's own
+frame-derived occupancy — reports as a free channel.
+
+Measured with `tests/ccx_clm_probe.sh`, 8812CU sensor (Jaguar3) on ch100 (chosen
+because it is genuinely traffic-free on this bench: 0 decoded frames, `fa_ofdm`
+0), three repetitions:
+
+| arm | decoded frames | `clm` | `nhm_env` | `fa_ofdm` |
+|---|---|---|---|---|
+| quiet | 0 | 0 | 0 | 0 |
+| 5 MHz non-802.11 carrier | **0** | 6 | **56** | 1776 |
+| devourer 802.11 TX, MCS1 | 606 | 15 | 15 | 0 |
+
+The middle row is the claim, and it holds: zero frames decoded, `nhm_env` at 56
+against a quiet floor of 0, per-rep spread 3. The discriminator is the *ratio* —
+`nhm_env`/`clm` is about 1.0 under 802.11 and about 9 under the carrier — which
+is what the vendor's ACS table encodes.
+
+**Treat the magnitudes as session-specific, not as constants.** An earlier run
+of the same arms on the same pair read `clm` 34 / `nhm_env` 98 with `fa_ofdm`
+2926 — a ~65% stronger interferer at the receiver for the same configured SDR
+gain. Two things changed between those runs (the threshold fix below, and the
+coupling), so neither number is attributable to one cause. What reproduces is
+the *separation* and its direction, not the value. When comparing arms, compare
+within one session.
+
+That table is an **8812CU**, and the ratio does not survive the move to a die
+whose DIG loop has room to move: see the gain-reference section below, where the
+same carrier reads `nhm_env` 0 on an 8822BU.
+
+**But the existing sensors are not blind to that row.** `fa_ofdm` went 0 to 1776
+on the same arm. So on this bench CLM and NHM-env did not find an interferer
+`fa_ofdm` misses; what they add is an *airtime* unit that compares across
+channels and adapters without a magic normalising constant, and a histogram
+ratio that does not rail. Whether that is worth a place in the scoring law is
+still open — the community report that motivated this is an operator anecdote,
+and devourer's own measured result on channel exclusion is that it buys margin,
+not throughput.
+
+### `nhm_env` is only as good as the gain reference is still
+
+The NHM thresholds are recomputed from the **current IGI** on every read
+(`th[0] = (igi - 14) * 2`). That makes the histogram a measure of power
+*relative to the receiver's own gain* — so if the AGC backs off to absorb an
+interferer, the mass stays in the same bucket and the interferer is normalised
+away. Measured, same SDR carrier, same channel, same window:
+
+| sensor | arm | IGI | `clm` | `nhm_env` | `fa_ofdm` | last histogram |
+|---|---|---|---|---|---|---|
+| 8812CU (J3) | quiet | 32 | 0 | 0 | 0 | mass low, buckets 3–4 |
+| 8812CU (J3) | carrier | 32 | 6 | **56** | 1776 | mass marched into the upper buckets |
+| 8822BU (J2) | quiet | 28 | 0 | 0 | 0 | `[0,0,255,0,…]` |
+| 8822BU (J2) | carrier | 40 | 4 | **0** | 318 | `[2,0,251,1,0,…]` |
+
+This is not a silicon difference. Every generation ports a DIG loop; what
+differs is **how far that loop is allowed to walk IGI**, and all three bounds
+are constants in devourer's own code:
+
+| generation | DIG window | travel | runs by default? |
+|---|---|---|---|
+| Jaguar1 (`PhydmWatchdog.h`) | `0x1c`–`0x2a` | 14 steps | **no** — opt-in `DEVOURER_PHYDM_WATCHDOG=1` |
+| Jaguar2 (`HalJaguar2::dig_step`) | `0x1c`–`0x3e` | 34 steps | yes |
+| Jaguar3 (`PhydmRuntimeJaguar3.cpp`) | `0x1e`–`0x22` | 4 steps | yes |
+
+Jaguar3's four-step clamp leaves the reference effectively fixed, so the
+histogram mass marches up out of buckets 3–4 and `nhm_env` reads 56 against a
+quiet 0.
+Jaguar2's 34-step window let DIG walk to 40 under the same carrier, taking the
+thresholds with it: **`nhm_env` separated by 0 across repetitions — "within
+noise" — against an interferer that moved `fa_ofdm` from 0 to 318.**
+
+Jaguar1 is unmeasured, but its watchdog is **off unless asked for**, so a
+default Jaguar1 session walks IGI not at all — a stiffer reference than
+Jaguar3's clamp. Expect it to behave like the 8812CU rather than the 8822BU,
+and to degrade toward the 8822BU if `DEVOURER_PHYDM_WATCHDOG=1` hands it 14
+steps of travel. That is a prediction from the constants above, not a
+measurement.
+
+Because every one of those bounds is ours, the behaviour is tunable: narrow the
+Jaguar2 window, or pin IGI across the NHM window the way phydm does for its
+fixed-threshold applications. The vendor marks this seam itself —
+`phydm_nhm_set` runs DIG free for `NHM_BACKGROUND` and `NHM_ACS` (short
+comparative scans, where IGI has little time to move) but calls
+`phydm_pause_func(F00_DIG, …)` to pin IGI for the fixed-threshold apps. Pinning
+is the obvious follow-up; it is not done here because it perturbs the DIG loop
+the rest of the receive path depends on.
+
+So `nhm_env` is a dependable interferer alarm only where the gain reference is
+held still. It is still the right way to read the histogram everywhere — on both
+measured parts it correctly reports **0 on a quiet channel** where the naive
+`busy` reports 100, and that reduction has no DIG dependency at all.
+
+**`clm` has no such dependency either.** It counts busy ticks, not power against
+a moving reference, and it separated on both generations — though only just on
+Jaguar2 (0 → 4, against a repetition noise of 1). Of the two, CLM is the one
+worth considering for a scoring law; but on this evidence `fa_ofdm` remains the
+most sensitive of the three on both parts, and neither new sensor displaces it.
+
+### One window is a sample; the median over ~20 is a measurement
+
+The CCX window is ~2 ms (period 500 in 4 us ticks, the NHM default), short enough
+that a single read of a bursty channel is close to a coin flip. Measured on
+ch100 over 23 consecutive reads per arm, 8812CU sensor:
+
+| arm | `clm` med (sd) | `nhm_env` med (sd) |
+|---|---|---|
+| quiet | 0 (9.6) | 0 (11.2) |
+| non-802.11 carrier | 8 (27.7) | 58 (12.5) |
+| 802.11 traffic, ~600 frames | 15 (3.5) | 16 (10.3) |
+
+Every arm has single windows reading 0, and the quiet arm has single windows
+reading as high as 55 — a window that happened to land in a gap, or on a burst
+of ambient. The *median* is what is stable: the 802.11 arm's per-rep medians
+were 15, 15 and the carrier arm 55, 58.
+
+On a channel with uncontrolled ambient traffic it is worse. The same probe on
+ch36 — which carries ~370 foreign frames per 500 ms window on this bench — gave
+per-window sd 36 for `clm` and 38 for `nhm_env`, and its 802.11 arm did not
+replicate at all (per-rep medians 50, 44, 11).
+
+So: average several windows before ranking anything, and qualify the channel
+before believing a single dwell. `chanscout` currently takes exactly one window
+per dwell. The cheap fix is the period itself — CLM's period field is
+independent of NHM's (the low half of the same register) and takes up to 65535
+ticks, about 262 ms, so CLM can be given a window two orders of magnitude longer
+than the histogram it rides. That is not done here: lengthening the shared armed
+window changes the cost of every existing NHM consumer, which is a decision for
+the layer that wants the number.
+
+Both numbers are **emitted, not scored**. `ChannelScore` still ranks candidates
+on decoded foreign airtime plus the false-alarm term
+(`src/chanmig/ChannelScore.cpp`), and the hopset TX occupancy law still weighs
+only CCA/FA/IGI/NHM-busy: whether CLM earns a place in either is a policy
+decision that needs its own validation, not a side effect of adding a sensor.
+
+### In a TX session, CLM shares the FA counters' fate
+
+devourer's frame-free counters are known to go inert inside a transmit-oriented
+session on some generations, which is what blocks TX-side quiet-window sensing
+in `src/hopset/`. CLM was a plausible escape — it is a plain baseband tick
+counter, not something riding the DIG runtime. It is not:
+
+| sensor | TX session, clean | TX session, carrier present |
+|---|---|---|
+| 8812CU (J3) | `clm` 0, `fa` 0, `cca` 0 | `clm` 5, `fa` 1118, `cca` 1122 — **alive** |
+| 8822BU (J2) | `clm` 0, `fa` 0, `cca` 0 | `clm` 0, `fa` 0, `cca` 0 — **inert** |
+
+On Jaguar2 every counter including CLM stays pinned at zero with a carrier on
+the channel that the same adapter measured fine in a receive session. So CLM
+does **not** unblock TX-side sensing, and the fact that it dies alongside FA and
+CCA points at a shared counter/CCX enable that the TX bring-up does not set,
+rather than at the DIG loop.
+
+Jaguar3 is alive in both — and that is the same 8812CU, and the same code path,
+on which the counters were previously measured *inert* in a TX session with
+4–20 ms quiet windows. The difference here is a 300 ms window. So window length,
+not generation, is the live variable in that older result. Jaguar1 is
+unmeasured.
+
+The generation coverage is the same as NHM's — the two ride one code path
+(`src/NhmReader.h`), so CLM lands wherever NHM does. Measured on Jaguar3 (8812CU,
+the JGR3 register map) and Jaguar2 (8822BU, the 11AC map) — so **both maps are
+hardware-validated**. Jaguar1 is unmeasured but shares the 11AC map with the
+validated Jaguar2. Not measured on Kestrel; on Kestrel the vendor engine computes
+`clm_ratio` already and `hal/halbb/g6/kestrel_halbb_glue.c` discards it.
+
+The register addresses sit in the same dwords as the NHM ones: CLM period is the
+low half of the NHM period register (`0x990` / `0x1e40`), the trigger is bit 0
+of the NHM control register beside NHM's bit 1, and the result plus its ready bit
+are `0xfa4` (11AC) / `0x2d88` (JGR3).
+
+Validation: `tests/ccx_clm_probe.sh` (four arms on one sensor and one channel —
+quiet, non-802.11 carrier, 802.11 transmitter, and the sensor's own TX session —
+repeated, with `tests/ccx_clm_analyze.py` reporting each arm's spread so a
+separation smaller than the repetition noise is not read as a finding). Headless:
+`ctest -R nhm_env_math`.
 
 ![NHM in-band power histogram](img/nhm_histogram.gif)
 
@@ -117,7 +326,7 @@ a strong carrier saturates it into bucket 11.*
 
 The facilities differ by generation but all three read the same fields:
 
-| Generation | FA/CCA/IGI + NHM | register map |
+| Generation | FA/CCA/IGI + NHM + CLM | register map |
 |---|---|---|
 | Jaguar1 (8812/8821/8814) | yes | classic AC — FA 0xF48/0xA5C, CCA 0xF08, IGI 0xC50; NHM 0x994/0x990/0x998/0xfa8/0xfb4 |
 | Jaguar2 (8822BU/8821CU) | yes | classic AC (FA/CCA sampled by the DIG thread; same NHM map) |

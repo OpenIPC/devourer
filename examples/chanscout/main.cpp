@@ -559,9 +559,14 @@ int main() {
       d.nhm_peak = static_cast<uint8_t>(peak_k);
       d.nhm_busy_pct = static_cast<uint8_t>(
           total ? 100 * (total - e.nhm[0]) / total : 0);
+      d.nhm_env_pct = e.nhm_env_ratio_pct;
     } else {
       d.flags |= cm::kFlagNhmMissing;
     }
+    /* CLM shares the NHM window, so it lands or fails with it on the phydm
+     * generations; it is flagged separately because nothing forces that. */
+    d.valid_clm = e.valid_clm;
+    d.clm_ratio_pct = e.clm_ratio_pct;
     /* Producer-side counter plausibility (the aggregator re-checks): a delta
      * beyond ~1000 events/ms of observation is a wrapped/reset counter. */
     if (e.valid_fa && d.observe_ms > 0) {

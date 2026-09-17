@@ -54,11 +54,16 @@ inline void emit_survey_dwell(EventSink &sink, const SurveyDwell &d) {
       hist[i] = d.nhm[i];
     ev.f("nhm_busy", d.nhm_busy_pct)
         .f("nhm_peak", d.nhm_peak)
+        .f("nhm_env", d.nhm_env_pct)
         .f("nhm_dur", d.nhm_dur)
         .arr("nhm", hist, 12);
   } else {
-    ev.f("nhm_busy", nullptr);
+    ev.f("nhm_busy", nullptr).f("nhm_env", nullptr);
   }
+  if (d.valid_clm)
+    ev.f("clm", d.clm_ratio_pct);
+  else
+    ev.f("clm", nullptr);
   ev.f("frames", d.frames)
       .f("rssi_mean", d.rssi_mean_raw)
       .f("rssi_max", d.rssi_max_raw)
@@ -82,7 +87,9 @@ inline bool survey_dwell_from_jsonl(std::string_view line, SurveyDwell &d) {
   if (!jsonl_ev_is(line, "survey.dwell"))
     return false;
   long long v = 0;
-  if (!jsonl_int(line, "v", &v) || v != kSurveySchemaV)
+  /* Accept older schemas: every version bump so far has been additive, and a
+   * replay over an archived v1 log is exactly what this parser is for. */
+  if (!jsonl_int(line, "v", &v) || v < 1 || v > kSurveySchemaV)
     return false;
   d = SurveyDwell{};
   std::string chan, err, hex;
@@ -124,6 +131,8 @@ inline bool survey_dwell_from_jsonl(std::string_view line, SurveyDwell &d) {
     d.nhm_busy_pct = static_cast<uint8_t>(x);
     if (jsonl_int(line, "nhm_peak", &x))
       d.nhm_peak = static_cast<uint8_t>(x);
+    if (jsonl_int(line, "nhm_env", &x))
+      d.nhm_env_pct = static_cast<uint8_t>(x);
     if (jsonl_int(line, "nhm_dur", &x))
       d.nhm_dur = static_cast<uint16_t>(x);
     int hist[12] = {};
@@ -131,6 +140,10 @@ inline bool survey_dwell_from_jsonl(std::string_view line, SurveyDwell &d) {
     if (jsonl_arr(line, "nhm", hist, 12, &n))
       for (int i = 0; i < n; i++)
         d.nhm[i] = static_cast<uint8_t>(hist[i]);
+  }
+  if (jsonl_int(line, "clm", &x)) {
+    d.valid_clm = true;
+    d.clm_ratio_pct = static_cast<uint8_t>(x);
   }
   if (jsonl_int(line, "frames", &x))
     d.frames = static_cast<uint32_t>(x);

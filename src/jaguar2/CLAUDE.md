@@ -69,3 +69,26 @@ the calibrated shape.
 
 The 8822B/8821C descriptor `TXPWR_OFSET` is a hardware LUT
 (0/-3/-7/-11/+3/+6 dB); session default via `SetTxPacketPowerStep`.
+
+## CCX energy sensing (`clm` / `nhm_env`)
+
+`GetRxEnergy(with_nhm=true)` runs the shared CCX window (`src/NhmReader.h`) on
+the 11AC register map; on-air validated on an RTL8822BU.
+
+**`nhm_env` is blind to a steady interferer here, and `dig_step()` is why.** The
+NHM thresholds are referenced to the live IGI, and this generation's DIG window
+spans `0x1c`–`0x3e` — 34 steps — and runs unconditionally. Under a 5 MHz
+non-802.11 carrier it walked IGI 28 → 40, taking the thresholds with it: the
+histogram stayed parked at bucket 2 and `nhm_env` separated by **0** across
+repetitions ("within noise") against an interferer that moved `fa_ofdm` 0 → 318.
+`clm` still separated, but only 0 → 4. Narrowing this window, or pinning IGI
+across the NHM window, is the fix — both are constants in our own code.
+
+The quiet-channel half does work: `[0,0,255,0,…]` reduces to `busy` 100 /
+`ratio` 100 / **`env` 0**, which is the defect `ChannelScore.cpp` cites (by
+name, on this chip) as its reason for excluding NHM from scoring.
+
+In a **TX session** every counter including `clm` pins at zero with a carrier
+present that the same adapter measures fine in RX — so CLM does not unblock
+TX-side sensing here, and dying alongside FA/CCA points at a shared counter/CCX
+enable the TX bring-up never sets rather than at the DIG loop.

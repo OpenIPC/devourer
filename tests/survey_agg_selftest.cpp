@@ -236,6 +236,9 @@ int main() {
     d.nhm[11] = 3;
     d.nhm_dur = 2;
     d.nhm_peak = 0;
+    d.nhm_env_pct = 37;
+    d.valid_clm = true;
+    d.clm_ratio_pct = 61;
     d.adapter_gen = 2;
     d.scout_id = 0x9f3a2c11;
     emit_survey_dwell(sink, d);
@@ -260,6 +263,8 @@ int main() {
     CHECK(r.valid_nhm && r.nhm_busy_pct == d.nhm_busy_pct &&
               r.nhm[0] == 200 && r.nhm[11] == 3,
           "nhm survives");
+    CHECK(r.nhm_env_pct == 37, "nhm_env survives");
+    CHECK(r.valid_clm && r.clm_ratio_pct == 61, "clm survives");
     CHECK(r.evm_valid && r.evm_mean_raw == -52, "evm survives");
     CHECK(r.dvr_air_us == d.dvr_air_us && r.oth_air_us == d.oth_air_us,
           "airtime survives");
@@ -275,6 +280,7 @@ int main() {
     d2.valid_fa = false;
     d2.valid_igi = false;
     d2.valid_nhm = false;
+    d2.valid_clm = false;
     emit_survey_dwell(sink2, d2);
     std::fflush(f2);
     long n2 = std::ftell(f2);
@@ -285,8 +291,32 @@ int main() {
     std::fclose(f2);
     SurveyDwell r2;
     CHECK(survey_dwell_from_jsonl(line2, r2), "null form parses");
-    CHECK(!r2.valid_fa && !r2.valid_igi && !r2.valid_nhm,
+    CHECK(!r2.valid_fa && !r2.valid_igi && !r2.valid_nhm && !r2.valid_clm,
           "null fields stay invalid");
+
+    /* An archived v1 line must still replay: the schema bump was additive, so
+     * the parser accepts the older version and simply leaves the new fields
+     * unset rather than rejecting the record. */
+    SurveyDwell r3;
+    const std::string v1 =
+        "{\"ev\":\"survey.dwell\",\"v\":1,\"seq\":7,\"chan\":\"36/20\","
+        "\"round\":1,\"plan\":\"0x0\",\"start_ms\":0,\"end_ms\":100,"
+        "\"retune_us\":0,\"settle_ms\":0,\"observe_ms\":100,"
+        "\"cca_ofdm\":5,\"cca_cck\":0,\"fa_ofdm\":2,\"fa_cck\":0,"
+        "\"igi\":32,\"nhm_busy\":90,\"nhm_peak\":4,\"nhm_dur\":501,"
+        "\"frames\":10,\"flags\":0,\"scout_id\":\"0x1\",\"agen\":1}";
+    CHECK(survey_dwell_from_jsonl(v1, r3), "v1 record still parses");
+    CHECK(r3.seq == 7 && r3.valid_fa && r3.cca_ofdm == 5 && r3.igi == 32,
+          "v1 fields survive");
+    CHECK(r3.valid_nhm && r3.nhm_busy_pct == 90, "v1 nhm survives");
+    CHECK(!r3.valid_clm && r3.nhm_env_pct == 0,
+          "v1 leaves the v2 fields unset, not faked");
+
+    /* A version this build does not know is still refused. */
+    SurveyDwell r4;
+    std::string future = v1;
+    future.replace(future.find("\"v\":1"), 5, "\"v\":99");
+    CHECK(!survey_dwell_from_jsonl(future, r4), "future schema refused");
   }
 
   /* --- JsonlLite scanner corner cases --- */

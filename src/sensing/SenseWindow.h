@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <functional>
 
+#include "IRadio.h"
 #include "IRtlRadio.h"
 #include "RxSense.h"
 
@@ -107,6 +108,12 @@ inline bool counters_implausible(const RxEnergy &e, int64_t window_us,
 
 struct SenseResult {
   RxEnergy energy{};
+  /* The vendor-neutral reading, filled on EVERY backend that has one. On a
+   * Realtek radio it is derived from `energy` above so the shared delta
+   * counters are consumed once, not twice; on any other backend it comes from
+   * IRadio::GetChannelBusy() directly. This is the field a consumer reads when
+   * it must work on arbitrary hardware. */
+  ChannelBusy busy{};
   int64_t window_us = 0; /* MEASURED: barrier-close .. read-complete */
   NhmReduction nhm{};
   bool counters_suspect = false;
@@ -120,21 +127,40 @@ struct SenseResult {
 class SenseWindow {
 public:
   /* `rtl` may be null: a non-Realtek radio has no phydm counters, which is a
-   * first-class case and not an error. The barrier becomes a no-op and the
-   * read returns an all-invalid snapshot with nhm_missing set. */
-  explicit SenseWindow(IRtlRadio *rtl, MonotonicUs clock = nullptr)
-      : rtl_(rtl), clock_(clock ? std::move(clock) : MonotonicUs(&steady_us)) {}
+   * first-class case and not an error — it still gets the neutral busy-airtime
+   * reading through `radio`, which is the whole point of that contract. Both
+   * may be null only in a test. */
+  SenseWindow(IRadio *radio, IRtlRadio *rtl, MonotonicUs clock = nullptr)
+      : radio_(radio), rtl_(rtl),
+        clock_(clock ? std::move(clock) : MonotonicUs(&steady_us)) {}
 
   void barrier(const SenseOptions &opt) {
-    if (rtl_ && !opt.skip_hardware)
-      (void)rtl_->GetRxEnergy(/*with_nhm=*/false);
+    if (!opt.skip_hardware) {
+      if (rtl_)
+        (void)rtl_->GetRxEnergy(/*with_nhm=*/false);
+      else if (radio_)
+        /* The neutral counters are read-and-clear too, so the same throwaway
+         * read scopes the window on a non-Realtek backend. Without it the
+         * first sample would carry whatever accumulated during the retune and
+         * settle. */
+        (void)radio_->GetChannelBusy();
+    }
     barrier_us_ = clock_();
   }
 
   SenseResult read(const SenseOptions &opt) {
     SenseResult r;
-    if (rtl_ && !opt.skip_hardware)
-      r.energy = rtl_->GetRxEnergy(opt.with_nhm);
+    if (!opt.skip_hardware) {
+      if (rtl_) {
+        r.energy = rtl_->GetRxEnergy(opt.with_nhm);
+        /* Derived from the read just taken, NOT a second GetChannelBusy call —
+         * on Realtek that would drain the same delta counters twice and halve
+         * both readings. */
+        r.busy = busy_from_rx_energy(r.energy);
+      } else if (radio_) {
+        r.busy = radio_->GetChannelBusy();
+      }
+    }
     r.window_us = clock_() - barrier_us_;
 
     r.nhm = reduce_nhm(r.energy);
@@ -153,6 +179,7 @@ public:
   int invalid_streak() const { return invalid_streak_; }
 
 private:
+  IRadio *radio_;
   IRtlRadio *rtl_;
   MonotonicUs clock_;
   int64_t barrier_us_ = 0;

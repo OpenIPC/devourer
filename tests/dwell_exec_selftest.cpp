@@ -90,6 +90,25 @@ struct FakeRtl final : IRtlRadio {
 struct FakeNeutral final : IRadio {
   std::vector<std::string> log;
   SelectedChannel ch{};
+  /* Read-and-clear, like the real MAC channel timers: the barrier read takes
+   * whatever accumulated during retune+settle, and only what arrives after it
+   * reaches the record. */
+  uint8_t pending_busy = 0;
+  bool has_busy = false;
+  devourer::ChannelBusy GetChannelBusy() override {
+    log.push_back("busy");
+    devourer::ChannelBusy b;
+    if (has_busy) {
+      b.valid = true;
+      b.valid_busy = true;
+      b.source = devourer::BusySource::ChTime;
+      b.busy_pct = pending_busy;
+      b.window_us = 100000;
+    }
+    pending_busy = 0;
+    has_busy = false;
+    return b;
+  }
   void Init(Action_ParsedRadioPacket, SelectedChannel) override {}
   void InitWrite(SelectedChannel) override {}
   void StartRxLoop(Action_ParsedRadioPacket) override {}
@@ -402,7 +421,8 @@ int main() {
     g_now_us += 100000;
     exec.finish(false, d);
 
-    check("neutral radio still retunes", (long)n.log.size(), 1);
+    check("neutral radio retunes and reads busy twice",
+          join(n.log) == "fast:36,busy,busy", 1);
     check("neutral radio reports no energy", d.valid_fa, 0);
     check("neutral radio reports no NHM",
           (d.flags & devourer::chanmig::kFlagNhmMissing) != 0, 1);
@@ -410,6 +430,37 @@ int main() {
           (d.flags & devourer::chanmig::kFlagReadFailed) != 0, 0);
     check("neutral radio still yields frame evidence", d.frames, 1);
     check("neutral radio still yields airtime", d.oth_air_us > 0, 1);
+    /* No reading offered -> no reading recorded. Not 0% busy. */
+    check("neutral radio with no busy counter records none", d.valid_clm, 0);
+  }
+  {
+    /* THE claim this PR rests on: a radio with only GetChannelBusy — no
+     * IRtlRadio anywhere — produces a dwell carrying real busy airtime, with
+     * its provenance, so chanmig can rank on evidence from it. */
+    FakeNeutral n;
+    n.has_busy = true;
+    n.pending_busy = 41;
+    SurveyFrameAggregator agg;
+    DwellExecConfig cfg;
+    cfg.clock = scripted_clock();
+    DwellExecutor exec(&n, /*rtl=*/nullptr, &agg, cfg);
+    ScanScheduler::DwellPlan p{};
+    p.valid = true;
+    p.bin_ch = 36;
+    p.def = bin20(36);
+    SurveyDwell d;
+    exec.begin(p, 0, d);
+    g_now_us += 30000;
+    exec.barrier(30); /* consumes the pre-window count */
+    n.has_busy = true;
+    n.pending_busy = 41; /* what the window itself saw */
+    g_now_us += 100000;
+    exec.finish(false, d);
+
+    check("non-Realtek radio yields busy airtime", d.valid_clm, 1);
+    check("busy airtime passes through", d.clm_ratio_pct, 41);
+    check("provenance recorded", d.busy_source,
+          static_cast<long>(devourer::BusySource::ChTime));
   }
 
   /* --- round bookkeeping: composes with the real scheduler --- */

@@ -347,6 +347,10 @@ void Mt7612uRadio::InitWrite(SelectedChannel channel) {
        * receiver wedge. */
       if (mt7612u_start(_dev) != 0)
         throw std::runtime_error("MT7612U MAC start failed");
+      /* Arm the channel timers here too. A transmit-only session has no RX
+       * loop to do it, and TX-side quiet-window sensing is exactly a caller
+       * that would otherwise read timers nobody configured. */
+      mt7612u_link_stats_start(_dev);
     } catch (...) {
       failed = std::current_exception();
     }
@@ -570,6 +574,11 @@ void Mt7612uRadio::SetMonitorChannel(SelectedChannel channel) {
   /* Only on success, so GetSelectedChannel never reports a channel the
    * hardware did not reach. */
   _channel = channel;
+  /* Re-arm the channel timers: they are read-and-clear and their interval mark
+   * persists, so without this the first sample after a retune would carry the
+   * PREVIOUS channel's airtime and an interval spanning the retune, and report
+   * it as a valid reading for the new channel. */
+  mt7612u_link_stats_start(_dev);
 }
 
 SelectedChannel Mt7612uRadio::GetSelectedChannel() {
@@ -828,10 +837,10 @@ devourer::ChannelBusy Mt7612uRadio::GetChannelBusy() {
      * commands; serialising here keeps register access single-file the way
      * every other accessor on this class does. */
     std::lock_guard<std::recursive_mutex> lock(_mu);
-    /* Refuses before bring-up: the timers are armed by
-     * mt7612u_link_stats_start() in StartRxLoop, and a read before that is a
-     * counter that was never enabled — indistinguishable from an idle channel
-     * if it were reported as one. */
+    /* mt7612u_ch_time refuses while the timers are unarmed, which is the case
+     * before bring-up and is what keeps a previous session's register residue
+     * from being reported as an idle channel. Arming happens in both the RX
+     * and the transmit-only path, and again on every live retune. */
     if (!_dev || mt7612u_ch_time(_dev, &busy, &idle, &interval_us) != 0)
       return {};
   }

@@ -61,9 +61,9 @@ inline void emit_survey_dwell(EventSink &sink, const SurveyDwell &d) {
     ev.f("nhm_busy", nullptr).f("nhm_env", nullptr);
   }
   if (d.valid_clm)
-    ev.f("clm", d.clm_ratio_pct);
+    ev.f("clm", d.clm_ratio_pct).f("busy_src", d.busy_source);
   else
-    ev.f("clm", nullptr);
+    ev.f("clm", nullptr).f("busy_src", nullptr);
   ev.f("frames", d.frames)
       .f("rssi_mean", d.rssi_mean_raw)
       .f("rssi_max", d.rssi_max_raw)
@@ -144,6 +144,8 @@ inline bool survey_dwell_from_jsonl(std::string_view line, SurveyDwell &d) {
   if (jsonl_int(line, "clm", &x)) {
     d.valid_clm = true;
     d.clm_ratio_pct = static_cast<uint8_t>(x);
+    if (jsonl_int(line, "busy_src", &x))
+      d.busy_source = static_cast<uint8_t>(x);
   }
   if (jsonl_int(line, "frames", &x))
     d.frames = static_cast<uint32_t>(x);

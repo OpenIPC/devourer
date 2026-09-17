@@ -586,9 +586,9 @@ Generation-agnostic core in `src/` (always compiled; depends on no HAL):
   (`check_positive` + opcode state machine, without pulling in phydm itself).
   Shared by Jaguar1 + Jaguar2; Jaguar3 has its own `PhyTableLoaderJaguar3`.
 - `sensing/` — the one helper subtree that CALLS device methods: the
-  channel-survey dwell executor and the shared settle/barrier/observe window
-  (`src/sensing/CLAUDE.md`). It owns no thread, performs no sleep and takes no
-  clock of record, which is what lets `chanmig/` and `hopset/` stay pure.
+  channel-survey dwell executor and the shared observation window. Its
+  lifecycle contract is what lets `chanmig/` and `hopset/` stay pure —
+  `src/sensing/CLAUDE.md`.
 - `cell/` — caller-side per-cell helpers built on the device API
   (`UeRxAttribution`: per-transmitter windowed RX statistics keyed by 802.11
   TA); the device RX loops are untouched.

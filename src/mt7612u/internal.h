@@ -210,6 +210,7 @@ struct mt7612u_dev {
 	int      transfers_stranded; /* libusb still owns a cancelled ring */
 	uint16_t max_mpdu_rx;     /* from MT_MAX_LEN_CFG at init, less the FCS */
 	uint64_t stats_last_us;   /* previous mt7612u_link_stats() mark */
+	int      ch_time_armed;   /* channel timers configured and zeroed */
 	uint64_t ch_time_last_us; /* previous mt7612u_ch_time() mark — separate
 	                           * from stats_last_us for the same reason it
 	                           * is per-device: two readers sharing one mark

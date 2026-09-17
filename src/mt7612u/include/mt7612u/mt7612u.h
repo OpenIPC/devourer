@@ -435,10 +435,16 @@ int mt7612u_link_stats(struct mt7612u_dev *dev, struct mt7612u_link_stats *out);
  * versa). Note mt7612u_link_stats() DOES also read and clear these two
  * registers, so a session polling both splits the counts between them.
  *
- * Requires mt7612u_link_stats_start() to have armed the timers. Returns 0 on
- * success, -1 on a bad device or a failed read — never a fabricated value,
- * because a failed control transfer would otherwise read as a 100%-busy
- * channel.
+ * Requires mt7612u_link_stats_start() to have armed the timers, and REFUSES
+ * until it has: the registers retain whatever a previous session left, and a
+ * busy+idle ratio would turn that residue into a perfectly plausible
+ * percentage for a window nobody measured. Arming also resets the interval
+ * mark, and a live channel change re-arms — otherwise the first sample after a
+ * retune would mix the old channel's airtime into the new channel's reading.
+ *
+ * Returns 0 on success, -1 on a bad device, an unarmed timer or a failed read
+ * — never a fabricated value, because a failed control transfer would
+ * otherwise read as a 100%-busy channel.
  */
 int mt7612u_ch_time(struct mt7612u_dev *dev, uint32_t *busy, uint32_t *idle,
                     uint32_t *interval_us);

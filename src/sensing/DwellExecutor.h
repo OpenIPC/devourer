@@ -56,7 +56,7 @@ public:
    * folds frames, and reports its energy fields invalid rather than zero. */
   DwellExecutor(IRadio *radio, IRtlRadio *rtl, SurveyFrameAggregator *agg,
                 const DwellExecConfig &cfg)
-      : radio_(radio), agg_(agg), cfg_(cfg), sense_(rtl, cfg.clock),
+      : radio_(radio), agg_(agg), cfg_(cfg), sense_(radio, rtl, cfg.clock),
         clock_(cfg.clock ? cfg.clock : MonotonicUs(&steady_us)) {}
 
   /* Phase 1 — open the record and retune.
@@ -175,8 +175,13 @@ public:
     } else {
       out.flags |= chanmig::kFlagNhmMissing;
     }
-    out.valid_clm = e.valid_clm;
-    out.clm_ratio_pct = e.clm_ratio_pct;
+    /* Busy airtime from whichever facility this backend has — Realtek CCX CLM
+     * derived from the read above, or the neutral IRadio::GetChannelBusy on
+     * any other family. busy_source records which, because the two count busy
+     * differently and a consumer comparing across adapters needs to know. */
+    out.valid_clm = r.busy.valid_busy;
+    out.clm_ratio_pct = r.busy.busy_pct;
+    out.busy_source = static_cast<uint8_t>(r.busy.source);
 
     /* Plausibility against the record's own observation window, matching what
      * the demo did — not against the finer measured one. */

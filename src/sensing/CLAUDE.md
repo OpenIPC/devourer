@@ -31,22 +31,19 @@ ones without eroding them:
 
 ## The two layers
 
-- **`SenseWindow.h`** — the shared discipline: settle → DISCARD BARRIER →
-  observe → read, in microseconds, with no retune and no frame term. Plus
-  `reduce_nhm()` and `counters_implausible()` as free functions. A null
-  `IRtlRadio*` is a first-class case (non-Realtek radio): the barrier becomes a
-  no-op and the read reports invalid rather than zero.
-
-  The barrier is the part that matters. The chip's FA/CCA counters are
+- **`SenseWindow.h`** — the shared observation discipline: settle, discard
+  barrier, observe, read. The sequence, the units, the null-radio case and the
+  neutral-vs-Realtek read are documented at the API itself; what belongs here
+  is *why* it is shared. The barrier is the reason: the chip's counters are
   delta-on-read, so a reading only describes the channel you are on if a
-  throwaway read resets them *after* the retune has settled and *before* the
-  window opens. Miss it and the record silently carries the previous channel's
-  energy — and nothing downstream can tell.
+  throwaway read resets them after the retune has settled and before the window
+  opens. Miss it and the record silently carries the previous channel's energy,
+  and nothing downstream can tell.
 
-  `examples/tx`'s `hopset_sense_window` still carries its own copy of this
-  discipline (its comment says "the discipline is chanscout's"). Converting it
-  is a later, mechanical change; this header is shaped for it, which is why the
-  retune and the frame fold are deliberately *not* in this layer.
+  `examples/tx`'s `hopset_sense_window` still carries its own copy (its comment
+  says "the discipline is chanscout's"). Converting it is a later, mechanical
+  change; this header is shaped for it, which is why the retune and the frame
+  fold are deliberately *not* in this layer.
 
 - **`DwellExecutor.h`** — the survey-shaped layer: three phases
   (`begin`/`barrier`/`finish`) the caller drives, producing a

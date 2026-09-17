@@ -156,11 +156,13 @@ int run_reg_ops(libusb_device_handle *handle, Logger_t logger,
                 libusb_context *ctx,
                 std::shared_ptr<devourer::UsbDeviceLock> lock,
                 const std::vector<RegOp> &ops) {
-  RtlAdapter adapter(handle, logger, ctx, lock);
   /* A failed vendor-control read throws (UsbTransport::ctrl_read) — on a
    * powered-down or wedged chip that is a real answer about the chip, so
-   * report which op died and exit nonzero instead of terminating. */
+   * report which op died and exit nonzero instead of terminating. The
+   * adapter is built inside the try too: its constructor already reads a
+   * register, and after --init that read is the first thing that can fail. */
   try {
+    RtlAdapter adapter(handle, logger, ctx, lock);
     for (const RegOp &op : ops) {
       if (op.write) {
         bool ok;

@@ -21,9 +21,11 @@ run_cell() {
   local knob=$1
   local log=$OUT/pid${PID}_keep${knob}.jsonl
   # The off arm scrubs the knob from the environment (env -u) rather than
-  # relying on the caller not having exported it; the on arm sets it.
+  # relying on the caller not having exported it; the on arm sets it. Events
+  # are forced to stdout because that is the stream the counts come from.
   local env=(-u DEVOURER_RX_KEEP_CORRUPTED
-             DEVOURER_PID="$PID" DEVOURER_CHANNEL="$CH" DEVOURER_RX_DUMP_ALL=1 DEVOURER_LOG_LEVEL=warn)
+             DEVOURER_PID="$PID" DEVOURER_CHANNEL="$CH" DEVOURER_RX_DUMP_ALL=1
+             DEVOURER_EVENTS=stdout DEVOURER_LOG_LEVEL=warn)
   [ "$knob" = 1 ] && env+=(DEVOURER_RX_KEEP_CORRUPTED=1)
   env "${env[@]}" "$RX" >"$log" 2>"$log.err" &
   local p=$!; pids+=("$p")

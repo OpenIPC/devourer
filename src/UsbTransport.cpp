@@ -398,6 +398,12 @@ UsbTransport::~UsbTransport() {
 void UsbTransport::write_batch_begin() {
   if (_batch_open)
     return;
+  /* The caller's batch opens whatever happens below: with pipelining off
+   * the writes go synchronously and a failed one still counts, so
+   * write_batch_end reports it — a radio with a register unprogrammed is
+   * the same problem whichever path the write took. */
+  _batch_open = true;
+  _aw->write_errors = 0;
   /* A session that already failed to reap its transfers has a short pool and
    * a suspect event loop; stay synchronous rather than pipeline into it. */
   if (_aw_abandoned)
@@ -417,7 +423,7 @@ void UsbTransport::write_batch_begin() {
           delete s;
         }
         _logger->error("USB: libusb_alloc_transfer failed; register writes "
-                       "stay synchronous");
+                       "stay synchronous (the batch verdict still applies)");
         return;
       }
       w->pool = _aw;
@@ -427,9 +433,7 @@ void UsbTransport::write_batch_begin() {
     std::lock_guard<std::mutex> lk(_aw->mu);
     _aw->free = slots;
   }
-  _aw->write_errors = 0;
   _batch = true;
-  _batch_open = true;
 }
 
 bool UsbTransport::write_batch_end() {

@@ -422,24 +422,26 @@ void LIBUSB_CALL UsbTransport::async_write_cb(libusb_transfer *t) {
   /* Only the shared pool is touched here — never the transport, which a
    * leaked slot can outlive (AsyncPool). */
   AsyncPool &pool = *w->pool;
+  /* Order matters: the result and every piece of accounting are final
+   * before the slot becomes visible again. `done` is published after
+   * status/actual so a waiter that sees it sees the result; the free-list
+   * push comes last so a taker (always the batch's own thread) can never
+   * reset a slot this callback is still writing to. A reader that is
+   * waiting on this very slot copies its data out before it submits
+   * anything else, so the buffer is intact when it does. */
   w->status = t->status;
   w->actual = t->actual_length;
   if (t->status != LIBUSB_TRANSFER_COMPLETED ||
       t->actual_length != t->length - LIBUSB_CONTROL_SETUP_SIZE)
     pool.errors++;
-  /* The slot goes back on the free list here; a reader that is waiting on
-   * this very slot copies its data out before it submits anything else
-   * (single-threaded by contract), so the buffer is still intact. `done`
-   * is published last, after status/actual, so a waiter that sees it sees
-   * the result too. */
+  w->inflight = false;
+  w->done = true;
+  pool.inflight--;
+  pool.completed++;
   {
     std::lock_guard<std::mutex> lk(pool.mu);
     pool.free.push_back(w);
   }
-  w->inflight = false;
-  pool.inflight--;
-  w->done = true;
-  pool.completed++;
 }
 
 UsbTransport::AsyncWrite *UsbTransport::async_take_slot() {
@@ -499,8 +501,16 @@ bool UsbTransport::async_read(uint16_t wvalue, uint16_t windex, void *data,
 }
 
 bool UsbTransport::async_wait_progress() {
+  /* Pumps until THIS pool's completion counter advances, a real 2 s
+   * deadline passes, or the event loop errors. Elapsed time, not a turn
+   * count: on a shared libusb context another adapter's RX/TX completions
+   * make each handle_events return at once, and counting those turns would
+   * declare a healthy queue stuck and cancel it. */
   const uint64_t before = _aw->completed;
-  for (int turns = 0; turns < 8 && _aw->completed == before; ++turns) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (_aw->completed == before) {
+    if (std::chrono::steady_clock::now() >= deadline)
+      return false;
     struct timeval tv {0, 250 * 1000};
     const int rc = libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
     if (rc < 0) {
@@ -509,7 +519,7 @@ bool UsbTransport::async_wait_progress() {
       return false;
     }
   }
-  return _aw->completed != before;
+  return true;
 }
 
 void UsbTransport::flush_writes() {

@@ -163,12 +163,22 @@ int run_reg_ops(libusb_device_handle *handle, Logger_t logger,
   try {
     for (const RegOp &op : ops) {
       if (op.write) {
+        bool ok;
         if (op.width == 4)
-          adapter.rtw_write32(op.addr, op.val);
+          ok = adapter.rtw_write32(op.addr, op.val);
         else if (op.width == 2)
-          adapter.rtw_write16(op.addr, static_cast<uint16_t>(op.val));
+          ok = adapter.rtw_write16(op.addr, static_cast<uint16_t>(op.val));
         else
-          adapter.rtw_write8(op.addr, static_cast<uint8_t>(op.val));
+          ok = adapter.rtw_write8(op.addr, static_cast<uint8_t>(op.val));
+        if (!ok) {
+          /* A write the chip did not take must not print as a poke, or a
+           * following peek reads as a verdict about bits that were never
+           * written. */
+          std::fflush(stdout);
+          logger->error("poke 0x{:04x} (width {}) FAILED — vendor-control "
+                        "write rejected", op.addr, op.width);
+          return 4;
+        }
         std::printf("poke 0x%04x = 0x%0*x\n", op.addr, op.width * 2, op.val);
       } else if (op.width == 4) {
         for (uint32_t row = op.addr & ~0xfu; row <= op.end; row += 16) {

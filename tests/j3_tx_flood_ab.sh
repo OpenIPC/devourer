@@ -15,7 +15,7 @@ run() {
   env DEVOURER_PID="$PID" DEVOURER_CHANNEL="$CH" DEVOURER_LOG_LEVEL=info \
     timeout -s INT "$SECS" "$tree/build/txdemo" >"$log.jsonl" 2>"$log.err" || rc=$?
   # 124 = timeout fired (the normal end), 0/130 = txdemo took the INT itself.
-  case $rc in 0|124|130) ;; *) echo "$n rep$rep: txdemo exited rc=$rc"; tail -3 "$log.err";; esac
+  case $rc in 0|124|130) ;; *) echo "$n rep$rep: txdemo exited rc=$rc"; tail -3 "$log.err"; failed=1;; esac
   local tx fail rd first
   tx=$(grep -cF '"ev":"tx.' "$log.jsonl" || true)
   fail=$(grep -c 'bulk_send EP .* FAIL' "$log.err" || true)
@@ -23,4 +23,7 @@ run() {
   first=$(grep -oE 'first_tx_submit","ms":[0-9]+' "$log.jsonl" | grep -oE '[0-9]+$' || echo '?')
   echo "$n rep$rep: first_tx_ms=$first tx_events=$tx bulk_fail=$fail read_fail=$rd"
 }
+failed=0
 for r in $(seq 1 "$REPS"); do run "$A" "$r"; run "$B" "$r"; done
+# Every rep is still reported, but a crashed or failed run fails the script.
+exit "$failed"

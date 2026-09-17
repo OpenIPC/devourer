@@ -176,7 +176,11 @@ private:
   bool async_read(uint16_t wvalue, uint16_t windex, void *data, size_t n);
   AsyncWrite *async_take_slot();
   bool async_submit(AsyncWrite *w); /* in-flight accounting before submit */
-  bool async_wait_progress(); /* pump until this pool progresses; false on a 2 s deadline/error */
+  /* Pump until this pool's completion counter moves past `before` (a
+   * snapshot the caller took BEFORE checking whatever it is waiting for,
+   * so a completion landing in between is not missed); false on a 2 s
+   * deadline or an event-loop error. */
+  bool async_wait_progress(uint64_t before);
   bool pump_once(int ms);      /* one bounded handle_events turn; false on error */
   static void LIBUSB_CALL async_write_cb(libusb_transfer *t);
   /* `_batch`: pipelined submission is enabled right now. `_batch_open`: the

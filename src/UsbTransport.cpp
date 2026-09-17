@@ -494,9 +494,14 @@ UsbTransport::AsyncWrite *UsbTransport::async_take_slot() {
     _aw->free.pop_back();
     return w;
   };
+  /* Snapshot first, then look: a callback on another adapter's pump thread
+   * that returns a slot between the look and the wait moves the counter
+   * past the snapshot, so the wait returns at once instead of sitting out
+   * its deadline over an available slot. */
+  uint64_t before = _aw->completed;
   AsyncWrite *w = take();
   while (!w) {
-    if (!async_wait_progress()) {
+    if (!async_wait_progress(before)) {
       flush_writes(); /* recovers the pool on a stuck queue */
       /* A recovery that retired slots closed the batch: hand out nothing,
        * even if some cancellations did return a slot, so the caller takes
@@ -504,6 +509,7 @@ UsbTransport::AsyncWrite *UsbTransport::async_take_slot() {
       if (_aw_abandoned || !_batch)
         return nullptr;
     }
+    before = _aw->completed;
     w = take();
   }
   w->done = false;
@@ -529,8 +535,11 @@ bool UsbTransport::async_read(uint16_t wvalue, uint16_t windex, void *data,
     _logger->error("USB: pipelined read submit failed");
     return false;
   }
-  while (!w->done) {
-    if (!async_wait_progress()) {
+  for (;;) {
+    const uint64_t before = _aw->completed; /* snapshot, then look */
+    if (w->done)
+      break;
+    if (!async_wait_progress(before)) {
       flush_writes(); /* cancels + recovers; w->done is set by the cancel */
       break;
     }
@@ -542,13 +551,12 @@ bool UsbTransport::async_read(uint16_t wvalue, uint16_t windex, void *data,
   return true;
 }
 
-bool UsbTransport::async_wait_progress() {
-  /* Pumps until THIS pool's completion counter advances, a real 2 s
-   * deadline passes, or the event loop errors. Elapsed time, not a turn
+bool UsbTransport::async_wait_progress(uint64_t before) {
+  /* Pumps until THIS pool's completion counter moves past `before`, a real
+   * 2 s deadline passes, or the event loop errors. Elapsed time, not a turn
    * count: on a shared libusb context another adapter's RX/TX completions
    * make each handle_events return at once, and counting those turns would
    * declare a healthy queue stuck and cancel it. */
-  const uint64_t before = _aw->completed;
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
   while (_aw->completed == before) {
     if (std::chrono::steady_clock::now() >= deadline)
@@ -581,7 +589,7 @@ void UsbTransport::flush_writes() {
   if (_aw_abandoned)
     return;
   while (_aw->inflight > 0) {
-    if (async_wait_progress())
+    if (async_wait_progress(_aw->completed))
       continue;
     /* No completion in ~2 s of pumping. USB_TIMEOUT is 500 ms, so libusb
      * itself times a stuck transfer out and completes it through the

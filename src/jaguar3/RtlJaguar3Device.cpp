@@ -760,6 +760,14 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * race the running TX). */
   const bool want_rx = _cfg.rx.enable_with_tx;
   _rx_wanted = want_rx;
+  /* A second bring-up on a live device: the coex thread of the previous
+   * one shares the transport, and the batch below is single-threaded by
+   * contract, so stop and join it before anything is queued. */
+  if (_coex_thread.joinable()) {
+    _coex_stop = true;
+    _coex_thread.join();
+    _coex_stop = false;
+  }
   InitTimer timer(_logger, "j3init", [this] { return _device.ctrl_xfers(); },
                   [this] { _device.flush_writes(); });
   WriteBatchScope batch(_device);

@@ -354,24 +354,34 @@ UsbTransport::~UsbTransport() {
   }
   int leaked = 0;
   for (auto *w : _aw_all) {
-    /* libusb forbids freeing an active transfer, and its callback still
-     * writes through `w`. If the drain above could not reap it (dead event
-     * loop / yanked device), leaking the slot is the lesser evil: a callback
-     * that somehow fires later touches leaked memory, whereas freeing here
-     * hands libusb a dangling transfer it is still holding. Checked FIRST:
-     * a slot seen in flight is kept whatever a concurrent callback does. */
-    if (w->inflight) {
-      ++leaked; /* keeps its shared AsyncPool alive for a late callback */
-      continue;
-    }
-    /* Seen not in flight: any callback for it has at least reached the
-     * store that cleared `inflight`, and it set `cb_busy` before that, so
-     * waiting here covers the whole of its remaining stores (another
-     * adapter's pump thread reaping it right now). */
-    while (w->cb_busy)
+    for (;;) {
+      std::unique_lock<std::mutex> lk(_aw->mu);
+      /* libusb forbids freeing an active transfer, and its callback still
+       * writes through `w`. If the drain above could not reap it (dead
+       * event loop / yanked device), leaking the slot is the lesser evil:
+       * a callback that somehow fires later touches leaked memory, whereas
+       * freeing here hands libusb a dangling transfer it is still holding.
+       * Checked first: a slot seen in flight is kept whatever a concurrent
+       * callback does. */
+      if (w->inflight) {
+        ++leaked; /* keeps its shared AsyncPool alive for a late callback */
+        break;
+      }
+      /* Seen not in flight and, under the pool mutex, not busy: its
+       * callback has completed the handoff (busy-clear + free-list push
+       * happen inside this same mutex), so nothing can publish `w` after
+       * we free it. Pull it off the free list first. */
+      if (!w->cb_busy) {
+        auto &fr = _aw->free;
+        fr.erase(std::remove(fr.begin(), fr.end(), w), fr.end());
+        lk.unlock();
+        libusb_free_transfer(w->t);
+        delete w;
+        break;
+      }
+      lk.unlock(); /* a callback is inside the slot on another thread */
       std::this_thread::yield();
-    libusb_free_transfer(w->t);
-    delete w;
+    }
   }
   if (leaked)
     _logger->error("USB: leaked {} unreaped pipelined transfer slot(s)", leaked);
@@ -396,8 +406,8 @@ UsbTransport::~UsbTransport() {
  * followed by a read behaves exactly like the synchronous sequence; the win
  * is that the host does not sit through a full URB round trip per write. */
 void UsbTransport::write_batch_begin() {
-  if (_batch_open)
-    return;
+  if (_batch_depth++ > 0)
+    return; /* nested: the outermost batch owns the verdict and the close */
   /* The caller's batch opens whatever happens below: with pipelining off
    * the writes go synchronously and a failed one still counts, so
    * write_batch_end reports it — a radio with a register unprogrammed is
@@ -440,6 +450,8 @@ void UsbTransport::write_batch_begin() {
 bool UsbTransport::write_batch_end() {
   if (!_batch_open)
     return true;
+  if (--_batch_depth > 0)
+    return true; /* an inner end: pipelining stays on, the outer end reports */
   flush_writes();
   /* Failed and short completions are only known here, after the fact: a
    * write reported true at submission. The count covers failed/short
@@ -484,10 +496,16 @@ void LIBUSB_CALL UsbTransport::async_write_cb(libusb_transfer *t) {
   w->done = true;
   pool->inflight--;
   pool->completed++;
-  w->cb_busy = false;
   {
+    /* The busy-clear and the free-list push are one critical section: a
+     * taker (under the same mutex) can only see the slot after both, so
+     * no later submission's callback can be inside it while this flag
+     * store lands; and the destructor decides under this mutex too, so it
+     * cannot free the slot between the clear and the push. After the
+     * unlock nothing here touches `w`. */
     std::lock_guard<std::mutex> lk(pool->mu);
-    pool->free.push_back(w); /* pointer value only — no access through it */
+    w->cb_busy = false;
+    pool->free.push_back(w);
   }
 }
 

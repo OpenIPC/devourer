@@ -195,6 +195,7 @@ private:
    * write errors) for write_batch_end to return. */
   bool _batch = false;
   bool _batch_open = false;
+  int _batch_depth = 0; /* begin/end nest; the outermost pair owns the verdict */
   std::shared_ptr<AsyncPool> _aw = std::make_shared<AsyncPool>();
   std::vector<AsyncWrite *> _aw_all;
   /* Set when a drain gave up with transfers still submitted: the destructor

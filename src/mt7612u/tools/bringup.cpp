@@ -4,7 +4,8 @@
  * stage is independently runnable on hardware.
  */
 #include <atomic>
-#include <errno.h>
+#include <chrono>
+#include <thread>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3265,16 +3266,20 @@ static int64_t mono_us(void)
 	return (int64_t)t.tv_sec * 1000000 + t.tv_nsec / 1000;
 }
 
+/* Sleep until a mono_us() instant. Not clock_nanosleep(TIMER_ABSTIME): macOS
+ * has neither, and reaching for a second clock source would put an epoch
+ * difference between the schedule and every timestamp around it. Sleeping the
+ * remaining delta and re-checking keeps mono_us() the only clock; an
+ * interrupted or short sleep just goes round again. */
 static void sleep_until_us(int64_t at)
 {
-	struct timespec t;
+	for (;;) {
+		const int64_t left = at - mono_us();
 
-	t.tv_sec = at / 1000000;
-	t.tv_nsec = (long)(at % 1000000) * 1000;
-	/* clock_nanosleep returns the error number itself; only an interrupt is
-	 * worth resuming, and never past a stop request. */
-	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL) == EINTR && !g_stop)
-		;
+		if (left <= 0 || g_stop)
+			return;
+		std::this_thread::sleep_for(std::chrono::microseconds(left));
+	}
 }
 
 /* A ring of (host, tsf) points and the line through them. */

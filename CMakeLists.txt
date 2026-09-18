@@ -392,6 +392,7 @@ if(DEVOURER_MT7612U)
         src/mt7612u/Mt7612uRadio.cpp src/mt7612u/Mt7612uRadio.h
         src/mt7612u/Mt7612uMapping.h
         src/mt7612u/Mt7612uRxQueue.h
+        src/mt7612u/Mt7612uTsfRead.h
         src/mt7612u/internal.h
         src/mt7612u/regs.h
         src/mt7612u/initvals.h
@@ -926,6 +927,33 @@ find_package(Threads REQUIRED)
 target_link_libraries(Mt7612uRxQueueSelftest PRIVATE devourer Threads::Threads)
 
 add_test(NAME mt7612u_rx_queue COMMAND Mt7612uRxQueueSelftest)
+
+# Headless guard for the MT7612U coherent TSF read. The two register halves are
+# not latched, so the read order is the whole correctness argument, and on a
+# bench a wrong order only shows for a few hundred microseconds every 71.6 min.
+# The cell sweeps a scripted counter across the low-word wrap and requires the
+# pre-fix order to tear in the same sweep. Header-only; no libusb.
+add_executable(Mt7612uTsfReadSelftest
+    tests/mt7612u_tsf_read_selftest.cpp
+)
+target_link_libraries(Mt7612uTsfReadSelftest PRIVATE devourer)
+
+add_test(NAME mt7612u_tsf_read COMMAND Mt7612uTsfReadSelftest)
+
+# The C entry points' failure contract, which the cell above cannot reach: a
+# failed read must be distinguishable from a value, because 0xffffffff is a
+# legitimate register word on this part. Needs the subtree's symbols, so it is
+# gated on DEVOURER_MT7612U (CI's MediaTek jobs turn it on).
+if(DEVOURER_MT7612U)
+    add_executable(Mt7612uTsfApiSelftest
+        tests/mt7612u_tsf_api_selftest.cpp
+    )
+    target_link_libraries(Mt7612uTsfApiSelftest PRIVATE devourer)
+    target_include_directories(Mt7612uTsfApiSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u/include)
+
+    add_test(NAME mt7612u_tsf_api COMMAND Mt7612uTsfApiSelftest)
+endif()
 
 # Headless guard for the TX quiesce seam (ITransport::quiesce_tx via
 # RtlAdapter): the explicit "stop TX and wait it out" call every device makes

@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -323,7 +324,20 @@ static Drone *g_drone = nullptr;
 
 static uint64_t read_tsf() {
   std::lock_guard<std::mutex> lk(g_dev_mu);
-  return g_dev ? g_dev->ReadTsf() : 0;
+  /* The stamp is informational; 0 already means "no TSF". A failed read
+   * throws (IRadio contract) and must not take the control plane down, but it
+   * is said once rather than swallowed. */
+  try {
+    return g_dev ? g_dev->ReadTsf() : 0;
+  } catch (const std::exception &e) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      fprintf(stderr, "chanmig: TSF read failed (%s); stamping 0 from here on failure\n",
+              e.what());
+    }
+    return 0;
+  }
 }
 
 static void drone_do(const std::vector<cm::MigAction> &acts) {

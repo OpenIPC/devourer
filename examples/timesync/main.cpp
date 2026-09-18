@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -157,9 +158,26 @@ static void run_master(IRadio* dev, const timesync::Config& c) {
   while (!g_devourer_should_stop) {
     // Stamp with the master's hardware TSF at send time. TX-side ReadTsf() is
     // reliable (no bulk-IN flood), unlike on a busy receiver.
-    uint64_t tsf = dev->ReadTsf();
-    auto f = tdma::build_frame(rt, tdma::Class::Marker, seq++, 0, tsf);
-    dev->send_packet(f.data(), f.size());
+    // A failed read throws (IRadio contract); skip this marker rather than
+    // stamp it with a time the slave would fit as real.
+    uint64_t tsf = 0;
+    bool stamped = true;
+    try {
+      tsf = dev->ReadTsf();
+    } catch (const std::exception &e) {
+      static bool warned = false;
+      stamped = false;
+      if (!warned) {
+        warned = true;
+        fprintf(stderr, "timesync master: TSF read failed (%s), marker skipped "
+                        "(said once; markers keep being skipped while it fails)\n",
+                e.what());
+      }
+    }
+    if (stamped) {
+      auto f = tdma::build_frame(rt, tdma::Class::Marker, seq++, 0, tsf);
+      dev->send_packet(f.data(), f.size());
+    }
 
     if (std::chrono::steady_clock::now() >= next_stat) {
       next_stat += std::chrono::seconds(1);

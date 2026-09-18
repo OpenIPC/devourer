@@ -577,6 +577,21 @@ from `DEVOURER_HOP_BW`, not from the `/40` in `DEVOURER_TX_RATE` (that only
 fills the descriptor field), and getting that wrong zeroes a cell for reasons
 that have nothing to do with the DUT.
 
+### `mt7612u_tsf_wrap.sh`: the MT7612U TSF read across the low-word wrap
+
+Wraps `bringup tsfwrap`, which is where the "two TSF halves are not latched"
+table in `docs/mt7612u.md` comes from. The two register halves are not latched,
+so a read is only wrong for the few hundred microseconds around a low-word
+wrap, and bring-up restarts the counter: one run is ~72 min and covers one gap
+of the read. Both gaps cost ~2.4 h on one adapter, or ~72 min on two in
+parallel (`DEVS="6-1 7-1"`). `SMOKE=1` checks the schedule, the host-clock
+model and the plumbing against a 16.7 s carry in ~2.5 min, and says SMOKE
+rather than PASS because a carry inside the low word cannot tear a read.
+
+One adapter is enough to verify the claim; the second only buys another unit
+and the wall-clock. A run can end with no verdict (rc 3) when the wrap lands in
+the other gap — that is a re-run, which the script does once, not a defect.
+
 ## Supported DUTs
 
 Listed in `SUPPORTED_DUTS` at the top of `regress.py`. Extend the dict

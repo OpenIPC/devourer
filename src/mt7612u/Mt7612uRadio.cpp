@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <ios>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -813,7 +814,16 @@ bool Mt7612uRadio::GetPermanentMacAddress(uint8_t out[6]) {
 
 uint64_t Mt7612uRadio::ReadTsf() {
   std::lock_guard<std::recursive_mutex> lock(_mu);
-  return _dev ? mt7612u_read_tsf(_dev) : 0;
+  if (!_dev)
+    return 0;
+  /* A failed read throws, as it does on every Realtek backend (a failed
+   * rtw_read throws std::ios_base::failure) and as IRadio::ReadTsf documents.
+   * Returning 0 would claim "unsupported"; returning the joined words would
+   * hand a timing consumer a plausible wrong clock. */
+  uint64_t tsf;
+  if (mt7612u_read_tsf_chk(_dev, &tsf))
+    throw std::ios_base::failure("mt7612u: TSF read failed");
+  return tsf;
 }
 
 /* Busy airtime from the MAC channel timers — the MediaTek half of the neutral
@@ -1102,8 +1112,11 @@ devourer::AdapterCaps Mt7612uRadio::GetAdapterCaps() {
    * describes sat three hundred lines above. */
   c.hw_beacon_txtsf = true;
   /* No TSF load path: every write sequence the bringup `tsfwrite` gate tries
-   * is ignored (docs/mt7612u.md), so WriteTsf stays on the IRadio default. */
-  c.tsf_write_ok = false;
+   * is ignored (docs/mt7612u.md), so WriteTsf stays on the IRadio default.
+   * Taken from the C caps rather than restated, so the two cannot drift; the
+   * C library owns the fact (mt7612u_get_caps), and `hw` is zeroed when there
+   * is no device, which is the same answer. */
+  c.tsf_write_ok = hw.tsf_write;
   /* Measured on air: 0 frames at the stimulus radio unarmed, 3500+ armed. */
   c.ack_responder_ok = true;
   /* Unmeasured, so false rather than optimistic - nothing here drives the

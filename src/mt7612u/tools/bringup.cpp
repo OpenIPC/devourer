@@ -4,6 +4,9 @@
  * stage is independently runnable on hardware.
  */
 #include <atomic>
+#include <chrono>
+#include <thread>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -15,6 +18,7 @@
 #include <time.h>
 #include <sys/resource.h>
 #include "../internal.h"
+#include "../Mt7612uTsfRead.h"
 
 
 static struct mt7612u_dev dev;
@@ -634,29 +638,40 @@ static int gate_beacon(uint8_t chan, int secs)
 	printf("witness: run rxdemo on the 8812AU and grep the BSSID; "
 	       "or `iw dev <sta> scan | grep MT7612U-AP`\n");
 
-	/* Watch the TSF advance - proof the beacon timer is running. DW0 is the
-	 * low word on this silicon (mt76's debug read has it backwards). */
+	/* Watch the TSF advance - proof the beacon timer is running. The checked
+	 * read matters here: an unchecked one returns all-ones on a failed
+	 * transfer, which is "greater than the previous sample" and would count a
+	 * dead transport as a live timer. A failed read breaks the chain instead. */
 	{
-		uint64_t prev = 0;
-		int good = 0;
+		uint64_t prev = 0, tsf;
+		bool have = false;
+		int good = 0, failed = 0;
 
 		for (int s = 0; s < secs && !g_stop; s++) {
-			uint32_t lo = mt_rr(&dev, MT_TSF_TIMER_DW0);
-			uint32_t hi = mt_rr(&dev, MT_TSF_TIMER_DW1);
-			uint64_t tsf = ((uint64_t)hi << 32) | lo;
-
-			if (s)
-				printf("  t=%ds TSF=%llu (+%llu us)\n", s,
-				       (unsigned long long)tsf,
-				       (unsigned long long)(tsf - prev));
-			if (s && tsf > prev)
-				good++;
-			prev = tsf;
+			if (mt7612u_read_tsf_chk(&dev, &tsf)) {
+				printf("  t=%ds TSF read failed\n", s);
+				failed++;
+				have = false;
+			} else {
+				if (have)
+					printf("  t=%ds TSF=%llu (+%llu us)\n", s,
+					       (unsigned long long)tsf,
+					       (unsigned long long)(tsf - prev));
+				if (have && tsf > prev)
+					good++;
+				prev = tsf;
+				have = true;
+			}
 			if (!wait_ms(1000))
 				break;
 		}
 		/* A running TSF is necessary, not sufficient - the witness is the
 		 * real gate - but a frozen TSF means no beacons are being sent. */
+		if (failed) {
+			printf("GATE A: FAIL - %d TSF read(s) failed; no timer verdict on a failing transport\n",
+			       failed);
+			goto out;
+		}
 		if (good == 0) {
 			printf("GATE A: FAIL - TSF did not advance; beacon timer is dead\n");
 			goto out;
@@ -1790,8 +1805,8 @@ static int gate_caps(uint8_t chan)
 	printf("      5 GHz %u-%u MHz, 2.4 GHz %u-%u MHz\n",
 	       c.band_5g_min_mhz, c.band_5g_max_mhz,
 	       c.band_2g_min_mhz, c.band_2g_max_mhz);
-	printf("      ampdu_tx=%u per_chain_rssi=%u narrowband=%u fast_retune=%u\n",
-	       c.ampdu_tx, c.per_chain_rssi, c.narrowband, c.fast_retune);
+	printf("      ampdu_tx=%u per_chain_rssi=%u narrowband=%u fast_retune=%u tsf_write=%u\n",
+	       c.ampdu_tx, c.per_chain_rssi, c.narrowband, c.fast_retune, c.tsf_write);
 	printf("      max MPDU: tx %u  rx %u  (rx is MT_MAX_LEN_CFG 0x%03x on air,\n"
 	       "                             less the 4-byte FCS)\n",
 	       c.max_mpdu_tx, c.max_mpdu_rx,
@@ -1813,33 +1828,49 @@ static int gate_caps(uint8_t chan)
 
 	/* TSF: the register names suggest DW0 is the low word but mt76 reads
 	 * DW0 as the high one. Rather than trust either reading, sleep a known
-	 * 200 ms and require the clock to have advanced by that much. */
+	 * 200 ms and require the clock to have advanced by that much. The raw
+	 * words stay raw on purpose - this is the measurement of the word order -
+	 * but they are checked: an all-ones failure would otherwise pose as a
+	 * word-order answer. */
 	{
-		uint32_t a0 = mt_rr(&dev, MT_TSF_TIMER_DW0);
-		uint32_t a1 = mt_rr(&dev, MT_TSF_TIMER_DW1);
-		uint32_t b0, b1;
+		uint32_t a0 = 0, a1 = 0, b0 = 0, b1 = 0;
 		int64_t d_hi0, d_lo0;
+		bool raw_ok;
 
+		raw_ok = !mt_rr_chk(&dev, MT_TSF_TIMER_DW0, &a0) &&
+		         !mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &a1);
 		mt_usleep(200000);
-		b0 = mt_rr(&dev, MT_TSF_TIMER_DW0);
-		b1 = mt_rr(&dev, MT_TSF_TIMER_DW1);
+		raw_ok = raw_ok && !mt_rr_chk(&dev, MT_TSF_TIMER_DW0, &b0) &&
+		         !mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &b1);
+		if (!raw_ok) {
+			printf("\nTSF raw: read failed - no word-order verdict\n");
+			bad++;
+		}
 
 		d_hi0 = (int64_t)((((uint64_t)b0 << 32) | b1) - (((uint64_t)a0 << 32) | a1));
 		d_lo0 = (int64_t)((((uint64_t)b1 << 32) | b0) - (((uint64_t)a1 << 32) | a0));
 
-		printf("\nTSF raw: DW0 %08x -> %08x   DW1 %08x -> %08x\n", a0, b0, a1, b1);
-		printf("  as (DW0<<32)|DW1 : delta %lld us\n", (long long)d_hi0);
-		printf("  as (DW1<<32)|DW0 : delta %lld us\n", (long long)d_lo0);
-		printf("  over a 200000 us sleep -> DW%d is the low word\n",
-		       (d_lo0 > 150000 && d_lo0 < 400000) ? 0 : 1);
+		if (raw_ok) {
+			printf("\nTSF raw: DW0 %08x -> %08x   DW1 %08x -> %08x\n", a0, b0, a1, b1);
+			printf("  as (DW0<<32)|DW1 : delta %lld us\n", (long long)d_hi0);
+			printf("  as (DW1<<32)|DW0 : delta %lld us\n", (long long)d_lo0);
+			printf("  over a 200000 us sleep -> DW%d is the low word\n",
+			       (d_lo0 > 150000 && d_lo0 < 400000) ? 0 : 1);
+		}
 
-		t1 = mt7612u_read_tsf(&dev);
+		int rc = mt7612u_read_tsf_chk(&dev, &t1);
+
 		mt_usleep(200000);
-		t2 = mt7612u_read_tsf(&dev);
-		delta = (int64_t)(t2 - t1);
-		printf("  mt7612u_read_tsf(): delta %lld us  %s\n", (long long)delta,
-		       (delta > 150000 && delta < 400000) ? "OK" : "*** WRONG ORDER ***");
-		if (delta < 150000 || delta > 400000) bad++;
+		rc |= mt7612u_read_tsf_chk(&dev, &t2);
+		if (rc) {
+			printf("  mt7612u_read_tsf_chk(): read failed\n");
+			bad++;
+		} else {
+			delta = (int64_t)(t2 - t1);
+			printf("  mt7612u_read_tsf_chk(): delta %lld us  %s\n", (long long)delta,
+			       (delta > 150000 && delta < 400000) ? "OK" : "*** WRONG ORDER ***");
+			if (delta < 150000 || delta > 400000) bad++;
+		}
 	}
 
 	/* 40 MHz */
@@ -2903,26 +2934,12 @@ static bool tsf_live(int64_t delta)
 	return delta > kTsfLiveMinUs && delta < kTsfLiveMaxUs;
 }
 
-/* A checked TSF read: DW1, DW0, DW1 again with one retry if the low word
- * wrapped in between, every word through mt_rr_chk. mt7612u_read_tsf() goes
- * through mt_rr, which reports a failed transfer as all-ones - two of those
- * read as a stopped clock, and a flaky cable would be reported as a dead
- * timer. False means a transfer failed and *out is not a TSF. */
+/* The library's checked, wrap-safe TSF read. A failed transfer must stay
+ * distinguishable from a stopped clock here, or a flaky cable is reported as
+ * a dead timer. False means a transfer failed and *out is not a TSF. */
 static bool tsf_read_chk(uint64_t *out)
 {
-	uint32_t hi, lo, hi2;
-
-	if (mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &hi) ||
-	    mt_rr_chk(&dev, MT_TSF_TIMER_DW0, &lo) ||
-	    mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &hi2))
-		return false;
-	if (hi2 != hi) {
-		hi = hi2;
-		if (mt_rr_chk(&dev, MT_TSF_TIMER_DW0, &lo))
-			return false;
-	}
-	*out = ((uint64_t)hi << 32) | lo;
-	return true;
+	return mt7612u_read_tsf_chk(&dev, out) == 0;
 }
 
 /* A fresh base for one arm, clear of a low-word wrap. Each arm judges a take
@@ -3184,6 +3201,411 @@ static int gate_tsfwrite(uint8_t chan)
 	return any ? 1 : 0;
 }
 
+/* Gate TSF-WRAP: the TSF read across the 2^32 us low-word wrap, judged
+ * against a truth that is not the read under test.
+ *
+ * WHY A GATE. The two TSF halves are not latched, so a read is only wrong for
+ * the few hundred microseconds around a low-word wrap, and bring-up restarts
+ * the counter near 0, so the first wrap is 71.6 min in. The headless
+ * mt7612u_tsf_read cell holds the read discipline against a scripted counter;
+ * this holds it against the part. A PASS takes ~72 min.
+ *
+ * TRUTH. A least-squares host-clock model, tsf = t0 + a + b * (host - h0),
+ * fitted over one read per 100 ms for the preceding 60 s. A read latches at an
+ * unknown instant inside its control transfer, and one transfer can take 10 ms
+ * on a busy USB 2.0 bus, so a read is judged against the model over the host
+ * interval that bracketed it (+-kTsfWrapTolUs), never at one timestamp. A torn
+ * read misses by 2^32 us.
+ *
+ * THREE PARTS.
+ *  1. Continuous: mt7612u_read_tsf_chk in a tight loop for the whole run. Any
+ *     failed read or backwards step fails the gate, and every read within
+ *     kTsfWrapWindowUs of the wrap must sit within kTsfWrapTolUs of the model.
+ *  2. Forced: once the counter is within 3 s of the wrap, the mt7612u::tsf_read template
+ *     the library compiles runs with a reader that sleeps to a schedule, so the
+ *     wrap lands in the chosen gap of the read (gap 1: between the first high
+ *     and the low read; gap 2: between the low and the second high). It must
+ *     take the retry and land within kTsfWrapTolUs of the model.
+ *  3. Positive control, interleaved with part 2: a plain DW0-then-DW1 read with
+ *     the wrap between its halves. It must miss the model by ~2^32 us, or the
+ *     rig cannot see the tear it exists to catch - and a DW0 read that froze
+ *     DW1 would make it read correctly.
+ *
+ * WHAT IT DOES NOT SHOW. Part 2 occupies the wrap instant, so the exported
+ * function in part 1 never itself takes the retry across it; the forced read
+ * is the same template, driven through a different reader.
+ *
+ * Smoke mode: wrap_bits < 32 treats the carry out of that bit of the low word
+ * as the "wrap" (16.7 s at 24). That checks the schedule and the model in
+ * seconds but cannot tear a read, so it reports SMOKE, never PASS. */
+static const int64_t kTsfWrapTolUs = 5000;
+/* A gone device fails every read at loop speed; stop rather than spin for the
+ * rest of the run (an interrupted run reached 192 million failed reads). */
+static const uint64_t kTsfWrapMaxConsecFails = 100;
+/* A read this slow still judges (it is judged over its own interval), but it is
+ * too coarse to fit the model from. Decoupled from the tolerance: on a busy
+ * USB 2.0 bus a 3-transfer read can take longer than the tolerance, and
+ * refusing to fit from those would leave the model empty. */
+static const int64_t kTsfWrapFeedMaxUs = 20000;
+/* The counter runs at the host's rate to within a crystal's error. A fit
+ * outside this band is a frozen or wedged counter, not a clock to predict a
+ * wrap from. */
+static const double kTsfWrapRateMin = 0.9, kTsfWrapRateMax = 1.1;
+/* How far either side of the wrap the forced read places its accesses. Wide
+ * enough that one slow (~10 ms) control transfer cannot move a latch across
+ * the wrap. */
+static const int64_t kTsfWrapMarginUs = 40000;
+static const int64_t kTsfWrapWindowUs = 120000000;
+static const int kTsfWrapModelPts = 600;
+
+static int64_t mono_us(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (int64_t)t.tv_sec * 1000000 + t.tv_nsec / 1000;
+}
+
+/* Sleep until a mono_us() instant. Not clock_nanosleep(TIMER_ABSTIME): macOS
+ * has neither, and reaching for a second clock source would put an epoch
+ * difference between the schedule and every timestamp around it. Sleeping the
+ * remaining delta and re-checking keeps mono_us() the only clock; an
+ * interrupted or short sleep just goes round again. */
+static void sleep_until_us(int64_t at)
+{
+	for (;;) {
+		const int64_t left = at - mono_us();
+
+		if (left <= 0 || g_stop)
+			return;
+		std::this_thread::sleep_for(std::chrono::microseconds(left));
+	}
+}
+
+/* A ring of (host, tsf) points and the line through them. */
+struct tsf_model {
+	double h[kTsfWrapModelPts], t[kTsfWrapModelPts];
+	int n, head;
+	double h0, t0, a, b;
+	bool ok;
+};
+
+static void tsf_model_add(struct tsf_model *m, double h, double t)
+{
+	m->h[m->head] = h;
+	m->t[m->head] = t;
+	m->head = (m->head + 1) % kTsfWrapModelPts;
+	if (m->n < kTsfWrapModelPts)
+		m->n++;
+}
+
+static void tsf_model_fit(struct tsf_model *m)
+{
+	const int first = m->n < kTsfWrapModelPts ? 0 : m->head;
+	double sx = 0, sy = 0, sxx = 0, sxy = 0, den;
+
+	m->ok = false;
+	if (m->n < 50)
+		return;
+	m->h0 = m->h[first];
+	m->t0 = m->t[first];
+	for (int i = 0; i < m->n; i++) {
+		int k = (first + i) % kTsfWrapModelPts;
+		double x = m->h[k] - m->h0, y = m->t[k] - m->t0;
+
+		sx += x; sy += y; sxx += x * x; sxy += x * y;
+	}
+	den = m->n * sxx - sx * sx;
+	if (den == 0)
+		return;
+	m->b = (m->n * sxy - sx * sy) / den;
+	m->a = (sy - m->b * sx) / m->n;
+	m->ok = true;
+}
+
+static double tsf_model_at(const struct tsf_model *m, double h)
+{
+	return m->t0 + m->a + m->b * (h - m->h0);
+}
+
+/* Whether a value read between host instants h_start and h_end is on the
+ * model: between the model at the start and at the end, give or take the
+ * tolerance. *err gets the miss against the interval's midpoint, for printing. */
+static bool tsf_model_holds(const struct tsf_model *m, double v, double h_start,
+                            double h_end, double *err)
+{
+	*err = v - tsf_model_at(m, (h_start + h_end) / 2);
+	return v >= tsf_model_at(m, h_start) - kTsfWrapTolUs &&
+	       v <= tsf_model_at(m, h_end) + kTsfWrapTolUs;
+}
+
+static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
+{
+	static struct tsf_model model;
+	int64_t last_pt = 0, last_status = 0, wrap_host = 0;
+	uint64_t prev = 0, reads = 0, fails = 0, backwards = 0, checked = 0, off_model = 0;
+	uint64_t consec_fails = 0;
+	bool gone = false;
+	double worst = 0;
+	bool have = false, forced = false, f_retried = false, f_held = false, c_held = false;
+	/* The forced read's first low word, for the gap check at the verdict. */
+	uint32_t lo_first = 0;
+	bool have_lo_first = false;
+	int f_rc = -1;
+	double f_err = 0, c_err = 0;
+
+	/* Argument checks come before the arithmetic they feed: 1ull << wrap_bits
+	 * is undefined for a wrap_bits outside the word, and a non-finite or huge
+	 * max_min has no int64 to convert to. atof() gives 0 for a non-number,
+	 * which the positive check below refuses. */
+	if (gap != 1 && gap != 2) {
+		printf("GATE TSF-WRAP: FAIL - gap must be 1 or 2\n");
+		return 2;
+	}
+	if (wrap_bits < 20 || wrap_bits > 32) {
+		printf("GATE TSF-WRAP: FAIL - wrap_bits must be 20..32\n");
+		return 2;
+	}
+	if (!isfinite(max_min) || max_min <= 0 || max_min > 24 * 60) {
+		printf("GATE TSF-WRAP: FAIL - max_min must be a positive number of minutes, at most a day\n");
+		return 2;
+	}
+
+	const uint64_t period = 1ull << wrap_bits, mask = period - 1;
+	const int64_t t_start = mono_us();
+	int64_t deadline = t_start + (int64_t)(max_min * 60e6);
+	/* Register reads only: the MAC stays as mt_init_hardware left it (stopped),
+	 * so there is nothing for an early return to unwind. */
+	if (mt_eeprom_init(&dev) || mt_init_hardware(&dev, NULL) ||
+	    mt_set_channel(&dev, 6, MT7612U_BW_20)) {
+		printf("GATE TSF-WRAP: FAIL - bring-up failed\n");
+		return 1;
+	}
+
+	while (!g_stop && mono_us() < deadline) {
+		uint64_t v;
+		const int64_t h0 = mono_us();
+
+		if (mt7612u_read_tsf_chk(&dev, &v)) {
+			fails++;
+			have = false;
+			if (++consec_fails >= kTsfWrapMaxConsecFails) {
+				gone = true;
+				break;
+			}
+			continue;
+		}
+		consec_fails = 0;
+		const int64_t h1 = mono_us();
+		const double hm = (h0 + h1) / 2.0;
+
+		reads++;
+		if (have && (int64_t)(v - prev) < 0) {
+			backwards++;
+			printf("  backwards: %llu -> %llu\n", (unsigned long long)prev,
+			       (unsigned long long)v);
+		}
+		prev = v;
+		have = true;
+
+		const bool near = wrap_host
+			? h1 < wrap_host + kTsfWrapWindowUs
+			: (v & mask) > mask - ((uint64_t)kTsfWrapWindowUs % period);
+		double e = 0;
+		bool holds = true;
+
+		tsf_model_fit(&model);
+		if (model.ok)
+			holds = tsf_model_holds(&model, (double)v, h0, h1, &e);
+		if (model.ok && near) {
+			checked++;
+			if (fabs(e) > worst)
+				worst = fabs(e);
+			if (!holds && ++off_model <= 5)
+				printf("  off model: tsf=%llu err=%+.0f us (read took %lld us)\n",
+				       (unsigned long long)v, e, (long long)(h1 - h0));
+		}
+		/* Feed the model only fast reads it agrees with, once it exists. */
+		if (h1 - last_pt > 100000 && h1 - h0 <= kTsfWrapFeedMaxUs && holds) {
+			last_pt = h1;
+			tsf_model_add(&model, hm, (double)v);
+		}
+		if (h1 - last_status > 60000000) {
+			last_status = h1;
+			printf("  t=%4.0fs tsf=%llu reads=%llu fails=%llu backwards=%llu checked=%llu off_model=%llu worst=%.0f us\n",
+			       (h1 - t_start) / 1e6, (unsigned long long)v,
+			       (unsigned long long)reads, (unsigned long long)fails,
+			       (unsigned long long)backwards, (unsigned long long)checked,
+			       (unsigned long long)off_model, worst);
+			fflush(stdout);
+		}
+
+		if (forced || !model.ok || (v & mask) <= mask - (3000000ull % period))
+			continue;
+
+		/* Parts 2 and 3, once. */
+		if (model.b < kTsfWrapRateMin || model.b > kTsfWrapRateMax) {
+			printf("\nGATE TSF-WRAP: FAIL - the counter runs at %.6f x the host clock; not a clock to time a wrap from\n",
+			       model.b);
+			return 1;
+		}
+		forced = true;
+		const int64_t w = (int64_t)(hm + (double)(period - (v & mask)) / model.b);
+		const int64_t m1 = kTsfWrapMarginUs, m2 = m1 + 5000, m3 = m1 + 10000;
+		const int64_t sched_gap1[4] = { w - m1, w + m1, w + m2, w + m3 };
+		const int64_t sched_gap2[4] = { w - m2, w - m1, w + m1, w + m2 };
+		const int64_t *sched = gap == 1 ? sched_gap1 : sched_gap2;
+		const int first_post = gap == 1 ? 1 : 2;
+		int64_t lo_start = 0, lo_end = 0, c_start, c_end, at_ms[4] = { 0 };
+		uint32_t c_lo = 0, c_hi = 0;
+		bool c_ok = true;
+		int k = 0;
+		uint64_t fv = 0;
+
+		wrap_host = w;
+		if (w - m3 > deadline) {
+			printf("\nGATE TSF-WRAP: FAIL - the predicted wrap (%.1f min away) is past the deadline\n",
+			       (w - mono_us()) / 60e6);
+			return 1;
+		}
+		sleep_until_us(w - m3);
+		c_start = mono_us();
+		c_ok = !mt_rr_chk(&dev, MT_TSF_TIMER_DW0, &c_lo);
+		c_end = mono_us();
+
+		auto rd = [&](uint32_t addr, uint32_t *val) {
+			int64_t start;
+			int r;
+
+			if (k < 4) {
+				if (k == first_post) {
+					/* After the wrap, and before the forced read's own first
+					 * post-wrap access, with room for a slow transfer. */
+					sleep_until_us(w + m1 - 5000);
+					c_ok = c_ok && !mt_rr_chk(&dev, MT_TSF_TIMER_DW1, &c_hi);
+				}
+				sleep_until_us(sched[k]);
+			}
+			start = mono_us();
+			r = mt_rr_chk(&dev, addr, val);
+			if (k < 4)
+				at_ms[k] = start;
+			if (addr == MT_TSF_TIMER_DW0) {
+				lo_start = start;
+				lo_end = mono_us();
+				/* Which side of the wrap the FIRST low read landed on is what
+				 * says which gap the wrap actually fell in - the requested one
+				 * is only where it was aimed. */
+				if (!have_lo_first && !r) {
+					lo_first = *val;
+					have_lo_first = true;
+				}
+			}
+			k++;
+			return r;
+		};
+		f_rc = mt7612u::tsf_read(rd, &fv, &f_retried);
+		if (!c_ok)
+			fails++;
+		/* A coherent read carries the instant its (last) low word latched. */
+		f_held = tsf_model_holds(&model, (double)fv, (double)lo_start, (double)lo_end, &f_err);
+		/* The control's low word latched in its own transfer; a coherent value
+		 * would sit there, a torn one 2^32 above. */
+		c_held = tsf_model_holds(&model, (double)(((uint64_t)c_hi << 32) | c_lo),
+		                         (double)c_start, (double)c_end, &c_err);
+		printf("  forced read (gap %d, wrap_bits %d): rc=%d retried=%d err=%+.0f us  accesses at",
+		       gap, wrap_bits, f_rc, f_retried ? 1 : 0, f_err);
+		for (int i = 0; i < k && i < 4; i++)
+			printf(" %+.2f", (at_ms[i] - w) / 1e3);
+		printf(" ms\n  control DW0,DW1 across the wrap: err=%+.0f us\n", c_err);
+		fflush(stdout);
+		have = false;                        /* the sleeps are a hole in part 1 */
+		deadline = mono_us() + kTsfWrapWindowUs;
+	}
+
+	printf("  reads=%llu fails=%llu backwards=%llu checked=%llu off_model=%llu worst=%.0f us\n",
+	       (unsigned long long)reads, (unsigned long long)fails,
+	       (unsigned long long)backwards, (unsigned long long)checked,
+	       (unsigned long long)off_model, worst);
+
+	if (gone) {
+		printf("\nGATE TSF-WRAP: FAIL - %llu reads in a row failed; the adapter is gone\n",
+		       (unsigned long long)consec_fails);
+		return 1;
+	}
+	if (fails || backwards || off_model) {
+		printf("\nGATE TSF-WRAP: FAIL - %llu failed read(s), %llu backwards step(s), %llu read(s) off the model\n",
+		       (unsigned long long)fails, (unsigned long long)backwards,
+		       (unsigned long long)off_model);
+		return 1;
+	}
+	/* 0 PASS, 1 FAIL, 2 bad invocation (as everywhere else in this tool),
+	 * 3 no verdict: interrupted, or the wrap missed the gap. A wrapper reruns
+	 * a 3; a 1 is a defect and a 2 is the operator's. */
+	if (g_stop) {
+		printf("\nGATE TSF-WRAP: INTERRUPTED - no verdict\n");
+		return 3;
+	}
+	if (!forced) {
+		printf("\nGATE TSF-WRAP: FAIL - no wrap reached before the deadline (%.0f min)\n",
+		       max_min);
+		return 1;
+	}
+	if (f_rc || !f_held) {
+		printf("\nGATE TSF-WRAP: FAIL - the forced read %s\n",
+		       f_rc ? "failed" : "missed the model");
+		return 1;
+	}
+	if (wrap_bits < 32) {
+		printf("\nGATE TSF-WRAP: SMOKE - schedule and model check out (control err %+.0f us); no wrap verdict below 32 bits\n",
+		       c_err);
+		return c_held ? 0 : 1;
+	}
+	/* Defensive: the forced read only runs on a fitted model, and the model
+	 * needs reads from inside the same 120 s window, so this cannot be 0 today.
+	 * It is the one thing a PASS silently rests on, so it is checked. */
+	if (checked == 0) {
+		printf("\nGATE TSF-WRAP: FAIL - no continuous read was checked near the wrap\n");
+		return 1;
+	}
+	/* The control reads the low word before the wrap and the high word after,
+	 * so a torn value is one whole high-word step ABOVE the truth. The sign
+	 * matters: a read that is systematically 2^32 low would also fail on
+	 * magnitude alone, and the model would have absorbed it. Checked before the
+	 * retry verdict, so a run that misses the gap still reports whether the rig
+	 * can see a tear at all. */
+	if (c_err < 2147483648.0 || c_err > 6442450944.0) {
+		printf("\nGATE TSF-WRAP: FAIL - the control is %+.0f us off, not the +2^32 us a torn read gives; the rig cannot see a tear\n",
+		       c_err);
+		return 1;
+	}
+	/* A retry says the wrap fell somewhere inside the read, not that it fell
+	 * where it was aimed: a mistimed wrap lands in the other gap and still
+	 * retries. The first low word says which - post-wrap it reads small,
+	 * pre-wrap it reads just under the mask. Crediting the wrong gap would
+	 * report a gap as covered when it never was. */
+	if (f_retried && have_lo_first) {
+		const int actual = ((uint64_t)lo_first & mask) < period / 2 ? 1 : 2;
+
+		if (actual != gap) {
+			printf("\nGATE TSF-WRAP: INCONCLUSIVE - the wrap landed in gap %d, not the requested gap %d (first low word 0x%08x). Re-run.\n",
+			       actual, gap, lo_first);
+			return 3;
+		}
+	}
+	if (!f_retried) {
+		/* The read holds against the model (checked above) and the control did
+		 * tear, so the wrap simply did not land in the gap - transfer jitter
+		 * can do that. Not a defect: re-run. */
+		printf("\nGATE TSF-WRAP: INCONCLUSIVE - the forced read holds and the control tore, but the read took no retry; the wrap missed gap %d. Re-run.\n",
+		       gap);
+		return 3;
+	}
+	printf("\nGATE TSF-WRAP: PASS - retried across the wrap in gap %d, %+.0f us off the model; control tore by %+.0f us\n",
+	       gap, f_err, c_err);
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *err = NULL, *cmd = argc > 1 ? argv[1] : "regs";
@@ -3245,6 +3667,10 @@ int main(int argc, char **argv)
 		rc = gate_caps(argc > 2 ? (uint8_t)atoi(argv[2]) : 149);
 	} else if (!strcmp(cmd, "tsfwrite")) {
 		rc = gate_tsfwrite(argc > 2 ? (uint8_t)atoi(argv[2]) : 149);
+	} else if (!strcmp(cmd, "tsfwrap")) {
+		rc = gate_tsfwrap(argc > 2 ? atoi(argv[2]) : 1,
+		                  argc > 3 ? atoi(argv[3]) : 32,
+		                  argc > 4 ? atof(argv[4]) : 80.0);
 	} else if (!strcmp(cmd, "rxbytes")) {
 		rc = gate_rxbytes(argc > 2 ? (uint8_t)atoi(argv[2]) : 1,
 		                  argc > 3 ? atoi(argv[3]) : 15);
@@ -3319,9 +3745,10 @@ int main(int argc, char **argv)
 		rc = gate_fw(argc > 2 ? argv[2] : NULL);
 	} else {
 		fprintf(stderr, "unknown subcommand '%s'\n", cmd);
-		fprintf(stderr, "usage: bringup [regs|fw|init|chan|tx|rx|hop|gateg|tsfwrite] [chan] [count] [phy 0=CCK 1=OFDM 2=HT 4=VHT] [mcs]\n");
+		fprintf(stderr, "usage: bringup [regs|fw|init|chan|tx|rx|hop|gateg|tsfwrite|tsfwrap] [chan] [count] [phy 0=CCK 1=OFDM 2=HT 4=VHT] [mcs]\n");
 		fprintf(stderr, "       bringup adopt                  (the mt_adopt path a libusb-owning consumer uses)\n");
 		fprintf(stderr, "       bringup tsfwrite [chan]        (confirm this part has no TSF load path)\n");
+		fprintf(stderr, "       bringup tsfwrap [gap 1|2] [wrap_bits] [max_min]  (TSF read across the low-word wrap, ~72 min; rc 3 = no verdict, re-run)\n");
 		fprintf(stderr, "       bringup beacon [chan] [secs]   (Stage A: static AP beacon on air)\n");
 		fprintf(stderr, "       bringup ap     [chan] [secs]   (Stage B: beacon + RX, probe/auth/assoc)\n");
 		fprintf(stderr, "       bringup [sweep|coding|vht] [chan] [count] [bw 0=20 1=40 2=80]\n");

@@ -460,7 +460,9 @@ int mt7612u_phy_tick(struct mt7612u_dev *dev);
  * transfers).
  *
  * mt7612u_read_tsf_chk: 0 and fills *out, or -1 on a failed transfer (or a
- * NULL argument), leaving *out untouched.
+ * NULL argument), leaving *out untouched. A separate return is what carries
+ * the failure because no value can: 0xffffffff is a legitimate word here (the
+ * low word passes through it once a wrap), so a sentinel would be a reading.
  *
  * mt7612u_read_tsf: the same read with no error channel - 0 on failure. A
  * running counter never reads 0 after bring-up, but 0 cannot say why; use

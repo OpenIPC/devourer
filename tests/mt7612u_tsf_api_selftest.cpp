@@ -10,7 +10,8 @@
  * TSF - the silent-garbage shape this whole path exists to remove.
  *
  * A NULL device is the only failure this can reach without hardware, so that
- * is what it pins. What it does NOT cover: a failed transfer on a live device,
+ * is what it pins, and it is not free: deleting the `!d || !out` guard in
+ * mt7612u_read_tsf_chk segfaults this cell (hand-run). What it does NOT cover: a failed transfer on a live device,
  * Mt7612uRadio::ReadTsf throwing, and the caps bit (filling it needs a device).
  * Those need the part - the `bringup tsfwrap` and `caps` gates, and the
  * bus-disconnect run in docs/mt7612u.md. */

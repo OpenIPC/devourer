@@ -3337,26 +3337,38 @@ static bool tsf_model_holds(const struct tsf_model *m, double v, double h_start,
 static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 {
 	static struct tsf_model model;
-	const uint64_t period = 1ull << wrap_bits, mask = period - 1;
-	const int64_t t_start = mono_us();
-	int64_t deadline = t_start + (int64_t)(max_min * 60e6);
 	int64_t last_pt = 0, last_status = 0, wrap_host = 0;
 	uint64_t prev = 0, reads = 0, fails = 0, backwards = 0, checked = 0, off_model = 0;
 	uint64_t consec_fails = 0;
 	bool gone = false;
 	double worst = 0;
 	bool have = false, forced = false, f_retried = false, f_held = false, c_held = false;
+	/* The forced read's first low word, for the gap check at the verdict. */
+	uint32_t lo_first = 0;
+	bool have_lo_first = false;
 	int f_rc = -1;
 	double f_err = 0, c_err = 0;
 
+	/* Argument checks come before the arithmetic they feed: 1ull << wrap_bits
+	 * is undefined for a wrap_bits outside the word, and a non-finite or huge
+	 * max_min has no int64 to convert to. atof() gives 0 for a non-number,
+	 * which the positive check below refuses. */
 	if (gap != 1 && gap != 2) {
 		printf("GATE TSF-WRAP: FAIL - gap must be 1 or 2\n");
-		return 1;
+		return 2;
 	}
 	if (wrap_bits < 20 || wrap_bits > 32) {
 		printf("GATE TSF-WRAP: FAIL - wrap_bits must be 20..32\n");
-		return 1;
+		return 2;
 	}
+	if (!isfinite(max_min) || max_min <= 0 || max_min > 24 * 60) {
+		printf("GATE TSF-WRAP: FAIL - max_min must be a positive number of minutes, at most a day\n");
+		return 2;
+	}
+
+	const uint64_t period = 1ull << wrap_bits, mask = period - 1;
+	const int64_t t_start = mono_us();
+	int64_t deadline = t_start + (int64_t)(max_min * 60e6);
 	/* Register reads only: the MAC stays as mt_init_hardware left it (stopped),
 	 * so there is nothing for an early return to unwind. */
 	if (mt_eeprom_init(&dev) || mt_init_hardware(&dev, NULL) ||
@@ -3476,6 +3488,13 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 			if (addr == MT_TSF_TIMER_DW0) {
 				lo_start = start;
 				lo_end = mono_us();
+				/* Which side of the wrap the FIRST low read landed on is what
+				 * says which gap the wrap actually fell in - the requested one
+				 * is only where it was aimed. */
+				if (!have_lo_first && !r) {
+					lo_first = *val;
+					have_lo_first = true;
+				}
 			}
 			k++;
 			return r;
@@ -3515,9 +3534,12 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 		       (unsigned long long)off_model);
 		return 1;
 	}
+	/* 0 PASS, 1 FAIL, 2 bad invocation (as everywhere else in this tool),
+	 * 3 no verdict: interrupted, or the wrap missed the gap. A wrapper reruns
+	 * a 3; a 1 is a defect and a 2 is the operator's. */
 	if (g_stop) {
 		printf("\nGATE TSF-WRAP: INTERRUPTED - no verdict\n");
-		return 2;
+		return 3;
 	}
 	if (!forced) {
 		printf("\nGATE TSF-WRAP: FAIL - no wrap reached before the deadline (%.0f min)\n",
@@ -3552,13 +3574,27 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 		       c_err);
 		return 1;
 	}
+	/* A retry says the wrap fell somewhere inside the read, not that it fell
+	 * where it was aimed: a mistimed wrap lands in the other gap and still
+	 * retries. The first low word says which - post-wrap it reads small,
+	 * pre-wrap it reads just under the mask. Crediting the wrong gap would
+	 * report a gap as covered when it never was. */
+	if (f_retried && have_lo_first) {
+		const int actual = ((uint64_t)lo_first & mask) < period / 2 ? 1 : 2;
+
+		if (actual != gap) {
+			printf("\nGATE TSF-WRAP: INCONCLUSIVE - the wrap landed in gap %d, not the requested gap %d (first low word 0x%08x). Re-run.\n",
+			       actual, gap, lo_first);
+			return 3;
+		}
+	}
 	if (!f_retried) {
 		/* The read holds against the model (checked above) and the control did
 		 * tear, so the wrap simply did not land in the gap - transfer jitter
 		 * can do that. Not a defect: re-run. */
 		printf("\nGATE TSF-WRAP: INCONCLUSIVE - the forced read holds and the control tore, but the read took no retry; the wrap missed gap %d. Re-run.\n",
 		       gap);
-		return 2;
+		return 3;
 	}
 	printf("\nGATE TSF-WRAP: PASS - retried across the wrap in gap %d, %+.0f us off the model; control tore by %+.0f us\n",
 	       gap, f_err, c_err);
@@ -3707,7 +3743,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "usage: bringup [regs|fw|init|chan|tx|rx|hop|gateg|tsfwrite|tsfwrap] [chan] [count] [phy 0=CCK 1=OFDM 2=HT 4=VHT] [mcs]\n");
 		fprintf(stderr, "       bringup adopt                  (the mt_adopt path a libusb-owning consumer uses)\n");
 		fprintf(stderr, "       bringup tsfwrite [chan]        (confirm this part has no TSF load path)\n");
-		fprintf(stderr, "       bringup tsfwrap [gap 1|2] [wrap_bits] [max_min]  (TSF read across the low-word wrap, ~72 min; rc 2 = inconclusive)\n");
+		fprintf(stderr, "       bringup tsfwrap [gap 1|2] [wrap_bits] [max_min]  (TSF read across the low-word wrap, ~72 min; rc 3 = no verdict, re-run)\n");
 		fprintf(stderr, "       bringup beacon [chan] [secs]   (Stage A: static AP beacon on air)\n");
 		fprintf(stderr, "       bringup ap     [chan] [secs]   (Stage B: beacon + RX, probe/auth/assoc)\n");
 		fprintf(stderr, "       bringup [sweep|coding|vht] [chan] [count] [bw 0=20 1=40 2=80]\n");

@@ -244,6 +244,40 @@ int main() {
     check("early: consumed by the completed read", w.armed() ? 1 : 0, 0);
   }
 
+  /* --- the other half of that rule: a SPOILED window IS consumed.
+   *
+   * "Not elapsed" keeps the window because nothing disturbed it — the caller
+   * was merely early. Interrupted and Retuned are the opposite: the hardware
+   * window was re-armed underneath it, or it spans two channels, so there is
+   * nothing left to wait for.
+   *
+   * Consuming it is what hands the caller BACK to the sampled path.
+   * IRtlRadio::GetChannelBusy takes the armed branch on armed(), so a spoiled
+   * window left armed strands every later call there: `spoil_` is sticky
+   * (only arm() clears it), so each one re-enters the spoil branch and
+   * returns invalid-Retuned, and the sampled fallback is unreachable for
+   * every unrelated consumer until something re-arms or resets the window.
+   * Not a wrong number — a sensor that stops answering.
+   *
+   * Without this block the asymmetry is invisible to the suite: a build that
+   * keeps the window armed on EVERY verdict passes every other test in this
+   * file. It is exactly the difference a later editor removes while tidying,
+   * so it is asserted rather than only described in the header. --- */
+  {
+    MockBb bb;
+    ClmWindow w;
+    w.arm(regs, 240000, 0, bb.wr());
+    w.note_retune();
+    const ChannelBusy spoiled = w.read(regs, 0, bb.rd());
+    check("spoiled: refused", spoiled.valid, 0);
+    /* On the READING, not just in last_spoil(): the block above checks the
+     * accessor, so a branch that reported every spoil as Interrupted would
+     * pass it. What a consumer acts on is the field. */
+    check("spoiled: with its reason", static_cast<long>(spoiled.spoil),
+          static_cast<long>(BusySpoil::Retuned));
+    check("spoiled: window consumed", w.armed() ? 1 : 0, 0);
+  }
+
   /* --- reading without arming is not a quiet channel --- */
   {
     MockBb bb;

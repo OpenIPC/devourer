@@ -219,6 +219,21 @@ int main() {
             static_cast<long>(b.spoil),
             static_cast<long>(BusySpoil::Interrupted));
     }
+    { /* The negative control for the block above. The SAME dead counters
+       * with no window armed are the sampled path finding a backend that is
+       * not counting — "no sensor here", which is what a bare invalid
+       * reading means, and it must stay bare. A build that reported a spoil
+       * reason here would tell every sampled caller that its window was
+       * lost, when it never armed one.
+       *
+       * This is what pins the `w.armed &&` half of the guard: without it the
+       * reason leaks onto the sampled path and no other test notices. */
+      ChTimeWindow w; /* unarmed */
+      const ChannelBusy b = busy_from_ch_time_window(w, 0, 0, 250000, false, 0);
+      check("mt unarmed over dead counters: no reading", b.valid, 0);
+      check("mt unarmed over dead counters: and no window to have lost",
+            static_cast<long>(b.spoil), static_cast<long>(BusySpoil::None));
+    }
   }
 
   if (g_fail) {

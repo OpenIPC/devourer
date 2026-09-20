@@ -127,7 +127,7 @@ hardware it runs on:
 |---|---|---|
 | returns | `ChannelBusy` — busy airtime + energy-above-floor | `RxEnergy` — the phydm counter set |
 | available on | any backend with a hardware busy-airtime counter | Realtek only |
-| today | Jaguar1/2/3 (CCX CLM), MT7612U (MAC channel timers, **unvalidated**) | Jaguar1/2/3, Kestrel (floor only) |
+| today | Jaguar1/2/3 (CCX CLM), MT7612U (MAC channel timers) | Jaguar1/2/3, Kestrel (floor only) |
 | not available | Kestrel, RTL8733B — both report *no reading*, never zero | RTL8733B, MT7612U |
 
 Advertised statically by `AdapterCaps::busy_airtime_ok` /

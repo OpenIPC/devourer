@@ -280,10 +280,14 @@ struct AdapterCaps {
    * channel timers. FALSE on Kestrel (its NHM rides the halbb glue, not
    * NhmReader, so it has no CLM) and on the RTL8733B.
    *
-   * busy_airtime_measured: that reading has been separated arm-vs-quiet ON AIR
-   * for this family (tests/ccx_clm_probe.sh), not merely implemented. False on
-   * Jaguar1 (shares the validated Jaguar2 11AC map, unmeasured) and on the
-   * MT7612U (no adapter available). False-as-unmeasured, per the house rule.
+   * busy_airtime_measured: that reading has been separated from a quiet
+   * channel ON AIR for this family, not merely implemented. The harness is
+   * tests/busy_window_probe.sh, which pits an armed window against the quiet
+   * floor under a known load, and against each way a window can be spoiled.
+   * True today on all four backends that set busy_airtime_ok. The flag stays
+   * because the two facts are independent: a port can land the engine before
+   * anyone has run it on air, and false-as-unmeasured is the house rule for
+   * that state.
    *
    * rx_energy_ok: IRtlRadio::GetRxEnergy returns real phydm FA/CCA/IGI
    * counters. Always false on a non-Realtek radio; false on the RTL8733B and

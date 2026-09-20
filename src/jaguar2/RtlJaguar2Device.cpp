@@ -2013,6 +2013,28 @@ bool RtlJaguar2Device::WriteTsf(uint64_t tsf) {
 }
 
 void RtlJaguar2Device::Stop() {
+  /* The armed window dies with the session. Nothing else forgets it:
+   * with_ccx gates on _brought_up, which Stop() does not clear, so a window
+   * armed before a Stop stays visible afterwards and the next retune's note
+   * hands the caller a spoil reason earned by a session that no longer
+   * exists. Measured on an RTL8822BU with this reset removed: an
+   * arm/Stop/retune/read sequence reports spoil=retuned; with it, none.
+   *
+   * Note this Stop does NOT tear the chip down — it only joins the runtime
+   * threads below — so after the reset the sampled path still answers, with
+   * a live 2 ms window. That is why the on-air `revive` arm asserts the spoil
+   * REASON rather than the reading's validity. Scoped; neither joined thread
+   * takes the CCX lock.   *
+   * What this does NOT close: unlike the RTL8733B — whose Stop() holds its
+   * recursive register lock across the whole body, which with_ccx takes
+   * first — there is no such span here, so a concurrent ArmChannelBusy can
+   * still land after this reset and during teardown. ArmChannelBusy is
+   * single-control-thread by contract (IRadio.h), and closing it properly
+   * means clearing _brought_up, which gates other paths. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_reset();
+  }
   stop_pwrtrack();
   stop_dig();
 }

@@ -480,12 +480,15 @@ and the retune note hands the caller a `Retuned` spoil earned by a hardware
 session that no longer exists: invalid either way, but the reason would be a
 lie. The reset is scoped under the `_reg_mu` `Stop()` already holds.
 
-Jaguar1/2/3 share this hole and have it worse — none of their `Stop()`
-implementations resets the window either, and unlike this backend none of them
-clears the flag their `with_ccx` gates on, so a `GetChannelBusy()` straight
-after `Stop()` reads CCX registers on a deinitialised chip with no retune
-needed. Not fixed here; noted so the asymmetry is not mistaken for an 8733B
-quirk.
+Jaguar1/2/3 had the same hole and are fixed in the same change — measured on
+each die with the reset removed, an arm/Stop/retune/read reports
+`spoil=retuned`. One half of the asymmetry remains on them and is NOT fixed
+here: their `with_ccx` gates on `_brought_up`, which no `Stop()` clears, so an
+`ArmChannelBusy()` issued *after* a Stop still succeeds against a chip that
+has been torn down. This backend does not have that problem because `Stop()`
+clears `_phy_ready`, which is what `with_ccx` gates on. Closing it on the
+Jaguars means clearing `_brought_up` in their `Stop()`, which gates other
+paths and is a behaviour change of its own.
 
 Retune notes live in `SetMonitorChannel` and `FastRetune`, both **scoped**:
 `FastRetune` calls `SetMonitorChannel` on its declined path while already

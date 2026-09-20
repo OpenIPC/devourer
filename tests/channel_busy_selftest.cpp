@@ -29,8 +29,10 @@ static void check(const char *what, long got, long want) {
 int main() {
   /* --- RxEnergy -> ChannelBusy --- */
   {
-    /* No CLM at all: a with_nhm=false read, or a generation with no CCX
-     * engine (Kestrel, RTL8733B). Not a quiet channel. */
+    /* No CLM in the read: a with_nhm=false read, a generation with no CCX
+     * engine (Kestrel), or one that implements no GetRxEnergy at all (the
+     * RTL8733B, whose CLM answers only through an armed window). Not a quiet
+     * channel. */
     RxEnergy e;
     const ChannelBusy b = busy_from_rx_energy(e);
     check("no-clm invalid", b.valid, 0);

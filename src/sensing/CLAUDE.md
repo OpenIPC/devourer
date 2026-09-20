@@ -76,3 +76,25 @@ must be field-comparable against a pre-change capture. The width-restoration
 rule specifically needs `DEVOURER_SCOUT_FULLWIDTH_MS > 0` against a 40/80 MHz
 candidate, because a headless test can only prove the call sequence, never that
 the chip actually came back to 20 MHz.
+
+## Known gap: a backend with busy airtime and no phydm counters
+
+`SenseWindow::read` chooses its source by whether the `IRtlRadio*` is
+non-null, not by `AdapterCaps::rx_energy_ok`. The RTL8733B derives from
+`IRtlRadio`, implements no `GetRxEnergy`, and answers `GetChannelBusy()` only
+through an armed CLM window — so on that die the window takes the phydm branch,
+gets the all-invalid base energy read, and never calls `GetChannelBusy()`.
+`examples/chanscout` constructs exactly that shape (a `dynamic_cast` that
+succeeds on the die) and reports neither CLM nor NHM there. Every other backend
+is unaffected: on the Jaguar families both flags are true, and on the MT7612U
+the cast fails and the neutral branch runs.
+
+Gating the branch on the capability is necessary but not sufficient. An unarmed
+`GetChannelBusy()` on that backend falls back to the energy read and yields
+nothing, and nothing in this subtree calls `ArmChannelBusy` — the arm needs an
+observation window sized to the dwell, which no layer between
+`ScanPlanConfig::dwell_ms` and `SenseWindow` carries (`DwellExecConfig` stamps a
+settle but no dwell). Arming also changes behaviour on the Jaguar families,
+where the NHM read spoils the same engine, which is what `dwell_executor`
+pins. So the fix is a capability gate plus a dwell-sized arm, with its own
+selftest arm — a design change here, not a rider on a backend port.

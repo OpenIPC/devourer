@@ -14,11 +14,21 @@
 #   window     armed, under load  -- the feature.
 #   sampled    unarmed, same load -- the spread comparison.
 #   interrupt  NHM read mid-window   -- must be INVALID, spoil=interrupted.
+#   quality    GetRxQuality() mid-window -- the same trap by the route a
+#              consumer actually takes. INVALID, spoil=interrupted.
+#   race       GetRxQuality() hammered from a second thread -- must never
+#              yield a SHORT window wearing a valid flag.
 #   retune     retune mid-window     -- must be INVALID, spoil=retuned.
 #   early      read before elapsed   -- must be INVALID, spoil=not-elapsed
 #              (both families: Realtek from the CCX ready bit, MediaTek from
 #              the window length recorded at arm).
+#   stale      re-arm, then read early -- must not return the latched result
+#              of the PREVIOUS window.
 #   txsess     sensor transmits      -- must stay VALID and be flagged own_tx.
+#
+# Nine arms. The skip counts below are stated against this list, so if you
+# add one, add it here too or the verdict's "N arm(s) skipped" stops being
+# auditable.
 #
 #   sudo tests/busy_window_probe.sh
 #   SENSOR_PID=0xc812 FLOOD_PID=0x8812 CHANNEL=100 sudo tests/busy_window_probe.sh
@@ -55,6 +65,7 @@ mkdir -p "$OUT"
 rx_flag=""; [ "$SENSOR_RX" = "1" ] && rx_flag="--rx"
 fails=0
 skips=0
+checks_skipped=0
 
 stop_flood() { pkill -x txdemo 2>/dev/null; sleep 1; }
 trap 'stop_flood' EXIT INT TERM
@@ -163,12 +174,29 @@ run_arm() { # mode, label
       | tee "$OUT/$mode.log" | grep -E '"ev":"busy\.'
 }
 
+# How many arms a skip branch bypasses, stated at the branch rather than
+# assumed to be one. The verdict line reports this, so an undercount is a
+# claim that more of the suite ran than did.
+skip_arms() { skips=$((skips + $1)); }
+
+caps_field() { # file, field -> that field from the probe's busy.caps record
+  python3 -c "
+import json,sys
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line.startswith('{'): continue
+    try: r = json.loads(line)
+    except ValueError: continue
+    if r.get('ev') == 'busy.caps': print(r.get(sys.argv[2])); break
+" "$1" "$2"
+}
+
 # A spoiled arm must produce NO valid readings; a working arm must produce
 # only valid ones. Both directions matter: a probe that passes whatever the
 # hardware does is not a test.
 expect_all() { # mode, valid(0|1), [spoil]
   local mode="$1" want_valid="$2" want_spoil="${3:-}"
-  local n bad
+  local n bad before="$fails"
   # `grep -c` prints 0 and EXITS 1 when it matches nothing, so a `|| echo 0`
   # here appended a second line and made this guard dead: an empty log then
   # reported "ok: 0 samples". The whole point of the guard is the empty case.
@@ -198,7 +226,11 @@ expect_all() { # mode, valid(0|1), [spoil]
       echo "FAIL $mode: $bad/$n samples not spoil=$want_spoil"
       fails=$((fails + 1)); }
   fi
-  echo "  ok: $n samples valid=$want_valid ${want_spoil:+spoil=$want_spoil}"
+  # Only when nothing above failed. This line used to print unconditionally,
+  # so a failing arm reported its FAILs and then said "ok" underneath them.
+  [ "$fails" -eq "$before" ] &&
+    echo "  ok: $n samples valid=$want_valid ${want_spoil:+spoil=$want_spoil}"
+  return 0
 }
 
 echo "== sensor $SENSOR_VID:$SENSOR_PID, flooder $FLOOD_VID:$FLOOD_PID, ch$CHANNEL"
@@ -220,6 +252,34 @@ quiet_mean="$(stat_of quiet mean)"
 # with the sensor parked on the wrong channel.
 assert_le "quiet floor is quiet" "$quiet_mean" 5
 
+# Which of the arms below apply is a CAPABILITY question, not a chip-identity
+# one. The NHM arms spoil a window by driving GetRxQuality -> GetRxEnergy, and
+# the sampled arm reads the path GetRxEnergy feeds. A backend that implements
+# no GetRxEnergy has nothing to interrupt the window WITH, and its sampled
+# path reports no reading by design — the RTL8733B is exactly that: Realtek,
+# CCX CLM working, no phydm FA/CCA block. A VID test calls it Realtek and runs
+# arms it cannot pass, which is the same wrong discriminator AdapterCaps.h
+# documents ("a successful dynamic_cast<IRtlRadio*> is not a correct
+# discriminator and never was"). Ask the caps instead.
+nhm_sensor=0
+rx_energy_cap="$(caps_field "$OUT/quiet.log" rx_energy_ok)"
+case "$rx_energy_cap" in
+  True)  nhm_sensor=1 ;;
+  False) nhm_sensor=0 ;;
+  *)
+    # Anything else means no caps record, or the field was renamed. Quietly
+    # treating that as "no GetRxEnergy" would skip the sampled arm, all three
+    # NHM arms AND the bursty comparison, and the run would still print PASS
+    # — a gate that switches its own tests off the moment it stops working.
+    # The arms it guards are the ones that catch a spoiled window being
+    # reported as data, so failing loudly is the only safe default.
+    echo "FAIL caps: rx_energy_ok not readable from the probe (got '$rx_energy_cap')"
+    echo "     — refusing to decide which arms apply from a caps record this"
+    echo "       harness cannot parse."
+    fails=$((fails + 1))
+    ;;
+esac
+
 # A MediaTek sensor cannot be brought up on an already-saturated channel: its
 # firmware MCU times out and the arm never becomes available (measured). The
 # loaded arms therefore need the flooder started AFTER the sensor is up, which
@@ -240,9 +300,13 @@ if [ "$realtek_sensor" != "1" ]; then
   echo "     build/BusyWindowProbe --vid $SENSOR_VID --pid $SENSOR_PID \\"
   echo "       --channel $CHANNEL --mode window --reps 45 --rx &"
   echo "     # then start the flooder once it prints its first sample"
-  skips=$((skips + 1))
+  # window, sampled, interrupt, quality, race, stale, txsess — everything
+  # below this exit. Four of them would be skipped by their own branches on
+  # this backend anyway, but "did not run" is what the verdict claims, so
+  # they are counted here.
+  skip_arms 7
   echo
-  [ "$fails" -eq 0 ] && echo "busy_window_probe: PASS (quiet arms only, $skips skipped)" \
+  [ "$fails" -eq 0 ] && echo "busy_window_probe: PASS (quiet arms only, $skips arm(s) skipped)" \
                      || echo "busy_window_probe: $fails FAILURE(S)"
   exit $((fails ? 1 : 0))
 fi
@@ -268,13 +332,20 @@ else
   assert_ge "load separates from floor" "$((window_mean - quiet_mean))" "$sep_min"
 fi
 
-f0="$(flood_frames)"
-run_arm sampled "shipped sampled read, same load"
-expect_all sampled 1
-assert_flood_alive "$f0" "sampled"
+if [ "$nhm_sensor" = "1" ]; then
+  f0="$(flood_frames)"
+  run_arm sampled "shipped sampled read, same load"
+  expect_all sampled 1
+  assert_flood_alive "$f0" "sampled"
+else
+  echo "== sampled arm skipped: this backend implements no GetRxEnergy, so"
+  echo "   the sampled path reports NO READING by design — the armed window"
+  echo "   is the only way a number comes out of it."
+  skip_arms 1
+fi
 
 f0="$(flood_frames)"
-if [ "$realtek_sensor" = "1" ]; then
+if [ "$nhm_sensor" = "1" ]; then
   run_arm interrupt "NHM read mid-window"
   expect_all interrupt 0 interrupted
   run_arm quality "GetRxQuality() mid-window — the trap a consumer springs"
@@ -286,7 +357,10 @@ if [ "$realtek_sensor" = "1" ]; then
   run_arm race "GetRxQuality() hammered from another thread"
   expect_all race 0 interrupted
 else
-  echo "== NHM arms skipped (non-Realtek sensor has no NHM engine)"
+  echo "== NHM arms skipped: no GetRxEnergy on this backend, so there is no"
+  echo "   NHM read that could re-arm the shared engine mid-window."
+  # interrupt, quality, race — three arms, not one.
+  skip_arms 3
 fi
 
 if [ "$realtek_sensor" = "1" ]; then
@@ -333,15 +407,22 @@ stop_flood
 
 echo
 echo "== spread: the point of the window"
-for m in window sampled; do
+arms="window"; [ "$nhm_sensor" = "1" ] && arms="window sampled"
+for m in $arms; do
   printf "  %-8s n=%s mean=%s%% min=%s%% max=%s%% spread=%s pts\n" \
     "$m" "$(busy_values $m | wc -l)" "$(stat_of $m mean)" "$(stat_of $m min)" \
     "$(stat_of $m max)" "$(stat_of $m spread)"
 done
 # The claim this feature exists for, gated rather than printed. Under a STEADY
 # load both are tight, so this only means something with DUTY_ON set — hence
-# the guard rather than an unconditional assert.
-if [ "$DUTY_ON" != "0" ]; then
+# the guard rather than an unconditional assert. It also needs a sampled arm
+# to compare against, which a backend without GetRxEnergy does not have.
+if [ "$DUTY_ON" != "0" ] && [ "$nhm_sensor" != "1" ]; then
+  echo "  (armed-vs-sampled comparison needs a sampled path; this backend has"
+  echo "   none, so the bursty claim is not testable on it)"
+  # A check, not an arm: counted separately so "arm(s) skipped" stays true.
+  checks_skipped=$((checks_skipped + 1))
+elif [ "$DUTY_ON" != "0" ]; then
   # Comparing spreads alone is fragile at small REPS: on a ~10% duty channel a
   # handful of 2 ms reads can ALL miss the burst, which looks like a spread of
   # zero while being entirely wrong. The claim is that the sampled estimator is
@@ -369,5 +450,16 @@ if [ "$DUTY_ON" != "0" ]; then
 fi
 
 echo
-[ "$fails" -eq 0 ] && echo "busy_window_probe: PASS" || echo "busy_window_probe: $fails FAILURE(S)"
+# The skip count belongs in the verdict line, not only in the per-arm chatter
+# above: a backend without GetRxEnergy legitimately skips four arms, and a
+# reader scraping the last line for PASS would otherwise see the same word for
+# "every arm ran" and "two thirds of them did not".
+if [ "$fails" -ne 0 ]; then
+  echo "busy_window_probe: $fails FAILURE(S)"
+elif [ "$skips" -ne 0 ] || [ "$checks_skipped" -ne 0 ]; then
+  echo "busy_window_probe: PASS ($skips arm(s), $checks_skipped check(s) skipped"\
+       "— see above for why)"
+else
+  echo "busy_window_probe: PASS"
+fi
 exit $((fails ? 1 : 0))

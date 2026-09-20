@@ -480,15 +480,21 @@ and the retune note hands the caller a `Retuned` spoil earned by a hardware
 session that no longer exists: invalid either way, but the reason would be a
 lie. The reset is scoped under the `_reg_mu` `Stop()` already holds.
 
-Jaguar1/2/3 had the same hole and are fixed in the same change — measured on
-each die with the reset removed, an arm/Stop/retune/read reports
-`spoil=retuned`. One half of the asymmetry remains on them and is NOT fixed
-here: their `with_ccx` gates on `_brought_up`, which no `Stop()` clears, so an
-`ArmChannelBusy()` issued *after* a Stop still succeeds against a chip that
-has been torn down. This backend does not have that problem because `Stop()`
-clears `_phy_ready`, which is what `with_ccx` gates on. Closing it on the
-Jaguars means clearing `_brought_up` in their `Stop()`, which gates other
-paths and is a behaviour change of its own.
+All of that is about a window armed BEFORE the Stop. For an arm issued
+*after* one, the flag does its job, and this backend closes both sides of the
+hazard: SEQUENTIALLY, `Stop()` clears `_phy_ready`, which is what `with_ccx`
+gates on, so a later `ArmChannelBusy()` is refused rather than arming a
+torn-down chip; CONCURRENTLY, `Stop()` holds the recursive `_reg_mu` across
+its whole body and `with_ccx` takes that lock first, so an arm racing the
+teardown blocks instead of slipping in after the reset.
+
+Jaguar1/2/3 reset the window in `Stop()` the same way but stop there — they
+have NEITHER half: no `Stop()` clears `_brought_up`, and none holds a
+register lock across its teardown (Jaguar1 has no family-wide one at all).
+So on those an arm issued after a Stop still succeeds against a torn-down
+chip, and one racing the teardown can still slip in. Each Jaguar guide
+records its own generation's teardown, the race is in each `Stop()`'s own
+comment, and `IRadio::ArmChannelBusy` carries the rule itself.
 
 Retune notes live in `SetMonitorChannel` and `FastRetune`, both **scoped**:
 `FastRetune` calls `SetMonitorChannel` on its declined path while already

@@ -2024,13 +2024,15 @@ void RtlJaguar2Device::Stop() {
    * threads below — so after the reset the sampled path still answers, with
    * a live 2 ms window. That is why the on-air `revive` arm asserts the spoil
    * REASON rather than the reading's validity. Scoped; neither joined thread
-   * takes the CCX lock.   *
-   * What this does NOT close: unlike the RTL8733B — whose Stop() holds its
-   * recursive register lock across the whole body, which with_ccx takes
-   * first — there is no such span here, so a concurrent ArmChannelBusy can
-   * still land after this reset and during teardown. ArmChannelBusy is
-   * single-control-thread by contract (IRadio.h), and closing it properly
-   * means clearing _brought_up, which gates other paths. */
+   * takes the CCX lock.
+   *
+   * What this does NOT close: no lock spans this Stop(), so a concurrent
+   * ArmChannelBusy can still land after the reset and during teardown, and
+   * with_ccx gates on _brought_up, which nothing here clears — so an arm
+   * issued AFTER a Stop still succeeds against a torn-down chip.
+   * ArmChannelBusy is single-control-thread by contract (IRadio.h); closing
+   * the rest means clearing _brought_up, which gates other paths. This
+   * generation's guide records where it stands. */
   {
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
     busy_window_reset();

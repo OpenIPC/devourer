@@ -753,16 +753,18 @@ void RtlJaguar3Device::Stop() {
    * hands the caller a spoil reason earned by a session that no longer
    * exists. Measured on an RTL8812CU with this reset removed: an
    * arm/Stop/retune/read sequence reports spoil=retuned; with it, none.
-   * Scoped, and OUTSIDE _reg_mu rather than inside it as the RTL8733B's is:
-   * Stop() joins the coex thread below, and that thread takes _reg_mu, so
-   * holding it across the join would deadlock. The coex loop never takes the
-   * CCX lock, which is what makes this ordering safe.   *
-   * What this does NOT close: unlike the RTL8733B — whose Stop() holds its
-   * recursive register lock across the whole body, which with_ccx takes
-   * first — there is no such span here, so a concurrent ArmChannelBusy can
-   * still land after this reset and during teardown. ArmChannelBusy is
-   * single-control-thread by contract (IRadio.h), and closing it properly
-   * means clearing _brought_up, which gates other paths. */
+   * Scoped, and deliberately NOT under _reg_mu: Stop() joins the coex thread
+   * below, that thread takes _reg_mu, and holding it across the join would
+   * deadlock. Taking the CCX lock alone is safe here because the coex loop
+   * never takes it.
+   *
+   * What this does NOT close: no lock spans this Stop(), so a concurrent
+   * ArmChannelBusy can still land after the reset and during teardown, and
+   * with_ccx gates on _brought_up, which nothing here clears — so an arm
+   * issued AFTER a Stop still succeeds against a torn-down chip.
+   * ArmChannelBusy is single-control-thread by contract (IRadio.h); closing
+   * the rest means clearing _brought_up, which gates other paths. This
+   * generation's guide records where it stands. */
   {
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
     busy_window_reset();

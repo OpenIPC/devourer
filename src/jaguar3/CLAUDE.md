@@ -106,6 +106,21 @@ same TSSI reshape as its offset slope).
 
 ## CCX energy sensing (`clm` / `nhm_env`)
 
+**`Stop()` forgets any armed busy window, and the hazard it leaves is not
+fully closed.** `with_ccx` gates on `_brought_up`, which `Stop()` does not
+clear, so an `ArmChannelBusy()` issued *after* a `Stop()` still succeeds
+against a chip that has been torn down. The reset in `Stop()` only handles a
+window armed *before* it. Closing the rest means clearing `_brought_up` in
+`Stop()`, which gates other paths and is a behaviour change of its own. The
+contract is at `IRadio::ArmChannelBusy`.
+
+Measured on an RTL8812CU with the reset removed: arm, `Stop()`, retune, read
+reports `spoil=retuned`; with it, `spoil=none` and no reading (`Stop()` runs
+`rtw_hal_deinit()`). The reset sits OUTSIDE `_reg_mu`, unlike the RTL8733B's,
+and deliberately: `Stop()` joins the coex thread, and that thread takes
+`_reg_mu`, so holding it across the join would deadlock. The coex loop never
+takes the CCX lock, which is what makes this ordering safe.
+
 **An armed busy window (`ArmChannelBusy`) is DESTROYED by an NHM read on this
 map.** Measured on an RTL8812CU: a clean 240 ms window read 60.4-61.6% under
 load, while the same window with one `GetRxEnergy(with_nhm=true)` mid-way came

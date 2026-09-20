@@ -461,7 +461,18 @@ measured, so this buys an airtime unit and a non-railing ratio rather than a new
 detection; `nhm_env` is referenced to the live IGI, so it is only dependable
 where DIG is not free to walk the gain out from under it (the per-generation
 windows are in each `src/<gen>/CLAUDE.md`); and the ~2 ms window makes one dwell
-a sample, not a measurement — average ~20, which `chanscout` does not do today.
+a sample, not a measurement.
+
+That last one is what `IRadio::ArmChannelBusy(window_us)` addresses: arm a
+window where you reset your counters, read it when your dwell ends, and the
+busy figure covers that window instead of a 2 ms slice of it. Both silicon
+families implement it (Realtek arms CLM alone, MediaTek resets its channel
+timers), and a window that something else disturbed — an NHM read re-arming the
+shared engine, a retune, a read before it elapsed — comes back INVALID carrying
+its reason rather than a plausible number. Own transmission is reported, not
+corrected: the two families are biased in opposite directions by it. Which map
+truncates and which merely inflates, and every measured number, live in each
+`src/<gen>/CLAUDE.md` and `docs/rx-spectrum-sensing.md`.
 Both are **emitted, not scored**: neither `ChannelScore` nor the hopset
 occupancy law reads them. Measured numbers, the generation matrix and the
 harness: `docs/rx-spectrum-sensing.md`.

@@ -99,6 +99,7 @@ public:
   uint64_t ReadTsf() override;
   devourer::TxStats GetTxStats() override;
   devourer::ChannelBusy GetChannelBusy() override;
+  uint32_t ArmChannelBusy(uint32_t window_us) override;
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
   bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) override;
@@ -148,6 +149,11 @@ private:
   std::mutex _teardown_mu;
   std::atomic<bool> _rx_stop{false};
   std::atomic<bool> _rx_active{false};
+  /* An armed busy window (IRadio::ArmChannelBusy) and whether a retune
+   * invalidated it. Guarded by _mu like every other register-adjacent member;
+   * the atomic above is separate because Stop() reads it without the lock. */
+  bool _busy_armed = false;
+  bool _busy_spoiled = false;
   std::atomic<uint64_t> _rx_frames{0};
 
   /* Frames cross from the C library's event thread to the StartRxLoop thread

@@ -399,6 +399,14 @@ struct mt7612u_link_stats {
  */
 int mt7612u_link_stats_start(struct mt7612u_dev *dev);
 
+/* Arm the channel timers alone and restart their interval mark, for a caller
+ * measuring one busy window (IRadio::ArmChannelBusy). Separate from
+ * mt7612u_link_stats_start() on purpose: that one also clears the MIB block
+ * and the link-stats interval, which belong to the 1 Hz telemetry caller, and
+ * arming per dwell through it would corrupt every rate the tick reports.
+ * Returns 0 on success. */
+int mt7612u_ch_time_arm(struct mt7612u_dev *dev);
+
 /* Read and clear. Returns 0 on success; fills the interval since the previous
  * call to this function or to _start(). */
 int mt7612u_link_stats(struct mt7612u_dev *dev, struct mt7612u_link_stats *out);

@@ -601,11 +601,43 @@ int mt7612u_link_stats_start(struct mt7612u_dev *d)
 	      FIELD_PREP(MT_CH_TIME_CFG_CH_TIMER_CLR, 1));
 	/* One read to clear everything, so the first real sample is clean. */
 	mt7612u_link_stats(d, &discard);
-	/* Arming is what makes a ch_time reading meaningful. Reset the mark with
-	 * it: the next interval must start here, not at whatever the previous
-	 * session left behind. */
+	/* Arming is what makes a ch_time reading meaningful, so the interval
+	 * STARTS here — not at whatever the previous session left behind, and not
+	 * at "unknown". Stamping now rather than zeroing is what lets the first
+	 * read after an arm report its own denominator: with a zero mark it came
+	 * back window_us=0, and a busy percentage whose window is unknown is not
+	 * a measurement a ranker can compare across channels. */
 	d->ch_time_armed = 1;
-	d->ch_time_last_us = 0;
+	d->ch_time_last_us = stats_now_us();
+	return 0;
+}
+
+/* Re-arm the CHANNEL TIMERS only, and restart their interval mark.
+ *
+ * Deliberately not mt7612u_link_stats_start(): that one also read-and-clears
+ * the whole MIB block and resets the link-stats interval, which belongs to the
+ * 1 Hz telemetry caller. Arming a busy window per survey dwell through that
+ * path would reset the tick's interval several times a second and corrupt
+ * every rate it reports. The channel timers have their own clear bit and their
+ * own mark, so the two callers need not collide. */
+int mt7612u_ch_time_arm(struct mt7612u_dev *d)
+{
+	uint32_t discard;
+
+	if (!d) return -1;
+	/* Same configuration mt76's mt76x02_mac_cc_reset() uses, with the
+	 * timer-clear field set so the counters restart from zero here. */
+	mt_wr(d, MT_CH_TIME_CFG,
+	      MT_CH_TIME_CFG_TIMER_EN | MT_CH_TIME_CFG_TX_AS_BUSY |
+	      MT_CH_TIME_CFG_RX_AS_BUSY | MT_CH_TIME_CFG_NAV_AS_BUSY |
+	      MT_CH_TIME_CFG_EIFS_AS_BUSY | MT_CH_CCA_RC_EN |
+	      FIELD_PREP(MT_CH_TIME_CFG_CH_TIMER_CLR, 1));
+	/* The pair is read-and-clear, so one throwaway read is the barrier
+	 * between whatever accumulated before and the window opening now. */
+	if (mt_rr_chk(d, MT_CH_BUSY, &discard) || mt_rr_chk(d, MT_CH_IDLE, &discard))
+		return -1;
+	d->ch_time_armed = 1;
+	d->ch_time_last_us = stats_now_us();
 	return 0;
 }
 

@@ -156,6 +156,53 @@ inline void read_nhm(const NhmRegs& r, uint8_t igi7,
   }
 }
 
+
+/* CLM alone, armed now and read later.
+ *
+ * read_nhm() above arms CLM and NHM on ONE window and polls a ready bit for at
+ * most 15 ms, so it can neither program nor read a window longer than that.
+ * CLM's period is its own field (the low half of the period dword) and reaches
+ * 65535 ticks of 4 us, which is long enough to integrate a survey dwell. These
+ * two split that into arm and read so the caller owns the window; the state
+ * machine that keeps such a window honest is devourer::ClmWindow
+ * (src/BusyWindow.h).
+ *
+ * NHM's half of the period dword and its trigger bit are deliberately not
+ * touched: the histogram is referenced to live IGI, so lengthening ITS window
+ * would make nhm_env less stable, not more. */
+inline void arm_clm_only(
+    const NhmRegs &r, uint16_t period,
+    const std::function<void(uint16_t, uint32_t, uint32_t)> &set_bb) {
+  /* cfg as read_nhm programs it — bit8 of ctrl is ccx_en, which both engines
+   * share. */
+  set_bb(r.ctrl, 0xf00u, 0x3u);
+  set_bb(r.period, 0x0000ffffu, static_cast<uint32_t>(period));
+  /* Pulse CLM's trigger (bit0) 0->1. NHM's bit1 is left alone. */
+  set_bb(r.ctrl, 0x1u, 0);
+  set_bb(r.ctrl, 0x1u, 1);
+}
+
+struct ClmRead {
+  bool ready = false;  /* the programmed window has completed */
+  uint16_t ticks = 0;  /* busy ticks, 4 us each */
+};
+
+/* One read of the CLM result register. Non-destructive and latched: the
+ * register holds the last COMPLETED window until the next trigger, so two
+ * reads without an intervening arm return the same value (measured on
+ * Jaguar1/2/3). The caller must therefore know whether its own window has
+ * elapsed — an early read returns the PREVIOUS one, not an error. */
+inline ClmRead read_clm_only(const NhmRegs &r,
+                             const std::function<uint32_t(uint16_t)> &read32) {
+  const uint32_t raw = read32(r.clm);
+  ClmRead c;
+  if (raw & (1u << 16)) {
+    c.ready = true;
+    c.ticks = static_cast<uint16_t>(raw & 0xffffu);
+  }
+  return c;
+}
+
 }  // namespace devourer
 
 #endif /* DEVOURER_NHM_READER_H */

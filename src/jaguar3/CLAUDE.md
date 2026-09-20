@@ -106,6 +106,15 @@ same TSSI reshape as its offset slope).
 
 ## CCX energy sensing (`clm` / `nhm_env`)
 
+**An armed busy window (`ArmChannelBusy`) is DESTROYED by an NHM read on this
+map.** Measured on an RTL8812CU: a clean 240 ms window read 60.4-61.6% under
+load, while the same window with one `GetRxEnergy(with_nhm=true)` mid-way came
+back as the 2 ms re-arm (311-326 of 62500 ticks). The 11AC families survive the
+same intrusion and merely read 3-4 points high, so this is the generation where
+the shared-engine rule is not optional. `GetRxQuality()` takes that NHM read,
+which makes the trap easy to spring from a caller that never touches the busy
+API.
+
 `GetRxEnergy(with_nhm=true)` runs the shared CCX window (`src/NhmReader.h`) on
 the JGR3 register map (CLM period is the low half of `0x1e40`, trigger
 `0x1e60[0]`, ready+result `0x2d88`); on-air validated on an RTL8812CU, ch100.

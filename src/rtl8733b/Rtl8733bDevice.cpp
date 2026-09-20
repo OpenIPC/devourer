@@ -174,6 +174,20 @@ void Rtl8733bDevice::Init(Action_ParsedRadioPacket packetProcessor,
   try {
     {
       std::lock_guard<std::recursive_mutex> lock(_reg_mu);
+      /* Bring-up forgets any armed busy window: the BB is reprogrammed and
+       * retuned below, so a window armed against the previous state describes
+       * a chip that no longer exists.
+       *
+       * INSIDE _reg_mu — which is held across the whole bring-up — and scoped
+       * within it so the CCX lock is never held across a call that re-enters
+       * this class. Ahead of _reg_mu the reset would be close to pointless:
+       * with_ccx takes _reg_mu first, so an arm landing between the released
+       * CCX lock and _reg_mu would survive the very bring-up the reset exists
+       * to forget. Same argument as SetMonitorChannel's note below. */
+      {
+        std::lock_guard<std::mutex> ccx(busy_window_mutex());
+        busy_window_reset();
+      }
       bring_up_to_phy();
       if (!_phy.set_channel(channel))
         throw std::runtime_error("RTL8733B channel configuration failed");
@@ -221,6 +235,11 @@ void Rtl8733bDevice::Init(Action_ParsedRadioPacket packetProcessor,
 void Rtl8733bDevice::InitWrite(SelectedChannel channel) {
   try {
     std::lock_guard<std::recursive_mutex> lock(_reg_mu);
+    /* Same as Init, and inside _reg_mu for the same reason. */
+    {
+      std::lock_guard<std::mutex> ccx(busy_window_mutex());
+      busy_window_reset();
+    }
     bring_up_to_phy();
     if (!_phy.set_channel(channel))
       throw std::runtime_error("RTL8733B channel configuration failed");
@@ -468,6 +487,23 @@ void Rtl8733bDevice::StartRxLoop(
 
 void Rtl8733bDevice::SetMonitorChannel(SelectedChannel channel) {
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
+  /* A window armed before this retune would integrate across the channel
+   * change and report the blend of two channels as one channel's occupancy.
+   *
+   * Inside _reg_mu, which is held across the whole tune below, and which
+   * with_ccx takes BEFORE the CCX lock — so a concurrent arm cannot land
+   * between this note and the tune. That is the Jaguar2/3 situation, not
+   * Jaguar1's, and it is why one note suffices here rather than a pair
+   * bracketing the tune.
+   *
+   * Scoped, and never held across the tune: FastRetune below calls this
+   * function on its declined path while already holding _reg_mu (which is
+   * recursive, so that part is fine), and the CCX mutex is NOT recursive —
+   * holding it across the tune would self-deadlock on that path. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_retune();
+  }
   bring_up_to_phy();
   const bool was_tx_ready = _tx_ready;
   _tx_ready = false;
@@ -493,6 +529,14 @@ void Rtl8733bDevice::FastRetune(uint8_t channel, bool cache_rf) {
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
   if (_phy_ready && channel == _channel.Channel)
     return;
+  /* Noted AFTER the same-channel early return above: that path tunes nothing,
+   * so spoiling a window there would refuse a measurement that was never
+   * disturbed. Scoped for the reason SetMonitorChannel spells out — the
+   * declined path below calls it, and the CCX mutex is not recursive. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_retune();
+  }
   SelectedChannel target = _channel;
   target.Channel = channel;
   if (_phy_ready &&
@@ -994,6 +1038,21 @@ void Rtl8733bDevice::SetCcaMode(bool disabled) {
 
 void Rtl8733bDevice::Stop() {
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
+  /* The armed window dies with the session. Clearing _phy_ready below is not
+   * enough on its own: SetMonitorChannel and FastRetune both call
+   * bring_up_to_phy(), which sets it true again, so a window armed before a
+   * Stop would come back to life on the revived chip — and the retune note
+   * would hand the caller a Retuned spoil earned by a hardware session that
+   * no longer exists. Invalid either way, but the reason would be a lie.
+   *
+   * Scoped, and taken under _reg_mu (already held) in the house order. Never
+   * held across the teardown I/O below: nothing Stop() calls re-enters this
+   * class, but the CCX mutex is non-recursive and this is not the place to
+   * start depending on that. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_reset();
+  }
   _rx_stop = true;
   _device.quiesce_tx();
   _tx_ready = false;
@@ -1041,13 +1100,29 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
   caps.marketing_names = "RTL8731BU/RTL8733BU";
   caps.chip_id = rtl8733b::kChipId;
   caps.generation = devourer::ChipGeneration::Rtl8733b;
-  /* No frame-free sensing ported: the phydm FA/CCA block and the CCX engine
-   * are not wired up here, and GetRxEnergy is not overridden — so both report
-   * false rather than letting the IRtlRadio cast imply a sensor. The die does
-   * have a working CLM engine on the JGR3 map (62-63% under a ~63% load,
-   * 0.0% quiet, one unit); its FA/IGI registers are unmeasured, so the port is
-   * its own change. */
-  caps.busy_airtime_ok = false;
+  /* Busy airtime yes, phydm counters no — and this die is the first backend
+   * where those two split.
+   *
+   * CCX CLM is ported (see with_ccx), on the JGR3 map the vendor puts this
+   * die on (phydm_pre_define.h:513 and :523-525 at the pinned
+   * reference/rtl8733bu-20230626). It needs no IGI reference —
+   * arm_clm_only/read_clm_only take none, because busy airtime is a tick
+   * count rather than a histogram referenced to the receiver's own floor — so
+   * it works here even though the phydm FA/CCA block is not wired up and
+   * GetRxEnergy is not overridden. The sampled path consequently still
+   * reports NO READING; the armed window (IRadio::ArmChannelBusy) is how a
+   * caller gets a number out of this backend.
+   *
+   * rx_energy_ok stays false, which is the half of the old caps note that was
+   * always right: the IRtlRadio cast would imply an FA/CCA/IGI reader that
+   * does not exist here. */
+  caps.busy_airtime_ok = true;
+  /* Separated on air through tests/busy_window_probe.sh on an RTL8733BU
+   * against an MT7612U flooder on ch165: 0% quiet, 69% under a steady load,
+   * and 10% against a 50/450 ms burst whose true duty is ~9%. A Jaguar3
+   * 8812CU on the same flooder read 69% too, so the two register paths agree
+   * on one load. Every spoiler refused with its reason. */
+  caps.busy_airtime_measured = true;
   caps.rx_energy_ok = false;
   caps.variant = "cut-selected";
   caps.transport = _device.is_usb() ? "usb" : "unknown";

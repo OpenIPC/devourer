@@ -240,7 +240,8 @@ untouched) and fall back to the full path.
 
 ## Not ported
 
-`ReadTsf`/beacons, A-MPDU, CCX / `tx.report` per-frame TX outcomes,
+`ReadTsf`/beacons, A-MPDU, CCX `tx.report` per-frame TX outcomes (the
+TX-report engine — CCX **CLM** busy airtime IS ported, see below),
 `FastSetBandwidth`, the flat-index / per-rate-diff TX-power knobs
 (`SetTxPowerIndexOverride`, `SetTxPowerRateDiffs`, `ReApplyTxPower` — only the
 relative `SetTxPowerOffsetQdb` is ported), `rx.path` per-chain telemetry,
@@ -369,7 +370,10 @@ The retry-12 shortfall from the ideal 13 may be passive-monitor loss or
 genuinely fewer airings, so the ratio is reported as an observation, not an
 exact hardware count.
 
-**CCX / `tx.report` is NOT ported, and its root cause is unresolved.** The
+**CCX `tx.report` is NOT ported, and its root cause is unresolved.** This is
+the per-frame TX-outcome engine, a different thing from the CCX **CLM**
+busy-airtime measurement documented under "Frame-free sensing" below, which
+is ported and measured. The
 descriptor and receive-side investigation narrows the problem but does not
 prove a firmware defect: SPE_RPT is dword2[19] and SW_DEFINE dword6[11:0] via
 the generic halmac
@@ -421,3 +425,95 @@ Headless coverage: `tests/rtl8733b_{efuse,phy_table,rx_parse,tx_desc}_selftest.c
 in `ctest`. Hardware: `tests/rtl8733b_lifecycle_soak.sh` (bounded warm
 lifecycle, explicitly not a true VBUS cycle) and `examples/rtl8733bprobe`
 (staged identity → power/EFUSE → firmware → MAC/PHY → TSSI audit).
+
+## Frame-free sensing: CLM busy airtime, and nothing else
+
+`IRadio::ArmChannelBusy()` / `GetChannelBusy()` work on this die. The vendor
+phydm puts the 8733B on JGR3 — at the pinned `reference/rtl8733bu-20230626`,
+`hal/phydm/phydm_pre_define.h:513` lists `ODM_RTL8733B` in
+`PHYDM_IC_SUPPORT_IFS_CLM`, and `:523-525` define
+`PHYDM_IC_JGR3_SERIES_SUPPORT` when `RTL8733B_SUPPORT` is set. The engine
+answers on that register map through
+the shared `devourer::ClmWindow` — `with_ccx()` in `Rtl8733bDevice.h` lends it
+`nhm_regs_jgr3()` under `_reg_mu` then the CCX mutex, exactly as Jaguar2/3 do.
+
+The flag relationship and the armed-only behaviour are the contract, and it
+lives at `src/AdapterCaps.h` on `busy_airtime_ok` / `rx_energy_ok` — the one
+place it can be kept true. What is specific to this die:
+
+- **Why CLM ports without a phydm block at all.** `arm_clm_only()` /
+  `read_clm_only()` take no IGI argument: busy airtime is a hardware tick
+  count, not a histogram referenced to the receiver's own noise floor the way
+  NHM's thresholds are. That is what makes it separable from FA/CCA here.
+- There is no NHM read on this die, so the `Interrupted` spoiler is
+  unreachable by construction: nothing can re-arm the shared engine
+  mid-window. `Retuned` and `NotElapsed` both fire normally.
+
+Measured with `tests/busy_window_probe.sh` (RTL8733BU sensor, MT7612U flooder,
+ch165): **0.0% quiet, 69% under a steady load, 10% against a 50/450 ms burst
+whose true duty is ~9%**, spread 0 on the steady arm. A Jaguar3 8812CU read
+that same flooder at 69% as well, so the two device paths onto the JGR3 map
+agree on one load. The retune and premature-read spoilers each refused with
+their reason, and a re-armed window never returned the previous latched value.
+
+**`src/sensing/` cannot reach this reading, and that is a pre-existing bug
+this die is the first to expose.** `SenseWindow::read` branches on whether the
+`IRtlRadio*` is non-null, not on whether the backend has phydm counters:
+
+```cpp
+if (rtl_) { r.energy = rtl_->GetRxEnergy(...); r.busy = busy_from_rx_energy(r.energy); }
+else if (radio_) { r.busy = radio_->GetChannelBusy(); }
+```
+
+The RTL8733B derives from `IRtlRadio`, so it takes the first branch, gets the
+all-invalid base `GetRxEnergy`, and `GetChannelBusy()` is never called. That
+is exactly the "a successful `dynamic_cast<IRtlRadio*>` is not a correct
+discriminator" failure `AdapterCaps.h` opens with, living in the sensing
+layer. It is not new — it would mis-handle any backend with busy airtime and
+no phydm block — but before this port no such backend existed, so nothing
+exposed it. **`examples/chanscout` is affected**: it builds a
+`DwellExecutor` with `dynamic_cast<IRtlRadio *>(dev)`
+(`examples/chanscout/main.cpp:323,342`), which succeeds on this die, so a
+scout here reports neither CLM nor NHM.
+
+Gating the branch on `rx_energy_ok` is necessary but NOT sufficient: an
+unarmed `GetChannelBusy()` on this backend falls back to
+`busy_from_rx_energy(GetRxEnergy(true))` and yields nothing, and nothing in
+`src/sensing/` ever calls `ArmChannelBusy` — the only callers in the tree are
+`tests/busy_window_probe.cpp`. A complete fix is the capability gate PLUS an
+arm, and arming needs an observation window that no layer between
+`ScanPlanConfig::dwell_ms` and `SenseWindow` carries at all — `DwellExecConfig`
+stamps a `settle_ms` but has no field for the dwell the window would be sized
+to. That is a design decision for `src/sensing/`, with its own tests, not a
+rider on a backend port.
+**Until then, a caller on this die must reach
+`IRadio::ArmChannelBusy`/`GetChannelBusy` directly.**
+
+**The CCA gate cannot bias the reading here.** CLM counts CCA-busy, so a
+session with CCA disabled would under-report — but `SetCcaMode` throws "CCA
+disable is not implemented by this backend" on this die, so that state is
+unreachable rather than merely unlikely.
+
+**`Stop()` forgets the window, and that is not obvious.** A stop is not a
+retune, so nothing would spoil an armed window — but clearing `_phy_ready`
+does not protect it either, because `SetMonitorChannel` and `FastRetune` both
+call `bring_up_to_phy()`, which sets that flag true again. Without a reset in
+`Stop()`, a window armed before a stop comes back to life on the revived chip
+and the retune note hands the caller a `Retuned` spoil earned by a hardware
+session that no longer exists: invalid either way, but the reason would be a
+lie. The reset is scoped under the `_reg_mu` `Stop()` already holds.
+
+Jaguar1/2/3 share this hole and have it worse — none of their `Stop()`
+implementations resets the window either, and unlike this backend none of them
+clears the flag their `with_ccx` gates on, so a `GetChannelBusy()` straight
+after `Stop()` reads CCX registers on a deinitialised chip with no retune
+needed. Not fixed here; noted so the asymmetry is not mistaken for an 8733B
+quirk.
+
+Retune notes live in `SetMonitorChannel` and `FastRetune`, both **scoped**:
+`FastRetune` calls `SetMonitorChannel` on its declined path while already
+holding `_reg_mu` (recursive, so that part is fine), and the CCX mutex is NOT
+recursive — holding it across the tune would self-deadlock on that path. One
+note per site suffices because `_reg_mu` is held across the whole tune and
+`with_ccx` takes `_reg_mu` first, so a concurrent arm cannot interleave; that
+is the Jaguar2/3 situation, not Jaguar1's.

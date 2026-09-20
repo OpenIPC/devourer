@@ -94,6 +94,58 @@ public:
   devourer::FwBootStatus GetFwBootStatus() override;
 
 private:
+  /* This generation's CCX map and register access, under its locks — see
+   * IRtlRadio::with_ccx. Private: the base class calls it, nobody else.
+   *
+   * The JGR3 map, and the proof is in this tree: hal/hal8733b_tables.c:792
+   * onward, the shipped 8733B phy_reg init table, programs 0x1e40, 0x1e44,
+   * 0x1e48, 0x1e5c and 0x1e60 at bring-up — the CCX block, at the JGR3
+   * addresses, on this die. The vendor agrees: at the pinned
+   * reference/rtl8733bu-20230626, hal/phydm/phydm_pre_define.h:513 lists
+   * ODM_RTL8733B in PHYDM_IC_SUPPORT_IFS_CLM, and :523-525 define
+   * PHYDM_IC_JGR3_SERIES_SUPPORT when RTL8733B_SUPPORT is set.
+   *
+   * That init table is also the only other writer of these registers:
+   * nothing in src/rtl8733b/ touches 0x1e40-0x1e60 or 0x2d88 at runtime,
+   * so the masked read-modify-writes below cannot corrupt another
+   * subsystem's state. arm_clm_only never touches 0x1e5c, where the table
+   * leaves a non-zero value.
+   *
+   * CLM is reachable here even though GetRxEnergy is not overridden:
+   * arm_clm_only() and read_clm_only() take no IGI argument, because busy
+   * airtime is a tick count and needs no receiver-noise reference the way
+   * NHM's IGI-referenced thresholds do. So this backend answers
+   * GetChannelBusy through an armed window while its sampled path still
+   * reports no reading, and rx_energy_ok stays false. */
+  bool with_ccx(const CcxFn &fn) override {
+    std::lock_guard<std::recursive_mutex> reg(_reg_mu);
+    /* Nothing to lend before the BB is programmed: a window armed against it
+     * would be forgotten by Init/InitWrite's reset. _phy_ready is this
+     * family's _brought_up, and it goes true the moment _phy.initialize()
+     * succeeds rather than at the end of bring_up_to_phy() — which is the
+     * right point for THIS question, because everything after it is MAC-level
+     * (the ACK window, the ACK responder) and does not bear on whether a BB
+     * register is safe to touch. Cleared by Stop().
+     *
+     * Read UNDER _reg_mu, unlike the Jaguar2/3 overrides this is modelled on.
+     * It is a plain bool written under that lock by bring_up_to_phy() and
+     * Stop(), so checking it before taking the lock is both a data race and a
+     * TOCTOU: the check passes, the lock then blocks behind a concurrent
+     * Stop(), and the register access below proceeds against a card that has
+     * just been powered down. Costs nothing to do it in the right order. */
+    if (!_phy_ready)
+      return false;
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    const Read32 rd = [this](uint16_t a) {
+      return _device.rtw_read<uint32_t>(a);
+    };
+    const SetBb wr = [this](uint16_t a, uint32_t m, uint32_t v) {
+      _device.phy_set_bb_reg(a, m, v);
+    };
+    fn(devourer::nhm_regs_jgr3(), rd, wr);
+    return true;
+  }
+
   void bring_up_to_phy();
   bool configure_tx_power(SelectedChannel channel);
   /* Fill one [txdesc][frame] block at `out`. `agg_num` is the USB TX

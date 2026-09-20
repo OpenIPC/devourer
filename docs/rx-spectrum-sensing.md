@@ -127,13 +127,15 @@ hardware it runs on:
 |---|---|---|
 | returns | `ChannelBusy` — busy airtime + energy-above-floor | `RxEnergy` — the phydm counter set |
 | available on | any backend with a hardware busy-airtime counter | Realtek only |
-| today | Jaguar1/2/3 (CCX CLM), MT7612U (MAC channel timers) | Jaguar1/2/3, Kestrel (floor only) |
-| not available | Kestrel, RTL8733B — both report *no reading*, never zero | RTL8733B, MT7612U |
+| today | Jaguar1/2/3 and RTL8733B (CCX CLM), MT7612U (MAC channel timers) | Jaguar1/2/3, Kestrel (floor only) |
+| not available | Kestrel — reports *no reading*, never zero | RTL8733B, MT7612U |
 
 Advertised statically by `AdapterCaps::busy_airtime_ok` /
 `busy_airtime_measured` / `rx_energy_ok`. **Do not use a successful
 `dynamic_cast<IRtlRadio*>` as the discriminator** — it was never correct: the
-RTL8733B derives from `IRtlRadio` and implements no energy reader at all.
+RTL8733B derives from `IRtlRadio` and implements no energy reader at all —
+while nonetheless answering `GetChannelBusy()` through CLM, so the two flags
+have to be read separately rather than inferred from each other.
 
 `ChannelBusy` carries its own `source` (`Clm` or `ChTime`) because the two
 facilities define busy differently: the MediaTek timers count TX+RX+NAV+EIFS,
@@ -360,6 +362,7 @@ The facilities differ by generation but all three read the same fields:
 | Jaguar1 (8812/8821/8814) | yes | classic AC — FA 0xF48/0xA5C, CCA 0xF08, IGI 0xC50; NHM 0x994/0x990/0x998/0xfa8/0xfb4 |
 | Jaguar2 (8822BU/8821CU) | yes | classic AC (FA/CCA sampled by the DIG thread; same NHM map) |
 | Jaguar3 (8822CU/8822EU) | yes | newer BB — CCA 0x2c08, CCK-FA 0x1a5c, OFDM-FA 0x2d0x, IGI 0x1d70; NHM 0x1e60/0x1e40/0x1e44/0x2d40/0x2d4c |
+| RTL8733B (8731BU/8733BU) | **CLM only** | the JGR3 CCX map (ctrl 0x1e60, period 0x1e40, result 0x2d88). No phydm FA/CCA block and no NHM here — CLM needs no IGI reference, so it ports alone |
 
 ## The armed busy window (`ArmChannelBusy`)
 
@@ -414,11 +417,11 @@ quick-connect decision has.
 Three things spoil one, all measured, and each makes the reading come back
 invalid with a reason (`ChannelBusy::spoil`) rather than plausible:
 
-| spoiler | Jaguar1 (11AC) | Jaguar3 (JGR3) |
-|---|---|---|
-| an NHM read mid-window | survives, reads **+4 points high** (74.8 vs 70.9) | **destroyed** — returns the 2 ms re-arm (326 of 62500 ticks on the 250 ms window used for that measurement) |
-| a retune mid-window | 60-62% where the channel was 71% | 44-47% where it was 61% |
-| reading before it elapsed | the result register latches the PREVIOUS window; reads are non-destructive, so an early read is a stale number wearing a fresh timestamp |
+| spoiler | Jaguar1 (11AC) | Jaguar3 (JGR3) | RTL8733B (JGR3) |
+|---|---|---|---|
+| an NHM read mid-window | survives, reads **+4 points high** (74.8 vs 70.9) | **destroyed** — returns the 2 ms re-arm (326 of 62500 ticks on the 250 ms window used for that measurement) | unreachable — no NHM reader on this die, so nothing can re-arm the shared engine |
+| a retune mid-window | 60-62% where the channel was 71% | 44-47% where it was 61% | refused with `spoil=retuned` |
+| reading before it elapsed | the result register latches the PREVIOUS window; reads are non-destructive, so an early read is a stale number wearing a fresh timestamp | as the other two: refused with `spoil=not-elapsed` |
 
 The third row rests on one silicon behaviour nothing else here depends on:
 **triggering CLM clears the ready bit**, so a window that has not finished
@@ -471,13 +474,35 @@ where a result at or above the period reports 100%.
 
 ### Coverage
 
-`ArmChannelBusy` works on Jaguar1, Jaguar2 and Jaguar3 (CLM) and on the
-MT7612U (channel timers). Under one flooder on one channel the three Realtek
-families and the MediaTek independently measured the same load at 61-71% — the
-spread is antenna and receiver gain, not a units disagreement. Kestrel and the
-RTL8733B return 0 from the arm (the CCX engine is not wired up on either — the
-RTL8733B has a working one, see the caps comment in its device source), and
-their callers keep the sampled path.
+`ArmChannelBusy` works on Jaguar1, Jaguar2, Jaguar3 and the RTL8733B (CLM)
+and on the MT7612U (channel timers). Under one flooder on one channel the
+Realtek families and the MediaTek independently measured the same load at
+61-71% — the spread is antenna and receiver gain, not a units disagreement.
+The RTL8733B and a Jaguar3 8812CU read the same load at 69% apiece on the same
+flooder, across the two different device paths onto the same JGR3 map. Kestrel
+returns 0 from the arm — its CCX engine is not wired up — and its callers keep
+the sampled path.
+
+The RTL8733B is the one backend where an armed window is the ONLY way to get a
+number: it implements no `GetRxEnergy`, so its sampled path reports no reading
+by design. One consequence to know before building on it — `src/sensing/`
+cannot reach that reading yet. `SenseWindow::read` chooses its source by
+whether the `IRtlRadio*` is non-null rather than by `rx_energy_ok`, so on a
+backend that derives from `IRtlRadio` and implements no energy reader it takes
+the phydm branch and never calls `GetChannelBusy()`. That is the same wrong
+discriminator `AdapterCaps.h` warns about, and it predates this port — the
+RTL8733B is simply the first backend that makes it observable — and
+`examples/chanscout` does hit it, through a `dynamic_cast<IRtlRadio *>` that
+succeeds on this die. Gating the branch on the capability is necessary but not
+sufficient: nothing in `src/sensing/` arms, and an unarmed read yields nothing
+here, so the complete fix is the gate plus an arm with an observation window
+the sensing layer does not yet carry. Until then a caller on this die should
+use `IRadio::ArmChannelBusy`/`GetChannelBusy` directly.
+
+`tests/busy_window_probe.sh` skips its sampled and NHM arms for that reason,
+gating on `rx_energy_ok` from the probe's own caps record rather
+than on the sensor's USB VID — a Realtek chip with CCX and no phydm counters
+is exactly what a VID test gets wrong.
 
 Both harness runs above used an MT7612U flooder. With a Jaguar2 (8822BU)
 `txdemo` flooder the same harness read a **valid 0%** for the first ~600 ms of

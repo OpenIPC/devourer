@@ -15,7 +15,9 @@
 #   sampled    unarmed, same load -- the spread comparison.
 #   interrupt  NHM read mid-window   -- must be INVALID, spoil=interrupted.
 #   retune     retune mid-window     -- must be INVALID, spoil=retuned.
-#   early      read before elapsed   -- must be INVALID, spoil=not-elapsed.
+#   early      read before elapsed   -- must be INVALID, spoil=not-elapsed
+#              (both families: Realtek from the CCX ready bit, MediaTek from
+#              the window length recorded at arm).
 #   txsess     sensor transmits      -- must stay VALID and be flagged own_tx.
 #
 #   sudo tests/busy_window_probe.sh
@@ -94,8 +96,15 @@ assert_flood_alive() { # label
 }
 
 busy_values() { # mode -> one busy percentage per valid sample
-  grep -E "^BUSY mode" "$OUT/$1.log" 2>/dev/null | grep "valid=1" \
-    | sed -E 's/.*busy=([0-9]+)%.*/\1/'
+  python3 -c "
+import json,sys
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line.startswith('{'): continue
+    try: r = json.loads(line)
+    except ValueError: continue
+    if r.get('ev') == 'busy.window' and r.get('valid'): print(r['busy_pct'])
+" "$OUT/$1.log" 2>/dev/null
 }
 
 stat_of() { # mode, mean|min|max|spread
@@ -120,13 +129,28 @@ assert_ge() { # label, value, bound
   else echo "FAIL $1: $2 < $3"; fails=$((fails + 1)); fi
 }
 
+# The probe emits JSON Lines (ev=busy.window / busy.caps / busy.skip), so the
+# assertions below read fields out of the JSON rather than scraping a bespoke
+# text format.
+jq_field() { # file, field -> one value per busy.window record
+  python3 -c "
+import json,sys
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line.startswith('{'): continue
+    try: r = json.loads(line)
+    except ValueError: continue
+    if r.get('ev') == 'busy.window': print(r.get(sys.argv[2]))
+" "$1" "$2"
+}
+
 run_arm() { # mode, label
   local mode="$1" label="$2"
   echo "== $label"
   timeout 120 "$PROBE" --vid "$SENSOR_VID" --pid "$SENSOR_PID" \
       --channel "$CHANNEL" --other "$OTHER" --reps "$REPS" \
       --window-ms "$WINDOW_MS" --mode "$mode" $rx_flag 2>/dev/null \
-      | tee "$OUT/$mode.log" | grep -E "^BUSY"
+      | tee "$OUT/$mode.log" | grep -E '"ev":"busy\.'
 }
 
 # A spoiled arm must produce NO valid readings; a working arm must produce
@@ -138,17 +162,28 @@ expect_all() { # mode, valid(0|1), [spoil]
   # `grep -c` prints 0 and EXITS 1 when it matches nothing, so a `|| echo 0`
   # here appended a second line and made this guard dead: an empty log then
   # reported "ok: 0 samples". The whole point of the guard is the empty case.
-  n=$(grep -cE "^BUSY mode" "$OUT/$mode.log" 2>/dev/null); n=${n:-0}
+  n=$(jq_field "$OUT/$mode.log" valid | wc -l); n=${n:-0}
   if [ "$n" -eq 0 ]; then
     echo "FAIL $mode: no samples"; fails=$((fails + 1)); return
   fi
-  bad=$(grep -E "^BUSY mode" "$OUT/$mode.log" | grep -vc "valid=$want_valid")
+  local want_json="False"; [ "$want_valid" = "1" ] && want_json="True"
+  # `grep -vc` on an empty stream prints 0 but a FAILED extractor prints
+  # nothing at all, and `[ "" -ne 0 ]` is a bash error, not false — which
+  # skipped the whole if-body and printed "ok". Default to a sentinel so a
+  # broken extractor fails loudly instead of passing silently.
+  bad=$(jq_field "$OUT/$mode.log" valid | grep -vc "^$want_json$"); bad=${bad:-ERR}
+  if [ "$bad" = "ERR" ]; then
+    echo "FAIL $mode: could not read the probe's records"
+    fails=$((fails + 1)); return
+  fi
   if [ "$bad" -ne 0 ]; then
     echo "FAIL $mode: $bad/$n samples not valid=$want_valid"
     fails=$((fails + 1))
   fi
   if [ -n "$want_spoil" ]; then
-    bad=$(grep -E "^BUSY mode" "$OUT/$mode.log" | grep -vc "spoil=$want_spoil")
+    bad=$(jq_field "$OUT/$mode.log" spoil | grep -vc "^$want_spoil$"); bad=${bad:-ERR}
+    [ "$bad" = "ERR" ] && { echo "FAIL $mode: could not read spoil reasons"
+                            fails=$((fails + 1)); return; }
     [ "$bad" -eq 0 ] || {
       echo "FAIL $mode: $bad/$n samples not spoil=$want_spoil"
       fails=$((fails + 1)); }
@@ -160,8 +195,11 @@ echo "== sensor $SENSOR_VID:$SENSOR_PID, flooder $FLOOD_VID:$FLOOD_PID, ch$CHANN
 
 # The Realtek-only arms drive IRtlRadio facilities (the NHM read, the CCX
 # result latch). A MediaTek sensor runs the rest.
+# Compared numerically: a literal string test made SENSOR_VID=0x0E8D (or a
+# decimal VID) run the Realtek-only NHM arms against a MediaTek sensor, where
+# the cast fails and the window comes back valid.
 realtek_sensor=1
-[ "$SENSOR_VID" = "0x0e8d" ] && realtek_sensor=0
+[ "$(printf '%d' "$SENSOR_VID")" -eq "$(printf '%d' 0x0e8d)" ] && realtek_sensor=0
 
 stop_flood
 run_arm window "quiet floor (no flooder)"
@@ -178,6 +216,14 @@ assert_le "quiet floor is quiet" "$quiet_mean" 5
 # is one process order this script cannot express — each arm launches its own
 # probe. Skipped explicitly rather than run into a failure that says nothing
 # about the code, and never counted as a pass.
+# These need no interferer, so they run on every family — and on the MediaTek
+# they are the only automated on-air cover for the armed-window rules this
+# change adds there.
+run_arm retune "retune mid-window (no load needed)"
+expect_all retune 0 retuned
+run_arm early "read before the window elapsed (no load needed)"
+expect_all early 0 not-elapsed
+
 if [ "$realtek_sensor" != "1" ]; then
   echo "== SKIPPING the loaded arms: a MediaTek sensor must be brought up"
   echo "   BEFORE the interferer. Run those arms by hand:"
@@ -205,7 +251,12 @@ window_mean="$(stat_of window mean)"
 # construction and a 15-point bar would be asserting something untrue.
 sep_min=15
 [ "$DUTY_ON" != "0" ] && sep_min=5
-assert_ge "load separates from floor" "$((window_mean - quiet_mean))" "$sep_min"
+if [ "$window_mean" = "nan" ] || [ "$quiet_mean" = "nan" ]; then
+  echo "FAIL load separates from floor: an arm produced no valid samples"
+  fails=$((fails + 1))
+else
+  assert_ge "load separates from floor" "$((window_mean - quiet_mean))" "$sep_min"
+fi
 
 f0="$(flood_frames)"
 run_arm sampled "shipped sampled read, same load"
@@ -228,23 +279,33 @@ else
   echo "== NHM arms skipped (non-Realtek sensor has no NHM engine)"
 fi
 
-run_arm retune "retune mid-window"
-expect_all retune 0 retuned
-
 if [ "$realtek_sensor" = "1" ]; then
-  # Realtek-only: the not-elapsed refusal exists because the CCX result
-  # register latches the previous window. The MediaTek timers have no such
-  # concept — a short arm there is simply a short, and valid, window.
-  run_arm early "read before the window elapsed"
-  expect_all early 0 not-elapsed
   run_arm stale "re-arm, then read before the new window elapsed"
   # The first read of each pair must be a real measurement and the second must
   # refuse. If the trigger did NOT clear the ready bit, the second read would
   # return the first window's latched value and look perfectly valid.
-  grep -E "^BUSY mode=stale-1st" "$OUT/stale.log" | grep -q "valid=1" || {
+  python3 -c "
+import json,sys
+ok = any(json.loads(l).get('mode') == 'stale-1st' and json.loads(l).get('valid')
+         for l in open(sys.argv[1]) if l.strip().startswith('{'))
+sys.exit(0 if ok else 1)
+" "$OUT/stale.log" || {
     echo "FAIL stale: the completed window did not read back"; fails=$((fails + 1)); }
-  bad=$(grep -E "^BUSY mode=stale " "$OUT/stale.log" | grep -vc "valid=0")
-  if [ "${bad:-1}" -eq 0 ]; then
+  # Count the second reads too: if the re-arm was refused the probe emits
+  # busy.skip and exits, leaving ZERO stale records — and "no bad records"
+  # would otherwise read as a pass.
+  read -r n_stale bad <<EOF
+$(python3 -c "
+import json,sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip().startswith('{')]
+stale = [r for r in rows if r.get('mode') == 'stale']
+print(len(stale), sum(1 for r in stale if r.get('valid')))
+" "$OUT/stale.log")
+EOF
+  if [ "${n_stale:-0}" -eq 0 ]; then
+    echo "FAIL stale: no second-read records (was the re-arm refused?)"
+    fails=$((fails + 1))
+  elif [ "${bad:-1}" -eq 0 ]; then
     echo "  ok: a re-armed window never returns the previous latched result"
   else
     echo "FAIL stale: $bad early reads returned a stale latched value"
@@ -256,7 +317,7 @@ f0="$(flood_frames)"
 run_arm txsess "sensor transmitting inside its own window"
 expect_all txsess 1
 assert_flood_alive "$f0" "txsess"
-grep -E "^BUSY mode" "$OUT/txsess.log" | grep -q "own_tx=1" || {
+jq_field "$OUT/txsess.log" own_tx | grep -q "^True$" || {
   echo "FAIL txsess: own transmission not flagged"; fails=$((fails + 1)); }
 stop_flood
 
@@ -271,14 +332,29 @@ done
 # load both are tight, so this only means something with DUTY_ON set — hence
 # the guard rather than an unconditional assert.
 if [ "$DUTY_ON" != "0" ]; then
-  w_spread="$(stat_of window spread)"; s_spread="$(stat_of sampled spread)"
-  if [ "$w_spread" != "nan" ] && [ "$s_spread" != "nan" ]; then
-    if [ "$w_spread" -lt "$s_spread" ]; then
-      echo "  ok: armed spread $w_spread < sampled spread $s_spread (bursty load)"
-    else
-      echo "FAIL bursty: armed spread $w_spread not below sampled $s_spread"
-      fails=$((fails + 1))
-    fi
+  # Comparing spreads alone is fragile at small REPS: on a ~10% duty channel a
+  # handful of 2 ms reads can ALL miss the burst, which looks like a spread of
+  # zero while being entirely wrong. The claim is that the sampled estimator is
+  # BIMODAL — it either misses the load or catches a burst and reports it as
+  # the channel — so test that: the armed window must see the load, and the
+  # sampled arm must give itself away either by reporting an empty channel at
+  # least once or by spreading wider than the armed one.
+  w_mean="$(stat_of window mean)"; w_spread="$(stat_of window spread)"
+  s_spread="$(stat_of sampled spread)"
+  s_zeros="$(busy_values sampled | grep -c '^0$')"; s_zeros=${s_zeros:-0}
+  if [ "$w_mean" = "nan" ] || [ "$s_spread" = "nan" ]; then
+    echo "FAIL bursty: an arm produced no valid samples"
+    fails=$((fails + 1))
+  elif [ "$w_mean" -le 0 ]; then
+    echo "FAIL bursty: the armed window did not see the load (mean $w_mean%)"
+    fails=$((fails + 1))
+  elif [ "$s_zeros" -ge 1 ] || [ "$s_spread" -gt "$w_spread" ]; then
+    echo "  ok: armed mean $w_mean% tracks the load; sampled missed it"\
+         "$s_zeros/$(busy_values sampled | wc -l) times, spread $s_spread vs $w_spread"
+  else
+    echo "FAIL bursty: the sampled read neither missed the load nor spread"\
+         "wider than the armed window — the premise does not hold here"
+    fails=$((fails + 1))
   fi
 fi
 

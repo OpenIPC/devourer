@@ -463,15 +463,11 @@ where DIG is not free to walk the gain out from under it (the per-generation
 windows are in each `src/<gen>/CLAUDE.md`); and the ~2 ms window makes one dwell
 a sample, not a measurement.
 
-That last one is what `IRadio::ArmChannelBusy(window_us)` addresses: arm a
-window where you reset your counters, read it when your dwell ends, and the
-busy figure covers that window instead of a 2 ms slice of it. Both silicon
-families implement it (Realtek arms CLM alone, MediaTek resets its channel
-timers), and a window that something else disturbed — an NHM read re-arming the
-shared engine, a retune, a read before it elapsed — comes back INVALID carrying
-its reason rather than a plausible number. Own transmission is reported, not
-corrected: the two families are biased in opposite directions by it. Which map
-truncates and which merely inflates, and every measured number, live in each
+That last one is what `IRadio::ArmChannelBusy(window_us)` addresses: a busy
+figure over the caller's own window instead of a 2 ms slice of it. The contract
+— what arming promises, what invalidates a window, and what own transmission
+does to the reading — is documented once, on the declaration in `src/IRadio.h`.
+The per-generation behaviour and every measured number live in each
 `src/<gen>/CLAUDE.md` and `docs/rx-spectrum-sensing.md`.
 Both are **emitted, not scored**: neither `ChannelScore` nor the hopset
 occupancy law reads them. Measured numbers, the generation matrix and the

@@ -31,8 +31,10 @@ the channel is already saturated (the arm then never becomes available, and the
 MCU times out), so in a two-adapter test bring this one up BEFORE the
 interferer.
 
-`ArmChannelBusy` here resets the timers and the interval mark
-(`mt7612u_link_stats_start`), so the window is exactly the caller's arm-to-read
+`ArmChannelBusy` here resets the timers and the interval mark through
+`mt7612u_ch_time_arm` — NOT `mt7612u_link_stats_start`, which would also clear
+the MIB block and the link-stats interval that the 1 Hz tick owns, once per
+dwell — so the window is exactly the caller's arm-to-read
 gap and is reported that way in `window_us`. The mark is stamped at arm rather
 than zeroed — zeroing made the first read after an arm report `window_us=0`,
 i.e. a percentage with no denominator.

@@ -27,9 +27,10 @@
  *            ready bit - an assumption the headless selftest can only model,
  *            which is why it is checked here against real silicon.
  *   race     a second thread hammers GetRxQuality() for the whole window while
- *            this one arms and reads. Every reading must be either refused as
- *            interrupted or a full-length window — never a short one wearing a
- *            valid flag. This is the on-air check of the locking: without it
+ *            this one arms and reads. Every reading must come back refused as
+ *            interrupted — the hammer re-arms the shared engine continuously,
+ *            so no window survives it, and the failure being hunted is a SHORT
+ *            window wearing a valid flag. This is the on-air check of the locking: without it
  *            the note could land before a concurrent arm while the re-arm
  *            lands after it, and a destroyed window reads back as data.
  *   quality  like `interrupt`, but through GetRxQuality() instead of
@@ -57,6 +58,7 @@
 #endif
 
 #include "AdapterCaps.h"
+#include "Event.h"
 #include "DeviceSession.h"
 #include "IRtlRadio.h"
 #include "RadiotapBuilder.h"
@@ -95,16 +97,27 @@ const char *source_name(devourer::BusySource s) {
   }
 }
 
+devourer::EventSink g_ev;
+
+/* JSON Lines through the shared sink, like every other machine-readable
+ * output in the tree: one atomic write per line, so a consumer parsing stdout
+ * (or a second writer on it) is never handed a half-line or a bespoke
+ * format. */
 void emit(const char *mode, int i, const devourer::ChannelBusy &b,
           uint32_t armed_us, uint32_t sent) {
-  /* No padding inside a key=value token: the harness parses these fields, and
-   * "busy= 71%" splits into two. */
-  std::printf("BUSY mode=%-9s i=%2d valid=%d busy=%u%% src=%-6s window_us=%u "
-              "armed_us=%u spoil=%-11s own_tx=%d tx_frames=%u sent=%u\n",
-              mode, i, b.valid ? 1 : 0, b.busy_pct, source_name(b.source),
-              b.window_us, armed_us, spoil_name(b.spoil),
-              b.own_tx_in_window ? 1 : 0, b.own_tx_frames, sent);
-  std::fflush(stdout);
+  devourer::Ev(g_ev, "busy.window")
+      .t()
+      .f("mode", mode)
+      .f("i", static_cast<long long>(i))
+      .f("valid", b.valid)
+      .f("busy_pct", static_cast<long long>(b.busy_pct))
+      .f("source", source_name(b.source))
+      .f("window_us", static_cast<long long>(b.window_us))
+      .f("armed_us", static_cast<long long>(armed_us))
+      .f("spoil", spoil_name(b.spoil))
+      .f("own_tx", b.own_tx_in_window)
+      .f("tx_frames", static_cast<long long>(b.own_tx_frames))
+      .f("sent", static_cast<long long>(sent));
 }
 
 /* Every exit from main() after the RX thread is running must go through this.
@@ -112,7 +125,10 @@ void emit(const char *mode, int i, const devourer::ChannelBusy &b,
  * DeviceSession's destructor close the handle under it is a use-after-free —
  * which is exactly what the SKIP returns used to do. _exit runs no
  * destructors, so the USB lock is dropped by hand first: one left behind makes
- * the next run of this script refuse the adapter it just used. */
+ * the next run of this script refuse the adapter it just used. The libusb
+ * context is NOT closed on that path — the kernel reclaims it at process exit,
+ * and closing it under a live RX thread is the very hazard being avoided. The
+ * non-RX paths return normally and the session closes everything. */
 struct Cleanup {
   IRadio *dev = nullptr;
   std::shared_ptr<devourer::UsbDeviceLock> *lock = nullptr;
@@ -167,6 +183,7 @@ int main(int argc, char **argv) {
     }
   }
 
+  g_ev.configure(stdout);
   auto logger = std::make_shared<Logger>();
   libusb_context *ctx = nullptr;
   if (libusb_init(&ctx) < 0) {
@@ -174,6 +191,8 @@ int main(int argc, char **argv) {
     return 3;
   }
   devourer::DeviceSession session(logger);
+  /* So every exit path, including the early ones, runs libusb_exit(). */
+  session.adopt_context(ctx);
   libusb_device_handle *handle = libusb_open_device_with_vid_pid(ctx, vid, pid);
   if (!handle) {
     std::fprintf(stderr, "no adapter %04x:%04x\n", vid, pid);
@@ -201,12 +220,13 @@ int main(int argc, char **argv) {
   auto *const rtl = dynamic_cast<IRtlRadio *>(dev);
 
   const devourer::AdapterCaps caps = dev->GetAdapterCaps();
-  std::printf("BUSY-GEN %s chip=%s busy_airtime_ok=%d busy_airtime_measured=%d "
-              "rx_energy_ok=%d\n",
-              devourer::generation_name(caps.generation), caps.chip_name,
-              caps.busy_airtime_ok ? 1 : 0, caps.busy_airtime_measured ? 1 : 0,
-              caps.rx_energy_ok ? 1 : 0);
-  std::fflush(stdout);
+  devourer::Ev(g_ev, "busy.caps")
+      .t()
+      .f("generation", devourer::generation_name(caps.generation))
+      .f("chip", caps.chip_name)
+      .f("busy_airtime_ok", caps.busy_airtime_ok)
+      .f("busy_airtime_measured", caps.busy_airtime_measured)
+      .f("rx_energy_ok", caps.rx_energy_ok);
 
   const SelectedChannel chan_def{.Channel = static_cast<uint8_t>(channel),
                                  .ChannelOffset = 0,
@@ -265,7 +285,7 @@ int main(int argc, char **argv) {
 
     const uint32_t armed = dev->ArmChannelBusy(window_us);
     if (armed == 0) {
-      std::printf("SKIP backend cannot arm a busy window\n");
+      devourer::Ev(g_ev, "busy.skip").t().f("why", "cannot arm a busy window");
       return finish(5);
     }
     /* Wait the window the hardware actually granted, not the one requested. */
@@ -286,9 +306,14 @@ int main(int argc, char **argv) {
     } else if (mode == "race") {
       std::atomic<bool> stop{false};
       std::thread hammer([&]() {
+        /* Register I/O can throw on a USB glitch. An escaping exception here
+         * terminates the process instead of failing the arm under test. */
         while (!stop.load(std::memory_order_relaxed)) {
-          if (rtl)
-            (void)rtl->GetRxQuality();
+          try {
+            if (rtl)
+              (void)rtl->GetRxQuality();
+          } catch (const std::exception &) {
+          }
         }
       });
       nap(wait_ms);
@@ -308,15 +333,22 @@ int main(int argc, char **argv) {
       const devourer::ChannelBusy done = dev->GetChannelBusy();
       emit("stale-1st", i, done, armed, 0);
       if (dev->ArmChannelBusy(window_us) == 0) {
-        std::printf("SKIP second arm refused\n");
+        devourer::Ev(g_ev, "busy.skip").t().f("why", "second arm refused");
         return finish(5);
       }
       nap(5);
     } else if (mode == "txsess") {
-      static const uint8_t dot11[36] = {0x08, 0x00, 0x00, 0x00, 0xff, 0xff,
-                                        0xff, 0xff, 0xff, 0xff, 0x02, 0x11,
-                                        0x22, 0x33, 0x44, 0x55, 0x02, 0x11,
-                                        0x22, 0x33, 0x44, 0x55};
+      /* A 24-byte 802.11 data header, written out in full: frame control,
+       * duration, addr1/2/3 and the sequence-control field. An earlier cut
+       * listed 22 bytes into a 36-byte array and worked only because the
+       * implicit zeros happened to land where seq-ctrl belongs. */
+      static const uint8_t dot11[24] = {
+          0x08, 0x00,                          /* frame control: data       */
+          0x00, 0x00,                          /* duration                  */
+          0xff, 0xff, 0xff, 0xff, 0xff, 0xff,  /* addr1: broadcast          */
+          0x02, 0x11, 0x22, 0x33, 0x44, 0x55,  /* addr2: source             */
+          0x02, 0x11, 0x22, 0x33, 0x44, 0x55,  /* addr3: BSSID              */
+          0x00, 0x00};                         /* sequence control          */
       devourer::TxMode tx_mode;
       const std::vector<uint8_t> rt = devourer::build_stream_radiotap(tx_mode);
       std::vector<uint8_t> buf(rt.begin(), rt.end());

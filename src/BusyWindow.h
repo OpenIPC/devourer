@@ -109,6 +109,16 @@ public:
       return b;
     armed_ = false;
 
+    /* An earlier reason wins: a window that something re-armed mid-flight is
+     * "interrupted", and the fact that it is consequently not elapsed either
+     * is a symptom of that, not a second finding. Checked BEFORE the ready
+     * bit for exactly that reason. */
+    if (spoil_ != BusySpoil::None) {
+      last_spoil_ = spoil_;
+      b.spoil = spoil_;
+      return b;
+    }
+
     const ClmRead c = read_clm_only(regs, read32);
     if (!c.ready) {
       /* The ready bit is still clear: the window has not finished. The result
@@ -119,12 +129,6 @@ public:
       b.spoil = spoil_;
       return b;
     }
-    if (spoil_ != BusySpoil::None) {
-      last_spoil_ = spoil_;
-      b.spoil = spoil_;
-      return b;
-    }
-
     b.valid = true;
     b.source = BusySource::Clm;
     b.valid_busy = true;

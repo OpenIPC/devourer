@@ -837,6 +837,12 @@ target_link_libraries(chipstate PUBLIC devourer PRIVATE PkgConfig::libusb)
 # The in-tree caller for the carrier-sense gate split. Needs hardware, so it is
 # a tool rather than an add_test — tests/cca_gates_regcheck.sh drives it and
 # cross-checks the registers with chipstate.
+add_executable(CcaGatesProbe
+    tests/cca_gates_probe.cpp
+)
+target_include_directories(CcaGatesProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+target_link_libraries(CcaGatesProbe PUBLIC devourer PRIVATE PkgConfig::libusb)
+
 # On-air driver for IRadio::ArmChannelBusy, through the public contract only
 # (arm + GetChannelBusy). tests/busy_window_probe.sh runs its arms and asserts
 # the separations; a spoiled window must come back INVALID with its reason,
@@ -846,12 +852,6 @@ add_executable(BusyWindowProbe
 )
 target_include_directories(BusyWindowProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 target_link_libraries(BusyWindowProbe PUBLIC devourer PRIVATE PkgConfig::libusb)
-
-add_executable(CcaGatesProbe
-    tests/cca_gates_probe.cpp
-)
-target_include_directories(CcaGatesProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
-target_link_libraries(CcaGatesProbe PUBLIC devourer PRIVATE PkgConfig::libusb)
 
 # Headless regression guard for the binary-stdin framing shared by the two
 # stream demos above (examples/common/stream_stdin.h). No libusb, no radio — just the

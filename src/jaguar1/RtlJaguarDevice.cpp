@@ -1923,11 +1923,17 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
 void RtlJaguarDevice::SetMonitorChannel(SelectedChannel channel) {
   /* A window armed before this retune would integrate across the channel
    * change and report the blend as one channel's occupancy. */
-  /* Held ACROSS the tune, not just around the note: a window armed in the gap
-   * between the two would integrate across the channel change and read back
-   * valid. Ordering is the family's register lock first, then this one. */
-  std::lock_guard<std::mutex> ccx(busy_window_mutex());
-  busy_window_note_retune();
+  /* Scoped to the note, NOT held across the tune. Holding it deadlocks: when
+   * the fast path declines, the fallback calls SetMonitorChannel(), which
+   * takes this same non-recursive mutex again. The note is safe scoped
+   * because the control plane is single-threaded by contract (see
+   * IRadio::ArmChannelBusy) — and on the families that DO have a register
+   * lock, that lock spans the tune and with_ccx takes it first, which closes
+   * the gap there for free. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_retune();
+  }
   /* Keep the device-level channel state current: send_packet's 5GHz
    * CCK->OFDM clamp keys off _channel.Channel. Before this assignment
    * existed, _channel was never written anywhere — the clamp read an
@@ -1955,11 +1961,17 @@ int RtlJaguarDevice::GetRxPathMask() {
 void RtlJaguarDevice::FastRetune(uint8_t channel, bool cache_rf) {
   /* A window armed before this retune would integrate across the channel
    * change and report the blend as one channel's occupancy. */
-  /* Held ACROSS the tune, not just around the note: a window armed in the gap
-   * between the two would integrate across the channel change and read back
-   * valid. Ordering is the family's register lock first, then this one. */
-  std::lock_guard<std::mutex> ccx(busy_window_mutex());
-  busy_window_note_retune();
+  /* Scoped to the note, NOT held across the tune. Holding it deadlocks: when
+   * the fast path declines, the fallback calls SetMonitorChannel(), which
+   * takes this same non-recursive mutex again. The note is safe scoped
+   * because the control plane is single-threaded by contract (see
+   * IRadio::ArmChannelBusy) — and on the families that DO have a register
+   * lock, that lock spans the tune and with_ccx takes it first, which closes
+   * the gap there for free. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_retune();
+  }
   if (_radioManagement->fast_retune(channel, cache_rf)) {
     _channel.Channel = channel;
     return;
@@ -1973,10 +1985,19 @@ void RtlJaguarDevice::FastRetune(uint8_t channel, bool cache_rf) {
 
 void RtlJaguarDevice::FastSetBandwidth(ChannelWidth_t bw) {
   /* A bandwidth change re-clocks the front end, so a window armed before it
-   * was measuring a different receiver — the same argument as a retune. Held
-   * across the change, not just noted before it. */
-  std::lock_guard<std::mutex> ccx(busy_window_mutex());
-  busy_window_note_retune();
+   * was measuring a different receiver — the same argument as a retune.
+   *
+   * ONE rule, two shapes: the note must not be separable from the change by a
+   * concurrent arm. Where the family has a register lock that spans the
+   * change (Jaguar2/3), the note sits inside it and with_ccx's ordering does
+   * the rest. Here there is no such lock, and holding this one across the
+   * change would deadlock — the declined fast path falls back to
+   * SetMonitorChannel(), which takes it again — so the note is scoped and the
+   * single-control-thread contract carries it. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_retune();
+  }
   if (_radioManagement->fast_set_bandwidth(bw)) {
     _channel.ChannelWidth = bw;
     return;

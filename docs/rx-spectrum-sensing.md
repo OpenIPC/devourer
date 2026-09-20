@@ -420,6 +420,17 @@ invalid with a reason (`ChannelBusy::spoil`) rather than plausible:
 | a retune mid-window | 60-62% where the channel was 71% | 44-47% where it was 61% |
 | reading before it elapsed | the result register latches the PREVIOUS window; reads are non-destructive, so an early read is a stale number wearing a fresh timestamp |
 
+The third row rests on one silicon behaviour nothing else here depends on:
+**triggering CLM clears the ready bit**, so a window that has not finished
+reports not-ready instead of the previous window's result. The headless test
+can only model that (its mock drops the bit on the trigger write), so it is
+checked on air by two arms, 6/6 each on an 8812AU: `early` (arm, read at once)
+returned `spoil=not-elapsed` on every read, and `stale` (arm, let it complete,
+read it, arm again, read at once) returned a valid measurement for the first
+read of every pair and `not-elapsed` for every second one. Had the trigger
+left the bit set, that second read would have returned the first window's
+value — valid, and wrong.
+
 The first row is why the rule is enforced on every family and not only where it
 fails loudly: `GetRxQuality()` calls `GetRxEnergy(with_nhm=true)`, so a
 consumer polling link quality inside its own survey dwell spoils it without

@@ -261,6 +261,68 @@ inline ChannelBusy busy_from_ch_time(uint32_t busy, uint32_t idle,
   return b;
 }
 
+/* An armed MediaTek busy window, as far as the conversion below needs to know
+ * about it. The backend owns the lifetime; this is the snapshot it decides on.
+ *
+ * These timers have no ready bit, so everything that makes an armed reading
+ * honest has to be carried in software: what the caller asked for (or a short
+ * glance at the channel reads as a finished window), whether a retune ran
+ * through it, and the TX baseline, because unlike CLM these timers count own
+ * transmission as busy. */
+struct ChTimeWindow {
+  bool armed = false;
+  bool spoiled = false;   /* a retune ran through the window */
+  uint32_t window_us = 0; /* what the caller requested at arm */
+  uint64_t tx_at_arm = 0;
+};
+
+/* The armed-window decision for the MediaTek timers, pure so the refusals are
+ * reachable from a selftest with no radio — the backend that owns the state is
+ * hardware-only, and these rules are exactly the part worth testing.
+ *
+ * `disturbed` says mt7612u_link_stats() read-and-cleared the same registers
+ * inside the window, which takes the counts this reading would otherwise
+ * claim: the MediaTek equivalent of an NHM read re-arming the shared CCX
+ * engine, and reported the same way.
+ *
+ * An unarmed call is the sampled path and falls through to busy_from_ch_time
+ * unchanged. */
+inline ChannelBusy busy_from_ch_time_window(const ChTimeWindow &w,
+                                            uint32_t busy, uint32_t idle,
+                                            uint32_t interval_us,
+                                            bool disturbed, uint64_t tx_now) {
+  if (w.armed) {
+    if (w.spoiled) {
+      ChannelBusy b;
+      b.spoil = BusySpoil::Retuned;
+      return b;
+    }
+    /* Interruption outranks "not elapsed", matching the Realtek ordering in
+     * devourer::ClmWindow::read: when something took the counters, the short
+     * interval is a SYMPTOM of that, and the caller's fix is its own
+     * sequencing rather than a longer wait. */
+    if (disturbed) {
+      ChannelBusy b;
+      b.spoil = BusySpoil::Interrupted;
+      return b;
+    }
+    if (interval_us < w.window_us) {
+      ChannelBusy b;
+      b.spoil = BusySpoil::NotElapsed;
+      return b;
+    }
+  }
+  ChannelBusy b = busy_from_ch_time(busy, idle, interval_us);
+  if (w.armed && b.valid) {
+    const uint64_t sent = tx_now > w.tx_at_arm ? tx_now - w.tx_at_arm : 0;
+    b.own_tx_frames = sent > UINT32_MAX ? UINT32_MAX
+                                        : static_cast<uint32_t>(sent);
+    b.own_tx_in_window = sent > 0;
+  }
+  return b;
+}
+
+
 } /* namespace devourer */
 
 #endif /* RX_SENSE_H */

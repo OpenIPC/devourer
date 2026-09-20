@@ -86,9 +86,9 @@ public:
    * COST + CONTENTION: see the IRadio declaration. This arms the ~2 ms NHM
    * window and consumes the same delta GetRxEnergy and GetRxQuality read. */
   devourer::ChannelBusy GetChannelBusy() override {
-    /* Sampled OUTSIDE the CCX lock: GetTxStats may take a family lock of its
-     * own, and the ordering rule here is register lock -> CCX lock, never the
-     * reverse. */
+    /* Sampled OUTSIDE the CCX lock. On these backends GetTxStats is a
+     * lock-free counter read, but the rule stands on the ordering, not on
+     * that: nothing may reach for another lock while holding this one. */
     const uint64_t tx = GetTxStats().submitted;
     devourer::ChannelBusy armed_reading;
     bool was_armed = false;

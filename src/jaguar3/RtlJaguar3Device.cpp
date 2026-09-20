@@ -1377,9 +1377,10 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
    * radio-management core directly (no lock needed: the coex thread isn't
    * running yet), so locking here cannot self-deadlock. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  /* Held ACROSS the tune, not just around the note: a window armed in the gap
-   * between the two would integrate across the channel change and read back
-   * valid. Ordering is the family's register lock first, then this one. */
+  /* The note must not be able to land before a concurrent arm that then
+   * commits while this tune runs. _reg_mu above is what spans the tune, and
+   * with_ccx takes _reg_mu BEFORE this lock, so an arm cannot interleave.
+   * Ordering is always the family's register lock first, then this one. */
   std::lock_guard<std::mutex> ccx(busy_window_mutex());
   busy_window_note_retune();
 

@@ -149,11 +149,13 @@ private:
   std::mutex _teardown_mu;
   std::atomic<bool> _rx_stop{false};
   std::atomic<bool> _rx_active{false};
-  /* An armed busy window (IRadio::ArmChannelBusy) and whether a retune
-   * invalidated it. Guarded by _mu like every other register-adjacent member;
-   * the atomic above is separate because Stop() reads it without the lock. */
-  bool _busy_armed = false;
-  bool _busy_spoiled = false;
+  /* An armed busy window (IRadio::ArmChannelBusy). All of it is guarded by
+   * _mu, and every field is needed for the reading to be honest: the
+   * requested length so a premature read is refused rather than reported as a
+   * short window (the elapsed side comes from the C layer's own interval
+   * mark), and the TX baseline because these timers count own transmission as
+   * busy. */
+  devourer::ChTimeWindow _busy;
   std::atomic<uint64_t> _rx_frames{0};
 
   /* Frames cross from the C library's event thread to the StartRxLoop thread

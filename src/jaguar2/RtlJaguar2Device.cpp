@@ -907,9 +907,10 @@ void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
    * change and report the blend as one channel's occupancy. */
   /* Serialize against the thermal-track tick's RF-window read. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  /* Held ACROSS the tune, not just around the note: a window armed in the gap
-   * between the two would integrate across the channel change and read back
-   * valid. Ordering is the family's register lock first, then this one. */
+  /* The note must not be able to land before a concurrent arm that then
+   * commits while this tune runs. _reg_mu above is what spans the tune, and
+   * with_ccx takes _reg_mu BEFORE this lock, so an arm cannot interleave.
+   * Ordering is always the family's register lock first, then this one. */
   std::lock_guard<std::mutex> ccx(busy_window_mutex());
   busy_window_note_retune();
   _channel = channel;
@@ -935,19 +936,13 @@ void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
 
 void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
   if (channel == _channel.Channel)
-    return; /* no tune, so nothing to spoil — the note goes after this */
-  /* A window armed before this retune would integrate across the channel
-   * change and report the blend as one channel's occupancy. */
-  {
-    std::lock_guard<std::mutex> ccx(busy_window_mutex());
-    busy_window_note_retune();
-  }
-
+    return; /* no tune, so nothing to spoil */
   /* Serialize against the thermal-track tick's RF-window read. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  /* Held ACROSS the tune, not just around the note: a window armed in the gap
-   * between the two would integrate across the channel change and read back
-   * valid. Ordering is the family's register lock first, then this one. */
+  /* The note must not be able to land before a concurrent arm that then
+   * commits while this tune runs. _reg_mu above is what spans the tune, and
+   * with_ccx takes _reg_mu BEFORE this lock, so an arm cannot interleave.
+   * Ordering is always the family's register lock first, then this one. */
   std::lock_guard<std::mutex> ccx(busy_window_mutex());
   busy_window_note_retune();
   const bool band_change = (_channel.Channel <= 14) != (channel <= 14);
@@ -973,11 +968,14 @@ void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
 void RtlJaguar2Device::FastSetBandwidth(ChannelWidth_t bw) {
   {
     std::lock_guard<std::mutex> lk(_reg_mu);
-  /* A bandwidth change re-clocks the front end, so a window armed before it
-   * was measuring a different receiver — the same argument as a retune. Held
-   * across the change, not just noted before it. */
-  std::lock_guard<std::mutex> ccx(busy_window_mutex());
-  busy_window_note_retune();
+    /* A bandwidth change re-clocks the front end, so a window armed before it
+     * was measuring a different receiver — the same argument as a retune. The
+     * note sits inside _reg_mu, which spans the change, and with_ccx takes
+     * _reg_mu first, so an arm cannot interleave. The fall-through to
+     * SetMonitorChannel is deliberately OUTSIDE this scope: it takes both
+     * locks itself. */
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_retune();
     if (_hal.fast_set_bandwidth(static_cast<uint8_t>(bw))) {
       _channel.ChannelWidth = bw;
       return;

@@ -599,7 +599,8 @@ int mt7612u_link_stats_start(struct mt7612u_dev *d)
 	      MT_CH_TIME_CFG_RX_AS_BUSY | MT_CH_TIME_CFG_NAV_AS_BUSY |
 	      MT_CH_TIME_CFG_EIFS_AS_BUSY | MT_CH_CCA_RC_EN |
 	      FIELD_PREP(MT_CH_TIME_CFG_CH_TIMER_CLR, 1));
-	/* One read to clear everything, so the first real sample is clean. */
+	/* One read to clear everything, so the first real sample is clean. Its
+	 * own disturbance flag is cleared below: arming is not a theft. */
 	mt7612u_link_stats(d, &discard);
 	/* Arming is what makes a ch_time reading meaningful, so the interval
 	 * STARTS here — not at whatever the previous session left behind, and not
@@ -637,8 +638,21 @@ int mt7612u_ch_time_arm(struct mt7612u_dev *d)
 	if (mt_rr_chk(d, MT_CH_BUSY, &discard) || mt_rr_chk(d, MT_CH_IDLE, &discard))
 		return -1;
 	d->ch_time_armed = 1;
+	d->ch_time_disturbed = 0;
 	d->ch_time_last_us = stats_now_us();
 	return 0;
+}
+
+/* Did anything read-and-clear the channel timers behind an armed window? See
+ * the header. Reports and clears. */
+int mt7612u_ch_time_disturbed(struct mt7612u_dev *d)
+{
+	int was;
+
+	if (!d) return 0;
+	was = d->ch_time_disturbed;
+	d->ch_time_disturbed = 0;
+	return was;
 }
 
 /* Channel timers only. See the header for why this is not link_stats(). */
@@ -682,6 +696,11 @@ int mt7612u_link_stats(struct mt7612u_dev *d, struct mt7612u_link_stats *out)
 
 	out->ch_busy = mt_rr(d, MT_CH_BUSY);
 	out->ch_idle = mt_rr(d, MT_CH_IDLE);
+	/* Those two are read-and-clear and are the SAME registers a ch_time
+	 * window accumulates in, so this poll just took its counts. Flag it
+	 * rather than let the window report the remainder as a full reading. */
+	if (d->ch_time_armed)
+		d->ch_time_disturbed = 1;
 
 	v = mt_rr(d, MT_RX_STAT_0);
 	out->rx_crc_err = (uint16_t)FIELD_GET(MT_RX_STAT_0_CRC_ERRORS, v);

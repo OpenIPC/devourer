@@ -174,15 +174,21 @@ int main() {
           static_cast<long>(BusySpoil::None));
   }
 
-  /* A result at or above the period is 100%, never an overflow artefact. */
+  /* A result at or above the period is 100%, never an overflow artefact.
+   * Overshoots the period far enough to KILL the mutant: rounding means a
+   * small excess still lands on 100 either way, so the value has to exceed
+   * period by more than half a percent of it. Without the clamp 61000/60000
+   * yields 102, which a uint8_t percentage reports as an out-of-range
+   * channel occupancy. */
   {
     MockBb bb;
     ClmWindow w;
     w.arm(regs, 240000, 0, bb.wr());
-    bb.clm_ticks = 60000;
+    bb.clm_ticks = 61000;
     bb.clm_ready = true;
     const ChannelBusy b = w.read(regs, 0, bb.rd());
     check("saturated: 100%", b.busy_pct, 100);
+    check("saturated: window still its own", b.window_us, 240000);
   }
 
   /* --- an NHM read inside the window: JGR3 truncates it, 11AC inflates it,
@@ -340,7 +346,10 @@ int main() {
     bb.clm_ticks = 30000;
     bb.clm_ready = true;
     (void)w.read(regs, 0, bb.rd());
-    w.note_nhm_read();             /* nothing armed: must be ignored */
+    /* A note with nothing armed must not reach the NEXT window. (The guard
+     * inside note_*() is belt-and-braces: arm() also clears the reason, so
+     * this asserts the observable behaviour rather than the mechanism.) */
+    w.note_nhm_read();
     check("unarmed note: nothing armed", w.armed() ? 1 : 0, 0);
     w.arm(regs, 240000, 0, bb.wr());
     bb.clm_ticks = 30000;
@@ -362,6 +371,21 @@ int main() {
     const ChannelBusy b = w.read(regs, 0, bb.rd());
     check("precedence: invalid", b.valid, 0);
     check("precedence: first reason kept", static_cast<long>(b.spoil),
+          static_cast<long>(BusySpoil::Interrupted));
+  }
+
+  /* An interrupted window that has ALSO not elapsed reports the interruption:
+   * the not-elapsed part is a symptom of the re-arm, and the caller's fix is
+   * the sequencing, not a longer wait. */
+  {
+    MockBb bb;
+    ClmWindow w;
+    w.arm(regs, 240000, 0, bb.wr());
+    w.note_nhm_read();
+    bb.clm_ready = false; /* the re-arm restarted it, so it is not done */
+    const ChannelBusy b = w.read(regs, 0, bb.rd());
+    check("precedence: not-elapsed does not mask the interruption",
+          static_cast<long>(b.spoil),
           static_cast<long>(BusySpoil::Interrupted));
   }
 

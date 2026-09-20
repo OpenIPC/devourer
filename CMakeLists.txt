@@ -843,6 +843,16 @@ add_executable(CcaGatesProbe
 target_include_directories(CcaGatesProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 target_link_libraries(CcaGatesProbe PUBLIC devourer PRIVATE PkgConfig::libusb)
 
+# On-air driver for IRadio::ArmChannelBusy, through the public contract only
+# (arm + GetChannelBusy). tests/busy_window_probe.sh runs its arms and asserts
+# the separations; a spoiled window must come back INVALID with its reason,
+# never as a plausible number.
+add_executable(BusyWindowProbe
+    tests/busy_window_probe.cpp
+)
+target_include_directories(BusyWindowProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+target_link_libraries(BusyWindowProbe PUBLIC devourer PRIVATE PkgConfig::libusb)
+
 # Headless regression guard for the binary-stdin framing shared by the two
 # stream demos above (examples/common/stream_stdin.h). No libusb, no radio — just the
 # set_stdin_binary() + read_exact() path, so a text-mode regression (e.g. the
@@ -1022,6 +1032,19 @@ target_include_directories(ChannelBusySelftest PRIVATE
 target_compile_features(ChannelBusySelftest PRIVATE cxx_std_20)
 
 add_test(NAME channel_busy_math COMMAND ChannelBusySelftest)
+
+# Headless guard for the CLM busy-window state machine (src/BusyWindow.h) with
+# mocked register access — the clamp, the CLM-only arm sequence (NHM's half of
+# the shared period dword must not move), the period-bounded ratio, and every
+# way a window stops describing the caller's dwell. Those refusals are the
+# point: on the 11AC map a spoiled window reads 3-4 points high, which no
+# consumer can tell from a real channel.
+add_executable(BusyWindowSelftest tests/busy_window_selftest.cpp)
+target_include_directories(BusyWindowSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_features(BusyWindowSelftest PRIVATE cxx_std_20)
+
+add_test(NAME busy_window_state COMMAND BusyWindowSelftest)
 
 # Headless round-trip guard for the 802.11ax HE TX radiotap path
 # (src/RadiotapBuilder.cpp build_he + the shared Radiotap.c field-23 size entry

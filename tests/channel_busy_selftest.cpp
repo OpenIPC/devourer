@@ -117,6 +117,110 @@ int main() {
           busy_from_ch_time(big / 4, (big / 4) * 3, 0).busy_pct, 25);
   }
 
+  /* --- the armed MediaTek window (busy_from_ch_time_window) ---
+   *
+   * These rules are the MediaTek half of the ArmChannelBusy contract, and the
+   * backend that owns the state needs a radio, so they are tested here where
+   * they are pure. Each refusal below is a reading that would otherwise be
+   * valid and wrong. */
+  {
+    using devourer::busy_from_ch_time_window;
+    using devourer::BusySpoil;
+    using devourer::ChTimeWindow;
+
+    { /* Unarmed: the sampled path, untouched by any of this. tx_now is
+       * deliberately LARGE — an unarmed reading has no baseline, so a build
+       * that dropped the armed check would report the lifetime TX counter as
+       * frames sent inside a window that was never armed. */
+      ChTimeWindow w;
+      const ChannelBusy b =
+          busy_from_ch_time_window(w, 300, 700, 1000, false, 9999);
+      check("mt unarmed: valid", b.valid, 1);
+      check("mt unarmed: pct", b.busy_pct, 30);
+      check("mt unarmed: no own-tx claim", b.own_tx_in_window, 0);
+      check("mt unarmed: no own-tx count", b.own_tx_frames, 0);
+    }
+    { /* The boundary: elapsed EXACTLY the requested window is complete, not
+       * premature. `<` vs `<=` is a one-character mutation otherwise. */
+      ChTimeWindow w; w.armed = true; w.window_us = 240000;
+      const ChannelBusy b = busy_from_ch_time_window(w, 600, 400, 240000, false, 0);
+      check("mt boundary: exactly the window is valid", b.valid, 1);
+      check("mt boundary: pct", b.busy_pct, 60);
+    }
+    { /* One microsecond short is premature. */
+      ChTimeWindow w; w.armed = true; w.window_us = 240000;
+      const ChannelBusy b = busy_from_ch_time_window(w, 600, 400, 239999, false, 0);
+      check("mt boundary: one us short is refused", b.valid, 0);
+      check("mt boundary: reason", static_cast<long>(b.spoil),
+            static_cast<long>(BusySpoil::NotElapsed));
+    }
+    { /* Armed and complete. */
+      ChTimeWindow w; w.armed = true; w.window_us = 240000;
+      const ChannelBusy b = busy_from_ch_time_window(w, 600, 400, 250000, false, 0);
+      check("mt armed: valid", b.valid, 1);
+      check("mt armed: pct", b.busy_pct, 60);
+    }
+    { /* Read before the requested window elapsed. These timers have no ready
+       * bit, so without this a glance reads as a finished measurement. */
+      ChTimeWindow w; w.armed = true; w.window_us = 240000;
+      const ChannelBusy b = busy_from_ch_time_window(w, 600, 400, 5000, false, 0);
+      check("mt early: refused", b.valid, 0);
+      check("mt early: reason", static_cast<long>(b.spoil),
+            static_cast<long>(BusySpoil::NotElapsed));
+    }
+    { /* A retune ran through it. */
+      ChTimeWindow w; w.armed = true; w.spoiled = true; w.window_us = 240000;
+      const ChannelBusy b = busy_from_ch_time_window(w, 600, 400, 250000, false, 0);
+      check("mt retuned: refused", b.valid, 0);
+      check("mt retuned: reason", static_cast<long>(b.spoil),
+            static_cast<long>(BusySpoil::Retuned));
+    }
+    { /* The 1 Hz telemetry poll read-and-cleared the same registers, so these
+       * counts are the remainder of the window, not the window. */
+      ChTimeWindow w; w.armed = true; w.window_us = 240000;
+      const ChannelBusy b = busy_from_ch_time_window(w, 600, 400, 250000, true, 0);
+      check("mt disturbed: refused", b.valid, 0);
+      check("mt disturbed: reason", static_cast<long>(b.spoil),
+            static_cast<long>(BusySpoil::Interrupted));
+    }
+    { /* Interruption outranks "not elapsed", as on Realtek: the short
+       * interval is a symptom of the theft. */
+      ChTimeWindow w; w.armed = true; w.window_us = 240000;
+      const ChannelBusy b = busy_from_ch_time_window(w, 600, 400, 5000, true, 0);
+      check("mt precedence: interrupted beats not-elapsed",
+            static_cast<long>(b.spoil),
+            static_cast<long>(BusySpoil::Interrupted));
+    }
+    { /* A retune outranks a disturbed read: the earlier and larger fact. */
+      ChTimeWindow w; w.armed = true; w.spoiled = true; w.window_us = 240000;
+      const ChannelBusy b = busy_from_ch_time_window(w, 600, 400, 250000, true, 0);
+      check("mt precedence: retune wins", static_cast<long>(b.spoil),
+            static_cast<long>(BusySpoil::Retuned));
+    }
+    { /* Own transmission: these timers count it as busy, so the reading says
+       * so rather than being silently corrected. */
+      ChTimeWindow w; w.armed = true; w.window_us = 240000; w.tx_at_arm = 1000;
+      const ChannelBusy b = busy_from_ch_time_window(w, 900, 100, 250000, false, 1450);
+      check("mt own-tx: still valid", b.valid, 1);
+      check("mt own-tx: flagged", b.own_tx_in_window, 1);
+      check("mt own-tx: count", b.own_tx_frames, 450);
+    }
+    { /* A TX counter that went backwards must not underflow. */
+      ChTimeWindow w; w.armed = true; w.window_us = 240000; w.tx_at_arm = 5000;
+      const ChannelBusy b = busy_from_ch_time_window(w, 900, 100, 250000, false, 7);
+      check("mt own-tx: reset does not underflow", b.own_tx_frames, 0);
+      check("mt own-tx: reset leaves it unflagged", b.own_tx_in_window, 0);
+    }
+    { /* An armed window over dead counters is "no reading", never 0%. */
+      ChTimeWindow w; w.armed = true; w.window_us = 240000;
+      const ChannelBusy b = busy_from_ch_time_window(w, 0, 0, 250000, false, 0);
+      check("mt armed over dead counters: no reading", b.valid, 0);
+      check("mt armed over dead counters: reported as a lost window",
+            static_cast<long>(b.spoil),
+            static_cast<long>(BusySpoil::Interrupted));
+    }
+  }
+
   if (g_fail) {
     std::printf("channel_busy: %d failure(s)\n", g_fail);
     return 1;

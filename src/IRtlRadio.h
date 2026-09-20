@@ -4,6 +4,9 @@
 #include "IRadio.h"
 
 #include "AdapterHealth.h" /* EfuseStability */
+#include <mutex>
+
+#include "BusyWindow.h"
 #include "RxSense.h"       /* RxEnergy */
 
 /* IRtlRadio is the Realtek-family extension of IRadio: the members whose
@@ -83,7 +86,42 @@ public:
    * COST + CONTENTION: see the IRadio declaration. This arms the ~2 ms NHM
    * window and consumes the same delta GetRxEnergy and GetRxQuality read. */
   devourer::ChannelBusy GetChannelBusy() override {
+    /* Sampled OUTSIDE the CCX lock. On these backends GetTxStats is a
+     * lock-free counter read, but the rule stands on the ordering, not on
+     * that: nothing may reach for another lock while holding this one. */
+    const uint64_t tx = GetTxStats().submitted;
+    devourer::ChannelBusy armed_reading;
+    bool was_armed = false;
+    const bool have_ccx =
+        with_ccx([&](const devourer::NhmRegs &regs, const Read32 &rd,
+                     const SetBb &) {
+          if (!_busy_window.armed())
+            return;
+          was_armed = true;
+          armed_reading = _busy_window.read(regs, tx, rd);
+        });
+    if (have_ccx && was_armed)
+      return armed_reading;
+    /* Unarmed: the shipped sampled path, unchanged — GetRxEnergy takes its own
+     * locks, so it must not be called with the CCX lock held. */
     return devourer::busy_from_rx_energy(GetRxEnergy(/*with_nhm=*/true));
+  }
+
+  /* IRadio::ArmChannelBusy on this family: a CLM-only window, armed without
+   * touching the NHM half of the shared engine. Implemented once here for the
+   * same reason GetChannelBusy is — every generation's answer is the same
+   * function of its CCX register map, which ccx_access() supplies. A
+   * generation with no CCX map returns 0 (not ported), and the caller keeps
+   * the sampled path. */
+  uint32_t ArmChannelBusy(uint32_t window_us) override {
+    const uint64_t tx = GetTxStats().submitted; /* see GetChannelBusy */
+    uint32_t armed = 0;
+    const bool have_ccx =
+        with_ccx([&](const devourer::NhmRegs &regs, const Read32 &,
+                     const SetBb &wr) {
+          armed = _busy_window.arm(regs, window_us, tx, wr);
+        });
+    return have_ccx ? armed : 0;
   }
 
   /* Perform `reads` fresh PHYSICAL EFUSE logical-map reads (each pass re-runs
@@ -174,6 +212,53 @@ public:
     (void)edcca_disabled;
     return false;
   }
+
+protected:
+  using Read32 = std::function<uint32_t(uint16_t)>;
+  using SetBb = std::function<void(uint16_t, uint32_t, uint32_t)>;
+
+  using CcxFn = std::function<void(const devourer::NhmRegs &, const Read32 &,
+                                   const SetBb &)>;
+
+  /* Run `fn` with the generation's CCX register map and register accessors,
+   * holding every lock that access needs: the family's own register lock
+   * first (the CCX registers are read-modify-written by phy_set_bb_reg, and
+   * on the Jaguar3 the coex thread writes registers under _reg_mu), then
+   * busy_window_mutex(). A generation without a CCX engine leaves this false
+   * and its callers get "no reading" rather than a fabricated zero.
+   *
+   * It takes the locks rather than handing them out because the arm is FOUR
+   * register writes that must not interleave with another CCX user; lending
+   * bare accessors made every caller's sequence non-atomic. Protected: this
+   * is a family lending the base class its register access, not a
+   * register-poke API on the contract. */
+  virtual bool with_ccx(const CcxFn & /*fn*/) { return false; }
+
+  /* A generation calls these from the two paths measured to spoil an armed
+   * window: its NHM read (which re-arms the shared engine) and its retune.
+   * No-ops when nothing is armed, so they are safe to call unconditionally.
+   *
+   * THE CALLER MUST HOLD busy_window_mutex(), and for the NHM read it must
+   * hold it across the note AND the read itself. Otherwise the note can land
+   * before a concurrent arm sets its flag while the re-arm lands after it,
+   * which is precisely the destroyed window this reports — silently valid. */
+  void busy_window_note_nhm_read() { _busy_window.note_nhm_read(); }
+  void busy_window_note_retune() { _busy_window.note_retune(); }
+
+  /* Forget any armed window. Bring-up paths call it: a window armed before a
+   * re-Init describes a chip state that no longer exists, and leaving it
+   * armed would make the next unrelated GetChannelBusy() take the armed
+   * branch and report a stale period as if it were its own dwell. */
+  void busy_window_reset() { _busy_window = devourer::ClmWindow{}; }
+
+  /* Serialises the CCX engine: the armed window's state, the arm/read, and
+   * the NHM read that re-arms the same hardware. Ordering is always the
+   * family's register lock FIRST, then this one. */
+  std::mutex &busy_window_mutex() { return _ccx_mu; }
+
+  std::mutex _ccx_mu;
+  devourer::ClmWindow _busy_window; /* guarded by _ccx_mu */
+
 };
 
 #endif /* IRTL_RADIO_H */

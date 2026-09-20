@@ -1041,9 +1041,12 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
   caps.marketing_names = "RTL8731BU/RTL8733BU";
   caps.chip_id = rtl8733b::kChipId;
   caps.generation = devourer::ChipGeneration::Rtl8733b;
-  /* No frame-free sensing of any kind: no phydm FA/CCA block, no CCX/NHM
-   * register set for the HALMAC 87xx, and GetRxEnergy is not overridden — so
-   * both report false rather than letting the IRtlRadio cast imply a sensor. */
+  /* No frame-free sensing ported: the phydm FA/CCA block and the CCX engine
+   * are not wired up here, and GetRxEnergy is not overridden — so both report
+   * false rather than letting the IRtlRadio cast imply a sensor. The die does
+   * have a working CLM engine on the JGR3 map (62-63% under a ~63% load,
+   * 0.0% quiet, one unit); its FA/IGI registers are unmeasured, so the port is
+   * its own change. */
   caps.busy_airtime_ok = false;
   caps.rx_energy_ok = false;
   caps.variant = "cut-selected";

@@ -348,9 +348,15 @@ void Mt7612uRadio::InitWrite(SelectedChannel channel) {
        * receiver wedge. */
       if (mt7612u_start(_dev) != 0)
         throw std::runtime_error("MT7612U MAC start failed");
-      /* Arm the channel timers here too. A transmit-only session has no RX
-       * loop to do it, and TX-side quiet-window sensing is exactly a caller
-       * that would otherwise read timers nobody configured. */
+      /* Arm the channel timers here too, so the MIB block and the timers are
+       * in a known state for this session.
+       *
+       * It does NOT make a busy reading available on a transmit-only session:
+       * measured with the receiver down, the idle timer advances while the
+       * busy one does not, so the ratio is a plausible 0% for a channel that
+       * was never listened to. GetChannelBusy therefore refuses unless the
+       * receiver is running, and a TX-side caller that needs occupancy has to
+       * bring up RX for the measurement. */
       mt7612u_link_stats_start(_dev);
     } catch (...) {
       failed = std::current_exception();
@@ -413,6 +419,11 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         _logger->warn("MT7612U monitor RX filter not applied");
       /* Arms the channel timers and zeroes the MIB counters. */
       mt7612u_link_stats_start(_dev);
+      /* A window armed before this start was measuring the previous receiver
+       * session, and that start just re-zeroed the hardware timers it was
+       * accumulating in. Forget it rather than consume the post-restart
+       * interval as though it began at the caller's arm. */
+      _busy = devourer::ChTimeWindow{};
       _rx_active.store(true, std::memory_order_release);
     }
     if (mac_failed) {
@@ -459,6 +470,12 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
 }
 
 void Mt7612uRadio::StopRxLoop() {
+  /* The armed window dies with the receiver: the timers stop counting and the
+   * next start re-zeroes them. */
+  {
+    std::lock_guard<std::recursive_mutex> lock(_mu);
+    _busy = devourer::ChTimeWindow{};
+  }
   _rx_stop = true;
   /* Wake the consumer immediately rather than leaving it to time out. */
   _rx_q.wake();
@@ -578,8 +595,12 @@ void Mt7612uRadio::SetMonitorChannel(SelectedChannel channel) {
   /* Re-arm the channel timers: they are read-and-clear and their interval mark
    * persists, so without this the first sample after a retune would carry the
    * PREVIOUS channel's airtime and an interval spanning the retune, and report
-   * it as a valid reading for the new channel. */
+   * it as a valid reading for the new channel. A window armed BEFORE this
+   * retune is spoiled either way — re-arming makes the next reading honest,
+   * it does not make the old one about one channel. */
   mt7612u_link_stats_start(_dev);
+  if (_busy.armed)
+    _busy.spoiled = true;
 }
 
 SelectedChannel Mt7612uRadio::GetSelectedChannel() {
@@ -829,26 +850,118 @@ uint64_t Mt7612uRadio::ReadTsf() {
 /* Busy airtime from the MAC channel timers — the MediaTek half of the neutral
  * IRadio::GetChannelBusy contract.
  *
- * NOT hardware-validated: no MT7612U was available when this was written. The
- * register pair and its arming configuration match mt76's
- * mt76x02_mac_cc_reset() exactly, and the C accessor it calls is the one this
- * port already runs, but no arm-vs-quiet separation has been measured on air.
- * GetAdapterCaps().busy_airtime_measured stays false until it has been. */
+ * MEASURED on air (see docs/rx-spectrum-sensing.md): against a devourer
+ * flooder on one channel this read 64.0-64.3% where two Realtek generations
+ * independently measured the same load at 61-63%, 0.0% on a quiet channel,
+ * and 8.1-9.5% per second on a 50 ms-on/450 ms-off interferer whose true duty
+ * was ~9%. GetAdapterCaps().busy_airtime_measured is true accordingly.
+ *
+ * REQUIRES A RUNNING RECEIVER. The MAC only accumulates busy time while the
+ * receiver is on: with RX down the idle timer still advances, so busy+idle is
+ * non-zero and the ratio comes out a perfectly plausible 0% — measured, and
+ * exactly the fabricated zero this contract exists to prevent. For a channel
+ * ranker 0% means "emptiest", so that zero does not merely lose information,
+ * it steers the choice onto the busiest channel. No RX, no reading. */
 devourer::ChannelBusy Mt7612uRadio::GetChannelBusy() {
-  uint32_t busy = 0, idle = 0, interval_us = 0;
-  {
-    /* The 1 Hz tick thread holds _mu inside mt7612u_phy_tick, which issues MCU
-     * commands; serialising here keeps register access single-file the way
-     * every other accessor on this class does. */
-    std::lock_guard<std::recursive_mutex> lock(_mu);
-    /* mt7612u_ch_time refuses while the timers are unarmed, which is the case
-     * before bring-up and is what keeps a previous session's register residue
-     * from being reported as an idle channel. Arming happens in both the RX
-     * and the transmit-only path, and again on every live retune. */
-    if (!_dev || mt7612u_ch_time(_dev, &busy, &idle, &interval_us) != 0)
-      return {};
+  if (!_rx_active.load(std::memory_order_acquire))
+    return {};
+
+  /* ONE locked section, start to finish. An earlier cut cleared the armed
+   * flag in one critical section and read the timers in another; a retune
+   * landing in that gap found nothing to spoil and the post-retune remainder
+   * came back valid. */
+  std::lock_guard<std::recursive_mutex> lock(_mu);
+  /* Re-checked UNDER the lock, and on _rx_stop as well as _rx_active:
+   * StopRxLoop raises _rx_stop before it quiesces the MAC and clears
+   * _rx_active only after the unlocked ring teardown (up to ~2 s later), so
+   * in between the C layer still answers (ch_time_armed stays set) with the
+   * idle timer advancing and the busy one dead — a plausible 0% for a
+   * receiver that is down, the fabricated zero this gate exists to prevent. */
+  if (!_dev || !_rx_active.load(std::memory_order_acquire) || _rx_stop.load())
+    return {};
+
+  const devourer::ChTimeWindow window = _busy;
+  /* A premature read is refused BEFORE the timers are touched and the window
+   * stays armed, as on Realtek (devourer::ClmWindow::read): the caller reads
+   * again when its dwell ends. Unlike CLM these timers are read-and-clear, so
+   * the elapsed check cannot come from the register read itself — reaching
+   * it would take the counts the window is still accumulating. The host-side
+   * arm time is the clock. A retune outranks it, as everywhere. */
+  if (window.armed && !window.spoiled) {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - _busy_armed_at)
+                             .count();
+    if (elapsed >= 0 && static_cast<uint64_t>(elapsed) < window.window_us) {
+      devourer::ChannelBusy early;
+      early.spoil = devourer::BusySpoil::NotElapsed;
+      return early;
+    }
   }
-  return devourer::busy_from_ch_time(busy, idle, interval_us);
+  /* From here every verdict consumes the window: the read below clears the
+   * timers, so there is nothing left to come back for. */
+  auto consume = [this] { _busy = devourer::ChTimeWindow{}; };
+
+  uint32_t busy = 0, idle = 0, interval_us = 0;
+  if (mt7612u_ch_time(_dev, &busy, &idle, &interval_us) != 0) {
+    /* The window is already consumed above, so say the register read took it
+     * rather than returning the bare "this backend has no sensor" answer a
+     * default-constructed reading means. */
+    devourer::ChannelBusy failed;
+    if (window.armed) {
+      consume();
+      failed.spoil = devourer::BusySpoil::Interrupted;
+    }
+    return failed;
+  }
+  /* Only a C-API caller that also polls mt7612u_link_stats() can steal these
+   * counters (tools/bringup.cpp does; nothing on this path does), but the
+   * window is only honest if that is checked rather than assumed. */
+  const bool disturbed = mt7612u_ch_time_disturbed(_dev) != 0;
+
+  /* The rules themselves are pure and live next to the conversion they
+   * qualify (devourer::busy_from_ch_time_window), so the refusals are
+   * reachable from a selftest even though this backend needs a radio. */
+  const devourer::ChannelBusy b = devourer::busy_from_ch_time_window(
+      window, busy, idle, interval_us, disturbed,
+      _tx_submitted.load(std::memory_order_relaxed));
+  if (window.armed)
+    consume();
+  return b;
+}
+
+/* IRadio::ArmChannelBusy on MediaTek: the channel timers already integrate
+ * over the whole interval between reads, so "arming" is resetting them and
+ * the interval mark — which is what mt7612u_ch_time_arm() does, deliberately
+ * NOT mt7612u_link_stats_start(): that one also clears the MIB block and the
+ * link-stats interval, which belong to the 1 Hz telemetry caller. The
+ * window therefore ends up exactly as long as the caller's own arm-to-read
+ * gap, and is reported that way (window_us from the host-measured interval)
+ * rather than as the requested length.
+ *
+ * Returns the REQUESTED window, which is what the IRadio contract asks for
+ * where nothing is programmed into hardware: these timers just run, so there
+ * is no period to clamp. The window that actually elapsed is reported on the
+ * reading (ChannelBusy::window_us), as on every family. */
+uint32_t Mt7612uRadio::ArmChannelBusy(uint32_t window_us) {
+  /* Same rule the Realtek path follows (devourer::ClmWindow::arm): a zero
+   * window is a caller bug, not a request for the minimum. Returning 0 while
+   * having armed anyway would be the worst of both — the caller falls back to
+   * the sampled path, and its next GetChannelBusy() silently takes the armed
+   * branch and reports a window it never asked for. */
+  if (window_us == 0)
+    return 0;
+  std::lock_guard<std::recursive_mutex> lock(_mu);
+  /* Checked under the lock for the same reason the read is. */
+  if (!_dev || !_rx_active.load(std::memory_order_acquire) || _rx_stop.load())
+    return 0;
+  if (mt7612u_ch_time_arm(_dev) != 0)
+    return 0;
+  _busy = devourer::ChTimeWindow{};
+  _busy.armed = true;
+  _busy.window_us = window_us;
+  _busy.tx_at_arm = _tx_submitted.load(std::memory_order_relaxed);
+  _busy_armed_at = std::chrono::steady_clock::now();
+  return window_us;
 }
 
 devourer::TxStats Mt7612uRadio::GetTxStats() {
@@ -1099,11 +1212,13 @@ devourer::AdapterCaps Mt7612uRadio::GetAdapterCaps() {
   c.ldpc_rx_flag = true;     /* the RXWI carries the per-frame LDPC bit */
   c.per_chain_rssi = true;
   /* Busy airtime from the MAC channel timers (MT_CH_BUSY / MT_CH_IDLE), via
-   * mt7612u_ch_time(). Implemented, NOT measured: no MT7612U was on the bench,
-   * so no arm-vs-quiet separation has been taken on air. There are no phydm
+   * mt7612u_ch_time(). Measured on air: 64.0-64.3% under a flooder two
+   * Realtek generations put at 61-63%, 0.0% quiet, 8.1-9.5% per second on a
+   * ~9%-duty bursty interferer (docs/rx-spectrum-sensing.md). The reading
+   * needs a running receiver — see GetChannelBusy. There are no phydm
    * counters here at all, so rx_energy_ok is structurally false. */
   c.busy_airtime_ok = true;
-  c.busy_airtime_measured = false;
+  c.busy_airtime_measured = true;
   c.rx_energy_ok = false;
   c.hw_rx_timestamp = false; /* the RXWI TSF field is not parsed */
   /* The MAC inserts the live 64-bit TSF into the beacon it auto-transmits;

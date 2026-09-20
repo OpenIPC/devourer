@@ -108,6 +108,27 @@ enum class BusySource : uint8_t {
   ChTime = 2 /* MediaTek MAC channel timers: TX+RX+NAV+EIFS counted busy */
 };
 
+/* Why an armed busy window produced no reading. Carried ON the reading
+ * because "this backend has no sensor" and "this window was spoiled" are
+ * different facts with different fixes, and a consumer that logs one as the
+ * other will chase the wrong bug. Named for what happened to the window, not
+ * for the facility that did it, so a second family's equivalent fits.
+ *
+ *   Interrupted  another measurement re-armed the shared engine mid-window
+ *                (on Realtek, an NHM read: destructive on the JGR3 map, a 3-4
+ *                point overcount on the 11AC map).
+ *   Retuned      the radio changed channel mid-window, so the count is a
+ *                blend of two channels.
+ *   NotElapsed   read before the window finished. The hardware latches the
+ *                PREVIOUS window's result, so this would be a stale reading
+ *                wearing a fresh timestamp. */
+enum class BusySpoil : uint8_t {
+  None = 0,
+  Interrupted,
+  Retuned,
+  NotElapsed
+};
+
 /* ChannelBusy — the vendor-NEUTRAL frame-free channel-occupancy reading, and
  * the only energy evidence src/chanmig/ and src/hopset/ can ask an arbitrary
  * backend for.
@@ -120,7 +141,9 @@ enum class BusySource : uint8_t {
  *
  * Read-and-clear DELTA semantics, like RxEnergy: each call returns the window
  * since the previous call on that backend, so two pollers on one radio steal
- * each other's counts.
+ * each other's counts. IRadio::ArmChannelBusy replaces that implicit window
+ * with an explicit one: after an arm, the next reading covers arm-to-read and
+ * nothing else, and window_us says so.
  *
  * Every field carries a validity flag. A backend that cannot answer reports
  * valid=false, NEVER a zero reading — "quiet channel" and "no sensor" are
@@ -167,6 +190,27 @@ struct ChannelBusy {
    * unowned counter is not available for reuse. */
   bool valid_energy = false;
   uint8_t energy_pct = 0;
+
+  /* Did the radio TRANSMIT inside the measured window, and how many frames.
+   *
+   * Carried rather than corrected, because the two families are biased in
+   * OPPOSITE directions and only the consumer knows which it can live with:
+   *   - Clm counts receive-side deferral only, and a transmitting radio is
+   *     deaf to the channel while its own PA is up, so the reading comes back
+   *     LOW. Measured on one 61%-busy channel: 60.9% silent, 18.4-18.6% while
+   *     the sensor transmitted (Jaguar3); 70.9% -> 24.4-25.8% on a Jaguar1.
+   *   - ChTime counts TX, RX, NAV and EIFS alike, so the same session reads
+   *     HIGH by its own airtime.
+   * A ranker comparing channels must not mix a hot sample with a quiet one in
+   * either direction. window_us with own_tx_in_window set is a sample that
+   * was taken, not a channel that was measured. */
+  bool own_tx_in_window = false;
+  uint32_t own_tx_frames = 0;
+
+  /* Set when an ARMED window came back unusable (valid stays false). None on
+   * a backend that simply has no sensor — that is the absence of a reading,
+   * not a spoiled one. */
+  BusySpoil spoil = BusySpoil::None;
 };
 
 /* RxEnergy -> ChannelBusy. Pure. CLM and NHM-env are the only two fields in
@@ -216,6 +260,75 @@ inline ChannelBusy busy_from_ch_time(uint32_t busy, uint32_t idle,
   /* energy_pct deliberately left invalid — see the field doc. */
   return b;
 }
+
+/* An armed MediaTek busy window, as far as the conversion below needs to know
+ * about it. The backend owns the lifetime; this is the snapshot it decides on.
+ *
+ * These timers have no ready bit, so everything that makes an armed reading
+ * honest has to be carried in software: what the caller asked for (or a short
+ * glance at the channel reads as a finished window), whether a retune ran
+ * through it, and the TX baseline, because unlike CLM these timers count own
+ * transmission as busy. */
+struct ChTimeWindow {
+  bool armed = false;
+  bool spoiled = false;   /* a retune ran through the window */
+  uint32_t window_us = 0; /* what the caller requested at arm */
+  uint64_t tx_at_arm = 0;
+};
+
+/* The armed-window decision for the MediaTek timers, pure so the refusals are
+ * reachable from a selftest with no radio — the backend that owns the state is
+ * hardware-only, and these rules are exactly the part worth testing.
+ *
+ * `disturbed` says mt7612u_link_stats() read-and-cleared the same registers
+ * inside the window, which takes the counts this reading would otherwise
+ * claim: the MediaTek equivalent of an NHM read re-arming the shared CCX
+ * engine, and reported the same way.
+ *
+ * An unarmed call is the sampled path and falls through to busy_from_ch_time
+ * unchanged. */
+inline ChannelBusy busy_from_ch_time_window(const ChTimeWindow &w,
+                                            uint32_t busy, uint32_t idle,
+                                            uint32_t interval_us,
+                                            bool disturbed, uint64_t tx_now) {
+  if (w.armed) {
+    if (w.spoiled) {
+      ChannelBusy b;
+      b.spoil = BusySpoil::Retuned;
+      return b;
+    }
+    /* Interruption outranks "not elapsed", matching the Realtek ordering in
+     * devourer::ClmWindow::read: when something took the counters, the short
+     * interval is a SYMPTOM of that, and the caller's fix is its own
+     * sequencing rather than a longer wait. */
+    if (disturbed) {
+      ChannelBusy b;
+      b.spoil = BusySpoil::Interrupted;
+      return b;
+    }
+    if (interval_us < w.window_us) {
+      ChannelBusy b;
+      b.spoil = BusySpoil::NotElapsed;
+      return b;
+    }
+  }
+  ChannelBusy b = busy_from_ch_time(busy, idle, interval_us);
+  /* An armed, elapsed, undisturbed window whose timers read nothing is a
+   * window that was LOST (a MAC that stopped counting), not "no sensor":
+   * that shape is reserved for a backend without one. */
+  if (w.armed && !b.valid) {
+    b.spoil = BusySpoil::Interrupted;
+    return b;
+  }
+  if (w.armed && b.valid) {
+    const uint64_t sent = tx_now > w.tx_at_arm ? tx_now - w.tx_at_arm : 0;
+    b.own_tx_frames = sent > UINT32_MAX ? UINT32_MAX
+                                        : static_cast<uint32_t>(sent);
+    b.own_tx_in_window = sent > 0;
+  }
+  return b;
+}
+
 
 } /* namespace devourer */
 

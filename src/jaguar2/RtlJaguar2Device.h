@@ -208,6 +208,25 @@ public:
   bool la_capture_wedged() const { return _la && _la->is_wedged(); }
 
 private:
+  /* This generation's CCX map and register access, under its locks — see
+   * IRtlRadio::with_ccx. Private: the base class calls it, nobody else. */
+  bool with_ccx(const CcxFn &fn) override {
+    /* Nothing to lend before bring-up: the BB is not programmed, and a
+     * window armed against it would be forgotten by Init/InitWrite's reset. */
+    if (!_brought_up)
+      return false;
+    std::lock_guard<std::mutex> reg(_reg_mu);
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    const Read32 rd = [this](uint16_t a) {
+      return _device.rtw_read<uint32_t>(a);
+    };
+    const SetBb wr = [this](uint16_t a, uint32_t m, uint32_t v) {
+      _device.phy_set_bb_reg(a, m, v);
+    };
+    fn(devourer::nhm_regs_11ac(), rd, wr);
+    return true;
+  }
+
   /* Golden-init replay (DEVOURER_REPLAY_WSEQ) — applied at the end of both
    * Init and InitWrite (see the definition for semantics). */
   void apply_replay_wseq();

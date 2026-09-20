@@ -89,7 +89,16 @@ rate-independent, so neither can implement the other.
 
 `GetRxEnergy(with_nhm=true)` runs the shared CCX window (`src/NhmReader.h`) on
 the 11AC register map — the same map validated on the Jaguar2 8822BU, so CLM
-lands here with no Jaguar1-specific code. **Unmeasured on this generation.**
+lands here with no Jaguar1-specific code. **Measured on an RTL8812AU**
+(`docs/rx-spectrum-sensing.md`): a 240 ms armed window read 70.6-70.9% against
+a flooder a MediaTek adapter independently measured, 0.1-1.0% on a quiet
+channel, so `busy_airtime_measured` is true.
+
+Window behaviour matches the Jaguar2 and NOT the Jaguar3: an NHM read inside an
+armed window leaves it readable but 4 points HIGH (74.8 vs 70.9), where the
+JGR3 map truncates it to the 2 ms re-arm. Both are spoiled — `ClmWindow`
+invalidates either way — but only one of them looks broken, which is why the
+rule is enforced per family rather than per symptom.
 
 The `nhm_env` reduction is referenced to the live IGI, so what matters is how
 far DIG may walk it. `PhydmWatchdog` clamps to `0x1c`–`0x2a` (14 steps,

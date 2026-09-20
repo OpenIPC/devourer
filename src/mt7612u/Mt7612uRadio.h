@@ -2,6 +2,7 @@
 #define MT7612U_RADIO_H
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -99,6 +100,7 @@ public:
   uint64_t ReadTsf() override;
   devourer::TxStats GetTxStats() override;
   devourer::ChannelBusy GetChannelBusy() override;
+  uint32_t ArmChannelBusy(uint32_t window_us) override;
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
   bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) override;
@@ -148,6 +150,18 @@ private:
   std::mutex _teardown_mu;
   std::atomic<bool> _rx_stop{false};
   std::atomic<bool> _rx_active{false};
+  /* An armed busy window (IRadio::ArmChannelBusy). All of it is guarded by
+   * _mu, and every field is needed for the reading to be honest: the
+   * requested length so a premature read is refused rather than reported as a
+   * short window (the elapsed side comes from the C layer's own interval
+   * mark), and the TX baseline because these timers count own transmission as
+   * busy. */
+  devourer::ChTimeWindow _busy;
+  /* When _busy was armed (steady clock). The refusal of a premature read is
+   * decided from THIS, before the timers are touched: they are read-and-clear,
+   * so a read that reached them would take the counts the window is still
+   * accumulating. */
+  std::chrono::steady_clock::time_point _busy_armed_at;
   std::atomic<uint64_t> _rx_frames{0};
 
   /* Frames cross from the C library's event thread to the StartRxLoop thread

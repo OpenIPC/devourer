@@ -79,6 +79,13 @@ struct WriteBatchScope {
 
 void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
+  /* A window armed before a (re-)bring-up describes a chip state that no
+   * longer exists; leaving it armed would make the next unrelated
+   * GetChannelBusy() take the armed branch and report a stale period. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_reset();
+  }
   _channel = channel;
   _rx_wanted = true;
   /* No WriteBatchScope here (yet): the pipelined bring-up is validated on
@@ -751,6 +758,13 @@ void RtlJaguar3Device::Stop() {
 }
 
 void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
+  /* A window armed before a (re-)bring-up describes a chip state that no
+   * longer exists; leaving it armed would make the next unrelated
+   * GetChannelBusy() take the armed branch and report a stale period. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_reset();
+  }
   _channel = channel;
   /* Concurrent TX+RX intent (DEVOURER_TX_WITH_RX / a later StartRxLoop on this
    * bring-up): enable the RX path at the same point in the sequence Init does
@@ -1230,13 +1244,20 @@ RxEnergy RtlJaguar3Device::GetRxEnergy(bool with_nhm) {
    * ~2 ms measurement window before the FA-counter reset below (0x1eb4[25] also
    * clears BB HW counters). Holds _reg_mu across the short wait — tolerable at
    * the emitter's >=100 ms cadence vs the coex thread's ~2 s tick. */
-  if (with_nhm)
+  /* Under the CCX lock together with the note, and INSIDE _reg_mu (the
+   * ordering every other CCX user takes): this read re-arms the shared engine,
+   * so it destroys an armed busy window on this map — the note must be atomic
+   * with the re-arm or a destroyed window reads back valid. */
+  if (with_nhm) {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_nhm_read();
     devourer::read_nhm(
       devourer::nhm_regs_jgr3(), e.igi, rd,
       [this](uint16_t a, uint32_t m, uint32_t v) {
         _device.phy_set_bb_reg(a, m, v);
       },
       e);
+  }
 
   /* Reset: CCK FA 0x1a2c[15:14] 0->2, CCK CCA 0x1a2c[13:12] 0->2, then OFDM
    * CCA/FA (phydm_reset_bb_hw_cnt jgr3: 0x1eb4[25] 1->0, wrapped by the
@@ -1348,12 +1369,21 @@ void RtlJaguar3Device::SetCcaMode(bool disabled) {
 }
 
 void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
+  /* A window armed before this retune would integrate across the channel
+   * change and report the blend as one channel's occupancy. */
   _phydm.on_channel_change();
   /* Serialize against the coex thread's housekeeping tick (and any concurrent
    * FastRetune) — channel config is register RMW. Init/InitWrite call the
    * radio-management core directly (no lock needed: the coex thread isn't
    * running yet), so locking here cannot self-deadlock. */
   std::lock_guard<std::mutex> lk(_reg_mu);
+  /* The note must not be able to land before a concurrent arm that then
+   * commits while this tune runs. _reg_mu above is what spans the tune, and
+   * with_ccx takes _reg_mu BEFORE this lock, so an arm cannot interleave.
+   * Ordering is always the family's register lock first, then this one. */
+  std::lock_guard<std::mutex> ccx(busy_window_mutex());
+  busy_window_note_retune();
+
   const bool ch_changed = channel.Channel != _channel.Channel;
   _channel = channel;
   _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
@@ -1379,7 +1409,14 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
 void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   if (channel == _channel.Channel)
-    return;
+    return; /* no tune, so nothing to spoil — the note goes after this */
+  /* A window armed before this retune would integrate across the channel
+   * change and report the blend as one channel's occupancy. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_retune();
+  }
+
   const bool band_change = (_channel.Channel <= 14) != (channel <= 14);
   if (_radioManagement.fast_retune(channel, _channel.ChannelOffset,
                                    _channel.ChannelWidth, cache_rf)) {
@@ -1403,7 +1440,14 @@ void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
 void RtlJaguar3Device::FastSetBandwidth(ChannelWidth_t bw) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   if (bw == _channel.ChannelWidth)
-    return;
+    return; /* no reconfiguration, so nothing to spoil */
+  /* A bandwidth change reconfigures the front end, so a window armed before
+   * it was measuring a different receiver — the same argument as a retune,
+   * and the full path below tunes the RF outright. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_retune();
+  }
   auto in_set = [](ChannelWidth_t b) {
     return b == CHANNEL_WIDTH_20 || b == CHANNEL_WIDTH_5 ||
            b == CHANNEL_WIDTH_10;

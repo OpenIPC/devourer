@@ -295,12 +295,13 @@ on decoded foreign airtime plus the false-alarm term
 only CCA/FA/IGI/NHM-busy: whether CLM earns a place in either is a policy
 decision that needs its own validation, not a side effect of adding a sensor.
 
-### In a TX session, CLM shares the FA counters' fate
+### In a TX session, CLM is alive on Jaguar1/3 and inert on Jaguar2 — and biased where alive
 
 devourer's frame-free counters are known to go inert inside a transmit-oriented
 session on some generations, which is what blocks TX-side quiet-window sensing
 in `src/hopset/`. CLM was a plausible escape — it is a plain baseband tick
-counter, not something riding the DIG runtime. It is not:
+counter, not something riding the DIG runtime. On Jaguar2 it is not, and where
+it does count it reads LOW while the sensor itself transmits:
 
 | sensor | TX session, clean | TX session, carrier present |
 |---|---|---|
@@ -316,14 +317,19 @@ rather than at the DIG loop.
 Jaguar3 is alive in both — and that is the same 8812CU, and the same code path,
 on which the counters were previously measured *inert* in a TX session with
 4–20 ms quiet windows. The difference here is a 300 ms window. So window length,
-not generation, is the live variable in that older result. Jaguar1 is
-unmeasured.
+not generation, is the live variable in that older result.
+
+On Jaguar1 (8812AU, through the armed window) CLM keeps counting while the
+adapter transmits, but reads LOW, because it counts receive-side deferral and
+the receiver is deaf while the PA is up. "Own transmission is carried, not
+corrected" below has both families' numbers — which is why the reading carries
+`own_tx_in_window` rather than an attempted correction.
 
 The generation coverage is the same as NHM's — the two ride one code path
 (`src/NhmReader.h`), so CLM lands wherever NHM does. Measured on Jaguar3 (8812CU,
 the JGR3 register map) and Jaguar2 (8822BU, the 11AC map) — so **both maps are
-hardware-validated**. Jaguar1 is unmeasured but shares the 11AC map with the
-validated Jaguar2. Not measured on Kestrel; on Kestrel the vendor engine computes
+hardware-validated**, and Jaguar1 (8812AU, 8821AU) on the 11AC map through the
+armed window below. Not measured on Kestrel; on Kestrel the vendor engine computes
 `clm_ratio` already and `hal/halbb/g6/kestrel_halbb_glue.c` discards it.
 
 The register addresses sit in the same dwords as the NHM ones: CLM period is the
@@ -354,6 +360,133 @@ The facilities differ by generation but all three read the same fields:
 | Jaguar1 (8812/8821/8814) | yes | classic AC — FA 0xF48/0xA5C, CCA 0xF08, IGI 0xC50; NHM 0x994/0x990/0x998/0xfa8/0xfb4 |
 | Jaguar2 (8822BU/8821CU) | yes | classic AC (FA/CCA sampled by the DIG thread; same NHM map) |
 | Jaguar3 (8822CU/8822EU) | yes | newer BB — CCA 0x2c08, CCK-FA 0x1a5c, OFDM-FA 0x2d0x, IGI 0x1d70; NHM 0x1e60/0x1e40/0x1e44/0x2d40/0x2d4c |
+
+## The armed busy window (`ArmChannelBusy`)
+
+CLM as read above is a **~2 ms sample**, once, because it rides NHM's window
+and `read_nhm()` caps its ready poll at 15 ms. That is not a measurement of a
+caller's dwell, and on bursty traffic it is bimodal rather than merely noisy.
+Measured on an RTL8822BU against a 50 ms-on/450 ms-off interferer (true duty
+~9%), one read per 300 ms:
+
+| estimator | samples | result |
+|---|---|---|
+| sampled, ~2 ms | 71 | **zero in 55 of them**, 61-65% in the rest; mean 9.0, sd 21.9 |
+| MT7612U channel timers, 1 s | 12 | 8.1-9.5% **every** sample, sd 0.5 |
+
+Frames were decoded in nearly every one of those 71 windows, so the channel was
+never actually free — the sample simply missed the burst 78% of the time. For a
+ranker that reads "0% busy" as "emptiest", that is not lost information, it is
+a wrong answer.
+
+`IRadio::ArmChannelBusy(window_us)` fixes the estimator rather than the
+aggregation: CLM's period is its own field (the low half of the period dword)
+and reaches 65535 ticks of 4 us, so the hardware can integrate the whole dwell.
+Arm where the counters are reset, read at the end of the dwell. The MediaTek
+timers already integrate between reads, so there "arming" is resetting them and
+the mark; both families then answer the same question about the same slice of
+time. `ArmChannelBusy` returns the window it actually armed — the period is
+clamped to 240 ms, below the point where a saturated window cannot be told from
+a wrapped one — and `ChannelBusy::window_us` reports the window each reading
+spans.
+
+Same bench, 8812AU sensor, `REPS=6 DUTY_ON=50 DUTY_OFF=450
+tests/busy_window_probe.sh`:
+
+| estimator | mean | min | max | spread |
+|---|---|---|---|---|
+| armed 240 ms window | 10% | 0% | 19% | **19 points** |
+| sampled ~2 ms | 24% | 0% | 73% | 73 points |
+
+The sampled column is not merely wider, it is wrong in the mean here too: six
+2 ms samples caught a burst twice and reported 24% for a ~9% channel. Under a
+STEADY load the two agree and the spread collapses (`REPS=6` with no duty
+cycle: armed 71% spread 0, sampled 71% spread 6), which is why the bursty arm
+is the one that decides anything.
+
+Both converge on the true duty in the MEAN, which is the other half of the
+lesson: the median is the wrong fold here (it is 0 for the sampled path), and
+the window is what makes a SINGLE dwell usable — which is what a
+quick-connect decision has.
+
+### A window is only about the dwell if nothing else touched it
+
+Three things spoil one, all measured, and each makes the reading come back
+invalid with a reason (`ChannelBusy::spoil`) rather than plausible:
+
+| spoiler | Jaguar1 (11AC) | Jaguar3 (JGR3) |
+|---|---|---|
+| an NHM read mid-window | survives, reads **+4 points high** (74.8 vs 70.9) | **destroyed** — returns the 2 ms re-arm (326 of 62500 ticks on the 250 ms window used for that measurement) |
+| a retune mid-window | 60-62% where the channel was 71% | 44-47% where it was 61% |
+| reading before it elapsed | the result register latches the PREVIOUS window; reads are non-destructive, so an early read is a stale number wearing a fresh timestamp |
+
+The third row rests on one silicon behaviour nothing else here depends on:
+**triggering CLM clears the ready bit**, so a window that has not finished
+reports not-ready instead of the previous window's result. The headless test
+can only model that (its mock drops the bit on the trigger write), so it is
+checked on air by two arms, 6/6 each on an 8812AU: `early` (arm, read at once)
+returned `spoil=not-elapsed` on every read, and `stale` (arm, let it complete,
+read it, arm again, read at once) returned a valid measurement for the first
+read of every pair and `not-elapsed` for every second one. Had the trigger
+left the bit set, that second read would have returned the first window's
+value — valid, and wrong.
+
+The first row is why the rule is enforced on every family and not only where it
+fails loudly: `GetRxQuality()` calls `GetRxEnergy(with_nhm=true)`, so a
+consumer polling link quality inside its own survey dwell spoils it without
+touching the busy API at all.
+
+### Own transmission is carried, not corrected
+
+CLM counts receive-side deferral only, and a radio is deaf to the channel while
+its own PA is up, so a transmitting sensor reads LOW. The MediaTek timers count
+TX as busy, so the same session reads HIGH. Measured on one loaded channel,
+sensor silent vs transmitting:
+
+| sensor | silent | transmitting | frames sent in-window |
+|---|---|---|---|
+| Jaguar1 RTL8812AU | 70.9% | **24-26%** | 765-1227 |
+| Jaguar3 RTL8812CU | 60.9% | **18.4-18.6%** | 1503-3260 |
+
+`ChannelBusy::own_tx_in_window` and `own_tx_frames` say so; a ranker must not
+mix a hot sample with a quiet one in either direction.
+
+### Saturation, and what is not measured
+
+The result and period fields are both 16 bits of 4 us ticks, so a window of
+65535 ticks is the hardware maximum and `rpt == period` is how the vendor
+reports a fully busy one. The armed period is capped at 60000 ticks (240 ms)
+instead, which makes the ambiguity unreachable rather than handled: the count
+is bounded by the period — measured, by arming 500 ticks and reading 270 ms
+later, which returned 304-364 on all three Realtek families rather than
+continuing to climb — so with a period below the field's range the counter
+cannot wrap into a small number that would read as a quiet channel.
+
+What is NOT measured is a genuinely saturated channel. Two adapters could not
+produce one here: a devourer flooder with no inter-frame gap holds this bench
+at ~71%, and shortening the window to 1 ms only samples the gaps more finely
+(30 reads spanned 67-80%, none at 100%). The `rpt == period` arithmetic is
+covered headlessly instead (`tests/busy_window_selftest.cpp`, "saturated"),
+where a result at or above the period reports 100%.
+
+### Coverage
+
+`ArmChannelBusy` works on Jaguar1, Jaguar2 and Jaguar3 (CLM) and on the
+MT7612U (channel timers). Under one flooder on one channel the three Realtek
+families and the MediaTek independently measured the same load at 61-71% — the
+spread is antenna and receiver gain, not a units disagreement. Kestrel and the
+RTL8733B return 0 from the arm (the CCX engine is not wired up on either — the
+RTL8733B has a working one, see the caps comment in its device source), and
+their callers keep the sampled path.
+
+Both harness runs above used an MT7612U flooder. With a Jaguar2 (8822BU)
+`txdemo` flooder the same harness read a **valid 0%** for the first ~600 ms of
+the Jaguar3 sensor's first arm — not the sensor: with the sensor up first, its
+armed windows stayed at 0 for ~4 s after the flooder's first submitted frame
+and then stepped to 61-65%. The 8822BU does not air at level for ~4 s after
+its first submit, and the harness now waits for that before the loaded arms.
+Why it takes that long is an open question on the Jaguar2 TX path, not on
+this sensor.
 
 ## Detecting a tone
 

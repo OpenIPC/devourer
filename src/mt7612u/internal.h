@@ -211,6 +211,12 @@ struct mt7612u_dev {
 	uint16_t max_mpdu_rx;     /* from MT_MAX_LEN_CFG at init, less the FCS */
 	uint64_t stats_last_us;   /* previous mt7612u_link_stats() mark */
 	int      ch_time_armed;   /* channel timers configured and zeroed */
+	/* Set when mt7612u_link_stats() cleared the channel timers while a
+	 * ch_time window was armed: the two share MT_CH_BUSY/MT_CH_IDLE, which
+	 * are read-and-clear, so the telemetry poll takes the counts the window
+	 * was accumulating. Without this the later read covers only the
+	 * remainder while still claiming the full interval. */
+	int      ch_time_disturbed;
 	uint64_t ch_time_last_us; /* previous mt7612u_ch_time() mark — separate
 	                           * from stats_last_us for the same reason it
 	                           * is per-device: two readers sharing one mark

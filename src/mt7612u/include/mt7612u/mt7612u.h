@@ -399,6 +399,14 @@ struct mt7612u_link_stats {
  */
 int mt7612u_link_stats_start(struct mt7612u_dev *dev);
 
+/* Arm the channel timers alone and restart their interval mark, for a caller
+ * measuring one busy window (IRadio::ArmChannelBusy). Separate from
+ * mt7612u_link_stats_start() on purpose: that one also clears the MIB block
+ * and the link-stats interval, which belong to the 1 Hz telemetry caller, and
+ * arming per dwell through it would corrupt every rate the tick reports.
+ * Returns 0 on success. */
+int mt7612u_ch_time_arm(struct mt7612u_dev *dev);
+
 /* Read and clear. Returns 0 on success; fills the interval since the previous
  * call to this function or to _start(). */
 int mt7612u_link_stats(struct mt7612u_dev *dev, struct mt7612u_link_stats *out);
@@ -448,6 +456,18 @@ int mt7612u_link_stats(struct mt7612u_dev *dev, struct mt7612u_link_stats *out);
  */
 int mt7612u_ch_time(struct mt7612u_dev *dev, uint32_t *busy, uint32_t *idle,
                     uint32_t *interval_us);
+
+/* Reports, and clears, whether mt7612u_link_stats() read-and-cleared the
+ * channel timers since they were armed — i.e. whether that call took the
+ * counts a ch_time() reading would otherwise claim. The two share
+ * MT_CH_BUSY/MT_CH_IDLE and both clear on read.
+ *
+ * Nothing in Mt7612uRadio polls link_stats(), so this cannot fire through the
+ * IRadio path; it exists for a C-API caller that uses BOTH (tools/bringup.cpp
+ * does), where a window measured across such a poll would otherwise report
+ * the remainder as a full reading. A caller measuring one window treats it as
+ * a spoiled window, never as a quiet channel. */
+int mt7612u_ch_time_disturbed(struct mt7612u_dev *dev);
 
 int mt7612u_phy_tick(struct mt7612u_dev *dev);
 

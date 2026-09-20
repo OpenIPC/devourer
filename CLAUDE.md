@@ -461,7 +461,14 @@ measured, so this buys an airtime unit and a non-railing ratio rather than a new
 detection; `nhm_env` is referenced to the live IGI, so it is only dependable
 where DIG is not free to walk the gain out from under it (the per-generation
 windows are in each `src/<gen>/CLAUDE.md`); and the ~2 ms window makes one dwell
-a sample, not a measurement — average ~20, which `chanscout` does not do today.
+a sample, not a measurement.
+
+That last one is what `IRadio::ArmChannelBusy(window_us)` addresses: a busy
+figure over the caller's own window instead of a 2 ms slice of it. The contract
+— what arming promises, what invalidates a window, and what own transmission
+does to the reading — is documented once, on the declaration in `src/IRadio.h`.
+The per-generation behaviour and every measured number live in each
+`src/<gen>/CLAUDE.md` and `docs/rx-spectrum-sensing.md`.
 Both are **emitted, not scored**: neither `ChannelScore` nor the hopset
 occupancy law reads them. Measured numbers, the generation matrix and the
 harness: `docs/rx-spectrum-sensing.md`.

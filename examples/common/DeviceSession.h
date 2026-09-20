@@ -66,6 +66,13 @@ public:
   IRadio *device() const { return _dev.get(); }
   const std::shared_ptr<UsbDeviceLock> &lock() const { return _lock; }
 
+  /* Drop this session's hold on the USB lock without touching the device.
+   * For a demo that must leave the process without running destructors (a
+   * detached RX thread it cannot join): the lock file is removed when the
+   * last holder goes, and one left behind makes the next run refuse the
+   * adapter. */
+  void release_lock() { _lock.reset(); }
+
   /* Explicit teardown for demos that have work to do after the adapter is
    * released (final statistics, a summary event). Idempotent; the destructor
    * calls it. */

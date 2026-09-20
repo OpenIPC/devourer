@@ -485,19 +485,12 @@ the sampled path.
 
 The RTL8733B is the one backend where an armed window is the ONLY way to get a
 number: it implements no `GetRxEnergy`, so its sampled path reports no reading
-by design. One consequence to know before building on it — `src/sensing/`
-cannot reach that reading yet. `SenseWindow::read` chooses its source by
-whether the `IRtlRadio*` is non-null rather than by `rx_energy_ok`, so on a
-backend that derives from `IRtlRadio` and implements no energy reader it takes
-the phydm branch and never calls `GetChannelBusy()`. That is the same wrong
-discriminator `AdapterCaps.h` warns about, and it predates this port — the
-RTL8733B is simply the first backend that makes it observable — and
-`examples/chanscout` does hit it, through a `dynamic_cast<IRtlRadio *>` that
-succeeds on this die. Gating the branch on the capability is necessary but not
-sufficient: nothing in `src/sensing/` arms, and an unarmed read yields nothing
-here, so the complete fix is the gate plus an arm with an observation window
-the sensing layer does not yet carry. Until then a caller on this die should
-use `IRadio::ArmChannelBusy`/`GetChannelBusy` directly.
+by design. `src/sensing/` cannot reach that reading yet — `SenseWindow` picks
+its source by a non-null `IRtlRadio*` rather than by `rx_energy_ok`, the same
+wrong discriminator `AdapterCaps.h` warns about, and `examples/chanscout` hits
+it on this die. The gap and what a fix needs are in `src/sensing/CLAUDE.md`;
+until then a caller on this die uses `IRadio::ArmChannelBusy`/`GetChannelBusy`
+directly.
 
 `tests/busy_window_probe.sh` skips its sampled and NHM arms for that reason,
 gating on `rx_energy_ok` from the probe's own caps record rather

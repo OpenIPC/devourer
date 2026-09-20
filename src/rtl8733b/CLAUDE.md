@@ -450,44 +450,21 @@ place it can be kept true. What is specific to this die:
   mid-window. `Retuned` and `NotElapsed` both fire normally.
 
 Measured with `tests/busy_window_probe.sh` (RTL8733BU sensor, MT7612U flooder,
-ch165): **0.0% quiet, 69% under a steady load, 10% against a 50/450 ms burst
-whose true duty is ~9%**, spread 0 on the steady arm. A Jaguar3 8812CU read
+ch165): **0.0% quiet, 69% under a steady load** with spread 0, and against a
+50/450 ms burst (true duty ~9%) a mean of 6-10% over five windows with a
+**19-point spread** — a 240 ms window inside a 500 ms burst period misses
+whole bursts, so single windows read 0-19% and only the mean is a measurement. A Jaguar3 8812CU read
 that same flooder at 69% as well, so the two device paths onto the JGR3 map
 agree on one load. The retune and premature-read spoilers each refused with
 their reason, and a re-armed window never returned the previous latched value.
 
-**`src/sensing/` cannot reach this reading, and that is a pre-existing bug
-this die is the first to expose.** `SenseWindow::read` branches on whether the
-`IRtlRadio*` is non-null, not on whether the backend has phydm counters:
-
-```cpp
-if (rtl_) { r.energy = rtl_->GetRxEnergy(...); r.busy = busy_from_rx_energy(r.energy); }
-else if (radio_) { r.busy = radio_->GetChannelBusy(); }
-```
-
-The RTL8733B derives from `IRtlRadio`, so it takes the first branch, gets the
-all-invalid base `GetRxEnergy`, and `GetChannelBusy()` is never called. That
-is exactly the "a successful `dynamic_cast<IRtlRadio*>` is not a correct
-discriminator" failure `AdapterCaps.h` opens with, living in the sensing
-layer. It is not new — it would mis-handle any backend with busy airtime and
-no phydm block — but before this port no such backend existed, so nothing
-exposed it. **`examples/chanscout` is affected**: it builds a
-`DwellExecutor` with `dynamic_cast<IRtlRadio *>(dev)`
-(`examples/chanscout/main.cpp:323,342`), which succeeds on this die, so a
-scout here reports neither CLM nor NHM.
-
-Gating the branch on `rx_energy_ok` is necessary but NOT sufficient: an
-unarmed `GetChannelBusy()` on this backend falls back to
-`busy_from_rx_energy(GetRxEnergy(true))` and yields nothing, and nothing in
-`src/sensing/` ever calls `ArmChannelBusy` — the only callers in the tree are
-`tests/busy_window_probe.cpp`. A complete fix is the capability gate PLUS an
-arm, and arming needs an observation window that no layer between
-`ScanPlanConfig::dwell_ms` and `SenseWindow` carries at all — `DwellExecConfig`
-stamps a `settle_ms` but has no field for the dwell the window would be sized
-to. That is a design decision for `src/sensing/`, with its own tests, not a
-rider on a backend port.
-**Until then, a caller on this die must reach
-`IRadio::ArmChannelBusy`/`GetChannelBusy` directly.**
+**`src/sensing/` cannot reach this reading.** `SenseWindow` picks its source
+by whether the `IRtlRadio*` is non-null rather than by `rx_energy_ok`, so on
+this die it takes the phydm branch and never arms or reads CLM —
+`examples/chanscout` on an RTL8733B reports neither. That is a sensing-layer
+bug this die is merely the first to expose; it is described, with what a fix
+needs, in `src/sensing/CLAUDE.md`. Until it lands, a caller on this die
+reaches `IRadio::ArmChannelBusy`/`GetChannelBusy` directly.
 
 **The CCA gate cannot bias the reading here.** CLM counts CCA-busy, so a
 session with CCA disabled would under-report — but `SetCcaMode` throws "CCA

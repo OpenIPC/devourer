@@ -1119,9 +1119,11 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
   caps.busy_airtime_ok = true;
   /* Separated on air through tests/busy_window_probe.sh on an RTL8733BU
    * against an MT7612U flooder on ch165: 0% quiet, 69% under a steady load,
-   * and 10% against a 50/450 ms burst whose true duty is ~9%. A Jaguar3
-   * 8812CU on the same flooder read 69% too, so the two register paths agree
-   * on one load. Every spoiler refused with its reason. */
+   * and a 50/450 ms burst (true duty ~9%) at a mean of 6-10% over five
+   * windows with a 19-point spread — a 240 ms window inside a 500 ms burst
+   * period misses whole bursts, so only the mean means anything there. A
+   * Jaguar3 8812CU on the same flooder read 69% too, so the two register
+   * paths agree on one load. Every spoiler refused with its reason. */
   caps.busy_airtime_measured = true;
   caps.rx_energy_ok = false;
   caps.variant = "cut-selected";

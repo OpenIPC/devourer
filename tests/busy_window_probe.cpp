@@ -48,7 +48,6 @@
 #include <memory>
 #include <string>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 #if __has_include(<libusb.h>)
@@ -128,7 +127,8 @@ void emit(const char *mode, int i, const devourer::ChannelBusy &b,
  * the next run of this script refuse the adapter it just used. The libusb
  * context is NOT closed on that path — the kernel reclaims it at process exit,
  * and closing it under a live RX thread is the very hazard being avoided. The
- * non-RX paths return normally and the session closes everything. */
+ * non-RX paths return normally and the session closes everything.
+ * std::_Exit rather than POSIX _exit: same semantics, and it builds on MSVC. */
 struct Cleanup {
   IRadio *dev = nullptr;
   std::shared_ptr<devourer::UsbDeviceLock> *lock = nullptr;
@@ -147,7 +147,7 @@ int finish(int code) {
     g_cleanup.lock->reset();
   if (g_cleanup.session)
     g_cleanup.session->release_lock();
-  _exit(code);
+  std::_Exit(code);
 }
 
 } // namespace

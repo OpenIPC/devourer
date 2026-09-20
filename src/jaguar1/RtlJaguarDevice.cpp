@@ -1925,11 +1925,9 @@ void RtlJaguarDevice::SetMonitorChannel(SelectedChannel channel) {
    * change and report the blend as one channel's occupancy. */
   /* Scoped to the note, NOT held across the tune. Holding it deadlocks: when
    * the fast path declines, the fallback calls SetMonitorChannel(), which
-   * takes this same non-recursive mutex again. The note is safe scoped
-   * because the control plane is single-threaded by contract (see
-   * IRadio::ArmChannelBusy) — and on the families that DO have a register
-   * lock, that lock spans the tune and with_ccx takes it first, which closes
-   * the gap there for free. */
+   * takes this same non-recursive mutex again. With no register lock spanning
+   * the tune on this family, the note is taken on BOTH sides of it (below),
+   * so an arm that lands in between is still spoiled. */
   {
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
     busy_window_note_retune();
@@ -1947,6 +1945,14 @@ void RtlJaguarDevice::SetMonitorChannel(SelectedChannel channel) {
    * all-paths behaviour is byte-identical when the knob is unused. */
   if (_rx_path_mask >= 0)
     _device.rtw_write8(0x808, static_cast<uint8_t>(_rx_path_mask.load()));
+  /* And after: with no register lock spanning the tune, an arm that landed
+   * between the note above and the channel change would otherwise read back
+   * a valid two-channel blend. send_packet's radiotap CHANNEL hop reaches
+   * FastRetune from the TX thread, so that arm is not hypothetical. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_retune();
+  }
 }
 
 void RtlJaguarDevice::SetRxPathMask(uint8_t mask) {
@@ -1963,17 +1969,19 @@ void RtlJaguarDevice::FastRetune(uint8_t channel, bool cache_rf) {
    * change and report the blend as one channel's occupancy. */
   /* Scoped to the note, NOT held across the tune. Holding it deadlocks: when
    * the fast path declines, the fallback calls SetMonitorChannel(), which
-   * takes this same non-recursive mutex again. The note is safe scoped
-   * because the control plane is single-threaded by contract (see
-   * IRadio::ArmChannelBusy) — and on the families that DO have a register
-   * lock, that lock spans the tune and with_ccx takes it first, which closes
-   * the gap there for free. */
+   * takes this same non-recursive mutex again. With no register lock spanning
+   * the tune on this family, the note is taken on BOTH sides of it (below),
+   * so an arm that lands in between is still spoiled. */
   {
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
     busy_window_note_retune();
   }
   if (_radioManagement->fast_retune(channel, cache_rf)) {
     _channel.Channel = channel;
+    /* And after — see SetMonitorChannel. The declined path lands in
+     * SetMonitorChannel, which notes on both sides itself. */
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_retune();
     return;
   }
   /* Fast path declined (band change / non-20MHz) — do the full channel set,
@@ -1992,14 +2000,16 @@ void RtlJaguarDevice::FastSetBandwidth(ChannelWidth_t bw) {
    * change (Jaguar2/3), the note sits inside it and with_ccx's ordering does
    * the rest. Here there is no such lock, and holding this one across the
    * change would deadlock — the declined fast path falls back to
-   * SetMonitorChannel(), which takes it again — so the note is scoped and the
-   * single-control-thread contract carries it. */
+   * SetMonitorChannel(), which takes it again — so the note is scoped and
+   * taken on both sides of the change instead. */
   {
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
     busy_window_note_retune();
   }
   if (_radioManagement->fast_set_bandwidth(bw)) {
     _channel.ChannelWidth = bw;
+    std::lock_guard<std::mutex> ccx(busy_window_mutex()); /* and after */
+    busy_window_note_retune();
     return;
   }
   /* Fast path declined (40/80 MHz endpoint, non-8812 die, or no clean 20 MHz
@@ -2187,8 +2197,8 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
   c.tx_chains = chains;
   c.rx_chains = chains;
   c.per_chain_rssi = chains >= 2;
-  /* CCX CLM via NhmReader's 11AC map, now measured on this family too
-   * (RTL8812AU, docs/rx-spectrum-sensing.md): a 240 ms armed window read
+  /* CCX CLM via NhmReader's 11AC map, measured on this family
+   * (RTL8812AU, RTL8821AU; docs/rx-spectrum-sensing.md): a 240 ms armed window read
    * 70.6-70.9% against a flooder that a MediaTek adapter independently
    * measured, 0.1-1.0% quiet, and it behaves like the Jaguar2 in every
    * window arm — period-bounded, latched, spoiled by an NHM read as a 4-point

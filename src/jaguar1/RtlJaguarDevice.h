@@ -437,6 +437,10 @@ private:
   /* This generation's CCX map and register access, under its locks — see
    * IRtlRadio::with_ccx. Private: the base class calls it, nobody else. */
   bool with_ccx(const CcxFn &fn) override {
+    /* Nothing to lend before bring-up: the BB is not programmed, and a
+     * window armed against it would be forgotten by Init/InitWrite's reset. */
+    if (!_brought_up)
+      return false;
     /* No family-wide register lock on this generation; the CCX lock is
      * the serialisation. */
     std::lock_guard<std::mutex> ccx(busy_window_mutex());

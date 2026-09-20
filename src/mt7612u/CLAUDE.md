@@ -20,7 +20,7 @@ candidate counter, `MT_RX_STAT_1`'s false-CCA field, is owned by
 **Validated on hardware** (`docs/rx-spectrum-sensing.md`): 64.0-64.3% under a
 flooder two Realtek generations put at 61-63%, 0.0% on a quiet channel, and
 8.1-9.5% per second on a ~9%-duty bursty interferer — the arm the Realtek 2 ms
-sample fails. `busy_airtime_measured` is now true.
+sample fails. `busy_airtime_measured` is true.
 
 Two facts that measurement added. First, the reading **requires a running
 receiver**: with RX down the idle timer still advances, so busy+idle is

@@ -313,6 +313,13 @@ inline ChannelBusy busy_from_ch_time_window(const ChTimeWindow &w,
     }
   }
   ChannelBusy b = busy_from_ch_time(busy, idle, interval_us);
+  /* An armed, elapsed, undisturbed window whose timers read nothing is a
+   * window that was LOST (a MAC that stopped counting), not "no sensor":
+   * that shape is reserved for a backend without one. */
+  if (w.armed && !b.valid) {
+    b.spoil = BusySpoil::Interrupted;
+    return b;
+  }
   if (w.armed && b.valid) {
     const uint64_t sent = tx_now > w.tx_at_arm ? tx_now - w.tx_at_arm : 0;
     b.own_tx_frames = sent > UINT32_MAX ? UINT32_MAX

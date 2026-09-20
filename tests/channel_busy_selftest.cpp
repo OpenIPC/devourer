@@ -215,6 +215,9 @@ int main() {
       ChTimeWindow w; w.armed = true; w.window_us = 240000;
       const ChannelBusy b = busy_from_ch_time_window(w, 0, 0, 250000, false, 0);
       check("mt armed over dead counters: no reading", b.valid, 0);
+      check("mt armed over dead counters: reported as a lost window",
+            static_cast<long>(b.spoil),
+            static_cast<long>(BusySpoil::Interrupted));
     }
   }
 

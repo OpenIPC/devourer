@@ -295,12 +295,13 @@ on decoded foreign airtime plus the false-alarm term
 only CCA/FA/IGI/NHM-busy: whether CLM earns a place in either is a policy
 decision that needs its own validation, not a side effect of adding a sensor.
 
-### In a TX session, CLM shares the FA counters' fate
+### In a TX session, CLM is alive on Jaguar1/3 and inert on Jaguar2 — and biased where alive
 
 devourer's frame-free counters are known to go inert inside a transmit-oriented
 session on some generations, which is what blocks TX-side quiet-window sensing
 in `src/hopset/`. CLM was a plausible escape — it is a plain baseband tick
-counter, not something riding the DIG runtime. It is not:
+counter, not something riding the DIG runtime. On Jaguar2 it is not, and where
+it does count it reads LOW while the sensor itself transmits:
 
 | sensor | TX session, clean | TX session, carrier present |
 |---|---|---|
@@ -318,18 +319,17 @@ on which the counters were previously measured *inert* in a TX session with
 4–20 ms quiet windows. The difference here is a 300 ms window. So window length,
 not generation, is the live variable in that older result.
 
-Jaguar1 is measured now, through the armed window, and the answer is sharper
-than "alive": CLM keeps counting while the adapter transmits, but reads LOW,
-because it counts receive-side deferral and the receiver is deaf while the PA
-is up. See "Own transmission is carried, not corrected" below for both
-families' numbers — which is also why the reading carries `own_tx_in_window`
-rather than an attempted correction.
+On Jaguar1 (8812AU, through the armed window) CLM keeps counting while the
+adapter transmits, but reads LOW, because it counts receive-side deferral and
+the receiver is deaf while the PA is up. "Own transmission is carried, not
+corrected" below has both families' numbers — which is why the reading carries
+`own_tx_in_window` rather than an attempted correction.
 
 The generation coverage is the same as NHM's — the two ride one code path
 (`src/NhmReader.h`), so CLM lands wherever NHM does. Measured on Jaguar3 (8812CU,
 the JGR3 register map) and Jaguar2 (8822BU, the 11AC map) — so **both maps are
-hardware-validated**. Jaguar1 is unmeasured but shares the 11AC map with the
-validated Jaguar2. Not measured on Kestrel; on Kestrel the vendor engine computes
+hardware-validated**, and Jaguar1 (8812AU, 8821AU) on the 11AC map through the
+armed window below. Not measured on Kestrel; on Kestrel the vendor engine computes
 `clm_ratio` already and `hal/halbb/g6/kestrel_halbb_glue.c` discards it.
 
 The register addresses sit in the same dwords as the NHM ones: CLM period is the
@@ -449,8 +449,7 @@ sensor silent vs transmitting:
 | Jaguar3 RTL8812CU | 60.9% | **18.4-18.6%** | 1503-3260 |
 
 `ChannelBusy::own_tx_in_window` and `own_tx_frames` say so; a ranker must not
-mix a hot sample with a quiet one in either direction. This also corrects the
-TX-session note further up: CLM is alive in a transmit session, but biased.
+mix a hot sample with a quiet one in either direction.
 
 ### Saturation, and what is not measured
 
@@ -476,8 +475,18 @@ where a result at or above the period reports 100%.
 MT7612U (channel timers). Under one flooder on one channel the three Realtek
 families and the MediaTek independently measured the same load at 61-71% — the
 spread is antenna and receiver gain, not a units disagreement. Kestrel and the
-RTL8733B return 0 from the arm (no CCX engine is wired up on either), and their
-callers keep the sampled path.
+RTL8733B return 0 from the arm (the CCX engine is not wired up on either — the
+RTL8733B has a working one, see the caps comment in its device source), and
+their callers keep the sampled path.
+
+Both harness runs above used an MT7612U flooder. With a Jaguar2 (8822BU)
+`txdemo` flooder the same harness read a **valid 0%** for the first ~600 ms of
+the Jaguar3 sensor's first arm — not the sensor: with the sensor up first, its
+armed windows stayed at 0 for ~4 s after the flooder's first submitted frame
+and then stepped to 61-65%. The 8822BU does not air at level for ~4 s after
+its first submit, and the harness now waits for that before the loaded arms.
+Why it takes that long is an open question on the Jaguar2 TX path, not on
+this sensor.
 
 ## Detecting a tone
 

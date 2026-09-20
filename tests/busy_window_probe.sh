@@ -68,7 +68,17 @@ start_flood() {
   env DEVOURER_VID="$FLOOD_VID" DEVOURER_PID="$FLOOD_PID" \
       DEVOURER_CHANNEL="$CHANNEL" DEVOURER_TX_RATE=MCS1 DEVOURER_TX_GAP_US=0 \
       "${burst[@]}" "$TXDEMO" > "$OUT/flood.log" 2>&1 &
-  sleep 4
+  # Wait for the first frame OUT, then for the flooder to be airing at level.
+  # A Jaguar2 (8822BU) txdemo does not radiate at level for ~4 s after its
+  # first submit (measured with a Jaguar3 sensor armed first: 50 ms windows
+  # at 0% for ~60 windows after the first bulk_send, then 61-65%). A fixed
+  # 4 s sleep put the Jaguar3's first arm exactly on that edge and it read a
+  # VALID 0% — which the assertions below cannot tell from a quiet channel.
+  for _ in $(seq 1 100); do
+    grep -qE "tx\.(frame|stats)|bulk_send" "$OUT/flood.log" && break
+    sleep 0.2
+  done
+  sleep "${FLOOD_SETTLE_S:-6}"
   grep -qE "tx\.(frame|stats)|bulk_send" "$OUT/flood.log" || {
     echo "WARN: flooder produced no frames — every 'under load' arm below is"
     echo "      really a quiet-channel run and proves nothing."

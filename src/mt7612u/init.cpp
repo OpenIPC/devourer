@@ -602,6 +602,7 @@ int mt7612u_link_stats_start(struct mt7612u_dev *d)
 	/* One read to clear everything, so the first real sample is clean. Its
 	 * own disturbance flag is cleared below: arming is not a theft. */
 	mt7612u_link_stats(d, &discard);
+	d->ch_time_disturbed = 0;
 	/* Arming is what makes a ch_time reading meaningful, so the interval
 	 * STARTS here — not at whatever the previous session left behind, and not
 	 * at "unknown". Stamping now rather than zeroing is what lets the first

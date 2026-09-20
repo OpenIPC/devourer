@@ -617,8 +617,10 @@ public:
    * of the dwell. A window is spoiled by an NHM read (IRtlRadio::GetRxEnergy
    * with with_nhm, which re-arms the shared CCX engine), by a retune, and by
    * reading before it has elapsed; the reading then comes back INVALID rather
-   * than plausible-but-wrong. Single control thread, like every other
-   * control-plane entry point. */
+   * than plausible-but-wrong. A spoiled or completed window is consumed by
+   * the read; a not-yet-elapsed one stays armed, so the caller reads again
+   * at the end of its dwell instead of re-arming. Single control thread, like
+   * every other control-plane entry point. */
   virtual uint32_t ArmChannelBusy(uint32_t window_us) {
     (void)window_us;
     return 0;

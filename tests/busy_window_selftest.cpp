@@ -233,6 +233,15 @@ int main() {
     check("early: no reading", b.valid, 0);
     check("early: reason reported", static_cast<long>(w.last_spoil()),
           static_cast<long>(BusySpoil::NotElapsed));
+    /* The window is still counting, so it is still armed: the read at the
+     * end of the dwell is the measurement. A build that consumed it here
+     * would send that read down the sampled path instead. */
+    check("early: window still armed", w.armed() ? 1 : 0, 1);
+    bb.clm_ready = true;
+    const ChannelBusy later = w.read(regs, 0, bb.rd());
+    check("early: later read is the window", later.valid, 1);
+    check("early: later value", later.busy_pct, 63);
+    check("early: consumed by the completed read", w.armed() ? 1 : 0, 0);
   }
 
   /* --- reading without arming is not a quiet channel --- */

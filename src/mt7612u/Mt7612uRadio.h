@@ -2,6 +2,7 @@
 #define MT7612U_RADIO_H
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -156,6 +157,11 @@ private:
    * mark), and the TX baseline because these timers count own transmission as
    * busy. */
   devourer::ChTimeWindow _busy;
+  /* When _busy was armed (steady clock). The refusal of a premature read is
+   * decided from THIS, before the timers are touched: they are read-and-clear,
+   * so a read that reached them would take the counts the window is still
+   * accumulating. */
+  std::chrono::steady_clock::time_point _busy_armed_at;
   std::atomic<uint64_t> _rx_frames{0};
 
   /* Frames cross from the C library's event thread to the StartRxLoop thread

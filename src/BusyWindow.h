@@ -101,19 +101,26 @@ public:
   /* Read an armed window. An unarmed, spoiled or not-yet-elapsed window
    * yields an INVALID reading rather than a number: "no reading" and "quiet
    * channel" are different facts and every consumer downstream acts on the
-   * difference. */
+   * difference.
+   *
+   * A completed or spoiled window is consumed by the read. A NOT-ELAPSED one
+   * is not: the hardware is still counting it, so the caller reads again
+   * when its dwell ends. Consuming it here would send that retry down the
+   * sampled path, which re-arms the engine for 2 ms and reports THAT as a
+   * valid reading — on the JGR3 map it also destroys the window still
+   * running. */
   ChannelBusy read(const NhmRegs &regs, uint64_t tx_submitted,
                    const Read32 &read32) {
     ChannelBusy b;
     if (!armed_)
       return b;
-    armed_ = false;
 
     /* An earlier reason wins: a window that something re-armed mid-flight is
      * "interrupted", and the fact that it is consequently not elapsed either
      * is a symptom of that, not a second finding. Checked BEFORE the ready
      * bit for exactly that reason. */
     if (spoil_ != BusySpoil::None) {
+      armed_ = false;
       last_spoil_ = spoil_;
       b.spoil = spoil_;
       return b;
@@ -123,12 +130,12 @@ public:
     if (!c.ready) {
       /* The ready bit is still clear: the window has not finished. The result
        * register holds the PREVIOUS window, so reporting it would be a stale
-       * reading wearing this window's timestamp. */
-      spoil_ = BusySpoil::NotElapsed;
-      last_spoil_ = spoil_;
-      b.spoil = spoil_;
+       * reading wearing this window's timestamp. Still armed: read again. */
+      last_spoil_ = BusySpoil::NotElapsed;
+      b.spoil = BusySpoil::NotElapsed;
       return b;
     }
+    armed_ = false;
     b.valid = true;
     b.source = BusySource::Clm;
     b.valid_busy = true;

@@ -365,7 +365,15 @@ int main(int argc, char **argv) {
        * depends on how deeply that backend's Stop tears the chip down:
        * measured false on the RTL8733B, Jaguar1 and Jaguar3, and TRUE with a
        * 2 ms window on a Jaguar2, whose Stop only joins its runtime
-       * threads. */
+       * threads.
+       *
+       * Read `5/5 spoil=none` as ONE confirmation, not five. This arm sits
+       * inside the rep loop, so reps 2..N arm a chip the previous rep's
+       * Stop() already tore down — which succeeds only because of the
+       * residual this very comment is about (nothing clears the gate
+       * with_ccx reads). Only rep 1 exercises the intended live-session
+       * sequence. The negative control is what discriminates: with the
+       * reset removed every rep reports spoil=retuned. */
       nap(wait_ms / 2);
       dev->Stop();
       nap(50);

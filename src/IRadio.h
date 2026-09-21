@@ -629,6 +629,13 @@ public:
    * point of the spoil field. A backend implementing this owes the reset;
    * the per-generation guides record how far each teardown goes.
    *
+   * What the reset does NOT close: it forgets a window armed BEFORE the
+   * teardown. Where nothing clears the flag the engine's own accessor gates
+   * on, an arm issued AFTER Stop() still succeeds against a chip that has
+   * been torn down — true of Jaguar1/2/3, whose gate is never cleared, and
+   * not of the RTL8733B, whose Stop() clears it. Closing it everywhere is a
+   * behaviour change on paths that flag also guards.
+   *
    * A spoiled or completed window is consumed by
    * the read; a not-yet-elapsed one stays armed, so the caller reads again
    * at the end of its dwell instead of re-arming. Single control thread, like

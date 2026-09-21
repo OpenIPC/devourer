@@ -2031,8 +2031,8 @@ void RtlJaguar2Device::Stop() {
    * with_ccx gates on _brought_up, which nothing here clears — so an arm
    * issued AFTER a Stop still succeeds against a torn-down chip.
    * ArmChannelBusy is single-control-thread by contract (IRadio.h); closing
-   * the rest means clearing _brought_up, which gates other paths. This
-   * generation's guide records where it stands. */
+   * the rest means clearing _brought_up, which gates other paths. The
+   * contract and this residual are both at IRadio::ArmChannelBusy. */
   {
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
     busy_window_reset();

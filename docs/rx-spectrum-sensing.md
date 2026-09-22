@@ -415,7 +415,8 @@ quick-connect decision has.
 ### A window is only about the dwell if nothing else touched it
 
 Three things spoil one, all measured, and each makes the reading come back
-invalid with a reason (`ChannelBusy::spoil`) rather than plausible:
+invalid with a reason (`ChannelBusy::spoil`) rather than plausible. A fourth —
+the session ending under it — is not a spoiler but a lifetime rule, below.
 
 | spoiler | Jaguar1 (11AC) | Jaguar3 (JGR3) | RTL8733B (JGR3) |
 |---|---|---|---|
@@ -438,6 +439,35 @@ The first row is why the rule is enforced on every family and not only where it
 fails loudly: `GetRxQuality()` calls `GetRxEnergy(with_nhm=true)`, so a
 consumer polling link quality inside its own survey dwell spoils it without
 touching the busy API at all.
+
+### A window does not outlive its hardware session
+
+`Stop()` forgets any armed window. Without that, one armed before a teardown
+stays reachable afterwards and the next retune's note stamps it `Retuned` — a
+reason earned by a session that no longer exists. The mechanism differs by
+die: on the RTL8733B the retune re-runs bring-up, which restores the flag
+`with_ccx` gates on; on Jaguar1/2/3 the retune does no bring-up at all and the
+window simply stays reachable because nothing ever clears `_brought_up`. The
+reading is invalid either way, so what a missing reset costs is the REASON —
+session end never produces a spoil value of its own, it forges another's.
+
+Measured with `tests/busy_window_probe.sh --mode revive` (arm, `Stop()`,
+retune, read), each die with its own reset removed and then restored:
+
+| sensor | without the reset | with it | reading, with it |
+|---|---|---|---|
+| RTL8812AU (Jaguar1) | `spoil=retuned` | `spoil=none` | no reading — `Stop()` powers the card down |
+| RTL8822BU (Jaguar2) | `spoil=retuned` | `spoil=none` | **valid, 2 ms window** — this `Stop()` only joins its runtime threads |
+| RTL8812CU (Jaguar3) | `spoil=retuned` | `spoil=none` | no reading — `Stop()` runs `rtw_hal_deinit()` |
+| RTL8733BU | `spoil=retuned` | `spoil=none` | no reading — and not because of teardown depth: this die has no sampled path at all, since it does not override `GetRxEnergy` |
+
+The Jaguar2 column is why the arm asserts the spoil REASON and not the
+reading's validity: an "invalid" assertion encodes one family's teardown depth
+as a contract and fails a correct backend. What holds everywhere is that no
+reason survives the session that ended.
+
+The contract is at `IRadio::ArmChannelBusy`; how far each generation's
+teardown goes is in its own `src/<gen>/CLAUDE.md`.
 
 ### Own transmission is carried, not corrected
 

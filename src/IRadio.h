@@ -617,7 +617,26 @@ public:
    * of the dwell. A window is spoiled by an NHM read (IRtlRadio::GetRxEnergy
    * with with_nhm, which re-arms the shared CCX engine), by a retune, and by
    * reading before it has elapsed; the reading then comes back INVALID rather
-   * than plausible-but-wrong. A spoiled or completed window is consumed by
+   * than plausible-but-wrong.
+   *
+   * A window also does not outlive its hardware session: Stop() forgets it.
+   * Without that a window armed before a teardown stays reachable afterwards
+   * — by different mechanisms on different backends, so clearing whatever
+   * flag guards the engine is not a substitute — and the next retune's note
+   * stamps it Retuned, a reason earned by a session that no longer exists.
+   * Measured on all four Realtek backends. The reading is invalid either
+   * way, so what a missing reset costs is the REASON, which is the whole
+   * point of the spoil field. A backend implementing this owes the reset;
+   * the per-generation guides record how far each teardown goes.
+   *
+   * What the reset does NOT close: it forgets a window armed BEFORE the
+   * teardown. Where nothing clears the flag the engine's own accessor gates
+   * on, an arm issued AFTER Stop() still succeeds against a chip that has
+   * been torn down — true of Jaguar1/2/3, whose gate is never cleared, and
+   * not of the RTL8733B, whose Stop() clears it. Closing it everywhere is a
+   * behaviour change on paths that flag also guards.
+   *
+   * A spoiled or completed window is consumed by
    * the read; a not-yet-elapsed one stays armed, so the caller reads again
    * at the end of its dwell instead of re-arming. Single control thread, like
    * every other control-plane entry point. */

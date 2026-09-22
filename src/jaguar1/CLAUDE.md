@@ -39,6 +39,18 @@ methods), `RadioManagementModule` (channel/BW/TX power, up to 4 RF paths),
 
 ## Teardown
 
+**`Stop()` forgets any armed busy window** — the rule, and the residual it
+does not close, are at `IRadio::ArmChannelBusy`, the one declaration site
+where they can be kept true. What is specific to this die:
+
+Measured on an RTL8812AU with the reset removed: arm, `Stop()`, retune, read
+reports `spoil=retuned` — a reason earned by a session that no longer exists;
+with it, `spoil=none` and no reading (this die's `Stop()` powers the card
+down). The reset sits ABOVE the `teardown_power_down=0` early return, so the
+"leave the chip powered" path forgets the window too. It takes the CCX lock
+alone: this generation has no family-wide register lock to order against
+(`_port0_mu` is narrower and never taken under the CCX lock).
+
 `RtlJaguarDevice::Stop()` and the destructor run `HalModule::rtw_hal_deinit()`:
 halt the MAC engines (`REG_CR`, `REG_RCR`), then the die's card-disable power
 sequence via the existing `HalPwrSeqCmdParsing` (`rtl8812_card_disable_flow` /

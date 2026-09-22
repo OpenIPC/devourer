@@ -9,7 +9,7 @@
 # in 55 of 71 windows on an RTL8822BU while 300-400 frames per window were
 # decoded).
 #
-# Arms, in order:
+# Arms (listed by role, not run order):
 #   quiet      sensor alone       -- the floor. Must read ~0, not "no reading".
 #   window     armed, under load  -- the feature.
 #   sampled    unarmed, same load -- the spread comparison.
@@ -24,9 +24,15 @@
 #              the window length recorded at arm).
 #   stale      re-arm, then read early -- must not return the latched result
 #              of the PREVIOUS window.
+#   revive     arm, Stop(), retune, read -- must carry spoil=NONE: no reason
+#              may survive from the session that ended. Whether the reading is
+#              VALID is backend-dependent and deliberately not asserted (a
+#              Jaguar2 Stop leaves the chip live, so its sampled path answers
+#              with a 2 ms window; the others tear down and report nothing).
+#              Realtek only -- see the arm.
 #   txsess     sensor transmits      -- must stay VALID and be flagged own_tx.
 #
-# Nine arms. The skip counts below are stated against this list, so if you
+# Eleven arms. The skip counts below are stated against this list, so if you
 # add one, add it here too or the verdict's "N arm(s) skipped" stops being
 # auditable.
 #
@@ -150,6 +156,31 @@ assert_ge() { # label, value, bound
   else echo "FAIL $1: $2 < $3"; fails=$((fails + 1)); fi
 }
 
+# Assert only the spoil REASON, ignoring validity. Some arms have a verdict
+# that is the same on every backend while the reading's validity is not: a
+# post-Stop read is invalid where Stop kills the chip (RTL8733B, Jaguar1/3)
+# and a valid 2 ms sampled reading where it does not (Jaguar2 Stop only joins
+# its runtime threads — measured). Asserting valid there would encode one
+# family's teardown depth as a contract.
+expect_spoil() { # mode, spoil
+  local mode="$1" want="$2" n bad before="$fails"
+  n=$(jq_field "$OUT/$mode.log" spoil | wc -l); n=${n:-0}
+  if [ "$n" -eq 0 ]; then
+    echo "FAIL $mode: no samples"; fails=$((fails + 1)); return 0
+  fi
+  if [ "$n" -ne "$REPS" ]; then
+    echo "FAIL $mode: $n/$REPS records — the probe stopped early"
+    fails=$((fails + 1)); return 0
+  fi
+  bad=$(jq_field "$OUT/$mode.log" spoil | grep -vc "^$want$"); bad=${bad:-ERR}
+  [ "$bad" = "ERR" ] && { echo "FAIL $mode: could not read spoil reasons"
+                          fails=$((fails + 1)); return 0; }
+  [ "$bad" -ne 0 ] && { echo "FAIL $mode: $bad/$n samples not spoil=$want"
+                        fails=$((fails + 1)); }
+  [ "$fails" -eq "$before" ] && echo "  ok: $n samples spoil=$want"
+  return 0
+}
+
 # The probe emits JSON Lines (ev=busy.window / busy.caps / busy.skip), so the
 # assertions below read fields out of the JSON rather than scraping a bespoke
 # text format.
@@ -204,6 +235,13 @@ expect_all() { # mode, valid(0|1), [spoil]
   if [ "$n" -eq 0 ]; then
     echo "FAIL $mode: no samples"; fails=$((fails + 1)); return
   fi
+  # A probe that died partway leaves fewer records than reps. Without this a
+  # single surviving sample passes the whole arm — the same hole expect_spoil
+  # closes, and there is no reason for the two to disagree.
+  if [ "$n" -ne "$REPS" ]; then
+    echo "FAIL $mode: $n/$REPS records — the probe stopped early"
+    fails=$((fails + 1)); return
+  fi
   local want_json="False"; [ "$want_valid" = "1" ] && want_json="True"
   # `grep -vc` on an empty stream prints 0 but a FAILED extractor prints
   # nothing at all, and `[ "" -ne 0 ]` is a bash error, not false — which
@@ -235,17 +273,47 @@ expect_all() { # mode, valid(0|1), [spoil]
 
 echo "== sensor $SENSOR_VID:$SENSOR_PID, flooder $FLOOD_VID:$FLOOD_PID, ch$CHANNEL"
 
-# The Realtek-only arms drive IRtlRadio facilities (the NHM read, the CCX
-# result latch). A MediaTek sensor runs the rest.
-# Compared numerically: a literal string test made SENSOR_VID=0x0E8D (or a
-# decimal VID) run the Realtek-only NHM arms against a MediaTek sensor, where
-# the cast fails and the window comes back valid.
-realtek_sensor=1
-[ "$(printf '%d' "$SENSOR_VID")" -eq "$(printf '%d' 0x0e8d)" ] && realtek_sensor=0
-
 stop_flood
 run_arm window "quiet floor (no flooder)"
 mv -f "$OUT/window.log" "$OUT/quiet.log"
+
+# EVERY per-backend decision below is read from the probe's own caps record,
+# not from the sensor's USB VID. The VID cannot answer any of these questions:
+# Kestrel ships under 0x0bda/0x0586/0x0b05, MediaTek ships under nine OEM
+# VIDs beyond 0x0e8d, and 0x0b05, 0x2c4e and 0x7392 appear in BOTH tables —
+# so no VID test can even separate those two. A "not MediaTek" gate therefore called a Kestrel
+# Realtek and ran arms it cannot pass, and called an OEM-VID MediaTek Realtek
+# and ran the loaded arms its bring-up cannot survive.
+sensor_gen="$(caps_field "$OUT/quiet.log" generation)"
+busy_cap="$(caps_field "$OUT/quiet.log" busy_airtime_ok)"
+
+# busy_airtime_ok says the backend HAS an engine, not that an arm will
+# succeed right now — a MediaTek with RX off and a Realtek before bring-up
+# both report true and refuse. That is fine here: the flag answers "is this
+# harness in scope", and the quiet arm's own assertion catches an engine that
+# exists but cannot arm.
+#
+# No busy-airtime engine at all (Kestrel) means this harness does not apply.
+# Say so once and leave, rather than emitting a failure per arm for hardware
+# that was never in scope.
+if [ "$busy_cap" = "False" ]; then
+  echo "SKIP: $sensor_gen has no busy-airtime engine (busy_airtime_ok=false),"
+  echo "      so there is no armed window for this harness to measure."
+  exit 77
+fi
+# "Realtek" here means "not the backend whose Stop() closes the device and
+# whose bring-up cannot survive a saturated channel" — a generation fact, and
+# the caps record carries the generation by name.
+realtek_sensor=1
+[ "$sensor_gen" = "mt7612u" ] && realtek_sensor=0
+
+if [ "$busy_cap" != "True" ]; then
+  echo "FAIL caps: busy_airtime_ok not readable from the probe (got '$busy_cap')"
+  echo "     — refusing to decide which arms apply from a caps record this"
+  echo "       harness cannot parse."
+  fails=$((fails + 1))
+fi
+
 expect_all quiet 1   # a quiet channel is a READING of ~0, never "no reading"
 quiet_mean="$(stat_of quiet mean)"
 # The floor must BE a floor. Without this the whole comparison below passes
@@ -293,6 +361,31 @@ run_arm retune "retune mid-window (no load needed)"
 expect_all retune 0 retuned
 run_arm early "read before the window elapsed (no load needed)"
 expect_all early 0 not-elapsed
+# The window must not outlive its own hardware session. Stop() ends the
+# session, but a retune re-runs bring-up, so a backend that forgets to reset
+# the window there revives it and answers with a spoil reason earned by a
+# session that no longer exists. spoil=none is the assertion that matters:
+# valid=0 alone passes either way.
+# MediaTek is excluded: its Stop() closes the device and nulls the handle, so
+# the arm cannot retune afterwards — measured, the probe wedges rather than
+# reporting. This is a Realtek lifecycle rule and is checked where it applies.
+# Gated on the reported GENERATION, not on a capability: there is no cap for
+# "Stop() is survivable", so this one exclusion stays a lifecycle fact. The
+# two cases: MediaTek's Stop() nulls the device handle, leaving no retune
+# path (measured: the probe wedges), and with SENSOR_RX=1 the Realtek Init
+# runs on a detached thread that Stop() would be torn down underneath.
+if [ "$realtek_sensor" = "1" ] && [ "$SENSOR_RX" != "1" ]; then
+  run_arm revive "arm, Stop(), retune, read (no load needed)"
+  # SPOIL only. Whether the post-Stop read is valid depends on how deeply that
+  # backend's Stop tears the chip down; what must hold everywhere is that no
+  # spoil reason survives from the session that ended.
+  expect_spoil revive none
+else
+  echo "== revive arm skipped: needs a Realtek sensor with the RX loop OFF —"
+  echo "   MediaTek's Stop() closes the device, and under SENSOR_RX=1 the"
+  echo "   Init thread would be torn down underneath."
+  skip_arms 1
+fi
 
 if [ "$realtek_sensor" != "1" ]; then
   echo "== SKIPPING the loaded arms: a MediaTek sensor must be brought up"
@@ -363,8 +456,10 @@ else
   skip_arms 3
 fi
 
-if [ "$realtek_sensor" = "1" ]; then
-  run_arm stale "re-arm, then read before the new window elapsed"
+# No guard: the MediaTek early exit above is unconditional, so every path
+# that reaches here is one that can arm. This arm's skip is already counted
+# in that exit's total.
+run_arm stale "re-arm, then read before the new window elapsed"
   # The first read of each pair must be a real measurement and the second must
   # refuse. If the trigger did NOT clear the ready bit, the second read would
   # return the first window's latched value and look perfectly valid.
@@ -395,7 +490,6 @@ EOF
     echo "FAIL stale: $bad early reads returned a stale latched value"
     fails=$((fails + 1))
   fi
-fi
 
 f0="$(flood_frames)"
 run_arm txsess "sensor transmitting inside its own window"

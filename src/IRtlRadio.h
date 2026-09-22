@@ -245,10 +245,14 @@ protected:
   void busy_window_note_nhm_read() { _busy_window.note_nhm_read(); }
   void busy_window_note_retune() { _busy_window.note_retune(); }
 
-  /* Forget any armed window. Bring-up paths call it: a window armed before a
-   * re-Init describes a chip state that no longer exists, and leaving it
-   * armed would make the next unrelated GetChannelBusy() take the armed
-   * branch and report a stale period as if it were its own dwell. */
+  /* Forget any armed window. Bring-up AND teardown paths call it: a window
+   * armed before a re-Init — or before a Stop() — describes a chip state that
+   * no longer exists, and leaving it armed would make the next unrelated
+   * GetChannelBusy() take the armed branch and report a stale period as if it
+   * were its own dwell. Stop() is the half that is easy to miss, because
+   * clearing the flag with_ccx gates on does not stand in for it: on a
+   * backend whose retune re-runs bring-up, that flag comes straight back.
+   * See IRadio::ArmChannelBusy for the contract. */
   void busy_window_reset() { _busy_window = devourer::ClmWindow{}; }
 
   /* Serialises the CCX engine: the armed window's state, the arm/read, and

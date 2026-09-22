@@ -2395,6 +2395,28 @@ bool RtlJaguarDevice::NetDevOpen(SelectedChannel selectedChannel) {
  * Best-effort: a chip that already dropped off the bus makes the writes fail,
  * which is fine on a teardown path. */
 void RtlJaguarDevice::Stop() {
+  /* The armed window dies with the session. Nothing else forgets it: this
+   * generation's with_ccx gates on _brought_up, which Stop() does not clear,
+   * so a window armed before a Stop stays visible afterwards and the next
+   * retune's note hands the caller a spoil reason earned by a session that no
+   * longer exists. Measured on an RTL8812AU with this reset removed: an
+   * arm/Stop/retune/read sequence reports spoil=retuned; with it, none.
+   * Scoped; nothing below takes the CCX lock. This generation has no
+   * FAMILY-WIDE register lock to order against (it has _port0_mu, a
+   * narrower one over the port0/TSF block, which is never taken under the
+   * CCX lock).
+   *
+   * What this does NOT close: no lock spans this Stop(), so a concurrent
+   * ArmChannelBusy can still land after the reset and during teardown, and
+   * with_ccx gates on _brought_up, which nothing here clears — so an arm
+   * issued AFTER a Stop still succeeds against a torn-down chip.
+   * ArmChannelBusy is single-control-thread by contract (IRadio.h); closing
+   * the rest means clearing _brought_up, which gates other paths. The
+   * contract and this residual are both at IRadio::ArmChannelBusy. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_reset();
+  }
   _device.quiesce_tx();
   if (!_cfg.tuning.teardown_power_down) {
     _logger->info("Jaguar1: Stop() leaving the chip powered "

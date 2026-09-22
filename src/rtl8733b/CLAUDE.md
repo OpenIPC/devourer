@@ -480,12 +480,21 @@ and the retune note hands the caller a `Retuned` spoil earned by a hardware
 session that no longer exists: invalid either way, but the reason would be a
 lie. The reset is scoped under the `_reg_mu` `Stop()` already holds.
 
-Jaguar1/2/3 share this hole and have it worse — none of their `Stop()`
-implementations resets the window either, and unlike this backend none of them
-clears the flag their `with_ccx` gates on, so a `GetChannelBusy()` straight
-after `Stop()` reads CCX registers on a deinitialised chip with no retune
-needed. Not fixed here; noted so the asymmetry is not mistaken for an 8733B
-quirk.
+All of that is about a window armed BEFORE the Stop. For an arm issued
+*after* one, the flag does its job, and this backend closes both sides of the
+hazard: SEQUENTIALLY, `Stop()` clears `_phy_ready`, which is what `with_ccx`
+gates on, so a later `ArmChannelBusy()` is refused rather than arming a
+torn-down chip; CONCURRENTLY, `Stop()` holds the recursive `_reg_mu` across
+its whole body and `with_ccx` takes that lock first, so an arm racing the
+teardown blocks instead of slipping in after the reset.
+
+Jaguar1/2/3 reset the window in `Stop()` the same way but stop there — they
+have NEITHER half: no `Stop()` clears `_brought_up`, and none holds a
+register lock across its teardown (Jaguar1 has no family-wide one at all).
+So on those an arm issued after a Stop still succeeds against a torn-down
+chip, and one racing the teardown can still slip in. Each Jaguar guide
+records its own generation's teardown, the race is in each `Stop()`'s own
+comment, and `IRadio::ArmChannelBusy` carries the rule itself.
 
 Retune notes live in `SetMonitorChannel` and `FastRetune`, both **scoped**:
 `FastRetune` calls `SetMonitorChannel` on its declined path while already

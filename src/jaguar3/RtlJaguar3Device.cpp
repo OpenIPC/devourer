@@ -747,6 +747,28 @@ void RtlJaguar3Device::apply_replay_wseq() {
 /* Clean shutdown — see IRadio::Stop. Best-effort: a chip that already
  * dropped off the bus will make the de-init writes fail, which is fine. */
 void RtlJaguar3Device::Stop() {
+  /* The armed window dies with the session. Nothing else forgets it:
+   * with_ccx gates on _brought_up, which Stop() does not clear, so a window
+   * armed before a Stop stays visible afterwards and the next retune's note
+   * hands the caller a spoil reason earned by a session that no longer
+   * exists. Measured on an RTL8812CU with this reset removed: an
+   * arm/Stop/retune/read sequence reports spoil=retuned; with it, none.
+   * Scoped, and deliberately NOT under _reg_mu: Stop() joins the coex thread
+   * below, that thread takes _reg_mu, and holding it across the join would
+   * deadlock. Taking the CCX lock alone is safe here because the coex loop
+   * never takes it.
+   *
+   * What this does NOT close: no lock spans this Stop(), so a concurrent
+   * ArmChannelBusy can still land after the reset and during teardown, and
+   * with_ccx gates on _brought_up, which nothing here clears — so an arm
+   * issued AFTER a Stop still succeeds against a torn-down chip.
+   * ArmChannelBusy is single-control-thread by contract (IRadio.h); closing
+   * the rest means clearing _brought_up, which gates other paths. The
+   * contract and this residual are both at IRadio::ArmChannelBusy. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_reset();
+  }
   _coex_stop = true;
   if (_coex_thread.joinable())
     _coex_thread.join();

@@ -72,6 +72,18 @@ The 8822B/8821C descriptor `TXPWR_OFSET` is a hardware LUT
 
 ## CCX energy sensing (`clm` / `nhm_env`)
 
+**`Stop()` forgets any armed busy window** — the rule, and the residual it
+does not close, are at `IRadio::ArmChannelBusy`, the one declaration site
+where they can be kept true. What is specific to this die:
+
+Measured on an RTL8822BU with the reset removed: arm, `Stop()`, retune, read
+reports `spoil=retuned`; with it, `spoil=none`. Note this `Stop()` does NOT
+tear the chip down — it only joins `stop_pwrtrack()`/`stop_dig()` — so after
+the reset the sampled path still answers, with a live 2 ms window. That is
+why the on-air `revive` arm asserts the spoil REASON rather than the reading's
+validity: asserting "invalid" would encode another family's teardown depth as
+a contract and fail this one. Neither joined thread takes the CCX lock.
+
 `GetRxEnergy(with_nhm=true)` runs the shared CCX window (`src/NhmReader.h`) on
 the 11AC register map; on-air validated on an RTL8822BU.
 

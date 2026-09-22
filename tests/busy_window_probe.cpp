@@ -18,6 +18,15 @@
  *            the counter runs across the channel change.
  *   early    arm, read immediately. Must be INVALID (spoil=not-elapsed)
  *            rather than the previous window's latched value.
+ *   revive   arm, Stop(), retune, read. The window must not outlive its own
+ *            hardware session. A backend that does not forget it here hands
+ *            back a spoil reason earned by a session that no longer exists —
+ *            measured as spoil=retuned on all four Realtek backends with the
+ *            reset removed. The assertion is on the REASON only: whether the
+ *            read is valid depends on how deeply that backend's Stop tears
+ *            the chip down, and on a Jaguar2 (whose Stop only joins its
+ *            runtime threads) the sampled path answers with a live 2 ms
+ *            window. Not runnable on MediaTek: Stop() closes the device.
  *   txsess   arm, TRANSMIT inside the window, read. Must stay valid and be
  *            flagged own_tx: Realtek reads low (the receiver is deaf while
  *            the PA is up), MediaTek reads high (it counts own airtime).
@@ -177,7 +186,8 @@ int main(int argc, char **argv) {
       std::fprintf(stderr,
                    "usage: %s [--vid N --pid N] [--channel N] [--other N] "
                    "[--reps N] [--window-ms N] [--rx] "
-                   "[--mode sampled|window|interrupt|retune|early|txsess]\n",
+                   "[--mode sampled|window|interrupt|quality|race|retune|early|"
+                   "revive|stale|txsess]\n",
                    argv[0]);
       return 2;
     }
@@ -271,6 +281,18 @@ int main(int argc, char **argv) {
     nap(200);
   }
 
+  /* `revive` tears the session down and brings it back. With --rx the Realtek
+   * Init is running on a DETACHED thread (it ends in a blocking StartRxLoop),
+   * so Stop() and SetMonitorChannel would run underneath it — the same
+   * use-after-free the cleanup path above exists to avoid, and the sequence
+   * RtlJaguar3Device::InitWrite refuses outright. Refuse rather than wedge. */
+  if (mode == "revive" && rx_on) {
+    devourer::Ev(g_ev, "busy.skip")
+        .t()
+        .f("why", "revive cannot run with the RX loop live");
+    return finish(5);
+  }
+
   const uint32_t window_us = static_cast<uint32_t>(window_ms) * 1000u;
 
   for (int i = 1; i <= reps; i++) {
@@ -326,6 +348,40 @@ int main(int argc, char **argv) {
       nap(wait_ms / 2);
     } else if (mode == "early") {
       nap(5);
+    } else if (mode == "revive") {
+      /* The window must not survive its own hardware session.
+       *
+       * Stop() ends the session, but that alone does not protect an armed
+       * window, and the mechanism differs by backend. On the RTL8733B,
+       * SetMonitorChannel re-runs bring_up_to_phy(), which sets the flag
+       * with_ccx gates on back to true. On Jaguar1/2/3 the retune does no
+       * bring-up at all — there the window stays reachable simply because
+       * nothing ever clears `_brought_up`. Either way a backend that does
+       * not reset the window in Stop() hands the next read a spoil reason
+       * earned by a session that no longer exists, and the retune note below
+       * is what stamps it.
+       *
+       * The harness asserts the REASON only. Whether the read is valid
+       * depends on how deeply that backend's Stop tears the chip down:
+       * measured false on the RTL8733B, Jaguar1 and Jaguar3, and TRUE with a
+       * 2 ms window on a Jaguar2, whose Stop only joins its runtime
+       * threads.
+       *
+       * Read `5/5 spoil=none` as ONE confirmation, not five. This arm sits
+       * inside the rep loop, so reps 2..N arm a chip the previous rep's
+       * Stop() already tore down — which succeeds only because of the
+       * residual this very comment is about (nothing clears the gate
+       * with_ccx reads). Only rep 1 exercises the intended live-session
+       * sequence. The negative control is what discriminates: with the
+       * reset removed every rep reports spoil=retuned. */
+      nap(wait_ms / 2);
+      dev->Stop();
+      nap(50);
+      dev->SetMonitorChannel(
+          SelectedChannel{.Channel = static_cast<uint8_t>(channel),
+                          .ChannelOffset = 0,
+                          .ChannelWidth = CHANNEL_WIDTH_20});
+      nap(wait_ms);
     } else if (mode == "stale") {
       /* Let this window finish and consume it, so the result register holds a
        * completed measurement; then arm again and read at once. */

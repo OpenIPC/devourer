@@ -103,11 +103,20 @@ for i in $(seq 1 "$REPS"); do
     uhubctl -l "$HUB" -p "$HPORT" -a off > /dev/null || { log "uhubctl off failed"; exit 3; }
     sleep 5
     uhubctl -l "$HUB" -p "$HPORT" -a on > /dev/null
-    t0=$SECONDS
-    while [ $((SECONDS - t0)) -lt 20 ]; do
-      [ -e "/sys/bus/usb/devices/$SYSFS/idProduct" ] && break
+    # Wait for the DUT itself, not just any device at the path: a ZeroCD
+    # part (the MT7612U, some Realtek dongles) enumerates first under its
+    # installer-disk PID and only then as the NIC.
+    want="${DUT_PID:+$(printf '%04x' "$DUT_PID")}"
+    t0=$SECONDS; seen=0
+    while [ $((SECONDS - t0)) -lt 30 ]; do
+      if [ -e "/sys/bus/usb/devices/$SYSFS/idProduct" ]; then
+        if [ -z "$want" ] || [ "$(cat "/sys/bus/usb/devices/$SYSFS/idProduct")" = "$want" ]; then
+          seen=1; break
+        fi
+      fi
       sleep 0.5
     done
+    [ "$seen" = 1 ] || { log "FATAL: DUT ${want:+pid $want }did not re-enumerate at $SYSFS within 30 s"; exit 3; }
     sleep 1.5
   fi
 
@@ -115,7 +124,10 @@ for i in $(seq 1 "$REPS"); do
     ${MT_FW:+--mt7612u-fw-dir "$MT_FW"} \
     --channel "$CHANNEL" --expect-traffic > "$LOG/rep$i.log" 2>&1
   rc=$?
-  [ "$rc" -gt "$worst" ] && [ "$rc" -le 2 ] && worst=$rc
+  # 0/1/2 are verdicts; anything else is the doctor failing to run (no adapter,
+  # claim failed) and must not be folded into a HEALTHY aggregate.
+  [ "$rc" -le 2 ] || { log "FATAL: doctor rc=$rc on rep $i (not a verdict)"; tail -3 "$LOG/rep$i.log"; exit 3; }
+  [ "$rc" -gt "$worst" ] && worst=$rc
   log "rep $i: $(grep -F '"ev":"doctor.verdict"' "$LOG/rep$i.log" | head -1) (rc=$rc)"
 done
 

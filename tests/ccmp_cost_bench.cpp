@@ -8,7 +8,12 @@
 // compare it with the per-frame send cost of the transport it would sit in
 // front of (txdemo at DEVOURER_TX_GAP_US=0 gives that as frames/s).
 //
-// Build + run: tests/ccmp_cost_bench.sh. Prints one JSON line per frame size.
+// Each timed call is the harness's ccm() whole: a fresh EVP_CIPHER_CTX per
+// call, init, AAD, payload, tag, free. Encrypt and decrypt are timed
+// separately - the RX path pays the second one.
+//
+// Build + run: tests/ccmp_cost_bench.sh. Prints one JSON line per frame size
+// and direction.
 #include <openssl/evp.h>
 
 #include <chrono>
@@ -17,23 +22,33 @@
 #include <cstring>
 #include <vector>
 
-static bool ccm_enc(EVP_CIPHER_CTX *c, const uint8_t *key, const uint8_t *nonce,
-                    const uint8_t *aad, int aadlen, const uint8_t *in, int inlen,
-                    uint8_t *out, uint8_t *tag) {
+// tests/ap_wpa2.cpp ccm(), verbatim in shape: context lifecycle included.
+static bool ccm(bool enc, const uint8_t *key, const uint8_t *nonce,
+                const uint8_t *aad, int aadlen, const uint8_t *in, int inlen,
+                uint8_t *out, uint8_t *tag) {
+  EVP_CIPHER_CTX *c = EVP_CIPHER_CTX_new();
   int l;
-  // Same call sequence as tests/ap_wpa2.cpp's ccm(): fixed 13-byte nonce,
-  // 8-byte MIC, AAD then payload.
-  if (!EVP_EncryptInit_ex(c, EVP_aes_128_ccm(), nullptr, nullptr, nullptr))
-    return false;
-  EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_SET_IVLEN, 13, nullptr);
-  EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_SET_TAG, 8, nullptr);
-  if (!EVP_EncryptInit_ex(c, nullptr, nullptr, key, nonce)) return false;
-  if (!EVP_EncryptUpdate(c, nullptr, &l, nullptr, inlen)) return false;
-  if (!EVP_EncryptUpdate(c, nullptr, &l, aad, aadlen)) return false;
-  if (!EVP_EncryptUpdate(c, out, &l, in, inlen)) return false;
-  if (!EVP_EncryptFinal_ex(c, out + l, &l)) return false;
-  EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_CCM_GET_TAG, 8, tag);
-  return true;
+  bool ok = true;
+  if (enc) {
+    EVP_EncryptInit_ex(c, EVP_aes_128_ccm(), 0, 0, 0);
+    EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_IVLEN, 13, 0);
+    EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_TAG, 8, 0);
+    EVP_EncryptInit_ex(c, 0, 0, key, nonce);
+    EVP_EncryptUpdate(c, 0, &l, 0, inlen);
+    EVP_EncryptUpdate(c, 0, &l, aad, aadlen);
+    ok = EVP_EncryptUpdate(c, out, &l, in, inlen) == 1;
+    EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_GET_TAG, 8, tag);
+  } else {
+    EVP_DecryptInit_ex(c, EVP_aes_128_ccm(), 0, 0, 0);
+    EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_IVLEN, 13, 0);
+    EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_SET_TAG, 8, tag);
+    EVP_DecryptInit_ex(c, 0, 0, key, nonce);
+    EVP_DecryptUpdate(c, 0, &l, 0, inlen);
+    EVP_DecryptUpdate(c, 0, &l, aad, aadlen);
+    ok = EVP_DecryptUpdate(c, out, &l, in, inlen) == 1;
+  }
+  EVP_CIPHER_CTX_free(c);
+  return ok;
 }
 
 int main(int argc, char **argv) {
@@ -44,24 +59,33 @@ int main(int argc, char **argv) {
   for (int i = 0; i < 13; i++) nonce[i] = (uint8_t)i;
   for (int i = 0; i < 22; i++) aad[i] = (uint8_t)(0xa0 + i);
 
-  EVP_CIPHER_CTX *c = EVP_CIPHER_CTX_new();
   for (int sz : sizes) {
-    std::vector<uint8_t> in((size_t)sz, 0x5a), out((size_t)sz + 16);
-    // warm up
-    for (int i = 0; i < 200; i++)
-      if (!ccm_enc(c, key, nonce, aad, sizeof aad, in.data(), sz, out.data(), tag)) return 1;
-    const auto t0 = std::chrono::steady_clock::now();
-    for (int i = 0; i < iters; i++) {
-      nonce[12] = (uint8_t)i;  // a moving PN, so nothing is hoisted
-      if (!ccm_enc(c, key, nonce, aad, sizeof aad, in.data(), sz, out.data(), tag)) return 1;
+    std::vector<uint8_t> in((size_t)sz, 0x5a), ct((size_t)sz), pt((size_t)sz);
+    for (int dir = 0; dir < 2; dir++) {
+      const bool enc = dir == 0;
+      // One real ciphertext + tag for the decrypt arm to verify against.
+      if (!ccm(true, key, nonce, aad, sizeof aad, in.data(), sz, ct.data(), tag))
+        return 1;
+      for (int i = 0; i < 200; i++)  // warm up
+        if (!ccm(enc, key, nonce, aad, sizeof aad,
+                 enc ? in.data() : ct.data(), sz, enc ? ct.data() : pt.data(),
+                 tag))
+          return 1;
+      const auto t0 = std::chrono::steady_clock::now();
+      for (int i = 0; i < iters; i++) {
+        if (!ccm(enc, key, nonce, aad, sizeof aad,
+                 enc ? in.data() : ct.data(), sz, enc ? ct.data() : pt.data(),
+                 tag))
+          return 1;
+      }
+      const double us = std::chrono::duration<double, std::micro>(
+                            std::chrono::steady_clock::now() - t0).count();
+      std::printf("{\"ev\":\"ccmp.bench\",\"dir\":\"%s\",\"bytes\":%d,"
+                  "\"iters\":%d,\"us_per_frame\":%.2f,\"frames_per_s\":%.0f,"
+                  "\"mbit_per_s\":%.0f}\n",
+                  enc ? "encrypt" : "decrypt", sz, iters, us / iters,
+                  iters / (us / 1e6), (double)sz * 8 * iters / us);
     }
-    const double us = std::chrono::duration<double, std::micro>(
-                          std::chrono::steady_clock::now() - t0).count();
-    std::printf("{\"ev\":\"ccmp.bench\",\"bytes\":%d,\"iters\":%d,"
-                "\"us_per_frame\":%.2f,\"frames_per_s\":%.0f,\"mbit_per_s\":%.0f}\n",
-                sz, iters, us / iters, iters / (us / 1e6),
-                (double)sz * 8 * iters / us);
   }
-  EVP_CIPHER_CTX_free(c);
   return 0;
 }

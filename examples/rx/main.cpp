@@ -312,7 +312,16 @@ static const int g_thermal_warn_delta = []() -> int {
  * this needs no IRtlRadio. */
 static const uint32_t g_rx_busy_ms = []() -> uint32_t {
   const char *e = std::getenv("DEVOURER_RX_BUSY_MS");
-  return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
+  if (!e)
+    return 0u;
+  char *end = nullptr;
+  const unsigned long long v = std::strtoull(e, &end, 0);
+  /* Reject anything but a whole non-negative number, and cap so that the
+   * microsecond form handed to ArmChannelBusy cannot wrap. */
+  if (end == e || *end != '\0' || *e == '-')
+    return 0u;
+  const unsigned long long cap = UINT32_MAX / 1000u;
+  return static_cast<uint32_t>(v > cap ? cap : v);
 }();
 
 /* DEVOURER_RX_DUMP_CSI=hex,hex,... (or "0x1a,0x20,0x40"): F2 research
@@ -1567,23 +1576,45 @@ int main(int argc, char **argv) {
   }
 #endif /* DEVOURER_HAVE_JAGUAR1 */
 
-  /* Vendor-neutral busy-airtime poller: arm, wait the window, read, emit. */
+  /* Vendor-neutral busy-airtime poller: arm, wait the window, read, emit.
+   * ArmChannelBusy/GetChannelBusy are control-plane calls with a
+   * single-control-thread contract, so this runs only where the main thread
+   * has nothing left to do to the radio once bring-up is done: it refuses the
+   * sweep and hop modes (which retune from the main thread — a retune spoils
+   * the window by contract, and interleaving two control callers is what the
+   * contract forbids), and its first arm waits for bring-up to have produced
+   * a frame, like the sweep does, instead of racing Init(). */
   std::atomic<bool> busy_emitter_stop{false};
   std::thread busy_emitter;
+  if (g_rx_busy_ms > 0 &&
+      (!g_rx_sweep.empty() || std::getenv("DEVOURER_HOP_CHANNELS"))) {
+    logger->error("DEVOURER_RX_BUSY_MS: refused with DEVOURER_RX_SWEEP / "
+                  "DEVOURER_HOP_CHANNELS — those retune from the main thread, "
+                  "and the busy window is a single-control-thread contract");
+    return 2;
+  }
   if (g_rx_busy_ms > 0) {
     logger->info("DEVOURER_RX_BUSY_MS={} — starting channel-busy poller",
                  g_rx_busy_ms);
     IRadio *dev = rtlDevice;
     busy_emitter = std::thread([&busy_emitter_stop, dev]() {
-      /* First window after bring-up settles, like the other pollers. */
-      for (uint32_t s = 0; s < 1000 && !busy_emitter_stop.load(); s += 50)
+      /* Bring-up runs on the main thread; the first RX frame is the proof it
+       * finished. A silent channel falls through after 10 s. */
+      for (uint32_t s = 0;
+           s < 10000 && !busy_emitter_stop.load() && g_rx_count == 0; s += 50)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
       while (!busy_emitter_stop.load()) {
         const uint32_t armed = dev->ArmChannelBusy(g_rx_busy_ms * 1000u);
-        for (uint32_t s = 0; s < g_rx_busy_ms && !busy_emitter_stop.load();
-             s += 50)
+        const auto until = std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(g_rx_busy_ms);
+        while (!busy_emitter_stop.load()) {
+          const auto now = std::chrono::steady_clock::now();
+          if (now >= until)
+            break;
           std::this_thread::sleep_for(
-              std::chrono::milliseconds(std::min<uint32_t>(50, g_rx_busy_ms - s)));
+              std::min(until - now, std::chrono::steady_clock::duration(
+                                        std::chrono::milliseconds(50))));
+        }
         if (busy_emitter_stop.load())
           break;
         const devourer::ChannelBusy b = dev->GetChannelBusy();

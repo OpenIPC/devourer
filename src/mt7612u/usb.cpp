@@ -149,13 +149,26 @@ enum { XFER_PENDING = 0, XFER_DONE = 1, XFER_ABANDONED = 2 };
 
 struct sync_xfer {
 	std::atomic<int> state{XFER_PENDING};
+	struct mt7612u_dev *d = nullptr;
 	struct libusb_transfer *t = nullptr;
 	unsigned char *buf = nullptr;   /* heap copy the transfer reads/writes */
 };
 
+/* Return the transfer to the device pool (see mt7612u_dev::sync_pool) if
+ * there is room, else free it. Never called on an in-flight transfer. */
 void sync_xfer_free(struct sync_xfer *x)
 {
-	libusb_free_transfer(x->t);   /* also frees x->buf: FREE_BUFFER */
+	free(x->buf);
+	bool pooled = false;
+	{
+		std::lock_guard<std::mutex> lk(x->d->sync_pool_mu);
+		if (x->d->sync_pool_n < MT_SYNC_POOL) {
+			x->d->sync_pool[x->d->sync_pool_n++] = x->t;
+			pooled = true;
+		}
+	}
+	if (!pooled)
+		libusb_free_transfer(x->t);
 	delete x;
 }
 
@@ -184,12 +197,19 @@ int status_to_rc(enum libusb_transfer_status st)
 
 /* Allocate a sync_xfer with a `len`-byte heap buffer. NULL on allocation
  * failure. */
-struct sync_xfer *sync_xfer_new(size_t len)
+struct sync_xfer *sync_xfer_new(struct mt7612u_dev *d, size_t len)
 {
 	auto *x = new (std::nothrow) sync_xfer;
 	if (!x)
 		return nullptr;
-	x->t = libusb_alloc_transfer(0);
+	x->d = d;
+	{
+		std::lock_guard<std::mutex> lk(d->sync_pool_mu);
+		if (d->sync_pool_n > 0)
+			x->t = d->sync_pool[--d->sync_pool_n];
+	}
+	if (!x->t)
+		x->t = libusb_alloc_transfer(0);
 	x->buf = (unsigned char *)malloc(len ? len : 1);
 	if (!x->t || !x->buf) {
 		free(x->buf);
@@ -250,7 +270,7 @@ int sync_control(struct mt7612u_dev *d, uint8_t type, uint8_t req,
                  uint16_t len, unsigned timeout_ms)
 {
 	const bool out = (type & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_OUT;
-	struct sync_xfer *x = sync_xfer_new(LIBUSB_CONTROL_SETUP_SIZE + len);
+	struct sync_xfer *x = sync_xfer_new(d, LIBUSB_CONTROL_SETUP_SIZE + len);
 	if (!x)
 		return LIBUSB_ERROR_NO_MEM;
 	libusb_fill_control_setup(x->buf, type, req, val, idx, len);
@@ -258,7 +278,7 @@ int sync_control(struct mt7612u_dev *d, uint8_t type, uint8_t req,
 		memcpy(x->buf + LIBUSB_CONTROL_SETUP_SIZE, data, len);
 	libusb_fill_control_transfer(x->t, d->h, x->buf, sync_done, x,
 	                             timeout_ms);
-	x->t->flags = LIBUSB_TRANSFER_FREE_BUFFER;
+	x->t->flags = 0;
 
 	int rc = submit_and_wait(d, x, timeout_ms);
 	if (rc == LIBUSB_ERROR_OTHER)
@@ -279,14 +299,14 @@ int sync_bulk(struct mt7612u_dev *d, uint8_t ep, unsigned char *buf, int len,
               int *xfered, unsigned timeout_ms)
 {
 	const bool in = (ep & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN;
-	struct sync_xfer *x = sync_xfer_new((size_t)len);
+	struct sync_xfer *x = sync_xfer_new(d, (size_t)len);
 	if (!x)
 		return LIBUSB_ERROR_NO_MEM;
 	if (!in && len)
 		memcpy(x->buf, buf, (size_t)len);
 	libusb_fill_bulk_transfer(x->t, d->h, ep, x->buf, len, sync_done, x,
 	                          timeout_ms);
-	x->t->flags = LIBUSB_TRANSFER_FREE_BUFFER;
+	x->t->flags = 0;
 
 	int rc = submit_and_wait(d, x, timeout_ms);
 	if (rc == LIBUSB_ERROR_OTHER) {
@@ -525,17 +545,25 @@ static int mt_identify(struct mt7612u_dev *d, const char **err)
 void mt_dev_state_init(struct mt7612u_dev *d)
 {
 	/* io_lock is a std::recursive_mutex member, constructed with the device,
-	 * so there is nothing to initialise here and no path that can reach the
-	 * tick with an unusable lock. Kept as a named seam because both open
-	 * paths call it and the cal sentinels (low_gain=-1 etc.) belong to the
-	 * same "device state is ready" step - those are reset per-tune in
-	 * mt_set_channel_ex(), which always runs before the first PHY tick. */
-	(void)d;
+	 * so it needs nothing here. What does: the sync helpers' transfer pool,
+	 * which has to exist before any event thread does (see the field). An
+	 * allocation failure leaves the pool short and the helpers allocate per
+	 * call instead - the cal sentinels (low_gain=-1 etc.) are reset per-tune
+	 * in mt_set_channel_ex(), which always runs before the first PHY tick. */
+	std::lock_guard<std::mutex> lk(d->sync_pool_mu);
+	while (d->sync_pool_n < MT_SYNC_POOL) {
+		struct libusb_transfer *t = libusb_alloc_transfer(0);
+		if (!t)
+			break;
+		d->sync_pool[d->sync_pool_n++] = t;
+	}
 }
 
 void mt_dev_state_destroy(struct mt7612u_dev *d)
 {
-	(void)d;
+	std::lock_guard<std::mutex> lk(d->sync_pool_mu);
+	while (d->sync_pool_n > 0)
+		libusb_free_transfer(d->sync_pool[--d->sync_pool_n]);
 }
 
 /*

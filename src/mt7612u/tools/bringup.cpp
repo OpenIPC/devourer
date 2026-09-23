@@ -1812,9 +1812,12 @@ static int gate_caps(uint8_t chan)
 	       c.max_mpdu_tx, c.max_mpdu_rx,
 	       mt_rr(&dev, MT_MAX_LEN_CFG) & 0xfff);
 
+	int8_t rssi_offset[2], lna_gain;
+	mt_rx_corr_unpack(dev.cal.rx_corr.load(std::memory_order_relaxed),
+	                  rssi_offset, &lna_gain);
 	printf("\nRX gain from EEPROM: rssi_offset=[%d,%d] lna_gain=%d "
 	       "high_gain=[%d,%d] mcu_gain=0x%08x\n",
-	       dev.cal.rssi_offset[0], dev.cal.rssi_offset[1], dev.cal.lna_gain,
+	       rssi_offset[0], rssi_offset[1], lna_gain,
 	       dev.cal.high_gain[0], dev.cal.high_gain[1], dev.cal.mcu_gain);
 	printf("  raw EEPROM: LNA_GAIN=0x%04x RSSI_OFF_5G_0=0x%04x "
 	       "RSSI_OFF_5G_1=0x%04x GRP4_5_RX_HIGH_GAIN=0x%04x\n",

@@ -16,6 +16,7 @@
 #include <unistd.h>
 #endif
 
+#include <atomic>
 #include "internal.h"
 
 /* See the LOG/WARN/ERR contract in internal.h. The whole line is formatted
@@ -110,6 +111,141 @@ static uint64_t now_us(void)
 	           std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+/*
+ * Synchronous transfers, built on libusb's async API.
+ *
+ * libusb's own libusb_control_transfer()/libusb_bulk_transfer() are not used
+ * here because this library runs a second event thread (async.cpp) on the same
+ * context. libusb's sync layer decides the transfer is over by reading its
+ * completion flag with no synchronization against the thread that set it -
+ * on the path where handle_events returns early for an expired timeout there
+ * is no lock between the event thread's last touch of the transfer and the
+ * caller's libusb_free_transfer(), which destroys the transfer's mutex. On
+ * x86 program order hides it; on the ARM hosts this library is meant for
+ * nothing does. ThreadSanitizer reports it against real hardware whenever a
+ * register access runs while the RX ring is up (a retune, the 1 Hz tick).
+ *
+ * So: submit through the async API, and wait on our own flag with
+ * acquire/release semantics. The callback's release store happens after
+ * everything libusb did with the transfer on the event thread, and the
+ * acquire load below orders the free after it. While waiting, this thread
+ * pumps events itself when no one else is (a caller with no RX ring), or
+ * parks as an event waiter when the ring's thread holds the events lock -
+ * the same two behaviours the sync API has, minus the unordered read.
+ *
+ * A transfer that has not completed is never freed: past the transfer's own
+ * timeout plus a margin it is cancelled, and if even the cancellation does
+ * not come back the transfer is leaked with a diagnostic rather than freed
+ * under the event thread.
+ */
+static void LIBUSB_CALL sync_done(struct libusb_transfer *t)
+{
+	static_cast<std::atomic<int> *>(t->user_data)
+		->store(1, std::memory_order_release);
+}
+
+static int status_to_rc(enum libusb_transfer_status st)
+{
+	switch (st) {
+	case LIBUSB_TRANSFER_COMPLETED: return 0;
+	case LIBUSB_TRANSFER_TIMED_OUT: return LIBUSB_ERROR_TIMEOUT;
+	case LIBUSB_TRANSFER_STALL:     return LIBUSB_ERROR_PIPE;
+	case LIBUSB_TRANSFER_NO_DEVICE: return LIBUSB_ERROR_NO_DEVICE;
+	case LIBUSB_TRANSFER_OVERFLOW:  return LIBUSB_ERROR_OVERFLOW;
+	default:                        return LIBUSB_ERROR_IO;
+	}
+}
+
+/* Submit `t` (already filled, callback sync_done, user_data `done`) and wait
+ * for it. Returns a LIBUSB_ERROR_* code, 0 on completion. On return the
+ * transfer is complete and may be read and freed - except when this returns
+ * LIBUSB_ERROR_OTHER, which means it was leaked (see above). */
+static int submit_and_wait(struct mt7612u_dev *d, struct libusb_transfer *t,
+                           std::atomic<int> *done, unsigned timeout_ms)
+{
+	int rc = libusb_submit_transfer(t);
+	if (rc)
+		return rc;
+
+	const auto cancel_at = std::chrono::steady_clock::now() +
+	                       std::chrono::milliseconds(timeout_ms) +
+	                       std::chrono::seconds(2);
+	const auto give_up_at = cancel_at + std::chrono::seconds(2);
+	bool cancelled = false;
+
+	while (!done->load(std::memory_order_acquire)) {
+		struct timeval tv = { 0, 20000 };
+		int r = libusb_handle_events_timeout_completed(d->ctx, &tv, NULL);
+		if (r < 0 && r != LIBUSB_ERROR_INTERRUPTED)
+			mt_usleep(1000);   /* a dead context: don't spin flat out */
+		const auto now = std::chrono::steady_clock::now();
+		if (!cancelled && now > cancel_at) {
+			libusb_cancel_transfer(t);
+			cancelled = true;
+		} else if (cancelled && now > give_up_at) {
+			ERR("transfer on ep %02x never completed after cancel: "
+			    "leaking it rather than freeing an in-flight transfer",
+			    t->endpoint);
+			return LIBUSB_ERROR_OTHER;
+		}
+	}
+	return status_to_rc(t->status);
+}
+
+/* libusb_control_transfer(), over submit_and_wait(). Same contract: the
+ * number of data bytes transferred on success, a LIBUSB_ERROR_* otherwise. */
+static int sync_control(struct mt7612u_dev *d, uint8_t type, uint8_t req,
+                        uint16_t val, uint16_t idx, unsigned char *data,
+                        uint16_t len, unsigned timeout_ms)
+{
+	std::atomic<int> done{0};
+	struct libusb_transfer *t = libusb_alloc_transfer(0);
+	if (!t)
+		return LIBUSB_ERROR_NO_MEM;
+	unsigned char *buf =
+		(unsigned char *)malloc(LIBUSB_CONTROL_SETUP_SIZE + len);
+	if (!buf) {
+		libusb_free_transfer(t);
+		return LIBUSB_ERROR_NO_MEM;
+	}
+	libusb_fill_control_setup(buf, type, req, val, idx, len);
+	if ((type & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_OUT && len)
+		memcpy(buf + LIBUSB_CONTROL_SETUP_SIZE, data, len);
+	libusb_fill_control_transfer(t, d->h, buf, sync_done, &done, timeout_ms);
+	t->flags = LIBUSB_TRANSFER_FREE_BUFFER;
+
+	int rc = submit_and_wait(d, t, &done, timeout_ms);
+	if (rc == LIBUSB_ERROR_OTHER)
+		return rc;       /* leaked on purpose; buffer goes with it */
+	if (rc == 0) {
+		rc = t->actual_length;
+		if ((type & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN && rc > 0)
+			memcpy(data, buf + LIBUSB_CONTROL_SETUP_SIZE, (size_t)rc);
+	}
+	libusb_free_transfer(t);
+	return rc;
+}
+
+/* libusb_bulk_transfer(), over submit_and_wait(). *xfered is filled on a
+ * timeout too, as libusb's is. */
+static int sync_bulk(struct mt7612u_dev *d, uint8_t ep, unsigned char *buf,
+                     int len, int *xfered, unsigned timeout_ms)
+{
+	std::atomic<int> done{0};
+	struct libusb_transfer *t = libusb_alloc_transfer(0);
+	if (!t)
+		return LIBUSB_ERROR_NO_MEM;
+	libusb_fill_bulk_transfer(t, d->h, ep, buf, len, sync_done, &done,
+	                          timeout_ms);
+	int rc = submit_and_wait(d, t, &done, timeout_ms);
+	if (rc == LIBUSB_ERROR_OTHER)
+		return rc;
+	if (xfered)
+		*xfered = t->actual_length;
+	libusb_free_transfer(t);
+	return rc;
+}
+
 int mt_vendor_req(struct mt7612u_dev *d, uint8_t req, uint8_t type,
                   uint16_t val, uint16_t idx, void *buf, size_t len)
 {
@@ -121,9 +257,8 @@ int mt_vendor_req(struct mt7612u_dev *d, uint8_t req, uint8_t type,
 	d->io_lock.lock();
 
 	for (int i = 0; i < VEND_RETRIES; i++) {
-		rc = libusb_control_transfer(d->h, type, req, val, idx,
-		                             (unsigned char *)buf, (uint16_t)len,
-		                             CTRL_TIMEOUT_MS);
+		rc = sync_control(d, type, req, val, idx, (unsigned char *)buf,
+		                  (uint16_t)len, CTRL_TIMEOUT_MS);
 		if (rc >= 0 || rc == LIBUSB_ERROR_NO_DEVICE)
 			goto out;
 		mt_usleep(5000);
@@ -288,8 +423,7 @@ int mt_bulk(struct mt7612u_dev *d, uint8_t ep, void *buf, int len,
             int *xfered, unsigned timeout_ms)
 {
 	int n = 0;
-	int rc = libusb_bulk_transfer(d->h, ep, (unsigned char *)buf, len,
-	                              &n, timeout_ms);
+	int rc = sync_bulk(d, ep, (unsigned char *)buf, len, &n, timeout_ms);
 	if (xfered) *xfered = n;
 	return rc;
 }

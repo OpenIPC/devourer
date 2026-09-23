@@ -21,6 +21,12 @@
 #   DOCTOR_VERIFY_ARGS rxdemo env for flood verify   (default 8821CU @ 9/1.3)
 #   DOCTOR_CHANNEL     bench channel                 (default 6)
 #   DOCTOR_DUT_VID     DUT vendor id                 (default 0x0bda)
+#   DOCTOR_DUT_PID     DUT product id — required for a non-Realtek VID,
+#                      where the doctor's default PID walk finds nothing
+#                      (e.g. 0x7612 with DOCTOR_DUT_VID=0x0e8d)
+#   DOCTOR_MT7612U_FW_DIR  MediaTek DUT: decompressed mt7662.bin +
+#                      mt7662_rom_patch.bin directory (passed to the doctor,
+#                      which reads no environment)
 #   DOCTOR_SKIP_VBUS=1 no per-rep VBUS cycle — for a DUT on a ROOT port
 #                      (NEVER uhubctl root ports on this rig: a root-port
 #                      cycle once wedged a device past everything but a
@@ -40,6 +46,8 @@ BUS="${4:?usb bus}"; PP="${5:?dotted port path}"; REPS="${6:-3}"
 MOD="${DOCTOR_RTW88_MOD:-rtw88_8812au}"
 CHANNEL="${DOCTOR_CHANNEL:-6}"
 DUT_VID="${DOCTOR_DUT_VID:-0x0bda}"   # e.g. 0x2357 for TP-Link-branded DUTs
+DUT_PID="${DOCTOR_DUT_PID:-}"         # empty = the doctor's Realtek PID walk
+MT_FW="${DOCTOR_MT7612U_FW_DIR:-}"
 FLOOD_ARGS="${DOCTOR_FLOOD_ARGS:-DEVOURER_PID=0x8813 DEVOURER_USB_BUS=4 DEVOURER_USB_PORT=2.3.2}"
 VERIFY_ARGS="${DOCTOR_VERIFY_ARGS:-DEVOURER_PID=0xc811 DEVOURER_USB_BUS=9 DEVOURER_USB_PORT=1.3}"
 
@@ -103,8 +111,9 @@ for i in $(seq 1 "$REPS"); do
     sleep 1.5
   fi
 
-  "$DOCTOR" --vid "$DUT_VID" --bus "$BUS" --port "$PP" --channel "$CHANNEL" \
-    --expect-traffic > "$LOG/rep$i.log" 2>&1
+  "$DOCTOR" --vid "$DUT_VID" ${DUT_PID:+--pid "$DUT_PID"} --bus "$BUS" --port "$PP" \
+    ${MT_FW:+--mt7612u-fw-dir "$MT_FW"} \
+    --channel "$CHANNEL" --expect-traffic > "$LOG/rep$i.log" 2>&1
   rc=$?
   [ "$rc" -gt "$worst" ] && [ "$rc" -le 2 ] && worst=$rc
   log "rep $i: $(grep -F '"ev":"doctor.verdict"' "$LOG/rep$i.log" | head -1) (rc=$rc)"

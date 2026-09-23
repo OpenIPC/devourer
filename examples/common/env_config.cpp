@@ -162,6 +162,8 @@ devourer::DeviceConfig devourer_config_from_env() {
    * library nor the device class consults ambient process state. */
   if (const char *e = env_str("DEVOURER_MT7612U_FW_DIR"))
     cfg.mt7612u.firmware_dir = std::string(e);
+  if (const char *e = env_str("DEVOURER_MT7612U_PHY_TICK"))
+    cfg.mt7612u.phy_tick = std::atoi(e) != 0;
 
   /* ---- tuning ---- */
   /* Defaults ON, so this reads the negation: only an explicit 0 disables it. */

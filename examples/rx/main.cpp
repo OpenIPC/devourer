@@ -303,6 +303,18 @@ static const int g_thermal_warn_delta = []() -> int {
   return e ? std::atoi(e) : 15;
 }();
 
+/* DEVOURER_RX_BUSY_MS=N: the vendor-neutral busy-airtime window
+ * (IRadio::ArmChannelBusy / GetChannelBusy) at a fixed cadence, one `rx.busy`
+ * event per window. Arms, sleeps the window, reads — the survey executor's
+ * dwell shape (src/sensing/), so this is what "polling at dwell cadence" costs
+ * a receiver. Works on every backend that reports busy_airtime_ok; elsewhere
+ * the event carries valid=false. 0 = disabled. Unlike DEVOURER_RX_ENERGY_MS
+ * this needs no IRtlRadio. */
+static const uint32_t g_rx_busy_ms = []() -> uint32_t {
+  const char *e = std::getenv("DEVOURER_RX_BUSY_MS");
+  return e ? static_cast<uint32_t>(std::strtoul(e, nullptr, 0)) : 0u;
+}();
+
 /* DEVOURER_RX_DUMP_CSI=hex,hex,... (or "0x1a,0x20,0x40"): F2 research
  * spike. On each canonical-SA RX frame (first N frames), read BB
  * dbgport 0x8FC at each selector and emit a csi.hit event
@@ -1555,6 +1567,43 @@ int main(int argc, char **argv) {
   }
 #endif /* DEVOURER_HAVE_JAGUAR1 */
 
+  /* Vendor-neutral busy-airtime poller: arm, wait the window, read, emit. */
+  std::atomic<bool> busy_emitter_stop{false};
+  std::thread busy_emitter;
+  if (g_rx_busy_ms > 0) {
+    logger->info("DEVOURER_RX_BUSY_MS={} — starting channel-busy poller",
+                 g_rx_busy_ms);
+    IRadio *dev = rtlDevice;
+    busy_emitter = std::thread([&busy_emitter_stop, dev]() {
+      /* First window after bring-up settles, like the other pollers. */
+      for (uint32_t s = 0; s < 1000 && !busy_emitter_stop.load(); s += 50)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      while (!busy_emitter_stop.load()) {
+        const uint32_t armed = dev->ArmChannelBusy(g_rx_busy_ms * 1000u);
+        for (uint32_t s = 0; s < g_rx_busy_ms && !busy_emitter_stop.load();
+             s += 50)
+          std::this_thread::sleep_for(
+              std::chrono::milliseconds(std::min<uint32_t>(50, g_rx_busy_ms - s)));
+        if (busy_emitter_stop.load())
+          break;
+        const devourer::ChannelBusy b = dev->GetChannelBusy();
+        devourer::Ev ev(*g_ev, "rx.busy");
+        ev.t().f("armed_us", armed).f("valid", b.valid);
+        if (b.valid_busy)
+          ev.f("busy_pct", b.busy_pct);
+        else
+          ev.f("busy_pct", nullptr);
+        if (b.valid_energy)
+          ev.f("energy_pct", b.energy_pct);
+        else
+          ev.f("energy_pct", nullptr);
+        ev.f("window_us", b.window_us)
+            .f("own_tx", b.own_tx_in_window)
+            .f("spoil", static_cast<int>(b.spoil));
+      }
+    });
+  }
+
   /* Cross-generation thermal telemetry. GetThermalStatus is part of IRadio
    * (Jaguar1/2/3, Kestrel, and RTL8733B); using the base pointer is what makes
    * DEVOURER_THERMAL_POLL_MS work on RTL8812EU and newer backends instead of
@@ -1787,6 +1836,9 @@ int main(int argc, char **argv) {
     qd_emitter_stop = true;
 #endif
     energy_emitter_stop = true;
+    busy_emitter_stop = true;
+    if (busy_emitter.joinable())
+      busy_emitter.join();
     if (therm_emitter.joinable())
       therm_emitter.join();
 #if defined(DEVOURER_HAVE_JAGUAR1)

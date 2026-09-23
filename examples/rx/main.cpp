@@ -105,7 +105,9 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0xb733, /* RTL8733BU combo module Wi-Fi function (vendor ID table) */
 };
 
-static int g_rx_count = 0;
+/* Written on the RX callback thread, read by the main thread and the pollers
+ * as the "bring-up produced a frame" signal, so atomic. */
+static std::atomic<int> g_rx_count{0};
 #if defined(DEVOURER_HAVE_JAGUAR1)
 static RtlJaguarDevice *g_rtl_device = nullptr;
 #endif
@@ -1039,7 +1041,7 @@ static void packetProcessor(const Packet &packet) {
 
   if (g_rx_count <= 10 || g_rx_count % 100 == 0) {
     devourer::Ev(*g_ev, "rx.pkt")
-        .f("n", g_rx_count)
+        .f("n", g_rx_count.load())
         .f("len", packet.Data.size())
         .f("rate", packet.RxAtrib.data_rate)
         .f("rssi", packet.RxAtrib.rssi[0]);
@@ -1114,7 +1116,7 @@ static void packetProcessor(const Packet &packet) {
          * RX decoded LDPC). */
         devourer::Ev(*g_ev, "rx.txhit")
             .f("hits", hits)
-            .f("total_rx", g_rx_count)
+            .f("total_rx", g_rx_count.load())
             .f("len", packet.Data.size())
             .f("seq", packet.RxAtrib.seq_num)
             .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
@@ -1295,6 +1297,15 @@ int main(int argc, char **argv) {
   /* SIGINT/SIGTERM -> clean shutdown (Stop() below). Without this the harness's
    * `timeout` SIGTERM killed us mid-RX, leaving the chip's USB core hung. */
   install_devourer_signal_handlers();
+  /* Knob combinations that cannot work are refused here, before any thread
+   * exists: a later return would destroy a joinable poller thread. */
+  if (g_rx_busy_ms > 0 &&
+      (!g_rx_sweep.empty() || std::getenv("DEVOURER_HOP_CHANNELS"))) {
+    logger->error("DEVOURER_RX_BUSY_MS: refused with DEVOURER_RX_SWEEP / "
+                  "DEVOURER_HOP_CHANNELS — those retune from the main thread, "
+                  "and the busy window is a single-control-thread contract");
+    return 2;
+  }
 
   /* Owns the teardown order (device -> interface -> handle -> context; see
    * DeviceSession.h). Declared before every thread below, so the threads are
@@ -1586,34 +1597,39 @@ int main(int argc, char **argv) {
    * a frame, like the sweep does, instead of racing Init(). */
   std::atomic<bool> busy_emitter_stop{false};
   std::thread busy_emitter;
-  if (g_rx_busy_ms > 0 &&
-      (!g_rx_sweep.empty() || std::getenv("DEVOURER_HOP_CHANNELS"))) {
-    logger->error("DEVOURER_RX_BUSY_MS: refused with DEVOURER_RX_SWEEP / "
-                  "DEVOURER_HOP_CHANNELS — those retune from the main thread, "
-                  "and the busy window is a single-control-thread contract");
-    return 2;
-  }
   if (g_rx_busy_ms > 0) {
     logger->info("DEVOURER_RX_BUSY_MS={} — starting channel-busy poller",
                  g_rx_busy_ms);
     IRadio *dev = rtlDevice;
-    busy_emitter = std::thread([&busy_emitter_stop, dev]() {
-      /* Bring-up runs on the main thread; the first RX frame is the proof it
-       * finished. A silent channel falls through after 10 s. */
+    busy_emitter = std::thread([&busy_emitter_stop, dev, logger]() {
+      /* Bring-up runs on the main thread. The first RX frame is the proof it
+       * finished; on a silent channel the fallback is the window's own gate -
+       * every backend refuses ArmChannelBusy (returns 0) until it is brought
+       * up, so an arm that is refused is retried, never read. */
       for (uint32_t s = 0;
-           s < 10000 && !busy_emitter_stop.load() && g_rx_count == 0; s += 50)
+           s < 10000 && !busy_emitter_stop.load() && g_rx_count.load() == 0;
+           s += 50)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      bool waited_on_gate = false;
       while (!busy_emitter_stop.load()) {
         const uint32_t armed = dev->ArmChannelBusy(g_rx_busy_ms * 1000u);
+        if (armed == 0) {
+          if (!waited_on_gate)
+            logger->info("DEVOURER_RX_BUSY_MS: arm refused (not brought up "
+                         "yet, or no sensor) — retrying until accepted");
+          waited_on_gate = true;
+          for (uint32_t s = 0; s < 500 && !busy_emitter_stop.load(); s += 50)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          continue;
+        }
         const auto until = std::chrono::steady_clock::now() +
                            std::chrono::milliseconds(g_rx_busy_ms);
         while (!busy_emitter_stop.load()) {
-          const auto now = std::chrono::steady_clock::now();
-          if (now >= until)
+          const auto left = until - std::chrono::steady_clock::now();
+          if (left <= std::chrono::steady_clock::duration::zero())
             break;
-          std::this_thread::sleep_for(
-              std::min(until - now, std::chrono::steady_clock::duration(
-                                        std::chrono::milliseconds(50))));
+          const auto step = std::chrono::milliseconds(50);
+          std::this_thread::sleep_for(left < step ? left : step);
         }
         if (busy_emitter_stop.load())
           break;

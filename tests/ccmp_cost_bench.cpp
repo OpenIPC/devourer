@@ -37,6 +37,7 @@ static bool ccm(bool enc, const uint8_t *key, const uint8_t *nonce,
     EVP_EncryptUpdate(c, 0, &l, 0, inlen);
     EVP_EncryptUpdate(c, 0, &l, aad, aadlen);
     ok = EVP_EncryptUpdate(c, out, &l, in, inlen) == 1;
+    EVP_EncryptFinal_ex(c, out + l, &l);
     EVP_CIPHER_CTX_ctrl(c, EVP_CTRL_AEAD_GET_TAG, 8, tag);
   } else {
     EVP_DecryptInit_ex(c, EVP_aes_128_ccm(), 0, 0, 0);

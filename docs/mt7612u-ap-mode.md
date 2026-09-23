@@ -176,10 +176,10 @@ either way. Against this transport that is noise: the MT7612U's own send path
 measured 268 µs per 100-byte frame and 2.4 ms per 1500-byte frame (`txdemo`,
 `DEVOURER_TX_GAP_US=0`, rate-less 6 Mbps frames, 44849 and 4997 submitted in
 12 s), so software CCMP is 0.06 % of the per-frame budget at MTU and under
-1 % even at an MCS7 airtime. A host with AES-NI is the favourable case — an
-ARM ground station without it would be some tens of times slower per frame
-and still under the transport's cost. GTK rekey, not throughput, is what
-hardware keys would buy.
+1 % even at an MCS7 airtime. One host, and a favourable one (AES-NI); an ARM
+ground station without it is unmeasured — run the bench there before
+carrying the percentage over. GTK rekey, not throughput, is what hardware
+keys would buy on this host.
 
 ## Limitations and shortfalls of a userspace AP on MediaTek — and workarounds
 

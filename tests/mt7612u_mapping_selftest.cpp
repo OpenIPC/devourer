@@ -9,6 +9,7 @@
  * translations are pure functions in a header with this test under them
  * rather than inline in the device class. */
 #include "mt7612u/Mt7612uMapping.h"
+#include "mt7612u/Mt7612uRxCorr.h"
 
 #include <cstdio>
 #include <cstring>
@@ -49,6 +50,29 @@ int main() {
          rssi_to_raw(-63) != static_cast<uint8_t>(static_cast<int8_t>(-63)));
   expect("rssi round-trips to dBm",
          static_cast<int>(rssi_to_raw(-63)) - 110 == -63);
+
+  /* --- the packed per-channel RSSI correction: signs survive the word --- */
+  {
+    int8_t off[2] = {0, 0}, lna = 0;
+    /* Real EEPROM values: negative chain offsets and a positive LNA gain. */
+    mt_rx_corr_unpack(mt_rx_corr_pack(-5, -3, 8), off, &lna);
+    expect("rx_corr keeps chain-0 offset sign", off[0] == -5);
+    expect("rx_corr keeps chain-1 offset sign", off[1] == -3);
+    expect("rx_corr keeps lna gain", lna == 8);
+    mt_rx_corr_unpack(mt_rx_corr_pack(127, -128, -1), off, &lna);
+    expect("rx_corr int8 extremes round-trip",
+           off[0] == 127 && off[1] == -128 && lna == -1);
+    /* The zero word - what a device reads before its first tune - corrects
+     * nothing, which is the raw-chip-value behaviour rx.cpp documents. */
+    mt_rx_corr_unpack(0, off, &lna);
+    expect("rx_corr zero word is no correction",
+           off[0] == 0 && off[1] == 0 && lna == 0);
+    /* And the correction rx.cpp applies from it matches the byte-wise form. */
+    const int8_t raw = -60;
+    mt_rx_corr_unpack(mt_rx_corr_pack(-5, -3, 8), off, &lna);
+    expect("rx_corr corrected RSSI = raw + off - lna",
+           (int8_t)(raw + off[0] - lna) == -73);
+  }
 
   /* --- per-chain signal: 2T2R, and rssi[2] is the NOISE FLOOR --- */
   {

@@ -248,7 +248,7 @@ static uint8_t get_5g_rx_gain(struct mt7612u_dev *d, uint8_t chan)
 
 void mt_read_rx_gain(struct mt7612u_dev *d, uint8_t chan, int band)
 {
-	int8_t lna_2g, lna_5g[3];
+	int8_t lna_2g, lna_5g[3], rssi_offset[2], lna_gain;
 	uint16_t rssi_off, v;
 	uint8_t gain, lna = 0;
 
@@ -273,9 +273,9 @@ void mt_read_rx_gain(struct mt7612u_dev *d, uint8_t chan, int band)
 
 	rssi_off = (band == 0) ? mt_ee(d, MT_EE_RSSI_OFFSET_2G_0)
 	                       : mt_ee(d, MT_EE_RSSI_OFFSET_5G_0);
-	d->cal.rssi_offset[0] = field_valid(rssi_off & 0xff)
+	rssi_offset[0] = field_valid(rssi_off & 0xff)
 		? (int8_t)sign_extend_optional(rssi_off & 0xff, 7) : 0;
-	d->cal.rssi_offset[1] = field_valid(rssi_off >> 8)
+	rssi_offset[1] = field_valid(rssi_off >> 8)
 		? (int8_t)sign_extend_optional(rssi_off >> 8, 7) : 0;
 
 	/* mt76x02_get_lna_gain(): which LNA entry applies to this channel. */
@@ -290,8 +290,13 @@ void mt_read_rx_gain(struct mt7612u_dev *d, uint8_t chan, int band)
 		uint16_t c1 = mt_ee(d, MT_EE_NIC_CONF_1);
 		int ext = (band == 0) ? (c1 & MT_EE_NIC_CONF_1_LNA_EXT_2G)
 		                      : (c1 & MT_EE_NIC_CONF_1_LNA_EXT_5G);
-		d->cal.lna_gain = ext ? 0 : (int8_t)sign_extend(lna, 8);
+		lna_gain = ext ? 0 : (int8_t)sign_extend(lna, 8);
 	}
+	/* One store: the RX event thread reads this word per frame, and the
+	 * three values only make sense together (see mt7612u_cal::rx_corr). */
+	d->cal.rx_corr.store(mt_rx_corr_pack(rssi_offset[0], rssi_offset[1],
+	                                     lna_gain),
+	                     std::memory_order_relaxed);
 
 	d->cal.mcu_gain  = (uint32_t)(lna_2g & 0xff);
 	d->cal.mcu_gain |= (uint32_t)(lna_5g[0] & 0xff) << 8;

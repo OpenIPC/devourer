@@ -91,10 +91,18 @@ int mt_rx_parse(struct mt7612u_dev *d, uint8_t *buf, int n,
 	 * the EEPROM (mt76x02_mac_get_rssi); with them at zero these are the
 	 * raw chip values, which is still enough to compare two chains. */
 	info->n_chains = (uint8_t)((d->chainmask & 0xf) > 1 ? 2 : 1);
-	for (int c = 0; c < 4; c++)
-		info->rssi[c] = (int8_t)((int8_t)rxwi[12 + c] +
-		                         (c < 2 ? d->cal.rssi_offset[c] : 0) -
-		                         d->cal.lna_gain);
+	{
+		/* One load of the packed triple: a retune on another thread
+		 * republishes all three at once, so this frame is corrected
+		 * consistently with either the old channel or the new one. */
+		int8_t rssi_offset[2], lna_gain;
+		mt_rx_corr_unpack(d->cal.rx_corr.load(std::memory_order_relaxed),
+		                  rssi_offset, &lna_gain);
+		for (int c = 0; c < 4; c++)
+			info->rssi[c] = (int8_t)((int8_t)rxwi[12 + c] +
+			                         (c < 2 ? rssi_offset[c] : 0) -
+			                         lna_gain);
+	}
 
 	for (int i = 0; i < 4; i++)
 		info->bbp[i] = get_le32(rxwi + 16 + 4 * i);

@@ -81,6 +81,7 @@ struct mt7612u_cal {
 	 * RX hot path does no cross-thread write at all. */
 };
 
+#define MT_SYNC_POOL 4   /* pooled transfers for the sync helpers */
 #define MT_RX_RING  16
 /* 16 slots, not 32: the slots now carry a full aggregate, so this is the
  * difference between 256 KB and 512 KB of ring. Depth is not what buys
@@ -220,6 +221,16 @@ struct mt7612u_dev {
 
 	unsigned io_err;          /* EP0 transfers that exhausted their retries */
 	int      transfers_stranded; /* libusb still owns a cancelled ring */
+	/* libusb_transfer objects for the synchronous helpers (usb.cpp), taken
+	 * from here rather than allocated per call. Allocated in
+	 * mt_dev_state_init(), i.e. before any event thread exists, so the
+	 * thread's first lock of a transfer's mutex is ordered after its
+	 * initialisation by thread creation - a per-call allocation is ordered
+	 * only through the kernel's URB handoff, which ThreadSanitizer cannot
+	 * see and reports. Empty pool = allocate fresh (correct, just noisier). */
+	std::mutex sync_pool_mu;
+	struct libusb_transfer *sync_pool[MT_SYNC_POOL];
+	int      sync_pool_n;
 	uint16_t max_mpdu_rx;     /* from MT_MAX_LEN_CFG at init, less the FCS */
 	uint64_t stats_last_us;   /* previous mt7612u_link_stats() mark */
 	int      ch_time_armed;   /* channel timers configured and zeroed */

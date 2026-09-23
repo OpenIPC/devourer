@@ -166,6 +166,21 @@ key interface is a much larger contract than a feature flag — key lifetime, GT
 vs PTK, rekey, who owns the replay counter — and expensive to undo once callers
 exist.
 
+What the software path costs, measured so the "hardware crypto is faster
+here" assumption has a number to argue with (`tests/ccmp_cost_bench.sh`: the
+harness's `ccm()` call whole — a fresh OpenSSL context per call, AES-128-CCM,
+free — timed in both directions on an i7-6700K, one core): encrypt 0.53 µs
+per 64-byte frame, 1.52 µs per 1500-byte frame, 2.54 µs at 3000 bytes;
+decrypt 0.58 / 1.54 / 2.60 µs — about 650 k frames/s or ~8 Gbit/s at MTU
+either way. Against this transport that is noise: the MT7612U's own send path
+measured 268 µs per 100-byte frame and 2.4 ms per 1500-byte frame (`txdemo`,
+`DEVOURER_TX_GAP_US=0`, rate-less 6 Mbps frames, 44849 and 4997 submitted in
+12 s), so software CCMP is 0.06 % of the per-frame budget at MTU and under
+1 % even at an MCS7 airtime. One host, and a favourable one (AES-NI); an ARM
+ground station without it is unmeasured — run the bench there before
+carrying the percentage over. GTK rekey, not throughput, is what hardware
+keys would buy on this host.
+
 ## Limitations and shortfalls of a userspace AP on MediaTek — and workarounds
 
 1. **Power-save / TIM is the real fight — USB has no pre-TBTT interrupt.**

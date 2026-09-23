@@ -21,6 +21,12 @@
 #   DOCTOR_VERIFY_ARGS rxdemo env for flood verify   (default 8821CU @ 9/1.3)
 #   DOCTOR_CHANNEL     bench channel                 (default 6)
 #   DOCTOR_DUT_VID     DUT vendor id                 (default 0x0bda)
+#   DOCTOR_DUT_PID     DUT product id — required for a non-Realtek VID,
+#                      where the doctor's default PID walk finds nothing
+#                      (e.g. 0x7612 with DOCTOR_DUT_VID=0x0e8d)
+#   DOCTOR_MT7612U_FW_DIR  MediaTek DUT: decompressed mt7662.bin +
+#                      mt7662_rom_patch.bin directory (passed to the doctor,
+#                      which reads no environment)
 #   DOCTOR_SKIP_VBUS=1 no per-rep VBUS cycle — for a DUT on a ROOT port
 #                      (NEVER uhubctl root ports on this rig: a root-port
 #                      cycle once wedged a device past everything but a
@@ -40,6 +46,8 @@ BUS="${4:?usb bus}"; PP="${5:?dotted port path}"; REPS="${6:-3}"
 MOD="${DOCTOR_RTW88_MOD:-rtw88_8812au}"
 CHANNEL="${DOCTOR_CHANNEL:-6}"
 DUT_VID="${DOCTOR_DUT_VID:-0x0bda}"   # e.g. 0x2357 for TP-Link-branded DUTs
+DUT_PID="${DOCTOR_DUT_PID:-}"         # empty = the doctor's Realtek PID walk
+MT_FW="${DOCTOR_MT7612U_FW_DIR:-}"
 FLOOD_ARGS="${DOCTOR_FLOOD_ARGS:-DEVOURER_PID=0x8813 DEVOURER_USB_BUS=4 DEVOURER_USB_PORT=2.3.2}"
 VERIFY_ARGS="${DOCTOR_VERIFY_ARGS:-DEVOURER_PID=0xc811 DEVOURER_USB_BUS=9 DEVOURER_USB_PORT=1.3}"
 
@@ -95,18 +103,31 @@ for i in $(seq 1 "$REPS"); do
     uhubctl -l "$HUB" -p "$HPORT" -a off > /dev/null || { log "uhubctl off failed"; exit 3; }
     sleep 5
     uhubctl -l "$HUB" -p "$HPORT" -a on > /dev/null
-    t0=$SECONDS
-    while [ $((SECONDS - t0)) -lt 20 ]; do
-      [ -e "/sys/bus/usb/devices/$SYSFS/idProduct" ] && break
+    # Wait for the DUT itself, not just any device at the path: a ZeroCD
+    # part (the MT7612U, some Realtek dongles) enumerates first under its
+    # installer-disk PID and only then as the NIC.
+    want="${DUT_PID:+$(printf '%04x' "$DUT_PID")}"
+    t0=$SECONDS; seen=0
+    while [ $((SECONDS - t0)) -lt 30 ]; do
+      if [ -e "/sys/bus/usb/devices/$SYSFS/idProduct" ]; then
+        if [ -z "$want" ] || [ "$(cat "/sys/bus/usb/devices/$SYSFS/idProduct")" = "$want" ]; then
+          seen=1; break
+        fi
+      fi
       sleep 0.5
     done
+    [ "$seen" = 1 ] || { log "FATAL: DUT ${want:+pid $want }did not re-enumerate at $SYSFS within 30 s"; exit 3; }
     sleep 1.5
   fi
 
-  "$DOCTOR" --vid "$DUT_VID" --bus "$BUS" --port "$PP" --channel "$CHANNEL" \
-    --expect-traffic > "$LOG/rep$i.log" 2>&1
+  "$DOCTOR" --vid "$DUT_VID" ${DUT_PID:+--pid "$DUT_PID"} --bus "$BUS" --port "$PP" \
+    ${MT_FW:+--mt7612u-fw-dir "$MT_FW"} \
+    --channel "$CHANNEL" --expect-traffic > "$LOG/rep$i.log" 2>&1
   rc=$?
-  [ "$rc" -gt "$worst" ] && [ "$rc" -le 2 ] && worst=$rc
+  # 0/1/2 are verdicts; anything else is the doctor failing to run (no adapter,
+  # claim failed) and must not be folded into a HEALTHY aggregate.
+  [ "$rc" -le 2 ] || { log "FATAL: doctor rc=$rc on rep $i (not a verdict)"; tail -3 "$LOG/rep$i.log"; exit 3; }
+  [ "$rc" -gt "$worst" ] && worst=$rc
   log "rep $i: $(grep -F '"ev":"doctor.verdict"' "$LOG/rep$i.log" | head -1) (rc=$rc)"
 done
 

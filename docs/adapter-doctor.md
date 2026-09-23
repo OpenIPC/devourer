@@ -67,6 +67,16 @@ would contaminate first-touch), runs a radiation-verified beacon flood,
 and invokes `doctor --expect-traffic`. Exit code is the worst verdict
 across reps.
 
+A MediaTek DUT takes three env knobs the Realtek default does not need:
+`DOCTOR_RTW88_MOD=mt76x2u` (the module to keep away), `DOCTOR_DUT_VID=0x0e8d
+DOCTOR_DUT_PID=0x7612` (the doctor's default PID walk is Realtek-only), and
+`DOCTOR_MT7612U_FW_DIR=<dir>` holding the decompressed `mt7662.bin` +
+`mt7662_rom_patch.bin` (passed to the doctor as `--mt7612u-fw-dir`, since
+the doctor reads no environment). The EFUSE leg reports "not probed" there
+(`IRtlRadio`-only) and the FW leg reports `fw_attempted=0` because the
+backend does not surface `GetFwBootStatus`; the verdict rests on bring-up
+and the RX smoke.
+
 Validated on the bench pair: the healthy unit grades HEALTHY (stable
 0x8129 EFUSE ×4, FW ready, thousands of frames) and the dying unit
 grades FAILING on every cold rep — regardless of which face the

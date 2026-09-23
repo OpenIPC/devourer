@@ -280,6 +280,12 @@ those are the ones listed below.
   degradation predictor — `docs/warm-tx-degradation.md` has delivery scattered
   63–83% with no relation to the meter, and inside one uninterrupted session
   the meter stays pinned while delivery drifts.
+- `DEVOURER_RX_BUSY_MS=N` (rxdemo) — the vendor-neutral busy-airtime window
+  at a fixed cadence: arm, wait N ms, read, one `rx.busy` event per window
+  (`IRadio::ArmChannelBusy`/`GetChannelBusy`, so it runs on the MT7612U where
+  `DEVOURER_RX_ENERGY_MS` cannot). It is the survey executor's dwell shape,
+  which makes it the harness for "does polling at dwell cadence cost the
+  receiver anything".
 - `DEVOURER_LINKHEALTH=1` (rxdemo, needs `DEVOURER_RX_ENERGY_MS=N`) — classify
   the RX sensor tuple via `src/LinkHealth.h`. **EVM, not SNR, is the
   saturation tell**: strong RSSI + poor EVM means back power OFF, which is the

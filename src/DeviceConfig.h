@@ -554,6 +554,15 @@ struct DeviceConfig {
      * device class both stay free of ambient process state; the demos fold the
      * variable in, the way they do for every other knob in this file. */
     std::optional<std::string> firmware_dir;
+    /* env: DEVOURER_MT7612U_PHY_TICK — 0 disables the backend's 1 Hz PHY tick
+     * (MCU channel calibration + temperature calibration + RX gain tracking,
+     * mt7612u_phy_tick()). Measurement control only: without the tick a
+     * receiver under a fast peer collapses to a few frames per 10 s
+     * (docs/mt7612u.md), so the only reason to turn it off is to measure that
+     * arm - the benchmark that says whether some other periodic reader (a
+     * channel-busy poller, say) is disturbing the tick has no meaning without
+     * the no-tick control beside it. Default on. */
+    bool phy_tick = true;
     /* No adapter selector here on purpose. devourer chooses the adapter before
      * a backend exists (DEVOURER_USB_BUS / _PORT / _VID / _PID) and hands the
      * backend an already-claimed handle, so a MediaTek-specific selector would

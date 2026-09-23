@@ -38,6 +38,8 @@
  *   --listen-secs N             RX smoke window (default 8; 0 = skip)
  *   --expect-traffic            operator vouches for on-channel traffic:
  *                               0 frames heard upgrades to FAILING
+ *   --mt7612u-fw-dir DIR        MediaTek DUTs: where mt7662.bin and
+ *                               mt7662_rom_patch.bin live (decompressed)
  *
  * Bench protocol for a definitive verdict on a suspect unit: put it on a
  * uhubctl-switchable hub port, VBUS-cycle, run doctor with a beacon flood on
@@ -90,6 +92,10 @@ struct Args {
   int reads = 4;
   int listen_secs = 8;
   bool expect_traffic = false;
+  /* MediaTek firmware directory (mt7662.bin + mt7662_rom_patch.bin). The
+   * library reads no environment and this tool takes no environment either,
+   * so the one backend whose firmware is not embedded needs it on the CLI. */
+  std::string mt7612u_fw_dir;
 };
 
 bool parse_int(const char *s, int &out) {
@@ -124,6 +130,8 @@ bool parse_args(int argc, char **argv, Args &a) {
       ;
     else if (k == "--expect-traffic")
       a.expect_traffic = true;
+    else if (k == "--mt7612u-fw-dir" && i + 1 < argc)
+      a.mt7612u_fw_dir = argv[++i];
     else {
       std::fprintf(stderr, "devourer [W] unknown/incomplete arg: %s\n",
                    k.c_str());
@@ -226,6 +234,8 @@ int main(int argc, char **argv) {
    * (informational only); enable_with_tx so Jaguar3's InitWrite keeps the RX
    * filters open for the StartRxLoop smoke window. */
   devourer::DeviceConfig cfg;
+  if (!a.mt7612u_fw_dir.empty())
+    cfg.mt7612u.firmware_dir = a.mt7612u_fw_dir;
   cfg.rx.keep_corrupted = true;
   cfg.rx.enable_with_tx = true;
 

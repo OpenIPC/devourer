@@ -105,7 +105,10 @@ probe on kernels 6.15+ (`failed to download firmware`, `error -22`), but
   still builds and still refuses the adapter at `CreateRadio`, by design —
   falling through to the Realtek path would misdetect it as a Jaguar1.
 - `mt7662.bin` + `mt7662_rom_patch.bin`, decompressed, passed with
-  `--mt7612u-fw-dir`. They ship as `.bin.zst` in linux-firmware.
+  `--mt7612u-fw-dir`. They ship as `.bin.zst` in linux-firmware. The same
+  flag exists on `build/doctor`, and `adapter_doctor_cold.sh` takes it as
+  `DOCTOR_MT7612U_FW_DIR` beside `DOCTOR_DUT_VID=0x0e8d DOCTOR_DUT_PID=0x7612
+  DOCTOR_RTW88_MOD=mt76x2u`.
 - `mt76x2u` for the kernel-side cells.
 
 `regress.py` checks the first two before the first cell — each otherwise
@@ -576,6 +579,14 @@ when a wide-bandwidth cell scores zero — the emitter's own channel width comes
 from `DEVOURER_HOP_BW`, not from the `/40` in `DEVOURER_TX_RATE` (that only
 fills the descriptor field), and getting that wrong zeroes a cell for reasons
 that have nothing to do with the DUT.
+
+### `ccmp_cost_bench.sh`: what software CCMP costs per frame
+
+Headless, no device. Builds `tests/ccmp_cost_bench.cpp` and times the exact
+OpenSSL AES-128-CCM call sequence the AP harnesses use, one JSON line per
+frame size. It exists to put a number under the hardware-crypto question
+(`docs/mt7612u-ap-mode.md`); compare it with a transport's per-frame send
+cost, not with another CPU.
 
 ### `mt7612u_tsf_wrap.sh`: the MT7612U TSF read across the low-word wrap
 

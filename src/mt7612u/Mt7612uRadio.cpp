@@ -189,7 +189,11 @@ void Mt7612uRadio::bring_up(SelectedChannel channel) {
     throw std::runtime_error("MT7612U channel set failed");
   _channel = channel;
   apply_config();
-  start_tick();
+  if (_cfg.mt7612u.phy_tick)
+    start_tick();
+  else
+    _logger->warn("MT7612U: 1 Hz PHY tick disabled by config - a receiver "
+                  "under a fast peer will collapse; measurement control only");
 }
 
 /* Every DeviceConfig knob this backend can reach, and a loud line for each one

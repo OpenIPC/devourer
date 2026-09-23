@@ -39,9 +39,19 @@ gap and is reported that way in `window_us`. The mark is stamped at arm rather
 than zeroed — zeroing made the first read after an arm report `window_us=0`,
 i.e. a percentage with no denominator.
 
-Still to measure: that polling at dwell cadence does not disturb
-`phy_tick`'s gain tracking. For
-the latter, reuse the tick's own controlled benchmark — with and without the
-poller, against a steady peer — reading the full figures, control arm included,
-from the `mt7612u_phy_tick` doc comment rather than a copy of its headline
-number.
+Polling at dwell cadence costs the receiver nothing measurable at survey
+load: `rxdemo` with `DEVOURER_RX_BUSY_MS=100` (arm / wait / read, the survey
+executor's dwell shape) against an RTL8822BU airing 1400-byte HT-MCS7 at its
+~700 fps ceiling on ch6, four arms × 2 reps × 30 s — tick+poll 14841 / 17534
+frames, tick alone 17417 / 17531, no tick + poll 18211 / 15097, neither 17810 /
+14201 — all inside the run-to-run spread, with the poller reading ~80% busy
+throughout (317 windows per run, none spoiled). The no-tick control is what
+limits the claim: at ~700 fps it does NOT collapse, so the regime the tick's
+own benchmark is about (a SuperSpeed peer at ~3000 fps, where no tick means 3
+frames in 10 s) was never entered, and whether the poll disturbs gain tracking
+*there* is still unmeasured. Nothing on this bench injects that fast: the
+8822BU's synchronous USB 2.0 send tops out near 700 fps at that size, the
+8812CU at ~670, a Kestrel 8832CU on the same hub at ~330, and the 8821AU
+submits 3500 fps host-side while an independent witness decodes none of it.
+`DEVOURER_MT7612U_PHY_TICK=0` is the control arm's switch; harness shape in
+the `mt7612u_phy_tick` doc comment.

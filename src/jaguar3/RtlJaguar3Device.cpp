@@ -87,6 +87,8 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
     busy_window_reset();
   }
   _channel = channel;
+  _rx_bw_code.store(channel_width_to_bw_code(channel.ChannelWidth),
+                    std::memory_order_relaxed);
   _rx_wanted = true;
   /* No WriteBatchScope here (yet): the pipelined bring-up is validated on
    * the TX path (InitWrite, cold + warm); the RX-only
@@ -368,7 +370,7 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         if (!is_c2h && f.physt && f.drvinfo_size >= 28)
           phy = jaguar3::parse_phy_sts_jgr3(
               data + off + jaguar3::RXDESC_SIZE_8822C, f.drvinfo_size,
-              p.RxAtrib);
+              _rx_bw_code.load(std::memory_order_relaxed), p.RxAtrib);
         /* The RAW descriptor bit, not the parse outcome — that is the meaning
          * the shared field carries on Jaguar1 and the RTL8733B too, and what
          * a caller needs to tell which A-MPDU subframe the report belonged to.
@@ -788,6 +790,8 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
     busy_window_reset();
   }
   _channel = channel;
+  _rx_bw_code.store(channel_width_to_bw_code(channel.ChannelWidth),
+                    std::memory_order_relaxed);
   /* Concurrent TX+RX intent (DEVOURER_TX_WITH_RX / a later StartRxLoop on this
    * bring-up): enable the RX path at the same point in the sequence Init does
    * and keep the RX filters open. Retrofitting RX state after the TX-oriented
@@ -1410,6 +1414,10 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
   _channel = channel;
   _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                       channel.ChannelWidth);
+  /* After the retune: a frame still in flight from the old width resolves
+   * rxsc 0 against the width it was received at. */
+  _rx_bw_code.store(channel_width_to_bw_code(channel.ChannelWidth),
+                    std::memory_order_relaxed);
   /* Runtime TX-power knobs in use: re-fold them against the NEW channel
    * group's efuse refs (8822E bases are per-group). Gated on a knob being
    * active so the legacy no-knob path stays byte-identical. */
@@ -1479,6 +1487,7 @@ void RtlJaguar3Device::FastSetBandwidth(ChannelWidth_t bw) {
   if (in_set(bw) && in_set(_channel.ChannelWidth) &&
       _radioManagement.fast_set_bandwidth(bw)) {
     _channel.ChannelWidth = bw;
+    _rx_bw_code.store(channel_width_to_bw_code(bw), std::memory_order_relaxed);
     return;
   }
   /* Fast path declined (40/80 endpoint, cold radio) — full channel set, under
@@ -1486,6 +1495,7 @@ void RtlJaguar3Device::FastSetBandwidth(ChannelWidth_t bw) {
   _radioManagement.set_channel_bwmode(_channel.Channel, _channel.ChannelOffset,
                                       bw);
   _channel.ChannelWidth = bw;
+  _rx_bw_code.store(channel_width_to_bw_code(bw), std::memory_order_relaxed);
 }
 
 /* Re-program TXAGC from the current knob state (see header). Both TXAGC

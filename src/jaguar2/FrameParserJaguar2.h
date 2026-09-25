@@ -254,13 +254,16 @@ inline bool parse_rx_8822b(const uint8_t *buf, size_t buflen,
  * SNR rxsnr[i] and per-stream EVM rxevm[i] (both s(8,1), i.e. half-dB units, as
  * the vendor stores them). Values are the raw phy-status fields, matching the
  * Jaguar-1 FrameParser convention (rssi = per-path power byte, dBm = value-110).
- * CCK (type0) reports a single path-A pwdb. Requires physts_len >= 28.
+ * CCK (type0) reports a single path-A pwdb. `configured_bw` is the card's
+ * currently tuned bandwidth (0/1/2 = 20/40/80 MHz, the `a.bw` encoding) — see
+ * the rxsc-to-bw comment below. Requires physts_len >= 28.
  * Returns which fields of `a` were filled (PhyStsFill): None on a null/short
  * buffer, Power for the CCK type0 report (path-A power only — EVM/SNR and the
  * CFO tail are NOT in that layout and stay 0), Full for type1. Callers must
  * not fold a field the return value does not claim. */
 inline PhyStsFill parse_phy_sts_jgr2(const uint8_t *physts, uint16_t physts_len,
-                                     bool is_cck, rx_pkt_attrib &a) {
+                                     bool is_cck, uint8_t configured_bw,
+                                     rx_pkt_attrib &a) {
   if (physts == nullptr || physts_len < 28)
     return PhyStsFill::None;
   if (is_cck) {
@@ -279,13 +282,19 @@ inline PhyStsFill parse_phy_sts_jgr2(const uint8_t *physts, uint16_t physts_len,
     /* DW1 byte7 flags: [5]=ldpc [6]=stbc [7]=beamformed (phy_sts_rpt_jgr2_type1).
      * DW1 byte5: l_rxsc[3:0] / ht_rxsc[7:4]; the vendor derives RX bandwidth from
      * the active rxsc (legacy OFDM uses l_rxsc, HT/VHT uses ht_rxsc): rxsc 1-8 =
-     * 20, 9-12 = 40, >=13 = 80 MHz (phydm_get_phy_sts_type1). */
+     * 20, 9-12 = 40, >=13 = 80 MHz (phydm_get_phy_sts_type1). rxsc 0 means the
+     * packet occupied the receiver's full configured bandwidth
+     * (phydm_rxsc_2_bw): an HT/VHT frame on a 40 MHz-tuned card reports 0 and
+     * would otherwise read as 20. Legacy OFDM stays 20 MHz whatever the
+     * tuning. */
     const uint8_t f7 = physts[7];
     a.ldpc = (f7 >> 5) & 1;
     a.stbc = (f7 >> 6) & 1;
     const uint8_t l_rxsc = physts[5] & 0x0f, ht_rxsc = (physts[5] >> 4) & 0x0f;
     const uint8_t rxsc = (a.data_rate >= 4 && a.data_rate <= 11) ? l_rxsc : ht_rxsc;
-    a.bw = rxsc >= 13 ? 2 : rxsc >= 9 ? 1 : 0;
+    a.bw = rxsc == 0 && a.data_rate >= 12
+               ? configured_bw
+               : rxsc >= 13 ? 2 : rxsc >= 9 ? 1 : 0;
   }
   return PhyStsFill::Full;
 }

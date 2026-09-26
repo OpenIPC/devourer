@@ -100,7 +100,7 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | `rx.scrambler` | RX (`DEVOURER_DUMP_SCRAMBLER`) | seed "0xNN", rate, hits, len |
 | `rx.energy` | RX (`DEVOURER_RX_ENERGY_MS` / sweep) | t, [ch], cca_ofdm\|null, cca_cck\|null, fa_ofdm\|null, fa_cck\|null, igi\|null, abs_noise_floor_dbm\|null, clm\|null (CCX busy airtime %), nhm_env\|null (NHM mass above the receiver's own floor, %), [retune_us], frames, frames_ldpc, frames_stbc, crc_err, icv_err, rssi_mean, rssi_max, snr_mean, snr_min, evm_mean — crc/icv nonzero only under `DEVOURER_RX_KEEP_CORRUPTED` (the parser drops failed frames otherwise) |
 | `rx.nhm` | RX | [ch], peak, busy (naive mass above bucket 0 — rails ~100 on a quiet channel), ratio, env (same mass with the IC's own noise-floor cluster removed — the comparable one), dur, hist[12] |
-| `rx.quality` | RX (`DEVOURER_RXQUALITY`) | verdict, frames, rssi_mean_dbm, rssi_max_dbm, snr_mean_db, snr_min_db, evm_db\|null, noise_floor_dbm\|null, abs_noise_floor_dbm\|null, igi |
+| `rx.quality` | RX (`DEVOURER_RXQUALITY`) | verdict, frames, rssi_mean_dbm, rssi_max_dbm, snr_mean_db\|null, snr_min_db\|null, evm_db\|null, noise_floor_dbm\|null, abs_noise_floor_dbm\|null, igi |
 | `adapter.rxpaths` | RX (`DEVOURER_RXQUALITY`) | active_mask "0xNN", n_active, n_chains, frames, rssi_dbm[], snr_db[], evm_db[] — GetActiveRxPaths live per-chain activity (the caps rx_chains companion); snr_db/evm_db only when a chain carried the metric this window (EVM -128 no-stream rail excluded) |
 | `link.health` | RX (`DEVOURER_LINKHEALTH`) | verdict, rssi_dbm, snr_db, evm_db\|null, frames, fa_ofdm\|null, igi\|null, [igi_floor], [igi_ceil], cause, fix |
 | `fw.c2h` | RX, duplex (`DEVOURER_TX_STATUS`) | len, bytes hex |

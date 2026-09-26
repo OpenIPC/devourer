@@ -1957,7 +1957,7 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
                                  0);
   if (build_tx_block(packet, length, usb_frame.data(), 0) == 0)
     return false;
-  int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
+  int rc = _device.bulk_send_data_sync_ep(_device.first_bulk_out_ep(),
                                      usb_frame.data(), usb_frame.size(),
                                      /*timeout_ms=*/20);
   /* bulk_send_sync_ep returns BYTES SUBMITTED, so `rc >= 0` would also cover
@@ -2063,7 +2063,7 @@ size_t RtlJaguar3Device::send_packets(const TxPacketView *pkts, size_t count) {
     SET_TX_DESC_DMA_TXAGG_NUM_8822C(first, plan.frames());
     jaguar3::cal_txdesc_chksum_8822c(first);
 
-    const int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
+    const int rc = _device.bulk_send_data_sync_ep(_device.first_bulk_out_ep(),
                                              urb.data(), urb.size(),
                                              /*timeout_ms=*/50);
     /* Full write or nothing submitted: a truncated URB means the chip got a

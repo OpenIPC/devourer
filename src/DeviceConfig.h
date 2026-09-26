@@ -202,6 +202,24 @@ struct DeviceConfig {
     /* env: DEVOURER_TX_TIMEOUT_MS — TX bulk-OUT transfer timeout (unset =
      * USB_TIMEOUT). */
     std::optional<unsigned> timeout_ms;
+    /* env: DEVOURER_TX_NO_CANCEL_MULTIPKT=1 — USB: a synchronous data send
+     * (ITransport::tx_sync_data) longer than one bulk packet gets no
+     * timeout; a single-packet one keeps its caller's. libusb cancels on
+     * timeout, and a multi-packet bulk-OUT cancelled after the chip took part
+     * of it leaves the endpoint wedged: with several sender threads queued,
+     * the next transfer streams in as the rest of the half-received packet,
+     * the TXDMA misparses it, and every later bulk-OUT is NAKed until re-init
+     * (observed on an 8822EU with 4 sender threads under a carrier-sense-free
+     * jam: `rc=-7 got 1536/4439`, then nothing). The cost: a frame the chip
+     * NAKs indefinitely blocks its sender indefinitely, and Stop() cannot
+     * interrupt it. Firmware download and reserved-page writes are never
+     * affected. Jaguar2, Jaguar3 and Kestrel data sends only. The RTL8733B
+     * keeps every send bounded: its send path holds the device register lock
+     * across the transfer, so an unbounded one would also stall retunes and
+     * Stop(). Jaguar1 sends asynchronously and the MT7612U has its own TX
+     * path, so both ignore it. Default off: every send uses its finite
+     * timeout. See src/BulkOutTimeout.h. */
+    bool no_cancel_multipkt = false;
     /* env: DEVOURER_TX_LEGACY_8812_DESC — 8814A: keep the legacy 8812-style
      * TX-descriptor bits instead of the 8814-native layout. */
     bool legacy_8812_desc = false;

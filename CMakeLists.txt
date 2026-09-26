@@ -1008,6 +1008,16 @@ target_include_directories(NoiseFloorMathSelftest PRIVATE
 
 add_test(NAME noise_floor_math COMMAND NoiseFloorMathSelftest)
 
+# Headless guard for src/BulkOutTimeout.h: under
+# DeviceConfig::Tx::no_cancel_multipkt a multi-packet bulk-OUT data send gets
+# no timeout (a cancel mid-transfer lets another sender's queued bytes splice
+# into the packet and wedges the Realtek TXDMA). Pure, header-only.
+add_executable(BulkOutTimeoutSelftest tests/bulk_out_timeout_selftest.cpp)
+target_include_directories(BulkOutTimeoutSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_test(NAME bulk_out_timeout COMMAND BulkOutTimeoutSelftest)
+
 # Headless guard for the NHM utility reduction (src/NhmEnvMath.h): bucket
 # weights, the rounded ratio helper shared with CLM, and the noise-floor-cluster
 # exclusion that makes nhm_env_ratio usable where the naive ratio rails. Pure

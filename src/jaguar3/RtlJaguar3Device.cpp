@@ -463,8 +463,7 @@ RtlJaguar3Device::~RtlJaguar3Device() {
 void RtlJaguar3Device::coex_runtime_loop() {
   std::vector<uint8_t> buf(16 * 1024);
   uint64_t tick = 0, c2h = 0, rx = 0;
-  int fail_streak = 0;
-  constexpr int kMaxFailStreak = 5;
+  uint64_t fail_streak = 0;
   /* The coex decision + FW heartbeats run on a fixed ~2 s WALL-CLOCK cadence
    * (steady_clock), independent of how fast bulk-IN completes — a busy bulk-IN
    * pipe must not turn the keepalive into an H2C storm that floods the HMEBOX. */
@@ -524,23 +523,30 @@ void RtlJaguar3Device::coex_runtime_loop() {
       _hal.fw_update_wl_phy_info();
       _hal.fw_set_pwr_mode_active();
       _hal.fw_coex_query_bt_info();
-      fail_streak = 0;
     } catch (const std::exception &e) {
       fail_what = e.what()[0] ? e.what() : "exception";
-      ++fail_streak;
     } catch (...) {
       fail_what = "unknown exception";
-      ++fail_streak;
     }
+    /* A failed tick is retried at the next period, never abandoned. On a USB2
+     * host a sustained TX flood starves these control transfers behind the
+     * saturated bulk-OUT pipe for many ticks in a row (bench 8812EU, ch36,
+     * ~380 fps: 5-11 consecutive failures in 30 s; at 50 fps it recovers
+     * after one), and the thread has to be alive when the pipe gets slack to
+     * resume the FW heartbeats. The retry is cheap: a tick stops at its first
+     * throwing read, so it holds _reg_mu for at most one USB_TIMEOUT (500 ms),
+     * which a concurrent retune waits out. Logging is rate-limited instead. */
     if (!fail_what.empty()) {
-      _logger->error("Jaguar3 coex: tick {} failed ({}) — {}/{} consecutive",
-                     tick + 1, fail_what, fail_streak, kMaxFailStreak);
-      if (fail_streak >= kMaxFailStreak) {
-        _logger->error("Jaguar3 coex: giving up after {} consecutive failures "
-                       "— sustained 5 GHz TX will degrade", kMaxFailStreak);
-        break;
-      }
+      ++fail_streak;
+      if (fail_streak <= 3 || fail_streak % 15 == 0)
+        _logger->error("Jaguar3 coex: tick {} failed ({}) — {} consecutive",
+                       tick + 1, fail_what, fail_streak);
       continue;
+    }
+    if (fail_streak > 0) {
+      _logger->info("Jaguar3 coex: tick {} recovered after {} consecutive "
+                    "failures", tick + 1, fail_streak);
+      fail_streak = 0;
     }
     if (++tick <= 3 || tick % 15 == 0)
       _logger->info("Jaguar3 coex: tick {} (bulk-IN reads={}, C2H={})", tick, rx,

@@ -1414,8 +1414,14 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
   _channel = channel;
   _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                       channel.ChannelWidth);
-  /* After the retune: a frame still in flight from the old width resolves
-   * rxsc 0 against the width it was received at. */
+  /* Stored after the retune. rxsc 0 is resolved against the width configured
+   * when the frame is PARSED, as the vendor does (phydm_rxsc_2_bw reads the
+   * current dm->band_width): a frame delivered while the retune runs uses the
+   * old width, but one received before the change and delivered after this
+   * store uses the new one. Nothing per-frame could do better — the RX
+   * descriptor and PHY status carry no receive-time bandwidth the vendor
+   * uses (Jaguar2's type1 rf_mode bits only reach a debug print; Jaguar3's
+   * layout comments them out). */
   _rx_bw_code.store(channel_width_to_bw_code(channel.ChannelWidth),
                     std::memory_order_relaxed);
   /* Runtime TX-power knobs in use: re-fold them against the NEW channel

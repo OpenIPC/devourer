@@ -162,11 +162,6 @@ void PhydmRuntimeJaguar3::cck_pd(const FaStats &fa) {
     return;
   if (_cck_lv_valid && lv == _cck_lv && bwc == _cck_bw && nrx == _cck_nrx)
     return;
-  _cck_lv = lv;
-  _cck_bw = bwc;
-  _cck_nrx = nrx;
-  _cck_lv_valid = true;
-  _cck_fa_ma = 0xffffffff; /* CCK_FA_MA_RESET on level apply */
 
   const uint8_t pd = _cckpd_tbl[bwc][nrx - 1][0][lv];
   const uint8_t cs = _cckpd_tbl[bwc][nrx - 1][1][lv];
@@ -177,6 +172,15 @@ void PhydmRuntimeJaguar3::cck_pd(const FaStats &fa) {
     _device.phy_set_bb_reg(0x1acc, nrx == 1 ? 0x000000ffu : 0x0000ff00u, pd);
     _device.phy_set_bb_reg(0x1ad0, nrx == 1 ? 0x01f00000u : 0x3e000000u, cs);
   }
+  /* Committed only once both writes landed: a write that throws leaves the
+   * cache describing the previous level, so the next tick (the coex loop
+   * retries a failed one) re-issues the level instead of matching a stale
+   * cache and skipping it. */
+  _cck_lv = lv;
+  _cck_bw = bwc;
+  _cck_nrx = nrx;
+  _cck_lv_valid = true;
+  _cck_fa_ma = 0xffffffff; /* CCK_FA_MA_RESET on level apply */
   _logger->info("Jaguar3 cckpd: lv={} pd=0x{:02x} cs=0x{:02x} (fa_ma window)",
                 lv, pd, cs);
 }

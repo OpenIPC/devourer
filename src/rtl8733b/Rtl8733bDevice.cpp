@@ -595,7 +595,7 @@ bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
   const uint8_t bandwidth = (usb_frame[0x14] >> 5) & 0x3;
   const uint8_t short_gi = (usb_frame[0x14] >> 4) & 0x1;
   const uint8_t ldpc = (usb_frame[0x14] >> 7) & 0x1;
-  const int sent = _device.bulk_send_sync_ep(
+  const int sent = _device.bulk_send_data_sync_ep(
       endpoint, usb_frame.data(), usb_frame.size(), 100);
   if (sent != static_cast<int>(usb_frame.size())) {
     _logger->error("RTL8733B TX failed/short on EP 0x{:02x}: {}/{}", endpoint,
@@ -729,7 +729,7 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
       continue;
     }
 
-    const int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
+    const int rc = _device.bulk_send_data_sync_ep(_device.first_bulk_out_ep(),
                                              urb.data(), urb.size(),
                                              /*timeout_ms=*/100);
     /* bulk_send_sync_ep returns BYTES SUBMITTED, so `rc >= 0` also covers a

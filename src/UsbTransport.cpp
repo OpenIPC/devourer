@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "BulkOutTimeout.h"
 #include "Event.h"
 #include "UsbDeviceLock.h"
 #include "UsbOpen.h"
@@ -314,8 +315,10 @@ UsbTransport::UsbTransport(libusb_device_handle *dev_handle, Logger_t logger,
                            libusb_context *ctx,
                            std::shared_ptr<devourer::UsbDeviceLock> usb_lock,
                            bool rx_zerocopy, RxMode rx_mode, int pool_spare,
-                           int ring_ms, PoolExhaust pool_exhaust)
-    : _dev_handle{dev_handle}, _ctx{ctx}, _logger{std::move(logger)},
+                           int ring_ms, PoolExhaust pool_exhaust,
+                           bool tx_no_cancel_multipkt)
+    : _tx_no_cancel_multipkt{tx_no_cancel_multipkt}, _dev_handle{dev_handle},
+      _ctx{ctx}, _logger{std::move(logger)},
       _rx_zerocopy{rx_zerocopy}, _rx_mode{rx_mode}, _pool_spare{pool_spare},
       _ring_ms{ring_ms}, _pool_exhaust{pool_exhaust},
       _usb_lock{std::move(usb_lock)} {
@@ -1088,6 +1091,11 @@ void UsbTransport::discover_endpoints() {
 
       if (is_bulk && !(endPointAddr & LIBUSB_ENDPOINT_IN)) {
         _info.bulk_out_eps.push_back(endPointAddr);
+        /* Smallest bulk-OUT packet size: what tx_sync_data's never-cancel
+         * rule (src/BulkOutTimeout.h) measures a transfer against. */
+        const unsigned mps = endpoint->wMaxPacketSize & 0x7ff;
+        if (mps && (_bulk_out_mps == 0 || mps < _bulk_out_mps))
+          _bulk_out_mps = mps;
       }
       /* First bulk IN endpoint wins. 8812AU/8814AU expose 0x81; 8821AU's
        * descriptor offers a different IN endpoint, so libusb's
@@ -1401,6 +1409,14 @@ int UsbTransport::tx_sync(uint8_t ep, uint8_t *packet, size_t length,
   }
   _logger->info("bulk_send EP {} OK {} bytes", (int)ep, actual);
   return actual;
+}
+
+int UsbTransport::tx_sync_data(uint8_t ep, uint8_t *packet, size_t length,
+                               int timeout_ms) {
+  if (_tx_no_cancel_multipkt)
+    timeout_ms = devourer::bulk_out_timeout_ms(length, _bulk_out_mps,
+                                               timeout_ms);
+  return tx_sync(ep, packet, length, timeout_ms);
 }
 
 TxStats UsbTransport::tx_stats() const {

@@ -1142,7 +1142,7 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
                                               _tx_seq++ & 0xfff, wd_len, txcnt);
   if (is_data && _tx_data_ep)
     ep = _tx_data_ep;
-  int rc = _device.bulk_send_sync_ep(ep, buf.data(),
+  int rc = _device.bulk_send_data_sync_ep(ep, buf.data(),
                                      static_cast<int>(buf.size()), 1000);
   if (rc < 0 || static_cast<size_t>(rc) != buf.size()) {
     _logger->error("Kestrel: send_packet bulk-OUT ep 0x{:02x} failed (rc={}, "

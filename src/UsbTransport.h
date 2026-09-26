@@ -36,7 +36,8 @@ public:
                std::shared_ptr<devourer::UsbDeviceLock> usb_lock = nullptr,
                bool rx_zerocopy = true, RxMode rx_mode = RxMode::Async,
                int pool_spare = 0, int ring_ms = 0,
-               PoolExhaust pool_exhaust = PoolExhaust::Backpressure);
+               PoolExhaust pool_exhaust = PoolExhaust::Backpressure,
+               bool tx_no_cancel_multipkt = false);
   ~UsbTransport() override;
 
   bool is_usb() const override { return true; }
@@ -106,6 +107,8 @@ public:
   bool tx_async(uint8_t ep, uint8_t *buf, size_t len,
                 unsigned timeout_ms) override;
   int tx_sync(uint8_t ep, uint8_t *buf, size_t len, int timeout_ms) override;
+  int tx_sync_data(uint8_t ep, uint8_t *buf, size_t len,
+                   int timeout_ms) override;
   void rx_loop(int buf_size, int n_urbs,
                const std::function<void(const uint8_t *, int)> &on_data,
                const std::function<bool()> &should_stop) override;
@@ -205,6 +208,11 @@ private:
    * issued; per instance, so two adapters in one process do not
    * cross-attribute their InitTimer stage counts. */
   std::atomic<uint64_t> _ctrl_xfers{0};
+  bool _tx_no_cancel_multipkt = false; /* DeviceConfig::Tx; tx_sync_data only */
+  /* Smallest bulk-OUT wMaxPacketSize, from discover_endpoints: what
+   * tx_sync_data's never-cancel rule measures a transfer against
+   * (src/BulkOutTimeout.h). 0 = unknown. */
+  unsigned _bulk_out_mps = 0;
   void discover_endpoints(); /* was InitDvObj */
   const char *speed_str() const;
   static void transfer_callback(struct libusb_transfer *transfer);

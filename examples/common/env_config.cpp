@@ -96,6 +96,7 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.tx.ep = static_cast<uint8_t>(v);
   if (env_long("DEVOURER_TX_TIMEOUT_MS", &v))
     cfg.tx.timeout_ms = static_cast<unsigned>(v);
+  cfg.tx.no_cancel_multipkt = env_flag("DEVOURER_TX_NO_CANCEL_MULTIPKT");
   cfg.tx.legacy_8812_desc = env_flag("DEVOURER_TX_LEGACY_8812_DESC");
   if (env_long("DEVOURER_TX_PWR", &v))
     cfg.tx.power_index = static_cast<int>(v & 0x3f);

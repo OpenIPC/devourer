@@ -144,6 +144,13 @@ public:
                         int timeout_ms) {
     return _transport->tx_sync(ep, packet, length, timeout_ms);
   }
+  /* bulk_send_sync_ep for a data frame (ITransport::tx_sync_data): the
+   * send path DeviceConfig::Tx::no_cancel_multipkt applies to. Firmware
+   * download and reserved-page writes stay on bulk_send_sync_ep. */
+  int bulk_send_data_sync_ep(uint8_t ep, uint8_t *packet, size_t length,
+                             int timeout_ms) {
+    return _transport->tx_sync_data(ep, packet, length, timeout_ms);
+  }
   void bulk_clear_halt(uint8_t ep) { _transport->clear_halt(ep); }
 
   /* Stop TX and wait out everything already submitted (ITransport::

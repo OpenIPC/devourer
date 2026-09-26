@@ -454,6 +454,8 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   }
   _channel = channel;
   bring_up(channel);
+  _rx_bw_code.store(channel_width_to_bw_code(channel.ChannelWidth),
+                    std::memory_order_relaxed);
 
   /* DEVOURER_BF_ARM_BFEE=aa:bb:cc:dd:ee:ff — beamforming self-sounding
    * (beamformee side), Jaguar-2 variant. Arms the hardware CSI responder to
@@ -638,7 +640,8 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         if (!is_c2h && f.physt && f.drvinfo_size >= 28)
           phy = jaguar2::parse_phy_sts_jgr2(
               data + off + jaguar2::RXDESC_SIZE_8822B, f.drvinfo_size,
-              f.rx_rate <= 3, p.RxAtrib);
+              f.rx_rate <= 3, _rx_bw_code.load(std::memory_order_relaxed),
+              p.RxAtrib);
         /* The RAW descriptor bit, matching the field's meaning on Jaguar1 /
          * Jaguar3 / RTL8733B; `phy` says which fields are safe to fold. */
         p.RxAtrib.physt = f.physt;
@@ -696,6 +699,8 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
    * efuse/table-calibrated TXAGC; DEVOURER_TX_PWR=0xNN forces a flat reference
    * (SDR-visibility debug knob). */
   bring_up(channel);
+  _rx_bw_code.store(channel_width_to_bw_code(channel.ChannelWidth),
+                    std::memory_order_relaxed);
   /* DEVOURER_TX_PWR=0xNN forces a flat per-rate TXAGC reference (SDR-visibility
    * debug knob) over the efuse-calibrated level bring_up applied — routed
    * through the runtime flat-override knob so it composes with the offset and
@@ -922,6 +927,16 @@ void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
   _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel),
                       static_cast<uint8_t>(channel.ChannelWidth), _rfe,
                       channel.ChannelOffset);
+  /* Stored after the retune. rxsc 0 is resolved against the width configured
+   * when the frame is PARSED, as the vendor does (phydm_rxsc_2_bw reads the
+   * current dm->band_width): a frame delivered while the retune runs uses the
+   * old width, but one received before the change and delivered after this
+   * store uses the new one. Nothing per-frame could do better — the RX
+   * descriptor and PHY status carry no receive-time bandwidth the vendor
+   * uses (Jaguar2's type1 rf_mode bits only reach a debug print; Jaguar3's
+   * layout comments them out). */
+  _rx_bw_code.store(channel_width_to_bw_code(channel.ChannelWidth),
+                    std::memory_order_relaxed);
   /* Runtime TX-power knobs in use: re-fold them against the NEW channel's
    * efuse group so the offset stays relative to the calibrated table (TXAGC
    * registers are not per-channel — a cross-group move would otherwise keep
@@ -978,6 +993,8 @@ void RtlJaguar2Device::FastSetBandwidth(ChannelWidth_t bw) {
     busy_window_note_retune();
     if (_hal.fast_set_bandwidth(static_cast<uint8_t>(bw))) {
       _channel.ChannelWidth = bw;
+      _rx_bw_code.store(channel_width_to_bw_code(bw),
+                        std::memory_order_relaxed);
       return;
     }
   }

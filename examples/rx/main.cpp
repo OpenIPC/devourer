@@ -1822,9 +1822,11 @@ int main(int argc, char **argv) {
           ev.f("verdict", q.label)
               .f("frames", q.frames)
               .f("rssi_mean_dbm", q.rssi_mean_dbm)
-              .f("rssi_max_dbm", q.rssi_max_dbm)
-              .f("snr_mean_db", q.snr_mean_db)
-              .f("snr_min_db", q.snr_min_db);
+              .f("rssi_max_dbm", q.rssi_max_dbm);
+          if (q.snr_valid)
+            ev.f("snr_mean_db", q.snr_mean_db).f("snr_min_db", q.snr_min_db);
+          else
+            ev.f("snr_mean_db", nullptr).f("snr_min_db", nullptr);
           if (q.evm_valid)
             ev.f("evm_db", q.evm_mean_db);
           else

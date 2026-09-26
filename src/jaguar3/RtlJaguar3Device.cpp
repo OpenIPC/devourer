@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -461,6 +463,8 @@ RtlJaguar3Device::~RtlJaguar3Device() {
 void RtlJaguar3Device::coex_runtime_loop() {
   std::vector<uint8_t> buf(16 * 1024);
   uint64_t tick = 0, c2h = 0, rx = 0;
+  int fail_streak = 0;
+  constexpr int kMaxFailStreak = 5;
   /* The coex decision + FW heartbeats run on a fixed ~2 s WALL-CLOCK cadence
    * (steady_clock), independent of how fast bulk-IN completes — a busy bulk-IN
    * pipe must not turn the keepalive into an H2C storm that floods the HMEBOX. */
@@ -504,6 +508,7 @@ void RtlJaguar3Device::coex_runtime_loop() {
     if (std::chrono::steady_clock::now() < next_tick)
       continue;
     next_tick += period;
+    std::string fail_what; /* copied: e.what() dies with the exception */
     try {
       std::lock_guard<std::mutex> lk(_reg_mu);
       _hal.coex_run_5g();
@@ -519,7 +524,24 @@ void RtlJaguar3Device::coex_runtime_loop() {
       _hal.fw_update_wl_phy_info();
       _hal.fw_set_pwr_mode_active();
       _hal.fw_coex_query_bt_info();
-    } catch (...) { break; }
+      fail_streak = 0;
+    } catch (const std::exception &e) {
+      fail_what = e.what()[0] ? e.what() : "exception";
+      ++fail_streak;
+    } catch (...) {
+      fail_what = "unknown exception";
+      ++fail_streak;
+    }
+    if (!fail_what.empty()) {
+      _logger->error("Jaguar3 coex: tick {} failed ({}) — {}/{} consecutive",
+                     tick + 1, fail_what, fail_streak, kMaxFailStreak);
+      if (fail_streak >= kMaxFailStreak) {
+        _logger->error("Jaguar3 coex: giving up after {} consecutive failures "
+                       "— sustained 5 GHz TX will degrade", kMaxFailStreak);
+        break;
+      }
+      continue;
+    }
     if (++tick <= 3 || tick % 15 == 0)
       _logger->info("Jaguar3 coex: tick {} (bulk-IN reads={}, C2H={})", tick, rx,
                     c2h);

@@ -295,6 +295,38 @@ void mt7612u_clear_ack_responder(struct mt7612u_dev *dev);
 int  mt7612u_set_retry_limit(struct mt7612u_dev *dev, int limit);
 
 /*
+ * Infrastructure-station identity: this adapter is `own`, the AP it has
+ * joined is `bssid`. Backs IRadio::SetStationIdentity.
+ *
+ * On this part the job is almost entirely refusal, and that is a measured
+ * result rather than a shortcut - docs/mt7612u-station-identity.md:
+ *
+ *   - It does NOT write MT_MAC_ADDR; it requires `own` to already BE the port
+ *     identity and fails if it is not. The auto-response engine matches
+ *     address 1 against that register, so moving it stops the station being
+ *     acknowledged; under the MANAGED receive filter it also stops the
+ *     station receiving at all. This is why a station must not be armed with
+ *     mt7612u_set_ack_responder(bssid): that call retargets the very register
+ *     a station needs left alone.
+ *   - It does NOT write MT_MAC_BSSID or the APC slot table. MT_MAC_BSSID
+ *     programmed wrong, and the AP's BSSID in the station's slot, receive
+ *     what nothing programmed receives.
+ *     The BSSID is recorded for the host (it is addr3 on every frame a station
+ *     sends) and retrievable with mt7612u_station_bssid().
+ *   - It verifies MT_AUTO_RSP_EN, since the measured auto-ACK depends on it.
+ *
+ * Returns 0 when armed, -1 when refused - including when something else (a
+ * beacon, an ACK responder) owns the port identity. A beacon or ACK responder
+ * armed LATER that moves the port identity drops the station arm with a
+ * warning; re-arm once it has been given back.
+ */
+int  mt7612u_set_station_identity(struct mt7612u_dev *dev,
+                                  const uint8_t own[6], const uint8_t bssid[6]);
+void mt7612u_clear_station_identity(struct mt7612u_dev *dev);
+/* The BSSID last armed; -1 if no station identity is armed. */
+int  mt7612u_station_bssid(struct mt7612u_dev *dev, uint8_t out[6]);
+
+/*
  * Hardware beacon, from the MAC's reserved page.
  *
  * mt7612u_beacon_start() loads the beacon and arms the TBTT timer; the MAC

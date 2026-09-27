@@ -28,6 +28,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
+#include "StationIdentity.h"
 #include "regs.h"
 #include "Mt7612uRxCorr.h"
 #include "include/mt7612u/mt7612u.h"
@@ -253,6 +254,13 @@ struct mt7612u_dev {
 	 * caller had already armed an ACK responder, because then the identity is
 	 * theirs and restoring would silently disarm it. */
 	int      beacon_took_identity;
+
+	/* Station identity (src/mt7612u/station.cpp). The BSSID is RECORDED,
+	 * not programmed: in the arms measured the hardware BSSID registers made
+	 * no difference to what a managed station receives, and MT_MAC_BSSID
+	 * already has two owners. The host still needs the value - it is addr3
+	 * on every frame a station transmits. docs/mt7612u-station-identity.md */
+	struct mt7612u_sta_state sta;
 	/* The addr2 AND addr3 mt7612u_beacon_start() programmed, so an in-place
 	 * update can refuse a beacon that would change either. Both, because they
 	 * land in different registers: addr2 in MT_MAC_ADDR and the MBSS base,
@@ -302,6 +310,16 @@ void     mt_wr(struct mt7612u_dev *d, uint32_t addr, uint32_t val);
 /* Returns -1 without writing when the read half fails. */
 int      mt_rmw(struct mt7612u_dev *d, uint32_t addr, uint32_t mask, uint32_t val);
 int      mt_wr_chk(struct mt7612u_dev *d, uint32_t addr, uint32_t val);
+/* Re-check a station arm against what MT_MAC_ADDR holds after a write to it:
+ * drop it on a verified move, keep it (and say so) when the register cannot
+ * be read, and with `allow_restore` re-arm one this operation dropped once
+ * the identity is back. src/mt7612u/station.cpp. */
+void     mt7612u_station_identity_check(struct mt7612u_dev *d, const char *who,
+                                        int allow_restore);
+/* mt7612u_set_ack_responder() naming its caller in that announcement - the
+ * beacon path takes MT_MAC_ADDR through here too. src/mt7612u/caps.cpp. */
+int      mt7612u_set_ack_responder_as(struct mt7612u_dev *d,
+                                      const uint8_t mac[6], const char *who);
 /* Register-I/O failure accumulator; see the comment above mt_io_clear(). */
 void     mt_io_clear(struct mt7612u_dev *d);
 /* Restore a previously sampled accumulator; see the note in usb.c. */

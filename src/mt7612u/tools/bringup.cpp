@@ -4178,6 +4178,1192 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
 	return 0;
 }
 
+/* ---------------------------------------------------------------------------
+ * Station-identity gates: `sta`, `staack`, `staid`, `norsp`, `bssen`.
+ * docs/mt7612u-station-identity.md is the record they produced; the harnesses
+ * are tests/mt7612u_sta_identity.sh and tests/mt7612u_sta_autoack.sh (the
+ * uplink half is gate_txs, driven by tests/mt7612u_sta_uplink.sh).
+ */
+
+/* ---------------------------------------------------------------- gate_sta
+ *
+ * Does programming the joined BSSID anywhere - MT_MAC_BSSID or the
+ * MT_MAC_APC_BSSID slot table - change what a MANAGED STATION receives, and
+ * is a wrong value silent, harmless, or fatal? Six arms; every write is read
+ * back after mt_mac_start(), every other slot is checked empty, and an arm
+ * whose state does not read back as written is marked UNVERIFIED and makes
+ * the gate INCONCLUSIVE (rc 2) - as does an all-zero to_us column, which
+ * would mean the table measured broadcast reception only.
+ *
+ * The station's slot is sta_station_slot() - slot 0 on a factory address, so
+ * arms C and D write the same slot there. Arms B, E and F move MT_MAC_BSSID,
+ * which mt76's station configuration never does; they ask whether a wrong
+ * base matters, not what mt76 would program.
+ *
+ * The receive filter is what makes this a question at all. The managed value
+ * mt_mac_start() programs, 0x00015f97, has bit 2 (PROMISC) SET, and in mt76
+ * bit 2 is the one mapped to FIF_OTHER_BSS (init.cpp describes that value as
+ * dropping other-BSS frames). Bit 3 (OTHER_BSS) is clear. Do not reason about
+ * this register from one bit: the gate prints the full value per arm for the
+ * reader, and flags an arm whose PROMISC drop bit is clear (the monitor
+ * filter).
+ *
+ * The AP-side finding (docs/mt7612u-ap-mode.md: a wrong APC slot "beacons
+ * perfectly, acknowledges nobody") is about acknowledgement, not reception,
+ * and does not transfer to a station's receive path.
+ *
+ * NO ARM TOUCHES MT_MAC_ADDR. The auto-response engine matches address 1
+ * against it, and moving it is what breaks a station
+ * (docs/mt7612u-station-identity.md).
+ *
+ * WHAT THIS GATE CANNOT SEE. It counts RX only. Whether the MAC auto-ACKed is
+ * a property of what the transmitter observed, and this process cannot ask -
+ * tests/mt7612u_sta_autoack.sh asks the transmitter. A healthy RX arm is not
+ * evidence about ACKing.
+ *
+ *   bringup sta <chan> <secs-per-arm> <ap-bssid>
+ */
+struct sta_rx_count {
+	std::atomic<unsigned long> total{0};     /* every frame off the ring */
+	std::atomic<unsigned long> from_bss{0};  /* addr2 == the AP          */
+	std::atomic<unsigned long> to_us{0};     /* addr1 == our own MAC     */
+	std::atomic<unsigned long> to_us_data{0};
+	std::atomic<unsigned long> beacons{0};
+	uint8_t bssid[6];
+	uint8_t own[6];
+};
+
+static void sta_rx_cb(void *user, const void *frame, size_t len,
+                      const struct mt7612u_rx_info *info)
+{
+	struct sta_rx_count *c = (struct sta_rx_count *)user;
+	const uint8_t *f = (const uint8_t *)frame;
+
+	(void)info;
+	c->total.fetch_add(1, std::memory_order_relaxed);
+	if (len < 24) return;
+
+	/* addr1 at 4, addr2 at 10, addr3 at 16 - true for every non-4-address
+	 * frame, which is all an infrastructure station ever sees. */
+	if (memcmp(f + 10, c->bssid, 6) == 0)
+		c->from_bss.fetch_add(1, std::memory_order_relaxed);
+	if (memcmp(f + 4, c->own, 6) == 0) {
+		c->to_us.fetch_add(1, std::memory_order_relaxed);
+		if ((f[0] & 0x0c) == 0x08)
+			c->to_us_data.fetch_add(1, std::memory_order_relaxed);
+	}
+	if (f[0] == 0x80 && memcmp(f + 16, c->bssid, 6) == 0)
+		c->beacons.fetch_add(1, std::memory_order_relaxed);
+}
+
+/*
+ * The APC slot a STATION's BSSID lives in, by mt76's rule - which keys the
+ * slot on the station's OWN address, not on the BSSID:
+ *
+ *   mt76x02_add_interface(): idx = 0, or 1 + (((macaddr[0] ^ vif->addr[0])
+ *     >> 2) & 7) when vif->addr is locally administered; a STATION then gets
+ *     idx += 8 ("bssidx 8-15 for client mode");
+ *   mt76x02_bss_info_changed() -> mt76x02_mac_set_bssid(mvif->idx, bssid),
+ *     which writes APC slot (idx & 7).
+ *
+ * `macaddr` there is the MBSS base, which mt76x02_mac_setaddr() keeps equal to
+ * the station's own address - mt76's station configuration never moves it.
+ * So the slot is computed against the base init leaves (the station's own
+ * address), and arms that reprogram MT_MAC_BSSID are, by construction, not an
+ * mt76 station configuration. A station on a factory (globally administered)
+ * address - this tree's case - is slot 0 whatever the base holds. The AP-side
+ * rule in beacon.cpp keys on the AP's own address, which for an AP is the
+ * BSSID; applying that rule to a station's BSSID picks the wrong slot.
+ */
+static int sta_station_slot(const uint8_t *base, const uint8_t *own)
+{
+	int idx = 0;
+
+	if (own[0] & 0x02)
+		idx = 1 + (((base[0] ^ own[0]) >> 2) & 7);
+	return (idx + 8) & 7;
+}
+
+/* Local copies: beacon.cpp's equivalents are static to that file. */
+static int sta_set_bss_base(struct mt7612u_dev *d, const uint8_t *a)
+{
+	const uint32_t dw0 = (uint32_t)a[0] | ((uint32_t)a[1] << 8) |
+	                     ((uint32_t)a[2] << 16) | ((uint32_t)a[3] << 24);
+	const uint32_t dw1 = (uint32_t)a[4] | ((uint32_t)a[5] << 8);
+
+	if (mt_wr_chk(d, MT_MAC_BSSID_DW0, dw0))
+		return -1;
+	return mt_rmw(d, MT_MAC_BSSID_DW1, MT_MAC_BSSID_DW1_ADDR, dw1);
+}
+
+/* Read a slot back into `out`. Without the read-back an arm could be writing
+ * a slot the hardware never consults, and the table would look identical
+ * either way. */
+static int sta_read_apc(struct mt7612u_dev *d, int idx, uint8_t *out)
+{
+	uint32_t lo = 0, hi = 0;
+
+	if (mt_rr_chk(d, MT_MAC_APC_BSSID_L(idx), &lo) ||
+	    mt_rr_chk(d, MT_MAC_APC_BSSID_H(idx), &hi))
+		return -1;
+	out[0] = (uint8_t)(lo & 0xff);
+	out[1] = (uint8_t)((lo >> 8) & 0xff);
+	out[2] = (uint8_t)((lo >> 16) & 0xff);
+	out[3] = (uint8_t)((lo >> 24) & 0xff);
+	out[4] = (uint8_t)(hi & 0xff);
+	out[5] = (uint8_t)((hi >> 8) & 0xff);
+	return 0;
+}
+
+/* The slot high register's BIT(16) is MT_MAC_APC_BSSID0_H_EN upstream in mt76
+ * (defined, never written there); this tree does not define it and gate_sta
+ * does not set it. If a per-slot enable is real on this part, a "slot
+ * programmed" arm may have written a slot the engine was not consulting,
+ * which would make a null result here much weaker than it appears. This gate
+ * reports the bit; gate_bssen sets it and measures. Returns -1 on a failed
+ * read. */
+static int sta_apc_high_raw(struct mt7612u_dev *d, int idx, uint32_t *hi)
+{
+	return mt_rr_chk(d, MT_MAC_APC_BSSID_H(idx), hi) ? -1 : 0;
+}
+
+static int sta_write_apc(struct mt7612u_dev *d, int idx, const uint8_t *a)
+{
+	const uint32_t lo = (uint32_t)a[0] | ((uint32_t)a[1] << 8) |
+	                    ((uint32_t)a[2] << 16) | ((uint32_t)a[3] << 24);
+	const uint32_t hi = (uint32_t)a[4] | ((uint32_t)a[5] << 8);
+
+	if (mt_wr_chk(d, MT_MAC_APC_BSSID_L(idx), lo))
+		return -1;
+	return mt_rmw(d, MT_MAC_APC_BSSID_H(idx), MT_MAC_APC_BSSID_H_ADDR, hi);
+}
+
+/* The MBSS base (MT_MAC_BSSID's address halves) back into `out`. */
+static int sta_read_bss_base(struct mt7612u_dev *d, uint8_t *out)
+{
+	uint32_t dw0 = 0, dw1 = 0;
+
+	if (mt_rr_chk(d, MT_MAC_BSSID_DW0, &dw0) ||
+	    mt_rr_chk(d, MT_MAC_BSSID_DW1, &dw1))
+		return -1;
+	out[0] = (uint8_t)(dw0 & 0xff);
+	out[1] = (uint8_t)((dw0 >> 8) & 0xff);
+	out[2] = (uint8_t)((dw0 >> 16) & 0xff);
+	out[3] = (uint8_t)((dw0 >> 24) & 0xff);
+	out[4] = (uint8_t)(dw1 & 0xff);
+	out[5] = (uint8_t)((dw1 >> 8) & 0xff);
+	return 0;
+}
+
+/*
+ * Put BOTH register families back to their init state, so an arm cannot
+ * inherit anything - from its predecessor, or from an earlier process: the
+ * chip keeps register state across bring-up tool runs, and mac_setaddr()
+ * rewrites only the address halves of the APC slots, so a BIT(16) that
+ * gate_bssen set survives into the next gate_sta unless it is cleared here.
+ * The whole high word is written, enable bit included. Returns -1 if any
+ * write fails, in which case the arm has not started from a known state.
+ */
+static int sta_reset_bss(struct mt7612u_dev *d, const uint8_t *own)
+{
+	int rc = sta_set_bss_base(d, own);
+
+	for (int z = 0; z < 8; z++) {
+		if (mt_wr_chk(d, MT_MAC_APC_BSSID_L(z), 0) ||
+		    mt_wr_chk(d, MT_MAC_APC_BSSID_H(z), 0))
+			rc = -1;
+	}
+	return rc;
+}
+
+/* sta_reset_bss(), then read it all back: the base holds `own` and both words
+ * of every slot read zero. The chip keeps these registers across processes, so
+ * a reset that did not land is reported, not assumed. 0 when verified. */
+static int sta_reset_bss_verified(struct mt7612u_dev *d, const uint8_t *own,
+                                  const char *gate)
+{
+	uint8_t base[6] = { 0 };
+	int ok = sta_reset_bss(d, own) == 0 &&
+	         sta_read_bss_base(d, base) == 0 && memcmp(base, own, 6) == 0;
+
+	for (int z = 0; ok && z < 8; z++) {
+		uint32_t lo = 1, hi = 1;
+
+		if (mt_rr_chk(d, MT_MAC_APC_BSSID_L(z), &lo) ||
+		    mt_rr_chk(d, MT_MAC_APC_BSSID_H(z), &hi) || lo || hi)
+			ok = 0;
+	}
+	if (!ok)
+		printf("GATE %s: FAIL - MT_MAC_BSSID / the APC slots could not be "
+		       "restored to their init state; the next process inherits "
+		       "them\n", gate);
+	return ok ? 0 : -1;
+}
+
+/* The receive filter the gate is about to measure under, read back and printed.
+ * 0 when the PROMISC drop bit is set (the managed filter mt_mac_start()
+ * programs); -1 on a failed read or a clear bit (the monitor filter), which
+ * voids an arm that claims to run managed. */
+static int sta_check_managed_filter(const char *gate)
+{
+	uint32_t filtr = 0;
+
+	if (mt_rr_chk(&dev, MT_RX_FILTR_CFG, &filtr)) {
+		printf("GATE %s: FAIL - MT_RX_FILTR_CFG unreadable\n", gate);
+		return -1;
+	}
+	if (!(filtr & MT_RX_FILTR_CFG_PROMISC)) {
+		printf("GATE %s: FAIL - filtr=%08x: PROMISC drop bit clear, the "
+		       "monitor filter - this arm would not run managed\n",
+		       gate, filtr);
+		return -1;
+	}
+	printf("filtr=%08x (managed: PROMISC drop bit set)\n", filtr);
+	return 0;
+}
+
+/* Set MT_AUTO_RSP_EN again and read it back. 0 once it verifiably holds -
+ * the state init leaves and everything else on the part assumes. `gate` names
+ * the caller in the failure line. */
+static int sta_restore_auto_rsp(const char *gate)
+{
+	uint32_t v = 0;
+
+	if (mt_rmw(&dev, MT_AUTO_RSP_CFG, MT_AUTO_RSP_EN, MT_AUTO_RSP_EN) ||
+	    mt_rr_chk(&dev, MT_AUTO_RSP_CFG, &v) || !(v & MT_AUTO_RSP_EN)) {
+		printf("GATE %s: FAIL - MT_AUTO_RSP_EN could not be restored "
+		       "(read %08x); the chip is left with auto-response OFF\n",
+		       gate, v);
+		return -1;
+	}
+	return 0;
+}
+
+/* 0 when MT_MAC_ADDR reads back as this adapter's own address (DW0 and the
+ * low half of DW1; the U2ME byte above it is write-only). -1 on a failed read
+ * or any other address - the port identity did not come back. */
+static int sta_port_is_own(void)
+{
+	uint32_t dw0 = 0, dw1 = 0;
+	const uint8_t *m = dev.macaddr;
+
+	if (mt_rr_chk(&dev, MT_MAC_ADDR_DW0, &dw0) ||
+	    mt_rr_chk(&dev, MT_MAC_ADDR_DW1, &dw1))
+		return -1;
+	if (dw0 != ((uint32_t)m[0] | ((uint32_t)m[1] << 8) |
+	            ((uint32_t)m[2] << 16) | ((uint32_t)m[3] << 24)) ||
+	    (dw1 & 0xffff) != ((uint32_t)m[4] | ((uint32_t)m[5] << 8)))
+		return -1;
+	return 0;
+}
+
+static int gate_sta(uint8_t chan, int secs, const char *bssid_str)
+{
+	static const uint8_t wrong[6] = { 0x02, 0x00, 0x00, 0xde, 0xad, 0x01 };
+	static const uint8_t zero[6] = { 0 };
+	static struct sta_rx_count ctr;
+	uint8_t bssid[6];
+	unsigned long base_bss = 0, base_bcn = 0, any_to_us = 0;
+	int any_beacon = 0, unverified = 0, slot;
+
+	/* mbss: write `want` into MT_MAC_BSSID. apc0: into APC slot 0.
+	 * apc_sta: into the station's slot by mt76's rule (sta_station_slot). */
+	static const struct {
+		char tag; int mbss; int apc_sta; int apc0; int bad;
+		const char *what;
+	} arms[] = {
+		{ 'A', 0, 0, 0, 0, "init only - nothing programmed" },
+		{ 'B', 1, 0, 0, 0, "MT_MAC_BSSID = AP" },
+		{ 'C', 0, 0, 1, 0, "APC slot 0 = AP" },
+		{ 'D', 0, 1, 0, 0, "APC station slot (mt76 rule) = AP" },
+		{ 'E', 1, 1, 0, 0, "MT_MAC_BSSID + station slot = AP" },
+		{ 'F', 1, 1, 0, 1, "both programmed WRONG (is it silent?)" },
+	};
+
+	if (parse_mac6(bssid_str, bssid)) {
+		printf("GATE STA: FAIL - need the AP's BSSID, e.g.\n"
+		       "  bringup sta 6 20 02:42:75:05:d6:00\n");
+		return 2;
+	}
+	if (bssid[0] & 0x01) {
+		printf("GATE STA: FAIL - %02x:%02x:%02x:%02x:%02x:%02x is multicast\n",
+		       bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+		return 2;
+	}
+
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
+
+	/* Against the base init leaves, which is the station's own address. */
+	slot = sta_station_slot(dev.macaddr, dev.macaddr);
+
+	printf("=== GATE STA: what the BSSID registers do for a managed station ===\n");
+	printf("chan %u, %d s per arm, AP %02x:%02x:%02x:%02x:%02x:%02x, "
+	       "own %02x:%02x:%02x:%02x:%02x:%02x, station APC slot %d\n",
+	       chan, secs, bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5],
+	       dev.macaddr[0], dev.macaddr[1], dev.macaddr[2],
+	       dev.macaddr[3], dev.macaddr[4], dev.macaddr[5], slot);
+	printf("RX ONLY - whether the MAC auto-ACKed is not visible from here.\n");
+	printf("No arm touches MT_MAC_ADDR.\n");
+	/*
+	 * The bring-up - its calibrations above all - is done. Say so, flushed,
+	 * and give a harness time to start its unicast stimulus before arm A.
+	 * The MT7612U's calibration replies come late under a strong nearby
+	 * transmitter (mcu.cpp, mcu_wait_resp), and the stimulus here is a
+	 * monitor-vif flood from 20 cm; starting it only after this line keeps
+	 * the two from overlapping (tests/mt7612u_sta_identity.sh waits for it).
+	 */
+	printf("GATE STA: bring-up done - start the stimulus\n\n");
+	fflush(stdout);
+	if (!wait_ms(3000)) return 2;
+	printf("  arm  %-38s %5s %8s %8s %7s %8s\n",
+	       "configuration", "slot", "rx_total", "from_bss", "beacons", "to_us");
+
+	for (unsigned a = 0; a < sizeof arms / sizeof arms[0]; a++) {
+		const uint8_t *want = arms[a].bad ? wrong : bssid;
+		const uint8_t *want_base = arms[a].mbss ? want : dev.macaddr;
+		uint32_t filtr = 0, apc_hi = 0;
+		uint8_t apc_rb[6] = { 0 }, base_rb[6] = { 0 };
+		int wrote_slot = -1, ok = 1, base_ok, apc_ok = 1, hi_ok = 0;
+
+		memcpy(ctr.bssid, bssid, 6);
+		memcpy(ctr.own, dev.macaddr, 6);
+		ctr.total = 0; ctr.from_bss = 0; ctr.to_us = 0;
+		ctr.to_us_data = 0; ctr.beacons = 0;
+
+		if (sta_reset_bss(&dev, dev.macaddr)) ok = 0;
+		if (arms[a].mbss && sta_set_bss_base(&dev, want)) ok = 0;
+		if (arms[a].apc0) wrote_slot = 0;
+		if (arms[a].apc_sta) wrote_slot = slot;
+		if (wrote_slot >= 0 && sta_write_apc(&dev, wrote_slot, want))
+			ok = 0;
+
+		/* Every early exit leaves the registers as init does: the chip
+		 * keeps them across runs. */
+		if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) {
+			mt_mac_stop(&dev); sta_reset_bss(&dev, dev.macaddr); return 1;
+		}
+		if (mt_async_start(&dev, sta_rx_cb, &ctr)) {
+			mt_mac_stop(&dev); sta_reset_bss(&dev, dev.macaddr); return 1;
+		}
+		/* The RECEIVER must be on: with ENABLE_RX clear the MAC filters
+		 * nothing and the gate could not test its own claim. */
+		if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) {
+			rx_teardown(); mt_mac_stop(&dev);
+			sta_reset_bss(&dev, dev.macaddr); return 1;
+		}
+		/*
+		 * DO NOT call mt7612u_set_monitor_rx() here. It writes
+		 * MT_RX_FILTR_CFG = PHY_ERR|CRC_ERR and nothing else - every
+		 * address and BSS drop bit OFF - so every arm would run
+		 * PROMISCUOUS, the hardware would never consult MT_MAC_BSSID or
+		 * the APC table, and six identical arms would be guaranteed
+		 * before the dwell began (docs/mt7612u-station-identity.md, the
+		 * retraction). The filter under test is what mt_mac_start()
+		 * already left: 0x00015f97, mt76's managed-station value.
+		 */
+		if (mt_rr_chk(&dev, MT_RX_FILTR_CFG, &filtr)) ok = 0;
+
+		/* Read everything back AFTER mt_mac_start(): anything written
+		 * before it could have been overwritten since. The base must
+		 * hold `want_base`; every slot but the one written must be
+		 * empty, and that one must hold `want` with BIT(16) reported. */
+		base_ok = sta_read_bss_base(&dev, base_rb) == 0 &&
+		          memcmp(base_rb, want_base, 6) == 0;
+		if (!base_ok) ok = 0;
+		for (int z = 0; z < 8; z++) {
+			uint8_t rb[6] = { 0 };
+
+			if (sta_read_apc(&dev, z, rb) ||
+			    memcmp(rb, z == wrote_slot ? want : zero, 6) != 0) {
+				apc_ok = 0;
+				ok = 0;
+			}
+			if (z == wrote_slot)
+				memcpy(apc_rb, rb, 6);
+		}
+		if (wrote_slot >= 0)
+			hi_ok = sta_apc_high_raw(&dev, wrote_slot, &apc_hi) == 0;
+
+		/* The receiving dwell ticks the PHY about once a second, as the
+		 * public header requires of every receiving consumer. */
+		wait_ticking(secs * 1000.0);
+
+		rx_teardown();
+		mt_mac_stop(&dev);
+
+		printf("  %c    %-38s %5d %8lu %8lu %7lu %8lu%s\n",
+		       arms[a].tag, arms[a].what, wrote_slot,
+		       ctr.total.load(), ctr.from_bss.load(),
+		       ctr.beacons.load(), ctr.to_us.load(),
+		       ok ? "" : "  UNVERIFIED");
+		printf("       base %02x:%02x:%02x:%02x:%02x:%02x%s  filtr=%08x%s  "
+		       "to_us_data=%lu\n",
+		       base_rb[0], base_rb[1], base_rb[2], base_rb[3], base_rb[4],
+		       base_rb[5], base_ok ? " (as written)" : " *** NOT AS WRITTEN ***",
+		       filtr,
+		       /* The label reads the way the BIT does, not the way the
+		        * word sounds: these are DROP bits, so PROMISC SET means
+		        * "drop frames not addressed here" - the managed state we
+		        * want. Clear means promiscuous: the monitor filter, under
+		        * which this gate measures nothing. */
+		       (filtr & MT_RX_FILTR_CFG_PROMISC)
+		           ? "" : "  *** MONITOR FILTER - THIS ARM IS PROMISCUOUS ***",
+		       ctr.to_us_data.load());
+		if (!apc_ok)
+			printf("       APC table NOT AS WRITTEN - a slot other than %d "
+			       "is non-empty, or slot %d reads "
+			       "%02x:%02x:%02x:%02x:%02x:%02x\n", wrote_slot,
+			       wrote_slot, apc_rb[0], apc_rb[1], apc_rb[2],
+			       apc_rb[3], apc_rb[4], apc_rb[5]);
+		else if (wrote_slot >= 0)
+			printf("       APC slot %d verified, others empty, high reg "
+			       "%08x (bit16 %s - mt76's per-slot enable)\n",
+			       wrote_slot, apc_hi,
+			       !hi_ok ? "UNREAD" :
+			       (apc_hi & (1u << 16)) ? "SET" : "clear");
+		if (!(filtr & MT_RX_FILTR_CFG_PROMISC)) ok = 0;
+		if (!ok) unverified++;
+
+		if (ctr.beacons.load()) any_beacon = 1;
+		any_to_us += ctr.to_us.load();
+		if (a == 0) { base_bss = ctr.from_bss.load(); base_bcn = ctr.beacons.load(); }
+		if (g_stop) break;
+	}
+	/* Leave the registers as init does, verified, so the next process starts
+	 * clean. */
+	if (sta_reset_bss_verified(&dev, dev.macaddr, "STA"))
+		return 1;
+	/* 0 measured, 1 FAIL, 2 inconclusive or bad invocation, 3 no verdict:
+	 * interrupted, as gate_txs and gate_tsfwrap. A table cut short mid-arm
+	 * is not a measurement, whatever the arms before it saw. */
+	if (g_stop) {
+		printf("\nGATE STA: INTERRUPTED - no verdict\n");
+		return 3;
+	}
+
+	printf("\nHow to read this:\n");
+	if (!any_beacon) {
+		printf("  NO BEACONS IN ANY ARM. The AP was not on channel %u, or its\n"
+		       "  BSSID is not the one given. Nothing here is comparable and\n"
+		       "  the run says NOTHING about the BSSID registers - fix the rig\n"
+		       "  and re-run.\n", chan);
+		printf("GATE STA: INCONCLUSIVE\n");
+		return 2;
+	}
+	if (!any_to_us) {
+		printf("  NO UNICAST TO US IN ANY ARM. Beacons arrived, but nothing was\n"
+		       "  addressed to this station, so the table measures broadcast\n"
+		       "  reception only - not the question. Drive unicast at the DUT\n"
+		       "  (tests/sta_unicast_inject.py) and re-run.\n");
+		printf("GATE STA: INCONCLUSIVE\n");
+		return 2;
+	}
+	if (unverified) {
+		printf("  %d arm(s) UNVERIFIED: a write did not read back, or the\n"
+		       "  managed filter was not in force. Those rows test nothing.\n",
+		       unverified);
+		printf("GATE STA: INCONCLUSIVE\n");
+		return 2;
+	}
+	printf("  arm A baseline: from_bss=%lu beacons=%lu\n", base_bss, base_bcn);
+	printf("  - if B..E match A, the BSSID registers do not gate a station's\n");
+	printf("    RX on this MAC, and the answer for receive is 'nothing'.\n");
+	printf("  - if arm F (deliberately WRONG) also matches, a wrong BSSID\n");
+	printf("    is HARMLESS for RX here - the opposite of the AP-side finding.\n");
+	printf("  - the ACK half is measured from the transmitter\n");
+	printf("    (tests/mt7612u_sta_autoack.sh).\n");
+	printf("GATE STA: measured (verdict is the operator's - see above)\n");
+	return 0;
+}
+
+/* ------------------------------------------------------------- gate_staack
+ *
+ * Probe-response retry counting, from the DUT alone - kept for the register
+ * state it prints and for its arm C, NOT for its auto-ACK verdict.
+ *
+ * Method: a directed probe request from our own address makes hostapd answer
+ * with a unicast probe response addressed to us. If we ACK it the AP is done
+ * (one copy, FC Retry clear); if not, the AP retransmits and we see the same
+ * response again with FC Retry SET.
+ *
+ * WHY ITS VERDICT IS NOT EVIDENCE. The single-variable control (arm B: clear
+ * MT_AUTO_RSP_EN, hold reception constant) does not move against hostapd,
+ * because that AP does not retransmit an unacknowledged probe response - so
+ * the method cannot fail and therefore cannot measure. The auto-ACK answer
+ * comes from the transmitter instead: tests/mt7612u_sta_autoack.sh reads a
+ * Realtek peer's per-frame CCX reports. docs/mt7612u-station-identity.md
+ * records both failed methods.
+ *
+ * WHAT ARM C DOES SHOW. Arm C retargets MT_MAC_ADDR with
+ * mt7612u_set_ack_responder() - what SetAckResponder(bssid) would do to a
+ * station. Under the managed filter the station then receives none of the
+ * AP's responses: it goes deaf, not merely silent.
+ *
+ *   bringup staack <chan> <secs> <ap-bssid>
+ */
+struct staack_count {
+	std::atomic<unsigned long> resp{0};      /* probe responses to us      */
+	std::atomic<unsigned long> resp_retry{0};/* ... with FC Retry set      */
+	std::atomic<unsigned long> other_to_us{0};
+	std::atomic<unsigned long> other_retry{0};
+	uint8_t own[6];
+	uint8_t bssid[6];
+};
+
+static void staack_rx_cb(void *user, const void *frame, size_t len,
+                         const struct mt7612u_rx_info *info)
+{
+	struct staack_count *c = (struct staack_count *)user;
+	const uint8_t *f = (const uint8_t *)frame;
+	int retry;
+
+	(void)info;
+	if (len < 24) return;
+	if (memcmp(f + 4, c->own, 6) != 0) return;       /* addr1 must be us */
+	if (memcmp(f + 10, c->bssid, 6) != 0) return;    /* from the AP      */
+
+	retry = (f[1] & 0x08) ? 1 : 0;                   /* FC Retry */
+	if (f[0] == 0x50) {                              /* probe response */
+		c->resp.fetch_add(1, std::memory_order_relaxed);
+		if (retry) c->resp_retry.fetch_add(1, std::memory_order_relaxed);
+	} else {
+		c->other_to_us.fetch_add(1, std::memory_order_relaxed);
+		if (retry) c->other_retry.fetch_add(1, std::memory_order_relaxed);
+	}
+}
+
+static int gate_staack(uint8_t chan, int secs, const char *bssid_str)
+{
+	static struct staack_count ctr;
+	struct mt7612u_tx_rate rate = { };
+	uint8_t bssid[6];
+	static uint8_t probe[128];
+	size_t plen;
+	double t0, last_tick, a_frac = -1.0, b_frac = -1.0, c_frac = -1.0;
+	unsigned long sent = 0, resp = 0, retried = 0;
+	unsigned long a_resp = 0, b_resp = 0, c_resp = 0;
+
+	if (parse_mac6(bssid_str, bssid)) {
+		printf("GATE STAACK: FAIL - need the AP's BSSID\n");
+		return 2;
+	}
+
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
+
+	memcpy(ctr.own, dev.macaddr, 6);
+	memcpy(ctr.bssid, bssid, 6);
+	ctr.resp = 0; ctr.resp_retry = 0; ctr.other_to_us = 0; ctr.other_retry = 0;
+
+	/* Directed probe request: addr1 = addr3 = the AP, addr2 = US. Addressed
+	 * to the AP rather than broadcast so the response comes back unicast to
+	 * our address, which is the frame whose acknowledgement we are testing. */
+	memset(probe, 0, sizeof probe);
+	probe[0] = 0x40;                       /* probe request */
+	memcpy(probe + 4,  bssid, 6);
+	memcpy(probe + 10, dev.macaddr, 6);
+	memcpy(probe + 16, bssid, 6);
+	plen = 24;
+	probe[plen++] = 0x00;                  /* SSID element, wildcard */
+	probe[plen++] = 0x00;
+	probe[plen++] = 0x01;                  /* supported rates */
+	probe[plen++] = 0x04;
+	probe[plen++] = 0x82; probe[plen++] = 0x84;
+	probe[plen++] = 0x8b; probe[plen++] = 0x96;
+
+	rate.phy = MT7612U_PHY_OFDM;
+	rate.mcs = 0;                          /* 6 Mbit/s - robust */
+	rate.nss = 1;
+	rate.bw = MT7612U_BW_20;
+	rate.no_ack = 0;
+
+	printf("=== GATE STAACK: does this MAC auto-ACK unicast to its own address? ===\n");
+	printf("chan %u, %d s per arm, AP %02x:%02x:%02x:%02x:%02x:%02x, own %02x:%02x:%02x:%02x:%02x:%02x\n",
+	       chan, secs, bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5],
+	       dev.macaddr[0], dev.macaddr[1], dev.macaddr[2],
+	       dev.macaddr[3], dev.macaddr[4], dev.macaddr[5]);
+	printf("\n");
+
+	/*
+	 * THREE ARMS. Arm A is the claim; arm B is the control that lets it
+	 * mean anything; arm C is a diagnostic.
+	 *
+	 * Retargeting MT_MAC_ADDR is not a control: under the MANAGED receive
+	 * filter it also makes the filter drop the AP's responses, so it cannot
+	 * tell "we did not acknowledge" from "we did not receive".
+	 *
+	 * The clean control changes ONE thing: clear MT_AUTO_RSP_EN and leave
+	 * MT_MAC_ADDR alone. Reception is then identical to arm A - same port
+	 * identity, same filter, the AP's responses still addressed to us and
+	 * still accepted - and the only difference is that the MAC stops
+	 * answering them. Retried copies must rise. If they do not, the
+	 * retried-copy signal does not track acknowledgement on this rig and
+	 * arm A proves nothing.
+	 *
+	 * Arm C demonstrates the MT_MAC_ADDR hazard rather than asserting it:
+	 * what SetAckResponder(bssid) would do to a station. Under the managed
+	 * filter the station goes deaf as well as silent.
+	 */
+	for (int armi = 0; armi < 3; armi++) {
+		static const uint8_t foreign[6] =
+			{ 0x02, 0x00, 0x00, 0xac, 0x1d, 0x01 };
+		double frac;
+
+		ctr.resp = 0; ctr.resp_retry = 0;
+		ctr.other_to_us = 0; ctr.other_retry = 0;
+		sent = 0;
+
+		/* mt_mac_start() sets ENABLE_TX before its WPDMA poll, so a failed
+		 * start can leave TX on: stop the MAC on that path too. */
+		if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
+		if (mt_async_start(&dev, staack_rx_cb, &ctr)) { mt_mac_stop(&dev); return 1; }
+		if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) {
+			rx_teardown(); mt_mac_stop(&dev); return 1;
+		}
+		/* As in gate_sta: mt7612u_set_monitor_rx() installs the MONITOR
+		 * filter, not the managed one. Leave what
+		 * mt_mac_start() programmed. The auto-ACK conclusion does not rest
+		 * on the filter - a probe response addressed to us is accepted
+		 * either way - but the arm should still run in the configuration a
+		 * station uses. */
+
+		if (armi == 1) {
+			/* The single-variable control: stop answering, keep
+			 * receiving. */
+			if (mt_rmw(&dev, MT_AUTO_RSP_CFG, MT_AUTO_RSP_EN, 0)) {
+				printf("  B  could not clear MT_AUTO_RSP_EN - no control\n");
+				rx_teardown(); mt_mac_stop(&dev);
+				return 2;
+			}
+		} else if (armi == 2 && mt7612u_set_ack_responder(&dev, foreign)) {
+			printf("  C  could not retarget MT_MAC_ADDR\n");
+			rx_teardown(); mt_mac_stop(&dev);
+			return 2;
+		}
+
+		printf("  %c  %s\n", (char)('A' + armi),
+		       armi == 0 ? "nothing armed - MT_MAC_ADDR as init left it" :
+		       armi == 1 ? "MT_AUTO_RSP_EN CLEARED (control: same RX, no ACK)"
+		                 : "MT_MAC_ADDR RETARGETED away (the station hazard)");
+
+		t0 = now_ms();
+		last_tick = t0;
+		while (now_ms() - t0 < secs * 1000.0 && !g_stop) {
+			/* Receiving: tick the PHY about once a second. */
+			txs_tick(1, &last_tick);
+			probe[22] = (uint8_t)((sent & 0xf) << 4);
+			probe[23] = (uint8_t)(sent >> 4);
+			if (mt_tx_raw(&dev, probe, plen, &rate, 0xff, 0) == 0)
+				sent++;
+			usleep(200000);            /* 5/s - inside any AP's rate */
+		}
+
+		resp = ctr.resp.load();
+		retried = ctr.resp_retry.load();
+		frac = resp ? 100.0 * (double)retried / (double)resp : -1.0;
+
+		/* Put the arm's change back, verified: the next arm (or the next
+		 * process - the chip keeps registers) must not start with
+		 * auto-response off or the port identity elsewhere. */
+		if (armi == 1 && sta_restore_auto_rsp("STAACK")) {
+			rx_teardown(); mt_mac_stop(&dev);
+			return 1;
+		}
+		if (armi == 2) {
+			mt7612u_clear_ack_responder(&dev);
+			if (sta_port_is_own()) {
+				printf("GATE STAACK: FAIL - MT_MAC_ADDR did not come back "
+				       "to this adapter's own address after arm C\n");
+				rx_teardown(); mt_mac_stop(&dev);
+				return 1;
+			}
+		}
+		rx_teardown();
+		mt_mac_stop(&dev);
+
+		printf("     sent %lu, responses to us %lu, retried %lu",
+		       sent, resp, retried);
+		if (frac >= 0.0) printf("  -> %.1f%% retried\n", frac);
+		else             printf("  -> no responses\n");
+		printf("     other unicast to us %lu (retried %lu)\n",
+		       ctr.other_to_us.load(), ctr.other_retry.load());
+
+		if (armi == 0)      { a_resp = resp; a_frac = frac; }
+		else if (armi == 1) { b_resp = resp; b_frac = frac; }
+		else                { c_resp = resp; c_frac = frac; }
+		if (g_stop) break;
+	}
+
+	/* Interrupted: no verdict (rc 3), as gate_sta. */
+	if (g_stop) {
+		printf("\nGATE STAACK: INTERRUPTED - no verdict\n");
+		return 3;
+	}
+	printf("\n");
+	if (a_resp == 0) {
+		printf("Arm A got no probe response at all. Either the AP is not on this\n"
+		       "channel/BSSID or our probe requests are not reaching it. This says\n"
+		       "NOTHING about acknowledgement - do not read it as a failure to ACK.\n"
+		       "GATE STAACK: INCONCLUSIVE\n");
+		return 2;
+	}
+	if (b_resp == 0) {
+		printf("Arm B got no probe response, so the control could not run and\n"
+		       "arm A's %.1f%% is UNCONTROLLED - do not quote it. Clearing\n"
+		       "MT_AUTO_RSP_EN should not have changed what we RECEIVE, so if\n"
+		       "this happens the assumption behind the control is wrong too.\n"
+		       "GATE STAACK: INCONCLUSIVE\n", a_frac);
+		return 2;
+	}
+	printf("A (nothing armed)       : %5.1f%% retried over %lu responses\n", a_frac, a_resp);
+	printf("B (AUTO_RSP_EN cleared) : %5.1f%% retried over %lu responses\n", b_frac, b_resp);
+	if (c_resp)
+		printf("C (MT_MAC_ADDR moved)   : %5.1f%% retried over %lu responses\n",
+		       c_frac, c_resp);
+	else
+		printf("C (MT_MAC_ADDR moved)   : received NOTHING - under the managed\n"
+		       "                          filter the station goes DEAF as well\n"
+		       "                          as silent. A larger failure than the\n"
+		       "                          one this seam was designed around.\n");
+
+	if (b_frac > a_frac + 10.0) {
+		printf("\nB rose with reception held constant, so the retried-copy signal\n"
+		       "does track acknowledgement here and A is meaningful: this MAC\n"
+		       "DOES auto-ACK unicast addressed to its own address with nothing\n"
+		       "armed at all.\n");
+		printf("GATE STAACK: PASS\n");
+		return 0;
+	}
+	printf("\nB did NOT rise above A even though only the answering engine was\n"
+	       "disabled. Either this MAC acknowledges by some path MT_AUTO_RSP_EN\n"
+	       "does not gate, or retried copies do not track acknowledgement on\n"
+	       "this rig. Either way the method did not demonstrate it can fail, so\n"
+	       "A's number proves nothing.\n");
+	printf("GATE STAACK: INCONCLUSIVE\n");
+	return 2;
+}
+
+/* -------------------------------------------------------------- gate_staid
+ *
+ * The SetStationIdentity contract, checked against real hardware. No AP and
+ * no peer: every property here is about what this MAC holds and what the
+ * function refuses, which is the whole of the job on this part.
+ *
+ * The case that matters is 5. mt7612u_set_ack_responder() retargets
+ * MT_MAC_ADDR, which is the register the auto-response engine matches address
+ * 1 against - and under the managed receive filter gate_staack's arm C shows
+ * reception itself going to zero when it moves. So a station identity armed
+ * while an ACK responder holds the port identity would be a station that
+ * cannot acknowledge anything, silently. It must be REFUSED, and this checks
+ * that it is, on the hardware, rather than trusting the branch to be right.
+ *
+ *   bringup staid
+ */
+/*
+ * Every register a station identity could plausibly write: the port identity
+ * (MT_MAC_ADDR), the MBSS base (MT_MAC_BSSID) and both words of all eight APC
+ * slots. The seam's defining property is that it writes none of them;
+ * gate_staid compares a snapshot before and after. Returns -1 on any failed
+ * read - an unreadable register cannot be shown unchanged.
+ */
+struct staid_regs { uint32_t w[20]; };
+
+static int staid_snapshot(struct staid_regs *r)
+{
+	int n = 0;
+
+	if (mt_rr_chk(&dev, MT_MAC_ADDR_DW0, &r->w[n++]) ||
+	    mt_rr_chk(&dev, MT_MAC_ADDR_DW1, &r->w[n++]) ||
+	    mt_rr_chk(&dev, MT_MAC_BSSID_DW0, &r->w[n++]) ||
+	    mt_rr_chk(&dev, MT_MAC_BSSID_DW1, &r->w[n++]))
+		return -1;
+	for (int z = 0; z < 8; z++) {
+		if (mt_rr_chk(&dev, MT_MAC_APC_BSSID_L(z), &r->w[n++]) ||
+		    mt_rr_chk(&dev, MT_MAC_APC_BSSID_H(z), &r->w[n++]))
+			return -1;
+	}
+	return 0;
+}
+
+/* 1 when both snapshots were taken and are identical. */
+static int staid_unchanged(const struct staid_regs *a, int a_ok,
+                           const struct staid_regs *b, int b_ok)
+{
+	return a_ok && b_ok && memcmp(a->w, b->w, sizeof a->w) == 0;
+}
+
+static int gate_staid(void)
+{
+	static const uint8_t bssid[6]   = { 0x02, 0x42, 0x75, 0x05, 0xd6, 0xaa };
+	static const uint8_t foreign[6] = { 0x02, 0x00, 0x00, 0xac, 0x1d, 0x01 };
+	static const uint8_t mcast[6]   = { 0x01, 0x00, 0x5e, 0x00, 0x00, 0x01 };
+	uint8_t own[6], got[6];
+	int pass = 0, fail = 0, snap0_ok, snap1_ok;
+	struct staid_regs snap0, snap1;
+
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+
+	memcpy(own, dev.macaddr, 6);
+	printf("=== GATE STAID: the SetStationIdentity contract on hardware ===\n");
+	printf("own %02x:%02x:%02x:%02x:%02x:%02x   bssid %02x:%02x:%02x:%02x:%02x:%02x\n\n",
+	       own[0], own[1], own[2], own[3], own[4], own[5],
+	       bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+
+#define CHK(cond, what) do {                                            \
+		if (cond) { pass++; printf("  ok    %s\n", what); }     \
+		else      { fail++; printf("  FAIL  %s\n", what); }     \
+	} while (0)
+
+	/* 1. the ordinary case - and the seam's defining property: arming
+	 * writes nothing (MT_MAC_ADDR, MT_MAC_BSSID and all eight APC slots
+	 * read the same before and after). */
+	snap0_ok = staid_snapshot(&snap0) == 0;
+	CHK(mt7612u_set_station_identity(&dev, own, bssid) == 0,
+	    "arms with the factory address as own");
+	snap1_ok = staid_snapshot(&snap1) == 0;
+	CHK(mt7612u_station_bssid(&dev, got) == 0 && memcmp(got, bssid, 6) == 0,
+	    "records the BSSID it was given");
+	CHK(staid_unchanged(&snap0, snap0_ok, &snap1, snap1_ok),
+	    "arming writes no register (MT_MAC_ADDR, MT_MAC_BSSID, APC slots "
+	    "read back unchanged)");
+
+	/* 2. an address this MAC is not holding */
+	CHK(mt7612u_set_station_identity(&dev, foreign, bssid) != 0,
+	    "refuses an `own` that is not the port identity");
+
+	/* 3. malformed arguments */
+	/* Not an isolating test: `mcast` is also not the port identity, so the
+	 * later branch would refuse it even if the multicast branch were
+	 * deleted. Kept because the refusal is still the required behaviour,
+	 * and labelled so nobody reads it as coverage of that branch. */
+	CHK(mt7612u_set_station_identity(&dev, mcast, bssid) != 0,
+	    "refuses a multicast own (not an isolating test - see comment)");
+	CHK(mt7612u_set_station_identity(&dev, own, mcast) != 0,
+	    "refuses a multicast bssid");
+	CHK(mt7612u_set_station_identity(&dev, own, own) != 0,
+	    "refuses own == bssid");
+
+	/* 4. clear - which also writes nothing */
+	snap0_ok = staid_snapshot(&snap0) == 0;
+	mt7612u_clear_station_identity(&dev);
+	snap1_ok = staid_snapshot(&snap1) == 0;
+	CHK(mt7612u_station_bssid(&dev, got) != 0,
+	    "reports no BSSID once cleared");
+	CHK(staid_unchanged(&snap0, snap0_ok, &snap1, snap1_ok),
+	    "clearing writes no register (same registers read back unchanged)");
+
+	/*
+	 * 5. THE ONE THAT MATTERS. Arm an ACK responder on a foreign address -
+	 * which moves MT_MAC_ADDR - and the station arm must refuse, because a
+	 * station whose port identity points elsewhere acknowledges nothing.
+	 */
+	if (mt7612u_set_ack_responder(&dev, foreign) == 0) {
+		CHK(mt7612u_set_station_identity(&dev, own, bssid) != 0,
+		    "REFUSES while an ACK responder holds the port identity");
+		mt7612u_clear_ack_responder(&dev);
+		CHK(mt7612u_set_station_identity(&dev, own, bssid) == 0,
+		    "arms again once the responder has given it back");
+	} else {
+		printf("  SKIP  could not arm an ACK responder - case 5 not run\n");
+		fail++;   /* the most important case did not run; do not pass. */
+	}
+	mt7612u_clear_station_identity(&dev);
+
+	/*
+	 * 6. THE OTHER ORDERING, the one a real caller is likelier to hit. Case
+	 * 5 covers "responder first, station second" - refused. This covers
+	 * "station first, responder second", where the arm-time check cannot
+	 * help: the responder moves MT_MAC_ADDR out from under a live station.
+	 *
+	 * It is not refused - a station arm does not veto the beacon and
+	 * responder paths - but it must not be silent, and the armed state must
+	 * not go on claiming a station is configured once its identity has been
+	 * taken.
+	 */
+	if (mt7612u_set_station_identity(&dev, own, bssid) == 0 &&
+	    mt7612u_set_ack_responder(&dev, foreign) == 0) {
+		CHK(mt7612u_station_bssid(&dev, got) != 0,
+		    "drops the armed station when a responder takes the identity");
+		mt7612u_clear_ack_responder(&dev);
+	} else {
+		printf("  SKIP  could not set up case 6\n");
+		fail++;
+	}
+	mt7612u_clear_station_identity(&dev);
+
+#undef CHK
+	printf("\nGATE STAID: %d passed, %d failed\n", pass, fail);
+	return fail ? 1 : 0;
+}
+
+/* -------------------------------------------------------------- gate_norsp
+ *
+ * Receive with MT_AUTO_RSP_EN CLEARED, for the single-variable arm of
+ * tests/mt7612u_sta_autoack.sh.
+ *
+ * That harness asks a peer whether this MAC acknowledges unicast addressed to
+ * it. SetStationIdentity refuses to arm when MT_AUTO_RSP_EN is clear; this
+ * gate is what tests that the bit matters: same receiver, same port identity,
+ * same filter, one bit different. If the peer's ok rate collapses with the
+ * bit clear, the refusal is justified; if it does not, the refusal rests on a
+ * bit that does not gate acknowledgement here.
+ *
+ * The third argument selects which side of the comparison this is:
+ *   1 (default) - clear MT_AUTO_RSP_EN: the CONTROL
+ *   0           - leave it set: the CLAIM
+ * Both run the SAME code path with the SAME managed filter, so the two arms
+ * differ by exactly one bit. (Pairing this with `bringup arx`, which installs
+ * the MONITOR filter at the top of gate_arx, would vary the filter and the
+ * init path as well.)
+ *
+ *   bringup norsp <chan> <secs> [clear_rsp]
+ */
+static void norsp_rx_cb(void *user, const void *frame, size_t len,
+                        const struct mt7612u_rx_info *info)
+{
+	(void)user; (void)frame; (void)len; (void)info;
+}
+
+static int gate_norsp(uint8_t chan, int secs, int clear_rsp)
+{
+	uint32_t before = 0, after = 0;
+	int rc = 0;
+
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
+	/* mt_mac_start() sets ENABLE_TX before its WPDMA poll, so a failed start
+	 * can leave TX on: stop the MAC on that path too. */
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
+	/* A NON-NULL callback, because mt_async_start(NULL) starts the TX slots
+	 * and NOT the RX ring - and mac_start(MT_RX_DRAIN_RING) then refuses,
+	 * correctly, with "no ring draining EP4". */
+	if (mt_async_start(&dev, norsp_rx_cb, NULL)) { mt_mac_stop(&dev); return 1; }
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) {
+		rx_teardown(); mt_mac_stop(&dev); return 1;
+	}
+	/* Managed filter left exactly as mt_mac_start() programmed it - do NOT
+	 * call mt7612u_set_monitor_rx(), which installs the monitor value (see
+	 * gate_sta). Read back, not assumed. */
+	if (sta_check_managed_filter("NORSP")) {
+		rx_teardown(); mt_mac_stop(&dev); return 2;
+	}
+
+	if (mt_rr_chk(&dev, MT_AUTO_RSP_CFG, &before)) {
+		printf("GATE NORSP: FAIL - cannot read MT_AUTO_RSP_CFG\n");
+		rx_teardown(); mt_mac_stop(&dev); return 1;
+	}
+	if (clear_rsp) {
+		if (mt_rmw(&dev, MT_AUTO_RSP_CFG, MT_AUTO_RSP_EN, 0)) {
+			printf("GATE NORSP: FAIL - cannot clear MT_AUTO_RSP_EN\n");
+			rx_teardown(); mt_mac_stop(&dev); return 1;
+		}
+		/* Checked: mt_rr_chk() leaves `after` untouched on a failed read,
+		 * and 0 would read as "EN cleared". */
+		if (mt_rr_chk(&dev, MT_AUTO_RSP_CFG, &after)) {
+			printf("GATE NORSP: FAIL - cannot read MT_AUTO_RSP_CFG back "
+			       "after clearing EN\n");
+			sta_restore_auto_rsp("NORSP");
+			rx_teardown(); mt_mac_stop(&dev); return 1;
+		}
+		if (after & MT_AUTO_RSP_EN) {
+			printf("GATE NORSP: FAIL - MT_AUTO_RSP_EN did not stay clear "
+			       "(%08x -> %08x); the arm would measure nothing\n",
+			       before, after);
+			sta_restore_auto_rsp("NORSP");
+			rx_teardown(); mt_mac_stop(&dev); return 2;
+		}
+	} else {
+		after = before;
+		if (!(after & MT_AUTO_RSP_EN)) {
+			printf("GATE NORSP: FAIL - asked to LEAVE MT_AUTO_RSP_EN set but "
+			       "it is already clear (%08x); this arm would be the control, "
+			       "not the claim\n", after);
+			rx_teardown(); mt_mac_stop(&dev); return 2;
+		}
+	}
+
+	printf("MT_AUTO_RSP_CFG %08x -> %08x (EN %s), managed filter, "
+	       "receiving %d s on ch%u\n", before, after,
+	       clear_rsp ? "CLEARED" : "left SET", secs, chan);
+
+	/* The receiving dwell ticks the PHY about once a second, as the public
+	 * header requires of every receiving consumer. 0 means interrupted. */
+	const int completed = wait_ticking(secs * 1000.0);
+
+	/* Put it back, verified - interrupted or not. */
+	if (clear_rsp && sta_restore_auto_rsp("NORSP"))
+		rc = 1;
+	rx_teardown();
+	mt_mac_stop(&dev);
+	if (rc)
+		return rc;
+	if (!completed) {
+		printf("GATE NORSP: INTERRUPTED - no verdict (restored)\n");
+		return 3;
+	}
+	printf("GATE NORSP: done (restored)\n");
+	return 0;
+}
+
+/* -------------------------------------------------------------- gate_bssen
+ *
+ * A WRONG BSSID in the APC slot a station's BSSID lives in, with that slot's
+ * BIT(16) SET - the DUT arm for tests/mt7612u_sta_autoack.sh arm E.
+ *
+ * gate_sta leaves BIT(16) clear - upstream mt76 calls it
+ * MT_MAC_APC_BSSID0_H_EN and never writes it; this tree does not define it.
+ * So a "slot programmed" arm there may write a slot the engine is not
+ * consulting, and "a wrong BSSID changes nothing" would be uninteresting if
+ * nothing was reading the BSSID.
+ *
+ * Which slot: the STATION slot by mt76's rule (sta_station_slot), keyed on
+ * the station's own address against the MBSS base - slot 0 for a factory
+ * address. MT_MAC_BSSID is left at the base init programs (the station's own
+ * address), exactly as mt76's station configuration leaves it, so the slot
+ * the hardware derives is the slot written. Every other slot is emptied,
+ * enable bit included. Base, slot, bit and emptiness are all read back; if
+ * any of them does not hold, the arm refuses: an unsettable or misplaced
+ * write is not evidence about anything.
+ *
+ * The peer (tests/mt7612u_sta_autoack.sh) transmits unicast at this station's
+ * own address throughout. If acknowledgement and reception survive, the BSSID
+ * plane does not gate a station on this part even when its enable is set.
+ *
+ *   bringup bssen <chan> <secs>
+ */
+static int gate_bssen(uint8_t chan, int secs)
+{
+	static const uint8_t wrong[6] = { 0x02, 0x00, 0x00, 0xde, 0xad, 0x02 };
+	static const uint8_t zero[6] = { 0 };
+	uint8_t rb[6] = { 0 }, base_rb[6] = { 0 };
+	uint32_t hi = 0;
+	/* bad: 1 a register write / read-back failed (a defect, rc 1);
+	 *      2 BIT(16) would not stay set (inconclusive, rc 2). */
+	int idx, bad = 0;
+
+	if (mt_eeprom_init(&dev)) return 1;
+	if (mt_init_hardware(&dev, NULL)) return 1;
+	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
+	/* As in gate_norsp: a failed start can leave TX on. */
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
+	if (mt_async_start(&dev, norsp_rx_cb, NULL)) { mt_mac_stop(&dev); return 1; }
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) {
+		rx_teardown(); mt_mac_stop(&dev); return 1;
+	}
+	/* Managed filter as mt_mac_start() left it - read back, not assumed. */
+	if (sta_check_managed_filter("BSSEN")) {
+		rx_teardown(); mt_mac_stop(&dev); return 2;
+	}
+
+	idx = sta_station_slot(dev.macaddr, dev.macaddr);
+	if (sta_reset_bss(&dev, dev.macaddr) ||
+	    sta_write_apc(&dev, idx, wrong) ||
+	    mt_rmw(&dev, MT_MAC_APC_BSSID_H(idx), 1u << 16, 1u << 16)) {
+		printf("GATE BSSEN: FAIL - a register write failed\n");
+		bad = 1;
+	}
+	if (!bad && (sta_read_bss_base(&dev, base_rb) ||
+	             memcmp(base_rb, dev.macaddr, 6) != 0)) {
+		printf("GATE BSSEN: FAIL - MT_MAC_BSSID does not hold the station's "
+		       "own address, so the derived slot is not certain\n");
+		bad = 1;
+	}
+	for (int z = 0; !bad && z < 8; z++) {
+		if (sta_read_apc(&dev, z, rb) ||
+		    memcmp(rb, z == idx ? wrong : zero, 6) != 0) {
+			printf("GATE BSSEN: FAIL - APC slot %d did not read back as "
+			       "written\n", z);
+			bad = 1;
+		}
+	}
+	if (!bad && sta_apc_high_raw(&dev, idx, &hi)) {
+		printf("GATE BSSEN: FAIL - APC slot %d high register unreadable\n", idx);
+		bad = 1;
+	}
+	if (!bad && !(hi & (1u << 16))) {
+		printf("GATE BSSEN: INCONCLUSIVE - BIT(16) of the APC high register "
+		       "would not stay set (%08x). Either it is not a per-slot "
+		       "enable on this part, or it is not writable here; either way "
+		       "this arm proves nothing about an enabled slot.\n", hi);
+		bad = 2;
+	}
+	if (bad) {
+		const int restore_failed =
+			sta_reset_bss_verified(&dev, dev.macaddr, "BSSEN");
+
+		rx_teardown(); mt_mac_stop(&dev);
+		/* A failed restore is a defect whatever the arm's own verdict. */
+		return restore_failed ? 1 : bad;
+	}
+
+	printf("WRONG BSSID %02x:%02x:%02x:%02x:%02x:%02x in station APC slot %d, "
+	       "BIT(16) SET (high reg %08x), other slots empty, MT_MAC_BSSID = own "
+	       "address (verified)\n",
+	       wrong[0], wrong[1], wrong[2], wrong[3], wrong[4], wrong[5], idx, hi);
+	printf("receiving %d s on ch%u as %02x:%02x:%02x:%02x:%02x:%02x\n",
+	       secs, chan, dev.macaddr[0], dev.macaddr[1], dev.macaddr[2],
+	       dev.macaddr[3], dev.macaddr[4], dev.macaddr[5]);
+
+	/* The receiving dwell ticks the PHY about once a second, as the public
+	 * header requires of every receiving consumer. 0 means interrupted. */
+	const int completed = wait_ticking(secs * 1000.0);
+
+	/* Leave the registers as init does, verified - interrupted or not: the
+	 * chip keeps them across runs. */
+	{
+		const int restore_failed =
+			sta_reset_bss_verified(&dev, dev.macaddr, "BSSEN");
+
+		rx_teardown();
+		mt_mac_stop(&dev);
+		if (restore_failed)
+			return 1;
+	}
+	if (!completed) {
+		printf("GATE BSSEN: INTERRUPTED - no verdict (restored)\n");
+		return 3;
+	}
+	printf("GATE BSSEN: done\n");
+	return 0;
+}
+
+/*
+ * The station gates' numeric arguments, parsed before any device I/O with
+ * txs_parse_long()'s strictness: [chan] 1..255, [secs] 1..3600, and norsp's
+ * [clear_rsp] 0 or 1. A malformed or out-of-range value is a usage error -
+ * atoi() would turn it into 0, and a zero dwell skips the measurement while
+ * the gate still reports "done". Absent arguments keep the defaults passed
+ * in. Returns 0, or 2 after printing the usage line.
+ */
+static int sta_parse_args(int argc, char **argv, const char *usage,
+                          long *chan, long *secs, long *flag)
+{
+	if ((argc > 2 && (txs_parse_long(argv[2], chan) ||
+	                  *chan < 1 || *chan > 255))) {
+		fprintf(stderr, "bad channel '%s': a number 1..255\n", argv[2]);
+		fprintf(stderr, "usage: %s\n", usage);
+		return 2;
+	}
+	if (argc > 3 && (txs_parse_long(argv[3], secs) ||
+	                 *secs < 1 || *secs > 3600)) {
+		fprintf(stderr, "bad duration '%s': seconds, 1..3600\n", argv[3]);
+		fprintf(stderr, "usage: %s\n", usage);
+		return 2;
+	}
+	if (flag && argc > 4 && (txs_parse_long(argv[4], flag) ||
+	                         (*flag != 0 && *flag != 1))) {
+		fprintf(stderr, "bad clear_rsp '%s': 0 or 1\n", argv[4]);
+		fprintf(stderr, "usage: %s\n", usage);
+		return 2;
+	}
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *err = NULL, *cmd = argc > 1 ? argv[1] : "regs";
@@ -4213,6 +5399,8 @@ int main(int argc, char **argv)
 	 * finer "does this chip tune it" check to reuse), frames a positive int,
 	 * peer a whole MAC. */
 	long txs_chan = 149, txs_frames = 40;
+	/* The station gates' arguments (sta_parse_args): defaults per gate. */
+	long sta_chan = 6, sta_secs = 15, sta_flag = 1;
 	if (!strcmp(cmd, "txs")) {
 		uint8_t mac[6];
 
@@ -4239,6 +5427,21 @@ int main(int argc, char **argv)
 			fprintf(stderr, "usage: bringup txs [chan] [frames] [peer MAC]\n");
 			return 2;
 		}
+	}
+
+	if (!strcmp(cmd, "sta") || !strcmp(cmd, "staack") ||
+	    !strcmp(cmd, "norsp") || !strcmp(cmd, "bssen")) {
+		const int norsp = !strcmp(cmd, "norsp");
+
+		sta_secs = !strcmp(cmd, "sta") ? 15 :
+		           !strcmp(cmd, "staack") ? 20 : 25;
+		if (sta_parse_args(argc, argv,
+		        norsp ? "bringup norsp [chan] [secs] [clear 1|0]" :
+		        !strcmp(cmd, "bssen") ? "bringup bssen [chan] [secs]" :
+		        !strcmp(cmd, "sta") ? "bringup sta [chan] [secs] <ap-bssid>" :
+		                              "bringup staack [chan] [secs] <ap-bssid>",
+		        &sta_chan, &sta_secs, norsp ? &sta_flag : NULL))
+			return 2;
 	}
 
 	signal(SIGINT, on_signal);
@@ -4345,6 +5548,18 @@ int main(int argc, char **argv)
 	} else if (!strcmp(cmd, "ap")) {
 		rc = gate_ap(argc > 2 ? (uint8_t)atoi(argv[2]) : 149,
 		             argc > 3 ? atoi(argv[3]) : 30);
+	} else if (!strcmp(cmd, "sta")) {
+		rc = gate_sta((uint8_t)sta_chan, (int)sta_secs,
+		              argc > 4 ? argv[4] : NULL);
+	} else if (!strcmp(cmd, "staack")) {
+		rc = gate_staack((uint8_t)sta_chan, (int)sta_secs,
+		                 argc > 4 ? argv[4] : NULL);
+	} else if (!strcmp(cmd, "staid")) {
+		rc = gate_staid();
+	} else if (!strcmp(cmd, "norsp")) {
+		rc = gate_norsp((uint8_t)sta_chan, (int)sta_secs, (int)sta_flag);
+	} else if (!strcmp(cmd, "bssen")) {
+		rc = gate_bssen((uint8_t)sta_chan, (int)sta_secs);
 	} else if (!strcmp(cmd, "chan")) {
 		rc = gate_chan(argc > 2 ? (uint8_t)atoi(argv[2]) : 149,
 		               argc > 3 ? argv[3] : NULL);
@@ -4363,6 +5578,11 @@ int main(int argc, char **argv)
 		fprintf(stderr, "       bringup beacon [chan] [secs]   (Stage A: static AP beacon on air)\n");
 		fprintf(stderr, "       bringup ap     [chan] [secs]   (Stage B: beacon + RX, probe/auth/assoc)\n");
 		fprintf(stderr, "       bringup txs    [chan] [frames] [peer MAC]  (per-frame retry count off MT_TX_STAT_FIFO; honours DEVOURER_TX_RETRY_LIMIT)\n");
+		fprintf(stderr, "       bringup staid                  (the SetStationIdentity contract on hardware, no AP)\n");
+		fprintf(stderr, "       bringup sta    [chan] [secs] <ap-bssid>  (what the BSSID registers do for a managed station)\n");
+		fprintf(stderr, "       bringup staack [chan] [secs] <ap-bssid>  (probe-response retry count; register state, not a verdict)\n");
+		fprintf(stderr, "       bringup norsp  [chan] [secs] [clear 1|0] (receive with MT_AUTO_RSP_EN cleared or left set)\n");
+		fprintf(stderr, "       bringup bssen  [chan] [secs]   (receive with a WRONG BSSID in an ENABLED APC slot)\n");
 		fprintf(stderr, "       bringup [sweep|coding|vht] [chan] [count] [bw 0=20 1=40 2=80]\n");
 		fprintf(stderr, "       the witness must listen at the same width (DEVOURER_BW=40|80)\n");
 		rc = 2;

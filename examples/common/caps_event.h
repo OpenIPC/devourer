@@ -82,6 +82,7 @@ inline void emit_adapter_caps(EventSink &sink, IRadio *dev) {
       .f("narrowband", c.narrowband_ok ? 1 : 0)
       .f("fastretune", c.fastretune_ok ? 1 : 0)
       .f("ack_responder", c.ack_responder_ok ? 1 : 0)
+      .f("station_mode", c.station_mode_ok ? 1 : 0)
       .f("tx_retry_limit", c.tx_retry_limit_ok ? 1 : 0)
       .f("he_er_su", c.he_er_su_ok ? 1 : 0)
       .f("per_chain_rssi", c.per_chain_rssi ? 1 : 0)

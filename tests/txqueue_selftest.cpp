@@ -87,6 +87,13 @@ static void test_tx_qsel() {
     CHECK(tx_qsel(false, eps, true, 5, 0x11) == 0x11, "debug mgmt eps=%u", eps);
     CHECK(tx_qsel(true, eps, true, 5, 0x11) == 0x11, "debug data eps=%u", eps);
   }
+  /* Below 3 endpoints the A-MPDU TID still lands on data while the frame
+   * rides endpoint 0 - the kept descriptor/endpoint mismatch (TxQueueMap.h). */
+  for (unsigned eps = 1; eps < 3; ++eps)
+    CHECK(tx_qsel(true, eps, true, 5, -1) == 5 &&
+              jaguar3::bulkout_id_for_qsel(tx_qsel(true, eps, true, 5, -1),
+                                           eps) == 0,
+          "ampdu data below 3 eps: TID on endpoint 0 (eps=%u)", eps);
   /* And the endpoint that follows: A-MPDU never moves management off HIGH. */
   CHECK(jaguar3::bulkout_id_for_qsel(tx_qsel(false, 3, true, 6, -1), 3) == 0,
         "ampdu mgmt left HIGH");

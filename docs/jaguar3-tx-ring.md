@@ -1,9 +1,9 @@
 # Jaguar2/Jaguar3 TX page ring — the beacon overwrite, and the fix
 
-**Status 2026-09-26: the mechanism is found and fixed on Jaguar3 and
-Jaguar2.** It was a one-constant porting defect: devourer enabled only the DMA
-bits of `REG_CR` before the LLT init, where halmac enables all eight - and a
-bit bisection names the one that matters: with the DMA bits, PROTOCOL_EN
+**The mechanism is known and fixed on Jaguar3 and Jaguar2.** It is a
+one-constant porting defect: devourer enabled only the DMA bits of `REG_CR`
+before the LLT init, where halmac enables all eight - and a bit bisection
+names the one that matters: with the DMA bits, PROTOCOL_EN
 (bit 4) was enough (`0x1F`); PROTOCOL without the DMA bits was not measured.
 An earlier workaround that wrote the ring terminator into the LLT directly
 matched the vendor chip's end state but not how it gets there; it never
@@ -36,6 +36,22 @@ headers (`src/jaguar3/TxQueueMap.h`, `src/AmpduMode.h`,
 (`ampdu_ba_check`, `ampdu_spike`, `ampdu_pacing_sweep`, `ampdu_onair_ab`,
 `arq_e2e_delivery`, `bench_onair.py`) sends `DEVOURER_TX_QOS_DATA=1`, so the
 data-frames-only A-MPDU rule changes no recorded A-MPDU figure.
+
+The queue measurement behind it (8812CU as AP, downlink load, station
+harness), HIGH/LOW/NORMAL/public pages as configured/available:
+
+| state | HQ | LQ | NQ | PUB |
+|---|---|---|---|---|
+| healthy | 64/64 | 64/64 | 64/64 | 1745/1745 |
+| TX wedged | 64/0 | 64/64 | 64/64 | 1745/1449 |
+
+Every frame went to the HIGH endpoint, so HQ drained while LOW and NORMAL
+were never used; with HQ empty the beacon could not be loaded and the AP
+answered none of seventeen received authentication requests while its
+receiver kept decoding. HQ running dry turned out to be a consequence of
+the page-ring wedge, not its cause: routing data to LOW moved the exhaustion
+there without touching the wedge. Moving QSEL alone, without the endpoint,
+changed nothing (HQ still drained 64 -> 0).
 
 And a beacon-arm rollback on Jaguar2 and Jaguar3 (contract at `StartBeacon`
 in `RtlJaguar2Device.h` / `RtlJaguar3Device.h`), not exercised on hardware -
@@ -339,14 +355,26 @@ Available with this PR:
   submitted / 0 failed with the beacon armed and then stopped, the
   aggregated path 0 failed, and A-MPDU over QoS data 0 failed.
 
+  **The maintainer's bench (josephnef), 2026-09-27:** the reproducer
+  reproduces and the fix clears it on an 8812CU, and the 8812BU LLT check
+  gives the same result as above. And a counterpart for `txdma_status`: an
+  8812CU on USB2 at `DEVOURER_TX_GAP_US=0` with 1400-byte QoS data read
+  `0x2000` (bit 13, `BIT_PAYLOAD_OVF_8822C`) from the first sample, on the
+  fixed and the control build alike, while TX completed 8051/8051; at the
+  default 2 ms gap it read 0. So a nonzero `txdma_status` is not by itself
+  the wedge - bit 18 (`BIT_TXPKTBUF_REQ_ERR`) is the bit measured with it
+  (`IRtlRadio::GetTxDmaStatus`).
+
   **The canonical-frame form does not reproduce**: without
   `DEVOURER_TX_QOS_DATA`/`DEVOURER_TX_PAYLOAD_BYTES`/`DEVOURER_TX_WITH_RX`,
   the unfixed build ran 20051 submitted / 0 failed / `txdma_status` 0, the
   same as the fix (one run each). Data-sized frames with the RX loop running
   are what it needs; which of those matters was not separated.
 - `txdemo` without the beacon knob, `DEVOURER_TX_FRAMES=8000
-  DEVOURER_TX_GAP_US=0`: `txdma_status` must stay 0. This never reproduced
-  the defect - it guards the fix against breaking plain TX.
+  DEVOURER_TX_GAP_US=0`: every frame must complete and `txdma_status` must
+  not latch bit 18 (bit 13 can latch at max duty on USB2 while TX
+  continues - see above). This never reproduced the defect - it guards the
+  fix against breaking plain TX.
 - The injection A/B above: `tests/probe_repeatability.sh` for the floor, and
   the witness count per arm.
 - **The in-tree Jaguar2 verification** - the LLT and beacon page, read

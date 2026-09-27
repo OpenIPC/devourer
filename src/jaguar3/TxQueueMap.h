@@ -12,11 +12,15 @@
  * count. So per-queue routing is only right with >= kPerQueueMinEps bulk-OUT
  * endpoints: a 4-endpoint part uses endpoints 0..2 of the same map (EXTRA is
  * never chosen), and below the threshold there is no LOW/NORMAL endpoint for
- * that map to name - sending a data QSEL down the first endpoint would be the
- * descriptor/endpoint mismatch the old out-of-range fallback created. Below
- * it, data keeps QSEL 0x12 (MGT -> HIGH) and every frame rides endpoint 0,
- * which is the pre-routing behaviour exactly. Neither the 1/2- nor the
- * 4-endpoint shape has been measured. */
+ * that map to name. Below it every frame rides endpoint 0, and plain data
+ * keeps QSEL 0x12 (MGT -> HIGH), so its descriptor and endpoint agree.
+ * SetAmpduMode is the exception: its TID (0..7) is still stamped on data
+ * frames, because aggregation only forms on a data queue (AmpduMode.h), so
+ * on a 1- or 2-endpoint part an A-MPDU data frame carries a data QSEL down
+ * endpoint 0 - a descriptor/endpoint mismatch on that shape, deliberately
+ * left as it is. The DEVOURER_TX_QSEL debug override can
+ * produce a mismatch on any shape. Neither the 1/2- nor the 4-endpoint shape
+ * has been measured. */
 #ifndef JAGUAR3_TX_QUEUE_MAP_H
 #define JAGUAR3_TX_QUEUE_MAP_H
 
@@ -66,7 +70,7 @@ constexpr bool dot11_is_data(uint8_t fc0) { return ((fc0 >> 2) & 0x3) == 0x2; }
  *   3. SetAmpduMode's TID - DATA frames only, as the AmpduMode contract says
  *      (aggregation forms on a data queue; management keeps its queue);
  *   4. the DEVOURER_TX_QSEL debug override (debug_qsel >= 0), on EVERY frame
- *      - it is a raw register-level knob, as it always was.
+ *      - it is a raw register-level knob.
  * Both the peek and the build call this, so they cannot disagree. */
 constexpr uint8_t tx_qsel(bool is_data, size_t n_eps, bool ampdu_enabled,
                           uint8_t ampdu_tid, int debug_qsel) {

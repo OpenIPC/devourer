@@ -6,7 +6,8 @@ facts live in nested `CLAUDE.md` files, auto-loaded when working there:
 `src/{jaguar1,jaguar2,jaguar3,kestrel,rtl8733b}/` for per-generation registers,
 descriptors and per-chip mechanisms; `src/hopset/` for keyed FHSS and the
 adaptive hopset; `src/chanmig/` for channel migration; `src/sensing/` for the
-device-touching survey executor. Add new facts to the
+device-touching survey executor; `src/sta/` for the device-free 802.11
+station core. Add new facts to the
 narrowest file that covers them.
 
 Two standing rules for this file: never duplicate what a header already

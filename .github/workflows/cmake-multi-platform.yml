@@ -63,6 +63,14 @@ jobs:
         run: |
           echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
 
+      # OpenSSL for the station crypto selftests (supplicant, station_sm,
+      # ccmp_framing), which CMakeLists only builds when find_package(OpenSSL)
+      # succeeds. Every job that runs ctest configures with
+      # DEVOURER_REQUIRE_STA_CRYPTO_TESTS=ON, so a runner that stops providing
+      # OpenSSL fails configure instead of silently dropping those cells.
+      # Linux and macOS install it explicitly (cheap). The MSVC cell does NOT:
+      # its runner image already ships an OpenSSL that FindOpenSSL picks up,
+      # and building one through vcpkg would add minutes to every run.
       - name: Install dependency libraries (Windows)
         id: vars
         if: runner.os == 'Windows'
@@ -77,12 +85,13 @@ jobs:
       - name: Install dependency libraries (Linux)
         if: runner.os == 'Linux'
         run:
-          sudo apt install libusb-1.0-0-dev
+          sudo apt install libusb-1.0-0-dev libssl-dev
 
       - name: Install dependency libraries (macOS)
         if: runner.os == 'macOS'
-        run:
-          brew install libusb
+        run: |
+          brew install libusb openssl@3
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
 
       - name: Configure CMake
         # DEVOURER_MT7612U=ON: the option defaults OFF, so without it here the
@@ -98,6 +107,7 @@ jobs:
           -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -DDEVOURER_MT7612U=ON
+          -DDEVOURER_REQUIRE_STA_CRYPTO_TESTS=ON
           -S ${{ github.workspace }}
 
       - name: Build
@@ -124,6 +134,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # OpenSSL so the station crypto acceptance cells (supplicant, station_sm,
+      # ccmp_framing - the KRACK and known-answer tests) build and run here
+      # too. CMakeLists gates them on find_package(OpenSSL); the configure
+      # below sets DEVOURER_REQUIRE_STA_CRYPTO_TESTS=ON, so if this package
+      # ever stops providing it the job fails rather than skipping them.
       - name: Set up MSYS2 / mingw-w64
         uses: msys2/setup-msys2@v2
         with:
@@ -135,6 +150,7 @@ jobs:
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-libusb
             mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-openssl
 
       - name: Configure CMake (mingw, pkg-config libusb, no vcpkg)
         # VCPKG_ROOT is unset, so CMakeLists takes the pkg-config path — the
@@ -145,6 +161,7 @@ jobs:
           -DCMAKE_C_COMPILER=gcc
           -DCMAKE_CXX_COMPILER=g++
           -DDEVOURER_MT7612U=ON
+          -DDEVOURER_REQUIRE_STA_CRYPTO_TESTS=ON
 
       - name: Build (library + stream demos + self-tests)
         # rxdemo / txdemo / precoder use POSIX-only APIs
@@ -153,7 +170,11 @@ jobs:
         # the stdin-driven stream demos plus the `selftests` aggregate — a target
         # that depends on every *Selftest binary (collected automatically in
         # CMakeLists.txt), so a newly-added self-test is picked up here without
-        # touching this file, and can never be skipped into a ctest "Not Run".
+        # touching this file, and a REGISTERED one can never be skipped into a
+        # ctest "Not Run". What the aggregate cannot see is a test that was never
+        # registered: the OpenSSL-gated station cells are simply absent when
+        # OpenSSL is, which is why configure sets
+        # DEVOURER_REQUIRE_STA_CRYPTO_TESTS=ON above.
         run: cmake --build build --target devourer streamtx duplex selftests
 
       - name: Test
@@ -211,10 +232,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependency libraries
-        run: sudo apt install libusb-1.0-0-dev
+        run: sudo apt install libusb-1.0-0-dev libssl-dev
 
       - name: Configure (${{ matrix.name }})
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.flags }} -S ${{ github.workspace }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DDEVOURER_REQUIRE_STA_CRYPTO_TESTS=ON ${{ matrix.flags }} -S ${{ github.workspace }}
 
       - name: Build (${{ matrix.name }})
         run: cmake --build build
@@ -234,7 +255,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependency libraries
-        run: sudo apt install libusb-1.0-0-dev
+        run: sudo apt install libusb-1.0-0-dev libssl-dev
 
       - name: Configure (ASan + UBSan)
         # DEVOURER_MT7612U=ON here too: that subtree moved from calloc/free to
@@ -243,6 +264,7 @@ jobs:
         run: >
           cmake -B build-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DDEVOURER_SANITIZE=address+undefined -DDEVOURER_MT7612U=ON
+          -DDEVOURER_REQUIRE_STA_CRYPTO_TESTS=ON
           -S ${{ github.workspace }}
 
       - name: Build (ASan + UBSan)

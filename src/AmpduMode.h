@@ -20,6 +20,15 @@
  *      <= 0x08 disable aggregation entirely). Clearing 0x04BC BIT6 (halmac
  *      sets it) is worth ~+40% on the aggregated path (8822B-proven).
  *
+ * WHICH FRAMES the descriptor half applies to: DATA frames. On Jaguar3 that
+ * is enforced - management and control frames keep their own queue (QSEL
+ * 0x12, HIGH), retry limit and no AGG_EN (jaguar3::tx_qsel, pinned by
+ * tests/txqueue_selftest.cpp). Jaguar1 and Jaguar2 still stamp it on every
+ * frame they send; over USB every frame rides one bulk-OUT endpoint there
+ * anyway, so a management frame's QSEL moves no endpoint (the PCIe 8821CE
+ * picks its DMA ring from QSEL, so there it does). The DEVOURER_TX_QSEL /
+ * DEVOURER_TX_AMPDU spike knobs apply to every frame on every backend.
+ *
  * The caller still has to keep the TX queue fed deep enough for the MAC to
  * have frames to aggregate — a shallow feed makes it SIFS-burst single-MPDU
  * aggregates (txdemo DEVOURER_TX_THREADS is the bench lever; a real feeder

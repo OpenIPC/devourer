@@ -74,13 +74,26 @@ public:
   size_t send_packets(const TxPacketView *pkts, size_t count) override;
   /* Hardware ACK responder (IRadio contract; src/AckResponder.h). */
   bool SetAckResponder(const devourer::MacAddr &mac) override;
+  /* The TX/beacon register witness — see the definition. Read-only; safe to
+   * call on a chip whose transmitter has stopped, which is the whole point.
+   * Serialized on _reg_mu against the coex runtime tick, so the dump is one
+   * chip state. */
+  void DumpChipState() override;
+  uint32_t GetTxDmaStatus() override;
+  bool HasTxDmaStatus() const override { return true; }
+  /* Serialized on _reg_mu against the coex runtime tick for the whole dump
+   * (~1024 register reads, so it holds the tick off that long - a diagnostic
+   * cost). */
+  bool DumpMacRegisters() override;
+  bool ReadPacketBuffer(int sel, uint32_t offset, uint8_t *out,
+                        size_t n) override;
   void ClearAckResponder() override;
   /* A-MPDU TX mode (IRadio contract; src/AmpduMode.h). Programs the 8822C
    * aggregate-fill timer (0x455) under _reg_mu (serialized against the coex
    * thread) and records the descriptor state the TX path reads. */
   bool SetAmpduMode(const devourer::AmpduMode &mode) override;
   void ClearAmpduMode() override;
-  devourer::AmpduMode GetAmpduMode() override { return _ampdu; }
+  devourer::AmpduMode GetAmpduMode() override { return ampdu_snapshot(); }
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override;
   /* EFUSE MAC at logical 0x157 — captured during rtw_hal_init on 8822E (the
@@ -88,6 +101,16 @@ public:
   bool GetPermanentMacAddress(uint8_t out[6]) override;
   uint64_t ReadTsf() override;
   bool WriteTsf(uint64_t tsf) override;
+  /* StartBeacon is all-or-nothing from its first enabling write on
+   * (net_type): a refused write rolls the arm back and returns false, a throw
+   * rolls it back and rethrows. The rollback runs StopBeacon's disable
+   * sequence (EN_BCN off, EN_BCNQ_DL off, net_type -> NoLink) and clears the
+   * active-beacon record - a failed RE-arm stops the previous beacon too - so
+   * UpdateBeaconPayload, the TBTT steers and PinBeaconTbtt refuse afterwards.
+   * StopBeacon also disarms a touched-but-never-armed beacon, and returns
+   * false (keeping it retryable) if a disable write is refused. The success
+   * path writes the same registers in the same order as before the rollback
+   * existed. */
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
   /* In-place beacon content swap (IRadio contract): a fresh
    * download_beacon_page; interval/TBTT/port identity untouched. */
@@ -265,9 +288,35 @@ private:
    * (zeroed, sized desc + pad + frame by the caller). Performs the per-packet
    * radiotap CHANNEL retune and the NDPA-period accounting, exactly like
    * send_packet. Returns the block length, 0 on malformed input. Shared by
-   * send_packet (pkt_offset=0) and the send_packets URB packer. */
+   * send_packet (pkt_offset=0) and the send_packets URB packer. `am` is the
+   * caller's ONE snapshot of _ampdu, shared with peek_tx_qsel so a
+   * SetAmpduMode between the peek and the build cannot change a frame's
+   * queue mid-run. */
   size_t build_tx_block(const uint8_t *packet, size_t length, uint8_t *out,
-                        uint8_t pkt_offset);
+                        uint8_t pkt_offset, const devourer::AmpduMode &am);
+  /* The QSEL build_tx_block will stamp on this buffer, WITHOUT building it,
+   * so send_packets can end a URB run at an endpoint change before anything
+   * is built - build_tx_block has side effects (the CCX report tag, a
+   * TX-power bank, a retune) that must run once per frame. Mirrors
+   * build_tx_block's QSEL writes for the same `am`; change the two
+   * together. */
+  uint8_t peek_tx_qsel(const uint8_t *packet, size_t length,
+                       const devourer::AmpduMode &am) const;
+  /* The bulk-OUT endpoint ADDRESS a frame with this QSEL goes to: the
+   * DeviceConfig tx.ep override (DEVOURER_TX_EP) when set - it wins for
+   * send_packet and send_packets alike and does NOT change the descriptor's
+   * QSEL - else the QSEL-derived endpoint (TxQueueMap.h), else the first
+   * bulk-OUT endpoint. */
+  uint8_t tx_ep_for_qsel(uint8_t qsel) const;
+  uint8_t tx_ep_for_descriptor(const uint8_t *desc) const;
+  /* One frame, one URB, one snapshot: send_packet's body, shared with
+   * send_packets' single-frame fallbacks so they use the call's snapshot. */
+  bool send_one(const uint8_t *packet, size_t length,
+                const devourer::AmpduMode &am);
+  /* Submit one already-built TXDMA block as its own URB on its own
+   * descriptor's endpoint - no rebuild, so no second round of
+   * build_tx_block's side effects. */
+  bool send_built_block(uint8_t *block, size_t len);
 
   RtlAdapter _device;
   const devourer::DeviceConfig _cfg;
@@ -324,10 +373,18 @@ private:
   void apply_txpkt_banks_locked();
   /* Requested-dB -> bank power-index steps (cfg.tuning.txpkt_step_qdb). */
   int txpkt_idx_for_qdb(int qdb) const;
-  /* A-MPDU TX mode (SetAmpduMode). Read lock-free in the TX descriptor path
-   * (same pattern as the TX-mode default); a control write during TX is the
-   * caller's to sequence and at worst tears one frame's mode benignly. */
+  /* A-MPDU TX mode (SetAmpduMode). Guarded by its own _ampdu_mu, taken only
+   * to copy a snapshot (send_packet / send_packets / GetAmpduMode) or to
+   * assign (SetAmpduMode) - never _reg_mu, which SetAmpduMode's register
+   * programming holds for a USB write the send path must not wait behind.
+   * Not std::atomic<AmpduMode>: 7 bytes, not lock-free, and it would pull in
+   * libatomic on GCC. */
   devourer::AmpduMode _ampdu;
+  mutable std::mutex _ampdu_mu;
+  devourer::AmpduMode ampdu_snapshot() const {
+    std::lock_guard<std::mutex> lk(_ampdu_mu);
+    return _ampdu;
+  }
   /* Rail-hit flags from the last apply (references clamped at 0/0x7f). */
   std::atomic<bool> _txpwr_sat_low{false};
   std::atomic<bool> _txpwr_sat_high{false};
@@ -430,6 +487,12 @@ private:
   /* Nominal beacon interval in TU while a beacon is active (0 = none); the
    * AdjustBeaconTiming one-shot tweak restores to this. */
   int _bcn_interval_tu = 0;
+  /* StartBeacon reached its first enabling write (under _reg_mu). Set before
+   * that write, cleared by StopBeacon or a successful rollback, so a beacon
+   * that failed mid-arm is still disarmable. */
+  bool _bcn_hw_touched = false;
+  bool disable_beacon_locked(); /* the StopBeacon writes; caller holds _reg_mu */
+  void rollback_beacon_arm_locked(const char *why); /* see the definition */
   /* TBTT-grid offset vs the TSF, in µs: TBTT fires at TSF % period == this.
    * 0 after StartBeacon and after every fine steer (the EN_BCN_FUNCTION
    * re-latch re-derives the grid from the TSF); each coarse interval-tweak

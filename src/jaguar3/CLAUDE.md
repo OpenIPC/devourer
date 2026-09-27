@@ -35,6 +35,42 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
 - The rtl8822e's hardware-bisected constraints (DPDT/pin-mux front end,
   single-path 1SS TX, spur channels, LCK, the 2.4 GHz TX kernel-parity
   limitation) live in `docs/8822e-quirks.md`.
+- **PROTOCOL_EN must be set before the LLT init.** halmac writes
+  `MAC_TRX_ENABLE = 0xFF` to `REG_CR` just before the auto-LLT init; this port
+  wrote the DMA-only `0x0F`. Without PROTOCOL_EN (bit 4) at that moment the
+  TX page allocator never terminates the data ring at `rsvd_boundary`: a
+  sustained load runs into the reserved region and overwrites the beacon
+  page, and the next TBTT latches `TXDMA_STATUS` `BIT_TXPKTBUF_REQ_ERR` - TX
+  dead for the life of the process. Bisected on an 8812CU: `0x1F` (DMA +
+  PROTOCOL) clean; `0x2F` (+SCHEDULE) and `0xCF` (+MACTX/MACRX) fault. The
+  later full-CR write (`0x06FF`) is too late. The code uses the vendor's full
+  `0xFF`; the 8822E was fixed with it (its `0x0F` control faulted at 172
+  frames, `0xFF` ran 4000/4000) and not bisected. With it the hardware
+  writes `LLT[rsvd_boundary - 1] = 0` itself by the end of a run past one
+  traversal; the LLT reads `0x792` at init either way (8822C and 8822E, and
+  the vendor driver's chip too), so an init-time LLT read proves nothing -
+  inject past a wrap with a beacon armed (the `txdemo`
+  `DEVOURER_TX_BEACON_TU` command in `docs/jaguar3-tx-ring.md` - it needs
+  data-sized frames and the RX thread) and read it after
+  (`IRtlRadio::ReadPacketBuffer`, sel 1). Found by diffing the vendor's
+  usbmon register writes against ours from the TRX enable to the LLT init:
+  `REG_CR` was the one difference. Plain injection never showed it - no
+  beacon engine reads the page. `GENERAL_INFO`/`PHYDM_INFO` H2C packets were
+  ruled out as the mechanism (sent byte-exact, consumed by the firmware, no
+  effect on the LLT).
+  Record: `docs/jaguar3-tx-ring.md`.
+- **Data frames leave the HIGH queue.** The QSEL order, the queue ->
+  endpoint map and its endpoint-count rule are `TxQueueMap.h`'s contract;
+  the send-path split and the `DEVOURER_TX_EP` override are
+  `RtlJaguar3Device.h`'s (`peek_tx_qsel`, `tx_ep_for_qsel`); which frames
+  A-MPDU applies to is `src/AmpduMode.h`'s. Measured, on an 8812CU (bulk-OUT
+  HIGH 0x05, NORMAL 0x06, LOW 0x08): QSEL and endpoint must agree - moving
+  QSEL alone changed nothing (HIGH still drained 64 -> 0); the endpoint alone
+  was not run (a reviewer predicted `TXDMA_STATUS`'s `EP_QSEL_DIFF` bit).
+  2026-09-27: `DEVOURER_TX_EP=0x06` put every send on EP 6 with 0 failed; the
+  aggregated path (`DEVOURER_TX_BATCH=4` + `DEVOURER_TX_USB_AGG=4`) and
+  A-MPDU over QoS data ran with 0 failed. Unmeasured: 1-, 2- and 4-endpoint
+  parts.
 
 ## Bring-up cost and the pipelined register writes
 

@@ -2534,9 +2534,11 @@ void HalJaguar2::dig_step() {
 }
 
 void HalJaguar2::enable_rx() {
-  /* CR (0x100) full MAC enable: TRX-DMA | PROTOCOL | SCHEDULE | MACTX | MACRX
-   * (+ENSWBCN), matching the jaguar3 RX-enable value 0x06FF. init_mac_cfg only
-   * set the DMA bits; without MACRXEN (BIT7) the MAC RX engine never runs. */
+  /* CR (0x100) = 0x06FF, matching Jaguar3. The low byte (TRX-DMA | PROTOCOL
+   * | SCHEDULE | MACTX | MACRX) is already on - init_mac_cfg writes halmac
+   * MAC_TRX_ENABLE before the LLT init (see HalmacJaguar2MacInit); this adds
+   * bits 9 and 10 (ENSEC, CALTMR_EN in hal/hal_com_reg.h). Bit 8, ENSWBCN,
+   * stays clear. Unchanged by the TX-ring fix. */
   _device.rtw_write16(0x0100, 0x06FF);
   /* Promiscuous RX for monitor: the vendor monitor RCR (hal_com.c:
    * RCR_AAP|APM|AM|AB|APWRMGT|APP_PHYST_RXFF|APP_MIC|APP_ICV = 0x7000002F)

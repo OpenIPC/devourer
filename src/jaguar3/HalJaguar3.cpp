@@ -502,9 +502,11 @@ void HalJaguar3::monitor_rx_cfg() {
   constexpr uint16_t REG_RXFLTMAP1_8822C = 0x06A2;
   constexpr uint16_t REG_RXFLTMAP2_8822C = 0x06A4;
   constexpr uint16_t REG_RX_DRVINFO_SZ_8822C = 0x060F;
-  /* Enable the full MAC: CR = TRX-DMA | PROTOCOL_EN | SCHEDULE_EN | MACTXEN |
-   * MACRXEN(+ENSWBCN). init_mac_cfg only set CR=0x0F (DMA enable); without
-   * MACRXEN (BIT7) the MAC RX engine never runs — the structured-path RX gap. */
+  /* CR = 0x06FF. The low byte (TRX-DMA | PROTOCOL | SCHEDULE | MACTX | MACRX)
+   * is already set: init_mac_cfg wrote halmac MAC_TRX_ENABLE, which must be
+   * on before the LLT init (see MacInit). This adds bits 9 and 10 (ENSEC and
+   * CALTMR_EN in hal/hal_com_reg.h, halmac's MAC_SEC_EN / 32K_CAL_TMR_EN);
+   * bit 8, ENSWBCN, stays clear. Unchanged by the TX-ring fix. */
   _device.rtw_write16(0x0100, 0x06FF);
   /* accept-all + append phy-status (BIT28 is inside the leading 0xF nibble).
    * BIT0 (AAP) is what makes monitor mode promiscuous for unicast: without it

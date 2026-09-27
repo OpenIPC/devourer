@@ -147,10 +147,80 @@ public:
    * (claim_interface_then_reset's `do_reset=false`) — a USB reset re-runs the
    * chip's own boot and is just as destructive.
    *
-   * Output format matches DEVOURER_DUMP_CANARY, so two dumps diff directly with
-   * tests/canary_diff.py. Reading a powered-down chip yields garbage or throws;
-   * interpreting that is the caller's job. No-op where unsupported (default). */
+   * Output: the DEVOURER_DUMP_CANARY block, so two dumps diff directly with
+   * tests/canary_diff.py. A backend may follow the block with its own
+   * labelled diagnostic lines OUTSIDE the canary envelope, which canary_diff
+   * ignores - Jaguar3 adds the TX/beacon witness registers as
+   * "j3 chipstate raw: MAC 0x... = 0x..." lines and a decoded reading of
+   * them. Reading a powered-down chip yields garbage or throws; interpreting
+   * that is the caller's job. No-op where unsupported (default). */
   virtual void DumpChipState() {}
+  /* The MAC's TX-DMA fault latch, for a caller that needs to know its
+   * transmitter has stopped.
+   *
+   * This is not a statistic. The vendor driver treats ANY nonzero value as a
+   * fatal TXDMA error and answers it with a MAC silent reset
+   * (core/rtw_sreset.c, hal/rtl8822c/rtl8822c_ops.c in the rtl88x2cu tree);
+   * once a bit here is set the part has stopped transmitting and will not
+   * resume on its own. Measured on an RTL8812CU under a sustained downlink
+   * load: 0x00040000, BIT_TXPKTBUF_REQ_ERR, latched while the receiver went
+   * on working perfectly.
+   *
+   * NOT FOR THE SEND PATH. This is a register read over USB - see the
+   * standing rule in CLAUDE.md that nothing reads a register per frame - so
+   * poll it on a supervisory cadence, not per transmission.
+   *
+   * THROWS on a failed USB transfer, like every register read. A poller must
+   * catch and skip that sample - on a busy bus these fail while the chip
+   * works on (the measured rate is in src/jaguar2/CLAUDE.md).
+   *
+   * Returns 0 where unsupported, which is indistinguishable from healthy:
+   * check HasTxDmaStatus() before reading a 0 as "no fault". */
+  virtual uint32_t GetTxDmaStatus() { return 0; }
+  /* True where GetTxDmaStatus reads the real latch (Jaguar2, Jaguar3). */
+  virtual bool HasTxDmaStatus() const { return false; }
+  /* The MAC registers in the rtl88x2cu vendor driver's /proc/.../
+   * mac_reg_dump layout: the same two ranges it dumps on the 88xx parts,
+   * 0x0000..0x07FF and 0x1000..0x17FF, a "======= MAC REG =======" banner,
+   * then one row per 16 bytes in its exact format - "0x%04x" followed by
+   * " 0x%08x " four times, so each row ends in a space. Each row is one
+   * Logger info line (stderr, "devourer [I] " prefix); strip the prefix and
+   * the rows diff line by line against the vendor's. A STATE diff: it cannot
+   * see a bit that bring-up sets late but needed early (the TX page-ring
+   * defect was found by diffing register WRITES from usbmon instead -
+   * docs/jaguar3-tx-ring.md). 1024 register reads over USB: diagnostic use
+   * only. Returns true after a complete dump; returns false - and prints
+   * nothing - where not ported (the default; only Jaguar3 implements it). A
+   * failed register read throws, like every register read, mid-dump. */
+  virtual bool DumpMacRegisters() { return false; }
+  /* Read the chip's internal packet memory through the debug window
+   * (REG_PKTBUF_DBG_CTRL + 0x8000..0x8FFF), a port of halmac read_buf_88xx.
+   * `sel` 0 = TX FIFO, 1 = the LLT (the linked list that chains TX pages).
+   * `offset` is in bytes from the start of that memory. Diagnostic: it
+   * borrows a shared debug window, so never call it on the send path; the
+   * window is restored on every exit, a throw included. The whole
+   * save/select/read/restore runs under the backend's register mutex, the one
+   * la_capture (which borrows the same 0x0140 window) also holds, so the two
+   * serialise within one process; another process on the same adapter is not
+   * covered. The vendor's dump_fifo gates the RX clock around the same read;
+   * this does not, so a FIFO read with RX running is a snapshot of moving
+   * memory. Throws on a failed USB transfer, like GetTxDmaStatus - catch it.
+   * PRECONDITIONS, refused with false: `offset` and `n` both multiples of 4,
+   * and the window holding the read's LAST byte still inside the 12-bit
+   * window field of 0x0140 (src/PktBufWindow.h), and `out` non-null when
+   * n != 0. n == 0 returns true without touching the chip (`out` unused).
+   * The size of the selected memory itself is NOT checked -
+   * reading past the end of the TX FIFO or LLT returns whatever the window
+   * maps there, so bound `offset + n` by the part's own sizes.
+   * Also false when a window could not be selected (the 0x0140 write was
+   * refused): nothing is read past that point, and `out` may be partly
+   * filled. A failed restore of the window on exit is logged as a warning.
+   * Returns false where unsupported. */
+  virtual bool ReadPacketBuffer(int sel, uint32_t offset, uint8_t *out,
+                                size_t n) {
+    (void)sel; (void)offset; (void)out; (void)n;
+    return false;
+  }
   /* The MAC carrier-sense gate, one bit at a time.
    *
    * SetCcaMode is all-or-nothing, and on Jaguar1 and Jaguar3 it is two

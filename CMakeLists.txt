@@ -686,6 +686,16 @@ add_executable(txdemo
 target_link_libraries(txdemo PUBLIC devourer PRIVATE PkgConfig::libusb)
 target_include_directories(txdemo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 
+# examples/common/env_config.cpp headless: the env-var -> DeviceConfig map
+# every demo shares. No device, no libusb calls.
+add_executable(EnvConfigSelftest
+    tests/env_config_selftest.cpp
+    examples/common/env_config.cpp
+)
+target_link_libraries(EnvConfigSelftest PUBLIC devourer)
+target_include_directories(EnvConfigSelftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+add_test(NAME env_config COMMAND EnvConfigSelftest)
+
 # dwell-1 A/B injection over the firmware channel switch (issue #272 data
 # plane): one admitted data-frame opportunity per wall-clock slot, with
 # bounded admission so a frame for context A can never air on B.
@@ -1068,6 +1078,17 @@ target_include_directories(HeRadiotapSelftest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_test(NAME he_radiotap COMMAND HeRadiotapSelftest)
+
+# Headless guard for the radiotap TX_FLAGS NOACK choice - the flag that
+# decides whether a unicast frame is retried (MT7612U: NOACK disables the
+# hardware retry). Every builder layout, default and both explicit settings.
+add_executable(RadiotapNoackSelftest
+    tests/radiotap_noack_selftest.cpp
+)
+target_link_libraries(RadiotapNoackSelftest PRIVATE devourer)
+target_include_directories(RadiotapNoackSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME radiotap_noack COMMAND RadiotapNoackSelftest)
 
 # Headless round-trip guard for the 802.11ax Trigger frame path (src/TriggerTwt.h
 # build_basic_trigger + he_ru_alloc, src/TriggerParse.h parse_trigger): build ->

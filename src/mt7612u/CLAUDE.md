@@ -55,3 +55,12 @@ frames in 10 s) was never entered, and whether the poll disturbs gain tracking
 submits 3500 fps host-side while an independent witness decodes none of it.
 `DEVOURER_MT7612U_PHY_TICK=0` is the control arm's switch; harness shape in
 the `mt7612u_phy_tick` doc comment.
+
+## TX retries
+
+Where each piece lives: NOACK vs. ACK-requesting radiotap -
+`build_stream_radiotap` in `src/RadiotapBuilder.h`; the retry-limit knob -
+`tx.retry_limit` in `src/DeviceConfig.h`, applied at every bring-up by
+`mt7612u_set_retry_limit` (`caps.cpp`); measurements -
+`docs/mt7612u-tx-retry.md`; reproducer - `mt7612uprobe txs` (`gate_txs` in
+`tools/bringup.cpp`).

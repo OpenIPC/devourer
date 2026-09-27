@@ -238,12 +238,21 @@ struct DeviceConfig {
     /* env: DEVOURER_TX_RETRY_LIMIT — per-frame hardware retry limit (0..63;
      * Kestrel ceiling 62 — its attempts-counting WD field folds +1). Maps to
      * the TX descriptor DATA_RETRY_LIMIT / RTS_DATA_RTY_LMT field on the
-     * 11ac generations and the RTL8733B, and wd_info DATA_TXCNT_LMT on
-     * Kestrel. 0 = no retries
+     * 11ac generations and the RTL8733B, wd_info DATA_TXCNT_LMT on
+     * Kestrel, and on the MT7612U the GLOBAL MAC register MT_TX_RETRY_CFG
+     * (short and long limit alike; per adapter, not per frame), programmed
+     * at every bring-up. One meaning on every chip: the number of hardware
+     * retries an ACK-requested frame gets. The 0..63 range is the Realtek
+     * descriptor field's; the MT7612U's 8-bit register fields hold more, but
+     * this config reaches them only up to 63 (Mt7612uRadio clamps).
+     * 0 = no retries
      * (WFB default: FEC provides reliability, not MAC retries). On a busy
      * half-duplex link retries flood the air and blind the receiver.
      * Hardware-ARQ (SetAckResponder + unicast TA, docs/scheduled-mac.md)
-     * needs a nonzero value. Inert on the 8814A die only (vendor
+     * needs a nonzero value, as does any unicast link that relies on MAC
+     * retransmission. On the MT7612U that includes the default 0: a default
+     * session airs ACK-requested frames with 0 retries, not the initvals'
+     * 15 (31 over 2032 bytes). Inert on the 8814A die only (vendor
      * DATA_RETRY_LIMIT=0 carve-out kept pending its bench). */
     int retry_limit = 0;
     /* env: DEVOURER_ACK_TIMEOUT_US — hardware ACK response window in µs

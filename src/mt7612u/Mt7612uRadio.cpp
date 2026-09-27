@@ -1,5 +1,6 @@
 #include "mt7612u/Mt7612uRadio.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <exception>
@@ -223,6 +224,24 @@ void Mt7612uRadio::apply_config() {
                   "backend - the MAC keeps its own default, so the range "
                   "budget this knob implies does not apply here",
                   _cfg.tx.ack_timeout_us);
+
+  /* tx.retry_limit, at every bring-up, with the same meaning as on the
+   * Realtek parts: 0 (the default) = no retries. Here it lands in a GLOBAL
+   * register (every ACK-requested frame), replacing the initvals' 15 (31
+   * over 2032 bytes). Refusal is fatal like the responder's - a session
+   * must not air with a retry depth it did not ask for. Clamped to the
+   * config's 0..63 grammar (DeviceConfig.h), though the register field
+   * holds 0..255. */
+  {
+    const int limit = std::clamp(_cfg.tx.retry_limit, 0, 63);
+    if (limit != _cfg.tx.retry_limit)
+      _logger->warn("MT7612U: tx.retry_limit={} is outside the config's "
+                    "0..63 - applying {}", _cfg.tx.retry_limit, limit);
+    if (mt7612u_set_retry_limit(_dev, limit) != 0)
+      throw std::runtime_error("MT7612U retry limit could not be set");
+    _logger->info("MT7612U: hardware retry limit {} (global, ACK-requested "
+                  "frames only)", limit);
+  }
 
   if (_cfg.tuning.disable_cca)
     _logger->warn("MT7612U: DEVOURER_DIS_CCA / tuning.disable_cca is not "
@@ -1238,9 +1257,10 @@ devourer::AdapterCaps Mt7612uRadio::GetAdapterCaps() {
   c.tsf_write_ok = hw.tsf_write;
   /* Measured on air: 0 frames at the stimulus radio unarmed, 3500+ armed. */
   c.ack_responder_ok = true;
-  /* Unmeasured, so false rather than optimistic - nothing here drives the
-   * hardware retry counter. */
-  c.tx_retry_limit_ok = false;
+  /* tx.retry_limit reaches MT_TX_RETRY_CFG (global, not per frame) at every
+   * bring-up and is read back. On air, by the chip's own TX status:
+   * docs/mt7612u-tx-retry.md. */
+  c.tx_retry_limit_ok = true;
   c.narrowband_ok = false;
   /* Measured 526 ms full / 48 ms with calibration skipped, against 0.5-2.5 ms
    * on the Realtek parts: the RF plane lives behind the MCU. Not "fast". */

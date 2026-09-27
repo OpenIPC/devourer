@@ -374,13 +374,25 @@ int mt_hdrlen_from_fc(const uint8_t *frame);
 #define MT_TXOPT_AMPDU     0x02  /* AMPDU flag + density + BA window */
 #define MT_TXOPT_QSEL_MGMT 0x04  /* mt76 uses MT_QSEL_MGMT for aggregated TX */
 #define MT_TXOPT_BEACON    0x08  /* HW timestamp (FLAGS_TS) + HW sequence (ACK_CTL_NSEQ) */
+#define MT_TXOPT_TXS       0x10  /* non-zero txwi pktid: file a MT_TX_STAT_FIFO entry */
+/* The pktid MT_TXOPT_TXS writes. The status FIFO echoes it in
+ * MT_TX_STAT_FIFO_EXT_PKTID, which is how a reader tells its own entries from
+ * anyone else's. By default MT_TXS_PKTID (mt76's MT_PACKET_ID_NO_SKB); a
+ * caller that must tell its OWN batches apart (the bring-up txs gate, one
+ * pktid per arm) passes MT_TXOPT_PKTID(id) alongside MT_TXOPT_TXS. Keep ids
+ * in mt76's range, 1..127: 0 means "no status" and bit 7 is mt76's
+ * MT_PACKET_ID_HAS_RATE. */
+#define MT_TXS_PKTID       1
+#define MT_TXOPT_PKTID(id)    (((unsigned)(id) & 0x7fu) << 8)
+#define MT_TXOPT_PKTID_GET(o) (((unsigned)(o) >> 8) & 0x7fu)
 int mt_tx_build(struct mt7612u_dev *d, uint8_t *buf, size_t bufsz,
                 const void *frame, size_t len,
                 const struct mt7612u_tx_rate *rate, uint8_t wcid, unsigned opts,
                 int next_vld, int trailer);
 int mt_tx_raw(struct mt7612u_dev *d, const void *frame, size_t len,
               const struct mt7612u_tx_rate *rate, uint8_t wcid, unsigned opts);
-void mt_wcid_setup(struct mt7612u_dev *d, uint8_t idx, const uint8_t *mac);
+/* 0 once the entry's address reads back, -1 otherwise. */
+int  mt_wcid_setup(struct mt7612u_dev *d, uint8_t idx, const uint8_t *mac);
 
 /* --- beacon.c --- */
 /* Static reserved-page beacon. mt_beacon_init() prepares the beacon engine

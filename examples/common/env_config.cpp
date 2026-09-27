@@ -1,9 +1,12 @@
 #include "env_config.h"
 
 #include <cctype>
+#include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "RadiotapBuilder.h"
 
@@ -35,6 +38,49 @@ bool env_long(const char *name, long *out) {
   if (!e || !*e)
     return false;
   *out = std::strtol(e, nullptr, 0);
+  return true;
+}
+
+/* env_long for a knob where a misread value is worse than no value: the
+ * whole string must be one number (same base auto-detect, surrounding
+ * whitespace allowed). A non-numeric value warns and reads as unset. Used by
+ * DEVOURER_TX_RETRY_LIMIT only, where env_long's prefix parse would quietly
+ * turn "5x" into a 5-retry session and a typo into 0. */
+bool env_long_strict(const char *name, long *out) {
+  const char *e = std::getenv(name);
+  if (!e || !*e)
+    return false;
+  char *end = nullptr;
+  errno = 0;
+  const long v = std::strtol(e, &end, 0);
+  /* No digits consumed: checked BEFORE skipping trailing whitespace, or a
+   * whitespace-only value would walk `end` off `e` and read as 0. */
+  bool bad = !end || end == e || errno == ERANGE;
+  while (!bad && std::isspace(static_cast<unsigned char>(*end)))
+    ++end;
+  if (bad || *end != '\0') {
+    /* The raw value is the operator's, so escape it: a newline in it would
+     * split this into two diagnostic lines and break the one-line contract. */
+    std::string shown;
+    for (const char *p = e; *p; ++p) {
+      const unsigned char c = static_cast<unsigned char>(*p);
+      char hex[5];
+      if (c == '\n')      shown += "\\n";
+      else if (c == '\r') shown += "\\r";
+      else if (c == '\t') shown += "\\t";
+      else if (c < 0x20 || c == 0x7f) {
+        std::snprintf(hex, sizeof hex, "\\x%02x", c);
+        shown += hex;
+      } else {
+        shown += static_cast<char>(c);
+      }
+    }
+    std::fprintf(stderr, "devourer [W] %s='%s' is not a number — ignored\n",
+                 name, shown.c_str());
+    std::fflush(stderr);
+    return false;
+  }
+  *out = v;
   return true;
 }
 
@@ -126,7 +172,7 @@ devourer::DeviceConfig devourer_config_from_env() {
     /* 1..255; out-of-range low keeps the library default (a 0 collapsing
      * to 1 us would write off every frame). */
     cfg.tx.ack_timeout_us = static_cast<int>(v > 255 ? 255 : v);
-  if (env_long("DEVOURER_TX_RETRY_LIMIT", &v))
+  if (env_long_strict("DEVOURER_TX_RETRY_LIMIT", &v))
     cfg.tx.retry_limit = static_cast<int>(v < 0 ? 0 : (v > 63 ? 63 : v));
   if (const char *e = env_str("DEVOURER_TX_RETRY_FALLBACK")) {
     if (str_ieq(e, "off")) {

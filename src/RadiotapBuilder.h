@@ -27,6 +27,18 @@ namespace devourer {
  * well-formed radiotap header — no 802.11 frame body. */
 std::vector<uint8_t> build_stream_radiotap(const TxMode& mode);
 
+/* The same header with the TX_FLAGS NOACK bit chosen. The one-argument form
+ * always sets it - right for a broadcast stream (the FPV downlink), where
+ * nothing ACKs and a backend that honours it must not wait. A unicast frame
+ * to a peer that ACKs wants no_ack=false, or the transmitter never retries:
+ * on the MT7612U NOACK clears the TXWI ACK request and its hardware
+ * retry is never used. Group-addressed frames must keep NOACK.
+ * Only the MT7612U reads this bit. The Realtek backends ignore radiotap
+ * TX_FLAGS and keep their existing ACK behaviour whatever no_ack says:
+ * Jaguar1 always marks the descriptor BMC; Jaguar2/3, Kestrel and the
+ * RTL8733B set BMC from addr1's group bit. */
+std::vector<uint8_t> build_stream_radiotap(const TxMode& mode, bool no_ack);
+
 /* Parse a TX-mode spec string into a TxMode. Single slash-separated string:
  *   <rate>[/<bw>][/SGI][/LDPC][/STBC][/ER|/ER106][/DCM]   (case-insensitive)
  *     <rate> : 6M|9M|12M|18M|24M|36M|48M|54M | MCS0..MCS31 |

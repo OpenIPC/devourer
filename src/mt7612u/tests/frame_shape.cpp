@@ -540,6 +540,31 @@ static void test_beacon_txwi(void)
 	if (flags_lo & MT_TXWI_FLAGS_TS)          { printf("  FAIL data frame set FLAGS_TS\n"); fails++; }
 	if (ack_ctl & MT_TXWI_ACK_CTL_NSEQ)       { printf("  FAIL data frame set NSEQ\n"); fails++; }
 	if (!(ack_ctl & MT_TXWI_ACK_CTL_REQ))     { printf("  FAIL data frame did not request an ACK\n"); fails++; }
+
+	/* txwi pktid (byte 19 of the TXWI, buf[4 + 19]): 0 on a normal send, so
+	 * nothing files TX status; MT_TXS_PKTID with MT_TXOPT_TXS alone; the
+	 * caller's id with MT_TXOPT_PKTID(id) - the txs gate relies on that to
+	 * tell one arm's status entries from the previous arm's late ones. */
+	printf("txwi pktid (MT_TXOPT_TXS / MT_TXOPT_PKTID):\n");
+	{
+		static const struct { unsigned opts; uint8_t want; } pk[] = {
+			{ 0,                                  0 },
+			{ MT_TXOPT_TXS,                       MT_TXS_PKTID },
+			{ MT_TXOPT_TXS | MT_TXOPT_PKTID(3),   3 },
+			{ MT_TXOPT_TXS | MT_TXOPT_PKTID(127), 127 },
+			{ MT_TXOPT_PKTID(9),                  0 },  /* no TXS, no status */
+		};
+		for (unsigned i = 0; i < sizeof pk / sizeof pk[0]; i++) {
+			total = mt_tx_build(&d, buf, sizeof buf, data, sizeof data,
+			                    &data_rate, 0xff, pk[i].opts, 0, 0);
+			if (total < 0) { printf("  FAIL pktid build returned %d\n", total); fails++; return; }
+			if (buf[4 + 19] != pk[i].want) {
+				printf("  FAIL opts 0x%x: pktid want %u got %u\n",
+				       pk[i].opts, pk[i].want, buf[4 + 19]);
+				fails++;
+			}
+		}
+	}
 }
 
 int main(void)

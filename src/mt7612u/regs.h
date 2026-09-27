@@ -222,6 +222,20 @@ enum mt_mcu_cr_mode { MT_RF_CR, MT_BBP_CR, MT_RF_BBP_CR, MT_HL_TEMP_CR_UPDATE };
 #define MT_TX_RTS_CFG        0x1344
 #define MT_TX_RTS_CFG_RETRY_LIMIT GENMASK(7, 0)
 #define MT_TX_RETRY_CFG      0x134c
+/* rt2800 TX_RTY_CFG layout (initvals 0x47f01f0f = short 15, long 31, long
+ * threshold 2032 bytes): a frame longer than the threshold uses the long
+ * limit, anything else the short one. */
+#define MT_TX_RETRY_CFG_SHORT GENMASK(7, 0)
+#define MT_TX_RETRY_CFG_LONG  GENMASK(15, 8)
+/* The word mt7612u_set_retry_limit() writes: both limits set to `limit`
+ * (0..255), every other field (the long threshold at bits 16+) preserved.
+ * Pure, so tests/field_macros pins it without a device. */
+static inline uint32_t mt_retry_cfg_with_limit(uint32_t cur, uint32_t limit)
+{
+	cur &= ~(MT_TX_RETRY_CFG_SHORT | MT_TX_RETRY_CFG_LONG);
+	return cur | FIELD_PREP(MT_TX_RETRY_CFG_SHORT, limit) |
+	       FIELD_PREP(MT_TX_RETRY_CFG_LONG, limit);
+}
 #define MT_TX_LINK_CFG       0x1350
 #define MT_TX_CFACK_EN       BIT(12)
 #define MT_TX_PWR_CFG_0      0x1314
@@ -352,6 +366,27 @@ enum mt_mcu_cr_mode { MT_RF_CR, MT_BBP_CR, MT_RF_BBP_CR, MT_HL_TEMP_CR_UPDATE };
 #define MT_TX_STA_0          0x170c
 #define MT_TX_STA_1          0x1710
 #define MT_TX_STA_2          0x1714
+/*
+ * Per-MPDU transmit status. mt76x02 pops one entry per read of
+ * MT_TX_STAT_FIFO while VALID is set, and the matching retry count and pktid
+ * live in the separate EXT register, which mt76 reads FIRST - the main read
+ * pops the entry (mt76x02_mac_load_tx_status).
+ *
+ * The MAC only files an entry for a frame whose txwi pktid is non-zero, which
+ * is why MT_TXOPT_TXS exists: the library's normal send path leaves pktid 0
+ * and therefore generates no status traffic at all. The bring-up tool's `txs`
+ * gate is the one reader (docs/mt7612u-tx-retry.md).
+ */
+#define MT_TX_STAT_FIFO      0x1718
+#define MT_TX_STAT_FIFO_VALID     BIT(0)
+#define MT_TX_STAT_FIFO_SUCCESS   BIT(5)
+#define MT_TX_STAT_FIFO_AGGR      BIT(6)
+#define MT_TX_STAT_FIFO_ACKREQ    BIT(7)
+#define MT_TX_STAT_FIFO_WCID      GENMASK(15, 8)
+#define MT_TX_STAT_FIFO_RATE      GENMASK(31, 16)
+#define MT_TX_STAT_FIFO_EXT  0x1798
+#define MT_TX_STAT_FIFO_EXT_RETRY GENMASK(7, 0)
+#define MT_TX_STAT_FIFO_EXT_PKTID GENMASK(15, 8)
 /* 16 registers, two 16-bit buckets each: the A-MPDU length histogram. */
 #define MT_TX_AGG_CNT_BASE0  0x1720
 #define MT_TX_AGG_CNT_BASE1  0x174c

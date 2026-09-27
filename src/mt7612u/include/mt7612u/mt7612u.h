@@ -280,6 +280,21 @@ int  mt7612u_set_ack_responder(struct mt7612u_dev *dev, const uint8_t mac[6]);
 void mt7612u_clear_ack_responder(struct mt7612u_dev *dev);
 
 /*
+ * The MAC's hardware retry limit for ACK-requested frames (0..255, the
+ * register fields' width). GLOBAL on this part, not per frame; sets the short
+ * and the long limit alike (the initvals leave short 15, long 31 for frames
+ * over 2032 bytes; the library does not call this for you - Mt7612uRadio
+ * does, from DeviceConfig tx.retry_limit). Frames sent radiotap NOACK never
+ * retry, whatever
+ * this says. Returns 0 once read back, negative otherwise (NULL `dev`
+ * included). The read-modify-write is atomic against the library's own
+ * register sequences (it holds the device I/O lock); ordering against the
+ * caller's OTHER setters on other threads is the caller's to serialise, as
+ * for every setter here.
+ */
+int  mt7612u_set_retry_limit(struct mt7612u_dev *dev, int limit);
+
+/*
  * Hardware beacon, from the MAC's reserved page.
  *
  * mt7612u_beacon_start() loads the beacon and arms the TBTT timer; the MAC

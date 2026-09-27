@@ -949,8 +949,12 @@ void Halrf8821c::pwr_track(int current_ofdm_index) {
   const int swing = avg > _pt_baseline ? up[delta] : -static_cast<int>(dn[delta]);
   if (swing == _pt_last_swing)
     return;
-  _pt_last_swing = swing;
+  /* Record the swing only once it is WRITTEN: pwr_track_write is USB
+   * register traffic and can throw (the thermal thread catches and skips
+   * the tick), and a swing recorded before a write that never landed would
+   * read as "no change" next tick and never be retried. */
   pwr_track_write(swing, current_ofdm_index);
+  _pt_last_swing = swing;
   _logger->info("Jaguar2 8821C thermal-track: avg={} d={} swing={}", avg, delta,
                 swing);
 }

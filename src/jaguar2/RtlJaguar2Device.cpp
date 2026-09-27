@@ -1,4 +1,5 @@
 #include "RtlJaguar2Device.h"
+#include "PktBufWindow.h"
 
 #include <algorithm>
 #include <climits>
@@ -298,7 +299,13 @@ void RtlJaguar2Device::start_pwrtrack() {
         continue;
       int cck = -1, ofdm = -1, mcs7 = -1;
       _hal.txagc_shadow(cck, ofdm, mcs7);
-      _cal->pwr_track(ofdm);
+      /* Same hazard as the DIG thread: a register read that throws under RX
+       * load must skip this tick, not terminate the process. */
+      try {
+        _cal->pwr_track(ofdm);
+      } catch (const std::exception &e) {
+        _logger->warn("Jaguar2 thermal track: tick skipped ({})", e.what());
+      }
     }
   });
   _logger->info("RtlJaguar2Device: thermal-track thread started");
@@ -525,9 +532,21 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   _dig_stop = false;
   if (!_cfg.tuning.skip_dig) {
     _dig_thread = std::thread([this] {
+      uint64_t skipped = 0;
       while (!_dig_stop && !g_devourer_should_stop) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        _hal.dig_step();
+        /* A control-transfer read can race the async bulk-IN and throw under
+         * RX load (the same hazard the CFO tracker guards below). Uncaught on
+         * this thread it is std::terminate - it killed an 8812BU AP mid-way
+         * through a 14-20 Mbit/s uplink. DIG is a tracking loop: a failed
+         * tick is skipped, counted, and the next one re-reads everything. */
+        try {
+          _hal.dig_step();
+        } catch (const std::exception &e) {
+          if (skipped++ % 100 == 0)
+            _logger->warn("Jaguar2 DIG: tick skipped after a failed register "
+                          "access ({}), {} so far", e.what(), skipped);
+        }
       }
     });
     _logger->info("RtlJaguar2Device: DIG thread started");
@@ -1777,14 +1796,37 @@ bool RtlJaguar2Device::StartBeacon(const uint8_t *beacon, size_t len,
     _device.rtw_write16(0x061c, (uint16_t)(bs[4] | (bs[5] << 8)));
   }
   /* net_type = AP (REG_CR+2 0x0102 [1:0]); interval; BCN_CTRL = EN_BCN_FUNCTION |
-   * DIS_TSF_UDT (0x18); EN_BCNQ_DL (BIT22 REG_FWHW_TXQ_CTRL). */
-  uint8_t nt = _device.rtw_read8(0x0102);
-  _device.rtw_write8(0x0102, static_cast<uint8_t>((nt & ~0x03u) | 0x03u));
-  _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */,
-                      static_cast<uint16_t>(interval_tu));
-  _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 3) | (1u << 4));
-  uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
-  _device.rtw_write<uint32_t>(0x0420, txq | (1u << 22) /* BIT_EN_BCNQ_DL */);
+   * DIS_TSF_UDT (0x18); EN_BCNQ_DL (BIT22 REG_FWHW_TXQ_CTRL).
+   *
+   * ROLLBACK: from the first enabling write on, a failure must not leave a
+   * half-armed beacon behind - the chip beacons autonomously, and Jaguar2 has
+   * no teardown power-down to silence it. The touch is recorded BEFORE that
+   * write; a refused write (false) rolls back and returns false, a throw
+   * rolls back and rethrows (rollback_beacon_arm_locked), and StopBeacon also
+   * disarms a touched-but-never-armed beacon. The && chain stops at the first
+   * refusal; on success it writes the same registers in the same order. */
+  _bcn_hw_touched = true;
+  bool armed = false;
+  try {
+    uint8_t nt = _device.rtw_read8(0x0102);
+    armed =
+        _device.rtw_write8(0x0102, static_cast<uint8_t>((nt & ~0x03u) | 0x03u)) &&
+        _device.rtw_write16(0x0554 /* REG_BCN_INTERVAL */,
+                            static_cast<uint16_t>(interval_tu)) &&
+        _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 3) | (1u << 4));
+    if (armed) {
+      uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
+      armed = _device.rtw_write<uint32_t>(0x0420,
+                                          txq | (1u << 22) /* BIT_EN_BCNQ_DL */);
+    }
+  } catch (...) {
+    rollback_beacon_arm_locked("a register access threw");
+    throw;
+  }
+  if (!armed) {
+    rollback_beacon_arm_locked("a register write was refused");
+    return false;
+  }
   /* Retain the MPDU + interval for the TBTT-steer re-download
    * (AdjustBeaconTiming*): the J2 engine loses the bcn-valid latch on any
    * re-latch and the hardware does not keep the reserved-page bytes. */
@@ -1820,19 +1862,150 @@ bool RtlJaguar2Device::UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
   return redownload_beacon_locked();
 }
 
-bool RtlJaguar2Device::StopBeacon() {
+uint32_t RtlJaguar2Device::GetTxDmaStatus() {
+  /* Serialized on _reg_mu against the other register-touching control
+   * calls. A failed transfer still throws. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  if (_bcn_mpdu.empty())
+  return _device.rtw_read<uint32_t>(0x0210); /* REG_TXDMA_STATUS */
+}
+
+bool RtlJaguar2Device::ReadPacketBuffer(int sel, uint32_t offset,
+                                        uint8_t *out, size_t n) {
+  /* halmac read_buf_88xx (the 88xx common code): 4 KiB windows at
+   * 0x8000..0x8FFF, TX FIFO based at window 0x780 and the LLT at 0x650,
+   * selected through the low 12 bits of REG_PKTBUF_DBG_CTRL (0x0140). */
+  uint32_t base;
+  if (sel == 0)
+    base = 0x780; /* TX FIFO */
+  else if (sel == 1)
+    base = 0x650; /* LLT */
+  else
     return false;
-  /* EN_BCN_FUNCTION off (keep DIS_TSF_UDT), beacon-queue download off,
-   * net_type back to No Link — the StartBeacon enables, reversed. */
-  _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 4));
+  /* Dword alignment and the window of the LAST byte inside the 12-bit field
+   * (src/PktBufWindow.h, pinned by tests/txqueue_selftest.cpp). The size of
+   * the selected memory is not bounded here (see the declaration). */
+  if (!devourer::pktbuf_read_fits(base, offset, n))
+    return false;
+  if (n == 0)
+    return true;
+  if (out == nullptr)
+    return false; /* nothing to write into - refused before the window moves */
+  /* The whole save/select/read/restore under _reg_mu: the window is shared
+   * with every other register user of this backend, la_capture included
+   * (which also holds _reg_mu), so a concurrent select cannot move it under
+   * this walk. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  uint32_t win = (offset >> 12) + base;
+  uint32_t residue = offset & 0xFFF;
+  const uint16_t saved = _device.rtw_read16(0x0140);
+  /* Restore the borrowed window on every exit, a throwing read included: a
+   * read that fails mid-walk must not leave 0x0140 pointing into the TX FIFO
+   * for the next user of the window. A destructor must not throw, so a
+   * failed restore is logged, not thrown. */
+  struct WindowRestore {
+    RtlAdapter &dev;
+    uint16_t value;
+    Logger_t &log;
+    ~WindowRestore() {
+      bool ok = false;
+      try {
+        ok = dev.rtw_write16(0x0140, value);
+      } catch (...) {
+      }
+      if (!ok) {
+        try {
+          log->warn("Jaguar2 ReadPacketBuffer: restoring REG_PKTBUF_DBG_CTRL "
+                    "(0x0140 = 0x{:04x}) failed - the debug window is left "
+                    "pointing elsewhere", value);
+        } catch (...) {
+        }
+      }
+    }
+  } restore{_device, saved, _logger};
+  const uint16_t hi = static_cast<uint16_t>(saved & 0xF000);
+  size_t got = 0;
+  while (got < n) {
+    /* A window select that did not land would make the reads below return
+     * whatever the window last mapped - refuse rather than report it. */
+    if (!_device.rtw_write16(0x0140, static_cast<uint16_t>(win | hi)))
+      return false;
+    for (uint32_t a = 0x8000 + residue; a <= 0x8FFF && got < n; a += 4) {
+      const uint32_t v = _device.rtw_read<uint32_t>(static_cast<uint16_t>(a));
+      out[got + 0] = static_cast<uint8_t>(v);
+      out[got + 1] = static_cast<uint8_t>(v >> 8);
+      out[got + 2] = static_cast<uint8_t>(v >> 16);
+      out[got + 3] = static_cast<uint8_t>(v >> 24);
+      got += 4;
+    }
+    residue = 0;
+    win++;
+  }
+  return true;
+}
+
+/* The StartBeacon enables, reversed: EN_BCN_FUNCTION off (keep DIS_TSF_UDT),
+ * beacon-queue download off, net_type back to No Link. Idempotent. Shared by
+ * StopBeacon and StartBeacon's failure rollback. Returns false if any write
+ * was refused (every write is still attempted). Caller holds _reg_mu. */
+bool RtlJaguar2Device::disable_beacon_locked() {
+  bool ok = _device.rtw_write8(0x0550 /* REG_BCN_CTRL */, (1u << 4));
   uint32_t txq = _device.rtw_read<uint32_t>(0x0420 /* REG_FWHW_TXQ_CTRL */);
-  _device.rtw_write<uint32_t>(0x0420, txq & ~(1u << 22) /* BIT_EN_BCNQ_DL */);
+  ok = _device.rtw_write<uint32_t>(0x0420,
+                                   txq & ~(1u << 22) /* BIT_EN_BCNQ_DL */) &&
+       ok;
   uint8_t nt = _device.rtw_read8(0x0102);
-  _device.rtw_write8(0x0102, static_cast<uint8_t>(nt & ~0x03u));
+  ok = _device.rtw_write8(0x0102, static_cast<uint8_t>(nt & ~0x03u)) && ok;
+  return ok;
+}
+
+/* Undo a StartBeacon that failed after its first enabling write (a register
+ * write refused, or an access that threw). The beacon is OFF after this - a
+ * failed RE-arm included, since the disable also stops the previous beacon -
+ * so its active-state record goes too, and every timing/payload call
+ * (UpdateBeaconPayload, the TBTT steers, PinBeaconTbtt) refuses as for no
+ * beacon. If the disable itself does not land, _bcn_hw_touched stays set and
+ * StopBeacon retries it. Never throws. Caller holds _reg_mu. */
+void RtlJaguar2Device::rollback_beacon_arm_locked(const char *why) {
   _bcn_mpdu.clear();
   _bcn_interval_tu = 0;
+  _tbtt_off_us = 0;
+  bool off = false;
+  try {
+    off = disable_beacon_locked();
+  } catch (...) {
+  }
+  if (off)
+    _bcn_hw_touched = false;
+  try {
+    if (off)
+      _logger->error("beacon(J2): StartBeacon failed mid-arm ({}) - rolled back",
+                     why);
+    else
+      _logger->error("beacon(J2): StartBeacon failed mid-arm ({}) and the "
+                     "rollback did not land - StopBeacon will retry the "
+                     "disable", why);
+  } catch (...) {
+  }
+}
+
+bool RtlJaguar2Device::StopBeacon() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* Also when StartBeacon touched the enables but never finished arming
+   * (_bcn_hw_touched, see StartBeacon's rollback): disarm that too. */
+  if (_bcn_mpdu.empty() && !_bcn_hw_touched)
+    return false;
+  const bool off = disable_beacon_locked();
+  _bcn_mpdu.clear();
+  _bcn_interval_tu = 0;
+  if (!off) {
+    /* A refused disable write: the beacon may still be airing. Keep the
+     * touch so a retry runs the disable again, and say so. */
+    _bcn_hw_touched = true;
+    _logger->error("beacon(J2): StopBeacon - a disable write was refused; "
+                   "retry StopBeacon");
+    return false;
+  }
+  _bcn_hw_touched = false;
   _logger->info("beacon(J2): stopped (EN_BCN off, EN_BCNQ_DL off, net_type->NoLink)");
   return true;
 }

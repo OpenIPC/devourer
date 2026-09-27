@@ -1829,6 +1829,130 @@ int main(int argc, char **argv) {
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
   }
 
+  /* DEVOURER_TX_BEACON_TU=N (demo-local; unset or 0 = off): arm the hardware
+   * TBTT beacon (IRadio::StartBeacon) at an N-TU interval before the injection
+   * loop, then inject exactly as without it. This is the in-tree reproducer
+   * for the Jaguar2/3 TX page-ring defect (docs/jaguar3-tx-ring.md): the data
+   * ring only overwrites the beacon page when a beacon is armed, so plain
+   * injection never shows it. It reproduces with data-sized frames and the RX
+   * loop running - DEVOURER_TX_QOS_DATA=1 DEVOURER_TX_PAYLOAD_BYTES=1400
+   * DEVOURER_TX_WITH_RX=thread plus DEVOURER_TX_FRAMES=8000
+   * DEVOURER_TX_GAP_US=0 (the canonical 100-byte frame alone did not, on an
+   * 8812CU); the verdict is `failed` / was_timeout in tx.stats, and
+   * txdma_status where a sample catches it. SA/BSSID = the canonical SA, so
+   * rx.txhit witnesses match the beacon too. A refused StartBeacon warns and
+   * the run continues unbeaconed.
+   *
+   * The beacon is a plain 802.11 MPDU, no radiotap: the IRadio contract says
+   * a leading radiotap is stripped, but only the Jaguar1/2/3 and MT7612U
+   * backends do; Kestrel hands its buffer to the firmware as-is. A bare MPDU
+   * with a zero Duration field is what every backend accepts - the Jaguar
+   * backends read bytes [2:3] as a radiotap length, which is 0 here. Only
+   * Jaguar2/3 are armed at all (below).
+   *
+   * The chip beacons AUTONOMOUSLY once armed, so the stop is a scope guard,
+   * not a teardown line: `attempted` is set BEFORE StartBeacon (a call that
+   * throws or refuses may still have armed part of it), and the guard stops
+   * the beacon on every exit from here - the normal teardown calls stop()
+   * explicitly, before Stop() powers the chip down; the destructor covers an
+   * exception or an early return. It is declared after the DeviceSession, so
+   * it runs before the device is destroyed. */
+  struct TxBeaconGuard {
+    IRadio *dev;
+    std::shared_ptr<Logger> log;
+    bool attempted = false;
+    bool armed = false;
+    void stop() {
+      if (!attempted)
+        return;
+      attempted = false;
+      bool threw = false;
+      for (int i = 0; i < 3; i++) {
+        try {
+          if (dev->StopBeacon())
+            return;
+        } catch (const std::exception &e) {
+          threw = true;
+          log->warn("DEVOURER_TX_BEACON_TU: StopBeacon threw: {}", e.what());
+        }
+      }
+      /* StopBeacon also returns false when no beacon was active, which is
+       * the expected answer after a refused StartBeacon - only a beacon that
+       * was armed, or a stop that threw, is a real failure. */
+      if (armed || threw)
+        log->error("DEVOURER_TX_BEACON_TU: StopBeacon failed 3 times - the "
+                   "beacon may keep airing until the adapter is re-enumerated "
+                   "or powered down (Jaguar2 has no teardown power-down)");
+    }
+    ~TxBeaconGuard() {
+      try {
+        stop();
+      } catch (...) {
+      }
+    }
+  } tx_beacon{rtlDevice, logger};
+  /* Not after a CW/continuous hold: those return only on shutdown. */
+  if (const char *btu = std::getenv("DEVOURER_TX_BEACON_TU");
+      btu && !g_devourer_should_stop) {
+    char *btu_end = nullptr;
+    const long tu = std::strtol(btu, &btu_end, 0);
+    const bool btu_ok = btu_end != btu && *btu_end == '\0';
+    /* Armed on Jaguar2 and Jaguar3 only: the dies with the page-ring defect
+     * this knob reproduces, and the ones whose StartBeacon is all-or-nothing
+     * (a true return means armed; a failed arm rolls back) and whose
+     * StopBeacon disarms it. Jaguar1's StartBeacon returns true even when
+     * its closing PinBeaconTbtt(0) re-download fails, so the arm cannot be
+     * confirmed there (pre-existing); Kestrel has no StopBeacon override at
+     * all (pre-existing). Everything else warns and runs unbeaconed. */
+    const devourer::ChipGeneration bgen =
+        rtlDevice->GetAdapterCaps().generation;
+    const bool bgen_ok = bgen == devourer::ChipGeneration::Jaguar2 ||
+                         bgen == devourer::ChipGeneration::Jaguar3;
+    if (!btu_ok) {
+      logger->warn("DEVOURER_TX_BEACON_TU='{}' is not a number - no beacon",
+                   btu);
+    } else if (tu != 0 && bgen == devourer::ChipGeneration::Jaguar1) {
+      logger->warn("DEVOURER_TX_BEACON_TU: not armed: the reproducer targets "
+                   "Jaguar2/3, and Jaguar1's StartBeacon cannot confirm the "
+                   "arm (it ignores its PinBeaconTbtt(0) re-download result)");
+    } else if (tu != 0 && !bgen_ok) {
+      logger->warn("DEVOURER_TX_BEACON_TU: not armed: the reproducer targets "
+                   "Jaguar2/3 ({})",
+                   devourer::generation_name(bgen));
+    } else if (tu > 0 && tu <= 0xFFFF) {
+      const bool five_g = tx_band == 6 || channel > 14;
+      const uint8_t rate = five_g ? 0x8c /* 6M basic */ : 0x82 /* 1M basic */;
+      const uint8_t bcn[] = {
+          0x80, 0x00, 0x00, 0x00,                         // FC beacon + dur 0
+          0xff, 0xff, 0xff, 0xff, 0xff, 0xff,             // addr1 broadcast
+          0x57, 0x42, 0x75, 0x05, 0xd6, 0x00,             // addr2 = canonical SA
+          0x57, 0x42, 0x75, 0x05, 0xd6, 0x00,             // addr3 = BSSID
+          0x00, 0x00,                                     // seq
+          0, 0, 0, 0, 0, 0, 0, 0,                         // timestamp (HW fills)
+          static_cast<uint8_t>(tu & 0xff),
+          static_cast<uint8_t>((tu >> 8) & 0xff),         // beacon interval
+          0x00, 0x00,                                     // capability
+          0x00, 15, 'd', 'e', 'v', 'o', 'u', 'r', 'e', 'r', '-', 't', 'x', 'r',
+          'i', 'n', 'g',                                  // SSID "devourer-txring"
+          0x01, 0x01, rate};                              // supported rates
+      tx_beacon.attempted = true; /* before the call - see TxBeaconGuard */
+      try {
+        tx_beacon.armed =
+            rtlDevice->StartBeacon(bcn, sizeof(bcn), static_cast<int>(tu));
+      } catch (const std::exception &e) {
+        logger->warn("DEVOURER_TX_BEACON_TU: StartBeacon threw: {}", e.what());
+      }
+      if (tx_beacon.armed)
+        logger->info("DEVOURER_TX_BEACON_TU: hardware beacon armed, {} TU", tu);
+      else
+        logger->warn("DEVOURER_TX_BEACON_TU: StartBeacon refused - continuing "
+                     "without a beacon");
+    } else if (tu != 0) {
+      logger->warn("DEVOURER_TX_BEACON_TU={} is outside 1..65535 - no beacon",
+                   btu);
+    }
+  }
+
   while (!g_devourer_should_stop) {
     if (tx_count == 0) {
       devourer::Ev(*g_ev, "init.timing")
@@ -2277,11 +2401,35 @@ int main(int argc, char **argv) {
        * climbing failed with was_timeout=1 is a full TX FIFO (recoverable
        * back-pressure); a hard rc is a broken path. */
       auto ts = rtlDevice->GetTxStats();
-      devourer::Ev(*g_ev, "tx.stats")
-          .f("submitted", (unsigned long long)ts.submitted)
+      /* The MAC's TX-DMA fault latch (IRtlRadio::GetTxDmaStatus), on the
+       * same 1-in-500 cadence as the rest of this event - never per frame.
+       * A nonzero value means the part has stopped transmitting whatever
+       * `submitted` says; the vendor answers it with a MAC reset. */
+      /* A register read can throw under load (a control transfer racing the
+       * bulk-IN); that sample then omits the field and says so, rather than
+       * reporting a 0 that reads as healthy - or killing the demo. */
+      /* Only where the backend reads the real latch (HasTxDmaStatus): its 0
+       * default elsewhere would read as "healthy" for a chip never asked. */
+      uint32_t txdma = 0;
+      bool txdma_have = false, txdma_ok = true;
+      if (auto *rr = dynamic_cast<IRtlRadio *>(rtlDevice);
+          rr && rr->HasTxDmaStatus()) {
+        txdma_have = true;
+        try {
+          txdma = rr->GetTxDmaStatus();
+        } catch (const std::exception &) {
+          txdma_ok = false;
+        }
+      }
+      auto ev = devourer::Ev(*g_ev, "tx.stats");
+      ev.f("submitted", (unsigned long long)ts.submitted)
           .f("failed", (unsigned long long)ts.failed)
           .f("was_timeout", ts.last_was_timeout ? 1 : 0)
           .f("last_rc", ts.last_error_rc);
+      if (txdma_have && txdma_ok)
+        ev.f("txdma_status", (unsigned long long)txdma);
+      else if (txdma_have)
+        ev.f("txdma_read_failed", 1);
     }
     /* Thermal telemetry via the generation-agnostic GetThermalStatus
      * (previously Jaguar1-only): every family reads its RF 0x42 meter —
@@ -2412,6 +2560,11 @@ int main(int argc, char **argv) {
     if (jag3) jag3->StopContinuousTx();
 #endif
   }
+
+  /* DEVOURER_TX_BEACON_TU: stop the beacon now, while the chip is still up
+   * (Stop() below powers it down; session.close() destroys the device before
+   * the guard's own destructor would run). Idempotent - see TxBeaconGuard. */
+  tx_beacon.stop();
 
   /* Join the RX loop BEFORE Stop(): the chip de-init must not race in-flight
    * RX URBs (and StartRxLoop's event pump must exit before libusb_exit). */

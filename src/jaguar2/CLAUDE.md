@@ -44,6 +44,25 @@ Jaguar1 (shared `PhyTableLoader`).
   instead (`fw_switch_confirm`). Classic 8-byte H2Cs ride the HMEBOX
   mailboxes (0x1d0/0x1f0 + 0x1cc busy bits), distinct from MacInit's 32-byte
   h2c-pkt queue.
+- **The whole MAC must be enabled before the LLT init** (`MAC_TRX_ENABLE =
+  0xFF`, halmac's value for both 8822B and 8821C; this port had the DMA-only
+  `0x0F`). The same defect and fix as Jaguar3 (`src/jaguar3/CLAUDE.md`, where
+  `0x1F` - the DMA bits + PROTOCOL_EN - was enough on the 8822C; not
+  bisected here). On an 8812BU (`rsvd_boundary` 1938 too): with `0x0F`, 4000
+  frames injected with a beacon armed overwrote page 1938 and latched
+  `TXDMA_STATUS` `0x10` then `0x15` (bits not decoded; the TBTT trigger was
+  bisected on the 8822C only) at 358 frames, then every bulk-OUT timed out;
+  with `0xFF`, 4000/4000 clean and `LLT[1937] = 0` by the end of the run.
+  The 8821C and the PCIe 8821CE ride the same constant and are unverified.
+- **Runtime threads must survive a failed register read** (the guards: the
+  DIG / thermal-track loops in `RtlJaguar2Device.cpp`). Before them, an
+  uncaught `rtw_read: iostream error` in the DIG thread terminated an 8812BU AP
+  mid-way through a 14-20 Mbit/s uplink, and the guard has fired about once
+  per throughput ladder since - it is a recurring event, not a one-off.
+  Measured on the caller side too: under a 4+4 Mbit/s 8812BU AP soak about
+  one control read a minute failed while the chip worked on, and an unguarded
+  `GetTxDmaStatus` poll killed that AP at minute 9. The poller contract is at
+  `IRtlRadio::GetTxDmaStatus`.
 
 ## TX power
 

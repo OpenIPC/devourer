@@ -161,6 +161,10 @@ devourer and the vendor kernel driver (`tests/eu_kernel_2g_verified.sh`: the
 same verified ground decodes an 8812AU control at −63 EVM while 51k
 kernel-injected EU frames yield zero). Treat 2.4 GHz TX as unusable on the
 BL-M8812EU2 until a second board proves it module-specific vs family-wide.
+**One contrary observation (2026-09-25, one run):** as a devourer AP on ch6,
+an 8812EU's beacons were decoded by an MT7612U station at about half the
+aired rate (~20/s of 39/s) - though the station still could not complete a
+four-way with it (`docs/jaguar3-tx-ring.md` item 2).
 2.4 GHz **RX** works. (The old README "8 Mbps @ ch6" figure was SDR
 duty×rate — energy, not decodable throughput.)
 

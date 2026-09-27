@@ -807,8 +807,11 @@ void Halrf8822b::pwr_track(int current_ofdm_index) {
     const int swing = avg > _pt_baseline ? up[delta] : -static_cast<int>(dn[delta]);
     if (swing == _pt_last_swing[p])
       continue; /* no change — skip the USB write */
-    _pt_last_swing[p] = swing;
+    /* Recorded only once written: a write that throws (the thermal thread
+     * catches and skips the tick) must be retried next tick, not read as
+     * "no change". */
     pwr_track_write(static_cast<uint8_t>(p), swing, current_ofdm_index);
+    _pt_last_swing[p] = swing;
     _logger->info("Jaguar2 8822B thermal-track: path{} avg={} d={} swing={}",
                   p, avg, delta, swing);
   }

@@ -1386,6 +1386,17 @@ target_link_libraries(TxAggSelftest PRIVATE devourer)
 target_include_directories(TxAggSelftest PRIVATE src)
 add_test(NAME txagg_pack COMMAND TxAggSelftest)
 
+# Headless guard for the ReadPacketBuffer window bound (src/PktBufWindow.h,
+# generation-neutral) and the Jaguar3 QSEL -> bulk-OUT map (incl. the
+# <3-endpoint fallback to endpoint 0, src/jaguar3/TxQueueMap.h). Built on
+# every configuration like TxAggSelftest: it links `devourer` only for the
+# DEVOURER_HAVE_* defines, and its Jaguar3 cases self-gate on
+# DEVOURER_HAVE_JAGUAR3.
+add_executable(TxQueueSelftest tests/txqueue_selftest.cpp)
+target_link_libraries(TxQueueSelftest PRIVATE devourer)
+target_include_directories(TxQueueSelftest PRIVATE src)
+add_test(NAME txqueue_map COMMAND TxQueueSelftest)
+
 # Headless guard for the beamforming-report decoder (src/BfReportDecode.h) — the
 # LSB-first Givens-angle unpacking + per-tone variance behind sense. It
 # decodes a real captured VHT MU report and checks the angles against an offline

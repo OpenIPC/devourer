@@ -87,11 +87,29 @@ public:
   bool GetPermanentMacAddress(uint8_t out[6]) override;
   uint64_t ReadTsf() override;
   bool WriteTsf(uint64_t tsf) override;
+  /* StartBeacon is all-or-nothing from its first enabling write on
+   * (net_type): a refused write rolls the arm back and returns false, a throw
+   * rolls it back and rethrows. The rollback runs StopBeacon's disable
+   * sequence (EN_BCN off, EN_BCNQ_DL off, net_type -> NoLink) and clears the
+   * active-beacon record - a failed RE-arm stops the previous beacon too - so
+   * UpdateBeaconPayload, the TBTT steers and PinBeaconTbtt refuse afterwards.
+   * StopBeacon also disarms a touched-but-never-armed beacon, and returns
+   * false (keeping it retryable) if a disable write is refused. The success
+   * path writes the same registers in the same order as before the rollback
+   * existed. */
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
   /* In-place beacon content swap (IRadio contract): retain the new MPDU +
    * ride the steer re-download; interval/TBTT/port identity untouched. */
   bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) override;
   bool StopBeacon() override;
+  /* Read-only TX-path diagnostics, the same halmac read_buf_88xx port as
+   * Jaguar3 (the 88xx common code: TX FIFO window 0x780, LLT 0x650, selected
+   * through REG_PKTBUF_DBG_CTRL; TXDMA_STATUS at 0x0210). Safe on a chip whose
+   * transmitter has stopped. */
+  uint32_t GetTxDmaStatus() override;
+  bool HasTxDmaStatus() const override { return true; }
+  bool ReadPacketBuffer(int sel, uint32_t offset, uint8_t *out,
+                        size_t n) override;
   /* Disable/restore the MAC EDCCA gate (BIT_DIS_EDCCA 0x520[15] + EDCCA-mask
    * 0x524[11] — HalMAC-common with J3) so a TBTT beacon airs on schedule. */
   void SetCcaMode(bool disabled) override;
@@ -355,6 +373,12 @@ private:
    * re-arm it. Guarded by _reg_mu (written in StartBeacon, read in the
    * steer actuators). _bcn_interval_tu = 0 means no active beacon. */
   std::vector<uint8_t> _bcn_mpdu;
+  /* StartBeacon reached its first enabling write (under _reg_mu). Set before
+   * that write, cleared by StopBeacon or a successful rollback, so a beacon
+   * that failed mid-arm is still disarmable. */
+  bool _bcn_hw_touched = false;
+  bool disable_beacon_locked(); /* the StopBeacon writes; caller holds _reg_mu */
+  void rollback_beacon_arm_locked(const char *why); /* see the definition */
   int _bcn_interval_tu = 0;
   /* TBTT-grid offset vs the TSF, in µs: TBTT fires at TSF % period == this.
    * 0 after StartBeacon and after every fine steer (the EN_BCN_FUNCTION

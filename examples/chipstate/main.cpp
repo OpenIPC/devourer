@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <string>
 
 #if __has_include(<libusb.h>)
 #include <libusb.h>
@@ -67,6 +68,8 @@ struct Args {
   int channel = 6;
   bool init = false;
   bool no_claim = false;
+  bool mac_dump = false; /* --mac-dump: IRtlRadio::DumpMacRegisters */
+  long pktbuf_bndy = -1; /* --pktbuf N: beacon page + LLT around page N */
   std::vector<RegOp> ops;
 };
 
@@ -75,6 +78,7 @@ void usage() {
                "usage: chipstate [--vid 0xNNNN] [--pid 0xNNNN] [--init] "
                "[--channel N]\n"
                "                 [--peek 0xA[-0xB][:4]]... [--poke 0xA=0xV[:W]]...\n"
+               "                 [--mac-dump] [--pktbuf N]\n"
                "  default: attach read-only, no USB reset, no bring-up.\n"
                "  --init : run a full bring-up first (for a healthy reference\n"
                "           dump on a freshly power-cycled adapter). With\n"
@@ -91,7 +95,15 @@ void usage() {
                "  --no-claim : (peek/poke only) skip the interface claim —\n"
                "           vendor control rides EP0 with device recipient, so\n"
                "           registers stay reachable while another process\n"
-               "           (e.g. an armed rxdemo) owns the interface.\n");
+               "           (e.g. an armed rxdemo) owns the interface.\n"
+               "  --mac-dump : after the canary dump, the MAC registers in the\n"
+               "           vendor mac_reg_dump layout (Jaguar3 only).\n"
+               "  --pktbuf N : after the canary dump, the first 32 bytes of TX\n"
+               "           page N (the beacon page: rsvd_boundary, 1938 on the\n"
+               "           8822B/C/E) and the LLT entries around it, through\n"
+               "           the packet-buffer debug window (Jaguar2/Jaguar3). An\n"
+               "           LLT[N-1] of 0 is the terminated data ring\n"
+               "           (docs/jaguar3-tx-ring.md). N in 2..2046.\n");
 }
 
 /* Range-checked address parse: a silently-wrapped register (0x12345 ->
@@ -235,6 +247,17 @@ int main(int argc, char **argv) {
       a.init = true;
     } else if (!std::strcmp(argv[i], "--no-claim")) {
       a.no_claim = true;
+    } else if (!std::strcmp(argv[i], "--mac-dump")) {
+      a.mac_dump = true;
+    } else if (!std::strcmp(argv[i], "--pktbuf") && v) {
+      char *end = nullptr;
+      a.pktbuf_bndy = std::strtol(v, &end, 0);
+      if (end == v || *end != '\0' || a.pktbuf_bndy < 2 ||
+          a.pktbuf_bndy > 2046) {
+        usage();
+        return 2;
+      }
+      ++i;
     } else if (!std::strcmp(argv[i], "--peek") && v) {
       RegOp op;
       if (!parse_peek(v, op)) {
@@ -360,6 +383,76 @@ int main(int argc, char **argv) {
                   "Realtek backend)");
     return 4;
   }
-  rtl->DumpChipState();
-  return 0;
+  /* Every dump below can throw on a failed transfer - a real answer about the
+   * chip, reported (labelled, exit code 5), not hidden. A failed canary dump
+   * does NOT stop the run: the optional --mac-dump / --pktbuf diagnostics
+   * still run, since they read different registers and may still answer. */
+  int rc = 0;
+  try {
+    rtl->DumpChipState();
+  } catch (const std::exception &e) {
+    logger->error("chipstate: canary dump (DumpChipState) failed: {}",
+                  e.what());
+    rc = 5;
+  }
+  /* The TX page-ring probes (docs/jaguar3-tx-ring.md). */
+  if (a.mac_dump) {
+    try {
+      if (!rtl->DumpMacRegisters()) {
+        /* Not ported on this backend (IRtlRadio's default) - say so and exit
+         * nonzero, rather than exit 0 with no dump. */
+        logger->error("chipstate: --mac-dump is not supported on {}",
+                      devourer::generation_name(
+                          rtl->GetAdapterCaps().generation));
+        if (rc == 0)
+          rc = 4; /* keep a more severe 5 from an earlier failed read */
+      }
+    } catch (const std::exception &e) {
+      logger->error("chipstate: MAC register dump failed: {}", e.what());
+      rc = 5;
+    }
+  }
+  if (a.pktbuf_bndy >= 0) {
+    const uint32_t b = static_cast<uint32_t>(a.pktbuf_bndy);
+    try {
+      uint8_t pg[32];
+      if (!rtl->ReadPacketBuffer(0, b << 7, pg, sizeof pg)) {
+        logger->error("chipstate: packet-buffer read not supported or refused "
+                      "on this radio");
+        return rc != 0 ? rc : 4; /* keep a more severe earlier result */
+      }
+      std::string hex;
+      char tmp[4];
+      for (uint8_t x : pg) {
+        std::snprintf(tmp, sizeof tmp, " %02x", x);
+        hex += tmp;
+      }
+      logger->info("chipstate: TX page {} (first 32 bytes):{}", b, hex);
+      const uint32_t pages[] = {0, 1, b - 2, b - 1, b, b + 1, 2046, 2047};
+      std::string llt;
+      bool llt_ok = true;
+      for (uint32_t pgn : pages) {
+        uint8_t e[4];
+        if (!rtl->ReadPacketBuffer(1, pgn * 4, e, sizeof e)) {
+          /* Refused (e.g. the window select did not land): report it, and
+           * never print an LLT line with entries silently missing. */
+          logger->error("chipstate: LLT[{}] read refused - no LLT line", pgn);
+          llt_ok = false;
+          break;
+        }
+        char item[32];
+        std::snprintf(item, sizeof item, " [%u]=%02x%02x%02x%02x",
+                      static_cast<unsigned>(pgn), e[3], e[2], e[1], e[0]);
+        llt += item;
+      }
+      if (llt_ok)
+        logger->info("chipstate: LLT:{}", llt);
+      else if (rc == 0)
+        rc = 4; /* the same code as a refused page read above */
+    } catch (const std::exception &e) {
+      logger->error("chipstate: packet-buffer read failed: {}", e.what());
+      rc = 5;
+    }
+  }
+  return rc;
 }

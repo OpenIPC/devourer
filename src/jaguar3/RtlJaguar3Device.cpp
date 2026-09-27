@@ -2094,13 +2094,10 @@ uint32_t RtlJaguar3Device::GetTxDmaStatus() {
   return _device.rtw_read<uint32_t>(REG_TXDMA_STATUS);
 }
 
-/* WHY THIS EXISTS. A sustained downlink load stops this part transmitting:
- * the beacon disappears from the air, management replies go unanswered, and
- * the receiver carries on decoding perfectly (measured — the AP logged
- * seventeen received authentication requests and answered none). Whether the
- * MAC's beacon gates got cleared or the failure is below the register
- * interface decides which fix to write, and until now nothing could read
- * them back.
+/* The TX/beacon register witness: the beacon gates, the TX-DMA and RX-DMA
+ * fault flags, the queue page counts and the ring boundaries, read back so a
+ * stopped transmitter can be told apart from cleared beacon gates
+ * (docs/jaguar3-tx-ring.md).
  *
  * Read-only (no register writes), so it is safe to call on a chip whose
  * transmitter has already failed. The bit meanings are the ones StartBeacon sets:
@@ -2154,12 +2151,10 @@ void RtlJaguar3Device::DumpChipState() {
   const uint16_t pg_ctrl2 = static_cast<uint16_t>(v(0x0204));
   const uint8_t bcn_valid = static_cast<uint8_t>(v(0x0204) >> 8);
   const uint32_t txdma = v(REG_TXDMA_STATUS);
-  /* THE FLOW-CONTROL SIGNAL devourer never consults. The vendor driver reads
-   * the AVAILABLE page count out of the high half of each FIFOPAGE_INFO
-   * register - proc_get_pubq_free_page in the rtl88x2cu tree is exactly
-   * `(rtw_read32(0x0240) >> 16) & 0x0FFF` - while this backend submits until
-   * the USB endpoint NAKs and then eats a 20 ms timeout per refusal. If the
-   * public queue reads zero here on a wedged part, that is the mechanism. */
+  /* Queue page counts: configured in the low half of each FIFOPAGE_INFO
+   * register, AVAILABLE in the high half - proc_get_pubq_free_page in the
+   * rtl88x2cu tree is `(rtw_read32(0x0240) >> 16) & 0x0FFF`. The TX path
+   * does not consult them (it submits until the endpoint NAKs). */
   const uint32_t hq_r = v(0x0230), lq_r = v(0x0234), nq_r = v(0x0238),
                  pub_r = v(0x0240);
   const uint16_t hq = (uint16_t)(hq_r & 0x0fff);
@@ -2183,10 +2178,9 @@ void RtlJaguar3Device::DumpChipState() {
                 "RX_SFF_OVF={} C2H_PKT_OVF={}) RXPKT_NUM=0x{:08x}",
                 rxdma_st, rxdma_st & 1, (rxdma_st >> 2) & 1,
                 (rxdma_st >> 7) & 1, rxpkt);
-  /* THE RING BOUNDARIES, read back live. The TX page ring faults when data
-   * walks through the reserved region while the TBTT beacon engine is
-   * running; the registers that are supposed to keep it out are written once
-   * at init with the right values. These say whether they STAYED right. */
+  /* The ring boundaries, read back live: the registers that keep data out of
+   * the reserved region are written once at init; these show their current
+   * values. */
   _logger->info("j3 chipstate: BCNQ_BDNY=0x{:04x} BCNQ_BDNY2(0x206)=0x{:04x} "
                 "BCNQ1_BDNY=0x{:04x} AUTO_LLT=0x{:08x} TXDMA_OFFSET_CHK=0x{:04x} "
                 "RQPN_CTRL_2=0x{:08x}",
@@ -2198,52 +2192,17 @@ void RtlJaguar3Device::DumpChipState() {
                 lq_r & 0x0fff, (lq_r >> 16) & 0x0fff,
                 nq_r & 0x0fff, (nq_r >> 16) & 0x0fff,
                 pub, (pub_r >> 16) & 0x0fff);
-  /* EVERY ONE OF THESE IS A GUESS UNTIL IT IS READ BACK ON A WEDGED PART.
-   * If they all read the same as they do on a healthy one, the beacon gates
-   * are not the mechanism and this dump has done its job by excluding them —
-   * which is worth as much as finding the bit. */
+  /* Compare against a dump from a healthy part: equal values exclude the
+   * beacon gates as the cause. */
 }
 
-/* WHICH BULK-OUT ENDPOINT A FRAME BELONGS ON.
- *
- * CORRECTED 2026-09-24: this comment used to say getting this wrong was WHY
- * the AP stopped transmitting under load. It was not. The mis-queuing below
- * is real and is fixed here, but the wedge was the TX page ring running into
- * the beacon page (REG_CR at the LLT init - docs/jaguar3-tx-ring.md); HQ
- * running dry was a consequence, and fixing the queues moved the exhaustion
- * to LOW without touching the wedge. The measurement is kept as recorded.
- *
- * On a Realtek USB part the ENDPOINT selects the hardware TX queue. halmac's
- * get_usb_bulkout_id_88xx() reads QSEL out of the descriptor, looks the
- * access category up in the same priority-queue map the driver programmed
- * into REG_TXDMA_PQ_MAP, and turns the resulting DMA mapping into a bulk-out
- * index: HIGH->0, NORMAL->1, LOW->2, EXTRA->3. With the enum values
- * (EXTRA=0, LOW=1, NORMAL=2, HIGH=3) that is simply `3 - mapping`.
- *
- * This backend sent EVERY frame to the first bulk-OUT endpoint — index 0,
- * the HIGH queue — while init_trx_cfg maps BE/BK to LOW and VO/VI to NORMAL
- * exactly as the vendor does. So all data went into a 64-page queue that
- * management frames and the beacon must share, and LOW and NORMAL were never
- * used at all.
- *
- * Measured on an RTL8812CU running this project's AP under a downlink load,
- * configured/AVAILABLE pages:
- *
- *     healthy:  HQ 64/64  LQ 64/64  NQ 64/64  PUB 1745/1745
- *     wedged:   HQ 64/0   LQ 64/64  NQ 64/64  PUB 1745/1449
- *
- * HQ drained to nothing; LOW and NORMAL sat untouched at their full 64,
- * which is the signature of a queue nothing is ever sent to. With HQ empty
- * the beacon could not be loaded and management frames could not be sent,
- * so the AP went silent while its receiver carried on perfectly — it logged
- * seventeen received authentication requests and answered none.
- *
- * Limits, both deliberate: every 802.11 data frame is queued as TID 0 (BE),
- * whatever its own QoS TID - only SetAmpduMode picks another (and an
- * A-MPDU TID routes to LOW or NORMAL like any other data QSEL, unmeasured);
- * and the map is the 3-bulk-OUT one init_trx_cfg always programs, so the
- * routing applies only with >= 3 bulk-OUT endpoints. The map, that rule and
- * why: src/jaguar3/TxQueueMap.h (pinned by tests/txqueue_selftest.cpp). */
+/* WHICH BULK-OUT ENDPOINT A FRAME BELONGS ON. On a Realtek USB part the
+ * endpoint selects the hardware TX queue, so it must agree with the
+ * descriptor's QSEL. The QSEL -> endpoint map, its endpoint-count rule and the
+ * QSEL order are src/jaguar3/TxQueueMap.h (pinned by
+ * tests/txqueue_selftest.cpp). Every 802.11 data frame is queued as TID 0
+ * (BE) whatever its own QoS TID - only SetAmpduMode picks another. The
+ * page-count measurement behind the queue change: docs/jaguar3-tx-ring.md. */
 using jaguar3::bulkout_id_for_qsel;
 
 static uint8_t qsel_of_descriptor(const uint8_t *desc) {
@@ -2430,8 +2389,11 @@ size_t RtlJaguar3Device::send_packets(const TxPacketView *pkts, size_t count) {
       /* Defensive only (the run was pre-validated). The blocks already built
        * go out one per URB as built - rebuilding them would run
        * build_tx_block's side effects twice; the frame that failed to build
-       * is dropped (not counted); the rest were never built and take the
-       * single-frame path. */
+       * is dropped (not counted - send_packet would refuse it the same way);
+       * the rest were never built and take the single-frame path. */
+      _logger->warn("8822C aggregated TX: frame {} of the batch is malformed "
+                    "(build_tx_block refused its radiotap/length) - dropped",
+                    done + built);
       for (size_t k = 0; k < built; ++k)
         if (send_built_block(urb.data() + plan.blocks[k].offset,
                              plan.blocks[k].length))
@@ -2687,36 +2649,20 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
       out, static_cast<uint16_t>(frame_len), MRateToHwRate(fixed_rate), rate_id,
       bw_desc, sgi != 0, ldpc != 0, stbc, bmc, ndpa, data_sc, pwr_type,
       pkt_offset);
-  /* A DATA FRAME BELONGS IN A DATA QUEUE, and until now none of them were.
-   *
-   * fill_data_tx_desc_8822c hardcodes QSEL = 0x12 (MGNT) on every descriptor
-   * it builds - "mirrors Jaguar1 inject", which was true and harmless for a
-   * monitor injector that airs a beacon every few milliseconds. init_trx_cfg
-   * maps MG to the HIGH queue, and HIGH has SIXTY-FOUR pages. So every frame
-   * this backend has ever sent - a whole video downlink included - was
-   * queued into the 64-page queue that management frames and the beacon must
-   * share, while LOW (BE/BK) and NORMAL (VO/VI) went entirely unused. The
-   * page-count measurement and its CORRECTION - HQ running dry was a
-   * consequence of the TX page-ring wedge, not why the AP went silent - are
-   * recorded once, at the WHICH BULK-OUT ENDPOINT comment.
-   *
-   * Management and control keep 0x12; only DATA moves, to TID 0 (BE), which
-   * the priority-queue map already routes to LOW. The endpoint moves with it
-   * - see tx_ep_for_descriptor - because on this bus the two must
-   * agree; TXDMA_STATUS has an EP_QSEL_DIFF bit for exactly that mismatch.
-   * Changing QSEL alone was measured to do nothing at all: the queue still
-   * drained 64 -> 0, because the frame still went to the HIGH endpoint.
-   *
-   * Only when jaguar3::per_queue_routing() (>= 3 bulk-OUT endpoints): with
-   * fewer there is no LOW endpoint under the 3-bulk queue map, so data keeps
-   * 0x12 and rides the first endpoint with everything else - the
-   * pre-routing path, unchanged.
+  /* A DATA FRAME BELONGS IN A DATA QUEUE. fill_data_tx_desc_8822c stamps
+   * QSEL 0x12 (MGNT) on every descriptor, and init_trx_cfg maps MG to the
+   * 64-page HIGH queue that management frames and the beacon share. So DATA
+   * moves to TID 0 (BE), which the priority-queue map routes to LOW;
+   * management and control keep 0x12. The endpoint moves with it
+   * (tx_ep_for_descriptor): on this bus the two must agree, and TXDMA_STATUS
+   * has an EP_QSEL_DIFF bit for that mismatch. Moving QSEL alone was measured
+   * to change nothing (docs/jaguar3-tx-ring.md).
    *
    * The FINAL QSEL - this, SetAmpduMode's TID (data frames only) and the
-   * DEVOURER_TX_QSEL debug override - is one pure function,
-   * jaguar3::tx_qsel() (TxQueueMap.h), which peek_tx_qsel calls with the
-   * same inputs, so the two cannot drift. Written here, before the
-   * unconditional checksum below. */
+   * DEVOURER_TX_QSEL debug override, with the endpoint-count rule - is one
+   * pure function, jaguar3::tx_qsel() (TxQueueMap.h), which peek_tx_qsel
+   * calls with the same inputs, so the two cannot drift. Written here,
+   * before the unconditional checksum below. */
   const bool is_data = frame_len >= 1 && jaguar3::dot11_is_data(dot11[0]);
   const bool ampdu_data = am.enabled && is_data;
   SET_TX_DESC_QSEL_8822C(

@@ -1856,34 +1856,38 @@ int main(int argc, char **argv) {
    * the beacon on every exit from here - the normal teardown calls stop()
    * explicitly, before Stop() powers the chip down; the destructor covers an
    * exception or an early return. It is declared after the DeviceSession, so
-   * it runs before the device is destroyed. */
+   * it runs before the device is destroyed. `attempted` is cleared only by a
+   * StopBeacon that returned (true, or a clean false = nothing active, per
+   * its contract); after three throws it stays set, so a later stop() - the
+   * destructor on an exception path - tries again. detach() drops the device
+   * before the normal path destroys it. */
   struct TxBeaconGuard {
     IRadio *dev;
     std::shared_ptr<Logger> log;
     bool attempted = false;
     bool armed = false;
     void stop() {
-      if (!attempted)
+      if (!attempted || dev == nullptr)
         return;
-      attempted = false;
-      bool threw = false;
       for (int i = 0; i < 3; i++) {
         try {
-          if (dev->StopBeacon())
-            return;
+          /* true = stopped; a clean false = nothing active (StopBeacon
+           * contract), expected after a refused StartBeacon - either way
+           * there is nothing to retry. */
+          dev->StopBeacon();
+          attempted = false;
+          return;
         } catch (const std::exception &e) {
-          threw = true;
           log->warn("DEVOURER_TX_BEACON_TU: StopBeacon threw: {}", e.what());
         }
       }
-      /* StopBeacon also returns false when no beacon was active, which is
-       * the expected answer after a refused StartBeacon - only a beacon that
-       * was armed, or a stop that threw, is a real failure. */
-      if (armed || threw)
-        log->error("DEVOURER_TX_BEACON_TU: StopBeacon failed 3 times - the "
-                   "beacon may keep airing until the adapter is re-enumerated "
-                   "or powered down (Jaguar2 has no teardown power-down)");
+      /* Three throws: `attempted` stays set so a later stop() tries again. */
+      log->error("DEVOURER_TX_BEACON_TU: StopBeacon failed 3 times - the "
+                 "beacon may keep airing until the adapter is re-enumerated "
+                 "or powered down (Jaguar2 has no teardown power-down)");
     }
+    /* The device is about to be destroyed: stop calling into it. */
+    void detach() { dev = nullptr; }
     ~TxBeaconGuard() {
       try {
         stop();
@@ -2403,8 +2407,8 @@ int main(int argc, char **argv) {
       auto ts = rtlDevice->GetTxStats();
       /* The MAC's TX-DMA fault latch (IRtlRadio::GetTxDmaStatus), on the
        * same 1-in-500 cadence as the rest of this event - never per frame.
-       * A nonzero value means the part has stopped transmitting whatever
-       * `submitted` says; the vendor answers it with a MAC reset. */
+       * Emitted raw: not every set bit means stopped (which ones do:
+       * IRtlRadio::GetTxDmaStatus). */
       /* A register read can throw under load (a control transfer racing the
        * bulk-IN); that sample then omits the field and says so, rather than
        * reporting a 0 that reads as healthy - or killing the demo. */
@@ -2582,6 +2586,8 @@ int main(int argc, char **argv) {
   /* Device, then interface, handle and context (DeviceSession.h). Explicit
    * only because the process has nothing left to do here — the destructor
    * does exactly the same on every other exit path. */
+  /* The beacon guard must not call into the device once it is gone. */
+  tx_beacon.detach();
   session.close();
   /* A truncated caller stream is a producer fault, and a harness that scored
    * the run as if it had ended cleanly would be scoring a short measurement. */

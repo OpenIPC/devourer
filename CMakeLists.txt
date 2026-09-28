@@ -975,6 +975,129 @@ if(DEVOURER_MT7612U)
     add_test(NAME mt7612u_tsf_api COMMAND Mt7612uTsfApiSelftest)
 endif()
 
+# --- src/sta/: the device-free 802.11 station core -------------------------
+# Header-only and pure: no libusb, no device, no IRadio. Every target below is
+# standalone (it does not link `devourer`, so it does not inherit that
+# target's PUBLIC cxx_std_20) and asks for C++20 itself - the station headers
+# use inline variables and nested namespaces, which MSVC rejects below C++17.
+#
+# The crypto cells need a CryptoOps implementation, and
+# tests/openssl_crypto_ops.h is the one complete implementation in the tree;
+# the modules themselves link nothing. OpenSSL is optional for the library,
+# so those cells are gated on it - loudly. A gated-out test is not "Not Run",
+# it is simply never registered, so nothing downstream can notice it missing:
+# DEVOURER_REQUIRE_STA_CRYPTO_TESTS=ON turns the warning into a configure
+# error, and CI sets it on every job that runs ctest.
+option(DEVOURER_REQUIRE_STA_CRYPTO_TESTS
+       "Fail configure when OpenSSL is missing and the station crypto selftests would be skipped"
+       OFF)
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND)
+    # src/sta/Eapol.h and src/sta/Supplicant.h - the station half of the
+    # WPA2-PSK key exchange.
+    #
+    # It also carries tests/eapol_kernel_vectors.h: the four EAPOL-Key frames
+    # hostapd and wpa_supplicant actually exchanged over a virtual rig, with
+    # the PTK wpa_supplicant derived and the GTK it installed. That is the
+    # only thing in the tree that pins the PRF, the EAPOL MIC and the GTK KDE
+    # layout against software that has never read this repository - the
+    # fixture authenticator in the same file cannot, because it shares an
+    # author with the code it tests. Regenerate with
+    # tests/eapol_capture_vectors.sh; checked in, so ctest needs no rig.
+    #
+    # Two of its cells pin the rules a supplicant is most easily wrong about:
+    # a forged EAPOL-Key MIC is rejected, and an equal-counter replayed group
+    # rekey installs nothing (it is answered as a retransmission). It also
+    # carries the IEEE 802.11i Annex H.4 passphrase-to-PSK known answers.
+    add_executable(SupplicantSelftest tests/supplicant_selftest.cpp)
+    target_include_directories(SupplicantSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_link_libraries(SupplicantSelftest PRIVATE OpenSSL::Crypto)
+    target_compile_features(SupplicantSelftest PRIVATE cxx_std_20)
+    add_test(NAME supplicant COMMAND SupplicantSelftest)
+
+    # src/sta/StationSm.h - the association state machine. Its timeouts are
+    # assertable at all only because the clock is an argument.
+    add_executable(StationSmSelftest tests/station_sm_selftest.cpp)
+    target_include_directories(StationSmSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_link_libraries(StationSmSelftest PRIVATE OpenSSL::Crypto)
+    target_compile_features(StationSmSelftest PRIVATE cxx_std_20)
+    add_test(NAME station_sm COMMAND StationSmSelftest)
+
+    # src/sta/Ccmp.h - the 802.11 CCMP framing. The vectors
+    # (tests/ccmp_gen_vectors.py) pin the CIPHER against a third
+    # implementation; they do NOT independently pin the framing, because
+    # generator and header share one author's reading - a zero CCM nonce
+    # Flags octet passes them. See the note atop tests/ccmp_selftest.cpp.
+    # tests/ccmp_kernel_vectors.h closes that gap from the other side: frames
+    # the LINUX KERNEL encrypted, at all eight TIDs, captured off a virtual
+    # two-radio rig by tests/ccmp_capture_vectors.sh. Checked in, so this
+    # target stays hardware-free and needs neither hwsim nor root.
+    # Also pins the AAD masking rules, the 48-bit PN packing, and the replay
+    # gate's `<=` (a `<` there admits a replayed PN, a KRACK-class defect).
+    add_executable(CcmpSelftest tests/ccmp_selftest.cpp)
+    target_include_directories(CcmpSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(CcmpSelftest PRIVATE OpenSSL::Crypto)
+    target_compile_features(CcmpSelftest PRIVATE cxx_std_20)
+    add_test(NAME ccmp_framing COMMAND CcmpSelftest)
+else()
+    # Said out loud: without OpenSSL the station's crypto ACCEPTANCE cells are
+    # not built, and a green ctest here has run none of them.
+    if(DEVOURER_REQUIRE_STA_CRYPTO_TESTS)
+        message(FATAL_ERROR "OpenSSL not found, and "
+                            "DEVOURER_REQUIRE_STA_CRYPTO_TESTS=ON: the station "
+                            "crypto selftests (supplicant, station_sm, "
+                            "ccmp_framing) cannot be built")
+    endif()
+    message(WARNING "OpenSSL not found: the station crypto selftests "
+                    "(supplicant, station_sm, ccmp_framing) are NOT built "
+                    "on this host")
+endif()
+
+# tests/ccmp_vectors.h is GENERATED by tests/ccmp_gen_vectors.py; --check
+# regenerates it in memory and byte-compares, so a hand edit or a generator
+# change that was not re-run fails here. Skipped (77) where
+# python-cryptography is not installed. The kernel-capture headers
+# (ccmp_kernel_vectors.h, eapol_kernel_vectors.h) have no such cell: their
+# input is a hwsim capture that is not in the tree.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME ccmp_vectors_generated
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/ccmp_gen_vectors.py --check
+    )
+    set_tests_properties(ccmp_vectors_generated PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# src/sta/Dot11.h - management/data frame builders and the IE walker. Pure and
+# header-only, so this needs neither OpenSSL nor libusb and runs in every CI
+# job. Covers the IE walker against truncated and hostile lengths, the
+# builders' exact wire bytes, and the 12-bit sequence counter.
+add_executable(Dot11Selftest tests/dot11_selftest.cpp)
+target_include_directories(Dot11Selftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_features(Dot11Selftest PRIVATE cxx_std_20)
+add_test(NAME dot11_frames COMMAND Dot11Selftest)
+
+# src/sta/BssTable.h - the scan result, and which BSS is worth joining. The
+# two cells that matter are select(), which must not offer a BSS this station
+# cannot finish a handshake with, and observe(), which must not invent a BSS
+# out of a frame that is not a beacon - every management frame shares the
+# same 24-byte header, so a deauth handed to parse_beacon reads its reason
+# code as part of a timestamp.
+add_executable(BssTableSelftest tests/bss_table_selftest.cpp)
+target_include_directories(BssTableSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_compile_features(BssTableSelftest PRIVATE cxx_std_20)
+add_test(NAME bss_table COMMAND BssTableSelftest)
+
 # Headless guard for the TX quiesce seam (ITransport::quiesce_tx via
 # RtlAdapter): the explicit "stop TX and wait it out" call every device makes
 # before anything is released. UsbTransport's cancel/drain is validated on

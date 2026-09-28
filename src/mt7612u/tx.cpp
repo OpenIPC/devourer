@@ -91,14 +91,28 @@ int mt_hdrlen_from_fc(const uint8_t *f)
 }
 
 /* mt76x02_mac_wcid_setup(): a station-table entry, needed before the
- * hardware will treat frames as belonging to a peer. */
-void mt_wcid_setup(struct mt7612u_dev *d, uint8_t idx, const uint8_t *mac)
+ * hardware will treat frames as belonging to a peer. Returns 0 once the
+ * address words read back as written, -1 otherwise (including an index
+ * past the 128-entry address table): mt_wr_copy() reports nothing, so the
+ * readback is the only way a caller learns the slot is really installed. */
+int mt_wcid_setup(struct mt7612u_dev *d, uint8_t idx, const uint8_t *mac)
 {
 	uint8_t addr[8] = { 0 };
+	uint32_t dw0, dw1;
 
-	mt_wr(d, MT_WCID_ATTR(idx), 0);
+	if (mt_wr_chk(d, MT_WCID_ATTR(idx), 0)) return -1;
+	if (idx >= 128) return -1;
 	if (mac) memcpy(addr, mac, 6);
-	if (idx < 128) mt_wr_copy(d, MT_WCID_ADDR(idx), addr, 8);
+	mt_wr_copy(d, MT_WCID_ADDR(idx), addr, 8);
+	if (mt_rr_chk(d, MT_WCID_ADDR(idx), &dw0) ||
+	    mt_rr_chk(d, MT_WCID_ADDR(idx) + 4, &dw1))
+		return -1;
+	if (dw0 != ((uint32_t)addr[0] | ((uint32_t)addr[1] << 8) |
+	            ((uint32_t)addr[2] << 16) | ((uint32_t)addr[3] << 24)) ||
+	    dw1 != ((uint32_t)addr[4] | ((uint32_t)addr[5] << 8) |
+	            ((uint32_t)addr[6] << 16) | ((uint32_t)addr[7] << 24)))
+		return -1;
+	return 0;
 }
 
 /*
@@ -191,7 +205,15 @@ int mt_tx_build(struct mt7612u_dev *d, uint8_t *buf, size_t bufsz,
 		}
 		txwi[18] = FIELD_PREP(MT_TX_PWR_ADJ, (uint32_t)(adj & 0xf));
 	}
-	txwi[19] = 0;                                           /* pktid */
+	/* pktid: zero means "do not report", which is what every normal send
+	 * wants - a status entry per frame is FIFO traffic nobody drains. With
+	 * MT_TXOPT_TXS the MAC files one entry per MPDU in MT_TX_STAT_FIFO, and
+	 * the caller is responsible for draining it. */
+	if (opts & MT_TXOPT_TXS)                                /* pktid */
+		txwi[19] = (uint8_t)(MT_TXOPT_PKTID_GET(opts) ? MT_TXOPT_PKTID_GET(opts)
+		                                              : MT_TXS_PKTID);
+	else
+		txwi[19] = 0;
 
 	/* frame, with the header pad inserted if needed */
 	memcpy(buf + 4 + MT_TXWI_LEN, f, (size_t)hdrlen);

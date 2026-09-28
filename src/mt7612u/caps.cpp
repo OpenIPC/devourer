@@ -66,6 +66,62 @@ void mt7612u_get_caps(const struct mt7612u_dev *d, struct mt7612u_caps *c)
 }
 
 /*
+ * Hardware retry limit. MT_TX_RETRY_CFG is GLOBAL on this part - the TXWI has
+ * no per-frame retry field - so this sets how many times the MAC retransmits
+ * every ACK-requested frame that goes unacknowledged. Both the short and the
+ * long limit take the value, so it applies whatever the frame length. The
+ * initvals leave short 15 / long 31 (long = frames over 2032 bytes);
+ * docs/mt7612u-tx-retry.md measured 16 attempts (short limit plus the first)
+ * on a 1400-byte frame. Frames sent NOACK never retry, whatever this says.
+ * Read back, because a value that did not land would leave the MAC retrying
+ * 15 deep while the caller believes otherwise.
+ *
+ * The read-modify-write holds io_lock (recursive; each register access takes
+ * it again), so it cannot interleave with another multi-register sequence
+ * that holds it, such as the PHY tick.
+ */
+int mt7612u_set_retry_limit(struct mt7612u_dev *d, int limit)
+{
+	uint32_t v, rb;
+	int rc = -1;
+
+	if (!d) return -1;
+	if (limit < 0 || limit > 255) {
+		ERR("retry limit %d out of range 0..255", limit);
+		return -1;
+	}
+	d->io_lock.lock();
+	/* Checked reads, both of them. mt_rr() returns ~0u on a failed transfer,
+	 * and a failed read here written back would set every OTHER field of
+	 * MT_TX_RETRY_CFG to all-ones - and the readback would then "verify" the
+	 * corrupted word, because it is exactly what was written. */
+	if (mt_rr_chk(d, MT_TX_RETRY_CFG, &v)) {
+		ERR("retry limit not set: MT_TX_RETRY_CFG read failed");
+		goto out;
+	}
+	v = mt_retry_cfg_with_limit(v, (uint32_t)limit);
+	/* Checked too: a failed transfer followed by a readback that happens
+	 * to match (the value was already there) must not report success for a
+	 * write that never landed. */
+	if (mt_wr_chk(d, MT_TX_RETRY_CFG, v)) {
+		ERR("retry limit not set: MT_TX_RETRY_CFG write failed");
+		goto out;
+	}
+	if (mt_rr_chk(d, MT_TX_RETRY_CFG, &rb)) {
+		ERR("retry limit not verified: MT_TX_RETRY_CFG readback failed");
+		goto out;
+	}
+	if (rb != v) {
+		ERR("retry limit not verified: MT_TX_RETRY_CFG %08x != %08x", rb, v);
+		goto out;
+	}
+	rc = 0;
+out:
+	d->io_lock.unlock();
+	return rc;
+}
+
+/*
  * Hardware ACK responder.
  *
  * On this MAC the immediate-response engine answers frames whose address 1

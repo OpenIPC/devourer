@@ -62,6 +62,28 @@ int main(void)
 		fails++;
 	}
 
+	/* The MT_TX_RETRY_CFG read-modify-write: both 8-bit limits take the
+	 * value, and bits 16+ (the long-frame threshold, 0x47f0 in the
+	 * initvals word 0x47f01f0f) survive untouched. */
+	{
+		static const struct { uint32_t cur, limit, want; } rty[] = {
+			{ 0x47f01f0fu, 5,   0x47f00505u },
+			{ 0x47f01f0fu, 0,   0x47f00000u },
+			{ 0x47f01f0fu, 255, 0x47f0ffffu },
+			{ 0xffffffffu, 7,   0xffff0707u },
+			{ 0x00000000u, 15,  0x00000f0fu },
+		};
+		for (unsigned i = 0; i < sizeof rty / sizeof rty[0]; i++) {
+			uint32_t got = mt_retry_cfg_with_limit(rty[i].cur,
+			                                       rty[i].limit);
+			if (got != rty[i].want) {
+				printf("  FAIL retry cfg %08x limit %u: want %08x got %08x\n",
+				       rty[i].cur, rty[i].limit, rty[i].want, got);
+				fails++;
+			}
+		}
+	}
+
 	printf("field_macros: %u masks checked, %s\n", checked,
 	       fails ? "FAIL" : "PASS");
 	return fails ? 1 : 0;

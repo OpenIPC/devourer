@@ -34,6 +34,7 @@ static void *const api[] = {
 	(void *)mt7612u_send_packets,
 	(void *)mt7612u_set_ack_responder,
 	(void *)mt7612u_clear_ack_responder,
+	(void *)mt7612u_set_retry_limit,
 	(void *)mt7612u_beacon_start,
 	(void *)mt7612u_beacon_update,
 	(void *)mt7612u_beacon_stop,

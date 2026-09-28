@@ -225,7 +225,12 @@ struct AdapterCaps {
    * (tests/rtl8733b_retry_limit_onair.sh); Kestrel
    * 8832CU witness-measured — the AX WD DATA_TXCNT_LMT field counts
    * ATTEMPTS, folded +1 to the N-retries contract, limits {0,2,8} -> modal
-   * on-air copies {1,3,8-9}). FALSE on the 8814A die (the vendor
+   * on-air copies {1,3,8-9}; the MT7612U by its own TX status FIFO -
+   * mt7612uprobe txs, an unacknowledged 1400-byte frame settles at 6
+   * attempts with limit 5 and 16 on the initvals (short limit 15; frames
+   * over 2032 bytes use the long limit, 31 - the knob sets both), one run
+   * each (docs/mt7612u-tx-retry.md); a global register there, not per
+   * frame, programmed from retry_limit at every bring-up). FALSE on the 8814A die (the vendor
    * DATA_RETRY_LIMIT=0 carve-out is kept — knob inert) and
    * false-as-unmeasured on the 8821C. */
   bool ack_responder_ok = false;

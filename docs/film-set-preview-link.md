@@ -64,7 +64,8 @@ a good one is 8–12 Mbps.
 
 The 5 GHz band offers about two dozen non-overlapping 20 MHz channels if the
 DFS ranges are usable where the shoot happens; 6 GHz adds more on the one
-tri-band part, at 80 MHz maximum and with no range evidence at all. So
+tri-band part — that part does 160 MHz at 5 GHz, but its 6 GHz transmit path
+tops out at 80 MHz today — and with no range evidence at all. So
 twenty-five cameras at a kilometre is a **ten-to-twenty-five-channel system
 with one receiving radio per channel**. Not because the software is weak, but
 because a receiving USB adapter has the same ~50–60 Mbps airtime ceiling as a
@@ -142,10 +143,12 @@ to a many-camera set:
   same code.
 - **A hardware timebase across all radios.** Beacon-stamped hardware time is
   held to a fraction of a microsecond between nodes with carrier-sense off and
-  to about a hundred microseconds software-stamped. On a set that is
-  timecode-grade synchronisation of every preview stream, and the shared clock
-  a channel scheduler needs. Commercial systems sell timecode passthrough as a
-  feature; here it falls out of the link.
+  to about a hundred microseconds software-stamped. On a set that is a
+  common clock under every preview stream and the shared timebase a channel
+  scheduler needs — the foundation for timecode alignment, not timecode itself:
+  nothing maps this clock to SMPTE timecode or an LTC output yet (§7).
+  Commercial systems sell timecode passthrough as a feature; here the clock
+  falls out of the link and the carriage remains to be built.
 - **Per-frame rate, power and channel choice**, layered (temporal-SVC)
   unequal error protection, and an erasure code that salvages partially
   corrupt frames (about +13% recovered blocks at the highest HT rate on a
@@ -155,9 +158,14 @@ to a many-camera set:
   case. On a set where another department powers something up on your
   channel, this is the difference between a producer seeing a frozen monitor
   and not noticing.
-- **Hardware acknowledgement and per-frame transmit reports** as a link
-  sensor and a reliable control/return plane (camera control, tally, timecode),
-  though not for the video plane itself.
+- **Hardware acknowledgement and per-frame transmit reports** as delivery
+  feedback and a transmit-side link sensor — the raw material for a
+  control/return plane (camera control, tally), not a reliable one by
+  themselves. Measured: two of the three families acknowledge 100% of
+  solicited frames, the third only 64–91% depending on session shape; report
+  coverage is 86–100%, and two families deliver no reports at all in a
+  transmit-only session. Reliable control needs an end-to-end retry and
+  acknowledgement layer on top; the video plane does not use any of this.
 
 What it does **not** have for this job, plainly: no packaged low-latency
 video pipeline (the production video path today is wfb-ng on top of it); no
@@ -171,11 +179,14 @@ time-synchronised access-point cells serving many stations) was written for
 robots in a warehouse. The film set is the same architecture with the traffic
 direction reversed: almost everything is **uplink**, camera to village.
 
-- The measured submit-to-air guard (1–3 ms at the 99.9th percentile) sizes a
-  slot at about 5 ms. With one or two cameras per channel, a cell of two to
-  four stations has a 10–20 ms superframe, comfortably inside the budget. With
-  twenty-five stations on one channel it would be a 125 ms superframe — which
-  independently confirms the channel-plan conclusion of §2.
+- The measured submit-to-air guard is 0.8–3.2 ms at the 99.9th percentile,
+  and the scheduled-MAC contract sizes a slot at about twice the guard — so
+  roughly 6–7 ms on the worst measured transport, or about 5 ms only if a
+  bounded deadline-miss rate (~1%) is accepted. With one or two cameras per
+  channel, a cell of two to four stations has a 13–26 ms superframe,
+  comfortably inside the budget. With twenty-five stations on one channel it
+  would be a 150–160 ms superframe — which independently confirms the
+  channel-plan conclusion of §2.
 - The single-cell scheduled MAC milestone is the per-channel cell: one ground
   radio, one or two camera stations, collision-free uplink where carrier-sense
   between two mutually hidden cameras would not be.

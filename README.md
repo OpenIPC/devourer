@@ -362,6 +362,9 @@ per-chip quirks notes at the bottom.
   per-UE RX attribution.
 - [Multi-AP cellular](docs/multi-ap-cellular.md) — what the shared clock
   enables: coordinated cells, make-before-break handover, roaming robot UEs.
+- [Film-set preview link](docs/film-set-preview-link.md) — twenty-five
+  cameras into a video village at ~100 ms: why it is a channel plan, where the
+  latency budget really goes, and what the ecosystem is missing.
 
 **Measurement & instrumentation:**
 

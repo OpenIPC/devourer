@@ -1827,6 +1827,8 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
    * measured — responder matrix + retry-knob A/B + the arq_e2e ledgers. */
   c.ack_responder_ok = true;
   c.tx_retry_limit_ok = true;
+  /* TxMode::no_agg: AGG_EN=0 + BK=1 in build_tx_block. */
+  c.tx_no_agg_ok = true;
   /* Per-packet TX power: the TXPWR_OFSET_TYPE bank selector + programmable
    * 0x1e70 offset banks (SetTxPacketPowerOffsetQdb / radiotap DBM_TX_POWER;
    * TxPktPwrBanks.h). Continuous in step_qdb units, ±63/-64 index travel, 2
@@ -2486,6 +2488,8 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
    * calibrated table, the Jaguar2 convention). INT_MIN = not present -> the
    * SetTxPacketPowerOffsetQdb session default applies. */
   int radiotap_pkt_pwr_db = INT_MIN;
+  /* Radiotap TX_FLAGS devourer-private no-aggregation bit (TxMode::no_agg). */
+  bool no_agg = false;
 
   auto *rtap_hdr = reinterpret_cast<struct ieee80211_radiotap_header *>(
       const_cast<uint8_t *>(packet));
@@ -2507,6 +2511,9 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
        * the RATE/MCS/VHT fields). Same contract as the Jaguar1 path. */
       radiotap_channel =
           devourer::freq_to_chan(get_unaligned_le16(it.this_arg));
+      break;
+    case IEEE80211_RADIOTAP_TX_FLAGS:
+      no_agg = devourer::radiotap_tx_no_agg(get_unaligned_le16(it.this_arg));
       break;
     case IEEE80211_RADIOTAP_DBM_TX_POWER:
       /* Signed dB delta for THIS frame, resolved to a power-offset bank
@@ -2724,6 +2731,13 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
       SET_TX_DESC_AMPDU_DENSITY_8822C(out, _cfg.debug.tx_ampdu_density & 0x7);
       if (_cfg.debug.tx_ampdu_rty)
         SET_TX_DESC_RTS_DATA_RTY_LMT_8822C(out, *_cfg.debug.tx_ampdu_rty);
+    }
+    /* A no_agg frame airs alone, after every override above: the MAC would
+     * otherwise fold it into its queue neighbour's PPDU at THAT frame's
+     * rate/bw (RadiotapTxFlags.h). Same queue, so ordering is unchanged. */
+    if (no_agg) {
+      SET_TX_DESC_AGG_EN_8822C(out, 0);
+      SET_TX_DESC_BK_8822C(out, 1);
     }
     jaguar3::cal_txdesc_chksum_8822c(out);
   }

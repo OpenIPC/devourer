@@ -76,6 +76,12 @@ constexpr size_t RXDESC_SIZE_8822C = 24; /* RX_DESC_SIZE_88XX */
  * to aggregate co-queued same-RA/TID frames into an A-MPDU (spike knobs
  * DEVOURER_TX_AMPDU / DEVOURER_TX_QSEL; see DeviceConfig debug section). */
 #define SET_TX_DESC_AGG_EN_8822C(d, v)        SET_BITS_TO_LE_4BYTE((d) + 0x08, 12, 1, v)
+/* BK (halmac SET_TX_DESC_BK, dword2[16]): break - the MAC does not merge this
+ * frame into an A-MPDU with its queue neighbours. The vendor rtl8822eu xmit
+ * path writes AGG_EN=0 + BK=1 for every data frame it does not aggregate
+ * (EAPOL/ARP/DHCP included); devourer does the same for a TxMode::no_agg
+ * frame (RadiotapTxFlags.h). */
+#define SET_TX_DESC_BK_8822C(d, v)            SET_BITS_TO_LE_4BYTE((d) + 0x08, 16, 1, v)
 #define SET_TX_DESC_MAX_AGG_NUM_8822C(d, v)   SET_BITS_TO_LE_4BYTE((d) + 0x0C, 17, 5, v)
 #define SET_TX_DESC_AMPDU_DENSITY_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x08, 20, 3, v)
 #define SET_TX_DESC_RTY_LMT_EN_8822C(d, v) SET_BITS_TO_LE_4BYTE((d) + 0x10, 17, 1, v)

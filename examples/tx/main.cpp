@@ -1378,6 +1378,36 @@ int main(int argc, char **argv) {
     if (tx_threads > 1)
       logger->info("DEVOURER_TX_THREADS — {} parallel senders", tx_threads);
   }
+  /* DEVOURER_TX_ALT_RATE=<rate spec> — every ODD-counter frame carries its own
+   * rate radiotap built from this spec (the DEVOURER_TX_RATE grammar, /NOAGG
+   * included); even frames keep the rate-less default. Needs
+   * DEVOURER_TX_QOS_DATA: the receiver tells the two apart by the stamped
+   * counter's parity (rx.seq pctr). The A-MPDU mixed-rate harness
+   * (tests/tx_no_agg_onair.sh). Replaces the frame each send, so it does not
+   * combine with the hop markers or DEVOURER_TX_STBC_TOGGLE. */
+  std::vector<uint8_t> tx_base_buf, tx_alt_buf;
+  if (const char *e = std::getenv("DEVOURER_TX_ALT_RATE")) {
+    if (!qos_stamp) {
+      logger->warn("DEVOURER_TX_ALT_RATE needs DEVOURER_TX_QOS_DATA — ignored");
+    } else {
+      const size_t rl = tx_buf[2] | (tx_buf[3] << 8);
+      tx_base_buf = tx_buf;
+      /* NOACK like the base frame's rate-less radiotap. */
+      tx_alt_buf =
+          devourer::build_stream_radiotap(devourer::parse_tx_mode_str(e));
+      tx_alt_buf.insert(tx_alt_buf.end(), tx_buf.begin() + rl, tx_buf.end());
+      logger->info("DEVOURER_TX_ALT_RATE={} — odd-counter frames", e);
+    }
+  }
+  /* Stamp the QoS per-frame counter at MPDU bytes 26..29 (after the frame's
+   * own radiotap), picking the ALT_RATE variant by parity first. */
+  auto stamp_counter = [&](std::vector<uint8_t> &b, uint32_t v) {
+    if (!tx_alt_buf.empty())
+      b = (v & 1) ? tx_alt_buf : tx_base_buf;
+    const size_t rl = b.size() >= 4 ? (b[2] | (b[3] << 8)) : b.size();
+    if (qos_stamp && b.size() >= rl + 26 + 4)
+      std::memcpy(b.data() + rl + 26, &v, 4);
+  };
   std::atomic<long> tx_counter{0}; /* shared frame-stamp source (threads>1) */
   std::vector<std::thread> tx_aux;
 
@@ -2336,10 +2366,7 @@ int main(int argc, char **argv) {
     /* QoS spike frames carry a per-frame counter at body[0..3] (MPDU bytes
      * 26..29) so the receiver can count UNIQUE frames vs hardware re-airings
      * (the A-MPDU engine renumbers seqs per aggregate, so seq can't). */
-    if (qos_stamp && tx_buf.size() >= 10 + 26 + 4) {
-      uint32_t v = static_cast<uint32_t>(tx_count);
-      std::memcpy(tx_buf.data() + 10 + 26, &v, 4);
-    }
+    stamp_counter(tx_buf, static_cast<uint32_t>(tx_count));
     /* Lazy-start the auxiliary senders on the first main-loop pass (the
      * chip is up and the first frame primed by then). */
     if (tx_threads > 1 && tx_aux.empty()) {
@@ -2354,10 +2381,7 @@ int main(int argc, char **argv) {
                 tx_counter.fetch_add(static_cast<long>(bufs.size()));
             for (size_t k = 0; k < bufs.size(); ++k) {
               auto &b = bufs[k];
-              if (qos_stamp && b.size() >= 10 + 26 + 4) {
-                uint32_t v = static_cast<uint32_t>(base + (long)k);
-                std::memcpy(b.data() + 10 + 26, &v, 4);
-              }
+              stamp_counter(b, static_cast<uint32_t>(base + (long)k));
               views.push_back(TxPacketView{b.data(), b.size()});
             }
             rtlDevice->send_packets(views.data(), views.size());
@@ -2377,11 +2401,10 @@ int main(int argc, char **argv) {
       tx_batch_views.clear();
       for (long k = 0; k < tx_batch; ++k) {
         auto &b = tx_batch_bufs[static_cast<size_t>(k)];
-        if (qos_stamp && b.size() >= 10 + 26 + 4) {
-          uint32_t v = static_cast<uint32_t>(
-              tx_threads > 1 ? tx_counter.fetch_add(1) : tx_count + k);
-          std::memcpy(b.data() + 10 + 26, &v, 4);
-        }
+        if (qos_stamp)
+          stamp_counter(b, static_cast<uint32_t>(
+                               tx_threads > 1 ? tx_counter.fetch_add(1)
+                                              : tx_count + k));
         tx_batch_views.push_back(TxPacketView{b.data(), b.size()});
       }
       const size_t okn = rtlDevice->send_packets(tx_batch_views.data(),

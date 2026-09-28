@@ -178,6 +178,26 @@ airtime ground truth):
   accounting-grade only for un-aggregated frames; under A-MPDU, use the
   windowed RX receipts (`src/cell/RxReceipt.h`) as the delivery truth — the
   receiver-side ledger is unaffected by TX aggregation.
+- **An aggregate airs at its first MPDU's rate, so a mixed-rate stream loses
+  its per-frame rates.** Consecutive co-queued data frames are folded into one
+  PPDU at the rate and bandwidth of the frame that opened it; a frame's own
+  MCS/BW/LDPC/STBC are dropped whenever it lands behind a frame of another
+  rate. `TxMode::no_agg` (`/NOAGG` in the rate grammar, a devourer-private
+  radiotap TX_FLAGS bit, `src/RadiotapTxFlags.h`) keeps one frame out: on
+  Jaguar3 it writes the descriptor `AGG_EN=0` + `BK=1`, the vendor
+  rtl8822eu recipe for data frames it does not aggregate. Honoured only where
+  `AdapterCaps::tx_no_agg_ok` is set (Jaguar3); elsewhere the bit is ignored.
+  Measured with `tests/tx_no_agg_onair.sh` (one 8812EU transmitting, an
+  8812EU witness, ch36, `0/6`, 4 senders, 1000 B, MCS5 and MCS0 alternating
+  by frame): without the flag 40.3 % / 40.4 % of the MCS0 frames aired at
+  MCS0 (two arms; the rest at MCS5), with it 100.0 % / 100.0 %; the MCS5
+  frames kept their rate in every arm. With the flag parsed but the
+  descriptor write disabled the flagged frames folded again (39.8 %). The
+  counterpart: a flagged frame breaks the aggregate around it, and flagging
+  every other frame — this harness's worst case — cut the witness's heard
+  rate from 2372 to 1250 frames/s (−47 %). The cost of occasional flagged
+  frames (control traffic inside a video stream) is not measured; the 8822C
+  shares the descriptor recipe and was not measured.
 - `ppdu_cnt` reads 0 on the 8812CU RX used for the bench; `paggr` + `tsfl`
   clustering are the working RX markers.
 

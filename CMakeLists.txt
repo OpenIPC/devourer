@@ -1231,6 +1231,17 @@ target_include_directories(RadiotapNoackSelftest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME radiotap_noack COMMAND RadiotapNoackSelftest)
 
+# Headless guard for TxMode::no_agg's wire form - the devourer-private
+# TX_FLAGS bit that keeps a frame out of an A-MPDU (RadiotapTxFlags.h). Every
+# builder layout, NOACK both ways, and the /NOAGG parse token.
+add_executable(RadiotapNoaggSelftest
+    tests/radiotap_noagg_selftest.cpp
+)
+target_link_libraries(RadiotapNoaggSelftest PRIVATE devourer)
+target_include_directories(RadiotapNoaggSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME radiotap_noagg COMMAND RadiotapNoaggSelftest)
+
 # Headless round-trip guard for the 802.11ax Trigger frame path (src/TriggerTwt.h
 # build_basic_trigger + he_ru_alloc, src/TriggerParse.h parse_trigger): build ->
 # parse a Basic Trigger, RU-allocation golden vectors. Generation-neutral (the

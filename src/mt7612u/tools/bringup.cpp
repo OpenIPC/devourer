@@ -620,7 +620,7 @@ static int gate_beacon(uint8_t chan, int secs)
 	}
 	/* TX-only: beaconing never reads EP 4. */
 	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) {
-		printf("GATE A: FAIL - mac_start\n"); return 1;
+		printf("GATE A: FAIL - mac_start\n"); mt_mac_stop(&dev); return 1;
 	}
 
 	mt_beacon_init(&dev);
@@ -792,7 +792,8 @@ static int gate_ap(uint8_t chan, int secs)
 	}
 	rx_up = 1;
 	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) {
-		printf("GATE B: FAIL - mac_start\n"); mt7612u_rx_stop(&dev); return 1;
+		printf("GATE B: FAIL - mac_start\n");
+		rx_teardown(); mt_mac_stop(&dev); return 1;
 	}
 	/*
 	 * AP receive filter. The managed default mt_mac_start() just wrote already
@@ -957,7 +958,7 @@ static int gate_tx(uint8_t chan, int count, int phy, int mcs)
 	}
 	/* TX only: this gate never reads EP 4, so do not switch the receiver on. */
 	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) {
-		printf("GATE E: FAIL - mac_start failed\n"); return 1;
+		printf("GATE E: FAIL - mac_start failed\n"); mt_mac_stop(&dev); return 1;
 	}
 	printf("MAC started: MT_MAC_SYS_CTRL=0x%08x (bit2 TX, bit3 RX)\n",
 	       mt_rr(&dev, MT_MAC_SYS_CTRL));
@@ -1014,7 +1015,8 @@ static int gate_rx(uint8_t chan, int want)
 		printf("GATE F: FAIL - set_channel failed\n"); return 1;
 	}
 	if (mt_mac_start(&dev, MT_RX_DRAIN_SYNC)) {
-		printf("GATE F: FAIL - mac_start failed\n"); return 1;
+		printf("GATE F: FAIL - mac_start failed\n");
+		mt_mac_rx_disable(&dev); mt_mac_stop(&dev); return 1;
 	}
 	/* Monitor: drop only CRC and PHY errors, accept everything else. The
 	 * initvals value 0x15f97 drops a great deal more than that. */
@@ -1140,7 +1142,7 @@ static int gate_g(uint8_t chan, int count)
 	if (mt_eeprom_init(&dev)) return 1;
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
 
 	memset(frame, 0, sizeof frame);
 	frame[0] = 0x08;
@@ -1251,7 +1253,7 @@ static int gate_mtu(uint8_t chan, int count)
 	if (mt_eeprom_init(&dev)) return 1;
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
 
 	memset(frame, 0, sizeof frame);
 	frame[0] = 0x08;                        /* data, 3-address */
@@ -1339,7 +1341,7 @@ static int gate_soak(uint8_t chan, int secs, int framelen)
 	if (mt_eeprom_init(&dev)) return 1;
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
 
 	memset(frame, 0, sizeof frame);
 	frame[0] = 0x08;
@@ -1458,7 +1460,9 @@ static int gate_arx(uint8_t chan, int secs, int notick)
 	if (mt7612u_rx_start(&dev, arx_cb, &ctx)) {
 		printf("GATE arx: FAIL - rx_start failed\n"); return 1;
 	}
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { rx_teardown(); return 1; }
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) {
+		rx_teardown(); mt_mac_stop(&dev); return 1;
+	}
 	mt7612u_set_monitor_rx(&dev, 0);
 	t0 = now_ms();
 	/* notick is the negative control: without the 1 Hz PHY tick this gate
@@ -1525,7 +1529,9 @@ static int gate_duplex(uint8_t chan, int secs)
 	memcpy(frame + 24, "MT7612U-HAL ", 12);
 
 	if (mt7612u_rx_start(&dev, arx_cb, &ctx)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { rx_teardown(); return 1; }
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) {
+		rx_teardown(); mt_mac_stop(&dev); return 1;
+	}
 	mt7612u_set_monitor_rx(&dev, 0);
 
 	t0 = now_ms();
@@ -1676,7 +1682,7 @@ static int gate_ampdu(uint8_t chan, int count)
 	if (mt_eeprom_init(&dev)) return 1;
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
 
 	/* A real station-table entry: aggregation is a per-peer notion, and
 	 * wcid 0xff (what the injector normally uses) names no peer. */
@@ -2120,7 +2126,10 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 		ctr.acks.store(0);
 		ctr.frames.store(0);
 
-		if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) return 1;
+		if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) {
+			mt_mac_stop(&dev);
+			return 1;
+		}
 		if (mt_async_start(&dev, rx_on ? ucast_rx_cb : NULL,
 		                   rx_on ? (void *)&ctr : NULL)) {
 			mt_mac_stop(&dev);
@@ -2365,7 +2374,9 @@ static int gate_caps(uint8_t chan)
 	 * with nothing reading, that is long enough to wedge the part below
 	 * the USB level, which no software reset recovers. */
 	if (mt_async_start(&dev, drain_cb, &drained)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { rx_teardown(); return 1; }
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) {
+		rx_teardown(); mt_mac_stop(&dev); return 1;
+	}
 
 	mt7612u_get_caps(&dev, &c);
 	printf("caps: %s rev 0x%08x  %dTx%dRx  bw_mask 0x%02x (20%s%s)\n",
@@ -2537,7 +2548,9 @@ static int gate_ack(uint8_t chan, int secs, int arm)
 	/* Ring first, receiver second - see gate_caps. Arming the responder and
 	 * printing between the two would otherwise leave RX on and undrained. */
 	if (mt7612u_rx_start(&dev, ack_cb, &off)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { rx_teardown(); return 1; }
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) {
+		rx_teardown(); mt_mac_stop(&dev); return 1;
+	}
 	/* CRC and PHY errors only: DUP must stay clear so retries reach us. */
 	mt_wr(&dev, MT_RX_FILTR_CFG,
 	      MT_RX_FILTR_CFG_CRC_ERR | MT_RX_FILTR_CFG_PHY_ERR);
@@ -2661,7 +2674,9 @@ static int gate_rxbytes(uint8_t chan, int secs)
     if (mt_init_hardware(&dev, NULL)) return 1;
     if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
     if (mt7612u_rx_start(&dev, rxbytes_cb, NULL)) return 1;
-    if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { rx_teardown(); return 1; }
+    if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) {
+        rx_teardown(); mt_mac_stop(&dev); return 1;
+    }
     mt7612u_set_monitor_rx(&dev, 0);
     mt7612u_link_stats_start(&dev);
 
@@ -2741,7 +2756,11 @@ static int gate_linkstat(uint8_t chan, int secs, int with_rx)
 	if (with_rx) {
 		if (mt7612u_rx_start(&dev, drain_cb, &linkstat_drained)) return 1;
 	}
-	if (mt_mac_start(&dev, with_rx)) { if (with_rx) rx_teardown(); return 1; }
+	if (mt_mac_start(&dev, with_rx)) {
+		if (with_rx) rx_teardown();
+		mt_mac_stop(&dev);
+		return 1;
+	}
 	if (with_rx) mt7612u_set_monitor_rx(&dev, 0);
 	mt7612u_link_stats_start(&dev);
 
@@ -2815,7 +2834,7 @@ static int gate_linktx(uint8_t chan, int count)
 	if (mt_eeprom_init(&dev)) return 1;
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
 
 	memset(f, 0, sizeof f);
 	f[0] = 0x08;
@@ -2904,7 +2923,9 @@ static int gate_linkrx(uint8_t chan, int secs)
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
 	if (mt7612u_rx_start(&dev, linkrx_cb, NULL)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) { rx_teardown(); return 1; }
+	if (mt_mac_start(&dev, MT_RX_DRAIN_RING)) {
+		rx_teardown(); mt_mac_stop(&dev); return 1;
+	}
 	mt7612u_set_monitor_rx(&dev, 0);
 
 	printf("RX on ch%u for %d s, filtering our own magic\n", chan, secs);
@@ -2978,7 +2999,7 @@ static int gate_diversity(uint8_t chan, int count)
 	if (mt_eeprom_init(&dev)) return 1;
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
 
 	memset(f, 0, sizeof f);
 	f[0] = 0x08;
@@ -3082,7 +3103,7 @@ static int gate_coding(uint8_t chan, int count, int bw)
 	if (mt_eeprom_init(&dev)) return 1;
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, (enum mt7612u_bw)bw)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
 
 	mt_chan_group(chan, (uint8_t)bw, &hw_chan, NULL, NULL);
 	printf("ch%u (hw centre %u) at %d MHz, %d frames per arm\n\n",
@@ -3189,7 +3210,7 @@ static int gate_sweep(uint8_t chan, int count, int bw)
 	if (mt_eeprom_init(&dev)) return 1;
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, (enum mt7612u_bw)bw)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
 
 	/* Report the centre the hardware actually tuned, not the control
 	 * channel: at 80 MHz they differ by up to 6, and a witness listening on
@@ -3318,7 +3339,7 @@ static int gate_vht(uint8_t chan, int count, int bw)
 	if (mt_eeprom_init(&dev)) return 1;
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, (enum mt7612u_bw)bw)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
 
 	mt_chan_group(chan, (uint8_t)bw, &hw_chan, NULL, NULL);
 	printf("chainmask 0x%04x -> %d spatial streams, txwi[17]=0x%02x\n",
@@ -3400,7 +3421,7 @@ static int gate_rtap(uint8_t chan, int count)
 	if (mt_eeprom_init(&dev)) return 1;
 	if (mt_init_hardware(&dev, NULL)) return 1;
 	if (mt_set_channel(&dev, chan, MT7612U_BW_20)) return 1;
-	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) return 1;
+	if (mt_mac_start(&dev, MT_RX_DRAIN_NONE)) { mt_mac_stop(&dev); return 1; }
 
 	memcpy(pkt, rtap, sizeof rtap);
 	{

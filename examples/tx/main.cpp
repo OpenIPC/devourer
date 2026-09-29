@@ -1946,9 +1946,10 @@ int main(int argc, char **argv) {
    * explicitly, before Stop() powers the chip down; the destructor covers an
    * exception or an early return. It is declared after the DeviceSession, so
    * it runs before the device is destroyed. `attempted` is cleared only by a
-   * StopBeacon that returned (true, or a clean false = nothing active, per
-   * its contract); after three throws it stays set, so a later stop() - the
-   * destructor on an exception path - tries again. detach() drops the device
+   * StopBeacon that returned true, or a clean false when nothing was armed;
+   * after three failed attempts (throws, or a refused disable of an armed
+   * beacon) it stays set, so a later stop() - the destructor on an exception
+   * path - tries again. detach() drops the device
    * before the normal path destroys it. */
   struct TxBeaconGuard {
     IRadio *dev;
@@ -1960,17 +1961,18 @@ int main(int argc, char **argv) {
         return;
       for (int i = 0; i < 3; i++) {
         try {
-          /* true = stopped; a clean false = nothing active (StopBeacon
-           * contract), expected after a refused StartBeacon - either way
-           * there is nothing to retry. */
-          dev->StopBeacon();
+          /* After a successful arm, false means the disable was refused
+           * (Jaguar2/3), so retry. Otherwise a clean false is nothing
+           * active - expected after a refused StartBeacon. */
+          if (!dev->StopBeacon() && armed)
+            continue;
           attempted = false;
           return;
         } catch (const std::exception &e) {
           log->warn("DEVOURER_TX_BEACON_TU: StopBeacon threw: {}", e.what());
         }
       }
-      /* Three throws: `attempted` stays set so a later stop() tries again. */
+      /* Three failures: `attempted` stays set so a later stop() tries again. */
       log->error("DEVOURER_TX_BEACON_TU: StopBeacon failed 3 times - the "
                  "beacon may keep airing until the adapter is re-enumerated "
                  "or powered down (Jaguar2 has no teardown power-down)");

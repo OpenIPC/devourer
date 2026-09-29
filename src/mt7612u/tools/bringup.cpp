@@ -1933,11 +1933,6 @@ static int txs_drain(struct mt7612u_dev *d, struct txs_sum *o,
 	return 0;
 }
 
-/* DEVOURER_TX_RETRY_LIMIT, read with env_config's strictness: the whole
- * string one number (base auto-detect), trailing whitespace by isspace()
- * exactly as env_long_strict() takes it, clamped to the config's 0..63.
- * Returns 1 and sets *out when present and valid, 0 when unset, -1 when
- * present but not a number. */
 /* The whole string one number (base auto-detect, leading and trailing
  * whitespace allowed, as strtol and isspace define them) - the rule
  * env_config's env_long_strict() applies. 0 and *out on success, -1 when no
@@ -1987,6 +1982,11 @@ static void txs_print_escaped(const char *s)
 	}
 }
 
+/* DEVOURER_TX_RETRY_LIMIT, read with env_config's strictness: the whole
+ * string one number (base auto-detect), trailing whitespace by isspace()
+ * exactly as env_long_strict() takes it, clamped to the config's 0..63.
+ * Returns 1 and sets *out when present and valid, 0 when unset, -1 when
+ * present but not a number. */
 static int txs_retry_limit_env(int *out)
 {
 	const char *e = getenv("DEVOURER_TX_RETRY_LIMIT");

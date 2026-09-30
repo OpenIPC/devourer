@@ -11,6 +11,11 @@
 #   odd counter   ALT rate  (DEVOURER_TX_ALT_RATE), with /NOAGG in the
 #                 "noagg" arm and without it in the "control" arm
 #
+# The "basenoagg" arm moves the flag to the BASE side: the even frames are
+# rate-less, so /NOAGG reaches them only through the SetTxMode default, not
+# their own radiotap. Dropping that default leaves the arm a copy of the
+# control (odd frames fold), so it guards the rate-less path.
+#
 # A passive witness decodes each copy's rate (rx.seq: pctr + hw rate index),
 # so every received frame is scored against the rate it was submitted with.
 #
@@ -36,7 +41,7 @@ WIT_VID=${WIT_VID:-0x0bda}; WIT_PID=${WIT_PID:-0xa81a}
 WIT_SSH=${WIT_SSH:-}; WIT_BIN=${WIT_BIN:-$BUILD/rxdemo}
 CH=${CH:-36}
 BASE=${BASE:-MCS5}; ALT=${ALT:-MCS0}
-ARMS=${ARMS:-"noagg control noagg control"}
+ARMS=${ARMS:-"noagg control basenoagg noagg control basenoagg"}
 SECS=${SECS:-12}
 AMPDU=${AMPDU:-0/6}          # DEVOURER_TX_AMPDU_MODE: TID0, 6 MPDUs
 THREADS=${THREADS:-4}        # deep feed: aggregation needs co-queued frames
@@ -60,7 +65,7 @@ rate_code() {
 BASE_CODE=$(rate_code "$BASE") || exit 2
 ALT_CODE=$(rate_code "$ALT") || exit 2
 [ "$BASE_CODE" -ne "$ALT_CODE" ] || { echo "ABORT: BASE and ALT must differ" >&2; exit 2; }
-case " $ARMS " in *" noagg "*) ;; *) echo "ABORT: ARMS needs a noagg arm" >&2; exit 2;; esac
+case " $ARMS " in *" noagg "*|*" basenoagg "*) ;; *) echo "ABORT: ARMS needs a noagg or basenoagg arm" >&2; exit 2;; esac
 case " $ARMS " in *" control "*) ;; *) echo "ABORT: ARMS needs a control arm" >&2; exit 2;; esac
 
 # Kill only this tree's demos (ERE-escaped build prefix), and the remote
@@ -82,9 +87,10 @@ for arm in $ARMS; do
   idx=$((idx+1))
   tag="$(printf '%02d_%s' "$idx" "$arm")"
   case "$arm" in
-    noagg)   alt_spec="$ALT/NOAGG" ;;
-    control) alt_spec="$ALT" ;;
-    *) echo "ABORT: unknown arm '$arm' (noagg|control)" >&2; exit 2 ;;
+    noagg)     base_spec="$BASE";       alt_spec="$ALT/NOAGG" ;;
+    control)   base_spec="$BASE";       alt_spec="$ALT" ;;
+    basenoagg) base_spec="$BASE/NOAGG"; alt_spec="$ALT" ;;
+    *) echo "ABORT: unknown arm '$arm' (noagg|control|basenoagg)" >&2; exit 2 ;;
   esac
   KILL; sleep 3   # USB release after a -9 is not instantaneous
   # shellcheck disable=SC2024
@@ -107,7 +113,7 @@ for arm in $ARMS; do
   # shellcheck disable=SC2024
   $SUDO env DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" \
        DEVOURER_CHANNEL="$CH" DEVOURER_TX_QOS_DATA=1 DEVOURER_TX_QOS_NOACK=1 \
-       DEVOURER_TX_SA="$TX_SA" DEVOURER_TX_RATE="$BASE" \
+       DEVOURER_TX_SA="$TX_SA" DEVOURER_TX_RATE="$base_spec" \
        DEVOURER_TX_ALT_RATE="$alt_spec" DEVOURER_TX_AMPDU_MODE="$AMPDU" \
        DEVOURER_TX_THREADS="$THREADS" DEVOURER_TX_GAP_US=0 \
        DEVOURER_TX_PAYLOAD_BYTES="$PAYLOAD" DEVOURER_LOG_LEVEL=warn \
@@ -160,7 +166,7 @@ python3 - "$RESULTS" <<'PY'
 import json, sys
 rows = [json.loads(l) for l in open(sys.argv[1])]
 ctl = [r for r in rows if r["arm"] == "control"]
-flg = [r for r in rows if r["arm"] == "noagg"]
+flg = [r for r in rows if r["arm"] in ("noagg", "basenoagg")]
 for r in rows:
     print(f"  #{r['idx']} {r['arm']:<8} odd@own {r['odd_own_pct']:>5}%  "
           f"even@own {r['even_own_pct']:>5}%  heard {r['heard_fps']} fps")

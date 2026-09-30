@@ -2591,6 +2591,7 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
     ldpc = tp.ldpc ? 1 : 0;
     stbc = tp.stbc ? 1 : 0;
     bwidth = static_cast<ChannelWidth_t>(tp.bwidth);
+    no_agg = no_agg || _tx_mode_default->no_agg;
   }
 
   /* DEVOURER_TX_NDPA=N — beamforming-sounding probe: mark injected frames as

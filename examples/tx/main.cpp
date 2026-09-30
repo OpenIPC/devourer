@@ -2401,10 +2401,9 @@ int main(int argc, char **argv) {
       tx_batch_views.clear();
       for (long k = 0; k < tx_batch; ++k) {
         auto &b = tx_batch_bufs[static_cast<size_t>(k)];
-        if (qos_stamp)
-          stamp_counter(b, static_cast<uint32_t>(
-                               tx_threads > 1 ? tx_counter.fetch_add(1)
-                                              : tx_count + k));
+        stamp_counter(b, static_cast<uint32_t>(tx_threads > 1
+                                                   ? tx_counter.fetch_add(1)
+                                                   : tx_count + k));
         tx_batch_views.push_back(TxPacketView{b.data(), b.size()});
       }
       const size_t okn = rtlDevice->send_packets(tx_batch_views.data(),

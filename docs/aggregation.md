@@ -195,9 +195,20 @@ airtime ground truth):
   descriptor write disabled the flagged frames folded again (39.8 %). The
   counterpart: a flagged frame breaks the aggregate around it, and flagging
   every other frame — this harness's worst case — cut the witness's heard
-  rate from 2372 to 1250 frames/s (−47 %). The cost of occasional flagged
-  frames (control traffic inside a video stream) is not measured; the 8822C
-  shares the descriptor recipe and was not measured.
+  rate from 2372 to 1250 frames/s (−47 %). The flag also reaches a
+  rate-less frame through the `SetTxMode` default
+  (`DEVOURER_TX_RATE=.../NOAGG`), the harness's `basenoagg` arm: 100.0 % of
+  both parities at their own rate (×2, 8812EU → 8812EU), while with the
+  default's `no_agg` not propagated the same arm folds like the control
+  (38.5 % / 40.1 % vs 39.1 %). The cost of occasional flagged frames
+  (control traffic inside a video stream) is not measured. The 8822C die,
+  measured on one 8812CU (an independent rig, same script unchanged,
+  an 8822BU external-antenna witness, same ch/`0/6`/4 senders/1000 B/MCS5 +
+  MCS0): the fold is deeper there — 23.8 % / 24.6 % of the MCS0 frames kept
+  their rate without the flag, 100.0 % / 100.0 % with it — and the
+  every-other-frame cost correspondingly larger, 2749–2913 frames/s heard
+  unflagged vs 1156–1159 flagged (about −60 %). One unit per die; the 8812EU
+  arm was not repeated on that rig.
 - `ppdu_cnt` reads 0 on the 8812CU RX used for the bench; `paggr` + `tsfl`
   clustering are the working RX markers.
 

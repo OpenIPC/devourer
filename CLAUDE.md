@@ -262,10 +262,8 @@ those are the ones listed below.
   Programmatic: `SetTxMode` / `ClearTxMode`. `/NOAGG` keeps the frame out
   of an A-MPDU (`TxMode::no_agg`, `AdapterCaps::tx_no_agg_ok`,
   `docs/aggregation.md`).
-- `DEVOURER_TX_ALT_RATE=<rate spec>` — txdemo (with `DEVOURER_TX_QOS_DATA`):
-  odd-counter frames carry their own rate radiotap from this spec, even ones
-  keep the default; the witness splits them by `rx.seq` pctr parity
-  (`tests/tx_no_agg_onair.sh`).
+- `DEVOURER_TX_ALT_RATE=<rate spec>` — txdemo: alternate frames at a second
+  rate (mixed-rate harness, `tests/tx_no_agg_onair.sh`).
 - `DEVOURER_SKIP_RESET=1` — skip `libusb_reset_device` before claim (only
   helps when firmware state is intact). Kestrel adapters skip the reset
   unconditionally — a USB reset on running firmware can land the chip in the

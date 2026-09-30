@@ -36,17 +36,21 @@ std::vector<uint8_t> build_stream_radiotap(const TxMode& mode);
  * Only the MT7612U reads this bit. The Realtek backends ignore radiotap
  * TX_FLAGS and keep their existing ACK behaviour whatever no_ack says:
  * Jaguar1 always marks the descriptor BMC; Jaguar2/3, Kestrel and the
- * RTL8733B set BMC from addr1's group bit. */
+ * RTL8733B set BMC from addr1's group bit. mode.no_agg rides the same field
+ * as a separate, devourer-private bit (RadiotapTxFlags.h), independent of
+ * no_ack. */
 std::vector<uint8_t> build_stream_radiotap(const TxMode& mode, bool no_ack);
 
 /* Parse a TX-mode spec string into a TxMode. Single slash-separated string:
- *   <rate>[/<bw>][/SGI][/LDPC][/STBC][/ER|/ER106][/DCM]   (case-insensitive)
+ *   <rate>[/<bw>][/SGI][/LDPC][/STBC][/NOAGG][/ER|/ER106][/DCM]
+ *                                                         (case-insensitive)
  *     <rate> : 6M|9M|12M|18M|24M|36M|48M|54M | MCS0..MCS31 |
  *              VHT1SS_MCS0..VHT4SS_MCS9 | HE1SS_MCS0..HE4SS_MCS11
  *     <bw>   : 20|40|80|160 (default 20)
  *     ER / ER106 / DCM (HE rates only, Kestrel): HE ER SU extended-range PPDU
  *       (242-tone RU, MCS0-2 / 106-tone RU, MCS0) and dual-carrier modulation
  *       (MCS 0/1/3/4; excludes STBC). Out-of-spec combos are clamped (W log).
+ *     NOAGG  : TxMode::no_agg - the frame never joins an A-MPDU.
  * Empty or unrecognised falls back to 6M legacy.
  *
  * The rate is resolved without reference to the band, so a VHT rate on a

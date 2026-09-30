@@ -285,6 +285,15 @@ struct AdapterCaps {
    * FALSE on every other backend: not ported. */
   bool station_mode_ok = false;
 
+  /* TxMode::no_agg is honoured: a frame carrying the radiotap TX_FLAGS
+   * kRadiotapTxFlagNoAgg bit (RadiotapTxFlags.h) airs as its own PPDU at its
+   * own rate and bandwidth even while SetAmpduMode is on. TRUE on Jaguar3,
+   * on-air-measured on one 8812EU and one 8812CU (tests/tx_no_agg_onair.sh;
+   * the 8822C folds deeper and pays more for the flag, docs/aggregation.md).
+   * False everywhere else: the bit is ignored and a flagged frame can still
+   * be folded into an aggregate at its neighbour's rate. */
+  bool tx_no_agg_ok = false;
+
   /* --- feature flags --- */
   /* Per-packet TX power: a per-frame power trim driven by radiotap
    * DBM_TX_POWER (dB delta vs the calibrated table / session base) or a

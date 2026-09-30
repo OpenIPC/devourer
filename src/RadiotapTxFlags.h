@@ -14,6 +14,20 @@ extern "C" {
 
 namespace devourer {
 
+/* Devourer-private TX_FLAGS bit: "never aggregate this frame" (TxMode::no_agg).
+ * Under an A-MPDU session the MAC folds consecutive co-queued frames into one
+ * PPDU aired at its FIRST MPDU's rate and bandwidth, so a frame's own
+ * MCS/BW/LDPC/STBC are silently replaced (docs/aggregation.md has the
+ * measurement). A backend that honours the bit (AdapterCaps::tx_no_agg_ok)
+ * airs the frame as its own PPDU. radiotap.org assigns TX_FLAGS 0x0001-0x0020;
+ * this bit sits above them and is not a registered assignment, so a future
+ * radiotap definition of 0x0100 would collide with it. */
+constexpr uint16_t kRadiotapTxFlagNoAgg = 0x0100;
+
+inline bool radiotap_tx_no_agg(uint16_t tx_flags) {
+  return (tx_flags & kRadiotapTxFlagNoAgg) != 0;
+}
+
 struct RadiotapMcsField {
   bool have_mcs = false;
   uint8_t mcs = 0;   /* HT MCS index 0..31, valid when have_mcs */

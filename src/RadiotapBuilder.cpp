@@ -1,6 +1,7 @@
 #include "RadiotapBuilder.h"
 
 #include "ieee80211_radiotap.h" /* HE field masks */
+#include "RadiotapTxFlags.h"    /* kRadiotapTxFlagNoAgg */
 
 #include <cctype>
 #include <cstdio>
@@ -296,7 +297,8 @@ std::vector<uint8_t> build_stream_radiotap(const TxMode& cfg) {
 }
 
 std::vector<uint8_t> build_stream_radiotap(const TxMode& cfg, bool no_ack) {
-  const uint16_t tx_flags = no_ack ? kTxFlagsNoAck : 0;
+  const uint16_t tx_flags = static_cast<uint16_t>(
+      (no_ack ? kTxFlagsNoAck : 0) | (cfg.no_agg ? kRadiotapTxFlagNoAgg : 0));
   switch (cfg.mode) {
     case TxMode::Mode::HT:  return build_ht(cfg, tx_flags);
     case TxMode::Mode::VHT: return build_vht(cfg, tx_flags);
@@ -315,7 +317,7 @@ TxMode parse_tx_mode_str(const std::string& spec) {
   const std::string s = to_upper_stripped(spec.c_str());
 
   /* Split on '/': first token = rate, rest = bandwidth (numeric) or modifier
-   * flags (SGI / LDPC / STBC). */
+   * flags (SGI / LDPC / STBC / NOAGG). */
   std::vector<std::string> tokens;
   size_t start = 0;
   while (start <= s.size()) {
@@ -340,6 +342,7 @@ TxMode parse_tx_mode_str(const std::string& spec) {
     if (t == "SGI")       cfg.sgi = true;
     else if (t == "LDPC") cfg.ldpc = true;
     else if (t == "STBC") cfg.stbc = true;
+    else if (t == "NOAGG") cfg.no_agg = true;
     else if (t == "ER" || t == "ER106" || t == "DCM") {
       /* HE ER SU / DCM are 802.11ax-only modifiers (Kestrel). */
       if (cfg.mode != TxMode::Mode::HE) {

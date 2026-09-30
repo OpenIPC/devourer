@@ -56,6 +56,15 @@ struct TxMode {
   bool sgi = false;
   bool ldpc = false;
   bool stbc = false;
+
+  /* Never aggregate this frame, even inside an A-MPDU session: it airs as its
+   * own PPDU at its own rate and bandwidth. Carried per frame in radiotap
+   * TX_FLAGS (kRadiotapTxFlagNoAgg, RadiotapTxFlags.h); honoured where
+   * AdapterCaps::tx_no_agg_ok is set, ignored elsewhere. false keeps the
+   * radiotap byte-identical. As the SetTxMode default it applies to rate-less
+   * frames only, like the rate fields: a frame with its own rate radiotap
+   * takes no_agg from its own TX_FLAGS. */
+  bool no_agg = false;
 };
 
 /* The descriptor inputs send_packet writes, derived from a TxMode. `fixed_rate`

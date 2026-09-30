@@ -1034,6 +1034,47 @@ void Mt7612uRadio::ClearAckResponder() {
     mt7612u_clear_ack_responder(_dev);
 }
 
+/* Thin, like the rest of the control plane: on this part a station identity
+ * is a check, not a configuration (station.cpp,
+ * docs/mt7612u-station-identity.md). The ordering note IRadio requires is at
+ * the declaration (Mt7612uRadio.h). */
+bool Mt7612uRadio::SetStationIdentity(const devourer::MacAddr &own,
+                                      const devourer::MacAddr &bssid) {
+  std::lock_guard<std::recursive_mutex> lock(_mu);
+  if (!_dev)
+    return false;
+  if (mt7612u_set_station_identity(_dev, own.data(), bssid.data()) != 0)
+    return false;
+  /* The arm covers RECEIVE and auto-ACK only. What a station transmits is
+   * the caller's: its unicast (management, EAPOL, data) must request an ACK -
+   * build_stream_radiotap(mode, false), since the default stream radiotap is
+   * NOACK and never retries - and the MAC retransmits an unacknowledged frame
+   * only tx.retry_limit times. That limit is programmed at bring-up into a
+   * GLOBAL register and defaults to 0, so a station session left at the
+   * default sends every unicast frame exactly once: one lost frame is a lost
+   * association step. Not refused - an RX-only or test session may want
+   * exactly that - but said, because nothing else would say it. */
+  if (std::clamp(_cfg.tx.retry_limit, 0, 63) == 0)
+    _logger->warn("MT7612U: station identity armed with tx.retry_limit=0 - "
+                  "the MAC will not retransmit this station's unacknowledged "
+                  "unicast. Set DEVOURER_TX_RETRY_LIMIT / tx.retry_limit "
+                  "(nonzero) and send unicast with an ACK-requesting "
+                  "radiotap");
+  return true;
+}
+
+bool Mt7612uRadio::ClearStationIdentity() {
+  std::lock_guard<std::recursive_mutex> lock(_mu);
+  /* No device: nothing can have been armed, so the pre-arm state trivially
+   * holds (IRadio's contract for a clear with nothing to undo). */
+  if (!_dev)
+    return true;
+  mt7612u_clear_station_identity(_dev);
+  /* True without qualification because the arm writes no hardware state on
+   * this part: there is nothing to restore, so nothing to verify. */
+  return true;
+}
+
 /* The beacon plane. Thin on purpose: the sequence these wrap is the one the
  * bring-up harness's Stage A and Stage B gates run, device-verified on
  * 2026-09-08 - beacon on air on both bands, hardware TSF and sequence, and a
@@ -1257,6 +1298,11 @@ devourer::AdapterCaps Mt7612uRadio::GetAdapterCaps() {
   c.tsf_write_ok = hw.tsf_write;
   /* Measured on air: 0 frames at the stimulus radio unarmed, 3500+ armed. */
   c.ack_responder_ok = true;
+  /* station_mode_ok: TRUE. The evidence, its controls and its limits -
+   * the promiscuous station RX path included - are kept in ONE place, at the
+   * AdapterCaps::station_mode_ok declaration, with the full record in
+   * docs/mt7612u-station-identity.md (read its retraction section first). */
+  c.station_mode_ok = true;
   /* tx.retry_limit reaches MT_TX_RETRY_CFG (global, not per frame) at every
    * bring-up and is read back. On air, by the chip's own TX status:
    * docs/mt7612u-tx-retry.md. */

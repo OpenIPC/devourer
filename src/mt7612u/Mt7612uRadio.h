@@ -102,6 +102,14 @@ public:
   devourer::ChannelBusy GetChannelBusy() override;
   uint32_t ArmChannelBusy(uint32_t window_us) override;
   bool SetAckResponder(const devourer::MacAddr &mac) override;
+  /* IRadio's ORDERING clause, answered here as it requires: this CANNOT
+   * detect being called before the RX loop. It writes no filter and no
+   * identity (a check, not a configuration), so it is order-independent as
+   * implemented - but StartRxLoop reprograms the receive filter after
+   * mt7612u_start(), so call it after StartRxLoop as the interface says. */
+  bool SetStationIdentity(const devourer::MacAddr &own,
+                          const devourer::MacAddr &bssid) override;
+  bool ClearStationIdentity() override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
   bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) override;
   bool StopBeacon() override;

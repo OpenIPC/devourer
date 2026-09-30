@@ -64,3 +64,10 @@ Where each piece lives: NOACK vs. ACK-requesting radiotap -
 `mt7612u_set_retry_limit` (`caps.cpp`); measurements -
 `docs/mt7612u-tx-retry.md`; reproducer - `mt7612uprobe txs` (`gate_txs` in
 `tools/bringup.cpp`).
+
+## Station identity
+
+Contract: `mt7612u_set_station_identity` (`include/mt7612u/mt7612u.h`) and
+`IRadio::SetStationIdentity` (`src/IRadio.h`). Measurements, the receive-filter
+caveat and the retractions: `docs/mt7612u-station-identity.md`. Headless cell
+`mt7612u_station_identity`; hardware gate `mt7612uprobe staid`.

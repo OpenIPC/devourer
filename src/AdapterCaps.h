@@ -236,6 +236,55 @@ struct AdapterCaps {
   bool ack_responder_ok = false;
   bool tx_retry_limit_ok = false;
 
+  /* station_mode_ok: IRadio::SetStationIdentity can program this MAC for the
+   * STATION half of an infrastructure BSS, and the behaviour a station needs
+   * from the silicon has been measured on air. Gate station-mode callers on
+   * this rather than on SetStationIdentity's return value alone, so a caller
+   * can refuse before it starts a handshake it cannot finish.
+   *
+   * False means "not ported / not measured", never "the silicon cannot". Do
+   * not set it from a code-reading: the bar is an on-air cell showing this
+   * adapter receiving unicast addressed to it and being ACKed for what it
+   * sends - the same shape of evidence ack_responder_ok carries, measured per
+   * die. (The MT7612U acknowledgement cells use a raw injector and an armed
+   * ACK responder as the peer, not an AP.)
+   *
+   * TRUE on MT7612U, and read docs/mt7612u-station-identity.md - its
+   * retraction section first - before quoting a number from it. Both halves
+   * of the bar are measured there, with controls: a Realtek peer's own CCX
+   * reports show this MAC acknowledging 100% of unicast addressed to it with
+   * nothing armed (0.45 mean retries, 1279 reports) against three controls
+   * pinned at the peer's 12-retry limit (a destination nobody holds, the DUT
+   * absent, and MT_AUTO_RSP_EN cleared); and the MAC's own TX status FIFO
+   * shows its uplink acknowledged 200/200 at 0.0 mean retries against a
+   * 0/200 control run to the full ladder. The uplink cell sent from the
+   * bring-up tool with an ACK-requesting TXWI and a retry limit of 15 - not
+   * a library session, whose defaults (NOACK stream radiotap, tx.retry_limit
+   * 0) send each unicast once; see IRadio::SetStationIdentity. Note the
+   * limits the measurements do NOT clear, which a caller should know:
+   *
+   *   - every cell ran an UNASSOCIATED station receiving traffic it had not
+   *     negotiated, so power save, TIM parsing, cross-BSS duplicate detection
+   *     and hardware key lookup are untested;
+   *   - those cells did not drive SetStationIdentity itself. On this part the
+   *     seam writes no register, so the measured hardware state is the state
+   *     a successful arm leaves behind, but the literal "arm through IRadio,
+   *     then measure" path is not what the cells ran;
+   *   - the cells ran the MANAGED receive filter, and the library's own RX
+   *     path does not: Mt7612uRadio::StartRxLoop calls
+   *     mt7612u_set_monitor_rx() unconditionally, so a station driven through
+   *     IRadio runs PROMISCUOUS. Acknowledgement does not depend on it (a
+   *     monitor-filter run of the same auto-ACK cell also read 100%), but the
+   *     "moving the port identity makes a station deaf" half of the rationale
+   *     is specific to the managed filter;
+   *   - two units, one peer model, one channel, near field, no soak; the
+   *     second unit reproduced the acknowledgement and uplink cells (its
+   *     uplink at 1.9 mean retries against the first unit's 0.0), not the
+   *     BSSID receive table.
+   *
+   * FALSE on every other backend: not ported. */
+  bool station_mode_ok = false;
+
   /* --- feature flags --- */
   /* Per-packet TX power: a per-frame power trim driven by radiotap
    * DBM_TX_POWER (dB delta vs the calibrated table / session base) or a

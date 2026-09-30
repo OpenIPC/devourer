@@ -341,8 +341,12 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 	uint8_t idx;
 	unsigned before;
 	int took = 0;
+	/* Whether a station arm was already lost before this call: a failed
+	 * start restores only an arm it dropped itself. */
+	int sta_lost_before;
 
 	if (!dev) return -1;
+	sta_lost_before = dev->sta.lost;
 	if (beacon_split(buf, len, &mpdu, &mpdu_len, &rate)) return -1;
 
 	ta = mpdu + 10;     /* addr2 - the transmitter, i.e. the port identity */
@@ -445,7 +449,7 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 		 * caller can act on. Silence is a worse outcome than a deaf AP only if
 		 * you are not told about it.
 		 */
-		if (mt7612u_set_ack_responder(dev, ta))
+		if (mt7612u_set_ack_responder_as(dev, ta, "a beacon"))
 			goto fail_post;
 		if (mt_mac_set_bss_base(dev, ta))
 			goto fail_post;
@@ -557,6 +561,10 @@ fail_post:
 	mt_ap_set_bssid(dev, 0, zero6);
 	mt_ap_set_bssid(dev, 1, zero6);
 	unwind_identity(dev, took);
+	/* The identity is back where this call found it (when the restore
+	 * landed), so a station arm this call dropped is valid again. */
+	mt7612u_station_identity_check(dev, "a failed beacon start",
+	                               !sta_lost_before);
 	return -2;
 }
 

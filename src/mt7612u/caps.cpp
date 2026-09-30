@@ -131,14 +131,36 @@ out:
  * closing the gate alone does not stop a die that matches on identity, the
  * clear path moves the identity back rather than only clearing the gate.
  */
+static int ack_responder_write(struct mt7612u_dev *d, const uint8_t mac[6]);
+
 int mt7612u_set_ack_responder(struct mt7612u_dev *d, const uint8_t mac[6])
 {
-	uint32_t dw0, rb;
+	return mt7612u_set_ack_responder_as(d, mac, "an ACK responder");
+}
+
+/* Arming a responder retargets MT_MAC_ADDR, which is the register a station
+ * identity depends on. The station arm is re-checked AFTER the write, against
+ * what the register then holds: re-arming the address already there leaves
+ * the station exactly as it was, a write that failed without moving anything
+ * drops nothing, and an unreadable register keeps the arm with a warning
+ * (mt7612u_station_identity_check). */
+int mt7612u_set_ack_responder_as(struct mt7612u_dev *d, const uint8_t mac[6],
+                                  const char *who)
+{
+	int rc;
 
 	if (!mac || (mac[0] & 0x01)) {
 		ERR("ack responder address must be unicast");
 		return -1;
 	}
+	rc = ack_responder_write(d, mac);
+	mt7612u_station_identity_check(d, who, 0);
+	return rc;
+}
+
+static int ack_responder_write(struct mt7612u_dev *d, const uint8_t mac[6])
+{
+	uint32_t dw0, rb;
 
 	if (!d->ack_saved) {
 		memcpy(d->ack_saved_mac, d->macaddr, 6);
@@ -229,6 +251,10 @@ void mt7612u_clear_ack_responder(struct mt7612u_dev *d)
 	 * through unwind_identity(), against an MT_MAC_ADDR still sitting on the
 	 * responder address. The flag means "a restore is still owed" and nothing
 	 * reads it as "a responder is armed", so leaving it set is safe. */
+	/* Moving the identity back can move it off a station armed on the
+	 * responder's address; re-check, never restore (IRadio: the caller
+	 * re-arms after a port-0 claimant). */
+	mt7612u_station_identity_check(d, "clearing the ACK responder", 0);
 	if (mt_io_errors(d) != before)
 		return;
 	d->ack_saved = 0;

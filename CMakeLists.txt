@@ -1139,6 +1139,19 @@ target_link_libraries(AckResponderSelftest PRIVATE devourer PkgConfig::libusb)
 
 add_test(NAME ack_responder_recipe COMMAND AckResponderSelftest)
 
+# Headless guard for the Realtek station arm (src/StationArm.h over the
+# AckResponder.h station recipe) - the Jaguar1/2/3 half of
+# IRadio::SetStationIdentity: the exact registers armed and restored, every
+# refusal writing nothing, and readback catching a write that did not land.
+# Built only when a backend that uses it is. Silicon behaviour is on-air only:
+# tests/realtek_station_onair.sh.
+if(DEVOURER_JAGUAR1 OR DEVOURER_JAGUAR2_8822B OR DEVOURER_JAGUAR2_8821C OR
+   DEVOURER_JAGUAR3_8822C OR DEVOURER_JAGUAR3_8822E)
+    add_executable(StationArmSelftest tests/station_arm_selftest.cpp)
+    target_link_libraries(StationArmSelftest PRIVATE devourer PkgConfig::libusb)
+    add_test(NAME station_arm COMMAND StationArmSelftest)
+endif()
+
 # Headless guard for the windowed RX-receipt primitives (src/cell/RxReceipt.h):
 # TLV round-trip, ring eviction, late accounting, ledger merge idempotence,
 # strict-parse rejections. The on-air halves are tests/receipt_verify.py over

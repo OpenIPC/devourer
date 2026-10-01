@@ -1,6 +1,7 @@
 # shellcheck shell=sh
-# mt7612u_sta_lib.sh - shared plumbing for the MT7612U station harnesses
-# (tests/mt7612u_sta_identity.sh, _autoack.sh, _uplink.sh). Sourced, not run.
+# mt7612u_sta_lib.sh - shared plumbing for the station harnesses
+# (tests/mt7612u_sta_identity.sh, _autoack.sh, _uplink.sh; the generic
+# helpers also serve tests/realtek_station_onair.sh). Sourced, not run.
 #
 # Four rules these scripts run as root under:
 #

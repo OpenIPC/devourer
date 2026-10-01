@@ -51,6 +51,14 @@ RtlJaguar2Device::~RtlJaguar2Device() {
   StopCwTone();
   stop_pwrtrack();
   stop_dig();
+  /* Safety net: a station arm the caller did not clear ends with the
+   * device, not with whatever state the chip is left in. */
+  try {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    if (_station.armed())
+      (void)_station.clear(_device, _logger, "Jaguar2");
+  } catch (...) {
+  }
 }
 
 void RtlJaguar2Device::bring_up(SelectedChannel channel) {
@@ -385,6 +393,16 @@ bool RtlJaguar2Device::SetAckResponder(const devourer::MacAddr &mac) {
                    "Jaguar2", mac.bytes[0]);
     return false;
   }
+  /* Under _reg_mu end to end: the station check and the port write must be
+   * one step, or a SetStationIdentity between them has its identity
+   * overwritten while it still reads as armed. No caller (the Init/InitWrite
+   * config arms included) holds _reg_mu here. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_station.armed()) {
+    _logger->error("Jaguar2: ACK responder refused: a station identity owns "
+                   "port 0 (ClearStationIdentity first)");
+    return false;
+  }
   /* Hardware ACK responder (src/AckResponder.h): port identity + net_type so
    * the MAC auto-ACKs unicast frames to `mac`. Same registers the proven
    * StartBeacon/AP path programs, minus the beacon machinery. */
@@ -404,7 +422,47 @@ bool RtlJaguar2Device::SetAckResponder(const devourer::MacAddr &mac) {
   return true;
 }
 
+bool RtlJaguar2Device::SetStationIdentity(const devourer::MacAddr &own,
+                                          const devourer::MacAddr &bssid) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (!_station_ready) {
+    _logger->error("Jaguar2: station identity refused until bring-up "
+                   "(Init/InitWrite) has finished");
+    return false;
+  }
+  /* The beacon's own record, not net_type: a ClearAckResponder can close the
+   * gate under a live beacon, and net_type alone would then read "free". */
+  if (!_bcn_mpdu.empty()) {
+    _logger->error("Jaguar2: station identity refused: the beacon owns port "
+                   "0 (StopBeacon first)");
+    return false;
+  }
+  /* A StartBeacon whose rollback did not land leaves the beacon enables set
+   * with no beacon recorded; the StopBeacon that retires them writes
+   * net_type. */
+  if (_bcn_hw_touched) {
+    _logger->error("Jaguar2: station identity refused: a beacon's hardware "
+                   "state is still set (StopBeacon first)");
+    return false;
+  }
+  return _station.arm(_device, own, bssid, _cfg.tx.retry_limit, _logger,
+                      "Jaguar2");
+}
+
+bool RtlJaguar2Device::ClearStationIdentity() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  return _station.clear(_device, _logger, "Jaguar2");
+}
+
 void RtlJaguar2Device::ClearAckResponder() {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  /* The gate this closes is the station's too: a clear here would leave the
+   * station deaf to its AP while it still reads as armed. */
+  if (_station.armed()) {
+    _logger->error("Jaguar2: ACK responder clear refused: port 0 belongs to "
+                   "a station identity (ClearStationIdentity instead)");
+    return;
+  }
   if (!devourer::ack::disable_verified(_device)) {
     _logger->error("Jaguar2: ACK responder disarm did not latch");
     return;
@@ -458,6 +516,14 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
   {
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
     busy_window_reset();
+  }
+  /* Likewise a station arm: a re-Init of a live session clears an arm this
+   * object holds before the bring-up below; one whose clear does not verify
+   * stays recorded for ClearStationIdentity (StationArm::retire). */
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    _station_ready = false;
+    _station.retire(_device, _logger, "Jaguar2");
   }
   _channel = channel;
   bring_up(channel);
@@ -520,6 +586,10 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                     _hal.dbg_rf_read(0, r), _hal.dbg_rf_read(1, r));
   }
 
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    _station_ready = true; /* every port-0 write of this bring-up is done */
+  }
   StartRxLoop(std::move(packetProcessor));
 }
 
@@ -712,6 +782,14 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
     busy_window_reset();
   }
+  /* Likewise a station arm: a re-Init of a live session clears an arm this
+   * object holds before the bring-up below; one whose clear does not verify
+   * stays recorded for ClearStationIdentity (StationArm::retire). */
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    _station_ready = false;
+    _station.retire(_device, _logger, "Jaguar2");
+  }
   _channel = channel;
   /* TX shares the full cold bring-up (config_trx_mode enables the TX antenna
    * paths, enable_rx sets CR MACTXEN). The chip transmits at its
@@ -762,6 +840,10 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
   if (_cfg.tx.ampdu)
     SetAmpduMode(*_cfg.tx.ampdu); /* DEVOURER_TX_AMPDU_MODE */
   apply_replay_wseq();
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    _station_ready = true; /* every port-0 write of this bring-up is done */
+  }
   _logger->info("Jaguar2: ready for TX (monitor inject, ch={})",
                 channel.Channel);
 }
@@ -1268,6 +1350,10 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
    * bench cell yet, so its flags stay false-as-unmeasured. */
   c.ack_responder_ok = _variant == jaguar2::ChipVariant::C8822B;
   c.tx_retry_limit_ok = _variant == jaguar2::ChipVariant::C8822B;
+  /* station_mode_ok: the 8822B die only - both halves measured on one
+   * RTL8812BU by tests/realtek_station_onair.sh (numbers and limits at the
+   * AdapterCaps declaration). The 8821C runs the same code with no cell. */
+  c.station_mode_ok = _variant == jaguar2::ChipVariant::C8822B;
   c.hw_rx_timestamp = true;  /* FrameParserJaguar2 fills RxAtrib.tsfl */
   c.hw_beacon_txtsf = true;  /* StartBeacon: MAC inserts the egress TSF into beacons */
   c.tsf_write_ok = true;     /* WriteTsf: REG_TSFTR (8822B readback) */
@@ -1769,6 +1855,11 @@ bool RtlJaguar2Device::GetPermanentMacAddress(uint8_t out[6]) {
 bool RtlJaguar2Device::StartBeacon(const uint8_t *beacon, size_t len,
                                    int interval_tu) {
   std::lock_guard<std::mutex> lk(_reg_mu);
+  if (_station.armed()) {
+    _logger->error("beacon-tbtt(J2): refused: a station identity owns port 0 "
+                   "(ClearStationIdentity first)");
+    return false;
+  }
   /* Mirrors the working Jaguar3 path (RtlJaguar3Device::StartBeacon) — the same
    * two bugs (beacon at page 0, radiotap-in-rsvd-page) applied here. Validated on
    * hardware: RTL8812BU (2357:012d, Jaguar2) auto-transmits the beacon at TBTT,
@@ -1953,8 +2044,11 @@ bool RtlJaguar2Device::disable_beacon_locked() {
   ok = _device.rtw_write<uint32_t>(0x0420,
                                    txq & ~(1u << 22) /* BIT_EN_BCNQ_DL */) &&
        ok;
-  uint8_t nt = _device.rtw_read8(0x0102);
-  ok = _device.rtw_write8(0x0102, static_cast<uint8_t>(nt & ~0x03u)) && ok;
+  /* net_type belongs to a station arm while one is held: leave it. */
+  if (!_station.armed()) {
+    uint8_t nt = _device.rtw_read8(0x0102);
+    ok = _device.rtw_write8(0x0102, static_cast<uint8_t>(nt & ~0x03u)) && ok;
+  }
   return ok;
 }
 
@@ -2229,6 +2323,15 @@ void RtlJaguar2Device::Stop() {
   }
   stop_pwrtrack();
   stop_dig();
+  /* This Stop leaves the chip powered, so a station arm would outlive the
+   * session: port 0 on MACID = own / Infra keeps acknowledging for the
+   * station after the process has gone. Clear it here (best effort; a
+   * failure is logged by the clear). */
+  {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    if (_station.armed())
+      (void)_station.clear(_device, _logger, "Jaguar2");
+  }
 }
 
 void RtlJaguar2Device::SetTxMode(const devourer::TxMode &mode) {

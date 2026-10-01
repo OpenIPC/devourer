@@ -30,6 +30,7 @@
 #include "SweepSpec.h"
 #include "TriggerParse.h"
 #include "caps_event.h"
+#include "station_arm_env.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
 #endif
@@ -108,6 +109,9 @@ static constexpr uint16_t kRealtekProductIds[] = {
 /* Written on the RX callback thread, read by the main thread and the pollers
  * as the "bring-up produced a frame" signal, so atomic. */
 static std::atomic<int> g_rx_count{0};
+/* Set when a worker-thread Init (the hop and sweep paths) has returned or
+ * thrown: RX is no longer running, so DEVOURER_STA_IDENTITY must not arm. */
+static std::atomic<bool> g_rx_ended{false};
 #if defined(DEVOURER_HAVE_JAGUAR1)
 static RtlJaguarDevice *g_rtl_device = nullptr;
 #endif
@@ -1347,6 +1351,12 @@ int main(int argc, char **argv) {
         .f("stage", "demo.create_device")
         .f("ms", ms_since_start());
     devourer::emit_adapter_caps(*g_ev, dev);
+    if (const char *sta = std::getenv("DEVOURER_STA_IDENTITY");
+        sta != nullptr && *sta != '\0') {
+      logger->error("DEVOURER_STA_IDENTITY is wired on the USB path only - "
+                    "refusing rather than running an unarmed station");
+      return 1;
+    }
     int pch = 36;
     if (const char *ch_env = std::getenv("DEVOURER_CHANNEL"))
       pch = std::atoi(ch_env);
@@ -1504,6 +1514,13 @@ int main(int argc, char **argv) {
       .f("stage", "demo.create_device")
       .f("ms", ms_since_start());
   devourer::emit_adapter_caps(*g_ev, rtlDevice);
+  /* DEVOURER_STA_IDENTITY (examples/common/station_arm_env.h). Parsed here so
+   * a malformed value stops the run before bring-up: a station measured
+   * unarmed must never be reported as armed. */
+  bool sta_bad = false;
+  const auto sta_req = devourer::station_arm_request_from_env(logger, sta_bad);
+  if (sta_bad)
+    return 1;
   /* Backend-scoped measurement hook. Scheduling belongs to each measured
    * concrete backend so the delay starts after its arm/bring-up rather than
    * racing Init from a generic side thread. Refuse unmeasured paths: a green
@@ -1875,6 +1892,30 @@ int main(int argc, char **argv) {
     });
   }
 
+  /* The station arm: IRadio orders it after the RX loop is running, so it
+   * waits for the first frame (10 s cap - a silent channel still arms; a
+   * backend refuses before bring-up and the helper retries that), then arms,
+   * then runs the optional scheduled clear. A worker-thread Init that has
+   * failed or ended (g_rx_ended) refuses the arm; the main-path Init runs on
+   * this thread's caller, and its end stops this thread through sta_stop. */
+  std::atomic<bool> sta_stop{false};
+  std::thread sta_thread;
+  if (sta_req) {
+    IRadio *dev = rtlDevice;
+    const devourer::StationArmRequest req = *sta_req;
+    sta_thread = std::thread([&sta_stop, dev, req, logger]() {
+      for (uint32_t s = 0; s < 10000 && !sta_stop.load() &&
+                           !g_rx_ended.load() && g_rx_count.load() == 0;
+           s += 50)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      if (sta_stop.load())
+        return;
+      if (devourer::station_arm_run(dev, req, *g_ev, logger, sta_stop,
+                                    &g_rx_ended))
+        devourer::station_clear_after(dev, req, *g_ev, logger, sta_stop);
+    });
+  }
+
   /* Every path below may have one or more background register readers alive.
    * Stop them before DeviceSession tears down the device/USB transport, and do
    * the same on exceptions: a joinable std::thread destructor terminates the
@@ -1886,6 +1927,9 @@ int main(int argc, char **argv) {
 #endif
     energy_emitter_stop = true;
     busy_emitter_stop = true;
+    sta_stop = true;
+    if (sta_thread.joinable())
+      sta_thread.join();
     if (busy_emitter.joinable())
       busy_emitter.join();
     if (therm_emitter.joinable())
@@ -2043,6 +2087,7 @@ int main(int argc, char **argv) {
       } catch (const std::exception &e) {
         logger->error("lockstep RX failed: {}", e.what());
       }
+      g_rx_ended = true;
     });
     /* Do not race FastRetune against firmware/calibration bring-up. A frame on
      * the parked channel proves RX is live; a silent link uses the same 10 s
@@ -2215,6 +2260,7 @@ int main(int argc, char **argv) {
       } catch (const std::exception &e) {
         logger->error("RX-sweep bring-up failed: {}", e.what());
       }
+      g_rx_ended = true;
     });
     /* Let bring-up complete before the first retune: a retune racing the
      * worker thread's init (FW download, DACK/IQK on Jaguar3) interleaves

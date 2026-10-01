@@ -282,7 +282,37 @@ struct AdapterCaps {
    *     uplink at 1.9 mean retries against the first unit's 0.0), not the
    *     BSSID receive table.
    *
-   * FALSE on every other backend: not ported. */
+   * TRUE on the Jaguar3 8822C and the Jaguar2 8822B dies, through the
+   * Realtek arm (src/StationArm.h has how it differs from the MT7612U: it
+   * configures the port rather than checking it, and refuses the other
+   * port-0 claimants rather than being dropped by them). Both halves were
+   * measured by tests/realtek_station_onair.sh, which arms through the seam
+   * itself and reads the transmitter's own CCX reports; one RTL8812CU and
+   * one RTL8812BU, each the other's peer. Read docs/realtek-station-arm.md
+   * - its limits section above all (one unit, two runs on one rig, near
+   * field, one AP type; what "received" means; the report gap) - before
+   * quoting:
+   *
+   *                  8812CU station          8812BU station
+   *   A armed        100.0% ok, 0.03 retries 100.0% ok, 0.33 retries
+   *   B nobody       0.0%, 12.00             0.0%, 12.00
+   *   C DUT absent   0.0%, 12.00             0.0%, 12.00
+   *   D unarmed      0.0%, 12.00             0.0%, 12.00
+   *   E cleared      0.0%, 12.00             0.0%, 12.00
+   *   F uplink->AP   100.0%, 0.09            100.0%, 0.20
+   *   G uplink->none 0.0%, 12.00             0.0%, 12.00
+   *   H unarmed F    100.0%, 0.08            100.0%, 0.20
+   *
+   * (Current record; an earlier record on the same rig matches it.) The
+   * flag rests on both halves met WHILE ARMED. H shows the uplink half holds
+   * without the arm too - the AP acknowledges by address - so on these dies
+   * the arm is what the DOWN half needs (D and E at 0%).
+   *
+   * FALSE on the other Realtek dies, where SetStationIdentity is ported and
+   * unmeasured: the 8822E (not measured by this cell), the 8821C, and every
+   * Jaguar1 die (8812, 8814A, 8821A, the 8811AU cut).
+   *
+   * FALSE on Kestrel and the RTL8733B: not ported. */
   bool station_mode_ok = false;
 
   /* TxMode::no_agg is honoured: a frame carrying the radiotap TX_FLAGS

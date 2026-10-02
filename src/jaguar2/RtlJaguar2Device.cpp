@@ -2326,9 +2326,11 @@ void RtlJaguar2Device::Stop() {
   /* This Stop leaves the chip powered, so a station arm would outlive the
    * session: port 0 on MACID = own / Infra keeps acknowledging for the
    * station after the process has gone. Clear it here (best effort; a
-   * failure is logged by the clear). */
+   * failure is logged by the clear). A new arm is refused until the next
+   * bring-up. */
   {
     std::lock_guard<std::mutex> lk(_reg_mu);
+    _station_ready = false;
     if (_station.armed())
       (void)_station.clear(_device, _logger, "Jaguar2");
   }

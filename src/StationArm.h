@@ -57,7 +57,9 @@
  * (Jaguar2's does not; Jaguar1's is optional) and a port left on MACID = own
  * / Infra goes on acknowledging for a station whose process has gone. A
  * (re-)bring-up clears a held arm first (retire()); a clear that does not
- * verify keeps the record for ClearStationIdentity to retry. */
+ * verify keeps the record for ClearStationIdentity to retry. Stop() also
+ * clears _station_ready, so an arm after Stop() is refused until the next
+ * bring-up. */
 
 #include <algorithm>
 #include <cstdint>

@@ -1,7 +1,7 @@
 # shellcheck shell=sh
 # mt7612u_sta_lib.sh - shared plumbing for the station harnesses
-# (tests/mt7612u_sta_identity.sh, _autoack.sh, _uplink.sh; the generic
-# helpers also serve tests/realtek_station_onair.sh). Sourced, not run.
+# (tests/mt7612u_sta_identity.sh, _autoack.sh, _uplink.sh, _onair.sh; the
+# generic helpers also serve tests/realtek_station_onair.sh). Sourced, not run.
 #
 # Four rules these scripts run as root under:
 #
@@ -147,27 +147,35 @@ sta_pid_init() {
 
 sta_pid_record() { echo "$2" > "$OUT/.pid_$1"; }
 
-# Signal ($2, default TERM) the process recorded under $1, reap it if it is
-# our child, and forget it. A process started inside a command substitution
-# is not this shell's child, so `wait` returns at once for it: poll `kill -0`
-# for up to 10 s so the caller knows it has really exited (a demo's chip
-# de-init runs after the signal). Returns 1, and says so, if it is still
-# alive then; 0 otherwise, and silently when nothing is recorded.
+# Is PID running? `kill -0` alone also succeeds on an exited but unreaped
+# child (a zombie, state Z in /proc/PID/stat after the command name).
+sta_pid_alive() {
+  _sta_st=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)
+  [ -n "$_sta_st" ] && [ "$_sta_st" != Z ] && [ "$_sta_st" != X ]
+}
+
+# Signal ($2, default TERM) the process recorded under $1, wait up to 10 s
+# for it to exit (a demo's chip de-init runs after the signal), reap it if it
+# is our child, and forget it. POLLED, never a bare `wait` first: a child
+# that ignores the signal - or a background job started with SIGINT ignored,
+# as a non-interactive shell starts them - would block that `wait` for good.
+# Returns 1, and says so, if it is still alive then (unreaped, so the caller
+# can escalate by PID); 0 otherwise, and silently when nothing is recorded.
 sta_pid_kill() {
   [ -f "$OUT/.pid_$1" ] || return 0
   _sta_pid=$(cat "$OUT/.pid_$1" 2>/dev/null)
   rm -f "$OUT/.pid_$1"
   case "$_sta_pid" in ''|*[!0-9]*) return 0 ;; esac
   kill "-${2:-TERM}" "$_sta_pid" 2>/dev/null
-  wait "$_sta_pid" 2>/dev/null
   _sta_t=0
-  while kill -0 "$_sta_pid" 2>/dev/null; do
+  while sta_pid_alive "$_sta_pid"; do
     if [ "$_sta_t" -ge 100 ]; then
       echo "$1 (pid $_sta_pid) is still running 10 s after SIG${2:-TERM}"
       return 1
     fi
     sleep 0.1; _sta_t=$((_sta_t + 1))
   done
+  wait "$_sta_pid" 2>/dev/null   # exited: reaps our child, no-op otherwise
   return 0
 }
 

@@ -55,7 +55,7 @@ and the cell, never here.
 | Received frames: beacons, deauth, auth and (re)assoc responses, no-data subtypes | `StationSm::on_rx`, `on_auth`, `on_assoc_resp` | station_sm: `test_header_only_beacons_do_not_hold_off_loss`, `test_short_deauth_is_malformed`, `test_deauth_during_handshake`, `test_reassoc_resp_does_not_complete_a_join`, `test_truncated_auth_and_assoc_are_malformed`, `test_qos_null_is_ignored_and_alive` |
 | The handshake deadline | `StationSm::eapol_reply`, `on_eapol` | station_sm: `test_dropped_reply_does_not_move_the_deadline` |
 | The TX queue: its bound, what `pop_tx` refuses | `StationSm::queue`, `pop_tx`, `kMaxTxQueue` | station_sm: `test_transmit_queue_is_bounded`, `test_join_clears_the_transmit_queue`, `test_pop_tx_refuses_null` |
-| Duplicate cache (no in-tree consumer yet) | `DupDetector` | dot11_frames: `test_dup_detector` |
+| Duplicate cache (consumer: `tests/sta_client.cpp`) | `DupDetector` | dot11_frames: `test_dup_detector`; sta_client_headless: `test_a_retransmission_is_a_duplicate` |
 
 ## Tests
 
@@ -66,6 +66,7 @@ and the cell, never here.
 | `ccmp_framing` | `tests/ccmp_selftest.cpp` | Ccmp.h + both CCMP vector sets | OpenSSL |
 | `supplicant` | `tests/supplicant_selftest.cpp` | Eapol.h, Supplicant.h, the hostapd four-way | OpenSSL |
 | `station_sm` | `tests/station_sm_selftest.cpp` | StationSm.h incl. the group rekey path | OpenSSL |
+| `sta_client_headless` | `tests/sta_client.cpp --self-test` (`tests/sta_client_selftest.inc`) | the station client's scan, join/re-join policy and data plane over this core | OpenSSL, Linux |
 | `ccmp_vectors_generated` | `tests/ccmp_gen_vectors.py --check` | `tests/ccmp_vectors.h` is what the generator emits | Python3 + python-cryptography (else skipped) |
 
 The OpenSSL cells are simply not registered without OpenSSL (configure
@@ -93,8 +94,9 @@ No device or radio calls; no hardware crypto offload; no PMF/802.11w
 Replay-window width and why it must change before any HE/EHT use:
 `CcmpReplay`.
 
-`Dot11.h`'s MSDU<->Ethernet conversion and `DupDetector` have no in-tree
-caller yet (`StationSm` does not run the duplicate cache; its contract is
-at `DupDetector`), and this tree's AP harnesses (`tests/ap_responder.cpp`,
+`Dot11.h`'s MSDU<->Ethernet conversion and `DupDetector` are called by the
+station client, `tests/sta_client.cpp` (`StationSm` does not run the
+duplicate cache; its contract is at `DupDetector`), and this tree's AP
+harnesses (`tests/ap_responder.cpp`,
 `tests/ap_wpa2.cpp`) carry their own inline builders rather than using this
 module.

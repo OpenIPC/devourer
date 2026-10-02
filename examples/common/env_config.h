@@ -17,6 +17,12 @@
  * See env_config.cpp for the full mapping table. */
 devourer::DeviceConfig devourer_config_from_env();
 
+/* The strict whole-string integer parse devourer_config_from_env applies to
+ * DEVOURER_TX_RETRY_LIMIT: true and *out only when the variable is set and is
+ * one number; a set but non-numeric value warns and returns false. For a demo
+ * that must know whether the library took the value. */
+bool devourer_env_long_strict(const char *name, long *out);
+
 /* DEVOURER_TX_RATE parsed to a TxMode (unset -> the 6M-legacy default). */
 devourer::TxMode devourer_tx_mode_from_env();
 

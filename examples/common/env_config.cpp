@@ -101,6 +101,10 @@ devourer::RxMode parse_rx_mode(const char *s) {
 
 } // namespace
 
+bool devourer_env_long_strict(const char *name, long *out) {
+  return env_long_strict(name, out);
+}
+
 devourer::DeviceConfig devourer_config_from_env() {
   devourer::DeviceConfig cfg;
   long v = 0;

@@ -66,9 +66,11 @@ functions is `src/sta/CLAUDE.md`.
 ## What this does not do
 
 No device, no hardware crypto offload, no PMF/802.11w, WPA2-PSK with CCMP
-only, and no AP-side per-station state. The data plane is the caller's:
-`DupDetector` and the MSDU<->Ethernet helpers in `Dot11.h` are tested but
-have no in-tree caller, and `StationSm` runs no duplicate cache. Three limits are stated at their
+only, and no AP-side per-station state. The data plane is the caller's;
+`StationSm` runs no duplicate cache. The in-tree caller that wires this core
+to a radio - scan, join policy, data plane, `DupDetector` and the
+MSDU<->Ethernet helpers - is the station client (`docs/station-client.md`).
+Three limits are stated at their
 declarations rather than here:
 - the replay-window width, and why it must grow before HE/EHT use: `CcmpReplay`;
 - the SNonce policy: `Supplicant::start`;

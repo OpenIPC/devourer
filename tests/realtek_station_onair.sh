@@ -45,8 +45,8 @@
 #
 # An arm is scored only when its transmitter kept airing through the window
 # (no silence over MAX_GAP_MS between its reports, or after the last one -
-# see summarize) and carried MIN_REPORTS reports and MIN_SUBMITTED
-# submissions. Reception in arm A is
+# see summarize) and carried MIN_REPORTS reports and its submission floor
+# (MIN_SUBMITTED, scaled to the span it aired). Reception in arm A is
 # judged against the peer's REPORTED frames, which aired; submitted frames
 # left unreported at window close are printed separately.
 #
@@ -92,8 +92,13 @@ MIN_RX_PCT="${MIN_RX_PCT:-80}"
 # CCX reports, and between its last report and its final tx.stats.
 MAX_GAP_MS="${MAX_GAP_MS:-2000}"
 # Per-arm floor on frames the transmitter submitted. Default: a quarter of
-# the nominal SECS / GAP_US rate (500 at the defaults; the slowest arm on
-# record, an unacknowledged one at 12 retries, submitted ~900).
+# the nominal GAP_US rate over the span the arm actually aired - its first
+# report to its final tx.stats (see summarize) - not over SECS, which also
+# holds the transmitter's bring-up: an 8812BU peer has spent 6-9 s of a 10 s
+# window in InitWrite and been scored a stall at 283-327 healthy frames.
+# The slowest arm on record, an unacknowledged one at 12 retries, submitted
+# ~900 in 10 s against the 500 a full window asks. A set MIN_SUBMITTED is a
+# fixed floor instead.
 MIN_SUBMITTED="${MIN_SUBMITTED:-}"
 EXPECT_UNARMED_SILENT="${EXPECT_UNARMED_SILENT:-1}"
 READY_TIMEOUT="${READY_TIMEOUT:-30}"
@@ -106,14 +111,6 @@ case "$HALF" in both|down|up) ;; *) echo "HALF must be both, down or up"; exit 2
 for v in SECS RETRY_LIMIT GAP_US MIN_REPORTS MIN_RX_PCT MAX_GAP_MS READY_TIMEOUT CLEAR_AFTER_MS CH; do
   case "${!v}" in ''|*[!0-9]*) echo "$v must be a non-negative integer"; exit 2 ;; esac
 done
-# GAP_US=0 (max duty) has no nominal rate, so no default floor.
-if [ -z "$MIN_SUBMITTED" ]; then
-  if [ "$GAP_US" -gt 0 ]; then
-    MIN_SUBMITTED=$(( SECS * 1000000 / GAP_US / 4 ))
-  else
-    MIN_SUBMITTED=0
-  fi
-fi
 case "$MIN_SUBMITTED" in *[!0-9]*) echo "MIN_SUBMITTED must be a non-negative integer"; exit 2 ;; esac
 # RETRY_LIMIT 0 would make every control indistinguishable from a one-shot
 # send: the retry count is the instrument.
@@ -255,7 +252,8 @@ wait_for() { # $1 pid, $2 file, $3 regex, $4 timeout s
 
 # One summary line from a transmitter's JSONL (and, optionally, the DUT's
 # rx.seq stream for frames from TA): reports, submitted, unreported,
-# ok_pct, retries_mean, max_gap_ms, tail_ms, live, rx_distinct.
+# ok_pct, retries_mean, max_gap_ms, tail_ms, live, aired_ms, min_submitted,
+# rx_distinct.
 #
 # LIVENESS. A report is a frame that aired, so the reports' own timestamps
 # (t, the host-monotonic tx.report timebase) show whether the transmitter
@@ -264,10 +262,18 @@ wait_for() { # $1 pid, $2 file, $3 regex, $4 timeout s
 # tx.stats, which carries t in the same timebase. live=0 when either exceeds
 # MAX_GAP_MS or the final tx.stats has no t - an arm that aired a burst and
 # stalled, which MIN_REPORTS alone would accept.
+#
+# FLOOR. aired_ms runs from the first report to the final tx.stats: the
+# first pair of timestamps in one timebase (txdemo.first_tx_submit carries
+# ms from a different epoch). It ends at the final tx.stats, not the last
+# report, so a transmitter that slows or stops after MIN_REPORTS still owes
+# the whole span. min_submitted is a quarter of the GAP_US rate over it
+# (0 at GAP_US=0, which has no nominal rate), or MIN_SUBMITTED when set.
 summarize() { # $1 tx jsonl, $2 tag, $3 dut jsonl or ""
-  python3 - "$1" "$2" "${3:-}" "$MAX_GAP_MS" <<'PYEOF'
+  python3 - "$1" "$2" "${3:-}" "$MAX_GAP_MS" "$GAP_US" "$MIN_SUBMITTED" <<'PYEOF'
 import json, sys
 tx, tag, rx, max_gap = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+gap_us, fixed_floor = int(sys.argv[5]), sys.argv[6]
 n = okc = retries = 0
 submitted = 0
 ts = []
@@ -298,6 +304,12 @@ out = (f"{tag} reports={n} submitted={submitted} "
 if n:
     out += f" ok_pct={100.0*okc/n:.1f} retries_mean={retries/n:.2f}"
 out += f" max_gap_ms={gap} tail_ms={'none' if tail is None else tail} live={live}"
+aired = (final_t - ts[0]) if (final_t is not None and ts) else 0
+if fixed_floor:
+    floor = int(fixed_floor)
+else:
+    floor = aired * 1000 // gap_us // 4 if gap_us > 0 else 0
+out += f" aired_ms={aired} min_submitted={floor}"
 if rx:
     seen = set()
     try:
@@ -460,12 +472,12 @@ ok()  { pass=$((pass+1)); printf '  PASS  %s\n' "$*"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$*"; }
 inc() { inconclusive=$((inconclusive+1)); printf '  INCONCLUSIVE  %s\n' "$*"; }
 field() { sed -n "s/.* $2=\\([0-9.]*\\).*/\\1/p" "$OUT/res_$1"; }
-# A usable arm: not aborted, carrying at least MIN_REPORTS reports and
-# MIN_SUBMITTED submissions, and with a transmitter that kept airing through
+# A usable arm: not aborted, carrying at least MIN_REPORTS reports and its
+# min_submitted submissions, and with a transmitter that kept airing through
 # the window (live=1, see summarize). Anything else leaves its verdicts
 # INCONCLUSIVE.
 usable() {
-  local r n sub
+  local r n sub floor
   r=$(cat "$OUT/res_$1" 2>/dev/null)
   case "$r" in
     *ABORTED*|*FAILCLEAR*|'') return 1 ;;
@@ -473,7 +485,9 @@ usable() {
   case "$r" in *" live=1"*) ;; *) return 1 ;; esac
   n=$(field "$1" reports)
   sub=$(field "$1" submitted)
-  [ "${n:-0}" -ge "$MIN_REPORTS" ] && [ "${sub:-0}" -ge "$MIN_SUBMITTED" ]
+  floor=$(field "$1" min_submitted)
+  [ -n "$floor" ] || return 1
+  [ "${n:-0}" -ge "$MIN_REPORTS" ] && [ "${sub:-0}" -ge "$floor" ]
 }
 show() { echo "  $(cat "$OUT/res_$1" 2>/dev/null)"; }
 
@@ -541,7 +555,7 @@ if [ "$HALF" != up ]; then
       bad "DOWN receive: the DUT delivered ${rxd:-0} distinct frames of the peer's ${rep:-0} reported (< ${MIN_RX_PCT}%; ${unr:-0} submitted unreported)"
     fi
   else
-    inc "DOWN: arm A, B or C aborted, carried under $MIN_REPORTS reports or $MIN_SUBMITTED submissions, or its transmitter stalled (live=0) - not a measurement"
+    inc "DOWN: arm A, B or C aborted, carried under $MIN_REPORTS reports or its min_submitted floor, or its transmitter stalled (live=0) - not a measurement"
   fi
   if usable A && usable D; then
     a=$(field A ok_pct); d=$(field D ok_pct)
@@ -639,7 +653,7 @@ EOF
       bad "UP ack: F ${f}% is not clearly above the control G ${g}%"
     fi
   else
-    inc "UP: arm F or G aborted, carried under $MIN_REPORTS reports or $MIN_SUBMITTED submissions, or its transmitter stalled (live=0) - not a measurement"
+    inc "UP: arm F or G aborted, carried under $MIN_REPORTS reports or its min_submitted floor, or its transmitter stalled (live=0) - not a measurement"
   fi
   # H is information, not a verdict: whether TX ACK matching needs the arm
   # at all on this die. Never counted into pass/fail/inconclusive.

@@ -104,6 +104,14 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
     busy_window_reset();
   }
+  /* Likewise a station arm: a re-Init of a live session clears an arm this
+   * object holds before the bring-up below; one whose clear does not verify
+   * stays recorded for ClearStationIdentity (StationArm::retire). */
+  {
+    std::lock_guard<std::recursive_mutex> lock(_port0_mu);
+    _station_ready = false;
+    _station.retire(_device, _logger, "Jaguar1");
+  }
   std::optional<uint64_t> configured_arm_generation;
   JaguarScopeExit rollback([&] {
     if (!configured_arm_generation)
@@ -162,6 +170,10 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
 
   if (_cfg.tx.ampdu)
     SetAmpduMode(*_cfg.tx.ampdu); /* DEVOURER_TX_AMPDU_MODE */
+  {
+    std::lock_guard<std::recursive_mutex> lock(_port0_mu);
+    _station_ready = true; /* every port-0 write of this bring-up is done */
+  }
   rollback.release();
 }
 
@@ -565,6 +577,11 @@ bool RtlJaguarDevice::StartBeacon(const uint8_t *beacon, size_t len,
                    "responder is armed; clear the responder first");
     return false;
   }
+  if (_station.armed()) {
+    _logger->error("beacon(J1): cannot claim port 0 while a station "
+                   "identity is armed; ClearStationIdentity first");
+    return false;
+  }
   /* Mirrors RtlJaguar2Device::StartBeacon on the pre-HalMAC registers, in the
    * VENDOR ORDER: port/beacon configuration first, reserved-page download
    * LAST. A download issued before the port is configured latches BCN_VALID
@@ -862,6 +879,11 @@ bool RtlJaguarDevice::SetAckResponder(const devourer::MacAddr &mac) {
                    "beacon owns MACID/BSSID/net_type");
     return false;
   }
+  if (_station.armed()) {
+    _logger->error("Jaguar1: ACK responder cannot be armed while a station "
+                   "identity owns port 0; ClearStationIdentity first");
+    return false;
+  }
   if (_eepromManager->version_id.ICType == CHIP_8812) {
     const bool had_restore_identity = _ack_restore_identity.has_value();
     if (!_ack_restore_identity) {
@@ -995,6 +1017,34 @@ bool RtlJaguarDevice::disarm_ack_responder() {
                 "(MACID/BSSID back to the pre-arm identity; "
                 "net_type=NoLink)");
   return true;
+}
+
+bool RtlJaguarDevice::SetStationIdentity(const devourer::MacAddr &own,
+                                         const devourer::MacAddr &bssid) {
+  std::lock_guard<std::recursive_mutex> lock(_port0_mu);
+  if (!_station_ready) {
+    _logger->error("Jaguar1: station identity refused until bring-up "
+                   "(Init/InitWrite) has finished");
+    return false;
+  }
+  if (_port0_beacon_claimed || _port0_ack_claimed) {
+    _logger->error("Jaguar1: station identity refused: port 0 is claimed "
+                   "by the {}",
+                   _port0_beacon_claimed ? "beacon" : "ACK responder");
+    return false;
+  }
+  /* The 8814A descriptor keeps the vendor DATA_RETRY_LIMIT=0 whatever
+   * tx.retry_limit says (tx_retry_limit_ok), so a station there sends every
+   * unicast once - nullopt makes the arm say that. */
+  std::optional<int> retry;
+  if (_eepromManager->version_id.ICType != CHIP_8814A)
+    retry = _cfg.tx.retry_limit;
+  return _station.arm(_device, own, bssid, retry, _logger, "Jaguar1");
+}
+
+bool RtlJaguarDevice::ClearStationIdentity() {
+  std::lock_guard<std::recursive_mutex> lock(_port0_mu);
+  return _station.clear(_device, _logger, "Jaguar1");
 }
 
 void RtlJaguarDevice::ClearAckResponder() {
@@ -1624,6 +1674,14 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
     busy_window_reset();
   }
+  /* Likewise a station arm: a re-Init of a live session clears an arm this
+   * object holds before the bring-up below; one whose clear does not verify
+   * stays recorded for ClearStationIdentity (StationArm::retire). */
+  {
+    std::lock_guard<std::recursive_mutex> lock(_port0_mu);
+    _station_ready = false;
+    _station.retire(_device, _logger, "Jaguar1");
+  }
   std::optional<uint64_t> configured_arm_generation;
   JaguarScopeExit rollback([&] {
     if (!configured_arm_generation)
@@ -1736,6 +1794,10 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
     }
   }
 
+  {
+    std::lock_guard<std::recursive_mutex> lock(_port0_mu);
+    _station_ready = true; /* every port-0 write of this bring-up is done */
+  }
   StartRxLoop(std::move(packetProcessor));
   rollback.release();
 }
@@ -2229,6 +2291,10 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
    * the vendor retry carve-out (knob inert). */
   c.ack_responder_ok = true;
   c.tx_retry_limit_ok = _eepromManager->version_id.ICType != CHIP_8814A;
+  /* station_mode_ok: false on every Jaguar1 die - ported (StationArm.h),
+   * not yet measured by tests/realtek_station_onair.sh; the AdapterCaps
+   * declaration says what is and is not measured. */
+  c.station_mode_ok = false;
   /* Per-packet TX power: 8814A only — its dword5 [30:28] descriptor LUT (the
    * 8822B TXPWR_OFSET position; vendor-defined, vendor-unused). measured
    * stays false until tests/txpkt_pwr_ofset_onair.sh proves it moves on-air
@@ -2418,6 +2484,15 @@ void RtlJaguarDevice::Stop() {
     busy_window_reset();
   }
   _device.quiesce_tx();
+  /* A station arm ends with the session: restored before the optional
+   * power-down (best effort; a failure is logged by the clear), so a chip
+   * left powered (tuning.teardown_power_down=0) does not keep answering for
+   * the station. */
+  {
+    std::lock_guard<std::recursive_mutex> lock(_port0_mu);
+    if (_station.armed())
+      (void)_station.clear(_device, _logger, "Jaguar1");
+  }
   if (!_cfg.tuning.teardown_power_down) {
     _logger->info("Jaguar1: Stop() leaving the chip powered "
                   "(tuning.teardown_power_down=0)");
@@ -2450,6 +2525,14 @@ RtlJaguarDevice::~RtlJaguarDevice() {
   _rxmask_stop.store(true);
   if (_rxmask_thread.joinable()) {
     _rxmask_thread.join();
+  }
+  /* Safety net: a station arm the caller did not clear ends with the
+   * device, not with whatever state the chip is left in. */
+  try {
+    std::lock_guard<std::recursive_mutex> lk(_port0_mu);
+    if (_station.armed())
+      (void)_station.clear(_device, _logger, "Jaguar1");
+  } catch (...) {
   }
   /* Backstop for a caller that destroys without Stop(): power the chip down so
    * it is not left in ACT indefinitely. After the thread joins, so nothing is

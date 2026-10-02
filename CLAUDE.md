@@ -289,6 +289,11 @@ those are the ones listed below.
   degradation predictor — `docs/warm-tx-degradation.md` has delivery scattered
   63–83% with no relation to the meter, and inside one uninterrupted session
   the meter stays pinned while delivery drifts.
+- `DEVOURER_STA_IDENTITY=<own|self>,<bssid>` (rxdemo; txdemo with
+  `DEVOURER_TX_WITH_RX=thread`) — call `IRadio::SetStationIdentity` once the
+  RX loop is up, `DEVOURER_STA_CLEAR_AFTER_MS=N` to clear it later; `sta.arm`
+  / `sta.clear` events (`examples/common/station_arm_env.h`); txdemo sends
+  nothing after a refused arm. The Realtek cell is `tests/realtek_station_onair.sh`.
 - `DEVOURER_RX_BUSY_MS=N` (rxdemo) — the vendor-neutral busy-airtime window
   at a fixed cadence: arm, wait N ms, read, one `rx.busy` event per window
   (`IRadio::ArmChannelBusy`/`GetChannelBusy`, so it runs on the MT7612U where

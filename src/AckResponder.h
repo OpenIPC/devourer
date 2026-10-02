@@ -285,5 +285,148 @@ inline bool verify(RtlAdapter &dev, const uint8_t mac[6]) noexcept {
   }
 }
 
+/* --- the STATION half of port 0 (IRadio::SetStationIdentity) --------------
+ *
+ * The same three registers as the responder recipe above, in the vendor
+ * drivers' station arrangement (hw_var_set_opmode STATION /
+ * Set_MSR(_HW_STATE_STATION_)): MACID = the station's OWN address, BSSID =
+ * the AP's, net_type = Infra (2). The ACK engine matches address 1 against
+ * MACID, so this is what makes the adapter answer the AP's unicast; net_type
+ * is the gate the AP-mode work found on the Jaguar generations (the RTL8733B
+ * has no gate - see retarget()).
+ *
+ * WHAT IT DELIBERATELY LEAVES ALONE: the receive filter. The vendor station
+ * path also rewrites RCR to a managed value (CBSSID_DATA/BCN and friends)
+ * because its host stack trusts the MAC to filter. A station built on src/sta
+ * filters in software (its address checks and BssTable), as the MT7612U
+ * station does, so a managed RCR would buy nothing the host does not already
+ * do and would change what every other consumer of the RX loop sees.
+ *
+ * The rollback target is the EXACT pre-arm port state - MACID, BSSID and the
+ * net_type bits - because on Jaguar1/CHIP_8812 a gate-only clear was measured
+ * to leave the old MACID answering (see the ACK-responder section above and
+ * AdapterCaps.h). Restoring all three is correct on every die, so every
+ * backend uses it rather than a per-die subset. */
+constexpr uint8_t kNetTypeMask = 0x03u;
+constexpr uint8_t kNetTypeInfra = 0x02u;
+
+struct StationRestore {
+  PortIdentity identity;
+  uint8_t net_type = 0; /* 0x0102[1:0] before the arm */
+};
+
+inline bool snapshot_station_restore(RtlAdapter &dev,
+                                     StationRestore &out) noexcept {
+  try {
+    if (!snapshot_port_identity(dev, out.identity))
+      return false;
+    out.net_type = static_cast<uint8_t>(dev.rtw_read8(0x0102) & kNetTypeMask);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+/* Gate closed first, as enable() does, so a failed identity write leaves the
+ * port passive rather than answering for half an address. The gate close is a
+ * PRECONDITION: if its transfer fails nothing else is written. Past it, every
+ * identity write is attempted (no short-circuit), and the gate opens only if
+ * all four reported success. The return is transfer status, NOT the verdict:
+ * a write can report failure and land, or report success and not - which is
+ * why StationArm ignores it and decides on station_is() alone. */
+inline bool arm_station(RtlAdapter &dev, const uint8_t own[6],
+                        const uint8_t bssid[6]) noexcept {
+  try {
+    const uint8_t nt = dev.rtw_read8(0x0102);
+    const uint8_t closed = static_cast<uint8_t>(nt & ~kNetTypeMask);
+    if (!dev.rtw_write8(0x0102, closed))
+      return false;
+    const bool ml = dev.rtw_write<uint32_t>(0x0610, macid_lo(own));
+    const bool mh = dev.rtw_write16(0x0614, macid_hi(own));
+    const bool bl = dev.rtw_write<uint32_t>(0x0618, macid_lo(bssid));
+    const bool bh = dev.rtw_write16(0x061c, macid_hi(bssid));
+    if (!(ml && mh && bl && bh))
+      return false;
+    return dev.rtw_write8(0x0102,
+                          static_cast<uint8_t>(closed | kNetTypeInfra));
+  } catch (...) {
+    return false;
+  }
+}
+
+/* Did the station arm land? net_type, MACID and BSSID all read back. Unlike
+ * verify() above, BSSID IS checked here: it is what the caller asked for, and
+ * on the Infra path the MAC uses it (beacon TSF sync, CBSSID matching) even
+ * though the ACK decision rides on MACID. */
+inline bool station_is(RtlAdapter &dev, const uint8_t own[6],
+                       const uint8_t bssid[6]) noexcept {
+  try {
+    return (dev.rtw_read8(0x0102) & kNetTypeMask) == kNetTypeInfra &&
+           dev.rtw_read<uint32_t>(0x0610) == macid_lo(own) &&
+           dev.rtw_read16(0x0614) == macid_hi(own) &&
+           dev.rtw_read<uint32_t>(0x0618) == macid_lo(bssid) &&
+           dev.rtw_read16(0x061c) == macid_hi(bssid);
+  } catch (...) {
+    return false;
+  }
+}
+
+/* Back to the snapshot: gate closed, identity restored, then the pre-arm
+ * net_type bits. Returns the READBACK verdict, not the transfer status.
+ *
+ * The gate close is a PRECONDITION, as in arm_station: when it fails (a
+ * refused write or a throw) the identity is NOT touched - moving it under a
+ * live Infra port would answer for a half-restored address - and the result
+ * is whether the port already reads as the snapshot. Anything else is false,
+ * which keeps the arm recorded so ClearStationIdentity can retry. */
+inline bool station_matches(RtlAdapter &dev,
+                            const StationRestore &saved) noexcept {
+  /* Its OWN guard: a write that threw may or may not have landed, and only
+   * the readback knows (tests/station_arm_selftest.cpp, the throwing
+   * transport). */
+  try {
+    return port_identity_is(dev, saved.identity) &&
+           (dev.rtw_read8(0x0102) & kNetTypeMask) ==
+               (saved.net_type & kNetTypeMask);
+  } catch (...) {
+    return false;
+  }
+}
+
+inline bool restore_station(RtlAdapter &dev,
+                            const StationRestore &saved) noexcept {
+  bool closed = false;
+  try {
+    const uint8_t nt = dev.rtw_read8(0x0102);
+    closed = dev.rtw_write8(0x0102, static_cast<uint8_t>(nt & ~kNetTypeMask));
+  } catch (...) {
+  }
+  if (!closed)
+    return station_matches(dev, saved);
+  (void)restore_port_identity(dev, saved.identity);
+  try {
+    const uint8_t nt = dev.rtw_read8(0x0102);
+    (void)dev.rtw_write8(0x0102,
+                         static_cast<uint8_t>((nt & ~kNetTypeMask) |
+                                              (saved.net_type & kNetTypeMask)));
+  } catch (...) {
+  }
+  return station_matches(dev, saved);
+}
+
+/* The seam's argument rule (IRadio.h): both unicast, and different - and
+ * neither all-zero. */
+inline bool station_args_ok(const uint8_t own[6],
+                            const uint8_t bssid[6]) noexcept {
+  /* is_unicast() alone passes 00:00:00:00:00:00, which would program
+   * MACID = 0 - unsafe for the reason has_safe_restore_mac() gives - and is
+   * no AP's BSSID either: a zero address on either side is refused. */
+  static const uint8_t kZero[6] = {0, 0, 0, 0, 0, 0};
+  return is_unicast(own) && is_unicast(bssid) &&
+         std::memcmp(own, kZero, 6) != 0 &&
+         std::memcmp(bssid, kZero, 6) != 0 &&
+         std::memcmp(own, bssid, 6) != 0;
+}
+
 } /* namespace ack */
 } /* namespace devourer */

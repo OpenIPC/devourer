@@ -11,6 +11,7 @@
 #include "IRtlRadio.h"
 #include "TxMode.h"
 #include "RtlAdapter.h"
+#include "StationArm.h"
 #include "SelectedChannel.h"
 #include "ChipVariant.h"
 #include "HalJaguar3.h"
@@ -88,6 +89,17 @@ public:
   bool ReadPacketBuffer(int sel, uint32_t offset, uint8_t *out,
                         size_t n) override;
   void ClearAckResponder() override;
+  /* Station identity (IRadio contract; src/StationArm.h): MACID = own,
+   * BSSID = the AP, net_type = Infra, under _reg_mu, read back; Clear
+   * restores and reads back the pre-arm MACID/BSSID/net_type. Refused until
+   * Init/InitWrite has made its last port-0 write (_station_ready) and while
+   * a beacon or an ACK responder owns port 0; while
+   * armed, SetAckResponder, ClearAckResponder and StartBeacon are refused in
+   * turn. Order-independent of the RX loop: StartRxLoop rewrites the RX
+   * filters (0x06A0..0x06A4) and the BB RX path, no port-0 register. */
+  bool SetStationIdentity(const devourer::MacAddr &own,
+                          const devourer::MacAddr &bssid) override;
+  bool ClearStationIdentity() override;
   /* A-MPDU TX mode (IRadio contract; src/AmpduMode.h). Programs the 8822C
    * aggregate-fill timer (0x455) under _reg_mu (serialized against the coex
    * thread) and records the descriptor state the TX path reads. */
@@ -509,6 +521,14 @@ private:
   /* Serializes the coex housekeeping tick against StartRxLoop's register
    * restore (the only two register writers during an active TX session). */
   std::mutex _reg_mu;
+  devourer::StationArm _station; /* under _reg_mu */
+  /* The station arm's readiness gate, committed late: false from the top of
+   * Init/InitWrite until that bring-up has made its last port-0 write (the
+   * BF beamformee identity into MACID, the configured ACK responder), and
+   * left false by a bring-up that throws. Not _brought_up: that flag goes
+   * true mid-bring-up because the tail's own setters apply live only once it
+   * is set. Under the station lock. */
+  bool _station_ready = false;
 };
 
 #endif /* RTL_JAGUAR3_DEVICE_H */

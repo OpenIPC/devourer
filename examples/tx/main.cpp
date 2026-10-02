@@ -783,6 +783,28 @@ int main(int argc, char **argv) {
     });
     logger->info("DEVOURER_POLL_INTR_IN — EP 0x85 interrupt-IN poller running");
   }
+  /* Stops and joins the optional IN drainers on every exit from here: a
+   * still-joinable std::thread terminates the process when destroyed, and
+   * both threads poll `handle`, so the normal path joins them explicitly
+   * before session.close(). A fork() child has copies of the thread objects
+   * but not the threads, so it must not join them (in_fork_child). */
+  struct DrainerJoin {
+    std::atomic<bool> &bulk_running, &intr_running;
+    std::thread &bulk, &intr;
+    bool in_fork_child = false;
+    void join() {
+      bulk_running = false;
+      intr_running = false;
+      if (bulk.joinable())
+        bulk.join();
+      if (intr.joinable())
+        intr.join();
+    }
+    ~DrainerJoin() {
+      if (!in_fork_child)
+        join();
+    }
+  } drainers{bulk_in_running, intr_running, bulk_in_thread, intr_in_thread};
 
   WiFiDriver wifi_driver{logger};
   std::unique_ptr<IRadio> owned_device;
@@ -1007,6 +1029,9 @@ int main(int argc, char **argv) {
   if (tx_with_rx && !rx_thread_mode) {
     pid_t fpid = fork();
     if (fpid == 0) {
+#if !defined(_MSC_VER) /* fork() is a real fork here, not the (0) stub */
+      drainers.in_fork_child = true;
+#endif
       rtlDevice->Init(packetProcessor,
                       SelectedChannel{
                           .Channel = static_cast<uint8_t>(channel),
@@ -1031,16 +1056,9 @@ int main(int argc, char **argv) {
   } catch (const std::exception &e) {
     /* InitWrite returns void, so a refused bring-up (e.g. a channel/width/
      * offset combination the chip rejects) surfaces as an exception. The
-     * device already tore itself down; exit cleanly instead of aborting —
-     * which means the optional IN-drainer threads above must be joined
-     * first, or their still-joinable std::thread destructors terminate. */
+     * device already tore itself down; exit cleanly instead of aborting
+     * (the drainers guard joins the IN-drainer threads). */
     logger->error("TX bring-up failed: {}", e.what());
-    bulk_in_running = false;
-    intr_running = false;
-    if (bulk_in_thread.joinable())
-      bulk_in_thread.join();
-    if (intr_in_thread.joinable())
-      intr_in_thread.join();
     return 1;
   }
 
@@ -2675,6 +2693,7 @@ int main(int argc, char **argv) {
    * does exactly the same on every other exit path. */
   /* The beacon guard must not call into the device once it is gone. */
   tx_beacon.detach();
+  drainers.join();   /* they poll the handle session.close() releases */
   session.close();
   /* A truncated caller stream is a producer fault, and a harness that scored
    * the run as if it had ended cleanly would be scoring a short measurement. */

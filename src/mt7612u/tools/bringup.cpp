@@ -1873,7 +1873,7 @@ static int parse_mac6(const char *s, uint8_t out[6])
  * columns, making a No-Ack arm look as if it retried to exactly the
  * configured limit and displacing one of its own entries from entr/sent.
  * Entries carrying the previous arm's pktid are reported as late; any other
- * pktid as foreign.
+ * pktid as foreign - with one exception, the stale EXT word (txs_drain).
  *
  * Exit: 0 reported, 1 device failure OR no status entry filed at all (the
  * measurement did not happen), 2 bad argument or retry limit refused,
@@ -1883,6 +1883,8 @@ struct txs_sum {
 	long entries, success, retry_total, retry_max;
 	long late_prev; /* entries carrying the PREVIOUS arm's pktid */
 	long foreign;   /* entries with any other pktid */
+	long stale_ext; /* own entries popped with a stale EXT word: counted in
+	                 * entries/success, kept out of the retry columns */
 };
 
 /* mt76's skb pktid range starts at MT_PACKET_ID_FIRST (3) and the id must
@@ -1893,14 +1895,35 @@ static unsigned txs_arm_pktid(int rx_on, unsigned arm)
 	return 3u + 8u * (unsigned)rx_on + arm;
 }
 #define TXS_NO_PKTID 0x100u   /* matches no 8-bit EXT_PKTID */
+#define TXS_ANY_PKTID 0x200u  /* txs_drain's stale_id: unknown, so any */
 /* Slack on top of frame_budget_ms for one frame's status wait: USB submit
  * latency plus the drain's two control reads. */
 #define TXS_FRAME_MARGIN_MS 50.0
 
 /* Returns 0 when the FIFO was drained (or is empty), -1 when a status read
- * failed - the caller must not report the arm as measured then. */
+ * failed - the caller must not report the arm as measured then.
+ *
+ * The EXT-then-main read is two USB transfers, not one atomic read. When the
+ * FIFO is EMPTY at the EXT read and an entry is filed before the main read,
+ * the main read pops that entry but the EXT word read just before it is
+ * stale - it still describes the last entry popped. Within an arm that is
+ * harmless (same pktid). On an arm's FIRST entry it is the previous arm's
+ * pktid (or, on the session's first arm, whatever EXT held), so the entry was
+ * counted late/foreign, the arm stayed one short for good, and every
+ * per-frame wait then timed out - the "one-step status lag" rows of
+ * docs/mt7612u-tx-retry.md (N-1/N, a timeout on every frame, ~5-6 fps, and
+ * the late entry in the SAME arm's row, after a fully settled arm).
+ *
+ * `stale_id` takes that one entry back. It is the pktid a stale EXT word
+ * would carry: the last arm that SENT a frame (an arm that sent none popped
+ * nothing, so EXT still describes the arm before it), or TXS_ANY_PKTID on the
+ * session's first. The caller passes it only once this arm has submitted a
+ * frame and that arm owed no entries, and TXS_NO_PKTID otherwise (no
+ * claim). The arm's first popped entry, carrying stale_id, can then only be
+ * ours. Its main word is fresh, so its SUCCESS bit counts; its retry count is
+ * the stale word's, so it is kept out of the retry columns. */
 static int txs_drain(struct mt7612u_dev *d, struct txs_sum *o,
-                     unsigned want, unsigned prev)
+                     unsigned want, unsigned prev, unsigned stale_id)
 {
 	int guard;
 
@@ -1925,6 +1948,14 @@ static int txs_drain(struct mt7612u_dev *d, struct txs_sum *o,
 				(unsigned)FIELD_GET(MT_TX_STAT_FIFO_EXT_PKTID, ext);
 
 			if (id != want) {
+				if (stale_id != TXS_NO_PKTID && o->entries == 0 &&
+				    (stale_id == TXS_ANY_PKTID || id == stale_id)) {
+					o->entries++;
+					o->stale_ext++;
+					if (st & MT_TX_STAT_FIFO_SUCCESS)
+						o->success++;
+					continue;
+				}
 				if (id == prev) o->late_prev++;
 				else            o->foreign++;
 				continue;
@@ -2015,6 +2046,10 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 	int rx_on, rl = 0, rl_given;
 	long total_entries = 0, total_foreign = 0;
 	unsigned prev_pktid = TXS_NO_PKTID;
+	/* txs_drain's stale_id: the last arm that sent a frame, and whether it
+	 * settled with no entry owed. */
+	unsigned stale_pktid = TXS_ANY_PKTID;
+	int stale_settled = 1;
 	double frame_budget_ms;
 	int io_fail = 0;   /* status read / WCID setup failed: teardown, exit 1 */
 	double last_tick = 0.0;  /* receiver passes: last mt7612u_phy_tick() */
@@ -2164,7 +2199,7 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 
 		for (a = 0; !io_fail && a < sizeof arms / sizeof arms[0]; a++) {
 			struct mt7612u_tx_rate rate = { };
-			struct txs_sum sum = { 0, 0, 0, 0, 0, 0 };
+			struct txs_sum sum = { 0, 0, 0, 0, 0, 0, 0 };
 			const unsigned pktid = txs_arm_pktid(rx_on, a);
 			const uint8_t *sa = arms[a].own_sa ? dev.macaddr : src;
 			const uint8_t *a1 = arms[a].bcast_a1 ? bcast : peer;
@@ -2188,7 +2223,8 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 			memcpy(frame + 26, "MT7612U-TXS", 11);
 
 			/* The previous arm's tail: counted as late, never as ours. */
-			if (txs_drain(&dev, &sum, pktid, prev_pktid)) io_fail = 1;
+			if (txs_drain(&dev, &sum, pktid, prev_pktid, TXS_NO_PKTID))
+				io_fail = 1;
 
 			/* Bounded twice, like gate_ampdu's wall clock: a submit
 			 * that keeps failing must end the arm, not spin it. The
@@ -2207,7 +2243,9 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 				              MT_TXOPT_TXS | MT_TXOPT_PKTID(pktid) |
 				              arms[a].opts) != 0) {
 					submit_fail++;
-					if (txs_drain(&dev, &sum, pktid, prev_pktid))
+					if (txs_drain(&dev, &sum, pktid, prev_pktid,
+					              n > 0 && stale_settled ?
+					              stale_pktid : TXS_NO_PKTID))
 						io_fail = 1;
 					continue;
 				}
@@ -2233,7 +2271,9 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 
 					do {
 						if (txs_drain(&dev, &sum, pktid,
-						              prev_pktid)) {
+						              prev_pktid,
+						              stale_settled ? stale_pktid
+						                            : TXS_NO_PKTID)) {
 							io_fail = 1;
 							break;
 						}
@@ -2265,7 +2305,9 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 				       && !g_stop && !io_fail) {
 					txs_tick(rx_on, &last_tick);
 					mt_usleep(2000);
-					if (txs_drain(&dev, &sum, pktid, prev_pktid))
+					if (txs_drain(&dev, &sum, pktid, prev_pktid,
+					              n > 0 && stale_settled ?
+					              stale_pktid : TXS_NO_PKTID))
 						io_fail = 1;
 				}
 				settled = (sum.entries >= n);
@@ -2282,22 +2324,35 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 			 * entries, uncapped: more than `sent` would mean the MAC
 			 * filed duplicates, and is shown as such rather than
 			 * clipped. */
-			printf("  %c    %-28s %7.0f %4ld/%-4ld %8ld %9.1f %6ld%s\n",
-			       arms[a].tag, arms[a].what, n * 1000.0 / wall,
-			       sum.entries, n, sum.success,
-			       sum.entries ? (double)sum.retry_total / sum.entries : 0.0,
-			       sum.retry_max, settled ? "" : "  UNSETTLED");
+			{
+				/* The retry mean is over the entries whose EXT
+				 * word is their own. */
+				const long rtry_n = sum.entries - sum.stale_ext;
+
+				printf("  %c    %-28s %7.0f %4ld/%-4ld %8ld %9.1f %6ld%s\n",
+				       arms[a].tag, arms[a].what, n * 1000.0 / wall,
+				       sum.entries, n, sum.success,
+				       rtry_n ? (double)sum.retry_total / rtry_n : 0.0,
+				       sum.retry_max, settled ? "" : "  UNSETTLED");
+			}
 			if (submit_fail || status_timeouts || sum.late_prev ||
-			    sum.foreign || n < frames)
+			    sum.foreign || sum.stale_ext || n < frames)
 				printf("       (pktid %u: %ld submit failures, %ld/%d "
 				       "frames sent, %ld per-frame status timeouts, "
 				       "%ld late entries from the previous arm, "
-				       "%ld foreign)\n",
+				       "%ld foreign, %ld stale-EXT entries claimed)\n",
 				       pktid, submit_fail, n, frames, status_timeouts,
-				       sum.late_prev, sum.foreign);
+				       sum.late_prev, sum.foreign, sum.stale_ext);
 			total_entries += sum.entries;
 			total_foreign += sum.foreign + sum.late_prev;
 			prev_pktid = pktid;
+			/* More entries than frames would be MAC duplicates: then a
+			 * stale-pktid entry is not provably ours either. An arm that
+			 * sent nothing popped nothing and leaves both as they were. */
+			if (n > 0) {
+				stale_pktid = pktid;
+				stale_settled = (sum.entries == n);
+			}
 			if (io_fail) {
 				printf("       (arm %c: a status-FIFO read FAILED - "
 				       "the row above is incomplete)\n", arms[a].tag);

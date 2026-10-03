@@ -158,19 +158,32 @@ What it shows:
   fps, the same per-frame cost as the No-Ack rows. At limit 5 and on the
   initvals they time out on every per-frame wait (T40), and three of the
   eight such rows are 39/40 with the lag below.
-- **Characterised, unexplained: a one-step status lag.** In some arms EVERY
-  per-frame wait times out (T40), yet the entries do arrive - one step
-  behind: a frame's status becomes visible only after the next frame is
-  submitted. Such an arm ends 39/40 and its last entry lands in the next arm
-  as late (or, for the very first arm, as one foreign entry). Arm a lags in
-  every pass; which other arms lag varies from pass to pass (c, e, f and g
-  are each clean in some passes and lagging in others), so it tracks chip
-  state, not arm configuration. Counting 39/40 rows, it hit five of sixteen
-  at limit 0, eleven at limit 5 and seven on the initvals - one run each,
-  too few to call a trend. The two candidate explanations
-  (status posted only on the next TX; the EXT/FIFO pairing off by one)
-  produce identical signatures in this gate and are not distinguishable
-  here. The retry and success columns exclude every late and foreign entry.
+- **A one-step status lag - a stale EXT read on the arm's first entry.** In
+  some arms EVERY per-frame wait times out (T40) and the arm ends 39/40, with
+  one late entry (or, for the very first arm, one foreign entry) in that
+  SAME arm's row. Counting 39/40 rows, it hit five of sixteen at limit 0,
+  eleven at limit 5 and seven on the initvals - one run each. Arm a lags in
+  every pass; which other arms lag varies from pass to pass. The table rules
+  out "status posted only on the next TX": at limit 0, receiver ON, arm f
+  lags with L1 although arm e before it settled 40/40 and owed nothing, and
+  arm g after it shows no late entry. What fits is the two-transfer read:
+  when the FIFO is empty at the EXT read and an entry is filed before the
+  main read, the popped entry is paired with the stale EXT word of the
+  previous entry. On an arm's first entry that is the previous arm's pktid,
+  so the entry was counted late, the arm stayed one short, and every
+  per-frame wait timed out. A race on the poll timing, which is why it
+  varies from pass to pass and with the host. The gate now claims that
+  entry back (`txs_drain`), under all of: it is the arm's first popped entry
+  (no own entry yet), the arm has submitted a frame, and its pktid is that
+  of the last arm that sent a frame, which must have settled with no entry
+  owed - or, on the session's first arm, any pktid. A claimed entry counts
+  in entries, and in success when its SUCCESS bit is set; it stays out of
+  the retry columns, and is reported as "stale-EXT entries claimed". These
+  tables were taken before that change. With the claim keyed to the
+  previous arm, the author's unit then settled 16/16 arms at limits 5 and 0
+  (recorded on issue #461); keying it to the last arm that sent a frame,
+  so an arm with every submit failed is skipped, has not been run on
+  hardware.
 - **Arms e-h**: e, f and g read like c whenever they are clean; nothing
   distinguishes them. h (broadcast, WCID 1) lagged in five of six passes.
 
@@ -244,9 +257,11 @@ why it is worth an issue of its own.
   tables; the delivery table above shows ACK-requesting retries working
   against a real AP.
 - UNSETTLED rows are read for the retry value, never for the counts.
-- The one-step status lag is unexplained, and its two candidate causes are
-  indistinguishable in this gate. It moves an arm's last entry into the next
-  arm's late count, never into another arm's statistics.
+- The one-step status lag is attributed to the stale-EXT race above from
+  this table's pattern, not from a bus trace. The claim recovers at most one
+  entry per arm - the first - and only on the conditions above; after an
+  UNSETTLED arm a previous-pktid entry is still reported as late. A deficit
+  of more than one entry is not this race.
 - `mt7612uprobe txs` reads two registers per status poll, so its `fps` is
   per-frame submit-to-status time, not comparable with any steady-state
   injection figure.

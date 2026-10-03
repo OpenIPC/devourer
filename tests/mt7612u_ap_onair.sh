@@ -64,7 +64,7 @@ KIDS=""
 # TERM every child, then WAIT for them to exit - up to 10 s: a demo's chip
 # de-init runs after the signal, and re-enumerating the adapter under it is
 # the hand-back this must not do. Anything still alive then is KILLed and
-# reaped is 1, so cleanup leaves the adapter alone; 0 when all exited.
+# reap returns 1, so cleanup leaves the adapter alone; 0 when all exited.
 reap() {
   local pid live t=0
   for pid in $KIDS; do kill "$pid" 2>/dev/null; done
@@ -85,6 +85,9 @@ reap() {
   return 0
 }
 
+# Returns 1 when it could not reset the AP (a process outlived TERM): the
+# adapter may still be airing an autonomous beacon, so no later cell may be
+# scored against it.
 cleanup() {
   local reaped=0
   reap || reaped=1
@@ -125,6 +128,7 @@ cleanup() {
       sleep 3
     fi
   fi
+  return "$reaped"
 }
 # An interrupt must STOP the run: on the EXIT trap alone, INT/TERM would run
 # cleanup and then carry on into the next cell against a re-enumerated
@@ -336,10 +340,23 @@ case "$CELLS" in
   open) cell_open ;;
   wpa2) cell_wpa2 ;;
   stop) cell_stop ;;
-  all)  cell_open; cleanup; cell_wpa2; cleanup; cell_stop ;;
+  all)  # A between-cell cleanup that could not reset the AP ends the run:
+        # the cells after it are recorded as not run, never scored.
+        cell_open
+        if ! cleanup; then not_run="wpa2 stop"
+        else
+          cell_wpa2
+          if ! cleanup; then not_run="stop"; else cell_stop; fi
+        fi ;;
   *)    echo "usage: $0 [open|wpa2|stop|all]"; exit 2 ;;
 esac
 
 say ""
+if [ -n "${not_run:-}" ]; then
+  say "  NOT RUN  $not_run - the AP could not be reset between cells"
+fi
 say "=== $pass passed, $fail failed   (logs: $OUT) ==="
-exit $(( fail > 0 ))
+# 1 a check failed; else 2 when cells were left unrun (INCONCLUSIVE); else 0.
+[ "$fail" -gt 0 ] && exit 1
+[ -n "${not_run:-}" ] && exit 2
+exit 0

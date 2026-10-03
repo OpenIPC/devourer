@@ -24,7 +24,7 @@
  * WHAT IT DOES NOT COVER, stated rather than implied:
  *   - USB, the radio, SetStationIdentity, the channel retune, and everything
  *     below send_packet(). Those need a device and stay in
- *     tests/mt7612u_sta_onair.sh.
+ *     tests/sta_client_onair.sh.
  *   - The four-way's INTEROPERABILITY. The fixture below and the code it
  *     tests share an author, so a shared misreading is invisible to it.
  *     tests/eapol_kernel_vectors.h (ctest `supplicant`) is what pins that,

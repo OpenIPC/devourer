@@ -58,7 +58,7 @@
  *        DEVOURER_STA_TAP=dvsta0 build/sta_client 60
  * Headless (no device, no root, no airtime):
  *   build/sta_client --self-test
- * On air: tests/mt7612u_sta_onair.sh.
+ * On air: tests/sta_client_onair.sh.
  */
 #include <atomic>
 #include <chrono>
@@ -296,7 +296,11 @@ void on_association() {
   g_rx_dup.reset();
   g_failed_noted = false;
   g_was_associated = true;
-  g_associations.fetch_add(1);
+  const uint64_t n = g_associations.fetch_add(1) + 1;
+  /* One line per association, so a re-join is visible while the run lasts
+   * and not only in the exit ledger. */
+  std::fprintf(stderr, "  station connected (association %llu)\n",
+               (unsigned long long)n);
 }
 
 /* A REKEY RESTARTS A PN SPACE, and the windows restart with it - both
@@ -612,8 +616,12 @@ void probe(uint8_t chan) {
   enqueue(std::move(m));
 }
 
+const char* fail_name(StationSm::Failure f);
+
 /* The join and re-join policy. Returns the channel the radio should be tuned
- * to. Caller must NOT hold g_mu. */
+ * to. Caller must NOT hold g_mu. With DEVOURER_STA_RECONNECT=0 the first
+ * failure - a lost link or a failed first join - ends the attempts: the run
+ * then idles, unassociated, until its time is up. */
 uint8_t supervise(uint32_t now) {
   std::lock_guard<std::mutex> l(g_mu);
 
@@ -626,6 +634,10 @@ uint8_t supervise(uint32_t now) {
   /* The transition INTO Failed, handled once. */
   if (st == StationSm::State::Failed && !g_failed_noted) {
     g_failed_noted = true;
+    std::fprintf(stderr, "  station %s: %s%s\n",
+                 g_was_associated ? "link lost" : "join failed",
+                 fail_name(g_sm.fail_reason()),
+                 g_reconnect ? "" : " - DEVOURER_STA_RECONNECT=0, not re-joining");
     /* Counted apart from a first join, once per lost link. */
     if (g_was_associated) {
       g_was_associated = false;

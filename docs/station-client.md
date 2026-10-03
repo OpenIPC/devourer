@@ -50,7 +50,16 @@ SIGINT/SIGTERM (handled from the start of `main`, so a stop during bring-up
 ends the run once the bring-up returns) leave the BSS, clear the identity and
 print the ledger. The ledger is printed at every exit once `sta_client up:`
 has printed, and separates "heard nothing", "heard another BSS" and "our AP
-refused us".
+refused us". While it runs, the station also logs each association
+(`station connected (association N)`) and each failure (`station link lost:
+<reason>` or `station join failed: <reason>`).
+
+Re-join policy: after a lost link or a failed join the station waits
+`DEVOURER_STA_BACKOFF_MS` and joins again, for as long as the run lasts.
+With `DEVOURER_STA_RECONNECT=0` the first failure - a lost link, or a first
+join that fails - ends the attempts: the station logs it, stays
+unassociated until its time is up, and the ledger ends `Failed` with the
+reason.
 
 Exit status: 0 the run completed; 1 setup failed; 2 refused
 (`station_mode_ok` false, or the duration, `DEVOURER_CHANNEL`,
@@ -68,33 +77,44 @@ first line then reads `fault=1`.
   policy, key selection by key id, replay and duplicate windows, PTK/GTK
   rekeys, plaintext/fragment/A-MSDU refusal, the FCS trim, the ledger's
   identities. No device, no root.
-- **On air** - `tests/mt7612u_sta_onair.sh` against hostapd in a network
-  namespace, MT7612U as the station:
+- **On air** - `tests/sta_client_onair.sh` against hostapd in a network
+  namespace. The station (DUT) is an MT7612U, an RTL8812CU (8822C) or an
+  RTL8812BU (8822B); the AP is any adapter whose in-kernel driver supports AP
+  mode and can change network namespace (`iw phy <phy> info` lists
+  `set_wiphy_netns`: mt76, rtw88 - not the out-of-tree rtl88x2cu / 88x2bu,
+  which the cell refuses).
 
   | Cell | Scored |
   |---|---|
-  | `open` | AP associates our address; ping 0% loss over the TAP; ledger plaintext only; armed; the clear ran on exit |
-  | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; MIC failures <= PTK installs; armed; the clear ran on exit; no `tx.retry_limit=0` warning |
-  | `noarm` | control, `DEVOURER_STA_ARM=0`: no arm and no clear ran (link outcome reported, not scored) |
-  | `retry0` | `DEVOURER_TX_RETRY_LIMIT=0`: the arm-time warning; the clear ran on exit (link outcome reported, not scored) |
+  | `open` | AP associates our address; ping 0% loss over the TAP; ledger plaintext only; armed; the clear |
+  | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; MIC failures <= PTK installs; armed; the clear; no `tx.retry_limit=0` warning |
+  | `noarm` | control, `DEVOURER_STA_ARM=0`: no arm and no clear ran. Realtek: the station tried and the AP did NOT complete the four-way - a completed one FAILs. MT7612U: the link over a 30 s ping window is reported, not scored |
+  | `retry0` | `DEVOURER_TX_RETRY_LIMIT=0`: the arm-time warning; the clear (the link over a 30 s ping window is reported, not scored) |
+  | `reconnect` | hostapd stopped and restarted: the station reports the lost link; second four-way within the bound; ping 0% loss over a 30 s window; ledger 2 associations, 1 reconnect; one arm across the re-join; the clear |
+  | `noreconnect` | as `reconnect` with `DEVOURER_STA_RECONNECT=0`: the lost link reported; no re-join; the ledger ends Failed after 1 association |
 
-  The clear's result is printed as information, not scored: on MT7612U
-  `ClearStationIdentity` is trivially true.
+  The arm differs by die. On MT7612U it writes no register, so an unarmed
+  link may work and `ClearStationIdentity` is trivially true: the clear is
+  scored as having run and its result is information. On a Realtek die the
+  arm writes the port registers and unarmed the MAC does not acknowledge
+  own-addressed unicast (`docs/realtek-station-arm.md`), so `noarm` is a
+  control that can fail and the clear must verify.
+
+  The arm is per BSSID: a re-join to the same BSSID keeps it rather than
+  arming again, and on Realtek the second association is the proof it still
+  holds.
 
   Exit 0 pass, 1 fail (including a station fault, exit 3, with its cause
   named), 2 inconclusive (rig refused, AP not up, route not through the TAP,
   the station exited or stalled before `sta_client up:`, station out of
-  time), 3 interrupted. `FW_DIR` must hold the decompressed MT7612U blobs. The AP's phy must be able to change
-  network namespace (`iw phy <phy> info` lists `set_wiphy_netns`): an
-  in-kernel cfg80211 driver such as rtw88 or mt76. Out-of-tree drivers such
-  as rtl88x2cu / 88x2bu cannot, and the cell refuses them.
+  time), 3 interrupted. `FW_DIR` (an MT7612U DUT) must hold the decompressed
+  MT7612U blobs.
 
 ## What it does not do
 
-- The on-air cell takes an MT7612U only (`sta_dut_take`) until a generic
-  DUT take / hand-back exists. The client itself arms a Realtek 8822C /
-  8822B selected with `DEVOURER_VID` / `DEVOURER_PID`; that path is not
-  covered by an on-air cell here.
+- The on-air cell covers the dies that report `station_mode_ok` (MT7612U,
+  8822C, 8822B). Another Realtek die can be named with `DUT_VID` / `DUT_PID`;
+  `sta_client` refuses it (exit 2) unless it reports `station_mode_ok`.
 - Software CCMP only; no PMF/802.11w, WPA2-PSK/CCMP or open only.
 - No fragment reassembly and no A-MSDU: both are refused and counted.
 - One BSS at a time, chosen by SSID; no roaming and no background scan while

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# mt7612u_sta_onair.sh - tests/sta_client.cpp joining a real hostapd AP, end
+# sta_client_onair.sh - tests/sta_client.cpp joining a real hostapd AP, end
 # to end, with the station identity armed through IRadio::SetStationIdentity.
 #
-# The MT7612U (DUT_SYSFS) runs sta_client: scan, authenticate, associate, the
-# WPA2-PSK four-way and CCMP over src/sta/, a TAP device for the host. A
-# kernel-driven adapter (AP_SYSFS) runs hostapd - an independent
-# implementation on independent silicon, which is what makes its log a
-# witness: "EAPOL-4WAY-HS-COMPLETED" means the AUTHENTICATOR verified our
-# message 4's MIC.
+# The DUT (DUT_SYSFS) runs sta_client: scan, authenticate, associate, the
+# WPA2-PSK four-way and CCMP over src/sta/, a TAP device for the host. It is
+# an MT7612U (0e8d:7612) or a Realtek die whose AdapterCaps::station_mode_ok
+# is true - the 8822C (RTL8812CU, 0bda:c812) and the 8822B (RTL8812BU,
+# 0bda:b812). A kernel-driven adapter (AP_SYSFS) runs hostapd - an
+# independent implementation on independent silicon, which is what makes its
+# log a witness: "EAPOL-4WAY-HS-COMPLETED" means the AUTHENTICATOR verified
+# our message 4's MIC. The AP need not be a Realtek.
 #
 # THE AP LIVES IN A NETWORK NAMESPACE. Both radios are on one host; with both
 # addresses in the root namespace the kernel routes the ping locally and it
@@ -15,29 +17,47 @@
 # every data-plane check first asserts that `ip route get` leaves through the
 # station's TAP.
 #
+# THE ARM DIFFERS BY DIE. On MT7612U the arm writes no register (it checks
+# MT_MAC_ADDR and the auto-responder), so DEVOURER_STA_ARM=0 changes nothing
+# and ClearStationIdentity is trivially true: both are information there. On
+# a Realtek die the arm WRITES the port registers (docs/realtek-station-arm.md)
+# and unarmed the MAC does not acknowledge own-addressed unicast, so the AP's
+# authentication response is never ACKed and hostapd never lets the station
+# in: `noarm` is a real control, and the clear's verification is scored.
+#
 # Cells (each scored against its own witness):
 #   open     hostapd open: the AP associates OUR address; ping 0% loss over
 #            the TAP; the ledger shows plaintext and no decryption; the arm
-#            line, and the clear ran on exit.
+#            line; the clear ran on exit (verified, on Realtek).
 #   wpa2     hostapd WPA2-PSK with group and pairwise rekeys: four-way, both
-#            rekeys completed at the AP, ping 0% loss, ONE association
-#            throughout, MIC failures <= PTK installs (a pairwise rekey has a
-#            one-frame switchover window, see rx_frame() in sta_client.cpp),
-#            the arm line, the clear ran on exit, and NO tx.retry_limit=0
-#            warning (the station default is nonzero).
+#            rekeys completed at the AP, ping 0% loss before and after them,
+#            ONE association throughout, MIC failures <= PTK installs (a
+#            pairwise rekey has a one-frame switchover window, see rx_frame()
+#            in sta_client.cpp), the arm line, the clear (as for open), and
+#            NO tx.retry_limit=0 warning (the station default is nonzero).
 #   noarm    the control: wpa2 with DEVOURER_STA_ARM=0 - nothing else
-#            changes. Scored: no SetStationIdentity and no clear ran.
-#            Reported, not scored: whether it associated and carried the
-#            ping (the MT7612U arm writes no register - docs/station-client.md).
+#            changes. Scored everywhere: no SetStationIdentity and no clear
+#            ran. On Realtek also scored: the station tried (beacons seen,
+#            authentication sent) and the AP did NOT complete the four-way
+#            for it within 30 s - a completed four-way is a FAIL, because then
+#            the arm is not what makes the wpa2 cell work. On MT7612U the link
+#            is reported over a PING_S ping window, not scored.
 #   retry0   wpa2 with DEVOURER_TX_RETRY_LIMIT=0. Scored: the library's
 #            arm-time warning about tx.retry_limit=0 (logged inside a
 #            successful SetStationIdentity, so just before sta_client's
-#            "armed" line), and the clear ran on exit.
-#            Reported, not scored: the link outcome with a single-shot uplink.
-#
-# The clear is scored as having RUN, not by its result: on MT7612U
-# ClearStationIdentity is trivially true (the arm wrote nothing), so the
-# result is printed as information.
+#            "armed" line), and the clear. Reported, not scored: the link
+#            over a PING_S ping window with a single-shot uplink.
+#   reconnect   hostapd WPA2-PSK, stopped for DOWN_S and restarted with the
+#            same configuration. Scored: the station reports the lost link;
+#            the AP completes a second four-way for it within REJOIN_S of
+#            coming back; ping 0% loss over a PING_S window after the
+#            re-join; the ledger counts 2 associations and 1 reconnect;
+#            exactly ONE arm (the arm is per BSSID and stays in place across
+#            a re-join to the same BSSID - on Realtek the second association
+#            is itself the proof that it still holds); the clear on exit.
+#   noreconnect   reconnect with DEVOURER_STA_RECONNECT=0: the station reports
+#            the lost link, the AP sees NO second four-way within REJOIN_S,
+#            and the ledger ends Failed with 1 association.
 #
 # Liveness: a data-plane check runs only while sta_client is alive, and again
 # checks it afterwards - a ping that straddles the station's exit reports
@@ -45,30 +65,37 @@
 # READY_TIMEOUT, before printing `sta_client up:` is a rig / bring-up problem
 # (INCONCLUSIVE, whatever its status). After `up:`, an exit with status 0
 # ran out of SECS (INCONCLUSIVE); 3 is a FAULT the station caught (an
-# exception or a failed TAP; `fault=1` in its ledger) and is a FAIL with the
-# cause named, wherever in the cell it happens; any other status is a FAIL.
+# exception, a failed TAP or an unverified clear; `fault=1` in its ledger)
+# and is a FAIL with the cause named, wherever in the cell it happens; any
+# other status is a FAIL.
 #
 # Exit status: 0 every scored check passed; 1 a check failed; 2 INCONCLUSIVE
 # (the rig was refused, the station did not come up, the AP did not come up,
 # the route did not leave through the TAP, or a cell was cut short);
 # 3 interrupted.
 #
-#   sudo DUT_SYSFS=1-1 AP_SYSFS=5-1 tests/mt7612u_sta_onair.sh
-#   sudo DUT_SYSFS=1-1 AP_SYSFS=5-1 CH=6 tests/mt7612u_sta_onair.sh wpa2 retry0
+#   sudo DUT_SYSFS=1-1 AP_SYSFS=8-1 tests/sta_client_onair.sh
+#   sudo DUT_SYSFS=5-1 AP_SYSFS=1-1 CH=6 tests/sta_client_onair.sh wpa2 noarm
 #
-# Rig: DUT_SYSFS an MT7612U (0e8d:7612), unbound from mt76x2u here and
-# re-enumerated at the end; AP_SYSFS an adapter whose kernel driver supports
-# AP mode AND lets its phy change network namespace (`iw phy` lists
-# set_wiphy_netns): an in-kernel cfg80211 driver such as rtw88 or mt76.
+# Rig: DUT_SYSFS an MT7612U, an RTL8812CU or an RTL8812BU (another die: set
+# DUT_VID / DUT_PID; sta_client refuses it unless its station_mode_ok is
+# true). Its kernel driver (mt76x2u, rtw88, or an out-of-tree rtl88x2*) is
+# unbound here and the device re-enumerated at the end, never while
+# sta_client is alive. AP_SYSFS an adapter whose kernel driver supports AP
+# mode AND lets its phy change network namespace (`iw phy` lists
+# set_wiphy_netns): an in-kernel cfg80211 driver such as mt76 or rtw88.
 # Out-of-tree drivers such as rtl88x2cu / 88x2bu cannot, and are refused.
-# Read AP_SYSFS from `lsusb -t` after its driver has loaded (it can move).
-# FW_DIR must hold the DECOMPRESSED MT7612U blobs (mt7662*.bin); a host that
-# ships only mt7662*.bin.zst gets INCONCLUSIVE (rig/bring-up).
+# Read both from `lsusb -t` after the drivers have loaded (they can move).
+# FW_DIR (an MT7612U DUT only) must hold the DECOMPRESSED MT7612U blobs
+# (mt7662*.bin); a host that ships only mt7662*.bin.zst gets INCONCLUSIVE
+# (rig/bring-up).
 # Build first: cmake --build build --target StaClientSelftest (build/sta_client).
 #
-# Env: DUT_SYSFS, AP_SYSFS, CH, SSID, PSK, SECS, REKEY_S, PTK_REKEY_S, FW_DIR,
-#      NS, TAP, READY_TIMEOUT, OUT, BUILD.
-# Cells: open | wpa2 | noarm | retry0 | all (default: all four).
+# Env: DUT_SYSFS, AP_SYSFS, DUT_VID, DUT_PID, CH, SSID, PSK, SECS, REKEY_S,
+#      PTK_REKEY_S, PING_S, DOWN_S, REJOIN_S, FW_DIR, NS, TAP, READY_TIMEOUT,
+#      OUT, BUILD.
+# Cells: open | wpa2 | noarm | retry0 | reconnect | noreconnect | all
+# (default: all six).
 
 # The cells are reached as "cell_$c" and cleanup through the traps.
 # shellcheck disable=SC2317
@@ -77,6 +104,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${BUILD:-$ROOT/build}"
 DUT_SYSFS="${DUT_SYSFS:-}"
 AP_SYSFS="${AP_SYSFS:-}"
+DUT_VID="${DUT_VID:-}"
+DUT_PID="${DUT_PID:-}"
 CH="${CH:-6}"
 SSID="${SSID:-devourerSTA}"
 PSK="${PSK:-devourer123}"
@@ -88,6 +117,13 @@ SECS="${SECS:-90}"
 # four-way alone never exercises.
 REKEY_S="${REKEY_S:-20}"
 PTK_REKEY_S="${PTK_REKEY_S:-25}"
+# The ping window behind every reported link line and the reconnect cell's
+# post-re-join check: PING_S seconds at 2 pings a second.
+PING_S="${PING_S:-30}"
+# reconnect: how long the AP is away, and the bound on the re-join once it is
+# back (loss noticed, re-join backoff, authentication, association, four-way).
+DOWN_S="${DOWN_S:-8}"
+REJOIN_S="${REJOIN_S:-30}"
 FW_DIR="${FW_DIR:-/lib/firmware/mediatek}"
 NS="${NS:-staonair}"
 TAP="${TAP:-dvsta0}"
@@ -97,15 +133,17 @@ APIP=192.168.98.1
 STAIP=192.168.98.2
 
 CELLS="${*:-all}"
-[ "$CELLS" = all ] && CELLS="open wpa2 noarm retry0"
+[ "$CELLS" = all ] && CELLS="open wpa2 noarm retry0 reconnect noreconnect"
 for c in $CELLS; do
-  case "$c" in open|wpa2|noarm|retry0) ;; *) echo "unknown cell '$c'"; exit 2 ;; esac
+  case "$c" in open|wpa2|noarm|retry0|reconnect|noreconnect) ;;
+    *) echo "unknown cell '$c'"; exit 2 ;; esac
 done
 
 [ "$(id -u)" = 0 ] || { echo "must run as root"; exit 2; }
-for v in CH SECS REKEY_S PTK_REKEY_S READY_TIMEOUT; do
+for v in CH SECS REKEY_S PTK_REKEY_S PING_S DOWN_S REJOIN_S READY_TIMEOUT; do
   case "${!v}" in ''|*[!0-9]*) echo "$v must be a non-negative integer"; exit 2 ;; esac
 done
+[ "$PING_S" -ge 1 ] || { echo "PING_S must be at least 1"; exit 2; }
 [ -n "$DUT_SYSFS" ] || { echo "DUT_SYSFS is required (lsusb -t)"; exit 2; }
 [ -n "$AP_SYSFS" ] || { echo "AP_SYSFS is required (lsusb -t)"; exit 2; }
 [ "$DUT_SYSFS" != "$AP_SYSFS" ] || { echo "DUT_SYSFS and AP_SYSFS must differ"; exit 2; }
@@ -120,6 +158,25 @@ if ns_exists; then
   echo "netns $NS already exists - recover or remove it first (set NS= to use another name)"
   exit 2
 fi
+
+# --- which die the DUT is -----------------------------------------------------
+# DUT_KIND decides the take / hand-back and what the arm scores.
+dut_have="$(cat "/sys/bus/usb/devices/$DUT_SYSFS/idVendor" 2>/dev/null):$(cat "/sys/bus/usb/devices/$DUT_SYSFS/idProduct" 2>/dev/null)"
+if [ -n "$DUT_VID" ] || [ -n "$DUT_PID" ]; then
+  dut_want=$(printf '%04x:%04x' "$((DUT_VID))" "$((DUT_PID))" 2>/dev/null)
+  [ "$dut_have" = "$dut_want" ] || {
+    echo "refusing DUT_SYSFS=$DUT_SYSFS - it reports '$dut_have', not DUT_VID:DUT_PID $dut_want"; exit 2; }
+fi
+case "$dut_have" in
+  0e8d:7612) DUT_KIND=mt7612u ;;
+  0bda:c812|0bda:b812) DUT_KIND=realtek ;;
+  *:*)
+    if [ -n "$DUT_VID" ] && [ "$dut_have" != ":" ]; then DUT_KIND=realtek
+    else echo "refusing DUT_SYSFS=$DUT_SYSFS ('$dut_have') - not an MT7612U, RTL8812CU or RTL8812BU (set DUT_VID / DUT_PID to name another die)"; exit 2
+    fi ;;
+esac
+DUT_VID="0x${dut_have%%:*}"
+DUT_PID="0x${dut_have#*:}"
 
 # shellcheck source=tests/mt7612u_sta_lib.sh
 . "$ROOT/tests/mt7612u_sta_lib.sh"
@@ -175,14 +232,26 @@ cleanup() {
   [ "$NM_AP" = yes ] && nmcli device set "$AP_IF" managed yes >/dev/null 2>&1
   # The DUT is re-enumerated only once sta_client has really exited: a
   # re-enumeration inside its teardown is what the hand-back must not do.
-  if [ "$sta_gone" = 0 ] && [ "$STA_HUNG" = no ]; then sta_dut_handback
-  else echo "sta_client still running - not re-enumerating $DUT_SYSFS"; fi
+  if [ "$sta_gone" = 0 ] && [ "$STA_HUNG" = no ]; then
+    if [ "$DUT_KIND" = mt7612u ]; then sta_dut_handback
+    else sta_dev_handback dut "$DUT_SYSFS"; fi
+  else
+    echo "sta_client still running - not re-enumerating $DUT_SYSFS"
+  fi
   sta_lock_release
 }
 trap cleanup EXIT
 trap 'cleanup; exit 3' INT TERM
 
-sta_dut_take || exit 2
+if [ "$DUT_KIND" = mt7612u ]; then
+  sta_dut_take || exit 2
+else
+  # Marked opened BEFORE the unbind, so the hand-back re-binds its driver
+  # whatever happens after this point.
+  sta_dev_record dut "$DUT_SYSFS" "$DUT_VID" "$DUT_PID" || exit 2
+  sta_dev_opened dut
+  sta_dev_unbind_wifi "$DUT_SYSFS" || exit 2
+fi
 
 if command -v nmcli >/dev/null 2>&1; then
   case "$(nmcli -t -f DEVICE,STATE device 2>/dev/null | grep "^$AP_IF:")" in
@@ -197,7 +266,7 @@ iw phy "$AP_PHY" set netns name "$NS" || { echo "could not move $AP_PHY into $NS
 sleep 2
 ip netns exec "$NS" ip link set "$AP_IF" up 2>/dev/null
 
-echo "DUT  MT7612U at $DUT_SYSFS ($(sta_usb_id "$DUT_SYSFS"))"
+echo "DUT  $DUT_KIND $dut_have at $DUT_SYSFS ($(sta_usb_id "$DUT_SYSFS"))"
 echo "AP   $AP_IF ($AP_PHY) at $AP_SYSFS, in netns $NS"
 echo "ch$CH  ssid '$SSID'  tap $TAP  cells: $CELLS"
 echo "logs: $OUT"
@@ -228,13 +297,15 @@ wait_for() { # $1 file, $2 regex, $3 seconds
 # hostapd runs in the foreground (backgrounded here) with its event stream on
 # stdout: AP-STA-CONNECTED, EAPOL-4WAY-HS-COMPLETED and the rekey lines are
 # read from that file. AP up is judged by the interface type, not the log.
-ap_up() { # $1 open | wpa2, $2 cell
+ap_up() { # $1 open | wpa2 | wpa2norekey, $2 log tag
   {
     printf 'interface=%s\ndriver=nl80211\nssid=%s\n' "$AP_IF" "$SSID"
     if [ "$CH" -le 14 ]; then printf 'hw_mode=g\n'; else printf 'hw_mode=a\n'; fi
     printf 'channel=%s\nieee80211n=1\nauth_algs=1\nwmm_enabled=1\n' "$CH"
-    if [ "$1" = wpa2 ]; then
+    if [ "$1" != open ]; then
       printf 'wpa=2\nwpa_passphrase=%s\nwpa_key_mgmt=WPA-PSK\nrsn_pairwise=CCMP\n' "$PSK"
+    fi
+    if [ "$1" = wpa2 ]; then
       printf 'wpa_group_rekey=%s\nwpa_ptk_rekey=%s\n' "$REKEY_S" "$PTK_REKEY_S"
     fi
   } > "$OUT/hostapd_$2.conf"
@@ -279,7 +350,7 @@ ap_up() { # $1 open | wpa2, $2 cell
 # 0 up; 1 exited before `sta_client up:`; 2 still not up after READY_TIMEOUT.
 sta_up() { # $1 cell, $2 seconds, $3.. extra env
   local cell="$1" secs="$2"; shift 2
-  env DEVOURER_VID=0x0e8d DEVOURER_PID=0x7612 \
+  env DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" \
       DEVOURER_USB_BUS="${DUT_SYSFS%%-*}" DEVOURER_USB_PORT="${DUT_SYSFS#*-}" \
       DEVOURER_MT7612U_FW_DIR="$FW_DIR" DEVOURER_LOG_LEVEL=info \
       DEVOURER_CHANNEL="$CH" DEVOURER_STA_SSID="$SSID" DEVOURER_STA_TAP="$TAP" \
@@ -357,14 +428,22 @@ led() { sed -n "s/.*$2=\\([0-9][0-9]*\\).*/\\1/p" "$OUT/sta_$1.log" | tail -1; }
 
 # Ping the AP over the air. 0 = 0% loss, 1 = loss, 2 = the station was not
 # alive for the whole measurement (no verdict on the link).
-ping_ap() { # $1 cell
+ping_ap() { # $1 tag
   proc_running "$STA_PID" || return 2
   ping -c 1 -W 3 -I "$TAP" "$APIP" >/dev/null 2>&1            # warm ARP
   ping -c 6 -W 1 -I "$TAP" "$APIP" > "$OUT/ping_$1.txt" 2>&1
   proc_running "$STA_PID" || return 2
   grep -q ' 0% packet loss' "$OUT/ping_$1.txt"
 }
-loss() { grep -oE '[0-9.]+% packet loss' "$OUT/ping_$1.txt" 2>/dev/null | head -1; }
+# The same over a real window: PING_S seconds, two pings a second.
+ping_window() { # $1 tag
+  proc_running "$STA_PID" || return 2
+  ping -c 1 -W 3 -I "$TAP" "$APIP" >/dev/null 2>&1            # warm ARP
+  ping -c $(( PING_S * 2 )) -i 0.5 -W 1 -I "$TAP" "$APIP" > "$OUT/ping_$1.txt" 2>&1
+  proc_running "$STA_PID" || return 2
+  grep -q ' 0% packet loss' "$OUT/ping_$1.txt"
+}
+loss() { grep -oE '[0-9]+ packets transmitted, [0-9]+ received.*packet loss' "$OUT/ping_$1.txt" 2>/dev/null | head -1; }
 
 # The station exited after `sta_client up:` but before its measurement:
 # status 0 ran out of SECS (INCONCLUSIVE); anything else is a FAIL.
@@ -382,16 +461,23 @@ fault_cause() {
   grep -m1 'FAULT\|threw' "$OUT/sta_$1.log" 2>/dev/null | sed 's/^ *//'
 }
 
-# The clear ran on exit (scored); its result, which is trivially true on
-# MT7612U, is information.
+# The clear ran on exit. Its result is scored on a Realtek die, where the
+# clear writes registers and verifies them; on MT7612U it is trivially true
+# (the arm wrote nothing) and is information. (An unverified clear is also a
+# station FAULT, exit 3, scored by sta_stop.)
 check_cleared() { # $1 cell
   local line
   line=$(grep -m1 'station identity clear:' "$OUT/sta_$1.log" | sed 's/^ *//')
-  if [ -n "$line" ]; then
+  if [ -z "$line" ]; then
+    bad "$1: ClearStationIdentity did not run on exit"
+  elif [ "$DUT_KIND" = realtek ]; then
+    case "$line" in
+      *"restored (verified)"*) ok "$1: ClearStationIdentity ran and verified on exit" ;;
+      *) bad "$1: ClearStationIdentity did not verify: $line" ;;
+    esac
+  else
     ok "$1: ClearStationIdentity ran on exit"
     info "$1: $line (trivially true on MT7612U: the arm wrote nothing)"
-  else
-    bad "$1: ClearStationIdentity did not run on exit"
   fi
 }
 
@@ -442,7 +528,8 @@ cell_open() {
 
 # --- wpa2 and its two variants --------------------------------------------------
 # $1 cell (wpa2 | noarm | retry0), $2.. extra station env. Returns after the
-# station has stopped; the caller scores the arm-specific lines.
+# station has stopped; the caller scores the arm-specific lines. WPA2_LINK is
+# "no four-way" or "four-way completed, ping ...", ending in OK on 0% loss.
 WPA2_LINK=""
 run_wpa2() {
   local cell="$1"; shift
@@ -462,7 +549,8 @@ run_wpa2() {
     return 0
   fi
   local p=0
-  ping_ap "$cell" || p=$?
+  if [ "$cell" = wpa2 ]; then ping_ap "$cell" || p=$?
+  else ping_window "$cell" || p=$?; fi
   if [ "$p" = 2 ]; then station_gone "$cell"; sta_pid_kill hostapd; return 1; fi
   WPA2_LINK="four-way completed, ping $(loss "$cell")"
   [ "$p" = 0 ] && WPA2_LINK="$WPA2_LINK OK"
@@ -530,7 +618,24 @@ cell_noarm() {
   else
     bad "noarm: an arm or clear ran with DEVOURER_STA_ARM=0 ($(grep -m1 'station identity' "$OUT/sta_noarm.log"))"
   fi
-  info "noarm: link unarmed: ${WPA2_LINK:-no result} (the MT7612U arm writes no register; a difference from wpa2 here is worth a look)"
+  if [ "$DUT_KIND" != realtek ]; then
+    info "noarm: link unarmed: ${WPA2_LINK:-no result} (the MT7612U arm writes no register; a difference from wpa2 here is worth a look)"
+    return
+  fi
+  # Realtek: unarmed, the MAC does not ACK own-addressed unicast, so hostapd
+  # never sees its authentication response acknowledged and never lets the
+  # station in. Meaningful only if the station tried.
+  local beacons auth noack
+  beacons=$(led noarm 'beacons observed'); auth=$(led noarm 'auth_tx')
+  noack=$(grep -c 'did not acknowledge' "$OUT/hostapd_noarm.log" 2>/dev/null)
+  if [ "${beacons:-0}" = 0 ] || [ "${auth:-0}" = 0 ]; then
+    inc "noarm: the unarmed station never tried (beacons observed=${beacons:-?}, auth_tx=${auth:-?}) - not a control"
+  elif [ "$WPA2_LINK" = "no four-way" ]; then
+    ok "noarm: unarmed, the AP never completed the four-way (auth_tx=$auth) - the arm is what makes the wpa2 link"
+  else
+    bad "noarm: the UNARMED station got in (${WPA2_LINK}) - the arm is not what makes the wpa2 link, or this die answers unarmed"
+  fi
+  info "noarm: hostapd 'did not acknowledge' lines: ${noack:-0}"
 }
 
 cell_retry0() {
@@ -548,6 +653,108 @@ cell_retry0() {
   fi
   check_cleared retry0
   info "retry0: single-shot uplink: ${WPA2_LINK:-no result}"
+}
+
+# --- reconnect and its no-re-join variant ---------------------------------------
+# $1 cell, $2 DEVOURER_STA_RECONNECT (1 | 0).
+run_reconnect() {
+  local cell="$1" rc="$2"
+  CELL="$cell"
+  # No rekeys: this cell measures the re-join, and a rekey in the window
+  # would be a second thing happening.
+  ap_up wpa2norekey "$cell" || { inc "$cell: hostapd did not come up - see $OUT/hostapd_$cell.log"; cell_end; return; }
+  local secs=$(( SECS + DOWN_S + REJOIN_S + PING_S + 30 ))
+  local up=0
+  sta_up "$cell" "$secs" DEVOURER_STA_PSK="$PSK" DEVOURER_STA_RECONNECT="$rc" || up=$?
+  [ "$up" = 0 ] || { station_not_up "$cell" "$up"; cell_end; return; }
+  local own; own=$(own_of "$cell")
+  tap_up || { inc "$cell: no TAP, or the route to $APIP does not leave through $TAP"; cell_end; return; }
+  if ! wait_for "$OUT/hostapd_$cell.log" "EAPOL-4WAY-HS-COMPLETED $own" 30; then
+    if proc_running "$STA_PID"; then
+      inc "$cell: the first association never completed - nothing to reconnect"; cell_end
+    else station_gone "$cell"; sta_pid_kill hostapd; fi
+    return
+  fi
+  ping_ap "$cell"; case $? in
+    0) ;;
+    1) inc "$cell: ping $(loss "$cell") before the loss - nothing to compare against"; cell_end; return ;;
+    *) station_gone "$cell"; sta_pid_kill hostapd; return ;;
+  esac
+
+  # THE AP GOES AWAY (hostapd deauthenticates its stations on the way out,
+  # and its beacons stop), then comes back on the same BSSID.
+  echo "  stopping hostapd for ${DOWN_S}s"
+  sta_pid_kill hostapd
+  sleep "$DOWN_S"
+  if ! grep -q '^  station link lost:' "$OUT/sta_$cell.log"; then
+    proc_running "$STA_PID" || { station_gone "$cell"; return; }
+  fi
+  ap_up wpa2norekey "${cell}2" || { inc "$cell: hostapd did not come back - see $OUT/hostapd_${cell}2.log"; cell_end; return; }
+  local back; back=$(date +%s)
+
+  if [ "$rc" = 1 ]; then
+    if wait_for "$OUT/hostapd_${cell}2.log" "EAPOL-4WAY-HS-COMPLETED $own" "$REJOIN_S"; then
+      ok "$cell: re-joined and re-keyed $(( $(date +%s) - back ))s after the AP came back (bound ${REJOIN_S}s)"
+    else
+      if proc_running "$STA_PID"; then
+        bad "$cell: no second four-way within ${REJOIN_S}s of the AP coming back"; cell_end
+      else station_gone "$cell"; sta_pid_kill hostapd; fi
+      return
+    fi
+    ping_window "${cell}_after"; case $? in
+      0) ok "$cell: ping after the re-join, $(loss "${cell}_after")" ;;
+      1) bad "$cell: ping after the re-join, $(loss "${cell}_after")" ;;
+      *) station_gone "$cell"; sta_pid_kill hostapd; return ;;
+    esac
+  else
+    if wait_for "$OUT/hostapd_${cell}2.log" "EAPOL-4WAY-HS-COMPLETED $own" "$REJOIN_S"; then
+      bad "$cell: re-joined with DEVOURER_STA_RECONNECT=0"
+    else
+      proc_running "$STA_PID" || { station_gone "$cell"; sta_pid_kill hostapd; return; }
+      ok "$cell: no re-join within ${REJOIN_S}s with DEVOURER_STA_RECONNECT=0"
+    fi
+  fi
+  cell_end
+
+  if grep -q '^  station link lost:' "$OUT/sta_$cell.log"; then
+    ok "$cell: the station reported the lost link ($(grep -m1 '^  station link lost:' "$OUT/sta_$cell.log" | sed 's/^ *station link lost: //'))"
+  else
+    bad "$cell: the station never reported losing the link"
+  fi
+  local assoc reconn
+  assoc=$(led "$cell" 'associations'); reconn=$(led "$cell" 'reconnects')
+  if [ "$rc" = 1 ]; then
+    if [ "${assoc:-0}" = 2 ] && [ "${reconn:-0}" = 1 ]; then
+      ok "$cell: ledger associations=2, reconnects=1"
+    else
+      bad "$cell: ledger associations=${assoc:-?}, reconnects=${reconn:-?} (expected 2 and 1)"
+    fi
+  else
+    if [ "${assoc:-0}" = 1 ] && grep -q '^fault=0 state=Failed' "$OUT/sta_$cell.log"; then
+      ok "$cell: ledger ends Failed after 1 association"
+    else
+      bad "$cell: ledger associations=${assoc:-?}, final state $(grep -m1 '^fault=' "$OUT/sta_$cell.log" | cut -d' ' -f2) (expected 1 and Failed)"
+    fi
+  fi
+  # ONE arm for the run: the arm is per BSSID, and a re-join to the same
+  # BSSID keeps it (nothing between the two associations touches it).
+  local arms; arms=$(grep -c '^  station identity armed for BSSID' "$OUT/sta_$cell.log")
+  if [ "${arms:-0}" = 1 ]; then
+    ok "$cell: armed once for the BSSID, across the re-join"
+  else
+    bad "$cell: ${arms:-0} arm lines (expected exactly 1)"
+  fi
+  check_cleared "$cell"
+}
+
+cell_reconnect() {
+  echo; echo "== reconnect: hostapd away for ${DOWN_S}s, re-join within ${REJOIN_S}s =="
+  run_reconnect reconnect 1
+}
+
+cell_noreconnect() {
+  echo; echo "== noreconnect: as reconnect, with DEVOURER_STA_RECONNECT=0 =="
+  run_reconnect noreconnect 0
 }
 
 for c in $CELLS; do "cell_$c"; done

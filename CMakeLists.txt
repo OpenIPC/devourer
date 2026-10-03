@@ -1050,7 +1050,7 @@ if(OpenSSL_FOUND)
 
     # tests/sta_client.cpp - the station client over IRadio + src/sta: scan,
     # join, the WPA2-PSK four-way, CCMP and a TAP data plane. Built under its
-    # real name for tests/mt7612u_sta_onair.sh; the target name ends in
+    # real name for tests/sta_client_onair.sh; the target name ends in
     # "Selftest" so the `selftests` aggregate collects it, and `--self-test`
     # runs its headless cells before libusb is touched (no adapter, no root).
     # Linux-only: the data plane is a TAP device (<linux/if_tun.h>).

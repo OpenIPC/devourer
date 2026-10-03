@@ -858,9 +858,11 @@ void RtlJaguar3Device::Stop() {
   /* A station arm ends with the session, not with whatever the de-init
    * below leaves: restored first (best effort; a failure is logged by the
    * clear), so the port stops answering for the station even where the
-   * power-down does not complete. */
+   * power-down does not complete. A new arm is refused until the next
+   * bring-up. */
   {
     std::lock_guard<std::mutex> lk(_reg_mu);
+    _station_ready = false;
     if (_station.armed())
       (void)_station.clear(_device, _logger, "Jaguar3");
   }

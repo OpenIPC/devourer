@@ -86,14 +86,19 @@ ok()  { pass=$((pass+1)); printf '  PASS  %s\n' "$*"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$*"; }
 
 RESP=""
+CLEANED=no
 # shellcheck disable=SC2317  # reached through the traps below
 cleanup() {
+  [ "$CLEANED" = yes ] && return 0
+  CLEANED=yes
   # arm() runs in a command substitution, so its PIDs are recorded in $OUT
   # (tests/mt7612u_sta_lib.sh) for this trap to find.
-  sta_pid_kill dut
+  sta_pid_kill dut; dut_gone=$?
   sta_pid_kill resp; peer_gone=$?
   RESP=""
-  sta_dut_handback
+  # Never re-enumerate the DUT while its process is still in de-init.
+  if [ "$dut_gone" = 0 ]; then sta_dut_handback
+  else echo "DUT still running - not re-enumerating DUT_SYSFS=$DUT_SYSFS"; fi
   # Only once the peer process has really exited: re-enumerating an adapter
   # still inside its de-init is what the hand-back must not do.
   if [ "$peer_gone" = 0 ]; then sta_peer_handback
@@ -103,8 +108,9 @@ cleanup() {
 }
 trap cleanup EXIT
 # AND IT MUST STOP: with INT/TERM on the EXIT trap the shell runs cleanup
-# and then CARRIES ON into the next arm. cleanup is idempotent, so the EXIT
-# pass after it is harmless.
+# and then CARRIES ON into the next arm. CLEANED makes the EXIT pass after it
+# a no-op: sta_pid_kill forgets a PID on the first pass, so a second pass
+# would hand back an adapter the first refused to.
 trap 'cleanup; exit 130' INT TERM
 
 sta_dut_take || exit 2
@@ -140,13 +146,27 @@ arm() {
     sta_pid_kill resp; RESP=""; return 1
   fi
 
+  # BOUNDED, so a wedged gate cannot hold the run (and both adapters) forever.
+  # The gate's own worst case: 16 gate arms, each frame waiting at most its
+  # status bound (b + 50 ms) and the settle at most b per frame + 2 s, with b
+  # = 60 ms + 8 ms per retry past 15 (gate_txs's frame_budget_ms), plus ~7 s of
+  # fixed cost per arm. Half again on top, and 2 min for bring-up. INT lets the
+  # gate tear down (exit 3); KILL 10 s later if it does not.
+  b=$(( RETRY_LIMIT > 15 ? 60 + (RETRY_LIMIT - 15) * 8 : 60 ))
+  dut_bound=$(( 16 * (FRAMES * (2 * b + 50) / 1000 + 8) * 3 / 2 + 120 ))
   DEVOURER_TX_RETRY_LIMIT="$RETRY_LIMIT" \
+      timeout -s INT -k 10 "$dut_bound" \
       "$BUILD/mt7612uprobe" txs "$CH" "$FRAMES" "$TARGET" \
       >"$OUT/dut_$tag.txt" 2>&1 &
   dut=$!
   sta_pid_record dut "$dut"
   wait "$dut"
+  dut_rc=$?
   rm -f "$OUT/.pid_dut"
+  if [ "$dut_rc" = 124 ] || [ "$dut_rc" = 137 ]; then
+    printf '%s ABORTED the DUT gate overran its %ss bound' "$tag" "$dut_bound"
+    sta_pid_kill resp; RESP=""; return 1
+  fi
   # The limit must have LANDED, not merely been asked for: the gate prints
   # this line only after mt7612u_set_retry_limit() read it back.
   if ! grep -q "^retry limit set to $RETRY_LIMIT " "$OUT/dut_$tag.txt"; then

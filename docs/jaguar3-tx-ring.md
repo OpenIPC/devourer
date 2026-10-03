@@ -343,7 +343,16 @@ Available with this PR:
   The verdict is the send failures, not `txdma_status`: on the faulting runs
   the periodic `tx.stats` still read `txdma_status` 0 up to its last sample
   (it is taken once per 500 frames, so a latch just before the stop would
-  not show). One adapter, one channel. On the 8822B (8812BU) this txdemo
+  not show). Nor is a nonzero `txdma_status` by itself the wedge: an 8812CU
+  on USB2 at `DEVOURER_TX_GAP_US=0` with 1400-byte QoS data read `0x2000`
+  (bit 13, `BIT_PAYLOAD_OVF_8822C`) from the first sample, on the fixed and
+  the control build alike, while TX completed 8051/8051; at the default 2 ms
+  gap it read 0, and one later USB2 run at gap 0 did not reproduce the
+  latch. So bit 13 can latch at max duty on USB2; bit 18
+  (`BIT_TXPKTBUF_REQ_ERR`) is the bit measured with the wedge
+  (`IRtlRadio::GetTxDmaStatus`). One adapter, one channel; a second bench
+  reproduced the defect and the fix clearing it on an 8812CU, and gave the
+  same 8812BU LLT result as below. On the 8822B (8812BU) this txdemo
   form does NOT reproduce - unfixed and fixed alike ran clean (item 3); the
   Jaguar2 verification is the LLT check below. The 8822E form is unmeasured
   (the `ap_wpa2` stress, station-mode PR, is its record). Those runs used a radiotap-prefixed beacon; the demo now passes
@@ -354,16 +363,6 @@ Available with this PR:
   0 failed. Re-run after review round 3 (8812CU): the reproducer 8051
   submitted / 0 failed with the beacon armed and then stopped, the
   aggregated path 0 failed, and A-MPDU over QoS data 0 failed.
-
-  **The maintainer's bench (josephnef), 2026-09-27:** the reproducer
-  reproduces and the fix clears it on an 8812CU, and the 8812BU LLT check
-  gives the same result as above. And a counterpart for `txdma_status`: an
-  8812CU on USB2 at `DEVOURER_TX_GAP_US=0` with 1400-byte QoS data read
-  `0x2000` (bit 13, `BIT_PAYLOAD_OVF_8822C`) from the first sample, on the
-  fixed and the control build alike, while TX completed 8051/8051; at the
-  default 2 ms gap it read 0. So a nonzero `txdma_status` is not by itself
-  the wedge - bit 18 (`BIT_TXPKTBUF_REQ_ERR`) is the bit measured with it
-  (`IRtlRadio::GetTxDmaStatus`).
 
   **The canonical-frame form does not reproduce**: without
   `DEVOURER_TX_QOS_DATA`/`DEVOURER_TX_PAYLOAD_BYTES`/`DEVOURER_TX_WITH_RX`,

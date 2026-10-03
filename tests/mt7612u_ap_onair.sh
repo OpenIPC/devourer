@@ -58,14 +58,39 @@ bad()  { fail=$((fail+1)); printf '  FAIL  %s\n' "$*"; }
 # wpa_supplicant` would drop every wireless client on the host, and a name kill
 # would reach a concurrent run of this same test.
 KIDS=""
+# sta_pid_alive (zombie-aware) is all this takes from the station lib.
+# shellcheck source=tests/mt7612u_sta_lib.sh
+. "$ROOT/tests/mt7612u_sta_lib.sh"
+# TERM every child, then WAIT for them to exit - up to 10 s: a demo's chip
+# de-init runs after the signal, and re-enumerating the adapter under it is
+# the hand-back this must not do. Anything still alive then is KILLed and
+# reap returns 1, so cleanup leaves the adapter alone; 0 when all exited.
 reap() {
-  local pid
+  local pid live t=0
   for pid in $KIDS; do kill "$pid" 2>/dev/null; done
+  while :; do
+    live=""
+    for pid in $KIDS; do sta_pid_alive "$pid" && live="$live $pid"; done
+    [ -z "$live" ] && break
+    if [ "$t" -ge 100 ]; then
+      for pid in $live; do kill -KILL "$pid" 2>/dev/null; done
+      echo "still running 10 s after TERM (KILLed):$live"
+      KIDS=""
+      return 1
+    fi
+    sleep 0.1; t=$((t + 1))
+  done
+  for pid in $KIDS; do wait "$pid" 2>/dev/null; done   # reaps our own children
   KIDS=""
+  return 0
 }
 
+# Returns 1 when it could not reset the AP (a process outlived TERM): the
+# adapter may still be airing an autonomous beacon, so no later cell may be
+# scored against it.
 cleanup() {
-  reap
+  local reaped=0
+  reap || reaped=1
   [ -n "${STA_IF:-}" ] && { ip addr flush dev "$STA_IF" 2>/dev/null
                             iw dev "$STA_IF" disconnect 2>/dev/null; }
   # The MAC beacons autonomously, so a cell that died before its teardown can
@@ -87,7 +112,9 @@ cleanup() {
   # Either way, confirmed against the VID:PID first: this runs as root and
   # writes to a path the caller supplied, and a stale AP_SYSFS would otherwise
   # yank whatever else is plugged there.
-  if [ "$(cat "/sys/bus/usb/devices/$AP_SYSFS/idVendor" 2>/dev/null)" = "0e8d" ] &&
+  if [ "$reaped" != 0 ]; then
+    echo "a process outlived TERM - not re-enumerating AP_SYSFS=$AP_SYSFS"
+  elif [ "$(cat "/sys/bus/usb/devices/$AP_SYSFS/idVendor" 2>/dev/null)" = "0e8d" ] &&
      [ "$(cat "/sys/bus/usb/devices/$AP_SYSFS/idProduct" 2>/dev/null)" = "7612" ]; then
     if [ -n "${AP_VBUS:-}" ]; then
       uhubctl -l "${AP_VBUS%%:*}" -p "${AP_VBUS##*:}" -a off >/dev/null 2>&1
@@ -101,8 +128,15 @@ cleanup() {
       sleep 3
     fi
   fi
+  return "$reaped"
 }
-trap cleanup EXIT INT TERM
+# An interrupt must STOP the run: on the EXIT trap alone, INT/TERM would run
+# cleanup and then carry on into the next cell against a re-enumerated
+# adapter. CLEANED only spares the EXIT pass a second re-enumeration after
+# that; the cleanups between cells (CELLS=all) still run every time.
+CLEANED=no
+trap '[ "$CLEANED" = yes ] || cleanup' EXIT
+trap 'cleanup; CLEANED=yes; exit 130' INT TERM
 
 # --- the station -----------------------------------------------------------
 STA_IF=$(ls "/sys/bus/usb/devices/$STA_SYSFS:1.0/net/" 2>/dev/null | head -1)
@@ -126,8 +160,8 @@ say "AP $AP_SYSFS   station $STA_SYSFS ($STA_IF)   ch$CH ($FREQ MHz)"
 # live beacon as absent. Observed: a "beacon not scannable" FAIL in a run where
 # the station then associated, pinged, and got an auth at retry=0.
 seen() {   # $1 = SSID, $2 = BSSID
-  local i n best=0
-  for i in 1 2 3; do
+  local n best=0
+  for _ in 1 2 3; do
     # Matched on BSSID *and* SSID: a neighbour running "devourerAP" would
     # otherwise pass an arm check, fail a stop check, or break the exact-count
     # comparison. awk keeps the pairing - grep -c on two patterns would count
@@ -189,7 +223,7 @@ cell_open() {
   if ping -c 6 -W 1 -I "$STA_IF" "$APIP" 2>&1 | tee "$OUT/open.ping" | grep -q " 0% packet loss"; then
     ok "open: data plane ($(grep -oE 'rtt [^ ]+ = [0-9./]+' "$OUT/open.ping" | head -1))"
   else
-    bad "open: ping lost packets ($(grep -oE '[0-9]+% packet loss' "$OUT/open.ping" | head -1))"
+    bad "open: ping lost packets ($(grep -oE '[0-9.]+% packet loss' "$OUT/open.ping" | head -1))"
   fi
   # retry=0 on auth IS the hardware ACK: an un-ACKed frame comes back with FC
   # Retry set. This is the only evidence that the APC slot and port identity
@@ -222,8 +256,7 @@ cell_wpa2() {
   ip addr flush dev "$STA_IF" 2>/dev/null
   wpa_supplicant -i "$STA_IF" -c "$wpa" -P "$OUT/wpa.pid" -B >/dev/null 2>&1
   KIDS="$KIDS $(cat "$OUT/wpa.pid" 2>/dev/null)"
-  local i
-  for i in $(seq 1 20); do
+  for _ in $(seq 1 20); do
     grep -q "4-WAY HANDSHAKE COMPLETE" "$OUT/wpa2.log" && break
     sleep 1
   done
@@ -274,8 +307,7 @@ cell_stop() {
     printf '%s' "${n:-0}"
   }
   wait_arm() { # $1 = the count to exceed, $2 = seconds to wait
-    local i
-    for i in $(seq 1 "$2"); do [ "$(armed)" -gt "$1" ] && return 0; sleep 1; done
+    for _ in $(seq 1 "$2"); do [ "$(armed)" -gt "$1" ] && return 0; sleep 1; done
     return 1
   }
 
@@ -284,8 +316,11 @@ cell_stop() {
   [ "$(seen mtStopCheck 02:4d:54:53:54:50)" = 1 ] && ok "stop: armed - beacon on air" || bad "stop: armed but not scannable"
 
   local n_arms; n_arms=$(armed)
-  local i
-  for i in $(seq 1 60); do grep -q "PHASE 2" "$OUT/stop.log" && break; sleep 1; done
+  for _ in $(seq 1 60); do grep -q "PHASE 2" "$OUT/stop.log" && break; sleep 1; done
+  # No PHASE 2 means StopBeacon was never called: a beacon gone now was
+  # stopped by whatever ended the process, which says nothing about StopBeacon.
+  grep -q "PHASE 2" "$OUT/stop.log" ||
+    { bad "stop: never reached PHASE 2 - StopBeacon not exercised"; kill $ap 2>/dev/null; return; }
   sleep 6
   [ "$(seen mtStopCheck 02:4d:54:53:54:50)" = 0 ] && ok "stop: stopped - beacon gone" || bad "stop: STILL AIRING after StopBeacon"
 
@@ -305,10 +340,23 @@ case "$CELLS" in
   open) cell_open ;;
   wpa2) cell_wpa2 ;;
   stop) cell_stop ;;
-  all)  cell_open; cleanup; cell_wpa2; cleanup; cell_stop ;;
+  all)  # A between-cell cleanup that could not reset the AP ends the run:
+        # the cells after it are recorded as not run, never scored.
+        cell_open
+        if ! cleanup; then not_run="wpa2 stop"
+        else
+          cell_wpa2
+          if ! cleanup; then not_run="stop"; else cell_stop; fi
+        fi ;;
   *)    echo "usage: $0 [open|wpa2|stop|all]"; exit 2 ;;
 esac
 
 say ""
+if [ -n "${not_run:-}" ]; then
+  say "  NOT RUN  $not_run - the AP could not be reset between cells"
+fi
 say "=== $pass passed, $fail failed   (logs: $OUT) ==="
-exit $(( fail > 0 ))
+# 1 a check failed; else 2 when cells were left unrun (INCONCLUSIVE); else 0.
+[ "$fail" -gt 0 ] && exit 1
+[ -n "${not_run:-}" ] && exit 2
+exit 0

@@ -44,9 +44,9 @@
 # station (the AP then deauths the "class 3" sender - expected, harmless).
 #
 # An arm is scored only when its transmitter kept airing through the window
-# (no silence over MAX_GAP_MS between its reports, or after the last one -
-# see summarize) and carried MIN_REPORTS reports and MIN_SUBMITTED
-# submissions. Reception in arm A is
+# (no silence over MAX_GAP_MS before its first report, between its
+# reports, or after the last one - see summarize) and carried MIN_REPORTS reports and its submission floor
+# (MIN_SUBMITTED, scaled to the span it aired). Reception in arm A is
 # judged against the peer's REPORTED frames, which aired; submitted frames
 # left unreported at window close are printed separately.
 #
@@ -88,12 +88,18 @@ GAP_US="${GAP_US:-5000}"
 HALF="${HALF:-both}"
 MIN_REPORTS="${MIN_REPORTS:-50}"
 MIN_RX_PCT="${MIN_RX_PCT:-80}"
-# Transmitter liveness: the longest silence allowed between two of an arm's
-# CCX reports, and between its last report and its final tx.stats.
+# Transmitter liveness: the longest silence allowed from an arm's first
+# submit to its first CCX report, between two reports, and from its last
+# report to its final tx.stats.
 MAX_GAP_MS="${MAX_GAP_MS:-2000}"
 # Per-arm floor on frames the transmitter submitted. Default: a quarter of
-# the nominal SECS / GAP_US rate (500 at the defaults; the slowest arm on
-# record, an unacknowledged one at 12 retries, submitted ~900).
+# the nominal GAP_US rate over the span the arm actually aired - its first
+# submit to its final tx.stats (see summarize) - not over SECS, which also
+# holds the transmitter's bring-up: an 8812BU peer has spent 6-9 s of a 10 s
+# window in InitWrite and been scored a stall at 283-327 healthy frames.
+# The slowest arm on record, an unacknowledged one at 12 retries, submitted
+# ~900 in 10 s against the 500 a full window asks. A set MIN_SUBMITTED is a
+# fixed floor instead.
 MIN_SUBMITTED="${MIN_SUBMITTED:-}"
 EXPECT_UNARMED_SILENT="${EXPECT_UNARMED_SILENT:-1}"
 READY_TIMEOUT="${READY_TIMEOUT:-30}"
@@ -106,14 +112,6 @@ case "$HALF" in both|down|up) ;; *) echo "HALF must be both, down or up"; exit 2
 for v in SECS RETRY_LIMIT GAP_US MIN_REPORTS MIN_RX_PCT MAX_GAP_MS READY_TIMEOUT CLEAR_AFTER_MS CH; do
   case "${!v}" in ''|*[!0-9]*) echo "$v must be a non-negative integer"; exit 2 ;; esac
 done
-# GAP_US=0 (max duty) has no nominal rate, so no default floor.
-if [ -z "$MIN_SUBMITTED" ]; then
-  if [ "$GAP_US" -gt 0 ]; then
-    MIN_SUBMITTED=$(( SECS * 1000000 / GAP_US / 4 ))
-  else
-    MIN_SUBMITTED=0
-  fi
-fi
 case "$MIN_SUBMITTED" in *[!0-9]*) echo "MIN_SUBMITTED must be a non-negative integer"; exit 2 ;; esac
 # RETRY_LIMIT 0 would make every control indistinguishable from a one-shot
 # send: the retry count is the instrument.
@@ -134,6 +132,29 @@ done
 
 # shellcheck source=tests/mt7612u_sta_lib.sh
 . "$ROOT/tests/mt7612u_sta_lib.sh"
+
+# The AP guard (tests/mt7612u_sta_identity.sh's): cleanup re-enumerates
+# AP_SYSFS as root, so it must be a USB device that is not a hub, carrying a
+# wireless netdev with no default route on a phy that supports AP mode. Sets
+# AP_IF and PHY. Run in the preflight, before the DOWN half spends its
+# minute, and again at the start of UP - the adapter can move in between.
+ap_refuse() { echo "refusing AP_SYSFS=$AP_SYSFS: $* - cleanup would re-enumerate it."; exit 2; }
+ap_guard() {
+  local fam
+  [ -n "$(cat "/sys/bus/usb/devices/$AP_SYSFS/idVendor" 2>/dev/null)" ] ||
+    ap_refuse "not a USB device - if its driver just loaded it may have moved; re-read lsusb -t"
+  [ "$(cat "/sys/bus/usb/devices/$AP_SYSFS/bDeviceClass" 2>/dev/null)" != "09" ] || ap_refuse "a hub"
+  AP_IF=$(sta_first_netdev "$AP_SYSFS")
+  [ -n "$AP_IF" ] || ap_refuse "no network interface on it"
+  [ -e "/sys/class/net/$AP_IF/phy80211" ] || ap_refuse "$AP_IF is not wireless"
+  for fam in -4 -6; do
+    ip "$fam" route show default 2>/dev/null | grep -qw "dev $AP_IF" &&
+      ap_refuse "$AP_IF carries a default route"
+  done
+  PHY=$(basename "$(readlink -f "/sys/class/net/$AP_IF/phy80211")")
+  iw phy "$PHY" info 2>/dev/null | grep -q '\* AP$' || ap_refuse "$AP_IF ($PHY) does not support AP mode"
+}
+[ "$HALF" = down ] || ap_guard
 sta_out_prepare || exit 2
 sta_lock_take || exit 2
 sta_pid_init dut peer hostapd
@@ -255,23 +276,36 @@ wait_for() { # $1 pid, $2 file, $3 regex, $4 timeout s
 
 # One summary line from a transmitter's JSONL (and, optionally, the DUT's
 # rx.seq stream for frames from TA): reports, submitted, unreported,
-# ok_pct, retries_mean, max_gap_ms, tail_ms, live, rx_distinct.
+# ok_pct, retries_mean, lead_ms, max_gap_ms, tail_ms, live, aired_ms,
+# min_submitted, rx_distinct.
+#
+# One clock: tx.report, the first tx.frame (txdemo's first submit) and the
+# final tx.stats all carry t in the host-monotonic tx.report timebase.
 #
 # LIVENESS. A report is a frame that aired, so the reports' own timestamps
-# (t, the host-monotonic tx.report timebase) show whether the transmitter
-# kept airing through the window: max_gap_ms is the longest silence between
-# two reports, tail_ms the silence from the last report to the final
-# tx.stats, which carries t in the same timebase. live=0 when either exceeds
-# MAX_GAP_MS or the final tx.stats has no t - an arm that aired a burst and
-# stalled, which MIN_REPORTS alone would accept.
+# show whether the transmitter kept airing through the window: lead_ms is
+# the silence from the first submit to the first report, max_gap_ms the
+# longest silence between two reports, tail_ms the silence from the last
+# report to the final tx.stats. live=0 when any of them exceeds MAX_GAP_MS,
+# or a timestamp it needs is missing - an arm that aired a burst and
+# stalled, or that started, stalled and burst at the end, which MIN_REPORTS
+# alone would accept.
+#
+# FLOOR. aired_ms runs from the first submit to the final tx.stats - not
+# over SECS, which also holds the transmitter's bring-up, and not from the
+# first report, which a late burst would move to the end. min_submitted
+# is a quarter of the GAP_US rate over it (0 at GAP_US=0, which has no
+# nominal rate), or MIN_SUBMITTED when set.
 summarize() { # $1 tx jsonl, $2 tag, $3 dut jsonl or ""
-  python3 - "$1" "$2" "${3:-}" "$MAX_GAP_MS" <<'PYEOF'
+  python3 - "$1" "$2" "${3:-}" "$MAX_GAP_MS" "$GAP_US" "$MIN_SUBMITTED" <<'PYEOF'
 import json, sys
 tx, tag, rx, max_gap = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+gap_us, fixed_floor = int(sys.argv[5]), sys.argv[6]
 n = okc = retries = 0
 submitted = 0
 ts = []
 final_t = None
+first_submit_t = None
 for line in open(tx, errors='replace'):
     if not line.startswith('{'):
         continue
@@ -285,19 +319,31 @@ for line in open(tx, errors='replace'):
         retries += int(e.get('retries', 0) or 0)
         if 't' in e:
             ts.append(int(e['t']))
+    elif e.get('ev') == 'tx.frame':
+        if first_submit_t is None and 't' in e:
+            first_submit_t = int(e['t'])
     elif e.get('ev') == 'tx.stats':
         submitted = int(e.get('submitted', submitted) or submitted)
         if e.get('final') and 't' in e:
             final_t = int(e['t'])
 gap = max((b - a for a, b in zip(ts, ts[1:])), default=0)
 tail = (final_t - ts[-1]) if (final_t is not None and ts) else None
-live = int(bool(ts) and tail is not None and gap <= max_gap
-           and tail <= max_gap)
+lead = (ts[0] - first_submit_t) if (first_submit_t is not None and ts) else None
+live = int(bool(ts) and tail is not None and lead is not None
+           and lead <= max_gap and gap <= max_gap and tail <= max_gap)
 out = (f"{tag} reports={n} submitted={submitted} "
        f"unreported={max(submitted - n, 0)}")
 if n:
     out += f" ok_pct={100.0*okc/n:.1f} retries_mean={retries/n:.2f}"
-out += f" max_gap_ms={gap} tail_ms={'none' if tail is None else tail} live={live}"
+out += (f" lead_ms={'none' if lead is None else lead} max_gap_ms={gap}"
+        f" tail_ms={'none' if tail is None else tail} live={live}")
+aired = (final_t - first_submit_t) \
+    if (final_t is not None and first_submit_t is not None) else 0
+if fixed_floor:
+    floor = int(fixed_floor)
+else:
+    floor = aired * 1000 // gap_us // 4 if gap_us > 0 else 0
+out += f" aired_ms={aired} min_submitted={floor}"
 if rx:
     seen = set()
     try:
@@ -460,12 +506,12 @@ ok()  { pass=$((pass+1)); printf '  PASS  %s\n' "$*"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$*"; }
 inc() { inconclusive=$((inconclusive+1)); printf '  INCONCLUSIVE  %s\n' "$*"; }
 field() { sed -n "s/.* $2=\\([0-9.]*\\).*/\\1/p" "$OUT/res_$1"; }
-# A usable arm: not aborted, carrying at least MIN_REPORTS reports and
-# MIN_SUBMITTED submissions, and with a transmitter that kept airing through
+# A usable arm: not aborted, carrying at least MIN_REPORTS reports and its
+# min_submitted submissions, and with a transmitter that kept airing through
 # the window (live=1, see summarize). Anything else leaves its verdicts
 # INCONCLUSIVE.
 usable() {
-  local r n sub
+  local r n sub floor
   r=$(cat "$OUT/res_$1" 2>/dev/null)
   case "$r" in
     *ABORTED*|*FAILCLEAR*|'') return 1 ;;
@@ -473,7 +519,9 @@ usable() {
   case "$r" in *" live=1"*) ;; *) return 1 ;; esac
   n=$(field "$1" reports)
   sub=$(field "$1" submitted)
-  [ "${n:-0}" -ge "$MIN_REPORTS" ] && [ "${sub:-0}" -ge "$MIN_SUBMITTED" ]
+  floor=$(field "$1" min_submitted)
+  [ -n "$floor" ] || return 1
+  [ "${n:-0}" -ge "$MIN_REPORTS" ] && [ "${sub:-0}" -ge "$floor" ]
 }
 show() { echo "  $(cat "$OUT/res_$1" 2>/dev/null)"; }
 
@@ -541,7 +589,7 @@ if [ "$HALF" != up ]; then
       bad "DOWN receive: the DUT delivered ${rxd:-0} distinct frames of the peer's ${rep:-0} reported (< ${MIN_RX_PCT}%; ${unr:-0} submitted unreported)"
     fi
   else
-    inc "DOWN: arm A, B or C aborted, carried under $MIN_REPORTS reports or $MIN_SUBMITTED submissions, or its transmitter stalled (live=0) - not a measurement"
+    inc "DOWN: arm A, B or C aborted, carried under $MIN_REPORTS reports or its min_submitted floor, or its transmitter stalled (live=0) - not a measurement"
   fi
   if usable A && usable D; then
     a=$(field A ok_pct); d=$(field D ok_pct)
@@ -577,20 +625,8 @@ fi
 
 # =============================== UP =========================================
 if [ "$HALF" != down ]; then
-  # --- the AP: the guard tests/mt7612u_sta_identity.sh uses ---
-  ap_refuse() { echo "refusing AP_SYSFS=$AP_SYSFS: $* - cleanup would re-enumerate it."; exit 2; }
-  [ -n "$(cat "/sys/bus/usb/devices/$AP_SYSFS/idVendor" 2>/dev/null)" ] ||
-    ap_refuse "not a USB device - if its driver just loaded it may have moved; re-read lsusb -t"
-  [ "$(cat "/sys/bus/usb/devices/$AP_SYSFS/bDeviceClass" 2>/dev/null)" != "09" ] || ap_refuse "a hub"
-  AP_IF=$(sta_first_netdev "$AP_SYSFS")
-  [ -n "$AP_IF" ] || ap_refuse "no network interface on it"
-  [ -e "/sys/class/net/$AP_IF/phy80211" ] || ap_refuse "$AP_IF is not wireless"
-  for fam in -4 -6; do
-    ip "$fam" route show default 2>/dev/null | grep -qw "dev $AP_IF" &&
-      ap_refuse "$AP_IF carries a default route"
-  done
-  PHY=$(basename "$(readlink -f "/sys/class/net/$AP_IF/phy80211")")
-  iw phy "$PHY" info 2>/dev/null | grep -q '\* AP$' || ap_refuse "$AP_IF ($PHY) does not support AP mode"
+  # --- the AP: the full guard again (it can have moved during DOWN) ---
+  ap_guard
   AP_ID=$(sta_usb_id "$AP_SYSFS")
 
   nmcli device set "$AP_IF" managed no >/dev/null 2>&1
@@ -639,7 +675,7 @@ EOF
       bad "UP ack: F ${f}% is not clearly above the control G ${g}%"
     fi
   else
-    inc "UP: arm F or G aborted, carried under $MIN_REPORTS reports or $MIN_SUBMITTED submissions, or its transmitter stalled (live=0) - not a measurement"
+    inc "UP: arm F or G aborted, carried under $MIN_REPORTS reports or its min_submitted floor, or its transmitter stalled (live=0) - not a measurement"
   fi
   # H is information, not a verdict: whether TX ACK matching needs the arm
   # at all on this die. Never counted into pass/fail/inconclusive.

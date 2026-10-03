@@ -2,6 +2,7 @@
 #include <cassert>
 #include <chrono>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -783,6 +784,24 @@ int main(int argc, char **argv) {
     });
     logger->info("DEVOURER_POLL_INTR_IN — EP 0x85 interrupt-IN poller running");
   }
+  /* Stops and joins the optional IN drainers on every exit from here: a
+   * still-joinable std::thread terminates the process when destroyed, and
+   * both threads poll `handle`, so the normal path joins them explicitly
+   * before session.close(). (The DEVOURER_TX_WITH_RX fork child never runs
+   * this: it leaves through std::_Exit - see there.) */
+  struct DrainerJoin {
+    std::atomic<bool> &bulk_running, &intr_running;
+    std::thread &bulk, &intr;
+    void join() {
+      bulk_running = false;
+      intr_running = false;
+      if (bulk.joinable())
+        bulk.join();
+      if (intr.joinable())
+        intr.join();
+    }
+    ~DrainerJoin() { join(); }
+  } drainers{bulk_in_running, intr_running, bulk_in_thread, intr_in_thread};
 
   WiFiDriver wifi_driver{logger};
   std::unique_ptr<IRadio> owned_device;
@@ -1007,6 +1026,28 @@ int main(int argc, char **argv) {
   if (tx_with_rx && !rx_thread_mode) {
     pid_t fpid = fork();
     if (fpid == 0) {
+#if !defined(_MSC_VER) /* fork() is a real fork here, not the (0) stub */
+      /* The post-fork rule: the child holds copies of the parent's objects -
+       * the IN-drainer std::threads among them, joinable copies of threads
+       * that do not exist here - so it must run no destructor. It flushes
+       * stdio and leaves through std::_Exit, never through a return; an
+       * exception from Init must not unwind it either. */
+      try {
+        rtlDevice->Init(packetProcessor,
+                        SelectedChannel{
+                            .Channel = static_cast<uint8_t>(channel),
+                            .ChannelOffset = 0,
+                            .ChannelWidth = CHANNEL_WIDTH_20,
+                        });
+      } catch (const std::exception &e) {
+        logger->error("RX child: {}", e.what());
+      } catch (...) {
+        logger->error("RX child: unknown exception");
+      }
+      std::fflush(nullptr);
+      std::_Exit(1);
+#else
+      /* The stub: this IS the only process, so it tears down normally. */
       rtlDevice->Init(packetProcessor,
                       SelectedChannel{
                           .Channel = static_cast<uint8_t>(channel),
@@ -1014,6 +1055,7 @@ int main(int argc, char **argv) {
                           .ChannelWidth = CHANNEL_WIDTH_20,
                       });
       return 1;
+#endif
     }
   }
 
@@ -1031,16 +1073,9 @@ int main(int argc, char **argv) {
   } catch (const std::exception &e) {
     /* InitWrite returns void, so a refused bring-up (e.g. a channel/width/
      * offset combination the chip rejects) surfaces as an exception. The
-     * device already tore itself down; exit cleanly instead of aborting —
-     * which means the optional IN-drainer threads above must be joined
-     * first, or their still-joinable std::thread destructors terminate. */
+     * device already tore itself down; exit cleanly instead of aborting
+     * (the drainers guard joins the IN-drainer threads). */
     logger->error("TX bring-up failed: {}", e.what());
-    bulk_in_running = false;
-    intr_running = false;
-    if (bulk_in_thread.joinable())
-      bulk_in_thread.join();
-    if (intr_in_thread.joinable())
-      intr_in_thread.join();
     return 1;
   }
 
@@ -1072,6 +1107,30 @@ int main(int argc, char **argv) {
     });
     logger->info("DEVOURER_TX_WITH_RX=thread: RX loop started alongside TX");
   }
+  /* Stops and joins the RX and USB event threads on every exit from here,
+   * the early returns below included - a joinable std::thread destructor
+   * terminates the process. The normal teardown's order: StopRxLoop and the
+   * RX join, then the event pump (which polls g_devourer_should_stop). It is
+   * declared after the session, so on an early return it runs while the
+   * device and libusb are still alive. Both threads start after the
+   * DEVOURER_TX_WITH_RX fork, so a fork child never reaches here. */
+  struct IoThreadsJoin {
+    IRadio *dev;
+    std::thread &rx, &usb;
+    bool done = false;
+    void join() {
+      if (done)
+        return;
+      done = true;
+      dev->StopRxLoop();
+      if (rx.joinable())
+        rx.join();
+      g_devourer_should_stop = true;
+      if (usb.joinable())
+        usb.join();
+    }
+    ~IoThreadsJoin() { join(); }
+  } io_threads{rtlDevice, rx_thread, usb_thread};
 
   /* DEVOURER_STA_IDENTITY: arm before the first frame, once the RX loop is
    * shown running - its first received frame (3 s cap: a silent channel still
@@ -1946,9 +2005,10 @@ int main(int argc, char **argv) {
    * explicitly, before Stop() powers the chip down; the destructor covers an
    * exception or an early return. It is declared after the DeviceSession, so
    * it runs before the device is destroyed. `attempted` is cleared only by a
-   * StopBeacon that returned (true, or a clean false = nothing active, per
-   * its contract); after three throws it stays set, so a later stop() - the
-   * destructor on an exception path - tries again. detach() drops the device
+   * StopBeacon that returned true, or a clean false when nothing was armed;
+   * after three failed attempts (throws, or a refused disable of an armed
+   * beacon) it stays set, so a later stop() - the destructor on an exception
+   * path - tries again. detach() drops the device
    * before the normal path destroys it. */
   struct TxBeaconGuard {
     IRadio *dev;
@@ -1960,17 +2020,18 @@ int main(int argc, char **argv) {
         return;
       for (int i = 0; i < 3; i++) {
         try {
-          /* true = stopped; a clean false = nothing active (StopBeacon
-           * contract), expected after a refused StartBeacon - either way
-           * there is nothing to retry. */
-          dev->StopBeacon();
+          /* After a successful arm, false means the disable was refused
+           * (Jaguar2/3), so retry. Otherwise a clean false is nothing
+           * active - expected after a refused StartBeacon. */
+          if (!dev->StopBeacon() && armed)
+            continue;
           attempted = false;
           return;
         } catch (const std::exception &e) {
           log->warn("DEVOURER_TX_BEACON_TU: StopBeacon threw: {}", e.what());
         }
       }
-      /* Three throws: `attempted` stays set so a later stop() tries again. */
+      /* Three failures: `attempted` stays set so a later stop() tries again. */
       log->error("DEVOURER_TX_BEACON_TU: StopBeacon failed 3 times - the "
                  "beacon may keep airing until the adapter is re-enumerated "
                  "or powered down (Jaguar2 has no teardown power-down)");
@@ -2481,7 +2542,8 @@ int main(int argc, char **argv) {
         ++frames_in_dwell >= hop_dwell)
       frames_in_dwell = 0;
     if (tx_count <= 10 || tx_count % 500 == 0) {
-      devourer::Ev(*g_ev, "tx.frame").f("n", tx_count).f("rc", rc);
+      /* t: the tx.report timebase, so a harness can date the first submit. */
+      devourer::Ev(*g_ev, "tx.frame").f("n", tx_count).f("rc", rc).t();
       /* TX submission health — the driver-drop / congestion feed (xtx). A
        * climbing failed with was_timeout=1 is a full TX FIFO (recoverable
        * back-pressure); a hard rc is a broken path. */
@@ -2657,11 +2719,7 @@ int main(int argc, char **argv) {
   sta_stop = true;
   if (sta_clear_thread.joinable())
     sta_clear_thread.join();
-  rtlDevice->StopRxLoop();
-  if (rx_thread.joinable())
-    rx_thread.join();
-  if (usb_thread.joinable())
-    usb_thread.join();
+  io_threads.join();
 
   /* Clean chip de-init before releasing the interface: card-disable PWR_SEQ on
    * the HalMAC families, TX quiesce on Jaguar1 — so the adapter re-enumerates
@@ -2673,6 +2731,7 @@ int main(int argc, char **argv) {
    * does exactly the same on every other exit path. */
   /* The beacon guard must not call into the device once it is gone. */
   tx_beacon.detach();
+  drainers.join();   /* they poll the handle session.close() releases */
   session.close();
   /* A truncated caller stream is a producer fault, and a harness that scored
    * the run as if it had ended cleanly would be scoring a short measurement. */

@@ -2487,9 +2487,10 @@ void RtlJaguarDevice::Stop() {
   /* A station arm ends with the session: restored before the optional
    * power-down (best effort; a failure is logged by the clear), so a chip
    * left powered (tuning.teardown_power_down=0) does not keep answering for
-   * the station. */
+   * the station. A new arm is refused until the next bring-up. */
   {
     std::lock_guard<std::recursive_mutex> lock(_port0_mu);
+    _station_ready = false;
     if (_station.armed())
       (void)_station.clear(_device, _logger, "Jaguar1");
   }

@@ -68,17 +68,22 @@ ok()  { pass=$((pass+1)); printf '  PASS  %s\n' "$*"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$*"; }
 
 DUT_PID=""
+CLEANED=no
 # shellcheck disable=SC2317  # reached through the traps below
 cleanup() {
+  [ "$CLEANED" = yes ] && return 0
+  CLEANED=yes
   # arm() runs in a command substitution, so the PIDs it starts are recorded
   # in $OUT (tests/mt7612u_sta_lib.sh) for this trap to find. The peer first:
   # an orphan txdemo keeps its USB lock and fails the NEXT run's peer open
   # with "adapter already in use", which yields zero reports - and zero is a
   # control's passing value. INT, as timeout(1) forwards it to txdemo.
   sta_pid_kill peer INT; peer_gone=$?
-  sta_pid_kill dut
+  sta_pid_kill dut; dut_gone=$?
   DUT_PID=""
-  sta_dut_handback
+  # The same rule for the DUT: never re-enumerate it mid-de-init.
+  if [ "$dut_gone" = 0 ]; then sta_dut_handback
+  else echo "DUT still running - not re-enumerating DUT_SYSFS=$DUT_SYSFS"; fi
   # Only once the peer process has really exited: re-enumerating an adapter
   # still inside its de-init is what the hand-back must not do.
   if [ "$peer_gone" = 0 ]; then sta_peer_handback
@@ -88,8 +93,9 @@ cleanup() {
 }
 trap cleanup EXIT
 # AND IT MUST STOP: with INT/TERM on the EXIT trap the shell runs cleanup
-# and then CARRIES ON into the next arm. cleanup is idempotent, so the EXIT
-# pass after it is harmless.
+# and then CARRIES ON into the next arm. CLEANED makes the EXIT pass after it
+# a no-op: sta_pid_kill forgets a PID on the first pass, so a second pass
+# would hand back an adapter the first refused to.
 trap 'cleanup; exit 130' INT TERM
 
 sta_dut_take || exit 2

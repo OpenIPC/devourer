@@ -306,14 +306,15 @@ int8_t rssi_dbm(uint8_t raw) {
  * without one, the link is lost (StationSm::link_lost) and the ordinary
  * re-join policy takes over. The window opens at the host's first question,
  * not at the association: a host idle for longer than kConfirmMs that then
- * sends a burst must still get its kConfirmMs for the reply. Only frames
- * that ask for a reply count as uplink here - unicast, and ARP (its request
- * is broadcast, its reply unicast) - so a host's multicast chatter (IPv6
- * RS/MLD, mDNS) on an idle link is never judged; an idle host is never
- * judged at all. A host whose only traffic is one-way unicast to a neighbour
- * it already resolved (static entries, or a cache kept across a re-join) is
- * judged lost until its stack re-verifies that neighbour with a unicast ARP
- * the AP answers - the price of having no other evidence. */
+ * sends a burst must still get its kConfirmMs for the reply. ONLY A FRAME
+ * WHOSE ANSWER THE AP MUST FORWARD BACK IS A QUESTION (solicits_reply): an
+ * ARP request, an ICMP / ICMPv6 echo request, a unicast IPv6 neighbour
+ * solicitation, TCP, a DNS query. So one-way traffic - a UDP video or
+ * telemetry uplink, the FPV case - is never judged, and neither is a host's
+ * multicast chatter (IPv6 RS/MLD, mDNS), a gratuitous or probe ARP, or an
+ * idle host. The cost: an unheld association under one-way traffic alone is
+ * found only when the host's stack next asks something (its neighbour
+ * re-verification is a unicast ARP request). */
 constexpr uint32_t kConfirmMs = 5000;
 constexpr uint32_t kConfirmUplink = 3;
 bool g_unconfirmed = false;
@@ -322,6 +323,54 @@ uint32_t g_uplink_first_ms = 0;     /* ...at this time: the window opens */
 uint32_t g_uplink_unconfirmed = 0;
 std::atomic<uint64_t> g_unconfirmed_lost{0};
 
+/* Whether the host's MSDU (LLC/SNAP + payload) asks for an answer the AP
+ * must carry back to this station (kConfirmMs above). Conservative: anything
+ * not recognised is not a question, so a false "lost" needs a question that
+ * really went unanswered. */
+bool solicits_reply(const uint8_t* msdu, size_t len, const uint8_t da[6]) {
+  if (len < devourer::sta::kLlcSnapLen) return false;
+  const uint8_t* p = msdu + devourer::sta::kLlcSnapLen;
+  const size_t n = len - devourer::sta::kLlcSnapLen;
+  const unsigned et = ((unsigned)msdu[6] << 8) | msdu[7];
+  if (et == 0x0806) {
+    /* An ARP request (op 1) for someone else's address; not a gratuitous
+     * one (sender == target) or a duplicate-address probe (sender 0), which
+     * no one answers. Sender IP at 14, target IP at 24. */
+    static const uint8_t zero4[4] = {0, 0, 0, 0};
+    return n >= 28 && p[6] == 0 && p[7] == 1 &&
+           std::memcmp(p + 14, zero4, 4) != 0 &&
+           std::memcmp(p + 14, p + 24, 4) != 0;
+  }
+  if (da[0] & 0x01) return false;   /* group-addressed IP: no unicast owed */
+  uint8_t proto = 0;
+  const uint8_t* l4 = nullptr;
+  size_t l4n = 0;
+  if (et == 0x0800) {
+    if (n < 20 || (p[0] >> 4) != 4) return false;
+    const size_t ihl = (size_t)(p[0] & 0x0f) * 4;
+    /* A non-first fragment carries no transport header. */
+    if (ihl < 20 || n < ihl || ((p[6] & 0x1f) | p[7]) != 0) return false;
+    proto = p[9];
+    l4 = p + ihl;
+    l4n = n - ihl;
+    if (proto == 1) return l4n >= 1 && l4[0] == 8;          /* echo request */
+  } else if (et == 0x86dd) {
+    if (n < 40 || (p[0] >> 4) != 6) return false;
+    proto = p[6];
+    l4 = p + 40;
+    l4n = n - 40;
+    if (proto == 58)                  /* echo request, unicast NS (NUD) */
+      return l4n >= 1 && (l4[0] == 128 || l4[0] == 135);
+  } else {
+    return false;
+  }
+  /* TCP: a SYN or data is acknowledged; a bare ACK only follows data this
+   * station received, which has already confirmed it. */
+  if (proto == 6) return true;
+  /* UDP: a DNS query only - any other UDP may be one-way. */
+  return proto == 17 && l4n >= 4 && (((unsigned)l4[2] << 8) | l4[3]) == 53;
+}
+
 /* Called under g_mu when the station reaches Connected on a new
  * association. The duplicate cache is reset here and NOT at a rekey: it is
  * per transmitter and TID over Sequence Control (DupDetector, Dot11.h), which
@@ -329,7 +378,7 @@ std::atomic<uint64_t> g_unconfirmed_lost{0};
  * still be a duplicate. The per-key state is not reset here: a PTK or GTK
  * rekey happens with the machine already Connected, so note_keys() owns it,
  * keyed on the supplicant's install generations. */
-void probe(uint8_t chan);   /* below, with the scan */
+bool probe(uint8_t chan);   /* below, with the scan */
 std::atomic<uint64_t> g_nudges{0};
 
 /* THE NUDGE. An AP may hold a transmitted frame's TX status until its next
@@ -349,8 +398,7 @@ uint32_t g_nudge_ms = 0;
 bool g_nudge_again = false;   /* a second nudge is still owed (WPA2) */
 uint32_t g_nudge_eapol_rx = 0;
 void nudge(uint32_t now) {
-  probe(g_sm.channel() ? g_sm.channel() : g_chan);
-  g_nudges.fetch_add(1);
+  if (probe(g_sm.channel() ? g_sm.channel() : g_chan)) g_nudges.fetch_add(1);
   g_nudge_ms = now;
 }
 
@@ -635,10 +683,7 @@ bool air_msdu(const uint8_t* msdu, size_t len, const uint8_t da[6],
   if (!protect) {
     hdr.insert(hdr.end(), msdu, msdu + len);
     if (from_host) g_tx_plain.fetch_add(1);
-    /* LLC/SNAP puts the ethertype at msdu[6..7]. */
-    if (from_host && g_unconfirmed &&
-        ((da[0] & 0x01) == 0 ||
-         (len >= 8 && msdu[6] == 0x08 && msdu[7] == 0x06)))
+    if (from_host && g_unconfirmed && solicits_reply(msdu, len, da))
       g_uplink_unconfirmed++;
     enqueue(std::move(hdr));
     return true;
@@ -696,15 +741,16 @@ uint8_t scan_step(uint32_t now) {
 }
 
 /* A directed probe request for the SSID we want, on the channel we are on:
- * it finds a hidden BSS and shortens the wait on a swept channel. Caller
- * holds g_mu. */
-void probe(uint8_t chan) {
+ * it finds a hidden BSS and shortens the wait on a swept channel. False when
+ * none could be built (it is then not counted). Caller holds g_mu. */
+bool probe(uint8_t chan) {
   std::vector<uint8_t> m =
       devourer::sta::build_probe_req(g_own, g_ssid, chan, chan > 14);
-  if (m.empty()) return;
+  if (m.empty()) return false;
   devourer::sta::assign_seq(m, g_data_seq.next());
   g_probe_tx.fetch_add(1);
   enqueue(std::move(m));
+  return true;
 }
 
 const char* fail_name(StationSm::Failure f);

@@ -1178,6 +1178,38 @@ void test_a_nudge_touches_no_tuning_or_liveness_state() {
   check(g_sm.connected(), "...and counts as AP liveness, not against it");
 }
 
+/* Host frames for the confirmation cells: an ARP request (broadcast; sender
+ * and target IPv4 10.0.0.<spa> / 10.0.0.<tpa>, spa 0 = a DAD probe, spa ==
+ * tpa = gratuitous) and a unicast IPv4 frame to kPeer carrying `proto`
+ * (ICMP: an echo request; UDP: to `port`). */
+void arp_request(uint8_t e[60], uint8_t spa, uint8_t tpa) {
+  std::memset(e, 0, 60);
+  std::memset(e, 0xff, 6);
+  std::memcpy(e + 6, kStaMac, 6);
+  e[12] = 0x08;
+  e[13] = 0x06;
+  uint8_t* a = e + 14;
+  a[1] = 0x01; a[2] = 0x08; a[4] = 6; a[5] = 4;   /* Ethernet / IPv4 */
+  a[7] = 0x01;                                     /* request */
+  std::memcpy(a + 8, kStaMac, 6);
+  if (spa) { a[14] = 10; a[17] = spa; }
+  a[24] = 10; a[27] = tpa;
+}
+
+void ipv4_to_peer(uint8_t e[60], uint8_t proto, uint16_t port) {
+  std::memset(e, 0, 60);
+  std::memcpy(e, kPeer, 6);
+  std::memcpy(e + 6, kStaMac, 6);
+  e[12] = 0x08;
+  e[13] = 0x00;
+  uint8_t* ip = e + 14;
+  ip[0] = 0x45;
+  ip[9] = proto;
+  uint8_t* l4 = ip + 20;
+  if (proto == 1) l4[0] = 8;                       /* echo request */
+  if (proto == 17) { l4[2] = (uint8_t)(port >> 8); l4[3] = (uint8_t)port; }
+}
+
 /* MULTICAST CHATTER IS NOT A QUESTION: frames that expect no reply (here a
  * multicast IPv6 frame) never count towards the judgement. */
 void test_multicast_chatter_is_not_judged() {
@@ -1201,20 +1233,29 @@ void test_multicast_chatter_is_not_judged() {
   check(g_sm.state() == StationSm::State::Connected,
         "multicast chatter with no reply is never judged");
 
-  /* ...but broadcast ARP requests are questions: an ARP that is never
-   * answered is exactly how an AP that dropped us shows. */
-  for (int i = 0; i < (int)kConfirmUplink; i++) {
+  /* Gratuitous and probe ARPs are announcements, not questions. */
+  for (int i = 0; i < 10; i++) {
     uint8_t e[60];
-    std::memset(e, 0xff, 6);
-    std::memcpy(e + 6, kStaMac, 6);
-    e[12] = 0x08;
-    e[13] = 0x06;
-    std::memset(e + 14, 0, sizeof e - 14);
+    arp_request(e, i % 2 ? 0 : 7, 7);
     tap_down_one(e, sizeof e);
   }
   drain_tx();
-  supervise(kConfirmMs * 5);
+  supervise(kConfirmMs * 4 + 1);
+  supervise(kConfirmMs * 5 + 2);
+  check(g_sm.state() == StationSm::State::Connected &&
+            g_uplink_unconfirmed == 0,
+        "gratuitous and probe ARPs are never judged");
+
+  /* ...but ARP requests are questions: an ARP that is never answered is
+   * exactly how an AP that dropped us shows. */
+  for (int i = 0; i < (int)kConfirmUplink; i++) {
+    uint8_t e[60];
+    arp_request(e, 2, 1);
+    tap_down_one(e, sizeof e);
+  }
+  drain_tx();
   supervise(kConfirmMs * 6);
+  supervise(kConfirmMs * 7);
   check(g_sm.state() == StationSm::State::Failed &&
             g_sm.fail_reason() == StationSm::Failure::Unconfirmed,
         "unanswered ARP requests are judged");
@@ -1233,11 +1274,8 @@ void open_link_with_uplink(Ap& ap, int frames) {
   }
   associate(ap, /*rsn=*/false);
   drain_tx();
-  uint8_t e[60] = {0};
-  std::memcpy(e, kPeer, 6);
-  std::memcpy(e + 6, kStaMac, 6);
-  e[12] = 0x08;
-  e[13] = 0x00;
+  uint8_t e[60];
+  ipv4_to_peer(e, 1, 0);                           /* a ping */
   for (int i = 0; i < frames; i++) tap_down_one(e, sizeof e);
   drain_tx();
 }
@@ -1272,10 +1310,8 @@ void test_a_burst_after_idle_gets_its_window() {
   Ap ap;
   open_link_with_uplink(ap, 0);
   supervise(kConfirmMs * 4);           /* idle, long past kConfirmMs */
-  uint8_t e[60] = {0};
-  std::memcpy(e, kPeer, 6);
-  std::memcpy(e + 6, kStaMac, 6);
-  e[12] = 0x08;
+  uint8_t e[60];
+  ipv4_to_peer(e, 6, 0);                           /* TCP */
   for (int i = 0; i < (int)kConfirmUplink; i++) tap_down_one(e, sizeof e);
   drain_tx();
   supervise(kConfirmMs * 4 + 1);
@@ -1310,6 +1346,33 @@ void test_a_unicast_reply_confirms_the_association() {
   supervise(kConfirmMs * 4);
   check(g_sm.state() == StationSm::State::Connected,
         "a unicast reply confirms the open association for good");
+}
+
+/* ONE-WAY TRAFFIC IS NOT A QUESTION: a UDP uplink to a peer behind the AP
+ * (video, telemetry) gets nothing unicast back, and must never be judged -
+ * while the same link's first DNS query is. */
+void test_a_one_way_udp_uplink_is_not_judged() {
+  reset_all();
+  Ap ap;
+  open_link_with_uplink(ap, 0);
+  uint8_t e[60];
+  ipv4_to_peer(e, 17, 5600);
+  for (uint32_t t = 0; t <= kConfirmMs * 4; t += 100) {
+    tap_down_one(e, sizeof e);
+    supervise(t);
+  }
+  drain_tx();
+  check(g_sm.state() == StationSm::State::Connected,
+        "a one-way UDP uplink is never judged unconfirmed");
+  check(g_uplink_unconfirmed == 0, "...and none of it counts as a question");
+  ipv4_to_peer(e, 17, 53);
+  for (int i = 0; i < (int)kConfirmUplink; i++) tap_down_one(e, sizeof e);
+  drain_tx();
+  supervise(kConfirmMs * 5);
+  supervise(kConfirmMs * 6);
+  check(g_sm.state() == StationSm::State::Failed &&
+            g_sm.fail_reason() == StationSm::Failure::Unconfirmed,
+        "...but unanswered DNS queries are judged");
 }
 
 void test_an_idle_open_association_is_not_judged() {
@@ -2214,6 +2277,7 @@ int self_test() {
   selftest::test_a_unicast_reply_confirms_the_association();
   selftest::test_an_idle_open_association_is_not_judged();
   selftest::test_a_burst_after_idle_gets_its_window();
+  selftest::test_a_one_way_udp_uplink_is_not_judged();
   selftest::test_multicast_chatter_is_not_judged();
   selftest::test_an_accepted_association_nudges_the_ap();
   selftest::test_a_nudge_touches_no_tuning_or_liveness_state();

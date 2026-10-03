@@ -80,13 +80,16 @@ An open association is confirmed by the AP's first unicast frame to the
 station. A station cannot see the AP's side: if the AP never saw the
 association response acknowledged, it does not hold the station, drops its
 traffic and may never say so. So once the host has asked something - three
-unicast or ARP frames - and no unicast reply has come within 5 s of the
-first, the link is lost as `unconfirmed` (`StationSm::link_lost`) and
-re-joined under the policy above. Multicast chatter and an idle host are
-never judged; WPA2 needs no such rule (the four-way is the confirmation).
-One-way unicast to a neighbour the host has already resolved gets no reply
-either, and is judged the same way until the host's stack re-verifies that
-neighbour (a unicast ARP the AP answers). The ledger counts
+frames whose answer the AP must forward back: an ARP request, an ICMP /
+ICMPv6 echo request, a unicast IPv6 neighbour solicitation, TCP, a DNS
+query - and no unicast reply has come within 5 s of the first, the link is
+lost as `unconfirmed` (`StationSm::link_lost`) and re-joined under the
+policy above. One-way traffic (a UDP video or telemetry uplink), multicast
+chatter, gratuitous and probe ARPs and an idle host are never judged; an
+unheld association under one-way traffic alone is found when the host's
+stack next asks something (its neighbour re-verification is a unicast ARP
+request). WPA2 needs no such rule (the four-way is the confirmation). The
+ledger counts
 these (`unconfirmed=`), and repeated association responses
 (`assoc_repeat=`).
 
@@ -116,7 +119,7 @@ first line then reads `fault=1`.
   | Cell | Scored |
   |---|---|
   | `open` | with a ping running from the start, the AP associates our address within 30 s (recovering an unconfirmed first association counts); ping 0% loss over the TAP; ledger plaintext only; armed; the clear |
-  | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; no four-way MIC failure, data-plane MIC failures <= PTK installs; armed; the clear; no `tx.retry_limit=0` warning. MT7612U: the managed filter - plaintext unicast injected from the AP's BSSID at the station (`plaintext refused` at least half of it, else INCONCLUSIVE) and at a foreign address (`not-for-us` under 1% of it) |
+  | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; no four-way MIC failure, data-plane MIC failures <= PTK installs; armed; the clear; no `tx.retry_limit=0` warning. MT7612U: the managed filter - plaintext unicast injected from the AP's BSSID at the station (`plaintext refused` at least half of it, else INCONCLUSIVE) and at a foreign address (`not-for-us` under 1% of it - a PASS counts only once the `noarm` control of the same run has seen that stream arrive, else INCONCLUSIVE) |
   | `noarm` | control, `DEVOURER_STA_ARM=0`: no arm and no clear ran. Realtek: the station tried and the AP did NOT complete the four-way - a completed one FAILs; INCONCLUSIVE unless the armed `wpa2` cell of the same run got in (the positive control). MT7612U: under the monitor filter both injected streams arrive (each at least half); the link over a 30 s ping window is reported, not scored |
   | `retry0` | `DEVOURER_TX_RETRY_LIMIT=0`: the arm-time warning; the clear (the link over a 30 s ping window is reported, not scored) |
   | `reconnect` | hostapd stopped and restarted: the station reports the lost link; second four-way within the bound, measured from hostapd being started again; ping 0% loss over a 30 s window; ledger 2 associations, 1 reconnect; one arm across the re-join; the clear |

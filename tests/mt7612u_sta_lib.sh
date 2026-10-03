@@ -11,11 +11,13 @@
 #     must be a directory owned by root or by the invoking user (SUDO_UID
 #     when run through sudo), and is created 0700 when missing - so a local
 #     user cannot point this root run's writes somewhere else.
-#   - One run per OUT. sta_lock_take() claims $OUT/.lock (mkdir is atomic) and
-#     refuses while the run that holds it is alive, so two concurrent runs
-#     cannot share - and kill each other through - one set of PID files. A
-#     lock whose holder is gone is reclaimed. (The adapters are exclusive
-#     anyway: mt7612uprobe and the Realtek demos take a per-adapter lock.)
+#   - One run per OUT. sta_lock_take() takes an flock(1) on the OUT directory
+#     itself and refuses while another run holds it, so two concurrent runs
+#     cannot share - and kill each other through - one set of PID files. The
+#     kernel drops the lock when the last holder exits, so there is no owner
+#     record to race and no stale lock to reclaim. (The adapters are
+#     exclusive anyway: mt7612uprobe and the Realtek demos take a
+#     per-adapter lock.)
 #   - Kill only what this run started, by recorded PID. No pattern kills, and
 #     no PID read from a file an earlier run left behind: sta_pid_init()
 #     removes stale PID files before anything is started.
@@ -58,33 +60,21 @@ sta_out_prepare() {
   return 0
 }
 
-# A process's start time in clock ticks since boot (/proc/PID/stat field 22),
-# or nothing. Field 2 is the command name in parentheses and may hold spaces,
-# so the fields are counted from after its closing parenthesis.
-sta_proc_start() {
-  sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20
-}
-
 STA_LOCKED=no
-# The lock records "PID starttime". A holder counts as live only when that
-# PID exists AND started at the recorded time - a recycled PID of an
-# unrelated process is a stale lock, not a live run.
+# The lock lives on fd 9, opened on the OUT directory (nothing is written,
+# so nothing can be redirected through a planted file). Taking and holding it
+# is one atomic flock. The children this run starts inherit fd 9, so a
+# process that outlives the harness (a hung sta_client) keeps OUT locked
+# until it exits - which is what it should do.
 sta_lock_take() {
-  if ! mkdir "$OUT/.lock" 2>/dev/null; then
-    read -r _sta_holder _sta_hstart < "$OUT/.lock/pid" 2>/dev/null
-    case "${_sta_holder:-}" in
-      ''|*[!0-9]*) ;;
-      *) if [ -n "${_sta_hstart:-}" ] &&
-            [ "$(sta_proc_start "$_sta_holder")" = "$_sta_hstart" ]; then
-           echo "OUT=$OUT is in use by run $_sta_holder - refusing; give this" \
-                "run its own OUT"
-           return 1
-         fi ;;
-    esac
-    rm -rf "$OUT/.lock"
-    mkdir "$OUT/.lock" 2>/dev/null || { echo "could not lock OUT=$OUT"; return 1; }
+  command -v flock >/dev/null 2>&1 || { echo "flock(1) is required"; return 1; }
+  exec 9<"$OUT" || { echo "could not open OUT=$OUT"; return 1; }
+  if ! flock -n 9; then
+    exec 9<&-
+    echo "OUT=$OUT is in use by another run - refusing; give this run its" \
+         "own OUT"
+    return 1
   fi
-  echo "$$ $(sta_proc_start "$$")" > "$OUT/.lock/pid"
   STA_LOCKED=yes
   # A reused OUT starts with no device records: a marker an earlier run left
   # would make this run hand back a device it never recorded or opened.
@@ -95,7 +85,7 @@ sta_lock_take() {
 sta_lock_release() {
   [ "$STA_LOCKED" = yes ] || return 0
   STA_LOCKED=no
-  rm -rf "$OUT/.lock"
+  exec 9<&-
 }
 
 sta_is_mt7612u() {

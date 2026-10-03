@@ -56,7 +56,9 @@
 #            the old key - see rx_frame() in sta_client.cpp), the arm line, the clear (as for open), and
 #            NO tx.retry_limit=0 warning (the station default is nonzero).
 #            MT7612U also: the managed filter - the own stream arrives and
-#            `not-for-us` stays under 1% of the foreign one.
+#            `not-for-us` stays under 1% of the foreign one; that PASS is
+#            held until the noarm control of the same run has seen the
+#            foreign stream arrive, else INCONCLUSIVE.
 #   noarm    the control: wpa2 with DEVOURER_STA_ARM=0 - nothing else
 #            changes. Scored everywhere: no SetStationIdentity and no clear
 #            ran. On Realtek also scored: the station tried (beacons seen,
@@ -579,7 +581,14 @@ inject_unicast() { # $1 cell
 
 # Score the stimulus against the station's ledger. $1 cell, $2 managed |
 # monitor (what the filter should be). Both need the OWN stream to have
-# arrived (>= half) before the FOREIGN count means anything.
+# arrived (>= half) before the FOREIGN count means anything. The own stream
+# shows the injection path airs, not that the FOREIGN injector did: an armed
+# PASS ("almost none arrived") is therefore held until a control in the same
+# run has seen the foreign stream arrive (noarm, FOREIGN_SEEN), and scored
+# after the last cell (score_held_filter) - INCONCLUSIVE without one. A FAIL
+# needs no such witness: the frames arrived.
+FOREIGN_SEEN=no
+HELD_FILTER_PASS=""
 check_filter() {
   local nfu ref
   nfu=$(led "$1" 'not-for-us'); ref=$(led "$1" 'plaintext refused')
@@ -597,11 +606,13 @@ check_filter() {
   fi
   if [ "$2" = managed ]; then
     if [ $(( nfu * 100 )) -lt "$INJ_FOREIGN" ]; then
-      ok "$1: managed filter on: own-addressed $ref of $INJ_OWN arrived, foreign not-for-us=$nfu of $INJ_FOREIGN"
+      HELD_FILTER_PASS="$1: managed filter on: own-addressed $ref of $INJ_OWN arrived, foreign not-for-us=$nfu of $INJ_FOREIGN"
+      info "$1: managed-filter result held until the noarm control has seen the foreign stream"
     else
       bad "$1: armed station still receives others' unicast: not-for-us=$nfu of $INJ_FOREIGN (own-addressed $ref of $INJ_OWN arrived)"
     fi
   elif [ $(( nfu * 2 )) -ge "$INJ_FOREIGN" ]; then
+    FOREIGN_SEEN=yes
     ok "$1: control: unarmed, both streams arrive: own-addressed $ref of $INJ_OWN, foreign not-for-us=$nfu of $INJ_FOREIGN"
   else
     bad "$1: unarmed (monitor filter) yet the foreign stream did not arrive: not-for-us=$nfu of $INJ_FOREIGN while own-addressed $ref of $INJ_OWN did"
@@ -651,7 +662,7 @@ cell_open() {
   sta_pid_record probe $!
   if ! wait_for "$OUT/hostapd_open.log" "AP-STA-CONNECTED $own" 30; then
     if proc_running "$STA_PID"; then bad "open: the AP never associated $own within 30 s"; cell_end
-    else station_gone open; sta_pid_kill hostapd; fi
+    else sta_pid_kill probe; station_gone open; sta_pid_kill hostapd; fi
     return
   fi
   sta_pid_kill probe
@@ -936,6 +947,16 @@ cell_noreconnect() {
 }
 
 for c in $CELLS; do CELL_FAIL0=$fail; "cell_$c"; done
+score_held_filter() {
+  [ -n "$HELD_FILTER_PASS" ] || return 0
+  echo; echo "== the held managed-filter result =="
+  if [ "$FOREIGN_SEEN" = yes ]; then
+    ok "$HELD_FILTER_PASS (the noarm control saw the foreign stream arrive)"
+  else
+    inc "${HELD_FILTER_PASS%%:*}: managed filter not scored - no control in this run saw the foreign stream arrive (run noarm with wpa2)"
+  fi
+}
+score_held_filter
 
 echo
 echo "=== $pass passed, $fail failed, $inconclusive inconclusive  (logs: $OUT) ==="

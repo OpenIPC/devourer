@@ -63,6 +63,17 @@ join that fails - ends the attempts: the station logs it, stays
 unassociated until its time is up, and the ledger ends `Failed` with the
 reason.
 
+An open association is confirmed by the AP's first unicast frame to the
+station. A station cannot see the AP's side: if the AP never saw the
+association response acknowledged, it does not hold the station, drops its
+traffic and may never say so. So once the host has asked something - three
+unicast or ARP frames - and no unicast reply has come within 5 s, the link
+is lost as `unconfirmed` (`StationSm::link_lost`) and re-joined under the
+policy above. Multicast chatter and an idle host are never judged; WPA2
+needs no such rule (the four-way is the confirmation). The ledger counts
+these (`unconfirmed=`), and repeated association responses
+(`assoc_repeat=`).
+
 Exit status: 0 the run completed; 1 setup failed; 2 refused
 (`station_mode_ok` false, or the duration, `DEVOURER_CHANNEL`,
 `DEVOURER_STA_SCAN_DWELL_MS` (10..10000, default 250) or
@@ -88,7 +99,7 @@ first line then reads `fault=1`.
 
   | Cell | Scored |
   |---|---|
-  | `open` | AP associates our address; ping 0% loss over the TAP; ledger plaintext only; armed; the clear |
+  | `open` | with a ping running from the start, the AP associates our address within 30 s (recovering an unconfirmed first association counts); ping 0% loss over the TAP; ledger plaintext only; armed; the clear |
   | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; no four-way MIC failure, data-plane MIC failures <= PTK installs; armed; the clear; no `tx.retry_limit=0` warning |
   | `noarm` | control, `DEVOURER_STA_ARM=0`: no arm and no clear ran. Realtek: the station tried and the AP did NOT complete the four-way - a completed one FAILs; INCONCLUSIVE unless the armed `wpa2` cell of the same run got in (the positive control). MT7612U: the link over a 30 s ping window is reported, not scored |
   | `retry0` | `DEVOURER_TX_RETRY_LIMIT=0`: the arm-time warning; the clear (the link over a 30 s ping window is reported, not scored) |
@@ -114,15 +125,15 @@ first line then reads `fault=1`.
 
 ## Known issue: RTL8812CU (8822C) association on 2.4 GHz
 
-Against an MT7612U AP on channel 6 the armed 8822C station authenticates
-(hostapd: "authenticated", so the authentication response was
-acknowledged) and receives the association response, but hostapd does not
-get that response acknowledged: the AP-side status stays pending until the
-station is removed ("handle_assoc_cb: STA ... not found"), and association
-mostly fails; with `DEVOURER_TX_RETRY_LIMIT=0` it sometimes succeeds after
-seconds. The 8822B and the MT7612U associate with the same AP. The cause is
-not settled; `AP_OFDM_ONLY=1` (management frames at 6 Mb/s OFDM instead of
-1 Mb/s CCK) and a 5 GHz channel are the first two experiments.
+Intermittently, against an MT7612U AP on channel 6, the armed 8822C station
+receives the association response but the AP never sees it acknowledged:
+hostapd's status for it stays pending until the station is removed
+("handle_assoc_cb: STA ... not found"). In captures of passing runs the
+8822C acknowledges both the authentication and the association response
+within ~0.3 ms, at 1 Mb/s CCK, and an OFDM-only AP (`AP_OFDM_ONLY=1`) fails
+the same way, so it is not a CCK-only problem. The cause is not settled.
+The station recovers by itself: on WPA2 through the four-way timeout, on an
+open BSS through the confirmation rule above.
 
 ## What it does not do
 

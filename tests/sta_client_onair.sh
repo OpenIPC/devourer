@@ -26,7 +26,11 @@
 # in: `noarm` is a real control, and the clear's verification is scored.
 #
 # Cells (each scored against its own witness):
-#   open     hostapd open: the AP associates OUR address; ping 0% loss over
+#   open     hostapd open, with a ping running from the start: the AP
+#            associates OUR address (hostapd's AP-STA-CONNECTED - its own
+#            record) within 30 s, which covers recovering a first
+#            association the AP did not hold (sta_client re-joins when its
+#            ARP gets no unicast reply, kConfirmMs); ping 0% loss over
 #            the TAP; the ledger shows plaintext and no decryption; the arm
 #            line; the clear ran on exit (verified, on Realtek).
 #   wpa2     hostapd WPA2-PSK with group and pairwise rekeys: four-way, both
@@ -192,7 +196,7 @@ DUT_PID="0x${dut_have#*:}"
 . "$ROOT/tests/mt7612u_sta_lib.sh"
 sta_out_prepare || exit 2
 sta_lock_take || exit 2
-sta_pid_init sta hostapd
+sta_pid_init sta hostapd probe
 
 # --- the AP adapter: refused unless it is plainly a spare wireless adapter --
 ap_refuse() { echo "refusing AP_SYSFS=$AP_SYSFS: $*"; sta_lock_release; exit 2; }
@@ -224,6 +228,7 @@ cleanup() {
   # INT, then KILL after its window (sta_stop) - never a bare blocking wait.
   [ -n "$STA_PID" ] && sta_stop
   [ "$STA_HUNG" = yes ] && sta_gone=1
+  sta_pid_kill probe
   sta_pid_kill hostapd
   # THE PHY COMES BACK BEFORE THE NAMESPACE GOES: `ip netns del` on a
   # namespace still holding a phy destroys the phy (only a re-enumeration
@@ -506,7 +511,7 @@ check_armed() { # $1 cell
   check_cleared "$1"
 }
 
-cell_end() { sta_stop; sta_pid_kill hostapd; }
+cell_end() { sta_pid_kill probe; sta_stop; sta_pid_kill hostapd; }
 
 # --- open ---------------------------------------------------------------------
 cell_open() {
@@ -518,11 +523,19 @@ cell_open() {
   [ "$up" = 0 ] || { station_not_up open "$up"; cell_end; return; }
   local own; own=$(own_of open)
   tap_up || { inc "open: no TAP, or the route to $APIP does not leave through $TAP"; cell_end; return; }
+  # Traffic from the start, as a user's host would send: an open association
+  # the AP does not hold is only visible to the station as questions (ARP)
+  # that get no reply, and it re-joins on that (kConfirmMs in sta_client.cpp).
+  # The AP's own record - AP-STA-CONNECTED for our address - is the witness,
+  # and the 30 s bound covers a first association that has to be recovered.
+  ping -I "$TAP" -i 1 "$APIP" >/dev/null 2>&1 &
+  sta_pid_record probe $!
   if ! wait_for "$OUT/hostapd_open.log" "AP-STA-CONNECTED $own" 30; then
-    if proc_running "$STA_PID"; then bad "open: the AP never associated $own"; cell_end
+    if proc_running "$STA_PID"; then bad "open: the AP never associated $own within 30 s"; cell_end
     else station_gone open; sta_pid_kill hostapd; fi
     return
   fi
+  sta_pid_kill probe
   ok "open: the AP associated $own"
   ping_ap open; case $? in
     0) ok "open: ping over the air, $(loss open)" ;;
@@ -530,6 +543,11 @@ cell_open() {
     *) station_gone open; sta_pid_kill hostapd; return ;;
   esac
   cell_end
+  local unconf assoc
+  unconf=$(led open 'unconfirmed'); assoc=$(led open 'associations')
+  if [ "${unconf:-0}" -gt 0 ] 2>/dev/null; then
+    info "open: recovered: ${unconf} association(s) the AP did not hold were found unconfirmed and re-joined (${assoc:-?} associations, assoc_repeat=$(led open 'assoc_repeat'))"
+  fi
   local plain enc
   plain=$(led open 'plaintext rx'); enc=$(led open 'encrypted rx')
   if [ "${plain:-0}" -gt 0 ] && [ "${enc:-x}" = 0 ]; then

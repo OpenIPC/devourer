@@ -285,6 +285,29 @@ int8_t rssi_dbm(uint8_t raw) {
 
 /* ---- keys and per-association state ------------------------------------- */
 
+/* AN OPEN ASSOCIATION IS CONFIRMED BY THE AP'S FIRST UNICAST REPLY. The
+ * station cannot see the AP's side: an Association Response it received but
+ * whose acknowledgement the AP never saw leaves the AP without the station,
+ * and on an open BSS nothing says so - the AP drops the station's uplink and
+ * may never deauthenticate it. (On WPA2 the four-way is the confirmation:
+ * the AP starts it only for a station it holds, and HandshakeTimeout covers
+ * the rest.) So an open association counts as unconfirmed until a unicast
+ * data frame from the AP arrives for this station; if the host has sent
+ * kConfirmUplink frames and kConfirmMs has passed without one, the link is
+ * lost (StationSm::link_lost) and the ordinary re-join policy takes over.
+ * Only frames that ask for a reply count as uplink here - unicast, and ARP
+ * (its request is broadcast, its reply unicast) - so a host's multicast
+ * chatter (IPv6 RS/MLD, mDNS) on an idle link is never judged; an idle host
+ * is never judged at all. A host sending one-way unicast traffic with
+ * static neighbour entries would be judged lost - the price of having no
+ * other evidence. */
+constexpr uint32_t kConfirmMs = 5000;
+constexpr uint32_t kConfirmUplink = 3;
+bool g_unconfirmed = false;
+uint32_t g_assoc_ms = 0;
+uint32_t g_uplink_unconfirmed = 0;
+std::atomic<uint64_t> g_unconfirmed_lost{0};
+
 /* Called under g_mu when the station reaches Connected on a new
  * association. The duplicate cache is reset here and NOT at a rekey: it is
  * per transmitter and TID over Sequence Control (DupDetector, Dot11.h), which
@@ -292,7 +315,10 @@ int8_t rssi_dbm(uint8_t raw) {
  * still be a duplicate. The per-key state is not reset here: a PTK or GTK
  * rekey happens with the machine already Connected, so note_keys() owns it,
  * keyed on the supplicant's install generations. */
-void on_association() {
+void on_association(uint32_t now) {
+  g_unconfirmed = g_sm.security() == StationSm::Security::Open;
+  g_assoc_ms = now;
+  g_uplink_unconfirmed = 0;
   g_rx_dup.reset();
   g_failed_noted = false;
   g_was_associated = true;
@@ -381,7 +407,7 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
   const StationSm::State before = g_sm.state();
   g_sm.on_rx(mpdu, len, now);
   if (before != StationSm::State::Connected && g_sm.connected())
-    on_association();
+    on_association(now);
   if (g_sm.connected()) note_keys();
 
   /* The data plane runs only on a live association: a protected frame that
@@ -435,6 +461,7 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
      * anyone on the channel inject into the host's stack. Cleartext EAPOL is
      * StationSm::on_rx's, and it has already had it. */
     if (g_sm.security() != StationSm::Security::Open) return;
+    if (to_us) g_unconfirmed = false;   /* the AP holds this association */
     g_plain_rx.fetch_add(1);
     if (len > hlen) tap_up(da, sa, mpdu + hlen, len - hlen);
     return;
@@ -549,6 +576,11 @@ bool air_msdu(const uint8_t* msdu, size_t len, const uint8_t da[6],
   if (!protect) {
     hdr.insert(hdr.end(), msdu, msdu + len);
     if (from_host) g_tx_plain.fetch_add(1);
+    /* LLC/SNAP puts the ethertype at msdu[6..7]. */
+    if (from_host && g_unconfirmed &&
+        ((da[0] & 0x01) == 0 ||
+         (len >= 8 && msdu[6] == 0x08 && msdu[7] == 0x06)))
+      g_uplink_unconfirmed++;
     enqueue(std::move(hdr));
     return true;
   }
@@ -624,6 +656,20 @@ const char* fail_name(StationSm::Failure f);
  * then idles, unassociated, until its time is up. */
 uint8_t supervise(uint32_t now) {
   std::lock_guard<std::mutex> l(g_mu);
+
+  /* An unconfirmed open association the host has been talking through
+   * (see kConfirmMs) - lost, through the ordinary failure path below. */
+  if (g_sm.state() == StationSm::State::Connected && g_unconfirmed &&
+      g_uplink_unconfirmed >= kConfirmUplink &&
+      (uint32_t)(now - g_assoc_ms) >= kConfirmMs) {
+    std::fprintf(stderr,
+                 "  station association unconfirmed: %u frames sent, no "
+                 "unicast reply from the AP in %u ms\n",
+                 g_uplink_unconfirmed, (unsigned)(now - g_assoc_ms));
+    g_unconfirmed = false;
+    g_unconfirmed_lost.fetch_add(1);
+    g_sm.link_lost();
+  }
 
   const StationSm::State st = g_sm.state();
   if (st != StationSm::State::Idle && st != StationSm::State::Failed)
@@ -774,6 +820,7 @@ const char* fail_name(StationSm::Failure f) {
     case StationSm::Failure::NoChannel: return "no-channel";
     case StationSm::Failure::NotInfrastructure: return "not-infrastructure";
     case StationSm::Failure::SsidMismatch: return "ssid-mismatch";
+    case StationSm::Failure::Unconfirmed: return "unconfirmed";
   }
   return "?";
 }
@@ -815,17 +862,18 @@ void report() {
                (int)g_end.keyed, g_bss.count());
   std::fprintf(stderr,
                "  join: beacons observed=%llu, probes sent=%llu, joins=%llu,"
-               " associations=%llu, reconnects=%llu\n",
+               " associations=%llu, reconnects=%llu, unconfirmed=%llu\n",
                (unsigned long long)g_beacons.load(),
                (unsigned long long)g_probe_tx.load(),
                (unsigned long long)g_joins.load(),
                (unsigned long long)g_associations.load(),
-               (unsigned long long)g_reconnects.load());
+               (unsigned long long)g_reconnects.load(),
+               (unsigned long long)g_unconfirmed_lost.load());
   std::fprintf(stderr,
                "  station rx: auth_tx=%u assoc_tx=%u eapol_tx=%u eapol_rx=%u"
-               " beacons=%u\n",
+               " beacons=%u assoc_repeat=%u\n",
                g_sm.auth_tx, g_sm.assoc_tx, g_sm.eapol_tx, g_sm.eapol_rx,
-               g_sm.beacons_rx);
+               g_sm.beacons_rx, g_sm.rx_assoc_repeat);
   std::fprintf(stderr,
                "  refused by the address filter: not-our-bss=%u,"
                " not-for-us=%u, ignored=%u, malformed=%u, tx-dropped=%u"

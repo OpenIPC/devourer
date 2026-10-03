@@ -107,6 +107,10 @@ void reset_all() {
   g_stop = 0;
   g_tap_read_err = 0;
   g_end = RunEnd{};
+  g_unconfirmed = false;
+  g_assoc_ms = 0;
+  g_uplink_unconfirmed = 0;
+  g_unconfirmed_lost = 0;
 }
 
 /* Drain whatever the station queued, stripping the radiotap prefix the real
@@ -1042,6 +1046,120 @@ void test_a_non_key_eapol_reaches_the_host() {
         "...and is not counted as a rekey");
 }
 
+/* MULTICAST CHATTER IS NOT A QUESTION: frames that expect no reply (here a
+ * multicast IPv6 frame) never count towards the judgement. */
+void test_multicast_chatter_is_not_judged() {
+  reset_all();
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    g_sm.configure_open(kSsid, g_own);
+  }
+  Ap ap;
+  associate(ap, /*rsn=*/false);
+  drain_tx();
+  for (int i = 0; i < 10; i++) {
+    uint8_t e[60] = {0x33, 0x33, 0, 0, 0, 2};   /* IPv6 all-routers */
+    std::memcpy(e + 6, kStaMac, 6);
+    e[12] = 0x86;
+    e[13] = 0xdd;
+    tap_down_one(e, sizeof e);
+  }
+  drain_tx();
+  supervise(kConfirmMs * 4);
+  check(g_sm.state() == StationSm::State::Connected,
+        "multicast chatter with no reply is never judged");
+
+  /* ...but broadcast ARP requests are questions: an ARP that is never
+   * answered is exactly how an AP that dropped us shows. */
+  for (int i = 0; i < (int)kConfirmUplink; i++) {
+    uint8_t e[60];
+    std::memset(e, 0xff, 6);
+    std::memcpy(e + 6, kStaMac, 6);
+    e[12] = 0x08;
+    e[13] = 0x06;
+    std::memset(e + 14, 0, sizeof e - 14);
+    tap_down_one(e, sizeof e);
+  }
+  drain_tx();
+  supervise(kConfirmMs * 5);
+  check(g_sm.state() == StationSm::State::Failed &&
+            g_sm.fail_reason() == StationSm::Failure::Unconfirmed,
+        "unanswered ARP requests are judged");
+}
+
+/* AN OPEN ASSOCIATION THE AP DOES NOT HOLD IS FOUND AND RE-JOINED. The host
+ * talks (kConfirmUplink frames) and no unicast reply comes back within
+ * kConfirmMs: the link is lost as Unconfirmed and the ordinary re-join policy
+ * takes over. The two controls: a unicast reply confirms the association for
+ * good, and an idle host is never judged. */
+void open_link_with_uplink(Ap& ap, int frames) {
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    g_sm.configure_open(kSsid, g_own);
+    g_rejoin_backoff_ms = 100;
+  }
+  associate(ap, /*rsn=*/false);
+  drain_tx();
+  uint8_t e[60] = {0};
+  std::memcpy(e, kPeer, 6);
+  std::memcpy(e + 6, kStaMac, 6);
+  e[12] = 0x08;
+  e[13] = 0x00;
+  for (int i = 0; i < frames; i++) tap_down_one(e, sizeof e);
+  drain_tx();
+}
+
+void test_an_unconfirmed_open_association_is_lost() {
+  reset_all();
+  Ap ap;
+  open_link_with_uplink(ap, (int)kConfirmUplink);
+  check(g_sm.state() == StationSm::State::Connected, "the open link is up");
+  supervise(kConfirmMs - 1);
+  check(g_sm.state() == StationSm::State::Connected,
+        "...and not judged before kConfirmMs");
+  supervise(kConfirmMs);
+  check(g_sm.state() == StationSm::State::Failed &&
+            g_sm.fail_reason() == StationSm::Failure::Unconfirmed,
+        "uplink with no unicast reply: lost as Unconfirmed");
+  check(g_unconfirmed_lost.load() == 1 && g_reconnects.load() == 1,
+        "...counted once, as a lost link");
+  const uint64_t joins = g_joins.load();
+  const std::vector<uint8_t> b = beacon(false);
+  rx_frame(b.data(), b.size(), -40, kConfirmMs + 200);
+  supervise(kConfirmMs + 200);
+  check(g_joins.load() == joins + 1, "...and re-joined after the backoff");
+}
+
+void test_a_unicast_reply_confirms_the_association() {
+  reset_all();
+  Ap ap;
+  open_link_with_uplink(ap, (int)kConfirmUplink);
+  const uint8_t pl[16] = {1};
+  const std::vector<uint8_t> d = ap.plain_to_sta(pl, sizeof pl);
+  rx_frame(d.data(), d.size(), -40, 100);
+  (void)tap_read();
+  for (int i = 0; i < 10; i++) {
+    uint8_t e[60] = {0};
+    std::memcpy(e, kPeer, 6);
+    std::memcpy(e + 6, kStaMac, 6);
+    e[12] = 0x08;
+    tap_down_one(e, sizeof e);
+  }
+  drain_tx();
+  supervise(kConfirmMs * 4);
+  check(g_sm.state() == StationSm::State::Connected,
+        "a unicast reply confirms the open association for good");
+}
+
+void test_an_idle_open_association_is_not_judged() {
+  reset_all();
+  Ap ap;
+  open_link_with_uplink(ap, 0);
+  supervise(kConfirmMs * 4);
+  check(g_sm.state() == StationSm::State::Connected,
+        "an idle host is never judged unconfirmed");
+}
+
 /* THE FCS IS TRIMMED ONLY WHERE IT IS PRESENT, and a runt shorter than its
  * FCS is length 0, not an unsigned wrap that every later bounds check would
  * pass. */
@@ -1921,6 +2039,10 @@ int self_test() {
   selftest::test_the_tid_comes_from_the_qos_control_field();
   selftest::test_a_group_key_we_cannot_use();
   selftest::test_the_fcs_is_trimmed_only_where_present();
+  selftest::test_an_unconfirmed_open_association_is_lost();
+  selftest::test_a_unicast_reply_confirms_the_association();
+  selftest::test_an_idle_open_association_is_not_judged();
+  selftest::test_multicast_chatter_is_not_judged();
   selftest::test_a_retransmission_is_a_duplicate();
   selftest::test_the_dup_cache_spans_a_rekey_not_an_association();
   selftest::test_a_full_tap_is_a_drop_not_a_stall();

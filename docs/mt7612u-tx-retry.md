@@ -60,11 +60,18 @@ How it reads the status FIFO:
   entries that echo the current arm's pktid. Entries carrying the previous
   arm's pktid are reported as late, any other as foreign - so late status from
   an unsettled arm never lands in the next arm's columns.
-- **Paced to the status, not the submit.** A submit only queues the USB
-  transfer, so each frame waits for its own status entry before the next is
-  sent, bounded by the ladder at the effective limit; an expired wait counts
-  as a per-frame status timeout. A final settle loop collects anything still
-  owed.
+- **Paced to the chip, then to the status.** A submit only queues the USB
+  transfer, so each frame first waits up to 1.5 s for that transfer to
+  complete - one that fails within that wait is resent and not counted as
+  sent, and the arm says how many did; one still in flight then counts as
+  sent, since a TX transfer has no timeout and a resend would air it twice
+  (should it fail later, the failure is charged to the next frame) - then
+  for its own
+  status entry, bounded by the ladder at the
+  effective limit and never less than 2 s; an expired wait counts as a
+  per-frame status timeout. A final settle loop collects anything still
+  owed. `DEVOURER_TXS_TRACE=1` logs every submit, expired wait and popped
+  entry with its raw words (`TXS` lines; the table is unchanged).
 - On receiver-ON passes the 1 Hz PHY tick runs from those waits, and WCID 1
   must read back as installed or the gate fails.
 
@@ -96,7 +103,8 @@ initvals.
 
 Columns: own-pktid entries / sent, successes, mean retry, max retry, fps,
 then per-frame status timeouts `T`, late entries from the previous arm `L`,
-foreign entries `F`; `U` = UNSETTLED. fps includes each frame's wait for its
+foreign entries `F`; `U` = UNSETTLED (fewer entries than frames sent, or
+an arm cut short before it sent all of its frames). fps includes each frame's wait for its
 own status entry: on a clean row it is per-frame submit-to-status time, on a
 row with timeouts it is the wait bound, not a rate.
 
@@ -163,10 +171,13 @@ What it shows:
   one late entry (or, for the very first arm, one foreign entry) in that
   SAME arm's row. Counting 39/40 rows, it hit five of sixteen at limit 0,
   eleven at limit 5 and seven on the initvals - one run each. Arm a lags in
-  every pass; which other arms lag varies from pass to pass. The table rules
-  out "status posted only on the next TX": at limit 0, receiver ON, arm f
-  lags with L1 although arm e before it settled 40/40 and owed nothing, and
-  arm g after it shows no late entry. What fits is the two-transfer read:
+  every pass; which other arms lag varies from pass to pass. This table
+  seemed to rule out "status posted only on the next TX" (at limit 0,
+  receiver ON, arm f lags with L1 although arm e before it settled 40/40 and
+  owed nothing, and arm g after it shows no late entry) - a later trace
+  shows exactly that for some arms; see "Status posted on the next
+  submit" below. What fits THIS table's first-entry case is the two-transfer
+  read:
   when the FIFO is empty at the EXT read and an entry is filed before the
   main read, the popped entry is paired with the stale EXT word of the
   previous entry. On an arm's first entry that is the previous arm's pktid,
@@ -186,6 +197,51 @@ What it shows:
   hardware.
 - **Arms e-h**: e, f and g read like c whenever they are clean; nothing
   distinguishes them. h (broadcast, WCID 1) lagged in five of six passes.
+
+## Status posted on the next submit (#461)
+
+`tests/mt7612u_sta_uplink.sh` at ch6, retry limit 15, the RTL8812CU peer
+answering for the DUT's target in its arm A and for another address in arm
+B, with `DEVOURER_TXS_TRACE=1`: one run at 60 frames per arm and two at 20
+(the second pair differing only in the data-frame QSEL, below) - six harness
+arms, each running all sixteen gate arms.
+
+**The gate used to lose frames, not status.** Before the gate waited for
+each transfer, its per-frame wait (60 + 50 ms) was far shorter than an
+unacknowledged frame's ~1.1 s on this channel, so it submitted ahead of the
+air: the chip's queue filled, its bulk OUT stopped accepting, and the async
+ring's 1000 ms transfer timeout (since removed: TX transfers now carry
+none, as mt76's do not) cancelled 9-50 of every 60 frames per unicast arm.
+Those were counted as sent; the surviving backlog filed its
+status seconds later in later arms' rows, as late or foreign. With the gate
+pacing on the transfer, no transfer failed in any of the three runs.
+
+**Some arms then file each frame's status only when the NEXT frame is
+submitted.** The trace shows it frame by frame: SUBMIT, the whole 2 s wait
+expires with nothing, and the entry pops within ~1 ms of the next frame's
+bulk transfer - so every wait times out, and the arm's last entry lands in
+the next arm as late (N-1/N, `late=1`). Which arms, across the six harness
+arms (rx0/rx1 = receiver off/on):
+
+| arm | rx0 | rx1 |
+|---|---|---|
+| a broadcast, No Ack | 6/6 | 6/6 |
+| h broadcast, wcid 1 | 6/6 | 6/6 |
+| e, f, g unicast No Ack (ownSA) | 0/6 | in all 3 peer-answering arms (A), one to three of e/f/g each; 0/3 in B |
+| b unicast Normal (static SA, never ACKed) | 1/6 | 1/6 |
+| c unicast No Ack; d unicast Normal (ownSA) | 0/6 | 0/6 |
+
+So broadcast holds every time, in both receiver states; unicast No-Ack holds
+only with the receiver on and a peer answering on the channel. Why the MAC
+holds the entry is not established. The 2 s floor does not cause it - no wait
+helps when the entry needs the next submit - but it makes a held arm cost
+2 s a frame, which is what makes the harness slow (35 min at 60 frames).
+
+**The data-frame queue is not it.** `MT_QSEL_EDCA` here is 1, which is
+mt76's HCCA value (`enum mt76_qsel`: MGMT 0, HCCA 1, EDCA 2). The two 20-frame
+runs aired data at QSEL 1 and at QSEL 2 from one build and read the same:
+the same arms held and the same ~1.1 s unacknowledged retire. The define is
+left as it is.
 
 ## Radiotap NOACK disables the retry
 
@@ -246,6 +302,25 @@ answers "how many attempts"; it does not answer "how long did each take".
 It is the difference between `docs/mt7612u.md`'s "address one-way links to
 broadcast or multicast" guidance and a usable one-way *unicast* link, which is
 why it is worth an issue of its own.
+
+## Open: ~1.1 s per unacknowledged frame on ch6
+
+On ch6 an unacknowledged frame at limit 15 retires in 1.1-1.4 s (arms b and d
+in arm B, b in both; the status reads 16 retries at OFDM 6M, rate word
+0x2000), against ~46 ms on ch36 above - ~70 ms an attempt where the EDCA
+arithmetic gives ~3-5 ms. Not the queue (above). What the registers say,
+decoded against mt76's field layout, none of it decisive:
+
+- `MT_TX_RTS_CFG` 0x00ffff20: RTS retry limit 32, threshold 0xffff.
+- `MT_CCK_PROT_CFG` 0x07f40003 / `MT_OFDM_PROT_CFG` 0x07f42004: CTRL 0 (no
+  protection), RTS-threshold enable set - so no RTS at 1400 bytes.
+- `MT_MM20/GF20_PROT_CFG` 0x01752004, `MM40/GF40` 0x03f52084: CTRL 1, RTS/CTS
+  FORCED for HT frames, at OFDM 24M. The first attempts at HT MCS7 would
+  each be an unanswered RTS, retried to 32 - but the same initvals ran on
+  ch36, and the final attempts (OFDM 6M) fall under OFDM_PROT, which is off.
+- `MT_TX_TIMEOUT_CFG` 0x000a2290: ACK timeout 0x22 (34 us).
+
+Nothing in-tree writes these after the initvals.
 
 ## Caveats
 

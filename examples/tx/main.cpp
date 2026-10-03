@@ -1090,6 +1090,30 @@ int main(int argc, char **argv) {
     });
     logger->info("DEVOURER_TX_WITH_RX=thread: RX loop started alongside TX");
   }
+  /* Stops and joins the RX and USB event threads on every exit from here,
+   * the early returns below included - a joinable std::thread destructor
+   * terminates the process. The normal teardown's order: StopRxLoop and the
+   * RX join, then the event pump (which polls g_devourer_should_stop). It is
+   * declared after the session, so on an early return it runs while the
+   * device and libusb are still alive. Both threads start after the
+   * DEVOURER_TX_WITH_RX fork, so a fork child never reaches here. */
+  struct IoThreadsJoin {
+    IRadio *dev;
+    std::thread &rx, &usb;
+    bool done = false;
+    void join() {
+      if (done)
+        return;
+      done = true;
+      dev->StopRxLoop();
+      if (rx.joinable())
+        rx.join();
+      g_devourer_should_stop = true;
+      if (usb.joinable())
+        usb.join();
+    }
+    ~IoThreadsJoin() { join(); }
+  } io_threads{rtlDevice, rx_thread, usb_thread};
 
   /* DEVOURER_STA_IDENTITY: arm before the first frame, once the RX loop is
    * shown running - its first received frame (3 s cap: a silent channel still
@@ -2677,11 +2701,7 @@ int main(int argc, char **argv) {
   sta_stop = true;
   if (sta_clear_thread.joinable())
     sta_clear_thread.join();
-  rtlDevice->StopRxLoop();
-  if (rx_thread.joinable())
-    rx_thread.join();
-  if (usb_thread.joinable())
-    usb_thread.join();
+  io_threads.join();
 
   /* Clean chip de-init before releasing the interface: card-disable PWR_SEQ on
    * the HalMAC families, TX quiesce on Jaguar1 — so the adapter re-enumerates

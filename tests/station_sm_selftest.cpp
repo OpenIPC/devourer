@@ -2201,7 +2201,42 @@ void test_qos_null_is_ignored_and_alive() {
         "qos null: ...and a stream of them keeps the link alive");
 }
 
+/* link_lost(): the caller's liveness check ends an association through the
+ * ordinary failure path, and only an association. A repeated Association
+ * Response after it is counted, not taken as a second success. */
+void test_link_lost() {
+  BssTable table;
+  StationSm sm;
+  FixtureAp ap;
+
+  ap.sends_msg1 = false;
+  sm.configure_open(kSsid, kOwn);
+  sm.link_lost();
+  check(sm.state() == StationSm::State::Idle, "link_lost() before a join changes nothing");
+  discovered(table, 6, /*rsn=*/false);
+  const BssEntry* bss = table.select_open(kSsid);
+  if (!bss) { check(false, "an open BSS to join"); return; }
+  sm.join(*bss, nullptr, 0);
+  pump(sm, ap, 0);
+  check(sm.state() == StationSm::State::Connected, "connected");
+
+  std::vector<uint8_t> again = ap.mgmt(devourer::sta::kFcAssocResp);
+  devourer::sta::put_le16(again, 0x0011);
+  devourer::sta::put_le16(again, 0);
+  devourer::sta::put_le16(again, (uint16_t)(0xc000 | ap.aid));
+  sm.on_rx(again.data(), again.size(), 10);
+  check(sm.rx_assoc_repeat == 1 && sm.state() == StationSm::State::Connected,
+        "a repeated Association Response is counted and changes nothing");
+
+  sm.link_lost();
+  check(sm.state() == StationSm::State::Failed &&
+            sm.fail_reason() == StationSm::Failure::Unconfirmed,
+        "link_lost() fails a Connected association as Unconfirmed");
+  check(sm.aid() == 0, "...and drops the AID");
+}
+
 int main() {
+  test_link_lost();
   test_cleartext_eapol_after_keying();
   test_join_on_a_live_association();
   test_beacon_interval_is_capped();

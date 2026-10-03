@@ -161,48 +161,17 @@ sta_pid_init dut peer hostapd
 
 # --- adapter identity and hand-back -----------------------------------------
 # The DUT and the PEER are opened by rxdemo / txdemo, whose libusb open
-# detaches the kernel driver and never re-attaches it. Each is recorded
-# (idVendor:idProduct:serial) before anything runs, marked touched just
-# before a process opens it, and handed back with an `authorized` 0/1 toggle
-# only when this run touched it AND the path still names the recorded device.
-declare -A RT_ID=()
-rt_record() { # $1 name, $2 sysfs, $3 vid, $4 pid
-  local d="/sys/bus/usb/devices/$2" want have
-  if [ "$(cat "$d/bDeviceClass" 2>/dev/null)" = "09" ]; then
-    echo "refusing $1 at $2 - a hub"; return 1
-  fi
-  want=$(printf '%04x:%04x' "$(($3))" "$(($4))" 2>/dev/null)
-  have="$(cat "$d/idVendor" 2>/dev/null):$(cat "$d/idProduct" 2>/dev/null)"
-  if [ "$have" != "$want" ]; then
-    echo "refusing $1 at $2 - it reports $have, not $want"; return 1
-  fi
-  RT_ID[$1]=$(sta_usb_id "$2")
-  rm -f "$OUT/.opened_$1"
-}
-rt_opened() { : > "$OUT/.opened_$1"; }
-rt_handback() { # $1 name, $2 sysfs
-  [ -n "${RT_ID[$1]:-}" ] || return 0
-  local id=${RT_ID[$1]}
-  RT_ID[$1]=""
-  [ -e "$OUT/.opened_$1" ] || return 0
-  rm -f "$OUT/.opened_$1"
-  if [ "$(sta_usb_id "$2")" != "$id" ]; then
-    echo "$1 path $2 no longer names the recorded device ($id) - not re-enumerating it"
-    return 0
-  fi
-  echo 0 > "/sys/bus/usb/devices/$2/authorized" 2>/dev/null
-  sleep 2
-  echo 1 > "/sys/bus/usb/devices/$2/authorized" 2>/dev/null
-}
+# detaches the kernel driver and never re-attaches it: each goes through the
+# lib's sta_dev_record / sta_dev_opened / sta_dev_handback.
 
 if [ "$DUT_SYSFS" = "${PEER_SYSFS:-x}" ] || [ "$DUT_SYSFS" = "${AP_SYSFS:-x}" ] ||
    { [ -n "$PEER_SYSFS" ] && [ "$PEER_SYSFS" = "${AP_SYSFS:-x}" ]; }; then
   echo "DUT_SYSFS, PEER_SYSFS and AP_SYSFS must be three different adapters"
   sta_lock_release; exit 2
 fi
-rt_record dut "$DUT_SYSFS" "$DUT_VID" "$DUT_PID" || { sta_lock_release; exit 2; }
+sta_dev_record dut "$DUT_SYSFS" "$DUT_VID" "$DUT_PID" || { sta_lock_release; exit 2; }
 if [ "$HALF" != up ]; then
-  rt_record peer "$PEER_SYSFS" "$PEER_VID" "$PEER_PID" || { sta_lock_release; exit 2; }
+  sta_dev_record peer "$PEER_SYSFS" "$PEER_VID" "$PEER_PID" || { sta_lock_release; exit 2; }
 fi
 
 AP_IF=""
@@ -219,9 +188,9 @@ cleanup() {
   sta_pid_kill hostapd
   # Only once a process has really exited: re-enumerating an adapter still
   # inside its de-init is what the hand-back must not do.
-  if [ "$dut_gone" = 0 ]; then rt_handback dut "$DUT_SYSFS"
+  if [ "$dut_gone" = 0 ]; then sta_dev_handback dut "$DUT_SYSFS"
   else echo "DUT still running - not re-enumerating $DUT_SYSFS"; fi
-  if [ "$peer_gone" = 0 ]; then rt_handback peer "${PEER_SYSFS:-}"
+  if [ "$peer_gone" = 0 ]; then sta_dev_handback peer "${PEER_SYSFS:-}"
   else echo "peer still running - not re-enumerating $PEER_SYSFS"; fi
   if [ "$AP_REENUM" = yes ]; then
     # hostapd's `bssid=` leaves the interface carrying that address after it
@@ -376,7 +345,7 @@ down_arm() {
       armed)   sta_env="DEVOURER_STA_IDENTITY=self,$BSSID" ;;
       cleared) sta_env="DEVOURER_STA_IDENTITY=self,$BSSID DEVOURER_STA_CLEAR_AFTER_MS=$CLEAR_AFTER_MS" ;;
     esac
-    rt_opened dut
+    sta_dev_opened dut
     # shellcheck disable=SC2046,SC2086  # word-split assignments on purpose
     env DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" $(sel_env "$DUT_SYSFS") \
         DEVOURER_CHANNEL="$CH" DEVOURER_LOG_LEVEL=info \
@@ -410,7 +379,7 @@ down_arm() {
   fi
 
   t0=$(date +%s)
-  rt_opened peer
+  sta_dev_opened peer
   # shellcheck disable=SC2046  # word-split assignments on purpose
   env DEVOURER_VID="$PEER_VID" DEVOURER_PID="$PEER_PID" $(sel_env "$PEER_SYSFS") \
       DEVOURER_CHANNEL="$CH" \
@@ -460,7 +429,7 @@ up_arm() { # $1 tag, $2 RA, $3 armed | unarmed (default armed)
   : > "$res"
   [ "$mode" = armed ] && sta_env="DEVOURER_STA_IDENTITY=$OWN,$BSSID"
   t0=$(date +%s)
-  rt_opened dut
+  sta_dev_opened dut
   # shellcheck disable=SC2046,SC2086  # word-split assignments on purpose
   env DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" $(sel_env "$DUT_SYSFS") \
       DEVOURER_CHANNEL="$CH" $sta_env \
@@ -530,7 +499,7 @@ OWN="${DUT_MAC:-}"
 # learned from a short armed rxdemo run's sta.arm event - which also proves,
 # before any arm is scored, that the seam arms on this DUT at all.
 if [ -z "$OWN" ]; then
-  rt_opened dut
+  sta_dev_opened dut
   # shellcheck disable=SC2046  # word-split assignments on purpose
   env DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" $(sel_env "$DUT_SYSFS") \
       DEVOURER_CHANNEL="$CH" DEVOURER_LOG_LEVEL=info \
@@ -620,7 +589,7 @@ if [ "$HALF" != up ]; then
     inc "CLEAR: arm E (or D) aborted or carried under $MIN_REPORTS reports"
   fi
   # The DOWN half no longer needs the peer: hand it back now.
-  rt_handback peer "$PEER_SYSFS"
+  sta_dev_handback peer "$PEER_SYSFS"
 fi
 
 # =============================== UP =========================================

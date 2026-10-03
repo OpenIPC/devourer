@@ -1,7 +1,8 @@
 # shellcheck shell=sh
 # mt7612u_sta_lib.sh - shared plumbing for the station harnesses
-# (tests/mt7612u_sta_identity.sh, _autoack.sh, _uplink.sh, _onair.sh; the
-# generic helpers also serve tests/realtek_station_onair.sh). Sourced, not run.
+# (tests/mt7612u_sta_identity.sh, _autoack.sh, _uplink.sh; the generic helpers
+# also serve tests/sta_client_onair.sh and tests/realtek_station_onair.sh).
+# Sourced, not run.
 #
 # Four rules these scripts run as root under:
 #
@@ -18,9 +19,10 @@
 #   - Kill only what this run started, by recorded PID. No pattern kills, and
 #     no PID read from a file an earlier run left behind: sta_pid_init()
 #     removes stale PID files before anything is started.
-#   - Hand every adapter back: the Realtek peer through sta_peer_handback()
-#     (below), the AP in tests/mt7612u_sta_identity.sh's cleanup, and the DUT
-#     here. The harnesses unbind the MT7612U from mt76x2u so
+#   - Hand every adapter back: a devourer-opened adapter through
+#     sta_dev_handback() (below; sta_peer_handback() is its PEER_SYSFS
+#     form), the AP in tests/mt7612u_sta_identity.sh's cleanup, and the
+#     MT7612U DUT here. The harnesses unbind the MT7612U from mt76x2u so
 #     mt7612uprobe can claim it; sta_dut_handback() re-enumerates it with an
 #     `authorized` 0/1 toggle so the kernel driver binds again, exactly as
 #     tests/mt7612u_ap_onair.sh does - and only after confirming the path
@@ -191,57 +193,87 @@ sta_usb_id() {
     "$(cat "/sys/bus/usb/devices/$1/serial" 2>/dev/null)"
 }
 
-# The Realtek peer (PEER_SYSFS) is opened by txdemo / rxdemo, whose libusb
-# open detaches its kernel driver and never re-attaches it. sta_peer_record()
-# checks and notes the peer's identity before the run; sta_peer_opened() marks
-# it touched (a file in OUT, because the peer is started inside a command
-# substitution whose variables the parent never sees) just before a peer
-# process starts; sta_peer_handback() re-enumerates it with an `authorized`
-# 0/1 toggle so its driver binds again - only when this run did open it, and
-# only while PEER_SYSFS still reports the recorded identity, so a device that
-# replaced it at the same path is left alone.
-STA_PEER_ID=""
-# The peer must be the adapter the run was told about: PEER_VID:PEER_PID at
-# PEER_SYSFS, not a hub, not the DUT's path. Checked before anything runs.
-sta_peer_record() {
-  _sta_pd="/sys/bus/usb/devices/$PEER_SYSFS"
-  if [ "$PEER_SYSFS" = "$DUT_SYSFS" ]; then
-    echo "refusing PEER_SYSFS=$PEER_SYSFS - it is the DUT's path"; return 1
+# An adapter devourer opens over libusb (a Realtek DUT or peer): the libusb
+# open detaches its kernel driver and nothing re-attaches it. Each is kept
+# under a NAME, in files in OUT (a process started inside a command
+# substitution sets them too, and its variables never reach the parent):
+#   sta_dev_record NAME SYSFS VID PID - before the run: refuse a hub and any
+#     device that is not VID:PID, and note its idVendor:idProduct:serial;
+#   sta_dev_opened NAME - just before a process opens it;
+#   sta_dev_handback NAME SYSFS - re-enumerate it with an `authorized` 0/1
+#     toggle so its kernel driver binds again - only when this run opened it,
+#     and only while SYSFS still reports the recorded identity, so a device
+#     that replaced it at the same path is left alone. Idempotent.
+sta_dev_record() {
+  _sta_dd="/sys/bus/usb/devices/$2"
+  if [ "$(cat "$_sta_dd/bDeviceClass" 2>/dev/null)" = "09" ]; then
+    echo "refusing $1 at $2 - a hub"; return 1
   fi
-  if [ "$(cat "$_sta_pd/bDeviceClass" 2>/dev/null)" = "09" ]; then
-    echo "refusing PEER_SYSFS=$PEER_SYSFS - a hub"; return 1
-  fi
-  _sta_want=$(printf '%04x:%04x' "$((PEER_VID))" "$((PEER_PID))" 2>/dev/null)
-  _sta_have="$(cat "$_sta_pd/idVendor" 2>/dev/null):$(cat "$_sta_pd/idProduct" 2>/dev/null)"
+  _sta_want=$(printf '%04x:%04x' "$(($3))" "$(($4))" 2>/dev/null)
+  _sta_have="$(cat "$_sta_dd/idVendor" 2>/dev/null):$(cat "$_sta_dd/idProduct" 2>/dev/null)"
   if [ "$_sta_have" != "$_sta_want" ]; then
-    echo "refusing PEER_SYSFS=$PEER_SYSFS - it reports $_sta_have, not" \
-         "PEER_VID:PEER_PID $_sta_want"
-    return 1
+    echo "refusing $1 at $2 - it reports $_sta_have, not $_sta_want"; return 1
   fi
-  STA_PEER_ID=$(sta_usb_id "$PEER_SYSFS")
-  rm -f "$OUT/.peer_opened"
+  sta_usb_id "$2" > "$OUT/.id_$1"
+  rm -f "$OUT/.opened_$1"
   return 0
 }
 
-sta_peer_opened() { : > "$OUT/.peer_opened"; }
+sta_dev_opened() { : > "$OUT/.opened_$1"; }
 
-sta_peer_handback() {
-  [ -n "$STA_PEER_ID" ] || return 0
-  _sta_peer_id=$STA_PEER_ID
-  STA_PEER_ID=""
-  if [ ! -e "$OUT/.peer_opened" ]; then
+sta_dev_handback() {
+  [ -f "$OUT/.id_$1" ] || return 0
+  _sta_id=$(cat "$OUT/.id_$1" 2>/dev/null)
+  rm -f "$OUT/.id_$1"
+  [ -e "$OUT/.opened_$1" ] || return 0
+  rm -f "$OUT/.opened_$1"
+  if [ "$(sta_usb_id "$2")" != "$_sta_id" ]; then
+    echo "$1 path $2 no longer names the recorded device ($_sta_id) -" \
+         "not re-enumerating it"
     return 0
   fi
-  rm -f "$OUT/.peer_opened"
-  if [ "$(sta_usb_id "$PEER_SYSFS")" != "$_sta_peer_id" ]; then
-    echo "PEER_SYSFS=$PEER_SYSFS no longer names the recorded peer" \
-         "($_sta_peer_id) - not re-enumerating it"
-    return 0
-  fi
-  echo 0 > "/sys/bus/usb/devices/$PEER_SYSFS/authorized" 2>/dev/null
+  echo 0 > "/sys/bus/usb/devices/$2/authorized" 2>/dev/null
   sleep 2
-  echo 1 > "/sys/bus/usb/devices/$PEER_SYSFS/authorized" 2>/dev/null
+  echo 1 > "/sys/bus/usb/devices/$2/authorized" 2>/dev/null
 }
+
+# Unbind the kernel driver from every interface of the USB device at $1 that
+# carries a wireless netdev (rtw88, an out-of-tree rtl88x2*, mt76x2u - and
+# not a composite adapter's Bluetooth interface), then require that none is
+# left: a driver still bound would own the chip under devourer. Nothing
+# bound is fine. Hand the device back with sta_dev_handback.
+sta_dev_unbind_wifi() {
+  for _sta_if in "/sys/bus/usb/devices/$1:"*; do
+    [ -e "$_sta_if/driver" ] || continue
+    for _sta_n in "$_sta_if/net/"*; do
+      [ -e "$_sta_n/phy80211" ] || continue
+      basename "$_sta_if" > "$_sta_if/driver/unbind" 2>/dev/null
+      break
+    done
+  done
+  sleep 2
+  for _sta_if in "/sys/bus/usb/devices/$1:"*; do
+    for _sta_n in "$_sta_if/net/"*; do
+      if [ -e "$_sta_n/phy80211" ]; then
+        echo "could not free $1: $(basename "$_sta_if") still carries" \
+             "$(basename "$_sta_n") ($(basename "$(readlink -f "$_sta_if/driver")"))"
+        return 1
+      fi
+    done
+  done
+  return 0
+}
+
+# The Realtek peer of the MT7612U harnesses: the sta_dev_* helpers on
+# PEER_SYSFS / PEER_VID:PEER_PID, which must not be the DUT's path.
+sta_peer_record() {
+  if [ "$PEER_SYSFS" = "$DUT_SYSFS" ]; then
+    echo "refusing PEER_SYSFS=$PEER_SYSFS - it is the DUT's path"; return 1
+  fi
+  sta_dev_record peer "$PEER_SYSFS" "$PEER_VID" "$PEER_PID"
+}
+sta_peer_opened() { sta_dev_opened peer; }
+sta_peer_handback() { sta_dev_handback peer "$PEER_SYSFS"; }
 
 # mt7612uprobe loads its firmware from ./firmware. sta_fw_link() creates
 # $ROOT/firmware -> FW_DIR only when nothing is there - not even a dangling

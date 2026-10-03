@@ -44,8 +44,8 @@
 # station (the AP then deauths the "class 3" sender - expected, harmless).
 #
 # An arm is scored only when its transmitter kept airing through the window
-# (no silence over MAX_GAP_MS between its reports, or after the last one -
-# see summarize) and carried MIN_REPORTS reports and its submission floor
+# (no silence over MAX_GAP_MS before its first report, between its
+# reports, or after the last one - see summarize) and carried MIN_REPORTS reports and its submission floor
 # (MIN_SUBMITTED, scaled to the span it aired). Reception in arm A is
 # judged against the peer's REPORTED frames, which aired; submitted frames
 # left unreported at window close are printed separately.
@@ -88,12 +88,13 @@ GAP_US="${GAP_US:-5000}"
 HALF="${HALF:-both}"
 MIN_REPORTS="${MIN_REPORTS:-50}"
 MIN_RX_PCT="${MIN_RX_PCT:-80}"
-# Transmitter liveness: the longest silence allowed between two of an arm's
-# CCX reports, and between its last report and its final tx.stats.
+# Transmitter liveness: the longest silence allowed from an arm's first
+# submit to its first CCX report, between two reports, and from its last
+# report to its final tx.stats.
 MAX_GAP_MS="${MAX_GAP_MS:-2000}"
 # Per-arm floor on frames the transmitter submitted. Default: a quarter of
 # the nominal GAP_US rate over the span the arm actually aired - its first
-# report to its final tx.stats (see summarize) - not over SECS, which also
+# submit to its final tx.stats (see summarize) - not over SECS, which also
 # holds the transmitter's bring-up: an 8812BU peer has spent 6-9 s of a 10 s
 # window in InitWrite and been scored a stall at 283-327 healthy frames.
 # The slowest arm on record, an unacknowledged one at 12 retries, submitted
@@ -275,23 +276,26 @@ wait_for() { # $1 pid, $2 file, $3 regex, $4 timeout s
 
 # One summary line from a transmitter's JSONL (and, optionally, the DUT's
 # rx.seq stream for frames from TA): reports, submitted, unreported,
-# ok_pct, retries_mean, max_gap_ms, tail_ms, live, aired_ms, min_submitted,
-# rx_distinct.
+# ok_pct, retries_mean, lead_ms, max_gap_ms, tail_ms, live, aired_ms,
+# min_submitted, rx_distinct.
+#
+# One clock: tx.report, the first tx.frame (txdemo's first submit) and the
+# final tx.stats all carry t in the host-monotonic tx.report timebase.
 #
 # LIVENESS. A report is a frame that aired, so the reports' own timestamps
-# (t, the host-monotonic tx.report timebase) show whether the transmitter
-# kept airing through the window: max_gap_ms is the longest silence between
-# two reports, tail_ms the silence from the last report to the final
-# tx.stats, which carries t in the same timebase. live=0 when either exceeds
-# MAX_GAP_MS or the final tx.stats has no t - an arm that aired a burst and
-# stalled, which MIN_REPORTS alone would accept.
+# show whether the transmitter kept airing through the window: lead_ms is
+# the silence from the first submit to the first report, max_gap_ms the
+# longest silence between two reports, tail_ms the silence from the last
+# report to the final tx.stats. live=0 when any of them exceeds MAX_GAP_MS,
+# or a timestamp it needs is missing - an arm that aired a burst and
+# stalled, or that started, stalled and burst at the end, which MIN_REPORTS
+# alone would accept.
 #
-# FLOOR. aired_ms runs from the first report to the final tx.stats: the
-# first pair of timestamps in one timebase (txdemo.first_tx_submit carries
-# ms from a different epoch). It ends at the final tx.stats, not the last
-# report, so a transmitter that slows or stops after MIN_REPORTS still owes
-# the whole span. min_submitted is a quarter of the GAP_US rate over it
-# (0 at GAP_US=0, which has no nominal rate), or MIN_SUBMITTED when set.
+# FLOOR. aired_ms runs from the first submit to the final tx.stats - not
+# over SECS, which also holds the transmitter's bring-up, and not from the
+# first report, which a late burst would move to the end. min_submitted
+# is a quarter of the GAP_US rate over it (0 at GAP_US=0, which has no
+# nominal rate), or MIN_SUBMITTED when set.
 summarize() { # $1 tx jsonl, $2 tag, $3 dut jsonl or ""
   python3 - "$1" "$2" "${3:-}" "$MAX_GAP_MS" "$GAP_US" "$MIN_SUBMITTED" <<'PYEOF'
 import json, sys
@@ -301,6 +305,7 @@ n = okc = retries = 0
 submitted = 0
 ts = []
 final_t = None
+first_submit_t = None
 for line in open(tx, errors='replace'):
     if not line.startswith('{'):
         continue
@@ -314,20 +319,26 @@ for line in open(tx, errors='replace'):
         retries += int(e.get('retries', 0) or 0)
         if 't' in e:
             ts.append(int(e['t']))
+    elif e.get('ev') == 'tx.frame':
+        if first_submit_t is None and 't' in e:
+            first_submit_t = int(e['t'])
     elif e.get('ev') == 'tx.stats':
         submitted = int(e.get('submitted', submitted) or submitted)
         if e.get('final') and 't' in e:
             final_t = int(e['t'])
 gap = max((b - a for a, b in zip(ts, ts[1:])), default=0)
 tail = (final_t - ts[-1]) if (final_t is not None and ts) else None
-live = int(bool(ts) and tail is not None and gap <= max_gap
-           and tail <= max_gap)
+lead = (ts[0] - first_submit_t) if (first_submit_t is not None and ts) else None
+live = int(bool(ts) and tail is not None and lead is not None
+           and lead <= max_gap and gap <= max_gap and tail <= max_gap)
 out = (f"{tag} reports={n} submitted={submitted} "
        f"unreported={max(submitted - n, 0)}")
 if n:
     out += f" ok_pct={100.0*okc/n:.1f} retries_mean={retries/n:.2f}"
-out += f" max_gap_ms={gap} tail_ms={'none' if tail is None else tail} live={live}"
-aired = (final_t - ts[0]) if (final_t is not None and ts) else 0
+out += (f" lead_ms={'none' if lead is None else lead} max_gap_ms={gap}"
+        f" tail_ms={'none' if tail is None else tail} live={live}")
+aired = (final_t - first_submit_t) \
+    if (final_t is not None and first_submit_t is not None) else 0
 if fixed_floor:
     floor = int(fixed_floor)
 else:

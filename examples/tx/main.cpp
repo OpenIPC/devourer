@@ -2525,7 +2525,8 @@ int main(int argc, char **argv) {
         ++frames_in_dwell >= hop_dwell)
       frames_in_dwell = 0;
     if (tx_count <= 10 || tx_count % 500 == 0) {
-      devourer::Ev(*g_ev, "tx.frame").f("n", tx_count).f("rc", rc);
+      /* t: the tx.report timebase, so a harness can date the first submit. */
+      devourer::Ev(*g_ev, "tx.frame").f("n", tx_count).f("rc", rc).t();
       /* TX submission health — the driver-drop / congestion feed (xtx). A
        * climbing failed with was_timeout=1 is a full TX FIFO (recoverable
        * back-pressure); a hard rc is a broken path. */

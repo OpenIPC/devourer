@@ -63,6 +63,12 @@ join that fails - ends the attempts: the station logs it, stays
 unassociated until its time is up, and the ledger ends `Failed` with the
 reason.
 
+The moment an association response is accepted - open or WPA2 - the
+station sends one probe request (the "nudge", counted as `nudges` in the
+ledger): see "AP quirk" below. On WPA2 a second one follows if no EAPOL has
+arrived 1 s later; the four-way timeout re-joins if even that is not
+enough.
+
 An open association is confirmed by the AP's first unicast frame to the
 station. A station cannot see the AP's side: if the AP never saw the
 association response acknowledged, it does not hold the station, drops its
@@ -123,17 +129,35 @@ first line then reads `fault=1`.
   time), 3 interrupted. `FW_DIR` (an MT7612U DUT) must hold the decompressed
   MT7612U blobs.
 
-## Known issue: RTL8812CU (8822C) association on 2.4 GHz
+## AP quirk: an MT7612U AP holds the association's TX status
 
-Intermittently, against an MT7612U AP on channel 6, the armed 8822C station
-receives the association response but the AP never sees it acknowledged:
-hostapd's status for it stays pending until the station is removed
-("handle_assoc_cb: STA ... not found"). In captures of passing runs the
-8822C acknowledges both the authentication and the association response
-within ~0.3 ms, at 1 Mb/s CCK, and an OFDM-only AP (`AP_OFDM_ONLY=1`) fails
-the same way, so it is not a CCK-only problem. The cause is not settled.
-The station recovers by itself: on WPA2 through the four-way timeout, on an
-open BSS through the confirmation rule above.
+An MT7612U running as the AP (kernel mt76x2u, hostapd) can hold a
+transmitted frame's TX status until its NEXT transmission - the same
+silicon behaviour `docs/mt7612u-tx-retry.md` records for this tree's own
+MT7612U driver ("status posted only on the next TX"). hostapd acts on an
+association only once the Association Response's status is in: it counts
+the station associated - dropping its data until then - and on WPA2 starts
+the four-way only from that status too, so both an open association and
+the WPA2 key exchange stall the same way. In hostapd's debug log
+(`HOSTAPD_DEBUG=1`):
+
+- "association OK (aid 1)", the station added, the Association Response
+  sent;
+- no TX status for it for six seconds, while the station - which had
+  received the response and acknowledged it - believed it was associated;
+- then the station's next frame made the AP transmit, and the status
+  arrived with `ack=1`: too late, the station had already given up on the
+  association ("handle_assoc_cb: STA ... not found").
+
+The station is not at fault: it acknowledged the response, at 1 Mb/s CCK,
+within ~0.3 ms in captures. The stall is intermittent and depends on
+whether anything else makes the AP transmit soon after the response, which
+is why a given station can pass several runs and then fail several in a
+row; on WPA2 it shows as the four-way never starting, each attempt ending
+in the station's handshake timeout. sta_client sends its nudge for exactly
+this, for open and WPA2 alike; the confirmation rule (open) and the
+four-way timeout (WPA2) re-join if the association still never becomes the
+AP's.
 
 ## What it does not do
 

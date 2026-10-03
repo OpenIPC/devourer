@@ -111,6 +111,10 @@ void reset_all() {
   g_assoc_ms = 0;
   g_uplink_unconfirmed = 0;
   g_unconfirmed_lost = 0;
+  g_nudges = 0;
+  g_nudge_ms = 0;
+  g_nudge_again = false;
+  g_nudge_eapol_rx = 0;
 }
 
 /* Drain whatever the station queued, stripping the radiotap prefix the real
@@ -1044,6 +1048,133 @@ void test_a_non_key_eapol_reaches_the_host() {
         "an EAP packet inside the cipher reaches the host");
   check(g_eapol_enc_rx.load() == enc_before,
         "...and is not counted as a rekey");
+}
+
+/* THE NUDGE: an accepted Association Response queues one probe request at
+ * once, open or WPA2, so an AP that holds the response's TX status until its
+ * next transmission is made to transmit (hostapd starts both the association
+ * and the four-way from that status). On WPA2 a second one follows if no
+ * EAPOL has arrived kNudgeAgainMs later, and none once it has. */
+int probes_in(const std::vector<std::vector<uint8_t>>& tx) {
+  int n = 0;
+  for (const std::vector<uint8_t>& f : tx)
+    if (f.size() >= 24 && f[0] == devourer::sta::kFcProbeReq) n++;
+  return n;
+}
+
+/* Beacon, authentication, association - answered, but no message 1. */
+void join_without_msg1(Ap& ap, bool rsn) {
+  const std::vector<uint8_t> b = beacon(rsn);
+  rx_frame(b.data(), b.size(), -40, 0);
+  supervise(0);
+  pump_tx();
+  for (int round = 0; round < 4; round++) {
+    const std::vector<std::vector<uint8_t>> tx = drain_tx();
+    if (tx.empty()) break;
+    for (const std::vector<uint8_t>& f : tx) {
+      if (f.size() >= 24 && f[0] == devourer::sta::kFcProbeReq) {
+        enqueue(f);   /* keep it for the cell to see */
+        continue;
+      }
+      const std::vector<uint8_t> r = ap.respond(f, rsn);
+      if (!r.empty()) rx_frame(r.data(), r.size(), -40, 0);
+    }
+    pump_tx();
+    if (g_sm.state() != StationSm::State::Authenticating &&
+        g_sm.state() != StationSm::State::Associating)
+      break;
+  }
+}
+
+void test_an_accepted_association_nudges_the_ap() {
+  reset_all();
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    g_sm.configure_open(kSsid, g_own);
+  }
+  Ap ap;
+  join_without_msg1(ap, /*rsn=*/false);
+  check(g_sm.state() == StationSm::State::Connected, "the open link is up");
+  check(probes_in(drain_tx()) == 1 && g_nudges.load() == 1,
+        "...and one probe request is queued the moment it is");
+  supervise(kNudgeAgainMs * 3);
+  check(probes_in(drain_tx()) == 0, "...and no second one on an open link");
+
+  reset_all();
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    g_sm.configure(g_crypto, kSsid, kPsk, g_own);
+  }
+  Ap ap2;
+  join_without_msg1(ap2, /*rsn=*/true);
+  check(g_sm.state() == StationSm::State::FourWay,
+        "WPA2: associated, waiting for message 1");
+  check(probes_in(drain_tx()) == 1 && g_nudges.load() == 1,
+        "...nudged the moment the Association Response was accepted");
+  supervise(kNudgeAgainMs - 1);
+  check(probes_in(drain_tx()) == 0, "...not again before kNudgeAgainMs");
+  supervise(kNudgeAgainMs);
+  check(probes_in(drain_tx()) == 1 && g_nudges.load() == 2,
+        "...and once more when no EAPOL has come by then");
+  supervise(kNudgeAgainMs * 3);
+  check(probes_in(drain_tx()) == 0, "...and never a third time");
+
+  reset_all();
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    g_sm.configure(g_crypto, kSsid, kPsk, g_own);
+  }
+  Ap ap3;
+  associate(ap3, /*rsn=*/true);   /* message 1 arrives at once */
+  supervise(kNudgeAgainMs * 3);
+  check(g_sm.keyed() && g_nudges.load() == 1,
+        "WPA2 with message 1 at once: nudged once, no second nudge");
+}
+
+/* A NUDGE IS ONE FRAME AND NOTHING ELSE: no retune, no scan state, no
+ * retune guard, and the AP's probe response it provokes neither moves the
+ * BSS's channel nor changes the beacon-loss window - it only counts as AP
+ * liveness. */
+void test_a_nudge_touches_no_tuning_or_liveness_state() {
+  reset_all();
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    g_sm.configure(g_crypto, kSsid, kPsk, g_own);
+  }
+  Ap ap;
+  associate(ap, /*rsn=*/true);
+  check(g_sm.keyed(), "the link is keyed");
+  drain_tx();
+
+  const uint8_t tuned = g_tuned.load();
+  const uint32_t guard = g_retune_ms.load();
+  const size_t scan_idx = g_scan_idx;
+  const uint32_t scan_switch = g_scan_switch_ms;
+  const uint32_t loss_ms = g_sm.beacon_loss_ms();
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    nudge(100);
+  }
+  const std::vector<std::vector<uint8_t>> tx = drain_tx();
+  check(tx.size() == 1 && probes_in(tx) == 1, "a nudge is exactly one probe request");
+  check(g_tuned.load() == tuned && g_retune_ms.load() == guard,
+        "...that touches neither the tuned channel nor the retune guard");
+  check(g_scan_idx == scan_idx && g_scan_switch_ms == scan_switch,
+        "...nor the scan sweep");
+
+  /* The AP's answer: a probe response from the BSSID to this station. */
+  std::vector<uint8_t> pr = beacon(true);
+  pr[0] = devourer::sta::kFcProbeResp;
+  std::memcpy(pr.data() + 4, kStaMac, 6);
+  rx_frame(pr.data(), pr.size(), -40, 200);
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    const devourer::sta::BssEntry* e = g_bss.find(kBssid);
+    check(e && e->info.channel == 6, "the probe response leaves the BSS on its channel");
+  }
+  check(g_sm.beacon_loss_ms() == loss_ms, "...and the beacon-loss window unchanged");
+  tick(200 + loss_ms - 1);
+  check(g_sm.connected(), "...and counts as AP liveness, not against it");
 }
 
 /* MULTICAST CHATTER IS NOT A QUESTION: frames that expect no reply (here a
@@ -2043,6 +2174,8 @@ int self_test() {
   selftest::test_a_unicast_reply_confirms_the_association();
   selftest::test_an_idle_open_association_is_not_judged();
   selftest::test_multicast_chatter_is_not_judged();
+  selftest::test_an_accepted_association_nudges_the_ap();
+  selftest::test_a_nudge_touches_no_tuning_or_liveness_state();
   selftest::test_a_retransmission_is_a_duplicate();
   selftest::test_the_dup_cache_spans_a_rekey_not_an_association();
   selftest::test_a_full_tap_is_a_drop_not_a_stall();

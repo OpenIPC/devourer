@@ -315,6 +315,31 @@ std::atomic<uint64_t> g_unconfirmed_lost{0};
  * still be a duplicate. The per-key state is not reset here: a PTK or GTK
  * rekey happens with the machine already Connected, so note_keys() owns it,
  * keyed on the supplicant's install generations. */
+void probe(uint8_t chan);   /* below, with the scan */
+std::atomic<uint64_t> g_nudges{0};
+
+/* THE NUDGE. An AP may hold a transmitted frame's TX status until its next
+ * transmission - the MT7612U on mt76x2u does (docs/station-client.md) - and
+ * hostapd acts on an association only once the Association Response's
+ * status (ACK) is in: it counts the station associated, and on WPA2 starts
+ * the four-way, only from that status. Nothing else need make the AP
+ * transmit to us soon, so the association - and the four-way - can stall for
+ * seconds while the station's traffic is dropped. One probe request, which
+ * every AP answers, makes it transmit and releases the held status. Sent the
+ * moment an Association Response is accepted, open or WPA2; on WPA2 a
+ * second one follows if no EAPOL has arrived kNudgeAgainMs later (supervise),
+ * and the four-way timeout re-joins if even that is not enough. Caller holds
+ * g_mu. */
+constexpr uint32_t kNudgeAgainMs = 1000;
+uint32_t g_nudge_ms = 0;
+bool g_nudge_again = false;   /* a second nudge is still owed (WPA2) */
+uint32_t g_nudge_eapol_rx = 0;
+void nudge(uint32_t now) {
+  probe(g_sm.channel() ? g_sm.channel() : g_chan);
+  g_nudges.fetch_add(1);
+  g_nudge_ms = now;
+}
+
 void on_association(uint32_t now) {
   g_unconfirmed = g_sm.security() == StationSm::Security::Open;
   g_assoc_ms = now;
@@ -406,6 +431,15 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
 
   const StationSm::State before = g_sm.state();
   g_sm.on_rx(mpdu, len, now);
+  /* An Association Response accepted: Associating -> Connected (open) or
+   * FourWay (WPA2). */
+  if (before == StationSm::State::Associating &&
+      g_sm.state() != StationSm::State::Associating &&
+      g_sm.state() != StationSm::State::Failed) {
+    nudge(now);
+    g_nudge_again = g_sm.state() == StationSm::State::FourWay;
+    g_nudge_eapol_rx = g_sm.eapol_rx;
+  }
   if (before != StationSm::State::Connected && g_sm.connected())
     on_association(now);
   if (g_sm.connected()) note_keys();
@@ -657,6 +691,18 @@ const char* fail_name(StationSm::Failure f);
 uint8_t supervise(uint32_t now) {
   std::lock_guard<std::mutex> l(g_mu);
 
+  /* WPA2: still no EAPOL kNudgeAgainMs after the first nudge - nudge once
+   * more (see nudge()). */
+  if (g_nudge_again) {
+    if (g_sm.state() != StationSm::State::FourWay ||
+        g_sm.eapol_rx != g_nudge_eapol_rx) {
+      g_nudge_again = false;
+    } else if ((uint32_t)(now - g_nudge_ms) >= kNudgeAgainMs) {
+      g_nudge_again = false;
+      nudge(now);
+    }
+  }
+
   /* An unconfirmed open association the host has been talking through
    * (see kConfirmMs) - lost, through the ordinary failure path below. */
   if (g_sm.state() == StationSm::State::Connected && g_unconfirmed &&
@@ -861,10 +907,12 @@ void report() {
   std::fprintf(stderr, " aid=%u keyed=%d bss_known=%d\n", g_end.aid,
                (int)g_end.keyed, g_bss.count());
   std::fprintf(stderr,
-               "  join: beacons observed=%llu, probes sent=%llu, joins=%llu,"
-               " associations=%llu, reconnects=%llu, unconfirmed=%llu\n",
+               "  join: beacons observed=%llu, probes sent=%llu (nudges %llu),"
+               " joins=%llu, associations=%llu, reconnects=%llu,"
+               " unconfirmed=%llu\n",
                (unsigned long long)g_beacons.load(),
                (unsigned long long)g_probe_tx.load(),
+               (unsigned long long)g_nudges.load(),
                (unsigned long long)g_joins.load(),
                (unsigned long long)g_associations.load(),
                (unsigned long long)g_reconnects.load(),

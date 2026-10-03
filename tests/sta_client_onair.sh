@@ -29,8 +29,9 @@
 #   open     hostapd open, with a ping running from the start: the AP
 #            associates OUR address (hostapd's AP-STA-CONNECTED - its own
 #            record) within 30 s, which covers recovering a first
-#            association the AP did not hold (sta_client re-joins when its
-#            ARP gets no unicast reply, kConfirmMs); ping 0% loss over
+#            association the AP did not hold (sta_client nudges the AP with
+#            a probe request on associating, and re-joins when its ARP gets
+#            no unicast reply, kConfirmMs); ping 0% loss over
 #            the TAP; the ledger shows plaintext and no decryption; the arm
 #            line; the clear ran on exit (verified, on Realtek).
 #   wpa2     hostapd WPA2-PSK with group and pairwise rekeys: four-way, both

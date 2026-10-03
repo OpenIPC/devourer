@@ -289,6 +289,28 @@ void test_rx_filter_ownership() {
   CHECK(s.rx_filtr_restore == keep);
 }
 
+/* A refused first arm whose undo did not read back: the register may hold
+ * the managed filter with nothing armed. The pre-arm value is kept for the
+ * clear, a request is still recorded, and a retried arm does not take the
+ * stranded register for the pre-arm value. */
+void test_stranded_undo_keeps_the_pre_arm_filter() {
+  mt7612u_sta_state s{};
+  mt7612u_sta_strand(&s, kMonitor);
+  CHECK(s.stranded == 1 && s.armed == 0 && s.rx_filtr_restore == kMonitor);
+  /* nothing armed: a request is installed as asked, and recorded */
+  const uint32_t keep = MT_RX_FILTR_CFG_PHY_ERR;
+  CHECK(mt7612u_sta_rx_filter_request(&s, keep, kManaged) == keep);
+  CHECK(s.rx_filtr_restore == keep);
+  /* the retry reads the stranded managed value - and does not record it */
+  mt7612u_sta_arm(&s, kOwn, kBssid, kManaged);
+  CHECK(s.armed == 1 && s.stranded == 0 && s.rx_filtr_restore == keep);
+  /* a strand under a live arm changes nothing: that arm's record stands */
+  mt7612u_sta_strand(&s, kManaged);
+  CHECK(s.armed == 1 && s.stranded == 0 && s.rx_filtr_restore == keep);
+  mt7612u_sta_clear(&s);
+  CHECK(s.stranded == 0 && s.rx_filtr_restore == 0);
+}
+
 } // namespace
 
 int main() {
@@ -304,6 +326,7 @@ int main() {
   test_check_args_needs_no_device();
   test_managed_filter_bits();
   test_rx_filter_ownership();
+  test_stranded_undo_keeps_the_pre_arm_filter();
 
   if (failures) {
     std::fprintf(stderr, "mt7612u_station_selftest: %d failure(s)\n", failures);

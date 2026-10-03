@@ -174,11 +174,20 @@ refused:
 		return -1;
 	}
 	if (sta_write_filter(dev, MT_RX_FILTR_CFG_MANAGED) != 0) {
-		/* Best effort: put back what it held. A previous arm, if any,
-		 * stands - this call changed nothing it can confirm. */
-		mt_wr(dev, MT_RX_FILTR_CFG, filtr);
-		WARN("station identity refused: the managed receive filter "
-		     "%08x did not read back", MT_RX_FILTR_CFG_MANAGED);
+		/* Put back what it held, and verify. A previous arm, if any,
+		 * stands. An undo that does not read back is recorded, so the
+		 * clear still restores `filtr` and a retry does not take the
+		 * stranded value for the pre-arm one. */
+		if (sta_write_filter(dev, filtr) != 0) {
+			mt7612u_sta_strand(&dev->sta, filtr);
+			WARN("station identity refused: the managed receive filter "
+			     "%08x did not read back, nor did the undo to %08x - "
+			     "the clear will retry it", MT_RX_FILTR_CFG_MANAGED,
+			     filtr);
+		} else {
+			WARN("station identity refused: the managed receive filter "
+			     "%08x did not read back", MT_RX_FILTR_CFG_MANAGED);
+		}
 		return -1;
 	}
 	mt7612u_sta_arm(&dev->sta, own, bssid, filtr);
@@ -191,7 +200,7 @@ int mt7612u_clear_station_identity(struct mt7612u_dev *dev)
 		return 0;
 	/* Re-written for a lost arm too: its drop restored the filter best
 	 * effort, and this is where that gets verified. */
-	if ((dev->sta.armed || dev->sta.lost) &&
+	if ((dev->sta.armed || dev->sta.lost || dev->sta.stranded) &&
 	    sta_write_filter(dev, dev->sta.rx_filtr_restore) != 0) {
 		WARN("station identity clear: the pre-arm receive filter %08x did "
 		     "not read back - the arm stays recorded so a second clear "

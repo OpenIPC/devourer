@@ -299,15 +299,19 @@ receiving and only stops acknowledging (issue #461).
 recorded value back and returns true only once that reads back (a failure
 keeps the arm recorded, so a second clear retries). A refusal returns before
 the filter is read, so it writes nothing; a managed write that does not read
-back is undone and refused. While armed, `mt7612u_set_monitor_rx()` - which
+back is undone (the undo read back too) and refused, and an undo that does
+not read back either is recorded, so the clear still restores the pre-arm
+value and a retried arm does not take the stranded managed filter for it.
+While armed, `mt7612u_set_monitor_rx()` - which
 `StartRxLoop` calls after every MAC start - keeps the managed filter and only
 records the request, so the arm is order-independent. A beacon or ACK
 responder that moves the port identity drops the arm and puts the pre-arm
 filter back (the AP and responder paths depend on the monitor filter's `DUP`
 clear); a failed beacon start that restores the arm reinstalls the managed
 filter. All of it runs under `Mt7612uRadio::_mu`, the lock the existing
-filter write and every channel change already take, and the RX loop never
-writes the filter. The drop and restore writes are read back and a miss is
+filter write and every channel change already take; the only other writes
+are `mt_mac_start()` and `StartRxLoop`'s `mt7612u_set_monitor_rx()`, the
+latter mediated as above, and the RX thread itself never writes it. The drop and restore writes are read back and a miss is
 logged (the clear re-verifies). `Stop()` clears a still-armed station before
 closing, best effort, because the chip keeps its registers across a close;
 every bring-up also rewrites the filter in `mt_mac_start()`. The

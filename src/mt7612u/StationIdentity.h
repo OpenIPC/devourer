@@ -131,9 +131,14 @@ struct mt7612u_sta_state {
 	/* Dropped by a port-identity move, own/bssid kept for a restore. */
 	int lost;
 	/* The receive filter the station took MT_RX_FILTR_CFG from, and puts back
-	 * when it lets go of it (clear, or a drop). Meaningful while `armed` or
-	 * `lost`. */
+	 * when it lets go of it (clear, or a drop). Meaningful while `armed`,
+	 * `lost` or `stranded`. */
 	uint32_t rx_filtr_restore;
+	/* A refused arm whose undo did not read back: the register may hold the
+	 * managed filter with no station armed. The clear still owes the
+	 * restore, and the next arm must not take the register for the pre-arm
+	 * value. */
+	int stranded;
 };
 
 /* `port` as read from MT_MAC_ADDR (DW0 + the low half of DW1) against `own`.
@@ -157,12 +162,24 @@ static inline void mt7612u_sta_arm(struct mt7612u_sta_state *s,
                                    const uint8_t *own, const uint8_t *bssid,
                                    uint32_t cur_filtr)
 {
-	if (!s->armed && !s->lost)
+	if (!s->armed && !s->lost && !s->stranded)
 		s->rx_filtr_restore = cur_filtr;
 	memcpy(s->own, own, 6);
 	memcpy(s->bssid, bssid, 6);
 	s->armed = 1;
 	s->lost = 0;
+	s->stranded = 0;
+}
+
+/* A refused arm's undo did not read back (see `stranded`). An arm, a drop
+ * or an earlier strand already holds the right restore value. */
+static inline void mt7612u_sta_strand(struct mt7612u_sta_state *s,
+                                      uint32_t pre_arm)
+{
+	if (!s->armed && !s->lost && !s->stranded)
+		s->rx_filtr_restore = pre_arm;
+	if (!s->armed)
+		s->stranded = 1;
 }
 
 static inline void mt7612u_sta_clear(struct mt7612u_sta_state *s)
@@ -209,7 +226,7 @@ static inline uint32_t
 mt7612u_sta_rx_filter_request(struct mt7612u_sta_state *s, uint32_t want,
                               uint32_t managed)
 {
-	if (s->armed || s->lost)
+	if (s->armed || s->lost || s->stranded)
 		s->rx_filtr_restore = want;
 	return s->armed ? managed : want;
 }

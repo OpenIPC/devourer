@@ -131,6 +131,29 @@ done
 
 # shellcheck source=tests/mt7612u_sta_lib.sh
 . "$ROOT/tests/mt7612u_sta_lib.sh"
+
+# The AP guard (tests/mt7612u_sta_identity.sh's): cleanup re-enumerates
+# AP_SYSFS as root, so it must be a USB device that is not a hub, carrying a
+# wireless netdev with no default route on a phy that supports AP mode. Sets
+# AP_IF and PHY. Run in the preflight, before the DOWN half spends its
+# minute, and again at the start of UP - the adapter can move in between.
+ap_refuse() { echo "refusing AP_SYSFS=$AP_SYSFS: $* - cleanup would re-enumerate it."; exit 2; }
+ap_guard() {
+  local fam
+  [ -n "$(cat "/sys/bus/usb/devices/$AP_SYSFS/idVendor" 2>/dev/null)" ] ||
+    ap_refuse "not a USB device - if its driver just loaded it may have moved; re-read lsusb -t"
+  [ "$(cat "/sys/bus/usb/devices/$AP_SYSFS/bDeviceClass" 2>/dev/null)" != "09" ] || ap_refuse "a hub"
+  AP_IF=$(sta_first_netdev "$AP_SYSFS")
+  [ -n "$AP_IF" ] || ap_refuse "no network interface on it"
+  [ -e "/sys/class/net/$AP_IF/phy80211" ] || ap_refuse "$AP_IF is not wireless"
+  for fam in -4 -6; do
+    ip "$fam" route show default 2>/dev/null | grep -qw "dev $AP_IF" &&
+      ap_refuse "$AP_IF carries a default route"
+  done
+  PHY=$(basename "$(readlink -f "/sys/class/net/$AP_IF/phy80211")")
+  iw phy "$PHY" info 2>/dev/null | grep -q '\* AP$' || ap_refuse "$AP_IF ($PHY) does not support AP mode"
+}
+[ "$HALF" = down ] || ap_guard
 sta_out_prepare || exit 2
 sta_lock_take || exit 2
 sta_pid_init dut peer hostapd
@@ -591,20 +614,8 @@ fi
 
 # =============================== UP =========================================
 if [ "$HALF" != down ]; then
-  # --- the AP: the guard tests/mt7612u_sta_identity.sh uses ---
-  ap_refuse() { echo "refusing AP_SYSFS=$AP_SYSFS: $* - cleanup would re-enumerate it."; exit 2; }
-  [ -n "$(cat "/sys/bus/usb/devices/$AP_SYSFS/idVendor" 2>/dev/null)" ] ||
-    ap_refuse "not a USB device - if its driver just loaded it may have moved; re-read lsusb -t"
-  [ "$(cat "/sys/bus/usb/devices/$AP_SYSFS/bDeviceClass" 2>/dev/null)" != "09" ] || ap_refuse "a hub"
-  AP_IF=$(sta_first_netdev "$AP_SYSFS")
-  [ -n "$AP_IF" ] || ap_refuse "no network interface on it"
-  [ -e "/sys/class/net/$AP_IF/phy80211" ] || ap_refuse "$AP_IF is not wireless"
-  for fam in -4 -6; do
-    ip "$fam" route show default 2>/dev/null | grep -qw "dev $AP_IF" &&
-      ap_refuse "$AP_IF carries a default route"
-  done
-  PHY=$(basename "$(readlink -f "/sys/class/net/$AP_IF/phy80211")")
-  iw phy "$PHY" info 2>/dev/null | grep -q '\* AP$' || ap_refuse "$AP_IF ($PHY) does not support AP mode"
+  # --- the AP: the full guard again (it can have moved during DOWN) ---
+  ap_guard
   AP_ID=$(sta_usb_id "$AP_SYSFS")
 
   nmcli device set "$AP_IF" managed no >/dev/null 2>&1

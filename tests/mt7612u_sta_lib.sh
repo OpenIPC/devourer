@@ -86,6 +86,9 @@ sta_lock_take() {
   fi
   echo "$$ $(sta_proc_start "$$")" > "$OUT/.lock/pid"
   STA_LOCKED=yes
+  # A reused OUT starts with no device records: a marker an earlier run left
+  # would make this run hand back a device it never recorded or opened.
+  rm -f "$OUT"/.id_* "$OUT"/.opened_*
   return 0
 }
 

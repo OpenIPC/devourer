@@ -50,7 +50,9 @@ SIGINT/SIGTERM (handled from the start of `main`, so a stop during bring-up
 ends the run once the bring-up returns) leave the BSS, clear the identity and
 print the ledger. The ledger is printed at every exit once `sta_client up:`
 has printed, and separates "heard nothing", "heard another BSS" and "our AP
-refused us". While it runs, the station also logs each association
+refused us". Its first line is the state the run ENDED in, before the
+teardown's leave: `Connected`, or `Failed reason=<why>` for a run that gave
+up. While it runs, the station also logs each association
 (`station connected (association N)`) and each failure (`station link lost:
 <reason>` or `station join failed: <reason>`).
 
@@ -87,10 +89,10 @@ first line then reads `fault=1`.
   | Cell | Scored |
   |---|---|
   | `open` | AP associates our address; ping 0% loss over the TAP; ledger plaintext only; armed; the clear |
-  | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; MIC failures <= PTK installs; armed; the clear; no `tx.retry_limit=0` warning |
-  | `noarm` | control, `DEVOURER_STA_ARM=0`: no arm and no clear ran. Realtek: the station tried and the AP did NOT complete the four-way - a completed one FAILs. MT7612U: the link over a 30 s ping window is reported, not scored |
+  | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; no four-way MIC failure, data-plane MIC failures <= PTK installs; armed; the clear; no `tx.retry_limit=0` warning |
+  | `noarm` | control, `DEVOURER_STA_ARM=0`: no arm and no clear ran. Realtek: the station tried and the AP did NOT complete the four-way - a completed one FAILs; INCONCLUSIVE unless the armed `wpa2` cell of the same run got in (the positive control). MT7612U: the link over a 30 s ping window is reported, not scored |
   | `retry0` | `DEVOURER_TX_RETRY_LIMIT=0`: the arm-time warning; the clear (the link over a 30 s ping window is reported, not scored) |
-  | `reconnect` | hostapd stopped and restarted: the station reports the lost link; second four-way within the bound; ping 0% loss over a 30 s window; ledger 2 associations, 1 reconnect; one arm across the re-join; the clear |
+  | `reconnect` | hostapd stopped and restarted: the station reports the lost link; second four-way within the bound, measured from hostapd being started again; ping 0% loss over a 30 s window; ledger 2 associations, 1 reconnect; one arm across the re-join; the clear |
   | `noreconnect` | as `reconnect` with `DEVOURER_STA_RECONNECT=0`: the lost link reported; no re-join; the ledger ends Failed after 1 association |
 
   The arm differs by die. On MT7612U it writes no register, so an unarmed
@@ -109,6 +111,18 @@ first line then reads `fault=1`.
   the station exited or stalled before `sta_client up:`, station out of
   time), 3 interrupted. `FW_DIR` (an MT7612U DUT) must hold the decompressed
   MT7612U blobs.
+
+## Known issue: RTL8812CU (8822C) association on 2.4 GHz
+
+Against an MT7612U AP on channel 6 the armed 8822C station authenticates
+(hostapd: "authenticated", so the authentication response was
+acknowledged) and receives the association response, but hostapd does not
+get that response acknowledged: the AP-side status stays pending until the
+station is removed ("handle_assoc_cb: STA ... not found"), and association
+mostly fails; with `DEVOURER_TX_RETRY_LIMIT=0` it sometimes succeeds after
+seconds. The 8822B and the MT7612U associate with the same AP. The cause is
+not settled; `AP_OFDM_ONLY=1` (management frames at 6 Mb/s OFDM instead of
+1 Mb/s CCK) and a 5 GHz channel are the first two experiments.
 
 ## What it does not do
 

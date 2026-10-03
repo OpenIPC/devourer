@@ -31,16 +31,20 @@
 #            line; the clear ran on exit (verified, on Realtek).
 #   wpa2     hostapd WPA2-PSK with group and pairwise rekeys: four-way, both
 #            rekeys completed at the AP, ping 0% loss before and after them,
-#            ONE association throughout, MIC failures <= PTK installs (a
-#            pairwise rekey has a one-frame switchover window, see rx_frame()
-#            in sta_client.cpp), the arm line, the clear (as for open), and
+#            ONE association throughout, no four-way MIC failure, and
+#            data-plane MIC failures <= PTK installs (a pairwise rekey has a
+#            one-frame switchover window in which the AP still sends under
+#            the old key - see rx_frame() in sta_client.cpp), the arm line, the clear (as for open), and
 #            NO tx.retry_limit=0 warning (the station default is nonzero).
 #   noarm    the control: wpa2 with DEVOURER_STA_ARM=0 - nothing else
 #            changes. Scored everywhere: no SetStationIdentity and no clear
 #            ran. On Realtek also scored: the station tried (beacons seen,
 #            authentication sent) and the AP did NOT complete the four-way
 #            for it within 30 s - a completed four-way is a FAIL, because then
-#            the arm is not what makes the wpa2 cell work. On MT7612U the link
+#            the arm is not what makes the wpa2 cell work. Its positive
+#            control is the wpa2 cell of the SAME run: without an armed
+#            four-way against the same hostapd configuration, a silent AP
+#            proves nothing and noarm is INCONCLUSIVE. On MT7612U the link
 #            is reported over a PING_S ping window, not scored.
 #   retry0   wpa2 with DEVOURER_TX_RETRY_LIMIT=0. Scored: the library's
 #            arm-time warning about tx.retry_limit=0 (logged inside a
@@ -50,7 +54,7 @@
 #   reconnect   hostapd WPA2-PSK, stopped for DOWN_S and restarted with the
 #            same configuration. Scored: the station reports the lost link;
 #            the AP completes a second four-way for it within REJOIN_S of
-#            coming back; ping 0% loss over a PING_S window after the
+#            hostapd being started again; ping 0% loss over a PING_S window after the
 #            re-join; the ledger counts 2 associations and 1 reconnect;
 #            exactly ONE arm (the arm is per BSSID and stays in place across
 #            a re-join to the same BSSID - on Realtek the second association
@@ -91,9 +95,14 @@
 # (rig/bring-up).
 # Build first: cmake --build build --target StaClientSelftest (build/sta_client).
 #
+# AP_OFDM_ONLY=1 (2.4 GHz): hostapd advertises and uses OFDM rates only
+# (no 1/2/5.5/11 Mb/s), so its management frames - authentication and
+# association responses - go out at 6 Mb/s OFDM instead of 1 Mb/s CCK. A
+# diagnostic: whether a station's association depends on CCK.
+#
 # Env: DUT_SYSFS, AP_SYSFS, DUT_VID, DUT_PID, CH, SSID, PSK, SECS, REKEY_S,
-#      PTK_REKEY_S, PING_S, DOWN_S, REJOIN_S, FW_DIR, NS, TAP, READY_TIMEOUT,
-#      OUT, BUILD.
+#      PTK_REKEY_S, PING_S, DOWN_S, REJOIN_S, AP_OFDM_ONLY, FW_DIR, NS, TAP,
+#      READY_TIMEOUT, OUT, BUILD.
 # Cells: open | wpa2 | noarm | retry0 | reconnect | noreconnect | all
 # (default: all six).
 
@@ -124,6 +133,7 @@ PING_S="${PING_S:-30}"
 # back (loss noticed, re-join backoff, authentication, association, four-way).
 DOWN_S="${DOWN_S:-8}"
 REJOIN_S="${REJOIN_S:-30}"
+AP_OFDM_ONLY="${AP_OFDM_ONLY:-0}"
 FW_DIR="${FW_DIR:-/lib/firmware/mediatek}"
 NS="${NS:-staonair}"
 TAP="${TAP:-dvsta0}"
@@ -140,7 +150,7 @@ for c in $CELLS; do
 done
 
 [ "$(id -u)" = 0 ] || { echo "must run as root"; exit 2; }
-for v in CH SECS REKEY_S PTK_REKEY_S PING_S DOWN_S REJOIN_S READY_TIMEOUT; do
+for v in CH SECS REKEY_S PTK_REKEY_S PING_S DOWN_S REJOIN_S AP_OFDM_ONLY READY_TIMEOUT; do
   case "${!v}" in ''|*[!0-9]*) echo "$v must be a non-negative integer"; exit 2 ;; esac
 done
 [ "$PING_S" -ge 1 ] || { echo "PING_S must be at least 1"; exit 2; }
@@ -308,6 +318,9 @@ ap_up() { # $1 open | wpa2 | wpa2norekey, $2 log tag
     if [ "$1" = wpa2 ]; then
       printf 'wpa_group_rekey=%s\nwpa_ptk_rekey=%s\n' "$REKEY_S" "$PTK_REKEY_S"
     fi
+    if [ "$AP_OFDM_ONLY" = 1 ] && [ "$CH" -le 14 ]; then
+      printf 'supported_rates=60 90 120 180 240 360 480 540\nbasic_rates=60 120 240\n'
+    fi
   } > "$OUT/hostapd_$2.conf"
   # The previous cell's hostapd exiting is not its interface being back: a
   # launch 30 ms after AP-DISABLED found the netdev gone ("Could not read
@@ -335,6 +348,7 @@ ap_up() { # $1 open | wpa2 | wpa2norekey, $2 log tag
     sleep 0.1; t=$((t + 1))
   done
   ip netns exec "$NS" ip link set "$AP_IF" up 2>/dev/null
+  AP_START_MS=$(date +%s%3N)   # reconnect measures its re-join from here
   ip netns exec "$NS" hostapd -t "$OUT/hostapd_$2.conf" > "$OUT/hostapd_$2.log" 2>&1 &
   sta_pid_record hostapd $!
   t=0
@@ -531,6 +545,9 @@ cell_open() {
 # station has stopped; the caller scores the arm-specific lines. WPA2_LINK is
 # "no four-way" or "four-way completed, ping ...", ending in OK on 0% loss.
 WPA2_LINK=""
+# Set once the ARMED wpa2 cell has completed a four-way in this run: the
+# positive control the Realtek noarm control needs.
+ARMED_FOURWAY=no
 run_wpa2() {
   local cell="$1"; shift
   CELL="$cell"
@@ -591,14 +608,19 @@ cell_wpa2() {
     *) bad "wpa2: ${WPA2_LINK:-no result} - see $OUT/sta_wpa2.log and $OUT/hostapd_wpa2.log" ;;
   esac
   [ "$WPA2_LINK" = "no four-way" ] && { check_armed wpa2; return; }
-  local assoc mic ptk ans
+  ARMED_FOURWAY=yes
+  # Two different MIC counters: the four-way's (mic_failures=, the
+  # supplicant's EAPOL-Key MIC check) must be 0; the data plane's (MIC
+  # failures=, CCMP on received data) may reach one per pairwise rekey.
+  local assoc mic fwmic ptk ans
   assoc=$(led wpa2 'associations'); mic=$(led wpa2 'MIC failures')
+  fwmic=$(led wpa2 'mic_failures')
   ptk=$(led wpa2 'PTK'); ans=$(led wpa2 'answered')
   if [ "${assoc:-0}" = 1 ] && [ "${ans:-0}" -gt 0 ] && [ "${ptk:-0}" -ge 2 ] &&
-     [ "${mic:-999}" -le "${ptk:-0}" ]; then
-    ok "wpa2: ledger associations=1, rekeys answered=$ans, PTK installs=$ptk, MIC failures=$mic (<= PTK installs)"
+     [ "${fwmic:-1}" = 0 ] && [ "${mic:-999}" -le "${ptk:-0}" ]; then
+    ok "wpa2: ledger associations=1, rekeys answered=$ans, PTK installs=$ptk, four-way MIC failures=0, data-plane MIC failures=$mic (<= PTK installs)"
   else
-    bad "wpa2: ledger associations=${assoc:-?} answered=${ans:-?} PTK=${ptk:-?} MIC failures=${mic:-?} (expected 1, >0, >=2, MIC <= PTK)"
+    bad "wpa2: ledger associations=${assoc:-?} answered=${ans:-?} PTK=${ptk:-?} four-way MIC failures=${fwmic:-?} data-plane MIC failures=${mic:-?} (expected 1, >0, >=2, 0, <= PTK)"
   fi
   check_armed wpa2
   # The station default retry limit is nonzero, so the arm must NOT warn.
@@ -628,7 +650,9 @@ cell_noarm() {
   local beacons auth noack
   beacons=$(led noarm 'beacons observed'); auth=$(led noarm 'auth_tx')
   noack=$(grep -c 'did not acknowledge' "$OUT/hostapd_noarm.log" 2>/dev/null)
-  if [ "${beacons:-0}" = 0 ] || [ "${auth:-0}" = 0 ]; then
+  if [ "$ARMED_FOURWAY" != yes ]; then
+    inc "noarm: no ARMED four-way against this hostapd configuration in this run (run the wpa2 cell first, and it must get in) - a silent AP proves nothing"
+  elif [ "${beacons:-0}" = 0 ] || [ "${auth:-0}" = 0 ]; then
     inc "noarm: the unarmed station never tried (beacons observed=${beacons:-?}, auth_tx=${auth:-?}) - not a control"
   elif [ "$WPA2_LINK" = "no four-way" ]; then
     ok "noarm: unarmed, the AP never completed the four-way (auth_tx=$auth) - the arm is what makes the wpa2 link"
@@ -690,11 +714,20 @@ run_reconnect() {
     proc_running "$STA_PID" || { station_gone "$cell"; return; }
   fi
   ap_up wpa2norekey "${cell}2" || { inc "$cell: hostapd did not come back - see $OUT/hostapd_${cell}2.log"; cell_end; return; }
-  local back; back=$(date +%s)
+  # The bound runs from hostapd being started again, not from ap_up
+  # returning (which waits for the AP type first).
+  local back=$AP_START_MS deadline=$(( AP_START_MS + REJOIN_S * 1000 )) rejoined=no
+  while [ "$(date +%s%3N)" -lt "$deadline" ]; do
+    if grep -q "EAPOL-4WAY-HS-COMPLETED $own" "$OUT/hostapd_${cell}2.log" 2>/dev/null; then
+      rejoined=yes; break
+    fi
+    sleep 0.2
+  done
 
   if [ "$rc" = 1 ]; then
-    if wait_for "$OUT/hostapd_${cell}2.log" "EAPOL-4WAY-HS-COMPLETED $own" "$REJOIN_S"; then
-      ok "$cell: re-joined and re-keyed $(( $(date +%s) - back ))s after the AP came back (bound ${REJOIN_S}s)"
+    if [ "$rejoined" = yes ]; then
+      local ms=$(( $(date +%s%3N) - back ))
+      ok "$cell: re-joined and re-keyed $(( ms / 1000 )).$(( ms % 1000 / 100 ))s after hostapd was started again (bound ${REJOIN_S}s)"
     else
       if proc_running "$STA_PID"; then
         bad "$cell: no second four-way within ${REJOIN_S}s of the AP coming back"; cell_end
@@ -707,7 +740,7 @@ run_reconnect() {
       *) station_gone "$cell"; sta_pid_kill hostapd; return ;;
     esac
   else
-    if wait_for "$OUT/hostapd_${cell}2.log" "EAPOL-4WAY-HS-COMPLETED $own" "$REJOIN_S"; then
+    if [ "$rejoined" = yes ]; then
       bad "$cell: re-joined with DEVOURER_STA_RECONNECT=0"
     else
       proc_running "$STA_PID" || { station_gone "$cell"; sta_pid_kill hostapd; return; }

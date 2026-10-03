@@ -150,12 +150,14 @@ mt7612u_port_compare(const uint8_t *port, int read_ok, const uint8_t *own)
 /* `cur_filtr` is what MT_RX_FILTR_CFG held when this arm was asked for. A
  * RE-arm keeps the value the first arm recorded: the register then holds the
  * managed filter that arm installed, and restoring THAT on clear would leave
- * the receiver managed after the station is gone. */
+ * the receiver managed after the station is gone. So does an arm after a
+ * drop: the record already holds the consumer's latest request, while the
+ * register may still hold the managed filter if the drop's write missed. */
 static inline void mt7612u_sta_arm(struct mt7612u_sta_state *s,
                                    const uint8_t *own, const uint8_t *bssid,
                                    uint32_t cur_filtr)
 {
-	if (!s->armed)
+	if (!s->armed && !s->lost)
 		s->rx_filtr_restore = cur_filtr;
 	memcpy(s->own, own, 6);
 	memcpy(s->bssid, bssid, 6);

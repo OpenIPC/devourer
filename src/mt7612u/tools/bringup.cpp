@@ -5186,7 +5186,8 @@ static int gate_staid(void)
 		printf("  SKIP  could not arm an ACK responder - case 5 not run\n");
 		fail++;   /* the most important case did not run; do not pass. */
 	}
-	mt7612u_clear_station_identity(&dev);
+	CHK(mt7612u_clear_station_identity(&dev) == 0 && staid_filtr_is(mon),
+	    "clear after case 5 restores the monitor receive filter");
 
 	/*
 	 * 6. THE OTHER ORDERING, the one a real caller is likelier to hit. Case
@@ -5210,7 +5211,9 @@ static int gate_staid(void)
 		printf("  SKIP  could not set up case 6\n");
 		fail++;
 	}
-	mt7612u_clear_station_identity(&dev);
+	/* After a drop: the clear re-writes the pre-arm filter and verifies it. */
+	CHK(mt7612u_clear_station_identity(&dev) == 0 && staid_filtr_is(mon),
+	    "clear after the drop verifies the monitor receive filter");
 
 #undef CHK
 	printf("\nGATE STAID: %d passed, %d failed\n", pass, fail);

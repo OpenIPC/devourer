@@ -278,6 +278,15 @@ void test_rx_filter_ownership() {
   /* An arm after a clear records afresh. */
   mt7612u_sta_arm(&s, kOwn, kBssid, keep);
   CHECK(s.rx_filtr_restore == keep);
+
+  /* An arm after a DROP keeps the record: the drop's restore write may have
+   * missed and left the managed filter in the register, and recording THAT
+   * would make the clear "restore" a managed receiver and verify it. */
+  CHECK(mt7612u_sta_port_observed(&s, MT7612U_PORT_DIFFERENT, 0) ==
+        MT7612U_STA_EV_DROPPED);
+  mt7612u_sta_arm(&s, kOwn, kBssid, kManaged);
+  CHECK(s.armed == 1 && s.lost == 0);
+  CHECK(s.rx_filtr_restore == keep);
 }
 
 } // namespace

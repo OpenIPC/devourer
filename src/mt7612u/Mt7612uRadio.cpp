@@ -726,8 +726,14 @@ void Mt7612uRadio::Stop() {
        * station still armed here would leave the managed receive filter for
        * whoever opens the adapter next. Put the pre-arm filter back first;
        * a no-op with nothing armed. Only a flag here - the logger can throw,
-       * and nothing may skip the stop and the close below. */
-      filter_left = mt7612u_clear_station_identity(dev) != 0;
+       * and nothing may skip the stop and the close below: `_dev` is already
+       * null, so an escape would leak the handle. The clear's own WARN goes
+       * through the same logger (log_trampoline), hence the catch. */
+      try {
+        filter_left = mt7612u_clear_station_identity(dev) != 0;
+      } catch (...) {
+        filter_left = true;
+      }
       mt7612u_stop(dev);
     }
   }

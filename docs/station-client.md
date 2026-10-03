@@ -80,10 +80,13 @@ An open association is confirmed by the AP's first unicast frame to the
 station. A station cannot see the AP's side: if the AP never saw the
 association response acknowledged, it does not hold the station, drops its
 traffic and may never say so. So once the host has asked something - three
-unicast or ARP frames - and no unicast reply has come within 5 s, the link
-is lost as `unconfirmed` (`StationSm::link_lost`) and re-joined under the
-policy above. Multicast chatter and an idle host are never judged; WPA2
-needs no such rule (the four-way is the confirmation). The ledger counts
+unicast or ARP frames - and no unicast reply has come within 5 s of the
+first, the link is lost as `unconfirmed` (`StationSm::link_lost`) and
+re-joined under the policy above. Multicast chatter and an idle host are
+never judged; WPA2 needs no such rule (the four-way is the confirmation).
+One-way unicast to a neighbour the host has already resolved gets no reply
+either, and is judged the same way until the host's stack re-verifies that
+neighbour (a unicast ARP the AP answers). The ledger counts
 these (`unconfirmed=`), and repeated association responses
 (`assoc_repeat=`).
 

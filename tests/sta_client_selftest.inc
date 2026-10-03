@@ -108,7 +108,8 @@ void reset_all() {
   g_tap_read_err = 0;
   g_end = RunEnd{};
   g_unconfirmed = false;
-  g_assoc_ms = 0;
+  g_uplink_seen = false;
+  g_uplink_first_ms = 0;
   g_uplink_unconfirmed = 0;
   g_unconfirmed_lost = 0;
   g_nudges = 0;
@@ -1213,6 +1214,7 @@ void test_multicast_chatter_is_not_judged() {
   }
   drain_tx();
   supervise(kConfirmMs * 5);
+  supervise(kConfirmMs * 6);
   check(g_sm.state() == StationSm::State::Failed &&
             g_sm.fail_reason() == StationSm::Failure::Unconfirmed,
         "unanswered ARP requests are judged");
@@ -1245,10 +1247,11 @@ void test_an_unconfirmed_open_association_is_lost() {
   Ap ap;
   open_link_with_uplink(ap, (int)kConfirmUplink);
   check(g_sm.state() == StationSm::State::Connected, "the open link is up");
-  supervise(kConfirmMs - 1);
+  supervise(10);                       /* the window opens */
+  supervise(10 + kConfirmMs - 1);
   check(g_sm.state() == StationSm::State::Connected,
         "...and not judged before kConfirmMs");
-  supervise(kConfirmMs);
+  supervise(10 + kConfirmMs);
   check(g_sm.state() == StationSm::State::Failed &&
             g_sm.fail_reason() == StationSm::Failure::Unconfirmed,
         "uplink with no unicast reply: lost as Unconfirmed");
@@ -1256,9 +1259,36 @@ void test_an_unconfirmed_open_association_is_lost() {
         "...counted once, as a lost link");
   const uint64_t joins = g_joins.load();
   const std::vector<uint8_t> b = beacon(false);
-  rx_frame(b.data(), b.size(), -40, kConfirmMs + 200);
-  supervise(kConfirmMs + 200);
+  rx_frame(b.data(), b.size(), -40, kConfirmMs + 210);
+  supervise(kConfirmMs + 210);
   check(g_joins.load() == joins + 1, "...and re-joined after the backoff");
+}
+
+/* THE WINDOW OPENS AT THE HOST'S FIRST QUESTION, not at the association: a
+ * host idle for longer than kConfirmMs that then asks kConfirmUplink things
+ * at once still gets kConfirmMs for the reply. */
+void test_a_burst_after_idle_gets_its_window() {
+  reset_all();
+  Ap ap;
+  open_link_with_uplink(ap, 0);
+  supervise(kConfirmMs * 4);           /* idle, long past kConfirmMs */
+  uint8_t e[60] = {0};
+  std::memcpy(e, kPeer, 6);
+  std::memcpy(e + 6, kStaMac, 6);
+  e[12] = 0x08;
+  for (int i = 0; i < (int)kConfirmUplink; i++) tap_down_one(e, sizeof e);
+  drain_tx();
+  supervise(kConfirmMs * 4 + 1);
+  supervise(kConfirmMs * 4 + 2);
+  check(g_sm.state() == StationSm::State::Connected,
+        "a burst after an idle spell is not judged at once");
+  const uint8_t pl[16] = {1};
+  const std::vector<uint8_t> d = ap.plain_to_sta(pl, sizeof pl);
+  rx_frame(d.data(), d.size(), -40, kConfirmMs * 4 + 50);
+  (void)tap_read();
+  supervise(kConfirmMs * 6);
+  check(g_sm.state() == StationSm::State::Connected,
+        "...and the reply inside its window confirms it");
 }
 
 void test_a_unicast_reply_confirms_the_association() {
@@ -2183,6 +2213,7 @@ int self_test() {
   selftest::test_an_unconfirmed_open_association_is_lost();
   selftest::test_a_unicast_reply_confirms_the_association();
   selftest::test_an_idle_open_association_is_not_judged();
+  selftest::test_a_burst_after_idle_gets_its_window();
   selftest::test_multicast_chatter_is_not_judged();
   selftest::test_an_accepted_association_nudges_the_ap();
   selftest::test_a_nudge_touches_no_tuning_or_liveness_state();

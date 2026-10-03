@@ -302,18 +302,23 @@ int8_t rssi_dbm(uint8_t raw) {
  * the AP starts it only for a station it holds, and HandshakeTimeout covers
  * the rest.) So an open association counts as unconfirmed until a unicast
  * data frame from the AP arrives for this station; if the host has sent
- * kConfirmUplink frames and kConfirmMs has passed without one, the link is
- * lost (StationSm::link_lost) and the ordinary re-join policy takes over.
- * Only frames that ask for a reply count as uplink here - unicast, and ARP
- * (its request is broadcast, its reply unicast) - so a host's multicast
- * chatter (IPv6 RS/MLD, mDNS) on an idle link is never judged; an idle host
- * is never judged at all. A host sending one-way unicast traffic with
- * static neighbour entries would be judged lost - the price of having no
- * other evidence. */
+ * kConfirmUplink frames and kConfirmMs has passed since the first of them
+ * without one, the link is lost (StationSm::link_lost) and the ordinary
+ * re-join policy takes over. The window opens at the host's first question,
+ * not at the association: a host idle for longer than kConfirmMs that then
+ * sends a burst must still get its kConfirmMs for the reply. Only frames
+ * that ask for a reply count as uplink here - unicast, and ARP (its request
+ * is broadcast, its reply unicast) - so a host's multicast chatter (IPv6
+ * RS/MLD, mDNS) on an idle link is never judged; an idle host is never
+ * judged at all. A host whose only traffic is one-way unicast to a neighbour
+ * it already resolved (static entries, or a cache kept across a re-join) is
+ * judged lost until its stack re-verifies that neighbour with a unicast ARP
+ * the AP answers - the price of having no other evidence. */
 constexpr uint32_t kConfirmMs = 5000;
 constexpr uint32_t kConfirmUplink = 3;
 bool g_unconfirmed = false;
-uint32_t g_assoc_ms = 0;
+bool g_uplink_seen = false;         /* supervise() saw the first question */
+uint32_t g_uplink_first_ms = 0;     /* ...at this time: the window opens */
 uint32_t g_uplink_unconfirmed = 0;
 std::atomic<uint64_t> g_unconfirmed_lost{0};
 
@@ -349,9 +354,9 @@ void nudge(uint32_t now) {
   g_nudge_ms = now;
 }
 
-void on_association(uint32_t now) {
+void on_association() {
   g_unconfirmed = g_sm.security() == StationSm::Security::Open;
-  g_assoc_ms = now;
+  g_uplink_seen = false;
   g_uplink_unconfirmed = 0;
   g_rx_dup.reset();
   g_failed_noted = false;
@@ -450,7 +455,7 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
     g_nudge_eapol_rx = g_sm.eapol_rx;
   }
   if (before != StationSm::State::Connected && g_sm.connected())
-    on_association(now);
+    on_association();
   if (g_sm.connected()) note_keys();
 
   /* The data plane runs only on a live association: a protected frame that
@@ -724,14 +729,19 @@ uint8_t supervise(uint32_t now) {
   }
 
   /* An unconfirmed open association the host has been talking through
-   * (see kConfirmMs) - lost, through the ordinary failure path below. */
+   * (see kConfirmMs) - lost, through the ordinary failure path below. The
+   * window opens the first time this pass sees a question. */
+  if (g_unconfirmed && g_uplink_unconfirmed > 0 && !g_uplink_seen) {
+    g_uplink_seen = true;
+    g_uplink_first_ms = now;
+  }
   if (g_sm.state() == StationSm::State::Connected && g_unconfirmed &&
-      g_uplink_unconfirmed >= kConfirmUplink &&
-      (uint32_t)(now - g_assoc_ms) >= kConfirmMs) {
+      g_uplink_seen && g_uplink_unconfirmed >= kConfirmUplink &&
+      (uint32_t)(now - g_uplink_first_ms) >= kConfirmMs) {
     std::fprintf(stderr,
                  "  station association unconfirmed: %u frames sent, no "
                  "unicast reply from the AP in %u ms\n",
-                 g_uplink_unconfirmed, (unsigned)(now - g_assoc_ms));
+                 g_uplink_unconfirmed, (unsigned)(now - g_uplink_first_ms));
     g_unconfirmed = false;
     g_unconfirmed_lost.fetch_add(1);
     g_sm.link_lost();

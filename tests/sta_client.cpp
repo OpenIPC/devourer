@@ -782,15 +782,37 @@ const char* fail_name(StationSm::Failure f) {
  * whether the run worked or not: "we heard
  * nothing", "we heard the wrong AP" and "we heard our AP and it said no" are
  * different lines here. */
+/* THE STATE THE RUN ENDED IN, taken before the teardown's leave() - which
+ * always returns the machine to Idle, and would otherwise make every ledger
+ * read Idle: a run that gave up (DEVOURER_STA_RECONNECT=0) must say Failed
+ * and why. Caller holds g_mu. */
+struct RunEnd {
+  bool taken = false;
+  StationSm::State state = StationSm::State::Idle;
+  StationSm::Failure reason = StationSm::Failure::None;
+  unsigned status = 0, aid = 0;
+  bool keyed = false;
+};
+RunEnd g_end;
+void take_run_end() {
+  g_end.taken = true;
+  g_end.state = g_sm.state();
+  g_end.reason = g_sm.fail_reason();
+  g_end.status = g_sm.status();
+  g_end.aid = g_sm.aid();
+  g_end.keyed = g_sm.keyed();
+}
+
 void report() {
   std::lock_guard<std::mutex> l(g_mu);
+  if (!g_end.taken) take_run_end();
   std::fprintf(stderr, "fault=%d state=%s", g_fault.load(),
-               state_name(g_sm.state()));
-  if (g_sm.state() == StationSm::State::Failed)
-    std::fprintf(stderr, " reason=%s status=%u", fail_name(g_sm.fail_reason()),
-                 g_sm.status());
-  std::fprintf(stderr, " aid=%u keyed=%d bss_known=%d\n", g_sm.aid(),
-               (int)g_sm.keyed(), g_bss.count());
+               state_name(g_end.state));
+  if (g_end.state == StationSm::State::Failed)
+    std::fprintf(stderr, " reason=%s status=%u", fail_name(g_end.reason),
+                 g_end.status);
+  std::fprintf(stderr, " aid=%u keyed=%d bss_known=%d\n", g_end.aid,
+               (int)g_end.keyed, g_bss.count());
   std::fprintf(stderr,
                "  join: beacons observed=%llu, probes sent=%llu, joins=%llu,"
                " associations=%llu, reconnects=%llu\n",
@@ -1277,6 +1299,7 @@ int main(int argc, char** argv) {
    * here, so an exception must not leave main. */
   try {
     std::lock_guard<std::mutex> l(g_mu);
+    take_run_end();
     g_sm.leave();
     std::vector<uint8_t> f;
     while (g_sm.pop_tx(&f)) {

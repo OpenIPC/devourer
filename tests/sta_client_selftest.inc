@@ -106,6 +106,7 @@ void reset_all() {
   g_fault = 0;
   g_stop = 0;
   g_tap_read_err = 0;
+  g_end = RunEnd{};
 }
 
 /* Drain whatever the station queued, stripping the radiotap prefix the real
@@ -1640,6 +1641,18 @@ void test_reconnect_can_be_disabled() {
     supervise(now);
   }
   check(g_joins.load() == joins_before, "no re-join with reconnect disabled");
+
+  /* And the ledger says so: the teardown's leave() returns the machine to
+   * Idle, but the run ENDED Failed, and why. */
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    take_run_end();
+    g_sm.leave();
+  }
+  check(g_sm.state() == StationSm::State::Idle, "leave() returns to Idle");
+  check(g_end.state == StationSm::State::Failed &&
+            g_end.reason == StationSm::Failure::BeaconLost,
+        "...but the run's end state is Failed, reason beacon-lost");
 }
 
 /* A frame from the host claiming somebody else's source address. A real AP

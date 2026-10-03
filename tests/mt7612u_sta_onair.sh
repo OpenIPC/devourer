@@ -238,9 +238,35 @@ ap_up() { # $1 open | wpa2, $2 cell
       printf 'wpa_group_rekey=%s\nwpa_ptk_rekey=%s\n' "$REKEY_S" "$PTK_REKEY_S"
     fi
   } > "$OUT/hostapd_$2.conf"
+  # The previous cell's hostapd exiting is not its interface being back: a
+  # launch 30 ms after AP-DISABLED found the netdev gone ("Could not read
+  # interface <if> flags: No such device" / "nl80211 driver initialization
+  # failed"). Wait, bounded, until the netdev is present, and FORCE it to a
+  # station once it is: a driver may leave the vif in AP type after hostapd
+  # exits, and hostapd then fails with "Match already configured" rather
+  # than anything that names the problem (tests/mt7612u_sta_identity.sh).
+  local t=0 info
+  while :; do
+    info=$(ip netns exec "$NS" iw dev "$AP_IF" info 2>/dev/null)
+    case "$info" in
+      *'type managed'*) break ;;
+      '') ;;   # not back yet
+      *) ip netns exec "$NS" ip link set "$AP_IF" down 2>/dev/null
+         ip netns exec "$NS" iw dev "$AP_IF" set type managed 2>/dev/null ;;
+    esac
+    if [ "$t" -ge 100 ]; then
+      echo "rig: $AP_IF not back as a managed netdev in netns $NS within 10 s" \
+           "- hostapd not started" | tee "$OUT/hostapd_$2.log"
+      # The loop may just have taken it down; leave it up (best effort).
+      ip netns exec "$NS" ip link set "$AP_IF" up 2>/dev/null
+      return 1
+    fi
+    sleep 0.1; t=$((t + 1))
+  done
+  ip netns exec "$NS" ip link set "$AP_IF" up 2>/dev/null
   ip netns exec "$NS" hostapd -t "$OUT/hostapd_$2.conf" > "$OUT/hostapd_$2.log" 2>&1 &
   sta_pid_record hostapd $!
-  local t=0
+  t=0
   until ip netns exec "$NS" iw dev "$AP_IF" info 2>/dev/null | grep -q 'type AP'; do
     [ "$t" -ge 15 ] && return 1
     sleep 1; t=$((t + 1))

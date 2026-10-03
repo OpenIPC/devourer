@@ -445,6 +445,7 @@ int mt_radiotap_parse(const uint8_t *buf, size_t len, struct mt7612u_tx_rate *r)
 struct mt_async_stats {
 	uint64_t tx_submitted, tx_done, tx_err, rx_frames, rx_err, rx_invalid;
 	uint64_t rx_dropped;
+	int tx_inflight;   /* submitted bulk transfers not yet completed */
 };
 void mt_async_stats(struct mt7612u_dev *d, struct mt_async_stats *out);
 void mt_async_note_invalid(struct mt7612u_dev *d);

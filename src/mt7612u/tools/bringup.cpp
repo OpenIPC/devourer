@@ -1899,6 +1899,19 @@ static unsigned txs_arm_pktid(int rx_on, unsigned arm)
 /* Slack on top of frame_budget_ms for one frame's status wait: USB submit
  * latency plus the drain's two control reads. */
 #define TXS_FRAME_MARGIN_MS 50.0
+/* Floor on one frame's status wait. frame_budget_ms is ladder arithmetic from
+ * the 5 GHz measurement (~46 ms for 16 attempts); on ch6 an unacknowledged
+ * frame at limit 15 measured 1.1-1.3 s from status to status (#461), and a
+ * wait shorter than the air let the gate submit ahead of it: the chip's queue
+ * filled, its bulk OUT NAKed, and the async ring's then 1000 ms transfer
+ * timeout cancelled the frames. A wait that ends early only costs time on the frames
+ * that genuinely lose their status. */
+#define TXS_STATUS_WAIT_MIN_MS 2000.0
+/* Bound on waiting for a submitted transfer to complete. TX transfers carry no
+ * timeout, so one still in flight here is a slow chip, not a failure: it is
+ * counted as sent and left to the status wait - resending it would air the
+ * frame twice. */
+#define TXS_USB_WAIT_MS 1500.0
 
 /*
  * DEVOURER_TXS_TRACE=1: one "TXS" line per popped status entry (raw main and
@@ -2276,7 +2289,12 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 			const uint8_t *a1 = arms[a].bcast_a1 ? bcast : peer;
 			double t0, wall, send_deadline;
 			long n = 0, attempts = 0, submit_fail = 0;
-			long status_timeouts = 0;
+			long status_timeouts = 0, wire_fail = 0;
+			const double status_wait_ms =
+				frame_budget_ms + TXS_FRAME_MARGIN_MS >
+				TXS_STATUS_WAIT_MIN_MS ?
+				frame_budget_ms + TXS_FRAME_MARGIN_MS :
+				TXS_STATUS_WAIT_MIN_MS;
 			struct mt_async_stats us0, us1;
 			int settled = 0;
 
@@ -2302,16 +2320,19 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 			txs_tr.tick_ms = txs_tr.tick_max_ms = 0.0;
 			if (txs_drain(&dev, &sum, pktid, prev_pktid, TXS_NO_PKTID))
 				io_fail = 1;
-			/* After the previous arm's tail: this arm's USB delta. */
+			/* After the previous arm's tail: this arm's USB delta.
+			 * us1 tracks the error count frame by frame. */
 			mt_async_stats(&dev, &us0);
+			us1 = us0;
 
 			/* Bounded twice, like gate_ampdu's wall clock: a submit
 			 * that keeps failing must end the arm, not spin it. The
 			 * attempt cap allows 3 failures per frame; the clock
-			 * allows every frame its full per-frame status wait. */
+			 * allows every frame its transfer and its full status
+			 * wait. */
 			t0 = now_ms();
-			send_deadline = t0 + frames * (frame_budget_ms +
-			                               TXS_FRAME_MARGIN_MS) + 5000.0;
+			send_deadline = t0 + frames * (TXS_USB_WAIT_MS +
+			                               status_wait_ms) + 5000.0;
 			while (n < frames && attempts < (long)frames * 4 &&
 			       now_ms() < send_deadline && !g_stop && !io_fail) {
 				frame[22] = (uint8_t)((n & 0xf) << 4);
@@ -2322,11 +2343,55 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 				              MT_TXOPT_TXS | MT_TXOPT_PKTID(pktid) |
 				              arms[a].opts) != 0) {
 					submit_fail++;
+					/* A refused libusb submit bumps tx_err; re-baseline
+					 * so the next frame does not read it as its own wire
+					 * failure. */
+					mt_async_stats(&dev, &us1);
 					if (txs_drain(&dev, &sum, pktid, prev_pktid,
 					              n > 0 && stale_settled ?
 					              stale_pktid : TXS_NO_PKTID))
 						io_fail = 1;
 					continue;
+				}
+				/*
+				 * Sent means ON THE CHIP, not queued in libusb: wait
+				 * for this transfer to resolve. One that failed put no
+				 * frame on the air and can file no status - it is
+				 * retried like a refused submit, never counted as
+				 * sent.
+				 */
+				{
+					const double udl = now_ms() + TXS_USB_WAIT_MS;
+					struct mt_async_stats u;
+
+					for (;;) {
+						mt_async_stats(&dev, &u);
+						if (u.tx_inflight == 0 || now_ms() >= udl ||
+						    g_stop)
+							break;
+						/* This frame is submitted: the arm has
+						 * sent, so the stale-EXT claim applies. */
+						if (txs_drain(&dev, &sum, pktid, prev_pktid,
+						              stale_settled ? stale_pktid
+						                            : TXS_NO_PKTID)) {
+							io_fail = 1;
+							break;
+						}
+						txs_tick(rx_on, &last_tick);
+						mt_usleep(500);
+					}
+					if (io_fail) break;
+					if (u.tx_err != us1.tx_err) {
+						us1 = u;
+						wire_fail++;
+						if (txs_tr.on)
+							printf("TXS t=%.1f arm=%c rx=%d n=%ld "
+							       "WIRE-FAIL inflight=%d\n",
+							       now_ms(), arms[a].tag, rx_on,
+							       n, u.tx_inflight);
+						continue;
+					}
+					us1 = u;
 				}
 				n++;
 				txs_tr.n = n;
@@ -2341,8 +2406,9 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 				 * without this wait submissions run ahead of the
 				 * air and can overflow the shallow status FIFO
 				 * between drains - entries lost for good. Wait for
-				 * this frame's own entry, bounded by the ladder at
-				 * the effective limit; on expiry count a status
+				 * this frame's own entry, bounded by status_wait_ms
+				 * (the ladder at the effective limit, floored at
+				 * TXS_STATUS_WAIT_MIN_MS); on expiry count a status
 				 * timeout and go on. (If one entry never arrives,
 				 * every later frame of the arm also waits its full
 				 * bound - the count then says how many frames were
@@ -2350,8 +2416,7 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 				 * missing.)
 				 */
 				{
-					const double fdl = now_ms() + frame_budget_ms +
-					                   TXS_FRAME_MARGIN_MS;
+					const double fdl = now_ms() + status_wait_ms;
 
 					do {
 						if (txs_drain(&dev, &sum, pktid,
@@ -2386,11 +2451,13 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 			 *
 			 * Bounded by the worst case that matters: `frames` at
 			 * the full ladder for the effective retry limit
-			 * (frame_budget_ms), plus slack.
+			 * (frame_budget_ms), and never less than one frame's
+			 * status wait, plus slack.
 			 */
 			{
-				double deadline = now_ms() + frames * frame_budget_ms +
-				                  2000.0;
+				double deadline = now_ms() + 2000.0 +
+					(frames * frame_budget_ms > status_wait_ms ?
+					 frames * frame_budget_ms : status_wait_ms);
 
 				while (sum.entries < n && now_ms() < deadline
 				       && !g_stop && !io_fail) {
@@ -2401,7 +2468,11 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 					              stale_pktid : TXS_NO_PKTID))
 						io_fail = 1;
 				}
-				settled = (sum.entries >= n);
+				/* An arm cut short (attempt cap, wall clock) did not
+				 * send what it was asked to: never settled, so a short
+				 * arm whose few frames all filed status cannot read as
+				 * a clean row. */
+				settled = (sum.entries >= n && n == frames);
 			}
 			wall = now_ms() - t0;
 
@@ -2426,6 +2497,10 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 				       rtry_n ? (double)sum.retry_total / rtry_n : 0.0,
 				       sum.retry_max, settled ? "" : "  UNSETTLED");
 			}
+			if (wire_fail)
+				printf("       (pktid %u: %ld transfers failed on the "
+				       "wire and were resent - not counted as sent)\n",
+				       pktid, wire_fail);
 			if (submit_fail || status_timeouts || sum.late_prev ||
 			    sum.foreign || sum.stale_ext || n < frames)
 				printf("       (pktid %u: %ld submit failures, %ld/%d "

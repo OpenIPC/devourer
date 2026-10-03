@@ -383,6 +383,7 @@ void mt_async_stats(struct mt7612u_dev *d, struct mt_async_stats *out)
 	out->rx_err       = a->rx_err;
 	out->rx_invalid   = a->rx_invalid;
 	out->rx_dropped   = a->rx_dropped;
+	out->tx_inflight  = a->tx_inflight;
 	a->lock.unlock();
 }
 

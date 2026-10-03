@@ -1900,6 +1900,37 @@ static unsigned txs_arm_pktid(int rx_on, unsigned arm)
  * latency plus the drain's two control reads. */
 #define TXS_FRAME_MARGIN_MS 50.0
 
+/*
+ * DEVOURER_TXS_TRACE=1: one "TXS" line per popped status entry (raw main and
+ * EXT words, how it was classified, the frame count at the time), per submit
+ * and per expired per-frame wait, plus every change of the EXT word seen while
+ * the FIFO was EMPTY - which is what says whether an empty FIFO's EXT holds
+ * the last popped entry (the premise of the stale-EXT claim) or something
+ * else. A status read slower than TXS_SLOW_READ_MS is flagged: mt_vendor_req
+ * sleeps 5 ms before a retry, and a retried read of the pop-on-read main word
+ * would lose the entry the first attempt popped. Off by default; written so
+ * the arm table and its parsers are unchanged ("TXS " prefix).
+ */
+#define TXS_SLOW_READ_MS 4.0
+static struct {
+	int on;
+	char arm;
+	int rx_on;
+	long n;            /* frames submitted so far in this arm */
+	uint32_t last_ext; /* last EXT word seen, popped or not */
+	long slow_reads;   /* per arm */
+	double tick_ms, tick_max_ms;   /* per arm: time inside txs_tick */
+} txs_tr;
+
+static void txs_trace_read(uint32_t addr, double ms)
+{
+	if (ms < TXS_SLOW_READ_MS) return;
+	txs_tr.slow_reads++;
+	printf("TXS t=%.1f arm=%c rx=%d n=%ld SLOW-READ %s %.1f ms\n", now_ms(),
+	       txs_tr.arm, txs_tr.rx_on, txs_tr.n,
+	       addr == MT_TX_STAT_FIFO ? "main" : "ext", ms);
+}
+
 /* Returns 0 when the FIFO was drained (or is empty), -1 when a status read
  * failed - the caller must not report the arm as measured then.
  *
@@ -1937,8 +1968,23 @@ static int txs_drain(struct mt7612u_dev *d, struct txs_sum *o,
 		 * (mt76x02_mac_load_tx_status): EXT FIRST, then the main word.
 		 * Reading MT_TX_STAT_FIFO pops the entry, so an EXT read after it
 		 * would describe the NEXT head, not the entry just popped. */
-		if (mt_rr_chk(d, MT_TX_STAT_FIFO_EXT, &ext)) return -1;
-		if (mt_rr_chk(d, MT_TX_STAT_FIFO, &st)) return -1;
+		if (txs_tr.on) {
+			double t = now_ms();
+
+			if (mt_rr_chk(d, MT_TX_STAT_FIFO_EXT, &ext)) return -1;
+			txs_trace_read(MT_TX_STAT_FIFO_EXT, now_ms() - t);
+			t = now_ms();
+			if (mt_rr_chk(d, MT_TX_STAT_FIFO, &st)) return -1;
+			txs_trace_read(MT_TX_STAT_FIFO, now_ms() - t);
+			if (!(st & MT_TX_STAT_FIFO_VALID) && ext != txs_tr.last_ext)
+				printf("TXS t=%.1f arm=%c rx=%d n=%ld EMPTY ext "
+				       "%08x -> %08x\n", now_ms(), txs_tr.arm,
+				       txs_tr.rx_on, txs_tr.n, txs_tr.last_ext, ext);
+			txs_tr.last_ext = ext;
+		} else {
+			if (mt_rr_chk(d, MT_TX_STAT_FIFO_EXT, &ext)) return -1;
+			if (mt_rr_chk(d, MT_TX_STAT_FIFO, &st)) return -1;
+		}
 		if (!(st & MT_TX_STAT_FIFO_VALID)) return 0;
 		/* Only the CURRENT arm's frames are averaged in: the previous
 		 * arm's late status and anything else that files status are
@@ -1946,6 +1992,7 @@ static int txs_drain(struct mt7612u_dev *d, struct txs_sum *o,
 		{
 			const unsigned id =
 				(unsigned)FIELD_GET(MT_TX_STAT_FIFO_EXT_PKTID, ext);
+			const char *cls = "own";
 
 			if (id != want) {
 				if (stale_id != TXS_NO_PKTID && o->entries == 0 &&
@@ -1954,12 +2001,26 @@ static int txs_drain(struct mt7612u_dev *d, struct txs_sum *o,
 					o->stale_ext++;
 					if (st & MT_TX_STAT_FIFO_SUCCESS)
 						o->success++;
-					continue;
+					cls = "stale-claimed";
+				} else if (id == prev) {
+					o->late_prev++;
+					cls = "late";
+				} else {
+					o->foreign++;
+					cls = "foreign";
 				}
-				if (id == prev) o->late_prev++;
-				else            o->foreign++;
-				continue;
 			}
+			if (txs_tr.on)
+				printf("TXS t=%.1f arm=%c rx=%d n=%ld POP st=%08x "
+				       "ext=%08x pktid=%u wcid=%u ok=%d retry=%u "
+				       "%s entries=%ld\n", now_ms(), txs_tr.arm,
+				       txs_tr.rx_on, txs_tr.n, st, ext, id,
+				       (unsigned)FIELD_GET(MT_TX_STAT_FIFO_WCID, st),
+				       !!(st & MT_TX_STAT_FIFO_SUCCESS),
+				       (unsigned)FIELD_GET(MT_TX_STAT_FIFO_EXT_RETRY,
+				                           ext),
+				       cls, o->entries + (id == want));
+			if (id != want) continue;
 		}
 		o->entries++;
 		if (st & MT_TX_STAT_FIFO_SUCCESS) o->success++;
@@ -1999,8 +2060,13 @@ static int txs_parse_long(const char *s, long *out)
 static void txs_tick(int rx_on, double *last_tick)
 {
 	if (rx_on && now_ms() - *last_tick >= 1000.0) {
+		const double t = now_ms();
+
 		mt7612u_phy_tick(&dev);
 		*last_tick = now_ms();
+		txs_tr.tick_ms += *last_tick - t;
+		if (*last_tick - t > txs_tr.tick_max_ms)
+			txs_tr.tick_max_ms = *last_tick - t;
 	}
 }
 
@@ -2098,6 +2164,11 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 	}
 	/* Parsed before any device work, so a typo costs nothing. */
 	rl_given = txs_retry_limit_env(&rl);
+	{
+		const char *tr = getenv("DEVOURER_TXS_TRACE");
+
+		txs_tr.on = tr && *tr && strcmp(tr, "0") != 0;
+	}
 	if (rl_given < 0) {
 		printf("GATE TXS: FAIL - DEVOURER_TX_RETRY_LIMIT='");
 		txs_print_escaped(getenv("DEVOURER_TX_RETRY_LIMIT"));
@@ -2206,6 +2277,7 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 			double t0, wall, send_deadline;
 			long n = 0, attempts = 0, submit_fail = 0;
 			long status_timeouts = 0;
+			struct mt_async_stats us0, us1;
 			int settled = 0;
 
 			rate.phy = MT7612U_PHY_HT;
@@ -2223,8 +2295,15 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 			memcpy(frame + 26, "MT7612U-TXS", 11);
 
 			/* The previous arm's tail: counted as late, never as ours. */
+			txs_tr.arm = arms[a].tag;
+			txs_tr.rx_on = rx_on;
+			txs_tr.n = 0;
+			txs_tr.slow_reads = 0;
+			txs_tr.tick_ms = txs_tr.tick_max_ms = 0.0;
 			if (txs_drain(&dev, &sum, pktid, prev_pktid, TXS_NO_PKTID))
 				io_fail = 1;
+			/* After the previous arm's tail: this arm's USB delta. */
+			mt_async_stats(&dev, &us0);
 
 			/* Bounded twice, like gate_ampdu's wall clock: a submit
 			 * that keeps failing must end the arm, not spin it. The
@@ -2250,6 +2329,11 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 					continue;
 				}
 				n++;
+				txs_tr.n = n;
+				if (txs_tr.on)
+					printf("TXS t=%.1f arm=%c rx=%d n=%ld SUBMIT "
+					       "entries=%ld\n", now_ms(), arms[a].tag,
+					       rx_on, n, sum.entries);
 				/*
 				 * One frame at a time, for real. mt_tx_raw returns
 				 * once the USB transfer is SUBMITTED (the async
@@ -2281,8 +2365,15 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 						txs_tick(rx_on, &last_tick);
 						mt_usleep(500);
 					} while (now_ms() < fdl && !g_stop);
-					if (!io_fail && sum.entries < n)
+					if (!io_fail && sum.entries < n) {
 						status_timeouts++;
+						if (txs_tr.on)
+							printf("TXS t=%.1f arm=%c rx=%d "
+							       "n=%ld WAIT-EXPIRED "
+							       "entries=%ld\n", now_ms(),
+							       arms[a].tag, rx_on, n,
+							       sum.entries);
+					}
 				}
 			}
 			/*
@@ -2343,6 +2434,29 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 				       "%ld foreign, %ld stale-EXT entries claimed)\n",
 				       pktid, submit_fail, n, frames, status_timeouts,
 				       sum.late_prev, sum.foreign, sum.stale_ext);
+			/* "sent" counts SUBMITTED bulk transfers. One that then
+			 * failed or never completed put no frame on the air and
+			 * can file no status, so it is named here rather than
+			 * left to read as a lost status entry. */
+			mt_async_stats(&dev, &us1);
+			if (us1.tx_done - us0.tx_done != (uint64_t)n ||
+			    us1.tx_err != us0.tx_err)
+				printf("       (USB: %llu submitted, %llu completed, "
+				       "%llu errors this arm, against %ld sent)\n",
+				       (unsigned long long)(us1.tx_submitted -
+				                            us0.tx_submitted),
+				       (unsigned long long)(us1.tx_done - us0.tx_done),
+				       (unsigned long long)(us1.tx_err - us0.tx_err),
+				       n);
+			if (txs_tr.on)
+				printf("TXS arm=%c rx=%d SUMMARY sent=%ld entries=%ld "
+				       "late=%ld foreign=%ld stale=%ld timeouts=%ld "
+				       "submit_fail=%ld slow_reads=%ld tick_ms=%.0f "
+				       "tick_max_ms=%.0f wall_ms=%.0f\n",
+				       arms[a].tag, rx_on, n, sum.entries,
+				       sum.late_prev, sum.foreign, sum.stale_ext,
+				       status_timeouts, submit_fail, txs_tr.slow_reads,
+				       txs_tr.tick_ms, txs_tr.tick_max_ms, wall);
 			total_entries += sum.entries;
 			total_foreign += sum.foreign + sum.late_prev;
 			prev_pktid = pktid;
@@ -5653,7 +5767,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "       bringup tsfwrap [gap 1|2] [wrap_bits] [max_min]  (TSF read across the low-word wrap, ~72 min; rc 3 = no verdict, re-run)\n");
 		fprintf(stderr, "       bringup beacon [chan] [secs]   (Stage A: static AP beacon on air)\n");
 		fprintf(stderr, "       bringup ap     [chan] [secs]   (Stage B: beacon + RX, probe/auth/assoc)\n");
-		fprintf(stderr, "       bringup txs    [chan] [frames] [peer MAC]  (per-frame retry count off MT_TX_STAT_FIFO; honours DEVOURER_TX_RETRY_LIMIT)\n");
+		fprintf(stderr, "       bringup txs    [chan] [frames] [peer MAC]  (per-frame retry count off MT_TX_STAT_FIFO; honours DEVOURER_TX_RETRY_LIMIT; DEVOURER_TXS_TRACE=1 logs every status pop)\n");
 		fprintf(stderr, "       bringup staid                  (the SetStationIdentity contract on hardware, no AP)\n");
 		fprintf(stderr, "       bringup sta    [chan] [secs] <ap-bssid>  (what the BSSID registers do for a managed station)\n");
 		fprintf(stderr, "       bringup staack [chan] [secs] <ap-bssid>  (probe-response retry count; register state, not a verdict)\n");

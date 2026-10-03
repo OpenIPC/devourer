@@ -12,7 +12,11 @@ to_us=0 in every arm and cannot answer it. This makes the traffic.
 The monitor vif lives on the AP's own phy, so the injection rides the AP's
 radio and lands on the AP's channel without needing a third adapter.
 
-  sta_unicast_inject.py <mon-if> <dst-mac> <bssid> [seconds] [pps]
+  sta_unicast_inject.py <mon-if> <dst-mac> <bssid> [seconds] [pps] [seq0]
+
+seq0 (0..4095, default 0) is the first sequence number. Two injectors sharing
+a transmitter address must use disjoint ranges, or a receiver's duplicate
+detection can take one stream's frames for the other's.
 
 Note what this does NOT do: mac80211 marks injected frames no-ack by default,
 so these do not solicit an acknowledgement and cannot be used to measure one.
@@ -71,7 +75,7 @@ def on_term(signum, frame):
 
 
 def main(argv):
-    if len(argv) < 4 or len(argv) > 6:
+    if len(argv) < 4 or len(argv) > 7:
         print(__doc__, file=sys.stderr)
         return 2
     try:
@@ -80,6 +84,14 @@ def main(argv):
         bssid = mac(argv[3])
         secs = positive('seconds', argv[4]) if len(argv) > 4 else 120.0
         pps = positive('pps', argv[5], MAX_PPS) if len(argv) > 5 else 300.0
+        seq0 = 0
+        if len(argv) > 6:
+            try:
+                seq0 = int(argv[6])
+            except ValueError:
+                raise Usage('seq0 must be an integer: %r' % argv[6])
+            if not 0 <= seq0 <= 4095:
+                raise Usage('seq0 must be 0..4095: %r' % argv[6])
     except Usage as e:
         print('sta_unicast_inject: %s' % e, file=sys.stderr)
         print(__doc__, file=sys.stderr)
@@ -98,7 +110,7 @@ def main(argv):
     gap = 1.0 / pps
     end = time.time() + secs
     sent = 0
-    seq = 0
+    seq = seq0
     try:
         while time.time() < end:
             hdr = (struct.pack('<BBH', 0x08, 0x02, 0) + dst + bssid + bssid +

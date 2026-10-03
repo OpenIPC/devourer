@@ -17,13 +17,27 @@
 # every data-plane check first asserts that `ip route get` leaves through the
 # station's TAP.
 #
-# THE ARM DIFFERS BY DIE. On MT7612U the arm writes no register (it checks
-# MT_MAC_ADDR and the auto-responder), so DEVOURER_STA_ARM=0 changes nothing
-# and ClearStationIdentity is trivially true: both are information there. On
-# a Realtek die the arm WRITES the port registers (docs/realtek-station-arm.md)
-# and unarmed the MAC does not acknowledge own-addressed unicast, so the AP's
-# authentication response is never ACKed and hostapd never lets the station
-# in: `noarm` is a real control, and the clear's verification is scored.
+# THE ARM DIFFERS BY DIE. On MT7612U the arm writes no identity register (it
+# checks MT_MAC_ADDR and the auto-responder) but installs the managed receive
+# filter 0x00015f97 in place of the RX loop's monitor filter, so an unarmed
+# station still gets in and acknowledges, and what DEVOURER_STA_ARM=0 changes
+# is the filter: `noarm` is the filter's control there (the unicast injection
+# below). On a Realtek die the arm WRITES the port registers
+# (docs/realtek-station-arm.md) and unarmed the MAC does not acknowledge
+# own-addressed unicast, so the AP's authentication response is never ACKed
+# and hostapd never lets the station in: `noarm` is the arm's control. On
+# both, the clear restores what the arm wrote and its verification is scored.
+#
+# THE MANAGED-FILTER STIMULUS (MT7612U only; on a Realtek DUT it is skipped,
+# said as INFO). Once the wpa2 / noarm four-way is in, a monitor vif on the
+# AP's phy injects two plaintext unicast data streams from the AP's BSSID
+# for INJECT_S at INJECT_PPS each (tests/sta_unicast_inject.py): one to
+# FOREIGN (an address nobody holds), one to the station's own address. The
+# own stream is the positive witness that the injection reaches the DUT - the
+# station refuses it on a WPA2 link and counts it (`plaintext refused`), and
+# it must reach half of what was injected, else the filter check is
+# INCONCLUSIVE. A phy that cannot add a monitor vif makes the check
+# INCONCLUSIVE, not the cell.
 #
 # Cells (each scored against its own witness):
 #   open     hostapd open, with a ping running from the start: the AP
@@ -33,7 +47,7 @@
 #            a probe request on associating, and re-joins when its ARP gets
 #            no unicast reply, kConfirmMs); ping 0% loss over
 #            the TAP; the ledger shows plaintext and no decryption; the arm
-#            line; the clear ran on exit (verified, on Realtek).
+#            line; the clear ran on exit and verified.
 #   wpa2     hostapd WPA2-PSK with group and pairwise rekeys: four-way, both
 #            rekeys completed at the AP, ping 0% loss before and after them,
 #            ONE association throughout, no four-way MIC failure, and
@@ -41,6 +55,8 @@
 #            one-frame switchover window in which the AP still sends under
 #            the old key - see rx_frame() in sta_client.cpp), the arm line, the clear (as for open), and
 #            NO tx.retry_limit=0 warning (the station default is nonzero).
+#            MT7612U also: the managed filter - the own stream arrives and
+#            `not-for-us` stays under 1% of the foreign one.
 #   noarm    the control: wpa2 with DEVOURER_STA_ARM=0 - nothing else
 #            changes. Scored everywhere: no SetStationIdentity and no clear
 #            ran. On Realtek also scored: the station tried (beacons seen,
@@ -49,8 +65,10 @@
 #            the arm is not what makes the wpa2 cell work. Its positive
 #            control is the wpa2 cell of the SAME run: without an armed
 #            four-way against the same hostapd configuration, a silent AP
-#            proves nothing and noarm is INCONCLUSIVE. On MT7612U the link
-#            is reported over a PING_S ping window, not scored.
+#            proves nothing and noarm is INCONCLUSIVE. On MT7612U also
+#            scored: under the monitor filter BOTH injected streams arrive
+#            (each at least half); the link is reported over a PING_S ping
+#            window, not scored.
 #   retry0   wpa2 with DEVOURER_TX_RETRY_LIMIT=0. Scored: the library's
 #            arm-time warning about tx.retry_limit=0 (logged inside a
 #            successful SetStationIdentity, so just before sta_client's
@@ -115,8 +133,8 @@
 #
 # Env: DUT_SYSFS, AP_SYSFS, DUT_VID, DUT_PID, CH, SSID, PSK, SECS, REKEY_S,
 #      PTK_REKEY_S, PING_S, DOWN_S, REJOIN_S, AP_OFDM_ONLY, HOSTAPD_DEBUG,
-#      FW_DIR, NS, TAP,
-#      READY_TIMEOUT, OUT, BUILD.
+#      INJECT_S, INJECT_PPS, FOREIGN, FW_DIR, NS, TAP, READY_TIMEOUT, OUT,
+#      BUILD.
 # Cells: open | wpa2 | noarm | retry0 | reconnect | noreconnect | all
 # (default: all six).
 
@@ -149,6 +167,12 @@ DOWN_S="${DOWN_S:-8}"
 REJOIN_S="${REJOIN_S:-30}"
 AP_OFDM_ONLY="${AP_OFDM_ONLY:-0}"
 HOSTAPD_DEBUG="${HOSTAPD_DEBUG:-0}"
+# The managed-filter stimulus (wpa2, noarm; MT7612U DUT). FOREIGN is locally
+# administered and held by nobody on the rig.
+INJECT_S="${INJECT_S:-10}"
+INJECT_PPS="${INJECT_PPS:-100}"
+FOREIGN="${FOREIGN:-02:00:00:de:ad:01}"
+MON=staon_mon
 FW_DIR="${FW_DIR:-/lib/firmware/mediatek}"
 NS="${NS:-staonair}"
 TAP="${TAP:-dvsta0}"
@@ -165,10 +189,13 @@ for c in $CELLS; do
 done
 
 [ "$(id -u)" = 0 ] || { echo "must run as root"; exit 2; }
-for v in CH SECS REKEY_S PTK_REKEY_S PING_S DOWN_S REJOIN_S AP_OFDM_ONLY HOSTAPD_DEBUG READY_TIMEOUT; do
+for v in CH SECS REKEY_S PTK_REKEY_S PING_S DOWN_S REJOIN_S AP_OFDM_ONLY HOSTAPD_DEBUG READY_TIMEOUT INJECT_S INJECT_PPS; do
   case "${!v}" in ''|*[!0-9]*) echo "$v must be a non-negative integer"; exit 2 ;; esac
 done
 [ "$PING_S" -ge 1 ] || { echo "PING_S must be at least 1"; exit 2; }
+if [ "$INJECT_S" -lt 1 ] || [ "$INJECT_PPS" -lt 1 ] || [ "$INJECT_PPS" -gt 2000 ]; then
+  echo "INJECT_S must be at least 1, INJECT_PPS 1..2000 (the injector's cap)"; exit 2
+fi
 [ -n "$DUT_SYSFS" ] || { echo "DUT_SYSFS is required (lsusb -t)"; exit 2; }
 [ -n "$AP_SYSFS" ] || { echo "AP_SYSFS is required (lsusb -t)"; exit 2; }
 [ "$DUT_SYSFS" != "$AP_SYSFS" ] || { echo "DUT_SYSFS and AP_SYSFS must differ"; exit 2; }
@@ -207,7 +234,7 @@ DUT_PID="0x${dut_have#*:}"
 . "$ROOT/tests/mt7612u_sta_lib.sh"
 sta_out_prepare || exit 2
 sta_lock_take || exit 2
-sta_pid_init sta hostapd probe
+sta_pid_init sta hostapd probe inject inject_own
 
 # --- the AP adapter: refused unless it is plainly a spare wireless adapter --
 ap_refuse() { echo "refusing AP_SYSFS=$AP_SYSFS: $*"; sta_lock_release; exit 2; }
@@ -240,7 +267,10 @@ cleanup() {
   [ -n "$STA_PID" ] && sta_stop
   [ "$STA_HUNG" = yes ] && sta_gone=1
   sta_pid_kill probe
+  sta_pid_kill inject
+  sta_pid_kill inject_own
   sta_pid_kill hostapd
+  ns_exists && ip netns exec "$NS" iw dev "$MON" del 2>/dev/null
   # THE PHY COMES BACK BEFORE THE NAMESPACE GOES: `ip netns del` on a
   # namespace still holding a phy destroys the phy (only a re-enumeration
   # brings it back). So the delete is conditional on the move having worked.
@@ -494,23 +524,87 @@ fault_cause() {
   grep -m1 'FAULT\|threw' "$OUT/sta_$1.log" 2>/dev/null | sed 's/^ *//'
 }
 
-# The clear ran on exit. Its result is scored on a Realtek die, where the
-# clear writes registers and verifies them; on MT7612U it is trivially true
-# (the arm wrote nothing) and is information. (An unverified clear is also a
-# station FAULT, exit 3, scored by sta_stop.)
+# The clear ran on exit and verified: on a Realtek die it restores the port
+# registers, on MT7612U the pre-arm (monitor) receive filter, and either reads
+# back. (An unverified clear is also a station FAULT, exit 3, scored by
+# sta_stop.)
 check_cleared() { # $1 cell
   local line
   line=$(grep -m1 'station identity clear:' "$OUT/sta_$1.log" | sed 's/^ *//')
-  if [ -z "$line" ]; then
-    bad "$1: ClearStationIdentity did not run on exit"
-  elif [ "$DUT_KIND" = realtek ]; then
-    case "$line" in
-      *"restored (verified)"*) ok "$1: ClearStationIdentity ran and verified on exit" ;;
-      *) bad "$1: ClearStationIdentity did not verify: $line" ;;
-    esac
+  case "$line" in
+    *"restored (verified)"*) ok "$1: ClearStationIdentity ran and verified on exit" ;;
+    '') bad "$1: ClearStationIdentity did not run on exit" ;;
+    *) bad "$1: ClearStationIdentity did not verify: $line" ;;
+  esac
+}
+
+# The managed-filter stimulus (header): the two streams off a monitor vif on
+# the AP's own phy, while the station is associated. They share a transmitter
+# address, so they get disjoint sequence ranges (0 and 2048): the managed
+# filter's hardware DUP drop must not take one for a retransmission of the
+# other. The injector counts frames it SUBMITTED, not frames that aired -
+# hence the own stream as the positive witness. Each PID is recorded on the
+# statement after its launch, and every injector is bounded by `timeout -k`
+# whatever happens to the harness. Sets INJ_FOREIGN / INJ_OWN (empty when it
+# could not run).
+INJ_FOREIGN=""; INJ_OWN=""
+inject_count() { sed -n 's/^injected \([0-9][0-9]*\) unicast frames.*/\1/p' "$1" 2>/dev/null | tail -1; }
+inject_unicast() { # $1 cell
+  INJ_FOREIGN=""; INJ_OWN=""
+  local bssid own pf po
+  bssid=$(ip netns exec "$NS" cat "/sys/class/net/$AP_IF/address" 2>/dev/null)
+  own=$(own_of "$1")
+  [ -n "$bssid" ] && [ -n "$own" ] || return 1
+  ip netns exec "$NS" iw dev "$MON" del 2>/dev/null
+  if ! { ip netns exec "$NS" iw phy "$AP_PHY" interface add "$MON" type monitor 2>/dev/null &&
+         ip netns exec "$NS" ip link set "$MON" up 2>/dev/null; }; then
+    ip netns exec "$NS" iw dev "$MON" del 2>/dev/null
+    return 1
+  fi
+  ip netns exec "$NS" timeout -k 5 $(( INJECT_S + 10 )) \
+    python3 "$ROOT/tests/sta_unicast_inject.py" "$MON" "$FOREIGN" "$bssid" \
+      "$INJECT_S" "$INJECT_PPS" > "$OUT/inject_$1.log" 2>&1 &
+  pf=$!; sta_pid_record inject "$pf"
+  ip netns exec "$NS" timeout -k 5 $(( INJECT_S + 10 )) \
+    python3 "$ROOT/tests/sta_unicast_inject.py" "$MON" "$own" "$bssid" \
+      "$INJECT_S" "$INJECT_PPS" 2048 > "$OUT/inject_own_$1.log" 2>&1 &
+  po=$!; sta_pid_record inject_own "$po"
+  wait "$pf" 2>/dev/null; wait "$po" 2>/dev/null
+  rm -f "$OUT/.pid_inject" "$OUT/.pid_inject_own"
+  ip netns exec "$NS" iw dev "$MON" del 2>/dev/null
+  INJ_FOREIGN=$(inject_count "$OUT/inject_$1.log")
+  INJ_OWN=$(inject_count "$OUT/inject_own_$1.log")
+  [ -n "$INJ_FOREIGN" ] && [ -n "$INJ_OWN" ]
+}
+
+# Score the stimulus against the station's ledger. $1 cell, $2 managed |
+# monitor (what the filter should be). Both need the OWN stream to have
+# arrived (>= half) before the FOREIGN count means anything.
+check_filter() {
+  local nfu ref
+  nfu=$(led "$1" 'not-for-us'); ref=$(led "$1" 'plaintext refused')
+  if [ "${INJ_FOREIGN:-0}" = 0 ] || [ "${INJ_OWN:-0}" = 0 ]; then
+    inc "$1: the unicast injectors did not run (no monitor vif on $AP_PHY?) - see $OUT/inject_$1.log, $OUT/inject_own_$1.log"
+    return
+  fi
+  if [ -z "$nfu" ] || [ -z "$ref" ]; then
+    inc "$1: no not-for-us / plaintext refused count in the ledger - see $OUT/sta_$1.log"
+    return
+  fi
+  if [ $(( ref * 2 )) -lt "$INJ_OWN" ]; then
+    inc "$1: only $ref of $INJ_OWN frames injected at the station's own address arrived - the injection is not reaching the DUT, so the filter check is not evidence"
+    return
+  fi
+  if [ "$2" = managed ]; then
+    if [ $(( nfu * 100 )) -lt "$INJ_FOREIGN" ]; then
+      ok "$1: managed filter on: own-addressed $ref of $INJ_OWN arrived, foreign not-for-us=$nfu of $INJ_FOREIGN"
+    else
+      bad "$1: armed station still receives others' unicast: not-for-us=$nfu of $INJ_FOREIGN (own-addressed $ref of $INJ_OWN arrived)"
+    fi
+  elif [ $(( nfu * 2 )) -ge "$INJ_FOREIGN" ]; then
+    ok "$1: control: unarmed, both streams arrive: own-addressed $ref of $INJ_OWN, foreign not-for-us=$nfu of $INJ_FOREIGN"
   else
-    ok "$1: ClearStationIdentity ran on exit"
-    info "$1: $line (trivially true on MT7612U: the arm wrote nothing)"
+    bad "$1: unarmed (monitor filter) yet the foreign stream did not arrive: not-for-us=$nfu of $INJ_FOREIGN while own-addressed $ref of $INJ_OWN did"
   fi
 }
 
@@ -614,6 +708,11 @@ run_wpa2() {
   if [ "$p" = 2 ]; then station_gone "$cell"; sta_pid_kill hostapd; return 1; fi
   WPA2_LINK="four-way completed, ping $(loss "$cell")"
   [ "$p" = 0 ] && WPA2_LINK="$WPA2_LINK OK"
+  INJ_FOREIGN=""; INJ_OWN=""
+  if [ "$DUT_KIND" = mt7612u ] && { [ "$cell" = wpa2 ] || [ "$cell" = noarm ]; }; then
+    inject_unicast "$cell"
+    proc_running "$STA_PID" || { station_gone "$cell"; sta_pid_kill hostapd; return 1; }
+  fi
   [ "$cell" = wpa2 ] || { cell_end; return 0; }
 
   # The rekeys: waited for while the station is alive. "pairwise key
@@ -666,6 +765,8 @@ cell_wpa2() {
     bad "wpa2: ledger associations=${assoc:-?} answered=${ans:-?} PTK=${ptk:-?} four-way MIC failures=${fwmic:-?} data-plane MIC failures=${mic:-?} (expected 1, >0, >=2, 0, <= PTK)"
   fi
   check_armed wpa2
+  if [ "$DUT_KIND" = mt7612u ]; then check_filter wpa2 managed
+  else info "wpa2: the managed-filter check is MT7612U-only (skipped on $DUT_KIND)"; fi
   # The station default retry limit is nonzero, so the arm must NOT warn.
   if grep -q 'station identity armed with tx.retry_limit=0' "$OUT/sta_wpa2.log"; then
     bad "wpa2: the tx.retry_limit=0 warning fired with the station default limit"
@@ -684,7 +785,8 @@ cell_noarm() {
     bad "noarm: an arm or clear ran with DEVOURER_STA_ARM=0 ($(grep -m1 'station identity' "$OUT/sta_noarm.log"))"
   fi
   if [ "$DUT_KIND" != realtek ]; then
-    info "noarm: link unarmed: ${WPA2_LINK:-no result} (the MT7612U arm writes no register; a difference from wpa2 here is worth a look)"
+    [ "$WPA2_LINK" = "no four-way" ] || check_filter noarm monitor
+    info "noarm: link unarmed: ${WPA2_LINK:-no result} (unarmed = the monitor filter; a link difference from wpa2 here is worth a look)"
     return
   fi
   # Realtek: unarmed, the MAC does not ACK own-addressed unicast, so hostapd

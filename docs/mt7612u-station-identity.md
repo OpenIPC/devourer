@@ -340,7 +340,7 @@ group-addressed data. What it loses is only what `StationSm::on_rx` already
 refused: another station's unicast (`not-for-us`) and probe responses to
 other stations. No disarm-while-scanning is needed.
 
-**Witness.** `tests/mt7612u_sta_onair.sh` injects two plaintext unicast
+**Witness.** `tests/sta_client_onair.sh` (an MT7612U DUT) injects two plaintext unicast
 streams from the AP's BSSID while the station is associated: one at an address
 nobody holds, one at the station's own address. The own stream is the positive
 witness that the injection reaches the DUT - the station counts it as

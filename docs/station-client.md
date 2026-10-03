@@ -17,12 +17,19 @@ integrator - the scanner, the re-join policy and the data plane.
   rule) and outside the mutex the RX callback takes (IRadio's lock rule).
 - Cleared on the way out whenever an arm was attempted; the result is printed
   (`station identity clear: restored (verified)` / `NOT VERIFIED`). On
-  MT7612U the clear is trivially true, since the arm wrote nothing.
+  MT7612U the clear puts the monitor receive filter back and is true once it
+  reads back.
 
-On MT7612U the arm writes no register: it verifies that the station's address
-is the adapter's own `MT_MAC_ADDR` and that the auto-responder is enabled
-(`docs/mt7612u-station-identity.md`). That is why the station's address always
-comes from `GetPermanentMacAddress`.
+On MT7612U the arm writes no identity register: it verifies that the
+station's address is the adapter's own `MT_MAC_ADDR` and that the
+auto-responder is enabled (`docs/mt7612u-station-identity.md`). That is why
+the station's address always comes from `GetPermanentMacAddress`. The one
+register it writes is the receive filter: armed, the station runs the managed
+filter `0x00015f97`, which drops unicast not addressed to it but keeps every
+BSS's beacons and group traffic; unarmed (`DEVOURER_STA_ARM=0`) it stays
+promiscuous. `StationSm::on_rx` is the address filter either way; its ledger
+`not-for-us` count (our BSS, someone else's unicast) is the witness that the
+managed filter is on.
 
 ## What the station transmits
 
@@ -106,18 +113,22 @@ first line then reads `fault=1`.
   | Cell | Scored |
   |---|---|
   | `open` | with a ping running from the start, the AP associates our address within 30 s (recovering an unconfirmed first association counts); ping 0% loss over the TAP; ledger plaintext only; armed; the clear |
-  | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; no four-way MIC failure, data-plane MIC failures <= PTK installs; armed; the clear; no `tx.retry_limit=0` warning |
-  | `noarm` | control, `DEVOURER_STA_ARM=0`: no arm and no clear ran. Realtek: the station tried and the AP did NOT complete the four-way - a completed one FAILs; INCONCLUSIVE unless the armed `wpa2` cell of the same run got in (the positive control). MT7612U: the link over a 30 s ping window is reported, not scored |
+  | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; no four-way MIC failure, data-plane MIC failures <= PTK installs; armed; the clear; no `tx.retry_limit=0` warning. MT7612U: the managed filter - plaintext unicast injected from the AP's BSSID at the station (`plaintext refused` at least half of it, else INCONCLUSIVE) and at a foreign address (`not-for-us` under 1% of it) |
+  | `noarm` | control, `DEVOURER_STA_ARM=0`: no arm and no clear ran. Realtek: the station tried and the AP did NOT complete the four-way - a completed one FAILs; INCONCLUSIVE unless the armed `wpa2` cell of the same run got in (the positive control). MT7612U: under the monitor filter both injected streams arrive (each at least half); the link over a 30 s ping window is reported, not scored |
   | `retry0` | `DEVOURER_TX_RETRY_LIMIT=0`: the arm-time warning; the clear (the link over a 30 s ping window is reported, not scored) |
   | `reconnect` | hostapd stopped and restarted: the station reports the lost link; second four-way within the bound, measured from hostapd being started again; ping 0% loss over a 30 s window; ledger 2 associations, 1 reconnect; one arm across the re-join; the clear |
   | `noreconnect` | as `reconnect` with `DEVOURER_STA_RECONNECT=0`: the lost link reported; no re-join; the ledger ends Failed after 1 association |
 
-  The arm differs by die. On MT7612U it writes no register, so an unarmed
-  link may work and `ClearStationIdentity` is trivially true: the clear is
-  scored as having run and its result is information. On a Realtek die the
-  arm writes the port registers and unarmed the MAC does not acknowledge
-  own-addressed unicast (`docs/realtek-station-arm.md`), so `noarm` is a
-  control that can fail and the clear must verify.
+  The arm differs by die. On MT7612U it writes only the receive filter, so
+  an unarmed link may work and `noarm` is the filter's control. On a Realtek
+  die the arm writes the port registers and unarmed the MAC does not
+  acknowledge own-addressed unicast (`docs/realtek-station-arm.md`), so
+  `noarm` is the arm's control and can fail. On both, the clear must verify.
+
+  The injections (`INJECT_S`, `INJECT_PPS` each, `FOREIGN`) ride a monitor
+  vif on the AP's phy (`tests/sta_unicast_inject.py`) and run only for an
+  MT7612U DUT; a phy that cannot add one makes the filter check
+  INCONCLUSIVE, not the cell.
 
   The arm is per BSSID: a re-join to the same BSSID keeps it rather than
   arming again, and on Realtek the second association is the proof it still

@@ -99,13 +99,22 @@
 # (rig/bring-up).
 # Build first: cmake --build build --target StaClientSelftest (build/sta_client).
 #
+# HOSTAPD_DEBUG=1: hostapd runs with -dd, its debug output in the same
+# per-cell log (hostapd_<cell>.log), for the AP's view of an association
+# (sta_add, TX status). Meant for the open cell: the extra lines can repeat
+# the text the wpa2 cell counts (rekey completions), so read its rekey
+# verdicts with that in mind. Whatever the setting, a cell that FAILs saves
+# the kernel log's tail (dmesg_<cell>.txt) and prints its mt76 / rtw88 /
+# cfg80211 lines - read-only, best effort.
+#
 # AP_OFDM_ONLY=1 (2.4 GHz): hostapd advertises and uses OFDM rates only
 # (no 1/2/5.5/11 Mb/s), so its management frames - authentication and
 # association responses - go out at 6 Mb/s OFDM instead of 1 Mb/s CCK. A
 # diagnostic: whether a station's association depends on CCK.
 #
 # Env: DUT_SYSFS, AP_SYSFS, DUT_VID, DUT_PID, CH, SSID, PSK, SECS, REKEY_S,
-#      PTK_REKEY_S, PING_S, DOWN_S, REJOIN_S, AP_OFDM_ONLY, FW_DIR, NS, TAP,
+#      PTK_REKEY_S, PING_S, DOWN_S, REJOIN_S, AP_OFDM_ONLY, HOSTAPD_DEBUG,
+#      FW_DIR, NS, TAP,
 #      READY_TIMEOUT, OUT, BUILD.
 # Cells: open | wpa2 | noarm | retry0 | reconnect | noreconnect | all
 # (default: all six).
@@ -138,6 +147,7 @@ PING_S="${PING_S:-30}"
 DOWN_S="${DOWN_S:-8}"
 REJOIN_S="${REJOIN_S:-30}"
 AP_OFDM_ONLY="${AP_OFDM_ONLY:-0}"
+HOSTAPD_DEBUG="${HOSTAPD_DEBUG:-0}"
 FW_DIR="${FW_DIR:-/lib/firmware/mediatek}"
 NS="${NS:-staonair}"
 TAP="${TAP:-dvsta0}"
@@ -154,7 +164,7 @@ for c in $CELLS; do
 done
 
 [ "$(id -u)" = 0 ] || { echo "must run as root"; exit 2; }
-for v in CH SECS REKEY_S PTK_REKEY_S PING_S DOWN_S REJOIN_S AP_OFDM_ONLY READY_TIMEOUT; do
+for v in CH SECS REKEY_S PTK_REKEY_S PING_S DOWN_S REJOIN_S AP_OFDM_ONLY HOSTAPD_DEBUG READY_TIMEOUT; do
   case "${!v}" in ''|*[!0-9]*) echo "$v must be a non-negative integer"; exit 2 ;; esac
 done
 [ "$PING_S" -ge 1 ] || { echo "PING_S must be at least 1"; exit 2; }
@@ -354,7 +364,10 @@ ap_up() { # $1 open | wpa2 | wpa2norekey, $2 log tag
   done
   ip netns exec "$NS" ip link set "$AP_IF" up 2>/dev/null
   AP_START_MS=$(date +%s%3N)   # reconnect measures its re-join from here
-  ip netns exec "$NS" hostapd -t "$OUT/hostapd_$2.conf" > "$OUT/hostapd_$2.log" 2>&1 &
+  local dbg=""
+  [ "$HOSTAPD_DEBUG" = 1 ] && dbg=-dd
+  # shellcheck disable=SC2086  # $dbg is empty or one flag
+  ip netns exec "$NS" hostapd $dbg -t "$OUT/hostapd_$2.conf" > "$OUT/hostapd_$2.log" 2>&1 &
   sta_pid_record hostapd $!
   t=0
   until ip netns exec "$NS" iw dev "$AP_IF" info 2>/dev/null | grep -q 'type AP'; do
@@ -511,7 +524,18 @@ check_armed() { # $1 cell
   check_cleared "$1"
 }
 
-cell_end() { sta_pid_kill probe; sta_stop; sta_pid_kill hostapd; }
+# A cell that FAILED keeps the kernel's view (the AP driver may log a
+# station-add or TX-status error): the tail of dmesg into its own file, and
+# the AP-relevant lines echoed. Read-only; skipped silently if unreadable.
+CELL_FAIL0=0
+dmesg_on_fail() {
+  [ "$fail" -gt "$CELL_FAIL0" ] || return 0
+  dmesg 2>/dev/null | tail -80 > "$OUT/dmesg_${CELL:-cell}.txt" || return 0
+  grep -iE 'mt76|rtw|rtl8|cfg80211|ieee80211' "$OUT/dmesg_${CELL:-cell}.txt" |
+    tail -10 | sed 's/^/  dmesg  /'
+  return 0
+}
+cell_end() { sta_pid_kill probe; sta_stop; sta_pid_kill hostapd; dmesg_on_fail; }
 
 # --- open ---------------------------------------------------------------------
 cell_open() {
@@ -808,7 +832,7 @@ cell_noreconnect() {
   run_reconnect noreconnect 0
 }
 
-for c in $CELLS; do "cell_$c"; done
+for c in $CELLS; do CELL_FAIL0=$fail; "cell_$c"; done
 
 echo
 echo "=== $pass passed, $fail failed, $inconclusive inconclusive  (logs: $OUT) ==="

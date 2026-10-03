@@ -38,10 +38,15 @@
  * from any other address is not acknowledged (docs/mt7612u-station-identity.md).
  * `own` comes from GetPermanentMacAddress and is never invented.
  *
- * THE RECEIVE PATH IS PROMISCUOUS on MT7612U (Mt7612uRadio::StartRxLoop
- * installs the monitor filter), so StationSm::on_rx is the address filter,
- * and its refusal counters are printed at every exit: they distinguish "the
- * AP never answered" from "we never heard the AP".
+ * THE RECEIVE PATH IS PROMISCUOUS on MT7612U until the arm
+ * (Mt7612uRadio::StartRxLoop installs the monitor filter); the arm installs
+ * the managed filter, which drops unicast not addressed to `own` but still
+ * passes every BSS's beacons and group traffic, and DEVOURER_STA_ARM=0 stays
+ * promiscuous. So StationSm::on_rx is the address filter either way, and its
+ * refusal counters are printed at every exit: they distinguish "the AP never
+ * answered" from "we never heard the AP". Its `not-for-us` count (our BSS,
+ * someone else's unicast) is also the witness that the managed filter is on:
+ * near zero while armed, whatever such traffic is on the air.
  *
  * Exit status: 0 the run completed (the ledger says how it went); 1 setup
  * failed; 2 refused - the adapter's station_mode_ok is false, or the
@@ -197,6 +202,10 @@ std::atomic<uint64_t> g_beacons{0}, g_probe_tx{0};
 std::atomic<uint64_t> g_joins{0}, g_associations{0}, g_reconnects{0};
 std::atomic<uint64_t> g_enc_rx{0}, g_mic_fail{0}, g_replays{0};
 std::atomic<uint64_t> g_group_rx{0}, g_plain_rx{0}, g_rx_short{0};
+/* Plaintext data (not EAPOL) from our BSS on a protected link: refused, and
+ * counted - it is also the on-air harness's positive witness that unicast
+ * addressed to us gets through the receive filter. */
+std::atomic<uint64_t> g_plain_refused{0};
 /* One counter per direction, so each direction's books close on their own:
  *   from host == encrypted + plaintext + dropped down
  *   queued    == aired + queue dropped + send failed */
@@ -494,7 +503,18 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
     /* Plaintext on a WPA2 link is not forwarded: accepting it would let
      * anyone on the channel inject into the host's stack. Cleartext EAPOL is
      * StationSm::on_rx's, and it has already had it. */
-    if (g_sm.security() != StationSm::Security::Open) return;
+    if (g_sm.security() != StationSm::Security::Open) {
+      /* Not counted: the four-way's own cleartext EAPOL (expected here),
+       * and the no-data subtypes (Null / QoS Null - subtype bit 2), which
+       * carry nothing to refuse. */
+      const uint8_t* msdu = mpdu + hlen;
+      const bool eapol =
+          devourer::sta::is_ethertype_snap(msdu, len - hlen) &&
+          msdu[6] == 0x88 && msdu[7] == 0x8e;
+      const bool no_data = (fc0 & 0x40) != 0;
+      if (!eapol && !no_data) g_plain_refused.fetch_add(1);
+      return;
+    }
     if (to_us) g_unconfirmed = false;   /* the AP holds this association */
     g_plain_rx.fetch_add(1);
     if (len > hlen) tap_up(da, sa, mpdu + hlen, len - hlen);
@@ -945,11 +965,12 @@ void report() {
                sup.rsn_mismatches);
   std::fprintf(stderr,
                "  data plane: encrypted rx=%llu (group=%llu), plaintext rx="
-               "%llu, MIC failures=%llu, replays rejected=%llu,"
-               " duplicates dropped=%llu, no key for it=%llu\n",
+               "%llu, plaintext refused=%llu, MIC failures=%llu, replays"
+               " rejected=%llu, duplicates dropped=%llu, no key for it=%llu\n",
                (unsigned long long)g_enc_rx.load(),
                (unsigned long long)g_group_rx.load(),
                (unsigned long long)g_plain_rx.load(),
+               (unsigned long long)g_plain_refused.load(),
                (unsigned long long)g_mic_fail.load(),
                (unsigned long long)g_replays.load(),
                (unsigned long long)g_dup_drop.load(),
@@ -1439,8 +1460,9 @@ int main(int argc, char** argv) {
   /* Cleared on the way out whenever an arm was attempted - every path that
    * can reach SetStationIdentity ends here. The result is the only way to
    * learn a rollback did not land (IRadio: the port may keep answering for
-   * `own`), so it is printed; on a backend whose arm wrote nothing it is
-   * trivially true. */
+   * `own`; on MT7612U, the managed receive filter may still be in force), so
+   * it is printed; on a backend whose arm wrote nothing it is trivially
+   * true. */
   if (arm_attempted) {
     const char* r = "NOT VERIFIED";
     try {

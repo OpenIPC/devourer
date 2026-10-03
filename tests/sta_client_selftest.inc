@@ -92,7 +92,7 @@ void reset_all() {
   { std::lock_guard<std::mutex> q(g_q_mu); g_q.clear(); }
   g_beacons = 0; g_probe_tx = 0; g_joins = 0; g_associations = 0;
   g_reconnects = 0; g_enc_rx = 0; g_mic_fail = 0; g_replays = 0;
-  g_group_rx = 0; g_plain_rx = 0; g_rx_short = 0;
+  g_group_rx = 0; g_plain_rx = 0; g_plain_refused = 0; g_rx_short = 0;
   g_tap_tx = 0; g_tap_rx = 0; g_tap_drop = 0; g_tap_down_drop = 0;
   g_q_in = 0;
   g_tx_enc = 0; g_tx_enc_fail = 0; g_tx_plain = 0;
@@ -1317,6 +1317,16 @@ void test_plaintext_is_refused_on_a_protected_link() {
   rx_frame(d.data(), d.size(), -40, 0);
   check(tap_read().empty(), "an unprotected data frame is refused");
   check(g_plain_rx.load() == 0, "...and is not counted as plaintext traffic");
+  check(g_plain_refused.load() == 1, "...but is counted as refused plaintext");
+
+  /* A QoS Null (26 bytes, no payload) is not plaintext data: not counted. */
+  std::vector<uint8_t> qn = devourer::sta::data_hdr_from_ds(
+      kStaMac, kBssid, kPeer, /*protect=*/false, ap.seq.next());
+  qn[0] = 0xc8;                               /* QoS Null */
+  qn.insert(qn.begin() + 24, {0x00, 0x00});   /* QoS Control, TID 0 */
+  check(qn.size() == 26, "the QoS Null fixture is 26 bytes");
+  rx_frame(qn.data(), qn.size(), -40, 0);
+  check(g_plain_refused.load() == 1, "...and a QoS Null is not counted");
 }
 
 /* Fragments and A-MSDUs are refused rather than misread. Handing half an MSDU

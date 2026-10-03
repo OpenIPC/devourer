@@ -41,6 +41,10 @@
 #     first binds (seen: bus 9 -> 10, 3-2.3.3 -> 4-2.3.3). Read AP_SYSFS from
 #     `lsusb -t` after the driver has loaded; a stale one is refused.
 #
+# Exit status: 0 every gate passed; 1 a gate failed; 2 INCONCLUSIVE (a gate
+# could not measure, or the rig was refused); 3 interrupted (a gate, or the
+# run itself by INT/TERM).
+#
 # Env: AP_SYSFS, DUT_SYSFS, CH, BSSID, SECS, OUT, FW_DIR.
 
 set -u
@@ -79,9 +83,10 @@ AP_IF=""
 # The accepted AP's idVendor:idProduct:serial, recorded once the guard has
 # passed; cleanup re-enumerates AP_SYSFS only while it still names this device.
 AP_ID=""
-# Set only once hostapd is up on a verified AP-capable interface: before
-# that, the trap has no business re-enumerating anything (a wrong or default
-# AP_SYSFS naming a hub would power-cycle every device under it).
+# Set only once AP_SYSFS has passed the AP guard below, and before anything
+# touches the interface: before that, the trap has no business
+# re-enumerating anything (a wrong or default AP_SYSFS naming a hub would
+# power-cycle every device under it).
 AP_REENUM=no
 CLEANED=no
 # shellcheck disable=SC2317  # reached through the traps below
@@ -90,11 +95,15 @@ cleanup() {
   CLEANED=yes
   sta_fw_unlink
   sta_pid_kill inject
-  sta_pid_kill gate
-  sta_dut_handback
-  [ "$AP_REENUM" = yes ] || { sta_lock_release; return 0; }
+  local gate_gone=0
+  sta_pid_kill gate || gate_gone=1
+  # Never re-enumerate the DUT while its gate is still in de-init.
+  if [ "$gate_gone" = 0 ]; then sta_dut_handback
+  else echo "DUT gate still running - not re-enumerating DUT_SYSFS=$DUT_SYSFS"; fi
   # hostapd -B daemonizes; its PID is the one it wrote to -P for this run.
+  # Unconditional: nothing is recorded unless hostapd started.
   sta_pid_kill hostapd
+  [ "$AP_REENUM" = yes ] || { sta_lock_release; return 0; }
   sleep 1
   iw dev staid_mon del 2>/dev/null
   # RE-ENUMERATE the AP adapter, do not just bounce the link.
@@ -125,7 +134,7 @@ trap cleanup EXIT
 # AND IT MUST STOP: with INT/TERM on the EXIT trap the shell runs cleanup
 # and then CARRIES ON into the next arm. cleanup is idempotent, so the EXIT
 # pass after it is harmless.
-trap 'cleanup; exit 130' INT TERM
+trap 'cleanup; exit 3' INT TERM
 
 # --- the AP ----------------------------------------------------------------
 # THE AP GUARD. Cleanup re-enumerates AP_SYSFS as root, so it is accepted only
@@ -162,6 +171,17 @@ PHY=$(basename "$(readlink -f "/sys/class/net/$AP_IF/phy80211")")
 iw phy "$PHY" info 2>/dev/null | grep -q '\* AP$' ||
   ap_refuse "$AP_IF ($PHY) does not support AP mode"
 AP_ID=$(sta_usb_id "$AP_SYSFS")
+# The BSSID gate needs a monitor vif on the AP's phy. Probed here, before
+# the gates spend their minute, and again (unchanged) where it is used.
+iw dev staid_mon del 2>/dev/null
+if ! iw phy "$PHY" interface add staid_mon type monitor 2>/dev/null; then
+  echo "no monitor vif on $PHY: the BSSID gate would measure broadcast"
+  echo "reception only - refusing this AP."
+  exit 2
+fi
+iw dev staid_mon del 2>/dev/null
+# From here on the trap restores the AP: everything below changes it.
+AP_REENUM=yes
 
 echo "AP  $AP_IF ($PHY) bssid $BSSID ch$CH"
 echo "DUT $DUT_SYSFS (MT7612U)"
@@ -196,11 +216,10 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   fi
   sleep 1
 done
-AP_REENUM=yes   # hostapd may have run and left its bssid behind
 if [ "$ap_up" != yes ]; then
   echo "hostapd did not bring $AP_IF up in AP mode:"
   tail -12 "$OUT/hostapd.log" 2>/dev/null || echo "(no hostapd log written)"
-  exit 1
+  exit 2   # the rig, not the DUT
 fi
 
 # --- free the DUT ----------------------------------------------------------
@@ -253,7 +272,7 @@ if ! { iw phy "$PHY" interface add staid_mon type monitor 2>/dev/null &&
        ip link set staid_mon up 2>/dev/null; }; then
   echo "no monitor vif on $PHY: the BSSID gate would measure broadcast"
   echo "reception only, which is not the question - refusing to run it."
-  exit 1
+  exit 2   # the rig, not the DUT
 fi
 # ORDER MATTERS. The gate's bring-up runs the MT7612U's calibrations, whose
 # MCU replies arrive late under a strong transmitter nearby (mcu.cpp); the
@@ -261,7 +280,11 @@ fi
 # the injector only once the gate prints "bring-up done", and the gate then
 # pauses 3 s before arm A so the stimulus covers every arm.
 : > "$OUT/bssid.txt"
-"$BUILD/mt7612uprobe" sta "$CH" "$SECS" "$BSSID" > "$OUT/bssid.txt" 2>&1 &
+# BOUNDED: six arms of SECS, a 3 s pause, and 3 min for bring-up and slack.
+# INT lets the gate restore the registers (exit 3); KILL 10 s later if not.
+gate_bound=$(( SECS * 6 + 183 ))
+timeout -s INT -k 10 "$gate_bound" \
+    "$BUILD/mt7612uprobe" sta "$CH" "$SECS" "$BSSID" > "$OUT/bssid.txt" 2>&1 &
 sta_gate=$!
 sta_pid_record gate "$sta_gate"
 waited=0
@@ -284,6 +307,11 @@ fi
 wait "$sta_gate"
 r_bss=$?
 rm -f "$OUT/.pid_gate"
+gate_overran=no
+if [ "$r_bss" = 124 ] || [ "$r_bss" = 137 ]; then
+  echo "the BSSID gate overran its ${gate_bound}s bound - no measurement"
+  r_bss=2; gate_overran=yes
+fi
 inj_secs=$(( $(date +%s) - inj_t0 ))
 cat "$OUT/bssid.txt"
 # Stop the injector (it prints its count on SIGTERM) and require that it
@@ -304,7 +332,9 @@ if [ "${injected:-0}" -gt 0 ] 2>/dev/null; then
 else
   echo "the unicast injector injected NOTHING (see $OUT/inject.log) - the BSSID"
   echo "table measured broadcast reception only."
-  [ "$r_bss" = 3 ] || r_bss=1   # an interrupted gate stays "no verdict"
+  # An interrupted or overrun gate stays "no verdict": a bring-up that
+  # wedged before the injector started is not a failed measurement.
+  [ "$r_bss" = 3 ] || [ "$gate_overran" = yes ] || r_bss=1
 fi
 
 echo
@@ -321,4 +351,15 @@ case "$r_bss" in
   3) echo "the BSSID gate was INTERRUPTED - no verdict" ;;
   *) echo "the BSSID gate did not pass - see $OUT/bssid.txt" ;;
 esac
-exit $(( r_bss != 0 || r_ack != 0 || ${staid:-0} != 0 ))
+# 1 if any gate failed, else 3 if any was interrupted, else 2 if any could
+# not measure, else 0.
+rc=0
+for r in "$r_bss" "$r_ack" "${staid:-0}"; do
+  case "$r" in
+    0) ;;
+    3) [ "$rc" = 1 ] || rc=3 ;;
+    2) [ "$rc" = 0 ] && rc=2 ;;
+    *) rc=1 ;;
+  esac
+done
+exit "$rc"

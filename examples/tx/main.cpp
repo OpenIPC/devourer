@@ -2,6 +2,7 @@
 #include <cassert>
 #include <chrono>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -786,12 +787,11 @@ int main(int argc, char **argv) {
   /* Stops and joins the optional IN drainers on every exit from here: a
    * still-joinable std::thread terminates the process when destroyed, and
    * both threads poll `handle`, so the normal path joins them explicitly
-   * before session.close(). A fork() child has copies of the thread objects
-   * but not the threads, so it must not join them (in_fork_child). */
+   * before session.close(). (The DEVOURER_TX_WITH_RX fork child never runs
+   * this: it leaves through std::_Exit - see there.) */
   struct DrainerJoin {
     std::atomic<bool> &bulk_running, &intr_running;
     std::thread &bulk, &intr;
-    bool in_fork_child = false;
     void join() {
       bulk_running = false;
       intr_running = false;
@@ -800,10 +800,7 @@ int main(int argc, char **argv) {
       if (intr.joinable())
         intr.join();
     }
-    ~DrainerJoin() {
-      if (!in_fork_child)
-        join();
-    }
+    ~DrainerJoin() { join(); }
   } drainers{bulk_in_running, intr_running, bulk_in_thread, intr_in_thread};
 
   WiFiDriver wifi_driver{logger};
@@ -1030,8 +1027,27 @@ int main(int argc, char **argv) {
     pid_t fpid = fork();
     if (fpid == 0) {
 #if !defined(_MSC_VER) /* fork() is a real fork here, not the (0) stub */
-      drainers.in_fork_child = true;
-#endif
+      /* The post-fork rule: the child holds copies of the parent's objects -
+       * the IN-drainer std::threads among them, joinable copies of threads
+       * that do not exist here - so it must run no destructor. It flushes
+       * stdio and leaves through std::_Exit, never through a return; an
+       * exception from Init must not unwind it either. */
+      try {
+        rtlDevice->Init(packetProcessor,
+                        SelectedChannel{
+                            .Channel = static_cast<uint8_t>(channel),
+                            .ChannelOffset = 0,
+                            .ChannelWidth = CHANNEL_WIDTH_20,
+                        });
+      } catch (const std::exception &e) {
+        logger->error("RX child: {}", e.what());
+      } catch (...) {
+        logger->error("RX child: unknown exception");
+      }
+      std::fflush(nullptr);
+      std::_Exit(1);
+#else
+      /* The stub: this IS the only process, so it tears down normally. */
       rtlDevice->Init(packetProcessor,
                       SelectedChannel{
                           .Channel = static_cast<uint8_t>(channel),
@@ -1039,6 +1055,7 @@ int main(int argc, char **argv) {
                           .ChannelWidth = CHANNEL_WIDTH_20,
                       });
       return 1;
+#endif
     }
   }
 

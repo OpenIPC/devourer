@@ -1001,8 +1001,8 @@ devourer::TxStats Mt7612uRadio::GetTxStats() {
    * a uint64_t reads as ~1.8e19. Reading it also took _mu, which send_packet
    * holds across a blocking submit - so a stats poll from another thread
    * stalled for as long as the TX ring was saturated. A documented gap beats
-   * four wrong numbers; the fix belongs in the library, which needs a
-   * monotonic wire-failure counter that outlives a ring.
+   * four wrong numbers; the fix belongs in the library, which now has the
+   * monotonic counter (mt7612u_tx_wire_failed) - not read here yet.
    *
    * Counted here rather than read from mt7612u_get_stats(), which reports the
    * ASYNC RING's counters. mt_tx_raw() only uses that ring when one is running

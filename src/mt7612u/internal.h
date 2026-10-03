@@ -134,7 +134,10 @@ struct mt_async;
 /* Each slot names its own ring, not dev->a: if a teardown has to leak a ring
  * whose transfers are still in flight, their completions must keep touching
  * the leaked ring and never a replacement one. */
-struct mt_slot { struct mt7612u_dev *d; struct mt_async *a; int idx; };
+struct mt_slot {
+	struct mt7612u_dev *d; struct mt_async *a; int idx;
+	int nframes;   /* TX: frames in the slot's transfer (an aggregate: >1) */
+};
 
 struct mt_async {
 	struct libusb_transfer *rx[MT_RX_RING], *tx[MT_TX_RING];
@@ -142,8 +145,9 @@ struct mt_async {
 	uint8_t rx_buf[MT_RX_RING][MT_RX_BUFSZ];
 	uint8_t tx_buf[MT_TX_RING][MT_TX_BUFSZ];
 	int     tx_busy[MT_TX_RING];
-	/* Guards running, rx_active, tx_busy[], tx_inflight and rx_inflight -
-	 * all of which the event thread writes and the caller reads. */
+	/* Guards running, stopping, rx_active, tx_busy[], tx_inflight,
+	 * rx_inflight and tx_slot[].d/.nframes - all of which the event thread
+	 * reads or writes alongside the caller. */
 	std::mutex lock;
 	/* condition_variable_any, not condition_variable: it waits on any
 	 * BasicLockable, so every site below keeps the plain lock()/unlock()
@@ -154,6 +158,10 @@ struct mt_async {
 	std::thread evt;
 	int evt_started;
 	int running, rx_active;
+	/* Set by mt_async_stop() before its cancel pass: no TX transfer may be
+	 * submitted after it, since one would miss the cancel and, carrying no
+	 * timeout, could hold the ring past the stop's wait. */
+	int stopping;
 	int tx_inflight, rx_inflight;
 	mt7612u_rx_cb cb;
 	void *cb_user;
@@ -222,6 +230,11 @@ struct mt7612u_dev {
 
 	unsigned io_err;          /* EP0 transfers that exhausted their retries */
 	int      transfers_stranded; /* libusb still owns a cancelled ring */
+	/* Frames whose bulk transfer was submitted and then did not complete -
+	 * errored, cancelled at a ring stop, or stranded with it - so never
+	 * reached the chip. Per device, so it outlives a ring restart; counted
+	 * in FRAMES, not transfers. mt7612u_tx_wire_failed(). */
+	std::atomic<uint64_t> tx_wire_failed{0};
 	/* libusb_transfer objects for the synchronous helpers (usb.cpp), taken
 	 * from here rather than allocated per call. Allocated in
 	 * mt_dev_state_init(), i.e. before any event thread exists, so the
@@ -437,7 +450,8 @@ void mt_async_stats(struct mt7612u_dev *d, struct mt_async_stats *out);
 void mt_async_note_invalid(struct mt7612u_dev *d);
 int  mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user);
 void mt_async_stop(struct mt7612u_dev *d);
-int  mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len);
+int  mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len,
+                        int nframes);
 
 /* --- rx.c --- */
 int mt_rx_parse(struct mt7612u_dev *d, uint8_t *buf, int n,

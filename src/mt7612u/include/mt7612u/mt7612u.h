@@ -203,7 +203,11 @@ int mt7612u_stop(struct mt7612u_dev *dev);
 
 /*
  * Inject one complete 802.11 frame (no FCS - the MAC appends it). Builds the
- * TXWI + TXINFO and submits a single bulk transfer. Fire-and-forget.
+ * TXWI + TXINFO and submits a single bulk transfer. Fire-and-forget: with a
+ * ring running it returns once the transfer is submitted, waiting up to ~1 s
+ * for a free slot when all are in flight and refusing (-1) if none frees.
+ * Transfers carry no timeout (as mt76's URBs): a chip that never takes them
+ * keeps refusing until mt7612u_rx_stop()/mt7612u_close() cancels the ring.
  */
 int mt7612u_tx(struct mt7612u_dev *dev, const void *frame, size_t len,
                const struct mt7612u_tx_rate *rate);
@@ -265,7 +269,8 @@ struct mt7612u_tx_view { const uint8_t *data; size_t len; };
 /*
  * Submit several frames in one call. MT7612U chains them into a single
  * bulk-OUT transfer via the TXDMA's "next valid" bit, so a burst costs one USB
- * transaction instead of one per frame. Returns the number accepted.
+ * transaction instead of one per frame. Returns the number accepted; with a
+ * ring running it stops at the first refused transfer (see mt7612u_tx).
  */
 size_t mt7612u_send_packets(struct mt7612u_dev *dev,
                             const struct mt7612u_tx_view *pkts, size_t count);
@@ -406,6 +411,14 @@ struct mt7612u_stats {
 	uint64_t rx_dropped;
 };
 void mt7612u_get_stats(struct mt7612u_dev *dev, struct mt7612u_stats *out);
+/* Frames handed to the async ring whose USB transfer then failed, was
+ * cancelled or was left stranded by a stop, so they never reached the chip.
+ * Frames refused at submit are not in it - the send call already returned
+ * them as not accepted - nor are the synchronous path's (no ring running).
+ * Monotonic for the device's lifetime - unlike mt7612u_stats it survives a
+ * ring restart - and counted in frames, an aggregated transfer adding all of
+ * its frames. Safe to call from any thread while the device is open. */
+uint64_t mt7612u_tx_wire_failed(struct mt7612u_dev *dev);
 
 /*
  * Per-interval link statistics from the MAC's MIB counters.

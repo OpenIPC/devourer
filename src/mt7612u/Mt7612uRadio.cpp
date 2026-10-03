@@ -715,16 +715,31 @@ void Mt7612uRadio::Stop() {
    * teardown lock is what keeps a concurrent StopRxLoop from using the pointer
    * after this steals it. */
   struct mt7612u_dev *dev = nullptr;
+  bool filter_left = false;
   {
     std::lock_guard<std::mutex> teardown(_teardown_mu);
     std::lock_guard<std::recursive_mutex> lock(_mu);
     dev = _dev;
     _dev = nullptr;
-    if (dev)
+    if (dev) {
+      /* Best effort: the chip keeps its registers across a close, so a
+       * station still armed here would leave the managed receive filter for
+       * whoever opens the adapter next. Put the pre-arm filter back first;
+       * a no-op with nothing armed. Only a flag here - the logger can throw,
+       * and nothing may skip the stop and the close below. */
+      filter_left = mt7612u_clear_station_identity(dev) != 0;
       mt7612u_stop(dev);
+    }
   }
   if (dev)
     mt7612u_close(dev);
+  if (filter_left) {
+    try {
+      _logger->warn("MT7612U: closed with the station's managed receive "
+                    "filter possibly still in force");
+    } catch (...) {
+    }
+  }
 }
 
 void Mt7612uRadio::SetTxPower(uint8_t power) {
@@ -1035,7 +1050,7 @@ void Mt7612uRadio::ClearAckResponder() {
 }
 
 /* Thin, like the rest of the control plane: on this part a station identity
- * is a check, not a configuration (station.cpp,
+ * is a check plus one register, the managed receive filter (station.cpp,
  * docs/mt7612u-station-identity.md). The ordering note IRadio requires is at
  * the declaration (Mt7612uRadio.h). */
 bool Mt7612uRadio::SetStationIdentity(const devourer::MacAddr &own,
@@ -1069,10 +1084,9 @@ bool Mt7612uRadio::ClearStationIdentity() {
    * holds (IRadio's contract for a clear with nothing to undo). */
   if (!_dev)
     return true;
-  mt7612u_clear_station_identity(_dev);
-  /* True without qualification because the arm writes no hardware state on
-   * this part: there is nothing to restore, so nothing to verify. */
-  return true;
+  /* The arm installed the managed receive filter; true only once the
+   * pre-arm filter reads back. A failure keeps the arm, so a retry works. */
+  return mt7612u_clear_station_identity(_dev) == 0;
 }
 
 /* The beacon plane. Thin on purpose: the sequence these wrap is the one the

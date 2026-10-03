@@ -263,8 +263,9 @@ public:
    *
    * ORDERING. Call after the RX loop is running, not before. This is not a
    * style preference: a backend may program the receive filter when the RX
-   * loop starts and overwrite anything an earlier call wrote (MT7612U does
-   * exactly this - see Mt7612uRadio::StartRxLoop). An implementation that
+   * loop starts and overwrite anything an earlier call wrote (MT7612U's RX
+   * loop start rewrites the filter, though it keeps an armed station's - see
+   * Mt7612uRadio::SetStationIdentity). An implementation that
    * cannot detect being called too early must say so at its declaration;
    * one that can should refuse and log rather than arm something that will
    * be silently undone.

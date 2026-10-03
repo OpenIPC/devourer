@@ -257,8 +257,32 @@ static inline uint32_t mt_retry_cfg_with_limit(uint32_t cur, uint32_t limit)
 #define MT_RX_FILTR_CFG_PROMISC   BIT(2)
 #define MT_RX_FILTR_CFG_OTHER_BSS BIT(3)
 #define MT_RX_FILTR_CFG_VER_ERR   BIT(4)
+#define MT_RX_FILTR_CFG_MCAST     BIT(5)
+#define MT_RX_FILTR_CFG_BCAST     BIT(6)
 #define MT_RX_FILTR_CFG_DUP       BIT(7)
+#define MT_RX_FILTR_CFG_CFACK     BIT(8)
+#define MT_RX_FILTR_CFG_CFEND     BIT(9)
+#define MT_RX_FILTR_CFG_ACK       BIT(10)
+#define MT_RX_FILTR_CFG_CTS       BIT(11)
+#define MT_RX_FILTR_CFG_RTS       BIT(12)
+#define MT_RX_FILTR_CFG_PSPOLL    BIT(13)
+#define MT_RX_FILTR_CFG_BA        BIT(14)
+#define MT_RX_FILTR_CFG_BAR       BIT(15)
 #define MT_RX_FILTR_CFG_CTRL_RSV  BIT(16)
+/* Every bit is a DROP bit. The managed-station filter: the initvals value
+ * mt_mac_start() programs, and what every station cell in
+ * docs/mt7612u-station-identity.md measured. Drops FCS and PLCP failures,
+ * unicast whose addr1 is not MT_MAC_ADDR (PROMISC - mt76x2u_config() sets it
+ * whenever the phy is not in monitor mode), bad protocol versions, hardware-detected
+ * duplicates and the control frames a station has no use for. KEEPS
+ * broadcast, multicast, other-BSS frames (so beacons and group traffic from
+ * every BSS, for a re-scan), PS-Poll and BAR. */
+#define MT_RX_FILTR_CFG_MANAGED                                            \
+	(MT_RX_FILTR_CFG_CRC_ERR | MT_RX_FILTR_CFG_PHY_ERR |                  \
+	 MT_RX_FILTR_CFG_PROMISC | MT_RX_FILTR_CFG_VER_ERR |                  \
+	 MT_RX_FILTR_CFG_DUP | MT_RX_FILTR_CFG_CFACK | MT_RX_FILTR_CFG_CFEND | \
+	 MT_RX_FILTR_CFG_ACK | MT_RX_FILTR_CFG_CTS | MT_RX_FILTR_CFG_RTS |     \
+	 MT_RX_FILTR_CFG_BA | MT_RX_FILTR_CFG_CTRL_RSV)
 #define MT_AUTO_RSP_CFG      0x1404
 #define MT_AUTO_RSP_EN       BIT(0)
 #define MT_AUTO_RSP_PREAMB_SHORT BIT(4)

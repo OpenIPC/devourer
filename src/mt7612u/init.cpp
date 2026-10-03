@@ -266,6 +266,10 @@ void mt_rx_flush(struct mt7612u_dev *d)
 	}
 }
 
+/* The value every station cell measured; the named bits must spell it. */
+static_assert(MT_RX_FILTR_CFG_MANAGED == 0x00015f97u,
+              "MT_RX_FILTR_CFG_MANAGED must stay the measured 0x00015f97");
+
 int mt_mac_start(struct mt7612u_dev *d, int enable_rx)
 {
 	/* Refuse rather than wedge.  The receiver running with nothing draining
@@ -287,7 +291,7 @@ int mt_mac_start(struct mt7612u_dev *d, int enable_rx)
 		ERR("mac_start: WPDMA stayed busy");
 		return -1;
 	}
-	mt_wr(d, MT_RX_FILTR_CFG, 0x00015f97);
+	mt_wr(d, MT_RX_FILTR_CFG, MT_RX_FILTR_CFG_MANAGED);
 	/* Only turn the receiver on when the caller will actually drain EP 4.
 	 * mt76's mac_start always sets both bits, but mt76 also keeps RX URBs
 	 * permanently queued; a TX-only injector that never reads has no such
@@ -549,13 +553,18 @@ int mt7612u_stop(struct mt7612u_dev *d)
 /*
  * Monitor receive filter.
  *
- * mt_mac_start() leaves MT_RX_FILTR_CFG at 0x00015f97, which is what mt76
- * programs for a managed station: control frames, other-BSS frames and
- * frames not addressed here are all dropped. A monitor consumer wants the
- * opposite, so this clears everything except the two error classes.
+ * mt_mac_start() leaves MT_RX_FILTR_CFG at MT_RX_FILTR_CFG_MANAGED
+ * (0x00015f97), which is what mt76 programs for a managed station: control
+ * frames and unicast not addressed here are dropped (regs.h has the bits). A
+ * monitor consumer wants the opposite, so this clears everything except the
+ * two error classes.
  *
  * DUP deliberately stays clear: duplicate suppression would hide the
  * retransmissions an ACK-responder test counts.
+ *
+ * While a station identity is armed the station owns the filter: this then
+ * keeps the managed filter in place and only records the request, which the
+ * station's clear (or a drop) installs (mt7612u_sta_rx_filter_request).
  */
 int mt7612u_set_monitor_rx(struct mt7612u_dev *d, int keep_corrupted)
 {
@@ -564,7 +573,9 @@ int mt7612u_set_monitor_rx(struct mt7612u_dev *d, int keep_corrupted)
 	if (!d) return -1;
 	if (!keep_corrupted)
 		filtr |= MT_RX_FILTR_CFG_CRC_ERR;
-	mt_wr(d, MT_RX_FILTR_CFG, filtr);
+	mt_wr(d, MT_RX_FILTR_CFG,
+	      mt7612u_sta_rx_filter_request(&d->sta, filtr,
+	                                    MT_RX_FILTR_CFG_MANAGED));
 	return 0;
 }
 

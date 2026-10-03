@@ -322,10 +322,11 @@ class StationSm {
      * this station (or broadcast). Without the addr2 check, any frame from any
      * AP on the channel drives this machine.
      *
-     * THE DROPS ARE COUNTED. On real hardware this is the only address filter
-     * in the system - the MT7612U RX path runs promiscuous - so most of a busy
-     * channel lands here, and a station that connects to nothing has to be
-     * able to say whether it heard its AP at all. */
+     * THE DROPS ARE COUNTED. On real hardware this is the main address
+     * filter - the MT7612U RX path runs promiscuous until a station identity
+     * is armed, and even its managed filter passes every BSS's broadcast -
+     * so most of a busy channel lands here, and a station that connects to
+     * nothing has to be able to say whether it heard its AP at all. */
     if (std::memcmp(a2, bssid_, 6) != 0) { rx_not_our_bss++; return; }
     const bool to_us = std::memcmp(a1, own_, 6) == 0;
     const bool bcast = (a1[0] & 0x01) != 0;

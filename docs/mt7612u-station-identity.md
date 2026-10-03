@@ -27,8 +27,11 @@ arm. That function writes `MT_RX_FILTR_CFG = PHY_ERR|CRC_ERR` and nothing else
 — every address and BSS drop bit off — so all six arms ran promiscuous and
 were identical by construction. Its null result is withdrawn. The reasoning
 that let it through was also wrong: in the managed filter `0x00015f97`, bit 3
-(`OTHER_BSS`) is clear but bit **2** (`PROMISC`) is set, and mt76 maps bit 2
-to `FIF_OTHER_BSS`. The gate now leaves the managed value `mt_mac_start()`
+(`OTHER_BSS`) is clear but bit **2** (`PROMISC`) is set, and bit 2 is the
+address drop (mt76x2 sets it whenever the phy is not in monitor mode; an
+earlier version of this page said mt76 maps it to `FIF_OTHER_BSS`, which is
+not what `mt76x2u_config()` does - the decode is in the managed-filter section
+below). The gate now leaves the managed value `mt_mac_start()`
 programs, prints it per arm, and flags an arm that is not running it.
 
 Also withdrawn: a "0.8% retried vs 98% control" auto-ACK figure from the
@@ -281,20 +284,85 @@ Against it, and against the comparison:
   first-arm excess every run shows.
 - Two units, one peer model, one channel, near field, one run per arm.
 
+## The managed receive filter belongs to the armed station
+
+Every cell above ran the managed filter `0x00015f97`, while
+`Mt7612uRadio::StartRxLoop` installs the monitor filter (`PHY_ERR|CRC_ERR`).
+So a station driven through `IRadio` used to run promiscuous, and the
+property that justifies the seam's refusal - "moving `MT_MAC_ADDR` makes a
+station deaf" - did not hold for it: under the monitor filter it keeps
+receiving and only stops acknowledging (issue #461).
+
+**The role is selected by the arm, with no new API.** A successful
+`SetStationIdentity` reads `MT_RX_FILTR_CFG`, writes
+`MT_RX_FILTR_CFG_MANAGED` and reads it back; `ClearStationIdentity` writes the
+recorded value back and returns true only once that reads back (a failure
+keeps the arm recorded, so a second clear retries). A refusal returns before
+the filter is read, so it writes nothing; a managed write that does not read
+back is undone and refused. While armed, `mt7612u_set_monitor_rx()` - which
+`StartRxLoop` calls after every MAC start - keeps the managed filter and only
+records the request, so the arm is order-independent. A beacon or ACK
+responder that moves the port identity drops the arm and puts the pre-arm
+filter back (the AP and responder paths depend on the monitor filter's `DUP`
+clear); a failed beacon start that restores the arm reinstalls the managed
+filter. All of it runs under `Mt7612uRadio::_mu`, the lock the existing
+filter write and every channel change already take, and the RX loop never
+writes the filter. The drop and restore writes are read back and a miss is
+logged (the clear re-verifies). `Stop()` clears a still-armed station before
+closing, best effort, because the chip keeps its registers across a close;
+every bring-up also rewrites the filter in `mt_mac_start()`. The
+policy half is `mt7612u_sta_rx_filter_request()` / `mt7612u_sta_arm()` in
+`src/mt7612u/StationIdentity.h`, covered by ctest `mt7612u_station_identity`.
+
+**The value is the measured one, unchanged.** These are DROP bits
+(`regs.h`, from mt76's `mt76x02_regs.h`):
+
+| bit | name | `0x00015f97` | what a station gets |
+|---|---|---|---|
+| 0 | CRC_ERR | drop | no FCS failures (`rx.keep_corrupted` applies to the monitor filter only; FCS-bad frames are dropped while armed) |
+| 1 | PHY_ERR | drop | |
+| 2 | PROMISC | **drop** | unicast whose addr1 is not `MT_MAC_ADDR` is dropped - the deaf-on-move property |
+| 3 | OTHER_BSS | keep | frames of every BSS still arrive |
+| 4 | VER_ERR | drop | |
+| 5 | MCAST | keep | group-addressed data |
+| 6 | BCAST | keep | beacons of every BSS, broadcast probe responses, broadcast data |
+| 7 | DUP | drop | hardware duplicate drop, as mt76 runs a station (sta_client's `DupDetector` stays) |
+| 8-12 | CFACK, CFEND, ACK, CTS, RTS | drop | control frames a station has no use for |
+| 13 | PSPOLL | keep | (mt76's `configure_filter` would drop it; immaterial to a station) |
+| 14 | BA | drop | |
+| 15 | BAR | keep | |
+| 16 | CTRL_RSV | drop | |
+
+What `tests/sta_client.cpp` needs while armed is all kept: beacons and probe
+responses from every BSS (broadcast, or unicast to `own`) for a scan and a
+re-join, authentication / association / EAPOL / data addressed to `own`, and
+group-addressed data. What it loses is only what `StationSm::on_rx` already
+refused: another station's unicast (`not-for-us`) and probe responses to
+other stations. No disarm-while-scanning is needed.
+
+**Witness.** `tests/mt7612u_sta_onair.sh` injects two plaintext unicast
+streams from the AP's BSSID while the station is associated: one at an address
+nobody holds, one at the station's own address. The own stream is the positive
+witness that the injection reaches the DUT - the station counts it as
+`plaintext refused` (a WPA2 link), and it must reach half of what was
+injected or the check is INCONCLUSIVE. Then armed (`wpa2`), `not-for-us` must
+stay under 1% of the foreign stream; unarmed (`noarm`, the monitor filter) at
+least half of it must arrive. Hardware gate:
+`mt7612uprobe staid` checks the filter value across arm, re-request, refusal,
+clear and drop. On-air numbers: TBD.
+
 ## What is not established
 
-- **The library's own RX path does not run the managed filter.**
-  `Mt7612uRadio::StartRxLoop` installs the monitor filter unconditionally, so
-  a station driven through `IRadio` runs promiscuous. Acknowledgement holds
-  there (the monitor-filter auto-ACK run above), but "moving `MT_MAC_ADDR`
-  makes a station deaf" is a managed-filter property: under the monitor filter
-  it would keep receiving and stop acknowledging. A role-selected managed
-  filter is not implemented.
-- **No cell drove `SetStationIdentity` through `IRadio`.** The seam writes no
-  register - `mt7612uprobe staid` reads `MT_MAC_ADDR`, `MT_MAC_BSSID` and
-  all eight APC slots before and after arming and clearing and checks them
-  unchanged - so the measured state is what a successful arm leaves behind,
-  but "arm the seam, then measure" is unexercised here.
+- **The managed filter under a live association is not yet measured on
+  air** (TBD, above). The cells that measured it ran unassociated, through
+  the bring-up tool.
+- **No BSSID/auto-ACK cell drove `SetStationIdentity` through `IRadio`.** The
+  seam writes no identity register - `mt7612uprobe staid` reads
+  `MT_MAC_ADDR`, `MT_MAC_BSSID` and all eight APC slots before and after
+  arming and clearing and checks them unchanged - and installs the managed
+  filter those cells ran, so the measured state is what a successful arm
+  leaves behind, but "arm the seam, then measure" is unexercised by those
+  cells.
 - **Every cell is an unassociated station** receiving traffic it did not
   negotiate: power save, TIM parsing, cross-BSS duplicate detection and
   hardware key lookup are untested.

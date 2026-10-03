@@ -69,5 +69,14 @@ Where each piece lives: NOACK vs. ACK-requesting radiotap -
 
 Contract: `mt7612u_set_station_identity` (`include/mt7612u/mt7612u.h`) and
 `IRadio::SetStationIdentity` (`src/IRadio.h`). Measurements, the receive-filter
-caveat and the retractions: `docs/mt7612u-station-identity.md`. Headless cell
+decision and the retractions: `docs/mt7612u-station-identity.md`. Headless cell
 `mt7612u_station_identity`; hardware gate `mt7612uprobe staid`.
+
+The arm OWNS `MT_RX_FILTR_CFG`: it installs `MT_RX_FILTR_CFG_MANAGED`
+(`0x00015f97`, `regs.h` spells the bits) and records what it replaced; the
+clear and a port-identity drop put that back. While armed,
+`mt7612u_set_monitor_rx()` only records its request
+(`mt7612u_sta_rx_filter_request`, `StationIdentity.h`), so an RX loop
+(re)started under a station does not knock it promiscuous. Anything new that
+writes the filter must go through the same request, or it silently disarms
+the station's receive half.

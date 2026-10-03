@@ -130,6 +130,10 @@ struct mt7612u_sta_state {
 	int armed;
 	/* Dropped by a port-identity move, own/bssid kept for a restore. */
 	int lost;
+	/* The receive filter the station took MT_RX_FILTR_CFG from, and puts back
+	 * when it lets go of it (clear, or a drop). Meaningful while `armed` or
+	 * `lost`. */
+	uint32_t rx_filtr_restore;
 };
 
 /* `port` as read from MT_MAC_ADDR (DW0 + the low half of DW1) against `own`.
@@ -143,9 +147,16 @@ mt7612u_port_compare(const uint8_t *port, int read_ok, const uint8_t *own)
 	                                 : MT7612U_PORT_DIFFERENT;
 }
 
+/* `cur_filtr` is what MT_RX_FILTR_CFG held when this arm was asked for. A
+ * RE-arm keeps the value the first arm recorded: the register then holds the
+ * managed filter that arm installed, and restoring THAT on clear would leave
+ * the receiver managed after the station is gone. */
 static inline void mt7612u_sta_arm(struct mt7612u_sta_state *s,
-                                   const uint8_t *own, const uint8_t *bssid)
+                                   const uint8_t *own, const uint8_t *bssid,
+                                   uint32_t cur_filtr)
 {
+	if (!s->armed)
+		s->rx_filtr_restore = cur_filtr;
 	memcpy(s->own, own, 6);
 	memcpy(s->bssid, bssid, 6);
 	s->armed = 1;
@@ -177,6 +188,28 @@ mt7612u_sta_port_observed(struct mt7612u_sta_state *s,
 		return MT7612U_STA_EV_RESTORED;
 	}
 	return MT7612U_STA_EV_NONE;
+}
+
+/*
+ * The receive filter, as owned by the station role.
+ *
+ * An armed station runs the managed filter (MT_RX_FILTR_CFG_MANAGED); every
+ * other state runs whatever the consumer asked for. A consumer asks through
+ * mt7612u_set_monitor_rx(), which Mt7612uRadio::StartRxLoop calls after every
+ * MAC start - so a receiver (re)started under a live station must not knock
+ * it back to the monitor filter, and a request made then is only RECORDED,
+ * to be installed when the station lets go. Returns the value to write.
+ *
+ * `lost` records too: a dropped arm comes back on a restore, and its clear
+ * must then put back the consumer's latest request, not a stale one.
+ */
+static inline uint32_t
+mt7612u_sta_rx_filter_request(struct mt7612u_sta_state *s, uint32_t want,
+                              uint32_t managed)
+{
+	if (s->armed || s->lost)
+		s->rx_filtr_restore = want;
+	return s->armed ? managed : want;
 }
 
 #ifdef __cplusplus

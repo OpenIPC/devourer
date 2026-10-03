@@ -4277,9 +4277,10 @@ static int gate_tsfwrap(int gap, int wrap_bits, double max_min)
  * base matters, not what mt76 would program.
  *
  * The receive filter is what makes this a question at all. The managed value
- * mt_mac_start() programs, 0x00015f97, has bit 2 (PROMISC) SET, and in mt76
- * bit 2 is the one mapped to FIF_OTHER_BSS (init.cpp describes that value as
- * dropping other-BSS frames). Bit 3 (OTHER_BSS) is clear. Do not reason about
+ * mt_mac_start() programs, 0x00015f97, has bit 2 (PROMISC) SET - mt76x2
+ * sets it whenever the phy is not in monitor mode, and it drops unicast not
+ * addressed to MT_MAC_ADDR (mt76x2u_config()). Bit 3 (OTHER_BSS) is clear
+ * (regs.h has the full decode). Do not reason about
  * this register from one bit: the gate prints the full value per arm for the
  * reader, and flags an arm whose PROMISC drop bit is clear (the monitor
  * filter).
@@ -5039,11 +5040,12 @@ static int gate_staack(uint8_t chan, int secs, const char *bssid_str)
  *   bringup staid
  */
 /*
- * Every register a station identity could plausibly write: the port identity
- * (MT_MAC_ADDR), the MBSS base (MT_MAC_BSSID) and both words of all eight APC
- * slots. The seam's defining property is that it writes none of them;
- * gate_staid compares a snapshot before and after. Returns -1 on any failed
- * read - an unreadable register cannot be shown unchanged.
+ * Every identity register a station identity could plausibly write: the port
+ * identity (MT_MAC_ADDR), the MBSS base (MT_MAC_BSSID) and both words of all
+ * eight APC slots. The seam writes none of them; gate_staid compares a
+ * snapshot before and after. Returns -1 on any failed read - an unreadable
+ * register cannot be shown unchanged. The one register it DOES write, the
+ * receive filter, is checked separately (staid_filtr_is).
  */
 struct staid_regs { uint32_t w[20]; };
 
@@ -5064,6 +5066,17 @@ static int staid_snapshot(struct staid_regs *r)
 	return 0;
 }
 
+/* 1 when MT_RX_FILTR_CFG reads back as `want`. */
+static int staid_filtr_is(uint32_t want)
+{
+	uint32_t v = 0;
+
+	if (mt_rr_chk(&dev, MT_RX_FILTR_CFG, &v)) return 0;
+	if (v != want)
+		printf("        (MT_RX_FILTR_CFG = %08x, expected %08x)\n", v, want);
+	return v == want;
+}
+
 /* 1 when both snapshots were taken and are identical. */
 static int staid_unchanged(const struct staid_regs *a, int a_ok,
                            const struct staid_regs *b, int b_ok)
@@ -5080,8 +5093,13 @@ static int gate_staid(void)
 	int pass = 0, fail = 0, snap0_ok, snap1_ok;
 	struct staid_regs snap0, snap1;
 
+	/* The monitor filter Mt7612uRadio's RX loop installs - the pre-arm
+	 * state every filter check below is measured against. */
+	const uint32_t mon = MT_RX_FILTR_CFG_CRC_ERR | MT_RX_FILTR_CFG_PHY_ERR;
+
 	if (mt_eeprom_init(&dev)) return 1;
 	if (mt_init_hardware(&dev, NULL)) return 1;
+	mt7612u_set_monitor_rx(&dev, 0);
 
 	memcpy(own, dev.macaddr, 6);
 	printf("=== GATE STAID: the SetStationIdentity contract on hardware ===\n");
@@ -5095,8 +5113,10 @@ static int gate_staid(void)
 	} while (0)
 
 	/* 1. the ordinary case - and the seam's defining property: arming
-	 * writes nothing (MT_MAC_ADDR, MT_MAC_BSSID and all eight APC slots
-	 * read the same before and after). */
+	 * writes no identity register (MT_MAC_ADDR, MT_MAC_BSSID and all eight
+	 * APC slots read the same before and after), and installs the managed
+	 * receive filter in place of the monitor one. */
+	CHK(staid_filtr_is(mon), "pre-arm: the monitor receive filter");
 	snap0_ok = staid_snapshot(&snap0) == 0;
 	CHK(mt7612u_set_station_identity(&dev, own, bssid) == 0,
 	    "arms with the factory address as own");
@@ -5104,8 +5124,16 @@ static int gate_staid(void)
 	CHK(mt7612u_station_bssid(&dev, got) == 0 && memcmp(got, bssid, 6) == 0,
 	    "records the BSSID it was given");
 	CHK(staid_unchanged(&snap0, snap0_ok, &snap1, snap1_ok),
-	    "arming writes no register (MT_MAC_ADDR, MT_MAC_BSSID, APC slots "
-	    "read back unchanged)");
+	    "arming writes no identity register (MT_MAC_ADDR, MT_MAC_BSSID, "
+	    "APC slots read back unchanged)");
+	CHK(staid_filtr_is(MT_RX_FILTR_CFG_MANAGED),
+	    "arming installs the managed receive filter 00015f97");
+
+	/* 1b. a receiver (re)started under the arm: the monitor request is
+	 * recorded, not installed. */
+	mt7612u_set_monitor_rx(&dev, 0);
+	CHK(staid_filtr_is(MT_RX_FILTR_CFG_MANAGED),
+	    "a monitor-filter request while armed keeps the managed filter");
 
 	/* 2. an address this MAC is not holding */
 	CHK(mt7612u_set_station_identity(&dev, foreign, bssid) != 0,
@@ -5123,14 +5151,25 @@ static int gate_staid(void)
 	CHK(mt7612u_set_station_identity(&dev, own, own) != 0,
 	    "refuses own == bssid");
 
-	/* 4. clear - which also writes nothing */
+	CHK(staid_filtr_is(MT_RX_FILTR_CFG_MANAGED),
+	    "the refusals left the (still armed) managed filter alone");
+
+	/* 4. clear - no identity register; the monitor filter back */
 	snap0_ok = staid_snapshot(&snap0) == 0;
-	mt7612u_clear_station_identity(&dev);
+	CHK(mt7612u_clear_station_identity(&dev) == 0,
+	    "clear reports the pre-arm filter restored");
 	snap1_ok = staid_snapshot(&snap1) == 0;
 	CHK(mt7612u_station_bssid(&dev, got) != 0,
 	    "reports no BSSID once cleared");
 	CHK(staid_unchanged(&snap0, snap0_ok, &snap1, snap1_ok),
-	    "clearing writes no register (same registers read back unchanged)");
+	    "clearing writes no identity register (same registers read back "
+	    "unchanged)");
+	CHK(staid_filtr_is(mon), "clearing restores the monitor receive filter");
+
+	/* 4b. a refusal with nothing armed writes no filter either. */
+	CHK(mt7612u_set_station_identity(&dev, foreign, bssid) != 0 &&
+	    staid_filtr_is(mon),
+	    "a refused arm leaves the monitor filter untouched");
 
 	/*
 	 * 5. THE ONE THAT MATTERS. Arm an ACK responder on a foreign address -
@@ -5164,6 +5203,8 @@ static int gate_staid(void)
 	    mt7612u_set_ack_responder(&dev, foreign) == 0) {
 		CHK(mt7612u_station_bssid(&dev, got) != 0,
 		    "drops the armed station when a responder takes the identity");
+		CHK(staid_filtr_is(mon),
+		    "the drop gives the receiver back the monitor filter");
 		mt7612u_clear_ack_responder(&dev);
 	} else {
 		printf("  SKIP  could not set up case 6\n");

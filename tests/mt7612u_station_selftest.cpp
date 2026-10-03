@@ -21,6 +21,7 @@
 #include <cstring>
 
 #include "StationIdentity.h"
+#include "regs.h"
 
 static int failures = 0;
 
@@ -35,6 +36,9 @@ static int failures = 0;
 namespace {
 
 constexpr uint32_t kAutoRspEn = 1u << 0;   /* MT_AUTO_RSP_EN */
+/* The monitor filter Mt7612uRadio's RX loop asks for (keep_corrupted off). */
+constexpr uint32_t kMonitor = MT_RX_FILTR_CFG_CRC_ERR | MT_RX_FILTR_CFG_PHY_ERR;
+constexpr uint32_t kManaged = MT_RX_FILTR_CFG_MANAGED;
 
 const uint8_t kOwn[6]   = {0x40, 0xa5, 0xef, 0x5a, 0x32, 0xf8};
 const uint8_t kBssid[6] = {0x02, 0x42, 0x75, 0x05, 0xd6, 0xaa};
@@ -125,7 +129,7 @@ void test_ownership_handoff() {
    * not produce a diagnostic. */
   CHECK(observe(&s, kOther, 1, 0) == MT7612U_STA_EV_NONE);
 
-  mt7612u_sta_arm(&s, kOwn, kBssid);
+  mt7612u_sta_arm(&s, kOwn, kBssid, kMonitor);
   CHECK(s.armed == 1);
   CHECK(std::memcmp(s.bssid, kBssid, 6) == 0);
   CHECK(std::memcmp(s.own, kOwn, 6) == 0);
@@ -157,7 +161,7 @@ void test_ownership_handoff() {
 
   /* Re-arming after the responder gives it back works, and the recorded
    * BSSID is the new one rather than a survivor of the previous arm. */
-  mt7612u_sta_arm(&s, kOwn, kOther);
+  mt7612u_sta_arm(&s, kOwn, kOther, kMonitor);
   CHECK(s.armed == 1);
   CHECK(s.lost == 0);
   CHECK(std::memcmp(s.bssid, kOther, 6) == 0);
@@ -171,7 +175,7 @@ void test_ownership_handoff() {
  * back, and a cleared station is never resurrected. */
 void test_failed_start_restores_the_arm() {
   mt7612u_sta_state s{};
-  mt7612u_sta_arm(&s, kOwn, kBssid);
+  mt7612u_sta_arm(&s, kOwn, kBssid, kMonitor);
   CHECK(observe(&s, kOther, 1, 0) == MT7612U_STA_EV_DROPPED);
 
   /* The unwind did not land (still elsewhere) or cannot be read: no. */
@@ -195,7 +199,7 @@ void test_failed_start_restores_the_arm() {
  * callers, and a stale value would name a BSS this station is not on. */
 void test_clear_wipes_the_bssid() {
   mt7612u_sta_state s{};
-  mt7612u_sta_arm(&s, kOwn, kBssid);
+  mt7612u_sta_arm(&s, kOwn, kBssid, kMonitor);
   mt7612u_sta_clear(&s);
   CHECK(std::memcmp(s.bssid, kZero, 6) == 0);
   CHECK(std::memcmp(s.own, kZero, 6) == 0);
@@ -207,6 +211,73 @@ void test_check_args_needs_no_device() {
   CHECK(mt7612u_sta_check_args(nullptr, kBssid) == MT7612U_STA_BAD_ARGS);
   CHECK(mt7612u_sta_check_args(kMcast, kBssid) == MT7612U_STA_MULTICAST);
   CHECK(mt7612u_sta_check_args(kOwn, kOwn) == MT7612U_STA_SAME_ADDR);
+}
+
+/* The managed filter, bit by bit (these are DROP bits). What a station needs
+ * to keep hearing must stay clear; what the cells measured must stay set. */
+void test_managed_filter_bits() {
+  CHECK(kManaged == 0x00015f97u);
+  /* kept: every BSS's beacons and group traffic (a re-scan, a re-join),
+   * broadcast and multicast, PS-Poll and BAR */
+  CHECK(!(kManaged & MT_RX_FILTR_CFG_OTHER_BSS));
+  CHECK(!(kManaged & MT_RX_FILTR_CFG_BCAST));
+  CHECK(!(kManaged & MT_RX_FILTR_CFG_MCAST));
+  CHECK(!(kManaged & MT_RX_FILTR_CFG_PSPOLL));
+  CHECK(!(kManaged & MT_RX_FILTR_CFG_BAR));
+  /* dropped: unicast not addressed to MT_MAC_ADDR - the bit that makes a
+   * moved port identity a deaf station - and the rest */
+  CHECK(kManaged & MT_RX_FILTR_CFG_PROMISC);
+  CHECK(kManaged & MT_RX_FILTR_CFG_CRC_ERR);
+  CHECK(kManaged & MT_RX_FILTR_CFG_DUP);
+  CHECK(kManaged & MT_RX_FILTR_CFG_ACK);
+  /* and the monitor filter is the other extreme: no address or BSS drop */
+  CHECK(!(kMonitor & (MT_RX_FILTR_CFG_PROMISC | MT_RX_FILTR_CFG_OTHER_BSS |
+                      MT_RX_FILTR_CFG_DUP)));
+}
+
+/* Who owns MT_RX_FILTR_CFG, and what goes back when the station lets go. */
+void test_rx_filter_ownership() {
+  mt7612u_sta_state s{};
+
+  /* No station: a request is installed as asked, and nothing is recorded. */
+  CHECK(mt7612u_sta_rx_filter_request(&s, kMonitor, kManaged) == kMonitor);
+  CHECK(s.rx_filtr_restore == 0);
+
+  /* The arm records what the register held. */
+  mt7612u_sta_arm(&s, kOwn, kBssid, kMonitor);
+  CHECK(s.rx_filtr_restore == kMonitor);
+
+  /* A RE-arm reads the managed filter the first arm installed; recording
+   * THAT would leave the receiver managed after the clear. */
+  mt7612u_sta_arm(&s, kOwn, kOther, kManaged);
+  CHECK(s.rx_filtr_restore == kMonitor);
+
+  /* A receiver restarted under the arm asks for the monitor filter again
+   * (keep_corrupted on this time): the managed filter stays, and the new
+   * request is what the clear will put back. */
+  const uint32_t keep = MT_RX_FILTR_CFG_PHY_ERR;
+  CHECK(mt7612u_sta_rx_filter_request(&s, keep, kManaged) == kManaged);
+  CHECK(s.rx_filtr_restore == keep);
+
+  /* Dropped by a port move: requests are installed again, and still
+   * recorded, because a restore re-arms and its clear must put back the
+   * latest. */
+  CHECK(mt7612u_sta_port_observed(&s, MT7612U_PORT_DIFFERENT, 0) ==
+        MT7612U_STA_EV_DROPPED);
+  CHECK(mt7612u_sta_rx_filter_request(&s, kMonitor, kManaged) == kMonitor);
+  CHECK(s.rx_filtr_restore == kMonitor);
+  CHECK(mt7612u_sta_port_observed(&s, MT7612U_PORT_SAME, 1) ==
+        MT7612U_STA_EV_RESTORED);
+  CHECK(mt7612u_sta_rx_filter_request(&s, kMonitor, kManaged) == kManaged);
+
+  /* Cleared: back to installing requests as asked. */
+  mt7612u_sta_clear(&s);
+  CHECK(mt7612u_sta_rx_filter_request(&s, kMonitor, kManaged) == kMonitor);
+  CHECK(s.rx_filtr_restore == 0);
+
+  /* An arm after a clear records afresh. */
+  mt7612u_sta_arm(&s, kOwn, kBssid, keep);
+  CHECK(s.rx_filtr_restore == keep);
 }
 
 } // namespace
@@ -222,6 +293,8 @@ int main() {
   test_failed_start_restores_the_arm();
   test_clear_wipes_the_bssid();
   test_check_args_needs_no_device();
+  test_managed_filter_bits();
+  test_rx_filter_ownership();
 
   if (failures) {
     std::fprintf(stderr, "mt7612u_station_selftest: %d failure(s)\n", failures);

@@ -249,6 +249,10 @@ int mt7612u_rx_quiesce(struct mt7612u_dev *dev);
  * station - on ambient 2.4 GHz traffic that is the difference between seeing
  * the whole mix and seeing almost nothing but beacons. Call this after
  * mt7612u_start(), which rewrites the register.
+ *
+ * While a station identity is armed (mt7612u_set_station_identity) the
+ * managed filter stays in force and this request is recorded instead; the
+ * station's clear installs it.
  */
 int mt7612u_set_monitor_rx(struct mt7612u_dev *dev, int keep_corrupted);
 
@@ -314,15 +318,25 @@ int  mt7612u_set_retry_limit(struct mt7612u_dev *dev, int limit);
  *     The BSSID is recorded for the host (it is addr3 on every frame a station
  *     sends) and retrievable with mt7612u_station_bssid().
  *   - It verifies MT_AUTO_RSP_EN, since the measured auto-ACK depends on it.
+ *   - It DOES write MT_RX_FILTR_CFG: the managed filter 0x00015f97
+ *     (MT_RX_FILTR_CFG_MANAGED), the receiver every station cell measured,
+ *     read back before the arm counts. What the register held is kept and put
+ *     back by the clear, and by a drop (below). A refusal writes nothing; a
+ *     managed write that does not read back is undone and refused.
  *
  * Returns 0 when armed, -1 when refused - including when something else (a
  * beacon, an ACK responder) owns the port identity. A beacon or ACK responder
  * armed LATER that moves the port identity drops the station arm with a
- * warning; re-arm once it has been given back.
+ * warning and puts the pre-arm filter back; re-arm once it has been given
+ * back.
+ *
+ * The clear returns 0 once the pre-arm filter reads back (or nothing was
+ * armed), -1 when it does not - the arm then stays recorded, so a second
+ * clear retries the restore.
  */
 int  mt7612u_set_station_identity(struct mt7612u_dev *dev,
                                   const uint8_t own[6], const uint8_t bssid[6]);
-void mt7612u_clear_station_identity(struct mt7612u_dev *dev);
+int  mt7612u_clear_station_identity(struct mt7612u_dev *dev);
 /* The BSSID last armed; -1 if no station identity is armed. */
 int  mt7612u_station_bssid(struct mt7612u_dev *dev, uint8_t out[6]);
 

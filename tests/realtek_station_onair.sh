@@ -255,7 +255,8 @@ wait_for() { # $1 pid, $2 file, $3 regex, $4 timeout s
 # show whether the transmitter kept airing through the window: lead_ms is
 # the silence from the first submit to the first report, max_gap_ms the
 # longest silence between two reports, tail_ms the silence from the last
-# report to the final tx.stats. live=0 when any of them exceeds MAX_GAP_MS,
+# report to the final tx.stats (clamped at 0: that t can precede the last
+# report's by a few ms). live=0 when any of them exceeds MAX_GAP_MS,
 # or a timestamp it needs is missing - an arm that aired a burst and
 # stalled, or that started, stalled and burst at the end, which MIN_REPORTS
 # alone would accept.
@@ -296,7 +297,7 @@ for line in open(tx, errors='replace'):
         if e.get('final') and 't' in e:
             final_t = int(e['t'])
 gap = max((b - a for a, b in zip(ts, ts[1:])), default=0)
-tail = (final_t - ts[-1]) if (final_t is not None and ts) else None
+tail = max(final_t - ts[-1], 0) if (final_t is not None and ts) else None
 lead = (ts[0] - first_submit_t) if (first_submit_t is not None and ts) else None
 live = int(bool(ts) and tail is not None and lead is not None
            and lead <= max_gap and gap <= max_gap and tail <= max_gap)

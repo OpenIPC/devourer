@@ -1885,7 +1885,27 @@ struct txs_sum {
 	long foreign;   /* entries with any other pktid */
 	long stale_ext; /* own entries popped with a stale EXT word: counted in
 	                 * entries/success, kept out of the retry columns */
+	unsigned stale_pktid; /* the claimed entry's EXT pktid, and */
+	int stale_ok;         /* its SUCCESS bit - for txs_unclaim() */
 };
+
+/* The claim is a bet that the stale-pktid entry is ours. If the arm's own
+ * entries reach `sent` anyway, it was not (a late entry, a MAC duplicate):
+ * the arm read 61/60 with one claimed. Hand it back to the column the drain
+ * would have put it in, so success is not inflated. */
+static void txs_unclaim(struct txs_sum *o, long sent, unsigned prev)
+{
+	if (o->stale_ext != 1 || o->entries - o->stale_ext != sent)
+		return;
+	o->entries--;
+	if (o->stale_ok)
+		o->success--;
+	o->stale_ext = 0;
+	if (o->stale_pktid == prev)
+		o->late_prev++;
+	else
+		o->foreign++;
+}
 
 /* mt76's skb pktid range starts at MT_PACKET_ID_FIRST (3) and the id must
  * stay under bit 7 (MT_PACKET_ID_HAS_RATE): 3 + 8 * pass + arm gives 3..18
@@ -2012,7 +2032,9 @@ static int txs_drain(struct mt7612u_dev *d, struct txs_sum *o,
 				    (stale_id == TXS_ANY_PKTID || id == stale_id)) {
 					o->entries++;
 					o->stale_ext++;
-					if (st & MT_TX_STAT_FIFO_SUCCESS)
+					o->stale_pktid = id;
+					o->stale_ok = !!(st & MT_TX_STAT_FIFO_SUCCESS);
+					if (o->stale_ok)
 						o->success++;
 					cls = "stale-claimed";
 				} else if (id == prev) {
@@ -2283,7 +2305,7 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 
 		for (a = 0; !io_fail && a < sizeof arms / sizeof arms[0]; a++) {
 			struct mt7612u_tx_rate rate = { };
-			struct txs_sum sum = { 0, 0, 0, 0, 0, 0, 0 };
+			struct txs_sum sum = {};
 			const unsigned pktid = txs_arm_pktid(rx_on, a);
 			const uint8_t *sa = arms[a].own_sa ? dev.macaddr : src;
 			const uint8_t *a1 = arms[a].bcast_a1 ? bcast : peer;
@@ -2472,6 +2494,7 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 				 * send what it was asked to: never settled, so a short
 				 * arm whose few frames all filed status cannot read as
 				 * a clean row. */
+				txs_unclaim(&sum, n, prev_pktid);
 				settled = (sum.entries >= n && n == frames);
 			}
 			wall = now_ms() - t0;

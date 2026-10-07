@@ -193,8 +193,13 @@ What it shows:
   tables were taken before that change. With the claim keyed to the
   previous arm, the author's unit then settled 16/16 arms at limits 5 and 0
   (recorded on issue #461); keying it to the last arm that sent a frame,
-  so an arm with every submit failed is skipped, has not been run on
-  hardware.
+  so an arm with every submit failed is skipped, has since been run on
+  hardware (#467). If the arm's own entries still reach `sent`, the claimed
+  entry was not its own (one arm read 61/60 with one claimed), and the gate
+  hands it back to the late/foreign column at arm end. The settled condition
+  cascades: one UNSETTLED arm disables the claim for every following arm
+  until an arm settles on its own, so on a unit whose arms do not settle the
+  claim buys almost nothing.
 - **Arms e-h**: e, f and g read like c whenever they are clean; nothing
   distinguishes them. h (broadcast, WCID 1) lagged in five of six passes.
 

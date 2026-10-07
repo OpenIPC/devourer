@@ -394,7 +394,9 @@ void Mt7612uRadio::InitWrite(SelectedChannel channel) {
 void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   struct mt7612u_dev *mac_failed = nullptr;
   /* An armed station keeps its managed filter: the monitor request below is
-   * recorded, not installed (mt7612u_set_monitor_rx). The log says which. */
+   * recorded, not installed (mt7612u_set_monitor_rx). The log says which
+   * filter is in force AT RX START; the usual station arms after this
+   * (IRadio.h), and SetStationIdentity logs the switch. */
   bool station_filter = false;
   {
     /* The WHOLE prologue, arming through the failure teardown, under the same
@@ -464,7 +466,7 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   if (mac_failed)
     throw std::runtime_error("MT7612U MAC start failed");
 
-  _logger->info("MT7612U RX on channel {} ({} receive filter)",
+  _logger->info("MT7612U RX on channel {} ({} receive filter at RX start)",
                 _channel.Channel, station_filter ? "managed station" : "monitor");
 
   /* THE consumer. The C layer parses on its own event thread and enqueues; the
@@ -1051,6 +1053,7 @@ bool Mt7612uRadio::SetStationIdentity(const devourer::MacAddr &own,
     return false;
   if (mt7612u_set_station_identity(_dev, own.data(), bssid.data()) != 0)
     return false;
+  _logger->info("MT7612U station identity armed: managed receive filter");
   /* The arm covers RECEIVE and auto-ACK only. What a station transmits is
    * the caller's: its unicast (management, EAPOL, data) must request an ACK -
    * build_stream_radiotap(mode, false), since the default stream radiotap is

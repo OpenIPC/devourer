@@ -5210,12 +5210,26 @@ static int gate_staid(void)
 		/* After a drop the clear re-writes the pre-arm filter and verifies
 		 * it. The drop has already written that value, so a clear that
 		 * wrote nothing would pass a bare read-back: poison the register
-		 * first, so only a clear that writes it can pass. */
+		 * first, so only a clear that writes it can pass - and only once the
+		 * poison reads back, or the check would prove nothing. */
 		mt_wr(&dev, MT_RX_FILTR_CFG, MT_RX_FILTR_CFG_MANAGED);
-		CHK(mt7612u_clear_station_identity(&dev) == 0 &&
-		    staid_filtr_is(mon),
-		    "clear after the drop re-writes the monitor receive filter "
-		    "(register poisoned first)");
+		if (staid_filtr_is(MT_RX_FILTR_CFG_MANAGED)) {
+			CHK(mt7612u_clear_station_identity(&dev) == 0 &&
+			    staid_filtr_is(mon),
+			    "clear after the drop re-writes the monitor receive "
+			    "filter (register poisoned first)");
+		} else {
+			printf("  SKIP  the poison write did not read back - the "
+			       "clear-after-drop check would prove nothing\n");
+			fail++;
+			mt7612u_clear_station_identity(&dev);
+		}
+		/* Stop() does not clear (master's), so a clear that missed is
+		 * retried here, once, and a second miss is said. */
+		if (!staid_filtr_is(mon) &&
+		    mt7612u_clear_station_identity(&dev) != 0)
+			printf("  NOTE  a second clear missed too - the receive "
+			       "filter is left as read above\n");
 	} else {
 		printf("  SKIP  could not set up case 6\n");
 		fail++;

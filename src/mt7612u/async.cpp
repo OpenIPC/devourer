@@ -72,11 +72,15 @@ static void LIBUSB_CALL rx_done(struct libusb_transfer *t)
 		/* The parse reads the device, so it runs under the lock that a
 		 * stranding stop clears s->d under: either d is still live for the
 		 * whole parse, or it is NULL and the completion touches nothing
-		 * but the leaked ring (mt7612u_close() frees d after that stop). */
+		 * but the leaked ring (mt7612u_close() frees d after that stop).
+		 * The parser therefore must not take this lock itself: it reports
+		 * an invalid PHY by its return value, and it is counted here. */
 		a->lock.lock();
 		if (s->d) {
 			len = mt_rx_parse(s->d, t->buffer, t->actual_length,
 			                  &frame, &info);
+			if (len == MT_RX_PARSE_INVALID)
+				a->rx_invalid++;
 			/* A frame the parser rejected used to move no counter
 			 * at all, which is indistinguishable from one never
 			 * sent.
@@ -105,21 +109,30 @@ static void LIBUSB_CALL rx_done(struct libusb_transfer *t)
 		a->lock.unlock();
 	}
 
-	/* rx_active is cleared before a stop strands anything, so a slot whose
-	 * device was let go is never resubmitted; the s->d test says so here. */
+	/* The decision and the resubmit are one step under the lock, as the
+	 * TX submit is: a stop clears rx_active under this lock before its
+	 * cancel pass, so a resubmitted transfer is in flight for that pass to
+	 * cancel, and one decided after it is not resubmitted at all. The
+	 * s->d test is belt and braces - rx_active is already clear by the time
+	 * a stop strands anything. Lock order: see mt_async_tx_submit(). */
 	a->lock.lock();
 	resubmit = a->rx_active && s->d && t->status != LIBUSB_TRANSFER_CANCELLED;
-	a->lock.unlock();
-	if (resubmit && libusb_submit_transfer(t) == 0)
+	if (resubmit && libusb_submit_transfer(t) == 0) {
+		a->lock.unlock();
 		return;
+	}
 
 	/* Not resubmitted: this transfer is now owned by us again. */
-	a->lock.lock();
 	if (resubmit)
 		a->rx_err++;
 	a->rx_inflight--;
 	a->cv.notify_all();
 	a->lock.unlock();
+}
+
+void mt_async_rx_done_for_test(struct libusb_transfer *t)
+{
+	rx_done(t);
 }
 
 static void LIBUSB_CALL tx_done(struct libusb_transfer *t)
@@ -327,6 +340,13 @@ void mt_async_stop(struct mt7612u_dev *d)
  * Hand a fully framed buffer of `nframes` frames to the TX pool. Blocks only
  * when every slot is in flight, and then at most MT_TX_SLOT_WAIT_MS. Returns
  * 0 on submit, -1 on error or a ring still full at the bound.
+ *
+ * What the `stopping` handshake below guarantees is narrow: no transfer is
+ * submitted after a stop's cancel pass. It does NOT make a send safe against
+ * a concurrent mt_async_stop() that goes on to free the ring: d->a is read
+ * here without synchronisation, and a sender still parked in the slot wait
+ * when the stop deletes the ring wakes on a destroyed mutex. As before this
+ * change, the caller must not run a send concurrently with a ring stop.
  */
 int mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len,
                        int nframes)
@@ -364,11 +384,14 @@ int mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len,
 	/* Submitted under the lock, and only while no stop has begun: a stop
 	 * sets `stopping` under this lock before its cancel pass, so every
 	 * transfer is either in flight for that pass to cancel or never
-	 * submitted. libusb DOES hold a lock across a completion callback
-	 * (event_waiters_lock), but libusb_submit_transfer() takes only
-	 * flying_transfers_lock and the transfer's own lock, never that one,
-	 * and this driver never takes event_waiters_lock - so tx_done taking
-	 * this lock while we submit under it has no lock-order cycle. */
+	 * submitted. libusb DOES hold a lock across a completion callback -
+	 * the context's event lock, taken by libusb_try_lock_events() in
+	 * libusb_handle_events_timeout_completed() - so a completion that takes
+	 * this lock orders event lock -> a->lock. The other order never occurs:
+	 * libusb_submit_transfer() takes only flying_transfers_lock and the
+	 * transfer's own lock, never the event lock, and this driver never
+	 * takes the event lock itself. So submitting under a->lock (here and in
+	 * rx_done's resubmit) has no lock-order cycle with a completion. */
 	a->lock.lock();
 	rc = a->stopping ? LIBUSB_ERROR_INTERRUPTED
 	                 : libusb_submit_transfer(a->tx[idx]);
@@ -431,9 +454,11 @@ int mt7612u_rx_stop(struct mt7612u_dev *d)
 	return 0;
 }
 
-/* A frame whose rate word named no valid PHY. Counted under the ring's lock
- * when one is running; on the synchronous bring-up path there is no ring and
- * nothing to count into, which is fine - that path prints every frame. */
+/* A frame whose rate word named no valid PHY, read by the synchronous path
+ * (mt_rx_one). Counted under the ring's lock when one is running; usually
+ * there is none and nothing to count into, which is fine - that path prints
+ * every frame. The ring's own completion counts in rx_done, under the lock it
+ * already holds: calling this from there would take that lock twice. */
 void mt_async_note_invalid(struct mt7612u_dev *d)
 {
 	struct mt_async *a = d->a;

@@ -137,7 +137,7 @@ struct mt_async;
 struct mt_slot {
 	struct mt7612u_dev *d; struct mt_async *a; int idx;
 	int nframes;   /* TX: frames in the slot's transfer (an aggregate: >1) */
-	int submitted; /* TX: libusb owns the transfer (a reserved slot: 0) */
+	int submitted; /* TX: submitted since the slot was last reserved */
 };
 
 struct mt_async {
@@ -450,12 +450,16 @@ struct mt_async_stats {
 };
 void mt_async_stats(struct mt7612u_dev *d, struct mt_async_stats *out);
 void mt_async_note_invalid(struct mt7612u_dev *d);
+/* Test hook: runs the RX ring's completion callback on `t`. Lets a headless
+ * test drive rx_done with a hand-filled transfer - no context, no device. */
+void mt_async_rx_done_for_test(struct libusb_transfer *t);
 int  mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user);
 void mt_async_stop(struct mt7612u_dev *d);
 int  mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len,
                         int nframes);
 
 /* --- rx.c --- */
+#define MT_RX_PARSE_INVALID (-2)  /* mt_rx_parse: the rate word's PHY is invalid */
 int mt_rx_parse(struct mt7612u_dev *d, uint8_t *buf, int n,
                 const uint8_t **frame, struct mt7612u_rx_info *info);
 int mt_rx_one(struct mt7612u_dev *d, uint8_t *buf, int bufsize,

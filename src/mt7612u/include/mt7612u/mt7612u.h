@@ -218,6 +218,9 @@ int mt7612u_tx(struct mt7612u_dev *dev, const void *frame, size_t len,
  * MAC strips it, and the four bytes that follow the MPDU in the DMA buffer
  * are the FCE info trailer, not a checksum (measured: CRC-32 matched them on
  * 0 of 4263 frames). Must not block and must not call back into the device.
+ * A callback that transmits anyway (the ring tolerates it) blocks the event
+ * thread - and with it every RX and TX completion - for up to the ~1 s slot
+ * wait whenever the TX ring is full.
  */
 typedef void (*mt7612u_rx_cb)(void *user, const void *frame, size_t len,
                               const struct mt7612u_rx_info *info);
@@ -412,7 +415,11 @@ struct mt7612u_stats {
 };
 void mt7612u_get_stats(struct mt7612u_dev *dev, struct mt7612u_stats *out);
 /* Frames handed to the async ring whose USB transfer then failed, was
- * cancelled or was left stranded by a stop, so they never reached the chip.
+ * cancelled or was left stranded by a stop - frames that may not have reached
+ * the chip. An upper bound, not an exact count: a cancelled or short
+ * aggregated transfer counts all of its frames although the chip may have
+ * taken some, and a stranded transfer is counted when the stop strands it and
+ * never corrected should it complete later on another thread.
  * Frames refused at submit are not in it - the send call already returned
  * them as not accepted - nor are the synchronous path's (no ring running).
  * Monotonic for the device's lifetime - unlike mt7612u_stats it survives a

@@ -77,7 +77,7 @@ sta_pid_init hostapd inject gate
 # so give it one rather than requiring the caller to cd somewhere specific.
 # Only a link THIS run created is removed afterwards - anything already at
 # $ROOT/firmware, a dangling symlink included, is the operator's.
-sta_fw_link
+sta_fw_link || { sta_fw_unlink; sta_lock_release; exit 2; }
 
 AP_IF=""
 # The accepted AP's idVendor:idProduct:serial, recorded once the guard has

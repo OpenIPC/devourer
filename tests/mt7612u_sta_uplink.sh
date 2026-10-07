@@ -79,7 +79,7 @@ sta_pid_init resp dut
 sta_peer_record || { sta_lock_release; exit 2; }
 # Only a link THIS run created is removed afterwards - anything already at
 # $ROOT/firmware, a dangling symlink included, is the operator's.
-sta_fw_link
+sta_fw_link || { sta_fw_unlink; sta_lock_release; exit 2; }
 
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  PASS  %s\n' "$*"; }

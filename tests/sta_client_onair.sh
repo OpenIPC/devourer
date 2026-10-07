@@ -116,8 +116,8 @@
 # Out-of-tree drivers such as rtl88x2cu / 88x2bu cannot, and are refused.
 # Read both from `lsusb -t` after the drivers have loaded (they can move).
 # FW_DIR (an MT7612U DUT only) must hold the DECOMPRESSED MT7612U blobs
-# (mt7662*.bin); a host that ships only mt7662*.bin.zst gets INCONCLUSIVE
-# (rig/bring-up).
+# (mt7662*.bin); a host that ships only mt7662*.bin.zst is refused (exit 2)
+# before anything is touched.
 # Build first: cmake --build build --target StaClientSelftest (build/sta_client).
 #
 # HOSTAPD_DEBUG=1: hostapd runs with -dd, its debug output in the same
@@ -234,6 +234,7 @@ DUT_PID="0x${dut_have#*:}"
 
 # shellcheck source=tests/mt7612u_sta_lib.sh
 . "$ROOT/tests/mt7612u_sta_lib.sh"
+if [ "$DUT_KIND" = mt7612u ]; then sta_fw_readable "$FW_DIR" || exit 2; fi
 sta_out_prepare || exit 2
 sta_lock_take || exit 2
 sta_pid_init sta hostapd probe inject inject_own

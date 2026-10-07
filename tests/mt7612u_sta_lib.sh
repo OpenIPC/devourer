@@ -272,12 +272,37 @@ sta_peer_handback() { sta_dev_handback peer "$PEER_SYSFS"; }
 # $ROOT/firmware -> FW_DIR only when nothing is there - not even a dangling
 # symlink, which `-e` alone would miss - and sta_fw_unlink() removes it only
 # if this run created it and it still points where this run pointed it.
+# Either way it then checks the blobs are readable THROUGH the link (below),
+# and returns 1 when they are not.
 STA_FW_LINK_OURS=no
 sta_fw_link() {
   if [ ! -e "$ROOT/firmware" ] && [ ! -L "$ROOT/firmware" ] &&
      ln -sn "$FW_DIR" "$ROOT/firmware" 2>/dev/null; then
     STA_FW_LINK_OURS=yes
   fi
+  sta_fw_readable "$ROOT/firmware"
+}
+
+# 0 when directory $1 holds both MT7612U blobs, readable and non-empty. A
+# host whose firmware is zstd-compressed (/lib/firmware/mediatek/*.bin.zst
+# only) links fine, and the DUT then fails its bring-up with "cannot open
+# firmware/mt7662_rom_patch.bin", which a gate scores as an empty ABORTED or a
+# missing MAC. This check makes that dead rig a refusal before anything runs.
+sta_fw_readable() {
+  for _sta_fw in mt7662_rom_patch.bin mt7662.bin; do
+    if [ -f "$1/$_sta_fw" ] && [ -r "$1/$_sta_fw" ] && [ -s "$1/$_sta_fw" ]; then
+      continue
+    fi
+    if [ -e "$1/$_sta_fw.zst" ]; then
+      echo "refusing: $1/$_sta_fw is missing, only $_sta_fw.zst is there - the" \
+           "DUT loads the blobs uncompressed. Decompress both (zstd -d) into a" \
+           "directory and pass it as FW_DIR"
+    else
+      echo "refusing: $1/$_sta_fw is missing, unreadable or empty (FW_DIR=$FW_DIR)"
+    fi
+    return 1
+  done
+  return 0
 }
 
 sta_fw_unlink() {

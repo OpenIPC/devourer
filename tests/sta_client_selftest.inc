@@ -107,7 +107,9 @@ void reset_all() {
   g_stop = 0;
   g_tap_read_err = 0;
   g_end = RunEnd{};
-  g_unconfirmed = false;
+  g_judge = false;
+  g_strike = false;
+  std::memset(g_strike_bss, 0, 6);
   g_uplink_seen = false;
   g_uplink_first_ms = 0;
   g_uplink_unconfirmed = 0;
@@ -481,8 +483,13 @@ struct Ap {
 
   /* An UNPROTECTED data frame, which a WPA2 link must refuse. */
   std::vector<uint8_t> plain_to_sta(const uint8_t* payload, size_t len) {
+    return plain_to(kStaMac, payload, len);
+  }
+  /* ...to any destination: a group address is the AP's broadcast. */
+  std::vector<uint8_t> plain_to(const uint8_t da[6], const uint8_t* payload,
+                                size_t len) {
     std::vector<uint8_t> m = devourer::sta::data_hdr_from_ds(
-        kStaMac, kBssid, kPeer, /*protect=*/false, seq.next());
+        da, kBssid, kPeer, /*protect=*/false, seq.next());
     devourer::sta::append_llc_snap(m, 0x0800);
     m.insert(m.end(), payload, payload + len);
     return m;
@@ -1180,8 +1187,10 @@ void test_a_nudge_touches_no_tuning_or_liveness_state() {
 
 /* Host frames for the confirmation cells: an ARP request (broadcast; sender
  * and target IPv4 10.0.0.<spa> / 10.0.0.<tpa>, spa 0 = a DAD probe, spa ==
- * tpa = gratuitous) and a unicast IPv4 frame to kPeer carrying `proto`
- * (ICMP: an echo request; UDP: to `port`). */
+ * tpa = gratuitous), a unicast IPv4 frame to kPeer carrying `proto` (ICMP: an
+ * echo request; UDP: to `port`; TCP: flags `port & 0xff`), and an IPv6 frame
+ * to `da` carrying ICMPv6 `type` (80 bytes, so the 40-byte header and the
+ * ICMPv6 type are all there). */
 void arp_request(uint8_t e[60], uint8_t spa, uint8_t tpa) {
   std::memset(e, 0, 60);
   std::memset(e, 0xff, 6);
@@ -1208,10 +1217,35 @@ void ipv4_to_peer(uint8_t e[60], uint8_t proto, uint16_t port) {
   uint8_t* l4 = ip + 20;
   if (proto == 1) l4[0] = 8;                       /* echo request */
   if (proto == 17) { l4[2] = (uint8_t)(port >> 8); l4[3] = (uint8_t)port; }
+  if (proto == 6) l4[13] = (uint8_t)port;          /* TCP flags */
 }
 
-/* MULTICAST CHATTER IS NOT A QUESTION: frames that expect no reply (here a
- * multicast IPv6 frame) never count towards the judgement. */
+const uint8_t kAllRouters6[6] = {0x33, 0x33, 0, 0, 0, 2};
+void icmpv6_to(uint8_t e[80], const uint8_t da[6], uint8_t type) {
+  std::memset(e, 0, 80);
+  std::memcpy(e, da, 6);
+  std::memcpy(e + 6, kStaMac, 6);
+  e[12] = 0x86;
+  e[13] = 0xdd;
+  uint8_t* ip = e + 14;
+  ip[0] = 0x60;
+  ip[5] = 26;                                      /* payload length */
+  ip[6] = 58;                                      /* ICMPv6 */
+  ip[7] = 64;
+  ip[40] = type;
+}
+
+/* Whether one host frame counted as a question on a judged open link. */
+bool is_question(const uint8_t* e, size_t len) {
+  const uint32_t before = g_uplink_unconfirmed;
+  tap_down_one(e, len);
+  drain_tx();
+  return g_uplink_unconfirmed == before + 1;
+}
+
+/* MULTICAST CHATTER IS NOT A QUESTION: frames that expect no reply (here
+ * IPv6 echo requests to a multicast group) never count towards the
+ * judgement. */
 void test_multicast_chatter_is_not_judged() {
   reset_all();
   {
@@ -1222,15 +1256,15 @@ void test_multicast_chatter_is_not_judged() {
   associate(ap, /*rsn=*/false);
   drain_tx();
   for (int i = 0; i < 10; i++) {
-    uint8_t e[60] = {0x33, 0x33, 0, 0, 0, 2};   /* IPv6 all-routers */
-    std::memcpy(e + 6, kStaMac, 6);
-    e[12] = 0x86;
-    e[13] = 0xdd;
+    uint8_t e[80];
+    icmpv6_to(e, kAllRouters6, 128);
     tap_down_one(e, sizeof e);
   }
   drain_tx();
   supervise(kConfirmMs * 4);
-  check(g_sm.state() == StationSm::State::Connected,
+  supervise(kConfirmMs * 5 + 1);
+  check(g_sm.state() == StationSm::State::Connected &&
+            g_uplink_unconfirmed == 0,
         "multicast chatter with no reply is never judged");
 
   /* Gratuitous and probe ARPs are announcements, not questions. */
@@ -1240,29 +1274,30 @@ void test_multicast_chatter_is_not_judged() {
     tap_down_one(e, sizeof e);
   }
   drain_tx();
-  supervise(kConfirmMs * 4 + 1);
   supervise(kConfirmMs * 5 + 2);
+  supervise(kConfirmMs * 6 + 3);
   check(g_sm.state() == StationSm::State::Connected &&
             g_uplink_unconfirmed == 0,
         "gratuitous and probe ARPs are never judged");
 
-  /* ...but ARP requests are questions: an ARP that is never answered is
-   * exactly how an AP that dropped us shows. */
+  /* ...but ARP requests are questions: an ARP that is never answered is how
+   * an AP that dropped us shows - the first time on this BSS (the one
+   * strike; test_one_strike_per_bss). */
   for (int i = 0; i < (int)kConfirmUplink; i++) {
     uint8_t e[60];
     arp_request(e, 2, 1);
     tap_down_one(e, sizeof e);
   }
   drain_tx();
-  supervise(kConfirmMs * 6);
   supervise(kConfirmMs * 7);
+  supervise(kConfirmMs * 8);
   check(g_sm.state() == StationSm::State::Failed &&
             g_sm.fail_reason() == StationSm::Failure::Unconfirmed,
-        "unanswered ARP requests are judged");
+        "unanswered ARP requests are judged, the first time on a BSS");
 }
 
 /* AN OPEN ASSOCIATION THE AP DOES NOT HOLD IS FOUND AND RE-JOINED. The host
- * talks (kConfirmUplink frames) and no unicast reply comes back within
+ * asks (kConfirmUplink questions) and no unicast reply comes back within
  * kConfirmMs: the link is lost as Unconfirmed and the ordinary re-join policy
  * takes over. The two controls: a unicast reply confirms the association for
  * good, and an idle host is never judged. */
@@ -1302,6 +1337,22 @@ void test_an_unconfirmed_open_association_is_lost() {
   check(g_joins.load() == joins + 1, "...and re-joined after the backoff");
 }
 
+/* FEWER THAN kConfirmUplink QUESTIONS ARE NOT JUDGED, however long they go
+ * unanswered: one lost ping is not a lost association. */
+void test_fewer_questions_than_the_threshold_are_not_judged() {
+  for (int n = 1; n < (int)kConfirmUplink; n++) {
+    reset_all();
+    Ap ap;
+    open_link_with_uplink(ap, n);
+    supervise(10);
+    supervise(10 + kConfirmMs * 4);
+    check(g_sm.state() == StationSm::State::Connected &&
+              g_uplink_unconfirmed == (uint32_t)n,
+          n == 1 ? "one unanswered question is not judged"
+                 : "two unanswered questions are not judged");
+  }
+}
+
 /* THE WINDOW OPENS AT THE HOST'S FIRST QUESTION, not at the association: a
  * host idle for longer than kConfirmMs that then asks kConfirmUplink things
  * at once still gets kConfirmMs for the reply. */
@@ -1309,11 +1360,13 @@ void test_a_burst_after_idle_gets_its_window() {
   reset_all();
   Ap ap;
   open_link_with_uplink(ap, 0);
+  supervise(1000);                     /* the main loop runs while idle */
   supervise(kConfirmMs * 4);           /* idle, long past kConfirmMs */
   uint8_t e[60];
-  ipv4_to_peer(e, 6, 0);                           /* TCP */
+  ipv4_to_peer(e, 6, 0x02);                        /* a TCP SYN */
   for (int i = 0; i < (int)kConfirmUplink; i++) tap_down_one(e, sizeof e);
   drain_tx();
+  check(g_uplink_unconfirmed == kConfirmUplink, "the SYNs are questions");
   supervise(kConfirmMs * 4 + 1);
   supervise(kConfirmMs * 4 + 2);
   check(g_sm.state() == StationSm::State::Connected,
@@ -1327,25 +1380,207 @@ void test_a_burst_after_idle_gets_its_window() {
         "...and the reply inside its window confirms it");
 }
 
+/* A unicast reply confirms the association: questions asked after it, left
+ * unanswered across more than a whole window, are never judged. */
 void test_a_unicast_reply_confirms_the_association() {
   reset_all();
   Ap ap;
-  open_link_with_uplink(ap, (int)kConfirmUplink);
+  open_link_with_uplink(ap, 0);
   const uint8_t pl[16] = {1};
   const std::vector<uint8_t> d = ap.plain_to_sta(pl, sizeof pl);
   rx_frame(d.data(), d.size(), -40, 100);
   (void)tap_read();
-  for (int i = 0; i < 10; i++) {
-    uint8_t e[60] = {0};
-    std::memcpy(e, kPeer, 6);
-    std::memcpy(e + 6, kStaMac, 6);
-    e[12] = 0x08;
-    tap_down_one(e, sizeof e);
-  }
+  uint8_t e[60];
+  ipv4_to_peer(e, 1, 0);                           /* real echo requests */
+  for (int i = 0; i < 10; i++) tap_down_one(e, sizeof e);
   drain_tx();
-  supervise(kConfirmMs * 4);
+  supervise(1000);
+  supervise(1000 + kConfirmMs * 2);
   check(g_sm.state() == StationSm::State::Connected,
         "a unicast reply confirms the open association for good");
+}
+
+/* ONLY A UNICAST REPLY CONFIRMS: a group-addressed data frame from the AP
+ * (a broadcast ARP, mDNS) reaches every station it ever held, and says
+ * nothing about this association. */
+void test_a_group_frame_from_the_ap_does_not_confirm() {
+  reset_all();
+  Ap ap;
+  open_link_with_uplink(ap, 0);
+  const uint8_t pl[16] = {1};
+  const std::vector<uint8_t> d = ap.plain_to(kBcast, pl, sizeof pl);
+  rx_frame(d.data(), d.size(), -40, 100);
+  check(tap_read().size() == devourer::sta::kEthHdrLen + sizeof pl,
+        "the AP's broadcast reaches the host");
+  uint8_t e[60];
+  ipv4_to_peer(e, 1, 0);
+  for (int i = 0; i < (int)kConfirmUplink; i++) tap_down_one(e, sizeof e);
+  drain_tx();
+  supervise(1000);
+  supervise(1000 + kConfirmMs);
+  check(g_sm.state() == StationSm::State::Failed &&
+            g_sm.fail_reason() == StationSm::Failure::Unconfirmed,
+        "...but does not confirm the association");
+}
+
+/* WHAT A QUESTION IS (solicits_reply), through the real transmit path. */
+void test_what_counts_as_a_question() {
+  reset_all();
+  Ap ap;
+  open_link_with_uplink(ap, 0);
+  uint8_t e4[60], e6[80];
+  ipv4_to_peer(e4, 6, 0x02);
+  check(is_question(e4, sizeof e4), "a TCP SYN is a question");
+  ipv4_to_peer(e4, 6, 0x12);
+  check(!is_question(e4, sizeof e4), "a SYN-ACK is not");
+  ipv4_to_peer(e4, 6, 0x10);
+  check(!is_question(e4, sizeof e4), "a bare TCP ACK is not");
+  ipv4_to_peer(e4, 6, 0x18);
+  check(!is_question(e4, sizeof e4), "TCP data (PSH-ACK) is not");
+  ipv4_to_peer(e4, 6, 0x04);
+  check(!is_question(e4, sizeof e4), "a TCP RST is not");
+  ipv4_to_peer(e4, 1, 0);
+  check(is_question(e4, sizeof e4), "an ICMP echo request is a question");
+  ipv4_to_peer(e4, 1, 0);
+  e4[14 + 20] = 0;
+  check(!is_question(e4, sizeof e4), "an ICMP echo reply is not");
+  e4[14 + 20] = 3;
+  check(!is_question(e4, sizeof e4), "an ICMP destination unreachable is not");
+  ipv4_to_peer(e4, 1, 0);
+  e4[14 + 7] = 1;                                  /* fragment offset 8 */
+  check(!is_question(e4, sizeof e4), "a non-first fragment is not");
+  ipv4_to_peer(e4, 17, 53);
+  check(is_question(e4, sizeof e4), "a DNS query is a question");
+  ipv4_to_peer(e4, 17, 5600);
+  check(!is_question(e4, sizeof e4), "other UDP is not");
+  icmpv6_to(e6, kPeer, 128);
+  check(is_question(e6, sizeof e6), "a unicast ICMPv6 echo request is a question");
+  icmpv6_to(e6, kPeer, 135);
+  check(is_question(e6, sizeof e6), "a unicast neighbour solicitation is a question");
+  icmpv6_to(e6, kPeer, 129);
+  check(!is_question(e6, sizeof e6), "an ICMPv6 echo reply is not");
+  icmpv6_to(e6, kAllRouters6, 128);
+  check(!is_question(e6, sizeof e6), "a multicast ICMPv6 echo request is not");
+}
+
+/* ONE STRIKE PER BSS. A host that keeps asking a peer that is switched off
+ * gets no answer on a perfectly healthy link. The verdict fires once; the
+ * re-joined association on the same BSS is not judged again, so the link is
+ * not torn down every kConfirmMs. A unicast reply lifts the strike. */
+uint32_t rejoin_open(uint32_t now) {
+  const std::vector<uint8_t> b = beacon(false);
+  rx_frame(b.data(), b.size(), -40, now);
+  supervise(now);
+  Ap ap2;
+  for (int round = 0; round < 8; round++) {
+    pump_tx();
+    const std::vector<std::vector<uint8_t>> tx = drain_tx();
+    if (tx.empty()) break;
+    for (const std::vector<uint8_t>& f : tx) {
+      const std::vector<uint8_t> r = ap2.respond(f, false);
+      if (!r.empty()) rx_frame(r.data(), r.size(), -40, now);
+    }
+  }
+  drain_tx();
+  return now;
+}
+
+void test_one_strike_per_bss() {
+  reset_all();
+  Ap ap;
+  open_link_with_uplink(ap, (int)kConfirmUplink);
+  supervise(10);
+  supervise(10 + kConfirmMs);
+  check(g_sm.fail_reason() == StationSm::Failure::Unconfirmed,
+        "the first verdict on a BSS fires");
+  uint32_t now = rejoin_open(10 + kConfirmMs + 200);
+  check(g_sm.state() == StationSm::State::Connected &&
+            g_associations.load() == 2,
+        "...and the station re-joins");
+  uint8_t e[60];
+  ipv4_to_peer(e, 1, 0);                           /* the dead peer, again */
+  for (uint32_t t = now; t <= now + kConfirmMs * 4; t += 1000) {
+    tap_down_one(e, sizeof e);
+    drain_tx();
+    supervise(t);
+  }
+  check(g_sm.state() == StationSm::State::Connected &&
+            g_unconfirmed_lost.load() == 1,
+        "the re-joined association on the struck BSS is not judged again");
+
+  /* A unicast reply lifts the strike: the next association is judged. */
+  const uint8_t pl[16] = {1};
+  const std::vector<uint8_t> d = ap.plain_to_sta(pl, sizeof pl);
+  now += kConfirmMs * 4 + 100;
+  rx_frame(d.data(), d.size(), -40, now);
+  (void)tap_read();
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    g_sm.link_lost();
+  }
+  supervise(now);
+  now = rejoin_open(now + 200);
+  check(g_sm.state() == StationSm::State::Connected &&
+            g_associations.load() == 3,
+        "...a third association once the reply came");
+  for (int i = 0; i < (int)kConfirmUplink; i++) tap_down_one(e, sizeof e);
+  drain_tx();
+  supervise(now + 1);
+  supervise(now + 1 + kConfirmMs);
+  check(g_sm.fail_reason() == StationSm::Failure::Unconfirmed &&
+            g_unconfirmed_lost.load() == 2,
+        "...and judged again, the strike lifted");
+}
+
+/* THE STRIKE IS PER BSS: one spent on another BSS does not spare this one.
+ * The fixture has one BSS, so the strike is moved to another address
+ * directly - what an earlier verdict on a different AP leaves behind. */
+void test_the_strike_is_per_bss() {
+  reset_all();
+  Ap ap;
+  open_link_with_uplink(ap, (int)kConfirmUplink);
+  supervise(10);
+  supervise(10 + kConfirmMs);
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    std::memcpy(g_strike_bss, kPeer, 6);
+  }
+  const uint32_t now = rejoin_open(10 + kConfirmMs + 200);
+  uint8_t e[60];
+  ipv4_to_peer(e, 1, 0);
+  for (int i = 0; i < (int)kConfirmUplink; i++) tap_down_one(e, sizeof e);
+  drain_tx();
+  supervise(now + 1);
+  supervise(now + 1 + kConfirmMs);
+  check(g_sm.fail_reason() == StationSm::Failure::Unconfirmed &&
+            g_unconfirmed_lost.load() == 2,
+        "a strike spent on another BSS does not spare this one");
+}
+
+/* A QUESTION THE FULL QUEUE DROPPED IS NOT COUNTED - it never reached the
+ * AP, so its missing answer says nothing - and neither is a nudge. */
+void test_a_dropped_frame_is_not_counted() {
+  reset_all();
+  Ap ap;
+  open_link_with_uplink(ap, 0);
+  {
+    std::lock_guard<std::mutex> q(g_q_mu);
+    while (g_q.size() < 128) g_q.push_back(std::vector<uint8_t>(1, 0));
+  }
+  const uint64_t drops = g_q_drop.load();
+  uint8_t e[60];
+  ipv4_to_peer(e, 1, 0);
+  tap_down_one(e, sizeof e);
+  const uint64_t nudges = g_nudges.load(), probes = g_probe_tx.load();
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    nudge(0);
+  }
+  check(g_q_drop.load() == drops + 2, "the full queue dropped both frames");
+  check(g_uplink_unconfirmed == 0, "...a dropped question is not counted");
+  check(g_nudges.load() == nudges && g_probe_tx.load() == probes,
+        "...and neither is a dropped nudge");
+  drain_tx();
 }
 
 /* ONE-WAY TRAFFIC IS NOT A QUESTION: a UDP uplink to a peer behind the AP
@@ -2279,6 +2514,12 @@ int self_test() {
   selftest::test_a_burst_after_idle_gets_its_window();
   selftest::test_a_one_way_udp_uplink_is_not_judged();
   selftest::test_multicast_chatter_is_not_judged();
+  selftest::test_fewer_questions_than_the_threshold_are_not_judged();
+  selftest::test_a_group_frame_from_the_ap_does_not_confirm();
+  selftest::test_what_counts_as_a_question();
+  selftest::test_one_strike_per_bss();
+  selftest::test_the_strike_is_per_bss();
+  selftest::test_a_dropped_frame_is_not_counted();
   selftest::test_an_accepted_association_nudges_the_ap();
   selftest::test_a_nudge_touches_no_tuning_or_liveness_state();
   selftest::test_a_retransmission_is_a_duplicate();

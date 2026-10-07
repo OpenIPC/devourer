@@ -265,7 +265,8 @@ uint32_t now_ms() {
       .count();
 }
 
-void enqueue(std::vector<uint8_t> mpdu) {
+/* True when the frame was queued; false when the full queue dropped it. */
+bool enqueue(std::vector<uint8_t> mpdu) {
   /* addr1's I/G bit: a group address is never ACKed. */
   const bool unicast = mpdu.size() >= 10 && (mpdu[4] & 0x01) == 0;
   const std::vector<uint8_t>& rt = (unicast && !g_rt_ack.empty()) ? g_rt_ack : g_rt;
@@ -277,8 +278,12 @@ void enqueue(std::vector<uint8_t> mpdu) {
   g_q_in.fetch_add(1);
   /* Bounded: everything queued here answers a received frame or a timer, so
    * an unbounded queue is an allocation the air controls. */
-  if (g_q.size() < 128) g_q.push_back(std::move(f));
-  else g_q_drop.fetch_add(1);
+  if (g_q.size() < 128) {
+    g_q.push_back(std::move(f));
+    return true;
+  }
+  g_q_drop.fetch_add(1);
+  return false;
 }
 
 /* The dBm convention this tree uses (src/LinkHealth.cpp, src/RxQuality.h):
@@ -301,32 +306,48 @@ int8_t rssi_dbm(uint8_t raw) {
  * may never deauthenticate it. (On WPA2 the four-way is the confirmation:
  * the AP starts it only for a station it holds, and HandshakeTimeout covers
  * the rest.) So an open association counts as unconfirmed until a unicast
- * data frame from the AP arrives for this station; if the host has sent
- * kConfirmUplink frames and kConfirmMs has passed since the first of them
+ * data frame from the AP arrives for this station; if the host has asked
+ * kConfirmUplink questions and kConfirmMs has passed since the first of them
  * without one, the link is lost (StationSm::link_lost) and the ordinary
  * re-join policy takes over. The window opens at the host's first question,
  * not at the association: a host idle for longer than kConfirmMs that then
- * sends a burst must still get its kConfirmMs for the reply. ONLY A FRAME
- * WHOSE ANSWER THE AP MUST FORWARD BACK IS A QUESTION (solicits_reply): an
- * ARP request, an ICMP / ICMPv6 echo request, a unicast IPv6 neighbour
- * solicitation, TCP, a DNS query. So one-way traffic - a UDP video or
- * telemetry uplink, the FPV case - is never judged, and neither is a host's
- * multicast chatter (IPv6 RS/MLD, mDNS), a gratuitous or probe ARP, or an
- * idle host. The cost: an unheld association under one-way traffic alone is
- * found only when the host's stack next asks something (its neighbour
+ * sends a burst must still get its kConfirmMs for the reply.
+ *
+ * A QUESTION IS A FRAME WHOSE ANSWER, IF ONE EXISTS, THE AP MUST FORWARD BACK
+ * (solicits_reply): an ARP request, an ICMP / ICMPv6 echo request, a unicast
+ * IPv6 neighbour solicitation, a TCP SYN, a DNS query. So one-way traffic -
+ * a UDP video or telemetry uplink, the FPV case - is never judged, and
+ * neither is a host's multicast chatter (IPv6 RS/MLD, mDNS), a gratuitous or
+ * probe ARP, or an idle host. But a question can go unanswered on a healthy
+ * link: the host pings or ARPs a peer that is switched off, or its DNS has
+ * no upstream.
+ *
+ * ONE STRIKE PER BSS. So the verdict is a bounded backstop: it fires at most
+ * once per BSS until an association on that BSS has been confirmed. After
+ * one Unconfirmed verdict the re-joined association on the same BSS is not
+ * judged (g_strike), so a host asking a dead peer costs one re-join, not one
+ * every kConfirmMs. A unicast reply on that BSS, or an association on a
+ * different one, lifts it. The cost: a second unheld association on the
+ * struck BSS is not found by this rule, and its traffic is lost until
+ * something else (beacon loss, a deauthentication, the AP's first reply)
+ * ends or confirms it. And an unheld association under one-way traffic alone
+ * is found only when the host's stack next asks something (its neighbour
  * re-verification is a unicast ARP request). */
 constexpr uint32_t kConfirmMs = 5000;
 constexpr uint32_t kConfirmUplink = 3;
-bool g_unconfirmed = false;
+/* An open association with no unicast reply yet, on a BSS whose strike is
+ * not spent: the verdict may fire for it. */
+bool g_judge = false;
+bool g_strike = false;              /* the one verdict is spent on... */
+uint8_t g_strike_bss[6] = {0};      /* ...this BSS */
 bool g_uplink_seen = false;         /* supervise() saw the first question */
 uint32_t g_uplink_first_ms = 0;     /* ...at this time: the window opens */
 uint32_t g_uplink_unconfirmed = 0;
 std::atomic<uint64_t> g_unconfirmed_lost{0};
 
-/* Whether the host's MSDU (LLC/SNAP + payload) asks for an answer the AP
- * must carry back to this station (kConfirmMs above). Conservative: anything
- * not recognised is not a question, so a false "lost" needs a question that
- * really went unanswered. */
+/* Whether the host's MSDU (LLC/SNAP + payload) asks for an answer that, if
+ * one exists, the AP must carry back to this station (kConfirmMs above).
+ * Conservative: anything not recognised is not a question. */
 bool solicits_reply(const uint8_t* msdu, size_t len, const uint8_t da[6]) {
   if (len < devourer::sta::kLlcSnapLen) return false;
   const uint8_t* p = msdu + devourer::sta::kLlcSnapLen;
@@ -364,9 +385,10 @@ bool solicits_reply(const uint8_t* msdu, size_t len, const uint8_t da[6]) {
   } else {
     return false;
   }
-  /* TCP: a SYN or data is acknowledged; a bare ACK only follows data this
-   * station received, which has already confirmed it. */
-  if (proto == 6) return true;
+  /* TCP: a SYN only (SYN set, ACK clear). Any other segment can go
+   * unanswered on a healthy link: a RST, a keepalive or a retransmission to a
+   * peer that has gone, or a bare ACK left over from before a re-join. */
+  if (proto == 6) return l4n >= 14 && (l4[13] & 0x12) == 0x02;
   /* UDP: a DNS query only - any other UDP may be one-way. */
   return proto == 17 && l4n >= 4 && (((unsigned)l4[2] << 8) | l4[3]) == 53;
 }
@@ -403,7 +425,10 @@ void nudge(uint32_t now) {
 }
 
 void on_association() {
-  g_unconfirmed = g_sm.security() == StationSm::Security::Open;
+  /* The one strike is per BSS: a different BSS is judged afresh. */
+  if (g_strike && std::memcmp(g_strike_bss, g_sm.bssid(), 6) != 0)
+    g_strike = false;
+  g_judge = g_sm.security() == StationSm::Security::Open && !g_strike;
   g_uplink_seen = false;
   g_uplink_unconfirmed = 0;
   g_rx_dup.reset();
@@ -568,7 +593,10 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
       if (!eapol && !no_data) g_plain_refused.fetch_add(1);
       return;
     }
-    if (to_us) g_unconfirmed = false;   /* the AP holds this association */
+    if (to_us) {                        /* the AP holds this association */
+      g_judge = false;
+      g_strike = false;                 /* ...so its BSS is judged again */
+    }
     g_plain_rx.fetch_add(1);
     if (len > hlen) tap_up(da, sa, mpdu + hlen, len - hlen);
     return;
@@ -683,9 +711,10 @@ bool air_msdu(const uint8_t* msdu, size_t len, const uint8_t da[6],
   if (!protect) {
     hdr.insert(hdr.end(), msdu, msdu + len);
     if (from_host) g_tx_plain.fetch_add(1);
-    if (from_host && g_unconfirmed && solicits_reply(msdu, len, da))
-      g_uplink_unconfirmed++;
-    enqueue(std::move(hdr));
+    /* Only a question that was queued: one the full queue dropped never
+     * reached the AP, so its missing answer says nothing. */
+    const bool question = from_host && g_judge && solicits_reply(msdu, len, da);
+    if (enqueue(std::move(hdr)) && question) g_uplink_unconfirmed++;
     return true;
   }
   /* 0 means the length would overflow: refused like any cipher failure. */
@@ -742,14 +771,15 @@ uint8_t scan_step(uint32_t now) {
 
 /* A directed probe request for the SSID we want, on the channel we are on:
  * it finds a hidden BSS and shortens the wait on a swept channel. False when
- * none could be built (it is then not counted). Caller holds g_mu. */
+ * none could be built or the full queue dropped it; only a queued one is
+ * counted. Caller holds g_mu. */
 bool probe(uint8_t chan) {
   std::vector<uint8_t> m =
       devourer::sta::build_probe_req(g_own, g_ssid, chan, chan > 14);
   if (m.empty()) return false;
   devourer::sta::assign_seq(m, g_data_seq.next());
+  if (!enqueue(std::move(m))) return false;   /* the full queue dropped it */
   g_probe_tx.fetch_add(1);
-  enqueue(std::move(m));
   return true;
 }
 
@@ -777,18 +807,20 @@ uint8_t supervise(uint32_t now) {
   /* An unconfirmed open association the host has been talking through
    * (see kConfirmMs) - lost, through the ordinary failure path below. The
    * window opens the first time this pass sees a question. */
-  if (g_unconfirmed && g_uplink_unconfirmed > 0 && !g_uplink_seen) {
+  if (g_judge && g_uplink_unconfirmed > 0 && !g_uplink_seen) {
     g_uplink_seen = true;
     g_uplink_first_ms = now;
   }
-  if (g_sm.state() == StationSm::State::Connected && g_unconfirmed &&
+  if (g_sm.state() == StationSm::State::Connected && g_judge &&
       g_uplink_seen && g_uplink_unconfirmed >= kConfirmUplink &&
       (uint32_t)(now - g_uplink_first_ms) >= kConfirmMs) {
     std::fprintf(stderr,
                  "  station association unconfirmed: %u frames sent, no "
                  "unicast reply from the AP in %u ms\n",
                  g_uplink_unconfirmed, (unsigned)(now - g_uplink_first_ms));
-    g_unconfirmed = false;
+    g_judge = false;
+    g_strike = true;                   /* the one strike for this BSS */
+    std::memcpy(g_strike_bss, g_sm.bssid(), 6);
     g_unconfirmed_lost.fetch_add(1);
     g_sm.link_lost();
   }

@@ -79,18 +79,29 @@ enough.
 An open association is confirmed by the AP's first unicast frame to the
 station. A station cannot see the AP's side: if the AP never saw the
 association response acknowledged, it does not hold the station, drops its
-traffic and may never say so. So once the host has asked something - three
-frames whose answer the AP must forward back: an ARP request, an ICMP /
-ICMPv6 echo request, a unicast IPv6 neighbour solicitation, TCP, a DNS
-query - and no unicast reply has come within 5 s of the first, the link is
-lost as `unconfirmed` (`StationSm::link_lost`) and re-joined under the
-policy above. One-way traffic (a UDP video or telemetry uplink), multicast
-chatter, gratuitous and probe ARPs and an idle host are never judged; an
-unheld association under one-way traffic alone is found when the host's
-stack next asks something (its neighbour re-verification is a unicast ARP
-request). WPA2 needs no such rule (the four-way is the confirmation). The
-ledger counts
-these (`unconfirmed=`), and repeated association responses
+traffic and may never say so. So once the host has asked three questions,
+and no unicast reply has come within 5 s of the first, the link is lost as
+`unconfirmed` (`StationSm::link_lost`) and re-joined under the policy above.
+A question is a frame whose answer, if one exists, the AP must forward
+back: an ARP request, an ICMP / ICMPv6 echo request, a unicast IPv6
+neighbour solicitation, a TCP SYN, a DNS query. One-way traffic (a UDP
+video or telemetry uplink), multicast chatter, gratuitous and probe ARPs,
+any other TCP segment and an idle host are never judged.
+
+A question can also go unanswered on a healthy link: the host pings or ARPs
+a peer that is switched off, or its DNS has no upstream. So the rule is a
+bounded backstop, with one strike per BSS. It fires at most once on a BSS
+until an association on that BSS has been confirmed. The re-joined
+association after a verdict is not judged, and a unicast reply, or an
+association on a different BSS, lifts the strike. A host asking a dead peer
+therefore costs one re-join, not one every 5 s. The cost: a second unheld
+association on the struck BSS is not found by this rule, and its traffic is
+lost until something else ends or confirms it (beacon loss, a
+deauthentication, the AP's first reply). An unheld association under
+one-way traffic alone is found only when the host's stack next asks
+something (its neighbour re-verification is a unicast ARP request). WPA2
+needs no such rule (the four-way is the confirmation). The ledger counts
+the verdicts (`unconfirmed=`) and repeated association responses
 (`assoc_repeat=`).
 
 Exit status: 0 the run completed; 1 setup failed; 2 refused

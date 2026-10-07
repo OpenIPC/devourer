@@ -858,9 +858,7 @@ uint8_t supervise(uint32_t now) {
     g_judge = false;
     /* One more consecutive verdict on this BSS: the next association on it
      * waits longer before it is judged. */
-    if (g_strikes && std::memcmp(g_strike_bss, g_sm.bssid(), 6) != 0)
-      g_strikes = 0;
-    g_strikes++;
+    g_strikes++;   /* on_association already reset it for a new BSS */
     std::memcpy(g_strike_bss, g_sm.bssid(), 6);
     g_unconfirmed_lost.fetch_add(1);
     g_sm.link_lost();

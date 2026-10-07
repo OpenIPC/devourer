@@ -1617,6 +1617,61 @@ void test_a_truncated_tcp_header_is_not_read() {
         "a TCP segment too short to hold its flags is not a question");
 }
 
+/* THE at= STAMPS are what the on-air harness orders against hostapd -t: the
+ * wall clock (CLOCK_REALTIME), seconds and exactly six fractional digits, on
+ * the association line AND the verdict line. Read back off stderr. */
+bool stamp_ok(const std::string& line, const char* what) {
+  const size_t p = line.find(" at=");
+  if (p == std::string::npos) {
+    std::fprintf(stdout, "  (%s: no at= in '%s')\n", what, line.c_str());
+    return false;
+  }
+  const std::string t = line.substr(p + 4);
+  const size_t dot = t.find('.');
+  size_t end = dot == std::string::npos ? 0 : dot + 1;
+  while (end < t.size() && t[end] >= '0' && t[end] <= '9') end++;
+  const bool digits = dot != std::string::npos && dot > 0 &&
+                      t.find_first_not_of("0123456789") == dot &&
+                      end - dot - 1 == 6 && end == t.size();
+  const long long sec = digits ? std::atoll(t.c_str()) : 0;
+  const long long now = (long long)time(nullptr);
+  const bool wall = sec >= now - 5 && sec <= now + 5;
+  if (!digits || !wall)
+    std::fprintf(stdout, "  (%s: at=%s - %s)\n", what, t.c_str(),
+                 !digits ? "not sec.usec with 6 digits" : "not the wall clock");
+  return digits && wall;
+}
+
+void test_the_stamps_are_wall_clock_microseconds() {
+  reset_all();
+  FILE* cap = std::tmpfile();
+  if (!cap) { check(false, "tmpfile for the stderr capture"); return; }
+  std::fflush(stderr);
+  const int saved = ::dup(2);
+  ::dup2(fileno(cap), 2);
+  Ap ap;
+  open_link_with_uplink(ap, (int)kConfirmUplink);
+  supervise(10);
+  supervise(10 + kConfirmMs);
+  std::fflush(stderr);
+  ::dup2(saved, 2);
+  ::close(saved);
+  std::rewind(cap);
+  std::string assoc, verdict;
+  char buf[512];
+  while (std::fgets(buf, sizeof buf, cap)) {
+    std::string l(buf);
+    while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+    if (l.find("station connected (association") != std::string::npos) assoc = l;
+    if (l.find("station association unconfirmed:") != std::string::npos) verdict = l;
+  }
+  std::fclose(cap);
+  check(!assoc.empty() && stamp_ok(assoc, "association"),
+        "the association line carries at=<wall-clock sec.usec>");
+  check(!verdict.empty() && stamp_ok(verdict, "verdict"),
+        "the verdict line carries at=<wall-clock sec.usec>");
+}
+
 /* A QUESTION THE FULL QUEUE DROPPED IS NOT COUNTED - it never reached the
  * AP, so its missing answer says nothing - and neither is a nudge. */
 void test_a_dropped_frame_is_not_counted() {
@@ -2580,6 +2635,7 @@ int self_test() {
   selftest::test_a_struck_bss_backs_off();
   selftest::test_a_group_frame_does_not_reset_the_backoff();
   selftest::test_a_truncated_tcp_header_is_not_read();
+  selftest::test_the_stamps_are_wall_clock_microseconds();
   selftest::test_the_strike_is_per_bss();
   selftest::test_a_dropped_frame_is_not_counted();
   selftest::test_an_accepted_association_nudges_the_ap();

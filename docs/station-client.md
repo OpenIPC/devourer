@@ -60,8 +60,9 @@ has printed, and separates "heard nothing", "heard another BSS" and "our AP
 refused us". Its first line is the state the run ENDED in, before the
 teardown's leave: `Connected`, or `Failed reason=<why>` for a run that gave
 up. While it runs, the station also logs each association
-(`station connected (association N)`) and each failure (`station link lost:
-<reason>` or `station join failed: <reason>`).
+(`station connected (association N) at=<sec.usec>`), each unconfirmed
+verdict (`station association unconfirmed: ... at=<sec.usec>`) and each
+failure (`station link lost: <reason>` or `station join failed: <reason>`).
 
 Re-join policy: after a lost link or a failed join the station waits
 `DEVOURER_STA_BACKOFF_MS` and joins again, for as long as the run lasts.
@@ -133,7 +134,7 @@ first line then reads `fault=1`.
 
   | Cell | Scored |
   |---|---|
-  | `open` | with a ping running from the start, the AP associates our address within 30 s (recovering an unconfirmed first association counts; a verdict on an association hostapd logged AP-STA-CONNECTED for before the verdict - ordered by the `at=` stamps against `hostapd -t` - FAILs, and a verdict without a stamp is INCONCLUSIVE); ping 0% loss over the TAP; ledger plaintext only; armed; the clear |
+  | `open` | with a ping running from the start, the AP associates our address within 30 s (recovering an unconfirmed first association counts; a verdict on an association hostapd logged AP-STA-CONNECTED for before the verdict - ordered by the `at=` stamps against `hostapd -t` - FAILs. A verdict is cleared only once the ordering itself is checked: every association without a verdict whose CONNECTED is logged must show it at or after its own `at=`. If one is earlier, or there is none to check, or a stamp or the ledger is missing or malformed, the verdicts are INCONCLUSIVE); ping 0% loss over the TAP; ledger plaintext only; armed; the clear |
   | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; no four-way MIC failure, data-plane MIC failures <= PTK installs; armed; the clear; no `tx.retry_limit=0` warning. MT7612U: the managed filter - plaintext unicast injected from the AP's BSSID at the station (`plaintext refused` at least half of it, else INCONCLUSIVE) and at a foreign address (`not-for-us` under 1% of it - a PASS counts only once the `noarm` control of the same run has seen that stream arrive, else INCONCLUSIVE) |
   | `noarm` | control, `DEVOURER_STA_ARM=0`: no arm and no clear ran. Realtek: the station tried and the AP did NOT complete the four-way - a completed one FAILs; INCONCLUSIVE unless the armed `wpa2` cell of the same run got in (the positive control). MT7612U: under the monitor filter both injected streams arrive (each at least half); the link over a 30 s ping window is reported, not scored |
   | `retry0` | `DEVOURER_TX_RETRY_LIMIT=0`: the arm-time warning; the clear (the link over a 30 s ping window is reported, not scored) |
@@ -205,3 +206,13 @@ AP's.
 - A pairwise rekey can cost one received frame (802.11-2016 12.7.6.5); the
   note is at the `ccmp_decrypt` call in `rx_frame()`.
 - The host stack owns ARP, IP and DHCP on the TAP.
+- The confirmation backoff remembers one BSS (`g_strike_bss`). A station
+  that alternates between two BSSes of one ESS resets it at each switch, so
+  a host asking a dead peer can then cost a verdict and a re-join every
+  cycle: the 5 s window (at least), the re-join backoff
+  (`DEVOURER_STA_BACKOFF_MS`, 1 s by default) and the
+  handshake. `select_open` normally keeps to one BSS, so this needs the
+  BSSes to swap rank between joins.
+- The MT7612U harnesses' hand-back (`sta_dut_handback`) re-enumerates the
+  DUT so mt76x2u binds again, even when the run took it with no driver bound
+  (as an earlier devourer session leaves it).

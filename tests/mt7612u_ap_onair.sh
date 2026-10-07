@@ -68,24 +68,28 @@ KIDS=""
 # de-init runs after the signal, and re-enumerating the adapter under it is
 # the hand-back this must not do. Anything still alive then is KILLed and
 # reap returns 1, so cleanup leaves the adapter alone; 0 when all exited.
+# Either way every child that has exited, a KILLed one included, is reaped,
+# so none is left a zombie for the rest of the run. A KILL lands only once
+# the process leaves the kernel (a USB call can hold it), so it gets 2 s, and
+# one still running after that is never `wait`ed on: that would block.
 reap() {
-  local pid live t=0
+  local pid live t=0 killed=""
   for pid in $KIDS; do kill "$pid" 2>/dev/null; done
   while :; do
     live=""
     for pid in $KIDS; do sta_pid_alive "$pid" && live="$live $pid"; done
     [ -z "$live" ] && break
-    if [ "$t" -ge 100 ]; then
+    if [ "$t" -eq 100 ]; then
       for pid in $live; do kill -KILL "$pid" 2>/dev/null; done
       echo "still running 10 s after TERM (KILLed):$live"
-      KIDS=""
-      return 1
+      killed=yes
     fi
+    [ "$t" -ge 120 ] && break
     sleep 0.1; t=$((t + 1))
   done
-  for pid in $KIDS; do wait "$pid" 2>/dev/null; done   # reaps our own children
+  for pid in $KIDS; do sta_pid_alive "$pid" || wait "$pid" 2>/dev/null; done
   KIDS=""
-  return 0
+  [ -z "$killed" ]
 }
 
 # Returns 1 when it could not reset the AP (a process outlived TERM): the

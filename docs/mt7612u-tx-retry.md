@@ -196,7 +196,12 @@ What it shows:
   so an arm with every submit failed is skipped, has since been run on
   hardware (#467). If the arm's own entries still reach `sent`, the claimed
   entry was not its own (one arm read 61/60 with one claimed), and the gate
-  hands it back to the late/foreign column at arm end. The settled condition
+  hands it back to the late/foreign column at arm end; it does the same when
+  the claim was taken while the arm's first transfer was in flight and that
+  transfer then failed on the wire. An arm whose surplus claim was handed
+  back reads `sent`/`sent` and counts as settled for the next arm's claim -
+  it owes no entries, which is what the condition asks; a MAC duplicate
+  (own entries above `sent`) still does not. The settled condition
   cascades: one UNSETTLED arm disables the claim for every following arm
   until an arm settles on its own, so on a unit whose arms do not settle the
   claim buys almost nothing.

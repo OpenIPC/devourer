@@ -1889,13 +1889,19 @@ struct txs_sum {
 	int stale_ok;         /* its SUCCESS bit - for txs_unclaim() */
 };
 
-/* The claim is a bet that the stale-pktid entry is ours. If the arm's own
- * entries reach `sent` anyway, it was not (a late entry, a MAC duplicate):
- * the arm read 61/60 with one claimed. Hand it back to the column the drain
- * would have put it in, so success is not inflated. */
-static void txs_unclaim(struct txs_sum *o, long sent, unsigned prev)
+/* The claim is a bet that the stale-pktid entry is ours. Two outcomes say
+ * it was not, and both hand it back to the column the drain would have put
+ * it in, so success is not inflated:
+ *  - the arm's own entries reach `sent` anyway (a late entry, or a MAC
+ *    duplicate): one arm read 61/60 with one claimed. txs_unclaim(), at arm
+ *    end. With a duplicate the own count exceeds `sent`, hence >=.
+ *  - the claim was taken while the arm's first transfer was in flight, and
+ *    that transfer then failed on the wire: nothing of this arm reached the
+ *    chip, so nothing popped can be its own. txs_unclaim_one() on that
+ *    wire failure, while no frame has been counted sent. */
+static void txs_unclaim_one(struct txs_sum *o, unsigned prev)
 {
-	if (o->stale_ext != 1 || o->entries - o->stale_ext != sent)
+	if (o->stale_ext != 1)
 		return;
 	o->entries--;
 	if (o->stale_ok)
@@ -1905,6 +1911,12 @@ static void txs_unclaim(struct txs_sum *o, long sent, unsigned prev)
 		o->late_prev++;
 	else
 		o->foreign++;
+}
+
+static void txs_unclaim(struct txs_sum *o, long sent, unsigned prev)
+{
+	if (o->entries - o->stale_ext >= sent)
+		txs_unclaim_one(o, prev);
 }
 
 /* mt76's skb pktid range starts at MT_PACKET_ID_FIRST (3) and the id must
@@ -2406,6 +2418,13 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 					if (u.tx_err != us1.tx_err) {
 						us1 = u;
 						wire_fail++;
+						/* A claim taken while this, the
+						 * arm's first, transfer was in
+						 * flight is not ours: it never
+						 * reached the chip. */
+						if (n == 0)
+							txs_unclaim_one(&sum,
+							                prev_pktid);
 						if (txs_tr.on)
 							printf("TXS t=%.1f arm=%c rx=%d n=%ld "
 							       "WIRE-FAIL inflight=%d\n",
@@ -2560,7 +2579,11 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 			prev_pktid = pktid;
 			/* More entries than frames would be MAC duplicates: then a
 			 * stale-pktid entry is not provably ours either. An arm that
-			 * sent nothing popped nothing and leaves both as they were. */
+			 * sent nothing popped nothing and leaves both as they were.
+			 * Read AFTER txs_unclaim() on purpose: an arm whose own
+			 * entries reached n, with one surplus claim handed back,
+			 * owes nothing and counts as settled, so the next arm may
+			 * claim; a duplicate keeps own > n and still disarms it. */
 			if (n > 0) {
 				stale_pktid = pktid;
 				stale_settled = (sum.entries == n);

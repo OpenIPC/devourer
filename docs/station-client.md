@@ -155,8 +155,9 @@ first line then reads `fault=1`.
   named), 2 inconclusive (rig refused, AP not up, route not through the TAP,
   the station exited or stalled before `sta_client up:`, station out of
   time), 3 interrupted. `FW_DIR` (an MT7612U DUT) must hold the decompressed
-  MT7612U blobs; a directory with only the `.bin.zst` copies is refused
-  (exit 2) before the run starts.
+  MT7612U blobs. Like the library, it falls back to `/lib/firmware/mediatek`
+  and then `./firmware`; when none holds them (compressed `.bin.zst` copies
+  only), the run is refused (exit 2) before it starts.
 
 ## AP quirk: an MT7612U AP holds the association's TX status
 

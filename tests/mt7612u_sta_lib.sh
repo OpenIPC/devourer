@@ -301,23 +301,32 @@ sta_fw_link() {
 }
 
 # 0 when directory $1 holds both MT7612U blobs, readable and non-empty. A
-# host whose firmware is zstd-compressed (/lib/firmware/mediatek/*.bin.zst
-# only) links fine, and the DUT then fails its bring-up with "cannot open
-# firmware/mt7662_rom_patch.bin", which a gate scores as an empty ABORTED or a
-# missing MAC. This check makes that dead rig a refusal before anything runs.
+# host whose firmware is compressed (/lib/firmware/mediatek/*.bin.zst only,
+# as most distributions ship it) links fine, and the DUT then fails its
+# bring-up with "cannot open firmware/mt7662_rom_patch.bin", which a gate
+# scores as an empty ABORTED or a missing MAC. This check makes that dead rig
+# a refusal before anything runs.
 sta_fw_readable() {
   for _sta_fw in mt7662_rom_patch.bin mt7662.bin; do
-    if [ -f "$1/$_sta_fw" ] && [ -r "$1/$_sta_fw" ] && [ -s "$1/$_sta_fw" ]; then
-      continue
+    _sta_p="$1/$_sta_fw"
+    if [ ! -e "$_sta_p" ]; then
+      _sta_z=""
+      for _sta_x in zst xz gz; do
+        [ -e "$_sta_p.$_sta_x" ] && _sta_z="$_sta_z $_sta_fw.$_sta_x"
+      done
+      if [ -n "$_sta_z" ]; then
+        echo "refusing: $_sta_p is missing; only compressed firmware is there" \
+             "(${_sta_z# }). The DUT loads the blobs uncompressed: decompress" \
+             "both into a directory and pass it as FW_DIR"
+      else
+        echo "refusing: $_sta_p is missing (FW_DIR=$FW_DIR)"
+      fi
+      return 1
     fi
-    if [ -e "$1/$_sta_fw.zst" ]; then
-      echo "refusing: $1/$_sta_fw is missing, only $_sta_fw.zst is there - the" \
-           "DUT loads the blobs uncompressed. Decompress both (zstd -d) into a" \
-           "directory and pass it as FW_DIR"
-    else
-      echo "refusing: $1/$_sta_fw is missing, unreadable or empty (FW_DIR=$FW_DIR)"
+    if [ ! -f "$_sta_p" ] || [ ! -r "$_sta_p" ] || [ ! -s "$_sta_p" ]; then
+      echo "refusing: $_sta_p is not a readable, non-empty file"
+      return 1
     fi
-    return 1
   done
   return 0
 }

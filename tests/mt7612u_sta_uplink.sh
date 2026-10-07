@@ -42,6 +42,9 @@
 #   sudo tests/mt7612u_sta_uplink.sh
 #
 # Env: PEER_VID, PEER_PID, PEER_SYSFS, DUT_SYSFS, CH, FRAMES, RETRY_LIMIT, OUT.
+#
+# Exit status: 0 every check passed; 1 a check failed; 2 INCONCLUSIVE (the rig
+# was refused, or an arm could not measure); 3 interrupted (INT/TERM).
 
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

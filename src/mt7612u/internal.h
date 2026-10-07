@@ -137,6 +137,7 @@ struct mt_async;
 struct mt_slot {
 	struct mt7612u_dev *d; struct mt_async *a; int idx;
 	int nframes;   /* TX: frames in the slot's transfer (an aggregate: >1) */
+	int submitted; /* TX: libusb owns the transfer (a reserved slot: 0) */
 };
 
 struct mt_async {
@@ -146,8 +147,8 @@ struct mt_async {
 	uint8_t tx_buf[MT_TX_RING][MT_TX_BUFSZ];
 	int     tx_busy[MT_TX_RING];
 	/* Guards running, stopping, rx_active, tx_busy[], tx_inflight,
-	 * rx_inflight and tx_slot[].d/.nframes - all of which the event thread
-	 * reads or writes alongside the caller. */
+	 * rx_inflight, tx_slot[].d/.nframes/.submitted and rx_slot[].d - all
+	 * of which the event thread reads or writes alongside the caller. */
 	std::mutex lock;
 	/* condition_variable_any, not condition_variable: it waits on any
 	 * BasicLockable, so every site below keeps the plain lock()/unlock()

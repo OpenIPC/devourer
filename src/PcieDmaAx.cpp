@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 
+#include "PcieDmaUtil.h"
 #include "PcieTransport.h"
 #include "kestrel/FrameParserKestrel.h"
 
@@ -68,8 +69,9 @@ constexpr uint32_t WD_BODY_LEN_V1 = 32; /* 8852C wd_body_t_v1 */
 constexpr uint32_t WD_INFO_LEN = 24;
 constexpr uint16_t DRV_INFO_UNIT_8852C = 16;
 
-constexpr size_t PAGE_SZ = 4096;
-inline size_t page_align(size_t v) { return (v + PAGE_SZ - 1) & ~(PAGE_SZ - 1); }
+constexpr size_t PAGE_SZ = pcie_dma::kPageSize;
+using pcie_dma::page_align;
+using pcie_dma::sleep_us;
 
 inline uint32_t rd_le32(const uint8_t *p) {
   return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
@@ -96,9 +98,6 @@ inline void bd_write(volatile uint8_t *e, uint16_t a, uint16_t b, uint32_t dma) 
   e[5] = static_cast<uint8_t>(dma >> 8);
   e[6] = static_cast<uint8_t>(dma >> 16);
   e[7] = static_cast<uint8_t>(dma >> 24);
-}
-void sleep_us(unsigned us) {
-  std::this_thread::sleep_for(std::chrono::microseconds(us));
 }
 
 /* Slab layout offsets (page-aligned sections). */
@@ -268,7 +267,10 @@ int PcieDmaAx::tx_submit(uint8_t hint, uint8_t *buf, size_t len,
     _logger->error("PcieDmaAx: tx on unknown DMA channel {}", hint);
     return -1;
   }
-  std::lock_guard<std::mutex> lk(_tx_mu);
+  /* One lock per channel: the rings are independent (CH12 fwcmd vs a data or
+   * mgmt frame in flight), only the WD page pool is shared and it has its
+   * own mutex. */
+  std::lock_guard<std::mutex> lk(_tx_mu[hint]);
   if (hint == kFwcmdCh)
     return submit_fwcmd(buf, len, timeout_ms);
   return submit_wd(hint, buf, len, timeout_ms);
@@ -538,6 +540,9 @@ void PcieDmaAx::irq_mask() {
   _t.mmio_write<uint32_t>(R_AX_HAXI_HIMR00, 0);
 }
 
-PcieDmaAx::RppStats PcieDmaAx::rpp_stats() const { return _rpp; }
+PcieDmaAx::RppStats PcieDmaAx::rpp_stats() const {
+  std::lock_guard<std::mutex> lk(_pool_mu); /* written under it by release_page */
+  return _rpp;
+}
 
 } /* namespace devourer */

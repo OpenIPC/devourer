@@ -123,8 +123,8 @@ private:
   uint64_t _payload_iova = 0;
   std::vector<uint16_t> _free_pages;       /* LIFO of free page indices */
   std::array<bool, kWdPages> _page_busy{}; /* in flight until its RPP */
-  std::mutex _pool_mu;                     /* pool + RPQ ring state */
-  std::mutex _tx_mu;                       /* serializes submitters */
+  mutable std::mutex _pool_mu;             /* pool + RPQ ring state + _rpp */
+  std::array<std::mutex, kTxChannels> _tx_mu; /* per-channel ring state */
 
   uint8_t *_fwcmd = nullptr; /* kBdLen × kFwcmdSlotSize bounce ring (CH12) */
   uint64_t _fwcmd_iova = 0;

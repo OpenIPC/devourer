@@ -7,6 +7,7 @@
 #include <poll.h>
 #include <unistd.h>
 
+#include "PcieDmaUtil.h"
 #include "PcieTransport.h"
 
 namespace devourer {
@@ -73,8 +74,9 @@ constexpr uint32_t RING_LEN_BE = 256;      /* RTK_BEQ_TX_DESC_NUM */
 constexpr uint32_t RING_LEN_BCN = 1;
 constexpr uint32_t TX_BOUNCE_SZ = 32 * 1024;
 
-constexpr size_t PAGE_SZ = 4096;
-inline size_t page_align(size_t v) { return (v + PAGE_SZ - 1) & ~(PAGE_SZ - 1); }
+constexpr size_t PAGE_SZ = pcie_dma::kPageSize;
+using pcie_dma::page_align;
+using pcie_dma::sleep_us;
 
 /* 8-byte buffer-descriptor entry accessors (volatile LE stores). */
 inline void bd_write(volatile uint8_t *e, uint16_t buf_size, uint16_t psb_len,
@@ -89,9 +91,6 @@ inline void bd_write(volatile uint8_t *e, uint16_t buf_size, uint16_t psb_len,
   e[7] = static_cast<uint8_t>(dma >> 24);
 }
 
-void sleep_us(unsigned us) {
-  std::this_thread::sleep_for(std::chrono::microseconds(us));
-}
 
 struct QueueRegs {
   uint32_t len;

@@ -415,7 +415,8 @@ endif()
 # --- PCIe transport (vfio-pci; see src/PcieTransport.h) ---
 if(DEVOURER_PCIE)
     target_sources(devourer PRIVATE
-        src/PcieTransport.cpp src/PcieTransport.h src/PcieDmaPlane.h)
+        src/PcieTransport.cpp src/PcieTransport.h src/PcieDmaPlane.h
+        src/PcieDmaUtil.h)
     if(DEVOURER_JAGUAR2_8821C)
         target_sources(devourer PRIVATE src/PcieDma88xx.cpp src/PcieDma88xx.h)
     endif()

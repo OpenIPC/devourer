@@ -134,6 +134,10 @@ private:
 
   RppStats _rpp{};
   uint64_t _rx_delivered = 0;
+  /* RXQ diagnostics: per rpkt_type packet counts (rxd dword0 [27:24]) and
+   * BDs dropped for an implausible rxbd_info length. */
+  std::array<uint64_t, 16> _rx_types{};
+  uint64_t _rx_bad_len = 0;
   std::atomic<bool> _dead_logged{false};
 };
 

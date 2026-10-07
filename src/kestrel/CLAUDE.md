@@ -256,15 +256,16 @@ does differently on PCIe hangs off `is_usb()`; nothing here is a second HAL:
   PD_REGU_L only when the HCI strap reads PCIE_USB, `0x70[12]` cleared,
   GPIO16-18 pulled low. EFUSE: the PCIe interface block puts the MAC at 0x400
   and the PCI vid/did at 0x406/0x408 (self-checking against config space).
-- **Not ported / open**: MSI (the plane polls the ring indices, 200 µs),
-  the 8852BE (refused at the factory), the CAV-cut-only
-  `l12_vmain`/`gen2_force_ib` rows (the lab modules are cut 1), interrupt
-  mitigation — and the PPDU-status (physts) reports: with the same
-  `R_AX_PPDU_STAT`/`R_AX_HW_RPT_FWD` programming that delivers them on USB,
-  none arrive on the PCIe RXQ (RX-only trace run: 0 physts blobs, 0 RPQ
-  buffers), so per-path RSSI/SNR/EVM and the passive noise floor read 0 over
-  PCIe while the MAC-level frame RSSI is populated. Unexplained; rtw89 sets
-  only RPT_EN|MAC_INFO|RX_CNT|PLCP|CRC32 (0x2F) there, the next thing to try.
+- **PPDU status over PCIe** arrives as its own RXQ packet (rpkt_type 1,
+  typically a 24-byte header-only report or an 80-byte one with the IE
+  pages) between the frames it describes, not prepended inside a bulk
+  aggregate; the cached-physts attach in `StartRxLoop` is bus-neutral and
+  per-path RSSI/EVM/SNR populate at the same rate as on USB. The plane's
+  exit line prints the RXQ packet-type histogram (t0 frames, t1 PPDU status,
+  t10 C2H) — a PCIe receiver with t1=0 has lost its physts, not its frames.
+- **Not ported**: MSI (the plane polls the ring indices, 200 µs), the 8852BE
+  (refused at the factory), the CAV-cut-only `l12_vmain`/`gen2_force_ib` rows
+  (the lab modules are cut 1), and interrupt mitigation.
 
 Validation record (lab box, two RTL8852CE on one J6412: 05:00.0 on a root
 port, 09:00.0 behind an ASM1182e switch with the AER UR mask; witness = a

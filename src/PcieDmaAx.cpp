@@ -1,7 +1,9 @@
 #include "PcieDmaAx.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <string>
 #include <thread>
 
 #include "PcieTransport.h"
@@ -465,6 +467,10 @@ uint32_t PcieDmaAx::reap_rxq(
     if (blen > 4 && blen <= kRxBufSize) {
       const uint8_t *data = buf + 4;
       const int dlen = static_cast<int>(blen - 4);
+      if (fs && dlen >= 4) {
+        const uint32_t t = (rd_le32(data) >> 24) & 0xf;
+        _rx_types[t]++;
+      }
       if (fs && ls) {
         on_data(data, dlen);
         _rx_delivered++;
@@ -484,6 +490,8 @@ uint32_t PcieDmaAx::reap_rxq(
                       "(info 0x{:08x})",
                       info);
       }
+    } else {
+      _rx_bad_len++;
     }
     arm_rx_bd(_rxq, _rxq.wp);
     _rxq.wp = (_rxq.wp + 1) % kBdLen;
@@ -513,10 +521,16 @@ void PcieDmaAx::rx_loop(
       sleep_us(static_cast<unsigned>(_rx_poll_us > 0 ? _rx_poll_us : 200));
   }
   const RppStats s = rpp_stats();
+  std::string types;
+  for (size_t t = 0; t < _rx_types.size(); t++)
+    if (_rx_types[t])
+      types += " t" + std::to_string(t) + "=" + std::to_string(_rx_types[t]);
   _logger->info("PcieDmaAx: RX loop exited ({} RXQ bufs / {} packets, {} RPQ "
-                "bufs; RPP done={} rty={} life={} drop={} unknown={})",
-                rxq_bufs, _rx_delivered, rpq_bufs, s.tx_done, s.retry_limit,
-                s.lifetime, s.macid_drop, s.unknown_seq);
+                "bufs, {} bad-len; rpkt types:{}; RPP done={} rty={} life={} "
+                "drop={} unknown={})",
+                rxq_bufs, _rx_delivered, rpq_bufs, _rx_bad_len, types,
+                s.tx_done, s.retry_limit, s.lifetime, s.macid_drop,
+                s.unknown_seq);
 }
 
 void PcieDmaAx::irq_mask() {

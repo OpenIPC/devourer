@@ -2257,6 +2257,24 @@ void HalKestrel::vnd_bb_ctrl_bw_ch(uint8_t pri_ch, uint8_t center,
                 : bw == CHANNEL_WIDTH_10 ? 7
                                          : static_cast<uint8_t>(bw);
   kestrel_halbb_ctrl_bw_ch(_halbb_ctx, pri_ch, center, hbw, band_type);
+  /* 6 GHz: with the BB table's EDCCA level the MAC EDCCA gate latches busy
+   * (measured: 1/300 delivered vs 300/300 with that one gate cleared, both
+   * buses, both 8852CE cards and the 8852CU) because the receiver's own
+   * floor as the BB measures it (-67..-69 dBm, every radio, every band)
+   * sits inside the default's hysteresis band. Program the vendor's
+   * unlinked EDCCA_NORMAL_MODE level (never busy) there; 2.4/5 GHz keep the
+   * table default the carrier-sense TX measurement was taken with. The
+   * report line is the per-band evidence (pwdB = the BB's energy reading). */
+  if (band_type == 2)
+    kestrel_halbb_edcca_6g(_halbb_ctx, hbw);
+  delay_us(5000);
+  int rpt[8] = {0};
+  kestrel_halbb_edcca_report(_halbb_ctx, rpt);
+  _logger->info("Kestrel PHY: EDCCA band{} pwdB fb={} p20={} path0={} busy={}{}",
+                band_type, rpt[0], rpt[1], rpt[6], rpt[3],
+                band_type == 2 ? " (6 GHz: energy-detect parked at the vendor's "
+                                 "unlinked level; preamble CCA stays on)"
+                               : "");
 }
 
 bool HalKestrel::nhm_noise_floor(int8_t &dbm, uint16_t mntr_time_ms) {
@@ -2639,7 +2657,8 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
                                               : 20;
   _logger->info("Kestrel PHY: tuned to ch{} (center {}) bw{} ({}) — "
                 "TXpwr={}dBm (off={}qdB)",
-                channel, center, bw_mhz, is_2g ? "2.4G" : "5G",
+                channel, center, bw_mhz,
+                is_2g ? "2.4G" : band_type == 2 ? "6G" : "5G",
                 (_txpwr_dbm_q2 + _txpwr_offset_qdb) / 4, _txpwr_offset_qdb);
 
   /* The full BB config just applied this bucket's gain-error, so a same-bucket

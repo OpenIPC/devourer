@@ -77,6 +77,12 @@ public:
    * (EnableTxScheduler clears these gates), so this is a runtime toggle, not the
    * co-channel-deferral fix it is on Jaguar. */
   void SetCcaMode(bool disabled) override;
+  /* The two halves of R_AX_CCA_CFG_0's gate field: "primary" = CCA_EN +
+   * SEC20/40/80 (bits 0-3, the preamble/sub-channel carrier sense), "edcca" =
+   * EDCCA_EN (bit 4, raw in-band energy). Post-bring-up only, per the
+   * IRtlRadio contract; SetCcaMode(d) == SetCcaGates(d, d). */
+  bool SetCcaGates(bool primary_disabled, bool edcca_disabled) override;
+  bool GetCcaGates(bool &primary_disabled, bool &edcca_disabled) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override { return _channel; }
@@ -254,6 +260,7 @@ private:
    * BULKOUTID0, ACH0 = BULKOUTID3), on PCIe the AX DMA channel itself (8, 0).
    * ACH0 is channel 0, so "TX is up" is its own flag, not a non-zero handle. */
   bool _tx_up = false;
+  bool _brought_up = false; /* Init/InitWrite completed the MAC bring-up */
   uint8_t _tx_mgmt_q = 0;
   uint8_t _tx_data_q = 0;
   bool _tx_data_ok = false; /* data frames may use _tx_data_q */

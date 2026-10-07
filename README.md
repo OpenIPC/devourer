@@ -107,8 +107,9 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
 | **RTL8852BU** (11ax)          | 2T2R + BT         | 43            | 36            | 33               | —          | TP-Link Archer TX20U Nano (`35bc:0108`); Wi-Fi 6, dual-band. 5/10 MHz capable; HE ER SU + DCM extended range |
 | **RTL8832BU** (11ax)          | 2T2R              | —             | —             | —                | —          | Wi-Fi-only SKU of the 8852B die; rides the 8852BU code path. Not benchmarked. 5/10 MHz capable; HE ER SU + DCM extended range |
-| **RTL8832CU** (11ax)          | 2T2R + BT         | 40            | 33            | 32               | 32          | TP-Link Archer TX50UH (`35bc:0101`); Wi-Fi 6E tri-band (2.4/5/6 GHz). 5/10 and 160 MHz capable; HE ER SU + DCM extended range. Host-push injection over USB 2.0 (~50% duty ceiling); [6G TX+RX validated](tests/kestrel_8832cu_6g_txrx.sh) |
-| **RTL8852CE** (11ax, PCIe)    | 2T2R + BT         | —             | —             | —                | —          | M.2 2230 module (`10ec:c852`); rides the 8852C code path over vfio-pci. Monitor RX + TX injection on-air validated against a USB 8852C witness ([cells](tests/pcie_8852ce_onair.sh)); not benchmarked |
+| **RTL8832CU** (11ax)          | 2T2R              | 40            | 33            | 32               | 32          | TP-Link Archer TX50UH (`35bc:0101`); Wi-Fi 6E tri-band (2.4/5/6 GHz). 5/10 and 160 MHz capable; HE ER SU + DCM extended range. Host-push injection over USB 2.0 (~50% duty ceiling); 6 GHz TX+RX validated ([cells](tests/pcie_8852ce_onair.sh) `--band 6`, with the 8852CE as the peer) |
+| **RTL8852CU** (11ax)          | 2T2R + BT         | —             | —             | —                | —          | the Bluetooth-combo SKU of the 8832CU die (same `C8852C` variant, same code path; the 8832CU is the Wi-Fi-only cut). Not separately benchmarked |
+| **RTL8852CE** (11ax, PCIe)    | 2T2R + BT         | —             | —             | —                | —          | M.2 2230 module (`10ec:c852`); rides the 8852C code path over vfio-pci. Monitor RX + TX injection on-air validated on 5 and 6 GHz against a USB 8852C witness ([cells](tests/pcie_8852ce_onair.sh)); not benchmarked |
 | **RTL8852CU** (11ax)          | 2T2R + BT         | —             | —             | —                | —          | "8852" branding of the same 8852C die; rides the 8832CU code path. Not benchmarked. 5/10 and 160 MHz capable; HE ER SU + DCM extended range |
 | **MT7612U** (MediaTek)        | 2T2R              | ‖             | ‖             | —                | —          | Alfa AWUS036ACM / Aukey USBAC1200 (`0e8d:7612`) and 15 OEM ids; the one non-Realtek backend, opt-in with `-DDEVOURER_MT7612U=ON`. 20/40/80 MHz; no 5/10 MHz, no fast retune. [Measured record](docs/mt7612u.md) |
 
@@ -133,7 +134,7 @@ Out of scope: the pre-HalMAC PCIe parts (RTL8812AE/8821AE). The 11ax
 "Kestrel" generation (RTL8852BU / RTL8852CU, a fourth HAL under `src/kestrel/`,
 vendor references `reference/rtl8852bu` + `reference/rtl8852cu`) has RX, TX, and
 channel/bandwidth (5/10/20/40/80 MHz on both dies, 160 MHz on the 8852C)
-on-air validated — and the tri-band **RTL8832CU** adds 6 GHz (WiFi 6E),
+on-air validated — and the tri-band **RTL8832CU / RTL8852CU / RTL8852CE** add 6 GHz (WiFi 6E),
 benchmarked above at ~5 GHz-parity throughput. The BB/RF plane is Realtek's own
 halbb/halrf C compiled verbatim (register tables, per-channel config, DACK/
 RX-DCK, plus IQK on the 8852C); TSSI/DPK on both dies and IQK on the 8852B are

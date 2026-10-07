@@ -208,6 +208,7 @@ bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
   _hal.set_host_rpr();
   if (!_hal.set_channel(channel.Channel, channel.ChannelWidth, channel.ChannelOffset, channel.Band))
     return false;
+  _brought_up = true;
   return true;
 }
 
@@ -473,6 +474,33 @@ void RtlKestrelDevice::SetCcaMode(bool disabled) {
   _device.rtw_write32(r::R_AX_CCA_CFG_0, v);
   _logger->info("Kestrel: MAC carrier-sense {} (CCA_CFG_0=0x{:08x})",
                 disabled ? "DISABLED (dis_cca)" : "enabled", v);
+}
+
+bool RtlKestrelDevice::SetCcaGates(bool primary_disabled, bool edcca_disabled) {
+  if (!_brought_up)
+    return false;
+  namespace r = kestrel::reg;
+  constexpr uint32_t kPrimary =
+      r::B_AX_CCA_EN | r::B_AX_SEC20_EN | r::B_AX_SEC40_EN | r::B_AX_SEC80_EN;
+  uint32_t v = _device.rtw_read32(r::R_AX_CCA_CFG_0);
+  v = primary_disabled ? (v & ~kPrimary) : (v | kPrimary);
+  v = edcca_disabled ? (v & ~r::B_AX_EDCCA_EN) : (v | r::B_AX_EDCCA_EN);
+  _device.rtw_write32(r::R_AX_CCA_CFG_0, v);
+  _logger->info("Kestrel: CCA gates primary={} edcca={} (CCA_CFG_0=0x{:08x})",
+                primary_disabled ? "off" : "on", edcca_disabled ? "off" : "on",
+                v);
+  return true;
+}
+
+bool RtlKestrelDevice::GetCcaGates(bool &primary_disabled,
+                                   bool &edcca_disabled) {
+  if (!_brought_up)
+    return false;
+  namespace r = kestrel::reg;
+  const uint32_t v = _device.rtw_read32(r::R_AX_CCA_CFG_0);
+  primary_disabled = (v & r::B_AX_CCA_EN) == 0;
+  edcca_disabled = (v & r::B_AX_EDCCA_EN) == 0;
+  return true;
 }
 
 RxEnergy RtlKestrelDevice::GetRxEnergy(bool with_nhm) {

@@ -1366,6 +1366,11 @@ int main(int argc, char **argv) {
       return 1;
     }
     int pch = 36;
+    /* DEVOURER_BAND=6 -> 6 GHz (the RTL8852CE is tri-band like the 8852CU);
+     * the band cannot be inferred from the channel number. */
+    uint8_t pband = 0;
+    if (const char *b = std::getenv("DEVOURER_BAND"))
+      pband = static_cast<uint8_t>(std::atoi(b));
     if (const char *ch_env = std::getenv("DEVOURER_CHANNEL"))
       pch = std::atoi(ch_env);
     ChannelWidth_t pwidth = CHANNEL_WIDTH_20;
@@ -1415,7 +1420,8 @@ int main(int argc, char **argv) {
       dev->Init(packetProcessor,
                 SelectedChannel{.Channel = static_cast<uint8_t>(pch),
                                 .ChannelOffset = poff,
-                                .ChannelWidth = pwidth});
+                                .ChannelWidth = pwidth,
+                                .Band = pband});
     } catch (const std::exception &e) {
       logger->error("PCIe bring-up failed: {}", e.what());
       if (pcie_la_thread.joinable())

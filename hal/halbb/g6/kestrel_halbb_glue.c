@@ -3,6 +3,7 @@
  * hal_headers_le.h). See the header. */
 #include "halbb_precomp.h"      /* full bb_info + halbb types + BB functions */
 #include "kestrel_halbb_glue.h"
+#include "vendor/halbb_edcca_ex.h"
 
 struct kestrel_halbb_ctx {
   struct bb_info bb;
@@ -10,6 +11,8 @@ struct kestrel_halbb_ctx {
   struct rtw_phl_com_t phl;
   struct bb_cmn_info cmn;
   int env_mntr_ready; /* lazy halbb_env_mntr init done */
+  int edcca_inited;
+  int edcca_cr_inited;
 };
 
 struct kestrel_halbb_ctx *kestrel_halbb_create(struct kestrel_halbb_bridge *br,
@@ -48,9 +51,14 @@ struct kestrel_halbb_ctx *kestrel_halbb_create(struct kestrel_halbb_bridge *br,
   c->bb.num_rf_path = 2;
   c->bb.num_tx_path = 2;
   c->bb.num_ss = 2;
-  c->bb.cr_type = BB_CLIENT;     /* USB client CR bank; without it the env-monitor
-                                  * CR-init switch falls through and the NHM
-                                  * ready-bit address stays 0 (report never rdy) */
+  /* CR bank, as halbb_hw_cfg's own ic_type test picks it (halbb_init.c):
+   * the 8852B is a BB_IC_AX_CLIENT part (BB_CLIENT, the _C register names),
+   * the 8852C is BB_IC_AX_AP2 (BB_AP2, the _A2 names). The EDCCA, DIG,
+   * physts and env-monitor CR tables all switch on this; a wrong bank writes
+   * another die's addresses (the 8852C EDCCA level is 0x4840, the client
+   * bank's 0x4884 is nothing there). Without any bank the env-monitor CR-init
+   * switch falls through and the NHM ready-bit address stays 0. */
+  c->bb.cr_type = (chip == KESTREL_CHIP_8852B) ? BB_CLIENT : BB_AP2;
   c->bb.bb0_cr_offset = 0;       /* bridge adds the BB window (wIndex=1) */
   /* halbb_init_cr_default guards on this flag; it asserts exactly the wiring
    * done above (hal_com/phl_com/bb_cmn_hooker present). */
@@ -132,6 +140,73 @@ void kestrel_halbb_ctrl_bw_ch(struct kestrel_halbb_ctx *ctx, unsigned char pri_c
   halbb_ctrl_bw_ch(&ctx->bb, pri_ch, central_ch, /*central_ch_seg1=*/0,
                    (enum band_type)band_type, (enum channel_width)bw,
                    HW_PHY_0);
+}
+
+/* EDCCA energy-detect threshold for a 6 GHz tune (halbb_edcca.c), via the
+ * vendor's own threshold calc. 2.4/5 GHz keep the BB table default (level
+ * 66 = -62 dBm high, -70 dBm low) the 8852C carrier-sense TX default was
+ * measured with. On 6 GHz that default latches the MAC EDCCA gate busy and
+ * every injected frame defers: the BB's EDCCA pwdB reads the receiver's own
+ * floor at -67..-69 dBm on every 8852C in the lab, on both bands, with no
+ * DIG running — inside the default's hysteresis band, and above the vendor's
+ * regulatory CBP threshold for 6 GHz (CBP_6G = 53, -75 dBm) outright. The
+ * vendor applies that regulatory threshold only under a chplan that demands
+ * it; its mode for an unassociated device is EDCCA_NORMAL_MODE, whose
+ * threshold is EDCCA_MAX (never busy) while not linked — that is what is
+ * programmed here, so 6 GHz TX defers on the preamble carrier sense (primary
+ * CCA, still on) and not on the uncalibrated energy floor. The regulatory
+ * 6 GHz energy-detect level is therefore not enforced by this driver.
+ * First call fills the EDCCA CR table (a vendor dm_init stage the minimal
+ * bring-up skips — without it every address is 0/mask 0 and writes land
+ * nowhere), the per-chip cap defaults and the one-shot init. */
+void kestrel_halbb_edcca_6g(struct kestrel_halbb_ctx *ctx, unsigned char bw) {
+  if (!ctx)
+    return;
+  struct bb_info *bb = &ctx->bb;
+  struct rtw_chan_def *cd = &bb->hal_com->band[0].cur_chandef;
+  cd->band = BAND_ON_6G;
+  cd->bw = (enum channel_width)bw;
+  if (!ctx->edcca_inited) {
+    if (!ctx->edcca_cr_inited) {
+      halbb_cr_cfg_edcca_init(bb);
+      ctx->edcca_cr_inited = 1;
+    }
+    halbb_edcca_dev_hw_cap(bb);
+    /* hal_cap.c copies the hw caps into the dev caps halbb_edcca_init reads
+     * (there is no sw override here). */
+    bb->phl_com->dev_cap.edcca_cap = bb->hal_com->dev_hw_cap.edcca_cap;
+    bb->phl_com->edcca_mode = EDCCA_NORMAL_MODE;
+    halbb_edcca_init(bb);
+    ctx->edcca_inited = 1;
+  }
+  bb->bb_edcca_i.edcca_mode = EDCCA_NORMAL_MODE;
+  bb->bb_link_i.is_linked = false; /* the unlinked branch: th_h = EDCCA_MAX */
+  halbb_edcca_thre_calc(bb);
+}
+
+/* One EDCCA hardware report (halbb_edcca_get_result): out[0..2] = pwdB of the
+ * full band / primary 20 / secondary 20 (dBm, s8), out[3..5] = the matching
+ * busy flags, out[6..7] = per-path pwdB 0/1. Diagnostic for a band where the
+ * MAC EDCCA gate defers: it answers "what level does the BB see against the
+ * threshold it was given". */
+void kestrel_halbb_edcca_report(struct kestrel_halbb_ctx *ctx, int out[8]) {
+  if (!ctx)
+    return;
+  struct bb_info *bb = &ctx->bb;
+  if (!ctx->edcca_cr_inited) {
+    halbb_cr_cfg_edcca_init(bb);
+    ctx->edcca_cr_inited = 1;
+  }
+  halbb_edcca_get_result(bb);
+  struct edcca_hw_rpt *r = &bb->bb_edcca_i.edcca_rpt;
+  out[0] = r->pwdb_fb;
+  out[1] = r->pwdb_p20;
+  out[2] = r->pwdb_s20;
+  out[3] = r->flag_fb;
+  out[4] = r->flag_p20;
+  out[5] = r->flag_s20;
+  out[6] = r->pwdb_0;
+  out[7] = r->pwdb_1;
 }
 
 void kestrel_halbb_ctrl_tx_path(struct kestrel_halbb_ctx *ctx) {

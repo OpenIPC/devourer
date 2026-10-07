@@ -52,7 +52,12 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first):
   path. On-air-validated: monitor RX (both dies, 2.4/5 GHz), TX injection
   (legacy/HT/VHT/HE + HE ER SU/DCM — `docs/he-extended-range.md`),
   5/10/20/40/80 MHz on both dies + 160 MHz on the 8852C only; 6 GHz TX tops
-  out at 80 MHz (the 6G+160 TX-enable path is un-ported). TX power is a fixed
+  out at 80 MHz (the 6G+160 TX-enable path is un-ported). On 6 GHz the BB
+  EDCCA energy-detect is parked at the vendor's unlinked level (the receiver's
+  own floor as the BB measures it, -67..-69 dBm without DIG, latches the
+  default's hysteresis band busy and every injected frame defers); preamble
+  carrier sense stays on and the regulatory 6 GHz energy-detect level is
+  **not** enforced — `src/kestrel/CLAUDE.md`. TX power is a fixed
   BB dBm (`DEVOURER_TX_PWR`, whole dBm here). The 8852A-family (RTL8832AU) is
   deliberately excluded. Quirks: `docs/8852c-quirks.md`.
 - **RTL8733B** (`src/rtl8733b/`): the 802.11n generation — RTL8731BU/RTL8733BU
@@ -378,8 +383,10 @@ Behavioural traps the per-field docs can't carry:
   with EDCCA off and primary CCA left on, the same Jaguar1 injector delivers
   95% on an idle channel and still 78% under a co-channel flooder; with both
   gates off it collapses to 0.3%, because it stops waiting for a gap and
-  collides instead. `SetCcaGates` (`IRtlRadio`, Jaguar1 and Jaguar3) is the
-  one-bit-at-a-time form for exactly this; `SetCcaMode` remains the portable
+  collides instead. `SetCcaGates` (`IRtlRadio`, Jaguar1, Jaguar3 and Kestrel —
+  there "primary" is CCA_EN + the sec20/40/80 bits and "edcca" EDCCA_EN;
+  txdemo drives it as `DEVOURER_CCA_GATES=<primary>,<edcca>`, 1 = that gate
+  off) is the one-bit-at-a-time form for exactly this; `SetCcaMode` remains the portable
   all-or-nothing call and is `SetCcaGates(d, d)`. Both gate calls are
   post-bring-up only and return false before it — see `src/IRtlRadio.h` for
   the contract, and `tests/cca_gates_regcheck.sh` to reproduce the tables.

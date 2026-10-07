@@ -219,6 +219,45 @@ scheduler stalled and the bulk-OUT NAKed). Behavioural quirks beyond the
 the firmware DIG biases the 5 GHz idle-noise measurement):
 `docs/8852c-quirks.md`.
 
+## 6 GHz: EDCCA parked, preamble CCA on
+
+With the carrier-sense TX default, injection on 6 GHz stalled after the first
+frame on every 8852C in the lab (8852CU over USB, both 8852CE over PCIe):
+1/300 delivered with both MAC gates on, 300/300 with only the EDCCA gate
+cleared, 1/300 with only the primary gate cleared (`DEVOURER_CCA_GATES`). The
+BB's own EDCCA report (`kestrel_halbb_edcca_report`, logged at every tune as
+`EDCCA band<n> pwdB ...`) reads the receiver's floor at -67..-69 dBm on every
+radio and both bands — no DIG runs here, so the energy measurement sits where
+the table's gain leaves it. The BB table's EDCCA level is 66 (-62 dBm) with
+an 8 dB hysteresis, so once anything trips it the -67 dBm floor keeps the
+gate busy; on 5 GHz the floor flickers under the -70 dBm low level and TX
+proceeds, on 6 GHz it does not. The vendor's regulatory 6 GHz threshold
+(`CBP_6G` = 53, -75 dBm) is below the floor outright.
+
+What is programmed: at a 6 GHz tune the glue runs the vendor's EDCCA init
+(`halbb_cr_cfg_edcca_init` — a dm_init stage the minimal bring-up skips,
+without which the EDCCA CR table is all zeros and the writes land nowhere —
+plus `halbb_edcca_dev_hw_cap` and the hw→dev cap copy) and
+`halbb_edcca_thre_calc` in `EDCCA_NORMAL_MODE` with `is_linked = false`,
+which is the vendor's level for an unassociated device: `EDCCA_MAX`, never
+busy. Primary carrier sense (preamble detect) stays on. 2.4/5 GHz keep the
+table default the carrier-sense measurement was taken with. Consequence,
+stated plainly: this driver does not enforce the 6 GHz energy-detect level
+the FCC/ETSI LPI rules call for; the caller owns compliance, as everywhere.
+
+Two things fixed on the way that affect every band: the halbb glue now gives
+the 8852C its own CR bank (`BB_AP2`, as `halbb_hw_cfg` picks from the
+ic_type) instead of the 8852B's `BB_CLIENT` — the EDCCA/DIG/physts/env-monitor
+CR tables all switch on it, and the client bank's EDCCA level address is
+nothing on the 8852C; the physts and env-monitor addresses happen to coincide,
+which is why RX never noticed. And `SetCcaGates`/`GetCcaGates` are ported
+(primary = CCA_EN + sec20/40/80, edcca = EDCCA_EN, post-bring-up only).
+
+Validation (ch37, 6M, 800 frames per cell, carrier sense on, same build):
+usb→pcie05 800, pcie05→usb 799, usb→pcie09 800, pcie09→usb 799,
+pcie05→pcie09 800; the 5 GHz matrix re-run beside it: 800 / 752 / 800 /
+791 / 797.
+
 ## PCIe (RTL8852CE)
 
 The 8852CE is this HAL over the PCIe transport (`src/PcieDmaAx.cpp` is the

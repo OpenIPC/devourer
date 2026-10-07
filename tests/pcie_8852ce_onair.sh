@@ -8,6 +8,7 @@
 #
 #   sudo tests/pcie_8852ce_onair.sh                     # defaults below
 #   sudo tests/pcie_8852ce_onair.sh --channel 6 --frames 1000
+#   sudo tests/pcie_8852ce_onair.sh --band 6 --channel 37     # 6 GHz (tri-band dies)
 #
 # Cells, per PCIe card:   usb->pcie   pcie->usb
 # then once:              pcie->pcie  (first card TX, second card RX)
@@ -22,6 +23,7 @@ BDFS="0000:05:00.0,0000:09:00.0"
 USB_VID=0x35bc
 USB_PID=0x0101
 CHANNEL=36
+BAND=0
 FRAMES=2000
 GAP_US=5000
 BUILD="$(cd "$(dirname "$0")/.." && pwd)/build"
@@ -35,6 +37,7 @@ while [ $# -gt 0 ]; do
     --bdfs) BDFS="$2"; shift 2 ;;
     --usb) USB_VID="0x${2%%:*}"; USB_PID="0x${2##*:}"; shift 2 ;;
     --channel) CHANNEL="$2"; shift 2 ;;
+    --band) BAND="$2"; shift 2 ;;   # 6 = 6 GHz (DEVOURER_BAND; channel numbers collide with 5 GHz)
     --frames) FRAMES="$2"; shift 2 ;;
     --gap-us) GAP_US="$2"; shift 2 ;;
     --build) BUILD="$2"; shift 2 ;;
@@ -83,9 +86,9 @@ run_cell() {
   local name="$1" rxk="$2" rxsel="$3" txk="$4" txsel="$5"
   local rxlog="$OUT/$name.rx.jsonl" rxerr="$OUT/$name.rx.err"
   local txlog="$OUT/$name.tx.jsonl" txerr="$OUT/$name.tx.err"
-  echo "== cell $name: $txk($txsel) -> $rxk($rxsel) ch$CHANNEL $RATE x$FRAMES =="
-  local rx_env=(DEVOURER_CHANNEL="$CHANNEL" DEVOURER_LOG_LEVEL=info)
-  local tx_env=(DEVOURER_CHANNEL="$CHANNEL" DEVOURER_LOG_LEVEL=info
+  echo "== cell $name: $txk($txsel) -> $rxk($rxsel) band$BAND ch$CHANNEL $RATE x$FRAMES =="
+  local rx_env=(DEVOURER_CHANNEL="$CHANNEL" DEVOURER_BAND="$BAND" DEVOURER_LOG_LEVEL=info)
+  local tx_env=(DEVOURER_CHANNEL="$CHANNEL" DEVOURER_BAND="$BAND" DEVOURER_LOG_LEVEL=info
                 DEVOURER_TX_FRAMES="$FRAMES" DEVOURER_TX_GAP_US="$GAP_US"
                 DEVOURER_TX_RATE="$RATE")
   if [ "$rxk" = pcie ]; then rx_env+=(DEVOURER_PCIE_BDF="$rxsel");
@@ -136,7 +139,7 @@ run_cell() {
   local pct=$(( hits * 1000 / submitted ))
   printf '  tx rc=%s frames=%s tx_failed=%s hits=%s delivery=%d.%d%%%s\n' "$txrc" "$submitted" "$failed" "$hits" $((pct / 10)) $((pct % 10)) "$approx"
   grep -E "\[E\]" "$txerr" "$rxerr" | grep -v "LTE interface not ready" | head -5 | sed 's/^/    /'
-  echo "{\"ev\":\"cell\",\"name\":\"$name\",\"ok\":$([ "$hits" -gt 0 ] && echo true || echo false),\"tx\":\"$txk:$txsel\",\"rx\":\"$rxk:$rxsel\",\"channel\":$CHANNEL,\"rate\":\"$RATE\",\"frames\":$submitted,\"tx_failed\":$failed,\"hits\":$hits,\"tx_rc\":$txrc}" | tee -a "$OUT/summary.jsonl"
+  echo "{\"ev\":\"cell\",\"name\":\"$name\",\"ok\":$([ "$hits" -gt 0 ] && echo true || echo false),\"tx\":\"$txk:$txsel\",\"rx\":\"$rxk:$rxsel\",\"band\":$BAND,\"channel\":$CHANNEL,\"rate\":\"$RATE\",\"frames\":$submitted,\"tx_failed\":$failed,\"hits\":$hits,\"tx_rc\":$txrc}" | tee -a "$OUT/summary.jsonl"
   [ "$hits" -gt 0 ]
 }
 

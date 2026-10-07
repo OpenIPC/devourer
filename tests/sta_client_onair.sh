@@ -263,6 +263,9 @@ ip link show "$AP_IF" 2>/dev/null | grep -q '[<,]UP[,>]' && AP_WAS_UP=yes
 # back what was.
 NM_AP=no; NS_OURS=no; CLEANED=no; STA_HUNG=no; STA_PID=""; CELL=""
 cleanup() {
+  # Ignored, not deferred: a second INT/TERM during the hand-back would
+  # otherwise end it half done (CLEANED is already set, so it cannot rerun).
+  trap '' INT TERM
   [ "$CLEANED" = yes ] && return 0
   CLEANED=yes
   local sta_gone=0

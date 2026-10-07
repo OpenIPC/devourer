@@ -71,7 +71,10 @@ KIDS=""
 # Either way every child that has exited, a KILLed one included, is reaped,
 # so none is left a zombie for the rest of the run. A KILL lands only once
 # the process leaves the kernel (a USB call can hold it), so it gets 2 s, and
-# one still running after that is never `wait`ed on: that would block.
+# one still running after that is never `wait`ed on: that would block. It
+# STAYS in KIDS instead, so every later reap still finds it, still returns 1,
+# and no later cleanup (the EXIT trap's included) re-enumerates the adapter
+# under it.
 reap() {
   local pid live t=0 killed=""
   for pid in $KIDS; do kill "$pid" 2>/dev/null; done
@@ -87,8 +90,11 @@ reap() {
     [ "$t" -ge 120 ] && break
     sleep 0.1; t=$((t + 1))
   done
-  for pid in $KIDS; do sta_pid_alive "$pid" || wait "$pid" 2>/dev/null; done
-  KIDS=""
+  live=""
+  for pid in $KIDS; do
+    if sta_pid_alive "$pid"; then live="$live $pid"; else wait "$pid" 2>/dev/null; fi
+  done
+  KIDS="$live"
   [ -z "$killed" ]
 }
 
@@ -140,10 +146,24 @@ cleanup() {
 # An interrupt must STOP the run: on the EXIT trap alone, INT/TERM would run
 # cleanup and then carry on into the next cell against a re-enumerated
 # adapter. CLEANED only spares the EXIT pass a second re-enumeration after
-# that; the cleanups between cells (CELLS=all) still run every time.
+# that; the cleanups between cells (CELLS=all) still run every time. A final
+# cleanup ignores a second INT/TERM: one arriving mid-cleanup would otherwise
+# abandon it with the adapter half reset.
 CLEANED=no
-trap '[ "$CLEANED" = yes ] || cleanup' EXIT
-trap 'cleanup; CLEANED=yes; exit 3' INT TERM
+on_int() { trap '' INT TERM; cleanup; CLEANED=yes; exit 3; }
+trap 'trap "" INT TERM; [ "$CLEANED" = yes ] || cleanup' EXIT
+trap on_int INT TERM
+# Nor is a between-cell cleanup: INT/TERM are ignored while it runs (press
+# again once it is done). Ignored, not held by a handler, so the children it
+# starts ignore them too - a Ctrl-C would otherwise cut short the `sleep`
+# between the two `authorized` writes.
+cell_cleanup() {
+  local rc
+  trap '' INT TERM
+  cleanup; rc=$?
+  trap on_int INT TERM
+  return "$rc"
+}
 
 # --- the station -----------------------------------------------------------
 STA_IF=$(ls "/sys/bus/usb/devices/$STA_SYSFS:1.0/net/" 2>/dev/null | head -1)
@@ -350,10 +370,10 @@ case "$CELLS" in
   all)  # A between-cell cleanup that could not reset the AP ends the run:
         # the cells after it are recorded as not run, never scored.
         cell_open
-        if ! cleanup; then not_run="wpa2 stop"
+        if ! cell_cleanup; then not_run="wpa2 stop"
         else
           cell_wpa2
-          if ! cleanup; then not_run="stop"; else cell_stop; fi
+          if ! cell_cleanup; then not_run="stop"; else cell_stop; fi
         fi ;;
   *)    echo "usage: $0 [open|wpa2|stop|all]"; exit 2 ;;
 esac

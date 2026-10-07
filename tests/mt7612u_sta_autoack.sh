@@ -74,6 +74,9 @@ DUT_PID=""
 CLEANED=no
 # shellcheck disable=SC2317  # reached through the traps below
 cleanup() {
+  # Ignored, not deferred: a second INT/TERM during the hand-back would
+  # otherwise end it half done (CLEANED is already set, so it cannot rerun).
+  trap '' INT TERM
   [ "$CLEANED" = yes ] && return 0
   CLEANED=yes
   # arm() runs in a command substitution, so the PIDs it starts are recorded

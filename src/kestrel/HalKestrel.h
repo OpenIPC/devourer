@@ -25,6 +25,8 @@ struct EfuseInfo {
   uint8_t thermal_a = 0x22;
   uint8_t thermal_b = 0x22;
   bool autoload_ok = false; /* header parsed to a plausible MAC */
+  uint16_t pci_vid = 0;     /* PCIe only: efuse copy of the PCI ids */
+  uint16_t pci_did = 0;
 };
 
 /* HalKestrel owns the low-level MAC bring-up for the Kestrel (G6) generation:
@@ -64,9 +66,29 @@ public:
    * FWDL -> set_enable_bb_rf -> THIS -> trx init. */
   void mac_sys_init();
 
-  /* intf_init (usb_init_8852b): LFPS filter, RX bulk size, per-endpoint NUMP.
+  /* intf_init: usb_init_8852{b,c} (LFPS filter, RX bulk size, per-endpoint
+   * NUMP) on USB; pcie_init (LTR + DMA channel enable + IO release) on PCIe.
    * Vendor order: runs AFTER trx init (+ feat_init, host-side no-op). */
+  void intf_init();
   void usb_intf_init() { usb_init(); }
+
+  /* ---- PCIe (RTL8852CE) host-interface bring-up, mirroring the vendor
+   * intf_pre_init / intf_init / intf_deinit slots with rtw89's
+   * mac_pre_init_ax / mac_post_init_ax / ops_deinit as the register-level
+   * source (the USB vendor drop lacks the generic _pcie.c). All MAC
+   * registers; the ring memory itself is the transport's (hci_setup). ---- */
+  /* intf_pre_init, after dmac_pre_init and before FWDL: PHY EQ/deglitch/LDO/
+   * wake glue, IO-recovery watchdogs, stop the HAXI DMA + poll idle, clear
+   * every ring index, mode_op (RXBD_PKT, bursts, tag count, WD intervals),
+   * program the rings (RtlAdapter::hci_setup), reset the BDRAM, then re-enable
+   * DMA with only the FWCMD channel (CH12) open. False on a poll timeout. */
+  bool pcie_pre_init();
+  /* intf_init: LTR (hardware-decided, 500 us space, 3.2 ms idle timer), open
+   * every TX DMA channel, release the WPDMA / PCIe IO stops. */
+  void pcie_init();
+  /* intf_deinit: LTR off, HAXI DMA stopped, ring indices cleared — run before
+   * the transport's DMA slab is unmapped. */
+  void pcie_deinit();
 
   /* The DMAC half of mac_trx_init: re-init the DLE to the NIC-mode (SCC)
    * quota, station scheduler, MPDU processor, security engine. Must run after
@@ -430,6 +452,15 @@ private:
 
   bool usb_pre_init();
   void usb_init(); /* runtime USB init (endpoint NUMP/burst) — usb_init_8852b */
+  /* pcie_pre_init pieces (rtw89 pci.c, 8852C branches only). */
+  void pcie_disable_eq();
+  void pcie_ctrl_dma_all(bool enable);
+  bool pcie_poll_dma_idle();
+  void pcie_clr_idx_all();
+  void pcie_mode_op();
+  bool pcie_rst_bdram();
+  void pcie_ctrl_txdma_ch(bool enable);
+  bool pcie_ltr_set(bool enable);
   /* BB/RF channel helpers (all over the wIndex=1 window). */
   void bb_rmw(uint32_t addr, uint32_t mask, uint32_t val); /* masked BB write */
   uint32_t bb_read(uint32_t addr, uint32_t mask); /* masked+shifted BB read */
@@ -489,6 +520,8 @@ public:
   Logger_t _logger;
   ChipVariant _variant;
   KestrelFw _fw; /* persistent: owns the CH12 H2C transport + IO-offload */
+  bool _pcie = false; /* !_device.is_usb(); declared after _device on purpose:
+                       * the mem-initializer reads it */
   int16_t _txpwr_dbm_q2 = 20 * 4; /* fixed BB TX power, s(9,2); 20 dBm default */
   int16_t _txpwr_offset_qdb = 0;  /* runtime offset (quarter-dB), sticky */
   bool _cca_on = false; /* carrier-sense TX default (8852C) / forced on */

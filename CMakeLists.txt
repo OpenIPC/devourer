@@ -32,15 +32,18 @@ option(DEVOURER_8733B         "RTL8731BU / RTL8733BU USB support"               
 # src/kestrel/CLAUDE.md).
 option(DEVOURER_KESTREL_8852B "RTL8852BU / 8832BU (Kestrel 11ax, G6)"           ON)
 option(DEVOURER_KESTREL_8852C "RTL8852CU / 8832CU (Kestrel 11ax, G6)"           ON)
-# PCIe transport (vfio-pci). Linux-only. The transport implements the HalMAC-
-# generation (Jaguar2/3) 88xx buffer-descriptor DMA rings; the RTL8821CE is
-# the only chip with a PCIe bring-up implemented + hardware-validated so far,
-# hence the DEVOURER_JAGUAR2_8821C requirement below. Other HalMAC PCIe parts
-# (RTL8822BE / RTL8822CE) could ride the same rings with per-chip HAL gates;
-# Jaguar1 PCIe parts (RTL8812AE/8821AE) CANNOT — they are pre-HalMAC silicon
-# with the older rtlwifi-style own-bit descriptor DMA, a different engine.
+# PCIe transport (vfio-pci). Linux-only. One transport, two DMA planes chosen
+# by PCI device id: the HalMAC-generation 88xx buffer-descriptor rings (the
+# RTL8821CE on the Jaguar2 HAL) and the AX HAXI TXBD/WD-page + RXQ/RPQ rings
+# (the RTL8852CE on the Kestrel HAL). Each plane compiles with its chip group,
+# so DEVOURER_PCIE=ON needs at least one of DEVOURER_JAGUAR2_8821C /
+# DEVOURER_KESTREL_8852C. Other HalMAC PCIe parts (RTL8822BE / RTL8822CE)
+# could ride the 88xx rings with per-chip HAL gates; the RTL8852BE is refused
+# (its PCIe power sequence and single-BDRAM table are unported); Jaguar1 PCIe
+# parts (RTL8812AE/8821AE) CANNOT — pre-HalMAC silicon with the older
+# rtlwifi-style own-bit descriptor DMA, a different engine.
 # OFF by default — libusb-only builds are bit-identical.
-option(DEVOURER_PCIE          "PCIe transport via vfio-pci (Linux; RTL8821CE)"  OFF)
+option(DEVOURER_PCIE          "PCIe transport via vfio-pci (Linux; RTL8821CE, RTL8852CE)"  OFF)
 # MediaTek MT7612U / MT7662U — the first non-Realtek part. Compiles the
 # src/mt7612u subtree (its own C++ library with a C ABI, landed unwired in #412)
 # into libdevourer along with Mt7612uRadio, the IRadio backend WiFiDriver
@@ -110,17 +113,17 @@ if(DEVOURER_PCIE)
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
         message(FATAL_ERROR "DEVOURER_PCIE=ON requires Linux (vfio-pci).")
     endif()
-    if(NOT DEVOURER_JAGUAR2_8821C)
+    if(NOT DEVOURER_JAGUAR2_8821C AND NOT DEVOURER_KESTREL_8852C)
         message(FATAL_ERROR
-            "DEVOURER_PCIE=ON requires DEVOURER_JAGUAR2_8821C=ON: the RTL8821CE "
-            "(Jaguar2 8821C) is currently the only chip with a PCIe bring-up "
-            "implemented and hardware-validated, so a PCIe build without it has "
-            "no usable chip. Not an architectural limit for the HalMAC families "
-            "— RTL8822BE (Jaguar2) / RTL8822CE (Jaguar3) could reuse the same "
-            "buffer-descriptor ring transport with per-chip HAL gates. Jaguar1 "
-            "PCIe parts (RTL8812AE/8821AE) are out of reach of this transport: "
-            "pre-HalMAC silicon with rtlwifi-style own-bit descriptor DMA, a "
-            "different engine entirely.")
+            "DEVOURER_PCIE=ON requires DEVOURER_JAGUAR2_8821C=ON (RTL8821CE, the "
+            "88xx buffer-descriptor DMA plane) or DEVOURER_KESTREL_8852C=ON "
+            "(RTL8852CE, the AX HAXI DMA plane) — a PCIe build without either "
+            "has no usable chip. Not an architectural limit for the HalMAC "
+            "families — RTL8822BE (Jaguar2) / RTL8822CE (Jaguar3) could reuse "
+            "the 88xx rings with per-chip HAL gates. Jaguar1 PCIe parts "
+            "(RTL8812AE/8821AE) are out of reach of this transport: pre-HalMAC "
+            "silicon with rtlwifi-style own-bit descriptor DMA, a different "
+            "engine entirely.")
     endif()
 endif()
 
@@ -412,7 +415,13 @@ endif()
 # --- PCIe transport (vfio-pci; see src/PcieTransport.h) ---
 if(DEVOURER_PCIE)
     target_sources(devourer PRIVATE
-        src/PcieTransport.cpp src/PcieTransport.h)
+        src/PcieTransport.cpp src/PcieTransport.h src/PcieDmaPlane.h)
+    if(DEVOURER_JAGUAR2_8821C)
+        target_sources(devourer PRIVATE src/PcieDma88xx.cpp src/PcieDma88xx.h)
+    endif()
+    if(DEVOURER_KESTREL_8852C)
+        target_sources(devourer PRIVATE src/PcieDmaAx.cpp src/PcieDmaAx.h)
+    endif()
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_PCIE=1)
 endif()
 
@@ -605,8 +614,8 @@ if(DEVOURER_KESTREL)
 endif()
 
 
-# pcieprobe — staged PCIe bring-up driver for the RTL8821CE milestones
-# (chip-id/MMIO sanity -> power-on + EFUSE -> firmware DLFW). rxdemo's
+# pcieprobe — staged PCIe bring-up driver for the RTL8821CE / RTL8852CE
+# milestones (id/MMIO sanity -> power-on + EFUSE -> firmware download). rxdemo's
 # DEVOURER_PCIE_BDF branch is the full-RX consumer; this probe validates the
 # layers below it one at a time. Linux/vfio only.
 if(DEVOURER_PCIE)

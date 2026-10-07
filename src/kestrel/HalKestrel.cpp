@@ -24,7 +24,15 @@ void delay_us(uint32_t us) {
 
 HalKestrel::HalKestrel(RtlAdapter device, Logger_t logger, ChipVariant variant)
     : _device{std::move(device)}, _logger{std::move(logger)},
-      _variant{variant}, _fw{_device, _logger, variant} {}
+      _variant{variant}, _fw{_device, _logger, variant},
+      _pcie{!_device.is_usb()} {}
+
+void HalKestrel::intf_init() {
+  if (_pcie)
+    pcie_init();
+  else
+    usb_init();
+}
 
 void HalKestrel::set32(uint16_t reg, uint32_t bits) {
   _device.rtw_write32(reg, _device.rtw_read32(reg) | bits);
@@ -155,12 +163,288 @@ void HalKestrel::usb_init() {
                 mode == r::MAC_AX_USB3 ? 3 : mode == r::MAC_AX_USB2 ? 2 : 1);
 }
 
+/* ---- PCIe host-interface bring-up (RTL8852CE) ----------------------------
+ * Register-level source: rtw89 pci.c (rtw89_pci_ops_mac_pre_init_ax /
+ * mac_post_init_ax / ops_deinit, 8852C branches) cross-checked against the
+ * vendor mac_ax _pcie_8852c.c. The ring memory (TXBD/WD/RXQ/RPQ) is the
+ * transport's; this is everything the MAC needs programmed around it. */
+
+namespace {
+/* PCIe config space through the MAC's MIO window (mio_r32_pcie_8852c): the
+ * HAL has no config-space handle, and the vendor reads link status this way
+ * too. Address = page[12:8] | byte[7:0], dword-aligned. */
+constexpr uint16_t R_AX_PCIE_MIO_INTF = 0x00E4;
+constexpr uint16_t R_AX_PCIE_MIO_INTD = 0x00E8;
+constexpr uint32_t B_AX_PCIE_MIO_RE = 1u << 12;
+constexpr uint32_t B_AX_PCIE_MIO_BYIOREG = 1u << 13;
+constexpr uint32_t B_AX_PCIE_AUXCLK_GATE = 1u << 11; /* R_AX_SYS_SDIO_CTRL */
+constexpr uint32_t PCIE_CFG_LINK_STATUS = 0x80; /* LnkCtl/LnkSta dword */
+constexpr uint32_t PCIE_GEN2_SPEED = 2;
+} /* namespace */
+
+void HalKestrel::pcie_disable_eq() {
+  /* rtw89_pci_disable_eq (8852C only): program the PHY out-of-band-signal
+   * sense level from the live link's measurement, for both Gen1 and Gen2
+   * PHYs, once. Skips if both OOBS_SEL bits are already set (a prior run).
+   * ASPM is parked during the PHY access. */
+  const uint32_t aspm = _device.rtw_read32(r::R_AX_PCIE_MIX_CFG_V1);
+  _device.rtw_write32(r::R_AX_PCIE_MIX_CFG_V1, aspm & ~r::B_AX_ASPM_CTRL_MASK);
+  const uint16_t g1 = _device.rtw_read16(r::R_RAC_DIRECT_OFFSET_G1 +
+                                         r::RAC_ANA09 * r::RAC_MULT);
+  const uint16_t g2 = _device.rtw_read16(r::R_RAC_DIRECT_OFFSET_G2 +
+                                         r::RAC_ANA09 * r::RAC_MULT);
+  if ((g1 & r::BAC_OOBS_SEL) && (g2 & r::BAC_OOBS_SEL)) {
+    _device.rtw_write32(r::R_AX_PCIE_MIX_CFG_V1, aspm);
+    return;
+  }
+  /* Link speed from config space via MIO: LnkSta speed = dword 0x80 [19:16]. */
+  uint32_t speed = 0;
+  {
+    set32(r::R_AX_SYS_SDIO_CTRL, B_AX_PCIE_AUXCLK_GATE);
+    uint32_t v = (PCIE_CFG_LINK_STATUS & 0xff) |
+                 (((PCIE_CFG_LINK_STATUS >> 8) & 0x1f) << 16) | B_AX_PCIE_MIO_RE;
+    _device.rtw_write32(R_AX_PCIE_MIO_INTF, v);
+    _device.rtw_write32(R_AX_PCIE_MIO_INTF, v | B_AX_PCIE_MIO_BYIOREG);
+    bool ok = false;
+    for (int i = 0; i < 1000; i++) {
+      if (!(_device.rtw_read32(R_AX_PCIE_MIO_INTF) & B_AX_PCIE_MIO_BYIOREG)) {
+        ok = true;
+        break;
+      }
+      delay_us(1);
+    }
+    if (ok)
+      speed = (_device.rtw_read32(R_AX_PCIE_MIO_INTD) >> 16) & 0xf;
+    else
+      _device.rtw_write32(R_AX_PCIE_MIO_INTF, v & ~B_AX_PCIE_MIO_RE);
+    clr32(r::R_AX_SYS_SDIO_CTRL, B_AX_PCIE_AUXCLK_GATE);
+  }
+  if (speed == 0) {
+    _logger->warn("Kestrel PCIe: link speed unreadable via MIO — EQ disable "
+                  "skipped");
+    _device.rtw_write32(r::R_AX_PCIE_MIX_CFG_V1, aspm);
+    return;
+  }
+  const uint16_t phy = speed >= PCIE_GEN2_SPEED ? r::R_RAC_DIRECT_OFFSET_G2
+                                                : r::R_RAC_DIRECT_OFFSET_G1;
+  auto w16 = [&](uint16_t reg, uint16_t v) { _device.rtw_write16(reg, v); };
+  auto s16 = [&](uint16_t reg, uint16_t bits) {
+    _device.rtw_write16(reg, _device.rtw_read16(reg) | bits);
+  };
+  s16(phy + r::RAC_ANA0D * r::RAC_MULT, r::BAC_RX_TEST_EN);
+  w16(phy + r::RAC_ANA10 * r::RAC_MULT, r::ADDR_SEL_PINOUT_DIS_VAL);
+  s16(phy + r::RAC_ANA19 * r::RAC_MULT, r::B_PCIE_BIT_RD_SEL);
+  const uint16_t level =
+      (_device.rtw_read16(phy + r::RAC_ANA1F * r::RAC_MULT) >> r::OOBS_LEVEL_SH) &
+      r::OOBS_LEVEL_MSK;
+  const uint16_t oobs = static_cast<uint16_t>(level << r::OOBS_SEN_SH);
+  w16(r::R_RAC_DIRECT_OFFSET_G1 + r::RAC_ANA03 * r::RAC_MULT, oobs);
+  s16(r::R_RAC_DIRECT_OFFSET_G1 + r::RAC_ANA09 * r::RAC_MULT, r::BAC_OOBS_SEL);
+  w16(r::R_RAC_DIRECT_OFFSET_G2 + r::RAC_ANA03 * r::RAC_MULT, oobs);
+  s16(r::R_RAC_DIRECT_OFFSET_G2 + r::RAC_ANA09 * r::RAC_MULT, r::BAC_OOBS_SEL);
+  _device.rtw_write32(r::R_AX_PCIE_MIX_CFG_V1, aspm);
+  _logger->info("Kestrel PCIe: PHY EQ disabled (gen{} link, oobs level {})",
+                speed, level);
+}
+
+void HalKestrel::pcie_ctrl_dma_all(bool enable) {
+  /* rtw89_pci_ctrl_dma_all: STOP_AXI_MST + the TX/RX HCI enables. */
+  if (enable) {
+    clr32(r::R_AX_HAXI_INIT_CFG1, r::B_AX_STOP_AXI_MST);
+    set32(r::R_AX_HAXI_INIT_CFG1, r::B_AX_TXHCI_EN_V1 | r::B_AX_RXHCI_EN_V1);
+  } else {
+    set32(r::R_AX_HAXI_INIT_CFG1, r::B_AX_STOP_AXI_MST);
+    clr32(r::R_AX_HAXI_INIT_CFG1, r::B_AX_TXHCI_EN_V1 | r::B_AX_RXHCI_EN_V1);
+  }
+}
+
+bool HalKestrel::pcie_poll_dma_idle() {
+  /* rtw89_pci_poll_dma_all_idle: TX channel busy (BUSY1 [18:8], BUSY2 CH10/
+   * 11), then RX (BUSY3 RXQ/RPQ). 10 us × 10 = the rtw89 100 us window. */
+  auto idle = [&](uint16_t reg, uint32_t mask, const char *what) {
+    for (int i = 0; i < 10; i++) {
+      if ((_device.rtw_read32(reg) & mask) == 0)
+        return true;
+      delay_us(10);
+    }
+    _logger->error("Kestrel PCIe: {} DMA busy (0x{:04x}=0x{:08x})", what, reg,
+                   _device.rtw_read32(reg));
+    return false;
+  };
+  return idle(r::R_AX_HAXI_DMA_BUSY1, r::HAXI_DMA_BUSY1_CHANS, "txdma ch") &&
+         idle(r::R_AX_HAXI_DMA_BUSY2, r::HAXI_DMA_BUSY2_CHANS, "txdma ch10/11") &&
+         idle(r::R_AX_HAXI_DMA_BUSY3, r::HAXI_DMA_BUSY3_RX, "rxdma");
+}
+
+void HalKestrel::pcie_clr_idx_all() {
+  /* rtw89_pci_clr_idx_all_ax (8852C): every TX channel incl. ACH4-7 and
+   * CH10/11, plus RXQ + RPQ. */
+  set32(r::R_AX_TXBD_RWPTR_CLR1, r::TXBD_RWPTR_CLR1_ALL);
+  set32(r::R_AX_TXBD_RWPTR_CLR2_V1, r::TXBD_RWPTR_CLR2_ALL);
+  set32(r::R_AX_RXBD_RWPTR_CLR_V1, r::RXBD_RWPTR_CLR_ALL);
+}
+
+void HalKestrel::pcie_mode_op() {
+  /* rtw89_pci_mode_op, 8852C (rtw8852c_pci_info): BD trunc mode needs no
+   * write here; RXBD_PKT (one packet per BD); TX burst 256 B / RX burst
+   * 128 B (V1 encodings); 8 DMA tags; WD DMA intervals 256 ns; and the
+   * TRUNC-mode address-info selects (host 8-byte addr-info select set, WD
+   * addr-info length clear — rtw89 does this even though the 8852C fills
+   * 6-byte v1 entries). */
+  clr32(r::R_AX_HAXI_INIT_CFG1, r::B_AX_RXBD_MODE_V1);
+  field32(r::R_AX_HAXI_INIT_CFG1, r::MAC_AX_TX_BURST_V1_256B,
+          r::B_AX_HAXI_MAX_TXDMA_MSK, r::B_AX_HAXI_MAX_TXDMA_SH);
+  field32(r::R_AX_HAXI_INIT_CFG1, r::MAC_AX_RX_BURST_V1_128B,
+          r::B_AX_HAXI_MAX_RXDMA_MSK, r::B_AX_HAXI_MAX_RXDMA_SH);
+  field32(r::R_AX_HAXI_EXP_CTRL, r::MAC_AX_TAG_NUM_8, r::B_AX_MAX_TAG_NUM_V1_MSK,
+          r::B_AX_MAX_TAG_NUM_V1_SH);
+  field32(r::R_AX_HAXI_INIT_CFG1, r::MAC_AX_WD_DMA_INTVL_256NS,
+          r::B_AX_WD_ITVL_IDLE_V1_MSK, r::B_AX_WD_ITVL_IDLE_V1_SH);
+  field32(r::R_AX_HAXI_INIT_CFG1, r::MAC_AX_WD_DMA_INTVL_256NS,
+          r::B_AX_WD_ITVL_ACT_V1_MSK, r::B_AX_WD_ITVL_ACT_V1_SH);
+  set32(r::R_AX_TX_ADDRESS_INFO_MODE_SETTING, r::B_AX_HOST_ADDR_INFO_8B_SEL);
+  clr32(r::R_AX_PKTIN_SETTING, r::B_AX_WD_ADDR_INFO_LENGTH);
+}
+
+bool HalKestrel::pcie_rst_bdram() {
+  set32(r::R_AX_HAXI_INIT_CFG1, r::B_AX_RST_BDRAM);
+  for (int i = 0; i < 100; i++) {
+    if (!(_device.rtw_read32(r::R_AX_HAXI_INIT_CFG1) & r::B_AX_RST_BDRAM))
+      return true;
+    delay_us(1);
+  }
+  _logger->error("Kestrel PCIe: BDRAM reset did not clear (0x1000=0x{:08x})",
+                 _device.rtw_read32(r::R_AX_HAXI_INIT_CFG1));
+  return false;
+}
+
+void HalKestrel::pcie_ctrl_txdma_ch(bool enable) {
+  /* rtw89_pci_ctrl_txdma_ch_ax: every TX channel's STOP bit (STOP1 [18:8],
+   * STOP2 CH10/11). */
+  if (enable) {
+    clr32(r::R_AX_HAXI_DMA_STOP1, r::HAXI_DMA_STOP1_CHANS);
+    clr32(r::R_AX_HAXI_DMA_STOP2, r::HAXI_DMA_STOP2_CHANS);
+  } else {
+    set32(r::R_AX_HAXI_DMA_STOP1, r::HAXI_DMA_STOP1_CHANS);
+    set32(r::R_AX_HAXI_DMA_STOP2, r::HAXI_DMA_STOP2_CHANS);
+  }
+}
+
+bool HalKestrel::pcie_ltr_set(bool enable) {
+  /* rtw89_pci_ltr_set_v1. A register reading 0xFFFFFFFF/0xEAEAEAEA means the
+   * LTR block is unreachable — refuse rather than program garbage. */
+  auto bad = [](uint32_t v) { return v == 0xFFFFFFFFu || v == 0xEAEAEAEAu; };
+  for (uint16_t reg : {r::R_AX_LTR_CTRL_0, r::R_AX_LTR_CTRL_1, r::R_AX_LTR_DEC_CTRL,
+                       r::R_AX_LTR_LATENCY_IDX3, r::R_AX_LTR_LATENCY_IDX0}) {
+    if (bad(_device.rtw_read32(reg))) {
+      _logger->error("Kestrel PCIe: LTR register 0x{:04x} unreadable", reg);
+      return false;
+    }
+  }
+  uint32_t dec = _device.rtw_read32(r::R_AX_LTR_DEC_CTRL);
+  if (!enable) {
+    dec &= ~(r::B_AX_LTR_HW_DEC_EN | r::B_AX_LTR_FW_DEC_EN | r::B_AX_LTR_DRV_DEC_EN |
+             (r::B_AX_LTR_IDX_DRV_MSK << r::B_AX_LTR_IDX_DRV_SH));
+    dec |= (r::PCIE_LTR_IDX_IDLE << r::B_AX_LTR_IDX_DRV_SH) | r::B_AX_LTR_REQ_DRV;
+  } else {
+    dec |= r::B_AX_LTR_HW_DEC_EN;
+  }
+  dec = r::set_clr_word(dec, r::PCI_LTR_SPC_500US, r::B_AX_LTR_SPACE_IDX_V1_MSK,
+                        r::B_AX_LTR_SPACE_IDX_V1_SH);
+  if (enable)
+    set32(r::R_AX_LTR_CTRL_0, r::B_AX_LTR_WD_NOEMP_CHK_V1 | r::B_AX_LTR_HW_EN);
+  field32(r::R_AX_LTR_CTRL_0, r::PCI_LTR_IDLE_TIMER_3_2MS,
+          r::B_AX_LTR_IDLE_TIMER_IDX_MSK, r::B_AX_LTR_IDLE_TIMER_IDX_SH);
+  field32(r::R_AX_LTR_CTRL_1, r::LTR_RX_TH_8852C, r::B_AX_LTR_RX0_TH_MSK,
+          r::B_AX_LTR_RX0_TH_SH);
+  field32(r::R_AX_LTR_CTRL_1, r::LTR_RX_TH_8852C, r::B_AX_LTR_RX1_TH_MSK,
+          r::B_AX_LTR_RX1_TH_SH);
+  _device.rtw_write32(r::R_AX_LTR_DEC_CTRL, dec);
+  _device.rtw_write32(r::R_AX_LTR_LATENCY_IDX3, r::LTR_IDLE_LATENCY_8852C);
+  _device.rtw_write32(r::R_AX_LTR_LATENCY_IDX0, r::LTR_ACTIVE_LATENCY_8852C);
+  return true;
+}
+
+bool HalKestrel::pcie_pre_init() {
+  /* rtw89_pci_ops_mac_pre_init_ax, the 8852C branches in order. Runs after
+   * dmac_pre_init (HAXI DMA_MODE=PCIE_1B, HCI enables) and before FWDL. */
+  if (_variant != ChipVariant::C8852C) {
+    _logger->error("Kestrel PCIe: pre-init is ported for the 8852C only");
+    return false;
+  }
+  pcie_disable_eq();
+  /* deglitch: clear RAC_ANA24[11:8] on both PHYs (16-bit registers). */
+  for (uint16_t phy : {r::R_RAC_DIRECT_OFFSET_G1, r::R_RAC_DIRECT_OFFSET_G2}) {
+    const uint16_t reg = phy + r::RAC_ANA24 * r::RAC_MULT;
+    _device.rtw_write16(reg, _device.rtw_read16(reg) & ~r::B_AX_DEGLITCH);
+  }
+  clr32(r::R_AX_SYS_SDIO_CTRL, r::B_AX_PCIE_DIS_L2_CTRL_LDO_HCI); /* hci_ldo */
+  set32(r::R_AX_HCI_OPT_CTRL, r::B_AX_WAKE_CTRL);                 /* power_wake */
+  set32(r::R_AX_PCIE_BG_CLR, r::B_AX_BG_CLR_ASYNC_M3);            /* autoload_hang */
+  clr32(r::R_AX_PCIE_BG_CLR, r::B_AX_BG_CLR_ASYNC_M3);
+  /* l12_vmain / gen2_force_ib are CAV-cut only; the plugged modules are cut 1
+   * (CBV), so they are deliberately not transcribed. */
+  clr32(r::R_AX_PCIE_PS_CTRL_V1, r::B_AX_SEL_REQ_ENTR_L1);        /* l1_ent_lat */
+  set32(r::R_AX_PCIE_PS_CTRL_V1, r::B_AX_DMAC0_EXIT_L1_EN);       /* wd_exit_l1 */
+  /* set_io_rcy: 6 ms analog watchdogs on M1/M2/E0, S1 off. */
+  _device.rtw_write32(r::R_AX_PCIE_WDT_TIMER_M1, r::MAC_AX_IO_RCY_ANA_TMR_6MS);
+  _device.rtw_write32(r::R_AX_PCIE_WDT_TIMER_M2, r::MAC_AX_IO_RCY_ANA_TMR_6MS);
+  _device.rtw_write32(r::R_AX_PCIE_WDT_TIMER_E0, r::MAC_AX_IO_RCY_ANA_TMR_6MS);
+  set32(r::R_AX_PCIE_IO_RCY_M1, r::B_AX_PCIE_IO_RCY_WDT_MODE);
+  set32(r::R_AX_PCIE_IO_RCY_M2, r::B_AX_PCIE_IO_RCY_WDT_MODE);
+  set32(r::R_AX_PCIE_IO_RCY_E0, r::B_AX_PCIE_IO_RCY_WDT_MODE);
+  clr32(r::R_AX_PCIE_IO_RCY_S1, r::B_AX_PCIE_IO_RCY_WDT_MODE);
+
+  set32(r::R_AX_HAXI_DMA_STOP1, r::B_AX_STOP_WPDMA);
+  pcie_ctrl_dma_all(false);
+  if (!pcie_poll_dma_idle())
+    return false;
+  pcie_clr_idx_all();
+  pcie_mode_op();
+  /* Ring base/num/BDRAM registers + host indices — the transport's memory. */
+  _device.hci_setup();
+  if (!pcie_rst_bdram())
+    return false;
+  /* Only the FWCMD channel open until the firmware is up. */
+  pcie_ctrl_txdma_ch(false);
+  clr32(r::R_AX_HAXI_DMA_STOP1, r::B_AX_STOP_CH12);
+  pcie_ctrl_dma_all(true);
+  _logger->info("Kestrel PCIe: HAXI pre-init done (DMA up, CH12 open)");
+  return true;
+}
+
+void HalKestrel::pcie_init() {
+  /* rtw89_pci_ops_mac_post_init_ax: LTR on, every TX channel open, release
+   * the WPDMA + PCIe IO stops. */
+  if (!pcie_ltr_set(true))
+    _logger->warn("Kestrel PCIe: LTR not enabled");
+  pcie_ctrl_txdma_ch(true);
+  clr32(r::R_AX_HAXI_DMA_STOP1, r::B_AX_STOP_WPDMA | r::B_AX_STOP_PCIEIO);
+  _logger->info("Kestrel PCIe: post-init done (LTR, all TX channels open)");
+}
+
+void HalKestrel::pcie_deinit() {
+  /* rtw89_pci_ops_deinit: LTR off, DMA stopped, indices cleared. */
+  pcie_ltr_set(false);
+  pcie_ctrl_dma_all(false);
+  pcie_clr_idx_all();
+  _logger->info("Kestrel PCIe: HAXI DMA stopped");
+}
+
 bool HalKestrel::power_on_8852c() {
   namespace r = kestrel::reg;
   /* mac_pwr_on_usb_8852c (pwr_seq_func_8852c.c:296), transcribed verbatim.
    * The chip-generic mac_pwr_switch prologue (env mode, BOOT_MODE exit,
-   * force-off of a half-on MAC) runs in power_on() before the dispatch. */
-  set32(r::R_AX_LDO_AON_CTRL0, r::B_AX_PD_REGU_L);            /* 0x218[16]=1 */
+   * force-off of a half-on MAC) runs in power_on() before the dispatch.
+   * On PCIe this is mac_pwr_on_nic_pcie_8852c (:834), which differs in
+   * exactly three places, each marked "PCIe:" below. */
+  const bool pcie = !_device.is_usb();
+  /* PCIe: PD_REGU_L only when the HCI pad strap is PCIE_USB. */
+  const uint32_t hci_sel =
+      (_device.rtw_read32(r::R_AX_SYS_STATUS1) >> r::B_AX_PAD_HCI_SEL_V2_SH) &
+      r::B_AX_PAD_HCI_SEL_V2_MSK;
+  if (!pcie || hci_sel == r::MAC_AX_HCI_SEL_PCIE_USB)
+    set32(r::R_AX_LDO_AON_CTRL0, r::B_AX_PD_REGU_L);          /* 0x218[16]=1 */
   clr32(r::R_AX_SYS_PW_CTRL,
         r::B_AX_AFSM_WLSUS_EN | r::B_AX_AFSM_PCIE_SUS_EN);    /* 0x04[12:11]=0 */
   set32(r::R_AX_SYS_PW_CTRL, r::B_AX_DIS_WLBT_PDNSUSEN_SOPC); /* 0x04[18]=1 */
@@ -188,6 +472,8 @@ bool HalKestrel::power_on_8852c() {
   plat(true);
   plat(false);
   plat(true);
+  if (pcie) /* PCIe: 0x70[12]=0 */
+    clr32(r::R_AX_SYS_SDIO_CTRL, r::B_AX_PCIE_CALIB_EN);
 
   /* CMAC1 power off (the 8852C is a 2-CMAC die; devourer runs CMAC0 only). */
   clr32(r::R_AX_SYS_ISO_CTRL_EXTEND, r::B_AX_CMAC1_FEN);          /* 0x80[30]=0 */
@@ -220,6 +506,10 @@ bool HalKestrel::power_on_8852c() {
   std::this_thread::sleep_for(std::chrono::milliseconds(1));
   clr32(r::R_AX_SYS_ISO_CTRL, 1u << 14);                        /* 0x00[14]=0 */
   clr32(r::R_AX_PMC_DBG_CTRL2, r::B_AX_SYSON_DIS_PMCR_AX_WRMSK); /* 0xCC[2]=0 */
+  if (pcie) /* PCIe: GPIO16/17/18 internal weak pull-low */
+    set32(r::R_AX_GPIO0_15_EECS_EESK_LED1_PULL_LOW_EN,
+          r::B_AX_GPIO16_PULL_LOW_EN | r::B_AX_GPIO17_PULL_LOW_EN |
+              r::B_AX_GPIO18_PULL_LOW_EN);
 
   /* The 8852C pwr-on tail enables the DMAC (0x8400) + CMAC0 (0xC000) + the
    * LED1 pinmux — where 8852B defers func-en to mac_sys_init (the later
@@ -229,13 +519,17 @@ bool HalKestrel::power_on_8852c() {
   field32(r::R_AX_LED1_FUNC_SEL, 0x1, r::B_AX_PINMUX_EESK_FUNC_SEL_V1_MSK,
           r::B_AX_PINMUX_EESK_FUNC_SEL_V1_SH); /* 0x2DC[27:24]=1 */
 
-  _logger->info("Kestrel: MAC powered on (8852C sequence)");
+  _logger->info("Kestrel: MAC powered on (8852C {} sequence, hci_sel={})",
+                pcie ? "PCIe" : "USB", hci_sel);
   return true;
 }
 
 bool HalKestrel::power_on() {
-  if (!_device.is_usb()) {
-    _logger->error("Kestrel: only USB power-on is ported");
+  /* USB for both dies; PCIe for the 8852C only (mac_pwr_on_nic_pcie_8852c —
+   * three deltas inside power_on_8852c). The 8852B PCIe sequence is unported
+   * and untested, so keep refusing it rather than run the USB one. */
+  if (!_device.is_usb() && _variant != ChipVariant::C8852C) {
+    _logger->error("Kestrel: PCIe power-on is ported for the 8852C only");
     return false;
   }
   /* mac_set_dut_env_mode (init.c:26, the first thing mac_hal_init does):
@@ -544,10 +838,11 @@ uint8_t HalKestrel::read_mss_index() {
 
 bool HalKestrel::download_firmware(uint8_t cut) {
   /* mac_hal_init order (init.c:406-434): hci_func_en -> dmac_pre_init (DLFW
-   * DLE/HFC) -> intf_pre_init (usb_pre_init) -> chk_sec_rec -> fwdl. */
+   * DLE/HFC) -> intf_pre_init (usb_pre_init / pcie_pre_init) -> chk_sec_rec
+   * -> fwdl. */
   if (!_fw.fw_pre_init())
     return false;
-  if (!usb_pre_init())
+  if (!(_pcie ? pcie_pre_init() : usb_pre_init()))
     return false;
   /* mac_chk_sec_rec (secure_boot.c:61): is_sec_ic from OTP key cell 0x5ED[7].
    * _security_rec = bit7; sec_rec==0 => secure IC (is_sec_ic=1). */
@@ -599,33 +894,51 @@ bool HalKestrel::dle_init_nic() {
    * the 8852B set omits; without it the fw can't store a TX completion report
    * and injected frames never release (the ~203-frame TX stall). */
   const bool c = (_variant == ChipVariant::C8852C);
-  const uint16_t wde_lnk = c ? r::SCC_WDE_LNK_PAGE_8852C : r::SCC_WDE_LNK_PAGE;
-  const uint16_t wde_unlnk =
-      c ? r::SCC_WDE_UNLNK_PAGE_8852C : r::SCC_WDE_UNLNK_PAGE;
-  const uint16_t ple_lnk = c ? r::SCC_PLE_LNK_PAGE_8852C : r::SCC_PLE_LNK_PAGE;
-  const uint16_t wde_hif = c ? r::SCC_WDE_QT_HIF_8852C : r::SCC_WDE_QT_HIF;
-  const uint16_t wde_wcpu = c ? r::SCC_WDE_QT_WCPU_8852C : r::SCC_WDE_QT_WCPU;
-  const uint16_t wde_cpuio = c ? r::SCC_WDE_QT_CPU_IO_8852C : r::SCC_WDE_QT_CPU_IO;
+  /* The 8852C PCIe SCC row (dle_mem_pcie_8852c: wde_size19 / ple_size19 /
+   * wde_qt18 / ple_qt46,47) is a different budget from either USB row — the
+   * host-interface pages are 64 B WDE × 3328 with a 3228-page HIF quota. */
+  const bool pc = c && _pcie;
+  const uint16_t wde_lnk = pc  ? r::PCIE_SCC_WDE_LNK_PAGE_8852C
+                           : c ? r::SCC_WDE_LNK_PAGE_8852C
+                               : r::SCC_WDE_LNK_PAGE;
+  const uint16_t wde_unlnk = pc  ? r::PCIE_SCC_WDE_UNLNK_PAGE_8852C
+                             : c ? r::SCC_WDE_UNLNK_PAGE_8852C
+                                 : r::SCC_WDE_UNLNK_PAGE;
+  const uint16_t ple_lnk = pc  ? r::PCIE_SCC_PLE_LNK_PAGE_8852C
+                           : c ? r::SCC_PLE_LNK_PAGE_8852C
+                               : r::SCC_PLE_LNK_PAGE;
+  const uint16_t wde_hif = pc  ? r::PCIE_SCC_WDE_QT_HIF_8852C
+                           : c ? r::SCC_WDE_QT_HIF_8852C
+                               : r::SCC_WDE_QT_HIF;
+  const uint16_t wde_wcpu = pc  ? r::PCIE_SCC_WDE_QT_WCPU_8852C
+                            : c ? r::SCC_WDE_QT_WCPU_8852C
+                                : r::SCC_WDE_QT_WCPU;
+  const uint16_t wde_cpuio = pc  ? r::PCIE_SCC_WDE_QT_CPU_IO_8852C
+                             : c ? r::SCC_WDE_QT_CPU_IO_8852C
+                                 : r::SCC_WDE_QT_CPU_IO;
   /* The 8852C has a DEDICATED USB2 DLE quota (dle.c selects dle_mem_usb2_8852c
    * vs dle_mem_usb3_8852c by get_usb_mode). On a USB2 8832CU the USB3 quota
    * caps the RX-DMA PLE pool and wedges RX (burst-then-idle). Detect the live
    * mode the same way usb_init does (USB_STATUS_V1: R_USB2_SEL=SuperSpeed,
    * else MODE_HS=USB2). */
   bool usb2 = false;
-  if (c) {
+  if (c && !_pcie) {
     const uint32_t st = _device.rtw_read32(r::R_AX_USB_STATUS_V1);
     usb2 = !(st & r::B_AX_R_USB2_SEL) && (st & r::B_AX_MODE_HS);
   }
-  const uint16_t *ple_min = !c ? r::SCC_PLE_MIN
-                          : usb2 ? r::SCC_PLE_MIN_8852C_USB2
-                                 : r::SCC_PLE_MIN_8852C;
-  const uint16_t *ple_max = !c ? r::SCC_PLE_MAX
-                          : usb2 ? r::SCC_PLE_MAX_8852C_USB2
-                                 : r::SCC_PLE_MAX_8852C;
+  const uint16_t *ple_min = !c   ? r::SCC_PLE_MIN
+                            : pc   ? r::PCIE_SCC_PLE_MIN_8852C
+                            : usb2 ? r::SCC_PLE_MIN_8852C_USB2
+                                   : r::SCC_PLE_MIN_8852C;
+  const uint16_t *ple_max = !c   ? r::SCC_PLE_MAX
+                            : pc   ? r::PCIE_SCC_PLE_MAX_8852C
+                            : usb2 ? r::SCC_PLE_MAX_8852C_USB2
+                                   : r::SCC_PLE_MAX_8852C;
   const int ple_qn = c ? 12 : 11; /* 8852C writes through Q11 (tx_rpt) */
   if (c)
     _logger->info("Kestrel DLE: 8852C SCC quota = {} (RX-DMA Q6 max {})",
-                  usb2 ? "USB2" : "USB3", usb2 ? 1646 : 178);
+                  pc ? "PCIe" : usb2 ? "USB2" : "USB3",
+                  pc ? 1199 : usb2 ? 1646 : 178);
   clr32(r::R_AX_DMAC_FUNC_EN, r::B_AX_DLE_WDE_EN | r::B_AX_DLE_PLE_EN);
 
   /* WDE: 64B page, bound 0, free = lnk_pge_num. */
@@ -725,18 +1038,42 @@ bool HalKestrel::hfc_init_nic() {
   const uint16_t pub2 = c ? r::R_AX_PUB_PAGE_CTRL2_V1 : r::R_AX_PUB_PAGE_CTRL2;
   const uint16_t wp1 = c ? r::R_AX_WP_PAGE_CTRL1_V1 : r::R_AX_WP_PAGE_CTRL1;
   const uint16_t wp2 = c ? r::R_AX_WP_PAGE_CTRL2_V1 : r::R_AX_WP_PAGE_CTRL2;
-  const uint16_t ch_min = c ? r::HFC_NIC_CH_MIN_8852C : r::HFC_NIC_CH_MIN;
-  const uint16_t ch_max = c ? r::HFC_NIC_CH_MAX_8852C : r::HFC_NIC_CH_MAX;
-  const uint16_t pub_g0 = c ? r::HFC_NIC_PUB_G0_8852C : r::HFC_NIC_PUB_G0;
-  const uint16_t pub_max = c ? r::HFC_NIC_PUB_MAX_8852C : r::HFC_NIC_PUB_MAX;
-  const uint16_t wp07 = c ? r::HFC_NIC_WP_CH07_PREC_8852C : r::HFC_NIC_WP_CH07_PREC;
-  const uint16_t wp811 =
-      c ? r::HFC_NIC_WP_CH811_PREC_8852C : r::HFC_NIC_WP_CH811_PREC;
+  /* PCIe (8852CE) runs the vendor's PCIe SCC HFC row: {13,1614} on every
+   * channel including ACH4-7 / B1MGQ / B1HIQ (group 1), public 1614/1614/
+   * 3228, hfc_preccfg_pcie (CH0-11 pre-cost 2, H2C 40, WP 0/0) with the
+   * H2C and WP full conditions at X1, and MODE = POH — the host owns the
+   * pages until the release report, not store-and-forward. */
+  const bool pc = c && _pcie;
+  const uint16_t ch_min = pc  ? r::HFC_PCIE_CH_MIN_8852C
+                          : c ? r::HFC_NIC_CH_MIN_8852C
+                              : r::HFC_NIC_CH_MIN;
+  const uint16_t ch_max = pc  ? r::HFC_PCIE_CH_MAX_8852C
+                          : c ? r::HFC_NIC_CH_MAX_8852C
+                              : r::HFC_NIC_CH_MAX;
+  const uint16_t pub_g0 = pc  ? r::HFC_PCIE_PUB_G0_8852C
+                          : c ? r::HFC_NIC_PUB_G0_8852C
+                              : r::HFC_NIC_PUB_G0;
+  const uint16_t pub_g1 = pc ? r::HFC_PCIE_PUB_G1_8852C : r::HFC_NIC_PUB_G1;
+  const uint16_t pub_max = pc  ? r::HFC_PCIE_PUB_MAX_8852C
+                           : c ? r::HFC_NIC_PUB_MAX_8852C
+                               : r::HFC_NIC_PUB_MAX;
+  const uint16_t wp07 = pc  ? r::HFC_PCIE_WP_PREC
+                        : c ? r::HFC_NIC_WP_CH07_PREC_8852C
+                            : r::HFC_NIC_WP_CH07_PREC;
+  const uint16_t wp811 = pc  ? r::HFC_PCIE_WP_PREC
+                         : c ? r::HFC_NIC_WP_CH811_PREC_8852C
+                             : r::HFC_NIC_WP_CH811_PREC;
+  const uint16_t ch011_prec = pc ? r::HFC_PCIE_CH011_PREC : r::HFC_NIC_CH011_PREC;
+  const uint16_t h2c_prec = pc ? r::HFC_PCIE_H2C_PREC : r::HFC_USB_H2C_PREC_8852B;
+  const uint8_t h2c_cond = pc ? r::HFC_FULL_COND_X1 : r::HFC_FULL_COND_X2;
+  const uint8_t wp_cond = pc ? r::HFC_FULL_COND_X1 : r::HFC_FULL_COND_X2;
+  const uint32_t fc_mode = pc ? r::MAC_AX_HCIFC_POH : 1u /* MAC_AX_HCIFC_STF */;
 
   /* set_fc_func_en(0, 0): disable FC + CH12 while reprogramming. */
   clr32(fc_ctrl, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
 
-  /* Per-channel page ctrl: ACH0-3 + B0MGQ(8) + B0HIQ(9) = {min,max,grp0}. */
+  /* Per-channel page ctrl: ACH0-3 + B0MGQ(8) + B0HIQ(9) = {min,max,grp0};
+   * on PCIe also ACH4-7 + B1MGQ(10) + B1HIQ(11) in group 1. */
   const uint32_t ch = min_max_grp(ch_min, ch_max);
   w(ach0, ch);
   w(ach1, ch);
@@ -744,22 +1081,30 @@ bool HalKestrel::hfc_init_nic() {
   w(ach3, ch);
   w(ch8, ch);
   w(ch9, ch);
+  if (pc) {
+    const uint32_t ch_g1 = ch | r::B_AX_ACH_GRP;
+    w(r::R_AX_ACH4_PAGE_CTRL_V1, ch_g1);
+    w(r::R_AX_ACH5_PAGE_CTRL_V1, ch_g1);
+    w(r::R_AX_ACH6_PAGE_CTRL_V1, ch_g1);
+    w(r::R_AX_ACH7_PAGE_CTRL_V1, ch_g1);
+    w(r::R_AX_CH10_PAGE_CTRL_V1, ch_g1);
+    w(r::R_AX_CH11_PAGE_CTRL_V1, ch_g1);
+  }
 
   /* Public page ctrl (set_fc_pubpg): group0/group1 + WP threshold. */
   w(pub1,
     ((static_cast<uint32_t>(pub_g0) & r::B_AX_PUBPG_G0_MSK)
      << r::B_AX_PUBPG_G0_SH) |
-        ((static_cast<uint32_t>(r::HFC_NIC_PUB_G1) & r::B_AX_PUBPG_G1_MSK)
+        ((static_cast<uint32_t>(pub_g1) & r::B_AX_PUBPG_G1_MSK)
          << r::B_AX_PUBPG_G1_SH));
   w(wp2, (static_cast<uint32_t>(r::HFC_NIC_WP_THRD) & r::B_AX_WP_THRD_MSK)
              << r::B_AX_WP_THRD_SH);
 
   /* Mix cfg (set_fc_mix_cfg): precharges + public max + full conditions. */
   w(page_ctrl,
-    ((static_cast<uint32_t>(r::HFC_NIC_CH011_PREC) & r::B_AX_PREC_PAGE_CH011_MSK)
+    ((static_cast<uint32_t>(ch011_prec) & r::B_AX_PREC_PAGE_CH011_MSK)
      << r::B_AX_PREC_PAGE_CH011_SH) |
-        ((static_cast<uint32_t>(r::HFC_USB_H2C_PREC_8852B) &
-          r::B_AX_PREC_PAGE_CH12_MSK)
+        ((static_cast<uint32_t>(h2c_prec) & r::B_AX_PREC_PAGE_CH12_MSK)
          << r::B_AX_PREC_PAGE_CH12_SH));
   w(pub2, (static_cast<uint32_t>(pub_max) & r::B_AX_PUBPG_ALL_MSK)
               << r::B_AX_PUBPG_ALL_SH);
@@ -770,20 +1115,20 @@ bool HalKestrel::hfc_init_nic() {
          << r::B_AX_PREC_PAGE_WP_CH811_SH));
   uint32_t fc = _device.rtw_read32(fc_ctrl);
   /* MODE = STF (1) for USB — the hfc_init USB branch selects store-and-
-   * forward flow control (hci_fc.c). An earlier port set MODE=0 + FC_EN=0 on
-   * a wrong assumption; the fw never pulled the bulk cmd_ofld H2C off CH12
-   * until HCI flow control was actually enabled. */
-  fc = r::set_clr_word(fc, 1 /* MAC_AX_HCIFC_STF */, r::B_AX_HCI_FC_MODE_MSK,
+   * forward flow control (hci_fc.c); POH (0) for PCIe. An earlier port set
+   * MODE=0 + FC_EN=0 on USB on a wrong assumption; the fw never pulled the
+   * bulk cmd_ofld H2C off CH12 until HCI flow control was actually enabled. */
+  fc = r::set_clr_word(fc, fc_mode, r::B_AX_HCI_FC_MODE_MSK,
                        r::B_AX_HCI_FC_MODE_SH);
   fc = r::set_clr_word(fc, r::HFC_FULL_COND_X2, r::B_AX_HCI_FC_WD_FULL_COND_MSK,
                        r::B_AX_HCI_FC_WD_FULL_COND_SH);
-  fc = r::set_clr_word(fc, r::HFC_FULL_COND_X2,
+  fc = r::set_clr_word(fc, h2c_cond,
                        r::B_AX_HCI_FC_CH12_FULL_COND_MSK,
                        r::B_AX_HCI_FC_CH12_FULL_COND_SH);
-  fc = r::set_clr_word(fc, r::HFC_FULL_COND_X2,
+  fc = r::set_clr_word(fc, wp_cond,
                        r::B_AX_HCI_FC_WP_CH07_FULL_COND_MSK,
                        r::B_AX_HCI_FC_WP_CH07_FULL_COND_SH);
-  fc = r::set_clr_word(fc, r::HFC_FULL_COND_X2,
+  fc = r::set_clr_word(fc, wp_cond,
                        r::B_AX_HCI_FC_WP_CH811_FULL_COND_MSK,
                        r::B_AX_HCI_FC_WP_CH811_FULL_COND_SH);
   w(fc_ctrl, fc);
@@ -987,6 +1332,15 @@ void HalKestrel::scheduler_init() {
    * SIFS-aggregation timing (band0). */
   field32(r::R_AX_PREBKF_CFG_0, r::SCH_PREBKF_16US, r::B_AX_PREBKF_TIME_MSK,
           r::B_AX_PREBKF_TIME_SH);
+  if (_pcie) {
+    /* trxcfg.c scheduler_init NIC/PCIe (POH) rows: 24 us pre-backoff on the
+     * AC path and, on the 8852C, the non-AC path too. */
+    field32(r::R_AX_PREBKF_CFG_0, r::SCH_PREBKF_24US, r::B_AX_PREBKF_TIME_MSK,
+            r::B_AX_PREBKF_TIME_SH);
+    if (c)
+      field32(r::R_AX_CTN_CFG_0, r::SCH_PREBKF_24US,
+              r::B_AX_PREBKF_TIME_NONAC_MSK, r::B_AX_PREBKF_TIME_NONAC_SH);
+  }
   field32(r::R_AX_CCA_CFG_0, 0x6a,
           c ? r::B_AX_R_SIFS_AGGR_TIME_V1_MSK : r::B_AX_R_SIFS_AGGR_TIME_MSK,
           c ? r::B_AX_R_SIFS_AGGR_TIME_V1_SH : r::B_AX_R_SIFS_AGGR_TIME_SH);
@@ -1069,6 +1423,25 @@ void HalKestrel::trxptcl_init() {
                       r::B_AX_WMAC_SPEC_SIFS_OFDM_SH);
   _device.rtw_write32(r::R_AX_TRXPTCL_RESP_0, v);
   set32(r::R_AX_RXTRIG_TEST_USER_2, r::B_AX_RXTRIG_FCSCHK_EN);
+  if (_pcie) {
+    /* trxcfg.c trxptcl_init PCIe (POH) rows: hardware CTS2SELF above a 1 KiB
+     * (256 B secure) frame and a 2 ms PTCL TX-arbiter timeout. */
+    uint32_t sifs = _device.rtw_read32(r::R_AX_SIFS_SETTING);
+    sifs = r::set_clr_word(sifs, r::S_AX_CTS2S_TH_1K,
+                           r::B_AX_HW_CTS2SELF_PKT_LEN_TH_MSK,
+                           r::B_AX_HW_CTS2SELF_PKT_LEN_TH_SH);
+    sifs = r::set_clr_word(sifs, r::S_AX_CTS2S_TH_SEC_256B,
+                           r::B_AX_HW_CTS2SELF_PKT_LEN_TH_TWW_MSK,
+                           r::B_AX_HW_CTS2SELF_PKT_LEN_TH_TWW_SH);
+    sifs |= r::B_AX_HW_CTS2SELF_EN;
+    _device.rtw_write32(r::R_AX_SIFS_SETTING, sifs);
+    uint32_t mon = _device.rtw_read32(r::R_AX_PTCL_FSM_MON);
+    mon = r::set_clr_word(mon, r::S_AX_PTCL_TO_2MS,
+                          r::B_AX_PTCL_TX_ARB_TO_THR_MSK,
+                          r::B_AX_PTCL_TX_ARB_TO_THR_SH);
+    mon &= ~r::B_AX_PTCL_TX_ARB_TO_MODE;
+    _device.rtw_write32(r::R_AX_PTCL_FSM_MON, mon);
+  }
 
   uint32_t c0 = _device.rtw_read32(r::R_AX_TRXPTCL_RRSR_CTL_0);
   uint32_t rate_en = (((c0 >> r::B_AX_WMAC_RESP_RATE_EN_SH) &
@@ -1128,21 +1501,35 @@ bool HalKestrel::write_lte(uint32_t offset, uint32_t val) {
 
 void HalKestrel::set_host_rpr() {
   namespace r = kestrel::reg;
-  /* WDRLS_MODE = STF (USB is always store-and-forward). */
-  field32(r::R_AX_WDRLS_CFG, r::MAC_AX_RPR_MODE_STF, r::B_AX_WDRLS_MODE_MSK,
-          r::B_AX_WDRLS_MODE_SH);
-  /* RLSRPT0_CFG0: rpr_cfg_stf has all filters DISabled — clear the filter map
-   * so every TX result generates a release report. */
-  clr32(r::R_AX_RLSRPT0_CFG0, r::B_WDRLS_FLTR_TXOK | r::B_WDRLS_FLTR_RTYLMT |
-                                  r::B_WDRLS_FLTR_LIFTIM | r::B_WDRLS_FLTR_MACID);
+  /* WDRLS_MODE = STF (USB is always store-and-forward) or POH on PCIe, where
+   * the host keeps the WD page until the release report names it. */
+  const bool poh = _pcie;
+  field32(r::R_AX_WDRLS_CFG,
+          poh ? r::MAC_AX_RPR_MODE_POH : r::MAC_AX_RPR_MODE_STF,
+          r::B_AX_WDRLS_MODE_MSK, r::B_AX_WDRLS_MODE_SH);
+  /* RLSRPT0_CFG0 filter map: rpr_cfg_stf has every filter DISabled (clear the
+   * bits so every TX result generates a release report); rpr_cfg_poh has them
+   * all ENabled (set the bits). The 8852C also selects the report's
+   * destination queue per mode (WDRLS_DEST_QID_STF / _POH). */
+  const uint32_t fltr = r::B_WDRLS_FLTR_TXOK | r::B_WDRLS_FLTR_RTYLMT |
+                        r::B_WDRLS_FLTR_LIFTIM | r::B_WDRLS_FLTR_MACID;
+  if (poh)
+    set32(r::R_AX_RLSRPT0_CFG0, fltr);
+  else
+    clr32(r::R_AX_RLSRPT0_CFG0, fltr);
+  if (_variant == ChipVariant::C8852C)
+    field32(r::R_AX_RLSRPT0_CFG0,
+            poh ? r::WDRLS_DEST_QID_POH : r::WDRLS_DEST_QID_STF,
+            r::B_AX_RLSRPT0_QID_MSK, r::B_AX_RLSRPT0_QID_SH);
   /* RLSRPT0_CFG1: AGGNUM=121, TO=255. The timeout is the key — it releases the
    * WD/PLE pages before the (~103-frame) bulk-OUT pool fills. */
   field32(r::R_AX_RLSRPT0_CFG1, r::RPR_STF_AGG, r::B_AX_RLSRPT0_AGGNUM_MSK,
           r::B_AX_RLSRPT0_AGGNUM_SH);
   field32(r::R_AX_RLSRPT0_CFG1, r::RPR_STF_TMR, r::B_AX_RLSRPT0_TO_MSK,
           r::B_AX_RLSRPT0_TO_SH);
-  _logger->info("Kestrel TRX: host RPR set (STF, agg=121 tmr=255) — TX page "
-                "release enabled");
+  _logger->info("Kestrel TRX: host RPR set ({}, agg=121 tmr=255) — TX page "
+                "release enabled",
+                poh ? "POH" : "STF");
 }
 
 void HalKestrel::port_init() {
@@ -2289,7 +2676,8 @@ bool HalKestrel::trx_cmac_rx_init() {
   cmac_com_init();
   ptcl_init();
   cmac_dma_init();
-  usb_rx_agg_cfg();
+  if (!_pcie)
+    usb_rx_agg_cfg(); /* PCIe delivers one packet per RX BD — no RXAGG */
   /* mac_trx_init tail: coex_mac_init. The SER error-IMR enable
    * (mac_enable_imr) is deliberately deferred to AFTER the BB/RF tables, so
    * the fw error handler isn't armed against a pending HCI/DMA condition
@@ -2343,7 +2731,17 @@ bool HalKestrel::read_efuse(EfuseInfo &out, std::array<uint8_t, 1536> *raw_phys)
   }
 
   auto def = [](uint8_t v, uint8_t d) { return v == 0xFF ? d : v; };
-  std::memcpy(out.mac.data(), &log[r::EFUSE_USB_MAC_ADDR_8852B], 6);
+  if (_device.is_usb()) {
+    std::memcpy(out.mac.data(), &log[r::EFUSE_USB_MAC_ADDR_8852B], 6);
+  } else {
+    /* PCIe interface block (8852C layout). The vid/did words are the
+     * offset's own proof: they must match config space. */
+    std::memcpy(out.mac.data(), &log[r::EFUSE_PCIE_MAC_ADDR_8852C], 6);
+    out.pci_vid = static_cast<uint16_t>(log[r::EFUSE_PCIE_VID_8852C] |
+                                        (log[r::EFUSE_PCIE_VID_8852C + 1] << 8));
+    out.pci_did = static_cast<uint16_t>(log[r::EFUSE_PCIE_DID_8852C] |
+                                        (log[r::EFUSE_PCIE_DID_8852C + 1] << 8));
+  }
   out.xtal_cap = def(log[r::EFUSE_RF_XTAL_8852B], 0x3F);
   out.rfe_type = def(log[r::EFUSE_RF_RFE_8852B], 0x01);
   out.thermal_a = def(log[r::EFUSE_RF_THERMAL_A_8852B], 0x22);

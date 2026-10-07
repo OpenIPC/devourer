@@ -179,7 +179,8 @@ inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
                                               const TxRate &r, uint8_t macid,
                                               uint16_t seq,
                                               uint32_t wd_body_len = WD_BODY_LEN,
-                                              int txcnt_lmt = -1) {
+                                              int txcnt_lmt = -1,
+                                              bool stf_mode = true) {
   /* The 8852C data/mgmt TX descriptor is the 32-byte wd_body_t_v1 (dwords 6/7
    * added, dword0-5 field layout identical); the 8852B is the 24-byte wd_body_t.
    * A short WD desyncs the MAC TX parser and the frame never airs (buffer still
@@ -188,8 +189,10 @@ inline std::vector<uint8_t> build_mgnt_txdesc(const uint8_t *frame,
   std::vector<uint8_t> buf(txd_len + frame_len, 0);
   uint8_t *wd = buf.data();
 
-  /* wd_body dword0: STF_MODE | CH_DMA=B0MG | WDINFO_EN (usb_pkt_ofst=0). */
-  txd_put_le32(wd + 0, txd::STF_MODE | txd::WDINFO_EN |
+  /* wd_body dword0: [STF_MODE] | CH_DMA=B0MG | WDINFO_EN (usb_pkt_ofst=0).
+   * STF_MODE is the USB store-and-forward bit; the PCIe WD page carries the
+   * frame by address instead (the transport sets WD_PAGE / ADDR_INFO_NUM). */
+  txd_put_le32(wd + 0, (stf_mode ? txd::STF_MODE : 0u) | txd::WDINFO_EN |
                            (static_cast<uint32_t>(MAC_AX_DMA_B0MG)
                             << txd::CH_DMA_SH));
   /* dword1 = 0 */
@@ -231,12 +234,13 @@ inline std::vector<uint8_t> build_data_txdesc(const uint8_t *frame,
                                               const TxRate &r, uint8_t macid,
                                               uint16_t seq,
                                               uint32_t wd_body_len = WD_BODY_LEN,
-                                              int txcnt_lmt = -1) {
+                                              int txcnt_lmt = -1,
+                                              bool stf_mode = true) {
   const uint32_t txd_len = wd_body_len + WD_INFO_LEN;
   std::vector<uint8_t> buf(txd_len + frame_len, 0);
   uint8_t *wd = buf.data();
-  /* dword0: STF_MODE | CH_DMA=DATA_CH0(0) | WDINFO_EN. */
-  txd_put_le32(wd + 0, txd::STF_MODE | txd::WDINFO_EN |
+  /* dword0: [STF_MODE] | CH_DMA=DATA_CH0(0) | WDINFO_EN (STF = USB only). */
+  txd_put_le32(wd + 0, (stf_mode ? txd::STF_MODE : 0u) | txd::WDINFO_EN |
                            (static_cast<uint32_t>(MAC_AX_DATA_CH0)
                             << txd::CH_DMA_SH));
   /* dword1 = shcut_camid = 0 */

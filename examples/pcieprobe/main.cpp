@@ -1,4 +1,5 @@
-/* pcieprobe — staged bring-up driver for the PCIe transport (RTL8821CE).
+/* pcieprobe — staged bring-up driver for the PCIe transport (RTL8821CE on
+ * the 88xx ring plane; RTL8852CE on the AX plane — see probe_8852c below).
  *
  * Validates the PCIe milestones one layer at a time, bottom-up:
  *   id     (M0) vfio open + BAR2 MMIO: chip-id @0xFC must read 0x09,
@@ -31,6 +32,86 @@
 #include "jaguar2/HalJaguar2.h"
 #include "jaguar2/HalmacJaguar2Fw.h"
 #include "jaguar2/HalmacJaguar2MacInit.h"
+#if defined(DEVOURER_HAVE_KESTREL_8852C)
+#include "kestrel/ChipVariant.h"
+#include "kestrel/HalKestrel.h"
+#endif
+#include <fstream>
+
+/* PCI device id from sysfs — the AX dies dispatch id-first (kestrel/CLAUDE.md:
+ * 0x00FC is R_AX_SYS_CHIPINFO there, not the Jaguar chip-id). */
+static uint16_t pci_device_id(const std::string &bdf) {
+  std::ifstream f("/sys/bus/pci/devices/" + bdf + "/device");
+  unsigned v = 0;
+  f >> std::hex >> v;
+  return static_cast<uint16_t>(v);
+}
+
+#if defined(DEVOURER_HAVE_KESTREL_8852C)
+/* RTL8852CE (Kestrel, AX): M0 die-id + cut, M1 = HalKestrel PCIe power-on
+ * (mac_pwr_on_nic_pcie_8852c) + EFUSE, cross-checking the efuse copy of the
+ * PCI ids against config space; M2 = firmware download over the AX HAXI
+ * FWCMD ring (HalKestrel::download_firmware runs the PCIe pre-init, which
+ * programs the rings through hci_setup, then the three-phase FWDL). */
+static int probe_8852c(RtlAdapter &adapter, Logger_t logger, int want) {
+  const uint8_t die_id = adapter.rtw_read8(0x00FC);
+  kestrel::HalKestrel hal(adapter, logger, kestrel::ChipVariant::C8852C);
+  const uint8_t cut = hal.read_cut();
+  const bool id_ok = die_id == 0x52;
+  logger->info("M0 (8852C): die-id=0x{:02x} (want 0x52) cut={}", die_id, cut);
+  devourer::Ev(logger->events(), "pcie.id")
+      .f("ok", id_ok)
+      .f("chip", "8852c")
+      .hexf("chip_id", die_id, 2)
+      .f("cut", static_cast<int>(cut));
+  if (!id_ok || want < 1)
+    return id_ok ? 0 : 1;
+
+  bool power_ok = false;
+  kestrel::EfuseInfo ef;
+  try {
+    power_ok = hal.power_on() && hal.read_efuse(ef);
+  } catch (const std::exception &e) {
+    logger->error("M1 (8852C): power-on failed: {}", e.what());
+  }
+  char mac[18];
+  snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", ef.mac[0],
+           ef.mac[1], ef.mac[2], ef.mac[3], ef.mac[4], ef.mac[5]);
+  const bool ids_ok = ef.pci_vid == 0x10EC && ef.pci_did == 0xC852;
+  const bool ok = power_ok && ef.autoload_ok && ids_ok;
+  logger->info("M1 (8852C): power_ok={} autoload={} efuse pci={:04x}:{:04x} "
+               "MAC(0x400)={} rfe={} xtal=0x{:02x}",
+               power_ok, ef.autoload_ok, ef.pci_vid, ef.pci_did, mac,
+               ef.rfe_type, ef.xtal_cap);
+  devourer::Ev(logger->events(), "pcie.power")
+      .f("ok", ok)
+      .hexf("efuse_vid", ef.pci_vid, 4)
+      .hexf("efuse_did", ef.pci_did, 4)
+      .f("mac", mac)
+      .f("rfe", static_cast<int>(ef.rfe_type));
+  if (!ok || want < 2)
+    return ok ? 0 : 1;
+
+  bool fw_ok = false;
+  try {
+    fw_ok = hal.download_firmware(cut);
+  } catch (const std::exception &e) {
+    logger->error("M2 (8852C): FWDL failed: {}", e.what());
+  }
+  const uint32_t wcpu = adapter.rtw_read32(0x01E0); /* R_AX_WCPU_FW_CTRL */
+  const uint32_t err = hal.fw_err_state("pcieprobe-fw");
+  logger->info("M2 (8852C): fw_ok={} WCPU_FW_CTRL=0x{:08x} ser-err=0x{:08x}",
+               fw_ok, wcpu, err);
+  devourer::Ev(logger->events(), "pcie.fw")
+      .f("ok", fw_ok)
+      .hexf("wcpu_fw_ctrl", wcpu, 8)
+      .hexf("ser_err", err, 8);
+  if (!fw_ok)
+    return 1;
+  hal.pcie_deinit();
+  return 0;
+}
+#endif
 
 int main(int argc, char **argv) {
   if (argc < 2) {
@@ -52,6 +133,14 @@ int main(int argc, char **argv) {
 
   /* ---- stage id (M0): pure MMIO register plane, no power, no DMA ---- */
   RtlAdapter adapter(transport, logger, {});
+  if (pci_device_id(bdf) == 0xC852) {
+#if defined(DEVOURER_HAVE_KESTREL_8852C)
+    return probe_8852c(adapter, logger, want);
+#else
+    logger->error("RTL8852CE found but 8852C support not compiled in");
+    return 1;
+#endif
+  }
   const uint8_t chip_id = adapter.rtw_read8(0x00FC);
   const uint32_t sys_cfg1 = adapter.rtw_read32(0x00F0);
   const uint8_t cr = adapter.rtw_read8(0x0100);

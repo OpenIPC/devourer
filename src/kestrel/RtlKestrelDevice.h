@@ -240,8 +240,13 @@ private:
   volatile bool _wp_drain_stop = true;
   void start_wp_drain();
   void stop_wp_drain();
-  uint8_t _tx_mgmt_ep = 0; /* band-0 mgmt bulk-OUT ep (BULKOUTID0), 0=TX not up */
-  uint8_t _tx_data_ep = 0; /* AC0 data bulk-OUT ep (BULKOUTID3) */
+  /* TX queue handles, bus-neutral: on USB the bulk-OUT endpoint (B0MG =
+   * BULKOUTID0, ACH0 = BULKOUTID3), on PCIe the AX DMA channel itself (8, 0).
+   * ACH0 is channel 0, so "TX is up" is its own flag, not a non-zero handle. */
+  bool _tx_up = false;
+  uint8_t _tx_mgmt_q = 0;
+  uint8_t _tx_data_q = 0;
+  bool _tx_data_ok = false; /* data frames may use _tx_data_q */
   uint16_t _tx_seq = 0;    /* rolling 12-bit wifi sequence for injected frames */
   std::optional<devourer::TxMode> _tx_mode_default; /* SetTxMode default */
   int16_t _sess_pwr_qdb = 0; /* offset applied by SetTxPowerOffsetQdb — the

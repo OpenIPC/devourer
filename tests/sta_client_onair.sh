@@ -665,24 +665,32 @@ cell_end() { sta_pid_kill probe; sta_stop; sta_pid_kill hostapd; dmesg_on_fail; 
 
 # Was each Unconfirmed verdict right? A verdict is right only for an
 # association the AP never held. sta_client stamps each association and each
-# verdict with `at=` (wall clock, hostapd -t's sec.usec form), so a verdict
-# is paired with the association it ended, and FAILs if hostapd logged
-# AP-STA-CONNECTED for our address between the two. One logged after the
-# verdict does not count: the re-join's own probe or authentication can
-# release a held status, and hostapd then logs CONNECTED for the association
-# the station has already abandoned.
+# verdict with `at=` (wall clock, hostapd -t's sec.usec form). Each
+# association owns the window from its `at=` to its verdict (or to the next
+# association), and a verdict FAILs if hostapd logged AP-STA-CONNECTED for
+# our address inside its association's window.
 #
 # THE ORDERING IS CHECKED, NOT ASSUMED. hostapd logs CONNECTED microseconds
 # after it accepts an association, and the station prints its own stamp a
-# few ms either side of that, depending on the rig. If hostapd can stamp
-# first, a held association's CONNECTED falls before `at=` and the check
-# above would pass a false positive. So every association that got NO
-# verdict and whose CONNECTED the log shows is the positive control: its
-# CONNECTED must not precede its `at=`. If one does, or there is no such
-# association to check, the verdicts cannot be cleared: INCONCLUSIVE rather
-# than INFO. A CONNECTED inside a verdict's window still FAILs either way.
-# Missing, malformed or out-of-order stamps, or a ledger that is missing or
-# disagrees with the log, are INCONCLUSIVE too. $1 cell, $2 own address.
+# few ms either side, depending on the rig. If hostapd can stamp first, a
+# held association's CONNECTED falls before its `at=`, outside the window,
+# and a false positive would pass. So every CONNECTED is accounted for:
+#   - inside a verdict's window: that verdict FAILs;
+#   - the first one inside a window without a verdict: that association's
+#     own, stamped after its `at=` - the positive control, counted once per
+#     association;
+#   - outside every window, or a second one in a window without a verdict:
+#     either an episode that ended (hostapd logs DISCONNECTED before the next
+#     association: the re-join's own probe can release a held status after
+#     the verdict, and hostapd then connects and drops the abandoned
+#     association) - ignored - or a CONNECTED stamped BEFORE the next
+#     association's `at=`, which proves this rig can stamp first.
+# The last case, or no control at all, leaves the verdicts INCONCLUSIVE
+# rather than cleared - it cannot tell which association such a CONNECTED
+# belongs to. A FAIL is reported first, whatever else the log shows; then
+# missing, malformed or out-of-order stamps, a ledger that is missing or
+# disagrees with the log, or a log that could not be parsed, are
+# INCONCLUSIVE. $1 cell, $2 own address.
 verdicts_scored() {
   local unconf res n ctrl tag k a v
   unconf=$(led "$1" 'unconfirmed')
@@ -701,49 +709,59 @@ verdicts_scored() {
       split(x, xs, "."); split(y, ys, ".")
       return xs[1] + 0 < ys[1] + 0 || (xs[1] + 0 == ys[1] + 0 && xs[2] + 0 <= ys[2] + 0)
     }
+    function lt(x, y) { return !le(y, x) }
     FILENAME == ARGV[1] {   # the hostapd log; FNR == NR fails when it is empty
-      if ($(NF - 1) == "AP-STA-CONNECTED" && $NF == own) {
-        t = $1; sub(/:$/, "", t); if (ok(t)) c[++nc] = t
+      if (NF >= 2 && $NF == own &&
+          ($(NF - 1) == "AP-STA-CONNECTED" || $(NF - 1) == "AP-STA-DISCONNECTED")) {
+        t = $1; sub(/:$/, "", t)
+        if (ok(t)) { ne++; ET[ne] = t; EK[ne] = ($(NF - 1) == "AP-STA-CONNECTED") ? "C" : "D" }
       }
       next
     }
-    { na++; A[na] = $1; V[na] = $2 }
+    NF >= 2 { na++; A[na] = $1; V[na] = $2 }
     END {
-      prev = "0.000000"
       for (i = 1; i <= na; i++) {
-        a = A[i]; v = V[i]
-        if (v != "-") {
-          nv++
-          if (!ok(a) || !ok(v) || !le(a, v)) { print "STAMP", nv; if (ok(v)) prev = v; continue }
-          for (j = 1; j <= nc; j++)
-            if (le(a, c[j]) && le(c[j], v)) { print "BAD", nv, a, v; break }
-          prev = v
-        } else {
-          if (!ok(a)) { print "STAMP", 0; continue }
-          hi = (i < na && ok(A[i + 1])) ? A[i + 1] : ""
-          last = ""
-          for (j = 1; j <= nc; j++)
-            if (c[j] != prev && le(prev, c[j]) && (hi == "" || le(c[j], hi))) last = c[j]
-          if (last != "") { nctl++; if (!le(a, last)) print "EARLY", a, last }
+        if (V[i] != "-") nv++
+        if (!ok(A[i]) || (V[i] != "-" && (!ok(V[i]) || lt(V[i], A[i])))) { stamp = 1; continue }
+        if (i > 1 && ok(A[i - 1]) && lt(A[i], (V[i - 1] != "-" && ok(V[i - 1])) ? V[i - 1] : A[i - 1])) stamp = 1
+        if (V[i] != "-")
+          for (j = 1; j <= ne; j++)
+            if (EK[j] == "C" && le(A[i], ET[j]) && le(ET[j], V[i])) { print "BAD", nv, A[i], V[i]; break }
+      }
+      if (stamp) print "STAMP"
+      else for (j = 1; j <= ne; j++) {
+        if (EK[j] != "C") continue
+        t = ET[j]; w = 0; nexta = ""
+        for (i = 1; i <= na; i++) {
+          e = (V[i] != "-") ? V[i] : (i < na ? A[i + 1] : "")
+          if (le(A[i], t) && (e == "" || lt(t, e) || (V[i] != "-" && le(t, e)))) { w = i; break }
         }
+        for (i = 1; i <= na; i++) if (lt(t, A[i])) { nexta = A[i]; break }
+        if (w && V[w] != "-") continue            # a BAD above
+        if (w && !owned[w]) { owned[w] = 1; nctl++; continue }
+        closed = j < ne && EK[j + 1] == "D" && (nexta == "" || lt(ET[j + 1], nexta))
+        if (!closed) print "EARLY", (nexta == "" ? "-" : nexta), t
       }
       print "N", nv + 0
       print "CTRL", nctl + 0
     }' "$OUT/hostapd_$1.log" -)
   n=$(printf '%s\n' "$res" | sed -n 's/^N //p')
   ctrl=$(printf '%s\n' "$res" | sed -n 's/^CTRL //p')
+  if [ -z "$n" ]; then
+    if grep -q 'station association unconfirmed:' "$OUT/sta_$1.log" 2>/dev/null ||
+       [ "${unconf:-0}" != 0 ]; then
+      inc "$1: could not parse the station and hostapd logs - cannot check the unconfirmed verdicts"
+    fi
+    return 0
+  fi
   if [ -z "$unconf" ]; then
-    [ "${n:-0}" = 0 ] ||
+    [ "$n" = 0 ] ||
       inc "$1: the log shows $n unconfirmed verdict(s) but the ledger is missing - cannot check them"
     return 0
   fi
-  [ "$unconf" = 0 ] && [ "${n:-0}" = 0 ] && return 0
-  if [ "$unconf" != "${n:-0}" ]; then
-    inc "$1: the ledger counts $unconf unconfirmed verdict(s) but the log shows ${n:-0} - cannot pair them"
-    return 0
-  fi
-  if printf '%s\n' "$res" | grep -q '^STAMP'; then
-    inc "$1: an association or verdict line has a missing, malformed or out-of-order at= stamp - cannot order the verdicts against hostapd's log"
+  [ "$unconf" = 0 ] && [ "$n" = 0 ] && return 0
+  if [ "$unconf" != "$n" ]; then
+    inc "$1: the ledger counts $unconf unconfirmed verdict(s) but the log shows $n - cannot pair them"
     return 0
   fi
   if printf '%s\n' "$res" | grep -q '^BAD'; then
@@ -755,12 +773,16 @@ $res
 EOF
     return 0
   fi
+  if printf '%s\n' "$res" | grep -q '^STAMP'; then
+    inc "$1: an association or verdict line has a missing, malformed or out-of-order at= stamp - cannot order the verdicts against hostapd's log"
+    return 0
+  fi
   if printf '%s\n' "$res" | grep -q '^EARLY'; then
-    inc "$1: $unconf unconfirmed verdict(s) not cleared - on this rig hostapd stamped a held association's AP-STA-CONNECTED before the station's own at= ($(printf '%s\n' "$res" | sed -n 's/^EARLY \([^ ]*\) \([^ ]*\)$/CONNECTED \2 < at= \1/p' | head -1)), so a CONNECTED that precedes at= cannot be told from an earlier association's"
+    inc "$1: $unconf unconfirmed verdict(s) not cleared - hostapd logged an AP-STA-CONNECTED that belongs to no association window and was not dropped before the next association ($(printf '%s\n' "$res" | sed -n 's/^EARLY \([^ ]*\) \([^ ]*\)$/CONNECTED \2, next at= \1/p' | head -1)): this rig can stamp a held association's CONNECTED before the station's own at=, so the verdicts cannot be cleared"
     return 0
   fi
   if [ "${ctrl:-0}" = 0 ]; then
-    inc "$1: $unconf unconfirmed verdict(s) not cleared - no association without a verdict shows an AP-STA-CONNECTED to check the stamp ordering against"
+    inc "$1: $unconf unconfirmed verdict(s) not cleared - no association without a verdict shows its own AP-STA-CONNECTED to check the stamp ordering against"
     return 0
   fi
   info "$1: recovered: $unconf association(s) the AP did not hold were found unconfirmed and re-joined (none logged AP-STA-CONNECTED before its verdict; ordering checked against $ctrl held association(s); $(led "$1" 'associations') associations, assoc_repeat=$(led "$1" 'assoc_repeat'))"

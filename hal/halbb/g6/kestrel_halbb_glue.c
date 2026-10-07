@@ -4,6 +4,7 @@
 #include "halbb_precomp.h"      /* full bb_info + halbb types + BB functions */
 #include "kestrel_halbb_glue.h"
 #include "vendor/halbb_edcca_ex.h"
+#include "vendor/halbb_auto_dbg.h"
 
 struct kestrel_halbb_ctx {
   struct bb_info bb;
@@ -140,6 +141,17 @@ void kestrel_halbb_ctrl_bw_ch(struct kestrel_halbb_ctx *ctx, unsigned char pri_c
   halbb_ctrl_bw_ch(&ctx->bb, pri_ch, central_ch, /*central_ch_seg1=*/0,
                    (enum band_type)band_type, (enum channel_width)bw,
                    HW_PHY_0);
+}
+
+/* halbb_edcca.c (and halbb_dig.c) call the auto-diagnostic notifier from
+ * halbb_auto_dbg.c, which is not vendored here: a no-op keeps the EDCCA
+ * object linkable on toolchains that do not drop unreferenced sections
+ * (MinGW); on ELF/--gc-sections the call sites were discarded anyway. */
+void halbb_diagnostic_event_notify(struct bb_info *bb, enum habb_fun_t type,
+                                   u8 sub_type) {
+  (void)bb;
+  (void)type;
+  (void)sub_type;
 }
 
 /* EDCCA energy-detect threshold for a 6 GHz tune (halbb_edcca.c), via the

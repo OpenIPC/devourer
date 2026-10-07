@@ -280,11 +280,13 @@ frames per cell, `tests/pcie_8852ce_onair.sh`, exact `rx.txhit` counts):
 | PCIe 09:00.0 → USB | 1980/2000 |
 | PCIe 05:00.0 → PCIe 09:00.0 | 1489/2000 |
 
-Both PCIe receivers are at the ceiling; card 05:00.0 as a *transmitter* is
-the one that loses frames (69–82 % across three runs, to either witness),
-card 09:00.0 as a transmitter does not — same code, so this is that
-module's TX chain / antenna seating, not the plane. One lab, near field,
-no SDR: a delivery figure for this pair, not a link-budget claim.
+Both PCIe receivers are at the ceiling in every run. PCIe-as-transmitter
+is the direction that moves between runs: card 05:00.0 delivered 69 %, 74 %,
+82 % and 97 % to the same witnesses across four runs of the same build,
+card 09:00.0 99 % and 97 % — a spread the probe-repeatability rule in the
+root CLAUDE.md says to measure before reading as a difference between the
+cards. One lab, near field, no SDR: delivery figures for this pair, not a
+link-budget claim.
 
 ## Scope
 

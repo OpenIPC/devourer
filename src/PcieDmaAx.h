@@ -99,6 +99,7 @@ private:
 
   void arm_rx_bd(RxRing &r, uint32_t idx);
   uint32_t hw_idx(uint16_t reg_idx);
+  bool ring_has_room(const TxRing &r, int ch);
   bool wait_consumed(TxRing &r, int ch, int timeout_ms);
   int submit_fwcmd(uint8_t *buf, size_t len, int timeout_ms);
   int submit_wd(int ch, uint8_t *buf, size_t len, int timeout_ms);

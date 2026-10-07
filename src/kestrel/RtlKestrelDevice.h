@@ -247,6 +247,9 @@ private:
    * unmaps the slab right after the device goes away. No-op on USB. */
   void pcie_quiesce();
   bool _pcie_quiesced = false;
+  /* True while StartRxLoop's reap loop runs; pcie_quiesce waits for it to
+   * clear (bounded) so the DMA stop never races a reap in progress. */
+  std::atomic<bool> _rx_running{false};
   /* TX queue handles, bus-neutral: on USB the bulk-OUT endpoint (B0MG =
    * BULKOUTID0, ACH0 = BULKOUTID3), on PCIe the AX DMA channel itself (8, 0).
    * ACH0 is channel 0, so "TX is up" is its own flag, not a non-zero handle. */

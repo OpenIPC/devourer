@@ -48,7 +48,7 @@ std::shared_ptr<PcieTransport> PcieTransport::Open(const std::string &bdf,
     return nullptr;
   if (!t->init_dma())
     return nullptr;
-  if (cfg.use_msi && !t->setup_msi())
+  if (cfg.use_msi && t->_dma->uses_msi() && !t->setup_msi())
     logger->warn("PcieTransport: MSI setup failed — RX falls back to polling");
   logger->info("PcieTransport: {} ready ({} plane, BAR2 {} KiB, DMA slab {} "
                "KiB @ IOVA 0x{:x}, RX {})",

@@ -241,6 +241,24 @@ void PcieDmaAx::setup_rings() {
                 kBdLen, kBdLen, kRxBufSize, kWdPages, _wd_pages_iova);
 }
 
+bool PcieDmaAx::ring_has_room(const TxRing &r, int ch) {
+  /* Submissions a timed-out wait left unconsumed stay in the ring. The
+   * hardware index can only be trusted as "caught up" while fewer than
+   * kBdLen-1 entries are outstanding; at that point refuse rather than let a
+   * wrapped write index meet a stalled hardware index and read as success. */
+  const uint32_t hw = hw_idx(r.reg_idx);
+  if (hw >= kBdLen)
+    return false; /* device gone — hw_idx logged it */
+  const uint32_t outstanding = (r.wp + kBdLen - hw) % kBdLen;
+  if (outstanding >= kBdLen - 1) {
+    _logger->error("PcieDmaAx: CH{} ring stalled ({} unconsumed entries, hw={} "
+                   "wp={}) — refusing the submission",
+                   ch, outstanding, hw, r.wp);
+    return false;
+  }
+  return true;
+}
+
 bool PcieDmaAx::wait_consumed(TxRing &r, int ch, int timeout_ms) {
   const auto deadline =
       std::chrono::steady_clock::now() +
@@ -286,6 +304,8 @@ int PcieDmaAx::submit_fwcmd(uint8_t *buf, size_t len, int timeout_ms) {
     return -1;
   }
   TxRing &r = _tx[kFwcmdCh];
+  if (!ring_has_room(r, kFwcmdCh))
+    return -1;
   const uint32_t slot = r.wp;
   uint8_t *dst = _fwcmd + static_cast<size_t>(slot) * kFwcmdSlotSize;
   std::memcpy(dst, buf, len);
@@ -319,6 +339,8 @@ int PcieDmaAx::submit_wd(int ch, uint8_t *buf, size_t len, int timeout_ms) {
                    flen, kPayloadSize);
     return -1;
   }
+  if (!ring_has_room(_tx[ch], ch))
+    return -1;
 
   /* A free page, reaping release reports first; starve → wait on the RPQ. */
   uint16_t page;

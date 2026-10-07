@@ -94,6 +94,13 @@ static int probe_8852c(RtlAdapter &adapter, Logger_t logger, int want) {
   if (!ok || want < 2)
     return ok ? 0 : 1;
 
+  /* download_firmware runs pcie_pre_init, which arms the rings and turns the
+   * HAXI DMA on; every exit from here on must stop it before the transport
+   * unmaps the slab — including the failure path this probe exists for. */
+  struct DeinitGuard {
+    kestrel::HalKestrel &h;
+    ~DeinitGuard() { h.pcie_deinit(); }
+  } deinit_guard{hal};
   bool fw_ok = false;
   try {
     fw_ok = hal.download_firmware(cut);
@@ -159,7 +166,6 @@ static int probe_8852c(RtlAdapter &adapter, Logger_t logger, int want) {
         .hexf("wr_4004", wr4004, 8)
         .hexf("wr_000c", wr000c, 8);
   }
-  hal.pcie_deinit();
   return 0;
 }
 #endif

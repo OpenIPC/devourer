@@ -48,10 +48,12 @@ public:
     uint32_t rx_buf_size = 11480; /* RTK_PCI_RX_BUF_SIZE (11478) 8-aligned */
     uint64_t iova_base = 0x10000000; /* slab IOVA; must stay < 4 GiB */
     int rx_poll_us = 200;            /* RX hw-index poll interval */
-    /* MSI-via-eventfd RX wakeups (VFIO_DEVICE_SET_IRQS). The reap logic is
-     * identical; MSI only replaces the fixed-interval sleep with an eventfd
-     * wait (100 ms safety timeout keeps a lost edge from ever stalling RX).
-     * Falls back to pure polling automatically when MSI setup fails. */
+    /* MSI-via-eventfd RX wakeups (VFIO_DEVICE_SET_IRQS) on a plane that
+     * consumes them (the 88xx plane; the AX plane polls and never registers
+     * the vector). The reap logic is identical; MSI only replaces the
+     * fixed-interval sleep with an eventfd wait (100 ms safety timeout keeps
+     * a lost edge from ever stalling RX). Falls back to pure polling
+     * automatically when MSI setup fails. */
     bool use_msi = true;
   };
 

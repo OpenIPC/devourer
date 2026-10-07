@@ -44,6 +44,7 @@ public:
                 int timeout_ms) override;
   void rx_loop(const std::function<void(const uint8_t *, int)> &on_data,
                const std::function<bool()> &should_stop) override;
+  bool uses_msi() const override { return true; }
   void irq_mask() override;
   /* 0xFE00..0xFEFF is USB-only register space — undefined over MMIO. The
    * jaguar users (0xFE5B/0xFE10/0xFE11) are is_usb()-gated; catch stragglers

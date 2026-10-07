@@ -48,6 +48,11 @@ public:
   virtual void rx_loop(const std::function<void(const uint8_t *, int)> &on_data,
                        const std::function<bool()> &should_stop) = 0;
 
+  /* Whether this plane consumes the vfio MSI eventfd in its RX loop. The
+   * transport registers the vector only for a plane that says so, so a
+   * polling plane neither arms an unused IRQ nor reports "MSI" as its RX
+   * mechanism. */
+  virtual bool uses_msi() const { return false; }
   /* Mask the plane's RX interrupt sources (teardown, before the MSI vector is
    * dropped). Default: nothing was enabled. */
   virtual void irq_mask() {}

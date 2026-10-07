@@ -15,7 +15,7 @@
 # Preflight per leg: the receiver must log its RX loop start within
 # $LIVENESS_S seconds or the cell aborts with the receiver's last lines — a
 # multi-minute run that silently measures a dead receiver is the trap this
-# avoids. Cleanup kills only our own rxdemo/txdemo by exact comm name.
+# avoids. Cleanup signals only the demo PIDs this run started.
 set -u
 
 BDFS="0000:05:00.0,0000:09:00.0"
@@ -49,12 +49,15 @@ done
 HERE="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$OUT"
 
+# Only the demos this run started are ours to stop: the receiver runs in the
+# background (RXPID), the transmitter in the foreground (TXPID); another
+# user's radio process on the same host is never touched.
+RXPID=""
+TXPID=""
 cleanup() {
-  pkill -INT -x rxdemo 2>/dev/null
-  pkill -INT -x txdemo 2>/dev/null
+  for pid in $RXPID $TXPID; do kill -INT "$pid" 2>/dev/null; done
   sleep 1
-  pkill -KILL -x rxdemo 2>/dev/null
-  pkill -KILL -x txdemo 2>/dev/null
+  for pid in $RXPID $TXPID; do kill -KILL "$pid" 2>/dev/null; done
 }
 trap cleanup EXIT INT TERM
 
@@ -93,21 +96,27 @@ run_cell() {
   env "${rx_env[@]}" timeout -s INT $((LIVENESS_S + RX_SETTLE_S + FRAMES * GAP_US / 1000000 + 40)) \
       "$BUILD/rxdemo" >"$rxlog" 2>"$rxerr" &
   local rxpid=$!
+  RXPID=$rxpid
   local t=0
   while ! grep -q "RX loop started\|starting RX loop\|async ring of" "$rxerr" 2>/dev/null; do
     sleep 1; t=$((t + 1))
     if ! kill -0 "$rxpid" 2>/dev/null || [ "$t" -ge "$LIVENESS_S" ]; then
       echo "FAIL: receiver not live after ${t}s:"; tail -8 "$rxerr" | sed 's/^/    /'
       kill -INT "$rxpid" 2>/dev/null; wait "$rxpid" 2>/dev/null
+      RXPID=""
       echo "{\"ev\":\"cell\",\"name\":\"$name\",\"ok\":false,\"why\":\"rx-not-live\"}" | tee -a "$OUT/summary.jsonl"
       return 1
     fi
   done
   sleep "$RX_SETTLE_S"
-  env "${tx_env[@]}" timeout $((FRAMES * GAP_US / 1000000 + 60)) "$BUILD/txdemo" >"$txlog" 2>"$txerr"
+  env "${tx_env[@]}" timeout $((FRAMES * GAP_US / 1000000 + 60)) "$BUILD/txdemo" >"$txlog" 2>"$txerr" &
+  TXPID=$!
+  wait "$TXPID"
   local txrc=$?
+  TXPID=""
   sleep 2
   kill -INT "$rxpid" 2>/dev/null; wait "$rxpid" 2>/dev/null
+  RXPID=""
   local hits failed
   # rxdemo's final rx.txhit (emitted at exit) carries the exact hit count; the
   # in-loop ones only fire every 100 hits.

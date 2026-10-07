@@ -1,5 +1,7 @@
 #include "RtlKestrelDevice.h"
 
+#include <chrono>
+#include <thread>
 #include <climits> /* INT_MIN = "no radiotap DBM_TX_POWER" sentinel */
 #include <cstdint>
 #include <span>
@@ -101,6 +103,15 @@ RtlKestrelDevice::~RtlKestrelDevice() {
 void RtlKestrelDevice::pcie_quiesce() {
   if (_device.is_usb() || _pcie_quiesced)
     return;
+  /* The reap loop runs on the caller's Init/StartRxLoop thread and checks
+   * _rx_stop every pass; give it a bounded moment to return before the ring
+   * indices are cleared under it. */
+  _rx_stop = true;
+  for (int i = 0; i < 200 && _rx_running.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  if (_rx_running.load())
+    _logger->warn("Kestrel PCIe: RX loop still running after 2 s — stopping "
+                  "DMA under it");
   _pcie_quiesced = true;
   _hal.pcie_deinit();
 }
@@ -343,6 +354,11 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   const uint16_t drv_info_unit =
       _variant == kestrel::ChipVariant::C8852C ? 16 : 8;
   long long parse_aborts = 0;
+  _rx_running = true;
+  struct RunningGuard {
+    std::atomic<bool> &f;
+    ~RunningGuard() { f = false; }
+  } running_guard{_rx_running};
   _device.bulk_read_async_loop(
       32768, 8,
       [&, drv_info_unit](const uint8_t *data, int n) {

@@ -5207,13 +5207,20 @@ static int gate_staid(void)
 		CHK(staid_filtr_is(mon),
 		    "the drop gives the receiver back the monitor filter");
 		mt7612u_clear_ack_responder(&dev);
+		/* After a drop the clear re-writes the pre-arm filter and verifies
+		 * it. The drop has already written that value, so a clear that
+		 * wrote nothing would pass a bare read-back: poison the register
+		 * first, so only a clear that writes it can pass. */
+		mt_wr(&dev, MT_RX_FILTR_CFG, MT_RX_FILTR_CFG_MANAGED);
+		CHK(mt7612u_clear_station_identity(&dev) == 0 &&
+		    staid_filtr_is(mon),
+		    "clear after the drop re-writes the monitor receive filter "
+		    "(register poisoned first)");
 	} else {
 		printf("  SKIP  could not set up case 6\n");
 		fail++;
+		mt7612u_clear_station_identity(&dev);
 	}
-	/* After a drop: the clear re-writes the pre-arm filter and verifies it. */
-	CHK(mt7612u_clear_station_identity(&dev) == 0 && staid_filtr_is(mon),
-	    "clear after the drop verifies the monitor receive filter");
 
 #undef CHK
 	printf("\nGATE STAID: %d passed, %d failed\n", pass, fail);

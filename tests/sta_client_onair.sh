@@ -726,7 +726,10 @@ verdicts_scored() {
         if (($i == "AP-STA-CONNECTED" || $i == "AP-STA-DISCONNECTED") &&
             tolower($(i + 1)) == tolower(own) && $(i - 1) == ifc) {
           t = $1; sub(/:$/, "", t)
-          if (ok(t)) { ne++; ET[ne] = t; EK[ne] = ($i == "AP-STA-CONNECTED") ? "C" : "D" }
+          if (ok(t)) {
+            if (ne && lt(t, ET[ne])) clock = 1   # the AP clock stepped back
+            ne++; ET[ne] = t; EK[ne] = ($i == "AP-STA-CONNECTED") ? "C" : "D"
+          }
           break
         }
       next
@@ -745,7 +748,8 @@ verdicts_scored() {
           if (last ~ /^C /) print "HELD", A[i], substr(last, 3)
         }
       }
-      if (stamp) print "STAMP"
+      if (clock) print "CLOCK"
+      if (stamp || clock) print "STAMP"
       else for (j = 1; j <= ne; j++) {
         if (EK[j] != "C") continue
         t = ET[j]; w = 0; nexta = ""
@@ -788,6 +792,10 @@ verdicts_scored() {
     done <<EOF
 $res
 EOF
+    return 0
+  fi
+  if printf '%s\n' "$res" | grep -q '^CLOCK'; then
+    inc "$1: hostapd's stamps for our address go backwards in its log - the AP clock stepped, so the verdicts cannot be ordered against it"
     return 0
   fi
   if printf '%s\n' "$res" | grep -q '^STAMP'; then

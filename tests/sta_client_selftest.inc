@@ -1408,16 +1408,25 @@ void test_a_unicast_reply_confirms_the_association() {
  * plain Null is pinned too; it is dropped before that path. */
 void test_a_null_frame_does_not_confirm() {
   /* 0: Null; 1: QoS Null; 2: QoS Null with trailing bytes - the subtype,
-   * not only the length, says there is no MSDU. */
-  for (int qos = 0; qos < 3; qos++) {
+   * not only the length, says there is no MSDU; 3: Data and 4: QoS Data
+   * with an EMPTY body - the length, not only the subtype, says there is
+   * none. */
+  static const char* const what[] = {
+      "a Null from the AP does not confirm the association",
+      "a QoS Null from the AP does not confirm the association",
+      "a QoS Null with trailing bytes does not confirm either",
+      "a Data frame with an empty body does not confirm either",
+      "a QoS Data frame with an empty body does not confirm either"};
+  static const uint8_t fc[] = {0x48, 0xc8, 0xc8, 0x08, 0x88};
+  for (int k = 0; k < 5; k++) {
     reset_all();
     Ap ap;
     open_link_with_uplink(ap, 0);
     std::vector<uint8_t> m = devourer::sta::data_hdr_from_ds(
         kStaMac, kBssid, kBssid, /*protect=*/false, ap.seq.next());
-    m[0] = qos ? 0xc8 : 0x48;                      /* QoS Null : Null */
-    if (qos) m.insert(m.begin() + 24, 2, 0);       /* QoS Control */
-    if (qos == 2) m.insert(m.end(), 8, 0xaa);
+    m[0] = fc[k];
+    if (fc[k] & 0x80) m.insert(m.begin() + 24, 2, 0);   /* QoS Control */
+    if (k == 2) m.insert(m.end(), 8, 0xaa);
     rx_frame(m.data(), m.size(), -40, 100);
     uint8_t e[60];
     ipv4_to_peer(e, 1, 0);
@@ -1427,9 +1436,7 @@ void test_a_null_frame_does_not_confirm() {
     supervise(1000 + kConfirmMs);
     check(g_sm.state() == StationSm::State::Failed &&
               g_sm.fail_reason() == StationSm::Failure::Unconfirmed,
-          qos == 0   ? "a Null from the AP does not confirm the association"
-          : qos == 1 ? "a QoS Null from the AP does not confirm the association"
-                     : "a QoS Null with trailing bytes does not confirm either");
+          what[k]);
   }
 }
 

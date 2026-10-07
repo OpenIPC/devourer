@@ -196,6 +196,8 @@ sta_pid_record() { echo "$2" > "$OUT/.pid_$1"; }
 # Is PID running? `kill -0` alone also succeeds on an exited but unreaped
 # child (a zombie, state Z in /proc/PID/stat after the command name).
 sta_pid_alive() {
+  # An empty or non-numeric PID is not live: /proc//stat is /proc/stat.
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
   _sta_st=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)
   [ -n "$_sta_st" ] && [ "$_sta_st" != Z ] && [ "$_sta_st" != X ]
 }

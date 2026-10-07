@@ -232,9 +232,10 @@ struct mt7612u_dev {
 	unsigned io_err;          /* EP0 transfers that exhausted their retries */
 	int      transfers_stranded; /* libusb still owns a cancelled ring */
 	/* Frames whose bulk transfer was submitted and then did not complete -
-	 * errored, cancelled at a ring stop, or stranded with it - so never
-	 * reached the chip. Per device, so it outlives a ring restart; counted
-	 * in FRAMES, not transfers. mt7612u_tx_wire_failed(). */
+	 * errored, cancelled at a ring stop, or stranded with it - so may not
+	 * have reached the chip: an upper bound, as mt7612u_tx_wire_failed()
+	 * documents. Per device, so it outlives a ring restart; counted in
+	 * FRAMES, not transfers. */
 	std::atomic<uint64_t> tx_wire_failed{0};
 	/* libusb_transfer objects for the synchronous helpers (usb.cpp), taken
 	 * from here rather than allocated per call. Allocated in

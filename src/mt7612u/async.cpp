@@ -365,10 +365,14 @@ int mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len,
 		for (int i = 0; i < MT_TX_RING; i++)
 			if (!a->tx_busy[i]) { idx = i; break; }
 		if (idx >= 0) break;
-		if (a->cv.wait_until(a->lock, until) == std::cv_status::timeout) {
+		/* Refuse on the deadline only after the scan above: a slot freed
+		 * as the wait expired is still taken, rather than refusing a
+		 * send the ring could have carried. */
+		if (std::chrono::steady_clock::now() >= until) {
 			a->lock.unlock();
 			return -1;
 		}
+		a->cv.wait_until(a->lock, until);
 	}
 	a->tx_busy[idx] = 1;
 	a->tx_slot[idx].nframes = nframes;

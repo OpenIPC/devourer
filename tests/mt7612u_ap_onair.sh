@@ -150,6 +150,7 @@ cleanup() {
 # cleanup ignores a second INT/TERM: one arriving mid-cleanup would otherwise
 # abandon it with the adapter half reset.
 CLEANED=no
+# shellcheck disable=SC2317,SC2329  # reached through the traps
 on_int() { trap '' INT TERM; cleanup; CLEANED=yes; exit 3; }
 trap 'trap "" INT TERM; [ "$CLEANED" = yes ] || cleanup' EXIT
 trap on_int INT TERM

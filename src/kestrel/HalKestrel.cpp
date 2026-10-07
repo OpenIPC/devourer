@@ -2508,19 +2508,22 @@ void HalKestrel::bb_reset_all() {
   bb_rmw(0x3200, 0x7u << 28, 0x0);
   bb_rmw(0x704, 1u << 1, 1);
   if (_variant == ChipVariant::C8852C) {
-    /* cfg_phy_rpt (phy_rpt.c) for the 8852C R_AX_PPDU_STAT (0xCE40) =
-     * 0x0B000201: RPT_EN(0) | DMA_MODE(9, the is_chip_id(8852C) bit) | the PPDU
-     * report filter HAS_A1M/CRC_OK/DMA_OK (24/25/27). Devourer's byte-OR only
-     * sets RPT_EN; without the filter bits no PPDU gets a status report, so the
-     * 8852C emits zero physts.
-     *   NB the vendor's value ALSO sets APP_MAC_INFO(1)/APP_RX_CNT(2)/
-     * APP_PLCP_HDR(3), which PREPEND those blocks to the report and push the
-     * physts_hdr_info out of place (devourer parses the physts, not the appended
-     * MAC info) — with them set, the report reads as an invalid/empty physts
-     * (is_valid=0). Clearing them makes the report the bare physts, bit-identical
-     * to the 8852B (is_valid + rssi_avg_td + IE_01), which the RPKT_TYPE_PPDU
-     * handler + the halbb measurement bring-up (kestrel_halbb_rx_bringup 8852C
-     * branch) turn into a working per-frame RSSI/SNR passive floor.
+    /* cfg_ppdu_status (phy_rpt.c) for the 8852C: R_AX_PPDU_STAT (0xCE40) =
+     * RPT_EN | filter | append, plus B_AX_PPDU_STAT_DMA_MODE (bit 9) on the
+     * 8852C/8852D/8192XB. The vendor's filter bits are HAS_A1M/HAS_CRC_OK/
+     * HAS_DMA_OK = bits 4/5/6 and the append bits MAC_INFO/RX_CNT/PLCP =
+     * bits 1/2/3 (mac_def.h MAC_AX_PPDU_*), written as-is into the register.
+     * The value used here, 0x0B000201, sets neither group: bits 24/25/27 lie
+     * outside every documented field of this register (mac_reg_ax.h), and the
+     * measured behaviour on both buses is RPT_EN + DMA_MODE with no filter
+     * (every PPDU gets a report) and no appended blocks — which is what the parser
+     * wants: with MAC_INFO/RX_CNT/PLCP appended the physts_hdr_info is pushed
+     * out of place and the report reads as an invalid/empty physts
+     * (is_valid=0); bare, it is bit-identical to the 8852B's (is_valid +
+     * rssi_avg_td + IE_01), which the RPKT_TYPE_PPDU handler + the halbb
+     * measurement bring-up (kestrel_halbb_rx_bringup 8852C branch) turn into
+     * the per-frame RSSI/SNR passive floor. Measured identical on USB and PCIe
+     * (PCIe: ~2 status reports per frame on the RXQ, rpkt_type 1).
      * Also forward PPDU-status to the host, not the WLCPU (R_AX_HW_RPT_FWD
      * 0x9C18[1:0]=1). */
     const uint32_t pre = _device.rtw_read32(0xce40);

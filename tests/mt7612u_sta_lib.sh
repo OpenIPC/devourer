@@ -205,13 +205,14 @@ sta_pid_alive() {
 # is our child, and forget it. POLLED, never a bare `wait` first: a child
 # that ignores the signal - or a background job started with SIGINT ignored,
 # as a non-interactive shell starts them - would block that `wait` for good.
-# Returns 1, and says so, if it is still alive then (unreaped, so the caller
-# can escalate by PID); 0 otherwise, and silently when nothing is recorded.
+# Returns 1, and says so, if it is still alive then - unreaped, and STILL
+# RECORDED, so a later call (or sta_pid_live) still finds it and nothing is
+# started or re-enumerated under it; 0 otherwise, and silently when nothing
+# is recorded.
 sta_pid_kill() {
   [ -f "$OUT/.pid_$1" ] || return 0
   _sta_pid=$(cat "$OUT/.pid_$1" 2>/dev/null)
-  rm -f "$OUT/.pid_$1"
-  case "$_sta_pid" in ''|*[!0-9]*) return 0 ;; esac
+  case "$_sta_pid" in ''|*[!0-9]*) rm -f "$OUT/.pid_$1"; return 0 ;; esac
   kill "-${2:-TERM}" "$_sta_pid" 2>/dev/null
   _sta_t=0
   while sta_pid_alive "$_sta_pid"; do
@@ -221,8 +222,20 @@ sta_pid_kill() {
     fi
     sleep 0.1; _sta_t=$((_sta_t + 1))
   done
+  rm -f "$OUT/.pid_$1"
   wait "$_sta_pid" 2>/dev/null   # exited: reaps our child, no-op otherwise
   return 0
+}
+
+# sta_pid_kill, escalated to KILL when the first signal did not end it.
+# 1 when the process outlived both; its record is kept.
+sta_pid_kill_hard() {
+  sta_pid_kill "$1" "${2:-TERM}" || sta_pid_kill "$1" KILL
+}
+
+# 0 when a process recorded under $1 is still running.
+sta_pid_live() {
+  [ -f "$OUT/.pid_$1" ] && sta_pid_alive "$(cat "$OUT/.pid_$1" 2>/dev/null)"
 }
 
 # A USB device's identity as idVendor:idProduct:serial (serial empty when the

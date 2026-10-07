@@ -188,14 +188,17 @@ cleanup() {
   local dut_gone=0 peer_gone=0
   sta_pid_kill peer INT || peer_gone=1
   sta_pid_kill dut INT || dut_gone=1
-  sta_pid_kill hostapd
+  local ap_gone=0
+  sta_pid_kill_hard hostapd || ap_gone=1
   # Only once a process has really exited: re-enumerating an adapter still
   # inside its de-init is what the hand-back must not do.
   if [ "$dut_gone" = 0 ]; then sta_dev_handback dut "$DUT_SYSFS"
   else echo "DUT still running - not re-enumerating $DUT_SYSFS"; fi
   if [ "$peer_gone" = 0 ]; then sta_dev_handback peer "${PEER_SYSFS:-}"
   else echo "peer still running - not re-enumerating $PEER_SYSFS"; fi
-  if [ "$AP_REENUM" = yes ]; then
+  if [ "$AP_REENUM" = yes ] && [ "$ap_gone" = 1 ]; then
+    echo "hostapd outlived TERM and KILL - not re-enumerating AP_SYSFS=$AP_SYSFS"
+  elif [ "$AP_REENUM" = yes ]; then
     # hostapd's `bssid=` leaves the interface carrying that address after it
     # exits; re-enumerate rather than bounce the link
     # (tests/mt7612u_sta_identity.sh has the history).

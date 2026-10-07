@@ -291,12 +291,19 @@ cleanup() {
   sta_pid_kill probe
   sta_pid_kill inject
   sta_pid_kill inject_own
-  sta_pid_kill hostapd
+  local ap_free=yes
+  sta_pid_kill_hard hostapd || ap_free=no
   ns_exists && ip netns exec "$NS" iw dev "$MON" del 2>/dev/null
   # THE PHY COMES BACK BEFORE THE NAMESPACE GOES: `ip netns del` on a
   # namespace still holding a phy destroys the phy (only a re-enumeration
   # brings it back). So the delete is conditional on the move having worked.
-  if [ "$NS_OURS" = yes ] && ns_exists; then
+  # And neither happens under a hostapd that outlived TERM and KILL: moving
+  # its interface away from it is what the hand-back must not do.
+  if [ "$ap_free" = no ]; then
+    echo "WARNING: hostapd (pid $(cat "$OUT/.pid_hostapd" 2>/dev/null)) outlived TERM and" \
+         "KILL - leaving $AP_PHY in netns $NS. Once it is gone:"
+    echo "  sudo ip netns exec $NS iw phy $AP_PHY set netns 1; sudo ip netns del $NS"
+  elif [ "$NS_OURS" = yes ] && ns_exists; then
     ip netns exec "$NS" iw phy "$AP_PHY" set netns 1 2>/dev/null
     sleep 1
     if ip netns exec "$NS" ls /sys/class/ieee80211/ 2>/dev/null | grep -q .; then
@@ -376,6 +383,14 @@ wait_for() { # $1 file, $2 regex, $3 seconds
 # stdout: AP-STA-CONNECTED, EAPOL-4WAY-HS-COMPLETED and the rekey lines are
 # read from that file. AP up is judged by the interface type, not the log.
 ap_up() { # $1 open | wpa2 | wpa2norekey, $2 log tag
+  # Never a second hostapd on the interface while the recorded one lives (a
+  # kill that failed keeps its record): the replacement would fight it, and
+  # the original would be left untracked.
+  if sta_pid_live hostapd; then
+    echo "rig: the previous hostapd (pid $(cat "$OUT/.pid_hostapd")) is still" \
+         "running - not starting another" | tee "$OUT/hostapd_$2.log"
+    return 1
+  fi
   {
     printf 'interface=%s\ndriver=nl80211\nssid=%s\n' "$AP_IF" "$SSID"
     if [ "$CH" -le 14 ]; then printf 'hw_mode=g\n'; else printf 'hw_mode=a\n'; fi
@@ -661,7 +676,7 @@ dmesg_on_fail() {
     tail -10 | sed 's/^/  dmesg  /'
   return 0
 }
-cell_end() { sta_pid_kill probe; sta_stop; sta_pid_kill hostapd; dmesg_on_fail; }
+cell_end() { sta_pid_kill probe; sta_stop; sta_pid_kill_hard hostapd; dmesg_on_fail; }
 
 # Was each Unconfirmed verdict right? A verdict is right only for an
 # association the AP never held. sta_client stamps each association and each
@@ -836,7 +851,7 @@ cell_open() {
   sta_pid_record probe $!
   if ! wait_for "$OUT/hostapd_open.log" "AP-STA-CONNECTED $own" 30; then
     if proc_running "$STA_PID"; then bad "open: the AP never associated $own within 30 s"; cell_end
-    else sta_pid_kill probe; station_gone open; sta_pid_kill hostapd; fi
+    else sta_pid_kill probe; station_gone open; sta_pid_kill_hard hostapd; fi
     return
   fi
   sta_pid_kill probe
@@ -844,7 +859,7 @@ cell_open() {
   ping_ap open; case $? in
     0) ok "open: ping over the air, $(loss open)" ;;
     1) bad "open: ping $(loss open)" ;;
-    *) station_gone open; sta_pid_kill hostapd; return ;;
+    *) station_gone open; sta_pid_kill_hard hostapd; return ;;
   esac
   cell_end
   verdicts_scored open "$own" "$AP_IF"
@@ -879,20 +894,20 @@ run_wpa2() {
   tap_up || { inc "$cell: no TAP, or the route to $APIP does not leave through $TAP"; cell_end; return 1; }
   if ! wait_for "$OUT/hostapd_$cell.log" "EAPOL-4WAY-HS-COMPLETED $own" 30; then
     WPA2_LINK="no four-way"
-    if ! proc_running "$STA_PID"; then station_gone "$cell"; sta_pid_kill hostapd; return 1; fi
+    if ! proc_running "$STA_PID"; then station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; fi
     cell_end
     return 0
   fi
   local p=0
   if [ "$cell" = wpa2 ]; then ping_ap "$cell" || p=$?
   else ping_window "$cell" || p=$?; fi
-  if [ "$p" = 2 ]; then station_gone "$cell"; sta_pid_kill hostapd; return 1; fi
+  if [ "$p" = 2 ]; then station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; fi
   WPA2_LINK="four-way completed, ping $(loss "$cell")"
   [ "$p" = 0 ] && WPA2_LINK="$WPA2_LINK OK"
   INJ_FOREIGN=""; INJ_OWN=""
   if [ "$DUT_KIND" = mt7612u ] && { [ "$cell" = wpa2 ] || [ "$cell" = noarm ]; }; then
     inject_unicast "$cell"
-    proc_running "$STA_PID" || { station_gone "$cell"; sta_pid_kill hostapd; return 1; }
+    proc_running "$STA_PID" || { station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; }
   fi
   [ "$cell" = wpa2 ] || { cell_end; return 0; }
 
@@ -907,7 +922,7 @@ run_wpa2() {
     sleep 1; t=$((t + 1))
   done
   if ! proc_running "$STA_PID" && { [ "${gk:-0}" -lt 1 ] || [ "${pk:-0}" -lt 2 ]; }; then
-    station_gone "$cell"; sta_pid_kill hostapd; return 1
+    station_gone "$cell"; sta_pid_kill_hard hostapd; return 1
   fi
   if [ "${gk:-0}" -ge 1 ]; then ok "$cell: the AP completed a group rekey"
   else bad "$cell: no group rekey completed in ${lim}s"; fi
@@ -917,7 +932,7 @@ run_wpa2() {
   ping_ap "${cell}_after"; case $? in
     0) ok "$cell: ping after the rekeys, $(loss "${cell}_after")" ;;
     1) bad "$cell: ping after the rekeys $(loss "${cell}_after")" ;;
-    *) station_gone "$cell"; sta_pid_kill hostapd; return 1 ;;
+    *) station_gone "$cell"; sta_pid_kill_hard hostapd; return 1 ;;
   esac
   cell_end
   return 0
@@ -1022,19 +1037,22 @@ run_reconnect() {
   if ! wait_for "$OUT/hostapd_$cell.log" "EAPOL-4WAY-HS-COMPLETED $own" 30; then
     if proc_running "$STA_PID"; then
       inc "$cell: the first association never completed - nothing to reconnect"; cell_end
-    else station_gone "$cell"; sta_pid_kill hostapd; fi
+    else station_gone "$cell"; sta_pid_kill_hard hostapd; fi
     return
   fi
   ping_ap "$cell"; case $? in
     0) ;;
     1) inc "$cell: ping $(loss "$cell") before the loss - nothing to compare against"; cell_end; return ;;
-    *) station_gone "$cell"; sta_pid_kill hostapd; return ;;
+    *) station_gone "$cell"; sta_pid_kill_hard hostapd; return ;;
   esac
 
   # THE AP GOES AWAY (hostapd deauthenticates its stations on the way out,
   # and its beacons stop), then comes back on the same BSSID.
   echo "  stopping hostapd for ${DOWN_S}s"
-  sta_pid_kill hostapd
+  if ! sta_pid_kill_hard hostapd; then
+    inc "$cell: hostapd outlived TERM and KILL - no AP restart, no replacement started"
+    cell_end; return
+  fi
   sleep "$DOWN_S"
   if ! grep -q '^  station link lost:' "$OUT/sta_$cell.log"; then
     proc_running "$STA_PID" || { station_gone "$cell"; return; }
@@ -1057,19 +1075,19 @@ run_reconnect() {
     else
       if proc_running "$STA_PID"; then
         bad "$cell: no second four-way within ${REJOIN_S}s of the AP coming back"; cell_end
-      else station_gone "$cell"; sta_pid_kill hostapd; fi
+      else station_gone "$cell"; sta_pid_kill_hard hostapd; fi
       return
     fi
     ping_window "${cell}_after"; case $? in
       0) ok "$cell: ping after the re-join, $(loss "${cell}_after")" ;;
       1) bad "$cell: ping after the re-join, $(loss "${cell}_after")" ;;
-      *) station_gone "$cell"; sta_pid_kill hostapd; return ;;
+      *) station_gone "$cell"; sta_pid_kill_hard hostapd; return ;;
     esac
   else
     if [ "$rejoined" = yes ]; then
       bad "$cell: re-joined with DEVOURER_STA_RECONNECT=0"
     else
-      proc_running "$STA_PID" || { station_gone "$cell"; sta_pid_kill hostapd; return; }
+      proc_running "$STA_PID" || { station_gone "$cell"; sta_pid_kill_hard hostapd; return; }
       ok "$cell: no re-join within ${REJOIN_S}s with DEVOURER_STA_RECONNECT=0"
     fi
   fi

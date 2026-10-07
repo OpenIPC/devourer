@@ -105,7 +105,10 @@ cleanup() {
   else echo "DUT gate still running - not re-enumerating DUT_SYSFS=$DUT_SYSFS"; fi
   # hostapd -B daemonizes; its PID is the one it wrote to -P for this run.
   # Unconditional: nothing is recorded unless hostapd started.
-  sta_pid_kill hostapd
+  if ! sta_pid_kill_hard hostapd; then
+    echo "hostapd outlived TERM and KILL - not re-enumerating AP_SYSFS=$AP_SYSFS"
+    sta_lock_release; return 0
+  fi
   [ "$AP_REENUM" = yes ] || { sta_lock_release; return 0; }
   sleep 1
   iw dev staid_mon del 2>/dev/null

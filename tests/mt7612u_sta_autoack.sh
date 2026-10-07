@@ -100,8 +100,8 @@ cleanup() {
 trap cleanup EXIT
 # AND IT MUST STOP: with INT/TERM on the EXIT trap the shell runs cleanup
 # and then CARRIES ON into the next arm. CLEANED makes the EXIT pass after it
-# a no-op: sta_pid_kill forgets a PID on the first pass, so a second pass
-# would hand back an adapter the first refused to.
+# a no-op, so the hand-back is decided once - by the pass that ran the
+# kills.
 trap 'cleanup; exit 3' INT TERM
 
 sta_dut_take || exit 2

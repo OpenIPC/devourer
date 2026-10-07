@@ -69,6 +69,7 @@ public:
   void Stop() override {
     _rx_stop = true;
     stop_wp_drain();
+    pcie_quiesce();
   }
   void SetMonitorChannel(SelectedChannel channel) override;
   /* Disable / restore the MAC carrier-sense gate (R_AX_CCA_CFG_0 all-CCA-EN:
@@ -240,6 +241,12 @@ private:
   volatile bool _wp_drain_stop = true;
   void start_wp_drain();
   void stop_wp_drain();
+  /* PCIe: stop the HAXI DMA engine + clear the ring indices (HalKestrel::
+   * pcie_deinit) exactly once, from Stop() or the destructor, whichever comes
+   * first — an RX-only session has the RXQ DMA live too, and the transport
+   * unmaps the slab right after the device goes away. No-op on USB. */
+  void pcie_quiesce();
+  bool _pcie_quiesced = false;
   /* TX queue handles, bus-neutral: on USB the bulk-OUT endpoint (B0MG =
    * BULKOUTID0, ACH0 = BULKOUTID3), on PCIe the AX DMA channel itself (8, 0).
    * ACH0 is channel 0, so "TX is up" is its own flag, not a non-zero handle. */

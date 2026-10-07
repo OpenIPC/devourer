@@ -37,6 +37,7 @@
  * memory. */
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -133,6 +134,7 @@ private:
 
   RppStats _rpp{};
   uint64_t _rx_delivered = 0;
+  std::atomic<bool> _dead_logged{false};
 };
 
 } /* namespace devourer */

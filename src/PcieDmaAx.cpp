@@ -191,7 +191,20 @@ void PcieDmaAx::arm_rx_bd(RxRing &r, uint32_t idx) {
 }
 
 uint32_t PcieDmaAx::hw_idx(uint16_t reg_idx) {
-  return (_t.mmio_read<uint32_t>(reg_idx) >> 16) & IDX_MASK;
+  /* A ring index register reads back its 12-bit hardware index in [27:16].
+   * All-ones is the PCIe "nobody answered" value (device in reset / off the
+   * bus), never a valid index for a 256-entry ring: report it as kBdLen so
+   * every caller's `wp != hw` loop terminates instead of spinning forever. */
+  const uint32_t v = _t.mmio_read<uint32_t>(reg_idx);
+  if (v == 0xFFFFFFFFu) {
+    if (!_dead_logged.exchange(true))
+      _logger->error("PcieDmaAx: ring index 0x{:04x} reads all-ones — the "
+                     "device stopped answering (reset / link down)",
+                     reg_idx);
+    return kBdLen;
+  }
+  const uint32_t hw = (v >> 16) & IDX_MASK;
+  return hw < kBdLen ? hw : kBdLen;
 }
 
 void PcieDmaAx::setup_rings() {
@@ -235,6 +248,8 @@ bool PcieDmaAx::wait_consumed(TxRing &r, int ch, int timeout_ms) {
     const uint32_t hw = hw_idx(r.reg_idx);
     if (hw == r.wp)
       return true;
+    if (hw >= kBdLen)
+      return false; /* device gone — hw_idx logged it */
     if (std::chrono::steady_clock::now() > deadline) {
       _logger->error("PcieDmaAx: CH{} TXBD not consumed (wp={} hw={}) within "
                      "{} ms",
@@ -400,11 +415,11 @@ void PcieDmaAx::release_page(uint32_t seq, uint32_t status) {
 
 uint32_t PcieDmaAx::reap_rpq_locked() {
   const uint32_t hw = hw_idx(_rpq.reg_idx);
-  if (hw == _rpq.wp)
+  if (hw == _rpq.wp || hw >= kBdLen)
     return 0;
   std::atomic_thread_fence(std::memory_order_acquire);
   uint32_t n = 0;
-  while (_rpq.wp != hw) {
+  while (_rpq.wp != hw && n < kBdLen) {
     const uint8_t *buf = _rpq.bufs + static_cast<size_t>(_rpq.wp) * kRxBufSize;
     const uint32_t info = rd_le32(buf);
     const uint32_t blen = info & RXBD_INFO_LEN_MSK;
@@ -438,11 +453,11 @@ uint32_t PcieDmaAx::reap_rpq_locked() {
 uint32_t PcieDmaAx::reap_rxq(
     const std::function<void(const uint8_t *, int)> &on_data) {
   const uint32_t hw = hw_idx(_rxq.reg_idx);
-  if (hw == _rxq.wp)
+  if (hw == _rxq.wp || hw >= kBdLen)
     return 0;
   std::atomic_thread_fence(std::memory_order_acquire);
   uint32_t n = 0;
-  while (_rxq.wp != hw) {
+  while (_rxq.wp != hw && n < kBdLen) {
     const uint8_t *buf = _rxq.bufs + static_cast<size_t>(_rxq.wp) * kRxBufSize;
     const uint32_t info = rd_le32(buf);
     const uint32_t blen = info & RXBD_INFO_LEN_MSK;

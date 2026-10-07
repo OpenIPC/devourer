@@ -314,11 +314,16 @@ bool PcieTransport::setup_config_space() {
       _logger->info("PcieTransport: ASPM disabled for bring-up");
     }
     /* Disable completion timeout (DEVCTL2 bit4) — rtw88 does this specifically
-     * for the 8821C (rtw_pci_phy_cfg). */
-    uint16_t devctl2 = 0;
-    cfg_read(pcie_cap + 0x28, &devctl2, 2);
-    devctl2 |= 1u << 4;
-    cfg_write(pcie_cap + 0x28, &devctl2, 2);
+     * for the 8821C (rtw_pci_phy_cfg). Only there: with the timeout off, a
+     * read of a device that stops answering never completes and the CPU
+     * hangs in the MMIO load instead of seeing all-ones, so the AX parts
+     * (rtw89 leaves the timeout alone) keep it. */
+    if (_pci_did != kPciDidRtl8852ce) {
+      uint16_t devctl2 = 0;
+      cfg_read(pcie_cap + 0x28, &devctl2, 2);
+      devctl2 |= 1u << 4;
+      cfg_write(pcie_cap + 0x28, &devctl2, 2);
+    }
   } else {
     _logger->warn("PcieTransport: PCIe capability not found — skipping "
                   "ASPM/completion-timeout config");
@@ -370,7 +375,7 @@ bool PcieTransport::write32_wide(uint32_t addr, uint32_t v) {
     warn_oob(addr);
     return false;
   }
-  *reinterpret_cast<volatile uint32_t *>(_mmio + addr) = v;
+  mmio_write<uint32_t>(addr, v);
   return true;
 }
 
@@ -379,7 +384,42 @@ uint32_t PcieTransport::read32_wide(uint32_t addr) {
     warn_oob(addr);
     return 0;
   }
-  return *reinterpret_cast<volatile uint32_t *>(_mmio + addr);
+  return mmio_read<uint32_t>(addr);
+}
+
+uint32_t PcieTransport::read_split(uint32_t off, size_t n) {
+  /* Misaligned access: 16-bit halves when the offset allows, else bytes. */
+  uint32_t v = 0;
+  size_t done = 0;
+  while (done < n) {
+    const uint32_t a = off + static_cast<uint32_t>(done);
+    if ((a & 1) == 0 && n - done >= 2) {
+      v |= static_cast<uint32_t>(*reinterpret_cast<volatile uint16_t *>(_mmio + a))
+           << (8 * done);
+      done += 2;
+    } else {
+      v |= static_cast<uint32_t>(*reinterpret_cast<volatile uint8_t *>(_mmio + a))
+           << (8 * done);
+      done += 1;
+    }
+  }
+  return v;
+}
+
+void PcieTransport::write_split(uint32_t off, size_t n, uint32_t v) {
+  size_t done = 0;
+  while (done < n) {
+    const uint32_t a = off + static_cast<uint32_t>(done);
+    if ((a & 1) == 0 && n - done >= 2) {
+      *reinterpret_cast<volatile uint16_t *>(_mmio + a) =
+          static_cast<uint16_t>(v >> (8 * done));
+      done += 2;
+    } else {
+      *reinterpret_cast<volatile uint8_t *>(_mmio + a) =
+          static_cast<uint8_t>(v >> (8 * done));
+      done += 1;
+    }
+  }
 }
 
 int PcieTransport::tx_sync(uint8_t ep, uint8_t *buf, size_t len,

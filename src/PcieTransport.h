@@ -129,20 +129,35 @@ public:
 
   /* ---- plane-facing services ---- */
   /* Raw BAR2 access at a 32-bit offset, bounds-checked against the mapping
-   * (out of range: read 0 / write dropped, with a warning). */
+   * (out of range: read 0 / write dropped, with a warning).
+   *
+   * Alignment: a USB vendor request is byte-granular, so the HALs freely do
+   * 32-bit RMWs on 16-bit-aligned registers (R_AX_SYS_FUNC_EN at 0x0002 is
+   * the canonical one). Over MMIO that becomes a 4-byte TLP at a non-DWORD
+   * address, which the root complex answers with all-ones on read and drops
+   * on write — the BB never came out of reset on the 8852CE until this was
+   * found. A misaligned access is therefore split into the aligned pieces
+   * (16-bit halves, else bytes), assembled little-endian: same register
+   * semantics as the USB path, minus atomicity across the pieces. */
   template <typename T> T mmio_read(uint32_t off) {
     if (off + sizeof(T) > _mmio_len) {
       warn_oob(off);
       return 0;
     }
-    return *reinterpret_cast<volatile T *>(_mmio + off);
+    if ((off & (sizeof(T) - 1)) == 0)
+      return *reinterpret_cast<volatile T *>(_mmio + off);
+    return static_cast<T>(read_split(off, sizeof(T)));
   }
   template <typename T> void mmio_write(uint32_t off, T v) {
     if (off + sizeof(T) > _mmio_len) {
       warn_oob(off);
       return;
     }
-    *reinterpret_cast<volatile T *>(_mmio + off) = v;
+    if ((off & (sizeof(T) - 1)) == 0) {
+      *reinterpret_cast<volatile T *>(_mmio + off) = v;
+      return;
+    }
+    write_split(off, sizeof(T), static_cast<uint32_t>(v));
   }
   int msi_fd() const { return _msi_evt; }
   const Config &config() const { return _cfg; }
@@ -166,16 +181,18 @@ private:
                     reg);
       return 0;
     }
-    return *reinterpret_cast<volatile T *>(_mmio + reg);
+    return mmio_read<T>(reg);
   }
   template <typename T> bool guarded_write(uint16_t reg, T v) {
     if (!_dma->reg_allowed(reg)) {
       _logger->warn("write(0x{:04x}) on PCIe: USB-page register, dropped", reg);
       return false;
     }
-    *reinterpret_cast<volatile T *>(_mmio + reg) = v;
+    mmio_write<T>(reg, v);
     return true;
   }
+  uint32_t read_split(uint32_t off, size_t n);
+  void write_split(uint32_t off, size_t n, uint32_t v);
 
   Logger_t _logger;
   Config _cfg;

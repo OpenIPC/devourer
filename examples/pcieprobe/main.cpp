@@ -108,6 +108,55 @@ static int probe_8852c(RtlAdapter &adapter, Logger_t logger, int want) {
       .hexf("ser_err", err, 8);
   if (!fw_ok)
     return 1;
+  if (want >= 3) {
+    /* M3 (bb): is the BB register window (+0x10000, halbb/halrf's plane)
+     * reachable through BAR2? set_enable_bb_rf then read a few BB registers
+     * both ways (adapter wide path vs raw BAR offset) plus a MAC register. */
+    hal.enable_bb_rf();
+    /* Alias check: does the BAR decode more than 16 address bits? */
+    const uint32_t mac0 = adapter.rtw_read32(0x0000);
+    const uint32_t mac0c = adapter.rtw_read32(0x000c);
+    const uint32_t a2 = adapter.rtw_read32_wide(0x20000);
+    const uint32_t a3 = adapter.rtw_read32_wide(0x30000);
+    const uint32_t a4 = adapter.rtw_read32_wide(0x40000);
+    logger->info("M3 (8852C): alias check MAC[0x0]=0x{:08x} MAC[0xc]=0x{:08x} "
+                 "[0x20000]=0x{:08x} [0x30000]=0x{:08x} [0x40000]=0x{:08x}",
+                 mac0, mac0c, a2, a3, a4);
+    /* The post-init releases the PCIe IO stop; test the window both before
+     * and after it. */
+    const uint32_t pre4004 = adapter.rtw_read32_wide(0x14004);
+    adapter.rtw_write32_wide(0x14004, 0xCA014000u);
+    const uint32_t pre_wr = adapter.rtw_read32_wide(0x14004);
+    const uint32_t stop1 = adapter.rtw_read32(0x1010);
+    hal.pcie_init();
+    logger->info("M3 (8852C): before post-init: 0x4004={:08x} write->{:08x} "
+                 "HAXI_DMA_STOP1=0x{:08x}; now 0x{:08x}",
+                 pre4004, pre_wr, stop1, adapter.rtw_read32(0x1010));
+    const uint32_t bb0 = adapter.rtw_read32_wide(0x10000);
+    const uint32_t bb4004 = adapter.rtw_read32_wide(0x14004);
+    const uint32_t bb000c = adapter.rtw_read32_wide(0x1000c);
+    const uint32_t raw4004 = adapter.rtw_read32_wide(0x14004);
+    const uint32_t mac4004 = adapter.rtw_read32(0x4004);
+    logger->info("M3 (8852C): BB window: [0x10000]=0x{:08x} [0x14004]=0x{:08x} "
+                 "[0x1000c]=0x{:08x} raw[0x14004]=0x{:08x} MAC[0x4004]=0x{:08x}",
+                 bb0, bb4004, bb000c, raw4004, mac4004);
+    /* Write/readback through the window: does a BB write land? */
+    adapter.rtw_write32_wide(0x14004, 0xCA014000u);
+    const uint32_t wr4004 = adapter.rtw_read32_wide(0x14004);
+    const uint32_t old000c = bb000c;
+    adapter.rtw_write32_wide(0x1000c, old000c ^ 0x00000f00u);
+    const uint32_t wr000c = adapter.rtw_read32_wide(0x1000c);
+    adapter.rtw_write32_wide(0x1000c, old000c);
+    logger->info("M3 (8852C): BB write/readback: 0x4004 <- CA014000 reads "
+                 "0x{:08x}; 0x000c ^0xf00 reads 0x{:08x} (was 0x{:08x})",
+                 wr4004, wr000c, old000c);
+    devourer::Ev(logger->events(), "pcie.bb")
+        .hexf("bb_0", bb0, 8)
+        .hexf("bb_4004", bb4004, 8)
+        .hexf("bb_000c", bb000c, 8)
+        .hexf("wr_4004", wr4004, 8)
+        .hexf("wr_000c", wr000c, 8);
+  }
   hal.pcie_deinit();
   return 0;
 }
@@ -115,13 +164,13 @@ static int probe_8852c(RtlAdapter &adapter, Logger_t logger, int want) {
 
 int main(int argc, char **argv) {
   if (argc < 2) {
-    fprintf(stderr, "usage: %s <bdf e.g. 0000:01:00.0> [id|power|fw]\n",
+    fprintf(stderr, "usage: %s <bdf e.g. 0000:01:00.0> [id|power|fw|bb]\n",
             argv[0]);
     return 2;
   }
   const std::string bdf = argv[1];
   const std::string stage = argc > 2 ? argv[2] : "id";
-  const int want = stage == "fw" ? 2 : stage == "power" ? 1 : 0;
+  const int want = stage == "bb" ? 3 : stage == "fw" ? 2 : stage == "power" ? 1 : 0;
 
   auto logger = std::make_shared<Logger>();
 

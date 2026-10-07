@@ -95,10 +95,14 @@ RtlKestrelDevice::~RtlKestrelDevice() {
   _device.quiesce_tx();
   _rx_stop = true;
   stop_wp_drain();
-  /* PCIe: stop the HAXI DMA engine and clear the ring indices before the
-   * transport's slab goes away (rtw89_pci_ops_deinit). */
-  if (!_device.is_usb() && _tx_up)
-    _hal.pcie_deinit();
+  pcie_quiesce();
+}
+
+void RtlKestrelDevice::pcie_quiesce() {
+  if (_device.is_usb() || _pcie_quiesced)
+    return;
+  _pcie_quiesced = true;
+  _hal.pcie_deinit();
 }
 
 void RtlKestrelDevice::start_wp_drain() {

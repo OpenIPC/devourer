@@ -119,6 +119,15 @@ static RtlJaguarDevice *g_rtl_device = nullptr;
 /* Event sink for the demo's own JSONL emissions (packetProcessor is a free
  * function) — points at the main() Logger's sink, set before Init(). */
 static devourer::EventSink *g_ev = nullptr;
+/* Canonical-SA hits, for the final `rx.txhit` summary the harnesses read
+ * (the in-loop event only fires for the first 10 and every 100th hit). */
+static std::atomic<int> g_txhits{0};
+static void emit_txhit_final() {
+  devourer::Ev(*g_ev, "rx.txhit")
+      .f("hits", g_txhits.load())
+      .f("total_rx", g_rx_count.load())
+      .f("final", 1);
+}
 static std::unique_ptr<devourer::HopSchedule> g_hop_schedule;
 static uint64_t g_hop_slot_us = 0;
 static std::atomic<long long> g_hop_anchor_us{0};
@@ -1111,8 +1120,7 @@ static void packetProcessor(const Packet &packet) {
         std::getenv("DEVOURER_RX_KEEP_CORRUPTED") != nullptr;
     const bool corrupted = packet.RxAtrib.crc_err || packet.RxAtrib.icv_err;
     if (sa_canon) {
-      static int hits = 0;
-      ++hits;
+      const int hits = ++g_txhits;
       if (hits <= 10 || hits % 100 == 0) {
         /* rate/bw/ldpc/stbc mirror the rx.frame fields: for encoding-matrix
          * runs the txhit event alone must prove what encoding was decoded
@@ -1417,6 +1425,7 @@ int main(int argc, char **argv) {
     if (pcie_la_thread.joinable())
       pcie_la_thread.join();
     dev->Stop();
+    emit_txhit_final();
     return 0;
   }
 #endif /* DEVOURER_HAVE_PCIE */
@@ -2238,6 +2247,7 @@ int main(int argc, char **argv) {
       rx.join();
     stop_background_emitters.Run();
     dev->Stop();
+    emit_txhit_final();
     session.close();
     return 0;
   }
@@ -2344,6 +2354,7 @@ int main(int argc, char **argv) {
       rx.join();
     stop_background_emitters.Run();
     dev->Stop();
+    emit_txhit_final();
     session.close();
     return 0;
   }
@@ -2401,6 +2412,7 @@ int main(int argc, char **argv) {
   /* Clean chip de-init before dropping the interface (card-disable PWR_SEQ), so
    * the adapter re-enumerates instead of hanging its USB core. */
   rtlDevice->Stop();
+  emit_txhit_final();
 
   /* Device, then interface, handle and context (DeviceSession.h). Explicit
    * only because the process has nothing left to do here — the destructor

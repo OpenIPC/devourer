@@ -219,6 +219,66 @@ scheduler stalled and the bulk-OUT NAKed). Behavioural quirks beyond the
 the firmware DIG biases the 5 GHz idle-noise measurement):
 `docs/8852c-quirks.md`.
 
+## PCIe (RTL8852CE)
+
+The 8852CE is this HAL over the PCIe transport (`src/PcieDmaAx.cpp` is the
+DMA plane; root CLAUDE.md has the transport picture). Everything the HAL
+does differently on PCIe hangs off `is_usb()`; nothing here is a second HAL:
+
+- **Queue handles are DMA channels.** `KestrelFw` sends FWDL/H2C on handle 12
+  (the FWCMD ring) and `RtlKestrelDevice` injects on 8 (B0MG) / 0 (ACH0)
+  where USB uses the bulk-OUT endpoints; ACH0 is channel 0, so TX-up is its
+  own flag. The descriptors are byte-identical to USB (16-byte `rxd_short_t`
+  for fwcmd, `wd_body_t_v1` + `wd_info` for frames) minus the STF_MODE bit;
+  the plane adds the WD_PAGE bit, wp_info and the addr_info count.
+- **intf_pre_init = `pcie_pre_init`** (rtw89 `mac_pre_init_ax`, 8852C
+  branches): PHY EQ/deglitch/LDO/wake glue, IO-recovery watchdogs, stop the
+  HAXI DMA + idle poll, clear every ring index, mode_op (RXBD_PKT, 256/128 B
+  bursts, 8 tags, 256 ns WD intervals, TRUNC addr-info selects), program the
+  rings via `hci_setup`, reset the BDRAM, re-enable DMA with only CH12 open.
+  **intf_init = `pcie_init`**: LTR (hardware-decided, 500 µs space, 3.2 ms
+  idle timer), every TX channel open, WPDMA/PCIe-IO stops released.
+  **`pcie_deinit`** (LTR off, DMA stopped, indices cleared) runs from `Stop()`
+  or the destructor, whichever comes first — an RX-only session has the RXQ
+  DMA live, and the kernel logged a DMAR write fault into an RX buffer after
+  the one exit that skipped it.
+- **PCIe table rows**: DLE `dle_mem_pcie_8852c` SCC (WDE 64 B × 3328, HIF
+  quota 3228; PLE 128 B × 1904 with the `ple_qt46/47` columns), HFC
+  `hfc_chcfg_pcie_scc_8852c` {13,1614} on all 12 channels (ACH4-7 and the
+  band-1 queues in group 1), public 1614/1614/3228, `hfc_preccfg_pcie` with
+  MODE = POH, the DLFW H2C pre-cost 256; `set_host_rpr` POH (every filter
+  enabled, release-report destination queue POH); `dmac_func_pre_en` DMA
+  mode PCIE_1B; trxcfg's PCIe rows (24 µs pre-backoff AC + non-AC, hardware
+  CTS2SELF, 2 ms PTCL arbiter timeout). RXAGG and the WP-release drain
+  thread are USB-only; release reports arrive on the RPQ and the plane reaps
+  them inside every send and in the RX loop.
+- **Power-on** is `mac_pwr_on_nic_pcie_8852c`: the USB sequence plus
+  PD_REGU_L only when the HCI strap reads PCIE_USB, `0x70[12]` cleared,
+  GPIO16-18 pulled low. EFUSE: the PCIe interface block puts the MAC at 0x400
+  and the PCI vid/did at 0x406/0x408 (self-checking against config space).
+- **Not ported**: MSI (the plane polls the ring indices, 200 µs), the 8852BE
+  (refused at the factory), the CAV-cut-only `l12_vmain`/`gen2_force_ib` rows
+  (the lab modules are cut 1), and MSI-driven interrupt mitigation.
+
+Validation record (lab box, two RTL8852CE on one J6412: 05:00.0 on a root
+port, 09:00.0 behind an ASM1182e switch with the AER UR mask; witness = a
+TP-Link TX50UH / RTL8832CU on USB in the same chassis; ch 36, 6M, 2000
+frames per cell, `tests/pcie_8852ce_onair.sh`, exact `rx.txhit` counts):
+
+| TX → RX | delivered |
+|---|---|
+| USB → PCIe 05:00.0 | 2000/2000 |
+| PCIe 05:00.0 → USB | 1383/2000 |
+| USB → PCIe 09:00.0 | 1999/2000 |
+| PCIe 09:00.0 → USB | 1980/2000 |
+| PCIe 05:00.0 → PCIe 09:00.0 | 1489/2000 |
+
+Both PCIe receivers are at the ceiling; card 05:00.0 as a *transmitter* is
+the one that loses frames (69–82 % across three runs, to either witness),
+card 09:00.0 as a transmitter does not — same code, so this is that
+module's TX chain / antenna seating, not the plane. One lab, near field,
+no SDR: a delivery figure for this pair, not a link-budget claim.
+
 ## Scope
 
 The capstone is 11ax trigger-based UL + TWT (issue #236 — the v1.19 vendor

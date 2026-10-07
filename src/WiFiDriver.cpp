@@ -349,6 +349,34 @@ std::unique_ptr<IRadio> WiFiDriver::CreateRadioPcie(
     _logger->error("CreateRadioPcie: null transport");
     return nullptr;
   }
+  /* AX parts first, by PCI device id — on that silicon 0x00FC is
+   * R_AX_SYS_CHIPINFO (die-id), not a Jaguar chip-id, mirroring the USB
+   * factory's PID-first Kestrel dispatch. */
+  if (auto kvariant = kestrel::variant_for_pci_id(transport->pci_vendor_id(),
+                                                  transport->pci_device_id())) {
+    if (*kvariant != kestrel::ChipVariant::C8852C) {
+      _logger->error("PCI {:04x}:{:04x} at {} is an RTL8852BE: its PCIe power "
+                     "sequence is unported — refusing rather than running the "
+                     "USB one",
+                     transport->pci_vendor_id(), transport->pci_device_id(),
+                     transport->bdf());
+      return nullptr;
+    }
+#if defined(DEVOURER_HAVE_KESTREL_8852C)
+    _logger->info("Creating RtlKestrelDevice C8852C over PCIe ({}; PCI "
+                  "{:04x}:{:04x})",
+                  transport->bdf(), transport->pci_vendor_id(),
+                  transport->pci_device_id());
+    return std::make_unique<RtlKestrelDevice>(
+        RtlAdapter(std::move(transport), _logger, cfg), _logger,
+        kestrel::ChipVariant::C8852C, cfg);
+#else
+    _logger->error("RTL8852CE detected but 8852C support not compiled in "
+                   "(DEVOURER_KESTREL_8852C=OFF)");
+    return nullptr;
+#endif
+  }
+
   /* Chip identity from SYS_CFG2 (0x00FC) over BAR2 MMIO — the same dispatch
    * signal the USB factory reads via a vendor control transfer. */
   const uint8_t chip_id =
@@ -370,7 +398,7 @@ std::unique_ptr<IRadio> WiFiDriver::CreateRadioPcie(
   }
 
   _logger->error("PCIe chip-id 0x{:02x} at {} is not supported over PCIe "
-                 "(only RTL8821C[E], chip-id 0x09, for now)",
+                 "(RTL8821C[E] chip-id 0x09, or RTL8852CE by PCI id 10ec:c852)",
                  chip_id, transport->bdf());
   return nullptr;
 }

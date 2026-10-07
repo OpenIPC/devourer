@@ -214,6 +214,12 @@ jobs:
             flags: "-DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR2_8821C=OFF -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF -DDEVOURER_8733B=OFF -DDEVOURER_KESTREL_8852C=OFF"
           - name: kestrel-8852c-only
             flags: "-DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR2_8821C=OFF -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF -DDEVOURER_8733B=OFF -DDEVOURER_KESTREL_8852B=OFF"
+          - name: pcie+8821c-only
+            flags: "-DDEVOURER_PCIE=ON -DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF -DDEVOURER_8733B=OFF -DDEVOURER_KESTREL_8852B=OFF -DDEVOURER_KESTREL_8852C=OFF"
+          - name: pcie+kestrel-8852c-only
+            flags: "-DDEVOURER_PCIE=ON -DDEVOURER_JAGUAR1=OFF -DDEVOURER_8814=OFF -DDEVOURER_JAGUAR2_8822B=OFF -DDEVOURER_JAGUAR2_8821C=OFF -DDEVOURER_JAGUAR3_8822C=OFF -DDEVOURER_JAGUAR3_8822E=OFF -DDEVOURER_8733B=OFF -DDEVOURER_KESTREL_8852B=OFF"
+          - name: pcie+all
+            flags: "-DDEVOURER_PCIE=ON"
           # Jaguar1 stays ON because it has to: MT7612U is deliberately not
           # counted as chip support, so an MT7612U-only configure is a
           # FATAL_ERROR. This proves the subtree is independent of the other
@@ -298,6 +304,15 @@ jobs:
             echo "ERROR: configure should have failed (no chip selected)"; cat err.log; exit 1
           fi
           grep -q "No chip support selected" err.log
+
+      - name: Reject "PCIe without a PCIe-capable chip"
+        run: |
+          if cmake -B build-pcie-bad -DDEVOURER_PCIE=ON \
+                -DDEVOURER_JAGUAR2_8821C=OFF -DDEVOURER_KESTREL_8852C=OFF \
+                -S "${{ github.workspace }}" 2>err.log; then
+            echo "ERROR: configure should have failed (PCIe without 8821C or 8852C)"; cat err.log; exit 1
+          fi
+          grep -q "DEVOURER_PCIE=ON requires" err.log
 
       - name: Reject "8814 without jaguar1"
         run: |

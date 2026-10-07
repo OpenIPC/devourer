@@ -661,6 +661,52 @@ dmesg_on_fail() {
 }
 cell_end() { sta_pid_kill probe; sta_stop; sta_pid_kill hostapd; dmesg_on_fail; }
 
+# Was each Unconfirmed verdict right? A verdict is right only for an
+# association the AP never held. sta_client stamps each association and each
+# verdict with `at=` in hostapd -t's wall-clock form, so every verdict is
+# paired with the association it ended. If hostapd logged AP-STA-CONNECTED
+# for our address between that association and its verdict, the AP held it:
+# a false positive, FAIL. A CONNECTED logged after the verdict does not
+# count. The re-join's own probe or authentication can release a held
+# status, and hostapd then logs CONNECTED for the association the station
+# has already abandoned. The race the other way - the AP stamping its
+# CONNECTED a few ms before the station prints its own association line -
+# can only hide a false positive, never invent one. Without stamps it cannot
+# order anything: INCONCLUSIVE. $1 cell, $2 own address.
+verdicts_scored() {
+  local unconf pairs a v held bad_n=0 n=0
+  unconf=$(led "$1" 'unconfirmed')
+  [ "${unconf:-0}" -gt 0 ] 2>/dev/null || return 0
+  pairs=$(awk '
+    function at(  i) { for (i = 1; i <= NF; i++) if ($i ~ /^at=/) return substr($i, 4); return "-" }
+    /station connected \(association/ { a = at() }
+    /station association unconfirmed:/ { print (a == "" ? "-" : a), at() }
+  ' "$OUT/sta_$1.log")
+  while read -r a v; do
+    [ -n "$a" ] || continue
+    n=$((n + 1))
+    case "$a$v" in *-*)
+      inc "$1: verdict $n carries no at= stamp - cannot order it against hostapd's log"
+      return 0 ;;
+    esac
+    held=$(awk -v a="$a" -v b="$v" -v own="$2" '
+      $0 ~ ("AP-STA-CONNECTED " own) { t = $1; sub(/:$/, "", t)
+        if (t + 0 >= a + 0 && t + 0 <= b + 0) c++ }
+      END { print c + 0 }' "$OUT/hostapd_$1.log")
+    if [ "$held" -gt 0 ]; then
+      bad_n=$((bad_n + 1))
+      bad "$1: verdict $n (at $v) hit an association the AP held - hostapd logged AP-STA-CONNECTED $2 after it was made (at $a)"
+    fi
+  done <<EOF
+$pairs
+EOF
+  if [ "$n" != "$unconf" ]; then
+    inc "$1: the ledger counts $unconf unconfirmed verdict(s) but the log shows $n - cannot pair them"
+  elif [ "$bad_n" = 0 ]; then
+    info "$1: recovered: $unconf association(s) the AP did not hold were found unconfirmed and re-joined (none logged AP-STA-CONNECTED before its verdict; $(led "$1" 'associations') associations, assoc_repeat=$(led "$1" 'assoc_repeat'))"
+  fi
+}
+
 # --- open ---------------------------------------------------------------------
 cell_open() {
   CELL=open
@@ -691,21 +737,7 @@ cell_open() {
     *) station_gone open; sta_pid_kill hostapd; return ;;
   esac
   cell_end
-  # An Unconfirmed verdict is right only for an association the AP never
-  # held. hostapd logs AP-STA-CONNECTED once for each association it holds,
-  # so at most (associations - held) verdicts can be genuine; any more hit
-  # an association the AP held - a false positive, which costs the user a
-  # re-join and is what the one-strike bound in sta_client.cpp limits.
-  local unconf assoc held
-  unconf=$(led open 'unconfirmed'); assoc=$(led open 'associations')
-  held=$(grep -c "AP-STA-CONNECTED $own" "$OUT/hostapd_open.log")
-  if [ "${unconf:-0}" -gt 0 ] 2>/dev/null; then
-    if [ "$unconf" -gt $(( ${assoc:-0} - held )) ] 2>/dev/null; then
-      bad "open: ${unconf} unconfirmed verdict(s), but the AP held ${held} of the station's ${assoc:-?} associations - a verdict hit an association the AP held"
-    else
-      info "open: recovered: ${unconf} association(s) the AP did not hold were found unconfirmed and re-joined (${assoc:-?} associations, ${held} held by the AP, assoc_repeat=$(led open 'assoc_repeat'))"
-    fi
-  fi
+  verdicts_scored open "$own"
   local plain enc
   plain=$(led open 'plaintext rx'); enc=$(led open 'encrypted rx')
   if [ "${plain:-0}" -gt 0 ] && [ "${enc:-x}" = 0 ]; then

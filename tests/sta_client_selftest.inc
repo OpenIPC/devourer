@@ -1618,8 +1618,9 @@ void test_a_truncated_tcp_header_is_not_read() {
 }
 
 /* THE at= STAMPS are what the on-air harness orders against hostapd -t: the
- * wall clock (CLOCK_REALTIME), seconds and exactly six fractional digits, on
- * the association line AND the verdict line. Read back off stderr. */
+ * wall clock (CLOCK_REALTIME, within a minute of time()), seconds and exactly
+ * six fractional digits, on the association line AND the verdict line. Read
+ * back off stderr. */
 bool stamp_ok(const std::string& line, const char* what) {
   const size_t p = line.find(" at=");
   if (p == std::string::npos) {
@@ -1635,7 +1636,10 @@ bool stamp_ok(const std::string& line, const char* what) {
                       end - dot - 1 == 6 && end == t.size();
   const long long sec = digits ? std::atoll(t.c_str()) : 0;
   const long long now = (long long)time(nullptr);
-  const bool wall = sec >= now - 5 && sec <= now + 5;
+  /* Generous: the point is the wall clock rather than the monotonic one,
+   * which is off by about the epoch (~1.7e9 s), not a tight bound that a
+   * loaded or sanitised build could miss. */
+  const bool wall = sec >= now - 60 && sec <= now + 60;
   if (!digits || !wall)
     std::fprintf(stdout, "  (%s: at=%s - %s)\n", what, t.c_str(),
                  !digits ? "not sec.usec with 6 digits" : "not the wall clock");
@@ -1648,14 +1652,20 @@ void test_the_stamps_are_wall_clock_microseconds() {
   if (!cap) { check(false, "tmpfile for the stderr capture"); return; }
   std::fflush(stderr);
   const int saved = ::dup(2);
-  ::dup2(fileno(cap), 2);
+  if (saved < 0 || ::dup2(fileno(cap), 2) < 0) {
+    if (saved >= 0) ::close(saved);
+    std::fclose(cap);
+    check(false, "redirect stderr for the capture");
+    return;
+  }
   Ap ap;
   open_link_with_uplink(ap, (int)kConfirmUplink);
   supervise(10);
   supervise(10 + kConfirmMs);
   std::fflush(stderr);
-  ::dup2(saved, 2);
+  const bool restored = ::dup2(saved, 2) >= 0;
   ::close(saved);
+  check(restored, "stderr restored after the capture");
   std::rewind(cap);
   std::string assoc, verdict;
   char buf[512];

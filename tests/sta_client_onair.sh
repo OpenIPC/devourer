@@ -239,7 +239,9 @@ DUT_PID="0x${dut_have#*:}"
 # The firmware the library will load: the first of FW_DIR,
 # /lib/firmware/mediatek and ./firmware that holds both blobs - the order and
 # the test of resolve_fw_dir (src/mt7612u/Mt7612uRadio.cpp). That one must be
-# readable; with none, the refusal names FW_DIR.
+# readable; with none, the refusal names FW_DIR. ./firmware is relative to
+# the working directory, the same for both: this script never changes it, and
+# sta_up starts sta_client from it.
 if [ "$DUT_KIND" = mt7612u ]; then
   fw_pick=""
   for d in "$FW_DIR" /lib/firmware/mediatek firmware; do

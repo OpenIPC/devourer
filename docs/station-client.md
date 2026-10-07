@@ -129,7 +129,7 @@ first line then reads `fault=1`.
 
   | Cell | Scored |
   |---|---|
-  | `open` | with a ping running from the start, the AP associates our address within 30 s (recovering an unconfirmed first association counts); ping 0% loss over the TAP; ledger plaintext only; armed; the clear |
+  | `open` | with a ping running from the start, the AP associates our address within 30 s (recovering an unconfirmed first association counts; more `unconfirmed` verdicts than associations the AP never held - AP-STA-CONNECTED counts the held ones - FAILs, as a verdict on a held association); ping 0% loss over the TAP; ledger plaintext only; armed; the clear |
   | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; no four-way MIC failure, data-plane MIC failures <= PTK installs; armed; the clear; no `tx.retry_limit=0` warning. MT7612U: the managed filter - plaintext unicast injected from the AP's BSSID at the station (`plaintext refused` at least half of it, else INCONCLUSIVE) and at a foreign address (`not-for-us` under 1% of it - a PASS counts only once the `noarm` control of the same run has seen that stream arrive, else INCONCLUSIVE) |
   | `noarm` | control, `DEVOURER_STA_ARM=0`: no arm and no clear ran. Realtek: the station tried and the AP did NOT complete the four-way - a completed one FAILs; INCONCLUSIVE unless the armed `wpa2` cell of the same run got in (the positive control). MT7612U: under the monitor filter both injected streams arrive (each at least half); the link over a 30 s ping window is reported, not scored |
   | `retry0` | `DEVOURER_TX_RETRY_LIMIT=0`: the arm-time warning; the clear (the link over a 30 s ping window is reported, not scored) |

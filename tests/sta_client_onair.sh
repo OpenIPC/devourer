@@ -677,10 +677,20 @@ cell_open() {
     *) station_gone open; sta_pid_kill hostapd; return ;;
   esac
   cell_end
-  local unconf assoc
+  # An Unconfirmed verdict is right only for an association the AP never
+  # held. hostapd logs AP-STA-CONNECTED once for each association it holds,
+  # so at most (associations - held) verdicts can be genuine; any more hit
+  # an association the AP held - a false positive, which costs the user a
+  # re-join and is what the one-strike bound in sta_client.cpp limits.
+  local unconf assoc held
   unconf=$(led open 'unconfirmed'); assoc=$(led open 'associations')
+  held=$(grep -c "AP-STA-CONNECTED $own" "$OUT/hostapd_open.log")
   if [ "${unconf:-0}" -gt 0 ] 2>/dev/null; then
-    info "open: recovered: ${unconf} association(s) the AP did not hold were found unconfirmed and re-joined (${assoc:-?} associations, assoc_repeat=$(led open 'assoc_repeat'))"
+    if [ "$unconf" -gt $(( ${assoc:-0} - held )) ] 2>/dev/null; then
+      bad "open: ${unconf} unconfirmed verdict(s), but the AP held ${held} of the station's ${assoc:-?} associations - a verdict hit an association the AP held"
+    else
+      info "open: recovered: ${unconf} association(s) the AP did not hold were found unconfirmed and re-joined (${assoc:-?} associations, ${held} held by the AP, assoc_repeat=$(led open 'assoc_repeat'))"
+    fi
   fi
   local plain enc
   plain=$(led open 'plaintext rx'); enc=$(led open 'encrypted rx')

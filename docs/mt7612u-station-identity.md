@@ -312,9 +312,10 @@ filter. All of it runs under `Mt7612uRadio::_mu`, the lock the existing
 filter write and every channel change already take; the only other writes
 are `mt_mac_start()` and `StartRxLoop`'s `mt7612u_set_monitor_rx()`, the
 latter mediated as above, and the RX thread itself never writes it. The drop and restore writes are read back and a miss is
-logged (the clear re-verifies). `Stop()` clears a still-armed station before
-closing, best effort, because the chip keeps its registers across a close;
-every bring-up also rewrites the filter in `mt_mac_start()`. The
+logged (the clear re-verifies). `Stop()` does not clear a still-armed
+station: every bring-up rewrites the filter (the initvals, then
+`mt_mac_start()`), and so does mt76, so a filter left armed at a close
+reaches no later opener. The
 policy half is `mt7612u_sta_rx_filter_request()` / `mt7612u_sta_arm()` in
 `src/mt7612u/StationIdentity.h`, covered by ctest `mt7612u_station_identity`.
 

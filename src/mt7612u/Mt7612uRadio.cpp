@@ -393,6 +393,9 @@ void Mt7612uRadio::InitWrite(SelectedChannel channel) {
 
 void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   struct mt7612u_dev *mac_failed = nullptr;
+  /* An armed station keeps its managed filter: the monitor request below is
+   * recorded, not installed (mt7612u_set_monitor_rx). The log says which. */
+  bool station_filter = false;
   {
     /* The WHOLE prologue, arming through the failure teardown, under the same
      * lock StopRxLoop uses - and released before the sleep loop below, which
@@ -440,6 +443,8 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
        * value - see rule 2. Before it, this write is simply overwritten. */
       if (mt7612u_set_monitor_rx(_dev, _cfg.rx.keep_corrupted ? 1 : 0) != 0)
         _logger->warn("MT7612U monitor RX filter not applied");
+      uint8_t armed_bssid[6];
+      station_filter = mt7612u_station_bssid(_dev, armed_bssid) == 0;
       /* Arms the channel timers and zeroes the MIB counters. */
       mt7612u_link_stats_start(_dev);
       /* A window armed before this start was measuring the previous receiver
@@ -459,7 +464,8 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   if (mac_failed)
     throw std::runtime_error("MT7612U MAC start failed");
 
-  _logger->info("MT7612U monitor RX on channel {}", _channel.Channel);
+  _logger->info("MT7612U RX on channel {} ({} receive filter)",
+                _channel.Channel, station_filter ? "managed station" : "monitor");
 
   /* THE consumer. The C layer parses on its own event thread and enqueues; the
    * processor runs here, on the thread that called StartRxLoop, which is the
@@ -715,38 +721,16 @@ void Mt7612uRadio::Stop() {
    * teardown lock is what keeps a concurrent StopRxLoop from using the pointer
    * after this steals it. */
   struct mt7612u_dev *dev = nullptr;
-  bool filter_left = false;
   {
     std::lock_guard<std::mutex> teardown(_teardown_mu);
     std::lock_guard<std::recursive_mutex> lock(_mu);
     dev = _dev;
     _dev = nullptr;
-    if (dev) {
-      /* Best effort: the chip keeps its registers across a close, so a
-       * station still armed here would leave the managed receive filter for
-       * whoever opens the adapter next. Put the pre-arm filter back first;
-       * a no-op with nothing armed. Only a flag here - the logger can throw,
-       * and this clear must not be what skips the stop and the close below
-       * (`_dev` is already null, so an escape would leak the handle). Its
-       * own WARN goes through the same logger (log_trampoline), hence the
-       * catch. */
-      try {
-        filter_left = mt7612u_clear_station_identity(dev) != 0;
-      } catch (...) {
-        filter_left = true;
-      }
+    if (dev)
       mt7612u_stop(dev);
-    }
   }
   if (dev)
     mt7612u_close(dev);
-  if (filter_left) {
-    try {
-      _logger->warn("MT7612U: closed with the station's managed receive "
-                    "filter possibly still in force");
-    } catch (...) {
-    }
-  }
 }
 
 void Mt7612uRadio::SetTxPower(uint8_t power) {

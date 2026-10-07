@@ -77,8 +77,10 @@ ledger): see "AP quirk" below. On WPA2 a second one follows if no EAPOL has
 arrived 1 s later; the four-way timeout re-joins if even that is not
 enough.
 
-An open association is confirmed by the AP's first unicast frame to the
-station. A station cannot see the AP's side: if the AP never saw the
+An open association is confirmed by the AP's first unicast data frame to
+the station - one that carries an MSDU; a (QoS) Null, which an AP sends for
+power-save or keepalive probing either way, does not count. A station cannot
+see the AP's side: if the AP never saw the
 association response acknowledged, it does not hold the station, drops its
 traffic and may never say so. So once the host has asked three questions,
 and no unicast reply has come within 5 s of the first, the link is lost as

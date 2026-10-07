@@ -1401,6 +1401,38 @@ void test_a_unicast_reply_confirms_the_association() {
         "a unicast reply confirms the open association for good");
 }
 
+/* ONLY DATA CONFIRMS. A QoS Null from the AP (subtype bit 0x40, no body)
+ * reaches the plaintext path - is_qos_data admits it - but carries no MSDU:
+ * an AP sends one for power-save or keepalive probing whether or not it
+ * forwards our traffic, so it must leave the association unconfirmed. A
+ * plain Null is pinned too; it is dropped before that path. */
+void test_a_null_frame_does_not_confirm() {
+  /* 0: Null; 1: QoS Null; 2: QoS Null with trailing bytes - the subtype,
+   * not only the length, says there is no MSDU. */
+  for (int qos = 0; qos < 3; qos++) {
+    reset_all();
+    Ap ap;
+    open_link_with_uplink(ap, 0);
+    std::vector<uint8_t> m = devourer::sta::data_hdr_from_ds(
+        kStaMac, kBssid, kBssid, /*protect=*/false, ap.seq.next());
+    m[0] = qos ? 0xc8 : 0x48;                      /* QoS Null : Null */
+    if (qos) m.insert(m.begin() + 24, 2, 0);       /* QoS Control */
+    if (qos == 2) m.insert(m.end(), 8, 0xaa);
+    rx_frame(m.data(), m.size(), -40, 100);
+    uint8_t e[60];
+    ipv4_to_peer(e, 1, 0);
+    for (int i = 0; i < (int)kConfirmUplink; i++) tap_down_one(e, sizeof e);
+    drain_tx();
+    supervise(1000);
+    supervise(1000 + kConfirmMs);
+    check(g_sm.state() == StationSm::State::Failed &&
+              g_sm.fail_reason() == StationSm::Failure::Unconfirmed,
+          qos == 0   ? "a Null from the AP does not confirm the association"
+          : qos == 1 ? "a QoS Null from the AP does not confirm the association"
+                     : "a QoS Null with trailing bytes does not confirm either");
+  }
+}
+
 /* ONLY A UNICAST REPLY CONFIRMS: a group-addressed data frame from the AP
  * (a broadcast ARP, mDNS) reaches every station it ever held, and says
  * nothing about this association. */
@@ -2641,6 +2673,7 @@ int self_test() {
   selftest::test_multicast_chatter_is_not_judged();
   selftest::test_fewer_questions_than_the_threshold_are_not_judged();
   selftest::test_a_group_frame_from_the_ap_does_not_confirm();
+  selftest::test_a_null_frame_does_not_confirm();
   selftest::test_what_counts_as_a_question();
   selftest::test_a_struck_bss_backs_off();
   selftest::test_a_group_frame_does_not_reset_the_backoff();

@@ -625,7 +625,13 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
       if (!eapol && !no_data) g_plain_refused.fetch_add(1);
       return;
     }
-    if (to_us) {                        /* the AP holds this association */
+    /* The AP holds this association once it forwards us DATA: a frame with
+     * a data subtype and a body. A QoS Null (no-data subtype bit 0x40,
+     * admitted by is_qos_data above) carries no MSDU, and an AP sends one
+     * for power-save or keepalive probing whether or not it forwards our
+     * traffic. (A plain Null, 0x48, never gets this far: it is neither
+     * kFcData nor QoS data.) */
+    if (to_us && !(fc0 & 0x40) && len > hlen) {
       g_judge = false;
       g_strikes = 0;                    /* ...so its BSS backs off no more */
     }

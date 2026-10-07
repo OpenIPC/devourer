@@ -16,12 +16,15 @@
 #     cannot share - and kill each other through - one set of PID files. The
 #     kernel drops the lock when the last holder exits, so there is no owner
 #     record to race and no stale lock to reclaim. Two runs with different
-#     OUTs are NOT kept apart by this lock, and an adapter is held only
-#     while a devourer process has it open - between two gates nothing does.
-#     So sta_dut_take() refuses an MT7612U that mt76x2u does not hold: an
-#     interface with no driver bound is another run's, or a crashed one's,
-#     and taking it would hand it back (an `authorized` toggle) under that
-#     run.
+#     OUTs are NOT kept apart by this lock. sta_dut_take() refuses an
+#     MT7612U with a LIVE holder - an interface bound to a driver other than
+#     mt76x2u (usbfs: a process has claimed it), or a process with its
+#     /dev/bus/usb node open - so a run never toggles `authorized` under a
+#     devourer process. An unbound interface nothing holds is taken as it is:
+#     a devourer demo detaches mt76x2u and never reattaches it, and a host
+#     may blacklist mt76x2u (docs/mt7612u.md). What this cannot see is
+#     another harness between two of its gates, when nothing holds the
+#     adapter: give concurrent runs different adapters.
 #   - Kill only what this run started, by recorded PID. No pattern kills, and
 #     no PID read from a file an earlier run left behind: sta_pid_init()
 #     removes stale PID files before anything is started.
@@ -99,33 +102,53 @@ sta_is_mt7612u() {
 
 STA_DUT_TAKEN=no
 STA_DUT_ID=""
-# Refuse a DUT_SYSFS that is not an MT7612U, or whose interface 0 mt76x2u
-# does not hold (nothing bound: another run, or a crashed one, has it; usbfs:
-# a devourer process has it open). Then unbind it from mt76x2u and require
-# that interface 0 really has no driver afterwards - a failed unbind leaves
-# the kernel driver owning the chip under the probe. Only a DUT that was taken
-# is handed back, and only while DUT_SYSFS still reports the
-# idVendor:idProduct:serial recorded here.
+# The PID of a process that has the USB device at sysfs path $1 open
+# (/dev/bus/usb/BBB/DDD), or nothing. Root sees every process's fds.
+sta_usb_holder() {
+  _sta_b=$(cat "/sys/bus/usb/devices/$1/busnum" 2>/dev/null)
+  _sta_d=$(cat "/sys/bus/usb/devices/$1/devnum" 2>/dev/null)
+  [ -n "$_sta_b" ] && [ -n "$_sta_d" ] || return 0
+  _sta_h=$(find /proc/[0-9]*/fd -maxdepth 1 \
+             -lname "$(printf '/dev/bus/usb/%03d/%03d' "$_sta_b" "$_sta_d")" \
+             2>/dev/null | head -1)
+  [ -n "$_sta_h" ] || return 0
+  _sta_h=${_sta_h#/proc/}
+  echo "${_sta_h%%/*}"
+}
+
+# Refuse a DUT_SYSFS that is not an MT7612U, or that something live holds:
+# interface 0 bound to a driver other than mt76x2u (usbfs: a process has
+# claimed it), or a process with its device node open. Then unbind it from
+# mt76x2u if that is bound, and require that interface 0 really has no
+# driver afterwards - a failed unbind leaves the kernel driver owning the
+# chip under the probe. An unbound interface nothing holds is taken as it is
+# (an earlier devourer session left it so, or mt76x2u is not loaded). Only a
+# DUT that was taken is handed back, and only while DUT_SYSFS still reports
+# the idVendor:idProduct:serial recorded here.
 sta_dut_take() {
   if ! sta_is_mt7612u "$DUT_SYSFS"; then
     echo "refusing DUT_SYSFS=$DUT_SYSFS - not an MT7612U (0e8d:7612)"
     return 1
   fi
   _sta_drv="/sys/bus/usb/devices/$DUT_SYSFS:1.0/driver"
-  if [ ! -e "$_sta_drv" ]; then
-    echo "refusing DUT_SYSFS=$DUT_SYSFS - interface 0 has no driver bound, so" \
-         "another run (or a crashed one) holds it. Once nothing uses it," \
-         "re-enumerate it (authorized 0 then 1) so mt76x2u (loaded) binds again"
+  if [ -e "$_sta_drv" ]; then
+    _sta_drv=$(basename "$(readlink -f "$_sta_drv")")
+    if [ "$_sta_drv" != mt76x2u ]; then
+      echo "refusing DUT_SYSFS=$DUT_SYSFS - interface 0 is held by" \
+           "$_sta_drv (usbfs: a process has claimed it)"
+      return 1
+    fi
+  fi
+  _sta_pid=$(sta_usb_holder "$DUT_SYSFS")
+  if [ -n "$_sta_pid" ]; then
+    echo "refusing DUT_SYSFS=$DUT_SYSFS - PID $_sta_pid" \
+         "($(cat "/proc/$_sta_pid/comm" 2>/dev/null)) has its USB device open"
     return 1
   fi
-  _sta_drv=$(basename "$(readlink -f "$_sta_drv")")
-  if [ "$_sta_drv" != mt76x2u ]; then
-    echo "refusing DUT_SYSFS=$DUT_SYSFS - interface 0 is held by $_sta_drv," \
-         "not mt76x2u"
-    return 1
+  if [ "$_sta_drv" = mt76x2u ]; then
+    echo "$DUT_SYSFS:1.0" > /sys/bus/usb/drivers/mt76x2u/unbind 2>/dev/null
+    sleep 2
   fi
-  echo "$DUT_SYSFS:1.0" > /sys/bus/usb/drivers/mt76x2u/unbind 2>/dev/null
-  sleep 2
   if [ -e "/sys/bus/usb/devices/$DUT_SYSFS:1.0/driver" ]; then
     echo "could not free DUT_SYSFS=$DUT_SYSFS: interface 0 is still bound to" \
          "$(basename "$(readlink -f "/sys/bus/usb/devices/$DUT_SYSFS:1.0/driver")")"
@@ -148,6 +171,17 @@ sta_dut_handback() {
   echo 0 > "/sys/bus/usb/devices/$DUT_SYSFS/authorized" 2>/dev/null
   sleep 2
   echo 1 > "/sys/bus/usb/devices/$DUT_SYSFS/authorized" 2>/dev/null
+  # Back to bound before the next run starts: wait, up to 5 s, for mt76x2u
+  # to probe it again - when mt76x2u is loaded at all.
+  [ -d /sys/bus/usb/drivers/mt76x2u ] || return 0
+  _sta_t=0
+  until [ -e "/sys/bus/usb/devices/$DUT_SYSFS:1.0/driver" ]; do
+    if [ "$_sta_t" -ge 50 ]; then
+      echo "DUT_SYSFS=$DUT_SYSFS: mt76x2u did not bind again within 5 s"
+      return 0
+    fi
+    sleep 0.1; _sta_t=$((_sta_t + 1))
+  done
 }
 
 # PID files live in $OUT as .pid_<name>. Every name a script uses is listed

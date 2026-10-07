@@ -90,19 +90,23 @@ any other TCP segment and an idle host are never judged.
 
 A question can also go unanswered on a healthy link: the host pings or ARPs
 a peer that is switched off, or its DNS has no upstream. So the rule is a
-bounded backstop, with one strike per BSS. It fires at most once on a BSS
-until an association on that BSS has been confirmed. The re-joined
-association after a verdict is not judged, and a unicast reply, or an
-association on a different BSS, lifts the strike. A host asking a dead peer
-therefore costs one re-join, not one every 5 s. The cost: a second unheld
-association on the struck BSS is not found by this rule, and its traffic is
-lost until something else ends or confirms it (beacon loss, a
-deauthentication, the AP's first reply). An unheld association under
-one-way traffic alone is found only when the host's stack next asks
-something (its neighbour re-verification is a unicast ARP request). WPA2
+backstop that backs off per BSS. The first verdict on a BSS fires as
+described. After n consecutive verdicts on a BSS, the next association on
+it is judged only once 5 s x 2^n has passed since it was made: 10 s, 20 s,
+40 s, 80 s, then 2 minutes, the cap. Questions asked inside the backoff are
+not counted. A unicast reply from the AP, or an association on a different
+BSS, resets the count; a broadcast does not. The cost: with a dead peer,
+the station re-joins at most once per backoff period, the periods growing
+to one re-join every 2 minutes (plus the 5 s window). And an association
+the AP really dropped is found up to one backoff period late, its traffic
+lost until then. An unheld association under one-way traffic alone is
+found only when the host's stack next asks something (its neighbour
+re-verification is a unicast ARP request). WPA2
 needs no such rule (the four-way is the confirmation). The ledger counts
 the verdicts (`unconfirmed=`) and repeated association responses
-(`assoc_repeat=`).
+(`assoc_repeat=`). Each association and each verdict line carries `at=`,
+the wall-clock time in the form `hostapd -t` stamps its lines with, so the
+on-air harness can order them against the AP's log.
 
 Exit status: 0 the run completed; 1 setup failed; 2 refused
 (`station_mode_ok` false, or the duration, `DEVOURER_CHANNEL`,

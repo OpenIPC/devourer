@@ -81,6 +81,8 @@
 #include <thread>
 #include <vector>
 
+#include <time.h>
+
 #include <csignal>
 #include <fcntl.h>
 #include <linux/if.h>
@@ -322,24 +324,52 @@ int8_t rssi_dbm(uint8_t raw) {
  * link: the host pings or ARPs a peer that is switched off, or its DNS has
  * no upstream.
  *
- * ONE STRIKE PER BSS. So the verdict is a bounded backstop: it fires at most
- * once per BSS until an association on that BSS has been confirmed. After
- * one Unconfirmed verdict the re-joined association on the same BSS is not
- * judged (g_strike), so a host asking a dead peer costs one re-join, not one
- * every kConfirmMs. A unicast reply on that BSS, or an association on a
- * different one, lifts it. The cost: a second unheld association on the
- * struck BSS is not found by this rule, and its traffic is lost until
- * something else (beacon loss, a deauthentication, the AP's first reply)
- * ends or confirms it. And an unheld association under one-way traffic alone
- * is found only when the host's stack next asks something (its neighbour
- * re-verification is a unicast ARP request). */
+ * BACKOFF PER BSS. So consecutive verdicts on one BSS back off: after n of
+ * them (g_strikes), the next association on that BSS is judged only once
+ * kConfirmMs * 2^n has passed since it was made (strike_backoff_ms), capped
+ * at kStrikeCapMs. Questions asked inside the backoff are not counted. A
+ * host asking a dead peer therefore costs at most one re-join per backoff
+ * period - 10 s, 20 s, 40 s ... then one every 2 minutes - instead of one
+ * every kConfirmMs, while an association the AP really dropped is still
+ * found, at worst a backoff period late. A unicast reply (the confirmation)
+ * or an association on a different BSS resets the count. An unheld
+ * association under one-way traffic alone is found only when the host's
+ * stack next asks something (its neighbour re-verification is a unicast ARP
+ * request). */
 constexpr uint32_t kConfirmMs = 5000;
 constexpr uint32_t kConfirmUplink = 3;
-/* An open association with no unicast reply yet, on a BSS whose strike is
- * not spent: the verdict may fire for it. */
+constexpr uint32_t kStrikeCapMs = 120000;
+/* docs/station-client.md and the on-air harness state these numbers. */
+static_assert(kConfirmMs == 5000 && kConfirmUplink == 3 &&
+                  kStrikeCapMs == 120000,
+              "docs/station-client.md documents 3 questions / 5 s / a 2 min "
+              "backoff cap: change them together");
+/* An open association with no unicast reply yet: the verdict may fire for
+ * it, once g_judge_from_ms has passed. */
 bool g_judge = false;
-bool g_strike = false;              /* the one verdict is spent on... */
+uint32_t g_judge_from_ms = 0;
+uint32_t g_strikes = 0;             /* consecutive verdicts on... */
 uint8_t g_strike_bss[6] = {0};      /* ...this BSS */
+
+/* How long an association on a BSS with `strikes` consecutive verdicts waits
+ * before it is judged: 0, then kConfirmMs * 2^strikes, capped. */
+uint32_t strike_backoff_ms(uint32_t strikes) {
+  if (strikes == 0) return 0;
+  uint32_t d = kConfirmMs;
+  for (uint32_t i = 0; i < strikes && d < kStrikeCapMs; i++) d *= 2;
+  return d < kStrikeCapMs ? d : kStrikeCapMs;
+}
+
+/* Wall-clock seconds.microseconds, the form hostapd -t stamps its lines
+ * with, so the on-air harness can order the station's events against the
+ * AP's. Into `buf`, which it returns. */
+const char* wall_stamp(char* buf, size_t n) {
+  struct timespec ts {};
+  clock_gettime(CLOCK_REALTIME, &ts);
+  std::snprintf(buf, n, "%lld.%06ld", (long long)ts.tv_sec,
+                (long)(ts.tv_nsec / 1000));
+  return buf;
+}
 bool g_uplink_seen = false;         /* supervise() saw the first question */
 uint32_t g_uplink_first_ms = 0;     /* ...at this time: the window opens */
 uint32_t g_uplink_unconfirmed = 0;
@@ -424,11 +454,12 @@ void nudge(uint32_t now) {
   g_nudge_ms = now;
 }
 
-void on_association() {
-  /* The one strike is per BSS: a different BSS is judged afresh. */
-  if (g_strike && std::memcmp(g_strike_bss, g_sm.bssid(), 6) != 0)
-    g_strike = false;
-  g_judge = g_sm.security() == StationSm::Security::Open && !g_strike;
+void on_association(uint32_t now) {
+  /* The backoff is per BSS: a different BSS is judged afresh. */
+  if (g_strikes && std::memcmp(g_strike_bss, g_sm.bssid(), 6) != 0)
+    g_strikes = 0;
+  g_judge = g_sm.security() == StationSm::Security::Open;
+  g_judge_from_ms = now + strike_backoff_ms(g_strikes);
   g_uplink_seen = false;
   g_uplink_unconfirmed = 0;
   g_rx_dup.reset();
@@ -437,8 +468,9 @@ void on_association() {
   const uint64_t n = g_associations.fetch_add(1) + 1;
   /* One line per association, so a re-join is visible while the run lasts
    * and not only in the exit ledger. */
-  std::fprintf(stderr, "  station connected (association %llu)\n",
-               (unsigned long long)n);
+  char at[32];
+  std::fprintf(stderr, "  station connected (association %llu) at=%s\n",
+               (unsigned long long)n, wall_stamp(at, sizeof at));
 }
 
 /* A REKEY RESTARTS A PN SPACE, and the windows restart with it - both
@@ -528,7 +560,7 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
     g_nudge_eapol_rx = g_sm.eapol_rx;
   }
   if (before != StationSm::State::Connected && g_sm.connected())
-    on_association();
+    on_association(now);
   if (g_sm.connected()) note_keys();
 
   /* The data plane runs only on a live association: a protected frame that
@@ -595,7 +627,7 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
     }
     if (to_us) {                        /* the AP holds this association */
       g_judge = false;
-      g_strike = false;                 /* ...so its BSS is judged again */
+      g_strikes = 0;                    /* ...so its BSS backs off no more */
     }
     g_plain_rx.fetch_add(1);
     if (len > hlen) tap_up(da, sa, mpdu + hlen, len - hlen);
@@ -807,6 +839,9 @@ uint8_t supervise(uint32_t now) {
   /* An unconfirmed open association the host has been talking through
    * (see kConfirmMs) - lost, through the ordinary failure path below. The
    * window opens the first time this pass sees a question. */
+  /* Inside a struck BSS's backoff nothing is judged, and its questions are
+   * dropped: the window must open at a question asked after it. */
+  if (g_judge && (int32_t)(now - g_judge_from_ms) < 0) g_uplink_unconfirmed = 0;
   if (g_judge && g_uplink_unconfirmed > 0 && !g_uplink_seen) {
     g_uplink_seen = true;
     g_uplink_first_ms = now;
@@ -814,12 +849,18 @@ uint8_t supervise(uint32_t now) {
   if (g_sm.state() == StationSm::State::Connected && g_judge &&
       g_uplink_seen && g_uplink_unconfirmed >= kConfirmUplink &&
       (uint32_t)(now - g_uplink_first_ms) >= kConfirmMs) {
+    char at[32];
     std::fprintf(stderr,
                  "  station association unconfirmed: %u frames sent, no "
-                 "unicast reply from the AP in %u ms\n",
-                 g_uplink_unconfirmed, (unsigned)(now - g_uplink_first_ms));
+                 "unicast reply from the AP in %u ms at=%s\n",
+                 g_uplink_unconfirmed, (unsigned)(now - g_uplink_first_ms),
+                 wall_stamp(at, sizeof at));
     g_judge = false;
-    g_strike = true;                   /* the one strike for this BSS */
+    /* One more consecutive verdict on this BSS: the next association on it
+     * waits longer before it is judged. */
+    if (g_strikes && std::memcmp(g_strike_bss, g_sm.bssid(), 6) != 0)
+      g_strikes = 0;
+    g_strikes++;
     std::memcpy(g_strike_bss, g_sm.bssid(), 6);
     g_unconfirmed_lost.fetch_add(1);
     g_sm.link_lost();

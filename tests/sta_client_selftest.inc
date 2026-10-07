@@ -108,7 +108,8 @@ void reset_all() {
   g_tap_read_err = 0;
   g_end = RunEnd{};
   g_judge = false;
-  g_strike = false;
+  g_judge_from_ms = 0;
+  g_strikes = 0;
   std::memset(g_strike_bss, 0, 6);
   g_uplink_seen = false;
   g_uplink_first_ms = 0;
@@ -1282,7 +1283,7 @@ void test_multicast_chatter_is_not_judged() {
 
   /* ...but ARP requests are questions: an ARP that is never answered is how
    * an AP that dropped us shows - the first time on this BSS (the one
-   * strike; test_one_strike_per_bss). */
+   * verdict on it fires at once; test_a_struck_bss_backs_off). */
   for (int i = 0; i < (int)kConfirmUplink; i++) {
     uint8_t e[60];
     arp_request(e, 2, 1);
@@ -1463,10 +1464,12 @@ void test_what_counts_as_a_question() {
   check(!is_question(e6, sizeof e6), "a multicast ICMPv6 echo request is not");
 }
 
-/* ONE STRIKE PER BSS. A host that keeps asking a peer that is switched off
- * gets no answer on a perfectly healthy link. The verdict fires once; the
- * re-joined association on the same BSS is not judged again, so the link is
- * not torn down every kConfirmMs. A unicast reply lifts the strike. */
+/* BACKOFF PER BSS. A host that keeps asking a peer that is switched off gets
+ * no answer on a perfectly healthy link. The first verdict fires at once;
+ * each re-joined association on the same BSS is then judged only after a
+ * backoff that doubles per consecutive verdict, so the link is not torn down
+ * every kConfirmMs - but an association the AP really dropped is still found.
+ * A unicast reply resets it; a group frame does not. */
 uint32_t rejoin_open(uint32_t now) {
   const std::vector<uint8_t> b = beacon(false);
   rx_frame(b.data(), b.size(), -40, now);
@@ -1485,55 +1488,102 @@ uint32_t rejoin_open(uint32_t now) {
   return now;
 }
 
-void test_one_strike_per_bss() {
-  reset_all();
-  Ap ap;
-  open_link_with_uplink(ap, (int)kConfirmUplink);
-  supervise(10);
-  supervise(10 + kConfirmMs);
-  check(g_sm.fail_reason() == StationSm::Failure::Unconfirmed,
-        "the first verdict on a BSS fires");
-  uint32_t now = rejoin_open(10 + kConfirmMs + 200);
-  check(g_sm.state() == StationSm::State::Connected &&
-            g_associations.load() == 2,
-        "...and the station re-joins");
+/* A ping to the dead peer every second over [from, to], each followed by a
+ * supervise pass. The time of the pass at which a verdict fired, or 0. */
+uint32_t ping_until(uint32_t from, uint32_t to) {
+  const uint64_t lost = g_unconfirmed_lost.load();
   uint8_t e[60];
-  ipv4_to_peer(e, 1, 0);                           /* the dead peer, again */
-  for (uint32_t t = now; t <= now + kConfirmMs * 4; t += 1000) {
+  ipv4_to_peer(e, 1, 0);
+  for (uint32_t t = from; t <= to; t += 1000) {
     tap_down_one(e, sizeof e);
     drain_tx();
     supervise(t);
+    if (g_unconfirmed_lost.load() != lost) return t;
   }
-  check(g_sm.state() == StationSm::State::Connected &&
-            g_unconfirmed_lost.load() == 1,
-        "the re-joined association on the struck BSS is not judged again");
+  return 0;
+}
 
-  /* A unicast reply lifts the strike: the next association is judged. */
+/* A first verdict on kBssid, then the re-join. Returns its time. */
+uint32_t struck_and_rejoined(Ap& ap) {
+  open_link_with_uplink(ap, (int)kConfirmUplink);
+  supervise(10);
+  supervise(10 + kConfirmMs);
+  check(g_unconfirmed_lost.load() == 1, "the first verdict on a BSS fires at once");
+  const uint32_t t = rejoin_open(10 + kConfirmMs + 200);
+  check(g_sm.state() == StationSm::State::Connected &&
+            g_associations.load() == 2,
+        "...and the station re-joins");
+  return t;
+}
+
+void test_a_struck_bss_backs_off() {
+  check(strike_backoff_ms(0) == 0 && strike_backoff_ms(1) == 2 * kConfirmMs &&
+            strike_backoff_ms(2) == 4 * kConfirmMs &&
+            strike_backoff_ms(5) == kStrikeCapMs &&
+            strike_backoff_ms(40) == kStrikeCapMs,
+        "the backoff doubles per consecutive verdict, capped at kStrikeCapMs");
+  reset_all();
+  Ap ap;
+  uint32_t t = struck_and_rejoined(ap);
+
+  const uint32_t b1 = t + strike_backoff_ms(1);
+  check(ping_until(t, b1 - 1) == 0 && g_uplink_unconfirmed == 0,
+        "inside the backoff the dead peer is not judged, nor its questions "
+        "counted");
+  uint32_t v = ping_until(b1, b1 + 2 * kConfirmMs);
+  check(v >= b1 + kConfirmMs && v <= b1 + kConfirmMs + 1000,
+        "after the backoff the association is judged again");
+
+  t = rejoin_open(v + 200);
+  const uint32_t b2 = t + strike_backoff_ms(2);
+  check(ping_until(t, b2 - 1) == 0, "the second backoff is twice as long");
+  v = ping_until(b2, b2 + 2 * kConfirmMs);
+  check(v >= b2 + kConfirmMs && v <= b2 + kConfirmMs + 1000,
+        "...and the association is judged after it");
+
+  /* A unicast reply resets the backoff: the next association is judged at
+   * once. */
+  t = rejoin_open(v + 200);
   const uint8_t pl[16] = {1};
   const std::vector<uint8_t> d = ap.plain_to_sta(pl, sizeof pl);
-  now += kConfirmMs * 4 + 100;
-  rx_frame(d.data(), d.size(), -40, now);
+  rx_frame(d.data(), d.size(), -40, t + 10);
   (void)tap_read();
   {
     std::lock_guard<std::mutex> l(g_mu);
     g_sm.link_lost();
   }
-  supervise(now);
-  now = rejoin_open(now + 200);
-  check(g_sm.state() == StationSm::State::Connected &&
-            g_associations.load() == 3,
-        "...a third association once the reply came");
-  for (int i = 0; i < (int)kConfirmUplink; i++) tap_down_one(e, sizeof e);
-  drain_tx();
-  supervise(now + 1);
-  supervise(now + 1 + kConfirmMs);
-  check(g_sm.fail_reason() == StationSm::Failure::Unconfirmed &&
-            g_unconfirmed_lost.load() == 2,
-        "...and judged again, the strike lifted");
+  supervise(t + 20);
+  t = rejoin_open(t + 300);
+  v = ping_until(t, t + 2 * kConfirmMs);
+  check(v >= t + kConfirmMs && v <= t + kConfirmMs + 1000,
+        "a unicast reply resets the backoff: the next association is judged "
+        "at once");
 }
 
-/* THE STRIKE IS PER BSS: one spent on another BSS does not spare this one.
- * The fixture has one BSS, so the strike is moved to another address
+/* Only a unicast reply resets the backoff. A broadcast from the AP reaches
+ * every station it ever held, and says nothing about this association: after
+ * one, a link lost some other way and re-joined is still backed off. */
+void test_a_group_frame_does_not_reset_the_backoff() {
+  reset_all();
+  Ap ap;
+  uint32_t t = struck_and_rejoined(ap);
+  const uint8_t pl[16] = {1};
+  const std::vector<uint8_t> d = ap.plain_to(kBcast, pl, sizeof pl);
+  rx_frame(d.data(), d.size(), -40, t + 10);
+  (void)tap_read();
+  {
+    std::lock_guard<std::mutex> l(g_mu);
+    g_sm.link_lost();
+  }
+  supervise(t + 20);
+  t = rejoin_open(t + 300);
+  check(g_sm.state() == StationSm::State::Connected &&
+            ping_until(t, t + strike_backoff_ms(1) - 1) == 0,
+        "a broadcast from the AP does not reset the backoff");
+}
+
+/* THE BACKOFF IS PER BSS: one earned on another BSS does not spare this
+ * one. The fixture has one BSS, so the strike is moved to another address
  * directly - what an earlier verdict on a different AP leaves behind. */
 void test_the_strike_is_per_bss() {
   reset_all();
@@ -1546,15 +1596,25 @@ void test_the_strike_is_per_bss() {
     std::memcpy(g_strike_bss, kPeer, 6);
   }
   const uint32_t now = rejoin_open(10 + kConfirmMs + 200);
-  uint8_t e[60];
-  ipv4_to_peer(e, 1, 0);
-  for (int i = 0; i < (int)kConfirmUplink; i++) tap_down_one(e, sizeof e);
-  drain_tx();
-  supervise(now + 1);
-  supervise(now + 1 + kConfirmMs);
-  check(g_sm.fail_reason() == StationSm::Failure::Unconfirmed &&
-            g_unconfirmed_lost.load() == 2,
-        "a strike spent on another BSS does not spare this one");
+  const uint32_t v = ping_until(now, now + 2 * kConfirmMs);
+  check(v >= now + kConfirmMs && v <= now + kConfirmMs + 1000,
+        "a backoff earned on another BSS does not spare this one");
+}
+
+/* A TCP segment too short to hold its flags byte is not a question - and the
+ * flags byte is never read past the end. The frame sits in an allocation of
+ * exactly its own length, so an ASan build catches a missing bound. */
+void test_a_truncated_tcp_header_is_not_read() {
+  std::vector<uint8_t> m;
+  devourer::sta::append_llc_snap(m, 0x0800);
+  uint8_t ip[20] = {0x45};
+  ip[9] = 6;
+  m.insert(m.end(), ip, ip + sizeof ip);
+  m.insert(m.end(), 13, 0x02);          /* TCP, one byte short of the flags */
+  std::unique_ptr<uint8_t[]> exact(new uint8_t[m.size()]);
+  std::memcpy(exact.get(), m.data(), m.size());
+  check(!solicits_reply(exact.get(), m.size(), kPeer),
+        "a TCP segment too short to hold its flags is not a question");
 }
 
 /* A QUESTION THE FULL QUEUE DROPPED IS NOT COUNTED - it never reached the
@@ -2517,7 +2577,9 @@ int self_test() {
   selftest::test_fewer_questions_than_the_threshold_are_not_judged();
   selftest::test_a_group_frame_from_the_ap_does_not_confirm();
   selftest::test_what_counts_as_a_question();
-  selftest::test_one_strike_per_bss();
+  selftest::test_a_struck_bss_backs_off();
+  selftest::test_a_group_frame_does_not_reset_the_backoff();
+  selftest::test_a_truncated_tcp_header_is_not_read();
   selftest::test_the_strike_is_per_bss();
   selftest::test_a_dropped_frame_is_not_counted();
   selftest::test_an_accepted_association_nudges_the_ap();

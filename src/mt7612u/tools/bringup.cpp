@@ -1896,9 +1896,12 @@ struct txs_sum {
  *    duplicate): one arm read 61/60 with one claimed. txs_unclaim(), at arm
  *    end. With a duplicate the own count exceeds `sent`, hence >=.
  *  - the claim was taken while the arm's first transfer was in flight, and
- *    that transfer then failed on the wire: nothing of this arm reached the
- *    chip, so nothing popped can be its own. txs_unclaim_one() on that
- *    wire failure, while no frame has been counted sent. */
+ *    that transfer then completed in error. Whether any of it reached the
+ *    chip is not known (mt7612u_tx_wire_failed() is an upper bound), but
+ *    the claim rests on the arm having a transfer that completed - this
+ *    one did not, so the entry cannot be attributed to this arm.
+ *    txs_unclaim_one() on that wire failure, while no frame has been
+ *    counted sent. */
 static void txs_unclaim_one(struct txs_sum *o, unsigned prev)
 {
 	if (o->stale_ext != 1)
@@ -2420,8 +2423,9 @@ static int gate_txs(uint8_t chan, int frames, const char *peer_str)
 						wire_fail++;
 						/* A claim taken while this, the
 						 * arm's first, transfer was in
-						 * flight is not ours: it never
-						 * reached the chip. */
+						 * flight cannot be attributed to
+						 * the arm: that transfer did not
+						 * complete (txs_unclaim_one). */
 						if (n == 0)
 							txs_unclaim_one(&sum,
 							                prev_pktid);

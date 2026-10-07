@@ -167,7 +167,7 @@ struct mt_async {
 	mt7612u_rx_cb cb;
 	void *cb_user;
 	uint64_t tx_submitted, tx_done_n, tx_err, rx_frames, rx_err, rx_invalid;
-	uint64_t rx_dropped;      /* rejected on length: truncated, or > MT_RX_BUFSZ */
+	uint64_t rx_dropped;      /* parser rejects: length, and invalid PHY too */
 };
 
 struct mt7612u_dev {
@@ -451,7 +451,8 @@ struct mt_async_stats {
 void mt_async_stats(struct mt7612u_dev *d, struct mt_async_stats *out);
 void mt_async_note_invalid(struct mt7612u_dev *d);
 /* Test hook: runs the RX ring's completion callback on `t`. Lets a headless
- * test drive rx_done with a hand-filled transfer - no context, no device. */
+ * test drive rx_done with a hand-filled transfer - no context, no device.
+ * Exists only for tests/mt7612u_rx_ring_selftest.cpp; not API. */
 void mt_async_rx_done_for_test(struct libusb_transfer *t);
 int  mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user);
 void mt_async_stop(struct mt7612u_dev *d);

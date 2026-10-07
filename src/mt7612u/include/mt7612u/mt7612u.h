@@ -218,9 +218,11 @@ int mt7612u_tx(struct mt7612u_dev *dev, const void *frame, size_t len,
  * MAC strips it, and the four bytes that follow the MPDU in the DMA buffer
  * are the FCE info trailer, not a checksum (measured: CRC-32 matched them on
  * 0 of 4263 frames). Must not block and must not call back into the device.
- * A callback that transmits anyway (the ring tolerates it) blocks the event
- * thread - and with it every RX and TX completion - for up to the ~1 s slot
- * wait whenever the TX ring is full.
+ * If a callback transmits anyway, what happens is: with the TX ring full it
+ * blocks the event thread - and with it every RX and TX completion - for up
+ * to the ~1 s slot wait; and anything that goes through the synchronous USB
+ * path (a register access, an MCU command, a send with no ring running)
+ * cannot make progress from the event thread at all.
  */
 typedef void (*mt7612u_rx_cb)(void *user, const void *frame, size_t len,
                               const struct mt7612u_rx_info *info);
@@ -404,9 +406,11 @@ struct mt7612u_stats {
 	 * them too. Nonzero here means the RX path is seeing garbage, not that
 	 * the radio is slow. */
 	uint64_t rx_invalid;
-	/* Frames the parser rejected on length - a short or malformed
-	 * transfer. Counted because such a frame used to move no counter at
-	 * all, which is indistinguishable from one that was never sent.
+	/* Completed transfers the parser rejected: a short or malformed
+	 * transfer, AND every invalid-PHY frame (which rx_invalid also counts,
+	 * so rx_dropped - rx_invalid is the length rejects). Counted because
+	 * such a frame used to move no counter at all, which is
+	 * indistinguishable from one that was never sent.
 	 *
 	 * It does NOT count an oversize frame: those are discarded by the MAC
 	 * above max_mpdu_rx, before USB, so they raise nothing here. That

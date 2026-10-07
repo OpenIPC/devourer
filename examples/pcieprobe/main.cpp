@@ -29,9 +29,11 @@
 #include "logger.h"
 
 #include "jaguar2/ChipVariant.h"
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
 #include "jaguar2/HalJaguar2.h"
 #include "jaguar2/HalmacJaguar2Fw.h"
 #include "jaguar2/HalmacJaguar2MacInit.h"
+#endif
 #if defined(DEVOURER_HAVE_KESTREL_8852C)
 #include "kestrel/ChipVariant.h"
 #include "kestrel/HalKestrel.h"
@@ -190,6 +192,11 @@ int main(int argc, char **argv) {
     return 1;
 #endif
   }
+#if !defined(DEVOURER_HAVE_JAGUAR2_8821C)
+  logger->error("PCI device {:04x} is not an RTL8852CE and 8821C support is not "
+                "compiled in", pci_device_id(bdf));
+  return 1;
+#else
   const uint8_t chip_id = adapter.rtw_read8(0x00FC);
   const uint32_t sys_cfg1 = adapter.rtw_read32(0x00F0);
   const uint8_t cr = adapter.rtw_read8(0x0100);
@@ -250,4 +257,5 @@ int main(int argc, char **argv) {
   logger->info("M2: fw_ok={} MCUFW_CTRL=0x{:04x} (want 0xC078)", fw_ok, mcufw);
   devourer::Ev(logger->events(), "pcie.fw").f("ok", fw_ok).hexf("mcufw", mcufw, 4);
   return fw_ok ? 0 : 1;
+#endif /* DEVOURER_HAVE_JAGUAR2_8821C */
 }

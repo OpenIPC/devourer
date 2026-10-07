@@ -28,6 +28,9 @@
 #   sudo tests/mt7612u_ap_onair.sh
 #   sudo AP_SYSFS=5-1 STA_SYSFS=2-1 CH=36 tests/mt7612u_ap_onair.sh open
 #
+# Exit status: 0 every cell passed; 1 a cell failed; 2 INCONCLUSIVE (the rig
+# was refused, or a cell was NOT RUN); 3 interrupted (INT/TERM).
+#
 # Env: AP_SYSFS, STA_SYSFS, CH, PSK, FW_DIR, SECS, AP_VBUS (hubloc:port for a
 # real VBUS cold cycle via uhubctl; hub ports only). Cells: open|wpa2|stop|all.
 
@@ -136,7 +139,7 @@ cleanup() {
 # that; the cleanups between cells (CELLS=all) still run every time.
 CLEANED=no
 trap '[ "$CLEANED" = yes ] || cleanup' EXIT
-trap 'cleanup; CLEANED=yes; exit 130' INT TERM
+trap 'cleanup; CLEANED=yes; exit 3' INT TERM
 
 # --- the station -----------------------------------------------------------
 STA_IF=$(ls "/sys/bus/usb/devices/$STA_SYSFS:1.0/net/" 2>/dev/null | head -1)

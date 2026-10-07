@@ -111,7 +111,7 @@ trap cleanup EXIT
 # and then CARRIES ON into the next arm. CLEANED makes the EXIT pass after it
 # a no-op: sta_pid_kill forgets a PID on the first pass, so a second pass
 # would hand back an adapter the first refused to.
-trap 'cleanup; exit 130' INT TERM
+trap 'cleanup; exit 3' INT TERM
 
 sta_dut_take || exit 2
 echo "DUT  MT7612U at $DUT_SYSFS transmitting to $TARGET"

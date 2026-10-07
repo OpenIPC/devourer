@@ -26,6 +26,9 @@
 #   sudo tests/mt7612u_sta_autoack.sh
 #   sudo PEER_PID=0xc812 DUT_SYSFS=7-1 CH=6 tests/mt7612u_sta_autoack.sh
 #
+# Exit status: 0 every check passed; 1 a check failed; 2 INCONCLUSIVE (the rig
+# was refused, or the gate could not measure); 3 interrupted (INT/TERM).
+#
 # Env: PEER_VID, PEER_PID, PEER_SYSFS, DUT_SYSFS, CH, SECS, RETRY_LIMIT, OUT.
 
 set -u
@@ -96,7 +99,7 @@ trap cleanup EXIT
 # and then CARRIES ON into the next arm. CLEANED makes the EXIT pass after it
 # a no-op: sta_pid_kill forgets a PID on the first pass, so a second pass
 # would hand back an adapter the first refused to.
-trap 'cleanup; exit 130' INT TERM
+trap 'cleanup; exit 3' INT TERM
 
 sta_dut_take || exit 2
 

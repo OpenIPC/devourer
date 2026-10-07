@@ -546,9 +546,9 @@ check_cleared() { # $1 cell
 
 # The managed-filter stimulus (header): the two streams off a monitor vif on
 # the AP's own phy, while the station is associated. They share a transmitter
-# address, so they get disjoint sequence ranges (0 and 2048): the managed
-# filter's hardware DUP drop must not take one for a retransmission of the
-# other. The injector counts frames it SUBMITTED, not frames that aired -
+# address and get disjoint sequence ranges (0 and 2048) as a precaution only:
+# neither sets Retry, so duplicate detection should not merge them anyway.
+# The injector counts frames it SUBMITTED, not frames that aired -
 # hence the own stream as the positive witness. Each PID is recorded on the
 # statement after its launch, and every injector is bounded by `timeout -k`
 # whatever happens to the harness. Sets INJ_FOREIGN / INJ_OWN (empty when it

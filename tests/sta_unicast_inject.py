@@ -15,8 +15,9 @@ radio and lands on the AP's channel without needing a third adapter.
   sta_unicast_inject.py <mon-if> <dst-mac> <bssid> [seconds] [pps] [seq0]
 
 seq0 (0..4095, default 0) is the first sequence number. Two injectors sharing
-a transmitter address must use disjoint ranges, or a receiver's duplicate
-detection can take one stream's frames for the other's.
+a transmitter address can be given disjoint ranges. That is a precaution, not
+a measured need: these frames never set Retry, so 802.11 duplicate detection
+should not merge the two streams anyway.
 
 Note what this does NOT do: mac80211 marks injected frames no-ack by default,
 so these do not solicit an acknowledgement and cannot be used to measure one.

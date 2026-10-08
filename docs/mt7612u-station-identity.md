@@ -28,11 +28,11 @@ arm. That function writes `MT_RX_FILTR_CFG = PHY_ERR|CRC_ERR` and nothing else
 were identical by construction. Its null result is withdrawn. The reasoning
 that let it through was also wrong: in the managed filter `0x00015f97`, bit 3
 (`OTHER_BSS`) is clear but bit **2** (`PROMISC`) is set, and bit 2 is the
-address drop (mt76x2 sets it whenever the phy is not in monitor mode; an
-earlier version of this page said mt76 maps it to `FIF_OTHER_BSS`, which is
-not what `mt76x2u_config()` does - the decode is in the managed-filter section
-below). The gate now leaves the managed value `mt_mac_start()`
-programs, prints it per arm, and flags an arm that is not running it.
+address drop: it drops unicast whose addr1 is not `MT_MAC_ADDR`, and mt76x2
+sets it whenever the phy is not in monitor mode (the decode is in the
+managed-filter section below). The gate leaves the managed value
+`mt_mac_start()` programs, prints it per arm, and flags an arm that is not
+running it.
 
 Also withdrawn: a "0.8% retried vs 98% control" auto-ACK figure from the
 probe-response method (below), whose control ran with the monitor filter and
@@ -286,12 +286,13 @@ Against it, and against the comparison:
 
 ## The managed receive filter belongs to the armed station
 
-Every cell above ran the managed filter `0x00015f97`, while
-`Mt7612uRadio::StartRxLoop` installs the monitor filter (`PHY_ERR|CRC_ERR`).
-So a station driven through `IRadio` used to run promiscuous, and the
-property that justifies the seam's refusal - "moving `MT_MAC_ADDR` makes a
-station deaf" - did not hold for it: under the monitor filter it keeps
-receiving and only stops acknowledging (issue #461).
+Every cell above ran the managed filter `0x00015f97`.
+`Mt7612uRadio::StartRxLoop` installs the monitor filter (`PHY_ERR|CRC_ERR`),
+and under it the property that justifies the seam's refusal - "moving
+`MT_MAC_ADDR` makes a station deaf" - does not hold: a station keeps
+receiving and only stops acknowledging. So the armed station runs the
+managed filter, and an unarmed one (`DEVOURER_STA_ARM=0`) the monitor
+filter.
 
 **The role is selected by the arm, with no new API.** A successful
 `SetStationIdentity` reads `MT_RX_FILTR_CFG`, writes
@@ -354,13 +355,21 @@ injected or the check is INCONCLUSIVE. Then armed (`wpa2`), `not-for-us` must
 stay under 1% of the foreign stream; unarmed (`noarm`, the monitor filter) at
 least half of it must arrive. Hardware gate:
 `mt7612uprobe staid` checks the filter value across arm, re-request, refusal,
-clear and drop. On-air numbers: TBD.
+clear and drop.
+
+On air, ch6, near field, an MT7612U station against an RTL8812BU AP (rtw88),
+one run per row on two benches. In every run the `noarm` control of the same
+run saw the foreign stream arrive (bench B's: own-addressed 612 of 706).
+
+| bench | own-addressed arrived | foreign `not-for-us` |
+|---|---|---|
+| A | 882 of 882 | 0 of 761 |
+| A | 943 of 943 | 0 of 927 |
+| B | 775 of 863 | 0 of 642 |
+| B | 875 of 875 | 0 of 713 |
 
 ## What is not established
 
-- **The managed filter under a live association is not yet measured on
-  air** (TBD, above). The cells that measured it ran unassociated, through
-  the bring-up tool.
 - **No BSSID/auto-ACK cell drove `SetStationIdentity` through `IRadio`.** The
   seam writes no identity register - `mt7612uprobe staid` reads
   `MT_MAC_ADDR`, `MT_MAC_BSSID` and all eight APC slots before and after

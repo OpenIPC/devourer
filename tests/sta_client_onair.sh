@@ -37,7 +37,12 @@
 # station refuses it on a WPA2 link and counts it (`plaintext refused`), and
 # it must reach half of what was injected, else the filter check is
 # INCONCLUSIVE. A phy that cannot add a monitor vif makes the check
-# INCONCLUSIVE, not the cell.
+# INCONCLUSIVE, not the cell. The injection runs straight after the four-way,
+# before the ping, and only when it - monitor vif deleted - ends at least
+# 5 s before hostapd's first group and pairwise rekeys, read off hostapd's
+# own stamps; otherwise it is skipped and the check is INCONCLUSIVE. A group
+# rekey that lands in the vif teardown can go unanswered and cost the
+# association.
 #
 # Cells (each scored against its own witness):
 #   open     hostapd open, with a ping running from the start: the AP
@@ -159,8 +164,10 @@ PSK="${PSK:-devourer123}"
 SECS="${SECS:-90}"
 # hostapd's group and pairwise rekey intervals for the wpa2 cell. Both must
 # fire inside the run: the rekeys travel inside the cipher, a path the
-# four-way alone never exercises.
-REKEY_S="${REKEY_S:-20}"
+# four-way alone never exercises. The group timer starts with the AP and the
+# pairwise one at the four-way; the injection (INJECT_S) has to fit, with
+# its margin, before the first of them.
+REKEY_S="${REKEY_S:-30}"
 PTK_REKEY_S="${PTK_REKEY_S:-25}"
 # The ping window behind every reported link line and the reconnect cell's
 # post-re-join check: PING_S seconds at 2 pings a second.
@@ -578,14 +585,32 @@ check_cleared() { # $1 cell
 # statement after its launch, and every injector is bounded by `timeout -k`
 # whatever happens to the harness. Sets INJ_FOREIGN / INJ_OWN (empty when it
 # could not run).
-INJ_FOREIGN=""; INJ_OWN=""
+INJ_FOREIGN=""; INJ_OWN=""; INJ_SKIP=""
 inject_count() { sed -n 's/^injected \([0-9][0-9]*\) unicast frames.*/\1/p' "$1" 2>/dev/null | tail -1; }
+# 0 when INJECT_S, plus 5 s for the monitor vif and hostapd's early group
+# timer, ends before both first rekeys: the group one REKEY_S after
+# AP-ENABLED, the pairwise one PTK_REKEY_S after the last four-way with $2.
+# Read off hostapd's -t stamps. $1 cell.
+rekey_clear() {
+  awk -v own="EAPOL-4WAY-HS-COMPLETED $2" -v g="$REKEY_S" -v p="$PTK_REKEY_S" \
+      -v need="$(( INJECT_S + 5 ))" -v now="$(date +%s.%N)" '
+    / AP-ENABLED/ && !e { e = $1 + 0 }
+    index($0, own) { f = $1 + 0 }
+    END { if (!e || !f) exit 1
+          d = e + g; if (f + p < d) d = f + p
+          exit !(now + need < d) }' "$OUT/hostapd_$1.log"
+}
+
 inject_unicast() { # $1 cell
-  INJ_FOREIGN=""; INJ_OWN=""
+  INJ_FOREIGN=""; INJ_OWN=""; INJ_SKIP=""
   local bssid own pf po
   bssid=$(ip netns exec "$NS" cat "/sys/class/net/$AP_IF/address" 2>/dev/null)
   own=$(own_of "$1")
   [ -n "$bssid" ] && [ -n "$own" ] || return 1
+  if ! rekey_clear "$1" "$own"; then
+    INJ_SKIP="the injection (${INJECT_S}s + 5s) would not end before hostapd's first rekey - raise REKEY_S / PTK_REKEY_S or lower INJECT_S"
+    return 1
+  fi
   ip netns exec "$NS" iw dev "$MON" del 2>/dev/null
   if ! { ip netns exec "$NS" iw phy "$AP_PHY" interface add "$MON" type monitor 2>/dev/null &&
          ip netns exec "$NS" ip link set "$MON" up 2>/dev/null; }; then
@@ -621,6 +646,7 @@ HELD_FILTER_PASS=""
 check_filter() {
   local nfu ref
   nfu=$(led "$1" 'not-for-us'); ref=$(led "$1" 'plaintext refused')
+  if [ -n "$INJ_SKIP" ]; then inc "$1: $INJ_SKIP"; return; fi
   if [ "${INJ_FOREIGN:-0}" = 0 ] || [ "${INJ_OWN:-0}" = 0 ]; then
     inc "$1: the unicast injectors did not run (no monitor vif on $AP_PHY?) - see $OUT/inject_$1.log, $OUT/inject_own_$1.log"
     return
@@ -892,17 +918,18 @@ run_wpa2() {
     cell_end
     return 0
   fi
+  # The managed-filter stimulus first, so that it is over before the rekeys.
+  INJ_FOREIGN=""; INJ_OWN=""; INJ_SKIP=""
+  if [ "$DUT_KIND" = mt7612u ] && { [ "$cell" = wpa2 ] || [ "$cell" = noarm ]; }; then
+    inject_unicast "$cell"
+    sta_pid_alive "$STA_PID" || { station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; }
+  fi
   local p=0
   if [ "$cell" = wpa2 ]; then ping_ap "$cell" || p=$?
   else ping_window "$cell" || p=$?; fi
   if [ "$p" = 2 ]; then station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; fi
   WPA2_LINK="four-way completed, ping $(loss "$cell")"
   [ "$p" = 0 ] && WPA2_LINK="$WPA2_LINK OK"
-  INJ_FOREIGN=""; INJ_OWN=""
-  if [ "$DUT_KIND" = mt7612u ] && { [ "$cell" = wpa2 ] || [ "$cell" = noarm ]; }; then
-    inject_unicast "$cell"
-    sta_pid_alive "$STA_PID" || { station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; }
-  fi
   [ "$cell" = wpa2 ] || { cell_end; return 0; }
 
   # The rekeys: waited for while the station is alive. "pairwise key

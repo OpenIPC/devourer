@@ -152,7 +152,13 @@ first line then reads `fault=1`.
   The injections (`INJECT_S`, `INJECT_PPS` each, `FOREIGN`) ride a monitor
   vif on the AP's phy (`tests/sta_unicast_inject.py`) and run only for an
   MT7612U DUT; a phy that cannot add one makes the filter check
-  INCONCLUSIVE, not the cell.
+  INCONCLUSIVE, not the cell. They run straight after the four-way, and
+  only when they end - vif deleted - at least 5 s before hostapd's first
+  group (`REKEY_S` after the AP comes up, default 30) and pairwise
+  (`PTK_REKEY_S` after the four-way, default 25) rekeys, read off hostapd's
+  own stamps; otherwise the filter check is INCONCLUSIVE. A group rekey
+  that lands in the vif teardown can go unanswered and cost the
+  association.
 
   The arm is per BSSID: a re-join to the same BSSID keeps it rather than
   arming again, and on Realtek the second association is the proof it still

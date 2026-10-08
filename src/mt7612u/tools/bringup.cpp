@@ -1936,11 +1936,10 @@ static unsigned txs_arm_pktid(int rx_on, unsigned arm)
 #define TXS_FRAME_MARGIN_MS 50.0
 /* Floor on one frame's status wait. frame_budget_ms is ladder arithmetic from
  * the 5 GHz measurement (~46 ms for 16 attempts); on ch6 an unacknowledged
- * frame at limit 15 measured 1.1-1.3 s from status to status (#461), and a
- * wait shorter than the air let the gate submit ahead of it: the chip's queue
- * filled, its bulk OUT NAKed, and the async ring's then 1000 ms transfer
- * timeout cancelled the frames. A wait that ends early only costs time on the frames
- * that genuinely lose their status. */
+ * frame at limit 15 measured 1.1-1.3 s from status to status, and a wait
+ * shorter than the air submits ahead of it: the chip's queue fills and its
+ * bulk OUT NAKs. A wait that ends early only costs time on the frames that
+ * genuinely lose their status. */
 #define TXS_STATUS_WAIT_MIN_MS 2000.0
 /* Bound on waiting for a submitted transfer to complete. TX transfers carry no
  * timeout, so one still in flight here is a slow chip, not a failure: it is

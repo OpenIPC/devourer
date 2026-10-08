@@ -14,24 +14,25 @@
  * (MT_TX_SLOT_WAIT_MS), so a stalled chip turns into a REFUSED submit the
  * caller counts, never into a cancelled frame.
  *
- * A TX transfer has no timeout, as mt76's URBs have none. With the old 1000 ms
- * one, a chip that NAKs bulk OUT for longer than that - its queue full behind
- * slow frames, e.g. unacknowledged unicast at a deep retry limit - had libusb
- * cancel frames it would have accepted a moment later: #461 measured 9-50 of
- * 60 lost per arm that way, invisible to every TX counter. The ring depth
- * bounds what is in flight; mt_async_stop() cancels whatever is left.
+ * A TX transfer has no timeout, as mt76's URBs have none. With a 1000 ms one,
+ * a chip that NAKs bulk OUT for longer than that - its queue full behind slow
+ * frames, e.g. unacknowledged unicast at a deep retry limit - has libusb
+ * cancel frames it would accept a moment later: measured at 9-50 of 60 lost
+ * per arm, invisible to every TX counter. The ring depth bounds what is in
+ * flight; mt_async_stop() cancels whatever is left.
  *
  * The cost, as in mt76: nothing reclaims a slot whose transfer the host
  * controller never completes. If all of them wedge, every submit waits the
  * bound and refuses until the ring is stopped - there is no self-heal short of
  * mt_async_stop(), whose 2 s drain then rests on libusb's cancel alone (which
- * is also all the old timeout was: libusb times a transfer out by cancelling
- * it).
+ * is all a transfer timeout would be: libusb times a transfer out by
+ * cancelling it).
  */
-#define MT_TX_SLOT_WAIT_MS 1000
 #include <stdlib.h>
 #include <string.h>
 #include "internal.h"
+
+#define MT_TX_SLOT_WAIT_MS 1000
 
 /*
  * Every field shared between the event thread and the caller lives under
@@ -81,9 +82,8 @@ static void LIBUSB_CALL rx_done(struct libusb_transfer *t)
 			                  &frame, &info);
 			if (len == MT_RX_PARSE_INVALID)
 				a->rx_invalid++;
-			/* A frame the parser rejected used to move no counter
-			 * at all, which is indistinguishable from one never
-			 * sent.
+			/* Counted so that a frame the parser rejected is
+			 * distinguishable from one never sent.
 			 *
 			 * This does NOT cover the oversize case, and it was
 			 * measured not to: frames above the MAC's
@@ -345,14 +345,14 @@ void mt_async_stop(struct mt7612u_dev *d)
  * submitted after a stop's cancel pass. It does NOT make a send safe against
  * a concurrent mt_async_stop() that goes on to free the ring: d->a is read
  * here without synchronisation, and a sender still parked in the slot wait
- * when the stop deletes the ring wakes on a destroyed mutex. As before this
- * change, the caller must not run a send concurrently with a ring stop.
+ * when the stop deletes the ring wakes on a destroyed mutex. The caller must
+ * not run a send concurrently with a ring stop.
  */
 int mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len,
                        int nframes)
 {
 	struct mt_async *a = d->a;
-	int idx = -1, rc;
+	int idx = -1, rc, stop_refused;
 	const auto until = std::chrono::steady_clock::now() +
 	                   std::chrono::milliseconds(MT_TX_SLOT_WAIT_MS);
 
@@ -397,12 +397,15 @@ int mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len,
 	 * takes the event lock itself. So submitting under a->lock (here and in
 	 * rx_done's resubmit) has no lock-order cycle with a completion. */
 	a->lock.lock();
-	rc = a->stopping ? LIBUSB_ERROR_INTERRUPTED
-	                 : libusb_submit_transfer(a->tx[idx]);
+	stop_refused = a->stopping;
+	rc = stop_refused ? LIBUSB_ERROR_INTERRUPTED
+	                  : libusb_submit_transfer(a->tx[idx]);
 	if (rc) {
 		a->tx_busy[idx] = 0;
 		a->tx_inflight--;
-		a->tx_err++;
+		/* A refusal because a stop began is not a transfer error. */
+		if (!stop_refused)
+			a->tx_err++;
 		a->cv.notify_all();
 	} else {
 		a->tx_slot[idx].submitted = 1;

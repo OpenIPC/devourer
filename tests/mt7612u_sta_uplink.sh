@@ -159,7 +159,7 @@ arm() {
   # This bound is PER HARNESS ARM: 5424 s at FRAMES=60, 17400 s at 200.
   # Against the measurement it is a wedge ceiling, not a squeeze: the slowest
   # frame measured costs ~2 s (a gate arm whose status is held to the next
-  # submit; an un-ACKed frame retires in ~1.2 s on ch6, #461, inside that same
+  # submit; an un-ACKed frame retires in ~1.2 s on ch6, inside that same
   # wait), and even every gate arm held at 2 s a frame is ~32 min per harness
   # arm at 60 and ~107 min at 200 - under the bound by ~2.7x at either size,
   # where the measured run (~17 min per harness arm at 60) sits ~5x under.

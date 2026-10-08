@@ -977,9 +977,9 @@ if(DEVOURER_MT7612U)
     add_test(NAME mt7612u_tsf_api COMMAND Mt7612uTsfApiSelftest)
 
     # The async RX ring's completion callback, driven with hand-filled
-    # transfers through a test hook: an invalid-PHY frame once self-deadlocked
-    # it on the ring lock. The cell fails itself after 2 s; TIMEOUT is the
-    # backstop.
+    # transfers through a test hook: the parse runs under the ring lock, and a
+    # parser that counts an invalid PHY under that lock self-deadlocks. The
+    # cell fails itself after 2 s; TIMEOUT is the backstop.
     add_executable(Mt7612uRxRingSelftest tests/mt7612u_rx_ring_selftest.cpp)
     target_link_libraries(Mt7612uRxRingSelftest PRIVATE devourer
                           PkgConfig::libusb Threads::Threads)

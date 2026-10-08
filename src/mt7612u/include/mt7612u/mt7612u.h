@@ -408,9 +408,8 @@ struct mt7612u_stats {
 	uint64_t rx_invalid;
 	/* Completed transfers the parser rejected: a short or malformed
 	 * transfer, AND every invalid-PHY frame (which rx_invalid also counts,
-	 * so rx_dropped - rx_invalid is the length rejects). Counted because
-	 * such a frame used to move no counter at all, which is
-	 * indistinguishable from one that was never sent.
+	 * so rx_dropped - rx_invalid is the length rejects). Counted so that a
+	 * rejected frame is distinguishable from one that was never sent.
 	 *
 	 * It does NOT count an oversize frame: those are discarded by the MAC
 	 * above max_mpdu_rx, before USB, so they raise nothing here. That

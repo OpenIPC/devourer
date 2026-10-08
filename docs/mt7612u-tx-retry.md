@@ -172,43 +172,46 @@ What it shows:
   SAME arm's row. Counting 39/40 rows, it hit five of sixteen at limit 0,
   eleven at limit 5 and seven on the initvals - one run each. Arm a lags in
   every pass; which other arms lag varies from pass to pass. This table
-  seemed to rule out "status posted only on the next TX" (at limit 0,
+  alone does not show "status posted only on the next TX" (at limit 0,
   receiver ON, arm f lags with L1 although arm e before it settled 40/40 and
-  owed nothing, and arm g after it shows no late entry) - a later trace
-  shows exactly that for some arms; see "Status posted on the next
-  submit" below. What fits THIS table's first-entry case is the two-transfer
-  read:
+  owed nothing, and arm g after it shows no late entry); the trace in
+  "Status posted on the next submit" below shows it for some arms. What fits
+  this table's first-entry case is the two-transfer read:
   when the FIFO is empty at the EXT read and an entry is filed before the
   main read, the popped entry is paired with the stale EXT word of the
   previous entry. On an arm's first entry that is the previous arm's pktid,
-  so the entry was counted late, the arm stayed one short, and every
-  per-frame wait timed out. A race on the poll timing, which is why it
-  varies from pass to pass and with the host. The gate now claims that
-  entry back (`txs_drain`), under all of: it is the arm's first popped entry
-  (no own entry yet), the arm has submitted a frame, and its pktid is that
-  of the last arm that sent a frame, which must have settled with no entry
-  owed - or, on the session's first arm, any pktid. A claimed entry counts
-  in entries, and in success when its SUCCESS bit is set; it stays out of
-  the retry columns, and is reported as "stale-EXT entries claimed". These
-  tables were taken before that change. With the claim keyed to the
-  previous arm, the author's unit then settled 16/16 arms at limits 5 and 0
-  (recorded on issue #461); keying it to the last arm that sent a frame,
-  so an arm with every submit failed is skipped, has since been run on
-  hardware (#467). If the arm's own entries still reach `sent`, the claimed
-  entry was not its own (one arm read 61/60 with one claimed), and the gate
-  hands it back to the late/foreign column at arm end; it does the same when
-  the claim was taken while the arm's first transfer was in flight and that
-  transfer then failed on the wire. An arm whose surplus claim was handed
-  back reads `sent`/`sent` and counts as settled for the next arm's claim -
-  it owes no entries, which is what the condition asks; a MAC duplicate
-  (own entries above `sent`) still does not. The settled condition
-  cascades: one UNSETTLED arm disables the claim for every following arm
-  until an arm settles on its own, so on a unit whose arms do not settle the
-  claim buys almost nothing.
+  so without a correction the entry counts as late, the arm stays one short,
+  and every per-frame wait times out. A race on the poll timing, which is
+  why it varies from pass to pass and with the host. These tables are
+  uncorrected. The gate claims that entry back (`txs_drain`), under all of:
+  it is the arm's first popped entry (no own entry yet), the arm has
+  submitted a frame, and its pktid is that of the last arm that sent a
+  frame, which must have settled with no entry owed - or, on the session's
+  first arm, any pktid. A claimed entry counts in entries, and in success
+  when its SUCCESS bit is set; it stays out of the retry columns, and is
+  reported as "stale-EXT entries claimed". With the claim, the author's unit
+  settled 16/16 arms at limits 5 and 0, and the ch6 uplink harness settled
+  every arm of both passes. If the arm's own entries still reach `sent`,
+  the claimed entry was not its own (one arm read 61/60 with one claimed),
+  and the gate hands it back to the late/foreign column at arm end; it does
+  the same when the claim was taken while the arm's first transfer was in
+  flight and that transfer then completed in error. The hand-back has a
+  blind spot: the claimed entry counts in entries, so the per-frame wait and
+  the settle loop are satisfied one status early, and the hand-back fires
+  only when the arm's last own entry pops inside the arm. A wrong claim
+  whose last own entry pops after the arm (n-1 own plus 1 claimed) reads
+  n/n, indistinguishable from a right one, and that entry lands in the next
+  arm - which, with the arm counted settled, may claim it in turn. An arm
+  whose surplus claim was handed back reads `sent`/`sent` and counts as
+  settled for the next arm's claim - it owes no entries, which is what the
+  condition asks; a MAC duplicate (own entries above `sent`) does not. The
+  settled condition cascades: one UNSETTLED arm disables the claim for every
+  following arm until an arm settles on its own, so on a unit whose arms do
+  not settle the claim buys almost nothing.
 - **Arms e-h**: e, f and g read like c whenever they are clean; nothing
   distinguishes them. h (broadcast, WCID 1) lagged in five of six passes.
 
-## Status posted on the next submit (#461)
+## Status posted on the next submit
 
 `tests/mt7612u_sta_uplink.sh` at ch6, retry limit 15, the RTL8812CU peer
 answering for the DUT's target in its arm A and for another address in arm
@@ -216,17 +219,18 @@ B, with `DEVOURER_TXS_TRACE=1`: one run at 60 frames per arm and two at 20
 (the second pair differing only in the data-frame QSEL, below) - six harness
 arms, each running all sixteen gate arms.
 
-**The gate used to lose frames, not status.** Before the gate waited for
-each transfer, its per-frame wait (60 + 50 ms) was far shorter than an
-unacknowledged frame's ~1.1 s on this channel, so it submitted ahead of the
-air: the chip's queue filled, its bulk OUT stopped accepting, and the async
-ring's 1000 ms transfer timeout (since removed: TX transfers now carry
-none, as mt76's do not) cancelled 9-50 of every 60 frames per unicast arm.
-Those were counted as sent; the surviving backlog filed its
-status seconds later in later arms' rows, as late or foreign. With the gate
-pacing on the transfer, no transfer failed in any of the three runs.
+**Frames, not status, are what a gate paced faster than the air loses.** A
+per-frame wait far shorter than an unacknowledged frame's ~1.1 s on this
+channel (60 + 50 ms, say) submits ahead of the air: the chip's queue
+fills, its bulk OUT stops accepting, and a ring with a 1000 ms transfer
+timeout cancels 9-50 of every 60 frames per unicast arm. Those count as
+sent, and the surviving backlog files its status seconds later in later
+arms' rows, as late or foreign. TX transfers carry no timeout (as mt76's do
+not) - a full ring refuses a submit instead - and the gate waits for each
+transfer and floors the status wait at 2 s; with both, no transfer failed
+in any of the three runs.
 
-**Some arms then file each frame's status only when the NEXT frame is
+**Some arms file each frame's status only when the NEXT frame is
 submitted.** The trace shows it frame by frame: SUBMIT, the whole 2 s wait
 expires with nothing, and the entry pops within ~1 ms of the next frame's
 bulk transfer - so every wait times out, and the arm's last entry lands in

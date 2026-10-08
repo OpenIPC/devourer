@@ -3,11 +3,11 @@
  * mt_async_rx_done_for_test).
  *
  * rx_done parses a completed bulk-IN transfer under the ring's lock, so the
- * parser must never take that lock itself. It once did: an RXWI whose rate
- * word named PHY 5-7 made mt_rx_parse count rx_invalid through a helper that
- * locked the same non-recursive mutex again, and one corrupt frame wedged the
- * RX ring, every TX submit, the stats read and the teardown. This cell feeds
- * the callback such a frame and fails if it does not return.
+ * parser must never take that lock itself. A parser that counted rx_invalid
+ * for an RXWI whose rate word names PHY 5-7 through a helper locking the same
+ * non-recursive mutex would self-deadlock, and one corrupt frame would wedge
+ * the RX ring, every TX submit, the stats read and the teardown. This cell
+ * feeds the callback such a frame and fails if it does not return.
  *
  * It also pins the counters for a valid frame and for a stranded slot (device
  * pointer cleared by a stop that leaked the ring): a completed transfer there
@@ -93,8 +93,8 @@ int main() {
     return 1;
   }
   d.chainmask = 0x0202;
-  /* As in a live session: the device points at its ring. The old helper
-   * reached the lock through d->a, so without this the cell cannot see the
+  /* As in a live session: the device points at its ring. A counting helper
+   * reaches the lock through d->a, so without this the cell cannot see the
    * deadlock it exists for. */
   d.a = a;
   a->cb = on_frame;

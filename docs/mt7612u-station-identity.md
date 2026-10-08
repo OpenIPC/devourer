@@ -361,10 +361,11 @@ On air, ch6, near field, an MT7612U station against an RTL8812BU AP (rtw88),
 one run per row on two benches. In every run the `noarm` control of the same
 run saw the foreign stream arrive. The rows from 0fa46cc, c54226e and af19b9c
 ran the injection after the four-way's ping, with `REKEY_S=20`; the rows from
-42fab15 and 232a631 ran it before the ping, with `REKEY_S=30`. The harness
-runs it after the ping and clear of the rekeys (`REKEY_S=90`,
-`PTK_REKEY_S=80`): injected before the ping, the AP's retransmissions of the
-foreign stream delay the ping's first echo. Bench B reported one `noarm` figure for its two runs
+42fab15, 232a631 and ddec632 ran it before the ping, with `REKEY_S=30`; the
+rows from a66f659 run it as the harness does, after the ping and clear of the
+rekeys (`REKEY_S=90`, `PTK_REKEY_S=80`). Injected before the ping, the ping
+lost its first echo on bench B, most likely behind the AP's retransmissions
+of the foreign stream. Bench B reported one `noarm` figure for its two runs
 together: own-addressed 612 of 706.
 
 | bench | head | schedule | own-addressed arrived | foreign `not-for-us` | `noarm` own-addressed |
@@ -376,6 +377,9 @@ together: own-addressed 612 of 706.
 | A | 42fab15 | before the ping | 746 of 746 | 0 of 684 | 821 of 821 |
 | A | 232a631 | before the ping | 751 of 751 | 0 of 683 | 944 of 944 |
 | A | 232a631 | before the ping | 833 of 833 | 0 of 721 | 746 of 746 |
+| A | ddec632 | before the ping | 764 of 764 | 0 of 739 | 870 of 870 |
+| A | a66f659 | after the ping | 893 of 893 | 0 of 796 | 720 of 943 |
+| A | a66f659 | after the ping | 942 of 942 | 0 of 789 | 700 of 744 |
 
 Unarmed, `not-for-us` runs far above the foreign count injected (bench A:
 6836 of 501 on 0fa46cc, up to 27125 of 869 on 42fab15). The rtw88 AP very

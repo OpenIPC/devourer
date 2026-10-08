@@ -280,8 +280,8 @@ sta_usb_id() {
 #   sta_dev_record NAME SYSFS VID PID - before the run: refuse a hub, any
 #     device that is not VID:PID, and one a live process holds
 #     (sta_usb_unheld), and note its idVendor:idProduct:serial;
-#   sta_dev_opened NAME - just before a process opens it, and after any
-#     sta_dev_unbind_wifi() has succeeded;
+#   sta_dev_opened NAME - before any sta_dev_unbind_wifi() and before a
+#     process opens it, so an unbind cut short is still handed back;
 #   sta_dev_handback NAME SYSFS - re-enumerate it with an `authorized` 0/1
 #     toggle so its kernel driver binds again - only when this run opened it,
 #     and only while SYSFS still reports the recorded identity, so a device

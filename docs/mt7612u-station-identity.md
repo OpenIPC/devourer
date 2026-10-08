@@ -360,13 +360,16 @@ clear and drop.
 On air, ch6, near field, an MT7612U station against an RTL8812BU AP (rtw88),
 one run per row on two benches. In every run the `noarm` control of the same
 run saw the foreign stream arrive (bench B's: own-addressed 612 of 706).
+Every row ran the injection after the four-way's ping, with `REKEY_S=20`;
+none has yet run the schedule that starts it straight after the four-way,
+clear of the rekeys.
 
-| bench | own-addressed arrived | foreign `not-for-us` |
-|---|---|---|
-| A | 882 of 882 | 0 of 761 |
-| A | 943 of 943 | 0 of 927 |
-| B | 775 of 863 | 0 of 642 |
-| B | 875 of 875 | 0 of 713 |
+| bench | head | own-addressed arrived | foreign `not-for-us` |
+|---|---|---|---|
+| A | 4335ee4 | 882 of 882 | 0 of 761 |
+| A | c54226e | 943 of 943 | 0 of 927 |
+| B | af19b9c | 775 of 863 | 0 of 642 |
+| B | af19b9c | 875 of 875 | 0 of 713 |
 
 ## What is not established
 

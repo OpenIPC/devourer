@@ -38,9 +38,11 @@
 # it must reach half of what was injected, else the filter check is
 # INCONCLUSIVE. A phy that cannot add a monitor vif makes the check
 # INCONCLUSIVE, not the cell. The injection runs straight after the four-way,
-# before the ping, and only when it - monitor vif deleted - ends at least
-# 5 s before hostapd's first group and pairwise rekeys, read off hostapd's
-# own stamps; otherwise it is skipped and the check is INCONCLUSIVE. A group
+# before the ping. It starts only when now + INJECT_S + 8 s is still before
+# hostapd's first group and pairwise rekeys, read off hostapd's own stamps;
+# otherwise it is skipped and the check is INCONCLUSIVE. The injectors are
+# killed at INJECT_S + 2 s (KILL 1 s later), so the 8 s cover them, the
+# monitor vif's add and delete, and leave a margin before the rekey. A group
 # rekey that lands in the vif teardown can go unanswered and cost the
 # association.
 #
@@ -338,11 +340,12 @@ trap 'cleanup; exit 3' INT TERM
 if [ "$DUT_KIND" = mt7612u ]; then
   sta_dut_take || exit 2
 else
-  # Marked opened only once the unbind has succeeded, so cleanup toggles
-  # `authorized` only on an adapter this run freed (and nothing held).
+  # Marked opened BEFORE the unbind: an unbind cut short (INT, or one of two
+  # netdevs freed) must still be handed back. sta_dev_record has refused a
+  # held adapter, so the toggle never lands under a live process.
   sta_dev_record dut "$DUT_SYSFS" "$DUT_VID" "$DUT_PID" || exit 2
-  sta_dev_unbind_wifi "$DUT_SYSFS" || exit 2
   sta_dev_opened dut
+  sta_dev_unbind_wifi "$DUT_SYSFS" || exit 2
 fi
 
 if command -v nmcli >/dev/null 2>&1; then
@@ -587,13 +590,14 @@ check_cleared() { # $1 cell
 # could not run).
 INJ_FOREIGN=""; INJ_OWN=""; INJ_SKIP=""
 inject_count() { sed -n 's/^injected \([0-9][0-9]*\) unicast frames.*/\1/p' "$1" 2>/dev/null | tail -1; }
-# 0 when INJECT_S, plus 5 s for the monitor vif and hostapd's early group
-# timer, ends before both first rekeys: the group one REKEY_S after
+# 0 when now + INJECT_S + 8 s is before both first rekeys - the injectors'
+# bound (INJECT_S + 2, KILL at + 3), the monitor vif's add and delete, and a
+# margin for hostapd's early group timer: the group one REKEY_S after
 # AP-ENABLED, the pairwise one PTK_REKEY_S after the last four-way with $2.
 # Read off hostapd's -t stamps. $1 cell.
 rekey_clear() {
   awk -v own="EAPOL-4WAY-HS-COMPLETED $2" -v g="$REKEY_S" -v p="$PTK_REKEY_S" \
-      -v need="$(( INJECT_S + 5 ))" -v now="$(date +%s.%N)" '
+      -v need="$(( INJECT_S + 8 ))" -v now="$(date +%s.%N)" '
     / AP-ENABLED/ && !e { e = $1 + 0 }
     index($0, own) { f = $1 + 0 }
     END { if (!e || !f) exit 1
@@ -608,7 +612,7 @@ inject_unicast() { # $1 cell
   own=$(own_of "$1")
   [ -n "$bssid" ] && [ -n "$own" ] || return 1
   if ! rekey_clear "$1" "$own"; then
-    INJ_SKIP="the injection (${INJECT_S}s + 5s) would not end before hostapd's first rekey - raise REKEY_S / PTK_REKEY_S or lower INJECT_S"
+    INJ_SKIP="the injection (${INJECT_S}s + 8s) would not end before hostapd's first rekey - raise REKEY_S / PTK_REKEY_S or lower INJECT_S"
     return 1
   fi
   ip netns exec "$NS" iw dev "$MON" del 2>/dev/null
@@ -617,11 +621,11 @@ inject_unicast() { # $1 cell
     ip netns exec "$NS" iw dev "$MON" del 2>/dev/null
     return 1
   fi
-  ip netns exec "$NS" timeout -k 5 $(( INJECT_S + 10 )) \
+  ip netns exec "$NS" timeout -k 1 $(( INJECT_S + 2 )) \
     python3 "$ROOT/tests/sta_unicast_inject.py" "$MON" "$FOREIGN" "$bssid" \
       "$INJECT_S" "$INJECT_PPS" > "$OUT/inject_$1.log" 2>&1 &
   pf=$!; sta_pid_record inject "$pf"
-  ip netns exec "$NS" timeout -k 5 $(( INJECT_S + 10 )) \
+  ip netns exec "$NS" timeout -k 1 $(( INJECT_S + 2 )) \
     python3 "$ROOT/tests/sta_unicast_inject.py" "$MON" "$own" "$bssid" \
       "$INJECT_S" "$INJECT_PPS" 2048 > "$OUT/inject_own_$1.log" 2>&1 &
   po=$!; sta_pid_record inject_own "$po"

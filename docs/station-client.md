@@ -153,10 +153,12 @@ first line then reads `fault=1`.
   vif on the AP's phy (`tests/sta_unicast_inject.py`) and run only for an
   MT7612U DUT; a phy that cannot add one makes the filter check
   INCONCLUSIVE, not the cell. They run straight after the four-way, and
-  only when they end - vif deleted - at least 5 s before hostapd's first
+  start only when now + `INJECT_S` + 8 s is still before hostapd's first
   group (`REKEY_S` after the AP comes up, default 30) and pairwise
   (`PTK_REKEY_S` after the four-way, default 25) rekeys, read off hostapd's
-  own stamps; otherwise the filter check is INCONCLUSIVE. A group rekey
+  own stamps; otherwise the filter check is INCONCLUSIVE. The injectors are
+  killed at `INJECT_S` + 2 s, so the 8 s cover them, the monitor vif's add
+  and delete, and a margin. A group rekey
   that lands in the vif teardown can go unanswered and cost the
   association.
 

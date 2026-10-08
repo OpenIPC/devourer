@@ -69,6 +69,7 @@ public:
   void Stop() override {
     _rx_stop = true;
     stop_wp_drain();
+    pcie_quiesce();
   }
   void SetMonitorChannel(SelectedChannel channel) override;
   /* Disable / restore the MAC carrier-sense gate (R_AX_CCA_CFG_0 all-CCA-EN:
@@ -76,6 +77,12 @@ public:
    * (EnableTxScheduler clears these gates), so this is a runtime toggle, not the
    * co-channel-deferral fix it is on Jaguar. */
   void SetCcaMode(bool disabled) override;
+  /* The two halves of R_AX_CCA_CFG_0's gate field: "primary" = CCA_EN +
+   * SEC20/40/80 (bits 0-3, the preamble/sub-channel carrier sense), "edcca" =
+   * EDCCA_EN (bit 4, raw in-band energy). Post-bring-up only, per the
+   * IRtlRadio contract; SetCcaMode(d) == SetCcaGates(d, d). */
+  bool SetCcaGates(bool primary_disabled, bool edcca_disabled) override;
+  bool GetCcaGates(bool &primary_disabled, bool &edcca_disabled) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override { return _channel; }
@@ -124,6 +131,19 @@ public:
   /* 64-bit free-running MAC TSF (band-0 port-0). mac_get_tsf (twt.c). */
   uint64_t ReadTsf() override;
 
+  /* Bare band-0 port-0 TSF write (LOW then HIGH). On the AX MAC the beacon
+   * TBTT is hardware-locked to this TSF grid (bench, RTL8852CE: a +30 ms TSF
+   * step left the on-air beacon phase at TSF%interval unchanged; toggling
+   * BCNTX_EN / PORT_FUNC_EN re-latches nothing) — so a write moves an active
+   * beacon's TBTT with it, the Jaguar1 model. PCIe-measured only. */
+  bool WriteTsf(uint64_t tsf) override;
+
+  /* Jaguar1 semantics (see IRadio): the AX TBTT already sits on the TSF grid,
+   * so offset 0 holds natively and a nonzero TSF-preserving pin is physically
+   * unavailable — refused with a one-time warning. Discipline the TSF itself
+   * (WriteTsf) to steer the TBTT. */
+  int32_t PinBeaconTbtt(int32_t offset_us) override;
+
   /* Lean intra-band 20 MHz retune (frequency hopping) — RF channel only, skips
    * the BB bandwidth config + RX-DCK. Falls back to SetMonitorChannel on a band
    * change or a non-20 MHz width. */
@@ -154,6 +174,7 @@ public:
    * prior InitWrite. `beacon` is a full 802.11 beacon; the MAC airs it every
    * `interval_tu` TU with the live TSF inserted. */
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+  int _bcn_interval_tu = 0; /* >0 while a HW beacon is armed (StartBeacon) */
 
   /* 802.11ax scheduled UL: air an HE Basic Trigger (UL-OFDMA grant), program
    * TWT agreements + STA binds, and the fw-autonomous trigger cadence
@@ -240,8 +261,23 @@ private:
   volatile bool _wp_drain_stop = true;
   void start_wp_drain();
   void stop_wp_drain();
-  uint8_t _tx_mgmt_ep = 0; /* band-0 mgmt bulk-OUT ep (BULKOUTID0), 0=TX not up */
-  uint8_t _tx_data_ep = 0; /* AC0 data bulk-OUT ep (BULKOUTID3) */
+  /* PCIe: stop the HAXI DMA engine + clear the ring indices (HalKestrel::
+   * pcie_deinit) exactly once, from Stop() or the destructor, whichever comes
+   * first — an RX-only session has the RXQ DMA live too, and the transport
+   * unmaps the slab right after the device goes away. No-op on USB. */
+  void pcie_quiesce();
+  bool _pcie_quiesced = false;
+  /* True while StartRxLoop's reap loop runs; pcie_quiesce waits for it to
+   * clear (bounded) so the DMA stop never races a reap in progress. */
+  std::atomic<bool> _rx_running{false};
+  /* TX queue handles, bus-neutral: on USB the bulk-OUT endpoint (B0MG =
+   * BULKOUTID0, ACH0 = BULKOUTID3), on PCIe the AX DMA channel itself (8, 0).
+   * ACH0 is channel 0, so "TX is up" is its own flag, not a non-zero handle. */
+  bool _tx_up = false;
+  bool _brought_up = false; /* Init/InitWrite completed the MAC bring-up */
+  uint8_t _tx_mgmt_q = 0;
+  uint8_t _tx_data_q = 0;
+  bool _tx_data_ok = false; /* data frames may use _tx_data_q */
   uint16_t _tx_seq = 0;    /* rolling 12-bit wifi sequence for injected frames */
   std::optional<devourer::TxMode> _tx_mode_default; /* SetTxMode default */
   int16_t _sess_pwr_qdb = 0; /* offset applied by SetTxPowerOffsetQdb — the

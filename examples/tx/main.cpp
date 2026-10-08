@@ -1078,6 +1078,21 @@ int main(int argc, char **argv) {
     logger->error("TX bring-up failed: {}", e.what());
     return 1;
   }
+  /* DEVOURER_CCA_GATES=<primary>,<edcca> (each 0/1, 1 = that gate OFF): the
+   * one-bit-at-a-time form of DEVOURER_DIS_CCA (IRtlRadio::SetCcaGates) for
+   * telling a preamble deferral from an energy deferral on a band where
+   * injection stalls. Demo-local; applied once the MAC is up. */
+  if (const char *g = std::getenv("DEVOURER_CCA_GATES")) {
+    int p = 0, e = 0;
+    if (sscanf(g, "%d,%d", &p, &e) == 2) {
+      auto *rtl = dynamic_cast<IRtlRadio *>(rtlDevice);
+      if (!rtl || !rtl->SetCcaGates(p != 0, e != 0))
+        logger->error("DEVOURER_CCA_GATES: SetCcaGates refused (not ported on "
+                      "this backend or not brought up)");
+    } else {
+      logger->error("DEVOURER_CCA_GATES: want <primary>,<edcca> (0/1 each)");
+    }
+  }
 
   write_sentinel(0xBEEF, "post-init/pre-TX");
   devourer::Ev(*g_ev, "init.timing")

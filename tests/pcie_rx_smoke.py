@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """pcie_rx_smoke.py — ambient-beacon RX validation for the PCIe transport
-(RTL8821CE via vfio-pci). Single-adapter: no 2x2 matrix is possible on the
-PCIe rig, so the pass signal is ambient traffic — management beacons decoded
-CRC-clean on both bands.
+(RTL8821CE or RTL8852CE via vfio-pci). Single-adapter: the pass signal is
+ambient traffic — management beacons decoded CRC-clean on both bands. A box
+with a USB witness runs tests/pcie_8852ce_onair.sh for real delivery cells.
 
     sudo python3 tests/pcie_rx_smoke.py [--bdf 0000:01:00.0] \
         [--rxdemo build/rxdemo] [--secs 15] [--channels 6,36]
@@ -12,7 +12,7 @@ DEVOURER_PCIE_BDF + DEVOURER_RX_DUMP_ALL, parse the rx.corrupt event stream
 (fc = 802.11 frame-control word), and require >= MIN_BEACONS frames with
 fc 0x0080 (beacon) and a zero chip-CRC-fail count among them. Exit 0 = all
 channels pass. The adapter is left bound to vfio-pci (use
-tests/pcie_vfio_bind.sh --restore to hand it back to rtw88).
+tests/pcie_vfio_bind.sh --restore to hand it back to the kernel driver).
 """
 
 import argparse

@@ -35,9 +35,17 @@ using kestrel::put_le32;
 KestrelFw::KestrelFw(RtlAdapter device, Logger_t logger, ChipVariant variant)
     : _device{std::move(device)}, _logger{std::move(logger)},
       _variant{variant} {
-  /* CH12 (H2C/FWDL) endpoint = BULKOUTID2 = the 3rd bulk-OUT in descriptor
-   * order (vendor RtOutPipe[2]); on the 8852BU that is 0x07. */
-  _ch12_ep = _device.nth_bulk_out_ep(r::BULKOUTID_H2C);
+  /* CH12 (H2C/FWDL) queue: on USB the BULKOUTID2 endpoint = the 3rd bulk-OUT
+   * in descriptor order (vendor RtOutPipe[2]; 0x07 on the 8852BU); on PCIe the
+   * AX DMA channel 12 itself (the FWCMD TXBD ring). */
+  _pcie = !_device.is_usb();
+  if (_pcie) {
+    _ch12_q = r::MAC_AX_DMA_H2C;
+    _ch12_ready = true;
+  } else {
+    _ch12_q = _device.nth_bulk_out_ep(r::BULKOUTID_H2C);
+    _ch12_ready = _ch12_q != 0;
+  }
 }
 
 void KestrelFw::set32(uint16_t reg, uint32_t bits) {
@@ -178,11 +186,14 @@ bool KestrelFw::hfc_init_dlfw() {
   const uint16_t page_ctrl = c ? r::R_AX_CH_PAGE_CTRL_V1 : r::R_AX_CH_PAGE_CTRL;
   /* set_fc_func_en(0, 0): clear FC_EN + CH12_EN. */
   clr32(fc_ctrl, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
-  /* set_fc_h2c: CH_PAGE_CTRL = h2c_prec<<16; HCI_FC_CTRL CH12_FULL_COND=X2. */
+  /* set_fc_h2c: CH_PAGE_CTRL = h2c_prec<<16; HCI_FC_CTRL CH12_FULL_COND=X2.
+   * The 8852C PCIe DLFW pre-cost is 256 pages (hfc_preccfg_pcie_dlfw_8852c),
+   * the USB one 32. */
+  const uint16_t h2c_prec =
+      _pcie ? r::HFC_PCIE_DLFW_H2C_PREC_8852C : r::HFC_USB_H2C_PREC_8852B;
   _device.rtw_write32(
-      page_ctrl,
-      (static_cast<uint32_t>(r::HFC_USB_H2C_PREC_8852B & r::B_AX_PREC_PAGE_CH12_MSK)
-       << r::B_AX_PREC_PAGE_CH12_SH));
+      page_ctrl, (static_cast<uint32_t>(h2c_prec & r::B_AX_PREC_PAGE_CH12_MSK)
+                  << r::B_AX_PREC_PAGE_CH12_SH));
   _device.rtw_write32(
       fc_ctrl,
       r::set_clr_word(_device.rtw_read32(fc_ctrl), r::HFC_FULL_COND_X2,
@@ -203,12 +214,12 @@ bool KestrelFw::dmac_pre_init() {
     funcen |= r::B_AX_H_AXIDMA_EN;
   set32(r::R_AX_DMAC_FUNC_EN, funcen);
   if (_variant == ChipVariant::C8852C) {
-    /* dmac_func_pre_en_8852c HAXI setup (init_8852c.c): DMA mode = USB,
-     * un-stop the AXI master + TX/RX HCI, un-stop the DMA channels, enable the
-     * AXIDMA in the platform. */
+    /* dmac_func_pre_en_8852c HAXI setup (init_8852c.c): DMA mode by bus
+     * (USB, or PCIE_1B on the 8852CE), un-stop the AXI master + TX/RX HCI,
+     * un-stop the DMA channels, enable the AXIDMA in the platform. */
     uint32_t v = _device.rtw_read32(r::R_AX_HAXI_INIT_CFG1);
-    v = r::set_clr_word(v, r::DMA_MOD_USB, r::B_AX_DMA_MODE_MSK,
-                        r::B_AX_DMA_MODE_SH);
+    v = r::set_clr_word(v, _pcie ? r::DMA_MOD_PCIE_1B : r::DMA_MOD_USB,
+                        r::B_AX_DMA_MODE_MSK, r::B_AX_DMA_MODE_SH);
     v = (v & ~r::B_AX_STOP_AXI_MST) | r::B_AX_TXHCI_EN_V1 | r::B_AX_RXHCI_EN_V1;
     _device.rtw_write32(r::R_AX_HAXI_INIT_CFG1, v);
     clr32(r::R_AX_HAXI_DMA_STOP1, r::HAXI_DMA_STOP1_CHANS);
@@ -333,12 +344,12 @@ bool KestrelFw::send_fwdl_packet(const uint8_t *payload, uint32_t payload_len,
 
   /* tx_sync returns bytes-transferred on success (>=0), negative libusb rc on
    * error. */
-  int rc = _device.bulk_send_sync_ep(_ch12_ep, _txbuf.data(),
+  int rc = _device.bulk_send_sync_ep(_ch12_q, _txbuf.data(),
                                      _txbuf.size(), 1000);
   if (rc < 0 || static_cast<size_t>(rc) != _txbuf.size()) {
-    _logger->error("Kestrel FWDL: bulk-out to ep 0x{:02x} failed (rc={}, "
+    _logger->error("Kestrel FWDL: CH12 send ({} 0x{:02x}) failed (rc={}, "
                    "wanted {})",
-                   _ch12_ep, rc, _txbuf.size());
+                   _pcie ? "dma-ch" : "ep", _ch12_q, rc, _txbuf.size());
     return false;
   }
   return true;
@@ -653,11 +664,11 @@ bool KestrelFw::send_h2c_cmd(uint8_t cat, uint8_t h2c_class, uint8_t func,
   put_le32(hdr + 4, data_len << r::H2C_HDR_TOTAL_LEN_SH);
   std::memcpy(hdr + r::FWCMD_HDR_LEN, content, len);
 
-  int rc = _device.bulk_send_sync_ep(_ch12_ep, _txbuf.data(), _txbuf.size(), 1000);
+  int rc = _device.bulk_send_sync_ep(_ch12_q, _txbuf.data(), _txbuf.size(), 1000);
   if (rc < 0 || static_cast<size_t>(rc) != _txbuf.size()) {
-    _logger->error("Kestrel H2C: bulk-out to ep 0x{:02x} failed (rc={}, class={}"
+    _logger->error("Kestrel H2C: CH12 send ({} 0x{:02x}) failed (rc={}, class={}"
                    " func={})",
-                   _ch12_ep, rc, h2c_class, func);
+                   _pcie ? "dma-ch" : "ep", _ch12_q, rc, h2c_class, func);
     return false;
   }
   return true;
@@ -943,7 +954,7 @@ bool KestrelFw::fw_pre_init() {
   /* mac_hal_init pre-FWDL: hci_func_en (init.c:406) + dmac_pre_init (DLFW
    * DLE/HFC, init.c:414). The caller runs usb_pre_init (intf_pre_init) after
    * this, then download_firmware — vendor order. */
-  if (_ch12_ep == 0) {
+  if (!_ch12_ready) {
     _logger->error("Kestrel FWDL: no CH12 bulk-OUT endpoint (need >=3 bulk-out; "
                    "found {})",
                    _device.bulk_out_ep_count());
@@ -991,8 +1002,8 @@ bool KestrelFw::download_firmware(uint8_t cut, uint8_t mss_idx, bool is_sec_ic) 
     _logger->error("Kestrel FWDL: no firmware image for this variant/build");
     return false;
   }
-  _logger->info("Kestrel FWDL: image {} ({} bytes) via ep 0x{:02x}", img, len,
-                _ch12_ep);
+  _logger->info("Kestrel FWDL: image {} ({} bytes) via {} 0x{:02x}", img, len,
+                _pcie ? "dma-ch" : "ep", _ch12_q);
 
   /* mac_hal_init WDT block (init.c:470, right before the CPU enable): no
    * WDT wake on USB/PCIE (SYS_CFG5), WDT platform-reset disabled

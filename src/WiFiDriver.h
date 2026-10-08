@@ -46,11 +46,11 @@ public:
    * vfio, mirroring the USB doctrine: open the transport first —
    * devourer::PcieTransport::Open("0000:01:00.0", logger) is the recommended
    * path (the device must be bound to vfio-pci, see tests/pcie_vfio_bind.sh) —
-   * then hand it in here. Chip identity is read from SYS_CFG2 over MMIO;
-   * currently only chip-id 0x09 (RTL8821C — the RTL8821CE) is accepted,
-   * anything else logs and returns nullptr (same contract as an unsupported
-   * chip on USB). No UsbDeviceLock: a vfio device fd is exclusive by
-   * construction (a second open fails). */
+   * then hand it in here. Dispatch: the PCI device id first (10ec:c852 =
+   * RTL8852CE on the Kestrel HAL), then SYS_CFG2 over MMIO (chip-id 0x09 =
+   * RTL8821CE on the Jaguar2 HAL); anything else logs and returns nullptr
+   * (same contract as an unsupported chip on USB). No UsbDeviceLock: a vfio
+   * device fd is exclusive by construction (a second open fails). */
   std::unique_ptr<IRadio>
   CreateRadioPcie(std::shared_ptr<devourer::PcieTransport> transport,
                       const devourer::DeviceConfig &cfg = {});

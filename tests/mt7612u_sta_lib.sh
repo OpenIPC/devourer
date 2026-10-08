@@ -16,11 +16,13 @@
 #     cannot share - and kill each other through - one set of PID files. The
 #     kernel drops the lock when the last holder exits, so there is no owner
 #     record to race and no stale lock to reclaim. Two runs with different
-#     OUTs are NOT kept apart by this lock. sta_dut_take() refuses an
-#     MT7612U with a LIVE holder - an interface bound to a driver other than
-#     mt76x2u (usbfs: a process has claimed it), or a process with its
-#     /dev/bus/usb node open - so a run never toggles `authorized` under a
-#     devourer process. An unbound interface nothing holds is taken as it is:
+#     OUTs are NOT kept apart by this lock. Every DUT and peer take
+#     (sta_dut_take() for the MT7612U, sta_dev_record() for a Realtek
+#     adapter) refuses an adapter with a LIVE holder - an interface bound to
+#     usbfs (a process has claimed it), or a process with its /dev/bus/usb
+#     node open - so a run never toggles `authorized` under a devourer
+#     process. sta_dut_take() also refuses interface 0 bound to any driver
+#     other than mt76x2u. An unbound interface nothing holds is taken as it is:
 #     a devourer demo detaches mt76x2u and never reattaches it, and a host
 #     may blacklist mt76x2u (docs/mt7612u.md). What this cannot see is
 #     another harness between two of its gates, when nothing holds the
@@ -104,16 +106,40 @@ STA_DUT_TAKEN=no
 STA_DUT_ID=""
 # The PID of a process that has the USB device at sysfs path $1 open
 # (/dev/bus/usb/BBB/DDD), or nothing. Root sees every process's fds.
+# Read from `ls -l`, which GNU and busybox print alike: busybox find has no
+# -lname (its error would read as "nothing holds it"), and GNU find -samefile
+# holds the node open itself.
 sta_usb_holder() {
   _sta_b=$(cat "/sys/bus/usb/devices/$1/busnum" 2>/dev/null)
   _sta_d=$(cat "/sys/bus/usb/devices/$1/devnum" 2>/dev/null)
   [ -n "$_sta_b" ] && [ -n "$_sta_d" ] || return 0
-  _sta_h=$(find /proc/[0-9]*/fd -maxdepth 1 \
-             -lname "$(printf '/dev/bus/usb/%03d/%03d' "$_sta_b" "$_sta_d")" \
-             2>/dev/null | head -1)
-  [ -n "$_sta_h" ] || return 0
-  _sta_h=${_sta_h#/proc/}
-  echo "${_sta_h%%/*}"
+  # shellcheck disable=SC2012 # the names listed are /proc fd numbers
+  ls -l /proc/[0-9]*/fd 2>/dev/null |
+    awk -v n="$(printf '/dev/bus/usb/%03d/%03d' "$_sta_b" "$_sta_d")" '
+      /^\/proc\/[0-9]+\/fd:$/ { split($0, p, "/"); pid = p[3]; next }
+      $NF == n && $(NF - 1) == "->" && pid != "" { print pid; exit }'
+}
+
+# Refuse the USB device at sysfs path $2 (called $1 in the message) while a
+# live process holds it: an interface bound to usbfs (claimed over libusb),
+# or a process with its /dev/bus/usb node open. A libusb-claimed interface
+# carries no netdev, so sta_dev_unbind_wifi() alone would pass it.
+sta_usb_unheld() {
+  for _sta_if in "/sys/bus/usb/devices/$2:"*; do
+    [ -e "$_sta_if/driver" ] || continue
+    if [ "$(basename "$(readlink -f "$_sta_if/driver")")" = usbfs ]; then
+      echo "refusing $1 at $2 - $(basename "$_sta_if") is held by usbfs" \
+           "(a process has claimed it)"
+      return 1
+    fi
+  done
+  _sta_pid=$(sta_usb_holder "$2")
+  if [ -n "$_sta_pid" ]; then
+    echo "refusing $1 at $2 - PID $_sta_pid" \
+         "($(cat "/proc/$_sta_pid/comm" 2>/dev/null)) has its USB device open"
+    return 1
+  fi
+  return 0
 }
 
 # Refuse a DUT_SYSFS that is not an MT7612U, or that something live holds:
@@ -139,12 +165,7 @@ sta_dut_take() {
       return 1
     fi
   fi
-  _sta_pid=$(sta_usb_holder "$DUT_SYSFS")
-  if [ -n "$_sta_pid" ]; then
-    echo "refusing DUT_SYSFS=$DUT_SYSFS - PID $_sta_pid" \
-         "($(cat "/proc/$_sta_pid/comm" 2>/dev/null)) has its USB device open"
-    return 1
-  fi
+  sta_usb_unheld DUT "$DUT_SYSFS" || return 1
   if [ "$_sta_drv" = mt76x2u ]; then
     echo "$DUT_SYSFS:1.0" > /sys/bus/usb/drivers/mt76x2u/unbind 2>/dev/null
     sleep 2
@@ -256,9 +277,11 @@ sta_usb_id() {
 # open detaches its kernel driver and nothing re-attaches it. Each is kept
 # under a NAME, in files in OUT (a process started inside a command
 # substitution sets them too, and its variables never reach the parent):
-#   sta_dev_record NAME SYSFS VID PID - before the run: refuse a hub and any
-#     device that is not VID:PID, and note its idVendor:idProduct:serial;
-#   sta_dev_opened NAME - just before a process opens it;
+#   sta_dev_record NAME SYSFS VID PID - before the run: refuse a hub, any
+#     device that is not VID:PID, and one a live process holds
+#     (sta_usb_unheld), and note its idVendor:idProduct:serial;
+#   sta_dev_opened NAME - just before a process opens it, and after any
+#     sta_dev_unbind_wifi() has succeeded;
 #   sta_dev_handback NAME SYSFS - re-enumerate it with an `authorized` 0/1
 #     toggle so its kernel driver binds again - only when this run opened it,
 #     and only while SYSFS still reports the recorded identity, so a device
@@ -273,6 +296,7 @@ sta_dev_record() {
   if [ "$_sta_have" != "$_sta_want" ]; then
     echo "refusing $1 at $2 - it reports $_sta_have, not $_sta_want"; return 1
   fi
+  sta_usb_unheld "$1" "$2" || return 1
   sta_usb_id "$2" > "$OUT/.id_$1"
   rm -f "$OUT/.opened_$1"
   return 0

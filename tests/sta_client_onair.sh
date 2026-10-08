@@ -331,11 +331,11 @@ trap 'cleanup; exit 3' INT TERM
 if [ "$DUT_KIND" = mt7612u ]; then
   sta_dut_take || exit 2
 else
-  # Marked opened BEFORE the unbind, so the hand-back re-binds its driver
-  # whatever happens after this point.
+  # Marked opened only once the unbind has succeeded, so cleanup toggles
+  # `authorized` only on an adapter this run freed (and nothing held).
   sta_dev_record dut "$DUT_SYSFS" "$DUT_VID" "$DUT_PID" || exit 2
-  sta_dev_opened dut
   sta_dev_unbind_wifi "$DUT_SYSFS" || exit 2
+  sta_dev_opened dut
 fi
 
 if command -v nmcli >/dev/null 2>&1; then

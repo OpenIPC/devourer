@@ -134,7 +134,11 @@ struct mt_async;
 /* Each slot names its own ring, not dev->a: if a teardown has to leak a ring
  * whose transfers are still in flight, their completions must keep touching
  * the leaked ring and never a replacement one. */
-struct mt_slot { struct mt7612u_dev *d; struct mt_async *a; int idx; };
+struct mt_slot {
+	struct mt7612u_dev *d; struct mt_async *a; int idx;
+	int nframes;   /* TX: frames in the slot's transfer (an aggregate: >1) */
+	int submitted; /* TX: submitted since the slot was last reserved */
+};
 
 struct mt_async {
 	struct libusb_transfer *rx[MT_RX_RING], *tx[MT_TX_RING];
@@ -142,8 +146,9 @@ struct mt_async {
 	uint8_t rx_buf[MT_RX_RING][MT_RX_BUFSZ];
 	uint8_t tx_buf[MT_TX_RING][MT_TX_BUFSZ];
 	int     tx_busy[MT_TX_RING];
-	/* Guards running, rx_active, tx_busy[], tx_inflight and rx_inflight -
-	 * all of which the event thread writes and the caller reads. */
+	/* Guards running, stopping, rx_active, tx_busy[], tx_inflight,
+	 * rx_inflight, tx_slot[].d/.nframes/.submitted and rx_slot[].d - all
+	 * of which the event thread reads or writes alongside the caller. */
 	std::mutex lock;
 	/* condition_variable_any, not condition_variable: it waits on any
 	 * BasicLockable, so every site below keeps the plain lock()/unlock()
@@ -154,11 +159,15 @@ struct mt_async {
 	std::thread evt;
 	int evt_started;
 	int running, rx_active;
+	/* Set by mt_async_stop() before its cancel pass: no TX transfer may be
+	 * submitted after it, since one would miss the cancel and, carrying no
+	 * timeout, could hold the ring past the stop's wait. */
+	int stopping;
 	int tx_inflight, rx_inflight;
 	mt7612u_rx_cb cb;
 	void *cb_user;
 	uint64_t tx_submitted, tx_done_n, tx_err, rx_frames, rx_err, rx_invalid;
-	uint64_t rx_dropped;      /* rejected on length: truncated, or > MT_RX_BUFSZ */
+	uint64_t rx_dropped;      /* parser rejects: length, and invalid PHY too */
 };
 
 struct mt7612u_dev {
@@ -222,6 +231,12 @@ struct mt7612u_dev {
 
 	unsigned io_err;          /* EP0 transfers that exhausted their retries */
 	int      transfers_stranded; /* libusb still owns a cancelled ring */
+	/* Frames whose bulk transfer was submitted and then did not complete -
+	 * errored, cancelled at a ring stop, or stranded with it - so may not
+	 * have reached the chip: an upper bound, as mt7612u_tx_wire_failed()
+	 * documents. Per device, so it outlives a ring restart; counted in
+	 * FRAMES, not transfers. */
+	std::atomic<uint64_t> tx_wire_failed{0};
 	/* libusb_transfer objects for the synchronous helpers (usb.cpp), taken
 	 * from here rather than allocated per call. Allocated in
 	 * mt_dev_state_init(), i.e. before any event thread exists, so the
@@ -432,14 +447,21 @@ int mt_radiotap_parse(const uint8_t *buf, size_t len, struct mt7612u_tx_rate *r)
 struct mt_async_stats {
 	uint64_t tx_submitted, tx_done, tx_err, rx_frames, rx_err, rx_invalid;
 	uint64_t rx_dropped;
+	int tx_inflight;   /* submitted bulk transfers not yet completed */
 };
 void mt_async_stats(struct mt7612u_dev *d, struct mt_async_stats *out);
 void mt_async_note_invalid(struct mt7612u_dev *d);
+/* Test hook: runs the RX ring's completion callback on `t`. Lets a headless
+ * test drive rx_done with a hand-filled transfer - no context, no device.
+ * Exists only for tests/mt7612u_rx_ring_selftest.cpp; not API. */
+void mt_async_rx_done_for_test(struct libusb_transfer *t);
 int  mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user);
 void mt_async_stop(struct mt7612u_dev *d);
-int  mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len);
+int  mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len,
+                        int nframes);
 
 /* --- rx.c --- */
+#define MT_RX_PARSE_INVALID (-2)  /* mt_rx_parse: the rate word's PHY is invalid */
 int mt_rx_parse(struct mt7612u_dev *d, uint8_t *buf, int n,
                 const uint8_t **frame, struct mt7612u_rx_info *info);
 int mt_rx_one(struct mt7612u_dev *d, uint8_t *buf, int bufsize,

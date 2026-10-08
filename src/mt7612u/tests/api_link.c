@@ -42,6 +42,7 @@ static void *const api[] = {
 	(void *)mt7612u_beacon_update,
 	(void *)mt7612u_beacon_stop,
 	(void *)mt7612u_get_stats,
+	(void *)mt7612u_tx_wire_failed,
 	(void *)mt7612u_link_stats_start,
 	(void *)mt7612u_link_stats,
 	(void *)mt7612u_ch_time,

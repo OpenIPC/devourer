@@ -33,11 +33,15 @@
 # one-shot send.
 #
 # RUNTIME. Each harness arm runs the whole `txs` gate - eight gate arms, each
-# twice (MAC receiver off, then on), FRAMES frames apiece - and most gate arms
-# settle one frame at a time at about 6 frames/s. Measured at FRAMES=200: about
-# 9 minutes for arm A; arm B, where nothing is acknowledged, is slower. Budget
-# 25 minutes at FRAMES=200 and about a third of that at the default 60 - an
-# outer timeout shorter than that cuts arm B off and reads as INCONCLUSIVE.
+# twice (MAC receiver off, then on), FRAMES frames apiece, one frame at a
+# time. Gate arms whose MAC holds each status entry until the next submit
+# (docs/mt7612u-tx-retry.md, "Status posted on the next submit") cost the
+# gate's 2 s status-wait floor per frame, and on ch6 an unacknowledged frame
+# takes ~1.1 s. Measured at the default 60: about 35 minutes for the whole
+# run, both harness arms. Time scales with FRAMES, so budget about 2 hours at
+# FRAMES=200, more if more gate arms hold their status. Arm B, where nothing
+# is acknowledged, is the slower one. An outer timeout shorter than the run
+# cuts arm B off and reads as INCONCLUSIVE.
 #
 #   sudo tests/mt7612u_sta_uplink.sh
 #
@@ -147,13 +151,22 @@ arm() {
   fi
 
   # BOUNDED, so a wedged gate cannot hold the run (and both adapters) forever.
-  # The gate's own worst case: 16 gate arms, each frame waiting at most its
-  # status bound (b + 50 ms) and the settle at most b per frame + 2 s, with b
-  # = 60 ms + 8 ms per retry past 15 (gate_txs's frame_budget_ms), plus ~7 s of
-  # fixed cost per arm. Half again on top, and 2 min for bring-up. INT lets the
-  # gate tear down (exit 3); KILL 10 s later if it does not.
+  # The gate's own worst case: 16 gate arms, each frame waiting at most for
+  # its transfer (1.5 s, TXS_USB_WAIT_MS) and its status (b + 50 ms, floored
+  # at 2 s - TXS_STATUS_WAIT_MIN_MS) and the settle at most b per frame + 2 s,
+  # with b = 60 ms + 8 ms per retry past 15 (gate_txs's frame_budget_ms), plus
+  # ~7 s of fixed cost per arm. Half again on top, and 2 min for bring-up.
+  # This bound is PER HARNESS ARM: 5424 s at FRAMES=60, 17400 s at 200.
+  # Against the measurement it is a wedge ceiling, not a squeeze: the slowest
+  # frame measured costs ~2 s (a gate arm whose status is held to the next
+  # submit; an un-ACKed frame retires in ~1.2 s on ch6, inside that same
+  # wait), and even every gate arm held at 2 s a frame is ~32 min per harness
+  # arm at 60 and ~107 min at 200 - under the bound by ~2.7x at either size,
+  # where the measured run (~17 min per harness arm at 60) sits ~5x under.
+  # INT lets the gate tear down (exit 3); KILL 10 s later if it does not.
   b=$(( RETRY_LIMIT > 15 ? 60 + (RETRY_LIMIT - 15) * 8 : 60 ))
-  dut_bound=$(( 16 * (FRAMES * (2 * b + 50) / 1000 + 8) * 3 / 2 + 120 ))
+  w=$(( b + 50 > 2000 ? b + 50 : 2000 ))
+  dut_bound=$(( 16 * (FRAMES * (1500 + w + b) / 1000 + 8) * 3 / 2 + 120 ))
   DEVOURER_TX_RETRY_LIMIT="$RETRY_LIMIT" \
       timeout -s INT -k 10 "$dut_bound" \
       "$BUILD/mt7612uprobe" txs "$CH" "$FRAMES" "$TARGET" \

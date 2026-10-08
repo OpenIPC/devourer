@@ -258,7 +258,7 @@ int mt_tx_raw(struct mt7612u_dev *d, const void *frame, size_t len,
 	/* Async pool when one is running - it only blocks when every slot is in
 	 * flight. Otherwise fall back to a synchronous transfer. */
 	if (d->a)
-		return mt_async_tx_submit(d, buf, total);
+		return mt_async_tx_submit(d, buf, total, 1);
 
 	rc = mt_bulk(d, MT_EP_OUT_AC_BE, buf, total, &n, 500);
 	if (rc) { ERR("tx bulk out: %s", libusb_error_name(rc)); return -1; }

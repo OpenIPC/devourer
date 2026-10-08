@@ -15,14 +15,16 @@ radio and lands on the AP's channel without needing a third adapter.
   sta_unicast_inject.py <mon-if> <dst-mac> <bssid> [seconds] [pps] [seq0]
 
 seq0 (0..4095, default 0) is the first sequence number. Two injectors sharing
-a transmitter address can be given disjoint ranges. That is a precaution, not
-a measured need: these frames never set Retry, so 802.11 duplicate detection
-should not merge the two streams anyway.
+a transmitter address can be given disjoint ranges, so 802.11 duplicate
+detection cannot merge the two streams. This script sets no Retry bit, but the
+AP's hardware may retransmit a frame nobody acknowledges, with Retry set: in
+tests/sta_client_onair.sh an unarmed station counts 10-30x as many frames to
+an address nobody holds as were injected, while the stream to its own
+address, which it acknowledges, arrives 1:1.
 
-Note what this does NOT do: mac80211 marks injected frames no-ack by default,
-so these do not solicit an acknowledgement and cannot be used to measure one.
-Acknowledgement is measured by tests/mt7612u_sta_autoack.sh, which asks the
-transmitter (a Realtek peer's per-frame CCX reports).
+Note what this does NOT do: it never sees an acknowledgement, so it cannot
+measure one. Acknowledgement is measured by tests/mt7612u_sta_autoack.sh,
+which asks the transmitter (a Realtek peer's per-frame CCX reports).
 """
 import signal
 import socket

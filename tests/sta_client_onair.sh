@@ -206,6 +206,9 @@ for v in CH SECS REKEY_S PTK_REKEY_S PING_S DOWN_S REJOIN_S AP_OFDM_ONLY HOSTAPD
   case "${!v}" in ''|*[!0-9]*) echo "$v must be a non-negative integer"; exit 2 ;; esac
 done
 [ "$PING_S" -ge 1 ] || { echo "PING_S must be at least 1"; exit 2; }
+# 0 would switch hostapd's rekey off, and the wpa2 cell exists to see both.
+[ "$REKEY_S" -ge 1 ] && [ "$PTK_REKEY_S" -ge 1 ] ||
+  { echo "REKEY_S and PTK_REKEY_S must be at least 1"; exit 2; }
 if [ "$INJECT_S" -lt 1 ] || [ "$INJECT_PPS" -lt 1 ] || [ "$INJECT_PPS" -gt 2000 ]; then
   echo "INJECT_S must be at least 1, INJECT_PPS 1..2000 (the injector's cap)"; exit 2
 fi
@@ -581,8 +584,10 @@ check_cleared() { # $1 cell
 
 # The managed-filter stimulus (header): the two streams off a monitor vif on
 # the AP's own phy, while the station is associated. They share a transmitter
-# address and get disjoint sequence ranges (0 and 2048) as a precaution only:
-# neither sets Retry, so duplicate detection should not merge them anyway.
+# address and get disjoint sequence ranges (0 and 2048), so duplicate
+# detection cannot merge them: the injector sets no Retry bit, but the AP's
+# hardware retransmits an unacknowledged frame with it set (the noarm
+# control counts many times more foreign frames than were injected).
 # The injector counts frames it SUBMITTED, not frames that aired -
 # hence the own stream as the positive witness. Each PID is recorded on the
 # statement after its launch, and every injector is bounded by `timeout -k`
@@ -594,13 +599,15 @@ inject_count() { sed -n 's/^injected \([0-9][0-9]*\) unicast frames.*/\1/p' "$1"
 # bound (INJECT_S + 2, KILL at + 3), the monitor vif's add and delete, and a
 # margin for hostapd's early group timer: the group one REKEY_S after
 # AP-ENABLED, the pairwise one PTK_REKEY_S after the last four-way with $2.
-# Read off hostapd's -t stamps. $1 cell.
+# Read off hostapd's -t stamps. $1 cell. 1 when the injection would not fit;
+# 2 or 3 when the log, its AP-ENABLED or that four-way cannot be read.
 rekey_clear() {
+  [ -r "$OUT/hostapd_$1.log" ] || return 2   # busybox awk exits 1 on it
   awk -v own="EAPOL-4WAY-HS-COMPLETED $2" -v g="$REKEY_S" -v p="$PTK_REKEY_S" \
       -v need="$(( INJECT_S + 8 ))" -v now="$(date +%s.%N)" '
     / AP-ENABLED/ && !e { e = $1 + 0 }
     index($0, own) { f = $1 + 0 }
-    END { if (!e || !f) exit 1
+    END { if (!e || !f) exit 3
           d = e + g; if (f + p < d) d = f + p
           exit !(now + need < d) }' "$OUT/hostapd_$1.log"
 }
@@ -611,10 +618,15 @@ inject_unicast() { # $1 cell
   bssid=$(ip netns exec "$NS" cat "/sys/class/net/$AP_IF/address" 2>/dev/null)
   own=$(own_of "$1")
   [ -n "$bssid" ] && [ -n "$own" ] || return 1
-  if ! rekey_clear "$1" "$own"; then
-    INJ_SKIP="the injection (${INJECT_S}s + 8s) would not end before hostapd's first rekey - raise REKEY_S / PTK_REKEY_S or lower INJECT_S"
-    return 1
-  fi
+  local rc=0
+  rekey_clear "$1" "$own" 2>/dev/null || rc=$?
+  case "$rc" in
+    0) ;;
+    1) INJ_SKIP="the injection (${INJECT_S}s + 8s) would not end before hostapd's first rekey - raise REKEY_S / PTK_REKEY_S or lower INJECT_S"
+       return 1 ;;
+    *) INJ_SKIP="no AP-ENABLED or four-way stamp for $own in $OUT/hostapd_$1.log - the rekeys cannot be placed, so the injection was not run"
+       return 1 ;;
+  esac
   ip netns exec "$NS" iw dev "$MON" del 2>/dev/null
   if ! { ip netns exec "$NS" iw phy "$AP_PHY" interface add "$MON" type monitor 2>/dev/null &&
          ip netns exec "$NS" ip link set "$MON" up 2>/dev/null; }; then

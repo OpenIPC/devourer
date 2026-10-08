@@ -152,10 +152,12 @@ first line then reads `fault=1`.
   The injections (`INJECT_S`, `INJECT_PPS` each, `FOREIGN`) ride a monitor
   vif on the AP's phy (`tests/sta_unicast_inject.py`) and run only for an
   MT7612U DUT; a phy that cannot add one makes the filter check
-  INCONCLUSIVE, not the cell. They run straight after the four-way, and
+  INCONCLUSIVE, not the cell. They run after the cell's ping - the AP keeps
+  retransmitting the unacknowledged foreign stream for seconds after the
+  injectors stop, and a ping behind that backlog loses its first echo - and
   start only when now + `INJECT_S` + 8 s is still before hostapd's first
-  group (`REKEY_S` after the AP comes up, default 30) and pairwise
-  (`PTK_REKEY_S` after the four-way, default 25) rekeys, read off hostapd's
+  group (`REKEY_S` after the AP comes up, default 90) and pairwise
+  (`PTK_REKEY_S` after the four-way, default 80) rekeys, read off hostapd's
   own stamps; otherwise the filter check is INCONCLUSIVE. The injectors are
   killed at `INJECT_S` + 2 s, so the 8 s cover them, the monitor vif's add
   and delete, and a margin. A group rekey

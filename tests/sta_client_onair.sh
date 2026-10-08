@@ -37,8 +37,10 @@
 # station refuses it on a WPA2 link and counts it (`plaintext refused`), and
 # it must reach half of what was injected, else the filter check is
 # INCONCLUSIVE. A phy that cannot add a monitor vif makes the check
-# INCONCLUSIVE, not the cell. The injection runs straight after the four-way,
-# before the ping. It starts only when now + INJECT_S + 8 s is still before
+# INCONCLUSIVE, not the cell. The injection runs after the cell's ping, not
+# before it: the AP keeps retransmitting the unacknowledged foreign stream
+# for seconds after the injectors stop, and a ping behind that backlog loses
+# its first echo. It starts only when now + INJECT_S + 8 s is still before
 # hostapd's first group and pairwise rekeys, read off hostapd's own stamps;
 # otherwise it is skipped and the check is INCONCLUSIVE. The injectors are
 # killed at INJECT_S + 2 s (KILL 1 s later), so the 8 s cover them, the
@@ -168,9 +170,13 @@ SECS="${SECS:-90}"
 # fire inside the run: the rekeys travel inside the cipher, a path the
 # four-way alone never exercises. The group timer starts with the AP and the
 # pairwise one at the four-way; the injection (INJECT_S) has to fit, with
-# its margin, before the first of them.
-REKEY_S="${REKEY_S:-30}"
-PTK_REKEY_S="${PTK_REKEY_S:-25}"
+# its margin, before the first of them, and it runs after the cell's ping.
+# The longer case is noarm: four-way ~2 s after AP-ENABLED, the warm-up ping
+# (<= 3 s) and the PING_S window (30 s), then INJECT_S + 8 s (18 s) - about
+# 53 s from AP-ENABLED, 51 s from the four-way. 90 and 80 leave ~30 s for a
+# slower join or host.
+REKEY_S="${REKEY_S:-90}"
+PTK_REKEY_S="${PTK_REKEY_S:-80}"
 # The ping window behind every reported link line and the reconnect cell's
 # post-re-join check: PING_S seconds at 2 pings a second.
 PING_S="${PING_S:-30}"
@@ -934,18 +940,20 @@ run_wpa2() {
     cell_end
     return 0
   fi
-  # The managed-filter stimulus first, so that it is over before the rekeys.
-  INJ_FOREIGN=""; INJ_OWN=""; INJ_SKIP=""
-  if [ "$DUT_KIND" = mt7612u ] && { [ "$cell" = wpa2 ] || [ "$cell" = noarm ]; }; then
-    inject_unicast "$cell"
-    sta_pid_alive "$STA_PID" || { station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; }
-  fi
   local p=0
   if [ "$cell" = wpa2 ]; then ping_ap "$cell" || p=$?
   else ping_window "$cell" || p=$?; fi
   if [ "$p" = 2 ]; then station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; fi
   WPA2_LINK="four-way completed, ping $(loss "$cell")"
   [ "$p" = 0 ] && WPA2_LINK="$WPA2_LINK OK"
+  # The managed-filter stimulus after the ping (the AP's retransmission
+  # backlog of the foreign stream must not sit in front of it), and before
+  # the rekeys (rekey_clear).
+  INJ_FOREIGN=""; INJ_OWN=""; INJ_SKIP=""
+  if [ "$DUT_KIND" = mt7612u ] && { [ "$cell" = wpa2 ] || [ "$cell" = noarm ]; }; then
+    inject_unicast "$cell"
+    sta_pid_alive "$STA_PID" || { station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; }
+  fi
   [ "$cell" = wpa2 ] || { cell_end; return 0; }
 
   # The rekeys: waited for while the station is alive. "pairwise key

@@ -72,10 +72,10 @@ unassociated until its time is up, and the ledger ends `Failed` with the
 reason.
 
 The moment an association response is accepted - open or WPA2 - the
-station sends one probe request (the "nudge", counted as `nudges` in the
-ledger): see "AP quirk" below. On WPA2 a second one follows if no EAPOL has
-arrived 1 s later; the four-way timeout re-joins if even that is not
-enough.
+station sends one SSID-specific probe request (to broadcast, carrying our
+SSID; the "nudge", counted as `nudges` in the ledger): see "AP quirk" below.
+On WPA2 a second one follows if no EAPOL has arrived 1 s later; the four-way
+timeout re-joins if even that is not enough.
 
 An open association is confirmed by the AP's first unicast data frame to
 the station - one that carries an MSDU; a (QoS) Null, which an AP sends for

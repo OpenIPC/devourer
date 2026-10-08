@@ -1059,11 +1059,11 @@ void test_a_non_key_eapol_reaches_the_host() {
         "...and is not counted as a rekey");
 }
 
-/* THE NUDGE: an accepted Association Response queues one probe request at
- * once, open or WPA2, so an AP that holds the response's TX status until its
- * next transmission is made to transmit (hostapd starts both the association
- * and the four-way from that status). On WPA2 a second one follows if no
- * EAPOL has arrived kNudgeAgainMs later, and none once it has. */
+/* THE NUDGE: an accepted Association Response queues one SSID-specific
+ * probe request at once, open or WPA2, so an AP that holds the response's TX
+ * status until its next transmission is made to transmit (hostapd starts both
+ * the association and the four-way from that status). On WPA2 a second one
+ * follows if no EAPOL has arrived kNudgeAgainMs later, and none once it has. */
 int probes_in(const std::vector<std::vector<uint8_t>>& tx) {
   int n = 0;
   for (const std::vector<uint8_t>& f : tx)
@@ -2508,7 +2508,7 @@ void test_scan_selects_the_wanted_network() {
   check(g_bss.count() >= 1, "the neighbour is in the table");
   supervise(0);
   check(g_joins.load() == 0, "nothing joinable yet, so no join");
-  check(g_probe_tx.load() > 0, "...but a directed probe went out");
+  check(g_probe_tx.load() > 0, "...but an SSID-specific probe went out");
 
   const std::vector<uint8_t> ours = beacon(true);
   rx_frame(ours.data(), ours.size(), -70, 1000);   /* weaker, and ours */

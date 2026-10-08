@@ -439,8 +439,9 @@ std::atomic<uint64_t> g_nudges{0};
  * status (ACK) is in: it counts the station associated, and on WPA2 starts
  * the four-way, only from that status. Nothing else need make the AP
  * transmit to us soon, so the association - and the four-way - can stall for
- * seconds while the station's traffic is dropped. One probe request, which
- * every AP answers, makes it transmit and releases the held status. Sent the
+ * seconds while the station's traffic is dropped. One SSID-specific probe
+ * request (to broadcast, carrying our SSID), which the AP answers, makes it
+ * transmit and releases the held status. Sent the
  * moment an Association Response is accepted, open or WPA2; on WPA2 a
  * second one follows if no EAPOL has arrived kNudgeAgainMs later (supervise),
  * and the four-way timeout re-joins if even that is not enough. Caller holds
@@ -807,10 +808,10 @@ uint8_t scan_step(uint32_t now) {
   return g_scan_chans[g_scan_idx];
 }
 
-/* A directed probe request for the SSID we want, on the channel we are on:
- * it finds a hidden BSS and shortens the wait on a swept channel. False when
- * none could be built or the full queue dropped it; only a queued one is
- * counted. Caller holds g_mu. */
+/* An SSID-specific probe request (to broadcast) for the SSID we want, on the
+ * channel we are on: it finds a hidden BSS and shortens the wait on a swept
+ * channel. False when none could be built or the full queue dropped it; only
+ * a queued one is counted. Caller holds g_mu. */
 bool probe(uint8_t chan) {
   std::vector<uint8_t> m =
       devourer::sta::build_probe_req(g_own, g_ssid, chan, chan > 14);

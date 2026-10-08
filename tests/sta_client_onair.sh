@@ -49,9 +49,9 @@
 #            associates OUR address (hostapd's AP-STA-CONNECTED - its own
 #            record) within 30 s, which covers recovering a first
 #            association the AP did not hold (sta_client nudges the AP with
-#            a probe request on associating, and re-joins when its ARP gets
-#            no unicast reply, kConfirmMs); ping 0% loss over
-#            the TAP; the ledger shows plaintext and no decryption; the arm
+#            an SSID-specific probe request on associating, and re-joins
+#            when its ARP gets no unicast reply, kConfirmMs); ping 0% loss
+#            over the TAP; the ledger shows plaintext and no decryption; the arm
 #            line; the clear ran on exit and verified.
 #   wpa2     hostapd WPA2-PSK with group and pairwise rekeys: four-way, both
 #            rekeys completed at the AP, ping 0% loss before and after them,

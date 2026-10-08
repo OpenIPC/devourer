@@ -74,9 +74,17 @@ int main(int argc, char **argv) {
   WiFiDriver wifi(logger);
   auto dev = wifi.CreateRadioPcie(std::move(t));
   if (!dev) { fprintf(stderr, "create failed\n"); return 1; }
-  if (!dev->GetAdapterCaps().tsf_write_ok) {
-    fprintf(stderr, "this part has no TSF write (tsf_write_ok=false)\n");
-    return 1;
+  {
+    const auto caps = dev->GetAdapterCaps();
+    if (!caps.tsf_write_ok || !caps.tbtt_follows_tsf) {
+      // A TSF write that doesn't move the beacon would "lock" the loop's
+      // estimate while the on-air TBTT stays put (Jaguar2/3: use
+      // tests/pcie_ptp_beacon.cpp, the PinBeaconTbtt loop).
+      fprintf(stderr, "this part cannot steer its beacon through the TSF "
+                      "(tsf_write_ok=%d tbtt_follows_tsf=%d)\n",
+              caps.tsf_write_ok ? 1 : 0, caps.tbtt_follows_tsf ? 1 : 0);
+      return 1;
+    }
   }
   dev->InitWrite(SelectedChannel{ch, 0, CHANNEL_WIDTH_20});
   std::vector<uint8_t> bcn = {
@@ -96,6 +104,7 @@ int main(int argc, char **argv) {
   bool init = false;
   double x0 = 0, y0 = 0, S = 0, integ = 0;
   long n = 0;
+  int write_fail_run = 0;
   std::vector<double> locked;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(secs);
   while (std::chrono::steady_clock::now() < deadline) {
@@ -130,7 +139,24 @@ int main(int argc, char **argv) {
       if (step != 0) {
         const uint64_t now = dev->ReadTsf();
         ok = dev->WriteTsf(now + (uint64_t)(step + (int64_t)std::llround(comp)));
-        if (ok) S += (double)step;
+        if (ok) {
+          S += (double)step;
+          write_fail_run = 0;
+        } else {
+          // The counter may be half-updated: its axis is no longer the one the
+          // fit window was built on. Drop the fit and the ledger and re-anchor
+          // from fresh samples; give up if the device keeps refusing.
+          fprintf(stderr, "WriteTsf failed (TSF now 0x%016llx) — refitting\n",
+                  (unsigned long long)dev->ReadTsf());
+          pts.clear();
+          init = false;
+          S = 0;
+          integ = 0;
+          if (++write_fail_run >= 3) {
+            fprintf(stderr, "3 consecutive TSF write failures — stopping\n");
+            break;
+          }
+        }
       }
       if (n > settle) locked.push_back(e);
       printf("{\"ev\":\"ptptsf\",\"i\":%ld,\"phase_us\":%.1f,\"step_us\":%lld,"

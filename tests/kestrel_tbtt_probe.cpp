@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -114,8 +115,10 @@ int main() {
   if (!bar.open(a_bdf)) { perror("sysfs resource2"); return 1; }
 
   SelectedChannel sc{ch, 0, CHANNEL_WIDTH_20};
+  std::atomic<bool> rx_done{false};
   std::thread rx([&] {
     B->Init([&](const Packet &p) {
+      if (p.RxAtrib.crc_err) return;  // a damaged timestamp would skew the phase
       if (p.Data.size() < 36 || p.Data[0] != 0x80) return;  // beacons only
       if (std::memcmp(p.Data.data() + 10, kSa, 6) != 0) return;
       auto e = p.TxEgressTsf();
@@ -124,7 +127,18 @@ int main() {
       g_phase.push_back((int64_t)(*e % (uint64_t)period));
       g_last_egress = *e;
     }, sc);
+    rx_done = true;
   });
+  // StartRxLoop clears the stop flag on entry, so a stop that lands while B is
+  // still in bring-up is lost: repeat it until the RX thread has really ended,
+  // then join. Every exit after the thread starts goes through here.
+  auto stop_rx = [&] {
+    while (!rx_done) {
+      B->StopRxLoop();
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    rx.join();
+  };
   std::this_thread::sleep_for(std::chrono::seconds(4));  // let B come up
 
   A->InitWrite(sc);
@@ -135,7 +149,11 @@ int main() {
       (uint8_t)(interval_tu & 0xff), (uint8_t)(interval_tu >> 8), 0x00,0x00,
       0x00,0x05,'T','B','P','R','B', 0x01,0x01,0x8c};
   if (!A->StartBeacon(bcn.data(), bcn.size(), interval_tu)) {
-    fprintf(stderr, "StartBeacon failed\n"); return 1;
+    fprintf(stderr, "StartBeacon failed\n");
+    stop_rx();
+    A->Stop();
+    B->Stop();
+    return 1;
   }
   std::this_thread::sleep_for(std::chrono::seconds(2));
   { std::lock_guard<std::mutex> lk(g_mu); g_phase.clear(); }
@@ -194,18 +212,23 @@ int main() {
       printf("{\"ev\":\"tbtt.pin\",\"step\":%d,\"req\":%lld,\"applied\":%d,\"dTSF_vs_freerun\":%lld}\n",
              idx, arg(1), applied, (long long)(tsf_minus_fr() - d0));
     } else if (st == "regs") {
-      printf("{\"ev\":\"tbtt.regs\",\"step\":%d,\"freerun\":%llu", idx,
-             (unsigned long long)bar.freerun());
+      // One write per event line: the RX thread also emits events on stdout.
+      char line[512];
+      int len = snprintf(line, sizeof(line),
+                         "{\"ev\":\"tbtt.regs\",\"step\":%d,\"freerun\":%llu", idx,
+                         (unsigned long long)bar.freerun());
       for (int p = 0; p < 5; ++p)
-        printf(",\"tsf_p%d\":%llu", p, (unsigned long long)bar.r64(TSF_LO[p]));
-      printf(",\"port_cfg_p0\":\"0x%08x\"}\n", bar.r(PORT_CFG_P0));
+        len += snprintf(line + len, sizeof(line) - len, ",\"tsf_p%d\":%llu", p,
+                        (unsigned long long)bar.r64(TSF_LO[p]));
+      snprintf(line + len, sizeof(line) - len, ",\"port_cfg_p0\":\"0x%08x\"}\n",
+               bar.r(PORT_CFG_P0));
+      fputs(line, stdout);
     } else {
       fprintf(stderr, "unknown step '%s'\n", st.c_str());
     }
     fflush(stdout);
   }
-  B->StopRxLoop();
-  rx.join();
+  stop_rx();
   A->Stop();
   B->Stop();
   return 0;

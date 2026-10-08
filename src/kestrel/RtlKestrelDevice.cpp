@@ -769,7 +769,10 @@ bool RtlKestrelDevice::StartBeacon(const uint8_t *beacon, size_t len,
   /* OFDM 6M beacon (MAC_AX_OFDM6). bss_color 0 (no HE-BSS coloring). */
   const bool ok = _hal.start_beacon(beacon, static_cast<uint32_t>(len), iv,
                                     /*bss_color=*/0, kestrel::reg::MAC_AX_OFDM6);
-  _bcn_interval_tu = ok ? iv : 0;
+  /* A failed update leaves any previously armed beacon running (the port
+   * config is only rewritten on success), so keep its interval. */
+  if (ok)
+    _bcn_interval_tu = iv;
   return ok;
 }
 
@@ -980,6 +983,9 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
    * a read-add-write moved TSF vs FREERUN by the requested step to within the
    * read latency). USB is unmeasured, so it stays refused there. */
   c.tsf_write_ok = !_device.is_usb();
+  /* ...and the AX TBTT is hardware-locked to that TSF: a WriteTsf moves an
+   * active beacon's TBTT with it (on-air, tests/kestrel_tbtt_probe.cpp). */
+  c.tbtt_follows_tsf = !_device.is_usb();
   c.xtal_cap_default = _efuse.xtal_cap; /* efuse crystal-cap (no runtime trim wired) */
   devourer::set_standard_freq_ranges(c);
 

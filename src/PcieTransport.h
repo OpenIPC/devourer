@@ -113,6 +113,10 @@ public:
    * it is per generation (Jaguar2: before power-on; Kestrel: after
    * dmac_func_pre_en, before FWDL). */
   void hci_setup() override { _dma->setup_rings(); }
+  /* Live DEVCTL2 LTR_EN read through the vfio config region (see ITransport).
+   * False when the PCIe capability is missing or unreadable — silence is the
+   * safe side. */
+  bool ltr_allowed() override;
   TxStats tx_stats() const override;
 
   volatile uint8_t *mmio() const { return _mmio; }
@@ -206,6 +210,7 @@ private:
   volatile uint8_t *_mmio = nullptr;
   size_t _mmio_len = 0;
   uint64_t _cfg_region_off = 0;
+  uint32_t _pcie_cap = 0; /* PCI Express capability offset (0 = not found) */
   size_t _cfg_region_len = 0;
 
   uint8_t *_slab = nullptr; /* DMA slab VA (anonymous, VFIO-pinned) */

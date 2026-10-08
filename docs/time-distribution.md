@@ -245,10 +245,15 @@ dies are n ≤ 2, a range rather than a characterised distribution, and the
 the J1 override writes, but the override itself has not run on J1 hardware. The
 8812AU/8814AU, the 8821C (USB and the 8821CE) and the 8822E share the pair and
 code path and are not separately measured.
-`tsf_write_ok` is false on the MT7612U — its DW0/DW1 registers hold the
-counter and do not load it (`bringup tsfwrite`, `docs/mt7612u.md`) — and on
-Kestrel and the RTL8733B, where the source has no TSF write at all (a source
-fact, not a bench measurement). There `WriteTsf` returns false without touching
+`tsf_write_ok` is true on Kestrel over PCIe: the bare port-0 pair
+(`R_AX_TSFTR_LOW/HIGH_P0`, LOW then HIGH) loads directly, measured against the
+untouched FREERUN counter on an RTL8852CE as a read-add-write with no sleep
+(+30000 µs → +29998, −20000 → −20004: the 2–4 µs is the MMIO read→write gap).
+On Kestrel the write also moves an active beacon's TBTT (see `PinBeaconTbtt`
+below). It stays false on Kestrel over USB (unmeasured). It is false on the
+MT7612U — its DW0/DW1 registers hold the counter and do not load it
+(`bringup tsfwrite`, `docs/mt7612u.md`) — and on the RTL8733B, where the source
+has no TSF write at all (a source fact, not a bench measurement). There `WriteTsf` returns false without touching
 a register, so an adoption loop gets a refusal instead of a silent no-op.
 
 A one-shot
@@ -350,7 +355,20 @@ full-magnitude jump). **Jaguar1** — offset 0 only: its TBTT is
 never holds, the phase follows the restored TSF), so a J1 master needs no
 TBTT actuator at all — discipline the TSF and the TBTT tracks it in hardware;
 `AdjustBeaconTimingFine` (which moves both together) remains the manual
-lever. Where a pin's ~1 ms USB restore disturbance is worse than a tiny
+lever. **Kestrel** (RTL8852CE, PCIe) — the Jaguar1 model, measured on air with
+`tests/kestrel_tbtt_probe.cpp` (one 8852CE beacons, a second reads the egress
+TSF from the beacon timestamp): a ±20–30 ms port-0 TSF step leaves the beacon
+at `TSF % interval` ≈ 22–48 µs after one transitional beacon, and toggling
+`BCNTX_EN` / `PORT_FUNC_EN` re-latches nothing. So `PinBeaconTbtt(0)` is the
+native state and nonzero offsets are refused; ports 1–4 do not run a TSF
+(`TSF_SYNC` from another port is unusable) and `TBTT_SHIFT_P0` is TU-granular.
+The discipline loop steers the TSF itself through `WriteTsf` —
+`tests/pcie_ptp_tsf_discipline.cpp` (actuator = TSF step, the steps subtracted
+from the fit's TSF axis, i.e. the steering ledger below) holds the TBTT to an
+I226 PHC at **0.57–0.86 µs RMS** over four runs on each of two 8852CEs, one on a
+root port and one behind an ASM1182e PCIe switch (no measurable slot
+difference, including with an NVMe saturating the switch uplink) — the same
+model and metric as the 8821CE pin loop. Where a pin's ~1 ms USB restore disturbance is worse than a tiny
 steer, the controller-side fix is a steering ledger: add the cumulative
 commanded shifts back onto the raw TSF before fitting, so the fit sees a
 continuous virtual clock and full authority is safe again.

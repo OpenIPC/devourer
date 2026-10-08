@@ -131,6 +131,19 @@ public:
   /* 64-bit free-running MAC TSF (band-0 port-0). mac_get_tsf (twt.c). */
   uint64_t ReadTsf() override;
 
+  /* Bare band-0 port-0 TSF write (LOW then HIGH). On the AX MAC the beacon
+   * TBTT is hardware-locked to this TSF grid (bench, RTL8852CE: a +30 ms TSF
+   * step left the on-air beacon phase at TSF%interval unchanged; toggling
+   * BCNTX_EN / PORT_FUNC_EN re-latches nothing) — so a write moves an active
+   * beacon's TBTT with it, the Jaguar1 model. PCIe-measured only. */
+  bool WriteTsf(uint64_t tsf) override;
+
+  /* Jaguar1 semantics (see IRadio): the AX TBTT already sits on the TSF grid,
+   * so offset 0 holds natively and a nonzero TSF-preserving pin is physically
+   * unavailable — refused with a one-time warning. Discipline the TSF itself
+   * (WriteTsf) to steer the TBTT. */
+  int32_t PinBeaconTbtt(int32_t offset_us) override;
+
   /* Lean intra-band 20 MHz retune (frequency hopping) — RF channel only, skips
    * the BB bandwidth config + RX-DCK. Falls back to SetMonitorChannel on a band
    * change or a non-20 MHz width. */
@@ -161,6 +174,7 @@ public:
    * prior InitWrite. `beacon` is a full 802.11 beacon; the MAC airs it every
    * `interval_tu` TU with the live TSF inserted. */
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+  int _bcn_interval_tu = 0; /* >0 while a HW beacon is armed (StartBeacon) */
 
   /* 802.11ax scheduled UL: air an HE Basic Trigger (UL-OFDMA grant), program
    * TWT agreements + STA binds, and the fw-autonomous trigger cadence

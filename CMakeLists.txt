@@ -626,6 +626,24 @@ if(DEVOURER_PCIE)
     target_link_libraries(pcieprobe PUBLIC devourer)
 endif()
 
+# kestrel_tbtt_probe — bench probe for the AX beacon TBTT vs port-TSF semantics
+# (two RTL8852CEs: one beacons, the other reads the on-air egress TSF). The
+# ground truth behind Kestrel's PinBeaconTbtt.
+if(DEVOURER_PCIE AND DEVOURER_KESTREL_8852C)
+    add_executable(kestrel_tbtt_probe
+        tests/kestrel_tbtt_probe.cpp
+    )
+    target_link_libraries(kestrel_tbtt_probe PUBLIC devourer)
+endif()
+# pcie_ptp_tsf_discipline — the AP-beacon → PTP loop for TSF-locked-TBTT parts
+# (actuator = the TSF itself); sibling of tests/pcie_ptp_beacon.cpp.
+if(DEVOURER_PCIE)
+    add_executable(pcie_ptp_tsf_discipline
+        tests/pcie_ptp_tsf_discipline.cpp
+    )
+    target_link_libraries(pcie_ptp_tsf_discipline PUBLIC devourer)
+endif()
+
 # kestrelprobe — staged USB bring-up prober for the Kestrel (RTL8852B/C):
 # AX identity (die-id/cut) -> power-on + EFUSE -> firmware download, the
 # pcieprobe sibling. Validates each layer before the demos use it.

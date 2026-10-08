@@ -362,12 +362,6 @@ bad()  { fail=$((fail+1)); printf '  FAIL  %s\n' "$*"; }
 inc()  { inconclusive=$((inconclusive+1)); printf '  INCONCLUSIVE  %s\n' "$*"; }
 info() { printf '  INFO  %s\n' "$*"; }
 
-# Is PID running? kill -0 also succeeds on an unreaped zombie.
-proc_running() {
-  local st
-  st=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)
-  [ -n "$st" ] && [ "$st" != Z ] && [ "$st" != X ]
-}
 
 # Wait for an extended regex in a file. 0 found, 1 timed out.
 wait_for() { # $1 file, $2 regex, $3 seconds
@@ -459,7 +453,7 @@ sta_up() { # $1 cell, $2 seconds, $3.. extra env
   sta_pid_record sta "$STA_PID"
   local t=0
   until grep -q 'sta_client up:' "$OUT/sta_$cell.log" 2>/dev/null; do
-    proc_running "$STA_PID" || return 1
+    sta_pid_alive "$STA_PID" || return 1
     [ "$t" -ge "$READY_TIMEOUT" ] && return 2
     sleep 1; t=$((t + 1))
   done
@@ -486,10 +480,10 @@ STA_RC=""
 sta_stop() {
   STA_RC=""
   [ -n "$STA_PID" ] || return 0
-  if proc_running "$STA_PID"; then kill -INT "$STA_PID" 2>/dev/null; fi
+  if sta_pid_alive "$STA_PID"; then kill -INT "$STA_PID" 2>/dev/null; fi
   local t=0
-  while proc_running "$STA_PID" && [ "$t" -lt 15 ]; do sleep 1; t=$((t + 1)); done
-  if proc_running "$STA_PID"; then
+  while sta_pid_alive "$STA_PID" && [ "$t" -lt 15 ]; do sleep 1; t=$((t + 1)); done
+  if sta_pid_alive "$STA_PID"; then
     # KILL, not TERM: TERM is handled exactly like INT. Still alive after it
     # means the DUT must not be re-enumerated under it.
     sta_pid_kill sta KILL || STA_HUNG=yes
@@ -529,18 +523,18 @@ led() { sed -n "s/.*$2=\\([0-9][0-9]*\\).*/\\1/p" "$OUT/sta_$1.log" | tail -1; }
 # Ping the AP over the air. 0 = 0% loss, 1 = loss, 2 = the station was not
 # alive for the whole measurement (no verdict on the link).
 ping_ap() { # $1 tag
-  proc_running "$STA_PID" || return 2
+  sta_pid_alive "$STA_PID" || return 2
   ping -c 1 -W 3 -I "$TAP" "$APIP" >/dev/null 2>&1            # warm ARP
   ping -c 6 -W 1 -I "$TAP" "$APIP" > "$OUT/ping_$1.txt" 2>&1
-  proc_running "$STA_PID" || return 2
+  sta_pid_alive "$STA_PID" || return 2
   grep -q ' 0% packet loss' "$OUT/ping_$1.txt"
 }
 # The same over a real window: PING_S seconds, two pings a second.
 ping_window() { # $1 tag
-  proc_running "$STA_PID" || return 2
+  sta_pid_alive "$STA_PID" || return 2
   ping -c 1 -W 3 -I "$TAP" "$APIP" >/dev/null 2>&1            # warm ARP
   ping -c $(( PING_S * 2 )) -i 0.5 -W 1 -I "$TAP" "$APIP" > "$OUT/ping_$1.txt" 2>&1
-  proc_running "$STA_PID" || return 2
+  sta_pid_alive "$STA_PID" || return 2
   grep -q ' 0% packet loss' "$OUT/ping_$1.txt"
 }
 loss() { grep -oE '[0-9]+ packets transmitted, [0-9]+ received.*packet loss' "$OUT/ping_$1.txt" 2>/dev/null | head -1; }
@@ -850,7 +844,7 @@ cell_open() {
   ping -I "$TAP" -i 1 "$APIP" >/dev/null 2>&1 &
   sta_pid_record probe $!
   if ! wait_for "$OUT/hostapd_open.log" "AP-STA-CONNECTED $own" 30; then
-    if proc_running "$STA_PID"; then bad "open: the AP never associated $own within 30 s"; cell_end
+    if sta_pid_alive "$STA_PID"; then bad "open: the AP never associated $own within 30 s"; cell_end
     else sta_pid_kill probe; station_gone open; sta_pid_kill_hard hostapd; fi
     return
   fi
@@ -894,7 +888,7 @@ run_wpa2() {
   tap_up || { inc "$cell: no TAP, or the route to $APIP does not leave through $TAP"; cell_end; return 1; }
   if ! wait_for "$OUT/hostapd_$cell.log" "EAPOL-4WAY-HS-COMPLETED $own" 30; then
     WPA2_LINK="no four-way"
-    if ! proc_running "$STA_PID"; then station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; fi
+    if ! sta_pid_alive "$STA_PID"; then station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; fi
     cell_end
     return 0
   fi
@@ -907,7 +901,7 @@ run_wpa2() {
   INJ_FOREIGN=""; INJ_OWN=""
   if [ "$DUT_KIND" = mt7612u ] && { [ "$cell" = wpa2 ] || [ "$cell" = noarm ]; }; then
     inject_unicast "$cell"
-    proc_running "$STA_PID" || { station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; }
+    sta_pid_alive "$STA_PID" || { station_gone "$cell"; sta_pid_kill_hard hostapd; return 1; }
   fi
   [ "$cell" = wpa2 ] || { cell_end; return 0; }
 
@@ -915,13 +909,13 @@ run_wpa2() {
   # handshake completed" is logged for the initial four-way too, so a PTK
   # rekey is the SECOND such line.
   local t=0 gk=0 pk=0 lim=$(( REKEY_S + PTK_REKEY_S + 25 ))
-  while [ "$t" -lt "$lim" ] && proc_running "$STA_PID"; do
+  while [ "$t" -lt "$lim" ] && sta_pid_alive "$STA_PID"; do
     gk=$(grep -c 'group key handshake completed' "$OUT/hostapd_$cell.log" 2>/dev/null)
     pk=$(grep -c 'pairwise key handshake completed' "$OUT/hostapd_$cell.log" 2>/dev/null)
     [ "${gk:-0}" -ge 1 ] && [ "${pk:-0}" -ge 2 ] && break
     sleep 1; t=$((t + 1))
   done
-  if ! proc_running "$STA_PID" && { [ "${gk:-0}" -lt 1 ] || [ "${pk:-0}" -lt 2 ]; }; then
+  if ! sta_pid_alive "$STA_PID" && { [ "${gk:-0}" -lt 1 ] || [ "${pk:-0}" -lt 2 ]; }; then
     station_gone "$cell"; sta_pid_kill_hard hostapd; return 1
   fi
   if [ "${gk:-0}" -ge 1 ]; then ok "$cell: the AP completed a group rekey"
@@ -1035,7 +1029,7 @@ run_reconnect() {
   local own; own=$(own_of "$cell")
   tap_up || { inc "$cell: no TAP, or the route to $APIP does not leave through $TAP"; cell_end; return; }
   if ! wait_for "$OUT/hostapd_$cell.log" "EAPOL-4WAY-HS-COMPLETED $own" 30; then
-    if proc_running "$STA_PID"; then
+    if sta_pid_alive "$STA_PID"; then
       inc "$cell: the first association never completed - nothing to reconnect"; cell_end
     else station_gone "$cell"; sta_pid_kill_hard hostapd; fi
     return
@@ -1055,7 +1049,7 @@ run_reconnect() {
   fi
   sleep "$DOWN_S"
   if ! grep -q '^  station link lost:' "$OUT/sta_$cell.log"; then
-    proc_running "$STA_PID" || { station_gone "$cell"; return; }
+    sta_pid_alive "$STA_PID" || { station_gone "$cell"; return; }
   fi
   ap_up wpa2norekey "${cell}2" || { inc "$cell: hostapd did not come back - see $OUT/hostapd_${cell}2.log"; cell_end; return; }
   # The bound runs from hostapd being started again, not from ap_up
@@ -1073,7 +1067,7 @@ run_reconnect() {
       local ms=$(( $(date +%s%3N) - back ))
       ok "$cell: re-joined and re-keyed $(( ms / 1000 )).$(( ms % 1000 / 100 ))s after hostapd was started again (bound ${REJOIN_S}s)"
     else
-      if proc_running "$STA_PID"; then
+      if sta_pid_alive "$STA_PID"; then
         bad "$cell: no second four-way within ${REJOIN_S}s of the AP coming back"; cell_end
       else station_gone "$cell"; sta_pid_kill_hard hostapd; fi
       return
@@ -1087,7 +1081,7 @@ run_reconnect() {
     if [ "$rejoined" = yes ]; then
       bad "$cell: re-joined with DEVOURER_STA_RECONNECT=0"
     else
-      proc_running "$STA_PID" || { station_gone "$cell"; sta_pid_kill_hard hostapd; return; }
+      sta_pid_alive "$STA_PID" || { station_gone "$cell"; sta_pid_kill_hard hostapd; return; }
       ok "$cell: no re-join within ${REJOIN_S}s with DEVOURER_STA_RECONNECT=0"
     fi
   fi

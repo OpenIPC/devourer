@@ -228,21 +228,11 @@ sel_env() { # $1 sysfs -> DEVOURER_USB_BUS / _PORT assignments
   printf 'DEVOURER_USB_BUS=%s DEVOURER_USB_PORT=%s' "${1%%-*}" "${1#*-}"
 }
 
-# Is PID running? `kill -0` is not enough: a background child that has exited
-# but is not yet reaped is a zombie, and kill -0 still succeeds on it. The
-# state field of /proc/PID/stat (after the parenthesised command name) is Z
-# for a zombie.
-proc_running() { # $1 pid
-  local st
-  st=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)
-  [ -n "$st" ] && [ "$st" != Z ] && [ "$st" != X ]
-}
-
 # Wait for a regex in a file while the process lives. 0 found, 1 not.
 wait_for() { # $1 pid, $2 file, $3 regex, $4 timeout s
   local t=0
   until grep -qE "$3" "$2" 2>/dev/null; do
-    proc_running "$1" || return 1
+    sta_pid_alive "$1" || return 1
     [ "$t" -ge "$4" ] && return 1
     sleep 1; t=$((t + 1))
   done
@@ -415,7 +405,7 @@ down_arm() {
   fi
   # LIVENESS AFTER THE WINDOW: a DUT that died mid-window reads ~0% ACKed,
   # which is a control's PASSING value.
-  if [ -n "$dut" ] && ! proc_running "$dut"; then
+  if [ -n "$dut" ] && ! sta_pid_alive "$dut"; then
     echo "$tag ABORTED the DUT died during the window: $(tail -1 "$OUT/dut_$tag.err" 2>/dev/null)" > "$res"
     rm -f "$OUT/.pid_dut"; return 0
   fi

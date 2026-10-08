@@ -767,8 +767,46 @@ bool RtlKestrelDevice::StartBeacon(const uint8_t *beacon, size_t len,
   }
   const uint16_t iv = interval_tu > 0 ? static_cast<uint16_t>(interval_tu) : 100;
   /* OFDM 6M beacon (MAC_AX_OFDM6). bss_color 0 (no HE-BSS coloring). */
-  return _hal.start_beacon(beacon, static_cast<uint32_t>(len), iv,
-                           /*bss_color=*/0, kestrel::reg::MAC_AX_OFDM6);
+  const bool ok = _hal.start_beacon(beacon, static_cast<uint32_t>(len), iv,
+                                    /*bss_color=*/0, kestrel::reg::MAC_AX_OFDM6);
+  /* A failed update leaves any previously armed beacon running (the port
+   * config is only rewritten on success), so keep its interval. */
+  if (ok)
+    _bcn_interval_tu = iv;
+  return ok;
+}
+
+bool RtlKestrelDevice::WriteTsf(uint64_t tsf) {
+  namespace r = kestrel::reg;
+  if (_device.is_usb())
+    return false; /* tsf_write_ok is PCIe-only (unmeasured over USB) */
+  _device.rtw_write32(r::R_AX_TSFTR_LOW_P0, static_cast<uint32_t>(tsf));
+  _device.rtw_write32(r::R_AX_TSFTR_HIGH_P0, static_cast<uint32_t>(tsf >> 32));
+  /* The counter keeps running: accept a readback within the shared window
+   * (devourer::kTsfWriteReadbackWindowUs semantics). A dead device reads
+   * all-ones and fails this. */
+  return ReadTsf() - tsf < 100000;
+}
+
+int32_t RtlKestrelDevice::PinBeaconTbtt(int32_t offset_us) {
+  if (_bcn_interval_tu <= 0)
+    return 0; /* no active beacon */
+  const int64_t period_us = static_cast<int64_t>(_bcn_interval_tu) * 1024;
+  const int64_t off =
+      ((static_cast<int64_t>(offset_us) % period_us) + period_us) % period_us;
+  if (off != 0) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      _logger->warn("PinBeaconTbtt(Kestrel): the AX TBTT is hardware-locked "
+                    "to the TSF grid — nonzero offsets cannot hold; discipline "
+                    "the TSF (WriteTsf) to steer the beacon");
+    }
+    return 0;
+  }
+  /* Offset 0 is the hardware's own state: the TBTT fires on the TSF grid with
+   * no arm or re-derive needed. */
+  return 0;
 }
 
 bool RtlKestrelDevice::SendTrigger(const devourer::TriggerConfig &cfg) {
@@ -941,6 +979,13 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   /* The AX beacon engine (StartBeacon) airs a HW-timed beacon with the live TSF
    * inserted by the MAC at TX — on-air validated on the 8852BU. */
   c.hw_beacon_txtsf = true;
+  /* WriteTsf: the bare port-0 TSF pair is writable over PCIe (bench, RTL8852CE:
+   * a read-add-write moved TSF vs FREERUN by the requested step to within the
+   * read latency). USB is unmeasured, so it stays refused there. */
+  c.tsf_write_ok = !_device.is_usb();
+  /* ...and the AX TBTT is hardware-locked to that TSF: a WriteTsf moves an
+   * active beacon's TBTT with it (on-air, tests/kestrel_tbtt_probe.cpp). */
+  c.tbtt_follows_tsf = !_device.is_usb();
   c.xtal_cap_default = _efuse.xtal_cap; /* efuse crystal-cap (no runtime trim wired) */
   devourer::set_standard_freq_ranges(c);
 

@@ -473,7 +473,8 @@ public:
    * air-time — a separate per-port timer drives the TBTT (bench-proven). On
    * Jaguar1 the TBTT is recorded as hardware-locked to the TSF grid
    * (PinBeaconTbtt, bench on all three dies), so expect a write there to move
-   * an active beacon's TBTT with it; neither that nor whether the beacon keeps
+   * an active beacon's TBTT with it — on Kestrel over PCIe that is measured on
+   * air (the TBTT follows the write within one beacon); neither that nor whether the beacon keeps
    * airing without the steer's re-download was measured through this call. To
    * steer the hardware-timed beacon (the uplink timing-advance actuator) use
    * AdjustBeaconTiming.
@@ -635,7 +636,10 @@ public:
    * Jaguar1 — offset 0 only (arm/re-derive): its TBTT is hardware-locked to
    * the TSF grid, so a nonzero TSF-preserving pin cannot hold (refused); the
    * flip side is that steering/disciplining the J1 TSF steers the TBTT with
-   * it in hardware, no actuator needed. Base is a no-op. */
+   * it in hardware, no actuator needed. Kestrel (RTL8852CE, PCIe) — the same
+   * model, measured on air: offset 0 is the native state, nonzero refused;
+   * discipline via WriteTsf (tests/pcie_ptp_tsf_discipline.cpp). Base is a
+   * no-op. */
   virtual int32_t PinBeaconTbtt(int32_t offset_us) {
     (void)offset_us;
     return 0;

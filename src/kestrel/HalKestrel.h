@@ -461,6 +461,11 @@ private:
   bool pcie_rst_bdram();
   void pcie_ctrl_txdma_ch(bool enable);
   bool pcie_ltr_set(bool enable);
+  /* LTR fully off with no message sent: HW_EN and the HW/FW/driver decision
+   * enables cleared, no driver request. pcie_ltr_set(false) is NOT this — the
+   * rtw89 disable path requests an idle LTR (REQ_DRV), which is itself a
+   * message. Used when the host has not enabled LTR (ltr_allowed() false). */
+  void pcie_ltr_silence();
   /* BB/RF channel helpers (all over the wIndex=1 window). */
   void bb_rmw(uint32_t addr, uint32_t mask, uint32_t val); /* masked BB write */
   uint32_t bb_read(uint32_t addr, uint32_t mask); /* masked+shifted BB read */

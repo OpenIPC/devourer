@@ -259,6 +259,15 @@ bool PcieTransport::cfg_write(uint32_t off, const void *buf, size_t len) {
          static_cast<ssize_t>(len);
 }
 
+bool PcieTransport::ltr_allowed() {
+  if (!_pcie_cap)
+    return false;
+  uint16_t devctl2 = 0;
+  if (!cfg_read(_pcie_cap + 0x28, &devctl2, 2) || devctl2 == 0xFFFF)
+    return false;
+  return (devctl2 & (1u << 10)) != 0; /* LTR Mechanism Enable */
+}
+
 bool PcieTransport::setup_config_space() {
   struct vfio_region_info reg{};
   reg.argsz = sizeof(reg);
@@ -303,6 +312,7 @@ bool PcieTransport::setup_config_space() {
     }
     cap_ptr = next;
   }
+  _pcie_cap = pcie_cap;
   if (pcie_cap) {
     /* Clear ASPM (LNKCTL[1:0]) during bring-up — L1 entry on a half-configured
      * link is a known hang source. */

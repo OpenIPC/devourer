@@ -133,6 +133,14 @@ public:
    * rtw_hci_setup slot: PCIe TRX buffer-descriptor ring registers; no-op on
    * USB). */
   virtual void hci_setup() {}
+  /* PCIe: whether the host enabled LTR for this function — DEVCTL2 bit 10,
+   * "LTR Mechanism Enable". The kernel sets it only when every port up to the
+   * root supports LTR, and a function must not send LTR messages while it is
+   * clear: behind a switch without LTR (e.g. an ASM1182e) each one is an
+   * Unsupported Request, and the AER recovery reset kills the radio. A chip
+   * whose LTR engine is armed by the driver (the AX parts) must stay silent
+   * when this is false. True on USB, which has no LTR. */
+  virtual bool ltr_allowed() { return true; }
   virtual UsbLinkInfo usb_info() const { return {}; }
   virtual TxStats tx_stats() const { return {}; }
 };

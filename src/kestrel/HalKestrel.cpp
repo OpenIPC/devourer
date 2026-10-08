@@ -365,6 +365,19 @@ bool HalKestrel::pcie_ltr_set(bool enable) {
   return true;
 }
 
+void HalKestrel::pcie_ltr_silence() {
+  const uint32_t ctrl0 = _device.rtw_read32(r::R_AX_LTR_CTRL_0);
+  const uint32_t dec = _device.rtw_read32(r::R_AX_LTR_DEC_CTRL);
+  _device.rtw_write32(r::R_AX_LTR_CTRL_0, ctrl0 & ~r::B_AX_LTR_HW_EN);
+  _device.rtw_write32(r::R_AX_LTR_DEC_CTRL,
+                      dec & ~(r::B_AX_LTR_HW_DEC_EN | r::B_AX_LTR_FW_DEC_EN |
+                              r::B_AX_LTR_DRV_DEC_EN | r::B_AX_LTR_REQ_DRV));
+  _logger->info("Kestrel PCIe: LTR silenced — host has LTR disabled for this "
+                "function (DEVCTL2 LTR_EN=0: a port on the path lacks LTR); "
+                "was CTRL_0=0x{:08x} DEC_CTRL=0x{:08x}",
+                ctrl0, dec);
+}
+
 bool HalKestrel::pcie_pre_init() {
   /* rtw89_pci_ops_mac_pre_init_ax, the 8852C branches in order. Runs after
    * dmac_pre_init (HAXI DMA_MODE=PCIE_1B, HCI enables) and before FWDL. */
@@ -372,6 +385,10 @@ bool HalKestrel::pcie_pre_init() {
     _logger->error("Kestrel PCIe: pre-init is ported for the 8852C only");
     return false;
   }
+  /* Before anything can arm it: a chip the host forbids LTR must never send
+   * one (an Unsupported Request behind a non-LTR switch → AER link reset). */
+  if (!_device.ltr_allowed())
+    pcie_ltr_silence();
   pcie_disable_eq();
   /* deglitch: clear RAC_ANA24[11:8] on both PHYs (16-bit registers). */
   for (uint16_t phy : {r::R_RAC_DIRECT_OFFSET_G1, r::R_RAC_DIRECT_OFFSET_G2}) {
@@ -416,16 +433,24 @@ bool HalKestrel::pcie_pre_init() {
 void HalKestrel::pcie_init() {
   /* rtw89_pci_ops_mac_post_init_ax: LTR on, every TX channel open, release
    * the WPDMA + PCIe IO stops. */
-  if (!pcie_ltr_set(true))
+  if (!_device.ltr_allowed())
+    pcie_ltr_silence();
+  else if (!pcie_ltr_set(true))
     _logger->warn("Kestrel PCIe: LTR not enabled");
   pcie_ctrl_txdma_ch(true);
   clr32(r::R_AX_HAXI_DMA_STOP1, r::B_AX_STOP_WPDMA | r::B_AX_STOP_PCIEIO);
-  _logger->info("Kestrel PCIe: post-init done (LTR, all TX channels open)");
+  _logger->info("Kestrel PCIe: post-init done (LTR {}, all TX channels open)",
+                _device.ltr_allowed() ? "on" : "silenced");
 }
 
 void HalKestrel::pcie_deinit() {
-  /* rtw89_pci_ops_deinit: LTR off, DMA stopped, indices cleared. */
-  pcie_ltr_set(false);
+  /* rtw89_pci_ops_deinit: LTR off, DMA stopped, indices cleared. The rtw89
+   * off path itself requests an idle LTR, so a host-forbidden function is
+   * silenced instead. */
+  if (_device.ltr_allowed())
+    pcie_ltr_set(false);
+  else
+    pcie_ltr_silence();
   pcie_ctrl_dma_all(false);
   pcie_clr_idx_all();
   _logger->info("Kestrel PCIe: HAXI DMA stopped");

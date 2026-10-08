@@ -88,6 +88,8 @@ public:
   /* Pre-power-on HCI programming (rtw88 rtw_hci_setup slot): PCIe TRX ring
    * registers; no-op on USB. Call per bring-up attempt, before power-on. */
   void hci_setup() { _transport->hci_setup(); }
+  /* PCIe LTR permission (ITransport::ltr_allowed); true on USB. */
+  bool ltr_allowed() { return _transport->ltr_allowed(); }
   /* Pipelined register writes — see ITransport::write_batch_begin. */
   void write_batch_begin() { _transport->write_batch_begin(); }
   bool write_batch_end() { return _transport->write_batch_end(); }

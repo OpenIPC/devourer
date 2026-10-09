@@ -55,6 +55,7 @@ and the cell, never here.
 | Received frames: beacons, deauth, auth and (re)assoc responses, no-data subtypes | `StationSm::on_rx`, `on_auth`, `on_assoc_resp` | station_sm: `test_header_only_beacons_do_not_hold_off_loss`, `test_short_deauth_is_malformed`, `test_deauth_during_handshake`, `test_reassoc_resp_does_not_complete_a_join`, `test_truncated_auth_and_assoc_are_malformed`, `test_qos_null_is_ignored_and_alive` |
 | The handshake deadline | `StationSm::eapol_reply`, `on_eapol` | station_sm: `test_dropped_reply_does_not_move_the_deadline` |
 | The TX queue: its bound, what `pop_tx` refuses | `StationSm::queue`, `pop_tx`, `kMaxTxQueue` | station_sm: `test_transmit_queue_is_bounded`, `test_join_clears_the_transmit_queue`, `test_pop_tx_refuses_null` |
+| The caller's liveness check back into the failure path; repeated Association Responses counted | `StationSm::link_lost`, `rx_assoc_repeat` | station_sm: `test_link_lost` |
 | Duplicate cache (consumer: `tests/sta_client.cpp`) | `DupDetector` | dot11_frames: `test_dup_detector`; sta_client_headless: `test_a_retransmission_is_a_duplicate` |
 
 ## Tests

@@ -267,16 +267,11 @@ struct AdapterCaps {
    *     negotiated, so power save, TIM parsing, cross-BSS duplicate detection
    *     and hardware key lookup are untested;
    *   - those cells did not drive SetStationIdentity itself. On this part the
-   *     seam writes no register, so the measured hardware state is the state
-   *     a successful arm leaves behind, but the literal "arm through IRadio,
+   *     seam writes no identity register and installs the managed receive
+   *     filter the cells ran (0x00015f97; the RX loop's monitor filter comes
+   *     back on clear), so the measured hardware state is the state a
+   *     successful arm leaves behind, but the literal "arm through IRadio,
    *     then measure" path is not what the cells ran;
-   *   - the cells ran the MANAGED receive filter, and the library's own RX
-   *     path does not: Mt7612uRadio::StartRxLoop calls
-   *     mt7612u_set_monitor_rx() unconditionally, so a station driven through
-   *     IRadio runs PROMISCUOUS. Acknowledgement does not depend on it (a
-   *     monitor-filter run of the same auto-ACK cell also read 100%), but the
-   *     "moving the port identity makes a station deaf" half of the rationale
-   *     is specific to the managed filter;
    *   - two units, one peer model, one channel, near field, no soak; the
    *     second unit reproduced the acknowledgement and uplink cells (its
    *     uplink at 1.9 mean retries against the first unit's 0.0), not the

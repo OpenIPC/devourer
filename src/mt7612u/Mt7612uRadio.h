@@ -43,7 +43,9 @@
  *     drain (mt7612u_rx_quiesce, then mt7612u_rx_stop).
  *
  *  2. The monitor filter goes on AFTER mt7612u_start(), which rewrites
- *     MT_RX_FILTR_CFG to mt76's managed-station value. Measured against the
+ *     MT_RX_FILTR_CFG to mt76's managed-station value (unless a station
+ *     identity is armed: then the managed filter is the station's and
+ *     stays). Measured against the
  *     bring-up harness in the same minute on the same silicon: 0 OFDM frames
  *     of 244 with the managed filter, 103 of 402 with the monitor filter. A
  *     single-path test would have called 244 beacons a working receiver.
@@ -102,11 +104,13 @@ public:
   devourer::ChannelBusy GetChannelBusy() override;
   uint32_t ArmChannelBusy(uint32_t window_us) override;
   bool SetAckResponder(const devourer::MacAddr &mac) override;
-  /* IRadio's ORDERING clause, answered here as it requires: this CANNOT
-   * detect being called before the RX loop. It writes no filter and no
-   * identity (a check, not a configuration), so it is order-independent as
-   * implemented - but StartRxLoop reprograms the receive filter after
-   * mt7612u_start(), so call it after StartRxLoop as the interface says. */
+  /* IRadio's ORDERING clause, answered here as it requires: order-
+   * independent. The arm installs the managed receive filter
+   * (MT_RX_FILTR_CFG_MANAGED) and writes no identity; a StartRxLoop under a
+   * live arm keeps the managed filter (mt7612u_set_monitor_rx only records
+   * its request), and the clear - or a beacon / ACK responder taking the port
+   * identity - puts the monitor filter back. Calling it after StartRxLoop,
+   * as the interface says, is still the documented order. */
   bool SetStationIdentity(const devourer::MacAddr &own,
                           const devourer::MacAddr &bssid) override;
   bool ClearStationIdentity() override;

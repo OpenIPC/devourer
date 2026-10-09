@@ -38,10 +38,15 @@
  * from any other address is not acknowledged (docs/mt7612u-station-identity.md).
  * `own` comes from GetPermanentMacAddress and is never invented.
  *
- * THE RECEIVE PATH IS PROMISCUOUS on MT7612U (Mt7612uRadio::StartRxLoop
- * installs the monitor filter), so StationSm::on_rx is the address filter,
- * and its refusal counters are printed at every exit: they distinguish "the
- * AP never answered" from "we never heard the AP".
+ * THE RECEIVE PATH IS PROMISCUOUS on MT7612U until the arm
+ * (Mt7612uRadio::StartRxLoop installs the monitor filter); the arm installs
+ * the managed filter, which drops unicast not addressed to `own` but still
+ * passes every BSS's beacons and group traffic, and DEVOURER_STA_ARM=0 stays
+ * promiscuous. So StationSm::on_rx is the address filter either way, and its
+ * refusal counters are printed at every exit: they distinguish "the AP never
+ * answered" from "we never heard the AP". Its `not-for-us` count (our BSS,
+ * someone else's unicast) is also the witness that the managed filter is on:
+ * near zero while armed, whatever such traffic is on the air.
  *
  * Exit status: 0 the run completed (the ledger says how it went); 1 setup
  * failed; 2 refused - the adapter's station_mode_ok is false, or the
@@ -58,7 +63,7 @@
  *        DEVOURER_STA_TAP=dvsta0 build/sta_client 60
  * Headless (no device, no root, no airtime):
  *   build/sta_client --self-test
- * On air: tests/mt7612u_sta_onair.sh.
+ * On air: tests/sta_client_onair.sh.
  */
 #include <atomic>
 #include <chrono>
@@ -75,6 +80,8 @@
 #include <system_error>
 #include <thread>
 #include <vector>
+
+#include <time.h>
 
 #include <csignal>
 #include <fcntl.h>
@@ -197,6 +204,10 @@ std::atomic<uint64_t> g_beacons{0}, g_probe_tx{0};
 std::atomic<uint64_t> g_joins{0}, g_associations{0}, g_reconnects{0};
 std::atomic<uint64_t> g_enc_rx{0}, g_mic_fail{0}, g_replays{0};
 std::atomic<uint64_t> g_group_rx{0}, g_plain_rx{0}, g_rx_short{0};
+/* Plaintext data (not EAPOL) from our BSS on a protected link: refused, and
+ * counted - it is also the on-air harness's positive witness that unicast
+ * addressed to us gets through the receive filter. */
+std::atomic<uint64_t> g_plain_refused{0};
 /* One counter per direction, so each direction's books close on their own:
  *   from host == encrypted + plaintext + dropped down
  *   queued    == aired + queue dropped + send failed */
@@ -256,7 +267,8 @@ uint32_t now_ms() {
       .count();
 }
 
-void enqueue(std::vector<uint8_t> mpdu) {
+/* True when the frame was queued; false when the full queue dropped it. */
+bool enqueue(std::vector<uint8_t> mpdu) {
   /* addr1's I/G bit: a group address is never ACKed. */
   const bool unicast = mpdu.size() >= 10 && (mpdu[4] & 0x01) == 0;
   const std::vector<uint8_t>& rt = (unicast && !g_rt_ack.empty()) ? g_rt_ack : g_rt;
@@ -268,8 +280,12 @@ void enqueue(std::vector<uint8_t> mpdu) {
   g_q_in.fetch_add(1);
   /* Bounded: everything queued here answers a received frame or a timer, so
    * an unbounded queue is an allocation the air controls. */
-  if (g_q.size() < 128) g_q.push_back(std::move(f));
-  else g_q_drop.fetch_add(1);
+  if (g_q.size() < 128) {
+    g_q.push_back(std::move(f));
+    return true;
+  }
+  g_q_drop.fetch_add(1);
+  return false;
 }
 
 /* The dBm convention this tree uses (src/LinkHealth.cpp, src/RxQuality.h):
@@ -285,6 +301,128 @@ int8_t rssi_dbm(uint8_t raw) {
 
 /* ---- keys and per-association state ------------------------------------- */
 
+/* AN OPEN ASSOCIATION IS CONFIRMED BY THE AP'S FIRST UNICAST REPLY. The
+ * station cannot see the AP's side: an Association Response it received but
+ * whose acknowledgement the AP never saw leaves the AP without the station,
+ * and on an open BSS nothing says so - the AP drops the station's uplink and
+ * may never deauthenticate it. (On WPA2 the four-way is the confirmation:
+ * the AP starts it only for a station it holds, and HandshakeTimeout covers
+ * the rest.) So an open association counts as unconfirmed until a unicast
+ * data frame from the AP arrives for this station; if the host has asked
+ * kConfirmUplink questions and kConfirmMs has passed since the first of them
+ * without one, the link is lost (StationSm::link_lost) and the ordinary
+ * re-join policy takes over. The window opens at the host's first question,
+ * not at the association: a host idle for longer than kConfirmMs that then
+ * sends a burst must still get its kConfirmMs for the reply.
+ *
+ * A QUESTION IS A FRAME WHOSE ANSWER, IF ONE EXISTS, THE AP MUST FORWARD BACK
+ * (solicits_reply): an ARP request, an ICMP / ICMPv6 echo request, a unicast
+ * IPv6 neighbour solicitation, a TCP SYN, a DNS query. So one-way traffic -
+ * a UDP video or telemetry uplink, the FPV case - is never judged, and
+ * neither is a host's multicast chatter (IPv6 RS/MLD, mDNS), a gratuitous or
+ * probe ARP, or an idle host. But a question can go unanswered on a healthy
+ * link: the host pings or ARPs a peer that is switched off, or its DNS has
+ * no upstream.
+ *
+ * BACKOFF PER BSS. So consecutive verdicts on one BSS back off: after n of
+ * them (g_strikes), the next association on that BSS is judged only once
+ * kConfirmMs * 2^n has passed since it was made (strike_backoff_ms), capped
+ * at kStrikeCapMs. Questions asked inside the backoff are not counted. A
+ * host asking a dead peer therefore costs at most one re-join per backoff
+ * period - 10 s, 20 s, 40 s ... then one every 2 minutes - instead of one
+ * every kConfirmMs, while an association the AP really dropped is still
+ * found, at worst a backoff period late. A unicast reply (the confirmation)
+ * or an association on a different BSS resets the count. An unheld
+ * association under one-way traffic alone is found only when the host's
+ * stack next asks something (its neighbour re-verification is a unicast ARP
+ * request). */
+constexpr uint32_t kConfirmMs = 5000;
+constexpr uint32_t kConfirmUplink = 3;
+constexpr uint32_t kStrikeCapMs = 120000;
+/* docs/station-client.md and the on-air harness state these numbers. */
+static_assert(kConfirmMs == 5000 && kConfirmUplink == 3 &&
+                  kStrikeCapMs == 120000,
+              "docs/station-client.md documents 3 questions / 5 s / a 2 min "
+              "backoff cap: change them together");
+/* An open association with no unicast reply yet: the verdict may fire for
+ * it, once g_judge_from_ms has passed. */
+bool g_judge = false;
+uint32_t g_judge_from_ms = 0;
+uint32_t g_strikes = 0;             /* consecutive verdicts on... */
+uint8_t g_strike_bss[6] = {0};      /* ...this BSS */
+
+/* How long an association on a BSS with `strikes` consecutive verdicts waits
+ * before it is judged: 0, then kConfirmMs * 2^strikes, capped. */
+uint32_t strike_backoff_ms(uint32_t strikes) {
+  if (strikes == 0) return 0;
+  uint32_t d = kConfirmMs;
+  for (uint32_t i = 0; i < strikes && d < kStrikeCapMs; i++) d *= 2;
+  return d < kStrikeCapMs ? d : kStrikeCapMs;
+}
+
+/* Wall-clock seconds.microseconds, the form hostapd -t stamps its lines
+ * with, so the on-air harness can order the station's events against the
+ * AP's. Into `buf`, which it returns. */
+const char* wall_stamp(char* buf, size_t n) {
+  struct timespec ts {};
+  clock_gettime(CLOCK_REALTIME, &ts);
+  std::snprintf(buf, n, "%lld.%06ld", (long long)ts.tv_sec,
+                (long)(ts.tv_nsec / 1000));
+  return buf;
+}
+bool g_uplink_seen = false;         /* supervise() saw the first question */
+uint32_t g_uplink_first_ms = 0;     /* ...at this time: the window opens */
+uint32_t g_uplink_unconfirmed = 0;
+std::atomic<uint64_t> g_unconfirmed_lost{0};
+
+/* Whether the host's MSDU (LLC/SNAP + payload) asks for an answer that, if
+ * one exists, the AP must carry back to this station (kConfirmMs above).
+ * Conservative: anything not recognised is not a question. */
+bool solicits_reply(const uint8_t* msdu, size_t len, const uint8_t da[6]) {
+  if (len < devourer::sta::kLlcSnapLen) return false;
+  const uint8_t* p = msdu + devourer::sta::kLlcSnapLen;
+  const size_t n = len - devourer::sta::kLlcSnapLen;
+  const unsigned et = ((unsigned)msdu[6] << 8) | msdu[7];
+  if (et == 0x0806) {
+    /* An ARP request (op 1) for someone else's address; not a gratuitous
+     * one (sender == target) or a duplicate-address probe (sender 0), which
+     * no one answers. Sender IP at 14, target IP at 24. */
+    static const uint8_t zero4[4] = {0, 0, 0, 0};
+    return n >= 28 && p[6] == 0 && p[7] == 1 &&
+           std::memcmp(p + 14, zero4, 4) != 0 &&
+           std::memcmp(p + 14, p + 24, 4) != 0;
+  }
+  if (da[0] & 0x01) return false;   /* group-addressed IP: no unicast owed */
+  uint8_t proto = 0;
+  const uint8_t* l4 = nullptr;
+  size_t l4n = 0;
+  if (et == 0x0800) {
+    if (n < 20 || (p[0] >> 4) != 4) return false;
+    const size_t ihl = (size_t)(p[0] & 0x0f) * 4;
+    /* A non-first fragment carries no transport header. */
+    if (ihl < 20 || n < ihl || ((p[6] & 0x1f) | p[7]) != 0) return false;
+    proto = p[9];
+    l4 = p + ihl;
+    l4n = n - ihl;
+    if (proto == 1) return l4n >= 1 && l4[0] == 8;          /* echo request */
+  } else if (et == 0x86dd) {
+    if (n < 40 || (p[0] >> 4) != 6) return false;
+    proto = p[6];
+    l4 = p + 40;
+    l4n = n - 40;
+    if (proto == 58)                  /* echo request, unicast NS (NUD) */
+      return l4n >= 1 && (l4[0] == 128 || l4[0] == 135);
+  } else {
+    return false;
+  }
+  /* TCP: a SYN only (SYN set, ACK clear). Any other segment can go
+   * unanswered on a healthy link: a RST, a keepalive or a retransmission to a
+   * peer that has gone, or a bare ACK left over from before a re-join. */
+  if (proto == 6) return l4n >= 14 && (l4[13] & 0x12) == 0x02;
+  /* UDP: a DNS query only - any other UDP may be one-way. */
+  return proto == 17 && l4n >= 4 && (((unsigned)l4[2] << 8) | l4[3]) == 53;
+}
+
 /* Called under g_mu when the station reaches Connected on a new
  * association. The duplicate cache is reset here and NOT at a rekey: it is
  * per transmitter and TID over Sequence Control (DupDetector, Dot11.h), which
@@ -292,11 +430,48 @@ int8_t rssi_dbm(uint8_t raw) {
  * still be a duplicate. The per-key state is not reset here: a PTK or GTK
  * rekey happens with the machine already Connected, so note_keys() owns it,
  * keyed on the supplicant's install generations. */
-void on_association() {
+bool probe(uint8_t chan);   /* below, with the scan */
+std::atomic<uint64_t> g_nudges{0};
+
+/* THE NUDGE. An AP may hold a transmitted frame's TX status until its next
+ * transmission - the MT7612U on mt76x2u does (docs/station-client.md) - and
+ * hostapd acts on an association only once the Association Response's
+ * status (ACK) is in: it counts the station associated, and on WPA2 starts
+ * the four-way, only from that status. Nothing else need make the AP
+ * transmit to us soon, so the association - and the four-way - can stall for
+ * seconds while the station's traffic is dropped. One SSID-specific probe
+ * request (to broadcast, carrying our SSID), which the AP answers, makes it
+ * transmit and releases the held status. Sent the
+ * moment an Association Response is accepted, open or WPA2; on WPA2 a
+ * second one follows if no EAPOL has arrived kNudgeAgainMs later (supervise),
+ * and the four-way timeout re-joins if even that is not enough. Caller holds
+ * g_mu. */
+constexpr uint32_t kNudgeAgainMs = 1000;
+uint32_t g_nudge_ms = 0;
+bool g_nudge_again = false;   /* a second nudge is still owed (WPA2) */
+uint32_t g_nudge_eapol_rx = 0;
+void nudge(uint32_t now) {
+  if (probe(g_sm.channel() ? g_sm.channel() : g_chan)) g_nudges.fetch_add(1);
+  g_nudge_ms = now;
+}
+
+void on_association(uint32_t now) {
+  /* The backoff is per BSS: a different BSS is judged afresh. */
+  if (g_strikes && std::memcmp(g_strike_bss, g_sm.bssid(), 6) != 0)
+    g_strikes = 0;
+  g_judge = g_sm.security() == StationSm::Security::Open;
+  g_judge_from_ms = now + strike_backoff_ms(g_strikes);
+  g_uplink_seen = false;
+  g_uplink_unconfirmed = 0;
   g_rx_dup.reset();
   g_failed_noted = false;
   g_was_associated = true;
-  g_associations.fetch_add(1);
+  const uint64_t n = g_associations.fetch_add(1) + 1;
+  /* One line per association, so a re-join is visible while the run lasts
+   * and not only in the exit ledger. */
+  char at[32];
+  std::fprintf(stderr, "  station connected (association %llu) at=%s\n",
+               (unsigned long long)n, wall_stamp(at, sizeof at));
 }
 
 /* A REKEY RESTARTS A PN SPACE, and the windows restart with it - both
@@ -376,8 +551,17 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
 
   const StationSm::State before = g_sm.state();
   g_sm.on_rx(mpdu, len, now);
+  /* An Association Response accepted: Associating -> Connected (open) or
+   * FourWay (WPA2). */
+  if (before == StationSm::State::Associating &&
+      g_sm.state() != StationSm::State::Associating &&
+      g_sm.state() != StationSm::State::Failed) {
+    nudge(now);
+    g_nudge_again = g_sm.state() == StationSm::State::FourWay;
+    g_nudge_eapol_rx = g_sm.eapol_rx;
+  }
   if (before != StationSm::State::Connected && g_sm.connected())
-    on_association();
+    on_association(now);
   if (g_sm.connected()) note_keys();
 
   /* The data plane runs only on a live association: a protected frame that
@@ -430,7 +614,28 @@ void rx_frame(const uint8_t* mpdu, size_t len, int8_t rssi, uint32_t now) {
     /* Plaintext on a WPA2 link is not forwarded: accepting it would let
      * anyone on the channel inject into the host's stack. Cleartext EAPOL is
      * StationSm::on_rx's, and it has already had it. */
-    if (g_sm.security() != StationSm::Security::Open) return;
+    if (g_sm.security() != StationSm::Security::Open) {
+      /* Not counted: the four-way's own cleartext EAPOL (expected here),
+       * and the no-data subtypes (Null / QoS Null - subtype bit 2), which
+       * carry nothing to refuse. */
+      const uint8_t* msdu = mpdu + hlen;
+      const bool eapol =
+          devourer::sta::is_ethertype_snap(msdu, len - hlen) &&
+          msdu[6] == 0x88 && msdu[7] == 0x8e;
+      const bool no_data = (fc0 & 0x40) != 0;
+      if (!eapol && !no_data) g_plain_refused.fetch_add(1);
+      return;
+    }
+    /* The AP holds this association once it forwards us DATA: a frame with
+     * a data subtype and a body. A QoS Null (no-data subtype bit 0x40,
+     * admitted by is_qos_data above) carries no MSDU, and an AP sends one
+     * for power-save or keepalive probing whether or not it forwards our
+     * traffic. (A plain Null, 0x48, never gets this far: it is neither
+     * kFcData nor QoS data.) */
+    if (to_us && !(fc0 & 0x40) && len > hlen) {
+      g_judge = false;
+      g_strikes = 0;                    /* ...so its BSS backs off no more */
+    }
     g_plain_rx.fetch_add(1);
     if (len > hlen) tap_up(da, sa, mpdu + hlen, len - hlen);
     return;
@@ -545,7 +750,10 @@ bool air_msdu(const uint8_t* msdu, size_t len, const uint8_t da[6],
   if (!protect) {
     hdr.insert(hdr.end(), msdu, msdu + len);
     if (from_host) g_tx_plain.fetch_add(1);
-    enqueue(std::move(hdr));
+    /* Only a question that was queued: one the full queue dropped never
+     * reached the AP, so its missing answer says nothing. */
+    const bool question = from_host && g_judge && solicits_reply(msdu, len, da);
+    if (enqueue(std::move(hdr)) && question) g_uplink_unconfirmed++;
     return true;
   }
   /* 0 means the length would overflow: refused like any cipher failure. */
@@ -600,22 +808,68 @@ uint8_t scan_step(uint32_t now) {
   return g_scan_chans[g_scan_idx];
 }
 
-/* A directed probe request for the SSID we want, on the channel we are on:
- * it finds a hidden BSS and shortens the wait on a swept channel. Caller
- * holds g_mu. */
-void probe(uint8_t chan) {
+/* An SSID-specific probe request (to broadcast) for the SSID we want, on the
+ * channel we are on: it finds a hidden BSS and shortens the wait on a swept
+ * channel. False when none could be built or the full queue dropped it; only
+ * a queued one is counted. Caller holds g_mu. */
+bool probe(uint8_t chan) {
   std::vector<uint8_t> m =
       devourer::sta::build_probe_req(g_own, g_ssid, chan, chan > 14);
-  if (m.empty()) return;
+  if (m.empty()) return false;
   devourer::sta::assign_seq(m, g_data_seq.next());
+  if (!enqueue(std::move(m))) return false;   /* the full queue dropped it */
   g_probe_tx.fetch_add(1);
-  enqueue(std::move(m));
+  return true;
 }
 
+const char* fail_name(StationSm::Failure f);
+
 /* The join and re-join policy. Returns the channel the radio should be tuned
- * to. Caller must NOT hold g_mu. */
+ * to. Caller must NOT hold g_mu. With DEVOURER_STA_RECONNECT=0 the first
+ * failure - a lost link or a failed first join - ends the attempts: the run
+ * then idles, unassociated, until its time is up. */
 uint8_t supervise(uint32_t now) {
   std::lock_guard<std::mutex> l(g_mu);
+
+  /* WPA2: still no EAPOL kNudgeAgainMs after the first nudge - nudge once
+   * more (see nudge()). */
+  if (g_nudge_again) {
+    if (g_sm.state() != StationSm::State::FourWay ||
+        g_sm.eapol_rx != g_nudge_eapol_rx) {
+      g_nudge_again = false;
+    } else if ((uint32_t)(now - g_nudge_ms) >= kNudgeAgainMs) {
+      g_nudge_again = false;
+      nudge(now);
+    }
+  }
+
+  /* An unconfirmed open association the host has been talking through
+   * (see kConfirmMs) - lost, through the ordinary failure path below. The
+   * window opens the first time this pass sees a question. */
+  /* Inside a struck BSS's backoff nothing is judged, and its questions are
+   * dropped: the window must open at a question asked after it. */
+  if (g_judge && (int32_t)(now - g_judge_from_ms) < 0) g_uplink_unconfirmed = 0;
+  if (g_judge && g_uplink_unconfirmed > 0 && !g_uplink_seen) {
+    g_uplink_seen = true;
+    g_uplink_first_ms = now;
+  }
+  if (g_sm.state() == StationSm::State::Connected && g_judge &&
+      g_uplink_seen && g_uplink_unconfirmed >= kConfirmUplink &&
+      (uint32_t)(now - g_uplink_first_ms) >= kConfirmMs) {
+    char at[32];
+    std::fprintf(stderr,
+                 "  station association unconfirmed: %u frames sent, no "
+                 "unicast reply from the AP in %u ms at=%s\n",
+                 g_uplink_unconfirmed, (unsigned)(now - g_uplink_first_ms),
+                 wall_stamp(at, sizeof at));
+    g_judge = false;
+    /* One more consecutive verdict on this BSS: the next association on it
+     * waits longer before it is judged. */
+    g_strikes++;   /* on_association already reset it for a new BSS */
+    std::memcpy(g_strike_bss, g_sm.bssid(), 6);
+    g_unconfirmed_lost.fetch_add(1);
+    g_sm.link_lost();
+  }
 
   const StationSm::State st = g_sm.state();
   if (st != StationSm::State::Idle && st != StationSm::State::Failed)
@@ -626,6 +880,10 @@ uint8_t supervise(uint32_t now) {
   /* The transition INTO Failed, handled once. */
   if (st == StationSm::State::Failed && !g_failed_noted) {
     g_failed_noted = true;
+    std::fprintf(stderr, "  station %s: %s%s\n",
+                 g_was_associated ? "link lost" : "join failed",
+                 fail_name(g_sm.fail_reason()),
+                 g_reconnect ? "" : " - DEVOURER_STA_RECONNECT=0, not re-joining");
     /* Counted apart from a first join, once per lost link. */
     if (g_was_associated) {
       g_was_associated = false;
@@ -762,6 +1020,7 @@ const char* fail_name(StationSm::Failure f) {
     case StationSm::Failure::NoChannel: return "no-channel";
     case StationSm::Failure::NotInfrastructure: return "not-infrastructure";
     case StationSm::Failure::SsidMismatch: return "ssid-mismatch";
+    case StationSm::Failure::Unconfirmed: return "unconfirmed";
   }
   return "?";
 }
@@ -770,28 +1029,53 @@ const char* fail_name(StationSm::Failure f) {
  * whether the run worked or not: "we heard
  * nothing", "we heard the wrong AP" and "we heard our AP and it said no" are
  * different lines here. */
+/* THE STATE THE RUN ENDED IN, taken before the teardown's leave() - which
+ * always returns the machine to Idle, and would otherwise make every ledger
+ * read Idle: a run that gave up (DEVOURER_STA_RECONNECT=0) must say Failed
+ * and why. Caller holds g_mu. */
+struct RunEnd {
+  bool taken = false;
+  StationSm::State state = StationSm::State::Idle;
+  StationSm::Failure reason = StationSm::Failure::None;
+  unsigned status = 0, aid = 0;
+  bool keyed = false;
+};
+RunEnd g_end;
+void take_run_end() {
+  g_end.taken = true;
+  g_end.state = g_sm.state();
+  g_end.reason = g_sm.fail_reason();
+  g_end.status = g_sm.status();
+  g_end.aid = g_sm.aid();
+  g_end.keyed = g_sm.keyed();
+}
+
 void report() {
   std::lock_guard<std::mutex> l(g_mu);
+  if (!g_end.taken) take_run_end();
   std::fprintf(stderr, "fault=%d state=%s", g_fault.load(),
-               state_name(g_sm.state()));
-  if (g_sm.state() == StationSm::State::Failed)
-    std::fprintf(stderr, " reason=%s status=%u", fail_name(g_sm.fail_reason()),
-                 g_sm.status());
-  std::fprintf(stderr, " aid=%u keyed=%d bss_known=%d\n", g_sm.aid(),
-               (int)g_sm.keyed(), g_bss.count());
+               state_name(g_end.state));
+  if (g_end.state == StationSm::State::Failed)
+    std::fprintf(stderr, " reason=%s status=%u", fail_name(g_end.reason),
+                 g_end.status);
+  std::fprintf(stderr, " aid=%u keyed=%d bss_known=%d\n", g_end.aid,
+               (int)g_end.keyed, g_bss.count());
   std::fprintf(stderr,
-               "  join: beacons observed=%llu, probes sent=%llu, joins=%llu,"
-               " associations=%llu, reconnects=%llu\n",
+               "  join: beacons observed=%llu, probes sent=%llu (nudges %llu),"
+               " joins=%llu, associations=%llu, reconnects=%llu,"
+               " unconfirmed=%llu\n",
                (unsigned long long)g_beacons.load(),
                (unsigned long long)g_probe_tx.load(),
+               (unsigned long long)g_nudges.load(),
                (unsigned long long)g_joins.load(),
                (unsigned long long)g_associations.load(),
-               (unsigned long long)g_reconnects.load());
+               (unsigned long long)g_reconnects.load(),
+               (unsigned long long)g_unconfirmed_lost.load());
   std::fprintf(stderr,
                "  station rx: auth_tx=%u assoc_tx=%u eapol_tx=%u eapol_rx=%u"
-               " beacons=%u\n",
+               " beacons=%u assoc_repeat=%u\n",
                g_sm.auth_tx, g_sm.assoc_tx, g_sm.eapol_tx, g_sm.eapol_rx,
-               g_sm.beacons_rx);
+               g_sm.beacons_rx, g_sm.rx_assoc_repeat);
   std::fprintf(stderr,
                "  refused by the address filter: not-our-bss=%u,"
                " not-for-us=%u, ignored=%u, malformed=%u, tx-dropped=%u"
@@ -815,11 +1099,12 @@ void report() {
                sup.rsn_mismatches);
   std::fprintf(stderr,
                "  data plane: encrypted rx=%llu (group=%llu), plaintext rx="
-               "%llu, MIC failures=%llu, replays rejected=%llu,"
-               " duplicates dropped=%llu, no key for it=%llu\n",
+               "%llu, plaintext refused=%llu, MIC failures=%llu, replays"
+               " rejected=%llu, duplicates dropped=%llu, no key for it=%llu\n",
                (unsigned long long)g_enc_rx.load(),
                (unsigned long long)g_group_rx.load(),
                (unsigned long long)g_plain_rx.load(),
+               (unsigned long long)g_plain_refused.load(),
                (unsigned long long)g_mic_fail.load(),
                (unsigned long long)g_replays.load(),
                (unsigned long long)g_dup_drop.load(),
@@ -1265,6 +1550,7 @@ int main(int argc, char** argv) {
    * here, so an exception must not leave main. */
   try {
     std::lock_guard<std::mutex> l(g_mu);
+    take_run_end();
     g_sm.leave();
     std::vector<uint8_t> f;
     while (g_sm.pop_tx(&f)) {
@@ -1308,8 +1594,9 @@ int main(int argc, char** argv) {
   /* Cleared on the way out whenever an arm was attempted - every path that
    * can reach SetStationIdentity ends here. The result is the only way to
    * learn a rollback did not land (IRadio: the port may keep answering for
-   * `own`), so it is printed; on a backend whose arm wrote nothing it is
-   * trivially true. */
+   * `own`; on MT7612U, the managed receive filter may still be in force), so
+   * it is printed; on a backend whose arm wrote nothing it is trivially
+   * true. */
   if (arm_attempted) {
     const char* r = "NOT VERIFIED";
     try {

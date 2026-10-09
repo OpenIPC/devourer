@@ -17,12 +17,19 @@ integrator - the scanner, the re-join policy and the data plane.
   rule) and outside the mutex the RX callback takes (IRadio's lock rule).
 - Cleared on the way out whenever an arm was attempted; the result is printed
   (`station identity clear: restored (verified)` / `NOT VERIFIED`). On
-  MT7612U the clear is trivially true, since the arm wrote nothing.
+  MT7612U the clear puts the monitor receive filter back and is true once it
+  reads back.
 
-On MT7612U the arm writes no register: it verifies that the station's address
-is the adapter's own `MT_MAC_ADDR` and that the auto-responder is enabled
-(`docs/mt7612u-station-identity.md`). That is why the station's address always
-comes from `GetPermanentMacAddress`.
+On MT7612U the arm writes no identity register: it verifies that the
+station's address is the adapter's own `MT_MAC_ADDR` and that the
+auto-responder is enabled (`docs/mt7612u-station-identity.md`). That is why
+the station's address always comes from `GetPermanentMacAddress`. The one
+register it writes is the receive filter: armed, the station runs the managed
+filter `0x00015f97`, which drops unicast not addressed to it but keeps every
+BSS's beacons and group traffic; unarmed (`DEVOURER_STA_ARM=0`) it stays
+promiscuous. `StationSm::on_rx` is the address filter either way; its ledger
+`not-for-us` count (our BSS, someone else's unicast) is the witness that the
+managed filter is on.
 
 ## What the station transmits
 
@@ -50,7 +57,59 @@ SIGINT/SIGTERM (handled from the start of `main`, so a stop during bring-up
 ends the run once the bring-up returns) leave the BSS, clear the identity and
 print the ledger. The ledger is printed at every exit once `sta_client up:`
 has printed, and separates "heard nothing", "heard another BSS" and "our AP
-refused us".
+refused us". Its first line is the state the run ENDED in, before the
+teardown's leave: `Connected`, or `Failed reason=<why>` for a run that gave
+up. While it runs, the station also logs each association
+(`station connected (association N) at=<sec.usec>`), each unconfirmed
+verdict (`station association unconfirmed: ... at=<sec.usec>`) and each
+failure (`station link lost: <reason>` or `station join failed: <reason>`).
+
+Re-join policy: after a lost link or a failed join the station waits
+`DEVOURER_STA_BACKOFF_MS` and joins again, for as long as the run lasts.
+With `DEVOURER_STA_RECONNECT=0` the first failure - a lost link, or a first
+join that fails - ends the attempts: the station logs it, stays
+unassociated until its time is up, and the ledger ends `Failed` with the
+reason.
+
+The moment an association response is accepted - open or WPA2 - the
+station sends one SSID-specific probe request (to broadcast, carrying our
+SSID; the "nudge", counted as `nudges` in the ledger): see "AP quirk" below.
+On WPA2 a second one follows if no EAPOL has arrived 1 s later; the four-way
+timeout re-joins if even that is not enough.
+
+An open association is confirmed by the AP's first unicast data frame to
+the station - one that carries an MSDU; a (QoS) Null, which an AP sends for
+power-save or keepalive probing either way, does not count. A station cannot
+see the AP's side: if the AP never saw the
+association response acknowledged, it does not hold the station, drops its
+traffic and may never say so. So once the host has asked three questions,
+and no unicast reply has come within 5 s of the first, the link is lost as
+`unconfirmed` (`StationSm::link_lost`) and re-joined under the policy above.
+A question is a frame whose answer, if one exists, the AP must forward
+back: an ARP request, an ICMP / ICMPv6 echo request, a unicast IPv6
+neighbour solicitation, a TCP SYN, a DNS query. One-way traffic (a UDP
+video or telemetry uplink), multicast chatter, gratuitous and probe ARPs,
+any other TCP segment and an idle host are never judged.
+
+A question can also go unanswered on a healthy link: the host pings or ARPs
+a peer that is switched off, or its DNS has no upstream. So the rule is a
+backstop that backs off per BSS. The first verdict on a BSS fires as
+described. After n consecutive verdicts on a BSS, the next association on
+it is judged only once 5 s x 2^n has passed since it was made: 10 s, 20 s,
+40 s, 80 s, then 2 minutes, the cap. Questions asked inside the backoff are
+not counted. A unicast reply from the AP, or an association on a different
+BSS, resets the count; a broadcast does not. The cost: with a dead peer,
+the station re-joins at most once per backoff period, the periods growing
+to one re-join every 2 minutes (plus the 5 s window). And an association
+the AP really dropped is found up to one backoff period late, its traffic
+lost until then. An unheld association under one-way traffic alone is
+found only when the host's stack next asks something (its neighbour
+re-verification is a unicast ARP request). WPA2
+needs no such rule (the four-way is the confirmation). The ledger counts
+the verdicts (`unconfirmed=`) and repeated association responses
+(`assoc_repeat=`). Each association and each verdict line carries `at=`,
+the wall-clock time in the form `hostapd -t` stamps its lines with, so the
+on-air harness can order them against the AP's log.
 
 Exit status: 0 the run completed; 1 setup failed; 2 refused
 (`station_mode_ok` false, or the duration, `DEVOURER_CHANNEL`,
@@ -68,33 +127,90 @@ first line then reads `fault=1`.
   policy, key selection by key id, replay and duplicate windows, PTK/GTK
   rekeys, plaintext/fragment/A-MSDU refusal, the FCS trim, the ledger's
   identities. No device, no root.
-- **On air** - `tests/mt7612u_sta_onair.sh` against hostapd in a network
-  namespace, MT7612U as the station:
+- **On air** - `tests/sta_client_onair.sh` against hostapd in a network
+  namespace. The station (DUT) is an MT7612U, an RTL8812CU (8822C) or an
+  RTL8812BU (8822B); the AP is any adapter whose in-kernel driver supports AP
+  mode and can change network namespace (`iw phy <phy> info` lists
+  `set_wiphy_netns`: mt76, rtw88 - not the out-of-tree rtl88x2cu / 88x2bu,
+  which the cell refuses).
 
   | Cell | Scored |
   |---|---|
-  | `open` | AP associates our address; ping 0% loss over the TAP; ledger plaintext only; armed; the clear ran on exit |
-  | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; MIC failures <= PTK installs; armed; the clear ran on exit; no `tx.retry_limit=0` warning |
-  | `noarm` | control, `DEVOURER_STA_ARM=0`: no arm and no clear ran (link outcome reported, not scored) |
-  | `retry0` | `DEVOURER_TX_RETRY_LIMIT=0`: the arm-time warning; the clear ran on exit (link outcome reported, not scored) |
+  | `open` | with a ping running from the start, the AP associates our address within 30 s (recovering an unconfirmed first association counts. Each association owns the window from its `at=` to its verdict, or to the next association; a verdict FAILs when hostapd (`hostapd -t`) logged AP-STA-CONNECTED for our address inside its window, whatever else the log shows. A verdict is cleared only once the stamp ordering is checked: every CONNECTED must be accounted for - the first one in a window without a verdict is that association's own (the positive control, counted once per association), and one outside every window must be followed by a DISCONNECTED before the next association (an episode the re-join ended). Any other CONNECTED - stamped before the next association's `at=` - or no control at all leaves the verdicts INCONCLUSIVE. So does a verdicted association that began while hostapd still held us - the last event for our address before its `at=` a CONNECTED with no DISCONNECTED after it - because that CONNECTED may be its own, stamped early. So do a missing, empty, malformed or out-of-order stamp, hostapd stamps for our address that go backwards (the AP clock stepped), a missing or mismatched ledger, and logs that could not be parsed. Only our address on the cell's AP interface counts, matched case-insensitively as the token after the event name); ping 0% loss over the TAP; ledger plaintext only; armed; the clear |
+  | `wpa2` | four-way, group and pairwise rekeys at the AP; ping before and after; one association; no four-way MIC failure, data-plane MIC failures <= PTK installs; armed; the clear; no `tx.retry_limit=0` warning. MT7612U: the managed filter - plaintext unicast injected from the AP's BSSID at the station (`plaintext refused` at least half of it, else INCONCLUSIVE) and at a foreign address (`not-for-us` under 1% of it - a PASS counts only once the `noarm` control of the same run has seen that stream arrive, else INCONCLUSIVE) |
+  | `noarm` | control, `DEVOURER_STA_ARM=0`: no arm and no clear ran. Realtek: the station tried and the AP did NOT complete the four-way - a completed one FAILs; INCONCLUSIVE unless the armed `wpa2` cell of the same run got in (the positive control). MT7612U: under the monitor filter both injected streams arrive (each at least half); the link over a 30 s ping window is reported, not scored |
+  | `retry0` | `DEVOURER_TX_RETRY_LIMIT=0`: the arm-time warning; the clear (the link over a 30 s ping window is reported, not scored) |
+  | `reconnect` | hostapd stopped and restarted: the station reports the lost link; second four-way within the bound, measured from hostapd being started again; ping 0% loss over a 30 s window; ledger 2 associations, 1 reconnect; one arm across the re-join; the clear |
+  | `noreconnect` | as `reconnect` with `DEVOURER_STA_RECONNECT=0`: the lost link reported; no re-join; the ledger ends Failed after 1 association |
 
-  The clear's result is printed as information, not scored: on MT7612U
-  `ClearStationIdentity` is trivially true.
+  The arm differs by die. On MT7612U it writes only the receive filter, so
+  an unarmed link may work and `noarm` is the filter's control. On a Realtek
+  die the arm writes the port registers and unarmed the MAC does not
+  acknowledge own-addressed unicast (`docs/realtek-station-arm.md`), so
+  `noarm` is the arm's control and can fail. On both, the clear must verify.
+
+  The injections (`INJECT_S`, `INJECT_PPS` each, `FOREIGN`) ride a monitor
+  vif on the AP's phy (`tests/sta_unicast_inject.py`) and run only for an
+  MT7612U DUT; a phy that cannot add one makes the filter check
+  INCONCLUSIVE, not the cell. They run after the cell's ping - the AP keeps
+  retransmitting the unacknowledged foreign stream for seconds after the
+  injectors stop, and a ping behind that backlog loses its first echo - and
+  start only when now + `INJECT_S` + 8 s is still before hostapd's first
+  group (`REKEY_S` after the AP comes up, default 90) and pairwise
+  (`PTK_REKEY_S` after the four-way, default 80) rekeys, read off hostapd's
+  own stamps; otherwise the filter check is INCONCLUSIVE. The injectors are
+  killed at `INJECT_S` + 2 s, so the 8 s cover them, the monitor vif's add
+  and delete, and a margin. A group rekey
+  that lands in the vif teardown can go unanswered and cost the
+  association.
+
+  The arm is per BSSID: a re-join to the same BSSID keeps it rather than
+  arming again, and on Realtek the second association is the proof it still
+  holds.
 
   Exit 0 pass, 1 fail (including a station fault, exit 3, with its cause
   named), 2 inconclusive (rig refused, AP not up, route not through the TAP,
   the station exited or stalled before `sta_client up:`, station out of
-  time), 3 interrupted. `FW_DIR` must hold the decompressed MT7612U blobs. The AP's phy must be able to change
-  network namespace (`iw phy <phy> info` lists `set_wiphy_netns`): an
-  in-kernel cfg80211 driver such as rtw88 or mt76. Out-of-tree drivers such
-  as rtl88x2cu / 88x2bu cannot, and the cell refuses them.
+  time), 3 interrupted. `FW_DIR` (an MT7612U DUT) should hold the decompressed
+  MT7612U blobs. Like the library, it falls back to `/lib/firmware/mediatek`
+  and then `./firmware`; when none holds them (compressed `.bin.zst` copies
+  only), the run is refused (exit 2) before it starts.
+
+## AP quirk: an MT7612U AP holds the association's TX status
+
+An MT7612U running as the AP (kernel mt76x2u, hostapd) can hold a
+transmitted frame's TX status until its NEXT transmission - the same
+silicon behaviour `docs/mt7612u-tx-retry.md` records for this tree's own
+MT7612U driver ("status posted only on the next TX"). hostapd acts on an
+association only once the Association Response's status is in: it counts
+the station associated - dropping its data until then - and on WPA2 starts
+the four-way only from that status too, so both an open association and
+the WPA2 key exchange stall the same way. In hostapd's debug log
+(`HOSTAPD_DEBUG=1`):
+
+- "association OK (aid 1)", the station added, the Association Response
+  sent;
+- no TX status for it for six seconds, while the station - which had
+  received the response and acknowledged it - believed it was associated;
+- then the station's next frame made the AP transmit, and the status
+  arrived with `ack=1`: too late, the station had already given up on the
+  association ("handle_assoc_cb: STA ... not found").
+
+The station is not at fault: it acknowledged the response, at 1 Mb/s CCK,
+within ~0.3 ms in captures. The stall is intermittent and depends on
+whether anything else makes the AP transmit soon after the response, which
+is why a given station can pass several runs and then fail several in a
+row; on WPA2 it shows as the four-way never starting, each attempt ending
+in the station's handshake timeout. sta_client sends its nudge for exactly
+this, for open and WPA2 alike; the confirmation rule (open) and the
+four-way timeout (WPA2) re-join if the association still never becomes the
+AP's.
 
 ## What it does not do
 
-- The on-air cell takes an MT7612U only (`sta_dut_take`) until a generic
-  DUT take / hand-back exists. The client itself arms a Realtek 8822C /
-  8822B selected with `DEVOURER_VID` / `DEVOURER_PID`; that path is not
-  covered by an on-air cell here.
+- The on-air cell covers the dies that report `station_mode_ok` (MT7612U,
+  8822C, 8822B). Another Realtek die can be named with `DUT_VID` / `DUT_PID`;
+  `sta_client` refuses it (exit 2) unless it reports `station_mode_ok`.
 - Software CCMP only; no PMF/802.11w, WPA2-PSK/CCMP or open only.
 - No fragment reassembly and no A-MSDU: both are refused and counted.
 - One BSS at a time, chosen by SSID; no roaming and no background scan while
@@ -102,3 +218,13 @@ first line then reads `fault=1`.
 - A pairwise rekey can cost one received frame (802.11-2016 12.7.6.5); the
   note is at the `ccmp_decrypt` call in `rx_frame()`.
 - The host stack owns ARP, IP and DHCP on the TAP.
+- The confirmation backoff remembers one BSS (`g_strike_bss`). A station
+  that alternates between two BSSes of one ESS resets it at each switch, so
+  a host asking a dead peer can then cost a verdict and a re-join every
+  cycle: the 5 s window (at least), the re-join backoff
+  (`DEVOURER_STA_BACKOFF_MS`, 1 s by default) and the
+  handshake. `select_open` normally keeps to one BSS, so this needs the
+  BSSes to swap rank between joins.
+- The MT7612U harnesses' hand-back (`sta_dut_handback`) re-enumerates the
+  DUT so mt76x2u binds again, even when the run took it with no driver bound
+  (as an earlier devourer session leaves it).

@@ -1,7 +1,8 @@
 # shellcheck shell=sh
 # mt7612u_sta_lib.sh - shared plumbing for the station harnesses
-# (tests/mt7612u_sta_identity.sh, _autoack.sh, _uplink.sh, _onair.sh; the
-# generic helpers also serve tests/realtek_station_onair.sh). Sourced, not run.
+# (tests/mt7612u_sta_identity.sh, _autoack.sh, _uplink.sh; the generic helpers
+# also serve tests/sta_client_onair.sh and tests/realtek_station_onair.sh).
+# Sourced, not run.
 #
 # Four rules these scripts run as root under:
 #
@@ -10,17 +11,29 @@
 #     must be a directory owned by root or by the invoking user (SUDO_UID
 #     when run through sudo), and is created 0700 when missing - so a local
 #     user cannot point this root run's writes somewhere else.
-#   - One run per OUT. sta_lock_take() claims $OUT/.lock (mkdir is atomic) and
-#     refuses while the run that holds it is alive, so two concurrent runs
-#     cannot share - and kill each other through - one set of PID files. A
-#     lock whose holder is gone is reclaimed. (The adapters are exclusive
-#     anyway: mt7612uprobe and the Realtek demos take a per-adapter lock.)
+#   - One run per OUT. sta_lock_take() takes an flock(1) on the OUT directory
+#     itself and refuses while another run holds it, so two concurrent runs
+#     cannot share - and kill each other through - one set of PID files. The
+#     kernel drops the lock when the last holder exits, so there is no owner
+#     record to race and no stale lock to reclaim. Two runs with different
+#     OUTs are NOT kept apart by this lock. Every DUT and peer take
+#     (sta_dut_take() for the MT7612U, sta_dev_record() for a Realtek
+#     adapter) refuses an adapter with a LIVE holder - an interface bound to
+#     usbfs (a process has claimed it), or a process with its /dev/bus/usb
+#     node open - so a run never toggles `authorized` under a devourer
+#     process. sta_dut_take() also refuses interface 0 bound to any driver
+#     other than mt76x2u. An unbound interface nothing holds is taken as it is:
+#     a devourer demo detaches mt76x2u and never reattaches it, and a host
+#     may blacklist mt76x2u (docs/mt7612u.md). What this cannot see is
+#     another harness between two of its gates, when nothing holds the
+#     adapter: give concurrent runs different adapters.
 #   - Kill only what this run started, by recorded PID. No pattern kills, and
 #     no PID read from a file an earlier run left behind: sta_pid_init()
 #     removes stale PID files before anything is started.
-#   - Hand every adapter back: the Realtek peer through sta_peer_handback()
-#     (below), the AP in tests/mt7612u_sta_identity.sh's cleanup, and the DUT
-#     here. The harnesses unbind the MT7612U from mt76x2u so
+#   - Hand every adapter back: a devourer-opened adapter through
+#     sta_dev_handback() (below; sta_peer_handback() is its PEER_SYSFS
+#     form), the AP in tests/mt7612u_sta_identity.sh's cleanup, and the
+#     MT7612U DUT here. The harnesses unbind the MT7612U from mt76x2u so
 #     mt7612uprobe can claim it; sta_dut_handback() re-enumerates it with an
 #     `authorized` 0/1 toggle so the kernel driver binds again, exactly as
 #     tests/mt7612u_ap_onair.sh does - and only after confirming the path
@@ -56,41 +69,32 @@ sta_out_prepare() {
   return 0
 }
 
-# A process's start time in clock ticks since boot (/proc/PID/stat field 22),
-# or nothing. Field 2 is the command name in parentheses and may hold spaces,
-# so the fields are counted from after its closing parenthesis.
-sta_proc_start() {
-  sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20
-}
-
 STA_LOCKED=no
-# The lock records "PID starttime". A holder counts as live only when that
-# PID exists AND started at the recorded time - a recycled PID of an
-# unrelated process is a stale lock, not a live run.
+# The lock lives on fd 9, opened on the OUT directory (nothing is written,
+# so nothing can be redirected through a planted file). Taking and holding it
+# is one atomic flock. The children this run starts inherit fd 9, so a
+# process that outlives the harness (a hung sta_client) keeps OUT locked
+# until it exits - which is what it should do.
 sta_lock_take() {
-  if ! mkdir "$OUT/.lock" 2>/dev/null; then
-    read -r _sta_holder _sta_hstart < "$OUT/.lock/pid" 2>/dev/null
-    case "${_sta_holder:-}" in
-      ''|*[!0-9]*) ;;
-      *) if [ -n "${_sta_hstart:-}" ] &&
-            [ "$(sta_proc_start "$_sta_holder")" = "$_sta_hstart" ]; then
-           echo "OUT=$OUT is in use by run $_sta_holder - refusing; give this" \
-                "run its own OUT"
-           return 1
-         fi ;;
-    esac
-    rm -rf "$OUT/.lock"
-    mkdir "$OUT/.lock" 2>/dev/null || { echo "could not lock OUT=$OUT"; return 1; }
+  command -v flock >/dev/null 2>&1 || { echo "flock(1) is required"; return 1; }
+  exec 9<"$OUT" || { echo "could not open OUT=$OUT"; return 1; }
+  if ! flock -n 9; then
+    exec 9<&-
+    echo "OUT=$OUT is in use by another run - refusing; give this run its" \
+         "own OUT"
+    return 1
   fi
-  echo "$$ $(sta_proc_start "$$")" > "$OUT/.lock/pid"
   STA_LOCKED=yes
+  # A reused OUT starts with no device records: a marker an earlier run left
+  # would make this run hand back a device it never recorded or opened.
+  rm -f "$OUT"/.id_* "$OUT"/.opened_*
   return 0
 }
 
 sta_lock_release() {
   [ "$STA_LOCKED" = yes ] || return 0
   STA_LOCKED=no
-  rm -rf "$OUT/.lock"
+  exec 9<&-
 }
 
 sta_is_mt7612u() {
@@ -100,17 +104,69 @@ sta_is_mt7612u() {
 
 STA_DUT_TAKEN=no
 STA_DUT_ID=""
-# Refuse a DUT_SYSFS that is not an MT7612U, then unbind it from mt76x2u and
-# require that interface 0 really has no driver afterwards - a failed unbind
-# leaves the kernel driver owning the chip under the probe. Only a DUT that was
-# taken is handed back, and only while DUT_SYSFS still reports the
-# idVendor:idProduct:serial recorded here.
+# The PID of a process that has the USB device at sysfs path $1 open
+# (/dev/bus/usb/BBB/DDD), or nothing. Root sees every process's fds.
+# Read from `ls -l`, which GNU and busybox print alike: busybox find has no
+# -lname (its error would read as "nothing holds it"), and GNU find -samefile
+# holds the node open itself.
+sta_usb_holder() {
+  _sta_b=$(cat "/sys/bus/usb/devices/$1/busnum" 2>/dev/null)
+  _sta_d=$(cat "/sys/bus/usb/devices/$1/devnum" 2>/dev/null)
+  [ -n "$_sta_b" ] && [ -n "$_sta_d" ] || return 0
+  # shellcheck disable=SC2012 # the names listed are /proc fd numbers
+  ls -l /proc/[0-9]*/fd 2>/dev/null |
+    awk -v n="$(printf '/dev/bus/usb/%03d/%03d' "$_sta_b" "$_sta_d")" '
+      /^\/proc\/[0-9]+\/fd:$/ { split($0, p, "/"); pid = p[3]; next }
+      $NF == n && $(NF - 1) == "->" && pid != "" { print pid; exit }'
+}
+
+# Refuse the USB device at sysfs path $2 (called $1 in the message) while a
+# live process holds it: an interface bound to usbfs (claimed over libusb),
+# or a process with its /dev/bus/usb node open. A libusb-claimed interface
+# carries no netdev, so sta_dev_unbind_wifi() alone would pass it.
+sta_usb_unheld() {
+  for _sta_if in "/sys/bus/usb/devices/$2:"*; do
+    [ -e "$_sta_if/driver" ] || continue
+    if [ "$(basename "$(readlink -f "$_sta_if/driver")")" = usbfs ]; then
+      echo "refusing $1 at $2 - $(basename "$_sta_if") is held by usbfs" \
+           "(a process has claimed it)"
+      return 1
+    fi
+  done
+  _sta_pid=$(sta_usb_holder "$2")
+  if [ -n "$_sta_pid" ]; then
+    echo "refusing $1 at $2 - PID $_sta_pid" \
+         "($(cat "/proc/$_sta_pid/comm" 2>/dev/null)) has its USB device open"
+    return 1
+  fi
+  return 0
+}
+
+# Refuse a DUT_SYSFS that is not an MT7612U, or that something live holds:
+# interface 0 bound to a driver other than mt76x2u (usbfs: a process has
+# claimed it), or a process with its device node open. Then unbind it from
+# mt76x2u if that is bound, and require that interface 0 really has no
+# driver afterwards - a failed unbind leaves the kernel driver owning the
+# chip under the probe. An unbound interface nothing holds is taken as it is
+# (an earlier devourer session left it so, or mt76x2u is not loaded). Only a
+# DUT that was taken is handed back, and only while DUT_SYSFS still reports
+# the idVendor:idProduct:serial recorded here.
 sta_dut_take() {
   if ! sta_is_mt7612u "$DUT_SYSFS"; then
     echo "refusing DUT_SYSFS=$DUT_SYSFS - not an MT7612U (0e8d:7612)"
     return 1
   fi
-  if [ -e "/sys/bus/usb/devices/$DUT_SYSFS:1.0/driver" ]; then
+  _sta_drv="/sys/bus/usb/devices/$DUT_SYSFS:1.0/driver"
+  if [ -e "$_sta_drv" ]; then
+    _sta_drv=$(basename "$(readlink -f "$_sta_drv")")
+    if [ "$_sta_drv" != mt76x2u ]; then
+      echo "refusing DUT_SYSFS=$DUT_SYSFS - interface 0 is held by" \
+           "$_sta_drv (usbfs: a process has claimed it)"
+      return 1
+    fi
+  fi
+  sta_usb_unheld DUT "$DUT_SYSFS" || return 1
+  if [ "$_sta_drv" = mt76x2u ]; then
     echo "$DUT_SYSFS:1.0" > /sys/bus/usb/drivers/mt76x2u/unbind 2>/dev/null
     sleep 2
   fi
@@ -136,6 +192,17 @@ sta_dut_handback() {
   echo 0 > "/sys/bus/usb/devices/$DUT_SYSFS/authorized" 2>/dev/null
   sleep 2
   echo 1 > "/sys/bus/usb/devices/$DUT_SYSFS/authorized" 2>/dev/null
+  # Back to bound before the next run starts: wait, up to 5 s, for mt76x2u
+  # to probe it again - when mt76x2u is loaded at all.
+  [ -d /sys/bus/usb/drivers/mt76x2u ] || return 0
+  _sta_t=0
+  until [ -e "/sys/bus/usb/devices/$DUT_SYSFS:1.0/driver" ]; do
+    if [ "$_sta_t" -ge 50 ]; then
+      echo "DUT_SYSFS=$DUT_SYSFS: mt76x2u did not bind again within 5 s"
+      return 0
+    fi
+    sleep 0.1; _sta_t=$((_sta_t + 1))
+  done
 }
 
 # PID files live in $OUT as .pid_<name>. Every name a script uses is listed
@@ -150,6 +217,8 @@ sta_pid_record() { echo "$2" > "$OUT/.pid_$1"; }
 # Is PID running? `kill -0` alone also succeeds on an exited but unreaped
 # child (a zombie, state Z in /proc/PID/stat after the command name).
 sta_pid_alive() {
+  # An empty or non-numeric PID is not live: /proc//stat is /proc/stat.
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
   _sta_st=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)
   [ -n "$_sta_st" ] && [ "$_sta_st" != Z ] && [ "$_sta_st" != X ]
 }
@@ -159,13 +228,14 @@ sta_pid_alive() {
 # is our child, and forget it. POLLED, never a bare `wait` first: a child
 # that ignores the signal - or a background job started with SIGINT ignored,
 # as a non-interactive shell starts them - would block that `wait` for good.
-# Returns 1, and says so, if it is still alive then (unreaped, so the caller
-# can escalate by PID); 0 otherwise, and silently when nothing is recorded.
+# Returns 1, and says so, if it is still alive then - unreaped, and STILL
+# RECORDED, so a later call (or sta_pid_live) still finds it and nothing is
+# started or re-enumerated under it; 0 otherwise, and silently when nothing
+# is recorded.
 sta_pid_kill() {
   [ -f "$OUT/.pid_$1" ] || return 0
   _sta_pid=$(cat "$OUT/.pid_$1" 2>/dev/null)
-  rm -f "$OUT/.pid_$1"
-  case "$_sta_pid" in ''|*[!0-9]*) return 0 ;; esac
+  case "$_sta_pid" in ''|*[!0-9]*) rm -f "$OUT/.pid_$1"; return 0 ;; esac
   kill "-${2:-TERM}" "$_sta_pid" 2>/dev/null
   _sta_t=0
   while sta_pid_alive "$_sta_pid"; do
@@ -175,8 +245,20 @@ sta_pid_kill() {
     fi
     sleep 0.1; _sta_t=$((_sta_t + 1))
   done
+  rm -f "$OUT/.pid_$1"
   wait "$_sta_pid" 2>/dev/null   # exited: reaps our child, no-op otherwise
   return 0
+}
+
+# sta_pid_kill, escalated to KILL when the first signal did not end it.
+# 1 when the process outlived both; its record is kept.
+sta_pid_kill_hard() {
+  sta_pid_kill "$1" "${2:-TERM}" || sta_pid_kill "$1" KILL
+}
+
+# 0 when a process recorded under $1 is still running.
+sta_pid_live() {
+  [ -f "$OUT/.pid_$1" ] && sta_pid_alive "$(cat "$OUT/.pid_$1" 2>/dev/null)"
 }
 
 # A USB device's identity as idVendor:idProduct:serial (serial empty when the
@@ -191,68 +273,135 @@ sta_usb_id() {
     "$(cat "/sys/bus/usb/devices/$1/serial" 2>/dev/null)"
 }
 
-# The Realtek peer (PEER_SYSFS) is opened by txdemo / rxdemo, whose libusb
-# open detaches its kernel driver and never re-attaches it. sta_peer_record()
-# checks and notes the peer's identity before the run; sta_peer_opened() marks
-# it touched (a file in OUT, because the peer is started inside a command
-# substitution whose variables the parent never sees) just before a peer
-# process starts; sta_peer_handback() re-enumerates it with an `authorized`
-# 0/1 toggle so its driver binds again - only when this run did open it, and
-# only while PEER_SYSFS still reports the recorded identity, so a device that
-# replaced it at the same path is left alone.
-STA_PEER_ID=""
-# The peer must be the adapter the run was told about: PEER_VID:PEER_PID at
-# PEER_SYSFS, not a hub, not the DUT's path. Checked before anything runs.
-sta_peer_record() {
-  _sta_pd="/sys/bus/usb/devices/$PEER_SYSFS"
-  if [ "$PEER_SYSFS" = "$DUT_SYSFS" ]; then
-    echo "refusing PEER_SYSFS=$PEER_SYSFS - it is the DUT's path"; return 1
+# An adapter devourer opens over libusb (a Realtek DUT or peer): the libusb
+# open detaches its kernel driver and nothing re-attaches it. Each is kept
+# under a NAME, in files in OUT (a process started inside a command
+# substitution sets them too, and its variables never reach the parent):
+#   sta_dev_record NAME SYSFS VID PID - before the run: refuse a hub, any
+#     device that is not VID:PID, and one a live process holds
+#     (sta_usb_unheld), and note its idVendor:idProduct:serial;
+#   sta_dev_opened NAME - before any sta_dev_unbind_wifi() and before a
+#     process opens it, so an unbind cut short is still handed back;
+#   sta_dev_handback NAME SYSFS - re-enumerate it with an `authorized` 0/1
+#     toggle so its kernel driver binds again - only when this run opened it,
+#     and only while SYSFS still reports the recorded identity, so a device
+#     that replaced it at the same path is left alone. Idempotent.
+sta_dev_record() {
+  _sta_dd="/sys/bus/usb/devices/$2"
+  if [ "$(cat "$_sta_dd/bDeviceClass" 2>/dev/null)" = "09" ]; then
+    echo "refusing $1 at $2 - a hub"; return 1
   fi
-  if [ "$(cat "$_sta_pd/bDeviceClass" 2>/dev/null)" = "09" ]; then
-    echo "refusing PEER_SYSFS=$PEER_SYSFS - a hub"; return 1
-  fi
-  _sta_want=$(printf '%04x:%04x' "$((PEER_VID))" "$((PEER_PID))" 2>/dev/null)
-  _sta_have="$(cat "$_sta_pd/idVendor" 2>/dev/null):$(cat "$_sta_pd/idProduct" 2>/dev/null)"
+  _sta_want=$(printf '%04x:%04x' "$(($3))" "$(($4))" 2>/dev/null)
+  _sta_have="$(cat "$_sta_dd/idVendor" 2>/dev/null):$(cat "$_sta_dd/idProduct" 2>/dev/null)"
   if [ "$_sta_have" != "$_sta_want" ]; then
-    echo "refusing PEER_SYSFS=$PEER_SYSFS - it reports $_sta_have, not" \
-         "PEER_VID:PEER_PID $_sta_want"
-    return 1
+    echo "refusing $1 at $2 - it reports $_sta_have, not $_sta_want"; return 1
   fi
-  STA_PEER_ID=$(sta_usb_id "$PEER_SYSFS")
-  rm -f "$OUT/.peer_opened"
+  sta_usb_unheld "$1" "$2" || return 1
+  sta_usb_id "$2" > "$OUT/.id_$1"
+  rm -f "$OUT/.opened_$1"
   return 0
 }
 
-sta_peer_opened() { : > "$OUT/.peer_opened"; }
+sta_dev_opened() { : > "$OUT/.opened_$1"; }
 
-sta_peer_handback() {
-  [ -n "$STA_PEER_ID" ] || return 0
-  _sta_peer_id=$STA_PEER_ID
-  STA_PEER_ID=""
-  if [ ! -e "$OUT/.peer_opened" ]; then
+sta_dev_handback() {
+  [ -f "$OUT/.id_$1" ] || return 0
+  _sta_id=$(cat "$OUT/.id_$1" 2>/dev/null)
+  rm -f "$OUT/.id_$1"
+  [ -e "$OUT/.opened_$1" ] || return 0
+  rm -f "$OUT/.opened_$1"
+  if [ "$(sta_usb_id "$2")" != "$_sta_id" ]; then
+    echo "$1 path $2 no longer names the recorded device ($_sta_id) -" \
+         "not re-enumerating it"
     return 0
   fi
-  rm -f "$OUT/.peer_opened"
-  if [ "$(sta_usb_id "$PEER_SYSFS")" != "$_sta_peer_id" ]; then
-    echo "PEER_SYSFS=$PEER_SYSFS no longer names the recorded peer" \
-         "($_sta_peer_id) - not re-enumerating it"
-    return 0
-  fi
-  echo 0 > "/sys/bus/usb/devices/$PEER_SYSFS/authorized" 2>/dev/null
+  echo 0 > "/sys/bus/usb/devices/$2/authorized" 2>/dev/null
   sleep 2
-  echo 1 > "/sys/bus/usb/devices/$PEER_SYSFS/authorized" 2>/dev/null
+  echo 1 > "/sys/bus/usb/devices/$2/authorized" 2>/dev/null
 }
+
+# Unbind the kernel driver from every interface of the USB device at $1 that
+# carries a wireless netdev (rtw88, an out-of-tree rtl88x2*, mt76x2u - and
+# not a composite adapter's Bluetooth interface), then require that none is
+# left: a driver still bound would own the chip under devourer. Nothing
+# bound is fine. Hand the device back with sta_dev_handback.
+sta_dev_unbind_wifi() {
+  for _sta_if in "/sys/bus/usb/devices/$1:"*; do
+    [ -e "$_sta_if/driver" ] || continue
+    for _sta_n in "$_sta_if/net/"*; do
+      [ -e "$_sta_n/phy80211" ] || continue
+      basename "$_sta_if" > "$_sta_if/driver/unbind" 2>/dev/null
+      break
+    done
+  done
+  sleep 2
+  for _sta_if in "/sys/bus/usb/devices/$1:"*; do
+    for _sta_n in "$_sta_if/net/"*; do
+      if [ -e "$_sta_n/phy80211" ]; then
+        echo "could not free $1: $(basename "$_sta_if") still carries" \
+             "$(basename "$_sta_n") ($(basename "$(readlink -f "$_sta_if/driver")"))"
+        return 1
+      fi
+    done
+  done
+  return 0
+}
+
+# The Realtek peer of the MT7612U harnesses: the sta_dev_* helpers on
+# PEER_SYSFS / PEER_VID:PEER_PID, which must not be the DUT's path.
+sta_peer_record() {
+  if [ "$PEER_SYSFS" = "$DUT_SYSFS" ]; then
+    echo "refusing PEER_SYSFS=$PEER_SYSFS - it is the DUT's path"; return 1
+  fi
+  sta_dev_record peer "$PEER_SYSFS" "$PEER_VID" "$PEER_PID"
+}
+sta_peer_opened() { sta_dev_opened peer; }
+sta_peer_handback() { sta_dev_handback peer "$PEER_SYSFS"; }
 
 # mt7612uprobe loads its firmware from ./firmware. sta_fw_link() creates
 # $ROOT/firmware -> FW_DIR only when nothing is there - not even a dangling
 # symlink, which `-e` alone would miss - and sta_fw_unlink() removes it only
 # if this run created it and it still points where this run pointed it.
+# Either way it then checks the blobs are readable THROUGH the link (below),
+# and returns 1 when they are not.
 STA_FW_LINK_OURS=no
 sta_fw_link() {
   if [ ! -e "$ROOT/firmware" ] && [ ! -L "$ROOT/firmware" ] &&
      ln -sn "$FW_DIR" "$ROOT/firmware" 2>/dev/null; then
     STA_FW_LINK_OURS=yes
   fi
+  sta_fw_readable "$ROOT/firmware"
+}
+
+# 0 when directory $1 holds both MT7612U blobs, readable and non-empty. A
+# host whose firmware is compressed (/lib/firmware/mediatek/*.bin.zst only,
+# as most distributions ship it) links fine, and the DUT then fails its
+# bring-up with "cannot open firmware/mt7662_rom_patch.bin", which a gate
+# scores as an empty ABORTED or a missing MAC. This check makes that dead rig
+# a refusal before anything runs.
+sta_fw_readable() {
+  for _sta_fw in mt7662_rom_patch.bin mt7662.bin; do
+    _sta_p="$1/$_sta_fw"
+    if [ ! -e "$_sta_p" ]; then
+      _sta_z=""
+      for _sta_x in zst xz gz; do
+        [ -e "$_sta_p.$_sta_x" ] && _sta_z="$_sta_z $_sta_fw.$_sta_x"
+      done
+      if [ -n "$_sta_z" ]; then
+        echo "refusing: $_sta_p is missing; only compressed firmware is there" \
+             "(${_sta_z# }). The DUT loads the blobs uncompressed: decompress" \
+             "both into a directory and pass it as FW_DIR"
+      else
+        echo "refusing: $_sta_p is missing (FW_DIR=$FW_DIR)"
+      fi
+      return 1
+    fi
+    if [ ! -f "$_sta_p" ] || [ ! -r "$_sta_p" ] || [ ! -s "$_sta_p" ]; then
+      echo "refusing: $_sta_p is not a readable, non-empty file"
+      return 1
+    fi
+  done
+  return 0
 }
 
 sta_fw_unlink() {

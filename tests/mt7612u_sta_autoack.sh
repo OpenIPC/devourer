@@ -26,6 +26,9 @@
 #   sudo tests/mt7612u_sta_autoack.sh
 #   sudo PEER_PID=0xc812 DUT_SYSFS=7-1 CH=6 tests/mt7612u_sta_autoack.sh
 #
+# Exit status: 0 every check passed; 1 a check failed; 2 INCONCLUSIVE (the rig
+# was refused, or the gate could not measure); 3 interrupted (INT/TERM).
+#
 # Env: PEER_VID, PEER_PID, PEER_SYSFS, DUT_SYSFS, CH, SECS, RETRY_LIMIT, OUT.
 
 set -u
@@ -61,7 +64,7 @@ sta_pid_init dut peer
 sta_peer_record || { sta_lock_release; exit 2; }
 # Only a link THIS run created is removed afterwards - anything already at
 # $ROOT/firmware, a dangling symlink included, is the operator's.
-sta_fw_link
+sta_fw_link || { sta_fw_unlink; sta_lock_release; exit 2; }
 
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  PASS  %s\n' "$*"; }
@@ -71,6 +74,9 @@ DUT_PID=""
 CLEANED=no
 # shellcheck disable=SC2317  # reached through the traps below
 cleanup() {
+  # Ignored, not deferred: a second INT/TERM during the hand-back would
+  # otherwise end it half done (CLEANED is already set, so it cannot rerun).
+  trap '' INT TERM
   [ "$CLEANED" = yes ] && return 0
   CLEANED=yes
   # arm() runs in a command substitution, so the PIDs it starts are recorded
@@ -94,9 +100,9 @@ cleanup() {
 trap cleanup EXIT
 # AND IT MUST STOP: with INT/TERM on the EXIT trap the shell runs cleanup
 # and then CARRIES ON into the next arm. CLEANED makes the EXIT pass after it
-# a no-op: sta_pid_kill forgets a PID on the first pass, so a second pass
-# would hand back an adapter the first refused to.
-trap 'cleanup; exit 130' INT TERM
+# a no-op, so the hand-back is decided once - by the pass that ran the
+# kills.
+trap 'cleanup; exit 3' INT TERM
 
 sta_dut_take || exit 2
 

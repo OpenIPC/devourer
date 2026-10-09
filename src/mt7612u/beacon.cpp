@@ -516,6 +516,12 @@ int mt7612u_beacon_start(struct mt7612u_dev *dev, const void *buf, size_t len,
 	 * out would switch duplicate filtering on in a session that deliberately
 	 * had it off - destroying the retry=0 evidence the AP harness measures.
 	 * Both were here for one round; neither belongs.
+	 *
+	 * One filter write does happen on this path, and not here: a station
+	 * arm this start drops (mt7612u_station_identity_check) gives the
+	 * receiver back the filter it replaced - the monitor filter, under
+	 * Mt7612uRadio - so a station armed first does not leave the AP running
+	 * the managed filter with DUP set.
 	 */
 	mt_beacon_init(dev);
 	/*

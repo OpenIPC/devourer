@@ -161,48 +161,17 @@ sta_pid_init dut peer hostapd
 
 # --- adapter identity and hand-back -----------------------------------------
 # The DUT and the PEER are opened by rxdemo / txdemo, whose libusb open
-# detaches the kernel driver and never re-attaches it. Each is recorded
-# (idVendor:idProduct:serial) before anything runs, marked touched just
-# before a process opens it, and handed back with an `authorized` 0/1 toggle
-# only when this run touched it AND the path still names the recorded device.
-declare -A RT_ID=()
-rt_record() { # $1 name, $2 sysfs, $3 vid, $4 pid
-  local d="/sys/bus/usb/devices/$2" want have
-  if [ "$(cat "$d/bDeviceClass" 2>/dev/null)" = "09" ]; then
-    echo "refusing $1 at $2 - a hub"; return 1
-  fi
-  want=$(printf '%04x:%04x' "$(($3))" "$(($4))" 2>/dev/null)
-  have="$(cat "$d/idVendor" 2>/dev/null):$(cat "$d/idProduct" 2>/dev/null)"
-  if [ "$have" != "$want" ]; then
-    echo "refusing $1 at $2 - it reports $have, not $want"; return 1
-  fi
-  RT_ID[$1]=$(sta_usb_id "$2")
-  rm -f "$OUT/.opened_$1"
-}
-rt_opened() { : > "$OUT/.opened_$1"; }
-rt_handback() { # $1 name, $2 sysfs
-  [ -n "${RT_ID[$1]:-}" ] || return 0
-  local id=${RT_ID[$1]}
-  RT_ID[$1]=""
-  [ -e "$OUT/.opened_$1" ] || return 0
-  rm -f "$OUT/.opened_$1"
-  if [ "$(sta_usb_id "$2")" != "$id" ]; then
-    echo "$1 path $2 no longer names the recorded device ($id) - not re-enumerating it"
-    return 0
-  fi
-  echo 0 > "/sys/bus/usb/devices/$2/authorized" 2>/dev/null
-  sleep 2
-  echo 1 > "/sys/bus/usb/devices/$2/authorized" 2>/dev/null
-}
+# detaches the kernel driver and never re-attaches it: each goes through the
+# lib's sta_dev_record / sta_dev_opened / sta_dev_handback.
 
 if [ "$DUT_SYSFS" = "${PEER_SYSFS:-x}" ] || [ "$DUT_SYSFS" = "${AP_SYSFS:-x}" ] ||
    { [ -n "$PEER_SYSFS" ] && [ "$PEER_SYSFS" = "${AP_SYSFS:-x}" ]; }; then
   echo "DUT_SYSFS, PEER_SYSFS and AP_SYSFS must be three different adapters"
   sta_lock_release; exit 2
 fi
-rt_record dut "$DUT_SYSFS" "$DUT_VID" "$DUT_PID" || { sta_lock_release; exit 2; }
+sta_dev_record dut "$DUT_SYSFS" "$DUT_VID" "$DUT_PID" || { sta_lock_release; exit 2; }
 if [ "$HALF" != up ]; then
-  rt_record peer "$PEER_SYSFS" "$PEER_VID" "$PEER_PID" || { sta_lock_release; exit 2; }
+  sta_dev_record peer "$PEER_SYSFS" "$PEER_VID" "$PEER_PID" || { sta_lock_release; exit 2; }
 fi
 
 AP_IF=""
@@ -211,19 +180,25 @@ AP_REENUM=no
 CLEANED=no
 # shellcheck disable=SC2317  # reached through the traps below
 cleanup() {
+  # Ignored, not deferred: a second INT/TERM during the hand-back would
+  # otherwise end it half done (CLEANED is already set, so it cannot rerun).
+  trap '' INT TERM
   [ "$CLEANED" = yes ] && return 0
   CLEANED=yes
   local dut_gone=0 peer_gone=0
   sta_pid_kill peer INT || peer_gone=1
   sta_pid_kill dut INT || dut_gone=1
-  sta_pid_kill hostapd
+  local ap_gone=0
+  sta_pid_kill_hard hostapd || ap_gone=1
   # Only once a process has really exited: re-enumerating an adapter still
   # inside its de-init is what the hand-back must not do.
-  if [ "$dut_gone" = 0 ]; then rt_handback dut "$DUT_SYSFS"
+  if [ "$dut_gone" = 0 ]; then sta_dev_handback dut "$DUT_SYSFS"
   else echo "DUT still running - not re-enumerating $DUT_SYSFS"; fi
-  if [ "$peer_gone" = 0 ]; then rt_handback peer "${PEER_SYSFS:-}"
+  if [ "$peer_gone" = 0 ]; then sta_dev_handback peer "${PEER_SYSFS:-}"
   else echo "peer still running - not re-enumerating $PEER_SYSFS"; fi
-  if [ "$AP_REENUM" = yes ]; then
+  if [ "$AP_REENUM" = yes ] && [ "$ap_gone" = 1 ]; then
+    echo "hostapd outlived TERM and KILL - not re-enumerating AP_SYSFS=$AP_SYSFS"
+  elif [ "$AP_REENUM" = yes ]; then
     # hostapd's `bssid=` leaves the interface carrying that address after it
     # exits; re-enumerate rather than bounce the link
     # (tests/mt7612u_sta_identity.sh has the history).
@@ -253,21 +228,11 @@ sel_env() { # $1 sysfs -> DEVOURER_USB_BUS / _PORT assignments
   printf 'DEVOURER_USB_BUS=%s DEVOURER_USB_PORT=%s' "${1%%-*}" "${1#*-}"
 }
 
-# Is PID running? `kill -0` is not enough: a background child that has exited
-# but is not yet reaped is a zombie, and kill -0 still succeeds on it. The
-# state field of /proc/PID/stat (after the parenthesised command name) is Z
-# for a zombie.
-proc_running() { # $1 pid
-  local st
-  st=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)
-  [ -n "$st" ] && [ "$st" != Z ] && [ "$st" != X ]
-}
-
 # Wait for a regex in a file while the process lives. 0 found, 1 not.
 wait_for() { # $1 pid, $2 file, $3 regex, $4 timeout s
   local t=0
   until grep -qE "$3" "$2" 2>/dev/null; do
-    proc_running "$1" || return 1
+    sta_pid_alive "$1" || return 1
     [ "$t" -ge "$4" ] && return 1
     sleep 1; t=$((t + 1))
   done
@@ -286,7 +251,8 @@ wait_for() { # $1 pid, $2 file, $3 regex, $4 timeout s
 # show whether the transmitter kept airing through the window: lead_ms is
 # the silence from the first submit to the first report, max_gap_ms the
 # longest silence between two reports, tail_ms the silence from the last
-# report to the final tx.stats. live=0 when any of them exceeds MAX_GAP_MS,
+# report to the final tx.stats (clamped at 0: that t can precede the last
+# report's by a few ms). live=0 when any of them exceeds MAX_GAP_MS,
 # or a timestamp it needs is missing - an arm that aired a burst and
 # stalled, or that started, stalled and burst at the end, which MIN_REPORTS
 # alone would accept.
@@ -327,7 +293,7 @@ for line in open(tx, errors='replace'):
         if e.get('final') and 't' in e:
             final_t = int(e['t'])
 gap = max((b - a for a, b in zip(ts, ts[1:])), default=0)
-tail = (final_t - ts[-1]) if (final_t is not None and ts) else None
+tail = max(final_t - ts[-1], 0) if (final_t is not None and ts) else None
 lead = (ts[0] - first_submit_t) if (first_submit_t is not None and ts) else None
 live = int(bool(ts) and tail is not None and lead is not None
            and lead <= max_gap and gap <= max_gap and tail <= max_gap)
@@ -376,7 +342,7 @@ down_arm() {
       armed)   sta_env="DEVOURER_STA_IDENTITY=self,$BSSID" ;;
       cleared) sta_env="DEVOURER_STA_IDENTITY=self,$BSSID DEVOURER_STA_CLEAR_AFTER_MS=$CLEAR_AFTER_MS" ;;
     esac
-    rt_opened dut
+    sta_dev_opened dut
     # shellcheck disable=SC2046,SC2086  # word-split assignments on purpose
     env DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" $(sel_env "$DUT_SYSFS") \
         DEVOURER_CHANNEL="$CH" DEVOURER_LOG_LEVEL=info \
@@ -410,7 +376,7 @@ down_arm() {
   fi
 
   t0=$(date +%s)
-  rt_opened peer
+  sta_dev_opened peer
   # shellcheck disable=SC2046  # word-split assignments on purpose
   env DEVOURER_VID="$PEER_VID" DEVOURER_PID="$PEER_PID" $(sel_env "$PEER_SYSFS") \
       DEVOURER_CHANNEL="$CH" \
@@ -439,7 +405,7 @@ down_arm() {
   fi
   # LIVENESS AFTER THE WINDOW: a DUT that died mid-window reads ~0% ACKed,
   # which is a control's PASSING value.
-  if [ -n "$dut" ] && ! proc_running "$dut"; then
+  if [ -n "$dut" ] && ! sta_pid_alive "$dut"; then
     echo "$tag ABORTED the DUT died during the window: $(tail -1 "$OUT/dut_$tag.err" 2>/dev/null)" > "$res"
     rm -f "$OUT/.pid_dut"; return 0
   fi
@@ -460,7 +426,7 @@ up_arm() { # $1 tag, $2 RA, $3 armed | unarmed (default armed)
   : > "$res"
   [ "$mode" = armed ] && sta_env="DEVOURER_STA_IDENTITY=$OWN,$BSSID"
   t0=$(date +%s)
-  rt_opened dut
+  sta_dev_opened dut
   # shellcheck disable=SC2046,SC2086  # word-split assignments on purpose
   env DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" $(sel_env "$DUT_SYSFS") \
       DEVOURER_CHANNEL="$CH" $sta_env \
@@ -530,7 +496,7 @@ OWN="${DUT_MAC:-}"
 # learned from a short armed rxdemo run's sta.arm event - which also proves,
 # before any arm is scored, that the seam arms on this DUT at all.
 if [ -z "$OWN" ]; then
-  rt_opened dut
+  sta_dev_opened dut
   # shellcheck disable=SC2046  # word-split assignments on purpose
   env DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" $(sel_env "$DUT_SYSFS") \
       DEVOURER_CHANNEL="$CH" DEVOURER_LOG_LEVEL=info \
@@ -620,7 +586,7 @@ if [ "$HALF" != up ]; then
     inc "CLEAR: arm E (or D) aborted or carried under $MIN_REPORTS reports"
   fi
   # The DOWN half no longer needs the peer: hand it back now.
-  rt_handback peer "$PEER_SYSFS"
+  sta_dev_handback peer "$PEER_SYSFS"
 fi
 
 # =============================== UP =========================================

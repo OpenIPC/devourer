@@ -77,7 +77,7 @@ sta_pid_init hostapd inject gate
 # so give it one rather than requiring the caller to cd somewhere specific.
 # Only a link THIS run created is removed afterwards - anything already at
 # $ROOT/firmware, a dangling symlink included, is the operator's.
-sta_fw_link
+sta_fw_link || { sta_fw_unlink; sta_lock_release; exit 2; }
 
 AP_IF=""
 # The accepted AP's idVendor:idProduct:serial, recorded once the guard has
@@ -91,6 +91,9 @@ AP_REENUM=no
 CLEANED=no
 # shellcheck disable=SC2317  # reached through the traps below
 cleanup() {
+  # Ignored, not deferred: a second INT/TERM during the hand-back would
+  # otherwise end it half done (CLEANED is already set, so it cannot rerun).
+  trap '' INT TERM
   [ "$CLEANED" = yes ] && return 0
   CLEANED=yes
   sta_fw_unlink
@@ -102,7 +105,10 @@ cleanup() {
   else echo "DUT gate still running - not re-enumerating DUT_SYSFS=$DUT_SYSFS"; fi
   # hostapd -B daemonizes; its PID is the one it wrote to -P for this run.
   # Unconditional: nothing is recorded unless hostapd started.
-  sta_pid_kill hostapd
+  if ! sta_pid_kill_hard hostapd; then
+    echo "hostapd outlived TERM and KILL - not re-enumerating AP_SYSFS=$AP_SYSFS"
+    sta_lock_release; return 0
+  fi
   [ "$AP_REENUM" = yes ] || { sta_lock_release; return 0; }
   sleep 1
   iw dev staid_mon del 2>/dev/null
@@ -339,15 +345,18 @@ fi
 
 echo
 echo "=== logs: $OUT ==="
-# A gate's rc 3 is INTERRUPTED - no verdict: never a pass.
+# A gate's rc 2 is INCONCLUSIVE and rc 3 INTERRUPTED: neither is a pass, and
+# neither is reported as a failure.
 [ "${staid:-0}" = 0 ] || echo "the contract gate FAILED - see $OUT/staid.txt"
 case "$r_ack" in
   0) ;;
+  2) echo "the probe-response gate stopped before arm C - INCONCLUSIVE, see $OUT/staack.txt" ;;
   3) echo "the probe-response gate was INTERRUPTED - no verdict" ;;
   *) echo "the probe-response gate's arm C did not hold - see $OUT/staack.txt" ;;
 esac
 case "$r_bss" in
   0) ;;
+  2) echo "the BSSID gate could not measure - INCONCLUSIVE, see $OUT/bssid.txt" ;;
   3) echo "the BSSID gate was INTERRUPTED - no verdict" ;;
   *) echo "the BSSID gate did not pass - see $OUT/bssid.txt" ;;
 esac

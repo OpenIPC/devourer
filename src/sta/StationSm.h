@@ -59,6 +59,7 @@ class StationSm {
     NoChannel,   /* the BSS entry carries no channel: the band is unknown */
     NotInfrastructure,  /* the BSS is an IBSS (or claims no ESS): no AP */
     SsidMismatch,       /* the entry is not the configured network */
+    Unconfirmed,  /* link_lost(): the caller's liveness check failed */
   };
 
   /* WHICH KIND OF BSS THIS STATION IS CONFIGURED FOR.
@@ -321,10 +322,11 @@ class StationSm {
      * this station (or broadcast). Without the addr2 check, any frame from any
      * AP on the channel drives this machine.
      *
-     * THE DROPS ARE COUNTED. On real hardware this is the only address filter
-     * in the system - the MT7612U RX path runs promiscuous - so most of a busy
-     * channel lands here, and a station that connects to nothing has to be
-     * able to say whether it heard its AP at all. */
+     * THE DROPS ARE COUNTED. On real hardware this is the main address
+     * filter - the MT7612U RX path runs promiscuous until a station identity
+     * is armed, and even its managed filter passes every BSS's broadcast -
+     * so most of a busy channel lands here, and a station that connects to
+     * nothing has to be able to say whether it heard its AP at all. */
     if (std::memcmp(a2, bssid_, 6) != 0) { rx_not_our_bss++; return; }
     const bool to_us = std::memcmp(a1, own_, 6) == 0;
     const bool bcast = (a1[0] & 0x01) != 0;
@@ -565,6 +567,19 @@ class StationSm {
   bool has_pmk() const { return have_pmk_; }
   bool keyed() const { return state_ == State::Connected && sup_.ptk_valid(); }
   Security security() const { return security_; }
+  /* THE CALLER'S OWN LIVENESS CHECK FAILED: the association this machine
+   * holds is not one the AP holds. A station cannot see the AP's side of an
+   * association - an Association Response the station received but the AP
+   * never saw acknowledged leaves the AP without the station while this
+   * machine is Connected, and on an open BSS nothing in the protocol ever
+   * says so. What proves the AP's side (a unicast reply to the station's
+   * traffic) is the data plane's to judge, so the check is the caller's;
+   * this is its way back into the ordinary failure and re-join path.
+   * Connected only; anywhere else it changes nothing. */
+  void link_lost() {
+    if (state_ == State::Connected) fail(Failure::Unconfirmed, 0);
+  }
+
   /* Associated and able to carry data. On a WPA2 BSS that is keyed(); on an
    * open one there is no key, so a data plane gated on keyed() would never
    * transmit at all. This is the predicate a caller wants. */
@@ -586,6 +601,9 @@ class StationSm {
   uint32_t rx_protected = 0;
   uint32_t rx_malformed = 0;
   uint32_t tx_dropped = 0;
+  /* Association Responses received when none was awaited - typically the
+   * AP retransmitting one whose acknowledgement it did not see. */
+  uint32_t rx_assoc_repeat = 0;
 
  private:
   /* WHAT AN UNPROTECTED EAPOL-KEY FRAME MAY BE. The clear carries the
@@ -681,7 +699,7 @@ class StationSm {
   void on_assoc_resp(const uint8_t* frame, size_t len, uint32_t now_ms) {
     AssocRespFields r;
 
-    if (state_ != State::Associating) return;
+    if (state_ != State::Associating) { rx_assoc_repeat++; return; }
     if (!parse_assoc_resp(frame, len, &r)) { rx_malformed++; return; }
     if (r.status != 0) { fail(Failure::AssocRefused, r.status); return; }
     /* AID 0 is not a valid association identifier; an AP that answers success

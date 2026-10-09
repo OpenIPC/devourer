@@ -39,7 +39,13 @@
  * needs ACK-requesting radiotap and a nonzero tx.retry_limit - see
  * Mt7612uRadio::SetStationIdentity.
  *
- * So the useful work here is refusal and verification, not configuration.
+ * THE ONE REGISTER IT WRITES is the receive filter. Every cell above ran the
+ * managed filter, while Mt7612uRadio's RX loop installs the monitor filter;
+ * left there, an armed station received promiscuously, and "moving the port
+ * identity makes a station deaf" did not hold for it. So the arm installs
+ * MT_RX_FILTR_CFG_MANAGED and the clear (or a drop) puts back what it found.
+ *
+ * So the useful work here is refusal and verification, plus that one filter.
  */
 #include <string.h>
 
@@ -72,11 +78,22 @@ static int sta_read_port_identity(struct mt7612u_dev *d, uint8_t out[6])
 	return 0;
 }
 
+/* Write the receive filter and read it back. */
+static int sta_write_filter(struct mt7612u_dev *d, uint32_t v)
+{
+	uint32_t got = 0;
+
+	if (mt_wr_chk(d, MT_RX_FILTR_CFG, v) != 0 ||
+	    mt_rr_chk(d, MT_RX_FILTR_CFG, &got) != 0)
+		return -1;
+	return got == v ? 0 : -1;
+}
+
 int mt7612u_set_station_identity(struct mt7612u_dev *dev,
                                  const uint8_t own[6], const uint8_t bssid[6])
 {
 	uint8_t port[6] = { 0 };
-	uint32_t rsp = 0;
+	uint32_t rsp = 0, filtr = 0;
 	int port_ok, rsp_ok;
 	enum mt7612u_sta_verdict v;
 
@@ -145,17 +162,53 @@ refused:
 	 * station transmits. Power save, TIM parsing and per-BSS key lookup,
 	 * which could give it a hardware use, are untested on this part.
 	 */
-	mt7612u_sta_arm(&dev->sta, own, bssid);
+	/*
+	 * The managed receive filter - the receiver the cells measured, not the
+	 * monitor one the RX loop installs. Read first, so the clear can put it
+	 * back and so a failure leaves the register as found; nothing above this
+	 * line writes, so every refusal before it leaves the filter untouched.
+	 */
+	if (mt_rr_chk(dev, MT_RX_FILTR_CFG, &filtr) != 0) {
+		WARN("station identity refused: MT_RX_FILTR_CFG unreadable, so the "
+		     "filter the clear must restore is unknown");
+		return -1;
+	}
+	if (sta_write_filter(dev, MT_RX_FILTR_CFG_MANAGED) != 0) {
+		/* Put back what it held, and verify. A previous arm, if any,
+		 * stands. An undo that does not read back is recorded, so the
+		 * clear still restores `filtr` and a retry does not take the
+		 * stranded value for the pre-arm one. */
+		if (sta_write_filter(dev, filtr) != 0) {
+			mt7612u_sta_strand(&dev->sta, filtr);
+			WARN("station identity refused: the managed receive filter "
+			     "%08x did not read back, nor did the undo to %08x - "
+			     "the clear will retry it", MT_RX_FILTR_CFG_MANAGED,
+			     filtr);
+		} else {
+			WARN("station identity refused: the managed receive filter "
+			     "%08x did not read back", MT_RX_FILTR_CFG_MANAGED);
+		}
+		return -1;
+	}
+	mt7612u_sta_arm(&dev->sta, own, bssid, filtr);
 	return 0;
 }
 
-void mt7612u_clear_station_identity(struct mt7612u_dev *dev)
+int mt7612u_clear_station_identity(struct mt7612u_dev *dev)
 {
 	if (!dev)
-		return;
-	/* Nothing to undo in hardware - this seam never wrote any. That is a
-	 * property of this part and not a promise of the interface. */
+		return 0;
+	/* Re-written for a lost arm too: its drop restored the filter best
+	 * effort, and this is where that gets verified. */
+	if ((dev->sta.armed || dev->sta.lost || dev->sta.stranded) &&
+	    sta_write_filter(dev, dev->sta.rx_filtr_restore) != 0) {
+		WARN("station identity clear: the pre-arm receive filter %08x did "
+		     "not read back - the arm stays recorded so a second clear "
+		     "retries it", dev->sta.rx_filtr_restore);
+		return -1;
+	}
 	mt7612u_sta_clear(&dev->sta);
+	return 0;
 }
 
 /*
@@ -175,30 +228,49 @@ void mt7612u_station_identity_check(struct mt7612u_dev *dev, const char *who,
 {
 	uint8_t port[6] = { 0 };
 	unsigned io;
-	int port_ok;
+	int port_ok, filtr_rc = 0;
+	uint32_t filtr_want = 0;
+	enum mt7612u_sta_event ev;
 
 	if (!dev || (!dev->sta.armed && !dev->sta.lost))
 		return;
-	/* Kept out of the I/O-error accumulator: this read must not fail an
-	 * operation (a beacon start counts io errors) that did its own job. */
+	/* Kept out of the I/O-error accumulator: this read, and the filter
+	 * write below, must not fail an operation (a beacon start counts io
+	 * errors) that did its own job. */
 	io = mt_io_errors(dev);
 	port_ok = sta_read_port_identity(dev, port) == 0;
+	ev = mt7612u_sta_port_observed(&dev->sta,
+	        mt7612u_port_compare(port, port_ok, dev->sta.own), allow_restore);
+	/* The filter follows the arm: a dropped station gives the receiver back
+	 * to the pre-arm filter (a beacon or responder that took the identity
+	 * wants the monitor filter, DUP clear - beacon.cpp relies on it); a
+	 * restored one takes it again. Read back, and a miss is said - it does
+	 * not fail the caller's operation, and the clear re-writes and
+	 * verifies. */
+	if (ev == MT7612U_STA_EV_DROPPED || ev == MT7612U_STA_EV_RESTORED) {
+		filtr_want = ev == MT7612U_STA_EV_DROPPED ? dev->sta.rx_filtr_restore
+		                                          : MT_RX_FILTR_CFG_MANAGED;
+		filtr_rc = sta_write_filter(dev, filtr_want);
+	}
 	mt_io_restore(dev, io);
+	if (filtr_rc != 0)
+		WARN("station identity %s after %s: the receive filter %08x did "
+		     "not read back - the receiver may still run the %s filter",
+		     ev == MT7612U_STA_EV_DROPPED ? "drop" : "restore", who,
+		     filtr_want,
+		     ev == MT7612U_STA_EV_DROPPED ? "managed (DUP set)" : "pre-arm");
 
-	switch (mt7612u_sta_port_observed(&dev->sta,
-	            mt7612u_port_compare(port, port_ok, dev->sta.own),
-	            allow_restore)) {
+	switch (ev) {
 	case MT7612U_STA_EV_NONE:
 		break;
 	case MT7612U_STA_EV_DROPPED:
 		WARN("station identity DROPPED: %s moved MT_MAC_ADDR to "
 		     "%02x:%02x:%02x:%02x:%02x:%02x, away from this station's own "
 		     "address. The MAC no longer acknowledges the AP's unicast to "
-		     "the station; under the MANAGED receive filter it no longer "
-		     "receives it either (measured: reception goes to zero). Under "
-		     "the monitor filter Mt7612uRadio's RX loop installs, frames "
-		     "still arrive but go unacknowledged. Re-arm the station "
-		     "identity after %s releases it.",
+		     "the station, and the receive filter is back to its pre-arm "
+		     "value (the monitor filter, under Mt7612uRadio's RX loop): "
+		     "frames still arrive but go unacknowledged. Re-arm the "
+		     "station identity after %s releases it.",
 		     who, port[0], port[1], port[2], port[3], port[4], port[5], who);
 		break;
 	case MT7612U_STA_EV_RESTORED:

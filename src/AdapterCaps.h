@@ -413,12 +413,24 @@ struct AdapterCaps {
    * (both word orders, no beacon armed), which is exactly what the Jaguar1
    * WriteTsf writes; the override itself has not run on Jaguar1 hardware. The
    * 8812A/8814A, 8821C (USB and PCIe) and 8822E ride the same pair and code
-   * path and are not separately measured. FALSE on the MT7612U (measured: its DW0/DW1 registers
-   * do not load the counter, docs/mt7612u.md), and on Kestrel and the RTL8733B
-   * (no TSF write in the source — not a bench fact). */
+   * path and are not separately measured. Kestrel: true over PCIe (RTL8852CE,
+   * readback against the FREERUN counter: +30000 µs -> +29998), false over USB
+   * (unmeasured). FALSE on the MT7612U (measured: its DW0/DW1 registers
+   * do not load the counter, docs/mt7612u.md), and on the RTL8733B (no TSF
+   * write in the source — not a bench fact).
+   *
+   * tbtt_follows_tsf: an active hardware beacon's TBTT moves with a WriteTsf
+   * (the TBTT is hardware-locked to the TSF grid), so disciplining the TSF
+   * steers the beacon — the actuator tests/pcie_ptp_tsf_discipline.cpp needs.
+   * Measured on air through WriteTsf on the RTL8852CE (Kestrel, PCIe). FALSE on
+   * Jaguar2/3, whose TBTT is deaf to a TSF write (measured — use
+   * PinBeaconTbtt there), and left false on Jaguar1: its TBTT is recorded as
+   * TSF-locked from the PinBeaconTbtt bench, but not measured through
+   * WriteTsf. */
   bool hw_rx_timestamp = false;
   bool hw_beacon_txtsf = false;
   bool tsf_write_ok = false;
+  bool tbtt_follows_tsf = false;
   /* 802.11ax scheduled UL (Kestrel/RTL8852 only). trigger_ul_ok: the adapter
    * can air an HE Trigger frame (UL-OFDMA grant) and program the fw UL-OFDMA
    * scheduler (SendTrigger / ConfigureUlOfdma). twt_ok: the fw exposes the TWT

@@ -10,11 +10,29 @@
  *
  * TX: a pool of MT_TX_RING transfers on EP 4 OUT with a free list. Submitting
  * does not wait for the wire; mt7612u_tx only blocks when every slot is in
- * flight, which is the back-pressure point.
+ * flight, which is the back-pressure point - and that wait is bounded
+ * (MT_TX_SLOT_WAIT_MS), so a stalled chip turns into a REFUSED submit the
+ * caller counts, never into a cancelled frame.
+ *
+ * A TX transfer has no timeout, as mt76's URBs have none. With a 1000 ms one,
+ * a chip that NAKs bulk OUT for longer than that - its queue full behind slow
+ * frames, e.g. unacknowledged unicast at a deep retry limit - has libusb
+ * cancel frames it would accept a moment later: measured at 9-50 of 60 lost
+ * per arm, invisible to every TX counter. The ring depth bounds what is in
+ * flight; mt_async_stop() cancels whatever is left.
+ *
+ * The cost, as in mt76: nothing reclaims a slot whose transfer the host
+ * controller never completes. If all of them wedge, every submit waits the
+ * bound and refuses until the ring is stopped - there is no self-heal short of
+ * mt_async_stop(), whose 2 s drain then rests on libusb's cancel alone (which
+ * is all a transfer timeout would be: libusb times a transfer out by
+ * cancelling it).
  */
 #include <stdlib.h>
 #include <string.h>
 #include "internal.h"
+
+#define MT_TX_SLOT_WAIT_MS 1000
 
 /*
  * Every field shared between the event thread and the caller lives under
@@ -44,56 +62,77 @@ static void evt_thread(struct mt7612u_dev *d)
 static void LIBUSB_CALL rx_done(struct libusb_transfer *t)
 {
 	struct mt_slot *s = (struct mt_slot *)t->user_data;
-	struct mt7612u_dev *d = s->d;
 	struct mt_async *a = s->a;
 	int resubmit;
 
 	if (t->status == LIBUSB_TRANSFER_COMPLETED) {
 		const uint8_t *frame = NULL;
 		struct mt7612u_rx_info info;
-		int len = mt_rx_parse(d, t->buffer, t->actual_length, &frame, &info);
+		int len = 0;
 
-		if (len <= 0) {
-			/* A frame the parser rejected used to move no counter at
-			 * all, which is indistinguishable from one never sent.
+		/* The parse reads the device, so it runs under the lock that a
+		 * stranding stop clears s->d under: either d is still live for the
+		 * whole parse, or it is NULL and the completion touches nothing
+		 * but the leaked ring (mt7612u_close() frees d after that stop).
+		 * The parser therefore must not take this lock itself: it reports
+		 * an invalid PHY by its return value, and it is counted here. */
+		a->lock.lock();
+		if (s->d) {
+			len = mt_rx_parse(s->d, t->buffer, t->actual_length,
+			                  &frame, &info);
+			if (len == MT_RX_PARSE_INVALID)
+				a->rx_invalid++;
+			/* Counted so that a frame the parser rejected is
+			 * distinguishable from one never sent.
 			 *
 			 * This does NOT cover the oversize case, and it was
-			 * measured not to: frames above the MAC's MT_MAX_LEN_CFG
-			 * ceiling never reach here, never complete a transfer and
-			 * never raise rx_err. The MAC discards them before USB, so
-			 * that loss is invisible from this layer by construction -
-			 * see mt7612u_caps.max_mpdu_rx. What this counts is a
-			 * short or malformed transfer. */
-			a->lock.lock();
-			a->rx_dropped++;
-			a->lock.unlock();
-		} else {
-			a->lock.lock();
-			a->rx_frames++;
-			a->lock.unlock();
-			/* Outside the lock: a callback is allowed to transmit,
-			 * and mt_async_tx_submit() takes this same mutex. */
-			if (a->cb)
-				a->cb(a->cb_user, frame, (size_t)len, &info);
+			 * measured not to: frames above the MAC's
+			 * MT_MAX_LEN_CFG ceiling never reach here, never
+			 * complete a transfer and never raise rx_err. The MAC
+			 * discards them before USB, so that loss is invisible
+			 * from this layer by construction - see
+			 * mt7612u_caps.max_mpdu_rx. What this counts is a short
+			 * or malformed transfer. */
+			if (len <= 0)
+				a->rx_dropped++;
+			else
+				a->rx_frames++;
 		}
+		a->lock.unlock();
+		/* Outside the lock: a callback is allowed to transmit, and
+		 * mt_async_tx_submit() takes this same mutex. */
+		if (len > 0 && a->cb)
+			a->cb(a->cb_user, frame, (size_t)len, &info);
 	} else if (t->status != LIBUSB_TRANSFER_CANCELLED) {
 		a->lock.lock();
 		a->rx_err++;
 		a->lock.unlock();
 	}
 
-	resubmit = locked_get(a, &a->rx_active) &&
-	           t->status != LIBUSB_TRANSFER_CANCELLED;
-	if (resubmit && libusb_submit_transfer(t) == 0)
+	/* The decision and the resubmit are one step under the lock, as the
+	 * TX submit is: a stop clears rx_active under this lock before its
+	 * cancel pass, so a resubmitted transfer is in flight for that pass to
+	 * cancel, and one decided after it is not resubmitted at all. The
+	 * s->d test is belt and braces - rx_active is already clear by the time
+	 * a stop strands anything. Lock order: see mt_async_tx_submit(). */
+	a->lock.lock();
+	resubmit = a->rx_active && s->d && t->status != LIBUSB_TRANSFER_CANCELLED;
+	if (resubmit && libusb_submit_transfer(t) == 0) {
+		a->lock.unlock();
 		return;
+	}
 
 	/* Not resubmitted: this transfer is now owned by us again. */
-	a->lock.lock();
 	if (resubmit)
 		a->rx_err++;
 	a->rx_inflight--;
 	a->cv.notify_all();
 	a->lock.unlock();
+}
+
+void mt_async_rx_done_for_test(struct libusb_transfer *t)
+{
+	rx_done(t);
 }
 
 static void LIBUSB_CALL tx_done(struct libusb_transfer *t)
@@ -103,10 +142,16 @@ static void LIBUSB_CALL tx_done(struct libusb_transfer *t)
 
 	a->lock.lock();
 	if (t->status == LIBUSB_TRANSFER_COMPLETED &&
-	    t->actual_length == t->length)
+	    t->actual_length == t->length) {
 		a->tx_done_n++;
-	else
+	} else {
 		a->tx_err++;
+		/* NULL once a stop has stranded this slot: the device may be
+		 * freed by now, and the stop already counted these frames. */
+		if (s->d)
+			s->d->tx_wire_failed.fetch_add((uint64_t)s->nframes,
+			                               std::memory_order_relaxed);
+	}
 	a->tx_busy[s->idx] = 0;
 	a->tx_inflight--;
 	a->cv.notify_all();
@@ -218,7 +263,11 @@ void mt_async_stop(struct mt7612u_dev *d)
 
 	a->lock.lock();
 	a->rx_active = 0;
+	a->stopping = 1;
 	a->lock.unlock();
+	/* A submitter parked in the slot wait must leave now, not take a slot
+	 * the cancel pass below frees and submit behind it. */
+	a->cv.notify_all();
 
 	/* Cancel *both* rings. Cancelling only RX leaves TX transfers owned by
 	 * libusb, and the wait below would then time out with them in flight. */
@@ -234,6 +283,24 @@ void mt_async_stop(struct mt7612u_dev *d)
 	stuck_tx = a->tx_inflight;
 	stuck_rx = a->rx_inflight;
 	a->running = 0;
+	/* A stranded transfer's frames are counted as failed now, and every
+	 * slot of a leaked ring lets go of the device: a completion, if one
+	 * ever runs (another thread may pump a shared context), must not touch
+	 * a device that mt7612u_close() is about to free. Only a SUBMITTED
+	 * slot is counted: one reserved but not yet submitted is refused by its
+	 * submitter when it sees `stopping`, and that send already returns an
+	 * error, so it is not a wire failure. */
+	if (stuck_tx || stuck_rx) {
+		for (int i = 0; i < MT_TX_RING; i++) {
+			if (a->tx_busy[i] && a->tx_slot[i].submitted)
+				d->tx_wire_failed.fetch_add(
+					(uint64_t)a->tx_slot[i].nframes,
+					std::memory_order_relaxed);
+			a->tx_slot[i].d = NULL;
+		}
+		for (int i = 0; i < MT_RX_RING; i++)
+			a->rx_slot[i].d = NULL;
+	}
 	a->lock.unlock();
 	/* Wake anyone parked in mt_async_tx_submit's slot wait. Clearing `running`
 	 * is what its guard tests, but without this notify the guard only fired
@@ -270,42 +337,78 @@ void mt_async_stop(struct mt7612u_dev *d)
 }
 
 /*
- * Hand a fully framed buffer to the TX pool. Blocks only when every slot is
- * in flight. Returns 0 on submit, -1 on error.
+ * Hand a fully framed buffer of `nframes` frames to the TX pool. Blocks only
+ * when every slot is in flight, and then at most MT_TX_SLOT_WAIT_MS. Returns
+ * 0 on submit, -1 on error or a ring still full at the bound.
+ *
+ * What the `stopping` handshake below guarantees is narrow: no transfer is
+ * submitted after a stop's cancel pass. It does NOT make a send safe against
+ * a concurrent mt_async_stop() that goes on to free the ring: d->a is read
+ * here without synchronisation, and a sender still parked in the slot wait
+ * when the stop deletes the ring wakes on a destroyed mutex. The caller must
+ * not run a send concurrently with a ring stop.
  */
-int mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len)
+int mt_async_tx_submit(struct mt7612u_dev *d, const uint8_t *buf, int len,
+                       int nframes)
 {
 	struct mt_async *a = d->a;
-	int idx = -1, rc;
+	int idx = -1, rc, stop_refused;
+	const auto until = std::chrono::steady_clock::now() +
+	                   std::chrono::milliseconds(MT_TX_SLOT_WAIT_MS);
 
 	if (!a || len > MT_TX_BUFSZ) return -1;
 
 	a->lock.lock();
 	for (;;) {
 		/* A teardown must not leave a caller parked here forever. */
-		if (!a->running) { a->lock.unlock(); return -1; }
+		if (!a->running || a->stopping) { a->lock.unlock(); return -1; }
 		for (int i = 0; i < MT_TX_RING; i++)
 			if (!a->tx_busy[i]) { idx = i; break; }
 		if (idx >= 0) break;
-		a->cv.wait(a->lock);
+		/* Refuse on the deadline only after the scan above: a slot freed
+		 * as the wait expired is still taken, rather than refusing a
+		 * send the ring could have carried. */
+		if (std::chrono::steady_clock::now() >= until) {
+			a->lock.unlock();
+			return -1;
+		}
+		a->cv.wait_until(a->lock, until);
 	}
 	a->tx_busy[idx] = 1;
+	a->tx_slot[idx].nframes = nframes;
+	a->tx_slot[idx].submitted = 0;
 	a->tx_inflight++;
 	a->lock.unlock();
 
 	memcpy(a->tx_buf[idx], buf, (size_t)len);
 	libusb_fill_bulk_transfer(a->tx[idx], d->h, MT_EP_OUT_AC_BE,
 	                          a->tx_buf[idx], len, tx_done,
-	                          &a->tx_slot[idx], 1000);
-	rc = libusb_submit_transfer(a->tx[idx]);
+	                          &a->tx_slot[idx], 0);
 
+	/* Submitted under the lock, and only while no stop has begun: a stop
+	 * sets `stopping` under this lock before its cancel pass, so every
+	 * transfer is either in flight for that pass to cancel or never
+	 * submitted. libusb DOES hold a lock across a completion callback -
+	 * the context's event lock, taken by libusb_try_lock_events() in
+	 * libusb_handle_events_timeout_completed() - so a completion that takes
+	 * this lock orders event lock -> a->lock. The other order never occurs:
+	 * libusb_submit_transfer() takes only flying_transfers_lock and the
+	 * transfer's own lock, never the event lock, and this driver never
+	 * takes the event lock itself. So submitting under a->lock (here and in
+	 * rx_done's resubmit) has no lock-order cycle with a completion. */
 	a->lock.lock();
+	stop_refused = a->stopping;
+	rc = stop_refused ? LIBUSB_ERROR_INTERRUPTED
+	                  : libusb_submit_transfer(a->tx[idx]);
 	if (rc) {
 		a->tx_busy[idx] = 0;
 		a->tx_inflight--;
-		a->tx_err++;
+		/* A refusal because a stop began is not a transfer error. */
+		if (!stop_refused)
+			a->tx_err++;
 		a->cv.notify_all();
 	} else {
+		a->tx_slot[idx].submitted = 1;
 		a->tx_submitted++;
 	}
 	a->lock.unlock();
@@ -331,6 +434,7 @@ void mt_async_stats(struct mt7612u_dev *d, struct mt_async_stats *out)
 	out->rx_err       = a->rx_err;
 	out->rx_invalid   = a->rx_invalid;
 	out->rx_dropped   = a->rx_dropped;
+	out->tx_inflight  = a->tx_inflight;
 	a->lock.unlock();
 }
 
@@ -357,9 +461,11 @@ int mt7612u_rx_stop(struct mt7612u_dev *d)
 	return 0;
 }
 
-/* A frame whose rate word named no valid PHY. Counted under the ring's lock
- * when one is running; on the synchronous bring-up path there is no ring and
- * nothing to count into, which is fine - that path prints every frame. */
+/* A frame whose rate word named no valid PHY, read by the synchronous path
+ * (mt_rx_one). Counted under the ring's lock when one is running; usually
+ * there is none and nothing to count into, which is fine - that path prints
+ * every frame. The ring's own completion counts in rx_done, under the lock it
+ * already holds: calling this from there would take that lock twice. */
 void mt_async_note_invalid(struct mt7612u_dev *d)
 {
 	struct mt_async *a = d->a;
@@ -368,6 +474,11 @@ void mt_async_note_invalid(struct mt7612u_dev *d)
 	a->lock.lock();
 	a->rx_invalid++;
 	a->lock.unlock();
+}
+
+uint64_t mt7612u_tx_wire_failed(struct mt7612u_dev *d)
+{
+	return d ? d->tx_wire_failed.load(std::memory_order_relaxed) : 0;
 }
 
 /* Public form of the snapshot above. */

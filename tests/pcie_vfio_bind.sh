@@ -18,7 +18,14 @@ DEV="/sys/bus/pci/devices/$BDF"
 [ "$(id -u)" = 0 ] || { echo "ERROR: run as root" >&2; exit 1; }
 
 current_driver() {
-  basename "$(readlink -f "$DEV/driver" 2>/dev/null)" 2>/dev/null || echo none
+  # readlink -f prints the path even when $DEV/driver is absent, so a
+  # driverless device (no firmware → in-tree probe failed) must be checked
+  # explicitly or it reads as a driver named "driver".
+  if [ -e "$DEV/driver" ]; then
+    basename "$(readlink -f "$DEV/driver")"
+  else
+    echo none
+  fi
 }
 
 if [ "$MODE" = "--restore" ]; then

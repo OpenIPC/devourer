@@ -177,6 +177,13 @@ constexpr uint32_t WL_EFUSE_PHYS_SIZE_8852B = 1536; /* physical dump bytes */
 constexpr uint32_t WL_EFUSE_LOG_MAP_SIZE_8852B = 2048; /* logical map bytes */
 constexpr uint32_t WL_SEC_CTRL_EFUSE_SIZE_8852B = 4;   /* header skip */
 constexpr uint16_t EFUSE_USB_MAC_ADDR_8852B = 0x488;   /* logical offset */
+/* PCIe interface block of the logical map (8852C), read off two RTL8852CE
+ * modules: MAC at 0x400, then PCI vid/did at 0x406/0x408 (and svid/smid at
+ * 0x40E/0x410). The vid/did words double as a self-check — they must equal
+ * the device's config-space ids, which pins the offsets. */
+constexpr uint16_t EFUSE_PCIE_MAC_ADDR_8852C = 0x400;
+constexpr uint16_t EFUSE_PCIE_VID_8852C = 0x406;
+constexpr uint16_t EFUSE_PCIE_DID_8852C = 0x408;
 /* RF calibration bases in the logical map (halrf_efuse_8852b.h). */
 constexpr uint16_t EFUSE_RF_XTAL_8852B = 0x2B9;
 constexpr uint16_t EFUSE_RF_RFE_8852B = 0x2CA;
@@ -1626,6 +1633,15 @@ constexpr uint16_t R_AX_LTE_WDATA = 0xDAF4;
 constexpr uint32_t R_AX_LTECOEX_CTRL = 0x38;   /* LTE-space indirect offset */
 constexpr uint32_t R_AX_LTECOEX_CTRL_2 = 0x3C; /* LTE-space indirect offset */
 constexpr uint16_t R_AX_SYS_SDIO_CTRL = 0x0070;
+/* PCIe power-on deltas — mac_pwr_on_nic_pcie_8852c (pwr_seq_func_8852c.c:834). */
+constexpr uint32_t B_AX_PCIE_CALIB_EN = 1u << 12; /* R_AX_SYS_SDIO_CTRL */
+constexpr uint32_t B_AX_PAD_HCI_SEL_V2_SH = 3;    /* R_AX_SYS_STATUS1 */
+constexpr uint32_t B_AX_PAD_HCI_SEL_V2_MSK = 0x7;
+constexpr uint32_t MAC_AX_HCI_SEL_PCIE_USB = 3;
+constexpr uint16_t R_AX_GPIO0_15_EECS_EESK_LED1_PULL_LOW_EN = 0x02E4;
+constexpr uint32_t B_AX_GPIO16_PULL_LOW_EN = 1u << 16;
+constexpr uint32_t B_AX_GPIO17_PULL_LOW_EN = 1u << 17;
+constexpr uint32_t B_AX_GPIO18_PULL_LOW_EN = 1u << 18;
 /* BT/LTE-coex block enable — mac_coex_init_8852b (coex_8852b.c:154). Arms the
  * LTE indirect interface (write_lte's ready bit) from real cold. */
 constexpr uint32_t B_AX_ENBT = 1u << 5; /* R_AX_GPIO_MUXCFG */
@@ -1683,6 +1699,177 @@ constexpr uint8_t B_AX_PHYINTF_TIMEOUT_THR_SH = 0;
 constexpr uint32_t B_AX_PHYINTF_TIMEOUT_THR_MSK = 0x3f;
 constexpr uint16_t R_AX_DMAC_ERR_IMR = 0x8520;
 constexpr uint16_t R_AX_CMAC_ERR_IMR = 0xC160;
+
+
+/* ---- PCIe host interface (RTL8852CE): the HAXI DMA plane the AX die drives
+ * when its HCI strap is PCIe. Register names from the vendor mac_ax
+ * (_pcie_8852c.c, init_8852c.c dmac_func_pre_en, hci_fc.c / dle.c PCIe rows)
+ * and rtw89 pci.{c,h} (the host-side ring driver the USB vendor drop lacks).
+ * The ring geometry itself lives in src/PcieDmaAx.cpp; this block is what
+ * HalKestrel::pcie_pre_init / pcie_init / pcie_deinit program around it. ---- */
+constexpr uint32_t DMA_MOD_PCIE_1B = 0x0;            /* HAXI_INIT_CFG1 DMA_MODE */
+constexpr uint32_t B_AX_RXBD_MODE_V1 = 1u << 14;     /* 0 = RXBD_PKT (one pkt/BD) */
+constexpr uint32_t B_AX_RST_BDRAM = 1u << 3;
+constexpr uint8_t B_AX_HAXI_MAX_TXDMA_SH = 0;        /* tx burst: 2 = 256 B (V1) */
+constexpr uint32_t B_AX_HAXI_MAX_TXDMA_MSK = 0x3;
+constexpr uint8_t B_AX_HAXI_MAX_RXDMA_SH = 8;        /* rx burst: 1 = 128 B (V1) */
+constexpr uint32_t B_AX_HAXI_MAX_RXDMA_MSK = 0x3;
+constexpr uint32_t MAC_AX_TX_BURST_V1_256B = 2;
+constexpr uint32_t MAC_AX_RX_BURST_V1_128B = 1;
+constexpr uint8_t B_AX_WD_ITVL_IDLE_V1_SH = 28;
+constexpr uint32_t B_AX_WD_ITVL_IDLE_V1_MSK = 0xf;
+constexpr uint8_t B_AX_WD_ITVL_ACT_V1_SH = 24;
+constexpr uint32_t B_AX_WD_ITVL_ACT_V1_MSK = 0xf;
+constexpr uint32_t MAC_AX_WD_DMA_INTVL_256NS = 1;
+constexpr uint32_t B_AX_STOP_WPDMA = 1u << 19;       /* HAXI_DMA_STOP1 */
+constexpr uint32_t B_AX_STOP_PCIEIO = 1u << 20;      /* HAXI_DMA_STOP1 */
+constexpr uint32_t B_AX_STOP_CH12 = 1u << 18;        /* HAXI_DMA_STOP1 (FWCMD) */
+constexpr uint16_t R_AX_HAXI_DMA_BUSY1 = 0x101C;     /* [18:8] channel busy */
+constexpr uint32_t HAXI_DMA_BUSY1_CHANS = 0x7FF00u;
+constexpr uint16_t R_AX_HAXI_DMA_BUSY2 = 0x11C8;     /* [1:0] CH10/CH11 */
+constexpr uint32_t HAXI_DMA_BUSY2_CHANS = 0x3u;
+constexpr uint16_t R_AX_HAXI_DMA_BUSY3 = 0x1208;     /* [1:0] RXQ/RPQ */
+constexpr uint32_t HAXI_DMA_BUSY3_RX = 0x3u;
+constexpr uint16_t R_AX_TXBD_RWPTR_CLR1 = 0x1014;    /* [10:0] ACH0-7,CH8,CH9,CH12 */
+constexpr uint32_t TXBD_RWPTR_CLR1_ALL = 0x7FFu;
+constexpr uint16_t R_AX_TXBD_RWPTR_CLR2_V1 = 0x11C4; /* [1:0] CH10/CH11 */
+constexpr uint32_t TXBD_RWPTR_CLR2_ALL = 0x3u;
+constexpr uint16_t R_AX_RXBD_RWPTR_CLR_V1 = 0x1200;  /* bit0 RXQ, bit1 RPQ */
+constexpr uint32_t RXBD_RWPTR_CLR_ALL = 0x3u;
+constexpr uint16_t R_AX_HAXI_EXP_CTRL = 0x1204;
+constexpr uint8_t B_AX_MAX_TAG_NUM_V1_SH = 0;
+constexpr uint32_t B_AX_MAX_TAG_NUM_V1_MSK = 0x7;
+constexpr uint32_t MAC_AX_TAG_NUM_8 = 7;
+constexpr uint16_t R_AX_TX_ADDRESS_INFO_MODE_SETTING = 0x8810;
+constexpr uint32_t B_AX_HOST_ADDR_INFO_8B_SEL = 1u << 0;
+constexpr uint16_t R_AX_PKTIN_SETTING = 0x9A00;
+constexpr uint32_t B_AX_WD_ADDR_INFO_LENGTH = 1u << 1;
+/* PCIe power-state / glue registers (the 0x3xxx PCIe bank on the 8852C). */
+constexpr uint16_t R_AX_PCIE_PS_CTRL_V1 = 0x3008;
+constexpr uint32_t B_AX_SEL_REQ_ENTR_L1 = 1u << 2;
+constexpr uint32_t B_AX_DMAC0_EXIT_L1_EN = 1u << 6;
+constexpr uint16_t R_AX_PCIE_MIX_CFG_V1 = 0x300C;
+constexpr uint32_t B_AX_ASPM_CTRL_MASK = 0x3u << 16;
+constexpr uint16_t R_AX_PCIE_BG_CLR = 0x303C;
+constexpr uint32_t B_AX_BG_CLR_ASYNC_M3 = 1u << 4;
+constexpr uint16_t R_AX_HCI_OPT_CTRL = 0x0074;
+constexpr uint32_t B_AX_WAKE_CTRL = 1u << 5;
+constexpr uint32_t B_AX_PCIE_DIS_L2_CTRL_LDO_HCI = 1u << 15; /* R_AX_SYS_SDIO_CTRL */
+/* IO recovery watchdogs (rtw89_pci_set_io_rcy, 8852C only). */
+constexpr uint16_t R_AX_PCIE_IO_RCY_M1 = 0x3100;
+constexpr uint16_t R_AX_PCIE_WDT_TIMER_M1 = 0x3104;
+constexpr uint16_t R_AX_PCIE_IO_RCY_M2 = 0x310C;
+constexpr uint16_t R_AX_PCIE_WDT_TIMER_M2 = 0x3110;
+constexpr uint16_t R_AX_PCIE_IO_RCY_E0 = 0x3118;
+constexpr uint16_t R_AX_PCIE_WDT_TIMER_E0 = 0x311C;
+constexpr uint16_t R_AX_PCIE_IO_RCY_S1 = 0x3124;
+constexpr uint32_t B_AX_PCIE_IO_RCY_WDT_MODE = 1u << 3; /* same bit, M1/M2/E0/S1 */
+constexpr uint32_t MAC_AX_IO_RCY_ANA_TMR_6MS = 72000;
+/* PCIe PHY RAC direct-access window (16-bit regs at offset + ana*2). */
+constexpr uint16_t R_RAC_DIRECT_OFFSET_G1 = 0x3800;
+constexpr uint16_t R_RAC_DIRECT_OFFSET_G2 = 0x3880;
+constexpr uint16_t RAC_MULT = 2;
+constexpr uint16_t RAC_ANA03 = 0x03, RAC_ANA09 = 0x09, RAC_ANA0D = 0x0D;
+constexpr uint16_t RAC_ANA10 = 0x10, RAC_ANA19 = 0x19, RAC_ANA1F = 0x1F;
+constexpr uint16_t RAC_ANA24 = 0x24;
+constexpr uint16_t BAC_OOBS_SEL = 1u << 4;
+constexpr uint16_t BAC_RX_TEST_EN = 1u << 6;
+constexpr uint16_t ADDR_SEL_PINOUT_DIS_VAL = 0x3C4;
+constexpr uint16_t B_PCIE_BIT_RD_SEL = 1u << 2;
+constexpr uint8_t OOBS_LEVEL_SH = 8;  /* RAC_ANA1F [12:8] */
+constexpr uint16_t OOBS_LEVEL_MSK = 0x1f;
+constexpr uint8_t OOBS_SEN_SH = 1;    /* RAC_ANA03 [5:1] */
+constexpr uint16_t B_AX_DEGLITCH = 0xfu << 8; /* RAC_ANA24 [11:8] */
+/* LTR (rtw89_pci_ltr_set_v1). */
+constexpr uint16_t R_AX_LTR_CTRL_0 = 0x8410;
+constexpr uint32_t B_AX_LTR_HW_EN = 1u << 0;
+constexpr uint32_t B_AX_LTR_WD_NOEMP_CHK_V1 = 1u << 1;
+constexpr uint8_t B_AX_LTR_IDLE_TIMER_IDX_SH = 8;
+constexpr uint32_t B_AX_LTR_IDLE_TIMER_IDX_MSK = 0x7;
+constexpr uint16_t R_AX_LTR_CTRL_1 = 0x8414;
+constexpr uint8_t B_AX_LTR_RX0_TH_SH = 0;
+constexpr uint32_t B_AX_LTR_RX0_TH_MSK = 0xfff;
+constexpr uint8_t B_AX_LTR_RX1_TH_SH = 16;
+constexpr uint32_t B_AX_LTR_RX1_TH_MSK = 0xfff;
+constexpr uint16_t R_AX_LTR_DEC_CTRL = 0x1600;
+constexpr uint32_t B_AX_LTR_HW_DEC_EN = 1u << 2;
+constexpr uint32_t B_AX_LTR_FW_DEC_EN = 1u << 3;
+constexpr uint32_t B_AX_LTR_DRV_DEC_EN = 1u << 4;
+constexpr uint8_t B_AX_LTR_IDX_DRV_SH = 5;
+constexpr uint32_t B_AX_LTR_IDX_DRV_MSK = 0x3;
+constexpr uint32_t B_AX_LTR_REQ_DRV = 1u << 7;
+constexpr uint8_t B_AX_LTR_SPACE_IDX_V1_SH = 0;
+constexpr uint32_t B_AX_LTR_SPACE_IDX_V1_MSK = 0x3;
+constexpr uint16_t R_AX_LTR_LATENCY_IDX0 = 0x1604;
+constexpr uint16_t R_AX_LTR_LATENCY_IDX3 = 0x1610;
+constexpr uint32_t PCI_LTR_IDLE_TIMER_3_2MS = 7;
+constexpr uint32_t PCI_LTR_SPC_500US = 2;
+constexpr uint32_t PCIE_LTR_IDX_IDLE = 3;
+constexpr uint32_t LTR_IDLE_LATENCY_8852C = 0x90039003;
+constexpr uint32_t LTR_ACTIVE_LATENCY_8852C = 0x880b880b;
+constexpr uint32_t LTR_RX_TH_8852C = 0x28;
+/* 8852C PCIe SCC (NIC) DLE quota (dle_mem_pcie_8852c: wde_size19 / ple_size19
+ * / wde_qt18 / ple_qt46,47). */
+constexpr uint16_t PCIE_SCC_WDE_LNK_PAGE_8852C = 3328;
+constexpr uint16_t PCIE_SCC_WDE_UNLNK_PAGE_8852C = 0;
+constexpr uint16_t PCIE_SCC_PLE_LNK_PAGE_8852C = 1904;
+constexpr uint16_t PCIE_SCC_WDE_QT_HIF_8852C = 3228;
+constexpr uint16_t PCIE_SCC_WDE_QT_WCPU_8852C = 60;
+constexpr uint16_t PCIE_SCC_WDE_QT_CPU_IO_8852C = 40;
+/* ple_qt46 (min) / ple_qt47 (max), Q0..Q11: cmac0_tx, cmac1_tx, c2h, h2c, wcpu,
+ * mpdu_proc, cmac0_dma, cmac1_dma, bb_rpt, wd_rel, cpu_io, tx_rpt. */
+constexpr uint16_t PCIE_SCC_PLE_MIN_8852C[12] = {525, 0, 16, 20, 13, 13,
+                                                 178, 0, 32, 62, 8, 16};
+constexpr uint16_t PCIE_SCC_PLE_MAX_8852C[12] = {525, 0, 32, 20, 1034, 13,
+                                                 1199, 0, 1053, 62, 160, 1037};
+/* 8852C PCIe HFC (hci_fc.c): hfc_chcfg_pcie_scc_8852c {13,1614} on every
+ * channel (ACH0-3 + B0MGQ/B0HIQ group 0, ACH4-7 + B1MGQ/B1HIQ group 1),
+ * hfc_pubcfg_pcie_scc_8852c 1614/1614/3228, hfc_preccfg_pcie (CH0-11 2, H2C
+ * 40, WP 0/0; full-cond X2 / X1 / X1 / X1), MODE = POH. The DLFW H2C
+ * pre-cost is 256 (hfc_preccfg_pcie_dlfw_8852c). */
+constexpr uint16_t HFC_PCIE_CH_MIN_8852C = 13;
+constexpr uint16_t HFC_PCIE_CH_MAX_8852C = 1614;
+constexpr uint16_t HFC_PCIE_PUB_G0_8852C = 1614;
+constexpr uint16_t HFC_PCIE_PUB_G1_8852C = 1614;
+constexpr uint16_t HFC_PCIE_PUB_MAX_8852C = 3228;
+constexpr uint16_t HFC_PCIE_CH011_PREC = 2;
+constexpr uint16_t HFC_PCIE_H2C_PREC = 40;
+constexpr uint16_t HFC_PCIE_WP_PREC = 0;
+constexpr uint16_t HFC_PCIE_DLFW_H2C_PREC_8852C = 256;
+constexpr uint8_t HFC_FULL_COND_X1 = 0;
+constexpr uint8_t MAC_AX_HCIFC_POH = 0;
+constexpr uint16_t R_AX_ACH4_PAGE_CTRL_V1 = 0x1720;
+constexpr uint16_t R_AX_ACH5_PAGE_CTRL_V1 = 0x1724;
+constexpr uint16_t R_AX_ACH6_PAGE_CTRL_V1 = 0x1728;
+constexpr uint16_t R_AX_ACH7_PAGE_CTRL_V1 = 0x172C;
+constexpr uint16_t R_AX_CH10_PAGE_CTRL_V1 = 0x1738;
+constexpr uint16_t R_AX_CH11_PAGE_CTRL_V1 = 0x173C;
+/* set_host_rpr POH row (rpr_cfg_poh: every filter EN, agg 121, tmr 255) and
+ * the 8852C release-report destination queue select. */
+constexpr uint8_t MAC_AX_RPR_MODE_POH = 0;
+constexpr uint8_t B_AX_RLSRPT0_QID_SH = 0;
+constexpr uint32_t B_AX_RLSRPT0_QID_MSK = 0x3f;
+constexpr uint32_t WDRLS_DEST_QID_STF = 0;
+constexpr uint32_t WDRLS_DEST_QID_POH = 1;
+/* trxcfg PCIe (POH) rows: scheduler pre-backoff 24 us (AC + non-AC) and the
+ * HW CTS2SELF / PTCL arbiter timeout in trxptcl_init. */
+constexpr uint32_t SCH_PREBKF_24US = 0x18;
+constexpr uint16_t R_AX_CTN_CFG_0 = 0xC34C;
+constexpr uint8_t B_AX_PREBKF_TIME_NONAC_SH = 8;
+constexpr uint32_t B_AX_PREBKF_TIME_NONAC_MSK = 0x1f;
+constexpr uint16_t R_AX_SIFS_SETTING = 0xC624;
+constexpr uint32_t B_AX_HW_CTS2SELF_EN = 1u << 16;
+constexpr uint8_t B_AX_HW_CTS2SELF_PKT_LEN_TH_SH = 24;
+constexpr uint32_t B_AX_HW_CTS2SELF_PKT_LEN_TH_MSK = 0xff;
+constexpr uint8_t B_AX_HW_CTS2SELF_PKT_LEN_TH_TWW_SH = 18;
+constexpr uint32_t B_AX_HW_CTS2SELF_PKT_LEN_TH_TWW_MSK = 0x3f;
+constexpr uint32_t S_AX_CTS2S_TH_1K = 4;
+constexpr uint32_t S_AX_CTS2S_TH_SEC_256B = 1;
+constexpr uint16_t R_AX_PTCL_FSM_MON = 0xC6E8;
+constexpr uint8_t B_AX_PTCL_TX_ARB_TO_THR_SH = 0;
+constexpr uint32_t B_AX_PTCL_TX_ARB_TO_THR_MSK = 0x3f;
+constexpr uint32_t S_AX_PTCL_TO_2MS = 0x3f;
+constexpr uint32_t B_AX_PTCL_TX_ARB_TO_MODE = 1u << 6;
 
 /* SET_CLR_WORD(orig, val, FIELD) — replace FIELD bits with val. */
 inline uint32_t set_clr_word(uint32_t orig, uint32_t val, uint32_t msk,

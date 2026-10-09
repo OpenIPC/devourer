@@ -235,7 +235,7 @@ static void test_invalid_phy(void)
 			printf("  FAIL phy %u is valid but was dropped\n", phy);
 			fails++;
 		}
-		if (phy > 4 && len != 0) {
+		if (phy > 4 && len != MT_RX_PARSE_INVALID) {
 			printf("  FAIL phy %u names no format but decoded as rate %u\n",
 			       phy, info.mcs);
 			fails++;

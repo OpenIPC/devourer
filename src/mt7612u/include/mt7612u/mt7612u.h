@@ -203,7 +203,11 @@ int mt7612u_stop(struct mt7612u_dev *dev);
 
 /*
  * Inject one complete 802.11 frame (no FCS - the MAC appends it). Builds the
- * TXWI + TXINFO and submits a single bulk transfer. Fire-and-forget.
+ * TXWI + TXINFO and submits a single bulk transfer. Fire-and-forget: with a
+ * ring running it returns once the transfer is submitted, waiting up to ~1 s
+ * for a free slot when all are in flight and refusing (-1) if none frees.
+ * Transfers carry no timeout (as mt76's URBs): a chip that never takes them
+ * keeps refusing until mt7612u_rx_stop()/mt7612u_close() cancels the ring.
  */
 int mt7612u_tx(struct mt7612u_dev *dev, const void *frame, size_t len,
                const struct mt7612u_tx_rate *rate);
@@ -214,6 +218,11 @@ int mt7612u_tx(struct mt7612u_dev *dev, const void *frame, size_t len,
  * MAC strips it, and the four bytes that follow the MPDU in the DMA buffer
  * are the FCE info trailer, not a checksum (measured: CRC-32 matched them on
  * 0 of 4263 frames). Must not block and must not call back into the device.
+ * If a callback transmits anyway, what happens is: with the TX ring full it
+ * blocks the event thread - and with it every RX and TX completion - for up
+ * to the ~1 s slot wait; and anything that goes through the synchronous USB
+ * path (a register access, an MCU command, a send with no ring running)
+ * cannot make progress from the event thread at all.
  */
 typedef void (*mt7612u_rx_cb)(void *user, const void *frame, size_t len,
                               const struct mt7612u_rx_info *info);
@@ -269,7 +278,8 @@ struct mt7612u_tx_view { const uint8_t *data; size_t len; };
 /*
  * Submit several frames in one call. MT7612U chains them into a single
  * bulk-OUT transfer via the TXDMA's "next valid" bit, so a burst costs one USB
- * transaction instead of one per frame. Returns the number accepted.
+ * transaction instead of one per frame. Returns the number accepted; with a
+ * ring running it stops at the first refused transfer (see mt7612u_tx).
  */
 size_t mt7612u_send_packets(struct mt7612u_dev *dev,
                             const struct mt7612u_tx_view *pkts, size_t count);
@@ -410,9 +420,10 @@ struct mt7612u_stats {
 	 * them too. Nonzero here means the RX path is seeing garbage, not that
 	 * the radio is slow. */
 	uint64_t rx_invalid;
-	/* Frames the parser rejected on length - a short or malformed
-	 * transfer. Counted because such a frame used to move no counter at
-	 * all, which is indistinguishable from one that was never sent.
+	/* Completed transfers the parser rejected: a short or malformed
+	 * transfer, AND every invalid-PHY frame (which rx_invalid also counts,
+	 * so rx_dropped - rx_invalid is the length rejects). Counted so that a
+	 * rejected frame is distinguishable from one that was never sent.
 	 *
 	 * It does NOT count an oversize frame: those are discarded by the MAC
 	 * above max_mpdu_rx, before USB, so they raise nothing here. That
@@ -420,6 +431,18 @@ struct mt7612u_stats {
 	uint64_t rx_dropped;
 };
 void mt7612u_get_stats(struct mt7612u_dev *dev, struct mt7612u_stats *out);
+/* Frames handed to the async ring whose USB transfer then failed, was
+ * cancelled or was left stranded by a stop - frames that may not have reached
+ * the chip. An upper bound, not an exact count: a cancelled or short
+ * aggregated transfer counts all of its frames although the chip may have
+ * taken some, and a stranded transfer is counted when the stop strands it and
+ * never corrected should it complete later on another thread.
+ * Frames refused at submit are not in it - the send call already returned
+ * them as not accepted - nor are the synchronous path's (no ring running).
+ * Monotonic for the device's lifetime - unlike mt7612u_stats it survives a
+ * ring restart - and counted in frames, an aggregated transfer adding all of
+ * its frames. Safe to call from any thread while the device is open. */
+uint64_t mt7612u_tx_wire_failed(struct mt7612u_dev *dev);
 
 /*
  * Per-interval link statistics from the MAC's MIB counters.

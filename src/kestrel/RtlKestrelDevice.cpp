@@ -1,5 +1,7 @@
 #include "RtlKestrelDevice.h"
 
+#include <chrono>
+#include <thread>
 #include <climits> /* INT_MIN = "no radiotap DBM_TX_POWER" sentinel */
 #include <cstdint>
 #include <span>
@@ -95,6 +97,23 @@ RtlKestrelDevice::~RtlKestrelDevice() {
   _device.quiesce_tx();
   _rx_stop = true;
   stop_wp_drain();
+  pcie_quiesce();
+}
+
+void RtlKestrelDevice::pcie_quiesce() {
+  if (_device.is_usb() || _pcie_quiesced)
+    return;
+  /* The reap loop runs on the caller's Init/StartRxLoop thread and checks
+   * _rx_stop every pass; give it a bounded moment to return before the ring
+   * indices are cleared under it. */
+  _rx_stop = true;
+  for (int i = 0; i < 200 && _rx_running.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  if (_rx_running.load())
+    _logger->warn("Kestrel PCIe: RX loop still running after 2 s — stopping "
+                  "DMA under it");
+  _pcie_quiesced = true;
+  _hal.pcie_deinit();
 }
 
 void RtlKestrelDevice::start_wp_drain() {
@@ -156,7 +175,7 @@ bool RtlKestrelDevice::PowerOnFwAndTrx(kestrel::EfuseInfo &out) {
     return false;
   if (!_hal.trx_cmac_rx_init())
     return false;
-  _hal.usb_intf_init();
+  _hal.intf_init();
   _hal.fw_err_state("post-mac-hal-init");
   return _hal.read_efuse(out);
 }
@@ -189,6 +208,7 @@ bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
   _hal.set_host_rpr();
   if (!_hal.set_channel(channel.Channel, channel.ChannelWidth, channel.ChannelOffset, channel.Band))
     return false;
+  _brought_up = true;
   return true;
 }
 
@@ -262,12 +282,21 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
       _cfg.tx.ack_timeout_us > 255   ? 255
       : _cfg.tx.ack_timeout_us < 1 ? 1
                                      : _cfg.tx.ack_timeout_us));
-  _tx_mgmt_ep = _device.nth_bulk_out_ep(0); /* B0MG -> BULKOUTID0 */
-  _tx_data_ep = _device.nth_bulk_out_ep(3); /* ACH0 -> BULKOUTID3 */
-  if (_tx_mgmt_ep == 0) {
-    _logger->error("Kestrel: no bulk-OUT endpoint for mgmt TX");
-    return;
+  if (_device.is_usb()) {
+    _tx_mgmt_q = _device.nth_bulk_out_ep(0); /* B0MG -> BULKOUTID0 */
+    _tx_data_q = _device.nth_bulk_out_ep(3); /* ACH0 -> BULKOUTID3 */
+    if (_tx_mgmt_q == 0) {
+      _logger->error("Kestrel: no bulk-OUT endpoint for mgmt TX");
+      return;
+    }
+    _tx_data_ok = _tx_data_q != 0;
+  } else {
+    /* PCIe: the queue handle is the AX DMA channel (PcieDmaAx routes on it). */
+    _tx_mgmt_q = kestrel::MAC_AX_DMA_B0MG;
+    _tx_data_q = kestrel::MAC_AX_DATA_CH0;
+    _tx_data_ok = true;
   }
+  _tx_up = true;
   /* Register a station-role MACID with the fw (mac_fw_role_maintain, CREATE)
    * so the per-MACID frame-stat engine tracks our injected frames — the
    * linchpin for the USR_TX_RPT report firing (and, later, data TX + power-by-
@@ -292,8 +321,9 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
    * register writes on otherwise-unused CMAC sounding regs; matches the vendor
    * init order (mac_init_snd at bring-up). */
   _hal.init_sounding();
-  _logger->info("Kestrel: TX ready on ch{} — mgmt ep 0x{:02x} data ep 0x{:02x}",
-                channel.Channel, _tx_mgmt_ep, _tx_data_ep);
+  _logger->info("Kestrel: TX ready on ch{} — mgmt {} 0x{:02x} data 0x{:02x}",
+                channel.Channel, _device.is_usb() ? "ep" : "dma-ch", _tx_mgmt_q,
+                _tx_data_q);
   /* One-shot thermal snapshot at bring-up (RF 0x42 meter vs efuse baseline) —
    * the PA-heating baseline for the TX-heavy link. */
   {
@@ -303,8 +333,11 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
   }
   /* Start draining the bulk-IN so the fw's per-frame WP-release reports recycle
    * the TX pages (else sustained mgmt TX stalls after ~103 frames). If the
-   * caller later runs StartRxLoop, it takes over the bulk-IN (handoff). */
-  start_wp_drain();
+   * caller later runs StartRxLoop, it takes over the bulk-IN (handoff). On
+   * PCIe the release reports arrive on the RPQ ring, which the transport reaps
+   * inside every send — no drain thread. */
+  if (_device.is_usb())
+    start_wp_drain();
 }
 
 void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
@@ -322,6 +355,11 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   const uint16_t drv_info_unit =
       _variant == kestrel::ChipVariant::C8852C ? 16 : 8;
   long long parse_aborts = 0;
+  _rx_running = true;
+  struct RunningGuard {
+    std::atomic<bool> &f;
+    ~RunningGuard() { f = false; }
+  } running_guard{_rx_running};
   _device.bulk_read_async_loop(
       32768, 8,
       [&, drv_info_unit](const uint8_t *data, int n) {
@@ -436,6 +474,33 @@ void RtlKestrelDevice::SetCcaMode(bool disabled) {
   _device.rtw_write32(r::R_AX_CCA_CFG_0, v);
   _logger->info("Kestrel: MAC carrier-sense {} (CCA_CFG_0=0x{:08x})",
                 disabled ? "DISABLED (dis_cca)" : "enabled", v);
+}
+
+bool RtlKestrelDevice::SetCcaGates(bool primary_disabled, bool edcca_disabled) {
+  if (!_brought_up)
+    return false;
+  namespace r = kestrel::reg;
+  constexpr uint32_t kPrimary =
+      r::B_AX_CCA_EN | r::B_AX_SEC20_EN | r::B_AX_SEC40_EN | r::B_AX_SEC80_EN;
+  uint32_t v = _device.rtw_read32(r::R_AX_CCA_CFG_0);
+  v = primary_disabled ? (v & ~kPrimary) : (v | kPrimary);
+  v = edcca_disabled ? (v & ~r::B_AX_EDCCA_EN) : (v | r::B_AX_EDCCA_EN);
+  _device.rtw_write32(r::R_AX_CCA_CFG_0, v);
+  _logger->info("Kestrel: CCA gates primary={} edcca={} (CCA_CFG_0=0x{:08x})",
+                primary_disabled ? "off" : "on", edcca_disabled ? "off" : "on",
+                v);
+  return true;
+}
+
+bool RtlKestrelDevice::GetCcaGates(bool &primary_disabled,
+                                   bool &edcca_disabled) {
+  if (!_brought_up)
+    return false;
+  namespace r = kestrel::reg;
+  const uint32_t v = _device.rtw_read32(r::R_AX_CCA_CFG_0);
+  primary_disabled = (v & r::B_AX_CCA_EN) == 0;
+  edcca_disabled = (v & r::B_AX_EDCCA_EN) == 0;
+  return true;
 }
 
 RxEnergy RtlKestrelDevice::GetRxEnergy(bool with_nhm) {
@@ -692,7 +757,7 @@ uint64_t RtlKestrelDevice::ReadTsf() {
 
 bool RtlKestrelDevice::StartBeacon(const uint8_t *beacon, size_t len,
                                    int interval_tu) {
-  if (_tx_mgmt_ep == 0) {
+  if (!_tx_up) {
     _logger->error("Kestrel: StartBeacon before InitWrite");
     return false;
   }
@@ -702,12 +767,50 @@ bool RtlKestrelDevice::StartBeacon(const uint8_t *beacon, size_t len,
   }
   const uint16_t iv = interval_tu > 0 ? static_cast<uint16_t>(interval_tu) : 100;
   /* OFDM 6M beacon (MAC_AX_OFDM6). bss_color 0 (no HE-BSS coloring). */
-  return _hal.start_beacon(beacon, static_cast<uint32_t>(len), iv,
-                           /*bss_color=*/0, kestrel::reg::MAC_AX_OFDM6);
+  const bool ok = _hal.start_beacon(beacon, static_cast<uint32_t>(len), iv,
+                                    /*bss_color=*/0, kestrel::reg::MAC_AX_OFDM6);
+  /* A failed update leaves any previously armed beacon running (the port
+   * config is only rewritten on success), so keep its interval. */
+  if (ok)
+    _bcn_interval_tu = iv;
+  return ok;
+}
+
+bool RtlKestrelDevice::WriteTsf(uint64_t tsf) {
+  namespace r = kestrel::reg;
+  if (_device.is_usb())
+    return false; /* tsf_write_ok is PCIe-only (unmeasured over USB) */
+  _device.rtw_write32(r::R_AX_TSFTR_LOW_P0, static_cast<uint32_t>(tsf));
+  _device.rtw_write32(r::R_AX_TSFTR_HIGH_P0, static_cast<uint32_t>(tsf >> 32));
+  /* The counter keeps running: accept a readback within the shared window
+   * (devourer::kTsfWriteReadbackWindowUs semantics). A dead device reads
+   * all-ones and fails this. */
+  return ReadTsf() - tsf < 100000;
+}
+
+int32_t RtlKestrelDevice::PinBeaconTbtt(int32_t offset_us) {
+  if (_bcn_interval_tu <= 0)
+    return 0; /* no active beacon */
+  const int64_t period_us = static_cast<int64_t>(_bcn_interval_tu) * 1024;
+  const int64_t off =
+      ((static_cast<int64_t>(offset_us) % period_us) + period_us) % period_us;
+  if (off != 0) {
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      _logger->warn("PinBeaconTbtt(Kestrel): the AX TBTT is hardware-locked "
+                    "to the TSF grid — nonzero offsets cannot hold; discipline "
+                    "the TSF (WriteTsf) to steer the beacon");
+    }
+    return 0;
+  }
+  /* Offset 0 is the hardware's own state: the TBTT fires on the TSF grid with
+   * no arm or re-derive needed. */
+  return 0;
 }
 
 bool RtlKestrelDevice::SendTrigger(const devourer::TriggerConfig &cfg) {
-  if (_tx_mgmt_ep == 0) {
+  if (!_tx_up) {
     _logger->error("Kestrel: SendTrigger before InitWrite");
     return false;
   }
@@ -748,7 +851,7 @@ bool RtlKestrelDevice::SendTrigger(const devourer::TriggerConfig &cfg) {
 }
 
 bool RtlKestrelDevice::ConfigureTwt(const devourer::TwtConfig &cfg) {
-  if (_tx_mgmt_ep == 0) {
+  if (!_tx_up) {
     _logger->error("Kestrel: ConfigureTwt before InitWrite");
     return false;
   }
@@ -756,13 +859,13 @@ bool RtlKestrelDevice::ConfigureTwt(const devourer::TwtConfig &cfg) {
 }
 
 bool RtlKestrelDevice::TeardownTwt(const devourer::TwtConfig &cfg) {
-  if (_tx_mgmt_ep == 0)
+  if (!_tx_up)
     return false;
   return _hal.teardown_twt(cfg);
 }
 
 bool RtlKestrelDevice::TwtBindSta(const devourer::TwtStaAct &act) {
-  if (_tx_mgmt_ep == 0) {
+  if (!_tx_up) {
     _logger->error("Kestrel: TwtBindSta before InitWrite");
     return false;
   }
@@ -770,7 +873,7 @@ bool RtlKestrelDevice::TwtBindSta(const devourer::TwtStaAct &act) {
 }
 
 bool RtlKestrelDevice::ConfigureTwtOfdma(const devourer::TwtOfdmaConfig &cfg) {
-  if (_tx_mgmt_ep == 0) {
+  if (!_tx_up) {
     _logger->error("Kestrel: ConfigureTwtOfdma before InitWrite");
     return false;
   }
@@ -778,7 +881,7 @@ bool RtlKestrelDevice::ConfigureTwtOfdma(const devourer::TwtOfdmaConfig &cfg) {
 }
 
 bool RtlKestrelDevice::ConfigureUlOfdma(const devourer::UlOfdmaConfig &cfg) {
-  if (_tx_mgmt_ep == 0) {
+  if (!_tx_up) {
     _logger->error("Kestrel: ConfigureUlOfdma before InitWrite");
     return false;
   }
@@ -787,7 +890,7 @@ bool RtlKestrelDevice::ConfigureUlOfdma(const devourer::UlOfdmaConfig &cfg) {
 
 bool RtlKestrelDevice::RegisterPeerSta(const uint8_t peer_mac[6], uint8_t macid,
                                        uint8_t addr_cam_idx) {
-  if (_tx_mgmt_ep == 0) {
+  if (!_tx_up) {
     _logger->error("Kestrel: RegisterPeerSta before InitWrite");
     return false;
   }
@@ -797,7 +900,7 @@ bool RtlKestrelDevice::RegisterPeerSta(const uint8_t peer_mac[6], uint8_t macid,
 bool RtlKestrelDevice::RegisterBeamformee(const uint8_t peer_mac[6],
                                           uint8_t macid, uint8_t addr_cam_idx,
                                           const devourer::StaBfCaps &bf) {
-  if (_tx_mgmt_ep == 0) {
+  if (!_tx_up) {
     _logger->error("Kestrel: RegisterBeamformee before InitWrite");
     return false;
   }
@@ -809,7 +912,7 @@ bool RtlKestrelDevice::RegisterBeamformee(const uint8_t peer_mac[6],
 }
 
 bool RtlKestrelDevice::StartSounding(const devourer::SoundingConfig &cfg) {
-  if (_tx_mgmt_ep == 0) {
+  if (!_tx_up) {
     _logger->error("Kestrel: StartSounding before InitWrite");
     return false;
   }
@@ -876,6 +979,13 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   /* The AX beacon engine (StartBeacon) airs a HW-timed beacon with the live TSF
    * inserted by the MAC at TX — on-air validated on the 8852BU. */
   c.hw_beacon_txtsf = true;
+  /* WriteTsf: the bare port-0 TSF pair is writable over PCIe (bench, RTL8852CE:
+   * a read-add-write moved TSF vs FREERUN by the requested step to within the
+   * read latency). USB is unmeasured, so it stays refused there. */
+  c.tsf_write_ok = !_device.is_usb();
+  /* ...and the AX TBTT is hardware-locked to that TSF: a WriteTsf moves an
+   * active beacon's TBTT with it (on-air, tests/kestrel_tbtt_probe.cpp). */
+  c.tbtt_follows_tsf = !_device.is_usb();
   c.xtal_cap_default = _efuse.xtal_cap; /* efuse crystal-cap (no runtime trim wired) */
   devourer::set_standard_freq_ranges(c);
 
@@ -894,7 +1004,7 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
 }
 
 bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
-  if (_tx_mgmt_ep == 0) {
+  if (!_tx_up) {
     _logger->error("Kestrel: send_packet before InitWrite (TX not up)");
     return false;
   }
@@ -1113,7 +1223,9 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
    * they exercise the data power-by-rate path; mgmt/beacon uses the MG0 queue
    * (BULKOUTID0). Falls back to the mgmt ep if the data ep was not resolved. */
   const bool is_data = kestrel::frame_is_data(frame, flen);
-  uint8_t ep = _tx_mgmt_ep;
+  uint8_t ep = _tx_mgmt_q;
+  const bool use_data_q = is_data && _tx_data_ok;
+  const bool stf = _device.is_usb(); /* USB store-and-forward descriptor bit */
   /* The 8852C data/mgmt TX descriptor is the 32-byte wd_body_t_v1; the 8852B is
    * the 24-byte wd_body_t. */
   const uint32_t wd_len = (_variant == kestrel::ChipVariant::C8852C)
@@ -1135,19 +1247,21 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
                  : _cfg.tx.retry_limit > 62 ? 62
                                             : _cfg.tx.retry_limit;
   const int txcnt = rl + 1;
-  auto buf = is_data && _tx_data_ep
+  auto buf = use_data_q
                  ? kestrel::build_data_txdesc(frame, flen, tr, 0,
-                                              _tx_seq++ & 0xfff, wd_len, txcnt)
+                                              _tx_seq++ & 0xfff, wd_len, txcnt,
+                                              stf)
                  : kestrel::build_mgnt_txdesc(frame, flen, tr, 0,
-                                              _tx_seq++ & 0xfff, wd_len, txcnt);
-  if (is_data && _tx_data_ep)
-    ep = _tx_data_ep;
+                                              _tx_seq++ & 0xfff, wd_len, txcnt,
+                                              stf);
+  if (use_data_q)
+    ep = _tx_data_q;
   int rc = _device.bulk_send_data_sync_ep(ep, buf.data(),
                                      static_cast<int>(buf.size()), 1000);
   if (rc < 0 || static_cast<size_t>(rc) != buf.size()) {
-    _logger->error("Kestrel: send_packet bulk-OUT ep 0x{:02x} failed (rc={}, "
-                   "wanted {})",
-                   ep, rc, buf.size());
+    _logger->error("Kestrel: send_packet {} 0x{:02x} failed (rc={}, wanted {})",
+                   _device.is_usb() ? "bulk-OUT ep" : "PCIe dma-ch", ep, rc,
+                   buf.size());
     return false;
   }
   return true;

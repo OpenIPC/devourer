@@ -26,8 +26,8 @@ public:
   KestrelFw(RtlAdapter device, Logger_t logger, ChipVariant variant);
 
   /* mac_hal_init pre-FWDL half: hci_func_en + dmac_pre_init (DLE/HFC for
-   * DLFW). The caller then runs usb_pre_init (intf_pre_init, vendor order)
-   * before download_firmware. */
+   * DLFW). The caller then runs the intf_pre_init step (usb_pre_init /
+   * pcie_pre_init, vendor order) before download_firmware. */
   bool fw_pre_init();
 
   /* The FWDL state machine: WDT config + disable/enable WCPU + download the
@@ -43,7 +43,7 @@ public:
   bool radio_page_to_fw(uint8_t cls, uint8_t page, const uint32_t *packed,
                         uint16_t count);
 
-  bool ch12_ready() const { return _ch12_ep != 0; }
+  bool ch12_ready() const { return _ch12_ready; }
 
   /* Enable the per-user TX report (mac_cfg_usr_tx_rpt): H2C cat=MAC,
    * class=FW_OFLD, func=USR_TX_RPT. `mode` = mac_ax_usr_tx_rpt_mode (PERIOD /
@@ -194,7 +194,11 @@ private:
   RtlAdapter _device;
   Logger_t _logger;
   ChipVariant _variant;
-  uint8_t _ch12_ep = 0; /* resolved bulk-OUT endpoint for CH12 (BULKOUTID2) */
+  /* CH12 (FWDL/H2C) queue handle, bus-neutral: the bulk-OUT endpoint on USB
+   * (BULKOUTID2), the DMA channel number 12 on PCIe (PcieDmaAx routes on it). */
+  uint8_t _ch12_q = 0;
+  bool _ch12_ready = false;
+  bool _pcie = false;
   std::vector<uint8_t> _txbuf; /* reused H2C packet scratch */
   uint8_t _h2c_seq = 0; /* fwinfo->h2c_seq: 8-bit rolling, all runtime H2Cs */
   /* Serializes send_h2c_cmd: it mutates the shared _txbuf scratch + _h2c_seq

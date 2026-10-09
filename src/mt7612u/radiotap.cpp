@@ -326,7 +326,11 @@ size_t mt7612u_send_packets(struct mt7612u_dev *d,
 		if (!off) break;
 
 		if (d->a) {
-			if (mt_async_tx_submit(d, buf, (int)off) == 0) sent += n_in_buf;
+			/* A refusal is a ring still full after the slot wait, or a
+			 * stop: the next batch would only wait it out again. */
+			if (mt_async_tx_submit(d, buf, (int)off, (int)n_in_buf))
+				break;
+			sent += n_in_buf;
 		} else {
 			int n = 0;
 

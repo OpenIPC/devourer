@@ -66,6 +66,12 @@ void kestrel_halbb_ctrl_bw_ch(struct kestrel_halbb_ctx *ctx, unsigned char pri_c
  * 8852C-only — the 8852B selects its TX antenna per-STA via the CMAC antenna
  * model, so this is a no-op there. Single-PHY, RF_PATH_A. */
 void kestrel_halbb_ctrl_tx_path(struct kestrel_halbb_ctx *ctx);
+/* 6 GHz EDCCA threshold after a 6 GHz tune (the vendor's unlinked
+ * EDCCA_NORMAL_MODE level — see the definition); bw is the halbb
+ * channel_width enum. */
+void kestrel_halbb_edcca_6g(struct kestrel_halbb_ctx *ctx, unsigned char bw);
+/* EDCCA hardware report: pwdB fb/p20/s20, busy flags fb/p20/s20, pwdB path 0/1. */
+void kestrel_halbb_edcca_report(struct kestrel_halbb_ctx *ctx, int out[8]);
 
 /* One-shot active/frame-free NHM absolute noise floor. Runs a manual IEEE-11k
  * NHM measurement over `mntr_time_ms` (0 -> 100) and returns the

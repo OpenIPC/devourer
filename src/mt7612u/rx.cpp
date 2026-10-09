@@ -60,9 +60,11 @@ static int decode_rate(uint16_t rate, struct mt7612u_rx_info *out)
 
 /*
  * Parse one completed RX buffer. Returns the 802.11 frame length (excluding
- * the RXWI), or 0 if the buffer holds nothing usable. `frame` receives a
- * pointer into `buf`. Shared by the synchronous reader and the async ring, so
- * both decode identically.
+ * the RXWI), 0 if the buffer holds nothing usable, or MT_RX_PARSE_INVALID if
+ * the rate word names no valid PHY. `frame` receives a pointer into `buf`.
+ * Shared by the synchronous reader and the async ring, so both decode
+ * identically. It counts nothing and takes no lock: the ring calls it under
+ * its own lock, and each caller counts the invalid case itself.
  */
 int mt_rx_parse(struct mt7612u_dev *d, uint8_t *buf, int n,
                 const uint8_t **frame, struct mt7612u_rx_info *info)
@@ -82,10 +84,8 @@ int mt_rx_parse(struct mt7612u_dev *d, uint8_t *buf, int n,
 	info->seq      = (uint16_t)(get_le16(rxwi + 8) >> 4);
 	info->crc_err  = !!(rxinfo & MT_RXINFO_CRCERR);
 	info->ampdu    = !!(rxinfo & MT_RXINFO_AMPDU);
-	if (decode_rate(get_le16(rxwi + 10), info)) {
-		mt_async_note_invalid(d);
-		return 0;
-	}
+	if (decode_rate(get_le16(rxwi + 10), info))
+		return MT_RX_PARSE_INVALID;
 
 	/* Per-chain RSSI is a fixed 4-byte field. Correction terms come from
 	 * the EEPROM (mt76x02_mac_get_rssi); with them at zero these are the
@@ -164,5 +164,10 @@ int mt_rx_one(struct mt7612u_dev *d, uint8_t *buf, int bufsize,
 
 	if (rc == LIBUSB_ERROR_TIMEOUT) return 0;
 	if (rc) return -1;
-	return mt_rx_parse(d, buf, n, frame, info);
+	rc = mt_rx_parse(d, buf, n, frame, info);
+	if (rc == MT_RX_PARSE_INVALID) {
+		mt_async_note_invalid(d);
+		return 0;
+	}
+	return rc;
 }

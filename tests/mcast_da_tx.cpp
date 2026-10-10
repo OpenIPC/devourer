@@ -1,12 +1,14 @@
 // mcast_da_tx.cpp — gate for carrying telemetry in addr1 (devourer#474):
 // does a monitor receiver deliver a stream frame whose DA is a non-broadcast
 // GROUP address? Alternates the canonical stream probe request with DA
-// ff:ff:ff:ff:ff:ff and the same frame with DA 03:57:42:75:05:d6 (group +
-// locally administered, not broadcast); the body carries "DAff" / "DA03" so
+// ff:ff:ff:ff:ff:ff and the same frame with the DA the FrameTimingExt encoder
+// ships (07:…, group + locally administered + version, not broadcast); the
+// body carries "DAff" / "DAgp" so
 // a witness tells them apart by content alone. Every TX descriptor path sets
 // BMC from addr1's group bit, so the air behaviour is the same either way —
 // what is under test is each receiver family's RX filter.
 // Driven by tests/mcast_da_rx_check.sh. Build recipe: dl_departure_matrix.sh.
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -18,15 +20,26 @@
 
 #include <libusb.h>
 
+#include "DeviceSession.h"
 #include "RadiotapBuilder.h"
 #include "SelectedChannel.h"
+#include "StreamTelemetry.h"
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
 #include "env_config.h"
 #include "logger.h"
 
 static const uint8_t kSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
-static const uint8_t kGroupDa[6] = {0x03, 0x57, 0x42, 0x75, 0x05, 0xd6};
+/* The group DA under test is the one the stream frames actually ship: the
+ * FrameTimingExt encoder's own bytes (0x07 = group + local + version 1, then
+ * its fields), never a hand-written copy that could drift from it. */
+static std::array<uint8_t, 6> group_da() {
+  devourer::stream_timing::FrameTimingExt x;
+  x.t_queue10 = 0x4257; x.t_write_prev10 = 0x0575; x.ctr = 0xd6;
+  std::array<uint8_t, 6> da{};
+  x.encode(da.data());
+  return da;
+}
 
 static std::vector<uint8_t> build(const std::vector<uint8_t>& rt, const uint8_t da[6],
                                   const char* tag, uint32_t n) {
@@ -57,13 +70,25 @@ int main(int argc, char** argv) {
   libusb_context* ctx = nullptr;
   libusb_init(&ctx);
   libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_WARNING);
+  /* Owns the teardown order on every return path: device, then the claimed
+   * interface, the handle and the context (examples/common/DeviceSession.h). */
+  devourer::DeviceSession session{logger};
+  session.adopt_context(ctx);
   auto* h = libusb_open_device_with_vid_pid(ctx, vid, pid);
   if (!h) { fprintf(stderr, "open fail %04x:%04x\n", vid, pid); return 1; }
+  const int iface = devourer::find_wifi_interface(h);
   std::shared_ptr<devourer::UsbDeviceLock> lk;
-  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lk) != 0) return 1;
+  if (devourer::claim_interface_then_reset(h, iface, logger, true, lk) != 0) {
+    session.adopt_handle(h);
+    return 1;
+  }
+  session.adopt_handle(h, iface);
+  session.adopt_lock(lk);
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRadio(h, ctx, lk, devourer_config_from_env());
-  if (!dev) return 1;
+  auto owned = wifi.CreateRadio(h, ctx, lk, devourer_config_from_env());
+  if (!owned) return 1;
+  session.adopt_device(std::move(owned));
+  IRadio* const dev = session.device();
   try {
     dev->InitWrite(SelectedChannel{ch, 0, CHANNEL_WIDTH_20});
   } catch (const std::exception& e) {
@@ -74,16 +99,17 @@ int main(int argc, char** argv) {
 
   const auto rt = devourer::build_stream_radiotap(devourer::parse_tx_mode_str("6M"));
   static const uint8_t bcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-  uint32_t n = 0, ok_ff = 0, ok_03 = 0;
+  uint32_t n = 0, ok_ff = 0, ok_gp = 0;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(secs);
   while (std::chrono::steady_clock::now() < deadline) {
     const bool grp = n & 1;
-    auto f = build(rt, grp ? kGroupDa : bcast, grp ? "DA03" : "DAff", n);
-    if (dev->send_packet(f.data(), f.size())) (grp ? ok_03 : ok_ff)++;
+    const auto gda = group_da();
+    auto f = build(rt, grp ? gda.data() : bcast, grp ? "DAgp" : "DAff", n);
+    if (dev->send_packet(f.data(), f.size())) (grp ? ok_gp : ok_ff)++;
     ++n;
     std::this_thread::sleep_for(std::chrono::microseconds(gap_us));
   }
-  dev->Stop();
-  printf("{\"ev\":\"mcast.tx\",\"sent\":%u,\"ok_ff\":%u,\"ok_03\":%u}\n", n, ok_ff, ok_03);
+  session.close();
+  printf("{\"ev\":\"mcast.tx\",\"sent\":%u,\"ok_ff\":%u,\"ok_gp\":%u}\n", n, ok_ff, ok_gp);
   return 0;
 }

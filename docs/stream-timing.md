@@ -28,8 +28,9 @@ The version is chosen so the old addr3 contents (the canonical SA) decode as
 **Five more bytes ride addr1**, the DA. It stays a group address — bit 0 of
 its first byte set — so nothing on the air ACKs it and every TX descriptor
 path still derives its broadcast/multicast bit from it; the first byte is
-`03` plus the version (group, locally administered), so the broadcast
-address a demo writes when it carries no extension decodes as "none":
+`0x03 | version<<2` (group, locally administered), `07` for this version, so
+the broadcast address a demo writes when it carries no extension decodes as
+"none":
 
 | bytes | field |
 |---|---|
@@ -40,16 +41,16 @@ address a demo writes when it carries no extension decodes as "none":
 
 Whether a monitor receiver delivers a non-broadcast group DA at all was
 measured, not assumed (`tests/mcast_da_rx_check.sh`: an injector alternates
-the broadcast and the `03:…` DA, each receiver family counts both by body
-tag, 15 s per cell):
+the broadcast DA and the exact bytes the extension's encoder ships, `07:…`,
+each receiver family counts both by body tag, 15 s per cell):
 
 | receiver | broadcast | group DA | ratio |
 |---|---|---|---|
-| 8822BU (Jaguar2) | 1404 | 1399 | 1.00 |
-| 8812CU (Jaguar3) | 1374 | 1381 | 1.01 |
-| 8821AU (Jaguar1) | 1330 | 1317 | 0.99 |
-| 8832CU (Kestrel) | 1419 | 1423 | 1.00 |
-| MT7612U | 1422 | 1428 | 1.00 |
+| 8822BU (Jaguar2) | 1364 | 1367 | 1.00 |
+| 8812CU (Jaguar3) | 1385 | 1385 | 1.00 |
+| 8821AU (Jaguar1) | 1353 | 1355 | 1.00 |
+| 8832CU (Kestrel) | 1416 | 1424 | 1.01 |
+| MT7612U | 1347 | 1346 | 1.00 |
 
 The RTL8733B was not plugged and is unmeasured. The marker frame, the hop
 sync marker and the Jaguar1 clock beacon keep the broadcast DA; only the

@@ -114,15 +114,21 @@ def main(argv=None) -> int:
             c = pct(lat, 0.01) > -2000
             out["checks"]["no_negative_tail"] = c
             ok &= c
-    if tw and markers:
-        mk = pct([m["tw_p50_us"] for m in markers], 0.5)
-        fr = pct(tw, 0.5)
-        # Same quantity from two carriers: agree within 20 us or 50%.
-        c = abs(fr - mk) <= max(20, 0.5 * max(fr, mk))
-        out["checks"]["ext_tw_matches_marker"] = c
-        ok &= c
+    if tel:
+        # The extension must be on (nearly) every telemetry frame, whether or
+        # not any decoded — a vanished extension is a failure, not a skip.
         c = len(tq) >= 0.9 * len(tel)
         out["checks"]["ext_present"] = c
+        ok &= c
+    # Same quantity from two carriers, over the same span: the retained
+    # (post-warmup) frames against the markers aired after the warm-up.
+    mk_after = [m["tw_p50_us"] for m in markers
+                if tel and ((m["tsfl"] - tel[0]["tsfl"]) & 0xffffffff) < 0x80000000]
+    if tw and mk_after:
+        mk = pct(mk_after, 0.5)
+        fr = pct(tw, 0.5)
+        c = abs(fr - mk) <= max(20, 0.5 * max(fr, mk))
+        out["checks"]["ext_tw_matches_marker"] = c
         ok &= c
     if args.expect_delay:
         n, ms = args.expect_delay.split(":")

@@ -5,13 +5,9 @@
  *
  *  1. FrameTiming — six bytes in the 802.11 header's addr3 (BSSID) of every
  *     stream frame, and FrameTimingExt — five more in addr1 (the DA), which
- *     stays a group address (bit 0 set) so nothing ACKs it and every TX
- *     descriptor path still derives BMC from it; its first byte carries the
- *     group + locally-administered bits and the version, so the broadcast
- *     address a demo writes when it carries no extension decodes as "none".
- *     Measured before use (tests/mcast_da_rx_check.sh): the monitor RX of the
- *     8822BU, 8812CU, 8821AU and 8832CU delivers a 03:… group DA at parity
- *     with ff:ff:ff:ff:ff:ff. The stream demos fill addr3 with the canonical SA today and
+ *     stays a group address so nothing ACKs it (byte 0 = 0x03 | version<<2;
+ *     broadcast decodes as "none"). Which receivers deliver such a DA, and
+ *     the numbers, are in docs/stream-timing.md. The stream demos fill addr3 with the canonical SA today and
  *     no receiver reads it (every consumer keys on addr2 and slices the body at
  *     +24), so the FEC bodies stay byte-for-byte untouched and the MTU is
  *     unchanged. It carries what kestrel-air puts in its slice header: the

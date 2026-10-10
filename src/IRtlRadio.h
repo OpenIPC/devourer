@@ -35,6 +35,14 @@
  * it, and it saves five identical per-backend overrides. */
 class IRtlRadio : public IRadio {
 public:
+  /* The SW_DEFINE tag the NEXT send_packet's descriptor will carry, on the
+   * HalMAC dies with DeviceConfig tx.report on (the report echoes it, so a
+   * caller that reads this right before each send can join every TxReport
+   * to its frame). nullopt where there is no tag echo (Jaguar1, Kestrel,
+   * RTL8733B, MT7612U) or reports are off. Single-sender semantics: the tag
+   * advances once per frame the device builds a data descriptor for. */
+  virtual std::optional<uint8_t> NextTxReportTag() const { return std::nullopt; }
+
   /* Crystal (XTAL) load-capacitance trim — the CFO lever. Writes the AFE
    * crystal-cap field (a per-chip register), pulling the chip's reference
    * oscillator a few ppm to align a marginal TX/RX crystal pair; the payoff

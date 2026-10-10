@@ -45,6 +45,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace devourer {
@@ -357,6 +358,45 @@ class TimingWindow {
   uint64_t _rng = 0x9E3779B97F4A7C15ULL;
   std::vector<uint64_t> _q, _w, _c;
   uint64_t _q_max = 0, _w_max = 0, _c_max = 0;
+};
+
+/* ---- CCX report join ----------------------------------------------------- */
+
+/* Joins a HalMAC CCX TX report to the frame it describes by the 8-bit
+ * SW_DEFINE tag the descriptor carried (IRtlRadio::NextTxReportTag read right
+ * before the send). A 256-slot ring keyed by tag: a slot is written per
+ * send, consumed by the report that echoes its tag, and a report whose slot
+ * is empty or already consumed (a tag that wrapped past 256 unreported
+ * frames, or a report for a frame sent before the join was armed) counts as
+ * unmatched. Pure; the TX thread owns it. */
+struct TxFrameRec {
+  uint64_t frame = 0;     /* the transmitter's frame counter */
+  uint64_t send_ns = 0;   /* host clock at send_packet */
+  uint32_t t_queue_us = 0, c2s_us = 0;
+  bool marker = false;    /* a marker frame, not a data frame */
+};
+class TxReportJoin {
+ public:
+  void sent(uint8_t tag, const TxFrameRec &rec) {
+    _slot[tag] = rec;
+    _live[tag] = true;
+    ++_sent;
+  }
+  /* The record for a report's tag, or nullopt (counted as unmatched). */
+  std::optional<TxFrameRec> match(uint8_t tag) {
+    if (!_live[tag]) { ++_unmatched; return std::nullopt; }
+    _live[tag] = false;
+    ++_joined;
+    return _slot[tag];
+  }
+  uint64_t sent_count() const { return _sent; }
+  uint64_t joined() const { return _joined; }
+  uint64_t unmatched() const { return _unmatched; }
+
+ private:
+  std::array<TxFrameRec, 256> _slot{};
+  std::array<bool, 256> _live{};
+  uint64_t _sent = 0, _joined = 0, _unmatched = 0;
 };
 
 }  // namespace stream_timing

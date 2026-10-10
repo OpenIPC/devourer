@@ -600,7 +600,10 @@ every 10th record; the receiver must see that step on ~10% of frames), `hop`
 (slot hopping; the clock survives retunes where the part stamps injected
 frames), `corrupt` (CRC-failed frames kept and never fed to the fit), `svctx`
 (replay), `svctx-live` (`svctx --live` fed by `gen_svc_nals.py --capture-ts
---pace-us`, the same producer-delay check per NAL), `duplex`. `tests/mcast_da_rx_check.sh` is the gate behind the
+--pace-us`, the same producer-delay check per NAL), `duplex`, `report`
+(streamtx with a CCX report per frame: the reports must join their frames by
+tag; `TX_REPORT=1` adds the join verdict to the duplex phase too, which is how
+a Jaguar2 transmitter is covered). `tests/mcast_da_rx_check.sh` is the gate behind the
 addr1 extension: an injector alternates the broadcast DA and the group DA the
 extension's encoder ships (`07:…`) and each receiver family (the MT7612U with `MT7612U_FW_DIR`) must deliver
 both at parity. `tests/stream_timing_analyze.py` is the per-capture summary and the

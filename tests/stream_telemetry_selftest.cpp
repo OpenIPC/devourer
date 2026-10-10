@@ -162,6 +162,22 @@ int main() {
     CHECK(m.t_queue_max_10 == 4000, "long window max exact");
   }
 
+  // ---- CCX join ring --------------------------------------------------------
+  {
+    TxReportJoin j;
+    std::optional<TxFrameRec> r;
+    CHECK(!j.match(5) && j.unmatched() == 1, "report before any send is unmatched");
+    TxFrameRec a; a.frame = 7; a.t_queue_us = 30;
+    j.sent(5, a);
+    r = j.match(5);
+    CHECK(r && r->frame == 7 && r->t_queue_us == 30 && j.joined() == 1, "report joins its frame");
+    CHECK(!j.match(5) && j.unmatched() == 2, "a second report for the same tag is unmatched");
+    for (unsigned i = 0; i < 300; ++i) { TxFrameRec x; x.frame = 100 + i; j.sent(uint8_t(i), x); }
+    r = j.match(10);  // tag 10 was written at i=10 and again at i=266
+    CHECK(r && r->frame == 100 + 266, "a wrapped tag yields the latest frame with it");
+    CHECK(j.sent_count() == 301, "sent count");
+  }
+
   if (fails == 0) std::printf("stream_telemetry selftest OK\n");
   return fails == 0 ? 0 : 1;
 }

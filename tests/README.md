@@ -600,7 +600,10 @@ every 10th record; the receiver must see that step on ~10% of frames), `hop`
 (slot hopping; the clock survives retunes where the part stamps injected
 frames), `corrupt` (CRC-failed frames kept and never fed to the fit), `svctx`
 (replay), `svctx-live` (`svctx --live` fed by `gen_svc_nals.py --capture-ts
---pace-us`, the same producer-delay check per NAL), `duplex`. `tests/stream_timing_analyze.py` is the per-capture summary and the
+--pace-us`, the same producer-delay check per NAL), `duplex`. `tests/mcast_da_rx_check.sh` is the gate behind the
+addr1 extension: an injector alternates the broadcast DA and a `03:…` group
+DA and each receiver family (the MT7612U with `MT7612U_FW_DIR`) must deliver
+both at parity. `tests/stream_timing_analyze.py` is the per-capture summary and the
 checks; `PACE_US` slows the producer for a part that cannot take 500 fps (the
 8812EU on 5 GHz). Which parts stamp an injected probe response is measured by
 `tests/probe_resp_egress_tsf_check.sh` (`HWBEACON=1` for the hardware

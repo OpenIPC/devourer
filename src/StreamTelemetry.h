@@ -4,7 +4,14 @@
  * Two carriers, both pure wire codecs here (no device dependency):
  *
  *  1. FrameTiming — six bytes in the 802.11 header's addr3 (BSSID) of every
- *     stream frame. The stream demos fill addr3 with the canonical SA today and
+ *     stream frame, and FrameTimingExt — five more in addr1 (the DA), which
+ *     stays a group address (bit 0 set) so nothing ACKs it and every TX
+ *     descriptor path still derives BMC from it; its first byte carries the
+ *     group + locally-administered bits and the version, so the broadcast
+ *     address a demo writes when it carries no extension decodes as "none".
+ *     Measured before use (tests/mcast_da_rx_check.sh): the monitor RX of the
+ *     8822BU, 8812CU, 8821AU and 8832CU delivers a 03:… group DA at parity
+ *     with ff:ff:ff:ff:ff:ff. The stream demos fill addr3 with the canonical SA today and
  *     no receiver reads it (every consumer keys on addr2 and slices the body at
  *     +24), so the FEC bodies stay byte-for-byte untouched and the MTU is
  *     unchanged. It carries what kestrel-air puts in its slice header: the
@@ -109,6 +116,38 @@ struct FrameTiming {
     t.depth = in[1];
     t.tsf10_lo = static_cast<uint16_t>(in[2] | (in[3] << 8));
     t.c2s10 = static_cast<uint16_t>(in[4] | (in[5] << 8));
+    return true;
+  }
+};
+
+/* ---- per-frame extension: addr1 ------------------------------------------ */
+
+/* addr1 byte 0: bit0 group (must stay set — a unicast DA would solicit an
+ * ACK), bit1 locally administered, bits 7..2 the version. Broadcast ff reads
+ * as version 63 and is rejected. */
+inline constexpr uint8_t kExtVersion = 1;
+
+struct FrameTimingExt {
+  uint16_t t_queue10 = 0;      /* stdin read → send_packet, 10 µs, clipped */
+  uint16_t t_write_prev10 = 0; /* the PREVIOUS frame's send_packet wall time, 10 µs
+                                * (kestrel-air's T_WRITE); 0 on the first frame */
+  uint8_t ctr = 0;             /* the transmitter's frame counter, low byte */
+
+  static constexpr size_t kSize = 6;
+
+  void encode(uint8_t out[kSize]) const {
+    out[0] = static_cast<uint8_t>(0x03 | (kExtVersion << 2));
+    out[1] = static_cast<uint8_t>(t_queue10);
+    out[2] = static_cast<uint8_t>(t_queue10 >> 8);
+    out[3] = static_cast<uint8_t>(t_write_prev10);
+    out[4] = static_cast<uint8_t>(t_write_prev10 >> 8);
+    out[5] = ctr;
+  }
+  static bool decode(const uint8_t in[kSize], FrameTimingExt &e) {
+    if ((in[0] & 0x03) != 0x03 || (in[0] >> 2) != kExtVersion) return false;
+    e.t_queue10 = static_cast<uint16_t>(in[1] | (in[2] << 8));
+    e.t_write_prev10 = static_cast<uint16_t>(in[3] | (in[4] << 8));
+    e.ctr = in[5];
     return true;
   }
 };

@@ -11,13 +11,19 @@
 //    produce. A production link would feed Annex-B or RTP instead — same NAL
 //    header parse, trivial framing adapter.)
 //
-// All records are read up front, then injected in a continuous loop (so a
-// receiver can capture a stable rate histogram). A live deployment would
-// inject each NAL as it arrives, once.
+// Two modes. Default: all records are read up front, then injected in a
+// continuous loop (a receiver can capture a stable rate histogram). --live:
+// each NAL is injected as it arrives, once, and EOF ends the run — what a
+// deployment does. Live mode honours the stdin control escape
+// (stream_stdin.h): a producer's CAPTURE_TS stamp applies to the next NAL
+// and rides the per-frame timing field (capture->send, has_capture) on that
+// NAL's first fragment; later fragments of the same NAL carry the time since
+// the NAL was read. The replay mode has no producer, so its frames say so
+// (has_capture=0).
 //
 // Usage:
 //   DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 ./build/svctx \
-//       [--mtu N] [--gap-us US] < nals.bin
+//       [--live] [--mtu N] [--gap-us US] < nals.bin
 
 #ifndef NOMINMAX
 #define NOMINMAX  // keep <windows.h> from defining min()/max() macros (breaks std::min)
@@ -111,9 +117,12 @@ int main(int argc, char** argv) {
   size_t mtu = 1400;
   long gap_us = 2000;
   long termux_fd = 0;
+  bool live = false;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
-    if (a == "--mtu" && i + 1 < argc)
+    if (a == "--live")
+      live = true;
+    else if (a == "--mtu" && i + 1 < argc)
       mtu = static_cast<size_t>(std::strtoul(argv[++i], nullptr, 0));
     else if (a == "--gap-us" && i + 1 < argc)
       gap_us = std::strtol(argv[++i], nullptr, 0);
@@ -217,61 +226,106 @@ int main(int argc, char** argv) {
   timing.set_channel(static_cast<uint8_t>(channel));
   timing.start();
 
-  // Read all length-prefixed NALs up front.
-  std::vector<std::vector<uint8_t>> nals;
-  while (true) {
-    std::vector<uint8_t> nal;
-    /* Any incomplete record ends the read-ahead: this loop drains a whole clip
-     * before transmitting anything, so a truncated tail is simply where the
-     * clip stops. */
-    if (stream_stdin::read_record(stdin, nal, 200000) !=
-        stream_stdin::RecordResult::Ok)
-      break;
-    nals.push_back(std::move(nal));
-  }
-  if (nals.empty()) { logger->error("no NALs on stdin"); return 2; }
-  logger->info("svctx: {} NALs, mtu={}, ch{} — looping", nals.size(), mtu,
-               channel);
-
   long sent[9] = {0};  // [0..7] per TID, [8] = critical
   long frames = 0;
-  while (!g_devourer_should_stop) {
-    for (const auto& nal : nals) {
+  auto stats = [&]() {
+    /* Per-layer injection counters. JSON keys are lowercase (t3plus stands
+     * in for "T3+": temporal layers 3..7 aggregated). */
+    devourer::Ev(logger->events(), "svc.stats")
+        .f("frames", frames)
+        .f("crit", sent[8])
+        .f("t0", sent[0])
+        .f("t1", sent[1])
+        .f("t2", sent[2])
+        .f("t3plus", sent[3] + sent[4] + sent[5] + sent[6] + sent[7]);
+  };
+  /* One NAL onto the air: classify, fragment to the MTU, every fragment at
+   * the layer's rate. `capture_ns` / `has_capture` describe the NAL (a
+   * producer stamp in live mode, the read instant otherwise); only the first
+   * fragment claims the stamp, the rest measure from the read. */
+  auto inject = [&](const std::vector<uint8_t>& nal, uint64_t read_ns,
+                    uint64_t capture_ns, bool has_capture) {
+    svc::NalInfo info = svc::parse_hevc_nal(nal.data(), nal.size());
+    const std::vector<uint8_t>& rt =
+        info.critical ? rt_crit
+        : rt_tid.empty() ? rt_crit
+        : rt_tid[info.tid < rt_tid.size() ? info.tid : rt_tid.size() - 1];
+    sent[info.critical ? 8 : (info.tid > 7 ? 7 : info.tid)]++;
+    bool first = true;
+    for (size_t off = 0; off < nal.size(); off += mtu) {
+      size_t n = std::min(mtu, nal.size() - off);
+      std::vector<uint8_t> frame;
+      frame.reserve(rt.size() + dot11.size() + n);
+      frame.insert(frame.end(), rt.begin(), rt.end());
+      frame.insert(frame.end(), dot11.begin(), dot11.end());
+      frame.insert(frame.end(), nal.begin() + off, nal.begin() + off + n);
+      timing.maybe_marker(rt);
+      timing.stamp(frame.data() + rt.size() + 16, read_ns,
+                   first ? capture_ns : read_ns, first && has_capture);
+      timing.sent(rtlDevice->send_packet(frame.data(), frame.size()));
+      first = false;
+      if (gap_us > 0)
+        std::this_thread::sleep_for(std::chrono::microseconds(gap_us));
+    }
+    if (++frames % 200 == 0) stats();
+  };
+
+  if (live) {
+    logger->info("svctx: live — each NAL injected as it arrives, mtu={}, ch{}",
+                 mtu, channel);
+    std::vector<uint8_t> nal, ctl;
+    while (!g_devourer_should_stop) {
+      uint32_t len = 0;
+      const auto r = stream_stdin::read_item(stdin, nal, ctl, 200000, &len);
       if (g_devourer_should_stop) break;
-      const uint64_t nal_ns = StreamTimingTx::now_ns();
-      svc::NalInfo info = svc::parse_hevc_nal(nal.data(), nal.size());
-      const std::vector<uint8_t>& rt =
-          info.critical ? rt_crit
-          : rt_tid.empty() ? rt_crit
-          : rt_tid[info.tid < rt_tid.size() ? info.tid : rt_tid.size() - 1];
-      sent[info.critical ? 8 : (info.tid > 7 ? 7 : info.tid)]++;
-      // Fragment the NAL to the radio MTU; every fragment carries the layer rate.
-      for (size_t off = 0; off < nal.size(); off += mtu) {
-        size_t n = std::min(mtu, nal.size() - off);
-        std::vector<uint8_t> frame;
-        frame.reserve(rt.size() + dot11.size() + n);
-        frame.insert(frame.end(), rt.begin(), rt.end());
-        frame.insert(frame.end(), dot11.begin(), dot11.end());
-        frame.insert(frame.end(), nal.begin() + off, nal.begin() + off + n);
-        timing.maybe_marker(rt);
-        timing.stamp(frame.data() + rt.size() + 16, nal_ns, nal_ns, false);
-        timing.sent(rtlDevice->send_packet(frame.data(), frame.size()));
-        if (gap_us > 0)
-          std::this_thread::sleep_for(std::chrono::microseconds(gap_us));
+      if (r == stream_stdin::RecordResult::Eof) break;
+      if (r == stream_stdin::RecordResult::Control) {
+        uint64_t ns = 0;
+        if (stream_stdin::parse_capture_ts(ctl, ns)) timing.capture_stamp(ns);
+        else
+          devourer::Ev(logger->events(), "stream.ctl")
+              .f("op", ctl[0]).f("len", ctl.size()).f("applied", 0);
+        continue;
       }
-      /* Per-layer injection counters. JSON keys are lowercase (t3plus stands
-       * in for "T3+": temporal layers 3..7 aggregated). */
-      if (++frames % 200 == 0) {
-        devourer::Ev(logger->events(), "svc.stats")
-            .f("frames", frames)
-            .f("crit", sent[8])
-            .f("t0", sent[0])
-            .f("t1", sent[1])
-            .f("t2", sent[2])
-            .f("t3plus", sent[3] + sent[4] + sent[5] + sent[6] + sent[7]);
+      if (r != stream_stdin::RecordResult::Ok) {
+        logger->warn("svctx: stdin ended mid-record (len {:#x}); stopping", len);
+        break;
+      }
+      const uint64_t read_ns = StreamTimingTx::now_ns();
+      bool has_capture = false;
+      const uint64_t capture_ns = timing.take_capture(read_ns, has_capture);
+      inject(nal, read_ns, capture_ns, has_capture);
+    }
+    stats();
+    timing.input_ended();
+    devourer::Ev(logger->events(), "stream.done")
+        .f("sent", frames)
+        .f("capture_dropped", (unsigned long long)timing.capture_dropped());
+  } else {
+    // Read all length-prefixed NALs up front.
+    std::vector<std::vector<uint8_t>> nals;
+    while (true) {
+      std::vector<uint8_t> nal;
+      /* Any incomplete record ends the read-ahead: this loop drains a whole
+       * clip before transmitting anything, so a truncated tail is simply
+       * where the clip stops. */
+      if (stream_stdin::read_record(stdin, nal, 200000) !=
+          stream_stdin::RecordResult::Ok)
+        break;
+      nals.push_back(std::move(nal));
+    }
+    if (nals.empty()) { logger->error("no NALs on stdin"); return 2; }
+    logger->info("svctx: {} NALs, mtu={}, ch{} — looping", nals.size(), mtu,
+                 channel);
+    while (!g_devourer_should_stop) {
+      for (const auto& nal : nals) {
+        if (g_devourer_should_stop) break;
+        const uint64_t nal_ns = StreamTimingTx::now_ns();
+        inject(nal, nal_ns, nal_ns, false);
       }
     }
   }
+  timing.stop();
   /* Device, then interface, handle and context (DeviceSession.h). Explicit
    * only because the process has nothing left to do here — the destructor
    * does exactly the same on every other exit path. */

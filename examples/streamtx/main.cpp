@@ -515,6 +515,7 @@ int main(int argc, char **argv) {
     }
   }
 
+  timing.input_ended();
   timing.stop();
   devourer::Ev(logger->events(), "stream.done")
       .f("sent", tx_count)

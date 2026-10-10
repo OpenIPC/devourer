@@ -96,7 +96,8 @@ repeated, so a later difference has something to be judged against.
 | Kestrel 8832CU, ch6 | 2 | 90 | 0 | 126 | 30 | 0 | < 1 µs |
 | Jaguar1 8821AU, ch6 (beacon clock) | 5 | 358–1337 | 34 (first three) | 436–1373 | 30–40 | 2–19 | < 1 µs |
 | Jaguar3 8812EU, ch36, producer at 15 ms | 2 | 109–122 | 6 | 150 | 30 | 0 | < 1 µs |
-| Jaguar3 8812CU, `svctx` (no producer stamp) | 1 | 155 | — | — | — | 0 | < 1 µs |
+| Jaguar3 8812CU, `svctx` replay (no producer stamp) | 2 | 155–166 | — | — | — | 0 | < 1 µs |
+| Jaguar3 8812CU, `svctx --live` (stamped NALs, 20 ms delay on every 10th) | 1 | — | — | step 20.08 ms on 6.9% of stamped frames | 30 | 0 | < 1 µs |
 | Jaguar3 8812CU, `duplex` (TX+RX on one chip) | 1 | 124 | — | 150 | 30 | 0 | < 1 µs |
 
 The checks every cell passes or fails on:
@@ -146,8 +147,18 @@ The adversarial readings, in the same breath:
 - **The first seconds are the pipe, not the link.** The producer fills the
   stdin pipe while the chip is brought up, so the first ~1000 records arrive
   with stamps seconds old. The analyzer drops a 4 s warm-up for that reason.
-- **svctx has no producer stamp.** It pre-reads and replays a clip, so its
-  capture→send is each NAL's loop iteration; a live stdin mode is a follow-up.
+- **svctx's replay mode has no producer stamp.** It pre-reads and replays a
+  clip, so its capture→send is each NAL's loop iteration and `cap` stays 0.
+  `svctx --live` injects each NAL as it arrives and takes the producer's
+  `CAPTURE_TS`: one stamp per NAL, claimed by its first fragment (later
+  fragments measure from the read), so the per-NAL delay check holds through
+  fragmentation: the step comes back as 20.08 ms. The delayed share reads
+  6.9% rather than 10% because the producer's every-10th lands unevenly on
+  the clip's NAL classes and the fast-rate enhancement frames are lost more
+  often than the robust base frames, so the share is a delivery figure as
+  much as a producer one. `tests/gen_svc_nals.py --capture-ts --pace-us` is the
+  producer; the harness's `svctx-live` phase runs the same 20 ms every-10th
+  check as streamtx.
 
 ## Reading it
 

@@ -202,6 +202,12 @@ class StreamTimingTx {
     _pending_capture = false;
     return has_capture ? _pending_capture_ns : read_ns;
   }
+  // The input ended: a stamp still pending had no record to apply to, and
+  // counts as dropped like one that was overwritten.
+  void input_ended() {
+    if (_pending_capture) ++_capture_dropped;
+    _pending_capture = false;
+  }
   uint64_t capture_dropped() const { return _capture_dropped; }
 
  private:

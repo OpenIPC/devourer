@@ -598,8 +598,9 @@ identical runs, the run-to-run sd of the median latency reported before any
 claim), `delay` (the producer sleeps 20 ms between its capture stamp and
 every 10th record; the receiver must see that step on ~10% of frames), `hop`
 (slot hopping; the clock survives retunes where the part stamps injected
-frames), `corrupt` (CRC-failed frames kept and never fed to the fit), `svctx`,
-`duplex`. `tests/stream_timing_analyze.py` is the per-capture summary and the
+frames), `corrupt` (CRC-failed frames kept and never fed to the fit), `svctx`
+(replay), `svctx-live` (`svctx --live` fed by `gen_svc_nals.py --capture-ts
+--pace-us`, the same producer-delay check per NAL), `duplex`. `tests/stream_timing_analyze.py` is the per-capture summary and the
 checks; `PACE_US` slows the producer for a part that cannot take 500 fps (the
 8812EU on 5 GHz). Which parts stamp an injected probe response is measured by
 `tests/probe_resp_egress_tsf_check.sh` (`HWBEACON=1` for the hardware

@@ -18,9 +18,10 @@
 //
 // On-wire wire format on stdin is identical to streamtx:
 //     <u32_le length><length bytes of descrambled PSDU body>
-// EOF on stdin closes the TX side and asks the RX loop to stop (StopRxLoop),
-// so a finite scripted stream ends the process cleanly through the ordinary
-// exit path; a live peer keeps stdin open for as long as it wants RX.
+// EOF on stdin closes the TX side and raises the shared stop flag the RX
+// loop honours (on entry as well), so a finite scripted stream — even an
+// already-closed stdin — ends the process cleanly through the ordinary exit
+// path; a live peer keeps stdin open for as long as it wants RX.
 //
 // RX emission on stdout mirrors examples/rx/main.cpp's DEVOURER_STREAM_OUT path —
 // one `rx.frame` JSONL event for every frame matching the canonical SA.
@@ -338,10 +339,13 @@ static void tx_thread(TxArgs args) {
     const auto r = stream_stdin::read_item(stdin, psdu, ctl, args.max_psdu, &len);
     if (g_devourer_should_stop) break;   // signal: the RX loop is ending too
     if (r == stream_stdin::RecordResult::Eof || r == stream_stdin::RecordResult::Short) {
-      // Clean EOF or short read — TX side done; the RX loop is asked to
-      // return so the process ends through its ordinary exit path.
+      // Clean EOF or short read — TX side done; the process ends through
+      // its ordinary exit path. The shared stop flag, not StopRxLoop(): a
+      // StartRxLoop that has not entered yet clears its own stop request on
+      // entry, while the shared flag is honoured on entry too — so an
+      // already-closed stdin cannot lose the request.
       devourer::Ev(*g_ev, "stream.eof").f("tx_count", tx_count);
-      args.rtl->StopRxLoop();
+      g_devourer_should_stop = true;
       break;
     }
     if (r == stream_stdin::RecordResult::Control) {
@@ -549,9 +553,18 @@ int main(int argc, char **argv) {
    * then runs the RX worker on the already-up chip. Records that arrive on
    * stdin meanwhile simply wait in the pipe — the TX thread does not exist
    * yet. */
-  rtlDevice->InitWrite(SelectedChannel{.Channel = static_cast<uint8_t>(channel),
-                                       .ChannelOffset = 0,
-                                       .ChannelWidth = CHANNEL_WIDTH_20});
+  try {
+    rtlDevice->InitWrite(SelectedChannel{.Channel = static_cast<uint8_t>(channel),
+                                         .ChannelOffset = 0,
+                                         .ChannelWidth = CHANNEL_WIDTH_20});
+  } catch (const std::exception &e) {
+    /* A refused bring-up surfaces as an exception on every backend (the
+     * IRadio contract txdemo relies on); no ready cue, no TX thread. */
+    logger->error("duplex: TX bring-up failed: {}", e.what());
+    devourer::Ev(*g_ev, "stream.eof").f("tx_count", 0).f("bringup_failed", 1);
+    session.close();
+    return 1;
+  }
   if (g_devourer_should_stop) { session.close(); return 0; }
   /* The feeder's cue: from here a record on stdin is sent, not lost. */
   devourer::Ev(*g_ev, "stream.ready").f("channel", channel);

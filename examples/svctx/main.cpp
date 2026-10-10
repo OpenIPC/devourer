@@ -297,6 +297,7 @@ int main(int argc, char** argv) {
       inject(nal, read_ns, capture_ns, has_capture);
     }
     stats();
+    timing.input_ended();
     devourer::Ev(logger->events(), "stream.done")
         .f("sent", frames)
         .f("capture_dropped", (unsigned long long)timing.capture_dropped());

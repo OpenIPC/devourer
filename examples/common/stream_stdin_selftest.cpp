@@ -218,6 +218,34 @@ static int do_states() {
       return 7;
     }
   }
+  /* read_item: a CAPTURE_TS control TLV (op 4 + u64) followed by a record. */
+  {
+    std::vector<uint8_t> bytes(4);
+    put_u32_le(bytes.data(), stream_stdin::kCtlFlag | 9u);
+    bytes.push_back(stream_stdin::kCtlCaptureTs);
+    const uint64_t ns = 0x0102030405060708ull;
+    for (int i = 0; i < 8; ++i) bytes.push_back(uint8_t(ns >> (8 * i)));
+    std::vector<uint8_t> r = rec(2, 2);   // length word 2, two body bytes
+    bytes.insert(bytes.end(), r.begin(), r.end());
+    std::FILE *f = std::tmpfile();
+    if (!f) return 7;
+    std::fwrite(bytes.data(), 1, bytes.size(), f);
+    std::rewind(f);
+    std::vector<uint8_t> body, ctl;
+    uint64_t got = 0;
+    const bool ok =
+        stream_stdin::read_item(f, body, ctl, 16) == stream_stdin::RecordResult::Control &&
+        stream_stdin::parse_capture_ts(ctl, got) && got == ns &&
+        stream_stdin::read_item(f, body, ctl, 16) == stream_stdin::RecordResult::Ok &&
+        body.size() == 2 &&
+        stream_stdin::read_item(f, body, ctl, 16) == stream_stdin::RecordResult::Eof;
+    std::fclose(f);
+    if (!ok) {
+      std::fprintf(stderr, "stream_stdin_selftest: FAIL — read_item did not "
+                           "deliver CAPTURE_TS then the record\n");
+      return 7;
+    }
+  }
   std::fprintf(stdout, "stream_stdin_selftest: %zu record states OK\n",
                cases.size());
   return 0;

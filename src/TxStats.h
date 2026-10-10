@@ -30,6 +30,13 @@ constexpr int kTxShortWriteRc = -1000;
 struct TxStats {
   uint64_t submitted = 0;
   uint64_t failed = 0;
+  /* Frames handed to the transport whose completion has not been reaped —
+   * the backlog depth behind the next send. Live only on the asynchronous
+   * bulk-OUT path (Jaguar1), where it is the in-flight URB count the sender
+   * blocks on at its cap; a synchronous transport has nothing outstanding
+   * between calls and reports 0. A per-frame telemetry field, not a health
+   * signal: it is what the receiver sees as "depth". */
+  uint32_t inflight = 0;
   int last_error_rc = 0;      /* raw libusb rc / negated transfer status /
                                * kTxShortWriteRc */
   bool last_was_timeout = false;

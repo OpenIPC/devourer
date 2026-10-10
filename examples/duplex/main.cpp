@@ -73,7 +73,9 @@
 #include "WiFiDriver.h"
 #include "env_config.h"
 #include "logger.h"
+#include "SignalStop.h"
 #include "stream_stdin.h"
+#include "stream_timing_tx.h"
 
 #define USB_VENDOR_ID 0x0bda
 
@@ -287,6 +289,10 @@ static void packet_processor(const Packet &packet) {
         .f("stbc", packet.RxAtrib.stbc)
         .f("ldpc", packet.RxAtrib.ldpc)
         .f("sgi", packet.RxAtrib.sgi)
+        /* fc0: the frame-control type/subtype byte, so a consumer can tell
+         * the stream's data frames (0x40) from the timing marker (0x50) and
+         * a Jaguar1 beacon (0x80) that share the canonical SA. */
+        .f("fc0", packet.Data[0])
         .hex("body", packet.Data.data() + 24, body_len);
   }
   if (hits <= 5 || hits % 500 == 0) {
@@ -301,6 +307,7 @@ struct TxArgs {
   size_t max_psdu;
   std::atomic<bool> *should_stop;
   std::shared_ptr<Logger> logger;
+  int channel;   // named in the timing marker's DS parameter set
 };
 
 static void tx_thread(TxArgs args) {
@@ -308,28 +315,36 @@ static void tx_thread(TxArgs args) {
   std::vector<uint8_t> tx_buf;
   tx_buf.reserve(g_radiotap.size() + dot11.size() + args.max_psdu);
   long tx_count = 0;
+  /* Per-frame timing telemetry in addr3 + the DEVOURER_STREAM_TIMING marker
+   * (examples/common/stream_timing_tx.h). The marker rides this thread's
+   * send lock like every other frame. */
+  StreamTimingTx timing(*args.rtl, *g_ev, *args.logger, kCanonicalSa,
+                        /*hopping=*/false);
+  timing.set_channel(static_cast<uint8_t>(args.channel));
+  timing.start();
+  std::vector<uint8_t> ctl;
 
-  while (!args.should_stop->load()) {
-    // This demo reads the length itself rather than using read_record: its top
-    // bit escapes to a control TLV with its own, much smaller bound, so the
-    // length has to be inspected before the body may be read.
+  while (!args.should_stop->load() && !g_devourer_should_stop) {
+    // The stdin control escape (stream_stdin.h): a length word with its top
+    // bit set is a control TLV <op:u8><payload...> — the adaptive link's live
+    // knobs and the producer's capture stamp — not a PSDU.
     uint32_t len = 0;
-    if (stream_stdin::read_length(stdin, len) != stream_stdin::ReadResult::Ok) {
+    std::vector<uint8_t> psdu;
+    const auto r = stream_stdin::read_item(stdin, psdu, ctl, args.max_psdu, &len);
+    if (g_devourer_should_stop) break;   // signal: the RX loop is ending too
+    if (r == stream_stdin::RecordResult::Eof || r == stream_stdin::RecordResult::Short) {
       // Clean EOF or short read — TX side done. RX keeps running.
       devourer::Ev(*g_ev, "stream.eof").f("tx_count", tx_count);
       break;
     }
-
-    // Control-opcode escape: top bit set -> the body is a control TLV (the
-    // adaptive link's live knobs), not a PSDU. <op:u8><payload...>.
-    if (len & 0x80000000u) {
-      uint32_t clen = len & 0x7fffffffu;
-      if (clen == 0 || clen > 256) break;
-      std::vector<uint8_t> ctl;
-      if (stream_stdin::read_body(stdin, ctl, clen) !=
-          stream_stdin::ReadResult::Ok)
-        break;
+    if (r == stream_stdin::RecordResult::Control) {
+      const uint32_t clen = static_cast<uint32_t>(ctl.size());
       uint8_t op = ctl[0];
+      uint64_t cap_ns = 0;
+      if (stream_stdin::parse_capture_ts(ctl, cap_ns)) {
+        timing.capture_stamp(cap_ns);
+        continue;
+      }
       if (op == 1 && clen >= 2) {                 // SET_PWR <idx>
         /* Flat TXAGC override via the generation-agnostic runtime TX-power
          * API (previously Jaguar1-only): applies live on every family. */
@@ -343,34 +358,43 @@ static void tx_thread(TxArgs args) {
         args.rtl->SetMonitorChannel(SelectedChannel{
             .Channel = ctl[1], .ChannelOffset = ctl[2],
             .ChannelWidth = static_cast<ChannelWidth_t>(ctl[3])});
+        timing.set_channel(ctl[1]);   // the marker's DS parameter set follows
       }
       devourer::Ev(*g_ev, "stream.ctl").f("op", op).f("len", clen);
       continue;
     }
-
-    if (len == 0 || len > args.max_psdu) {
-      args.logger->error("tx PSDU len {} out of range (max {})", len,
+    if (r == stream_stdin::RecordResult::BadLength) {
+      args.logger->error("tx PSDU len {:#x} out of range (max {})", len,
                          args.max_psdu);
       break;
     }
-    std::vector<uint8_t> psdu;
-    if (stream_stdin::read_body(stdin, psdu, len) !=
-        stream_stdin::ReadResult::Ok) {
+    if (r == stream_stdin::RecordResult::EofMidBody) {
       /* EOF mid-PSDU: `bytes` = the expected PSDU length that was cut short. */
       devourer::Ev(*g_ev, "stream.eof").f("tx_count", tx_count).f("bytes", len);
       break;
     }
+    const uint64_t read_ns = StreamTimingTx::now_ns();
+    bool has_capture = false;
+    const uint64_t capture_ns = timing.take_capture(read_ns, has_capture);
     tx_buf.clear();
+    size_t addr3_off = 0;
     {
       std::lock_guard<std::mutex> lk(g_rt_mu);   // live rate may be rewritten
       tx_buf.insert(tx_buf.end(), g_radiotap.begin(), g_radiotap.end());
+      addr3_off = g_radiotap.size() + 16;
     }
     tx_buf.insert(tx_buf.end(), dot11.begin(), dot11.end());
     tx_buf.insert(tx_buf.end(), psdu.begin(), psdu.end());
     bool ok;
     {
       std::lock_guard<std::mutex> lk(g_send_mu);
+      {
+        std::lock_guard<std::mutex> lr(g_rt_mu);
+        timing.maybe_marker(g_radiotap);
+      }
+      timing.stamp(tx_buf.data() + addr3_off, read_ns, capture_ns, has_capture);
       ok = args.rtl->send_packet(tx_buf.data(), tx_buf.size());
+      timing.sent(ok);
     }
     ++tx_count;
     if (tx_count <= 5 || tx_count % 500 == 0) {
@@ -502,11 +526,16 @@ int main(int argc, char **argv) {
     rtlDevice->SetTxPower(static_cast<uint8_t>(std::atoi(p)));
 
   std::atomic<bool> should_stop{false};
+  /* SIGINT/SIGTERM: every generation's RX loop returns on the shared flag, so
+   * Init() comes back, the TX thread's blocking read returns short (no
+   * SA_RESTART) and sees the flag, and the ordinary exit path runs — the
+   * device stopped, a Jaguar1 timing beacon disarmed. */
+  install_devourer_signal_handlers();
 
   // Spawn TX thread first; it'll block on stdin until our peer pushes a
   // length-prefixed PSDU. Then drop into Init() (the RX loop) in the main
   // thread.
-  TxArgs txa{rtlDevice, interval_ms, max_psdu, &should_stop, logger};
+  TxArgs txa{rtlDevice, interval_ms, max_psdu, &should_stop, logger, channel};
   std::thread tx{tx_thread, std::move(txa)};
 
   /* Receipt emitter (DEVOURER_RX_RECEIPT_MS): every tick, encode the current

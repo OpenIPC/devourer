@@ -79,7 +79,9 @@
 #include "WiFiDriver.h"
 #include "env_config.h"
 #include "logger.h"
+#include "SignalStop.h"
 #include "stream_stdin.h"
+#include "stream_timing_tx.h"
 
 #define USB_VENDOR_ID 0x0bda
 
@@ -112,6 +114,12 @@
 int main(int argc, char **argv) {
   auto logger = std::make_shared<Logger>();
   apply_logging_env(*logger); /* DEVOURER_LOG_LEVEL / DEVOURER_EVENTS / ... */
+  /* SIGINT/SIGTERM end the send loop through the ordinary exit path, so the
+   * device is stopped (and a hardware beacon armed as the Jaguar1 timing
+   * clock is disarmed) instead of left airing by a killed process. The
+   * handler is installed without SA_RESTART, so the blocking stdin read
+   * returns short and the loop sees the flag. */
+  install_devourer_signal_handlers();
   /* Events ride stderr here (overriding the stdout default): stdout is left
    * clean for downstream callers that may chain this binary. */
   logger->events().configure(stderr);
@@ -350,6 +358,14 @@ int main(int argc, char **argv) {
   std::vector<uint8_t> tx_buf;
   tx_buf.reserve(kStreamRadiotap.size() + dot11.size() + max_psdu);
 
+  /* Per-frame timing telemetry in addr3 + the DEVOURER_STREAM_TIMING marker
+   * (examples/common/stream_timing_tx.h). */
+  StreamTimingTx timing(*rtlDevice, logger->events(), *logger, kCanonicalSa,
+                        !hop_channels.empty());
+  timing.set_channel(static_cast<uint8_t>(channel));
+  timing.start();
+  const size_t addr3_off = kStreamRadiotap.size() + 16;
+
   logger->info(
       "stream TX ready (legacy 6M OFDM, ch {}); reading length-prefixed PSDUs "
       "from stdin", channel);
@@ -362,18 +378,32 @@ int main(int argc, char **argv) {
   const uint32_t hop_epoch = static_cast<uint32_t>(
       std::chrono::high_resolution_clock::now().time_since_epoch().count());
   std::vector<uint8_t> sync_buf;
+  std::vector<uint8_t> ctl;
   while (true) {
     std::vector<uint8_t> psdu;
     uint32_t len = 0;
     {
-      const auto r = stream_stdin::read_record(stdin, psdu, max_psdu, &len);
+      const auto r = stream_stdin::read_item(stdin, psdu, ctl, max_psdu, &len);
+      if (g_devourer_should_stop) break;                // signal: clean stop
       if (r == stream_stdin::RecordResult::Eof) break;  // clean stdin close
+      if (r == stream_stdin::RecordResult::Control) {
+        /* The stdin control escape (stream_stdin.h). This demo takes the
+         * producer's capture stamp; the live-knob opcodes are the duplex
+         * demo's and are reported, not applied. */
+        uint64_t ns = 0;
+        const bool applied = stream_stdin::parse_capture_ts(ctl, ns);
+        if (applied) timing.capture_stamp(ns);
+        else
+          devourer::Ev(logger->events(), "stream.ctl")
+              .f("op", ctl[0]).f("len", ctl.size()).f("applied", 0);
+        continue;
+      }
       if (r == stream_stdin::RecordResult::EofMidBody) {
         logger->warn("EOF mid-PSDU (expected {} bytes)", len);
         break;
       }
       if (r == stream_stdin::RecordResult::BadLength) {
-        logger->error("PSDU length {} out of range (max {}); stopping", len,
+        logger->error("PSDU length {:#x} out of range (max {}); stopping", len,
                       max_psdu);
         break;
       }
@@ -383,6 +413,9 @@ int main(int argc, char **argv) {
         std::exit(2);
       }
     }
+    const uint64_t read_ns = StreamTimingTx::now_ns();
+    bool has_capture = false;
+    const uint64_t capture_ns = timing.take_capture(read_ns, has_capture);
 
     /* Retune to this PSDU's hop channel before sending. FastRetune/fast_retune
      * is a cheap no-op when the channel is unchanged within a dwell, so calling
@@ -399,6 +432,7 @@ int main(int argc, char **argv) {
       int ch = hop_schedule ? hop_schedule->channel(slot, hop_channels)
                             : hop_channels[slot % hop_channels.size()];
       const bool slot_changed = (slot != last_hop_slot);
+      timing.set_channel(static_cast<uint8_t>(ch));
       if (slot_changed) {
         auto ev = devourer::Ev(logger->events(), "hop.dwell");
         ev.f("slot", (unsigned long long)slot)
@@ -455,12 +489,17 @@ int main(int argc, char **argv) {
       }
     }
 
+    timing.maybe_marker(kStreamRadiotap);
+
     tx_buf.clear();
     tx_buf.insert(tx_buf.end(), kStreamRadiotap.begin(),
                   kStreamRadiotap.end());
     tx_buf.insert(tx_buf.end(), dot11.begin(), dot11.end());
     tx_buf.insert(tx_buf.end(), psdu.begin(), psdu.end());
+    /* addr3 is the per-frame telemetry field (the body is untouched). */
+    timing.stamp(tx_buf.data() + addr3_off, read_ns, capture_ns, has_capture);
     bool ok = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
+    timing.sent(ok);
     ++tx_count;
     // TX progress marker (event stream rides stderr in this demo, keeping
     // stdout clean for downstream callers that may chain this binary).
@@ -476,7 +515,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  devourer::Ev(logger->events(), "stream.done").f("sent", tx_count);
+  timing.stop();
+  devourer::Ev(logger->events(), "stream.done")
+      .f("sent", tx_count)
+      .f("capture_dropped", (unsigned long long)timing.capture_dropped());
   /* Device, then interface, handle and context (DeviceSession.h). Explicit
    * only because the process has nothing left to do here — the destructor
    * does exactly the same on every other exit path. */

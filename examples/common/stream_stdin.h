@@ -104,6 +104,36 @@ inline ReadResult read_body(std::FILE *f, std::vector<std::uint8_t> &out,
   return n ? read_exact(f, out.data(), n) : ReadResult::Ok;
 }
 
+/* ---- the control escape -------------------------------------------------
+ *
+ * A length word with its top bit set is not a PSDU: the body is a control
+ * TLV, <op:u8><args...>, bounded at kCtlMax rather than at the PSDU maximum.
+ * The duplex demo introduced it for the adaptive link's live knobs; streamtx
+ * honours it too. Opcodes are one namespace across the demos; a demo that
+ * does not implement one ignores it (and says so in its stream.ctl event). */
+constexpr uint32_t kCtlFlag = 0x80000000u;
+constexpr size_t kCtlMax = 256;
+enum CtlOp : uint8_t {
+  kCtlSetPwr = 1,     /* <idx:u8>                    flat TXAGC override */
+  kCtlSetRate = 2,    /* <spec:ascii>                live TX rate */
+  kCtlSetChan = 3,    /* <ch:u8><offset:u8><width:u8> SetMonitorChannel */
+  kCtlCaptureTs = 4,  /* <ns:u64 LE>  the producer's capture time of the NEXT
+                       * data record, CLOCK_MONOTONIC ns on the same host. The
+                       * TX measures capture->send_packet from it and carries
+                       * that in the frame (src/StreamTelemetry.h). A stamp
+                       * followed by another stamp, or by EOF, is dropped. */
+};
+
+/* Decode a kCtlCaptureTs body. False unless it is exactly op 4 + 8 bytes. */
+inline bool parse_capture_ts(const std::vector<std::uint8_t> &ctl,
+                             std::uint64_t &ns) {
+  if (ctl.size() != 9 || ctl[0] != kCtlCaptureTs) return false;
+  ns = 0;
+  for (int i = 0; i < 8; ++i)
+    ns |= static_cast<std::uint64_t>(ctl[1 + i]) << (8 * i);
+  return true;
+}
+
 enum class RecordResult {
   Ok,          // a complete record is in `out`
   Eof,         // clean close: nothing at all where a record would have started
@@ -111,6 +141,7 @@ enum class RecordResult {
   EofMidBody,  // the length word arrived, then the stream closed before a byte
                // of its body — one record lost, cleanly
   BadLength,   // zero, or larger than the caller's bound
+  Control,     // read_item only: a control TLV is in `ctl`, not a record
 };
 
 // Read one whole <u32_le len><body> record. `max` bounds the body. When
@@ -141,6 +172,50 @@ inline RecordResult read_record(std::FILE *f, std::vector<std::uint8_t> &out,
     return RecordResult::Short;
   }
   return RecordResult::Short;  // unreachable; keeps every toolchain quiet
+}
+
+/* Read one stdin item: a data record (RecordResult::Ok, body in `out`) or a
+ * control TLV (RecordResult::Control, <op><args> in `ctl`). Every other state
+ * is read_record's. A control body outside [1, kCtlMax] is BadLength with the
+ * raw length word in `raw_len`, so the caller can say which it was. */
+inline RecordResult read_item(std::FILE *f, std::vector<std::uint8_t> &out,
+                              std::vector<std::uint8_t> &ctl, std::size_t max,
+                              std::uint32_t *raw_len = nullptr) {
+  std::uint32_t len = 0;
+  switch (read_length(f, len)) {
+  case ReadResult::Eof:
+    return RecordResult::Eof;
+  case ReadResult::Short:
+    return RecordResult::Short;
+  case ReadResult::Ok:
+    break;
+  }
+  if (raw_len)
+    *raw_len = len;
+  if (len & kCtlFlag) {
+    const std::uint32_t clen = len & ~kCtlFlag;
+    if (clen == 0 || clen > kCtlMax)
+      return RecordResult::BadLength;
+    switch (read_body(f, ctl, clen)) {
+    case ReadResult::Ok:
+      return RecordResult::Control;
+    case ReadResult::Eof:
+      return RecordResult::EofMidBody;
+    case ReadResult::Short:
+      return RecordResult::Short;
+    }
+  }
+  if (len == 0 || len > max)
+    return RecordResult::BadLength;
+  switch (read_body(f, out, len)) {
+  case ReadResult::Ok:
+    return RecordResult::Ok;
+  case ReadResult::Eof:
+    return RecordResult::EofMidBody;
+  case ReadResult::Short:
+    return RecordResult::Short;
+  }
+  return RecordResult::Short;
 }
 
 }  // namespace stream_stdin

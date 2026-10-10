@@ -36,6 +36,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Optional, Union
 
+import time
+import struct
 import numpy as np
 
 from encode_subcarriers import (
@@ -577,3 +579,12 @@ def unpack_stream(frames: Iterable[StreamFrame]) -> Iterator[tuple[int, bytes]]:
         delivered += 1
         if total_target and delivered >= total_target:
             return
+
+
+# The stdin control TLVs live in stdin_ctl.py (numpy-free, so adaptive_link
+# and the orchestrators can import them without this module's numpy); the
+# producers reach them through these names.
+from stdin_ctl import (  # noqa: E402,F401
+    CTL_FLAG, SET_PWR, SET_RATE, SET_CHAN, CAPTURE_TS, ctl_frame, psdu_frame,
+    capture_ts_frame, CaptureStamper, add_capture_args, capture_stamper_from_args,
+)

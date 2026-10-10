@@ -38,6 +38,7 @@ import argparse
 import os
 import struct
 import sys
+import time
 from typing import Optional
 
 # Allow running both via `uv run python tools/precoder/stream_tx.py`
@@ -105,6 +106,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="override DEVOURER_STREAM_ENTRY_STATE")
     ap.add_argument("--seq-start", type=int, default=None,
                     help="override DEVOURER_STREAM_SEQ_START")
+    stream.add_capture_args(ap)
+    ap.add_argument("--pace-us", type=int, default=0,
+                    help="sleep this long between records and flush each one, so "
+                         "the pipe stays shallow and a CAPTURE_TS stamp measures the "
+                         "producer->air path rather than the pipe backlog")
     ap.add_argument("--repeat", type=int, default=1,
                     help="emit each encoded body this many times in sequence "
                          "(RX dedups by seq). Combats early-frame loss during "
@@ -145,6 +151,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     dump = open(args.dump_bodies, "wb") if args.dump_bodies else None
 
     repeat = max(1, args.repeat)
+    stamper = stream.capture_stamper_from_args(args)
     total_bytes = 0
     for f in frames:
         body, layout = stream.encode_body(
@@ -153,8 +160,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         chunk = struct.pack("<I", len(body)) + body
         for _ in range(repeat):
-            out.write(chunk)
+            out.write(stamper.prefix() + chunk)
             total_bytes += len(body)
+            if args.pace_us > 0:
+                out.flush()
+                time.sleep(args.pace_us / 1e6)
         if dump is not None:
             dump.write(body)
 

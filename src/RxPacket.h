@@ -146,7 +146,11 @@ struct Packet
      * For the frames the 802.11 MAC regenerates itself — beacons and probe
      * responses — the sender's MAC overwrites the 8-byte timestamp field (MPDU
      * bytes 24-31) with its live TSF at the instant the frame is clocked onto
-     * the air. That is a genuine hardware TX-egress timestamp, latched below the
+     * the air. For a HARDWARE beacon (StartBeacon) that holds on every
+     * generation; for a frame the host injects it holds only where
+     * AdapterCaps::hw_injected_mgmt_txtsf says so — a Jaguar1 transmitter puts
+     * a counter that is not a TSF there, which this accessor cannot tell from
+     * a real stamp. That is a genuine hardware TX-egress timestamp, latched below the
      * CSMA/queueing layer (bench-measured sub-µs against an independent
      * receiver, vs ~100+ µs for any host-side "read the clock after send"
      * approximation). Paired with RxAtrib.tsfl (this receiver's hardware RX

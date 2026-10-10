@@ -1356,6 +1356,9 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
   c.station_mode_ok = _variant == jaguar2::ChipVariant::C8822B;
   c.hw_rx_timestamp = true;  /* FrameParserJaguar2 fills RxAtrib.tsfl */
   c.hw_beacon_txtsf = true;  /* StartBeacon: MAC inserts the egress TSF into beacons */
+  /* Measured on the 8822B die only (an 8812BU: injected 0x50/0x80 stamped,
+   * 34 µs spread); the 8821C runs the same code with no cell. */
+  c.hw_injected_mgmt_txtsf = _variant == jaguar2::ChipVariant::C8822B;
   c.tsf_write_ok = true;     /* WriteTsf: REG_TSFTR (8822B readback) */
   c.xtal_cap_max = 0x3f; /* 6-bit AFE crystal-cap trim (0x24/0x28) */
   c.xtal_cap_default = _hal.efuse_logical_byte(0xB9) == 0xFF

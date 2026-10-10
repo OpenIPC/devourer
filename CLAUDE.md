@@ -451,6 +451,12 @@ temporal layer and injects each at its ladder's rate
 (RS outer code + corrupt-frame salvage) lives in `tools/precoder/`
 (`docs/fused-fec.md`).
 
+Per-frame TX-side timing for the stream link (`src/StreamTelemetry.h`,
+`examples/common/stream_timing_tx.h`): what each frame carries, which parts
+MAC-stamp an injected frame (`AdapterCaps::hw_injected_mgmt_txtsf`) and the
+measured matrix are in `docs/stream-timing.md`; harness
+`tests/stream_timing_onair.sh`.
+
 ## Frequency hopping
 
 `IRadio::FastRetune(channel)` — lean intra-band, same-bandwidth retune on

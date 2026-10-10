@@ -187,6 +187,7 @@ Emitters: L = library, RX/TX/... = demo. Optional fields in [brackets];
 | ev | emitter | fields |
 |---|---|---|
 | `stream.rx` / `stream.ctl` / `stream.eof` / `stream.tx` | duplex (stdout), streamtx (stderr) | hits / op, len, [applied 0 — streamtx reports the live-knob opcodes it does not apply; op 4 CAPTURE_TS is consumed silently by both] / tx_count, [bytes] / n, ok, psdu, [total] |
+| `stream.ready` | duplex (stdout) | channel — the chip's bring-up (InitWrite) succeeded and the TX thread exists: from here a record on stdin is sent, not lost. A feeder waits on this, not on a lead time; a refused bring-up emits `stream.eof {tx_count 0, bringup_failed 1}` instead and exits 1 |
 | `stream.timing` | streamtx, svctx, duplex (`DEVOURER_STREAM_TIMING=N`, every N data frames) | ok (the marker frame's send), frames, tq_p50_us, tq_max_us, tw_p50_us, tw_max_us, c2s_p50_us, c2s_max_us, depth_max, captured, tsf_pred, fit_ppm, fit_n, fit_resid_us, fit_resets, fit_unsupported (the host↔TSF fit, one ReadTsf per 100 ms; a reset = the chip's TSF jumped under it; unsupported = ReadTsf returns 0 on this part), presp_stamped, beacon, tx_async — the same window the marker carries on air (`examples/common/stream_timing_tx.h`) |
 | `stream.done` | streamtx (stderr) | sent, capture_dropped (CAPTURE_TS stamps that no record followed) |
 | `svc.stats` | svctx | frames, crit, t0, t1, t2, t3plus |

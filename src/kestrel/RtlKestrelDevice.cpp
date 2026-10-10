@@ -244,9 +244,12 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
    * the scheduler/tmac/trxptcl/ptcl TX path) minus the RX loop. Then resolve
    * the band-0 mgmt bulk-OUT endpoint (BULKOUTID0 = 0th bulk-OUT per
    * get_bulkout_id_8852b). */
+  /* A refused bring-up is an exception here as on every other generation
+   * (the IRadio contract the demos rely on): a caller that went on to
+   * send_packet would otherwise learn of it one refused frame at a time. */
   if (!BringUpMonitor(channel)) {
     _logger->error("Kestrel: TX bring-up failed");
-    return;
+    throw std::runtime_error("Kestrel TX bring-up failed (BringUpMonitor)");
   }
   /* TX-only: enable the CMAC port + scheduler contention queues. Kept out
    * of BringUpMonitor so the pure-monitor RX path keeps CCA on and can
@@ -287,7 +290,7 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
     _tx_data_q = _device.nth_bulk_out_ep(3); /* ACH0 -> BULKOUTID3 */
     if (_tx_mgmt_q == 0) {
       _logger->error("Kestrel: no bulk-OUT endpoint for mgmt TX");
-      return;
+      throw std::runtime_error("Kestrel TX bring-up failed (no mgmt bulk-OUT endpoint)");
     }
     _tx_data_ok = _tx_data_q != 0;
   } else {

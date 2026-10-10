@@ -368,7 +368,13 @@ class TimingWindow {
  * send, consumed by the report that echoes its tag, and a report whose slot
  * is empty or already consumed (a tag that wrapped past 256 unreported
  * frames, or a report for a frame sent before the join was armed) counts as
- * unmatched. Pure; the TX thread owns it. */
+ * unmatched. An eight-bit tag cannot name its generation: when a send
+ * reuses a tag whose slot is still live (its report has not come back after
+ * 256 further sends), the slot is overwritten and counted in overwritten();
+ * a late report for the old frame then joins the NEW frame — the ring
+ * cannot tell them apart. A non-zero overwritten() therefore means that
+ * window's joins are suspect (the startup burst does this; a paced steady
+ * state does not). Pure; the TX thread owns it. */
 struct TxFrameRec {
   uint64_t frame = 0;     /* the transmitter's frame counter */
   uint64_t send_ns = 0;   /* host clock at send_packet */
@@ -378,6 +384,7 @@ struct TxFrameRec {
 class TxReportJoin {
  public:
   void sent(uint8_t tag, const TxFrameRec &rec) {
+    if (_live[tag]) ++_overwritten;
     _slot[tag] = rec;
     _live[tag] = true;
     ++_sent;
@@ -392,11 +399,12 @@ class TxReportJoin {
   uint64_t sent_count() const { return _sent; }
   uint64_t joined() const { return _joined; }
   uint64_t unmatched() const { return _unmatched; }
+  uint64_t overwritten() const { return _overwritten; }
 
  private:
   std::array<TxFrameRec, 256> _slot{};
   std::array<bool, 256> _live{};
-  uint64_t _sent = 0, _joined = 0, _unmatched = 0;
+  uint64_t _sent = 0, _joined = 0, _unmatched = 0, _overwritten = 0;
 };
 
 }  // namespace stream_timing

@@ -173,8 +173,13 @@ int main() {
     CHECK(r && r->frame == 7 && r->t_queue_us == 30 && j.joined() == 1, "report joins its frame");
     CHECK(!j.match(5) && j.unmatched() == 2, "a second report for the same tag is unmatched");
     for (unsigned i = 0; i < 300; ++i) { TxFrameRec x; x.frame = 100 + i; j.sent(uint8_t(i), x); }
-    r = j.match(10);  // tag 10 was written at i=10 and again at i=266
-    CHECK(r && r->frame == 100 + 266, "a wrapped tag yields the latest frame with it");
+    // Tag 10 was written at i=10 and again at i=266 while still live: the
+    // ring cannot tell an old report from the new one — a late report for
+    // frame 110 joins frame 366, and the overwrite is counted, not hidden.
+    CHECK(j.overwritten() == 300 - 256, "live-slot reuse is counted");
+    r = j.match(10);
+    CHECK(r && r->frame == 100 + 266, "a late report after reuse joins the NEW frame (documented ambiguity)");
+    CHECK(!j.match(10), "and the new frame's own report is then unmatched");
     CHECK(j.sent_count() == 301, "sent count");
   }
 

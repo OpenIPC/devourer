@@ -218,16 +218,34 @@ Measured with a report requested on every frame, 20 s runs:
 
 The whole-run shortfall is the start, not the link: the first ~1000 records
 are the stdin backlog aired at full rate while the chip came up, and there
-the report latency outruns the 256-slot tag ring (a report arriving after
-256 further sends finds its slot overwritten — the unmatched count) and the
-firmware's emission ceiling drops reports outright on the 8812CU (the tag
-gaps; `docs/scheduled-mac.md`). From the first paced window on, every frame
-has its report. The join is exact where a report exists: the tag advances
+the report latency outruns the 256-slot tag ring (a send reusing a tag whose
+report has not returned overwrites the slot — `rpt_overwritten`; an
+eight-bit tag cannot name its generation, so a late report for the old frame
+would land on the new one and the new frame's own report go unmatched, which
+is why a window with overwrites is suspect) and the firmware's emission
+ceiling drops reports outright on the 8812CU (the tag gaps;
+`docs/scheduled-mac.md`). From the first paced window on, every frame has
+its report, and `rpt_overwritten` stays at zero. The join is exact where a
+report exists: the tag advances
 once per send, markers included, which is why the ledger's `tag` runs ahead
 of `frame` by the number of markers aired. Nothing is added to the air: this
-is a transmit-side instrument. C2H must flow for it — Jaguar3
-drains it on its coex thread, a Jaguar2 transmitter needs an RX loop
-(duplex, or `DEVOURER_TX_WITH_RX=thread`); Jaguar1 reports carry no tag, so
+is a transmit-side instrument.
+
+With slot hopping on as well (8812CU, 1/6/11 at 50 ms, a report per frame),
+the steady state still joins 1.30 reports per data frame (the timing and
+hop-sync markers included, both recorded through the helper), but about 15%
+of all sends never get a report: the `tx.report` tag sequence shows ~190
+gaps of 7–13 over 340 dwells, so the firmware drops a burst of reports
+around a retune. A dropped report leaves its slot live until the tag wraps,
+and `rpt_overwritten` (1732 over that run) then counts the backlog — an
+upper bound on suspect joins, since a report that never arrives cannot
+mis-join. Read the counter as "this many sends went unreported", and judge
+hop-mode queue times by their p50, not their maximum.
+
+C2H must flow for it — Jaguar3
+drains it on its coex thread; a Jaguar2 transmitter needs an RX loop on the
+same handle, which streamtx never runs, so `duplex` is the Jaguar2 path (as
+measured above); Jaguar1 reports carry no tag, so
 there is no join there; Kestrel, the RTL8733B and the MT7612U have no CCX
 report in this form.
 

@@ -19,6 +19,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -98,9 +99,10 @@ class StreamTimingTx {
     if (_rtl && _rtl->NextTxReportTag()) {
       _join_on = true;
       _dev.SetTxReportSink([this](const devourer::TxReport &r) {
+        const uint64_t rx_ns = now_ns();   /* when the host decoded it */
         std::lock_guard<std::mutex> lk(_rpt_mu);
-        if (_rpt_q.size() < 4096) _rpt_q.push_back(r);
-        else ++_rpt_overflow;
+        if (_rpt_q.size() < 4096) _rpt_q.push_back({r, rx_ns});
+        else _rpt_overflow.fetch_add(1, std::memory_order_relaxed);
       });
       _log.info("stream timing: CCX report join armed (tag echo)");
     }
@@ -184,13 +186,13 @@ class StreamTimingTx {
   // into the window and the sampled stream.txrpt ledger.
   void drain_reports() {
     if (!_join_on) return;
-    std::deque<devourer::TxReport> q;
+    std::deque<QueuedReport> q;
     {
       std::lock_guard<std::mutex> lk(_rpt_mu);
       q.swap(_rpt_q);
     }
-    const uint64_t now = now_ns();
-    for (const auto &r : q) {
+    for (const auto &qr : q) {
+      const devourer::TxReport &r = qr.r;
       auto rec = _join.match(r.sw_define);
       if (!rec) continue;
       ++_w_rpt;
@@ -209,7 +211,9 @@ class StreamTimingTx {
             .f("final_rate", r.final_rate)
             .f("tq_us", rec->t_queue_us)
             .f("c2s_us", rec->c2s_us)
-            .f("age_us", (unsigned long long)((now - rec->send_ns) / 1000))
+            /* send_packet -> the host decoding the report, stamped in the
+             * sink, not when this thread got round to draining it. */
+            .f("age_us", (unsigned long long)((qr.rx_ns - rec->send_ns) / 1000))
             .f("marker", rec->marker ? 1 : 0);
     }
   }
@@ -289,9 +293,22 @@ class StreamTimingTx {
         .f("q_max_raw", _w_q_max)
         .f("retries_max", _w_retries_max)
         .f("rpt_unmatched", (unsigned long long)_join.unmatched())
-        .f("rpt_overflow", (unsigned long long)_rpt_overflow);
+        .f("rpt_overwritten", (unsigned long long)_join.overwritten())
+        .f("rpt_overflow", (unsigned long long)_rpt_overflow.load(std::memory_order_relaxed));
     _w_rpt = _w_rpt_fail = 0; _w_q_max = 0; _w_retries_max = 0; _w_q.clear();
     return true;
+  }
+
+  // A frame this helper does not build is about to go out on the same device
+  // (streamtx's hop sync marker): record the tag it will carry so its report
+  // joins as a marker instead of counting as unmatched.
+  void note_external_send() {
+    if (!_join_on) return;
+    if (auto tag = _rtl->NextTxReportTag()) {
+      devourer::stream_timing::TxFrameRec rec;
+      rec.frame = _frames; rec.send_ns = now_ns(); rec.marker = true;
+      _join.sent(*tag, rec);
+    }
   }
 
   // A producer capture stamp arrived (kCtlCaptureTs): remembered for the next
@@ -328,9 +345,10 @@ class StreamTimingTx {
   bool _started = false, _data_sent_ok = false, _warned_unsupported = false;
   IRtlRadio *_rtl = nullptr;
   bool _join_on = false;
+  struct QueuedReport { devourer::TxReport r; uint64_t rx_ns; };
   std::mutex _rpt_mu;
-  std::deque<devourer::TxReport> _rpt_q;
-  uint64_t _rpt_overflow = 0;
+  std::deque<QueuedReport> _rpt_q;
+  std::atomic<uint64_t> _rpt_overflow{0};
   devourer::stream_timing::TxReportJoin _join;
   std::vector<uint32_t> _w_q;
   uint32_t _w_rpt = 0, _w_rpt_fail = 0, _w_q_max = 0, _w_retries_max = 0;

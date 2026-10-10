@@ -14,6 +14,7 @@
 #include "SelectedChannel.h"
 #include "ThermalStatus.h"
 #include "TxReport.h"
+#include <condition_variable>
 #include <mutex>
 #include "Sounding.h"
 #include "TriggerTwt.h"
@@ -670,8 +671,12 @@ public:
    * is the tag IRtlRadio::NextTxReportTag() gave the frame, which is how a
    * caller joins a report to the frame it sent. An empty function clears it. */
   void SetTxReportSink(std::function<void(const devourer::TxReport &)> sink) {
-    std::lock_guard<std::mutex> lk(_tx_report_sink_mu);
+    std::unique_lock<std::mutex> lk(_tx_report_sink_mu);
     _tx_report_sink = std::move(sink);
+    /* Returns only once no earlier sink is still executing, so a caller may
+     * destroy what its sink captured right after. Never call this from
+     * inside the sink itself. */
+    _tx_report_sink_cv.wait(lk, [this] { return _tx_report_inflight == 0; });
   }
 
   /* TX submission health snapshot (see TxStats.h) — the driver-side drop /
@@ -784,13 +789,22 @@ protected:
     std::function<void(const devourer::TxReport &)> sink;
     {
       std::lock_guard<std::mutex> lk(_tx_report_sink_mu);
+      if (!_tx_report_sink) return;
       sink = _tx_report_sink;
+      ++_tx_report_inflight;
     }
-    if (sink) sink(r);
+    sink(r);
+    {
+      std::lock_guard<std::mutex> lk(_tx_report_sink_mu);
+      --_tx_report_inflight;
+    }
+    _tx_report_sink_cv.notify_all();
   }
 
 private:
   std::mutex _tx_report_sink_mu;
+  std::condition_variable _tx_report_sink_cv;
+  int _tx_report_inflight = 0;
   std::function<void(const devourer::TxReport &)> _tx_report_sink;
 
 };

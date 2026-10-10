@@ -485,6 +485,7 @@ int main(int argc, char **argv) {
           auto wire = devourer::HopSyncMarker::encode(marker);
           sync_buf.insert(sync_buf.end(), wire.begin(), wire.end());
         }
+        timing.note_external_send();
         rtlDevice->send_packet(sync_buf.data(), sync_buf.size());
       }
     }

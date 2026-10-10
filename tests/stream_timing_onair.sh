@@ -18,6 +18,13 @@
 #           decoded for what they are and never feed the clock fit.
 #   svctx   the SVC demo as the transmitter (synthetic NALs, per-layer rates):
 #           the same addr3 field and marker from a second TX demo.
+#   report  streamtx with DEVOURER_TX_REPORT=1 (HalMAC CCX reports, tag echo):
+#           every report must join the frame it describes — rpt_n ≈ frames in
+#           each marker window, few unmatched — so the on-chip queue time and
+#           retry count enter stream.timing / stream.txrpt. Jaguar3 drains
+#           C2H on its coex thread, so this phase is for a Jaguar3 TX; a
+#           Jaguar2 transmitter has no C2H without an RX loop (streamtx never
+#           runs one) — cover it with the duplex phase and TX_REPORT=1.
 #   svctx-live  svctx --live fed by a paced, CAPTURE_TS-stamping producer with
 #           the DELAY_MS/DELAY_N producer delay: the stamp survives the UEP
 #           path (one capture per NAL, on its first fragment).
@@ -42,6 +49,7 @@ RX_VID="${RX_VID:-0x0bda}"; RX_PID="${RX_PID:-0xb812}"      # CF-924AC (8822BU) 
 CH="${CH:-6}"; SECS="${SECS:-20}"; REPS="${REPS:-3}"
 MARKER_EVERY="${MARKER_EVERY:-50}"
 PACE_US="${PACE_US:-2000}"
+TX_REPORT="${TX_REPORT:-}"       # set to 1 to request a CCX report per frame in every phase
 DELAY_N="${DELAY_N:-10}"; DELAY_MS="${DELAY_MS:-20}"
 HOP_CHANNELS="${HOP_CHANNELS:-1,6,11}"; HOP_SLOT_MS="${HOP_SLOT_MS:-50}"
 PHASES="${PHASES:-floor delay hop corrupt}"
@@ -98,7 +106,8 @@ run_tx() {
     "${UVRUN[@]}" tools/precoder/stream_tx.py --input "$OUT/src.bin" --repeat 2000 \
         --pace-us "$PACE_US" $prod 2>"$OUT/prod_$tag.log" |
     sudo env DEVOURER_VID="$TX_VID" DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$CH" \
-        DEVOURER_STREAM_TIMING="$MARKER_EVERY" DEVOURER_LOG_LEVEL=info "$@" \
+        DEVOURER_STREAM_TIMING="$MARKER_EVERY" DEVOURER_LOG_LEVEL=info \
+        ${TX_REPORT:+DEVOURER_TX_REPORT="$TX_REPORT"} "$@" \
         timeout "$SECS" ./build/streamtx --interval-ms 0 >"$OUT/tx_$tag.out" 2>"$OUT/tx_$tag.log"
     sudo pkill -INT -x streamtx 2>/dev/null || true
     sleep 1
@@ -229,6 +238,52 @@ if [[ " $PHASES " == *" svctx "* ]]; then
     fi
 fi
 
+# The CCX join verdict from a TX log's stream.timing windows: reports joined
+# vs frames aired, unmatched reports, and that queue time actually arrived.
+join_verdict() { # $1 = tx log, $2 = label
+    $PY - "$1" "$2" <<'PY'
+import sys
+sys.path.insert(0, "tests")
+from devourer_events import iter_events
+w = [e for e in iter_events(open(sys.argv[1]), ev="stream.timing")]
+# The first ~1000 records are the stdin backlog aired at full rate while the
+# chip came up; there the report latency outruns the tag ring and the
+# firmware's CCX emission ceiling drops reports (docs/scheduled-mac.md). Judge
+# the steady state: the second half of the run's windows.
+w = [e for e in w if e.get("rpt_join") == 1]
+if not w:
+    print(f"FAIL: {sys.argv[2]}: no join windows — reports need C2H to flow (Jaguar3 coex thread, "
+          f"or an RX loop: the duplex phase on a Jaguar2 transmitter)"); sys.exit(1)
+w = w[len(w) // 2:]
+frames = sum(e["frames"] for e in w); rpt = sum(e["rpt_n"] for e in w)
+fail = sum(e["rpt_fail"] for e in w)
+unm = (w[-1]["rpt_unmatched"] - w[0]["rpt_unmatched"]) if w else 0
+ovf = w[-1]["rpt_overflow"] if w else 0
+qmax = max((e["q_max_raw"] for e in w), default=0)
+q50 = sorted(e["q_p50_raw"] for e in w)[len(w) // 2] if w else 0
+ratio = rpt / frames if frames else 0
+# The firmware drops some reports (tag gaps; docs/scheduled-mac.md): 0.8 is
+# the floor a healthy join clears, the ratio itself is the number to read.
+ovw = (w[-1]["rpt_overwritten"] - w[0]["rpt_overwritten"]) if w else 0
+ok = frames >= 500 and ratio >= 0.8 and unm <= 0.02 * max(rpt, 1) and ovf == 0 and ovw == 0
+print(f"{'PASS' if ok else 'FAIL'}: {sys.argv[2]}: joined {rpt}/{frames} ({ratio:.3f}) unmatched={unm} "
+      f"overwritten={ovw} overflow={ovf} fail={fail} q_p50_raw={q50} q_max_raw={qmax} windows={len(w)}")
+sys.exit(0 if ok else 1)
+PY
+}
+
+# ---- report --------------------------------------------------------------
+if [[ " $PHASES " == *" report "* ]]; then
+    echo "== report: streamtx with a CCX report per frame, joined by tag =="
+    start_witness report
+    off=$(mark report)
+    TX_REPORT=1 run_tx report "--capture-ts"
+    slice report "$off" report
+    stop_witness
+    if join_verdict "$OUT/tx_report.log" "report"; then pass "report: CCX reports join their frames (see line above)"; else fail "report: join"; fi
+    $PY tests/stream_timing_analyze.py "$OUT/run_report.jsonl" >"$OUT/sum_report.json" || fail "report: the stream itself degraded with reports on ($OUT/sum_report.json)"
+fi
+
 # ---- svctx-live ----------------------------------------------------------
 if [[ " $PHASES " == *" svctx-live "* ]]; then
     echo "== svctx --live: stamped, paced NALs with a ${DELAY_MS} ms delay on every ${DELAY_N}th =="
@@ -263,11 +318,13 @@ if [[ " $PHASES " == *" duplex "* ]]; then
         --pace-us "$PACE_US" --capture-ts 2>"$OUT/prod_duplex.log" ) |
     sudo env DEVOURER_VID="$TX_VID" DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$CH" \
         DEVOURER_STREAM_TIMING="$MARKER_EVERY" DEVOURER_LOG_LEVEL=info \
+        ${TX_REPORT:+DEVOURER_TX_REPORT="$TX_REPORT"} \
         timeout $((SECS + DUPLEX_LEAD_S + 10)) ./build/duplex --interval-ms 0 >"$OUT/tx_duplex.out" 2>"$OUT/tx_duplex.log"
     grep -q -F '"ev":"stream.ready"' "$OUT/tx_duplex.out" || fail "duplex: no stream.ready event"
     sudo pkill -INT -x duplex 2>/dev/null || true; sleep 1
     slice duplex "$off" duplex
     stop_witness
+    if [ "${TX_REPORT:-0}" -gt 0 ] 2>/dev/null; then join_verdict "$OUT/tx_duplex.out" "duplex report" || fail "duplex: join"; fi
     if $PY tests/stream_timing_analyze.py "$OUT/run_duplex.jsonl" >"$OUT/sum_duplex.json"; then
         pass "duplex: $(grep -o '"lat_frames": [0-9]*\|"lat_p50_us": [0-9]*\|"c2a_p50_us": [0-9]*\|"markers": [0-9]*' "$OUT/sum_duplex.json" | tr '\n' ' ')"
     else

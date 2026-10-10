@@ -18,6 +18,8 @@
 // gets no absolute latency and says so.
 #pragma once
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -28,6 +30,10 @@
 #include "AdapterCaps.h"
 #include "Event.h"
 #include "IRadio.h"
+#include "IRtlRadio.h"
+#include "TxReport.h"
+#include <deque>
+#include <mutex>
 #include "StreamTelemetry.h"
 #include "TxStats.h"
 #include "host_tsf_fit.h"
@@ -83,8 +89,29 @@ class StreamTimingTx {
     _fit->start();
     _log.info("stream timing: marker every {} frames; host<->TSF fit started "
               "(one ReadTsf per 100 ms)", _marker_every);
+    /* CCX report join (HalMAC dies with DeviceConfig tx.report on): every
+     * send records the tag its descriptor will carry; the device's sink
+     * queues each report, the TX thread drains and joins them. The on-chip
+     * queue time and retry count then enter the window (stream.timing) and
+     * a sampled per-frame ledger (stream.txrpt). Needs C2H to flow: an RX
+     * loop on Jaguar2, Jaguar3's coex thread regardless. */
+    _rtl = dynamic_cast<IRtlRadio *>(&_dev);
+    if (_rtl && _rtl->NextTxReportTag()) {
+      _join_on = true;
+      _dev.SetTxReportSink([this](const devourer::TxReport &r) {
+        const uint64_t rx_ns = now_ns();   /* when the host decoded it */
+        std::lock_guard<std::mutex> lk(_rpt_mu);
+        if (_rpt_q.size() < 4096) _rpt_q.push_back({r, rx_ns});
+        else _rpt_overflow.fetch_add(1, std::memory_order_relaxed);
+      });
+      _log.info("stream timing: CCX report join armed (tag echo)");
+    }
   }
   void stop() {
+    if (_join_on) {
+      _dev.SetTxReportSink({});
+      _join_on = false;
+    }
     if (_beacon) {
       _dev.StopBeacon();
       _beacon = false;
@@ -128,6 +155,16 @@ class StreamTimingTx {
       t.tsf10_lo = static_cast<uint16_t>((tsf / 10) & 0xffff);
     }
     t.encode(addr3);
+    if (_join_on) {
+      if (auto tag = _rtl->NextTxReportTag()) {
+        devourer::stream_timing::TxFrameRec rec;
+        rec.frame = _frames;
+        rec.send_ns = _t0;
+        rec.t_queue_us = static_cast<uint32_t>(_t0 > read_ns ? (_t0 - read_ns) / 1000 : 0);
+        rec.c2s_us = static_cast<uint32_t>(c2s);
+        _join.sent(*tag, rec);
+      }
+    }
   }
   // Right after send_packet returned (`ok` = its result). No marker is aired
   // before the first data frame went out: the duplex demo's TX thread can run
@@ -142,6 +179,43 @@ class StreamTimingTx {
     _last_write_us = tw;
     _window.add(tq, tw, c2s, _has_capture, _depth);
     ++_frames;
+    drain_reports();
+  }
+
+  // Join every queued CCX report to its frame; fold queue time and retries
+  // into the window and the sampled stream.txrpt ledger.
+  void drain_reports() {
+    if (!_join_on) return;
+    std::deque<QueuedReport> q;
+    {
+      std::lock_guard<std::mutex> lk(_rpt_mu);
+      q.swap(_rpt_q);
+    }
+    for (const auto &qr : q) {
+      const devourer::TxReport &r = qr.r;
+      auto rec = _join.match(r.sw_define);
+      if (!rec) continue;
+      ++_w_rpt;
+      if (r.queue_time_raw > _w_q_max) _w_q_max = r.queue_time_raw;
+      if (_w_q.size() < 4096) _w_q.push_back(r.queue_time_raw);
+      if (r.data_retries > _w_retries_max) _w_retries_max = r.data_retries;
+      if (r.state != 0) ++_w_rpt_fail;
+      const uint64_t n = _join.joined();
+      if (n <= 5 || n % 100 == 0)
+        devourer::Ev(_ev, "stream.txrpt")
+            .f("frame", (unsigned long long)rec->frame)
+            .f("tag", r.sw_define)
+            .f("q_raw", r.queue_time_raw)
+            .f("retries", r.data_retries)
+            .f("state", r.state)
+            .f("final_rate", r.final_rate)
+            .f("tq_us", rec->t_queue_us)
+            .f("c2s_us", rec->c2s_us)
+            /* send_packet -> the host decoding the report, stamped in the
+             * sink, not when this thread got round to draining it. */
+            .f("age_us", (unsigned long long)((qr.rx_ns - rec->send_ns) / 1000))
+            .f("marker", rec->marker ? 1 : 0);
+    }
   }
 
   // Before each data frame: air the marker when due. `radiotap` is the stream
@@ -174,7 +248,21 @@ class StreamTimingTx {
     _buf.clear();
     _buf.insert(_buf.end(), radiotap.begin(), radiotap.end());
     devourer::stream_timing::append_marker_mpdu(_buf, _sa, _channel, m);
+    if (_join_on) {
+      if (auto tag = _rtl->NextTxReportTag()) {
+        devourer::stream_timing::TxFrameRec rec;
+        rec.frame = _frames; rec.send_ns = hn; rec.marker = true;
+        _join.sent(*tag, rec);
+      }
+    }
     const bool ok = _dev.send_packet(_buf.data(), _buf.size());
+    drain_reports();
+    uint32_t q_p50 = 0;
+    if (!_w_q.empty()) {
+      auto mid = _w_q.begin() + static_cast<std::ptrdiff_t>(_w_q.size() / 2);
+      std::nth_element(_w_q.begin(), mid, _w_q.end());
+      q_p50 = *mid;
+    }
     devourer::Ev(_ev, "stream.timing")
         .f("ok", ok ? 1 : 0)
         .f("frames", m.frames)
@@ -194,8 +282,33 @@ class StreamTimingTx {
         .f("fit_unsupported", _fit && _fit->unsupported() ? 1 : 0)
         .f("presp_stamped", _presp_stamped ? 1 : 0)
         .f("beacon", _beacon ? 1 : 0)
-        .f("tx_async", _tx_async ? 1 : 0);
+        .f("tx_async", _tx_async ? 1 : 0)
+        /* The CCX join (HalMAC + tx.report): reports joined in this window,
+         * the on-chip queue time (raw firmware units) p50/max, the worst
+         * retry count, failed deliveries, and the running unmatched total. */
+        .f("rpt_join", _join_on ? 1 : 0)
+        .f("rpt_n", _w_rpt)
+        .f("rpt_fail", _w_rpt_fail)
+        .f("q_p50_raw", q_p50)
+        .f("q_max_raw", _w_q_max)
+        .f("retries_max", _w_retries_max)
+        .f("rpt_unmatched", (unsigned long long)_join.unmatched())
+        .f("rpt_overwritten", (unsigned long long)_join.overwritten())
+        .f("rpt_overflow", (unsigned long long)_rpt_overflow.load(std::memory_order_relaxed));
+    _w_rpt = _w_rpt_fail = 0; _w_q_max = 0; _w_retries_max = 0; _w_q.clear();
     return true;
+  }
+
+  // A frame this helper does not build is about to go out on the same device
+  // (streamtx's hop sync marker): record the tag it will carry so its report
+  // joins as a marker instead of counting as unmatched.
+  void note_external_send() {
+    if (!_join_on) return;
+    if (auto tag = _rtl->NextTxReportTag()) {
+      devourer::stream_timing::TxFrameRec rec;
+      rec.frame = _frames; rec.send_ns = now_ns(); rec.marker = true;
+      _join.sent(*tag, rec);
+    }
   }
 
   // A producer capture stamp arrived (kCtlCaptureTs): remembered for the next
@@ -230,6 +343,15 @@ class StreamTimingTx {
   uint8_t _channel = 0;
   long _marker_every = 0;
   bool _started = false, _data_sent_ok = false, _warned_unsupported = false;
+  IRtlRadio *_rtl = nullptr;
+  bool _join_on = false;
+  struct QueuedReport { devourer::TxReport r; uint64_t rx_ns; };
+  std::mutex _rpt_mu;
+  std::deque<QueuedReport> _rpt_q;
+  std::atomic<uint64_t> _rpt_overflow{0};
+  devourer::stream_timing::TxReportJoin _join;
+  std::vector<uint32_t> _w_q;
+  uint32_t _w_rpt = 0, _w_rpt_fail = 0, _w_q_max = 0, _w_retries_max = 0;
   bool _tx_async = false, _presp_stamped = false, _beacon = false;
   std::unique_ptr<HostTsfFit> _fit;
   devourer::stream_timing::TimingWindow _window;

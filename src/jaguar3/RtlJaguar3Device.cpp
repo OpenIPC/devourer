@@ -379,9 +379,9 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
          * C2H pkt 0xFF/0x0F carries per-frame delivery + retry count —
          * decode + emit tx.report (src/TxReport.h). */
         if (is_c2h && devourer::is_ccx_halmac(f.frame, f.frame_len))
-          devourer::emit_tx_report(
-              _logger->events(),
-              devourer::parse_ccx_halmac(f.frame, f.frame_len), "halmac");
+          DeliverTxReport(_logger->events(),
+                          devourer::parse_ccx_halmac(f.frame, f.frame_len),
+                          "halmac");
         /* Decode the jgr3 PHY-status report (per-frame RSSI/SNR/EVM), which
          * sits immediately after the 24-byte descriptor inside the drvinfo
          * area (monitor_rx_cfg enables APP_PHYSTS + RX_DRVINFO_SZ=4).
@@ -543,9 +543,9 @@ void RtlJaguar3Device::coex_runtime_loop() {
                                          static_cast<size_t>(n) - off, f)) {
             if ((buf[off + 11] & 0x10) &&
                 devourer::is_ccx_halmac(f.frame, f.frame_len))
-              devourer::emit_tx_report(
-                  _logger->events(),
-                  devourer::parse_ccx_halmac(f.frame, f.frame_len), "halmac");
+              DeliverTxReport(_logger->events(),
+                              devourer::parse_ccx_halmac(f.frame, f.frame_len),
+                              "halmac");
             if (f.next_offset == 0)
               break;
             off += f.next_offset;

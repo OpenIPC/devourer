@@ -711,9 +711,9 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
          * C2H pkt 0xFF/0x0F carries per-frame delivery + retry count —
          * decode + emit tx.report (src/TxReport.h). */
         if (is_c2h && devourer::is_ccx_halmac(f.frame, f.frame_len))
-          devourer::emit_tx_report(
-              _logger->events(),
-              devourer::parse_ccx_halmac(f.frame, f.frame_len), "halmac");
+          DeliverTxReport(_logger->events(),
+                          devourer::parse_ccx_halmac(f.frame, f.frame_len),
+                          "halmac");
         /* Per-frame RSSI/SNR/EVM from the jgr2 PHY-status (present when
          * APP_PHYSTS is on, i.e. drvinfo carries the 32-byte report). CCK rates
          * (DESC_RATE1M..11M = 0..3) use type0, everything else type1. C2H has no

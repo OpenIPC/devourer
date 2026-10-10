@@ -1963,7 +1963,7 @@ void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         const devourer::TxReport r =
             devourer::parse_ccx_8812(p.Data.data() + 2, p.Data.size() - 2);
         if (r.valid)
-          devourer::emit_tx_report(_logger->events(), r, "8812");
+          DeliverTxReport(_logger->events(), r, "8812");
       }
       _packetProcessor(p);
     }

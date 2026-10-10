@@ -191,6 +191,64 @@ The adversarial readings, in the same breath:
   producer; the harness's `svctx-live` phase runs the same 20 ms every-10th
   check as streamtx.
 
+## The chip's own queue time: joining the CCX report
+
+The one stage the host cannot time is how long the chip held the frame. On
+the HalMAC dies with `DEVOURER_TX_REPORT` on, the firmware answers each
+transmission with a CCX report that echoes the descriptor's 8-bit SW_DEFINE
+tag (`src/TxReport.h`). `IRtlRadio::NextTxReportTag()` is the tag the next
+`send_packet` will carry; the TX helper reads it before every send, keeps a
+256-slot ring of frame records keyed by tag, and `IRadio::SetTxReportSink`
+hands it each report as it decodes (on the C2H-draining thread; the TX
+thread joins them). The on-chip queue time (raw firmware units — the HalMAC
+unit is not documented; Jaguar1's 256 µs is) and the retry count then enter
+the `stream.timing` window and a sampled per-frame ledger, `stream.txrpt`,
+which also carries the report's age: send to report on the host.
+
+Measured with a report requested on every frame, 20 s runs:
+
+| | 8812CU, streamtx (~460 fps) | 8812BU (T3U), duplex (~680 fps) |
+|---|---|---|
+| steady state, reports joined per data frame | 1.02 (every frame, plus the markers) | 1.02 |
+| whole run, joined / frames | 8198 / 9250 | 12940 / 13550 |
+| reports matching no frame | 13 | 870, all in the first seconds |
+| `tx.report` tag deltas | 1 × 8113, then gaps of 7–11 | 1 × 13860 |
+| report age, send → host | p50 2.2 ms steady, 7–10 ms in the burst | — |
+| queue time p50 / max (raw) | 1 / 508 | 1 / 596 |
+
+The whole-run shortfall is the start, not the link: the first ~1000 records
+are the stdin backlog aired at full rate while the chip came up, and there
+the report latency outruns the 256-slot tag ring (a send reusing a tag whose
+report has not returned overwrites the slot — `rpt_overwritten`; an
+eight-bit tag cannot name its generation, so a late report for the old frame
+would land on the new one and the new frame's own report go unmatched, which
+is why a window with overwrites is suspect) and the firmware's emission
+ceiling drops reports outright on the 8812CU (the tag gaps;
+`docs/scheduled-mac.md`). From the first paced window on, every frame has
+its report, and `rpt_overwritten` stays at zero. The join is exact where a
+report exists: the tag advances
+once per send, markers included, which is why the ledger's `tag` runs ahead
+of `frame` by the number of markers aired. Nothing is added to the air: this
+is a transmit-side instrument.
+
+With slot hopping on as well (8812CU, 1/6/11 at 50 ms, a report per frame),
+the steady state still joins 1.30 reports per data frame (the timing and
+hop-sync markers included, both recorded through the helper), but about 15%
+of all sends never get a report: the `tx.report` tag sequence shows ~190
+gaps of 7–13 over 340 dwells, so the firmware drops a burst of reports
+around a retune. A dropped report leaves its slot live until the tag wraps,
+and `rpt_overwritten` (1732 over that run) then counts the backlog — an
+upper bound on suspect joins, since a report that never arrives cannot
+mis-join. Read the counter as "this many sends went unreported", and judge
+hop-mode queue times by their p50, not their maximum.
+
+C2H must flow for it — Jaguar3
+drains it on its coex thread; a Jaguar2 transmitter needs an RX loop on the
+same handle, which streamtx never runs, so `duplex` is the Jaguar2 path (as
+measured above); Jaguar1 reports carry no tag, so
+there is no join there; Kestrel, the RTL8733B and the MT7612U have no CCX
+report in this form.
+
 ## Reading it
 
 `rxdemo` with `DEVOURER_STREAM_OUT=1`: every `rx.frame` carries `fc0` (so a

@@ -13,6 +13,9 @@
 #include "RxQuality.h"
 #include "SelectedChannel.h"
 #include "ThermalStatus.h"
+#include "TxReport.h"
+#include <condition_variable>
+#include <mutex>
 #include "Sounding.h"
 #include "TriggerTwt.h"
 #include "TxCaps.h"
@@ -660,6 +663,22 @@ public:
   virtual void SetTxMode(const devourer::TxMode & /*mode*/) {}
   virtual void ClearTxMode() {}
 
+  /* Per-frame CCX TX reports (TxReport.h, DeviceConfig tx.report) handed to
+   * the caller as they decode, in addition to the `tx.report` event. The sink
+   * runs on whichever thread drains C2H for this generation (the RX worker,
+   * or Jaguar3's coex thread), so it must be cheap and thread-safe; set it
+   * before the RX/coex path starts. On the HalMAC dies a report's sw_define
+   * is the tag IRtlRadio::NextTxReportTag() gave the frame, which is how a
+   * caller joins a report to the frame it sent. An empty function clears it. */
+  void SetTxReportSink(std::function<void(const devourer::TxReport &)> sink) {
+    std::unique_lock<std::mutex> lk(_tx_report_sink_mu);
+    _tx_report_sink = std::move(sink);
+    /* Returns only once no earlier sink is still executing, so a caller may
+     * destroy what its sink captured right after. Never call this from
+     * inside the sink itself. */
+    _tx_report_sink_cv.wait(lk, [this] { return _tx_report_inflight == 0; });
+  }
+
   /* TX submission health snapshot (see TxStats.h) — the driver-side drop /
    * congestion signal an adaptive-link controller uses to detect a full TX FIFO
    * (a bulk-OUT TIMEOUT = recoverable back-pressure) vs a hard error. Counted at
@@ -760,6 +779,33 @@ public:
    * Init/InitWrite). On Jaguar1 a failed FW boot does not abort bring-up —
    * this is the only place the failure is visible to a caller. */
   virtual devourer::FwBootStatus GetFwBootStatus() { return {}; }
+
+
+protected:
+  /* Emit the `tx.report` event and hand the report to the sink, if any. */
+  void DeliverTxReport(devourer::EventSink &events, const devourer::TxReport &r,
+                       const char *fmt) {
+    devourer::emit_tx_report(events, r, fmt);
+    std::function<void(const devourer::TxReport &)> sink;
+    {
+      std::lock_guard<std::mutex> lk(_tx_report_sink_mu);
+      if (!_tx_report_sink) return;
+      sink = _tx_report_sink;
+      ++_tx_report_inflight;
+    }
+    sink(r);
+    {
+      std::lock_guard<std::mutex> lk(_tx_report_sink_mu);
+      --_tx_report_inflight;
+    }
+    _tx_report_sink_cv.notify_all();
+  }
+
+private:
+  std::mutex _tx_report_sink_mu;
+  std::condition_variable _tx_report_sink_cv;
+  int _tx_report_inflight = 0;
+  std::function<void(const devourer::TxReport &)> _tx_report_sink;
 
 };
 

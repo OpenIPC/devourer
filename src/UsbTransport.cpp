@@ -1425,6 +1425,8 @@ TxStats UsbTransport::tx_stats() const {
   s.failed = _tx_failed.load(std::memory_order_relaxed);
   s.last_error_rc = _tx_last_rc.load(std::memory_order_relaxed);
   s.last_was_timeout = _tx_last_timeout.load(std::memory_order_relaxed);
+  const int inflight = _tx_inflight.load(std::memory_order_relaxed);
+  s.inflight = inflight > 0 ? static_cast<uint32_t>(inflight) : 0;
   return s;
 }
 

@@ -2311,6 +2311,10 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
   c.hw_beacon_txtsf = true;  /* StartBeacon: MAC inserts the egress TSF into
                               * beacons (bench: 8821AU + 8814AU body-TS steps
                               * live at the beacon interval) */
+  c.hw_injected_mgmt_txtsf = false; /* measured on the 8821AU: an injected
+                              * probe response / beacon gets a counter that is
+                              * not a TSF (AdapterCaps.h) — the hardware beacon
+                              * above is this family's egress-stamped frame */
   c.tsf_write_ok = true; /* WriteTsf: bare REG_TSFTR (8821AU readback) */
   c.xtal_cap_max = 0x3f; /* 6-bit AFE crystal-cap trim (0x2C) */
   c.xtal_cap_default = _eepromManager->crystal_cap & 0x3f;

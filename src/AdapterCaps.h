@@ -426,9 +426,25 @@ struct AdapterCaps {
    * Jaguar2/3, whose TBTT is deaf to a TSF write (measured — use
    * PinBeaconTbtt there), and left false on Jaguar1: its TBTT is recorded as
    * TSF-locked from the PinBeaconTbtt bench, but not measured through
-   * WriteTsf. */
+   * WriteTsf.
+   *
+   * hw_injected_mgmt_txtsf: the MAC ALSO overwrites the timestamp field of a
+   * management frame the HOST injects through send_packet (a probe response or
+   * a beacon-shaped frame) with its live egress TSF, so a caller can air an
+   * egress-stamped frame on any channel at any time without the hardware
+   * beacon function. Measured with a constant in the field and an independent
+   * witness reading it back (tests/probe_resp_egress_tsf_check.sh): true on
+   * Jaguar2 (8812BU), Jaguar3 (8812CU, 8812EU) and Kestrel (8832CU), both FC
+   * 0x50 and 0x80, arrival−egress spread 34–41 µs over 15 s. FALSE on Jaguar1:
+   * the 8821AU rewrites the field, but with a free-running counter that is
+   * neither TSF port (both read live during the run) and repeats for ~7
+   * frames at a time; its hardware TBTT beacon IS stamped (3.2 µs spread), so
+   * on this family the egress pair rides StartBeacon. The 8812AU/8814AU are
+   * unmeasured and inherit false. False on the RTL8733B (no TSF read, no
+   * beacon) and the MT7612U (unmeasured). */
   bool hw_rx_timestamp = false;
   bool hw_beacon_txtsf = false;
+  bool hw_injected_mgmt_txtsf = false;
   bool tsf_write_ok = false;
   bool tbtt_follows_tsf = false;
   /* 802.11ax scheduled UL (Kestrel/RTL8852 only). trigger_ul_ok: the adapter

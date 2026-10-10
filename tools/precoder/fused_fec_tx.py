@@ -23,6 +23,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+import stream  # noqa: E402
+
 from fused_fec_link import FusedFecSender  # noqa: E402
 from stream_fec import FecConfig  # noqa: E402
 
@@ -40,6 +42,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input", default=None, help="read bytes from file (else stdin)")
+    stream.add_capture_args(ap)
     ap.add_argument("--repeat", type=int, default=1,
                     help="emit each body this many times (combats RX warmup loss)")
     add_fec_args(ap)
@@ -57,10 +60,11 @@ def main(argv=None) -> int:
     bodies = snd.add_bytes(data) + snd.flush()
     out = sys.stdout.buffer
     nbytes = 0
+    stamper = stream.capture_stamper_from_args(args)
     for body in bodies:
         chunk = struct.pack("<I", len(body)) + body
         for _ in range(max(1, args.repeat)):
-            out.write(chunk)
+            out.write(stamper.prefix() + chunk)
             nbytes += len(body)
     out.flush()
     sys.stderr.write(

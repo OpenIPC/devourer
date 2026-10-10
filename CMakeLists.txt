@@ -240,6 +240,7 @@ add_library(devourer
     src/hopset/HopsetState.h
     src/hopset/HopsetTypes.h
     src/hopset/HopsetWire.h
+    src/StreamTelemetry.h
     src/hopset/HopsetAuthority.h
     src/hopset/HopsetFollower.h
     src/hopset/HopsetPolicy.h
@@ -1426,6 +1427,12 @@ add_test(NAME hopset_schedule_math COMMAND HopsetScheduleSelftest)
 add_executable(HopsetWireSelftest tests/hopset_wire_selftest.cpp)
 target_link_libraries(HopsetWireSelftest PRIVATE devourer)
 add_test(NAME hopset_wire_kat COMMAND HopsetWireSelftest)
+
+# Headless guard for src/StreamTelemetry.h (the addr3 per-frame field + the
+# timing marker IE): known-answer bytes, version rejection, TSF unwrap, latency.
+add_executable(StreamTelemetrySelftest tests/stream_telemetry_selftest.cpp)
+target_link_libraries(StreamTelemetrySelftest PRIVATE devourer)
+add_test(NAME stream_telemetry_kat COMMAND StreamTelemetrySelftest)
 
 add_executable(HopsetProtoSelftest tests/hopset_proto_selftest.cpp)
 target_link_libraries(HopsetProtoSelftest PRIVATE devourer)

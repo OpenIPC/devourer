@@ -67,6 +67,7 @@
 #include "env_config.h"
 #include "logger.h"
 #include "stream_stdin.h"
+#include "stream_timing_tx.h"
 #include "svc_tx.h"
 
 #define USB_VENDOR_ID 0x0bda
@@ -203,6 +204,15 @@ int main(int argc, char** argv) {
 
   const auto dot11 = build_dot11_probe_req();
 
+  /* Per-frame timing telemetry in addr3 + the DEVOURER_STREAM_TIMING marker.
+   * svctx pre-reads and replays a clip, so "capture" is each NAL's loop
+   * iteration and has_capture stays 0; the depth, queue and write stages and
+   * the TSF stamp are real. */
+  StreamTimingTx timing(*rtlDevice, logger->events(), *logger, kCanonicalSa,
+                        /*hopping=*/false);
+  timing.set_channel(static_cast<uint8_t>(channel));
+  timing.start();
+
   // Read all length-prefixed NALs up front.
   std::vector<std::vector<uint8_t>> nals;
   while (true) {
@@ -223,6 +233,7 @@ int main(int argc, char** argv) {
   long frames = 0;
   while (true) {
     for (const auto& nal : nals) {
+      const uint64_t nal_ns = StreamTimingTx::now_ns();
       svc::NalInfo info = svc::parse_hevc_nal(nal.data(), nal.size());
       const std::vector<uint8_t>& rt =
           info.critical ? rt_crit
@@ -237,7 +248,10 @@ int main(int argc, char** argv) {
         frame.insert(frame.end(), rt.begin(), rt.end());
         frame.insert(frame.end(), dot11.begin(), dot11.end());
         frame.insert(frame.end(), nal.begin() + off, nal.begin() + off + n);
+        timing.maybe_marker(rt);
+        timing.stamp(frame.data() + rt.size() + 16, nal_ns, nal_ns, false);
         rtlDevice->send_packet(frame.data(), frame.size());
+        timing.sent();
         if (gap_us > 0)
           std::this_thread::sleep_for(std::chrono::microseconds(gap_us));
       }

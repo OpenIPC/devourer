@@ -107,6 +107,10 @@ from devourer_events import parse_event  # noqa: E402
 # users running on a python without the wheel installed don't get
 # blindsided at startup. We only need the module when --fec-k > 0.
 stream_fec = None  # type: ignore[assignment]
+# The CAPTURE_TS prefix for every record, set from --capture-ts in main().
+_stamper = stream.CaptureStamper(False)
+
+
 def _import_stream_fec():  # noqa: E302
     global stream_fec
     if stream_fec is None:
@@ -269,7 +273,7 @@ def tx_thread(stop: StopBit, tun_fd: int, tx_stdin, body_bytes: int,
                 chunk = struct.pack("<I", len(body)) + body
                 try:
                     for _ in range(repeat):
-                        tx_stdin.write(chunk)
+                        tx_stdin.write(_stamper.prefix() + chunk)
                     tx_stdin.flush()
                 except (BrokenPipeError, ValueError):
                     return
@@ -315,7 +319,7 @@ def fec_flush_thread(stop: StopBit, tx_stdin, body_bytes: int,
             chunk = struct.pack("<I", len(body)) + body
             try:
                 for _ in range(repeat):
-                    tx_stdin.write(chunk)
+                    tx_stdin.write(_stamper.prefix() + chunk)
                 tx_stdin.flush()
             except (BrokenPipeError, ValueError):
                 return
@@ -458,6 +462,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--duplex-bin",
                     default=str(repo / "build" / "duplex"))
     ap.add_argument("--interval-ms", type=int, default=2)
+    stream.add_capture_args(ap)
     ap.add_argument("--repeat", type=int, default=1,
                     help="blind per-frame replication (combine with the "
                          "default --dedup to collapse the fan-out at RX so "
@@ -535,6 +540,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                          "4). Higher = denser coefficient vectors → better "
                          "recovery, more CPU.")
     args = ap.parse_args(argv)
+    global _stamper
+    _stamper = stream.capture_stamper_from_args(args)
 
     do_tx = args.mode in ("duplex", "duplex-split", "tx-only")
     do_rx = args.mode in ("duplex", "duplex-split", "rx-only")

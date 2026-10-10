@@ -301,6 +301,9 @@ per-chip quirks notes at the bottom.
   controller design, [its validation](docs/adaptive-link-validation.md), and
   the [building blocks](docs/adaptive-link-building-blocks.md): what each knob
   (power, rate, bandwidth, hopping) measurably buys.
+- [Stream timing](docs/stream-timing.md) — per-frame air-side timing in the
+  stream link: backlog, capture→send and a hardware-clocked one-way latency
+  per frame, carried in header bytes no receiver otherwise reads.
 - [Fused FEC](docs/fused-fec.md) — the cross-layer error-protection stack:
   per-layer PHY rates, corrupt-frame salvage, outer erasure code.
 - [Aggregation & hardware ACK](docs/aggregation.md) — USB TX aggregation,

@@ -353,17 +353,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
 from devourer_events import parse_event, desc_rate_to_mcs  # noqa: E402
 
 
-def ctl_frame(op: int, payload: bytes = b"") -> bytes:
-    """Encode a stdin control TLV for the duplex binary's SET_* opcodes."""
-    body = bytes([op]) + payload
-    return struct.pack("<I", 0x80000000 | len(body)) + body
-
-
-def psdu_frame(body: bytes) -> bytes:
-    return struct.pack("<I", len(body)) + body
-
-
-SET_PWR, SET_RATE, SET_CHAN = 1, 2, 3
+from stream import ctl_frame, psdu_frame, SET_PWR, SET_RATE, SET_CHAN  # noqa: E402
 
 
 def _parse_mcs_bias(spec: str) -> dict[int, float]:

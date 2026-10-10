@@ -18,6 +18,9 @@
 #           decoded for what they are and never feed the clock fit.
 #   svctx   the SVC demo as the transmitter (synthetic NALs, per-layer rates):
 #           the same addr3 field and marker from a second TX demo.
+#   svctx-live  svctx --live fed by a paced, CAPTURE_TS-stamping producer with
+#           the DELAY_MS/DELAY_N producer delay: the stamp survives the UEP
+#           path (one capture per NAL, on its first fragment).
 #   duplex  the duplex demo as the transmitter (TX+RX on one chip): same again,
 #           with the capture stamp through its control escape.
 #
@@ -223,6 +226,26 @@ if [[ " $PHASES " == *" svctx "* ]]; then
         pass "svctx: $(grep -o '"lat_frames": [0-9]*\|"lat_p50_us": [0-9]*\|"markers": [0-9]*' "$OUT/sum_svctx.json" | tr '\n' ' ')"
     else
         fail "svctx: $(cat "$OUT/sum_svctx.json")"
+    fi
+fi
+
+# ---- svctx-live ----------------------------------------------------------
+if [[ " $PHASES " == *" svctx-live "* ]]; then
+    echo "== svctx --live: stamped, paced NALs with a ${DELAY_MS} ms delay on every ${DELAY_N}th =="
+    start_witness svclive
+    off=$(mark svclive)
+    $PY tests/gen_svc_nals.py 40 --repeat 50 --pace-us "$PACE_US" --capture-ts \
+        --capture-delay "$DELAY_N:$DELAY_MS" 2>"$OUT/prod_svclive.log" |
+    sudo env DEVOURER_VID="$TX_VID" DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$CH" \
+        DEVOURER_STREAM_TIMING="$MARKER_EVERY" DEVOURER_LOG_LEVEL=info \
+        timeout "$SECS" ./build/svctx --live --gap-us 0 >"$OUT/tx_svclive.out" 2>"$OUT/tx_svclive.log"
+    sudo pkill -INT -x svctx 2>/dev/null || true; sleep 1
+    slice svclive "$off" svclive
+    stop_witness
+    if $PY tests/stream_timing_analyze.py "$OUT/run_svclive.jsonl" --expect-delay "$DELAY_N:$DELAY_MS" >"$OUT/sum_svclive.json"; then
+        pass "svctx-live: $(grep -o '"lat_frames": [0-9]*\|"cap_frames": [0-9]*\|"delay_step_ms": [0-9.]*\|"delay_frac": [0-9.]*' "$OUT/sum_svclive.json" | tr '\n' ' ')"
+    else
+        fail "svctx-live: $(cat "$OUT/sum_svclive.json")"
     fi
 fi
 

@@ -71,16 +71,41 @@ def gen_nals(gops: int = 6, idr_period: int = 2,
 
 
 def _main() -> None:
-    gops = int(sys.argv[1]) if len(sys.argv) > 1 else 6
-    # legacy positional PAYLOAD arg: flatten every class to that size
+    import argparse
+    import os
+    import time
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("gops", nargs="?", type=int, default=6)
+    ap.add_argument("payload", nargs="?", type=int, default=None,
+                    help="legacy: flatten every class to this many body bytes")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="emit the clip this many times (a live svctx run of N seconds)")
+    ap.add_argument("--pace-us", type=int, default=0,
+                    help="sleep between NALs and flush each: a live producer, not a dump")
+    # CAPTURE_TS for svctx --live: tools/precoder/stdin_ctl.py (stdlib only).
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "tools", "precoder"))
+    import stdin_ctl  # noqa: E402
+    stdin_ctl.add_capture_args(ap)
+    a = ap.parse_args()
     sizes = None
-    if len(sys.argv) > 2:
-        p = int(sys.argv[2])
+    if a.payload is not None:
+        p = a.payload
         sizes = {"param": p, "idr": p, "t0": p, "t1": p, "t2": p}
+    stamper = stdin_ctl.capture_stamper_from_args(a)
     out = sys.stdout.buffer
-    for nal in gen_nals(gops, sizes=sizes):
-        out.write(struct.pack("<I", len(nal)) + nal)
-    out.flush()
+    clip = gen_nals(a.gops, sizes=sizes)
+    try:
+        for _ in range(max(1, a.repeat)):
+            for nal in clip:
+                out.write(stamper.prefix() + struct.pack("<I", len(nal)) + nal)
+                if a.pace_us > 0:
+                    out.flush()
+                    time.sleep(a.pace_us / 1e6)
+        out.flush()
+    except BrokenPipeError:
+        pass
 
 
 if __name__ == "__main__":

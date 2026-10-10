@@ -497,7 +497,8 @@ int main(int argc, char **argv) {
     tx_buf.insert(tx_buf.end(), dot11.begin(), dot11.end());
     tx_buf.insert(tx_buf.end(), psdu.begin(), psdu.end());
     /* addr3 is the per-frame telemetry field (the body is untouched). */
-    timing.stamp(tx_buf.data() + addr3_off, read_ns, capture_ns, has_capture);
+    timing.stamp(tx_buf.data() + addr3_off, read_ns, capture_ns, has_capture,
+                 tx_buf.data() + addr3_off - 12 /* addr1 */);
     bool ok = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
     timing.sent(ok);
     ++tx_count;

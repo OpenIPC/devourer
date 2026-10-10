@@ -70,6 +70,12 @@ def main(argv=None) -> int:
     c2s = [e["c2s_us"] for e in tel]
     cap = [e["c2s_us"] for e in tel if e.get("cap") == 1]
     depth = [e.get("depth", 0) for e in tel]
+    # The addr1 extension: per-frame read->send and the previous frame's
+    # send_packet wall time. Its median must agree with the marker's window
+    # p50 of the same quantity (both come from the transmitter), which is the
+    # cheap self-consistency check that the field decodes right.
+    tq = [e["tq_us"] for e in tel if "tq_us" in e]
+    tw = [e["tw_us"] for e in tel if "tw_us" in e]
     out = {
         "ev": "stream_timing.summary",
         "frames": len(frames), "tel": len(tel), "warmup_dropped": warm, "lat_frames": len(lat),
@@ -85,6 +91,9 @@ def main(argv=None) -> int:
         "presp_stamped": markers[-1].get("presp_stamped") if markers else None,
         "beacon": markers[-1].get("beacon") if markers else None,
         "tx_async": markers[-1].get("tx_async") if markers else None,
+        "ext_frames": len(tq),
+        "frame_tq_p50_us": pct(tq, 0.5), "frame_tq_p99_us": pct(tq, 0.99),
+        "frame_tw_p50_us": pct(tw, 0.5), "frame_tw_p99_us": pct(tw, 0.99),
         "tw_p50_us": pct([m["tw_p50_us"] for m in markers], 0.5) if markers else None,
         "tw_max_us": max((m["tw_max_us"] for m in markers), default=None),
         "tq_max_us": max((m["tq_max_us"] for m in markers), default=None),
@@ -105,6 +114,22 @@ def main(argv=None) -> int:
             c = pct(lat, 0.01) > -2000
             out["checks"]["no_negative_tail"] = c
             ok &= c
+    if tel:
+        # The extension must be on (nearly) every telemetry frame, whether or
+        # not any decoded — a vanished extension is a failure, not a skip.
+        c = len(tq) >= 0.9 * len(tel)
+        out["checks"]["ext_present"] = c
+        ok &= c
+    # Same quantity from two carriers, over the same span: the retained
+    # (post-warmup) frames against the markers aired after the warm-up.
+    mk_after = [m["tw_p50_us"] for m in markers
+                if tel and ((m["tsfl"] - tel[0]["tsfl"]) & 0xffffffff) < 0x80000000]
+    if tw and mk_after:
+        mk = pct(mk_after, 0.5)
+        fr = pct(tw, 0.5)
+        c = abs(fr - mk) <= max(20, 0.5 * max(fr, mk))
+        out["checks"]["ext_tw_matches_marker"] = c
+        ok &= c
     if args.expect_delay:
         n, ms = args.expect_delay.split(":")
         n, ms = int(n), float(ms)

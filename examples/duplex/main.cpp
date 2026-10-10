@@ -403,7 +403,8 @@ static void tx_thread(TxArgs args) {
         std::lock_guard<std::mutex> lr(g_rt_mu);
         timing.maybe_marker(g_radiotap);
       }
-      timing.stamp(tx_buf.data() + addr3_off, read_ns, capture_ns, has_capture);
+      timing.stamp(tx_buf.data() + addr3_off, read_ns, capture_ns, has_capture,
+                   tx_buf.data() + addr3_off - 12 /* addr1 */);
       ok = args.rtl->send_packet(tx_buf.data(), tx_buf.size());
       timing.sent(ok);
     }

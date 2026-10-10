@@ -261,7 +261,8 @@ int main(int argc, char** argv) {
       frame.insert(frame.end(), nal.begin() + off, nal.begin() + off + n);
       timing.maybe_marker(rt);
       timing.stamp(frame.data() + rt.size() + 16, read_ns,
-                   first ? capture_ns : read_ns, first && has_capture);
+                   first ? capture_ns : read_ns, first && has_capture,
+                   frame.data() + rt.size() + 4 /* addr1 */);
       timing.sent(rtlDevice->send_packet(frame.data(), frame.size()));
       first = false;
       if (gap_us > 0)

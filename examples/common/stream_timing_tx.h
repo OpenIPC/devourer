@@ -36,6 +36,7 @@
 class StreamTimingTx {
  public:
   using FrameTiming = devourer::stream_timing::FrameTiming;
+  using FrameTimingExt = devourer::stream_timing::FrameTimingExt;
   using TimingMarker = devourer::stream_timing::TimingMarker;
 
   StreamTimingTx(IRadio &dev, devourer::EventSink &ev, Logger &log,
@@ -96,10 +97,19 @@ class StreamTimingTx {
 
   // Right before send_packet. `read_ns` = when the record came off stdin,
   // `capture_ns` = the producer's stamp (has_capture) or read_ns. Fills the six
-  // addr3 bytes; remembers the instants for sent().
-  void stamp(uint8_t *addr3, uint64_t read_ns, uint64_t capture_ns, bool has_capture) {
+  // addr3 bytes and, when `addr1` is given, the addr1 extension (the DA
+  // becomes the 03:… group address); remembers the instants for sent().
+  void stamp(uint8_t *addr3, uint64_t read_ns, uint64_t capture_ns, bool has_capture,
+             uint8_t *addr1 = nullptr) {
     ensure_started();
     _t0 = now_ns();
+    if (addr1) {
+      FrameTimingExt x;
+      x.t_queue10 = devourer::stream_timing::clip10(_t0 > read_ns ? (_t0 - read_ns) / 1000 : 0);
+      x.t_write_prev10 = devourer::stream_timing::clip10(_last_write_us);
+      x.ctr = static_cast<uint8_t>(_frames);
+      x.encode(addr1);
+    }
     _read_ns = read_ns;
     _capture_ns = capture_ns;
     _has_capture = has_capture;
@@ -129,6 +139,7 @@ class StreamTimingTx {
     const uint64_t tq = _t0 > _read_ns ? (_t0 - _read_ns) / 1000 : 0;
     const uint64_t tw = (t1 - _t0) / 1000;
     const uint64_t c2s = _t0 > _capture_ns ? (_t0 - _capture_ns) / 1000 : 0;
+    _last_write_us = tw;
     _window.add(tq, tw, c2s, _has_capture, _depth);
     ++_frames;
   }
@@ -224,7 +235,7 @@ class StreamTimingTx {
   devourer::stream_timing::TimingWindow _window;
   std::vector<uint8_t> _buf;
   uint64_t _frames = 0, _last_marker_frame = UINT64_MAX;
-  uint64_t _t0 = 0, _read_ns = 0, _capture_ns = 0;
+  uint64_t _t0 = 0, _read_ns = 0, _capture_ns = 0, _last_write_us = 0;
   bool _has_capture = false;
   uint32_t _depth = 0;
   bool _pending_capture = false, _capture_seen = false;

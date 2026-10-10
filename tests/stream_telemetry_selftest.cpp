@@ -45,6 +45,26 @@ int main() {
     uint8_t v2[6] = {0x40, 0, 0, 0, 0, 0};
     CHECK(!FrameTiming::decode(v2, d), "version 2 rejected");
   }
+  // ---- FrameTimingExt (addr1) KAT ---------------------------------------
+  {
+    FrameTimingExt x;
+    x.t_queue10 = 0x1234; x.t_write_prev10 = 0xabcd; x.ctr = 0x5e;
+    uint8_t b[6];
+    x.encode(b);
+    const uint8_t want[6] = {0x07, 0x34, 0x12, 0xcd, 0xab, 0x5e};
+    CHECK(std::memcmp(b, want, 6) == 0, "FrameTimingExt KAT bytes");
+    CHECK((b[0] & 0x01) && (b[0] & 0x02), "addr1 stays a locally administered group address");
+    FrameTimingExt d;
+    CHECK(FrameTimingExt::decode(b, d) && d.t_queue10 == 0x1234 &&
+              d.t_write_prev10 == 0xabcd && d.ctr == 0x5e,
+          "FrameTimingExt round-trip");
+    const uint8_t bcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    CHECK(!FrameTimingExt::decode(bcast, d), "broadcast DA is not an extension");
+    uint8_t uni[6] = {0x06, 0, 0, 0, 0, 0};  // version 1 but the group bit clear
+    CHECK(!FrameTimingExt::decode(uni, d), "a unicast-looking DA is rejected");
+    uint8_t v2[6] = {0x0b, 0, 0, 0, 0, 0};
+    CHECK(!FrameTimingExt::decode(v2, d), "other extension version rejected");
+  }
   // ---- units ----------------------------------------------------------
   CHECK(clip10(0) == 0 && clip10(9) == 0 && clip10(10) == 1, "clip10 floor");
   CHECK(clip10(655350) == 0xffff && clip10(10000000) == 0xffff, "clip10 clips");

@@ -1393,6 +1393,13 @@ static void packetProcessor(const Packet &packet) {
               .f("depth", ft.depth)
               .f("c2s_us", ft.c2s10 * 10)
               .f("cap", ft.has_capture ? 1 : 0);
+          /* addr1 extension: per-frame stdin-read→send and the previous
+           * frame's send_packet wall time, plus the TX frame counter. */
+          devourer::stream_timing::FrameTimingExt fx;
+          if (devourer::stream_timing::FrameTimingExt::decode(packet.Data.data() + 4, fx))
+            ev.f("tq_us", fx.t_queue10 * 10)
+                .f("tw_us", fx.t_write_prev10 * 10)
+                .f("ctr", fx.ctr);
           devourer::stream_timing::FrameLatency fl;
           if (g_rt_hw_tsfl && sa_canon && !corrupted && g_rt_fit.ready() &&
               devourer::stream_timing::latency(

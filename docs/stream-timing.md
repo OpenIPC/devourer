@@ -25,6 +25,37 @@ byte-for-byte untouched and the MTU is unchanged:
 The version is chosen so the old addr3 contents (the canonical SA) decode as
 "no telemetry" rather than as garbage values.
 
+**Five more bytes ride addr1**, the DA. It stays a group address — bit 0 of
+its first byte set — so nothing on the air ACKs it and every TX descriptor
+path still derives its broadcast/multicast bit from it; the first byte is
+`0x03 | version<<2` (group, locally administered), `07` for this version, so
+the broadcast address a demo writes when it carries no extension decodes as
+"none":
+
+| bytes | field |
+|---|---|
+| 0 | group + locally administered bits, version |
+| 1–2 | stdin read → `send_packet` for this frame, 10 µs units |
+| 3–4 | the previous frame's `send_packet` wall time (kestrel-air's T_WRITE), 10 µs units |
+| 5 | the transmitter's frame counter, low byte |
+
+Whether a monitor receiver delivers a non-broadcast group DA at all was
+measured, not assumed (`tests/mcast_da_rx_check.sh`: an injector alternates
+the broadcast DA and the exact bytes the extension's encoder ships, `07:…`,
+each receiver family counts both by body tag, 15 s per cell):
+
+| receiver | broadcast | group DA | ratio |
+|---|---|---|---|
+| 8822BU (Jaguar2) | 1364 | 1367 | 1.00 |
+| 8812CU (Jaguar3) | 1385 | 1385 | 1.00 |
+| 8821AU (Jaguar1) | 1353 | 1355 | 1.00 |
+| 8832CU (Kestrel) | 1416 | 1424 | 1.01 |
+| MT7612U | 1347 | 1346 | 1.00 |
+
+The RTL8733B was not plugged and is unmeasured. The marker frame, the hop
+sync marker and the Jaguar1 clock beacon keep the broadcast DA; only the
+stream's data frames carry the extension.
+
 **A periodic marker** (`DEVOURER_STREAM_TIMING=N`, every N data frames, its
 own frame like the hop sync marker) carries the absolute pair (predicted TSF,
 host clock), the state of the transmitter's host↔TSF fit, and the window since

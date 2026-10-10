@@ -22,6 +22,7 @@
 
 #include <libusb.h>
 
+#include "DeviceSession.h"
 #include "RadiotapBuilder.h"
 #include "RtlAdapter.h"
 #include "SelectedChannel.h"
@@ -68,13 +69,25 @@ int main(int argc, char** argv) {
   libusb_context* ctx = nullptr;
   libusb_init(&ctx);
   libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_WARNING);
+  /* Owns the teardown order on every return path: device, then the claimed
+   * interface, the handle and the context (examples/common/DeviceSession.h). */
+  devourer::DeviceSession session{logger};
+  session.adopt_context(ctx);
   auto* h = libusb_open_device_with_vid_pid(ctx, vid, pid);
   if (!h) { fprintf(stderr, "open fail %04x:%04x\n", vid, pid); return 1; }
+  const int iface = devourer::find_wifi_interface(h);
   std::shared_ptr<devourer::UsbDeviceLock> lk;
-  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lk) != 0) return 1;
+  if (devourer::claim_interface_then_reset(h, iface, logger, true, lk) != 0) {
+    session.adopt_handle(h);
+    return 1;
+  }
+  session.adopt_handle(h, iface);
+  session.adopt_lock(lk);
   WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRadio(h, ctx, lk, devourer_config_from_env());
-  if (!dev) return 1;
+  auto owned = wifi.CreateRadio(h, ctx, lk, devourer_config_from_env());
+  if (!owned) return 1;
+  session.adopt_device(std::move(owned));
+  IRadio* const dev = session.device();
 
   dev->InitWrite(SelectedChannel{ch, 0, CHANNEL_WIDTH_20});
   std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -118,7 +131,7 @@ int main(int argc, char** argv) {
     ++n;
     std::this_thread::sleep_for(std::chrono::microseconds(gap_us));
   }
-  dev->Stop();
+  session.close();
   fprintf(stderr, "probe_resp_egress_tx: %u frames (half 0x50, half 0x80) on ch%d (%04x:%04x)\n",
           n, ch, vid, pid);
   return 0;
